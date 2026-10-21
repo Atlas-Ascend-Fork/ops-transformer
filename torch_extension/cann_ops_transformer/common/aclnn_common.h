@@ -1081,8 +1081,11 @@ inline void ApplyDeterministicConfig()
         at::Tensor workspace_tensor; \
         void* workspace_addr = nullptr; \
         if (workspace_size != 0) { \
+            TORCH_CHECK(workspace_size <= static_cast<uint64_t>(INT64_MAX), \
+                        "call " #aclnn_api " failed, workspace_size is too large to allocate workspace tensor: ", \
+                        workspace_size); \
             at::TensorOptions options = at::TensorOptions(torch_npu::utils::get_npu_device_type()); \
-            workspace_tensor = at::empty({workspace_size}, options.dtype(at::kByte)); \
+            workspace_tensor = at::empty({static_cast<int64_t>(workspace_size)}, options.dtype(at::kByte)); \
             workspace_addr = const_cast<void*>(workspace_tensor.storage().data()); \
         } \
         auto acl_call = [converted_params, workspace_addr, workspace_size, acl_stream, executor]() -> int { \
