@@ -59,7 +59,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_prob_none_bf16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -101,7 +101,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_bf16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -143,7 +143,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_prob_none_fp16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -185,7 +185,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_fp16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -225,7 +225,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_prob_none_fp32)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 32;
 
@@ -266,7 +266,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_fp32)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -308,7 +308,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_mix_bf16_fp16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -350,7 +350,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_mix_bf16_fp32)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -392,7 +392,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_mix_fp16_bf16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -434,7 +434,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_mix_fp16_fp32)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -476,7 +476,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_mix_fp32_bf16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 
@@ -518,7 +518,7 @@ TEST_F(moe_token_unpermute_with_ep_test, test_mix_fp32_fp16)
 
     uint8_t* unpermuted_tokens = (uint8_t*)AscendC::GmAlloc(unpermutedTokensByteSize + 32);
 
-    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(16 * 1024 * 1024 + 32);
+    uint8_t* workspace = (uint8_t*)AscendC::GmAlloc(32);
     uint8_t* tiling = (uint8_t*)AscendC::GmAlloc(tilingDataSize + 32);
     uint32_t blockDim = 48;
 

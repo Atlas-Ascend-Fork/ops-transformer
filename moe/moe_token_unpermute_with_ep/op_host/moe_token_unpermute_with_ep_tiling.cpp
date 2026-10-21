@@ -23,8 +23,6 @@ const static int64_t UNPERMUTE_WITH_EP_OUTPUT_TOKENS = 0;
 const static int64_t UNPERMUTE_WITH_EP_ARRT_TOPK = 0;
 const static int64_t UNPERMUTE_WITH_EP_ARRT_RANGE = 1;
 const static int64_t RANGE_SIZE = 2;
-const static uint64_t WORKSPACE_SIZE_WITH_M = 16;
-const static uint64_t BYTE_SIZE_WITH_K = 1024;
 
 ge::graphStatus TilingMoeTokenUnpermuteWithEp(gert::TilingContext* context);
 
@@ -377,7 +375,7 @@ ge::graphStatus UnpermuteWithEpTilingCompute(gert::TilingContext* context, const
     SetTilingData(context, param);
     DebugPrint(context, param);
     size_t* workSpaces = context->GetWorkspaceSizes(1);
-    workSpaces[0] = WORKSPACE_SIZE_WITH_M * BYTE_SIZE_WITH_K * BYTE_SIZE_WITH_K;
+    workSpaces[0] = 0;
     return context->SetTilingKey(param.core.tilingKey);
 }
 
