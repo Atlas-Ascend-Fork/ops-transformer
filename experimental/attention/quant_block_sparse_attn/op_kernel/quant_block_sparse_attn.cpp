@@ -15,29 +15,28 @@
 
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
-#include "quant_block_sparse_attn_template_tiling_key.h"
-#include "quant_block_sparse_attn_common.h"
+#include "arch35/common/quant_block_sparse_attn_common.h"
+#include "arch35/common/quant_block_sparse_attn_tiling_key_registry.h"
 #if QBSA_ARCH92_FP8
-#include "arch92/quant_block_sparse_attn_kernel.h"
-#else
-#include "quant_block_sparse_attn_mx_tiling_data.h"
-#include "quant_block_sparse_attn_arch_select.h"
-#if QBSA_ARCH_9102R1
-#include "arch92/quant_block_sparse_attn_mx_kernel.h"
-#include "arch92/quant_block_sparse_attn_mx_m128_v64_layout.h"
+#include "arch92/qbsa_fp8/quant_block_sparse_attn_kernel.h"
+#define QBSA_FP8_KERNEL_TILING_TYPE optiling::QuantBlockSparseAttnFp8Arch92TilingData
+#elif QBSA_ARCH_9102R1
+#include "arch35/qbsa_mxfp8/qbsa_mxfp8_tiling_data.h"
+#include "arch92/qbsa_mxfp8/quant_block_sparse_attn_mx_kernel.h"
+#include "arch92/qbsa_mxfp8/quant_block_sparse_attn_mx_m128_v64_layout.h"
 #if QBSA_9102_MX_M128_V64
-#include "arch92/quant_block_sparse_attn_mx_m128_v64_kernel.h"
+#include "arch92/qbsa_mxfp8/quant_block_sparse_attn_mx_m128_v64_kernel.h"
 #endif
 #else
-#include "arch35/quant_block_sparse_attn_kernel.h"
-#include "arch35/quant_block_sparse_attn_mx_kernel.h"
-#endif
+#include "arch35/qbsa_fp8/qbsa_fp8_tiling_data.h"
+#include "arch35/qbsa_mxfp8/qbsa_mxfp8_tiling_data.h"
+#include "arch35/qbsa_fp8/quant_block_sparse_attn_kernel.h"
+#include "arch35/qbsa_mxfp8/quant_block_sparse_attn_mx_kernel.h"
+#define QBSA_FP8_KERNEL_TILING_TYPE optiling::QuantBlockSparseAttnFp8TilingData
 #endif
 
 using namespace AscendC;
-#if !QBSA_ARCH92_FP8
 using namespace optiling;
-#endif
 
 // 仿 kv_quant_sparse_attn_sharedkv.cpp 的 kernel 侧调用写法：
 //   - 按 g_coreType 选择实/Dummy 的 Cube/Vec block（AIC 跑真 Cube + Dummy Vec，AIV 跑 Dummy Cube + 真 Vec）
@@ -64,8 +63,8 @@ using namespace optiling;
 
 #define QBSA_OP_IMPL(...) \
     do { \
-        GET_TILING_DATA_WITH_STRUCT(QuantBlockSparseAttnTilingData, tilingDataIn, tiling); \
-        const QuantBlockSparseAttnTilingData* __restrict tilingData = &tilingDataIn; \
+        GET_TILING_DATA_WITH_STRUCT(QBSA_FP8_KERNEL_TILING_TYPE, tilingDataIn, tiling); \
+        const QBSA_FP8_KERNEL_TILING_TYPE* __restrict tilingData = &tilingDataIn; \
         QBSA_OP_IMPL_WITH_TILING(tilingData, __VA_ARGS__); \
     } while (0)
 
@@ -81,7 +80,7 @@ using namespace optiling;
 #if QBSA_9102_MX_M128_V64
 #define QBSA_MX_OP_IMPL_WITH_TILING(tilingDataPtr, ...) \
     do { \
-        if ((tilingDataPtr)->pageAttentionParams.qBlockSize == 128U) { \
+        if ((tilingDataPtr)->commonParams.paParams.qBlockSize == 128U) { \
             QBSA_MX_RUN_KERNEL(BaseApi::QuantBlockSparseAttnMxM128V64Kernel, tilingDataPtr, __VA_ARGS__); \
         } else { \
             QBSA_MX_RUN_KERNEL(BaseApi::QuantBlockSparseAttnMxKernel, tilingDataPtr, __VA_ARGS__); \
@@ -104,8 +103,8 @@ using namespace optiling;
 
 #define QBSA_MX_OP_IMPL(...) \
     do { \
-        GET_TILING_DATA_WITH_STRUCT(QuantBlockSparseAttnMxTilingData, tilingDataIn, tiling); \
-        const QuantBlockSparseAttnMxTilingData* __restrict tilingData = &tilingDataIn; \
+        GET_TILING_DATA_WITH_STRUCT(QuantBlockSparseAttnMxfp8TilingData, tilingDataIn, tiling); \
+        const QuantBlockSparseAttnMxfp8TilingData* __restrict tilingData = &tilingDataIn; \
         QBSA_MX_OP_IMPL_WITH_TILING(tilingData, __VA_ARGS__); \
     } while (0)
 
@@ -118,15 +117,19 @@ __global__ __aicore__ void quant_block_sparse_attn(
     __gm__ uint8_t* blockTable, __gm__ uint8_t* attenMask, __gm__ uint8_t* metadata, __gm__ uint8_t* attentionOut,
     __gm__ uint8_t* softmaxLse, __gm__ uint8_t* workspace, __gm__ uint8_t* tiling)
 {
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
+#if QBSA_ARCH92_FP8
+    REGISTER_TILING_DEFAULT(optiling::QuantBlockSparseAttnFp8Arch92TilingData);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
-#elif defined(QBSA_ARCH_9102R1) && QBSA_ARCH_9102R1
+#elif QBSA_ARCH_9102R1
+    REGISTER_TILING_DEFAULT(optiling::QuantBlockSparseAttnMxfp8TilingData);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
 #else
+    REGISTER_TILING_DEFAULT(optiling::QuantBlockSparseAttnFp8TilingData);
+    REGISTER_TILING_FOR_TILINGKEY("QUANT_MODE == 2", optiling::QuantBlockSparseAttnMxfp8TilingData);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 #endif
 
-    // mask 模式 / softmaxLse 使能同时进入 tilingKey 与 tilingData；LSE 已改为编译期模板参数。
+    // mask 模式和 softmaxLse 使能由 tiling key 选择对应的编译期模板。
     TPipe tPipe;
     __gm__ uint8_t* user = GetUserWorkspace(workspace);
 
@@ -137,64 +140,67 @@ __global__ __aicore__ void quant_block_sparse_attn(
     constexpr bool bsaUseDn = BaseApi::IsDn();
     constexpr bool HAS_ATTENTION = (MASK_MODE == 3);
 #if QBSA_ARCH92_FP8
-    static_assert(QUANT_MODE == FP8QuantMode, "V121 only instantiates the QBSA FP8 kernel");
-    static_assert(Config == Config_S1Aligned64_S2Aligned512_DAligned128_DVAligned128,
-                  "V121 FP8QuantMode must use S1=64, S2=512, D=128, DV=128 config");
+    static_assert(QUANT_MODE == QBSA_FP8_ARCH92_QUANT_MODE, "arch92 supports FP8 only");
+    static_assert(Config == QBSA_FP8_ARCH92_CONFIG, "arch92 FP8 requires S1=64, S2=512, D=DV=128");
     QBSA_OP_IMPL(fp8_e4m3fn_t, float, bfloat16_t, layout, kvLayout, S1TemplateType::Aligned64,
                  S2TemplateType::Aligned512, DTemplateType::Aligned128, DTemplateType::Aligned128, HAS_ATTENTION,
                  RETURN_SOFTMAX_LSE, bsaIsPa, bsaUseDn);
 #else
-    if constexpr (QUANT_MODE == MXFullQuantMode) {
+    if constexpr (QUANT_MODE == QBSA_MXFP8_QUANT_MODE) {
 #if QBSA_ARCH_9102R1
-        static_assert(Config == Config_S1Aligned128_S2Aligned512_DAligned128_DVAligned128,
-                      "960 MXFullQuantMode requires D=DV=128, S1=128 and S2=512");
+        static_assert(Config == QBSA_MXFP8_CONFIG, "960 MXFP8 requires S1=128, S2=512, D=DV=128");
         QBSA_MX_OP_IMPL(fp8_e4m3fn_t, float, bfloat16_t, layout, kvLayout, S1TemplateType::Aligned128,
                         S2TemplateType::Aligned512, DTemplateType::Aligned128, DTemplateType::Aligned128, HAS_ATTENTION,
                         RETURN_SOFTMAX_LSE, bsaIsPa, bsaUseDn);
 #else
+        static_assert(
+            Config == QBSA_TILING_CONFIG_1 || Config == QBSA_TILING_CONFIG_2 || Config == QBSA_TILING_CONFIG_3,
+            "MXFP8 requires D=DV in {64,128,256}");
         int64_t originalCastMode = 0;
         int64_t originalGlobalSatMode = 0;
         if ASCEND_IS_AIV {
             // MX Reg Casts use their own SAT/NO_SAT trait; global NO_SAT is reserved for Tensor Casts.
             originalCastMode =
-                AscendC::GetCtrlSpr<FaVectorApi::CAST_SAT_MODE_CTRL_BIT, FaVectorApi::CAST_SAT_MODE_CTRL_BIT>();
-            originalGlobalSatMode = AscendC::GetCtrlSpr<FaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT,
-                                                        FaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT>();
-            AscendC::SetCtrlSpr<FaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT, FaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT>(
-                FaVectorApi::CAST_GLOBAL_NO_SAT_MODE);
-            AscendC::SetCtrlSpr<FaVectorApi::CAST_SAT_MODE_CTRL_BIT, FaVectorApi::CAST_SAT_MODE_CTRL_BIT>(
-                FaVectorApi::CAST_USE_INSTRUCTION_SAT_MODE);
+                AscendC::GetCtrlSpr<QbsaVectorApi::CAST_SAT_MODE_CTRL_BIT, QbsaVectorApi::CAST_SAT_MODE_CTRL_BIT>();
+            originalGlobalSatMode = AscendC::GetCtrlSpr<QbsaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT,
+                                                        QbsaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT>();
+            AscendC::SetCtrlSpr<QbsaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT,
+                                QbsaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT>(QbsaVectorApi::CAST_GLOBAL_NO_SAT_MODE);
+            AscendC::SetCtrlSpr<QbsaVectorApi::CAST_SAT_MODE_CTRL_BIT, QbsaVectorApi::CAST_SAT_MODE_CTRL_BIT>(
+                QbsaVectorApi::CAST_USE_INSTRUCTION_SAT_MODE);
         }
-        // MX supports TND/BSND/BNSD with PA BNBD; the logical S2 tile is 256 for D256 and 512 otherwise.
-        static_assert(Config == Config_S1Aligned128_S2Aligned512_DAligned128_DVAligned128 ||
-                          Config == Config_S1Aligned128_S2Aligned512_DAligned64_DVAligned64 ||
-                          Config == Config_S1Aligned128_S2Aligned256_DAligned256_DVAligned256,
-                      "MXFullQuantMode requires D=DV in {64,128,256}");
-        constexpr DTemplateType mxD =
-            Config == Config_S1Aligned128_S2Aligned512_DAligned64_DVAligned64 ?
-                DTemplateType::Aligned64 :
-                (Config == Config_S1Aligned128_S2Aligned256_DAligned256_DVAligned256 ? DTemplateType::Aligned256 :
-                                                                                       DTemplateType::Aligned128);
-        constexpr S2TemplateType mxS2 =
-            mxD == DTemplateType::Aligned256 ? S2TemplateType::Aligned256 : S2TemplateType::Aligned512;
-        QBSA_MX_OP_IMPL(fp8_e4m3fn_t, float, bfloat16_t, layout, kvLayout, S1TemplateType::Aligned128, mxS2, mxD, mxD,
-                        HAS_ATTENTION, RETURN_SOFTMAX_LSE, bsaIsPa, bsaUseDn);
+        // Keep the baseline MX tiles: D64/D128 use S2=512; D256 uses S2=256.
+        if constexpr (Config == QBSA_TILING_CONFIG_2) {
+            QBSA_MX_OP_IMPL(fp8_e4m3fn_t, float, bfloat16_t, layout, kvLayout, S1TemplateType::Aligned128,
+                            S2TemplateType::Aligned512, DTemplateType::Aligned64, DTemplateType::Aligned64,
+                            HAS_ATTENTION, RETURN_SOFTMAX_LSE, bsaIsPa, bsaUseDn);
+        } else if constexpr (Config == QBSA_TILING_CONFIG_3) {
+            QBSA_MX_OP_IMPL(fp8_e4m3fn_t, float, bfloat16_t, layout, kvLayout, S1TemplateType::Aligned128,
+                            S2TemplateType::Aligned256, DTemplateType::Aligned256, DTemplateType::Aligned256,
+                            HAS_ATTENTION, RETURN_SOFTMAX_LSE, bsaIsPa, bsaUseDn);
+        } else {
+            QBSA_MX_OP_IMPL(fp8_e4m3fn_t, float, bfloat16_t, layout, kvLayout, S1TemplateType::Aligned128,
+                            S2TemplateType::Aligned512, DTemplateType::Aligned128, DTemplateType::Aligned128,
+                            HAS_ATTENTION, RETURN_SOFTMAX_LSE, bsaIsPa, bsaUseDn);
+        }
         if ASCEND_IS_AIV {
             // Restore once at the MX kernel exit so the operator cannot leak CTRL state to subsequent work.
-            AscendC::SetCtrlSpr<FaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT, FaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT>(
-                originalGlobalSatMode);
-            AscendC::SetCtrlSpr<FaVectorApi::CAST_SAT_MODE_CTRL_BIT, FaVectorApi::CAST_SAT_MODE_CTRL_BIT>(
+            AscendC::SetCtrlSpr<QbsaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT,
+                                QbsaVectorApi::CAST_GLOBAL_SAT_MODE_CTRL_BIT>(originalGlobalSatMode);
+            AscendC::SetCtrlSpr<QbsaVectorApi::CAST_SAT_MODE_CTRL_BIT, QbsaVectorApi::CAST_SAT_MODE_CTRL_BIT>(
                 originalCastMode);
         }
 #endif
     }
 #if !QBSA_ARCH_9102R1
-    else {
-        static_assert(Config == Config_S1Aligned128_S2Aligned256_DAligned128_DVAligned128,
-                      "FP8QuantMode must use S1=128, S2=256, D=128, DV=128 config");
+    else if constexpr (QUANT_MODE == QBSA_FP8_QUANT_MODE) {
+        static_assert(Config == QBSA_FP8_CONFIG, "FP8 must use the S1=128, S2=256, D=128 and DV=128 config");
         QBSA_OP_IMPL(fp8_e4m3fn_t, float, bfloat16_t, layout, kvLayout, S1TemplateType::Aligned128,
                      S2TemplateType::Aligned256, DTemplateType::Aligned128, DTemplateType::Aligned128, HAS_ATTENTION,
                      RETURN_SOFTMAX_LSE, bsaIsPa, bsaUseDn);
+    } else {
+        static_assert(QUANT_MODE == QBSA_FP8_QUANT_MODE || QUANT_MODE == QBSA_MXFP8_QUANT_MODE,
+                      "Unsupported QBSA quant mode");
     }
 #endif
 #endif
