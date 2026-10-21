@@ -112,15 +112,15 @@ uint32_t QfaBaseChecker::GetTypeSize(ge::DataType dtype)
     constexpr uint32_t NUM_BYTES_INT8 = 1;
 
     switch (dtype) {
-        case ge::DT_FLOAT:
+        case Ops::Transformer::DT_FLOAT:
             return NUM_BYTES_FLOAT;
-        case ge::DT_FLOAT16:
-        case ge::DT_BF16:
+        case Ops::Transformer::DT_FLOAT16:
+        case Ops::Transformer::DT_BF16:
             return NUM_BYTES_FLOAT16;
-        case ge::DT_INT8:
-        case ge::DT_UINT8:
-        case ge::DT_FLOAT8_E4M3FN:
-        case ge::DT_FLOAT8_E8M0:
+        case Ops::Transformer::DT_INT8:
+        case Ops::Transformer::DT_UINT8:
+        case Ops::Transformer::DT_FLOAT8_E4M3FN:
+        case Ops::Transformer::DT_FLOAT8_E8M0:
             return NUM_BYTES_INT8;
         default:
             return NUM_BYTES_FLOAT16;

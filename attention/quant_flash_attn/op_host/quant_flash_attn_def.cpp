@@ -16,6 +16,7 @@
  */
 
 #include "register/op_def_registry.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace ops {
 
@@ -27,129 +28,129 @@ public:
         this->Input("q")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_HIFLOAT8,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_HIFLOAT8,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("k")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_HIFLOAT8,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_HIFLOAT8,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         this->Input("v")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_HIFLOAT8,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_HIFLOAT8,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         this->Input("q_descale")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E8M0,
-                ge::DT_FLOAT,
-                ge::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT8_E8M0,
+                Ops::Transformer::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("k_descale")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E8M0,
-                ge::DT_FLOAT,
-                ge::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT8_E8M0,
+                Ops::Transformer::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         this->Input("v_descale")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E8M0,
-                ge::DT_FLOAT,
-                ge::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT8_E8M0,
+                Ops::Transformer::DT_FLOAT,
+                Ops::Transformer::DT_FLOAT,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         this->Input("block_table")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("p_scale")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_FLOAT})
+            .DataTypeList({Ops::Transformer::DT_FLOAT})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("cu_seqlens_q")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("cu_seqlens_kv")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("seqused_q")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("seqused_kv")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("sinks")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_FLOAT})
+            .DataTypeList({Ops::Transformer::DT_FLOAT})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("attn_mask")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT8})
+            .DataTypeList({Ops::Transformer::DT_INT8})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("metadata")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("v_tail")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_BF16})
+            .DataTypeList({Ops::Transformer::DT_BF16})
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         this->Input("block_table_tail")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Input("seqused_v_tail")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_INT32})
+            .DataTypeList({Ops::Transformer::DT_INT32})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Output("attn_out")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_BF16,
-                ge::DT_BF16,
-                ge::DT_BF16,
+                Ops::Transformer::DT_BF16,
+                Ops::Transformer::DT_BF16,
+                Ops::Transformer::DT_BF16,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Output("softmax_lse")
             .ParamType(OPTIONAL)
-            .DataTypeList({ge::DT_FLOAT})
+            .DataTypeList({Ops::Transformer::DT_FLOAT})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         this->Attr("quant_compute_mode").AttrType(REQUIRED).Int();
@@ -182,56 +183,56 @@ public:
         aicore_config_96.Input("q")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_HIFLOAT4,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_HIFLOAT4,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         aicore_config_96.Input("k")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_HIFLOAT4,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_HIFLOAT4,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         aicore_config_96.Input("v")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E4M3FN,
-                ge::DT_HIFLOAT4,
+                Ops::Transformer::DT_FLOAT8_E4M3FN,
+                Ops::Transformer::DT_HIFLOAT4,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         aicore_config_96.Input("q_descale")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E8M0,
-                ge::DT_HIFLOAT4_SCALE,
+                Ops::Transformer::DT_FLOAT8_E8M0,
+                Ops::Transformer::DT_HIFLOAT4_SCALE,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
         aicore_config_96.Input("k_descale")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E8M0,
-                ge::DT_HIFLOAT4_SCALE,
+                Ops::Transformer::DT_FLOAT8_E8M0,
+                Ops::Transformer::DT_HIFLOAT4_SCALE,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         aicore_config_96.Input("v_descale")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_FLOAT8_E8M0,
-                ge::DT_HIFLOAT4_SCALE,
+                Ops::Transformer::DT_FLOAT8_E8M0,
+                Ops::Transformer::DT_HIFLOAT4_SCALE,
             })
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
         aicore_config_96.Output("attn_out")
             .ParamType(REQUIRED)
             .DataType({
-                ge::DT_BF16,
-                ge::DT_BF16,
+                Ops::Transformer::DT_BF16,
+                Ops::Transformer::DT_BF16,
             })
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();

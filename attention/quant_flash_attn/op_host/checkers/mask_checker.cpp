@@ -58,7 +58,7 @@ ge::graphStatus MaskChecker::CheckSingleParaAttnMask(const QfaTilingInfo& qfaInf
         return ge::GRAPH_SUCCESS;
     }
 
-    OP_CHECK_IF(attnMaskDesc->GetDataType() != ge::DT_INT8,
+    OP_CHECK_IF(attnMaskDesc->GetDataType() != Ops::Transformer::DT_INT8,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, ATTN_MASK_NAME.c_str(),
                                           DataTypeToSerialString(attnMaskDesc->GetDataType()).c_str(), "INT8"),
                 return ge::GRAPH_FAILED);

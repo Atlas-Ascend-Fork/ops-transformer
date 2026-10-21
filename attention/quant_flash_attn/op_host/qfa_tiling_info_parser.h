@@ -123,12 +123,12 @@ private:
     NpuArch npuArch_ = NpuArch::DAV_3510;
 
     // Dtype
-    ge::DataType inputQType_ = ge::DT_FLOAT16;
-    ge::DataType inputKvType_ = ge::DT_FLOAT16;
-    ge::DataType outputType_ = ge::DT_BF16;
-    ge::DataType qDescaleType_ = ge::DT_FLOAT8_E8M0;
-    ge::DataType kDescaleType_ = ge::DT_FLOAT8_E8M0;
-    ge::DataType vDescaleType_ = ge::DT_FLOAT8_E8M0;
+    ge::DataType inputQType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType inputKvType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType outputType_ = Ops::Transformer::DT_BF16;
+    ge::DataType qDescaleType_ = Ops::Transformer::DT_FLOAT8_E8M0;
+    ge::DataType kDescaleType_ = Ops::Transformer::DT_FLOAT8_E8M0;
+    ge::DataType vDescaleType_ = Ops::Transformer::DT_FLOAT8_E8M0;
 
     // Mask
     int64_t winLeft_ = 0;

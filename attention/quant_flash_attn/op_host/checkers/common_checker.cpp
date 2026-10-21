@@ -85,10 +85,10 @@ ge::graphStatus CommonChecker::CheckSingleParaDtype(const QfaTilingInfo& qfaInfo
     std::vector<ge::DataType> supportedQuantDtypes;
     std::string supportedQuantDtypesStr;
     if (qfaInfo.npuArch == NpuArch::DAV_3510) {
-        supportedQuantDtypes = {ge::DT_FLOAT8_E4M3FN, ge::DT_HIFLOAT8};
+        supportedQuantDtypes = {Ops::Transformer::DT_FLOAT8_E4M3FN, Ops::Transformer::DT_HIFLOAT8};
         supportedQuantDtypesStr = "FLOAT8_E4M3FN/HIFLOAT8";
     } else if (qfaInfo.npuArch == NpuArch::DAV_9201) {
-        supportedQuantDtypes = {ge::DT_FLOAT8_E4M3FN, ge::DT_HIFLOAT4};
+        supportedQuantDtypes = {Ops::Transformer::DT_FLOAT8_E4M3FN, Ops::Transformer::DT_HIFLOAT4};
         supportedQuantDtypesStr = "FLOAT8_E4M3FN/DT_HIFLOAT4";
     }
     const auto checkQuantDtype = [&](const gert::CompileTimeTensorDesc* desc,
@@ -117,7 +117,7 @@ ge::graphStatus CommonChecker::CheckSingleParaDtype(const QfaTilingInfo& qfaInfo
     // attn_out: data_type 仅支持 BFLOAT16
     const gert::CompileTimeTensorDesc* attnOutDesc = qfaInfo.opParamInfo.attnOut.desc;
     if (attnOutDesc != nullptr) {
-        OP_CHECK_IF(attnOutDesc->GetDataType() != ge::DT_BF16,
+        OP_CHECK_IF(attnOutDesc->GetDataType() != Ops::Transformer::DT_BF16,
                     OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, ATTN_OUT_NAME.c_str(),
                                               DataTypeToSerialString(attnOutDesc->GetDataType()).c_str(), "BFLOAT16"),
                     return ge::GRAPH_FAILED);

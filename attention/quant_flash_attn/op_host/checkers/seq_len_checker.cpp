@@ -40,7 +40,7 @@ ge::graphStatus SeqLenChecker::CheckSingleParaSequsedQ(const QfaTilingInfo& qfaI
     if (tensor == nullptr || desc == nullptr) {
         return ge::GRAPH_SUCCESS; // 可选参数，存在性由 CheckParaExistence 负责
     }
-    OP_CHECK_IF(desc->GetDataType() != ge::DT_INT32,
+    OP_CHECK_IF(desc->GetDataType() != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, SEQUSED_Q_NAME.c_str(),
                                           DataTypeToSerialString(desc->GetDataType()).c_str(), "INT32"),
                 return ge::GRAPH_FAILED);
@@ -71,7 +71,7 @@ ge::graphStatus SeqLenChecker::CheckSingleParaSequsedKv(const QfaTilingInfo& qfa
     if (tensor == nullptr || desc == nullptr) {
         return ge::GRAPH_SUCCESS;
     }
-    OP_CHECK_IF(desc->GetDataType() != ge::DT_INT32,
+    OP_CHECK_IF(desc->GetDataType() != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, SEQUSED_KV_NAME.c_str(),
                                           DataTypeToSerialString(desc->GetDataType()).c_str(), "INT32"),
                 return ge::GRAPH_FAILED);
@@ -102,7 +102,7 @@ ge::graphStatus SeqLenChecker::CheckSingleParaCuSeqlensQ(const QfaTilingInfo& qf
     if (tensor == nullptr || desc == nullptr) {
         return ge::GRAPH_SUCCESS;
     }
-    OP_CHECK_IF(desc->GetDataType() != ge::DT_INT32,
+    OP_CHECK_IF(desc->GetDataType() != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, CU_SEQLENS_Q_NAME.c_str(),
                                           DataTypeToSerialString(desc->GetDataType()).c_str(), "INT32"),
                 return ge::GRAPH_FAILED);
@@ -133,7 +133,7 @@ ge::graphStatus SeqLenChecker::CheckSingleParaCuSeqlensKv(const QfaTilingInfo& q
     if (tensor == nullptr || desc == nullptr) {
         return ge::GRAPH_SUCCESS;
     }
-    OP_CHECK_IF(desc->GetDataType() != ge::DT_INT32,
+    OP_CHECK_IF(desc->GetDataType() != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, CU_SEQLENS_KV_NAME.c_str(),
                                           DataTypeToSerialString(desc->GetDataType()).c_str(), "INT32"),
                 return ge::GRAPH_FAILED);

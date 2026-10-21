@@ -55,7 +55,7 @@ ge::graphStatus PagedAttentionChecker::CheckSingleParaBlockTable(const QfaTiling
                 return ge::GRAPH_FAILED);
 
     // dtype 校验
-    OP_CHECK_IF(blockTableDesc->GetDataType() != ge::DT_INT32,
+    OP_CHECK_IF(blockTableDesc->GetDataType() != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, BLOCK_TABLE_NAME.c_str(),
                                           DataTypeToSerialString(blockTableDesc->GetDataType()).c_str(), "INT32"),
                 return ge::GRAPH_FAILED);

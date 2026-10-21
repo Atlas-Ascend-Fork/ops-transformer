@@ -21,6 +21,22 @@
 #include "offset_calculator_v2.h"
 #include "../const_def.h"
 
+#if (__NPU_ARCH__ == 2201)
+#define ATTN_HAS_HIFP4_TYPE 0
+#else
+#define ATTN_HAS_HIFP4_TYPE 1
+#endif
+
+template <typename T>
+__aicore__ inline constexpr bool IsHiFloat4x2Type()
+{
+#if ATTN_HAS_HIFP4_TYPE
+    return IsSameType<T, hifloat4x2_t>::value;
+#else
+    return false;
+#endif
+}
+
 // ----------------------------------------------CopyQueryGmToL1--------------------------------
 template <typename T>
 __aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<T> l1Tensor, const GlobalTensor<T> gmTensor, uint32_t nValue,
@@ -31,8 +47,7 @@ __aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<T> l1Tensor, const Glo
     if (unlikely(srcDValue < SRCDVALUE_LIMIT)) {
         nd2nzPara.ndNum = 1;
         nd2nzPara.nValue = nValue; // nd矩阵的行数
-        if constexpr (IsSameType<T, int4b_t>::value || IsSameType<T, hifloat4x2_t>::value ||
-                      IsSameType<T, fp4x2_e2m1_t>::value) {
+        if constexpr (IsSameType<T, int4b_t>::value || IsSameType<T, fp4x2_e2m1_t>::value || IsHiFloat4x2Type<T>()) {
             constexpr uint32_t HALF_SIZE_DIVISOR = 2;
             nd2nzPara.dValue = dValue / HALF_SIZE_DIVISOR;
             nd2nzPara.srcDValue = srcDValue / HALF_SIZE_DIVISOR;
@@ -56,8 +71,7 @@ __aicore__ inline void CopySingleMatrixNDToNZ(LocalTensor<T> l1Tensor, const Glo
         nd2nzPara.dstNzMatrixStride = 0;
         nd2nzPara.ndNum = 1;
         nd2nzPara.nValue = 1;
-        if constexpr (IsSameType<T, int4b_t>::value || IsSameType<T, hifloat4x2_t>::value ||
-                      IsSameType<T, fp4x2_e2m1_t>::value) {
+        if constexpr (IsSameType<T, int4b_t>::value || IsSameType<T, fp4x2_e2m1_t>::value || IsHiFloat4x2Type<T>()) {
             constexpr uint32_t HALF_SIZE_DIVISOR = 2;
             nd2nzPara.dValue = dValue / HALF_SIZE_DIVISOR;
             nd2nzPara.srcDValue = dValue / HALF_SIZE_DIVISOR;
@@ -322,8 +336,8 @@ private:
         uint32_t copyFinishRowCnt = 0;
         uint32_t curS2Idx = gmCoord.s2Idx;
         uint32_t blockElementCnt = 32 / sizeof(KV_T);
-        if constexpr (IsSameType<KV_T, int4b_t>::value || IsSameType<KV_T, hifloat4x2_t>::value ||
-                      IsSameType<KV_T, fp4x2_e2m1_t>::value) {
+        if constexpr (IsSameType<KV_T, int4b_t>::value || IsSameType<KV_T, fp4x2_e2m1_t>::value ||
+                      IsHiFloat4x2Type<KV_T>()) {
             blockElementCnt = 64; // int4b时32B可以存64个元素
         }
         while (copyFinishRowCnt < gmCoord.s2DealSize) {

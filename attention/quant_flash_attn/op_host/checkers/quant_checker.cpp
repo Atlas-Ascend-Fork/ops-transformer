@@ -38,11 +38,12 @@ namespace {
 // descale dtype 期望值表: 各量化场景下 q/k/v descale 的 tensor_type 要求
 //   MxFP8: FLOAT8_E8M0; GQA_FP8_FULLQUANT: FLOAT32; HIF8: FLOAT32
 const std::map<QfaQuantMode, std::pair<ge::DataType, std::string>> DESCALE_DTYPE_TABLE = {
-    {QfaQuantMode::A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32, {ge::DT_FLOAT8_E8M0, "FLOAT8_E8M0"}},
+    {QfaQuantMode::A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32,
+     {Ops::Transformer::DT_FLOAT8_E8M0, "FLOAT8_E8M0"}},
     {QfaQuantMode::A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32,
-     {ge::DT_FLOAT, "FLOAT32"}},
-    {QfaQuantMode::A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32, {ge::DT_FLOAT, "FLOAT32"}},
-    {QfaQuantMode::A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16, {ge::DT_HIFLOAT4_SCALE, "HIFLOAT4_SCALE"}},
+     {Ops::Transformer::DT_FLOAT, "FLOAT32"}},
+    {QfaQuantMode::A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32, {Ops::Transformer::DT_FLOAT, "FLOAT32"}},
+    {QfaQuantMode::A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16, {Ops::Transformer::DT_HIFLOAT4_SCALE, "HIFLOAT4_SCALE"}},
 };
 } // namespace
 
@@ -153,14 +154,16 @@ ge::graphStatus QuantChecker::CheckSingleParaQDescale(const QfaTilingInfo& qfaIn
 
     // 公共: dtype / format 校验
     if (qfaInfo.npuArch == NpuArch::DAV_3510) {
-        const std::vector<ge::DataType> supportedDtypes = {ge::DT_FLOAT8_E8M0, ge::DT_FLOAT};
+        const std::vector<ge::DataType> supportedDtypes = {Ops::Transformer::DT_FLOAT8_E8M0,
+                                                           Ops::Transformer::DT_FLOAT};
         OP_CHECK_IF(
             std::find(supportedDtypes.begin(), supportedDtypes.end(), desc->GetDataType()) == supportedDtypes.end(),
             OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, Q_DESCALE_NAME.c_str(),
                                       DataTypeToSerialString(desc->GetDataType()).c_str(), "FLOAT8_E8M0/FLOAT32"),
             return ge::GRAPH_FAILED);
     } else if (qfaInfo.npuArch == NpuArch::DAV_9201) {
-        const std::vector<ge::DataType> supportedDtypes = {ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE};
+        const std::vector<ge::DataType> supportedDtypes = {Ops::Transformer::DT_FLOAT8_E8M0,
+                                                           Ops::Transformer::DT_HIFLOAT4_SCALE};
         OP_CHECK_IF(
             std::find(supportedDtypes.begin(), supportedDtypes.end(), desc->GetDataType()) == supportedDtypes.end(),
             OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, Q_DESCALE_NAME.c_str(),
@@ -255,14 +258,16 @@ ge::graphStatus QuantChecker::CheckSingleParaKDescale(const QfaTilingInfo& qfaIn
 
     // 公共: dtype / format 校验
     if (qfaInfo.npuArch == NpuArch::DAV_3510) {
-        const std::vector<ge::DataType> supportedDtypes = {ge::DT_FLOAT8_E8M0, ge::DT_FLOAT};
+        const std::vector<ge::DataType> supportedDtypes = {Ops::Transformer::DT_FLOAT8_E8M0,
+                                                           Ops::Transformer::DT_FLOAT};
         OP_CHECK_IF(
             std::find(supportedDtypes.begin(), supportedDtypes.end(), desc->GetDataType()) == supportedDtypes.end(),
             OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, K_DESCALE_NAME.c_str(),
                                       DataTypeToSerialString(desc->GetDataType()).c_str(), "FLOAT8_E8M0/FLOAT32"),
             return ge::GRAPH_FAILED);
     } else if (qfaInfo.npuArch == NpuArch::DAV_9201) {
-        const std::vector<ge::DataType> supportedDtypes = {ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE};
+        const std::vector<ge::DataType> supportedDtypes = {Ops::Transformer::DT_FLOAT8_E8M0,
+                                                           Ops::Transformer::DT_HIFLOAT4_SCALE};
         OP_CHECK_IF(
             std::find(supportedDtypes.begin(), supportedDtypes.end(), desc->GetDataType()) == supportedDtypes.end(),
             OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, K_DESCALE_NAME.c_str(),
@@ -357,14 +362,16 @@ ge::graphStatus QuantChecker::CheckSingleParaVDescale(const QfaTilingInfo& qfaIn
 
     // 公共: dtype / format 校验
     if (qfaInfo.npuArch == NpuArch::DAV_3510) {
-        const std::vector<ge::DataType> supportedDtypes = {ge::DT_FLOAT8_E8M0, ge::DT_FLOAT};
+        const std::vector<ge::DataType> supportedDtypes = {Ops::Transformer::DT_FLOAT8_E8M0,
+                                                           Ops::Transformer::DT_FLOAT};
         OP_CHECK_IF(
             std::find(supportedDtypes.begin(), supportedDtypes.end(), desc->GetDataType()) == supportedDtypes.end(),
             OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, V_DESCALE_NAME.c_str(),
                                       DataTypeToSerialString(desc->GetDataType()).c_str(), "FLOAT8_E8M0/FLOAT32"),
             return ge::GRAPH_FAILED);
     } else if (qfaInfo.npuArch == NpuArch::DAV_9201) {
-        const std::vector<ge::DataType> supportedDtypes = {ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE};
+        const std::vector<ge::DataType> supportedDtypes = {Ops::Transformer::DT_FLOAT8_E8M0,
+                                                           Ops::Transformer::DT_HIFLOAT4_SCALE};
         OP_CHECK_IF(
             std::find(supportedDtypes.begin(), supportedDtypes.end(), desc->GetDataType()) == supportedDtypes.end(),
             OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, V_DESCALE_NAME.c_str(),
@@ -395,7 +402,7 @@ ge::graphStatus QuantChecker::CheckSingleParaPScale(const QfaTilingInfo& qfaInfo
         return ge::GRAPH_SUCCESS;
     }
 
-    OP_CHECK_IF(desc->GetDataType() != ge::DT_FLOAT,
+    OP_CHECK_IF(desc->GetDataType() != Ops::Transformer::DT_FLOAT,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, P_SCALE_NAME.c_str(),
                                           DataTypeToSerialString(desc->GetDataType()).c_str(), "FLOAT32"),
                 return ge::GRAPH_FAILED);
@@ -1338,7 +1345,7 @@ ge::graphStatus QuantChecker::CheckVTailExistence(const QfaTilingInfo& qfaInfo) 
 ge::graphStatus QuantChecker::CheckVTailShape(const QfaTilingInfo& qfaInfo) const
 {
     const gert::CompileTimeTensorDesc* vTailDesc = qfaInfo.opParamInfo.vTail.desc;
-    OP_CHECK_IF(vTailDesc->GetDataType() != ge::DT_BF16,
+    OP_CHECK_IF(vTailDesc->GetDataType() != Ops::Transformer::DT_BF16,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(qfaInfo.opName, V_TAIL_NAME.c_str(),
                                                       DataTypeToSerialString(vTailDesc->GetDataType()).c_str(),
                                                       "The dtype of v_tail must be BF16 when v_tail is provided"),
@@ -1346,7 +1353,7 @@ ge::graphStatus QuantChecker::CheckVTailShape(const QfaTilingInfo& qfaInfo) cons
 
     const gert::Tensor* sequsedVTail = qfaInfo.opParamInfo.sequsedVTail.tensor;
     const gert::CompileTimeTensorDesc* sequsedVTailDesc = qfaInfo.opParamInfo.sequsedVTail.desc;
-    OP_CHECK_IF(sequsedVTailDesc->GetDataType() != ge::DT_INT32,
+    OP_CHECK_IF(sequsedVTailDesc->GetDataType() != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(qfaInfo.opName, SEQUSED_V_TAIL_NAME.c_str(),
                                                       DataTypeToSerialString(sequsedVTailDesc->GetDataType()).c_str(),
                                                       "The dtype of seqused_v_tail must be INT32"),
@@ -1452,7 +1459,7 @@ ge::graphStatus QuantChecker::CheckVTailShape(const QfaTilingInfo& qfaInfo) cons
         OP_CHECK_IF(blockTableTailDesc == nullptr,
                     OP_LOGE_WITH_INVALID_INPUT(qfaInfo.opName, BLOCK_TABLE_TAIL_NAME.c_str()), return ge::GRAPH_FAILED);
         OP_CHECK_IF(
-            blockTableTailDesc->GetDataType() != ge::DT_INT32,
+            blockTableTailDesc->GetDataType() != Ops::Transformer::DT_INT32,
             OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, BLOCK_TABLE_TAIL_NAME.c_str(),
                                       DataTypeToSerialString(blockTableTailDesc->GetDataType()).c_str(), "INT32"),
             return ge::GRAPH_FAILED);
@@ -1540,13 +1547,13 @@ ge::graphStatus QuantChecker::CheckQkvDtype(const QfaTilingInfo& qfaInfo) const
     ge::DataType expectedDtype;
     std::string expectedDtypeStr;
     if (qfaInfo.quantMode == QfaQuantMode::A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32) {
-        expectedDtype = ge::DT_HIFLOAT8;
+        expectedDtype = Ops::Transformer::DT_HIFLOAT8;
         expectedDtypeStr = "HIFLOAT8";
     } else if (qfaInfo.quantMode == QfaQuantMode::A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16) {
-        expectedDtype = ge::DT_HIFLOAT4;
+        expectedDtype = Ops::Transformer::DT_HIFLOAT4;
         expectedDtypeStr = "HIFLOAT4";
     } else {
-        expectedDtype = ge::DT_FLOAT8_E4M3FN;
+        expectedDtype = Ops::Transformer::DT_FLOAT8_E4M3FN;
         expectedDtypeStr = "FLOAT8_E4M3FN";
     }
 

@@ -54,7 +54,7 @@ ge::graphStatus SoftmaxLSEChecker::CheckSinglePara(const QfaTilingInfo& qfaInfo)
         return ge::GRAPH_SUCCESS;
     }
 
-    OP_CHECK_IF(lseOutDesc->GetDataType() != ge::DT_FLOAT,
+    OP_CHECK_IF(lseOutDesc->GetDataType() != Ops::Transformer::DT_FLOAT,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, SOFTMAX_LSE_NAME.c_str(),
                                           DataTypeToSerialString(lseOutDesc->GetDataType()).c_str(), "FLOAT32"),
                 return ge::GRAPH_FAILED);

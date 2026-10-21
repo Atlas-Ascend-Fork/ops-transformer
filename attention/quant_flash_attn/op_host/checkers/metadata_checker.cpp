@@ -42,7 +42,7 @@ ge::graphStatus MetadataChecker::CheckSinglePara(const QfaTilingInfo& qfaInfo)
     }
 
     // dtype 仅支持 INT32
-    OP_CHECK_IF(metadataDesc->GetDataType() != ge::DT_INT32,
+    OP_CHECK_IF(metadataDesc->GetDataType() != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE(qfaInfo.opName, METADATA_NAME.c_str(),
                                           DataTypeToSerialString(metadataDesc->GetDataType()).c_str(), "INT32"),
                 return ge::GRAPH_FAILED);

@@ -16,6 +16,7 @@
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "log/log.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 using namespace ge;
 
@@ -211,8 +212,8 @@ ge::graphStatus InferDataTypeQuantFlashAttn(gert::InferDataTypeContext* context)
     if (context == nullptr) {
         return ge::GRAPH_FAILED;
     }
-    context->SetOutputDataType(OUTPUT_IDX_ATTN_OUT, ge::DT_BF16);
-    context->SetOutputDataType(OUTPUT_IDX_SOFTMAX_LSE, ge::DT_FLOAT);
+    context->SetOutputDataType(OUTPUT_IDX_ATTN_OUT, Ops::Transformer::DT_BF16);
+    context->SetOutputDataType(OUTPUT_IDX_SOFTMAX_LSE, Ops::Transformer::DT_FLOAT);
     return ge::GRAPH_SUCCESS;
 }
 

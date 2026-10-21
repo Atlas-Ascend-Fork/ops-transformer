@@ -14,6 +14,7 @@
 #include <memory>
 #include <sstream>
 #include "op_host_csv_case_loader.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace QuantFlashAttnUT {
 
@@ -255,24 +256,24 @@ struct QuantFlashAttnInferShapeUtParam : public QuantFlashAttnHostUtParamBase {
 };
 
 struct QuantFlashAttnInferDTypeUtParam : public QuantFlashAttnHostUtParamBase {
-    ge::DataType q = ge::DT_UNDEFINED;
-    ge::DataType k = ge::DT_UNDEFINED;
-    ge::DataType v = ge::DT_UNDEFINED;
-    ge::DataType q_descale = ge::DT_UNDEFINED;
-    ge::DataType k_descale = ge::DT_UNDEFINED;
-    ge::DataType v_descale = ge::DT_UNDEFINED;
-    ge::DataType block_table = ge::DT_UNDEFINED;
-    ge::DataType p_scale = ge::DT_UNDEFINED;
-    ge::DataType cu_seqlens_q = ge::DT_UNDEFINED;
-    ge::DataType cu_seqlens_kv = ge::DT_UNDEFINED;
-    ge::DataType seqused_q = ge::DT_UNDEFINED;
-    ge::DataType seqused_kv = ge::DT_UNDEFINED;
-    ge::DataType sinks = ge::DT_UNDEFINED;
-    ge::DataType attn_mask = ge::DT_UNDEFINED;
-    ge::DataType metadata = ge::DT_UNDEFINED;
+    ge::DataType q = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType k = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType v = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType q_descale = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType k_descale = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType v_descale = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType block_table = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType p_scale = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType cu_seqlens_q = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType cu_seqlens_kv = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType seqused_q = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType seqused_kv = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType sinks = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType attn_mask = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType metadata = Ops::Transformer::DT_UNDEFINED;
 
-    ge::DataType attn_out = ge::DT_UNDEFINED;
-    ge::DataType softmax_lse = ge::DT_UNDEFINED;
+    ge::DataType attn_out = Ops::Transformer::DT_UNDEFINED;
+    ge::DataType softmax_lse = Ops::Transformer::DT_UNDEFINED;
 
     QuantFlashAttnInferDTypeUtParam(const csv_map& csvMap)
         : QuantFlashAttnHostUtParamBase(csvMap)

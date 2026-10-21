@@ -22,6 +22,7 @@
 #include <vector>
 #include <cstdint>
 #include "../../common/op_host/fia_tiling_base.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "tiling/platform/platform_ascendc.h"
 
 namespace optiling {
@@ -284,12 +285,12 @@ public:
     const gert::Stride* vTailStrides = nullptr;
 
     // DType
-    ge::DataType inputQType = ge::DT_FLOAT8_E4M3FN;
-    ge::DataType inputKvType = ge::DT_FLOAT8_E4M3FN;
-    ge::DataType outputType = ge::DT_BF16;
-    ge::DataType qDescaleType = ge::DT_FLOAT8_E8M0;
-    ge::DataType kDescaleType = ge::DT_FLOAT8_E8M0;
-    ge::DataType vDescaleType = ge::DT_FLOAT8_E8M0;
+    ge::DataType inputQType = Ops::Transformer::DT_FLOAT8_E4M3FN;
+    ge::DataType inputKvType = Ops::Transformer::DT_FLOAT8_E4M3FN;
+    ge::DataType outputType = Ops::Transformer::DT_BF16;
+    ge::DataType qDescaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+    ge::DataType kDescaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+    ge::DataType vDescaleType = Ops::Transformer::DT_FLOAT8_E8M0;
 
     // Layout
     QfaLayout qLayout = QfaLayout::BSND;
@@ -362,40 +363,53 @@ constexpr float FLOAT4SIZE = 0.5f;
 
 constexpr uint32_t DOUBLE_BUFFER_NUM = 2;
 
-const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {{ge::DT_UNDEFINED, "DT_UNDEFINED"},
-                                                                    {ge::DT_FLOAT, "DT_FLOAT"},
-                                                                    {ge::DT_FLOAT16, "DT_FLOAT16"},
-                                                                    {ge::DT_INT8, "DT_INT8"},
-                                                                    {ge::DT_INT16, "DT_INT16"},
-                                                                    {ge::DT_UINT16, "DT_UINT16"},
-                                                                    {ge::DT_UINT8, "DT_UINT8"},
-                                                                    {ge::DT_INT32, "DT_INT32"},
-                                                                    {ge::DT_INT64, "DT_INT64"},
-                                                                    {ge::DT_UINT32, "DT_UINT32"},
-                                                                    {ge::DT_UINT64, "DT_UINT64"},
-                                                                    {ge::DT_BOOL, "DT_BOOL"},
-                                                                    {ge::DT_DOUBLE, "DT_DOUBLE"},
-                                                                    {ge::DT_BF16, "DT_BFLOAT16"},
-                                                                    {ge::DT_INT4, "DT_INT4"},
-                                                                    {ge::DT_HIFLOAT8, "DT_HIFLOAT8"},
-                                                                    {ge::DT_FLOAT8_E4M3FN, "DT_FLOAT8_E4M3FN"},
-                                                                    {ge::DT_FLOAT8_E8M0, "DT_FLOAT8_E8M0FN"},
-                                                                    {ge::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"},
-                                                                    {ge::DT_HIFLOAT4_SCALE, "DT_HIFLOAT4_SCALE"},
-                                                                    {ge::DT_HIFLOAT4, "DT_HIFLOAT4"}};
+const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {
+    {Ops::Transformer::DT_UNDEFINED, "DT_UNDEFINED"},
+    {Ops::Transformer::DT_FLOAT, "DT_FLOAT"},
+    {Ops::Transformer::DT_FLOAT16, "DT_FLOAT16"},
+    {Ops::Transformer::DT_INT8, "DT_INT8"},
+    {Ops::Transformer::DT_INT16, "DT_INT16"},
+    {Ops::Transformer::DT_UINT16, "DT_UINT16"},
+    {Ops::Transformer::DT_UINT8, "DT_UINT8"},
+    {Ops::Transformer::DT_INT32, "DT_INT32"},
+    {Ops::Transformer::DT_INT64, "DT_INT64"},
+    {Ops::Transformer::DT_UINT32, "DT_UINT32"},
+    {Ops::Transformer::DT_UINT64, "DT_UINT64"},
+    {Ops::Transformer::DT_BOOL, "DT_BOOL"},
+    {Ops::Transformer::DT_DOUBLE, "DT_DOUBLE"},
+    {Ops::Transformer::DT_BF16, "DT_BFLOAT16"},
+    {Ops::Transformer::DT_INT4, "DT_INT4"},
+    {Ops::Transformer::DT_HIFLOAT8, "DT_HIFLOAT8"},
+    {Ops::Transformer::DT_FLOAT8_E4M3FN, "DT_FLOAT8_E4M3FN"},
+    {Ops::Transformer::DT_FLOAT8_E8M0, "DT_FLOAT8_E8M0FN"},
+    {Ops::Transformer::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"},
+    {Ops::Transformer::DT_HIFLOAT4_SCALE, "DT_HIFLOAT4_SCALE"},
+    {Ops::Transformer::DT_HIFLOAT4, "DT_HIFLOAT4"}};
 
 const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
-    {QUERY_NAME, {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN, ge::DT_HIFLOAT8, ge::DT_HIFLOAT4}},
-    {KEY_NAME, {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN, ge::DT_HIFLOAT8, ge::DT_HIFLOAT4}},
-    {VALUE_NAME, {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN, ge::DT_HIFLOAT8, ge::DT_HIFLOAT4}},
-    {Q_DESCALE_NAME, {ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE}},
-    {K_DESCALE_NAME, {ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE}},
-    {V_DESCALE_NAME, {ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE}},
-    {BLOCK_TABLE_NAME, {ge::DT_INT32}},
-    {P_SCALE_NAME, {ge::DT_FLOAT}},
-    {ATTN_MASK_NAME, {ge::DT_INT8}},
-    {ATTN_OUT_NAME, {ge::DT_BF16}},
-    {SOFTMAX_LSE_NAME, {ge::DT_FLOAT}},
+    {QUERY_NAME,
+     {Ops::Transformer::DT_FLOAT16, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E4M3FN,
+      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4}},
+    {KEY_NAME,
+     {Ops::Transformer::DT_FLOAT16, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E4M3FN,
+      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4}},
+    {VALUE_NAME,
+     {Ops::Transformer::DT_FLOAT16, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E4M3FN,
+      Ops::Transformer::DT_HIFLOAT8, Ops::Transformer::DT_HIFLOAT4}},
+    {Q_DESCALE_NAME,
+     {Ops::Transformer::DT_FLOAT, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E8M0,
+      Ops::Transformer::DT_HIFLOAT4_SCALE}},
+    {K_DESCALE_NAME,
+     {Ops::Transformer::DT_FLOAT, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E8M0,
+      Ops::Transformer::DT_HIFLOAT4_SCALE}},
+    {V_DESCALE_NAME,
+     {Ops::Transformer::DT_FLOAT, Ops::Transformer::DT_BF16, Ops::Transformer::DT_FLOAT8_E8M0,
+      Ops::Transformer::DT_HIFLOAT4_SCALE}},
+    {BLOCK_TABLE_NAME, {Ops::Transformer::DT_INT32}},
+    {P_SCALE_NAME, {Ops::Transformer::DT_FLOAT}},
+    {ATTN_MASK_NAME, {Ops::Transformer::DT_INT8}},
+    {ATTN_OUT_NAME, {Ops::Transformer::DT_BF16}},
+    {SOFTMAX_LSE_NAME, {Ops::Transformer::DT_FLOAT}},
 };
 
 const std::set<ge::Format> FORMAT_SUPPORT_SET = {ge::FORMAT_ND};
