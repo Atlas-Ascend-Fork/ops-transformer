@@ -174,6 +174,8 @@ __aicore__ inline void GatherPaKvCacheNd<T>::Process()
                 ubBaseV_ = cachelineBlkV / ubLoopPerBlkV_;
                 ubBaseVTail_ = cachelineBlkV % ubLoopPerBlkV_;
             }
+            AscendC::DataCopyExtParams tailCopyParams(1, 0, 0, 0, 0);
+            AscendC::DataCopyPadExtParams<T> padParams = {false, 0, 0, 0};
             int32_t blkKOffset = 0;
             for (int loopID = 0; loopID < ubLoopPerBlkK_; loopID++) {
                 int32_t realUbBaseK_ = (ubBaseK_ + (loopID < ubBaseKTail_ ? 1 : 0)) * 512 / sizeof(T);
@@ -181,15 +183,25 @@ __aicore__ inline void GatherPaKvCacheNd<T>::Process()
                     realUbBaseK_ += (cachelineBlkKTail_ - 512) / sizeof(T);
                 }
                 if (taskID++ % coreNum == vecIdx) {
-                    uint16_t copyLen = realUbBaseK_ * sizeof(T) / 32;
-                    AscendC::DataCopyParams copyParams = {1, copyLen, 0, 0};
+                    int32_t chunkBytes = realUbBaseK_ * sizeof(T);
                     int64_t kBlockStart =
                         GetBlockCacheOffset(blockID, static_cast<int64_t>(blockSize) * tokenSizeK, kCacheBlockStride);
-                    DataCopy(tmpTensor, inKeyCacheGM[kBlockStart + blkKOffset], copyParams);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
-                    DataCopy(outKeyGM[(tokenStart + tableID * blockSize) * tokenSizeK + blkKOffset], tmpTensor,
-                             copyParams);
+                    if (chunkBytes % 32 == 0) {
+                        AscendC::DataCopyParams copyParams = {1, static_cast<uint16_t>(chunkBytes / 32), 0, 0};
+                        DataCopy(tmpTensor, inKeyCacheGM[kBlockStart + blkKOffset], copyParams);
+                        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        DataCopy(outKeyGM[(tokenStart + tableID * blockSize) * tokenSizeK + blkKOffset], tmpTensor,
+                                 copyParams);
+                    } else {
+                        tailCopyParams.blockLen = static_cast<uint32_t>(chunkBytes);
+                        AscendC::DataCopyPad(tmpTensor, inKeyCacheGM[kBlockStart + blkKOffset], tailCopyParams,
+                                             padParams);
+                        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        AscendC::DataCopyPad(outKeyGM[(tokenStart + tableID * blockSize) * tokenSizeK + blkKOffset],
+                                             tmpTensor, tailCopyParams);
+                    }
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
                 }
@@ -202,15 +214,25 @@ __aicore__ inline void GatherPaKvCacheNd<T>::Process()
                     realUbBaseV_ += (cachelineBlkVTail_ - 512) / sizeof(T);
                 }
                 if (taskID++ % coreNum == vecIdx) {
-                    uint16_t copyLen = realUbBaseV_ * sizeof(T) / 32;
-                    AscendC::DataCopyParams copyParams = {1, copyLen, 0, 0};
+                    int32_t chunkBytes = realUbBaseV_ * sizeof(T);
                     int64_t vBlockStart =
                         GetBlockCacheOffset(blockID, static_cast<int64_t>(blockSize) * tokenSizeV, vCacheBlockStride);
-                    DataCopy(tmpTensor, inValueCacheGM[vBlockStart + blkVOffset], copyParams);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
-                    DataCopy(outValueGM[(tokenStart + tableID * blockSize) * tokenSizeV + blkVOffset], tmpTensor,
-                             copyParams);
+                    if (chunkBytes % 32 == 0) {
+                        AscendC::DataCopyParams copyParams = {1, static_cast<uint16_t>(chunkBytes / 32), 0, 0};
+                        DataCopy(tmpTensor, inValueCacheGM[vBlockStart + blkVOffset], copyParams);
+                        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        DataCopy(outValueGM[(tokenStart + tableID * blockSize) * tokenSizeV + blkVOffset], tmpTensor,
+                                 copyParams);
+                    } else {
+                        tailCopyParams.blockLen = static_cast<uint32_t>(chunkBytes);
+                        AscendC::DataCopyPad(tmpTensor, inValueCacheGM[vBlockStart + blkVOffset], tailCopyParams,
+                                             padParams);
+                        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(EVENT_ID1);
+                        AscendC::DataCopyPad(outValueGM[(tokenStart + tableID * blockSize) * tokenSizeV + blkVOffset],
+                                             tmpTensor, tailCopyParams);
+                    }
                     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
                     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
                 }

@@ -26,6 +26,8 @@ struct GatherPaKvCacheTilingDataTest {
     int32_t typeByte;
     int32_t hasSeqStarts;
     int32_t isSeqLensCumsum;
+    int64_t kCacheBlockStride;
+    int64_t vCacheBlockStride;
 };
 
 #define CONVERT_TILING_DATA(tilingStruct, tilingDataPointer, tilingPointer) \
@@ -45,7 +47,9 @@ struct GatherPaKvCacheTilingDataTest {
     (tilingData).tokenSizeV = tilingDataPointer->tokenSizeV; \
     (tilingData).typeByte = tilingDataPointer->typeByte; \
     (tilingData).hasSeqStarts = tilingDataPointer->hasSeqStarts; \
-    (tilingData).isSeqLensCumsum = tilingDataPointer->isSeqLensCumsum;
+    (tilingData).isSeqLensCumsum = tilingDataPointer->isSeqLensCumsum; \
+    (tilingData).kCacheBlockStride = tilingDataPointer->kCacheBlockStride; \
+    (tilingData).vCacheBlockStride = tilingDataPointer->vCacheBlockStride;
 
 #define GET_TILING_DATA_WITH_STRUCT(TilingData, tilingData, tilingPointer) \
     TilingData tilingData; \
@@ -57,6 +61,8 @@ struct GatherPaKvCacheTilingDataTest {
     (tilingData).tokenSizeV = tilingDataPointer->tokenSizeV; \
     (tilingData).typeByte = tilingDataPointer->typeByte; \
     (tilingData).hasSeqStarts = tilingDataPointer->hasSeqStarts; \
-    (tilingData).isSeqLensCumsum = tilingDataPointer->isSeqLensCumsum;
+    (tilingData).isSeqLensCumsum = tilingDataPointer->isSeqLensCumsum; \
+    (tilingData).kCacheBlockStride = tilingDataPointer->kCacheBlockStride; \
+    (tilingData).vCacheBlockStride = tilingDataPointer->vCacheBlockStride;
 
 #endif
