@@ -683,9 +683,8 @@ void AccumulateActivationAndMetadataSize(int64_t& cclDataSize, const CclDataBudg
     cclDataSize += CeilAlign(
         budget.maxOutput * CeilDiv(budget.intermediateHidden, ARCH35_MX_SCALE_DIVISOR) * ARCH35_MX_MULTI_BASE_SIZE,
         ALIGN_512);
-    int64_t expertRecvTokenCountBytes = budget.isUrma ? budget.expertPerRank * ALIGN_32 * ARCH35_MAX_AIC_NUM :
-                                                        CeilAlign(budget.expertPerRank, ARCH35_INT_CACHELINE) *
-                                                            static_cast<int64_t>(sizeof(int32_t)) * ARCH35_MAX_AIC_NUM;
+    int64_t expertRecvTokenCountBytes = CeilAlign(budget.expertPerRank, ARCH35_INT_CACHELINE) *
+                                        static_cast<int64_t>(sizeof(int32_t)) * ARCH35_MAX_AIC_NUM;
     cclDataSize += CeilAlign(expertRecvTokenCountBytes, ALIGN_512);
     cclDataSize += CeilAlign(budget.maxOutput * ALIGN_32, ALIGN_512);
 }
@@ -699,7 +698,7 @@ void AccumulateSyncSize(int64_t& cclDataSize, const CclDataBudget& budget)
 {
     // 保持 WorkspaceLayout 的标志位顺序，每个槽位独占一条 64B 缓存行。
     if (budget.isUrma) {
-        AccumulateFlagSize(cclDataSize, budget.expertPerRank);                         // 激活到 GMM2 的通知。
+        AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.wavesPerExpert); // 激活到 GMM2 的通知。
         AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.wavesPerExpert); // 分发到 GMM1 的通知。
         AccumulateFlagSize(cclDataSize, budget.expertPerRank * ARCH35_MAX_AIC_NUM); // 接收数量元数据就绪通知。
         AccumulateFlagSize(cclDataSize, ARCH35_MAX_AIC_NUM);                        // GMM 到后处理的通知。

@@ -157,8 +157,11 @@ private:
     {
         InitializeDispatchBuffers(tilingData);
         InitializeDispatchRevWeights(tilingData);
+        // 与 MTE 一致，每个 block 连续保存完整专家计数表。
+        int64_t expertRecvTokenCountStride = static_cast<int64_t>(
+            Ops::Base::CeilAlign(tilingData->moeExpertPerRank, static_cast<uint32_t>(INT_CACHELINE)));
         int64_t expertRecvTokenCountBytes =
-            static_cast<int64_t>(tilingData->moeExpertPerRank) * ALIGN_32 * tilingData->aicNum;
+            expertRecvTokenCountStride * static_cast<int64_t>(sizeof(int32_t)) * tilingData->aicNum;
         InitializeActivationBuffers(tilingData);
         InitializeRoutingMetadata(tilingData, expertRecvTokenCountBytes);
         InitializeUrmaSyncFlags(tilingData);
@@ -285,8 +288,10 @@ private:
         int64_t flagRegionBeginOffset = workspaceSize;
         int64_t moeExpertCount = static_cast<int64_t>(tilingData->moeExpertPerRank);
         flagActivationToGmm2Offset = workspaceSize;
-        // URMA activation uses only the first slot of each expert.
-        workspaceSize += SIZE_INT_32 * moeExpertCount * INT_CACHELINE;
+        // Layered token wave 按专家内的每个 256 行分组发布激活完成标志。
+        int64_t maxGroupsPerExpert =
+            Ops::Base::CeilDiv(static_cast<int64_t>(tilingData->maxOutputSize), static_cast<int64_t>(L1_TILE_M_256));
+        workspaceSize += SIZE_INT_32 * moeExpertCount * maxGroupsPerExpert * INT_CACHELINE;
         InitializeRoutingFlags(tilingData);
         const bool isMoeW4 = IsW4GmmMode(tilingData->moeGmmMode);
         const bool hasSharedW4 = tilingData->sharedExpertNum > 0 && IsW4GmmMode(tilingData->sharedGmmMode);

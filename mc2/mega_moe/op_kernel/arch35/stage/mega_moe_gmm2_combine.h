@@ -418,7 +418,7 @@ template <uint8_t CombineQuantMode, typename BlockMmad, bool IsShared, bool IsLa
           bool NotifyCombineTileReady = false, typename WorkSet, typename Config>
 __aicore__ inline void Gmm2AicMmadGeneric(BlockMmad& blockMmad, WorkSet& workSet, const GMMAddrInfo& gmmAddrInfo,
                                           const Config& config, uint32_t startLoopIdx, uint32_t tileNum,
-                                          uint32_t rowOffsetInExpert = 0U)
+                                          uint32_t rowOffsetInExpert = 0U, uint32_t expertTokenCount = 0U)
 {
     uint32_t lastWaveWaited = static_cast<uint32_t>(-1);
     GroupSyncSlotLayout groupSyncSlotLayout{};
@@ -430,7 +430,9 @@ __aicore__ inline void Gmm2AicMmadGeneric(BlockMmad& blockMmad, WorkSet& workSet
                 logicalCoreCount *= 2U;
             }
         }
-        groupSyncSlotLayout = CalcGroupSyncSlotLayout(config.m, logicalCoreCount);
+        // 分片计算仍按完整专家行数建立同步槽布局，未显式传入时沿用当前计算形状的行数。
+        uint32_t fullExpertTokenCount = expertTokenCount != 0U ? expertTokenCount : config.m;
+        groupSyncSlotLayout = CalcGroupSyncSlotLayout(fullExpertTokenCount, logicalCoreCount);
     }
 
     for (uint32_t loopIdx = startLoopIdx; loopIdx < tileNum; loopIdx += config.blockNum) {
@@ -476,7 +478,8 @@ __aicore__ inline void Gmm2AicMmadGeneric(BlockMmad& blockMmad, WorkSet& workSet
             // GMM2 tile 与配对 AIV1 的 Combine tile 一对一通知。
             gmmAddrInfo.gmm2CombineSync->NotifyCombine();
         } else if constexpr (IsLayered && !IsShared) {
-            NotifyCombineConsumersOfTileCompletion(mLoc, groupSyncSlotLayout, gmmAddrInfo.gmm2CombineSyncCounter);
+            NotifyCombineConsumersOfTileCompletion(rowOffsetInExpert + mLoc, groupSyncSlotLayout,
+                                                   gmmAddrInfo.gmm2CombineSyncCounter);
         } else if constexpr (IsShared && !IsLayered) {
             NotifySharedExpertTileCompletion(mLoc, gmmAddrInfo.sharedExpertGmm2TileCounter);
         }
@@ -613,7 +616,8 @@ template <uint8_t CombineQuantMode, typename BlockMmad, typename ElementC, bool 
 __aicore__ inline void Gmm2ExecGeneric(Scheduler& scheduler, const GMMAddrInfo& gmmAddrInfo, const Config& config,
                                        uint32_t startLoopIdx, uint32_t tileNum,
                                        BlockMmadContext<BlockMmad>* blockMmadContext, bool allowWeightL2Bypass,
-                                       uint32_t rowOffsetInExpert = 0U, const Params* params = nullptr)
+                                       uint32_t rowOffsetInExpert = 0U, const Params* params = nullptr,
+                                       uint32_t expertTokenCount = 0U)
 {
     using KernelConfig = typename Config::KernelConfig;
     using ElementA = typename KernelConfig::ElementAType;
@@ -652,13 +656,14 @@ __aicore__ inline void Gmm2ExecGeneric(Scheduler& scheduler, const GMMAddrInfo& 
         if (blockMmadContext != nullptr) {
             blockMmadContext->template Init<GmmStage::GMM2>(config);
             Gmm2AicMmadGeneric<CombineQuantMode, BlockMmad, IsShared, IsLayered, NotifyCombineTileReady>(
-                blockMmadContext->blockMmad, workSet, gmmAddrInfo, config, startLoopIdx, tileNum, rowOffsetInExpert);
+                blockMmadContext->blockMmad, workSet, gmmAddrInfo, config, startLoopIdx, tileNum, rowOffsetInExpert,
+                expertTokenCount);
         } else {
             BlockMmadContext<BlockMmad> localBlockMmadContext;
             localBlockMmadContext.template Init<GmmStage::GMM2>(config);
             Gmm2AicMmadGeneric<CombineQuantMode, BlockMmad, IsShared, IsLayered, NotifyCombineTileReady>(
-                localBlockMmadContext.blockMmad, workSet, gmmAddrInfo, config, startLoopIdx, tileNum,
-                rowOffsetInExpert);
+                localBlockMmadContext.blockMmad, workSet, gmmAddrInfo, config, startLoopIdx, tileNum, rowOffsetInExpert,
+                expertTokenCount);
         }
     } else if constexpr (NotifyCombineTileReady) {
         // NotifyCombineTileReady 为真时 AIV1 逐 tile 锁步消费。combine 去重的独立消费路径
@@ -748,7 +753,8 @@ __aicore__ inline void RunGmm2Generic(const AscendC::Shape<int64_t, int64_t, int
                                       const BlockJobContext& blockJob, void* blockMmadContext = nullptr,
                                       bool allowWeightL2Bypass = false, uint32_t rowOffsetInExpert = 0U,
                                       const Params* params = nullptr,
-                                      uint32_t activationOutputDivisor = ACTIVATION_N_HALF)
+                                      uint32_t activationOutputDivisor = ACTIVATION_N_HALF,
+                                      uint32_t expertTokenCount = 0U)
 {
     static_assert(!IsShared || !NotifyCombineTileReady, "Shared expert GMM2 has its own completion counter");
     static_assert(!IsLayered || !NotifyCombineTileReady, "Layered GMM2 selects its synchronization through IsLayered");
@@ -774,7 +780,7 @@ __aicore__ inline void RunGmm2Generic(const AscendC::Shape<int64_t, int64_t, int
     auto* typedBlockMmadContext = reinterpret_cast<MmadContext*>(blockMmadContext);
     GmmKernel::Gmm2ExecGeneric<CombineQuantMode, BlockMmad, ElementC, IsLayered, IsShared, NotifyCombineTileReady>(
         scheduler, gmmAddrInfo, config, startLoopIdx, tileNum, typedBlockMmadContext, allowWeightL2Bypass,
-        rowOffsetInExpert, params);
+        rowOffsetInExpert, params, expertTokenCount);
 
     startBlockIdx = (startBlockIdx + tileNum) % config.blockNum;
 }
@@ -787,14 +793,15 @@ __aicore__ inline void RunGmm2Generic(const AscendC::Shape<int64_t, int64_t, int
                                       const GMMAddrInfo& gmmAddrInfo, uint32_t& startBlockIdx,
                                       void* blockMmadContext = nullptr, bool allowWeightL2Bypass = false,
                                       uint32_t rowOffsetInExpert = 0U, const Params* params = nullptr,
-                                      uint32_t activationOutputDivisor = ACTIVATION_N_HALF)
+                                      uint32_t activationOutputDivisor = ACTIVATION_N_HALF,
+                                      uint32_t expertTokenCount = 0U)
 {
     BlockJobContext blockJob{static_cast<uint32_t>(GetBlockIdx() / GetTaskRation()),
                              static_cast<uint32_t>(GetBlockNum())};
     RunGmm2Generic<CombineQuantMode, ElementA, ElementB, ElementC, ElementMxScaleA, ElementMxScaleB, IsWeightNZ,
                    IsLayered, Gmm1TileM, TopkWeightsPrefetch, IsShared, IsWaveFlagGrained, NotifyCombineTileReady>(
         problemShape, gmmAddrInfo, startBlockIdx, blockJob, blockMmadContext, allowWeightL2Bypass, rowOffsetInExpert,
-        params, activationOutputDivisor);
+        params, activationOutputDivisor, expertTokenCount);
 }
 
 // RunGmm2A8W4：AIV0执行W4→W8 prologue，AIC执行GMM2；可选由配对AIV1逐tile Combine。
