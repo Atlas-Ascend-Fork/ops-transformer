@@ -15,6 +15,8 @@
 #include <torch/extension.h>
 #include "aclnn_common.h"
 
+namespace py = pybind11;
+
 namespace op_api {
 
 static const int DIM_TWO = 2;
@@ -74,7 +76,8 @@ at::Tensor NpuQuantAllReduce(const at::Tensor& context, const at::Tensor& x, con
     if (x.dim() == DIM_THREE) {
         axisBs = axisBs * x.size(1);
     }
-    TORCH_CHECK(axisBs % worldSize == 0, "The x BS-axis should be divisible by world_size");
+    TORCH_CHECK(axisBs % worldSize == 0, "The x BS-axis should be divisible by worldSize, but the actual BS-axis is ",
+                axisBs, ", worldSize is ", worldSize);
 
     // (bs, h)或者(b, s, h), h范围在[1024, 8192]内，且h满足128对齐
     uint32_t axisH = (x.dim() == DIM_THREE ? 2 : 1);
@@ -145,7 +148,9 @@ at::Tensor NpuQuantAllReduce(const at::Tensor& context, const at::Tensor& x, con
 // Bind the C++ function to Python module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("npu_quant_all_reduce", &NpuQuantAllReduce, "npu_quant_all_reduce");
+    m.def("npu_quant_all_reduce", &NpuQuantAllReduce, "npu_quant_all_reduce", py::arg("context"), py::arg("x"),
+          py::arg("scales"), py::arg("hccl_buffer_size"), py::arg("world_size"), py::arg("reduce_op"),
+          py::arg("output_dtype"), py::arg("x_dtype"), py::arg("scales_dtype"));
 }
 
 } // namespace op_api

@@ -357,8 +357,8 @@ static bool CheckScalesValid(const gert::TilingContext* context, const std::vect
     size_t actualDimNum = scalesShape->GetStorageShape().GetDimNum();
     if (actualDimNum != expectedScalesDims.size()) {
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-            nodeName, "scales", FormatShape(expectedScalesDims).c_str(),
-            ("The shape dim of scales must be " + std::to_string(expectedScalesDims.size()) + "D").c_str());
+            nodeName, "actual dim of scales", std::to_string(actualDimNum).c_str(),
+            ("The expected dim of scales must be " + std::to_string(expectedScalesDims.size()) + "D").c_str());
         return false;
     }
 
@@ -368,8 +368,8 @@ static bool CheckScalesValid(const gert::TilingContext* context, const std::vect
         uint64_t actualDim = scalesShape->GetStorageShape().GetDim(i);
         if (expectedDim != actualDim) {
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                nodeName, "scales", std::to_string(actualDim).c_str(),
-                ("The shape of scales dim " + std::to_string(i) + " must be " + std::to_string(expectedDim)).c_str());
+                nodeName, "actual scales dim " + std::to_string(i), std::to_string(actualDim).c_str(),
+                ("The expected scales dim " + std::to_string(i) + " must be " + std::to_string(expectedDim)).c_str());
             return false;
         }
     }

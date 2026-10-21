@@ -92,11 +92,14 @@ static bool CheckAllDtypesValid(const aclTensor* x, const aclTensor* scales, con
     isAllDtypesValid = CheckKGAllDtypesValid(x, scales, output) || CheckMXAllDtypesValid(x, scales, output);
     if (!isAllDtypesValid) {
         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-            "aclnnQuantReduceScatter", "x/scales/output",
+            "aclnnQuantReduceScatter", "actual x/scales/output",
             (std::string(op::ToString(x->GetDataType()).GetString()) + "/" +
              op::ToString(scales->GetDataType()).GetString() + "/" + op::ToString(output->GetDataType()).GetString())
                 .c_str(),
-            "The dtypes of x, scales and output must be valid");
+            "In KG QuantMode, the expected dtypes of x are: int8/hifloat8/float8_e4m3fn/float8_e5m2, scale: float, "
+            "output: float16/bfloat16/float. "
+            "In MX QuantMode, the expected dtypes of x are: float8_e4m3fn/float8_e5m2, scale: float8_e8m0, output: "
+            "float16/bfloat16/float.");
     }
     return isAllDtypesValid;
 }

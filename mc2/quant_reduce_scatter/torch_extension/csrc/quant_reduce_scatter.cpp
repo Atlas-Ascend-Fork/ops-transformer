@@ -15,6 +15,8 @@
 #include <torch/extension.h>
 #include "aclnn_common.h"
 
+namespace py = pybind11;
+
 namespace op_api {
 // worldSize
 const std::set<int> SUPPORT_WORLD_SIZE_LIST{2, 4, 8};
@@ -59,7 +61,7 @@ at::Tensor NpuQuantReduceScatter(const at::Tensor& context, const at::Tensor& x,
     TORCH_CHECK(scales.defined(), "The input tensor scales can not be None.");
     // 校验x的shape, 2维或者3维
     TORCH_CHECK(x.dim() == DIM_TWO || x.dim() == DIM_THREE,
-                "The input x tensor shape is required to be 2 or 3 dim, but the actual input shape is ", x.dim());
+                "The input x tensor shape is required to be 2 or 3 dim, but the actual input dim is ", x.dim());
     // 校验x是否为空tensor
     TORCH_CHECK(CheckTensorNotEmpty(x), "The input tensor x can not be empty tensor");
     // 校验x的dtype
@@ -79,7 +81,8 @@ at::Tensor NpuQuantReduceScatter(const at::Tensor& context, const at::Tensor& x,
         "The x H-axis should be in [1024, 8192] and divisible by 128");
 
     int64_t axisBs = (x.dim() == DIM_THREE) ? x.size(DIM_ZERO) * x.size(DIM_ONE) : x.size(DIM_ZERO);
-    TORCH_CHECK(axisBs % worldSize == 0, "The x BS-axis should be divisible by worldSize");
+    TORCH_CHECK(axisBs % worldSize == 0, "The x BS-axis should be divisible by worldSize, but the actual BS-axis is ",
+                axisBs, ", worldSize is ", worldSize);
 
     // 校验scales的shape
     TORCH_CHECK(
@@ -139,7 +142,9 @@ at::Tensor NpuQuantReduceScatter(const at::Tensor& context, const at::Tensor& x,
 // Bind the C++ function to Python module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("npu_quant_reduce_scatter", &NpuQuantReduceScatter, "npu_quant_reduce_scatter");
+    m.def("npu_quant_reduce_scatter", &NpuQuantReduceScatter, "npu_quant_reduce_scatter", py::arg("context"),
+          py::arg("x"), py::arg("scales"), py::arg("hccl_buffer_size"), py::arg("world_size"), py::arg("reduce_op"),
+          py::arg("output_dtype"), py::arg("x_dtype"), py::arg("scales_dtype"));
 }
 
 } // namespace op_api

@@ -164,6 +164,14 @@ def quant_all_reduce(
     x_dtype: Optional[int] = None,
     scales_dtype: Optional[int] = None,
 ):
+    if x is None:
+        raise TypeError(
+            "x cannot be None, please input some value" + ops_error(ErrCode.TYPE)
+        )
+    if scales is None:
+        raise TypeError(
+            "scales cannot be None, please input some value" + ops_error(ErrCode.TYPE)
+        )
     if isinstance(hcom, str):
         group_name = hcom
     else:
