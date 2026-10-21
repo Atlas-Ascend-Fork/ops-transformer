@@ -83,9 +83,8 @@ def _base_attrs(**overrides):
         "B": 1,
         "N_q": 6,
         "N_kv": 1,
-        "D": 512,
+        "D": 576,
         "D_V": 512,
-        "D_rope": 64,
         "quant_mode": 1,
         "softmax_scale": 0.041666666666666664,
         "seqused_q_values": [1],
@@ -179,14 +178,19 @@ def gen_cases():
     cases.append(_row("metadata_Nkv_invalid_0", _BASE_SHAPES, _base_attrs(N_kv=0)))
     cases.append(_row("Nkv_invalid_-1", _BASE_SHAPES, _base_attrs(N_kv=-1)))
 
-    # ===== 3. head_dim_qk 约束: 仅支持 576 (D + D_rope) =====
-    # D=256 → D_total=320 != 576
-    cases.append(_row("D_head_dim_qk_320", _shapes_with_d(320), _base_attrs(D=256)))
-    # D=1024 → D_total=1088
-    cases.append(_row("D_head_dim_qk_1088", _shapes_with_d(1088), _base_attrs(D=1024)))
-    # D=0 → D_total=64
+    # ===== 3. head_dim_qk 约束: 仅支持 576 (D_V 512 + D_rope 64) =====
+    # D 为算子侧 QK 总 head dim (qkHeadDim), D_rope 不再作为独立属性下传, 由
+    # D - D_V 推导; 非 576 的总 head dim 由算子 host 侧校验拦截。
+    for d_total in [320, 1088, 544, 640, 511]:
+        cases.append(
+            _row(
+                f"D_head_dim_qk_{d_total}",
+                _shapes_with_d(d_total),
+                _base_attrs(D=d_total),
+            )
+        )
+    # D=0 / D=-1 的空/负维度无法构造出对应 slot 形状, 用最小占位 shape 承载属性透传。
     cases.append(_row("D_zero", _shapes_with_d(64), _base_attrs(D=0)))
-    # D=-1
     cases.append(_row("D_neg1", _shapes_with_d(63), _base_attrs(D=-1)))
 
     # ===== 4. head_dim_v 约束: 仅支持 512 =====
@@ -589,15 +593,6 @@ def gen_cases():
                     cu_seqlens_q_values=cu_vals,
                     seqused_q_values=seq_vals,
                 ),
-            )
-        )
-
-    # ===== 27. D_rope 非法 (D + D_rope != 576) =====
-    for d_rope in [0, 32, 128, -1]:
-        d_total = 512 + d_rope
-        cases.append(
-            _row(
-                f"D_rope_{d_rope}", _shapes_with_d(d_total), _base_attrs(D_rope=d_rope)
             )
         )
 

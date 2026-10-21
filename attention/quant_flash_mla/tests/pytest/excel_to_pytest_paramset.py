@@ -24,7 +24,6 @@
   KV_N/num_heads_kv -> N_kv
   Q_D / head_dim    -> D
   head_dim_v        -> D_V
-  head_dim_rope / D_rope -> D_rope
   cu_seqlens_q_value-> cu_seqlens_q
   cache_seqlens_value-> cache_seqlens
   seqused_q_value   -> seqused_q
@@ -262,17 +261,10 @@ def _parse_row(row, cols):
     params["N_kv"] = _to_int(
         row.get(cols.get("KV_N")) or row.get(cols.get("num_heads_kv"))
     )
+    # D 直接取表的 Q_D (QK 总 head dim), D_V 取 head_dim_v; 只有一个 D,
+    # 不再有独立的 D_rope 参数 (nope/rope 已合并)。
     params["D"] = _to_int(row.get(cols.get("Q_D")) or row.get(cols.get("head_dim")))
     params["D_V"] = _to_int(row.get(cols.get("head_dim_v")))
-    params["D_rope"] = _to_int(
-        row.get(cols.get("head_dim_rope")) or row.get(cols.get("D_rope"))
-    )
-
-    # Excel Q_D 是 nope+rope 合并值 (576)，golden 需要 nope(512)+rope(64)
-    # 如果 D_rope 未填且 D > 512，推断 D_rope = D - 512, D = 512
-    if params["D_rope"] is None and params["D"] and params["D"] > 512:
-        params["D_rope"] = params["D"] - 512
-        params["D"] = 512
 
     params["cu_seqlens_q"] = _to_int_list(row.get(cols.get("cu_seqlens_q_value")))
     params["cache_seqlens"] = _to_int_list(row.get(cols.get("cache_seqlens_value")))
@@ -327,7 +319,6 @@ _FIELDS = [
     "N_kv",
     "D",
     "D_V",
-    "D_rope",
     "cu_seqlens_q",
     "cache_seqlens",
     "seqused_q",

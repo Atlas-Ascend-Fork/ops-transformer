@@ -84,12 +84,12 @@ def generate_qfmla_inputs(
     """Generate MLA FP8 input data and write into TTK tensor slots in-place.
 
     Sidecar attributes via **kwargs:
-      B, N_q, N_kv, D, D_V, D_rope,
+      B, N_q, N_kv, D, D_V,
       seqused_q_values, cache_seqlens_values,
       kv_cache_layout (golden-side name, e.g. "BnNBsD"),
       block_size, input_layout, output_layout,
       q_data_range, k_data_range, v_data_range,
-      seed_q, seed_k, seed_v, seed_qr, seed_kr,
+      seed_q, seed_k, seed_v,
       p_scale, graph_path
     """
     # Match QFA's plugin/no-plugin layering for structural empty-tensor cases.
@@ -108,17 +108,30 @@ def generate_qfmla_inputs(
             )
 
     # ---- 1. Read sidecar attributes ----
-    N_q = kwargs.get("N_q", 6)
-    N_kv = kwargs.get("N_kv", 1)
-    D = kwargs.get("D", 512)
-    D_V = kwargs.get("D_V", 512)
-    D_rope = kwargs.get("D_rope", 64)
-    block_size = kwargs.get("block_size", 128)
+    # 属性一律不硬编码兜底 (对齐 QFA tests/assets/impl/inputs.py 形态): 缺失即
+    # 缺失, 能由 slot 形状推导的就地推导, 不能推导的显式报错, 避免静默补值掩盖
+    # 测试脚本漏配参数。
+    N_q = kwargs.get("N_q")
+    N_kv = kwargs.get("N_kv")
+    D = kwargs.get("D")
+    D_V = kwargs.get("D_V")
+    if D_V is None:
+        D_V = head_dim_v
+    block_size = kwargs.get("block_size")
+    if block_size is None:
+        raise ValueError(
+            "[INPUTS] attribute block_size is not provided by the case and cannot "
+            "be derived from slot shapes"
+        )
     # Keep the raw values for the final in-place write.  Negative/value-error
     # cases must reach metadata unchanged, but those values cannot be used to
     # allocate the CPU tensors that provide the otherwise-valid test payload.
-    seqused_q_vals = list(kwargs.get("seqused_q_values", [1]))
-    cache_seqlens_vals = list(kwargs.get("cache_seqlens_values", [1024]))
+    seqused_q_vals = kwargs.get("seqused_q_values")
+    if seqused_q_vals is not None:
+        seqused_q_vals = list(seqused_q_vals)
+    cache_seqlens_vals = kwargs.get("cache_seqlens_values")
+    if cache_seqlens_vals is not None:
+        cache_seqlens_vals = list(cache_seqlens_vals)
     cu_seqlens_q_vals = kwargs.get("cu_seqlens_q_values")
     if cu_seqlens_q_vals is not None:
         cu_seqlens_q_vals = list(cu_seqlens_q_vals)
@@ -140,7 +153,7 @@ def generate_qfmla_inputs(
     elif cache_seqlens_vals:
         B = max(1, len(cache_seqlens_vals))
     else:
-        B = max(1, int(kwargs.get("B", 1)))
+        B = max(1, int(kwargs["B"])) if kwargs.get("B") is not None else 1
 
     # QMLA only supports TND.  Use TND and a positive block size for payload
     # synthesis while preserving the raw layout_q/block_size in the actual
@@ -187,29 +200,14 @@ def generate_qfmla_inputs(
     _k_head_axis = 2 if str(layout_kv).upper() == "PA_BBND" else 1
     N_q = _positive_or_derive("N_q", N_q, q, _q_head_axis)
     N_kv = _positive_or_derive("N_kv", N_kv, k_cache, _k_head_axis)
-    # D: q slot 末维是真实的 D_total (CSV slot 配置); CSV 的 D 属性语义不统一
-    # (有些 case D=D_nope=512, 有些 case D=D_total=576), 不能盲目 D+D_rope。
-    # 以 q slot 末维为准反推 D_nope, 不一致时以 q slot 为准 (CSV slot 是算子
-    # 实际接收的形状, 是真实 QK head_dim); 原 CSV 的 D 属性仍由 ttk 透传给
-    # metadata/主算子, 不影响算子侧拦截。
+    # D 是算子侧 QK 总 head dim (qkHeadDim, 如 576), 只有一个 D, 直接作为数据
+    # 合成宽度 (不再拆 nope/rope); 以 q slot 末维 (算子实际接收的 QK head_dim)
+    # 为准, 无槽位信息时用 case 属性。CSV 的 D/D_V 属性原样由 ttk 透传给算子,
+    # 由 host 侧校验拦截, 这里不做任何兜底补值。
+    if D is None:
+        raise ValueError("[INPUTS] attribute D is not provided by the case")
     _q_last_dim = int(q.shape[-1]) if (hasattr(q, "shape") and q.dim() > 0) else 0
-    if _q_last_dim > 0:
-        D_total = _q_last_dim
-    else:
-        D_total = _positive_or_derive("D", int(D) + int(D_rope), q, -1)
-    if int(D) + int(D_rope) != D_total:
-        logger.warning(
-            "[INPUTS] CSV D=%d + D_rope=%d = %d != q slot last dim=%d; "
-            "CSV 'D' likely uses D_total convention (D_total=%d, D_nope=%d) - "
-            "using q slot dim as D_total for data synthesis",
-            int(D),
-            int(D_rope),
-            int(D) + int(D_rope),
-            D_total,
-            D_total,
-            D_total - int(D_rope),
-        )
-    D = D_total - int(D_rope)
+    D_total = _q_last_dim if _q_last_dim > 0 else int(D)
 
     # Synthesis-only sequence lengths. Prefer a valid cumulative sequence from
     # the case, otherwise derive a positive partition from the CSV q slot. The
@@ -251,20 +249,25 @@ def generate_qfmla_inputs(
     ):
         synthesis_cache_seqlens_vals = [1] * max(int(B), 1)
 
-    # Invalid D/D_rope values are operator attributes and/or reflected by the
-    # CSV slot shape. Use the supported dimensions only for payload synthesis;
-    # shape mismatches are deliberately skipped by _inplace_write below.
-    if D <= 0 or int(D_rope) <= 0:
-        D = 512
-        D_rope = 64
+    # case 未提供 per-batch 长度 (seqused_q_values/cache_seqlens_values 为 None)
+    # 时, 数据合成与 slot 写回改用与 golden.py 同源的 synthesis 推导值, 不再
+    # 硬编码 [1]/[1024]; 提供了原始值的用例原样透传。
+    if seqused_q_vals is None:
+        seqused_q_vals = list(synthesis_seqused_q_vals)
+    if cache_seqlens_vals is None:
+        cache_seqlens_vals = list(synthesis_cache_seqlens_vals)
+
+    # Invalid D/D_V values are operator attributes and/or reflected by the CSV
+    # slot shape and are passed through untouched; shape mismatches are
+    # deliberately skipped by _inplace_write below.
 
     logger.info(
-        "[INPUTS] B=%s N_q=%s N_kv=%s D=%s D_rope=%s layout_q=%s kv_layout=%s block_size=%s",
+        "[INPUTS] B=%s N_q=%s N_kv=%s D=%s D_V=%s layout_q=%s kv_layout=%s block_size=%s",
         B,
         N_q,
         N_kv,
-        D,
-        D_rope,
+        D_total,
+        D_V,
         layout_q,
         kv_cache_layout,
         block_size,
@@ -274,10 +277,9 @@ def generate_qfmla_inputs(
     golden_mod.B = B
     golden_mod.N_q = N_q
     golden_mod.N_kv = N_kv
-    golden_mod.D = D
+    golden_mod.D = D_total
     golden_mod.D_V = D_V
-    golden_mod.D_rope = D_rope
-    golden_mod.QFMLA_QK_HEAD_DIM = D + D_rope
+    golden_mod.QFMLA_QK_HEAD_DIM = D_total
     golden_mod.QFMLA_V_HEAD_DIM = D_V
     golden_mod.QFMLA_QUANT_MODE = quant_mode
     golden_mod.SEQUSED_Q = list(synthesis_seqused_q_vals)
@@ -321,7 +323,7 @@ def generate_qfmla_inputs(
         golden_mod.V_DATA_RANGE = tuple(kwargs["v_data_range"])
 
     # Seeds
-    for s in ("SEED_Q", "SEED_K", "SEED_V", "SEED_QR", "SEED_KR", "SEED_BLOCK_TABLE"):
+    for s in ("SEED_Q", "SEED_K", "SEED_V", "SEED_BLOCK_TABLE"):
         key = s.lower()
         if key in kwargs:
             setattr(golden_mod, s, kwargs[key])

@@ -68,35 +68,166 @@ def _set_golden_globals(
     head_dim_v,
     return_softmax_lse,
     softmax_scale,
+    q=None,
+    k_cache=None,
+    cache_seqlens=None,
     **kwargs,
 ):
-    """Set golden module globals from op params and sidecar kwargs."""
-    B = kwargs.get("B", 1)
-    N_q = kwargs.get("N_q", 6)
-    N_kv = kwargs.get("N_kv", 1)
-    D = kwargs.get("D", 512)
-    D_V = kwargs.get("D_V", 512)
-    D_rope = kwargs.get("D_rope", 64)
-    block_size = kwargs.get("block_size", 128)
-    seqused_q_vals = kwargs.get("seqused_q_values", [1])
-    cache_seqlens_vals = kwargs.get("cache_seqlens_values", [1024])
+    """Set golden module globals from op params and sidecar kwargs.
+
+    generate_data 依赖全局量 (B/N_q/N_kv/D/D_V/SEQUSED_Q/CACHE_SEQLENS/
+    种子/数据范围) 决定数据 shape 与 RNG 消费流, 必须与 inputs.py 侧完全对齐,
+    否则 "同种子同数据" 失效, golden 再生数据与 NPU 输入数据错位。因此这里的
+    数据合成全局量推导逻辑与 inputs.generate_qfmla_inputs 逐条对应; 而 CPU
+    golden 计算仍使用原始 seqused_q_values/cache_seqlens_values。
+    """
+    # case 属性一律不硬编码兜底 (对齐 QFA tests/assets/impl/golden.py 形态):
+    # 属性缺失即缺失, 能由 slot 形状推导的就地推导, 不能推导的显式报错, 避免
+    # 静默补值掩盖测试脚本漏配参数。
+    B = kwargs.get("B")
+    N_q = kwargs.get("N_q")
+    N_kv = kwargs.get("N_kv")
+    D = kwargs.get("D")
+    D_V = kwargs.get("D_V")
+    if D_V is None:
+        D_V = head_dim_v
+    block_size = kwargs.get("block_size")
+    if block_size is None:
+        raise ValueError(
+            "[GOLDEN] attribute block_size is not provided by the case and cannot "
+            "be derived from slot shapes"
+        )
+    seqused_q_vals = kwargs.get("seqused_q_values")
+    if seqused_q_vals is not None:
+        seqused_q_vals = list(seqused_q_vals)
+    cache_seqlens_vals = kwargs.get("cache_seqlens_values")
+    if cache_seqlens_vals is not None:
+        cache_seqlens_vals = list(cache_seqlens_vals)
+    cu_seqlens_q_vals = kwargs.get("cu_seqlens_q_values")
+    if cu_seqlens_q_vals is not None:
+        cu_seqlens_q_vals = list(cu_seqlens_q_vals)
     kv_cache_layout = kwargs.get("kv_cache_layout") or _KV_LAYOUT_REVERSE.get(
         layout_kv, "BnNBsD"
     )
     input_layout = kwargs.get("input_layout", layout_q)
     output_layout = kwargs.get("output_layout", layout_out)
 
+    # ---- B: 与 inputs.py 一致, 优先从 cache_seqlens slot 首维推导 ----
+    cache_shape = (
+        tuple(int(dim) for dim in cache_seqlens.shape)
+        if (cache_seqlens is not None and hasattr(cache_seqlens, "shape"))
+        else ()
+    )
+    if len(cache_shape) == 1 and cache_shape[0] > 0:
+        B = cache_shape[0]
+    elif cache_seqlens_vals:
+        B = max(1, len(cache_seqlens_vals))
+    else:
+        B = max(1, int(B)) if B is not None else 1
+
+    # ---- 非法 N_q/N_kv/D 从 slot 形状推导 (与 inputs.py 一致) ----
+    def _positive_or_derive(name, value, slot, axis):
+        try:
+            ivalue = int(value)
+        except (TypeError, ValueError):
+            ivalue = 0
+        if ivalue > 0:
+            return ivalue
+        shape = (
+            tuple(int(dim) for dim in slot.shape)
+            if (slot is not None and hasattr(slot, "shape"))
+            else ()
+        )
+        idx = axis if axis >= 0 else len(shape) + axis
+        if not 0 <= idx < len(shape) or shape[idx] <= 0:
+            raise ValueError(
+                f"[GOLDEN] attribute {name}={value!r} invalid and cannot be "
+                f"derived from slot shape {shape}"
+            )
+        logger.warning(
+            "[GOLDEN] attribute %s=%r invalid - derive %s=%d from slot shape %s",
+            name,
+            value,
+            name,
+            shape[idx],
+            shape,
+        )
+        return shape[idx]
+
+    q_shape = (
+        tuple(int(dim) for dim in q.shape)
+        if (q is not None and hasattr(q, "shape"))
+        else ()
+    )
+    _q_head_axis = 2 if str(layout_q).upper() == "BSND" else 1
+    N_q = _positive_or_derive("N_q", N_q, q, _q_head_axis)
+    _k_head_axis = 2 if str(layout_kv).upper() == "PA_BBND" else 1
+    N_kv = _positive_or_derive("N_kv", N_kv, k_cache, _k_head_axis)
+
+    # D 是算子侧 QK 总 head dim (qkHeadDim, 如 576), 只有一个 D, 直接作为数据
+    # 合成宽度 (不再拆 nope/rope); 以 q slot 末维 (算子实际接收的 QK head_dim)
+    # 为准, 无槽位信息时用 case 属性, 不做任何兜底补值。
+    if D is None:
+        raise ValueError("[GOLDEN] attribute D is not provided by the case")
+    _q_last_dim = q_shape[-1] if q_shape else 0
+    D_total = _q_last_dim if _q_last_dim > 0 else int(D)
+
+    # ---- synthesis seqused: 与 inputs.py 一致, cu 差值优先, 否则按 slot 均分 ----
+    synthesis_seqused_q_vals = None
+    if (
+        cu_seqlens_q_vals is not None
+        and len(cu_seqlens_q_vals) == int(B) + 1
+        and cu_seqlens_q_vals
+        and cu_seqlens_q_vals[0] == 0
+        and all(
+            cu_seqlens_q_vals[i + 1] >= cu_seqlens_q_vals[i]
+            for i in range(len(cu_seqlens_q_vals) - 1)
+        )
+    ):
+        candidate = [
+            cu_seqlens_q_vals[i + 1] - cu_seqlens_q_vals[i] for i in range(int(B))
+        ]
+        if candidate and max(candidate) > 0:
+            synthesis_seqused_q_vals = candidate
+    if synthesis_seqused_q_vals is None:
+        batch_for_synthesis = max(int(B), 1)
+        total_q = (
+            q_shape[0] if len(q_shape) == 3 and q_shape[0] > 0 else batch_for_synthesis
+        )
+        base, extra = divmod(total_q, batch_for_synthesis)
+        synthesis_seqused_q_vals = [
+            base + (1 if i < extra else 0) for i in range(batch_for_synthesis)
+        ]
+        if max(synthesis_seqused_q_vals) <= 0:
+            synthesis_seqused_q_vals = [1] * batch_for_synthesis
+
+    synthesis_cache_seqlens_vals = cache_seqlens_vals
+    if (
+        not synthesis_cache_seqlens_vals
+        or len(synthesis_cache_seqlens_vals) != int(B)
+        or any(int(v) <= 0 for v in synthesis_cache_seqlens_vals)
+    ):
+        synthesis_cache_seqlens_vals = [1] * max(int(B), 1)
+
+    # case 未提供 per-batch 长度 (seqused_q_values/cache_seqlens_values 为 None)
+    # 时, CPU golden 与布局转换改用与 inputs.py 同源的 synthesis 推导值, 不再
+    # 硬编码 [1]/[1024]; 提供了原始值的用例原样透传。
+    if seqused_q_vals is None:
+        seqused_q_vals = list(synthesis_seqused_q_vals)
+    if cache_seqlens_vals is None:
+        cache_seqlens_vals = list(synthesis_cache_seqlens_vals)
+
     golden_mod.B = B
     golden_mod.N_q = N_q
     golden_mod.N_kv = N_kv
-    golden_mod.D = D
+    golden_mod.D = D_total
     golden_mod.D_V = D_V
-    golden_mod.D_rope = D_rope
-    golden_mod.QFMLA_QK_HEAD_DIM = D + D_rope
+    golden_mod.QFMLA_QK_HEAD_DIM = D_total
     golden_mod.QFMLA_V_HEAD_DIM = D_V
     golden_mod.QFMLA_QUANT_MODE = quant_mode
-    golden_mod.SEQUSED_Q = list(seqused_q_vals)
-    golden_mod.CACHE_SEQLENS = list(cache_seqlens_vals)
+    # 数据合成用 synthesis 值 (与 inputs.py 一致); CPU golden 计算用原始值
+    golden_mod.SEQUSED_Q = list(synthesis_seqused_q_vals)
+    golden_mod.CACHE_SEQLENS = list(synthesis_cache_seqlens_vals)
     golden_mod.ENABLE_PA = True
     golden_mod.ENABLE_LSE = return_softmax_lse
     golden_mod.GOLDEN_MODE = True
@@ -125,7 +256,7 @@ def _set_golden_globals(
     if kwargs.get("v_data_range"):
         golden_mod.V_DATA_RANGE = tuple(kwargs["v_data_range"])
 
-    for s in ("SEED_Q", "SEED_K", "SEED_V", "SEED_QR", "SEED_KR", "SEED_BLOCK_TABLE"):
+    for s in ("SEED_Q", "SEED_K", "SEED_V", "SEED_BLOCK_TABLE"):
         key = s.lower()
         if key in kwargs:
             setattr(golden_mod, s, kwargs[key])
@@ -134,9 +265,8 @@ def _set_golden_globals(
         "B": B,
         "N_q": N_q,
         "N_kv": N_kv,
-        "D": D,
+        "D": D_total,
         "D_V": D_V,
-        "D_rope": D_rope,
         "block_size": block_size,
         "seqused_q_vals": seqused_q_vals,
         "cache_seqlens_vals": cache_seqlens_vals,
@@ -184,30 +314,10 @@ def cpu_qfmla_mxfp8(
         layout_out,
     )
 
-    # CSV 'D' 字段语义不统一 (有些 case D=D_nope=512, 有些 case D=D_total=576);
-    # 与 inputs.py 一致, 以 q slot 末维为准反推 D_nope, 防止 golden generate_data
-    # 用 D + D_rope = 640 生成数据导致与算子期望的 576 维不一致。
-    _csv_D = int(kwargs.get("D", 512))
-    _csv_D_rope = int(kwargs.get("D_rope", 64))
-    _q_last_dim = int(q.shape[-1]) if (hasattr(q, "shape") and q.dim() > 0) else 0
-    if (
-        _q_last_dim > 0
-        and _csv_D + _csv_D_rope != _q_last_dim
-        and _csv_D == _q_last_dim
-    ):
-        # CSV 'D' 是 D_total (新约定): D_nope = D - D_rope
-        kwargs = dict(kwargs)
-        kwargs["D"] = _csv_D - _csv_D_rope
-        logger.warning(
-            "[%s] golden: CSV D=%d == q slot last dim=%d (D_total convention); "
-            "use D_nope = D - D_rope = %d for data synthesis",
-            testcase_name,
-            _csv_D,
-            _q_last_dim,
-            _csv_D - _csv_D_rope,
-        )
-
     # ---- 1. Set golden globals ----
+    # 数据合成全局量 (B/N_q/N_kv/D/SEQUSED_Q/CACHE_SEQLENS) 的推导在
+    # _set_golden_globals 内完成, 与 inputs.py 逐条对齐 (D_total 语义、
+    # cu 差值 synthesis seqused 等), 保证 "同种子同数据"。
     cfg = _set_golden_globals(
         quant_mode=quant_mode,
         mask_mode=mask_mode,
@@ -219,6 +329,9 @@ def cpu_qfmla_mxfp8(
         head_dim_v=head_dim_v,
         return_softmax_lse=return_softmax_lse,
         softmax_scale=softmax_scale,
+        q=q,
+        k_cache=k_cache,
+        cache_seqlens=cache_seqlens,
         **kwargs,
     )
 
@@ -259,24 +372,68 @@ def cpu_qfmla_mxfp8(
 
     # ---- 4. Convert output to target layout ----
     output_layout = cfg["output_layout"]
-    result_final = golden_mod.convert_q_bnsd_to_layout(
-        result_bnsd, cfg["seqused_q_vals"], output_layout
-    )
+
+    def _convert_tnd_full_rows(bnsd, seqused, cu_values, to_ntd=False):
+        """TND/NTD输出按算子语义转换: T=全量T(q行数), 每批按cu偏移定位,
+        有效行=seqused[b], 无效行attn补0/lse补inf (NPU实测: 无效行attn=0, lse=inf)。
+        bnsd: attn为(B,N,S,Dv) / lse为(B,N,S,1)"""
+        is_lse = bnsd.dim() == 4 and bnsd.shape[-1] == 1
+        T = int(q.shape[0])
+        fill_val = float("inf") if is_lse else 0.0
+        if to_ntd:
+            out = torch.full(
+                (bnsd.shape[1], T, bnsd.shape[3]), fill_val, dtype=bnsd.dtype
+            )
+        else:
+            out = torch.full(
+                (T, bnsd.shape[1], bnsd.shape[3]), fill_val, dtype=bnsd.dtype
+            )
+        for b in range(bnsd.shape[0]):
+            act_s = int(seqused[b])
+            if act_s <= 0:
+                continue
+            start = int(cu_values[b])
+            valid = bnsd[b, :, :act_s, :]  # (N, act_s, D)
+            if to_ntd:
+                out[:, start : start + act_s, :] = valid
+            else:
+                out[start : start + act_s, :, :] = valid.permute(1, 0, 2)
+        return out.contiguous()
+
+    cu_values = kwargs.get("cu_seqlens_q_values")
+    if output_layout in ("TND", "NTD") and layout_q == "TND" and cu_values:
+        # 算子TND输出语义: 全量T(cu偏移定位), 部分seqused时无效行补0/inf
+        result_final = _convert_tnd_full_rows(
+            result_bnsd,
+            cfg["seqused_q_vals"],
+            cu_values,
+            to_ntd=(output_layout == "NTD"),
+        )
+    else:
+        result_final = golden_mod.convert_q_bnsd_to_layout(
+            result_bnsd, cfg["seqused_q_vals"], output_layout
+        )
 
     # ---- 5. Convert lse if needed ----
     lse_final = None
     if return_softmax_lse and lse_bnsd is not None:
-        # lse_bnsd is (B, N, S, 1); convert to target layout
-        lse_layout = "BNSD" if output_layout in ("BSND", "BNSD") else output_layout
-        lse_final = golden_mod.convert_q_bnsd_to_layout(
-            lse_bnsd, cfg["seqused_q_vals"], lse_layout
-        )
-        if output_layout == "TND":
-            # (T, N, 1) → (N, T)
-            lse_final = lse_final.permute(1, 0, 2).squeeze(-1).contiguous()
+        if layout_q == "TND" and cu_values:
+            # TND输入: lse输出(N,T)全量T, 无效行补inf (与算子一致)
+            lse_final = _convert_tnd_full_rows(
+                lse_bnsd, cfg["seqused_q_vals"], cu_values, to_ntd=True
+            )
+            lse_final = lse_final.squeeze(-1)
         else:
-            # squeeze last dim: (B, N, S, 1) → (B, N, S)
-            lse_final = lse_final.squeeze(-1).contiguous()
+            lse_layout = "BNSD" if output_layout in ("BSND", "BNSD") else output_layout
+            lse_final = golden_mod.convert_q_bnsd_to_layout(
+                lse_bnsd, cfg["seqused_q_vals"], lse_layout
+            )
+            if output_layout == "TND":
+                # (T, N, 1) → (N, T)
+                lse_final = lse_final.permute(1, 0, 2).squeeze(-1).contiguous()
+            else:
+                # squeeze last dim: (B, N, S, 1) → (B, N, S)
+                lse_final = lse_final.squeeze(-1).contiguous()
 
     # Convert result to bfloat16 to match op output dtype
     result_final = result_final.to(torch.bfloat16)

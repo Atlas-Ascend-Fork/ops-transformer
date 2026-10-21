@@ -19,6 +19,7 @@ expand_paramset_to_cases 用 itertools.product 把 TEST_PARAMS 展开成扁平 c
 """
 
 import itertools
+import math
 
 PARAM_NAMES = [
     "B",
@@ -26,7 +27,6 @@ PARAM_NAMES = [
     "N_kv",
     "D",
     "D_V",
-    "D_rope",
     "cu_seqlens_q",
     "cache_seqlens",
     "seqused_q",
@@ -49,11 +49,15 @@ PARAM_NAMES = [
 
 TEST_PARAMS_DEFAULTS = {
     "D_V": [512],
-    "D_rope": [64],
     "cache_seqlens": [None],
-    "softmax_scale": [None],
+    # 算子默认 softmax_scale = 1/sqrt(qkHeadDim); 本 paramset 默认网格 D=576。
+    "softmax_scale": [1.0 / math.sqrt(576.0)],
     "max_seqlen_q": [-1],
     "max_seqlen_kv": [-1],
+    "enable_pa": [True],
+    "kv_cache_layout": ["BnNBsD"],
+    "block_size": [128],
+    "mask_mode": [0],
     "data_range_q": [1.0],
     "data_range_k": [1.0],
     "data_range_v": [1.0],

@@ -12,12 +12,12 @@
 """
 FIA FullQuant MLA Golden
 
-功能：生成 BNSD 数据 → nope(512)+rope(64) 合并为 576 维 → FP8 per-token-head (Q) / per-tensor (K) 量化
+功能：生成 BNSD 数据 (单个 D 维, nope 与 rope 已合并) → FP8 per-token-head (Q) / per-tensor (K) 量化
       → NPU golden (可选 CPU) → layout 转换 → NPU 调用 → 精度对比
-支持：PA / 非 PA 场景，MLA (DeepSeek 风格: D_nope=512 + D_rope=64, qkHeadDim=576, dV=512)
-量化：Q per-token-head (整 576 维), K per-tensor (整 576 维)
-MLA 特性: bmm1 = Q@K^T (576 维合并, 统一 descale), bmm2 = P@V (V = K 的 nope 前 512 维)
-          softmax_scale = 1/sqrt(D) (仅 nope 维度 D=512, 不含 rope)
+支持：PA / 非 PA 场景，MLA (DeepSeek 风格: qkHeadDim D=576, dV=512)
+量化：Q per-token-head (整 D 维), K per-tensor (整 D 维)
+MLA 特性: bmm1 = Q@K^T (D 维, 统一 descale), bmm2 = P@V (V = K 的前 D_V 维)
+          softmax_scale = 1/sqrt(D)
 """
 
 import argparse
@@ -72,13 +72,12 @@ B = 1
 N_q = 96
 N_kv = 1
 
-# MLA dims: D_nope + D_rope = qkHeadDim
-D = 512  # nope head dim (Q/K)
+# MLA dims: 只有一个 D (qkHeadDim, nope 与 rope 已合并)
+D = 576  # Q/K head dim (qkHeadDim)
 D_V = 512  # V head dim
-D_rope = 64  # rope head dim
 # 新接口 quant_flash_mla 常量
 QFMLA_QUANT_MODE = 1  # 1=FP8_E4M3（mla 新接口）
-QFMLA_QK_HEAD_DIM = D + D_rope  # 576 = nope(512) + rope(64)，q/k_cache 沿末维拼接
+QFMLA_QK_HEAD_DIM = D  # 576，q/k_cache 末维即算子侧 qkHeadDim
 QFMLA_V_HEAD_DIM = D_V  # 512
 
 SEQUSED_Q = [1] * B
@@ -96,8 +95,6 @@ KV_CACHE_LAYOUT = "BnBsND"  # 新接口仅支持 PA_BNBD
 Q_DATA_RANGE = (-1.0, 1.0)
 K_DATA_RANGE = (-5.0, 5.0)
 V_DATA_RANGE = (-5.0, 5.0)
-# rope 部分数据范围 (与 nope 拼成 576 维 q/k 后统一量化)
-ROPE_DATA_RANGE = (-0.3, 0.3)
 
 ENABLE_PA = True
 ENABLE_LSE = False
@@ -126,8 +123,6 @@ _KV_LAYOUT_MAP = {
 SEED_Q = 54
 SEED_K = 3
 SEED_V = 20
-SEED_QR = 8
-SEED_KR = 9
 SEED_BLOCK_TABLE = 1234
 
 FP8_DTYPE = torch.float8_e4m3fn
@@ -296,9 +291,9 @@ def bnsd_to_v_cache(
 def _bnsd_to_pa_bf16(
     tensor_bnsd, seq_lens, block_size, block_table, num_blocks=0, kv_layout="BnNBsD"
 ):
-    """BNSD bf16 (rope) → PA cache (无 scale rows, 纯数据 block 分片)
+    """BNSD bf16 (rope 段) → PA cache (无 scale rows, 纯数据 block 分片)
 
-    输出: (cache_blocks, N, block_size, D_rope) bf16, 并按 kv_layout 转换
+    输出: (cache_blocks, N, block_size, D - D_V) bf16, 并按 kv_layout 转换
     """
     tensor_bnsd = tensor_bnsd.contiguous()
     device = tensor_bnsd.device
@@ -329,13 +324,13 @@ def _bnsd_to_pa_bf16(
 # 数据生成
 # ==============================================================================
 def generate_data(device="npu"):
-    """生成 BNSD FP16 Q/K (nope+rope 合并, head_dim_qk=576) 并做 FP8 量化
+    """生成 BNSD FP16 Q/K (单个 D 维, head_dim_qk=D) 并做 FP8 量化
 
-    MLA 新接口 quant_flash_mla: q/k_cache 将 nope(512) 与 rope(64)
-    沿末维拼接为 576, 统一量化:
-      - Q: per-token-head 动态量化 (作用于整 576 维)
-      - K: per-tensor 静态量化 (作用于整 576 维)
-      - V = K 的 nope 前 512 维 (head_dim_v=512), 共享 K 的 per-tensor scale
+    MLA 新接口 quant_flash_mla: q/k_cache 即单个 D 维 (nope 与 rope 已合并),
+    统一量化:
+      - Q: per-token-head 动态量化 (作用于整 D 维)
+      - K: per-tensor 静态量化 (作用于整 D 维)
+      - V = K 的前 D_V 维 (head_dim_v=D_V), 共享 K 的 per-tensor scale
     """
     device = torch.device(device)
     logger.info("[Data] generation/quantization device=%s", device)
@@ -372,29 +367,15 @@ def generate_data(device="npu"):
         data = lo + normed * (hi - lo)
         return torch.from_numpy(data.astype(np.float16))
 
-    qk_head_dim = D + D_rope  # 576 = nope(512) + rope(64)
-
-    # nope 部分 (D=512)
-    q_nope_fp16 = _generate_one(
+    # 直接按单个 D (qkHeadDim) 生成 Q/K, 不再拆分 nope/rope 分别生成再拼接
+    q_fp16 = _generate_one(
         SEED_Q, Q_DATA_RANGE, (B, N_q, max_sq, D), (B, N_q, max_sq, 1)
-    )
-    k_nope_fp16 = _generate_one(
+    ).contiguous()
+    k_fp16 = _generate_one(
         SEED_K, K_DATA_RANGE, (B, N_kv, max_skv, D), (B, N_kv, max_skv, 1)
-    )
+    ).contiguous()
 
-    # rope 部分 (D_rope=64)
-    q_rope_fp16 = _generate_one(
-        SEED_QR, ROPE_DATA_RANGE, (B, N_q, max_sq, D_rope), (B, N_q, max_sq, 1)
-    )
-    k_rope_fp16 = _generate_one(
-        SEED_KR, ROPE_DATA_RANGE, (B, N_kv, max_skv, D_rope), (B, N_kv, max_skv, 1)
-    )
-
-    # 合并 nope + rope, 得到统一的 576 维 Q / K (KV 共享, V = K 的 nope 部分)
-    q_fp16 = torch.cat([q_nope_fp16, q_rope_fp16], dim=-1).contiguous()
-    k_fp16 = torch.cat([k_nope_fp16, k_rope_fp16], dim=-1).contiguous()
-
-    # 量化: Q per-token-head (整 576 维), K per-tensor (整 576 维)
+    # 量化: Q per-token-head (整 D 维), K per-tensor (整 D 维)
     quant_scale_q = get_fp8_per_token_head_quant_scale(q_fp16)
     quant_scale_k = get_fp8_per_tensor_quant_scale(k_fp16)
 
@@ -405,8 +386,8 @@ def generate_data(device="npu"):
 
     q_fp8 = quant_fp16_to_fp8(q_fp16, quant_scale_q)
     k_fp8 = quant_fp16_to_fp8(k_fp16, quant_scale_k)
-    # MLA: V 使用 K 的 nope 前 D=512 维 (head_dim_v=512)
-    v_fp8 = k_fp8[:, :, :, :D].contiguous()
+    # MLA: V 使用 K 的前 D_V 维 (head_dim_v=D_V, 即 nope 段)
+    v_fp8 = k_fp8[:, :, :, :D_V].contiguous()
 
     if max(CACHE_SEQLENS) == 0:
         real_skv = max(CACHE_SEQLENS)
@@ -416,7 +397,7 @@ def generate_data(device="npu"):
     logger.info("[INFO] q_fp8 shape: %s, dtype: %s", q_fp8.shape, q_fp8.dtype)
     logger.info("[INFO] k_fp8 shape: %s, dtype: %s", k_fp8.shape, k_fp8.dtype)
     logger.info("[INFO] v_fp8 shape: %s, dtype: %s", v_fp8.shape, v_fp8.dtype)
-    logger.info("[INFO] QK head dim (nope+rope): %d", qk_head_dim)
+    logger.info("[INFO] QK head dim: %d", D)
     logger.info(
         "[INFO] deq_k (per-tensor) shape: %s, val: %s",
         dequant_scale_k.shape,
@@ -430,9 +411,10 @@ def generate_data(device="npu"):
 
     p_scale = torch.tensor([P_SCALE], dtype=torch.float32, device=device).contiguous()
 
-    # rope bf16 (用于 CPU golden 累加和缓存, 与 nope 已合并到 576 维 fp8 不同)
-    qr_bf16 = q_rope_fp16.to(torch.bfloat16).contiguous()
-    kr_bf16 = k_rope_fp16.to(torch.bfloat16).contiguous()
+    # Q/K 的 D_V 之后部分 (rope 段) bf16, 与上面的 fp8 数据同源 (同一次生成),
+    # 供独立 rope PA cache 使用, 不再单独生成
+    qr_bf16 = q_fp16[..., D_V:].to(torch.bfloat16).contiguous()
+    kr_bf16 = k_fp16[..., D_V:].to(torch.bfloat16).contiguous()
 
     return (
         q_fp8,
@@ -587,8 +569,8 @@ def pa_cache_to_bnsd(
 
 # ==============================================================================
 # CPU Golden 函数
-# MLA: bmm1 = Q_nope@K_nope^T (fp8 dequant) + Q_rope@K_rope^T (bf16)
-#      softmax_scale = 1/sqrt(D + D_rope)
+# MLA: bmm1 = Q@K^T (单 D 维, nope 与 rope 已合并, fp8 dequant 统一 descale)
+#      softmax_scale = 1/sqrt(D)
 #      bmm2 = P @ V (V fp8 dequant, V per-tensor scale)
 # ==============================================================================
 def get_softmax_scale(scale_value, head_dim):
@@ -941,10 +923,10 @@ def fp8_fullquant_mla_golden(
 ):
     """Device-selectable golden reference - MLA flash attention with FP8 quantization
 
-    Q/K: nope(512)+rope(64) 已合并为 576 维, 统一 fp8 per-token-head/per-tensor 量化,
-         反量化后直接做一次 576 维 matmul (无需单独的 rope 累加)
-    V:   使用 K 的 nope 前 512 维 (per-tensor 量化), bmm2 = P @ V
-    softmax_scale = 1/sqrt(D) (仅 nope 部分, 不含 rope)
+    Q/K: 单个 D 维 (qkHeadDim, nope 与 rope 已合并), 统一 fp8
+         per-token-head/per-tensor 量化, 反量化后直接做一次 D 维 matmul
+    V:   使用 K 的前 D_V 维 (per-tensor 量化), bmm2 = P @ V
+    softmax_scale = 1/sqrt(D)
     """
     softmax_scale = get_softmax_scale(SCALE_VALUE, D)
 
@@ -1053,7 +1035,7 @@ def fp8_fullquant_mla_golden(
             mi = m_blocks[i]
             deq_qi = deq_q_blocks[i]
 
-            # bmm1: 576 维 (nope+rope) 合并的 Q@K^T, 整体乘 deq_q * deq_k * scalar
+            # bmm1: D 维 (nope+rope 合并) 的 Q@K^T, 整体乘 deq_q * deq_k * scalar
             sij = torch.matmul(qi, kj_T)
             deq_qi_scaled = deq_qi * softmax_scale
             sij = sij * deq_qi_scaled * deq_k_scalar
@@ -2030,9 +2012,7 @@ if __name__ == "__main__":
         INPUT_LAYOUT,
         OUTPUT_LAYOUT,
     )
-    logger.info(
-        "B=%d, N_q=%d, N_kv=%d, D=%d, D_rope=%d, D_V=%d", B, N_q, N_kv, D, D_rope, D_V
-    )
+    logger.info("B=%d, N_q=%d, N_kv=%d, D=%d, D_V=%d", B, N_q, N_kv, D, D_V)
     logger.info("SEQUSED_Q=%s, CACHE_SEQLENS=%s", SEQUSED_Q, CACHE_SEQLENS)
 
     block_table_torch = None

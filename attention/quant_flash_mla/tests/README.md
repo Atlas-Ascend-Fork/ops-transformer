@@ -189,7 +189,7 @@ TTK 读取 CSV
 | quant_mode | 1（FP8_E4M3FN），原 HIFP8 自动转换 |
 | TND padding | T = B × Q_S（padded），cu_seqlens_q[-1] = T |
 | 精度阈值 | rtol=0.0078125, atol=0.0001, PctThd=99.5% |
-| softmax_scale | Excel 指定时透传到 golden SCALE_VALUE；未指定时默认 1/sqrt(D+D_rope) |
+| softmax_scale | Excel 指定时透传到 golden SCALE_VALUE；未指定时默认 1/sqrt(D) |
 
 ## 环境依赖
 

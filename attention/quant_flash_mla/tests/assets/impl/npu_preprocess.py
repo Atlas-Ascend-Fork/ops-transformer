@@ -81,10 +81,9 @@ def _max_seqlen(kwargs, name):
 
 def build_metadata_arguments(q, cu_seqlens_q, seqused_q, kwargs):
     """Derive ``quant_flash_mla_metadata`` arguments from the main invocation."""
-    # 不同 CSV 对 'D' 属性的语义不一致:
-    #   qfmla_abnormal_full.csv: D = nope 部分 (512), 需要加 D_rope (64) 才得到 576
-    #   B270_redline.csv:        D = QK 总 head dim (576), 不应再加 D_rope
-    # 仿照 quant_flash_attn/tests/assets/impl/npu_preprocess.py 的 head_dim 解析:
+    # D 属性已统一为算子侧 QK 总 head dim (qkHeadDim, 576), 只有一个 D,
+    # metadata 所需的 head_dim_qk 即 D。仿照
+    # quant_flash_attn/tests/assets/impl/npu_preprocess.py 的 head_dim 解析:
     #   ① 优先 head_dim_qk 显式属性 (异常用例可原样透传被算子拦截)
     #   ② 退化到 Q 张量最后一维 (永远等于真实 head_dim_qk)
     head_dim_qk = int(

@@ -594,7 +594,6 @@ def _build_attributes(row, cols, sq_values, cu_values):
     KV_N = _str_to_int(row.get(cols.get("KV_N"))) or 1
     Q_D = _str_to_int(row.get(cols.get("Q_D"))) or 576
     V_D = _str_to_int(row.get(cols.get("V_D"))) or 512
-    D_rope = 64  # MLA 固定 D_rope=64
     block_size = _str_to_int(row.get(cols.get("blocksize"))) or 128
     quant_mode = _str_to_int(row.get(cols.get("quant_mode"))) or 1
     softmax_scale = (
@@ -634,9 +633,8 @@ def _build_attributes(row, cols, sq_values, cu_values):
     _set("B", B)
     _set("N_q", Q_N)
     _set("N_kv", KV_N)
-    _set("D", 512)
+    _set("D", Q_D)
     _set("D_V", V_D)
-    _set("D_rope", D_rope)
     _set("quant_mode", quant_mode)
     _set("softmax_scale", softmax_scale)
     _set_force("seqused_q_values", sq_values)

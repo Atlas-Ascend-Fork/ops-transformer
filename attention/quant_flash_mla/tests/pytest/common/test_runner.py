@@ -25,9 +25,6 @@ PARAM_MAP = {
     "B": "B",
     "N_q": "N_q",
     "N_kv": "N_kv",
-    "D": "D",
-    "D_v": "D_V",
-    "D_rope": "D_rope",
     "seqused_q": "SEQUSED_Q",
     "cache_seqlens": "CACHE_SEQLENS",
     "max_seqlen_q": "MAX_SEQLEN_Q",
@@ -53,8 +50,6 @@ PARAM_MAP = {
     "seed_q": "SEED_Q",
     "seed_k": "SEED_K",
     "seed_v": "SEED_V",
-    "seed_qr": "SEED_QR",
-    "seed_kr": "SEED_KR",
     "seed_block_table": "SEED_BLOCK_TABLE",
 }
 
@@ -83,14 +78,18 @@ def apply_params(params):
             if param_key == "kv_cache_layout" and val is not None:
                 val = _LAYOUT_MAP.get(val, val)
             setattr(golden, golden_attr, val)
-    # 推导 QFMLA_QK_HEAD_DIM 和 QFMLA_V_HEAD_DIM
-    D = params.get("D", 512)
-    D_rope = params.get("D_rope") or 64
-    D_V = params.get("D_V") or params.get("D_v") or D
-    golden.D = D
-    golden.D_rope = D_rope
+    # 推导 QFMLA_QK_HEAD_DIM 和 QFMLA_V_HEAD_DIM。
+    # D 是 QK 总 head dim (qkHeadDim), 只有一个 D, 直接作为数据合成宽度;
+    # D_V 是 V head dim (用于 V 切片与 metadata), 不再有独立的 D_rope。
+    D = params.get("D")
+    D_V = params.get("D_V") or params.get("D_v")
+    if D is None or D_V is None:
+        raise ValueError(
+            "[TEST_RUNNER] params must provide D (qkHeadDim) and D_V (V head dim)"
+        )
+    golden.D = int(D)
     golden.D_V = D_V
-    golden.QFMLA_QK_HEAD_DIM = D + D_rope
+    golden.QFMLA_QK_HEAD_DIM = int(D)
     golden.QFMLA_V_HEAD_DIM = D_V
     golden.GOLDEN_MODE = True
     golden.ENABLE_PA = True

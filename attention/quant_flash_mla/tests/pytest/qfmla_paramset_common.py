@@ -11,6 +11,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import itertools
+import math
 
 PARAM_NAMES = [
     "B",
@@ -18,7 +19,8 @@ PARAM_NAMES = [
     "N_kv",
     "D",
     "D_v",
-    "D_rope",
+    "quant_mode",
+    "softmax_scale",
     "seqused_q",
     "cache_seqlens",
     "max_seqlen_q",
@@ -43,15 +45,16 @@ PARAM_NAMES = [
     "seed_q",
     "seed_k",
     "seed_v",
-    "seed_qr",
-    "seed_kr",
     "seed_block_table",
 ]
 
 TEST_PARAMS_DEFAULTS = {
-    "D": [512],
+    "D": [576],
     "D_v": [512],
-    "D_rope": [64],
+    "quant_mode": [1],
+    # pytest_paramset_to_csv 消费 softmax_scale (scale_value 仅供 test_runner 使用);
+    # 算子默认 softmax_scale = 1/sqrt(qkHeadDim), 本 paramset 默认网格 D=576。
+    "softmax_scale": [1.0 / math.sqrt(576.0)],
     "seqused_q": [[1]],
     "cache_seqlens": [[1024]],
     "max_seqlen_q": [-1],
@@ -76,8 +79,6 @@ TEST_PARAMS_DEFAULTS = {
     "seed_q": [54],
     "seed_k": [3],
     "seed_v": [20],
-    "seed_qr": [8],
-    "seed_kr": [9],
     "seed_block_table": [1234],
 }
 

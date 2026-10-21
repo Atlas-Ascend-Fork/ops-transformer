@@ -30,7 +30,6 @@
 
 import argparse
 import csv
-import math
 import os
 import sys
 
@@ -120,32 +119,39 @@ def _to_op_layout(layout_kv):
     return mapping.get(layout_kv, layout_kv)
 
 
+def _require(case, key, *alias_keys):
+    """读取必填字段 (支持别名), 缺配或显式为 None 时直接报错, 不静默补值。
+
+    转换器只负责透传 case 声明的值; 默认值应由 paramset 的
+    TEST_PARAMS_DEFAULTS 显式声明, 避免掩盖 paramset 漏配。
+    """
+    for name in (key, *alias_keys):
+        if case.get(name) is not None:
+            return case[name]
+    names = " / ".join((key, *alias_keys))
+    raise ValueError(f"[PYTEST2CSV] case '{case.get('name')}' must provide {names}")
+
+
 def _derive_case(case):
     """返回 (shapes, data_ranges, attrs)。"""
-    quant_mode = case.get("quant_mode", 1)
-    quant_mode = 1 if quant_mode is None else int(quant_mode)
+    quant_mode = int(_require(case, "quant_mode"))
 
     B = int(case["B"])
     N_q = int(case["N_q"])
     N_kv = int(case["N_kv"])
-    D = int(case["D"])
-    D_V = int(case.get("D_V") or D)
-    D_rope = int(case.get("D_rope") or 64)
-    D_total = D + D_rope  # MLA Q/K head_dim = nope + rope
+    D = int(case["D"])  # 算子侧 QK 总 head dim
+    D_V = int(_require(case, "D_V", "D_v"))
+    D_total = D
 
-    kv_layout_raw = str(case.get("kv_cache_layout") or "PA_BNBD")
+    kv_layout_raw = str(_require(case, "kv_cache_layout"))
     kv_layout = _normalize_layout(kv_layout_raw)
-    enable_pa = bool(case.get("enable_pa", True))
-    block_size = int(case.get("block_size") or 128)
-    mask_mode = int(case.get("mask_mode") or 0)
-    return_lse = bool(case.get("enable_lse", False))
+    enable_pa = bool(_require(case, "enable_pa"))
+    block_size = int(_require(case, "block_size"))
+    mask_mode = int(_require(case, "mask_mode"))
+    return_lse = bool(_require(case, "enable_lse"))
 
-    p_scale = case.get("p_scale")
-    p_scale = 1.0 if p_scale is None else float(p_scale)
-    softmax_scale = case.get("softmax_scale")
-    softmax_scale = (
-        (1.0 / math.sqrt(D_total)) if softmax_scale is None else float(softmax_scale)
-    )
+    p_scale = float(_require(case, "p_scale"))
+    softmax_scale = float(_require(case, "softmax_scale", "scale_value"))
 
     cu_q = case.get("cu_seqlens_q")
     seq_q = case.get("seqused_q")
@@ -262,7 +268,6 @@ def _derive_case(case):
         "N_kv": N_kv,
         "D": D,
         "D_V": D_V,
-        "D_rope": D_rope,
         "quant_mode": quant_mode,
         "softmax_scale": softmax_scale,
         "seqused_q_values": list(seq_q)

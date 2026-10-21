@@ -41,11 +41,10 @@ def gen_case(
     layout_q: 'BNSD', 'BSND', 'TND'
     """
     N_kv = 1
-    D = 512
-    D_V = 512
-    D_rope = 64
-    QK_DIM = D + D_rope  # 576
-    softmax_scale = 1.0 / math.sqrt(D)  # 1/sqrt(512)
+    D = 576  # QK 总 head dim (nope 512 + rope 64)
+    D_V = 512  # V head dim, 与 QK 的 nope 段同宽
+    QK_DIM = D
+    softmax_scale = 1.0 / math.sqrt(D)  # 1/sqrt(576)
 
     max_sq = max(seqused_q)
     T = sum(seqused_q)
@@ -139,7 +138,6 @@ def gen_case(
         "N_kv": N_kv,
         "D": D,
         "D_V": D_V,
-        "D_rope": D_rope,
         "quant_mode": 1,
         "softmax_scale": softmax_scale,
         "seqused_q_values": list(seqused_q),
