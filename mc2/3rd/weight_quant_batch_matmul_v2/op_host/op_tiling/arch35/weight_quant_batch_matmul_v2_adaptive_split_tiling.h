@@ -91,6 +91,8 @@ private:
     void EnlargeBaseKNotFullloadA(uint64_t maxBaseK, uint64_t maxKL1, const std::vector<uint64_t>& l0BaseKList,
                                   const std::vector<uint64_t>& l1KList);
     bool IsWeight4Nz() const;
+    // A6(ascend960dt)判断: 主线各平台链路的CANN无SocVersion::ASCEND960DT枚举, 统一用arch值判断
+    bool IsA6Arch() const;
     void ReSetTilingAfterExtendedBaseN(uint64_t extendedBaseN, uint64_t firstTailBlockL1Size,
                                        uint64_t firstTailBlockCount, uint64_t secondTailBlockL1Size,
                                        uint64_t secondTailBlockCount) const;

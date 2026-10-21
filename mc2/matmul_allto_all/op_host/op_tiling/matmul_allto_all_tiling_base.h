@@ -53,6 +53,7 @@ protected:
     platform_ascendc::SocVersion socVersion_;
     NpuArch npuArch_;
     uint32_t libApiWorkSpaceSize_{0};
+    uint32_t cvRatio_{1};
     const char* opName_{nullptr};
     TilingContextInfo contextInfo;
     TilingInferredInfo inferredInfo;

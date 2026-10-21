@@ -297,7 +297,7 @@ uint8_t FpMatmulAllToAllTilingBase::ChooseAddBiasSplitMode() const
 {
     constexpr uint32_t ADD_BIAS_TILE_M = 64;
     constexpr uint32_t ADD_BIAS_TILE_N = 256;
-    const uint32_t aivCoreNum = contextInfo.args_.aicCoreNum * 2;
+    const uint32_t aivCoreNum = contextInfo.args_.aicCoreNum * cvRatio_;
 
     const uint32_t M = std::max(inferredInfo.tileM, inferredInfo.tailM);
     const uint32_t N = contextInfo.args_.nValue;
@@ -403,5 +403,7 @@ FpMatmulAllToAllTilingBase::FpMatmulAllToAllTilingBase(gert::TilingContext* cont
 
 // 注册tiling类
 REGISTER_TILING_TEMPLATE_WITH_ARCH(MatmulAlltoAll, FpMatmulAllToAllTilingBase,
-                                   static_cast<int32_t>(Ops::Base::DAV_3510), 0);
+                                   std::vector<int32_t>({static_cast<int32_t>(Ops::Base::DAV_3510),
+                                                         static_cast<int32_t>(Ops::Base::DAV_9201)}),
+                                   0);
 } // namespace MC2Tiling

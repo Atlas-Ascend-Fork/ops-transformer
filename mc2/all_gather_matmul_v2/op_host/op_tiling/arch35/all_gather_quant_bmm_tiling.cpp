@@ -504,7 +504,7 @@ ge::graphStatus AllGatherQuantBmmTiling::SetMc2Hcomm()
 {
     // Set hccl comm engine with comm_mode
     uint8_t commEngine = Mc2Comm::ENGINE_AICPU;
-    if (std::strncmp(commMode_, "ccu", CMP_MAX_LEN) == 0) {
+    if (npuArch_ == Ops::Base::DAV_3510 && std::strncmp(commMode_, "ccu", CMP_MAX_LEN) == 0) {
         commEngine = Mc2Comm::ENGINE_CCU_SCHED;
     }
     OP_LOGD(opName_, "Tiling SetMc2Hcom commMode_: %s", commMode_);
@@ -1095,7 +1095,8 @@ AllGatherQuantBmmHelper::AllGatherQuantBmmHelper(AllGatherQuantBmmTiling& allGat
 {}
 // 注册Tiling类
 REGISTER_TILING_TEMPLATE_WITH_ARCH(AllGatherMatmulV2, AllGatherQuantBmmTiling,
-                                   static_cast<int32_t>(Ops::Base::DAV_3510), 1);
+                                   std::vector<int32_t>({(int32_t)Ops::Base::DAV_3510, (int32_t)Ops::Base::DAV_9201}),
+                                   1);
 } // namespace optiling
 
 #endif // _QUANT_MATMUL_ALL_REDUCE_TILING_CC_

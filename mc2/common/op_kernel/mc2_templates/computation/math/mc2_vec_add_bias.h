@@ -72,7 +72,6 @@ protected:
     static constexpr uint32_t TILE_M = 64;
     static constexpr uint32_t TILE_N = 256;
     static constexpr uint32_t BUFFER_NUM = 2;
-    static constexpr uint32_t AIV_PER_AIC = 2;
 
     // FP32 计算常量
     static constexpr uint32_t FP32_ELEMS_PER_BLOCK = 32 / sizeof(float);
@@ -126,7 +125,7 @@ protected:
 
     __aicore__ inline void CalcSplit()
     {
-        usedCoreNum_ = static_cast<uint32_t>(GetBlockNum()) * AIV_PER_AIC;
+        usedCoreNum_ = static_cast<uint32_t>(GetBlockNum()) * GetTaskRation();
 
         if constexpr (MODE == SplitMode::MN_SPLIT) {
             tileMCnt_ = Ceil(context_.M, TILE_M);

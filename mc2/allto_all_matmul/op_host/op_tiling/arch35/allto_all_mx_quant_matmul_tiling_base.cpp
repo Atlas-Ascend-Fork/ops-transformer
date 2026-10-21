@@ -410,7 +410,7 @@ ge::graphStatus AllToAllMxQuantMatmulTilingBase::InitTilingContextParameters()
     MC2_CHECK_LOG_RET(opName_, SetAlltoAllMatmulShapeInfo(context_, contextInfo_));
     // 卡数不超过8时使用APACE路径，AICPU和CCU均支持可选的all2all_out输出。
     constexpr uint64_t APACE_IMPL_MAX_RANK_DIM = 8;
-    usingApaceImpl_ = contextInfo_.args_.rankDim <= APACE_IMPL_MAX_RANK_DIM;
+    usingApaceImpl_ = (npuArch_ == Ops::Base::DAV_3510) && contextInfo_.args_.rankDim <= APACE_IMPL_MAX_RANK_DIM;
     if (usingApaceImpl_ && contextInfo_.allToAllOutFlag) {
         int64_t groupRankDim = 0;
         OP_TILING_CHECK(!mc2tiling::GetRankSize(opName_, contextInfo_.group.c_str(), groupRankDim),
@@ -1132,6 +1132,8 @@ AllToAllMxQuantMatmulTilingBase::AllToAllMxQuantMatmulTilingBase(gert::TilingCon
 
 // 注册tiling类
 REGISTER_TILING_TEMPLATE_WITH_ARCH(AlltoAllMatmul, AllToAllMxQuantMatmulTilingBase,
-                                   static_cast<int32_t>(Ops::Base::DAV_3510), 2);
+                                   std::vector<int32_t>({static_cast<int32_t>(Ops::Base::DAV_3510),
+                                                         static_cast<int32_t>(Ops::Base::DAV_9201)}),
+                                   2);
 
 } // namespace MC2Tiling
