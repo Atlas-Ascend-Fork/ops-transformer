@@ -196,6 +196,13 @@
   - C：大于0、小于100000且可以被128整除。
   - sk_iter_count：Sinkhorn迭代次数当前仅支持20。
 
+- **数据类型与shape约束**
+
+  - gradHin与x的数据类型须保持一致，支持FLOAT16、BFLOAT16。
+  - gradX的shape须与x保持一致，数据类型须与gradHin保持一致。
+  - gradPhi、gradAlpha、gradBias的shape须分别与phi、alpha、bias保持一致。
+  - 其余输入、输出tensor的数据类型须为FLOAT32。
+
 ## 调用说明
 
 | 调用方式 | 调用样例 | 说明 |

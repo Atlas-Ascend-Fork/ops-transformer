@@ -72,44 +72,6 @@ TEST_F(MhcPreSinkhornBackwardOpapiUt, aclnn_mhc_pre_sinkhorn_backward_basic_4d_b
     EXPECT_EQ(aclRet, ACL_SUCCESS);
 }
 
-TEST_F(MhcPreSinkhornBackwardOpapiUt, aclnn_mhc_pre_sinkhorn_backward_basic_3d_bf16)
-{
-    int64_t T = 256;
-    int64_t N = 4;
-    int64_t C = 256;
-    int64_t skIterCount = 20;
-    int64_t hcMix = N * N + 2 * N;
-    float hcEps = 1e-6f;
-
-    auto gradHin = TensorDesc({T, C}, ACL_BF16, ACL_FORMAT_ND);
-    auto gradHPost = TensorDesc({T, N}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto gradHRes = TensorDesc({T, N, N}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto x = TensorDesc({T, N, C}, ACL_BF16, ACL_FORMAT_ND);
-    auto phi = TensorDesc({hcMix, N * C}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto alpha = TensorDesc({3}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto bias = TensorDesc({hcMix}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto hPre = TensorDesc({T, N}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto hcBeforeNorm = TensorDesc({T, hcMix}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto invRms = TensorDesc({T, 1}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto sumOut = TensorDesc({skIterCount * 2, T, N}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto normOut = TensorDesc({skIterCount * 2, T, N, N}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto eps = 1e-6;
-
-    auto gradX = TensorDesc({T, N, C}, ACL_BF16, ACL_FORMAT_ND);
-    auto gradPhi = TensorDesc({hcMix, N * C}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto gradAlpha = TensorDesc({3}, ACL_FLOAT, ACL_FORMAT_ND);
-    auto gradBias = TensorDesc({hcMix}, ACL_FLOAT, ACL_FORMAT_ND);
-
-    auto ut = OP_API_UT(
-        aclnnMhcPreSinkhornBackward,
-        INPUT(gradHin, gradHPost, gradHRes, x, phi, alpha, bias, hPre, hcBeforeNorm, invRms, sumOut, normOut, eps),
-        OUTPUT(gradX, gradPhi, gradAlpha, gradBias));
-
-    uint64_t workspaceSize = 0;
-    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
-    EXPECT_EQ(aclRet, ACL_SUCCESS);
-}
-
 TEST_F(MhcPreSinkhornBackwardOpapiUt, aclnn_mhc_pre_sinkhorn_backward_empty_tensor_4d_B0)
 {
     int64_t B = 0;

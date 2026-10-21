@@ -2371,7 +2371,9 @@ mhc:
       - mhc/mhc_pre_sinkhorn_backward/tests
     test:
       examples: True
-      ut: False
+      ut: True
+    options:
+      - mhc_pre_sinkhorn_backward
   mhc_post_backward:
     module: True
     src:

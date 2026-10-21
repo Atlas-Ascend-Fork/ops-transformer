@@ -328,7 +328,7 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
         <td>gradHin(aclTensor *)</td>
         <td>输入</td>
         <td>输出h_in的梯度。</td>
-        <td>支持空Tensor。</td>
+        <td>与x数据类型保持一致，支持空Tensor。</td>
         <td>FLOAT16、BFLOAT16</td>
         <td>ND</td>
         <td>(B,S,C)或(T,C)</td>
@@ -458,7 +458,7 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
         <td>gradX(aclTensor *)</td>
         <td>输出</td>
         <td>输入x的梯度。</td>
-        <td>-</td>
+        <td>shape与x保持一致，数据类型与gradHin保持一致。</td>
         <td>FLOAT16、BFLOAT16</td>
         <td>ND</td>
         <td>(B,S,N,C)或(T,N,C)</td>
@@ -468,7 +468,7 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
         <td>gradPhi(aclTensor *)</td>
         <td>输出</td>
         <td>参数phi的梯度。</td>
-        <td>-</td>
+        <td>shape与phi保持一致。</td>
         <td>FLOAT32</td>
         <td>ND</td>
         <td>(2N+N^2, N*C)</td>
@@ -478,7 +478,7 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
         <td>gradAlpha(aclTensor *)</td>
         <td>输出</td>
         <td>参数alpha的梯度。</td>
-        <td>-</td>
+        <td>shape与alpha保持一致。</td>
         <td>FLOAT32</td>
         <td>ND</td>
         <td>(3)</td>
@@ -488,7 +488,7 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
         <td>gradBias(aclTensor *)</td>
         <td>输出</td>
         <td>参数bias的梯度。</td>
-        <td>-</td>
+        <td>shape与bias保持一致。</td>
         <td>FLOAT32</td>
         <td>ND</td>
         <td>(2N+N^2)</td>
@@ -540,8 +540,8 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
                 <td>必选参数或者输出是空指针。</td>
             </tr>
             <tr>
-                <td rowspan="5">ACLNN_ERR_PARAM_INVALID</td>
-                <td rowspan="5">161002</td>
+                <td rowspan="6">ACLNN_ERR_PARAM_INVALID</td>
+                <td rowspan="6">161002</td>
                 <td>输入或输出tensor的维度个数(dim)与参数说明不符。</td>
             </tr>
             <tr>
@@ -549,6 +549,9 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
             </tr>
             <tr>
                 <td>输入变量的数据类型和数据格式不在支持的范围内。</td>
+            </tr>
+            <tr>
+                <td>gradX的数据类型与gradHin不一致。</td>
             </tr>
             <tr>
                 <td>N取值不符合约束要求。</td>
@@ -631,6 +634,13 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
 
   - C：大于0、小于100000且可以被128整除。
   - sk_iter_count：Sinkhorn迭代次数当前仅支持20。
+
+- **数据类型与shape约束**
+
+  - gradHin与x的数据类型须保持一致，支持FLOAT16、BFLOAT16。
+  - gradX的shape须与x保持一致，数据类型须与gradHin保持一致。
+  - gradPhi、gradAlpha、gradBias的shape须分别与phi、alpha、bias保持一致。
+  - 其余输入、输出tensor的数据类型须为FLOAT32。
 
 - 确定性计算
 
