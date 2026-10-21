@@ -73,6 +73,144 @@ def peek_bench(testcase_name):
     return entry.get("bench")
 
 
+def depage_cache(cache, block_table, block_size):
+    """PA cache 反查逻辑布局 (B, NB*block_size, N, D)。"""
+    B, NB = block_table.shape
+    out = torch.zeros(
+        (B, NB * block_size, cache.shape[2], cache.shape[3]), dtype=cache.dtype
+    )
+    for b in range(B):
+        for i in range(NB):
+            blk = int(block_table[b, i])
+            if blk == -1:
+                continue
+            out[b, i * block_size : (i + 1) * block_size] = cache[blk]
+    return out
+
+
+def flatten_slots(value):
+    flat = []
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            flat.extend(flatten_slots(item))
+    else:
+        flat.append(value)
+    return flat
+
+
+def unpack_context_tensors(compare_context):
+    """按 API 签名从 compare_context 张量槽定位输入与 sinks。
+
+    aclnn 列表为 C 签名全长槽(含输出槽): V1 = 9 输入 + 3 输出、V2 = 10 输入 +
+    3 输出。旧版 V1 无 sinks, 截断输入位并显式 sinks=None, 避免把 attentionOut
+    误当 sinks。e2e 框架接口列表仅含声明的输入槽(未用可选位为 None 占位), 按
+    签名序 (query, key, value, sparse_indices, block_table, actual_seq_q,
+    actual_seq_kv, query_rope, key_rope, sinks) 解析, 尾部缺省补 None。
+    """
+    tensors = flatten_slots(compare_context.input_tensors or ())
+    api_name = getattr(compare_context, "api_name", "") or ""
+    if api_name == "aclnnSparseFlashAttention":
+        if len(tensors) < 9:
+            raise RuntimeError(
+                "SFA lazy bench expects 9 input slots for %s, got %d"
+                % (api_name, len(tensors))
+            )
+        return tensors[:9], None
+    if api_name == "aclnnSparseFlashAttentionV2":
+        if len(tensors) < 10:
+            raise RuntimeError(
+                "SFA lazy bench expects 10 input slots for %s, got %d"
+                % (api_name, len(tensors))
+            )
+        return tensors[:9], tensors[9]
+    padded = list(tensors[:10])
+    padded += [None] * (10 - len(padded))
+    return padded[:9], padded[9]
+
+
+def compute_bench_from_context(compare_context):
+    """cross_check 懒计算: 用比对侧 compare_context 携带的 API 输入张量(与 NPU
+    完全对齐)重建无 exp 量化三方标杆, 并缓存进 CASE_DATA。生成阶段不再预产
+    bench, 超大 case 非 cross_check 场景零额外开销。
+    """
+    if compare_context is None:
+        return None
+    attrs = dict(compare_context.attributes or {})
+    inputs, sinks = unpack_context_tensors(compare_context)
+    query, key, _, sparse_indices, block_table, _, _, query_rope, key_rope = inputs
+    params, pytest_golden = SparseFlashAttentionPytestAdapter.convert_params(
+        attrs, compare_context.testcase_name
+    )
+    layout_kv = str(params.get("layout_kv", "BSND")).upper()
+    is_pa = layout_kv == "PA_BSND"
+    if is_pa:
+        block_size = int(attrs.get("pytest_block_size") or 512)
+        key_logical = depage_cache(key, block_table, block_size)
+        krope_logical = depage_cache(key_rope, block_table, block_size)
+    else:
+        key_logical, krope_logical = key, key_rope
+    input_tensor_dict = {
+        "query": query,
+        "key": key_logical,
+        "value": key_logical,
+        "sparse_indices": sparse_indices,
+        "block_table": block_table if is_pa else None,
+        "query_rope": query_rope,
+        "key_rope": krope_logical,
+        "sinks": sinks,
+        "scale_value": attrs.get("scale_value", params["scalevalue"]),
+        "sparse_block_size": params["sparse_blocksize"],
+        "layout_query": params["layout_query"],
+        "layout_kv": params["layout_kv"],
+        "sparse_mode": params["sparsemode"],
+        "attention_mode": params["attention_mode"],
+        "pre_tokens": (1 << 63) - 1,
+        "next_tokens": (1 << 63) - 1,
+        "return_softmax_lse": params["return_softmax_lse"],
+    }
+    si_api = sparse_indices
+    orig_si = pytest_golden._generate_sparse_indices
+    orig_bt = pytest_golden._generate_block_table_and_cache
+
+    def reuse_si(ito, fa_param, p, out_shape, layoutQuery):
+        if fa_param["tnd_flag"]:
+            shape = fa_param["sparse_indices_bnsd_shape"]
+            si_bnsd = torch.full(tuple(shape), -1, dtype=torch.int32)
+            t0 = 0
+            for b, act in enumerate(fa_param["actualSeqLengths_q"]):
+                si_bnsd[b, :, :act, :] = si_api[t0 : t0 + act].permute(1, 0, 2)
+                t0 += act
+            fa_param["sparse_indices_bnsd_tensor"] = si_bnsd
+        else:
+            fa_param["sparse_indices_bnsd_tensor"] = si_api.permute(
+                0, 2, 1, 3
+            ).contiguous()
+        ito["sparse_indices"] = si_api
+
+    def reuse_bt(ito, fa_param, p, act_kv, out_shape):
+        fa_param["block_table"] = block_table
+        ito["block_table"] = block_table
+        pytest_golden.kv_pa_preprocessing(ito, fa_param, p)
+
+    pytest_golden._generate_sparse_indices = reuse_si
+    if is_pa:
+        pytest_golden._generate_block_table_and_cache = reuse_bt
+    try:
+        out = pytest_golden.compute_golden(input_tensor_dict, params, return_bench=True)
+    finally:
+        pytest_golden._generate_sparse_indices = orig_si
+        pytest_golden._generate_block_table_and_cache = orig_bt
+    if not isinstance(out, (tuple, list)) or len(out) != 4:
+        raise RuntimeError("SFA lazy bench: unexpected compute_golden output")
+    bench = normalize_pytest_outputs(
+        (out[3], out[1], out[2]), query, params["return_softmax_lse"]
+    )
+    entry = CASE_DATA.cases.get(str(compare_context.testcase_name))
+    if entry is not None:
+        entry["bench"] = bench
+    return bench
+
+
 CASE_DATA = CaseDataStore()
 
 
@@ -268,7 +406,9 @@ def normalize_pytest_outputs(outputs, query, return_softmax_lse):
         # None 占位落盘为 golden_i_none marker，TTK 原生按抑制比较处理，
         # 使 e2e prepare 的 bin 目录可被 aclnn replay 直接复用。
         return attn_out, None, None
-    return tuple(output.detach().cpu() for output in outputs)
+    softmax_max = outputs[1].detach().cpu()
+    softmax_sum = outputs[2].detach().cpu()
+    return attn_out, softmax_max, softmax_sum
 
 
 def cpu_sparse_flash_attention(

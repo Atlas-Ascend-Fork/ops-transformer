@@ -24,7 +24,10 @@ import torch
 try:
     from ttk.utilities.container_utils import get_global_storage
 except Exception:
-    get_global_storage = None
+    try:
+        from ttk.switches import get_global_storage
+    except Exception:
+        get_global_storage = None
 
 try:
     from ttk.core_modules.comparison.cross_check import CrossCheckComparison
@@ -32,7 +35,15 @@ try:
 
     _TTK_CROSS_CHECK_AVAILABLE = True
 except Exception:
-    _TTK_CROSS_CHECK_AVAILABLE = False
+    try:
+        from ttk.core_modules.common.comparison.cross_check import (
+            CrossCheckComparison,
+        )
+        from ttk.core_modules.common.comparison.resolve import resolve_tolerance
+
+        _TTK_CROSS_CHECK_AVAILABLE = True
+    except Exception:
+        _TTK_CROSS_CHECK_AVAILABLE = False
 
 
 class PytestResultComparator:
@@ -174,6 +185,10 @@ def _get_compare_method():
         except Exception:
             return None
     return None
+
+
+def cross_check_requested():
+    return _get_compare_method() == "cross_check"
 
 
 def is_cross_check_available():

@@ -77,9 +77,12 @@ def _sfa_compare(*outputs, compare_context=None, **kwargs):
         if compare_context is not None
         else None
     )
+    bench_outputs = golden_module.peek_bench(testcase_name)
+    if bench_outputs is None and compare_module.cross_check_requested():
+        bench_outputs = golden_module.compute_bench_from_context(compare_context)
     return compare_module.dispatch(
         *outputs,
-        bench_outputs=golden_module.peek_bench(testcase_name),
+        bench_outputs=bench_outputs,
         spec_tolerance=CROSS_CHECK_TOLERANCE,
     )
 
