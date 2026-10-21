@@ -43,6 +43,10 @@ ge::graphStatus MixedQuantVariantChecker::CheckSinglePara(const CheckContext &co
         context.ropeHeadDim != 64,
         OP_LOGE_FOR_INVALID_VALUE(Op(context), "rope_head_dim", std::to_string(context.ropeHeadDim).c_str(), "64"),
         return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context.quantMode == 2 && context.kvLayout != Layout::PA_BBND,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Op(context), "layout_kv",
+                                                         "quant_mode 2 only supports PA_BBND KV layout"),
+                return ge::GRAPH_FAILED);
     if (!turboQuant) {
         return ge::GRAPH_SUCCESS;
     }
