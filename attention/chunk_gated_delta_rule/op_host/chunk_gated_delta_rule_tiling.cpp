@@ -73,7 +73,6 @@ void ChunkGatedDeltaRuleTiling::InitCompileInfo()
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
     compileInfo_.aicNum = ascendcPlatform.GetCoreNumAic();
-    socVersion_ = ascendcPlatform.GetSocVersion();
     npuArch_ = ascendcPlatform.GetCurNpuArch();
 
     if (compileInfo_.aivNum <= 0 || compileInfo_.aicNum <= 0) {
@@ -255,9 +254,13 @@ uint64_t ChunkGatedDeltaRuleTiling::GetTilingKey() const
 // 计算 workspace 大小
 ge::graphStatus ChunkGatedDeltaRuleTiling::GetWorkspaceSize()
 {
+    // 融合实现版本将阶段中间量和递推状态保留在 UB/L1，仅申请 16 MiB 系统工作区。
+    // interWorkspaceSz/stageWorkspaceSz 仍由公共 tiling 计算，只有其他架构的分阶段实现需要申请。
     workspaceSize_ = SYS_WORKSPACE_SIZE;
-    workspaceSize_ += tilingData_.interWorkspaceSz;
-    workspaceSize_ += tilingData_.stageWorkspaceSz;
+    if (npuArch_ != NpuArch::DAV_3510) {
+        workspaceSize_ += tilingData_.interWorkspaceSz;
+        workspaceSize_ += tilingData_.stageWorkspaceSz;
+    }
     return ge::GRAPH_SUCCESS;
 };
 

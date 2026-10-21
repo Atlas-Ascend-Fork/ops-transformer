@@ -12,8 +12,7 @@
  * \file chunk_gated_delta_rule_tiling.h
  * \brief
  */
-#ifndef __OP_HOST_CHUNK_GATED_DELTA_RULE_TILING_H__
-#define __OP_HOST_CHUNK_GATED_DELTA_RULE_TILING_H__
+#pragma once
 
 #include <tiling/tiling_api.h>
 #include "register/tilingdata_base.h"
@@ -96,9 +95,7 @@ protected:
     ChunkGatedDeltaRuleCompileInfo compileInfo_;
     ChunkGatedDeltaRule::ChunkGatedDeltaRuleTilingData tilingData_;
     ChunkGatedDeltaRuleInfo inputParams_;
-    platform_ascendc::SocVersion socVersion_;
     NpuArch npuArch_;
 };
 
 } // namespace optiling
-#endif // __OP_HOST_CHUNK_GATED_DELTA_RULE_TILING_H__
