@@ -245,7 +245,7 @@ TEST_F(MhcPreSinkhornTiling, ascend950_regbase_tilingdata_matches_pre_refactor)
          262144,
          1000,
          18415616,
-         {{4, 2, 2, 2, 2}, {1, 4096, 4096}, {64, 2, 128, 256, 1, 64, 64, 256, 64, 0, 0, 0, 128}}},
+         {{5, 3, 1, 1, 1}, {1, 4096, 4096}, {64, 2, 128, 256, 1, 64, 64, 256, 52, 0, 0, 0, 128}}},
         {"m_split_no_grad",
          16384,
          4096,
@@ -277,7 +277,7 @@ TEST_F(MhcPreSinkhornTiling, ascend950_regbase_tilingdata_matches_pre_refactor)
          49152,
          1000,
          18415616,
-         {{4, 4, 4, 1, 1}, {4, 1344, 64}, {64, 1, 128, 256, 1, 64, 64, 256, 64, 0, 0, 0, 128}}},
+         {{5, 5, 1, 1, 1}, {4, 1344, 64}, {64, 1, 128, 256, 1, 64, 64, 256, 52, 0, 0, 0, 128}}},
     }};
 
     for (const auto& baseline : baselines) {
@@ -306,7 +306,7 @@ TEST_F(MhcPreSinkhornTiling, ascend950_regbase_core_tiling_boundary_branches)
          17312,
          1000,
          18415616,
-         {{4, 4, 4, 1, 1}, {256, 16, 16}, {64, 1, 128, 256, 1, 64, 64, 256, 64, 0, 0, 0, 128}}},
+         {{5, 5, 1, 1, 1}, {128, 32, 32}, {64, 1, 128, 256, 1, 64, 64, 256, 52, 0, 0, 0, 128}}},
         {"m_split_grad_out_d_factor_at_ub_limit",
          16384,
          4096,
@@ -323,7 +323,7 @@ TEST_F(MhcPreSinkhornTiling, ascend950_regbase_core_tiling_boundary_branches)
     }
 
     const RegbaseTilingBaseline insufficientUb = {
-        "k_split_insufficient_minimum_tile", 256, 4096, false, 17311, 0, 0, {}};
+        "k_split_insufficient_minimum_tile", 256, 4096, false, 16927, 0, 0, {}};
     ExpectRegbaseTilingFailure(insufficientUb);
 
     RegbaseTilingBaseline insufficientMBufferPool = {

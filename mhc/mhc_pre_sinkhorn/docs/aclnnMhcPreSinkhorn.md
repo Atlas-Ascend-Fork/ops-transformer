@@ -238,7 +238,7 @@ aclnnStatus aclnnMhcPreSinkhorn(
         <td>hin（aclTensor*）</td>
         <td>输出</td>
         <td>输出的h_in作为Atten/MLP层的输入。</td>
-        <td>-</td>
+        <td>数据类型与x相同。</td>
         <td>FLOAT16、BFLOAT16</td>
         <td>ND</td>
         <td>(bs, seq_len, c)<br>(t, c)</td>

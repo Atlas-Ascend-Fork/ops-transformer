@@ -198,7 +198,7 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>hin</td>
         <td>Tensor</td>
         <td>必选</td>
-        <td>输出的h_in，作为Attention/MLP层的输入。对应公式中h<sub>in</sub>。</td>
+        <td>输出的h_in，作为Attention/MLP层的输入。对应公式中h<sub>in</sub>，数据类型与输入x保持一致。</td>
         <td>float16、bfloat16</td>
         <td>
             <ul>
@@ -243,6 +243,8 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
 - 该接口支持训练、推理场景下使用。
 - 该接口支持单算子模式和图模式调用。
 - 参数约束：x、phi、alpha、bias不支持空Tensor。
+- 数据类型约束：
+  - 输出`hin`的数据类型与`x`保持一致。
 - 规格约束：
   - numIters：表示迭代次数，目前仅支持20。
   - N：目前仅支持4。

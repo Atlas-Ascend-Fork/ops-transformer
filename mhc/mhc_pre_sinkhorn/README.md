@@ -141,7 +141,7 @@
       <tr>
         <td>hIn</td>
         <td>输出</td>
-        <td>输出的h_in作为Attention/MLP层的输入。</td>
+        <td>输出的h_in作为Attention/MLP层的输入，数据类型与输入x保持一致。</td>
         <td>BFLOAT16, FLOAT16</td>
         <td>ND</td>
       </tr>
