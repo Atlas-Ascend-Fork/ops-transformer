@@ -17,6 +17,10 @@ import copy
 
 import generate_tensor_data
 
+SFA_S2_BASE_SIZE = 128
+SFA_S2_TAIL_MIN_ORIGIN = 64
+NEGATIVE_MIN_VALUE_FP32 = -torch.finfo(torch.float32).max
+
 
 def concat_tensor(tensor1, shape1, tensor2, shape2, n, tnd_flag=False):
     if len(shape1) != len(shape2):
@@ -674,6 +678,64 @@ def softmax(x, sinks=None):
     return ans, x_max, x_sum
 
 
+def online_softmax_bmm2(scale_res, v_sparse, sinks, q_dtype, quantize_exp):
+    rows, kv_len = scale_res.shape
+    dim = v_sparse.shape[1]
+    if sinks is not None:
+        running_max = sinks.float().reshape(rows).clone()
+        running_sum = torch.ones_like(running_max)
+    else:
+        running_max = torch.full((rows,), float("-inf"), dtype=torch.float32)
+        running_sum = torch.zeros(rows, dtype=torch.float32)
+    acc = torch.zeros((rows, dim), dtype=torch.float32)
+
+    for start in range(0, kv_len, SFA_S2_BASE_SIZE):
+        chunk = scale_res[:, start : start + SFA_S2_BASE_SIZE]
+        v_chunk = v_sparse[start : start + SFA_S2_BASE_SIZE].float()
+        size = chunk.shape[1]
+        if SFA_S2_TAIL_MIN_ORIGIN < size < SFA_S2_BASE_SIZE:
+            # 尾块用 -FLT_MAX 补满 128 并参与 max/sum 归约，v 侧补 0
+            pad = SFA_S2_BASE_SIZE - size
+            chunk = torch.cat(
+                (
+                    chunk,
+                    torch.full(
+                        (rows, pad),
+                        NEGATIVE_MIN_VALUE_FP32,
+                        dtype=chunk.dtype,
+                        device=chunk.device,
+                    ),
+                ),
+                dim=-1,
+            )
+            v_chunk = torch.cat(
+                (
+                    v_chunk,
+                    torch.zeros((pad, dim), dtype=v_chunk.dtype, device=v_chunk.device),
+                ),
+                dim=0,
+            )
+
+        new_max = torch.maximum(running_max, chunk.max(dim=-1).values)
+        exp_chunk = torch.exp(chunk - new_max[:, None])
+        rescale = torch.exp(running_max - new_max)
+
+        exp_quantized = exp_chunk
+        if quantize_exp:
+            if q_dtype == "float16":
+                exp_quantized = exp_chunk.to(torch.float16).float()
+            elif q_dtype == "bfloat16":
+                exp_quantized = exp_chunk.to(torch.bfloat16).float()
+
+        # sum 用未量化的 fp32 exp（kernel 在 CastStoreExp128 之前完成归约）
+        running_sum = running_sum * rescale + exp_chunk.sum(dim=-1)
+        acc = acc * rescale[:, None] + torch.matmul(exp_quantized, v_chunk)
+        running_max = new_max
+
+    bmm2_res = acc / running_sum[:, None]
+    return bmm2_res, running_max[:, None], running_sum[:, None]
+
+
 def bmm1(q_curr, k_sparse, calc_dtype):
     # 极值输入（如 key_rope=BF16 上界）下 bmm1 真值可能超出 fp32 表示范围，
     # 此时采用 NPU matmul 结果
@@ -782,21 +844,15 @@ def _t_increattention_bnsd(fa_param, quantize_exp=True):
                     else torch.float16,
                 )
                 scaleRes = bmm1Res * scaleValue
-                _, x_max, x_sum = softmax(scaleRes, cur_sinks)
-                # 与算子softmax的数值链对齐: 未归一化 exp(x-max) 先量化为 P 的计算精度,bmm2 用 fp32 累加,最后除以fp32的sum
-                exp_unnorm = torch.exp(scaleRes - x_max)
-                if quantize_exp:
-                    if fa_param["q_dtype"] == "float16":
-                        exp_quantized = exp_unnorm.to(torch.float16).float()
-                    elif fa_param["q_dtype"] == "bfloat16":
-                        exp_quantized = exp_unnorm.to(torch.bfloat16).float()
-                    else:
-                        exp_quantized = exp_unnorm
-                else:
-                    # 三方标杆高精度路径: exp(x-max) 保持 fp32 直接参与 bmm2,
-                    # 不量化到算子计算精度(对齐其他测试工具的高精度参考分支)
-                    exp_quantized = exp_unnorm
-                bmm2Res = torch.matmul(exp_quantized, v_sparse.float()) / x_sum
+
+                # 与算子 arch35 的分块在线 softmax 对齐：s2 方向按 SFA_S2_BASE_SIZE
+                bmm2Res, x_max, x_sum = online_softmax_bmm2(
+                    scaleRes,
+                    v_sparse,
+                    cur_sinks,
+                    fa_param["q_dtype"],
+                    quantize_exp,
+                )
                 y[batch, n2Idx * g : (n2Idx + 1) * g, s1Idx, :] = bmm2Res
                 set_softmax_lse(
                     batch, n2Idx, s1Idx, qLastPrefill, x_max[:, 0], x_sum[:, 0]
