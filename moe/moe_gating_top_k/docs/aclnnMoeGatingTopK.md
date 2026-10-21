@@ -186,7 +186,7 @@ aclnnStatus aclnnMoeGatingTopK(
       <td>biasOptional</td>
       <td>输入</td>
       <td>与输入x进行计算的bias值，对应公式中的`bias`。</td>
-      <td>shape值与x最后一维相等。</td>
+      <td>数据类型与x需要保持一致，shape值与x最后一维相等。</td>
       <td>FLOAT16、BFLOAT16、FLOAT32</td>
       <td>ND</td>
       <td>1</td>

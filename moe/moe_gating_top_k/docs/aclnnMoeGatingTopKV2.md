@@ -174,7 +174,7 @@
 
 ## 函数原型
 
-每个算子分为两段式接口，必须先调用"aclnnMoeGatingTopKV2GetWorkspaceSizeV2"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnMoeGatingTopKV2"接口执行计算。
+每个算子分为两段式接口，必须先调用"aclnnMoeGatingTopKV2GetWorkspaceSize"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnMoeGatingTopKV2"接口执行计算。
 
 ```Cpp
 aclnnStatus aclnnMoeGatingTopKV2GetWorkspaceSize(
@@ -246,7 +246,7 @@ aclnnStatus aclnnMoeGatingTopKV2(
       <td>biasOptional</td>
       <td>输入</td>
       <td>与输入x进行计算的bias值，对应公式中的bias。</td>
-      <td>shape值与x最后一维相等。</td>
+      <td>数据类型与x需要保持一致，shape值与x最后一维相等。</td>
       <td>FLOAT16、BFLOAT16、FLOAT32</td>
       <td>ND</td>
       <td>1</td>
@@ -486,7 +486,7 @@ aclnnStatus aclnnMoeGatingTopKV2(
     <tr>
       <td>workspaceSize</td>
       <td>输入</td>
-      <td>在Device侧申请的workspace大小，由第一段接口aclnnMoeGatingTopKV2GetWorkspaceSizeV2获取。</td>
+      <td>在Device侧申请的workspace大小，由第一段接口aclnnMoeGatingTopKV2GetWorkspaceSize获取。</td>
     </tr>
     <tr>
       <td>executor</td>
