@@ -38,6 +38,7 @@ extern "C" {
  * @param [in] groupList: 代表输入和输出分组轴方向的matmul大小分布，数据类型支持：int64。
  * @param [in] sharedInput:
  * moe计算中共享专家的输出，需要与moe专家的输出进行combine操作，数据类型支持：bfloat16、float16。
+ * Ascend 950PR&950DT系列产品仅支持bfloat16。
  * @param [in] logit:
  * moe专家对各个token的logit大小，矩阵乘的计算输出与该logit做乘法，然后索引进行combine，数据类型支持：float32；
  * 输出为bfloat16时支持float32和bfloat16。
@@ -54,6 +55,7 @@ extern "C" {
  * @param [in] groupListType: GroupedMatmul分组类型，默认值：1，count模式，数据类型支持：int64。
  * @param [in] tuningConfigOptional:
  * 调优参数，数组中第一个值表示各个专家处理的token数的预期值，算子tiling时会按照该预期值进行最优tiling。数组中的第二个元素设置为1，则算子tiling时会根据实际输入尝试使用更适合的算法，性能可能更优。
+ * Ascend 950PR&950DT系列产品从第二个元素开始预留，用户无须填写。
  * @param [out] out: 计算结果，数据类型支持float32；满足BF16约束时支持bfloat16。
  * @param [out] workspaceSize: 返回需要在npu device侧申请的workspace大小。
  * @param [out] executor: 返回op执行器，包含了算子计算流程。
@@ -82,4 +84,4 @@ ACLNN_API aclnnStatus aclnnGroupedMatmulFinalizeRoutingWeightNzV2(void* workspac
 }
 #endif
 
-#endif // OP_API_INC_QUANT_MATMUL_NZ
+#endif // OP_API_INC_GROUPED_MATMUL_FINALIZE_ROUTING_WEIGHT_NZ_V2

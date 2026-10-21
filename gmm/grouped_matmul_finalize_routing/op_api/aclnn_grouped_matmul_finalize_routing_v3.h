@@ -33,6 +33,7 @@ extern "C" {
  * @param [in] groupListOptional: 代表输入和输出分组轴方向的matmul大小分布，数据类型支持：int64。
  * @param [in] sharedInputOptional:
  * moe计算中共享专家的输出，需要与moe专家的输出进行combine操作，数据类型支持：bfloat16、float16。
+ * Ascend 950PR&950DT系列产品仅支持bfloat16。
  * @param [in] logitOptional:
  * moe专家对各个token的logit大小，矩阵乘的计算输出与该logit做乘法，然后索引进行combine，数据类型支持：float32。
  * @param [in] rowIndexOptional:

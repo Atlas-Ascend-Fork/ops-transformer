@@ -132,14 +132,14 @@
     <tr>
       <td>sharedInputWeight</td>
       <td>属性</td>
-      <td>共享专家与moe专家进行combine的系数，sharedInput先与该参数乘，然后在和moe专家结果累加。</td>
+      <td>共享专家与moe专家进行combine的系数，sharedInput先与该参数乘，然后再和moe专家结果累加。</td>
       <td>FLOAT</td>
       <td></td>
     </tr>
     <tr>
       <td>sharedInputOffset</td>
       <td>属性</td>
-      <td>共享专家输出的在总输出中的偏移。</td>
+      <td>共享专家输出在总输出中的偏移。</td>
       <td>INT64</td>
       <td></td>
     </tr>

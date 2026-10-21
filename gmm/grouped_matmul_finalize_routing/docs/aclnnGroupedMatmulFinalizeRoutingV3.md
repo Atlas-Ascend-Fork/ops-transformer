@@ -59,7 +59,7 @@
     $$
     y [rowIndex[i],:] = y[rowIndex[i],:] + sharedInputWeight \times sharedInput[j, :]
     $$
-  - 4.共享专家输出融合：最终输出结果是所有专家输出与共享专家输出，按照rowIndex进行合并的结果，计算过程如下：
+  - 4.最终合并：最终输出结果是所有专家输出与共享专家输出，按照rowIndex进行合并的结果，计算过程如下：
 
     $$
     y[rowIndex[i],:] = \sum_{i \in \mathcal{E}[j]} y_i [j - start_i] + sharedInputWeight \times sharedInput[j, :]
@@ -376,7 +376,7 @@ aclnnStatus aclnnGroupedMatmulFinalizeRoutingV3(
     - x2不支持INT4。维度为(e,k,n)，转置情况下维度为(e,n,k)，e取值范围[1,1024]。
     - scaleOptional支持FLOAT8_E8M0。shape支持四维。x2非转置时维度为(e,Ceil(k/64),n,2)，x2转置时维度为(e,n,Ceil(k/64),2)。数据类型只支持FLOAT8_E8M0，转置属性必须和x2保持一致。
     - biasOptional支持BF16。
-    - sharedInputOptional支持二维，维度为(bsdp,n)，bsdp代表batchSize / dataParallelSize。
+    - sharedInputOptional支持二维，维度为(bsdp,n)，bsdp代表batchSize / dataParallelSize，必须小于等于out的第一维batch。
     - perTokenScaleOptional支持FLOAT8_E8M0。shape支持三维，维度为(m,Ceil(k/64),2)。
     - rowIndexOptional仅支持INT64。
     - x1、x2、scaleOptional、pertokenScaleOptional、groupListOptional、logitOptional、rowIndexOptional是必选参数，biasOptional，sharedInputOptional是可选参数。目前暂不支持offsetOptional参数。
