@@ -41,6 +41,7 @@ constexpr int64_t SCALE_FACTOR_WITH_X = 32LL;
 constexpr int64_t NUM_THOUSAND = 1000LL;
 constexpr int64_t FP8_PERBLOCK_BLOCK_SIZE = 128LL;
 constexpr int64_t FP8_GROUP_SIZE = 128LL;
+constexpr int64_t BUFFER_NUM = 1; // 1: 不开启double buffer
 constexpr int64_t DOUBLE_BUFFER = 2LL;
 
 constexpr int64_t MAX_QUEUE_BUFFER_NUM = 6LL;
@@ -63,6 +64,7 @@ constexpr int64_t RANK_ONE = 1LL;
 constexpr int64_t RANK_TWO = 2LL;
 constexpr int64_t RANK_THREE = 3LL;
 constexpr int64_t BF16_TO_FP32_SIZE_FACTOR = 2LL;
+constexpr int64_t HIFP4_MID_UB_RES_NUM = 6;
 
 // 输入输出的位置索引（V3 回归后 topk_weight 相关索引不再使用，V4 子类使用独立索引常量）
 constexpr int64_t INPUT_X_INDEX = 0LL;
@@ -105,6 +107,7 @@ constexpr int64_t QUANT_MODE_HIF8_CAST = 6LL;
 constexpr int64_t QUANT_MODE_HIF8_PERTENSOR = 7LL;
 constexpr int64_t QUANT_MODE_HIF8_PERTOKEN = 8LL;
 constexpr int64_t QUANT_MODE_MXFP4_E2M1 = 9LL;
+constexpr int64_t QUANT_MODE_HIF4 = 10LL;
 constexpr int64_t QUANT_MODE_FP8_PERBLOCK_E5M2 = 11LL;
 constexpr int64_t QUANT_MODE_FP8_PERBLOCK_E4M3FN = 12LL;
 constexpr int64_t QUANT_MODE_INT4_DYNAMIC = 13LL;
@@ -136,6 +139,13 @@ constexpr int64_t COUTSORT_MODE_FULLLOAD = 1LL;  // 计数排序 FullLoad（核�
 constexpr int64_t COUTSORT_MODE_CUTORIGIN = 2LL; // 计数排序 CutOrigin（核内 chunk 切分）
 constexpr int64_t KEY_VALUE_MODE_DIM0_NUM = 2LL;
 constexpr int64_t MASK_STRIDE = 64;
+
+constexpr int64_t HIFP4_GROUP_ELE_NUM = 64;
+constexpr int64_t HIFP4_PER_LOOP_MIN_GROUP_NUM =
+    32; // 换算字节数： HIFP4_PER_LOOP_MIN_GROUP_NUM * 64(group elements num) * 2(dtype width)
+constexpr int64_t HIFP4_OUTPUT_REG_ONELOOP_GROUP_NUM = 16; // 一次reg循环计算16个VL
+constexpr int64_t HIFP4_ONE_GROUP_MID_UB_RES_BYTES = 119;
+constexpr int64_t HIFP4_OUTPUT_SCALE_REG_ONELOOP_GROUP_NUM = 256; // scale 输出的计算，一次reg循环计算256个group的scale
 
 inline static int64_t CeilLog4(int64_t x)
 {
@@ -408,6 +418,7 @@ private:
     void Tiling4GatherOutMxFP8NoQuantCompute();
     void Tiling4GatherOutMxQuant();
     void Tiling4GatherOutFP8Quant();
+    void Tiling4GatherOutHIF4Quant();
     void Tiling4SortOutCompute();
     void Tiling4VMSMiddleCompute();
     void Tiling4VBSCompute();
@@ -417,6 +428,7 @@ private:
     int64_t CalcMaxRowIdxPerLoopMxQuant(int64_t perLoopCols);
     int64_t CalcMaxRowIdxPerLoopFP8Quant(int64_t perLoopCols);
     int64_t CalcMaxRowIdxPerLoopFP8GroupQuant(int64_t perLoopCols);
+    int64_t CalcMaxRowIdxPerLoopHIF4Quant(int64_t perLoopCols);
     bool IsFullLoad();
     bool IsSupportGatherCopyKernels() const;
     void ComputeUseGatherCopy();

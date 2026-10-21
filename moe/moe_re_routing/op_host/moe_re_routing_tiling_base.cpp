@@ -15,6 +15,7 @@
 #include <iostream>
 #include "log/log.h"
 #include "moe_re_routing_tiling_base.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace optiling {
 
@@ -38,10 +39,11 @@ constexpr size_t DIM_INDEX_2 = 2;
 constexpr int64_t DIM_1 = 1;
 constexpr int64_t DIM_2 = 2;
 constexpr int64_t DIM_3 = 3;
+constexpr int64_t HIF4_TOKEN_SIZE_PARAMS = 2;
 
-static const std::set<ge::DataType> TOKENS_DTYPE = {ge::DT_INT8,          ge::DT_FLOAT16,     ge::DT_BF16,
-                                                    ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2, ge::DT_HIFLOAT8,
-                                                    ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E1M2};
+static const std::set<ge::DataType> TOKENS_DTYPE = {
+    ge::DT_INT8,     ge::DT_FLOAT16,     ge::DT_BF16,        ge::DT_FLOAT8_E4M3FN,         ge::DT_FLOAT8_E5M2,
+    ge::DT_HIFLOAT8, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2, Ops::Transformer::DT_HIFLOAT4};
 static const std::set<ge::DataType> EXPERT_TOKEN_NUM_DTYPE = {ge::DT_INT32, ge::DT_INT64};
 static const std::set<ge::DataType> SCALE_DTYPE = {ge::DT_FLOAT, ge::DT_FLOAT8_E8M0};
 
@@ -167,6 +169,14 @@ ge::graphStatus MoeReRoutingTilingBase::CheckDtypeAndAttr() const
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                 context_->GetNodeName(), "per_token_scales", ge::TypeUtils::DataTypeToSerialString(scaleDtype_).c_str(),
                 "When tokens dtype is FP4, scale dtype should be FLOAT8_E8M0 or FLOAT."),
+            return ge::GRAPH_FAILED);
+    }
+    if (tokenDtype_ == Ops::Transformer::DT_HIFLOAT4) {
+        OP_CHECK_IF(
+            hasScale_ && scaleDtype_ != ge::DT_FLOAT,
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "per_token_scales",
+                                                  ge::TypeUtils::DataTypeToSerialString(scaleDtype_).c_str(),
+                                                  "When tokens dtype is HIFLOAT4, scale dtype should be FLOAT."),
             return ge::GRAPH_FAILED);
     }
     if (hasScale_) {
@@ -323,6 +333,23 @@ ge::graphStatus MoeReRoutingTilingBase::CheckParam()
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "output shape", "check failed",
                                               "Please check output shapes against input shapes and derived sizes."),
         return ge::GRAPH_FAILED);
+    if (tokenDtype_ == Ops::Transformer::DT_HIFLOAT4) {
+        OP_CHECK_IF(tokenSize_ % 2 != 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        context_->GetNodeName(), "tokenSize", std::to_string(tokenSize_).c_str(),
+                        "tokens is hif4, token size should be even number, actual odd number."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(tokenSize_ % 64 != 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "tokenSize",
+                                                          std::to_string(tokenSize_).c_str(),
+                                                          "tokens is hif4, token size shouldbe exactly divided by 64."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(tokenSizeH_ / 64 != scaleSize_,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        context_->GetNodeName(), "tokenSize", std::to_string(tokenSize_).c_str(),
+                        "tokens is hif4, the scale size must be the token size divided by 64."),
+                    return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -340,6 +367,7 @@ ge::graphStatus MoeReRoutingTilingBase::GetShapeAttrsInfo()
     auto expertShapeTuple = GetShapeTuple(context_, IN_EXPERT_TOKEN_NUM_PER_RANK_INDEX);
     tokenSum_ = std::get<0>(tokenShapeTuple);
     tokenSize_ = std::get<1>(tokenShapeTuple);
+    tokenSizeH_ = std::get<1>(tokenShapeTuple);
     rankNums_ = std::get<0>(expertShapeTuple);
     expertNum_ = std::get<1>(expertShapeTuple);
     tokenDtype_ = context_->GetInputDesc(IN_TOKEN_INDEX)->GetDataType();
@@ -396,6 +424,12 @@ ge::graphStatus MoeReRoutingTilingBase::GetShapeAttrsInfo()
         hasScale_ = true;
     }
     hasTopkWeight_ = false;
+    if (tokenDtype_ == Ops::Transformer::DT_HIFLOAT4) {
+        int64_t originalH = tokenSize_;
+        tokenSize_ = tokenSize_ / HIF4_TOKEN_SIZE_PARAMS;
+        OP_LOGI(context_->GetNodeName(), "HIF4 adaptation: original H=%ld, adapted tokenSize=%ld (H/2)", originalH,
+                tokenSize_);
+    }
 
     auto attrs = context_->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);

@@ -143,6 +143,8 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::DoOpTiling()
         Tiling4GatherOutDropPadCompute();
     } else if (IsMXFP8NoQuantCase(quantMode_, xDtype_)) {
         Tiling4GatherOutMxFP8NoQuantCompute();
+    } else if (quantMode_ == QUANT_MODE_HIF4) {
+        Tiling4GatherOutHIF4Quant();
     } else {
         Tiling4GatherOutCompute();
     }
@@ -474,13 +476,14 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::ValidateQuantMode()
                     quantMode_ != QUANT_MODE_MXFP8_E4M3FN && quantMode_ != QUANT_MODE_FP8_GROUP_E5M2 &&
                     quantMode_ != QUANT_MODE_FP8_GROUP_E4M3FN && quantMode_ != QUANT_MODE_HIF8_CAST &&
                     quantMode_ != QUANT_MODE_HIF8_PERTENSOR && quantMode_ != QUANT_MODE_HIF8_PERTOKEN &&
-                    quantMode_ != QUANT_MODE_MXFP4_E2M1 && quantMode_ != QUANT_MODE_FP8_PERBLOCK_E5M2 &&
-                    quantMode_ != QUANT_MODE_FP8_PERBLOCK_E4M3FN && quantMode_ != QUANT_MODE_INT4_DYNAMIC &&
-                    quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E5M2 && quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E4M3FN &&
+                    quantMode_ != QUANT_MODE_MXFP4_E2M1 && quantMode_ != QUANT_MODE_HIF4 &&
+                    quantMode_ != QUANT_MODE_FP8_PERBLOCK_E5M2 && quantMode_ != QUANT_MODE_FP8_PERBLOCK_E4M3FN &&
+                    quantMode_ != QUANT_MODE_INT4_DYNAMIC && quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E5M2 &&
+                    quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E4M3FN &&
                     quantMode_ != QUANT_MODE_MXFP8_ROUNDSCALE_AMAX_E5M2 &&
                     quantMode_ != QUANT_MODE_MXFP8_ROUNDSCALE_AMAX_E4M3FN,
                 OP_LOGE_WITH_INVALID_ATTR(context_->GetNodeName(), "quant_mode", std::to_string(quantMode_),
-                                          "-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16 or 17"),
+                                          "-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 or 17"),
                 return ge::GRAPH_FAILED);
     tilingDataPtr_->quantMode = quantMode_;
     return ge::GRAPH_SUCCESS;
@@ -568,6 +571,14 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::CheckInputX()
     auto rank = static_cast<int64_t>(xShape_.GetDimNum());
     OP_CHECK_IF(rank != 2, OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "x", std::to_string(rank), "2"),
                 return ge::GRAPH_FAILED);
+    if (quantMode_ == QUANT_MODE_HIF4) {
+        int64_t xDim1 = xShape_.GetDim(1);
+        OP_CHECK_IF(
+            xDim1 % HIFP4_GROUP_ELE_NUM != 0,
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "shape of x", std::to_string(xDim1),
+                                                  "The dim1 of input x should be multiple of 64 when quant mode is 10"),
+            return ge::GRAPH_FAILED);
+    }
     // dtype
     using ge::DataType;
     using std::unordered_set;
@@ -1872,6 +1883,83 @@ void MoeInitRoutingV3TilingArch35::Tiling4GatherOutFP8Quant()
 
     LogGatherOutTilingData();
     return;
+}
+
+int64_t MoeInitRoutingV3TilingArch35::CalcMaxRowIdxPerLoopHIF4Quant(int64_t perLoopCols)
+{
+    OP_LOGD(context_, "Entered MoeInitRoutingV3TilingArch35::CalcMaxRowIdxPerLoopHIF4Quant(...)");
+
+    // 中间结果E8、E1_16、E1_8要先保存ub，再计算scale输出，三个中间结果32B对齐;
+    // scale输出，是4个VL交织出来的，输出需要256B * 4对齐
+    int64_t ubReserveAlignBuf = HIFP4_MID_UB_RES_NUM * UB_BLOCK_SIZE * BUFFER_NUM + BUFFER_NUM * NUM_FOUR * REG_SIZE;
+    // 输入x[cols]所占大小：cols*sizeof(dtypeX)，perLoopCols为64的倍数，默认32B对齐
+    int64_t xInSize = perLoopCols * inputXDtypeSize_;
+    // 输出xOut[cols]所占大小：cols*sizeof(hif4)，perLoopCols为64的倍数，默认32B对齐
+    int64_t xOutSize = perLoopCols / 2;
+
+    // scale三级阶码所占大小：E8:16bit(性能考虑，u16存储) E1_8:8bit E1_16:16bit
+    int64_t midScaleResSize = HIFP4_ONE_GROUP_MID_UB_RES_BYTES * (perLoopCols / HIFP4_GROUP_ELE_NUM);
+    // 输出scale[cols/64]所占大小：float32
+    int64_t scaleSize = sizeof(float) * (perLoopCols / HIFP4_GROUP_ELE_NUM);
+
+    // 返回的是(availUbSize-每行输入x、输出scale、输出xOut所占的大小)/sizeof(int32)，应该是留给sortedRowIdx元素的数目
+    return (availUbSize_ - ubReserveAlignBuf - midScaleResSize - BUFFER_NUM * (xInSize + scaleSize + xOutSize)) /
+           static_cast<int64_t>(sizeof(int32_t));
+}
+
+void MoeInitRoutingV3TilingArch35::Tiling4GatherOutHIF4Quant()
+{
+    OP_LOGD(context_, "Entered MoeInitRoutingV3TilingArch35::Tiling4GatherOutHIF4Quant()");
+
+    auto* gatherOutTiling = &(tilingDataPtr_->gatherOutComputeParamsOp);
+    int64_t perCoreIndicesElements = Ops::Base::CeilDiv(totalLength_, aivCoreNum_);
+    if (perCoreIndicesElements <= 0) {
+        gatherOutTiling->needCoreNum = 0;
+        return;
+    }
+    int64_t needCoreNum = Ops::Base::CeilDiv(totalLength_, perCoreIndicesElements);
+    int64_t lastCoreIndicesElements = totalLength_ - (needCoreNum - 1) * perCoreIndicesElements;
+
+    // 列元素个数对齐至64的倍数
+    int64_t perLoopCols = Ops::Base::CeilAlign(tilingDataPtr_->cols, HIFP4_GROUP_ELE_NUM);
+    int64_t perLoopMaxIndicesElements = CalcMaxRowIdxPerLoopHIF4Quant(perLoopCols);
+    while (perLoopMaxIndicesElements <= 0) {
+        perLoopCols = Ops::Base::CeilAlign(Ops::Base::CeilDiv(perLoopCols, NUM_TWO), HIFP4_GROUP_ELE_NUM);
+        perLoopMaxIndicesElements = CalcMaxRowIdxPerLoopHIF4Quant(perLoopCols);
+    }
+
+    int64_t colsLoops = Ops::Base::CeilDiv(tilingDataPtr_->cols, perLoopCols);
+    int64_t lastLoopCols = tilingDataPtr_->cols - (colsLoops - 1) * perLoopCols;
+    gatherOutTiling->needCoreNum = needCoreNum; // 没用这个，kernel根据读取到的expertTotalCount重新计算tiling相关值
+    gatherOutTiling->perCoreIndicesElements =
+        perCoreIndicesElements; // 没用这个，kernel根据读取到的expertTotalCount重新计算tiling相关值
+    gatherOutTiling->lastCoreIndicesElements =
+        lastCoreIndicesElements; // 没用这个，kernel根据读取到的expertTotalCount重新计算tiling相关值
+    gatherOutTiling->colsLoops = colsLoops;
+    gatherOutTiling->perLoopCols = perLoopCols;
+    gatherOutTiling->lastLoopCols = lastLoopCols;
+
+    int64_t perCorePerLoopIndicesElements = std::min(perLoopMaxIndicesElements, perCoreIndicesElements);
+    int64_t perCoreIndicesLoops = Ops::Base::CeilDiv(perCoreIndicesElements, perCorePerLoopIndicesElements);
+    int64_t perCoreLastLoopIndicesElements =
+        perCoreIndicesElements - (perCoreIndicesLoops - 1) * perCorePerLoopIndicesElements;
+    gatherOutTiling->perCoreIndicesLoops =
+        perCoreIndicesLoops; // 没用这个，kernel根据读取到的expertTotalCount重新计算tiling相关值
+    gatherOutTiling->perCorePerLoopIndicesElements = perCorePerLoopIndicesElements;
+    gatherOutTiling->perCoreLastLoopIndicesElements =
+        perCoreLastLoopIndicesElements; // 没用这个，kernel根据读取到的expertTotalCount重新计算tiling相关值
+
+    int64_t lastCorePerLoopIndicesElements = std::min(perLoopMaxIndicesElements, lastCoreIndicesElements);
+    int64_t lastCoreIndicesLoops = Ops::Base::CeilDiv(lastCoreIndicesElements, lastCorePerLoopIndicesElements);
+    int64_t lastCoreLastLoopIndicesElements =
+        lastCoreIndicesElements - (lastCoreIndicesLoops - 1) * lastCorePerLoopIndicesElements;
+    gatherOutTiling->lastCoreIndicesLoops =
+        lastCoreIndicesLoops; // 没用这个，kernel根据读取到的expertTotalCount重新计算tiling相关值
+    gatherOutTiling->lastCorePerLoopIndicesElements = lastCorePerLoopIndicesElements;
+    gatherOutTiling->lastCoreLastLoopIndicesElements =
+        lastCoreLastLoopIndicesElements; // 没用这个，kernel根据读取到的expertTotalCount重新计算tiling相关值
+
+    LogGatherOutTilingData();
 }
 
 bool MoeInitRoutingV3TilingArch35::IsFullLoad()

@@ -59,6 +59,7 @@ protected:
     uint64_t tilingKey_ = {0};
     int64_t tokenSum_ = {0};
     int64_t tokenSize_ = {0};
+    int64_t tokenSizeH_ = {0};
     int64_t scaleSize_ = {0};
     int64_t rankNums_ = {0};
     int64_t ubFactor_ = {0};

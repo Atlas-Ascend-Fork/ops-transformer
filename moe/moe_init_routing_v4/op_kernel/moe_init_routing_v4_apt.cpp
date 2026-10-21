@@ -204,7 +204,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
         return;
     }
 
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     int64_t oriOverflowMode = GetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>();
 #endif
 
@@ -292,7 +292,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
             fullLoadOp.Process();
             fullLoadPipe.Destroy();
         }
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -320,7 +320,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
             }
         }
 
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -356,7 +356,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
             csOp.Process();
             csPipe.Destroy();
         }
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -370,7 +370,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
         phaseOp.Init(expertIdx, expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &phasePipe);
         phaseOp.Process();
         phasePipe.Destroy();
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         // 注意：这里不 return，继续落入 Stage3/Stage5 复用既有 dispatch。
@@ -737,7 +737,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
         }
     }
 
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
 }

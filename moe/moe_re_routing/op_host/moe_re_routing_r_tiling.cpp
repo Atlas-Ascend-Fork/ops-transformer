@@ -18,6 +18,7 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "op_common/op_host/util/platform_util.h"
 #include "moe_re_routing_r_tiling.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace optiling {
 constexpr int64_t NUM_TWO = 2;
@@ -34,6 +35,7 @@ constexpr uint64_t MOE_RE_ROUTING_R_WITH_SCALE_FLOAT = 210100;
    All above types use int8_t kernel template path since they are 1-byte packed data movement without type-aware
    computation. */
 constexpr uint64_t MOE_RE_ROUTING_R_WITH_SCALE_FLOAT8_E8M0 = 210200;
+constexpr uint64_t MOE_RE_ROUTING_R_WITH_SCALE_HIF4 = 210300;
 
 void MoeReRoutingRTiling::SplitCore()
 {
@@ -75,14 +77,17 @@ ge::graphStatus MoeReRoutingRTiling::DoOpTiling()
         return ge::GRAPH_FAILED;
     }
     if (hasScale_) {
-        tilingKey_ =
-            scaleDtype_ == ge::DT_FLOAT ? MOE_RE_ROUTING_R_WITH_SCALE_FLOAT : MOE_RE_ROUTING_R_WITH_SCALE_FLOAT8_E8M0;
         // FP8/HIF8/FP4 + float32场景复用FP8的Tiling路径与Kernel实现
         if ((tokenDtype_ == ge::DT_FLOAT8_E4M3FN || tokenDtype_ == ge::DT_FLOAT8_E5M2 ||
              tokenDtype_ == ge::DT_HIFLOAT8 || tokenDtype_ == ge::DT_FLOAT4_E2M1 ||
              tokenDtype_ == ge::DT_FLOAT4_E1M2) &&
             scaleDtype_ == ge::DT_FLOAT) {
             tilingKey_ = MOE_RE_ROUTING_R_WITH_SCALE_FLOAT8_E8M0;
+        } else if (tokenDtype_ == Ops::Transformer::DT_HIFLOAT4) {
+            tilingKey_ = MOE_RE_ROUTING_R_WITH_SCALE_HIF4;
+        } else {
+            tilingKey_ = scaleDtype_ == ge::DT_FLOAT ? MOE_RE_ROUTING_R_WITH_SCALE_FLOAT :
+                                                       MOE_RE_ROUTING_R_WITH_SCALE_FLOAT8_E8M0;
         }
     } else {
         tilingKey_ = MOE_RE_ROUTING_R_WITHOUT_SCALE;

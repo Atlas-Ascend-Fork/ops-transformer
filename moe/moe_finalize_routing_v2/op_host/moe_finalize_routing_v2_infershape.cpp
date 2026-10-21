@@ -15,6 +15,7 @@
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 using namespace ge;
 namespace ops {
@@ -42,7 +43,8 @@ constexpr int64_t UNKNOWN_RANK_DIM_VALUE_ = -2;
 
 static inline bool IsValidType(const DataType dtype)
 {
-    return dtype == ge::DT_FLOAT || dtype == ge::DT_FLOAT16 || dtype == ge::DT_BF16;
+    return dtype == ge::DT_FLOAT || dtype == ge::DT_FLOAT16 || dtype == ge::DT_BF16 ||
+           dtype == Ops::Transformer::DT_HIFLOAT4;
 }
 
 static ge::graphStatus InferDataTypeMoeFinalizeRoutingV2(gert::InferDataTypeContext* context)
@@ -51,7 +53,7 @@ static ge::graphStatus InferDataTypeMoeFinalizeRoutingV2(gert::InferDataTypeCont
     OP_CHECK_IF(!IsValidType(context->GetInputDataType(INDEX_IN_EXPANDED_X)),
                 OP_LOGE_FOR_INVALID_DTYPE(context->GetNodeName(), "expanded_x",
                                           Ops::Base::ToString(context->GetInputDataType(INDEX_IN_EXPANDED_X)).c_str(),
-                                          "FLOAT, FLOAT16 or BF16"),
+                                          "FLOAT, FLOAT16, BF16 or HIFLOAT4"),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(context->GetInputDataType(INDEX_IN_EXPANDED_ROW_IDX) != ge::DT_INT32,
@@ -90,7 +92,11 @@ static ge::graphStatus InferDataTypeMoeFinalizeRoutingV2(gert::InferDataTypeCont
                                           Ops::Base::ToString(parameterDtype).c_str(), "INT32"),
                 return ge::GRAPH_FAILED);
 
-    context->SetOutputDataType(0, context->GetInputDataType(INDEX_IN_EXPANDED_X));
+    if (context->GetInputDataType(INDEX_IN_EXPANDED_X) == Ops::Transformer::DT_HIFLOAT4) {
+        context->SetOutputDataType(0, ge::DT_BF16);
+    } else {
+        context->SetOutputDataType(0, context->GetInputDataType(INDEX_IN_EXPANDED_X));
+    }
     return ge::GRAPH_SUCCESS;
 }
 

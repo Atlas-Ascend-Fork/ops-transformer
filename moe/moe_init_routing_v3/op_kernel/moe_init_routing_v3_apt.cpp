@@ -27,6 +27,10 @@
 #include "arch35/moe_v3_gather_hif8_pertensor_quant.h"
 #include "arch35/moe_v3_gather_hif8_pertoken_quant.h"
 #include "arch35/moe_v3_gather_hif8_quant.h"
+// hif4（hifloat4）量化仅 960（9201/9202）工具链支持，其余平台（如 950/3510）不编译
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202))
+#include "arch35/moe_v3_gather_hif4_quant.h"
+#endif
 #include "arch35/moe_v3_gather_out_mxfp8.h"
 #include "arch35/moe_v3_gather_out_mxfp4.h"
 #include "arch35/moe_v3_gather_mxfp4_quant.h"
@@ -132,6 +136,14 @@
 #define MOE_INIT_ROUTING_V3_SORTMULTICORE_MXFP4QUANT_SCATTER 11101000 // 多核排序、MXFP4量化、SCATTER索引
 
 /*
+ * HIF4量化
+ */
+#define MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER 10110000     // 单核排序、动态量化、GATHER索引
+#define MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_SCATTER 10111000    // 单核排序、动态量化、SCATTER索引
+#define MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER 11110000   // 多核排序、动态量化、GATHER索引
+#define MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANTT_SCATTER 11111000 // 多核排序、动态量化、SCATTER索引
+
+/*
  * FP8 PerBlock量化
  */
 #define MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER 10120000 // 单核排序、FP8 PerBlock量化、GATHER索引
@@ -199,7 +211,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
         return;
     }
 
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     int64_t oriOverflowMode = GetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>();
 #endif
 
@@ -242,7 +254,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
             fullLoadOp.Process();
             fullLoadPipe.Destroy();
         }
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -270,7 +282,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
             }
         }
 
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -285,7 +297,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
             fullLoadPipe.Destroy();
         }
 
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -307,7 +319,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
             csOp.Process();
             csPipe.Destroy();
         }
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -321,7 +333,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
         phaseOp.Init(expertIdx, expandedRowIdx, expertTokensCountOrCumsum, userWS, t, &phasePipe);
         phaseOp.Process();
         phasePipe.Destroy();
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         // 注意：这里不 return，继续落入 Stage3/Stage5 复用既有 dispatch。
@@ -355,7 +367,9 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_SCATTER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_GATHER) ||
-        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_SCATTER)) {
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_SCATTER) ||
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER) ||
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_SCATTER)) {
         // 单核排序
         MoeSortOneCore op;
         op.Init(expertIdx, expandedRowIdx, userWS, t, &sortPipe);
@@ -386,7 +400,9 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_GATHER) ||
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_SCATTER) ||
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8GROUP_AMAX_QUANT_GATHER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8GROUP_AMAX_QUANT_SCATTER)) {
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8GROUP_AMAX_QUANT_SCATTER) ||
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER) ||
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANTT_SCATTER)) {
         // 多核排序
         MoeSortMultiCore op;
         op.Init(expertIdx, expandedRowIdx, userWS, t, &sortPipe);
@@ -452,7 +468,9 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_SCATTER) ||
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8GROUP_AMAX_QUANT_SCATTER) ||
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_COUTSORT_CUTORIGIN_UNQUANTIZED_SCATTER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_COUTSORT_CUTORIGIN_STATIC_QUANT_SCATTER)) {
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_COUTSORT_CUTORIGIN_STATIC_QUANT_SCATTER) ||
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER) ||
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER)) {
         if (t->useGatherCopy) {
             RowIdxGather rowIdxGatherOp;
             rowIdxGatherOp.Init(expandedRowIdx, userWS, t);
@@ -474,7 +492,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
     }
 
     if (t->cols == 0) {
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
         return;
@@ -668,10 +686,26 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
             gatherMxfp4QuantOp.Process();
             gatherPipe.Destroy();
         }
-    } else if (TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_SCATTER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_GATHER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_SCATTER)) {
+    }
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202))
+    else if (TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_SCATTER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANTT_SCATTER)) {
+        // HIF4量化
+        if constexpr (IsSameType<DTYPE_X, bfloat16_t>::value && IsSameType<DTYPE_EXPANDED_X, hifloat4x2_t>::value) {
+            TPipe gatherPipe;
+            MoeGatherOutHif4Quant<DTYPE_X, DTYPE_EXPANDED_X> gatherHif4QuantOp;
+            gatherHif4QuantOp.Init(x, scale, userWS, expandedRowIdx, expandedX, expandedScale, t, &gatherPipe);
+            gatherHif4QuantOp.Process();
+            gatherPipe.Destroy();
+        }
+    }
+#endif
+    else if (TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_SCATTER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_SCATTER)) {
         // FP8 PerBlock量化
         if constexpr ((IsSameType<DTYPE_X, bfloat16_t>::value || IsSameType<DTYPE_X, half>::value) &&
                       (IsSameType<DTYPE_EXPANDED_X, fp8_e4m3fn_t>::value ||
@@ -697,7 +731,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
         }
     }
 
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 #endif
 }

@@ -512,7 +512,7 @@ __aicore__ inline void MoeV3GatherMxfp4Quant<T, U>::Init(GM_ADDR xAddr, GM_ADDR 
                                                          const MoeInitRoutingV3Arch35TilingData* tilingData,
                                                          TPipe* tPipe)
 {
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(0);
 #endif
 

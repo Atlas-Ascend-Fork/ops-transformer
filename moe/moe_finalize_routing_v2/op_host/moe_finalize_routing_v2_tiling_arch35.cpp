@@ -15,6 +15,7 @@
 #include "op_host/tiling_util.h"
 #include "moe_finalize_routing_v2_tiling.h"
 #include "../op_kernel/arch35/moe_finalize_routing_v2_tiling_struct.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace optiling {
 static constexpr int64_t TWO = 2;
@@ -53,6 +54,14 @@ static constexpr uint64_t DROPPAD_ROW_TILING_KEY = 30;
 static constexpr uint64_t FLOAT16_TILING_KEY = 1;
 static constexpr uint64_t BFLOAT16_TILING_KEY = 2;
 static constexpr size_t WORKSPACE_RESERVED = 16 * 1024 * 1024;
+static constexpr size_t SIZEOF_B16 = 2;
+static constexpr uint64_t NUM_FP4_IN_BYTE = 2;
+static constexpr uint64_t HIF4_BLOCK_SIZE = 64;
+
+static constexpr uint64_t HIF4_FULL_LOAD_K_H_BASE_TILING_KEY = 50000;
+static constexpr uint64_t HIF4_FULL_LOAD_H_BASE_TILING_KEY = 60000;
+static constexpr uint64_t HIF4_FULL_LOAD_SPLIT_H_BASE_TILING_KEY = 70000;
+static constexpr uint64_t HIF4_FULL_LOAD_ROW_K_H_BASE_TILING_KEY = 80000;
 
 const static int64_t ATTR_DROP_PAD_MODE_IDX = 0LL;
 const static int64_t ATTR_ZERO_EXPERT_RANGE_IDX = 1LL;
@@ -86,6 +95,9 @@ protected:
     bool IsRowKHFullLoad();
     bool IsKHFullLoad();
     bool IsHFullLoad();
+    bool IsHif4RowKHFullLoad();
+    bool IsHif4KHFullLoad();
+    bool IsHif4HFullLoad();
     ge::graphStatus CheckOptionalInputDtype(int64_t idx, const char* name, ge::DataType expectedDtype);
     ge::graphStatus CheckOptionalInputShape(int64_t idx, const char* name, const gert::Shape& expected,
                                             const char* reason);
@@ -115,6 +127,12 @@ protected:
                                       const char* name2);
     ge::graphStatus CheckExpertRangeValidity();
 
+    // hif4新增，未适配空专家特性
+    ge::graphStatus DoOpTilingHif4KHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+    ge::graphStatus DoOpTilingHif4HFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+    ge::graphStatus DoOpTilingHif4SplitH(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+    ge::graphStatus DoOpTilingHif4RowKHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+
     bool hasX1_{false};
     bool hasX2_{false};
     bool hasScales_{false};
@@ -124,6 +142,10 @@ protected:
     bool rowKHFullLoad_{false};
     bool kHFullLoad_{false};
     bool hFullLoad_{false};
+    bool isHif4Dequant_{false};
+    bool isHif4KHFullLoad_{false};
+    bool isHif4HFullLoad_{false};
+    bool isHif4RowKHFullLoad_{false};
     uint32_t coreNum_{0};
     uint64_t blockSize_{0};
     uint64_t vlFp32_{0};
@@ -192,6 +214,24 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetK(const gert::StorageShape* scal
     const int64_t* attrKPtr = attrsPtr->GetAttrPointer<int64_t>(ATTR_K_IDX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, attrKPtr);
     k = *attrKPtr;
+    // 适配hif4
+    if (isHif4Dequant_) {
+        OP_CHECK_NULL_WITH_CONTEXT(context_, scalesShape);
+        hasScales_ = true;
+        OP_CHECK_IF(
+            scalesShape->GetStorageShape().GetDimNum() != 3,
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "scales",
+                                                     std::to_string(scalesShape->GetStorageShape().GetDimNum()).c_str(),
+                                                     "dim num of scales should be 3 under hifp4 dequantize mode."),
+            return ge::GRAPH_FAILED);
+        k = scalesShape->GetStorageShape().GetDim(1); // (n,k,h/64)
+        OP_CHECK_IF(k <= 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "k", std::to_string(k).c_str(),
+                                                          "k must be greater than 0."),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
+
     if (!scalesShape) {
         hasScales_ = false;
         return ge::GRAPH_SUCCESS;
@@ -233,6 +273,13 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetECH(const gert::StorageShape* ex
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "h", std::to_string(h).c_str(),
                                                           "h must be greater than 0."),
                     return ge::GRAPH_FAILED);
+        // 适配hif4
+        if (isHif4Dequant_) {
+            OP_CHECK_IF(h % 64 != 0,
+                        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "h", std::to_string(h).c_str(),
+                                                              "h must be a multiple of 64 under hif4 dequantize mode."),
+                        return ge::GRAPH_FAILED);
+        }
         return ge::GRAPH_SUCCESS;
     }
 
@@ -252,6 +299,14 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetECH(const gert::StorageShape* ex
                     "e, c and h must be greater than 0."),
                 return ge::GRAPH_FAILED);
     dim0OfExpandedX = e;
+
+    // 适配hif4
+    if (isHif4Dequant_) {
+        OP_CHECK_IF(h % 64 != 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "h", std::to_string(h).c_str(),
+                                                          "h must be a multiple of 64 under hif4 dequantize mode."),
+                    return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -408,18 +463,29 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CheckPartShapeAndDtypeIsValid()
 
     auto scalesDesc = context_->GetOptionalInputDesc(SCALES_IDX);
     scaleDtypeSize = dtypeSize;
-    if (scalesDesc) {
+    if (isHif4Dequant_) {
+        OP_CHECK_NULL_WITH_CONTEXT(context_, scalesDesc);
         auto scaleDtype = scalesDesc->GetDataType();
-        OP_CHECK_IF(scaleDtype != ge::DataType::DT_FLOAT && scaleDtype != ge::DataType::DT_FLOAT16 &&
-                        scaleDtype != ge::DataType::DT_BF16,
+        OP_CHECK_IF(scaleDtype != ge::DataType::DT_FLOAT,
                     OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "scales",
-                                              Ops::Base::ToString(scaleDtype).c_str(), "FLOAT, FLOAT16 or BF16"),
+                                              Ops::Base::ToString(scaleDtype).c_str(), "FLOAT"),
                     return ge::GRAPH_FAILED);
-        scaleDtypeSize = (scaleDtype == ge::DataType::DT_FLOAT) ? sizeof(float) : sizeof(short);
-        if (scaleDtype == ge::DataType::DT_FLOAT16) {
-            scaleDtypeKey = FLOAT16_TILING_KEY;
-        } else if (scaleDtype == ge::DataType::DT_BF16) {
-            scaleDtypeKey = BFLOAT16_TILING_KEY;
+        scaleDtypeSize = sizeof(float);
+        scaleDtypeKey = 0;
+    } else {
+        if (scalesDesc) {
+            auto scaleDtype = scalesDesc->GetDataType();
+            OP_CHECK_IF(scaleDtype != ge::DataType::DT_FLOAT && scaleDtype != ge::DataType::DT_FLOAT16 &&
+                            scaleDtype != ge::DataType::DT_BF16,
+                        OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "scales",
+                                                  Ops::Base::ToString(scaleDtype).c_str(), "FLOAT, FLOAT16 or BF16"),
+                        return ge::GRAPH_FAILED);
+            scaleDtypeSize = (scaleDtype == ge::DataType::DT_FLOAT) ? sizeof(float) : sizeof(short);
+            if (scaleDtype == ge::DataType::DT_FLOAT16) {
+                scaleDtypeKey = FLOAT16_TILING_KEY;
+            } else if (scaleDtype == ge::DataType::DT_BF16) {
+                scaleDtypeKey = BFLOAT16_TILING_KEY;
+            }
         }
     }
 
@@ -439,9 +505,20 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::FinalCheckShapeAndDtypeIsValid()
 {
     gert::Shape bsk = {row, k};
     gert::Shape bsh = {row, h};
+    gert::Shape hif4ScaleShape = {row, k, h / 64};
 
-    if (CheckOptionalInputShape(SCALES_IDX, "scales", bsk, "shape of scales must be (bs,k).") != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
+    // 适配hif4
+    if (isHif4Dequant_) {
+        if (CheckOptionalInputShape(SCALES_IDX, "scales", hif4ScaleShape,
+                                    "shape of scales must be (bs,k,h/64) under hif4 dequantize mode.") !=
+            ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+    } else {
+        if (CheckOptionalInputShape(SCALES_IDX, "scales", bsk, "shape of scales must be (bs,k).") !=
+            ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
     }
     if (CheckOptionalInputDtype(EXPERTIDX_IDX, "expert_idx", ge::DataType::DT_INT32) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
@@ -579,11 +656,19 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetRequiredInputInfo()
     auto expandedXDesc = context_->GetInputDesc(EXPANDED_X_IDX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXDesc);
     dtype = expandedXDesc->GetDataType();
-    OP_CHECK_IF(dtype != ge::DataType::DT_FLOAT && dtype != ge::DataType::DT_FLOAT16 && dtype != ge::DataType::DT_BF16,
-                OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "expanded_x", Ops::Base::ToString(dtype).c_str(),
-                                          "FLOAT, FLOAT16 or BF16"),
-                return ge::GRAPH_FAILED);
-    dtypeSize = (dtype == ge::DataType::DT_FLOAT) ? sizeof(float) : sizeof(short);
+    // 适配hif4
+    if (dtype == Ops::Transformer::DT_HIFLOAT4) {
+        isHif4Dequant_ = true;
+        dtypeSize = 0;                 // hif4不使用这个变量
+        dtype = ge::DataType::DT_BF16; // 用于x1/x2/bias的校验
+    } else {
+        OP_CHECK_IF(
+            dtype != ge::DataType::DT_FLOAT && dtype != ge::DataType::DT_FLOAT16 && dtype != ge::DataType::DT_BF16,
+            OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "expanded_x", Ops::Base::ToString(dtype).c_str(),
+                                      "FLOAT, FLOAT16 or BF16"),
+            return ge::GRAPH_FAILED);
+        dtypeSize = (dtype == ge::DataType::DT_FLOAT) ? sizeof(float) : sizeof(short);
+    }
     auto expandedXShape = context_->GetInputShape(EXPANDED_X_IDX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXShape);
     OP_CHECK_IF(GetECH(expandedXShape) != ge::GRAPH_SUCCESS,
@@ -649,6 +734,18 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::DoGetShapeAttrsInfo()
 
 int64_t MoeFinalizeRoutingV2Regbase::RowsHSize(int64_t rowFactor, bool scalesInUb)
 {
+    if (isHif4Dequant_) {
+        // row/k/h模式下，也需要增加scale空间
+        int64_t scaleLen =
+            scalesInUb ?
+                Ops::Base::CeilDiv(static_cast<uint64_t>(k * h / HIF4_BLOCK_SIZE * sizeof(uint32_t)), blockSize_) *
+                    blockSize_ :
+                0;
+        // hif4反量化模式，外循环一次拷入拷出的rows只包含x1、x2、y
+        int64_t rowsLen = rowFactor * h * SIZEOF_B16; // 天然对齐到UB了
+        return (static_cast<int64_t>(hasX1_) + static_cast<int64_t>(hasX2_) + 1) * rowsLen +
+               scaleLen; // rowFactor*(x1需要空间、x2需要空间、y需要空间)
+    }
     return (static_cast<int64_t>(hasX1_) + static_cast<int64_t>(hasX2_) + static_cast<int64_t>(hasX_)) *
                Ops::Base::CeilDiv(static_cast<uint64_t>(rowFactor * h * dtypeSize), blockSize_) * blockSize_ +
            (hasConstantExpert_ ? 1 : 0) * CONST_EXPERT_BUFFER_NUM *
@@ -660,6 +757,20 @@ int64_t MoeFinalizeRoutingV2Regbase::RowsHSize(int64_t rowFactor, bool scalesInU
 
 int64_t MoeFinalizeRoutingV2Regbase::RowsHSizeForKHFullLoad(int64_t rowFactor, bool scalesInUb)
 {
+    if (isHif4Dequant_) {
+        // row/k/h模式下，也需要增加scale空间
+        int64_t scaleLen =
+            scalesInUb ?
+                Ops::Base::CeilDiv(static_cast<uint64_t>(k * h / HIF4_BLOCK_SIZE * sizeof(uint32_t)), blockSize_) *
+                    blockSize_ :
+                0;
+        // hif4反量化模式，外循环一次拷入拷出的rows只包含x1、x2、y
+        int64_t rowsLen = rowFactor * h * SIZEOF_B16; // 天然对齐到UB了
+        return (static_cast<int64_t>(hasX1_) + static_cast<int64_t>(hasX2_) + 1) * rowsLen + scaleLen +
+               (hasBias_ ? 1 : 0) * rowFactor * k * hAligned * dtypeSize + rowFactor * rowsLen +
+               Ops::Base::CeilDiv(static_cast<uint64_t>(rowFactor * k * sizeof(int32_t)), blockSize_) * blockSize_ +
+               Ops::Base::CeilDiv(static_cast<uint64_t>(rowFactor * k * sizeof(int32_t)), blockSize_) * blockSize_;
+    }
     return (static_cast<int64_t>(hasX1_) + static_cast<int64_t>(hasX2_) + static_cast<int64_t>(hasX_)) *
                Ops::Base::CeilDiv(static_cast<uint64_t>(rowFactor * h * dtypeSize), blockSize_) * blockSize_ +
            (scalesInUb && hasScales_ ? 1 : 0) *
@@ -749,6 +860,25 @@ void MoeFinalizeRoutingV2Regbase::SetFullLoadTilingData(int64_t rowOfFormerBlock
     tilingData->constExpertRangeNum = constExpertRangeNum;
 }
 
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingHif4RowKHFullLoad(int64_t rowOfFormerBlock,
+                                                                         int64_t rowOfTailBlock)
+{
+    int64_t expandedXAlignedByte;
+    if (dropPadMode == DROP_LESS_COL || dropPadMode == DROP_LESS_ROW) {
+        expandedXAlignedByte =
+            Ops::Base::CeilDiv(static_cast<uint64_t>(row * k * h / NUM_FP4_IN_BYTE), blockSize_) * blockSize_;
+    } else {
+        expandedXAlignedByte =
+            Ops::Base::CeilDiv(static_cast<uint64_t>(e * c * h / NUM_FP4_IN_BYTE), blockSize_) * blockSize_;
+    }
+    int64_t eHAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(e * h * SIZEOF_B16), blockSize_) * blockSize_;
+    int64_t hasBiasvalue = hasBias_ ? eHAlignedByte : 0;
+    int64_t ubSizeRemained = (ubSize_ - expandedXAlignedByte - hasBiasvalue) / DOUBLE_BUFFER;
+    int64_t rowFactor = CalcRowFactor(ubSizeRemained, true);
+    SetFullLoadTilingData(rowOfFormerBlock, rowOfTailBlock, rowFactor);
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingRowKHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
 {
     int64_t expandedXAlignedByte;
@@ -780,6 +910,41 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingKHFullLoad(int64_t rowOfF
         rowFactor = CalcRowFactor(ubSizeRemained, true);
     }
     SetFullLoadTilingData(rowOfFormerBlock, rowOfTailBlock, rowFactor);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingHif4HFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
+{
+    int64_t expandedXAndBiasSize = h / NUM_FP4_IN_BYTE + static_cast<int64_t>(hasBias_) * h * SIZEOF_B16 +
+                                   Ops::Base::CeilAlign(static_cast<int64_t>(h / HIF4_BLOCK_SIZE * sizeof(uint32_t)),
+                                                        static_cast<int64_t>(blockSize_));
+    int64_t kFactor = ubSize_ / DOUBLE_BUFFER / expandedXAndBiasSize;
+    int64_t upper = kFactor;
+    int64_t lower = 1;
+    int64_t blockSize = static_cast<int64_t>(blockSize_);
+    while (upper - lower > 1) {
+        int64_t mid = (lower + upper) / TWO;
+        int64_t useUbSize = mid * expandedXAndBiasSize + Ops::Base::CeilDiv(mid * dtypeSize, blockSize) * blockSize +
+                            RowsHSize(1, false);
+        if (useUbSize > ubSize_ / DOUBLE_BUFFER) {
+            upper = mid;
+        } else {
+            lower = mid;
+        }
+    }
+    kFactor = lower;
+
+    int64_t kLoop = Ops::Base::CeilDiv(k, kFactor);
+    kFactor = Ops::Base::CeilDiv(k, kLoop);
+    int64_t tailKFactor = k - (kLoop - 1) * kFactor;
+
+    int64_t ubSizeRemained = ubSize_ / DOUBLE_BUFFER - kFactor * expandedXAndBiasSize -
+                             Ops::Base::CeilDiv(kFactor * dtypeSize, blockSize) * blockSize;
+    int64_t rowFactor = CalcRowFactor(ubSizeRemained, false);
+    SetFullLoadTilingData(rowOfFormerBlock, rowOfTailBlock, rowFactor);
+    tilingData->kLoop = kLoop;
+    tilingData->kFactor = kFactor;
+    tilingData->tailKFactor = tailKFactor;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -815,6 +980,28 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingHFullLoad(int64_t rowOfFo
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingHif4SplitH(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
+{
+    int64_t actualInputNum = INPUT_BUFFER_NUM - static_cast<int64_t>(!hasX1_) - static_cast<int64_t>(!hasX2_) -
+                             static_cast<int64_t>(!hasBias_);
+    int64_t totalBufferNum = actualInputNum + OUTPUT_BUFFER_NUM + (dtype != ge::DataType::DT_FLOAT ? 1 : 0);
+    int64_t hFactor = ubSize_ / DOUBLE_BUFFER / SIZEOF_B16 / totalBufferNum;
+
+    int64_t hLoop = Ops::Base::CeilDiv(h, hFactor);
+    hFactor = Ops::Base::CeilDiv(h, hLoop);
+    int64_t tailHFactor = h - (hLoop - 1) * hFactor;
+    tilingData->rowLoopOfFormerBlock = rowOfFormerBlock;
+    tilingData->rowLoopOfTailBlock = rowOfTailBlock;
+    tilingData->rowFactor = 1;
+    tilingData->tailRowFactorOfFormerBlock = rowOfFormerBlock;
+    tilingData->tailRowFactorOfTailBlock = rowOfTailBlock;
+    tilingData->hLoop = hLoop;
+    tilingData->hFactor = hFactor;
+    tilingData->tailHFactor = tailHFactor;
+    tilingData->activeNum = dim0OfExpandedX;
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingSplitH(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
 {
     int64_t actualInputNum = INPUT_BUFFER_NUM - static_cast<int64_t>(!hasX1_) - static_cast<int64_t>(!hasX2_) -
@@ -835,6 +1022,21 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingSplitH(int64_t rowOfForme
     tilingData->tailHFactor = tailHFactor;
     tilingData->activeNum = dim0OfExpandedX;
 
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingHif4KHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
+{
+    // expandedX、scales、bias 每次小循环都搬运一次k行
+    int64_t expandedXLen = k * h / 2; // fp4的字节数是元素个数除以2，且这里h是64的整数倍可以直接整除
+    int64_t scalesLenAligned =
+        k * Ops::Base::CeilAlign(static_cast<int64_t>(h / 64 * sizeof(uint32_t)), static_cast<int64_t>(blockSize_));
+    int64_t biasLen = hasBias_ ? k * h * SIZEOF_B16 : 0;
+    // x1、x2、y 每次ub大循环搬运一次rowFactor行
+    int64_t ubSizeRemained = ubSize_ / DOUBLE_BUFFER - expandedXLen - scalesLenAligned - biasLen;
+    int64_t rowFactor = CalcRowFactor(ubSizeRemained, false);
+
+    SetFullLoadTilingData(rowOfFormerBlock, rowOfTailBlock, rowFactor);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -882,14 +1084,27 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CalcOpTiling()
 
     // 切分
     ge::graphStatus ret;
-    if (rowKHFullLoad_) {
-        ret = DoOpTilingRowKHFullLoad(rowPerCore, rowOfTailBlock);
-    } else if (kHFullLoad_) {
-        ret = DoOpTilingKHFullLoad(rowPerCore, rowOfTailBlock);
-    } else if (hFullLoad_) {
-        ret = DoOpTilingHFullLoad(rowPerCore, rowOfTailBlock);
+    // 适配hif4
+    if (isHif4Dequant_) {
+        if (isHif4RowKHFullLoad_) {
+            ret = DoOpTilingHif4RowKHFullLoad(rowPerCore, rowOfTailBlock);
+        } else if (isHif4KHFullLoad_) {
+            ret = DoOpTilingHif4KHFullLoad(rowPerCore, rowOfTailBlock);
+        } else if (isHif4HFullLoad_) {
+            ret = DoOpTilingHif4HFullLoad(rowPerCore, rowOfTailBlock);
+        } else {
+            ret = DoOpTilingHif4SplitH(rowPerCore, rowOfTailBlock);
+        }
     } else {
-        ret = DoOpTilingSplitH(rowPerCore, rowOfTailBlock);
+        if (rowKHFullLoad_) {
+            ret = DoOpTilingRowKHFullLoad(rowPerCore, rowOfTailBlock);
+        } else if (kHFullLoad_) {
+            ret = DoOpTilingKHFullLoad(rowPerCore, rowOfTailBlock);
+        } else if (hFullLoad_) {
+            ret = DoOpTilingHFullLoad(rowPerCore, rowOfTailBlock);
+        } else {
+            ret = DoOpTilingSplitH(rowPerCore, rowOfTailBlock);
+        }
     }
 
     OP_CHECK_IF(
@@ -898,6 +1113,47 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CalcOpTiling()
         return ge::GRAPH_FAILED);
     PrintTilingData();
     return ge::GRAPH_SUCCESS;
+}
+
+bool MoeFinalizeRoutingV2Regbase::IsHif4KHFullLoad()
+{
+    hAligned = h;                     // hif4模式要求h是64的倍数，因此hAligned天然等于h
+    int64_t expandedXLen = k * h / 2; // fp4的字节数是元素个数除以2，且这里h是64的整数倍可以直接整除
+    // scales在kernel里翻译成uint32_t来按字节提取，且需要手动对齐到UB
+    int64_t scalesLenAligned =
+        k * Ops::Base::CeilAlign(static_cast<int64_t>(h / 64 * sizeof(uint32_t)), static_cast<int64_t>(blockSize_));
+    int64_t oneRowLen = h * SIZEOF_B16;
+    int64_t biasLen = hasBias_ ? k * oneRowLen : 0;
+    int64_t x1Len = hasX1_ ? oneRowLen : 0;
+    int64_t x2Len = hasX2_ ? oneRowLen : 0;
+    int64_t yLen = oneRowLen;
+    int64_t totalLenBytes = DOUBLE_BUFFER * (expandedXLen + scalesLenAligned + biasLen + x1Len + x2Len + yLen);
+    return totalLenBytes <= ubSize_;
+}
+
+bool MoeFinalizeRoutingV2Regbase::IsHif4RowKHFullLoad()
+{
+    int64_t expandedXAlignedByte;
+    if (dropPadMode == DROP_LESS_COL || dropPadMode == DROP_LESS_ROW) {
+        expandedXAlignedByte =
+            Ops::Base::CeilDiv(static_cast<uint64_t>(row * k * h / NUM_FP4_IN_BYTE), blockSize_) * blockSize_;
+    } else {
+        expandedXAlignedByte =
+            Ops::Base::CeilDiv(static_cast<uint64_t>(e * c * h / NUM_FP4_IN_BYTE), blockSize_) * blockSize_;
+    }
+    int64_t eHAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(e * h * SIZEOF_B16), blockSize_) * blockSize_;
+    int64_t scalesAlignedByte =
+        Ops::Base::CeilDiv(static_cast<uint64_t>(k * h * sizeof(uint32_t) / HIF4_BLOCK_SIZE), blockSize_) * blockSize_;
+    int64_t hAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(h * SIZEOF_B16), blockSize_) * blockSize_;
+    hAligned = hAlignedByte / SIZEOF_B16;
+    int64_t hAligned32Byte = Ops::Base::CeilDiv(static_cast<uint64_t>(h * sizeof(float)), blockSize_) * blockSize_;
+    int64_t hasBiasvalue = hasBias_ ? eHAlignedByte : 0;
+    int64_t hasScalevalue = hasScales_ ? scalesAlignedByte : 0;
+    int64_t totalSize =
+        expandedXAlignedByte + hasBiasvalue +
+        DOUBLE_BUFFER * (hasScalevalue + (static_cast<int64_t>(hasX1_) + static_cast<int64_t>(hasX2_)) * hAlignedByte +
+                         hAligned32Byte * OUTPUT_BUFFER_NUM);
+    return totalSize <= ubSize_;
 }
 
 bool MoeFinalizeRoutingV2Regbase::IsRowKHFullLoad()
@@ -953,6 +1209,22 @@ bool MoeFinalizeRoutingV2Regbase::IsKHFullLoad()
     return totalSize <= ubSize_;
 }
 
+bool MoeFinalizeRoutingV2Regbase::IsHif4HFullLoad()
+{
+    hAligned = h;                               // hif4模式要求h是64的倍数，因此hAligned天然等于h
+    int64_t expandedXLen = h / NUM_FP4_IN_BYTE; // fp4的字节数是元素个数除以2，且这里h是64的整数倍可以直接整除
+    // scales在kernel里翻译成uint32_t来按字节提取，且需要手动对齐到UB
+    int64_t scalesLenAligned = Ops::Base::CeilAlign(static_cast<int64_t>(h / HIF4_BLOCK_SIZE * sizeof(uint32_t)),
+                                                    static_cast<int64_t>(blockSize_));
+    int64_t oneRowLen = h * SIZEOF_B16;
+    int64_t biasLen = hasBias_ ? oneRowLen : 0;
+    int64_t x1Len = hasX1_ ? oneRowLen : 0;
+    int64_t x2Len = hasX2_ ? oneRowLen : 0;
+    int64_t yLen = oneRowLen;
+    int64_t totalLenBytes = DOUBLE_BUFFER * (expandedXLen + scalesLenAligned + biasLen + x1Len + x2Len + yLen);
+    return totalLenBytes <= ubSize_;
+}
+
 bool MoeFinalizeRoutingV2Regbase::IsHFullLoad()
 {
     int64_t oneKAlignedByte = static_cast<int64_t>(blockSize_);
@@ -974,6 +1246,23 @@ bool MoeFinalizeRoutingV2Regbase::IsCapable()
     if (!Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_)) {
         return false;
     }
+    // 适配hif4
+    if (isHif4Dequant_) {
+        isHif4RowKHFullLoad_ = IsHif4RowKHFullLoad();
+        if (isHif4RowKHFullLoad_) {
+            return true;
+        }
+        isHif4KHFullLoad_ = IsHif4KHFullLoad();
+        if (isHif4KHFullLoad_) {
+            return true;
+        }
+        isHif4HFullLoad_ = IsHif4HFullLoad();
+        if (isHif4HFullLoad_) {
+            return true;
+        }
+        return true;
+    }
+
     // IsRowKHFullLoad（全维度）→ IsKHFullLoad（K-H 维度）→ IsHFullLoad（仅 H 维度），粒度由粗到细，适配不同 MoE
     // 子任务；
     rowKHFullLoad_ = IsRowKHFullLoad();
@@ -992,14 +1281,28 @@ bool MoeFinalizeRoutingV2Regbase::IsCapable()
 
 ge::graphStatus MoeFinalizeRoutingV2Regbase::CalcTilingKey()
 {
-    if (rowKHFullLoad_) {
-        tilingKey_ = FULL_LOAD_ROW_K_H_BASE_TILING_KEY;
-    } else if (kHFullLoad_) {
-        tilingKey_ = FULL_LOAD_K_H_BASE_TILING_KEY;
-    } else if (hFullLoad_) {
-        tilingKey_ = FULL_LOAD_H_BASE_TILING_KEY;
+    // 适配hif4
+    if (isHif4Dequant_) {
+        // isHif4KHFullLoad_必须为True
+        if (isHif4RowKHFullLoad_) {
+            tilingKey_ = HIF4_FULL_LOAD_ROW_K_H_BASE_TILING_KEY;
+        } else if (isHif4KHFullLoad_) {
+            tilingKey_ = HIF4_FULL_LOAD_K_H_BASE_TILING_KEY;
+        } else if (isHif4HFullLoad_) {
+            tilingKey_ = HIF4_FULL_LOAD_H_BASE_TILING_KEY;
+        } else {
+            tilingKey_ = HIF4_FULL_LOAD_SPLIT_H_BASE_TILING_KEY;
+        }
     } else {
-        tilingKey_ = SPLIT_H_BASE_TILING_KEY;
+        if (rowKHFullLoad_) {
+            tilingKey_ = FULL_LOAD_ROW_K_H_BASE_TILING_KEY;
+        } else if (kHFullLoad_) {
+            tilingKey_ = FULL_LOAD_K_H_BASE_TILING_KEY;
+        } else if (hFullLoad_) {
+            tilingKey_ = FULL_LOAD_H_BASE_TILING_KEY;
+        } else {
+            tilingKey_ = SPLIT_H_BASE_TILING_KEY;
+        }
     }
 
     if (dropPadMode == DROP_LESS_COL) {
@@ -1022,6 +1325,6 @@ void MoeFinalizeRoutingV2Regbase::DoPostTiling()
     return;
 }
 
-REGISTER_OPS_TILING_TEMPLATE(MoeFinalizeRoutingV2, MoeFinalizeRoutingV2Regbase, 30000);
+REGISTER_OPS_TILING_TEMPLATE(MoeFinalizeRoutingV2, MoeFinalizeRoutingV2Regbase, 1000);
 
 } // namespace optiling

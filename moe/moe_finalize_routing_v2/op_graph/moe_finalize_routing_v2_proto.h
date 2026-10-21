@@ -16,6 +16,7 @@
 #define OPS_OP_PROTO_INC_MOEFINALIZE_ROUTEV2_H_
 
 #include "graph/operator_reg.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace ge {
 
@@ -68,7 +69,7 @@ arrangement).
 * @li k:  Optional parameter. Type is Int. Represents the number of top-K experts selected per token. Default: 1.
 */
 REG_OP(MoeFinalizeRoutingV2)
-    .INPUT(expanded_x, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))
+    .INPUT(expanded_x, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16, Ops::Transformer::DT_HIFLOAT4}))
     .INPUT(expanded_row_idx, TensorType({DT_INT32}))
     .OPTIONAL_INPUT(x1, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))
     .OPTIONAL_INPUT(x2, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))

@@ -58,6 +58,7 @@ END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(MoeReRouting_200000, MoeReRoutingReTilingData);
 REGISTER_TILING_DATA_CLASS(MoeReRouting_200100, MoeReRoutingReTilingData);
 REGISTER_TILING_DATA_CLASS(MoeReRouting_200200, MoeReRoutingReTilingData);
+REGISTER_TILING_DATA_CLASS(MoeReRouting_200300, MoeReRoutingReTilingData);
 
 BEGIN_TILING_DATA_DEF(MoeReRoutingRTilingData)
 TILING_DATA_FIELD_DEF(int64_t, tokenSize);       // token大小
@@ -75,6 +76,7 @@ END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(MoeReRouting_210000, MoeReRoutingRTilingData);
 REGISTER_TILING_DATA_CLASS(MoeReRouting_210100, MoeReRoutingRTilingData);
 REGISTER_TILING_DATA_CLASS(MoeReRouting_210200, MoeReRoutingRTilingData);
+REGISTER_TILING_DATA_CLASS(MoeReRouting_210300, MoeReRoutingRTilingData);
 
 struct ParamsMoeReRouting {
     ge::DataType tokenDtype = ge::DT_UNDEFINED;

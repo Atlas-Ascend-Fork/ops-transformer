@@ -22,6 +22,7 @@
 #include "aclnn_moe_init_routing_v3.h"
 #include "external/aclnn_kernels/aclnn_platform.h"
 #include "aclnn_util.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 using namespace op;
 
@@ -47,9 +48,11 @@ static const std::initializer_list<DataType> DTYPE_SUPPORT_LIST_OFFSET = {DataTy
 static const std::initializer_list<DataType> DTYPE_SUPPORT_LIST_EXPANDED_X_OUT = {
     DataType::DT_FLOAT16, DataType::DT_BF16, DataType::DT_FLOAT, DataType::DT_INT8};
 static const std::initializer_list<DataType> DTYPE_SUPPORT_LIST_EXPANDED_X_OUT_REGBASE = {
-    DataType::DT_FLOAT16,       DataType::DT_BF16,        DataType::DT_FLOAT,
-    DataType::DT_INT8,          DataType::DT_HIFLOAT8,    DataType::DT_FLOAT8_E5M2,
-    DataType::DT_FLOAT8_E4M3FN, DataType::DT_FLOAT4_E2M1, DataType::DT_INT4};
+    DataType::DT_FLOAT16,       DataType::DT_BF16,
+    DataType::DT_FLOAT,         DataType::DT_INT8,
+    DataType::DT_HIFLOAT8,      DataType::DT_FLOAT8_E5M2,
+    DataType::DT_FLOAT8_E4M3FN, DataType::DT_FLOAT4_E2M1,
+    DataType::DT_INT4,          Ops::Transformer::DT_HIFLOAT4};
 static const std::initializer_list<DataType> DTYPE_SUPPORT_LIST_EXPANDED_ROW_IDX_OUT = {DataType::DT_INT32};
 static const std::initializer_list<DataType> DTYPE_SUPPORT_LIST_EXPERT_TOKENS_COUNT_OR_CUMSUMOUT = {DataType::DT_INT64};
 static const std::initializer_list<DataType> DTYPE_SUPPORT_LIST_EXPANDED_SCALE_OUT = {DataType::DT_FLOAT};

@@ -324,7 +324,7 @@ __aicore__ inline void MoeV3GatherFP8GroupQuant<T, U, CLAMP_AMAX>::Init(
     GM_ADDR expandedScaleAddr, const MoeInitRoutingV3Arch35TilingData* tilingData, TPipe* tPipe)
 {
     (void)unusedScaleAddr;
-#if (__NPU_ARCH__ == 3510)
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(0);
 #endif
     pipe_ = tPipe;

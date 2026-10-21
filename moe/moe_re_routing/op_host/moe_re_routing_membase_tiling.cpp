@@ -18,6 +18,7 @@
 #include "tiling/tiling_api.h"
 #include "util/math_util.h"
 #include "log/log.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace optiling {
 
@@ -48,6 +49,8 @@ constexpr int64_t TILING_KEY_TOKENS_FP16_EXPERTS_INT32_SCALES_FLOAT32 = 100100;
 constexpr int64_t TILING_KEY_TOKENS_FP16_EXPERTS_INT64_SCALES_FLOAT32 = 100110;
 constexpr int64_t TILING_KEY_TOKENS_BF16_EXPERTS_INT32_SCALES_FLOAT32 = 100200;
 constexpr int64_t TILING_KEY_TOKENS_BF16_EXPERTS_INT64_SCALES_FLOAT32 = 100210;
+constexpr int64_t TILING_KEY_TOKENS_HIF4_EXPERTS_INT32_SCALES_FLOAT32 = 100300;
+constexpr int64_t TILING_KEY_TOKENS_HIF4_EXPERTS_INT64_SCALES_FLOAT32 = 100310;
 
 inline int64_t CeilDiv(int64_t N, int64_t n)
 {
@@ -61,6 +64,8 @@ static const std::map<std::pair<ge::DataType, ge::DataType>, int64_t> TILING_KEY
     {{ge::DT_FLOAT16, ge::DT_INT64}, TILING_KEY_TOKENS_FP16_EXPERTS_INT64_SCALES_FLOAT32},
     {{ge::DT_BF16, ge::DT_INT32}, TILING_KEY_TOKENS_BF16_EXPERTS_INT32_SCALES_FLOAT32},
     {{ge::DT_BF16, ge::DT_INT64}, TILING_KEY_TOKENS_BF16_EXPERTS_INT64_SCALES_FLOAT32},
+    {{Ops::Transformer::DT_HIFLOAT4, ge::DT_INT32}, TILING_KEY_TOKENS_HIF4_EXPERTS_INT32_SCALES_FLOAT32},
+    {{Ops::Transformer::DT_HIFLOAT4, ge::DT_INT64}, TILING_KEY_TOKENS_HIF4_EXPERTS_INT64_SCALES_FLOAT32},
 };
 
 static std::tuple<int64_t, int64_t> GetShapeTuple(const gert::TilingContext* context, const int64_t index = 0)
