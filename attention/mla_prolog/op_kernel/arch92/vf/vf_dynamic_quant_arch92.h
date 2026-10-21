@@ -543,7 +543,8 @@ __simd_vf__ void ComputeDataVF(__ubuf__ T* srcAddr, __ubuf__ uint16_t* halfScale
  * @param outputLocal 输出tensor [row, col]
  * @param outputScale 输出每行的反量化系数 [row, col/32]
  * @param inputLocal 输入tensor [row, col]
- * @param tmpLocal 临时buffer,所需空间大小row * col * 2
+ * @param tmpLocal 临时buffer，n = row * col；需要 2 * n + Align(n / 16, 32) 字节。
+ *                 halfScale 位于 2 * n 字节处，每个 32 元素 block 另占一个 uint16_t。
  * @param row 待处理的行数
  * @param col 待处理的列数
  */

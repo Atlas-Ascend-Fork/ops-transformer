@@ -18,7 +18,7 @@
 
 #if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201))
 #include "../../mla_prolog/op_kernel/arch92/kernel_mla_prolog_split_n_arch92.h"
-#include "../../mla_prolog/op_kernel/arch92/kernel_mla_prolog_split_m.h"
+#include "../../mla_prolog/op_kernel/arch92/kernel_mla_prolog_split_m_arch92.h"
 #elif __CCE_AICORE__ == 310
 #include "../../mla_prolog/op_kernel/arch35/kernel_mla_prolog_split_n_arch35.h"
 #include "../../mla_prolog/op_kernel/arch35/kernel_mla_prolog_split_m.h"

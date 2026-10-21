@@ -42,6 +42,10 @@
 
 namespace optiling {
 
+namespace mla_ub {
+struct Params;
+}
+
 // INPUT
 constexpr uint32_t TOKEN_X_INPUT_INDEX = 0;
 constexpr uint32_t WEIGHT_DQ_INPUT_INDEX = 1;
@@ -403,7 +407,9 @@ private:
     QUANT_MODE GetQuantizationMode() const;
     QUANT_MODE GetQuantizationModeV3() const;
     QUANT_MODE GetQuantizationModeV3Dav() const;
+    ge::graphStatus CheckTokenShape() const;
     ge::graphStatus SetShapeInfo();
+    void SetCacheShapeInfo();
     void SetShapeInfoDrSize();
     ge::graphStatus ProcessBaseInputs();
     ge::graphStatus FillTiling();
@@ -412,6 +418,10 @@ private:
     ge::graphStatus FillMatmul2Tiling();
     ge::graphStatus FillMatmul3Tiling();
     ge::graphStatus FillMatmul4Tiling();
+    ge::graphStatus BuildUbBudgetParams(mla_ub::Params& params) const;
+    ge::graphStatus ReduceStepBatchForUb();
+    void LogUbStepChange(uint32_t step, uint32_t mm1Ng, uint32_t mm1Kg, uint32_t mm2Ng, uint32_t mm2Kg) const;
+    ge::graphStatus RefineStepBatchForUb();
     uint32_t CalcSingleCoreN(uint32_t n, uint32_t coreNum, uint32_t alignNum = 16) const;
 
     bool IsSplitKnSupported() const;

@@ -119,10 +119,13 @@ __aicore__ inline void ScatterCacheMultiRows(GlobalTensor<T>& cacheGm, const Loc
         constexpr uint8_t col0 = ALIGN_BLOCK_SIZE / sizeof(T);
         DataCopyParams copyParams{static_cast<uint16_t>(scatterCacheParams.col / col0), 1, 0,
                                   static_cast<uint16_t>(scatterCacheParams.blockSize - 1)};
-        DataCopy(cacheGm[cacheOffset], inputLocal, copyParams);
+        for (int64_t row = 0; row < rowsInCurBatch; ++row) {
+            DataCopy(cacheGm[cacheOffset + row * col0], inputLocal[row * scatterCacheParams.col], copyParams);
+        }
         if (rowsInCurBatch != scatterCacheParams.row) {
-            for (int row = 0; row < scatterCacheParams.row - rowsInCurBatch; ++row) {
-                DataCopy(cacheGm[nextBatchOffset + row * col0], inputLocal[copyCnt + row * col0], copyParams);
+            for (int64_t row = 0; row < scatterCacheParams.row - rowsInCurBatch; ++row) {
+                DataCopy(cacheGm[nextBatchOffset + row * col0], inputLocal[copyCnt + row * scatterCacheParams.col],
+                         copyParams);
             }
         }
     }

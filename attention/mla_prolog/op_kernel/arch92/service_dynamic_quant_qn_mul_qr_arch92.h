@@ -115,13 +115,9 @@ __aicore__ inline void MulQr(const GlobalTensor<T>& outputGmRope, const GlobalTe
         WaitFlag<HardEvent::MTE2_V>(MUL_QR);
 
         Cast(qrFp32Local, qrInputLocal[inputLocalRopeOffset], RoundMode::CAST_NONE, computeSizeRope);
-        if (cvRatio == 1) {
-            MulQrVF(qrFp32Local, qrFp32Local, dequantScaleBrcbLocal[dequantScaleOffset], quantScaleCkvRope,
-                    computeSizeRope, computeBlockAlign);
-        } else {
-            MulQrVF(qrFp32Local, qrFp32Local, dequantScaleBrcbLocal, quantScaleCkvRope, computeSizeRope,
-                    computeBlockAlign);
-        }
+        // Every chunk consumes its own token scales, independently of the AIC/AIV ratio.
+        MulQrVF(qrFp32Local, qrFp32Local, dequantScaleBrcbLocal[dequantScaleOffset], quantScaleCkvRope, computeSizeRope,
+                computeBlockAlign);
         Cast(outputLocalRope, qrFp32Local, RoundMode::CAST_RINT, computeSizeRope);
 
         SetFlag<HardEvent::V_MTE3>(MUL_QR);

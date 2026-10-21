@@ -168,10 +168,12 @@ private:
     __aicore__ inline void ScatterCkv(LocalTensor<kvCacheType>& outputLocal, CkvkrParams rmsNormAndScatterCkvParams);
     __aicore__ inline void RmsNormRopeScatterCkvKr(int64_t tokenIndex, int64_t rmsNormCkvOffset, int64_t ropeKrOffset,
                                                    int64_t curVecToken, int64_t batchOffset);
+    __aicore__ inline void ReleaseCkvkrWorkspace();
     __aicore__ inline void RopeQr(int64_t ropeQrOffset, int64_t ropeQrResOffset, int64_t curVecToken,
                                   int64_t curBlockTokenOffset);
     __aicore__ inline void DequantQc(int64_t mmQnPreDequantOffset, int64_t mmQnPreDequantResOffset, int64_t curVecToken,
                                      int64_t curBlockTokenOffset);
+    __aicore__ inline void DequantQcAndSync(AivOffset& aivOffset);
     __aicore__ inline void CastQc(int64_t mmQnPreCastOffset, int64_t mmQnPreCastResOffset, int64_t curVecToken);
     // 低时延算力分组场景
     template <bool needQnDynamicQuant>
@@ -226,9 +228,10 @@ private:
     static constexpr uint32_t cvMode = MLAPT::cvRatio;
     static constexpr bool isFp8E8m0 = std::is_same<dequantScaleType, FP8E8M0>::value;
 
-    static constexpr bool nqWaveMode =
-        MLA_NQ_WAVE_ENABLE && MLA_USE_UB_DIRECT && std::is_same<mmInputType, bfloat16_t>::value &&
-        std::is_same<mmQcQrInputType, bfloat16_t>::value && std::is_same<dequantScaleType, float>::value;
+    static constexpr bool nqWaveMode = MLA_NQ_WAVE_ENABLE && MLA_USE_UB_DIRECT && (MLAPT::cvRatio == 1) &&
+                                       std::is_same<mmInputType, bfloat16_t>::value &&
+                                       std::is_same<mmQcQrInputType, bfloat16_t>::value &&
+                                       std::is_same<dequantScaleType, float>::value;
 
     uint32_t cvRatio_ = 2U;
     uint32_t ubShareBytes_ = 0U;
@@ -248,6 +251,17 @@ private:
 
     TBuf<TPosition::VECCALC> qcqrScaleBuf_;
     LocalTensor<float> qcqrScaleLocal_;
+
+    __aicore__ inline uint32_t CvSharedSlotBytes() const
+    {
+        // MM3 emits a full M-by-(D+Dr) head; MM4 emits up to ceil(M/2)-by-Hckv.
+        // Both producers and consumers must use the same byte stride, including M=1.
+        const uint32_t mm3Bytes = baseParams_->stepBatchSize * mmQcQrParam_.baseN * sizeof(mmQcQrOutputType);
+        const uint32_t mm4Bytes = MLAPT::enableDequantOpt ? ((baseParams_->stepBatchSize + 1U) / 2U) *
+                                                                baseParams_->headSizeCkv * sizeof(mmQnOutputType) :
+                                                            0U;
+        return Align((mm3Bytes > mm4Bytes) ? mm3Bytes : mm4Bytes, static_cast<uint32_t>(ALIGN_BLOCK_SIZE));
+    }
 
     __aicore__ inline uint32_t CkvkrWriteSpan()
     {
@@ -274,8 +288,8 @@ private:
         const uint32_t colQcW = baseParams_->dimHeadSizeQc;
         const uint32_t colQrW = baseParams_->dimHeadRope;
         const uint64_t dequantPhase = static_cast<uint64_t>(m) * colQcW * 4U + 2048U; // Cast 的 fp32 输入 + 槽余量
-        const uint64_t ropePhase = static_cast<uint64_t>(m) * colQcW * 2U +
-                                   static_cast<uint64_t>(m) * colQrW * 6U; // 2×sFp(4B)+2×sOut(2B), ropeCnt=m/2
+        const uint64_t ropePhase =
+            static_cast<uint64_t>(m) * colQcW * 2U + static_cast<uint64_t>((m + 1U) / 2U) * colQrW * 12U;
         uint64_t scratchPeak = (dequantPhase > ropePhase) ? dequantPhase : ropePhase;
         if (baseParams_->mm1KGroup > 1U && baseParams_->mm1KGroup <= 4U) {
             const uint64_t gaPhase = 2ULL * (baseParams_->mm1KGroup + 1U) * baseParams_->headSizeCq * 4U + 6144U;
@@ -283,7 +297,7 @@ private:
                 scratchPeak = gaPhase;
             }
         }
-        const uint64_t cvUbBytes = 2ULL * m * mmQcQrParam_.baseN * sizeof(mmQcQrOutputType);
+        const uint64_t cvUbBytes = 2ULL * CvSharedSlotBytes();
         const uint64_t fixedEst = 2ULL * colQrW * 4U * m + 2ULL * (baseParams_->headSizeCq + baseParams_->headSizeCkv) +
                                   static_cast<uint64_t>(m + 7U) * 32U + 8192U;
         return cvUbBytes + scratchPeak + fixedEst <= MAX_UB_SIZE;
@@ -708,8 +722,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::VectorBufferInit()
     uint64_t usedBytes = 0;
     if (MLA_USE_UB_DIRECT && (MLAPT::enableDequantOpt || nqWaveMode) && !MLAPT::enableGroupComputeOpt &&
         (!isFp8E8m0 || IsMxWaveCapable())) {
-        uint64_t cvUbSize =
-            2ULL * static_cast<uint64_t>(baseParams_->stepBatchSize) * mmQcQrParam_.baseN * sizeof(mmQcQrOutputType);
+        uint64_t cvUbSize = 2ULL * CvSharedSlotBytes();
         pipe_->InitBuffer(cvSharedUb_, cvUbSize);
         usedBytes += cvUbSize;
     }
@@ -816,8 +829,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::CubeBufferInit()
 
     if (MLA_USE_UB_DIRECT && (MLAPT::enableDequantOpt || nqWaveMode) && !MLAPT::enableGroupComputeOpt &&
         (!isFp8E8m0 || IsMxWaveCapable())) {
-        uint64_t cvUbSize =
-            2ULL * static_cast<uint64_t>(baseParams_->stepBatchSize) * mmQcQrParam_.baseN * sizeof(mmQcQrOutputType);
+        uint64_t cvUbSize = 2ULL * CvSharedSlotBytes();
         pipe_->InitBuffer(cvSharedUb_, cvUbSize);
     }
 
@@ -1157,6 +1169,23 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::AivProcess(AivOffset& aivOffs
                                                               int64_t curStepBatchSize, int64_t numHeadOffset,
                                                               int64_t mmQnLoops)
 {
+    if (batchOffset > 0) {
+        // The next step reuses shareBuffer_ in Gather/RMS, before reaching MM3.
+        // Consume only tokens that were actually produced by the preceding step.
+        if (ckvkrBatchDrainPending_) {
+            WaitFlag<HardEvent::MTE3_V>(CKVKR_STEP_DRAIN);
+            ckvkrBatchDrainPending_ = false;
+        }
+        if (nqWaveTokenPending_) {
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID1);
+            nqWaveTokenPending_ = false;
+        }
+        // Protect both VF stores and MTE2 loads, including do_rope=false and idle MM3 cores.
+        SetFlag<HardEvent::MTE3_V>(EVENT_ID6);
+        WaitFlag<HardEvent::MTE3_V>(EVENT_ID6);
+        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID6);
+        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID6);
+    }
     int64_t tokenIndex = batchOffset + aivOffset.curBlockTokenOffset;
     int64_t rmsNormCqResOffset = baseParams_->queryNormFlag == 1U ?
                                      tokenIndex * baseParams_->headSizeCq :
@@ -1206,9 +1235,19 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::AivProcess(AivOffset& aivOffs
     WaitAllCore<SYNC_MODE_ALL_VEC, PIPE_MTE2>(FINISH_VEC_ALL);
     RmsNormRopeScatterCkvKr(tokenIndex, aivOffset.rmsNormCkvOffset, aivOffset.ropeKrOffset, aivOffset.curVecToken,
                             batchOffset);
-    CrossCoreSetFlag<SYNC_MODE_CUBE_VEC, PIPE_MTE3>(FINISH_VEC_CKVKR);
+    ReleaseCkvkrWorkspace();
 
     DequantQcAndRopeQc<needQnDynamicQuant>(aivOffset, batchOffset, curStepBatchSize, numHeadOffset, mmQnLoops);
+}
+
+template <typename MLAPT>
+__aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::ReleaseCkvkrWorkspace()
+{
+    // Each MM2 producer overwrites all token rows; every AIV must finish its GM reads first.
+    // Keep the global wait and the paired release on MTE3, with a dedicated global flag.
+    CrossCoreSetFlag<SYNC_MODE_ALL_VEC, PIPE_MTE2>(FINISH_VEC_CKVKR_READS);
+    CrossCoreWaitFlag<SYNC_MODE_ALL_VEC, PIPE_MTE3>(FINISH_VEC_CKVKR_READS);
+    CrossCoreSetFlag<SYNC_MODE_CUBE_VEC, PIPE_MTE3>(FINISH_VEC_CKVKR);
 }
 
 template <typename MLAPT>
@@ -1576,7 +1615,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MatmulQcQrSplitN(AicOffset& a
             if (mm3WaveSeq_ >= 2) {
                 CrossCoreWaitFlag<SYNC_MODE_CUBE_VEC, PIPE_FIX>(FINISH_VEC_QCQR_CONSUMED);
             }
-            uint32_t waveElems = baseParams_->stepBatchSize * mmQcQrParam_.baseN;
+            uint32_t waveElems = CvSharedSlotBytes() / sizeof(mmQcQrOutputType);
             waveUb = cvSharedUb_.Get<mmQcQrOutputType>()[(mm3WaveSeq_ & 1u) * waveElems];
             mm3WaveSeq_++;
         }
@@ -1676,7 +1715,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::MatmulQnHeadUb(const GlobalTe
         WaitFlag<HardEvent::MTE2_MTE1>(B_EVENT0 + (bufParam_.bL1BufIter & 1u));
     }
     LocalTensor<mmQnInputType> bL1 = localTensors.bL1Tensor[(bufParam_.bL1BufIter & 1u) * bL1Offset];
-    const uint32_t cvPingElems = baseParams_->stepBatchSize * mmQcQrParam_.baseN * sizeof(mmQcQrOutputType) / sizeof(O);
+    const uint32_t cvPingElems = CvSharedSlotBytes() / sizeof(O);
     const uint32_t nloops = CeilDivT(para.n, para.baseN);
     for (uint32_t h = 0; h < halfCnt; h++) {
         const uint32_t rows = (h == 0) ? rows0 : rows1;
@@ -2029,8 +2068,11 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RmsNormCq(int64_t tokenIndex,
     }
     if constexpr (gaSupportedMx) {
         if (gaGateMx) {
-            const uint32_t slotBytes = static_cast<uint32_t>(baseParams_->headSizeCq) * sizeof(float) *
-                                       (1U + static_cast<uint32_t>(baseParams_->mm1KGroup));
+            const uint32_t partialBytes = static_cast<uint32_t>(baseParams_->headSizeCq) * sizeof(float) *
+                                          (1U + static_cast<uint32_t>(baseParams_->mm1KGroup));
+            const uint32_t quantBytes = 8U * baseParams_->headSizeCq +
+                                        Align(baseParams_->headSizeCq / 16U, static_cast<uint32_t>(ALIGN_BLOCK_SIZE));
+            const uint32_t slotBytes = (partialBytes > quantBytes) ? partialBytes : quantBytes;
             RmsNormParam gaParams = {
                 baseParams_->reciprocalCq, baseParams_->epsilonCq, static_cast<uint32_t>(vectorRow_),
                 baseParams_->headSizeCq,   baseParams_->qcQrScale, baseParams_->isQcQrScaleEnable};
@@ -2258,7 +2300,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::ComputeBlkScatterOffsets(Glob
         needSpill = false;
         nextBlkId = -1;
     } else {
-        curRows = rows - rowsLeftInPage;
+        curRows = rowsLeftInPage;
         needSpill = true;
         nextBlkId = indexGm(blkIdxOffset + 1);
     }
@@ -2636,8 +2678,9 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RmsNormRopeScatterCkvKr(int64
     if constexpr (MLA_CKVKR_BATCH2) {
         const bool takeBatch2 = (curVecToken == 2) && !isPertile && (vectorRow_ == 1);
         if (takeBatch2) {
-            if (batchOffset > 0) {
+            if (ckvkrBatchDrainPending_) {
                 WaitFlag<HardEvent::MTE3_V>(CKVKR_STEP_DRAIN);
+                ckvkrBatchDrainPending_ = false;
             }
             constexpr bool kvMergeModeOk =
                 (MLAPT::cacheMode == CACHE_MODE::PA_BSND) || (MLAPT::cacheMode == CACHE_MODE::ND);
@@ -2878,8 +2921,9 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitN(const RopeQrSpli
         if (wavePitch > 0) {
             uint32_t cnt = ropeCnt * colQr;
             if constexpr (MLA_PRELOAD_QCQR_SCALE && IsFullQuantMode<mmQcQrInputType, dequantScaleType, true>()) {
-                const uint32_t sOut = cnt * static_cast<uint32_t>(sizeof(ropeOutputType));
-                const uint32_t sFp = cnt * static_cast<uint32_t>(sizeof(float));
+                const uint32_t halfCapacity = ((mmQcQrParam_.m + 1U) / 2U) * colQr;
+                const uint32_t sOut = halfCapacity * static_cast<uint32_t>(sizeof(ropeOutputType));
+                const uint32_t sFp = halfCapacity * static_cast<uint32_t>(sizeof(float));
                 const uint32_t dequantOutBytes = static_cast<uint32_t>(mmQcQrParam_.m) *
                                                  (static_cast<uint32_t>(baseParams_->dimHeadSizeQc) / cvRatio_) *
                                                  static_cast<uint32_t>(sizeof(mmQnInputType));
@@ -2890,7 +2934,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitN(const RopeQrSpli
                                       .template ReinterpretCast<ropeOutputType>();
                 ropeShareTmpUb = shareTmpUb[ropeBase];
                 LocalTensor<float> kFp32Local = ropeShareTmpUb.ReinterpretCast<float>(); // 紧凑输入[ropeCnt,colQr]
-                LocalTensor<float> kOutFp32Local = kFp32Local[cnt];                      // rope计算输出
+                LocalTensor<float> kOutFp32Local = kFp32Local[halfCapacity];             // 固定半块容量
                 LocalTensor<float> scaleChLocal = qcqrScaleLocal_[static_cast<uint32_t>(baseParams_->dimHeadSizeQc) +
                                                                   ropeQrSplitNParams.deqScaleOffset];
                 Dequant(kFp32Local, waveUbQr, scaleChLocal, dequantTool_.deQuantScaleCqLocal_[deQuantScaleCqOffset],
@@ -2905,7 +2949,8 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitN(const RopeQrSpli
                 }
             } else if constexpr (std::is_same<mmQcQrInputType, bfloat16_t>::value) {
                 const uint32_t colQcSingleR2 = baseParams_->dimHeadSizeQc / cvRatio_;
-                const uint32_t sOut = cnt * static_cast<uint32_t>(sizeof(ropeOutputType));
+                const uint32_t halfCapacity = ((mmQcQrParam_.m + 1U) / 2U) * colQr;
+                const uint32_t sOut = halfCapacity * static_cast<uint32_t>(sizeof(ropeOutputType));
                 const uint32_t qcScratchBytes = static_cast<uint32_t>(mmQcQrParam_.m) * colQcSingleR2 *
                                                 static_cast<uint32_t>(sizeof(mmQnInputType));
                 const uint32_t ropeBase =
@@ -2914,9 +2959,8 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitN(const RopeQrSpli
                                       .template ReinterpretCast<ropeOutputType>();
                 LocalTensor<uint8_t> ropeScratchUb = shareTmpUb[ropeBase + 2U * sOut];
                 LocalTensor<mmQcQrOutputType> kLocalUb = ropeScratchUb.template ReinterpretCast<mmQcQrOutputType>();
-                LocalTensor<float> kFp32Local =
-                    kLocalUb[cnt].template ReinterpretCast<float>(); // 紧凑输入[ropeCnt,colQr]
-                LocalTensor<float> kOutFp32Local = kFp32Local[cnt];  // rope计算输出
+                LocalTensor<float> kFp32Local = kLocalUb[halfCapacity].template ReinterpretCast<float>();
+                LocalTensor<float> kOutFp32Local = kFp32Local[halfCapacity];
                 CopyStridedVf<mmQcQrOutputType>(kLocalUb, waveUbQr, ropeCnt, colQr, wavePitch, colQr);
                 Cast(kFp32Local, kLocalUb, RoundMode::CAST_NONE, cnt);
                 if constexpr (MLAPT::enableRope) {
@@ -2971,8 +3015,9 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitN(const RopeQrSpli
     } else {
         if (wavePitch > 0) {
             const uint32_t cnt = ropeCnt * colQr;
-            const uint32_t sOut = cnt * static_cast<uint32_t>(sizeof(ropeOutputType));
-            const uint32_t sFp = cnt * static_cast<uint32_t>(sizeof(float));
+            const uint32_t halfCapacity = ((mmQcQrParam_.m + 1U) / 2U) * colQr;
+            const uint32_t sOut = halfCapacity * static_cast<uint32_t>(sizeof(ropeOutputType));
+            const uint32_t sFp = halfCapacity * static_cast<uint32_t>(sizeof(float));
             const uint32_t castOutBytes = static_cast<uint32_t>(mmQcQrParam_.m) *
                                           (static_cast<uint32_t>(baseParams_->dimHeadSizeQc) / cvRatio_) *
                                           static_cast<uint32_t>(sizeof(mmQnInputType));
@@ -2980,7 +3025,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitN(const RopeQrSpli
             outputLocalRope = shareTmpUb[ropeBase + 2U * sFp + ropeQrSplitNParams.scratchSlot * sOut]
                                   .template ReinterpretCast<ropeOutputType>();
             LocalTensor<float> kFp32Local = shareTmpUb[ropeBase].template ReinterpretCast<float>(); // 紧凑输入
-            LocalTensor<float> kOutFp32Local = kFp32Local[cnt];                                     // rope计算输出
+            LocalTensor<float> kOutFp32Local = kFp32Local[halfCapacity];
             CopyStridedVf<mmQcQrOutputType>(kFp32Local, waveUbQr, ropeCnt, colQr, wavePitch, colQr);
             if constexpr (MLAPT::enableRope) {
                 RotaryPosEmb<ropeComputType>(kOutFp32Local, kFp32Local, cosLocal_[ropeQrSplitNParams.sinCosOffset],
@@ -3094,6 +3139,12 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DequantQcQrSplitN(const Dequa
         WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
     }
 
+    if (wavePitch == 0) {
+        // The preceding head's Qr can still be an MTE3 source in this region.
+        // V->MTE2 alone does not protect the GM path's next input copy.
+        SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
+        WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
+    }
     if (wavePitch > 0) {
         if constexpr (MLA_PRELOAD_QCQR_SCALE && IsFullQuantMode<mmQcQrInputType, dequantScaleType, true>()) {
             Dequant(computeLocal, waveUb, qcqrScaleLocal_[dequantQcQrSplitN.inputOffset], scale2Local,
@@ -3164,7 +3215,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DequantAndRopeSplitNSyncMMQcQ
                                         (!isFp8E8m0 || IsMxWaveCapable());
         const bool ubActiveA = ubDirectSupportedA && MLA_USE_UB_DIRECT;
         ubPathAiv = ubActiveA && (cvRatio_ == 1);
-        waveElems = baseParams_->stepBatchSize * mmQcQrParam_.baseN;
+        waveElems = CvSharedSlotBytes() / sizeof(mmQcQrOutputType);
     }
     while (colOffsetCube < oriCol) { // 循环CeilDiv(oriCol, colCube)次
         uint32_t prevColOffsetCube = colOffsetCube;
@@ -3304,6 +3355,19 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DequantRopeSplitNRopeLoop(
 }
 
 template <typename MLAPT>
+__aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DequantQcAndSync(AivOffset& aivOffset)
+{
+    CrossCoreWaitFlag<SYNC_MODE_CUBE_VEC, PIPE_MTE2>(FINISH_MM_QCQR);
+    // All MM3 producers must finish before any AIV reads a token across their columns.
+    WaitAllCore<SYNC_MODE_ALL_VEC, PIPE_MTE2>(FINISH_VEC_ALL);
+    DequantQc(aivOffset.mmQnPreDequantOffset, aivOffset.mmQnPreDequantResOffset, aivOffset.curVecToken,
+              aivOffset.curBlockTokenOffset);
+    // The final Qc write is asynchronous; aggregate MTE3 completion before releasing MM4.
+    WaitAllCore<SYNC_MODE_ALL_VEC, PIPE_MTE3>(FINISH_VEC_ALL);
+    CrossCoreSetFlag<SYNC_MODE_CUBE_VEC, PIPE_MTE3>(FINISH_VEC_DEQUANT_QC);
+}
+
+template <typename MLAPT>
 template <bool needQnDynamicQuant>
 __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DequantQcAndRopeQc(AivOffset& aivOffset, int64_t batchOffset,
                                                                       int64_t curStepBatchSize, int64_t numHeadOffset,
@@ -3322,12 +3386,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DequantQcAndRopeQc(AivOffset&
             DequantAndRopeSplitNSyncMMQcQr(aivOffset.mmQnPreDequantOffset, aivOffset.mmQnPreDequantResOffset,
                                            aivOffset.ropeQrOffset, aivOffset.ropeQrResOffset);
         } else if constexpr (IsFullQuantMode<mmQcQrInputType, dequantScaleType, true>()) {
-            CrossCoreWaitFlag<SYNC_MODE_CUBE_VEC, PIPE_MTE2>(FINISH_MM_QCQR);
-            WaitAllCore<SYNC_MODE_ALL_VEC, PIPE_MTE3>(FINISH_VEC_ALL);
-            DequantQc(aivOffset.mmQnPreDequantOffset, aivOffset.mmQnPreDequantResOffset, aivOffset.curVecToken,
-                      aivOffset.curBlockTokenOffset);
-            WaitAllCore<SYNC_MODE_ALL_VEC, PIPE_MTE2>(FINISH_VEC_ALL);
-            CrossCoreSetFlag<SYNC_MODE_CUBE_VEC, PIPE_MTE3>(FINISH_VEC_DEQUANT_QC);
+            DequantQcAndSync(aivOffset);
             RopeQr(aivOffset.ropeQrOffset, aivOffset.ropeQrResOffset, aivOffset.curVecToken,
                    aivOffset.curBlockTokenOffset);
         } else if constexpr (std::is_same<mmQcQrInputType, FP8E4M3>::value && isFp8E8m0) {
@@ -3499,8 +3558,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DynamicQuantQnAndMulQrSyncMMQ
                          sizeof(float); // scaleBrcbSeg(Brcb: CeilDiv(rows0,8)×64 float)
             const bool mulqrFusedFits = fusedNeed <= (ubShareBytes_ - PostCkvkrShareBase());
             if (mulqrFusedFits) {
-                const uint32_t cvPingElems =
-                    baseParams_->stepBatchSize * mmQcQrParam_.baseN * sizeof(mmQcQrOutputType) / sizeof(mmQnOutputType);
+                const uint32_t cvPingElems = CvSharedSlotBytes() / sizeof(mmQnOutputType);
                 constexpr uint32_t MUL_QR = EVENT_ID1;
                 constexpr uint32_t MUL_QR_INPUT_READY = EVENT_ID3;
                 constexpr uint32_t SCALE_OUT_READY = EVENT_ID0;
@@ -3635,8 +3693,7 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::DynamicQuantQnAndMulQrSyncMMQ
         const uint32_t colRope = baseParams_->dimHeadRope; // 64
         const uint32_t subRowRope = (row < 64) ? row : 64;
         const uint32_t scaleRowStride = Align(row, static_cast<uint32_t>(FP32_BLOCK_ELEMENT_NUM));
-        const uint32_t cvPingElems =
-            baseParams_->stepBatchSize * mmQcQrParam_.baseN * sizeof(mmQcQrOutputType) / sizeof(mmQnOutputType);
+        const uint32_t cvPingElems = CvSharedSlotBytes() / sizeof(mmQnOutputType);
         constexpr uint32_t MUL_QR = EVENT_ID1;
         constexpr uint32_t MUL_QR_INPUT_COPY_READY = EVENT_ID3;
         constexpr uint32_t DYNAMIC_QUANT_OUTPUT_READY = EVENT_ID3;

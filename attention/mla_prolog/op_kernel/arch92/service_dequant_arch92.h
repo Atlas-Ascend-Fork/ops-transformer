@@ -60,6 +60,13 @@ __aicore__ inline void DequantPerTokenQc(const GlobalTensor<O>& outputGm, const 
     };
 
     for (int64_t rowOffset = 0; rowOffset < oriRow; rowOffset += dequantRowColStrideParams.row) {
+        const uint32_t remainingRows = oriRow - static_cast<uint32_t>(rowOffset);
+        const uint32_t currentRows =
+            remainingRows < dequantRowColStrideParams.row ? remainingRows : dequantRowColStrideParams.row;
+        const uint32_t currentCount = currentRows * dequantRowColStrideParams.col;
+        copyParams.blockCount = static_cast<uint16_t>(currentRows);
+        rectangleParams.col = currentCount;
+        rectangleParams.stride = currentCount;
         int64_t inputOffset = rowOffset * dequantRowColStrideParams.stride;
         int64_t outputOffset = rowOffset * dequantRowColStrideParams.col;
         // copy in
@@ -72,11 +79,11 @@ __aicore__ inline void DequantPerTokenQc(const GlobalTensor<O>& outputGm, const 
         // compute
         Dequant(computeLocal, inputLocal, scaleLocal, deQuantScaleQcQrLocal, rectangleParams);
         // cast
-        Cast(outputLocal, computeLocal, RoundMode::CAST_RINT, count);
+        Cast(outputLocal, computeLocal, RoundMode::CAST_RINT, currentCount);
         SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
         // copy out
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
-        DataCopy(outputGm[outputOffset], outputLocal, count);
+        DataCopy(outputGm[outputOffset], outputLocal, currentCount);
     }
 }
 
@@ -107,6 +114,11 @@ __aicore__ inline void CastPerTokenQc(const GlobalTensor<O>& outputGm, const Glo
         static_cast<uint16_t>((castRowColStrideParams.stride - castRowColStrideParams.col) * sizeof(T) / 32U), 0};
 
     for (int64_t rowOffset = 0; rowOffset < oriRow; rowOffset += castRowColStrideParams.row) {
+        const uint32_t remainingRows = oriRow - static_cast<uint32_t>(rowOffset);
+        const uint32_t currentRows =
+            remainingRows < castRowColStrideParams.row ? remainingRows : castRowColStrideParams.row;
+        const uint32_t currentCount = currentRows * castRowColStrideParams.col;
+        copyParams.blockCount = static_cast<uint16_t>(currentRows);
         int64_t inputOffset = rowOffset * castRowColStrideParams.stride;
         int64_t outputOffset = rowOffset * castRowColStrideParams.col;
         // copy in
@@ -116,11 +128,11 @@ __aicore__ inline void CastPerTokenQc(const GlobalTensor<O>& outputGm, const Glo
         SetFlag<HardEvent::MTE2_V>(EVENT_ID1);
         WaitFlag<HardEvent::MTE2_V>(EVENT_ID1);
         // cast
-        Cast(outputLocal, inputLocal, RoundMode::CAST_RINT, count);
+        Cast(outputLocal, inputLocal, RoundMode::CAST_RINT, currentCount);
         SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
         // copy out
         WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
-        DataCopy(outputGm[outputOffset], outputLocal, count);
+        DataCopy(outputGm[outputOffset], outputLocal, currentCount);
     }
 }
 

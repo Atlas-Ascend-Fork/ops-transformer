@@ -23,6 +23,7 @@
 #include "mla_prolog_tiling_check.h"
 #include "mla_prolog_tiling.h"
 #include "mla_prolog_kn_search.h"
+#include "mla_prolog_ub_budget.h"
 using namespace ge;
 namespace optiling {
 
@@ -46,7 +47,7 @@ inline auto CeilDiv(T a, T b) -> T
     if (b == 0) {
         return b;
     }
-    return (a + b - 1) / b;
+    return a / b + static_cast<T>(a % b != 0);
 }
 
 template <typename T>
@@ -247,8 +248,44 @@ QUANT_MODE MlaPrologTiling::GetQuantizationMode() const
     return QUANT_MODE::ERROR_MODE;
 }
 
+ge::graphStatus MlaPrologTiling::CheckTokenShape() const
+{
+    const auto& tokenShape = context_->tokenX.shape->GetStorageShape();
+    const uint64_t maxTokenDimension = std::numeric_limits<uint32_t>::max();
+    for (size_t dim = 0; dim < tokenShape.GetDimNum(); ++dim) {
+        const int64_t value = tokenShape.GetDim(dim);
+        OP_CHECK_IF(value < 0 || static_cast<uint64_t>(value) > maxTokenDimension,
+                    OP_LOGE(context_->opName, "tokenX dimension %zu must fit a non-negative uint32_t.", dim),
+                    return ge::GRAPH_FAILED);
+    }
+    if (tokenShape.GetDimNum() == MLA_PROLOG_DIM_NUM_3) {
+        const uint64_t tokenCount = static_cast<uint64_t>(tokenShape.GetDim(MLA_PROLOG_DIM_INDEX_0)) *
+                                    static_cast<uint64_t>(tokenShape.GetDim(MLA_PROLOG_DIM_INDEX_1));
+        OP_CHECK_IF(tokenCount > maxTokenDimension,
+                    OP_LOGE(context_->opName, "tokenX B*S must fit uint32_t before tiling."), return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+void MlaPrologTiling::SetCacheShapeInfo()
+{
+    if (context_->kvCache.shape->GetStorageShape().GetDimNum() == MLA_PROLOG_DIM_NUM_3) {
+        baseShapeInfo_.blockNum = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_0);
+        baseShapeInfo_.nkvSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_1);
+        baseShapeInfo_.dtileSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_2);
+    } else {
+        baseShapeInfo_.blockNum = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_0);
+        baseShapeInfo_.blockSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_1);
+        baseShapeInfo_.nkvSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_2);
+        baseShapeInfo_.dtileSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_3);
+    }
+}
+
 ge::graphStatus MlaPrologTiling::SetShapeInfo()
 {
+    if (CheckTokenShape() != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
     if (context_->tokenX.shape->GetStorageShape().GetDimNum() == MLA_PROLOG_DIM_NUM_3) {
         baseShapeInfo_.bSize = context_->tokenX.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_0);
         baseShapeInfo_.s1Size = context_->tokenX.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_1);
@@ -272,16 +309,7 @@ ge::graphStatus MlaPrologTiling::SetShapeInfo()
     baseShapeInfo_.headSizeQc = baseShapeInfo_.dSize * baseShapeInfo_.nSize;
     baseShapeInfo_.headSizeQr = baseShapeInfo_.drSize * baseShapeInfo_.nSize;
     baseShapeInfo_.headSizeUqQr = baseShapeInfo_.headSizeQc + baseShapeInfo_.headSizeQr;
-    if (context_->kvCache.shape->GetStorageShape().GetDimNum() == MLA_PROLOG_DIM_NUM_3) {
-        baseShapeInfo_.blockNum = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_0);
-        baseShapeInfo_.nkvSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_1);
-        baseShapeInfo_.dtileSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_2);
-    } else {
-        baseShapeInfo_.blockNum = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_0);
-        baseShapeInfo_.blockSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_1);
-        baseShapeInfo_.nkvSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_2);
-        baseShapeInfo_.dtileSize = context_->kvCache.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_3);
-    }
+    SetCacheShapeInfo();
     if (context_->weightDkvKr.shape->GetStorageShape().GetDimNum() == MLA_PROLOG_DIM_NUM_4) {
         baseShapeInfo_.hckvSize = context_->weightDkvKr.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_0) *
                                       context_->weightDkvKr.shape->GetStorageShape().GetDim(MLA_PROLOG_DIM_INDEX_3) -
@@ -567,6 +595,102 @@ ge::graphStatus MlaPrologTiling::FillMatmul4Tiling()
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus MlaPrologTiling::BuildUbBudgetParams(mla_ub::Params& params) const
+{
+    params.step = stepBatchSize_;
+    params.aiv = aivNum_;
+    params.cv = aivNum_ / aicNum_;
+    params.hcq = baseShapeInfo_.hcqSize;
+    params.he = baseShapeInfo_.heSize;
+    params.hckv = baseShapeInfo_.hckvSize;
+    params.d = baseShapeInfo_.dSize;
+    params.dr = baseShapeInfo_.drSize;
+    params.heads = baseShapeInfo_.nSize;
+    params.headsPerCore = singlecoreNumHeadSize_;
+    params.stepHeads = stepNumHeadDequant_;
+    params.mm3SingleN = singlecoreHeadSizeQcQr_;
+    params.k1 = mm1KGroup_;
+    params.k2 = mm2KGroup_;
+    params.kvBytes = DTYPE_TO_SIZE.at(context_->kvCache.desc->GetDataType());
+    params.krBytes = DTYPE_TO_SIZE.at(context_->krCache.desc->GetDataType());
+    params.tileSize = tileSize_;
+    params.splitM = scenarioInfo_.splitMFlag_ == 1U;
+    params.mx = scenarioInfo_.weightQuantMode_ == WEIGHT_QUANT_MODE::MXFP8_FULL_QUANT;
+    params.inputQuant = DTYPE_TO_SIZE.at(context_->tokenX.desc->GetDataType()) == 1U;
+    params.cqQuant = DTYPE_TO_SIZE.at(context_->weightUqQr.desc->GetDataType()) == 1U;
+    params.dequant = enableDequantOpt_;
+    params.nqWave = scenarioInfo_.quantMode_ == QUANT_MODE::NO_QUANT && params.cv == 1U;
+    // Kernel allocates by GM pointer presence, including provided empty tensors.
+    params.smooth = context_->smoothScalesCq.shape != nullptr;
+    params.krQuant = context_->krCache.desc->GetDataType() == ge::DT_INT8;
+    params.pertile = scenarioInfo_.kvQuantMode_ == KV_QUANT_MODE::PER_TILE;
+    OP_CHECK_IF(params.pertile && (params.tileSize == 0U || params.hckv % params.tileSize != 0U),
+                OP_LOGE(context_->opName, "The per-tile cache scale layout has an invalid tile size."),
+                return ge::GRAPH_FAILED);
+    params.int8Pertile = params.pertile && context_->kvCache.desc->GetDataType() == ge::DT_INT8;
+    params.actualSeq = scenarioInfo_.actualSeqMode_ == ACTUAL_SEQ_MODE::EN_Q_LEN;
+    params.qnQuant = scenarioInfo_.kvQuantMode_ == KV_QUANT_MODE::PER_TENSOR;
+    return ge::GRAPH_SUCCESS;
+}
+
+void MlaPrologTiling::LogUbStepChange(uint32_t step, uint32_t mm1Ng, uint32_t mm1Kg, uint32_t mm2Ng,
+                                      uint32_t mm2Kg) const
+{
+    if (stepBatchSize_ != step) {
+        OP_LOGI(context_->opName,
+                "arch92 UB budget changes step %u -> %u, MM1 NG/KG %u/%u -> %u/%u, "
+                "MM2 NG/KG %u/%u -> %u/%u.",
+                step, stepBatchSize_, mm1Ng, mm1Kg, static_cast<uint32_t>(mm1NGroup_),
+                static_cast<uint32_t>(mm1KGroup_), mm2Ng, mm2Kg, static_cast<uint32_t>(mm2NGroup_),
+                static_cast<uint32_t>(mm2KGroup_));
+    }
+}
+
+ge::graphStatus MlaPrologTiling::ReduceStepBatchForUb()
+{
+    // Recompute KN because its L1 and reduction costs depend on M.
+    stepBatchSize_ = stepBatchSize_ > 16U ? ((stepBatchSize_ - 1U) / 16U) * 16U : stepBatchSize_ - 1U;
+    vectorBlockNum_ = std::min(stepBatchSize_, aivNum_);
+    if (FillMatmul1Tiling() != ge::GRAPH_SUCCESS || FillMatmul2Tiling() != ge::GRAPH_SUCCESS ||
+        FillMatmul3Tiling() != ge::GRAPH_SUCCESS || FillMatmul4Tiling() != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MlaPrologTiling::RefineStepBatchForUb()
+{
+    if (GetCurNpuArch() != NpuArch::DAV_9201 || stepBatchSize_ == 0U) {
+        return ge::GRAPH_SUCCESS;
+    }
+    OP_CHECK_IF(ubSize_ <= mla_ub::RESERVED_BYTES,
+                OP_LOGE(context_->opName, "The platform UB size is unavailable or too small for arch92."),
+                return ge::GRAPH_FAILED);
+    const uint64_t available = static_cast<uint64_t>(ubSize_) - mla_ub::RESERVED_BYTES;
+    const uint32_t originalStep = stepBatchSize_;
+    const uint32_t originalMm1Ng = mm1NGroup_;
+    const uint32_t originalMm1Kg = mm1KGroup_;
+    const uint32_t originalMm2Ng = mm2NGroup_;
+    const uint32_t originalMm2Kg = mm2KGroup_;
+    for (;;) {
+        mla_ub::Params p;
+        if (BuildUbBudgetParams(p) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+        const mla_ub::Budget budget = mla_ub::Estimate(p);
+        if (budget.Total() <= available) {
+            LogUbStepChange(originalStep, originalMm1Ng, originalMm1Kg, originalMm2Ng, originalMm2Kg);
+            return ge::GRAPH_SUCCESS;
+        }
+        OP_CHECK_IF(stepBatchSize_ == 1U,
+                    OP_LOGE(context_->opName, "arch92 fixed buffers and scratch exceed the available UB at step 1."),
+                    return ge::GRAPH_FAILED);
+        if (ReduceStepBatchForUb() != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+    }
+}
+
 ge::graphStatus MlaPrologTiling::ProcessBaseInputs()
 {
     uint32_t maxStepBatch = 128U;
@@ -587,7 +711,7 @@ ge::graphStatus MlaPrologTiling::ProcessBaseInputs()
     }
     stepBatchSize_ = std::min(maxStepBatch, baseShapeInfo_.tSize);
     if (scenarioInfo_.splitMFlag_ == 1U && (stepBatchSize_ > 0U) && (aicNum_ > 0U) && (baseShapeInfo_.tSize > 0U)) {
-        mSubSize_ = (baseShapeInfo_.tSize + aicNum_ - 1U) / aicNum_;
+        mSubSize_ = CeilDiv(baseShapeInfo_.tSize, aicNum_);
         // idx为[0, mSubCoreNum_]的核分到mSubSize_，其余核分到mSubSize_ - 1
         mSubCoreNum_ = baseShapeInfo_.tSize - (mSubSize_ - 1U) * aicNum_;
     }
@@ -889,10 +1013,10 @@ ge::graphStatus MlaPrologTiling::RunBigKernelTiling(MlaPrologContext& context, M
     }
 
     std::vector<StatusFunction> optionalTilingFuncs{
-        std::bind(&MlaPrologTiling::FillMatmul1Tiling, this), std::bind(&MlaPrologTiling::FillMatmul2Tiling, this),
-        std::bind(&MlaPrologTiling::FillMatmul3Tiling, this), std::bind(&MlaPrologTiling::FillMatmul4Tiling, this),
-        std::bind(&MlaPrologTiling::FillTiling, this),        std::bind(&MlaPrologTiling::CalcWorkSpace, this),
-        std::bind(&MlaPrologTiling::GenTilingKey, this)};
+        std::bind(&MlaPrologTiling::FillMatmul1Tiling, this),    std::bind(&MlaPrologTiling::FillMatmul2Tiling, this),
+        std::bind(&MlaPrologTiling::FillMatmul3Tiling, this),    std::bind(&MlaPrologTiling::FillMatmul4Tiling, this),
+        std::bind(&MlaPrologTiling::RefineStepBatchForUb, this), std::bind(&MlaPrologTiling::FillTiling, this),
+        std::bind(&MlaPrologTiling::CalcWorkSpace, this),        std::bind(&MlaPrologTiling::GenTilingKey, this)};
     for (const auto& func : optionalTilingFuncs) {
         if (func() != ge::GRAPH_SUCCESS) {
             return ge::GRAPH_FAILED;

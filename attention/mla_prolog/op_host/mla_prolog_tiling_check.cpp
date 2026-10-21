@@ -112,7 +112,7 @@ inline auto CeilDiv(T a, T b) -> T
     if (b == 0) {
         return b;
     }
-    return (a + b - 1) / b;
+    return a / b + static_cast<T>(a % b != 0);
 }
 
 NpuArch MlaPrologTilingCheck::GetCurNpuArch() const

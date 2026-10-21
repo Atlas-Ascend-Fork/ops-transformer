@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file kernel_mla_prolog_split_m.h
+ * \file kernel_mla_prolog_split_m_arch92.h
  * \brief
  */
 
-#ifndef KERNEL_MLA_PROLOG_SPLIT_M_H
-#define KERNEL_MLA_PROLOG_SPLIT_M_H
+#ifndef KERNEL_MLA_PROLOG_SPLIT_M_ARCH92_H
+#define KERNEL_MLA_PROLOG_SPLIT_M_ARCH92_H
 
 #include "mla_prolog_comm_arch92.h"
 #include "mla_prolog_vector_comm_arch92.h"
@@ -1289,7 +1289,10 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::RmsNormCq(int64_t tokenIndex, i
                 baseParams_->reciprocalCq, baseParams_->epsilonCq, static_cast<uint32_t>(vectorRow_),
                 baseParams_->headSizeCq,   baseParams_->qcQrScale, baseParams_->isQcQrScaleEnable};
             const uint32_t smSlotBytes =
-                static_cast<uint32_t>(baseParams_->headSizeCq) * sizeof(float) * 2U; // (1+kg)×col×4, kg=1
+                static_cast<uint32_t>(baseParams_->headSizeCq) * sizeof(float) * 2U +
+                Align(static_cast<uint32_t>(baseParams_->headSizeCq) / 16U, static_cast<uint32_t>(BYTE_BLOCK));
+            // MX block quantization keeps halfScale after the two float-sized regions.
+            // Include its aligned tail so the two token slots remain disjoint.
             for (int64_t t = 0; t + 1 < curVecToken; t += 2) {
                 // ---- L 阶段: 相邻两 token 的读连续发射(不同槽, 互不等待) ----
                 for (int64_t tt = 0; tt < 2; tt++) {
@@ -1657,9 +1660,10 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::ScatterKr(LocalTensor<krCacheTy
     int64_t paTokenIndex;
     if constexpr ((MLAPT::cacheMode == CACHE_MODE::PA_NZ) || (MLAPT::cacheMode == CACHE_MODE::PA_BSND) ||
                   (MLAPT::cacheMode == CACHE_MODE::ND)) {
-        paTokenIndex = cacheIndexGm_(ropeAndScatterKrParams.tokenIndex);
         if constexpr (MLAPT::cacheMode == CACHE_MODE::ND) {
             paTokenIndex = ropeAndScatterKrParams.tokenIndex;
+        } else {
+            paTokenIndex = cacheIndexGm_(ropeAndScatterKrParams.tokenIndex);
         }
         if (isPertile && baseParams_->ckvkrRepoMode == 1) {
             int64_t smStartOffset;
@@ -1976,4 +1980,4 @@ __aicore__ inline void MlaPrologV3SplitM<MLAPT>::DynamicQuantQnAndMulQrSyncMMQn(
 
 } // namespace MlaProlog
 
-#endif // MLA_PROLOG_V3_SPLIT_M
+#endif // KERNEL_MLA_PROLOG_SPLIT_M_ARCH92_H
