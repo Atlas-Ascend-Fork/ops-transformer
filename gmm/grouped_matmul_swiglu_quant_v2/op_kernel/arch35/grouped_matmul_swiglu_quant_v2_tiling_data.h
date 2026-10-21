@@ -10,7 +10,7 @@
 
 /*!
  * \file grouped_matmul_swiglu_quant_v2_tiling_data.h
- * \brief Device-side tiling data for the default MX quantization path.
+ * \brief Device-side tiling data for MX and HIF4 quantization paths.
  */
 
 #ifndef GROUPED_MATMUL_SWIGLU_QUANT_V2_TILING_DATA_H
@@ -18,6 +18,7 @@
 
 #include "kernel_tiling/kernel_tiling.h"
 #include "grouped_matmul_swiglu_quant_swiglu_params.h"
+#include "grouped_matmul_swiglu_quant_v2_tensor_api_tiling_data.h"
 
 #pragma pack(push, 8)
 struct GMMSwigluQuantV2Params {
@@ -34,6 +35,11 @@ struct GMMSwigluQuantV2TilingDataParams {
     GMMSwigluQuantV2Params gmmSwigluQuantParams;
     TCubeTiling mmTilingData;
     GMMSwigluQuantSwigluParams swigluParams;
+};
+
+struct GMMSwigluQuantBasicApiTilingDataParams {
+    GMMSwigluQuantV2Params gmmSwigluQuantParams;
+    GroupedMatmulSwigluQuantV2TensorApi::GMMTensorApiMMTiling basicTilingData;
 };
 #pragma pack(pop)
 

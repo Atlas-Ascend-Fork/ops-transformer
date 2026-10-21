@@ -12,6 +12,7 @@
  * \file grouped_matmul_tiling.cpp
  * \brief
  */
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "grouped_matmul_tiling.h"
 #include "gmm/common/op_host/log_format_util.h"
 #include "log/log.h"
@@ -19,10 +20,12 @@
 #include <climits>
 #include "register/op_impl_registry.h"
 #include "arch35/grouped_weight_quant_batch_matmul_tiling.h"
+#include "arch35/grouped_weight_quant_matmul_asw_tiling.h"
 #include "arch35/grouped_no_quant_matmul_tiling.h"
 #include "arch35/grouped_quant_basic_api_matmul_tiling.h"
 #include "op_host/tiling_templates_registry.h"
 #include "err/ops_err.h"
+#include "platform/platform_infos_def.h"
 #include "../../op_kernel/grouped_matmul_tiling_key.h"
 using namespace Ops::Transformer::OpTiling;
 using namespace ge;
@@ -2382,6 +2385,20 @@ ge::graphStatus GMMTiling::A8W4Tiling(gert::TilingContext* context, const GMMCom
     }
 }
 
+ge::graphStatus GMMTiling::RegBaseWeightQuantTiling(gert::TilingContext* context, const GMMCompileInfo* compileInfoPtr)
+{
+    if (compileInfoPtr->npuArch == NpuArch::DAV_3510) {
+        GroupedWeightQuantBatchMatmulTiling groupedWeightQuantTiling;
+        OP_CHECK_IF(!groupedWeightQuantTiling.SetTiling(context),
+                    OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "SetTiling failed."), return ge::GRAPH_FAILED);
+    } else {
+        GroupedWeightQuantMatmulAswTiling groupedWeightQuantMatmulAswTiling;
+        OP_CHECK_IF(!groupedWeightQuantMatmulAswTiling.SetTiling(context),
+                    OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "SetTiling failed."), return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 ASCENDC_EXTERN_C ge::graphStatus TilingGMM(gert::TilingContext* context)
 {
     OP_CHECK_NULL_WITH_CONTEXT(context, context);
@@ -2396,9 +2413,10 @@ ASCENDC_EXTERN_C ge::graphStatus TilingGMM(gert::TilingContext* context)
     if (compileInfoPtr->npuArch == NpuArch::DAV_3510 || compileInfoPtr->npuArch == NpuArch::DAV_9201) {
         const bool isS8S4PseudoQuant = IsS8S4PseudoQuant(context, xDType, weightDtype);
         // 全量化：双8bits或双4bits(不会有A4W2)
-        bool isQuant = !isS8S4PseudoQuant &&
-                       (xDType == ge::DT_FLOAT4_E2M1 || xDType == ge::DT_INT4 || xDType == ge::DT_FLOAT4_E1M2 ||
-                        (ge::GetSizeByDataType(xDType) == 1 && ge::GetSizeByDataType(weightDtype) == 1));
+        bool isQuant =
+            !isS8S4PseudoQuant && (xDType == ge::DT_FLOAT4_E2M1 || xDType == ge::DT_INT4 ||
+                                   xDType == ge::DT_FLOAT4_E1M2 || xDType == Ops::Transformer::DT_HIFLOAT4 ||
+                                   (ge::GetSizeByDataType(xDType) == 1 && ge::GetSizeByDataType(weightDtype) == 1));
         if (isQuant) {
             if (xDType == ge::DT_INT4 && weightDtype == ge::DT_INT4) { // S4S4 (INT4×INT4) mix-core
                 GroupedS4S4IntQuantTiling s4s4Tiling(context);
@@ -2415,11 +2433,8 @@ ASCENDC_EXTERN_C ge::graphStatus TilingGMM(gert::TilingContext* context)
                 std::vector<int32_t> registerList = {2};
                 return TilingRegistry::GetInstance().DoTilingImpl(context, registerList);
             }
-            GroupedWeightQuantBatchMatmulTiling groupedWeightQuantTiling;
-            OP_CHECK_IF(!groupedWeightQuantTiling.SetTiling(context),
-                        OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "SetTiling failed."),
-                        return ge::GRAPH_FAILED);
-            return ge::GRAPH_SUCCESS;
+            GMMTiling tiling;
+            return tiling.RegBaseWeightQuantTiling(context, compileInfoPtr);
         }
         bool isUnQuant =
             (xDType == ge::DT_FLOAT16 || xDType == ge::DT_BF16 || xDType == ge::DT_FLOAT) && (xDType == weightDtype);
@@ -2458,6 +2473,10 @@ ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForGMM(gert::TilingParseContext* c
     OP_CHECK_NULL_WITH_CONTEXT(context, platformInfoPtr);
     auto compileInfoPtr = context->GetCompiledInfo<GMMCompileInfo>();
     OP_CHECK_NULL_WITH_CONTEXT(context, compileInfoPtr);
+
+    std::string platformRes;
+    platformInfoPtr->GetPlatformRes("AICoreintrinsicDtypeMap", "Intrinsic_mmad", platformRes);
+    compileInfoPtr->supportMmadF16S8 = (platformRes.find("f16s8") != std::string::npos);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
 

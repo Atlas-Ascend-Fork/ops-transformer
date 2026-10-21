@@ -11,6 +11,7 @@
 #ifndef OP_API_INC_GROUPED_MATMUL_WEIGHT_QUANT_950_CHECKER_H
 #define OP_API_INC_GROUPED_MATMUL_WEIGHT_QUANT_950_CHECKER_H
 #include "opdev/format_utils.h"
+#include "opdev/platform.h"
 #include "aclnn_kernels/common/op_error_check.h"
 #include "grouped_matmul_util.h"
 
@@ -74,7 +75,9 @@ private:
                               const std::string& tensorName) const;
 
     bool IsA16MxFp4NZ() const;
+    bool IsA16MxHiF4() const;
     bool IsMxA8W4NZ() const;
+    bool IsMxA8HiF4() const;
     bool IsA16W8ND() const;
     bool IsA16F8ND() const;
     bool IsS8S4NZ() const;
@@ -90,6 +93,7 @@ private:
 
 private:
     GroupedMatmulParams gmmParams_;
+    NpuArch npuArch_;
     DataType xDtype_ = ge::DT_UNDEFINED;
     DataType weightDtype_ = ge::DT_UNDEFINED;
     DataType biasDtype_ = ge::DT_UNDEFINED;

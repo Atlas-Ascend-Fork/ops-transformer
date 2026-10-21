@@ -27,18 +27,18 @@
 #include "../grouped_matmul_swiglu_quant_v2_tiling.h"
 
 namespace optiling {
-class GroupedMatmulSwigluQuantV2BasicApiTiling950 : public GroupedQmmBasicApiTiling {
+class GroupedMatmulSwigluQuantV2BasicApiTiling : public GroupedQmmBasicApiTiling {
 public:
-    explicit GroupedMatmulSwigluQuantV2BasicApiTiling950(gert::TilingContext* context)
+    explicit GroupedMatmulSwigluQuantV2BasicApiTiling(gert::TilingContext* context)
         : GroupedQmmBasicApiTiling(context)
     {
         Reset();
     }
-    ~GroupedMatmulSwigluQuantV2BasicApiTiling950() override = default;
+    ~GroupedMatmulSwigluQuantV2BasicApiTiling() override = default;
 
     void Reset(gert::TilingContext* context) override
     {
-        Ops::Transformer::OpTiling::TilingBaseClass::Reset(context);
+        GroupedQmmBasicApiTiling::Reset(context);
         Reset();
     }
 
@@ -62,13 +62,18 @@ private:
     bool AnalyzeAttrs() override;
     bool AnalyzeDtype() override;
     bool AnalyzeInputs() override;
-    bool CheckTensorApiShapes() const;
-    bool CheckTensorApiScaleShapes() const;
+    bool CheckInputShapes() const;
+    bool CheckScaleShapes() const;
     bool IsFp8(ge::DataType dtype) const;
+    bool IsHif4Input() const;
+    bool CheckHif4Dtype() const;
+    bool CheckHif4CoreNum() const;
+    bool CheckHif4Dims() const;
     bool IsSupportedFormat(ge::Format format) const;
     size_t GetDynamicInputCount(uint32_t inputIndex) const;
 
     GroupedMatmulSwigluQuantV2TensorApi::GMMSwigluQuantV2TensorApiTilingData tilingData_;
+    GMMSwigluQuantBasicApiTilingDataParams hif4TilingData_;
     ge::DataType xScaleDtype_ = ge::DT_UNDEFINED;
     ge::DataType quantDtype_ = ge::DT_UNDEFINED;
     ge::Format xScaleFormat_ = static_cast<ge::Format>(-1);

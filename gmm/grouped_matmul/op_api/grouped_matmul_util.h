@@ -9,6 +9,7 @@
  */
 #ifndef OP_API_INC_GROUPED_MATMUL_UTIL_H
 #define OP_API_INC_GROUPED_MATMUL_UTIL_H
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "opdev/common_types.h"
 #include "opdev/op_executor.h"
 #include "log/log.h"
@@ -99,6 +100,11 @@ constexpr int64_t MXFP_MULTI_BASE_SIZE = 2L;
 constexpr int64_t EVEN_FACTOR = 2L;
 constexpr int64_t LAST_TWO_DIM_INDEX = 2L;
 
+// hifloat4 dim num
+constexpr size_t HIF4_SPLIT_M_SCALE_DIM = 3U;
+constexpr size_t HIF4_SPLIT_M_PER_TOKEN_SCALE_DIM = 2U;
+constexpr int64_t HIF4_DIVISOR_SIZE = 64L;
+
 constexpr int64_t N_K_MAX_VALUE_WEIGHT_QUANT = 65535L;
 constexpr int64_t N_K_ALIGN_VALUE_WEIGHT_QUANT_4BIT = 64L;
 
@@ -151,12 +157,17 @@ struct GroupedMatmulParamsBase {
 
 using GroupedMatmulParams = GroupedMatmulParamsBase<aclTensorList>;
 
-const std::map<DataType, aclDataType> BIAS_DTYPE{
-    {DataType::DT_FLOAT16, aclDataType::ACL_FLOAT16},     {DataType::DT_BF16, aclDataType::ACL_FLOAT},
-    {DataType::DT_INT8, aclDataType::ACL_INT32},          {DataType::DT_FLOAT, aclDataType::ACL_FLOAT},
-    {DataType::DT_FLOAT8_E4M3FN, aclDataType::ACL_FLOAT}, {DataType::DT_FLOAT8_E5M2, aclDataType::ACL_FLOAT},
-    {DataType::DT_HIFLOAT8, aclDataType::ACL_FLOAT},      {DataType::DT_INT4, aclDataType::ACL_FLOAT16},
-    {DataType::DT_FLOAT4_E2M1, aclDataType::ACL_FLOAT},   {DataType::DT_FLOAT4_E1M2, aclDataType::ACL_FLOAT}};
+const std::map<DataType, aclDataType> BIAS_DTYPE{{DataType::DT_FLOAT16, aclDataType::ACL_FLOAT16},
+                                                 {DataType::DT_BF16, aclDataType::ACL_FLOAT},
+                                                 {DataType::DT_INT8, aclDataType::ACL_INT32},
+                                                 {DataType::DT_FLOAT, aclDataType::ACL_FLOAT},
+                                                 {DataType::DT_FLOAT8_E4M3FN, aclDataType::ACL_FLOAT},
+                                                 {DataType::DT_FLOAT8_E5M2, aclDataType::ACL_FLOAT},
+                                                 {DataType::DT_HIFLOAT8, aclDataType::ACL_FLOAT},
+                                                 {DataType::DT_INT4, aclDataType::ACL_FLOAT16},
+                                                 {DataType::DT_FLOAT4_E2M1, aclDataType::ACL_FLOAT},
+                                                 {DataType::DT_FLOAT4_E1M2, aclDataType::ACL_FLOAT},
+                                                 {Ops::Transformer::DT_HIFLOAT4, aclDataType::ACL_FLOAT}};
 
 const std::map<DataType, std::string> DTYPE_STRING{{DataType::DT_FLOAT16, "FLOAT16"},
                                                    {DataType::DT_BF16, "BF16"},
@@ -171,6 +182,7 @@ const std::vector<op::DataType> DTYPE_SUPPORT_LIST = {DataType::DT_FLOAT, DataTy
 
 bool IsTransposeLastTwoDims(const aclTensor* tensor);
 bool IsTransposeForMxShape(const aclTensor* tensor);
+bool IsTransposeForHif4Shape(const aclTensor* tensor);
 bool CreateContiguousTensorListForPertoken(const aclTensorList* tensorList, std::vector<aclTensor*>& newTensorList,
                                            aclOpExecutor* executor);
 bool CreateContiguousTensorListForMXTypeMScale(const aclTensorList* tensorList, std::vector<aclTensor*>& newTensorList,

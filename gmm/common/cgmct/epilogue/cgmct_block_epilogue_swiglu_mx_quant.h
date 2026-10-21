@@ -15,7 +15,7 @@
 
 #ifndef EPILOGUE_BLOCK_EPILOGUE_SWIGLU_MX_QUANT_H
 #define EPILOGUE_BLOCK_EPILOGUE_SWIGLU_MX_QUANT_H
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201)
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
 #else
@@ -31,6 +31,11 @@
 namespace Cgmct {
 namespace Gemm {
 namespace Block {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+using SwigluMxScaleCopyType = int8_t;
+#else
+using SwigluMxScaleCopyType = AscendC::fp8_e8m0_t;
+#endif
 
 namespace Gmmsg {
 enum class QuantMode : uint32_t {
@@ -63,7 +68,11 @@ constexpr uint64_t DATA_BLOCK_SIZE = 32UL;        // UB上一个DataBlock的大�
 constexpr uint32_t Y_IDX = 0;
 constexpr uint32_t Y_SCALE_IDX = 1;
 constexpr uint32_t BLOCK_SIZE = 32;
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+constexpr uint32_t MAX_SINGLE_MN = 128 * 256;
+#else
 constexpr uint32_t MAX_SINGLE_MN = 64 * 256;
+#endif
 constexpr uint32_t CGMCT_INTERLEAVED_REG_FACTOR = 2;
 constexpr uint32_t PADDED_QUANT_SCALE_SIZE = 64 * 32;
 constexpr uint16_t MAX_EXP_FOR_BF16 = 0x7f80;
@@ -175,17 +184,22 @@ private:
     __aicore__ inline void ComputeMaxExp(__ubuf__ bfloat16_t* srcAddr, __ubuf__ uint16_t* maxExpAddr,
                                          uint32_t totalCountInUB, uint16_t loopNum);
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 9201)
     __aicore__ inline void ComputeMaxExpCublas(__ubuf__ bfloat16_t* srcAddr, __ubuf__ uint16_t* maxExpAddr,
                                                uint32_t totalCountInUB, uint16_t loopNum);
+#endif
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 9201)
     __aicore__ inline void ComputeScaleCublasFromBf16(__ubuf__ uint16_t* maxValueAddr,
                                                       __ubuf__ uint16_t* mxScaleLocalAddr,
                                                       __ubuf__ uint16_t* halfScaleLocalAddr, uint32_t totalScaleInUB,
                                                       uint16_t loopNumScale);
+#endif
 
     __aicore__ inline void ComputeDataForQuantTargetFp8(__ubuf__ bfloat16_t* srcAddr,
                                                         __ubuf__ uint16_t* halfScaleLocalAddr,
-                                                        __ubuf__ int8_t* outLocalAddr, uint16_t loopNum);
+                                                        __ubuf__ int8_t* outLocalAddr, uint32_t totalCountInUB,
+                                                        uint16_t loopNum);
 
     __aicore__ inline void ComputeDataForQuantTargetFp4(__ubuf__ bfloat16_t* srcAddr,
                                                         __ubuf__ uint16_t* halfScaleLocalAddr,
@@ -195,10 +209,10 @@ private:
     __aicore__ inline void CopyOutputFromUb2Gm(uint64_t blockCount, uint64_t offset, AscendC::LocalTensor<int8_t>& src);
 
     __aicore__ inline void CopyScaleFromUb2Gm(uint64_t blockCount, uint64_t offset,
-                                              AscendC::LocalTensor<AscendC::fp8_e8m0_t>& src);
+                                              AscendC::LocalTensor<SwigluMxScaleCopyType>& src);
     // GM ADDR
     AscendC::GlobalTensor<int8_t> quantOutputGlobal_;
-    AscendC::GlobalTensor<AscendC::fp8_e8m0_t> quantScaleGlobal_;
+    AscendC::GlobalTensor<SwigluMxScaleCopyType> quantScaleGlobal_;
 
     // UB ADDR
     AscendC::LocalTensor<DataTypeIn> l0cOutUbFirst_{AscendC::TPosition::VECIN, 0, MAX_SINGLE_MN};
@@ -206,7 +220,7 @@ private:
                                                      MAX_SINGLE_MN};
     AscendC::LocalTensor<int8_t> quantOutput_;
     AscendC::LocalTensor<int8_t> quantScaleOutput_;
-    AscendC::LocalTensor<AscendC::fp8_e8m0_t> quantScaleBlockOutput_;
+    AscendC::LocalTensor<SwigluMxScaleCopyType> quantScaleBlockOutput_;
     AscendC::LocalTensor<bfloat16_t> gluRes_;
     AscendC::LocalTensor<uint16_t> maxExp_;
     AscendC::LocalTensor<uint16_t> halfScale_;
@@ -264,8 +278,13 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     constexpr uint32_t afterIO =
         afterIn + MAX_SINGLE_MN * sizeof(int8_t) + MAX_SINGLE_MN / AscendC::ONE_BLK_SIZE * sizeof(int8_t);
     // swiglu res
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    gluRes_ = AscendC::LocalTensor<bfloat16_t>(AscendC::TPosition::VECCALC, 0, MAX_SINGLE_MN);
+    constexpr uint32_t afterIOAndGlu = afterIO;
+#else
     gluRes_ = AscendC::LocalTensor<bfloat16_t>(AscendC::TPosition::VECCALC, afterIO, MAX_SINGLE_MN);
     constexpr uint32_t afterIOAndGlu = afterIO + MAX_SINGLE_MN * sizeof(bfloat16_t);
+#endif
     // sharedExp
     maxExp_ = AscendC::LocalTensor<uint16_t>(AscendC::TPosition::VECCALC, afterIOAndGlu,
                                              MAX_SINGLE_MN / AscendC::ONE_BLK_SIZE);
@@ -275,8 +294,8 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     constexpr uint32_t realScaleBlockOffset =
         afterIOAndGluExp + MAX_SINGLE_MN / AscendC::ONE_BLK_SIZE * sizeof(uint16_t);
     quantScaleBlockOutput_ =
-        AscendC::LocalTensor<AscendC::fp8_e8m0_t>(AscendC::TPosition::VECOUT, realScaleBlockOffset,
-                                                  params_->baseM / AscendC::GetTaskRation() * AscendC::ONE_BLK_SIZE);
+        AscendC::LocalTensor<SwigluMxScaleCopyType>(AscendC::TPosition::VECOUT, realScaleBlockOffset,
+                                                    params_->baseM / AscendC::GetTaskRation() * AscendC::ONE_BLK_SIZE);
 }
 
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
@@ -285,7 +304,7 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
 {
     if ASCEND_IS_AIV {
         quantOutputGlobal_.SetGlobalBuffer((__gm__ int8_t*)params_->yGmAddr + Get<Y_IDX>(baseOffset));
-        quantScaleGlobal_.SetGlobalBuffer((__gm__ AscendC::fp8_e8m0_t*)params_->yScaleGmAddr +
+        quantScaleGlobal_.SetGlobalBuffer((__gm__ SwigluMxScaleCopyType*)params_->yScaleGmAddr +
                                           Get<Y_SCALE_IDX>(baseOffset));
     }
 }
@@ -327,8 +346,17 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
 
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::CopyScaleFromUb2Gm(
-    uint64_t blockCount, uint64_t offset, AscendC::LocalTensor<AscendC::fp8_e8m0_t>& src)
+    uint64_t blockCount, uint64_t offset, AscendC::LocalTensor<SwigluMxScaleCopyType>& src)
 {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    AscendC::DataCopyExtParams ub2GmParams{1, 0, 0, 0, 0};
+    auto blockScaleN =
+        CeilDiv(static_cast<uint64_t>(singleN_), static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
+    ub2GmParams.blockLen = blockScaleN * sizeof(int8_t);
+    ub2GmParams.blockCount = blockCount;
+    ub2GmParams.dstStride = (scaleN_ - blockScaleN) * sizeof(int8_t);
+    AscendC::DataCopyPad(quantScaleGlobal_[offset], src, ub2GmParams);
+#else
     // scaleBlockN_ is the UB source row pitch (it is based on Align64(singleN)
     // because ComputeMxQuant also computes the aligned tail).  It is not the
     // number of valid scale bytes in the public yScale row.  Copy only the
@@ -345,10 +373,11 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     // for all N tiles, including the common N=64 output tile.
     AscendC::DataCopyExtParams params{SINGLE_DMA_BLOCK, 0, 0, 0, 0};
     params.blockCount = SINGLE_DMA_BLOCK;
-    params.blockLen = static_cast<uint32_t>(validScaleN * sizeof(AscendC::fp8_e8m0_t));
+    params.blockLen = static_cast<uint32_t>(validScaleN * sizeof(SwigluMxScaleCopyType));
     for (uint64_t row = 0; row < blockCount; ++row) {
         AscendC::DataCopyPad(quantScaleGlobal_[offset + row * scaleN_], src[row * AscendC::ONE_BLK_SIZE], params);
     }
+#endif
 }
 
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
@@ -410,6 +439,7 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     return;
 }
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 9201)
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::ComputeMaxExpCublas(
     __ubuf__ bfloat16_t* srcAddr, __ubuf__ uint16_t* maxExpAddr, uint32_t totalCountInUB, uint16_t loopNum)
@@ -446,13 +476,78 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
         AscendC::Reg::StoreUnAlignPost(maxExpAddr, unalign, 0);
     }
 }
+#endif
 
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
 __aicore__ inline void
 BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::ComputeDataForQuantTargetFp8(
     __ubuf__ bfloat16_t* srcAddr, __ubuf__ uint16_t* halfScaleLocalAddr, __ubuf__ int8_t* outLocalAddr,
-    uint16_t loopNum)
+    uint32_t totalCountInUB, uint16_t loopNum)
 {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    // 2：为拆分转换和打包存储建立双倍计数的 mask。
+    uint32_t totalCountInUB2 = totalCountInUB * 2;
+    using T = bfloat16_t;
+    __VEC_SCOPE__
+    {
+        AscendC::Reg::MaskReg dataMask1, dataMask2, dataMask3, dataMask4;
+        AscendC::Reg::RegTensor<uint16_t> halfScaleForMul;
+        AscendC::Reg::RegTensor<T> vdExp0, vdExp1;
+        AscendC::Reg::RegTensor<float> vdExp0FP32Zero, vdExp0FP32One, vdExp1FP32Zero, vdExp1FP32One;
+        AscendC::Reg::RegTensor<DataTypeOut> vdExp0FP8Zero, vdExp0FP8One, vdExp1FP8Zero, vdExp1FP8One;
+
+        static constexpr AscendC::Reg::CastTrait castTraitZero = {
+            AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::UNKNOWN};
+        static constexpr AscendC::Reg::CastTrait castTraitOne = {
+            AscendC::Reg::RegLayout::ONE, AscendC::Reg::SatMode::UNKNOWN, AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::UNKNOWN};
+        static constexpr AscendC::Reg::CastTrait castTrait32to8 = {
+            AscendC::Reg::RegLayout::ZERO, AscendC::Reg::SatMode::SAT, AscendC::Reg::MaskMergeMode::ZEROING,
+            AscendC::RoundMode::CAST_RINT};
+        for (uint16_t i = 0; i < loopNum; i++) {
+            dataMask1 = AscendC::Reg::UpdateMask<T>(totalCountInUB);
+            dataMask2 = AscendC::Reg::UpdateMask<T>(totalCountInUB);
+            dataMask3 = AscendC::Reg::UpdateMask<T>(totalCountInUB2);
+            dataMask4 = AscendC::Reg::UpdateMask<T>(totalCountInUB2);
+            AscendC::Reg::DataCopy<T, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                   AscendC::Reg::LoadDist::DIST_DINTLV_B16>(
+                vdExp0, vdExp1, srcAddr,
+                vlForHalfNumber_ * 2); // copy two chunks from srcAddr to regbase
+            AscendC::Reg::DataCopy<uint16_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                   AscendC::Reg::LoadDist::DIST_E2B_B16>(halfScaleForMul, halfScaleLocalAddr,
+                                                                         elementAfterReduce_);
+
+            AscendC::Reg::Mul(vdExp0, vdExp0, (AscendC::Reg::RegTensor<T>&)halfScaleForMul, dataMask1);
+            AscendC::Reg::Mul(vdExp1, vdExp1, (AscendC::Reg::RegTensor<T>&)halfScaleForMul, dataMask1);
+            AscendC::Reg::Interleave(vdExp0, vdExp1, vdExp0, vdExp1);
+            AscendC::Reg::Cast<float, T, castTraitZero>(vdExp0FP32Zero, vdExp0, dataMask1);
+            AscendC::Reg::Cast<float, T, castTraitOne>(vdExp0FP32One, vdExp0, dataMask1);
+            AscendC::Reg::Interleave(vdExp0FP32Zero, vdExp0FP32One, vdExp0FP32Zero, vdExp0FP32One);
+            AscendC::Reg::Cast<DataTypeOut, float, castTrait32to8>(vdExp0FP8Zero, vdExp0FP32Zero, dataMask3);
+            AscendC::Reg::Cast<DataTypeOut, float, castTrait32to8>(vdExp0FP8One, vdExp0FP32One, dataMask3);
+            AscendC::Reg::Cast<float, T, castTraitZero>(vdExp1FP32Zero, vdExp1, dataMask2);
+            AscendC::Reg::Cast<float, T, castTraitOne>(vdExp1FP32One, vdExp1, dataMask2);
+            AscendC::Reg::Interleave(vdExp1FP32Zero, vdExp1FP32One, vdExp1FP32Zero, vdExp1FP32One);
+            AscendC::Reg::Cast<DataTypeOut, float, castTrait32to8>(vdExp1FP8Zero, vdExp1FP32Zero, dataMask4);
+            AscendC::Reg::Cast<DataTypeOut, float, castTrait32to8>(vdExp1FP8One, vdExp1FP32One, dataMask4);
+            AscendC::Reg::DataCopy<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                   AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                outLocalAddr, (AscendC::Reg::RegTensor<int8_t>&)vdExp0FP8Zero, OUT_ELE_NUM_ONE_BLK, dataMask3);
+            AscendC::Reg::DataCopy<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                   AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                outLocalAddr, (AscendC::Reg::RegTensor<int8_t>&)vdExp0FP8One, OUT_ELE_NUM_ONE_BLK, dataMask3);
+            AscendC::Reg::DataCopy<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                   AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                outLocalAddr, (AscendC::Reg::RegTensor<int8_t>&)vdExp1FP8Zero, OUT_ELE_NUM_ONE_BLK, dataMask4);
+            AscendC::Reg::DataCopy<int8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                                   AscendC::Reg::StoreDist::DIST_PACK4_B32>(
+                outLocalAddr, (AscendC::Reg::RegTensor<int8_t>&)vdExp1FP8One, OUT_ELE_NUM_ONE_BLK, dataMask4);
+        }
+    }
+    return;
+#else
+    (void)totalCountInUB;
     using T = bfloat16_t;
     using U = DataTypeOut;
     __VEC_SCOPE__
@@ -515,6 +610,7 @@ BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::ComputeD
         }
     }
     return;
+#endif
 }
 
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
@@ -645,6 +741,10 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     uint16_t loopScaleNum = (totalScaleInUb + vlForHalfNumber_ - VECTOR_CEIL_ADJUSTMENT) / vlForHalfNumber_;
     __ubuf__ uint16_t* maxExpAddr = (__ubuf__ uint16_t*)maxExp_.GetPhyAddr();
     __ubuf__ uint16_t* halfScaleLocalAddr = (__ubuf__ uint16_t*)halfScale_.GetPhyAddr();
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    ComputeMaxExp(gluResAddr, maxExpAddr, totalDataInUb, loopDataNum);
+    ComputeScale(maxExpAddr, scaleDst, halfScaleLocalAddr, totalScaleInUb, loopScaleNum);
+#else
     if (params_->scaleAlg == 0) {
         ComputeMaxExp(gluResAddr, maxExpAddr, totalDataInUb, loopDataNum);
         ComputeScale(maxExpAddr, scaleDst, halfScaleLocalAddr, totalScaleInUb, loopScaleNum);
@@ -654,9 +754,10 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
             static_cast<uint16_t>((totalScaleInUb + vlForHalfNumber_ - VECTOR_CEIL_ADJUSTMENT) / vlForHalfNumber_);
         ComputeScaleCublasFromBf16(maxExpAddr, scaleDst, halfScaleLocalAddr, totalScaleInUb, cublasLoopScaleNum);
     }
+#endif
     if constexpr (AscendC::IsSameType<DataTypeOut, fp8_e4m3fn_t>::value ||
                   AscendC::IsSameType<DataTypeOut, fp8_e5m2_t>::value) {
-        ComputeDataForQuantTargetFp8(gluResAddr, halfScaleLocalAddr, outputDst, loopDataNum);
+        ComputeDataForQuantTargetFp8(gluResAddr, halfScaleLocalAddr, outputDst, totalDataInUb, loopDataNum);
     }
     if constexpr (IS_FP4_OUT) {
         ComputeDataForQuantTargetFp4(gluResAddr, halfScaleLocalAddr, outputDst, totalDataInUb, loopDataNum);
@@ -664,6 +765,7 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     return;
 }
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ != 9201)
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
 __aicore__ inline void
 BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::ComputeScaleCublasFromBf16(
@@ -714,6 +816,7 @@ BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::ComputeS
         }
     }
 }
+#endif
 
 QMM_BLOCK_EPILOGUE_SWIGLU_QUANT_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::VFDoSwigluForMX(
@@ -737,8 +840,12 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     __VEC_SCOPE__
     {
         for (uint16_t mIdx = 0; mIdx < mSize; ++mIdx) {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+            uint32_t elemNum = scaleBlockN;
+#else
             constexpr uint64_t scaleGroupSize = MXFP_DIVISOR_SIZE / MXFP_MULTI_BASE_SIZE;
             uint32_t elemNum = CeilDiv(static_cast<uint64_t>(singleN_), scaleGroupSize);
+#endif
             AscendC::Reg::MaskReg maskScaleN = AscendC::Reg::UpdateMask<int8_t>(elemNum);
             AscendC::Reg::RegTensor<int8_t> vreg0;
             AscendC::Reg::UnalignReg u0, u1;
@@ -775,8 +882,13 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     // ComputeScale emits one byte per 32 values. The public MX scale row
     // packs two such bytes for every 64 output values, so the UB source row
     // pitch is ceil(Align64(N), 64) * 2 rather than ceil(N, 64).
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    scaleBlockN_ =
+        CeilDiv(static_cast<uint64_t>(singleN_), static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
+#else
     scaleBlockN_ = CeilDiv(Align64(static_cast<uint64_t>(singleN_)), static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
                    MXFP_MULTI_BASE_SIZE;
+#endif
     blockCoord_ = blockCoord;
     auto halfSingleM = CeilDiv(static_cast<uint64_t>(singleM_), static_cast<uint64_t>(AscendC::GetTaskRation()));
     uint64_t singleMInVec = subBlockIdx_ == 1 ? singleM_ - halfSingleM : halfSingleM;

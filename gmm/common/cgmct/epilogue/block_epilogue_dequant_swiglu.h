@@ -15,8 +15,12 @@
 
 #ifndef EPILOGUE_BLOCK_EPILOGUE_DEQUANT_SWIGLU_H
 #define EPILOGUE_BLOCK_EPILOGUE_DEQUANT_SWIGLU_H
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201)
+#if ASC_DEVKIT_MAJOR >= 9
+#include "kernel_basic_intf.h"
+#else
 #include "kernel_operator.h"
+#endif
 #include "../utils/cgmct_common_utils.h"
 #include "../utils/device_utils.h"
 #include "../utils/status_utils.h"
@@ -211,15 +215,15 @@ __aicore__ inline void BlockEpilogueDequantSwiglu<QMM_BLOCK_EPILOGUE_DEQUANT_FUN
                 // swish * gate
                 AscendC::Reg::Mul(verg6, swishOutput, l0cOutRegSecond, mask);
                 uint32_t dstUbOffset = mIdx * nDstUbAligned + vfBlockIdx * sizePerRepeat;
-                if constexpr (IsSameType<DataTypeOut, half>::value) {
+                if constexpr (AscendC::IsSameType<DataTypeOut, half>::value) {
                     AscendC::Reg::Cast<half, float, CAST_FP32_TO_B16>(verg7, verg6, mask);
                     AscendC::Reg::DataCopy<DataTypeOut, AscendC::Reg::StoreDist::DIST_PACK_B32>(
                         gluResAddr + dstUbOffset, verg7, mask);
-                } else if constexpr (IsSameType<DataTypeOut, bfloat16_t>::value) {
+                } else if constexpr (AscendC::IsSameType<DataTypeOut, bfloat16_t>::value) {
                     AscendC::Reg::Cast<bfloat16_t, float, CAST_FP32_TO_B16>(verg7, verg6, mask);
                     AscendC::Reg::DataCopy<DataTypeOut, AscendC::Reg::StoreDist::DIST_PACK_B32>(
                         gluResAddr + dstUbOffset, verg7, mask);
-                } else if constexpr (IsSameType<DataTypeOut, float>::value) {
+                } else if constexpr (AscendC::IsSameType<DataTypeOut, float>::value) {
                     verg7 = verg6;
                     AscendC::Reg::DataCopy<DataTypeOut, AscendC::Reg::StoreDist::DIST_NORM_B32>(
                         gluResAddr + dstUbOffset, verg7, mask);
@@ -267,19 +271,19 @@ __aicore__ inline void BlockEpilogueDequantSwiglu<QMM_BLOCK_EPILOGUE_DEQUANT_FUN
                 // copy input from ub to register, addr of ub should align to 32B
                 uint32_t l0cOutOffset = mIdx * nSrcUbAligned + vfBlockIdx * eleNumPerVf;
                 AscendC::Reg::DataCopy(l0cOutReg, l0cOut + l0cOutOffset);
-                if constexpr (IsSameType<DataTypeIn, int32_t>::value) {
+                if constexpr (AscendC::IsSameType<DataTypeIn, int32_t>::value) {
                     AscendC::Reg::Cast<float, DataTypeIn, ctInt322Fp32S>(l0cOutRegFloat, l0cOutReg, maskN);
                 } else {
                     l0cOutRegFloat = l0cOutReg;
                 }
                 // l0c_out * scale2
                 AscendC::Reg::DataCopy(scaleReg, scale2 + vfBlockIdx * eleNumPerVf);
-                if constexpr (IsSameType<DataTypeX2Scale, bfloat16_t>::value ||
-                              IsSameType<DataTypeX2Scale, half>::value) {
+                if constexpr (AscendC::IsSameType<DataTypeX2Scale, bfloat16_t>::value ||
+                              AscendC::IsSameType<DataTypeX2Scale, half>::value) {
                     AscendC::Reg::Cast<float, DataTypeX2Scale, ctHalf2Fp32ZeroS>(castScaleReg, scaleReg, maskN);
                     AscendC::Reg::Cast<float, DataTypeX2Scale, ctHalf2Fp32OneS>(castScaleOneReg, scaleReg, maskN4B16);
                     AscendC::Reg::Interleave(castScaleReg, castScaleOneReg, castScaleReg, castScaleOneReg);
-                } else if constexpr (IsSameType<DataTypeX2Scale, float>::value) {
+                } else if constexpr (AscendC::IsSameType<DataTypeX2Scale, float>::value) {
                     castScaleReg = scaleReg;
                 }
                 AscendC::Reg::Mul(mulScaleOutReg, l0cOutRegFloat, castScaleReg, maskN);
@@ -300,8 +304,8 @@ QMM_BLOCK_EPILOGUE_DEQUANT_SWIGLU_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockEpilogueDequantSwiglu<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::CopyX1ScaleFromGm2Ub(
     AscendC::LocalTensor<DataTypeX1Scale>& dst, uint64_t blockLen, uint64_t offset)
 {
-    DataCopyParams ptScale2UbParams{1, 0, 0, 0};
-    DataCopyPadParams padParams;
+    AscendC::DataCopyParams ptScale2UbParams{1, 0, 0, 0};
+    AscendC::DataCopyPadParams padParams;
     ptScale2UbParams.blockLen = blockLen;
     AscendC::DataCopyPad(dst, x1ScaleGlobal_[Get<X1SCALE_IDX>(blockCoord_) + offset], ptScale2UbParams, padParams);
 }
@@ -310,8 +314,8 @@ QMM_BLOCK_EPILOGUE_DEQUANT_SWIGLU_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockEpilogueDequantSwiglu<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_LOCAL_PARAMS>::CopyX2ScaleFromGm2Ub(
     AscendC::LocalTensor<DataTypeX2Scale>& dst, uint64_t offset)
 {
-    DataCopyParams scale2UbParams{1, 0, 0, 0};
-    DataCopyPadParams padParams;
+    AscendC::DataCopyParams scale2UbParams{1, 0, 0, 0};
+    AscendC::DataCopyPadParams padParams;
     scale2UbParams.blockLen = singleN_ * sizeof(DataTypeX2Scale);
     AscendC::DataCopyPad(dst, x2ScaleGlobal_[Get<X2SCALE_IDX>(blockCoord_) + offset], scale2UbParams, padParams);
 }

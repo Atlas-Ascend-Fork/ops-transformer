@@ -66,6 +66,7 @@ private:
                                         DataType scaleDtype) const;
 
     aclnnStatus CheckGroupedMatmulMxDtype() const;
+    aclnnStatus CheckGroupedMatmulHif4Dtype() const;
     aclnnStatus CheckGroupedMatmulPerGroupDim() const;
     aclnnStatus CheckPerGroupWeightDim(size_t weightDimNumber) const;
     aclnnStatus CheckPerGroupScaleDim(const TensorIndexInfo& tensorIndex, size_t scaleDimNumber,
@@ -79,6 +80,11 @@ private:
     aclnnStatus CheckPerTileKShape(size_t i, int64_t weightKDim, int64_t scaleKDim, int64_t perTokenKDim) const;
     aclnnStatus CheckGroupedMatmulMxfp8() const;
     aclnnStatus CheckGroupedMatmulMxfp4() const;
+    aclnnStatus CheckGroupedMatmulHif4ScaleTranspose() const;
+    aclnnStatus CheckGroupedMatmulHif4() const;
+    aclnnStatus CheckGroupedMatmulHif4DimValue() const;
+    aclnnStatus CheckHif4TypeMCaseInputShape(const TensorDimInfo& dimInfo, size_t index) const;
+    aclnnStatus CheckHif4TypeKCaseInputShape(const TensorDimInfo& dimInfo, size_t index) const;
     aclnnStatus CheckGroupedMatmulFp4MxDimValue() const;
 
     aclnnStatus CheckNonPerGroupQuantDim() const;
@@ -93,6 +99,7 @@ private:
     aclnnStatus CheckFp8Hif8QuantParams() const;
     aclnnStatus CheckFp8Params(const DataType& scaleDtype) const;
     aclnnStatus CheckFp4Params(const DataType& scaleDtype) const;
+    aclnnStatus CheckHif4Params(const DataType& scaleDtype) const;
     aclnnStatus CheckNonMxQuantTransposeStatus() const;
     aclnnStatus CheckInputParamsForV3Version() const;
     aclnnStatus CheckInputShapeForV3Version() const;

@@ -73,7 +73,8 @@ public:
     __aicore__ inline void UpdateBasicIndex(uint64_t roundIdx, bool isLastGroupRound);
     template <bool aTrans, bool bTrans, CubeFormat wFormat = CubeFormat::ND>
     __aicore__ inline void UpdateBlockParams(uint64_t roundIdx, bool isLastGroupRound = true);
-    template <bool aTrans, bool bTrans, class scaleType = AscendC::fp8_e8m0_t, CubeFormat wFormat = CubeFormat::ND>
+    template <bool aTrans, bool bTrans, class xType, class scaleType = AscendC::fp8_e8m0_t,
+              CubeFormat wFormat = CubeFormat::ND>
     __aicore__ inline void CalcGMOffset();
     __aicore__ inline void ResetAddressOffsets();
     __aicore__ inline uint32_t GetStartBlockIdx() const;
@@ -89,8 +90,9 @@ private:
     __aicore__ inline uint64_t CalcNzWeightSize(uint64_t n, uint64_t k) const;
     template <bool bTrans, class xType, CubeFormat wFormat>
     __aicore__ inline void UpdateAAndBGroupOffsets(uint32_t groupIdx, uint64_t curN, uint64_t curK, bool isSplitM);
-    template <bool aTrans, bool bTrans, class scaleType>
+    template <bool aTrans, bool bTrans, class xType, class scaleType>
     __aicore__ inline void UpdateScaleGroupOffsets(uint32_t groupIdx, uint64_t curN, uint64_t curK, bool isSplitM);
+    template <class xType>
     __aicore__ inline void UpdateBiasGroupOffset(uint32_t groupIdx, uint64_t curN, bool isSplitM);
 
     const uint64_t WINDOW_LEN = 4;
@@ -146,7 +148,7 @@ template <bool bTrans, class xType, CubeFormat wFormat>
 __aicore__ inline void QuantASWBlockSch::UpdateAAndBGroupOffsets(uint32_t groupIdx, uint64_t curN, uint64_t curK,
                                                                  bool isSplitM)
 {
-    if constexpr (QuantUtils::IsFp4<xType>()) { // 2: fp4为半个字节
+    if constexpr (QuantUtils::IsFp4<xType>() || QuantUtils::IsHifp4<xType>()) { // 2: fp4为半个字节
         params_.aGroupAddrOffset += params_.m * params_.k / 2;
         if (isSplitM) {
             params_.bGroupAddrOffset = static_cast<uint64_t>(groupIdx) * curN * curK / 2;
@@ -173,26 +175,24 @@ __aicore__ inline void QuantASWBlockSch::UpdateAAndBGroupOffsets(uint32_t groupI
     }
 }
 
-template <bool aTrans, bool bTrans, class scaleType>
+template <bool aTrans, bool bTrans, class xType, class scaleType>
 __aicore__ inline void QuantASWBlockSch::UpdateScaleGroupOffsets(uint32_t groupIdx, uint64_t curN, uint64_t curK,
                                                                  bool isSplitM)
 {
-    if constexpr (QuantUtils::IsMxType<scaleType>()) {
-        uint64_t scaleK = QuantUtils::MXFP_MULTI_BASE_SIZE;
-        if constexpr (!aTrans) { // mx (m, ceil(k / 64), 2)
-            scaleK *= QuantUtils::CeilDiv(params_.k, QuantUtils::MXFP_DIVISOR_SIZE);
+    if constexpr (QuantUtils::IsMxOrHif4Type<xType, scaleType>()) {
+        if constexpr (!aTrans) {
+            constexpr uint64_t scaleFactor = QuantUtils::IsHifp4<xType>() ? 1ULL : QuantUtils::MXFP_MULTI_BASE_SIZE;
+            uint64_t scaleK = scaleFactor * QuantUtils::CeilDiv(params_.k, QuantUtils::MXFP_DIVISOR_SIZE);
             params_.xScaleGroupAddrOffset += params_.m * scaleK;
             if (isSplitM) {
-                uint64_t wScaleK = QuantUtils::MXFP_MULTI_BASE_SIZE;
-                wScaleK *= QuantUtils::CeilDiv(curK, QuantUtils::MXFP_DIVISOR_SIZE);
+                uint64_t wScaleK = scaleFactor * QuantUtils::CeilDiv(curK, QuantUtils::MXFP_DIVISOR_SIZE);
                 params_.wScaleGroupAddrOffset = static_cast<uint64_t>(groupIdx) * curN * wScaleK;
             } else {
                 params_.wScaleGroupAddrOffset += params_.n * scaleK;
             }
-            return;
-        }
-        if constexpr (aTrans && !bTrans) { // mx (k / 64 + G, m, 2)
-            scaleK *= (params_.bGroupAddrOffset / curN / QuantUtils::MXFP_DIVISOR_SIZE + groupIdx);
+        } else if constexpr (aTrans && !bTrans) {
+            uint64_t scaleK = QuantUtils::MXFP_MULTI_BASE_SIZE *
+                              (params_.bGroupAddrOffset / curN / QuantUtils::MXFP_DIVISOR_SIZE + groupIdx);
             params_.xScaleGroupAddrOffset = params_.m * scaleK;
             params_.wScaleGroupAddrOffset = curN * scaleK;
         }
@@ -207,13 +207,16 @@ __aicore__ inline void QuantASWBlockSch::UpdateScaleGroupOffsets(uint32_t groupI
     }
 }
 
+template <class xType>
 __aicore__ inline void QuantASWBlockSch::UpdateBiasGroupOffset(uint32_t groupIdx, uint64_t curN, bool isSplitM)
 {
     if (isSplitM) {
         params_.biasGroupAddrOffset = static_cast<uint64_t>(groupIdx) * curN;
         return;
     }
-    params_.biasGroupAddrOffset += params_.n;
+    if (!QuantUtils::IsHifp4<xType>()) {
+        params_.biasGroupAddrOffset += params_.n;
+    }
 }
 
 template <bool aTrans, bool bTrans, class xType, class scaleType, CubeFormat wFormat>
@@ -227,8 +230,8 @@ __aicore__ inline void QuantASWBlockSch::UpdateGroupOffset(int32_t m, int32_t n,
     if (groupIdx > 0) {
         UpdateAAndBGroupOffsets<bTrans, xType, wFormat>(groupIdx, curN, curK, isSplitM);
         params_.cGroupAddrOffset += params_.m * params_.n;
-        UpdateScaleGroupOffsets<aTrans, bTrans, scaleType>(groupIdx, curN, curK, isSplitM);
-        UpdateBiasGroupOffset(groupIdx, curN, isSplitM);
+        UpdateScaleGroupOffsets<aTrans, bTrans, xType, scaleType>(groupIdx, curN, curK, isSplitM);
+        UpdateBiasGroupOffset<xType>(groupIdx, curN, isSplitM);
     }
 
     // 需要kernel传参m,n,k, 兼容group_type=0,2和多tensor情况
@@ -370,7 +373,7 @@ __aicore__ inline void QuantASWBlockSch::ResetAddressOffsets()
     params_.nSplitAddrOffset = 0;
 }
 
-template <bool aTrans, bool bTrans, class scaleType, CubeFormat wFormat>
+template <bool aTrans, bool bTrans, class xType, class scaleType, CubeFormat wFormat>
 __aicore__ inline void QuantASWBlockSch::CalcGMOffset()
 {
     uint64_t mOffset = params_.mIndex * tilingData_->baseM + params_.mSplitAddrOffset;
@@ -398,14 +401,23 @@ __aicore__ inline void QuantASWBlockSch::CalcGMOffset()
 
     offset_.offsetC = mOffset * params_.n + nOffset;
 
-    if constexpr (QuantUtils::IsMxType<scaleType>()) {
+    if constexpr (QuantUtils::IsMxOrHif4Type<xType, scaleType>()) {
         uint64_t pertokenScaleK = QuantUtils::MXFP_MULTI_BASE_SIZE;
         uint64_t scaleK = QuantUtils::MXFP_MULTI_BASE_SIZE;
+        uint64_t ceilK = QuantUtils::CeilDiv(params_.k, QuantUtils::MXFP_DIVISOR_SIZE);
         if constexpr (!aTrans) { // mx (m, ceil(k / 64), 2)
-            pertokenScaleK *= QuantUtils::CeilDiv(params_.k, QuantUtils::MXFP_DIVISOR_SIZE);
+            if constexpr (QuantUtils::IsHifp4<xType>()) {
+                pertokenScaleK = ceilK;
+            } else {
+                pertokenScaleK *= ceilK;
+            }
         }
         if constexpr (bTrans) { // mx (n, ceil(k / 64), 2)
-            scaleK *= QuantUtils::CeilDiv(params_.k, QuantUtils::MXFP_DIVISOR_SIZE);
+            if constexpr (QuantUtils::IsHifp4<xType>()) {
+                scaleK = ceilK;
+            } else {
+                scaleK *= ceilK;
+            }
         }
         offset_.offsetPerTokenScale = mOffset * pertokenScaleK;
         offset_.offsetScale = nOffset * scaleK;

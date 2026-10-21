@@ -73,9 +73,19 @@ public:
     using BiasType = typename BlockMmad::BiasType;
     using LayoutB = typename BlockMmad::LayoutB;
     static constexpr CubeFormat formatB = TagToFormat<LayoutB>::format;
-    static constexpr bool IS_FP4 =
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    static constexpr bool IS_FP4_HIF4 = AscendC::IsSameType<AType, fp4x2_e2m1_t>::value ||
+                                        AscendC::IsSameType<AType, fp4x2_e1m2_t>::value ||
+                                        AscendC::IsSameType<AType, hifloat4x2_t>::value;
+    static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
+    using ScaleType = typename AscendC::Conditional<IS_HIF4, AscendC::hif4_scale, AscendC::fp8_e8m0_t>::type;
+#else
+    static constexpr bool IS_FP4_HIF4 =
         AscendC::IsSameType<AType, fp4x2_e2m1_t>::value || AscendC::IsSameType<AType, fp4x2_e1m2_t>::value;
-    static constexpr int32_t c0Size = IS_FP4 ? MATMUL_MNK_ALIGN_INT4 : MATMUL_MNK_ALIGN_INT8;
+    static constexpr bool IS_HIF4 = false;
+    using ScaleType = AscendC::fp8_e8m0_t;
+#endif
+    static constexpr int32_t c0Size = IS_FP4_HIF4 ? MATMUL_MNK_ALIGN_INT4 : MATMUL_MNK_ALIGN_INT8;
 
     using TupleShape = AscendC::Shape<int64_t, int64_t, int64_t>;
     using BlockShape = AscendC::Shape<int64_t, int64_t, int64_t, int64_t>;
@@ -159,8 +169,8 @@ private:
     AscendC::GlobalTensor<AType> aGlobal_;
     AscendC::GlobalTensor<BType> bGlobal_;
     AscendC::GlobalTensor<BiasType> biasGlobal_;
-    AscendC::GlobalTensor<AscendC::fp8_e8m0_t> x1ScaleGlobal_;
-    AscendC::GlobalTensor<AscendC::fp8_e8m0_t> x2ScaleGlobal_;
+    AscendC::GlobalTensor<ScaleType> x1ScaleGlobal_;
+    AscendC::GlobalTensor<ScaleType> x2ScaleGlobal_;
     AscendC::GlobalTensor<int64_t> groupListGlobal_;
     AscendC::GlobalTensor<CType> yGlobal_;
 
@@ -168,7 +178,7 @@ private:
     __gm__ AType* xTensorPtr_;
     __gm__ BType* wTensorPtr_;
     GM_ADDR x1ScaleTensorPtr_;
-    __gm__ AscendC::fp8_e8m0_t* x2ScaleTensorPtr_;
+    __gm__ ScaleType* x2ScaleTensorPtr_;
     __gm__ BiasType* biasTensorPtr_;
     __gm__ CType* yTensorPtr_;
 
@@ -208,8 +218,10 @@ __aicore__ inline void KernelQGmmMx<QGMM_MX_KERNEL_FUN_TEM_PARAMS>::Run(const Pa
             continue;
         }
 
+        AscendC::Std::tuple<int64_t, int64_t, int64_t, int64_t> bsProblemShape{
+            Get<MNK_M>(problemShape_), Get<MNK_N>(problemShape_), Get<MNK_K>(problemShape_), 0L};
         BaseMBalance(bs, Get<MNK_M>(problemShape_), params.gmmParams.baseM);
-        bs.UpdateNextProblem(problemShape_);
+        bs.UpdateNextProblem(bsProblemShape);
         ProcessSingleGroup<false>(params, bs, groupIdx);
     }
 
@@ -222,8 +234,10 @@ __aicore__ inline void KernelQGmmMx<QGMM_MX_KERNEL_FUN_TEM_PARAMS>::Run(const Pa
     // Update the group-specific M/N/K values.
     SetMNK(loopIdx);
     if (Get<MNK_M>(problemShape_) > 0 && Get<MNK_K>(problemShape_) > 0) {
+        AscendC::Std::tuple<int64_t, int64_t, int64_t, int64_t> bsProblemShape{
+            Get<MNK_M>(problemShape_), Get<MNK_N>(problemShape_), Get<MNK_K>(problemShape_), 0L};
         BaseMBalance(bs, Get<MNK_M>(problemShape_), params.gmmParams.baseM);
-        bs.UpdateNextProblem(problemShape_);
+        bs.UpdateNextProblem(bsProblemShape);
         // Further split the tail tiles of the last group to use more cores when possible.
         if (IfNeedSplit(bs)) {
             bs.UpdateTailTile();
@@ -243,7 +257,7 @@ __aicore__ inline void KernelQGmmMx<QGMM_MX_KERNEL_FUN_TEM_PARAMS>::Init(const P
     xTensorPtr_ = GetTensorAddr<AType>(0, mmadParams.aGmAddr);
     wTensorPtr_ = GetTensorAddr<BType>(0, mmadParams.bGmAddr);
     x1ScaleTensorPtr_ = mmadParams.x1ScaleGmAddr;
-    x2ScaleTensorPtr_ = GetTensorAddr<AscendC::fp8_e8m0_t>(0, mmadParams.x2ScaleGmAddr);
+    x2ScaleTensorPtr_ = GetTensorAddr<ScaleType>(0, mmadParams.x2ScaleGmAddr);
     biasTensorPtr_ = GetTensorAddr<BiasType>(0, mmadParams.biasGmAddr);
     groupListPtr_ = mmadParams.groupListGmAddr;
     yTensorPtr_ = GetTensorAddr<CType>(0, mmadParams.cGmAddr);
@@ -260,9 +274,9 @@ __aicore__ inline void KernelQGmmMx<QGMM_MX_KERNEL_FUN_TEM_PARAMS>::Init(const P
             perGroupBOffset_ = gmmParams.n * gmmParams.k;
         } else {
             if constexpr (transB) {
-                perGroupBOffset_ = Align16(gmmParams.n) * (IS_FP4 ? Align64(gmmParams.k) : Align32(gmmParams.k));
+                perGroupBOffset_ = Align16(gmmParams.n) * (IS_FP4_HIF4 ? Align64(gmmParams.k) : Align32(gmmParams.k));
             } else {
-                perGroupBOffset_ = (IS_FP4 ? Align64(gmmParams.n) : Align32(gmmParams.n)) * Align16(gmmParams.k);
+                perGroupBOffset_ = (IS_FP4_HIF4 ? Align64(gmmParams.n) : Align32(gmmParams.n)) * Align16(gmmParams.k);
             }
         }
     }
@@ -340,24 +354,31 @@ __aicore__ inline void KernelQGmmMx<QGMM_MX_KERNEL_FUN_TEM_PARAMS>::UpdateOffset
     int64_t n = Get<MNK_N>(problemShape_);
     int64_t k = Get<MNK_K>(problemShape_);
     if constexpr (!transA) { // split m, weight ND/NZ
-        if constexpr (IS_FP4) {
+        if constexpr (IS_FP4_HIF4) {
             Get<IDX_A_OFFSET>(baseOffset_) = (preOffset_ - m) * k >> 1;
             Get<IDX_B_OFFSET>(baseOffset_) = perGroupBOffset_ * static_cast<int64_t>(groupIdx) >> 1;
         } else {
             Get<IDX_A_OFFSET>(baseOffset_) = (preOffset_ - m) * k;
             Get<IDX_B_OFFSET>(baseOffset_) = perGroupBOffset_ * static_cast<int64_t>(groupIdx);
         }
-        // x1Scale:(m, ceil(k/64), 2) x2Scale:(g, n, ceil(k/64), 2) or (g, ceil(k/64), n, 2)
-        int64_t scaleK = CeilDiv(k, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+        int64_t scaleK = CeilDiv(k, MXFP_DIVISOR_SIZE) * (IS_HIF4 ? 1 : MXFP_MULTI_BASE_SIZE);
         Get<IDX_X1SCALE_OFFSET>(baseOffset_) = (preOffset_ - m) * scaleK;
         Get<IDX_X2SCALE_OFFSET>(baseOffset_) = static_cast<int64_t>(groupIdx) * n * scaleK;
         // y:(m, n)
         Get<IDX_C_OFFSET>(baseOffset_) = (preOffset_ - m) * n;
     } else { // split k, weight ND only
-        Get<IDX_A_OFFSET>(baseOffset_) = m * (preOffset_ - k);
-        Get<IDX_B_OFFSET>(baseOffset_) = n * (preOffset_ - k);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+        if constexpr (IS_FP4_HIF4) {
+            Get<IDX_A_OFFSET>(baseOffset_) = m * (preOffset_ - k) >> 1;
+            Get<IDX_B_OFFSET>(baseOffset_) = n * (preOffset_ - k) >> 1;
+        } else
+#endif
+        {
+            Get<IDX_A_OFFSET>(baseOffset_) = m * (preOffset_ - k);
+            Get<IDX_B_OFFSET>(baseOffset_) = n * (preOffset_ - k);
+        }
         // x1Scale:(k/64+g, m, 2) x2Scale:(k/64+g, n, 2)
-        int64_t scaleK = ((preOffset_ - k) / MXFP_DIVISOR_SIZE + groupIdx) * MXFP_MULTI_BASE_SIZE;
+        int64_t scaleK = ((preOffset_ - k) / MXFP_DIVISOR_SIZE + groupIdx) * (IS_HIF4 ? 1 : MXFP_MULTI_BASE_SIZE);
         Get<IDX_X1SCALE_OFFSET>(baseOffset_) = m * scaleK;
         Get<IDX_X2SCALE_OFFSET>(baseOffset_) = n * scaleK;
         // y:(g, m, n)
@@ -392,9 +413,15 @@ __aicore__ inline void KernelQGmmMx<QGMM_MX_KERNEL_FUN_TEM_PARAMS>::ProcessSingl
         if (Get<MNK_M>(singleShape) <= 0 || Get<MNK_N>(singleShape) <= 0) {
             return;
         }
-        blockOffset_ = coord.template GetQuantOffset<QuantMode::MX_PERGROUP_MODE, c0Size>(
-            Get<IDX_M_TILEIDX>(tileIdx), Get<IDX_N_TILEIDX>(tileIdx), Get<IDX_M_TAIL_SPLIT_TILEIDX>(singleShape),
-            Get<IDX_N_TAIL_SPLIT_TILEIDX>(singleShape));
+        if constexpr (IS_HIF4) {
+            blockOffset_ = coord.template GetQuantOffset<QuantMode::HIF4_PEGROUP_MODE, c0Size>(
+                Get<IDX_M_TILEIDX>(tileIdx), Get<IDX_N_TILEIDX>(tileIdx), Get<IDX_M_TAIL_SPLIT_TILEIDX>(singleShape),
+                Get<IDX_N_TAIL_SPLIT_TILEIDX>(singleShape));
+        } else {
+            blockOffset_ = coord.template GetQuantOffset<QuantMode::MX_PERGROUP_MODE, c0Size>(
+                Get<IDX_M_TILEIDX>(tileIdx), Get<IDX_N_TILEIDX>(tileIdx), Get<IDX_M_TAIL_SPLIT_TILEIDX>(singleShape),
+                Get<IDX_N_TAIL_SPLIT_TILEIDX>(singleShape));
+        }
         Iterate(Get<MNK_M>(singleShape), Get<MNK_N>(singleShape));
     } while (bs.GetTileIdx(tileIdx));
 }
@@ -430,7 +457,7 @@ __aicore__ inline void KernelQGmmMx<QGMM_MX_KERNEL_FUN_TEM_PARAMS>::UpdateMMGlob
     if (isBias_) {
         biasGlobal_.SetGlobalBuffer(biasTensorPtr_ + Get<IDX_BIAS_OFFSET>(baseOffset_));
     }
-    x1ScaleGlobal_.SetGlobalBuffer((__gm__ AscendC::fp8_e8m0_t*)(x1ScaleTensorPtr_) +
+    x1ScaleGlobal_.SetGlobalBuffer((__gm__ ScaleType*)(x1ScaleTensorPtr_) +
                                    Get<IDX_X1SCALE_OFFSET>(baseOffset_)); // optional input
     x2ScaleGlobal_.SetGlobalBuffer(x2ScaleTensorPtr_ + Get<IDX_X2SCALE_OFFSET>(baseOffset_));
     yGlobal_.SetGlobalBuffer(yTensorPtr_ + Get<IDX_C_OFFSET>(baseOffset_));

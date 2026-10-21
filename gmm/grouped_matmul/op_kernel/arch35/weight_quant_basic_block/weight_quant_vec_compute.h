@@ -42,12 +42,11 @@ using AscendC::TEventID;
 using AscendC::TPipe;
 using AscendC::VECTOR_REG_WIDTH;
 using AscendC::WaitFlag;
-namespace Reg = AscendC::Reg;
-using AscendC::Reg::AddrReg;
-using AscendC::Reg::GetRound;
-using AscendC::Reg::MaskReg;
-using AscendC::Reg::RegTensor;
-using AscendC::Reg::TypeGet;
+using GmmWeightQuantVectorApi::AddrReg;
+using GmmWeightQuantVectorApi::GetRound;
+using GmmWeightQuantVectorApi::MaskReg;
+using GmmWeightQuantVectorApi::RegTensor;
+using GmmWeightQuantVectorApi::TypeGet;
 
 namespace WeightQuantBatchMatmulV2::Arch35 {
 

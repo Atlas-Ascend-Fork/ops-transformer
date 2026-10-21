@@ -19,6 +19,7 @@
 #include "cgmct/kernel/kernel_gmm_swiglu_mxquant.h"
 #include "cgmct/block/block_mx_mm_aic_to_aiv_builder.h"
 #include "cgmct/block/block_scheduler_gmm_aswt_with_tail_split.h"
+#include "cgmct/tile/tile_copy.h"
 
 using namespace Cgmct::Gemm;
 using namespace Cgmct::Gemm::Kernel;

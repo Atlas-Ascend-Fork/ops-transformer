@@ -16,6 +16,7 @@
 #ifndef GROUPED_MATMUL_HOST_UTIL_H
 #define GROUPED_MATMUL_HOST_UTIL_H
 
+#include <array>
 #include <map>
 #include <cstdint>
 

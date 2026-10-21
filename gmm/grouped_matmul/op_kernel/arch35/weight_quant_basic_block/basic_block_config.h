@@ -24,6 +24,12 @@
 #include "lib/matmul_intf.h"
 #include "weight_quant_tool.h"
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+namespace GmmWeightQuantVectorApi = AscendC::MicroAPI;
+#else
+namespace GmmWeightQuantVectorApi = AscendC::Reg;
+#endif
+
 namespace WeightQuantBatchMatmulV2::Arch35 {
 
 constexpr static uint16_t WEIGHT_F16_UB_NZ_STRIDE = 65;

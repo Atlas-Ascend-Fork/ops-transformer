@@ -24,8 +24,7 @@
 #endif
 #include "weight_quant_tool.h"
 
-namespace Reg = AscendC::Reg;
-using AscendC::Reg::RegTensor;
+using GmmWeightQuantVectorApi::RegTensor;
 
 namespace WeightQuantBatchMatmulV2::Arch35 {
 
@@ -38,11 +37,13 @@ struct LocalAddressYParam {
     __local_mem__ yType* yPhyAddr;
 };
 
-static constexpr Reg::CastTrait C32_TO_FP32_TRAIT = {Reg::RegLayout::UNKNOWN, Reg::SatMode::UNKNOWN,
-                                                     Reg::MaskMergeMode::ZEROING, AscendC::RoundMode::CAST_RINT};
+static constexpr GmmWeightQuantVectorApi::CastTrait C32_TO_FP32_TRAIT = {
+    GmmWeightQuantVectorApi::RegLayout::UNKNOWN, GmmWeightQuantVectorApi::SatMode::UNKNOWN,
+    GmmWeightQuantVectorApi::MaskMergeMode::ZEROING, AscendC::RoundMode::CAST_RINT};
 
-static constexpr Reg::CastTrait FP32_TO_F16 = {Reg::RegLayout::ZERO, Reg::SatMode::NO_SAT, Reg::MaskMergeMode::ZEROING,
-                                               AscendC::RoundMode::CAST_RINT};
+static constexpr GmmWeightQuantVectorApi::CastTrait FP32_TO_F16 = {
+    GmmWeightQuantVectorApi::RegLayout::ZERO, GmmWeightQuantVectorApi::SatMode::NO_SAT,
+    GmmWeightQuantVectorApi::MaskMergeMode::ZEROING, AscendC::RoundMode::CAST_RINT};
 
 template <typename yType, bool hasBias>
 __aicore__ inline void AntiQuantYB32(LocalAddressYParam<yType>& localAddressParam, uint64_t nRealL0Size,
@@ -56,37 +57,38 @@ __aicore__ inline void AntiQuantYB32(LocalAddressYParam<yType>& localAddressPara
         RegTensor<float> antiQuantKScaleVreg;
         RegTensor<float> biasVreg;
         RegTensor<yType> yF16Vreg;
-        Reg::MaskReg maskAll = Reg::CreateMask<uint8_t, AscendC::Reg::MaskPattern::ALL>();
+        GmmWeightQuantVectorApi::MaskReg maskAll =
+            GmmWeightQuantVectorApi::CreateMask<uint8_t, GmmWeightQuantVectorApi::MaskPattern::ALL>();
 
         uint32_t nRealL0Temp = nRealL0Size;
         for (uint16_t nId = 0; nId < ubLoopN; nId++) {
             if constexpr (hasBias) {
-                Reg::DataCopy<float, Reg::LoadDist::DIST_NORM>(biasVreg,
-                                                               localAddressParam.biasPhyAddr + nId * nRealVRegSize);
+                GmmWeightQuantVectorApi::DataCopy<float, GmmWeightQuantVectorApi::LoadDist::DIST_NORM>(
+                    biasVreg, localAddressParam.biasPhyAddr + nId * nRealVRegSize);
             }
-            Reg::DataCopy<float, Reg::LoadDist::DIST_NORM>(antiQuantCScaleVreg,
-                                                           localAddressParam.cScalePhyAddr + nId * nRealVRegSize);
+            GmmWeightQuantVectorApi::DataCopy<float, GmmWeightQuantVectorApi::LoadDist::DIST_NORM>(
+                antiQuantCScaleVreg, localAddressParam.cScalePhyAddr + nId * nRealVRegSize);
 
-            Reg::MaskReg yResultMask = Reg::UpdateMask<float>(nRealL0Temp);
+            GmmWeightQuantVectorApi::MaskReg yResultMask = GmmWeightQuantVectorApi::UpdateMask<float>(nRealL0Temp);
             for (uint16_t mId = 0; mId < ubLoopM; mId++) {
                 uint64_t yOffset = nId * nRealVRegSize + mId * nRealL0Size;
                 uint64_t ubYOffset = (nId * nRealVRegSize >> 1) + mId * nRealL0Size;
-                Reg::DataCopy<int32_t, Reg::LoadDist::DIST_NORM>(yOriginVreg,
-                                                                 localAddressParam.yOriginPhyAddr + yOffset);
-                Reg::DataCopy<float, Reg::LoadDist::DIST_BRC_B32>(antiQuantKScaleVreg,
-                                                                  localAddressParam.kScalePhyAddr + mId);
+                GmmWeightQuantVectorApi::DataCopy<int32_t, GmmWeightQuantVectorApi::LoadDist::DIST_NORM>(
+                    yOriginVreg, localAddressParam.yOriginPhyAddr + yOffset);
+                GmmWeightQuantVectorApi::DataCopy<float, GmmWeightQuantVectorApi::LoadDist::DIST_BRC_B32>(
+                    antiQuantKScaleVreg, localAddressParam.kScalePhyAddr + mId);
 
-                Reg::Cast<float, int32_t, C32_TO_FP32_TRAIT>(yVreg, yOriginVreg, maskAll);
-                Reg::Mul(yVreg, yVreg, antiQuantCScaleVreg, maskAll);
-                Reg::Mul(yVreg, yVreg, antiQuantKScaleVreg, maskAll);
+                GmmWeightQuantVectorApi::Cast<float, int32_t, C32_TO_FP32_TRAIT>(yVreg, yOriginVreg, maskAll);
+                GmmWeightQuantVectorApi::Mul(yVreg, yVreg, antiQuantCScaleVreg, maskAll);
+                GmmWeightQuantVectorApi::Mul(yVreg, yVreg, antiQuantKScaleVreg, maskAll);
                 if constexpr (hasBias) {
-                    Reg::Add(yVreg, yVreg, biasVreg, maskAll);
+                    GmmWeightQuantVectorApi::Add(yVreg, yVreg, biasVreg, maskAll);
                 }
 
-                Reg::Cast<yType, float, FP32_TO_F16>(yF16Vreg, yVreg, maskAll);
+                GmmWeightQuantVectorApi::Cast<yType, float, FP32_TO_F16>(yF16Vreg, yVreg, maskAll);
 
-                Reg::DataCopy<yType, Reg::StoreDist::DIST_PACK_B32>(localAddressParam.yPhyAddr + ubYOffset * 2,
-                                                                    yF16Vreg, yResultMask);
+                GmmWeightQuantVectorApi::DataCopy<yType, GmmWeightQuantVectorApi::StoreDist::DIST_PACK_B32>(
+                    localAddressParam.yPhyAddr + ubYOffset * 2, yF16Vreg, yResultMask);
             }
         }
     }

@@ -176,6 +176,27 @@ struct GMMWeightQuantTilingData {
 };
 #pragma pack(pop)
 
+#pragma pack(push, 8)
+struct GMMWeightQuantAswParams {
+    uint32_t groupNum = 0;
+    uint32_t l0cSize = 0;
+    uint8_t singleX = 0;
+    uint8_t singleW = 0;
+    uint8_t singleY = 0;
+    int8_t groupType = 0;
+    uint8_t groupListType = 0;
+    uint8_t hasBias = 0;
+    uint16_t groupSize = 0;
+};
+#pragma pack(pop)
+
+#pragma pack(push, 8)
+struct GMMWeightQuantAswTilingData {
+    GMMWeightQuantAswParams gmmWeightQuantAswParams;
+    TCubeTiling mmTilingData;
+};
+#pragma pack(pop)
+
 // A5 S4S4 (INT4×INT4) mix-core tiling：AIV prologue(int4->int8) + AIC int8×int8 Mmad + AIV epilogue
 #pragma pack(push, 8)
 struct GMMBaseParamsS4S4 {

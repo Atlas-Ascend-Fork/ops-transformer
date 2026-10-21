@@ -23,8 +23,10 @@
 
 #include "log/log.h"
 #include "log/error_code.h"
+#include "platform/platform_infos_def.h"
 #include "op_host/tiling_templates_registry.h"
 #include "op_host/tiling_type.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "../../../op_kernel/arch35/quant_adaptive_sliding_window_templates/gqmm_tiling_key.h"
 using namespace Ops::Transformer::OpTiling;
 using namespace GroupedMatmul;
@@ -32,6 +34,8 @@ using namespace optiling::GmmConstant;
 using GMMQuantTilingData = GroupedMatmulTilingData::GMMQuantTilingData;
 using GMMQuantParams = GroupedMatmulTilingData::GMMQuantParams;
 namespace {
+constexpr int64_t kMinResplitBaseN = 128; // 128: lower bound of baseN in the re-split loop, baseN never goes below 128
+
 static optiling::GroupedQuantMatmulInfoFactory g_groupedQuantMatmulInfoFactory;
 
 bool CheckGroupListType(const optiling::GQmmInputInfo& inputParams)
@@ -77,6 +81,8 @@ ge::graphStatus GroupedQmmTiling::GetPlatformInfo()
         aicoreParams_.l0aSize = compileInfoPtr->l0ASize;
         aicoreParams_.l0bSize = compileInfoPtr->l0BSize;
         aicoreParams_.l0cSize = compileInfoPtr->l0CSize;
+        supportMmadF16S8_ = compileInfoPtr->supportMmadF16S8;
+        npuArch_ = compileInfoPtr->npuArch;
     } else {
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
         aicoreParams_.aicNum = ascendcPlatform.GetCoreNumAic();
@@ -85,6 +91,10 @@ ge::graphStatus GroupedQmmTiling::GetPlatformInfo()
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, aicoreParams_.l0aSize);
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_B, aicoreParams_.l0bSize);
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, aicoreParams_.l0cSize);
+        std::string platformRes;
+        platformInfoPtr->GetPlatformRes("AICoreintrinsicDtypeMap", "Intrinsic_mmad", platformRes);
+        supportMmadF16S8_ = (platformRes.find("f16s8") != std::string::npos);
+        npuArch_ = ascendcPlatform.GetCurNpuArch();
     }
 
     OP_LOGI(context_, "Platform info: aicNum(%lu) ubSize(%lu) l1Size(%lu) l0aSize(%lu) l0bSize(%lu) l0cSize(%lu).",
@@ -96,6 +106,11 @@ ge::graphStatus GroupedQmmTiling::GetPlatformInfo()
 bool GroupedQmmTiling::IsMicroScaling() const
 {
     return inputParams_.scaleDtype == ge::DT_FLOAT8_E8M0;
+}
+
+bool GroupedQmmTiling::IsHif4Scale() const
+{
+    return inputParams_.aDtype == Ops::Transformer::DT_HIFLOAT4 && inputParams_.bDtype == Ops::Transformer::DT_HIFLOAT4;
 }
 
 bool GroupedQmmTiling::IsMxfp4() const
@@ -380,8 +395,10 @@ bool GroupedQmmTiling::ValidateAAndWDtype(const std::vector<ge::DataType>& legal
 
 bool GroupedQmmTiling::AnalyzeDtype()
 {
-    static const std::vector<ge::DataType> legalInputDtypes = {
-        ge::DT_INT8, ge::DT_HIFLOAT8, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2};
+    static const std::vector<ge::DataType> legalInputDtypes = {ge::DT_INT8,          ge::DT_HIFLOAT8,
+                                                               ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,
+                                                               ge::DT_FLOAT4_E2M1,   Ops::Transformer::DT_HIFLOAT4,
+                                                               ge::DT_FLOAT4_E1M2};
     OP_CHECK_IF(!ValidateAAndWDtype(legalInputDtypes), OP_LOGE(inputParams_.opName, "ValidateAAndWDtype failed."),
                 return false);
     auto wDesc = context_->GetDynamicInputDesc(WEIGHT_INDEX, 0);
@@ -615,6 +632,119 @@ bool GroupedQmmTiling::CheckQuantParamsForMxQuantMode(const gert::StorageShape* 
     return true;
 }
 
+bool GroupedQmmTiling::CheckQuantParamsForHif4TypeM(const gert::Shape& xScaleShape,
+                                                    const gert::Shape& wScaleShape) const
+{
+    auto xScaleDimNum = xScaleShape.GetDimNum();
+    auto wScaleDimNum = wScaleShape.GetDimNum();
+    OP_CHECK_IF(
+        wScaleDimNum != HIF4_TYPE_M_SCALE_DIM_NUM,
+        OP_LOGE(inputParams_.opName, "When split m, the dim num of scale should be 4 in hif4 quant mode, but actual \
+is %zu",
+                wScaleDimNum),
+        return false);
+    OP_CHECK_IF(
+        xScaleDimNum != HIF4_TYPE_K_SCALE_DIM_NUM,
+        OP_LOGE(inputParams_.opName, "When split m, the dim num of pertokenScale should be 3 in hif4 quant mode, but \
+actual is %zu",
+                xScaleDimNum),
+        return false);
+    auto wScaleEDim = static_cast<uint64_t>(wScaleShape.GetDim(0));
+    auto wScaleNDim = static_cast<uint64_t>(
+        inputParams_.transB ? wScaleShape.GetDim(1) : wScaleShape.GetDim(2)); // 2 is index for the third dim
+    auto wScaleKDim =
+        static_cast<uint64_t>(inputParams_.transB ? wScaleShape.GetDim(2) : // 2 is index for the third dim
+                                                    wScaleShape.GetDim(1));
+    auto xScaleMDim = static_cast<uint64_t>(inputParams_.transA ? xScaleShape.GetDim(1) : xScaleShape.GetDim(0));
+    auto xScaleKDim = static_cast<uint64_t>(inputParams_.transA ? xScaleShape.GetDim(0) : xScaleShape.GetDim(1));
+    auto xScaleLastDim = static_cast<uint64_t>(xScaleShape.GetDim(xScaleDimNum - 1));
+    auto wScaleLastDim = static_cast<uint64_t>(wScaleShape.GetDim(wScaleDimNum - 1));
+    auto expectedKDimValue = CeilDiv(inputParams_.kSize, MXFP_BASEK_FACTOR);
+    OP_CHECK_IF(
+        wScaleEDim != inputParams_.groupNum || wScaleKDim != expectedKDimValue || wScaleNDim != inputParams_.nSize ||
+            wScaleLastDim != HIF4_MULTI_BASE_SIZE,
+        OP_LOGE(inputParams_.opName,
+                "When split m in hif4 quant mode, the expected shape of scale is (%lu,%lu,%lu,1), but the actual \
+is (%lu,%lu,%lu,%lu).",
+                inputParams_.groupNum, inputParams_.nSize, expectedKDimValue, wScaleEDim, wScaleNDim, wScaleKDim,
+                wScaleLastDim),
+        return false);
+    OP_CHECK_IF(
+        xScaleMDim != inputParams_.mSize || xScaleKDim != expectedKDimValue || xScaleLastDim != HIF4_MULTI_BASE_SIZE,
+        OP_LOGE(inputParams_.opName,
+                "When split m in hif4 quant mode, the expected shape of pertokenScale is (%lu,%lu,1), but the actual \
+is (%lu,%lu,%lu).",
+                inputParams_.mSize, expectedKDimValue, xScaleMDim, xScaleKDim, xScaleLastDim),
+        return false);
+    return true;
+}
+
+bool GroupedQmmTiling::CheckQuantParamsForHif4TypeK(const gert::Shape& xScaleShape,
+                                                    const gert::Shape& wScaleShape) const
+{
+    auto xScaleDimNum = xScaleShape.GetDimNum();
+    auto wScaleDimNum = wScaleShape.GetDimNum();
+    OP_CHECK_IF(
+        wScaleDimNum != HIF4_TYPE_K_SCALE_DIM_NUM,
+        OP_LOGE(inputParams_.opName, "When split k, the dim num of scale should be 3 in hif4 quant mode, but actual \
+is %zu",
+                wScaleDimNum),
+        return false);
+    OP_CHECK_IF(
+        xScaleDimNum != HIF4_TYPE_K_SCALE_DIM_NUM,
+        OP_LOGE(inputParams_.opName, "When split k, the dim num of pertokenScale should be 3 in hif4 quant mode, but \
+actual is %zu",
+                xScaleDimNum),
+        return false);
+    auto xScaleLastDim = static_cast<uint64_t>(xScaleShape.GetDim(xScaleDimNum - 1));
+    auto xScaleKDim = static_cast<uint64_t>(
+        inputParams_.transA ? xScaleShape.GetDim(0) : xScaleShape.GetDim(xScaleDimNum - LAST_SECOND_DIM_INDEX));
+    auto xScaleMDim = static_cast<uint64_t>(
+        inputParams_.transA ? xScaleShape.GetDim(xScaleDimNum - LAST_SECOND_DIM_INDEX) : xScaleShape.GetDim(0));
+    auto wScaleLastDim = static_cast<uint64_t>(wScaleShape.GetDim(wScaleDimNum - 1));
+    auto wScaleNDim = static_cast<uint64_t>(
+        inputParams_.transB ? wScaleShape.GetDim(0) : wScaleShape.GetDim(wScaleDimNum - LAST_SECOND_DIM_INDEX));
+    auto wScaleKDim = static_cast<uint64_t>(
+        inputParams_.transB ? wScaleShape.GetDim(wScaleDimNum - LAST_SECOND_DIM_INDEX) : wScaleShape.GetDim(0));
+    auto expectedKDimValue = inputParams_.kSize / HIF4_BASEK_FACTOR + inputParams_.groupNum;
+    OP_CHECK_IF(!inputParams_.transA || inputParams_.transB,
+                OP_LOGE(inputParams_.opName, "When split m in hif4 quant mode, the expected transpose attrs of x and \
+weight are true and false, but the actual transpose attrs of x and weight are %d and %d.",
+                        inputParams_.transA, inputParams_.transB),
+                return false);
+    OP_CHECK_IF(
+        xScaleLastDim != HIF4_MULTI_BASE_SIZE || xScaleKDim != expectedKDimValue || xScaleMDim != inputParams_.mSize,
+        OP_LOGE(inputParams_.opName, "When split k in hif4 quant mode, the expected shape of pertokenScale is \
+(%lu,%lu,%lu), but the actual is (%lu,%lu,%lu).",
+                expectedKDimValue, inputParams_.mSize, HIF4_MULTI_BASE_SIZE, xScaleKDim, xScaleMDim, xScaleLastDim),
+        return false);
+    OP_CHECK_IF(
+        wScaleLastDim != HIF4_MULTI_BASE_SIZE || wScaleKDim != expectedKDimValue || wScaleNDim != inputParams_.nSize,
+        OP_LOGE(inputParams_.opName, "When split k in hif4 quant mode, the expected shape of scale is (%lu,%lu,%lu), \
+but the actual is (%lu,%lu,%lu).",
+                expectedKDimValue, inputParams_.nSize, HIF4_MULTI_BASE_SIZE, wScaleKDim, wScaleNDim, wScaleLastDim),
+        return false);
+    return true;
+}
+
+bool GroupedQmmTiling::CheckQuantParamsForHif4QuantMode(const gert::StorageShape* xScaleStorageShape,
+                                                        const gert::Shape& wScaleShape) const
+{
+    // 多数参数在CheckQuantParamsForHif4QuantMode函数调用前已有非空校验
+    OP_CHECK_IF(xScaleStorageShape == nullptr, OP_LOGE(context_->GetNodeName(), "xScaleStorageShape is nullptr."),
+                return false);
+    auto& xScaleShape = xScaleStorageShape->GetStorageShape();
+    if (inputParams_.groupType == SPLIT_M) {
+        OP_CHECK_IF(!CheckQuantParamsForHif4TypeM(xScaleShape, wScaleShape),
+                    OP_LOGE(inputParams_.opName, "CheckQuantParamsForHif4TypeM failed."), return false);
+    } else {
+        OP_CHECK_IF(!CheckQuantParamsForHif4TypeK(xScaleShape, wScaleShape),
+                    OP_LOGE(inputParams_.opName, "CheckQuantParamsForHif4TypeK failed."), return false);
+    }
+
+    return true;
+}
+
 bool GroupedQmmTiling::CheckQuantParamsForNonKGroupQuantMode(const gert::Shape& wScaleShape,
                                                              uint64_t expectedNSize) const
 {
@@ -639,12 +769,29 @@ should be 1 or 2, but the actual dim num is %zu.",
 
 bool GroupedQmmTiling::CheckFp4Shape(const gert::Shape& xShape, const gert::Shape& wShape) const
 {
-    OP_CHECK_IF(inputParams_.kSize % EVEN_FACTOR != 0 || inputParams_.kSize <= EVEN_FACTOR,
+    if (npuArch_ != NpuArch::DAV_9201 || !IsHif4Scale()) {
+        OP_CHECK_IF(
+            inputParams_.kSize % EVEN_FACTOR != 0 || inputParams_.kSize <= EVEN_FACTOR,
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(inputParams_.opType, "x, weight",
+                                                   ShapesToString({ShapeToString(xShape), ShapeToString(wShape)}),
+                                                   "when the dtype of x is FLOAT4, k size must be even and greater "
+                                                   "than 2"),
+            return false);
+    } else {
+        if (!inputParams_.transA) {
+            OP_CHECK_IF(
+                inputParams_.kSize % EVEN_FACTOR != 0,
                 OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(inputParams_.opType, "x, weight",
                                                        ShapesToString({ShapeToString(xShape), ShapeToString(wShape)}),
-                                                       "when the dtype of x is FLOAT4, k size must be even and greater "
-                                                       "than 2"),
+                                                       "when x is not transposed, k size must be even"),
                 return false);
+        }
+        OP_CHECK_IF(inputParams_.kSize == 2,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        inputParams_.opType, "x, weight",
+                        ShapesToString({ShapeToString(xShape), ShapeToString(wShape)}), "k size must not be 2"),
+                    return false);
+    }
     if (!inputParams_.transB) {
         OP_CHECK_IF(inputParams_.nSize % EVEN_FACTOR != 0,
                     OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
@@ -680,7 +827,8 @@ bool GroupedQmmTiling::CheckQuantParams(const gert::StorageShape* xScaleStorageS
     // 非k分组量化校验
     if (inputParams_.bQuantMode != optiling::QuantMode::MX_PERGROUP_MODE &&
         inputParams_.bQuantMode != optiling::QuantMode::PERGROUP_MODE &&
-        inputParams_.bQuantMode != optiling::QuantMode::PERBLOCK_MODE) {
+        inputParams_.bQuantMode != optiling::QuantMode::PERBLOCK_MODE &&
+        inputParams_.bQuantMode != optiling::QuantMode::HIF4_PERGROUP_MODE) {
         OP_CHECK_IF(!CheckQuantParamsForNonKGroupQuantMode(wScaleShape, expectedNSize),
                     OP_LOGE(inputParams_.opName, "CheckQuantParamsForNonKGroupQuantMode failed."), return false);
     }
@@ -689,6 +837,11 @@ bool GroupedQmmTiling::CheckQuantParams(const gert::StorageShape* xScaleStorageS
         inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
         OP_CHECK_IF(!CheckQuantParamsForMxQuantMode(xScaleStorageShape, wScaleStorageShape, expectedNSize),
                     OP_LOGE(inputParams_.opName, "CheckQuantParamsForMxQuantMode failed."), return false);
+    }
+    // hif4量化校验
+    if (inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
+        OP_CHECK_IF(!CheckQuantParamsForHif4QuantMode(xScaleStorageShape, wScaleShape),
+                    OP_LOGE(inputParams_.opName, "CheckQuantParamsForHif4QuantMode failed."), return false);
     }
 
     return true;
@@ -1066,7 +1219,8 @@ bool GroupedQmmTiling::AnalyzeInputs()
         OP_CHECK_IF(!CheckActiveMode(wScaleShape, xScaleStorageShape),
                     OP_LOGE(context_->GetNodeName(), "CheckActiveMode failed."), return false);
     }
-    if (inputParams_.aDtype == ge::DT_FLOAT4_E2M1 || inputParams_.aDtype == ge::DT_FLOAT4_E1M2) {
+    if (inputParams_.aDtype == ge::DT_FLOAT4_E2M1 || inputParams_.aDtype == ge::DT_FLOAT4_E1M2 ||
+        inputParams_.aDtype == Ops::Transformer::DT_HIFLOAT4) {
         OP_CHECK_IF(!CheckFp4Shape(xShape, wShape), OP_LOGE(inputParams_.opName, "CheckFp4Shape failed."),
                     return false);
         if (inputParams_.hasBias) {
@@ -1086,20 +1240,21 @@ bool GroupedQmmTiling::CheckCoreNum() const
     OP_CHECK_IF(compileInfo == nullptr, OP_LOGE(inputParams_.opName, "compileInfo is nullptr."), return false);
     auto aicNum = compileInfo->aicNum;
     auto aivNum = compileInfo->aivNum;
+    uint32_t coreRatio = npuArch_ == NpuArch::DAV_9201 ? GmmConstant::CORE_RATIO_9201 : GmmConstant::CORE_RATIO;
     if (inputParams_.groupType == SPLIT_K) {
         OP_CHECK_IF(
-            aivNum != GmmConstant::CORE_RATIO * aicNum,
+            aivNum != coreRatio * aicNum,
             OP_LOGE(inputParams_.opName,
-                    "When group type is 2 (mix template), aicNum:aivNum should be 1:2, actual aicNum: %u, aivNum: %u.",
-                    aicNum, aivNum),
+                    "When group type is 2 (mix template), aicNum:aivNum should be 1:%u, actual aicNum: %u, aivNum: %u.",
+                    coreRatio, aicNum, aivNum),
             return false);
     }
     // kernelType, 1：dequant vec模板；2：perGroup-perBlock(GB)独立pertile模板
     if (inputParams_.kernelType == 1 || inputParams_.kernelType == 2) {
         OP_CHECK_IF(
-            aivNum != GmmConstant::CORE_RATIO * aicNum,
-            OP_LOGE(inputParams_.opName, "Current scene, aicNum:aivNum should be 1:2, actual aicNum: %u, aivNum: %u.",
-                    aicNum, aivNum),
+            aivNum != coreRatio * aicNum,
+            OP_LOGE(inputParams_.opName, "Current scene, aicNum:aivNum should be 1:%u, actual aicNum: %u, aivNum: %u.",
+                    coreRatio, aicNum, aivNum),
             return false);
     }
     return true;
@@ -1112,6 +1267,11 @@ bool GroupedQmmTiling::SetQuantMode(const gert::Shape& wScaleShape, const gert::
     if (IsMicroScaling()) {
         inputParams_.bQuantMode = optiling::QuantMode::MX_PERGROUP_MODE;
         inputParams_.aQuantMode = optiling::QuantMode::MX_PERGROUP_MODE;
+        return true;
+    }
+    if (IsHif4Scale()) {
+        inputParams_.bQuantMode = optiling::QuantMode::HIF4_PERGROUP_MODE;
+        inputParams_.aQuantMode = optiling::QuantMode::HIF4_PERGROUP_MODE;
         return true;
     }
     // scale pertensor: (g,1) 2维或（g,）1维, perchannel:（g, N), 2维
@@ -1130,7 +1290,8 @@ bool GroupedQmmTiling::SetQuantMode(const gert::Shape& wScaleShape, const gert::
         if (inputParams_.aDtype != ge::DT_INT8 &&
             ((xScaleDims == 2 && xScaleShape[xScaleDims - 1] == 1) || // 2:（g,1) 2维
              (xScaleDims == 1 && static_cast<uint64_t>(xScaleShape[0]) == inputParams_.groupNum &&
-              (inputParams_.groupType == SPLIT_K || inputParams_.groupNum != inputParams_.mSize)))) {
+              ((npuArch_ != NpuArch::DAV_9201 && inputParams_.groupType == SPLIT_K) ||
+               inputParams_.groupNum != inputParams_.mSize)))) {
             inputParams_.aQuantMode = optiling::QuantMode::PERTENSOR_MODE;
         } else {
             inputParams_.aQuantMode = optiling::QuantMode::PERTOKEN_MODE;
@@ -1289,6 +1450,9 @@ ge::graphStatus GroupedQmmTiling::GetShapeAttrsInfo()
 {
     inputParams_.opName = context_->GetNodeName();
     inputParams_.opType = GetOpType();
+    OP_CHECK_IF(GroupedQmmTiling::GetPlatformInfo() != ge::GRAPH_SUCCESS,
+                OP_LOGE(inputParams_.opName, "GetPlatformInfo failed before analyzing inputs."),
+                return ge::GRAPH_FAILED);
     if (inputParams_.initFlag) {
         OP_LOGD(inputParams_.opName, "No need to get shape and attrs from tiling context again.");
         return ge::GRAPH_SUCCESS;
@@ -1451,10 +1615,44 @@ void GroupedQmmTiling::PrintQuantParams()
     OP_LOGD(inputParams_.opName, "%ld", LogQuantParams(tilingData_.gmmQuantParams));
 }
 
+void GroupedQmmTiling::ReSplitBaseN()
+{
+    auto compileInfoPtr = context_->GetCompileInfo<GMMCompileInfo>();
+    if (compileInfoPtr == nullptr) {
+        return;
+    }
+    if (compileInfoPtr->npuArch != NpuArch::DAV_9201) {
+        return;
+    }
+
+    int64_t step = inputParams_.transB ? CUBE_BLOCK : GetShapeWithDataType(L1_ALIGN_SIZE, inputParams_.bDtype);
+    int64_t curBlockNum = CeilDiv(inputParams_.nSize, basicTiling_.baseN) * inputParams_.groupNum;
+    int64_t bestRounds = CeilDiv(curBlockNum, aicoreParams_.aicNum);
+    int64_t bestTail = curBlockNum % aicoreParams_.aicNum;
+    int64_t bestBaseN = basicTiling_.baseN;
+
+    for (int64_t baseN = basicTiling_.baseN - step; baseN >= kMinResplitBaseN; baseN -= step) {
+        int64_t blockNum = CeilDiv(inputParams_.nSize, baseN) * inputParams_.groupNum;
+        int64_t rounds = CeilDiv(blockNum, aicoreParams_.aicNum);
+        int64_t tail = blockNum % aicoreParams_.aicNum;
+        // Break when the number of rounds increases
+        if (rounds != bestRounds) {
+            break;
+        }
+        if (tail == 0 || tail >= bestTail) {
+            bestTail = tail;
+            bestBaseN = baseN;
+        }
+    }
+    basicTiling_.baseN = bestBaseN;
+}
+
 void GroupedQmmTiling::CalBasicBlock()
 {
     bool isGBQuantMode = inputParams_.aQuantMode == optiling::QuantMode::PERGROUP_MODE &&
                          inputParams_.bQuantMode == optiling::QuantMode::PERBLOCK_MODE;
+    bool isPertokenMode = inputParams_.aQuantMode == optiling::QuantMode::PERTOKEN_MODE;
+    bool isPerchannelMode = inputParams_.bQuantMode == optiling::QuantMode::PERCHANNEL_MODE;
     basicTiling_.baseM = std::min(inputParams_.mSize, static_cast<uint64_t>(GmmConstant::BASIC_BLOCK_SIZE_256));
     basicTiling_.baseM = !inputParams_.transA ?
                              CeilAlign(basicTiling_.baseM, CUBE_BLOCK) :
@@ -1465,6 +1663,10 @@ void GroupedQmmTiling::CalBasicBlock()
             basicTiling_.baseN = PER_BLOCK_GROUP_SIZE;
         } else {
             basicTiling_.baseN = GmmConstant::BASIC_BLOCK_SIZE_256;
+        }
+        if (npuArch_ == NpuArch::DAV_9201 && supportMmadF16S8_) {
+            basicTiling_.baseM = std::min(basicTiling_.baseM, static_cast<uint64_t>(GmmConstant::BASIC_BLOCK_SIZE_128));
+            basicTiling_.baseN = std::min(basicTiling_.baseN, static_cast<uint64_t>(GmmConstant::BASIC_BLOCK_SIZE_128));
         }
         basicTiling_.baseK = PER_BLOCK_GROUP_SIZE;
         return;
@@ -1477,10 +1679,18 @@ void GroupedQmmTiling::CalBasicBlock()
         std::min(GetShapeWithDataType(GmmConstant::BASIC_BLOCK_SIZE_128, inputParams_.aDtype), inputParams_.kSize),
         GetShapeWithDataType(CUBE_REDUCE_BLOCK, inputParams_.aDtype));
 
+    ReSplitBaseN();
+    if (npuArch_ == NpuArch::DAV_9201 && supportMmadF16S8_ && (isPertokenMode || isPerchannelMode)) {
+        if (basicTiling_.baseM * basicTiling_.baseN > BASIC_BLOCK_LIMIT_ONE_VECTOR) {
+            basicTiling_.baseM = MAX_BASEM_ONE_VECTOR;
+        }
+    }
+
     if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE ||
         inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
         basicTiling_.baseK = CeilAlign(basicTiling_.baseK, MXFP_BASEK_FACTOR); // mx_mmad requires basek align to 64
-        bool isFp4Input = inputParams_.aDtype == ge::DT_FLOAT4_E2M1 || inputParams_.aDtype == ge::DT_FLOAT4_E1M2;
+        bool isFp4Input = inputParams_.aDtype == ge::DT_FLOAT4_E2M1 || inputParams_.aDtype == ge::DT_FLOAT4_E1M2 ||
+                          inputParams_.aDtype == Ops::Transformer::DT_HIFLOAT4;
         if (isFp4Input && !inputParams_.transB) {
             // 64: mx_mmad requires the inner axis to align to 64
             basicTiling_.baseN = CeilAlign(basicTiling_.baseN, static_cast<uint64_t>(64));
@@ -1490,7 +1700,9 @@ void GroupedQmmTiling::CalBasicBlock()
 
 bool GroupedQmmTiling::IsBiasInL1() const
 {
-    // Reserve L1 for bias cases consumed by quant tiling.
+    if (npuArch_ == NpuArch::DAV_9201) {
+        return inputParams_.hasBias && inputParams_.biasDtype == ge::DT_INT32;
+    }
     if (!inputParams_.hasBias) {
         return false;
     }
@@ -1594,7 +1806,8 @@ ge::graphStatus GroupedQmmTiling::CalL1Depth(uint64_t leftL1Size)
         basicTiling_.depthB1 = depthASec < depthBSec ? depthBSec : depthInit;
     }
     CalStepKs();
-    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE) {
+    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE ||
+        inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
         CalScaleFactors();
     }
     return ge::GRAPH_SUCCESS;

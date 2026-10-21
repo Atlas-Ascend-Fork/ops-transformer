@@ -57,6 +57,7 @@ constexpr uint64_t BIAS_DIMS = 2UL;
 constexpr uint64_t GROUP_LIST_SPARSE_DIMS = 2UL;
 constexpr uint64_t MXFP_MULTI_BASE_SIZE = 2UL;
 constexpr uint64_t HIF4_MULTI_BASE_SIZE = 1UL;
+constexpr uint64_t MAX_BASEM_ONE_VECTOR = 128UL;
 constexpr uint64_t MXFP_BASEK_FACTOR = 64UL;
 constexpr uint64_t HIF4_BASEK_FACTOR = 64UL;
 constexpr size_t MXFP_TYPE_K_SCALE_DIM_NUM = 3;
@@ -73,6 +74,7 @@ constexpr size_t MXFP_SCALE_NZ_N0_DIM_OFFSET = 2;
 constexpr size_t MXFP_SCALE_NZ_C0_DIM_OFFSET = 3;
 constexpr size_t MXFP_PER_TOKEN_SCALE_DIM_NUM = 3;
 constexpr uint32_t RESERVED_LENGTH = 1024U;
+constexpr uint64_t BASIC_BLOCK_LIMIT_ONE_VECTOR = 32768UL; // 128*256
 constexpr uint16_t FIRST_TENSOR_INDEX = 0U;
 constexpr uint16_t SECOND_TENSOR_INDEX = 1U;
 
@@ -280,6 +282,11 @@ protected:
     virtual bool AnalyzeInputs();
     virtual void PrintQuantParams();
     bool IsMicroScaling() const;
+    bool IsHif4Scale() const;
+    bool CheckQuantParamsForHif4TypeM(const gert::Shape& xScaleShape, const gert::Shape& wScaleShape) const;
+    bool CheckQuantParamsForHif4TypeK(const gert::Shape& xScaleShape, const gert::Shape& wScaleShape) const;
+    bool CheckQuantParamsForHif4QuantMode(const gert::StorageShape* xScaleStorageShape,
+                                          const gert::Shape& wScaleShape) const;
     bool CheckQuantParamsForMXTypeM(const gert::Shape& xScaleShape, const gert::StorageShape* wScaleStorageShape,
                                     uint64_t expectedNSize = 0UL) const;
     bool CheckQuantParamsForMXTypeM(const gert::Shape& xScaleShape, const gert::Shape& wScaleShape,
@@ -313,6 +320,8 @@ protected:
     GQmmBasicTiling basicTiling_;
     GQmmInputInfo& inputParams_;
 
+    NpuArch npuArch_ = NpuArch::DAV_3510;
+
 private:
     void CalScaleFactors();
     bool SetQuantMode(const gert::Shape& wScaleShape, const gert::StorageShape* xScaleStorageShape,
@@ -336,6 +345,7 @@ private:
     bool CheckDtypeForWeightNz(bool isPertokenScaleNull) const;
     bool CheckActiveModeDtype(const gert::StorageShape* xScaleStorageShape) const;
     bool CheckActiveMode(const gert::Shape& wScaleShape, const gert::StorageShape* xScaleStorageShape);
+    void ReSplitBaseN();
     virtual bool CheckCoreNum() const;
     bool CheckTransposeAndFormatByGroupType() const;
     bool CheckPertokenScaleDtypeForWeightNz(bool isA8W8Int, bool isA8W8Fp, bool isA4W4Fp, bool isA4W4Int) const;
@@ -348,6 +358,8 @@ private:
     bool ValidateAAndWDtype(const std::vector<ge::DataType>& legalInputDtypes) const;
 
     GroupedMatmulTilingData::GMMQuantTilingData tilingData_;
+
+    bool supportMmadF16S8_ = false;
 
     int32_t mList_[GroupedMatmul::MAX_TENSOR_CONT] = {0};
     int32_t kList_[GroupedMatmul::MAX_TENSOR_CONT] = {0};

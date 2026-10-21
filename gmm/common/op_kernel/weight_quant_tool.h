@@ -21,6 +21,10 @@
 #include "kernel_operator.h"
 #endif
 #include "kernel_utils.h"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+#include "lib/matmul_intf.h"
+#include "op_kernel/math_util.h"
+#endif
 
 using AscendC::CrossCoreSetFlag;
 using AscendC::CrossCoreWaitFlag;
@@ -39,6 +43,13 @@ using matmul::MatmulCallBackFunc;
 using matmul::MatmulImpl;
 using matmul::MatmulType;
 using matmul::MatmulTypeWithScale;
+
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+using AscendC::DataCopyPad;
+using AscendC::Dn2NzParams;
+using AscendC::hif4_scale;
+using AscendC::IsSupportB4;
+#endif
 
 #define SHORT_MIX_LOG(format, ...)
 
@@ -192,4 +203,7 @@ struct MatmulL1GmType : MatmulType<POSITION, FORMAT, TYPE, ISTRANS, LAYOUT, IBSH
     constexpr static TPosition srcPos = TPosition::GM;
 };
 } // namespace WeightQuantBatchMatmulV2::Arch35
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+#include "weight_quant_tool_asw.h"
+#endif // DAV_9201
 #endif

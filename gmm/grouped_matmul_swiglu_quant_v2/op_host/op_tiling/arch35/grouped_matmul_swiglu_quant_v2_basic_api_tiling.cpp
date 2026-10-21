@@ -18,6 +18,7 @@
 #include <algorithm>
 #include "log/log.h"
 #include "platform/platform_infos_def.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "../../../op_kernel/arch35/grouped_matmul_swiglu_quant_v2_tiling_key.h"
 #include "grouped_matmul_swiglu_quant_tensor_api_tiling_common.h"
 
@@ -34,9 +35,11 @@ constexpr int64_t MX_QUANT_MODE = 2L;
 
 } // namespace
 
-void GroupedMatmulSwigluQuantV2BasicApiTiling950::Reset()
+void GroupedMatmulSwigluQuantV2BasicApiTiling::Reset()
 {
     tilingData_ = {};
+    auto* rawTiling = context_ == nullptr ? nullptr : context_->GetRawTilingData();
+    hif4TilingData_.SetDataPtr(rawTiling == nullptr ? nullptr : rawTiling->GetData());
     basicTiling_ = GQmmBasicTiling();
     xScaleDtype_ = ge::DT_UNDEFINED;
     quantDtype_ = ge::DT_UNDEFINED;
@@ -48,7 +51,7 @@ void GroupedMatmulSwigluQuantV2BasicApiTiling950::Reset()
     return;
 }
 
-ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::GetPlatformInfo()
+ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::GetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
     if (platformInfo == nullptr) {
@@ -58,6 +61,13 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::GetPlatformInfo()
         aicoreParams_.aicNum = compileInfo->aicNum_;
         aivNum_ = compileInfo->aivNum_;
         aicoreParams_.ubSize = compileInfo->ubSize_;
+        if (IsHif4Input()) {
+            aicoreParams_.l1Size = compileInfo->l1Size_;
+            aicoreParams_.l0cSize = compileInfo->l0CSize_;
+            OP_CHECK_IF(aicoreParams_.l1Size == 0 || aicoreParams_.l0cSize == 0,
+                        OP_LOGE(context_->GetNodeName(), "HIF4 requires L1 and L0C platform memory information."),
+                        return ge::GRAPH_FAILED);
+        }
         OP_LOGD(context_->GetNodeName(),
                 "Platform memory information is unavailable; Tensor API tiling will fall back.");
         return ge::GRAPH_SUCCESS;
@@ -79,18 +89,12 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::GetPlatformInfo()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::GetShapeAttrsInfo()
+ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::GetShapeAttrsInfo()
 {
-    inputParams_.Reset();
-    inputParams_.opName = context_->GetNodeName();
-    inputParams_.opType = GetOpType();
-    OP_CHECK_IF(!AnalyzeDtype() || !AnalyzeAttrs() || !AnalyzeInputs(),
-                OP_LOGE(inputParams_.opName, "Failed to analyze Tensor API tiling inputs."), return ge::GRAPH_FAILED);
-    inputParams_.initFlag = true;
-    return ge::GRAPH_SUCCESS;
+    return GroupedQmmBasicApiTiling::GetShapeAttrsInfo();
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeDtype()
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeDtype()
 {
     auto xDesc = context_->GetInputDesc(X_INDEX);
     auto xScaleDesc = context_->GetInputDesc(X_SCALE_INDEX);
@@ -108,7 +112,12 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeDtype()
     inputParams_.scaleDtype = weightScaleDesc->GetDataType();
     inputParams_.outDataDtype = yDesc->GetDataType();
     inputParams_.outScaleDtype = yScaleDesc->GetDataType();
-    inputParams_.cDtype = inputParams_.outDataDtype;
+    // HIF4 keeps the existing FP16 intermediate used by the low-level tiling strategy.
+    if (IsHif4Input()) {
+        inputParams_.perTokenScaleDtype = xScaleDtype_;
+    } else {
+        inputParams_.cDtype = inputParams_.outDataDtype;
+    }
     inputParams_.aFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(xDesc->GetFormat().GetStorageFormat()));
     inputParams_.bFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(weightDesc->GetFormat().GetStorageFormat()));
     xScaleFormat_ = static_cast<ge::Format>(ge::GetPrimaryFormat(xScaleDesc->GetFormat().GetStorageFormat()));
@@ -118,16 +127,18 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeDtype()
 
     auto biasShape = context_->GetOptionalInputShape(BIAS_INDEX);
     inputParams_.hasBias = biasShape != nullptr && biasShape->GetStorageShape().GetShapeSize() != 0;
+    OP_CHECK_IF(IsHif4Input() && inputParams_.hasBias,
+                OP_LOGE(context_->GetNodeName(), "HIF4 does not support non-empty bias."), return false);
     auto biasDesc = context_->GetOptionalInputDesc(BIAS_INDEX);
     OP_CHECK_IF(inputParams_.hasBias && biasDesc == nullptr,
                 OP_LOGE(context_->GetNodeName(), "Bias shape is present but bias desc is nullptr."), return false);
     if (biasDesc != nullptr) {
         inputParams_.biasDtype = biasDesc->GetDataType();
     }
-    return true;
+    return !IsHif4Input() || CheckHif4Dtype();
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeAttrs()
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeAttrs()
 {
     auto attrs = context_->GetAttrs();
     OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "Attrs is nullptr."), return false);
@@ -138,12 +149,15 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeAttrs()
     const int64_t* quantDtype = attrs->GetAttrPointer<int64_t>(ATTR_INDEX_QUANT_DTYPE);
     OP_CHECK_IF(dequantMode == nullptr || dequantDtype == nullptr || quantMode == nullptr || quantDtype == nullptr,
                 OP_LOGE(context_->GetNodeName(), "Required quantization attrs are nullptr."), return false);
-    OP_CHECK_IF(*dequantMode != MX_QUANT_MODE || *quantMode != MX_QUANT_MODE,
-                OP_LOGE(context_->GetNodeName(), "dequant_mode and quant_mode must both be 2 for MX quant."),
+    const int64_t quantModeExpected = IsHif4Input() ? GroupedMatmulSwigluQuantParamsV2::Hif4QuantMode : MX_QUANT_MODE;
+    OP_CHECK_IF(*dequantMode != quantModeExpected || *quantMode != quantModeExpected,
+                OP_LOGE(context_->GetNodeName(), "dequant_mode and quant_mode must match the input quantization type."),
                 return false);
     OP_CHECK_IF(static_cast<ge::DataType>(*dequantDtype) != ge::DT_FLOAT,
                 OP_LOGE(context_->GetNodeName(), "dequant_dtype must be DT_FLOAT for MX quant."), return false);
     quantDtype_ = static_cast<ge::DataType>(*quantDtype);
+    OP_CHECK_IF(IsHif4Input() && quantDtype_ != Ops::Transformer::DT_HIFLOAT4,
+                OP_LOGE(context_->GetNodeName(), "HIF4 quant_dtype must be DT_HIFLOAT4."), return false);
     const bool* transposeWeight = attrs->GetAttrPointer<bool>(ATTR_INDEX_TRANSPOSE_WEIGHT);
     const int64_t* groupListType = attrs->GetAttrPointer<int64_t>(ATTR_INDEX_GROUPLIST_TYPE);
     inputParams_.transA = false;
@@ -152,12 +166,12 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeAttrs()
     OP_CHECK_IF(inputParams_.groupListType != 0 && inputParams_.groupListType != 1,
                 OP_LOGE(context_->GetNodeName(), "group_list_type must be 0 or 1."), return false);
     inputParams_.groupType = static_cast<int8_t>(GroupedMatmul::SPLIT_M);
-    inputParams_.aQuantMode = QuantMode::MX_PERGROUP_MODE;
-    inputParams_.bQuantMode = QuantMode::MX_PERGROUP_MODE;
+    inputParams_.aQuantMode = IsHif4Input() ? QuantMode::HIF4_PERGROUP_MODE : QuantMode::MX_PERGROUP_MODE;
+    inputParams_.bQuantMode = inputParams_.aQuantMode;
     return true;
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeInputs()
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeInputs()
 {
     auto xStorageShape = context_->GetInputShape(X_INDEX);
     auto weightStorageShape = context_->GetDynamicInputShape(WEIGHT_INDEX, 0);
@@ -192,23 +206,32 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::AnalyzeInputs()
     inputParams_.nSize = static_cast<uint64_t>(n);
     inputParams_.kSize = static_cast<uint64_t>(k);
     inputParams_.groupNum = static_cast<uint64_t>(groupNum);
+    if (IsHif4Input()) {
+        OP_CHECK_IF(!CheckInputShapes(),
+                    OP_LOGE(context_->GetNodeName(),
+                            "HIF4 requires one weight tensor and one weightScale tensor, x rank %zu, "
+                            "weight rank %zu, and weight expert count equal to groupNum=%lu.",
+                            SHAPE_DIM_TWO, SHAPE_DIM_THREE, inputParams_.groupNum),
+                    return false);
+        return CheckHif4CoreNum() && CheckScaleShapes() && CheckHif4Dims();
+    }
     inputParams_.isSingleX = true;
     inputParams_.isSingleW = GetDynamicInputCount(WEIGHT_INDEX) == 1U;
     inputParams_.isSingleY = true;
     return true;
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::IsFp8(ge::DataType dtype) const
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::IsFp8(ge::DataType dtype) const
 {
     return dtype == ge::DT_FLOAT8_E4M3FN || dtype == ge::DT_FLOAT8_E5M2;
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::IsSupportedFormat(ge::Format format) const
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::IsSupportedFormat(ge::Format format) const
 {
     return format == ge::FORMAT_ND || format == ge::FORMAT_NCL || format == ge::FORMAT_NCHW;
 }
 
-size_t GroupedMatmulSwigluQuantV2BasicApiTiling950::GetDynamicInputCount(uint32_t inputIndex) const
+size_t GroupedMatmulSwigluQuantV2BasicApiTiling::GetDynamicInputCount(uint32_t inputIndex) const
 {
     size_t count = 0U;
     while (count < GmmConstant::GMM_MAX_GROUP_LIST_SIZE &&
@@ -218,7 +241,7 @@ size_t GroupedMatmulSwigluQuantV2BasicApiTiling950::GetDynamicInputCount(uint32_
     return count;
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::CheckTensorApiShapes() const
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::CheckInputShapes() const
 {
     auto xShapePtr = context_->GetInputShape(X_INDEX);
     auto weightShapePtr = context_->GetDynamicInputShape(WEIGHT_INDEX, 0);
@@ -228,6 +251,10 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::CheckTensorApiShapes() const
     }
     const auto& xShape = xShapePtr->GetOriginShape();
     const auto& weightShape = weightShapePtr->GetOriginShape();
+    // HIF4 keeps the explicit expert axis required by its ACLNN input contract.
+    if (IsHif4Input() && weightShape.GetDimNum() != SHAPE_DIM_THREE) {
+        return false;
+    }
     if (xShape.GetDimNum() != SHAPE_DIM_TWO ||
         (weightShape.GetDimNum() != SHAPE_DIM_TWO && weightShape.GetDimNum() != SHAPE_DIM_THREE)) {
         return false;
@@ -237,7 +264,7 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::CheckTensorApiShapes() const
             weightShape.GetDim(0) == static_cast<int64_t>(inputParams_.groupNum));
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::CheckTensorApiScaleShapes() const
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::CheckScaleShapes() const
 {
     auto xScaleShapePtr = context_->GetInputShape(X_SCALE_INDEX);
     auto weightScaleShapePtr = context_->GetDynamicInputShape(WEIGHT_SCALE_INDEX, 0);
@@ -250,20 +277,27 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::CheckTensorApiScaleShapes() co
         return false;
     }
 
+    // 2：MX 模式每组包含 2 个 E8M0 scale，HIF4 每组仅一个 scale。
+    const int64_t scaleLastDim = IsHif4Input() ? 1L : 2L;
     const int64_t kBlocks = static_cast<int64_t>(GroupedMatmul::CeilDiv(inputParams_.kSize, MX_SCALE_K_ALIGN));
     if (xScaleShape.GetDim(0) != static_cast<int64_t>(inputParams_.mSize) || xScaleShape.GetDim(1) != kBlocks ||
-        xScaleShape.GetDim(2) != SHAPE_DIM_TWO) { // xScale 的最后一维（索引 2，即第 3 维）也必须等于 2
+        // 2：xScale 的末维索引。
+        xScaleShape.GetDim(2) != scaleLastDim) {
         return false;
     }
     const int64_t weightScaleN = inputParams_.transB ? weightScaleShape.GetDim(1) : weightScaleShape.GetDim(2);
     const int64_t weightScaleK = inputParams_.transB ? weightScaleShape.GetDim(2) : weightScaleShape.GetDim(1);
     return weightScaleShape.GetDim(0) == static_cast<int64_t>(inputParams_.groupNum) &&
            weightScaleN == static_cast<int64_t>(inputParams_.nSize) && weightScaleK == kBlocks &&
-           weightScaleShape.GetDim(3) == SHAPE_DIM_TWO; // 3：weightScale 最后一维索引（4维），该维固定为 2
+           // 3：weightScale 的末维索引。
+           weightScaleShape.GetDim(3) == scaleLastDim;
 }
 
-bool GroupedMatmulSwigluQuantV2BasicApiTiling950::IsCapable()
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::IsCapable()
 {
+    if (IsHif4Input()) {
+        return inputParams_.aQuantMode == QuantMode::HIF4_PERGROUP_MODE;
+    }
     if (!platformMemoryReady_) {
         return false;
     }
@@ -275,8 +309,8 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::IsCapable()
     const bool formatSupported = IsSupportedFormat(inputParams_.aFormat) && IsSupportedFormat(inputParams_.bFormat) &&
                                  IsSupportedFormat(xScaleFormat_) && IsSupportedFormat(weightScaleFormat_) &&
                                  IsSupportedFormat(inputParams_.cFormat) && IsSupportedFormat(yScaleFormat_);
-    const bool checkTensorApiShapes = CheckTensorApiShapes();
-    const bool checkTensorApiScaleShapes = CheckTensorApiScaleShapes();
+    const bool checkTensorApiShapes = CheckInputShapes();
+    const bool checkTensorApiScaleShapes = CheckScaleShapes();
     const uint64_t averageMPerGroup = inputParams_.mSize / inputParams_.groupNum;
     const uint64_t mPerGroupLowerLimit =
         inputParams_.transB ? GroupedMatmulSwigluQuantTensorApiTiling::TRANS_B_M_PER_GROUP_LOWER_LIMIT :
@@ -303,26 +337,61 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling950::IsCapable()
     return capable;
 }
 
-ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::DoOpTiling()
+ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::DoOpTiling()
 {
-    GroupedMatmulSwigluQuantTensorApiTiling::FillQuantParams(tilingData_.gmmQuantParams, inputParams_);
+    if (IsHif4Input()) {
+        auto* rawTiling = context_->GetRawTilingData();
+        OP_CHECK_IF(rawTiling == nullptr || rawTiling->GetData() == nullptr ||
+                        rawTiling->GetCapacity() < hif4TilingData_.GetDataSize(),
+                    OP_LOGE(context_->GetNodeName(), "HIF4 tiling buffer is unavailable or too small."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(memset_s(rawTiling->GetData(), rawTiling->GetCapacity(), 0, hif4TilingData_.GetDataSize()) != EOK,
+                    OP_LOGE(context_->GetNodeName(), "Failed to clear HIF4 tiling buffer."), return ge::GRAPH_FAILED);
+        hif4TilingData_.gmmSwigluQuantParams.set_groupNum(inputParams_.groupNum);
+        hif4TilingData_.gmmSwigluQuantParams.set_groupListType(static_cast<uint8_t>(inputParams_.groupListType));
+        hif4TilingData_.gmmSwigluQuantParams.set_quantDtype(static_cast<uint8_t>(quantDtype_));
+    } else {
+        GroupedMatmulSwigluQuantTensorApiTiling::FillQuantParams(tilingData_.gmmQuantParams, inputParams_);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::DoLibApiTiling()
+ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::DoLibApiTiling()
 {
     GroupedQmmTiling::CalBasicBlock();
-    GroupedMatmulSwigluQuantTensorApiTiling::PrepareBasicBlockForL1(basicTiling_);
+    if (IsHif4Input()) {
+        basicTiling_.baseM = GroupedMatmul::CeilAlign(std::min(basicTiling_.baseM, GmmConstant::MAX_BASEM_ONE_VECTOR),
+                                                      GmmConstant::CUBE_BLOCK);
+    } else {
+        GroupedMatmulSwigluQuantTensorApiTiling::PrepareBasicBlockForL1(basicTiling_);
+    }
     OP_CHECK_IF(GroupedQmmBasicApiTiling::CalL1Tiling() != ge::GRAPH_SUCCESS,
                 OP_LOGE(context_->GetNodeName(), "CalL1Tiling failed."), return ge::GRAPH_FAILED);
-    GroupedMatmulSwigluQuantTensorApiTiling::RestoreBasicBlockAfterL1(basicTiling_);
-
+    if (!IsHif4Input()) {
+        GroupedMatmulSwigluQuantTensorApiTiling::RestoreBasicBlockAfterL1(basicTiling_);
+    }
     GroupedMatmulSwigluQuantTensorApiTiling::FillMatmulTiling(tilingData_.mmTilingData, inputParams_, basicTiling_,
                                                               basicTiling_.scaleFactorA, basicTiling_.scaleFactorB);
+    if (IsHif4Input()) {
+        // Serialize the same compact payload consumed by the HIF4 kernel.
+        const auto& mm = tilingData_.mmTilingData;
+        hif4TilingData_.basicTilingData.set_m(mm.m);
+        hif4TilingData_.basicTilingData.set_n(mm.n);
+        hif4TilingData_.basicTilingData.set_k(mm.k);
+        hif4TilingData_.basicTilingData.set_baseM(mm.baseM);
+        hif4TilingData_.basicTilingData.set_baseN(mm.baseN);
+        hif4TilingData_.basicTilingData.set_baseK(mm.baseK);
+        hif4TilingData_.basicTilingData.set_kAL1(mm.kAL1);
+        hif4TilingData_.basicTilingData.set_kBL1(mm.kBL1);
+        hif4TilingData_.basicTilingData.set_dbL0C(mm.dbL0C);
+        hif4TilingData_.basicTilingData.set_isBias(0);
+        hif4TilingData_.basicTilingData.set_scaleKAL1(mm.scaleKAL1);
+        hif4TilingData_.basicTilingData.set_scaleKBL1(mm.scaleKBL1);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::GetWorkspaceSize()
+ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::GetWorkspaceSize()
 {
     size_t* workspaces = context_->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
@@ -330,15 +399,74 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::GetWorkspaceSize()
     return ge::GRAPH_SUCCESS;
 }
 
-uint64_t GroupedMatmulSwigluQuantV2BasicApiTiling950::GetTilingKey() const
+uint64_t GroupedMatmulSwigluQuantV2BasicApiTiling::GetTilingKey() const
 {
+    const uint64_t kernelType =
+        IsHif4Input() ? GMM_SWIGLU_HIF4_QUANT_KERNEL_TYPE : GMM_SWIGLU_QUANT_TENSOR_LEVEL_KERNEL_TYPE;
     return GET_TPL_TILING_KEY(static_cast<uint64_t>(inputParams_.transB), static_cast<uint64_t>(inputParams_.transA),
-                              static_cast<uint64_t>(GMM_SWIGLU_QUANT_TENSOR_LEVEL_KERNEL_TYPE));
+                              kernelType);
 }
 
-ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling950::PostTiling()
+ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::PostTiling()
 {
+    if (IsHif4Input()) {
+        context_->SetBlockDim(aicoreParams_.aicNum);
+        context_->SetScheduleMode(1);
+        OP_CHECK_IF(hif4TilingData_.GetDataSize() % sizeof(uint64_t) != 0,
+                    OP_LOGE(context_->GetNodeName(), "HIF4 tiling data must be aligned to 8 bytes."),
+                    return ge::GRAPH_FAILED);
+        hif4TilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(),
+                                     context_->GetRawTilingData()->GetCapacity());
+        context_->GetRawTilingData()->SetDataSize(hif4TilingData_.GetDataSize());
+        return ge::GRAPH_SUCCESS;
+    }
     context_->SetScheduleMode(BATCH_MODE_SCHEDULE);
     return SaveTilingDataToContext(tilingData_);
+}
+
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::IsHif4Input() const
+{
+    const auto* x = context_->GetInputDesc(GroupedMatmulSwigluQuantV2Tiling::X_INDEX);
+    const auto* w = context_->GetDynamicInputDesc(GroupedMatmulSwigluQuantV2Tiling::WEIGHT_INDEX, 0);
+    return x != nullptr && w != nullptr && x->GetDataType() == Ops::Transformer::DT_HIFLOAT4 &&
+           w->GetDataType() == Ops::Transformer::DT_HIFLOAT4;
+}
+
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::CheckHif4Dtype() const
+{
+    OP_CHECK_IF(inputParams_.scaleDtype != Ops::Transformer::DT_HIFLOAT4_SCALE ||
+                    inputParams_.perTokenScaleDtype != Ops::Transformer::DT_HIFLOAT4_SCALE ||
+                    inputParams_.outDataDtype != Ops::Transformer::DT_HIFLOAT4 ||
+                    inputParams_.outScaleDtype != Ops::Transformer::DT_HIFLOAT4_SCALE,
+                OP_LOGE(inputParams_.opName, "HIF4 requires HIFLOAT4 output and HIFLOAT4_SCALE input/output scales."),
+                return false);
+    return true;
+}
+
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::CheckHif4CoreNum() const
+{
+    const auto* compileInfo = context_->GetCompileInfo<GMMSwigluV2CompileInfo>();
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE(context_->GetNodeName(), "Compile info is nullptr."), return false);
+    auto aicNum = compileInfo->aicNum_;
+    auto aivNum = compileInfo->aivNum_;
+    OP_CHECK_IF(aicNum == 0, OP_LOGE(inputParams_.opName, "aicNum should be positive integer, actual is %u.", aicNum),
+                return false);
+    const uint32_t coreRatio =
+        compileInfo->npuArch_ == static_cast<int32_t>(NpuArch::DAV_9201) ? 1U : GmmConstant::CORE_RATIO;
+    OP_CHECK_IF(aivNum != coreRatio * aicNum,
+                OP_LOGE(inputParams_.opName, "aicNum:aivNum should be 1:%u, actual aicNum: %u, aivNum: %u.", coreRatio,
+                        aicNum, aivNum),
+                return false);
+    return true;
+}
+
+bool GroupedMatmulSwigluQuantV2BasicApiTiling::CheckHif4Dims() const
+{
+    OP_CHECK_IF(inputParams_.kSize <= GroupedMatmulSwigluQuantParamsV2::HIF4_K_MIN_VALUE ||
+                    inputParams_.kSize % GroupedMatmulSwigluQuantParamsV2::B4_DATACOPY_MIN_NUM != 0,
+                OP_LOGE(inputParams_.opName, "HIF4 requires even K greater than 2."), return false);
+    OP_CHECK_IF(inputParams_.nSize == 0 || inputParams_.nSize % GmmConstant::BASIC_BLOCK_SIZE_128 != 0,
+                OP_LOGE(inputParams_.opName, "HIF4 requires positive N aligned to 128."), return false);
+    return true;
 }
 } // namespace optiling

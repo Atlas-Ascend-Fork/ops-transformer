@@ -38,7 +38,11 @@ __aicore__ inline void InitOutputWithZero(AscendC::GlobalTensor<T> yInitGlobal, 
     if (AscendC::GetSubBlockIdx() >= 1) {
         return;
     }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    uint32_t blockIdx = AscendC::GetBlockIdx() / GetAicAivTaskRation();
+#else
     uint32_t blockIdx = AscendC::GetBlockIdx() / AscendC::GetTaskRation();
+#endif
     // Fetch values following the InitOutput interface pattern
     // Maximum number of elements storable in output dtype
     uint64_t initSize = (AscendC::MAX_REPEAT_TIMES * AscendC::ONE_BLK_SIZE) / sizeof(T);

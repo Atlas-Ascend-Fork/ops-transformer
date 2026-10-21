@@ -116,9 +116,11 @@ ge::graphStatus GroupedMatmulSwigluQuantV2Tiling950::GetShapeAttrsInfo()
 {
     inputParams_.Reset();
     const auto* attrs = context_->GetAttrs();
-    const auto* mode = attrs == nullptr ?
-                           nullptr :
-                           attrs->GetAttrPointer<int64_t>(GroupedMatmulSwigluQuantV2Tiling::ATTR_INDEX_SWIGLU_MODE);
+    const auto* compileInfo = context_->GetCompileInfo<GMMSwigluV2CompileInfo>();
+    const auto* mode =
+        attrs == nullptr || compileInfo == nullptr || compileInfo->npuArch_ != static_cast<int32_t>(NpuArch::DAV_3510) ?
+            nullptr :
+            attrs->GetAttrPointer<int64_t>(GroupedMatmulSwigluQuantV2Tiling::ATTR_INDEX_SWIGLU_MODE);
     swigluParams_.swigluMode = mode == nullptr ? 0 : *mode;
     return GroupedQmmTiling::GetShapeAttrsInfo();
 }
@@ -526,6 +528,12 @@ bool GroupedMatmulSwigluQuantV2Tiling950::SetQuantModeForGMMSwigluQuant(const ge
 
 bool GroupedMatmulSwigluQuantV2Tiling950::CheckDims(const gert::Shape& xShape, const gert::Shape& wShape) const
 {
+    const auto* compileInfo = context_->GetCompileInfo<GMMSwigluV2CompileInfo>();
+    // The 9201 MX path requires N to be 128-aligned for both ND and NZ weights.
+    if (compileInfo != nullptr && compileInfo->npuArch_ == static_cast<int32_t>(NpuArch::DAV_9201)) {
+        OP_CHECK_IF(inputParams_.nSize % GmmConstant::BASIC_BLOCK_SIZE_128 != 0,
+                    OP_LOGE(inputParams_.opName, "On 9201, MX N must be a multiple of 128."), return false);
+    }
     auto aInnerSize = inputParams_.transA ? inputParams_.mSize : inputParams_.kSize;
     auto bInnerSize = inputParams_.transB ? inputParams_.kSize : inputParams_.nSize;
     OP_CHECK_IF(IsFp4Input() && (aInnerSize % B4_DATACOPY_MIN_NUM != 0 || bInnerSize % B4_DATACOPY_MIN_NUM != 0),
@@ -678,7 +686,12 @@ bool GroupedMatmulSwigluQuantV2Tiling950::AnalyzeInputs()
         return AnalyzeV3Inputs();
     }
     OP_CHECK_IF(!CheckCoreNum(), OP_LOGE(inputParams_.opName, "CheckCoreNum failed."), return false);
+    const auto* compileInfo = context_->GetCompileInfo<GMMSwigluV2CompileInfo>();
+    const bool is9201 = compileInfo->npuArch_ == static_cast<int32_t>(NpuArch::DAV_9201);
     if (inputParams_.aQuantMode == optiling::QuantMode::PERTOKEN_MODE) {
+        OP_CHECK_IF(is9201 && inputParams_.bFormat == ge::FORMAT_FRACTAL_NZ,
+                    OP_LOGE(inputParams_.opName, "On 9201, pertoken quantization only supports ND weight."),
+                    return false);
         return AnalyzeInputsPertoken();
     }
     const gert::Shape* xShape = nullptr;
@@ -691,6 +704,10 @@ bool GroupedMatmulSwigluQuantV2Tiling950::AnalyzeInputs()
     size_t weightCount = GetDynamicInputCount(context_, WEIGHT_INDEX);
     size_t scaleCount = GetDynamicInputCount(context_, SCALE_INDEX);
     bool isMultiWeightNz = IsMxWeightNzMultiTensor(*wShape);
+    OP_CHECK_IF(
+        is9201 && (weightCount != 1 || scaleCount != 1 || isMultiWeightNz),
+        OP_LOGE(inputParams_.opName, "On 9201, MX requires one weight and one weightScale tensor with an expert axis."),
+        return false);
     isMxWeightNzMultiTensor_ = isMultiWeightNz;
     size_t expectedScaleDim = isMultiWeightNz ? MX_MULTI_WEIGHT_SCALE_DIM : MX_WEIGHT_SCALE_DIM;
     OP_CHECK_IF(scaleDimNum != expectedScaleDim,
@@ -733,10 +750,11 @@ bool GroupedMatmulSwigluQuantV2Tiling950::CheckCoreNum() const
     auto aivNum = compileInfo->aivNum_;
     OP_CHECK_IF(aicNum == 0, OP_LOGE(inputParams_.opName, "aicNum should be positive integer, actual is %u.", aicNum),
                 return false);
-    OP_CHECK_IF(
-        aivNum != GmmConstant::CORE_RATIO * aicNum,
-        OP_LOGE(inputParams_.opName, "aicNum:aivNum should be 1:2, actual aicNum: %u, aivNum: %u.", aicNum, aivNum),
-        return false);
+    const uint32_t coreRatio =
+        compileInfo->npuArch_ == static_cast<int32_t>(NpuArch::DAV_9201) ? 1U : GmmConstant::CORE_RATIO;
+    OP_CHECK_IF(aivNum != coreRatio * aicNum,
+                OP_LOGE(inputParams_.opName, "Unexpected AIC/AIV ratio, aicNum: %u, aivNum: %u.", aicNum, aivNum),
+                return false);
     return true;
 }
 
@@ -797,7 +815,12 @@ ge::graphStatus GroupedMatmulSwigluQuantV2Tiling950::DoLibApiTiling()
     } else {
         const auto cappedBaseM = std::min(basicTiling_.baseM, CGMCT_MAX_BASE_M);
         basicTiling_.baseM = GroupedMatmul::CeilAlign(cappedBaseM, GmmConstant::CUBE_BLOCK);
-        if (IsSplitSwigluMode()) {
+        const auto* compileInfo = context_->GetCompileInfo<GMMSwigluV2CompileInfo>();
+        if (compileInfo != nullptr && compileInfo->npuArch_ == static_cast<int32_t>(NpuArch::DAV_9201)) {
+            basicTiling_.baseN = GroupedMatmul::CeilAlign(
+                std::min(basicTiling_.baseN, static_cast<uint64_t>(GmmConstant::BASIC_BLOCK_SIZE_128)),
+                GmmConstant::CUBE_BLOCK);
+        } else if (IsSplitSwigluMode()) {
             basicTiling_.baseN =
                 GroupedMatmul::CeilAlign(std::min(basicTiling_.baseN, V3_MAX_BASE_N), GmmConstant::CUBE_BLOCK);
         }
@@ -1277,10 +1300,7 @@ ge::graphStatus GroupedMatmulSwigluQuantV2Tiling950::GetWorkspaceSize()
 }
 ge::graphStatus GroupedMatmulSwigluQuantV2Tiling950::GetPlatformInfo()
 {
-    // V2 keeps its existing platform path. V3 also supports parse-time CompileInfo.
-    if (!IsSplitSwigluMode()) {
-        return GroupedQmmTiling::GetPlatformInfo();
-    }
+    // The base-class fallback reads GMMCompileInfo, whose layout differs from this operator's compile info.
     if (context_->GetPlatformInfo() != nullptr) {
         auto status = GroupedQmmTiling::GetPlatformInfo();
         if (status != ge::GRAPH_SUCCESS) {

@@ -181,11 +181,21 @@ public:
     __aicore__ inline void WaitForVector()
     {
         AscendC::CrossCoreWaitFlag<SYNC_AIC_AIV_MODE, PIPE_FIX>(AIV_SYNC_AIC_FLAG);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+        if (GetAicAivTaskRation() == 1) {
+            return;
+        }
+#endif
         AscendC::CrossCoreWaitFlag<SYNC_AIC_AIV_MODE, PIPE_FIX>(AIV_SYNC_AIC_FLAG + FLAG_ID_MAX);
     }
     __aicore__ inline void NotifyVector()
     {
         AscendC::CrossCoreSetFlag<SYNC_AIC_AIV_MODE, PIPE_FIX>(AIC_SYNC_AIV_FLAG);
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+        if (GetAicAivTaskRation() == 1) {
+            return;
+        }
+#endif
         AscendC::CrossCoreSetFlag<SYNC_AIC_AIV_MODE, PIPE_FIX>(AIC_SYNC_AIV_FLAG + FLAG_ID_MAX);
     }
     __aicore__ inline void WaitForCube()
@@ -202,6 +212,7 @@ public:
         }
     }
 
+#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 9201)
     __aicore__ inline void SetL2CacheDisableIfNeeded(int64_t mSize, int64_t curBaseM, int64_t baseN)
     {
         if constexpr (formatB != CubeFormat::ND) {
@@ -232,6 +243,7 @@ public:
             }
         }
     }
+#endif
 
     __aicore__ inline int32_t GetSplitValueFromGroupList(uint32_t groupIdx, uint8_t groupListType)
     {
@@ -364,8 +376,18 @@ public:
         int64_t k = Get<K_VALUE>(problemShape_);
         CoordClass coord(m, n, k, params.gmmParams.baseM, params.gmmParams.baseN, params.gmmParams.baseK);
         BlockCoord tileIdx;
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+        if (!bs.GetTileIdx(tileIdx)) {
+            return;
+        }
+        UpdateOffset(params, groupIdx);
+        UpdateGlobalBuffer(params, groupIdx);
+        do {
+#else
         while (bs.GetTileIdx(tileIdx)) {
+#endif
             BlockShape singleShape = bs.GetBlockShape(tileIdx);
+#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 9201)
             if (initSingleGroup_) {
                 UpdateOffset(params, groupIdx);
                 UpdateGlobalBuffer(params, groupIdx);
@@ -373,6 +395,7 @@ public:
                                           static_cast<int64_t>(params.gmmParams.baseN));
                 initSingleGroup_ = false;
             }
+#endif
             // isMx = true
             blockOffset_ = coord.template GetQuantIOOffset<GroupedMatmul::QuantMode::MX_PERGROUP_MODE>(
                 Get<IDX_M_TILEIDX>(tileIdx), Get<IDX_N_TILEIDX>(tileIdx), Get<IDX_M_TAIL_SPLIT_TILEIDX>(singleShape),
@@ -409,7 +432,11 @@ public:
                 epilogueOp_(epilogueShape, epilogueOffset);
                 NotifyCube();
             }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+        } while (bs.GetTileIdx(tileIdx));
+#else
         }
+#endif
     }
 
     __aicore__ inline void operator()(const Params& params)
@@ -437,7 +464,9 @@ public:
                                        Get<K_VALUE>(problemShape_)};
             bs.UpdateNextProblem(resProblemShape);
             epilogueOp_.UpdateNextProblem(resProblemShape);
+#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 9201)
             initSingleGroup_ = true;
+#endif
             ProcessSingleGroup(params, bs, groupIdx);
         }
         End();

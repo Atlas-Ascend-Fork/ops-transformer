@@ -12,6 +12,7 @@
  * \file grouped_matmul_infershape.cpp
  * \brief
  */
+#include "common/include/op_host/op_const_def_transformer.h"
 #include <algorithm>
 #include "gmm/common/op_host/log_format_util.h"
 
@@ -1934,7 +1935,8 @@ static graphStatus IsDavidQuantGMMByShape(T context)
     OP_CHECK_NULL_WITH_CONTEXT(context, scaleDesc);
     DataType xDtype = xDesc->GetDataType();
     DataType weightDtype = weightDesc->GetDataType();
-    if (xDtype == ge::DT_FLOAT4_E2M1 || xDtype == ge::DT_INT4 || xDtype == ge::DT_FLOAT4_E1M2) {
+    if (xDtype == ge::DT_FLOAT4_E2M1 || xDtype == ge::DT_INT4 || xDtype == ge::DT_FLOAT4_E1M2 ||
+        xDtype == Ops::Transformer::DT_HIFLOAT4) {
         return GRAPH_SUCCESS;
     }
     return (GetSizeByDataType(xDtype) == 1 && GetSizeByDataType(weightDtype) == 1) ? GRAPH_SUCCESS : GRAPH_FAILED;

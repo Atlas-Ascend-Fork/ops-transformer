@@ -56,6 +56,23 @@ bool IsTransposeForMxShape(const aclTensor* tensor)
     return false;
 }
 
+bool IsTransposeForHif4Shape(const aclTensor* tensor)
+{
+    auto shape = tensor->GetViewShape();
+    if (shape.GetDimNum() < MX_SPLIT_K_PER_TOKEN_SCALE_DIM) {
+        return false;
+    }
+    int64_t firstLastDim = shape.GetDimNum() - 1;
+    int64_t secondLastDim = shape.GetDimNum() - LAST_SECOND_DIM_INDEX;
+    int64_t thirdLastDim = shape.GetDimNum() - LAST_THIRD_DIM_INDEX;
+    auto strides = tensor->GetViewStrides();
+    if (strides[firstLastDim] == 1 && strides[thirdLastDim] == 1 &&
+        strides[secondLastDim] == shape.GetDim(thirdLastDim) * 1) {
+        return true;
+    }
+    return false;
+}
+
 bool CreateContiguousTensorListForPertoken(const aclTensorList* tensorList, std::vector<aclTensor*>& newTensorList,
                                            aclOpExecutor* executor)
 {

@@ -12,6 +12,7 @@
  * \file grouped_quant_basic_api_matmul_tiling.cpp
  * \brief
  */
+#include "common/include/op_host/op_const_def_transformer.h"
 #include <algorithm>
 #include <limits>
 #include "acl/acl_rt.h"
@@ -23,10 +24,11 @@ using namespace Ops::Transformer::OpTiling;
 using namespace GroupedMatmul;
 using namespace optiling::GmmConstant;
 using GMMQuantBasicApiTilingData = GroupedMatmulTilingData::GMMQuantBasicApiTilingData;
-namespace optiling {
 namespace {
 constexpr uint64_t THREE_BUFFER_MIN_LOAD_SIZE = MTE2_MIN_LOAD_SIZE_V120 * 3UL / 4UL; // 48 KiB
 }
+
+namespace optiling {
 
 GroupedQmmBasicApiTiling::GroupedQmmBasicApiTiling(gert::TilingContext* context)
     : GroupedQmmTiling(context)
@@ -152,20 +154,21 @@ bool GroupedQmmBasicApiTiling::IsCapable()
     if (useCubeBasicApi_) {
         return true;
     }
-    // MX 量化：scale 为 FLOAT8_E8M0（IsMicroScaling）；支持 mxfp8 与 mxfp4
-    if (!IsMicroScaling()) {
+    // MX 量化：scale 为 FLOAT8_E8M0（IsMicroScaling）；支持 mxfp8, hifloat4 与 mxfp4
+    if (!IsMicroScaling() && inputParams_.scaleDtype != Ops::Transformer::DT_HIFLOAT4_SCALE) {
         return false;
     }
     const bool isMxFp8 = inputParams_.aDtype == ge::DT_FLOAT8_E4M3FN || inputParams_.aDtype == ge::DT_FLOAT8_E5M2;
     const bool isMxFp4 = inputParams_.aDtype == ge::DT_FLOAT4_E2M1 || inputParams_.aDtype == ge::DT_FLOAT4_E1M2;
-    return isMxFp8 || isMxFp4;
+    const bool isHifp4 = inputParams_.aDtype == Ops::Transformer::DT_HIFLOAT4;
+    return isMxFp8 || isMxFp4 || isHifp4;
 }
 
 void GroupedQmmBasicApiTiling::Reset()
 {
     useCubeBasicApi_ = false;
-    tilingData_ = GMMQuantBasicApiTilingData();
     cubeTilingData_ = GroupedMatmulTilingData::GMMQuantCubeBasicApiTilingData();
+    tilingData_ = GMMQuantBasicApiTilingData();
 }
 
 ge::graphStatus GroupedQmmBasicApiTiling::GetShapeAttrsInfo()
@@ -212,14 +215,109 @@ ge::graphStatus GroupedQmmBasicApiTiling::DoLibApiTiling()
     tilingData_.mmTilingData.kBL1 = basicTiling_.stepKb * basicTiling_.baseK;
     tilingData_.mmTilingData.isBias = inputParams_.hasBias ? 1 : 0;
     tilingData_.mmTilingData.dbL0C = basicTiling_.dbL0c;
-    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE) {
+    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE ||
+        inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
         tilingData_.mmTilingData.scaleKAL1 = std::min(
             std::max(basicTiling_.scaleFactorA * basicTiling_.stepKa, basicTiling_.scaleFactorB * basicTiling_.stepKb) *
                 basicTiling_.baseK,
             inputParams_.kSize);
         tilingData_.mmTilingData.scaleKBL1 = tilingData_.mmTilingData.scaleKAL1;
     }
-    tilingData_.mmTilingData.l1BufferStage = static_cast<uint8_t>(CanEnableThreeL1Buffer() ? TB_SIZE : DB_SIZE);
+    tilingData_.mmTilingData.l1BufferStage =
+        static_cast<uint8_t>(npuArch_ != NpuArch::DAV_9201 && CanEnableThreeL1Buffer() ? TB_SIZE : DB_SIZE);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus GroupedQmmBasicApiTiling::PostTiling()
+{
+    if (useCubeBasicApi_) {
+        return SaveTilingDataToContext(cubeTilingData_);
+    }
+    return SaveTilingDataToContext(tilingData_);
+}
+
+ge::graphStatus GroupedQmmBasicApiTiling::CalL1Tiling()
+{
+    InitCommonL1TilingFields();
+    uint64_t leftL1Size = 0;
+    OP_CHECK_IF(CalcLeftL1Size(leftL1Size) != ge::GRAPH_SUCCESS,
+                OP_LOGE(context_->GetNodeName(), "CalcLeftL1Size failed"), return ge::GRAPH_FAILED);
+    return CalL1Depth(leftL1Size);
+}
+
+ge::graphStatus GroupedQmmBasicApiTiling::CalL1Depth(uint64_t leftL1Size)
+{
+    uint64_t baseASize = GetSizeWithDataType(basicTiling_.baseM * basicTiling_.baseK, inputParams_.aDtype);
+    uint64_t baseBSize = GetSizeWithDataType(basicTiling_.baseN * basicTiling_.baseK, inputParams_.bDtype);
+
+    uint64_t baseScaleASize = 0;
+    uint64_t baseScaleBSize = 0;
+    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE ||
+        inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
+        CalcAlignedMxBaseScaleSize(baseScaleASize, baseScaleBSize);
+    }
+    uint64_t baseL1Size = baseASize + baseBSize + baseScaleASize + baseScaleBSize;
+    OP_CHECK_IF(leftL1Size < baseL1Size,
+                OP_LOGE(context_->GetNodeName(), "L1 space overflow. Free L1Size : %lu, used space: %lu", leftL1Size,
+                        baseL1Size),
+                return ge::GRAPH_FAILED);
+    uint64_t depthInit = GetDepthA1B1(leftL1Size, baseL1Size, 1UL); // 求A+B和的平均depth
+    // 根据一条指令带宽要求的数据量求取A,B各自的depth
+    basicTiling_.depthA1 = GetDepthWithHighBW(std::min(inputParams_.mSize, basicTiling_.baseM));
+    basicTiling_.depthB1 = GetDepthWithHighBW(std::min(inputParams_.nSize, basicTiling_.baseN));
+    // 如果按照满足带宽的L1数据量超过了L1Size，进行下调整到平均depth;适配mx低阶api scaleKAL1=scaleKBL1的约束
+    if (basicTiling_.depthA1 * baseASize + basicTiling_.depthB1 * baseBSize +
+            std::max(basicTiling_.depthA1, basicTiling_.depthB1) * (baseScaleASize + baseScaleBSize) >
+        leftL1Size) {
+        basicTiling_.depthA1 = depthInit;
+        basicTiling_.depthB1 = depthInit;
+    }
+    // 960DT(9201)保持v121路径：恒两段L1 buffer，不启用3-buffer搜索（v121等价要求）
+    if (npuArch_ == NpuArch::DAV_9201) {
+        // 用剩余L1空间对内轴ND非对齐场景进行调整depth
+        ModifyDepthForUnalign(leftL1Size, baseASize, baseBSize, baseScaleASize + baseScaleBSize);
+        CalStepKs();
+        if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE ||
+            inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
+            return CalScaleFactors();
+        }
+        return ge::GRAPH_SUCCESS;
+    }
+    // 其他平台（如950）保持主线行为：NZ weight 通过调整 tiling 优先使能 3-buffer；ND weight 保持原有 tiling
+    // 和使能判断逻辑
+    if (inputParams_.bFormat != ge::FORMAT_FRACTAL_NZ) {
+        ModifyDepthForUnalign(leftL1Size, baseASize, baseBSize, baseScaleASize + baseScaleBSize);
+        return FinalizeStepAndScale();
+    }
+
+    const uint64_t initialDepthA1 = basicTiling_.depthA1;
+    const uint64_t initialDepthB1 = basicTiling_.depthB1;
+
+    // 先使用初始 stepK 判断是否可以开启3-buffer。初始值不满足时，搜索 depthA1 和 depthB1 的缩小组合
+    OP_CHECK_IF(FinalizeStepAndScale() != ge::GRAPH_SUCCESS,
+                OP_LOGE(context_->GetNodeName(), "Finalize initial stepK and scale factor failed"),
+                return ge::GRAPH_FAILED);
+    if (!CanEnableThreeL1Buffer()) {
+        L1SearchResult result;
+        if (SearchReducedThreeBufferTiling(initialDepthA1, initialDepthB1, baseASize, baseBSize, result)) {
+            ApplyThreeBufferSearchResult(result);
+            return ge::GRAPH_SUCCESS;
+        }
+        basicTiling_.depthA1 = initialDepthA1;
+        basicTiling_.depthB1 = initialDepthB1;
+        ModifyDepthForUnalign(leftL1Size, baseASize, baseBSize, baseScaleASize + baseScaleBSize);
+        return FinalizeStepAndScale();
+    }
+
+    basicTiling_.depthA1 = initialDepthA1;
+    basicTiling_.depthB1 = initialDepthB1;
+    ModifyDepthForUnalign(leftL1Size, baseASize, baseBSize, baseScaleASize + baseScaleBSize);
+    const uint64_t maxDepthA1 = std::max(basicTiling_.depthA1, initialDepthA1);
+    const uint64_t maxDepthB1 = std::max(basicTiling_.depthB1, initialDepthB1);
+    L1SearchResult result;
+    SearchExpandedThreeBufferTiling(initialDepthA1, initialDepthB1, maxDepthA1, maxDepthB1, baseASize, baseBSize,
+                                    result);
+    ApplyThreeBufferSearchResult(result);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -252,87 +350,6 @@ bool GroupedQmmBasicApiTiling::CanEnableThreeL1Buffer() const
     const uint64_t commonL1Size = aL1Size + bL1Size + scaleAL1Size + scaleBL1Size + biasL1Size;
     const uint64_t halfL1Size = aicoreParams_.l1Size / NUM_HALF;
     return commonL1Size + aL1Size <= halfL1Size && commonL1Size + bL1Size <= halfL1Size;
-}
-
-ge::graphStatus GroupedQmmBasicApiTiling::PostTiling()
-{
-    if (useCubeBasicApi_) {
-        return SaveTilingDataToContext(cubeTilingData_);
-    }
-    return SaveTilingDataToContext(tilingData_);
-}
-
-ge::graphStatus GroupedQmmBasicApiTiling::CalL1Tiling()
-{
-    InitCommonL1TilingFields();
-    uint64_t leftL1Size = 0;
-    OP_CHECK_IF(CalcLeftL1Size(leftL1Size) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context_->GetNodeName(), "CalcLeftL1Size failed"), return ge::GRAPH_FAILED);
-    return CalL1Depth(leftL1Size);
-}
-
-ge::graphStatus GroupedQmmBasicApiTiling::CalL1Depth(uint64_t leftL1Size)
-{
-    uint64_t baseASize = GetSizeWithDataType(basicTiling_.baseM * basicTiling_.baseK, inputParams_.aDtype);
-    uint64_t baseBSize = GetSizeWithDataType(basicTiling_.baseN * basicTiling_.baseK, inputParams_.bDtype);
-
-    uint64_t baseScaleASize = 0;
-    uint64_t baseScaleBSize = 0;
-    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE) {
-        CalcAlignedMxBaseScaleSize(baseScaleASize, baseScaleBSize);
-    }
-    uint64_t baseL1Size = baseASize + baseBSize + baseScaleASize + baseScaleBSize;
-    OP_CHECK_IF(leftL1Size < baseL1Size,
-                OP_LOGE(context_->GetNodeName(), "L1 space overflow. Free L1Size : %lu, used space: %lu", leftL1Size,
-                        baseL1Size),
-                return ge::GRAPH_FAILED);
-    uint64_t depthInit = GetDepthA1B1(leftL1Size, baseL1Size, 1UL); // 求A+B和的平均depth
-    // 根据一条指令带宽要求的数据量求取A,B各自的depth
-    basicTiling_.depthA1 = GetDepthWithHighBW(std::min(inputParams_.mSize, basicTiling_.baseM));
-    basicTiling_.depthB1 = GetDepthWithHighBW(std::min(inputParams_.nSize, basicTiling_.baseN));
-    // 如果按照满足带宽的L1数据量超过了L1Size，进行下调整到平均depth;适配mx低阶api scaleKAL1=scaleKBL1的约束
-    if (basicTiling_.depthA1 * baseASize + basicTiling_.depthB1 * baseBSize +
-            std::max(basicTiling_.depthA1, basicTiling_.depthB1) * (baseScaleASize + baseScaleBSize) >
-        leftL1Size) {
-        basicTiling_.depthA1 = depthInit;
-        basicTiling_.depthB1 = depthInit;
-    }
-
-    // 仅 NZ weight 通过调整 tiling 优先使能 3-buffer；ND weight 保持原有 tiling 和使能判断逻辑。
-    if (inputParams_.bFormat != ge::FORMAT_FRACTAL_NZ) {
-        ModifyDepthForUnalign(leftL1Size, baseASize, baseBSize, baseScaleASize + baseScaleBSize);
-        return FinalizeStepAndScale();
-    }
-
-    const uint64_t initialDepthA1 = basicTiling_.depthA1;
-    const uint64_t initialDepthB1 = basicTiling_.depthB1;
-
-    // 先使用初始 stepK 判断是否可以开启 3-buffer。初始值不满足时，搜索 depthA1 和 depthB1 的缩小组合。
-    OP_CHECK_IF(FinalizeStepAndScale() != ge::GRAPH_SUCCESS,
-                OP_LOGE(context_->GetNodeName(), "Finalize initial stepK and scale factor failed"),
-                return ge::GRAPH_FAILED);
-    if (!CanEnableThreeL1Buffer()) {
-        L1SearchResult result;
-        if (SearchReducedThreeBufferTiling(initialDepthA1, initialDepthB1, baseASize, baseBSize, result)) {
-            ApplyThreeBufferSearchResult(result);
-            return ge::GRAPH_SUCCESS;
-        }
-        basicTiling_.depthA1 = initialDepthA1;
-        basicTiling_.depthB1 = initialDepthB1;
-        ModifyDepthForUnalign(leftL1Size, baseASize, baseBSize, baseScaleASize + baseScaleBSize);
-        return FinalizeStepAndScale();
-    }
-
-    basicTiling_.depthA1 = initialDepthA1;
-    basicTiling_.depthB1 = initialDepthB1;
-    ModifyDepthForUnalign(leftL1Size, baseASize, baseBSize, baseScaleASize + baseScaleBSize);
-    const uint64_t maxDepthA1 = std::max(basicTiling_.depthA1, initialDepthA1);
-    const uint64_t maxDepthB1 = std::max(basicTiling_.depthB1, initialDepthB1);
-    L1SearchResult result;
-    SearchExpandedThreeBufferTiling(initialDepthA1, initialDepthB1, maxDepthA1, maxDepthB1, baseASize, baseBSize,
-                                    result);
-    ApplyThreeBufferSearchResult(result);
-    return ge::GRAPH_SUCCESS;
 }
 
 bool GroupedQmmBasicApiTiling::SearchReducedThreeBufferTiling(uint64_t initialDepthA1, uint64_t initialDepthB1,
@@ -443,7 +460,8 @@ void GroupedQmmBasicApiTiling::ApplyThreeBufferSearchResult(const L1SearchResult
 ge::graphStatus GroupedQmmBasicApiTiling::FinalizeStepAndScale()
 {
     CalStepKs();
-    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE) {
+    if (inputParams_.bQuantMode == optiling::QuantMode::MX_PERGROUP_MODE ||
+        inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE) {
         return CalScaleFactors();
     }
     return ge::GRAPH_SUCCESS;
@@ -509,10 +527,13 @@ ge::graphStatus GroupedQmmBasicApiTiling::CalScaleFactors()
 {
     uint64_t baseASize = GetSizeWithDataType(basicTiling_.baseM * basicTiling_.baseK, inputParams_.aDtype);
     uint64_t baseBSize = GetSizeWithDataType(basicTiling_.baseN * basicTiling_.baseK, inputParams_.bDtype);
-    uint64_t baseScaleASize = GetSizeWithDataType(CeilDiv(basicTiling_.baseK, MX_GROUP_SIZE) * basicTiling_.baseM,
+    uint64_t scaleGroupSize = inputParams_.bQuantMode == optiling::QuantMode::HIF4_PERGROUP_MODE ?
+                                  GmmConstant::HIF4_BASEK_FACTOR :
+                                  GmmConstant::MX_GROUP_SIZE;
+    uint64_t baseScaleASize = GetSizeWithDataType(CeilDiv(basicTiling_.baseK, scaleGroupSize) * basicTiling_.baseM,
                                                   inputParams_.perTokenScaleDtype);
     uint64_t baseScaleBSize =
-        GetSizeWithDataType(CeilDiv(basicTiling_.baseK, MX_GROUP_SIZE) * basicTiling_.baseN, inputParams_.scaleDtype);
+        GetSizeWithDataType(CeilDiv(basicTiling_.baseK, scaleGroupSize) * basicTiling_.baseN, inputParams_.scaleDtype);
     uint64_t biasDtypeSize = ge::GetSizeByDataType(inputParams_.biasDtype);
     uint64_t baseBiasSize = inputParams_.hasBias ? basicTiling_.baseN * biasDtypeSize : 0;
     uint64_t leftL1Size =
@@ -521,9 +542,10 @@ ge::graphStatus GroupedQmmBasicApiTiling::CalScaleFactors()
         leftL1Size / (std::max(basicTiling_.depthA1, basicTiling_.depthB1) * (baseScaleASize + baseScaleBSize)));
     OP_CHECK_IF(
         scaleInit == 0,
-        OP_LOGE(context_->GetNodeName(),
-                "When m(%lu)/n(%lu)/k(%lu)/groupNum(%lu) in mx quant mode, scaleFactor should not be equal to 0.",
-                inputParams_.mSize, inputParams_.nSize, inputParams_.kSize, inputParams_.groupNum),
+        OP_LOGE(
+            context_->GetNodeName(),
+            "When m(%lu)/n(%lu)/k(%lu)/groupNum(%lu) in mx or hif4 quant mode, scaleFactor should not be equal to 0.",
+            inputParams_.mSize, inputParams_.nSize, inputParams_.kSize, inputParams_.groupNum),
         return ge::GRAPH_FAILED);
     // 计算scaleFactorA, scaleFactorB
     // 来自K轴的约束

@@ -23,11 +23,17 @@
 #include "lib/matmul_intf.h"
 
 #define LOCAL_TEMPLATE_CLASS_PARAMS \
-    template <class xType, class wType, class biasType, class scaleType, class yType, CubeFormat wFormat, bool aTrans, \
-              bool bTrans>
-#define LOCAL_TEMPLATE_FUNC_PARAMS xType, wType, biasType, scaleType, yType, wFormat, aTrans, bTrans
+    template <class xType, class wType, class biasType, class inputScaleType, class yType, CubeFormat wFormat, \
+              bool aTrans, bool bTrans>
+#define LOCAL_TEMPLATE_FUNC_PARAMS xType, wType, biasType, inputScaleType, yType, wFormat, aTrans, bTrans
 
 namespace QuantUtils {
+
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+namespace VectorApi = AscendC::MicroAPI;
+#else
+namespace VectorApi = AscendC::Reg;
+#endif
 
 constexpr uint32_t PER_BLOCK_SIZE = 128;
 constexpr int32_t MXFP_DIVISOR_SIZE = 64;
@@ -52,13 +58,19 @@ constexpr uint32_t WEIGHTNZ_N0_K0 = 512;
 
 constexpr float NEG_SQRT_EIGHT_OVER_PI = -1.595769121 * 0.044715;
 constexpr float TANH_APPROX_FACTOR = 1 / 0.044715;
-constexpr AscendC::Reg::DivSpecificMode mode = {AscendC::Reg::MaskMergeMode::ZEROING, true};
+constexpr VectorApi::DivSpecificMode mode = {VectorApi::MaskMergeMode::ZEROING, true};
 
 constexpr uint8_t SYNC_AIC_AIV_MODE = 4;
 constexpr uint16_t FLAG_ID_MAX = 16;
 constexpr uint16_t AIC_SYNC_AIV_FLAG = 4;
 constexpr uint16_t AIV_SYNC_AIC_FLAG = 6;
 constexpr MatmulConfig MM_CFG_NO_PRELOAD_OPEN_UNIT_FLAG = GetMDLConfig(false, false, 0, false, false, false, true);
+
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+constexpr uint8_t CV_RATIO = 1;
+#else
+constexpr uint8_t CV_RATIO = 2; // 分配给2个AIV计算
+#endif
 
 enum class QuantMode : uint32_t {
     DEFAULT = 0x0U,
@@ -101,10 +113,31 @@ __aicore__ inline constexpr bool IsMxType()
     return AscendC::IsSameType<T, AscendC::fp8_e8m0_t>::value;
 }
 
+template <typename x1Dtype, typename scaleDytpe>
+__aicore__ inline constexpr bool IsMxOrHif4Type()
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    return AscendC::IsSameType<scaleDytpe, AscendC::fp8_e8m0_t>::value ||
+           AscendC::IsSameType<x1Dtype, hifloat4x2_t>::value;
+#else
+    return AscendC::IsSameType<scaleDytpe, AscendC::fp8_e8m0_t>::value;
+#endif
+}
+
 template <typename T>
 __aicore__ inline constexpr bool IsFp4()
 {
     return AscendC::IsSameType<T, fp4x2_e2m1_t>::value;
+}
+
+template <typename T>
+__aicore__ inline constexpr bool IsHifp4()
+{
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    return (AscendC::IsSameType<T, hifloat4x2_t>::value);
+#else
+    return false;
+#endif
 }
 
 template <typename aType, typename biasType>

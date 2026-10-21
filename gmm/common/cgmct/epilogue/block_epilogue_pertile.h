@@ -28,6 +28,11 @@
 namespace Cgmct {
 namespace Gemm {
 namespace Block {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+namespace GmmPerTileVectorApi = AscendC::MicroAPI;
+#else
+namespace GmmPerTileVectorApi = AscendC::Reg;
+#endif
 #define QGMM_BLOCK_EPILOGUE_CLASS_LOCAL_PARAMS \
     template <typename L0TileShape_, typename DataTypeOut_, typename DataTypeIn_, typename DataTypeBias_, \
               typename DataTypeX1Scale_, typename DataTypeX2Scale_, typename LayoutX1Scale_, typename LayoutX2Scale_>
@@ -198,7 +203,7 @@ __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAM
     }
 
     params_ = params;
-    subBlockIdx_ = AscendC::GetSubBlockIdx();
+    subBlockIdx_ = GetAicAivTaskRation() > 1 ? AscendC::GetSubBlockIdx() : 0;
     (void)GetL0c2UbPingTensor();
     (void)GetL0c2UbPongTensor();
     constexpr uint32_t elems = UB_TWO_BANK_ELEMS_B32 * PER_BLOCK_SIZE;
@@ -345,12 +350,12 @@ __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAM
     int64_t actualN = Get<MNK_N>(actualSingleShape_);
     if (ubParams_.CopyOutWithSplitN) {
         ubParams_.validM = ubParams_.singleM;
-        uint64_t subBlockIdxOffset = AscendC::GetSubBlockIdx() * ubParams_.singleN;
+        uint64_t subBlockIdxOffset = subBlockIdx_ * ubParams_.singleN;
         uint64_t ndNumN = 2 * ubParams_.singleN + subBlockIdxOffset; // 2: the nSize of 2 ND, base is 2 ND
         ubParams_.validN[0] = actualN < subBlockIdxOffset ? 0 : Min(ubParams_.singleN, actualN - subBlockIdxOffset);
         ubParams_.validN[1] = actualN < ndNumN ? 0 : Min(ubParams_.singleN, actualN - ndNumN);
     } else {
-        if (AscendC::GetSubBlockIdx() == 0) {
+        if (subBlockIdx_ == 0) {
             ubParams_.validM = ubParams_.singleM;
         } else {
             ubParams_.validM = Get<MNK_M>(actualSingleShape_) - ubParams_.singleM;
@@ -364,7 +369,8 @@ QGMM_BLOCK_EPILOGUE_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAMS>::UpdatePerBlockUBParam()
 {
     ubParams_.CopyOutWithSplitN =
-        Get<MNK_N>(actualSingleShape_) > params_->groupSizeN || Get<MNK_M>(actualSingleShape_) == 1;
+        (Get<MNK_N>(actualSingleShape_) > params_->groupSizeN || Get<MNK_M>(actualSingleShape_) == 1) &&
+        GetAicAivTaskRation() > 1;
     uint32_t fixpipeN = 0;
     if (ubParams_.CopyOutWithSplitN) {
         // (m * n/2) is written to 2 UB, n must be multiples of 32
@@ -373,7 +379,7 @@ __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAM
         int64_t alignedNBase =
             Get<MNK_N>(actualSingleShape_) > PER_BLOCK_SIZE ? PER_BLOCK_SIZE : AscendC::ONE_BLK_SIZE * ubParams_.ndNum;
         fixpipeN = Align(Get<MNK_N>(actualSingleShape_), static_cast<uint64_t>(alignedNBase)) / ubParams_.ndNum;
-        ubParams_.singleN = fixpipeN / static_cast<uint32_t>(AscendC::GetTaskRation());
+        ubParams_.singleN = fixpipeN / static_cast<uint32_t>(GetAicAivTaskRation());
         ubParams_.singleM = Get<MNK_M>(actualSingleShape_);
     } else {
         // (m/2 * n) is written to 2 UB, m must be multiples of 2
@@ -383,17 +389,17 @@ __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAM
         fixpipeN = Align(Get<MNK_N>(actualSingleShape_), static_cast<uint64_t>(AscendC::BLOCK_CUBE) * ubParams_.ndNum) /
                    ubParams_.ndNum;
         ubParams_.singleN = fixpipeN;
-        ubParams_.singleM = CeilDiv(Get<MNK_M>(actualSingleShape_), AscendC::GetTaskRation());
+        ubParams_.singleM = CeilDiv(Get<MNK_M>(actualSingleShape_), GetAicAivTaskRation());
     }
     UpdatePerBlockUBValidMN();
     int64_t offsetM = 0;
     int64_t offsetN0 = 0;
     int64_t offsetN1 = 0;
     if (ubParams_.CopyOutWithSplitN) {
-        offsetN0 = ubParams_.validN[0] == 0 ? 0 : AscendC::GetSubBlockIdx() * ubParams_.singleN;
+        offsetN0 = ubParams_.validN[0] == 0 ? 0 : subBlockIdx_ * ubParams_.singleN;
         offsetN1 = ubParams_.validN[1] == 0 ? offsetN0 : offsetN0 + UB_SUB_BANK_NUM * ubParams_.singleN;
     } else {
-        if (AscendC::GetSubBlockIdx() == 1) {
+        if (subBlockIdx_ == 1) {
             offsetM += ubParams_.singleM;
         }
         offsetN1 = ubParams_.validN[1] == 0 ? 0 : ubParams_.singleN;
@@ -541,58 +547,60 @@ __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAM
     __VEC_SCOPE__
     {
         for (uint16_t mIdx = 0; mIdx < mSize; mIdx++) {
-            AscendC::Reg::RegTensor<X1ScaleType> x1ScaleReg, muledScaleReg;
+            GmmPerTileVectorApi::RegTensor<X1ScaleType> x1ScaleReg, muledScaleReg;
             if constexpr (transA) {
-                AscendC::Reg::DataCopy<X1ScaleType, AscendC::Reg::LoadDist::DIST_BRC_B32>(
+                GmmPerTileVectorApi::DataCopy<X1ScaleType, GmmPerTileVectorApi::LoadDist::DIST_BRC_B32>(
                     x1ScaleReg, x1Scale + x1ScaleKIdxInCache * alignM + mIdx);
             } else {
-                AscendC::Reg::DataCopy<X1ScaleType, AscendC::Reg::LoadDist::DIST_BRC_B32>(
+                GmmPerTileVectorApi::DataCopy<X1ScaleType, GmmPerTileVectorApi::LoadDist::DIST_BRC_B32>(
                     x1ScaleReg, x1Scale + mIdx * alignK + x1ScaleKIdxInCache);
             }
             // 1 ND
             uint32_t elementNum = nSize0;
-            AscendC::Reg::MaskReg maskN = AscendC::Reg::UpdateMask<CType>(elementNum);
-            AscendC::Reg::RegTensor<CType> l0cOutReg;
-            AscendC::Reg::RegTensor<CType> addReg;
-            AscendC::Reg::RegTensor<CType> ResReg, mulScaleOutReg;
+            GmmPerTileVectorApi::MaskReg maskN = GmmPerTileVectorApi::UpdateMask<CType>(elementNum);
+            GmmPerTileVectorApi::RegTensor<CType> l0cOutReg;
+            GmmPerTileVectorApi::RegTensor<CType> addReg;
+            GmmPerTileVectorApi::RegTensor<CType> ResReg, mulScaleOutReg;
             // copy input from ub to register, addr of ub should align to 32B
             uint32_t offset = mIdx * UB_TWO_BANK_ELEMS_B32;
             uint32_t l0cOutOffset = offset;
-            AscendC::Reg::DataCopy(l0cOutReg, l0cOut + offset);
+            GmmPerTileVectorApi::DataCopy(l0cOutReg, l0cOut + offset);
             // l0c_out * scale
-            AscendC::Reg::Muls(muledScaleReg, x1ScaleReg, x2Scale0, maskN);
-            AscendC::Reg::Mul(mulScaleOutReg, l0cOutReg, muledScaleReg, maskN);
+            GmmPerTileVectorApi::Muls(muledScaleReg, x1ScaleReg, x2Scale0, maskN);
+            GmmPerTileVectorApi::Mul(mulScaleOutReg, l0cOutReg, muledScaleReg, maskN);
             uint32_t dstUbOffset = offset;
             if constexpr (isFirstKLoop) {
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, mulScaleOutReg,
-                                                                                      maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(
+                    dst + dstUbOffset, mulScaleOutReg, maskN);
             } else {
-                AscendC::Reg::DataCopy(addReg, dst + dstUbOffset);
-                AscendC::Reg::Add(ResReg, mulScaleOutReg, addReg, maskN);
+                GmmPerTileVectorApi::DataCopy(addReg, dst + dstUbOffset);
+                GmmPerTileVectorApi::Add(ResReg, mulScaleOutReg, addReg, maskN);
                 // copy out from register to ub
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, ResReg, maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(dst + dstUbOffset,
+                                                                                                    ResReg, maskN);
             }
             // 2 ND
             if constexpr (ndNum == 1) {
                 continue;
             }
             elementNum = nSize1;
-            maskN = AscendC::Reg::UpdateMask<CType>(elementNum);
+            maskN = GmmPerTileVectorApi::UpdateMask<CType>(elementNum);
             // copy input from ub to register, addr of ub should align to 32B
             l0cOutOffset = offset + UB_TWO_BANK_ELEMS_B32 * PER_BLOCK_SIZE; // + distance of 2 NDs
-            AscendC::Reg::DataCopy(l0cOutReg, l0cOut + l0cOutOffset);
+            GmmPerTileVectorApi::DataCopy(l0cOutReg, l0cOut + l0cOutOffset);
             // l0c_out * scale
-            AscendC::Reg::Muls(muledScaleReg, x1ScaleReg, x2Scale1, maskN);
-            AscendC::Reg::Mul(mulScaleOutReg, l0cOutReg, muledScaleReg, maskN);
+            GmmPerTileVectorApi::Muls(muledScaleReg, x1ScaleReg, x2Scale1, maskN);
+            GmmPerTileVectorApi::Mul(mulScaleOutReg, l0cOutReg, muledScaleReg, maskN);
             dstUbOffset = offset + nSize0;
             if constexpr (isFirstKLoop) {
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, mulScaleOutReg,
-                                                                                      maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(
+                    dst + dstUbOffset, mulScaleOutReg, maskN);
             } else {
-                AscendC::Reg::DataCopy(addReg, dst + dstUbOffset);
-                AscendC::Reg::Add(ResReg, mulScaleOutReg, addReg, maskN);
+                GmmPerTileVectorApi::DataCopy(addReg, dst + dstUbOffset);
+                GmmPerTileVectorApi::Add(ResReg, mulScaleOutReg, addReg, maskN);
                 // copy out from register to ub
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, ResReg, maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(dst + dstUbOffset,
+                                                                                                    ResReg, maskN);
             }
         }
     }
@@ -610,25 +618,26 @@ __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAM
             // 1 ND
             X2ScaleType scaleMul = x1Scale * x2Scale0;
             uint32_t elementNum = nSize0;
-            AscendC::Reg::MaskReg maskN = AscendC::Reg::UpdateMask<CType>(elementNum);
-            AscendC::Reg::RegTensor<CType> l0cOutReg;
-            AscendC::Reg::RegTensor<CType> addReg;
-            AscendC::Reg::RegTensor<CType> ResReg, mulScaleOutReg;
+            GmmPerTileVectorApi::MaskReg maskN = GmmPerTileVectorApi::UpdateMask<CType>(elementNum);
+            GmmPerTileVectorApi::RegTensor<CType> l0cOutReg;
+            GmmPerTileVectorApi::RegTensor<CType> addReg;
+            GmmPerTileVectorApi::RegTensor<CType> ResReg, mulScaleOutReg;
             // copy input from ub to register, addr of ub should align to 32B
             uint32_t offset = mIdx * UB_TWO_BANK_ELEMS_B32;
             uint32_t l0cOutOffset = offset;
-            AscendC::Reg::DataCopy(l0cOutReg, l0cOut + offset);
+            GmmPerTileVectorApi::DataCopy(l0cOutReg, l0cOut + offset);
             // l0c_out * scale
-            AscendC::Reg::Muls(mulScaleOutReg, l0cOutReg, scaleMul, maskN);
+            GmmPerTileVectorApi::Muls(mulScaleOutReg, l0cOutReg, scaleMul, maskN);
             uint32_t dstUbOffset = offset;
             if constexpr (isFirstKLoop) {
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, mulScaleOutReg,
-                                                                                      maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(
+                    dst + dstUbOffset, mulScaleOutReg, maskN);
             } else {
-                AscendC::Reg::DataCopy(addReg, dst + dstUbOffset);
-                AscendC::Reg::Add(ResReg, mulScaleOutReg, addReg, maskN);
+                GmmPerTileVectorApi::DataCopy(addReg, dst + dstUbOffset);
+                GmmPerTileVectorApi::Add(ResReg, mulScaleOutReg, addReg, maskN);
                 // copy out from register to ub
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, ResReg, maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(dst + dstUbOffset,
+                                                                                                    ResReg, maskN);
             }
             // 2 ND
             if constexpr (ndNum == 1) {
@@ -636,21 +645,22 @@ __aicore__ inline void BlockEpiloguePerTile<QGMM_BLOCK_EPILOGUE_FUNC_LOCAL_PARAM
             }
             scaleMul = x1Scale * x2Scale1;
             elementNum = nSize1;
-            maskN = AscendC::Reg::UpdateMask<CType>(elementNum);
+            maskN = GmmPerTileVectorApi::UpdateMask<CType>(elementNum);
             // copy input from ub to register, addr of ub should align to 32B
             l0cOutOffset = offset + UB_TWO_BANK_ELEMS_B32 * PER_BLOCK_SIZE; // + distance of 2 NDs
-            AscendC::Reg::DataCopy(l0cOutReg, l0cOut + l0cOutOffset);
+            GmmPerTileVectorApi::DataCopy(l0cOutReg, l0cOut + l0cOutOffset);
             // l0c_out * scale
-            AscendC::Reg::Muls(mulScaleOutReg, l0cOutReg, scaleMul, maskN);
+            GmmPerTileVectorApi::Muls(mulScaleOutReg, l0cOutReg, scaleMul, maskN);
             dstUbOffset = offset + nSize0;
             if constexpr (isFirstKLoop) {
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, mulScaleOutReg,
-                                                                                      maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(
+                    dst + dstUbOffset, mulScaleOutReg, maskN);
             } else {
-                AscendC::Reg::DataCopy(addReg, dst + dstUbOffset);
-                AscendC::Reg::Add(ResReg, mulScaleOutReg, addReg, maskN);
+                GmmPerTileVectorApi::DataCopy(addReg, dst + dstUbOffset);
+                GmmPerTileVectorApi::Add(ResReg, mulScaleOutReg, addReg, maskN);
                 // copy out from register to ub
-                AscendC::Reg::DataCopy<CType, AscendC::Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, ResReg, maskN);
+                GmmPerTileVectorApi::DataCopy<CType, GmmPerTileVectorApi::StoreDist::DIST_NORM_B32>(dst + dstUbOffset,
+                                                                                                    ResReg, maskN);
             }
         }
     }

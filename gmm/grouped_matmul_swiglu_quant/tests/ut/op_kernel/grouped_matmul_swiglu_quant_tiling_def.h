@@ -7,8 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
-#ifndef __GROUPED_MATMUL_ADD_TILING_DEF_H__
-#define __GROUPED_MATMUL_ADD_TILING_DEF_H__
+#ifndef GROUPED_MATMUL_SWIGLU_QUANT_UT_TILING_DEF_H
+#define GROUPED_MATMUL_SWIGLU_QUANT_UT_TILING_DEF_H
 
 #include "kernel_tiling/kernel_tiling.h"
 

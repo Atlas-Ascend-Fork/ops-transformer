@@ -13,6 +13,7 @@
 #include "opdev/op_dfx.h"
 #include "opdev/make_op_executor.h"
 #include "util/math_util.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "grouped_matmul_swiglu_quant_utils.h"
 #include "grouped_matmul_swiglu_quant_v2.h"
 
@@ -78,7 +79,8 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuantV2(
     gert::Shape scaleOutShape({m});
     auto out = executor->AllocTensor(outShape, DataType::DT_INT8, ge::FORMAT_ND);
     auto scaleOut = executor->AllocTensor(scaleOutShape, DataType::DT_FLOAT, ge::FORMAT_ND);
-    if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510) {
+    if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510 ||
+        op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_9201) {
         bool isMxWeightNzMultiTensor = IsMxWeightNzMultiTensor(weight);
         if (quantMode == QUANT_MODE_PERTOKEN) {
             // A8W4/A4W4 weightScale is [E, N] for per-channel and [E, KGroup, N] for per-group.
@@ -94,16 +96,22 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuantV2(
         gert::Shape outShapeV2({m, nAfterHalve});
         gert::Shape scaleOutShapeV2;
         // 当quantMode等于2时，out_scale 的形状为三维
-        if (quantMode == 2) {
+        // 2：MX 模式；3：HIF4 模式。
+        if (quantMode == 2 || quantMode == 3) {
             int64_t nAfterSplit = static_cast<int64_t>(Ops::Base::CeilDiv(nAfterHalve, SWIGLU_SPLIT_SIZE));
-            scaleOutShapeV2 = gert::Shape({m, nAfterSplit, 2});
+            // 3：HIF4 模式；2：MX 模式每组包含 2 个 E8M0 scale。
+            scaleOutShapeV2 = gert::Shape({m, nAfterSplit, quantMode == 3 ? 1 : 2});
         } else {
             scaleOutShapeV2 = gert::Shape({m});
         }
         out = executor->AllocTensor(outShapeV2, static_cast<ge::DataType>(quantDtype), ge::FORMAT_ND);
         // 当quantMode等于2时，outScale的DataType为FLOAT8_E8M0
-        scaleOut = quantMode == 2 ? executor->AllocTensor(scaleOutShapeV2, DataType::DT_FLOAT8_E8M0, ge::FORMAT_ND) :
-                                    executor->AllocTensor(scaleOutShapeV2, DataType::DT_FLOAT, ge::FORMAT_ND);
+        scaleOut = quantMode == 2 ?
+                       executor->AllocTensor(scaleOutShapeV2, DataType::DT_FLOAT8_E8M0, ge::FORMAT_ND) :
+                       // 3：HIF4 模式，输出 HIFLOAT4_SCALE。
+                       quantMode == 3 ?
+                       executor->AllocTensor(scaleOutShapeV2, Ops::Transformer::DT_HIFLOAT4_SCALE, ge::FORMAT_ND) :
+                       executor->AllocTensor(scaleOutShapeV2, DataType::DT_FLOAT, ge::FORMAT_ND);
     }
     if (out == nullptr) {
         OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "AllocTensor for GroupedMatmulSwigluQuantV2 out failed.");

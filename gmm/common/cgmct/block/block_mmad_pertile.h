@@ -30,8 +30,14 @@ namespace Cgmct {
 namespace Gemm {
 namespace Block {
 
+enum class FixpipeDualDstMode : uint8_t {
+    DUAL_DST_MODE_NONE = 0,
+    DUAL_DST_MODE_M = 1,
+    DUAL_DST_MODE_N = 2
+};
+
 struct PerBlockMmParam {
-    bool fixpipeSplitN = false;
+    FixpipeDualDstMode fixpipeDualDstMode = FixpipeDualDstMode::DUAL_DST_MODE_NONE;
     uint64_t fixpipeN;
     uint64_t fixpipeM;
     uint64_t srcStride;
@@ -113,14 +119,18 @@ private:
     __aicore__ inline void WaitForVector(uint16_t crossPingPongID)
     {
         AscendC::CrossCoreWaitFlag<GMM_AIC_SYNC_AIV_MODE, PIPE_FIX>(GMM_AIC_SYNC_AIV_FLAG + crossPingPongID);
-        AscendC::CrossCoreWaitFlag<GMM_AIC_SYNC_AIV_MODE, PIPE_FIX>(GMM_AIC_SYNC_AIV_FLAG + crossPingPongID +
-                                                                    GMM_FLAG_ID_MAX);
+        if (GetAicAivTaskRation() != 1) {
+            AscendC::CrossCoreWaitFlag<GMM_AIC_SYNC_AIV_MODE, PIPE_FIX>(GMM_AIC_SYNC_AIV_FLAG + crossPingPongID +
+                                                                        GMM_FLAG_ID_MAX);
+        }
     }
     __aicore__ inline void NotifyVector(uint16_t crossPingPongID)
     {
         AscendC::CrossCoreSetFlag<GMM_AIC_SYNC_AIV_MODE, PIPE_FIX>(GMM_AIV_SYNC_AIC_FLAG + crossPingPongID);
-        AscendC::CrossCoreSetFlag<GMM_AIC_SYNC_AIV_MODE, PIPE_FIX>(GMM_AIV_SYNC_AIC_FLAG + crossPingPongID +
-                                                                   GMM_FLAG_ID_MAX);
+        if (GetAicAivTaskRation() != 1) {
+            AscendC::CrossCoreSetFlag<GMM_AIC_SYNC_AIV_MODE, PIPE_FIX>(GMM_AIV_SYNC_AIC_FLAG + crossPingPongID +
+                                                                       GMM_FLAG_ID_MAX);
+        }
     }
 
 public:
@@ -231,17 +241,23 @@ __aicore__ inline void BlockMmadGmm<QGMM_BLOCK_MMAD_FUNC_LOCAL_PARAMS>::UpdatePa
 QGMM_BLOCK_MMAD_CLASS_LOCAL_PARAMS
 __aicore__ inline void BlockMmadGmm<QGMM_BLOCK_MMAD_FUNC_LOCAL_PARAMS>::UpdatePerBlockMmParam()
 {
-    mmParams_.fixpipeSplitN = Get<MNK_N>(actualSingleShape_) > PER_BLOCK_SIZE || Get<MNK_M>(actualSingleShape_) == 1;
+    if (GetAicAivTaskRation() == 1) {
+        mmParams_.fixpipeDualDstMode = FixpipeDualDstMode::DUAL_DST_MODE_NONE;
+    } else if (Get<MNK_N>(actualSingleShape_) > PER_BLOCK_SIZE || Get<MNK_M>(actualSingleShape_) == 1) {
+        mmParams_.fixpipeDualDstMode = FixpipeDualDstMode::DUAL_DST_MODE_N;
+    } else {
+        mmParams_.fixpipeDualDstMode = FixpipeDualDstMode::DUAL_DST_MODE_M;
+    }
 
     if constexpr (transA) {
         mmParams_.srcStride = Align(Get<MNK_M>(actualSingleShape_), static_cast<uint64_t>(AscendC::ONE_BLK_SIZE));
     } else {
         mmParams_.srcStride = Align(Get<MNK_M>(actualSingleShape_), static_cast<uint64_t>(AscendC::BLOCK_CUBE));
     }
-    mmParams_.fixpipeM = mmParams_.fixpipeSplitN ?
+    mmParams_.fixpipeM = mmParams_.fixpipeDualDstMode == FixpipeDualDstMode::DUAL_DST_MODE_N ?
                              Get<MNK_M>(actualSingleShape_) :
                              Align(Get<MNK_M>(actualSingleShape_), static_cast<uint64_t>(GetAicAivTaskRation()));
-    if (mmParams_.fixpipeSplitN) {
+    if (mmParams_.fixpipeDualDstMode == FixpipeDualDstMode::DUAL_DST_MODE_N) {
         mmParams_.ndNum = Get<MNK_N>(actualSingleShape_) > UB_TWO_BANK_ELEMS_B32 ? 2 : 1; // 2: 2 ND
         int64_t alignedNBase =
             Get<MNK_N>(actualSingleShape_) > PER_BLOCK_SIZE ? PER_BLOCK_SIZE : AscendC::ONE_BLK_SIZE * mmParams_.ndNum;
@@ -322,7 +338,8 @@ __aicore__ inline void BlockMmadGmm<QGMM_BLOCK_MMAD_FUNC_LOCAL_PARAMS>::AicBaseM
         AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0PingPongID_);
         AscendC::FixpipeParamsC310<AscendC::CO2Layout::ROW_MAJOR> fixpipeParams(
             mmParams_.fixpipeN, mmParams_.fixpipeM, mmParams_.srcStride, UB_TWO_BANK_ELEMS_B32); // dstStride is 128
-        fixpipeParams.dualDstCtl = mmParams_.fixpipeSplitN ? 2 : 1; // 2 means splitting N with ratio 1:2
+        fixpipeParams.dualDstCtl =
+            static_cast<uint8_t>(mmParams_.fixpipeDualDstMode); // 2 means splitting N with ratio 1:2
         // When nz2nd loop in copyout, srcndstride is unit of c0Size, dstndstride is unit of one element.
         fixpipeParams.params.ndNum = mmParams_.ndNum;
         fixpipeParams.params.srcNdStride = mmParams_.srcStride * (mmParams_.fixpipeN / AscendC::BLOCK_CUBE);

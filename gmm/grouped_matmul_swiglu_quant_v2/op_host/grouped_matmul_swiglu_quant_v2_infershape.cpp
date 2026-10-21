@@ -17,6 +17,7 @@
 #include "platform/platform_info.h"
 #include "util/math_util.h"
 #include "graph/utils/type_utils.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 #include <sstream>
 
@@ -38,6 +39,7 @@ constexpr size_t GMMSQ_INDEX_ATTR_QUANT_MODE = 2UL;
 constexpr size_t GMMSQ_INDEX_ATTR_TRANSPOSE_WEIGHT = 4UL;
 constexpr size_t QUANT_MODE_MX_TYPE = 2;
 constexpr size_t QUANT_MODE_PERTOKEN_TYPE = 0;
+constexpr size_t QUANT_MODE_HIF4_TYPE = 3;
 constexpr const char* GROUPED_MATMUL_SWIGLU_QUANT_V2_OP_TYPE = "GroupedMatmulSwigluQuantV2";
 
 template <typename... Args>
@@ -51,7 +53,7 @@ std::string ListToString(const Args&... args)
 }
 constexpr int64_t DYNAMIC_GRAPH_FIRST_INFERSHAPE_DIM_VALUE = -1;
 
-static std::set<std::string> GmmDavidSupportSoc = {"Ascend950"};
+static std::set<std::string> GmmDavidSupportSoc = {"Ascend950", "Ascend960DT"};
 static const std::unordered_set<ge::DataType> DavidSupportedInputDtypes = {
     ge::DataType::DT_FLOAT8_E5M2, ge::DataType::DT_FLOAT8_E4M3FN, ge::DataType::DT_FLOAT4_E2M1,
     ge::DataType::DT_FLOAT4_E1M2, ge::DataType::DT_INT8,          ge::DataType::DT_HIFLOAT8};
@@ -73,15 +75,20 @@ static ge::graphStatus InferShape4GroupedMatmulSwigluQuantV2(gert::InferShapeCon
     OP_CHECK_NULL_WITH_CONTEXT(context, quantModePtr);
     const bool* transposeWeightPtr = attrs->GetBool(GMMSQ_INDEX_ATTR_TRANSPOSE_WEIGHT);
     const bool transposeWeight = (transposeWeightPtr != nullptr ? *transposeWeightPtr : false);
+    const auto* xDesc = context->GetDynamicInputDesc(X_INDEX, 0);
+    const auto* weightDesc = context->GetDynamicInputDesc(WEIGHT_INDEX, 0);
+    const bool isHif4Shape = *quantModePtr == QUANT_MODE_HIF4_TYPE && xDesc != nullptr && weightDesc != nullptr &&
+                             xDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4 &&
+                             weightDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4;
 
     int64_t m = xShape->GetDim(M_DIM_INDEX);
     int64_t weightScaleDimNum = weightScaleShape->GetDimNum();
     int64_t nDimIndex = weightScaleDimNum - 1;
     // A8W4/A4W4 per-group weightScale is also 3D, so per-token mode must not be identified as MX by rank.
     // Preserve the original shape inference for invalid non-per-token modes; parameter validation rejects them later.
-    bool isMxShape = *quantModePtr != QUANT_MODE_PERTOKEN_TYPE &&
-                     (*quantModePtr == QUANT_MODE_MX_TYPE || weightScaleDimNum == MX_SINGLE_WEIGHT_SCALE_DIM ||
-                      weightScaleDimNum == MX_MULTI_WEIGHT_SCALE_DIM);
+    bool isMxShape = *quantModePtr != QUANT_MODE_PERTOKEN_TYPE && (*quantModePtr == QUANT_MODE_MX_TYPE || isHif4Shape ||
+                                                                   weightScaleDimNum == MX_SINGLE_WEIGHT_SCALE_DIM ||
+                                                                   weightScaleDimNum == MX_MULTI_WEIGHT_SCALE_DIM);
     if (isMxShape) {
         if (weightScaleDimNum == MX_SINGLE_WEIGHT_SCALE_DIM) {
             nDimIndex = transposeWeight ? weightScaleDimNum - OUT_DIM_LEN : weightScaleDimNum - DIM_LEN;
@@ -103,7 +110,8 @@ static ge::graphStatus InferShape4GroupedMatmulSwigluQuantV2(gert::InferShapeCon
         outScaleShape->SetDimNum(OUT_DIM_LEN);
         outScaleShape->SetDim(0, m);
         outScaleShape->SetDim(1, n);
-        outScaleShape->SetDim(2, SPLIT_RATIO); // 设置outScaleShape的第2维度
+        // 2：scale shape 的末维索引，表示每组 scale 数量。
+        outScaleShape->SetDim(2, isHif4Shape ? 1 : SPLIT_RATIO);
     } else {
         outScaleShape->SetDimNum(1);
         outScaleShape->SetDim(0, m);
@@ -143,7 +151,12 @@ static graphStatus InferDataType4GroupedMatmulSwigluQuantV2(gert::InferDataTypeC
     if (ret == GRAPH_SUCCESS && GmmDavidSupportSoc.count(platformInfo.str_info.short_soc_version) > 0) {
         auto xDtype = context->GetInputDataType(X_INDEX);
         auto weightDtype = context->GetDynamicInputDataType(WEIGHT_INDEX, 0);
-        OP_CHECK_IF(!isSupportedInputDtypeForDavid(xDtype) || !isSupportedInputDtypeForDavid(weightDtype),
+        const bool is9201 = platformInfo.str_info.short_soc_version == "Ascend960DT";
+        const bool xSupported =
+            isSupportedInputDtypeForDavid(xDtype) || (is9201 && xDtype == Ops::Transformer::DT_HIFLOAT4);
+        const bool weightSupported =
+            isSupportedInputDtypeForDavid(weightDtype) || (is9201 && weightDtype == Ops::Transformer::DT_HIFLOAT4);
+        OP_CHECK_IF(!xSupported || !weightSupported,
                     OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
                         GROUPED_MATMUL_SWIGLU_QUANT_V2_OP_TYPE, "x, weight",
                         ListToString(ge::TypeUtils::DataTypeToSerialString(xDtype),
@@ -152,21 +165,35 @@ static graphStatus InferDataType4GroupedMatmulSwigluQuantV2(gert::InferDataTypeC
                         "FLOAT8_E5M2, FLOAT4_E2M1, INT8 or HIFLOAT8"),
                     return GRAPH_FAILED);
 
-        OP_CHECK_IF(*quantMode != QUANT_MODE_MX_TYPE && *quantMode != QUANT_MODE_PERTOKEN_TYPE,
-                    OP_LOGE_FOR_INVALID_VALUE(GROUPED_MATMUL_SWIGLU_QUANT_V2_OP_TYPE, "quant_mode",
-                                              std::to_string(*quantMode), "0(Pertoken) or 2(MX)"),
-                    return GRAPH_FAILED);
+        OP_CHECK_IF(
+            *quantMode != QUANT_MODE_MX_TYPE && *quantMode != QUANT_MODE_PERTOKEN_TYPE &&
+                !(is9201 && *quantMode == QUANT_MODE_HIF4_TYPE),
+            OP_LOGE_FOR_INVALID_VALUE(GROUPED_MATMUL_SWIGLU_QUANT_V2_OP_TYPE, "quant_mode", std::to_string(*quantMode),
+                                      is9201 ? "0(Pertoken), 2(MX) or 3(HIF4)" : "0(Pertoken) or 2(MX)"),
+            return GRAPH_FAILED);
+        OP_CHECK_IF(*quantMode == QUANT_MODE_HIF4_TYPE &&
+                        (xDtype != Ops::Transformer::DT_HIFLOAT4 || weightDtype != Ops::Transformer::DT_HIFLOAT4),
+                    OP_LOGE(context->GetNodeName(), "HIF4 mode requires HIFLOAT4 x and weight."), return GRAPH_FAILED);
     }
     auto weightScaleDtype = context->GetDynamicInputDataType(WEIGHTSCALE_INDEX, 0);
     if (*quantMode == QUANT_MODE_MX_TYPE) {
-        if (weightScaleDtype == ge::DataType::DT_FLOAT8_E8M0) {
+        const bool isMxA8Hif4 = context->GetInputDataType(X_INDEX) == ge::DT_FLOAT8_E4M3FN &&
+                                context->GetDynamicInputDataType(WEIGHT_INDEX, 0) == Ops::Transformer::DT_HIFLOAT4;
+        if ((isMxA8Hif4 && weightScaleDtype == Ops::Transformer::DT_HIFLOAT4_SCALE) ||
+            (!isMxA8Hif4 && weightScaleDtype == ge::DT_FLOAT8_E8M0)) {
             context->SetOutputDataType(1, DataType::DT_FLOAT8_E8M0);
         } else {
             OP_LOGE(context->GetNodeName(),
-                    "In mx quant mode, the dtype of weightScale should be FLOAT8_E8M0, but actual dtype is %s.",
+                    "In mx quant mode, weightScale must be FLOAT8_E8M0 (or HIFLOAT4_SCALE for MXA8HIF4), but got %s.",
                     ge::TypeUtils::DataTypeToSerialString(weightScaleDtype).c_str());
             return GRAPH_FAILED;
         }
+    } else if (*quantMode == QUANT_MODE_HIF4_TYPE) {
+        if (weightScaleDtype != Ops::Transformer::DT_HIFLOAT4_SCALE) {
+            OP_LOGE(context->GetNodeName(), "HIF4 mode requires HIFLOAT4_SCALE weightScale.");
+            return GRAPH_FAILED;
+        }
+        context->SetOutputDataType(1, Ops::Transformer::DT_HIFLOAT4_SCALE);
     } else if (*quantMode == QUANT_MODE_PERTOKEN_TYPE) {
         context->SetOutputDataType(1, DataType::DT_FLOAT);
     }

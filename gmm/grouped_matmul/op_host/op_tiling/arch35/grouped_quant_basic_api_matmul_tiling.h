@@ -46,13 +46,13 @@ protected:
     virtual void Reset();
     ge::graphStatus CalL1Tiling();
 
-private:
     bool IsCubeBasicApi() const;
     // Selected in IsCapable; reused by computation and serialization until Reset.
     bool useCubeBasicApi_ = false;
     ge::graphStatus CalCubeL1Tiling();
     GroupedMatmulTilingData::GMMQuantCubeBasicApiTilingData cubeTilingData_;
 
+private:
     struct L1SearchResult {
         uint64_t depthA1 = 0UL;
         uint64_t depthB1 = 0UL;

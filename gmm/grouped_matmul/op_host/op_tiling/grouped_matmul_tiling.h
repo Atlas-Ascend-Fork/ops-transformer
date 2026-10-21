@@ -120,6 +120,7 @@ public:
     ge::graphStatus RunFusionKernelTiling(gert::TilingContext* context);
     ge::graphStatus A8W4Tiling(gert::TilingContext* context, const GMMCompileInfo* compileInfoPtr);
     ge::graphStatus A16W4MsdTiling(gert::TilingContext* context, const GMMCompileInfo* compileInfoPtr);
+    ge::graphStatus RegBaseWeightQuantTiling(gert::TilingContext* context, const GMMCompileInfo* compileInfoPtr);
 
 protected:
     bool IsAivAicRatioTwoRequired();

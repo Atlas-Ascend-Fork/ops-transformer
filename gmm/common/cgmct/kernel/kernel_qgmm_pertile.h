@@ -212,7 +212,10 @@ __aicore__ inline void QuantMmGroupedPerTile<QGMM_PERTILE_KERNEL_FUN_TEM_PARAMS>
             epilogueOp_.UpdateParamsForNextProblem(problemShape_);
         }
 
-        bs.UpdateNextProblem(problemShape_);
+        AscendC::Std::tuple<int64_t, int64_t, int64_t, int64_t> bsProblemShape{
+            Get<MNK_M>(problemShape_), Get<MNK_N>(problemShape_), Get<MNK_K>(problemShape_), 0L};
+        bs.UpdateNextProblem(bsProblemShape);
+
         UpdateMMGlobalAddr();
         ProcessSingleGroup(params, bs, groupIdx);
     }
@@ -233,7 +236,7 @@ __aicore__ inline void QuantMmGroupedPerTile<QGMM_PERTILE_KERNEL_FUN_TEM_PARAMS>
 
     blockIdx_ = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV {
-        blockIdx_ = blockIdx_ / AscendC::GetTaskRation();
+        blockIdx_ = blockIdx_ / GetAicAivTaskRation();
     }
 
     if (groupListPtr_ != nullptr) {

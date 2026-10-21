@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "grouped_matmul_950_checker.h"
 #include "log/log.h"
 
@@ -647,7 +648,7 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckPerGroupScaleDim(const Ten
 {
     if (gmmParams_.groupType == SPLIT_M) {
         DataType scaleDtype = GetInputTensor(gmmParams_.scaleOptional, tensorIndex.scale)->GetDataType();
-        if (scaleDtype == DataType::DT_FLOAT8_E8M0) {
+        if (scaleDtype == DataType::DT_FLOAT8_E8M0 || scaleDtype == Ops::Transformer::DT_HIFLOAT4_SCALE) {
             const size_t expectedScaleDim = IsWeightNzMultiTensorLayout() ? MX_SPLIT_K_SCALE_DIM : MX_SPLIT_M_SCALE_DIM;
             GMM_CHECK_REPORT(
                 scaleDimNumber == expectedScaleDim,
@@ -672,6 +673,21 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckPerGroupScaleDim(const Ten
                                      std::to_string(xDimNumber) + "]"));
         }
     }
+    return ACLNN_SUCCESS;
+}
+
+template <typename T>
+aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulHif4Dtype() const
+{
+    DataType perTokenDtype = GetInputTensor(gmmParams_.perTokenScaleOptional)->GetDataType();
+    CHECK_COND(perTokenDtype == Ops::Transformer::DT_HIFLOAT4_SCALE, ACLNN_ERR_PARAM_INVALID,
+               "The %s dtype in hifloat4 should be hifloat4_scale, but actual dtype is %s.", perTokenScaleName_.c_str(),
+               op::ToString(perTokenDtype).GetString());
+
+    DataType yDtype = GetInputTensor(gmmParams_.y)->GetDataType();
+    CHECK_COND(yDtype == DataType::DT_BF16 || yDtype == DataType::DT_FLOAT16, ACLNN_ERR_PARAM_INVALID,
+               "The output dtype should be bfloat16 or float16 in hifloat4 quant case, but actual %s dtype is %s",
+               yName_.c_str(), op::ToString(yDtype).GetString());
     return ACLNN_SUCCESS;
 }
 
@@ -830,6 +846,102 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckMxTypeMPerTokenAndScaleLas
 }
 
 template <typename T>
+aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckHif4TypeKCaseInputShape(const TensorDimInfo& dimInfo,
+                                                                              size_t index) const
+{
+    size_t xDimNum = dimInfo.xDimNum;
+    size_t weightDimNum = dimInfo.weightDimNum;
+    size_t scaleDimNum = dimInfo.scaleDimNum;
+    size_t pertokenScaleDimNum = dimInfo.pertokenScaleDimNum;
+    int64_t groupNum = dimInfo.groupNum;
+    // split k, x is (m,k), weight is (k,n), scale is (k//64+g, n, 1), pertoken is (m, k//64+g, 1)
+    CHECK_COND(xDimNum == MX_SPLIT_K_SINGLE_X_DIM, ACLNN_ERR_PARAM_INVALID,
+               "The %s dim num should be 2 when split k, but actual is [%zu].", xName_.c_str(), xDimNum);
+    CHECK_COND(weightDimNum == MX_SPLIT_K_SINGLE_WEIGHT_DIM, ACLNN_ERR_PARAM_INVALID,
+               "The %s dim num should be 2 when split k, but actual is [%zu].", weightName_.c_str(), weightDimNum);
+    CHECK_COND(scaleDimNum == MX_SPLIT_K_SCALE_DIM, ACLNN_ERR_PARAM_INVALID,
+               "The %s dim num should be 3 when split k, but actual is [%zu].", scaleName_.c_str(), scaleDimNum);
+    CHECK_COND(pertokenScaleDimNum == MX_SPLIT_K_PER_TOKEN_SCALE_DIM, ACLNN_ERR_PARAM_INVALID,
+               "The %s dim num should be 3 when split k, but actual is [%zu].", perTokenScaleName_.c_str(),
+               pertokenScaleDimNum);
+    auto xMDimValue = GetInputTensor(gmmParams_.x, index)->GetViewShape().GetDim(0);
+    auto xKDimValue = GetInputTensor(gmmParams_.x, index)->GetViewShape().GetDim(1);
+    auto weightNDimValue = GetInputTensor(gmmParams_.weight, index)->GetViewShape().GetDim(1);
+    auto pertokenMDimValue = GetInputTensor(gmmParams_.perTokenScaleOptional, index)->GetViewShape().GetDim(0);
+    auto pertokenKDimValue = GetInputTensor(gmmParams_.perTokenScaleOptional, index)->GetViewShape().GetDim(1);
+    auto pertokenLastDimValue = GetInputTensor(gmmParams_.perTokenScaleOptional, index)
+                                    ->GetViewShape()
+                                    .GetDim(MX_SPLIT_K_PER_TOKEN_SCALE_DIM - 1);
+    auto scaleKDimValue = GetInputTensor(gmmParams_.scaleOptional, index)->GetViewShape().GetDim(0);
+    auto scaleNDimValue = GetInputTensor(gmmParams_.scaleOptional, index)->GetViewShape().GetDim(1);
+    auto scaleLastDimValue =
+        GetInputTensor(gmmParams_.scaleOptional, index)->GetViewShape().GetDim(MX_SPLIT_K_SCALE_DIM - 1);
+    CHECK_COND(xMDimValue == pertokenMDimValue, ACLNN_ERR_PARAM_INVALID,
+               "The m dim of %s[%ld] and m dim of %s[%ld] should be equal.", xName_.c_str(), xMDimValue,
+               perTokenScaleName_.c_str(), pertokenMDimValue);
+    CHECK_COND(weightNDimValue == scaleNDimValue, ACLNN_ERR_PARAM_INVALID,
+               "The n dim of %s[%ld] and n dim of %s[%ld] should be equal.", weightName_.c_str(), weightNDimValue,
+               scaleName_.c_str(), scaleNDimValue);
+    CHECK_COND(pertokenKDimValue == (xKDimValue / HIF4_DIVISOR_SIZE + groupNum), ACLNN_ERR_PARAM_INVALID,
+               "The k dim of %s[%ld] should be equal to the k dim of %s[%ld] divided by 64, plus the groupSize[%ld].",
+               perTokenScaleName_.c_str(), pertokenKDimValue, xName_.c_str(), xKDimValue, groupNum);
+    CHECK_COND(scaleKDimValue == (xKDimValue / HIF4_DIVISOR_SIZE + groupNum), ACLNN_ERR_PARAM_INVALID,
+               "The k dim of %s[%ld] should be equal to the k dim of %s[%ld] divided by 64, plus the groupSize[%ld].",
+               scaleName_.c_str(), scaleKDimValue, xName_.c_str(), xKDimValue, groupNum);
+    CHECK_COND(scaleLastDimValue == 1, ACLNN_ERR_PARAM_INVALID, // last dim should be 1 in hif4 typek quant mode
+               "The last dim of %s[%ld] should be 1 when split k in hif4 quant mode.", scaleName_.c_str(),
+               scaleLastDimValue);
+    CHECK_COND(pertokenLastDimValue == 1, ACLNN_ERR_PARAM_INVALID, // last dim should be 1 in hif4 typek quant mode
+               "The last dim of %s[%ld] should be 1 when split k in hif4 quant mode.", perTokenScaleName_.c_str(),
+               pertokenLastDimValue);
+    return ACLNN_SUCCESS;
+}
+
+template <typename T>
+aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckHif4TypeMCaseInputShape(const TensorDimInfo& dimInfo,
+                                                                              size_t index) const
+{
+    auto weightNIndex = GetInputTensor(gmmParams_.weight, index)->GetViewShape().GetDimNum() - 1;
+    int64_t groupNum = dimInfo.groupNum;
+    size_t scaleDimNum = dimInfo.scaleDimNum;
+    size_t pertokenScaleDimNum = dimInfo.pertokenScaleDimNum;
+    auto xMDimValue = GetInputTensor(gmmParams_.x, index)->GetViewShape().GetDim(0);
+    auto xKDimValue = GetInputTensor(gmmParams_.x, index)->GetViewShape().GetDim(1);
+    auto pertokenMDimValue = GetInputTensor(gmmParams_.perTokenScaleOptional, index)->GetViewShape().GetDim(0);
+    auto pertokenScaleKDimValue = GetInputTensor(gmmParams_.perTokenScaleOptional, index)->GetViewShape().GetDim(1);
+    auto weightNDimValue = GetInputTensor(gmmParams_.weight, index)->GetViewShape().GetDim(weightNIndex);
+    auto scaleNDimValue = GetInputTensor(gmmParams_.scaleOptional, index)->GetViewShape().GetDim(weightNIndex);
+    auto scaleGDimValue = GetInputTensor(gmmParams_.scaleOptional, index)->GetViewShape().GetDim(0);
+    auto scaleKDimValue = GetInputTensor(gmmParams_.scaleOptional, index)->GetViewShape().GetDim(1);
+    auto pertokenScaleLastDimValue =
+        GetInputTensor(gmmParams_.perTokenScaleOptional, index)->GetViewShape().GetDim(pertokenScaleDimNum - 1);
+    auto scaleLastDimValue = GetInputTensor(gmmParams_.scaleOptional, index)->GetViewShape().GetDim(scaleDimNum - 1);
+    CHECK_COND(xMDimValue == pertokenMDimValue, ACLNN_ERR_PARAM_INVALID,
+               "In hifloat4 case, the m dim of %s[%ld] and m dim of %s[%ld] should be equal.", xName_.c_str(),
+               xMDimValue, perTokenScaleName_.c_str(), pertokenMDimValue);
+    CHECK_COND(weightNDimValue == scaleNDimValue, ACLNN_ERR_PARAM_INVALID,
+               "In hifloat4 case, the n dim of %s[%ld] and n dim of %s[%ld] should be equal.", weightName_.c_str(),
+               weightNDimValue, scaleName_.c_str(), scaleNDimValue);
+    CHECK_COND(scaleGDimValue == groupNum, ACLNN_ERR_PARAM_INVALID,
+               "In hifloat4 case, the group dim of %s[%ld] and group number[%ld] should be equal.", scaleName_.c_str(),
+               scaleGDimValue, groupNum);
+    auto inferredScaleKDimValue = (xKDimValue + HIF4_DIVISOR_SIZE - 1) / HIF4_DIVISOR_SIZE;
+    CHECK_COND(scaleKDimValue == inferredScaleKDimValue, ACLNN_ERR_PARAM_INVALID,
+               "In hifloat4 case, the k dim of %s[%ld] should be equal to ceil(k/64), which is [%ld].",
+               scaleName_.c_str(), scaleKDimValue, inferredScaleKDimValue);
+    CHECK_COND(pertokenScaleKDimValue == inferredScaleKDimValue, ACLNN_ERR_PARAM_INVALID,
+               "In hifloat4 case, the k dim of %s[%ld] should be equal to ceil(k/64), which is [%ld].",
+               perTokenScaleName_.c_str(), pertokenScaleKDimValue, inferredScaleKDimValue);
+    CHECK_COND(pertokenScaleLastDimValue == 1, ACLNN_ERR_PARAM_INVALID,
+               "The last dim of %s should be equal to 1, but the actual is [%ld].", perTokenScaleName_.c_str(),
+               pertokenScaleLastDimValue);
+    CHECK_COND(scaleLastDimValue == 1, ACLNN_ERR_PARAM_INVALID,
+               "The last dim of %s should be equal to 1, but the actual is [%ld].", scaleName_.c_str(),
+               scaleLastDimValue);
+    return ACLNN_SUCCESS;
+}
+
+template <typename T>
 aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckMxTypeMCaseInputShape(const TensorDimInfo& dimInfo,
                                                                             size_t index) const
 {
@@ -959,9 +1071,17 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulMxShape() con
         }
         const TensorDimInfo dimInfo = {xDimNum, weightDimNum, scaleDimNum, pertokenScaleDimNum, groupNum, biasDimNum};
         if (gmmParams_.groupType == SPLIT_M) {
-            CHECK_RET(CheckMxTypeMCaseInputShape(dimInfo, i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+            if (gmmParams_.xDtype == Ops::Transformer::DT_HIFLOAT4) {
+                CHECK_RET(CheckHif4TypeMCaseInputShape(dimInfo, i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+            } else {
+                CHECK_RET(CheckMxTypeMCaseInputShape(dimInfo, i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+            }
         } else {
-            CHECK_RET(CheckMxFp8TypeKCaseInputShape(dimInfo, i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+            if (gmmParams_.xDtype == Ops::Transformer::DT_HIFLOAT4) {
+                CHECK_RET(CheckHif4TypeKCaseInputShape(dimInfo, i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+            } else {
+                CHECK_RET(CheckMxFp8TypeKCaseInputShape(dimInfo, i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+            }
         }
     }
     return ACLNN_SUCCESS;
@@ -1028,6 +1148,24 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulMxScaleTransp
 }
 
 template <typename T>
+aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulHif4ScaleTranspose() const
+{
+    bool transposeScale = IsTransposeForHif4Shape(GetInputTensor(gmmParams_.scaleOptional));
+    bool transposePerTokenScale = IsTransposeForHif4Shape(GetInputTensor(gmmParams_.perTokenScaleOptional));
+    CHECK_COND(
+        transposeScale == gmmParams_.transposeWeight || LastTwoDimValueIsOne(GetInputTensor(gmmParams_.scaleOptional)),
+        ACLNN_SUCCESS, "The transposition of %s/%s should be equal, but actual transpositions are %s/%s.",
+        scaleName_.c_str(), weightName_.c_str(), transposeScale ? "true" : "false",
+        gmmParams_.transposeWeight ? "true" : "false");
+    CHECK_COND(transposePerTokenScale == gmmParams_.transposeX ||
+                   LastTwoDimValueIsOne(GetInputTensor(gmmParams_.perTokenScaleOptional)),
+               ACLNN_SUCCESS, "The transposition of %s/%s should be equal, but actual transpositions are %s/%s.",
+               perTokenScaleName_.c_str(), xName_.c_str(), transposePerTokenScale ? "true" : "false",
+               gmmParams_.transposeX ? "true" : "false");
+    return ACLNN_SUCCESS;
+}
+
+template <typename T>
 aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulMxfp8() const
 {
     GMM_CHECK_REPORT(gmmParams_.biasOptional == nullptr,
@@ -1073,6 +1211,82 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulMxfp4() const
     CHECK_RET(CheckGroupedMatmulPerGroupDim() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckGroupedMatmulMxShape() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckGroupedMatmulFp4MxDimValue() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    return ACLNN_SUCCESS;
+}
+
+template <typename T>
+aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulHif4() const
+{
+    CHECK_COND(gmmParams_.biasOptional == nullptr, ACLNN_ERR_PARAM_INVALID, "hifloat4 does not support bias.");
+    CHECK_COND(gmmParams_.perTokenScaleOptional != nullptr, ACLNN_ERR_PARAM_INVALID,
+               "%s should not be nullptr in hifloat4 case.", perTokenScaleName_.c_str());
+    CHECK_COND(CheckGroupedMatmulHif4Dtype() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
+               "CheckGroupedMatmulHif4Dtype failed");
+    if (gmmParams_.groupType == SPLIT_M) {
+        CHECK_COND(!gmmParams_.transposeX, ACLNN_ERR_PARAM_INVALID,
+                   "When groupType is 0 (split m), the transposition of X only support false, but actual \
+tranposition is %s in hifloat4 case.",
+                   gmmParams_.transposeX ? "true" : "false");
+    } else if (gmmParams_.groupType == SPLIT_K) {
+        CHECK_COND(!gmmParams_.transposeWeight && gmmParams_.transposeX, ACLNN_ERR_PARAM_INVALID,
+                   "When groupType is 2 (split K), the transposition of %s/%s only support true/false, but actual \
+transpositions are %s/%s in hifloat4 case.",
+                   xName_.c_str(), weightName_.c_str(), gmmParams_.transposeX ? "true" : "false",
+                   gmmParams_.transposeWeight ? "true" : "false");
+    }
+    CHECK_COND(CheckGroupedMatmulHif4ScaleTranspose() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
+               "CheckGroupedMatmulHif4ScaleTranspose failed");
+    CHECK_COND(CheckGroupedMatmulPerGroupDim() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
+               "CheckGroupedMatmulPerGroupDim failed");
+    CHECK_COND(CheckGroupedMatmulMxShape() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
+               "CheckGroupedMatmulMxShape failed");
+    CHECK_COND(CheckGroupedMatmulHif4DimValue() == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
+               "CheckGroupedMatmulHif4DimValue failed");
+    return ACLNN_SUCCESS;
+}
+
+template <typename T>
+aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckGroupedMatmulHif4DimValue() const
+{
+    for (size_t i = 0; i < GetInputTensorSize(gmmParams_.x); i++) {
+        auto xKDimValue = GetInputTensor(gmmParams_.x, i)->GetViewShape().GetDim(1);
+        auto weightKIndex = GetInputTensor(gmmParams_.weight, i)->GetViewShape().GetDimNum() - LAST_TWO_DIM_INDEX;
+        auto weightKDimValue = GetInputTensor(gmmParams_.weight, i)->GetViewShape().GetDim(weightKIndex);
+        auto weightLastIndex = GetInputTensor(gmmParams_.weight, i)->GetViewShape().GetDimNum() - 1;
+        auto weightLastDimValue = GetInputTensor(gmmParams_.weight, i)->GetViewShape().GetDim(weightLastIndex);
+        // 2：检查N是否为偶数
+        auto weightLastDimModValue = weightLastDimValue % 2;
+        if (!gmmParams_.transposeWeight) {
+            CHECK_COND(weightLastDimModValue == 0, ACLNN_ERR_PARAM_INVALID,
+                       "When the dtypes of x and weight inputs are hifloat4 and weight is not transposed, the dim N \
+value of %s should be even, but actual dim N mod value is %lu",
+                       weightName_.c_str(), weightLastDimModValue);
+        }
+        // 2：检查K是否为偶数, 不支持k轴为2
+        auto xKDimModValue = xKDimValue % 2;
+        if (!gmmParams_.transposeX) {
+            CHECK_COND(
+                xKDimModValue == 0, ACLNN_ERR_PARAM_INVALID,
+                "When the dtypes of x and weight inputs are hifloat4, the last dim value of %s should be even, but \
+actual dim value is %lu",
+                xName_.c_str(), xKDimValue);
+            // 2：不支持k轴为2
+            CHECK_COND(
+                xKDimModValue != 2, ACLNN_ERR_PARAM_INVALID,
+                "When the dtypes of x and weight inputs are hifloat4, the dim K value should not be 2, but actual \
+dim K value of %s is %lu",
+                xName_.c_str(), xKDimValue);
+        }
+        if (gmmParams_.transposeX) {
+            auto kDimValue = GetInputTensor(gmmParams_.x, i)->GetViewShape().GetDim(0);
+            // 2：不支持k轴为2
+            CHECK_COND(
+                kDimValue != 2, ACLNN_ERR_PARAM_INVALID,
+                "When the dtypes of x and weight inputs are hifloat4, the dim K value should not be 2, but actual \
+dim K value of %s is %lu",
+                xName_.c_str(), kDimValue);
+        }
+    }
     return ACLNN_SUCCESS;
 }
 
@@ -1653,6 +1867,17 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckFp4Params(const DataType& 
 }
 
 template <typename T>
+aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckHif4Params(const DataType& scaleDtype) const
+{
+    if (scaleDtype == Ops::Transformer::DT_HIFLOAT4_SCALE) {
+        return CheckGroupedMatmulHif4();
+    }
+    OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Unsupported quant scale dtype %s with hifloat4 case",
+            op::ToString(scaleDtype).GetString());
+    return ACLNN_ERR_PARAM_INVALID;
+}
+
+template <typename T>
 aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckInputAndOutputDtypeForV3Version() const
 {
     DataType xDtype = gmmParams_.xDtype;
@@ -1796,6 +2021,8 @@ aclnnStatus AclnnGroupedMatmulDAV3510Checker<T>::CheckQuantParamsByDtype(DataTyp
     } else if ((xDtype == DataType::DT_FLOAT4_E2M1 || xDtype == DataType::DT_FLOAT4_E1M2) &&
                (weightDtype == DataType::DT_FLOAT4_E2M1 || weightDtype == DataType::DT_FLOAT4_E1M2)) {
         return CheckFp4Params(scaleDtype);
+    } else if ((xDtype == Ops::Transformer::DT_HIFLOAT4) && (weightDtype == Ops::Transformer::DT_HIFLOAT4)) {
+        return CheckHif4Params(scaleDtype);
     } else if (xDtype == DataType::DT_INT4 && weightDtype == DataType::DT_INT4) {
         GMM_CHECK_REPORT(scaleDtype == DataType::DT_UINT64,
                          OP_LOGE_FOR_INVALID_DTYPE(GetAclnnOpName(), scaleName_.c_str(),

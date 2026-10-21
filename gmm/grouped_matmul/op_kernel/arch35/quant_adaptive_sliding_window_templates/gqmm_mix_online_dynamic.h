@@ -30,17 +30,23 @@ using GMMQuantParams = GroupedMatmulTilingData::GMMQuantParams;
 
 namespace AscendC {
 
-constexpr Reg::CastTrait ctInt322Fp32 = {Reg::RegLayout::UNKNOWN, Reg::SatMode::UNKNOWN, Reg::MaskMergeMode::ZEROING,
-                                         RoundMode::CAST_RINT};
+namespace GmmQuantVectorApi = QuantUtils::VectorApi;
 
-constexpr Reg::CastTrait ctFp322Half = {Reg::RegLayout::ZERO, Reg::SatMode::NO_SAT, Reg::MaskMergeMode::ZEROING,
-                                        RoundMode::CAST_RINT};
+constexpr GmmQuantVectorApi::CastTrait ctInt322Fp32 = {GmmQuantVectorApi::RegLayout::UNKNOWN,
+                                                       GmmQuantVectorApi::SatMode::UNKNOWN,
+                                                       GmmQuantVectorApi::MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
 
-constexpr Reg::CastTrait ctHalf2Fp32Zero = {Reg::RegLayout::ZERO, Reg::SatMode::UNKNOWN, Reg::MaskMergeMode::ZEROING,
-                                            RoundMode::UNKNOWN};
+constexpr GmmQuantVectorApi::CastTrait ctFp322Half = {GmmQuantVectorApi::RegLayout::ZERO,
+                                                      GmmQuantVectorApi::SatMode::NO_SAT,
+                                                      GmmQuantVectorApi::MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
 
-constexpr Reg::CastTrait ctHalf2Fp32One = {Reg::RegLayout::ONE, Reg::SatMode::UNKNOWN, Reg::MaskMergeMode::ZEROING,
-                                           RoundMode::UNKNOWN};
+constexpr GmmQuantVectorApi::CastTrait ctHalf2Fp32Zero = {
+    GmmQuantVectorApi::RegLayout::ZERO, GmmQuantVectorApi::SatMode::UNKNOWN, GmmQuantVectorApi::MaskMergeMode::ZEROING,
+    RoundMode::UNKNOWN};
+
+constexpr GmmQuantVectorApi::CastTrait ctHalf2Fp32One = {GmmQuantVectorApi::RegLayout::ONE,
+                                                         GmmQuantVectorApi::SatMode::UNKNOWN,
+                                                         GmmQuantVectorApi::MaskMergeMode::ZEROING, RoundMode::UNKNOWN};
 
 LOCAL_TEMPLATE_CLASS_MIX_PARAMS
 class GQmmMixRegbaseKernel {
@@ -92,14 +98,18 @@ protected:
     __aicore__ inline void WaitForVector()
     {
         CrossCoreWaitFlag<QuantUtils::SYNC_AIC_AIV_MODE, PIPE_FIX>(QuantUtils::AIV_SYNC_AIC_FLAG);
-        CrossCoreWaitFlag<QuantUtils::SYNC_AIC_AIV_MODE, PIPE_FIX>(QuantUtils::AIV_SYNC_AIC_FLAG +
-                                                                   QuantUtils::FLAG_ID_MAX);
+        if (QuantUtils::GetTaskRation() != 1) {
+            CrossCoreWaitFlag<QuantUtils::SYNC_AIC_AIV_MODE, PIPE_FIX>(QuantUtils::AIV_SYNC_AIC_FLAG +
+                                                                       QuantUtils::FLAG_ID_MAX);
+        }
     }
     __aicore__ inline void NotifyVector()
     {
         CrossCoreSetFlag<QuantUtils::SYNC_AIC_AIV_MODE, PIPE_FIX>(QuantUtils::AIC_SYNC_AIV_FLAG);
-        CrossCoreSetFlag<QuantUtils::SYNC_AIC_AIV_MODE, PIPE_FIX>(QuantUtils::AIC_SYNC_AIV_FLAG +
-                                                                  QuantUtils::FLAG_ID_MAX);
+        if (QuantUtils::GetTaskRation() != 1) {
+            CrossCoreSetFlag<QuantUtils::SYNC_AIC_AIV_MODE, PIPE_FIX>(QuantUtils::AIC_SYNC_AIV_FLAG +
+                                                                      QuantUtils::FLAG_ID_MAX);
+        }
     }
     __aicore__ inline void WaitForCube()
     {
@@ -440,7 +450,7 @@ __aicore__ inline void GQmmMixRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::Pro
             return;
         }
         mm.SetSingleShape(block_.params_.singleCoreM, block_.params_.singleCoreN, block_.params_.k);
-        block_.template CalcGMOffset<aTrans, bTrans, scaleType, wFormat>();
+        block_.template CalcGMOffset<aTrans, bTrans, xType, scaleType, wFormat>();
         if ASCEND_IS_AIC {
             if (isVecSetSyncCom_) {
                 WaitForVector();
@@ -472,7 +482,8 @@ __aicore__ inline void GQmmMixRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::MMC
 LOCAL_TEMPLATE_CLASS_MIX_PARAMS
 __aicore__ inline void GQmmMixRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::DequantCompute()
 {
-    auto halfSingleM = QuantUtils::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(2)); // 分配给2个AIV计算
+    auto halfSingleM =
+        QuantUtils::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(QuantUtils::GetTaskRation()));
     auto singleMInVec = subBlockIdx_ == 1 ? block_.params_.singleCoreM - halfSingleM : halfSingleM;
     if (singleMInVec == 0) {
         return;
@@ -526,7 +537,8 @@ __aicore__ inline void GQmmMixRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::Deq
 LOCAL_TEMPLATE_CLASS_MIX_PARAMS
 __aicore__ inline void GQmmMixRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::CopyDataFromGm2Ub()
 {
-    auto halfSingleM = QuantUtils::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(2)); // 分配给2个AIV计算
+    auto halfSingleM =
+        QuantUtils::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(QuantUtils::GetTaskRation()));
     auto singleMInVec = subBlockIdx_ == 1 ? block_.params_.singleCoreM - halfSingleM : halfSingleM;
     // scale: GM -> UB
     if (gmmQuantParams_->bQuantMode == static_cast<uint32_t>(QuantUtils::QuantMode::PERCHANNEL_MODE)) {
@@ -804,110 +816,114 @@ __aicore__ inline void GQmmMixRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::VFD
     uint16_t nLoopCnt = (nSize + eleNumPerVf - 1) / eleNumPerVf;
     __VEC_SCOPE__
     {
-        Reg::MaskReg maskN4B16 = Reg::CreateMask<bfloat16_t, Reg::MaskPattern::ALL>();
+        GmmQuantVectorApi::MaskReg maskN4B16 =
+            GmmQuantVectorApi::CreateMask<bfloat16_t, GmmQuantVectorApi::MaskPattern::ALL>();
         for (uint16_t mIdx = 0; mIdx < mSize; mIdx++) {
             uint32_t elementNum = nSize;
             for (uint16_t vfBlockIdx = 0; vfBlockIdx < nLoopCnt; vfBlockIdx++) {
-                Reg::RegTensor<l0cType> l0cOutReg;
-                Reg::RegTensor<scaleType> scaleReg;
-                Reg::RegTensor<ptScaleType> perTokenScaleReg;
-                Reg::RegTensor<biasType> biasReg;
-                Reg::RegTensor<float> castSrcOutReg, castScaleReg, castScaleOneReg, mulScaleOutReg, mulPtScaleOutReg,
-                    castBiasReg, castBiasOneReg, addBiasOutReg, actOutReg;
-                Reg::RegTensor<yType> castResultOutReg;
-                Reg::MaskReg maskN = Reg::UpdateMask<l0cType>(elementNum);
+                GmmQuantVectorApi::RegTensor<l0cType> l0cOutReg;
+                GmmQuantVectorApi::RegTensor<scaleType> scaleReg;
+                GmmQuantVectorApi::RegTensor<ptScaleType> perTokenScaleReg;
+                GmmQuantVectorApi::RegTensor<biasType> biasReg;
+                GmmQuantVectorApi::RegTensor<float> castSrcOutReg, castScaleReg, castScaleOneReg, mulScaleOutReg,
+                    mulPtScaleOutReg, castBiasReg, castBiasOneReg, addBiasOutReg, actOutReg;
+                GmmQuantVectorApi::RegTensor<yType> castResultOutReg;
+                GmmQuantVectorApi::MaskReg maskN = GmmQuantVectorApi::UpdateMask<l0cType>(elementNum);
                 // copy input from ub to register, addr of ub should align to 32B
                 uint32_t l0cOutOffset = mIdx * nSrcUbAligned + vfBlockIdx * eleNumPerVf;
-                Reg::DataCopy(l0cOutReg, l0cOut + l0cOutOffset);
+                GmmQuantVectorApi::DataCopy(l0cOutReg, l0cOut + l0cOutOffset);
                 // cast l0cOut from int32 to float
                 if constexpr (IsSameType<l0cType, int32_t>::value) {
-                    Reg::Cast<float, l0cType, ctInt322Fp32>(castSrcOutReg, l0cOutReg, maskN);
+                    GmmQuantVectorApi::Cast<float, l0cType, ctInt322Fp32>(castSrcOutReg, l0cOutReg, maskN);
                 } else {
                     castSrcOutReg = l0cOutReg;
                 }
                 // l0c_out * scale
                 if constexpr (isPertensor) {
-                    Reg::Muls(mulScaleOutReg, castSrcOutReg, scaleScalar_, maskN);
+                    GmmQuantVectorApi::Muls(mulScaleOutReg, castSrcOutReg, scaleScalar_, maskN);
                 } else {
-                    Reg::DataCopy(scaleReg, scale + vfBlockIdx * eleNumPerVf);
+                    GmmQuantVectorApi::DataCopy(scaleReg, scale + vfBlockIdx * eleNumPerVf);
                     if constexpr (!IsSameType<scaleType, float>::value) { // cast scale from bf16 to float
-                        Reg::Cast<float, scaleType, ctHalf2Fp32Zero>(castScaleReg, scaleReg, maskN);
-                        Reg::Cast<float, scaleType, ctHalf2Fp32One>(castScaleOneReg, scaleReg, maskN4B16);
-                        Reg::Interleave(castScaleReg, castScaleOneReg, castScaleReg, castScaleOneReg);
+                        GmmQuantVectorApi::Cast<float, scaleType, ctHalf2Fp32Zero>(castScaleReg, scaleReg, maskN);
+                        GmmQuantVectorApi::Cast<float, scaleType, ctHalf2Fp32One>(castScaleOneReg, scaleReg, maskN4B16);
+                        GmmQuantVectorApi::Interleave(castScaleReg, castScaleOneReg, castScaleReg, castScaleOneReg);
                     } else {
                         castScaleReg = scaleReg;
                     }
-                    Reg::Mul(mulScaleOutReg, castSrcOutReg, castScaleReg, maskN);
+                    GmmQuantVectorApi::Mul(mulScaleOutReg, castSrcOutReg, castScaleReg, maskN);
                 }
                 // out * perTokenScale
                 if constexpr (aQuantMode == QuantUtils::QuantMode::PERTENSOR_MODE) {
-                    AscendC::Reg::Muls(mulPtScaleOutReg, mulScaleOutReg, perTokenScaleScalar_, maskN);
+                    GmmQuantVectorApi::Muls(mulPtScaleOutReg, mulScaleOutReg, perTokenScaleScalar_, maskN);
                 } else if constexpr (aQuantMode == QuantUtils::QuantMode::PERTOKEN_MODE) {
-                    Reg::DataCopy<ptScaleType, Reg::LoadDist::DIST_BRC_B32>(perTokenScaleReg, perTokenScale + mIdx);
-                    Reg::Mul(mulPtScaleOutReg, mulScaleOutReg, perTokenScaleReg, maskN);
+                    GmmQuantVectorApi::DataCopy<ptScaleType, GmmQuantVectorApi::LoadDist::DIST_BRC_B32>(
+                        perTokenScaleReg, perTokenScale + mIdx);
+                    GmmQuantVectorApi::Mul(mulPtScaleOutReg, mulScaleOutReg, perTokenScaleReg, maskN);
                 } else {
                     mulPtScaleOutReg = mulScaleOutReg;
                 }
                 // out + bias
                 if constexpr (isBiasEpilogue) {
-                    Reg::DataCopy(biasReg, bias + vfBlockIdx * eleNumPerVf);
+                    GmmQuantVectorApi::DataCopy(biasReg, bias + vfBlockIdx * eleNumPerVf);
                     // cast bias from bf16/fp16 to float
                     if constexpr (IsSameType<biasType, bfloat16_t>::value || IsSameType<biasType, half>::value) {
-                        Reg::Cast<float, biasType, ctHalf2Fp32Zero>(castBiasReg, biasReg, maskN);
+                        GmmQuantVectorApi::Cast<float, biasType, ctHalf2Fp32Zero>(castBiasReg, biasReg, maskN);
                         // bf16/fp16共用maskN4B16
-                        Reg::Cast<float, biasType, ctHalf2Fp32One>(castBiasOneReg, biasReg, maskN4B16);
-                        Reg::Interleave(castBiasReg, castBiasOneReg, castBiasReg, castBiasOneReg);
+                        GmmQuantVectorApi::Cast<float, biasType, ctHalf2Fp32One>(castBiasOneReg, biasReg, maskN4B16);
+                        GmmQuantVectorApi::Interleave(castBiasReg, castBiasOneReg, castBiasReg, castBiasOneReg);
                     } else if constexpr (IsSameType<biasType, float>::value) {
                         castBiasReg = biasReg;
                     }
-                    Reg::Add(addBiasOutReg, mulPtScaleOutReg, castBiasReg, maskN);
+                    GmmQuantVectorApi::Add(addBiasOutReg, mulPtScaleOutReg, castBiasReg, maskN);
                 } else {
                     addBiasOutReg = mulPtScaleOutReg;
                 }
                 // activation
                 if constexpr (activeType == GROUPED_MATMUL::ActiveType::FASTGELU) {
-                    AscendC::Reg::RegTensor<float, AscendC::Reg::RegTraitNumOne> denominator;
-                    AscendC::Reg::Muls(denominator, addBiasOutReg, (float)-1.702, maskN);
-                    AscendC::Reg::Exp(denominator, denominator, maskN);
-                    AscendC::Reg::Adds(denominator, denominator, (float)1.0, maskN);
+                    GmmQuantVectorApi::RegTensor<float, GmmQuantVectorApi::RegTraitNumOne> denominator;
+                    GmmQuantVectorApi::Muls(denominator, addBiasOutReg, (float)-1.702, maskN);
+                    GmmQuantVectorApi::Exp(denominator, denominator, maskN);
+                    GmmQuantVectorApi::Adds(denominator, denominator, (float)1.0, maskN);
                     // actOutReg = x / (Exp(-1.702 * x) + 1)
-                    AscendC::Reg::Div<float, &QuantUtils::mode>(actOutReg, addBiasOutReg, denominator, maskN);
+                    GmmQuantVectorApi::Div<float, &QuantUtils::mode>(actOutReg, addBiasOutReg, denominator, maskN);
                 } else if constexpr (activeType == GROUPED_MATMUL::ActiveType::SILU) {
-                    AscendC::Reg::RegTensor<float, AscendC::Reg::RegTraitNumOne> denominator;
-                    AscendC::Reg::Muls(denominator, addBiasOutReg, (float)-1.0, maskN);
-                    AscendC::Reg::Exp(denominator, denominator, maskN);
-                    AscendC::Reg::Adds(denominator, denominator, (float)1.0, maskN);
+                    GmmQuantVectorApi::RegTensor<float, GmmQuantVectorApi::RegTraitNumOne> denominator;
+                    GmmQuantVectorApi::Muls(denominator, addBiasOutReg, (float)-1.0, maskN);
+                    GmmQuantVectorApi::Exp(denominator, denominator, maskN);
+                    GmmQuantVectorApi::Adds(denominator, denominator, (float)1.0, maskN);
                     // actOutReg = x / (Exp(-1.0 * x) + 1)
-                    AscendC::Reg::Div<float, &QuantUtils::mode>(actOutReg, addBiasOutReg, denominator, maskN);
+                    GmmQuantVectorApi::Div<float, &QuantUtils::mode>(actOutReg, addBiasOutReg, denominator, maskN);
                 } else if constexpr (activeType == GROUPED_MATMUL::ActiveType::RELU) {
                     // x = (x >= 0) ? x : 0
-                    AscendC::Reg::Relu(actOutReg, addBiasOutReg, maskN);
+                    GmmQuantVectorApi::Relu(actOutReg, addBiasOutReg, maskN);
                 } else if constexpr (activeType == GROUPED_MATMUL::ActiveType::GELU_TANH) {
                     // current realization: x / (1 + e^(-1.5957691*0.044715(x/0.044715 + x^3)))
-                    Reg::RegTensor<float, Reg::RegTraitNumOne> vregInputSqr;
-                    Reg::RegTensor<float, Reg::RegTraitNumOne> vregInputCub;
-                    Reg::Mul(vregInputSqr, addBiasOutReg, addBiasOutReg, maskN);
-                    Reg::Mul(vregInputCub, vregInputSqr, addBiasOutReg, maskN);
-                    Reg::Axpy(vregInputCub, addBiasOutReg, QuantUtils::TANH_APPROX_FACTOR, maskN);
-                    Reg::Muls(vregInputCub, vregInputCub, QuantUtils::NEG_SQRT_EIGHT_OVER_PI, maskN);
-                    Reg::Exp(vregInputCub, vregInputCub, maskN);
-                    Reg::Adds(vregInputCub, vregInputCub, (float)1.0, maskN);
-                    Reg::Div(actOutReg, addBiasOutReg, vregInputCub, maskN);
+                    GmmQuantVectorApi::RegTensor<float, GmmQuantVectorApi::RegTraitNumOne> vregInputSqr;
+                    GmmQuantVectorApi::RegTensor<float, GmmQuantVectorApi::RegTraitNumOne> vregInputCub;
+                    GmmQuantVectorApi::Mul(vregInputSqr, addBiasOutReg, addBiasOutReg, maskN);
+                    GmmQuantVectorApi::Mul(vregInputCub, vregInputSqr, addBiasOutReg, maskN);
+                    GmmQuantVectorApi::Axpy(vregInputCub, addBiasOutReg, QuantUtils::TANH_APPROX_FACTOR, maskN);
+                    GmmQuantVectorApi::Muls(vregInputCub, vregInputCub, QuantUtils::NEG_SQRT_EIGHT_OVER_PI, maskN);
+                    GmmQuantVectorApi::Exp(vregInputCub, vregInputCub, maskN);
+                    GmmQuantVectorApi::Adds(vregInputCub, vregInputCub, (float)1.0, maskN);
+                    GmmQuantVectorApi::Div(actOutReg, addBiasOutReg, vregInputCub, maskN);
                 } else {
                     actOutReg = addBiasOutReg;
                 }
                 // cast dequant result from float to fp16/bf16
                 if constexpr (!IsSameType<yType, float>::value) {
-                    Reg::Cast<yType, float, ctFp322Half>(castResultOutReg, actOutReg, maskN);
+                    GmmQuantVectorApi::Cast<yType, float, ctFp322Half>(castResultOutReg, actOutReg, maskN);
                 } else {
                     castResultOutReg = actOutReg;
                 }
                 // copy out from register to ub
                 uint32_t dstUbOffset = mIdx * nDstUbAligned + vfBlockIdx * eleNumPerVf;
                 if constexpr (IsSameType<yType, float>::value) {
-                    Reg::DataCopy<yType, Reg::StoreDist::DIST_NORM_B32>(dst + dstUbOffset, castResultOutReg, maskN);
+                    GmmQuantVectorApi::DataCopy<yType, GmmQuantVectorApi::StoreDist::DIST_NORM_B32>(
+                        dst + dstUbOffset, castResultOutReg, maskN);
                 } else {
-                    Reg::DataCopy<yType, Reg::StoreDist::DIST_PACK_B32>(dst + dstUbOffset, castResultOutReg, maskN);
+                    GmmQuantVectorApi::DataCopy<yType, GmmQuantVectorApi::StoreDist::DIST_PACK_B32>(
+                        dst + dstUbOffset, castResultOutReg, maskN);
                 }
             }
         }

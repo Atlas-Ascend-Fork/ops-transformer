@@ -28,8 +28,9 @@ constexpr int64_t INNER_AXIS_MIN_SPLIT_VAL = 128; // ND2NZ cache line size is 12
 template <class ProblemShape_, class L1TileShape_, class L0TileShape_, bool TransA_, bool TransB_>
 class BlockSchedulerGmmAswtWithTailSplit {
 public:
-    using TupleShape = AscendC::Shape<int64_t, int64_t, int64_t>;          // m, n, k
-    using BlockShape = AscendC::Shape<int64_t, int64_t, int64_t, int64_t>; // m, n, mOffset, nOffset
+    using TupleShape = AscendC::Shape<int64_t, int64_t, int64_t, int64_t>;
+    using BlockShape = TupleShape;
+    using ProblemShape3 = AscendC::Shape<int64_t, int64_t, int64_t>;
     using BlockCoord = AscendC::Coord<int64_t, int64_t, int64_t, int64_t>;
     using ProblemShape = ProblemShape_;
 
@@ -102,6 +103,14 @@ public:
         } else if (startBlockIdx_ <= endBlockIdx_ && (blockIdx_ > endBlockIdx_ || blockIdx_ < startBlockIdx_)) {
             round_ -= 1;
         }
+    }
+
+    // Adapt mainline three-component callers using the V121 caller's (m,n,k,0) form.
+    // GroupedMatmul GB and HIF4 call the original four-component overload directly.
+    __aicore__ inline void UpdateNextProblem(const ProblemShape3& problemShape)
+    {
+        TupleShape bsProblemShape{Get<MNK_M>(problemShape), Get<MNK_N>(problemShape), Get<MNK_K>(problemShape), 0L};
+        UpdateNextProblem(bsProblemShape);
     }
 
     __aicore__ inline void UpdateBaseM(uint32_t baseM)
@@ -252,7 +261,7 @@ public:
         return true;
     }
 
-    __aicore__ inline BlockShape GetBlockShape(const BlockCoord& blockCoord)
+    __aicore__ inline TupleShape GetBlockShape(const BlockCoord& blockCoord)
     {
         int64_t singleCoreM = Get<MNK_M>(blockCoord) != (mCnt_ - 1) ? baseM_ : mBaseTail_;
         int64_t singleCoreN = Get<MNK_N>(blockCoord) != (nCnt_ - 1) ? baseN_ : nBaseTail_;

@@ -12,20 +12,24 @@
  * \file grouped_matmul_infershape_quant_checker.cpp
  * \brief
  */
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "grouped_matmul_infershape_common_util.h"
 #include "grouped_matmul_infershape_quant_checker.h"
 
 namespace ops {
 
 static const std::unordered_set<ge::DataType> X_TYPE_SUPPORT_SET = {
-    ge::DT_INT8, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2, ge::DT_HIFLOAT8, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2};
+    ge::DT_INT8,        ge::DT_FLOAT8_E4M3FN,          ge::DT_FLOAT8_E5M2, ge::DT_HIFLOAT8,
+    ge::DT_FLOAT4_E2M1, Ops::Transformer::DT_HIFLOAT4, ge::DT_FLOAT4_E1M2};
 static const std::unordered_set<ge::DataType> WEIGHT_TYPE_SUPPORT_SET = {
-    ge::DT_INT8, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2, ge::DT_HIFLOAT8, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2};
+    ge::DT_INT8,        ge::DT_FLOAT8_E4M3FN,          ge::DT_FLOAT8_E5M2, ge::DT_HIFLOAT8,
+    ge::DT_FLOAT4_E2M1, Ops::Transformer::DT_HIFLOAT4, ge::DT_FLOAT4_E1M2};
 static const std::unordered_set<ge::DataType> BIAS_TYPE_SUPPORT_SET = {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT,
                                                                        ge::DT_INT32};
-static const std::unordered_set<ge::DataType> SCALE_TYPE_SUPPORT_SET = {ge::DT_UINT64, ge::DT_INT64, ge::DT_FLOAT,
-                                                                        ge::DT_BF16, ge::DT_FLOAT8_E8M0};
-static const std::unordered_set<ge::DataType> PERTOEKN_SCALE_TYPE_SUPPORT_SET = {ge::DT_FLOAT, ge::DT_FLOAT8_E8M0};
+static const std::unordered_set<ge::DataType> SCALE_TYPE_SUPPORT_SET = {
+    ge::DT_UINT64, ge::DT_INT64, ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT8_E8M0, Ops::Transformer::DT_HIFLOAT4_SCALE};
+static const std::unordered_set<ge::DataType> PERTOEKN_SCALE_TYPE_SUPPORT_SET = {ge::DT_FLOAT, ge::DT_FLOAT8_E8M0,
+                                                                                 Ops::Transformer::DT_HIFLOAT4_SCALE};
 constexpr size_t GROUP_LIST_DIM_NUM = 1UL;
 constexpr size_t X_SHAPE_DIM_SPLIT_M = 2UL;
 constexpr size_t W_SHAPE_DIM_SPLIT_M = 3UL;
@@ -126,6 +130,15 @@ x is %s, weight is %s.",
                 "weight is %s.",
                 ge::TypeUtils::DataTypeToAscendString(xDtype).GetString(),
                 ge::TypeUtils::DataTypeToAscendString(weightDtype).GetString()),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        LogicXOR((xDtype == Ops::Transformer::DT_HIFLOAT4), (weightDtype == Ops::Transformer::DT_HIFLOAT4)),
+        OP_LOGE(
+            context->GetNodeName(),
+            "When x input dtype is HIFLOAT4, then the weight input dtype must be HIFLOAT4, vice versa, actual x is %s, \
+weight is %s.",
+            ge::TypeUtils::DataTypeToAscendString(xDtype).GetString(),
+            ge::TypeUtils::DataTypeToAscendString(weightDtype).GetString()),
         return ge::GRAPH_FAILED);
     auto ScaleDtype = context->GetDynamicInputDataType(GMM_INDEX_IN_SCALE, 0);
     OP_CHECK_IF(SCALE_TYPE_SUPPORT_SET.find(ScaleDtype) == SCALE_TYPE_SUPPORT_SET.end(),
@@ -685,6 +698,13 @@ is not supported, but the actual x dtype is [%s] and actual scale dtype is [%s].
 equal to float8_e8m0.",
                             ge::TypeUtils::DataTypeToAscendString(scaleDtype).GetString()),
                     return ge::GRAPH_FAILED);
+    } else if (xDtype == Ops::Transformer::DT_HIFLOAT4) {
+        OP_CHECK_IF(
+            scaleDtype != Ops::Transformer::DT_HIFLOAT4_SCALE,
+            OP_LOGE(context->GetNodeName(), "When data type of x is hifloat4, data type of scale [%s] should be \
+equal to hifloat4_scale.",
+                    ge::TypeUtils::DataTypeToAscendString(scaleDtype).GetString()),
+            return ge::GRAPH_FAILED);
     }
     return ge::GRAPH_SUCCESS;
 }

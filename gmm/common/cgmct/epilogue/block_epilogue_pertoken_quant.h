@@ -15,7 +15,11 @@
 #ifndef EPILOGUE_BLOCK_EPILOGUE_PERTOKEN_QUANT_H
 #define EPILOGUE_BLOCK_EPILOGUE_PERTOKEN_QUANT_H
 
+#if ASC_DEVKIT_MAJOR >= 9
+#include "kernel_basic_intf.h"
+#else
 #include "kernel_operator.h"
+#endif
 #include "../utils/cgmct_common_utils.h"
 #include "../utils/device_utils.h"
 #include "../utils/status_utils.h"

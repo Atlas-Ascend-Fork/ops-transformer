@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "op_host/op_const_def_transformer.h"
 #include <algorithm>
 #include "fallback/fallback_comm.h"
 #include "fallback/fallback.h"
@@ -51,8 +52,9 @@ constexpr int64_t PERTILE_GROUP_SIZE = 128;
 static inline aclDataType ToAclDataTypeForGMM(ge::DataType dtype)
 {
     static const std::vector<DataType> GMM_CONVERT_TO_ACL_DataType_LIST = {
-        ge::DataType::DT_FLOAT8_E4M3FN, ge::DataType::DT_FLOAT8_E5M2, ge::DataType::DT_HIFLOAT8,
-        ge::DataType::DT_FLOAT8_E8M0, ge::DataType::DT_FLOAT4_E2M1};
+        ge::DataType::DT_FLOAT8_E4M3FN,     ge::DataType::DT_FLOAT8_E5M2, ge::DataType::DT_HIFLOAT8,
+        ge::DataType::DT_FLOAT8_E8M0,       ge::DataType::DT_FLOAT4_E2M1, Ops::Transformer::DT_HIFLOAT4,
+        Ops::Transformer::DT_HIFLOAT4_SCALE};
     auto iter = std::find(GMM_CONVERT_TO_ACL_DataType_LIST.begin(), GMM_CONVERT_TO_ACL_DataType_LIST.end(), dtype);
     if (iter == GMM_CONVERT_TO_ACL_DataType_LIST.end()) {
         return aclDataType::ACL_DT_UNDEFINED;
@@ -69,7 +71,8 @@ static bool IsFP8FP4BitsDataType(ge::DataType dataType)
 {
     return dataType == ge::DataType::DT_FLOAT8_E4M3FN || dataType == ge::DataType::DT_FLOAT8_E5M2 ||
            dataType == ge::DataType::DT_HIFLOAT8 || dataType == ge::DataType::DT_FLOAT8_E8M0 ||
-           dataType == ge::DataType::DT_FLOAT4_E2M1;
+           dataType == ge::DataType::DT_FLOAT4_E2M1 || dataType == Ops::Transformer::DT_HIFLOAT4 ||
+           dataType == Ops::Transformer::DT_HIFLOAT4_SCALE;
 }
 
 static bool SetShapeAndStrideForMXFPTypeKForGMM(std::vector<int64_t>& viewShape, std::vector<int64_t>& strides)
@@ -96,6 +99,30 @@ static bool SetShapeAndStrideForMXFPTypeMForGMM(std::vector<int64_t>& viewShape,
     std::swap(viewShape[TYPEM_SCALE_K_DIM_INDEX], viewShape[TYPEM_SCALE_N_DIM_INDEX]);
     strides[TYPEM_SCALE_K_DIM_INDEX] = MXFP_MULTI_BASE_SIZE;
     strides[TYPEM_SCALE_N_DIM_INDEX] = viewShape[TYPEM_SCALE_K_DIM_INDEX] * MXFP_MULTI_BASE_SIZE;
+    strides[viewShape.size() - 1] = 1;
+    return true;
+}
+
+static bool SetShapeAndStrideForHif4TypeKForGMM(std::vector<int64_t>& viewShape, std::vector<int64_t>& strides)
+{
+    OP_CHECK_IF(viewShape.size() < MXFP_TPYEK_PER_TOKEN_SCALE_DIM_NUM,
+                OP_LOGE("GroupedMatmul aclnnfallback", "HiF4 split-K scale requires at least 3 dimensions."),
+                return false);
+    std::swap(viewShape[0], viewShape[1]);
+    strides[0] = 1;
+    strides[1] = viewShape[0];
+    strides[viewShape.size() - 1] = 1;
+    return true;
+}
+
+static bool SetShapeAndStrideForHif4TypeMForGMM(std::vector<int64_t>& viewShape, std::vector<int64_t>& strides)
+{
+    OP_CHECK_IF(viewShape.size() < MXFP_TPYEM_SCALE_DIM_NUM,
+                OP_LOGE("GroupedMatmul aclnnfallback", "HiF4 split-M scale requires at least 4 dimensions."),
+                return false);
+    std::swap(viewShape[TYPEM_SCALE_K_DIM_INDEX], viewShape[TYPEM_SCALE_N_DIM_INDEX]);
+    strides[TYPEM_SCALE_K_DIM_INDEX] = 1;
+    strides[TYPEM_SCALE_N_DIM_INDEX] = viewShape[TYPEM_SCALE_K_DIM_INDEX];
     strides[viewShape.size() - 1] = 1;
     return true;
 }
@@ -176,6 +203,16 @@ static inline aclTensor* GeTensor2AclTensor(const gert::Tensor* geTensor, bool e
                             OP_LOGE("GroupedMatmul aclnnfallback", "SetShapeAndStrideForMXFPTypeMForGMM failed"),
                             return nullptr);
             }
+        } else if (dataTypeGE == Ops::Transformer::DT_HIFLOAT4_SCALE) {
+            if (index == INDEX_GMM_INPUT_PER_TOKEN_SCALE) {
+                OP_CHECK_IF(!SetShapeAndStrideForHif4TypeKForGMM(viewShape, strides),
+                            OP_LOGE("GroupedMatmul aclnnfallback", "SetShapeAndStrideForHif4TypeKForGMM failed"),
+                            return nullptr);
+            } else if (index == INDEX_GMM_INPUT_SCALE) {
+                OP_CHECK_IF(!SetShapeAndStrideForHif4TypeMForGMM(viewShape, strides),
+                            OP_LOGE("GroupedMatmul aclnnfallback", "SetShapeAndStrideForHif4TypeMForGMM failed"),
+                            return nullptr);
+            }
         } else {
             OP_CHECK_IF(!SetShapeAndStrideForLastTwoDimForGMM(viewShape, strides),
                         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("GroupedMatmul aclnnfallback", "tensor",
@@ -251,6 +288,12 @@ static graphStatus PrepareOutputTensorVector(const OpExecuteContext* host_api_ct
         tensorVector.push_back(outputGe);
     }
     return GRAPH_SUCCESS;
+}
+
+static bool IsHif4QuantMode(const OpExecuteContext* host_api_ctx)
+{
+    auto scaleTensor = host_api_ctx->GetDynamicInputTensor(INDEX_GMM_INPUT_SCALE, 0);
+    return scaleTensor != nullptr && scaleTensor->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE;
 }
 
 static bool IsPerTileQuantMode(const OpExecuteContext* host_api_ctx, bool transposeX, bool transposeWeight,
@@ -362,8 +405,8 @@ static graphStatus PreparePerTokenScaleList(const OpExecuteContext* host_api_ctx
                                                      "aclCreateTensor failed to create the perTokenScale placeholder"),
             return GRAPH_FAILED);
     }
-    if (perTokenScaleTensor != nullptr &&
-        (perTokenScaleTensor->GetDataType() == ge::DataType::DT_FLOAT8_E8M0 || isPerTile)) {
+    if (perTokenScaleTensor != nullptr && (perTokenScaleTensor->GetDataType() == ge::DataType::DT_FLOAT8_E8M0 ||
+                                           isPerTile || IsHif4QuantMode(host_api_ctx))) {
         PrepareAclTensorVector(host_api_ctx, perTokenScaleVec, INDEX_GMM_INPUT_PER_TOKEN_SCALE, isXTransposed, false);
     } else {
         perTokenScaleVec.push_back(perTokenScale);
@@ -441,7 +484,8 @@ static graphStatus GroupedMatmulExecuteFunc(OpExecuteContext* host_api_ctx)
     auto scaleTensor = host_api_ctx->GetDynamicInputTensor(INDEX_GMM_INPUT_SCALE, 0);
     bool isPerTile =
         IsPerTileQuantMode(host_api_ctx, *attrs.isXTransposed, *attrs.isWeightTransposedPtr, *attrs.groupTypeGe);
-    if (scaleTensor != nullptr && (scaleTensor->GetDataType() == ge::DataType::DT_FLOAT8_E8M0 || isPerTile)) {
+    if (scaleTensor != nullptr &&
+        (scaleTensor->GetDataType() == ge::DataType::DT_FLOAT8_E8M0 || isPerTile || IsHif4QuantMode(host_api_ctx))) {
         isScaleTransposedPtr = attrs.isWeightTransposedPtr;
     }
     std::vector<const aclTensor*> aclTensorVectorScale;
