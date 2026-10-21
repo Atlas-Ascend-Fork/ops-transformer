@@ -84,6 +84,7 @@ public:
     static constexpr GmFormat Q_SCALE_FORMAT = GetQueryScaleGmFormat<layout, USE_DN>();
     static constexpr GmFormat K_SCALE_FORMAT = GetKeyScaleGmFormat<layout, KvLayoutType, PAGE_ATTENTION>();
     static constexpr GmFormat V_SCALE_FORMAT = GetValueScaleGmFormat<layout, KvLayoutType, PAGE_ATTENTION>();
+    static constexpr InnerMLayout Q_M_LAYOUT = USE_DN ? InnerMLayout::S1_ONLY_LAYOUT : InnerMLayout::GS1_MERGE_LAYOUT;
 
     using ROPE_T = bfloat16_t;
     using Q_T = INPUT_T;
@@ -139,7 +140,7 @@ public:
 
     CopyQueryGmToL1<Q_T, Q_FORMAT> copyQueryGmToL1;
     CopyKvGmToL1<KV_T, KV_FORMAT> copyKvGmToL1;
-    CopyQueryScaleGmToL1<SCALE_T, Q_SCALE_FORMAT> copyQueryScaleGmToL1;
+    CopyQueryScaleGmToL1<SCALE_T, Q_SCALE_FORMAT, L1Format::NZ, Q_M_LAYOUT> copyQueryScaleGmToL1;
     KeyScaleGmToL1Type copyKeyScaleGmToL1;
     ValueScaleGmToL1Type copyValueScaleGmToL1;
     CopyQueryGmToL1<ROPE_T, Q_FORMAT> copyQueryRopeGmToL1;
@@ -466,13 +467,25 @@ public:
         uint32_t dstStride = (runInfo.actMSize + 31) >> 5 << 5;
         FaL1Tensor<SCALE_T, L1Format::NZ> l1Tensor{.tensor = dstTensor, .rowCount = dstStride};
 
-        GmCoordGs1Merge gmCoord{.bIdx = runInfo.bIdx,
-                                .n2Idx = runInfo.realN2Idx,
-                                .gS1Idx = runInfo.gS1Idx,
-                                .dIdx = dOffset,
-                                .gS1DealSize = runInfo.actMSize,
-                                .dDealSize = dRealSize};
-        copyQueryScaleGmToL1(l1Tensor, queryScaleGm, gmCoord);
+        if constexpr (USE_DN) {
+            // DN分支下realGSize=1，gS1Idx即s1Idx，gIdx恒为0
+            GmCoordS1Only gmCoord{.bIdx = runInfo.bIdx,
+                                  .n2Idx = runInfo.realN2Idx,
+                                  .gIdx = 0,
+                                  .s1Idx = runInfo.gS1Idx,
+                                  .dIdx = dOffset,
+                                  .s1DealSize = runInfo.actMSize,
+                                  .dDealSize = dRealSize};
+            copyQueryScaleGmToL1(l1Tensor, queryScaleGm, gmCoord);
+        } else {
+            GmCoordGs1Merge gmCoord{.bIdx = runInfo.bIdx,
+                                    .n2Idx = runInfo.realN2Idx,
+                                    .gS1Idx = runInfo.gS1Idx,
+                                    .dIdx = dOffset,
+                                    .gS1DealSize = runInfo.actMSize,
+                                    .dDealSize = dRealSize};
+            copyQueryScaleGmToL1(l1Tensor, queryScaleGm, gmCoord);
+        }
     }
 
     __aicore__ inline void CopyQueryScaleTile(const LocalTensor<SCALE_T>& dstTensor, RunInfoX& runInfo)

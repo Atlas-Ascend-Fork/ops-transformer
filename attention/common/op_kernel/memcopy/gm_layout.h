@@ -55,7 +55,8 @@ enum class GmFormat {
     BNDS = 28,
     LSE_TN2G = 29,
     LSE_N2GT = 30,
-    LSE_BN2GS1 = 31
+    LSE_BN2GS1 = 31,
+    BNSGD = 32, // q_scale decode, 内存序 B-N2-S1-G-D
 };
 
 template <GmFormat FORMAT>
@@ -111,6 +112,25 @@ struct GmLayout<GmFormat::NGBSD> {
         uint64_t bStride = sStride * s;
         uint64_t gStride = bStride * b;
         uint64_t nStride = gStride * g;
+        stride = AscendC::MakeStride(bStride, nStride, gStride, sStride, dStride);
+    }
+};
+
+template <>
+struct GmLayout<GmFormat::BNSGD> {
+    // q_scale decode (BSND): 内存序 B-N2-S1-G-D, S1-major 的 gS1 合并维连续
+    AscendC::Shape<uint32_t, uint32_t, uint32_t, uint32_t, uint32_t> shape;
+    AscendC::Stride<uint64_t, uint64_t, uint64_t, uint64_t, uint64_t> stride;
+
+    __aicore__ inline GmLayout() = default;
+    __aicore__ inline void MakeLayout(uint32_t b, uint32_t n, uint32_t g, uint32_t s, uint32_t d)
+    {
+        shape = AscendC::MakeShape(b, n, g, s, d);
+        uint64_t dStride = 1;
+        uint64_t gStride = dStride * d;
+        uint64_t sStride = gStride * g;
+        uint64_t nStride = sStride * s;
+        uint64_t bStride = nStride * n;
         stride = AscendC::MakeStride(bStride, nStride, gStride, sStride, dStride);
     }
 };

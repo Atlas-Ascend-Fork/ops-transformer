@@ -163,6 +163,29 @@ def _tnd_to_bnsd_fixed(tensor_tnd, seq_lens, cu_seqlens=None):
     return result.contiguous()
 
 
+def _data_layout_to_bnsd(tensor_in, seq_lens, layout, cu_seqlens=None):
+    """Q/K/V 数据按 input_layout 逆转换回 BNSD (TND/BNSD/BSND)"""
+    layout = str(layout or "TND").upper()
+    if layout == "BNSD":
+        tensor = (
+            tensor_in
+            if isinstance(tensor_in, torch.Tensor)
+            else torch.as_tensor(tensor_in)
+        )
+        # 保留 slot 完整 S 维 (padding 上界, 可大于 max(seq_lens), 超出 seqused
+        # 的行在 cpu golden 中被 mask 输出 0); 正常用例 S == max_seq 等价。
+        return tensor.contiguous()
+    if layout == "BSND":
+        # (B, S, N, D) -> (B, N, S, D)
+        tensor = (
+            tensor_in
+            if isinstance(tensor_in, torch.Tensor)
+            else torch.as_tensor(tensor_in)
+        )
+        return tensor.permute(0, 2, 1, 3).contiguous()
+    return _tnd_to_bnsd_fixed(tensor_in, seq_lens, cu_seqlens=cu_seqlens)
+
+
 def _assert_no_e8m0_nan(t_e8m0, name="scale"):
     if t_e8m0.numel() == 0:
         return
@@ -194,6 +217,25 @@ def _tnd_qk_scale_to_bnsd_grouped(
     scale_tnd_packed, seq_lens, cu_seqlens=None, q_scale_layout="TND", num_kv_heads=None
 ):
     layout = mxfp8_golden_mod.canonical_q_scale_layout(q_scale_layout)
+    if layout == "BNSD":
+        # (B, N, S, Dg//2, 2) -> (B, N, S, Dg); 保留完整 S 维 (slot S 为 padding
+        # 上界, 可大于 max(seq_lens)), 正常用例 S == max_seq 等价。
+        B, N, S, Dg_half, _pair = scale_tnd_packed.shape
+        return scale_tnd_packed.reshape(B, N, -1, Dg_half * 2).contiguous()
+    if layout == "BSND":
+        # (B, S, N, Dg//2, 2) -> (B, N, S, Dg)
+        B, S, N, Dg_half, _pair = scale_tnd_packed.shape
+        bnsd_packed = scale_tnd_packed.permute(0, 2, 1, 3, 4)
+        return bnsd_packed.reshape(B, N, -1, Dg_half * 2).contiguous()
+    if layout == "BN2SGD":
+        # (B, N2, S1, G, Dg//2, 2) -> (B, N_q, S1, Dg), 内存序 B-N2-S1-G-D
+        if num_kv_heads is None:
+            raise ValueError("num_kv_heads required for BN2SGD layout")
+        B, N2, S1, G, Dg_half, _pair = scale_tnd_packed.shape
+        bnsd_packed = scale_tnd_packed.permute(0, 1, 3, 2, 4, 5).reshape(
+            B, N2 * G, S1, Dg_half, 2
+        )
+        return bnsd_packed.reshape(B, N2 * G, S1, Dg_half * 2).contiguous()
     if layout == "N2TGD":
         if num_kv_heads is None:
             raise ValueError("num_kv_heads required for N2TGD layout")
@@ -242,6 +284,25 @@ def _tnd_v_scale_to_bnsd_grouped(
         result[b, :, :sg, :] = recovered[:sg, :, :].permute(1, 0, 2)
         t = t_end
     return result.contiguous()
+
+
+def _v_scale_layout_to_bnsd_grouped(scale_packed, seq_lens, layout, group_size=32):
+    """V scale 按 input_layout 逆转换回 BNSD grouped (B, N, Sg, D)"""
+    layout = str(layout or "TND").upper()
+    if layout in ("BNSD", "BSND"):
+        if layout == "BSND":
+            # (B, S_out, N, D, 2) -> (B, N, S_out, D, 2)
+            scale_packed = scale_packed.permute(0, 2, 1, 3, 4).contiguous()
+        B, N, S_out, D, _pair = scale_packed.shape
+        sg = S_out * 2
+        recovered = torch.zeros(
+            (B, N, sg, D), dtype=scale_packed.dtype, device=scale_packed.device
+        )
+        recovered[:, :, 0::2, :] = scale_packed[..., 0]
+        recovered[:, :, 1::2, :] = scale_packed[..., 1]
+        sg_max = max(math.ceil(s / group_size) for s in seq_lens) if seq_lens else sg
+        return recovered[:, :, :sg_max, :].contiguous()
+    return _tnd_v_scale_to_bnsd_grouped(scale_packed, seq_lens, group_size=group_size)
 
 
 def _pa_k_scale_to_bnsd_grouped(pa_cache, seq_lens, block_size, block_table):
@@ -432,7 +493,20 @@ def cpu_qfa_mxfp8(
     kv_cache_layout = kwargs.get("kv_cache_layout") or layout_kv
     block_size = kwargs.get("block_size", 0)
     q_scale_layout = kwargs.get("q_scale_layout") or layout_q_descale
-    input_layout = kwargs.get("input_layout", "TND")
+    # 数据布局解析: 优先 input_layout 属性 (pytest 直跑路径); CSV/TTK 路径无该
+    # 属性, 按算子真实 layout 参数解析 — Q 用 layout_q, 非 PA 的 K/V 用 layout_kv
+    # (PA 时 layout_kv 是 cache 布局 PA_*), 与 impl/inputs.py 生成侧保持一致。
+    # 老 paramset CSV layout_q/layout_kv 恒为 "TND", 解析结果与原默认一致。
+    _data_layouts = ("TND", "BNSD", "BSND")
+    _il_attr = str(kwargs.get("input_layout") or "").upper()
+    if _il_attr in _data_layouts:
+        input_layout = q_data_layout = kv_data_layout = _il_attr
+    else:
+        _lq_attr = str(layout_q or "").upper()
+        _lk_attr = str(layout_kv or "").upper()
+        q_data_layout = _lq_attr if _lq_attr in _data_layouts else "TND"
+        kv_data_layout = _lk_attr if _lk_attr in _data_layouts else "TND"
+        input_layout = q_data_layout
     is_contiguous = kwargs.get("is_contiguous", True)
     device_id = kwargs.get("device_id", 0)
     graph_path = kwargs.get("graph_path", 0)
@@ -466,11 +540,14 @@ def cpu_qfa_mxfp8(
 
     # batch_size: CSV 原始值 (可为 -1), 透传给 metadata;
     # B: 从 cu_seqlens_q 推导的正整数, 供 shape assert 与 BNSD 逆转换。
-    B = (
-        max(1, len(cu_seqlens_q_list) - 1)
-        if cu_seqlens_q_list and len(cu_seqlens_q_list) >= 2
-        else 1
-    )
+    # 与 impl/inputs.py 一致: cu_seqlens 占位 [0] (BNSD/BSND 用例不提供) 时
+    # 回退 seqused_q 长度, 否则 B=1 与 NPU 实际 batch 不匹配。
+    if cu_seqlens_q_list and len(cu_seqlens_q_list) >= 2:
+        B = len(cu_seqlens_q_list) - 1
+    elif seqused_q_list is not None and len(seqused_q_list) > 0:
+        B = len(seqused_q_list)
+    else:
+        B = 1
 
     # p_scale_value 从 CSV attributes 经 kwargs 传入
     p_scale_value = kwargs.get("p_scale_value", 1.0)
@@ -509,18 +586,23 @@ def cpu_qfa_mxfp8(
 
     group_size = 32
 
-    # actual_seq 推导 max_seq (用于 assertion 和 PA 逆转换的 scatter 范围)
-    max_sq = max(actual_seq_q) if actual_seq_q else D
+    # actual_seq 推导 max_skv (用于 KV assertion 和 PA 逆转换的 scatter 范围);
+    # Q 侧 S 维用 q 逆转换后的实际 Sq_full (含 padding 区), 见下方。
     max_skv = max(actual_seq_kv) if actual_seq_kv else D
     # D=64→2, D=72→4 D=128→4.
     _num_groups = math.ceil(D / group_size)
     Dg = _num_groups + (_num_groups % 2)
 
-    # Q: TND -> BNSD
+    # Q: 按解析的 Q 数据布局逆转换 -> BNSD (PA 不再固定 TND — 算子支持
+    # PA + layout_q=BNSD/BSND, 见 layout redline; 老 CSV PA 用例 layout_q="TND"
+    # 行为不变)
     q_fp8_tnd = _to_torch_fp8(q)
-    q_fp8_bnsd = _tnd_to_bnsd_fixed(
-        q_fp8_tnd, actual_seq_q, cu_seqlens=cu_seqlens_q_list
+    q_fp8_bnsd = _data_layout_to_bnsd(
+        q_fp8_tnd, actual_seq_q, q_data_layout, cu_seqlens=cu_seqlens_q_list
     )
+    # Q 的完整 S 维 (含 padding 区, slot S 可大于 max(seqused_q)) — descale
+    # 逆转换与输出 shape 均以此为准, 输出与 q slot S 一致。
+    Sq_full = int(q_fp8_bnsd.shape[2])
 
     # Q scale: e8m0 -> fp32
     dq_e8m0 = _to_torch_e8m0(dequant_scale_q)
@@ -534,9 +616,9 @@ def cpu_qfa_mxfp8(
         q_scale_layout=q_scale_layout,
         num_kv_heads=N_kv,
     )
-    assert dq_bnsd_grouped.shape == (B, N_q, max_sq, Dg), (
+    assert dq_bnsd_grouped.shape == (B, N_q, Sq_full, Dg), (
         f"Q scale grouped shape mismatch: got {tuple(dq_bnsd_grouped.shape)}, "
-        f"expected {(B, N_q, max_sq, Dg)}"
+        f"expected {(B, N_q, Sq_full, Dg)}"
     )
 
     # K/V: PA paged / TND -> BNSD
@@ -609,21 +691,21 @@ def cpu_qfa_mxfp8(
         if dv_bnsd_grouped.shape[3] > D:
             dv_bnsd_grouped = dv_bnsd_grouped[:, :, :, :D].contiguous()
     else:
-        # 非 PA: K/V 都是 TND -> BNSD
+        # 非 PA: K/V 按解析的 KV 数据布局逆转换 -> BNSD
         k_fp8_tnd = _to_torch_fp8(k)
-        k_fp8_bnsd = _tnd_to_bnsd_fixed(
-            k_fp8_tnd, actual_seq_kv, cu_seqlens=cu_seqlens_kv_list
+        k_fp8_bnsd = _data_layout_to_bnsd(
+            k_fp8_tnd, actual_seq_kv, kv_data_layout, cu_seqlens=cu_seqlens_kv_list
         )
         if k_fp8_bnsd.shape[-1] > D:
             k_fp8_bnsd = k_fp8_bnsd[:, :, :, :D].contiguous()
         v_fp8_tnd = _to_torch_fp8(v)
-        v_fp8_bnsd = _tnd_to_bnsd_fixed(
-            v_fp8_tnd, actual_seq_kv, cu_seqlens=cu_seqlens_kv_list
+        v_fp8_bnsd = _data_layout_to_bnsd(
+            v_fp8_tnd, actual_seq_kv, kv_data_layout, cu_seqlens=cu_seqlens_kv_list
         )
         if v_fp8_bnsd.shape[-1] > D:
             v_fp8_bnsd = v_fp8_bnsd[:, :, :, :D].contiguous()
 
-        # K scale: e8m0 -> fp32 -> TND grouped -> BNSD grouped
+        # K scale: e8m0 -> fp32 -> 按 KV 数据布局 grouped -> BNSD grouped
         dk_e8m0 = _to_torch_e8m0(dequant_scale_k)
         _assert_no_e8m0_nan(dk_e8m0, "descale_k")
         dk_fp32 = mxfp8_golden_mod.e8m0_to_fp32(dk_e8m0)
@@ -631,7 +713,7 @@ def cpu_qfa_mxfp8(
             dk_fp32,
             actual_seq_kv,
             cu_seqlens=cu_seqlens_kv_list,
-            q_scale_layout="TND",
+            q_scale_layout=kv_data_layout,
             num_kv_heads=N_kv,
         )
         assert dk_bnsd_grouped.shape == (B, N_kv, max_skv, Dg), (
@@ -639,12 +721,12 @@ def cpu_qfa_mxfp8(
             f"expected {(B, N_kv, max_skv, Dg)}"
         )
 
-        # V scale: e8m0 -> fp32 -> TND v-scale grouped -> BNSD grouped
+        # V scale: e8m0 -> fp32 -> 按 KV 数据布局 v-scale grouped -> BNSD grouped
         dv_e8m0 = _to_torch_e8m0(dequant_scale_v)
         _assert_no_e8m0_nan(dv_e8m0, "descale_v")
         dv_fp32 = mxfp8_golden_mod.e8m0_to_fp32(dv_e8m0)
-        dv_bnsd_grouped = _tnd_v_scale_to_bnsd_grouped(
-            dv_fp32, actual_seq_kv, cu_seqlens=cu_seqlens_kv_list, group_size=group_size
+        dv_bnsd_grouped = _v_scale_layout_to_bnsd_grouped(
+            dv_fp32, actual_seq_kv, kv_data_layout, group_size=group_size
         )
         Sg_max = math.ceil(max_skv / group_size) if max_skv > 0 else 0
         # TND V scale D 维可能因对齐 padding 而大于 logical D, 同 PA 分支处理.
@@ -681,7 +763,14 @@ def cpu_qfa_mxfp8(
         tail_lens=vtail_tail_lens,
     )
 
-    compare_layout = "TND" if enable_pa else input_layout
+    # 输出布局: 优先算子 layout_out 参数 (redline 用例 BNSD); 老 CSV layout_out
+    # 恒为 "TND" 与原行为一致; 无有效值时回退旧逻辑 (PA→TND, 非PA→Q 布局)。
+    _lo_attr = str(layout_out or "").upper()
+    compare_layout = (
+        _lo_attr
+        if _lo_attr in _data_layouts
+        else ("TND" if enable_pa else input_layout)
+    )
     cpu_out_aligned = mxfp8_golden_mod.convert_q_bnsd_to_layout(
         cpu_out,
         actual_seq_q,
@@ -690,27 +779,35 @@ def cpu_qfa_mxfp8(
     )
 
     if enable_lse:
-        cpu_lse_aligned = mxfp8_golden_mod.convert_q_bnsd_to_layout(
-            cpu_lse,
-            actual_seq_q,
-            compare_layout,
-            cu_seqlens=cu_seqlens_q_list if enable_pa else None,
-        )
-        # TND padding 位置填 inf 以匹配 NPU 行为：NPU 对超出实际序列长度的 Q 位置输出 inf LSE
-        if enable_pa and cu_seqlens_q_list is not None:
-            cpu_lse_aligned = mxfp8_golden_mod.fill_tnd_padding(
-                cpu_lse_aligned,
+        # NPU LSE 输出不跟随数据布局: kernel 仅对 TND 做 N-major 重排,
+        # BNSD/BSND (以及 layout_out 无效回退的非 TND 场景) 的 LSE 恒为
+        # (B, N, S) — 与 Q 布局无关。仅 TND 时按 varlen 转换 + N-major 转置。
+        if compare_layout == "TND":
+            cpu_lse_aligned = mxfp8_golden_mod.convert_q_bnsd_to_layout(
+                cpu_lse,
                 actual_seq_q,
-                cu_seqlens_q_list,
-                fill_value=float("inf"),
+                "TND",
+                cu_seqlens=cu_seqlens_q_list if enable_pa else None,
             )
-
-        if cpu_lse_aligned.ndim == 3 and cpu_lse_aligned.shape[-1] == 1:
-            cpu_lse_aligned = cpu_lse_aligned.squeeze(-1).contiguous()
-        # NPU LSE 输出已改为 N-major 排布 (N, T): N 在外, T 在内
-        # CPU golden 经 convert 后是 [T, N] (T-major), TND case 需转成 [N, T] 对齐
-        if compare_layout == "TND" and cpu_lse_aligned.ndim == 2:
-            cpu_lse_aligned = cpu_lse_aligned.permute(1, 0).contiguous()
+            # TND padding 位置填 inf 以匹配 NPU 行为：NPU 对超出实际序列长度的 Q 位置输出 inf LSE
+            if enable_pa and cu_seqlens_q_list is not None:
+                cpu_lse_aligned = mxfp8_golden_mod.fill_tnd_padding(
+                    cpu_lse_aligned,
+                    actual_seq_q,
+                    cu_seqlens_q_list,
+                    fill_value=float("inf"),
+                )
+            if cpu_lse_aligned.ndim == 3 and cpu_lse_aligned.shape[-1] == 1:
+                cpu_lse_aligned = cpu_lse_aligned.squeeze(-1).contiguous()
+            # NPU LSE 输出已改为 N-major 排布 (N, T): N 在外, T 在内
+            # CPU golden 经 convert 后是 [T, N] (T-major), TND case 需转成 [N, T] 对齐
+            if cpu_lse_aligned.ndim == 2:
+                cpu_lse_aligned = cpu_lse_aligned.permute(1, 0).contiguous()
+        else:
+            # BNSD/BSND: LSE 保持 golden 内部 (B, N, S, 1), squeeze 尾轴即可
+            cpu_lse_aligned = cpu_lse
+            if cpu_lse_aligned.ndim == 3 and cpu_lse_aligned.shape[-1] == 1:
+                cpu_lse_aligned = cpu_lse_aligned.squeeze(-1).contiguous()
         result = [cpu_out_aligned, cpu_lse_aligned]
 
     else:

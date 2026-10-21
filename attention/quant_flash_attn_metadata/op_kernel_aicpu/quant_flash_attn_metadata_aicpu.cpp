@@ -277,8 +277,7 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
     }
     baseInfo.batchSize = batchSize_;
     baseInfo.queryHeadNum = numHeadsQ_;
-    bool isDecode = (layoutQDescale_ == "N2TGD");
-    baseInfo.kvHeadNum = isDecode ? numHeadsKv_ : numHeadsQ_;
+    baseInfo.kvHeadNum = numHeadsKv_;
     baseInfo.headDimQk = headDim_;
     baseInfo.headDimV = headDim_;
     baseInfo.attenMaskFlag = (maskMode_ != 0);
@@ -293,12 +292,15 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
     }
     uint32_t sOuterFactor = 0;
     uint32_t sInnerFactor = 0;
+    // N2TGD(TND decode) / BN2SGD(BSND decode) 均对应 DECODE 模板;
+    // BNSD 仅支持 prefill 模板(USE_DN=true), 不路由 DECODE
+    bool isMxfp8Decode = (layoutQDescale_ == "N2TGD" || layoutQDescale_ == "BN2SGD");
     if (socVersion_.find("Ascend960") != std::string::npos) {
         // 基本块随 decode/prefill 与 vHeadDim 分级，按 vHeadDim 判档
         optiling::quant_flash_attn::qfa_tiling_util::AdjustSinnerAndSouterArch92(
             static_cast<uint32_t>(headDimV_), static_cast<int64_t>(maxSeqlenQ_), static_cast<int64_t>(maxSeqlenKv_),
             maskMode_, static_cast<int64_t>(winLeft_), static_cast<int64_t>(winRight_),
-            optiling::quant_flash_attn::qfa_tiling_util::LAYOUT_BSND, static_cast<uint32_t>(quantMode_), isDecode,
+            optiling::quant_flash_attn::qfa_tiling_util::LAYOUT_BSND, static_cast<uint32_t>(quantMode_), isMxfp8Decode,
             sOuterFactor, sInnerFactor);
     } else {
         // 保持原有逻辑与入参不变
@@ -324,7 +326,12 @@ bool QuantFlashAttnMetadataCpuKernel::ParamsInit()
         param.fdTolerance = 300;
         param.fdOn = false;
     }
-    param.kernelSplitMode = load_balance::KernelSplitMode::BN2_S1G_S2;
+    if (quantMode_ == 1) {
+        param.kernelSplitMode =
+            isMxfp8Decode ? load_balance::KernelSplitMode::BN2_S1G_S2 : load_balance::KernelSplitMode::BN1_S1_S2;
+    } else {
+        param.kernelSplitMode = load_balance::KernelSplitMode::BN1_S1_S2;
+    }
 
     if (isGradEnabled_) {
         // 等长场景的 deterMaxRound, 由 GenMetaData 在 Clear 之后写入第二行槽位 0。
@@ -968,6 +975,14 @@ bool QuantFlashAttnMetadataCpuKernel::CheckNeedInitOutput()
     if (hasSeqKv) {
         seqUsedKv = GetTensorDataAsInt64(sequsedKv_, bSize);
     }
+    // BNSD/BSND 张量 S1 = max(seqused_q)（调用方按 max 分配；保持本函数纯读原始数据风格，
+    // 不用 ParamsInit 可能被改写的 baseInfo 字段）
+    int64_t maxSeqUsedQ = 0;
+    if (hasSeqQ) {
+        for (uint32_t i = 0; i < bSize; ++i) {
+            maxSeqUsedQ = std::max(maxSeqUsedQ, seqUsedQ[i]);
+        }
+    }
     for (uint32_t bIdx = 0; bIdx < bSize; ++bIdx) {
         // Q 侧: cu_seqlens_q 差分为 0 → 零长 batch
         int64_t qAllocLen = hasCuQ ? cuSeqlensQ[bIdx + 1] - cuSeqlensQ[bIdx] : -1;
@@ -980,6 +995,9 @@ bool QuantFlashAttnMetadataCpuKernel::CheckNeedInitOutput()
             return true;
         }
         if (qAllocLen > 0 && qUsedLen < qAllocLen) {
+            return true;
+        }
+        if (qAllocLen < 0 && hasSeqQ && qUsedLen < maxSeqUsedQ) {
             return true;
         }
         // KV 侧: cu_seqlens_kv 差分为 0 → 零长 batch

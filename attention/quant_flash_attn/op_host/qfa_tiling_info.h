@@ -128,13 +128,15 @@ enum class QfaLayout : uint32_t {
     LSE_NT = 7,
     N2TGD = 8,
     NTD = 9,
-    NT = 10
+    NT = 10,
+    BN2SGD = 11
 };
 
-const std::map<std::string, QfaLayout> qfaLayoutMap = {
-    {"BSND", QfaLayout::BSND},       {"BNSD", QfaLayout::BNSD},       {"TND", QfaLayout::TND},
-    {"PA_BBND", QfaLayout::PA_BBND}, {"PA_BNBD", QfaLayout::PA_BNBD}, {"PA_NZ", QfaLayout::PA_NZ},
-    {"N2TGD", QfaLayout::N2TGD},     {"NTD", QfaLayout::NTD},         {"NT", QfaLayout::NT}};
+const std::map<std::string, QfaLayout> qfaLayoutMap = {{"BSND", QfaLayout::BSND},       {"BNSD", QfaLayout::BNSD},
+                                                       {"TND", QfaLayout::TND},         {"PA_BBND", QfaLayout::PA_BBND},
+                                                       {"PA_BNBD", QfaLayout::PA_BNBD}, {"PA_NZ", QfaLayout::PA_NZ},
+                                                       {"N2TGD", QfaLayout::N2TGD},     {"NTD", QfaLayout::NTD},
+                                                       {"NT", QfaLayout::NT},           {"BN2SGD", QfaLayout::BN2SGD}};
 
 enum class QfaAxis : uint32_t {
     B = 0,

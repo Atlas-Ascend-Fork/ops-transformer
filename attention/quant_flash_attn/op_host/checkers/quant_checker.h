@@ -90,7 +90,9 @@ private:
     ge::graphStatus CheckQkvShapeDim(const QfaTilingInfo& qfaInfo) const;
 
     // --- Feature: layout 匹配关系校验 (文档: layout匹配关系表) ---
-    // MxFP8: layout_q=TND, layout_kv∈{TND,PA_BBND,PA_BNBD,PA_NZ}, layout_out=TND, layout_q_descale∈{TND,N2TGD}
+    // MxFP8: layout_q∈{TND,BSND,BNSD}, layout_kv∈{TND,BSND,BNSD,PA_BBND,PA_BNBD,PA_NZ},
+    //        layout_out∈{TND,BSND,BNSD}, layout_q_descale∈{TND,N2TGD,BNSD,BSND,BN2SGD}
+    //        (BSND prefill 为 BSND, decode 为 BN2SGD; BNSD 仅 prefill 模板)
     ge::graphStatus CheckLayoutConstraint(const QfaTilingInfo& qfaInfo) const;
 
     // --- Feature: q/k/v/attn_out shape 校验 (文档: q/k/v/attn_out shape匹配关系表) ---

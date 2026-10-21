@@ -77,6 +77,7 @@ def get_mxfp8_per_token_group_quant_scale(tensor, fp8_dtype, group_size=32):
     _validate_fp8_dtype(fp8_dtype)
     emax_elem = _EMAX_MAP[fp8_dtype]
 
+    tensor = tensor.to(torch.float32)
     dim1, dim2, dim3, dim4 = tensor.shape
     dim4_align = (dim4 + 63) // 64 * 64
     num_groups = math.ceil(dim4_align / group_size)
@@ -98,6 +99,7 @@ def get_mxfp8_per_channel_group_quant_scale(tensor, fp8_dtype, group_size=32):
     _validate_fp8_dtype(fp8_dtype)
     emax_elem = _EMAX_MAP[fp8_dtype]
 
+    tensor = tensor.to(torch.float32)
     dim1, dim2, dim3, dim4 = tensor.shape
     num_groups = math.ceil(dim3 / group_size)
     pad_size = num_groups * group_size - dim3
@@ -116,13 +118,13 @@ def get_mxfp8_per_channel_group_quant_scale(tensor, fp8_dtype, group_size=32):
 def mxfp8_per_token_group_quant(tensor, quant_scale, group_size=32):
     dim4 = tensor.shape[-1]
     scale_expanded = quant_scale.repeat_interleave(group_size, dim=-1)[..., :dim4]
-    return (tensor / scale_expanded.to(tensor.dtype)).to(torch.float32)
+    return (tensor.to(torch.float32) / scale_expanded).to(torch.float32)
 
 
 def mxfp8_per_channel_group_quant(tensor, quant_scale, group_size=32):
     dim3 = tensor.shape[2]
     scale_expanded = quant_scale.repeat_interleave(group_size, dim=2)[:, :, :dim3, :]
-    return (tensor / scale_expanded.to(tensor.dtype)).to(torch.float32)
+    return (tensor.to(torch.float32) / scale_expanded).to(torch.float32)
 
 
 def broadcast_kv(num_heads, num_kv_heads, kv_tensor):
@@ -159,6 +161,7 @@ def convert_q_bnsd_to_layout(tensor_bnsd, seq_lens, layout, cu_seqlens=None):
         return (
             tensor[:, :, :max_org_s, :]
             .permute(0, 2, 1, 3)
+            .contiguous()
             .reshape(B, max_org_s, N * D)
             .contiguous()
         )
@@ -268,7 +271,9 @@ def e8m0_to_fp32(tensor_e8m0):
 
 def canonical_q_scale_layout(layout):
     layout = (layout or "TND").upper()
-    if layout not in ("TND", "N2TGD"):
+    # BNSD/BSND: q_descale 与 query 同排布 (5D, D//64 组内偶奇打包)
+    # BN2SGD: BSND decode 场景 (6D, B-N2-S1-G-D)
+    if layout not in ("TND", "N2TGD", "BNSD", "BSND", "BN2SGD"):
         raise ValueError(f"Unsupported Q scale layout: {layout}")
     return layout
 
@@ -319,12 +324,14 @@ def convert_q_scale_bnsd_to_layout(scale_bnsd, seq_lens, layout, cu_seqlens=None
         return (
             scale_bnsd[:, :, :max_org_s, :]
             .permute(0, 2, 1, 3)
+            .contiguous()
             .reshape(B, max_org_s, N, Dg_half, 2)
         )
     elif layout == "BSH":
         return (
             scale_bnsd[:, :, :max_org_s, :]
             .permute(0, 2, 1, 3)
+            .contiguous()
             .reshape(B, max_org_s, N * Dg_half, 2)
         )
     elif layout == "TND":
@@ -334,6 +341,15 @@ def convert_q_scale_bnsd_to_layout(scale_bnsd, seq_lens, layout, cu_seqlens=None
             scale_bnsd, seq_lens, cu_seqlens=cu_seqlens
         )
         return convert_q_scale_tnd_to_n2tgd_layout(tnd_result, N_kv)
+    elif layout == "BN2SGD":
+        # BSND decode: (B, N_q, S1, Dg) -> (B, N2, S1, G, Dg//2, 2), 内存序 B-N2-S1-G-D
+        g = N // N_kv
+        return (
+            scale_bnsd[:, :, :max_org_s, :]
+            .reshape(B, N_kv, g, max_org_s, Dg_half, 2)
+            .permute(0, 1, 3, 2, 4, 5)
+            .contiguous()
+        )
     else:
         raise ValueError(f"Unsupported layout: {layout}")
 
@@ -377,7 +393,7 @@ def convert_v_scale_bnsd_to_layout(scale_bnsd, seq_lens, layout, group_size=32):
         result[..., 1] = transposed[..., 1::2, :]
         return result
     elif layout == "BSND":
-        transposed = scale_bnsd[:, :, :actual_Sg, :].permute(0, 2, 1, 3)
+        transposed = scale_bnsd[:, :, :actual_Sg, :].permute(0, 2, 1, 3).contiguous()
         if actual_Sg % 2 != 0:
             pad = torch.full(
                 (B, 1, N, D),
@@ -396,6 +412,7 @@ def convert_v_scale_bnsd_to_layout(scale_bnsd, seq_lens, layout, group_size=32):
         transposed = (
             scale_bnsd[:, :, :actual_Sg, :]
             .permute(0, 2, 1, 3)
+            .contiguous()
             .reshape(B, actual_Sg, N * D)
         )
         if actual_Sg % 2 != 0:
@@ -844,7 +861,17 @@ def _online_softmax_update(S_ij, mask_j, mi, si, oi, ln_p_scale, mask_fill_value
 
 def resolve_q_scale_layout(layout=None):
     """解析 Q scale layout 并返回 (resolved_layout, gqa_group)"""
-    resolved = canonical_q_scale_layout(layout or globals().get("Q_SCALE_LAYOUT"))
+    effective = layout or globals().get("Q_SCALE_LAYOUT")
+    # BNSD/BSND 非 PA 场景: 算子约束 layout_q_descale 与模板绑定
+    # BNSD: 仅 prefill 模板(USE_DN=true), q_scale 恒 BNSD
+    # BSND: prefill -> BSND, decode -> BN2SGD
+    input_layout = globals().get("INPUT_LAYOUT")
+    if input_layout in ("BNSD", "BSND"):
+        if input_layout == "BNSD":
+            effective = "BNSD"
+        else:
+            effective = "BN2SGD" if effective in ("N2TGD", "BN2SGD") else "BSND"
+    resolved = canonical_q_scale_layout(effective)
     if N_kv <= 0 or N_q % N_kv != 0:
         raise ValueError(f"N_q must be divisible by N_kv, got N_q={N_q}, N_kv={N_kv}")
     group = N_q // N_kv
@@ -929,12 +956,16 @@ def _build_qfa_section_info(actual_seq_q, actual_seq_kv):
     enable_pa = bool(globals().get("ENABLE_PA", False))
     input_layout = globals().get("INPUT_LAYOUT") or "TND"
     kv_cache_layout = globals().get("KV_CACHE_LAYOUT") or "BnNBsD"
-    layout_q = "TND" if enable_pa else input_layout
+    # INPUT_LAYOUT 已由 inputs/golden 按 input_layout/layout_q 解析为有效数据布局
+    # (老 CSV PA 用例为 TND; redline PA+BNSD 用例为 BNSD) — metadata 调用参数
+    # 需与 npu_preprocess 透传给算子的真实 layout 一致; 无效值 (如 GQA 的 NTD)
+    # 回退旧逻辑 PA→TND。
+    _il = str(input_layout or "").upper()
+    _il_data = _il if _il in ("TND", "BNSD", "BSND") else None
+    layout_q = _il_data or ("TND" if enable_pa else _il)
     _pa_layout_kv_map = {"BnNBsD": "PA_BNBD", "BnBsND": "PA_BBND", "PA_NZ": "PA_NZ"}
-    layout_kv = (
-        _pa_layout_kv_map.get(kv_cache_layout, "PA_BNBD") if enable_pa else input_layout
-    )
-    layout_out = "TND" if enable_pa else input_layout
+    layout_kv = _pa_layout_kv_map.get(kv_cache_layout, "PA_BNBD") if enable_pa else _il
+    layout_out = _il_data or ("TND" if enable_pa else _il)
     q_runtime_layout, _ = resolve_q_scale_layout()
 
     def _derive_cu(seqused):
@@ -1003,10 +1034,11 @@ def _decode_qfa_sections(meta_flat, seqused_q, seqused_kv):
 
     每个 FA chunk 是 (bn, m, s2) 线性迭代空间上的一段 [start, end)。
     bn 语义 (aicpu quant_flash_attn_metadata_aicpu.cpp L271-316):
-      - 非 decode (layout_q_descale != "N2TGD"): kvHeadNum=numHeadsQ_ →
+      - 非 decode (layout_q_descale 不属于 {N2TGD, BN2SGD}): kvHeadNum=numHeadsQ_ →
         headNum=N_q, bn = b*N_q + query_head; kernel USE_DN (prefill 不合轴)
         realN2Size=n2Size*gSize=N_q, realGSize=1 → m 行即 s1 token
-      - decode: headNum=N_kv, bn = b*N_kv + kv_head; kernel 合轴
+        (BNSD 仅 prefill 模板, 恒走本分支)
+      - decode (N2TGD=TND decode / BN2SGD=BSND decode): headNum=N_kv, bn = b*N_kv + kv_head; kernel 合轴
         realGSize=gSize → m 行 = s1*G + g
     sched_group = GetGroupSize() = N_q/headNum (prefill=1, decode=G)。
     causal 时每个 m 的 s2 块范围由 CalcS2Range 决定。chunk 即 core 分段,
@@ -1024,7 +1056,7 @@ def _decode_qfa_sections(meta_flat, seqused_q, seqused_kv):
             f"s2Base={s2_base}, aicNum={aic_num}"
         )
 
-    is_decode = resolve_q_scale_layout()[0] == "N2TGD"
+    is_decode = resolve_q_scale_layout()[0] in ("N2TGD", "BN2SGD")
     head_num = N_kv if is_decode else N_q
     sched_group = N_q // head_num
 

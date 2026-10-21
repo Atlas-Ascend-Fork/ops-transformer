@@ -190,7 +190,22 @@ def generate_qfa_mxfp8_inputs(
     cu_seqlens_kv = kwargs.get("cu_seqlens_kv_values")
     seqused_q = kwargs.get("seqused_q_values")
     seqused_kv = kwargs.get("seqused_kv_values")
-    input_layout = kwargs.get("input_layout", "TND")
+    # 数据布局解析: 优先 input_layout 属性 (pytest 直跑路径); CSV/TTK 路径无该
+    # 属性, 按算子真实 layout 参数解析 — Q 用 layout_q, 非 PA 的 K/V 用 layout_kv
+    # (PA 时 layout_kv 是 cache 布局 PA_*, K/V 走 mxfp8_pa_preprocessing 分支)。
+    # 老 paramset CSV layout_q/layout_kv 恒为 "TND", 解析结果与原默认一致。
+    _data_layouts = ("TND", "BNSD", "BSND")
+    _il_attr = str(kwargs.get("input_layout") or "").upper()
+    _lq_attr = str(layout_q or "").upper()
+    _lk_attr = str(layout_kv or "").upper()
+    if _il_attr in _data_layouts:
+        input_layout = _il_attr
+        q_data_layout = _il_attr
+        kv_data_layout = _il_attr
+    else:
+        q_data_layout = _lq_attr if _lq_attr in _data_layouts else "TND"
+        kv_data_layout = _lk_attr if _lk_attr in _data_layouts else "TND"
+        input_layout = q_data_layout
 
     # 异常用例容忍: N_q/N_kv/D 可能被注入非法值 (如 -1)。非法值不能用于数据合成
     # (torch.rand 负维度会裸崩, 掩盖真正要验证的异常属性), 按 CSV slot 形状推导
@@ -231,11 +246,16 @@ def generate_qfa_mxfp8_inputs(
     # cu_seqlens -> actual_seq (差分还原)
     cu_seqlens_q = list(cu_seqlens_q) if cu_seqlens_q is not None else [0]
     cu_seqlens_kv = list(cu_seqlens_kv) if cu_seqlens_kv is not None else [0]
-    actual_seq_q = (
-        [cu_seqlens_q[i + 1] - cu_seqlens_q[i] for i in range(len(cu_seqlens_q) - 1)]
-        if len(cu_seqlens_q) > 1
-        else [0]
-    )
+    # Q 与 KV 一致: cu_seqlens 缺失 (BNSD/BSND 用例不提供) 时回退 seqused,
+    # 不能回退 [0] — 否则 Q 生成长度为 0, 与 CSV slot 形状不匹配。
+    if len(cu_seqlens_q) > 1:
+        actual_seq_q = [
+            cu_seqlens_q[i + 1] - cu_seqlens_q[i] for i in range(len(cu_seqlens_q) - 1)
+        ]
+    elif seqused_q is not None and len(seqused_q) > 0:
+        actual_seq_q = list(seqused_q)
+    else:
+        actual_seq_q = [0]
     if len(cu_seqlens_kv) > 1:
         actual_seq_kv = [
             cu_seqlens_kv[i + 1] - cu_seqlens_kv[i]
@@ -248,9 +268,40 @@ def generate_qfa_mxfp8_inputs(
 
     # batch_size: CSV 原始值 (可为 -1), 透传给 metadata;
     # B: 从 cu_seqlens_q 推导的正整数, 供 BNSD 张量生成。
-    B = max(1, len(cu_seqlens_q) - 1) if cu_seqlens_q and len(cu_seqlens_q) >= 2 else 1
+    # BNSD/BSND 用例 cu_seqlens 缺失 (占位 [0]) 时回退 seqused_q 长度 —
+    # redline PA+BNSD 用例 seqused_q=[4,4,4,4] → B=4, 与 CSV slot 形状一致。
+    if len(cu_seqlens_q) >= 2:
+        B = len(cu_seqlens_q) - 1
+    elif seqused_q is not None and len(seqused_q) > 0:
+        B = len(seqused_q)
+    else:
+        B = 1
 
     max_sq = max(actual_seq_q) if actual_seq_q else D
+    # CSV q slot 的 S 维是 padding 权威上界: redline 用例 slot S 可大于
+    # max(seqused_q) (如 000022 S=16426 > max=1024)。B/N/D 与属性一致而仅 S
+    # 更大时, 按 slot S 生成 padded 数据 (超出 seqused 的行不参与有效计算,
+    # golden/NPU 侧 mask 掉), 保证 in-place 写入 shape 匹配、输出 shape 与
+    # q slot S 一致; 结构不一致的异常用例仍走 mismatch 跳过路径。
+    try:
+        _q_slot_shape = tuple(int(_d) for _d in q.shape)
+    except (AttributeError, TypeError, ValueError):
+        _q_slot_shape = ()
+    if q_data_layout == "BNSD" and len(_q_slot_shape) == 4:
+        _slot_ok = (
+            _q_slot_shape[0] == B and _q_slot_shape[1] == N_q and _q_slot_shape[3] == D
+        )
+        _slot_sq = _q_slot_shape[2]
+    elif q_data_layout == "BSND" and len(_q_slot_shape) == 4:
+        _slot_ok = (
+            _q_slot_shape[0] == B and _q_slot_shape[2] == N_q and _q_slot_shape[3] == D
+        )
+        _slot_sq = _q_slot_shape[1]
+    else:
+        _slot_ok = False
+        _slot_sq = 0
+    if _slot_ok and _slot_sq > max_sq:
+        max_sq = _slot_sq
     max_skv = max(actual_seq_kv) if actual_seq_kv else D
 
     for gkey, gval in [
@@ -431,11 +482,16 @@ def generate_qfa_mxfp8_inputs(
             tail_lens,
         )
 
+    # Q 数据布局按解析结果 (PA 不再强制 TND — 算子支持 PA + layout_q=BNSD/BSND,
+    # 见 layout redline 用例; 老 CSV PA 用例 layout_q="TND" 行为不变)。
+    # cu_seqlens 占位 [0] (CSV 未提供时) 不能传给 TND 转换 — T=cu[-1]=0 会
+    # 产生空 tensor, len<2 视为未提供。
+    _cu_q_real = cu_seqlens_q if len(cu_seqlens_q) > 1 else None
     q_fp8_final = mxfp8_golden_mod.convert_q_bnsd_to_layout(
-        q_fp8_bnsd_f32, actual_seq_q, "TND", cu_seqlens=cu_seqlens_q
+        q_fp8_bnsd_f32, actual_seq_q, q_data_layout, cu_seqlens=_cu_q_real
     )
     q_scale_final_layout = mxfp8_golden_mod.convert_q_scale_bnsd_to_layout(
-        quant_scale_q_bnsd, actual_seq_q, q_scale_layout, cu_seqlens=cu_seqlens_q
+        quant_scale_q_bnsd, actual_seq_q, q_scale_layout, cu_seqlens=_cu_q_real
     )
 
     if enable_pa:
@@ -504,28 +560,30 @@ def generate_qfa_mxfp8_inputs(
         k_scale_final_layout = k_scale_pa
         v_scale_final_layout = v_scale_pa
     else:
-        # 非 PA 模式: k/v -> TND
+        # 非 PA 模式: k/v 按解析的 KV 数据布局转换 (TND/BNSD/BSND);
+        # cu_seqlens 占位 [0] 视为未提供 (同 Q 侧)。
+        _cu_kv_real = cu_seqlens_kv if len(cu_seqlens_kv) > 1 else None
         k_fp8_final = mxfp8_golden_mod.convert_kv_bnsd_to_layout(
             k_fp8_bnsd_f32,
             actual_seq_kv,
-            "TND",
-            cu_seqlens=cu_seqlens_kv if cu_seqlens_kv else None,
+            kv_data_layout,
+            cu_seqlens=_cu_kv_real,
         )
         v_fp8_final = mxfp8_golden_mod.convert_kv_bnsd_to_layout(
             v_fp8_bnsd_f32,
             actual_seq_kv,
-            "TND",
-            cu_seqlens=cu_seqlens_kv if cu_seqlens_kv else None,
+            kv_data_layout,
+            cu_seqlens=_cu_kv_real,
         )
         # k/v scale: convert 函数内部做 pack, 输入 UNPACKED 4D scale (B, N, S, D)
         k_scale_final_layout = mxfp8_golden_mod.convert_k_scale_bnsd_to_layout(
             quant_scale_k_bnsd,
             actual_seq_kv,
-            "TND",
-            cu_seqlens=cu_seqlens_kv if cu_seqlens_kv else None,
+            kv_data_layout,
+            cu_seqlens=_cu_kv_real,
         )
         v_scale_final_layout = mxfp8_golden_mod.convert_v_scale_bnsd_to_layout(
-            quant_scale_v_bnsd, actual_seq_kv, "TND"
+            quant_scale_v_bnsd, actual_seq_kv, kv_data_layout
         )
 
     # ----- Step 4: fp32 scale -> e8m0 -----

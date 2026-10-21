@@ -101,7 +101,9 @@ public:
     static constexpr uint32_t initOutputEventId = 0U; // attenOut和lse，刷无效行会用到剩余ub，需加同步
 
     static constexpr ActualSeqLensMode Q_MODE = GetQActSeqMode<layout>();
-    static constexpr MaskFormat MASK_LAYOUT = MaskFormat::SG;
+    // ND 路径 gs1 行序与 query 布局相关(与 GeInputUbFormat 谓词一致): BNSD/NTD 为 g 主序
+    // (ProcessGS1, s1=gs1%s1Size)需按 GS 解析 mask; BSH(含BSND)/TND 为 s1 主序(ProcessS1G, s1=gs1/gSize)按 SG
+    static constexpr MaskFormat MASK_LAYOUT = (layout == LayOutTypeEnum::LAYOUT_BNSD) ? MaskFormat::GS : MaskFormat::SG;
 
     static constexpr bool USE_DN = useDn;
     static constexpr UbFormat OUT_UB_FORMAT = USE_DN ? UbFormat::S1_ONLY : GetOutUbFormat<layout>();
@@ -622,15 +624,17 @@ public:
             DataCopySoftmaxLseNTDArch35<T, ConstInfoX>(softmaxLseGm_, lseUb, bN2Offset, vecMIdx, gmDealRowCount,
                                                        constInfo_, s1Size);
         } else if constexpr (layout == LayOutTypeEnum::LAYOUT_BSH) {
+            // DN 范式下任务按 realN2Idx 逐 head 分解(realGSize=1), 头部偏移须用 realN2Idx*realGSize
             uint64_t bN2Offset = runInfo.bIdx * constInfo_.n2Size * constInfo_.gSize * constInfo_.s1Size +
-                                 runInfo.n2Idx * constInfo_.gSize * constInfo_.s1Size;
+                                 runInfo.realN2Idx * constInfo_.realGSize * constInfo_.s1Size;
             uint64_t qActSeqLens = qActSeqLensParser_->GetActualSeqLength(runInfo.bIdx);
             uint64_t s1LeftPaddingSize = 0;
             DataCopySoftmaxLseBSNDArch35<T, ConstInfoX>(softmaxLseGm_, lseUb, bN2Offset, vecMIdx, gmDealRowCount,
                                                         constInfo_, s1LeftPaddingSize);
         } else { // BNSD
+            // DN 范式下任务按 realN2Idx 逐 head 分解(realGSize=1), 头部偏移须用 realN2Idx*realGSize
             uint64_t bN2Offset = runInfo.bIdx * constInfo_.n2Size * constInfo_.gSize * constInfo_.s1Size +
-                                 runInfo.n2Idx * constInfo_.gSize * constInfo_.s1Size;
+                                 runInfo.realN2Idx * constInfo_.realGSize * constInfo_.s1Size;
             uint64_t qActSeqLens = qActSeqLensParser_->GetActualSeqLength(runInfo.bIdx);
             uint64_t s1LeftPaddingSize = 0;
             DataCopySoftmaxLseBNSDArch35<T, ConstInfoX>(softmaxLseGm_, lseUb, bN2Offset, vecMIdx, gmDealRowCount,

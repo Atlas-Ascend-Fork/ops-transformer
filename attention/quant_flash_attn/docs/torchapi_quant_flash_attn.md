@@ -226,12 +226,12 @@ cann_ops_transformer.quant_flash_attn(
 
 | 参数名                  | 参数类型          | 可选/必选 | 描述                                                   | 数据类型                    | 数据格式 | 维度                                                                                                                 | 非连续Tensor |
 | :------------------- | :------------ | :---- | :--------------------------------------------------- | :---------------------- | :--- | :----------------------------------------------------------------------------------------------------------------- | :-------- |
-| q                    | Tensor        | 必选    | 公式中的Q                                                | float8_e4m3fn/hifloat8 | ND   | (Q_T, Q_N, D)                                                                                                    | ×         |
-| k                    | Tensor        | 必选    | 公式中的K                                                | float8_e4m3fn/hifloat8 | ND   | <ul><li>(KV_T, KV_N, D)</li><li>(Bn, KV_N, Bs, D)</li><li>(Bn, KV_N, D/32, Bs, 32)</li></ul>                   | √         |
-| v                    | Tensor        | 必选    | 公式中的V                                                | float8_e4m3fn/hifloat8 | ND   | <ul><li>(KV_T, KV_N, D)</li><li>(Bn, KV_N, Bs, D)</li><li>(Bn, KV_N, D/32, Bs, 32)</li></ul>                   | √         |
-| q_descale           | Tensor        | 必选    | q的反量化scale                                           | float8_e8m0/float32    | ND   | <ul><li>(Q_T, Q_N, ⌈D/64⌉, 2)</li><li>(KV_N, Q_T, G, ⌈D/64⌉, 2)</li><li>(Q_N, Q_T)</li></ul>                     | ×         |
-| k_descale           | Tensor        | 必选    | k的反量化scale                                           | float8_e8m0/float32    | ND   | <ul><li>(KV_T, KV_N, ⌈D/64⌉, 2)</li><li>(Bn, KV_N, Bs, ⌈D/64⌉, 2)</li><li>(Bn, KV_N, Bs/16, ⌈D/64⌉, 16, 2)</li><li>(Bn, KV_N, Bs)</li></ul> | √         |
-| v_descale           | Tensor        | 必选    | v的反量化scale                                           | float8_e8m0/float32    | ND   | <ul><li>(KV_T/64, KV_N, D, 2)</li><li>(Bn, KV_N, Bs/64, D, 2)</li><li>(Bn, KV_N, D/16, Bs/64, 16, 2)</li><li>(KV_N,)</li></ul> | √         |
+| q                    | Tensor        | 必选    | 公式中的Q                                                | float8_e4m3fn/hifloat8 | ND   | <ul><li>(Q_T, Q_N, D)</li><li>(B, Q_N, Q_S, D)</li><li>(B, Q_S, Q_N, D)</li></ul>                                                                 | ×         |
+| k                    | Tensor        | 必选    | 公式中的K                                                | float8_e4m3fn/hifloat8 | ND   | <ul><li>(KV_T, KV_N, D)</li><li>(B, KV_N, KV_S, D)</li><li>(B, KV_S, KV_N, D)</li><li>(Bn, KV_N, Bs, D)</li><li>(Bn, KV_N, D/32, Bs, 32)</li></ul>                   | √         |
+| v                    | Tensor        | 必选    | 公式中的V                                                | float8_e4m3fn/hifloat8 | ND   | <ul><li>(KV_T, KV_N, D)</li><li>(B, KV_N, KV_S, D)</li><li>(B, KV_S, KV_N, D)</li><li>(Bn, KV_N, Bs, D)</li><li>(Bn, KV_N, D/32, Bs, 32)</li></ul>                   | √         |
+| q_descale           | Tensor        | 必选    | q的反量化scale                                           | float8_e8m0/float32    | ND   | <ul><li>(Q_T, Q_N, ⌈D/64⌉, 2)</li><li>(KV_N, Q_T, G, ⌈D/64⌉, 2)</li><li>(B, Q_N, Q_S, ⌈D/64⌉, 2)</li><li>(B, Q_S, Q_N, ⌈D/64⌉, 2)</li><li>(B, KV_N, Q_S, G, ⌈D/64⌉, 2)</li><li>(Q_N, Q_T)</li></ul>                     | ×         |
+| k_descale           | Tensor        | 必选    | k的反量化scale                                           | float8_e8m0/float32    | ND   | <ul><li>(KV_T, KV_N, ⌈D/64⌉, 2)</li><li>(B, KV_N, KV_S, ⌈D/64⌉, 2)</li><li>(B, KV_S, KV_N, ⌈D/64⌉, 2)</li><li>(Bn, KV_N, Bs, ⌈D/64⌉, 2)</li><li>(Bn, KV_N, Bs/16, ⌈D/64⌉, 16, 2)</li><li>(Bn, KV_N, Bs)</li></ul> | √         |
+| v_descale           | Tensor        | 必选    | v的反量化scale                                           | float8_e8m0/float32    | ND   | <ul><li>(KV_T/64, KV_N, D, 2)</li><li>(B, KV_N, KV_S/64, D, 2)</li><li>(B, KV_S/64, KV_N, D, 2)</li><li>(Bn, KV_N, Bs/64, D, 2)</li><li>(Bn, KV_N, D/16, Bs/64, 16, 2)</li><li>(KV_N,)</li></ul> | √         |
 | quant_mode          | int/QuantMode | 必选    | 量化模式，支持传入枚举或对应 int 值，枚举定义见「quant_mode 枚举」           | int32                   | -    | -                                                                                                                  | -         |
 | block_table         | Tensor        | 可选    | 用于分块注意力计算中的块索引映射                                     | int32                   | ND   | (B, Bn)                                                                                                            | ×         |
 | cu_seqlens_q       | Tensor        | 可选    | Q的累积序列长度，用于处理变长序列，第一个元素必须为0                          | int32                   | ND   | (B+1,)                                                                                                             | ×         |
@@ -273,7 +273,7 @@ cann_ops_transformer.quant_flash_attn(
 
 | 参数名          | 参数类型   | 可选/必选 | 描述                                                                                                           | 数据类型     | 数据格式 | 维度              | 非连续Tensor |
 | :----------- | :----- | :---- | :----------------------------------------------------------------------------------------------------------- | :------- | :--- | :-------------- | :-------- |
-| attn_out    | Tensor | 必选    | quant_flash_attn的计算输出                                                                                     | bfloat16 | ND   | <ul><li>(Q_T, Q_N, D)</li><li>(B, Q_S, Q_N, D)（HIF8场景）</li><li>(B, Q_N, Q_S, D)（HIF8场景）</li></ul> | ×         |
+| attn_out    | Tensor | 必选    | quant_flash_attn的计算输出                                                                                     | bfloat16 | ND   | <ul><li>(Q_T, Q_N, D)（TND）</li><li>(B, Q_S, Q_N, D)（BSND）</li><li>(B, Q_N, Q_S, D)（BNSD）</li></ul> | ×         |
 | softmax_lse | Tensor | 可选    | softmax的LSE结果。`return_softmax_lse`为True时，输出shape为(Q_N, Q_T)的Tensor；`return_softmax_lse`为False时，则输出空Tensor | float32  | ND   | (Q_N, Q_T)    | ×         |
 
 ## 约束说明
@@ -374,7 +374,7 @@ cann_ops_transformer.quant_flash_attn(
         <td rowspan="4">
             <ul>
                 <li>q/k/v dtype与quant_mode精确匹配：MxFP8场景为float8_e4m3fn，HIF8场景为hifloat8，FP8场景为float8_e4m3fn</li>
-                <li>q/attn_out shape dim与quant_mode精确匹配：MxFP8场景仅支持3D，HIF8场景支持3D/4D，FP8场景仅支持3D</li>
+                <li>q/attn_out shape dim与quant_mode精确匹配：MxFP8/HIF8场景支持3D/4D（TND为3D，BNSD/BSND为4D），FP8场景仅支持3D</li>
                 <li>轴校验：
                     <ul>
                         <li>65536 > B > 0</li>
@@ -413,7 +413,7 @@ cann_ops_transformer.quant_flash_attn(
         <td>layout_q</td>
         <td>
             <ul>
-                <li>MxFP8场景支持TND</li>
+                <li>MxFP8场景支持TND/BNSD/BSND</li>
                 <li>HIF8场景支持TND/BSND/BNSD</li>
                 <li>FP8场景支持NTD</li>
             </ul>
@@ -426,7 +426,7 @@ cann_ops_transformer.quant_flash_attn(
         <td>layout_q_descale</td>
         <td>
             <ul>
-                <li>MxFP8场景支持TND/N2TGD</li>
+                <li>MxFP8场景支持TND/N2TGD/BNSD/BSND/BN2SGD</li>
                 <li>HIF8场景支持BSND</li>
                 <li>FP8场景支持NT</li>
             </ul>
@@ -436,7 +436,7 @@ cann_ops_transformer.quant_flash_attn(
         <td>layout_kv</td>
         <td>
             <ul>
-                <li>MxFP8场景支持TND/PA_BBND/PA_BNBD/PA_NZ（D=72时不支持PA_NZ）</li>
+                <li>MxFP8场景支持TND/BNSD/BSND/PA_BBND/PA_BNBD/PA_NZ（D=72时不支持PA_NZ）</li>
                 <li>HIF8场景支持TND/BSND/BNSD</li>
                 <li>FP8场景支持PA_BNBD</li>
             </ul>
@@ -446,7 +446,7 @@ cann_ops_transformer.quant_flash_attn(
         <td>layout_out</td>
         <td>
             <ul>
-                <li>MxFP8场景支持TND</li>
+                <li>MxFP8场景支持TND/BNSD/BSND</li>
                 <li>HIF8场景支持TND/BSND/BNSD</li>
                 <li>FP8场景支持TND</li>
             </ul>
@@ -592,22 +592,25 @@ layout匹配关系表：<a name="layout匹配关系表"></a>
     </tr>
     <tr>
         <td>quant_mode=1（MxFP8）</td>
-        <td>TND</td>
+        <td>TND/BNSD/BSND</td>
         <td>
             <ul>
                 <li>TND（prefill）</li>
-                <li>N2TGD（decode）</li>
+                <li>N2TGD（decode，layout_q=TND）</li>
+                <li>BNSD（prefill，layout_q=BNSD）</li>
+                <li>BSND（prefill，layout_q=BSND）</li>
+                <li>BN2SGD（decode，layout_q=BSND）</li>
             </ul>
         </td>
         <td>
             <ul>
-                <li>TND</li>
+                <li>TND/BNSD/BSND（非PA场景，须与layout_q一致）</li>
                 <li>PA_BBND</li>
                 <li>PA_BNBD</li>
                 <li>PA_NZ（D=72时不支持）</li>
             </ul>
         </td>
-        <td>TND</td>
+        <td>TND/BNSD/BSND（须与layout_q一致）</td>
         <td>(Q_N, Q_T)</td>
     </tr>
     <tr>
@@ -624,6 +627,8 @@ layout匹配关系表：<a name="layout匹配关系表"></a>
 > [!NOTE]
 >
 > HIF8场景（`quant_mode=0`）下，layout_q、layout_kv、layout_out三者必须相同。
+>
+> MxFP8场景（`quant_mode=1`）下：layout_out必须与layout_q相同；layout_kv为非PA布局时必须与layout_q相同；layout_q=BNSD时，layout_q_descale仅支持BNSD(prefill场景下性能更优，decode场景推荐其他layout)；layout_q=BSND时，layout_q_descale为BSND（prefill场景推荐）或BN2SGD（decode场景推荐）；layout_q=TND时，layout_q_descale为TND（prefill场景推荐）或N2TGD（decode场景推荐）。
 
 q/k/v descale dtype匹配关系表：<a name="descale_dtype匹配关系表"></a>
 
@@ -708,14 +713,26 @@ q_descale shape匹配关系表：<a name="descale_shape匹配关系表"></a>
             <td>(1,)<br>per-tensor 量化，1D</td>
         </tr>
         <tr>
-            <td rowspan="2">1</td>
-            <td rowspan="2">q_descale</td>
+            <td rowspan="5">1</td>
+            <td rowspan="5">q_descale</td>
             <td>TND</td>
-            <td>(Q_T, Q_N, ⌈D/64⌉, 2)<br>用于Prefill场景，推荐G*Q_S > 80时传入</td>
+            <td>(Q_T, Q_N, ⌈D/64⌉, 2)<br>layout_q=TND时使用，用于Prefill场景，推荐G*Q_S > 80时传入</td>
         </tr>
         <tr>
             <td>N2TGD</td>
-            <td>(KV_N, Q_T, G, ⌈D/64⌉, 2)<br>用于Decode场景，推荐G*Q_S <= 80时传入</td>
+            <td>(KV_N, Q_T, G, ⌈D/64⌉, 2)<br>layout_q=TND时使用，用于Decode场景，推荐G*Q_S <= 80时传入</td>
+        </tr>
+        <tr>
+            <td>BNSD</td>
+            <td>(B, Q_N, Q_S, ⌈D/64⌉, 2)<br>layout_q=BNSD时使用，用于Prefill场景，推荐G*Q_S > 80时传入</td>
+        </tr>
+        <tr>
+            <td>BSND</td>
+            <td>(B, Q_S, Q_N, ⌈D/64⌉, 2)<br>layout_q=BSND时使用，用于Prefill场景，推荐G*Q_S > 80时传入</td>
+        </tr>
+        <tr>
+            <td>BN2SGD</td>
+            <td>(B, KV_N, Q_S, G, ⌈D/64⌉, 2)<br>layout_q=BSND时使用，用于Decode场景，推荐G*Q_S <= 80时传入</td>
         </tr>
         <tr>
             <td>6</td>
@@ -756,10 +773,18 @@ k_descale/v_descale shape匹配关系表：
             <td>(1,)<br>per-tensor 量化，1D</td>
         </tr>
         <tr>
-            <td rowspan="8">1</td>
-            <td rowspan="4">k_descale</td>
+            <td rowspan="12">1</td>
+            <td rowspan="6">k_descale</td>
             <td>TND</td>
             <td>(KV_T, KV_N, ⌈D/64⌉, 2)</td>
+        </tr>
+        <tr>
+            <td>BNSD</td>
+            <td>(B, KV_N, KV_S, ⌈D/64⌉, 2)</td>
+        </tr>
+        <tr>
+            <td>BSND</td>
+            <td>(B, KV_S, KV_N, ⌈D/64⌉, 2)</td>
         </tr>
         <tr>
             <td>PA_BBND</td>
@@ -774,9 +799,17 @@ k_descale/v_descale shape匹配关系表：
             <td>(Bn, KV_N, Bs/16, ⌈D/64⌉, 16, 2)</td>
         </tr>
         <tr>
-            <td rowspan="4">v_descale</td>
+            <td rowspan="6">v_descale</td>
             <td>TND</td>
             <td>(KV_T/64, KV_N, D, 2)</td>
+        </tr>
+        <tr>
+            <td>BNSD</td>
+            <td>(B, KV_N, KV_S/64, D, 2)</td>
+        </tr>
+        <tr>
+            <td>BSND</td>
+            <td>(B, KV_S/64, KV_N, D, 2)</td>
         </tr>
         <tr>
             <td>PA_BBND</td>
@@ -867,15 +900,31 @@ q/k/v/attn_out shape匹配关系表：<a name="qkv_attn_out_shape匹配关系表
             <td>(B, Q_N, Q_S, D)</td>
         </tr>
         <tr>
-            <td rowspan="6">1</td>
-            <td>q</td>
+            <td rowspan="12">1</td>
+            <td rowspan="3">q</td>
             <td>TND</td>
             <td>(Q_T, Q_N, D)</td>
         </tr>
         <tr>
-            <td rowspan="4">k/v</td>
+            <td>BNSD</td>
+            <td>(B, Q_N, Q_S, D)</td>
+        </tr>
+        <tr>
+            <td>BSND</td>
+            <td>(B, Q_S, Q_N, D)</td>
+        </tr>
+        <tr>
+            <td rowspan="6">k/v</td>
             <td>TND</td>
             <td>(KV_T, KV_N, D)</td>
+        </tr>
+        <tr>
+            <td>BNSD</td>
+            <td>(B, KV_N, KV_S, D)</td>
+        </tr>
+        <tr>
+            <td>BSND</td>
+            <td>(B, KV_S, KV_N, D)</td>
         </tr>
         <tr>
             <td>PA_BBND</td>
@@ -890,9 +939,17 @@ q/k/v/attn_out shape匹配关系表：<a name="qkv_attn_out_shape匹配关系表
             <td>(Bn, KV_N, D/32, Bs, 32)</td>
         </tr>
         <tr>
-            <td>attn_out</td>
+            <td rowspan="3">attn_out</td>
             <td>TND</td>
             <td>(Q_T, Q_N, D)</td>
+        </tr>
+        <tr>
+            <td>BNSD</td>
+            <td>(B, Q_N, Q_S, D)</td>
+        </tr>
+        <tr>
+            <td>BSND</td>
+            <td>(B, Q_S, Q_N, D)</td>
         </tr>
         <tr>
             <td rowspan="3">6</td>
@@ -1158,7 +1215,7 @@ mask_mode参数解释：
 
 #### V高精尾块参数组
 
-高精尾块仅支持`quant_mode=1`的Paged Attention场景，`layout_kv`支持`PA_BNBD`、`PA_BBND`和`PA_NZ`，可用于decode和prefill。`layout_q`、`layout_out`仍按MxFP8场景使用`TND`；其他参数继续遵循主接口约束。
+高精尾块仅支持`quant_mode=1`的Paged Attention场景，`layout_kv`支持`PA_BNBD`、`PA_BBND`和`PA_NZ`，可用于decode和prefill。`layout_q`、`layout_out`按MxFP8场景支持`TND`、`BNSD`或`BSND`（`layout_out`须与`layout_q`一致）；其他参数继续遵循主接口约束。
 
 <table style="undefined;table-layout: fixed; width:1625px">
     <colgroup>
@@ -1558,5 +1615,79 @@ mask_mode参数解释：
   torch_npu.npu.synchronize()
   assert attn_out.shape == (B * Q_S, Q_N, D)
   assert attn_out.dtype == torch.bfloat16
+  assert torch.isfinite(attn_out.float()).all().item()
+  ```
+
+- MxFP8 BSND排布调用示例（非PA场景）
+
+  ```python
+  import torch
+  import torch_npu
+  import cann_ops_transformer
+
+  torch_npu.npu.set_device(0)
+
+  dtype = torch.float8_e4m3fn
+  out_dtype = torch.bfloat16
+  B = 2
+  Q_S = 256
+  KV_S = 128
+  Q_N = 32
+  KV_N = 8
+  D = 128
+
+  # BSND排布: q为(B, Q_S, Q_N, D), k/v为(B, KV_S, KV_N, D)
+  q = torch.randn(B, Q_S, Q_N, D, dtype=dtype, device="npu")
+  k = torch.randn(B, KV_S, KV_N, D, dtype=dtype, device="npu")
+  v = torch.randn(B, KV_S, KV_N, D, dtype=dtype, device="npu")
+
+  # descale (BSND)
+  q_descale = torch.randn(B, Q_S, Q_N, D // 64, 2, dtype=torch.float8_e8m0, device="npu")
+  k_descale = torch.randn(B, KV_S, KV_N, D // 64, 2, dtype=torch.float8_e8m0, device="npu")
+  v_descale = torch.randn(B, KV_S // 64, KV_N, D, 2, dtype=torch.float8_e8m0, device="npu")
+
+  # BSND排布不支持cu_seqlens, 需传入seqused_q/seqused_kv
+  seqused_q = torch.full((B,), Q_S, dtype=torch.int32, device="npu")
+  seqused_kv = torch.full((B,), KV_S, dtype=torch.int32, device="npu")
+
+  metadata = cann_ops_transformer.ops.quant_flash_attn_metadata(
+      Q_N,
+      KV_N,
+      D,
+      quant_mode=1,
+      seqused_q=seqused_q,
+      seqused_kv=seqused_kv,
+      max_seqlen_q=Q_S,
+      max_seqlen_kv=KV_S,
+      mask_mode=0,
+      win_left=-1,
+      win_right=-1,
+      layout_q="BSND",
+      layout_q_descale="BSND",
+      layout_kv="BSND",
+      layout_out="BSND",
+      is_grad_enabled=False,
+  )
+
+  attn_out, softmax_lse = cann_ops_transformer.ops.quant_flash_attn(
+      q, k, v,
+      q_descale, k_descale, v_descale,
+      quant_mode=1,
+      seqused_q=seqused_q,
+      seqused_kv=seqused_kv,
+      metadata=metadata,
+      softmax_scale=1.0 / (D ** 0.5),
+      mask_mode=0,
+      win_left=-1,
+      win_right=-1,
+      layout_q="BSND",
+      layout_q_descale="BSND",
+      layout_kv="BSND",
+      layout_out="BSND",
+      return_softmax_lse=False,
+  )
+  torch_npu.npu.synchronize()
+  assert attn_out.shape == (B, Q_S, Q_N, D)
+  assert attn_out.dtype == out_dtype
   assert torch.isfinite(attn_out.float()).all().item()
   ```
