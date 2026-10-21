@@ -25,6 +25,7 @@ if _TESTS_DIR not in sys.path:
 import quant_flash_attn_golden as mxfp8_golden_mod
 import quant_flash_attn_fp8_golden as fp8_golden_mod
 import quant_flash_attn_hif8_golden as hif8_golden_mod
+import quant_flash_attn_hifp4_golden as hifp4_golden_mod
 
 logger = logging.getLogger(__name__)
 
@@ -1246,3 +1247,245 @@ def _apply_hif8_golden_globals(attrs):
 
     for golden_key, val in attrs.items():
         setattr(hif8_golden_mod, golden_key, val)
+
+
+# ==============================================================================
+# HiFP4 CPU Golden 插件
+# ==============================================================================
+
+
+def _apply_hifp4_golden_globals(attrs):
+    """把 case 属性注入 hifp4 golden 模块全局变量 (HiFP4 路径)。"""
+    mapping = {
+        "B": "B",
+        "N_q": "N_q",
+        "N_kv": "N_kv",
+        "D": "D",
+        "enable_pa": "ENABLE_PA",
+        "kv_cache_layout": "KV_CACHE_LAYOUT",
+        "block_size": "BLOCK_SIZE",
+        "mask_mode": "SPARSE_MODE",
+        "q_scale_layout": "Q_SCALE_LAYOUT",
+        "enable_lse": "ENABLE_LSE",
+        "input_layout": "INPUT_LAYOUT",
+        "is_contiguous": "IS_CONTIGUOUS",
+        "device_id": "DEVICE_ID",
+        "graph_path": "GRAPH_PATH",
+        "cu_seqlens_q": "CU_SEQLENS_Q",
+        "cu_seqlens_kv": "CU_SEQLENS_KV",
+        "seqused_q": "SEQUSED_Q",
+        "seqused_kv": "SEQUSED_KV",
+        "max_seqlen_q": "MAX_SEQLEN_Q",
+        "max_seqlen_kv": "MAX_SEQLEN_KV",
+        "softmax_scale": "SOFTMAX_SCALE",
+    }
+    for attr_key, golden_key in mapping.items():
+        if attr_key in attrs:
+            setattr(hifp4_golden_mod, golden_key, attrs[attr_key])
+    setattr(hifp4_golden_mod, "HIFP4_GROUP_SIZE", 64)
+    p_scale = attrs.get("p_scale_value", 1.0)
+    if isinstance(p_scale, torch.Tensor):
+        p_scale = float(p_scale.item())
+    else:
+        p_scale = float(p_scale)
+    setattr(hifp4_golden_mod, "P_SCALE", p_scale)
+
+
+def cpu_qfa_hifp4(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dequant_scale_q: torch.Tensor,
+    dequant_scale_k: torch.Tensor,
+    dequant_scale_v: torch.Tensor,
+    quant_mode: int,
+    block_table: torch.Tensor,
+    p_scale: torch.Tensor,
+    cu_seqlens_q_t: torch.Tensor,
+    cu_seqlens_kv_t: torch.Tensor,
+    seqused_q_t: torch.Tensor,
+    seqused_kv_t: torch.Tensor,
+    sinks_t: torch.Tensor,
+    attn_mask_t: torch.Tensor,
+    metadata_t: torch.Tensor,
+    v_tail: torch.Tensor = None,
+    block_table_tail: torch.Tensor = None,
+    seqused_v_tail: torch.Tensor = None,
+    softmax_scale: float = 1.0,
+    mask_mode: int = 0,
+    win_left: int = -1,
+    win_right: int = -1,
+    max_seqlen_q: int = -1,
+    max_seqlen_kv: int = -1,
+    layout_q: str = "BSND",
+    layout_q_descale: str = "BSND",
+    layout_kv: str = "BSND",
+    layout_out: str = "BSND",
+    return_softmax_lse: bool = False,
+    **kwargs,
+):
+    """HiFP4 CPU golden 插件 (quant_mode=10)。
+
+    与 cpu_qfa_mxfp8 同签名 (op-schema 直调), hifp4 专用处理:
+      - q/k/v: hifloat4 (unpacked) → packed uint8
+      - descale: float32 (32-bit 三级量化 scale bitcast), 无 e8m0 解码
+      - golden: hifp4_golden_mod.cpu_hifp4_golden (numpy FP4 E1M2 + 三级 scale)
+      - layout 转换复用 mxfp8_golden_mod.convert_q_bnsd_to_layout
+    """
+    N_q = kwargs.get("N_q")
+    N_kv = kwargs.get("N_kv")
+    D = kwargs.get("D")
+    enable_pa = bool(kwargs.get("enable_pa", False))
+    kv_cache_layout = kwargs.get("kv_cache_layout") or layout_kv
+    block_size = kwargs.get("block_size", 0)
+    q_scale_layout = kwargs.get("q_scale_layout") or layout_q_descale
+    input_layout = kwargs.get("input_layout", "BNSD")
+    is_contiguous = kwargs.get("is_contiguous", True)
+    device_id = kwargs.get("device_id", 0)
+    graph_path = kwargs.get("graph_path", 0)
+    enable_lse = return_softmax_lse
+    # csv precision 暂存到 hifp4_golden_mod 供 compare 插件读取
+    hifp4_golden_mod._csv_precision_tolerances = kwargs.get("precision_tolerances")
+    hifp4_golden_mod._csv_absolute_precision = kwargs.get("absolute_precision")
+
+    # cu_seqlens/seqused 的真实值由 inputs.py in-place 写入 tensor slot (_t)
+    cu_seqlens_q_list = _tolist_t(cu_seqlens_q_t)
+    cu_seqlens_kv_list = _tolist_t(cu_seqlens_kv_t)
+    if isinstance(seqused_q_t, numpy.ndarray):
+        seqused_q_t = torch.from_numpy(seqused_q_t)
+    seqused_q_list = _tolist_t(seqused_q_t)
+    if isinstance(seqused_kv_t, numpy.ndarray):
+        seqused_kv_t = torch.from_numpy(seqused_kv_t)
+    seqused_kv_list = _tolist_t(seqused_kv_t)
+
+    actual_seq_q = (
+        list(seqused_q_list)
+        if (seqused_q_list is not None and len(seqused_q_list) > 0)
+        else _cu_seqlens_to_actual(cu_seqlens_q_list)
+    )
+    actual_seq_kv = (
+        list(seqused_kv_list)
+        if (seqused_kv_list is not None and len(seqused_kv_list) > 0)
+        else _cu_seqlens_to_actual(cu_seqlens_kv_list)
+    )
+
+    # HiFP4 仅支持 BNSD, 不感知 cu_seqlens_q/kv
+    # B 推导优先级: cu_seqlens_q (len-1) → seqused_q (len) → batch_size attr → q.shape[0]
+    if cu_seqlens_q_list is not None and len(cu_seqlens_q_list) >= 2:
+        B = max(1, len(cu_seqlens_q_list) - 1)
+    elif seqused_q_list is not None and len(seqused_q_list) > 0:
+        B = len(seqused_q_list)
+    else:
+        _bs_attr = kwargs.get("batch_size")
+        if _bs_attr is not None and int(_bs_attr) > 0:
+            B = int(_bs_attr)
+        elif hasattr(q, "shape") and q.ndim >= 4:
+            B = int(q.shape[0])
+        else:
+            B = 1
+
+    p_scale_value = kwargs.get("p_scale_value", 1.0)
+    if isinstance(p_scale_value, torch.Tensor):
+        p_scale_value = float(p_scale_value.item())
+    else:
+        p_scale_value = float(p_scale_value)
+
+    _apply_hifp4_golden_globals(
+        {
+            "B": B,
+            "N_q": N_q,
+            "N_kv": N_kv,
+            "D": D,
+            "cu_seqlens_q": cu_seqlens_q_list,
+            "cu_seqlens_kv": cu_seqlens_kv_list,
+            "seqused_q": seqused_q_list,
+            "seqused_kv": seqused_kv_list,
+            "max_seqlen_q": max_seqlen_q,
+            "max_seqlen_kv": max_seqlen_kv,
+            "enable_pa": enable_pa,
+            "kv_cache_layout": kv_cache_layout,
+            "block_size": block_size,
+            "mask_mode": mask_mode,
+            "q_scale_layout": q_scale_layout,
+            "enable_lse": enable_lse,
+            "input_layout": input_layout,
+            "is_contiguous": is_contiguous,
+            "device_id": device_id,
+            "graph_path": graph_path,
+            "softmax_scale": softmax_scale,
+            "p_scale_value": p_scale_value,
+        }
+    )
+
+    # hifloat4 (unpacked) → packed uint8
+    q_np = q.numpy() if isinstance(q, torch.Tensor) else numpy.asarray(q)
+    k_np = k.numpy() if isinstance(k, torch.Tensor) else numpy.asarray(k)
+    v_np = v.numpy() if isinstance(v, torch.Tensor) else numpy.asarray(v)
+    q_np = hifp4_golden_mod._pack_hifloat4_to_uint8(q_np)
+    k_np = hifp4_golden_mod._pack_hifloat4_to_uint8(k_np)
+    v_np = hifp4_golden_mod._pack_hifloat4_to_uint8(v_np)
+
+    # descale: float32 bitcast (32-bit 三级量化 scale), 直接转 numpy
+    dq_q_np = (
+        dequant_scale_q.numpy()
+        if isinstance(dequant_scale_q, torch.Tensor)
+        else numpy.asarray(dequant_scale_q)
+    )
+    dq_k_np = (
+        dequant_scale_k.numpy()
+        if isinstance(dequant_scale_k, torch.Tensor)
+        else numpy.asarray(dequant_scale_k)
+    )
+    dq_v_np = (
+        dequant_scale_v.numpy()
+        if isinstance(dequant_scale_v, torch.Tensor)
+        else numpy.asarray(dequant_scale_v)
+    )
+
+    p_scale_torch = torch.tensor([p_scale_value], dtype=torch.float32)
+
+    # ----- 调 cpu_hifp4_golden (BNSD fp4 + 32bit scale) -----
+    cpu_out, cpu_lse = hifp4_golden_mod.cpu_hifp4_golden(
+        q_np,
+        k_np,
+        v_np,
+        dq_q_np,
+        dq_k_np,
+        dq_v_np,
+        actual_seq_q,
+        actual_seq_kv,
+        p_scale=p_scale_torch,
+    )
+
+    # cpu_out 已是 torch.bfloat16 tensor; cpu_lse 是 numpy → 转 torch
+    if cpu_lse is not None and not isinstance(cpu_lse, torch.Tensor):
+        cpu_lse = torch.from_numpy(numpy.ascontiguousarray(cpu_lse)).to(torch.float32)
+
+    compare_layout = "TND" if enable_pa else input_layout
+    if compare_layout == "BNSD":
+        result = [cpu_out, None]
+        if enable_lse and cpu_lse is not None:
+            result = [cpu_out, cpu_lse]
+    else:
+        cpu_out_aligned = mxfp8_golden_mod.convert_q_bnsd_to_layout(
+            cpu_out,
+            actual_seq_q,
+            compare_layout,
+            cu_seqlens=cu_seqlens_q_list if enable_pa else None,
+        )
+        if enable_lse and cpu_lse is not None:
+            cpu_lse_aligned = mxfp8_golden_mod.convert_q_bnsd_to_layout(
+                cpu_lse,
+                actual_seq_q,
+                compare_layout,
+                cu_seqlens=cu_seqlens_q_list if enable_pa else None,
+            )
+            if cpu_lse_aligned.ndim == 3 and cpu_lse_aligned.shape[-1] == 1:
+                cpu_lse_aligned = cpu_lse_aligned.squeeze(-1).contiguous()
+            if compare_layout == "TND" and cpu_lse_aligned.ndim == 2:
+                cpu_lse_aligned = cpu_lse_aligned.permute(1, 0).contiguous()
+            result = [cpu_out_aligned, cpu_lse_aligned]
+        else:
+            result = [cpu_out_aligned, None]
+
+    return result

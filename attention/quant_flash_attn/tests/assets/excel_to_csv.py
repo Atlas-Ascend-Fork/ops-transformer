@@ -104,6 +104,12 @@ CSV_PROFILES_MXFP8 = [
     ("qfa_mxfp8_excel.csv", API_NAME, ""),
 ]
 
+# HiFP4 (quant_mode=10): 1 个 csv, api_name 与 testcase 均无后缀
+CSV_PROFILES_HIFP4 = [
+    ("qfa_hifp4_excel.csv", API_NAME, ""),
+]
+
+
 # 每个 mode 1 个 csv 的 api_name 和 testcase_name 后缀 (GQA FP8 全量化, quant_mode=6)
 # api_name 与 MXFP8 相同 (内部按 quant_mode 分支),
 # 仅 CSV 文件名和 testcase 后缀区分, 避免与 mxfp8 testcase 重名。
@@ -128,6 +134,8 @@ DTYPE_MAP = {
     "FLOAT8_E8M0": "float8_e8m0",
     "FP8_E8M0": "float8_e8m0",
     "FLOAT4_E2M1": "float4_e2m1",
+    "HIFLOAT4": "hifloat4",
+    "HIF4": "hifloat4",
     "HIFLOAT8": "uint8",
     "HFLOAT8": "uint8",
     "BF16": "bfloat16",
@@ -355,6 +363,19 @@ def _map_dtype_or(s, default):
 # -----------------------------------------------------------------------------------------------------------
 # 每行映射：excel row → csv record
 # -----------------------------------------------------------------------------------------------------------
+def _is_hifp4_row(row, cols):
+    """判断该行是否为 HiFP4 用例: quant_mode=10 或 q_dtype 含 HIFLOAT4/HIF4。"""
+    qm = _str_to_int(row.get(cols.get("quant_mode")))
+    if qm == 10:
+        return True
+    q_dtype = _strip_or_none(row.get(cols.get("q_dtype")))
+    if q_dtype:
+        ud = q_dtype.upper()
+        if "HIFLOAT4" in ud or "HIF4" in ud:
+            return True
+    return False
+
+
 def _derive_vtail_slots(attrs, quant_mode):
     """enable_v_tail 时推导 v_tail 三件套 slot (15-17) 的 (shapes, dtypes, dranges)。
 
@@ -441,6 +462,13 @@ def _build_tensor_lists(row, cols, quant_mode, attrs=None):
 
     descale_default = "float32" if quant_mode in (6, 0) else "float8_e8m0"
 
+    is_hifp4 = _is_hifp4_row(row, cols)
+    if is_hifp4:
+        descale_default = "float32"
+        qkv_default_dtype = "hifloat4"
+    else:
+        qkv_default_dtype = "float8_e4m3fn"
+
     for (
         shape_col,
         dtype_col,
@@ -448,6 +476,11 @@ def _build_tensor_lists(row, cols, quant_mode, attrs=None):
         default_dtype,
         use_real_drange,
     ) in _TENSOR_SPECS:
+        # q/k/v dtype: HiFP4 → hifloat4, MXFP8 → float8_e4m3fn
+        if shape_col in ("q_shape", "k_shape", "v_shape"):
+            default_dtype = qkv_default_dtype
+        # descale dtype: HiFP4 → float32 (32-bit packed scale bitcast),
+        #                MXFP8 → float8_e8m0
         # descale dtype 缺省按 quant_mode 分支
         if shape_col in ("q_descale_shape", "k_descale_shape", "v_descale_shape"):
             default_dtype = descale_default
@@ -485,8 +518,8 @@ def _build_tensor_lists(row, cols, quant_mode, attrs=None):
         ):
             shape = (1,)
 
-        # GQA FP8 / HIF8: p_scale 空 shape → 标量 (1,) float32（与原脚本分支一致）
-        if shape_col == "p_scale_shape" and shape == (0,) and quant_mode in (6, 0):
+        # GQA FP8 / HIF8 / HiFP4: p_scale 空 shape → 标量 (1,) float32（与原脚本分支一致）
+        if shape_col == "p_scale_shape" and shape == (0,) and quant_mode in (6, 0, 10):
             shape = (1,)
             dtype = "float32"
 
@@ -658,7 +691,12 @@ def _build_attributes(row, cols):
     if layout_q_descale is None:
         _qm_raw = _str_to_int(row.get(cols.get("quant_mode")))
         quant_mode = _qm_raw if _qm_raw is not None else 1
-        layout_q_descale = "BSND" if quant_mode == 0 else "TND"
+        if quant_mode == 0:
+            layout_q_descale = "BSND"
+        elif quant_mode == 10:
+            layout_q_descale = "BNSD"
+        else:
+            layout_q_descale = "TND"
     # batch_size: Excel pure passthrough (可为 -1/正整数/None)，透传给 metadata 的 batch_size。
     # wrapper 内部从 cu_seqlens_q 推导正整数 B 供 inputs/golden 生成 BNSD 张量。
     _set_force(
@@ -773,7 +811,7 @@ def _parse_sheet_arg(s):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="redline.xlsx → 每个 mode 1 个 ttk 标准 CSV (mxfp8 / gqa_fp8 / hif8)"
+        description="redline.xlsx → 每个 mode 1 个 ttk 标准 CSV (mxfp8 / gqa_fp8 / hif8 / hifp4)"
     )
     parser.add_argument(
         "--sheet",
@@ -829,6 +867,9 @@ def main():
     elif first_qm == 0:
         profiles = CSV_PROFILES_HIF8
         mode_label = "HIF8 (quant_mode=0)"
+    elif _is_hifp4_row(data_rows[0], cols):
+        profiles = CSV_PROFILES_HIFP4
+        mode_label = "HiFP4 (quant_mode=10)"
     else:
         profiles = CSV_PROFILES_MXFP8
         mode_label = "MXFP8 (quant_mode=1)"

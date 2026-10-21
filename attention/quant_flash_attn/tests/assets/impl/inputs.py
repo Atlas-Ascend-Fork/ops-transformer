@@ -25,6 +25,7 @@ if _TESTS_DIR not in sys.path:
 
 import quant_flash_attn_golden as mxfp8_golden_mod
 import quant_flash_attn_fp8_golden as fp8_golden_mod
+import quant_flash_attn_hifp4_golden as hifp4_golden_mod
 
 logger = logging.getLogger(__name__)
 
@@ -1185,6 +1186,407 @@ def generate_qfa_hif8_inputs(
     logger.info(
         "[INPUTS] HIF8 in-place wrote q/k/v (q=%s), fp32 descale (dq=%s, dk=%s, dv=%s), "
         "fp32 p_scale, int32 block_table (pa=False)",
+        tuple(q.shape),
+        tuple(dequant_scale_q.shape),
+        tuple(dequant_scale_k.shape),
+        tuple(dequant_scale_v.shape),
+    )
+
+
+# ==============================================================================
+# HiFP4 输入生成插件
+# ==============================================================================
+
+try:
+    from ml_dtypes import bfloat16 as np_bfloat16
+except ImportError:
+    np_bfloat16 = numpy.float32
+
+_HIFP4_SEED_MAP = {"q": 54, "k": 3, "v": 4}
+_HIFP4_GROUP_SIZE = 64
+
+
+def _hifp4_to_bf16(x):
+    x = numpy.asarray(x, dtype=numpy.float64)
+    tmp = numpy.abs(x)
+    e = numpy.floor(numpy.log2(tmp + 2.0 ** (-1000)))
+    return numpy.round(x * 2.0 ** (-e + 7)) * 2.0 ** (e - 7)
+
+
+def _hifp4_bf16_to_e6m2(x):
+    x = numpy.asarray(x, dtype=numpy.float64)
+    max_val = 2.0**15 * 1.5
+    min_val = 2.0 ** (-48)
+    x = numpy.where(x > max_val, max_val, x)
+    x = numpy.where(x < min_val, min_val, x)
+    e = numpy.floor(numpy.log2(x))
+    return numpy.round(x * 2.0 ** (-e + 2)) * 2.0 ** (-2 + e)
+
+
+def _hifp4_float_to_e6m2_bits(x):
+    x = numpy.asarray(x, dtype=numpy.float64)
+    max_val = 2.0**15 * 1.5
+    min_val = 2.0 ** (-48)
+    nan_val = 2.0**15 * 1.75
+    xc = numpy.where(numpy.isnan(x), max_val, x)
+    xc = numpy.where(xc > max_val, max_val, xc)
+    xc = numpy.where(xc < min_val, min_val, xc)
+    m, e = numpy.frexp(xc)
+    f = m * 2.0
+    exp = e - 1
+    r = numpy.clip(numpy.round(f * 4.0).astype(numpy.int64), 4, 8)
+    carry = r == 8
+    exp = numpy.where(carry, exp + 1, exp)
+    m_val = numpy.where(carry, 0, r - 4)
+    code = ((exp + 48).astype(numpy.int64) << 2) | m_val
+    code = code.astype(numpy.uint32)
+    nan_mask = numpy.isnan(x) | numpy.isclose(x, nan_val, rtol=1e-12, atol=1e-12)
+    return numpy.where(nan_mask, numpy.uint32(0xFF), code)
+
+
+def _hifp4_combine_to_32bit(e6m2_bits, e1_8, e1_16):
+    w8 = numpy.array([1 << (7 - i) for i in range(8)], dtype=numpy.uint32)
+    w16 = numpy.array([1 << (15 - i) for i in range(16)], dtype=numpy.uint32)
+    int8 = (e1_8.astype(numpy.uint32) * w8).sum(axis=-1, dtype=numpy.uint32)
+    int16 = (e1_16.astype(numpy.uint32) * w16).sum(axis=-1, dtype=numpy.uint32)
+    return (e6m2_bits.astype(numpy.uint32) | (int8 << 8) | (int16 << 16)).astype(
+        numpy.uint32
+    )
+
+
+def _hifp4_three_level_quant(x_2d, group_size=64):
+    x = numpy.asarray(x_2d, dtype=numpy.float64)
+    Mi, Ni = x.shape
+    g = group_size
+    ncnt = Ni // g
+    sign = numpy.where(x < 0, -1.0, 1.0).reshape(Mi, ncnt, g)
+    abs_grp = numpy.abs(x).reshape(Mi, ncnt, g)
+    v16 = abs_grp.reshape(Mi, ncnt, 16, g // 16).max(axis=-1)
+    v8 = v16.reshape(Mi, ncnt, 8, 2).max(axis=-1)
+    vmax = v8.max(axis=-1)
+    vmax_safe = numpy.where(vmax == 0, 2.0 ** (-48), vmax)
+    const_rec = _hifp4_to_bf16(1.0 / 7.0)
+    sf = _hifp4_to_bf16(vmax_safe * const_rec)
+    e6m2 = _hifp4_bf16_to_e6m2(sf)
+    e6m2_bits = _hifp4_float_to_e6m2_bits(sf)
+    rec_e6m2 = _hifp4_to_bf16(1.0 / e6m2)
+    e1_8 = (v8 * rec_e6m2[..., None] >= 4.0).astype(numpy.uint8)
+    e1_8x2 = numpy.repeat(e1_8, 2, axis=-1)
+    e1_16 = (
+        v16 * rec_e6m2[..., None] * numpy.power(2.0, -e1_8x2.astype(numpy.float64))
+        >= 2.0
+    ).astype(numpy.uint8)
+    de16 = e1_16.astype(numpy.int64) + e1_8x2.astype(numpy.int64)
+    de64 = numpy.repeat(de16, g // 16, axis=-1)
+    ng = 2
+    abs_bf16 = np_bfloat16(abs_grp)
+    rec_bf16 = np_bfloat16(rec_e6m2[..., None])
+    prod = abs_bf16 * rec_bf16 * numpy.power(2.0, -de64 + ng)
+    in_grp = numpy.floor(prod + 0.5) * (2.0 ** (-ng))
+    in_grp = numpy.where(in_grp >= 2.0, 2.0 - 2.0 ** (-ng), in_grp)
+    x_hifp4 = (sign * in_grp).reshape(Mi, Ni)
+    scale = _hifp4_combine_to_32bit(e6m2_bits, e1_8[:, :, ::-1], e1_16[:, :, ::-1])
+    return x_hifp4, scale
+
+
+def _hifp4_pack_fp4_e1m2(x_hifp4):
+    x = numpy.asarray(x_hifp4, dtype=numpy.float64)
+    sign = (x < 0).astype(numpy.uint8)
+    abs_val = numpy.abs(x)
+    code = numpy.clip(numpy.round(abs_val * 4.0).astype(numpy.int64), 0, 7).astype(
+        numpy.uint8
+    )
+    fp4_val = (sign << 3) | code
+    flat = fp4_val.reshape(-1)
+    packed = (flat[1::2] << 4) | flat[0::2]
+    out_shape = tuple(x_hifp4.shape[:-1]) + (x_hifp4.shape[-1] // 2,)
+    return packed.reshape(out_shape).astype(numpy.uint8)
+
+
+def _hifp4_quant_along_d(tensor_bnsd, group_size=64):
+    B, N, S, D = tensor_bnsd.shape
+    g = group_size
+    if S == 0 or D == 0:
+        return (
+            numpy.zeros((B, N, S, D // 2), dtype=numpy.uint8),
+            numpy.zeros((B, N, S, D // g), dtype=numpy.float32),
+        )
+    flat = tensor_bnsd.reshape(B * N * S, D).astype(numpy.float64)
+    x_h, scale_h = _hifp4_three_level_quant(flat, g)
+    x_h = x_h.reshape(B, N, S, D).astype(np_bfloat16)
+    fp4 = _hifp4_pack_fp4_e1m2(x_h)
+    scale = numpy.ascontiguousarray(scale_h.reshape(B, N, S, D // g)).view(
+        numpy.float32
+    )
+    return fp4, scale
+
+
+def _hifp4_quant_v_along_s(tensor_bnsd, group_size=64):
+    B, N, S, D = tensor_bnsd.shape
+    g = group_size
+    n_groups = math.ceil(S / g) if S > 0 else 0
+    if S == 0 or D == 0:
+        return (
+            numpy.zeros((B, N, S, D // 2), dtype=numpy.uint8),
+            numpy.zeros((B, N, D, n_groups), dtype=numpy.float32),
+        )
+    s_pad = n_groups * g
+    flat = tensor_bnsd.transpose(0, 1, 3, 2).reshape(B * N * D, S).astype(numpy.float64)
+    if s_pad > S:
+        flat_pad = numpy.zeros((B * N * D, s_pad), dtype=numpy.float64)
+        flat_pad[:, :S] = flat
+    else:
+        flat_pad = flat
+    x_h, scale_h = _hifp4_three_level_quant(flat_pad, g)
+    x_h = x_h[:, :S].reshape(B, N, D, S).transpose(0, 1, 3, 2)
+    x_h = numpy.ascontiguousarray(x_h).astype(np_bfloat16)
+    fp4 = _hifp4_pack_fp4_e1m2(x_h)
+    scale = numpy.ascontiguousarray(scale_h.reshape(B, N, D, n_groups)).view(
+        numpy.float32
+    )
+    return fp4, scale
+
+
+def _hifp4_inplace_write(dst, src_np, slot_name):
+    """hifloat4 (unpacked 4-bit) storage 写入: 拆包 packed uint8 → 1 byte/fp4。"""
+    dst_dtype_str = str(getattr(dst, "dtype", ""))
+    if "float4" in dst_dtype_str or "hifloat4" in dst_dtype_str:
+        _flags = getattr(dst, "flags", None)
+        if _flags is not None:
+            _c_contig = (
+                _flags["C_CONTIGUOUS"]
+                if not isinstance(_flags, dict)
+                else _flags.get("C_CONTIGUOUS", True)
+            )
+            if not bool(_c_contig):
+                raise ValueError(
+                    f"[HIFP4 INPUTS] {slot_name} hifloat4 storage must be C-contiguous"
+                )
+        dst_u8 = numpy.ascontiguousarray(dst).view(numpy.uint8)
+        dst_u8[..., 0::2] = src_np & 0x0F
+        dst_u8[..., 1::2] = (src_np >> 4) & 0x0F
+        return
+    if isinstance(dst, torch.Tensor):
+        dst_np = (
+            dst.view(torch.uint8).numpy() if "float8" in str(dst.dtype) else dst.numpy()
+        )
+        if dst_np.dtype != src_np.dtype:
+            src_np = src_np.astype(dst_np.dtype)
+        if tuple(dst_np.shape) != tuple(src_np.shape):
+            raise ValueError(
+                f"[HIFP4 INPUTS] {slot_name} shape mismatch: CSV {tuple(dst_np.shape)} != {tuple(src_np.shape)}"
+            )
+        dst_np[...] = src_np
+    else:
+        if dst.dtype != src_np.dtype:
+            src_np = src_np.astype(dst.dtype)
+        if tuple(dst.shape) != tuple(src_np.shape):
+            raise ValueError(
+                f"[HIFP4 INPUTS] {slot_name} shape mismatch: CSV {tuple(dst.shape)} != {tuple(src_np.shape)}"
+            )
+        dst[...] = src_np
+
+
+def generate_qfa_hifp4_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dequant_scale_q: torch.Tensor,
+    dequant_scale_k: torch.Tensor,
+    dequant_scale_v: torch.Tensor,
+    quant_mode: int,
+    block_table: torch.Tensor,
+    p_scale: torch.Tensor,
+    cu_seqlens_q_t: torch.Tensor,
+    cu_seqlens_kv_t: torch.Tensor,
+    seqused_q_t: torch.Tensor,
+    seqused_kv_t: torch.Tensor,
+    sinks_t: torch.Tensor,
+    attn_mask_t: torch.Tensor,
+    metadata_t: torch.Tensor,
+    v_tail: torch.Tensor = None,
+    block_table_tail: torch.Tensor = None,
+    seqused_v_tail: torch.Tensor = None,
+    softmax_scale: float = 1.0,
+    mask_mode: int = 0,
+    win_left: int = -1,
+    win_right: int = -1,
+    max_seqlen_q: int = -1,
+    max_seqlen_kv: int = -1,
+    layout_q: str = "BSND",
+    layout_q_descale: str = "BSND",
+    layout_kv: str = "BSND",
+    layout_out: str = "BSND",
+    return_softmax_lse: bool = False,
+    **kwargs,
+):
+    """HiFP4 输入生成插件 (quant_mode=10)。
+
+    与 generate_qfa_mxfp8_inputs 同签名 (op-schema 直调), hifp4 专用:
+      - bf16 BNSD random → 三阶量化 (E6M2 + E1_8 + E1_16) → fp4 e1m2 (packed uint8)
+      - scale: 32-bit 位打包, 以 fp32 存储 (bitcast)
+      - hifloat4 storage: 拆包 packed uint8 → 1 byte/fp4 (code in low nibble)
+    """
+    N_q = kwargs.get("N_q")
+    N_kv = kwargs.get("N_kv")
+    D = kwargs.get("D")
+    enable_pa = bool(kwargs.get("enable_pa", False))
+    kv_cache_layout = kwargs.get("kv_cache_layout") or layout_kv
+    block_size = kwargs.get("block_size", 0)
+    q_scale_layout = kwargs.get("q_scale_layout") or layout_q_descale
+    cu_seqlens_q = kwargs.get("cu_seqlens_q_values")
+    cu_seqlens_kv = kwargs.get("cu_seqlens_kv_values")
+    seqused_q = kwargs.get("seqused_q_values")
+    seqused_kv = kwargs.get("seqused_kv_values")
+    input_layout = kwargs.get("input_layout", "BNSD")
+
+    # HiFP4 仅支持 BNSD, 不感知 cu_seqlens_q/kv
+    # B 推导优先级: cu_seqlens_q (len-1) → seqused_q (len) → batch_size attr → q.shape[0]
+    cu_seqlens_q_list = list(cu_seqlens_q) if cu_seqlens_q is not None else None
+    seqused_q_list = (
+        list(seqused_q) if (seqused_q is not None and len(seqused_q) > 0) else []
+    )
+    seqused_kv_list = (
+        list(seqused_kv) if (seqused_kv is not None and len(seqused_kv) > 0) else []
+    )
+
+    if cu_seqlens_q_list is not None and len(cu_seqlens_q_list) >= 2:
+        B = max(1, len(cu_seqlens_q_list) - 1)
+    elif seqused_q_list:
+        B = len(seqused_q_list)
+    else:
+        _bs_attr = kwargs.get("batch_size")
+        if _bs_attr is not None and int(_bs_attr) > 0:
+            B = int(_bs_attr)
+        elif hasattr(q, "shape") and q.ndim >= 4:
+            B = int(q.shape[0])
+        else:
+            B = 1
+
+    # HiFP4 BNSD: S 维对所有 batch 统一
+    if len(set(seqused_q_list)) > 1:
+        raise ValueError(
+            f"[HIFP4 INPUTS] BNSD requires uniform seqused_q across batches, got {seqused_q_list}"
+        )
+    if len(set(seqused_kv_list)) > 1:
+        raise ValueError(
+            f"[HIFP4 INPUTS] BNSD requires uniform seqused_kv across batches, got {seqused_kv_list}"
+        )
+
+    # max_sq/max_skv 优先级: seqused → max_seqlen → tensor S 维
+    s1_size = int(q.shape[2]) if (hasattr(q, "ndim") and q.ndim >= 3) else 0
+    s2_size = int(k.shape[2]) if (hasattr(k, "ndim") and k.ndim >= 3) else 0
+    max_seqlen_q_val = -1 if max_seqlen_q is None else int(max_seqlen_q)
+    max_seqlen_kv_val = -1 if max_seqlen_kv is None else int(max_seqlen_kv)
+
+    if seqused_q_list:
+        max_sq = max(seqused_q_list)
+    elif max_seqlen_q_val >= 0:
+        max_sq = max_seqlen_q_val
+    else:
+        max_sq = s1_size
+    if seqused_kv_list:
+        max_skv = max(seqused_kv_list)
+    elif max_seqlen_kv_val >= 0:
+        max_skv = max_seqlen_kv_val
+    else:
+        max_skv = s2_size
+    if max_sq <= 0:
+        max_sq = D
+    if max_skv <= 0:
+        max_skv = D
+
+    for gkey, gval in [
+        ("B", B),
+        ("N_q", N_q),
+        ("N_kv", N_kv),
+        ("D", D),
+        ("HIFP4_GROUP_SIZE", _HIFP4_GROUP_SIZE),
+        ("CU_SEQLENS_Q", None),
+        ("CU_SEQLENS_KV", None),
+        ("SEQUSED_Q", seqused_q_list if seqused_q_list else None),
+        ("SEQUSED_KV", seqused_kv_list if seqused_kv_list else None),
+        ("MAX_SEQLEN_Q", max_sq),
+        ("MAX_SEQLEN_KV", max_skv),
+        ("ENABLE_PA", enable_pa),
+        ("KV_CACHE_LAYOUT", kv_cache_layout),
+        ("BLOCK_SIZE", block_size),
+        ("SPARSE_MODE", mask_mode),
+        ("Q_SCALE_LAYOUT", q_scale_layout),
+        ("INPUT_LAYOUT", input_layout),
+        ("SOFTMAX_SCALE", softmax_scale),
+    ]:
+        setattr(hifp4_golden_mod, gkey, gval)
+
+    G = _HIFP4_GROUP_SIZE
+
+    # csv input_data_ranges -> bf16 q/k/v 数据范围
+    input_ranges = kwargs.get("input_ranges")
+
+    def _range_of(idx, default=(-1.0, 1.0)):
+        if input_ranges is None or idx >= len(input_ranges):
+            return default
+        r = input_ranges[idx]
+        if r is None:
+            return default
+        return (float(r[0]), float(r[1]))
+
+    rq_min, rq_max = _range_of(0)
+    rk_min, rk_max = _range_of(1)
+    rv_min, rv_max = _range_of(2)
+
+    # ----- Step 1: 生成 bf16 BNSD random -----
+    torch.manual_seed(_HIFP4_SEED_MAP["q"])
+    q_bf16 = (
+        torch.rand(B, N_q, max_sq, D, dtype=torch.bfloat16) * (rq_max - rq_min) + rq_min
+    )
+    torch.manual_seed(_HIFP4_SEED_MAP["k"])
+    k_bf16 = (
+        torch.rand(B, N_kv, max_skv, D, dtype=torch.bfloat16) * (rk_max - rk_min)
+        + rk_min
+    )
+    torch.manual_seed(_HIFP4_SEED_MAP["v"])
+    v_bf16 = (
+        torch.rand(B, N_kv, max_skv, D, dtype=torch.bfloat16) * (rv_max - rv_min)
+        + rv_min
+    )
+
+    q_bf16_np = q_bf16.to(torch.float32).numpy()
+    k_bf16_np = k_bf16.to(torch.float32).numpy()
+    v_bf16_np = v_bf16.to(torch.float32).numpy()
+
+    # ----- Step 2: 三阶量化 bf16 -> fp4 e1m2 (packed uint8) + uint32 scale -----
+    q_fp4, dequant_scale_q_np = _hifp4_quant_along_d(q_bf16_np, G)
+    k_fp4, k_antiquant_scale_np = _hifp4_quant_along_d(k_bf16_np, G)
+    v_fp4, v_antiquant_scale_np = _hifp4_quant_v_along_s(v_bf16_np, G)
+
+    # ----- Step 3: in-place 写入 CSV tensor slots -----
+    _hifp4_inplace_write(q, q_fp4, "q (slot 0)")
+    _hifp4_inplace_write(k, k_fp4, "k (slot 1)")
+    _hifp4_inplace_write(v, v_fp4, "v (slot 2)")
+    _hifp4_inplace_write(dequant_scale_q, dequant_scale_q_np, "descale_q (slot 3)")
+    _hifp4_inplace_write(dequant_scale_k, k_antiquant_scale_np, "descale_k (slot 4)")
+    _hifp4_inplace_write(dequant_scale_v, v_antiquant_scale_np, "descale_v (slot 5)")
+
+    # p_scale
+    p_scale_value = kwargs.get("p_scale_value", 1.0)
+    if isinstance(p_scale_value, torch.Tensor):
+        p_scale_value = float(p_scale_value.item())
+    p_scale[...] = float(p_scale_value)
+
+    # block_table
+    if block_table is not None:
+        block_table[...] = 0
+
+    # cu_seqlens/seqused: 用 attributes 真实值覆盖 ttk 随机生成
+    _write_int32_list(cu_seqlens_q_t, cu_seqlens_q, "cu_seqlens_q (slot 8)")
+    _write_int32_list(cu_seqlens_kv_t, cu_seqlens_kv, "cu_seqlens_kv (slot 9)")
+    _write_int32_list(seqused_q_t, seqused_q, "seqused_q (slot 10)")
+    _write_int32_list(seqused_kv_t, seqused_kv, "seqused_kv (slot 11)")
+    _write_causal_mask(attn_mask_t, mask_mode, kwargs.get("attn_mask_shape"))
+
+    logger.info(
+        "[HIFP4 INPUTS] wrote fp4 q/k/v (q=%s), fp32 three-level scale (dq=%s, dk=%s, dv=%s)",
         tuple(q.shape),
         tuple(dequant_scale_q.shape),
         tuple(dequant_scale_k.shape),
