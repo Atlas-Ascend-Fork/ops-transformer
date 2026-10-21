@@ -11,14 +11,6 @@
 /*!
  * \file paged_attention_checker.cpp
  * \brief Checker for PagedAttention parameters (文档约束: Paged Attention参数组)
- *
- * kv layout is PA (PA_BBND/PA_BNBD/PA_NZ) -> block_table is REQUIRED (INT32, [b, max_blocks]).
- * Per-batch block counts must be consistent with cache_seqlens: each batch's
- * KV length must fit in its block_table row (len <= dim1 * block_size), which
- * bounds the needed blocks by max_block_num (block_table dim1). The value
- * cross-check runs only when host tensor data is present (same guard as the
- * seq_len checker / FIA tiling). v contiguity checks do not exist in MLA:
- * k_cache is a single kv buffer (k == v).
  */
 
 #include <map>
@@ -41,14 +33,10 @@ using namespace arch35MLA;
 
 ge::graphStatus PagedAttentionChecker::CheckSinglePara(const FlashMlaTilingInfo& faInfo)
 {
-    if (!faInfo.pageAttentionFlag) {
-        return ge::GRAPH_SUCCESS;
-    }
-
     OP_CHECK_IF(
-        faInfo.blockSize != 128,
+        faInfo.blockSize < 1 || faInfo.blockSize > 1024,
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(faInfo.opName, "block_size", std::to_string(faInfo.blockSize).c_str(),
-                                              "The value of block_size must be 128"),
+                                              "The value of block_size must be in [1, 1024]"),
         return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(
@@ -58,7 +46,6 @@ ge::graphStatus PagedAttentionChecker::CheckSinglePara(const FlashMlaTilingInfo&
         return ge::GRAPH_FAILED);
 
     auto& blockTableTensor = faInfo.opParamInfo.blockTable.tensor;
-    // 这里和存在性校验冲突了，但是为了在单参数校验校验dtype需要先判空
     OP_CHECK_IF(blockTableTensor == nullptr, OP_LOGE_WITH_INVALID_INPUT(faInfo.opName, "block_table"),
                 return ge::GRAPH_FAILED);
 
@@ -86,17 +73,6 @@ ge::graphStatus PagedAttentionChecker::CheckSinglePara(const FlashMlaTilingInfo&
 
 ge::graphStatus PagedAttentionChecker::CheckParaExistence(const FlashMlaTilingInfo& faInfo)
 {
-    if (!faInfo.pageAttentionFlag) {
-        // 非 PA 模式下，block_table 不应传入
-        auto& blockTableTensor = faInfo.opParamInfo.blockTable.tensor;
-        OP_CHECK_IF(blockTableTensor != nullptr,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                        faInfo.opName, "block_table", "provided",
-                        "When layout_kv is not PA (PA_BBND/PA_BNBD/PA_NZ), block_table must not be provided"),
-                    return ge::GRAPH_FAILED);
-        return ge::GRAPH_SUCCESS;
-    }
-
     auto& blockTableTensor = faInfo.opParamInfo.blockTable.tensor;
     OP_CHECK_IF(
         blockTableTensor == nullptr,
@@ -110,16 +86,8 @@ ge::graphStatus PagedAttentionChecker::CheckParaExistence(const FlashMlaTilingIn
 
 ge::graphStatus PagedAttentionChecker::CheckMultiPara(const FlashMlaTilingInfo& faInfo)
 {
-    if (!faInfo.pageAttentionFlag) {
-        OP_CHECK_IF(faInfo.keyNonContigDim != -1,
-                    OP_LOGE(faInfo.opName, "In non-PA scenarios, k_cache must be contiguous."),
-                    return ge::GRAPH_FAILED);
-        return ge::GRAPH_SUCCESS;
-    }
-
     auto& blockTableTensor = faInfo.opParamInfo.blockTable.tensor;
     int64_t dim0 = blockTableTensor->GetStorageShape().GetDim(0);
-    int64_t dim1 = blockTableTensor->GetStorageShape().GetDim(1);
     if (dim0 != faInfo.bSize) {
         std::string shapeStr = Ops::Base::ToString(blockTableTensor->GetStorageShape());
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
@@ -128,14 +96,12 @@ ge::graphStatus PagedAttentionChecker::CheckMultiPara(const FlashMlaTilingInfo& 
         return ge::GRAPH_FAILED;
     }
 
-    OP_CHECK_IF(dim1 <= 0,
+    OP_CHECK_IF(faInfo.maxBlockNumPerBatch <= 0,
                 OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
                     faInfo.opName, "block_table", Ops::Base::ToString(blockTableTensor->GetStorageShape()).c_str(),
                     "The second dim of block_table (max block num per batch) must be greater than 0"),
                 return ge::GRAPH_FAILED);
 
-    // PA 场景下 kvcache 非连续stride校验 (dimIndex由parser预计算); k_cache 是唯一 kv buffer
-    // PA_BBND（batch-block 序）仅允许 dim0 非连续（block 表索引维）；PA_BNBD/PA_NZ（head-block 序）允许 dim0|dim1
     if (faInfo.hasViewStride && faInfo.kvLayout == FlashMlaLayout::PA_BBND) {
         OP_CHECK_IF((faInfo.keyNonContigDim > 0),
                     OP_LOGE(faInfo.opName,
@@ -154,9 +120,7 @@ ge::graphStatus PagedAttentionChecker::CheckMultiPara(const FlashMlaTilingInfo& 
             return ge::GRAPH_FAILED);
     }
 
-    // Per-batch block counts consistent with cache_seqlens：值级校验在 ACLNN 直调路径下
-    // 不可读（GetData 为设备指针，同 seq_len_checker），改由 kernel 分页解析器运行时兜底。
-    (void)dim1;
+    // GetData 返回设备地址，Host 不能据此检查块表内容。
     return ge::GRAPH_SUCCESS;
 }
 

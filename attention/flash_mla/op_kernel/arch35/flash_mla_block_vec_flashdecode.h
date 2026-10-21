@@ -24,8 +24,6 @@
 #include "../utils/flash_mla_type.h"
 
 namespace FlashAttnKernel {
-// ConstInfo_t 解析为 MLA 的 ConstInfoX（= ConstInfo_t<FlashMlaKernelType::NO_QUANT>）；
-// FA fd 构造与 DataCopySoftmaxLse* 模板取 ConstInfo_t，两个 struct 字段完全一致。
 using ConstInfoX = AttentionCommon::ConstInfo_t<FlashMlaKernelType::NO_QUANT>;
 using ConstInfo_t = ConstInfoX;
 
@@ -49,11 +47,9 @@ public:
     static constexpr FLASH_MLA_LAYOUT LAYOUT_OUT = FA_T::attnOutLayout;
     static constexpr bool PAGE_ATTENTION = FA_T::pageAttention;
     static constexpr bool HAS_MASK = FA_T::hasMask;
-    // =================================类型定义区=================================
     using T = float;
 
 private:
-    // =================================常量区=================================
     static constexpr int64_t BYTE_BLOCK = 32UL;
     static constexpr int64_t REPEAT_BLOCK_BYTE = 256U;
     // Mutex ID（核内静态旗标）：需与 vecFaBlock_（同 AIV 核、同 PIPE）所用 0..8 错开，故从 9 起编
@@ -95,7 +91,6 @@ protected:
 
     uint64_t actSeqLensKv_ = 0;
     uint64_t actSeqLensQ_ = 0;
-    // ================================类成员变量====================================
     const ConstInfo_t& constInfo_;
     TaskInfoMla taskInfo_{};
 
@@ -106,15 +101,12 @@ protected:
     SeqLensToolType& seqLensTool_;
 
     static constexpr GmFormat OUT_FORMAT = GetQueryGmFormat<LAYOUT_OUT>();
-    // WITH_ZERO_HEAD 由 q 布局决定（parser 来自 q 侧 cu_seqlens，TND 带首零头）；
-    // TND→NTD 转置时 LAYOUT_OUT=NTD 但 LAYOUT_T 仍为 TND，需按 LAYOUT_T 取 true 以匹配
-    // seqLensTool_.qActSeqLensParser（ActualSeqLensParser<ACCUM, SEQLEN_T, true>）。
+    // WITH_ZERO_HEAD 由输入布局决定，TND→NTD 输出转置不能改变序列解析方式。
     using FaGmTensorOut = FaGmTensor<OUTPUT_T, OUT_FORMAT, SEQLEN_T, (LAYOUT_T == FLASH_MLA_LAYOUT::TND)>;
     FaGmTensorOut outGmTensor_;
     CopyAttenOutUbToGm<OUTPUT_T, OUT_FORMAT, GetOutUbFormat<LAYOUT_T>()> copyAttenOutUbToGm_;
 
 private:
-    // ================================FD Local Buffer区====================================
     LocalTensor<T> fdSumBuf1_;          // 6 KiB；实际占用 parts*dealRowCount*8*sizeof(float)
     LocalTensor<T> fdSumBuf2_;          // 6 KiB；实际占用 parts*dealRowCount*8*sizeof(float)
     LocalTensor<T> fdMaxBuf1_;          // 6 KiB；实际占用 parts*dealRowCount*8*sizeof(float)
@@ -184,7 +176,6 @@ public:
             fdReduceBuf_ = LocalTensor<uint8_t>(TPosition::VECIN, LSE_SUM_MAX_BYTES + 2U * BUFFER_SIZE_BYTE_16K,
                                                 BUFFER_SIZE_BYTE_16K)
                                .template ReinterpretCast<T>();
-            // fdOutputBuf_ 只需 8K：dealRowCount(8) × dSizeV_Align_(512) × sizeof(OUTPUT_T=2B)
             fdOutputBuf_ = LocalTensor<uint8_t>(TPosition::VECIN, LSE_SUM_MAX_BYTES + 3U * BUFFER_SIZE_BYTE_16K,
                                                 BUFFER_SIZE_BYTE_8K)
                                .template ReinterpretCast<OUTPUT_T>();

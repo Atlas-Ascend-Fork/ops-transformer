@@ -10,9 +10,7 @@
 
 /*!
  * \file flash_mla_block_cube.h
- * \brief arch35 flash_mla block cube MLA；
- *        静态 tensor buffer + Mutex/cross-core 显式同步。
- *        L0C：bmm2 单次 Mmad 足迹 96*256*sizeof(float) = 96 KiB，槽保持 2×128K 静态 + 2 Mutex（不得拆 4×64K）。
+ * \brief FlashMla Cube block for arch35.
  */
 #ifndef FLASH_MLA_BLOCK_CUBE_H_
 #define FLASH_MLA_BLOCK_CUBE_H_
@@ -51,7 +49,6 @@ public:
 
     using ConstInfoX = ConstInfo_t<FlashMlaKernelType::NO_QUANT>;
 
-    // ================== 核间同步 ID（与 vec 侧逐字节一致）==================
     static constexpr uint64_t CROSS_CORE_SYNC_MODE = 4U;
     static constexpr uint32_t CROSSCORE_BMM1_0 = 0U;
     static constexpr uint32_t CROSSCORE_BMM2_0 = 2U;
@@ -59,10 +56,8 @@ public:
     static constexpr uint32_t CROSSCORE_L1P_0 = 5U;
     static constexpr uint32_t CROSSCORE_L1P_1 = 6U;
     static constexpr uint32_t CROSSCORE_L1P_2 = 7U;
-    // 两个 AIV 的核间同步旗标相差 16。
     static constexpr uint32_t AIV_SYNC_OFFSET = 16U;
 
-    // ================== 核内 Mutex ID（AIC 核内 0-26 自洽）==================
     static constexpr uint32_t L0C_BUFFER_ID0 = 0U;
     static constexpr uint32_t L0C_BUFFER_ID1 = 1U;
     static constexpr uint32_t Q_L1_BUFFER_ID0 = 2U; // Q 单槽，容量 mBaseSize*576*sizeof(Q_T)
@@ -73,27 +68,19 @@ public:
     static constexpr uint32_t L0B_BUFFER_ID0 = 9U;
     static constexpr uint32_t L0B_BUFFER_ID1 = 10U;
 
-    // ================== 静态布局常量（M96、S2=112、输入元素 2 字节）==================
-    // UB CV 区（VECIN，与 vec 侧同一偏移别名）：
-    //   mm2Res 2×48K @0、mm1Res 1×24K @96K
     static constexpr uint32_t UB_MM2_RES_BUFCNT = 2U;
     static constexpr uint32_t UB_MM2_RES_BUF_BYTES = mBaseSize / CV_RATIO * 256U * sizeof(MM_T);
     static constexpr uint32_t UB_MM1_RES_BUFCNT = 1U;
     static constexpr uint32_t UB_MM1_RES_BUF_BYTES = mBaseSize / CV_RATIO * 128U * sizeof(MM_T);
-    // L1（A1）：Q 1×108K @0（576宽），KV/P 3×133K @108K（mm12RightSize；k==v，P 复用）
     static constexpr uint32_t L1_Q_BUFCNT = 1U;
     static constexpr uint32_t L1_Q_BUF_BYTES = mBaseSize * 576 * sizeof(Q_T);
     static constexpr uint32_t L1_KVP_BUFCNT = 3U;
     static constexpr uint32_t L1_KVP_BUF_BYTES = s2BaseSize * 608 * sizeof(INPUT_T);
-    // L0C（CO1）：2×128 KiB，每槽容纳 96×256 FP32 结果
     static constexpr uint32_t L0C_BUFCNT = 2U;
     static constexpr uint32_t L0C_BUF_BYTES = 128U * 1024U;
-    // L0A：首个 96 宽 Q 分块常驻 18K @0；临时 Q128 使用 24K @18K，Q112/P 使用 21K @42K。
-    // L0B：2×32K 双缓冲，独立游标跨 mm1/mm2 轮转。
     static constexpr uint32_t BUFFER_SIZE_BYTE_64K = 65536;
     static constexpr uint32_t BUFFER_SIZE_BYTE_32K = 32768;
 
-    // buffer位置+用途+Buffers；使用时命名: 用途+buffer位置+Tensor
     LocalTensor<uint8_t> ubMm1ResBuffers_;
     LocalTensor<uint8_t> ubMm2ResBuffers_;
     LocalTensor<uint8_t> l1QBuffers_;
@@ -107,15 +94,9 @@ public:
     bool lastMatmulWasPv_ = false;
 
     /* =====================GM变量(with layout)==================== */
-    // q/k_cache 为 576 宽单张量（nope 512 + rope 64 合并），无独立 queryRope/keyRope 张量；
-    // query 与 key 的 GM stride 布局按 576 宽初始化（偏移切分见 CopyQueryAndRopeTile/CopyKeyAndRopeTile）。
-    // seq-lens（cu_seqlens_q/cache_seqlens）为 INT32，ACTLEN_T=uint32_t。
-    // WITH_ZERO_HEAD 仅对 TND（cu_seqlens 首零头）成立；BSND/BNSD 走 GM_Q_OUT_BNGSD 3-参实现
-    // （offset_calculator_v2.h，无 WITH_ZERO_HEAD 形参），与 IS_TND 同构。
     FaGmTensor<Q_T, Q_FORMAT, uint32_t, LAYOUT == FLASH_MLA_LAYOUT::TND> queryGm;
     FaGmTensor<KV_T, KV_FORMAT> kCacheGm;
     GlobalTensor<int32_t> blockTableGm;
-    // seq-lens GM 张量与解析器所有权在 kernel 侧 FlashMlaSeqLensTool，本 block 只读引用
     SeqLensToolType& seqLensTool_;
 
     CopyQueryGmToL1<Q_T, Q_FORMAT> copyQueryGmToL1;
@@ -137,7 +118,6 @@ public:
     {
         static_assert(mBaseSize == 96 && s2BaseSize == 112, "mBaseSize != 96 or s2BaseSize != 112");
         /*--------------------------------------------UB--------------------------------------------*/
-        // CV 区与 vec 侧同一偏移别名（mm2@0..96K、mm1@96K..120K）
         uint32_t addrUb = 0;
         ubMm2ResBuffers_ = LocalTensor<uint8_t>(TPosition::VECIN, addrUb, UB_MM2_RES_BUFCNT * UB_MM2_RES_BUF_BYTES);
         addrUb = UB_MM2_RES_BUFCNT * UB_MM2_RES_BUF_BYTES;
@@ -150,8 +130,7 @@ public:
         };
         static_assert(sizeof(L1Layout) <= 512 * 1024, "L1 buffer too large");
         l1QBuffers_ = LocalTensor<uint8_t>(TPosition::A1, 0U, SIZE_OF_MEMBER(L1Layout, qBuffers));
-        // KV/P 区从 A1 108K 起；vec 写 P 的目标偏移必须与本布局逐字节一致：
-        //   l1KvpBuffers_[loop%3 * L1_KVP_BUF_BYTES] + s2BaseSize*dVBaseSize（rope 段）
+        // P 复用 KV 槽的 rope 区，写入偏移必须与 Vector 侧一致。
         l1KvpBuffers_ =
             LocalTensor<uint8_t>(TPosition::A1, L1_Q_BUFCNT * L1_Q_BUF_BYTES, SIZE_OF_MEMBER(L1Layout, kvpBuffers));
 
@@ -163,7 +142,6 @@ public:
         lastMatmulWasPv_ = false;
 
         /*--------------------------------------------L0C--------------------------------------------*/
-        // 2×128K 静态 + M/FIX Mutex 对（bmm2 单次 96*256*4 = 96 KiB，不得拆成 64 KiB 槽）
         l0CBuffers_ = LocalTensor<uint8_t>(TPosition::CO1, 0U, L0C_BUFCNT * L0C_BUF_BYTES);
     }
 
@@ -173,22 +151,13 @@ public:
             blockTableGm.SetGlobalBuffer((__gm__ int32_t*)blockTable);
         }
 
-        // query 576 宽单张量（nope 512 + rope 64 合并）——GM stride 按 576 初始化，
-        // 供 CopyQueryAndRopeTile 的 rope 段按 dIdx=512 偏移定位
         InitQBuffer(constInfo.bSize, constInfo.n2Size, constInfo.gSize, constInfo.s1Size,
                     constInfo.dSize + constInfo.dSizeRope, queryGm, query);
 
-        // k_cache 为普通 ND 张量（非 TensorList）：直接取裸指针，
-        // 不能用 ListTensorDesc 解码（会把 k_cache 数据首部误解析为 list 描述符 → GM 越界）
-
-        // k_cache 576 宽单张量（nope 512 + rope 64 合并）——key 与 value 同源（k==v）：
-        // bmm2 的 V 段 = L1 上 nope 区（512 宽，mm1 后仍留在 L1），无独立 value GM 张量/读取
-        // 仅 PA 实例化（host 强制 PA 路由），非 PA 分支已删
         InitKVBuffer(constInfo.n2Size, constInfo.blockSize, constInfo.dSize + constInfo.dSizeRope, kCacheGm, kCache,
                      constInfo.keyStrides.bnStride, constInfo.keyStrides.n2Stride);
 
-        // decode 场景 K/V 数据量远超 L2 容量，关闭 L2 Cache 避免无意义的缓存填充/驱逐开销
-        // （由 tiling 侧 gSize*s1Size <= 128 下发开关，见 flash_mla_tiling.cpp SetFATilingData）
+        // 关闭 L2 缓存以避免流式 KV 读取造成缓存污染。
         if (constInfo.l2CacheOffFlag) {
 #ifndef ASCENDC_OOM
             kCacheGm.gmTensor.SetL2CacheHint(CacheMode::CACHE_MODE_DISABLE);
@@ -227,15 +196,11 @@ public:
         }
     }
 
-    __aicore__ inline void InitCrossCoreSync()
-    {
-        // AIC 侧无需预置（AIV 的 InitCrossCoreSync 预置 BMM1 单槽和 BMM2 双槽的三个可用标志）
-    }
+    __aicore__ inline void InitCrossCoreSync() {}
 
     __aicore__ inline void UnInitCrossCoreSync()
     {
-        // 收尾消耗 6 个 c1v1/c2v2 标志（3 个槽 × 2 个 AIV），防悬空旗标
-        // 污染下一 kernel 的首次 Wait
+        // 消耗剩余跨核标志，避免影响下一次 kernel 的 Wait。
         CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_FIX>(CROSSCORE_BMM1_0);
         CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_FIX>(CROSSCORE_BMM1_0 + AIV_SYNC_OFFSET);
         CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_FIX>(CROSSCORE_BMM2_0);
@@ -244,9 +209,7 @@ public:
         CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_FIX>(CROSSCORE_BMM2_1 + AIV_SYNC_OFFSET);
     }
 
-    // copy query（q 为 576 宽单张量，GM 上 nope+rope 合并存储，
-    // 一次拷满 576 宽连续块，避免两次 strided 拷贝（nope 512 + rope 64）在 GM 行内留 gap 降低 MTE2 效率；
-    // L1 NZ 布局中 rope 段自然落在 [dSize*dstStride) 偏移处，与双段拷贝一致）
+    // 合并搬运 nope 和 rope，避免拆分读取降低 MTE2 效率。
     __aicore__ inline void CopyQueryAndRopeTile(const LocalTensor<Q_T>& dstTensor, FlashMlaRunInfoX& runInfo)
     {
         uint32_t dstStride = (runInfo.actMSize + 15) >> 4 << 4;
@@ -261,10 +224,6 @@ public:
         copyQueryGmToL1(l1Tensor, queryGm, gmCoord);
     }
 
-    // copy key（k_cache 为 576 宽单张量，GM 上 nope+rope 合并存储，
-    // 一次拷满 576 宽连续块，避免两次 strided 拷贝在 GM 行内留 gap；L1 NZ 布局 rope 段自然落在
-    // [dSize*dstStride) 偏移处；key and value 是同一份数据（k==v），bmm2 的 V 段 = L1 nope 区（512 宽），
-    // 无独立 value GM 读取）
     __aicore__ inline void CopyKeyAndRopeTile(const LocalTensor<KV_T>& dstTensor, FlashMlaRunInfoX& runInfo)
     {
         uint32_t dstStride = (runInfo.actSingleLoopS2Size + 15) >> 4 << 4;
@@ -279,7 +238,6 @@ public:
         copyKvGmToL1(l1Tensor, kCacheGm, gmCoord);
     }
 
-    // 提前一轮发起 KV 搬运（只发 MTE2、不等落地），让 MTE2 与 MAC 流水重叠
     __aicore__ inline void IterateBmm1Load(FlashMlaRunInfoX& runInfo)
     {
         uint32_t kvpL1BufId = runInfo.loop % L1_KVP_BUFCNT;
@@ -289,8 +247,7 @@ public:
         Mutex::Unlock<PIPE_MTE2>(KV_L1_BUFFER_ID0 + kvpL1BufId);
     }
 
-    // 仅用于 kernel 启动首任务（loop==0）：Q 的 MTE2 拷贝提前与 KV 同拍发出，压缩启动期。
-    // 中途换 Q 块时不可提前（Q 单槽 L1，前块 MTE1 锁未释时会写冲突），仍走 IterateBmm1 原路径。
+    // Q 只有一个 L1 槽，预取必须等待上一块的 MTE1 读取结束。
     __aicore__ inline void IterateQPreload(FlashMlaRunInfoX& runInfo)
     {
         LocalTensor<Q_T> qL1Tensor = l1QBuffers_.template ReinterpretCast<Q_T>();
@@ -307,8 +264,6 @@ public:
         fixpipeParams.nSize = (runInfo.actSingleLoopS2Size + 7) >> 3 << 3;
         // 有效数据不足16行，只需输出部分行即可;L0C上的bmm1结果矩阵M方向的size大小必须是偶数
         fixpipeParams.mSize = (runInfo.actMSize + 1) >> 1 << 1;
-        // L0C上matmul结果相邻连续数据片断间隔（前面一个数据块的头与后面数据块的头的间隔），单位为16 *sizeof(T)
-        // 源NZ矩阵中相邻Z排布的起始地址偏移
         fixpipeParams.srcStride = (fixpipeParams.mSize + 15) >> 4 << 4;
         fixpipeParams.dstStride = 128U; // mmResUb上两行之间的间隔，单位：element
         fixpipeParams.dualDstCtl = 1; // 双目标模式，按M维度拆分， M / 2 * N写入每个UB，M必须为2的倍数
@@ -319,8 +274,6 @@ public:
         Fixpipe<T, T, FIXPIPE_ROW_MAJOR_UB>(dstTensor, l0C, fixpipeParams);
     }
 
-    // ================== 特化 LoadData (310 分支 LoadData2DParamsV2, 常量折叠) ==================
-    // mm1 L0A: MK, isLeftTranspose=false, realM=0; kSplit=tileK, mSplit=actM
     __aicore__ inline void Mm1LoadL0A(LocalTensor<Q_T>& l0a, const LocalTensor<Q_T>& l1, uint64_t offset,
                                       uint32_t tileK, uint32_t actM)
     {
@@ -334,7 +287,6 @@ public:
         p.dstStride = p.mStep;
         LoadData(l0a, l1[offset], p);
     }
-    // mm1 L0B: KN, isRightTranspose=true → ifTranspose=false; kSplit=tileK, nSplit=actS2
     __aicore__ inline void Mm1LoadL0B(LocalTensor<KV_T>& l0b, const LocalTensor<KV_T>& l1, uint64_t offset,
                                       uint32_t tileK, uint32_t actS2)
     {
@@ -348,7 +300,6 @@ public:
         p.dstStride = p.mStep;
         LoadData(l0b, l1[offset], p);
     }
-    // mm2 L0A: MK, isLeftTranspose=false, realM≠0 → mStep 用 realM; kSplit=actS2, mSplit=64
     __aicore__ inline void Mm2LoadL0A(LocalTensor<KV_T>& l0a, const LocalTensor<KV_T>& l1, uint32_t actS2,
                                       uint32_t realM)
     {
@@ -363,7 +314,6 @@ public:
         p.dstStride = p.mStep;
         LoadData(l0a, l1[0], p);
     }
-    // mm2 L0B: KN, isRightTranspose=false → ifTranspose=true; kSplit=actS2, nSplit=128(常量)
     __aicore__ inline void Mm2LoadL0B(LocalTensor<KV_T>& l0b, const LocalTensor<KV_T>& l1, uint64_t offset,
                                       uint32_t actS2)
     {
@@ -379,9 +329,7 @@ public:
         LoadData(l0b, l1[offset], p);
     }
 
-    // ================== 特化 MatmulK（mm1: Q·K^T, K=576 固定, 96+112+128+112+128, M=actM, N=actS2）==================
-    // 首个 Q96 分块常驻，其余分块交替使用 Q112/P 与 Q128 临时槽。
-    // A/B 共用 B 槽 Mutex；Q112/P 最后一次 QK 读取位于倒数第二条 Mmad。
+    // Q 首块常驻；Q112/P 共用槽需等 QK 的倒数第二次 Mmad 读取结束。
     __aicore__ inline void Mm1MatmulK(const LocalTensor<Q_T>& qL1, const LocalTensor<KV_T>& kvL1,
                                       const LocalTensor<MM_T>& c, uint32_t actM, uint32_t actS2, bool loadQueryCache)
     {
@@ -423,7 +371,6 @@ public:
         lastMatmulWasPv_ = false;
     }
 
-    // qPreloaded：本任务 Q 已由启动路径（loop==0 IterateQPreload）提前发起 MTE2，跳过重复拷贝
     __aicore__ inline void IterateBmm1(FlashMlaRunInfoX& runInfo, bool qPreloaded = false)
     {
         uint32_t mm1ResUbBufId = runInfo.loop % UB_MM1_RES_BUFCNT;

@@ -26,8 +26,6 @@ using namespace op;
 extern "C" {
 #endif
 
-// aclnnInner* 实现由构建工具自动生成（build/autogen/inner/aclnnInner_flash_mla.cpp）
-// 并链接进 libcust_opapi.so，此处仅作前置声明（合并自原 aclnn_flash_mla_inner.h）。
 extern aclnnStatus aclnnInnerFlashMlaGetWorkspaceSize(
     const aclTensor* q, const aclTensor* kCache, const aclTensor* blockTableOptional,
     const aclTensor* cacheSeqlensOptional, const aclTensor* cuSeqlensQOptional, const aclTensor* sequsedQOptional,
@@ -71,36 +69,38 @@ aclnnStatus FlashMlaProcessSoftmaxLse(int64_t returnSoftmaxLse, const aclTensor*
  * @domain aclnn_ops_train_infer
  *
  * @param q                   [IN]  query tensor。数据类型FLOAT16/BFLOAT16，ND格式。
- *                                  layout由layoutQ决定，支持TND。
+ *                                  layout由layoutQ决定，支持TND、BNSD、BSND。
  *                                  TND: shape=(T_q, N_q, D)，T_q为总token数，
  *                                  D=576=nope(512)+rope(64)，rope已合并在q中。
  * @param kCache              [IN]  key-cache tensor。数据类型与q一致，layout由layoutKv决定。
- *                                  PA_NZ: shape=(NumBlocks, N_kv, BlockSize/16, D, 16)，
+ *                                  PA_NZ: shape=(NumBlocks, N_kv, D/16, BlockSize, 16)，
  *                                  分页注意力PA_NZ格式，D=576=nope(512)+rope(64)，rope已合并在k_cache中。
  *                                  MLA场景固定N_kv=1（单latent KV头）。
  * @param blockTableOptional  [IN]  可选。分页KV缓存的块映射表，数据类型INT32。
- *                                  shape=(B, MaxBlocksPerSeq)，与layoutKv=PA_Nz配合使用。
+ *                                  shape=(B, MaxBlocksPerSeq)，适用于PA_NZ、PA_BBND、PA_BNBD三种分页KV布局。
  * @param cacheSeqlensOptional [IN] 可选。各batch的KV cache实际长度，数据类型INT32。
  *                                  shape=(B,)，表征每个batch的KV序列长度（seqused_kv语义）。
  * @param cuSeqlensQOptional  [IN]  可选。query的累积序列长度（前缀和），数据类型INT32。
  *                                  shape=(B+1,)，cu_seqlens_q[i+1]-cu_seqlens_q[i]为第i个sample的q序列长度。
- *                                  TND layout变长场景时有效。与seqused_q互斥。
+ *                                  TND布局时必传，非TND布局时不能传。
  * @param sequsedQOptional    [IN]  可选。各batch中query的实际序列长度，数据类型INT32。
- *                                  shape=(B,)，padded batch模式下有效。与cuSeqlensQOptional互斥。
+ *                                  shape=(B,)，各布局均可传入；TND时与cuSeqlensQOptional共同描述有效长度。
  * @param attnMaskOptional    [IN]  可选。attnmask的参数，数据类型INT8。
  * @param metadataOptional    [IN]  可选。预计算的tiling切分方案，数据类型INT32，由上游算子传入。
  *                                  当该输入不为nullptr时，tiling侧跳过切分方案计算，直接使用该元数据。
  * @param headDimV            [IN]  ATTR可选。k_cache中nope（value）段的宽度。数据类型INT，默认值512。
  *                                  q/k_cache最后维=headDimV+64（rope宽）。
  * @param softmaxScale        [IN]  ATTR可选。softmax缩放系数，对应老接口的scaleValue。
- *                                  数据类型DOUBLE。默认值0.0表示使用1/sqrt(D)。
+ *                                  数据类型DOUBLE。默认值1.0；显式传入0.0时使用0.0，不自动计算1/sqrt(D)。
  * @param maskMode            [IN]  ATTR可选。掩码模式，对应老接口的sparseMode。数据类型INT。
- *                                  0: 不使用掩码；1: 因果掩码（下三角）。
+ *                                  0: 不使用掩码；3: 右下对齐因果掩码。
  * @param maxSeqlenQ          [IN]  ATTR可选。query的最大序列长度。数据类型INT，默认值-1。
  * @param maxSeqlenKV         [IN]  ATTR可选。kv的最大序列长度。数据类型INT，默认值-1。
- * @param layoutQ             [IN]  ATTR可选。query的数据布局，支持"TND"（大小写不敏感）。
- * @param layoutKv            [IN]  ATTR可选。key/value的数据布局，支持"PA_NZ"。
- * @param layoutOut           [IN]  ATTR可选。输出的数据布局，支持"NTD"（大小写不敏感）。
+ * @param layoutQ             [IN]  ATTR可选。query的数据布局，支持"TND"、"BNSD"、"BSND"，算子属性默认"TND"。
+ * @param layoutKv            [IN]  ATTR可选。key/value的数据布局，支持"PA_NZ"、"PA_BBND"、"PA_BNBD"，默认"PA_BBND"。
+ * @param layoutOut           [IN]  ATTR可选。输出的数据布局，算子属性默认"NTD"。
+ *                                  layoutQ为BSND/BNSD时，仅支持相同输出布局。
+ *                                  layoutQ为TND时，支持TND、NTD两种输出布局。
  * @param returnSoftmaxLse    [IN]  ATTR可选。是否输出softmax_lse。INT类型，1表示输出，0表示不输出。
  *                                  训练正向传播时置1，推理时置0。
  * @param attnOut        [OUT] 必选输出。attention计算结果，数据类型与q一致，layout由layoutOut决定。
@@ -110,7 +110,6 @@ aclnnStatus FlashMlaProcessSoftmaxLse(int64_t returnSoftmaxLse, const aclTensor*
  * @param executor            [OUT] op执行器句柄，供第二段接口使用。
  * @return aclnnStatus 执行状态。ACLNN_SUCCESS表示成功。
  */
-// 第一段接口：计算workspace大小
 aclnnStatus aclnnFlashMlaGetWorkspaceSize(const aclTensor* q, const aclTensor* kCache,
                                           const aclTensor* blockTableOptional, const aclTensor* cacheSeqlensOptional,
                                           const aclTensor* cuSeqlensQOptional, const aclTensor* sequsedQOptional,
@@ -136,7 +135,6 @@ aclnnStatus aclnnFlashMlaGetWorkspaceSize(const aclTensor* q, const aclTensor* k
         metadataOptional, headDimV, softmaxScale, maskMode, maxSeqlenQ, maxSeqlenKV, layoutQ, layoutKv, layoutOut,
         returnSoftmaxLse, attnOut, placeHolder, workspaceSize, executor);
 
-    // 销毁占位符
     if (returnSoftmaxLse == 0) {
         aclDestroyTensor(tempTensor);
     }
@@ -152,7 +150,6 @@ aclnnStatus aclnnFlashMlaGetWorkspaceSize(const aclTensor* q, const aclTensor* k
  * @param stream          [IN] 用于执行计算的acl stream。
  * @return aclnnStatus 执行状态。
  */
-// 第二段接口：执行计算
 aclnnStatus aclnnFlashMla(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, const aclrtStream stream)
 {
     return aclnnInnerFlashMla(workspace, workspaceSize, executor, stream);

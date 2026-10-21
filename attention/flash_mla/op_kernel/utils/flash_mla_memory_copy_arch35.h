@@ -23,7 +23,6 @@
 #include "../../../common/op_kernel/memcopy/attn_copy_gm_to_ub.h"
 #include "../../../common/op_kernel/memcopy/copy_ub_to_gm.h"
 
-// ----------------------------------------------Copy LSE UB To Gm arch35--------------------------------
 template <typename T, typename CONST_INFO_T>
 __aicore__ inline void DataCopySoftmaxLseBSNDArch35(GlobalTensor<float> softmaxLseGm, LocalTensor<T> lseSrc,
                                                     uint64_t bN2Offset, uint32_t mOffset, uint32_t dealCount,
@@ -66,7 +65,6 @@ __aicore__ inline void DataCopySoftmaxLseBNSDArch35(GlobalTensor<float> softmaxL
     uint64_t outOffset = bN2Offset + gOffset + seqOffset + s1LeftPaddingSize;
     uint64_t ubOffset = 0;
 
-    // dealCount ≤ 当前actQs剩余部分，则直接搬运全部dealCount
     if ((qActSeqLens - seqOffset) >= dealCount) {
         DataCopyExtParams dataCopyParams;
         dataCopyParams.blockCount = dealCount;
@@ -76,8 +74,6 @@ __aicore__ inline void DataCopySoftmaxLseBNSDArch35(GlobalTensor<float> softmaxL
         DataCopyPad(softmaxLseGm[outOffset], lseSrc[ubOffset], dataCopyParams);
         return;
     }
-    // dealCount > 当前actQs剩余部分，分块搬运dealCount
-    // dealCount首块
     uint64_t headActSeq = qActSeqLens - seqOffset;
     DataCopyExtParams dataCopyParams;
     dataCopyParams.blockCount = headActSeq;
@@ -86,9 +82,7 @@ __aicore__ inline void DataCopySoftmaxLseBNSDArch35(GlobalTensor<float> softmaxL
     dataCopyParams.dstStride = 0;
     DataCopyPad(softmaxLseGm[outOffset], lseSrc[ubOffset], dataCopyParams);
     outOffset += constInfo.s1Size - qActSeqLens + headActSeq;
-    // ubOffset += headActSeq * AttentionCommon::FP32_BLOCK_ELEMENT_NUM;
     ubOffset += headActSeq * AttentionCommon::FP32_BLOCK_ELEMENT_NUM;
-    // dealCount中间块
     uint64_t pendingCount = dealCount - headActSeq;
     while (pendingCount > qActSeqLens) {
         DataCopyExtParams dataCopyParams;
@@ -101,7 +95,6 @@ __aicore__ inline void DataCopySoftmaxLseBNSDArch35(GlobalTensor<float> softmaxL
         ubOffset += qActSeqLens * AttentionCommon::FP32_BLOCK_ELEMENT_NUM;
         pendingCount -= qActSeqLens;
     }
-    // dealCount尾块
     if (pendingCount > 0) {
         DataCopyExtParams dataCopyParams;
         dataCopyParams.blockCount = pendingCount;
@@ -112,7 +105,6 @@ __aicore__ inline void DataCopySoftmaxLseBNSDArch35(GlobalTensor<float> softmaxL
     }
 }
 
-// 将 TND 的 LSE 写为 (N,T) 头主序；prefixBS1 为当前 batch 的累计 token 偏移。
 template <typename T, typename CONST_INFO_T>
 __aicore__ inline void DataCopySoftmaxLseTNDtoNTArch35(GlobalTensor<float> softmaxLseGm, LocalTensor<T> lseSrc,
                                                        uint64_t bN2Offset, uint32_t mOffset, uint32_t dealCount,

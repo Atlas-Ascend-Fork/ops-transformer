@@ -48,7 +48,7 @@ public:
     ge::graphStatus GetBatchSize();
     void GetQueryTSize();
     void GetKeyTSize();
-    ge::graphStatus GetQkHeadDim();
+    ge::graphStatus GetQkNopeHeadDim();
     ge::graphStatus GetS1Size();
     void GetKvStorageMode();
     void GetKvIsContiguous();
@@ -58,7 +58,6 @@ public:
     ge::graphStatus GetMaxActualSeq(const gert::Tensor* actualSeqLensTensor, FlashMlaLayout layout,
                                     int64_t& maxActualSeqLen);
     ge::graphStatus GetS2SizeFromCuSeqLens();
-    ge::graphStatus GetS2SizeForBatchContinuous();
     ge::graphStatus GetMaxBlockNumPerBatch();
     ge::graphStatus GetBlockSize();
     ge::graphStatus GetBlockNum();
@@ -90,24 +89,21 @@ public:
     fe::PlatFormInfos* platformInfo_ = nullptr;
     FlashMlaParaInfo opParamInfo_;
 
-    // BaseParams
     int64_t bSize_ = 0;
     int64_t n1Size_ = 0;
     int64_t n2Size_ = 0;
     int64_t gSize_ = 0;
     int64_t s1Size_ = 0;
     int64_t s2Size_ = 0;
-    int64_t qkHeadDim_ = 0;
+    int64_t qkNopeHeadDim_ = 0;
     int64_t vHeadDim_ = 0;
     int64_t ropeHeadDim_ = 0;
     int64_t queryTSize_ = 0;
     int64_t keyTSize_ = 0;
-    // INT32 seq-lens buffer 元素数（cu_seqlens_q / cache_seqlens），kernel parser 的 actualLenDims
-    int64_t actualLenQDims_ = 0;
-    int64_t actualLenKvDims_ = 0;
+    int64_t cuSeqlensQSize_ = 0;
+    int64_t cacheSeqlensSize_ = 0;
     KvStorageMode kvStorageMode_ = KvStorageMode::BATCH_CONTINUOUS;
 
-    // kvcache strides (tensor v2 view inputs)
     const gert::Stride* keyStrides_ = nullptr;
     const gert::Stride* valueStrides_ = nullptr;
     uint64_t keyBnStride_ = 0;
@@ -119,37 +115,29 @@ public:
     int32_t keyNonContigDim_ = -1;
     int32_t valueNonContigDim_ = -1;
 
-    // Layout
     FlashMlaLayout layoutQ_ = FlashMlaLayout::BSND;
     FlashMlaLayout layoutKV_ = FlashMlaLayout::BSND;
     FlashMlaLayout layoutOut_ = FlashMlaLayout::BSND;
 
-    // PageAttention
     int64_t maxBlockNumPerBatch_ = 0;
     int32_t blockSize_ = 0;
     int32_t blockNum_ = 0;
 
-    // NPU信息
     NpuArch npuArch_ = NpuArch::DAV_3510;
 
-    // Dtype信息
     ge::DataType inputQType_ = ge::DT_FLOAT16;
     ge::DataType inputKvType_ = ge::DT_FLOAT16;
     ge::DataType outputType_ = ge::DT_FLOAT16;
 
-    // mask 信息
     int64_t winLeft_ = 0;
     int64_t winRight_ = 0;
     int64_t maskMode_ = 0;
 
-    // SoftmaxLSE 信息
     bool softmaxLseFlag_ = false;
     int64_t returnSoftmaxLse_ = 0;
 
-    // 其他属性信息
     float softmaxScale_ = 1.0;
 
-    // seqLen信息
     int64_t seqLenQDims_ = 0;
     int64_t seqLenKvDims_ = 0;
     int64_t cuseqLenQDims_ = 0;
@@ -157,10 +145,8 @@ public:
     int64_t maxSeqQ_ = -1;
     int64_t maxSeqKv_ = -1;
 
-    // Empty Tensor
     bool emptyTensorFlag_ = false;
 
-    // shape信息
     std::shared_ptr<FlashMlaTilingShape> queryShape_ = nullptr;
     std::shared_ptr<FlashMlaTilingShape> keyShape_ = nullptr;
     std::shared_ptr<FlashMlaTilingShape> valueShape_ = nullptr;

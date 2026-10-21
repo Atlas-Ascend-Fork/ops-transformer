@@ -23,9 +23,6 @@
 
 namespace optiling {
 
-// FlashMla 使用common中的公共结构
-// using FlashMlaTilingData = FlashMlaSimplifiedTilingData;
-
 ASCENDC_EXTERN_C ge::graphStatus TilingFlashMla(gert::TilingContext* context);
 ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForFlashMla(gert::TilingParseContext* context);
 

@@ -42,11 +42,9 @@ public:
     ge::graphStatus CheckAttnOutShape(const FlashMlaTilingInfo& faInfo) const;
 
 private:
-    // --- Layout checks ---
     ge::graphStatus CheckSingleParaLayout(const FlashMlaTilingInfo& faInfo);
     ge::graphStatus CheckMultiParaLayout(const FlashMlaTilingInfo& faInfo);
 
-    // --- Shape/dt checks ---
     ge::graphStatus CheckNonQuantDataType(const FlashMlaTilingInfo& faInfo);
     ge::graphStatus CheckNonQuantHeadNum(const FlashMlaTilingInfo& faInfo);
     ge::graphStatus CheckDtypeConsistency(const FlashMlaTilingInfo& faInfo);
@@ -55,8 +53,6 @@ private:
     ge::graphStatus CheckShapeConsistency(const FlashMlaTilingInfo& faInfo);
 
     ge::graphStatus CheckKVShapeForPageAttention(const FlashMlaTilingInfo& faInfo) const;
-
-    // --- Attr checks ---
 
     std::shared_ptr<FlashMlaTilingShapeCompare> queryShapeCmp_;
     std::shared_ptr<FlashMlaTilingShapeCompare> keyShapeCmp_;

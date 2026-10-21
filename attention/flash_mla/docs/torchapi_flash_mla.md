@@ -112,37 +112,37 @@ cann_ops_transformer.flash_mla(
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | cache_seqlens | Tensor | 必选 | 各batch有效KV长度，与主算子一致 | int32 | ND | (B,) |
-| num_heads_q | int | 必选 | Query头数，配套当前主算子时支持64、96 | int32 | - | - |
+| num_heads_q | int | 必选 | Query头数，支持1～128 | int32 | - | - |
 | num_heads_kv | int | 必选 | KV头数，配套当前主算子时为1 | int32 | - | - |
-| cu_seqlens_q | Tensor | 必选 | TND累积Query长度，首项为0 | int32 | ND | (B+1,) |
+| cu_seqlens_q | Tensor | 条件必选 | layout_q=TND时必传，非TND时不能传；累积Query长度，首项为0 | int32 | ND | (B+1,) |
 | seqused_q | Tensor | 可选 | 各batch实际使用的Query长度 | int32 | ND | (B,) |
-| max_seqlen_q | int | 可选 | 配套主算子时仅传-1或省略；默认None归一化为-1 | int32 | - | - |
-| max_seqlen_kv | int | 可选 | 配套主算子时仅传-1或省略；默认None归一化为-1 | int32 | - | - |
+| max_seqlen_q | int | 可选 | 允许-1或非负值；默认None归一化为-1 | int32 | - | - |
+| max_seqlen_kv | int | 可选 | 允许-1或非负值；默认None归一化为-1 | int32 | - | - |
 | head_dim_qk | int | 可选 | Query/Key逻辑头维，固定576，不能传nope部分的512 | int32 | - | - |
 | head_dim_v | int | 可选 | Value头维，固定512 | int32 | - | - |
 | mask_mode | int | 可选 | 0或3；默认None归一化为0，与主算子一致 | int32 | - | - |
-| layout_q | string | 可选 | 当前须显式传TND，不使用历史默认值BSND | string | - | - |
+| layout_q | string | 可选 | 支持BSND、BNSD、TND，默认BSND | string | - | - |
 
 ### flash_mla
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| q | Tensor | 必选 | 已合并nope和rope的Query | bfloat16/float16 | ND | (Q_T, Q_N, D) |
-| k_cache | Tensor | 必选 | 同时提供Key和Value的分页缓存 | bfloat16/float16 | ND | PA_BBND：(num_blocks, block_size, KV_N, D)；PA_NZ：(num_blocks, KV_N, D / D0, block_size, D0) |
+| q | Tensor | 必选 | 已合并nope和rope的Query | bfloat16/float16 | ND | BSND：(B, Q_S, Q_N, D)；BNSD：(B, Q_N, Q_S, D)；TND：(Q_T, Q_N, D) |
+| k_cache | Tensor | 必选 | 同时提供Key和Value的分页缓存 | bfloat16/float16 | ND | PA_BBND：(num_blocks, block_size, KV_N, D)；PA_BNBD：(num_blocks, KV_N, block_size, D)；PA_NZ：(num_blocks, KV_N, D / D0, block_size, D0) |
 | block_table | Tensor | 必选 | 各batch逻辑页到物理页的索引映射 | int32 | ND | (B, max_num_blocks_per_seq) |
 | cache_seqlens | Tensor | 必选 | 各batch有效KV长度 | int32 | ND | (B,) |
-| cu_seqlens_q | Tensor | 必选 | 累积Query长度，首项0，末项Q_T | int32 | ND | (B+1,) |
+| cu_seqlens_q | Tensor | 条件必选 | TND时必传、非TND时不能传；累积Query长度，首项0，末项Q_T | int32 | ND | (B+1,) |
 | seqused_q | Tensor | 可选 | 各batch实际使用的Query长度 | int32 | ND | (B,) |
 | attn_mask | Tensor | 可选 | mask_mode=3时必传；mask_mode=0时不传 | int8 | ND | (2048, 2048) |
 | metadata | Tensor | 必选 | 配套metadata接口生成的调度数据 | int32 | ND | (max_schedule_size,) |
 | head_dim_v | int | 可选 | Value头维，固定512，默认512 | int32 | - | - |
 | softmax_scale | float | 可选 | 注意力分数缩放系数，默认1.0 | float32 | - | - |
 | mask_mode | int | 可选 | 仅0、3，默认0 | int32 | - | - |
-| max_seqlen_q | int | 可选 | 仅-1或省略，默认-1 | int32 | - | - |
-| max_seqlen_kv | int | 可选 | 仅-1或省略，默认-1 | int32 | - | - |
-| layout_q | string | 可选 | 当前须显式传TND | string | - | - |
-| layout_kv | string | 可选 | 仅PA_BBND、PA_NZ，默认PA_BBND | string | - | - |
-| layout_out | string | 可选 | 当前须显式传NTD | string | - | - |
+| max_seqlen_q | int | 可选 | 允许-1或非负值，默认-1 | int32 | - | - |
+| max_seqlen_kv | int | 可选 | 允许-1或非负值，默认-1 | int32 | - | - |
+| layout_q | string | 可选 | 支持BSND、BNSD、TND，默认BSND | string | - | - |
+| layout_kv | string | 可选 | 支持PA_BBND、PA_BNBD、PA_NZ，默认PA_BBND | string | - | - |
+| layout_out | string | 可选 | 支持BSND、BNSD、TND、NTD，默认BSND；BSND/BNSD输入的输出必须同布局，TND输入可输出TND或NTD | string | - | - |
 | return_softmax_lse | bool | 可选 | 是否输出有效LSE，默认False | bool | - | - |
 
 ## 返回值说明
@@ -159,13 +159,13 @@ metadata的shape根据batch数和设备核数动态计算。
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| attn_out | Tensor | 必选 | 注意力输出，与q的数据类型相同 | bfloat16/float16 | ND | (Q_N, Q_T, DV) |
-| softmax_lse | Tensor | 可选 | Softmax的LSE结果，由return_softmax_lse控制 | float32 | ND | 开启：(Q_N, Q_T)；关闭：(0,) |
+| attn_out | Tensor | 必选 | 注意力输出，与q的数据类型相同 | bfloat16/float16 | ND | BSND：(B, Q_S, Q_N, DV)；BNSD：(B, Q_N, Q_S, DV)；TND：(Q_T, Q_N, DV)；NTD：(Q_N, Q_T, DV) |
+| softmax_lse | Tensor | 可选 | Softmax的LSE结果，由return_softmax_lse控制 | float32 | ND | 开启：TND输入为(Q_N, Q_T)，BSND/BNSD输入为(B, Q_N, Q_S)；关闭：(0,) |
 
 **说明**
 
 - attn_out：D维度为head_dim_v，其余维度由query按layout_out排布。
-- softmax_lse：return_softmax_lse为True时，shape为(Q_N, Q_T)；为False时，shape为(0,)。
+- softmax_lse：return_softmax_lse为True时，TND输入的shape为(Q_N, Q_T)，BSND/BNSD输入的shape为(B, Q_N, Q_S)；为False时，shape为(0,)。
 
 ## 约束说明
 
@@ -184,7 +184,8 @@ metadata的shape根据batch数和设备核数动态计算。
 | Mask参数组 | mask_mode | ATTR(OPTIONAL) | int |
 | | attn_mask | INPUT(OPTIONAL) | Tensor |
 | Paged Attention参数组 | block_table | INPUT | Tensor |
-| SeqLens参数组 | cache_seqlens、cu_seqlens_q | INPUT | Tensor |
+| SeqLens参数组 | cache_seqlens | INPUT | Tensor |
+| | cu_seqlens_q | INPUT(条件必选) | Tensor |
 | | seqused_q | INPUT(OPTIONAL) | Tensor |
 | | max_seqlen_q、max_seqlen_kv | ATTR(OPTIONAL) | int |
 | SoftmaxLSE参数组 | return_softmax_lse | ATTR(OPTIONAL) | bool |
@@ -197,7 +198,8 @@ metadata的shape根据batch数和设备核数动态计算。
 | B | batch数 |
 | Q_N / N1 | 输入q tensor的头数 |
 | KV_N / N2 | 输入k_cache tensor的头数 |
-| Q_S / KV_S | 单个batch的有效Query/KV长度 |
+| Q_S | BSND/BNSD输入中单个batch的物理Query长度 |
+| KV_S | 单个batch的有效KV长度 |
 | Q_T / T | 所有batch物理Query序列长度之和 |
 | D | Query/Key逻辑头维 |
 | DV | Value及attn_out头维 |
@@ -212,18 +214,22 @@ metadata的shape根据batch数和设备核数动态计算。
 
 | 参数 | 单参数校验 | 存在性校验 | 一致性校验 | 特性交叉校验 |
 | :--- | :--- | :--- | :--- | :--- |
-| q | float16/bfloat16；TND，(Q_T, Q_N, D) | 必须存在 | 与k_cache、attn_out数据类型一致 | 0 < B < 65536；Q_T > 0；Q_N支持64、96；KV_N=1、D=576 |
-| k_cache | float16/bfloat16；PA_BBND：(num_blocks, block_size, KV_N, D)；PA_NZ：(num_blocks, KV_N, D / D0, block_size, D0)；非连续Tensor：PA_BBND仅dim0支持，PA_NZ支持dim0或dim1 | 必须存在 | 逻辑D与q相同 | block_size=128；D0=16 |
-| attn_out | float16/bfloat16；NTD，(Q_N, Q_T, DV) | 必须存在 | Q_T、Q_N与q对应 | DV=head_dim_v=512 |
+| q | float16/bfloat16；BSND、BNSD、TND，shape见参数说明 | 必须存在 | 与k_cache、attn_out数据类型一致 | 0 < B < 65536；TND场景Q_T > 0；Q_N支持1～128；KV_N=1、D=576 |
+| k_cache | float16/bfloat16；PA_BBND：(num_blocks, block_size, KV_N, D)；PA_BNBD：(num_blocks, KV_N, block_size, D)；PA_NZ：(num_blocks, KV_N, D / D0, block_size, D0)；非连续Tensor：PA_BBND仅dim0支持，PA_BNBD/PA_NZ支持dim0或dim1 | 必须存在 | 逻辑D与q相同 | block_size在[1,1024]且16对齐（即16、32、…、1024）；D0=16 |
+| attn_out | float16/bfloat16；布局及shape见参数说明 | 必须存在 | Q_T、Q_N与q对应 | DV=head_dim_v=512 |
 | metadata | int32、一维、ND、非空；容量不小于当前设备和B所需容量 | 必须传入 | 必须对应本次调用参数 | 由配套metadata接口生成 |
 | head_dim_v | 仅512 | 可省略，默认512 | head_dim_v+64=576 | Value取缓存前512维 |
 | softmax_scale | float，默认1.0 | 可省略 | 无 | 不自动按D缩放 |
+
+Torch接口的layout_q与layout_out均默认BSND；算子属性定义保留layout_q=TND、layout_out=NTD的默认值。各接口的默认值独立生效，不会根据另一个参数自动切换；修改layout_q时应显式设置匹配的layout_out。
 
 layout匹配关系表：
 
 | layout_q | layout_kv | layout_out | layout_softmax_lse |
 | :--- | :--- | :--- | :--- |
-| TND | PA_BBND、PA_NZ | NTD | (Q_N, Q_T) |
+| BSND | PA_BBND、PA_BNBD、PA_NZ | BSND | (B, Q_N, Q_S) |
+| BNSD | PA_BBND、PA_BNBD、PA_NZ | BNSD | (B, Q_N, Q_S) |
+| TND | PA_BBND、PA_BNBD、PA_NZ | TND、NTD | (Q_N, Q_T) |
 
 #### Mask参数组
 
@@ -236,24 +242,24 @@ layout匹配关系表：
 
 | 参数 | 单参数校验 | 存在性校验 | 一致性校验 | 特性交叉校验 |
 | :--- | :--- | :--- | :--- | :--- |
-| block_table | int32、ND；shape为(B, max_num_blocks_per_seq)；max_num_blocks_per_seq > 0；block_size=128 | 必须传入 | B与cache_seqlens、cu_seqlens_q对应 | 必须传入cache_seqlens；layout_kv为PA_NZ时，D为D0的倍数 |
+| block_table | int32、ND；shape为(B, max_num_blocks_per_seq)；max_num_blocks_per_seq > 0；block_size在[1,1024]且16对齐 | 必须传入 | B与cache_seqlens、cu_seqlens_q对应 | 必须传入cache_seqlens；layout_kv为PA_NZ时，D为D0的倍数 |
 
 #### SeqLengths参数组
 
 | 参数 | 单参数校验 | 存在性校验 | 一致性校验 | 特性交叉校验 |
 | :--- | :--- | :--- | :--- | :--- |
 | cache_seqlens | int32、ND、(B,)，元素非负 | 必须传入 | 与metadata生成时一致 | 与block_table的batch数一致 |
-| cu_seqlens_q | int32、ND、(B+1,)，非递减，首项0、末项Q_T | TND场景必须传入 | B与cache_seqlens一致 | 相邻差值表示各batch物理Query长度 |
-| seqused_q | int32、ND、(B,)，元素非负 | 可选 | 与metadata生成时一致 | 每项不超过对应cu_seqlens_q相邻差值；省略时使用相邻差值 |
-| max_seqlen_q | int | 可省略 | 仅允许-1或省略 | 由Query序列长度信息推导，不接受0、正数或其他负数 |
-| max_seqlen_kv | int | 可省略 | 仅允许-1或省略 | 由cache_seqlens推导，不接受0、正数或其他负数 |
+| cu_seqlens_q | int32、ND、(B+1,)，非递减，首项0、末项Q_T | TND场景必须传入，非TND场景禁止传入 | B与cache_seqlens一致 | 相邻差值表示各batch物理Query长度 |
+| seqused_q | int32、ND、(B,)，元素非负 | 可选 | 与metadata生成时一致 | TND场景每项不超过对应cu_seqlens_q相邻差值，省略时使用相邻差值；非TND场景每项不超过物理Q_S |
+| max_seqlen_q | int | 可省略 | 允许-1或非负值 | -1表示未指定；非TND的metadata生成需提供seqused_q或非负max_seqlen_q以确定Query长度 |
+| max_seqlen_kv | int | 可省略 | 允许-1或非负值 | -1表示未指定；有效KV长度由cache_seqlens提供 |
 
 #### SoftmaxLSE参数组
 
 | 参数 | 单参数校验 | 存在性校验 | 一致性校验 | 特性交叉校验 |
 | :--- | :--- | :--- | :--- | :--- |
 | return_softmax_lse | bool，仅True/False | 可省略，默认False | 控制LSE输出是否有效 | 不改变attn_out的布局和shape |
-| softmax_lse | float32 | 始终占返回二元组的第二项 | True：(Q_N, Q_T)；False：(0,) | 无 |
+| softmax_lse | float32 | 始终占返回二元组的第二项 | True：TND输入为(Q_N, Q_T)，BSND/BNSD输入为(B, Q_N, Q_S)；False：(0,) | 无 |
 
 ## 调用示例
 

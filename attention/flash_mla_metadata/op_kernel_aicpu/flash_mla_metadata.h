@@ -17,24 +17,17 @@
 #define FLASH_MLA_METADATA_H
 
 #include <cstdint>
+#include "../../flash_mla/op_kernel/flash_mla_shared.h"
 #include <cassert>
 
 namespace optiling {
 
-// Constants
 using FA_METADATA_T = uint32_t;
 
-constexpr uint32_t HEAD_METADATA_STRIDE = 16U;
-constexpr uint32_t FA_METADATA_STRIDE = 16U;
-constexpr uint32_t FD_METADATA_STRIDE = 16U;
-
-// R7: producer 侧布局不变量。三个 metadata 区每个 core 的 stride 必须恒为 16 words，
-// 与 flash_mla kernel 消费点的 FLASH_ATTN_METADATA_SIZE / FA_FD_METADATA_SIZE == 16
-// 断言同源一致（此断言位于 producer 布局头，是唯一权威来源）。
-static_assert(FA_METADATA_STRIDE == 16U && FD_METADATA_STRIDE == 16U && HEAD_METADATA_STRIDE == 16U,
+static_assert(FlashMlaCommon::FA_METADATA_STRIDE == 16U && FlashMlaCommon::FD_METADATA_STRIDE == 16U &&
+                  FlashMlaCommon::HEAD_METADATA_STRIDE == 16U,
               "flash_mla metadata layout must stay 16 words/core");
 
-// Head Metadata Index Definitions
 constexpr uint32_t HEAD_SECTION_NUM_INDEX = 0U;
 constexpr uint32_t HEAD_IS_FD_INDEX = 1U;
 constexpr uint32_t HEAD_M_BASE_SIZE_INDEX = 2U;
@@ -43,12 +36,9 @@ constexpr uint32_t HEAD_AIC_NUM_INDEX = 4U;
 constexpr uint32_t HEAD_AIV_NUM_INDEX = 5U;
 constexpr uint32_t HEAD_OUTPUT_LAYOUT_INDEX = 6U;
 
-// Fixed MLA tile sizes must match the main kernel and host tiling.
-// GenMetadata writes these values directly; do not derive them through FA tile adjustment.
 constexpr uint32_t HEAD_M_BASE_SIZE_MLA = 96U;
 constexpr uint32_t HEAD_S2_BASE_SIZE_MLA = 112U;
 
-// FA Metadata Index Definitions
 constexpr uint32_t FA_BN2_START_INDEX = 0U;
 constexpr uint32_t FA_M_START_INDEX = 1U;
 constexpr uint32_t FA_S2_START_INDEX = 2U;
@@ -57,7 +47,6 @@ constexpr uint32_t FA_M_END_INDEX = 4U;
 constexpr uint32_t FA_S2_END_INDEX = 5U;
 constexpr uint32_t FA_FIRST_FD_DATA_WORKSPACE_IDX_INDEX = 6U;
 
-// FD Metadata Index Definitions
 constexpr uint32_t FD_BN2_IDX_INDEX = 0U;
 constexpr uint32_t FD_M_IDX_INDEX = 1U;
 constexpr uint32_t FD_WORKSPACE_IDX_INDEX = 2U;
@@ -78,34 +67,34 @@ struct FaMetadata {
           aicCoreNum(aicNum),
           aivCoreNum(aivNum),
           headMetadata(static_cast<FA_METADATA_T*>(metadataPtr)),
-          faMetadata(headMetadata + HEAD_METADATA_STRIDE),
-          fdMetadata(faMetadata + sectionNum * aicCoreNum * FA_METADATA_STRIDE)
+          faMetadata(headMetadata + FlashMlaCommon::HEAD_METADATA_STRIDE),
+          fdMetadata(faMetadata + sectionNum * aicCoreNum * FlashMlaCommon::FA_METADATA_STRIDE)
     {
         headMetadata[0] = sectionNum;
     }
 
     void Clear()
     {
-        for (size_t i = 0; i < HEAD_METADATA_STRIDE; ++i) {
+        for (size_t i = 0; i < FlashMlaCommon::HEAD_METADATA_STRIDE; ++i) {
             headMetadata[i] = 0U;
         }
-        for (size_t i = 0; i < sectionNum * aicCoreNum * FA_METADATA_STRIDE; ++i) {
+        for (size_t i = 0; i < sectionNum * aicCoreNum * FlashMlaCommon::FA_METADATA_STRIDE; ++i) {
             faMetadata[i] = 0U;
         }
-        for (size_t i = 0; i < sectionNum * aivCoreNum * FD_METADATA_STRIDE; ++i) {
+        for (size_t i = 0; i < sectionNum * aivCoreNum * FlashMlaCommon::FD_METADATA_STRIDE; ++i) {
             fdMetadata[i] = 0U;
         }
     }
 
     void SetHeadMetadata(uint32_t metaIdx, uint32_t val)
     {
-        assert(metaIdx < HEAD_METADATA_STRIDE);
+        assert(metaIdx < FlashMlaCommon::HEAD_METADATA_STRIDE);
         headMetadata[metaIdx] = val;
     }
 
     uint32_t GetHeadMetadata(uint32_t metaIdx)
     {
-        assert(metaIdx < HEAD_METADATA_STRIDE);
+        assert(metaIdx < FlashMlaCommon::HEAD_METADATA_STRIDE);
         return headMetadata[metaIdx];
     }
 
@@ -113,32 +102,36 @@ struct FaMetadata {
     {
         assert(sectionIdx < sectionNum);
         assert(aicIdx < aicCoreNum);
-        assert(metaIdx < FA_METADATA_STRIDE);
-        faMetadata[sectionIdx * aicCoreNum * FA_METADATA_STRIDE + aicIdx * FA_METADATA_STRIDE + metaIdx] = val;
+        assert(metaIdx < FlashMlaCommon::FA_METADATA_STRIDE);
+        faMetadata[sectionIdx * aicCoreNum * FlashMlaCommon::FA_METADATA_STRIDE +
+                   aicIdx * FlashMlaCommon::FA_METADATA_STRIDE + metaIdx] = val;
     }
 
     uint32_t GetFaMetadata(uint32_t sectionIdx, uint32_t aicIdx, uint32_t metaIdx)
     {
         assert(sectionIdx < sectionNum);
         assert(aicIdx < aicCoreNum);
-        assert(metaIdx < FA_METADATA_STRIDE);
-        return faMetadata[aicCoreNum * FA_METADATA_STRIDE * sectionIdx + FA_METADATA_STRIDE * aicIdx + metaIdx];
+        assert(metaIdx < FlashMlaCommon::FA_METADATA_STRIDE);
+        return faMetadata[aicCoreNum * FlashMlaCommon::FA_METADATA_STRIDE * sectionIdx +
+                          FlashMlaCommon::FA_METADATA_STRIDE * aicIdx + metaIdx];
     }
 
     void SetFdMetadata(uint32_t sectionIdx, uint32_t aivIdx, uint32_t metaIdx, uint32_t val)
     {
         assert(sectionIdx < sectionNum);
         assert(aivIdx < aivCoreNum);
-        assert(metaIdx < FD_METADATA_STRIDE);
-        fdMetadata[aivCoreNum * FD_METADATA_STRIDE * sectionIdx + FD_METADATA_STRIDE * aivIdx + metaIdx] = val;
+        assert(metaIdx < FlashMlaCommon::FD_METADATA_STRIDE);
+        fdMetadata[aivCoreNum * FlashMlaCommon::FD_METADATA_STRIDE * sectionIdx +
+                   FlashMlaCommon::FD_METADATA_STRIDE * aivIdx + metaIdx] = val;
     }
 
     uint32_t GetFdMetadata(uint32_t sectionIdx, uint32_t aivIdx, uint32_t metaIdx)
     {
         assert(sectionIdx < sectionNum);
         assert(aivIdx < aivCoreNum);
-        assert(metaIdx < FD_METADATA_STRIDE);
-        return fdMetadata[aivCoreNum * FD_METADATA_STRIDE * sectionIdx + FD_METADATA_STRIDE * aivIdx + metaIdx];
+        assert(metaIdx < FlashMlaCommon::FD_METADATA_STRIDE);
+        return fdMetadata[aivCoreNum * FlashMlaCommon::FD_METADATA_STRIDE * sectionIdx +
+                          FlashMlaCommon::FD_METADATA_STRIDE * aivIdx + metaIdx];
     }
 };
 } // namespace detail

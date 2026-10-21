@@ -10,8 +10,7 @@
 
 /*!
  * \file flash_mla_kernel.h
- * \brief arch35 flash_mla MLA kernel；
- *        metadata 消费为 AICPU 多 section 布局。
+ * \brief FlashMla kernel for arch35.
  */
 
 #ifndef FLASH_MLA_KERNEL_H_
@@ -56,38 +55,24 @@ public:
     using OUT_T = typename VecFaBlockType::OUT_T;
     using ConstInfoX = typename CubeBlockType::ConstInfoX;
 
-    // ---- CV buffers：已静态化至各 block（cube/vec InitBuffers 中的 MM1/MM2 共用布局），kernel 不再持有 buffer manager
-    // ----
-
-    // 多 section AICPU metadata：
-    // 字节布局 = [16-word header][sectionNum*aic*16 (FA)][sectionNum*aiv*16 (FD)]，FA/FD 区分别绑定 GM tensor。
-    // 每 section 的 aic/aiv 核数从 header 保留位自描述读取（producer 写硬件实际值，如 950PR 为 28/56），
-    // 不再使用编译期常量，避免与 producer 布局错位。
     AscendC::GlobalTensor<uint32_t> faMetaDataGm_;
     AscendC::GlobalTensor<uint32_t> fdMetaDataGm_;
     uint32_t sectionNum_ = 0U;
     uint32_t metaAicCoreNum_ = 0U;
     uint32_t metaAivCoreNum_ = 0U;
-    // header 第 1 个 uint32：producer 写 1 表示任意 section 存在 FD 任务（与 flash_attn
-    // HEAD_IS_FD_INDEX=1 一致）；全局开关，所有 AIV core 读取一致
     bool enableFlashDecode_ = false;
     FlashMlaFdParamsX fdParams_ = {};
-    // 与 producer（flash_mla_metadata 改名克隆）的核 strides 一致：AICPU 侧 FA_METADATA_STRIDE=16 /
-    // FD_METADATA_STRIDE=16 / HEAD_METADATA_STRIDE=16，producer 侧 static_assert 已就位于
-    // flash_mla_metadata.h（本注释不再复制断言，避免漂移）。（旧名：flash_mla_metadata，历史原因保留）
-    static_assert(FLASH_ATTN_METADATA_SIZE == 16 && FA_FD_METADATA_SIZE == 16,
+    static_assert(FlashMlaCommon::FA_METADATA_STRIDE == 16 && FlashMlaCommon::FD_METADATA_STRIDE == 16,
                   "flash_mla: metadata per-core stride must be 16 to match flash_mla_metadata AICPU layout");
 
     ConstInfoX constInfo_;
     FlashMlaSeqLensTool<Q_MODE, KV_MODE> seqLensTool_;
 
     const optiling::FlashMlaNoQuantTilingArch35* __restrict tilingData_;
-    // 静态 tensor 模型：block 内自持静态 buffer + Mutex/cross-core 显式同步
     CubeBlockType cubeBlock_;
     VecFaBlockType vecFaBlock_;
     VecFdBlockType vecFdBlock_;
 
-    // schduler params
     int64_t validTaskNum_ = 0;
     uint64_t actSeqLensKv_ = 0;
     uint64_t actSeqLensQ_ = 0;
@@ -102,7 +87,6 @@ public:
     bool headS2Split_ = false;
     bool tailS2Split_ = false;
 
-    // ==============================fuction=======================================================
     __aicore__ inline FlashAttentionNoQuantMlaKernel()
         : cubeBlock_(constInfo_, seqLensTool_),
           vecFaBlock_(constInfo_, seqLensTool_),
@@ -115,25 +99,19 @@ public:
     {
         this->tilingData_ = tiling;
 
-        // metadata（GM 输入）：section 数在 16-word header 第 0 个 uint32；header 第 1 个 uint32
-        // 为 producer 写入的全局 FD 启用标志（与 flash_attn HEAD_IS_FD_INDEX=1 一致）；第 4/5 个
-        // uint32 为 producer 自描述写入的 FA/FD 区每 section 核数（硬件实际值）
         sectionNum_ = ((__gm__ uint32_t*)metadata)[0];
         enableFlashDecode_ = static_cast<bool>(((__gm__ uint32_t*)metadata)[1U]);
         metaAicCoreNum_ = ((__gm__ uint32_t*)metadata)[FLASH_MLA_METADATA_AIC_NUM_INDEX];
         metaAivCoreNum_ = ((__gm__ uint32_t*)metadata)[FLASH_MLA_METADATA_AIV_NUM_INDEX];
-        // FA 区从 header 后开始（参见 metadata 消费段）
         faMetaDataGm_.SetGlobalBuffer((__gm__ uint32_t*)(metadata + FA_METADATA_HEADER_OFFSET),
-                                      metaAicCoreNum_ * FLASH_ATTN_METADATA_SIZE * sectionNum_);
+                                      metaAicCoreNum_ * FlashMlaCommon::FA_METADATA_STRIDE * sectionNum_);
         fdMetaDataGm_.SetGlobalBuffer(
             (__gm__ uint32_t*)(metadata + FA_METADATA_HEADER_OFFSET +
-                               FLASH_ATTN_METADATA_SIZE * metaAicCoreNum_ * sectionNum_ * sizeof(uint32_t)),
-            metaAivCoreNum_ * FA_FD_METADATA_SIZE * sectionNum_);
+                               FlashMlaCommon::FA_METADATA_STRIDE * metaAicCoreNum_ * sectionNum_ * sizeof(uint32_t)),
+            metaAivCoreNum_ * FlashMlaCommon::FD_METADATA_STRIDE * sectionNum_);
 
         InitConstInfo();
 
-        // seq-lens 全部 INT32（ACTLEN_T=uint32_t），无 int64 GM 物化、无预核 pass；
-        // parser 所有权收敛到 kernel 层（FlashMlaSeqLensTool），block 只读引用
         seqLensTool_.InitQ(cuSeqlensQ, sequsedQ, constInfo_.actualSeqLenSize, constInfo_.s1Size, constInfo_.bSize);
         seqLensTool_.InitKv(cacheSeqlens, constInfo_.actualSeqLenKVSize, constInfo_.s2Size);
 
@@ -148,8 +126,6 @@ public:
 
         if constexpr (FLASH_DECODE) {
             if ASCEND_IS_AIV {
-                // FA fd（Mutex 版）Init 契约：InitBlock(softmaxLse, attentionOut)
-                // 建 outGmTensor_/softmaxLseGm_/dSizeV_Align_；InitGlobalTensor 仅接 FD 读的 accum/LSE GM。
                 vecFdBlock_.InitBlock(softmaxLse, attentionOut);
                 vecFdBlock_.InitGlobalTensor(this->vecFaBlock_.softmaxFDMaxGm, this->vecFaBlock_.softmaxFDSumGm,
                                              this->vecFaBlock_.accumOutGm);
@@ -182,8 +158,6 @@ public:
         constInfo_.s2Size = flashMlaBaseParams.s2Size;
         constInfo_.dSize = flashMlaBaseParams.dSize;
         constInfo_.dSizeV = flashMlaBaseParams.dSizeV;
-        // rope 段宽度由 host 从 q last dim - headDimV 推导后经 tiling data 传入
-        // （当前 MLA D512 仅支持 rope==64，见 tiling_info_parser GetQkHeadDim）
         constInfo_.dSizeRope = flashMlaBaseParams.dSizeRope;
         constInfo_.actualSeqLenSize = flashMlaBaseParams.actualSeqLengthsQSize;
         constInfo_.actualSeqLenKVSize = flashMlaBaseParams.actualSeqLengthsKVSize;
@@ -208,33 +182,28 @@ public:
         constInfo_.isExistRowInvalid = flashMlaAttenMaskParams.isExistRowInvalid;
         constInfo_.accumOutSize = flashMlaWorkspaceParams.accumOutSize;
         constInfo_.logSumExpSize = flashMlaWorkspaceParams.logSumExpSize;
-        // pageAttention（仅 PA 实例化：SEL 不含 NO_PA，host IsCapableFeatureCheckMla 亦强制 PA 路由）
         constInfo_.maxBlockNumPerBatch = flashMlaPageAttentionParams.maxBlockNumPerBatch;
         constInfo_.blockSize = flashMlaPageAttentionParams.blockSize;
         constInfo_.paLayoutType = flashMlaPageAttentionParams.paLayoutType;
-        // LSE
         constInfo_.isSoftmaxLseEnable = flashMlaBaseParams.isSoftMaxLseEnable;
 
-        // 每 section 的 FA 任务区间由 FlashAttention(sectionIdx) 内 GetFASectionInfo
-        // 从 AICPU metadata 读取（多 section 0 基布局，无 S1 外切）
         constInfo_.dBasicBlock = AttentionCommon::Align(constInfo_.dSizeV, 64U);
         constInfo_.kRopeStrides.bnStride = flashMlaBaseParams.kRopeStrides.bnStride;
         constInfo_.kRopeStrides.n2Stride = flashMlaBaseParams.kRopeStrides.n2Stride;
     }
 
-    // 0 基、16 字段/核、无 CORE_ENABLE
     __aicore__ inline uint32_t GetFAMetaDataIndex(uint32_t coreIdx, uint32_t metaIdx, uint32_t sectionIdx)
     {
-        return FLASH_ATTN_METADATA_SIZE * metaAicCoreNum_ * sectionIdx + 16U * coreIdx + metaIdx;
+        return FlashMlaCommon::FA_METADATA_STRIDE * metaAicCoreNum_ * sectionIdx +
+               FlashMlaCommon::FA_METADATA_STRIDE * coreIdx + metaIdx;
     }
 
     __aicore__ inline uint32_t GetFDMetaDataIndex(uint32_t coreIdx, uint32_t metaIdx, uint32_t sectionIdx)
     {
-        return FA_FD_METADATA_SIZE * metaAivCoreNum_ * sectionIdx + FA_FD_METADATA_SIZE * coreIdx + metaIdx;
+        return FlashMlaCommon::FD_METADATA_STRIDE * metaAivCoreNum_ * sectionIdx +
+               FlashMlaCommon::FD_METADATA_STRIDE * coreIdx + metaIdx;
     }
 
-    // 单 section FA 任务区间读取（重映射：FIA 8 字段 CORE_ENABLE 布局 -> AICPU 16 字段 0 基布局，
-    // FA 各字段索引 -1；FA_CORE_ENABLE 删除，核活跃由区间隐含）
     __aicore__ inline void GetFASectionInfo(uint32_t sectionIdx)
     {
         constInfo_.bN2Start =
@@ -253,7 +222,6 @@ public:
             GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_FIRST_FD_DATA_WORKSPACE_IDX_INDEX, sectionIdx));
     }
 
-    // 单 section FD 参数读取；FD 核活跃 = mLen > 0（无 CORE_ENABLE 字段）
     __aicore__ inline void GetFDSectionInfo(uint32_t sectionIdx)
     {
         fdParams_.mLen = fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, FA_FD_M_NUM_INDEX, sectionIdx));
@@ -279,8 +247,7 @@ public:
         }
 
         GetFASectionInfo(sectionIdx);
-        // Sparse first/last M tiles can be skipped before updating split flags.
-        // Never reuse a previous section's FD workspace-slot state.
+        // 跳过稀疏任务时也需重置 FD 状态，避免复用上一 section 的 workspace 槽。
         headS2Split_ = false;
         tailS2Split_ = false;
 
@@ -296,22 +263,18 @@ public:
         uint32_t createdTaskCount = 0U;
         uint32_t executedTaskCount = 0U;
         while (shouldDispatchTask || shouldExecuteTask) {
-            // 分发任务
             shouldDispatchTask = ShouldDispatchTask(bN2Cur, gS1Cur, s2Cur);
             if (shouldDispatchTask) {
                 TASK_DEAL_MODE taskDealMode = GetTaskDealMode(bN2Cur, gS1Cur, s2Cur);
                 if (taskDealMode == TASK_DEAL_MODE::CREATE_TASK) {
-                    // 创建任务
                     CreateTask(createdTaskCount, bN2Cur, gS1Cur, s2Cur, taskRunInfo);
                     createdTaskCount++;
                     UpdateAxisInfo(taskDealMode, bN2Cur, gS1Cur, s2Cur);
                 } else {
-                    // DEAL_ZERO / SKIP_ZERO / SKIP 等非建任务模式：统一推进轴信息
                     UpdateAxisInfo(taskDealMode, bN2Cur, gS1Cur, s2Cur);
                     continue;
                 }
             }
-            // 执行任务
             shouldExecuteTask = ShouldExecuteTask(taskRunInfo, shouldDispatchTask);
             if (shouldExecuteTask) {
                 ExecuteTask(executedTaskCount, taskRunInfo);
@@ -337,8 +300,7 @@ public:
         if (validTaskNum_ <= 0) {
             return false;
         }
-        // 预取提前一轮：执行本轮前须保证下一轮任务已创建（validTaskNum_ >= 2），
-        // 否则 ExecuteTask 的 Load(L+1) 无任务可预取；收尾阶段（!stillDispatchTask）放行，避免流水排不空。
+        // 预取需要下一任务已创建；排空流水时不再等待后续任务。
         if (stillDispatchTask && validTaskNum_ < 2) {
             return false;
         }
@@ -366,7 +328,6 @@ public:
             return TASK_DEAL_MODE::SKIP_ZERO;
         }
 
-        // 计算每一行的起止点，只有当换行时（bN2Cur、gS1Cur更新）才需要重新计算
         if (isFirstTask || bN2Cur != prevBN2Idx_ || gS1Cur != prevGS1Idx_) {
             if constexpr (!HAS_MASK) {
                 CalcCurS2StartEndNoSparse(bN2Cur, gS1Cur);
@@ -432,13 +393,11 @@ public:
 
     __aicore__ inline void CalcCurS2StartEndWithSparse(uint32_t bN2Cur, uint32_t gS1Cur)
     {
-        // 1. Calc preTokenLeftUp, nextTokenLeftUp
         int64_t preTokenLeftUp = 0;
         int64_t nextTokenLeftUp = 0;
         int64_t s1FirstToken = 0;
         int64_t s1LastToken = 0;
 
-        // 2. calc index of s2FirstToken, s2LastToken by index of s1GFirstToken, s1GLastToken
         int64_t s1GFirstToken = static_cast<int64_t>(gS1Cur) * static_cast<int64_t>(mBaseSize);
         int64_t s1GLastToken =
             AttentionCommon::Min(s1GFirstToken + static_cast<int64_t>(mBaseSize),
@@ -451,30 +410,24 @@ public:
         } else {
             if (s1GFirstToken / static_cast<int64_t>(actSeqLensQ_) ==
                 s1GLastToken / static_cast<int64_t>(actSeqLensQ_)) {
-                // start and end locate in one G
                 s1FirstToken = s1GFirstToken % static_cast<int64_t>(actSeqLensQ_);
                 s1LastToken = s1GLastToken % static_cast<int64_t>(actSeqLensQ_);
             } else {
-                // start and end locate in tow or more G, but working same as crossing one complete block
                 s1LastToken = static_cast<int64_t>(actSeqLensQ_);
                 s1FirstToken = 0;
             }
         }
         GetPreNextTokenLeftUp(actSeqLensQ_, actSeqLensKv_, preTokenLeftUp, nextTokenLeftUp);
-        // 3. trans index of token to index of block
         int64_t s2FirstToken = s1FirstToken - preTokenLeftUp;
         int64_t s2LastToken = s1LastToken + nextTokenLeftUp;
-        // no valid token
         if (s2FirstToken >= static_cast<int64_t>(actSeqLensKv_) || s2LastToken < 0 || s2LastToken < s2FirstToken) {
             curS2Start_ = 0U;
             curS2End_ = 0U;
             return;
         }
-        // get valid range
         s2FirstToken = ClipSInnerToken(s2FirstToken, 0, static_cast<int64_t>(actSeqLensKv_ - 1));
         s2LastToken = ClipSInnerToken(s2LastToken, 0, static_cast<int64_t>(actSeqLensKv_ - 1));
 
-        // 4. Calc curS2Start_, curS2End_
         curS2Start_ = static_cast<uint32_t>(s2FirstToken) / s2BaseSize;
         curS2End_ = static_cast<uint32_t>(s2LastToken) / s2BaseSize + 1U;
 
@@ -498,9 +451,6 @@ public:
         FlashMlaRunInfoX& runInfoNext =
             taskRunInfo[(loop + 1) & (PRELOAD_TASK_CACHE_SIZE - 1)]; // 下一轮任务（仅用于提前搬运 KV）
 
-        // 提前一轮发起下一任务的 KV 搬运（只发 MTE2、不等落地），让 MTE2 与 MAC 流水重叠：
-        // MAC 在算本轮(L)与上轮(L-1)时，MTE2 在后台搬 L+1。
-        // 首个任务（loop==0）无"上轮"可预取，须在本轮同轮发起。
         if (runInfoNext.isValid) {
             if ASCEND_IS_AIC {
                 ComputeBmm1Load(runInfoNext);
@@ -527,8 +477,7 @@ public:
             }
         }
 
-        // 下一任务为换 Q 块首任务：Q 的 MTE2 提前到本轮发起（须在 ComputeMm1 释 MTE1(Q) 锁之后，
-        // Mutex 顺序保证覆盖时不与本轮 Q 的 MTE1 读冲突；Q 单槽 L1，故仅边界任务可提前）
+        // Q 单槽复用，预取必须在本轮 MTE1 读取结束后发起。
         if (runInfo0.isValid && runInfoNext.isValid && runInfo0.isLastS2Loop && runInfoNext.isFirstS2Loop) {
             if ASCEND_IS_AIC {
                 ComputeQPreload(runInfoNext);
@@ -608,10 +557,8 @@ public:
         info.n2Idx = bN2Cur % constInfo_.n2Size;
         info.gS1Idx = gS1Cur * mBaseSize;
         if constexpr (LAYOUT_Q == FLASH_MLA_LAYOUT::BSH || LAYOUT_Q == FLASH_MLA_LAYOUT::TND) {
-            // S1G layout
             info.s1Idx = info.gS1Idx / constInfo_.gSize;
         } else {
-            // GS1 layout
             info.s1Idx = info.gS1Idx % actSeqLensQ_;
         }
         info.s2Idx = s2Cur * s2BaseSize;
@@ -633,10 +580,6 @@ public:
 
         GetPreNextTokenLeftUp(actSeqLensQ_, actSeqLensKv_, info.preTokensLeftUp, info.nextTokensLeftUp);
 
-        // 情况1: loop不等于0时, 第一个S2 inner循环就是第一个S2 outer循环, 即s2Cur=0
-        // 情况2: loop=0时, 如果(bN2Start, gS1OStart, s2Start)任务有效, 对于当前核, 为第一个S2 inner循环
-        // 情况3: loop=0时, 如果(bN2Start, gS1OStart, s2Start)任务无效,
-        // 下一个有效任务一定是某个head的第一个S2外切块，s2Cur=0
         info.isFirstS2Loop = ((loop == 0) || (s2Cur == curS2Start_));
         info.isS2SplitCore = false;
         info.faTmpOutWsPos = constInfo_.coreFirstTmpOutWsPos;
@@ -649,14 +592,11 @@ public:
         }
 
         if ((constInfo_.bN2Start == constInfo_.bN2End && constInfo_.gS1OStart == constInfo_.gS1OEnd)) {
-            // 所有任务属于同一个S1G
             info.isS2SplitCore = true;
         } else {
             if (headS2Split_ && (bN2Cur == constInfo_.bN2Start) && (gS1Cur == constInfo_.gS1OStart)) {
-                // 当前任务属于第一个S1G, 并且第一个S1G的S2被切分了
                 info.isS2SplitCore = true;
             } else if (tailS2Split_ && (bN2Cur == constInfo_.bN2End) && (gS1Cur == constInfo_.gS1OEnd)) {
-                // 当前任务属于最后一个S1G, 并且最后一个S1G的S2被切分了
                 info.isS2SplitCore = true;
                 info.faTmpOutWsPos = headS2Split_ ? (info.faTmpOutWsPos + 1) : info.faTmpOutWsPos;
             }
@@ -674,7 +614,6 @@ public:
             return;
         }
 
-        // 当前BN2未处理完
         s2Cur = 0;
 
         uint64_t gS1LoopTimes = cachedG1S1LoopTimes_;
@@ -683,17 +622,13 @@ public:
             return;
         }
 
-        // 当前BN2已处理完
         gS1Cur = 0;
         bN2Cur++;
     }
 
     __aicore__ inline void FlashDecode(uint32_t sectionIdx)
     {
-        // [flash_attn 同款] 全局 FD 开关（header 第 1 个 uint32），所有 AIV core 读取一致：
-        // false 时全部直接 return（0 次 SyncAll，barrier 平衡），true 时全部执行完整 FD 流程
-        // （2 次 SyncAll）。GetFDSectionInfo 对无任务 core 只设 fdCoreEnable=0 后 return，
-        // vecFdBlock_.FlashDecode 内部按其 mLen 跳过计算，但外层 SyncAll 仍执行 → 全核 barrier 平衡。
+        // 所有 AIV 必须执行相同次数的 SyncAll，包括没有 FD 任务的核。
         if (!enableFlashDecode_) {
             return;
         }
@@ -707,8 +642,6 @@ public:
 
     __aicore__ inline void Process()
     {
-        // AIV 先 InitBuffers→InitCrossCoreSync→AllocEventID；
-        // AIC 先 InitCrossCoreSync→InitBuffers，使用固定 Mutex ID
         if (constInfo_.aicIdx < constInfo_.coreNum) {
             if ASCEND_IS_AIV {
                 vecFaBlock_.InitBuffers();
@@ -720,7 +653,6 @@ public:
             }
         }
 
-        // 多 section 流水：逐 section 读 AICPU metadata 并执行 FA/FD
         for (uint32_t sectionIdx = 0; sectionIdx < sectionNum_; sectionIdx++) {
             if (constInfo_.aicIdx < constInfo_.coreNum) {
                 FlashAttention(sectionIdx);

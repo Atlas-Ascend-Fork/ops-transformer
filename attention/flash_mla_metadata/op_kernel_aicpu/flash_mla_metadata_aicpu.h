@@ -11,9 +11,6 @@
 /*!
  * \file flash_mla_metadata_aicpu.h
  * \brief AICPU metadata producer for FlashMlaMetadata.
- *        Inputs are 3 tensors: cuSeqlensQ (accumulated), cacheSeqlens (per-batch,
- *        non-cumulative kv lengths), sequsedQ (per-batch non-cumulative query lengths).
- *        Window is unlimited: preToken/nextToken are unconditionally UINT32_MAX.
  */
 
 #ifndef FLASH_MLA_METADATA_AICPU_H
@@ -40,7 +37,6 @@ private:
 
     bool ParamsCheck();
     bool CheckAttrs();
-    // kv 先于 query 检查：batch 由必传的 cacheSeqlens 推导，query 侧校验依赖 batch
     bool CheckActualKvSeq();
     bool CheckActualQuerySeq(int64_t batchSize);
     bool CheckMetadataCapacity(uint32_t sectionNum);
@@ -52,14 +48,11 @@ private:
 
 private:
     CpuKernelContext* context_ = nullptr;
-    // input tensor
     Tensor* cuSeqlensQ_ = nullptr;
     Tensor* cacheSeqlens_ = nullptr;
     Tensor* sequsedQ_ = nullptr;
-    // output tensor
     Tensor* metadata_ = nullptr;
 
-    // input attr
     int32_t maxSeqlenQ_ = -1;
     int32_t maxSeqlenKv_ = -1;
     int32_t numHeadsQ_ = 0;
@@ -72,31 +65,22 @@ private:
     int32_t aicCoreNum_ = 36U; // 36: default aic num
     int32_t aivCoreNum_ = 72U; // 72: default aiv num
 
-    // BaseInfo
     bool isActualSeqlenQAccum_ = false;
     bool isActualSeqlenKvAccum_ = false;
     std::vector<int64_t> actualSeqlenQ_{};
     std::vector<int64_t> actualSeqlenKv_{};
 
-    // SplitParams
     uint32_t mBaseSize_ = 64;   // 64: default value
     uint32_t s2BaseSize_ = 128; // 128: default value
     load_balance::DeviceInfo deviceInfo;
     load_balance::BaseInfo baseInfo;
     load_balance::SectionStreamKParam param;
 
-    // MLA 硬约束（与 host 侧 flash_mla_metadata_check.h 同源，kernel 侧兜底）
-    static constexpr int64_t MLA_KV_HEADS = 1;
-    static constexpr int64_t MLA_HEAD_DIM_QK = 576;
-    static constexpr int64_t MLA_HEAD_DIM_V = 512;
-
 private:
     enum class ParamId : uint32_t {
-        // input
         cuSeqlensQ = 0,
         cacheSeqlens = 1,
         sequsedQ = 2,
-        // output
         metaData = 0,
     };
 };

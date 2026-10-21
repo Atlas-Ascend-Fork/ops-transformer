@@ -10,7 +10,7 @@
 
 /*!
  * \file flash_mla_public_define_arch35.h
- * \brief arch35 flash_mla 公共定义（由 fia_public_define_arch35.h 复制改名）
+ * \brief arch35 flash_mla 公共定义
  */
 #ifndef FLASH_MLA_PUBLIC_DEFINE_ARCH35_H
 #define FLASH_MLA_PUBLIC_DEFINE_ARCH35_H
@@ -82,7 +82,6 @@ struct FlashMlaRunInfoX {
 
     uint32_t actSingleLoopS2Size = 0; // S2方向长度
     uint32_t actSingleLoopS2SizeAlign;
-    // uint32_t curS2LoopTimes = 0;
     bool isS2SplitCore = false;
     uint32_t faTmpOutWsPos = 0; // FA阶段，S2外切，需要写到workspace时，写出到第几块M*D的GM块
 

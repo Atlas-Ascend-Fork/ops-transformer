@@ -31,6 +31,7 @@ public:
 
     ge::graphStatus CheckSinglePara(const FlashMlaTilingInfo& faInfo) override;
     ge::graphStatus CheckParaExistence(const FlashMlaTilingInfo& faInfo) override;
+    ge::graphStatus CheckMultiPara(const FlashMlaTilingInfo& faInfo) override;
 };
 
 } // namespace flash_mla

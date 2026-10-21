@@ -10,9 +10,7 @@
 
 /*!
  * \file flash_mla_block_vec.h
- * \brief arch35 flash_mla MLA vector；
- *        静态 tensor UbLayout + Mutex/cross-core 显式同步 + FA 协同清零
- *        （FD 业务 UB 从 120 KiB 起，避开 Cube/Vector 共用的 MM1/MM2 区）
+ * \brief FlashMla Vector block for arch35.
  */
 #ifndef FLASH_MLA_BLOCK_VEC_H_
 #define FLASH_MLA_BLOCK_VEC_H_
@@ -161,7 +159,6 @@ public:
     using ConstInfoNoQuant = ConstInfo_t<FlashMlaKernelType::NO_QUANT>;
     using OUT_T = OUTPUT_T;
 
-    // ================== 核间同步 ID（与 cube 侧逐字节一致）==================
     static constexpr uint64_t CROSS_CORE_SYNC_MODE = 4U;
     static constexpr uint32_t CROSSCORE_BMM1_0 = 0U;
     static constexpr uint32_t CROSSCORE_BMM2_0 = 2U;
@@ -169,22 +166,18 @@ public:
     static constexpr uint32_t CROSSCORE_L1P_0 = 5U;
     static constexpr uint32_t CROSSCORE_L1P_1 = 6U;
     static constexpr uint32_t CROSSCORE_L1P_2 = 7U;
-    // AIV0_AIV1_OFFSET 使用全局宏（attention/common/op_kernel/buffer.h:30，=16）
 
-    // ================== AIV 核内 Mutex ID：0–5 用于输出，6/7 用于 mask 槽 ==================
     static constexpr uint32_t UB_OUT_VEC2_RES_EVENT0 = 0U; // vec2Res（96K@120K）V/MTE3
     static constexpr uint32_t EVENT_ID0 = 1U;              // InitOutput atten-out pop 同步（PIPE_V/PIPE_MTE3）
     static constexpr uint32_t UB_OUT_VEC1_RES_EVENT0 = 2U; // stage1/vec1Res（12.25K@216K）V/MTE3
     static constexpr uint32_t EVENT_ID1 = 3U;              // InitOutput LSE pop 同步（PIPE_V/PIPE_MTE3）
     static constexpr uint32_t UB_OUT_LSE_OUT_EVENT0 = 4U;  // LSE 1.5 KiB 输出（V/MTE3）
     static constexpr uint32_t UB_BRDCST_SUM_EVENT = 5U;    // sumBrdcst 2 KiB（V/MTE3）
-    // mask 槽 2×6 KiB 的 per-slot 双 pipe 生产-消费握手：
-    // MTE2(加载) ↔ V(软max消费) 严格交替，避免跨 S2 轮次槽复用读到上一轮掩码（旧深度1队列的进出队语义）
+    // 掩码槽复用前需等待 Vector 消费结束，防止覆盖未读数据。
     static constexpr uint32_t UB_IN_MASK_EVENT0 = 6U;
     static constexpr uint32_t UB_IN_MASK_EVENT1 = 7U;
     static constexpr uint32_t UB_BRDCST_MAX_EVENT = UB_BRDCST_SUM_EVENT; // maxBrdcst 2K（V/MTE3）
 
-    // ================== 静态布局常量（M96/CV_RATIO=2；UB 合计 246.5 KiB ≤ 248 KiB）==================
     static constexpr uint32_t BUFFER_SIZE_BYTE_32K = 32768;
     static constexpr uint32_t UB_MM2_RES_BUFCNT = 2U;
     static constexpr uint32_t UB_MM2_RES_BUF_BYTES = mBaseSize / CV_RATIO * 256U * sizeof(T);
@@ -200,18 +193,13 @@ public:
     static constexpr uint32_t UB_BRDCST_BUF_BYTES = 2048U;                                     // max/sumBrdcst
     static constexpr uint32_t UB_TMP_BUF_BYTES = 512U;                                         // commonTBuf 512B
 
-    // L1 P（A1）：vec1 写 P 的目标 = cube 的 L1 KVP 区（A1 108K 起、3×133K、每个任务 loop%3 槽）；
-    // P 在槽内偏移为 s2BaseSize*dVBaseSize 个元素，即 112*512*2 = 112 KiB；
-    // P 的 96*112*2 = 21 KiB 覆盖 rope 的 14 KiB 与预留的 7 KiB。
+    // P 覆盖 KV 槽的 rope 区和预留空间，偏移须与 Cube 侧一致。
     static constexpr uint32_t L1_P_BUFCNT = 3U;
     static constexpr uint32_t L1_P_BUF_BYTES = s2BaseSize * 608 * sizeof(INPUT_T);   // 133K
     static constexpr uint32_t L1_Q_PREFIX_BYTES = mBaseSize * 576 * sizeof(INPUT_T); // 108K（cube Q 区，跳过）
 
-    // gm
     GlobalTensor<OUTPUT_T> attentionOutGm;
     GlobalTensor<float> softmaxLseGm;
-    // seq-lens INT32；q 侧 ACCUM 带首零头（cu_seqlens_q [b+1]），ACTLEN_T=uint32_t；
-    // parser 所有权在 kernel 侧 FlashMlaSeqLensTool，本 block 只读引用
     SeqLensToolType& seqLensTool_;
 
     attenMaskGmType attenMaskGmInt;
@@ -220,14 +208,12 @@ public:
     flashdecodeGmType softmaxFDSumGm;
     flashdecodeGmType softmaxFDMaxGm;
 
-    // 输出 GM tensor + 拷贝器（flash_attn 风格成员变量，编译期模板化）
     static constexpr GmFormat OUT_FORMAT = GetQueryGmFormat<outLayout>();
     using FaGmTensorOut = FaGmTensor<OUTPUT_T, OUT_FORMAT, uint32_t,
                                      (outLayout == FLASH_MLA_LAYOUT::TND || outLayout == FLASH_MLA_LAYOUT::NTD)>;
     FaGmTensorOut outGmTensor_;
     CopyAttenOutUbToGm<OUTPUT_T, OUT_FORMAT, GetOutUbFormat<LAYOUT_T>()> copyAttenOutUbToGm_;
 
-    // ub/l1 静态 tensor（按 InitBuffers 中的 UbLayout 和 L1 常量建立）
     LocalTensor<uint8_t> ubMm2ResBuffers_;
     LocalTensor<uint8_t> ubMm1ResBuffers_;
     LocalTensor<uint8_t> ubVec2Res_;
@@ -247,7 +233,6 @@ public:
     int64_t bmm2SubBlockOffset = 0;
     int64_t vec2SubBlockOffset = 0;
 
-    // ==================== Functions ======================
     __aicore__ inline FlashMlaNoQuantMlaBlockVec(ConstInfoNoQuant& constInfo, SeqLensToolType& seqLensTool)
         : constInfo(constInfo),
           seqLensTool_(seqLensTool){};
@@ -303,9 +288,6 @@ public:
         LocalTensor<INPUT_T> pL1Tensor = l1PBuffers_[pL1BufId * L1_P_BUF_BYTES].template ReinterpretCast<INPUT_T>();
         auto mm1ResUbTensor = ubMm1ResBuffers_[mm1ResUbBufId * UB_MM1_RES_BUF_BYTES].template ReinterpretCast<T>();
 
-        // 首轮 softmax 折叠：统一走 Update VF 族（ProcessVec1Vf updateFlag=true），由
-        // ResetSoftmaxBuffer 把 mloop 槽 sum/max 置 0/-inf 替代旧 isFirstS2Loop 区分
-        // （消除首次 softmax VF 分支）
         if (unlikely(runInfo.isFirstS2Loop)) {
             ResetSoftmaxBuffer(runInfo.mloop % UB_SOFTMAX_BUFCNT);
             AscendC::PipeBarrier<PIPE_V>();
@@ -333,9 +315,7 @@ public:
         Vec1PostProcess(runInfo);
     }
 
-    // 初始化借用 UB：attentionOut 使用 [0,32) KiB，LSE 使用 [32,64) KiB。
-    // 仅在 kernel Init 阶段执行；SyncAll 后才在 Process 中发布 BMM1/BMM2 可用标志。
-    // EVENT_ID0/1 保护各 pop-buffer 的 V/MTE3 搬运，初始化与 FA 业务阶段分离。
+    // 初始化借用 CV 缓冲区，SyncAll 后才能发布 BMM1/BMM2 可用标志。
     __aicore__ inline void ClearOutput(bool needInit)
     {
         if (needInit) {
@@ -396,8 +376,7 @@ public:
         Mutex::Unlock<PIPE_V>(UB_OUT_LSE_OUT_EVENT0);
         Mutex::Lock<PIPE_MTE3>(UB_OUT_LSE_OUT_EVENT0);
 
-        // flash_mla LSE 契约为 (N,T) 头主序：runInfo 的 gS1 区间是 [gIdx][s1Idx] token 主序排布，
-        // 用 TND→(N,T) 转置写出；bN2Offset = n2Idx * gSize * t1Size = head 块 GM 起址。
+        // runInfo 按 token 排列，LSE 写出时需转为 head-major。
         if constexpr (LAYOUT_T == FLASH_MLA_LAYOUT::NTD) {
             uint32_t prefixBS1 = seqLensTool_.qActSeqLensParser.GetTBase(runInfo.bIdx);
             uint32_t s1Size = seqLensTool_.qActSeqLensParser.GetActualSeqLength(runInfo.bIdx);
@@ -449,14 +428,11 @@ public:
         LocalTensor<uint8_t> apiTmpBuffer;
 
         apiTmpBuffer = this->vec1ApiTmpBuf_;
-        // 统一走 Update VF 族（updateFlag=true）：首轮 sum/max 由 ProcessVec1 的
-        // ResetSoftmaxBuffer 置 0/-inf，消除 isFirstS2Loop 分支
         if (likely(runInfo.actSingleLoopS2Size == 128)) {
             ProcessVec1Vf<T, INPUT_T, pseShiftType, true, mBaseSize, 128U, EQ_128, APPLY_MASK, PSE_MODE, HAS_DROP,
                           false, false>(stage1CastTensor, nullptr, sumUb, maxUb, mmRes, expUb, sumUb, maxUb,
                                         attenMaskUb, pseUb, dropMaskUb, apiTmpBuffer, pScaleUb, runInfo.actVecMSize,
-                                        runInfo.actSingleLoopS2Size, pseStride, slopes, posShift,
-                                        constInfo.scaleValue, // constInfo.scaleValue 已是 T float类型
+                                        runInfo.actSingleLoopS2Size, pseStride, slopes, posShift, constInfo.scaleValue,
                                         descaleQK, negativeFloatScalar, 0.0F, queryScaleUb, deSCaleKValue);
         } else if (runInfo.actSingleLoopS2Size <= 64) {
             ProcessVec1Vf<T, INPUT_T, pseShiftType, true, mBaseSize, 128U, GT_0_AND_LTE_64, APPLY_MASK, PSE_MODE,
@@ -488,7 +464,6 @@ public:
         const uint32_t maskBufId = runInfo.loop % DB;
         if constexpr (hasAtten) {
             attenMaskUb = ubMaskBuffers_[maskBufId * UB_MASK_BUF_BYTES];
-            // Mask preparation was issued before the QK wait. Fully visible tiles do not use this slot.
             if (useMask) {
                 Mutex::Lock<PIPE_V>(UB_IN_MASK_EVENT0 + maskBufId);
             }
@@ -507,13 +482,11 @@ public:
         }
         Mutex::Unlock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0);
         if constexpr (hasAtten) {
-            // 软max 已消费完本槽 mask，Unlock 释放供下一轮 MTE2 覆写
             if (useMask) {
                 Mutex::Unlock<PIPE_V>(UB_IN_MASK_EVENT0 + maskBufId);
             }
         }
 
-        // ===================DataCopy to L1 ====================
         Mutex::Lock<PIPE_MTE3>(UB_OUT_VEC1_RES_EVENT0);
         LocalTensor<INPUT_T> mm2AL1Tensor = pL1Tensor;
 
@@ -536,8 +509,6 @@ public:
         LocalTensor<float> expUb =
             softmaxExpBuf_[(runInfo.loop % UB_SOFTMAX_BUFCNT) * (UB_SOFTMAX_BUF_BYTES / sizeof(float))];
 
-        // 折叠软最大值：首轮时 mloop 槽 sum/max 已由 ProcessVec1 的 ResetSoftmaxBuffer
-        // 置 0/-inf，Update 恒执行（消除 isFirstS2Loop 区分）
         UpdateExpSumAndExpMax<T>(sumUb, maxUb, expUb, sumUb, maxUb, vec1ApiTmpBuf_, runInfo.actVecMSize);
 
         if (unlikely(runInfo.isLastS2Loop)) {
@@ -627,12 +598,10 @@ public:
         int32_t s1EndTdx;
         bool ret = false;
         if constexpr (LAYOUT_T == FLASH_MLA_LAYOUT::BSH || LAYOUT_T == FLASH_MLA_LAYOUT::TND) {
-            // S1G layout
             s1StartTdx = vecMStartIdx / constInfo.gSize;
             s1EndTdx = vecMEndIdx / constInfo.gSize;
             ret = (s1StartTdx < s1FirstValidToken) || (s1EndTdx > s1LastValidToken);
         } else {
-            // GS1 layout
             s1StartTdx = vecMStartIdx % runInfo.actS1Size;
             s1EndTdx = vecMEndIdx % runInfo.actS1Size;
             int32_t gStartIdx = vecMStartIdx / runInfo.actS1Size;
@@ -697,7 +666,6 @@ public:
     __aicore__ inline void BroadCastAndCopyOut(const FlashMlaRunInfoX& runInfo, LocalTensor<float>& sumUb,
                                                LocalTensor<float>& maxUb, int64_t gmOffset, int64_t calculateSize)
     {
-        // Copy sum to gm
         Mutex::Lock<PIPE_V>(UB_BRDCST_SUM_EVENT);
         LocalTensor<float> sumOutTensor = ubSumBrdcstBuf_.template ReinterpretCast<float>();
         FaVectorApi::BroadcastMaxSum(sumOutTensor, sumUb, runInfo.actVecMSize);
@@ -706,7 +674,6 @@ public:
         DataCopy(softmaxFDSumGm[gmOffset], sumOutTensor, calculateSize);
         Mutex::Unlock<PIPE_MTE3>(UB_BRDCST_SUM_EVENT);
 
-        // Copy max to gm
         Mutex::Lock<PIPE_V>(UB_BRDCST_MAX_EVENT);
         LocalTensor<float> maxOutTensor = ubMaxBrdcstBuf_.template ReinterpretCast<float>();
         FaVectorApi::BroadcastMaxSum(maxOutTensor, maxUb, runInfo.actVecMSize);
@@ -724,7 +691,6 @@ public:
         }
         int64_t calculateSize = runInfo.actVecMSize * fp32BaseSize;
         int64_t gmOffset = runInfo.faTmpOutWsPos * mBaseSize * fp32BaseSize + runInfo.vecMbaseIdx * fp32BaseSize;
-        // Copy sum to gm
         BroadCastAndCopyOut(runInfo, sumUb, maxUb, gmOffset, calculateSize);
     }
 
@@ -745,7 +711,6 @@ public:
     __aicore__ inline void InitBuffers()
     {
         /*--------------------------------------------L1--------------------------------------------*/
-        // l1P 三缓冲：A1 108K 起（跳过 cube Q 区），槽内 P 从 112 KiB 偏移开始，覆盖 rope 与预留区
         l1PBuffers_ = LocalTensor<uint8_t>(TPosition::A1, L1_Q_PREFIX_BYTES, L1_P_BUFCNT * L1_P_BUF_BYTES);
 
         /*--------------------------------------------UB--------------------------------------------*/
@@ -804,8 +769,7 @@ public:
 
     __aicore__ inline void InitCrossCoreSync()
     {
-        // AIV 预置 BMM1_0、BMM2_0/1 三个可用标志：AIC 首个 bmm1/bmm2 Wait 立即通过；
-        // v1c2 三旗标随任务 ping-pong 无需预置（首轮 bmm2 的 Wait 有 AIV 首个 P 写保证）
+        // 预置 BMM1/BMM2 可用标志，避免 AIC 首次 Wait 阻塞。
         CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_V>(CROSSCORE_BMM2_0);
         CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_V>(CROSSCORE_BMM2_1);
         CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_V>(CROSSCORE_BMM1_0);
@@ -813,14 +777,10 @@ public:
 
     __aicore__ inline void UnInitCrossCoreSync() {}
 
-    __aicore__ inline void AllocEventID()
-    {
-        // 核内同步使用上方定义的静态 Mutex ID，无动态事件可分配
-    }
+    __aicore__ inline void AllocEventID() {}
 
     __aicore__ inline void FreeEventID() {}
 
-    // Return false for a fully visible tile without touching mask buffers or their synchronization.
     __aicore__ inline bool AttenMaskCopyIn(LocalTensor<uint8_t> attenMaskUb, uint32_t vecMIdx, uint32_t mDealSize,
                                            FlashMlaRunInfoX& runInfo)
     {
@@ -848,7 +808,6 @@ public:
 
         bool IsSkipMask = IsSkipAttentionmask(maskInfo);
         bool IsSkipMaskForPre = IsSkipAttentionmaskForPre(maskInfo);
-        // 锁全部内置于本函数（各槽 PIPE_V/MTE2 握手在拷贝内完成）
         const uint32_t maskBufId = runInfo.loop % DB;
         if (IsSkipMask && IsSkipMaskForPre) {
             // Fully visible tiles use the unmasked VF and do not access the mask slots.

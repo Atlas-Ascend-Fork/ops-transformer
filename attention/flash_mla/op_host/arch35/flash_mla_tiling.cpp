@@ -11,8 +11,6 @@
 /*!
  * \file flash_mla_tiling.cpp
  * \brief FlashMla arch35 tiling implementation.
- *        Parameter validation is performed by the checker; task partitioning
- *        is supplied by FlashMlaMetadata.
  */
 
 #include "flash_mla_tiling_arch35.h"
@@ -53,7 +51,6 @@ ge::graphStatus FlashMlaTilingImpl::DoOpTiling()
     OP_CHECK_IF(SetPlatMemoryInfo() != ge::GRAPH_SUCCESS, OP_LOGE(faInfo_->opName, "Set plat memory info fail."),
                 return ge::GRAPH_FAILED);
 
-    // Clear unused fields and padding before filling the kernel tiling data.
     memset(&tilingData_, 0, sizeof(tilingData_));
 
     InitImplParam();
@@ -99,7 +96,6 @@ ge::graphStatus FlashMlaTilingImpl::SetPlatMemoryInfo()
 
 void FlashMlaTilingImpl::InitImplParam()
 {
-    // Tiling only reads tensor shapes; sequence values are consumed on device.
     const gert::Tensor* cuSeqLenQ = faInfo_->opParamInfo.cuSeqlensQ.tensor;
     const gert::Tensor* seqUsedQ = faInfo_->opParamInfo.sequsedQ.tensor;
     const gert::Tensor* cacheSeqlens = faInfo_->opParamInfo.cacheSeqlens.tensor;
@@ -110,8 +106,6 @@ void FlashMlaTilingImpl::InitImplParam()
 
 void FlashMlaTilingImpl::SplitPolicy()
 {
-    // MLA uses M96/S2=112; each AIV handles 48 rows. The metadata producer
-    // owns task partitioning, and the kernel executes its FA/FD sections.
     sOuterFactor_ = 48;
     sInnerFactor_ = 112;
     CalcNumBlocks(platformInfo_.aicNum);
@@ -120,14 +114,11 @@ void FlashMlaTilingImpl::SplitPolicy()
 
 void FlashMlaTilingImpl::UpdateTilingKeyConfig()
 {
-    // MLA D512 唯一路径: S1=64, S2=128, D=576, DV=512 -> Config index 0
     tilingKeyInfo_.config = Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512;
 }
 
 void FlashMlaTilingImpl::UpdateTilingKeyLayout()
 {
-    // q/out 布局 -> InOutLayoutType（取值以 op_kernel/utils/flash_mla_common_def.h
-    // 为准：BSND=0 / BNSD=1 / TND=2 / TND_NTD=4）
     if (faInfo_->qLayout == FlashMlaLayout::TND) {
         if (faInfo_->outLayout == FlashMlaLayout::NTD) {
             tilingKeyInfo_.inputLayout = InOutLayoutType_TND_NTD;
@@ -163,7 +154,6 @@ void FlashMlaTilingImpl::UpdateTilingKeyInfo()
 void FlashMlaTilingImpl::GenTilingKey()
 {
     UpdateTilingKeyInfo();
-    // 实参序 = ASCENDC_TPL_ARGS_DECL 声明序：InOutLayoutType, KvLayoutType, HasAttenMask, Config
     tilingKey_ = GET_TPL_TILING_KEY(tilingKeyInfo_.inputLayout, tilingKeyInfo_.kvLayoutType,
                                     tilingKeyInfo_.hasAttenMask, tilingKeyInfo_.config);
 
@@ -185,7 +175,6 @@ void FlashMlaTilingImpl::CalcNumBlocks(uint32_t aicNum)
 
 void FlashMlaTilingImpl::CalcWorkspaceSize()
 {
-    // Each AIC owns two AIV row tiles and two partial-result slots.
     const uint64_t mSize = static_cast<uint64_t>(sOuterFactor_) * platformInfo_.cvRatio;
     const uint64_t dSize = faInfo_->vHeadDim;
     constexpr uint64_t lseSize = 8;
@@ -219,7 +208,6 @@ void FlashMlaTilingImpl::ComputeTilingData()
     maskParams.nextTokens = static_cast<int32_t>(faInfo_->nextTokens);
     tilingKeyInfo_.hasAttenMask = faInfo_->maskMode != static_cast<int64_t>(MaskMode::NO_MASK);
     if (tilingKeyInfo_.hasAttenMask) {
-        // The checker requires one shared [2048, 2048] mask for all batches.
         const auto& maskShape = faInfo_->opParamInfo.attnMask.tensor->GetStorageShape();
         maskParams.attenMaskBatch = 1;
         maskParams.attenMaskS1Size = maskShape.GetDim(0);
@@ -245,21 +233,19 @@ void FlashMlaTilingImpl::SetFATilingData()
     tilingData_.baseTiling.flashMlaBaseParams.gSize = faInfo_->gSize;
     tilingData_.baseTiling.flashMlaBaseParams.s1Size = faInfo_->s1Size;
     tilingData_.baseTiling.flashMlaBaseParams.s2Size = faInfo_->s2Size;
-    tilingData_.baseTiling.flashMlaBaseParams.dSize = faInfo_->qkHeadDim;
+    tilingData_.baseTiling.flashMlaBaseParams.dSize = faInfo_->qkNopeHeadDim;
     tilingData_.baseTiling.flashMlaBaseParams.dSizeV = faInfo_->vHeadDim;
     tilingData_.baseTiling.flashMlaBaseParams.dSizeRope = faInfo_->ropeHeadDim;
     tilingData_.baseTiling.flashMlaBaseParams.scaleValue = faInfo_->softmaxScale;
-    // kernel ActualSeqLensParser<ACTLEN_T=uint32_t> 的 actualLenDims（INT32 buffer 元素数）
     tilingData_.baseTiling.flashMlaBaseParams.actualSeqLengthsQSize =
-        cuSeqLenQFlag_ ? static_cast<uint32_t>(faInfo_->actualLenQDims) : 0;
+        cuSeqLenQFlag_ ? static_cast<uint32_t>(faInfo_->cuSeqlensQSize) : 0;
     tilingData_.baseTiling.flashMlaBaseParams.actualSeqLengthsKVSize =
-        cacheSeqlensFlag_ ? static_cast<uint32_t>(faInfo_->actualLenKvDims) : 0;
+        cacheSeqlensFlag_ ? static_cast<uint32_t>(faInfo_->cacheSeqlensSize) : 0;
     tilingData_.baseTiling.flashMlaBaseParams.isKvContinuous = 0;
     tilingData_.baseTiling.flashMlaBaseParams.isSoftMaxLseEnable = faInfo_->softmaxLseFlag;
     tilingData_.baseTiling.flashMlaBaseParams.coreNum = numBlocks_;
     tilingData_.baseTiling.flashMlaBaseParams.outputLayout = static_cast<uint32_t>(faInfo_->kernelOutputLayout);
-    // 单 token / 小 batch decode 场景：K/V 数据量远超 L2 缓存容量，关闭 L2 cache 避免无意义的缓存填充/驱逐开销
-    // （阈值 128 = 2*mBaseSize，由性能实验验证：gSize*s1Size > 128 时可能存在跨 batch 复用，保持 L2 开启）
+    // 小任务关闭 L2 缓存，避免 KV 流式读取造成缓存填充和驱逐。
     tilingData_.baseTiling.flashMlaBaseParams.l2CacheOffFlag = (faInfo_->gSize * faInfo_->s1Size) <= 128 ? 1U : 0U;
 
     tilingData_.baseTiling.flashMlaPageAttentionParams.blockSize = faInfo_->blockSize;
@@ -277,7 +263,6 @@ void FlashMlaTilingImpl::SetFATilingData()
     tilingData_.baseTiling.flashMlaEmptyTensorParams.totalSoftMaxLseOutputSize = lseSize;
     tilingData_.baseTiling.flashMlaEmptyTensorParams.needInit = CheckNeedInitOutput() ? 1 : 0;
 
-    // Key, value and rope share k_cache and its physical strides.
     if (faInfo_->hasViewStride) {
         tilingData_.baseTiling.flashMlaBaseParams.keyStrides.bnStride = faInfo_->keyBnStride;
         tilingData_.baseTiling.flashMlaBaseParams.keyStrides.n2Stride = faInfo_->keyN2Stride;
@@ -331,7 +316,6 @@ void FlashMlaTilingImpl::PrintAllTilingData()
 
 using flash_mla::FlashMlaTilingImpl;
 
-// 值越小表示优先级越高
 REGISTER_TILING_TEMPLATE_FIA(FlashMla, FlashMlaTilingImpl,
                              std::vector<int32_t>({static_cast<int32_t>(NpuArch::DAV_3510)}), 1);
 } // namespace optiling

@@ -10,19 +10,7 @@
 
 /*!
  * \file flash_mla_template_tiling_key.h
- * \brief flash_mla TilingKey 定义（非量化 MLA，仅 FP16/BF16）。
- *
- * 四字段布局：InOutLayoutType 8bw / KvLayoutType 8bw /
- * HasAttenMask 1bw / Config 3bw，同序同位宽；枚举/表/常量见 utils/
- * flash_mla_common_def.h。无 IsFd（FD 能力恒实例化，运行时由
- * metadata 各 section mLen>0 驱动，见 kernel 入口注释）。
- *
- * 实例化集合（SEL 笛卡尔积 × 2 dtype）：
- *   InOutLayoutType ∈ {BSND, BNSD, TND, TND_NTD}           (4, TND_NTD 为 TND→NTD 输出转置)
- *   KvLayoutType    ∈ {PA_BBND, PA_BNBD, PA_NZ}          (3, 仅 PA 分页)
- *   HasAttenMask    ∈ {false, true}                       (2)
- *   Config          ∈ {0: M=96/S2=112/D=576/DV=512}      (1, MLA 唯一配置)
- *   ⇒ 24 组合/ dtype × {half, bfloat16_t}（ORIG_DTYPE_* 编译宏）= 48 个 kernel 实例。
+ * \brief FlashMla tiling keys for arch35.
  */
 
 #ifndef FLASH_MLA_TEMPLATE_TILING_KEY_H_
@@ -45,34 +33,13 @@
 #define ORIG_DTYPE_ATTENTION_OUT (DT_BF16)
 #endif
 
-// 布尔 template 参数值必须带数字 token：CANN ASCENDC_TPL_PRE 预编译产出的
-// `@@ASCENDC_TPL_BOOL_DECL_<name>@@ = {<values>}` 由 template_tiling.py 的
-// extract_num(re.findall(r'\d+', ...)) 解析。字面 "false"/"true" 无数字 →
-// "values of ASCENDC_TPL_BOOL_DECL <name> is empty!"，tbe opc 编译即失败；
-// 数字 token 是工具链契约要求（历史真实损坏点，勿回退为字面 bool）。
+// CANN 模板预编译器只解析数字 token，布尔取值须使用 0/1。
 #define FLASH_MLA_TPL_BOOL_FALSE 0
 #define FLASH_MLA_TPL_BOOL_TRUE 1
 
-ASCENDC_TPL_ARGS_DECL(FlashMla,
-                      // InOutLayoutType（位宽 8-bit，key 位 7-0）
-                      //    0: InOutLayoutType_BSND （q=BSND）
-                      //    1: InOutLayoutType_BNSD （q=BNSD）
-                      //    2: InOutLayoutType_TND  （q=TND, out=TND）
-                      //    3: （预留 BNSD_BSND，MLA 未使用）
-                      //    4: InOutLayoutType_TND_NTD（q=TND, out=NTD 输出转置）
-                      ASCENDC_TPL_UINT_DECL(InOutLayoutType, ASCENDC_TPL_8_BW, ASCENDC_TPL_UI_RANGE, 1, 0, 4),
-                      // KvLayoutType（位宽 8-bit，key 位 15-8）
-                      //    0: KvLayoutType_NO_PA   （不实例化：连续 KV 从未被 MLA 跑过）
-                      //    1: KvLayoutType_PA_BBND
-                      //    2: KvLayoutType_PA_BNBD
-                      //    3: KvLayoutType_PA_NZ
+ASCENDC_TPL_ARGS_DECL(FlashMla, ASCENDC_TPL_UINT_DECL(InOutLayoutType, ASCENDC_TPL_8_BW, ASCENDC_TPL_UI_RANGE, 1, 0, 4),
                       ASCENDC_TPL_UINT_DECL(KvLayoutType, ASCENDC_TPL_8_BW, ASCENDC_TPL_UI_RANGE, 1, 0, 3),
-                      // HasAttenMask（位宽 1-bit，key 位 16）
-                      //    0: false
-                      //    1: true
                       ASCENDC_TPL_BOOL_DECL(HasAttenMask, FLASH_MLA_TPL_BOOL_FALSE, FLASH_MLA_TPL_BOOL_TRUE),
-                      // Config（位宽 3-bit，key 位 19-17）：MLA 唯一配置
-                      //    0: 保留原 Config 枚举标识；实际 kernel 模板使用 M96/S2=112/D576/DV512
                       ASCENDC_TPL_UINT_DECL(Config, ASCENDC_TPL_3_BW, ASCENDC_TPL_UI_RANGE, 1, 0, 0), );
 
 ASCENDC_TPL_SEL(

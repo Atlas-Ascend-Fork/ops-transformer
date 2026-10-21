@@ -31,25 +31,12 @@ using namespace Ops::Transformer::OpTiling;
 namespace optiling {
 using namespace flash_mla;
 
-static bool IsEmptyInput(gert::TilingContext* context)
-{
-    (void)context;
-    return false;
-}
-
 ASCENDC_EXTERN_C ge::graphStatus TilingFlashMla(gert::TilingContext* context)
 {
     OP_LOGW(context, "FlashMla TilingFlashMla start.");
 
     auto platformInfoPtr = context->GetPlatformInfo();
     OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
-
-    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
-    if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
-        if (IsEmptyInput(context)) {
-            return ge::GRAPH_SUCCESS;
-        }
-    }
 
     FlashMlaTilingInfo faInfo;
     FlashMlaInfoParser faInfoParser(context);
@@ -85,7 +72,6 @@ ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForFlashMla(gert::TilingParseConte
     return ge::GRAPH_SUCCESS;
 }
 
-// 注册tiling函数：
 IMPL_OP_OPTILING(FlashMla)
     .Tiling(TilingFlashMla)
 

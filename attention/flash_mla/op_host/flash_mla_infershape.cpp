@@ -11,9 +11,6 @@
 /*!
  * \file flash_mla_infershape.cpp
  * \brief FlashMla算子InferShape实现
- * \note 接口基准 flash_mla：
- *       q/k_cache 最后维必须为 576 = head_dim_v(nope 512) + rope 64；
- *       attn_out 的最后维取 head_dim_v（q 的 576 含 rope，不能直接作为输出宽度）。
  */
 
 #include <graph/utils/type_utils.h>
@@ -24,7 +21,6 @@ using namespace ge;
 
 namespace ops {
 
-// 属性索引 对齐def注册索引（head_dim_v 在首位）
 static constexpr size_t ATTR_IDX_HEAD_DIM_V = 0;
 static constexpr size_t ATTR_IDX_SOFTMAX_SCALE = 1;
 static constexpr size_t ATTR_IDX_MASK_MODE = 2;
@@ -35,14 +31,11 @@ static constexpr size_t ATTR_IDX_LAYOUT_KV = 6;
 static constexpr size_t ATTR_IDX_LAYOUT_OUT = 7;
 static constexpr size_t ATTR_IDX_RETURN_SOFTMAX_LSE = 8;
 
-// 输入索引
 static constexpr size_t INPUT_IDX_Q = 0;
 static constexpr size_t INPUT_IDX_K_CACHE = 1;
-// 输出索引
 static constexpr size_t OUTPUT_IDX_ATTN_OUT = 0;
 static constexpr size_t OUTPUT_IDX_SOFTMAX_LSE = 1;
 
-// MLA rope 合并语义常量：q/k_cache 最后维 = head_dim_v + ROPE_HEAD_DIM
 static constexpr int64_t FLASH_MLA_ROPE_HEAD_DIM = 64;
 
 ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
@@ -75,7 +68,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
     OP_CHECK_NULL_WITH_CONTEXT(context, returnSoftmaxLsePtr);
     int64_t returnSoftmaxLse = *returnSoftmaxLsePtr;
 
-    // head_dim_v + rope(64) == 576 一致性校验（MLA 正确性关键，QA 项）
     if (headDimV <= 0) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "head_dim_v", std::to_string(headDimV).c_str(),
                                               "The value of head_dim_v must be greater than 0");
@@ -87,7 +79,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
     std::string layoutKvStr = std::string(layoutKv);
     std::string layoutOutStr = std::string(layoutOut);
 
-    // 转为大写以便统一比较
     for (auto& c : layoutQStr) {
         c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
     }
@@ -142,7 +133,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
         return ge::GRAPH_FAILED;
     }
 
-    // 输出布局必须与查询布局一致（仅允许 TND→NTD 转置）
     if (layoutOutStr != layoutQStr) {
         if (!(layoutQStr == "TND" && layoutOutStr == "NTD")) {
             OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layout_out", layoutOutStr.c_str(),
@@ -151,7 +141,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
         }
     }
 
-    // q 的末轴、k_cache 的逻辑 D == head_dim_v + 64。
     int64_t qLastDim = qShape->GetDim(qShape->GetDimNum() - 1);
     if (qLastDim != -1 && qLastDim != expectedLastDim) {
         std::string reason =
@@ -160,7 +149,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
                                               reason.c_str());
         return ge::GRAPH_FAILED;
     }
-    // PA_NZ: (num_blocks, N, D / D0, block_size, D0)。不能把末轴 D0 当成 D。
     const bool isNz = layoutKvStr == "PA_NZ";
     if (kCacheShape->GetDimNum() != (isNz ? 5 : 4)) {
         OP_LOGE(context->GetNodeName(), "k_cache must be 5D for PA_NZ or 4D for PA_BBND/PA_BNBD.");
@@ -182,7 +170,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
     gert::Shape* attnOutShape = context->GetOutputShape(OUTPUT_IDX_ATTN_OUT);
     OP_CHECK_NULL_WITH_CONTEXT(context, attnOutShape);
 
-    // 输出最后维 = head_dim_v（q 的 576 含 rope，不能直接作为输出宽度）
     if (layoutOutStr == "BSND") {
         attnOutShape->SetDimNum(4);
         attnOutShape->SetDim(0, batchSize);
@@ -201,7 +188,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
         attnOutShape->SetDim(1, numHeadsQ);
         attnOutShape->SetDim(2, headDimV);
     } else if (layoutOutStr == "NTD") {
-        // TND→NTD 转置输出 (N, T, D)
         attnOutShape->SetDimNum(3);
         attnOutShape->SetDim(0, numHeadsQ);
         attnOutShape->SetDim(1, seqLenQ);
@@ -226,7 +212,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
                 lseShape->SetDim(2, seqLenQ);
             }
         } else {
-            // 不输出softmax_lse时设置为空shape
             lseShape->SetDimNum(1);
             lseShape->SetDim(0, 0);
         }
@@ -241,10 +226,8 @@ ge::graphStatus InferDataTypeFlashMla(gert::InferDataTypeContext* context)
     if (context == nullptr) {
         return ge::GRAPH_FAILED;
     }
-    // attn_out数据类型与q一致
     auto qDtype = context->GetInputDataType(INPUT_IDX_Q);
     context->SetOutputDataType(OUTPUT_IDX_ATTN_OUT, qDtype);
-    // softmax_lse固定为FLOAT32
     context->SetOutputDataType(OUTPUT_IDX_SOFTMAX_LSE, ge::DT_FLOAT);
     return ge::GRAPH_SUCCESS;
 }

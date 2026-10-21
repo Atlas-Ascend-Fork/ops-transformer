@@ -12,7 +12,6 @@ import torch
 from torch.library import impl
 from cann_ops_transformer.op_builder import OpBuilder, get_as_library
 
-
 MLA_METADATA_OP_NAME = "flash_mla_metadata"
 
 
@@ -55,8 +54,6 @@ def _check_metadata_capacity(metadata, batch_size, aic_core_num, aiv_core_num):
 
 class FlashMlaOpBuilder(OpBuilder):
     def __init__(self):
-        # Builder name == torch 公开接口名（照 flash_attn.py 惯例）；仅用作 JIT 缓存键与
-        # @impl 注册名，sources() 指向同名 cpp（csrc/attention/flash_mla.cpp）。
         super(FlashMlaOpBuilder, self).__init__("flash_mla", category="attention")
 
     def sources(self):
@@ -128,9 +125,6 @@ class FlashMlaOpBuilder(OpBuilder):
         ):
             layout_q = "BSND" if layout_q is None else layout_q
             layout_out = "BSND" if layout_out is None else layout_out
-            # MLA: attn_out 最后一维 = head_dim_v（nope/value 宽度 512）；q/k_cache 最后维为
-            # 576（nope 512 + rope 64），rope 已合并进输入，故输出 D 不能取 q 最后维（对照 flash_attn.py
-            # 由 v 推导 D 的逻辑，MLA 无独立 v 输入，改用 head_dim_v）。
             if layout_q == "TND":
                 t_size = q.size(0)
                 n_size = q.size(1)
@@ -149,7 +143,6 @@ class FlashMlaOpBuilder(OpBuilder):
                 d_size = head_dim_v
                 softmax_out_size = (b_size, n_size, s_size)
 
-            # 输出默认 BSND；显式布局必须与 query 一致，或为 TND→NTD。
             if layout_out is not None:
                 torch._check(
                     layout_out == layout_q
@@ -172,9 +165,8 @@ class FlashMlaOpBuilder(OpBuilder):
             )
 
 
-# Instantiate the builder
 flash_mla_op_builder = FlashMlaOpBuilder()
-flash_mla_op_builder._ensure_initialized()  # 照 flash_attn.py:167：加载时延迟初始化（define schema）
+flash_mla_op_builder._ensure_initialized()
 
 
 @impl(get_as_library(), MLA_METADATA_OP_NAME, "PrivateUse1")
@@ -251,7 +243,6 @@ def flash_mla(
     """
     aic_core_num, aiv_core_num = _get_core_nums()
     if metadata is not None:
-        # 显式容量校验（B2/D16）：主算子侧对用户传入的 metadata 做防呆
         batch_size = None
         if seqused_q is not None:
             batch_size = seqused_q.size(0)

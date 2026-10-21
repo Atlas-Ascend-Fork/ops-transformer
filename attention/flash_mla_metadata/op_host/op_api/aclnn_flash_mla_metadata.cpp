@@ -48,8 +48,7 @@ aclnnStatus aclnnFlashMlaMetadataGetWorkspaceSize(
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
-    // 与主算子 ACLNN tiling 保持一致：优先获取当前线程的有效核数（含 stream 控核）。
-    // 查询失败时，与 opbase InitL2Phase1Context 一样回退到硬件平台核数。
+    // 优先使用当前线程的有效核数，以支持 stream 控核。
     const op::PlatformInfo& npuInfo = op::GetCurrentPlatformInfo();
     uint32_t aicCoreNum = 0;
     uint32_t aivCoreNum = 0;
@@ -92,9 +91,6 @@ aclnnStatus aclnnFlashMlaMetadataGetWorkspaceSize(
         }
     }
 
-    // l0 函数输入槽位与 meta.txt 定义的 3 输入契约一致：
-    //   slot0=cuSeqlensQ, slot1=cacheSeqlens, slot2=sequsedQ
-    // 将有效核数透传给 AICPU，任务分配和 metadata header 使用同一组核数。
     auto output = l0op::FlashMlaMetadata(cuSeqlensQContiguous, cacheSeqlensContiguous, sequsedQContiguous, maxSeqlenQ,
                                          maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ,
                                          socVersion, aicCoreNum, aivCoreNum, metaData, uniqueExecutor.get());

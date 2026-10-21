@@ -20,7 +20,6 @@
 
 namespace optiling {
 namespace flash_mla {
-// 参考训练算子公共info
 struct FlashMlaCompileInfo {
     uint32_t aivNum;
     uint32_t aicNum;

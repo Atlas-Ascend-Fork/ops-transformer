@@ -10,8 +10,7 @@
 
 /*!
  * \file flash_mla_common_def.h
- * \brief flash_mla TilingKey 相关枚举/宏/常量（host tiling 与 kernel 入口共用；
- *        template_tiling_key.h 只保留 ASCENDC_TPL_ARGS_DECL/SEL 骨架）。
+ * \brief FlashMla tiling key definitions.
  */
 
 #ifndef FLASH_MLA_COMMON_DEF_H_
@@ -20,20 +19,16 @@
 // 3-bit 位宽宏非工具链内置（内置仅 1/2/4/8），本地定义
 #define ASCENDC_TPL_3_BW 3
 
-// q/out 布局索引（InOutLayoutType，key 位 7-0）：0=BSND 1=BNSD 2=TND
-// 3 预留（BNSD_BSND，MLA 未使用）。4=TND_NTD（q=TND, out=NTD 转置）。
 #define InOutLayoutType_BSND 0
 #define InOutLayoutType_BNSD 1
 #define InOutLayoutType_TND 2
 #define InOutLayoutType_TND_NTD 4
 
-// kv 存储格式（KvLayoutType，key 位 15-8）
 #define KvLayoutType_NO_PA 0
 #define KvLayoutType_PA_BBND 1
 #define KvLayoutType_PA_BNBD 2
 #define KvLayoutType_PA_NZ 3
 
-// 唯一 MLA 配置（Config，key 位 19-17）：S1=64, S2=128, D=576（nope512+rope64 合并宽）, DV=512
 #define Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512 0
 #define Config_MLA_DEFAULT Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512
 
@@ -90,7 +85,6 @@ struct ConfigParams {
     inferDTemplateType dv;
 };
 
-// config → (s1, s2, d, dv) 模板块大小（MLA 唯一行，对应 ConfigValue[0]）
 static constexpr ConfigParams ConfigValue[] = {
     {inferS1TemplateType::Aligned64, inferS2TemplateType::Aligned128, inferDTemplateType::Aligned576,
      inferDTemplateType::Aligned512} // config=0: MLA 默认（s1=64, s2=128, D=576, DV=512）

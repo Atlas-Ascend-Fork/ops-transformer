@@ -11,24 +11,6 @@
 /*!
  * \file mask_checker.cpp
  * \brief Checker for mask_mode, attn_mask parameters (文档约束: Mask参数组)
- *
- * mask_mode <-> FIA sparseMode mapping:
- *   The fia*mla compute path has only ever been exercised with sparseMode in
- *   {NO_MASK(0), RIGHT_DOWN(3)} — hard gate at
- *   fused_infer_attention_score/op_host/arch35/fia_tiling_nonquant_mla.cpp:79
- *   (IsCapableSparseLayoutCheckMla), values from fia_tiling_info.h:69,72.
- *   This repo's MaskMode enum is {NO_MASK=0, CAUSAL=3, BAND=4}
- *   (fa_tiling_info.h:106-110) and the FIA kernel implements right-down
- *   causality via `sparseMode == fa_base_vector::RIGHT_DOWN_CAUSAL`
- *   (fia_kernel_noquant_mla.h:466). CAUSAL and SPARSE_MODE_RIGHT_DOWN are
- *   numerically identical (3), so the mapping is:
- *     mask_mode 0 (NO_MASK)  -> sparseMode 0 (NO_MASK)     [no attn_mask]
- *     mask_mode 3 (CAUSAL)   -> sparseMode 3 (RIGHT_DOWN) [attn_mask required]
- *   Every other value (incl. BAND=4) is REJECTED.
- *   FIA additionally requires attn_mask when sparseMode != 0
- *   (fia_tiling_info.cpp mask_checker CheckDimAndShape), so the
- *   "attn_mask required for CAUSAL" existence rule is kept.
- *   The left/right window attrs are NOT part of the interface — no checks.
  */
 
 #include <map>
@@ -52,8 +34,6 @@ using namespace arch35MLA;
 
 ge::graphStatus MaskChecker::CheckSingleParaMaskMode(const FlashMlaTilingInfo& faInfo)
 {
-    // only {0 (NO_MASK), 3 (CAUSAL == FIA SPARSE_MODE_RIGHT_DOWN)} are valid.
-    // BAND(4)/LEFT_UP/etc. route in FIA MLA to nothing — reject.
     const std::vector<int64_t> maskModeList = {static_cast<int64_t>(MaskMode::NO_MASK),
                                                static_cast<int64_t>(MaskMode::CAUSAL)};
     OP_CHECK_IF(ge::GRAPH_SUCCESS != CheckValueSupport(static_cast<int64_t>(faInfo.maskMode), maskModeList),

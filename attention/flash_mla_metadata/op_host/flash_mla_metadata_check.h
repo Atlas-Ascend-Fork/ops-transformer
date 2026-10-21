@@ -11,9 +11,6 @@
 /*!
  * \file flash_mla_metadata_check.h
  * \brief MLA metadata checker.
- * MLA uses fixed M96/S2=112 tiles. GenMetadata writes HEAD_M_BASE_SIZE_MLA /
- * HEAD_S2_BASE_SIZE_MLA from op_kernel_aicpu/flash_mla_metadata.h;
- * the main kernel checks the same dimensions in its Cube InitBuffers().
  */
 
 #ifndef FLASH_MLA_METADATA_CHECK_H
@@ -21,6 +18,7 @@
 
 #include <unordered_set>
 #include <string>
+#include "../../flash_mla/op_kernel/flash_mla_shared.h"
 #include "opdev/format_utils.h"
 #include "opdev/op_log.h"
 #include "opdev/data_type_utils.h"
@@ -40,11 +38,6 @@ public:
 
 private:
     static constexpr int64_t NONE_VALUE = -1;
-    // MLA 硬约束：kv head num 恒 1；head_dim_qk = q/k_cache 最后维 576（nope 512 + rope 64）；
-    // head_dim_v = 512（value/输出宽）；mask {0,3}；q 布局 ∈ {TND,BNSD,BSND}
-    static constexpr int64_t MLA_KV_HEADS = 1;
-    static constexpr int64_t MLA_HEAD_DIM_QK = 576;
-    static constexpr int64_t MLA_HEAD_DIM_V = 512;
 
     static inline bool IsTensorExist(const aclTensor* tensor);
     static inline aclnnStatus CheckSeqLens(const char* name, bool isCu, int64_t batchSize, const aclTensor* seqLens);
@@ -55,7 +48,6 @@ private:
 
     static inline aclnnStatus CheckMask(int64_t maskMode);
 
-    // cache_seqlens 必传，batch 由其长度推导；存在性规则与主算子 seq_len_checker 一致
     static inline aclnnStatus CheckExistency(int64_t maxSeqlenQ, const char* layoutQ,
                                              const aclTensor* cuSeqlensQOptional, const aclTensor* cacheSeqlensOptional,
                                              const aclTensor* sequsedQOptional, const aclTensor* metadata,
@@ -65,8 +57,6 @@ private:
                                                const aclTensor* cacheSeqlensOptional,
                                                const aclTensor* sequsedQOptional);
 
-    // metadata buffer 容量上界校验：最坏容量 ((aic+aiv)*batch*1+1)*16 words（kv head==1），
-    // 核数为 host 平台信息（硬件）值，与 AICPU producer 的 CheckMetadataCapacity 同公式
     static inline aclnnStatus CheckMetadataCapacity(const aclTensor* metadata, int64_t batchSize, uint32_t aicCoreNum,
                                                     uint32_t aivCoreNum);
 };
@@ -83,7 +73,6 @@ inline aclnnStatus FlashMlaMetadataCheck::ParamsCheck(
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     ret = CheckMask(maskMode);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
-    // batch size 由必传的 cacheSeqlens 长度推导（每 batch 一项），与 Python/dispatcher 侧同源（无 batch_size attr）
     int64_t batchSize = NONE_VALUE;
     ret = CheckExistency(maxSeqlenQ, layoutQ, cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, metadata,
                          batchSize);
@@ -104,14 +93,16 @@ inline aclnnStatus FlashMlaMetadataCheck::CheckBaseAttr(int64_t maxSeqlenQ, int6
     CHECK_COND((maxSeqlenKv == NONE_VALUE || maxSeqlenKv >= 0), ACLNN_ERR_RUNTIME_ERROR,
                "maxSeqlenKv must be %ld or greater than or equal to 0, but got %ld", NONE_VALUE, maxSeqlenKv);
 
-    CHECK_COND(numHeadsQ > 0, ACLNN_ERR_RUNTIME_ERROR, "numHeadsQ must be greater than 0, but got %ld", numHeadsQ);
-    CHECK_COND(numHeadsKv == MLA_KV_HEADS, ACLNN_ERR_RUNTIME_ERROR, "MLA kv head num must be %ld, but got %ld",
-               MLA_KV_HEADS, numHeadsKv);
-    CHECK_COND(headDimQk == MLA_HEAD_DIM_QK, ACLNN_ERR_RUNTIME_ERROR,
-               "MLA head_dim_qk (q/k_cache last dim, nope 512 + rope 64) must be %ld, but got %ld", MLA_HEAD_DIM_QK,
-               headDimQk);
-    CHECK_COND(headDimV == MLA_HEAD_DIM_V, ACLNN_ERR_RUNTIME_ERROR,
-               "MLA head_dim_v (value/output width) must be %ld, but got %ld", MLA_HEAD_DIM_V, headDimV);
+    CHECK_COND(numHeadsQ >= 1 && numHeadsQ <= 128, ACLNN_ERR_RUNTIME_ERROR,
+               "numHeadsQ must be in [1, 128], but got %ld", numHeadsQ);
+    CHECK_COND(numHeadsKv == FlashMlaCommon::MLA_KV_HEADS, ACLNN_ERR_RUNTIME_ERROR,
+               "MLA kv head num must be %ld, but got %ld", FlashMlaCommon::MLA_KV_HEADS, numHeadsKv);
+    CHECK_COND(headDimQk == FlashMlaCommon::MLA_HEAD_DIM_QK, ACLNN_ERR_RUNTIME_ERROR,
+               "MLA head_dim_qk (q/k_cache last dim, nope 512 + rope 64) must be %ld, but got %ld",
+               FlashMlaCommon::MLA_HEAD_DIM_QK, headDimQk);
+    CHECK_COND(headDimV == FlashMlaCommon::MLA_HEAD_DIM_V, ACLNN_ERR_RUNTIME_ERROR,
+               "MLA head_dim_v (value/output width) must be %ld, but got %ld", FlashMlaCommon::MLA_HEAD_DIM_V,
+               headDimV);
 
     static const std::unordered_set<std::string> layoutQSet = {"TND", "BNSD", "BSND"};
     CHECK_COND(layoutQSet.count(layoutQ) > 0, ACLNN_ERR_RUNTIME_ERROR,
@@ -145,7 +136,6 @@ inline aclnnStatus FlashMlaMetadataCheck::CheckExistency(int64_t maxSeqlenQ, con
     CHECK_COND(metadata->GetViewShape().GetDim(0) > 0, ACLNN_ERR_RUNTIME_ERROR,
                "metadata shape (max_schedule_size,) must be positive, but got %ld", metadata->GetViewShape().GetDim(0));
 
-    // cache_seqlens 为必传输入（batch 由它推导）
     CHECK_COND(IsTensorExist(cacheSeqlensOptional), ACLNN_ERR_RUNTIME_ERROR,
                "cacheSeqlens should be provided, but got null or empty tensor");
     CHECK_COND(cacheSeqlensOptional->GetViewShape().GetDimNum() == 1, ACLNN_ERR_RUNTIME_ERROR,
@@ -157,7 +147,6 @@ inline aclnnStatus FlashMlaMetadataCheck::CheckExistency(int64_t maxSeqlenQ, con
                "batchSize (derived from cacheSeqlens) must be between (%ld, %ld), but got %ld", MIN_BATCH, MAX_BATCH,
                batchSize);
 
-    // cuSeqlensQ：layoutQ 为 TND 时必传，非 TND（BNSD/BSND）时禁传（与主算子 seq_len_checker 判定一致）
     if (strcmp(layoutQ, "TND") == 0) {
         CHECK_COND(IsTensorExist(cuSeqlensQOptional), ACLNN_ERR_RUNTIME_ERROR,
                    "When layoutQ is TND, cuSeqlensQOptional should be provided, but got null");
@@ -185,9 +174,9 @@ inline aclnnStatus FlashMlaMetadataCheck::CheckConsistency(int64_t batchSize, co
 inline aclnnStatus FlashMlaMetadataCheck::CheckMetadataCapacity(const aclTensor* metadata, int64_t batchSize,
                                                                 uint32_t aicCoreNum, uint32_t aivCoreNum)
 {
-    // 最坏容量（kv head==1）：((aic+aiv)*batch*1+1)*16 个 int32 word；torch 侧分配按 4096 个 int32 元素对齐只会更大
-    constexpr int64_t WORDS_PER_CORE = 16;
-    int64_t needWords = ((static_cast<int64_t>(aicCoreNum) + aivCoreNum) * batchSize + 1) * WORDS_PER_CORE;
+    int64_t needWords = FlashMlaCommon::HEAD_METADATA_STRIDE +
+                        batchSize * (static_cast<int64_t>(aicCoreNum) * FlashMlaCommon::FA_METADATA_STRIDE +
+                                     static_cast<int64_t>(aivCoreNum) * FlashMlaCommon::FD_METADATA_STRIDE);
     int64_t actualWords = metadata->GetViewShape().GetDim(0);
     CHECK_COND(actualWords >= needWords, ACLNN_ERR_RUNTIME_ERROR,
                "metadata buffer too small: %ld words, required at least %ld words "

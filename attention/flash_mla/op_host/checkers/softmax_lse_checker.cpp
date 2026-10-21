@@ -33,14 +33,10 @@ using namespace arch35MLA;
 
 ge::graphStatus SoftmaxLSEChecker::CheckSinglePara(const FlashMlaTilingInfo& faInfo)
 {
-    auto& returnSoftmaxLse = faInfo.opParamInfo.returnSoftMaxLse;
-    if (returnSoftmaxLse != nullptr) {
-        int64_t returnSoftmaxLseVal = *returnSoftmaxLse;
-        OP_CHECK_IF(returnSoftmaxLseVal != 0 && returnSoftmaxLseVal != 1,
-                    OP_LOGE_FOR_INVALID_VALUE(faInfo.opName, "return_softmax_lse",
-                                              std::to_string(returnSoftmaxLseVal).c_str(), "0 or 1"),
-                    return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(faInfo.returnSoftmaxLse != 0 && faInfo.returnSoftmaxLse != 1,
+                OP_LOGE_FOR_INVALID_VALUE(faInfo.opName, "return_softmax_lse",
+                                          std::to_string(faInfo.returnSoftmaxLse).c_str(), "0 or 1"),
+                return ge::GRAPH_FAILED);
 
     if (!faInfo.softmaxLseFlag) {
         return ge::GRAPH_SUCCESS;
@@ -73,6 +69,33 @@ ge::graphStatus SoftmaxLSEChecker::CheckParaExistence(const FlashMlaTilingInfo& 
                     return ge::GRAPH_FAILED);
     }
 
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus SoftmaxLSEChecker::CheckMultiPara(const FlashMlaTilingInfo& faInfo)
+{
+    if (!faInfo.softmaxLseFlag) {
+        return ge::GRAPH_SUCCESS;
+    }
+    const auto* lseOutShape = faInfo.opParamInfo.lseOut.shape;
+    OP_CHECK_IF(lseOutShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(faInfo.opName, "lse_out"), return ge::GRAPH_FAILED);
+
+    const auto& shape = lseOutShape->GetStorageShape();
+    const bool isTnd = faInfo.qLayout == FlashMlaLayout::TND;
+    const std::vector<int64_t> expectedShape =
+        isTnd ? std::vector<int64_t>{static_cast<int64_t>(faInfo.n1Size), static_cast<int64_t>(faInfo.qTSize)} :
+                std::vector<int64_t>{static_cast<int64_t>(faInfo.bSize), static_cast<int64_t>(faInfo.n1Size),
+                                     static_cast<int64_t>(faInfo.s1Size)};
+    const char* reason = isTnd ? "lse_out shape must be [Q_N, Q_T] for TND query" :
+                                 "lse_out shape must be [B, Q_N, Q_S] for BSND/BNSD query";
+    OP_CHECK_IF(shape.GetDimNum() != expectedShape.size(),
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(faInfo.opName, "lse_out", GetShapeStr(shape).c_str(), reason),
+                return ge::GRAPH_FAILED);
+    for (size_t axis = 0; axis < expectedShape.size(); ++axis) {
+        OP_CHECK_IF(shape.GetDim(axis) != expectedShape[axis],
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(faInfo.opName, "lse_out", GetShapeStr(shape).c_str(), reason),
+                    return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 

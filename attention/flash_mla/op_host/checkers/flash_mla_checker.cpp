@@ -32,8 +32,6 @@ using namespace ge;
 using namespace AscendC;
 using namespace arch35MLA;
 
-// RegisterCheckers - 注册所有 checker
-// 新增 checker 时在此方法中添加: checkers_.push_back(std::make_unique<XxxChecker>());
 void FlashMlaChecker::RegisterCheckers()
 {
     checkers_.push_back(std::make_unique<CommonChecker>());

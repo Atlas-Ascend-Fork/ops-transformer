@@ -11,40 +11,22 @@
 /*!
  * \file flash_mla_tiling_data.h
  * \brief flash_mla arch35 kernel 侧 tiling struct 与 metadata 消费常量
- *
- * Tiling struct：字段布局与 FIA NoQuantTilingArch35 / FusedInferAttentionScoreTilingData 一致，
- * 仅改名（Fia* -> FlashMla*），并移除内嵌 fiaMetaData —— metadata 以 GM 输入 tensor 传入
- *（AICPU 多 section 布局）。
  */
 
 #ifndef FLASH_MLA_TILING_DATA_H_
 #define FLASH_MLA_TILING_DATA_H_
 
+#include "../flash_mla_shared.h"
+
 namespace optiling {
 
-// 数组长度（对齐 FIA 命名；kernel 侧仅用 AIC/AIV 核数做索引数学）
 constexpr uint32_t FA_AIC_CORE_NUM = 36;
 constexpr uint32_t FA_AIV_CORE_NUM = 72;
 
-// ============================= metadata 消费常量 =============================
-// 消费 flash_mla_metadata（AICPU 多 section 布局）产出的布局：（producer
-// 旧名：flash_mla_metadata，历史原因保留）
-//   [16-word header][sectionNum * aic * 16 (FA)][sectionNum * aiv * 16 (FD)]
-//   （aic/aiv 为 header 自描述的硬件核数，见 FLASH_MLA_METADATA_AIC/AIV_NUM_INDEX）
-// AICPU producer 侧对应常量 FA_METADATA_STRIDE=16 / FD_METADATA_STRIDE=16
-// （flash_mla_metadata/op_kernel_aicpu/flash_mla_metadata.h，字节布局一致）。（producer
-// 旧名：flash_mla_metadata，历史原因保留）名称沿用 kernel 侧常量，编译期即暴露与
-// producer 的偏差。
-constexpr uint32_t FLASH_ATTN_METADATA_SIZE = 16;
-constexpr uint32_t FA_FD_METADATA_SIZE = 16;
-// header 区 16 个 uint32（sectionNum/isFd/mBaseSize/s2BaseSize/aicCoreNum/aivCoreNum + 10 保留）
-constexpr uint32_t FA_METADATA_HEADER_OFFSET = 16U * sizeof(uint32_t);
-// header 内 producer 自描述核数的字段索引（与 producer 布局头
-// flash_mla_metadata.h 的 HEAD_AIC_NUM_INDEX/HEAD_AIV_NUM_INDEX 同源）
+constexpr uint32_t FA_METADATA_HEADER_OFFSET = FlashMlaCommon::HEAD_METADATA_STRIDE * sizeof(uint32_t);
 constexpr uint32_t FLASH_MLA_METADATA_AIC_NUM_INDEX = 4;
 constexpr uint32_t FLASH_MLA_METADATA_AIV_NUM_INDEX = 5;
 
-// FA Metadata Index Definitions（0 基、无 CORE_ENABLE，对应 AICPU producer；非活跃核全零）
 constexpr uint32_t FLASH_ATTN_BN2_START_INDEX = 0;
 constexpr uint32_t FLASH_ATTN_M_START_INDEX = 1;
 constexpr uint32_t FLASH_ATTN_S2_START_INDEX = 2;
@@ -53,7 +35,6 @@ constexpr uint32_t FLASH_ATTN_M_END_INDEX = 4;
 constexpr uint32_t FLASH_ATTN_S2_END_INDEX = 5;
 constexpr uint32_t FLASH_ATTN_FIRST_FD_DATA_WORKSPACE_IDX_INDEX = 6;
 
-// FD Metadata Index Definitions（0 基、无 CORE_ENABLE；核活跃由 FA_FD_M_NUM_INDEX > 0 判定）
 constexpr uint32_t FA_FD_BN2_IDX_INDEX = 0;
 constexpr uint32_t FA_FD_M_IDX_INDEX = 1;
 constexpr uint32_t FA_FD_WORKSPACE_IDX_INDEX = 2;
@@ -102,7 +83,6 @@ struct FlashMlaBaseParams {
     uint8_t l2CacheOffFlag = 0;
     uint32_t coreNum = 0;
     uint32_t outputLayout = 0;
-    // 增加strides参数
     stridesParams keyStrides;
     stridesParams valueStrides;
     stridesParams kRopeStrides;
@@ -163,8 +143,6 @@ struct FlashMlaEmptyTensorParams {
     uint64_t totalSoftMaxLseOutputSize = 0;
 };
 
-// FIA FusedInferAttentionScoreTilingData 的字段布局改名保留；FiaMetaData 成员已移除
-// （metadata 走 GM 输入，见 flash_mla_kernel.h）
 class FlashMlaNoQuantTilingArch35 {
 public:
     FlashMlaBaseParams flashMlaBaseParams;

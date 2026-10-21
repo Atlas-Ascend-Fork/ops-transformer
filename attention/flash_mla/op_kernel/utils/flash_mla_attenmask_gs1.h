@@ -50,7 +50,6 @@ struct MaskInfo {
     int64_t preToken = 0;
     int64_t nextToken = 0;
 
-    // for bss & bs
     uint32_t batchIdx;
     uint32_t attenMaskBatchStride;
     uint32_t attenMaskS1Stride; // 这个变量名与A3 代码不一致，统一整改
@@ -65,7 +64,6 @@ struct MaskInfo {
     uint64_t s2LeftPaddingSize = 0;
 };
 
-// TODO，后续放到VF层
 __simd_vf__ inline void MergeBand(const uint64_t maskNextUb, const uint64_t maskPreUb, const uint16_t loopCount)
 {
     RegTensor<uint32_t> vreg_pre;
@@ -299,7 +297,6 @@ __aicore__ inline void AttentionmaskCopyInForGsLayout(LocalTensor<T>& attenMaskU
     int32_t s1EndIdx = (info.gs1StartIdx + info.gs1dealNum - 1) % info.s1Size + 1;
     uint32_t attenMaskS2Stride = AttentionCommon::Align(info.s2dealNum, 32U) + 32 * info.attenMaskDstStride;
     uint32_t headS1Count = (s1StartIdx == 0) ? 0 : (info.s1Size - s1StartIdx);
-    // midGCount: gs1dealNum 跨 G 边界时，中间完整 s1Size 行的重复次数
     uint32_t midGCount = (info.gs1dealNum > headS1Count) ? (info.gs1dealNum - headS1Count) / info.s1Size : 0;
     // 无完整G（midGCount==0）时，模板写入会超出 buffer 边界，改为走 if 分支直接从 GM 拷贝
     if (info.gs1dealNum <= info.s1Size || midGCount == 0) {
@@ -313,7 +310,6 @@ __aicore__ inline void AttentionmaskCopyInForGsLayout(LocalTensor<T>& attenMaskU
         }
         Mutex::Unlock<PIPE_MTE2>(mte2ToVEventId);
     } else {
-        // 有完整G：先从GM拷贝一个完整G到UB作为模板，再用UB→UB DataCopy填充head/mid/tail
         uint32_t tailS1Size = (info.gs1dealNum - headS1Count) % info.s1Size;
 
         Mutex::Lock<PIPE_MTE2>(mte2ToVEventId);
@@ -322,16 +318,13 @@ __aicore__ inline void AttentionmaskCopyInForGsLayout(LocalTensor<T>& attenMaskU
         Mutex::Unlock<PIPE_MTE2>(mte2ToVEventId);
 
         Mutex::Lock<PIPE_V>(mte2ToVEventId);
-        // head
         if (headS1Count > 0) {
             DataCopy(attenMaskUb, attenMaskUb[info.s1Size * attenMaskS2Stride], headS1Count * attenMaskS2Stride);
         }
-        // mid
         for (uint32_t i = 1; i < midGCount; i++) {
             DataCopy(attenMaskUb[(headS1Count + i * info.s1Size) * attenMaskS2Stride], attenMaskSecUb,
                      info.s1Size * attenMaskS2Stride);
         }
-        // tail
         if (tailS1Size > 0) {
             DataCopy(attenMaskUb[(headS1Count + midGCount * info.s1Size) * attenMaskS2Stride], attenMaskSecUb,
                      tailS1Size * attenMaskS2Stride);
@@ -359,13 +352,11 @@ __aicore__ inline void AttentionmaskCopyInForSgLayout(LocalTensor<T>& attenMaskU
     uint32_t attenMaskS2Stride = attenMaskSizeAlign + 32 * info.attenMaskDstStride;
 
     Mutex::Lock<PIPE_MTE2>(mte2ToVEventId);
-    // ub-head
     if (headGSize > 0) {
         AttentionmaskDataCopy(attenMaskUb, srcGmAddr, info, s1StartIdx, s1StartIdx + 1, isPre);
         s1StartIdx++;
     }
 
-    // ub-remain
     if (remainRowCount > 0) {
         uint64_t maskOffset = ComputeAttenMaskOffset(info, s1StartIdx, isPre);
         DataCopyExtParams dataCopyParams;
@@ -373,7 +364,6 @@ __aicore__ inline void AttentionmaskCopyInForSgLayout(LocalTensor<T>& attenMaskU
         dataCopyParams.blockLen = info.s2dealNum;
         dataCopyParams.srcStride = info.attenMaskS1Stride - info.s2dealNum;
         dataCopyParams.dstStride = (info.gSize - 1) * attenMaskS2Stride / 32 + info.attenMaskDstStride;
-        // blockLen + padParams.len + dstStride = gSize * s2Size
         DataCopyPadExtParams<T> padParams{true, 0, static_cast<uint8_t>(attenMaskSizeAlign - info.s2dealNum), 1U};
         DataCopyPad(attenMaskUb[headGSize * attenMaskS2Stride], srcGmAddr[maskOffset], dataCopyParams, padParams);
     }
