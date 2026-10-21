@@ -188,7 +188,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td>输入</td>
           <td>表示paged attention中KV存储使用的block映射表。</td>
           <td>
-            -
+            必选参数，不可传入nullptr。
           </td>
           <td>INT32</td>
           <td>ND</td>
@@ -200,7 +200,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td>输入</td>
           <td>表示query的S轴实际长度。</td>
           <td>
-      如不使用该功能时可传入nullptr。
+            必选参数，不可传入nullptr。
           </td>
           <td>INT64</td>
           <td>ND</td>
@@ -211,7 +211,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td>actualKvSeqLenOptional</td>
           <td>输入</td>
           <td>表示算子处理的key和value的S轴实际长度。</td>
-          <td>-
+          <td>必选参数，不可传入nullptr。
           </td>
           <td>INT64</td>
           <td>ND</td>
@@ -225,7 +225,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td>
             <ul style="list-style-type: circle; margin: 0; padding-left: 20px;">
               <li>当前支持BSH/BSND/TND。</li>
-              <li>当不传入该参数时，默认为“BSND”，分别对应query、key、value 3/4维。</li>
+              <li>必选参数，不可传入nullptr。</li>
               <li>query的数据排布格式中，B即Batch，S即Seq-Length，N（Head-Num）表示多头数、D（Head-Dim）表示隐藏层最小的单元尺寸，且满足D=H/N。key和value的数据排布格式当前（paged attention）支持（blocknum, blocksize, H），（blocknum, blocksize, N, D），H（Head-Size）表示隐藏层的大小，H = N * D。</li>
             </ul>
           </td>
@@ -378,8 +378,8 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
     </thead>
     <tbody>
       <tr>
-        <td>ACLNN_ERR_PARAM_NULLPTR</td>
-        <td>161001</td>
+        <td>ACLNN_ERR_INNER_NULLPTR</td>
+        <td>561103</td>
         <td>传入参数是必选输入，输出或者必选属性，且是空指针。</td>
       </tr>
       <tr>
