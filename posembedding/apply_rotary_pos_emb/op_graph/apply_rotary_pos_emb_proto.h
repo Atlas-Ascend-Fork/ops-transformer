@@ -45,7 +45,7 @@ namespace ge {
     - support types: float16, float32.
     - support layout: not support.
     - support rotary_mode: not support.
- * @li Atlas A2 products and Atlas A3 training products:
+ * @li Atlas A2 products and Atlas A3 products:
     - support types: float16, float32.
     - support layout: 1.
     - support rotary_mode: not support.
