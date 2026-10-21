@@ -206,6 +206,111 @@ def _liv2_run_compiled_graph(run_args):
     return npu_result, npu_topk_value
 
 
+class LIV2CandidateNetwork(nn.Module):
+    """candidate（两级 TopK source）路径的图模式网络。
+
+    走融合后 lightning_indexer 的 candidate overload（传入 candidate_topk_blocks
+    即返回 4 输出，torch.ops.cann_ops_transformer.lightning_indexer.candidate）。
+    """
+
+    def __init__(self):
+        super(LIV2CandidateNetwork, self).__init__()
+
+    def forward(
+        self,
+        query,
+        key,
+        weights,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        seqused_q,
+        seqused_k,
+        cmp_residual_k,
+        block_table,
+        output_idx_offset,
+        metadata,
+        topk,
+        max_seqlen_q,
+        layout_q,
+        layout_k,
+        mask_mode,
+        cmp_ratio,
+        return_value,
+        candidate_topk_blocks,
+        candidate_block_size,
+    ):
+        return torch.ops.cann_ops_transformer.lightning_indexer.candidate(
+            query,
+            key,
+            weights,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            seqused_q=seqused_q,
+            seqused_k=seqused_k,
+            cmp_residual_k=cmp_residual_k,
+            block_table=block_table,
+            output_idx_offset=output_idx_offset,
+            metadata=metadata,
+            topk=topk,
+            max_seqlen_q=max_seqlen_q,
+            layout_q=layout_q,
+            layout_k=layout_k,
+            mask_mode=mask_mode,
+            cmp_ratio=cmp_ratio,
+            return_value=return_value,
+            candidate_topk_blocks=candidate_topk_blocks,
+            candidate_block_size=candidate_block_size,
+        )
+
+
+def _liv2_run_compiled_candidate_graph(run_args):
+    """
+    candidate 路径的 torch.compile + torchair 执行（共用逻辑）：返回 4 输出。
+    """
+    config = CompilerConfig()
+    config.mode = "reduce-overhead"
+    npu_backend = torchair.get_npu_backend(compiler_config=config)
+    torch._dynamo.reset()
+    npu_mode = torch.compile(
+        LIV2CandidateNetwork().npu(),
+        fullgraph=False,
+        backend=npu_backend,
+        dynamic=False,
+    )
+    npu_result, npu_topk_value, npu_candidate, npu_cand_len = npu_mode(**run_args)
+    torch.npu.synchronize()
+    npu_topk_value, _ = npu_topk_value.sort(dim=-1, descending=True)
+    return npu_result, npu_topk_value, npu_candidate, npu_cand_len
+
+
+def liv2_output_candidate_acl_graph(
+    params, candidate_topk_blocks, candidate_block_size=8
+):
+    """candidate 路径图模式入口：返回 (cpu_result, npu_result, topk_value, cpu_topk_value,
+    npu_topk_value, npu_candidate, npu_candidate_block_length)。"""
+    tensor_dict = lightning_indexer_v2_golden.generate_liv2_test_data(params)
+    cpu_result = tensor_dict["cpu_result"]
+    topk_value = tensor_dict["topk_value"]
+    cpu_topk_value = tensor_dict["cpu_topk_value"]
+
+    run_args = _liv2_prepare_tensors_and_metadata(params, tensor_dict)
+    run_args["candidate_topk_blocks"] = int(candidate_topk_blocks)
+    run_args["candidate_block_size"] = int(candidate_block_size)
+    npu_result, npu_topk_value, npu_candidate, npu_cand_len = (
+        _liv2_run_compiled_candidate_graph(run_args)
+    )
+
+    return (
+        cpu_result,
+        npu_result,
+        topk_value,
+        cpu_topk_value,
+        npu_topk_value,
+        npu_candidate,
+        npu_cand_len,
+    )
+
+
 def liv2_output_acl_graph(params):
     tensor_dict = lightning_indexer_v2_golden.generate_liv2_test_data(params)
     cpu_result = tensor_dict["cpu_result"]

@@ -27,6 +27,8 @@
   2. 通过激活函数$ReLU$过滤无效负相关信号后，得到当前Token与所有前序Token的相关性分数向量。
   3. 将其与权重系数`w`（$W$）相乘后，沿g的方向，选取前$Top-k$个索引值得到输出$sparse\_indices$，并输出对应的$sparse\_values$，作为Attention的输入。
 
+- 接口分层说明：算子支持candidate（两级TopK候选源）模式；aclnn层由两个接口承接——[aclnnLightningIndexerV2](./docs/aclnnLightningIndexerV2.md)（不支持candidate）与[aclnnLightningIndexerV3](./docs/aclnnLightningIndexerV3.md)（candidate扩展接口，支持candidate相关属性与输出）。torch层由`lightning_indexer`统一承接：传入可选参数`candidate_topk_blocks`时返回4元组（内部走V3），未传入时返回2元组保持兼容（内部走V2）。
+
 ## 参数说明
 
   <table style="undefined;table-layout: fixed; width: 1080px"><colgroup>
@@ -124,8 +126,8 @@
   </tr>
   <tr>
   <td>topk</td>
-  <td>属性</td>
-  <td>topK阶段需要保留的block数量。</td>
+  <td>输入</td>
+  <td>topK阶段需要保留的Key token索引数量。</td>
   <td>INT64</td>
   <td>-</td>
   </tr>
@@ -172,6 +174,20 @@
   <td>-</td>
   </tr>
   <tr>
+  <td>candidate_topk_blocks</td>
+  <td>属性</td>
+  <td>候选块两级TopK开关与输出宽度：-1（默认）为关闭，输出与单级TopK完全一致；有效值(0, 2048]且为64的倍数时开启candidate source模式，输出每query行前candidate_topk_blocks个最高分候选块索引。</td>
+  <td>INT64</td>
+  <td>-</td>
+  </tr>
+  <tr>
+  <td>candidate_block_size</td>
+  <td>属性</td>
+  <td>候选块大小（位置数），[2, 64]且为2的幂，默认8。source与consumer侧（sparse_lightning_indexer）必须一致。</td>
+  <td>INT64</td>
+  <td>-</td>
+  </tr>
+  <tr>
   <td>sparse_indices</td>
   <td>输出</td>
   <td>公式中的Indices输出。</td>
@@ -185,6 +201,20 @@
   <td>FLOAT</td>
   <td>ND</td>
   </tr>
+  <tr>
+  <td>candidate_block_indices</td>
+  <td>输出</td>
+  <td>candidate source模式输出的候选块索引：BSND为[B, S1, N2, candidateTopkBlocks]、TND为[T, N2, candidateTopkBlocks]；值为batch内压缩后位置域的相对块号（块号×candidateBlockSize为起始位置）或-1（无效槽），槽位无序；不加outputIdxOffset。candidateTopkBlocks=-1时输出空tensor (0,)。</td>
+  <td>INT32</td>
+  <td>ND</td>
+  </tr>
+  <tr>
+  <td>candidate_block_length</td>
+  <td>输出</td>
+  <td>预留接口，当前恒输出空tensor (0,)。</td>
+  <td>INT32</td>
+  <td>ND</td>
+  </tr>
   </tbody>
    </table>
 
@@ -195,9 +225,14 @@
 
 - 参数q的N支持1~64，k的N支持1。
 - headdim支持128。
-- pa_kv_cache支持0轴非连续；pa_block_size支持1~1024，满足block大小32Byte对齐。
+- pa_kv_cache支持0轴非连续；pa_block_size支持[16, 1024]，且是16的倍数。
 - 参数q、k的数据类型应保持一致。
 - sparse_indices无效部分填-1；sparse_values无效部分填-inf。
+- candidate（两级TopK候选源，仅Atlas A2系列产品、Atlas A3系列产品支持开启；Ascend 950PR&950DT系列产品上开启会被host侧tiling校验拒绝并返回错误，算子本体在950上仍支持，candidate能力由aclnnLightningIndexerV3接口承接）：
+  - candidate_topk_blocks != -1（开启source模式）时，topk必须<=2048；return_value已放开（值域∈{0,1}），rv=1时sparse_values输出位置级topk真实分数（shape与sparse_indices相同，无效部分填-inf），rv=0时sparse_values恒为空tensor (0,)。
+  - candidate_topk_blocks取值(0, 2048]且为64的倍数；candidate_block_indices无效部分填-1，值为相对块号（batch内、压缩后位置域）。
+  - candidate_block_size须为[2, 64]内2的幂（candidate关闭时同样校验该取值范围）；与consumer侧（sparse_lightning_indexer）的candidate_block_size保持一致——该一致性为调用方约束，框架层无法跨算子校验（两侧host各自仅校验值域；错配行为未定义）。
+  - candidate_block_length为预留接口，恒为空tensor。
 - 传入的cmp_residual_k中的每一个元素的值都应小于传入的压缩率cmp_ratio。
 - 确定性计算与batch一致性：
   - 默认确定性实现，相同输入多次调用结果一致。
@@ -216,11 +251,12 @@
   - 当传入的参数layout_q为TND时，必须传入cu_seqlens_q，如果也传入seqused_q，应保证由seqused_q传入的各个batch的q长度不超过根据cu_seqlens_q计算出的各个batch的q序列长度。当某个batch由seqused_q传入的q序列长度seqlen1小于由cu_seqlens_q计算出的q长度seqlen2时，会启用TND Padding功能，将该batch的seqlen2与seqlen1差值部分的q输出的sparse_indices和sparse_values全部置为无效值。部分长序列场景下，如果需要填充的无效数据过多，由于硬件限制可能会导致aicore执行超时，可以通过(seqlen2 - seqlen1) * topk来计算需要填充的数据量，建议将这个数据量控制在4亿以内。
   - 当传入的cmp_ratio > 1且mask_mode = 3时，必须传入cmp_residual_k，其余情况不传入。
   - 当layout_k为PA_BBND时，必须传入seqused_k。
-  - 参数metadata必须传入，且shape固定为[1024]。
+  - 参数metadata必须传入，且shape固定为[2048]。
 
-## 调用示例
+## 调用说明
 
 | 调用方式 | 调用样例                                                                   | 说明                                                           |
 |--------------|------------------------------------------------------------------------|--------------------------------------------------------------|
-| aclnn调用 | [test_aclnn_lightning_indexer_v2](./examples/test_aclnn_lightning_indexer_v2.cpp) | 通过[aclnnLightningIndexerV2](./docs/aclnnLightningIndexerV2.md)接口方式调用LightningIndexerV2算子。 |
-| PyTorch API | - | 通过[torch.ops.cann_ops_transformer.lightning_indexer](../../attention/lightning_indexer_v2/docs/torchapi_lightning_indexer.md)接口调用LightningIndexerV2算子。|
+| aclnn API | [test_aclnn_lightning_indexer_v2](./examples/test_aclnn_lightning_indexer_v2.cpp) | 通过[aclnnLightningIndexerV2](./docs/aclnnLightningIndexerV2.md)接口方式调用LightningIndexerV2算子。 |
+| PyTorch API | [torchapi_lightning_indexer](./docs/torchapi_lightning_indexer.md) | 通过[cann_ops_transformer.lightning_indexer](./docs/torchapi_lightning_indexer.md)（含lightning_indexer_metadata；传入candidate_topk_blocks可选参数启用candidate模式）接口调用LightningIndexerV2算子。|
+| aclnn API（candidate） | [test_aclnn_lightning_indexer_v3](./examples/test_aclnn_lightning_indexer_v3.cpp) | 通过[aclnnLightningIndexerV3](./docs/aclnnLightningIndexerV3.md)接口方式调用LightningIndexerV2算子的candidate（两级TopK source）模式。|

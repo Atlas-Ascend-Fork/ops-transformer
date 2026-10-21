@@ -22,6 +22,9 @@ using namespace AscendC;
 
 constexpr int32_t NEG_INF = 0xFF800000;
 constexpr int32_t INVALID_INDEX = -1;
+constexpr int32_t POS_INF_F32 = 0x7F800000; // +inf (fp32 bits) — candidate pin 块位型
+// leak 降级值 NEG_HUGE 属 consumer（sparse_lightning_indexer）侧语义，唯一定义在 SLI vector.h
+// （0xF149F2CA = -1e30f），source 侧不定义、无消费点
 constexpr uint8_t VEC_REPEAT_MAX = 255;
 constexpr uint8_t B32_VEC_ELM_NUM = 64;
 constexpr uint8_t B32_BLOCK_ALIGN_NUM = 8;
@@ -176,6 +179,23 @@ __aicore__ inline void InitSortOutBuf(const LocalTensor<float>& src, int64_t ele
 }
 
 /**
+  UB->UB 纯 V 管道位精确回拷 (int32 视图 count-based Adds +0)。
+  替代 SortAll/MergeSort 尾部的 AscendC::DataCopy: UB->UB DataCopy 走 MTE 管道,
+  其后的 PipeBarrier<PIPE_V> 不构成 fence, 紧随其后的 V 读 (MrgSort/Extract) 与
+  MTE 回拷存在调度敏感竞态 (症状: sparse_indices 出现"单元素插入+整体右移"型随机污染)。
+  单次 count-based Adds 由 API 内部 counter 模式自行展开 repeat (自含尾块掩码),
+  相比 64 分块循环少 64~128 次调用。int32 视图 +0 数值位精确,
+  candidateTopkBlocks=-1 (off) 时输出与 DataCopy 路径逐位不变。
+ */
+__aicore__ inline void VecCopyI32BitExact(const LocalTensor<float>& dst, const LocalTensor<float>& src, int32_t copyNum)
+{
+    LocalTensor<int32_t> dstI = dst.template ReinterpretCast<int32_t>();
+    LocalTensor<int32_t> srcI = src.template ReinterpretCast<int32_t>();
+    AscendC::Adds(dstI, srcI, 0, static_cast<uint64_t>(copyNum));
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
+/**
   src: logits和索引，前logitsNum为logits，后logitsNum为索引
   tmp: 计算使用到的临时空间，大小与src一致
   logitsNum: 排序的元素个数, 暂只支持[128,256,384,512,1024,2048]
@@ -237,8 +257,8 @@ __aicore__ inline void SortAll(LocalTensor<float>& src, LocalTensor<float>& tmp,
         AscendC::PipeBarrier<PIPE_V>();
     }
     if (i % CONST_TWO == 0) {
-        AscendC::DataCopy(src, tmp, logitsNum * VALUE_AND_INDEX_NUM);
-        AscendC::PipeBarrier<PIPE_V>();
+        // 尾部回拷禁用 UB->UB DataCopy (MTE 管道, PipeBarrier<PIPE_V> 不构成 fence)
+        VecCopyI32BitExact(src, tmp, static_cast<int32_t>(logitsNum * VALUE_AND_INDEX_NUM));
     }
 }
 
@@ -279,8 +299,8 @@ __aicore__ inline void MergeSort(const LocalTensor<float>& mrgDst, int32_t mrgDs
 
         AscendC::MrgSort<float>(tmpTensor, srcList, params);
         AscendC::PipeBarrier<PIPE_V>();
-        AscendC::DataCopy(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
-        AscendC::PipeBarrier<PIPE_V>();
+        // 回拷禁用 UB->UB DataCopy (MTE 管道, PipeBarrier<PIPE_V> 不构成 fence)
+        VecCopyI32BitExact(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
     } else {
         int64_t unitElements = 1024;
         int64_t segNum = mrgDstNum / unitElements;
@@ -306,8 +326,8 @@ __aicore__ inline void MergeSort(const LocalTensor<float>& mrgDst, int32_t mrgDs
 
         AscendC::MrgSort<float>(tmpTensor, srcList, params);
         AscendC::PipeBarrier<PIPE_V>();
-        AscendC::DataCopy(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
-        AscendC::PipeBarrier<PIPE_V>();
+        // 回拷禁用 UB->UB DataCopy (MTE 管道, PipeBarrier<PIPE_V> 不构成 fence)
+        VecCopyI32BitExact(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
     }
 }
 
@@ -397,6 +417,33 @@ __aicore__ inline void ExtractIndex(const LocalTensor<uint32_t>& idxULocal, cons
     uint8_t src1Pattern = 2; // 固定模式2,表示筛选出奇数索引的数
     AscendC::GatherMask(idxULocal, sortLocal, src1Pattern, false, static_cast<uint32_t>(0), gatherMaskParams, rsvdCnt);
     AscendC::PipeBarrier<PIPE_V>();
+}
+
+/**
+  候选路径专用合并: 与 MergeSort 语义相同, 但回拷 mrgDst 用纯向量 count-based Adds。
+  MergeSort 尾部的 UB->UB DataCopy 若走 MTE 管道, 其后的 PipeBarrier<PIPE_V> 不构成 fence,
+  跨 tile/跨行对累加器的下一次 MrgSort 读存在调度敏感竞态。纯 V 回拷全程受 PipeBarrier 约束。
+  与 sparse_lightning_indexer 同名函数互为克隆，两侧修改须同步。
+ */
+__aicore__ inline void MergeSortVecCopy(const LocalTensor<float>& mrgDst, int32_t mrgDstNum, LocalTensor<float>& mrgSrc,
+                                        int32_t mrgSrcNum, LocalTensor<float>& tmpTensor)
+{
+    AscendC::MrgSort4Info params;
+    params.elementLengths[0] = mrgSrcNum;
+    params.elementLengths[1] = mrgDstNum;
+    params.ifExhaustedSuspension = false;
+    params.validBit = 0b0011;
+    params.repeatTimes = 1;
+
+    AscendC::MrgSortSrcList<float> srcList;
+    srcList.src1 = mrgSrc;
+    srcList.src2 = mrgDst;
+
+    AscendC::MrgSort<float>(tmpTensor, srcList, params);
+    AscendC::PipeBarrier<PIPE_V>();
+    // 回拷必须位精确: -1 (0xFFFFFFFF) 作为 float 是负符号 NaN, vadd 会规范化为 0x7FFFFFFF;
+    // 用 int32 视图 Adds(+0) 保证 bit-exact 且全程 V 管道 (受 PipeBarrier fence)
+    VecCopyI32BitExact(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
 }
 
 template <HardEvent event>

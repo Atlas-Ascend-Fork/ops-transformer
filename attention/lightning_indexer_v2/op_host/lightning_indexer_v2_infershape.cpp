@@ -25,6 +25,8 @@ constexpr uint32_t ATTR_TOPK_INDEX = 0;
 constexpr uint32_t ATTR_QUERY_LAYOUT_INDEX = 2;
 constexpr uint32_t ATTR_KEY_LAYOUT_INDEX = 3;
 constexpr uint32_t ATTR_RETURN_VALUE_INDEX = 6;
+constexpr uint32_t ATTR_CANDIDATE_TOPK_BLOCKS_INDEX = 7;
+constexpr int64_t CANDIDATE_TOPK_BLOCKS_OFF = -1;
 
 static ge::graphStatus InferShapeLightningIndexerV2(gert::InferShapeContext* context)
 {
@@ -39,6 +41,11 @@ static ge::graphStatus InferShapeLightningIndexerV2(gert::InferShapeContext* con
     OP_CHECK_NULL_WITH_CONTEXT(context, sparseIndicesShape);
     gert::Shape* sparseValuesShape = context->GetOutputShape(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, sparseValuesShape);
+    // candidate (two-level topk)：source 输出 + 预留 block_length（恒空）
+    gert::Shape* candidateBlockIndicesShape = context->GetOutputShape(2);
+    OP_CHECK_NULL_WITH_CONTEXT(context, candidateBlockIndicesShape);
+    gert::Shape* candidateBlockLengthShape = context->GetOutputShape(3);
+    OP_CHECK_NULL_WITH_CONTEXT(context, candidateBlockLengthShape);
 
     auto attrs = context->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
@@ -78,15 +85,30 @@ static ge::graphStatus InferShapeLightningIndexerV2(gert::InferShapeContext* con
         sparseIndicesShape->SetDim(2, *seleced_count);                   // 2:Dim K
     }
 
-    const bool* return_value = attrs->GetAttrPointer<bool>(ATTR_RETURN_VALUE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, return_value);
-    bool returnValueFlag = (return_value != nullptr) ? *return_value : false;
+    // GE Int 属性按 int64_t 读取（仓惯例），不做小端 bool* type-punning
+    const int64_t* return_value = attrs->GetAttrPointer<int64_t>(ATTR_RETURN_VALUE_INDEX);
+    bool returnValueFlag = (return_value != nullptr) ? (*return_value != 0) : false;
     if (returnValueFlag) {
         *sparseValuesShape = *sparseIndicesShape;
     } else {
         sparseValuesShape->SetDimNum(1);
         sparseValuesShape->SetDim(0, 0);
     }
+
+    // candidate_block_indices: candidate_topk_blocks != -1(source) 时输出，复制 sparse_indices shape、
+    // 末维改 candidate_topk_blocks（BSND 4 维 / TND 3 维双布局）；off 时输出 (0,)
+    const int64_t* candidate_topk_blocks = attrs->GetAttrPointer<int64_t>(ATTR_CANDIDATE_TOPK_BLOCKS_INDEX);
+    int64_t candBlocks = (candidate_topk_blocks != nullptr) ? *candidate_topk_blocks : CANDIDATE_TOPK_BLOCKS_OFF;
+    if (candBlocks > 0) {
+        *candidateBlockIndicesShape = *sparseIndicesShape;
+        candidateBlockIndicesShape->SetDim(candidateBlockIndicesShape->GetDimNum() - 1, candBlocks);
+    } else {
+        candidateBlockIndicesShape->SetDimNum(1);
+        candidateBlockIndicesShape->SetDim(0, 0);
+    }
+    // candidate_block_length: 预留接口，恒空
+    candidateBlockLengthShape->SetDimNum(1);
+    candidateBlockLengthShape->SetDim(0, 0);
     OP_LOGI(context->GetNodeName(), "LightningIndexerV2 InferShape end.");
 
     return ge::GRAPH_SUCCESS;
@@ -102,6 +124,9 @@ static ge::graphStatus InferDataTypeLightningIndexerV2(gert::InferDataTypeContex
     // attention_out, outidx:0
     context->SetOutputDataType(0, outputType);
     context->SetOutputDataType(1, ge::DT_FLOAT);
+    // candidate_block_indices:2 / candidate_block_length:3
+    context->SetOutputDataType(2, ge::DT_INT32);
+    context->SetOutputDataType(3, ge::DT_INT32);
     OP_LOGI(context->GetNodeName(), "LightningIndexerV2 InferDataType end.");
     return GRAPH_SUCCESS;
 }

@@ -233,6 +233,9 @@ ge::graphStatus LIV2InfoParser::GetAndCheckAttrParaInfo()
     liV2Params_.maskMode = attrs->GetAttrPointer<int32_t>(ATTR_MASK_MODE_INDEX);
     liV2Params_.cmpRatio = attrs->GetAttrPointer<int64_t>(ATTR_CMP_RATIO_INDEX);
     liV2Params_.returnValue = attrs->GetAttrPointer<int32_t>(ATTR_RETURN_VALUE_INDEX);
+    // candidate (two-level topk)：新增属性按 int64_t 读取（GE .Int() 属性惯例，无兼容包袱）
+    liV2Params_.candidateTopkBlocks = attrs->GetAttrPointer<int64_t>(ATTR_CANDIDATE_TOPK_BLOCKS_INDEX);
+    liV2Params_.candidateBlockSize = attrs->GetAttrPointer<int64_t>(ATTR_CANDIDATE_BLOCK_SIZE_INDEX);
 
     auto keyStrides = context_->GetDynamicInputStride(KEY_INDEX, 0);
     if (keyStrides != nullptr && keyStrides->GetDimNum() > 0) {
@@ -292,12 +295,14 @@ ge::graphStatus LIV2InfoParser::GetAndCheckAttrParaInfo()
             OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                 opName_, "max_seqlen_q", std::to_string(*liV2Params_.maxSeqlenQ).c_str(), "Max_seqlen_q must >= -1"),
             return ge::GRAPH_FAILED);
-        OP_CHECK_IF((*liV2Params_.returnValue != 0) && (*liV2Params_.returnValue != 1),
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "return_value",
-                                                          std::to_string(*liV2Params_.returnValue).c_str(),
-                                                          "Return_value only supports 0 or 1"),
-                    return ge::GRAPH_FAILED);
     }
+    // return_value 值域双架构守门（原位于 DAV_3510 分支内，arch22 裸 aclnn 链路存在 rv=2 静默按真值执行的缺口；
+    // 提升后 910B/950 host 均拒绝 ∉{0,1}，与 torch 入口 TORCH_CHECK 镜像）
+    OP_CHECK_IF(
+        (*liV2Params_.returnValue != 0) && (*liV2Params_.returnValue != 1),
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "return_value", std::to_string(*liV2Params_.returnValue).c_str(),
+                                              "Return_value only supports 0 or 1"),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF((!((*liV2Params_.topk > 0) && (*liV2Params_.topk <= TOPK_MAX))),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "topk", std::to_string(*liV2Params_.topk),
                                                       "Topk must > 0 and <= 8192"),
@@ -316,6 +321,42 @@ ge::graphStatus LIV2InfoParser::GetAndCheckAttrParaInfo()
     OP_CHECK_IF((*liV2Params_.cmpRatio <= 0) || (*liV2Params_.cmpRatio > 128),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "cmp_ratio", std::to_string(*liV2Params_.cmpRatio),
                                                       "Cmp_ratio must > 0 and <= 128"),
+                return ge::GRAPH_FAILED);
+    // ------------------candidate (two-level topk) 校验（仅 arch22 路径生效）------------------
+    // candidate_mode 不上参数面：candidate_topk_blocks == -1（缺省）即 off，行为与既有单级 TopK 一致
+    int32_t candTopkBlocks = (liV2Params_.candidateTopkBlocks != nullptr) ?
+                                 static_cast<int32_t>(*liV2Params_.candidateTopkBlocks) :
+                                 CANDIDATE_TOPK_BLOCKS_OFF;
+    uint32_t candBlockSize = (liV2Params_.candidateBlockSize != nullptr) ?
+                                 static_cast<uint32_t>(*liV2Params_.candidateBlockSize) :
+                                 CANDIDATE_BLOCK_SIZE_DEFAULT;
+    bool candidateOn = (candTopkBlocks != CANDIDATE_TOPK_BLOCKS_OFF);
+    if (candidateOn) {
+        OP_CHECK_IF(candTopkBlocks <= 0 || static_cast<uint32_t>(candTopkBlocks) > CANDIDATE_TOPK_BLOCKS_FIX ||
+                        static_cast<uint32_t>(candTopkBlocks) % CANDIDATE_TOPK_BLOCKS_MULTIPLE != 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        opName_, "candidate_topk_blocks", std::to_string(candTopkBlocks),
+                        "Candidate_topk_blocks must be -1(off) or in (0, 2048] and a multiple of 64"),
+                    return ge::GRAPH_FAILED);
+        // 双保险：candidate 仅 arch22(910B/910_93) 支持。950 正常走 ParseAndCheckLIV2Arch35 路由
+        // 不经本函数（入口守卫已先行拒绝），此断言防御路由误配
+        OP_CHECK_IF(npuArch_ == NpuArch::DAV_3510,
+                    OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                        opName_, "candidate_topk_blocks", "candidate_topk_blocks=" + std::to_string(candTopkBlocks),
+                        "Candidate_topk_blocks is only supported on ascend910b/ascend910_93, not on ascend950"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(*liV2Params_.topk > SPARSE_2K,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "topk", std::to_string(*liV2Params_.topk),
+                                                          "Topk must be <= 2048 when candidate_topk_blocks is enabled"),
+                    return ge::GRAPH_FAILED);
+        // return_value 已在 candidate 模式放开（位置级 topk 出值通路 source 模式恒可达，值=真实分无哨兵）；
+        // 值域 ∈{0,1} 由前置校验统一守门
+    }
+    // block_size 恒校验（[2,64] 且 2 的幂），off 时亦拒绝带病配置
+    OP_CHECK_IF(candBlockSize < CANDIDATE_BLOCK_SIZE_MIN || candBlockSize > CANDIDATE_BLOCK_SIZE_MAX ||
+                    (candBlockSize & (candBlockSize - 1U)) != 0,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "candidate_block_size", std::to_string(candBlockSize),
+                                                      "Candidate_block_size must be a power of 2 in [2, 64]"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -774,6 +815,16 @@ ge::graphStatus LIV2InfoParser::GetS1Size()
 {
     if (qLayout_ == DataLayout::BSND) {
         s1Size_ = liV2Params_.query.shape->GetStorageShape().GetDim(1);
+    } else if (liV2Params_.candidateTopkBlocks != nullptr &&
+               *liV2Params_.candidateTopkBlocks != CANDIDATE_TOPK_BLOCKS_OFF) {
+        // TND + candidate source 时取 query.dim0 作为 s1Size：该值供 kernel ProcessInvalid 的
+        // TND 全域清理使用（输出 [T,N2,topk]，需覆盖全部 T 行；不赋值则 usedCoreNum==0 时输出
+        // 保持未初始化内存）。candidate 关闭时 TND 不赋值恒 0，与单级 TopK 行为一致。
+        // 本分支必须与 kernel 侧 ProcessInvalid 的 layout 分支公式成对存在：缺本分支不清理；
+        // 只改 kernel 不改 host 则 TND 按 B×T×N2×K 越界写。
+        // 其余 s1Size/qSeqSize 消费点均在 BSND 守卫内（TND 主路径恒走 cuSeqlens 前缀和），无影响；
+        // s1Size_ 的 BSND 一致性校验位于 ValidateInputShapesMatchQbsnd（仅 BSND 调用），TND 不触及。
+        s1Size_ = liV2Params_.query.shape->GetStorageShape().GetDim(0);
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -1087,6 +1138,12 @@ void LIV2InfoParser::GenerateInfo(LIV2TilingInfo& liInfo)
     liInfo.maxSeqlenQ = *liV2Params_.maxSeqlenQ;
     liInfo.cmpRatio = *liV2Params_.cmpRatio;
     liInfo.returnValue = *liV2Params_.returnValue;
+    liInfo.candidateTopkBlocks = (liV2Params_.candidateTopkBlocks != nullptr) ?
+                                     static_cast<int32_t>(*liV2Params_.candidateTopkBlocks) :
+                                     CANDIDATE_TOPK_BLOCKS_OFF;
+    liInfo.candidateBlockSize = (liV2Params_.candidateBlockSize != nullptr) ?
+                                    static_cast<uint32_t>(*liV2Params_.candidateBlockSize) :
+                                    CANDIDATE_BLOCK_SIZE_DEFAULT;
 
     if (!keyStridesVec_.empty()) {
         liInfo.keyStride0 = static_cast<uint32_t>(keyStridesVec_[0]);
@@ -1195,6 +1252,9 @@ ge::graphStatus LightningIndexerV2Tiling::DoTiling(LIV2TilingInfo* tilingInfo)
     tilingData_.set_cmpRatio(tilingInfo->cmpRatio);
     tilingData_.set_keyStride0(tilingInfo->keyStride0);
     tilingData_.set_returnValue(tilingInfo->returnValue);
+    // candidate (two-level topk)：-1 原值下发，kernel 侧推导 on/off
+    tilingData_.set_candidateTopkBlocks(tilingInfo->candidateTopkBlocks);
+    tilingData_.set_candidateBlockSize(tilingInfo->candidateBlockSize);
     constexpr int32_t BATCH_CONSISTENCY_LEVEL = 3;
     tilingData_.set_batchInvariant(context_->GetDeterministicLevel() == BATCH_CONSISTENCY_LEVEL ? 1U : 0U);
     tilingData_.set_usedCoreNum(blockDim);
@@ -1228,6 +1288,21 @@ ge::graphStatus TilingForLightningIndexerV2(gert::TilingContext* context)
     auto platformInfoPtr = context->GetPlatformInfo();
     OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
+    // candidate (two-level topk) 仅 arch22(ascend910b/ascend910_93) 生效：950(DAV_3510) 上启用必须显式拒绝。
+    // 守卫置于 useArch35Checker 路由之前：950 走 ParseAndCheckLIV2Arch35 路径（不读 candidate 属性），
+    // 入口守卫是覆盖 arch22/arch35 两条路由的唯一单点；缺省 -1(off) 不受影响。
+    const auto* candAttrs = context->GetAttrs();
+    if (candAttrs != nullptr) {
+        const int64_t* candTopkBlocks = candAttrs->GetAttrPointer<int64_t>(ATTR_CANDIDATE_TOPK_BLOCKS_INDEX);
+        if (candTopkBlocks != nullptr && *candTopkBlocks != CANDIDATE_TOPK_BLOCKS_OFF &&
+            ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
+            OP_LOGE(context->GetNodeName(),
+                    "candidate_topk_blocks[%lld] is only supported on ascend910b/ascend910_93; "
+                    "enabling candidate mode on ascend950(DAV_3510) is rejected.",
+                    *candTopkBlocks);
+            return ge::GRAPH_FAILED;
+        }
+    }
     const bool useArch35Checker = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510;
     LIV2InfoParser liV2InfoParser(context);
     const ge::graphStatus parseStatus =

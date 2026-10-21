@@ -1598,3 +1598,347 @@ def generate_cpu_golden(data):
     data["topk_value"] = topk_value
     data["cpu_topk_value"] = cpu_topk_value
     return data
+
+
+# -----------------------------------------------------------------------------------------------------------
+# candidate (source / candidate_mode==1) golden + NPU driver
+#
+# The candidate golden is computed in the fp32 score domain (after w-sum + causal mask, before
+# sort) directly from the score matrix that GeneralizedLIV2.forward already returns as
+# ``topk_value`` (BNSD [B,N2,S1,S2max], -inf at unreachable positions).  This keeps the
+# sparse_indices golden bit-identical (the "two independent accumulators" carrier) and adds the
+# block golden non-invasively.
+#
+# 算子句柄按受控导入模式从 cann_ops_transformer.ops 惰性解析（见 resolve_candidate_op）；
+# metadata 构造沿用 liv2_output_single 的 lightning_indexer_metadata 直调方式。
+# -----------------------------------------------------------------------------------------------------------
+
+import liv2_candidate_golden as _cand_golden
+
+# Re-export the pure candidate golden helpers: the dependency-light implementation lives in
+# liv2_candidate_golden (importable on a pure-CPU host without torch_npu /
+# cann_ops_transformer, for the golden self-check), while model tests import them from here.
+select_candidate_blocks_ref = _cand_golden.select_candidate_blocks_ref
+select_candidate_blocks_torch = _cand_golden.select_candidate_blocks_torch
+compute_candidate_golden_bnsd = _cand_golden.compute_candidate_golden_bnsd
+derive_compress_lens = _cand_golden.derive_compress_lens
+CANDIDATE_TOPK_BLOCKS_OFF = _cand_golden.CANDIDATE_TOPK_BLOCKS_OFF
+
+
+class CandidateOpUnavailableError(RuntimeError):
+    """Raised when the candidate torch op is not registered yet (kernel under development)."""
+
+
+def compute_candidate_golden(
+    score_bnsd,
+    candidate_topk_blocks,
+    candidate_block_size,
+    layout_q,
+    cu_seqlens_q=None,
+):
+    """Build the candidate golden + block-amax matrix in the operator output layout.
+
+    Args:
+        score_bnsd: [B,N2,S1,S2max] fp32 score (== ``topk_value`` from GeneralizedLIV2.forward).
+        candidate_topk_blocks: K (output width); -1 (off) -> empty (0,) candidate.
+        candidate_block_size: candidate block size ([2,64] power of two).
+        layout_q: "BSND" or "TND".
+        cu_seqlens_q: per-batch q lengths (prefix-sum size B+1, or lengths size B); TND only.
+
+    Returns:
+        (cand torch.int32, blk torch.float32) where
+          cand: BSND [B,S1,N2,K] / TND [T,N2,K] (off -> shape (0,))
+          blk : row-major [total_rows, NBmax] block-amax (pin == +inf), same row order as cand.
+    """
+    score = (
+        score_bnsd.detach().cpu().numpy() if torch.is_tensor(score_bnsd) else score_bnsd
+    )
+    score = np.asarray(score, dtype=np.float32)
+    if candidate_topk_blocks == CANDIDATE_TOPK_BLOCKS_OFF:
+        empty = torch.zeros(0, dtype=torch.int32)
+        return empty, torch.zeros(0, dtype=torch.float32)
+    cand_bnsd, blk_bnsd = _cand_golden.compute_candidate_golden_bnsd(
+        score, candidate_topk_blocks, candidate_block_size, return_block_scores=True
+    )
+    cand = _cand_golden.bnsd_to_output_layout(
+        cand_bnsd, layout_q, cu_seqlens_q, fill=-1
+    )
+    blk = _cand_golden.bnsd_to_output_layout(
+        blk_bnsd, layout_q, cu_seqlens_q, fill=_cand_golden.NEG_INF
+    )
+    return (
+        torch.from_numpy(np.ascontiguousarray(cand)).to(torch.int32),
+        torch.from_numpy(np.ascontiguousarray(blk)).to(torch.float32),
+    )
+
+
+# Candidate torch op binding name.  candidate（两级 TopK source）能力已融合进
+# ``lightning_indexer`` 主入口：传入 candidate_topk_blocks 即返回 4 输出（torch
+# overload lightning_indexer.candidate），未传入保持 2 输出（兼容）。
+_CANDIDATE_OP_NAMES = ("lightning_indexer",)
+# 融合入口的 candidate 开关形参名，用于甄别旧版包（未收录融合改造的构建）
+_CANDIDATE_OP_KWARG = "candidate_topk_blocks"
+
+
+def resolve_candidate_op():
+    """Return (callable, name) for the candidate-capable torch op, or (None, None) if unavailable.
+
+    candidate 能力随 ``cann_ops_transformer.ops.lightning_indexer`` 发布（torch_extension/
+    __init__ 导出主入口，candidate_topk_blocks 可选参数即开关）。沿用
+    ``from cann_ops_transformer.ops import ...`` 的受控导入模式：从 ops 子包惰性解析
+    符号并校验签名接受 candidate 参数；旧版包（未收录融合改造，主入口无该形参）解析
+    失败返回 (None, None)，caller skips，测试侧不做 torch.ops 探测。
+    """
+    import inspect
+
+    for name in _CANDIDATE_OP_NAMES:
+        try:
+            fn = getattr(cann_ops_transformer.ops, name, None)
+        except Exception:  # noqa: BLE001 - lazy attr may raise for unregistered op
+            fn = None
+        if fn is None:
+            continue
+        try:
+            if _CANDIDATE_OP_KWARG not in inspect.signature(fn).parameters:
+                continue
+        except (TypeError, ValueError):
+            continue
+        return fn, name
+    return None, None
+
+
+def candidate_ops_unavailable_reason():
+    """Skip reason when the candidate torch op is unusable; None when usable.
+
+    与发布包接口可用性（模块级 from cann_ops_transformer.ops import，缺包即 ImportError）
+    解耦：candidate 测试套在仅安装未收录 candidate 的旧版主包环境下应可收集并 skip。
+    """
+    fn, _ = resolve_candidate_op()
+    return (
+        None
+        if fn is not None
+        else (
+            "candidate torch op unavailable: %s missing in cann_ops_transformer.ops"
+            % (list(_CANDIDATE_OP_NAMES),)
+        )
+    )
+
+
+def _candidate_to_npu(tensor):
+    if tensor is None:
+        return None
+    if torch.is_tensor(tensor):
+        return tensor.npu()
+    return torch.as_tensor(tensor).npu()
+
+
+def _prepare_candidate_npu_args(
+    params, data, candidate_topk_blocks, candidate_block_size, return_value=0
+):
+    """Build the kwargs for the candidate torch op from generate_liv2_test_data() output.
+
+    return_value 已在 candidate 模式放开（∈{0,1}）：rv=1 时 sparse_values 输出位置级 topk
+    真实分（shape 与 sparse_indices 相同），与现网 lightning_indexer 入口 rv=1 语义一致。
+    """
+    qk_dtype = data["query"].dtype
+    query = data["query"].to(qk_dtype)
+    key = data["key"].to(qk_dtype)
+    block_fusion = data.get("blockFusion")
+    if block_fusion is not None:
+        block_size = int(params[8])
+        block_num = int(params[9])
+        head_dim = int(params[7])
+        k_head_num = int(params[6])
+        block_fusion = block_fusion.to(qk_dtype).npu()
+        key = block_fusion[:, : block_size * k_head_num * head_dim].view(
+            block_num, block_size, k_head_num, head_dim
+        )
+    else:
+        key = key.npu()
+
+    # metadata inputs are CPU tensors in the pytest data dict; the metadata op runs on NPU,
+    # so move every tensor argument to npu first (mirrors the eager / acl_graph paths).
+    # 构造方式沿用 liv2_output_single：lightning_indexer_metadata 直调（前置算子
+    # 在发布包内恒可用）。
+    meta_in = {
+        mk: (mv.npu() if torch.is_tensor(mv) else mv)
+        for mk, mv in data["metadata_input"].items()
+    }
+    metadata = lightning_indexer_metadata(**meta_in)
+    return {
+        "q": query.npu(),
+        "k": key,
+        "w": data["weights"].npu(),
+        "topk": int(data["topk"]),
+        "cu_seqlens_q": _candidate_to_npu(data.get("cu_seqlens_q")),
+        "cu_seqlens_k": _candidate_to_npu(data.get("cu_seqlens_k")),
+        "seqused_q": _candidate_to_npu(data.get("seqused_q")),
+        "seqused_k": _candidate_to_npu(data.get("seqused_k")),
+        "cmp_residual_k": _candidate_to_npu(data.get("cmp_residual_k_for_npu")),
+        "block_table": _candidate_to_npu(data.get("block_table")),
+        "output_idx_offset": _candidate_to_npu(data.get("output_idx_offset")),
+        "metadata": metadata.npu(),
+        "max_seqlen_q": int(data["max_seqlen_q"]),
+        "layout_q": data["layout_query"],
+        "layout_k": data["layout_key"],
+        "mask_mode": int(data["mask_mode"]),
+        "cmp_ratio": int(data["cmp_ratio"]),
+        "return_value": int(return_value),
+        "candidate_topk_blocks": int(candidate_topk_blocks),
+        "candidate_block_size": int(candidate_block_size),
+    }
+
+
+def liv2_output_candidate_single(
+    params,
+    candidate_topk_blocks,
+    candidate_block_size=8,
+    generate_golden=True,
+    return_value=0,
+):
+    """Run the CPU candidate golden and (when available) the NPU candidate op.
+
+    return_value：candidate 模式已放开（∈{0,1}）。rv=1 时 NPU sparse_values 为位置级 topk
+    真实分（float32，shape 与 sparse_indices 相同，无效槽 -inf），golden 取
+    ``data["cpu_topk_value"]``（params 携带 return_value=1 时由 GeneralizedLIV2 产出）。
+
+    Returns a dict with: cpu_sparse, cpu_candidate, cpu_blk, npu_sparse, npu_sparse_value,
+    npu_candidate, npu_candidate_block_length, topk_value(score), op_name.  Raises
+    CandidateOpUnavailableError when the candidate torch op is not registered yet (so callers
+    can pytest.skip).
+    """
+    data = generate_liv2_test_data(params, generate_golden=generate_golden)
+    score = data["topk_value"]
+    layout_q = data["layout_query"]
+    cu_seqlens_q = data.get("cu_seqlens_q")
+
+    cpu_candidate, cpu_blk = compute_candidate_golden(
+        score, candidate_topk_blocks, candidate_block_size, layout_q, cu_seqlens_q
+    )
+
+    op, op_name = resolve_candidate_op()
+    if op is None:
+        raise CandidateOpUnavailableError(
+            "candidate torch op not registered (looked for "
+            f"{list(_CANDIDATE_OP_NAMES)}); kernel/op_api still under development"
+        )
+
+    run_kwargs = _prepare_candidate_npu_args(
+        params, data, candidate_topk_blocks, candidate_block_size, return_value
+    )
+    q = run_kwargs.pop("q")
+    k = run_kwargs.pop("k")
+    w = run_kwargs.pop("w")
+    topk = run_kwargs.pop("topk")
+    outputs = op(q, k, w, topk, **run_kwargs)
+    if not isinstance(outputs, (tuple, list)) or len(outputs) != 4:
+        raise CandidateOpUnavailableError(
+            f"candidate op '{op_name}' returned {type(outputs)} (expected a 4-tuple: "
+            "sparse_indices, sparse_values, candidate_block_indices, candidate_block_length)"
+        )
+    npu_sparse, npu_sparse_value, npu_candidate, npu_cand_len = outputs
+    torch.npu.synchronize()
+
+    return {
+        "params": params,
+        "data": data,
+        "op_name": op_name,
+        "cpu_sparse": data["cpu_result"],
+        "cpu_topk_value": data["cpu_topk_value"],
+        "topk_value": score,
+        "cpu_candidate": cpu_candidate,
+        "cpu_blk": cpu_blk,
+        "npu_sparse": npu_sparse,
+        "npu_sparse_value": npu_sparse_value,
+        "npu_candidate": npu_candidate,
+        "npu_candidate_block_length": npu_cand_len,
+    }
+
+
+def liv2_output_candidate_rv_pair(
+    params,
+    candidate_topk_blocks,
+    candidate_block_size=8,
+    generate_golden=True,
+):
+    """Run the candidate op twice (return_value=0 vs 1) on IDENTICAL inputs.
+
+    candidate 模式放开 return_value 后的核心一致性探针：rv 开关不得影响位置级 topk 管线，
+    即 rv=1 与 rv=0 的 sparse_indices / candidate_block_indices 须逐位一致；rv=1 的
+    sparse_values 为位置级 topk 真实分（golden 由 params[25]=1 驱动的 cpu_topk_value 提供）。
+
+    Returns (data, out_rv0, out_rv1) where each out is the 4-tuple
+    (sparse_indices, sparse_values, candidate_block_indices, candidate_block_length).
+    Raises CandidateOpUnavailableError when the candidate torch op is not registered.
+    """
+    data = generate_liv2_test_data(params, generate_golden=generate_golden)
+    op, op_name = resolve_candidate_op()
+    if op is None:
+        raise CandidateOpUnavailableError(
+            "candidate torch op not registered (looked for "
+            f"{list(_CANDIDATE_OP_NAMES)}); kernel/op_api still under development"
+        )
+    run_kwargs = _prepare_candidate_npu_args(
+        params, data, candidate_topk_blocks, candidate_block_size, return_value=0
+    )
+    q = run_kwargs.pop("q")
+    k = run_kwargs.pop("k")
+    w = run_kwargs.pop("w")
+    topk = run_kwargs.pop("topk")
+    out_rv0 = op(q, k, w, topk, **run_kwargs)
+    run_kwargs["return_value"] = 1
+    out_rv1 = op(q, k, w, topk, **run_kwargs)
+    if (
+        not isinstance(out_rv0, (tuple, list))
+        or not isinstance(out_rv1, (tuple, list))
+        or len(out_rv0) != 4
+        or len(out_rv1) != 4
+    ):
+        raise CandidateOpUnavailableError(
+            f"candidate op '{op_name}' did not return 4-tuples "
+            "(sparse_indices, sparse_values, candidate_block_indices, candidate_block_length)"
+        )
+    torch.npu.synchronize()
+    return data, out_rv0, out_rv1
+
+
+def liv2_candidate_host_reject(
+    params, candidate_topk_blocks, candidate_block_size, return_value=0
+):
+    """Assert the host validation rejects an illegal candidate configuration.
+
+    Builds the NPU inputs WITHOUT materializing the CPU golden (generate_golden=False), then
+    calls the candidate op expecting it to raise.  Returns (rejected: bool, message: str).
+    Raises CandidateOpUnavailableError when the op is not registered yet (caller skips).
+
+    return_value 随调用透传：candidate 模式已放开 rv∈{0,1}（rv=1 为合法组合，不应拒绝）；
+    rv=2 的值域拒绝由融合 torch 入口 lightning_indexer 的 candidate 路径 TORCH_CHECK 触发。
+
+    950 拒绝路径探针：在 ascend950（DAV_3510）环境上以 candidate_topk_blocks != -1 调用，
+    host 侧 tiling 入口守卫应返回 GRAPH_FAILED（表现为 torch RuntimeError），本探针据此
+    断言"950 上启用 candidate 模式被明确拒绝"。
+    """
+    op, op_name = resolve_candidate_op()
+    if op is None:
+        raise CandidateOpUnavailableError(
+            "candidate torch op not registered (looked for "
+            f"{list(_CANDIDATE_OP_NAMES)}); kernel/op_api still under development"
+        )
+    data = generate_liv2_test_data(params, generate_golden=False)
+    run_kwargs = _prepare_candidate_npu_args(
+        params, data, candidate_topk_blocks, candidate_block_size, return_value
+    )
+    q = run_kwargs.pop("q")
+    k = run_kwargs.pop("k")
+    w = run_kwargs.pop("w")
+    topk = run_kwargs.pop("topk")
+    try:
+        op(q, k, w, topk, **run_kwargs)
+        torch.npu.synchronize()
+    except Exception as exc:  # noqa: BLE001 - host validation surfaces as a torch RuntimeError
+        return True, f"{op_name} rejected as expected: {type(exc).__name__}: {exc}"
+    return (
+        False,
+        f"{op_name} did NOT reject candidate_topk_blocks={candidate_topk_blocks}, "
+        f"candidate_block_size={candidate_block_size}, return_value={return_value}",
+    )

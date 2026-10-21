@@ -92,8 +92,9 @@ public:
                                 __gm__ uint8_t* cuSeqlensK, __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedK,
                                 __gm__ uint8_t* cmpResidualK, __gm__ uint8_t* blockTable,
                                 __gm__ uint8_t* outputIdxOffset, __gm__ uint8_t* metadata,
-                                __gm__ uint8_t* sparseIndices, __gm__ uint8_t* sparseValues, __gm__ uint8_t* workspace,
-                                const LIV2TilingData* __restrict tiling, TPipe* tPipe);
+                                __gm__ uint8_t* sparseIndices, __gm__ uint8_t* sparseValues,
+                                __gm__ uint8_t* candidateBlockIndicesOut, __gm__ uint8_t* candidateBlockLength,
+                                __gm__ uint8_t* workspace, const LIV2TilingData* __restrict tiling, TPipe* tPipe);
     __aicore__ inline void Process();
 
     // ================================ 类型定义区 ================================
@@ -135,6 +136,7 @@ protected:
     uint64_t keyCoreOffset = 0ULL;
     uint64_t weightsCoreOffset = 0ULL;
     uint64_t indiceOutCoreOffset = 0ULL;
+    uint64_t candidateOutCoreOffset = 0ULL; // candidate (two-level topk) source 输出前缀
 
     // ================================ Global Buffer区 ================================
     GlobalTensor<Q_T> queryGm;
@@ -144,6 +146,7 @@ protected:
     GlobalTensor<int32_t> indiceOutGm;
     GlobalTensor<OUT_V_T> valueOutGm;
     GlobalTensor<int32_t> blockTableGm;
+    GlobalTensor<int32_t> candidateBlockIndexOutGm; // candidate source 输出（candidate_block_length 预留不绑定）
 
     GlobalTensor<uint32_t> actualSeqLengthsGmQ;
     GlobalTensor<uint32_t> actualSeqLengthsGm;
@@ -237,7 +240,16 @@ __aicore__ inline void LightningIndexerV2Kernel<LIT>::InitTilingData(const LIV2T
     constInfo.s2BaseSize = S2_BASE_SIZE;
     constInfo.isSparseCountOver2K = (constInfo.sparseCount <= BASE_TOPK) ? false : true;
 
-    constInfo.s1BaseSize = constInfo.isSparseCountOver2K ? SPARSE_COUNT_8K / constInfo.sparseCount * 2 : 8;
+    // candidate (two-level topk)：candidateTopkBlocks == -1 为 off（缺省行为）；on 时为 source 模式。
+    // host 已校验 on ⇒ topk ≤ 2048（isSparseCountOver2K 必为 false，无组合冲突）。
+    bool candidateOn = (tilingData->candidateTopkBlocks != CANDIDATE_TOPK_BLOCKS_OFF);
+    constInfo.candidateMode = candidateOn ? CANDIDATE_MODE_SOURCE : CANDIDATE_MODE_OFF;
+    constInfo.candidateTopkBlocks = candidateOn ? static_cast<uint32_t>(tilingData->candidateTopkBlocks) : 0U;
+    constInfo.candidateBlockSize = tilingData->candidateBlockSize;
+
+    // D5: candidate on 时强制 s1BaseSize=4（块级累加器 32KB 置换 sortOutBuf 减半的 32KB，UB 总量不变）
+    constInfo.s1BaseSize =
+        candidateOn ? 4 : (constInfo.isSparseCountOver2K ? SPARSE_COUNT_8K / constInfo.sparseCount * 2 : 8);
     constInfo.mBaseSize = constInfo.s1BaseSize * constInfo.gSize;
     constInfo.mBaseSizeAlign = LIV2Common::Align(constInfo.mBaseSize, ConstInfo::BLOCK_CUBE);
 }
@@ -350,19 +362,19 @@ __aicore__ inline uint32_t LightningIndexerV2Kernel<LIT>::GetTotalBaseBlockNum()
     uint32_t totalBlockNum = 0;
     uint32_t actS1Size, actS2Size, actS2SizeOrig;
     uint32_t s1GBaseNum, s2BaseNum;
+    // candidate on 时禁 S2 跨核切分（块级累加器单核内完成，免 LD 归并）；off 时与缺省路径逐位等价
+    const bool noS2Split = constInfo.isSparseCountOver2K || (constInfo.candidateMode == CANDIDATE_MODE_SOURCE);
 
     for (uint32_t bIdx = 0; bIdx < constInfo.batchSize; bIdx++) {
         GetS1S2ActualSeqLen(bIdx, actS1Size, actS2Size, actS2SizeOrig);
         s1GBaseNum = CeilDiv(actS1Size, constInfo.s1BaseSize);
         if (!constInfo.attenMaskFlag) {
-            s2BaseNum =
-                constInfo.isSparseCountOver2K ? (actS2Size > 0 ? 1 : 0) : CeilDiv(actS2Size, constInfo.s2BaseSize);
+            s2BaseNum = noS2Split ? (actS2Size > 0 ? 1 : 0) : CeilDiv(actS2Size, constInfo.s2BaseSize);
             totalBlockNum += s1GBaseNum * s2BaseNum * constInfo.kHeadNum;
             continue;
         }
         for (uint32_t s1gIdx = 0; s1gIdx < s1GBaseNum; s1gIdx++) {
-            s2BaseNum = constInfo.isSparseCountOver2K ? (actS2Size > 0 ? 1 : 0) :
-                                                        GetS2BaseBlockNumOnMask(s1gIdx, actS1Size, actS2SizeOrig);
+            s2BaseNum = noS2Split ? (actS2Size > 0 ? 1 : 0) : GetS2BaseBlockNumOnMask(s1gIdx, actS1Size, actS2SizeOrig);
             totalBlockNum += s2BaseNum * constInfo.kHeadNum;
         }
     }
@@ -382,6 +394,8 @@ __aicore__ void inline LightningIndexerV2Kernel<LIT>::SplitCore(uint32_t curCore
     uint32_t lastGS1RemainBlockCnt = 0;
     uint32_t coreDealBlockCnt = coreIdx < deal1MoreBlockCoreNum ? minBlockPerCore + 1 : minBlockPerCore;
     coreNum = minBlockPerCore == 0 ? deal1MoreBlockCoreNum : coreNum;
+    // D4: candidate on 时禁 S2 跨核切分（与 GetTotalBaseBlockNum 同点位保持一致）
+    const bool noS2Split = constInfo.isSparseCountOver2K || (constInfo.candidateMode == CANDIDATE_MODE_SOURCE);
 
     bool findLastCoreEnd = true;
     uint32_t actS1Size, actS2Size, actS2SizeOrig;
@@ -411,7 +425,7 @@ __aicore__ void inline LightningIndexerV2Kernel<LIT>::SplitCore(uint32_t curCore
                 info.s2Start = 0;
                 findLastCoreEnd = false;
             }
-            s2Loop = constInfo.isSparseCountOver2K ? (actS2Size > 0 ? 1 : 0) : s2BaseNum;
+            s2Loop = noS2Split ? (actS2Size > 0 ? 1 : 0) : s2BaseNum;
             for (uint32_t s2Idx = 0; s2Idx < s2Loop;) {
                 if (findLastCoreEnd) {
                     info.bN2Start = bN2Idx;
@@ -423,8 +437,7 @@ __aicore__ void inline LightningIndexerV2Kernel<LIT>::SplitCore(uint32_t curCore
                 if (lastGS1RemainBlockCnt + s2RemainBaseNum >= coreDealBlockCnt) {
                     info.bN2End = bN2Idx;
                     info.gS1End = gS1Idx;
-                    info.s2End = constInfo.isSparseCountOver2K ? s2BaseNum - 1 :
-                                                                 s2Idx + coreDealBlockCnt - lastGS1RemainBlockCnt - 1;
+                    info.s2End = noS2Split ? s2BaseNum - 1 : s2Idx + coreDealBlockCnt - lastGS1RemainBlockCnt - 1;
 
                     if (coreIdx == curCoreIdx) {
                         // S2被切N核，那么只有第一个核需要处理LD，其他核不用
@@ -585,14 +598,13 @@ __aicore__ inline void LightningIndexerV2Kernel<LIT>::DealActSeqLenIsZero(uint32
 }
 
 template <typename LIT>
-__aicore__ inline void LightningIndexerV2Kernel<LIT>::Init(__gm__ uint8_t* query, __gm__ uint8_t* key,
-                                                           __gm__ uint8_t* weights, __gm__ uint8_t* cuSeqlensQ,
-                                                           __gm__ uint8_t* cuSeqlensK, __gm__ uint8_t* sequsedQ,
-                                                           __gm__ uint8_t* sequsedK, __gm__ uint8_t* cmpResidualK,
-                                                           __gm__ uint8_t* blockTable, __gm__ uint8_t* outputIdxOffset,
-                                                           __gm__ uint8_t* metadata, __gm__ uint8_t* sparseIndices,
-                                                           __gm__ uint8_t* sparseValues, __gm__ uint8_t* workspace,
-                                                           const LIV2TilingData* __restrict tiling, TPipe* tPipe)
+__aicore__ inline void LightningIndexerV2Kernel<LIT>::Init(
+    __gm__ uint8_t* query, __gm__ uint8_t* key, __gm__ uint8_t* weights, __gm__ uint8_t* cuSeqlensQ,
+    __gm__ uint8_t* cuSeqlensK, __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedK, __gm__ uint8_t* cmpResidualK,
+    __gm__ uint8_t* blockTable, __gm__ uint8_t* outputIdxOffset, __gm__ uint8_t* metadata,
+    __gm__ uint8_t* sparseIndices, __gm__ uint8_t* sparseValues, __gm__ uint8_t* candidateBlockIndicesOut,
+    __gm__ uint8_t* candidateBlockLength, __gm__ uint8_t* workspace, const LIV2TilingData* __restrict tiling,
+    TPipe* tPipe)
 {
     if ASCEND_IS_AIV {
         tmpBlockIdx = GetBlockIdx(); // vec:0-47
@@ -641,7 +653,13 @@ __aicore__ inline void LightningIndexerV2Kernel<LIT>::Init(__gm__ uint8_t* query
         indiceOutGm.SetGlobalBuffer((__gm__ int32_t*)sparseIndices);
         valueOutGm.SetGlobalBuffer((__gm__ OUT_V_T*)sparseValues);
         weightsGm.SetGlobalBuffer((__gm__ W_T*)weights);
+        // candidate (two-level topk)：source 输出绑定；candidate_block_length 预留（恒空，不绑定不消费）
+        GlobalTensor<int32_t> candidateBlockIndexInGm; // 本算子无 candidate 输入（consumer 链归 sparse 算子）
+        if (constInfo.candidateMode == CANDIDATE_MODE_SOURCE && candidateBlockIndicesOut != nullptr) {
+            candidateBlockIndexOutGm.SetGlobalBuffer((__gm__ int32_t*)candidateBlockIndicesOut);
+        }
         vectorService.InitVec1GlobalTensor(mm1ResGm, vec1ResGm, vec1ParamGm, weightsGm, indiceOutGm, valueOutGm);
+        vectorService.InitVecCandidateTensor(candidateBlockIndexInGm, candidateBlockIndexOutGm);
     } else {
         matmulService.InitParams(constInfo);
         queryGm.SetGlobalBuffer((__gm__ Q_T*)query);
@@ -767,12 +785,18 @@ __aicore__ inline void LightningIndexerV2Kernel<LIT>::CalcRunInfo(uint32_t loop,
         // B,S1,N2,k/T,N2,k
         indiceOutCoreOffset =
             actualSeqQPrefixSum * constInfo.kHeadNum * constInfo.sparseCount + runInfo.n2Idx * constInfo.sparseCount;
+        // candidate (two-level topk)：source 输出前缀，BSND/TND 与 indiceOutCoreOffset 同构
+        if (constInfo.candidateMode == CANDIDATE_MODE_SOURCE) {
+            candidateOutCoreOffset = actualSeqQPrefixSum * constInfo.kHeadNum * constInfo.candidateTopkBlocks +
+                                     runInfo.n2Idx * constInfo.candidateTopkBlocks;
+        }
     }
     runInfo.tensorQueryOffset = queryCoreOffset;
     runInfo.tensorKeyOffset =
         keyCoreOffset + runInfo.s2Idx * constInfo.s2BaseSize * constInfo.kHeadNum * constInfo.headDim;
     runInfo.tensorWeightsOffset = weightsCoreOffset;
     runInfo.indiceOutOffset = indiceOutCoreOffset;
+    runInfo.candidateOutOffset = candidateOutCoreOffset;
 }
 
 template <typename LIT>
@@ -796,7 +820,11 @@ __aicore__ inline void LightningIndexerV2Kernel<LIT>::ProcessInvalid()
 {
     if ASCEND_IS_AIV {
         uint32_t aivCoreNum = GetBlockNum() * 2; // 2 means c:v = 1:2
-        uint64_t totalQuerySize = constInfo.batchSize * constInfo.qSeqSize;
+        // TND 输出为 [T,N2,topk]（qSeqSize=query.dim0，GetS1Size TND 分支下发），全域大小不含
+        // batchSize 因子；若沿用 B×T×N2×K 将越界写 B 倍。BSND 输出 [B,S1,N2,K] 与 SLI 同构
+        uint64_t totalQuerySize =
+            (LAYOUT_T == LI_V2_LAYOUT::TND) ? constInfo.qSeqSize : constInfo.batchSize * constInfo.qSeqSize;
+        // batch 一致性开关（GetDeterministicLevel==3）：TND 按 cuSeqlensQ 前缀和取实际全域 token 数
         if (constInfo.batchInvariant && constInfo.outputLayout == LI_V2_LAYOUT::TND && constInfo.actualLenQDims > 0) {
             totalQuerySize = actualSeqLengthsGmQ.GetValue(constInfo.batchSize);
         }
@@ -819,6 +847,25 @@ __aicore__ inline void LightningIndexerV2Kernel<LIT>::ProcessInvalid()
                 GlobalTensor<uint32_t> valueOut = valueOutGmTmp[baseSize];
 
                 AscendC::InitGlobalMemory(valueOut, dealSize, constInfo.NEG_INF_FLOAT);
+            }
+        }
+        // candidate (two-level topk)：source 模式对 candidate_block_indices 输出全域填 -1
+        // （candidate_block_length 恒空无需清理）；输出形状同样按 layout 分支：
+        // TND 为 [T,N2,candBlocks]（不含 B 因子），BSND 为 [B,S1,N2,candBlocks]
+        if (constInfo.candidateMode == CANDIDATE_MODE_SOURCE && candidateBlockIndexOutGm.GetPhyAddr() != 0) {
+            uint64_t totalCandSize =
+                (LAYOUT_T == LI_V2_LAYOUT::TND) ?
+                    constInfo.qSeqSize * constInfo.kHeadNum * constInfo.candidateTopkBlocks :
+                    constInfo.batchSize * constInfo.qSeqSize * constInfo.kHeadNum * constInfo.candidateTopkBlocks;
+            uint64_t candSingleCoreSize =
+                LIV2Common::Align((totalCandSize + aivCoreNum - 1) / aivCoreNum, GM_ALIGN_BYTES / sizeof(int32_t));
+            uint64_t candBaseSize = tmpBlockIdx * candSingleCoreSize;
+            if (candBaseSize < totalCandSize) {
+                uint64_t candDealSize = (candBaseSize + candSingleCoreSize <= totalCandSize) ?
+                                            candSingleCoreSize :
+                                            totalCandSize - candBaseSize;
+                GlobalTensor<int32_t> candOutput = candidateBlockIndexOutGm[candBaseSize];
+                AscendC::InitGlobalMemory(candOutput, candDealSize, constInfo.INVALID_IDX);
             }
         }
     }

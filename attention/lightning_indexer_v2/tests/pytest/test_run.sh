@@ -20,6 +20,8 @@ LIV2_PT_SAVE_SCRIPT="./batch/lightning_indexer_v2_pt_save.py"
 TEST_LIV2_BATCH_SCRIPT="test_lightning_indexer_v2_batch.py"
 REPLACE_PATH_SCRIPT="./batch/replace_path.py"
 TEST_LIV2_SINGLE_SCRIPT="test_lightning_indexer_v2_single.py"
+TEST_LIV2_CANDIDATE_SCRIPT="test_lightning_indexer_v2_candidate.py"
+TEST_LIV2_CANDIDATE_REJECT_SCRIPT="test_lightning_indexer_v2_candidate_reject.py"
 
 # ====================== 执行区======================
 
@@ -32,6 +34,20 @@ run_single() {
     LIV2_PARAMSET="${paramset}" LIV2_CASE_NAMES="${case_names}" \
     LIV2_RUN_MODE="${run_mode}" \
         python3 -m pytest -rA -s $TEST_LIV2_SINGLE_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
+}
+
+# candidate（两级 TopK source）功能用例
+run_candidate() {
+    local case_names="$1"
+    echo "===== 执行 candidate 功能用例 ====="
+    LIV2_CAND_CASE_NAMES="${case_names}" \
+        python3 -m pytest -rA -s $TEST_LIV2_CANDIDATE_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
+}
+
+# candidate host 校验拒绝用例
+run_candidate_reject() {
+    echo "===== 执行 candidate host 校验拒绝用例 ====="
+    python3 -m pytest -rA -s $TEST_LIV2_CANDIDATE_REJECT_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
 }
 
 # 用例批量生成调试
@@ -74,14 +90,19 @@ show_help() {
     echo "命令说明："
     echo "  single [default|stc] [eager|graph|both]"
     echo "  single [--paramset default|stc] [-C CASE[,CASE...]] [-M eager|graph|both]"
+    echo "  candidate [-C CASE[,CASE...]]         执行 candidate（两级 TopK source）功能用例"
+    echo "  candidate_reject                      执行 candidate host 校验拒绝用例"
     echo "  batch [eager|graph] 执行用例批量生成调试"
     echo "                        eager - 直接调用算子（默认）"
-    echo "                        graph - torch.compile + torchair 后端"
+    echo "                        graph - 通过 torch.compile + torchair 后端"
     echo "  help                显示本帮助信息"
     echo "示例："
     echo "  $0 single        # 执行single模式"
     echo "  $0 single stc eager # 以eager模式执行STC白盒参数集"
     echo "  $0 single --paramset stc -C S2_16_003 -M graph"
+    echo "  $0 candidate     # 全量 candidate 用例"
+    echo "  $0 candidate -C LIV2_CAND_BS_2,LIV2_CAND_TND_TND"
+    echo "  $0 candidate_reject"
     echo "  $0 batch         # 执行batch模式（默认eager）"
     echo "  $0 batch eager   # 显式指定eager模式"
     echo "  $0 batch graph   # 使用graph模式"
@@ -151,6 +172,31 @@ case "$COMMAND" in
             exit 1
         fi
         run_single "$paramset" "$case_names" "$run_mode"
+        ;;
+    candidate)
+        shift
+        case_names=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -C|--cases)
+                    if [ $# -lt 2 ]; then
+                        echo "错误：$1 缺少参数值"
+                        exit 1
+                    fi
+                    case_names="$2"
+                    shift 2
+                    ;;
+                *)
+                    echo "错误：未知 candidate 参数 '$1'"
+                    show_help
+                    exit 1
+                    ;;
+            esac
+        done
+        run_candidate "$case_names"
+        ;;
+    candidate_reject)
+        run_candidate_reject
         ;;
     batch)
         if [[ "$RUN_MODE" != "eager" && "$RUN_MODE" != "graph" ]]; then

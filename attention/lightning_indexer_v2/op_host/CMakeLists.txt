@@ -9,8 +9,10 @@
 # -----------------------------------------------------------------------------------------------------------
 add_op_to_compiled_list()
 
+# def 进 op_host_aclnnInner 库：自动生成 aclnnInnerLightningIndexerV2（全量含 candidate 原型），
+# 外层 aclnnLightningIndexerV2（兼容老签名）与 aclnnLightningIndexerV3（candidate）由 op_api 手写提供
 if (BUILD_OPEN_PROJECT)
-    target_sources(op_host_aclnn PRIVATE
+    target_sources(op_host_aclnnInner PRIVATE
     lightning_indexer_v2_def.cpp
     )
 endif()
@@ -25,7 +27,7 @@ add_ops_compile_options(
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE lightning_indexer_v2 ACLNNTYPE aclnn)
+    add_modules_sources(OPTYPE lightning_indexer_v2 ACLNNTYPE aclnn_inner)
     include(${CMAKE_CURRENT_SOURCE_DIR}/checkers/checker_sources.cmake)
     add_lightning_indexer_v2_common_checker_sources(${OPHOST_NAME}_tiling_obj)
     target_sources(${OPHOST_NAME}_tiling_obj PRIVATE

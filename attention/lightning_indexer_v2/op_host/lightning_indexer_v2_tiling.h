@@ -59,6 +59,8 @@ constexpr uint32_t METADATA_INDEX = 10;
 // Outputs Index
 constexpr uint32_t LIGHTNING_INDEXER = 0;
 constexpr uint32_t LIGHTNING_VALUES = 1;
+constexpr uint32_t CANDIDATE_BLOCK_INDICES_OUTPUT_INDEX = 2;
+constexpr uint32_t CANDIDATE_BLOCK_LENGTH_OUTPUT_INDEX = 3; // 预留, 恒空
 // Attributes Index
 constexpr uint32_t ATTR_TOPK_INDEX = 0;
 constexpr uint32_t ATTR_MAX_SEQLEN_Q_INDEX = 1;
@@ -67,6 +69,8 @@ constexpr uint32_t ATTR_KEY_LAYOUT_INDEX = 3;
 constexpr uint32_t ATTR_MASK_MODE_INDEX = 4;
 constexpr uint32_t ATTR_CMP_RATIO_INDEX = 5;
 constexpr uint32_t ATTR_RETURN_VALUE_INDEX = 6;
+constexpr uint32_t ATTR_CANDIDATE_TOPK_BLOCKS_INDEX = 7;
+constexpr uint32_t ATTR_CANDIDATE_BLOCK_SIZE_INDEX = 8;
 // Dim Index
 constexpr uint32_t DIM_IDX_ZERO = 0;
 constexpr uint32_t DIM_IDX_ONE = 1;
@@ -84,6 +88,13 @@ constexpr uint32_t TOPK_MAX = 8192;
 constexpr uint32_t TOPK_MULTIPLE = 1024;
 constexpr uint32_t G_SIZE_LIMIT = 64;
 constexpr uint32_t METADATA_LIMIT = 2048;
+// ------------------candidate 两级TopK 常量（与 kernel common_arch22.h 保持一致）------------------
+constexpr int32_t CANDIDATE_TOPK_BLOCKS_OFF = -1;    // 关闭 candidate（默认值）
+constexpr uint32_t CANDIDATE_TOPK_BLOCKS_FIX = 2048; // 块级 topk 上限（BASE_TOPK 排序/归并结构约束）
+constexpr uint32_t CANDIDATE_TOPK_BLOCKS_MULTIPLE = 64;
+constexpr uint32_t CANDIDATE_BLOCK_SIZE_DEFAULT = 8;
+constexpr uint32_t CANDIDATE_BLOCK_SIZE_MIN = 2; // [MIN, MAX] 内 2 的幂
+constexpr uint32_t CANDIDATE_BLOCK_SIZE_MAX = 64;
 
 // -----------算子TilingData定义---------------
 BEGIN_TILING_DATA_DEF(LIV2TilingData)
@@ -104,6 +115,9 @@ TILING_DATA_FIELD_DEF(int64_t, cmpRatio)
 TILING_DATA_FIELD_DEF(uint32_t, batchSupperFlag)
 TILING_DATA_FIELD_DEF(uint32_t, keyStride0)
 TILING_DATA_FIELD_DEF(uint32_t, returnValue)
+// ---- candidate (two-level topk)：仅尾部追加，既有字段偏移不变（arch35 kernel 无感）----
+TILING_DATA_FIELD_DEF(int32_t, candidateTopkBlocks) // -1=off；有效值 (0,2048] 且 64 的倍数
+TILING_DATA_FIELD_DEF(uint32_t, candidateBlockSize) // [2,64] 2 的幂，默认 8
 TILING_DATA_FIELD_DEF(uint32_t, batchInvariant)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(LightningIndexerV2, LIV2TilingData)
@@ -137,6 +151,9 @@ struct LiV2ParaInfo {
     const int64_t* nextTokens = nullptr;
     const int64_t* cmpRatio = nullptr;
     const int32_t* returnValue = nullptr;
+    // candidate (two-level topk)：新增属性按 int64_t 读取（GE .Int() 属性惯例，无兼容包袱）
+    const int64_t* candidateTopkBlocks = nullptr;
+    const int64_t* candidateBlockSize = nullptr;
 };
 
 // -----------算子Tiling入参信息类---------------
@@ -170,6 +187,9 @@ public:
     uint32_t returnValue = 0;
     uint32_t keyStride0 = 0;
     std::vector<uint32_t> keyStridesVec;
+    // candidate (two-level topk)
+    int32_t candidateTopkBlocks = CANDIDATE_TOPK_BLOCKS_OFF;
+    uint32_t candidateBlockSize = CANDIDATE_BLOCK_SIZE_DEFAULT;
 
     // DType
     ge::DataType inputQType = ge::DT_FLOAT16;

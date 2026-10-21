@@ -120,7 +120,7 @@ int InitializeTensors(TensorResources& resources)
     std::vector<int64_t> keyShape = {B, S2Compressed, N2, D};
     std::vector<int64_t> weightsShape = {B, S1, N1};
     std::vector<int64_t> cmpResidualKShape = {B};
-    std::vector<int64_t> metadataShape = {1024};
+    std::vector<int64_t> metadataShape = {2048};
     std::vector<int64_t> sparseIndicesShape = {B, S1, N2, topk};
     std::vector<int64_t> sparseValuesShape = {B, S1, N2, topk};
 
@@ -270,6 +270,7 @@ int ExecuteLightningIndexerV2(TensorResources& resources, aclrtStream stream, vo
     }
     aclOpExecutor* executor;
 
+    // V2 兼容签名：无 candidate 参数（candidate 能力由 aclnnLightningIndexerV3 承接）
     int ret = aclnnLightningIndexerV2GetWorkspaceSize(
         resources.queryTensor, resources.keyTensor, resources.weightsTensor, nullptr, nullptr, nullptr, nullptr,
         resources.cmpResidualKTensor, nullptr, nullptr, resources.metadataTensor, topk, maxSeqlenQ, layoutQuery,
@@ -298,7 +299,7 @@ int ExecuteLightningIndexerV2(TensorResources& resources, aclrtStream stream, vo
     return ACL_SUCCESS;
 }
 
-int PrintOutResult(std::vector<int64_t>& shape, void** deviceAddr)
+int PrintOutResult(const char* name, std::vector<int64_t>& shape, void** deviceAddr)
 {
     auto size = GetShapeSize(shape);
     std::vector<int32_t> resultData(size, 0);
@@ -309,7 +310,7 @@ int PrintOutResult(std::vector<int64_t>& shape, void** deviceAddr)
         return ret;
     }
     for (int64_t i = 0; i < size; i++) {
-        LOG_PRINT("sparse_indices result[%ld] is: %d\n", i, resultData[i]);
+        LOG_PRINT("%s result[%ld] is: %d\n", name, i, resultData[i]);
     }
     return ACL_SUCCESS;
 }
@@ -371,9 +372,6 @@ void CleanupResources(TensorResources& resources, void* workspaceAddr, aclrtStre
 
 int main()
 {
-    if (op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510) {
-        return 0;
-    }
     int32_t deviceId = 0;
     aclrtStream stream = nullptr;
     TensorResources resources = {};
@@ -395,17 +393,31 @@ int main()
         return ret;
     }
 
+    // 本算子支持 ascend950（arch35，metadata 前置分核流程）与 ascend910b/ascend910_93（arch22）；
+    // candidate（两级 TopK source）能力由 aclnnLightningIndexerV3 提供，见
+    // test_aclnn_lightning_indexer_v3.cpp。平台信息须在设备初始化后读取（设备初始化前
+    // GetCurNpuArch() 返回无效值，门控将恒命中早退导致示例空跑）。
+    const NpuArch npuArch = op::GetCurrentPlatformInfo().GetCurNpuArch();
+    if (npuArch != NpuArch::DAV_3510 && npuArch != NpuArch::DAV_2201) {
+        LOG_PRINT("skip: requires DAV_3510 (ascend950) or DAV_2201 (ascend910b/ascend910_93), current arch = %u.\n",
+                  static_cast<uint32_t>(npuArch));
+        CleanupResources(resources, workspaceAddr, stream, deviceId);
+        return 0;
+    }
     ret = InitializeTensors(resources);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
         LOG_PRINT("InitializeTensors failed. ERROR: %d\n", ret);
         CleanupResources(resources, workspaceAddr, stream, deviceId);
         return ret;
     }
-    ret = GenerateMetadata(resources, stream, B, S1, S2, N1, N2, D, topk, 3, 4);
-    if (!CHECK_RET(ret == ACL_SUCCESS)) {
-        LOG_PRINT("GenerateMetadata failed. ERROR: %d\n", ret);
-        CleanupResources(resources, workspaceAddr, stream, deviceId);
-        return ret;
+    if (npuArch == NpuArch::DAV_3510) {
+        // 950（arch35）：metadata 前置算子必传，先完成分核信息生成（既有流程）
+        ret = GenerateMetadata(resources, stream, B, S1, S2, N1, N2, D, topk, 3, 4);
+        if (!CHECK_RET(ret == ACL_SUCCESS)) {
+            LOG_PRINT("GenerateMetadata failed. ERROR: %d\n", ret);
+            CleanupResources(resources, workspaceAddr, stream, deviceId);
+            return ret;
+        }
     }
     ret = ExecuteLightningIndexerV2(resources, stream, &workspaceAddr, &workspaceSize);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
@@ -421,7 +433,7 @@ int main()
         return ret;
     }
 
-    PrintOutResult(sparseIndicesShape, &resources.sparseIndicesDeviceAddr);
+    PrintOutResult("sparse_indices", sparseIndicesShape, &resources.sparseIndicesDeviceAddr);
 
     CleanupResources(resources, workspaceAddr, stream, deviceId);
     return 0;
