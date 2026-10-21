@@ -16,13 +16,13 @@
 
 #### 前置要求
 1、确认TorchNPU为最新版本  
-2、参考[Attention融合算子Experimental使用说明](../../../Attention融合算子Experimental使用说明.md)激活CANN包合自定义算子包
+2、参考[Attention融合算子Experimental使用说明](../../../Attention融合算子Experimental使用说明.md)激活CANN包和自定义算子包
 
 #### custom包调用
 支持custom包调用
 
 ## 文件结构
-#### pytest文件结构说明
+### pytest文件结构说明
 - test_run.sh                                               # 用例执行脚本
 - kv_quant_sparse_attn_sharedkv_golden.py                   # 算子入参处理及cpu侧golden实现
 - result_compare_method.py                                  # cpu golden与npu结果精度对比脚本
