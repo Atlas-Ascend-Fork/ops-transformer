@@ -176,7 +176,6 @@ __aicore__ inline void MixedQuantSparseFlashMlaCsa<MqsmlaCsaCubeBlockType, Mqsml
         return;
     }
     this->mqsmlaCsaMetadataGm.SetGlobalBuffer((__gm__ uint32_t*)metadata);
-
     bN2StartIdx = mqsmlaCsaMetadataGm.GetValue(GetAttrAbsIndex(mqsmlaCsaAicIdx, FA_BN2_START_INDEX, false));
     gS1StartIdx = mqsmlaCsaMetadataGm.GetValue(GetAttrAbsIndex(mqsmlaCsaAicIdx, FA_M_START_INDEX, false));
     s2StartIdx = mqsmlaCsaMetadataGm.GetValue(GetAttrAbsIndex(mqsmlaCsaAicIdx, FA_S2_START_INDEX, false));

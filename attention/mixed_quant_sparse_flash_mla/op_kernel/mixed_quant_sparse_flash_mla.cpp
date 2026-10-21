@@ -12,7 +12,13 @@
  * \file mixed_quant_sparse_flash_mla.cpp
  * \brief
  */
-
+#if (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
+#include "kernel_operator.h"
+#include "lib/matmul_intf.h"
+#include "arch92/mixed_quant_sparse_flash_mla_template_tiling_key_arch92.h"
+#include "arch92/mixed_quant_sparse_flash_mla_scfa_kernel.h"
+#include "arch92/mixed_quant_sparse_flash_mla_common_arch92.h"
+#else
 #if (__CCE_AICORE__ == 310)
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_vec_intf.h"
@@ -32,8 +38,56 @@
 #include "arch22/mixed_quant_sparse_flash_mla_tq_csa_kernel.h"
 #include "mixed_quant_sparse_flash_mla_metadata.h"
 #endif
+#endif
 
 using namespace AscendC;
+#if (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
+
+#define MQSMLA_OP_IMPL(templateClass, tilingdataClass, ...) \
+    do { \
+        using CubeBlockType = \
+            typename std::conditional<g_coreType == AscendC::AIC, BaseApi::MqsmlaCsaBlockCube<__VA_ARGS__>, \
+                                      BaseApi::MqsmlaCsaBlockCubeDummy<__VA_ARGS__>>::type; \
+        using VecBlockType = \
+            typename std::conditional<g_coreType == AscendC::AIC, BaseApi::MqsmlaCsaBlockVectorDummy<__VA_ARGS__>, \
+                                      BaseApi::MqsmlaCsaBlockVector<__VA_ARGS__>>::type; \
+        templateClass<CubeBlockType, VecBlockType> op; \
+        GET_TILING_DATA_WITH_STRUCT(tilingdataClass, tilingDataIn, tiling); \
+        const tilingdataClass* __restrict tilingData = &tilingDataIn; \
+        op.Init(query, oriKV, cmpKV, oriSparseIndices, cmpSparseIndices, oriBlockTable, cmpBlockTable, cuSeqlensQ, \
+                cuSeqlensOriKv, cuSeqlensCmpKv, seqUsedQ, seqUsedOriKV, seqUsedCmpKV, cmpResidualKv, oriTopkLength, \
+                cmpTopkLength, sinks, metadata, attentionOut, user, tilingData, &tPipe); \
+        op.Process(); \
+    } while (0)
+
+template <int FLASH_DECODE, int LAYOUT_T, int KV_LAYOUT_T, int TEMPLATE_MODE, int SPLIT_G, int KV_DTYPE,
+          int IS_VEC_S2PHYADDR>
+__global__ __aicore__ void mixed_quant_sparse_flash_mla(
+    __gm__ uint8_t* query, __gm__ uint8_t* oriKV, __gm__ uint8_t* cmpKV, __gm__ uint8_t* oriSparseIndices,
+    __gm__ uint8_t* cmpSparseIndices, __gm__ uint8_t* oriBlockTable, __gm__ uint8_t* cmpBlockTable,
+    __gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* cuSeqlensOriKv, __gm__ uint8_t* cuSeqlensCmpKv,
+    __gm__ uint8_t* seqUsedQ, __gm__ uint8_t* seqUsedOriKV, __gm__ uint8_t* seqUsedCmpKV, __gm__ uint8_t* cmpResidualKv,
+    __gm__ uint8_t* oriTopkLength, __gm__ uint8_t* cmpTopkLength, __gm__ uint8_t* sinks, __gm__ uint8_t* metadata,
+    __gm__ uint8_t* attentionOut, __gm__ uint8_t* softmax_lse, __gm__ uint8_t* workspace, __gm__ uint8_t* tiling)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+
+    TPipe tPipe;
+    __gm__ uint8_t* user = GetUserWorkspace(workspace);
+    if constexpr (KV_DTYPE == DTYPE_FP8_E4M3FN) {
+        MQSMLA_OP_IMPL(BaseApi::MixedQuantSparseFlashMlaCsa, MixedQuantSparseFlashMlaTilingData, bfloat16_t,
+                       fp8_e4m3fn_t, float, bfloat16_t, FLASH_DECODE, KV_LAYOUT_T == MQSMLA_LAYOUT_PA_BBND,
+                       static_cast<MQSMLA_LAYOUT>(LAYOUT_T), static_cast<MQSMLA_LAYOUT>(KV_LAYOUT_T),
+                       static_cast<MQSMLATemplateMode>(TEMPLATE_MODE), SPLIT_G, IS_VEC_S2PHYADDR);
+    } else {
+        MQSMLA_OP_IMPL(BaseApi::MixedQuantSparseFlashMlaCsa, MixedQuantSparseFlashMlaTilingData, bfloat16_t, hifloat8_t,
+                       float, bfloat16_t, FLASH_DECODE, KV_LAYOUT_T == MQSMLA_LAYOUT_PA_BBND,
+                       static_cast<MQSMLA_LAYOUT>(LAYOUT_T), static_cast<MQSMLA_LAYOUT>(KV_LAYOUT_T),
+                       static_cast<MQSMLATemplateMode>(TEMPLATE_MODE), SPLIT_G, IS_VEC_S2PHYADDR);
+    }
+}
+
+#else
 
 #if (__CCE_AICORE__ == 310)
 #define QSMLA_OP_IMPL(templateClass, tilingdataClass, ...) \
@@ -119,3 +173,4 @@ __global__ __aicore__ void mixed_quant_sparse_flash_mla(
     }
 #endif
 }
+#endif

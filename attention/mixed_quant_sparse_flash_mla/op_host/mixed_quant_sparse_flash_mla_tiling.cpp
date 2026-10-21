@@ -29,6 +29,7 @@ namespace optiling {
 constexpr int64_t BATCH_CONSISTENCY_LEVEL = 3;
 constexpr uint32_t DEFAULT_D_SIZE_V = 512;
 constexpr uint32_t DEFAULT_TILE_SIZE = 512;
+constexpr uint32_t DEFAULT_TILE_SIZE_A6 = 64;
 
 std::vector<int64_t> MQSMLAToVector(const gert::Shape& shape)
 {
@@ -122,7 +123,8 @@ ge::graphStatus MQSMLAInfoParser::GetNpuInfo()
 
     socVersion_ = mqsmlaPlatform.GetSocVersion();
     npuArch_ = mqsmlaPlatform.GetCurNpuArch();
-    if (npuArch_ != NpuArch::DAV_2201 && npuArch_ != NpuArch::DAV_3510) {
+    if (npuArch_ != NpuArch::DAV_2201 && npuArch_ != NpuArch::DAV_3510 && npuArch_ != NpuArch::DAV_9201 &&
+        npuArch_ != NpuArch::DAV_9202) {
         OP_LOGE(mqsmlaOpName_, "NpuArch[%d] is not support.", static_cast<int32_t>(npuArch_));
         return GRAPH_FAILED;
     }
@@ -634,6 +636,10 @@ void MQSMLAInfoParser::GenerateInfo(MQSMLATilingInfo& mqsmlaInfo)
     mqsmlaInfo.kvLayout = mqsmlaKvLayout_;
     mqsmlaInfo.outLayout = mqsmlaOutputLayout_;
     mqsmlaInfo.returnSoftmaxLse = (mqsmlaParams_.returnSoftmaxLse != nullptr) ? *mqsmlaParams_.returnSoftmaxLse : false;
+    if (npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
+        mqsmlaInfo.returnSoftmaxLse = false;
+        mqsmlaInfo.tileSize = DEFAULT_TILE_SIZE_A6;
+    }
 }
 
 ge::graphStatus MQSMLAInfoParser::Parse(MQSMLATilingInfo& mqsmlaInfo)
@@ -681,6 +687,8 @@ ge::graphStatus MixedQuantSparseFlashMlaTiling::DoOpTiling(MQSMLATilingInfo* til
 {
     if (tilingInfo->npuArch == NpuArch::DAV_2201) {
         return DoTurboQuantTiling(tilingInfo);
+    } else if (tilingInfo->npuArch == NpuArch::DAV_9201 || tilingInfo->npuArch == NpuArch::DAV_9202) {
+        return DoA6CsaTiling(tilingInfo);
     }
     return DoCsaTiling(tilingInfo);
 }
