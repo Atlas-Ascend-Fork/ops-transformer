@@ -43,6 +43,19 @@ using namespace Reg;
 // DAV_9201/9202 use explicit exponent encoding instead of bf162fp8e8m0 vcvt.
 // Keep the arch35 trait and its original Cast call sites unchanged.
 #if QBSA_ARCH_9102R1
+__simd_callee__ inline void ClampMxPToE4M3(RegTensor<float>& value, MaskReg& mask)
+{
+    // The caller has already accumulated the unclipped softmax sum. Only the
+    // probability sent to C2 is saturated, matching _cast_mxfp8_p_to_e4m3.
+    // Do not depend on incoming CTRL saturation state, or turn existing NaNs
+    // into finite values: an ordered comparison leaves NaN lanes unchanged.
+    RegTensor<float> limit;
+    MaskReg aboveLimit;
+    Duplicate(limit, fp8e4m3MaxValue);
+    Compare<float, CMPMODE::GT>(aboveLimit, value, limit, mask);
+    Select(value, limit, value, aboveLimit);
+}
+
 __simd_callee__ inline void EncodeMxPScaleE8M0Zero(RegTensor<fp8_e8m0_t>& dst, RegTensor<bfloat16_t>& src,
                                                    MaskReg& mask)
 {

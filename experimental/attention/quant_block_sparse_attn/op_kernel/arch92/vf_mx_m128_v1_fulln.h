@@ -227,6 +227,16 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateMxfp8FullNVF(__ubuf__ T2* x_exp, __
         Add(vreg_x_sum_6, vreg_x_exp_6, vreg_x_sum_6, preg_134);
         Add(vreg_x_sum_7, vreg_x_exp_7, vreg_x_sum_7, preg_134);
 
+#if QBSA_ARCH_9102R1
+        ClampMxPToE4M3(vreg_x_exp_0, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_1, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_2, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_3, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_4, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_5, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_6, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_7, preg_135);
+#endif
         // Interleave two independent FP8 pack chains to cover Cast/Or/Gather RAW latency.
         Cast<T2, T, castTraitRintZero>(vreg_x_exp_fp8_0, vreg_x_exp_0, preg_135);
         Cast<T2, T, castTraitRintZero>(vreg_x_exp_fp8_1, vreg_x_exp_4, preg_135);
@@ -522,6 +532,16 @@ __simd_vf__ inline void ProcessVec1DnUpdateMxfp8FullNVF(
         Add(vreg_x_sum_6, vreg_x_exp_6, vreg_x_sum_6, preg_134);
         Add(vreg_x_sum_7, vreg_x_exp_7, vreg_x_sum_7, preg_134);
 
+#if QBSA_ARCH_9102R1
+        ClampMxPToE4M3(vreg_x_exp_0, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_1, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_2, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_3, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_4, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_5, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_6, preg_135);
+        ClampMxPToE4M3(vreg_x_exp_7, preg_135);
+#endif
         // Interleave two independent FP8 pack chains to cover Cast/Or/Gather RAW latency.
         Cast<T2, T, castTraitRintZero>(vreg_x_exp_fp8_0, vreg_x_exp_0, preg_135);
         Cast<T2, T, castTraitRintZero>(vreg_x_exp_fp8_1, vreg_x_exp_4, preg_135);
