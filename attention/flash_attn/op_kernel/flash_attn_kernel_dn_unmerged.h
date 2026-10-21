@@ -241,8 +241,7 @@ public:
         tailS2Split_ = false;
 
         uint32_t bn1Cur = bn1Start_;
-        // s1Cur 语义为纯 s1 轴坐标(元素粒度); metadata 的 M_START/M_END 为 mBaseSize 块序号, 此处换算
-        uint32_t s1Cur = s1OStart_ * mBaseSize;
+        uint32_t s1Cur = s1OStart_;
         uint32_t s2Cur = s2OStart_;
         prevBn1Idx_ = bn1Cur;
         prevS1Idx_ = s1Cur;
@@ -284,26 +283,15 @@ public:
         if (bn1Cur != bn1End_) {
             return bn1Cur < bn1End_;
         }
-        uint32_t s1EndCoord = s1OEnd_ * mBaseSize;
-        if (s1Cur != s1EndCoord) {
-            return s1Cur < s1EndCoord;
+        if (s1Cur != s1OEnd_) {
+            return s1Cur < s1OEnd_;
         }
         return s2Cur < s2OEnd_;
     }
 
-    // 纯 s1 轴步进: 每任务为一个 query 头(n1)的 [s1Cur, min(s1Cur+mBaseSize, actSeqLensQ_)) 块
-    __aicore__ inline uint32_t GetS1Step(uint32_t s1Cur)
-    {
-        uint32_t step = mBaseSize;
-        if (s1Cur + step > actSeqLensQ_) {
-            step = static_cast<uint32_t>(actSeqLensQ_) - s1Cur;
-        }
-        return step;
-    }
-
     __aicore__ inline TASK_DEAL_MODE GetTaskDealMode(uint32_t bn1Cur, uint32_t s1Cur, uint32_t s2Cur)
     {
-        bool isFirstTask = (bn1Cur == bn1Start_) && (s1Cur == s1OStart_ * mBaseSize) && (s2Cur == s2OStart_);
+        bool isFirstTask = (bn1Cur == bn1Start_) && (s1Cur == s1OStart_) && (s2Cur == s2OStart_);
         uint32_t bIdx = bn1Cur / constInfo_.n1Size;
         if (isFirstTask || prevBIdx_ != bIdx) {
             prevBIdx_ = bIdx;
@@ -366,17 +354,16 @@ public:
 
     __aicore__ inline void CalcCurS2StartEndNoSparse(uint32_t bn1Cur, uint32_t s1Cur)
     {
-        // s1Cur 为纯 s1 坐标(元素粒度)
         s2FirstToken_ = 0;
         curS2Start_ = 0U;
         curS2End_ = (static_cast<uint32_t>(actSeqLensKv_) + s2BaseSize - 1) / s2BaseSize;
 
-        if ((bn1Cur == bn1Start_) && (s1Cur == s1OStart_ * mBaseSize)) {
+        if ((bn1Cur == bn1Start_) && (s1Cur == s1OStart_)) {
             headS2Split_ = s2OStart_ != 0U;
             curS2Start_ = s2OStart_;
         }
 
-        if ((bn1Cur == bn1End_) && (s1Cur == s1OEnd_ * mBaseSize)) {
+        if ((bn1Cur == bn1End_) && (s1Cur == s1OEnd_)) {
             tailS2Split_ = s2OEnd_ != 0U;
             curS2End_ = s2OEnd_;
         }
@@ -391,10 +378,10 @@ public:
         GetPreNextTokenLeftUp(actSeqLensQ_, actSeqLensKv_, preTokenLeftUp, nextTokenLeftUp);
 
         // 2. calc index of s2FirstToken, s2LastToken by s1 token range(纯 s1, 不合轴无 gs1 概念)
-        int64_t s1FirstToken = static_cast<int64_t>(s1Cur);
-        int64_t s1LastToken = AttentionCommon::Min(s1FirstToken + static_cast<int64_t>(GetS1Step(s1Cur)),
-                                                   static_cast<int64_t>(actSeqLensQ_)) -
-                              1;
+        int64_t s1FirstToken = static_cast<int64_t>(s1Cur) * static_cast<int64_t>(mBaseSize);
+        int64_t s1LastToken =
+            AttentionCommon::Min(s1FirstToken + static_cast<int64_t>(mBaseSize), static_cast<int64_t>(actSeqLensQ_)) -
+            1;
 
         // 3. trans index of token to index of block
         uint32_t s2StartWithSparse = 0U;
@@ -420,11 +407,11 @@ public:
         curS2Start_ = s2StartWithSparse;
         curS2End_ = s2EndWithSparse;
 
-        if (bn1Cur == bn1Start_ && s1Cur == s1OStart_ * mBaseSize) { // first line
+        if (bn1Cur == bn1Start_ && s1Cur == s1OStart_) { // first line
             headS2Split_ = s2OStart_ > s2StartWithSparse ? true : false;
             curS2Start_ = AttentionCommon::Max(s2StartWithSparse, s2OStart_);
         }
-        if (bn1Cur == bn1End_ && s1Cur == s1OEnd_ * mBaseSize) { // last line
+        if (bn1Cur == bn1End_ && s1Cur == s1OEnd_) { // last line
             tailS2Split_ = s2OEnd_ > 0U ? true : false;
             curS2End_ = s2OEnd_ > 0U ? AttentionCommon::Min(s2EndWithSparse, s2OEnd_) : s2EndWithSparse;
         }
@@ -493,12 +480,15 @@ public:
         info.n1Idx = bn1Cur % constInfo_.n1Size;
         info.n2Idx = info.n1Idx / constInfo_.gSize;
         info.gIdx = info.n1Idx % constInfo_.gSize;
-        info.s1Idx = s1Cur;
+        info.s1Idx = s1Cur * mBaseSize;
         info.s2Idx = s2Cur * s2BaseSize;
         info.actS1Size = actSeqLensQ_;
         info.actS2Size = actSeqLensKv_;
 
-        info.actMSize = GetS1Step(s1Cur);
+        info.actMSize = mBaseSize;
+        if (((s1Cur + 1) * mBaseSize) > actSeqLensQ_) {
+            info.actMSize = actSeqLensQ_ - s1Cur * mBaseSize;
+        }
         info.actSingleLoopS2Size = s2BaseSize;
         if (((s2Cur + 1) * s2BaseSize) > info.actS2Size) {
             info.actSingleLoopS2Size = info.actS2Size - s2Cur * s2BaseSize;
@@ -528,10 +518,10 @@ public:
             // 所有任务属于同一个 (b,n1)
             info.isS2SplitCore = true;
         } else {
-            if (headS2Split_ && (bn1Cur == bn1Start_) && (s1Cur == s1OStart_ * mBaseSize)) {
+            if (headS2Split_ && (bn1Cur == bn1Start_) && (s1Cur == s1OStart_)) {
                 // 当前任务属于第一个 (b,n1), 并且它的 S2 被切分了
                 info.isS2SplitCore = true;
-            } else if (tailS2Split_ && (bn1Cur == bn1End_) && (s1Cur == s1OEnd_ * mBaseSize)) {
+            } else if (tailS2Split_ && (bn1Cur == bn1End_) && (s1Cur == s1OEnd_)) {
                 // 当前任务属于最后一个 (b,n1), 并且它的 S2 被切分了
                 info.isS2SplitCore = true;
                 info.faTmpOutWsPos = headS2Split_ ? (info.faTmpOutWsPos + 1) : info.faTmpOutWsPos;
@@ -543,6 +533,7 @@ public:
                                           uint32_t& s2Cur)
     {
         uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
+        uint64_t s1LoopTimes = (actSeqLensQ_ + mBaseSize - 1) / mBaseSize;
 
         // 尚未到达有效区间, 快进s2Cur到curS2Start, 不跳行
         if (taskDealMode == TASK_DEAL_MODE::NOT_START) {
@@ -558,8 +549,8 @@ public:
         }
         // 当前 (b,n1) 未处理完
         s2Cur = 0;
-        if (s1Cur < actSeqLensQ_) {
-            s1Cur += GetS1Step(s1Cur);
+        if (s1Cur + 1 < s1LoopTimes) {
+            s1Cur++;
             return;
         }
         // 当前 (b,n1) 已处理完
