@@ -350,7 +350,7 @@ $$
 
 - 参数说明里shape格式说明：
     - `A`：表示本卡可能接收的最大token数量，取值范围如下：
-        - 对于共享专家，要满足`A` = `BS` *`epWorldSize`* `sharedExpertNum` / `sharedExpertRankNum`。
+        - 对于共享专家，令`ranksPerSharedExpert = sharedExpertRankNum / sharedExpertNum`、`maxBS = (globalBs == 0 ? BS : globalBs / epWorldSize)`，要满足`A >= maxBS * ((epWorldSize + ranksPerSharedExpert - 1) / ranksPerSharedExpert)`。
         - 对于MoE专家，当`globalBs`为0时，要满足`A` >= `BS` *`epWorldSize`* min(`localExpertNum`, `K`)；当`globalBs`非0时，要满足`A` >= `globalBs` * min(`localExpertNum`, `K`)。
     - `K`：表示选取topK个专家，取值范围为0 < `K` ≤ 16同时满足0 < `K` ≤ `moeExpertNum` + `zeroExpertNum` + `copyExpertNum` + `constExpertNum`。
     - `localExpertNum`：表示本卡专家数量。

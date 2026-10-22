@@ -657,7 +657,7 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
 
   | 变量         | 定义与取值范围                                                                 |
   | :----------- | :----------------------------------------------------------------------------- |
-  | A            | 表示本卡需要分发的最大token数量，取值范围如下：<ul> <li>对于共享专家，要满足A = BS \* epWorldSize \* sharedExpertNum / sharedExpertRankNum。</li> <li>对于MoE专家，当globalBs为0时，要满足A >= BS \* epWorldSize \* min(localExpertNum, K)；当globalBs非0时，要满足A >= globalBs \* min(localExpertNum, K)。</li> </ul>|
+  | A            | 表示本卡需要分发的最大token数量，取值范围如下：<ul> <li>对于共享专家，令 <code>ranksPerSharedExpert = sharedExpertRankNum / sharedExpertNum</code>、<code>maxBS = (globalBs == 0 ? BS : globalBs / epWorldSize)</code>，要满足 <code>A &gt;= maxBS * ((epWorldSize + ranksPerSharedExpert - 1) / ranksPerSharedExpert)</code>。</li> <li>对于MoE专家，当globalBs为0时，要满足A >= BS \* epWorldSize \* min(localExpertNum, K)；当globalBs非0时，要满足A >= globalBs \* min(localExpertNum, K)。</li> </ul>|
   | H（hidden size） | 表示hidden size隐藏层大小。<ul><li><term>Atlas A2系列产品</term>：当`x`的数据类型为INT32时，取值范围为(0, 5120]且为32的整数倍；其他数据类型的取值范围为(0, 10240]且为32的整数倍。</li> <li><term>Atlas A3系列产品</term>、Ascend 950DT系列产品：取值范围[1024, 8192]。</li> </ul> |
   | BS           | 表示本卡最终输出token数。<ul><li><term>Atlas A2系列产品</term>：依commAlg取值，"fullmesh"取值范围为(0 < BS ≤ 256)；"hierarchy"并且驱动版本≥25.0.RC1.1时取值范围为(0 < BS ≤ 512)；</li><li><term>Atlas A3训练系列产品/Atlas A3推理系列产品</term>：依commAlg取值，"fullmesh_v2"取值范围为(0 < BS ≤ 256)，"fullmesh_v1"和""取值范围为(0 < BS ≤ 512)。</li><li><term>Ascend 950DT系列产品</term>：0 < BS ≤512。</li></ul> |
   | K    | 表示选取topK个专家，取值范围为0 < K ≤16，且<code>0 < K ≤ moeExpertNum + zeroExpertNum + copyExpertNum + constExpertNum</code>。<br> <term>Atlas A3系列产品</term>、Ascend 950DT系列产品：当commAlg为"fullmesh_v2"时，取值范围为0 < K ≤ 12。|
