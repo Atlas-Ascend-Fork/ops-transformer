@@ -636,6 +636,7 @@ class ElasticBuffer:
         num_topk: Optional[int] = None,
         with_grad: bool = False,
         explicitly_destroy: bool = False,
+        netlayer: str = "auto",
     ):
         """
         Initialize the ElasticBuffer.
@@ -654,9 +655,23 @@ class ElasticBuffer:
                 instance is garbage collected. Note that Engram host pinned
                 memory is retained in a process-level pool after ``destroy``
                 and freed when the process exits (see ``destroy``).
+            netlayer: HCCL netlayer selection. ``"auto"`` (default) probes
+                every peer starting from the first netlayer onward; a
+                non-negative integer string (e.g. ``"1"``, ``"2"``) builds
+                links within the specified netlayer only (every peer must
+                be reachable in that layer, otherwise the build fails). A
+                specified netlayer that does not exist fails the build
+                directly.
         """
         moe_args = (num_max_tokens_per_rank, hidden, num_topk)
         self._validate_init_args(group, num_cpu_bytes, moe_args, with_grad)
+
+        torch._check(
+            isinstance(netlayer, str)
+            and (netlayer == "auto" or (netlayer.isascii() and netlayer.isdigit())),
+            lambda: f"netlayer must be 'auto' or a non-negative integer string (e.g. '1', '2'), got {netlayer!r}.",
+        )
+        self._netlayer = netlayer
 
         self._group = group
         self._num_cpu_bytes = num_cpu_bytes
@@ -688,6 +703,7 @@ class ElasticBuffer:
             num_max_tokens_per_rank if num_max_tokens_per_rank is not None else 0,
             self._with_grad,
             self._explicitly_destroy,
+            self._netlayer,
         )
 
         self._num_max_tokens_per_rank = num_max_tokens_per_rank

@@ -262,6 +262,7 @@ struct EngramSharedBufferEntry : EngramCtxResBase {
     int64_t registeredBytes = 0;   // 实际已注册的字节数
     bool sfExternal = false;       // SF 表是否来自调用方零拷贝存储
     int64_t sfRegisteredBytes = 0; // SF 表实际已注册的字节数
+    std::string netLayer = "auto"; // 首建生效的 netlayer（"auto" 或数字串），重建需一致
 };
 static std::mutex gEngramSharedBufferMutex;
 static std::unordered_map<std::string, EngramSharedBufferEntry> gEngramSharedBuffers;
@@ -348,6 +349,57 @@ static at::Tensor CreateCommContextTensor(const ContextT& context)
     TORCH_CHECK(memRet == EOK, "memcpy_s failed, ret=", memRet);
     tensor.copy_(hostContext);
     return tensor;
+}
+
+static void DumpRankPairLinks(const HcclComm& commHandle, uint32_t srcRankId, uint32_t rankSize,
+                              const uint32_t* layerList, uint32_t layerNum)
+{
+    ASCEND_LOGI("[DumpTopo] src=%u rankSize=%u layerNum=%u", srcRankId, rankSize, layerNum);
+
+    for (uint32_t li = 0; li < layerNum; ++li) {
+        uint32_t layerId = layerList[li];
+
+        CommTopo topo = COMM_TOPO_RESERVED;
+        HcclRankGraphGetTopoTypeByLayerFunc(commHandle, layerId, &topo);
+        ASCEND_LOGI("[DumpTopo] layer %u: topo=%d", layerId, static_cast<int>(topo));
+
+        uint32_t* rankList = nullptr;
+        uint32_t rankCnt = 0;
+        if (HcclRankGraphGetRanksByLayerFunc(commHandle, layerId, &rankList, &rankCnt) == HCCL_SUCCESS) {
+            std::string members;
+            for (uint32_t i = 0; i < rankCnt; ++i) {
+                members += std::to_string(rankList[i]);
+                if (i + 1 < rankCnt) {
+                    members += ",";
+                }
+            }
+            ASCEND_LOGI("[DumpTopo] layer %u members: %s", layerId, members.c_str());
+        }
+
+        for (uint32_t dstRankId = 0; dstRankId < rankSize; ++dstRankId) {
+            if (dstRankId == srcRankId) {
+                continue;
+            }
+            CommLink* links = nullptr;
+            uint32_t linkNum = 0;
+            auto linkRet = HcclRankGraphGetLinksFunc(commHandle, layerId, srcRankId, dstRankId, &links, &linkNum);
+            if (linkRet != HCCL_SUCCESS) {
+                ASCEND_LOGI("[DumpTopo] layer %u src %u dst %u: GetLinks failed ret=%d", layerId, srcRankId, dstRankId,
+                            static_cast<int>(linkRet));
+                continue;
+            }
+            std::string protocols;
+            for (uint32_t i = 0; i < linkNum; ++i) {
+                protocols += std::to_string(static_cast<int>(links[i].linkAttr.linkProtocol));
+                if (i + 1 < linkNum) {
+                    protocols += ",";
+                }
+            }
+            ASCEND_LOGI("[DumpTopo] layer %u src %u dst %u: linkNum=%u protocols=[%s]", layerId, srcRankId, dstRankId,
+                        linkNum, protocols.c_str());
+        }
+    }
+    ASCEND_LOGI("[DumpTopo] done");
 }
 
 class HcclContextBuilderBase {
@@ -636,9 +688,10 @@ public:
 
     EngramContextResources Build(const std::string& groupName, int64_t numCpuBytes, bool withGrad,
                                  void* externalHostPtr = nullptr, int64_t externalBytes = 0, void* sfHostPtr = nullptr,
-                                 int64_t sfBytes = 0)
+                                 int64_t sfBytes = 0, const std::string& netLayer = "auto")
     {
         withGrad_ = withGrad;
+        netLayer_ = netLayer;
         EngramContextResources resources;
         AcquireHcclHandle(groupName, resources.hcclComm);
 
@@ -686,6 +739,9 @@ public:
             entry.sfHostBufPtr, ", size ", entry.sfRegisteredBytes,
             "; zero-copy rebuild requires the same pinned SF table address and size, rebuild without SF is "
             "not supported, please use a new comm group");
+        TORCH_CHECK(entry.netLayer == netLayer_, "Engram comm context of group '", contextTag,
+                    "' was built with netLayer '", entry.netLayer,
+                    "'; rebuild with a different netlayer is not supported, please use a new comm group");
         resources.CopyBase(entry);
         resources.contextTensor = CreateCommContextTensor(resources.context);
         return resources;
@@ -693,6 +749,7 @@ public:
 
 private:
     bool withGrad_ = false;
+    std::string netLayer_ = "auto";
 
     // 功能：将本次建链结果登记进共享池
     void RegisterBufferPoolEntry(const std::string& contextTag, const EngramContextResources& resources,
@@ -702,6 +759,7 @@ private:
         try {
             EngramSharedBufferEntry& entry = gEngramSharedBuffers[contextTag];
             entry.CopyBase(resources);
+            entry.netLayer = netLayer_;
             entry.external = (externalHostPtr != nullptr);
             entry.registeredBytes =
                 resources.hostBufPtr != nullptr ? ((externalHostPtr != nullptr) ? externalBytes : numCpuBytes) : 0;
@@ -744,6 +802,59 @@ private:
         guard.Release();
         sfGuard.Release();
         return resources;
+    }
+
+    static int32_t ParseNetLayerId(const std::string& netLayer)
+    {
+        TORCH_CHECK(!netLayer.empty() && netLayer.find_first_not_of("0123456789") == std::string::npos,
+                    "netlayer must be 'auto' or a non-negative integer string (e.g. '1', '2'), got '", netLayer, "'");
+        TORCH_CHECK(netLayer.size() <= 9U, "netlayer value is invalid: '", netLayer, "'");
+        return std::stoi(netLayer);
+    }
+
+    // netlayer 选层："auto" 自首个网络分层起逐层探测；数字串（如 "1"）指定分层编号，仅在该分层内
+    // 建链（该层所有对端都必须可达），指定分层不存在或该层内建链失败直接报错
+    void ResolveRankLinks(const HcclComm& commHandle, uint32_t srcRankId, uint32_t rankSize, const uint32_t* layerList,
+                          uint32_t layerNum)
+    {
+        uint32_t preferIdx = 0;
+        bool singleLayer = false;
+        if (netLayer_ != "auto") {
+            int32_t netLayerId = ParseNetLayerId(netLayer_);
+            bool layerExists = false;
+            for (uint32_t li = 0; li < layerNum; ++li) {
+                if (static_cast<int32_t>(layerList[li]) == netLayerId) {
+                    preferIdx = li;
+                    layerExists = true;
+                    break;
+                }
+            }
+            TORCH_CHECK(layerExists, "netLayer ", netLayer_, " not exist in HCCL net layers");
+            singleLayer = true;
+        }
+        uint32_t endLayer = singleLayer ? (preferIdx + 1) : layerNum;
+        for (uint32_t peer = 0; peer < rankSize; ++peer) {
+            if (peer == srcRankId) {
+                continue;
+            }
+            bool found = false;
+            for (uint32_t li = preferIdx; li < endLayer && !found; ++li) {
+                CommLink* links = nullptr;
+                uint32_t linkNum = 0;
+                auto hcclRet = HcclRankGraphGetLinksFunc(commHandle, layerList[li], srcRankId, peer, &links, &linkNum);
+                for (uint32_t i = 0; hcclRet == HCCL_SUCCESS && links != nullptr && i < linkNum; ++i) {
+                    CommProtocol protocol = links[i].linkAttr.linkProtocol;
+                    if (protocol == CommProtocol::COMM_PROTOCOL_UB_CTP ||
+                        protocol == CommProtocol::COMM_PROTOCOL_UB_RTP) {
+                        rankLinkMap_[peer] = {protocol, layerList[li]};
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            TORCH_CHECK(found, "No UBC/UBG link found for peer rank ", peer, " in netLayer ", netLayer_);
+        }
+        ASCEND_LOGI("netLayer %s applied", netLayer_.c_str());
     }
 
     static void ValidateRankSize(uint32_t rankSize)
@@ -1026,15 +1137,10 @@ private:
         uint32_t* netLayerList = nullptr;
         uint32_t netLayerNum = 0;
         GetNetLayers(resources.hcclComm, netLayerList, netLayerNum);
-        if (netLayerNum != HCCL_COMM_LAYERS_MTE_CCU) {
-            CheckProtocolSupport(resources.hcclComm, netLayerList, netLayerNum, CommProtocol::COMM_PROTOCOL_UB_CTP);
-        } else {
-            for (uint32_t peer = 0; peer < resources.context.rankSize; ++peer) {
-                if (peer != resources.context.rankId) {
-                    rankLinkMap_[peer] = {CommProtocol::COMM_PROTOCOL_UB_CTP, netLayerList[0]};
-                }
-            }
-        }
+        DumpRankPairLinks(resources.hcclComm, resources.context.rankId, resources.context.rankSize, netLayerList,
+                          netLayerNum);
+        ResolveRankLinks(resources.hcclComm, resources.context.rankId, resources.context.rankSize, netLayerList,
+                         netLayerNum);
 
         if (withGrad_) {
             QueryHcclBufferResource(resources.hcclComm, resources);
@@ -1694,7 +1800,7 @@ private:
 class ElasticBuffer {
 public:
     ElasticBuffer(const std::optional<std::string>& groupName, int64_t numCpuBytes, int64_t numMaxTokensPerRank = 0,
-                  bool withGrad = false, bool explicitlyDestroy = false);
+                  bool withGrad = false, bool explicitlyDestroy = false, const std::string& netLayer = "auto");
     ~ElasticBuffer();
 
     void EngramWrite(const at::Tensor& storage, const c10::optional<at::Tensor>& sf, bool zeroCopy);
@@ -1789,6 +1895,7 @@ private:
     int64_t numMaxTokensPerRank_ = 0;
     bool explicitlyDestroy_ = false;
     bool withGrad_ = false;
+    std::string netLayer_ = "auto";
 
     void* engramHostBufPtr_ = nullptr;
     void* engramDeviceBufPtr_ = nullptr;
@@ -1830,7 +1937,8 @@ private:
 // Constructor
 
 ElasticBuffer::ElasticBuffer(const std::optional<std::string>& groupName, int64_t numCpuBytes,
-                             int64_t numMaxTokensPerRank, bool withGrad, bool explicitlyDestroy)
+                             int64_t numMaxTokensPerRank, bool withGrad, bool explicitlyDestroy,
+                             const std::string& netLayer)
     : groupName_(groupName),
       localFullVocab_(!groupName.has_value()),
       engramNumCpuBytes_(numCpuBytes),
@@ -1838,7 +1946,8 @@ ElasticBuffer::ElasticBuffer(const std::optional<std::string>& groupName, int64_
       engramWriteCalled_(false),
       numMaxTokensPerRank_(numMaxTokensPerRank),
       explicitlyDestroy_(explicitlyDestroy),
-      withGrad_(withGrad)
+      withGrad_(withGrad),
+      netLayer_(netLayer)
 {
     if (!localFullVocab_) {
         InitHcclEngineCtxFunctions();
@@ -1877,7 +1986,7 @@ void ElasticBuffer::EnsureEngramContext(void* externalHostPtr, int64_t externalB
         TORCH_CHECK(commStream_ != nullptr, "Failed to get NPU stream from pool for comm stream");
         EngramContextBuilder builder;
         resources = builder.Build(*groupName_, withGrad_ ? 0 : engramNumCpuBytes_, withGrad_, externalHostPtr,
-                                  externalBytes, sfHostPtr, sfBytes);
+                                  externalBytes, sfHostPtr, sfBytes, netLayer_);
     }
     engramHcclComm_ = resources.hcclComm;
     engramMemHandle_ = resources.memHandle;
@@ -2508,9 +2617,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         .def("host_ptr", &OpApi::HostPinnedCounter::HostPtr);
 
     pybind11::class_<Mc2Api::ElasticBuffer>(m, "ElasticBuffer")
-        .def(pybind11::init<const std::optional<std::string>&, int64_t, int64_t, bool, bool>(),
+        .def(pybind11::init<const std::optional<std::string>&, int64_t, int64_t, bool, bool, const std::string&>(),
              pybind11::arg("groupName"), pybind11::arg("numCpuBytes"), pybind11::arg("numMaxTokensPerRank") = 0,
-             pybind11::arg("withGrad") = false, pybind11::arg("explicitlyDestroy") = false)
+             pybind11::arg("withGrad") = false, pybind11::arg("explicitlyDestroy") = false,
+             pybind11::arg("netLayer") = "auto")
         .def("engram_write", &Mc2Api::ElasticBuffer::EngramWrite, pybind11::arg("storage").noconvert(),
              pybind11::arg("sf") = pybind11::none(), pybind11::arg("zeroCopy"))
         .def_static("engram_fetch",

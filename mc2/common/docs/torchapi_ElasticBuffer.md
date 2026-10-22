@@ -25,7 +25,7 @@
 
 ElasticBuffer类提供统一的分布式通信buffer管理能力：
 
-- Engram存储接口用于分布式Engram存储管理，支持将本rank的表注册为通信可达的存储（推理模式可写入host pinned共享段或显式零拷贝注册调用方内存，训练模式直接映射上层锁页表内存），以及通过RDMA从远端rank抓取Engram数据。`group=None` 表示full-vocab local推理，不初始化HCCL。
+- Engram存储接口用于分布式Engram存储管理，支持将本rank的表注册为通信可达的存储（推理模式可写入host pinned共享段或显式零拷贝注册调用方内存，训练模式直接映射上层锁页表内存），以及通过URMA从远端rank抓取Engram数据。`group=None` 表示full-vocab local推理，不初始化HCCL。
 - Engram训练接口在推理接口的基础上，通过 `with_grad=True` 开启训练模式。前向 [engram_fetch](#engram_fetch) 在抓取数据的同时保存反向所需的通信元数据（封装为 [EngramFetchCtx](#engramfetchctx)），反向 [engram_fetch_grad](#engram_fetch_grad) 根据这些元数据将梯度沿前向路径反向交换并按local entry稀疏累加，产出稀疏梯度用于优化器更新。
 - Dispatch/Combine接口用于MoE的Expert Parallelism（EP）并行部署，支持通过[dispatch](#dispatch)将token数据分发到对应专家卡，再通过[combine](#combine)将专家输出按原路由聚合回原始序列。所需的CCL通信buffer由ElasticBuffer内部按算子参数自动计算并申请，无需手动配置。
 
@@ -43,6 +43,7 @@ class ElasticBuffer:
         num_topk: Optional[int] = None,
         with_grad: bool = False,
         explicitly_destroy: bool = False,
+        netlayer: str = "auto",
     )
 
     def engram_write(
@@ -136,6 +137,7 @@ class ElasticBuffer:
 - **num_topk** (`int`)：可选参数，表示选取topK个专家。
 - **with_grad** (`bool`)：可选参数，是否开启训练。默认为 `False`（推理）。设为 `True` 时，前向 [engram_fetch](#engram_fetch) 会额外保存反向所需的通信元数据（封装为 [EngramFetchCtx](#engramfetchctx)），并可通过 [engram_fetch_grad](#engram_fetch_grad) 执行反向。
 - **explicitly_destroy** (`bool`)：可选参数，是否需要显式调用 [destroy](#destroy) 释放资源。默认为 `False`，实例被垃圾回收时会自动调用 `destroy` 释放资源；设为 `True` 时，调用方需要显式调用 `destroy` 释放资源。推荐设置为 `True` 并在使用结束后手动调用 `destroy` 释放资源，以确保资源释放时机确定。
+- **netlayer** (`str`)：可选参数，HCCL网络分层（netlayer）选择，仅作用于Engram建链。取值：`"auto"`（默认）自netlayer 0起逐层探测尝试建链；非负整数字符串（如 `"1"`）表示netlayer编号，仅在该分层内建链，失败则报错返回。建议按“d2d与h2d同die”的原则选择分层建链：使对端访问本卡host映射内存的d2d链路，与本卡NPU访问该内存的h2d路径位于同一die，避免跨die转发，获得更优通信带宽与时延。
 
 **输出**：无返回值，构造ElasticBuffer实例。
 
@@ -143,13 +145,13 @@ class ElasticBuffer:
 
 **功能**：将本rank的Engram表注册为通信可达的Engram storage，使其他rank可读取该数据。按构造时的 `with_grad` 与 `zero_copy` 区分行为：
 
-- **推理**（`with_grad=False`，`zero_copy=False`）：将 `storage` 数据拷贝到内部host pinned共享内存段；`group=None` 且未显式指定容量时，内部按 `storage.nbytes()` 向上2MB对齐。
-- **推理**（`with_grad=False`，`zero_copy=True`）：原地注册 `storage` 主机内存，注册或映射失败直接报错，不隐式回退到拷贝。
-- **训练**（`with_grad=True`）：将 `storage` 的锁页内存直接映射为Engram storage（零拷贝，无数据搬运），`storage` 的原地更新对后续 [engram_fetch](#engram_fetch) 可见。
+- **推理**（`with_grad=False`，`zero_copy=False`）：将 `storage` 数据拷贝到内部host pinned共享内存段；`group=None` 且未显式指定容量时，内部按 `storage.nbytes()` 向上2MB对齐。当 `storage` 为FP8量化类型时，须同时传入SF量化表 `sf`。
+- **推理**（`with_grad=False`，`zero_copy=True`）：原地注册 `storage` 主机内存，注册或映射失败直接报错，不隐式回退到拷贝。当 `storage` 为FP8量化类型时，须同时传入SF量化表 `sf`。
+- **训练**（`with_grad=True`）：将 `storage` 的锁页内存直接映射为Engram storage（零拷贝，无数据搬运），`storage` 的原地更新对后续 [engram_fetch](#engram_fetch) 可见。当 `storage` 为FP8量化类型时，须同时传入SF量化表 `sf`。
 
 写入完成后，内部都会获取通信上下文tensor、本地storage地址和rank数等信息，供后续 [engram_fetch](#engram_fetch) 使用。
 
-> **host pinned共享内存段**（推理模式）：指通过 `aclrtMallocHost` 分配的页锁定（pinned）主机内存，并经 `aclrtHostRegisterV2` 映射后获得设备可访问地址。该内存段既可被本卡NPU直接访问，也可被远端rank的NPU通过RDMA读取，从而实现跨rank的零拷贝数据共享。其大小由构造函数的 `num_cpu_bytes` 参数指定。
+> **host pinned共享内存段**（推理模式）：指通过 `aclrtMallocHost` 分配的页锁定（pinned）主机内存，并经 `aclrtHostRegisterV2` 映射后获得设备可访问地址。该内存段既可被本卡NPU直接访问，也可被远端rank的NPU通过URMA读取，从而实现跨rank的零拷贝数据共享。其大小由构造函数的 `num_cpu_bytes` 参数指定。
 
 > **训练模式内存映射**：`storage` 的锁页主机内存经 `aclrtHostRegisterV2` 注册并映射到设备地址，再注册到HCCL通信域供远端rank访问。要求：`storage` 必须为锁页内存（如 `pin_memory()` 或 `torch.empty(..., pin_memory=True)` 分配）；普通（非锁页）CPU内存在当前驱动的主机注册路径下不受支持，会在首次调用时报 `aclrtHostGetDevicePointer` 失败；`storage` 在本ElasticBuffer生命周期内必须保持存活且地址不变。重复调用本接口须传入同一 `storage`（可作为表原地更新后的跨rank同步点），传入其他地址会报错。
 
@@ -177,8 +179,8 @@ ElasticBuffer.engram_write(storage, sf=None, *, zero_copy=None) -> None
 
 **输入参数**：
 
-- **storage** (`Tensor`)：必选参数，待写入的CPU tensor，shape为 `(num_entries, hidden)`，表示有 `num_entries` 个条目，每个条目维度为 `hidden`。要求2维、连续、`hidden`必须大于0，数据类型支持 `bfloat16`、`float16`、`float32`。
-- **sf** (`Optional[Tensor]`)：可选参数，FP8 scaling factor表。推理时为NPU tensor，shape为 `(num_entries * world_size, num_sf_packs)`，local模式 `world_size=1`；训练时为pinned CPU tensor，shape为 `(num_entries, num_sf_packs)`。
+- **storage** (`Tensor`)：必选参数，待写入的CPU tensor，shape为 `(num_entries, hidden)`，表示有 `num_entries` 个条目，每个条目维度为 `hidden`。要求2维、连续、`hidden`必须大于0，数据类型支持 `bfloat16`、`float16`、`float32`（不带SF时）、`float8_e4m3fn`、`float8_e5m2`（带SF时）。
+- **sf** (`Optional[Tensor]`)：可选参数，FP8量化的缩放因子（Scale Factor）表。要求2维张量，shape为 `(行数, num_sf_packs)`，列数 `num_sf_packs = ceil(hidden / group_size)`，其中 `group_size` 为MX量化的分组大小（每分组一个SF），即对每个条目的 `hidden` 个元素按分组数向上取整，且 `num_sf_packs` 小于等于 `hidden` 大于0；行数按模式区分：训练模式为落在本rank分片SF表，且为cpu tensor,有 `num_entries_per_rank` 条；推理模式为全量SF表，且为npu tensor，有 `num_entries_per_rank × rank_size` 条，详见[约束说明](#约束说明)中的Engram SF量化约束。数据类型支持 `float32`、`float8_e8m0`，数据格式为 $ND$。仅当 `storage` 为 `float8_e4m3fn` 或 `float8_e5m2` 时传入。
 - **zero_copy** (`Optional[bool]`)：keyword-only参数。未传时按模式取默认值：推理为 `False`，训练为 `True`。推理时 `False` 表示拷贝到内部host pinned window，`True` 表示原地注册调用方内存，失败直接抛错；训练时始终原地注册pinned storage，显式传 `False` 会直接报错。
 
 **输出说明**：无返回值。推理模式数据写入host pinned内存；训练模式 `storage` 内存被注册为Engram storage。
@@ -187,8 +189,8 @@ ElasticBuffer.engram_write(storage, sf=None, *, zero_copy=None) -> None
 
 **功能**：根据输入的全局索引，从对应rank抓取Engram数据。推理和训练的行为由构造时的 `with_grad` 决定：
 
-- **推理**（`with_grad=False`）：通过RDMA one-sided read从远端rank的host pinned共享内存抓取数据。接口采用异步设计：调用后立即返回一个callable，执行该callable时阻塞等待RDMA传输完成并返回结果tensor。
-- **训练**（`with_grad=True`）：通过all-to-all通信从远端rank抓取数据（桶排序 → a2a交换indices → 本地gather → a2a交换data → 还原），返回一个callable，执行该callable时等待传输完成并返回 `(fetched, fetch_ctx)` 二元组，其中 `fetch_ctx` 为save-for-backward上下文 [EngramFetchCtx](#engramfetchctx)。
+- **推理**（`with_grad=False`）：通过URMA one-sided read从远端rank的host pinned共享内存抓取数据。接口采用异步设计：调用后立即返回一个callable，执行该callable时阻塞等待URMA传输完成并返回结果tensor。[engram_write](#engram_write) 传入过 `sf` 时，callable额外返回每token对应的SF数据 `fetched_sf`，即返回 `(fetched, fetched_sf)`。
+- **训练**（`with_grad=True`）：通过all-to-all通信从远端rank抓取数据（桶排序 → a2a交换indices → 本地gather → a2a交换data → 还原），返回一个callable，执行该callable时等待传输完成并返回 `(fetched, fetch_ctx)` 二元组，其中 `fetch_ctx` 为save-for-backward上下文 [EngramFetchCtx](#engramfetchctx)。[engram_write](#engram_write) 传入过 `sf` 时，callable额外返回每token对应的SF数据 `fetched_sf`，即返回 `(fetched, fetched_sf, fetch_ctx)`；SF数据与hidden数据同行存放、随token一起交换，反向无SF梯度。
 
 **计算公式**：
 
@@ -205,7 +207,7 @@ $$fetched[i] = EngramTable[rank\_id][local\_idx]$$
 - $global\_idx$：输入索引张量 `indices` 的元素值，取值范围 $[0, world\_size \times num\_entries)$。
 - $num\_entries$：[engram_write](#engram_write) 时各rank写入的条目数，即 `storage.size(0)`。
 - $world\_size$：通信域中的rank总数。
-- $rank\_id$：$global\_idx$ 映射到的目标rank编号，取值范围 $[0, world\_size)$。当 $rank\_id$ 为本rank时，数据直接从本地host pinned内存读取；当 $rank\_id$ 为远端rank时，通过RDMA跨卡读取。
+- $rank\_id$：$global\_idx$ 映射到的目标rank编号，取值范围 $[0, world\_size)$。当 $rank\_id$ 为本rank时，数据直接从本地host pinned内存读取；当 $rank\_id$ 为远端rank时，通过URMA跨卡读取。
 - $local\_idx$：目标rank内的本地条目索引，取值范围 $[0, num\_entries)$。
 - $EngramTable[rank\_id]$：目标rank通过 [engram_write](#engram_write) 提供的Engram表数据（推理模式位于host pinned共享内存，训练模式为直接映射的上层表内存），shape为 `(num_entries, hidden)`，
 $EngramTable[rank\_id][local\_idx]$ 表示其中第 $local\_idx$ 个条目。
@@ -223,7 +225,9 @@ $$send\_counts[r] = |\{\,i \mid rank\_id_i = r\,\}|, \quad r \in [0, world\_size
 
 $$local\_data[j] = EngramTable[rank\_id][recv\_local\_entry[j] \bmod num\_entries], \quad j \in [0, num\_recv)$$
 
-4. a2a交换data：将 $local\_data$ 沿原请求路径送回，得到 $recv\_data[i]$，$i \in [0, num\_tokens)$。
+启用SF量化时，SF行按同一 $local\_idx$ 从本rank SF表读取，与hidden数据同行存放（行宽 $rowStride = hidden\_bytes + sf\_bytes$）。
+
+4. a2a交换data：将 $local\_data$（含SF行，每行 $rowStride$ 字节）沿原请求路径送回，得到 $recv\_data[i]$，$i \in [0, num\_tokens)$。
 
 5. 还原：按 $perm$ 重排回原始token顺序：
 
@@ -248,10 +252,12 @@ ElasticBuffer.engram_fetch(indices) -> Callable
 **推理**调用 `wait_callable()` 返回：
 
 - **fetched** (`Tensor`)：NPU tensor，shape为 `(num_tokens, hidden)`，数据类型与 [engram_write](#engram_write) 的 `storage.dtype` 相同，数据格式为 $ND$。
+- **fetched_sf** (`Tensor`)：可选返回，启用SF量化时返回。NPU tensor，shape为 `(num_tokens, num_sf_packs)`，数据类型与 [engram_write](#engram_write) 的 `sf.dtype` 相同，数据格式为 $ND$。
 
 **训练**调用 `wait_callable()` 返回：
 
 - **fetched** (`Tensor`)：NPU tensor，shape为 `(num_tokens, hidden)`，数据类型与 `storage.dtype` 相同，数据格式为 $ND$。
+- **fetched_sf** (`Tensor`)：可选返回，启用SF量化时返回，规格同推理。
 - **fetch_ctx** (`EngramFetchCtx`)：save-for-backward上下文，包含反向所需的5个通信元数据tensor（详见 [EngramFetchCtx](#engramfetchctx)）。需原样传递给 [engram_fetch_grad](#engram_fetch_grad)。
 
 ### engram_fetch_grad
@@ -495,8 +501,15 @@ ElasticBuffer.get_moe_ep_ccl_buffer_size(world_size, num_max_tokens_per_rank, hi
   - `indices` 必须为1 维张量。
 
 - **Engram dtype约束**：
-  - `storage.dtype` 仅支持 `bfloat16`、`float16`、`float32`。
+  - `storage.dtype` 仅支持 `bfloat16`、`float16`、`float32`（不带SF时）、`float8_e4m3fn`、`float8_e5m2`（带SF时）。
   - `indices.dtype` 必须为 `int32`。
+
+- **Engram SF量化约束**：
+  - `sf` 与 `storage.dtype` 必须配套：`storage` 为 `float8_e4m3fn`/`float8_e5m2` 时必须传入 `sf`；`storage` 为 `bfloat16`/`float16`/`float32` 时不得传入 `sf`。
+  - `sf` 必须为2维张量，`sf.dtype` 仅支持 `float32`、`float8_e8m0`。
+  - 训练模式：`sf` shape为 `(storage.size(0), num_sf_packs)`，列数 `num_sf_packs = ceil(hidden / group_size)`，`group_size` 为MX量化的分组大小，且 `num_sf_packs` 小于等于 `hidden` 大于0；`sf` 必须为CPU锁页内存（与 `storage` 同为直接映射，零拷贝）；`sf` 在ElasticBuffer生命周期内必须保持存活且地址不变，重复调用 [engram_write](#engram_write) 须传入同一 `sf`，其原地更新对后续 [engram_fetch](#engram_fetch) 可见。
+  - 推理模式：`sf` shape为 `(world_size × num_entries, num_sf_packs)`（全量SF表，每个条目一组SF），为NPU张量，按全局索引寻址；local模式（`group=None`）下 `world_size=1`，行数即为 `num_entries`。
+  - [engram_fetch_grad](#engram_fetch_grad) 不产生SF梯度：`fetched_sf` 视为不可导张量，反向仅对hidden数据回传梯度。
 
 - **Engram设备约束**：
   - `storage` 必须在CPU上。
@@ -529,6 +542,11 @@ ElasticBuffer.get_moe_ep_ccl_buffer_size(world_size, num_max_tokens_per_rank, hi
   `dtype_size` 为单个元素的字节大小，如 `bfloat16` 为2 字节、`float32` 为4 字节）。
   - 全局条目总数 `world_size × num_entries` 必须小于2^31（int32 最大值），保证indices索引不溢出。
   - `group=None` 时 `num_entries` 必须小于2^31。
+
+- **Engram netlayer约束**：
+  - `netlayer` 仅作用于Engram建链选层（[engram_write](#engram_write) 触发的链路探测与channel创建）；Dispatch/Combine路径不使用该参数。
+  - `netlayer` 必须为 `"auto"` 或非负整数字符串；且必须存在于HCCL netlayer列表中，否则建链失败。
+  - 选层规则：`"auto"` 自netlayer 0起逐层尝试与对端卡建链；数字串仅在该分层内建链，该层所有对端都必须可达，指定分层的分层编号不存在，或该分层内任一对端无可达链路时，建链失败。
 
 - **Dispatch/Combine配套约束**：
   - [dispatch](#dispatch) 和 [combine](#combine) 必须配套使用。
@@ -609,10 +627,20 @@ def run_elastic_buffer(queue, rank, world_size, storage, indices):
     )
     print(f"[INFO] device_{rank} num_cpu_bytes={num_cpu_bytes}")
 
-    buffer = ElasticBuffer(group, num_cpu_bytes=num_cpu_bytes, explicitly_destroy=True)
+    buffer = ElasticBuffer(
+        group,
+        num_cpu_bytes=num_cpu_bytes,
+        explicitly_destroy=True,
+        netlayer="auto",
+    )
 
     print(f"[INFO] device_{rank} run engram_write")
     buffer.engram_write(storage)
+    # SF量化（可选）：storage 为 fp8 时须同时传入缩放因子表（NPU张量，全量SF表）：
+    #   num_sf_packs = (hidden + 31) // 32  # MX量化group_size=32，即ceil(hidden/group_size)
+    #   sf = torch.rand(num_entries * world_size, num_sf_packs, dtype=torch.float32, device="npu")
+    #   buffer.engram_write(storage_fp8, sf)
+    #   fetched, fetched_sf = buffer.engram_fetch(indices_npu)()
 
     print(f"[INFO] device_{rank} run engram_fetch")
     indices_npu = indices.npu()
@@ -721,10 +749,17 @@ def train_worker(rank):
         num_max_tokens_per_rank=num_tokens,
         with_grad=True,
         explicitly_destroy=True,
+        netlayer="auto",
     )
 
     # ==================== 写入 storage ====================
     buffer.engram_write(storage)
+    # SF量化（可选）：storage 为 fp8 时须同时传入缩放因子表（本rank表，需锁页）：
+    #   num_sf_packs = (hidden + 31) // 32  # MX量化group_size=32，即ceil(hidden/group_size)
+    #   sf = torch.rand(num_entries, num_sf_packs, dtype=torch.float32).pin_memory()
+    #   buffer.engram_write(storage_fp8, sf)
+    #   fetched, fetched_sf, fetch_ctx = buffer.engram_fetch(indices_npu)()
+    # fetched_sf 无反向梯度，反向仍只需传 grad_fetched 与 fetch_ctx
     dist.barrier()
     torch.npu.synchronize()
 
