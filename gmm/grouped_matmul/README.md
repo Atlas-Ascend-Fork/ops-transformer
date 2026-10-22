@@ -86,8 +86,8 @@ $$
 
 | 参数名 | 输入/输出 | 描述 | 数据类型 | 数据格式 |
 |--------|:---:|------|----------|:-----------:|
-| x | 输入 | 公式中的输入 $x$ | FLOAT、FLOAT16、INT16<sup>1</sup>、INT8、INT4<sup>1</sup>、BFLOAT16、FLOAT8_E5M2<sup>2</sup>、FLOAT8_E4M3FN<sup>2</sup>、HIFLOAT8<sup>2</sup>、FLOAT4_E2M1<sup>2</sup> | ND |
-| weight | 输入 | 公式中的 $weight$ | FLOAT、FLOAT16、INT16<sup>1</sup>、INT8、INT4、BFLOAT16、FLOAT8_E5M2<sup>2</sup>、FLOAT8_E4M3FN<sup>2</sup>、HIFLOAT8<sup>2</sup>、FLOAT4_E2M1<sup>2</sup> | ND/NZ |
+| x | 输入 | 公式中的输入 $x$ | FLOAT、FLOAT16、INT8、INT4<sup>1</sup>、BFLOAT16、FLOAT8_E5M2<sup>2</sup>、FLOAT8_E4M3FN<sup>2</sup>、HIFLOAT8<sup>2</sup>、FLOAT4_E2M1<sup>2</sup> | ND |
+| weight | 输入 | 公式中的 $weight$ | FLOAT、FLOAT16、INT8、INT4、BFLOAT16、FLOAT8_E5M2<sup>2</sup>、FLOAT8_E4M3FN<sup>2</sup>、HIFLOAT8<sup>2</sup>、FLOAT4_E2M1<sup>2</sup> | ND/NZ |
 | biasOptional | 可选输入 | 公式中的 $bias$ | FLOAT、FLOAT16、INT32、BFLOAT16<sup>2</sup> | ND |
 | scaleOptional | 可选输入 | 公式中的 $scale$，代表量化参数中的缩放因子 | FLOAT、UINT64、BFLOAT16、FLOAT8_E8M0<sup>2</sup>、INT64<sup>2</sup> | ND |
 | offsetOptional | 可选输入 | 公式中的 $offset$，代表量化参数中的偏移量 | FLOAT | ND |
@@ -109,7 +109,7 @@ $$
 
 - <term>Ascend 950PR&950DT系列产品</term>：
   - 上表数据类型列中的角标 <sup>1</sup> 代表该系列不支持的数据类型。
-  - 输入参数 x、weight均不支持INT16 类型，且 x 不支持INT4 类型。
+  - 输入参数 x 不支持INT4 类型。
   - 输入参数 x、weight，输出参数 out在非量化场景支持最多 1024个Tensor，在伪量化支持最多 128个Tensor，在全量化场景最多支持 1个Tensor。
 - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
   - 上表数据类型列中的角标 <sup>2</sup> 代表该系列不支持的数据类型。

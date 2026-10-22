@@ -194,8 +194,8 @@ aclnnStatus aclnnGroupedMatmulV5(
 
   | 参数名 | 输入/输出 | 描述 | 使用说明 | 数据类型 | 数据格式 | 维度(shape) | 非连续Tensor |
   |--------|:---:|------|------|----------|:---:|:---|:---:|
-  | x（aclTensorList *） | 输入 | 公式中的输入 $x$ | TensorList长度 [1,128] 或 [1,1024] | FLOAT、FLOAT16、INT16<span title="Ascend 950PR/950DT 不支持"><sup>1</sup></span>、INT8、INT4、BFLOAT16、FLOAT8_E5M2<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT8_E4M3FN<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、HIFLOAT8<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT4_E2M1<span title="Atlas A3/A2 不支持"><sup>2</sup></span> | <abbr title="常规连续排布">ND</abbr> | 2~6 | √ |
-  | weight（aclTensorList *） | 输入 | 公式中的 $weight$ | TensorList长度 [1,128] 或 [1,1024] | FLOAT、FLOAT16、INT16<span title="Ascend 950PR/950DT 不支持"><sup>1</sup></span>、INT8、INT4、BFLOAT16、FLOAT8_E5M2<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT8_E4M3FN<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、HIFLOAT8<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT4_E2M1<span title="Atlas A3/A2 不支持"><sup>2</sup></span> | ND/<abbr title="FRACTAL_NZ格式（亲和排布）">NZ</abbr> | 2~3 | √ |
+  | x（aclTensorList *） | 输入 | 公式中的输入 $x$ | TensorList长度 [1,128] 或 [1,1024] | FLOAT、FLOAT16、INT8、INT4、BFLOAT16、FLOAT8_E5M2<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT8_E4M3FN<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、HIFLOAT8<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT4_E2M1<span title="Atlas A3/A2 不支持"><sup>2</sup></span> | <abbr title="常规连续排布">ND</abbr> | 2~6 | √ |
+  | weight（aclTensorList *） | 输入 | 公式中的 $weight$ | TensorList长度 [1,128] 或 [1,1024] | FLOAT、FLOAT16、INT8、INT4、BFLOAT16、FLOAT8_E5M2<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT8_E4M3FN<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、HIFLOAT8<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、FLOAT4_E2M1<span title="Atlas A3/A2 不支持"><sup>2</sup></span> | ND/<abbr title="FRACTAL_NZ格式（亲和排布）">NZ</abbr> | 2~3 | √ |
   | biasOptional（aclTensorList *） | 可选输入 | 公式中的 $bias$ | 长度与weight相同 | FLOAT、FLOAT16、INT32、BFLOAT16<span title="Atlas A3/A2 不支持"><sup>2</sup></span> | ND | 1~2 | √ |
   | scaleOptional（aclTensorList *） | 可选输入 | 公式中的 $scale$，代表量化参数中的缩放因子 | 一般情况下，长度与weight相同。综合约束请参见 [约束说明](#7-约束说明) | FLOAT、UINT64、BFLOAT16、FLOAT8_E8M0<span title="Atlas A3/A2 不支持"><sup>2</sup></span>、INT64<span title="Atlas A3/A2 不支持"><sup>2</sup></span> | ND | 1~4 | √ |
   | offsetOptional（aclTensorList *） | 可选输入 | 公式中的 $offset$，代表量化参数中的偏移量 | 长度与weight相同 | FLOAT | ND | 3 | √ |
@@ -217,11 +217,6 @@ aclnnStatus aclnnGroupedMatmulV5(
   | workspaceSize（uint64_t *） | 输出 | 返回需要在Device侧申请的workspace大小（字节） | - | - | - | - | - |
   | executor（aclOpExecutor **） | 输出 | 返回op执行器，包含了算子计算流程 | - | - | - | - | - |
 
-  <!-- npu="950" id8 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：
-    - 上表数据类型列中的角标 <span title="Ascend 950PR/950DT 不支持"><sup>1</sup></span> 代表该系列不支持的数据类型
-    - 输入参数 x、weight均不支持INT16 类型
-  <!-- end id8 -->
   <!-- npu="A3,910b" id11 -->
   - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
     - 上表数据类型列中的角标 <span title="Atlas A3/A2 不支持"><sup>2</sup></span> 代表该系列不支持的数据类型
