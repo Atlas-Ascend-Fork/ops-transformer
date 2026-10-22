@@ -127,7 +127,7 @@ if(UT_TEST_ALL OR OP_HOST_UT)
     target_include_directories(
       ${OP_INFERSHAPE_MODULE_NAME}_cases_obj PRIVATE ${UT_COMMON_INC} ${GTEST_INCLUDE} ${ASCEND_DIR}/include
                                                      ${ASCEND_DIR}/pkg_inc ${ASCEND_DIR}/include/base/context_builder
-                                                     ${OPBASE_INC_DIRS}
+                                                     ${OPBASE_INC_DIRS} ${OPS_TRANSFORMER_DIR}
                                                      ${ASCEND_DIR}/include/ascendc/basic_api
       )
     target_link_libraries(
