@@ -26,7 +26,7 @@
 - 接口功能：该算子为AI CPU算子，是aclnnDenseLightningIndexerKLLossGrad算子的前置算子。根据aclnnDenseLightningIndexerKLLossGrad算子的输入shape、layout、mask和压缩比例信息，计算并输出分核切分metadata。输出结果可作为aclnnDenseLightningIndexerKLLossGrad算子的metadataOptional输入，减少主算子tiling阶段对host array的访问。
 
   **该算子不建议单独使用，建议与aclnnDenseLightningIndexerKLLossGrad算子配合使用，形成完整的工作流。**
-    1. 接收主算子的shape信息，包括batchSize、maxSeqLenQ、maxSeqLenK、numHeadsQ、numHeadsK、headDim、layout和mask信息。
+    1. 接收主算子的shape信息，包括batchSize、maxSeqlenQ、maxSeqlenK、numHeadsQ、numHeadsK、headDim、layout和mask信息。
     2. 根据每个query对应的有效序列长度估算负载，并将B/S1合轴后的任务均衡切分到可用AIC核上。
     3. 输出metadata后，后续作为aclnnDenseLightningIndexerKLLossGrad算子的metadataOptional输入使用。
 
@@ -36,19 +36,19 @@
 
 ```cpp
 aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadataGetWorkspaceSize(
-    const aclTensor   *cuSeqLensQOptional,
-    const aclTensor   *cuSeqLensKOptional,
-    const aclTensor   *seqUsedQOptional,
-    const aclTensor   *seqUsedKOptional,
+    const aclTensor   *cuSeqlensQOptional,
+    const aclTensor   *cuSeqlensKOptional,
+    const aclTensor   *sequsedQOptional,
+    const aclTensor   *sequsedKOptional,
     const aclTensor   *cmpResidualKOptional,
     int64_t            batchSize,
-    int64_t            maxSeqLenQ,
-    int64_t            maxSeqLenK,
+    int64_t            maxSeqlenQ,
+    int64_t            maxSeqlenK,
     int64_t            numHeadsQ,
     int64_t            numHeadsK,
     int64_t            headDim,
-    char              *layoutQ,
-    char              *layoutK,
+    char              *layoutQOptional,
+    char              *layoutKOptional,
     int64_t            maskMode,
     int64_t            cmpRatio,
     const aclTensor   *metadata,
@@ -91,7 +91,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
     </tr></thead>
   <tbody>
     <tr>
-      <td>cuSeqLensQOptional（const aclTensor*）</td>
+      <td>cuSeqlensQOptional（const aclTensor*）</td>
       <td>输入</td>
       <td>表示不同batch中query的累积sequence length。</td>
       <td><ul><li>支持空Tensor</li><li>TND场景下必传，并可通过该入参shape推导batch。</li><li>第一个值固定为0。</li><li>shape固定为(B+1, )。</li></ul></td>
@@ -101,7 +101,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>√</td>
     </tr>
     <tr>
-      <td>cuSeqLensKOptional（const aclTensor*）</td>
+      <td>cuSeqlensKOptional（const aclTensor*）</td>
       <td>输入</td>
       <td>表示不同batch中key的累积sequence length。</td>
       <td><ul><li>支持空Tensor</li><li>TND场景下必传。</li><li>第一个值固定为0。</li><li>shape固定为(B+1, )。</li></ul></td>
@@ -111,7 +111,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>√</td>
     </tr>
     <tr>
-      <td>seqUsedQOptional（const aclTensor*）</td>
+      <td>sequsedQOptional（const aclTensor*）</td>
       <td>输入</td>
       <td>表示不同batch中query实际参与运算的sequence length。</td>
       <td><ul><li>支持空Tensor。</li><li>shape固定为(B, )。</li></ul></td>
@@ -121,7 +121,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>√</td>
     </tr>
     <tr>
-      <td>seqUsedKOptional（const aclTensor*）</td>
+      <td>sequsedKOptional（const aclTensor*）</td>
       <td>输入</td>
       <td>表示不同batch中key实际参与运算的sequence length。</td>
       <td><ul><li>支持空Tensor。</li><li>shape固定为(B, )。</li></ul></td>
@@ -144,14 +144,14 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>batchSize（int64_t）</td>
       <td>输入</td>
       <td>表示batch数量。</td>
-      <td><ul><li>支持非负数。TND场景可填0，并通过cuSeqLensQOptional推导。</li><li>建议值为0。</li></ul></td>
+      <td><ul><li>支持非负数。TND场景可填0，并通过cuSeqlensQOptional推导。</li><li>建议值为0。</li></ul></td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
     </tr>
     <tr>
-      <td>maxSeqLenQ（int64_t）</td>
+      <td>maxSeqlenQ（int64_t）</td>
       <td>输入</td>
       <td>表示query的最大sequence length。</td>
       <td><ul><li>支持非负数。BSND场景必须为正数。</li><li>建议值为0。</li></ul></td>
@@ -161,7 +161,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>-</td>
     </tr>
     <tr>
-      <td>maxSeqLenK（int64_t）</td>
+      <td>maxSeqlenK（int64_t）</td>
       <td>输入</td>
       <td>表示key的最大sequence length。</td>
       <td><ul><li>支持非负数。BSND场景必须为正数。</li><li>建议值为0。</li></ul></td>
@@ -201,7 +201,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>-</td>
     </tr>
     <tr>
-      <td>layoutQ（char*）</td>
+      <td>layoutQOptional（char*）</td>
       <td>输入</td>
       <td>表示query侧的排列格式。</td>
       <td><ul><li>支持 BSND、TND。</li><li>建议值为BSND。</li></ul></td>
@@ -211,7 +211,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>-</td>
     </tr>
     <tr>
-      <td>layoutK（char*）</td>
+      <td>layoutKOptional（char*）</td>
       <td>输入</td>
       <td>表示key侧的排列格式。</td>
       <td><ul><li>支持 BSND、TND。</li><li>建议值为BSND。</li></ul></td>
@@ -300,7 +300,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
     <tr>
       <td rowspan="7">ACLNN_ERR_PARAM_INVALID</td>
       <td rowspan="7">161002</td>
-      <td>cuSeqLensQOptional、cuSeqLensKOptional、seqUsedQOptional、seqUsedKOptional或cmpResidualKOptional的数据类型或维度不在支持范围内。</td>
+      <td>cuSeqlensQOptional、cuSeqlensKOptional、sequsedQOptional、sequsedKOptional或cmpResidualKOptional的数据类型或维度不在支持范围内。</td>
     </tr>
     <tr>
       <td>metadata为空指针，或其数据类型、维度或shape不在支持范围内。</td>
@@ -309,13 +309,13 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
       <td>numHeadsQ、numHeadsK或headDim不在支持范围内。</td>
     </tr>
     <tr>
-      <td>layoutQ或layoutK为空指针，或不在支持范围内。</td>
+      <td>layoutQOptional或layoutKOptional为空指针，或不在支持范围内。</td>
     </tr>
     <tr>
-      <td>batchSize、maxSeqLenQ、maxSeqLenK、maskMode或cmpRatio不满足取值约束。</td>
+      <td>batchSize、maxSeqlenQ、maxSeqlenK、maskMode或cmpRatio不满足取值约束。</td>
     </tr>
     <tr>
-      <td>TND场景下未传入对应的cuSeqLensQOptional或cuSeqLensKOptional，或maskMode=3且cmpRatio不为1时未传入cmpResidualKOptional。</td>
+      <td>TND场景下未传入对应的cuSeqlensQOptional或cuSeqlensKOptional，或maskMode=3且cmpRatio不为1时未传入cmpResidualKOptional。</td>
     </tr>
     <tr>
       <td>从query、key或cmpResidualKOptional推导出的batch数量不一致。</td>
@@ -369,10 +369,10 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
 
 - 确定性说明：aclnnDenseLightningIndexerKLLossGradMetadata默认确定性实现。
 - BSND场景
-  - 必传batchSize、maxSeqLenQ和maxSeqLenK参数，以获取shape信息。
+  - 必传batchSize、maxSeqlenQ和maxSeqlenK参数，以获取shape信息。
 - TND场景
-  - 必传cuSeqLensQOptional、cuSeqLensKOptional参数，以获取正确shape信息。
-  - 当batchSize为0时，通过cuSeqLensQOptional的shape推导batch。
+  - 必传cuSeqlensQOptional、cuSeqlensKOptional参数，以获取正确shape信息。
+  - 当batchSize为0时，通过cuSeqlensQOptional的shape推导batch。
 
 <details>
 <summary><a id="Mask"></a>Mask</summary>
@@ -408,14 +408,14 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGradMetadata(
 
   - Batch取值规则
     - 如果batchSize大于0，优先使用batchSize。
-    - 如果batchSize小于等于0，且layoutQ为TND，则通过cuSeqLensQOptional的shape推导batch。
-    - 如果batchSize小于等于0，且layoutQ为BSND，则报错。
+    - 如果batchSize小于等于0，且layoutQOptional为TND，则通过cuSeqlensQOptional的shape推导batch。
+    - 如果batchSize小于等于0，且layoutQOptional为BSND，则报错。
   - Seqlen取值规则
-    - TND场景下，通过cuSeqLensQOptional和cuSeqLensKOptional计算每个batch的实际q/k长度。
-    - BSND场景下，通过maxSeqLenQ和maxSeqLenK获取q/k长度。
+    - TND场景下，通过cuSeqlensQOptional和cuSeqlensKOptional计算每个batch的实际q/k长度。
+    - BSND场景下，通过maxSeqlenQ和maxSeqlenK获取q/k长度。
   - layout约束
-    - layoutQ必须为BSND或TND。
-    - layoutK支持BSND和TND，建议与layoutQ保持一致。
+    - layoutQOptional必须为BSND或TND。
+    - layoutKOptional支持BSND和TND，建议与layoutQOptional保持一致。
   - head约束
     - numHeadsQ、numHeadsK和headDim必须为正数。
     - numHeadsQ必须能被numHeadsK整除。
