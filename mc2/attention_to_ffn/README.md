@@ -73,14 +73,14 @@
     <tr>
     <td style="white-space: nowrap">scales</td>
     <td style="white-space: nowrap">输入</td>
-    <td style="white-space: nowrap">可选参数，表示每个专家的量化平滑参数，3D Tensor，shape为 <code>(L, moeExpertNum + sharedExpertNum, H)。</code></td>
+    <td style="white-space: nowrap">表示每个专家的量化平滑参数。quantMode为0（非量化）时必须传空指针；quantMode为2（动态量化）时可传有效Tensor或空指针。传入时为3D Tensor，shape为 <code>(L, moeExpertNum + sharedExpertNum, H)。</code></td>
     <td style="white-space: nowrap">FLOAT32</td>
     <td style="white-space: nowrap">ND</td>
     </tr>
     <tr>
     <td style="white-space: nowrap">activeMask</td>
     <td style="white-space: nowrap">输入</td>
-    <td style="white-space: nowrap">可选参数，表示token是否参与通信，可传有效数据或空指针，2D Tensor，shape为 <code>(X, Bs)。</code></td>
+    <td style="white-space: nowrap">表示token是否参与通信，可传有效数据或空指针。传入有效数据时，true项必须排列在false项之前；shape为 <code>(X, Bs)。</code></td>
     <td style="white-space: nowrap">BOOL</td>
     <td style="white-space: nowrap">ND</td>
     </tr>
