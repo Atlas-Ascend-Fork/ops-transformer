@@ -27,10 +27,11 @@ class SparseFlashAttentionGradOpBuilder(OpBuilder):
         """PyTorch operator signature."""
         return (
             "sparse_flash_attention_grad(Tensor query, Tensor key, Tensor? value, Tensor sparse_indices, "
-            "Tensor d_out, Tensor out, Tensor softmax_max, Tensor softmax_sum, Tensor? sinks, "
+            "Tensor d_out, Tensor out, Tensor softmax_max, Tensor softmax_sum, "
             "float scale_value, int sparse_block_size, "
-            "*, Tensor? query_rope=None, Tensor? key_rope=None, Tensor? actual_seq_qlen=None, "
-            'Tensor? actual_seq_kvlen=None, str layout="BSND", int sparse_mode=3, '
+            "*, Tensor? query_rope=None, Tensor? key_rope=None, Tensor? sinks=None, "
+            "Tensor? actual_seq_qlen=None, Tensor? actual_seq_kvlen=None, "
+            'str layout="BSND", int sparse_mode=3, '
             "int win_left=9223372036854775807, int win_right=9223372036854775807, int attention_mode=0) "
             "-> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)"
         )
@@ -51,11 +52,12 @@ class SparseFlashAttentionGradOpBuilder(OpBuilder):
             out,
             softmax_max,
             softmax_sum,
-            sinks=None,
-            scale_value=1.0,
-            sparse_block_size=1,
+            scale_value,
+            sparse_block_size,
+            *,
             query_rope=None,
             key_rope=None,
+            sinks=None,
             actual_seq_qlen=None,
             actual_seq_kvlen=None,
             layout="BSND",
@@ -78,17 +80,17 @@ class SparseFlashAttentionGradOpBuilder(OpBuilder):
                     query_rope.shape, dtype=query_rope.dtype, device="meta"
                 )
                 if query_rope is not None
-                else None
+                else query.new_empty([0], dtype=query.dtype, device="meta")
             )
             dk_rope = (
                 key_rope.new_empty(key_rope.shape, dtype=key_rope.dtype, device="meta")
                 if key_rope is not None
-                else None
+                else query.new_empty([0], dtype=query.dtype, device="meta")
             )
             d_sinks = (
                 sinks.new_empty(sinks.shape, dtype=sinks.dtype, device="meta")
                 if sinks is not None
-                else None
+                else query.new_empty([0], dtype=torch.float32, device="meta")
             )
             return (dq, dk, dv, dq_rope, dk_rope, d_sinks)
 
@@ -108,11 +110,12 @@ def sparse_flash_attention_grad(
     out,
     softmax_max,
     softmax_sum,
-    sinks=None,
-    scale_value=1.0,
-    sparse_block_size=1,
+    scale_value,
+    sparse_block_size,
+    *,
     query_rope=None,
     key_rope=None,
+    sinks=None,
     actual_seq_qlen=None,
     actual_seq_kvlen=None,
     layout="BSND",
@@ -127,16 +130,16 @@ def sparse_flash_attention_grad(
         query (Tensor): query 张量，dtype 支持 bfloat16/float16，layout 决定 shape（TND: [total_q, N1, D+Dr]）。
         key (Tensor): key 张量，dtype 与 query 一致（TND: [total_kv, N2, D+Dr]）。
         value (Tensor, optional): value 张量，dtype 与 query 一致（TND: [total_kv, N2, D]）。
-            可选项。传入 None 时启用 KV merge，内部按 value=key 处理（arch22/A2 与 Ascend950 均支持；
+            必选位置参数，可传入 None；传入 None 时启用 KV merge，内部按 value=key 处理（arch22/A2 与 Ascend950 均支持；
             KV merge 场景要求 d_value 输出为空 tensor）。
         sparse_indices (Tensor): topk 索引，int32，shape [T1, N2, K]（K=select_block_count）。
         d_out (Tensor): 反向梯度 dy，dtype 与 query 一致，shape 与 out 相同。
         out (Tensor): 前向输出，dtype 与 query 一致，shape 与 query 相同。
         softmax_max (Tensor): 前向 softmax max，float32。
         softmax_sum (Tensor): 前向 softmax sum，float32。
-        sinks (Tensor, optional): oss-sink 输入，float32，shape [N1]。
-        scale_value (float): query@key 缩放系数，默认 1.0（通常为 1/sqrt(head_dim)）。
-        sparse_block_size (int): block 大小，支持 {1,8,16,32,64}，默认 1。
+        sinks (Tensor, optional): oss-sink 输入，float32，shape [N1]。可选关键字参数，默认 None（无 sink 路径）。
+        scale_value (float): query@key 缩放系数，必选（通常为 1/sqrt(head_dim)）。
+        sparse_block_size (int): block 大小，支持 {1,8,16,32,64}，必选。
         query_rope (Tensor, optional): query 的 rope 部分，dtype 与 query 一致，仅 layout=TND 时使用。
         key_rope (Tensor, optional): key 的 rope 部分，dtype 与 query 一致，仅 layout=TND 时使用。
         actual_seq_qlen (Tensor, optional): query 实际序列长度，int32，shape [B]。
