@@ -144,9 +144,9 @@ $$
   </tr>
   <tr>
    <td>ccl_buffer_size</td>
-   <td>属性</td>
-   <td><li>当前通信域Buffer大小。</li><li>默认值为""。</li></td>
-   <td>STRING</td>
+   <td>必选属性</td>
+   <td>当前通信域Buffer大小（INT64 字节数），需通过 get_low_latency_ccl_buffer_size 接口获取。</td>
+   <td>INT64</td>
    <td>ND</td>
   </tr>
   <tr>
