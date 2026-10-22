@@ -816,7 +816,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
   - <term>Ascend 950PR&950DT系列产品</term>：
     - groupList第1维最大支持1024，即最多支持1024个group。
     - MX量化场景下需满足以下约束条件：
-        - 数据类型需要满足下表：
+        - 数据类型需要满足下表。表中MXFP4的ND和FRACTAL_NZ表示weight的存储格式。weight采用FRACTAL_NZ时，x和weight可独立选择FLOAT4_E2M1或FLOAT4_E1M2；两种交叉组合（x为FLOAT4_E2M1、weight为FLOAT4_E1M2，以及x为FLOAT4_E1M2、weight为FLOAT4_E2M1）均受支持。
           <table style="undefined;table-layout: fixed; width: 1134px"><colgroup>
           <col style="width: 130px">
           <col style="width: 130px">
@@ -847,12 +847,21 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
               <td>FLOAT8_E8M0</td>
             </tr>
             <tr>
-              <td>MXFP4</td>
+              <td>MXFP4（ND）</td>
               <td>FLOAT4_E2M1</td>
               <td>FLOAT4_E2M1</td>
               <td>FLOAT8_E8M0</td>
               <td>FLOAT8_E8M0</td>
               <td>FLOAT4_E2M1、FLOAT8_E4M3FN、FLOAT8_E5M2</td>
+              <td>FLOAT8_E8M0</td>
+            </tr>
+            <tr>
+              <td>MXFP4（FRACTAL_NZ）</td>
+              <td>FLOAT4_E2M1、FLOAT4_E1M2</td>
+              <td>FLOAT4_E2M1、FLOAT4_E1M2</td>
+              <td>FLOAT8_E8M0</td>
+              <td>FLOAT8_E8M0</td>
+              <td>FLOAT4_E2M1、FLOAT8_E4M3FN、FLOAT4_E1M2</td>
               <td>FLOAT8_E8M0</td>
             </tr>
           </tbody>
