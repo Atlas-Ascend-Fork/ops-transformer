@@ -92,12 +92,12 @@ HOST_DEVICE int64_t CalcDispatchRouteIndexAlignSize(const MegaMoeTilingData* til
 // 下面两个判断函数是唯一入口，host 和 kernel 都用它们，不要在别处自己写数值比较。
 HOST_DEVICE constexpr bool IsDispatchDedupOn(int32_t dedupMode)
 {
-    return dedupMode == 2 || dedupMode == 3;
+    return dedupMode == DEDUP_MODE_DISPATCH_ONLY || dedupMode == DEDUP_MODE_BOTH;
 }
 
 HOST_DEVICE constexpr bool IsCombineDedupOn(int32_t dedupMode)
 {
-    return dedupMode == 1 || dedupMode == 3;
+    return dedupMode == DEDUP_MODE_COMBINE_ONLY || dedupMode == DEDUP_MODE_BOTH;
 }
 
 // 单 token 的量化记录包含数据和 mx scale，按 32B 对齐。

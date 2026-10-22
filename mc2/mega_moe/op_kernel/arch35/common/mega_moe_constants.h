@@ -126,6 +126,12 @@ constexpr uint32_t ACTIVATION_N_HALF = 2U;
 // ============ MTE 通信去重 ============
 // 开关的唯一真源是 tilingData->dedupMode（0=全关 1=仅combine开 2=仅dispatch开 3=双开），
 // 判断统一用 mega_moe_peermem.h 的 IsDispatchDedupOn/IsCombineDedupOn。
+constexpr int32_t DEDUP_MODE_OFF = 0;
+constexpr int32_t DEDUP_MODE_COMBINE_ONLY = 1;
+constexpr int32_t DEDUP_MODE_DISPATCH_ONLY = 2;
+constexpr int32_t DEDUP_MODE_BOTH = 3;
+// prepass done 槽（prepassReadyPtr 槽 0）按 AIV 角色分位域累计完成核数：低 16 位=AIV1，高 16 位=AIV0。
+constexpr int32_t DEDUP_PREPASS_DONE_AIV0_SHIFT = 16;
 // prepass 工作项 chunk 数上限：flag 区按 worldSize*MAX_CHUNKS 上界分配；
 // CalcDedupPrepassChunkTokens 的 floor-clamp 保证实际 chunkCount 不超此值。
 constexpr uint32_t DEDUP_PREPASS_MAX_CHUNKS = 128U;

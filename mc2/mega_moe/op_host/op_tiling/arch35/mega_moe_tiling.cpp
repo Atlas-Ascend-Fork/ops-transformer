@@ -321,7 +321,7 @@ void PrintPeermemInfo(const MegaMoeTilingData* tilingData, const char* nodeName)
  * 0=全关，1=仅 combine 开，2=仅 dispatch 开，3=双开。
  * dispatch 恒先请求（这个形状开了是否划算，由后面的收益门决定）；combine 完全听
  * combine_comm_mode 属性（1=强制开、0=强制关，门控无权改）。非 MTE 拓扑没有去重能力，
- * 直接返回 0（客户显式给 ccm=1 撞非 MTE 时由 CheckDedupRequestAttrs 报错）。
+ * 直接返回 0（显式给 ccm=1 撞非 MTE 时由 CheckDedupRequestAttrs 报错）。
  * 无效值返回 -1，由 CheckDedupRequestAttrs 拦截。
  */
 static int64_t GetDedupMode(const gert::TilingContext* context, const MegaMoeConfig& config)
@@ -2802,7 +2802,7 @@ static MegaMoeL1Layout CalcMegaMoeL1Layout(uint64_t maxGmmK)
  * prepass chunk 可行性护栏：floorChunk（保 chunkCount≤DEDUP_PREPASS_MAX_CHUNKS）不得冲破
  * UB 容量上限，否则 prepass member 区越界写（如 k32 且 numMaxTokensPerRank>18432）。
  * 公式与 kernel CalcDedupPrepassChunkTokens 逐项同源（常量单一真源 mega_moe_constants.h）。
- * 超界处置分请求来源：combine 位是客户显式请求（combine_comm_mode=1），撞硬约束必须显式报错、
+ * 超界处置分请求来源：combine 位是显式请求（combine_comm_mode=1），撞硬约束必须显式报错、
  * 不静默降级；dispatch 位是内部自动优化，静默关闭按基线继续。
  */
 static ge::graphStatus ApplyDedupPrepassChunkGuard(MegaMoeTilingData* tilingData, const char* nodeName)
@@ -2832,8 +2832,7 @@ static ge::graphStatus ApplyDedupPrepassChunkGuard(MegaMoeTilingData* tilingData
 
 /*
  * dispatch 去重收益自适应门（纯性能决策；dispatch 去重 bit 级等价，关闭不改变任何数值结果）。
- * 只裁决 dispatch 位：combine 位由客户经 combine_comm_mode 显式决定，开即强制走、不受本门裁决
- * （适用场景在客户资料中说明，收益判断责任在客户侧）。
+ * 只裁决 dispatch 位：combine 位由 combine_comm_mode 显式决定，开即强制走、不受本门裁决。
  * 裁决输入只用各卡一致的量（numMaxTokensPerRank/topK/h/hiddenDim/本卡专家数/epWorldSize），不读本卡 bs：
  * 可变 bs 下各卡 bs 不同，而记录是否带权重段、combine 的 canonical 槽协议都要求各卡 dedupMode 一致，
  * 按本卡 bs 裁决会一卡开一卡关、跨卡读记录错位。attr 为 0 时 numMaxTokensPerRank 回落 bs，定长场景行为不变。
@@ -2880,25 +2879,28 @@ static void ApplyDedupBenefitGate(MegaMoeTilingData* tilingData, const char* nod
                     "world=%u, savedBytes=%.0f), disable dispatch dedup for this shape",
                     gateValue, requiredValue, tilingData->numMaxTokensPerRank, tilingData->topK, tilingData->h,
                     tilingData->hiddenDim, tilingData->moeExpertPerRank, tilingData->epWorldSize, savedBytes);
-            // 关掉 dispatch 去重、保留 combine 的客户指定值：3(双开)->1(仅combine)，2(仅dispatch)->0(全关)。
+            // 关掉 dispatch 去重、保留 combine 位的显式请求值：3(双开)->1(仅combine)，2(仅dispatch)->0(全关)。
             tilingData->dedupMode = IsCombineDedupOn(tilingData->dedupMode) ? 1 : 0;
         }
     }
     return;
 }
 
-// combine 去重 UB 容量护栏：独立 combine 阶段需要行环(≥2)+整行合并发送共 3×行宽，外加固定
-// 60KiB（成员乒乓/fp32/累加段 + desc 批区），装进 [64KiB,184KiB) 要求 h ≤ 10240。
-// combine 位是客户显式请求，超界显式报错、不静默降级。
+/*
+ * combine 去重 UB 容量护栏：独立 combine 阶段需要行环(≥2)+整行合并发送 ping/pong(×2) 共 4×行宽，
+ * 外加固定 49152B（成员乒乓/fp32/累加段），装进 [64KiB,184KiB) 要求 h ≤ 9216
+ * （4×ceilAlign(2h,32) ≤ 122880-49152，与 kernel InitWaveCombineBuffersDedup 的 fixedBytes 镜像；
+ *  desc 批区与权重区在该窗口外的外移段，不占本窗口预算）。超界显式报错、不静默降级。
+ */
 static ge::graphStatus ApplyDedupCombineCapacityGate(MegaMoeTilingData* tilingData, const char* nodeName)
 {
     if (!IsCombineDedupOn(tilingData->dedupMode)) {
         return ge::GRAPH_SUCCESS;
     }
-    constexpr int64_t DEDUP_COMBINE_MAX_H = 10240;
+    constexpr int64_t DEDUP_COMBINE_MAX_H = 9216;
     OP_TILING_CHECK(static_cast<int64_t>(tilingData->h) > DEDUP_COMBINE_MAX_H,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "combine_comm_mode", "1",
-                                              "combine dedup requires h <= 10240 (UB capacity), "
+                                              "combine dedup requires h <= 9216 (UB capacity), "
                                               "set combine_comm_mode=0 for this shape"),
                     return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
@@ -2906,7 +2908,7 @@ static ge::graphStatus ApplyDedupCombineCapacityGate(MegaMoeTilingData* tilingDa
 
 /*
  * 去重 per-shape 门集合（请求位已由 CheckDedupRequestAttrs 落库）：prepass 可行性护栏 →
- * dispatch 收益门 → combine 容量护栏。combine 位由客户显式决定（开即强制走，撞硬约束报错）；
+ * dispatch 收益门 → combine 容量护栏。combine 位由 combine_comm_mode 显式决定（开即强制走，撞硬约束报错）；
  * dispatch 位保持内部自动裁决。必须在 bs/h/topK/epWorldSize/numMaxTokensPerRank 全部写入
  * tilingData 之后、workspace 与自适应 buffer 规划之前调用（两者按 dedupMode 定布局）。
  */

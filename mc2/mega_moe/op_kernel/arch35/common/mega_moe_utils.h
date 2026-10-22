@@ -458,6 +458,11 @@ __aicore__ inline int32_t CrossRankHandshakeInWorldSize(GM_ADDR rankSyncInWorldP
         GmSignalWaitBarrier(syncRank + rankIdx * INT_CACHELINE, count);
     }
     WriteGmByPassDCache(syncCount, count);
+    /*
+     * 出口 posted 写与下一次 graph replay 的入口旁路回读仅隔微秒级：不排空则下轮读到旧计数，
+     * epoch tag 永久错位 1，两卡互等挂死。每 AIV 每 kernel 仅一条 DSB，出口处写队列近空、开销可忽略。
+     */
+    asc_sync_data_barrier(mem_dsb_t::DSB_DDR);
     return count;
 }
 

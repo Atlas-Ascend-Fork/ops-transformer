@@ -107,10 +107,11 @@ private:
      *   [64, 160 KiB)     非量化 Combine 的 6 个 BF16 row buffer（H 最大 8 KiB）；
      *                     量化 Combine 使用 2 个 [BF16 row | FP8 data + scale] 槽及共享量化 scratch；
      *   [160, 184 KiB)    基线空闲；combine 去重把 [64,184 KiB) 整段动态切分为
-     *                     行环(2..6) + 合并发送整行 + 成员乒乓/fp32/累加段 + desc 批区
-     *                     （InitWaveCombineBuffersDedup，h≤10240 由 host 门保证装得下）；
-     *   [184, 187.5 KiB)  GMM2-ready 序号的 GM 搬入与逐 AIC lane 检查区；
-     *   [187.5, 200 KiB)  空闲；
+     *                     行环(2..6) + 合并发送整行 ping/pong + 成员乒乓/fp32/累加段
+     *                     （InitWaveCombineBuffersDedup，h≤9216 由 host 门保证装得下）；
+     *   [184, ~187 KiB)   GMM2-ready 序号的 GM 搬入与逐 AIC lane 检查区（止点按核数推导）；
+     *   [~187, 200 KiB)   combine 去重 desc 批区+权重区（紧随 ready 区按 512B 对齐起排，
+     *                     WAVE_COMBINE_DEDUP_SIDE_UB_BASE，约 12.1 KiB），其余空闲；
      *   [200, 248 KiB)    Combine 共用的 meta-info，共 1536 token * 8 int32；
      *   [248, 256 KiB)    硬件保留，不使用。
      */

@@ -34,13 +34,27 @@ constexpr uint32_t WAVE_COMBINE_DEDUP_DESC_UB_BYTES = 12U * 1024U;
 // tkw=0 乘权用：LAST 行 revWeights 槽（整 token topK 个 fp32 位型权重）的 UB 装载区，
 // topK ≤ 32（host 校验）→ 128B 定长。
 constexpr uint32_t WAVE_COMBINE_DEDUP_WEIGHT_UB_BYTES = 128U;
-// 成员乒乓装载事件（MTE2_V/V_MTE2）用 6/7，合并发送事件（V_MTE3/MTE3_V）用 6；
-// 与行环 slot 事件（MTE3_MTE2 的 0..5）分属不同 pipe 对或不同 id，互不冲突。
+/*
+ * 成员乒乓装载事件（MTE2_V/V_MTE2）与合并发送 ping/pong 事件（V_MTE3/MTE3_V）均用 6/7 双 id；
+ * 与行环 slot 事件（MTE3_MTE2 的 0..5）分属不同 pipe 对或不同 id，互不冲突。
+ */
 constexpr int32_t WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE = 6;
-constexpr int32_t WAVE_COMBINE_DEDUP_MERGE_EVENT = 6;
+constexpr int32_t WAVE_COMBINE_DEDUP_MERGE_EVENT_BASE = 6;
+/*
+ * desc 批区与权重区的外移段基址：紧随 GMM2-ready 检查区（scan/reduce/sum 三段）之后按 512B
+ * 对齐起排，止于 combine meta-info 区之前。把这两段固定开销挪出
+ * [WAVE_COMBINE_UB_BASE, WAVE_COMBINE_UB_LIMIT) 窗口，窗口让位给随 h 增长的行宽类缓冲
+ * （合并发送 ping/pong 占两份行宽后，容量上限仍有 h ≤ 9216）。
+ */
+constexpr uint32_t WAVE_COMBINE_DEDUP_SIDE_UB_BASE = static_cast<uint32_t>(
+    (WAVE_GMM2_READY_SUM_UB_ADDR + INT_CACHELINE * sizeof(int32_t) + ALIGN_512 - 1) / ALIGN_512 * ALIGN_512);
+static_assert(WAVE_COMBINE_DEDUP_SIDE_UB_BASE + WAVE_COMBINE_DEDUP_DESC_UB_BYTES + WAVE_COMBINE_DEDUP_WEIGHT_UB_BYTES <=
+                  META_INFO_TENSOR_ADDR,
+              "dedup desc/weight side region overruns combine meta-info base");
 
 struct WaveCombineDedupScratch {
-    LocalTensor<bfloat16_t> mergeSendTensor; // 整行 bf16 合并结果（发送源）
+    LocalTensor<bfloat16_t> mergeSendTensor; // 整行 bf16 合并结果 ×2 ping/pong（发送源，行间解串行）
+    uint32_t mergeRowSequence = 0U;          // LAST 行序号（选 ping/pong 半区与事件 id）
     LocalTensor<bfloat16_t> memberTensor;    // 2 × 段长 bf16 成员装载乒乓
     LocalTensor<float> memberFp32Tensor;     // 段长 fp32 成员转换暂存
     LocalTensor<float> accumTensor;          // 段长 fp32 累加
@@ -56,11 +70,13 @@ struct WaveCombineDedupGmViews {
     uint64_t gmRemoteBaseOffset = 0;
 };
 
-// 成员乒乓（V_MTE2 事件 6/7）与合并发送（MTE3_V 事件 6）走「先挂再等」协议：进 wave 前先
-// Set 一次（本函数），之后每次复写缓冲前无条件 Wait、用完再 Set，wave 结束由
-// DrainCombineRowBuffersDedup 无条件 Wait 收尾。这样任何时刻每个事件 id 上恰有一个在途
-// Set：首轮 Wait 等到的是这里预挂的 Set（不死等），结束时全部被 Drain 消费（无悬挂残留）。
-// 调用本函数的开关条件必须与调用 Drain 的条件完全一致，否则一边挂一边不收，直接死等。
+/*
+ * 成员乒乓（V_MTE2 事件 6/7）与合并发送（MTE3_V 事件 6/7）走「先挂再等」协议：进 wave 前先
+ * Set 一次（本函数），之后每次复写缓冲前无条件 Wait、用完再 Set，wave 结束由
+ * DrainCombineRowBuffersDedup 无条件 Wait 收尾。这样任何时刻每个事件 id 上恰有一个在途
+ * Set：首轮 Wait 等到的是这里预挂的 Set（不死等），结束时全部被 Drain 消费（无悬挂残留）。
+ * 调用本函数的开关条件必须与调用 Drain 的条件完全一致，否则一边挂一边不收，直接死等。
+ */
 __aicore__ inline void ArmWaveCombineDedupEvents()
 {
     if constexpr (g_coreType == AIC) {
@@ -68,33 +84,40 @@ __aicore__ inline void ArmWaveCombineDedupEvents()
     }
     SetFlag<HardEvent::V_MTE2>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE));
     SetFlag<HardEvent::V_MTE2>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE + 1));
-    SetFlag<HardEvent::MTE3_V>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT));
+    SetFlag<HardEvent::MTE3_V>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT_BASE));
+    SetFlag<HardEvent::MTE3_V>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT_BASE + 1));
 }
 
-// 在行环之后依次落位去重各 UB 段：合并发送整行 → 成员乒乓 → fp32 转换 → 累加 → desc 批区 → 权重区。
+/*
+ * 在行环之后依次落位去重的窗口内各段：合并发送整行 ping/pong → 成员乒乓 → fp32 转换 → 累加；
+ * desc 批区与权重区固定落在窗口外的外移段（WAVE_COMBINE_DEDUP_SIDE_UB_BASE 起）。
+ */
 __aicore__ inline void LayoutWaveCombineDedupScratch(WaveCombineDedupScratch& dedupScratch, uint32_t addr,
                                                      uint32_t rowStrideBytes)
 {
     constexpr uint32_t segBf16Bytes = WAVE_COMBINE_DEDUP_SEG_ELEMS * sizeof(bfloat16_t);
     constexpr uint32_t segFp32Bytes = WAVE_COMBINE_DEDUP_SEG_ELEMS * sizeof(float);
-    dedupScratch.mergeSendTensor = LocalTensor<bfloat16_t>(TPosition::VECIN, addr, rowStrideBytes / sizeof(bfloat16_t));
-    addr += rowStrideBytes;
+    dedupScratch.mergeSendTensor =
+        LocalTensor<bfloat16_t>(TPosition::VECIN, addr, 2U * rowStrideBytes / sizeof(bfloat16_t));
+    addr += 2U * rowStrideBytes;
     dedupScratch.memberTensor = LocalTensor<bfloat16_t>(TPosition::VECIN, addr, 2U * WAVE_COMBINE_DEDUP_SEG_ELEMS);
     addr += 2U * segBf16Bytes;
     dedupScratch.memberFp32Tensor = LocalTensor<float>(TPosition::VECCALC, addr, WAVE_COMBINE_DEDUP_SEG_ELEMS);
     addr += segFp32Bytes;
     dedupScratch.accumTensor = LocalTensor<float>(TPosition::VECCALC, addr, WAVE_COMBINE_DEDUP_SEG_ELEMS);
-    addr += segFp32Bytes;
-    dedupScratch.descTensor =
-        LocalTensor<int32_t>(TPosition::VECCALC, addr, WAVE_COMBINE_DEDUP_DESC_UB_BYTES / sizeof(int32_t));
-    addr += WAVE_COMBINE_DEDUP_DESC_UB_BYTES;
+    dedupScratch.descTensor = LocalTensor<int32_t>(TPosition::VECCALC, WAVE_COMBINE_DEDUP_SIDE_UB_BASE,
+                                                   WAVE_COMBINE_DEDUP_DESC_UB_BYTES / sizeof(int32_t));
     dedupScratch.weightTensor =
-        LocalTensor<int32_t>(TPosition::VECCALC, addr, WAVE_COMBINE_DEDUP_WEIGHT_UB_BYTES / sizeof(int32_t));
+        LocalTensor<int32_t>(TPosition::VECCALC, WAVE_COMBINE_DEDUP_SIDE_UB_BASE + WAVE_COMBINE_DEDUP_DESC_UB_BYTES,
+                             WAVE_COMBINE_DEDUP_WEIGHT_UB_BYTES / sizeof(int32_t));
 }
 
-// 去重专属 UB 规划（[WAVE_COMBINE_UB_BASE, WAVE_COMBINE_UB_LIMIT) 内动态切分）：
-// 行环(n×行宽) + 合并发送整行 + 成员乒乓/fp32/累加三段（段长固定）+ desc 批区。
-// host 收益门已保证 h 满足容量约束（3×行宽 + 固定 60KiB ≤ 120KiB，即 h ≤ 10240）。
+/*
+ * 去重专属 UB 规划（[WAVE_COMBINE_UB_BASE, WAVE_COMBINE_UB_LIMIT) 内动态切分）：
+ * 行环(n×行宽) + 合并发送整行 ping/pong + 成员乒乓/fp32/累加三段（段长固定）；
+ * desc 批区与权重区在窗口外的外移段，不占本窗口。
+ * host 容量门已保证 h 满足容量约束（4×行宽 + 固定 49152B ≤ 122880B，即 h ≤ 9216）。
+ */
 template <bool IncludeAiv0 = false>
 __aicore__ inline WaveCombineBufferConfig InitWaveCombineBuffersDedup(const MoeStageCommonConfig& common,
                                                                       WaveCombineScratch& scratch,
@@ -113,9 +136,11 @@ __aicore__ inline WaveCombineBufferConfig InitWaveCombineBuffersDedup(const MoeS
     bufferConfig.slotStrideBytes = bufferConfig.rowStrideBytes;
     constexpr uint32_t segBf16Bytes = WAVE_COMBINE_DEDUP_SEG_ELEMS * sizeof(bfloat16_t);
     constexpr uint32_t segFp32Bytes = WAVE_COMBINE_DEDUP_SEG_ELEMS * sizeof(float);
-    const uint32_t fixedBytes = bufferConfig.rowStrideBytes /* mergeSend */ + 2U * segBf16Bytes /* member 乒乓 */ +
-                                2U * segFp32Bytes /* memberFp32 + accum */ + WAVE_COMBINE_DEDUP_DESC_UB_BYTES +
-                                WAVE_COMBINE_DEDUP_WEIGHT_UB_BYTES;
+    /*
+     * 窗口内固定开销：合并发送整行 ping/pong（2×行宽）+ 成员乒乓（2×段长 bf16）
+     * + fp32 转换与累加（2×段长 fp32）；desc 批区与权重区在窗口外的外移段，不计入。
+     */
+    const uint32_t fixedBytes = 2U * bufferConfig.rowStrideBytes + 2U * segBf16Bytes + 2U * segFp32Bytes;
     // 纵深防御：host 门失效（h 超界）时无符号减法会回绕成巨大预算→ring 钳到 6→静默写穿
     // ready-scan 区；此处先钳零，让越界表现为固定的 min-ring 布局而非任意写穿。
     constexpr uint32_t totalBudgetBytes = WAVE_COMBINE_UB_LIMIT - WAVE_COMBINE_UB_BASE;
@@ -166,50 +191,93 @@ __aicore__ inline float GetDedupMemberWeight(const WaveCombineDedupScratch& dedu
     return *reinterpret_cast<const float*>(&weightBits);
 }
 
-// 对一个 h 段读齐组内全部成员并 fp32 累加进 accumTensor（tkw=0 先按成员权重乘）。
-// 成员乒乓事件跨行存活：ArmWaveCombineDedupEvents 已预挂首轮 Set，此处直接 Wait。
+/*
+ * 发起第 issueIdx 个成员行在当前 h 段的半区装载：V_MTE2=半区可复写（Arm 预挂首轮）、
+ * MTE2_V=装载完成；半区按 issueIdx 奇偶轮换。
+ */
+__aicore__ inline void IssueDedupMemberLoad(WaveCombineDedupScratch& dedupScratch, GlobalTensor<bfloat16_t>& gmm2AbsGm,
+                                            uint32_t descRowBase, uint32_t issueIdx, uint32_t h, uint32_t segBase,
+                                            const DataCopyExtParams& segGm2UbParams,
+                                            const DataCopyPadExtParams<bfloat16_t>& segPad)
+{
+    const uint64_t issueRow = static_cast<uint64_t>(static_cast<uint32_t>(
+        dedupScratch.descTensor.GetValue(descRowBase + DEDUP_ROW_DESC_HEADER_INT32 + issueIdx * 3U)));
+    const uint32_t issueBuf = issueIdx & 1U;
+    const TEventID issueEvent =
+        static_cast<TEventID>(WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE + static_cast<int32_t>(issueBuf));
+    // 等该半区上一次的 Cast 读完（首两轮等到的是预挂 Set），才能复写发起装载。
+    WaitFlag<HardEvent::V_MTE2>(issueEvent);
+    LocalTensor<bfloat16_t> issueUb = dedupScratch.memberTensor[issueBuf * WAVE_COMBINE_DEDUP_SEG_ELEMS];
+    DataCopyPad(issueUb, gmm2AbsGm[issueRow * h + segBase], segGm2UbParams, segPad);
+    SetFlag<HardEvent::MTE2_V>(issueEvent);
+}
+
+/*
+ * 消费第 memberIdx 个成员已装载的半区：fp32 累加进 accumTensor（tkw=0 先按成员权重乘；
+ * memberIdx=0 直写初始化累加区），消费完释放半区（V_MTE2）。
+ */
+__aicore__ inline void ConsumeDedupMemberSegment(WaveCombineDedupScratch& dedupScratch, const Params& params,
+                                                 uint32_t descRowBase, uint32_t memberIdx, bool mulWeights,
+                                                 uint32_t segLen)
+{
+    const uint32_t buf = memberIdx & 1U;
+    const TEventID memberEvent =
+        static_cast<TEventID>(WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE + static_cast<int32_t>(buf));
+    WaitFlag<HardEvent::MTE2_V>(memberEvent);
+    LocalTensor<bfloat16_t> memberUb = dedupScratch.memberTensor[buf * WAVE_COMBINE_DEDUP_SEG_ELEMS];
+    if (memberIdx == 0U) {
+        Cast(dedupScratch.accumTensor, memberUb, RoundMode::CAST_NONE, segLen);
+        if (mulWeights) {
+            PipeBarrier<PIPE_V>();
+            Muls(dedupScratch.accumTensor, dedupScratch.accumTensor,
+                 GetDedupMemberWeight(dedupScratch, params, descRowBase, 0U), segLen);
+        }
+    } else {
+        Cast(dedupScratch.memberFp32Tensor, memberUb, RoundMode::CAST_NONE, segLen);
+        PipeBarrier<PIPE_V>();
+        if (mulWeights) {
+            Muls(dedupScratch.memberFp32Tensor, dedupScratch.memberFp32Tensor,
+                 GetDedupMemberWeight(dedupScratch, params, descRowBase, memberIdx), segLen);
+            PipeBarrier<PIPE_V>();
+        }
+        Add(dedupScratch.accumTensor, dedupScratch.accumTensor, dedupScratch.memberFp32Tensor, segLen);
+    }
+    PipeBarrier<PIPE_V>();
+    SetFlag<HardEvent::V_MTE2>(memberEvent);
+}
+
+/*
+ * 对一个 h 段读齐组内全部成员并 fp32 累加进 accumTensor（tkw=0 先按成员权重乘）。
+ * 前瞻双缓冲：先发起成员 i+1 的装载再消费成员 i，MTE2 与 V 重叠（原写法为发起→立等→计算
+ * 的全串行，成员装载时间全部裸露在关键路径上）。首轮只发起、末轮只消费，各自单列在主循环外。
+ * 事件协议不变：任何时刻每个事件 id 恰一个在途 Set，Arm/Drain 配平不变（成员乒乓事件跨行
+ * 存活，ArmWaveCombineDedupEvents 已预挂首轮 Set，此处直接 Wait）。
+ * fp32 累加顺序严格保持 memberIdx 升序（desc 表序）——与 golden 全序对齐契约一致，勿动。
+ */
 __aicore__ inline void AccumulateDedupMemberSegment(WaveCombineDedupScratch& dedupScratch,
                                                     GlobalTensor<bfloat16_t>& gmm2AbsGm, const Params& params,
                                                     uint32_t descRowBase, uint32_t memberCount, bool mulWeights,
                                                     uint32_t h, uint32_t segBase, uint32_t segLen)
 {
+    if (memberCount == 0U) {
+        return;
+    }
     DataCopyExtParams segGm2UbParams{1U, segLen * static_cast<uint32_t>(sizeof(bfloat16_t)), 0U, 0U, 0U};
     DataCopyPadExtParams<bfloat16_t> segPad{false, 0U, 0U, 0U};
-    for (uint32_t memberIdx = 0U; memberIdx < memberCount; ++memberIdx) {
-        const uint64_t memberRow = static_cast<uint64_t>(static_cast<uint32_t>(
-            dedupScratch.descTensor.GetValue(descRowBase + DEDUP_ROW_DESC_HEADER_INT32 + memberIdx * 3U)));
-        const uint32_t buf = memberIdx & 1U;
-        TEventID memberEvent = static_cast<TEventID>(WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE + static_cast<int32_t>(buf));
-        // 等上一次用这个半区的 Cast 读完（首轮等到的是预挂 Set），才能复写半区。
-        WaitFlag<HardEvent::V_MTE2>(memberEvent);
-        LocalTensor<bfloat16_t> memberUb = dedupScratch.memberTensor[buf * WAVE_COMBINE_DEDUP_SEG_ELEMS];
-        DataCopyPad(memberUb, gmm2AbsGm[memberRow * h + segBase], segGm2UbParams, segPad);
-        SetFlag<HardEvent::MTE2_V>(memberEvent);
-        WaitFlag<HardEvent::MTE2_V>(memberEvent);
-        if (memberIdx == 0U) {
-            Cast(dedupScratch.accumTensor, memberUb, RoundMode::CAST_NONE, segLen);
-            if (mulWeights) {
-                PipeBarrier<PIPE_V>();
-                Muls(dedupScratch.accumTensor, dedupScratch.accumTensor,
-                     GetDedupMemberWeight(dedupScratch, params, descRowBase, 0U), segLen);
-            }
-        } else {
-            Cast(dedupScratch.memberFp32Tensor, memberUb, RoundMode::CAST_NONE, segLen);
-            PipeBarrier<PIPE_V>();
-            if (mulWeights) {
-                Muls(dedupScratch.memberFp32Tensor, dedupScratch.memberFp32Tensor,
-                     GetDedupMemberWeight(dedupScratch, params, descRowBase, memberIdx), segLen);
-                PipeBarrier<PIPE_V>();
-            }
-            Add(dedupScratch.accumTensor, dedupScratch.accumTensor, dedupScratch.memberFp32Tensor, segLen);
-        }
-        PipeBarrier<PIPE_V>();
-        SetFlag<HardEvent::V_MTE2>(memberEvent);
+    // 首轮：只发起成员 0 的装载。
+    IssueDedupMemberLoad(dedupScratch, gmm2AbsGm, descRowBase, 0U, h, segBase, segGm2UbParams, segPad);
+    for (uint32_t memberIdx = 1U; memberIdx < memberCount; ++memberIdx) {
+        IssueDedupMemberLoad(dedupScratch, gmm2AbsGm, descRowBase, memberIdx, h, segBase, segGm2UbParams, segPad);
+        ConsumeDedupMemberSegment(dedupScratch, params, descRowBase, memberIdx - 1U, mulWeights, segLen);
     }
+    // 末轮：只消费最后一个成员。
+    ConsumeDedupMemberSegment(dedupScratch, params, descRowBase, memberCount - 1U, mulWeights, segLen);
 }
 
-// 合并驱动行（LAST）：按段读齐组内全部成员（含本行）→ fp32 累加 → Cast 进整行发送缓冲，
-// 一次发到 (tokenIdx*topK + minTopkIdx) 槽。成员行号是全局接收行号，直接对 gmm2MmadRes 绝对基址寻址。
+/*
+ * 合并驱动行（LAST）：按段读齐组内全部成员（含本行）→ fp32 累加 → Cast 进整行发送缓冲，
+ * 一次发到 (tokenIdx*topK + minTopkIdx) 槽。成员行号是全局接收行号，直接对 gmm2MmadRes 绝对基址寻址。
+ */
 __aicore__ inline void SendWaveCombineTokenDedupMerge(const MoeStageCommonConfig& common,
                                                       WaveCombineDedupScratch& dedupScratch, const Params& params,
                                                       GlobalTensor<bfloat16_t>& gmm2AbsGm, uint64_t gmRemoteBaseOffset,
@@ -226,8 +294,20 @@ __aicore__ inline void SendWaveCombineTokenDedupMerge(const MoeStageCommonConfig
     uint64_t gmDstRowOffset =
         (static_cast<uint64_t>(route.tokenIdx) * params.tilingData->topK + static_cast<uint64_t>(minTopkIdx)) * h;
 
-    constexpr TEventID mergeEvent = static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT);
-    // 等上一合并行发送（MTE3 读 mergeSend）完成（首轮等到的是预挂 Set），才能复写发送缓冲。
+    const uint32_t mergeBuf = dedupScratch.mergeRowSequence & 1U;
+    dedupScratch.mergeRowSequence++;
+    const TEventID mergeEvent =
+        static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT_BASE + static_cast<int32_t>(mergeBuf));
+    // 半区步长与 LayoutWaveCombineDedupScratch 的 rowStrideBytes 同源（CeilAlign(h*2B,32)/2B 元素）。
+    const uint32_t mergeStrideElems =
+        static_cast<uint32_t>(
+            Ops::Base::CeilAlign(static_cast<uint64_t>(h) * sizeof(bfloat16_t), static_cast<uint64_t>(ALIGN_32))) /
+        sizeof(bfloat16_t);
+    LocalTensor<bfloat16_t> mergeSendUb = dedupScratch.mergeSendTensor[mergeBuf * mergeStrideElems];
+    /*
+     * 等本半区上一次发送（MTE3 读）完成（首两轮等到的是预挂 Set），才能复写；另一半区的
+     * 发送与本行的累加/Cast 并行——跨卡 MTE3 写延迟不再卡住下一行计算。
+     */
     WaitFlag<HardEvent::MTE3_V>(mergeEvent);
     const bool mulWeights = params.tilingData->topkWeightsPrefetch == 0;
     if (mulWeights) {
@@ -237,7 +317,7 @@ __aicore__ inline void SendWaveCombineTokenDedupMerge(const MoeStageCommonConfig
         const uint32_t segLen = h - segBase < WAVE_COMBINE_DEDUP_SEG_ELEMS ? h - segBase : WAVE_COMBINE_DEDUP_SEG_ELEMS;
         AccumulateDedupMemberSegment(dedupScratch, gmm2AbsGm, params, descRowBase, memberCount, mulWeights, h, segBase,
                                      segLen);
-        Cast(dedupScratch.mergeSendTensor[segBase], dedupScratch.accumTensor, RoundMode::CAST_RINT, segLen);
+        Cast(mergeSendUb[segBase], dedupScratch.accumTensor, RoundMode::CAST_RINT, segLen);
         PipeBarrier<PIPE_V>(); // 下一段的累加 Cast 复写 accum 前，本段回写 Cast 已读完
     }
     if (mulWeights) {
@@ -248,12 +328,14 @@ __aicore__ inline void SendWaveCombineTokenDedupMerge(const MoeStageCommonConfig
     SetFlag<HardEvent::V_MTE3>(mergeEvent);
     WaitFlag<HardEvent::V_MTE3>(mergeEvent);
     DataCopyExtParams ub2GmParams{1U, h * static_cast<uint32_t>(sizeof(bfloat16_t)), 0U, 0U, 0U};
-    DataCopyPad(gmRemoteD[gmDstRowOffset], dedupScratch.mergeSendTensor, ub2GmParams);
+    DataCopyPad(gmRemoteD[gmDstRowOffset], mergeSendUb, ub2GmParams);
     SetFlag<HardEvent::MTE3_V>(mergeEvent);
 }
 
-// 排空去重 combine 的全部在途事件：行环 slot（复用基础 Drain）+ 成员乒乓 + 合并发送。
-// 与 ArmWaveCombineDedupEvents 严格配对：每个事件 id 无条件 Wait 掉最后一个在途 Set。
+/*
+ * 排空去重 combine 的全部在途事件：行环 slot（复用基础 Drain）+ 成员乒乓 + 合并发送。
+ * 与 ArmWaveCombineDedupEvents 严格配对：每个事件 id 无条件 Wait 掉最后一个在途 Set。
+ */
 __aicore__ inline void DrainCombineRowBuffersDedup(uint32_t& issuedRowCount, uint32_t rowBufferCount)
 {
     if constexpr (g_coreType == AIC) {
@@ -262,7 +344,8 @@ __aicore__ inline void DrainCombineRowBuffersDedup(uint32_t& issuedRowCount, uin
     DrainCombineRowBuffers(issuedRowCount, rowBufferCount);
     WaitFlag<HardEvent::V_MTE2>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE));
     WaitFlag<HardEvent::V_MTE2>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MEMBER_EVENT_BASE + 1));
-    WaitFlag<HardEvent::MTE3_V>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT));
+    WaitFlag<HardEvent::MTE3_V>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT_BASE));
+    WaitFlag<HardEvent::MTE3_V>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT_BASE + 1));
 }
 
 // prepass 槽 0（done 计数：AIV1 低 16 位、AIV0 参与档另有高 16 位）到齐后整张 desc 表方可读；
@@ -271,7 +354,8 @@ __aicore__ inline void WaitDedupPrepassAllDone(const Params& params)
 {
     WaitUntilGmFlagEquals(reinterpret_cast<__gm__ int32_t*>(params.workspaceInfo.dedupPrepassReadyPtr),
                           params.tilingData->hiddenDim <= DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM ?
-                              (static_cast<int32_t>(GetBlockNum()) | (static_cast<int32_t>(GetBlockNum()) << 16)) :
+                              (static_cast<int32_t>(GetBlockNum()) |
+                               (static_cast<int32_t>(GetBlockNum()) << DEDUP_PREPASS_DONE_AIV0_SHIFT)) :
                               static_cast<int32_t>(GetBlockNum()));
 }
 

@@ -186,7 +186,25 @@ __aicore__ inline void DedupPrepassScanSlot(DedupPrepassWorker<TopkIndexType>& w
                                             int32_t segCount, int32_t rowBase, int32_t segBase, uint32_t expertIdx,
                                             int32_t expertRowBegin)
 {
-    for (int32_t entryIdx = 0; entryIdx < segCount; ++entryIdx) {
+    /*
+     * 槽内升序：二分首个 >= targetLo 的条目作扫描起点，窗口前的条目免逐条标量跳过
+     * （大 bs 下每槽窗口外条目可达千级）。防御性下界判断保留，产出表不变。
+     */
+    int32_t scanBegin = 0;
+    {
+        int32_t lo = 0;
+        int32_t hi = segCount;
+        while (lo < hi) {
+            const int32_t mid = (lo + hi) >> 1;
+            if (static_cast<int32_t>(routeSeg.GetValue(static_cast<uint32_t>(mid))) < window.targetLo) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        scanBegin = lo;
+    }
+    for (int32_t entryIdx = scanBegin; entryIdx < segCount; ++entryIdx) {
         const int32_t topkIndex = static_cast<int32_t>(routeSeg.GetValue(entryIdx));
         if (topkIndex < window.targetLo) {
             continue;
@@ -501,7 +519,8 @@ __aicore__ inline void BuildDedupRowDescTable(const DedupConfig& dedup, const Mo
     // 槽 0 = done 计数，AIV1 计低 16 位、AIV0 计高 16 位。dispatch 发布 gate 只等高位（全体 AIV0）：
     // 每个 AIV1 发布前自己必然已建完，AIV1 互等会打断 prepass 与 dispatch 的流水交叠（实测大形状
     // 明显劣化）；combine 兜底等全值。本核不等任何人。
-    AtomicAdd(readyBase, GetSubBlockIdx() == 1U ? static_cast<int32_t>(1) : static_cast<int32_t>(1) << 16);
+    AtomicAdd(readyBase, GetSubBlockIdx() == 1U ? static_cast<int32_t>(1) :
+                                                  static_cast<int32_t>(1) << DEDUP_PREPASS_DONE_AIV0_SHIFT);
 }
 
 } // namespace MegaMoeImpl
