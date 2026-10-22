@@ -81,10 +81,10 @@ aclnnStatus aclnnMhcSinkhornBackward(
 
   | 参数名 | 输入/输出 | 描述 | 使用说明 | 数据类型 | 数据格式 | 维度(shape) | 非连续Tensor |
   |:--- |:--- |:--- |:--- |:--- |:--- |:--- |:--- |
-  | gradOutput | 输入 | 表示Sinkhorn变换输出的初始梯度 | 不支持空Tensor | FLOAT32 | ND | (B,S,n,n)、(T,n,n) | √ |
-  | normOut| 输入 | 表示Sinkhorn变换正向计算保存的中间结果norm| 不支持空Tensor | FLOAT32 | ND | (2\*num_iters\*n\*align_n\*B\*S)、(2\*num_iters\*n\*align_n\*T) | √ |
-  | sumOut| 输入 | 表示Sinkhorn变换正向计算保存的中间结果sum | 不支持空Tensor | FLOAT32 | ND | (2\*num_iters\*align_n\*B\*S)、(2\*num_iters\*align_n\*T) | √ |
-  | out| 输出 | 表示对Sinkhorn变换的输入$\mathbf{H}_{\text{res}}$的梯度 | 不支持空Tensor | FLOAT32 | ND | (B,S,n,n)、(T,n,n) | √ |
+  | gradOutput | 输入 | 表示Sinkhorn变换输出的初始梯度 | 空Tensor情况见约束说明 | FLOAT32 | ND | (B,S,n,n)、(T,n,n) | √ |
+  | normOut| 输入 | 表示Sinkhorn变换正向计算保存的中间结果norm| 空Tensor情况见约束说明 | FLOAT32 | ND | (2\*num_iters\*n\*align_n\*B\*S)、(2\*num_iters\*n\*align_n\*T) | √ |
+  | sumOut| 输入 | 表示Sinkhorn变换正向计算保存的中间结果sum | 空Tensor情况见约束说明 | FLOAT32 | ND | (2\*num_iters\*align_n\*B\*S)、(2\*num_iters\*align_n\*T) | √ |
+  | out| 输出 | 表示对Sinkhorn变换的输入$\mathbf{H}_{\text{res}}$的梯度 | 空Tensor情况见约束说明 | FLOAT32 | ND | (B,S,n,n)、(T,n,n) | √ |
   | workspaceSize | 输出 | 返回需要在Device侧申请的workspace大小。 | - | - | - | - | - |
   | executor | 输出 | 返回op执行器，包含了算子计算流程。 | - | - | - | - | - |
 
@@ -143,6 +143,7 @@ aclnnStatus aclnnMhcSinkhornBackward(
   - n：输入矩阵最后两维尺寸，仅支持4、6或8。
   - align_n：固定为8，是n按FP32块大小32字节对齐后的值。
   - 维度数：输入gradOutput仅支持3维(T,n,n)或4维(B,S,n,n)。
+  - 空Tensor：当gradOutput和out的shape为(0,4,4)，且normOut和sumOut的shape均为(0)时，aclnnMhcSinkhornBackwardGetWorkspaceSize返回ACLNN_SUCCESS，workspaceSize为0。
 
 ## 调用示例
 
