@@ -73,7 +73,7 @@
             $$
 
             $$
-            quantResult = round(x / dynamicQuantScaleOutOptional)
+            quantResult = round(x * scaleOptional / dynamicQuantScaleOutOptional)
             $$
 
   6.对quantResult取前NUM\_ROWS个sortedRowIdx的对应位置的值，得出expandedXOut：
