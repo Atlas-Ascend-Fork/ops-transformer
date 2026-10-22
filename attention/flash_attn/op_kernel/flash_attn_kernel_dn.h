@@ -526,7 +526,12 @@ public:
         info.faTmpOutWsPos = coreFirstTmpOutWsPos_;
         info.isLastS2Loop = (s2Cur + 1 == curS2End_);
         info.actMSizeAlign32 = (info.actMSize + 31) >> 5 << 5;
-        info.actVecMSize = info.actMSize <= 16 ? info.actMSize : (info.actMSizeAlign32 / CV_RATIO);
+        if constexpr (CV_RATIO == 1) {
+            // 单 AIV(CV=1:1): 有效输出行数取实际行数, 与不合轴 DN 保持同一约定
+            info.actVecMSize = info.actMSize;
+        } else {
+            info.actVecMSize = info.actMSize <= 16 ? info.actMSize : (info.actMSizeAlign32 / CV_RATIO);
+        }
         info.vecMbaseIdx = 0;
         if (constInfo_.subBlockIdx == 1) {
             info.vecMbaseIdx = info.actVecMSize;
