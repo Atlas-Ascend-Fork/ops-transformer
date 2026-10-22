@@ -25,12 +25,12 @@
 
 - **接口功能**:
 
-  `quant_flash_attn`是基于`torch_npu`的`cann_ops_transformer`扩展接口，用于调用`QuantFlashAttn`算子完成全量化注意力计算，训练推理归一化。当前支持 MxFP4 与 MxFP8 Softmax FP16 场景：
+  `quant_flash_attn`是基于`torch_npu`的`cann_ops_transformer`扩展接口，用于调用`QuantFlashAttn`算子完成全量化注意力计算，训练推理归一。当前支持 MxFP4 与 MxFP8 Softmax FP16 场景：
 
   - **MxFP4场景**（`quant_mode=5`）：Q/K/V 均采用 MxFP4，P 采用 MxFP4，Softmax 在 FP16 下计算。
   - **MxFP8 Softmax FP16场景**（`quant_mode=3`）：Q/K/V 均采用 MxFP8（float8_e4m3fn），P 采用 FP8_E4M3（per-tensor），Softmax 在 FP16 下计算。
 
-  `quant_flash_attn_metadata`是`quant_flash_attn`的元数据生成接口，用于在主算子执行前生成metadata。metadata记录AICore/AIVCore的任务切分结果，主算子可选择传入该metadata以优化调度。典型调用流程如下：
+  `quant_flash_attn_metadata`是`quant_flash_attn`的元数据生成接口，用于在主算子执行前生成metadata。metadata记录AI Core/AIVCore的任务切分结果，主算子可选择传入该metadata以优化调度。典型调用流程如下：
 
   1. 准备`q`、`k`、`v`等输入。
   2. 调用`quant_flash_attn_metadata`生成`metadata`。
