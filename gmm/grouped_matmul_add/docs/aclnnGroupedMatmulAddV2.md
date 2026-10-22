@@ -123,7 +123,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>表示输入和输出分组轴方向的matmul大小分布。</td>
       <td>-</td>
       <td>INT64</td>
-      <td>-</td>
+      <td>ND</td>
       <td>-</td>
       <td>-</td>
     </tr>
@@ -246,8 +246,8 @@ aclnnStatus aclnnGroupedMatmulAddV2(
     </tr>
       <td>x与weight的数据类型不一致。</td>
     <tr>
-      <td>ACLNN_ERR_INNER_TILING_ERROR</td>
-      <td>561002</td>
+      <td>ACLNN_ERR_PARAM_NULLPTR</td>
+      <td>161002</td>
       <td>x、weight、yRef的shape不满足矩阵乘限制要求。</td>
     </tr>
   </tbody></table>

@@ -112,7 +112,7 @@ aclnnStatus aclnnGroupedMatmulAdd(
       <td>表示输入和输出分组轴方向的matmul大小分布，Device侧的aclTensor类型。</td>
       <td>仅支持累积和（cumsum模式）。</td>
       <td>INT64</td>
-      <td>-</td>
+      <td>ND</td>
       <td>-</td>
       <td>-</td>
     </tr>
@@ -215,8 +215,8 @@ aclnnStatus aclnnGroupedMatmulAdd(
         <td>x与weight的数据类型不一致。</td>
       </tr>
       <tr>
-        <td>ACLNN_ERR_INNER_TILING_ERROR</td>
-        <td>561002</td>
+        <td>ACLNN_ERR_PARAM_NULLPTR</td>
+        <td>161001</td>
         <td>x、weight、yRef的shape不满足矩阵乘限制要求。</td>
       </tr>
     </tbody>
