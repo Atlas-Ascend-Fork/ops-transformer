@@ -33,6 +33,16 @@
   $(I-A)^{-1} = (I+A)(I+A^2)(I+A^4)\cdots(I+A^{C/2})$在$\log_2 C$轮内求出，无需逐行前代。
   $q\_kernel$、$k\_kernel$为$q$、$k$的BTHD到BHTD重排，不参与数学计算。
 
+  Use the doubling algorithm above only when $\max_i\sum_j|A_{ij}| < 0.75$.
+  Otherwise, use vectorized FP32 forward substitution while preserving the per-row
+  update order. For `K=V=128`, compute $T$ once using FP32 forward substitution,
+  then apply FP16 hi/lo split products (`hi*hi`, `hi*lo`, and `lo*hi`, accumulated
+  in FP32) to obtain W/U. If finite-value or range checks fail, recompute the
+  whole chunk using direct FP32 forward substitution for W/U. This fallback
+  runs entirely on the NPU. The operator interface, tiling layout, and workspace
+  size remain unchanged.
+
+
 ## 参数说明
 
 | 参数名 | 输入/输出/属性 | 描述 | 数据类型 | 数据格式 |
