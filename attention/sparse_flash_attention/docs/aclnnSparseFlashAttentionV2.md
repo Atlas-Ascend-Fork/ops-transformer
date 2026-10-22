@@ -184,7 +184,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
       </td>
       <td>INT32</td>
       <td>ND</td>
-      <td>shape支持(B,S2/block_size)。</td>
+      <td>shape为(B,block_table_size)，其中block_table_size不小于ceilDiv(S2_max,block_size)。</td>
       <td>x</td>
     </tr>
     <tr>
