@@ -604,6 +604,8 @@ ge::graphStatus BSATiling::ParseSeqlensInTND(gert::TilingContext* bsaContext)
         maxKvSeqlen_ = (kvSeqLenList_[bIdx] > maxKvSeqlen_) ? kvSeqLenList_[bIdx] : maxKvSeqlen_;
         btKvTokens_ += static_cast<uint32_t>((kvSeqLenList_[bIdx] + NUM_64 - 1) / NUM_64); // CeilDiv(S2_b, 64)
     }
+    maxEffectiveQSeqlen_ = maxQSeqlen_;
+    maxEffectiveKvSeqlen_ = maxKvSeqlen_;
     useUniformQSeqlen_ = false;
     useUniformKvSeqlen_ = false;
     return ge::GRAPH_SUCCESS;
@@ -627,6 +629,8 @@ ge::graphStatus BSATiling::ParseSeqlensInNonTND(gert::TilingContext* bsaContext)
         qSeqLenList_ = actualSeqLengths->GetData<int64_t>();
         kvSeqLenList_ = actualSeqLengthsKv->GetData<int64_t>();
 
+        maxEffectiveQSeqlen_ = 0;
+        maxEffectiveKvSeqlen_ = 0;
         // 校验BNSD/BSND格式时，每个batch的actualSeqLength须小于等于maxSeqLength
         for (uint32_t i = 0; i < batch_; i++) {
             if (qSeqLenList_[i] > maxQSeqlen_) {
@@ -643,10 +647,15 @@ ge::graphStatus BSATiling::ParseSeqlensInNonTND(gert::TilingContext* bsaContext)
                         maxKvSeqlen_, i, kvSeqLenList_[i]);
                 return ge::GRAPH_FAILED;
             }
+            maxEffectiveQSeqlen_ = (qSeqLenList_[i] > maxEffectiveQSeqlen_) ? qSeqLenList_[i] : maxEffectiveQSeqlen_;
+            maxEffectiveKvSeqlen_ =
+                (kvSeqLenList_[i] > maxEffectiveKvSeqlen_) ? kvSeqLenList_[i] : maxEffectiveKvSeqlen_;
         }
         useUniformQSeqlen_ = false;
         useUniformKvSeqlen_ = false;
     } else if (actualSeqLengths == nullptr && actualSeqLengthsKv == nullptr) {
+        maxEffectiveQSeqlen_ = maxQSeqlen_;
+        maxEffectiveKvSeqlen_ = maxKvSeqlen_;
         useUniformQSeqlen_ = true;
         useUniformKvSeqlen_ = true;
     } else {
@@ -708,6 +717,18 @@ ge::graphStatus BSATiling::CheckSparsePattern(gert::TilingContext* bsaContext, c
                 "BlockSparseMask must have consistent numHeads with context,"
                 "but got BlockSparseMask numHeads(dim1): %u, context numHeads: %u.",
                 blockSparseMaskNumHeads, numHeads_);
+        return ge::GRAPH_FAILED;
+    }
+
+    uint32_t expectedMaxQBlockNum = CeilDiv(maxEffectiveQSeqlen_, blockShapeX_);
+    uint32_t expectedMaxKVBlockNum = CeilDiv(maxEffectiveKvSeqlen_, blockShapeY_);
+    if (maxQBlockNum_ < expectedMaxQBlockNum || maxKvBlockNum_ < expectedMaxKVBlockNum) {
+        OP_LOGE(bsaContext->GetNodeName(),
+                "BlockSparseMask requires qBlockNum (dim2) >= %u and kvBlockNum (dim3) >= %u, "
+                "but got (%u, %u). The minimum values are calculated using maximum effective sequence lengths "
+                "(Q: %u, KV: %u) and blockShape (X: %ld, Y: %ld).",
+                expectedMaxQBlockNum, expectedMaxKVBlockNum, maxQBlockNum_, maxKvBlockNum_, maxEffectiveQSeqlen_,
+                maxEffectiveKvSeqlen_, blockShapeX_, blockShapeY_);
         return ge::GRAPH_FAILED;
     }
 
