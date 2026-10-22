@@ -258,7 +258,7 @@ uint64_t MatmulReduceScatterTilingBase::GetTilingKey() const
     uint8_t commAlg =
         isPeerOnly_ ? TPL_CCU_REDUCESUM_PEER_ONLY : (isA2APath_ ? TPL_CCU_ALL2ALL_VEC_REDUCE : TPL_CCU_REDUCESUM);
     uint64_t tilingKey = GET_TPL_TILING_KEY(false, args_.isATrans, args_.isBTrans, inputIsBf16Fp16, OUTPUT_TYPE_IS_FP8,
-                                            TPL_X1_X2_DTYPE_IS_OTHER, commAlg, commMode_);
+                                            TPL_X1_X2_DTYPE_IS_OTHER, commAlg, commMode_, false);
     OP_LOGD(opName_, "args_.isATrans, args_.isBTrans, inputIsBf16Fp16 is: [%d, %d, %d]", args_.isATrans, args_.isBTrans,
             inputIsBf16Fp16);
     return tilingKey;
@@ -468,6 +468,15 @@ void MatmulReduceScatterTilingBase::SetReduceScatterTilingArgsDataType()
     auto bType = context_->GetInputDesc(1)->GetDataType();
     auto cType = context_->GetOutputDesc(0)->GetDataType();
     const gert::StorageShape* matrix_bias = context_->GetOptionalInputShape(2);
+    if (matrix_bias != nullptr) {
+        const auto& biasShape = matrix_bias->GetStorageShape();
+        for (size_t i = 0; i < biasShape.GetDimNum(); ++i) {
+            if (biasShape.GetDim(i) <= 0) {
+                matrix_bias = nullptr; // 空 Tensor 按未启用 bias 处理。
+                break;
+            }
+        }
+    }
     if (matrix_bias == nullptr) {
         isBias = false;
         biasType = cType;
@@ -475,7 +484,10 @@ void MatmulReduceScatterTilingBase::SetReduceScatterTilingArgsDataType()
         biasType = context_->GetInputDesc(BIAS_INDEX)->GetDataType();
     }
 
-    uint64_t inputDtypeSize = mc2tiling::GetDataTypeSize(opName_, aType);
+    // 性能模型只接受整数字节大小，HiFP4 用 B8 保守估算；实际 B4 数据和 scale 由 APACE 单独计算。
+    const auto tilingAType = aType == ge::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : aType;
+    const auto tilingBType = bType == ge::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : bType;
+    uint64_t inputDtypeSize = mc2tiling::GetDataTypeSize(opName_, tilingAType);
     uint64_t outputDtypeSize = mc2tiling::GetDataTypeSize(opName_, cType);
 
     args_.isBias = isBias;
@@ -483,8 +495,8 @@ void MatmulReduceScatterTilingBase::SetReduceScatterTilingArgsDataType()
     args_.geBType = bType;
     args_.geCType = cType;
     args_.geBiasType = biasType;
-    args_.aType = mc2tiling::ConvertGeTypeToMmType(opName_, aType);
-    args_.bType = mc2tiling::ConvertGeTypeToMmType(opName_, bType);
+    args_.aType = mc2tiling::ConvertGeTypeToMmType(opName_, tilingAType);
+    args_.bType = mc2tiling::ConvertGeTypeToMmType(opName_, tilingBType);
     args_.cType = mc2tiling::ConvertGeTypeToMmType(opName_, cType);
     args_.biasType = mc2tiling::ConvertGeTypeToMmType(opName_, biasType); // 因为bias可能不存在，先采用biasType规避
     args_.inputDtypeSize = inputDtypeSize;
