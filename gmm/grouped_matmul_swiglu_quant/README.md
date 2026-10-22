@@ -34,20 +34,19 @@
 
     * $Q∈\mathbb{Z_8}^{M \times N / 2}$：量化后的输出矩阵。
     * $Q\_scale∈\mathbb{R}^{M}$：量化缩放因子。
-    * $Q\_offset∈\mathbb{R}^{M}$：量化偏移因子。
   - **计算过程**
 
     - 1.根据groupList[i]确定当前分组的token ，$i \in [0,Len(groupList)]$。
 
       >例子：假设groupList=[3,4,4,6]，从0开始计数。
       >
-      >第0个右矩阵`W[0,:,:]`，对应索引位置[0,3)的token`x[0:3]`（共3-0=3个token），对应`x_scale[0:3]`、`w_scale[0]`、`bias[0]`、`offset[0]`、`Q[0:3]`、`Q_scale[0:3]`、`Q_offset[0:3]`；
+      >第0个右矩阵`W[0,:,:]`，对应索引位置[0,3)的token`x[0:3]`（共3-0=3个token），对应`x_scale[0:3]`、`w_scale[0]`、`bias[0]`、`offset[0]`、`Q[0:3]`、`Q_scale[0:3]`；
       >
-      >第1个右矩阵`W[1,:,:]`，对应索引位置[3,4)的token`x[3:4]`（共4-3=1个token），对应`x_scale[3:4]`、`w_scale[1]`、`bias[1]`、`offset[1]`、`Q[3:4]`、`Q_scale[3:4]`、`Q_offset[3:4]`；
+      >第1个右矩阵`W[1,:,:]`，对应索引位置[3,4)的token`x[3:4]`（共4-3=1个token），对应`x_scale[3:4]`、`w_scale[1]`、`bias[1]`、`offset[1]`、`Q[3:4]`、`Q_scale[3:4]`；
       >
-      >第2个右矩阵`W[2,:,:]`，对应索引位置[4,4)的token`x[4:4]`（共4-4=0个token），对应`x_scale[4:4]`、`w_scale[2]`、`bias[2]`、`offset[2]`、`Q[4:4]`、`Q_scale[4:4]`、`Q_offset[4:4]`；
+      >第2个右矩阵`W[2,:,:]`，对应索引位置[4,4)的token`x[4:4]`（共4-4=0个token），对应`x_scale[4:4]`、`w_scale[2]`、`bias[2]`、`offset[2]`、`Q[4:4]`、`Q_scale[4:4]`；
       >
-      >第3个右矩阵`W[3,:,:]`，对应索引位置[4,6)的token`x[4:6]`（共6-4=2个token），对应`x_scale[4:6]`、`w_scale[3]`、`bias[3]`、`offset[3]`、`Q[4:6]`、`Q_scale[4:6]`、`Q_offset[4:6]`；
+      >第3个右矩阵`W[3,:,:]`，对应索引位置[4,6)的token`x[4:6]`（共6-4=2个token），对应`x_scale[4:6]`、`w_scale[3]`、`bias[3]`、`offset[3]`、`Q[4:6]`、`Q_scale[4:6]`；
       >
       >请注意：groupList中未指定的部分将不会参与更新。
       >例如groupList=[12,14,18]，X的shape为[30，:]。
@@ -162,10 +161,10 @@
 </tr>
 <tr>
 <td style="white-space: nowrap">outputOffset</td>
-<td style="white-space: nowrap">输出</td>
-<td style="white-space: nowrap">输出的非对称量化的偏移，公式中的Q_offset。</td>
-<td style="white-space: nowrap">FLOAT</td>
-<td style="white-space: nowrap">ND</td>
+<td style="white-space: nowrap">预留参数</td>
+<td style="white-space: nowrap">兼容接口预留参数；当前版本不支持，必须传空指针。</td>
+<td style="white-space: nowrap">-</td>
+<td style="white-space: nowrap">-</td>
 </tr>
 </tbody>
 </table>
