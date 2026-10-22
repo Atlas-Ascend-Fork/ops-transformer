@@ -11,6 +11,7 @@
 #include "log/log.h"
 #include "../mqfa_fa_tiling_info.h"
 #include "mqfa_quant_checker.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace optiling {
 namespace mixed_quant_flash_attn {
@@ -27,17 +28,17 @@ ge::graphStatus QuantChecker::CheckSinglePara(const FaTilingInfo& faInfo)
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(
-        faInfo.kDescaleType != ge::DT_FLOAT8_E8M0 && faInfo.kDescaleType != ge::DT_HIFLOAT4_SCALE,
+        faInfo.kDescaleType != ge::DT_FLOAT8_E8M0 && faInfo.kDescaleType != Ops::Transformer::DT_HIFLOAT4_SCALE,
         OP_LOGE_FOR_INVALID_DTYPE(faInfo.opName, "k_descale", DataTypeToSerialString(faInfo.kDescaleType).c_str(),
                                   "FLOAT8_E8M0 or HIFLOAT4_SCALE"),
         return ge::GRAPH_FAILED);
     OP_CHECK_IF(
-        faInfo.vDescaleType != ge::DT_FLOAT8_E8M0 && faInfo.vDescaleType != ge::DT_HIFLOAT4_SCALE,
+        faInfo.vDescaleType != ge::DT_FLOAT8_E8M0 && faInfo.vDescaleType != Ops::Transformer::DT_HIFLOAT4_SCALE,
         OP_LOGE_FOR_INVALID_DTYPE(faInfo.opName, "v_descale", DataTypeToSerialString(faInfo.vDescaleType).c_str(),
                                   "FLOAT8_E8M0 or HIFLOAT4_SCALE"),
         return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(faInfo.inputKvType != ge::DT_FLOAT4_E2M1 && faInfo.inputKvType != ge::DT_HIFLOAT4,
+    OP_CHECK_IF(faInfo.inputKvType != ge::DT_FLOAT4_E2M1 && faInfo.inputKvType != Ops::Transformer::DT_HIFLOAT4,
                 OP_LOGE_FOR_INVALID_DTYPE(faInfo.opName, "k/v", DataTypeToSerialString(faInfo.inputKvType).c_str(),
                                           "FLOAT4_E2M1 or HIFLOAT4"),
                 return ge::GRAPH_FAILED);
