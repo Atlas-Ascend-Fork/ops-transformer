@@ -91,10 +91,10 @@ public:
         : cubeBlock_(constInfo_, seqLensTool_),
           vecFaBlock_(constInfo_, seqLensTool_),
           vecFdBlock_(constInfo_, seqLensTool_){};
-    __aicore__ inline void Init(__gm__ uint8_t* query, __gm__ uint8_t* kCache, __gm__ uint8_t* attenMask,
-                                __gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* sequsedQ, __gm__ uint8_t* cacheSeqlens,
-                                __gm__ uint8_t* blockTable, __gm__ uint8_t* softmaxLse, __gm__ uint8_t* attentionOut,
-                                __gm__ uint8_t* workspace, __gm__ uint8_t* metadata,
+    __aicore__ inline void Init(__gm__ uint8_t* query, __gm__ uint8_t* kCache, __gm__ uint8_t* sinks,
+                                __gm__ uint8_t* attenMask, __gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* sequsedQ,
+                                __gm__ uint8_t* cacheSeqlens, __gm__ uint8_t* blockTable, __gm__ uint8_t* softmaxLse,
+                                __gm__ uint8_t* attentionOut, __gm__ uint8_t* workspace, __gm__ uint8_t* metadata,
                                 const optiling::FlashMlaNoQuantTilingArch35* __restrict tiling)
     {
         this->tilingData_ = tiling;
@@ -111,12 +111,13 @@ public:
             metaAivCoreNum_ * FlashMlaCommon::FD_METADATA_STRIDE * sectionNum_);
 
         InitConstInfo();
+        constInfo_.learnableSinkFlag = (sinks != nullptr);
 
         seqLensTool_.InitQ(cuSeqlensQ, sequsedQ, constInfo_.actualSeqLenSize, constInfo_.s1Size, constInfo_.bSize);
         seqLensTool_.InitKv(cacheSeqlens, constInfo_.actualSeqLenKVSize, constInfo_.s2Size);
 
         if ASCEND_IS_AIV {
-            vecFaBlock_.InitVecBlock(attenMask, softmaxLse, attentionOut, workspace);
+            vecFaBlock_.InitVecBlock(sinks, attenMask, softmaxLse, attentionOut, workspace);
             vecFaBlock_.ClearOutput(tilingData_->flashMlaEmptyTensorParams.needInit != 0);
         }
 
@@ -580,6 +581,7 @@ public:
 
         GetPreNextTokenLeftUp(actSeqLensQ_, actSeqLensKv_, info.preTokensLeftUp, info.nextTokensLeftUp);
 
+        info.isFirstFdBlock = !(headS2Split_ && bN2Cur == constInfo_.bN2Start && gS1Cur == constInfo_.gS1OStart);
         info.isFirstS2Loop = ((loop == 0) || (s2Cur == curS2Start_));
         info.isS2SplitCore = false;
         info.faTmpOutWsPos = constInfo_.coreFirstTmpOutWsPos;

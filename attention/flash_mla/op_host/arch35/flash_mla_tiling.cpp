@@ -204,8 +204,14 @@ void FlashMlaTilingImpl::ComputeTilingData()
 {
     auto& maskParams = tilingData_.baseTiling.flashMlaAttenMaskParams;
     maskParams.sparseMode = static_cast<uint8_t>(faInfo_->maskMode);
-    maskParams.preTokens = static_cast<int32_t>(faInfo_->preTokens);
-    maskParams.nextTokens = static_cast<int32_t>(faInfo_->nextTokens);
+    maskParams.preTokens = MASK_MODE_INT_MAX;
+    maskParams.nextTokens = MASK_MODE_INT_MAX;
+    if (faInfo_->maskMode == static_cast<int64_t>(MaskMode::CAUSAL)) {
+        maskParams.nextTokens = 0;
+    } else if (faInfo_->maskMode == static_cast<int64_t>(MaskMode::BAND)) {
+        maskParams.preTokens = static_cast<int32_t>(faInfo_->winLeft == -1 ? MASK_MODE_INT_MAX : faInfo_->winLeft);
+        maskParams.nextTokens = static_cast<int32_t>(faInfo_->winRight == -1 ? MASK_MODE_INT_MAX : faInfo_->winRight);
+    }
     tilingKeyInfo_.hasAttenMask = faInfo_->maskMode != static_cast<int64_t>(MaskMode::NO_MASK);
     if (tilingKeyInfo_.hasAttenMask) {
         const auto& maskShape = faInfo_->opParamInfo.attnMask.tensor->GetStorageShape();

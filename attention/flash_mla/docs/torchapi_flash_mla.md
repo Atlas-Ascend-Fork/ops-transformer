@@ -79,6 +79,8 @@ cann_ops_transformer.flash_mla_metadata(
     head_dim_qk=576,
     head_dim_v=512,
     mask_mode=None,
+    win_left=-1,
+    win_right=-1,
     layout_q="BSND",
 ) -> Tensor
 ```
@@ -91,11 +93,14 @@ cann_ops_transformer.flash_mla(
     cache_seqlens=None,
     cu_seqlens_q=None,
     seqused_q=None,
+    sinks=None,
     attn_mask=None,
     metadata=None,
     head_dim_v=512,
     softmax_scale=1.0,
     mask_mode=0,
+    win_left=-1,
+    win_right=-1,
     max_seqlen_q=-1,
     max_seqlen_kv=-1,
     layout_q="BSND",
@@ -120,8 +125,11 @@ cann_ops_transformer.flash_mla(
 | max_seqlen_kv | int | 可选 | 允许-1或非负值；默认None归一化为-1 | int32 | - | - |
 | head_dim_qk | int | 可选 | Query/Key逻辑头维，固定576，不能传nope部分的512 | int32 | - | - |
 | head_dim_v | int | 可选 | Value头维，固定512 | int32 | - | - |
-| mask_mode | int | 可选 | 0或3；默认None归一化为0，与主算子一致 | int32 | - | - |
+| mask_mode | int | 可选 | 0、3或4；默认None归一化为0，与主算子一致 | int32 | - | - |
+| win_left | int | 可选 | mode=4时的左窗口，范围[-1, INT32_MAX]，-1表示无界；其他模式须为-1 | int32 | - | - |
+| win_right | int | 可选 | mode=4时的右窗口，范围[-1, INT32_MAX]，-1表示无界；其他模式须为-1 | int32 | - | - |
 | layout_q | string | 可选 | 支持BSND、BNSD、TND，默认BSND | string | - | - |
+
 
 ### flash_mla
 
@@ -133,11 +141,14 @@ cann_ops_transformer.flash_mla(
 | cache_seqlens | Tensor | 必选 | 各batch有效KV长度 | int32 | ND | (B,) |
 | cu_seqlens_q | Tensor | 条件必选 | TND时必传、非TND时不能传；累积Query长度，首项0，末项Q_T | int32 | ND | (B+1,) |
 | seqused_q | Tensor | 可选 | 各batch实际使用的Query长度 | int32 | ND | (B,) |
-| attn_mask | Tensor | 可选 | mask_mode=3时必传；mask_mode=0时不传 | int8 | ND | (2048, 2048) |
+| sinks | Tensor | 可选 | 每个 Q head 的 softmax sink logit；None 或形状(0,)表示关闭 | float32 | ND | (num_heads_q,) |
+| attn_mask | Tensor | 可选 | mask_mode=3或4时必传；mask_mode=0时不传 | int8 | ND | (2048, 2048) |
 | metadata | Tensor | 必选 | 配套metadata接口生成的调度数据 | int32 | ND | (max_schedule_size,) |
 | head_dim_v | int | 可选 | Value头维，固定512，默认512 | int32 | - | - |
 | softmax_scale | float | 可选 | 注意力分数缩放系数，默认1.0 | float32 | - | - |
-| mask_mode | int | 可选 | 仅0、3，默认0 | int32 | - | - |
+| mask_mode | int | 可选 | 0无掩码、3右对齐因果、4右对齐滑动窗口，默认0 | int32 | - | - |
+| win_left | int | 可选 | 左窗口，同metadata接口，默认-1 | int32 | - | - |
+| win_right | int | 可选 | 右窗口，同metadata接口，默认-1 | int32 | - | - |
 | max_seqlen_q | int | 可选 | 允许-1或非负值，默认-1 | int32 | - | - |
 | max_seqlen_kv | int | 可选 | 允许-1或非负值，默认-1 | int32 | - | - |
 | layout_q | string | 可选 | 支持BSND、BNSD、TND，默认BSND | string | - | - |
@@ -168,6 +179,8 @@ metadata的shape根据batch数和设备核数动态计算。
 - softmax_lse：return_softmax_lse为True时，TND输入的shape为(Q_N, Q_T)，BSND/BNSD输入的shape为(B, Q_N, Q_S)；为False时，shape为(0,)。
 
 ## 约束说明
+
+- Q、k_cache 任一维度大小为0时，入口报错；不支持空 Q 或空 k_cache。
 
 - `block_table`、序列长度、`attn_mask`和`metadata`中的值由调用者保证正确。Tiling阶段不能全面校验设备Tensor内容，非法值可能导致精度错误或非法内存访问。
 - metadata接口和主算子的序列长度、头数、头维、掩码模式及Query布局必须一致。输入变化后应重新生成对应metadata。
@@ -235,8 +248,33 @@ layout匹配关系表：
 
 | 参数 | 单参数校验 | 存在性校验 | 一致性校验 | 特性交叉校验 |
 | :--- | :--- | :--- | :--- | :--- |
-| mask_mode | 仅0、3 | 可省略，默认0 | 与metadata生成时相同 | 0无掩码；3右对齐因果掩码 |
-| attn_mask | int8、ND、(2048, 2048) | mode=0不传；mode=3必传 | 对角线及其下方为0，上方为1 | 配合mode=3解释为右对齐因果掩码 |
+| mask_mode | 仅0、3、4 | 可省略，默认0 | 与metadata生成时相同 | 0无掩码；3右对齐因果掩码；4右对齐滑动窗口 |
+| attn_mask | int8、ND、(2048, 2048) | mode=0不传；mode=3或4必传 | 对角线及其下方为0，上方为1 | mode=3/4共用上三角压缩模板 |
+
+#### BAND 滑动窗口（mask_mode=4）
+
+主算子和 metadata 接口都接收 `win_left=-1`、`win_right=-1`，必须传入相同值。
+两者取值范围为 `[-1, INT32_MAX]`；`-1` 表示该侧不限制。
+`mask_mode=0/3` 时两者必须保持 `-1`。
+
+对每个 batch，以实际序列长度 `S_q`、`S_kv` 计算右对齐位置 `p = i + S_kv - S_q`。
+Q 的第 `i` 行可见的 KV 索引满足闭区间 `p - win_left <= j <= p + win_right`，
+同时限制在 `[0, S_kv - 1]` 内；无限侧不施加对应边界。
+
+| win_left | win_right | 行为 |
+| --- | --- | --- |
+| -1 | -1 | 全可见，与 mode=0 的数学结果相同 |
+| -1 | 0 | 右对齐因果，与 mode=3 的数学结果相同 |
+| 0 | 0 | 仅看对齐位置 |
+| 127 | 0 | 当前对齐位置及之前最多127个token |
+| 2 | 1 | 左2、右1，包含对齐位置，共最多4个token |
+
+`attn_mask` 必须为 INT8、`[2048, 2048]`，上三角为1，对角线及下方为0，
+与 FlashAttn 的 mode=3/4 模板一致；不要将它替换为按实际序列展开的带状矩阵。
+窗口内没有有效 KV 的行，attention 输出为0，启用 LSE 时输出为正无穷。
+
+窗口默认值均为 -1。metadata 的窗口参数位于 `layout_q` 前，主算子的位于 `max_seqlen_q` 前，Python 和 ACLNN 保持相同顺序。
+C++ 调用方和 Torch 扩展须重新编译，使用配套的主算子及 metadata 包。
 
 #### Paged Attention参数组
 
@@ -317,3 +355,15 @@ assert softmax_lse.shape == (96, 8)
 assert attn_out.dtype == dtype
 assert softmax_lse.dtype == torch.float32
 ```
+
+### Learnable sink
+
+`sinks` 支持与 `mask_mode=0/3/4` 组合。每个 Q head 的 sink logit 不乘
+`softmax_scale`，只参与 softmax 分母和 LSE，不参与 V 加权分子：
+`out = sum(exp(score_j) * V_j) / (sum(exp(score_j)) + exp(sinks[h]))`。
+FlashDecode 跨核切分时仅在首个有效 KV 分块注入一次 sink；metadata 生成接口不需要 sinks。
+完全无有效 KV 的行沿用输出零、LSE 为正无穷的约定。
+
+Python、ACLNN 和 GE 的 `sinks` 均位于 `seqused_q` 之后、`attn_mask` 之前。
+ACLNN/GE 中 `sinks` 为第 7 个输入，`attn_mask`、`metadata` 分别为第 8、9 个输入。
+使用新接口需一起重建算子包与 Torch 扩展，位置参数调用需按新顺序传入 sinks 或 nullptr。

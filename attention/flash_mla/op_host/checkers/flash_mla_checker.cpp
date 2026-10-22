@@ -22,6 +22,7 @@
 #include "../flash_mla_tiling_info.h"
 #include "flash_mla_checker.h"
 #include "common_checker.h"
+#include "flash_mla_sinks_checker.h"
 
 namespace optiling {
 namespace flash_mla {
@@ -38,6 +39,7 @@ void FlashMlaChecker::RegisterCheckers()
     checkers_.push_back(std::make_unique<ActualSeqLenChecker>());
     checkers_.push_back(std::make_unique<PagedAttentionChecker>());
     checkers_.push_back(std::make_unique<MaskChecker>());
+    checkers_.push_back(std::make_unique<SinksChecker>());
     checkers_.push_back(std::make_unique<MetadataChecker>());
     checkers_.push_back(std::make_unique<SoftmaxLSEChecker>());
 }
@@ -86,7 +88,8 @@ ge::graphStatus FlashMlaChecker::CheckMultiPara(const FlashMlaTilingInfo& faInfo
 ge::graphStatus FlashMlaChecker::Process(const FlashMlaTilingInfo& faInfo)
 {
     if (faInfo.emptyTensorFlag) {
-        OP_LOGE(faInfo.opName, "Empty tensor detected: q, k_cache or attn_out has dimension with size 0");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(faInfo.opName, "q, k_cache, attn_out",
+                                                 "q, k_cache and attn_out must not have dimensions with size 0");
         return ge::GRAPH_FAILED;
     }
     if (ge::GRAPH_SUCCESS != CheckSinglePara(faInfo)) {

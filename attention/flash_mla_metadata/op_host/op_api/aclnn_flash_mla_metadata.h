@@ -17,11 +17,12 @@
 extern "C" {
 #endif
 
+// Use the same BAND windows as FlashMla; -1 means unbounded.
 __attribute__((visibility("default"))) aclnnStatus aclnnFlashMlaMetadataGetWorkspaceSize(
     const aclTensor* cuSeqlensQOptional, const aclTensor* cacheSeqlensOptional, const aclTensor* sequsedQOptional,
     int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
-    int64_t maskMode, const char* layoutQ, const aclTensor* metaData, uint64_t* workspaceSize,
-    aclOpExecutor** executor);
+    int64_t maskMode, int64_t winLeft, int64_t winRight, const char* layoutQ, const aclTensor* metaData,
+    uint64_t* workspaceSize, aclOpExecutor** executor);
 
 __attribute__((visibility("default"))) aclnnStatus aclnnFlashMlaMetadata(void* workspace, uint64_t workspaceSize,
                                                                          aclOpExecutor* executor, aclrtStream stream);

@@ -60,6 +60,8 @@ private:
     int32_t headDimQk_ = 0;
     int32_t headDimV_ = 0;
     int32_t maskMode_ = 0;
+    int64_t winLeft_ = -1;
+    int64_t winRight_ = -1;
     std::string layoutQ_ = "BSND";
     std::string socVersion_ = "";
     int32_t aicCoreNum_ = 36U; // 36: default aic num

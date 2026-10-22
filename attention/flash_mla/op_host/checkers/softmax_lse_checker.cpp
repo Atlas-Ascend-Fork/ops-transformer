@@ -63,7 +63,7 @@ ge::graphStatus SoftmaxLSEChecker::CheckParaExistence(const FlashMlaTilingInfo& 
 {
     if (faInfo.softmaxLseFlag) {
         const gert::StorageShape* lseOutShape = faInfo.opParamInfo.lseOut.shape;
-        OP_CHECK_IF(lseOutShape == nullptr,
+        OP_CHECK_IF(lseOutShape == nullptr || faInfo.opParamInfo.lseOut.desc == nullptr,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(faInfo.opName, "lse_out", "empty",
                                                           "When softmaxLSE is enabled, lse_out cannot be empty"),
                     return ge::GRAPH_FAILED);

@@ -13,7 +13,7 @@
 from .metadata import build_metadata
 
 
-METADATA_SLOT_INDEX = 7
+METADATA_SLOT_INDEX = 8
 
 
 def metadata_slot_declared(tensor_dtypes):
@@ -32,6 +32,7 @@ def run(
     cache_seqlens=None,
     cu_seqlens_q=None,
     seqused_q=None,
+    sinks=None,
     attn_mask=None,
     metadata=None,
     head_dim_v=512,

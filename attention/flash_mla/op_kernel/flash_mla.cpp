@@ -75,8 +75,9 @@ __aicore__ inline constexpr GmFormat GetKvLayoutMla()
 template <uint8_t inOutLayoutType, uint8_t KvLayoutType, bool hasAttenMask, uint8_t config>
 __global__ __aicore__ void flash_mla(__gm__ uint8_t* query, __gm__ uint8_t* kCache, __gm__ uint8_t* blockTable,
                                      __gm__ uint8_t* cacheSeqlens, __gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* sequsedQ,
-                                     __gm__ uint8_t* attnMask, __gm__ uint8_t* metadata, __gm__ uint8_t* attnOut,
-                                     __gm__ uint8_t* softmaxLse, __gm__ uint8_t* workspace, __gm__ uint8_t* tiling)
+                                     __gm__ uint8_t* sinks, __gm__ uint8_t* attnMask, __gm__ uint8_t* metadata,
+                                     __gm__ uint8_t* attnOut, __gm__ uint8_t* softmaxLse, __gm__ uint8_t* workspace,
+                                     __gm__ uint8_t* tiling)
 {
     REGISTER_TILING_DEFAULT(optiling::FlashMlaTilingData);
     __gm__ uint8_t* user = GetUserWorkspace(workspace);
@@ -126,7 +127,7 @@ __global__ __aicore__ void flash_mla(__gm__ uint8_t* query, __gm__ uint8_t* kCac
     using Kernel = FlashAttnKernel::FlashAttentionNoQuantMlaKernel<CubeBlock, VecFaBlock, VecFdBlock>;
 
     Kernel op;
-    op.Init(query, kCache, attnMask, cuSeqlensQ, sequsedQ, cacheSeqlens, blockTable, softmaxLse, attnOut, user,
+    op.Init(query, kCache, sinks, attnMask, cuSeqlensQ, sequsedQ, cacheSeqlens, blockTable, softmaxLse, attnOut, user,
             metadata, tilingData);
     op.Process();
 

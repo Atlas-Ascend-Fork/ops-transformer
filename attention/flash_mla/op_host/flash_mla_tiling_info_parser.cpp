@@ -177,6 +177,8 @@ void FlashMlaInfoParser::GetInputParaInfo()
     opParamInfo_.kCache.desc = context_->GetInputDesc(K_CACHE_INDEX);
     opParamInfo_.kCache.shape = context_->GetInputShape(K_CACHE_INDEX);
     GetOptionalInputParaInfo();
+    opParamInfo_.sinks.tensor = context_->GetOptionalInputTensor(SINKS_INDEX);
+    opParamInfo_.sinks.desc = context_->GetOptionalInputDesc(SINKS_INDEX);
 }
 
 ge::graphStatus FlashMlaInfoParser::GetStrides()
@@ -222,14 +224,16 @@ ge::graphStatus FlashMlaInfoParser::GetAttrParaInfo()
     opParamInfo_.layoutOut = attrs->GetStr(ATTR_LAYOUT_OUT_INDEX);
 
     opParamInfo_.returnSoftMaxLse = attrs->GetAttrPointer<int64_t>(ATTR_RETURN_LSE_INDEX);
+    opParamInfo_.winLeft = attrs->GetAttrPointer<int64_t>(ATTR_WIN_LEFT_INDEX);
+    opParamInfo_.winRight = attrs->GetAttrPointer<int64_t>(ATTR_WIN_RIGHT_INDEX);
 
     return ge::GRAPH_SUCCESS;
 }
 
 void FlashMlaInfoParser::GetMaskParams()
 {
-    winLeft_ = -1;
-    winRight_ = -1;
+    winLeft_ = opParamInfo_.winLeft == nullptr ? -1 : *opParamInfo_.winLeft;
+    winRight_ = opParamInfo_.winRight == nullptr ? -1 : *opParamInfo_.winRight;
     maskMode_ = (opParamInfo_.maskMode == nullptr) ? 0 : *opParamInfo_.maskMode;
 }
 
@@ -515,6 +519,15 @@ ge::graphStatus FlashMlaInfoParser::GetActualSeqInfo()
     return ge::GRAPH_SUCCESS;
 }
 
+void FlashMlaInfoParser::GetSinksInfo()
+{
+    sinkFlag_ = opParamInfo_.sinks.tensor != nullptr;
+    if (sinkFlag_) {
+        const auto& shape = opParamInfo_.sinks.tensor->GetStorageShape();
+        sinkFlag_ = shape.GetDimNum() != 1 || shape.GetDim(0) != 0;
+    }
+}
+
 void FlashMlaInfoParser::GenerateFeatureInfo(FlashMlaTilingInfo& faInfo)
 {
     faInfo.pageAttentionFlag = (kvStorageMode_ == KvStorageMode::PAGE_ATTENTION);
@@ -522,16 +535,11 @@ void FlashMlaInfoParser::GenerateFeatureInfo(FlashMlaTilingInfo& faInfo)
     faInfo.blockTypeSize = sizeof(float);
 
     faInfo.maskMode = maskMode_;
+    faInfo.sinkFlag = sinkFlag_;
     faInfo.attenMaskFlag = (opParamInfo_.attnMask.tensor != nullptr) &&
                            (opParamInfo_.attnMask.tensor->GetStorageShape().GetShapeSize() != 0);
     faInfo.winLeft = winLeft_;
     faInfo.winRight = winRight_;
-
-    faInfo.preTokens = MASK_MODE_INT_MAX;
-    faInfo.nextTokens = MASK_MODE_INT_MAX;
-    if (maskMode_ == static_cast<int64_t>(MaskMode::CAUSAL)) {
-        faInfo.nextTokens = 0;
-    }
 
     faInfo.returnSoftmaxLse = returnSoftmaxLse_;
     faInfo.softmaxLseFlag = softmaxLseFlag_;
@@ -685,9 +693,10 @@ ge::graphStatus FlashMlaInfoParser::ParseAxisInfo()
 ge::graphStatus FlashMlaInfoParser::ParseFeatureInfo()
 {
     GetMaskParams();
-    if (maskMode_ != static_cast<int64_t>(MaskMode::NO_MASK) && maskMode_ != static_cast<int64_t>(MaskMode::CAUSAL)) {
+    if (maskMode_ != static_cast<int64_t>(MaskMode::NO_MASK) && maskMode_ != static_cast<int64_t>(MaskMode::CAUSAL) &&
+        maskMode_ != static_cast<int64_t>(MaskMode::BAND)) {
         OP_LOGE_FOR_INVALID_VALUE(opName_, "mask_mode", std::to_string(maskMode_).c_str(),
-                                  "0 (no mask) or 3 (right-down causal)");
+                                  "0 (no mask), 3 (right-down causal) or 4 (band)");
         return ge::GRAPH_FAILED;
     }
     if (maskMode_ == static_cast<int64_t>(MaskMode::NO_MASK) && opParamInfo_.attnMask.tensor != nullptr) {
@@ -698,6 +707,8 @@ ge::graphStatus FlashMlaInfoParser::ParseFeatureInfo()
     if (ge::GRAPH_SUCCESS != GetActualSeqInfo()) {
         return ge::GRAPH_FAILED;
     }
+
+    GetSinksInfo();
 
     returnSoftmaxLse_ = (opParamInfo_.returnSoftMaxLse == nullptr) ? 0 : *opParamInfo_.returnSoftMaxLse;
     softmaxLseFlag_ = (returnSoftmaxLse_ != 0);

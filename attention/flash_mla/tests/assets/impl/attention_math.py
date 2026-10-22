@@ -8,15 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Shared mixed-precision reference primitives (not bitwise kernel emulation).
-
-Cube operands retain input precision; products accumulate into FP32. PyTorch's
-ordinary half matmul returns half, so use FP32 matmul on *tile-local* widened
-operands to emulate the accumulator without rounding QK or PV to half.
-Softmax max/sum and output accumulation remain FP32. The unnormalised exp
-weights round to the input dtype BEFORE PV, as in the Ascend vector-to-Cube
-handoff. Tile shape/reduction order may differ from the selected kernel.
-"""
+"""Mixed-precision attention reference primitives."""
 
 import torch
 
@@ -45,7 +37,15 @@ def attention_single(
             dtype=torch.float32,
             device=q.device,
         )
-        maximum = torch.full_like(total, float("-inf") if sink is None else sink)
+        if isinstance(sink, torch.Tensor) and sink.numel() > 1:
+            maximum = (
+                sink[qs:qe]
+                .to(device=q.device, dtype=torch.float32)
+                .reshape(-1, 1)
+                .clone()
+            )
+        else:
+            maximum = torch.full_like(total, float("-inf") if sink is None else sink)
         first, stop = (0, skv) if kv_bounds is None else kv_bounds(qs, qe)
         first = max(0, first // tile_size * tile_size)
         stop = min(skv, max(0, stop))
@@ -61,9 +61,7 @@ def attention_single(
                 and q.dtype in (torch.float16, torch.bfloat16)
                 and block < ke - ks
             ):
-                # Several kernel KV blocks share one large GEMM. Reproduce
-                # their running maxima/rounding with vector operations, then
-                # express all PV terms relative to the final maximum.
+                # Preserve rounding at each KV block before merging PV terms.
                 width = ke - ks
                 padded = (width + block - 1) // block * block
                 if padded != width:
@@ -111,11 +109,7 @@ def attention_single(
 
 
 def gather_pages(cache, block_table, batch, length, layout):
-    """Restore one batch in native dtype, gathering bounded groups of pages.
-
-    Validate only referenced entries: unused -1 padding is legal. Moving the
-    row once to CPU avoids one NPU scalar synchronisation per page.
-    """
+    """Restore one batch from the referenced cache pages."""
     bs = (
         cache.shape[3]
         if layout == "PA_NZ"

@@ -33,8 +33,8 @@ public:
     static inline aclnnStatus ParamsCheck(const aclTensor* cuSeqlensQOptional, const aclTensor* cacheSeqlensOptional,
                                           const aclTensor* sequsedQOptional, int64_t maxSeqlenQ, int64_t maxSeqlenKv,
                                           int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
-                                          int64_t maskMode, const char* layoutQ, const aclTensor* metadata,
-                                          uint32_t aicCoreNum, uint32_t aivCoreNum);
+                                          int64_t maskMode, int64_t winLeft, int64_t winRight, const char* layoutQ,
+                                          const aclTensor* metadata, uint32_t aicCoreNum, uint32_t aivCoreNum);
 
 private:
     static constexpr int64_t NONE_VALUE = -1;
@@ -46,7 +46,7 @@ private:
                                             int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
                                             const char* layoutQ);
 
-    static inline aclnnStatus CheckMask(int64_t maskMode);
+    static inline aclnnStatus CheckMask(int64_t maskMode, int64_t winLeft, int64_t winRight);
 
     static inline aclnnStatus CheckExistency(int64_t maxSeqlenQ, const char* layoutQ,
                                              const aclTensor* cuSeqlensQOptional, const aclTensor* cacheSeqlensOptional,
@@ -64,14 +64,15 @@ private:
 inline aclnnStatus FlashMlaMetadataCheck::ParamsCheck(
     const aclTensor* cuSeqlensQOptional, const aclTensor* cacheSeqlensOptional, const aclTensor* sequsedQOptional,
     int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
-    int64_t maskMode, const char* layoutQ, const aclTensor* metadata, uint32_t aicCoreNum, uint32_t aivCoreNum)
+    int64_t maskMode, int64_t winLeft, int64_t winRight, const char* layoutQ, const aclTensor* metadata,
+    uint32_t aicCoreNum, uint32_t aivCoreNum)
 {
     CHECK_COND(aicCoreNum > 0, ACLNN_ERR_RUNTIME_ERROR, "aicCoreNum should be larger than 0, but got %u", aicCoreNum);
     CHECK_COND(aivCoreNum > 0, ACLNN_ERR_RUNTIME_ERROR, "aivCoreNum should be larger than 0, but got %u", aivCoreNum);
 
     auto ret = CheckBaseAttr(maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, layoutQ);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
-    ret = CheckMask(maskMode);
+    ret = CheckMask(maskMode, winLeft, winRight);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     int64_t batchSize = NONE_VALUE;
     ret = CheckExistency(maxSeqlenQ, layoutQ, cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, metadata,
@@ -88,6 +89,7 @@ inline aclnnStatus FlashMlaMetadataCheck::CheckBaseAttr(int64_t maxSeqlenQ, int6
                                                         int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
                                                         const char* layoutQ)
 {
+    CHECK_COND(layoutQ != nullptr, ACLNN_ERR_PARAM_NULLPTR, "layoutQ must not be null");
     CHECK_COND((maxSeqlenQ == NONE_VALUE || maxSeqlenQ >= 0), ACLNN_ERR_RUNTIME_ERROR,
                "maxSeqlenQ must be %ld or greater than or equal to 0, but got %ld", NONE_VALUE, maxSeqlenQ);
     CHECK_COND((maxSeqlenKv == NONE_VALUE || maxSeqlenKv >= 0), ACLNN_ERR_RUNTIME_ERROR,
@@ -111,14 +113,19 @@ inline aclnnStatus FlashMlaMetadataCheck::CheckBaseAttr(int64_t maxSeqlenQ, int6
     return ACLNN_SUCCESS;
 }
 
-inline aclnnStatus FlashMlaMetadataCheck::CheckMask(int64_t maskMode)
+inline aclnnStatus FlashMlaMetadataCheck::CheckMask(int64_t maskMode, int64_t winLeft, int64_t winRight)
 {
     constexpr int64_t NO_MASK = 0;
     constexpr int64_t CAUSAL_MASK = 3;
 
-    static const std::unordered_set<int64_t> maskSet = {NO_MASK, CAUSAL_MASK};
-    CHECK_COND(maskSet.count(maskMode) > 0, ACLNN_ERR_RUNTIME_ERROR, "maskMode only supports %ld, %ld, but got %ld",
-               NO_MASK, CAUSAL_MASK, maskMode);
+    constexpr int64_t BAND_MASK = 4;
+    static const std::unordered_set<int64_t> maskSet = {NO_MASK, CAUSAL_MASK, BAND_MASK};
+    CHECK_COND(maskSet.count(maskMode) > 0, ACLNN_ERR_RUNTIME_ERROR, "maskMode only supports 0, 3, 4, but got %ld",
+               maskMode);
+    CHECK_COND(winLeft >= -1 && winLeft <= INT32_MAX && winRight >= -1 && winRight <= INT32_MAX,
+               ACLNN_ERR_PARAM_INVALID, "win_left and win_right must be in [-1, INT32_MAX]");
+    CHECK_COND(maskMode == BAND_MASK || (winLeft == -1 && winRight == -1), ACLNN_ERR_PARAM_INVALID,
+               "win_left and win_right must be -1 for mask_mode 0 or 3");
     return ACLNN_SUCCESS;
 }
 

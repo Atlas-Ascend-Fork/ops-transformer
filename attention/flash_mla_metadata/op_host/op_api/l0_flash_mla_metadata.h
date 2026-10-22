@@ -17,8 +17,9 @@ namespace l0op {
 const aclTensor* FlashMlaMetadata(const aclTensor* cuSeqlensQOptional, const aclTensor* cacheSeqlensOptional,
                                   const aclTensor* sequsedQOptional, int64_t maxSeqlenQ, int64_t maxSeqlenKv,
                                   int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
-                                  int64_t maskMode, const char* layoutQ, const char* socVersion, int64_t aicCoreNum,
-                                  int64_t aivCoreNum, const aclTensor* metaData, aclOpExecutor* executor);
+                                  int64_t maskMode, int64_t winLeft, int64_t winRight, const char* layoutQ,
+                                  const char* socVersion, int64_t aicCoreNum, int64_t aivCoreNum,
+                                  const aclTensor* metaData, aclOpExecutor* executor);
 } // namespace l0op
 
 #endif

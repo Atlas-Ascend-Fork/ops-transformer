@@ -34,13 +34,15 @@ TEST_P(FlashMlaInferDTypeTest, param)
     auto contextHolder =
         gert::InferDataTypeContextFaker()
             .SetOpType("FlashMla")
-            .IrInstanceNum({1, 1, 0, 0, 0, 0, 0, 0}, {1, 1})
+            .IrInstanceNum({1, 1, 0, 0, 0, 0, 0, 0, 0}, {1, 1})
             .InputDataTypes(inputDataTypes)
             .OutputDataTypes(outputDataTypes)
             .NodeAttrs({
                 {"head_dim_v", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.head_dim_v)},
                 {"softmax_scale", Ops::Transformer::AnyValue::CreateFrom<float>(param.softmax_scale)},
                 {"mask_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.mask_mode)},
+                {"win_left", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.win_left)},
+                {"win_right", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.win_right)},
                 {"max_seqlen_q", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.max_seqlen_q)},
                 {"max_seqlen_kv", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.max_seqlen_kv)},
                 {"layout_q", Ops::Transformer::AnyValue::CreateFrom<std::string>(param.layout_q)},

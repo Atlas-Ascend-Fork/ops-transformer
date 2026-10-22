@@ -244,6 +244,21 @@ attention:
     options:
       - sparse_flash_attention_grad
 
+  flash_mla:
+    module: True
+    src:
+      - attention/flash_mla
+    exclude:
+      - attention/flash_mla/docs
+      - attention/flash_mla/README.md
+    ut_cov_exclude:
+      - attention/flash_mla/tests
+    test:
+      examples: False
+      ut: True
+    options:
+      - flash_mla
+
   sparse_flash_mla:
     module: True
     src:

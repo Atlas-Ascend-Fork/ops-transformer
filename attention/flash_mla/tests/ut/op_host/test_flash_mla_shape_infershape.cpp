@@ -22,8 +22,8 @@ TEST_P(FlashMlaInferShapeTest, param)
 
     std::vector<gert::InfershapeContextPara::TensorDescription> inputTensorDesc;
     std::vector<gert::InfershapeContextPara::TensorDescription> allInputs = {
-        param.q,         param.k_cache,   param.block_table, param.cache_seqlens, param.cu_seqlens_q,
-        param.seqused_q, param.attn_mask, param.metadata};
+        param.q,         param.k_cache, param.block_table, param.cache_seqlens, param.cu_seqlens_q,
+        param.seqused_q, param.sinks,   param.attn_mask,   param.metadata};
     for (size_t i = 0; i < allInputs.size(); ++i) {
         if (param.inputInstance[i]) {
             inputTensorDesc.push_back(allInputs[i]);
@@ -42,6 +42,8 @@ TEST_P(FlashMlaInferShapeTest, param)
             {"head_dim_v", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.head_dim_v)},
             {"softmax_scale", Ops::Transformer::AnyValue::CreateFrom<float>(param.softmax_scale)},
             {"mask_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.mask_mode)},
+            {"win_left", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.win_left)},
+            {"win_right", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.win_right)},
             {"max_seqlen_q", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.max_seqlen_q)},
             {"max_seqlen_kv", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.max_seqlen_kv)},
             {"layout_q", Ops::Transformer::AnyValue::CreateFrom<std::string>(param.layout_q)},

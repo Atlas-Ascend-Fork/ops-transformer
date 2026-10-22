@@ -39,8 +39,8 @@ int64_t CalculateMlaMetadataSizeBytes(int64_t batchSize, int64_t aicCoreNum, int
 at::Tensor FlashMlaMetadata(const c10::optional<at::Tensor>& cuSeqlensQ, const at::Tensor& cacheSeqlens,
                             const c10::optional<at::Tensor>& sequsedQ, int64_t maxSeqlenQ, int64_t maxSeqlenKv,
                             int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
-                            int64_t maskMode, std::string layoutQ, int64_t aicCoreNum, int64_t aivCoreNum,
-                            const at::Tensor& output)
+                            int64_t maskMode, int64_t winLeft, int64_t winRight, std::string layoutQ,
+                            int64_t aicCoreNum, int64_t aivCoreNum, const at::Tensor& output)
 {
     at::Device outputDevice = at::Device(std::string("npu"));
     if (cuSeqlensQ.has_value()) {
@@ -65,17 +65,18 @@ at::Tensor FlashMlaMetadata(const c10::optional<at::Tensor>& cuSeqlensQ, const a
     char* layoutQPtr = const_cast<char*>(layoutQ.c_str());
 
     ACLNN_CMD(aclnnFlashMlaMetadata, cuSeqlensQVal, cacheSeqlens, sequsedQVal, maxSeqlenQ, maxSeqlenKv, numHeadsQ,
-              numHeadsKv, headDimQk, headDimV, maskMode, layoutQPtr, output);
+              numHeadsKv, headDimQk, headDimV, maskMode, winLeft, winRight, layoutQPtr, output);
     return output;
 }
 
 std::tuple<at::Tensor, at::Tensor> FlashMla(
     const at::Tensor& q, const at::Tensor& kCache, const c10::optional<at::Tensor>& blockTable,
     const c10::optional<at::Tensor>& cacheSeqlens, const c10::optional<at::Tensor>& cuSeqlensQ,
-    const c10::optional<at::Tensor>& sequsedQ, const c10::optional<at::Tensor>& attnMask,
-    const c10::optional<at::Tensor>& metadata, int64_t headDimV, double softmaxScale, int64_t maskMode,
-    int64_t maxSeqlenQ, int64_t maxSeqlenKv, std::string layoutQ, std::string layoutKv, std::string layoutOut,
-    int64_t returnSoftmaxLse, int64_t aicCoreNum, int64_t aivCoreNum)
+    const c10::optional<at::Tensor>& sequsedQ, const c10::optional<at::Tensor>& sinks,
+    const c10::optional<at::Tensor>& attnMask, const c10::optional<at::Tensor>& metadata, int64_t headDimV,
+    double softmaxScale, int64_t maskMode, int64_t winLeft, int64_t winRight, int64_t maxSeqlenQ, int64_t maxSeqlenKv,
+    std::string layoutQ, std::string layoutKv, std::string layoutOut, int64_t returnSoftmaxLse, int64_t aicCoreNum,
+    int64_t aivCoreNum)
 {
     int64_t tSize = 0;
     int64_t nSize = 0;
@@ -136,9 +137,9 @@ std::tuple<at::Tensor, at::Tensor> FlashMla(
     char* layoutKvPtr = const_cast<char*>(layoutKv.c_str());
     char* layoutOutPtr = const_cast<char*>(layoutOut.c_str());
 
-    ACLNN_CMD(aclnnFlashMla, q, kCache, blockTable, cacheSeqlens, cuSeqlensQ, sequsedQ, attnMask, metadata, headDimV,
-              softmaxScale, maskMode, maxSeqlenQ, maxSeqlenKv, layoutQPtr, layoutKvPtr, layoutOutPtr, returnSoftmaxLse,
-              attentionOutput, softmaxLse);
+    ACLNN_CMD(aclnnFlashMla, q, kCache, blockTable, cacheSeqlens, cuSeqlensQ, sequsedQ, sinks, attnMask, metadata,
+              headDimV, softmaxScale, maskMode, winLeft, winRight, maxSeqlenQ, maxSeqlenKv, layoutQPtr, layoutKvPtr,
+              layoutOutPtr, returnSoftmaxLse, attentionOutput, softmaxLse);
 
     return std::tuple<at::Tensor, at::Tensor>(attentionOutput, softmaxLse);
 }

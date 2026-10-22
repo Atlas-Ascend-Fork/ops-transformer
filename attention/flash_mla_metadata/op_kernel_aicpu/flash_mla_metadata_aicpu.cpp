@@ -66,6 +66,8 @@ bool FlashMlaMetadataCpuKernel::Prepare(CpuKernelContext& ctx)
     GetAttrValueOpt(ctx, "max_seqlen_q", maxSeqlenQ_);
     GetAttrValueOpt(ctx, "max_seqlen_kv", maxSeqlenKv_);
     GetAttrValueOpt(ctx, "mask_mode", maskMode_);
+    GetAttrValueOpt(ctx, "win_left", winLeft_);
+    GetAttrValueOpt(ctx, "win_right", winRight_);
     GetAttrValueOpt(ctx, "layout_q", layoutQ_);
 
     KERNEL_CHECK_FALSE(ParamsCheck(), false, "Params check failed");
@@ -102,8 +104,12 @@ bool FlashMlaMetadataCpuKernel::CheckAttrs()
     KERNEL_CHECK_FALSE(headDimV_ == FlashMlaCommon::MLA_HEAD_DIM_V, false,
                        "MLA headDimV (value/output width) must be %ld, but got %d", FlashMlaCommon::MLA_HEAD_DIM_V,
                        headDimV_);
-    KERNEL_CHECK_FALSE((maskMode_ == 0 || maskMode_ == 3), false,
-                       "maskMode only supports 0(NO_MASK), 3(RIGHT_DOWN), but got %d", maskMode_);
+    KERNEL_CHECK_FALSE((maskMode_ == 0 || maskMode_ == 3 || maskMode_ == 4), false,
+                       "maskMode only supports 0(NO_MASK), 3(RIGHT_DOWN), 4(BAND), but got %d", maskMode_);
+    KERNEL_CHECK_FALSE(winLeft_ >= -1 && winLeft_ <= INT32_MAX && winRight_ >= -1 && winRight_ <= INT32_MAX, false,
+                       "win_left and win_right must be in [-1, INT32_MAX]");
+    KERNEL_CHECK_FALSE(maskMode_ == 4 || (winLeft_ == -1 && winRight_ == -1), false,
+                       "win_left and win_right must be -1 for mask_mode 0 or 3");
     KERNEL_CHECK_FALSE((layoutQ_ == "TND" || layoutQ_ == "BNSD" || layoutQ_ == "BSND"), false,
                        "layoutQ only supports TND, BNSD, BSND, but got %s", layoutQ_.c_str());
     KERNEL_CHECK_FALSE(aicCoreNum_ > 0, false, "aicCoreNum must be positive, but got %d", aicCoreNum_);
@@ -256,8 +262,8 @@ void FlashMlaMetadataCpuKernel::InitBaseInfo()
     }
     baseInfo.attenMaskFlag = (maskMode != load_balance::SparseMode::BUTT);
     baseInfo.sparseMode = static_cast<uint32_t>(maskMode);
-    baseInfo.preToken = std::numeric_limits<uint32_t>::max();
-    baseInfo.nextToken = std::numeric_limits<uint32_t>::max();
+    baseInfo.preToken = winLeft_ == -1 ? std::numeric_limits<uint32_t>::max() : static_cast<uint32_t>(winLeft_);
+    baseInfo.nextToken = winRight_ == -1 ? std::numeric_limits<uint32_t>::max() : static_cast<uint32_t>(winRight_);
     baseInfo.layoutQuery = load_balance::ConvertToLayout(layoutQ_);
     baseInfo.queryType = load_balance::DataType::FP16;
     baseInfo.kvType = load_balance::DataType::FP16;

@@ -38,11 +38,12 @@ extern "C" {
 aclnnStatus aclnnFlashMlaMetadataGetWorkspaceSize(
     const aclTensor* cuSeqlensQOptional, const aclTensor* cacheSeqlensOptional, const aclTensor* sequsedQOptional,
     int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV,
-    int64_t maskMode, const char* layoutQ, const aclTensor* metaData, uint64_t* workspaceSize, aclOpExecutor** executor)
+    int64_t maskMode, int64_t winLeft, int64_t winRight, const char* layoutQ, const aclTensor* metaData,
+    uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     L2_DFX_PHASE_1(aclnnFlashMlaMetadata,
                    DFX_IN(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, maxSeqlenQ, maxSeqlenKv,
-                          numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ),
+                          numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, winLeft, winRight, layoutQ),
                    DFX_OUT(metaData));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
@@ -60,9 +61,9 @@ aclnnStatus aclnnFlashMlaMetadataGetWorkspaceSize(
     }
     const char* socVersion = npuInfo.GetSocLongVersion().c_str();
 
-    auto ret = FlashMlaMetadataCheck::ParamsCheck(cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional,
-                                                  maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV,
-                                                  maskMode, layoutQ, metaData, aicCoreNum, aivCoreNum);
+    auto ret = FlashMlaMetadataCheck::ParamsCheck(
+        cuSeqlensQOptional, cacheSeqlensOptional, sequsedQOptional, maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv,
+        headDimQk, headDimV, maskMode, winLeft, winRight, layoutQ, metaData, aicCoreNum, aivCoreNum);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
 
     // 前置处理：seqlens 输入转连续（AICPU kernel 按连续内存读取原始数据）
@@ -91,9 +92,10 @@ aclnnStatus aclnnFlashMlaMetadataGetWorkspaceSize(
         }
     }
 
-    auto output = l0op::FlashMlaMetadata(cuSeqlensQContiguous, cacheSeqlensContiguous, sequsedQContiguous, maxSeqlenQ,
-                                         maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, layoutQ,
-                                         socVersion, aicCoreNum, aivCoreNum, metaData, uniqueExecutor.get());
+    auto output =
+        l0op::FlashMlaMetadata(cuSeqlensQContiguous, cacheSeqlensContiguous, sequsedQContiguous, maxSeqlenQ,
+                               maxSeqlenKv, numHeadsQ, numHeadsKv, headDimQk, headDimV, maskMode, winLeft, winRight,
+                               layoutQ, socVersion, aicCoreNum, aivCoreNum, metaData, uniqueExecutor.get());
     CHECK_RET(output != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();

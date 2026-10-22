@@ -43,8 +43,8 @@ except ImportError:
 if _TORCHAIR_AVAILABLE:
 
     @auto_convert_to_tensor(
-        [False, False, False, False, False, False, False, False],
-        [False, False, False, False, True, True, True, True, False],
+        [False, False, False, False, False, False, False, False, False],
+        [False, False, True, True, True, True, True, True, True],
     )
     def FlashMla(
         q: Tensor,
@@ -53,11 +53,14 @@ if _TORCHAIR_AVAILABLE:
         cache_seqlens: Optional[Tensor],
         cu_seqlens_q: Optional[Tensor],
         seqused_q: Optional[Tensor],
+        sinks: Optional[Tensor],
         attn_mask: Optional[Tensor],
         metadata: Optional[Tensor],
         head_dim_v: int = 512,
         softmax_scale: Optional[float] = 1.0,
         mask_mode: int = 0,
+        win_left: int = -1,
+        win_right: int = -1,
         max_seqlen_q: int = -1,
         max_seqlen_kv: int = -1,
         layout_q: str = "BSND",
@@ -77,11 +80,14 @@ if _TORCHAIR_AVAILABLE:
         cache_seqlens: Tensor = None,
         cu_seqlens_q: Tensor = None,
         seqused_q: Tensor = None,
+        sinks: Optional[Tensor] = None,
         attn_mask: Tensor = None,
         metadata: Tensor = None,
         head_dim_v: int = 512,
         softmax_scale: Optional[float] = 1.0,
         mask_mode: int = 0,
+        win_left: int = -1,
+        win_right: int = -1,
         max_seqlen_q: int = -1,
         max_seqlen_kv: int = -1,
         layout_q: str = "BSND",

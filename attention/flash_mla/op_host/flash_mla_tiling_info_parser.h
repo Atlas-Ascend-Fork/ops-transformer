@@ -72,6 +72,7 @@ public:
     void GetMaskParams();
 
     ge::graphStatus GetActualSeqInfo();
+    void GetSinksInfo();
 
     void GenerateAxisInfo(FlashMlaTilingInfo& faInfo);
     void GenerateDtypeInfo(FlashMlaTilingInfo& faInfo);
@@ -134,6 +135,7 @@ public:
     int64_t maskMode_ = 0;
 
     bool softmaxLseFlag_ = false;
+    bool sinkFlag_ = false;
     int64_t returnSoftmaxLse_ = 0;
 
     float softmaxScale_ = 1.0;

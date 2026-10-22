@@ -24,12 +24,12 @@ namespace ops {
 static constexpr size_t ATTR_IDX_HEAD_DIM_V = 0;
 static constexpr size_t ATTR_IDX_SOFTMAX_SCALE = 1;
 static constexpr size_t ATTR_IDX_MASK_MODE = 2;
-static constexpr size_t ATTR_IDX_MAX_SEQLEN_Q = 3;
-static constexpr size_t ATTR_IDX_MAX_SEQLEN_KV = 4;
-static constexpr size_t ATTR_IDX_LAYOUT_Q = 5;
-static constexpr size_t ATTR_IDX_LAYOUT_KV = 6;
-static constexpr size_t ATTR_IDX_LAYOUT_OUT = 7;
-static constexpr size_t ATTR_IDX_RETURN_SOFTMAX_LSE = 8;
+static constexpr size_t ATTR_IDX_MAX_SEQLEN_Q = 5;
+static constexpr size_t ATTR_IDX_MAX_SEQLEN_KV = 6;
+static constexpr size_t ATTR_IDX_LAYOUT_Q = 7;
+static constexpr size_t ATTR_IDX_LAYOUT_KV = 8;
+static constexpr size_t ATTR_IDX_LAYOUT_OUT = 9;
+static constexpr size_t ATTR_IDX_RETURN_SOFTMAX_LSE = 10;
 
 static constexpr size_t INPUT_IDX_Q = 0;
 static constexpr size_t INPUT_IDX_K_CACHE = 1;

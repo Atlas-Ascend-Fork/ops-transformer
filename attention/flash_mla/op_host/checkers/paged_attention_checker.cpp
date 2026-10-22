@@ -103,20 +103,19 @@ ge::graphStatus PagedAttentionChecker::CheckMultiPara(const FlashMlaTilingInfo& 
                 return ge::GRAPH_FAILED);
 
     if (faInfo.hasViewStride && faInfo.kvLayout == FlashMlaLayout::PA_BBND) {
-        OP_CHECK_IF((faInfo.keyNonContigDim > 0),
-                    OP_LOGE(faInfo.opName,
-                            "In PA BBND scenarios, k_cache only supports non-contiguous tensors in dimension 0, "
-                            "but the first non-contiguous dimension is index %d.",
-                            faInfo.keyNonContigDim),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            (faInfo.keyNonContigDim > 0),
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(faInfo.opName, "k_cache first non-contiguous dimension",
+                                                  std::to_string(faInfo.keyNonContigDim).c_str(),
+                                                  "PA_BBND only supports non-contiguous tensors in dimension 0"),
+            return ge::GRAPH_FAILED);
     } else if (faInfo.hasViewStride &&
                (faInfo.kvLayout == FlashMlaLayout::PA_BNBD || faInfo.kvLayout == FlashMlaLayout::PA_NZ)) {
         OP_CHECK_IF(
             (faInfo.keyNonContigDim > 1),
-            OP_LOGE(faInfo.opName,
-                    "In PA BNBD/PA_NZ scenarios, k_cache only supports non-contiguous tensors in dimensions 0 or 1, "
-                    "but the first non-contiguous dimension is index %d.",
-                    faInfo.keyNonContigDim),
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                faInfo.opName, "k_cache first non-contiguous dimension", std::to_string(faInfo.keyNonContigDim).c_str(),
+                "PA_BNBD and PA_NZ only support non-contiguous tensors in dimensions 0 or 1"),
             return ge::GRAPH_FAILED);
     }
 

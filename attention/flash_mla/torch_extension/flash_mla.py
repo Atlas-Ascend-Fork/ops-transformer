@@ -30,13 +30,7 @@ def _calculate_batch_size(cache_seqlens: torch.Tensor):
 
 
 def _calculate_metadata_size(batch_size, aic_core_num, aiv_core_num):
-    """计算 metadata tensor 的对齐后大小。
-
-    MLA 硬约束 kv head num == 1（B2/D16 上界公式，禁止按 num_heads_kv>1 放大）：
-    最坏容量 = ((aic + aiv) * batch_size * 1 + 1) * 16 个 int32（每核 16 word，
-    外加 1 个 header），按 4096 个 INT32 元素对齐（与 flash_attn.py 一致）。
-    核数从硬件获取，见 _get_core_nums。
-    """
+    """Calculate the aligned metadata tensor size."""
     metadata_size = ((aic_core_num + aiv_core_num) * batch_size * 1 + 1) * 16
     return ((metadata_size + 4095) // 4096) * 4096
 
@@ -67,22 +61,19 @@ class FlashMlaOpBuilder(OpBuilder):
             "Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, "
             "int? max_seqlen_q=None, int? max_seqlen_kv=None, "
             "int head_dim_qk=576, int head_dim_v=512, "
-            'int? mask_mode=None, str? layout_q="BSND") -> Tensor',
+            'int? mask_mode=None, int win_left=-1, int win_right=-1, str? layout_q="BSND") -> Tensor',
             "flash_mla(Tensor q, Tensor k_cache, "
             "Tensor? block_table=None, Tensor? cache_seqlens=None, "
             "Tensor? cu_seqlens_q=None, Tensor? seqused_q=None, "
-            "Tensor? attn_mask=None, Tensor? metadata=None, "
+            "Tensor? sinks=None, Tensor? attn_mask=None, Tensor? metadata=None, "
             "int head_dim_v=512, float softmax_scale=1.0, int mask_mode=0, "
-            "int max_seqlen_q=-1, int max_seqlen_kv=-1, "
+            "int win_left=-1, int win_right=-1, int max_seqlen_q=-1, int max_seqlen_kv=-1, "
             'str layout_q="BSND", str layout_kv="PA_BBND", str? layout_out="BSND", '
             "bool return_softmax_lse=False) -> (Tensor, Tensor)",
         ]
 
     def register_meta(self):
-        """
-        Registers the Meta implementation (Shape/Dtype inference).
-        Essential for Autograd and FakeTensor support.
-        """
+        """Register shape and dtype inference."""
 
         @torch.library.register_fake("cann_ops_transformer::" + MLA_METADATA_OP_NAME)
         def flash_mla_metadata_meta(
@@ -96,6 +87,8 @@ class FlashMlaOpBuilder(OpBuilder):
             head_dim_qk: int = 576,
             head_dim_v: int = 512,
             mask_mode: Optional[int] = None,
+            win_left: int = -1,
+            win_right: int = -1,
             layout_q: Optional[str] = None,
         ):
             b_size = _calculate_batch_size(cache_seqlens)
@@ -111,11 +104,14 @@ class FlashMlaOpBuilder(OpBuilder):
             cache_seqlens: Optional[torch.Tensor] = None,
             cu_seqlens_q: Optional[torch.Tensor] = None,
             seqused_q: Optional[torch.Tensor] = None,
+            sinks: Optional[torch.Tensor] = None,
             attn_mask: Optional[torch.Tensor] = None,
             metadata: Optional[torch.Tensor] = None,
             head_dim_v: Optional[int] = 512,
             softmax_scale: Optional[float] = 1.0,
             mask_mode: Optional[int] = 0,
+            win_left: int = -1,
+            win_right: int = -1,
             max_seqlen_q: Optional[int] = -1,
             max_seqlen_kv: Optional[int] = -1,
             layout_q: Optional[str] = "BSND",
@@ -181,12 +177,11 @@ def flash_mla_metadata(
     head_dim_qk: int = 576,
     head_dim_v: int = 512,
     mask_mode: Optional[int] = 0,
+    win_left: int = -1,
+    win_right: int = -1,
     layout_q: Optional[str] = "BSND",
 ):
-    """
-    Dispatcher implementation: NPU.
-    'PrivateUse1' is dispatch key for custom NPU backends.
-    """
+    """Dispatch FlashMla metadata generation to NPU."""
     b_size = _calculate_batch_size(cache_seqlens)
     aic_core_num, aiv_core_num = _get_core_nums()
 
@@ -210,6 +205,8 @@ def flash_mla_metadata(
         head_dim_qk,
         head_dim_v,
         mask_mode,
+        win_left,
+        win_right,
         layout_q,
         aic_core_num,
         aiv_core_num,
@@ -225,11 +222,14 @@ def flash_mla(
     cache_seqlens: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     seqused_q: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
     attn_mask: Optional[torch.Tensor] = None,
     metadata: Optional[torch.Tensor] = None,
     head_dim_v: Optional[int] = 512,
     softmax_scale: Optional[float] = 1.0,
     mask_mode: Optional[int] = 0,
+    win_left: int = -1,
+    win_right: int = -1,
     max_seqlen_q: Optional[int] = -1,
     max_seqlen_kv: Optional[int] = -1,
     layout_q: Optional[str] = "BSND",
@@ -237,10 +237,7 @@ def flash_mla(
     layout_out: Optional[str] = "BSND",
     return_softmax_lse: Optional[bool] = False,
 ):
-    """
-    Dispatcher implementation for NPU (DeepSeek MLA flash attention).
-    'PrivateUse1' is the combine key for custom NPU backends.
-    """
+    """Dispatch FlashMla to NPU."""
     aic_core_num, aiv_core_num = _get_core_nums()
     if metadata is not None:
         batch_size = None
@@ -264,11 +261,14 @@ def flash_mla(
         cache_seqlens,
         cu_seqlens_q,
         seqused_q,
+        sinks,
         attn_mask,
         metadata,
         head_dim_v,
         softmax_scale,
         mask_mode,
+        win_left,
+        win_right,
         max_seqlen_q,
         max_seqlen_kv,
         layout_q,

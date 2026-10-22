@@ -50,18 +50,21 @@ constexpr uint32_t BLOCK_TABLE_INDEX = 2;
 constexpr uint32_t CACHE_SEQLENS_INDEX = 3;
 constexpr uint32_t CU_SEQLENS_Q_INDEX = 4;
 constexpr uint32_t SEQUSED_Q_INDEX = 5;
-constexpr uint32_t ATTN_MASK_INDEX = 6;
-constexpr uint32_t METADATA_INDEX = 7;
+constexpr uint32_t SINKS_INDEX = 6;
+constexpr uint32_t ATTN_MASK_INDEX = 7;
+constexpr uint32_t METADATA_INDEX = 8;
 
 constexpr uint32_t ATTR_HEAD_DIM_V_INDEX = 0;    // head_dim_v (nope/value width inside k_cache, default 512)
 constexpr uint32_t ATTR_SOFTMAX_SCALE_INDEX = 1; // softmax_scale
 constexpr uint32_t ATTR_MASK_MODE_INDEX = 2;     // mask_mode
-constexpr uint32_t ATTR_MAX_SEQLEN_Q_INDEX = 3;  // max_seqlen_q
-constexpr uint32_t ATTR_MAX_SEQLEN_KV_INDEX = 4; // max_seqlen_kv
-constexpr uint32_t ATTR_LAYOUT_Q_INDEX = 5;      // layout_q
-constexpr uint32_t ATTR_LAYOUT_KV_INDEX = 6;     // layout_kv
-constexpr uint32_t ATTR_LAYOUT_OUT_INDEX = 7;    // layout_out
-constexpr uint32_t ATTR_RETURN_LSE_INDEX = 8;    // return_softmax_lse
+constexpr uint32_t ATTR_WIN_LEFT_INDEX = 3;
+constexpr uint32_t ATTR_WIN_RIGHT_INDEX = 4;
+constexpr uint32_t ATTR_MAX_SEQLEN_Q_INDEX = 5;  // max_seqlen_q
+constexpr uint32_t ATTR_MAX_SEQLEN_KV_INDEX = 6; // max_seqlen_kv
+constexpr uint32_t ATTR_LAYOUT_Q_INDEX = 7;      // layout_q
+constexpr uint32_t ATTR_LAYOUT_KV_INDEX = 8;     // layout_kv
+constexpr uint32_t ATTR_LAYOUT_OUT_INDEX = 9;    // layout_out
+constexpr uint32_t ATTR_RETURN_LSE_INDEX = 10;   // return_softmax_lse
 
 constexpr uint32_t ATTN_OUT_INDEX = 0;
 constexpr uint32_t SOFTMAX_LSE_INDEX = 1;
@@ -123,6 +126,7 @@ struct FlashMlaParaInfo {
     FlashMlaOptionalParaInfo cuSeqlensQ = {nullptr, nullptr};
     FlashMlaOptionalParaInfo sequsedQ = {nullptr, nullptr};
     FlashMlaOptionalParaInfo attnMask = {nullptr, nullptr};
+    FlashMlaOptionalParaInfo sinks = {nullptr, nullptr};
     FlashMlaOptionalParaInfo metadata = {nullptr, nullptr};
 
     FlashMlaOptionalParaInfo cuSeqlensKv = {nullptr, nullptr};
@@ -131,6 +135,8 @@ struct FlashMlaParaInfo {
     const int64_t* headDimV = nullptr;
     const float* softmaxScale = nullptr;
     const int64_t* maskMode = nullptr;
+    const int64_t* winLeft = nullptr;
+    const int64_t* winRight = nullptr;
     const int64_t* maxSeqlenQ = nullptr;
     const int64_t* maxSeqlenKV = nullptr;
     const char* layoutQ = nullptr;
@@ -166,6 +172,7 @@ public:
 
     int64_t maskMode = 0;
     bool attenMaskFlag = false;
+    bool sinkFlag = false;
 
     uint64_t totalOutputSize = 0;
     uint64_t totalLseSize = 0;
@@ -180,8 +187,6 @@ public:
     int64_t cuSeqLenQDims = 0;
     int64_t maxSeqQ = 0;
     int64_t maxSeqKv = 0;
-    int64_t preTokens = 0;
-    int64_t nextTokens = 0;
     int64_t winLeft = 0;
     int64_t winRight = 0;
 

@@ -33,10 +33,10 @@ ge::graphStatus FlashMlaBaseChecker::CheckDtypeSupport(const gert::CompileTimeTe
 {
     if (desc != nullptr) {
         const auto& it = DTYPE_SUPPORT_MAP.find(name);
-        OP_CHECK_IF(
-            it == DTYPE_SUPPORT_MAP.end(),
-            OP_LOGE("FlashMla", "%s datatype support list should be specify in DTYPE_SUPPORT_MAP", name.c_str()),
-            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(it == DTYPE_SUPPORT_MAP.end(),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        "FlashMla", name.c_str(), "The dtype support list is not defined in DTYPE_SUPPORT_MAP"),
+                    return ge::GRAPH_FAILED);
         auto& expectDtypeList = it->second;
         if (std::find(expectDtypeList.begin(), expectDtypeList.end(), desc->GetDataType()) == expectDtypeList.end()) {
             std::string dtypeStr = DataTypeToSerialString(desc->GetDataType());
@@ -71,7 +71,8 @@ std::string FlashMlaBaseChecker::DataTypeToSerialString(ge::DataType type) const
     if (it != DATATYPE_TO_STRING_MAP.end()) {
         return it->second;
     } else {
-        OP_LOGE("FlashMla", "datatype %d not support", type);
+        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON("FlashMla", "dtype", std::to_string(static_cast<int32_t>(type)).c_str(),
+                                              "Unsupported data type");
         return "UNDEFINED";
     }
 }

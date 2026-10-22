@@ -25,6 +25,8 @@ struct FlashMlaHostUtParamBase : public HostUtParamBase {
     int64_t head_dim_v = 512;
     float softmax_scale = 1.0f;
     int64_t mask_mode = 0;
+    int64_t win_left = -1;
+    int64_t win_right = -1;
     int64_t max_seqlen_q = -1;
     int64_t max_seqlen_kv = -1;
     std::string layout_q = "BSND";
@@ -38,6 +40,8 @@ struct FlashMlaHostUtParamBase : public HostUtParamBase {
         head_dim_v = std::stoll(ReadMap(values, "head_dim_v", "512"));
         softmax_scale = std::stof(ReadMap(values, "softmax_scale", "1.0"));
         mask_mode = std::stoll(ReadMap(values, "mask_mode", "0"));
+        win_left = std::stoll(ReadMap(values, "win_left", "-1"));
+        win_right = std::stoll(ReadMap(values, "win_right", "-1"));
         max_seqlen_q = std::stoll(ReadMap(values, "max_seqlen_q", "-1"));
         max_seqlen_kv = std::stoll(ReadMap(values, "max_seqlen_kv", "-1"));
         layout_q = ReadMap(values, "layout_q", "BSND");
@@ -54,6 +58,7 @@ struct FlashMlaTilingUtParam : public FlashMlaHostUtParamBase {
     gert::TilingContextPara::TensorDescription cache_seqlens = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription cu_seqlens_q = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription seqused_q = TD_DEFAULT;
+    gert::TilingContextPara::TensorDescription sinks = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription attn_mask = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription metadata = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription attn_out = TD_DEFAULT;
@@ -75,6 +80,7 @@ struct FlashMlaTilingUtParam : public FlashMlaHostUtParamBase {
             GetTensorGE(values, "cu_seqlens_q_shape", "cu_seqlens_q_dtype", "cu_seqlens_q_format", cu_seqlens_q));
         inputInstance.emplace_back(
             GetTensorGE(values, "seqused_q_shape", "seqused_q_dtype", "seqused_q_format", seqused_q));
+        inputInstance.emplace_back(GetTensorGE(values, "sinks_shape", "sinks_dtype", "sinks_format", sinks));
         inputInstance.emplace_back(
             GetTensorGE(values, "attn_mask_shape", "attn_mask_dtype", "attn_mask_format", attn_mask));
         inputInstance.emplace_back(
@@ -93,6 +99,7 @@ struct FlashMlaInferShapeUtParam : public FlashMlaHostUtParamBase {
     gert::InfershapeContextPara::TensorDescription cache_seqlens = ID_DEFAULT;
     gert::InfershapeContextPara::TensorDescription cu_seqlens_q = ID_DEFAULT;
     gert::InfershapeContextPara::TensorDescription seqused_q = ID_DEFAULT;
+    gert::InfershapeContextPara::TensorDescription sinks = ID_DEFAULT;
     gert::InfershapeContextPara::TensorDescription attn_mask = ID_DEFAULT;
     gert::InfershapeContextPara::TensorDescription metadata = ID_DEFAULT;
     gert::InfershapeContextPara::TensorDescription attn_out = ID_DEFAULT;
@@ -112,6 +119,7 @@ struct FlashMlaInferShapeUtParam : public FlashMlaHostUtParamBase {
             GetTensorGE(values, "cu_seqlens_q_shape", "cu_seqlens_q_dtype", "cu_seqlens_q_format", cu_seqlens_q));
         inputInstance.emplace_back(
             GetTensorGE(values, "seqused_q_shape", "seqused_q_dtype", "seqused_q_format", seqused_q));
+        inputInstance.emplace_back(GetTensorGE(values, "sinks_shape", "sinks_dtype", "sinks_format", sinks));
         inputInstance.emplace_back(
             GetTensorGE(values, "attn_mask_shape", "attn_mask_dtype", "attn_mask_format", attn_mask));
         inputInstance.emplace_back(

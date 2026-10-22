@@ -9,16 +9,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Validate and benchmark paged MLA eager and static-shape ACL graph execution.
-
-Use system Python after sourcing CANN and the desired custom operator package.
-No TTK or PYTHONPATH setup is needed. Metadata is prepared before capture/timing.
-Event intervals include dispatch gaps; --profile-dir additionally measures
-MLA kernel durations. Metadata is excluded. Replays use warm inputs/caches.
-Online static kernel compilation is opt-in and distinct from graph capture.
-Use --output result.csv to export timings and shapes for calculate_mfu_mbu.py;
-other output suffixes produce JSON. Utilization is calculated separately.
-"""
+"""Validate paged MLA with eager and ACL graph execution."""
 
 import argparse
 import csv
@@ -173,6 +164,7 @@ def main():
         cache_seqlens=torch.full((args.batch,), args.kv_len, dtype=torch.int32),
         cu_seqlens_q=torch.arange(args.batch + 1, dtype=torch.int32) * args.q_len,
         seqused_q=torch.full((args.batch,), args.q_len, dtype=torch.int32),
+        sinks=None,
         attn_mask=torch.ones(2048, 2048, dtype=torch.int8).triu(1)
         if args.mask_mode
         else None,

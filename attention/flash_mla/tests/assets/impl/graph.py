@@ -20,6 +20,8 @@ class FlashMlaAclGraph(torch.nn.Module):
         head_dim_v=512,
         softmax_scale=1.0,
         mask_mode=0,
+        win_left=-1,
+        win_right=-1,
         max_seqlen_q=-1,
         max_seqlen_kv=-1,
         layout_q="BSND",
@@ -32,6 +34,8 @@ class FlashMlaAclGraph(torch.nn.Module):
             head_dim_v=head_dim_v,
             softmax_scale=softmax_scale,
             mask_mode=mask_mode,
+            win_left=win_left,
+            win_right=win_right,
             max_seqlen_q=max_seqlen_q,
             max_seqlen_kv=max_seqlen_kv,
             layout_q=layout_q,
@@ -49,6 +53,7 @@ class FlashMlaAclGraph(torch.nn.Module):
         cache_seqlens=None,
         cu_seqlens_q=None,
         seqused_q=None,
+        sinks=None,
         attn_mask=None,
         metadata=None,
     ):
@@ -57,6 +62,7 @@ class FlashMlaAclGraph(torch.nn.Module):
             cache_seqlens=cache_seqlens,
             cu_seqlens_q=cu_seqlens_q,
             seqused_q=seqused_q,
+            sinks=sinks,
             attn_mask=attn_mask,
         )
         if metadata is None or metadata.numel() == 0:

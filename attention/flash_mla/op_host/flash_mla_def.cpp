@@ -56,6 +56,11 @@ public:
             .DataType({ge::DT_INT32, ge::DT_INT32})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
+        this->Input("sinks")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND})
+            .AutoContiguous();
         this->Input("attn_mask")
             .ParamType(OPTIONAL)
             .DataType({ge::DT_INT8, ge::DT_INT8})
@@ -79,6 +84,8 @@ public:
         this->Attr("head_dim_v").AttrType(OPTIONAL).Int(512);
         this->Attr("softmax_scale").AttrType(OPTIONAL).Float(1.0f);
         this->Attr("mask_mode").AttrType(OPTIONAL).Int(0);
+        this->Attr("win_left").AttrType(OPTIONAL).Int(-1);
+        this->Attr("win_right").AttrType(OPTIONAL).Int(-1);
         this->Attr("max_seqlen_q").AttrType(OPTIONAL).Int(-1);
         this->Attr("max_seqlen_kv").AttrType(OPTIONAL).Int(-1);
         this->Attr("layout_q").AttrType(OPTIONAL).String("TND");

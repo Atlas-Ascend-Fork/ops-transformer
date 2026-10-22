@@ -8,14 +8,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""Generate supported-range TTK cases (or the 16-case --suite smoke).
-
-Cases call the installed torch.ops.cann_ops_transformer API directly;
-pass --plugin <assets directory> without adding assets to PYTHONPATH.
-
-Metadata defaults to (-1,) and requires TTK commit 7b305c89 or later.
-The generator always emits dynamic metadata slots.
-"""
+"""Generate FlashMla TTK cases."""
 
 import argparse
 import ast
@@ -90,6 +83,7 @@ def coverage_row(
         (batch,),
         (batch + 1,),
         None if no_seqused else (batch,),
+        None,
         (2048, 2048) if mask else None,
         (-1,),  # Materialized by npu_preprocess; CPU golden receives None.
     )
@@ -100,6 +94,7 @@ def coverage_row(
         "int32",
         "int32",
         None if no_seqused else "int32",
+        None,
         "int8" if mask else None,
         "int32",
     )
@@ -271,8 +266,7 @@ def coverage_cases():
     ]
     for name, dtype, kv, q, options in specials:
         rows.append(coverage_row(name, dtype, kv, q, **options))
-    # Five logical pages share three physical pages across batches, or two
-    # physical pages both within a sequence and across batches.
+    # Cover page sharing within and across batches.
     for name, dtype, layout, pages in (
         ("shared_pages_bbnd", "float16", "PA_BBND", 3),
         ("shared_pages_nz", "bfloat16", "PA_NZ", 2),
@@ -324,6 +318,7 @@ def cases():
             (2,),
             (3,) if layout_q == "TND" else None,
             (2,),
+            None,
             (2048, 2048) if mask == 3 else None,
             (-1,),  # Materialized by npu_preprocess; CPU golden receives None.
         )
@@ -334,6 +329,7 @@ def cases():
             "int32",
             "int32" if layout_q == "TND" else None,
             "int32",
+            None,
             "int8" if mask == 3 else None,
             "int32",
         )
