@@ -484,7 +484,10 @@ aclnnStatus aclnnIncreFlashAttentionV4(
   - page attention开启场景下，以下场景输入S需要大于等于maxBlockNumPerSeq * blockSize。
   - 开启Attention mask，例如mask shape为(B, 1, 1, S)。
   - 开启pseShift，例如pseShift shape为(B, N, 1, S)。
-  - 开启kvPaddingSize，例如kvPaddingSize shape为(1),并且要求S大于等于kvPaddingSize加每个Batch中最大actualSeqLengthsKv的和。
+
+- kv左padding场景：
+  - 需要与actualSeqLengths参数一起开启；仅支持非Page Attention的连续KV场景。Page Attention场景不支持kv左padding。
+  - kvPaddingSize小于0时按0处理；KV搬运区间为[Smax - kvPaddingSize - actualSeqLengths, Smax - kvPaddingSize)。
 
 ## 调用示例
 
