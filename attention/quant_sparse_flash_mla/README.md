@@ -197,8 +197,8 @@
     </tr>
     <tr>
       <td>metadata</td>
-      <td>可选输入</td>
-      <td>QuantSparseFlashMlaMetadata生成的任务切分结果。默认值为None。</td>
+      <td>必选输入</td>
+      <td>必须传入由QuantSparseFlashMlaMetadata生成的任务切分结果。</td>
       <td>INT32</td>
       <td>ND</td>
     </tr>
