@@ -102,21 +102,21 @@
     <td style="white-space: nowrap">ffnTokenInfoTableShape</td>
     <td style="white-space: nowrap">属性</td>
     <td style="white-space: nowrap">表示FFN节点上token信息表格shape大小的列表，长度为3。</td>
-    <td style="white-space: nowrap">INT32</td>
+    <td style="white-space: nowrap">INT64</td>
     <td style="white-space: nowrap">-</td>
     </tr>
     <tr>
     <td style="white-space: nowrap">ffnTokenDataShape</td>
     <td style="white-space: nowrap">属性</td>
     <td style="white-space: nowrap">表示FFN节点上token数据表格shape大小的列表，长度为5。</td>
-    <td style="white-space: nowrap">INT32</td>
+    <td style="white-space: nowrap">INT64</td>
     <td style="white-space: nowrap">-</td>
     </tr>
     <tr>
     <td style="white-space: nowrap">attnTokenInfoTableShape</td>
     <td style="white-space: nowrap">属性</td>
     <td style="white-space: nowrap">表示Attention节点上token信息表格shape大小的列表，长度为3。</td>
-    <td style="white-space: nowrap">INT32</td>
+    <td style="white-space: nowrap">INT64</td>
     <td style="white-space: nowrap">-</td>
     </tr>
     <tr>

@@ -191,7 +191,7 @@ aclnnStatus aclnnAttentionToFFN(
         <td>输入</td>
         <td>表示FFN节点上token信息表格shape大小的列表。</td>
         <td>长度为3，包括Attention节点的数量、microBatchSize的大小以及每个token对应的相关发送状态信息shape的大小。</td>
-        <td>INT32</td>
+        <td>INT64</td>
         <td>-</td>
         <td>-</td>
         <td>-</td>
@@ -201,7 +201,7 @@ aclnnStatus aclnnAttentionToFFN(
         <td>输入</td>
         <td>表示FFN节点上token数据表格shape大小的列表。</td>
         <td>长度为5，包括Attention节点的数量、microBatchSize的大小、batchSize大小、每个token需发送的专家数量（包括共享专家）、单个token的长度。</td>
-        <td>INT32</td>
+        <td>INT64</td>
         <td>-</td>
         <td>-</td>
         <td>-</td>
@@ -211,7 +211,7 @@ aclnnStatus aclnnAttentionToFFN(
         <td>输入</td>
         <td>表示Attention节点上token信息表格shape大小的列表。</td>
         <td>长度为3，包括microBatchSize的大小、batchSize大小、每个token需发送的专家数量（包括共享专家）。</td>
-        <td>INT32</td>
+        <td>INT64</td>
         <td>-</td>
         <td>-</td>
         <td>-</td>
