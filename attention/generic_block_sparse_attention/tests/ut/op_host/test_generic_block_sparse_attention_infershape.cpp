@@ -175,3 +175,38 @@ TEST_F(generic_block_sparse_attention_infershape_ut, unknown_rank_query)
     };
     ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape);
 }
+
+TEST_F(generic_block_sparse_attention_infershape_ut, batched_output_and_lse_layouts)
+{
+    for (const std::string layout : {"BNSD", "BSND"}) {
+        for (int64_t flags = 0; flags < 4; ++flags) {
+            const int64_t lse = flags & 1;
+            const bool paged = (flags & 2) != 0;
+            auto inputs = MakeInputs();
+            if (layout == "BSND") {
+                inputs[0] = {{{2, 3, 6, 65}, {2, 3, 6, 65}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+                inputs[1] = {{{2, 257, 2, 65}, {2, 257, 2, 65}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+            } else {
+                inputs[0] = {{{2, 6, 3, 65}, {2, 6, 3, 65}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+                inputs[1] = {{{2, 2, 257, 65}, {2, 2, 257, 65}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+            }
+            std::vector<uint32_t> inputInstances(16, 1U);
+            if (paged) {
+                inputs[1] = {{{8, 128, 2, 65}, {8, 128, 2, 65}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+                inputs[15] = {{{2, 4}, {2, 4}}, ge::DT_INT32, ge::FORMAT_ND};
+            } else {
+                inputs.pop_back();
+                inputInstances[15] = 0U;
+            }
+            inputs[2] = inputs[1];
+            gert::InfershapeContextPara ctx(
+                "GenericBlockSparseAttention", inputs,
+                {{{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND}, {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+                MakeAttrs(lse, layout, paged ? "PA_BBND" : layout), inputInstances, {1U, 1U});
+            const std::vector<int64_t> q =
+                layout == "BSND" ? std::vector<int64_t>{2, 3, 6, 65} : std::vector<int64_t>{2, 6, 3, 65};
+            ExecuteTestCase(ctx, ge::GRAPH_SUCCESS,
+                            {q, lse != 0 ? std::vector<int64_t>{2, 6, 3, 1} : std::vector<int64_t>{0}});
+        }
+    }
+}

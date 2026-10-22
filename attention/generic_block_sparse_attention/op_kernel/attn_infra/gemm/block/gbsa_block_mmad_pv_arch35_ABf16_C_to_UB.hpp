@@ -12,8 +12,8 @@
  * @brief matmul implementation for single p&v base tile
  * This implementation is designed for the following senario:
  * A full p base tile is loaded to L1 from UB, no workspace transit
- * A full v base tile is loaded to L1 from GM，relavent instructions launched before p base tile crossCore wait
- * A full p*v base tile is loaded to UB from l0C, no workspace transit
+ * V keeps a full base tile in L1; non-quantized groups can be consumed while later groups are loading.
+ * A full p*v base tile is stored from L0C to UB, or to GM for row-streamed rescaleO.
  */
 #ifndef GEMM_BLOCK_PV_ARCH35_ABF16_C2UB_HPP
 #define GEMM_BLOCK_PV_ARCH35_ABF16_C2UB_HPP
@@ -29,6 +29,7 @@
 #include "../../../attn_infra/gemm/tile_common/gbsa_tile_mmad.hpp"
 #include "../../../tla/gbsa_tla_layout.hpp"
 #include "../../../tla/gbsa_tla_tensor.hpp"
+#include "../../../arch35/gbsa_layout_utils.hpp"
 
 ////////////////////////////////////////////////////////////////////
 
@@ -55,12 +56,16 @@ struct Mm2L1TileHelper {
     {}
 };
 
-template <class L1TileShape_, class L0TileShape_, class ElementA_, class ElementB_, class ElementC_, class ElementBias_,
-          class TileCopy_, class TileMmad_>
-struct BlockMmadTla<MmadAtlasA5BsaPV, L1TileShape_, L0TileShape_, ElementA_, ElementB_, ElementC_, ElementBias_,
-                    TileCopy_, TileMmad_> {
+template <bool PAGED_CACHE_FLAG_, bool HAS_RESIDUAL_BLOCK_, bool PRECOMPUTE_SPARSE_, class L1TileShape_,
+          class L0TileShape_, class ElementA_, class ElementB_, class ElementC_, class ElementBias_, class TileCopy_,
+          class TileMmad_>
+struct BlockMmadTla<MmadAtlasA5BsaPV<PAGED_CACHE_FLAG_, HAS_RESIDUAL_BLOCK_, PRECOMPUTE_SPARSE_>, L1TileShape_,
+                    L0TileShape_, ElementA_, ElementB_, ElementC_, ElementBias_, TileCopy_, TileMmad_> {
 public:
-    using DispatchPolicy = MmadAtlasA5BsaPV;
+    using DispatchPolicy = MmadAtlasA5BsaPV<PAGED_CACHE_FLAG_, HAS_RESIDUAL_BLOCK_, PRECOMPUTE_SPARSE_>;
+    static constexpr bool PAGED_CACHE_FLAG = DispatchPolicy::PAGED_CACHE_FLAG;
+    static constexpr bool HAS_RESIDUAL_BLOCK = DispatchPolicy::HAS_RESIDUAL_BLOCK;
+    static constexpr bool PRECOMPUTE_SPARSE = DispatchPolicy::PRECOMPUTE_SPARSE;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using TileCopy = TileCopy_;
     using ElementA = ElementA_;
@@ -152,76 +157,117 @@ public:
     }
 
     template <class TensorB, class TensorL1B>
-    __aicore__ inline void SparseVBaseTileL1FullLoad(TensorB& gBTensor, TensorL1B& l1BTensorTla,
-                                                     AscendC::GlobalTensor<int32_t> gSparseBlockIdx,
-                                                     uint32_t gatheredKvSTileIdx, uint32_t kvSeqlen,
-                                                     uint32_t kvSBaseTile, uint32_t blockShapeY, uint32_t yBlockNumAval,
-                                                     uint32_t yBlockNumSparse, uint32_t curBaseTileSize, uint32_t embed)
+    __aicore__ inline void SparseVGroupL1Load(TensorB& gBTensor, TensorL1B& l1BTensorTla,
+                                              AscendC::GlobalTensor<uint64_t> groupInfo, uint32_t rowOffset,
+                                              uint32_t embed)
+    {
+        constexpr uint32_t recordWords = PAGED_CACHE_FLAG ? 4U : 2U;
+        constexpr uint32_t elementsPerC0 = BYTE_PER_C0 / sizeof(ElementB);
+        const auto& srcData = gBTensor.data();
+        const auto& dstStorage = l1BTensorTla.data();
+        // Rebind the existing L1 view with an explicit logical position.
+        // Subtract the L1 base so the address is relative in CPU debug as well.
+        const AscendC::LocalTensor<ElementB> l1Base(AscendC::TPosition::A1, 0, ArchTag::L1_SIZE / sizeof(ElementB));
+        const uint32_t dstAddr =
+            static_cast<uint32_t>((uint64_t)dstStorage.GetPhyAddr() - (uint64_t)l1Base.GetPhyAddr());
+        const AscendC::LocalTensor<ElementB> dstData(AscendC::TPosition::A1, dstAddr, dstStorage.GetSize());
+        const uint32_t dstRowStride = tla::get<0, 0>(l1BTensorTla.stride());
+        const auto dstBase = l1BTensorTla.layout()(l1BTensorTla.coord());
+        AscendC::Nd2NzParams copyParams;
+        copyParams.dValue = embed;
+        copyParams.srcDValue = tla::get<0>(gBTensor.stride());
+        copyParams.dstNzC0Stride = tla::get<1, 1>(l1BTensorTla.stride()) / elementsPerC0;
+        copyParams.dstNzNStride = dstRowStride / elementsPerC0;
+        const __gm__ uint64_t* records = groupInfo.GetPhyAddr();
+        const uint32_t blockCount = records[0];
+        for (uint32_t i = 0; i < blockCount; ++i) {
+            const uint32_t word = 8U + i * recordWords;
+            const uint64_t sourceOffset = records[word + (PAGED_CACHE_FLAG ? 1U : 0U)];
+            const uint64_t lengthOrMeta = records[word + (PAGED_CACHE_FLAG ? 3U : 1U)];
+            const uint32_t curDealtLen = static_cast<uint32_t>(lengthOrMeta) >> 1U;
+            const uint32_t ndNum = 1U + static_cast<uint32_t>(lengthOrMeta & 1U);
+            copyParams.ndNum = ndNum;
+            copyParams.nValue = curDealtLen;
+            copyParams.srcNdMatrixStride = static_cast<uint32_t>(lengthOrMeta >> 32U);
+            copyParams.dstNzMatrixStride = curDealtLen * dstRowStride;
+            AscendC::DataCopy(dstData[dstBase + rowOffset * dstRowStride], srcData[sourceOffset], copyParams);
+            rowOffset += ndNum * curDealtLen;
+        }
+    }
+
+    template <class TensorB, class TensorL1B>
+    __aicore__ inline void SparseVBaseTileL1FullLoad(
+        TensorB& gBTensor, TensorL1B& l1BTensorTla, AscendC::GlobalTensor<int32_t> gSparseBlockIdx,
+        uint32_t gatheredKvSTileIdx, uint32_t kvSBaseTile, uint32_t blockShapeY, uint32_t curBaseTileSize,
+        uint32_t embed, AscendC::GlobalTensor<int32_t> gBlockTable, uint32_t blockSize, uint64_t pageStride,
+        uint64_t tokenStride, uint32_t localExplicitBlockCount, uint32_t residualBlockId,
+        AscendC::GlobalTensor<uint64_t> kvOffsetInfo, uint32_t kvOffsetGroupWords, uint32_t kvOffsetGroupN)
     {
         using CopyGmToL1B = typename TileCopy_::template CopyGmToL1B<TensorB>;
         CopyGmToL1B copyGmToL1B;
+        if constexpr (PRECOMPUTE_SPARSE) {
+            const uint32_t groupNum = CeilDiv(curBaseTileSize, kvOffsetGroupN);
+            for (uint32_t groupIdx = 0; groupIdx < groupNum; ++groupIdx) {
+                SparseVGroupL1Load(gBTensor, l1BTensorTla, kvOffsetInfo[groupIdx * kvOffsetGroupWords],
+                                   groupIdx * kvOffsetGroupN, embed);
+            }
+            return;
+        }
         uint32_t baseTileStartOffset = gatheredKvSTileIdx * kvSBaseTile;
-        uint32_t baseTileEndOffset = baseTileStartOffset + curBaseTileSize;
-        // 稀疏情况下对实际选中的部分gather后进行基本块切分
-        // 当前处理的Yblock在gather的序列中的起始偏移，初始值为当前基块的起始偏移
-        uint32_t gatheredStartOffset = baseTileStartOffset;
-        // 当前处理的Yblock gather后的下标，初始值为基本块起始偏移对应的按Y方向稀疏block的gather后起始下标
-        uint32_t gatheredYBlockIdx = gatheredStartOffset / blockShapeY;
-        // 当前基本块起始偏移对应的按Y方向稀疏后的block内起始偏移
-        uint32_t yBlockInnerStartOffset = gatheredStartOffset % blockShapeY;
-        // 当前处理的Yblock原始的下标，初始值为基本块对应的按Y方向稀疏block的原始起始下标
-        uint32_t oriYBlockIdx = gSparseBlockIdx.GetValue(gatheredYBlockIdx);
-        // 当前处理的Yblock起始位置在原始序列中的偏移，初始值为基本块在原始序列中的起始偏移
-        uint32_t oriStartOffset = oriYBlockIdx * blockShapeY + yBlockInnerStartOffset;
-        // 逐稀疏block搬移填充基本块过程中，已处理的累积序列长度
+        uint32_t yBlockInnerStartOffset = baseTileStartOffset % blockShapeY;
         uint32_t dealtLenAccum = 0;
-
-        while (dealtLenAccum < curBaseTileSize && gatheredYBlockIdx < yBlockNumSparse && oriYBlockIdx < yBlockNumAval &&
-               oriStartOffset < kvSeqlen) {
-            uint32_t curYBlockSize = blockShapeY;
-            if (oriYBlockIdx == yBlockNumAval - 1) {
-                curYBlockSize = kvSeqlen - oriYBlockIdx * blockShapeY;
+        // The caller clips this tile to validKvTokens, so every visited token is valid.
+        for (uint32_t gatheredYBlockIdx = baseTileStartOffset / blockShapeY; dealtLenAccum < curBaseTileSize;
+             ++gatheredYBlockIdx) {
+            const uint32_t curYBlockSize = min(blockShapeY - yBlockInnerStartOffset, curBaseTileSize - dealtLenAccum);
+            const int32_t logicalBlockId = GbsaKernelArch35::GetSparseBlockId<HAS_RESIDUAL_BLOCK>(
+                gSparseBlockIdx, gatheredYBlockIdx, localExplicitBlockCount, residualBlockId);
+            const uint64_t oriStartOffset =
+                static_cast<uint64_t>(logicalBlockId) * blockShapeY + yBlockInnerStartOffset;
+            // Only PA can split one sparse block across several physical pages.
+            for (uint32_t copied = 0; copied < curYBlockSize;) {
+                uint32_t curDealtLen = curYBlockSize - copied;
+                uint64_t sourceToken = oriStartOffset + copied;
+                uint64_t pageOffset = 0;
+                if constexpr (PAGED_CACHE_FLAG) {
+                    const uint32_t pageInnerOffset = sourceToken % blockSize;
+                    curDealtLen = min(curDealtLen, blockSize - pageInnerOffset);
+                    const uint32_t physicalPage = gBlockTable.GetValue(sourceToken / blockSize);
+                    pageOffset = static_cast<uint64_t>(physicalPage) * pageStride;
+                    sourceToken = pageInnerOffset;
+                }
+                auto l1BTensorTlaTile = GetTile(l1BTensorTla, tla::MakeCoord(dealtLenAccum + copied, 0),
+                                                tla::MakeShape(curDealtLen, embed));
+                // GM is already rebased to the batch/head or physical block, with zero tensor coordinates.
+                const uint64_t sourceOffset = pageOffset + sourceToken * tokenStride;
+                auto gBSourceTensor =
+                    tla::MakeTensor(gBTensor.data()[sourceOffset], gBTensor.layout(), Arch::PositionGM{});
+                auto gBTensorTlaTile =
+                    GetTile(gBSourceTensor, tla::MakeCoord(0, 0), tla::MakeShape(curDealtLen, embed));
+                copyGmToL1B(l1BTensorTlaTile, gBTensorTlaTile);
+                copied += curDealtLen;
             }
-            uint32_t gatheredEndOffset = min(gatheredYBlockIdx * blockShapeY + curYBlockSize, baseTileEndOffset);
-            // 当前循环处理的序列长度
-            uint32_t curDealtLen = gatheredEndOffset - gatheredStartOffset;
-            if (curDealtLen == 0) {
-                break;
-            }
-            auto l1BTensorTlaTile =
-                GetTile(l1BTensorTla, tla::MakeCoord(dealtLenAccum, 0), tla::MakeShape(curDealtLen, embed));
-            auto gBTensorTlaTile =
-                GetTile(gBTensor, tla::MakeCoord(oriStartOffset, 0), tla::MakeShape(curDealtLen, embed));
-            copyGmToL1B(l1BTensorTlaTile, gBTensorTlaTile);
-            // 为下一次循环刷新循环变量
-            dealtLenAccum += curDealtLen;
-            gatheredStartOffset += curDealtLen;
-            gatheredYBlockIdx = gatheredStartOffset / blockShapeY;
-            yBlockInnerStartOffset = gatheredStartOffset % blockShapeY;
-            if (dealtLenAccum < curBaseTileSize) {
-                // 防止最后一次循环之后对GM的访问越界引发硬件error
-                oriYBlockIdx = gSparseBlockIdx.GetValue(gatheredYBlockIdx);
-                oriStartOffset = oriYBlockIdx * blockShapeY + yBlockInnerStartOffset;
-            }
+            dealtLenAccum += curYBlockSize;
+            yBlockInnerStartOffset = 0;
         }
     }
 
     template <class TensorB, class TensorC>
-    __aicore__ inline void operator()(TensorB& gBTensor, TensorC& ubCTensor,
-                                      AscendC::GlobalTensor<int32_t> gSparseBlockIdx, GemmCoord actualOriShape,
-                                      uint32_t gatheredKvSTileIdx, uint32_t kvSeqlen, uint32_t kvSBaseTile,
-                                      uint32_t blockShapeY, uint32_t yBlockNumAval, uint32_t yBlockNumSparse,
-                                      uint64_t prefixSumL0AStages, uint64_t prefixSumL0BStages,
-                                      Arch::CrossCoreFlag smToMm2Flag, Arch::CrossCoreFlag mm2ToReFlag)
+    __aicore__ inline void operator()(
+        TensorB& gBTensor, TensorC& ubCTensor, AscendC::GlobalTensor<int32_t> gSparseBlockIdx, GemmCoord actualOriShape,
+        uint32_t gatheredKvSTileIdx, uint32_t kvSBaseTile, uint32_t blockShapeY, uint64_t prefixSumL0AStages,
+        uint64_t prefixSumL0BStages, Arch::CrossCoreFlag smToMm2Flag, Arch::CrossCoreFlag mm2ToReFlag,
+        uint64_t tokenStride, AscendC::GlobalTensor<int32_t> gBlockTable = {}, uint32_t blockSize = 0,
+        uint64_t pageStride = 0, uint32_t localExplicitBlockCount = 0, uint32_t residualBlockId = 0,
+        AscendC::GlobalTensor<uint64_t> kvOffsetInfo = {}, uint32_t kvOffsetGroupWords = 0, uint32_t kvOffsetGroupN = 0)
     {
-        using CopyL0CToDst = typename TileCopy_::template CopyL0CToDst<TensorC>;
-        CopyL0CToDst copyL0CToDst;
-
         uint32_t rowNum = actualOriShape[0];
         uint32_t embed = actualOriShape[1];
         uint32_t curBaseTileSize = actualOriShape[2];
 
-        uint32_t l1BBufId = gatheredKvSTileIdx % l1BBufNum;
+        // Non-quantized tiling allocates one or two V buffers; P may use three.
+        uint32_t l1BBufId =
+            PRECOMPUTE_SPARSE ? (gatheredKvSTileIdx & (l1BBufNum - 1U)) : (gatheredKvSTileIdx % l1BBufNum);
         uint32_t l1BEventId = l1BBufId + 3;
         uint32_t l1ABufId = gatheredKvSTileIdx % l1ABufNum;
 
@@ -229,44 +275,101 @@ public:
         auto l1BTensorTla = tla::MakeTensor(l1BTensor[l1BBufId], l1BLayoutTla, Arch::PositionL1{});
         auto l1ALayoutTla = tla::MakeLayout<ElementA, LayoutTagL1A>(rowNum, curBaseTileSize);
         auto l1ATensorTla = tla::MakeTensor(l1ATensor[l1ABufId], l1ALayoutTla, Arch::PositionL1{});
-        // load V full base tile to L1 before crossCoreSync
+        // Retain the full V layout. Only readiness is split along the KV axis.
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventId);
-        SparseVBaseTileL1FullLoad(gBTensor, l1BTensorTla, gSparseBlockIdx, gatheredKvSTileIdx, kvSeqlen, kvSBaseTile,
-                                  blockShapeY, yBlockNumAval, yBlockNumSparse, curBaseTileSize, embed);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventId);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventId);
+        const uint32_t vGroupNum = PRECOMPUTE_SPARSE ? CeilDiv(curBaseTileSize, kvOffsetGroupN) : 1U;
+        const uint32_t vReadyBase =
+            PRECOMPUTE_SPARSE ? EVENT_ID3 + l1BBufId * CeilDiv(l1BTileK, kvOffsetGroupN) : l1BEventId;
+        if constexpr (PRECOMPUTE_SPARSE) {
+            // Current tiling has at most four groups across the V buffers.
+            // QK uses IDs 0..2; IDs 3..6 are reused only after this V buffer is released.
+            for (uint32_t groupIdx = 0; groupIdx < vGroupNum; ++groupIdx) {
+                SparseVGroupL1Load(gBTensor, l1BTensorTla, kvOffsetInfo[groupIdx * kvOffsetGroupWords],
+                                   groupIdx * kvOffsetGroupN, embed);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(vReadyBase + groupIdx);
+            }
+            const uint32_t freeFlag =
+                GbsaKernelArch35::KV_OFFSET_FLAG_BASE + gatheredKvSTileIdx % GbsaKernelArch35::KV_OFFSET_STAGES;
+            AscendC::CrossCoreSetFlag<4, PIPE_S>(freeFlag);
+            AscendC::CrossCoreSetFlag<4, PIPE_S>(freeFlag + V0_V1_FLAG_ID_OFFSET);
+        } else {
+            SparseVBaseTileL1FullLoad(gBTensor, l1BTensorTla, gSparseBlockIdx, gatheredKvSTileIdx, kvSBaseTile,
+                                      blockShapeY, curBaseTileSize, embed, gBlockTable, blockSize, pageStride,
+                                      tokenStride, localExplicitBlockCount, residualBlockId, kvOffsetInfo,
+                                      kvOffsetGroupWords, kvOffsetGroupN);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventId);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventId);
+        }
         // fwd crossCoreSync from online sm to mm2
         WaitCrossCoreSync<4, PIPE_MTE1>(smToMm2Flag);
+        if constexpr (PRECOMPUTE_SPARSE) {
+            // Select geometry once. The inner N loop then has one or two
+            // compile-time iterations, with fixed ownership of both PV L0Cs.
+            if (embed <= L0_TILE_N) {
+                ComputePV<1U>(l1ATensorTla, l1BTensorTla, ubCTensor, actualOriShape, gatheredKvSTileIdx,
+                              prefixSumL0AStages, prefixSumL0BStages, smToMm2Flag, mm2ToReFlag, l1BEventId, vReadyBase,
+                              kvOffsetGroupN);
+            } else {
+                ComputePV<2U>(l1ATensorTla, l1BTensorTla, ubCTensor, actualOriShape, gatheredKvSTileIdx,
+                              prefixSumL0AStages, prefixSumL0BStages, smToMm2Flag, mm2ToReFlag, l1BEventId, vReadyBase,
+                              kvOffsetGroupN);
+            }
+        } else {
+            ComputePV<0U>(l1ATensorTla, l1BTensorTla, ubCTensor, actualOriShape, gatheredKvSTileIdx, prefixSumL0AStages,
+                          prefixSumL0BStages, smToMm2Flag, mm2ToReFlag, l1BEventId, vReadyBase, kvOffsetGroupN);
+        }
+    }
+
+    template <uint32_t N_SPLITS, class TensorL1A, class TensorL1B, class TensorC>
+    __aicore__ inline void ComputePV(TensorL1A& l1ATensorTla, TensorL1B& l1BTensorTla, TensorC& ubCTensor,
+                                     GemmCoord actualOriShape, uint32_t gatheredKvSTileIdx, uint64_t prefixSumL0AStages,
+                                     uint64_t prefixSumL0BStages, Arch::CrossCoreFlag smToMm2Flag,
+                                     Arch::CrossCoreFlag mm2ToReFlag, uint32_t l1BEventId, uint32_t vReadyBase,
+                                     uint32_t kvOffsetGroupN)
+    {
+        using CopyL0CToDst = typename TileCopy_::template CopyL0CToDst<TensorC>;
+        CopyL0CToDst copyL0CToDst;
+        const uint32_t rowNum = actualOriShape[0];
+        const uint32_t embed = actualOriShape[1];
+        const uint32_t curBaseTileSize = actualOriShape[2];
         // P full base tile already on L1
-        uint32_t mL0LoopNum = CeilDiv(rowNum, L0_TILE_M);
-        uint32_t nL0LoopNum = CeilDiv(embed, L0_TILE_N);
+        // The host bounds non-quant groupSize by L0_TILE_M (128).
+        const uint32_t mL0LoopNum = PRECOMPUTE_SPARSE ? 1U : CeilDiv(rowNum, L0_TILE_M);
+        const uint32_t nL0LoopNum = N_SPLITS != 0U ? N_SPLITS : CeilDiv(embed, L0_TILE_N);
         uint32_t kL0LoopNum = CeilDiv(curBaseTileSize, L0_TILE_K);
-        // while splitting the base tile OTmp to 2 AIVs,
-        // the order of the elements in each column is expected to be preserved,
-        // which means a column in l0C cannot be chunked and processed by dualMode FixPipe seperately.
-        // therefore, FixPipe won't launch until each portion(chunked only by columns, based on nbuffer strategy)
-        // of the base tile is ready on l0C
-        for (uint32_t nL0Itr = 0; nL0Itr < nL0LoopNum; nL0Itr++) {
-            uint32_t l0TileNAct = (nL0Itr == nL0LoopNum - 1) ? (embed - nL0Itr * L0_TILE_N) : L0_TILE_N;
-            uint32_t nLoopCounter = GetCurLoopCounter(gatheredKvSTileIdx, nL0LoopNum, nL0Itr);
-            // l0C nbuffer chunked only in n loop
-            uint32_t l0CLoopCounter = nLoopCounter;
-            uint32_t l0CBufId = l0CLoopCounter % L0_STAGES;
-            // uint32_t l0CEventId = l0CBufId;
-            uint32_t l0CEventId = l0CBufId + 2;
-            auto l0CLayoutTla = tla::MakeLayoutL0C(rowNum, l0TileNAct);
-            auto l0CTensorTla = tla::MakeTensor(l0CTensor[l0CBufId], l0CLayoutTla, Arch::PositionL0C{});
-            for (uint32_t mL0Itr = 0; mL0Itr < mL0LoopNum; mL0Itr++) {
-                uint32_t l0TileMAct = (mL0Itr == mL0LoopNum - 1) ? (rowNum - mL0Itr * L0_TILE_M) : L0_TILE_M;
-                // uint32_t mLoopCounter = GetCurLoopCounter(gatheredKvSTileIdx, mL0LoopNum, mL0Itr);
-                // different m chunks will be concated in the same piece of l0C buffer
-                auto l0CTensorTlaTile = GetTile(l0CTensorTla, tla::MakeCoord(mL0Itr * L0_TILE_M, 0),
-                                                tla::MakeShape(l0TileMAct, l0TileNAct));
-                for (uint32_t kL0Itr = 0; kL0Itr < kL0LoopNum; kL0Itr++) {
-                    uint32_t l0ALoopCounter = prefixSumL0AStages + GetCurLoopCounter(mL0Itr, kL0LoopNum, kL0Itr);
-                    uint32_t l0BLoopCounter = prefixSumL0BStages + GetCurLoopCounter(nL0Itr, kL0LoopNum, kL0Itr);
-                    uint32_t l0TileKAct =
-                        (kL0Itr == kL0LoopNum - 1) ? (curBaseTileSize - kL0Itr * L0_TILE_K) : L0_TILE_K;
+        // D <= 256: retain both D slices in the existing PV L0C buffers.
+        // Their strides depend only on M; the actual N tail is selected below.
+        const uint32_t l0TileNTail = embed - (nL0LoopNum - 1U) * L0_TILE_N;
+        const uint32_t l0CBaseId = gatheredKvSTileIdx * nL0LoopNum;
+        auto l0CLayoutTla = tla::MakeLayoutL0C(rowNum, L0_TILE_N);
+        const uint32_t l0ABaseId = prefixSumL0AStages % L0_STAGES;
+        const uint32_t l0BBaseId = prefixSumL0BStages % L0_STAGES;
+        uint32_t vGroupIdx = 0;
+        for (uint32_t kL0Itr = 0; kL0Itr < kL0LoopNum; kL0Itr++) {
+            const uint32_t l0TileKAct =
+                (kL0Itr == kL0LoopNum - 1U) ? (curBaseTileSize - kL0Itr * L0_TILE_K) : L0_TILE_K;
+            if constexpr (PRECOMPUTE_SPARSE) {
+                if (kL0Itr * L0_TILE_K == vGroupIdx * kvOffsetGroupN) {
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(vReadyBase + vGroupIdx);
+                    ++vGroupIdx;
+                }
+            }
+#pragma unroll
+            for (uint32_t nL0Itr = 0; nL0Itr < nL0LoopNum; nL0Itr++) {
+                const uint32_t l0TileNAct = nL0Itr == nL0LoopNum - 1U ? l0TileNTail : L0_TILE_N;
+                const uint32_t l0CBufId = (l0CBaseId + nL0Itr) % L0_STAGES;
+                const uint32_t l0CEventId = l0CBufId + 2;
+                auto l0CTensorTla = tla::MakeTensor(l0CTensor[l0CBufId], l0CLayoutTla, Arch::PositionL0C{});
+                for (uint32_t mL0Itr = 0; mL0Itr < mL0LoopNum; mL0Itr++) {
+                    uint32_t l0TileMAct = (mL0Itr == mL0LoopNum - 1) ? (rowNum - mL0Itr * L0_TILE_M) : L0_TILE_M;
+                    // Different M slices occupy disjoint rows in the same L0C buffer.
+                    auto l0CTensorTlaTile = GetTile(l0CTensorTla, tla::MakeCoord(mL0Itr * L0_TILE_M, 0),
+                                                    tla::MakeShape(l0TileMAct, l0TileNAct));
+                    // Ping-pong follows MMAD issue order, not the old N-major order.
+                    const uint32_t l0LoopCounter = (kL0Itr * nL0LoopNum + nL0Itr) * mL0LoopNum + mL0Itr;
+                    // Both D slices use the same P tile. Advance L0A only along K.
+                    uint32_t l0ALoopCounter = l0ABaseId + (N_SPLITS == 2U ? kL0Itr : l0LoopCounter);
+                    uint32_t l0BLoopCounter = l0BBaseId + l0LoopCounter;
                     uint32_t l0ABufId = l0ALoopCounter % L0_STAGES;
                     // l0ABufId = (mLoopCounter % 2 == 0) ? (1 - l0ABufId) : l0ABufId;
                     uint32_t l0BBufId = l0BLoopCounter % L0_STAGES;
@@ -288,23 +391,28 @@ public:
                         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventId);
                     }
 
-                    auto l1ATensorTlaTile =
-                        GetTile(l1ATensorTla, tla::MakeCoord(mL0Itr * L0_TILE_M, kL0Itr * L0_TILE_K),
-                                tla::MakeShape(l0TileMAct, l0TileKAct));
                     auto l0ALayoutTla = tla::MakeLayout<ElementA, LayoutTagL0A>(l0TileMAct, l0TileKAct);
                     auto l0ATensorTla = tla::MakeTensor(l0ATensor[l0ABufId], l0ALayoutTla, Arch::PositionL0A{});
 
-                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventId);
-                    copyL1ToL0A(l0ATensorTla, l1ATensorTlaTile);
-                    AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(l0AEventId);
-                    // reverse crossCoreSync for P
-                    if ((mL0Itr == mL0LoopNum - 1) && (nL0Itr == nL0LoopNum - 1) && (kL0Itr == kL0LoopNum - 1)) {
+                    if (N_SPLITS != 2U || nL0Itr == 0U) {
+                        auto l1ATensorTlaTile =
+                            GetTile(l1ATensorTla, tla::MakeCoord(mL0Itr * L0_TILE_M, kL0Itr * L0_TILE_K),
+                                    tla::MakeShape(l0TileMAct, l0TileKAct));
+                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventId);
+                        copyL1ToL0A(l0ATensorTla, l1ATensorTlaTile);
+                        AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(l0AEventId);
+                    }
+                    // Release L1 P after its last copy. Both MMADs retain the L0A copy.
+                    if ((mL0Itr == mL0LoopNum - 1) && (N_SPLITS == 2U ? nL0Itr == 0U : nL0Itr == nL0LoopNum - 1U) &&
+                        (kL0Itr == kL0LoopNum - 1)) {
                         SetCrossCoreSync<4, PIPE_MTE1>(smToMm2Flag);
                     }
 
                     bool initMmad = (kL0Itr == 0);
                     uint32_t l0TileMAligned = RoundUp(l0TileMAct, 16);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(l0AEventId);
+                    if (N_SPLITS != 2U || nL0Itr == 0U) {
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(l0AEventId);
+                    }
 
                     AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(l0BEventId);
 
@@ -313,25 +421,32 @@ public:
                     }
                     tileMmad(l0CTensorTlaTile, l0ATensorTla, l0BTensorTla, l0TileMAligned, l0TileNAct, l0TileKAct,
                              initMmad);
-                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventId);
+                    if (N_SPLITS != 2U || nL0Itr == nL0LoopNum - 1U) {
+                        // The second MMAD must finish reading P before reusing L0A.
+                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventId);
+                    }
                     AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventId);
                 }
             }
-            // fixpipe
+        }
+// Each D slice contains every M row before dual-AIV Fixpipe splits it.
+#pragma unroll
+        for (uint32_t nL0Itr = 0; nL0Itr < nL0LoopNum; nL0Itr++) {
+            const uint32_t l0TileNAct = nL0Itr == nL0LoopNum - 1U ? l0TileNTail : L0_TILE_N;
+            const uint32_t l0CBufId = (l0CBaseId + nL0Itr) % L0_STAGES;
+            const uint32_t l0CEventId = l0CBufId + 2;
+            auto l0CTensorTla =
+                tla::MakeTensor(l0CTensor[l0CBufId], tla::MakeLayoutL0C(rowNum, l0TileNAct), Arch::PositionL0C{});
             if (nL0Itr == 0) {
-                // reverse crossCoreSync, do fixPipe only after ubCTensor is fully released
+                // Reverse crossCoreSync: wait until the destination UB/GM tile is fully released.
                 WaitCrossCoreSync<4, PIPE_FIX>(mm2ToReFlag);
             }
             AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventId);
             AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventId);
-            // 需要kernel传输ubCTensor的时候确保其shape的m，n是满足32B（8个32位元素）对齐的
-            // rounded up by 8 and splited in half to each AIV
-            // valid rows in AIV0: [0, mFixPAligned8 / 2 - 1]
-            // valid rows in AIV1: [mFixPAligned8 / 2, rowNum - 1]
-            uint32_t mFixPAligned8 = RoundUp(rowNum, 8);
+            // UB SPLIT_M rounds M to an even value; GM retains the full M. N is aligned to 32B.
             uint32_t nFixPAligned8 = RoundUp(l0TileNAct, 8);
             auto ubCTensorTlaTile =
-                GetTile(ubCTensor, tla::MakeCoord(0, nL0Itr * L0_TILE_N), tla::MakeShape(mFixPAligned8, nFixPAligned8));
+                GetTile(ubCTensor, tla::MakeCoord(0, nL0Itr * L0_TILE_N), tla::MakeShape(rowNum, nFixPAligned8));
             copyL0CToDst(ubCTensorTlaTile, l0CTensorTla);
             AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CEventId);
         }

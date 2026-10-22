@@ -19,6 +19,7 @@
 #include "opdev/op_errno.h"
 #include "opdev/op_executor.h"
 #include "opdev/op_log.h"
+#include "opdev/platform.h"
 #include <algorithm>
 #include <string>
 #include <unordered_map>
@@ -119,12 +120,14 @@ static aclnnStatus ValidateParams(const aclTensor* query, const aclTensor* key, 
 
     const std::string layoutQStr = op::ToString(layoutQ).GetString();
     const std::string layoutKvStr = op::ToString(layoutKv).GetString();
-    if (layoutQStr != "TND") {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "layoutQ only supports TND, got %s.", layoutQStr.c_str());
+    if (layoutQStr != "TND" && layoutQStr != "BSND" && layoutQStr != "BNSD") {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Unsupported layoutQ=%s.", layoutQStr.c_str());
         return ACLNN_ERR_PARAM_INVALID;
     }
-    if (layoutKvStr != "PA_BBND") {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "layoutKv only supports PA_BBND, got %s.", layoutKvStr.c_str());
+    if (layoutKvStr != layoutQStr && layoutKvStr != "PA_BBND" && layoutKvStr != "PA_BNBD") {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                "Dense Q/K/V must use the same layout; paged KV must be PA_BBND/PA_BNBD, got layoutKv=%s.",
+                layoutKvStr.c_str());
         return ACLNN_ERR_PARAM_INVALID;
     }
 
@@ -307,6 +310,41 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
         return ret;
     }
 
+    // Storage mode comes from blockTable presence; layout only constrains the tensor axes.
+    const bool isPaged = blockTableOptional != nullptr;
+    const bool layoutIsPa = (std::string(layoutKv) == "PA_BBND" || std::string(layoutKv) == "PA_BNBD");
+    if (isPaged) {
+        if (!layoutIsPa) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "With blockTable, the supported KV layout is PA_BBND or PA_BNBD.");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+    } else {
+        if (layoutIsPa) {
+            OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "PA_BBND/PA_BNBD requires blockTable; it must not be nullptr.");
+            return ACLNN_ERR_PARAM_NULLPTR;
+        }
+        if (op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510 || quantType != 0 ||
+            (query->GetDataType() != DataType::DT_FLOAT16 && query->GetDataType() != DataType::DT_BF16)) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Dense non-paged KV requires A5, FP16/BF16 and quantType=0.");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+        if (std::string(layoutQ) == "TND" && (cuSeqLengthsQOptional == nullptr || cuSeqLengthsKvOptional == nullptr)) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "TND non-paged KV requires Q/KV cuSeqLengths and no blockTable.");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+    }
+
+    if (std::string(layoutQ) != "TND") {
+        if (sequsedQOptional == nullptr || sequsedKvOptional == nullptr) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "BSND/BNSD query requires sequsedQ and sequsedKv.");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+        if (op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510 || quantType != 0 ||
+            (query->GetDataType() != DataType::DT_FLOAT16 && query->GetDataType() != DataType::DT_BF16)) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "BSND/BNSD query requires A5 FP16/BF16 non-quantization.");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+    }
     ret = ValidateAdditionalParams(softmaxPrecision, attentionOut, workspaceSize, executor);
     if (ret != ACLNN_SUCCESS) {
         return ret;
@@ -336,9 +374,11 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
     std::string layoutQStr = ConvertLayoutString(layoutQ);
     std::string layoutKvStr = ConvertLayoutString(layoutKv);
 
-    const aclTensor* keyFinal = NormalizeDim0KvTensor(key, "key", executorImpl);
+    const aclTensor* keyFinal =
+        isPaged ? NormalizeDim0KvTensor(key, "key", executorImpl) : l0op::Contiguous(key, executorImpl);
     CHECK_RET(keyFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    const aclTensor* valueFinal = NormalizeDim0KvTensor(value, "value", executorImpl);
+    const aclTensor* valueFinal =
+        isPaged ? NormalizeDim0KvTensor(value, "value", executorImpl) : l0op::Contiguous(value, executorImpl);
     CHECK_RET(valueFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     auto outputs = l0op::GenericBlockSparseAttention(

@@ -11,6 +11,8 @@
 #include "log.h"
 #include "generic_block_sparse_attention_metadata_aicpu.h"
 
+#include <limits>
+
 namespace aicpu {
 namespace {
 
@@ -18,11 +20,7 @@ constexpr uint32_t KERNEL_STATUS_OK = 0U;
 constexpr uint32_t KERNEL_STATUS_PARAM_INVALID = 1U;
 constexpr int32_t TND_SPARSE_BLOCK_IDX_DIM_NUM = 3;
 constexpr int32_t TND_SPARSE_BLOCK_COUNT_DIM_NUM = 2;
-constexpr int32_t BATCHED_SPARSE_BLOCK_IDX_DIM_NUM = 4;
-constexpr int32_t BATCHED_SPARSE_BLOCK_COUNT_DIM_NUM = 3;
 constexpr int32_t TND_BLOCK_CAPACITY_DIM_INDEX = 2;
-constexpr int32_t BATCHED_Q_BLOCK_DIM_INDEX = 2;
-constexpr int32_t BATCHED_BLOCK_CAPACITY_DIM_INDEX = 3;
 
 bool HasTensorShape(const Tensor* tensor)
 {
@@ -42,10 +40,11 @@ uint32_t GenericBlockSparseAttentionMetadataAicpu::Compute(CpuKernelContext& ctx
         return KERNEL_STATUS_PARAM_INVALID;
     }
     std::vector<int64_t> qSeqLens;
+    std::vector<int64_t> kvSeqLens;
     std::vector<int64_t> qStorageBlockStarts;
     std::vector<int64_t> validBlockNums;
-    if (!ParseQSeqLens(qSeqLens, qStorageBlockStarts) ||
-        !ParseValidBlockNums(qSeqLens, qStorageBlockStarts, validBlockNums) ||
+    if (!ParseQSeqLens(qSeqLens, kvSeqLens, qStorageBlockStarts) ||
+        !ParseValidBlockNums(qSeqLens, kvSeqLens, qStorageBlockStarts, validBlockNums) ||
         !GenerateMetadata(qSeqLens, validBlockNums)) {
         return KERNEL_STATUS_PARAM_INVALID;
     }
@@ -58,6 +57,8 @@ bool GenericBlockSparseAttentionMetadataAicpu::Prepare(CpuKernelContext& ctx)
     sparseBlockCount_ = ctx.Input(static_cast<uint32_t>(ParamId::SPARSE_BLOCK_COUNT));
     cuSeqLengths_ = ctx.Input(static_cast<uint32_t>(ParamId::CU_SEQ_LENGTHS));
     seqUsedQ_ = ctx.Input(static_cast<uint32_t>(ParamId::SEQ_USED_Q));
+    cuSeqLengthsKv_ = ctx.Input(static_cast<uint32_t>(ParamId::CU_SEQ_LENGTHS_KV));
+    seqUsedKv_ = ctx.Input(static_cast<uint32_t>(ParamId::SEQ_USED_KV));
     metadata_ = ctx.Output(static_cast<uint32_t>(ParamId::METADATA));
     // An omitted optional input is represented by an empty Tensor in the AICPU context.
     if (!HasTensorData(cuSeqLengths_)) {
@@ -67,6 +68,13 @@ bool GenericBlockSparseAttentionMetadataAicpu::Prepare(CpuKernelContext& ctx)
         seqUsedQ_ = nullptr;
     }
 
+    if (!HasTensorData(cuSeqLengthsKv_)) {
+        cuSeqLengthsKv_ = nullptr;
+    }
+    if (!HasTensorData(seqUsedKv_)) {
+        seqUsedKv_ = nullptr;
+    }
+
     const bool attrsValid =
         GetAttrValue(ctx, "max_q_seq_len", maxQSeqLen_) && GetAttrValue(ctx, "num_q_heads", numQHeads_) &&
         GetAttrValue(ctx, "num_kv_heads", numKvHeads_) && GetAttrValue(ctx, "head_dim", headDim_) &&
@@ -74,8 +82,8 @@ bool GenericBlockSparseAttentionMetadataAicpu::Prepare(CpuKernelContext& ctx)
         GetAttrValue(ctx, "is_packed_gqa", isPackedGQA_) && GetAttrValue(ctx, "q_input_layout", qInputLayout_) &&
         GetAttrValue(ctx, "aic_core_num", aicCoreNum_) &&
         GetAttrValue(ctx, "residual_block_mode", residualBlockMode_) &&
-        GetAttrValue(ctx, "is_consistent_topk", isConsistentTopk_);
-    return attrsValid && CheckInputs();
+        GetAttrValue(ctx, "is_consistent_topk", isConsistentTopk_) && GetAttrValue(ctx, "mask_type", maskType_);
+    return attrsValid && (maskType_ == 0 || maskType_ == 1) && CheckInputs() && CheckKvSeqLens();
 }
 
 bool GenericBlockSparseAttentionMetadataAicpu::CheckOptionalTensor(const Tensor* tensor, DataType dataType,
@@ -113,8 +121,8 @@ bool GenericBlockSparseAttentionMetadataAicpu::CheckInputs()
         return false;
     }
     if ((qInputLayout_ != "TND" && maxQSeqLen_ <= 0) || numQHeads_ <= 0 || numKvHeads_ <= 0 || headDim_ <= 0 ||
-        blockShapeX_ != 1 || blockShapeY_ <= 0 || (isPackedGQA_ != 0 && isPackedGQA_ != 1) || aicCoreNum_ <= 0 ||
-        aicCoreNum_ > MAX_AIC_CORE_NUM || residualBlockMode_ != 0 ||
+        blockShapeX_ != 1 || blockShapeY_ <= 0 || blockShapeY_ > 256 || (isPackedGQA_ != 0 && isPackedGQA_ != 1) ||
+        aicCoreNum_ <= 0 || aicCoreNum_ > MAX_AIC_CORE_NUM || (residualBlockMode_ != 0 && residualBlockMode_ != 1) ||
         (isConsistentTopk_ != 0 && isConsistentTopk_ != 1)) {
         KERNEL_LOG_ERROR("Invalid scheduling attrs for GenericBlockSparseAttentionMetadata.");
         return false;
@@ -123,51 +131,26 @@ bool GenericBlockSparseAttentionMetadataAicpu::CheckInputs()
     sparseHeadNum_ = isPackedGQA_ == 1 ? numKvHeads_ : numQHeads_;
     const auto idxShape = sparseBlockIdx_->GetTensorShape();
     const auto countShape = sparseBlockCount_->GetTensorShape();
+    if (idxShape->GetDims() != TND_SPARSE_BLOCK_IDX_DIM_NUM ||
+        countShape->GetDims() != TND_SPARSE_BLOCK_COUNT_DIM_NUM || idxShape->GetDimSize(0) != sparseHeadNum_ ||
+        countShape->GetDimSize(0) != sparseHeadNum_ || countShape->GetDimSize(1) != idxShape->GetDimSize(1)) {
+        KERNEL_LOG_ERROR("Sparse block tensor shapes do not match attrs.");
+        return false;
+    }
+    qBlockStorageNum_ = idxShape->GetDimSize(1);
+    blockIndexStride_ = idxShape->GetDimSize(TND_BLOCK_CAPACITY_DIM_INDEX);
     if (qInputLayout_ == "TND") {
-        if (idxShape->GetDims() != TND_SPARSE_BLOCK_IDX_DIM_NUM ||
-            countShape->GetDims() != TND_SPARSE_BLOCK_COUNT_DIM_NUM || idxShape->GetDimSize(0) != sparseHeadNum_ ||
-            countShape->GetDimSize(0) != sparseHeadNum_ || countShape->GetDimSize(1) != idxShape->GetDimSize(1)) {
-            KERNEL_LOG_ERROR("TND sparse block tensor shapes do not match attrs.");
-            return false;
-        }
-        qBlockStorageNum_ = idxShape->GetDimSize(1);
-        blockIndexStride_ = idxShape->GetDimSize(TND_BLOCK_CAPACITY_DIM_INDEX);
         if (!HasTensorShape(cuSeqLengths_) || cuSeqLengths_->GetTensorShape()->GetDims() != 1) {
             KERNEL_LOG_ERROR("cu_seq_lengths is required for TND query.");
             return false;
         }
         batchSize_ = cuSeqLengths_->GetTensorShape()->GetDimSize(0) - 1;
     } else {
-        if (idxShape->GetDims() != BATCHED_SPARSE_BLOCK_IDX_DIM_NUM ||
-            countShape->GetDims() != BATCHED_SPARSE_BLOCK_COUNT_DIM_NUM) {
-            KERNEL_LOG_ERROR("BSND/BNSD sparse block tensors must be 4D and 3D, but got %dD and %dD.",
-                             idxShape->GetDims(), countShape->GetDims());
+        if (qBlockStorageNum_ % maxQSeqLen_ != 0 || seqUsedQ_ == nullptr || seqUsedKv_ == nullptr) {
+            KERNEL_LOG_ERROR("Batched layouts require valid Q storage capacity and seq_used_q/seq_used_kv.");
             return false;
         }
-        if (idxShape->GetDimSize(0) != countShape->GetDimSize(0)) {
-            KERNEL_LOG_ERROR("sparse block batch dims differ: idx=%lld, count=%lld.", idxShape->GetDimSize(0),
-                             countShape->GetDimSize(0));
-            return false;
-        }
-        if (idxShape->GetDimSize(1) != sparseHeadNum_ || countShape->GetDimSize(1) != sparseHeadNum_) {
-            KERNEL_LOG_ERROR("sparse block head dims must be %lld, but got idx=%lld, count=%lld.", sparseHeadNum_,
-                             idxShape->GetDimSize(1), countShape->GetDimSize(1));
-            return false;
-        }
-        if (idxShape->GetDimSize(BATCHED_Q_BLOCK_DIM_INDEX) != countShape->GetDimSize(BATCHED_Q_BLOCK_DIM_INDEX)) {
-            KERNEL_LOG_ERROR("sparse block Q dims differ: idx=%lld, count=%lld.",
-                             idxShape->GetDimSize(BATCHED_Q_BLOCK_DIM_INDEX),
-                             countShape->GetDimSize(BATCHED_Q_BLOCK_DIM_INDEX));
-            return false;
-        }
-        if (idxShape->GetDimSize(BATCHED_Q_BLOCK_DIM_INDEX) != maxQSeqLen_) {
-            KERNEL_LOG_ERROR("sparse block Q dim must equal max_q_seq_len: Q dim=%lld, max_q_seq_len=%lld.",
-                             idxShape->GetDimSize(BATCHED_Q_BLOCK_DIM_INDEX), maxQSeqLen_);
-            return false;
-        }
-        batchSize_ = idxShape->GetDimSize(0);
-        qBlockStorageNum_ = idxShape->GetDimSize(BATCHED_Q_BLOCK_DIM_INDEX);
-        blockIndexStride_ = idxShape->GetDimSize(BATCHED_BLOCK_CAPACITY_DIM_INDEX);
+        batchSize_ = qBlockStorageNum_ / maxQSeqLen_;
     }
     if (batchSize_ < 0 || qBlockStorageNum_ < 0 || blockIndexStride_ <= 0) {
         KERNEL_LOG_ERROR("Invalid batch, Q block or sparse block capacity.");
@@ -180,97 +163,131 @@ bool GenericBlockSparseAttentionMetadataAicpu::CheckInputs()
     return true;
 }
 
-bool GenericBlockSparseAttentionMetadataAicpu::ParseQSeqLens(std::vector<int64_t>& qSeqLens,
-                                                             std::vector<int64_t>& qStorageBlockStarts) const
+bool GenericBlockSparseAttentionMetadataAicpu::CheckKvSeqLens() const
 {
-    // Get valid Qseq len vector. Qseq priroty: seqUsedQ, cuSeqLengths, maxQSeqLen.
-    // qSeqLens ：actual Qseqlens in batch. qStorageBlockStarts :
-    // Qblocks start(1 qtoken) in batch base on cuSeq(maybe pad).
-    if (qInputLayout_ == "TND") {
-        const auto* prefix = static_cast<const int64_t*>(cuSeqLengths_->GetData());
-        std::vector<int64_t> cuSeqLengths(prefix, prefix + batchSize_ + 1);
-        std::vector<int64_t> seqUsedQ;
-        if (seqUsedQ_ != nullptr) {
-            const auto* seqUsed = static_cast<const int32_t*>(seqUsedQ_->GetData());
-            seqUsedQ.assign(seqUsed, seqUsed + batchSize_);
-        }
-        if (!generic_block_sparse_attention_metadata::BuildTndQSeqLayout(cuSeqLengths, seqUsedQ, seqUsedQ_ != nullptr,
-                                                                         blockShapeX_, qBlockStorageNum_, qSeqLens,
-                                                                         qStorageBlockStarts)) {
-            KERNEL_LOG_ERROR("TND Q sequence lengths do not match sparse block storage.");
-            return false;
-        }
-        return true;
-    }
-
-    qSeqLens.assign(static_cast<size_t>(batchSize_), maxQSeqLen_);
-    qStorageBlockStarts.clear();
-    if (seqUsedQ_ != nullptr) {
-        const auto* seqUsed = static_cast<const int32_t*>(seqUsedQ_->GetData());
-        for (int64_t batchIdx = 0; batchIdx < batchSize_; ++batchIdx) {
-            const int64_t qSeqLen = seqUsed[batchIdx];
-            if (qSeqLen < 0 || qSeqLen > maxQSeqLen_) {
-                KERNEL_LOG_ERROR("seq_used_q[%lld]=%lld is outside [0, %lld].", batchIdx, qSeqLen, maxQSeqLen_);
-                return false;
-            }
-            qSeqLens[static_cast<size_t>(batchIdx)] = qSeqLen;
-        }
-        return true;
-    }
-
-    if (cuSeqLengths_ == nullptr) {
-        return true;
-    }
-    const auto* prefix = static_cast<const int64_t*>(cuSeqLengths_->GetData());
-    if (prefix[0] != 0) {
-        KERNEL_LOG_ERROR("cu_seq_lengths[0] must be 0, but got %lld.", prefix[0]);
+    if (!CheckOptionalTensor(cuSeqLengthsKv_, DT_INT64, batchSize_ + 1, "cu_seq_lengths_kv") ||
+        !CheckOptionalTensor(seqUsedKv_, DT_INT32, batchSize_, "seq_used_kv")) {
         return false;
     }
-    for (int64_t batchIdx = 0; batchIdx < batchSize_; ++batchIdx) {
-        if (prefix[batchIdx + 1] < prefix[batchIdx]) {
-            KERNEL_LOG_ERROR("cu_seq_lengths must be nondecreasing at batch %lld.", batchIdx);
-            return false;
-        }
-        const int64_t qSeqLen = prefix[batchIdx + 1] - prefix[batchIdx];
-        if (qSeqLen > maxQSeqLen_) {
-            KERNEL_LOG_ERROR("Q sequence length %lld exceeds max_q_seq_len %lld at batch %lld.", qSeqLen, maxQSeqLen_,
-                             batchIdx);
-            return false;
-        }
-        qSeqLens[static_cast<size_t>(batchIdx)] = qSeqLen;
+    if (qInputLayout_ != "TND") {
+        return true;
     }
+    // The public API enforces the layout-specific presence rules. Validate the
+    // prefix origin here; per-batch values are checked during the combined parse.
+    const auto* cu = cuSeqLengthsKv_ == nullptr ? nullptr : static_cast<const int64_t*>(cuSeqLengthsKv_->GetData());
+    if (cu != nullptr && cu[0] != 0) {
+        KERNEL_LOG_ERROR("cu_seq_lengths_kv must start at zero.");
+        return false;
+    }
+    // Per-batch values are validated while Q and KV lengths are parsed together.
+    // The main kernel checks cu[B] against the actual KV tensor capacity.
     return true;
 }
 
+bool GenericBlockSparseAttentionMetadataAicpu::ParseQSeqLens(std::vector<int64_t>& qSeqLens,
+                                                             std::vector<int64_t>& kvSeqLens,
+                                                             std::vector<int64_t>& qStorageBlockStarts) const
+{
+    if (qInputLayout_ != "TND") {
+        const auto* qUsed = static_cast<const int32_t*>(seqUsedQ_->GetData());
+        const auto* kvUsed = static_cast<const int32_t*>(seqUsedKv_->GetData());
+        qSeqLens.resize(static_cast<size_t>(batchSize_));
+        kvSeqLens.resize(static_cast<size_t>(batchSize_));
+        qStorageBlockStarts.resize(static_cast<size_t>(batchSize_));
+        for (int64_t batchIdx = 0; batchIdx < batchSize_; ++batchIdx) {
+            if (qUsed[batchIdx] < 0 || qUsed[batchIdx] > maxQSeqLen_ || kvUsed[batchIdx] < 0) {
+                KERNEL_LOG_ERROR("Invalid batched sequence length at batch %lld.", batchIdx);
+                return false;
+            }
+            qSeqLens[static_cast<size_t>(batchIdx)] = qUsed[batchIdx];
+            kvSeqLens[static_cast<size_t>(batchIdx)] = kvUsed[batchIdx];
+            qStorageBlockStarts[static_cast<size_t>(batchIdx)] = batchIdx * maxQSeqLen_;
+        }
+        return true;
+    }
+    const auto* kvPrefix =
+        cuSeqLengthsKv_ == nullptr ? nullptr : static_cast<const int64_t*>(cuSeqLengthsKv_->GetData());
+    const auto* kvUsed = seqUsedKv_ == nullptr ? nullptr : static_cast<const int32_t*>(seqUsedKv_->GetData());
+    if (kvPrefix == nullptr && kvUsed == nullptr) {
+        KERNEL_LOG_ERROR("Either cu_seq_lengths_kv or seq_used_kv is required.");
+        return false;
+    }
+    kvSeqLens.resize(static_cast<size_t>(batchSize_));
+    const auto readKvSeqLen = [&](int64_t batchIdx, int64_t& kvSeqLen) -> bool {
+        if (kvPrefix != nullptr && (kvPrefix[batchIdx] < 0 || kvPrefix[batchIdx + 1] < kvPrefix[batchIdx])) {
+            KERNEL_LOG_ERROR("cu_seq_lengths_kv must be nonnegative and nondecreasing.");
+            return false;
+        }
+        const int64_t storageKvSeqLen = kvPrefix == nullptr ? 0 : kvPrefix[batchIdx + 1] - kvPrefix[batchIdx];
+        if (kvUsed != nullptr &&
+            (kvUsed[batchIdx] < 0 || (kvPrefix != nullptr && kvUsed[batchIdx] > storageKvSeqLen))) {
+            KERNEL_LOG_ERROR("seq_used_kv must fit the corresponding storage segment.");
+            return false;
+        }
+        kvSeqLen = kvUsed != nullptr ? kvUsed[batchIdx] : storageKvSeqLen;
+        return true;
+    };
+
+    if (qInputLayout_ == "TND") {
+        const auto* qPrefix = static_cast<const int64_t*>(cuSeqLengths_->GetData());
+        if (qPrefix[0] != 0) {
+            KERNEL_LOG_ERROR("cu_seq_lengths[0] must be 0 for TND Q.");
+            return false;
+        }
+        const auto* qUsed = seqUsedQ_ == nullptr ? nullptr : static_cast<const int32_t*>(seqUsedQ_->GetData());
+        qSeqLens.resize(static_cast<size_t>(batchSize_));
+        qStorageBlockStarts.resize(static_cast<size_t>(batchSize_));
+        int64_t storageBlockBase = 0;
+        for (int64_t batchIdx = 0; batchIdx < batchSize_; ++batchIdx) {
+            const int64_t storageQSeqLen = qPrefix[batchIdx + 1] - qPrefix[batchIdx];
+            const int64_t actualQSeqLen = qUsed == nullptr ? storageQSeqLen : qUsed[batchIdx];
+            if (qPrefix[batchIdx] < 0 || storageQSeqLen < 0 || actualQSeqLen < 0 || actualQSeqLen > storageQSeqLen) {
+                KERNEL_LOG_ERROR("Invalid TND Q sequence length at batch %lld.", batchIdx);
+                return false;
+            }
+            qSeqLens[static_cast<size_t>(batchIdx)] = actualQSeqLen;
+            qStorageBlockStarts[static_cast<size_t>(batchIdx)] = storageBlockBase;
+            const int64_t storageBlockNum = storageQSeqLen == 0 ? 0 : (storageQSeqLen - 1) / blockShapeX_ + 1;
+            if (storageBlockBase > std::numeric_limits<int64_t>::max() - storageBlockNum) {
+                return false;
+            }
+            storageBlockBase += storageBlockNum;
+            if (!readKvSeqLen(batchIdx, kvSeqLens[static_cast<size_t>(batchIdx)])) {
+                return false;
+            }
+        }
+        return storageBlockBase == qBlockStorageNum_;
+    }
+
+    return false;
+}
+
 bool GenericBlockSparseAttentionMetadataAicpu::ParseValidBlockNums(const std::vector<int64_t>& qSeqLens,
+                                                                   const std::vector<int64_t>& kvSeqLens,
                                                                    const std::vector<int64_t>& qStorageBlockStarts,
                                                                    std::vector<int64_t>& validBlockNums) const
 {
     const auto* counts = static_cast<const int32_t*>(sparseBlockCount_->GetData());
-    if (qInputLayout_ == "TND") {
-        if (!generic_block_sparse_attention_metadata::GatherTndValidBlockNums(counts, sparseHeadNum_, qBlockStorageNum_,
-                                                                              blockShapeX_, blockIndexStride_, qSeqLens,
-                                                                              qStorageBlockStarts, validBlockNums)) {
-            KERNEL_LOG_ERROR("Failed to gather TND sparse block counts.");
-            return false;
-        }
-        return true;
-    }
-
     validBlockNums.clear();
     for (int64_t batchIdx = 0; batchIdx < batchSize_; ++batchIdx) {
-        const int64_t qBlockNum =
-            generic_block_sparse_attention_metadata::CeilDivQSeq(qSeqLens[static_cast<size_t>(batchIdx)], blockShapeX_);
+        const int64_t qSeqLen = qSeqLens[static_cast<size_t>(batchIdx)];
+        const int64_t kvSeqLen = kvSeqLens[static_cast<size_t>(batchIdx)];
+        const int64_t qBlockNum = generic_block_sparse_attention_metadata::CeilDivQSeq(qSeqLen, blockShapeX_);
         for (int64_t qBlock = 0; qBlock < qBlockNum; ++qBlock) {
+            const int64_t qToken = qBlock * blockShapeX_;
+            const int64_t visibleKvEnd = maskType_ == 1 ? kvSeqLen - qSeqLen + qToken + 1 : kvSeqLen;
+            const int64_t residual =
+                residualBlockMode_ == 1 && visibleKvEnd > 0 && visibleKvEnd % blockShapeY_ != 0 ? 1 : 0;
             for (int64_t sparseHead = 0; sparseHead < sparseHeadNum_; ++sparseHead) {
-                const int64_t offset = (batchIdx * sparseHeadNum_ + sparseHead) * qBlockStorageNum_ + qBlock;
+                const int64_t offset =
+                    sparseHead * qBlockStorageNum_ + qStorageBlockStarts[static_cast<size_t>(batchIdx)] + qBlock;
                 const int64_t count = counts[offset];
                 if (count < 0 || count > blockIndexStride_) {
                     KERNEL_LOG_ERROR("sparse_block_count[%lld]=%lld exceeds capacity %lld.", offset, count,
                                      blockIndexStride_);
                     return false;
                 }
-                validBlockNums.push_back(count);
+                validBlockNums.push_back(count + residual);
             }
         }
     }
@@ -293,6 +310,7 @@ bool GenericBlockSparseAttentionMetadataAicpu::GenerateMetadata(const std::vecto
     input.isPackedGQA = isPackedGQA_;
     input.residualBlockMode = residualBlockMode_;
     input.isConsistentTopk = isConsistentTopk_;
+    input.maskType = maskType_;
     input.aicCoreNum = aicCoreNum_;
     input.qSeqLens = qSeqLens;
     input.validBlockNums = validBlockNums;

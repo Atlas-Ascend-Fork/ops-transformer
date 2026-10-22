@@ -156,8 +156,10 @@ struct PackedTileCopyTlaToUB : public PackedTileCopyTla<ArchTag, ElementA_, Layo
                                                  LayoutTagC, ElementBias>::TensorL0C;
 
     template <class TensorC>
-    using CopyL0CToDst =
-        Gemm::Tile::CopyL0CToUBTla<ArchTag, TensorL0C, TensorC, CopyMode, DEQUANT_GRANULARITY, ReluEnable>;
+    using CopyL0CToDst = std::conditional_t<
+        TensorC::position == AscendC::TPosition::GM,
+        Gemm::Tile::CopyL0CToGmTla<ArchTag, TensorL0C, TensorC, DEQUANT_GRANULARITY, ReluEnable>,
+        Gemm::Tile::CopyL0CToUBTla<ArchTag, TensorL0C, TensorC, CopyMode, DEQUANT_GRANULARITY, ReluEnable>>;
 };
 #endif
 

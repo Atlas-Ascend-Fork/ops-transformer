@@ -81,9 +81,7 @@ public:
         AscendC::GlobalTensor<int32_t> gSparseBlockCount;
         gSparseBlockCount.SetGlobalBuffer((__gm__ int32_t*)params.sparseBlockCount);
         AscendC::GlobalTensor<int64_t> gCuSeqLengths;
-        if (params.cuSeqLengths != nullptr) {
-            gCuSeqLengths.SetGlobalBuffer((__gm__ int64_t*)params.cuSeqLengths);
-        }
+        gCuSeqLengths.SetGlobalBuffer((__gm__ int64_t*)params.cuSeqLengths);
         AscendC::GlobalTensor<int32_t> gSequsedQ;
         const bool hasSequsedQ = (params.sequsedQ != nullptr);
         if (hasSequsedQ) {
@@ -287,12 +285,10 @@ public:
             globalQBlock += qTokenInBatch / blockShapeX_;
             int64_t sparseIdxBase =
                 static_cast<int64_t>(kvHeadIdx) * qBlockNum_ * topK_ + static_cast<int64_t>(globalQBlock) * topK_;
-            uint32_t validTopK = topK_;
-            if (params.sparseBlockCount != nullptr) {
-                // sparseBlockCount 2D: [N_kv, totalQBlocks]
-                int64_t countOffset = static_cast<int64_t>(kvHeadIdx) * qBlockNum_ + static_cast<int64_t>(globalQBlock);
-                validTopK = static_cast<uint32_t>(gSparseBlockCount.GetValue(countOffset));
-            }
+            // sparseBlockCount 2D: [N_kv, totalQBlocks]
+            const int64_t countOffset =
+                static_cast<int64_t>(kvHeadIdx) * qBlockNum_ + static_cast<int64_t>(globalQBlock);
+            const uint32_t validTopK = static_cast<uint32_t>(gSparseBlockCount.GetValue(countOffset));
             if (fdEnabled) {
                 rawBegin = rawBegin < validTopK ? rawBegin : validTopK;
                 rawEnd = rawEnd < validTopK ? rawEnd : validTopK;
@@ -516,8 +512,8 @@ private:
         totalTaskNum_ = static_cast<uint32_t>(meta->saTotalTaskNum);
         scaleValue_ = tilingData->scaleValue;
         groupSize_ = tilingData->groupSize;
-        qBaseTile_ = tilingData->qBaseTile;
-        kvBaseTile_ = tilingData->kvBaseTile;
+        qBaseTile_ = tilingData->baseTileInfo.qBaseTile;
+        kvBaseTile_ = tilingData->baseTileInfo.kvBaseTile;
         mm1OutSize_ = tilingData->mm1OutSize;
         smOnlineOutSize_ = tilingData->smOnlineOutSize;
         mm2OutSize_ = tilingData->mm2OutSize;

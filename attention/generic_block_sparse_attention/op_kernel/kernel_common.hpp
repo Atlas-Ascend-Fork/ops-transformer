@@ -15,6 +15,26 @@
 
 namespace GenericBlockSparseAttn {
 
+struct GbsaBaseTiling {
+    uint32_t qBaseTile;
+    uint32_t kvBaseTile;
+};
+
+struct GbsaMmPhaseL1Tiling {
+    uint32_t mm1L1TileM;
+    uint32_t mm1L1TileN;
+    uint32_t mm1L1TileKLeft;
+    uint32_t mm1L1TileKRight;
+    uint32_t mm2L1TileM;
+    uint32_t mm2L1TileN;
+    uint32_t mm2L1TileKLeft;
+    uint32_t mm2L1TileKRight;
+    uint32_t qL1BufNum;
+    uint32_t kL1BufNum;
+    uint32_t vL1BufNum;
+    uint32_t pL1BufNum;
+};
+
 // Kernel-side mirror of GenericBlockSparseAttentionTilingData (host tiling).
 // Field order must match BEGIN_TILING_DATA_DEF in generic_block_sparse_attention_tiling.h.
 struct GenericBlockSparseAttentionTilingData {
@@ -36,22 +56,6 @@ struct GenericBlockSparseAttentionTilingData {
     uint64_t workSpaceSize;
     uint64_t tilingKey;
     uint32_t groupSize;
-    // BaseTileInfo
-    uint32_t qBaseTile;
-    uint32_t kvBaseTile;
-    // MmPhaseL1TileInfo
-    uint32_t mm1L1TileM;
-    uint32_t mm1L1TileN;
-    uint32_t mm1L1TileKLeft;
-    uint32_t mm1L1TileKRight;
-    uint32_t mm2L1TileM;
-    uint32_t mm2L1TileN;
-    uint32_t mm2L1TileKLeft;
-    uint32_t mm2L1TileKRight;
-    uint32_t qL1BufNum;
-    uint32_t kL1BufNum;
-    uint32_t vL1BufNum;
-    uint32_t pL1BufNum;
     // PA_BBND page base stride in elements (dim0). Allows first-axis non-contiguous KV cache.
     uint64_t kStride0;
     uint64_t vStride0;
@@ -62,6 +66,14 @@ struct GenericBlockSparseAttentionTilingData {
     uint64_t fdPartialOOffset;
     uint32_t residualBlockMode;
     uint32_t isConsistentTopk;
+    uint64_t totalQTokens;
+    uint64_t totalKvTokens; // PA: physical page token capacity; Dense: Tkv.
+    GbsaBaseTiling baseTileInfo;
+    GbsaMmPhaseL1Tiling mmPhaseL1TileInfo;
+    uint64_t kvOffsetInfoOffset;
+    uint32_t kvOffsetTileWords;
+    uint32_t qSeqCapacity;
+    uint32_t kvSeqCapacity;
 };
 
 } // namespace GenericBlockSparseAttn

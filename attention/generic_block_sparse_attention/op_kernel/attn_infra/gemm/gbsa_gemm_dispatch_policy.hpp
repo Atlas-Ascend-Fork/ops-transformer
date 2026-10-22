@@ -47,12 +47,20 @@ struct MmadAtlasA2SFAIPV : public MmadAtlasA2 {
     static constexpr bool ENABLE_UNIT_FLAG = ENABLE_UNIT_FLAG_;
 };
 
+template <bool PAGED_CACHE_FLAG_ = false, bool HAS_RESIDUAL_BLOCK_ = false, bool PRECOMPUTE_SPARSE_ = false>
 struct MmadAtlasA5BsaQK : public MmadAtlasA5 {
     static constexpr uint32_t L0_STAGES = 2;
+    static constexpr bool PAGED_CACHE_FLAG = PAGED_CACHE_FLAG_;
+    static constexpr bool HAS_RESIDUAL_BLOCK = HAS_RESIDUAL_BLOCK_;
+    static constexpr bool PRECOMPUTE_SPARSE = PRECOMPUTE_SPARSE_;
 };
 
+template <bool PAGED_CACHE_FLAG_ = false, bool HAS_RESIDUAL_BLOCK_ = false, bool PRECOMPUTE_SPARSE_ = false>
 struct MmadAtlasA5BsaPV : public MmadAtlasA5 {
     static constexpr uint32_t L0_STAGES = 2;
+    static constexpr bool PAGED_CACHE_FLAG = PAGED_CACHE_FLAG_;
+    static constexpr bool HAS_RESIDUAL_BLOCK = HAS_RESIDUAL_BLOCK_;
+    static constexpr bool PRECOMPUTE_SPARSE = PRECOMPUTE_SPARSE_;
 };
 
 } // namespace NpuArch::Gemm

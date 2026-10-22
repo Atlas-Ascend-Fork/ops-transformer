@@ -96,8 +96,9 @@ __global__ __aicore__ void GbsaInferIntfRegularArch22(GM_ADDR q, GM_ADDR k, GM_A
 
 using namespace GbsaKernelArch35;
 
-template <class InDtype, class SMDtype, class REDtype, Format qFormat,
-          Epilogue::LseMode lseMode = Epilogue::LseMode::NONE, Epilogue::LseFormat lseFormat = Epilogue::LseFormat::TN1>
+template <class InDtype, class SMDtype, class REDtype, Format qFormat, Format kvFormat, bool isPaged,
+          bool isCausal = true, bool hasResidualBlock = false, Epilogue::LseMode lseMode = Epilogue::LseMode::NONE,
+          Epilogue::LseFormat lseFormat = Epilogue::LseFormat::TN1>
 __global__ __aicore__ void GbsaInferIntfRegular(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR sparseBlockIdx,
                                                 GM_ADDR sparseBlockCount, GM_ADDR metaData, GM_ADDR cuSeqLengths,
                                                 GM_ADDR cuSeqLengthsKv, GM_ADDR sequsedQ, GM_ADDR sequsedKv,
@@ -121,12 +122,19 @@ __global__ __aicore__ void GbsaInferIntfRegular(GM_ADDR q, GM_ADDR k, GM_ADDR v,
     using LayoutO = layout::RowMajor;
     using LayoutOTmp = layout::RowMajor;
 
+    // Sparse KV offset preparation
+    using DispatchPolicyPrepareKvOffsets = Epilogue::EpilogueAtlasA5PrepareKvOffsets<isPaged, hasResidualBlock>;
+    using EpiloguePrepareKvOffsets = Epilogue::Block::BlockEpilogue<DispatchPolicyPrepareKvOffsets>;
+
     // QK matmul
     using L1TileShapeQK = Shape<Int<128>, Int<128>, Int<128>>;
     using L0TileShapeQK = Shape<Int<128>, Int<128>, Int<128>>;
-    using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQK;
+    using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQK<isPaged, hasResidualBlock, true>;
+    static constexpr auto MM1_COPY_MODE = AscendC::IsSameType<ElementS, float>::value ?
+                                              Gemm::Tile::CopyL0CToUBMode::SPLIT_M :
+                                              Gemm::Tile::CopyL0CToUBMode::NO_SPLIT;
     using TileCopyQK = Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, LayoutQ, ElementK, LayoutK, ElementS,
-                                                         LayoutS, void, Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
+                                                         LayoutS, void, MM1_COPY_MODE>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, ElementQ, ElementK,
                                                   ElementS, void, TileCopyQK>;
 
@@ -139,7 +147,7 @@ __global__ __aicore__ void GbsaInferIntfRegular(GM_ADDR q, GM_ADDR k, GM_ADDR v,
     // PV matmul
     using L1TileShapePV = Shape<Int<128>, Int<128>, Int<128>>;
     using L0TileShapePV = Shape<Int<128>, Int<128>, Int<128>>;
-    using DispatchPolicyPV = Gemm::MmadAtlasA5BsaPV;
+    using DispatchPolicyPV = Gemm::MmadAtlasA5BsaPV<isPaged, hasResidualBlock, true>;
     using TileCopyPV =
         Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementP, LayoutPDummy, ElementV, LayoutV, ElementOTmp, LayoutOTmp,
                                           void, Gemm::Tile::CopyL0CToUBMode::SPLIT_M>;
@@ -153,7 +161,8 @@ __global__ __aicore__ void GbsaInferIntfRegular(GM_ADDR q, GM_ADDR k, GM_ADDR v,
                                                             ElementK, TileCopyRescaleO, Arch::PositionL0C>;
 
     using GbsaKernel =
-        GbsaRegularKernelArch35<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat>;
+        GbsaRegularKernelArch35<EpiloguePrepareKvOffsets, BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV,
+                                EpilogueRescaleO, qFormat, kvFormat, isPaged, hasResidualBlock, isCausal>;
 
     GbsaKernelParamsArch35 params{
         q,         k,          v, sparseBlockIdx, sparseBlockCount, metaData, cuSeqLengths, cuSeqLengthsKv, sequsedQ,
@@ -190,7 +199,8 @@ __global__ __aicore__ void GbsaInferInterfaceFullQuant(GM_ADDR q, GM_ADDR k, GM_
 
     using L1TileShapeQK = Shape<Int<128>, Int<128>, Int<128>>;
     using L0TileShapeQK = Shape<Int<128>, Int<128>, Int<128>>;
-    using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQK;
+    // FP8 resolves physical pages before the matrix loader.
+    using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQK<false>;
     using TileCopyQK = Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, LayoutQ, ElementK, LayoutK, ElementS,
                                                          LayoutS, void, Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, ElementQ, ElementK,
@@ -203,7 +213,8 @@ __global__ __aicore__ void GbsaInferInterfaceFullQuant(GM_ADDR q, GM_ADDR k, GM_
 
     using L1TileShapePV = Shape<Int<128>, Int<128>, Int<128>>;
     using L0TileShapePV = Shape<Int<128>, Int<128>, Int<128>>;
-    using DispatchPolicyPV = Gemm::MmadAtlasA5BsaPV;
+    // FP8 resolves physical pages before the matrix loader.
+    using DispatchPolicyPV = Gemm::MmadAtlasA5BsaPV<false>;
     using TileCopyPV =
         Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementP, LayoutPDummy, ElementV, LayoutV, ElementOTmp, LayoutOTmp,
                                           void, Gemm::Tile::CopyL0CToUBMode::SPLIT_M>;
@@ -215,8 +226,8 @@ __global__ __aicore__ void GbsaInferInterfaceFullQuant(GM_ADDR q, GM_ADDR k, GM_
     using EpilogueRescaleO = Epilogue::Block::BlockEpilogue<DispatchPolicyRescaleO, ElementO, ElementOTmp, ElementS,
                                                             ElementK, TileCopyRescaleO, Arch::PositionL0C>;
 
-    using GbsaKernel =
-        GbsaFullQuantKernelArch35<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO, qFormat, qFormat>;
+    using GbsaKernel = GbsaFullQuantKernelArch35<BlockMmadQK, EpilogueOnlineSoftmax, BlockMmadPV, EpilogueRescaleO,
+                                                 qFormat, Format::BSND>;
 
     GbsaFullQuantKernelParamsArch35 params{q,
                                            k,

@@ -22,6 +22,29 @@ constexpr AscendC::FixpipeConfig CFG_ROW_MAJOR_UB = {AscendC::CO2Layout::ROW_MAJ
 
 namespace NpuArch::Gemm::Tile {
 
+// GM-assisted LO uses the same PV matmul, with an unsplit row-major destination.
+template <class TensorSrc_, class ElementDst_, class LayoutDst_, class CoordDst_, bool ReluEnable_>
+struct CopyL0CToGmTla<NpuArch::Arch::AtlasA5, TensorSrc_,
+                      tla::Tensor<AscendC::GlobalTensor<ElementDst_>, LayoutDst_, CoordDst_, AscendC::TPosition::GM>,
+                      ScaleGranularity::NO_QUANT, ReluEnable_,
+                      std::enable_if_t<tla::detail::isRowMajor<LayoutDst_>::value>> {
+    template <class TensorDst, class TensorSrc>
+    __aicore__ inline void operator()(TensorDst const& dstTensor, TensorSrc const& srcTensor)
+    {
+        AscendC::FixpipeParamsC310<AscendC::CO2Layout::ROW_MAJOR> params;
+        params.nSize = tla::get<1>(dstTensor.shape());
+        params.mSize = tla::get<0>(dstTensor.shape());
+        params.srcStride = tla::get<1, 1>(srcTensor.stride()) / tla::get<0, 0>(srcTensor.stride());
+        params.dstStride = tla::get<0>(dstTensor.stride());
+        params.quantPre = QuantMode_t::NoQuant;
+        params.reluEn = ReluEnable_;
+        const auto dstOffset = dstTensor.layout()(dstTensor.coord());
+        const auto srcOffset = srcTensor.layout()(srcTensor.coord());
+        AscendC::Fixpipe<ElementDst_, typename TensorSrc::Element, AscendC::CFG_ROW_MAJOR>(
+            dstTensor.data()[dstOffset], srcTensor.data()[srcOffset], params);
+    }
+};
+
 template <class TensorSrc_, class ElementDst_, class LayoutDst_, class CoordDst_, bool ReluEnable_>
 struct CopyL0CToUBTla<
     NpuArch::Arch::AtlasA5, TensorSrc_,

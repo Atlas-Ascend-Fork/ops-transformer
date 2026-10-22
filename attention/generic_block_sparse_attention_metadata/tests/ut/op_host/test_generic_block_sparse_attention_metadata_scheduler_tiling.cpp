@@ -61,7 +61,7 @@ constexpr int64_t DECODE_FIRST_UNUSED_CORE_INDEX = 5;
 constexpr int64_t DECODE_FOURTH_CORE_FIRST_BLOCK = 9;
 constexpr int64_t DECODE_COMBINE_PARTIAL_COUNT = 4;
 
-constexpr int64_t UNSUPPORTED_DIM = 64;
+constexpr int64_t UNSUPPORTED_DIM = 513;
 constexpr int64_t MAX_BLOCK_CAPACITY = 256;
 constexpr int64_t ACTIVE_BASE_TASK_NUM = 8;
 constexpr int64_t ACTIVE_AIC_CORE_NUM = 28;
@@ -189,19 +189,33 @@ TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, ActualBlockPrefixDecode
 
 TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, DecodeShapeConstraints)
 {
+    for (int64_t headDim : {1, 64, 127, 128, 129, 256, 257, 384, 511, 512}) {
+        ScheduleInput input = MakeDecodeInput();
+        ScheduleResult result;
+        input.headDim = headDim;
+        ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
+        ASSERT_GT(result.fdActiveCoreNum, 0);
+    }
     ScheduleInput input = MakeDecodeInput();
     ScheduleResult result;
-    input.blockShapeY = UNSUPPORTED_DIM;
-    ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
-    ASSERT_EQ(result.fdActiveCoreNum, 0);
-
-    input.blockShapeY = SUPPORTED_BLOCK_SHAPE_Y;
     input.headDim = UNSUPPORTED_DIM;
     ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
     ASSERT_EQ(result.fdActiveCoreNum, 0);
 }
 
-TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, ZeroCountsAndRepeatedPrefix)
+TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, GeneralizedYUsesFdSchedule)
+{
+    for (int64_t y = 1; y <= 128; ++y) {
+        ScheduleInput input = MakeDecodeInput();
+        input.blockShapeY = y;
+        ScheduleResult result;
+        ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
+        ASSERT_GT(result.fdActiveCoreNum, 0);
+        ASSERT_NE(static_cast<uint32_t>(result.fdScheduleFlags) & FD_SCHEDULE_ENABLED, 0U);
+    }
+}
+
+TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, ZeroCountsKeepFdSchedulingSlots)
 {
     ScheduleInput input = MakeInput();
     input.batchSize = 1;
@@ -214,10 +228,52 @@ TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, ZeroCountsAndRepeatedPr
     ScheduleResult result;
     ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
     ASSERT_EQ(result.blockPrefix[0], 0);
-    ASSERT_EQ(result.blockPrefix[1], 0);
-    ASSERT_EQ(result.blockPrefix[DECODE_Q_BLOCK_STORAGE_NUM], DECODE_FIRST_BLOCK_NUM);
-    ASSERT_EQ(result.blockPrefix[DEFAULT_MAX_Q_SEQ_LEN], DECODE_TOTAL_VALID_BLOCK_NUM);
-    ASSERT_EQ(result.decodeSchedules[0].baseTaskStart, 1);
+    ASSERT_EQ(result.blockPrefix[1], 1);
+    ASSERT_EQ(result.blockPrefix[DECODE_Q_BLOCK_STORAGE_NUM], DECODE_FIRST_BLOCK_NUM + 1);
+    ASSERT_EQ(result.blockPrefix[DEFAULT_MAX_Q_SEQ_LEN], DECODE_TOTAL_VALID_BLOCK_NUM + 1);
+    ASSERT_GT(result.fdActiveCoreNum, 0);
+    ASSERT_EQ(result.decodeSchedules[0].baseTaskStart, 0);
+}
+
+TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, FdCoversEmptyTasksAtEachPosition)
+{
+    for (const auto& counts :
+         {std::vector<int64_t>{0, 12, 3}, std::vector<int64_t>{12, 0, 3}, std::vector<int64_t>{12, 3, 0}}) {
+        ScheduleInput input = MakeDecodeInput();
+        input.qSeqLens = {3};
+        input.maxQSeqLen = 3;
+        input.qBlockStorageNum = 3;
+        input.validBlockNums = counts;
+        ScheduleResult result;
+        ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
+        ASSERT_GT(result.fdActiveCoreNum, 0);
+        std::array<int, 3> visits{};
+        for (int64_t core = 0; core < result.fdActiveCoreNum; ++core) {
+            const auto& schedule = result.decodeSchedules[core];
+            for (int64_t task = schedule.baseTaskStart; task < schedule.baseTaskEnd; ++task) {
+                ASSERT_GE(task, 0);
+                ASSERT_LT(task, 3);
+                ++visits[static_cast<size_t>(task)];
+            }
+        }
+        for (size_t task = 0; task < counts.size(); ++task) {
+            ASSERT_GT(visits[task], 0);
+            if (counts[task] == 0) {
+                EXPECT_EQ(visits[task], 1);
+            }
+        }
+    }
+}
+
+TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, AllEmptyTasksKeepNormalScheduling)
+{
+    ScheduleInput input = MakeDecodeInput();
+    input.validBlockNums = {0, 0};
+    ScheduleResult result;
+    ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
+    EXPECT_EQ(result.fdActiveCoreNum, 0);
+    EXPECT_EQ(static_cast<uint32_t>(result.fdScheduleFlags) & FD_SCHEDULE_ENABLED, 0U);
+    EXPECT_EQ(result.saTotalTaskNum, 2);
 }
 
 TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, SparseBlockCapacityUpTo256)
@@ -339,6 +395,16 @@ TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, InvalidBlockCount)
     input.validBlockNums[0] = input.blockIndexStride + 1;
     ScheduleResult result;
     ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_INVALID_PARAM);
+}
+
+TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, ResidualBlockExtendsVirtualCapacity)
+{
+    ScheduleInput input = MakeInput();
+    input.residualBlockMode = 1;
+    input.validBlockNums[0] = input.blockIndexStride + 1;
+    ScheduleResult result;
+    ASSERT_EQ(BuildSchedule(input, result), BSAScheduleStatus::BSA_SUCCESS);
+    ASSERT_EQ(result.blockPrefix[1], input.blockIndexStride + 1);
 }
 
 TEST_F(GenericBlockSparseAttentionMetadataSchedulerTest, TndSeqUsedUsesStorageOffsets)

@@ -42,6 +42,13 @@ struct EpilogueAtlasA2RescaleO {
 };
 
 // For AtlasA5
+template <bool PAGED_CACHE_FLAG_, bool RESIDUAL_BLOCK_FLAG_>
+struct EpilogueAtlasA5PrepareKvOffsets {
+    using ArchTag = Arch::AtlasA5;
+    static constexpr bool PAGED_CACHE_FLAG = PAGED_CACHE_FLAG_;
+    static constexpr bool RESIDUAL_BLOCK_FLAG = RESIDUAL_BLOCK_FLAG_;
+};
+
 struct EpilogueBsaMask2Idx {
     static constexpr uint32_t IO_STAGES = 2;
     using ArchTag = Arch::AtlasA5;

@@ -14,18 +14,19 @@
 #include "kernel_operator.h"
 #include "adv_api/reduce/reduce.h"
 #include "../generic_block_sparse_attention_fd_utils.h"
+#include "gbsa_layout_utils.hpp"
 
 namespace GbsaKernelArch35 {
 
-template <class ElementO, class Resource, bool OUTPUT_LSE>
+template <class ElementO, class Resource, bool OUTPUT_LSE, Format qFormat = Format::TND>
 class GenericBlockSparseAttentionFdCombineArch35 {
 public:
     static constexpr uint32_t MAX_SPLIT_NUM = GbsaMetadata::MAX_DECODE_CORE_NUM;
     static constexpr uint32_t MAX_ROW_TILE = 8U;
     static constexpr uint32_t FLOATS_PER_BLOCK = 8U;
-    static constexpr uint32_t HEAD_DIM = 128U;
+    static constexpr uint32_t MAX_HEAD_DIM = 512U;
     static constexpr uint32_t MAX_LSE_ELEMS = MAX_SPLIT_NUM * MAX_ROW_TILE;
-    static constexpr uint32_t MAX_O_TILE_ELEMS = MAX_ROW_TILE * HEAD_DIM;
+    static constexpr uint32_t MAX_O_TILE_ELEMS = MAX_ROW_TILE * MAX_HEAD_DIM;
 
     __aicore__ inline explicit GenericBlockSparseAttentionFdCombineArch35(Resource& resource)
     {
@@ -65,7 +66,11 @@ public:
         const uint32_t aivIdx = AscendC::GetBlockIdx();
         const uint32_t aivNum = AscendC::GetBlockNum() * subBlockNum;
         const uint32_t groupSize = tilingData->groupSize;
-        const uint32_t rowSplit = Min(groupSize, RoundUp(groupSize, FLOATS_PER_BLOCK) / subBlockNum);
+        const uint32_t headDim = tilingData->embeddingSize;
+        const uint32_t partialOStride = RoundUp(headDim, 16U);
+        // Keep rows 32-byte aligned both before and after the FP32 -> 16-bit cast.
+        const uint32_t ubOStride = partialOStride;
+        const uint32_t rowSplit = Min(groupSize, RoundUp(groupSize, 2U) / subBlockNum);
         const uint32_t sub0Rows = rowSplit;
         const uint32_t sub1Rows = groupSize - rowSplit;
         const uint32_t combineTaskNum = static_cast<uint32_t>(meta->combineTaskNum);
@@ -106,31 +111,40 @@ public:
             uint32_t qTokenInBatch = 0U;
             uint32_t batchIdx = 0U;
             uint32_t kvHeadIdx = 0U;
-            if (!GsaFd::DecodeTaskStorage(baseTask, tilingData->kvHeads, tilingData->batch, gCuSeqLengths, gSeqUsedQ,
-                                          hasSeqUsedQ, qStorageToken, qTokenInBatch, batchIdx, kvHeadIdx)) {
-                continue;
+            BatchSeqInfo qSeq;
+            if constexpr (qFormat == Format::TND) {
+                if (!GsaFd::DecodeTaskStorage(baseTask, tilingData->kvHeads, tilingData->batch, gCuSeqLengths,
+                                              gSeqUsedQ, hasSeqUsedQ, qStorageToken, qTokenInBatch, batchIdx,
+                                              kvHeadIdx)) {
+                    continue;
+                }
+                ReadBatchSeqInfo<qFormat>(gCuSeqLengths, gSeqUsedQ, hasSeqUsedQ, batchIdx, qSeq);
+            } else {
+                kvHeadIdx = baseTask % tilingData->kvHeads;
+                DecodeBatchedQToken(baseTask / tilingData->kvHeads, tilingData->batch, tilingData->qSeqCapacity,
+                                    gSeqUsedQ, batchIdx, qTokenInBatch, qSeq);
             }
+            const uint32_t outputHead = kvHeadIdx * groupSize + groupRowStart;
             const uint64_t outputOffset =
-                (static_cast<uint64_t>(qStorageToken) * tilingData->numHeads + kvHeadIdx * groupSize + groupRowStart) *
-                HEAD_DIM;
+                GetTensorOffset<qFormat>(qSeq, qTokenInBatch, outputHead, tilingData->numHeads, headDim);
             const uint64_t lseOutputOffset =
-                static_cast<uint64_t>(qStorageToken) * tilingData->numHeads + kvHeadIdx * groupSize + groupRowStart;
-            const uint32_t tileElems = rowCount * HEAD_DIM;
+                GetLseOffset<qFormat>(qSeq, qTokenInBatch, outputHead, tilingData->numHeads);
+            const uint32_t tileElems = rowCount * ubOStride;
             AscendC::Duplicate(oAccUb_, 0.0F, tileElems);
             AscendC::PipeBarrier<PIPE_V>();
             for (uint32_t split = 0U; split < splitCount; ++split) {
                 const uint64_t partialOOffset =
-                    (static_cast<uint64_t>(firstPartialTask + split) * groupSize + groupRowStart) * HEAD_DIM;
+                    (static_cast<uint64_t>(firstPartialTask + split) * groupSize + groupRowStart) * partialOStride;
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                 AscendC::DataCopyPad(oTmpUb_, gPartialO[partialOOffset],
-                                     AscendC::DataCopyExtParams(rowCount, HEAD_DIM * sizeof(float), 0, 0, 0),
-                                     AscendC::DataCopyPadExtParams<float>(false, 0, 0, 0));
+                                     AscendC::DataCopyExtParams(rowCount, partialOStride * sizeof(float), 0, 0, 0),
+                                     AscendC::DataCopyPadExtParams<float>(false, 0, 0, 0.0F));
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID1);
                 for (uint32_t row = 0U; row < rowCount; ++row) {
-                    AscendC::Muls(oTmpUb_[row * HEAD_DIM], oTmpUb_[row * HEAD_DIM],
-                                  weightUb_.GetValue(split * rowCountAlign + row), HEAD_DIM);
+                    AscendC::Muls(oTmpUb_[row * ubOStride], oTmpUb_[row * ubOStride],
+                                  weightUb_.GetValue(split * rowCountAlign + row), headDim);
                 }
                 AscendC::PipeBarrier<PIPE_V>();
                 AscendC::Add(oAccUb_, oAccUb_, oTmpUb_, tileElems);
@@ -144,15 +158,34 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-            AscendC::DataCopyPad(gO[outputOffset], oOutUb_,
-                                 AscendC::DataCopyExtParams(rowCount, HEAD_DIM * sizeof(ElementO), 0, 0, 0));
+            AscendC::DataCopyPad(
+                gO[outputOffset], oOutUb_,
+                AscendC::DataCopyExtParams(
+                    rowCount, headDim * sizeof(ElementO), 0,
+                    (GbsaLayoutHelper<qFormat>::HeadStride(tilingData->qSeqCapacity, headDim) - headDim) *
+                        sizeof(ElementO),
+                    0));
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             if constexpr (OUTPUT_LSE) {
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                AscendC::DataCopyPad(gLse[lseOutputOffset], globalLseUb_,
-                                     AscendC::DataCopyExtParams(1, rowCount * sizeof(float), 0, 0, 0));
+                if constexpr (qFormat == Format::TND) {
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                    AscendC::DataCopyPad(gLse[lseOutputOffset], globalLseUb_,
+                                         AscendC::DataCopyExtParams(1, rowCount * sizeof(float), 0, 0, 0));
+                } else {
+                    // GM heads are Sq apart; each UB source row must be 32-byte aligned.
+                    for (uint32_t row = 0U; row < rowCount; ++row) {
+                        AscendC::Duplicate(broadcastUb_[row * FLOATS_PER_BLOCK], globalLseUb_.GetValue(row),
+                                           FLOATS_PER_BLOCK);
+                    }
+                    AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                    AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
+                    AscendC::DataCopyPad(
+                        gLse[lseOutputOffset], broadcastUb_,
+                        AscendC::DataCopyExtParams(rowCount, sizeof(float), 0,
+                                                   (tilingData->qSeqCapacity - 1U) * sizeof(float), 0));
+                }
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             }

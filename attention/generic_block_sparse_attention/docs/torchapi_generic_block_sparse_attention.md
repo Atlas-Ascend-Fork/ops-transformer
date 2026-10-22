@@ -27,7 +27,7 @@
 
   `generic_block_sparse_attention`是基于`TorchNPU`的`cann_ops_transformer`扩展接口，用于调用`GenericBlockSparseAttention`算子完成任意粒度块稀疏注意力计算。
 
-  `generic_block_sparse_attention_metadata`是`generic_block_sparse_attention`的元数据生成接口，用于在主算子执行前生成metadata。metadata记录AI Core/AIVCore的任务切分结果，主算子可选择传入该metadata以优化调度。典型调用流程如下：
+  `generic_block_sparse_attention_metadata`是`generic_block_sparse_attention`的元数据生成接口，用于在主算子执行前生成metadata。metadata记录AI Core/AIVCore的任务切分结果，当前主算子必须传入配套metadata；虽然Python签名默认值为None，实际调用不支持省略，也不会自动生成metadata。典型调用流程如下：
 
   1. 准备`q`、`k`、`v`、`sparse_block_idx`、`sparse_block_count`等输入。
   2. 调用`generic_block_sparse_attention_metadata`生成`metadata`。
@@ -149,7 +149,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 
 > [!NOTE]
 >
-> 枚举为 `IntEnum`，可直接作为 int 传入底层算子；接口仅支持传入枚举或对应 int 值。当前仅支持 mask_mode = 1（`CAUSAL`）；quant_mode 当前仅支持 0（`NO_QUANT`）与 5（`FP8_E4M3_STATIC_CAST_P`）。
+> 枚举为 `IntEnum`，可直接作为 int 传入底层算子；接口仅支持传入枚举或对应 int 值。mask_mode支持1（`CAUSAL`），Ascend 950非量化FLOAT16/BFLOAT16场景另支持0（`NO_MASK`）；quant_mode 当前仅支持 0（`NO_QUANT`）与 5（`FP8_E4M3_STATIC_CAST_P`）。
 
 ## layout_sparse_pattern 取值与sparse_block_idx/sparse_block_count的shape对应关系说明
 
@@ -179,12 +179,12 @@ cann_ops_transformer.generic_block_sparse_attention(
 | num_heads_kv | int | 必选 | Key/Value head数 | int32 | - | - |
 | head_dim | int | 必选 | 每个注意力头的维度 | int32 | - | - |
 | block_shape | list[int] | 必选 | 稀疏块形状 `[block_x, block_y]` | int64 | - | 长度为2 |
-| cu_seqlens_q | Tensor | 可选 | 累积序列长度，用于处理变长序列，第一个元素必须为0 | int64 | ND | (B+1,) |
-| cu_seqlens_kv | Tensor | 可选 | 累积序列长度，用于处理变长序列，第一个元素必须为0 | int64 | ND | (B+1,) |
-| seqused_q | Tensor | 可选 | 指定每batch中实际使用的序列长度，截断冗余运算 | int32 | ND | (B,) |
-| seqused_kv | Tensor | 可选 | 指定每batch中实际使用的kv序列长度，截断冗余运算 | int32 | ND | (B,) |
-| max_seqlen_q | int | 可选 | 指定查询q序列的长度上限 | int32 | - | - |
-| max_seqlen_kv | int | 可选 | 指定键k和值v序列的长度上限 | int32 | - | - |
+| cu_seqlens_q | Tensor | 条件必选 | TND必须传入Q存储长度前缀和；BSND/BNSD不使用，建议传入None；第一个元素为0 | int64 | ND | (B+1,) |
+| cu_seqlens_kv | Tensor | 条件必选 | TND KV必须传入KV存储长度前缀和；BSND/BNSD不使用，建议传入None；PA_BBND/PA_BNBD必须为None | int64 | ND | (B+1,) |
+| seqused_q | Tensor | 条件必选 | BSND/BNSD必须传入，TND可选，指定每batch实际Q长度 | int32 | ND | (B,) |
+| seqused_kv | Tensor | 条件必选 | PA_BBND/PA_BNBD及BSND/BNSD KV必须传入；TND KV可选，指定每batch实际KV长度 | int32 | ND | (B,) |
+| max_seqlen_q | int | 条件必选 | BSND/BNSD必须传入Q的shape容量Sq；TND为可选长度上限 | int32 | - | - |
+| max_seqlen_kv | int | 可选 | 允许-1或非负值，不用于推导BSND/BNSD的实际KV长度 | int32 | - | - |
 | layout_q | string | 可选 | 定义输入query张量的布局格式 | string | - | - |
 | layout_kv | string | 可选 | 定义输入key/value张量的布局格式 | string | - | - |
 | layout_sparse_pattern | int | 可选 | 代表输入的sparseBlockIdx、sparseBlockCount的数据排布格式，取值见「layout_sparse_pattern 取值与sparse_block_idx/sparse_block_count的shape对应关系说明」 | int64 | - | - |
@@ -200,23 +200,23 @@ cann_ops_transformer.generic_block_sparse_attention(
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| q | Tensor | 必选 | 公式中的q | bfloat16/float16/float8_e4m3fn | ND | (Q_T, Q_N, D) |
-| k | Tensor | 必选 | 公式中的k | bfloat16/float16/float8_e4m3fn | ND | (num_blocks, block_size, KV_N, D) |
-| v | Tensor | 必选 | 公式中的v | bfloat16/float16/float8_e4m3fn | ND | (num_blocks, block_size, KV_N, D) |
+| q | Tensor | 必选 | 公式中的q | bfloat16/float16/float8_e4m3fn | ND | TND: (Q_T,Q_N,D)；BSND: (B,Sq,Q_N,D)；BNSD: (B,Q_N,Sq,D) |
+| k | Tensor | 必选 | 公式中的k | bfloat16/float16/float8_e4m3fn | ND | PA_BBND: (num_blocks, block_size, KV_N, D)；PA_BNBD: (num_blocks, KV_N, block_size, D)；TND: (KV_T,KV_N,D)；BSND: (B,Sk,KV_N,D)；BNSD: (B,KV_N,Sk,D) |
+| v | Tensor | 必选 | 公式中的v | bfloat16/float16/float8_e4m3fn | ND | PA_BBND: (num_blocks, block_size, KV_N, D)；PA_BNBD: (num_blocks, KV_N, block_size, D)；TND: (KV_T,KV_N,D)；BSND: (B,Sk,KV_N,D)；BNSD: (B,KV_N,Sk,D) |
 | sparse_block_idx | Tensor | 必选 | 每个Q块选择的KV块索引 | int32 | ND | (KV_N, totalQBlocks, maxKvBlockCount) |
 | sparse_block_count | Tensor | 必选 | 每个Q块实际保留的KV块数量 | int32 | ND | (KV_N, totalQBlocks) |
 | block_shape | list[int] | 必选 | 稀疏块形状 `[block_x, block_y]` | int64 | - | 长度为2 |
-| metadata | Tensor | 可选 | `generic_block_sparse_attention_metadata`生成的任务切分结果，传入后可优化调度 | int32 | ND | (1024,) |
+| metadata | Tensor | 必选 | 必须传入`generic_block_sparse_attention_metadata`生成的配套任务切分结果 | int32 | ND | (1024,) |
 | attn_mask | Tensor | 可选 | 掩码矩阵 | bool | ND | - |
 | q_dequant_scale | Tensor | 可选 | query反量化缩放因子 | float32 | ND | - |
 | k_dequant_scale | Tensor | 可选 | key反量化缩放因子 | float32 | ND | - |
 | v_dequant_scale | Tensor | 可选 | value反量化缩放因子 | float32 | ND | - |
 | p_quant_scale | Tensor | 可选 | P量化缩放因子 | float32 | ND | - |
-| cu_seqlens_q | Tensor | 可选 | 累积序列长度，用于处理变长序列，第一个元素必须为0 | int64 | ND | (B+1,) |
-| cu_seqlens_kv | Tensor | 可选 | 累积序列长度，用于处理变长序列，第一个元素必须为0 | int64 | ND | (B+1,) |
-| seqused_q | Tensor | 可选 | 指定每batch中实际使用的序列长度，截断冗余运算 | int32 | ND | (B,) |
-| seqused_kv | Tensor | 可选 | 指定每batch中实际使用的kv序列长度，截断冗余运算 | int32 | ND | (B,) |
-| block_table | Tensor | 可选 | 用于Paged Attention计算中的块索引映射 | int32 | ND | (B, max_num_blocks_per_seq) |
+| cu_seqlens_q | Tensor | 条件必选 | TND必须传入Q存储长度前缀和；BSND/BNSD不使用，建议传入None；第一个元素为0 | int64 | ND | (B+1,) |
+| cu_seqlens_kv | Tensor | 条件必选 | TND KV必须传入KV存储长度前缀和；BSND/BNSD不使用，建议传入None；PA_BBND/PA_BNBD必须为None | int64 | ND | (B+1,) |
+| seqused_q | Tensor | 条件必选 | BSND/BNSD必须传入，TND可选，指定每batch实际Q长度 | int32 | ND | (B,) |
+| seqused_kv | Tensor | 条件必选 | PA_BBND/PA_BNBD及BSND/BNSD KV必须传入；TND KV可选，指定每batch实际KV长度 | int32 | ND | (B,) |
+| block_table | Tensor | 条件必选 | PA_BBND/PA_BNBD必须传入页表；TND/BSND/BNSD KV必须为None | int32 | ND | (B, max_num_blocks_per_seq) |
 | layout_q | string | 可选 | 定义输入query张量的布局格式 | string | - | - |
 | layout_kv | string | 可选 | 定义输入key/value张量的布局格式 | string | - | - |
 | layout_sparse_pattern | int | 可选 | 代表输入的sparseBlockIdx、sparseBlockCount的数据排布格式，取值见「layout_sparse_pattern 取值与sparse_block_idx/sparse_block_count的shape对应关系说明」 | int64 | - | - |
@@ -244,18 +244,26 @@ cann_ops_transformer.generic_block_sparse_attention(
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| attention_out | Tensor | 必选 | generic_block_sparse_attention的计算输出 | bfloat16/float16 | ND | (Q_T, Q_N, D) |
+| attention_out | Tensor | 必选 | generic_block_sparse_attention的计算输出 | bfloat16/float16 | ND | TND: (Q_T,Q_N,D)；BSND: (B,Sq,Q_N,D)；BNSD: (B,Q_N,Sq,D) |
 | softmax_lse | Tensor | 可选 | softmax的LSE结果 | float32 | ND | (Q_T, Q_N, 1) 或空 |
 
 **说明**
 
 - attention_out：限制：该输出参数的shape与入参query的shape保持一致；`quant_mode=0`时dtype默认与q一致，`quant_mode!=0`时由attention_out_dtype指定。
-- softmax_lse：return_softmax_lse为True时，TND布局下输出shape为(Q_T, Q_N, 1)的Tensor；return_softmax_lse为False时，则输出空Tensor。
+- softmax_lse：return_softmax_lse为True时，TND布局下输出shape为(Q_T,Q_N,1)的Tensor，BSND/BNSD布局下输出(B,Q_N,Sq,1)；return_softmax_lse为False时，则输出空Tensor。
 
 ## 约束说明
 
 - 参数cu_seqlens_q、cu_seqlens_kv、seqused_q、seqused_kv、sparse_block_idx、sparse_block_count及block_table属于tensor。由于算子在Tiling阶段无法获取tensor的具体数值，tiling侧不对值进行校验，正确性需要用户自行保证。若上述参数传入非法值，会触发未定义行为（精度问题、非法内存访问导致的程序崩溃等）。
 - generic_block_sparse_attention_metadata和generic_block_sparse_attention的入参在调用时应该保持一致。由于算子分为两个接口分段调用，算子无法自行校验，正确性需要由客户自行保证。若接口传入参数不一致，会发生未定义行为（精度问题、非法内存访问导致的程序崩溃等）。
+
+### 产品差异约束
+
+- Ascend 950非量化FLOAT16/BFLOAT16场景：`head_dim`支持1～256的任意值；`layout_q/layout_kv`支持`TND/PA_BBND`、`TND/PA_BNBD`、`TND/TND`、`BSND/BSND`、`BNSD/BNSD`、`BSND/PA_BBND`、`BNSD/PA_BBND`、`BSND/PA_BNBD`和`BNSD/PA_BNBD`，不支持其他组合；`mask_mode`支持0（非因果）和1（causal）；`residual_block_mode`支持0或1。
+- 其余场景与Metadata配套使用时，`head_dim`仅支持128，`layout_kv`仅支持`"PA_BBND"`，`mask_mode`仅支持1，`residual_block_mode`仅支持0。
+- 稀疏索引最后一维容量：Ascend 950非量化FLOAT16/BFLOAT16场景支持1～INT32_MAX，其余场景支持1～256；容量均须不小于稀疏块有效计数的最大值。
+- `quant_mode`：Ascend 950支持0（非量化）或5（FP8量化）；Atlas A2/A3仅支持0。
+- `softmax_precision`：Ascend 950非量化FLOAT16/BFLOAT16场景支持0或1，FP8量化场景仅支持1；Atlas A2/A3上FLOAT16支持0或1，BFLOAT16仅支持0。
 
 ### 特性参数组
 
@@ -267,7 +275,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 |                      |  sparse_block_idx  |      INPUT      |   Tensor   |
 |                      | sparse_block_count  |      INPUT      |   Tensor   |
 |                      |     block_shape     |   ATTR(REQUIRED) |  int[]  |
-|                      |       metadata       | INPUT(OPTIONAL) |   Tensor   |
+|                      |       metadata       | INPUT（当前必传） |   Tensor   |
 |                      |    softmax_scale    | ATTR(OPTIONAL) |   float   |
 |                      |  softmax_precision  | ATTR(OPTIONAL) |   int   |
 |                      |      layout_q       | ATTR(OPTIONAL) |   string   |
@@ -315,7 +323,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 |     Q_S     |      各batch的query逻辑序列长度，TND下一般由cu_seqlens_q差分得到      |
 |    KV_S    |  各batch的key/value逻辑序列长度；TND下一般由cu_seqlens_kv差分得到，Paged Attention下为block_table映射对应的逻辑KV长度  |
 |     D     |          输入q/k/v tensor隐藏层最小的单元尺寸headdim         |
-|  maxKvBlockCount  | sparse_block_idx最后一维，表示每个Q块最多选择的KV块数，须不小于sparseBlockCount中所有元素的最大值，当前上限为256 |
+|  maxKvBlockCount  | sparse_block_idx最后一维，表示每个Q块最多选择的KV块数，须不小于sparseBlockCount中所有元素的最大值，容量上限见<a href="#产品差异约束">产品差异约束</a> |
 | totalQBlocks | 按blockShapeX分块后的Q块总数；$\sum_i\mathrm{ceil}(Q\_S_i / block\_x)$，为`sparse_block_idx`/`sparse_block_count`第二维 |
 | totalKBlocks | 按blockShapeY分块后的KV块总数，即$\sum_i\mathrm{ceilDiv}(kvStorageLen_i, blockShapeY)$ |
 | num_blocks | Paged KV Cache物理页总数 |
@@ -373,7 +381,7 @@ cann_ops_transformer.generic_block_sparse_attention(
                 <li>Q_T > 0</li>
                 <li>Q_N > 0</li>
                 <li>KV_N > 0</li>
-                <li>当前D仅支持128</li>
+                <li>headDim取值范围见<a href="#产品差异约束">产品差异约束</a></li>
                 <li>Q_N % KV_N == 0且Q_N / KV_N > 0</li>
                 <li>groupSize = Q_N / KV_N 当前须不超过128</li>
             </ul>
@@ -385,8 +393,10 @@ cann_ops_transformer.generic_block_sparse_attention(
             <ul>
                 <li>tensor_type支持bfloat16、float16、float8_e4m3fn</li>
                 <li>PA_BBND -> (num_blocks, block_size, KV_N, D)</li>
-                <li>当前block_size须等于128且等于block_shape[1]</li>
-                <li>非连续Tensor约束：PA_BBND仅dim0支持非连续</li>
+                <li>PA_BNBD -> (num_blocks, KV_N, block_size, D)</li>
+                <li>PA的block_size固定为128，与稀疏block_shape[1]独立；</li>
+                <li>TND -> (KV_T, KV_N, D)，适用范围见<a href="#产品差异约束">产品差异约束</a></li>
+                <li>非连续Tensor约束：PA_BBND/PA_BNBD仅dim0支持非连续</li>
             </ul>
         </td>
     </tr>
@@ -424,9 +434,15 @@ cann_ops_transformer.generic_block_sparse_attention(
     <tbody>
         <tr>
             <td>TND</td>
-            <td>PA_BBND</td>
+            <td>PA_BBND、PA_BNBD或TND，适用范围见<a href="#产品差异约束">产品差异约束</a></td>
             <td>(Q_T, Q_N, D)</td>
             <td>(Q_T, Q_N, 1)</td>
+        </tr>
+        <tr>
+            <td>BSND</td><td>BSND或PA_BBND或PA_BNBD</td><td>(B,Sq,Q_N,D)</td><td>(B,Q_N,Sq,1)</td>
+        </tr>
+        <tr>
+            <td>BNSD</td><td>BNSD或PA_BBND或PA_BNBD</td><td>(B,Q_N,Sq,D)</td><td>(B,Q_N,Sq,1)</td>
         </tr>
     </tbody>
     </table>
@@ -467,8 +483,8 @@ cann_ops_transformer.generic_block_sparse_attention(
         </td>
         <td rowspan="3">
             <ul>
-                <li>当前maxKvBlockCount不超过256</li>
-                <li>当前block_shape=[1, 128]</li>
+                <li>maxKvBlockCount：容量上限见<a href="#产品差异约束">产品差异约束</a></li>
+                <li>非量化场景支持block_shape=[1, Y]，Y为1-128任意整数；量化场景为[1,128]。</li>
             </ul>
         </td>
     </tr>
@@ -521,9 +537,9 @@ cann_ops_transformer.generic_block_sparse_attention(
                         <li>当前不支持不传入，未传入将发出拦截报警</li>
                     </ul>
                 </td>
-                <td>可选参数</td>
+                <td>当前必传</td>
                 <td>无</td>
-                <td>传入时需与generic_block_sparse_attention_metadata生成的结果一致</td>
+                <td>必须使用与当前输入和属性配套的generic_block_sparse_attention_metadata输出</td>
             </tr>
         </tbody>
     </table>
@@ -553,7 +569,7 @@ cann_ops_transformer.generic_block_sparse_attention(
                 <td>
                     <ul>
                         <li>data_type支持INT</li>
-                        <li>Ascend 950当前仅支持1</li>
+                        <li>取值为0或1，适用范围见<a href="#产品差异约束">产品差异约束</a></li>
                     </ul>
                 </td>
                 <td>可选属性，默认值为1</td>
@@ -590,7 +606,7 @@ mask_mode参数解释见「mask_mode 枚举」。
             <td>
                 <ul>
                     <li>data_type支持INT</li>
-                    <li>当前仅支持1</li>
+                    <li>支持0（非因果）或1（causal），适用范围见<a href="#产品差异约束">产品差异约束</a></li>
                 </ul>
             </td>
             <td>可选输入，默认值为1</td>
@@ -662,12 +678,13 @@ mask_mode参数解释见「mask_mode 枚举」。
                     <li>seqused_kv中的值需小于等于KV_S</li>
                 </ul>
             </td>
-            <td rowspan="2">可选参数</td>
+            <td>BSND/BNSD必须传入；TND可选</td>
             <td rowspan="4">无</td>
             <td rowspan="4">无</td>
         </tr>
         <tr>
             <td>seqused_kv</td>
+            <td>PA_BBND/PA_BNBD及BSND/BNSD必须传入；TND可选</td>
         </tr>
         <tr>
             <td>cu_seqlens_q</td>
@@ -677,16 +694,16 @@ mask_mode参数解释见「mask_mode 枚举」。
                     <li>tensor_shape为(B+1,)</li>
                     <li>值仅支持非负整数</li>
                     <li>其值应非递减（大于等于前一个值）排列</li>
-                    <li>cu_seqlens_q：第一个元素为0且最后一个元素等于Q_T</li>
-                    <li>cu_seqlens_kv：第一个元素为0且最后一个元素等于KV_T</li>
+                    <li>TND Q：cu_seqlens_q第一个元素为0且最后一个元素等于Q_T</li>
+                    <li>TND KV：cu_seqlens_kv第一个元素为0且最后一个元素等于KV_T</li>
                 </ul>
             </td>
             <td rowspan="2">
                 <ul>
                     <li>当layout_q为TND时，cu_seqlens_q必须传入</li>
-                    <li>当layout_q不为TND时，cu_seqlens_q不支持传入</li>
+                    <li>当layout_q为BSND/BNSD时，cu_seqlens_q不参与计算，建议传入None</li>
                     <li>当layout_kv为TND时，cu_seqlens_kv必须传入</li>
-                    <li>当layout_kv不为TND时，cu_seqlens_kv不支持传入</li>
+                    <li>当layout_kv为BSND/BNSD时，cu_seqlens_kv不参与计算，建议传入None；PA_BBND/PA_BNBD时不传</li>
                 </ul>
             </td>
         </tr>
@@ -701,10 +718,10 @@ mask_mode参数解释见「mask_mode 枚举」。
                     <li>默认值为-1</li>
                 </ul>
             </td>
-            <td rowspan="2">可选参数</td>
+            <td rowspan="2">max_seqlen_q条件必选；max_seqlen_kv可选</td>
             <td rowspan="2">
                 <ul>
-                    <li>值必须大于等于-1；传入时必须等于实际的最大序列长度，否则行为未定义</li>
+                    <li>max_seqlen_q在BSND/BNSD下必须为Q的shape容量Sq；max_seqlen_kv允许-1或非负值，不参与实际KV长度计算</li>
                 </ul>
             </td>
             <td rowspan="2">无</td>
@@ -745,7 +762,7 @@ mask_mode参数解释见「mask_mode 枚举」。
                     <li>值只能为正整数</li>
                 </ul>
             </td>
-            <td>可选参数</td>
+            <td>PA_BBND/PA_BNBD必须传入；TND/BSND/BNSD必须为None</td>
             <td>无</td>
             <td>
                 <ul>
@@ -852,7 +869,7 @@ quant_mode参数解释见「quant_mode 枚举」。
             <td>
                 <ul>
                     <li>data_type仅支持BOOL</li>
-                    <li>当前仅支持False</li>
+                    <li>非量化支持False/True；FP8路径仅支持False</li>
                 </ul>
             </td>
             <td>可选属性，默认值为False</td>

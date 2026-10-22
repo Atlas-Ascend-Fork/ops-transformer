@@ -25,6 +25,28 @@ constexpr uint64_t GBSA_OP_ARCH22_BASE = 9200000000000000ULL; // aicore220
 constexpr uint64_t GBSA_OP_ARCH35_BASE = 9250000000000000ULL; // aicore310
 constexpr uint64_t GBSA_LSE_OUT_OFFSET = 100000000ULL;
 
+BEGIN_TILING_DATA_DEF(GbsaBaseTiling)
+TILING_DATA_FIELD_DEF(uint32_t, qBaseTile);
+TILING_DATA_FIELD_DEF(uint32_t, kvBaseTile);
+END_TILING_DATA_DEF;
+REGISTER_TILING_DATA_CLASS(GbsaBaseTilingOp, GbsaBaseTiling)
+
+BEGIN_TILING_DATA_DEF(GbsaMmPhaseL1Tiling)
+TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileM);
+TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileN);
+TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileKLeft);
+TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileKRight);
+TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileM);
+TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileN);
+TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileKLeft);
+TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileKRight);
+TILING_DATA_FIELD_DEF(uint32_t, qL1BufNum);
+TILING_DATA_FIELD_DEF(uint32_t, kL1BufNum);
+TILING_DATA_FIELD_DEF(uint32_t, vL1BufNum);
+TILING_DATA_FIELD_DEF(uint32_t, pL1BufNum);
+END_TILING_DATA_DEF;
+REGISTER_TILING_DATA_CLASS(GbsaMmPhaseL1TilingOp, GbsaMmPhaseL1Tiling)
+
 BEGIN_TILING_DATA_DEF(GenericBlockSparseAttentionTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, batch);
 TILING_DATA_FIELD_DEF(uint32_t, numHeads);
@@ -45,20 +67,6 @@ TILING_DATA_FIELD_DEF(uint64_t, updateSize);
 TILING_DATA_FIELD_DEF(uint64_t, workSpaceSize);
 TILING_DATA_FIELD_DEF(uint64_t, tilingKey);
 TILING_DATA_FIELD_DEF(uint32_t, groupSize);
-TILING_DATA_FIELD_DEF(uint32_t, qBaseTile);
-TILING_DATA_FIELD_DEF(uint32_t, kvBaseTile);
-TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileM);
-TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileN);
-TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileKLeft);
-TILING_DATA_FIELD_DEF(uint32_t, mm1L1TileKRight);
-TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileM);
-TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileN);
-TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileKLeft);
-TILING_DATA_FIELD_DEF(uint32_t, mm2L1TileKRight);
-TILING_DATA_FIELD_DEF(uint32_t, qL1BufNum);
-TILING_DATA_FIELD_DEF(uint32_t, kL1BufNum);
-TILING_DATA_FIELD_DEF(uint32_t, vL1BufNum);
-TILING_DATA_FIELD_DEF(uint32_t, pL1BufNum);
 // PA_BBND page base stride in elements (dim0). Allows first-axis non-contiguous KV cache.
 TILING_DATA_FIELD_DEF(uint64_t, kStride0);
 TILING_DATA_FIELD_DEF(uint64_t, vStride0);
@@ -71,6 +79,16 @@ TILING_DATA_FIELD_DEF(uint64_t, fdPartialOOffset);
 TILING_DATA_FIELD_DEF(uint32_t, residualBlockMode);
 // 0: per-Q-block sparseBlockCount; 1: every Q block uses the same topK.
 TILING_DATA_FIELD_DEF(uint32_t, isConsistentTopk);
+// Storage token capacities, not sums of seqused. PA KV counts all physical page tokens.
+TILING_DATA_FIELD_DEF(uint64_t, totalQTokens);
+TILING_DATA_FIELD_DEF(uint64_t, totalKvTokens);
+TILING_DATA_FIELD_DEF_STRUCT(GbsaBaseTiling, baseTileInfo);
+TILING_DATA_FIELD_DEF_STRUCT(GbsaMmPhaseL1Tiling, mmPhaseL1TileInfo);
+TILING_DATA_FIELD_DEF(uint64_t, kvOffsetInfoOffset);
+TILING_DATA_FIELD_DEF(uint32_t, kvOffsetTileWords);
+// Fixed per-batch storage capacities for BSND/BNSD. TND uses cuSeqLengths instead.
+TILING_DATA_FIELD_DEF(uint32_t, qSeqCapacity);
+TILING_DATA_FIELD_DEF(uint32_t, kvSeqCapacity);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttention, GenericBlockSparseAttentionTilingData)
 
@@ -104,6 +122,7 @@ private:
     ge::graphStatus ParseInputTensors(gert::TilingContext* context);
     ge::graphStatus ParseQueryKeyShapes(gert::TilingContext* context);
     ge::graphStatus ParseSparseTensors(gert::TilingContext* context);
+    ge::graphStatus ParseSequenceInputs(gert::TilingContext* context);
     ge::graphStatus ParseBlockTable(gert::TilingContext* context);
     ge::graphStatus ParseQkvDtype(gert::TilingContext* context);
     ge::graphStatus CalculateWorkSpace(gert::TilingContext* context);
@@ -113,8 +132,9 @@ private:
     ge::graphStatus CheckQuantConfig(gert::TilingContext* context);
     ge::graphStatus CheckMetadata(gert::TilingContext* context);
     ge::graphStatus CheckReservedOptionalInputs(gert::TilingContext* context);
-    ge::graphStatus CheckCuSeqLengths(gert::TilingContext* context);
     ge::graphStatus ParseKvCacheStride0(gert::TilingContext* context);
+    void CalcBaseTileTilingParams950();
+    void CalcMatmulPhaseL1TileInfo950();
     uint64_t GenerateTilingKey();
 
     uint32_t batch_ = 0;
@@ -125,9 +145,6 @@ private:
     uint32_t blockShapeX_ = 1;
     uint32_t blockShapeY_ = 128;
     uint32_t blockSize_ = 128;
-    // key PA_BBND origin [blockNum, blockSize, Nkv, D] dim BLOCKED_KV_DIM_KV_HEAD (Nkv); cross-checked against
-    // sparseBlockIdx dim0 in ParseSparseTensors.
-    uint32_t keyKvHeads_ = 0;
     uint32_t topK_ = 16;
     uint32_t qBlockNum_ = 0;
     uint32_t maxBlocksPerBatch_ = 0;
@@ -138,7 +155,8 @@ private:
     bool isConsistentTopk_ = false;
     int64_t softmaxLseFlag_ = 0;
     bool returnSoftmaxlse_ = false;
-    bool blockTablePresent_ = false;
+    bool isPaged_ = false;  // Derived only from blockTable input presence.
+    bool isPaBnbd_ = false; // Paged KV laid out as [blockNum, Nkv, blockSize, D].
 
     uint64_t mm1OutSize_ = 0;
     uint64_t smOnlineOutSize_ = 0;
@@ -157,12 +175,31 @@ private:
     std::string layoutQ_ = "TND";
     std::string layoutKv_ = "TND";
     int64_t layoutSparsePattern_ = 4;
-    int64_t maskType_ = 0;
+    int64_t maskType_ = 1;
     int64_t quantType_ = 0;
 
     // Default = contiguous PA_BBND page size; overwritten when KV is a dim0-strided view.
     uint64_t kStride0_ = 0;
     uint64_t vStride0_ = 0;
+    uint32_t qSeqCapacity_ = 0;
+    uint32_t kvSeqCapacity_ = 0;
+    uint64_t totalQTokens_ = 0;
+    uint64_t totalKvTokens_ = 0;
+
+    uint32_t qBaseTile_ = 128;
+    uint32_t kvBaseTile_ = 128;
+    uint32_t mm1L1TileM_ = 128;
+    uint32_t mm1L1TileN_ = 128;
+    uint32_t mm1L1TileKLeft_ = 128;
+    uint32_t mm1L1TileKRight_ = 128;
+    uint32_t mm2L1TileM_ = 128;
+    uint32_t mm2L1TileN_ = 128;
+    uint32_t mm2L1TileKLeft_ = 128;
+    uint32_t mm2L1TileKRight_ = 128;
+    uint32_t qL1BufNum_ = 1;
+    uint32_t kL1BufNum_ = 1;
+    uint32_t vL1BufNum_ = 1;
+    uint32_t pL1BufNum_ = 3;
 
     bool fdStaticEnabled_ = false;
     uint32_t fdLseSubStride_ = 0;

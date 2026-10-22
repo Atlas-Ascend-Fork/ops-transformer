@@ -26,6 +26,7 @@ __aicore__ inline uint32_t HashConfigValue(uint32_t hash, uint32_t value)
     return hash;
 }
 
+template <bool isCausal = true>
 __aicore__ inline uint32_t CalculateConfigSignature(
     const GenericBlockSparseAttn::GenericBlockSparseAttentionTilingData* tilingData)
 {
@@ -42,9 +43,14 @@ __aicore__ inline uint32_t CalculateConfigSignature(
     // Must stay in sync with the metadata scheduler's CalculateConfigSignature.
     hash = HashConfigValue(hash, tilingData->residualBlockMode);
     hash = HashConfigValue(hash, tilingData->isConsistentTopk);
+    // Preserve the existing causal signature; tag the new non-causal configuration.
+    if constexpr (!isCausal) {
+        hash = HashConfigValue(hash, 0U);
+    }
     return hash;
 }
 
+template <bool isCausal = true>
 __aicore__ inline bool ValidateMetadata(__gm__ const GbsaMetadata::Metadata* meta,
                                         const GenericBlockSparseAttn::GenericBlockSparseAttentionTilingData* tilingData,
                                         uint32_t physicalAicNum)
@@ -52,7 +58,7 @@ __aicore__ inline bool ValidateMetadata(__gm__ const GbsaMetadata::Metadata* met
     if (meta == nullptr || meta->magic != GbsaMetadata::METADATA_MAGIC ||
         meta->version != GbsaMetadata::METADATA_VERSION ||
         meta->metadataUsedSize != static_cast<int32_t>(GbsaMetadata::METADATA_USED_SIZE) ||
-        meta->configSignature != static_cast<int32_t>(CalculateConfigSignature(tilingData)) ||
+        meta->configSignature != static_cast<int32_t>(CalculateConfigSignature<isCausal>(tilingData)) ||
         meta->saTotalTaskNum < 0) {
         return false;
     }
@@ -75,12 +81,14 @@ __aicore__ inline bool ValidateMetadata(__gm__ const GbsaMetadata::Metadata* met
         return false;
     }
 
+    // FD block ranges include the implicit residual block, unlike the sparse index storage.
+    const int64_t maxBlockNum = static_cast<int64_t>(tilingData->topK) + (tilingData->residualBlockMode == 1U ? 1 : 0);
     for (int32_t core = 0; core < meta->fdActiveCoreNum; ++core) {
         const __gm__ GbsaMetadata::DecodeSchedule& schedule = meta->decodeSchedules[core];
         if (schedule.baseTaskStart < 0 || schedule.baseTaskEnd < schedule.baseTaskStart ||
             schedule.baseTaskEnd > meta->saTotalTaskNum || schedule.firstBlockStart < 0 ||
-            schedule.firstBlockStart > static_cast<int32_t>(tilingData->topK) || schedule.lastBlockEnd < 0 ||
-            schedule.lastBlockEnd > static_cast<int32_t>(tilingData->topK)) {
+            schedule.firstBlockStart > maxBlockNum || schedule.lastBlockEnd < 0 ||
+            schedule.lastBlockEnd > maxBlockNum) {
             return false;
         }
     }

@@ -42,7 +42,7 @@ struct TileCopyTla<
 
         const uint32_t nValue = tla::get<0>(srcTensor.shape());
         const uint32_t dValue = tla::get<1>(srcTensor.shape());
-        const uint32_t srcDValue = tla::get<0>(srcTensor.stride());
+        const uint64_t srcDValue = tla::get<0>(srcTensor.stride());
         const uint32_t dstInnerStrideRow = tla::get<0, 0>(dstTensor.stride());
         const uint32_t dstOuterStrideCol = tla::get<1, 1>(dstTensor.stride());
 

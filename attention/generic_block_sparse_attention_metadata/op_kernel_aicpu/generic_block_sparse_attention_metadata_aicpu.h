@@ -33,8 +33,11 @@ public:
 private:
     bool Prepare(CpuKernelContext& ctx);
     bool CheckInputs();
-    bool ParseQSeqLens(std::vector<int64_t>& qSeqLens, std::vector<int64_t>& qStorageBlockStarts) const;
-    bool ParseValidBlockNums(const std::vector<int64_t>& qSeqLens, const std::vector<int64_t>& qStorageBlockStarts,
+    bool CheckKvSeqLens() const;
+    bool ParseQSeqLens(std::vector<int64_t>& qSeqLens, std::vector<int64_t>& kvSeqLens,
+                       std::vector<int64_t>& qStorageBlockStarts) const;
+    bool ParseValidBlockNums(const std::vector<int64_t>& qSeqLens, const std::vector<int64_t>& kvSeqLens,
+                             const std::vector<int64_t>& qStorageBlockStarts,
                              std::vector<int64_t>& validBlockNums) const;
     bool GenerateMetadata(const std::vector<int64_t>& qSeqLens, const std::vector<int64_t>& validBlockNums) const;
     bool CheckOptionalTensor(const Tensor* tensor, DataType dataType, int64_t elementNum, const char* tensorName) const;
@@ -43,6 +46,8 @@ private:
     Tensor* sparseBlockCount_ = nullptr;
     Tensor* cuSeqLengths_ = nullptr;
     Tensor* seqUsedQ_ = nullptr;
+    Tensor* cuSeqLengthsKv_ = nullptr;
+    Tensor* seqUsedKv_ = nullptr;
     Tensor* metadata_ = nullptr;
 
     int64_t batchSize_ = 0;
@@ -55,6 +60,7 @@ private:
     int64_t isPackedGQA_ = 1;
     int64_t residualBlockMode_ = 0;
     int64_t isConsistentTopk_ = 0;
+    int64_t maskType_ = 1;
     int64_t aicCoreNum_ = 0;
     int64_t sparseHeadNum_ = 0;
     int64_t qBlockStorageNum_ = 0; // QShape nums of SparseBlockCount last dim.
