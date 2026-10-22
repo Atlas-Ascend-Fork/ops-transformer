@@ -169,7 +169,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
       <td>cmpResidualKvOptional（aclTensor*）</td>
       <td>输入</td>
       <td>表示不同Batch中cmpKvOptional压缩后Sequence Length的余数，配合cmpRatio实现cmpKvOptional部分的mask和负载计算。</td>
-      <td><ul><li>支持空Tensor。</li><li>cmpRatio不为1场景下必传。</li><li>shape固定为(B, )。</li></ul></td>
+      <td><ul><li>支持空Tensor。</li><li>cmpRatio不为1且cmpMaskMode为3（RightDownCausal）场景下必传。</li><li>shape固定为(B, )。</li></ul></td>
       <td>INT32</td>
       <td>ND</td>
       <td>1维</td>
