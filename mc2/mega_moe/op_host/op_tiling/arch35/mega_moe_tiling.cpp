@@ -537,11 +537,11 @@ static ge::graphStatus CheckActivationParams(const gert::TilingContext* context,
                                               "one of 'swiglu', 'swiglustep', 'swigluoai', 'situglu' or 'gelu'"),
                     return ge::GRAPH_FAILED);
 
-    // URMA Layered 仅支持 swiglu/situglu；GELU 仅支持 MTE。
-    OP_TILING_CHECK(
-        topoType == TOPO_TYPE_URMA && !isSwiGlu && !isSituGlu,
-        OP_LOGE_FOR_INVALID_VALUE(nodeName, "activation", activationPtr, "'swiglu' or 'situglu' for URMA topology"),
-        return ge::GRAPH_FAILED);
+    // URMA Layered 支持 swiglu、situglu 和逐元素 GELU。
+    OP_TILING_CHECK(topoType == TOPO_TYPE_URMA && !isSwiGlu && !isSituGlu && !isGelu,
+                    OP_LOGE_FOR_INVALID_VALUE(nodeName, "activation", activationPtr,
+                                              "'swiglu', 'situglu' or 'gelu' for URMA topology"),
+                    return ge::GRAPH_FAILED);
 
     if (isSwiGlu || isSwiGluStep) {
         return CheckSwiGluActivationParams(activationParams, paramCount, nodeName);

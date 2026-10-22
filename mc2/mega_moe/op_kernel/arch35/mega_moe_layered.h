@@ -257,6 +257,7 @@ private:
 
     uint32_t m_ = 0;
     uint32_t k_ = 0;
+    uint32_t activationOutputDivisor_ = ACTIVATION_N_HALF;
     uint32_t aicNum_ = 0;
     uint32_t topK_ = 0;
     uint32_t rankId_ = 0;
@@ -450,14 +451,15 @@ MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::MakeWaveProblemState(const Exper
     ExpertLoopState problem = state;
     uint64_t n = Get<N_VALUE>(state.problemShape);
     uint64_t k = Get<K_VALUE>(state.problemShape);
+    const uint64_t activationOutputCols = n / activationOutputDivisor_;
     uint64_t scaleK = Ops::Base::CeilDiv(k, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
     uint64_t scaleN =
-        Ops::Base::CeilDiv(n / ACTIVATION_N_HALF, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
+        Ops::Base::CeilDiv(activationOutputCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
     Get<M_VALUE>(problem.problemShape) = rowEnd - rowBegin;
     problem.expertBeforeCnt += rowBegin;
     Get<IDX_A_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * k / A_ELEMS_PER_BYTE;
     Get<IDX_A_SCALE_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * scaleK;
-    Get<IDX_C_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * n / ACTIVATION_N_HALF / C_ELEMS_PER_BYTE;
+    Get<IDX_C_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * activationOutputCols / C_ELEMS_PER_BYTE;
     Get<IDX_C_SCALE_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * scaleN;
     Get<IDX_Y2_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * k;
     Get<IDX_M_OFFSET>(problem.baseOffset) += rowBegin;
@@ -485,6 +487,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitTopol
         Ops::Base::CeilDiv(static_cast<int64_t>(maxOutputSize_), static_cast<int64_t>(L1_TILE_M_256)));
     dispatchFlagSlotsPerExpert_ = maxWavesPerExpert_ * INT_CACHELINE;
     hiddenDim_ = tilingData->hiddenDim;
+    activationOutputDivisor_ = GetActivationOutputDivisor(tilingData->actMode);
     rankId_ = mc2Context_->epRankId;
     rankNumPerServer_ = tilingData->rankNumPerServer;
     if (rankNumPerServer_ == 0U || rankNumPerServer_ > worldSize_) {
@@ -599,20 +602,21 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::AdvanceEx
         uint64_t m = Get<M_VALUE>(state.problemShape);
         uint64_t n = Get<N_VALUE>(state.problemShape);
         uint64_t k = Get<K_VALUE>(state.problemShape);
+        const uint64_t activationOutputCols = n / activationOutputDivisor_;
         state.expertBeforeCnt += m;
         Get<IDX_A_OFFSET>(state.baseOffset) += m * k / A_ELEMS_PER_BYTE;
         Get<IDX_B_OFFSET>(state.baseOffset) += n * k / B_ELEMS_PER_BYTE;
         auto scaleK = Ops::Base::CeilDiv(k, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
         Get<IDX_A_SCALE_OFFSET>(state.baseOffset) += m * scaleK;
         Get<IDX_B_SCALE_OFFSET>(state.baseOffset) += n * scaleK;
-        Get<IDX_C_OFFSET>(state.baseOffset) += m * n / ACTIVATION_N_HALF / C_ELEMS_PER_BYTE;
+        Get<IDX_C_OFFSET>(state.baseOffset) += m * activationOutputCols / C_ELEMS_PER_BYTE;
         Get<IDX_C_SCALE_OFFSET>(state.baseOffset) +=
-            m * Ops::Base::CeilDiv(n / ACTIVATION_N_HALF, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
+            m * Ops::Base::CeilDiv(activationOutputCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
             MXFP_MULTI_BASE_SIZE;
         Get<IDX_FLAG_OFFSET>(state.baseOffset) += 1;
-        Get<IDX_B2_OFFSET>(state.baseOffset) += k * n / ACTIVATION_N_HALF / B_ELEMS_PER_BYTE;
+        Get<IDX_B2_OFFSET>(state.baseOffset) += k * activationOutputCols / B_ELEMS_PER_BYTE;
         Get<IDX_B2_SCALE_OFFSET>(state.baseOffset) +=
-            k * Ops::Base::CeilDiv(n / ACTIVATION_N_HALF, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
+            k * Ops::Base::CeilDiv(activationOutputCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
             MXFP_MULTI_BASE_SIZE;
         Get<IDX_Y2_OFFSET>(state.baseOffset) += m * k;
         Get<IDX_M_OFFSET>(state.baseOffset) += m;
@@ -894,18 +898,18 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::RunGmm1Wi
         RunGmm1A8W4<QuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType, GMM1_TILE_M,
                     epilogueTileM, prefetchWeights, IsShared, !IsShared>(
             blockContext_, epilogue, params_, state.problemShape, gmmAddrInfo, startBlockIdx_, gmTileSequence,
-            state.expertBeforeCnt, expertIdx);
+            state.expertBeforeCnt, expertIdx, activationOutputDivisor_);
     } else {
         if (params_.tilingData->moeGmmMode == GMM_MODE_A8W8_NZ || params_.tilingData->moeGmmMode == GMM_MODE_A4W4_NZ) {
             RunGmm1Generic<QuantOutType, ActivationQuantOutType, QuantOutType, bfloat16_t, QuantScaleOutType,
                            QuantScaleOutType, true, GMM1_TILE_M, epilogueTileM, prefetchWeights, IsShared, !IsShared>(
                 epilogue, params_, state.problemShape, gmmAddrInfo, startBlockIdx_, vecSetSyncCom,
-                state.expertBeforeCnt, expertIdx, gmm1PingPongIdx_);
+                state.expertBeforeCnt, expertIdx, gmm1PingPongIdx_, activationOutputDivisor_);
         } else {
             RunGmm1Generic<QuantOutType, ActivationQuantOutType, QuantOutType, bfloat16_t, QuantScaleOutType,
                            QuantScaleOutType, false, GMM1_TILE_M, epilogueTileM, prefetchWeights, IsShared, !IsShared>(
                 epilogue, params_, state.problemShape, gmmAddrInfo, startBlockIdx_, vecSetSyncCom,
-                state.expertBeforeCnt, expertIdx, gmm1PingPongIdx_);
+                state.expertBeforeCnt, expertIdx, gmm1PingPongIdx_, activationOutputDivisor_);
         }
     }
 }
@@ -938,7 +942,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
         RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                     L1_TILE_M_256, TopkWeightsPrefetch, IsShared, true, !IsShared, false>(
             blockContext_, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob, expertTokenCount,
-            rowOffsetInExpert);
+            rowOffsetInExpert, nullptr, activationOutputDivisor_);
     } else if constexpr (ENABLE_A4W4) {
         // A4W4 GMM1 uses a different block; keep the FP8/W4 objects local to GMM2.
         if constexpr (g_coreType == AscendC::AIC) {
@@ -946,8 +950,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
             typename A8W4Config::BlockContext context{&block};
             RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                         L1_TILE_M_256, TopkWeightsPrefetch, IsShared, true, !IsShared, false>(
-                context, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob, expertTokenCount,
-                rowOffsetInExpert);
+                context, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob, expertTokenCount, rowOffsetInExpert,
+                nullptr, activationOutputDivisor_);
         } else {
             if (GetSubBlockIdx() == 0U) {
                 typename A8W4Config::BlockPrologue block(params_.tilingData->a8w4L1Layout);
@@ -955,12 +959,12 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
                 RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                             L1_TILE_M_256, TopkWeightsPrefetch, IsShared, true, !IsShared, false>(
                     context, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob, expertTokenCount,
-                    rowOffsetInExpert);
+                    rowOffsetInExpert, nullptr, activationOutputDivisor_);
             } else {
                 RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                             L1_TILE_M_256, TopkWeightsPrefetch, IsShared, true, !IsShared, false>(
                     typename A8W4Config::BlockContext{}, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob,
-                    expertTokenCount, rowOffsetInExpert);
+                    expertTokenCount, rowOffsetInExpert, nullptr, activationOutputDivisor_);
             }
         }
     } else {
@@ -969,12 +973,12 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
             RunGmm2Generic<CombineQuantMode, QuantOutType, QuantOutType, bfloat16_t, QuantScaleOutType,
                            QuantScaleOutType, true, true, L1_TILE_M_256, TopkWeightsPrefetch, IsShared, !IsShared>(
                 state.problemShape, gmmAddrInfo, startBlockIdx_, nullptr, false, rowOffsetInExpert, nullptr,
-                ACTIVATION_N_HALF, expertTokenCount);
+                activationOutputDivisor_, expertTokenCount);
         } else {
             RunGmm2Generic<CombineQuantMode, QuantOutType, QuantOutType, bfloat16_t, QuantScaleOutType,
                            QuantScaleOutType, false, true, L1_TILE_M_256, TopkWeightsPrefetch, IsShared, !IsShared>(
                 state.problemShape, gmmAddrInfo, startBlockIdx_, nullptr, false, rowOffsetInExpert, nullptr,
-                ACTIVATION_N_HALF, expertTokenCount);
+                activationOutputDivisor_, expertTokenCount);
         }
     }
 }
