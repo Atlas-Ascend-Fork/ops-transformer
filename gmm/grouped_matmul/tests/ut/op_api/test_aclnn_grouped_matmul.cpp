@@ -92,8 +92,9 @@ struct GroupedMatmulOpApiCase {
                 GroupedMatmulInferShapeStubEnabled() = previous;
             }
         } shapeStub;
-        GroupedMatmulInferShapeStubEnabled() =
-            caseName.rfind("v5_nonquant_group_list_", 0) == 0 || caseName.rfind("legacy_", 0) == 0;
+        GroupedMatmulInferShapeStubEnabled() = caseName.rfind("v5_nonquant_group_list_", 0) == 0 ||
+                                               caseName.rfind("legacy_", 0) == 0 ||
+                                               caseName.rfind("weightnz_mxa8w4_sms_", 0) == 0;
         SetupPlatformForCase(socVersion);
         TensorListDesc x = BuildAclTensorListDesc(xShape, xDtype, xFormat);
         TensorListDesc weight = BuildAclTensorListDesc(weightShape, weightDtype, weightFormat);

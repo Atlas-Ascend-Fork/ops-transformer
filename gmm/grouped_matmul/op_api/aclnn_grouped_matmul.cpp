@@ -3378,7 +3378,11 @@ static bool CheckWeightNzAntiquantScaleStorageBounds(const aclTensorList* tensor
         // SetTransposedScaleTensorListContiguous creates this view before reading the scale.
         const size_t firstAxis = isMxScale ? rank - 3 : rank - 2;
         const auto& strides = tensor->GetViewStrides();
-        if (strides.size() != rank || strides[firstAxis] >= strides[firstAxis + 1]) {
+        // A canonical transposed scale already describes its actual storage span.
+        // Only reinterpret the historical unswapped-shape descriptors below;
+        // swapping an already-correct view can spuriously exceed storage when K/64 > N.
+        if (strides.size() != rank || strides[firstAxis] >= strides[firstAxis + 1] ||
+            (isMxScale ? gmm::IsTransposeForMxShape(tensor) : gmm::IsTransposeLastTwoDims(tensor))) {
             if (!gmm::CheckTensorStorageBounds(tensor, opName, indexedName.c_str())) {
                 return false;
             }

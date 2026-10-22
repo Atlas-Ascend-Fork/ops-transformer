@@ -21,20 +21,22 @@ bool& GroupedMatmulInferShapeStubEnabled()
 
 // API UTs exercise parameter checks; real inference is covered by op_host UTs.
 // The common stub returns success without setting shapes. Model single-tensor
-// split-M here so the production output-shape check can still run unchanged.
+// split-M (including multiple rank-2 NZ weights) here so the production
+// output-shape check can still run unchanged.
 inline aclnnStatus InferGroupedMatmulShapeForUt(const aclTensorList* x, const aclTensorList* weight,
                                                 const aclTensorList* out, int64_t groupType, bool transposeWeight)
 {
     if (!GroupedMatmulInferShapeStubEnabled() || groupType != 0 || x == nullptr || weight == nullptr ||
-        out == nullptr || x->Size() != 1 || weight->Size() != 1 || out->Size() != 1) {
+        out == nullptr || x->Size() != 1 || weight->Size() == 0 || out->Size() != 1) {
         return ACLNN_SUCCESS;
     }
     const auto& xShape = (*x)[0]->GetViewShape();
     const auto& wShape = (*weight)[0]->GetViewShape();
-    if (xShape.GetDimNum() != 2 || wShape.GetDimNum() != 3) {
+    const auto weightRank = wShape.GetDimNum();
+    if (xShape.GetDimNum() != 2 || (weightRank != 2 && weightRank != 3)) {
         return ACLNN_SUCCESS;
     }
-    const op::Shape shape{xShape.GetDim(0), wShape.GetDim(transposeWeight ? 1 : 2)};
+    const op::Shape shape{xShape.GetDim(0), wShape.GetDim(weightRank - (transposeWeight ? 2 : 1))};
     auto* output = const_cast<aclTensor*>((*out)[0]);
     output->SetViewShape(shape);
     output->SetStorageShape(shape);
