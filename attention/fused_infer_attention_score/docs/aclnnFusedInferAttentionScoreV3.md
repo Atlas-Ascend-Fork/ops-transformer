@@ -778,7 +778,7 @@ aclnnStatus aclnnFusedInferAttentionScoreV3(
     - sparse模式仅支持sparse=0且attenMask为nullptr，或sparse=3且attenMask不为nullptr，或sparse=4且传入attenMask不为nullptr；
     - 当query的d等于512时：
       - 支持TND、TND_NTD;
-      - 必须开启page attention，此时actualSeqLengthsKv长度等于key/value的batch值，代表每个batch的实际长度，值不大于KV_S；
+      - 必须开启page attention，此时actualSeqLengthsKv长度等于key/value的batch值，每个元素表示对应batch的逻辑KV长度，且不大于blockTable第二维长度与blockSize的乘积（可大于单个cache block的blockSize）；
       - 支持query每个batch的s为1-16；
       - 要求query的n为32/64/128，key、value的n为1；
       - 要求queryRope和keyRope不等于空，queryRope和keyRope的d为64；

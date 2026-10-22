@@ -1545,7 +1545,7 @@ BFLOAT16和INT8不区分高精度和高性能，行无效修正对FLOAT16、BFLO
     </tr>
     <tr>
         <td>actualSeqLengthsKv</td>
-        <td>此时actualSeqLengthsKv长度等于key/value的batch值，代表每个batch的实际长度，值不大于KV_S</td>
+        <td>此时actualSeqLengthsKv长度等于key/value的batch值，每个元素表示对应batch的逻辑KV长度，且不大于blockTable第二维长度与blockSize的乘积（可大于单个cache block的blockSize）</td>
     </tr>
     <tr>
         <td>MLA（要求queryRope和keyRope不等于空）</td>

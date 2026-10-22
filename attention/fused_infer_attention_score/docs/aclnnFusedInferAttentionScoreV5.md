@@ -1623,7 +1623,8 @@ FusedInferAttentionScore算子约束分为4个档位，按约束复杂程度递�
       - 入参中的数值应满足以下条件：
         - 当key/value的layout为TND/NTD时，最后一个元素应等于T
         - 当key/value的layout为TND/NTD时，其值应递增(大于等于前一个值)排列
-        - 当key/value的layout为非TND/NTD时，其值应不大于KV_S
+        - 未开启PagedAttention且key/value的layout为非TND/NTD时，其值应不大于KV_S
+        - PagedAttention场景下，每个元素表示对应batch的逻辑KV长度，且不大于blockTable第二维长度与blockSize的乘积（可大于单个cache block的blockSize）
         - 其值应为非负数
 - 存在性约束
   - 公共
