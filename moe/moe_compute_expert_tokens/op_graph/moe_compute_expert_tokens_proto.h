@@ -26,7 +26,7 @@ namespace ge {
  * @par Outputs:
  * @li total_rows_before_expert: A Tensor. Type is:Int32.
  * @par Attributes:
- * @li num_experts: Required parameter. Type is:Int. The value must be more than 0 and less than 2048.
+ * @li num_experts: Required parameter. Type is:Int. The value must be more than 0 and less than or equal to 2048.
  */
 REG_OP(MoeComputeExpertTokens)
     .INPUT(sorted_experts, "T")
