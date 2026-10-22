@@ -43,8 +43,8 @@
         当`normType = LAYER_NORM`时
 
         $$
-        queryMean_{b,s,n} = \frac{1}{D}\sum_{i=0}^{D}query_{b,s,n} \\
-        queryVar_{b,s,n} = \frac{1}{D}\sum_{i=0}^{D}(query-queryMean_{b,s,n})^2 \\
+        queryMean_{b,s,n} = \frac{1}{D}\sum_{i=0}^{D-1}query_{b,s,n} \\
+        queryVar_{b,s,n} = \frac{1}{D}\sum_{i=0}^{D-1}(query-queryMean_{b,s,n})^2 \\
         queryRstd_{b,s,n}=  \frac{1}{\sqrt{queryVar_{b,s,n}+\epsilon}} \\
         hiddenState_q = (query-queryMean)*queryRstd$$
         当`normType = LAYER_NORM_AFFINE`时，在上面的基础上
@@ -56,7 +56,7 @@
         当`normType = RMS_NORM`时：
 
         $$
-        queryMs = \frac{1}{D}\sum_{i=0}^{D}(query_{b,s,n})^2 \\
+        queryMs = \frac{1}{D}\sum_{i=0}^{D-1}(query_{b,s,n})^2 \\
         queryRms = \frac{1}{\sqrt{queryMs+\epsilon}} \\
         hiddenState_q = query * queryRms
         $$
