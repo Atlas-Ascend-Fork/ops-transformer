@@ -243,7 +243,8 @@
       <td>
         <ul>
           <li>代表输入query、key、value的数据排布格式。</li>
-          <li>支持BSH、SBH、BSND、BNSD。</li>
+          <li>支持BSH、SBH、BSND、BNSD、TND。</li>
+          <li>TND采用紧凑布局，各序列的token沿T轴拼接，query、key、value的shape为[T, N, D]；T为各序列实际token数之和，N为注意力头数，D为每个头的维度。actualSeqQlenOptional和actualSeqKvlenOptional分别提供query与key/value各序列的累计长度。</li>
         </ul>
       </td>
       <td>STRING</td>
