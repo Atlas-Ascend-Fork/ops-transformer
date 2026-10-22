@@ -65,7 +65,7 @@
    <td>worldSize</td>
    <td>输入</td>
    <td>通信域大小。</td>
-   <td>UINT64</td>
+   <td>INT64</td>
    <td>ND</td>
   </tr>
  </tbody></table>
