@@ -4,9 +4,6 @@
 
 ## 产品支持情况
 
-<!-- npu="960" id18 -->
-- <term>Ascend 960DT</term>：支持
-<!-- end id18 -->
 <!-- npu="950" id1 -->
 - <term>Ascend 950PR&950DT系列产品</term>：支持
 <!-- end id1 -->
@@ -31,11 +28,6 @@
 - 接口功能:
     aclnnMatmulReduceScatterV2接口是对aclnnMatmulReduceScatter接口的功能扩展，在支持x1和x2输入类型为FLOAT16/BFLOAT16的基础上，
 
-    <!-- npu="960" id19 -->
-    - <term>Ascend960DT</term>：
-        - 支持FLOAT8_E4M3FN/FLOAT8_E5M2/HIFLOAT8/FLOAT4_E2M1低精度输入。支持pertensor、perblock、mx[量化方式](../../../docs/zh/context/quant_mode_introduction.md)，其中mx量化支持MXFP8和MXFP4场景。
-        - 在上述功能基础上，新增HIFLOAT4输入和HIFLOAT4_SCALE反量化参数的支持，对应MXHiFP4量化场景。
-    <!-- end id19 -->
     <!-- npu="950" id7 -->
     - <term>Ascend 950PR&950DT系列产品</term>：
         - 新增了对低精度数据类型FLOAT8_E4M3FN/FLOAT8_E5M2/HIFLOAT8/FLOAT4_E2M1的支持。支持pertensor、perblock、mx[量化方式](../../../docs/zh/context/quant_mode_introduction.md)。其中mx量化支持MXFP8和MXFP4量化场景。
@@ -70,14 +62,6 @@
         $$
         output=ReduceScatter(\sum_{0}^{\left \lfloor \frac{k}{blockSize=32} \right \rfloor} (x1_{pr}@x2_{rq}*(x1Scale_{pr}*x2Scale_{rq})))
         $$
-
-    - 情形5：如果x1和x2均为HIFLOAT4（MXHiFP4量化），x1Scale和x2Scale均为HIFLOAT4_SCALE。x1的shape为(m, k)，x1Scale的shape为(m, ceildiv(k, 64), 1)；x2转置时，x2和x2Scale的存储shape分别为(n, k)、(n, ceildiv(k, 64), 1)；x2不转置时，分别为(k, n)、(ceildiv(k, 64), n, 1)。
-
-        $$
-        output=ReduceScatter\left(\operatorname{Cast}_{output\_dtype}\left(\sum_{r=0}^{\lceil k/64\rceil-1}\left(\operatorname{Dequant}_{HiFP4}(x1_r,x1Scale_r) @ \operatorname{Dequant}_{HiFP4}(x2_r,x2Scale_r)\right)\right)\right)
-        $$
-
-        其中，r表示沿K轴每64个元素的分组，x1_r、x2_r为该组的逻辑矩阵分块，x1Scale_r、x2Scale_r为对应缩放信息，尾组仅计算有效元素。Dequant表示按基础及子组倍率逐元素反量化；Cast表示转换为output指定的FLOAT16或BFLOAT16类型。
 
 ## 函数原型
 
@@ -142,7 +126,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
         <td>输入</td>
         <td>MM左矩阵，即计算公式中的x1。</td>
         <td>当前版本仅支持两维输入，shape为[m, k]，且仅支持不转置场景。</td>
-        <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT8_E5M2、HIFLOAT8、FLOAT4_E2M1、HIFLOAT4、INT8</td>
+        <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT8_E5M2、HIFLOAT8、FLOAT4_E2M1、INT8</td>
         <td>ND</td>
         <td>2</td>
         <td>×</td>
@@ -152,8 +136,8 @@ aclnnStatus aclnnMatmulReduceScatterV2(
         <td>输入</td>
         <td>MM右矩阵，即计算公式中的x2。</td>
         <td><ul><li>当前版本仅支持二维输入，支持转置/不转置场景，转置时shape为[n, k]，不转置时shape为[k, n]。</li><li>仅支持两根轴转置情况下的
-        非连续Tensor，其他场景的<a href="../../../docs/zh/context/non_contiguous_tensor.md">[非连续的Tensor]</a>不支持。</li></ul></td>
-        <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT8_E5M2、HIFLOAT8、FLOAT4_E2M1、HIFLOAT4、INT8</td>
+        非连续Tensor，其他场景的<a href="../../../docs/zh/context/non_contiguous_tensor.md">非连续的Tensor</a>不支持。</li></ul></td>
+        <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT8_E5M2、HIFLOAT8、FLOAT4_E2M1、INT8</td>
         <td>ND、FRACTAL_NZ</td>
         <td>2</td>
         <td>√（仅适用转置场景）</td>
@@ -173,7 +157,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
         <td>输入</td>
         <td>mm左矩阵反量化参数。</td>
         <td>支持传入空指针场景。</td>
-        <td>FLOAT、FLOAT8_E8M0、HIFLOAT4_SCALE</td>
+        <td>FLOAT、FLOAT8_E8M0</td>
         <td>ND</td>
         <td>1-3</td>
         <td>×</td>
@@ -183,7 +167,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
         <td>输入</td>
         <td>mm右矩阵反量化参数。</td>
         <td>支持传入空指针场景。MX量化场景下x2Scale支持转置/不转置输入。</td>
-        <td>FLOAT、INT64、FLOAT8_E8M0、HIFLOAT4_SCALE</td>
+        <td>FLOAT、INT64、FLOAT8_E8M0</td>
         <td>ND</td>
         <td>1-3</td>
         <td>√（仅适用转置场景）</td>
@@ -320,8 +304,8 @@ aclnnStatus aclnnMatmulReduceScatterV2(
         - commMode：当前仅支持aiv模式。aiv模式下使用AI VECTOR核完成通信任务。当前版本仅支持输入“aiv”。
         - output：数据类型支持FLOAT16、BFLOAT16。如果x1类型为FLOAT16、BFLOAT16，则output类型与x1保持一致。
     <!-- end id9 -->
-    <!-- npu="950,960" id10 -->
-    - <term>Ascend 950PR&950DT系列产品</term>、<term>Ascend960DT</term>（非量化、pertensor、perblock、MXFP8和MXFP4场景）：
+    <!-- npu="950" id10 -->
+    - <term>Ascend 950PR&950DT系列产品</term>：
         - x1、x2：数据类型支持FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT8_E5M2、HIFLOAT8、FLOAT4_E2M1，数据格式仅支持ND。
         - bias：如果x1的数据类型是FLOAT16、BFLOAT16，则bias的数据类型必须为FLOAT16、BFLOAT16。如果x1的数据类型是FLOAT8_E4M3FN、FLOAT8_E5M2、HIFLOAT8、FLOAT4_E2M1时，在pertensor和mx量化场景下，bias的数据类型必须为FLOAT。在perblock场景下，仅支持输入为nullptr。
         - x1Scale：当x1和x2数据类型为FLOAT16、BFLOAT16时，仅支持输入为nullptr。在pertensor场景下，shape为[1]。在perblock场景下，shape为[ceildiv(m, 128), ceildiv(k, 128)]。在pertensor和perblock场景下，数据类型支持FLOAT。在mx量化场景下（MXFP8和MXFP4），数据类型为FLOAT8_E8M0，shape为(m, ceilDiv(k, 64), 2)。
@@ -333,7 +317,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
             groupSize = groupSizeK | groupSizeN << 16 | groupSizeM << 32
             $$
             - 如果满足重新设置条件，一般情况下，当x1Scale、x2Scale输入都是2维，且数据类型都为FLOAT时，[groupSizeM，groupSizeN，groupSizeK]取值组合会推导为[128, 128, 128]，对应groupSize的值为549764202624；当x1Scale、x2Scale输入都是3维，且数据类型都为FLOAT8_E8M0时，[groupSizeM, groupSizeN, groupSizeK]取值组合会推导为[1, 1, 32]，对应groupSize的值为4295032864。
-        - commMode：<term>Ascend 950PR&950DT系列产品</term>支持输入“ai_cpu”或“ccu”；<term>Ascend960DT</term>仅支持“ai_cpu”。
+        - commMode：支持输入“ai_cpu”或“ccu”。
         - output：如果x1类型为FLOAT16、BFLOAT16，则output类型与x1保持一致。如果x1类型为FLOAT8_E4M3FN、FLOAT8_E5M2、HIFLOAT8、FLOAT4_E2M1，则数据类型支持FLOAT16、BFLOAT16、FLOAT。
 
             $$
@@ -341,19 +325,6 @@ aclnnStatus aclnnMatmulReduceScatterV2(
             $$
 
     <!-- end id10 -->
-
-    <!-- npu="960" id20 -->
-    - <term>Ascend960DT</term>（MXHiFP4补充说明）：
-        - x1、x2：数据类型必须均为HIFLOAT4，数据格式仅支持ND。沿连续轴每两个4位元素打包为一个字节，aclTensor的shape和stride按HIFLOAT4逻辑元素描述。
-        - bias：不支持非空Tensor，传入nullptr或空Tensor表示不启用bias。
-        - x1Scale：必须传入非空三维Tensor，数据类型为HIFLOAT4_SCALE，数据格式为ND，shape为(m, ceilDiv(k, 64), 1)。沿K轴每64个元素对应32位缩放信息，不按FLOAT数值解释。
-        - x2Scale：必须传入非空三维Tensor，数据类型为HIFLOAT4_SCALE，数据格式为ND。当x2转置时，存储shape为(n, ceilDiv(k, 64), 1)；当x2不转置时，shape为(ceilDiv(k, 64), n, 1)，且x2Scale必须不转置。
-            - x2不转置时，x2Scale需按每个K分组内“所有N列的低16位字段、所有N列的高16位字段”顺序存放，仍以HIFLOAT4_SCALE类型和上述shape传入。接口不执行该数据重排，不能仅对原始32位缩放信息矩阵做转置或修改shape。
-        - groupSize：[groupSizeM, groupSizeN, groupSizeK]为[1, 1, 64]，对应groupSize为4295032896。各字段传0时分别按1、1、64补齐，因此也支持传入groupSize=0；不支持其他分组大小。
-        - commMode：仅支持“ai_cpu”。
-        - output：仅支持FLOAT16、BFLOAT16。
-        - quantScale、amaxOutOptional：仅支持nullptr；blockSize必须为0。
-    <!-- end id20 -->
 
 - **返回值**
 
@@ -431,10 +402,6 @@ aclnnStatus aclnnMatmulReduceScatterV2(
 ## 约束说明
 
 - 通信约束：
-
-  <!-- npu="960" id21 -->
-  - <term>Ascend960DT</term>：仅支持commMode为“ai_cpu”。
-  <!-- end id21 -->
   <!-- npu="910b" id11 -->
   - <term>Atlas A2系列产品</term>：仅支持commMode为"aiv"，且通信缓冲区大于等于200MB。
   <!-- end id11 -->
@@ -449,17 +416,8 @@ aclnnStatus aclnnMatmulReduceScatterV2(
 - 确定性计算：
   - `aclnnMatmulReduceScatterV2`默认采用确定性计算实现。
 
-<!-- npu="960" id22 -->
-- <term>Ascend960DT</term>（MXHiFP4补充约束）：
-    - x1仅支持不转置，shape为(m, k)；x2支持转置/不转置，其viewshape必须为(k, n)，两输入的K轴长度必须相等。
-    - x1、x2不支持空Tensor。m须为卡数rank\_size的整数倍，输出shape为(m/rank\_size, n)。
-    - k轴取值范围为[256, 65535)，且k必须是偶数；x2不转置时，n也必须是偶数。
-    - k不要求是64的整数倍；scale的K分组数按ceilDiv(k, 64)计算，最后一组仅对实际存在的K元素生效。
-    - 支持2、4、8、16、32、64卡。通信数据量按output的数据类型计算，算子切分后的单次通信分片不能超过256MiB。
-<!-- end id22 -->
-
-<!-- npu="950,960" id14 -->
-- <term>Ascend 950PR&950DT系列产品</term>、<term>Ascend960DT</term>（非量化、pertensor、perblock、MXFP8和MXFP4场景）：
+<!-- npu="950" id14 -->
+- <term>Ascend 950PR&950DT系列产品</term>：
     - 只支持x2矩阵转置/不转置，x1矩阵仅支持不转置场景。
     - 输入x1为2维，其shape为\(m, k\)，m须为卡数rank\_size的整数倍。
     - 输入x2为2维，其viewshape必须为\(k, n\)，轴满足mm算子入参要求，k轴相等，且k轴取值范围为\[256, 65535\)。
@@ -474,9 +432,8 @@ aclnnStatus aclnnMatmulReduceScatterV2(
     - 当x1、x2的数据类型为FLOAT8_E4M3FN/FLOAT8_E5M2时，x1和x2的数据类型可以为其中任意一种。
     - mx量化场景下，x2/x2Scale支持转置/不转置输入。
     - mx量化场景下，且x1和x2输入为FLOAT4_E2M1（MXFP4量化）时，k必须是偶数，当x2不转置输入时，n必须也是偶数。
-    - 支持2、4、8、16、32、64卡。<term>Ascend 950PR&950DT系列产品</term>支持CCU通信和AICPU通信，CCU仅支持单机UB域内互联，AICPU可支持跨机UB域内互联；<term>Ascend960DT</term>仅支持AICPU通信。
+    - 支持2、4、8、16、32、64卡。<term>Ascend 950PR&950DT系列产品</term>支持CCU通信和AICPU通信，CCU仅支持单机UB域内互联，AICPU可支持跨机UB域内互联。
     - <term>Ascend 950PR&950DT系列产品</term>：ReduceScatter集合通信数据总量不能超过16 * 256MB，集合通信数据总量计算方式为：m * n * sizeof(output_dtype)。由于shape不同，算子内部实现可能存在差异，实际支持的总通信量可能略小于该值。
-    - <term>Ascend960DT</term>：通信数据量按output的数据类型计算，算子切分后的单次通信分片不能超过256MiB。
 
 <!-- end id14 -->
 <!-- npu="A3,910b" id15 -->

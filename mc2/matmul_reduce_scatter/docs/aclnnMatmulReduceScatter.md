@@ -132,7 +132,7 @@ aclnnStatus aclnnMatmulReduceScatter(
             <ul>
                 <li>shape为（n）。</li>
                 <li>支持传入空指针场景。</li>
-                <li><term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：暂不支持输入为非0的场景。</li>
+                <li><term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：暂不支持输入为非0的场景。</li>
                 <li><term>Ascend 950PR&950DT系列产品</term>：支持输入为非0的场景。</li>
             </ul>
         </td>
@@ -186,7 +186,7 @@ aclnnStatus aclnnMatmulReduceScatter(
     <tr>
         <td>output</td>
         <td>输出</td>
-        <td>AllGather通信与MatMul计算的结果，即计算公式中的output。</td>
+        <td>ReduceScatter通信与Matmul计算的结果，即计算公式中的output。</td>
         <td>
             <ul>
                 <li>shape为(m/rank_size, n)。</li>
@@ -331,7 +331,7 @@ aclnnStatus aclnnMatmulReduceScatter(
   - aclnnMatmulReduceScatter默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
 <!-- end id10 -->
 <!-- npu="A3" id11 -->
-- <term>Atlas A3系列产品</term>  ：
+- <term>Atlas A3系列产品</term>：
   - 支持2、4、8、16、32卡，并且仅支持hccs链路double ring组网。
   - aclnnMatmulReduceScatter默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
 <!-- end id11 -->
@@ -346,12 +346,12 @@ aclnnStatus aclnnMatmulReduceScatter(
 
 示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
-说明：本示例代码调用了部分HCCL集合通信库接口：HcclGetCommName、HcclCommInitAll、HcclCommDestroy,请参考[<<HCCL API (C)>>](https://hiascend.com/document/redirect/CannCommunityHcclCppApi)。
+说明：本示例代码调用了部分HCCL集合通信库接口：HcclGetCommName、HcclCommInitAll、HcclCommDestroy，请参考[《HCCL API (C)》](https://hiascend.com/document/redirect/CannCommunityHcclCppApi)。
 
 <!-- npu="950,A3,910b" id13 -->
-- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  、<term>Ascend 950PR&950DT系列产品</term>：
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>、<term>Ascend 950PR&950DT系列产品</term>：
 
-    ```Cpp
+    ```cpp
     #include <thread>
     #include <iostream>
     #include <vector>

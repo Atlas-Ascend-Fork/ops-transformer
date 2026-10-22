@@ -237,7 +237,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
     <tr>
         <td>output</td>
         <td>输出</td>
-        <td>ReduceScatter通信与MatMul计算的结果，即计算公式中的output。</td>
+        <td>ReduceScatter通信与Matmul计算的结果，即计算公式中的output。</td>
         <td>仅当输出类型为FLOAT16、BFLOAT16时支持空Tensor。</td>
         <td>FLOAT16、BFLOAT16、FLOAT</td>
         <td>ND</td>
@@ -276,7 +276,7 @@ aclnnStatus aclnnMatmulReduceScatterV2(
     </tr>
     </tbody></table>
 
-    - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：
+    - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
         - x1、x2：在commMode为aicpu时，数据类型支持FLOAT16、BFLOAT16；commMode为aiv时，数据类型支持FLOAT16、BFLOAT16、INT8，x1数据格式仅支持ND，x2数据格式支持ND、FRACTAL_NZ。
         - bias：在commMode为aicpu时，数据类型支持FLOAT16、BFLOAT16，仅支持为0的输入。在commMode为aiv时，当x1和x2数据类型为INT8时，bias数据类型可以是FLOAT16、BFLOAT16、FLOAT；当x1和x2数据类型为FLOAT16时，bias数据类型必须为FLOAT16、FLOAT；当x1和x2数据类型为BFLOAT16时，bias数据类型必须为BFLOAT16、FLOAT。
         - x1Scale：在commMode为aicpu时，仅支持输入nullptr。在commMode为aiv时，数据类型支持FLOAT。当x1和x2数据类型为FLOAT16/BFLOAT16时，仅支持输入为nullptr。在pertoken场景，shape为(m, 1)。
