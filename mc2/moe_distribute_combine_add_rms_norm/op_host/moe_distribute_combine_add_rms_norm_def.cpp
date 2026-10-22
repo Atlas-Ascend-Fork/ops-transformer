@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * CANN Open Software License Agreement Version 2.0 (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -54,10 +54,24 @@ public:
             .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel")
             .ExtendCfgInfo("opFile.value", "moe_distribute_combine_add_rms_norm_apt");
 
+        // A6 (arch92): _a6 entry (opFile -> arch92/..._a6.cpp).
+        OpAICoreConfig aicore_config_a6;
+        aicore_config_a6.DynamicCompileStaticFlag(true)
+            .DynamicFormatFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .NeedCheckSupportFlag(false)
+            .PrecisionReduceFlag(true)
+            .ExtendCfgInfo("aclnnSupport.value", "support_aclnn")
+            .ExtendCfgInfo("prebuildPattern.value", "Opaque")
+            .ExtendCfgInfo("jitCompile.flag", "static_true")
+            .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel")
+            .ExtendCfgInfo("opFile.value", "moe_distribute_combine_add_rms_norm_a6");
+
         this->AICore().AddConfig("ascend910_93", aicore_config_a3);
         this->AICore().AddConfig("ascend950", aicore_config_apt);
-        this->AICore().AddConfig("ascend960dt", aicore_config_apt);
-        this->AICore().AddConfig("ascend960pr", aicore_config_apt);
+        this->AICore().AddConfig("ascend960dt", aicore_config_a6);
+        this->AICore().AddConfig("ascend960pr", aicore_config_a6);
         this->MC2().HcclGroup({"group_ep", "group_tp"});
     }
 
