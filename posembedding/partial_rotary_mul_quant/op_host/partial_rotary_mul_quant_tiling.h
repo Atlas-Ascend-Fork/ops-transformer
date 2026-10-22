@@ -87,6 +87,7 @@ TILING_DATA_FIELD_DEF(int64_t, ubCalcNLoop);
 TILING_DATA_FIELD_DEF(int64_t, ubCalcNTail);
 
 TILING_DATA_FIELD_DEF(float, scale);
+TILING_DATA_FIELD_DEF(uint32_t, hasScale);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(PartialRotaryMulQuant, QuantRopeRegbaseTilingData)
@@ -178,6 +179,12 @@ public:
     ge::graphStatus GetWorkspaceSize() override;
     ge::graphStatus JudgeSliceInfo();
     ge::graphStatus CheckHiF4Support();
+    ge::graphStatus CheckHiF8Support();
+    int64_t HiF8RowCapacity() const;
+    uint64_t QuantTilingKey(uint64_t layoutKey) const
+    {
+        return layoutKey + (yDtype_ == 0 ? (hybridRound_ ? 20000 : 10000) : 0);
+    }
 
     bool IsRegbaseSocVersion()
     {
@@ -207,6 +214,8 @@ protected:
     float scaleAttr_ = 1.0f;
     int64_t yDtype_{0};
     int64_t axis_{0};
+    bool hybridRound_{false};
+    uint32_t hasScale_{0};
 };
 
 class QuantRopeRegBaseTilingClassAAndB : public QuantRopeRegBaseTilingClass {
@@ -301,8 +310,8 @@ private:
 
 class QuantRopeRegBaseTilingClassBAB : public QuantRopeRegBaseTilingClass {
 public:
-    explicit QuantRopeRegBaseTilingClassBAB(gert::TilingContext* context_)
-        : QuantRopeRegBaseTilingClass(context_)
+    explicit QuantRopeRegBaseTilingClassBAB(gert::TilingContext* context)
+        : QuantRopeRegBaseTilingClass(context)
     {}
 
     // 计算数据切分
@@ -315,7 +324,7 @@ public:
     bool IsCapable() override
     {
         // BSND format, 1s1d模版，后续可扩展支持所有bab类型的boardcast
-        if (IsRegbaseSocVersion() && (layout_ == RopeLayout::BSND) && (cosb_ == 1)) {
+        if (yDtype_ == 0 && IsRegbaseSocVersion() && (layout_ == RopeLayout::BSND) && (cosb_ == 1)) {
             return true;
         }
         return false;

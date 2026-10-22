@@ -18,6 +18,8 @@
 
 #include "partial_rotary_mul_quant_common.h"
 
+namespace PartialRotaryMulQuantHiF4 {
+
 using namespace AscendC;
 using namespace MicroAPI;
 
@@ -675,5 +677,7 @@ __aicore__ inline void VFProcessSwigluGroupQuantScale(const LocalTensor<uint16_t
         }
     }
 }
+
+} // namespace PartialRotaryMulQuantHiF4
 
 #endif // PARTIAL_ROTARY_MUL_QUANT_HIF4_COMMON_H

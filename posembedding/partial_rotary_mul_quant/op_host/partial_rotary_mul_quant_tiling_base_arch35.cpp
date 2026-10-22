@@ -13,11 +13,13 @@
  * \brief
  */
 
+#include "op_host/op_const_def_transformer.h"
 #include <graph/utils/type_utils.h>
 #include "tiling/tiling_api.h"
 #include "platform/platform_info.h"
 #include "partial_rotary_mul_quant_tiling.h"
 #include "log/log.h"
+#include <cstring>
 
 namespace {
 constexpr int64_t X_INDEX = 0;
@@ -36,7 +38,7 @@ constexpr int64_t QUARTER_MODE_COEF = 4;
 constexpr int64_t BLOCK_SIZE = 32;
 constexpr int64_t D_LIMIT = 1024;
 constexpr int64_t ATTR_IDX_Y_DTYPE = 0;
-constexpr int64_t ATTR_IDX_AXIS = -1;
+constexpr int64_t ATTR_IDX_ROUND_MODE = 2;
 constexpr int32_t ATTR_IDX_ROTARY_MODE = 4;
 constexpr int32_t ATTR_IDX_SLICE = 5;
 constexpr int32_t HIFLOAT4_QUANT_GROUP = 64;
@@ -91,6 +93,8 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckNullptr()
     }
     auto yDesc = context_->GetOutputDesc(Y_INDEX);
     OP_CHECK_IF(yDesc == nullptr, OP_LOGE(context_->GetNodeName(), "output desc is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetOutputDesc(Y_SCALE_INDEX));
+    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetOutputShape(Y_SCALE_INDEX));
     auto yShape = context_->GetOutputShape(Y_INDEX);
     OP_CHECK_IF(yShape == nullptr, OP_LOGE(context_->GetNodeName(), "output shape is nullptr."),
                 return ge::GRAPH_FAILED);
@@ -190,7 +194,8 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckShape()
                 return ge::GRAPH_FAILED);
     auto& yScaleShape = context_->GetOutputShape(Y_SCALE_INDEX)->GetStorageShape();
     OP_CHECK_IF(
-        yScaleShape.GetDimNum() != DIM_NUM + 1,
+        (yDtype_ == 1 && yScaleShape.GetDimNum() != DIM_NUM + 1) ||
+            (yDtype_ == 0 && (yScaleShape.GetDimNum() != 1 || yScaleShape.GetDim(0) != 0)),
         OP_LOGE(context_->GetNodeName(), "dim of y_scale output expect 5, actual %lu.", yScaleShape.GetDimNum()),
         return ge::GRAPH_FAILED);
     OP_CHECK_IF(cosShape != sinShape,
@@ -227,14 +232,14 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckDtypeAndAttr()
                             ge::TypeUtils::DataTypeToSerialString(type).c_str()),
                     return ge::GRAPH_FAILED);
     }
-    // output is always uint8 (hifloat4 on wire)
+    // Output types are selected by y_dtype; HiFloat8 has no group-scale output.
     auto outputType = context_->GetOutputDesc(Y_INDEX)->GetDataType();
-    OP_CHECK_IF(outputType != ge::DT_HIFLOAT4,
+    OP_CHECK_IF(outputType != (yDtype_ == 0 ? ge::DT_HIFLOAT8 : Ops::Transformer::DT_HIFLOAT4),
                 OP_LOGE(context_->GetNodeName(), "output datatype expect hfloat4, actual %s.",
                         ge::TypeUtils::DataTypeToSerialString(outputType).c_str()),
                 return ge::GRAPH_FAILED);
     auto yScaleType = context_->GetOutputDesc(Y_SCALE_INDEX)->GetDataType();
-    OP_CHECK_IF(yScaleType != ge::DT_HIFLOAT4_SCALE,
+    OP_CHECK_IF(yScaleType != (yDtype_ == 0 ? ge::DT_FLOAT : Ops::Transformer::DT_HIFLOAT4_SCALE),
                 OP_LOGE(context_->GetNodeName(), "y_scale output datatype expect hifloat4_scale, actual %s.",
                         ge::TypeUtils::DataTypeToSerialString(yScaleType).c_str()),
                 return ge::GRAPH_FAILED);
@@ -315,15 +320,14 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckHiF4Support()
     }
     const gert::RuntimeAttrs* attrs = context_->GetAttrs();
     OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs is null"), return ge::GRAPH_FAILED);
-    const int32_t* yDtype = attrs->GetAttrPointer<int32_t>(ATTR_IDX_Y_DTYPE);
-    int32_t yDtypeValue = (yDtype == nullptr) ? 0 : static_cast<int32_t>(*yDtype);
+    int64_t yDtypeValue = yDtype_;
     if (yDtypeValue != 1) {
         OP_LOGE(context_->GetNodeName(), "y_dtype only support 1(hifloat4), but get %ld", yDtypeValue);
         return ge::GRAPH_FAILED;
     }
     if (rotaryMode_ != RotaryPosEmbeddingMode::HALF && rotaryMode_ != RotaryPosEmbeddingMode::INTERLEAVE) {
         OP_LOGE(context_->GetNodeName(), "rotary_mode only support 0(half) or 1(interleave) now, but get %ld",
-                rotaryMode_);
+                static_cast<int64_t>(rotaryMode_));
         return ge::GRAPH_FAILED;
     }
 
@@ -338,10 +342,15 @@ ge::graphStatus QuantRopeRegBaseTilingClass::GetShapeAttrsInfo()
 {
     const gert::RuntimeAttrs* attrs = context_->GetAttrs();
     OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs is null"), return ge::GRAPH_FAILED);
-    const int32_t* rotaryMode = attrs->GetAttrPointer<int32_t>(ATTR_IDX_ROTARY_MODE);
-    int32_t modeValue = (rotaryMode == nullptr) ? 0 : static_cast<int32_t>(*rotaryMode);
-    OP_CHECK_IF(IsRotaryPosEmbeddingMode(modeValue) != true,
-                OP_LOGE(context_->GetNodeName(), "rotary_mode only support 0, 1, 2 3, actual %d.", modeValue),
+    const int64_t* yDtype = attrs->GetAttrPointer<int64_t>(ATTR_IDX_Y_DTYPE);
+    yDtype_ = yDtype == nullptr ? 0 : *yDtype;
+    OP_CHECK_IF(yDtype_ != 0 && yDtype_ != 1,
+                OP_LOGE(context_->GetNodeName(), "y_dtype must be 0 (HiFloat8) or 1 (HiFloat4)"),
+                return ge::GRAPH_FAILED);
+    const int64_t* rotaryMode = attrs->GetAttrPointer<int64_t>(ATTR_IDX_ROTARY_MODE);
+    int64_t modeValue = rotaryMode == nullptr ? 0 : *rotaryMode;
+    OP_CHECK_IF(modeValue < 0 || modeValue > 3,
+                OP_LOGE(context_->GetNodeName(), "rotary_mode only support 0, 1, 2, 3, actual %ld.", modeValue),
                 return ge::GRAPH_FAILED);
     rotaryMode_ = static_cast<RotaryPosEmbeddingMode>(modeValue);
 
@@ -383,10 +392,13 @@ ge::graphStatus QuantRopeRegBaseTilingClass::GetShapeAttrsInfo()
 
     // 获取slice
     const gert::ContinuousVector* sliceRangeListPtr = attrs->GetAttrPointer<gert::ContinuousVector>(ATTR_IDX_SLICE);
-    if (sliceRangeListPtr->GetSize() == 0) {
+    if (sliceRangeListPtr == nullptr || sliceRangeListPtr->GetSize() == 0) {
         sliceStart_ = 0;
         sliceEnd_ = d_;
     } else {
+        OP_CHECK_IF(sliceRangeListPtr->GetSize() != 2,
+                    OP_LOGE(context_->GetNodeName(), "partial_slice must contain two elements"),
+                    return ge::GRAPH_FAILED);
         const int64_t* expertRangeList = reinterpret_cast<const int64_t*>(sliceRangeListPtr->GetData());
         sliceStart_ = expertRangeList[0];
         sliceEnd_ = expertRangeList[1];
@@ -395,12 +407,54 @@ ge::graphStatus QuantRopeRegBaseTilingClass::GetShapeAttrsInfo()
     OP_CHECK_IF(JudgeSliceInfo() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "JudgeSliceInfo fail."),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(CheckHiF4Support() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "check hif4 support fail."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF((yDtype_ == 0 ? CheckHiF8Support() : CheckHiF4Support()) != ge::GRAPH_SUCCESS,
+                OP_LOGE(context_->GetNodeName(), "quantization parameters are not supported"), return ge::GRAPH_FAILED);
 
     scaleAttr_ = 1.0f;
 
     return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus QuantRopeRegBaseTilingClass::CheckHiF8Support()
+{
+    auto platform = platform_ascendc::PlatformAscendC(context_->GetPlatformInfo());
+    OP_CHECK_IF(platform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND950,
+                OP_LOGE(context_->GetNodeName(), "HiFloat8 requires Ascend950"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(sliceEnd_ != d_, OP_LOGE(context_->GetNodeName(), "HiFloat8 requires sliceEnd == D"),
+                return ge::GRAPH_FAILED);
+    int64_t divisor = rotaryMode_ == RotaryPosEmbeddingMode::QUARTER ? 4 : 2;
+    OP_CHECK_IF(sliceLength_ % divisor != 0,
+                OP_LOGE(context_->GetNodeName(), "sliceLength is incompatible with rotary_mode"),
+                return ge::GRAPH_FAILED);
+    const char* roundMode = context_->GetAttrs()->GetAttrPointer<char>(ATTR_IDX_ROUND_MODE);
+    hybridRound_ = roundMode != nullptr && std::strcmp(roundMode, "hybird") == 0;
+    OP_CHECK_IF(roundMode != nullptr && std::strcmp(roundMode, "round") != 0 && !hybridRound_,
+                OP_LOGE(context_->GetNodeName(), "HiFloat8 round_mode must be round or hybird"),
+                return ge::GRAPH_FAILED);
+    auto scaleDesc = context_->GetOptionalInputDesc(SCALE_INDEX);
+    auto scaleShape = context_->GetOptionalInputShape(SCALE_INDEX);
+    hasScale_ = scaleDesc != nullptr;
+    if (hasScale_) {
+        OP_CHECK_IF(scaleShape == nullptr || scaleDesc->GetDataType() != ge::DT_FLOAT ||
+                        scaleShape->GetStorageShape().GetShapeSize() != 1,
+                    OP_LOGE(context_->GetNodeName(), "HiFloat8 scale must be a single-element FP32 tensor"),
+                    return ge::GRAPH_FAILED);
+    }
+    // quant_mode and axis are retained for ABI compatibility and ignored by HiFloat8.
+    return ge::GRAPH_SUCCESS;
+}
+
+int64_t QuantRopeRegBaseTilingClass::HiF8RowCapacity() const
+{
+    int64_t typeSize = ge::GetSizeByDataType(dtype_);
+    int64_t ropeBytes = CeilAlign(sliceLength_ / dSplitCoef_ * typeSize, blockSize_) * dSplitCoef_;
+    int64_t prefixBytes = std::max(blockSize_, CeilAlign(sliceStart_ * typeSize, blockSize_));
+    int64_t outputBytes = CeilAlign(sliceLength_ / dSplitCoef_, blockSize_) * dSplitCoef_ +
+                          std::max(blockSize_, CeilAlign(sliceStart_, blockSize_));
+    // Two input buffers, two cos/sin buffers, and one output buffer per region.
+    // Count cos/sin per row even for broadcast layouts, providing a conservative bound.
+    int64_t rowBytes = 2 * prefixBytes + 6 * ropeBytes + outputBytes;
+    return (static_cast<int64_t>(aicoreParams_.ubSize) - blockSize_) / rowBytes;
 }
 
 } // namespace optiling

@@ -12,6 +12,7 @@
  * \file partial_rotary_mul_quant_def.cpp
  * \brief
  */
+#include "op_host/op_const_def_transformer.h"
 #include "register/op_def_registry.h"
 
 namespace ops {
@@ -45,12 +46,12 @@ public:
             .AutoContiguous();
         this->Output("y")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_HIFLOAT4, ge::DT_HIFLOAT4, ge::DT_HIFLOAT4})
+            .DataType({ge::DT_HIFLOAT8, ge::DT_HIFLOAT8, ge::DT_HIFLOAT8})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Output("y_scale")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_HIFLOAT4_SCALE, ge::DT_HIFLOAT4_SCALE, ge::DT_HIFLOAT4_SCALE})
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
         this->Attr("y_dtype").AttrType(OPTIONAL).Int(0);
@@ -59,12 +60,42 @@ public:
         this->Attr("axis").AttrType(OPTIONAL).Int(-1);
         this->Attr("rotary_mode").AttrType(OPTIONAL).Int(0);
         this->Attr("partial_slice").AttrType(OPTIONAL).ListInt({0, 0});
-        OpAICoreConfig regbaseCfg;
-        regbaseCfg.DynamicCompileStaticFlag(true)
+#ifdef PARTIAL_ROTARY_MUL_QUANT_ASCEND960_ONLY
+        OpAICoreConfig ascend960dtCfg;
+        ascend960dtCfg.DynamicCompileStaticFlag(true)
             .DynamicRankSupportFlag(true)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "partial_rotary_mul_quant");
-        this->AICore().AddConfig("ascend960dt", regbaseCfg);
+        ascend960dtCfg.Output("y")
+            .ParamType(REQUIRED)
+            .DataType({Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+        ascend960dtCfg.Output("y_scale")
+            .ParamType(REQUIRED)
+            .DataType({Ops::Transformer::DT_HIFLOAT4_SCALE, Ops::Transformer::DT_HIFLOAT4_SCALE,
+                       Ops::Transformer::DT_HIFLOAT4_SCALE})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+        this->AICore().AddConfig("ascend960dt", ascend960dtCfg);
+#endif
+
+        OpAICoreConfig ascend950Cfg;
+        ascend950Cfg.DynamicCompileStaticFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .ExtendCfgInfo("opFile.value", "partial_rotary_mul_quant");
+        ascend950Cfg.Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_HIFLOAT8, ge::DT_HIFLOAT8, ge::DT_HIFLOAT8})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+        ascend950Cfg.Output("y_scale")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
+            .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
+            .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
+        this->AICore().AddConfig("ascend950", ascend950Cfg);
     }
 };
 

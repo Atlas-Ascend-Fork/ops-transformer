@@ -54,6 +54,12 @@ ge::graphStatus QuantRopeRegBaseTilingClassAAndB::SplitCore()
 
 ge::graphStatus QuantRopeRegBaseTilingClassAAndB::ComputeUbFactor()
 {
+    if (yDtype_ == 0) {
+        ubFactorB_ = std::min({blockFactorB_, HiF8RowCapacity(), MAX_COPY_BLOCK_COUNT / dSplitCoef_});
+        OP_CHECK_IF(ubFactorB_ < 1, OP_LOGE(context_->GetNodeName(), "Insufficient UB for HiFloat8"),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
     ubFactorB_ = 1;
     int64_t inputSize = DOUBLE_BUFFER * (d_ * GetSizeByDataType(dtype_) + 2 * sliceLength_ * GetSizeByDataType(dtype_));
     int64_t calcSize = 2 * CeilAlign(d_ / 64, blockSize_) + CeilAlign(d_ / 32, blockSize_);
@@ -106,6 +112,7 @@ void QuantRopeRegBaseTilingClassAAndB::SetTilingData()
     tilingData_.set_sliceEnd(static_cast<int64_t>(sliceEnd_));
     tilingData_.set_sliceLength(static_cast<int64_t>(sliceLength_));
     tilingData_.set_scale(scaleAttr_);
+    tilingData_.set_hasScale(hasScale_);
 
     OP_LOGI(context_->GetNodeName(),
             "QuantRopeRegBaseTilingClassAAndB tilingData: "
@@ -136,7 +143,7 @@ ge::graphStatus QuantRopeRegBaseTilingClassAAndB::DoOpTiling()
 
 uint64_t QuantRopeRegBaseTilingClassAAndB::GetTilingKey() const
 {
-    return layout_ == RopeLayout::NO_BROADCAST ? TILING_KEY_A : TILING_KEY_B;
+    return QuantTilingKey(layout_ == RopeLayout::NO_BROADCAST ? TILING_KEY_A : TILING_KEY_B);
 }
 
 ge::graphStatus QuantRopeRegBaseTilingClassAAndB::PostTiling()

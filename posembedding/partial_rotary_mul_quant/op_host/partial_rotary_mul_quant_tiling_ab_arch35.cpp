@@ -58,6 +58,16 @@ ge::graphStatus QuantRopeRegBaseTilingClassAB::DoOpTiling()
         blockTailN_ = n_;
     }
 
+    if (yDtype_ == 0) {
+        int64_t rows = HiF8RowCapacity();
+        OP_CHECK_IF(rows < 1, OP_LOGE(context_->GetNodeName(), "Insufficient UB for HiFloat8"),
+                    return ge::GRAPH_FAILED);
+        ubFactorN_ = std::min({blockFactorN_, rows, MAX_COPY_BLOCK_COUNT / dSplitCoef_});
+        // Multiple BS rows are contiguous only when the whole N dimension is copied.
+        ubFactorBS_ = ubFactorN_ == n_ ? std::min(blockFactorBS_, rows / ubFactorN_) : 1;
+        ubFactorBS_ = std::min(ubFactorBS_, MAX_COPY_BLOCK_COUNT / (ubFactorN_ * dSplitCoef_));
+        return ge::GRAPH_SUCCESS;
+    }
     int64_t inputSize = DB_FLAG * (dAlign_ * typeSize + CONST_TWO * sliceLength_ * typeSize);
     int64_t calcSize = CONST_TWO * CeilAlign(dAlign_ / 64, blockSize_) + CeilAlign(dAlign_ / 32, blockSize_);
     if (typeSize == sizeof(float)) {
@@ -101,6 +111,7 @@ ge::graphStatus QuantRopeRegBaseTilingClassAB::PostTiling()
     tilingData_.set_sliceEnd(static_cast<int64_t>(sliceEnd_));
     tilingData_.set_sliceLength(static_cast<int64_t>(sliceLength_));
     tilingData_.set_scale(scaleAttr_);
+    tilingData_.set_hasScale(hasScale_);
 
     context_->SetTilingKey(GetTilingKey());
     context_->SetBlockDim(blockNumBS_ * blockNumN_);
@@ -126,7 +137,7 @@ ge::graphStatus QuantRopeRegBaseTilingClassAB::PostTiling()
 
 uint64_t QuantRopeRegBaseTilingClassAB::GetTilingKey() const
 {
-    return TILING_KEY_AB;
+    return QuantTilingKey(TILING_KEY_AB);
 }
 
 bool QuantRopeRegBaseTilingClassAB::IsCapable()

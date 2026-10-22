@@ -15,6 +15,7 @@
 #ifndef OPS_OP_PROTO_INC_PARTIAL_ROTARY_MUL_QUANT_OPS_H_
 #define OPS_OP_PROTO_INC_PARTIAL_ROTARY_MUL_QUANT_OPS_H_
 
+#include "op_host/op_const_def_transformer.h"
 #include "util/shape_util.h"
 #include "util/math_util.h"
 #include "register/op_impl_registry.h"
@@ -57,6 +58,18 @@ static ge::graphStatus InferShape4PartialRotaryMulQuant(gert::InferShapeContext*
     auto scaleShape = context->GetOutputShape(INDEX_OUTPUT_Y_SCALE);
     OP_CHECK_NULL_WITH_CONTEXT(context, scaleShape);
 
+    auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    const int64_t* yDtype = attrs->GetAttrPointer<int64_t>(INDEX_ATTR_Y_DTYPE);
+    int64_t outputType = yDtype == nullptr ? 0 : *yDtype;
+    OP_CHECK_IF(outputType != 0 && outputType != 1, OP_LOGE(context->GetNodeName(), "y_dtype must be 0 or 1"),
+                return ge::GRAPH_FAILED);
+    if (outputType == 0) {
+        *yShape = *xShape;
+        scaleShape->SetDimNum(1);
+        scaleShape->SetDim(0, 0);
+        return ge::GRAPH_SUCCESS;
+    }
     if (Ops::Base::IsUnknownRank(*xShape)) {
         OP_LOGD(context->GetNodeName(), "x shape is UnknownRank, set y, scale shape to (-2, )");
         Ops::Base::SetUnknownRank(*yShape);
@@ -85,8 +98,15 @@ static ge::graphStatus InferShape4PartialRotaryMulQuant(gert::InferShapeContext*
 static ge::graphStatus InferDtype4PartialRotaryMulQuant(gert::InferDataTypeContext* context)
 {
     OP_LOGI(context->GetNodeName(), "InferDtype4PartialRotaryMulQuant enter");
-    context->SetOutputDataType(INDEX_OUTPUT_Y, ge::DT_HIFLOAT4);
-    context->SetOutputDataType(INDEX_OUTPUT_Y_SCALE, ge::DT_HIFLOAT4_SCALE);
+    auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    const int64_t* yDtype = attrs->GetAttrPointer<int64_t>(INDEX_ATTR_Y_DTYPE);
+    int64_t outputType = yDtype == nullptr ? 0 : *yDtype;
+    OP_CHECK_IF(outputType != 0 && outputType != 1, OP_LOGE(context->GetNodeName(), "y_dtype must be 0 or 1"),
+                return ge::GRAPH_FAILED);
+    context->SetOutputDataType(INDEX_OUTPUT_Y, outputType == 0 ? ge::DT_HIFLOAT8 : Ops::Transformer::DT_HIFLOAT4);
+    context->SetOutputDataType(INDEX_OUTPUT_Y_SCALE,
+                               outputType == 0 ? ge::DT_FLOAT : Ops::Transformer::DT_HIFLOAT4_SCALE);
     OP_LOGI(context->GetNodeName(), "InferDtype4PartialRotaryMulQuant end");
     return GRAPH_SUCCESS;
 }

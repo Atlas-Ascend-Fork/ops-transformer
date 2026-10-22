@@ -17,7 +17,7 @@
 
 #include "partial_rotary_mul_quant_hif4_common.h"
 
-namespace PartialRotaryMulQuantOps {
+namespace PartialRotaryMulQuantHiF4 {
 using namespace AscendC::MicroAPI;
 using namespace AscendC;
 
@@ -303,6 +303,6 @@ __aicore__ inline void RotaryPositionEmbeddingAAndB<T, IsBoardCast>::CopyOut(int
     scaleQueue_.FreeTensor(scaleLocal);
 }
 
-} // namespace PartialRotaryMulQuantOps
+} // namespace PartialRotaryMulQuantHiF4
 
 #endif
