@@ -45,6 +45,8 @@
   - qInputLayout: "TND" "BNSD"
   - kvInputLayout: "TND" "BNSD"
 
+  qInputLayout与kvInputLayout必须相同：两者都为"TND"或都为"BNSD"，不支持混用布局。
+
 ## 函数原型
 
 每个算子分为[两段式接口](../../../docs/zh/context/two_phase_api.md)，必须先调用"aclnnRainFusionAttentionGetWorkspaceSize"接口获取计算所需workspace大小以及包含了算子计算流程的执行器，再调用"aclnnRainFusionAttention"接口执行计算。
@@ -114,30 +116,30 @@ aclnnStatus aclnnRainFusionAttention(
       <td>query</td>
       <td>输入</td>
       <td>公式中的query。</td>
-      <td>-</td>
+      <td>按qInputLayout选择：TND为[T, N, D]；BNSD为[B, N, S, D]。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
-      <td>3</td>
+      <td>3（TND）/ 4（BNSD）</td>
       <td>√</td>
     </tr>
     <tr>
       <td>key</td>
       <td>输入</td>
       <td>公式中的key。</td>
-      <td>-</td>
+      <td>按kvInputLayout选择：TND为[T, N, D]；BNSD为[B, N, S, D]。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
-      <td>3</td>
+      <td>3（TND）/ 4（BNSD）</td>
       <td>√</td>
     </tr>
     <tr>
       <td>value</td>
       <td>输入</td>
       <td>公式中的value。</td>
-      <td>-</td>
+      <td>按kvInputLayout选择：TND为[T, N, D]；BNSD为[B, N, S, D]。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
-      <td>3</td>
+      <td>3（TND）/ 4（BNSD）</td>
       <td>√</td>
     </tr>
     <tr>
@@ -311,10 +313,10 @@ aclnnStatus aclnnRainFusionAttention(
       <td>attentionOut</td>
       <td>输出</td>
       <td>公式中的attentionOut。</td>
-      <td>数据类型和shape与query保持一致。</td>
+      <td>数据类型和shape与query保持一致（TND为3维，BNSD为4维）。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
-      <td>3</td>
+      <td>3（TND）/ 4（BNSD）</td>
       <td>√</td>
     </tr>
     <tr>
