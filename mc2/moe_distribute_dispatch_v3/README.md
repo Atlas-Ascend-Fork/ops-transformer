@@ -138,7 +138,7 @@ $$
   <tr>
    <td>moe_expert_num</td>
    <td>属性</td>
-   <td>MoE专家数量，满足moe_expert_num % (ep_world_size - shared_expert_num) = 0。</td>
+   <td>MoE专家数量，满足moe_expert_num % (ep_world_size - shared_expert_rank_num) = 0。</td>
    <td>INT64</td>
    <td>ND</td>
   </tr>

@@ -198,7 +198,7 @@
   <tr>
    <td>moe_expert_num</td>
    <td>属性</td>
-   <td>MoE专家数量，满足moe_expert_num % (ep_world_size - shared_expert_num) = 0。</td>
+   <td>MoE专家数量，满足moe_expert_num % (ep_world_size - shared_expert_rank_num) = 0。</td>
    <td>INT64</td>
    <td>ND</td>
   </tr>
@@ -329,7 +329,7 @@
     - `K`：表示选取topK个专家，取值范围为0 < `K` ≤ 16同时满足0 < `K` ≤ `moe_expert_num` + `zero_expert_num` + `copy_expert_num` + `const_expert_num`。
     - `local_expert_num`：表示本卡专家数量。
         - 对于共享专家卡，`local_expert_num` = 1
-        - 对于MoE专家卡，`local_expert_num` = `moe_expert_num` / (`ep_world_size` - `shared_expert_num`)。当前版本不支持TP域通信。
+        - 对于MoE专家卡，`local_expert_num` = `moe_expert_num` / (`ep_world_size` - `shared_expert_rank_num`)。当前版本不支持TP域通信。
 
 - 参数约束：
     - `zero_expert_num`：取值范围：[0, MAX_INT32)，MAX_INT32 = 2^31 - 1,合法的零专家的ID的值是[`moe_expert_num`, `moe_expert_num` + `zero_expert_num`)。
