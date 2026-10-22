@@ -61,7 +61,7 @@ NsaCompressAttention输入query、key、value的数据排布格式支持从多�
 | compressStride | 输入 | 公式中的d，两次压缩滑窗间隔。 | INT64 | - |
 | selectBlockSize | 输入 | 公式中的l'，选择块大小。 | INT64 | - |
 | selectBlockCount | 输入 | 公式中topK选择个数。 | INT64 | - |
-| attentionOut | 输出 | 公式中的attentionOut，输出与query形状一致。 | BFLOAT16、FLOAT16 | ND |
+| attentionOut | 输出 | 公式中的attentionOut；除最后一维外，输出形状沿用query，最后一维取value的headDim。 | BFLOAT16、FLOAT16 | ND |
 | topkIndicesOut | 输出 | 公式中的topkIndices。 | INT32 | - |
 
 ## 约束说明
