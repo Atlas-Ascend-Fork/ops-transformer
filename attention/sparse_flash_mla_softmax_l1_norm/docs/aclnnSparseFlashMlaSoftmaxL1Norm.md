@@ -76,6 +76,7 @@ aclnnStatus aclnnSparseFlashMlaSoftmaxL1NormGetWorkspaceSize(
     const aclTensor   *topkLengthOptional,
     const aclTensor   *metadataOptional,
     double             softmaxScale,
+    int64_t            maxSeqlenK,
     int64_t            cmpRatio,
     int64_t            maskMode,
     char              *layoutQOptional,
@@ -280,6 +281,16 @@ aclnnStatus aclnnSparseFlashMlaSoftmaxL1Norm(
             建议值：公式中d开根号的倒数。
             </td>
             <td>FLOAT32</td>
+            <td>-</td>
+            <td>-</td>
+            <td>-</td>
+        </tr>
+        <tr>
+            <td>maxSeqlenK（int64_t）</td>
+            <td>输入</td>
+            <td>k的最大序列长度。</td>
+            <td>仅TND dense场景用于输出shape推导，默认值为0。</td>
+            <td>INT64</td>
             <td>-</td>
             <td>-</td>
             <td>-</td>
