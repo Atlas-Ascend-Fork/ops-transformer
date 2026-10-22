@@ -558,11 +558,13 @@ ge::graphStatus GMMTiling::Init(const gert::TilingContext* context)
     auto biasPtr = context->GetDynamicInputTensor(BIAS_INDEX, 0); // 0: obtain the first tensor of the tensorList
     hasBias_ = !(biasPtr == nullptr || biasPtr->GetStorageShape().GetShapeSize() == 0);
     if (isA4W4_) {
+        auto scaleInput = context->GetDynamicInputTensor(SCALE_INDEX, 0);
+        OP_CHECK_NULL_WITH_CONTEXT(context, scaleInput);
         uint64_t quantGroupNum = 0;
-        uint32_t scaleDimNum = context->GetDynamicInputTensor(SCALE_INDEX, 0)->GetStorageShape().GetDimNum();
+        uint32_t scaleDimNum = scaleInput->GetStorageShape().GetDimNum();
         // 3: pergroup scale shape is [e,g,n]
         if (scaleDimNum == 3U) {
-            quantGroupNum = context->GetDynamicInputTensor(SCALE_INDEX, 0)->GetStorageShape().GetDim(1);
+            quantGroupNum = scaleInput->GetStorageShape().GetDim(1);
             quantGroupSize_ = quantGroupNum == 0 ? 0U : maxK_ / quantGroupNum;
             isPerGroup_ = true;
             // 2: perchannel scale shape is [e, n]
@@ -1924,9 +1926,15 @@ ge::graphStatus GMMTiling::A8W4Tiling(gert::TilingContext* context, const GMMCom
     }
     GMMTilingData tilingDataA8W4;
     auto w0Desc = context->GetDynamicInputDesc(WEIGHT_INDEX, 0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, w0Desc);
     auto wFormat0 = static_cast<ge::Format>(ge::GetPrimaryFormat(w0Desc->GetStorageFormat()));
     bool wNZ = wFormat0 == ge::FORMAT_FRACTAL_NZ;
     auto wInput = context->GetDynamicInputTensor(WEIGHT_INDEX, 0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, wInput);
+    auto xInput = context->GetDynamicInputTensor(X_INDEX, 0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, xInput);
+    auto scaleInput = context->GetDynamicInputTensor(SCALE_INDEX, 0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, scaleInput);
     auto wDimNum = wInput->GetStorageShape().GetDimNum();
     const int64_t isSingleTensor = (wDimNum == ND_WEIGHT_DIM_LIMIT || wDimNum == NZ_WEIGHT_DIM_LIMIT) ? 1 : 0;
 
@@ -1974,12 +1982,12 @@ ge::graphStatus GMMTiling::A8W4Tiling(gert::TilingContext* context, const GMMCom
         constexpr int CASE_THREE = 3;
         constexpr float INT4_TYPE_COUNT = 0.5f;
         constexpr float FP16_TYPE_COUNT = 2.0f;
-        uint32_t groupNum = context->GetDynamicInputTensor(WEIGHT_INDEX, 0)->GetStorageShape().GetDim(0);
-        uint32_t N = context->GetDynamicInputTensor(WEIGHT_INDEX, 0)->GetStorageShape().GetDim(TWO);
-        uint32_t K = context->GetDynamicInputTensor(X_INDEX, 0)->GetStorageShape().GetDim(1);
-        uint32_t M = TWO * context->GetDynamicInputTensor(X_INDEX, 0)->GetStorageShape().GetDim(0);
+        uint32_t groupNum = wInput->GetStorageShape().GetDim(0);
+        uint32_t N = wInput->GetStorageShape().GetDim(TWO);
+        uint32_t K = xInput->GetStorageShape().GetDim(1);
+        uint32_t M = TWO * xInput->GetStorageShape().GetDim(0);
 
-        uint32_t quantGroupNum = context->GetDynamicInputTensor(SCALE_INDEX, 0)->GetStorageShape().GetDim(DIM_NUM_1);
+        uint32_t quantGroupNum = scaleInput->GetStorageShape().GetDim(DIM_NUM_1);
         if (quantGroupNum > 1) {
             OP_LOGW(context->GetNodeName(),
                     "W4A8 autotiling: The quantGroupNum is %u, which is invalid. "
@@ -2086,12 +2094,12 @@ ge::graphStatus GMMTiling::A8W4Tiling(gert::TilingContext* context, const GMMCom
         uint32_t groupNum = 0;
         uint32_t quantGroupNum = 0;
         if (isSingleTensor == 1) {
-            n = context->GetDynamicInputTensor(SCALE_INDEX, 0)->GetStorageShape().GetDim(DIM_NUM_2);
-            groupNum = context->GetDynamicInputTensor(WEIGHT_INDEX, 0)->GetStorageShape().GetDim(DIM_NUM_0);
-            quantGroupNum = context->GetDynamicInputTensor(SCALE_INDEX, 0)->GetStorageShape().GetDim(DIM_NUM_1);
+            n = scaleInput->GetStorageShape().GetDim(DIM_NUM_2);
+            groupNum = wInput->GetStorageShape().GetDim(DIM_NUM_0);
+            quantGroupNum = scaleInput->GetStorageShape().GetDim(DIM_NUM_1);
         } else {
-            n = context->GetDynamicInputTensor(SCALE_INDEX, 0)->GetStorageShape().GetDim(DIM_NUM_1);
-            quantGroupNum = context->GetDynamicInputTensor(SCALE_INDEX, 0)->GetStorageShape().GetDim(DIM_NUM_0);
+            n = scaleInput->GetStorageShape().GetDim(DIM_NUM_1);
+            quantGroupNum = scaleInput->GetStorageShape().GetDim(DIM_NUM_0);
             groupNum = 0;
             while (context->GetDynamicInputTensor(WEIGHT_INDEX, groupNum) != nullptr) {
                 groupNum++;
@@ -2106,8 +2114,8 @@ ge::graphStatus GMMTiling::A8W4Tiling(gert::TilingContext* context, const GMMCom
                                             groupNum, groupNumCheck),
                 return ge::GRAPH_FAILED);
         }
-        const uint32_t k = context->GetDynamicInputTensor(X_INDEX, 0)->GetStorageShape().GetDim(1);
-        const uint32_t m = context->GetDynamicInputTensor(X_INDEX, 0)->GetStorageShape().GetDim(0);
+        const uint32_t k = xInput->GetStorageShape().GetDim(1);
+        const uint32_t m = xInput->GetStorageShape().GetDim(0);
         std::array<int64_t, FIVE> mKNList = {groupNum, m, k, n, wNZ}; // 5: input shape info size
 
         auto offset = context->GetDynamicInputTensor(OFFSET_INDEX, 0);
