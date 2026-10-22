@@ -135,7 +135,7 @@ aclnnStatus aclnnGatherPaKvCache(
       <td class="tg-0pky">seqLens（aclTensor*）</td>
       <td class="tg-0pky">输入</td>
       <td class="tg-0pky">表示每个batch对应的序列长度。</td>
-      <td class="tg-0pky">shape为[batch]或[batch + 1]。<br>当isSeqLensCumsum为false时，shape为[batch]。<br>当isSeqLensCumsum为true时，shape为[batch + 1]。<br>元素取值范围为[0, num_blocks)。</td>
+      <td class="tg-0pky">shape为[batch]或[batch + 1]。<br>当isSeqLensCumsum为false时，shape为[batch]。<br>当isSeqLensCumsum为true时，shape为[batch + 1]。</td>
       <td class="tg-0pky">与blockTables保持一致</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">1</td>
