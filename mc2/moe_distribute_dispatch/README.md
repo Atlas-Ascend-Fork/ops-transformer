@@ -177,7 +177,7 @@
 <tr>
 <td>expertTokenNumsType</td>
 <td>可选属性</td>
-<td><li>输出expertTokenNums中值的语义类型，支持0：expertTokenNums中的输出为每个专家处理的token数的前缀和，1：expertTokenNums中的输出为每个专家处理的token数量。</li><li>默认值为0。</li></td>
+<td><li>输出expertTokenNums中值的语义类型，支持0：expertTokenNums中的输出为每个专家处理的token数的前缀和，1：expertTokenNums中的输出为每个专家处理的token数量。</li><li>默认值为1。</li></td>
 <td>INT64</td>
 <td>ND</td>
 </tr>
