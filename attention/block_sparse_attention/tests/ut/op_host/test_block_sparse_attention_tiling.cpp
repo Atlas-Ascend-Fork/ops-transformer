@@ -89,6 +89,62 @@ TEST_F(block_sparse_attention_tiling_ut, tnd_normal)
 }
 
 // ============================================================================
+// 用例 1b: TND scaleValue=0 兜底为 1/sqrt(headDim)，非 0 值原样透传
+// ============================================================================
+TEST_F(block_sparse_attention_tiling_ut, tnd_scale_value_zero_fallback_and_nonzero_passthrough)
+{
+    struct BlockSparseAttentionCompileInfo {
+    } compileInfo;
+    constexpr float kZeroScale = 0.0f;
+    constexpr float kCustomScale = 2.5f;
+    const float testScales[] = {kZeroScale, kCustomScale};
+    // scaleValue=0 时应回退为 1/sqrt(headDim)；非 0 时原样透传
+    const float expectScales[] = {1.0f / sqrt(static_cast<float>(headDim)), kCustomScale};
+    for (size_t caseIdx = 0; caseIdx < sizeof(testScales) / sizeof(testScales[0]); caseIdx++) {
+        gert::TilingContextPara tilingContextPara(
+            "BlockSparseAttention",
+            {{{{tokenQ, numHeads, headDim}, {tokenQ, numHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{tokenKv, numKvHeads, headDim}, {tokenKv, numKvHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{tokenKv, numKvHeads, headDim}, {tokenKv, numKvHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{batch, numHeads, qBlockNum, kvBlockNum}, {batch, numHeads, qBlockNum, kvBlockNum}},
+              ge::DT_INT8,
+              ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_INT8, ge::FORMAT_ND},
+             {{{2}, {2}}, ge::DT_INT64, ge::FORMAT_ND, true, blockShapeData},
+             {{{batch}, {batch}}, ge::DT_INT64, ge::FORMAT_ND, true, actualSeqLengthsData},
+             {{{batch}, {batch}}, ge::DT_INT64, ge::FORMAT_ND, true, actualSeqLengthsKvData},
+             {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+            {{{{tokenQ, numHeads, headDim}, {tokenQ, numHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{tokenQ, numHeads, 1}, {tokenQ, numHeads, 1}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+            {{"qInputLayout", Ops::Transformer::AnyValue::CreateFrom<std::string>("TND")},
+             {"kvInputLayout", Ops::Transformer::AnyValue::CreateFrom<std::string>("TND")},
+             {"numKeyValueHeads", Ops::Transformer::AnyValue::CreateFrom<int64_t>(numKvHeads)},
+             {"maskType", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"scaleValue", Ops::Transformer::AnyValue::CreateFrom<float>(testScales[caseIdx])},
+             {"innerPrecise", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+             {"blockSize", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"preTokens", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2147483647)},
+             {"nextTokens", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2147483647)},
+             {"softmaxLseFlag", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
+            &compileInfo, "Ascend910B", 64, 196608, 16384);
+
+        TilingInfo tilingInfo;
+        ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo)) << "caseIdx=" << caseIdx;
+        EXPECT_EQ(tilingInfo.tilingKey, 9000000030100002ULL) << "caseIdx=" << caseIdx;
+        // BlockSparseAttentionTilingData 前 10 个 word 为 uint32（batch/numHeads/kvHeads/embeddingSize/
+        // blockSize/maxNumBlocksPerBatch/firstBatchTaskNum/totalTaskNum/coreTaskNum/maskType），
+        // 第 11 个 word 为 scaleValue（float）
+        ASSERT_GE(tilingInfo.tilingDataSize, sizeof(uint32_t) * 11) << "caseIdx=" << caseIdx;
+        const auto* words = reinterpret_cast<const uint32_t*>(tilingInfo.tilingData.get());
+        const float* scaleValueInTiling = reinterpret_cast<const float*>(&words[10]);
+        EXPECT_FLOAT_EQ(*scaleValueInTiling, expectScales[caseIdx]) << "caseIdx=" << caseIdx;
+    }
+}
+
+// ============================================================================
 // 用例 2: BNSD正常场景 dtype=bf16 innerPrecise=0
 // ============================================================================
 TEST_F(block_sparse_attention_tiling_ut, bnsd_normal)

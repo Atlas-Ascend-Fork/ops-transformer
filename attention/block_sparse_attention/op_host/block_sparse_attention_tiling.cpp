@@ -1198,6 +1198,16 @@ ge::graphStatus BSATiling::ParseAttrs(gert::TilingContext* bsaContext)
     return ge::GRAPH_SUCCESS;
 }
 
+void BSATiling::NormalizeScaleValue(gert::TilingContext* bsaContext)
+{
+    // scaleValue为0视为未设置，回退为1/sqrt(headDim)
+    if (scaleValue_ == 0.0f && embeddingSize_ > 0) {
+        OP_LOGW(bsaContext->GetNodeName(), "Attr scaleValue is 0 and will be set as 1/sqrt(headDim), headDim is %u.",
+                embeddingSize_);
+        scaleValue_ = 1.0f / std::sqrt(static_cast<float>(embeddingSize_));
+    }
+}
+
 void BSATiling::CalculateBatchTaskSplit(int64_t qSeqlen, uint32_t groupSize, uint32_t& curTaskNum,
                                         uint32_t& curQBlockNum)
 {
@@ -1671,6 +1681,8 @@ ge::graphStatus BSATiling::GetBsaTiling(gert::TilingContext* bsaContext, BlockSp
         ret = ge::GRAPH_FAILED;
         return ret;
     }
+    // scaleValue归一化依赖embeddingSize_，须在解析链完成后调用
+    NormalizeScaleValue(bsaContext);
     // 校验TND格式下qseqlen和kvseqlen之和是否分别等于Q和KV的T
     ret = ValidateTNDSeqlenSum(bsaContext);
     if (ret != ge::GRAPH_SUCCESS) {

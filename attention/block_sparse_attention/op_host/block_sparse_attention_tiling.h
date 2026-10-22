@@ -207,6 +207,7 @@ private:
     ge::graphStatus CalculateWorkSpace(gert::TilingContext* bsaContext);
     // shared
     void CalculateBatchTaskSplit(int64_t qSeqlen, uint32_t groupSize, uint32_t& curTaskNum, uint32_t& curQBlockNum);
+    void NormalizeScaleValue(gert::TilingContext* bsaContext);
     ge::graphStatus FillTilingData(gert::TilingContext* bsaContext);
     uint64_t GenerateTilingKey(gert::TilingContext* bsaContext);
 
