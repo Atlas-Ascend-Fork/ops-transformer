@@ -51,6 +51,37 @@ inline bool CheckTensorNotEmpty(const at::Tensor& tensor)
     return check_result;
 }
 
+// output_dtype仅支持float16/bfloat16/float32三类合法dtype，名称转换覆盖这三类及常见量化dtype，其余返回DT_UNKNOWN
+inline const char* GetOutputDtypeName(aclDataType aclDtype)
+{
+    switch (aclDtype) {
+        case ACL_FLOAT16:
+            return "DT_FLOAT16";
+        case ACL_BF16:
+            return "DT_BF16";
+        case ACL_FLOAT:
+            return "DT_FLOAT";
+        case ACL_INT8:
+            return "DT_INT8";
+        case ACL_UINT8:
+            return "DT_UINT8";
+        case ACL_HIFLOAT8:
+            return "DT_HIFLOAT8";
+        case ACL_FLOAT8_E5M2:
+            return "DT_FLOAT8_E5M2";
+        case ACL_FLOAT8_E4M3FN:
+            return "DT_FLOAT8_E4M3FN";
+        case ACL_FLOAT8_E8M0:
+            return "DT_FLOAT8_E8M0";
+        case ACL_FLOAT4_E2M1:
+            return "DT_FLOAT4_E2M1";
+        case ACL_FLOAT4_E1M2:
+            return "DT_FLOAT4_E1M2";
+        default:
+            return "DT_UNKNOWN";
+    }
+}
+
 at::Tensor NpuQuantReduceScatter(const at::Tensor& context, const at::Tensor& x, const at::Tensor& scales,
                                  int64_t hcclBufferSize, int64_t worldSize, c10::optional<std::string> reduceOp,
                                  c10::optional<int64_t> outputDtype, c10::optional<int64_t> xDtype,
@@ -115,7 +146,9 @@ at::Tensor NpuQuantReduceScatter(const at::Tensor& context, const at::Tensor& x,
         } else if (outputAclDtype == ACL_FLOAT) {
             outputDefaultDtype = at::kFloat;
         } else {
-            TORCH_CHECK(false, "unsupported output dtype: ", static_cast<int32_t>(outputAclDtype));
+            // 回显用户传入的torch_npu层dtype枚举值(扩展dtype即acl值+256偏移，如290=hifloat8)，避免展示acl层裸值
+            TORCH_CHECK(false, "unsupported output dtype: ", GetOutputDtypeName(outputAclDtype), "(",
+                        outputDtype.value(), "), only float16/bfloat16/float32 are supported");
         }
     }
     auto outputSize = {axisBs / worldSize, x.size(AxisHIdx)};

@@ -172,6 +172,17 @@ def quant_all_reduce(
         raise TypeError(
             "scales cannot be None, please input some value" + ops_error(ErrCode.TYPE)
         )
+    # world_size 校验必须前置：MTE 通信上下文构建（get_context）要求通信域 rank 数 >= 2，
+    # 非法 world_size 若不在建上下文前拦截，会先触发底层 HCCL 地址表构建失败。
+    world_size_list = [2, 4, 8]
+    if world_size not in world_size_list:
+        raise ValueError(
+            "world_size must be in "
+            + str(world_size_list)
+            + ", but actual value is: "
+            + str(world_size)
+            + ops_error(ErrCode.VALUE)
+        )
     if isinstance(hcom, str):
         group_name = hcom
     else:
