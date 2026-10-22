@@ -69,7 +69,7 @@ $$
    <td>context</td>
    <td>输入</td>
    <td>本卡通信域信息数据。</td>
-   <td>FLOAT16、BFLOAT16</td>
+   <td>INT32</td>
    <td>ND</td>
   </tr>
   <tr>
@@ -111,7 +111,7 @@ $$
    <td>elastic_info_optional</td>
    <td>可选输入</td>
    <td>EP通信域动态缩容信息。</td>
-   <td>FLOAT32</td>
+   <td>INT32</td>
    <td>ND</td>
   </tr>
   <tr>
