@@ -57,7 +57,7 @@ TEST_F(L2GroupedMatMulAlltoAllvV2Test, Test)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
 }
 
 TEST_F(L2GroupedMatMulAlltoAllvV2Test, TestGroupNullptr)
@@ -153,7 +153,7 @@ TEST_F(L2GroupedMatMulAlltoAllvV2Test, TestSendCountsTensorOptional)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
 
 // recvCountsTensorOptional not nullptr - covers lines 47-49 in CheckNullStatus
@@ -178,7 +178,7 @@ TEST_F(L2GroupedMatMulAlltoAllvV2Test, TestRecvCountsTensorOptional)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
 
 // sendCounts null in CheckSendAndRecv - covers lines 71-73
@@ -201,7 +201,7 @@ TEST_F(L2GroupedMatMulAlltoAllvV2Test, TestSendCountsNull)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
 }
 
 // recvCounts null in CheckSendAndRecv - covers lines 75-77
@@ -224,7 +224,7 @@ TEST_F(L2GroupedMatMulAlltoAllvV2Test, TestRecvCountsNull)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
 }
 
 // valid sendCounts and recvCounts - covers lines 79-82 (size calculation)

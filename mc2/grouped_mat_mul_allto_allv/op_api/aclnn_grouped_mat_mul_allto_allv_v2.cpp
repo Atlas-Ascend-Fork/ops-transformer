@@ -74,19 +74,14 @@ static aclnnStatus CheckAndHandleCommMode(const char* commModeStr, uint8_t& comm
 }
 
 // check nullptr
-static bool CheckNullStatus(const aclTensor* gmmX, const aclTensor* gmmWeight,
-                            const aclTensor* sendCountsTensorOptional, const aclTensor* recvCountsTensorOptional,
-                            const aclTensor* mmXOptional, const aclTensor* mmWeightOptional, const char* group,
-                            aclTensor* y, const aclTensor* mmYOptional)
+static bool CheckNullStatus(const aclTensor* gmmX, const aclTensor* gmmWeight, const aclTensor* mmXOptional,
+                            const aclTensor* mmWeightOptional, const char* group, aclTensor* y,
+                            const aclTensor* mmYOptional)
 {
     // 检查必选入参出参为非空
     OP_CHECK_NULL(gmmX, return false);
     OP_CHECK_NULL(gmmWeight, return false);
     OP_CHECK_NULL(y, return false);
-    if ((sendCountsTensorOptional != nullptr) || (recvCountsTensorOptional != nullptr)) {
-        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "sendCountsTensorOptional and recvCountsTensorOptional should be empty.");
-        return false;
-    }
     if ((group == nullptr) || (strnlen(group, HCCL_GROUP_NAME_MAX) == 0)) {
         OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Required group name is Empty.");
         return false;
@@ -108,12 +103,12 @@ static bool CheckNullStatus(const aclTensor* gmmX, const aclTensor* gmmWeight,
 static aclnnStatus CheckSendAndRecv(const aclIntArray* sendCounts, const aclIntArray* recvCounts)
 {
     if (sendCounts == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "sendCounts should not be null.");
-        return ACLNN_ERR_PARAM_INVALID;
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "sendCounts should not be null.");
+        return ACLNN_ERR_PARAM_NULLPTR;
     }
     if (recvCounts == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "recvCounts should not be null.");
-        return ACLNN_ERR_PARAM_INVALID;
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "recvCounts should not be null.");
+        return ACLNN_ERR_PARAM_NULLPTR;
     }
     uint64_t recvSize = 0U; // recvCounts的大小
     uint64_t sendSize = 0U; // recvCounts的大小
@@ -136,8 +131,13 @@ static aclnnStatus CheckParams(const aclTensor* gmmX, const aclTensor* gmmWeight
                                const aclTensor* mmXOptional, const aclTensor* mmWeightOptional, const char* group,
                                aclTensor* y, aclTensor* mmYOptional)
 {
-    CHECK_RET(CheckNullStatus(gmmX, gmmWeight, sendCountsTensorOptional, recvCountsTensorOptional, mmXOptional,
-                              mmWeightOptional, group, y, mmYOptional),
+    // 可选参数sendCountsTensorOptional/recvCountsTensorOptional不支持传入，必须为空
+    if ((sendCountsTensorOptional != nullptr) || (recvCountsTensorOptional != nullptr)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                "sendCountsTensorOptional and recvCountsTensorOptional are unsupported and must both be nullptr.");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    CHECK_RET(CheckNullStatus(gmmX, gmmWeight, mmXOptional, mmWeightOptional, group, y, mmYOptional),
               ACLNN_ERR_PARAM_NULLPTR);
 
     if (strnlen(group, HCCL_GROUP_NAME_MAX) >= HCCL_GROUP_NAME_MAX) {

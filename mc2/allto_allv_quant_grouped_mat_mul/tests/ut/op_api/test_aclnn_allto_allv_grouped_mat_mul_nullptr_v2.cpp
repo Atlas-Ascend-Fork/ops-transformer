@@ -69,7 +69,7 @@ TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, aclnnAlltoAllvQuantGrouped
                         mmWeightQuantMode, group, commMode, epWorldSize, sendCounts, recvCounts, transGmmWeight,
                         transMmWeight, groupSize, permuteOutFlag),
                   OUTPUT(gmmY, mmYOptional, permuteOutOptional));
-    EXPECT_EQ(ACLNN_ERR_PARAM_INVALID, ut_null_gmm_x.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+    EXPECT_EQ(ACLNN_ERR_PARAM_NULLPTR, ut_null_gmm_x.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
 }
 
 TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, aclnnAlltoAllvQuantGroupedMatMulNullGmmWeight)
@@ -158,7 +158,7 @@ TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, aclnnAlltoAllvQuantGrouped
                         mmWeightQuantMode, group, commMode, epWorldSize, sendCounts, recvCounts, transGmmWeight,
                         transMmWeight, groupSize, permuteOutFlag),
                   OUTPUT(gmmY, mmYOptional, permuteOutOptional));
-    EXPECT_EQ(ACLNN_ERR_PARAM_INVALID,
+    EXPECT_EQ(ACLNN_ERR_PARAM_NULLPTR,
               ut_null_gmm_x_scale.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
 }
 
@@ -202,7 +202,7 @@ TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, aclnnAlltoAllvQuantGrouped
               mmWeightScaleOptional, gmmXQuantMode, gmmWeightQuantMode, mmXQuantMode, mmWeightQuantMode, group,
               commMode, epWorldSize, sendCounts, recvCounts, transGmmWeight, transMmWeight, groupSize, permuteOutFlag),
         OUTPUT(gmmY, mmYOptional, permuteOutOptional));
-    EXPECT_EQ(ACLNN_ERR_PARAM_INVALID,
+    EXPECT_EQ(ACLNN_ERR_PARAM_NULLPTR,
               ut_null_gmm_weight_scale.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
 }
 

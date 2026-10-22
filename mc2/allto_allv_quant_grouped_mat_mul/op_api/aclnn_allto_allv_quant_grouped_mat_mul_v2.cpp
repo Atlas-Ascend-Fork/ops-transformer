@@ -72,31 +72,36 @@ static bool CheckNullStatus(const aclTensor* sendCountsTensorOptional, const acl
     return true;
 }
 
-// 检查必要输入是否为空/quantMode为1或6，必须非空/1或6
+// 检查必要输入是否为空
 static bool CheckNotNull(const aclTensor* gmmX, const aclTensor* gmmWeight, const aclTensor* gmmY,
-                         const aclTensor* gmmXScale, const aclTensor* gmmWeightScale, int64_t gmmXQuantMode,
-                         int64_t gmmWeightQuantMode)
+                         const aclTensor* gmmXScale, const aclTensor* gmmWeightScale)
 {
     if (gmmX == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input gmmX should not be null.");
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Input gmmX should not be null.");
         return false;
     }
     if (gmmWeight == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input gmmWeight should not be null.");
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Input gmmWeight should not be null.");
         return false;
     }
     if (gmmY == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "gmmY should not be null.");
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "gmmY should not be null.");
         return false;
     }
     if (gmmXScale == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "gmmXScale should not be null.");
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "gmmXScale should not be null.");
         return false;
     }
     if (gmmWeightScale == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "gmmWeightScale should not be null.");
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "gmmWeightScale should not be null.");
         return false;
     }
+    return true;
+}
+
+// 检查quantMode取值为1或6
+static bool CheckQuantModeValid(int64_t gmmXQuantMode)
+{
     if ((gmmXQuantMode != static_cast<int64_t>(QuantModeType::PERTENSOR_QUANT)) &&
         (gmmXQuantMode != static_cast<int64_t>(QuantModeType::MX_QUANT))) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID,
@@ -392,8 +397,9 @@ static aclnnStatus CheckParams(const aclTensor* gmmX, const aclTensor* gmmWeight
                               mmXScaleOptional, mmWeightScaleOptional, permuteOutFlag, mmYOptional, permuteOutOptional),
               ACLNN_ERR_PARAM_INVALID);
     // 检查参数是否为空
-    CHECK_RET(CheckNotNull(gmmX, gmmWeight, gmmY, gmmXScale, gmmWeightScale, gmmXQuantMode, gmmWeightQuantMode),
-              ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(CheckNotNull(gmmX, gmmWeight, gmmY, gmmXScale, gmmWeightScale), ACLNN_ERR_PARAM_NULLPTR);
+    // 检查quantMode取值
+    CHECK_RET(CheckQuantModeValid(gmmXQuantMode), ACLNN_ERR_PARAM_INVALID);
     OP_LOGD("AlltoAllvQuantGroupedMatmul checkParams success");
     return ACLNN_SUCCESS;
 }
