@@ -1389,7 +1389,7 @@ __aicore__ inline void FANoQuantBlockVecBase<TEMPLATE_BASE_ARGS>::ProcessVec1Nd(
 #if (__NPU_ARCH__ == 3510)
         UpdateExpSumAndExpMax<T>(sumUb, maxUb, expUb, sumUb, maxUb, apiTmpBuffer, runInfo.halfS1RealSize);
 #else
-        UpdateExpSumAndExpMax<T, s1BaseSize, false>(sumUb, maxUb, expUb, sumUb, maxUb, apiTmpBuffer,
+        UpdateExpSumAndExpMax<T, s1BaseSize, useNz>(sumUb, maxUb, expUb, sumUb, maxUb, apiTmpBuffer,
                                                     runInfo.halfS1RealSize);
 #endif
     }

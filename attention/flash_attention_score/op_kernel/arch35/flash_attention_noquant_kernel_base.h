@@ -765,10 +765,11 @@ __aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType
             runParam.halfS1RealSize =
                 runParam.s1RealSize <= 16 ? runParam.s1RealSize : (runParam.s1RealSizeAlign32 >> 1);
         }
-    } else if constexpr (CV_RATIO == 1) {
-        runParam.halfS1RealSize = runParam.s1RealSize;
     } else {
         runParam.halfS1RealSize = (runParam.s1RealSize + 1) >> 1;
+    }
+    if constexpr (CV_RATIO == 1) {
+        runParam.halfS1RealSize = runParam.s1RealSize;
     }
     runParam.firstHalfS1RealSize = runParam.halfS1RealSize;
     if (constInfo.subBlockIdx == 1) {
