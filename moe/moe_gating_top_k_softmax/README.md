@@ -25,11 +25,12 @@
   $$
 
   $$
-  rowIdxRange=arange(expertIdxOut.shape[0]*expertIdxOut.shape[1])
+  R=rank(expertIdxOut), M=\prod_{i=0}^{R-2}expertIdxOut.shape[i], K=expertIdxOut.shape[R-1]
   $$
 
   $$
-  rowIdxOut=rowIdxRange.reshape([expertIdxOut.shape[1],expertIdxOut.shape[0]]).transpose(1,0)
+  rowIdxRange=arange(M*K)
+  rowIdxOut=rowIdxRange.reshape([K,M]).transpose(1,0).reshape(expertIdxOut.shape)
   $$
 
 ## 参数说明
@@ -92,7 +93,7 @@
 
 ## 约束说明
 
-- k的值不大于1024。
+- 1 <= k <= x最后一维大小，且k不大于1024。
 - x和finishedOptional的每一维大小应不大于int32的最大值2147483647。
 
 ## 调用说明

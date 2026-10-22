@@ -37,11 +37,12 @@
   $$
 
   $$
-  rowIdxRange=arange(expertIdxOut.shape[0]*expertIdxOut.shape[1])
+  R=rank(expertIdxOut), M=\prod_{i=0}^{R-2}expertIdxOut.shape[i], K=expertIdxOut.shape[R-1]
   $$
 
   $$
-  rowIdxOut=rowIdxRange.reshape([expertIdxOut.shape[1],expertIdxOut.shape[0]]).transpose(1,0)
+  rowIdxRange=arange(M*K)
+  rowIdxOut=rowIdxRange.reshape([K,M]).transpose(1,0).reshape(expertIdxOut.shape)
   $$
 
 ## 函数原型
@@ -118,7 +119,7 @@ aclnnStatus aclnnMoeGatingTopKSoftmax(
     <td>k</td>
     <td>输入</td>
     <td>topK的k值，专家数。</td>
-    <td>0 <= k <= x的-1轴大小，且k不大于1024。</td>
+    <td>1 <= k <= x的-1轴大小，且k不大于1024。</td>
     <td>INT64</td>
     <td>-</td>
     <td>-</td>
@@ -214,7 +215,7 @@ aclnnStatus aclnnMoeGatingTopKSoftmax(
     <td>输入属性和输入tensor之间的shape信息不匹配。</td>
     </tr>
     <tr>
-    <td>k的值小于0或大于x-1的轴的大小。</td>
+    <td>k的值小于或等于0或大于x-1的轴的大小。</td>
     </tr>
     <tr>
     <td>k的值大于1024。</td>
