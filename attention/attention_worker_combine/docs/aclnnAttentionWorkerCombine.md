@@ -37,9 +37,21 @@
 
 - 计算公式：
 
-  $$
-  y[i] = \sum_{k=0}^{K-1} \text{expertScales}[i][k] \times \text{token\_data}[i][k]
-  $$
+  令 $i$ 表示 token 行，$h$ 表示 hidden 维下标，$K$ 表示路由专家数。token_data 包含 $K$ 个路由专家结果和最后一行共享专家结果。
+
+  - 非量化场景（tokenDtype 为 0 或 1）：
+
+    $$
+    y[i,h] = \sum_{k=0}^{K-1} \text{expertScales}[i,k] \times \text{token\_data}[i,k,h] + \text{token\_data}[i,K,h]
+    $$
+
+  - MXFP 反量化场景（tokenDtype 为 2、3 或 4），设 $S$ 为 scale 槽数，dequant(x, s) 表示将 token 值按其 dtype 解码后乘以 E8M0 scale 解码值：
+
+    $$
+    y[i,h] = \sum_{k=0}^{K} \operatorname{dequant}\!\left(\text{token\_data}[i,k,h],\ \text{expertScales}[i,k,\lfloor h/32 \rfloor]\right)
+    $$
+
+    MXFP 的 scale 按每 32 个 hidden 元素分组；shape 中额外对齐的 scale 槽不对应有效 hidden 元素。
 
   $$
   \text{nextLayerId} = \text{layerId} + 1
