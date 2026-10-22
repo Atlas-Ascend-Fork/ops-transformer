@@ -362,8 +362,8 @@ aclnnStatus aclnnQkvRmsNormRopeCache(
     <tr>
       <td>kOutBeforeQuant</td>
       <td>输出</td>
-      <td>表示即将写入到vCache中的数据，在未经量化和Scatter前的中间计算结果。</td>
-      <td><ul><li>分型、数据类型，需要与输入参数qkv保持一致。</li><li>shape为[B<sub>qkv</sub> * S<sub>qkv</sub>, N<sub>q</sub> * D<sub>qkv</sub>]。</li></ul></td>
+      <td>表示即将写入到kCache中的数据，在未经量化和Scatter前的中间计算结果。</td>
+      <td><ul><li>分型、数据类型，需要与输入参数qkv保持一致。</li><li>shape为[B<sub>qkv</sub> * S<sub>qkv</sub>, N<sub>k</sub> * D<sub>qkv</sub>]。</li></ul></td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>2</td>
@@ -373,7 +373,7 @@ aclnnStatus aclnnQkvRmsNormRopeCache(
       <td>vOutBeforeQuant</td>
       <td>输出</td>
       <td>表示即将写入到vCache中的数据，在未经量化和Scatter前的中间计算结果。</td>
-      <td><ul><li>分型、数据类型，需要与输入参数qkv保持一致。</li><li>shape为[B<sub>qkv</sub> * S<sub>qkv</sub>, N<sub>q</sub> * D<sub>qkv</sub>]。</li></ul></td>
+      <td><ul><li>分型、数据类型，需要与输入参数qkv保持一致。</li><li>shape为[B<sub>qkv</sub> * S<sub>qkv</sub>, N<sub>v</sub> * D<sub>qkv</sub>]。</li></ul></td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>2</td>
