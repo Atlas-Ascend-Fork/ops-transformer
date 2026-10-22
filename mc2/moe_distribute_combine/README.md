@@ -19,7 +19,7 @@
 
     $$
     ataOut = AllToAllV(expandX)\\
-    xOut = Sum(expertScales * ataOut + expertScales * sharedExpertX)
+    xOut = Sum(expertScales * ataOut) + sharedExpertX
     $$
 
 注意该算子必须与MoeDistributeDispatch配套使用，相当于按MoeDistributeDispatch算子收集数据的路径原路返还。

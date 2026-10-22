@@ -35,10 +35,10 @@
 
     $$
     ataOut = AllToAllV(expandX)\\
-    xOut = Sum(expertScales * ataOut + expertScales * sharedExpertX)
+    xOut = Sum(expertScales * ataOut) + sharedExpertX
     $$
 
-    `expertScales`为空Tensor时，不执行权重乘法，直接对专家输出求和。
+    `expertScales`为空Tensor时，路由专家结果直接求和；若传入`sharedExpertXOptional`，仍直接累加，不乘路由权重。
 
 > 注意：该接口必须与`aclnnMoeDistributeDispatchV4`配套使用，相当于按`aclnnMoeDistributeDispatchV4`接口收集数据的路径原路返还。
 
