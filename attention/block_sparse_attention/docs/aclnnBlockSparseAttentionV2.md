@@ -44,8 +44,8 @@
 
   当前支持的布局：
 
-  - qInputLayout: "TND" "BNSD" "BSND"
-  - kvInputLayout: "TND" "BNSD" "BSND"
+  - qInputLayout: "TND"、"BNSD"；"BSND"仅<term>Ascend 950PR&950DT系列产品</term>支持
+  - kvInputLayout: "TND"、"BNSD"；"BSND"仅<term>Ascend 950PR&950DT系列产品</term>支持
 
 <!-- npu="950" id7 -->
 - **FP8特性说明（仅<term>Ascend 950PR&950DT系列产品</term>支持）**：
@@ -344,7 +344,7 @@ aclnnStatus aclnnBlockSparseAttentionV2(
       <td>qInputLayout（char*）</td>
       <td>输入</td>
       <td>代表输入query的数据排布格式。</td>
-      <td>取值范围为 "TND"/"BNSD"/"BSND"，约束详见约束说明。</td>
+      <td>取值范围为 "TND"/"BNSD"/"BSND"，其中"BSND"仅<term>Ascend 950PR&950DT系列产品</term>支持，约束详见约束说明。</td>
       <td>String</td>
       <td>-</td>
       <td>-</td>
@@ -354,7 +354,7 @@ aclnnStatus aclnnBlockSparseAttentionV2(
       <td>kvInputLayout（char*）</td>
       <td>输入</td>
       <td>代表输入key、value的数据排布格式。</td>
-      <td>取值范围为 "TND"/"BNSD"/"BSND"，约束详见约束说明。</td>
+      <td>取值范围为 "TND"/"BNSD"/"BSND"，其中"BSND"仅<term>Ascend 950PR&950DT系列产品</term>支持，约束详见约束说明。</td>
       <td>String</td>
       <td>-</td>
       <td>-</td>
@@ -597,8 +597,7 @@ aclnnStatus aclnnBlockSparseAttentionV2(
 - 确定性计算：
   - aclnnBlockSparseAttentionV2默认确定性实现。
 - 该接口与PyTorch配合使用时，需要保证CANN相关包与PyTorch相关包的版本匹配。
-- qInputLayout当前仅支持"TND"和"BNSD"和"BSND"。
-- kvInputLayout当前仅支持"TND"和"BNSD"和"BSND"。
+- qInputLayout和kvInputLayout当前仅支持相同的"TND"、"BNSD"或"BSND"布局；其中"BSND"仅<term>Ascend 950PR&950DT系列产品</term>支持。
 - 当前query、key、value的InputLayout必须保持一致。
 - 输入query、key、value的数据类型必须一致，支持FLOAT16和BFLOAT16。
 - query、key、value的D轴当前仅支持配置为64或128
