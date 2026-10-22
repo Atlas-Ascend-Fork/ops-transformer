@@ -19,8 +19,17 @@
   */
 
 
- #include "register/op_def_registry.h"
+#include "register/op_def_registry.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
+// 旧版 CANN（如 9.2.0 兼容性看护）的 aclnn 生成器不支持 DT_HIFLOAT4/Ascend960，
+// 通过 devkit 版本宏守卫整段 960 配置：CANN >= 9.3 才注册
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ENABLE_MQFA_DT_HIFLOAT4
+#endif
+#endif
 
  namespace ops {
 
@@ -37,22 +46,22 @@
              .AutoContiguous();
          this->Input("k")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1, ge::DT_HIFLOAT4, ge::DT_HIFLOAT4})
+            .DataType({ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1, Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4})
             .FormatList({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
          this->Input("v")
             .ParamType(REQUIRED)
-            .DataType({ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1, ge::DT_HIFLOAT4, ge::DT_HIFLOAT4})
+            .DataType({ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1, Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4})
             .FormatList({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
             .AutoContiguous();
          this->Input("k_descale")
              .ParamType(REQUIRED)
-             .DataType({ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE, ge::DT_HIFLOAT4_SCALE})
+             .DataType({ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, Ops::Transformer::DT_HIFLOAT4_SCALE, Ops::Transformer::DT_HIFLOAT4_SCALE})
              .FormatList({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
              .AutoContiguous();
          this->Input("v_descale")
              .ParamType(REQUIRED)
-             .DataType({ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_HIFLOAT4_SCALE, ge::DT_HIFLOAT4_SCALE})
+             .DataType({ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, Ops::Transformer::DT_HIFLOAT4_SCALE, Ops::Transformer::DT_HIFLOAT4_SCALE})
              .FormatList({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND})
              .AutoContiguous();
          this->Input("block_table")
@@ -147,8 +156,9 @@
              .ExtendCfgInfo("coreType.value", "AiCore")
              .ExtendCfgInfo("opFile.value", "mixed_quant_flash_attn")
              .ExtendCfgInfo("aclnnSupport.value", "support_aclnn");   // set value of aclnn support
-
+#ifdef ENABLE_MQFA_DT_HIFLOAT4
          this->AICore().AddConfig("ascend960dt", aicore_config_96);
+#endif // ENABLE_MQFA_DT_HIFLOAT4
      }
  };
 
