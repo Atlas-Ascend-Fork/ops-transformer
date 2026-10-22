@@ -105,8 +105,8 @@ aclnnStatus aclnnStemOamPrepPagedKvGetWorkspaceSize(
   const aclTensor  *vCache,
   const aclTensor  *kvIndices,
   const aclIntArray  *kvSeqLens,
-  const aclTensor  *kScaleCache,
-  const aclTensor  *vScale,
+  const aclTensor  *kScaleCacheOptional,
+  const aclTensor  *vScaleOptional,
   double            lambdaMag,
   char              *kvLayout,
   int64_t           stemBlockSize,
@@ -314,7 +314,7 @@ aclnnStatus aclnnStemOamPrepPagedKv(
     <tr>
       <td>ACLNN_ERR_PARAM_NULLPTR</td>
       <td>161001</td>
-      <td>传入的kCache、vCache、kFlat、vBias是空指针。<br>kCache数据类型为FP8时kScaleCache、vScale空指针。</td>
+      <td>传入的kCache、vCache、kFlat、vBias是空指针。<br>kCache数据类型为FP8时kScaleCacheOptional、vScaleOptional空指针。</td>
     </tr>
     <tr>
       <td rowspan="4">ACLNN_ERR_PARAM_INVALID</td>
@@ -322,10 +322,10 @@ aclnnStatus aclnnStemOamPrepPagedKv(
       <td>kCache dtype不为FLOAT8_E4M3FN。</td>
     </tr>
     <tr>
-      <td>kScaleCache dtype不为FLOAT。</td>
+      <td>kScaleCacheOptional dtype不为FLOAT。</td>
     </tr>
     <tr>
-      <td>vScale shape不是1D [H_kv]。</td>
+      <td>vScaleOptional shape不是1D [H_kv]。</td>
     </tr>
     <tr>
       <td>kvLayout/stemBlockSize/stemStride不满足约束。</td>

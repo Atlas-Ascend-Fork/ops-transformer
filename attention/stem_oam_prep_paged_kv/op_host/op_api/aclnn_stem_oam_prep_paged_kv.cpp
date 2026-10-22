@@ -15,7 +15,6 @@
 
 #include "aclnn_stem_oam_prep_paged_kv.h"
 #include "stem_oam_prep_paged_kv.h"
-#include "aclnn_kernels/contiguous.h"
 #include "aclnn/aclnn_base.h"
 #include "aclnn_kernels/common/op_error_check.h"
 #include "opdev/common_types.h"
@@ -100,6 +99,23 @@ inline static bool CheckCacheContinuous(const aclTensor* shape)
         return false;
     }
 
+    return true;
+}
+
+inline static bool CheckContiguous(const aclTensor* kvIndices, const aclTensor* vScaleOptional)
+{
+    if (!IsContiguous(kvIndices)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "kvIndices must be contiguous, but got shape %s and strides %s.",
+                op::ToString(kvIndices->GetViewShape()).GetString(),
+                op::ToString(kvIndices->GetViewStrides()).GetString());
+        return false;
+    }
+    if (vScaleOptional != nullptr && !IsContiguous(vScaleOptional)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "vScale must be contiguous, but got shape %s and strides %s.",
+                op::ToString(vScaleOptional->GetViewShape()).GetString(),
+                op::ToString(vScaleOptional->GetViewStrides()).GetString());
+        return false;
+    }
     return true;
 }
 
@@ -244,6 +260,7 @@ inline static aclnnStatus CheckParams(const aclTensor* kCache, const aclTensor* 
               ACLNN_ERR_PARAM_NULLPTR);
     CHECK_RET(CheckEmpty(kCache, vCache, kvIndices, kScaleCacheOptional, vScaleOptional), ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckDtype(kCache, vCache, kScaleCacheOptional, vScaleOptional), ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(CheckContiguous(kvIndices, vScaleOptional), ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckShape(kCache, vCache, kScaleCacheOptional, vScaleOptional, kvIndices, kvSeqLens, kvLayout),
               ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckAttr(stemBlockSize, stemStride, lambdaMag), ACLNN_ERR_PARAM_INVALID);
@@ -300,19 +317,13 @@ aclnnStatus aclnnStemOamPrepPagedKvGetWorkspaceSize(const aclTensor* kCache, con
                                            kScaleCacheOptional->GetStorageShape(),
                                            kScaleCacheOptional->GetViewStrides(), kScaleCacheOptional->GetViewOffset());
     }
-    const aclTensor* vScaleContiguous = nullptr;
-    if (vScaleOptional != nullptr) {
-        vScaleContiguous = l0op::Contiguous(vScaleOptional, uniqueExecutor.get());
-    }
-
-    auto kvIndicesContiguous = l0op::Contiguous(kvIndices, uniqueExecutor.get());
     const aclTensor* kvSeqLensTensor = uniqueExecutor->ConvertToTensor(kvSeqLens, DataType::DT_INT32);
     OP_CHECK_NULL(kvSeqLensTensor, return ACLNN_ERR_PARAM_NULLPTR);
     float lambdaMagFloat = static_cast<float>(lambdaMag);
 
-    auto result = l0op::StemOamPrepPagedKv(kCacheView, vCacheView, kvIndicesContiguous, kvSeqLensTensor,
-                                           kScaleCacheView, vScaleContiguous, lambdaMagFloat, kvLayoutStr,
-                                           stemBlockSize, stemStride, kFlat, vBias, uniqueExecutor.get());
+    auto result = l0op::StemOamPrepPagedKv(kCacheView, vCacheView, kvIndices, kvSeqLensTensor, kScaleCacheView,
+                                           vScaleOptional, lambdaMagFloat, kvLayoutStr, stemBlockSize, stemStride,
+                                           kFlat, vBias, uniqueExecutor.get());
     CHECK_RET(std::get<0>(result) != nullptr && std::get<1>(result) != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
