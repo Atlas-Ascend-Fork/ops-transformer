@@ -73,7 +73,7 @@
   </tr>
   <tr>
     <td>scale1</td>
-    <td rowspan="1">可选输入</td>
+    <td rowspan="1">输入</td>
     <td>量化参数中由x1量化引入的缩放因子。综合约束请参见<a href="#约束说明">约束说明</a>。</td>
     <td>FLOAT32、FLOAT8_E8M0</td>
     <td>ND</td>
