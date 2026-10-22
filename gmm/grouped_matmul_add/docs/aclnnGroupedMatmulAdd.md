@@ -118,8 +118,8 @@ aclnnStatus aclnnGroupedMatmulAdd(
     </tr>
       <tr>
         <td>yRef</td>
-        <td>输出</td>
-        <td>表示原地累加的输出矩阵，即y。</td>
+        <td>输入/输出</td>
+        <td>表示原地累加的输入输出矩阵，即y。</td>
         <td>-</td>
         <td>FLOAT32</td>
         <td>ND</td>
