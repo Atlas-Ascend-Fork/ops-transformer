@@ -27,7 +27,7 @@
   $$
 
   $$
-  probsGradExpertOrder = \sum_{j=0}^{hidden\_size}(permutedProbsGrad_{i,j})
+  probsGradExpertOrder = \sum_{j=0}^{hidden\_size-1}(permutedProbsGrad_{i,j})
   $$
 
     - dropAndPad为false时
