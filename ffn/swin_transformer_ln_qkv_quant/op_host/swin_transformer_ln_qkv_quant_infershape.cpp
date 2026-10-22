@@ -100,8 +100,11 @@ static ge::graphStatus InferShapeSwinTransformerLnQkvQuant(gert::InferShapeConte
     const auto* headNum = attrs->GetAttrPointer<int64_t>(0);
     OP_CHECK_NULL_WITH_CONTEXT(context, headNum);
     const auto* seqLength = attrs->GetAttrPointer<int64_t>(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, seqLength);
     const auto* hWinSize = attrs->GetAttrPointer<int64_t>(5); // attr param 5 is hWin
+    OP_CHECK_NULL_WITH_CONTEXT(context, hWinSize);
     const auto* wWinSize = attrs->GetAttrPointer<int64_t>(6); //  attr params 6 is wWin
+    OP_CHECK_NULL_WITH_CONTEXT(context, wWinSize);
 
     const uint32_t outputChannel1 = *headNum;
     const uint32_t outputChannel2 = (*hWinSize) * (*wWinSize);
@@ -111,8 +114,8 @@ static ge::graphStatus InferShapeSwinTransformerLnQkvQuant(gert::InferShapeConte
     const uint32_t outputDim1 = 1;
     const uint32_t outputDim2 = 2;
     const uint32_t outputDim3 = 3;
-    OP_LOGW(context->GetNodeName(), "headNum: %ld, hWinSize is %ld, wWinSize is %ld, outputDim0 is %d, \
-    outputDim1 is %d,outputDim2 is %d,outputDim3 is %d",
+    OP_LOGW(context->GetNodeName(), "headNum: %ld, hWinSize is %ld, wWinSize is %ld, outputChannel0 is %u, \
+    outputChannel1 is %u, outputChannel2 is %u, outputChannel3 is %u",
             *headNum, *hWinSize, *wWinSize, outputChannel0, outputChannel1, outputChannel2, outputChannel3);
     qShape->SetDim(outputDim0, outputChannel0);
     qShape->SetDim(outputDim1, outputChannel1);

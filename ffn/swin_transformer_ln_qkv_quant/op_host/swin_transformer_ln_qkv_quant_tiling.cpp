@@ -136,7 +136,7 @@ void SwinTransformerLnQkvQuantTilingCompute::SwinTransformerLnQkvQuantSetTilingK
     uint64_t tilingKey = 0;
     tilingKey = static_cast<uint64_t>(templateId) + transposeB * 100000; // transposeB is 100000 bit
     context->SetTilingKey(tilingKey);
-    OP_LOGI(context->GetNodeName(), "SwinTransformerLnQkvQuant tilingKey is : %ld.", tilingKey);
+    OP_LOGI(context->GetNodeName(), "SwinTransformerLnQkvQuant tilingKey is : %lu.", tilingKey);
     return;
 }
 

@@ -116,7 +116,12 @@ ge::graphStatus SAFFNTilingComp::SAFFNTilingTPROLL(const gert::TilingContext* co
     l0cSize = compileInfo->l0cSize;
 
     const gert::RuntimeAttrs* runtimeAttrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, runtimeAttrs);
     const gert::TypedContinuousVector<int64_t>* shifts = runtimeAttrs->GetListInt(0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, shifts);
+    OP_CHECK_IF(shifts->GetSize() < 2,
+                OP_LOGE(context->GetNodeName(), "shifts size:%lu is less than 2.", (unsigned long)shifts->GetSize()),
+                return ge::GRAPH_FAILED);
     shift1 = uint32_t(*shifts->GetData());
     shift2 = uint32_t(*(shifts->GetData() + 1));
 
