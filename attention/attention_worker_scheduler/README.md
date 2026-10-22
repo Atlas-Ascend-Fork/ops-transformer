@@ -87,7 +87,12 @@ $$
 
 ## 约束说明
 
-无。
+- 输入 `schedule_context` 为一维 INT8 Tensor，数据至少包含 `sizeof(ScheduleContext)` 字节（当前结构体为 1024 字节）。
+- `schedule_mode` 必须为 `1`（Attention）；`micro_batch_num`、`micro_batch_size`、`selected_expert_num` 均须大于 0。
+- `token_info_buf` 和 `token_data_buf` 均须为非空地址；`token_info_buf_size` 至少为 `micro_batch_num * (sizeof(AttentionDataDesc) + sizeof(int32_t) * micro_batch_size * selected_expert_num)` 字节。
+- `micro_batch_id` 必须在 `[0, micro_batch_num)` 范围内。
+- `run_flag` 为 `0` 时算子退出；为非零值时等待当前批次的 flag 全部就绪后继续处理。
+- 计算缓冲区所需长度时若整数乘法溢出，算子返回内部错误。
 
 ## 调用说明
 
