@@ -37,6 +37,8 @@ constexpr uint8_t HC_BEFORE_NORM_IDX = 8;
 constexpr uint8_t INV_RMS_IDX = 9;
 constexpr uint8_t SUM_OUT_IDX = 10;
 constexpr uint8_t NORM_OUT_IDX = 11;
+constexpr uint8_t PRE_MIX_IDX = 12;
+constexpr uint8_t GRAD_PRE_IDX = 13;
 constexpr uint8_t GRAD_X_IDX = 0;
 constexpr uint8_t GRAD_PHI_IDX = 1;
 constexpr uint8_t GRAD_ALPHA_IDX = 2;
@@ -78,7 +80,17 @@ using namespace AscendC;
 
 bool MhcPreSinkhornPremixBackwardArch35DeterminiticTiling::IsCapable()
 {
-    return true;
+    // 确定性请求必须走本类（无原子写、分阶段规约）
+    if (context_->GetDeterministic() == 1) {
+        return true;
+    }
+    // 非确定性请求优先走 one_stage；one_stage 不支持的 shape（3D TND 或 n != 4）兜底走本类
+    const auto xShapePtr = context_->GetInputShape(INPUT_X_IDX);
+    if (xShapePtr == nullptr) {
+        return true;
+    }
+    auto xShape = xShapePtr->GetStorageShape();
+    return xShape.GetDimNum() != 4 || xShape.GetDim(N_DIM_IDX) != N_SIZE_4;
 }
 
 ge::graphStatus MhcPreSinkhornPremixBackwardArch35DeterminiticTiling::GetShapeAttrsInfo()
@@ -100,6 +112,18 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35DeterminiticTiling::GetShapeAt
                 OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(),
                                             "xShape verify failed, x must be 3D or 4D, but got %lu dims", xDimNum),
                 return ge::GRAPH_FAILED);
+    // 规格校验:x/gradHin 仅支持 fp16/bf16 且一致(README 约束),不支持 dtype 在 tiling 层拦截
+    const auto xDesc = context_->GetInputDesc(INPUT_X_IDX);
+    const auto gradHinDesc = context_->GetInputDesc(GRAD_HIN_IDX);
+    OP_CHECK_IF(
+        xDesc == nullptr || gradHinDesc == nullptr ||
+            (xDesc->GetDataType() != ge::DT_FLOAT16 && xDesc->GetDataType() != ge::DT_BF16) ||
+            gradHinDesc->GetDataType() != xDesc->GetDataType(),
+        OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(),
+                                    "x/gradHin dtype must be fp16 or bf16 (and equal), but got x=%d, gradHin=%d",
+                                    xDesc == nullptr ? -1 : static_cast<int>(xDesc->GetDataType()),
+                                    gradHinDesc == nullptr ? -1 : static_cast<int>(gradHinDesc->GetDataType())),
+        return ge::GRAPH_FAILED);
     auto skSumShape = skSumPtr->GetStorageShape();
 
     auto attrsPtr = context_->GetAttrs();
@@ -148,7 +172,7 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35DeterminiticTiling::GetShapeAt
 
 ge::graphStatus MhcPreSinkhornPremixBackwardArch35DeterminiticTiling::SetTilingData()
 {
-    MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData *tilingData =
+    MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData* tilingData =
         context_->GetTilingData<MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData>();
     auto platformInfo = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
@@ -192,6 +216,8 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35DeterminiticTiling::SetTilingD
         return ge::GRAPH_FAILED;
     }
 
+    tilingData->hasPreMix = (context_->GetOptionalInputShape(PRE_MIX_IDX) != nullptr) ? 1 : 0;
+    tilingData->hasGradPre = (context_->GetOptionalInputShape(GRAD_PRE_IDX) != nullptr) ? 1 : 0;
     tilingData->bs = bs_;
     tilingData->c = c_;
     tilingData->n = n_;
@@ -323,7 +349,7 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35DeterminiticTiling::GetWorkspa
                                bs_ * hcMix * FP32_BYTE_SIZE + WS_BUFFER_INTERVAL;  // grad_norm_out
 
     size_t systemWorkspaceSize = ascendPlatformInfo.GetLibApiWorkSpaceSize();
-    size_t *currentWorkspace = context_->GetWorkspaceSizes(1);
+    size_t* currentWorkspace = context_->GetWorkspaceSizes(1);
     OP_CHECK_IF(currentWorkspace == nullptr, OP_LOGE(opName, "fail to GetWorkspaceSizes"), return ge::GRAPH_FAILED);
     currentWorkspace[0] = systemWorkspaceSize + userWorkspaceSize;
 

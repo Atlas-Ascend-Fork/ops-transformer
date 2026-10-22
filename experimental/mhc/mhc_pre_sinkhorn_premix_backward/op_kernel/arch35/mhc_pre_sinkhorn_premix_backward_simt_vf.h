@@ -21,14 +21,18 @@ using namespace AscendC;
 namespace {
 constexpr int32_t THREAD_NUM = 1024;
 constexpr int32_t WARP_SIZE = 32;
+constexpr int32_t ELEMENTS_PER_32B = 32 / sizeof(float);
 }; // namespace
 
+// skSumPreLocal/skNormPreLocal：调用方已把 skIterCount 轮迭代的 sk 数据批量预载到 UB，
+// UB 内块 j 对应 GM 中第 j 个迭代块（即 SIMT 第 skIterCount-1-j 轮所用的数据），
+// 每块布局为 [taskCount][n*n]（norm）与 [taskCount][n]（sum，row 段之后接 col 段）。
 template <typename T>
 __simt_vf__ __aicore__ LAUNCH_BOUND(THREAD_NUM) inline void SinkhornKnoppSimt(
-    __ubuf__ T *gradHRes2Local, __ubuf__ T *gradInvRmsLocal, __gm__ T *gradAlphaGlobal, __gm__ T *gradBiasGlobal,
-    __gm__ T *skSumGlobal, __gm__ T *skNormGlobal_, __ubuf__ T *gradResLocal, __ubuf__ T *hRes2Local,
-    __ubuf__ T *invRmsLocal, __ubuf__ T *biasLocal, __ubuf__ T *tmpLocal, const T hcScaleRes, const int32_t totalTasks,
-    const int32_t taskOffset, const int32_t taskCount, const int32_t skIterCount, const int32_t n)
+    __ubuf__ T* gradHRes2Local, __ubuf__ T* gradInvRmsLocal, __ubuf__ T* alphaResAccLocal, __ubuf__ T* biasResAccLocal,
+    __ubuf__ T* skSumPreLocal, __ubuf__ T* skNormPreLocal, __ubuf__ T* gradResLocal, __ubuf__ T* hRes2Local,
+    __ubuf__ T* invRmsLocal, __ubuf__ T* biasLocal, __ubuf__ T* tmpLocal, const T hcScaleRes, const int32_t taskCount,
+    const int32_t skIterCount, const int32_t n, const T eps)
 {
     int32_t xTid = threadIdx.x;   // 16
     int32_t hinTid = threadIdx.y; // THREAD_NUM // 16
@@ -38,21 +42,21 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(THREAD_NUM) inline void SinkhornKnoppSimt(
     int32_t taskWidth = n * n + 2 * n;
 
     // sinkhorn
-    int32_t baseOffset1 = 0, baseOffset2 = 0;
+    // DataCopyPad 多块搬运的 UB 侧块间距按 32B 对齐，sum 每块实际占 AlignUp(taskCount*n, 8) 个元素
+    int32_t sumBlockPitch = (taskCount * n + ELEMENTS_PER_32B - 1) / ELEMENTS_PER_32B * ELEMENTS_PER_32B;
+    int32_t colSumSegOffset = skIterCount * sumBlockPitch;
     for (int32_t iter = 0; iter < skIterCount; ++iter) {
-        baseOffset1 = ((skIterCount - 1 - iter) * totalTasks * 2 + taskOffset) * n * n;
-        baseOffset2 = ((skIterCount - 1 - iter) * totalTasks * 2 + taskOffset) * n;
+        int32_t preBlock = skIterCount - 1 - iter;
+        int32_t normBase = preBlock * taskCount * n * n;
+        int32_t sumBase = preBlock * sumBlockPitch;
         for (int32_t i = hinTid; i < taskCount; i += yBlockDim) {
             int32_t hOffset = i * xBlockDim + xTid;
-            int32_t offsetRow = baseOffset2 + i * n + xTid / n;
-            int32_t offsetCol = baseOffset2 + i * n + xTid % n;
 
             T gradResVal = gradResLocal[hOffset];
 
-            T skRowNormVal = skNormGlobal_[hOffset + baseOffset1];
-            T skRowSumVal = skSumGlobal[offsetRow];
-            // T skColNormVal = skNormGlobal_[hOffset + baseOffset1 + totalTasks * n * n];
-            T skColSumVal = skSumGlobal[offsetCol + totalTasks * n];
+            T skRowNormVal = skNormPreLocal[normBase + hOffset];
+            T skRowSumVal = skSumPreLocal[sumBase + i * n + xTid / n];
+            T skColSumVal = skSumPreLocal[colSumSegOffset + sumBase + i * n + xTid % n];
 
             T grad1 = (gradResVal * skRowNormVal / powf(skColSumVal, 2.0f));
 
@@ -61,12 +65,17 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(THREAD_NUM) inline void SinkhornKnoppSimt(
             colReduceSumVal = colReduceSumVal + asc_shfl_xor(colReduceSumVal, 8, 16);
             T gradRowNormed = gradResVal / skColSumVal - colReduceSumVal;
 
+            // 末轮(前向第 0 轮)行侧 eps 修正,精确对齐 golden.py:131-135——
+            // 修正仅作用于行侧第二次使用(除法/加权),列向 grad1 用原始 xrn
+            T rowNormUsed = (preBlock == 0) ? (skRowNormVal - eps) : skRowNormVal;
+            T rowSumUsed = (preBlock == 0) ? (skRowSumVal - eps) : skRowSumVal;
+
             // reduce dim -1
-            T grad2 = (gradRowNormed * skRowNormVal / skRowSumVal);
+            T grad2 = (gradRowNormed * rowNormUsed / rowSumUsed);
             T rowReduceSumVal = grad2 + asc_shfl_xor(grad2, 1, 16);
             rowReduceSumVal = rowReduceSumVal + asc_shfl_xor(rowReduceSumVal, 2, 16);
 
-            T gradSinkhorn = gradRowNormed / skRowSumVal - rowReduceSumVal;
+            T gradSinkhorn = gradRowNormed / rowSumUsed - rowReduceSumVal;
 
             gradResLocal[hOffset] = gradSinkhorn;
         }
@@ -149,13 +158,14 @@ __simt_vf__ __aicore__ LAUNCH_BOUND(THREAD_NUM) inline void SinkhornKnoppSimt(
 
     T gradAlphaRes = 0;
     if (hinTid == 0) {
-        // copyout gradHcBase
-        Simt::AtomicAdd(gradBiasGlobal + xTid, gradResLocal[xTid]);
+        // res 贡献只累加到本核 UB 累加器(每核一次原子归并在主循环后统一做),
+        // 替代逐 tile 的跨核原子写,消除归约次序噪声
+        biasResAccLocal[xTid] = biasResAccLocal[xTid] + gradResLocal[xTid];
         gradAlphaRes = tmpLocal[xTid];
     }
 
     gradAlphaRes = asc_reduce_add(gradAlphaRes);
     if (tid == 0) {
-        Simt::AtomicAdd(gradAlphaGlobal, gradAlphaRes);
+        alphaResAccLocal[0] = alphaResAccLocal[0] + gradAlphaRes;
     }
 }

@@ -24,31 +24,31 @@ using namespace AscendC;
 namespace optiling {
 
 namespace {
-const gert::StorageShape *GetInputShapeChecked(gert::TilingContext *context, const char *opName, const char *tensorName,
+const gert::StorageShape* GetInputShapeChecked(gert::TilingContext* context, const char* opName, const char* tensorName,
                                                uint8_t idx)
 {
-    const gert::StorageShape *ptr = context->GetInputShape(idx);
+    const gert::StorageShape* ptr = context->GetInputShape(idx);
     OP_CHECK_IF(ptr == nullptr,
                 OPS_REPORT_VECTOR_INNER_ERR(opName, "ShapeVerify failed, %s shape is nullptr", tensorName),
                 return nullptr);
     return ptr;
 }
 
-const gert::StorageShape *GetOutputShapeChecked(gert::TilingContext *context, const char *opName,
-                                                const char *tensorName, uint8_t idx)
+const gert::StorageShape* GetOutputShapeChecked(gert::TilingContext* context, const char* opName,
+                                                const char* tensorName, uint8_t idx)
 {
-    const gert::StorageShape *ptr = context->GetOutputShape(idx);
+    const gert::StorageShape* ptr = context->GetOutputShape(idx);
     OP_CHECK_IF(ptr == nullptr,
                 OPS_REPORT_VECTOR_INNER_ERR(opName, "ShapeVerify failed, %s shape is nullptr", tensorName),
                 return nullptr);
     return ptr;
 }
 
-ge::graphStatus VerifyShape(const char *opName, const char *tensorName, const gert::StorageShape *shapePtr,
-                            const int64_t *batchDims, size_t batchDimCount, std::initializer_list<int64_t> suffixDims,
+ge::graphStatus VerifyShape(const char* opName, const char* tensorName, const gert::StorageShape* shapePtr,
+                            const int64_t* batchDims, size_t batchDimCount, std::initializer_list<int64_t> suffixDims,
                             size_t startDim = 0)
 {
-    const gert::Shape &shape = shapePtr->GetStorageShape();
+    const gert::Shape& shape = shapePtr->GetStorageShape();
     size_t expectedDimNum = startDim + batchDimCount + suffixDims.size();
     OP_CHECK_IF(shape.GetDimNum() != expectedDimNum,
                 OPS_REPORT_VECTOR_INNER_ERR(opName, "ShapeVerify failed, %s must be %luD, but got %lu dims", tensorName,
@@ -88,6 +88,8 @@ constexpr uint8_t HC_BEFORE_NORM_IDX = 8;
 constexpr uint8_t INV_RMS_IDX = 9;
 constexpr uint8_t SUM_OUT_IDX = 10;
 constexpr uint8_t NORM_OUT_IDX = 11;
+constexpr uint8_t PRE_MIX_IDX = 12;
+constexpr uint8_t GRAD_PRE_IDX = 13;
 constexpr uint8_t GRAD_X_IDX = 0;
 constexpr uint8_t GRAD_PHI_IDX = 1;
 constexpr uint8_t GRAD_ALPHA_IDX = 2;
@@ -98,8 +100,6 @@ constexpr uint8_t N_DIM_IDX = 2;
 constexpr uint8_t C_DIM_IDX = 3;
 constexpr float DEFAULT_EPS = 1e-6f;
 constexpr uint8_t ITER_COUNT_IDX = 0;
-constexpr int64_t DOUBLE_BUFFER = 2;
-constexpr uint8_t BF16_BYTE_SIZE = 2;
 constexpr int64_t ALPHA_SIZE_3 = 3;
 constexpr int64_t N_SIZE_4 = 4;
 constexpr int64_t MAX_N = 8;
@@ -109,10 +109,18 @@ constexpr int64_t C_ALIGNMENT = 128;
 constexpr int64_t ITER_COUNT_DIVISOR = 2;
 constexpr int64_t C0_SIZE = 64;
 constexpr int64_t TILE_UPPER_BOUND = 64;
-constexpr double UB_USAGE_RATIO = 0.95;
-constexpr int64_t N_SQUARE_BUF_COUNT = 4;
-constexpr int64_t N_LINEAR_BUF_COUNT = 9;
-constexpr int64_t SCALAR_BUF_COUNT = 3;
+// one_stage kernel UB 占用对账（详见 InitBuffer）：固定区 24B*c（x/xFp32/gradHin/gradX 四个 buffer）
+constexpr int64_t C_BUFFERS_BYTE_PER_C = 24;
+// 固定小区：bias/alpha/gradAlpha/gradBias + pmGradPreSlot 宽槽(64B)
+// + 小输出每核累加器/装配缓冲(alpha2+bias8+alphaRes1+biasRes16+smallOut32 ≈ 236B)
+constexpr int64_t FIXED_SMALL_BUF_BYTES = 576;
+// 对齐余量：sigmoidGrad 两个 AlignUp(32B*tile,256B) 最坏 448B + skSumPre 块距 32B 对齐最坏 640B
+constexpr int64_t ALIGN_SLACK_BYTES = 1088;
+// 每 tile：hPre16+hRes64+invRms4+gradH2 96+sigmoid64+tmp96+gradInvRms4+gradHRes64+fused64+gradRMSNorm4
+// +skNormPre1280+skSumPre640+gradPreMixStage16（fp32 字节,v2 可选通路暂存）
+constexpr int64_t PER_TILE_BUF_BYTES = 2412;
+// SetTilingData 里 SetDynUBufSize 前从 ubSize_ 扣掉的预留，两处必须同源
+constexpr int64_t UB_DYN_RESERVE_BYTES = 32 * 1024;
 
 using namespace ge;
 using namespace std;
@@ -158,6 +166,30 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::GetShapeAttrsInfo()
         return ge::GRAPH_FAILED;
     }
     auto xShape = xShapePtr->GetStorageShape();
+    const auto xDesc = context_->GetInputDesc(INPUT_X_IDX);
+    OP_CHECK_IF(xDesc == nullptr, OP_LOGE(context_->GetNodeName(), "input x desc is nullptr"), return ge::GRAPH_FAILED);
+    isBf16_ = (xDesc->GetDataType() == ge::DT_BF16);
+    // 规格校验:x/gradHin 仅支持 fp16/bf16(README 约束);不支持 dtype 须在 tiling 层拦截
+    auto gradHinDesc = context_->GetInputDesc(GRAD_HIN_IDX);
+    const auto preMixShapePtrV = context_->GetOptionalInputShape(PRE_MIX_IDX);
+    const auto gradPreShapePtrV = context_->GetOptionalInputShape(GRAD_PRE_IDX);
+    const auto hPreShapePtrV = context_->GetInputShape(H_PRE_IDX);
+    for (size_t k = 0; k < 2; k++) {
+        const auto cur = (k == 0) ? preMixShapePtrV : gradPreShapePtrV;
+        const char* nm = (k == 0) ? "pre_mix" : "grad_pre";
+        OP_CHECK_IF(
+            cur != nullptr && hPreShapePtrV != nullptr && !(cur->GetStorageShape() == hPreShapePtrV->GetStorageShape()),
+            OPS_REPORT_VECTOR_INNER_ERR(opName, "%s shape must be same as h_pre when provided", nm),
+            return ge::GRAPH_FAILED);
+    }
+    OP_CHECK_IF(
+        (xDesc->GetDataType() != ge::DT_FLOAT16 && xDesc->GetDataType() != ge::DT_BF16) ||
+            (gradHinDesc == nullptr || gradHinDesc->GetDataType() != xDesc->GetDataType()),
+        OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(),
+                                    "x/gradHin dtype must be fp16 or bf16 (and equal), but got x=%d, gradHin=%d",
+                                    static_cast<int>(xDesc->GetDataType()),
+                                    gradHinDesc == nullptr ? -1 : static_cast<int>(gradHinDesc->GetDataType())),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF(xShape.GetDimNum() != 4,
                 OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(),
                                             "xShape verify failed, x must be 4D, but got %lu dims", xShape.GetDimNum()),
@@ -199,6 +231,14 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::CheckShapeBase(int64_t
     auto opName = context_->GetNodeName();
     int64_t bs = batchSize * seqLength;
     int64_t hcMix = n * n + 2 * n;
+
+    // 规格校验(README 约束):N∈[1,8];维度非空。缺失时越界输入会直达内核
+    // (实测 N=9 触发 aivec 异常),属异常场景拦截缺口
+    OP_CHECK_IF(n <= 0 || n > MAX_N,
+                OPS_REPORT_VECTOR_INNER_ERR(opName, "n must be in [1, %ld], but got %ld", MAX_N, n),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(bs <= 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "batchSize * seqLength must be positive, but got %ld", bs),
+                return ge::GRAPH_FAILED);
 
     int64_t batchPrefix[2] = {0, 0};
     size_t batchDimCount;
@@ -364,12 +404,12 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::CheckShape(int64_t bat
 
 ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::SetTilingData()
 {
-    MhcPreSinkhornPremixBackwardArch35TilingData *tilingData =
+    MhcPreSinkhornPremixBackwardArch35TilingData* tilingData =
         context_->GetTilingData<MhcPreSinkhornPremixBackwardArch35TilingData>();
     auto platformInfo = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
     auto ascendPlatformInfo = platform_ascendc::PlatformAscendC(platformInfo);
-    ubSize_ = ubSize_ - 32 * 1024;
+    ubSize_ = ubSize_ - UB_DYN_RESERVE_BYTES;
     auto floatDataType = matmul_tiling::DataType::DT_FLOAT;
     auto bf16DataType = matmul_tiling::DataType::DT_BF16;
 
@@ -378,7 +418,8 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::SetTilingData()
 
     mm1Tiling.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, floatDataType);
     mm1Tiling.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, floatDataType);
-    mm1Tiling.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, bf16DataType);
+    // 全 dtype 的 mm1 输出 fp32 workspace（kernel 侧 C 已统一切 fp32，单次舍入装配）
+    mm1Tiling.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, floatDataType);
     mm1Tiling.SetOrgShape(mm1M_, mm1N_, mm1K_);
     mm1Tiling.SetShape(mm1M_, mm1N_, mm1K_);
     mm1Tiling.SetBias(false);
@@ -387,6 +428,14 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::SetTilingData()
     if (mm1Tiling.GetTiling(tilingData->mm1TilingData) == -1) {
         return ge::GRAPH_FAILED;
     }
+
+    // mm2 在 kernel 侧移出 tile 循环：全量 K = b*s，org/shape 均按全量 N 生成 tiling（与 deterministic 一致），
+    // 各 AIC 的 N 维切片由运行时 SetSingleShape 完成（CeilDiv + 尾核截断，无需整除假设）
+    // UB 装不下任何 tile（c 过大）时响亮报错，不放行给 kernel 除零/越界
+    OP_CHECK_IF(
+        tile_ <= 0,
+        OPS_REPORT_VECTOR_INNER_ERR(opName, "tile(%ld) must be positive, c(%ld) is too large for UB", tile_, c_),
+        return ge::GRAPH_FAILED);
 
     mm2Tiling.SetAType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, floatDataType, true);
     mm2Tiling.SetBType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, floatDataType);
@@ -407,6 +456,14 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::SetTilingData()
     tilingData->c0 = c0_;
     tilingData->c1 = c1_;
     tilingData->aivNum = coreNumAiv_;
+    tilingData->aicNum = coreNumAic_;
+    // 可选输入 pre_mix / grad_pre 在场检测(参考 arch22:478 口径)
+    const auto preMixShapePtr = context_->GetOptionalInputShape(PRE_MIX_IDX);
+    const auto gradPreShapePtr = context_->GetOptionalInputShape(GRAD_PRE_IDX);
+    tilingData->hasPreMix = (preMixShapePtr != nullptr) ? 1 : 0;
+    tilingData->hasGradPre = (gradPreShapePtr != nullptr) ? 1 : 0;
+    // hc_eps 属性下发(此前 one_stage 侧三处断链:不下发/不读/SIMT 无末轮修正,对齐 deterministic)
+    tilingData->eps = hcEps_;
     tilingData->skIterCount = skIterCount_;
     tilingData->tileSize = tile_;
 
@@ -419,15 +476,23 @@ void MhcPreSinkhornPremixBackwardArch35Tiling::DoUbTiling()
     c1_ = c_ / c0_;
     coreTaskCount_ = (batchSize_ * seqLength_ + coreNumAiv_ - 1) / coreNumAiv_;
     tile_ = min(coreTaskCount_, TILE_UPPER_BOUND);
-    tileUB_ = (ubSize_ * UB_USAGE_RATIO - (n_ * sizeof(float) - DOUBLE_BUFFER * 2 * BF16_BYTE_SIZE) * c_) /
-              ((n_ * n_ * N_SQUARE_BUF_COUNT + n_ * N_LINEAR_BUF_COUNT + SCALAR_BUF_COUNT) * sizeof(float));
+    // tileUB_ 按 kernel InitBuffer 实际占用逐字节对账：预算基准与 SetTilingData 的 SetDynUBufSize 同源
+    // （ubSize_ - 32KB），分子扣固定区（24B*c + 小 buffer + 对齐余量），分母为每 tile 实际字节数
+    // bf16：主循环不分配 gradXBuf_（-2buf*U = -4B/c），新增 sSpillBuf_（AlignUp(tile,8)*4B ≈ 4B/tile 入分母，
+    // 对齐尾差入 slack）；收尾 pass 的 buffer 在 pipe_->Reset() 后分配，不占主循环预算
+    // 全 dtype fp32 装配口径：主循环不分配 gradXBuf_（-2buf*U），新增 sSpillBuf_（+4B/tile 入分母）
+    const int64_t cBufBytesPerC = C_BUFFERS_BYTE_PER_C - 4;
+    const int64_t perTileBufBytes = PER_TILE_BUF_BYTES + sizeof(float);
+    const int64_t alignSlackBytes = ALIGN_SLACK_BYTES + 64;
+    tileUB_ = (ubSize_ - UB_DYN_RESERVE_BYTES - cBufBytesPerC * c_ - FIXED_SMALL_BUF_BYTES - alignSlackBytes) /
+              perTileBufBytes;
     tile_ = min(tile_, tileUB_);
 
     mm1K_ = n_ * n_ + 2 * n_;
     mm1M_ = tile_ * 2;
     mm1N_ = n_ * c_;
 
-    mm2K_ = tile_ * 2;
+    mm2K_ = batchSize_ * seqLength_;
     mm2M_ = n_ * n_ + 2 * n_;
     mm2N_ = n_ * c_;
 }
@@ -461,7 +526,16 @@ ge::graphStatus MhcPreSinkhornPremixBackwardArch35Tiling::GetWorkspaceSize()
     size_t gradHat2Workspace = batchSize_ * seqLength_ * (n_ * n_ + 2 * n_ + n_ * c_) * sizeof(float);
     size_t systemWorkspaceSize = ascendPlatformInfo.GetLibApiWorkSpaceSize();
     size_t usrWorkSpaceSize = gradHat2Workspace;
-    size_t *currentWorkspace = context_->GetWorkspaceSizes(1);
+    {
+        // 全 dtype gradX fp32 装配（与 kernel InitGM 布局一致）：追加 [gradXM: bs*n*c fp32] +
+        // [sSpill: numTiles * AlignUp(tile_,8) fp32]（槽位对齐保证 kernel 侧 GM 写 32B 对齐）
+        int64_t spillSlotElems = (tile_ + 7) / 8 * 8;
+        int64_t numTiles = (batchSize_ * seqLength_ + tile_ - 1) / tile_;
+        usrWorkSpaceSize += batchSize_ * seqLength_ * n_ * c_ * sizeof(float) +
+                            static_cast<size_t>(numTiles) * spillSlotElems * sizeof(float) +
+                            static_cast<size_t>(coreNumAiv_) * 32 * sizeof(float);
+    }
+    size_t* currentWorkspace = context_->GetWorkspaceSizes(1);
     OP_CHECK_IF(currentWorkspace == nullptr, OP_LOGE(opName, "fail to GetWorkspaceSizes"), return ge::GRAPH_FAILED);
     currentWorkspace[0] = systemWorkspaceSize + usrWorkSpaceSize;
 

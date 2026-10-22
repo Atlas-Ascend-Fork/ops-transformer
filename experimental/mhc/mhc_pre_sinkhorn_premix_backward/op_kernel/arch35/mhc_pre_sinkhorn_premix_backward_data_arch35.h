@@ -27,6 +27,9 @@ struct MhcPreSinkhornPremixBackwardArch35TilingData {
     int64_t c1 = 0;
     int64_t cTail = 0;
     int64_t aivNum = 0;
+    int64_t aicNum = 0;
+    int64_t hasPreMix = 0;
+    int64_t hasGradPre = 0;
     int64_t tileGradY = 0;
     int64_t tileHHat2 = 0;
     int64_t tileSize = 0;
@@ -43,6 +46,8 @@ struct MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData {
     int64_t n = 0;
     int64_t usedAivNum = 0;
     int64_t aicNum = 0;
+    int64_t hasPreMix = 0;
+    int64_t hasGradPre = 0;
     int64_t cLoopDataLen = 0;
     int64_t bsLoopDataLen = 0;
     int64_t skIterCount = 0;

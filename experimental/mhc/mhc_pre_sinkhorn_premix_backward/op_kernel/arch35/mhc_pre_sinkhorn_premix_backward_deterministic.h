@@ -93,63 +93,64 @@ public:
     __aicore__ inline void Process(void);
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR phi, GM_ADDR hPre, GM_ADDR gradHin, GM_ADDR gradHPost,
                                 GM_ADDR gradHRes, GM_ADDR alpha, GM_ADDR bias, GM_ADDR hcBeforeNorm, GM_ADDR invRms,
-                                GM_ADDR sumOut, GM_ADDR normOut, GM_ADDR gradX, GM_ADDR gradPhi, GM_ADDR gradAlpha,
-                                GM_ADDR gradBias, GM_ADDR workspace,
-                                const MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData *tilingData,
-                                TPipe *pipe);
+                                GM_ADDR sumOut, GM_ADDR normOut, GM_ADDR preMix, GM_ADDR gradPre, GM_ADDR gradX,
+                                GM_ADDR gradPhi, GM_ADDR gradAlpha, GM_ADDR gradBias, GM_ADDR gradPreMix,
+                                GM_ADDR workspace,
+                                const MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData* tilingData,
+                                TPipe* pipe);
 
 private:
     // Phase A: C 维循环
     __aicore__ inline void PhaseACLoop(uint64_t bsIdx, uint64_t bsLen);
-    __aicore__ inline void CopyInHpreAndGradHPost(const GlobalTensor<U> &gmTensor, uint64_t bsLen);
+    __aicore__ inline void CopyInHpreAndGradHPost(const GlobalTensor<U>& gmTensor, uint64_t bsLen);
     __aicore__ inline void CopyInXAndGradHin(uint64_t xGmOffset, uint64_t gradHinGmOffset, uint64_t bsLen,
                                              uint64_t cLen);
-    __aicore__ inline void ComputeGradHPreAndGradXFromHin(LocalTensor<U> &hPreLocal, LocalTensor<U> &gradHPreLocal,
-                                                          const BsCLoopInfo &info);
+    __aicore__ inline void ComputeGradHPreAndGradXFromHin(LocalTensor<U>& hPreLocal, LocalTensor<U>& gradHPreLocal,
+                                                          const BsCLoopInfo& info);
 
     // Phase B: K 维计算
     __aicore__ inline void PhaseBKDim(uint64_t bsIdx, uint64_t bsLen);
     __aicore__ inline void ComputeSigmoidGrad(uint64_t bsLen, uint64_t colLen, uint8_t num);
     __aicore__ inline void ComputeGradAlphaAndBias(uint64_t bsLen, uint64_t colLen);
-    __aicore__ inline void ComputeGradNormOut(const LocalTensor<U> &invRmsLocal, uint64_t bsLen, uint64_t colLen,
-                                              uint64_t oft, const U &alpha, uint64_t biasOft);
+    __aicore__ inline void ComputeGradNormOut(const LocalTensor<U>& invRmsLocal, uint64_t bsLen, uint64_t colLen,
+                                              uint64_t oft, const U& alpha, uint64_t biasOft);
     __aicore__ inline void CopyInHcBeforeNorm(uint64_t bsLen, uint64_t colLen, uint64_t gmOft);
     __aicore__ inline void CopyInInvRms(uint64_t bsLen, uint64_t gmOft);
     __aicore__ inline void CopyOutAlphaAndBias(uint64_t gmAlphaOft, uint64_t gmBiasOft, uint64_t colLen);
     __aicore__ inline void ComputeGradHcBeforeNormAndInvRms(uint64_t bsOffset, uint64_t bsLen, U alphaScalar,
                                                             uint64_t count, uint64_t offset);
-    __aicore__ inline void SinkhornGradSimdVf(const LocalTensor<float> &skGradLocal,
-                                              const LocalTensor<float> &sumOutRowLocal,
-                                              const LocalTensor<float> &sumOutColLocal,
-                                              const LocalTensor<float> &normOutLocal, uint64_t bsIdx, uint64_t bsLen);
+    __aicore__ inline void SinkhornGradSimdVf(const LocalTensor<float>& skGradLocal,
+                                              const LocalTensor<float>& sumOutRowLocal,
+                                              const LocalTensor<float>& sumOutColLocal,
+                                              const LocalTensor<float>& normOutLocal, uint64_t bsIdx, uint64_t bsLen);
     __aicore__ inline void SinkhornGradAndExpGrad(uint64_t bsOffset, uint64_t bsIdx, uint64_t bsLen);
     __aicore__ inline void ExpGradSimdVf(LocalTensor<float> skGrad, LocalTensor<float> expGrad,
                                          LocalTensor<float> zResLocal, uint64_t bsIdx, uint64_t bsLen);
     // SinkhornGradSimdVf sub-functions (for-skIter loop in caller)
-    __aicore__ inline void SinkhornGradComputeTmpMul(__local_mem__ U *rowNormPtr, __local_mem__ U *skGradPtr,
-                                                     __local_mem__ U *tmpPtr, uint16_t bsLenLoop);
-    __aicore__ inline void SinkhornGradComputeTmpDiv(__local_mem__ U *colSumPtr, __local_mem__ U *skGradPtr,
-                                                     __local_mem__ U *tmpPtr, __local_mem__ U *tmpDivLocalPtr,
-                                                     __local_mem__ U *tmpDiv2LocalPtr, uint16_t bsLenLoop);
-    __aicore__ inline void SinkhornGradReduceSumCol(__local_mem__ U *tmpDiv2LocalPtr, __local_mem__ U *tmpPtr,
+    __aicore__ inline void SinkhornGradComputeTmpMul(__local_mem__ U* rowNormPtr, __local_mem__ U* skGradPtr,
+                                                     __local_mem__ U* tmpPtr, uint16_t bsLenLoop);
+    __aicore__ inline void SinkhornGradComputeTmpDiv(__local_mem__ U* colSumPtr, __local_mem__ U* skGradPtr,
+                                                     __local_mem__ U* tmpPtr, __local_mem__ U* tmpDivLocalPtr,
+                                                     __local_mem__ U* tmpDiv2LocalPtr, uint16_t bsLenLoop);
+    __aicore__ inline void SinkhornGradReduceSumCol(__local_mem__ U* tmpDiv2LocalPtr, __local_mem__ U* tmpPtr,
                                                     uint16_t bsLenLoop);
-    __aicore__ inline void SinkhornGradComputeRowNorm(__local_mem__ U *tmpDivLocalPtr, __local_mem__ U *rowNormPtr,
-                                                      __local_mem__ U *tmpPtr, __local_mem__ U *rowSumPtr,
-                                                      __local_mem__ U *tmpDiv3LocalPtr,
-                                                      __local_mem__ U *tmpDiv4LocalPtr, uint16_t bsLenLoop);
-    __aicore__ inline void SinkhornGradUpdateSkGrad(__local_mem__ U *tmpDiv3LocalPtr, __local_mem__ U *tmpDiv4LocalPtr,
-                                                    __local_mem__ U *skGradPtr, uint16_t bsLenLoop);
-    __aicore__ inline void SinkhornGradRestoreRaw(__local_mem__ U *rowNormPtr, __local_mem__ U *rowSumPtr,
+    __aicore__ inline void SinkhornGradComputeRowNorm(__local_mem__ U* tmpDivLocalPtr, __local_mem__ U* rowNormPtr,
+                                                      __local_mem__ U* tmpPtr, __local_mem__ U* rowSumPtr,
+                                                      __local_mem__ U* tmpDiv3LocalPtr,
+                                                      __local_mem__ U* tmpDiv4LocalPtr, uint16_t bsLenLoop);
+    __aicore__ inline void SinkhornGradUpdateSkGrad(__local_mem__ U* tmpDiv3LocalPtr, __local_mem__ U* tmpDiv4LocalPtr,
+                                                    __local_mem__ U* skGradPtr, uint16_t bsLenLoop);
+    __aicore__ inline void SinkhornGradRestoreRaw(__local_mem__ U* rowNormPtr, __local_mem__ U* rowSumPtr,
                                                   uint16_t bsLenLoop);
     // ExpGradSimdVf sub-functions
-    __aicore__ inline void ExpGradComputeMaxAndIsMax(__local_mem__ U *zResPtr, __local_mem__ U *zResMaxPtr,
-                                                     __local_mem__ U *zResMaxIdxPtr, __local_mem__ U *isMaxIdxPtr,
+    __aicore__ inline void ExpGradComputeMaxAndIsMax(__local_mem__ U* zResPtr, __local_mem__ U* zResMaxPtr,
+                                                     __local_mem__ U* zResMaxIdxPtr, __local_mem__ U* isMaxIdxPtr,
                                                      uint16_t bsLenLoop);
-    __aicore__ inline void ExpGradComputeExpMul(__local_mem__ U *zResPtr, __local_mem__ U *zResMaxPtr,
-                                                __local_mem__ U *skGradPtr, __local_mem__ U *tmpMulPtr,
+    __aicore__ inline void ExpGradComputeExpMul(__local_mem__ U* zResPtr, __local_mem__ U* zResMaxPtr,
+                                                __local_mem__ U* skGradPtr, __local_mem__ U* tmpMulPtr,
                                                 uint16_t bsLenLoop);
-    __aicore__ inline void ExpGradComputeFinal(__local_mem__ U *tmpMulPtr, __local_mem__ U *isMaxIdxPtr,
-                                               __local_mem__ U *expGradPtr, uint16_t bsLenLoop);
+    __aicore__ inline void ExpGradComputeFinal(__local_mem__ U* tmpMulPtr, __local_mem__ U* isMaxIdxPtr,
+                                               __local_mem__ U* expGradPtr, uint16_t bsLenLoop);
 
     // Phase D: AIC Matmul
     __aicore__ inline void PhaseDMm1(const int32_t taskOffset, const int32_t mm1M);
@@ -177,6 +178,9 @@ private:
     GlobalTensor<U> alphaGm_;
     GlobalTensor<U> biasGm_;
     GlobalTensor<U> hPreGm_;
+    GlobalTensor<U> preMixGm_, gradPreGm_, gradPreMixGm_;
+    bool hasPreMix_ = false;
+    bool hasGradPre_ = false;
     GlobalTensor<U> hcBeforeNormGm_;
     GlobalTensor<U> invRmsGm_;
     GlobalTensor<U> sumOutGm_;
@@ -212,6 +216,8 @@ private:
     TQueBind<QuePosition::VECIN, QuePosition::VECOUT, 1> gradBiasQue_;
 
     TBuf<TPosition::VECCALC> gradHPreBuf_;
+    TQue<QuePosition::VECIN, 1> gradPreQue_;
+    TQue<QuePosition::VECOUT, 1> gradPreMixQue_;
     TBuf<TPosition::VECCALC> gradZBuf_;
     TBuf<TPosition::VECCALC> biasBuf_;
     TBuf<TPosition::VECCALC> normOutForwardBuf_;
@@ -263,8 +269,8 @@ private:
     int64_t xTypeSize_ = sizeof(X_T);
     int64_t gradHinTypeSize_ = sizeof(GRADHIN_T);
     U alphaPre_, alphaPost_, alphaRes_;
-    TPipe *pipe_ = nullptr;
-    const MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData *tilingData_ = nullptr;
+    TPipe* pipe_ = nullptr;
+    const MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData* tilingData_ = nullptr;
     constexpr static uint32_t V_REG_SIZE = Ops::Base::GetVRegSize();
     int64_t aicNum_ = 0;
     int64_t bsTaskCount_ = 0;
@@ -289,9 +295,9 @@ private:
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::Init(
     GM_ADDR x, GM_ADDR phi, GM_ADDR hPre, GM_ADDR gradHin, GM_ADDR gradHPost, GM_ADDR gradHRes, GM_ADDR alpha,
-    GM_ADDR bias, GM_ADDR hcBeforeNorm, GM_ADDR invRms, GM_ADDR sumOut, GM_ADDR normOut, GM_ADDR gradX, GM_ADDR gradPhi,
-    GM_ADDR gradAlpha, GM_ADDR gradBias, GM_ADDR workspace,
-    const MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData *tilingData, TPipe *pipe)
+    GM_ADDR bias, GM_ADDR hcBeforeNorm, GM_ADDR invRms, GM_ADDR sumOut, GM_ADDR normOut, GM_ADDR preMix,
+    GM_ADDR gradPre, GM_ADDR gradX, GM_ADDR gradPhi, GM_ADDR gradAlpha, GM_ADDR gradBias, GM_ADDR gradPreMix,
+    GM_ADDR workspace, const MhcPreSinkhornPremixBackwardArch35DeterminiticTilingData* tilingData, TPipe* pipe)
 {
     tilingData_ = tilingData;
     pipe_ = pipe;
@@ -305,6 +311,8 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     eps_ = tilingData->eps;
     k_ = n_ * n_ + 2 * n_;
     usedAivNum_ = tilingData->usedAivNum;
+    hasPreMix_ = tilingData->hasPreMix != 0;
+    hasGradPre_ = tilingData->hasGradPre != 0;
     blockIdx_ = GetBlockIdx();
     blockSize_ = Ops::Base::GetUbBlockSize();
     curCoreProcessbsTask_ = (blockIdx_ == usedAivNum_ - 1) ? tilingData->tailBsTaskCount : tilingData->bsTaskCount;
@@ -332,9 +340,9 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     finalUsedAivNum_ = tilingData->finalUsedAivNum;
     aicNum_ = tilingData->aicNum;
 
-    gradXGm_.SetGlobalBuffer(reinterpret_cast<__gm__ X_T *>(gradX));
-    phiGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(phi));
-    gradPhiGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(gradPhi));
+    gradXGm_.SetGlobalBuffer(reinterpret_cast<__gm__ X_T*>(gradX));
+    phiGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(phi));
+    gradPhiGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(gradPhi));
     constexpr int64_t FP32_BYTE_SIZE = sizeof(U);
     int64_t gradAlphaOffset = bsCount_ * c_ * n_ + WS_BUFFER_INTERVAL / FP32_BYTE_SIZE;
     int64_t gradBiasOffset = gradAlphaOffset + 3 * usedAivNum_ + WS_BUFFER_INTERVAL / FP32_BYTE_SIZE;
@@ -346,29 +354,33 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     int64_t gradNormOutOffset =
         gradHcBeforeNormOffset + bsCount_ * (2 * n_ + n_ * n_) + WS_BUFFER_INTERVAL / FP32_BYTE_SIZE;
 
-    xFp32Ws_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace));
-    gradAlphaWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace) + gradAlphaOffset);
-    gradBiasWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace) + gradBiasOffset);
-    gradXFromHinWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace) + gradXFromHinOffset);
-    gradHcBeforeNormWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace) + gradHcBeforeNormOffset);
-    gradNormOutWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace) + gradNormOutOffset);
-    gradXFromMatmulWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace) + gradXFromMatmulOffset);
-    gradXFromRmsWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(workspace) + gradXFromRmsOffset);
+    xFp32Ws_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace));
+    gradAlphaWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace) + gradAlphaOffset);
+    gradBiasWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace) + gradBiasOffset);
+    gradXFromHinWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace) + gradXFromHinOffset);
+    gradHcBeforeNormWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace) + gradHcBeforeNormOffset);
+    gradNormOutWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace) + gradNormOutOffset);
+    gradXFromMatmulWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace) + gradXFromMatmulOffset);
+    gradXFromRmsWs_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(workspace) + gradXFromRmsOffset);
 
     if ASCEND_IS_AIV {
-        xGm_.SetGlobalBuffer(reinterpret_cast<__gm__ X_T *>(x));
-        gradHinGm_.SetGlobalBuffer(reinterpret_cast<__gm__ GRADHIN_T *>(gradHin));
-        gradHPostGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(gradHPost));
-        gradHResGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(gradHRes));
-        alphaGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(alpha));
-        biasGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(bias));
-        hPreGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(hPre));
-        hcBeforeNormGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(hcBeforeNorm));
-        invRmsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(invRms));
-        sumOutGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(sumOut));
-        normOutGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(normOut));
-        gradAlphaGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(gradAlpha));
-        gradBiasGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U *>(gradBias));
+        xGm_.SetGlobalBuffer(reinterpret_cast<__gm__ X_T*>(x));
+        gradHinGm_.SetGlobalBuffer(reinterpret_cast<__gm__ GRADHIN_T*>(gradHin));
+        gradHPostGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(gradHPost));
+        gradHResGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(gradHRes));
+        alphaGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(alpha));
+        biasGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(bias));
+        hPreGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(hPre));
+        // v2 可选通路(参考 golden.py:hasPreMix 时 pre_mix 替代 h_pre 作 y 折权重;grad_pre 合并点三态)
+        preMixGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(preMix));
+        gradPreGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(gradPre));
+        gradPreMixGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(gradPreMix));
+        hcBeforeNormGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(hcBeforeNorm));
+        invRmsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(invRms));
+        sumOutGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(sumOut));
+        normOutGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(normOut));
+        gradAlphaGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(gradAlpha));
+        gradBiasGm_.SetGlobalBuffer(reinterpret_cast<__gm__ U*>(gradBias));
 
         // Init UB
         // VECIN
@@ -386,6 +398,8 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
         // BUF
         pipe_->InitBuffer(gradHPreBuf_, bsNAlignFp32_ * uTypeSize_);
+        pipe_->InitBuffer(gradPreQue_, 1, bsNAlignFp32_ * uTypeSize_);
+        pipe_->InitBuffer(gradPreMixQue_, 1, bsNAlignFp32_ * uTypeSize_);
         pipe_->InitBuffer(gradZBuf_, bsnnAlignFp32_ * uTypeSize_);
         pipe_->InitBuffer(biasBuf_, kAlignFp32_ * uTypeSize_);
         pipe_->InitBuffer(normOutForwardBuf_, bsnnAlignFp32_ * uTypeSize_);
@@ -442,7 +456,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::CopyInHpreAndGradHPost(
-    const GlobalTensor<U> &gMTensor, uint64_t bsLen)
+    const GlobalTensor<U>& gMTensor, uint64_t bsLen)
 {
     LocalTensor<U> hPreLocal = hPreAndGradHPostQue_.AllocTensor<U>();
     CopyIn(hPreLocal, gMTensor, 1, bsLen * n_, 0, 0);
@@ -521,8 +535,8 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
         LocalTensor<U> gradAlphaSumLocal = gradAlphaSumQue_.AllocTensor<U>();
         LocalTensor<U> gradAlphaLocal = gradAlphaQue_.DeQue<U>();
 
-        __local_mem__ U *gradAlphaAddr = (__ubuf__ U *)gradAlphaLocal.GetPhyAddr();
-        __local_mem__ U *gradAlphaSumAddr = (__ubuf__ U *)gradAlphaSumLocal.GetPhyAddr();
+        __local_mem__ U* gradAlphaAddr = (__ubuf__ U*)gradAlphaLocal.GetPhyAddr();
+        __local_mem__ U* gradAlphaSumAddr = (__ubuf__ U*)gradAlphaSumLocal.GetPhyAddr();
         uint32_t vfLen = V_REG_SIZE / sizeof(U);
         uint16_t loopCnt = (usedAivNum_ + vfLen - 1) / vfLen;
         __VEC_SCOPE__
@@ -588,7 +602,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     uint64_t xOffset = bsOffset * n_ * c_;
     uint64_t gradHinOffset = bsOffset * c_;
     uint64_t gradXFromHinOffset = bsOffset * n_ * c_;
-    CopyInHpreAndGradHPost(hPreGm_[hPreOffset], bsLen);
+    CopyInHpreAndGradHPost(hasPreMix_ ? preMixGm_[hPreOffset] : hPreGm_[hPreOffset], bsLen);
     LocalTensor<U> hPreLocal = hPreAndGradHPostQue_.DeQue<U>();
 
     BsCLoopInfo info;
@@ -617,6 +631,38 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
         gradXFromHinQue_.FreeTensor(gradXFromHinLocal);
     }
     hPreAndGradHPostQue_.FreeTensor(hPreLocal);
+
+    // v2 合并点三态:hasPreMix 时 d_pre = grad_pre(或 0),d_mix_for_y 写出为 grad_pre_mix;
+    // 否则 d_pre = d_mix_for_y + grad_pre(或 +0)。全部走队列/CopyOut 原语,不用裸事件 id
+    //(FetchEventID 与队列框架共用事件池,裸用会扰乱后续队列阶段的同步,实测导致下游输出错值)
+    if (hasPreMix_ || hasGradPre_) {
+        auto gradPreLocal = gradPreQue_.AllocTensor<U>();
+        DataCopyPad(gradPreLocal, gradPreGm_[bsOffset * n_],
+                    {static_cast<uint16_t>(1), static_cast<uint32_t>(bsLen * n_ * uTypeSize_), 0, 0, 0},
+                    {false, 0, 0, 0});
+        gradPreQue_.EnQue(gradPreLocal);
+        gradPreLocal = gradPreQue_.DeQue<U>();
+        if (hasPreMix_) {
+            // d_mix 经 VECOUT 队列写出(V→MTE3 同步由队列框架保证;裸写/裸事件两种实测均读到未就绪数据)
+            auto gradPreMixSlot = gradPreMixQue_.AllocTensor<U>();
+            Duplicate(gradPreMixSlot, float(0), bsLen * n_);
+            Add(gradPreMixSlot, gradPreMixSlot, gradHPreLocal, bsLen * n_);
+            gradPreMixQue_.EnQue(gradPreMixSlot);
+            gradPreMixSlot = gradPreMixQue_.DeQue<U>();
+            DataCopyPad(gradPreMixGm_[bsOffset * n_], gradPreMixSlot,
+                        {static_cast<uint16_t>(1), static_cast<uint32_t>(bsLen * n_ * uTypeSize_), 0, 0, 0});
+            gradPreMixQue_.FreeTensor(gradPreMixSlot);
+            if (hasGradPre_) {
+                Duplicate(gradHPreLocal, float(0), bsLen * n_);
+                Add(gradHPreLocal, gradHPreLocal, gradPreLocal, bsLen * n_);
+            } else {
+                Duplicate(gradHPreLocal, float(0), bsLen * n_);
+            }
+        } else {
+            Add(gradHPreLocal, gradHPreLocal, gradPreLocal, bsLen * n_);
+        }
+        gradPreQue_.FreeTensor(gradPreLocal);
+    }
 }
 
 template <typename X_T, typename GRADHIN_T, typename U>
@@ -655,7 +701,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::ComputeGradNormOut(
-    const LocalTensor<U> &invRmsLocal, uint64_t bsLen, uint64_t colLen, uint64_t oft, const U &alpha, uint64_t biasOft)
+    const LocalTensor<U>& invRmsLocal, uint64_t bsLen, uint64_t colLen, uint64_t oft, const U& alpha, uint64_t biasOft)
 {
     CopyInHcBeforeNorm(bsLen, colLen, oft);
     LocalTensor<U> hcBeforeNormLocal = hcBeforeNormQue_.DeQue<U>();
@@ -664,11 +710,11 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     LocalTensor<U> normOutForwardLocal = normOutForwardBuf_.Get<U>();
     LocalTensor<U> biasLocal = biasBuf_.Get<U>();
 
-    __local_mem__ U *zAddr = (__ubuf__ U *)zLocal.GetPhyAddr();
-    __local_mem__ U *hcBeformNormAddr = (__ubuf__ U *)hcBeforeNormLocal.GetPhyAddr();
-    __local_mem__ U *invRmsAddr = (__ubuf__ U *)invRmsLocal.GetPhyAddr();
-    __local_mem__ U *normOutForwardAddr = (__ubuf__ U *)normOutForwardLocal.GetPhyAddr();
-    __local_mem__ U *biasAddr = (__ubuf__ U *)biasLocal[biasOft].GetPhyAddr();
+    __local_mem__ U* zAddr = (__ubuf__ U*)zLocal.GetPhyAddr();
+    __local_mem__ U* hcBeformNormAddr = (__ubuf__ U*)hcBeforeNormLocal.GetPhyAddr();
+    __local_mem__ U* invRmsAddr = (__ubuf__ U*)invRmsLocal.GetPhyAddr();
+    __local_mem__ U* normOutForwardAddr = (__ubuf__ U*)normOutForwardLocal.GetPhyAddr();
+    __local_mem__ U* biasAddr = (__ubuf__ U*)biasLocal[biasOft].GetPhyAddr();
 
     auto cLenAlign = Ops::Base::CeilAlign(int64_t(colLen * uTypeSize_), blockSize_) / uTypeSize_;
     ComputeForwardPart<U>(hcBeformNormAddr, invRmsAddr, normOutForwardAddr, bsLen, colLen, cLenAlign, V_REG_SIZE,
@@ -687,16 +733,16 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     LocalTensor<U> zPreLocal = zBuf_.Get<U>();
     LocalTensor<U> gradZLocal = gradZBuf_.Get<U>();
 
-    __local_mem__ U *gradHAddr;
-    __local_mem__ U *zPreAddr = (__ubuf__ U *)zPreLocal.GetPhyAddr();
-    __local_mem__ U *gradZAddr = (__ubuf__ U *)gradZLocal.GetPhyAddr();
+    __local_mem__ U* gradHAddr;
+    __local_mem__ U* zPreAddr = (__ubuf__ U*)zPreLocal.GetPhyAddr();
+    __local_mem__ U* gradZAddr = (__ubuf__ U*)gradZLocal.GetPhyAddr();
     if (num == SIGMOID_GRAD_PRE) {
         gradHLocal = gradHPreBuf_.Get<U>();
-        gradHAddr = (__ubuf__ U *)gradHLocal.GetPhyAddr();
+        gradHAddr = (__ubuf__ U*)gradHLocal.GetPhyAddr();
         SigmoidGrad<U, true>(gradHAddr, zPreAddr, gradZAddr, bsLen, colLen, V_REG_SIZE);
     } else {
         gradHLocal = hPreAndGradHPostQue_.DeQue<U>();
-        gradHAddr = (__ubuf__ U *)gradHLocal.GetPhyAddr();
+        gradHAddr = (__ubuf__ U*)gradHLocal.GetPhyAddr();
         SigmoidGrad<U, false>(gradHAddr, zPreAddr, gradZAddr, bsLen, colLen, V_REG_SIZE);
         hPreAndGradHPostQue_.FreeTensor(gradHLocal);
     }
@@ -711,10 +757,10 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     LocalTensor<U> gradAlphaLocal = gradAlphaAndBiasQue_.AllocTensor<U>();
     LocalTensor<U> gradBiasLocal = gradAlphaLocal[gradBiasOft_];
 
-    __local_mem__ U *normOutForwardAddr = (__ubuf__ U *)normOutForwardLocal.GetPhyAddr();
-    __local_mem__ U *gradZAddr = (__ubuf__ U *)gradZLocal.GetPhyAddr();
-    __local_mem__ U *gradAlphaAddr = (__ubuf__ U *)gradAlphaLocal.GetPhyAddr();
-    __local_mem__ U *gradBiasAddr = (__ubuf__ U *)gradBiasLocal.GetPhyAddr();
+    __local_mem__ U* normOutForwardAddr = (__ubuf__ U*)normOutForwardLocal.GetPhyAddr();
+    __local_mem__ U* gradZAddr = (__ubuf__ U*)gradZLocal.GetPhyAddr();
+    __local_mem__ U* gradAlphaAddr = (__ubuf__ U*)gradAlphaLocal.GetPhyAddr();
+    __local_mem__ U* gradBiasAddr = (__ubuf__ U*)gradBiasLocal.GetPhyAddr();
 
     ComputeGradAlpha<U>(normOutForwardAddr, gradZAddr, gradAlphaAddr, bsLen, colLen, V_REG_SIZE);
     ComputeGradBias<U>(gradBiasAddr, gradZAddr, bsLen, colLen, V_REG_SIZE);
@@ -723,19 +769,19 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::ComputeGradHPreAndGradXFromHin(
-    LocalTensor<U> &hPreLocal, LocalTensor<U> &gradHPreLocal, const BsCLoopInfo &info)
+    LocalTensor<U>& hPreLocal, LocalTensor<U>& gradHPreLocal, const BsCLoopInfo& info)
 {
     LocalTensor<U> xFp32Local = xFp32Que_.AllocTensor<U>();
     LocalTensor<U> gradXFromHinLocal = gradXFromHinQue_.AllocTensor<U>();
     LocalTensor<X_T> xLocal = xQue_.DeQue<X_T>();
     LocalTensor<GRADHIN_T> gradHInLocal = gradHinQue_.DeQue<GRADHIN_T>();
 
-    __local_mem__ X_T *xAddr = (__ubuf__ X_T *)xLocal.GetPhyAddr();
-    __local_mem__ U *xCastAddr = (__ubuf__ U *)xFp32Local.GetPhyAddr();
-    __local_mem__ GRADHIN_T *gradHInAddr = (__ubuf__ GRADHIN_T *)gradHInLocal.GetPhyAddr();
-    __local_mem__ U *gradHPreAddr = (__ubuf__ U *)gradHPreLocal.GetPhyAddr();
-    __local_mem__ U *hPreAddr = (__ubuf__ U *)hPreLocal.GetPhyAddr();
-    __local_mem__ U *gradXFromHinAddr = (__ubuf__ U *)gradXFromHinLocal.GetPhyAddr();
+    __local_mem__ X_T* xAddr = (__ubuf__ X_T*)xLocal.GetPhyAddr();
+    __local_mem__ U* xCastAddr = (__ubuf__ U*)xFp32Local.GetPhyAddr();
+    __local_mem__ GRADHIN_T* gradHInAddr = (__ubuf__ GRADHIN_T*)gradHInLocal.GetPhyAddr();
+    __local_mem__ U* gradHPreAddr = (__ubuf__ U*)gradHPreLocal.GetPhyAddr();
+    __local_mem__ U* hPreAddr = (__ubuf__ U*)hPreLocal.GetPhyAddr();
+    __local_mem__ U* gradXFromHinAddr = (__ubuf__ U*)gradXFromHinLocal.GetPhyAddr();
 
     uint32_t vfLen = V_REG_SIZE / uTypeSize_;
     uint16_t loopCnt = (info.cLen + vfLen - 1) / vfLen;
@@ -857,21 +903,21 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::SinkhornGradSimdVf(
-    const LocalTensor<float> &skGradLocal, const LocalTensor<float> &sumOutRowLocal,
-    const LocalTensor<float> &sumOutColLocal, const LocalTensor<float> &normOutLocal, uint64_t bsIdx, uint64_t bsLen)
+    const LocalTensor<float>& skGradLocal, const LocalTensor<float>& sumOutRowLocal,
+    const LocalTensor<float>& sumOutColLocal, const LocalTensor<float>& normOutLocal, uint64_t bsIdx, uint64_t bsLen)
 {
     auto bsLennAlignFp32_ = Ops::Base::CeilAlign(int64_t(bsLen * n_ * uTypeSize_), blockSize_) / uTypeSize_;
     auto bsLennnAlignFp32_ = Ops::Base::CeilAlign(int64_t(bsLen * n_ * n_ * uTypeSize_), blockSize_) / uTypeSize_;
 
-    __local_mem__ U *skGradPtr = (__local_mem__ U *)skGradLocal.GetPhyAddr();
-    __local_mem__ U *colSumBase = (__local_mem__ U *)sumOutColLocal.GetPhyAddr();
-    __local_mem__ U *rowSumBase = (__local_mem__ U *)sumOutRowLocal.GetPhyAddr();
-    __local_mem__ U *normOutBase = (__local_mem__ U *)normOutLocal.GetPhyAddr();
-    __local_mem__ U *tmpDivLocalPtr = (__local_mem__ U *)tmpDivBuf_.Get<float>().GetPhyAddr();
-    __local_mem__ U *tmpDiv2LocalPtr = (__local_mem__ U *)tmpDiv2Buf_.Get<float>().GetPhyAddr();
-    __local_mem__ U *tmpDiv3LocalPtr = (__local_mem__ U *)tmpDiv3Buf_.Get<float>().GetPhyAddr();
-    __local_mem__ U *tmpDiv4LocalPtr = (__local_mem__ U *)tmpDiv4Buf_.Get<float>().GetPhyAddr();
-    __local_mem__ U *tmpPtr = (__local_mem__ U *)tmpBuf_.Get<float>().GetPhyAddr();
+    __local_mem__ U* skGradPtr = (__local_mem__ U*)skGradLocal.GetPhyAddr();
+    __local_mem__ U* colSumBase = (__local_mem__ U*)sumOutColLocal.GetPhyAddr();
+    __local_mem__ U* rowSumBase = (__local_mem__ U*)sumOutRowLocal.GetPhyAddr();
+    __local_mem__ U* normOutBase = (__local_mem__ U*)normOutLocal.GetPhyAddr();
+    __local_mem__ U* tmpDivLocalPtr = (__local_mem__ U*)tmpDivBuf_.Get<float>().GetPhyAddr();
+    __local_mem__ U* tmpDiv2LocalPtr = (__local_mem__ U*)tmpDiv2Buf_.Get<float>().GetPhyAddr();
+    __local_mem__ U* tmpDiv3LocalPtr = (__local_mem__ U*)tmpDiv3Buf_.Get<float>().GetPhyAddr();
+    __local_mem__ U* tmpDiv4LocalPtr = (__local_mem__ U*)tmpDiv4Buf_.Get<float>().GetPhyAddr();
+    __local_mem__ U* tmpPtr = (__local_mem__ U*)tmpBuf_.Get<float>().GetPhyAddr();
 
     uint16_t bsLenLoop = static_cast<uint16_t>(bsLen);
 
@@ -902,12 +948,12 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     LocalTensor<float> tmpLocal = tmpBuf_.Get<float>();
     LocalTensor<float> isMaxIdx = isMaxBuf_.Get<float>();
 
-    __local_mem__ U *expGradPtr = (__local_mem__ U *)expGrad.GetPhyAddr();
-    __local_mem__ U *zResPtr = (__local_mem__ U *)zResLocal.GetPhyAddr();
-    __local_mem__ U *skGradPtr = (__local_mem__ U *)skGrad.GetPhyAddr();
-    __local_mem__ U *tmpMulPtr = (__local_mem__ U *)tmpMul.GetPhyAddr();
-    __local_mem__ U *tmpPtr = (__local_mem__ U *)tmpLocal.GetPhyAddr();
-    __local_mem__ U *isMaxIdxPtr = (__local_mem__ U *)isMaxIdx.GetPhyAddr();
+    __local_mem__ U* expGradPtr = (__local_mem__ U*)expGrad.GetPhyAddr();
+    __local_mem__ U* zResPtr = (__local_mem__ U*)zResLocal.GetPhyAddr();
+    __local_mem__ U* skGradPtr = (__local_mem__ U*)skGrad.GetPhyAddr();
+    __local_mem__ U* tmpMulPtr = (__local_mem__ U*)tmpMul.GetPhyAddr();
+    __local_mem__ U* tmpPtr = (__local_mem__ U*)tmpLocal.GetPhyAddr();
+    __local_mem__ U* isMaxIdxPtr = (__local_mem__ U*)isMaxIdx.GetPhyAddr();
 
     uint32_t maskLenN = static_cast<uint32_t>(n_);
     uint32_t maskLenNN = static_cast<uint32_t>(nn_);
@@ -917,8 +963,8 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
     AscendC::DataCopy(zResMaxIdx, zResLocal, maskLenNN);
     AscendC::DataCopy(zResMax, zResLocal, maskLenNN);
 
-    __local_mem__ U *zResMaxPtr = (__local_mem__ U *)zResMax.GetPhyAddr();
-    __local_mem__ U *zResMaxIdxPtr = (__local_mem__ U *)zResMaxIdx.GetPhyAddr();
+    __local_mem__ U* zResMaxPtr = (__local_mem__ U*)zResMax.GetPhyAddr();
+    __local_mem__ U* zResMaxIdxPtr = (__local_mem__ U*)zResMaxIdx.GetPhyAddr();
 
     ExpGradComputeMaxAndIsMax(zResPtr, zResMaxPtr, zResMaxIdxPtr, isMaxIdxPtr, bsLenLoop);
     ExpGradComputeExpMul(zResPtr, zResMaxPtr, skGradPtr, tmpMulPtr, bsLenLoop);
@@ -927,7 +973,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::SinkhornGradComputeTmpMul(
-    __local_mem__ U *rowNormPtr, __local_mem__ U *skGradPtr, __local_mem__ U *tmpPtr, uint16_t bsLenLoop)
+    __local_mem__ U* rowNormPtr, __local_mem__ U* skGradPtr, __local_mem__ U* tmpPtr, uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
     {
@@ -959,8 +1005,8 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::SinkhornGradComputeTmpDiv(
-    __local_mem__ U *colSumPtr, __local_mem__ U *skGradPtr, __local_mem__ U *tmpPtr, __local_mem__ U *tmpDivLocalPtr,
-    __local_mem__ U *tmpDiv2LocalPtr, uint16_t bsLenLoop)
+    __local_mem__ U* colSumPtr, __local_mem__ U* skGradPtr, __local_mem__ U* tmpPtr, __local_mem__ U* tmpDivLocalPtr,
+    __local_mem__ U* tmpDiv2LocalPtr, uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
     {
@@ -1016,7 +1062,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::SinkhornGradReduceSumCol(
-    __local_mem__ U *tmpDiv2LocalPtr, __local_mem__ U *tmpPtr, uint16_t bsLenLoop)
+    __local_mem__ U* tmpDiv2LocalPtr, __local_mem__ U* tmpPtr, uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
     {
@@ -1050,8 +1096,8 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::SinkhornGradComputeRowNorm(
-    __local_mem__ U *tmpDivLocalPtr, __local_mem__ U *rowNormPtr, __local_mem__ U *tmpPtr, __local_mem__ U *rowSumPtr,
-    __local_mem__ U *tmpDiv3LocalPtr, __local_mem__ U *tmpDiv4LocalPtr, uint16_t bsLenLoop)
+    __local_mem__ U* tmpDivLocalPtr, __local_mem__ U* rowNormPtr, __local_mem__ U* tmpPtr, __local_mem__ U* rowSumPtr,
+    __local_mem__ U* tmpDiv3LocalPtr, __local_mem__ U* tmpDiv4LocalPtr, uint16_t bsLenLoop)
 {
     auto gradXRowPtr = tmpPtr;
     __VEC_SCOPE__
@@ -1108,7 +1154,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::SinkhornGradUpdateSkGrad(
-    __local_mem__ U *tmpDiv3LocalPtr, __local_mem__ U *tmpDiv4LocalPtr, __local_mem__ U *skGradPtr, uint16_t bsLenLoop)
+    __local_mem__ U* tmpDiv3LocalPtr, __local_mem__ U* tmpDiv4LocalPtr, __local_mem__ U* skGradPtr, uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
     {
@@ -1154,7 +1200,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::SinkhornGradRestoreRaw(
-    __local_mem__ U *rowNormPtr, __local_mem__ U *rowSumPtr, uint16_t bsLenLoop)
+    __local_mem__ U* rowNormPtr, __local_mem__ U* rowSumPtr, uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
     {
@@ -1189,7 +1235,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::ExpGradComputeMaxAndIsMax(
-    __local_mem__ U *zResPtr, __local_mem__ U *zResMaxPtr, __local_mem__ U *zResMaxIdxPtr, __local_mem__ U *isMaxIdxPtr,
+    __local_mem__ U* zResPtr, __local_mem__ U* zResMaxPtr, __local_mem__ U* zResMaxIdxPtr, __local_mem__ U* isMaxIdxPtr,
     uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
@@ -1263,7 +1309,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::ExpGradComputeExpMul(
-    __local_mem__ U *zResPtr, __local_mem__ U *zResMaxPtr, __local_mem__ U *skGradPtr, __local_mem__ U *tmpMulPtr,
+    __local_mem__ U* zResPtr, __local_mem__ U* zResMaxPtr, __local_mem__ U* skGradPtr, __local_mem__ U* tmpMulPtr,
     uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
@@ -1307,7 +1353,7 @@ __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T,
 
 template <typename X_T, typename GRADHIN_T, typename U>
 __aicore__ inline void MhcPreSinkhornPremixBackwardDeterministic<X_T, GRADHIN_T, U>::ExpGradComputeFinal(
-    __local_mem__ U *tmpMulPtr, __local_mem__ U *isMaxIdxPtr, __local_mem__ U *expGradPtr, uint16_t bsLenLoop)
+    __local_mem__ U* tmpMulPtr, __local_mem__ U* isMaxIdxPtr, __local_mem__ U* expGradPtr, uint16_t bsLenLoop)
 {
     __VEC_SCOPE__
     {

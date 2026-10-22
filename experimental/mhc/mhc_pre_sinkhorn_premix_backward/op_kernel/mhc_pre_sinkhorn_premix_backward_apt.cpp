@@ -53,7 +53,8 @@ __global__ __aicore__ void mhc_pre_sinkhorn_premix_backward(GM_ADDR grad_hin, GM
         op.mm2_.SetSubBlockIdx(0);
         op.mm2_.Init(&tilingData.mm2TilingData, &pipe);
         op.Init(x, phi, h_pre, grad_hin, grad_h_post, grad_h_res, alpha, bias, hc_before_norm, inv_rms, sum_out,
-                norm_out, grad_x, grad_phi, grad_alpha, grad_bias, usrWorkspace, &tilingData, &pipe);
+                norm_out, pre_mix, grad_pre, grad_x, grad_phi, grad_alpha, grad_bias, grad_pre_mix, usrWorkspace,
+                &tilingData, &pipe);
         op.Process();
     } else {
         REGISTER_TILING_FOR_TILINGKEY("DETERMINISTIC == false", MhcPreSinkhornPremixBackwardArch35TilingData);
@@ -64,7 +65,8 @@ __global__ __aicore__ void mhc_pre_sinkhorn_premix_backward(GM_ADDR grad_hin, GM
         op.mm2_.SetSubBlockIdx(0);
         op.mm2_.Init(&tilingData.mm2TilingData, &pipe);
         op.Init(x, phi, h_pre, grad_hin, grad_h_post, grad_h_res, alpha, bias, hc_before_norm, inv_rms, sum_out,
-                norm_out, grad_x, grad_phi, grad_alpha, grad_bias, usrWorkspace, &tilingData, &pipe);
+                norm_out, pre_mix, grad_pre, grad_x, grad_phi, grad_alpha, grad_bias, grad_pre_mix, usrWorkspace,
+                &tilingData, &pipe);
         op.Process();
     }
 }
