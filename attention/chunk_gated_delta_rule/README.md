@@ -91,7 +91,7 @@
   </tr>
   <tr>
     <td>g</td>
-    <td>输入</td>
+    <td>可选输入</td>
     <td>衰减系数，公式中的α=e^g</td>
     <td>FLOAT32</td>
     <td>ND</td>

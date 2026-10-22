@@ -163,7 +163,7 @@ aclnnStatus aclnnChunkGatedDeltaRule(
     </tr>
     <tr>
       <td>gOptional</td>
-      <td>输入</td>
+      <td>可选输入</td>
       <td>衰减系数的指数，公式中的α=e^g。</td>
       <td>可选输入。<ul><li>不支持空Tensor。</li><li>如果传入nullptr，则表示全0的tensor。</li></ul></td>
       <td>FLOAT32</td>
