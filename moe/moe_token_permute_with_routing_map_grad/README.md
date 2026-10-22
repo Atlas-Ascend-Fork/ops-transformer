@@ -133,7 +133,7 @@ $$
 ## 约束说明
 
  - 非dropPaddedMode场景topK_num <= 512。
- - 不支持混合精度输入，即permutedTokenOutputGrad、permutedProbsOutputGradOptional、tokensGradOut、probsGradOutOptional需要保持相同的数据类型。
+ - `tokensGradOut` 的数据类型必须与 `permutedTokenOutputGrad` 一致；提供 `probsGradOutOptional` 时，其数据类型必须与 `permutedProbsOutputGradOptional` 一致。两类梯度输入支持相同类型，也支持 token 梯度为 BFLOAT16、概率梯度为 FLOAT32 的组合。
 
 ## 调用说明
 
