@@ -791,10 +791,10 @@ void FusedInferAttentionScoreTilingImpl::SplitNBSeq(const FiaTilingInfo& fiaInfo
     faRunTilingAdapter_.multiCoreParamsRegbase.set_s1OuterSize(s1OuterSize);
 
     // The tiling structure element needs to have a length greater than or equal to the length specified
-    // by TILING_DATA_FIELD_DEF_ARR. If the tiling structure definition specifies a length of 64,
+    // by TILING_DATA_FIELD_DEF_ARR. If the tiling structure definition specifies a length of 80,
     // the vector definition needs to compare its size with coreNum and take the larger value
     const size_t tilingElementArrayLen =
-        (static_cast<size_t>(curCoreNum) > 64UL) ? static_cast<size_t>(curCoreNum) : 64UL;
+        (static_cast<size_t>(curCoreNum) > 80UL) ? static_cast<size_t>(curCoreNum) : 80UL;
     uint32_t curIndx = 0;
 
     ComputeSplitNBSeq(fiaInfo, tilingElementArrayLen, sOuterSize, sInnerSize, coreWeightTarget, curIndx);
