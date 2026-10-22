@@ -19,6 +19,7 @@
 #include "aclnn/aclnn_base.h"
 #include "aclnn_kernels/common/op_error_check.h"
 #include "aclnn_kernels/contiguous.h"
+#include "external/aclnn_kernels/aclnn_platform.h"
 #include "opdev/common_types.h"
 #include "opdev/data_type_utils.h"
 #include "opdev/format_utils.h"
@@ -305,7 +306,11 @@ static bool IsSupportNonContiguousCacheNdInner(const aclTensor* keyCache, const 
     if (isPaNz) {
         return false;
     }
-    return !IsContiguous(keyCache) || !IsContiguous(valueCache);
+    // 仅block首轴非连续由isCacheNonContiguous管(A2/A3 kernel有kCacheBlockStride, 保留零拷贝), 此处需排除,
+    // 否则非regbase下会把首轴零拷贝一并打回物理连续化。
+    bool keyInnerAxesNonContig = !IsContiguous(keyCache) && !IsFirstAxisNonContiguous(keyCache);
+    bool valueInnerAxesNonContig = !IsContiguous(valueCache) && !IsFirstAxisNonContiguous(valueCache);
+    return keyInnerAxesNonContig || valueInnerAxesNonContig;
 }
 
 static aclnnStatus ProcessNonContiguous(const aclTensor* keyCache, const aclTensor* valueCache,
@@ -489,6 +494,11 @@ aclnnStatus aclnnGatherPaKvCacheGetWorkspaceSize(const aclTensor* keyCache, cons
     bool isNdCacheInner = IsSupportNonContiguousCacheNdInner(keyCache, valueCache, isPaNz);
     // ref(key/value)内部轴非连续(ND dim0/dim1, NZ dim0)、尾轴连续: kernel可零拷贝散写, 放行。
     bool isRefNonContig = IsSupportNonContiguousRef(keyRef, valueRef);
+    // cache内轴与ref输出stride入参只存在于arch35 tiling/kernel(分发条件见tiling_arch35.cpp的
+    // IsRegbaseSocVersion), A2/A3 kernel只消费块首轴stride, 故这两类形态在非regbase上须连续化兜底。
+    if (!Ops::Transformer::AclnnUtil::IsRegbase() && (isNdCacheInner || isRefNonContig)) {
+        mustContiguous = true;
+    }
     if (!mustContiguous && (isCacheNonContiguous || isNdCacheInner || isRefNonContig)) {
         return ProcessNonContiguous(keyCache, valueCache, blockTables, seqLens, keyRef, valueRef, seqOffsetOptional,
                                     cacheMode, isSeqLensCumsum, workspaceSize, executor, uniqueExecutor);

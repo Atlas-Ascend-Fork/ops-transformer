@@ -136,7 +136,8 @@ bool CommonGatherPaKvCacheTiling(gert::TilingContext* context)
 
     int32_t hasSeqStarts;
     auto seqStartsTensor = context->GetOptionalInputTensor(DIM_6);
-    seqStartsTensor == nullptr ? hasSeqStarts = 0 : hasSeqStarts = 1;
+    // aclnn在非regbase下用0维空tensor占位seqOffset, 须按"无"处理, 否则kernel读到垃圾值当tableOffset致越界。
+    hasSeqStarts = (seqStartsTensor != nullptr && seqStartsTensor->GetOriginShape().GetDimNum() != 0) ? 1 : 0;
 
     const bool* isSeqLensCumsumPtr = attrs->GetAttrPointer<bool>(IS_SEQ_LENS_CUNSUM_INDEX);
     bool isSeqLensCumsum = (isSeqLensCumsumPtr == nullptr) ? true : *isSeqLensCumsumPtr;
