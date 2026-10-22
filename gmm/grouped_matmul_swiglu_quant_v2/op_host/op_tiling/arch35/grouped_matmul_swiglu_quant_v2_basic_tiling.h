@@ -30,8 +30,9 @@ namespace optiling {
 using namespace Ops::Transformer::OpTiling;
 class GroupedMatmulSwigluQuantV2Tiling950 : public GroupedQmmTiling {
 public:
-    explicit GroupedMatmulSwigluQuantV2Tiling950(gert::TilingContext* context)
-        : GroupedQmmTiling(context)
+    explicit GroupedMatmulSwigluQuantV2Tiling950(gert::TilingContext* context, bool activation = false)
+        : GroupedQmmTiling(context),
+          activation_(activation)
     {
         Reset();
     }
@@ -46,7 +47,7 @@ public:
 protected:
     const char* GetOpType() const override
     {
-        return "GroupedMatmulSwigluQuantV2";
+        return activation_ ? "GroupedMatmulActivation" : "GroupedMatmulSwigluQuantV2";
     }
     ge::graphStatus GetPlatformInfo() override;
     // 0、获取INPUT/OUTPUT/ATTR信息
@@ -66,9 +67,9 @@ protected:
 private:
     bool IsSplitSwigluMode() const
     {
-        constexpr int64_t SPLIT_SWIGLU_MODE = 2;
-        return swigluParams_.swigluMode == SPLIT_SWIGLU_MODE;
+        return useV3Path_;
     }
+    bool AnalyzeActivationAttrs();
     bool AnalyzeV3Attrs();
     bool AnalyzeV3Dtype();
     bool AnalyzeV3Inputs();
@@ -128,6 +129,8 @@ private:
     GroupedMatmulSwigluQuantV2TensorApi::GMMSwigluQuantV2TensorApiTilingData tensorApiTilingData_;
     uint32_t aivNum_ = 0;
     bool useTensorApi_ = false;
+    bool useV3Path_ = false;
+    bool activation_ = false;
 
     const std::vector<ge::DataType> quantDtypeSupportList = {ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,
                                                              ge::DT_FLOAT4_E2M1};

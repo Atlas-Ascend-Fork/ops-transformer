@@ -83,6 +83,7 @@
 - [aclnnGroupedMatMulAlltoAllv](../../mc2/grouped_mat_mul_allto_allv/docs/aclnnGroupedMatMulAlltoAllv.md)
 - [aclnnGroupedMatMulAlltoAllvV2](../../mc2/grouped_mat_mul_allto_allv/docs/aclnnGroupedMatMulAlltoAllvV2.md)
 - [aclnnGroupedMatmul](../../gmm/grouped_matmul/docs/aclnnGroupedMatmul.md)
+- [aclnnGroupedMatmulActivationWeightNz](../../gmm/grouped_matmul_activation/docs/aclnnGroupedMatmulActivationWeightNz.md)
 - [aclnnGroupedMatmulActivationQuantWeightNz](../../gmm/grouped_matmul_activation_quant/docs/aclnnGroupedMatmulActivationQuantWeightNz.md)
 - [aclnnGroupedMatmulAdd](../../gmm/grouped_matmul_add/docs/aclnnGroupedMatmulAdd.md)
 - [aclnnGroupedMatmulAddV2](../../gmm/grouped_matmul_add/docs/aclnnGroupedMatmulAddV2.md)

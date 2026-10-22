@@ -46,4 +46,18 @@ constexpr uint64_t MXFP4_K_MIN_VALUE = 2UL;
 constexpr uint64_t MXFP4_N_MIN_VALUE = 4UL;
 constexpr uint64_t HIF4_K_MIN_VALUE = 2UL;
 } // namespace GroupedMatmulSwigluQuantParamsV2
+
+namespace GroupedMatmulActivationParams {
+constexpr uint32_t BIAS_INDEX = 5;
+constexpr uint32_t ATTR_INDEX_DEQUANT_MODE = 0;
+constexpr uint32_t ATTR_INDEX_DEQUANT_DTYPE = 1;
+constexpr uint32_t ATTR_INDEX_ACT_TYPE = 2;
+constexpr uint32_t ATTR_INDEX_GROUP_LIST_TYPE = 3;
+constexpr uint32_t ATTR_INDEX_TUNING_CONFIG = 4;
+constexpr uint32_t ATTR_INDEX_SWIGLU_MODE = 5;
+constexpr uint32_t ATTR_INDEX_CLAMP_LIMIT = 6;
+constexpr uint32_t ATTR_INDEX_GLU_ALPHA = 7;
+constexpr uint32_t ATTR_INDEX_GLU_BIAS = 8;
+constexpr uint32_t ATTR_INDEX_TRANSPOSE_WEIGHT = 9;
+} // namespace GroupedMatmulActivationParams
 #endif

@@ -871,6 +871,22 @@ gmm:
     test:
       examples: True
 
+  grouped_matmul_activation:
+    module: True
+    src:
+      - gmm/grouped_matmul_activation
+    exclude:
+      - gmm/grouped_matmul_activation/docs
+      - gmm/grouped_matmul_activation/README.md
+    ut_cov_exclude:
+      - gmm/grouped_matmul_activation/op_kernel
+      - gmm/grouped_matmul_activation/torch_extension
+    options:
+      - grouped_matmul_activation
+    test:
+      examples: False
+      ut: True
+
   grouped_matmul_activation_quant:
     module: True
     src:

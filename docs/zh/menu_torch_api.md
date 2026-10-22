@@ -25,6 +25,7 @@
 - [generic_block_sparse_attention](../../attention/generic_block_sparse_attention/docs/torchapi_generic_block_sparse_attention.md)
 - [generic_block_sparse_attention_grad](../../attention/generic_block_sparse_attention_grad/docs/torchapi_generic_block_sparse_attention_grad.md)
 - [get_low_latency_ccl_buffer_size](../../mc2/common/docs/torchapi_get_low_latency_ccl_buffer_size.md)
+- [grouped_matmul_activation](../../gmm/grouped_matmul_activation/docs/torchapi_grouped_matmul_activation.md)
 - [grouped_matmul_activation_quant](../../gmm/grouped_matmul_activation_quant/docs/torchapi_grouped_matmul_activation_quant.md)
 - [grouped_matmul_swiglu_quant](../../gmm/grouped_matmul_swiglu_quant_v2/docs/torchapi_grouped_matmul_swiglu_quant.md)
 - [indexer_quant_cache](../../attention/indexer_quant_cache/docs/torchapi_indexer_quant_cache.md)

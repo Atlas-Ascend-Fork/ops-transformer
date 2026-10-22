@@ -768,6 +768,16 @@ Ascend 950支持的算子分类和算子列表如下：
   </tr>
   <tr>
     <td>gmm</td>
+    <td><a href="../../gmm/grouped_matmul_activation/README.md">grouped_matmul_activation</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>融合A4W4 WeightNZ分组矩阵乘与前后分半SwiGLU，直接输出BF16结果。</td>
+  </tr>
+  <tr>
+    <td>gmm</td>
     <td><a href="../../gmm/grouped_matmul_activation_quant/README.md">grouped_matmul_activation_quant</a></td>
     <td>✓</td>
     <td>✓</td>

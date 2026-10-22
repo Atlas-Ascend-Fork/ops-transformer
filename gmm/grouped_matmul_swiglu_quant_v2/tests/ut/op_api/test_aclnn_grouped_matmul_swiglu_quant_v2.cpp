@@ -457,7 +457,23 @@ string BuildCaseName(const testing::TestParamInfo<SwigluOpApiCase>& info)
     return ops::ut::MakeSafeParamName(info.param.caseName);
 }
 
-class grouped_matmul_swiglu_quant_v2_opapi_csv_test : public testing::TestWithParam<SwigluOpApiCase> {};
+class grouped_matmul_swiglu_quant_v2_opapi_csv_test : public testing::TestWithParam<SwigluOpApiCase> {
+protected:
+    void SetUp() override
+    {
+        previousSocVersion_ = op::GetCurrentPlatformInfo().GetSocVersion();
+        // Legacy non-CSV cases use Ascend910B; CSV cases select their own platform in Run().
+        op::SetPlatformSocVersion(op::SocVersion::ASCEND910B);
+    }
+
+    void TearDown() override
+    {
+        op::SetPlatformSocVersion(previousSocVersion_);
+    }
+
+private:
+    op::SocVersion previousSocVersion_ = op::SocVersion::ASCEND910B;
+};
 
 TEST_F(grouped_matmul_swiglu_quant_v2_opapi_csv_test, direct_launch_entry_error_case)
 {

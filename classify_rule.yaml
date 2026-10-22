@@ -657,6 +657,12 @@ gmm@ops-transformer:
                 - ops/ops-transformer/gmm/grouped_matmul_swiglu_quant_v2/op_host/op_tiling/arch35
                 - ops/ops-transformer/gmm/grouped_matmul_swiglu_quant_v2/op_kernel/arch35
                 - ops/ops-transformer/gmm/grouped_matmul_swiglu_quant_v2/op_kernel/grouped_matmul_swiglu_quant_v2_apt.cpp
+                - ops/ops-transformer/gmm/grouped_matmul_activation/op_api
+                - ops/ops-transformer/gmm/grouped_matmul_activation/op_graph
+                - ops/ops-transformer/gmm/grouped_matmul_activation/op_host
+                - ops/ops-transformer/gmm/grouped_matmul_activation/op_kernel
+                - ops/ops-transformer/gmm/grouped_matmul_activation/torch_extension
+                - ops/ops-transformer/gmm/grouped_matmul_activation/CMakeLists.txt
                 - ops/ops-transformer/gmm/quant_grouped_matmul_inplace_add
             opensource_style: null
             kernel_style: null
@@ -673,6 +679,9 @@ gmm@ops-transformer:
                 - ops/ops-transformer/gmm/grouped_matmul_swiglu_quant_v2/tests
                 - ops/ops-transformer/gmm/grouped_matmul_swiglu_quant_v2/examples
                 - ops/ops-transformer/gmm/grouped_matmul_swiglu_quant_v2/examples_david
+                - ops/ops-transformer/gmm/grouped_matmul_activation/tests
+                - ops/ops-transformer/gmm/grouped_matmul_activation/docs
+                - ops/ops-transformer/gmm/grouped_matmul_activation/README.md
                 - ops/ops-transformer/gmm/grouped_matmul_add/tests
                 - ops/ops-transformer/gmm/grouped_matmul_add/examples
             non_delivery: null
