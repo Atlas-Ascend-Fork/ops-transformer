@@ -59,8 +59,8 @@
       </tr>
       <tr>
         <td>finishedOptional</td>
-        <td>输入</td>
-        <td>表示如果对应的行finished为True，则expert序号直接填num_expert值（即x的最后一个轴大小）。</td>
+        <td>可选输入</td>
+        <td>不使用finished行掩码时可传nullptr；否则，finished为True时该行的expert序号填为num_expert（即x最后一维大小）。</td>
         <td>BOOL</td>
         <td>ND</td>
       </tr>

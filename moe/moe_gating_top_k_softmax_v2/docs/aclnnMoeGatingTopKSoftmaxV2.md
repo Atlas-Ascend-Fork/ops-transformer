@@ -112,8 +112,8 @@ aclnnStatus aclnnMoeGatingTopKSoftmaxV2(
   </tr>
   <tr>
     <td>finishedOptional</td>
-    <td>输入</td>
-    <td>公式中的finished，表示该行是否参与运算。</td>
+    <td>可选输入</td>
+    <td>公式中的finished；表示该行是否参与运算；不使用finished行掩码时可传nullptr。</td>
     <td>shape为x_shape[:-1]。</td>
     <td>BOOL</td>
     <td>ND</td>
