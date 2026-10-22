@@ -23,6 +23,7 @@
 #include "graph/utils/type_utils.h"
 #include "op_host/tiling_base.h"
 #include "op_host/op_tiling/mc2_opversion_manager.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace optiling {
 constexpr uint32_t X_INDEX = 0U;
@@ -48,6 +49,7 @@ enum class RealModeA5 : uint32_t {
     PERGROUP_SCALES = 3,
     MX_SCALES = 4,
     HIF8_SCALES = 5,
+    HIF4_SCALES = 6,
     INVALID_MODE
 };
 
@@ -63,6 +65,7 @@ enum class QuantModeA5 : uint32_t {
     PERGROUP_DYNAMIC_QUANT = 3,
     MX_QUANT = 4,
     MX_QUANT_CLIP = 5,
+    HIF4_QUANT = 6,
     BUTT
 };
 
@@ -74,6 +77,7 @@ const std::map<std::pair<QuantModeA5, ge::DataType>, RealModeA5> QUANT_MODE_MAP 
     {{QuantModeA5::NON_QUANT, ge::DT_HIFLOAT8}, RealModeA5::NO_SCALES},
     {{QuantModeA5::NON_QUANT, ge::DT_FLOAT4_E2M1}, RealModeA5::NO_SCALES},
     {{QuantModeA5::NON_QUANT, ge::DT_FLOAT4_E1M2}, RealModeA5::NO_SCALES},
+    {{QuantModeA5::NON_QUANT, Ops::Transformer::DT_HIFLOAT4}, RealModeA5::NO_SCALES},
     {{QuantModeA5::STATIC_QUANT, ge::DT_INT8}, RealModeA5::STATIC_SCALES},
     {{QuantModeA5::STATIC_QUANT, ge::DT_HIFLOAT8}, RealModeA5::HIF8_SCALES},
     {{QuantModeA5::PERTOKEN_DYNAMIC_QUANT, ge::DT_INT8}, RealModeA5::PERTOKEN_SCALES},
@@ -86,12 +90,13 @@ const std::map<std::pair<QuantModeA5, ge::DataType>, RealModeA5> QUANT_MODE_MAP 
     {{QuantModeA5::MX_QUANT, ge::DT_FLOAT4_E2M1}, RealModeA5::MX_SCALES},
     {{QuantModeA5::MX_QUANT, ge::DT_FLOAT4_E1M2}, RealModeA5::MX_SCALES},
     {{QuantModeA5::MX_QUANT_CLIP, ge::DT_FLOAT8_E5M2}, RealModeA5::MX_SCALES},
-    {{QuantModeA5::MX_QUANT_CLIP, ge::DT_FLOAT8_E4M3FN}, RealModeA5::MX_SCALES}};
+    {{QuantModeA5::MX_QUANT_CLIP, ge::DT_FLOAT8_E4M3FN}, RealModeA5::MX_SCALES},
+    {{QuantModeA5::HIF4_QUANT, Ops::Transformer::DT_HIFLOAT4}, RealModeA5::HIF4_SCALES}};
 
 // Supported x datatype in nonquant mode, the same as expandX
-const std::set<ge::DataType> NON_QUANT_DTYPE = {ge::DT_FLOAT16,       ge::DT_BF16,        ge::DT_HIFLOAT8,
-                                                ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT4_E2M1,
-                                                ge::DT_FLOAT4_E1M2};
+const std::set<ge::DataType> NON_QUANT_DTYPE = {
+    ge::DT_FLOAT16,     ge::DT_BF16,        ge::DT_HIFLOAT8,    ge::DT_FLOAT8_E4M3FN,
+    ge::DT_FLOAT8_E5M2, ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E1M2, Ops::Transformer::DT_HIFLOAT4};
 
 class MoeDistributeDispatchTilingHelper {
 public:

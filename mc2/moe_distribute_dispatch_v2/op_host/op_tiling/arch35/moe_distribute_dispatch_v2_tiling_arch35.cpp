@@ -392,12 +392,31 @@ inline uint32_t CheckQuantModeAndExpandXType(const gert::TilingContext* context,
     return static_cast<uint32_t>(modeToFind->second);
 }
 
+static inline ge::graphStatus CheckHif4QuantOnCurrentPlatform(const gert::TilingContext* context, const char* nodeName,
+                                                              const uint32_t quantMode)
+{
+    if (quantMode != static_cast<uint32_t>(QuantModeA5::HIF4_QUANT)) {
+        return ge::GRAPH_SUCCESS;
+    }
+    const NpuArch npuArch = mc2tiling::GetNpuArch(context);
+    if ((npuArch == Ops::Base::DAV_2201) || (npuArch == Ops::Base::DAV_3510)) {
+        std::string npuArchStr = std::to_string(static_cast<int32_t>(npuArch));
+        std::string reason = "HiF4 quant is only supported on Ascend960(A6) and later, but npuArch=" + npuArchStr;
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "quantMode", std::to_string(quantMode).c_str(), reason.c_str());
+        return ge::GRAPH_FAILED;
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 static ge::graphStatus CheckQuantModeAndScales(const gert::TilingContext* context, const char* nodeName, bool isScales,
                                                const uint32_t quantMode)
 {
+    OP_TILING_CHECK(CheckHif4QuantOnCurrentPlatform(context, nodeName, quantMode) != ge::GRAPH_SUCCESS,
+                    OP_LOGE(nodeName, "HiF4 quant is not supported on the current platform."), return ge::GRAPH_FAILED);
     if (isScales && ((quantMode == static_cast<uint32_t>(QuantModeA5::MX_QUANT)) ||
-                     (quantMode == static_cast<uint32_t>(QuantModeA5::MX_QUANT_CLIP)))) {
-        std::string reason = "scales must be nullptr when quantMode is MX_QUANT";
+                     (quantMode == static_cast<uint32_t>(QuantModeA5::MX_QUANT_CLIP)) ||
+                     (quantMode == static_cast<uint32_t>(QuantModeA5::HIF4_QUANT)))) {
+        std::string reason = "scales must be nullptr when quantMode is MX_QUANT, MX_QUANT_CLIP or HIF4_QUANT";
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "scales", "provided", reason.c_str());
         return ge::GRAPH_FAILED;
     }
@@ -415,7 +434,7 @@ static ge::graphStatus CheckQuantModeAndScales(const gert::TilingContext* contex
     }
     if (!isScales && (quantMode == static_cast<uint32_t>(QuantModeA5::NON_QUANT)) &&
         ((xDesc->GetDataType() == ge::DT_HIFLOAT8) || (xDesc->GetDataType() == ge::DT_FLOAT8_E5M2) ||
-         (xDesc->GetDataType() == ge::DT_FLOAT8_E4M3FN))) {
+         (xDesc->GetDataType() == ge::DT_FLOAT8_E4M3FN) || (xDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4))) {
         std::string reason = "scales must be provided when quantMode is NON_QUANT and x dtype is " + xDtypeStr;
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "scales", "not provided", reason.c_str());
         return ge::GRAPH_FAILED;
@@ -1116,6 +1135,23 @@ static bool CheckTensorDataTypeStaticOrDynamic(const gert::TilingContext* contex
     return true;
 }
 
+static bool CheckTensorDataTypeHiF4(const gert::TilingContext* context, const char* nodeName, DispatchV2Config& config)
+{
+    auto xDesc = context->GetInputDesc(config.xIndex);
+    auto dynamicScalesDesc = context->GetOutputDesc(OUTPUT_DYNAMIC_SCALES_INDEX);
+    OP_TILING_CHECK((xDesc->GetDataType() != ge::DT_BF16) && (xDesc->GetDataType() != ge::DT_FLOAT16),
+                    OP_LOGE(nodeName, "x datatype is invalid, datatype should be bf16 or float16, but is %s.",
+                            Ops::Base::ToString(xDesc->GetDataType()).c_str()),
+                    return false);
+    // No Scales input
+    OP_TILING_CHECK(
+        dynamicScalesDesc->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE,
+        OP_LOGE(nodeName, "dynamicScales datatype is invalid, datatype should be hifloat4_scale, but is %s.",
+                Ops::Base::ToString(dynamicScalesDesc->GetDataType()).c_str()),
+        return false);
+    return true;
+}
+
 static bool CheckTensorDataTypeMxfp8(const gert::TilingContext* context, const char* nodeName, DispatchV2Config& config)
 {
     auto xDesc = context->GetInputDesc(config.xIndex);
@@ -1139,8 +1175,10 @@ static bool CheckTensorDataTypeNonQuant(const gert::TilingContext* context, cons
     auto expandXDesc = context->GetOutputDesc(OUTPUT_EXPAND_X_INDEX);
     OP_TILING_CHECK(
         (NON_QUANT_DTYPE.find(static_cast<ge::DataType>(xDesc->GetDataType())) == NON_QUANT_DTYPE.end()),
-        OP_LOGE(nodeName, "x datatype is invalid, datatype should be one of bf16/fp16/e5m2/e4m3fn/hif8, but is %s.",
-                Ops::Base::ToString(xDesc->GetDataType()).c_str()),
+        OP_LOGE(
+            nodeName,
+            "x datatype is invalid, datatype should be one of bf16/fp16/e5m2/e4m3fn/e1m2/e2m1/hif8/hif4, but is %s.",
+            Ops::Base::ToString(xDesc->GetDataType()).c_str()),
         return false);
     // ExpandX: the same as X
     OP_TILING_CHECK(
@@ -1168,9 +1206,16 @@ static bool CheckTensorDataTypeNonQuant(const gert::TilingContext* context, cons
             OP_LOGE(nodeName, "scales datatype is invalid, datatype should be e8m0, but is %s.",
                     Ops::Base::ToString(scalesDesc->GetDataType()).c_str()),
             return false);
+        OP_TILING_CHECK(((xDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4) &&
+                         (scalesDesc->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE)),
+                        OP_LOGE(nodeName, "scales datatype is invalid, datatype should be e8m0, but is %s.",
+                                Ops::Base::ToString(scalesDesc->GetDataType()).c_str()),
+                        return false);
         OP_TILING_CHECK(
-            (scalesDesc->GetDataType() != ge::DT_FLOAT) && (scalesDesc->GetDataType() != ge::DT_FLOAT8_E8M0),
-            OP_LOGE(nodeName, "scales datatype is invalid, datatype should be float or e8m0, but is %s.",
+            (scalesDesc->GetDataType() != ge::DT_FLOAT) && (scalesDesc->GetDataType() != ge::DT_FLOAT8_E8M0) &&
+                (scalesDesc->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE),
+            OP_LOGE(nodeName,
+                    "scales datatype is invalid, datatype should be float or e8m0 or hifloat4_scale, but is %s.",
                     Ops::Base::ToString(scalesDesc->GetDataType()).c_str()),
             return false);
         OP_TILING_CHECK(
@@ -1194,6 +1239,9 @@ static bool CheckDistinctTensorDataType(const gert::TilingContext* context, cons
                (quantMode == static_cast<uint32_t>(QuantModeA5::MX_QUANT_CLIP))) {
         OP_TILING_CHECK(!CheckTensorDataTypeMxfp8(context, nodeName, config),
                         OP_LOGE(nodeName, "CheckTensorDataType for mx quant mode failed."), return false);
+    } else if (quantMode == static_cast<uint32_t>(QuantModeA5::HIF4_QUANT)) {
+        OP_TILING_CHECK(!CheckTensorDataTypeHiF4(context, nodeName, config),
+                        OP_LOGE(nodeName, "CheckTensorDataType for hif4 quant mode failed."), return false);
     } else {
         // static/perToken/perGroup
         OP_TILING_CHECK(!CheckTensorDataTypeStaticOrDynamic(context, nodeName, isScales, config),
@@ -1349,14 +1397,13 @@ ge::graphStatus MoeDistributeDispatchV2TilingFuncA5::CheckCommAlgPtr(const char*
 ge::graphStatus MoeDistributeDispatchV2TilingFuncA5::CheckQuantModePtr(const int64_t* quantModePtr,
                                                                        const char* nodeName)
 {
-    OP_TILING_CHECK(
-        (*quantModePtr < static_cast<int64_t>(QuantModeA5::NON_QUANT)) ||
-            (*quantModePtr > static_cast<int64_t>(QuantModeA5::MX_QUANT_CLIP)),
-        OP_LOGE_FOR_INVALID_VALUE(nodeName, "quantMode", std::to_string(*quantModePtr).c_str(),
-                                  std::string("[") + std::to_string(static_cast<int64_t>(QuantModeA5::NON_QUANT)) +
-                                      "," + std::to_string(static_cast<int64_t>(QuantModeA5::MX_QUANT_CLIP)) +
-                                      std::string("]").c_str()),
-        return ge::GRAPH_FAILED);
+    OP_TILING_CHECK((*quantModePtr < static_cast<int64_t>(QuantModeA5::NON_QUANT)) ||
+                        (*quantModePtr >= static_cast<int64_t>(QuantModeA5::BUTT)),
+                    OP_LOGE_FOR_INVALID_VALUE(
+                        nodeName, "quantMode", std::to_string(*quantModePtr).c_str(),
+                        std::string("[") + std::to_string(static_cast<int64_t>(QuantModeA5::NON_QUANT)) + "," +
+                            std::to_string(static_cast<int64_t>(QuantModeA5::BUTT) - 1) + std::string("]").c_str()),
+                    return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }

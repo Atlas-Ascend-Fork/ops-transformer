@@ -18,6 +18,7 @@
 #include "runtime/rt_external_base.h"
 #include "op_host/util/op_const_def.h"
 #include "mc2_log_compat.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 using namespace ge;
 namespace ops {
@@ -30,6 +31,8 @@ enum class QuantMode : int64_t {
     QUANT_MODE_PERGROUP = 3,
     QUANT_MODE_MX = 4,
     QUANT_MODE_MX_CLIP = 5,
+    QUANT_MODE_HIF4 = 6,
+    QUANT_MODE_END,
 };
 } // namespace
 
@@ -40,6 +43,7 @@ static constexpr int64_t RANK_NUM_PER_NODE = 8;
 static constexpr int64_t ASSIST_INFO_NUM_PER_A = 128;
 static constexpr int64_t PER_GROUP_SIZE = 128;
 static constexpr int64_t MX_QUANT_SIZE = 32;
+static constexpr int64_t HIF4_GROUP_SIZE = 64;
 static constexpr int64_t NUM_EVEN = 2;
 static constexpr int64_t SEND_COUNT_MEMORY_SIZE = 2;
 
@@ -69,6 +73,7 @@ static constexpr size_t DISPATCH_INPUT_ATTR_Y_DTYPE_INDEX = 17;
 
 static constexpr uint32_t VERSION_SIZE = 32;
 const std::set<std::string> PLATFORM_A2 = {"Ascend910B"};
+const std::set<std::string> NPUARCH_22 = {std::to_string(static_cast<uint32_t>(Ops::Base::DAV_2201))};
 const std::set<std::string> NPUARCH_A5 = {std::to_string(static_cast<uint32_t>(Ops::Base::DAV_3510))};
 
 static bool IsTargetSocVersionInfershape(const char* nodeName, const std::set<std::string>& targetPlatform)
@@ -94,9 +99,16 @@ static bool IsTargetNpuArchInfershape(const char* nodeName, const std::set<std::
     return (targetPlatform.count(versionValNpuArch) > 0);
 }
 
-static void InferShapeDynamicScalesA5(gert::Shape* dynamicScalesShape, const gert::Shape* scalesShape,
-                                      int64_t quantMode, int64_t a, int64_t h)
+static void InferShapeDynamicScalesDavid(gert::Shape* dynamicScalesShape, const gert::Shape* scalesShape,
+                                         int64_t quantMode, int64_t a, int64_t h, bool isA5)
 {
+    if (!isA5 && static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_HIF4) {
+        dynamicScalesShape->SetDimNum(DIM_TWO);
+        dynamicScalesShape->SetDim(0U, a);
+        dynamicScalesShape->SetDim(1U, (h + HIF4_GROUP_SIZE - 1) / HIF4_GROUP_SIZE);
+        return;
+    }
+
     if (static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_PERGROUP) {
         dynamicScalesShape->SetDimNum(DIM_TWO);
         dynamicScalesShape->SetDim(0U, a);
@@ -119,11 +131,12 @@ static void InferShapeDynamicScalesA5(gert::Shape* dynamicScalesShape, const ger
 static ge::DataType InferDataTypeDynamicScales(int64_t quantMode, ge::DataType scalesType, bool quantFlag)
 {
     ge::DataType dynamicScalesDtype = ge::DT_FLOAT;
-    if ((static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_MX) ||
-        (static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_MX_CLIP)) {
+    if (static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_HIF4) {
+        dynamicScalesDtype = Ops::Transformer::DT_HIFLOAT4_SCALE;
+    } else if ((static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_MX) ||
+               (static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_MX_CLIP)) {
         dynamicScalesDtype = ge::DT_FLOAT8_E8M0;
-    }
-    if (quantFlag && static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_NO_QUANT) {
+    } else if (quantFlag && static_cast<QuantMode>(quantMode) == QuantMode::QUANT_MODE_NO_QUANT) {
         dynamicScalesDtype = scalesType;
     }
     return dynamicScalesDtype;
@@ -318,8 +331,9 @@ static ge::graphStatus InferShapeMoeDistributeDispatchV2(gert::InferShapeContext
     OP_LOGD(context->GetNodeName(), "expandx shape is :%s after infershape.",
             Ops::Base::ToString(*expandXShape).c_str());
 
-    if (IsTargetNpuArchInfershape(context->GetNodeName(), NPUARCH_A5)) {
-        InferShapeDynamicScalesA5(dynamicScalesShape, scalesShape, *quantMode, a, h);
+    if (!IsTargetNpuArchInfershape(context->GetNodeName(), NPUARCH_22)) {
+        InferShapeDynamicScalesDavid(dynamicScalesShape, scalesShape, *quantMode, a, h,
+                                     IsTargetNpuArchInfershape(context->GetNodeName(), NPUARCH_A5));
     } else {
         dynamicScalesShape->SetDimNum(DIM_ONE);
         dynamicScalesShape->SetDim(0U, realA);
@@ -349,7 +363,7 @@ static ge::graphStatus InferShapeMoeDistributeDispatchV2(gert::InferShapeContext
             epRecvCountShape->SetDim(0U, *epWorldSize * localExpertNum);
         }
     } else {
-        if (hasExpertScales && !IsTargetNpuArchInfershape(context->GetNodeName(), NPUARCH_A5)) {
+        if (hasExpertScales && IsTargetNpuArchInfershape(context->GetNodeName(), NPUARCH_22)) {
             epRecvCountShape->SetDim(0U, *epWorldSize * localExpertNum + globalBsReal * SEND_COUNT_MEMORY_SIZE * k *
                                                                              (*epWorldSize) / RANK_NUM_PER_NODE);
         } else {
@@ -408,6 +422,11 @@ static ge::graphStatus CheckQuantMode(const gert::InferDataTypeContext* context,
                                       "FLOAT8_E4M3FN, FLOAT8_E5M2, FLOAT4_E2M1, FLOAT4_E1M2");
             return ge::GRAPH_FAILED;
         }
+    } else if (static_cast<QuantMode>(*quantMode) == QuantMode::QUANT_MODE_HIF4) {
+        if (yDtype != static_cast<int64_t>(Ops::Transformer::DT_HIFLOAT4)) {
+            OP_LOGE_WITH_INVALID_ATTR(context->GetNodeName(), "y_dtype", std::to_string(yDtype).c_str(), "HIFLOAT4");
+            return ge::GRAPH_FAILED;
+        }
     }
 
     return ge::GRAPH_SUCCESS;
@@ -423,7 +442,7 @@ static ge::graphStatus InferDataTypeMoeDistributeDispatchV2(gert::InferDataTypeC
     OPS_CHECK_NULL_WITH_CONTEXT(context, quantMode);
     const auto scalesType = context->GetOptionalInputDataType(DISPATCH_INPUT_SCALES_IDX_INDEX);
     const int64_t* yDtypePtr = nullptr;
-    if (IsTargetNpuArchInfershape(context->GetNodeName(), NPUARCH_A5)) {
+    if (!IsTargetNpuArchInfershape(context->GetNodeName(), NPUARCH_22)) {
         yDtypePtr = attrs->GetAttrPointer<int64_t>(DISPATCH_INPUT_ATTR_Y_DTYPE_INDEX);
     }
     bool quantFlag = (scalesType != ge::DT_UNDEFINED) ? true : false;

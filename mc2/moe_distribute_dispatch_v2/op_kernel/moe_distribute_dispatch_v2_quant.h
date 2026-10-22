@@ -19,7 +19,7 @@
 #include "moe_distribute_v2_constant.h"
 #include "moe_distribute_v2_base.h"
 
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
 #include "moe_distribute_dispatch_v2_common.h"
 #include "../../common/op_kernel/quantize_functions.h"
 #endif
@@ -75,7 +75,7 @@ public:
             hOutSizeAlign_ += sizeof(float);
             scaleOutBytes = sizeof(float); // PERTOKEN量化一个token生成一个scale
         }
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         else if constexpr (QuantMode == MX_QUANT || QuantMode == MX_QUANT_CLIP) {
             if constexpr (Std::IsSame<ExpandXOutType, fp4x2_e2m1_t>::value ||
                           Std::IsSame<ExpandXOutType, fp4x2_e1m2_t>::value) {
@@ -98,6 +98,12 @@ public:
                 smoothTailCount_ = inputReadCount > smoothTailOffset_ ? (inputReadCount - smoothTailOffset_) : 0U;
             }
         }
+#if (__NPU_ARCH__ != 3510)
+        else if constexpr (QuantMode == HIF4_QUANT) {
+            scaleOutBytes = Ceil(axisH_, Quant::HIF4_QUANT_GROUP_ELE_NUM) * sizeof(hif4_scale);
+            hOutSizeAlign_ += scaleOutBytes;
+        }
+#endif
 #endif
         uint32_t hScaleSizeAlign = Ceil(hOutSizeAlign_, UB_ALIGN) * UB_ALIGN; // 保证后面填充三元组的起始地址对齐32
         tokenQuantAlign_ = hScaleSizeAlign / sizeof(int32_t);
@@ -114,7 +120,7 @@ public:
         } else if constexpr (QuantMode == PERTOKEN_DYNAMIC_QUANT) {
             QuantDynamicPerToken(outLocal, inLocal, expertIndex, scalesGMTensor_);
         }
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         else if constexpr (QuantMode == MX_QUANT) {
             QuantDynamicMx(outLocal, inLocal);
         } else if constexpr (QuantMode == MX_QUANT_CLIP) {
@@ -122,6 +128,11 @@ public:
         } else if constexpr (QuantMode == PERGROUP_DYNAMIC_QUANT) {
             QuantDynamicPerGroup(outLocal, inLocal, expertIndex, scalesGMTensor_);
         }
+#if (__NPU_ARCH__ != 3510)
+        else if constexpr (QuantMode == HIF4_QUANT) {
+            QuantDynamicHif4(outLocal, inLocal);
+        }
+#endif
 #endif
     }
 
@@ -153,7 +164,7 @@ public:
             Cast(tokenF16LT, tokenI32LT, RoundMode::CAST_ROUND, axisH_);
             Cast(outLocal, tokenF16LT, RoundMode::CAST_TRUNC, axisH_);
         }
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         else if constexpr (Std::IsSame<ExpandXOutType, hifloat8_t>::value) {
             DataCacheCleanAndInvalid<float, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(scalesGMTensor_);
             float scaleVal = scalesGMTensor_(0);
@@ -168,7 +179,7 @@ public:
     {
         float dynamicScale = 0.0;
         float maxVal = INT8_MAX_VALUE; // 获取输出类型的最大值（AscendC未提供相关接口）
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         if constexpr (Std::IsSame<ExpandXOutType, fp8_e5m2_t>::value) {
             maxVal = FP8_E5M2_MAX_VALUE;
         } else if constexpr (Std::IsSame<ExpandXOutType, fp8_e4m3fn_t>::value) {
@@ -203,7 +214,7 @@ public:
             PipeBarrier<PIPE_V>();
             Cast(outLocal, halfLocalTemp, RoundMode::CAST_TRUNC, axisH_);
         }
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
         else if constexpr (Std::IsSame<ExpandXOutType, fp8_e4m3fn_t>::value ||
                            Std::IsSame<ExpandXOutType, fp8_e5m2_t>::value) {
             Cast(outLocal, floatLocalTemp_, RoundMode::CAST_RINT, axisH_);
@@ -215,7 +226,7 @@ public:
         SyncFunc<AscendC::HardEvent::S_MTE3>();
     }
 
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     __aicore__ inline void QuantDynamicPerGroup(LocalTensor<XOutType>& outLocal, LocalTensor<XInType>& inLocal,
                                                 uint32_t expertIndex, GlobalTensor<float>& scalesGMTensor_)
     {
@@ -293,6 +304,34 @@ public:
                                   AscendC::RoundMode::CAST_RINT>(srcAddr, halfScaleLocalAddr, outLocalAddr, axisH_);
         }
     }
+#if (__NPU_ARCH__ != 3510)
+    __aicore__ inline void QuantDynamicHif4(LocalTensor<XOutType>& outLocal, LocalTensor<XInType>& inLocal)
+    {
+        if (Std::IsSame<XInType, half>::value) {
+            LocalTensor<bfloat16_t> inLocalBf16 = inLocal.template ReinterpretCast<bfloat16_t>();
+            Cast(inLocalBf16, inLocal, RoundMode::CAST_RINT, axisH_);
+        }
+
+        uint32_t groupNum = Ceil(axisH_, Quant::HIF4_QUANT_GROUP_ELE_NUM);
+        uint32_t e8BufSize = Align32(groupNum * static_cast<uint32_t>(sizeof(uint16_t)));
+        uint32_t e1p8BufSize = Align32(groupNum * static_cast<uint32_t>(sizeof(uint8_t)));
+        uint32_t e1p16BufSize = Align32(groupNum * static_cast<uint32_t>(sizeof(uint16_t)));
+
+        __ubuf__ bfloat16_t* srcAddr = (__ubuf__ bfloat16_t*)inLocal.GetPhyAddr();
+        __ubuf__ uint8_t* outLocalAddr = (__ubuf__ uint8_t*)outLocal.GetPhyAddr();
+        __ubuf__ float* dstScaleAddr =
+            (__ubuf__ float*)outLocal[Align32<uint32_t>(Ceil(axisH_, FP4_ELEMS_PER_BYTE))].GetPhyAddr();
+        // e8需 h / 64 * 2 字节, e1p8需 h / 64 字节, e1p16需 h / 64 * 2 字节, floatLocalTemp_ 至少含 h * 4 字节
+        // h 最小为 1024，在上述4个部分内存大小均ub对齐的情况下，floatLocalTemp_仍可满足前三者所需内存要求
+        LocalTensor<uint8_t> floatLocalTempUint8 = floatLocalTemp_.template ReinterpretCast<uint8_t>();
+        __ubuf__ bfloat16_t* e8BufAddr = (__ubuf__ bfloat16_t*)floatLocalTempUint8.GetPhyAddr();
+        __ubuf__ uint8_t* e1p8BufAddr = (__ubuf__ uint8_t*)floatLocalTempUint8[e8BufSize].GetPhyAddr();
+        __ubuf__ uint8_t* e1p16BufAddr = (__ubuf__ uint8_t*)floatLocalTempUint8[e8BufSize + e1p8BufSize].GetPhyAddr();
+
+        Quant::Hif4Compute<bfloat16_t, XOutType>(srcAddr, outLocalAddr, e8BufAddr, e1p8BufAddr, e1p16BufAddr,
+                                                 dstScaleAddr, axisH_);
+    }
+#endif
 #endif
 
     __aicore__ inline void CopyScalesToOut(uint32_t currentTokenIndex, uint32_t scaleOutBytes,
@@ -301,7 +340,7 @@ public:
         if constexpr (((QuantMode > UNQUANT) && (QuantMode != STATIC_QUANT)) ||
                       ((QuantMode == UNQUANT) && IsSmoothScaleExist)) {
             auto scaleLT = quantTok[(Ceil(axisH_, UB_ALIGN) * UB_ALIGN)].template ReinterpretCast<uint8_t>();
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
             if constexpr ((QuantMode == MX_QUANT) && (Std::IsSame<ExpandXOutType, fp4x2_e2m1_t>::value ||
                                                       Std::IsSame<ExpandXOutType, fp4x2_e1m2_t>::value)) {
                 scaleLT =
@@ -317,6 +356,12 @@ public:
                 scaleLT = quantTok[(Ceil(Ceil(axisH_, FP4_ELEMS_PER_BYTE), UB_ALIGN) * UB_ALIGN)]
                               .template ReinterpretCast<uint8_t>();
             }
+#if (__NPU_ARCH__ != 3510)
+            else if constexpr (Std::IsSame<ExpandXOutType, hifloat4x2_t>::value) {
+                scaleLT = quantTok[(Ceil(Ceil(axisH_, FP4_ELEMS_PER_BYTE), UB_ALIGN) * UB_ALIGN)]
+                              .template ReinterpretCast<uint8_t>();
+            }
+#endif
 #endif
             DataCopyPad(dynamicScalesOutGMTensor_[currentTokenIndex * scaleOutBytes], scaleLT, scaleOutParams);
         }

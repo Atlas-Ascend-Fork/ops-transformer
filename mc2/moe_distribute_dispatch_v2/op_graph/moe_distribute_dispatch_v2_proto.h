@@ -16,6 +16,7 @@
 #define MOE_DISTRIBUTE_DISPATCH_V2_PROTO_H_
 
 #include "graph/operator_reg.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 namespace ge {
 
 /**
@@ -69,16 +70,16 @@ support format: ND.
 */
 REG_OP(MoeDistributeDispatchV2)
     .INPUT(x, TensorType({DT_BF16, DT_FLOAT16, DT_INT32, DT_FLOAT8_E5M2, DT_FLOAT8_E4M3FN, DT_HIFLOAT8, DT_FLOAT4_E2M1,
-                          DT_FLOAT4_E1M2}))
+                          DT_FLOAT4_E1M2, Ops::Transformer::DT_HIFLOAT4}))
     .INPUT(expert_ids, TensorType({DT_INT32}))
-    .OPTIONAL_INPUT(scales, TensorType({DT_FLOAT, DT_FLOAT8_E8M0}))
+    .OPTIONAL_INPUT(scales, TensorType({DT_FLOAT, DT_FLOAT8_E8M0, Ops::Transformer::DT_HIFLOAT4_SCALE}))
     .OPTIONAL_INPUT(x_active_mask, TensorType({DT_BOOL}))
     .OPTIONAL_INPUT(expert_scales, TensorType({DT_FLOAT}))
     .OPTIONAL_INPUT(elastic_info, TensorType({DT_INT32}))
     .OPTIONAL_INPUT(performance_info, TensorType({DT_INT64}))
     .OUTPUT(expand_x, TensorType({DT_BF16, DT_INT8, DT_INT32, DT_FLOAT16, DT_FLOAT8_E5M2, DT_FLOAT8_E4M3FN, DT_HIFLOAT8,
-                                  DT_FLOAT4_E2M1, DT_FLOAT4_E1M2}))
-    .OUTPUT(dynamic_scales, TensorType({DT_FLOAT, DT_FLOAT8_E8M0}))
+                                  DT_FLOAT4_E2M1, DT_FLOAT4_E1M2, Ops::Transformer::DT_HIFLOAT4}))
+    .OUTPUT(dynamic_scales, TensorType({DT_FLOAT, DT_FLOAT8_E8M0, Ops::Transformer::DT_HIFLOAT4_SCALE}))
     .OUTPUT(assist_info_for_combine, TensorType({DT_INT32}))
     .OUTPUT(expert_token_nums, TensorType({DT_INT64}))
     .OUTPUT(ep_recv_count, TensorType({DT_INT32}))

@@ -60,6 +60,7 @@ constexpr int64_t MAX_EP_WORLD_SIZE_A5 = 1024L;
 constexpr int64_t MAX_EP_WORLD_SIZE_LAYERED = 256;
 constexpr int64_t MIN_EP_WORLD_SIZE = 2;
 constexpr int64_t BS_UPPER_BOUND = 512;
+constexpr int64_t BS_UPPER_BOUND_A6 = 1024;
 constexpr int64_t BS_UPPER_BOUND_LAYERED = 256;
 constexpr int64_t FULLMESH_BS_UPPER_BOUND_A3 = 256;
 constexpr int64_t FULLMESH_BS_UPPER_BOUND_A5 = BS_UPPER_BOUND;
@@ -103,6 +104,7 @@ constexpr uint64_t STATIC_SCALE_DIM_0 = 1;
 constexpr uint64_t ONE_DIM_SCALE_COL_NUM = 1;
 constexpr uint64_t MX_BLOCK_SIZE = 32U;
 constexpr uint64_t PERGROUP_BLOCK_SIZE = 128U;
+constexpr uint64_t HIF4_GROUP_SIZE = 64U;
 } // namespace
 
 // Supported x datatype in nonquant mode, the same as expandX
@@ -603,7 +605,7 @@ static ge::graphStatus CheckGroupAttrParams(const gert::TilingContext* context, 
     isLayered = (commAlgPtr != nullptr) && (strcmp(commAlgPtr, "hierarchy") == 0); // isLayered赋值
     std::string socVersion = mc2tiling::GetSocVersion(context);
     int64_t maxEpworldsize = 0;
-    if (npuArch == Ops::Base::DAV_3510) {
+    if (npuArch == Ops::Base::DAV_3510 || npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202) {
         maxEpworldsize = isLayered ? MAX_EP_WORLD_SIZE_LAYERED : MAX_EP_WORLD_SIZE_A5;
     } else {
         maxEpworldsize = isLayered ? MAX_EP_WORLD_SIZE_LAYERED : MAX_EP_WORLD_SIZE_A3;
@@ -667,7 +669,12 @@ ge::graphStatus MoeDistributeDispatchV2TilingFuncBase::CheckOtherAttrParams(cons
         return ge::GRAPH_FAILED;
     }
 
-    isSetFullMeshV2 = ((strcmp(commAlgPtr, "fullmesh_v2") == 0) ? true : false);
+    NpuArch npuArch = mc2tiling::GetNpuArch(context);
+    if ((npuArch == Ops::Base::DAV_2201) || (npuArch == Ops::Base::DAV_3510)) {
+        isSetFullMeshV2 = ((strcmp(commAlgPtr, "fullmesh_v2") == 0) ? true : false);
+    } else {
+        isSetFullMeshV2 = true;
+    }
     OP_LOGD(nodeName, "MoeDistributeDispatchV2 isSetFullMeshV2 = %d\n", isSetFullMeshV2);
 
     return ge::GRAPH_SUCCESS;
@@ -866,8 +873,14 @@ static bool CheckCommAlgAttrs(const gert::TilingContext* context, const char* no
     const gert::StorageShape* expertIdStorageShape = context->GetInputShape(config.expertIdsIndex);
     const int64_t expertIdsDim1 = expertIdStorageShape->GetStorageShape().GetDim(1);
     uint32_t k = static_cast<uint32_t>(expertIdsDim1);
-    int64_t fullMeshBsUpperBound =
-        mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510 ? FULLMESH_BS_UPPER_BOUND_A5 : FULLMESH_BS_UPPER_BOUND_A3;
+
+    int64_t fullMeshBsUpperBound = FULLMESH_BS_UPPER_BOUND_A3;
+    if (mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510) {
+        fullMeshBsUpperBound = FULLMESH_BS_UPPER_BOUND_A5;
+    } else if ((mc2tiling::GetNpuArch(context) == Ops::Base::DAV_9201) ||
+               (mc2tiling::GetNpuArch(context) == Ops::Base::DAV_9202)) {
+        fullMeshBsUpperBound = BS_UPPER_BOUND_A6;
+    }
 
     // 检查comm_alg和bs是否冲突
     OP_TILING_CHECK(isSetFullMeshV2 && (bs > fullMeshBsUpperBound),
@@ -951,6 +964,10 @@ static ge::graphStatus CheckAttrs(const gert::TilingContext* context, const char
     const gert::StorageShape* xStorageShape = context->GetInputShape(config.xIndex);
     const int64_t xDim0 = xStorageShape->GetStorageShape().GetDim(0);
     int64_t bsUpperBound = isLayered ? BS_UPPER_BOUND_LAYERED : BS_UPPER_BOUND;
+    if ((mc2tiling::GetNpuArch(context) == Ops::Base::DAV_9201) ||
+        (mc2tiling::GetNpuArch(context) == Ops::Base::DAV_9202)) {
+        bsUpperBound = BS_UPPER_BOUND_A6;
+    }
     OP_TILING_CHECK((xDim0 > bsUpperBound) || (xDim0 <= 0),
                     OP_LOGE(nodeName,
                             "xDim0(BS) is invalid. Should be between "
@@ -1015,7 +1032,8 @@ static ge::graphStatus CheckLayeredExpertScalesShape(const gert::TilingContext* 
 static ge::graphStatus CheckFloat4LastAxis(const gert::TilingContext* context, const char* nodeName, int64_t xDim1)
 {
     auto expandXDesc = context->GetOutputDesc(OUTPUT_EXPAND_X_INDEX);
-    if ((expandXDesc->GetDataType() == ge::DT_FLOAT4_E2M1) || (expandXDesc->GetDataType() == ge::DT_FLOAT4_E1M2)) {
+    if ((expandXDesc->GetDataType() == ge::DT_FLOAT4_E2M1) || (expandXDesc->GetDataType() == ge::DT_FLOAT4_E1M2) ||
+        (expandXDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4)) {
         OP_TILING_CHECK(
             xDim1 % EVEN_ALIGN,
             OP_LOGE(nodeName,
@@ -1255,7 +1273,7 @@ static ge::graphStatus CheckExpandXAndDynamicScalesTensorShape(const gert::Tilin
                                 "dynamicScales's dim0=%ld, A=%u.",
                                 dynamicScalesDim0, A),
                         return ge::GRAPH_FAILED);
-        // Dim1, only for pergroup and mx
+        // Dim1, only for pergroup and mx and hif4
         if (quantMode != static_cast<uint32_t>(QuantModeA5::PERTOKEN_DYNAMIC_QUANT)) {
             const uint64_t dynamicScalesDim1 =
                 static_cast<uint64_t>(dynamicScalesStorageShape->GetStorageShape().GetDim(1));
@@ -1274,6 +1292,12 @@ static ge::graphStatus CheckExpandXAndDynamicScalesTensorShape(const gert::Tilin
                     (quantMode == static_cast<uint32_t>(QuantModeA5::PERGROUP_DYNAMIC_QUANT)),
                 OP_LOGE(nodeName, "dynamicScales's dim1 should be equal to %lu when quantMode=%u, but got %lu.",
                         ops::CeilDiv(h, PERGROUP_BLOCK_SIZE), quantMode, dynamicScalesDim1),
+                return ge::GRAPH_FAILED);
+            OP_TILING_CHECK(
+                (dynamicScalesDim1 != ops::CeilDiv(h, HIF4_GROUP_SIZE)) &&
+                    (quantMode == static_cast<uint32_t>(QuantModeA5::HIF4_QUANT)),
+                OP_LOGE(nodeName, "dynamicScales's dim1 should be equal to %lu when quantMode=%u, but got %lu.",
+                        ops::CeilDiv(h, HIF4_GROUP_SIZE), quantMode, dynamicScalesDim1),
                 return ge::GRAPH_FAILED);
         }
     }
@@ -1623,7 +1647,7 @@ static uint32_t SendToMoeExpertUsedBuffer(const gert::TilingContext* context,
     UbForMoe = UbForMoe + expertMaskBufSize;                                        // expertMaskBuf
     UbForMoe = UbForMoe + Ceil(moeExpertNum * sizeof(int32_t), UB_ALIGN, nodeName); // tokenNumToExpertBuf
     if (maxBs < A5_SERIAL_MODE_BS_THRESHOLD && epWorldSize < A5_SERIAL_MODE_EP_WORLD_SIZE_THRESHOLD &&
-        mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510) {
+        mc2tiling::GetNpuArch(context) != Ops::Base::DAV_2201) {
         // 串行模式下各核按rank分片统计专家count，statusBuf_只需容纳本核分片
         uint32_t countNumPerCore = Ceil(totalExpertNum, aivNum, nodeName) / aivNum;
         uint32_t rankNumPerCore = Ceil(epWorldSize, aivNum, nodeName) / aivNum;
@@ -1827,7 +1851,8 @@ static ge::graphStatus SetWorkSpace(gert::TilingContext* context, const char* no
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + static_cast<size_t>(WORKSPACE_ELEMENT_OFFSET * aivNum * aivNum);
-    if (mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510) {
+    NpuArch npuArch = mc2tiling::GetNpuArch(context);
+    if (npuArch == Ops::Base::DAV_3510 || npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202) {
         // A5为前缀和同步标记预留空间
         workSpaces[0] +=
             A5_CUMSUM_WS_FLAG_OFFSET + static_cast<uint64_t>(aivNum) * A5_CUMSUM_WORKSPACE_MAX_CORE_NUM * UB_ALIGN_VAL;
@@ -2124,7 +2149,8 @@ ge::graphStatus MoeDistributeDispatchV2TilingFuncBase::MoeDistributeDispatchA3Ti
 inline void MoeDistributeDispatchV2ExceptionImplWrapper(aclrtExceptionInfo* args, void* userdata)
 {
     const char* socName = aclrtGetSocName();
-    if ((std::strstr(socName, "Ascend950") == nullptr) && (std::strstr(socName, "Ascend910B") == nullptr)) {
+    if ((std::strstr(socName, "Ascend960") == nullptr) && (std::strstr(socName, "Ascend950") == nullptr) &&
+        (std::strstr(socName, "Ascend910B") == nullptr)) {
         return;
     }
     Mc2Exception::Mc2ExceptionImpl(args, userdata, "MoeDistributeDispatchV2");

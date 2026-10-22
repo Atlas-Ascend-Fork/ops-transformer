@@ -55,6 +55,12 @@ constexpr uint32_t FP32_EXP_BIAS_CUBLAS = 0x00007f00;
 constexpr uint16_t ABS_MASK_FOR_16BIT = 0x7fff;
 constexpr uint32_t EPS_1E_4_FP32 = 0x38D1B717; // 1e-4 的 FP32 bit pattern，用于 cuBLAS scale 路径下限 clamp
 
+constexpr uint32_t HIF4_QUANT_GROUP_ELE_NUM = 64U;
+constexpr uint32_t HIF4_QUANT_SCALE_ALIGN = 256U;
+constexpr uint32_t HIF4_QUANT_BF16_BLOCK_NUM = 16U;
+constexpr uint32_t HIF4_QUANT_CAST_COPYOUT_PACK4_NUM = 4U;
+constexpr uint32_t HIF4_QUANT_BRC_BLOCK_NUM = 8U;
+
 using namespace AscendC;
 
 template <typename T>
@@ -789,6 +795,286 @@ __aicore__ inline void ComputePerTileDynamicBatchScale(__ubuf__ T* srcAddr, __ub
     QuantizePerTileWithGroupScale<T, U, RMode, HasSmooth>(srcAddr, smoothLocalAddr, groupScaleLocalAddr, outLocalAddr,
                                                           totalCountInUB);
 }
+
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+template <typename ST, typename DT>
+__simd_callee__ inline void CopyInAndGetMaxFourEle(Reg::RegTensor<ST>& vregIn1, Reg::RegTensor<ST>& vregIn2,
+                                                   Reg::RegTensor<ST>& vregIn3, Reg::RegTensor<ST>& vregIn4,
+                                                   Reg::RegTensor<ST>& vregMax1, Reg::RegTensor<ST>& vregMax2,
+                                                   Reg::RegTensor<ST>& vregMaxFourEle, __ubuf__ float*& srcAddr,
+                                                   int32_t gmCopyInRegStep, Reg::MaskReg& maskAll,
+                                                   uint32_t& remainEvenEleNum, uint32_t& remainOddEleNum,
+                                                   Reg::MaskReg& maskForValidEle)
+{
+    Reg::LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_DINTLV_B32>(
+        (Reg::RegTensor<float>&)vregIn1, (Reg::RegTensor<float>&)vregIn2, srcAddr, gmCopyInRegStep);
+    maskForValidEle = Reg::UpdateMask<ST>(remainEvenEleNum);
+    Reg::Abs<half>((Reg::RegTensor<half>&)vregIn1, (Reg::RegTensor<half>&)vregIn1, maskForValidEle);
+    maskForValidEle = Reg::UpdateMask<ST>(remainOddEleNum);
+    Reg::Abs<half>((Reg::RegTensor<half>&)vregIn2, (Reg::RegTensor<half>&)vregIn2, maskForValidEle);
+
+    Reg::LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_DINTLV_B32>(
+        (Reg::RegTensor<float>&)vregIn3, (Reg::RegTensor<float>&)vregIn4, srcAddr, gmCopyInRegStep);
+    maskForValidEle = Reg::UpdateMask<ST>(remainEvenEleNum);
+    Reg::Abs<half>((Reg::RegTensor<half>&)vregIn3, (Reg::RegTensor<half>&)vregIn3, maskForValidEle);
+    maskForValidEle = Reg::UpdateMask<ST>(remainOddEleNum);
+    Reg::Abs<half>((Reg::RegTensor<half>&)vregIn4, (Reg::RegTensor<half>&)vregIn4, maskForValidEle);
+
+    Reg::Max<ST>(vregMax1, vregIn1, vregIn2, maskAll);
+    Reg::Max<ST>(vregMax2, vregIn3, vregIn4, maskAll);
+    Reg::DeInterleave<ST>(vregMax1, vregMax2, vregMax1, vregMax2);
+    Reg::Max<ST>(vregMaxFourEle, vregMax1, vregMax2, maskAll);
+}
+
+template <typename ST, typename DT>
+__simd_callee__ inline void GetHif4GroupMax(Reg::RegTensor<ST>& vregMax, Reg::RegTensor<ST>& vregMaxFourEle,
+                                            Reg::RegTensor<uint16_t>& vregNumscale, Reg::RegTensor<ST>& vregGroupMax,
+                                            __ubuf__ ST*& e8BufAddr, Reg::MaskReg& maskAll,
+                                            AscendC::Reg::UnalignRegForStore& ureg1)
+{
+    static constexpr Reg::CastTrait castTraitE6M2 = {Reg::RegLayout::ZERO, Reg::SatMode::SAT,
+                                                     Reg::MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
+
+    Reg::ReduceDataBlock<Reg::ReduceType::MAX, uint16_t>((Reg::RegTensor<uint16_t>&)vregMax,
+                                                         (Reg::RegTensor<uint16_t>&)vregMaxFourEle, maskAll);
+    Reg::Mul(vregMax, vregMax, (Reg::RegTensor<ST>&)vregNumscale, maskAll);
+    Reg::Cast<fp8_e6m2_t, bfloat16_t, castTraitE6M2>((Reg::RegTensor<fp8_e6m2_t>&)vregGroupMax,
+                                                     (Reg::RegTensor<bfloat16_t>&)vregMax, maskAll);
+    Reg::StoreUnAlign<ST, Reg::PostLiteral::POST_MODE_UPDATE>(e8BufAddr, vregGroupMax, ureg1, 8);
+}
+
+template <typename ST, typename DT>
+__simd_callee__ inline void ComputeHif4Scale(Reg::RegTensor<ST>& vregMax, Reg::RegTensor<ST>& vb16_Ea_rec_bf16,
+                                             Reg::RegTensor<ST>& vb16_max_elt8, Reg::RegTensor<ST>& vregNumhalf,
+                                             Reg::RegTensor<ST>& vregNum1, Reg::RegTensor<ST>& vregMid,
+                                             __ubuf__ ST*& e8BufRead1Addr, Reg::MaskReg& vb1E8Comp,
+                                             Reg::MaskReg& vb1E16Comp, Reg::MaskReg& maskAll)
+{
+    static constexpr Reg::CastTrait castTraitZero = {Reg::RegLayout::ZERO, Reg::SatMode::UNKNOWN,
+                                                     Reg::MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
+
+    Reg::LoadAlign<ST, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_E2B_B16>(vregMax, e8BufRead1Addr,
+                                                                                        HIF4_QUANT_BRC_BLOCK_NUM);
+    Reg::ReciprocalCast<bfloat16_t, fp8_e6m2_t, castTraitZero>((Reg::RegTensor<bfloat16_t>&)vb16_Ea_rec_bf16,
+                                                               (Reg::RegTensor<fp8_e6m2_t>&)vregMax, maskAll);
+    Reg::Mul(vb16_max_elt8, vb16_max_elt8, vb16_Ea_rec_bf16, maskAll);
+    Reg::Compares<ST, CMPMODE::GE>(vb1E8Comp, vb16_max_elt8, 4, maskAll);
+    Reg::Select(vb16_max_elt8, vregNumhalf, vregNum1, vb1E8Comp);
+    Reg::Mul(vregMid, vregMid, vb16_Ea_rec_bf16, maskAll);
+    Reg::Mul(vregMid, vregMid, vb16_max_elt8, maskAll);
+    Reg::Compares<ST, CMPMODE::GE>(vb1E16Comp, vregMid, 2, maskAll);
+    Reg::Select(vregMid, vregNumhalf, vregNum1, vb1E16Comp);
+    Reg::Mul(vregMid, vregMid, vb16_max_elt8, maskAll);
+    Reg::Mul(vregMax, vregMid, vb16_Ea_rec_bf16, maskAll);
+}
+
+template <typename ST, typename DT>
+__simd_callee__ inline void ComputeHif4Ele(Reg::RegTensor<ST>& vregIn1, Reg::RegTensor<ST>& vregIn2,
+                                           Reg::RegTensor<uint8_t>& vb, Reg::RegTensor<ST>& vregIn3,
+                                           Reg::RegTensor<ST>& vregIn4, Reg::RegTensor<fp4x2_e1m2_t>& vbOut1,
+                                           Reg::RegTensor<fp4x2_e1m2_t>& vbOut2, __ubuf__ ST*& srcAddr,
+                                           __ubuf__ int32_t*& dstAddr, int32_t gmCopyOutRegStep,
+                                           int32_t gmCopyInRegStep2, Reg::MaskReg& maskAll, Reg::MaskReg& maskCopyOut,
+                                           uint32_t& tokenElePairNum)
+{
+    static constexpr Reg::CastTrait castTraitZero = {Reg::RegLayout::ZERO, Reg::SatMode::UNKNOWN,
+                                                     Reg::MaskMergeMode::ZEROING, RoundMode::CAST_RINT};
+
+    Reg::Interleave<ST>(vregIn1, vregIn2, (Reg::RegTensor<ST>&)vb, (Reg::RegTensor<ST>&)vb); // 4倍
+    Reg::LoadAlign<ST, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_NORM>(vregIn3, srcAddr,
+                                                                                     gmCopyInRegStep2);
+    Reg::LoadAlign<ST, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_NORM>(vregIn4, srcAddr,
+                                                                                     gmCopyInRegStep2);
+    Reg::Mul(vregIn1, vregIn1, vregIn3, maskAll);
+    Reg::Mul(vregIn2, vregIn2, vregIn4, maskAll);
+    Reg::Cast<fp4x2_e1m2_t, ST, castTraitZero>(vbOut1, vregIn1, maskAll);
+    Reg::Cast<fp4x2_e1m2_t, ST, castTraitZero>(vbOut2, vregIn2, maskAll);
+    maskCopyOut = Reg::UpdateMask<int32_t>(tokenElePairNum);
+    Reg::StoreAlign<int32_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::StoreDist::DIST_PACK4_B32>(
+        dstAddr, (Reg::RegTensor<int32_t>&)vbOut1, gmCopyOutRegStep, maskCopyOut);
+    maskCopyOut = Reg::UpdateMask<int32_t>(tokenElePairNum);
+    Reg::StoreAlign<int32_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::StoreDist::DIST_PACK4_B32>(
+        dstAddr, (Reg::RegTensor<int32_t>&)vbOut2, gmCopyOutRegStep, maskCopyOut);
+}
+
+template <typename ST, typename DT>
+__simd_vf__ inline void Hif4ElementQuant(__ubuf__ ST* srcAddrOri, __ubuf__ uint8_t* outLocalAddr,
+                                         __ubuf__ ST* e8BufAddrOri, __ubuf__ uint8_t* e1p8BufAddrOri,
+                                         __ubuf__ uint8_t* e1p16BufAddrOri, uint32_t tokenEleNum)
+{
+    uint16_t regLoop = CeilDivision(tokenEleNum, HIF4_QUANT_GROUP_ELE_NUM * HIF4_QUANT_BF16_BLOCK_NUM);
+
+    int32_t sysRegLen = static_cast<int32_t>(GetVecLen());
+    int32_t gmCopyInRegStep = sysRegLen / sizeof(float) * 2; // 按照类型float，双搬入
+    int32_t gmCopyOutRegStep = sysRegLen / sizeof(int32_t) / HIF4_QUANT_CAST_COPYOUT_PACK4_NUM; // 类型 uint32
+    int32_t gmCopyInRegStep2 = sysRegLen / sizeof(ST);                                          // 按照类型float
+
+    __ubuf__ float* srcAddr = (__ubuf__ float*)srcAddrOri;
+    __ubuf__ ST* srcAddr2 = (__ubuf__ ST*)srcAddrOri;
+    __ubuf__ int32_t* dstAddr = (__ubuf__ int32_t*)outLocalAddr;
+    __ubuf__ ST* e8BufAddr = (__ubuf__ ST*)e8BufAddrOri; // bf16存储
+    __ubuf__ uint8_t* e1p8BufAddr = (__ubuf__ uint8_t*)e1p8BufAddrOri;
+    __ubuf__ uint8_t* e1p16BufAddr = (__ubuf__ uint8_t*)e1p16BufAddrOri;
+    __ubuf__ ST* e8BufRead1Addr = e8BufAddr; // bf16存储
+
+    Reg::RegTensor<ST> vregIn1;
+    Reg::RegTensor<ST> vregIn2;
+    Reg::RegTensor<ST> vregIn3;
+    Reg::RegTensor<ST> vregIn4;
+    Reg::RegTensor<ST> vregMax1;
+    Reg::RegTensor<ST> vregMax2;
+    Reg::RegTensor<ST> vregFirst;
+    Reg::RegTensor<ST> vregSecond;
+    Reg::RegTensor<ST> vregLow;
+    Reg::RegTensor<ST> vregHigh;
+    Reg::RegTensor<ST> vmax8;
+
+    Reg::RegTensor<ST> vb16_max_elt8_1;
+    Reg::RegTensor<ST> vb16_max_elt8_2;
+    Reg::RegTensor<ST> vb16_Ea_rec_bf16_1;
+    Reg::RegTensor<ST> vb16_Ea_rec_bf16_2;
+
+    Reg::RegTensor<uint8_t> vb1E8;
+    Reg::RegTensor<uint8_t> vb1E16;
+    Reg::RegTensor<fp4x2_e1m2_t> vbOut1;
+    Reg::RegTensor<fp4x2_e1m2_t> vbOut2;
+
+    Reg::RegTensor<uint16_t> vregNumOneSeventh;
+    Reg::Duplicate(vregNumOneSeventh, 0x3e12); // bloat16的1/7
+
+    float numberhalf = 0.5;
+    Reg::RegTensor<ST> vregNumhalf;
+    Reg::Duplicate(vregNumhalf, static_cast<ST>(numberhalf));
+
+    uint8_t number1 = 1;
+    Reg::RegTensor<ST> vregNum1;
+    Reg::Duplicate(vregNum1, number1);
+
+    Reg::MaskReg vb1E8Comp1;
+    Reg::MaskReg vb1E8Comp2;
+    Reg::MaskReg vb1E16Comp1;
+    Reg::MaskReg vb1E16Comp2;
+    Reg::MaskReg maskAll = Reg::CreateMask<uint8_t>();
+
+    Reg::UnalignRegForStore ureg1;
+
+    uint32_t tokenElePairNum = tokenEleNum / 2;
+    uint32_t remainOddEleNum = (tokenElePairNum / 2) * 2;
+    uint32_t remainEvenEleNum = tokenEleNum - remainOddEleNum;
+    Reg::MaskReg maskCopyOut;
+    Reg::MaskReg maskForValidEle;
+    for (uint16_t loopIdx = 0; loopIdx < regLoop; loopIdx++) {
+        CopyInAndGetMaxFourEle<ST, DT>(vregIn1, vregIn2, vregIn3, vregIn4, vregMax1, vregMax2, vregFirst, srcAddr,
+                                       gmCopyInRegStep, maskAll, remainEvenEleNum, remainOddEleNum, maskForValidEle);
+
+        CopyInAndGetMaxFourEle<ST, DT>(vregIn1, vregIn2, vregIn3, vregIn4, vregMax1, vregMax2, vregSecond, srcAddr,
+                                       gmCopyInRegStep, maskAll, remainEvenEleNum, remainOddEleNum, maskForValidEle);
+
+        Reg::DeInterleave<ST>(vregMax1, vregMax2, vregFirst, vregSecond);
+        Reg::Max<ST>((Reg::RegTensor<ST>&)vmax8, (Reg::RegTensor<ST>&)vregMax1, (Reg::RegTensor<ST>&)vregMax2, maskAll);
+
+        GetHif4GroupMax<ST, DT>(vregMax1, vregFirst, vregNumOneSeventh, vregLow, e8BufAddr, maskAll, ureg1);
+        GetHif4GroupMax<ST, DT>(vregMax2, vregSecond, vregNumOneSeventh, vregHigh, e8BufAddr, maskAll, ureg1);
+        Reg::StoreUnAlignPost(e8BufAddr, ureg1, 0);
+        Reg::LocalMemBar<Reg::MemType::VEC_STORE, Reg::MemType::VEC_LOAD>();
+
+        Reg::Interleave<ST>(vb16_max_elt8_1, vb16_max_elt8_2, vmax8, vmax8);
+        ComputeHif4Scale<ST, DT>(vregMax1, vb16_Ea_rec_bf16_1, vb16_max_elt8_1, vregNumhalf, vregNum1, vregFirst,
+                                 e8BufRead1Addr, vb1E8Comp1, vb1E16Comp1, maskAll);
+        ComputeHif4Scale<ST, DT>(vregMax2, vb16_Ea_rec_bf16_2, vb16_max_elt8_2, vregNumhalf, vregNum1, vregSecond,
+                                 e8BufRead1Addr, vb1E8Comp2, vb1E16Comp2, maskAll);
+
+        Reg::MaskDeInterleave<uint8_t>(vb1E8Comp1, vb1E8Comp2, vb1E8Comp1, vb1E8Comp2);
+        Reg::StoreAlign<uint8_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::MaskDist::DIST_PACK>(e1p8BufAddr, vb1E8Comp1,
+                                                                                               16);
+
+        Reg::MaskDeInterleave<uint8_t>(vb1E16Comp1, vb1E16Comp2, vb1E16Comp1, vb1E16Comp2);
+        Reg::StoreAlign<uint8_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::MaskDist::DIST_NORM>(e1p16BufAddr,
+                                                                                               vb1E16Comp1, 32);
+
+        Reg::Interleave<ST>((Reg::RegTensor<ST>&)vb1E8, (Reg::RegTensor<ST>&)vb1E16, vregMax1, vregMax1); // 2倍
+
+        ComputeHif4Ele<ST, DT>(vregIn1, vregIn2, vb1E8, vregIn3, vregIn4, vbOut1, vbOut2, srcAddr2, dstAddr,
+                               gmCopyOutRegStep, gmCopyInRegStep2, maskAll, maskCopyOut, tokenElePairNum);
+        ComputeHif4Ele<ST, DT>(vregIn1, vregIn2, vb1E16, vregIn3, vregIn4, vbOut1, vbOut2, srcAddr2, dstAddr,
+                               gmCopyOutRegStep, gmCopyInRegStep2, maskAll, maskCopyOut, tokenElePairNum);
+
+        Reg::Interleave<ST>((Reg::RegTensor<ST>&)vb1E8, (Reg::RegTensor<ST>&)vb1E16, vregMax2, vregMax2); // 2倍
+
+        ComputeHif4Ele<ST, DT>(vregIn1, vregIn2, vb1E8, vregIn3, vregIn4, vbOut1, vbOut2, srcAddr2, dstAddr,
+                               gmCopyOutRegStep, gmCopyInRegStep2, maskAll, maskCopyOut, tokenElePairNum);
+        ComputeHif4Ele<ST, DT>(vregIn1, vregIn2, vb1E16, vregIn3, vregIn4, vbOut1, vbOut2, srcAddr2, dstAddr,
+                               gmCopyOutRegStep, gmCopyInRegStep2, maskAll, maskCopyOut, tokenElePairNum);
+    }
+}
+
+template <typename ST, typename DT>
+__simd_vf__ inline void Hif4ScalesOut(__ubuf__ float* dstScaleAddrOri, __ubuf__ ST* e8BufAddrOri,
+                                      __ubuf__ uint8_t* e1p8BufAddrOri, __ubuf__ uint8_t* e1p16BufAddrOri,
+                                      uint32_t tokenEleNum)
+{
+    uint16_t scaleMoveLoopTimes = CeilDivision(tokenEleNum, HIF4_QUANT_GROUP_ELE_NUM * HIF4_QUANT_SCALE_ALIGN);
+    uint32_t scaleNum = CeilDivision(tokenEleNum, HIF4_QUANT_GROUP_ELE_NUM);
+
+    int32_t sysRegLen = static_cast<int32_t>(GetVecLen());
+    int32_t gmCopyTmpBufE8Step = sysRegLen * 2;
+    int32_t gmCopyTmpBufOtherStep = sysRegLen;
+    int32_t gmCopyOutScaleRegStep = sysRegLen / sizeof(float); // 类型 fp32
+
+    // 计算scale
+    __ubuf__ float* dstScaleAddr = (__ubuf__ float*)dstScaleAddrOri;
+    __ubuf__ uint8_t* e8BufStep2Addr = (__ubuf__ uint8_t*)e8BufAddrOri; // bf16存储
+    __ubuf__ uint8_t* e1p8BufStep2Addr = (__ubuf__ uint8_t*)e1p8BufAddrOri;
+    __ubuf__ uint8_t* e1p16BufStep2Addr = (__ubuf__ uint8_t*)e1p16BufAddrOri;
+
+    Reg::RegTensor<uint8_t> vregE8;
+    Reg::RegTensor<uint8_t> vreg1E8;
+    Reg::RegTensor<uint8_t> vreg1E16First;
+    Reg::RegTensor<uint8_t> vreg1E16Second;
+    Reg::MaskReg maskCopyOut;
+
+    for (uint16_t loopIdx = 0; loopIdx < scaleMoveLoopTimes; loopIdx++) {
+        Reg::LoadAlign<uint8_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_DS_B8>(
+            vregE8, e8BufStep2Addr, gmCopyTmpBufE8Step); // gmCopyTmpBufE8Step 512实际上是256个只有低八位有效的fp16
+        Reg::LoadAlign<uint8_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_NORM>(
+            vreg1E8, e1p8BufStep2Addr, gmCopyTmpBufOtherStep); // gmCopyTmpBufOtherStep 256
+        Reg::LoadAlign<uint8_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_NORM>(
+            vreg1E16First, e1p16BufStep2Addr, gmCopyTmpBufOtherStep); // gmCopyTmpBufOtherStep 256
+        Reg::LoadAlign<uint8_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_NORM>(
+            vreg1E16Second, e1p16BufStep2Addr, gmCopyTmpBufOtherStep); // gmCopyTmpBufOtherStep 256
+
+        // vregE8是前128个EA+EB vreg1E8是后128个EA+EB
+        Reg::Interleave<uint8_t>(vregE8, vreg1E8, vregE8, vreg1E8);
+        Reg::Interleave<ST>((Reg::RegTensor<ST>&)vregE8, (Reg::RegTensor<ST>&)vreg1E16First,
+                            (Reg::RegTensor<ST>&)vregE8, (Reg::RegTensor<ST>&)vreg1E16First); // 4倍
+        Reg::Interleave<ST>((Reg::RegTensor<ST>&)vreg1E8, (Reg::RegTensor<ST>&)vreg1E16Second,
+                            (Reg::RegTensor<ST>&)vreg1E8, (Reg::RegTensor<ST>&)vreg1E16Second); // 4倍
+
+        maskCopyOut = Reg::UpdateMask<float>(scaleNum);
+        Reg::StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::StoreDist::DIST_NORM>(
+            dstScaleAddr, (Reg::RegTensor<float>&)vregE8, gmCopyOutScaleRegStep, maskCopyOut);
+        maskCopyOut = Reg::UpdateMask<float>(scaleNum);
+        Reg::StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::StoreDist::DIST_NORM>(
+            dstScaleAddr, (Reg::RegTensor<float>&)vreg1E16First, gmCopyOutScaleRegStep, maskCopyOut);
+        maskCopyOut = Reg::UpdateMask<float>(scaleNum);
+        Reg::StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::StoreDist::DIST_NORM>(
+            dstScaleAddr, (Reg::RegTensor<float>&)vreg1E8, gmCopyOutScaleRegStep, maskCopyOut);
+        maskCopyOut = Reg::UpdateMask<float>(scaleNum);
+        Reg::StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::StoreDist::DIST_NORM>(
+            dstScaleAddr, (Reg::RegTensor<float>&)vreg1E16Second, gmCopyOutScaleRegStep, maskCopyOut);
+    }
+}
+
+template <typename ST, typename DT>
+__aicore__ inline void Hif4Compute(__ubuf__ ST* srcAddrOri, __ubuf__ uint8_t* outLocalAddr, __ubuf__ ST* e8BufAddrOri,
+                                   __ubuf__ uint8_t* e1p8BufAddrOri, __ubuf__ uint8_t* e1p16BufAddrOri,
+                                   __ubuf__ float* dstScaleAddrOri, uint32_t tokenEleNum)
+{
+    asc_vf_call<Hif4ElementQuant<ST, DT>>(srcAddrOri, outLocalAddr, e8BufAddrOri, e1p8BufAddrOri, e1p16BufAddrOri,
+                                          tokenEleNum);
+    asc_vf_call<Hif4ScalesOut<ST, DT>>(dstScaleAddrOri, e8BufAddrOri, e1p8BufAddrOri, e1p16BufAddrOri, tokenEleNum);
+}
+#endif
 
 } // namespace Quant
 #endif

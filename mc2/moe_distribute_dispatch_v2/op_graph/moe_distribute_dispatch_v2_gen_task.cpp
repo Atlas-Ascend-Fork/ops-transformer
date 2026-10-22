@@ -58,7 +58,7 @@ ge::Status MoeDistributeDispatchV2GenTaskFunc(const gert::ExeResGenerationContex
         OPS_LOG_E(nodeName, "Got unsupported commAlg %s.", commAlg.c_str());
         return ge::GRAPH_FAILED;
     }
-    OPS_LOG_D(nodeName, "Do A3 gen task.");
+    OPS_LOG_D(nodeName, "Do gen task other than A2 or A5.");
     return Mc2MoeGenTaskOpsUtils::Mc2MoeGenTaskCallbackV2(context, tasks);
 }
 

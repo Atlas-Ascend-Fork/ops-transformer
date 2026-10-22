@@ -562,8 +562,8 @@ inline int ParseStructuredDump(uint64_t argsAddr, std::vector<uint8_t>& winBuf)
 inline void Mc2ExceptionImpl(aclrtExceptionInfo* args, void* userdata, const char* op)
 {
     const char* socName = aclrtGetSocName();
-    if ((std::strstr(socName, "Ascend950") == nullptr) && (std::strstr(socName, "Ascend910_93") == nullptr) &&
-        (std::strstr(socName, "Ascend910B") == nullptr)) {
+    if ((std::strstr(socName, "Ascend960") == nullptr) && (std::strstr(socName, "Ascend950") == nullptr) &&
+        (std::strstr(socName, "Ascend910_93") == nullptr) && (std::strstr(socName, "Ascend910B") == nullptr)) {
         OP_LOGE(OP_NAME, "The soc version is %s, skip dump process", socName);
         return;
     }
@@ -638,7 +638,7 @@ inline void Mc2ExceptionImpl(aclrtExceptionInfo* args, void* userdata, const cha
                 OP_LOGE(OP_NAME, "Failed to get win content.");
                 return;
             }
-        } else if (std::strstr(socName, "Ascend950") != nullptr) {
+        } else if ((std::strstr(socName, "Ascend960") != nullptr) || (std::strstr(socName, "Ascend950") != nullptr)) {
             if (ProcessArgsForA5(argsAddr, winContent, op) != 0) {
                 OP_LOGE(OP_NAME, "Failed to get win content.");
                 return;

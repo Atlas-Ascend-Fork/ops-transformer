@@ -120,7 +120,7 @@ inline ge::graphStatus CheckActualWinSize(const gert::TilingContext* context, co
     uint64_t tokenNeedSizeDispatch = 0;
     uint64_t tokenNeedSizeCombine = 0;
     const uint64_t combineDataAlign =
-        mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510 ? FULL_MESH_DATA_ALIGN : WIN_ADDR_ALIGN;
+        (mc2tiling::GetNpuArch(context) == Ops::Base::DAV_2201) ? WIN_ADDR_ALIGN : FULL_MESH_DATA_ALIGN;
     uint64_t actualSize = CalcMinWinSize(winSizeData, tokenNeedSizeDispatch, tokenNeedSizeCombine, combineDataAlign);
     OP_TILING_CHECK(CheckLayeredWinSizeParams(context, nodeName, winSizeData) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "Invalid hierarchy window parameters."), return ge::GRAPH_FAILED);
