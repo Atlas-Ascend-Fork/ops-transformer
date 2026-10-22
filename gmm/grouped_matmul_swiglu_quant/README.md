@@ -25,7 +25,7 @@
 
     * $X∈\mathbb{Z_8}^{M \times K}$：输入矩阵（左矩阵），M是总token数，K是特征维度。
     * $W∈\mathbb{Z_8}^{E \times K \times N}$：分组权重矩阵（右矩阵），E是专家个数，K是特征维度，N是输出维度。
-    * $bias∈\mathbb{Z_{32}}^{E  \times N}$：矩阵乘计算的偏移值，E是专家个数，N是输出维度。
+    * $bias∈\mathbb{R}^{E \times N}$：A8W4 场景的 FLOAT32 辅助矩阵（`weightAssistMatrix`），E是专家个数，N是输出维度；A8W8 场景需传空指针。
     * $offset∈\mathbb{R}^{E  \times N}$：per-channel非对称反量化的偏移，E是专家个数，N是输出维度。
     * $w\_scale∈\mathbb{R}^{E \times N}$：分组权重矩阵（右矩阵）的逐通道缩放因子，E是专家个数，N是输出维度。
     * $x\_scale∈\mathbb{R}^{M}$：输入矩阵（左矩阵）的逐token缩放因子，M是总token数。
@@ -66,8 +66,7 @@
 
       $S_{i}=Swish(C_{i,act})\odot gate_{i}$  &nbsp;&nbsp;其中$Swish(x)=\frac{x}{1+e^{-x}}$
 
-      >注：当前版本不支持$bias_{i}$、$offset_{i}$，未来版本将支持的计算公式如下：
-      >$C_{i} =(X_{i}\cdot W_{i} + bias_{i\ BroadCast})\odot x\_scale_{i\ BroadCast} \odot w\_scale_{i\ BroadCast}+offset_{i\ BroadCast}$
+      >注：`bias` 输入的作用和传入要求随场景不同：A8W4 场景必须传入 FLOAT32 辅助矩阵（`weightAssistMatrix`），A8W8 场景需传空指针；它不是 INT32 矩阵乘偏置。当前版本不支持$offset_{i}$，非对称量化暂不支持。
 
     - 3.确定量化方式
 
@@ -115,8 +114,8 @@
 <tr>
 <td style="white-space: nowrap">bias</td>
 <td style="white-space: nowrap">输入</td>
-<td style="white-space: nowrap">矩阵乘计算的偏移值，公式中的bias。</td>
-<td style="white-space: nowrap">INT32</td>
+<td style="white-space: nowrap">矩阵乘时的辅助矩阵（weightAssistMatrix），shape为[E,N]；仅A8W4场景必须传入，A8W8场景需传空指针。</td>
+<td style="white-space: nowrap">FLOAT32</td>
 <td style="white-space: nowrap">ND</td>
 </tr>
 <tr>
