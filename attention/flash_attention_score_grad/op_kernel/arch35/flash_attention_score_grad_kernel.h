@@ -525,7 +525,7 @@ __aicore__ inline void FlashAttentionScoreGradKernel<CubeBlockType, VecBlockType
                     this->GetNextValidIdx(runInfos[(taskId + 1) & 1], taskId + 1, blockInnerIdx + 1, curLoopIdx + 1);
                 this->SetRunInfo(runInfos[taskId & 1], runInfos[(taskId + 1) & 1], taskId, blockInnerIdx,
                                  nextValidBlockInnerIdx);
-                if (this->tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx || IS_TND_SWIZZLE) {
+                if constexpr (IS_SWIZZLE) {
                     curLoopIdx++;
                 } else {
                     blockInnerIdx++;
@@ -625,7 +625,7 @@ __aicore__ inline void FlashAttentionScoreGradKernel<CubeBlockType, VecBlockType
             isLastTwoLoop = (nextValidBlockInnerIdx == -1);
             this->SetRunInfo(runInfos[taskId % PRELOAD_TIMES], runInfos[(taskId + 1) % PRELOAD_TIMES], taskId,
                              blockInnerIdx, nextValidBlockInnerIdx);
-            if (this->tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx || IS_TND_SWIZZLE) {
+            if constexpr (IS_SWIZZLE) {
                 curLoopIdx++;
             } else {
                 blockInnerIdx++;

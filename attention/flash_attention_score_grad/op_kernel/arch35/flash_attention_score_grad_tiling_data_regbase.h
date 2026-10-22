@@ -17,19 +17,31 @@
 #define FLASH_ATTENTION_SCORE_GRAD_TILING_DATA_REGBASE_H_
 
 #include <cstdint>
+#include "deter_gqa_band_schedule.h"
 
 namespace optiling {
 namespace fag {
 constexpr uint32_t MAX_CORE_NUM = 36;
 constexpr uint32_t TND_SWIZZLE_PREFIX_NUM = 129;
 
-// Schedule selected for the non-TND deterministic BAND implementation. isSplitByBlockIdx keeps
-// its original boolean meaning and only controls whether block-index splitting is enabled.
+// Runtime BAND sub-mode within the compile-time IsSwizzle branch. The legacy
+// isSplitByBlockIdx byte below is reserved and no longer controls kernel dispatch.
 enum class DeterBandScheduleMode : uint8_t {
     DISABLED = 0,
     CAUSAL = 1,
     DENSE = 2,
-    BAND = 3
+    BAND = 3,
+    CAUSAL_UPPER = 4
+};
+
+enum class DeterGqaCausalScheduleMode : uint8_t {
+    ORIGINAL = 0,
+    BATCH_MAJOR = 1
+};
+
+enum class DeterGqaBandScheduleMode : uint8_t {
+    ORIGINAL = 0,
+    PIECEWISE = 1
 };
 
 class FlashAttentionScoreGradEmptyTensorTilingDataRegbase {
@@ -232,6 +244,7 @@ public:
     uint32_t attenMaskCompressMode;
     uint32_t attenMaskS2Size;
     uint32_t sinkOptional;
+    // Reserved ABI byte. Swizzle dispatch is selected by template-key bit 53.
     uint8_t isSplitByBlockIdx;
     uint8_t dropMaskOuter;
     uint8_t sparseType;
@@ -239,7 +252,10 @@ public:
     uint64_t s1SinkOuter;
     uint64_t s2SinkOuter;
     uint8_t deterBandScheduleMode;
-    uint8_t reservedPad[7]; // tilingData需要8字节对齐，对应编译器尾部padding
+    uint8_t deterGqaCausalScheduleMode;
+    uint8_t deterGqaBandScheduleMode;
+    uint8_t reservedPad[1]; // Keep the existing 200-byte layout by using reserved bytes.
+    uint32_t deterGqaBandGroups;
 
     int64_t get_coreNum() const
     {
@@ -372,6 +388,18 @@ public:
     uint8_t get_deterBandScheduleMode() const
     {
         return deterBandScheduleMode;
+    }
+    uint8_t get_deterGqaCausalScheduleMode() const
+    {
+        return deterGqaCausalScheduleMode;
+    }
+    uint8_t get_deterGqaBandScheduleMode() const
+    {
+        return deterGqaBandScheduleMode;
+    }
+    uint32_t get_deterGqaBandGroups() const
+    {
+        return deterGqaBandGroups;
     }
 
     void set_coreNum(int64_t coreNumParam)
@@ -517,6 +545,18 @@ public:
     void set_deterBandScheduleMode(uint8_t deterBandScheduleModeParam)
     {
         this->deterBandScheduleMode = deterBandScheduleModeParam;
+    }
+    void set_deterGqaCausalScheduleMode(uint8_t deterGqaCausalScheduleModeParam)
+    {
+        this->deterGqaCausalScheduleMode = deterGqaCausalScheduleModeParam;
+    }
+    void set_deterGqaBandScheduleMode(uint8_t value)
+    {
+        deterGqaBandScheduleMode = value;
+    }
+    void set_deterGqaBandGroups(uint32_t value)
+    {
+        deterGqaBandGroups = value;
     }
     void set_reservedPad(uint8_t reservedPadVal = 0)
     {
@@ -1229,7 +1269,7 @@ public:
 class BaseDeterParamRegbase {
 public:
     uint32_t noNeedDeter;
-    uint32_t reserved1; // tilingData需要8字节对齐
+    uint32_t deterGqaCausalRoundsPerBatch;
     int64_t deterMaxRound;
     uint64_t deterGmOffset;
     uint64_t deterWorkSpaceOffset;
@@ -1243,6 +1283,10 @@ public:
     int64_t get_deterMaxRound() const
     {
         return deterMaxRound;
+    }
+    uint32_t get_deterGqaCausalRoundsPerBatch() const
+    {
+        return deterGqaCausalRoundsPerBatch;
     }
     uint64_t get_deterGmOffset() const
     {
@@ -1273,13 +1317,13 @@ public:
     {
         noNeedDeter = val;
     }
-    void set_reserved1(uint32_t val)
-    {
-        reserved1 = val;
-    }
     void set_deterMaxRound(int64_t value)
     {
         deterMaxRound = value;
+    }
+    void set_deterGqaCausalRoundsPerBatch(uint32_t value)
+    {
+        deterGqaCausalRoundsPerBatch = value;
     }
     void set_deterGmOffset(uint64_t value)
     {
@@ -1508,7 +1552,7 @@ public:
 };
 
 template <const bool isDeter = false, const bool isNewDeter = false, const bool isTnd = false,
-          const bool isTndSwizzle = false>
+          const bool isSwizzle = false>
 class FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase {
 public:
     FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase s1s2BNGS1S2BaseParams;
@@ -1519,7 +1563,9 @@ public:
     typename std::conditional<isDeter, BaseDeterParamRegbase, std::nullptr_t>::type baseDeterParam;
     typename std::conditional<isNewDeter, DeterParamRegbase, std::nullptr_t>::type deterParam;
     typename std::conditional<!isNewDeter && isTnd, TndParamRegbase, std::nullptr_t>::type tndParam;
-    typename std::conditional<isTndSwizzle, TndSwizzleParamRegbase, std::nullptr_t>::type tndSwizzleParam;
+    typename std::conditional<isTnd && isSwizzle, TndSwizzleParamRegbase, std::nullptr_t>::type tndSwizzleParam;
+    // Append only: all existing pre/main/post tiling offsets remain unchanged.
+    typename std::conditional<isDeter && !isTnd, GqaBandSchedule, std::nullptr_t>::type deterGqaBandSchedule{};
 };
 } // namespace fag
 } // namespace optiling

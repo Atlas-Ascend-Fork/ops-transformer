@@ -24,11 +24,11 @@ using namespace AscendC;
 
 #define FAG_PRE_CLASS_TEMPLATE \
     template <typename T1, typename T2, const uint8_t DETER_SPARSE_TYPE = 0, const uint32_t IS_TND = 0, \
-              const uint8_t SPLIT_AXIS = 0, const bool IS_TND_SWIZZLE = 0, const bool IS_ATTEN_MASK = 0>
+              const uint8_t SPLIT_AXIS = 0, const bool IS_SWIZZLE = 0, const bool IS_ATTEN_MASK = 0>
 #define FAG_PRE_FUNCTION_TEMPLATE \
     template <typename T1, typename T2, const uint8_t DETER_SPARSE_TYPE, const uint32_t IS_TND, \
-              const uint8_t SPLIT_AXIS, const bool IS_TND_SWIZZLE, const bool IS_ATTEN_MASK>
-#define FAG_PRE_FUNCTION_PARAMS_TEMPLATE T1, T2, DETER_SPARSE_TYPE, IS_TND, SPLIT_AXIS, IS_TND_SWIZZLE, IS_ATTEN_MASK
+              const uint8_t SPLIT_AXIS, const bool IS_SWIZZLE, const bool IS_ATTEN_MASK>
+#define FAG_PRE_FUNCTION_PARAMS_TEMPLATE T1, T2, DETER_SPARSE_TYPE, IS_TND, SPLIT_AXIS, IS_SWIZZLE, IS_ATTEN_MASK
 
 FAG_PRE_CLASS_TEMPLATE
 class FlashAttentionScoreGradS1S2BNGS1S2PreRegbase {

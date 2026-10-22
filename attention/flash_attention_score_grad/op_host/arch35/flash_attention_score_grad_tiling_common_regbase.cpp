@@ -14,6 +14,8 @@
  */
 
 #include "flash_attention_score_grad_tiling_common_regbase.h"
+#include "../../op_kernel/arch35/deter_gqa_band_common.h"
+#include <limits>
 #include "log/log.h"
 #include "err/ops_err.h"
 
@@ -790,20 +792,596 @@ void CalcleBandDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams)
     fBaseParams.deterMaxRound = r1 + r2;
 }
 
-void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams)
+static bool PreferGqaBandLocalityOnTie(const GqaBandPlan& plan)
 {
-    int64_t m{fBaseParams.s1Outer}, n{fBaseParams.s2Outer}, k{static_cast<int64_t>(fBaseParams.aicNum)},
-        b{fBaseParams.b * fBaseParams.n2};
-    if (fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL) && m > n) {
-        int64_t skipM = (fBaseParams.s1 - fBaseParams.s2) / (fBaseParams.s1Inner * fBaseParams.s1CvRatio);
-        m -= skipM;
-    } else if ((fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::NO_MASK) ||
-                fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::LEFT_UP_CAUSAL)) &&
-               n > m) {
-        n = m;
-    } else if (fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL) && m < n) {
-        fBaseParams.deterSparseType = static_cast<uint32_t>(DeterSparseType::DETER_BAND);
+    if (plan.k <= 0 || plan.b <= 1 || plan.tailPhaseCount != 0) {
+        return false;
+    }
+    if (plan.groupsPerChunk == 1 && plan.phaseCount == 1) {
+        const GqaBandPhase& phase = plan.phases[0];
+        // For n=s*k, m>=k and s>1, both mappings keep whole KV columns on
+        // each core. Serializing groups reduces their completion spans.
+        return phase.kind == GqaBandPhaseKind::DIAGONAL && phase.rowOffset == 0 && phase.colOffset == 0 &&
+               phase.m >= plan.k && phase.n > plan.k && phase.n % plan.k == 0;
+    }
+    // With b=t*k+1 and even k, H=2 consumes the complete groups in pairs,
+    // then one tail group. For a k-by-k rectangle plus a k-by-k triangle,
+    // rounds equal t*k*(3*k+1)*g/2 + 2*k*g, exactly the legacy bound.
+    // Each pair stays within two KV groups; the caller still requires the
+    // existing KV-run and query-locality checks before admitting this tie.
+    constexpr int64_t pairedGroups = 2;
+    constexpr int64_t rectanglePhaseIndex = 0;
+    constexpr int64_t trianglePhaseIndex = 1;
+    constexpr int64_t rectangleTrianglePhaseCount = 2;
+    if (plan.groupsPerChunk != pairedGroups || plan.g <= 1 || plan.k % pairedGroups != 0 || plan.b <= plan.k ||
+        plan.b % plan.k != 1 || plan.phaseCount != rectangleTrianglePhaseCount) {
+        return false;
+    }
+    const GqaBandPhase& rectangle = plan.phases[rectanglePhaseIndex];
+    const GqaBandPhase& triangle = plan.phases[trianglePhaseIndex];
+    return rectangle.kind == GqaBandPhaseKind::RECTANGLE && rectangle.m == plan.k && rectangle.n == plan.k &&
+           rectangle.rowOffset == 0 && rectangle.colOffset == 0 && triangle.kind == GqaBandPhaseKind::LOWER_TRIANGLE &&
+           triangle.m == plan.k && triangle.n == plan.k && triangle.rowOffset == 0 && triangle.colOffset == plan.k;
+}
+
+// Shared host iteration only. Preserve each caller's candidate order; a
+// repeated unsplit group cannot replace the same plan on a strict tie.
+class GqaBandGroupRange {
+public:
+    class Iterator {
+    public:
+        Iterator(int64_t index, int64_t limit, int64_t all)
+            : index_(index),
+              limit_(limit),
+              all_(all)
+        {}
+        int64_t operator*() const
+        {
+            return index_ <= limit_ ? index_ : all_;
+        }
+        Iterator& operator++()
+        {
+            ++index_;
+            return *this;
+        }
+        bool operator!=(const Iterator& other) const
+        {
+            return index_ != other.index_;
+        }
+
+    private:
+        int64_t index_;
+        int64_t limit_;
+        int64_t all_;
+    };
+
+    GqaBandGroupRange(int64_t all, int64_t capacity, bool includeUnsplit)
+        : all_(all),
+          limit_(std::min(all, capacity)),
+          count_(limit_ + (includeUnsplit && all > limit_ ? 1 : 0))
+    {}
+    Iterator begin() const
+    {
+        return Iterator(1, limit_, all_);
+    }
+    Iterator end() const
+    {
+        return Iterator(count_ + 1, limit_, all_);
+    }
+
+private:
+    int64_t all_;
+    int64_t limit_;
+    int64_t count_;
+};
+
+struct GqaBandAdmission {
+    bool queryLocality = false;
+    bool completeChunks = false;
+    bool originalLocalityTie = false;
+    bool allowEqualRounds = false;
+};
+
+static bool TrySaveGqaBandCandidate(FuzzyBaseInfoParamsRegbase& params, const GqaBandPlan& plan, int64_t kvLimit,
+                                    int64_t& bestRounds, int64_t& bestGroups, GqaBandAdmission admission = {})
+{
+    const bool equalAllowed = admission.allowEqualRounds ||
+                              (admission.originalLocalityTie && bestGroups == 0 && PreferGqaBandLocalityOnTie(plan));
+    if (plan.totalRounds <= 0 || plan.totalRounds > bestRounds || (plan.totalRounds == bestRounds && !equalAllowed) ||
+        plan.totalRounds >= std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    if (admission.completeChunks &&
+        (plan.fullRounds <= 0 || (plan.b % plan.groupsPerChunk != 0 && plan.tailRounds <= 0))) {
+        return false;
+    }
+    const int64_t kvRuns = GqaBandKvRunUpperBound(plan);
+    if (kvRuns < 0 || kvRuns > kvLimit || (admission.queryLocality && !HasGqaBandQueryLocality(plan))) {
+        return false;
+    }
+    bestRounds = plan.totalRounds;
+    bestGroups = plan.groupsPerChunk;
+    SaveGqaBandSchedule(plan, params.deterGqaBandSchedule);
+    return true;
+}
+
+// Exact logical KV-run cost for the original mapper's column-preserving
+// branches. Unknown branches keep the existing physical-column lower bound.
+// The calculation is independent of the number of rounds and tile tasks.
+static int64_t GqaBandLegacyKvRunExact(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t b, int64_t g)
+{
+    k = GqaBandMin(k, GqaBandMin(b * g * m, b * n));
+    if (k <= 0 || m <= 0 || n <= 0 || p <= 0 || q <= 0 || b <= 0 || g <= 1) {
+        return -1;
+    }
+    int64_t rowExtent = m;
+    if (p + q > m) {
+        n = q + GqaBandMin(m - 1, n - q);
+    } else {
+        const int64_t middle = GqaBandMin(n - q + 1, m + 2 - p - q);
+        const int64_t last = GqaBandMax(0, GqaBandMin(p + n - m - 1, p + q - 2));
+        if (last == 0) {
+            rowExtent = p + q + middle - 2;
+        }
+        n = q - 1 + middle + last;
+    }
+    // CalPosWholeBatch visits each column once per head. Consecutive heads
+    // merge only when this group has exactly one physical column.
+    const int64_t completeRuns = (b / k) * k * n * (n == 1 ? 1 : g);
+    const int64_t tail = b % k;
+    if (tail == 0) {
+        return completeRuns;
+    }
+    int64_t denseRows;
+    bool noTune = false;
+    if (p + q > m) {
+        const bool symmetricPair = 2 * tail == k && m - p == n - q && m > 1 && m - p > 0;
+        if (p + q <= n || symmetricPair) {
+            return -1;
+        }
+        denseRows = m;
+    } else {
+        if (p + q > rowExtent) {
+            return -1;
+        }
+        denseRows = p + q - 1;
+        if (n > m) {
+            const int64_t rowFoldRounds = GqaBandDenseRounds(k, rowExtent, denseRows, tail, g);
+            const int64_t columnRounds = GqaBandDenseRounds(k, denseRows, n, tail, g);
+            if (rowFoldRounds <= columnRounds) {
+                // This branch folds virtual columns into different physical columns.
+                return -1;
+            }
+            noTune = true;
+        }
+    }
+    const int64_t denseRound = GqaBandDenseRounds(k, denseRows, n, tail, g) / denseRows;
+    if (!noTune && denseRound / GqaBandGcd(tail * g, denseRound) * denseRows < n) {
+        return -1;
+    }
+    // Every head-column is nonempty in the complete physical tile domain.
+    // Row filtering/folding leaves its column and contiguous head-ID run intact.
+    // Complete groups and the tail address disjoint KV groups and cannot merge.
+    return completeRuns + GqaBandDenseKvRunUpperBound(k, denseRows, n, tail, g, noTune);
+}
+
+// Search the admissible full/tail frontier instead of first discarding every
+// geometry except the minimum-round one. The six modes and their pairs bound
+// host work independently of sequence length; no task table is serialized.
+static void SelectGqaBandJointSchedule(FuzzyBaseInfoParamsRegbase& params, int64_t k, int64_t m, int64_t n, int64_t q,
+                                       int64_t b, int64_t validColumns, int64_t legacyKvLimit,
+                                       GqaBandCandidateCache& cache, int64_t& bestRounds, int64_t& bestGroups)
+{
+    int64_t referenceKvLimit = legacyKvLimit;
+    if (bestGroups != 0) {
+        const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+        const int64_t exact =
+            params.s1 % cubeBase == 0 && params.s2 % cubeBase == 0 && validColumns == GqaBandMin(n, m + q - 1) ?
+                GqaBandScheduleKvRunExact(params.deterGqaBandSchedule) :
+                -1;
+        referenceKvLimit = GqaBandMin(referenceKvLimit, exact >= 0 ? exact : b * validColumns);
+    }
+    // Freeze the complete previous selector's cost at entry. Candidate
+    // improvements never change this search's admission baseline.
+    for (const int64_t groups : GqaBandGroupRange(b, k, true)) {
+        const int64_t fullChunks = b / groups;
+        const int64_t tailGroups = b % groups;
+        for (int64_t fullMode = 0; fullMode < GQA_BAND_GEOMETRY_COUNT; ++fullMode) {
+            if (!cache.HasGeometry(fullMode)) {
+                continue;
+            }
+            const auto& full = cache.GetMetrics(fullMode, groups);
+            if (full.rounds <= 0 || full.kvRuns < 0 || !full.queryLocality) {
+                continue;
+            }
+            for (int64_t tailMode = 0; tailMode < (tailGroups != 0 ? GQA_BAND_GEOMETRY_COUNT : 1); ++tailMode) {
+                if (tailGroups != 0 && !cache.HasGeometry(tailMode)) {
+                    continue;
+                }
+                const auto& tail = cache.GetMetrics(tailMode, tailGroups);
+                if (tailGroups != 0 && (tail.rounds <= 0 || tail.kvRuns < 0 || !tail.queryLocality)) {
+                    continue;
+                }
+                const int64_t totalRounds = fullChunks * full.rounds + tail.rounds;
+                const int64_t kvRuns = fullChunks * full.kvRuns + tail.kvRuns;
+                if (totalRounds <= 0 || totalRounds >= bestRounds ||
+                    totalRounds >= std::numeric_limits<uint32_t>::max() || kvRuns > referenceKvLimit) {
+                    continue;
+                }
+                GqaBandPlan candidate;
+                cache.Build(groups, fullMode, tailMode, tailGroups != 0, candidate);
+                TrySaveGqaBandCandidate(params, candidate, referenceKvLimit, bestRounds, bestGroups);
+            }
+        }
+    }
+}
+
+// A common row displacement lets one head run on multiple disjoint row
+// intervals while each physical KV column remains on exactly one core.
+// This applies to the complete band geometry, including small head groups.
+static void SelectGqaBandGenericFoldedOwner(FuzzyBaseInfoParamsRegbase& params, int64_t k, int64_t m, int64_t n,
+                                            int64_t p, int64_t q, int64_t b, int64_t validColumns,
+                                            int64_t legacyKvLimit, int64_t& bestRounds, int64_t& bestGroups)
+{
+    const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+    const bool completePhysicalTiles = params.s1 % cubeBase == 0 && params.s2 % cubeBase == 0;
+    // IsValidForDeter filters the rounded geometry with the original token
+    // mask, including partial physical tiles. Its executed task stream is a
+    // subsequence of this conflict-free mapper, so the geometric KV-run upper
+    // bound remains valid. The previous mapper's geometric exact cost need not
+    // survive filtering; use the touched physical columns as its lower bound.
+    int64_t referenceKvLimit = completePhysicalTiles ? legacyKvLimit : b * validColumns;
+    if (bestGroups != 0) {
+        const int64_t exact = completePhysicalTiles && validColumns == std::min(n, m + q - 1) ?
+                                  GqaBandScheduleKvRunExact(params.deterGqaBandSchedule) :
+                                  -1;
+        referenceKvLimit = std::min(referenceKvLimit, exact >= 0 ? exact : b * validColumns);
+    }
+    for (const int64_t groups : GqaBandGroupRange(b, k, true)) {
+        GqaBandPlan candidate;
+        AppendGqaBandFoldedPhase(candidate, GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER, {m, n, p, q, 0, 0});
+        SetGqaBandGroups(k, b, params.g, groups, candidate);
+        GqaBandAdmission admission;
+        admission.completeChunks = true;
+        TrySaveGqaBandCandidate(params, candidate, referenceKvLimit, bestRounds, bestGroups, admission);
+    }
+}
+
+// One-sided bands can fold physical columns by the row period. The common
+// row displacement gives distinct dQ rows even when there are fewer heads
+// than active cores; fixed virtual-column ownership also protects shared dK/dV.
+static void SelectGqaBandFoldedOwner(FuzzyBaseInfoParamsRegbase& params, int64_t k, int64_t m, int64_t n, int64_t p,
+                                     int64_t q, int64_t b, int64_t rowOffset, int64_t colOffset, int64_t legacyKvRuns,
+                                     int64_t& bestRounds, int64_t& bestGroups)
+{
+    if ((p != 1 && q != 1) || (p == 1 && rowOffset != 0) || (p != 1 && colOffset != 0)) {
         return;
+    }
+    const bool upper = p == 1;
+    const auto kind = upper ? GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER : GqaBandPhaseKind::FOLDED_LOWER_COLUMN_OWNER;
+    for (const int64_t candidateGroups : GqaBandGroupRange(b, k, true)) {
+        GqaBandPlan plan;
+        // The width occupies the unused translation field for this orientation.
+        AppendGqaBandFoldedPhase(plan, kind, {m, n, p, q, rowOffset, colOffset});
+        SetGqaBandGroups(k, b, params.g, candidateGroups, plan);
+        GqaBandAdmission admission;
+        admission.completeChunks = true;
+        TrySaveGqaBandCandidate(params, plan, legacyKvRuns, bestRounds, bestGroups, admission);
+    }
+}
+
+// Signed mathematical ceil. Device math::Ceil uses (a+b-1)/b and truncates
+// toward zero for negative a, so reproduce that separately for legacy offsets.
+static int64_t GqaBandSignedCeil(int64_t value, int64_t unit)
+{
+    return value / unit + (value % unit > 0 ? 1 : 0);
+}
+
+struct GqaBandNormalizedInput {
+    GqaBandDomain domain;
+    GqaBandDomain legacyDomain;
+    int64_t validColumns = 0;
+    bool negativeWindow = false;
+};
+
+// Keep the physical origin separate from p/q. The legacy origin is retained
+// because CalBandDeterIndex already adds it after the scheduled mapper.
+static bool NormalizeGqaBandInput(const FuzzyBaseInfoParamsRegbase& params, int64_t k, int64_t m, int64_t n, int64_t b,
+                                  int64_t cubeBase, GqaBandNormalizedInput& input)
+{
+    const int64_t pre = std::min<int64_t>(params.s1Token, INT32_MAX);
+    const int64_t next = std::min<int64_t>(params.s2Token, INT32_MAX);
+    input.negativeWindow = pre < 0 || next < 0;
+    if (!input.negativeWindow) {
+        const int64_t p = std::min(m, CeilDivideBy(pre, cubeBase) + 1);
+        const int64_t q = std::min(n, CeilDivideBy(next, cubeBase) + 1);
+        input.domain = {m, n, p, q, 0, 0};
+        input.legacyDomain = input.domain;
+        input.validColumns = std::min(
+            n, params.s1 / cubeBase + next / cubeBase + CeilDivideBy(params.s1 % cubeBase + next % cubeBase, cubeBase));
+        return true;
+    }
+    // These exact negative-window inequalities have only been proved for
+    // complete physical tiles. Keep empty windows and legacy core guards.
+    if (params.s1 % cubeBase != 0 || params.s2 % cubeBase != 0 || (pre < 0 && (next < 0 || pre < -next)) ||
+        (next < 0 && pre >= 0 && next < -pre)) {
+        return false;
+    }
+    const int64_t exactP = std::min(m, GqaBandSignedCeil(pre, cubeBase) + 1);
+    const int64_t exactQ = std::min(n, GqaBandSignedCeil(next, cubeBase) + 1);
+    const int64_t rowOrigin = std::max<int64_t>(0, 1 - exactQ);
+    const int64_t colOrigin = std::max<int64_t>(0, 1 - exactP);
+    if (rowOrigin >= m || colOrigin >= n) {
+        return false;
+    }
+    const int64_t normalizedM = m - rowOrigin;
+    const int64_t normalizedN = n - colOrigin;
+    const int64_t p = std::min(normalizedM, exactP - rowOrigin + colOrigin);
+    const int64_t q = std::min(normalizedN, exactQ + rowOrigin - colOrigin);
+    if (p <= 0 || q <= 0) {
+        return false;
+    }
+    input.domain = {normalizedM, normalizedN, p, q, rowOrigin, colOrigin};
+    GqaBandDomain& legacy = input.legacyDomain;
+    legacy = {m, n, std::min(m, (pre + cubeBase - 1) / cubeBase + 1), std::min(n, (next + cubeBase - 1) / cubeBase + 1),
+              0, 0};
+    if (legacy.p < 0) {
+        legacy.n += legacy.p;
+        legacy.colOrigin = -legacy.p;
+        legacy.q += legacy.p;
+        legacy.p = 1;
+    } else if (legacy.q < 0) {
+        legacy.m += legacy.q;
+        legacy.rowOrigin = -legacy.q;
+        legacy.p += legacy.q;
+        legacy.q = 1;
+    }
+    if (legacy.m <= 0 || legacy.n <= 0 || legacy.p <= 0 || legacy.q <= 0 ||
+        k > std::min(b * params.g * legacy.m, b * legacy.n)) {
+        return false;
+    }
+    input.validColumns = std::min(normalizedN, normalizedM + q - 1);
+    return true;
+}
+
+static GqaBandDomain GetGqaBandMappingDomain(const GqaBandNormalizedInput& input)
+{
+    GqaBandDomain domain = input.domain;
+    domain.rowOrigin -= input.legacyDomain.rowOrigin;
+    domain.colOrigin -= input.legacyDomain.colOrigin;
+    return domain;
+}
+
+// Called only after SelectGqaBandSchedule's common template/overflow guards.
+// Only completely masked leading tiles are removed. Partial boundary tiles
+// remain and continue to use the original sparse token mask in the kernel.
+static void SelectGqaBandNegativeSchedule(FuzzyBaseInfoParamsRegbase& params, int64_t k, int64_t b,
+                                          const GqaBandNormalizedInput& input)
+{
+    const GqaBandDomain domain = GetGqaBandMappingDomain(input);
+    const GqaBandDomain& legacy = input.legacyDomain;
+    const int64_t normalizedM = domain.m;
+    const int64_t normalizedN = domain.n;
+    const int64_t p = domain.p;
+    const int64_t q = domain.q;
+    const int64_t legacyRounds = GqaBandLegacyRounds(k, legacy.m, legacy.n, legacy.p, legacy.q, b, params.g);
+    // Every touched physical KV column must be submitted at least once.
+    const int64_t legacyKvLower = b * std::min(normalizedN, normalizedM + q - 1);
+    int64_t bestRounds = legacyRounds;
+    int64_t bestGroups = 0;
+    for (const int64_t candidateGroups : GqaBandGroupRange(b, k, true)) {
+        GqaBandPlan plan;
+        // GENERAL only: ordinary phase offsets are unconditional translations.
+        // EDGE_PAIR offsets select one half and BAND_COLUMN_OWNER stores p/q there;
+        // neither is safe to shift as an ordinary phase.
+        BuildGqaBandGeneralGeometry(normalizedM, normalizedN, p, q, plan);
+        SetGqaBandGroups(k, b, params.g, candidateGroups, plan);
+        ConfigureGqaBandDensePhases(plan);
+        for (int64_t i = 0; i < plan.phaseCount; ++i) {
+            plan.phases[i].rowOffset += domain.rowOrigin;
+            plan.phases[i].colOffset += domain.colOrigin;
+        }
+        GqaBandAdmission admission;
+        admission.queryLocality = true;
+        TrySaveGqaBandCandidate(params, plan, legacyKvLower, bestRounds, bestGroups, admission);
+    }
+    const int64_t validRows = std::min(normalizedM, normalizedN + p - 1);
+    const int64_t validColumns = std::min(normalizedN, normalizedM + q - 1);
+    // A translated lower triangle is the p=m,q=1 instance of the generic
+    // column-owner mapper. All sizes, group counts and head counts use the
+    // same load calculation; no negative-window shape whitelist is needed.
+    if (q == 1 && p == normalizedM && validRows == validColumns &&
+        CanUseGqaBandColumnOwner(k, b, params.g, validRows, validColumns, validRows, 1)) {
+        GqaBandPlan plan;
+        AppendGqaBandPhase(plan, GqaBandPhaseKind::LOWER_TRIANGLE_COLUMN_OWNER, validRows, validColumns,
+                           domain.rowOrigin, domain.colOrigin);
+        SetGqaBandGroups(k, b, params.g, b, plan);
+        if (plan.totalRounds < legacyRounds) {
+            GqaBandAdmission admission;
+            admission.allowEqualRounds = true;
+            TrySaveGqaBandCandidate(params, plan, legacyKvLower, bestRounds, bestGroups, admission);
+        }
+    }
+    SelectGqaBandFoldedOwner(params, k, normalizedM, normalizedN, p, q, b, domain.rowOrigin, domain.colOrigin,
+                             legacyKvLower, bestRounds, bestGroups);
+    if (bestGroups != 0) {
+        params.deterGqaBandScheduleMode = DeterGqaBandScheduleMode::PIECEWISE;
+        params.deterGqaBandGroups = static_cast<uint32_t>(bestGroups);
+        params.deterMaxRound = bestRounds;
+    }
+}
+
+static void SelectGqaBandOverlapSchedule(FuzzyBaseInfoParamsRegbase& params, int64_t k, int64_t m, int64_t n, int64_t p,
+                                         int64_t q, int64_t b, int64_t validColumns, int64_t legacyKvLower,
+                                         int64_t& bestRounds, int64_t& bestGroups)
+{
+    const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+    if (m < 2) {
+        return;
+    }
+    const bool completePhysicalTiles = params.s1 % cubeBase == 0 && params.s2 % cubeBase == 0;
+    // Masking removes tasks without creating conflicts or increasing the
+    // candidate's KV-run upper bound. Compare against a physical lower bound
+    // whenever a partial tile prevents using the previous plan's exact cost.
+    int64_t currentKvLower = completePhysicalTiles ? legacyKvLower : b * validColumns;
+    if (bestGroups != 0) {
+        // A fully masked rounded column invalidates the exact geometric cost.
+        const int64_t geometricColumns = std::min(n, m + q - 1);
+        const int64_t exactRuns = completePhysicalTiles && validColumns == geometricColumns ?
+                                      GqaBandScheduleKvRunExact(params.deterGqaBandSchedule) :
+                                      -1;
+        currentKvLower = exactRuns >= 0 ? exactRuns : b * validColumns;
+    }
+    for (const int64_t groups : GqaBandGroupRange(b, k / (m / 2 + 1), false)) {
+        GqaBandPlan candidate;
+        if (!BuildGqaBandOverlapCandidate(k, m, n, p, q, b, params.g, groups, candidate)) {
+            continue;
+        }
+        TrySaveGqaBandCandidate(params, candidate, std::min(legacyKvLower, currentKvLower), bestRounds, bestGroups);
+    }
+}
+
+void SelectGqaBandSchedule(FuzzyBaseInfoParamsRegbase& params, bool originalSquareBase)
+{
+    params.deterGqaBandScheduleMode = DeterGqaBandScheduleMode::ORIGINAL;
+    params.deterGqaBandGroups = 0;
+    params.deterGqaBandSchedule = GqaBandSchedule{};
+    const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+    const int64_t k = static_cast<int64_t>(params.aicNum);
+    const int64_t m = params.s1Outer;
+    const int64_t n = params.s2Outer;
+    // Split-mode keeps its existing implementation; negative tokens use the exact host normalization below.
+    if (!params.isSwizzle || !originalSquareBase || !params.isDeterministic || params.layoutType == INPUT_FORMAT_TND ||
+        params.deterSparseType != static_cast<uint32_t>(DeterSparseType::DETER_BAND) ||
+        params.splitAxis != SplitAxisEnum::BN2GS1S2 || params.g <= 1 || k <= 0 || k > MAX_CORE_NUM ||
+        params.coreNum != k * NUM_TWO || m <= 0 || n <= 0 || params.b <= 0 || params.n2 <= 0 ||
+        params.s1Inner * params.s1CvRatio != cubeBase || params.s2Inner * params.s2CvRatio != cubeBase) {
+        return;
+    }
+    // Bound every intermediate before multiplication (geometry, group tails and phase sums).
+    int64_t arithmeticBudget = std::numeric_limits<int64_t>::max() / (NUM_TWO * GQA_BAND_MAX_PHASES);
+    const int64_t factors[] = {params.b, params.n2, params.g, m, n};
+    for (int64_t factor : factors) {
+        if (factor > arithmeticBudget) {
+            return;
+        }
+        arithmeticBudget /= factor;
+    }
+    const int64_t b = params.b * params.n2;
+    if (b > std::numeric_limits<uint32_t>::max()) {
+        return;
+    }
+    GqaBandNormalizedInput input;
+    if (!NormalizeGqaBandInput(params, k, m, n, b, cubeBase, input)) {
+        return;
+    }
+    if (input.negativeWindow) {
+        SelectGqaBandNegativeSchedule(params, k, b, input);
+        return;
+    }
+    // SaveToTilingData applies the same clamp before the device builds p/q.
+    const int64_t p = input.domain.p;
+    const int64_t q = input.domain.q;
+    const int64_t legacyRounds = GqaBandLegacyRounds(k, m, n, p, q, b, params.g);
+    // Rounding S1 and nextTokens separately may add an entirely masked last
+    // column. Count real touched columns before using the geometric lower bound.
+    const int64_t validColumns = input.validColumns;
+    const int64_t legacyKvRuns = validColumns < std::min(n, m + q - 1) ?
+                                     b * validColumns :
+                                     GqaBandLegacyKvRunLowerBound(k, m, n, p, q, b, params.g);
+    GqaBandPlan plan;
+    GqaBandCandidateCache cache(k, m, n, p, q, b, params.g);
+    int64_t bestRounds = legacyRounds;
+    int64_t bestGroups = 0;
+    // This complete legacy stage retains its original candidate and tie order.
+    for (const int64_t groups : GqaBandGroupRange(b, k, true)) {
+        cache.BuildLegacy(groups, plan);
+        GqaBandAdmission admission;
+        admission.queryLocality = true;
+        admission.originalLocalityTie = true;
+        TrySaveGqaBandCandidate(params, plan, legacyKvRuns, bestRounds, bestGroups, admission);
+    }
+    // Preserve every already admitted plan. If all minimum-round geometries
+    // failed admission, try existing uniform geometries with the same guards.
+    if (bestGroups == 0) {
+        // Limit this second pass to forward general and paired-edge families.
+        // Reversed and compound variants need a stronger locality admission model.
+        constexpr GqaBandGeometryMode fallbackModes[] = {GqaBandGeometryMode::GENERAL,
+                                                         GqaBandGeometryMode::PAIRED_EDGES};
+        for (const int64_t groups : GqaBandGroupRange(b, k, true)) {
+            for (const GqaBandGeometryMode geometry : fallbackModes) {
+                const int64_t mode = GqaBandGeometryIndex(geometry);
+                if (!cache.HasGeometry(mode)) {
+                    continue;
+                }
+                GqaBandPlan fallback;
+                cache.Build(groups, mode, mode, false, fallback);
+                GqaBandAdmission admission;
+                admission.queryLocality = true;
+                TrySaveGqaBandCandidate(params, fallback, legacyKvRuns, bestRounds, bestGroups, admission);
+            }
+        }
+    }
+    // A whole diagonal needs no cross-column dQ reduction. Keep each KV column
+    // on one core across G heads, and replace an existing plan only at fewer rounds.
+    if (p == 1 && q == 1) {
+        plan = GqaBandPlan{};
+        const int64_t diagonalSize = std::min(m, n);
+        AppendGqaBandPhase(plan, GqaBandPhaseKind::DIAGONAL_COLUMN_OWNER, diagonalSize, diagonalSize, 0, 0);
+        SetGqaBandGroups(k, b, params.g, b, plan);
+        TrySaveGqaBandCandidate(params, plan, legacyKvRuns, bestRounds, bestGroups);
+    }
+    // Mirrored column pairs balance band edges and retain each column on one owner.
+    // One lane per group offers no inter-lane balancing; keep existing mappings.
+    if (GqaBandColumnOwnerLanes(k, b, params.g) > 1 && CanUseGqaBandColumnOwner(k, b, params.g, m, n, p, q)) {
+        plan = GqaBandPlan{};
+        AppendGqaBandPhase(plan, GqaBandPhaseKind::BAND_COLUMN_OWNER, m, n, p, q);
+        SetGqaBandGroups(k, b, params.g, b, plan);
+        TrySaveGqaBandCandidate(params, plan, legacyKvRuns, bestRounds, bestGroups);
+    }
+    // Search complete chunks and their actual remainder with both column orders.
+    // Preserve every existing tie; a new order/grouping must reduce total rounds.
+    // A single lane may still remove masked work, so admission is based on cost.
+    constexpr GqaBandPhaseKind ownerKinds[] = {GqaBandPhaseKind::BAND_COLUMN_OWNER,
+                                               GqaBandPhaseKind::BAND_BALANCED_COLUMN_OWNER};
+    for (const int64_t groups : GqaBandGroupRange(b, k, false)) {
+        for (const GqaBandPhaseKind kind : ownerKinds) {
+            plan = GqaBandPlan{};
+            AppendGqaBandPhase(plan, kind, m, n, p, q);
+            SetGqaBandGroups(k, b, params.g, groups, plan);
+            GqaBandAdmission admission;
+            admission.completeChunks = true;
+            TrySaveGqaBandCandidate(params, plan, legacyKvRuns, bestRounds, bestGroups, admission);
+        }
+    }
+    SelectGqaBandFoldedOwner(params, k, m, n, p, q, b, 0, 0, legacyKvRuns, bestRounds, bestGroups);
+    // Seed the new search with the complete previous selector, including its
+    // even-height overlap candidate and original conservative cost admission.
+    // Otherwise a new owner could block an older, faster overlap through its
+    // tighter KV reference before that previous candidate was evaluated.
+    if (m % NUM_TWO == 0) {
+        SelectGqaBandOverlapSchedule(params, k, m, n, p, q, b, validColumns, legacyKvRuns, bestRounds, bestGroups);
+    }
+    // Refine only branches with a closed-form exact cost. Partial physical
+    // tiles and unproved original mappings retain the conservative bound.
+    const int64_t legacyExact = params.s1 % cubeBase == 0 && params.s2 % cubeBase == 0 ?
+                                    GqaBandLegacyKvRunExact(k, m, n, p, q, b, params.g) :
+                                    -1;
+    const int64_t legacyKvLimit = legacyExact >= 0 ? legacyExact : legacyKvRuns;
+    SelectGqaBandJointSchedule(params, k, m, n, q, b, validColumns, legacyKvLimit, cache, bestRounds, bestGroups);
+    SelectGqaBandGenericFoldedOwner(params, k, m, n, p, q, b, validColumns, legacyKvLimit, bestRounds, bestGroups);
+    SelectGqaBandOverlapSchedule(params, k, m, n, p, q, b, validColumns, legacyKvLimit, bestRounds, bestGroups);
+    if (bestGroups != 0) {
+        params.deterGqaBandScheduleMode = DeterGqaBandScheduleMode::PIECEWISE;
+        params.deterGqaBandGroups = static_cast<uint32_t>(bestGroups);
+        params.deterMaxRound = bestRounds;
+    }
+}
+
+int64_t CalcCausalDeterRound(int64_t k, int64_t m, int64_t n, int64_t b, int64_t g)
+{
+    if (k <= 0 || m <= 0 || n <= 0 || m < n || b <= 0 || g <= 0) {
+        return 0;
     }
 
     int64_t bTail = b % k;
@@ -813,7 +1391,7 @@ void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams)
     int64_t t1 = n / (MULT_BASE * k);
     int64_t n1 = t * k;
 
-    if (fBaseParams.g != 1) {
+    if (g != 1) {
         rUpper += (MULT_BASE * m - n1 + 1) * t * (bTail / MULT_BASE);
     } else {
         rUpper += bTail * (n1 * m - n1 * (n1 - 1) / MULT_BASE) / k;
@@ -822,10 +1400,10 @@ void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams)
         if ((t % MULT_BASE) == 1) {
             int64_t m1 = m - t1 * MULT_BASE * k;
             if (ell == 0) {
-                int64_t rm3 = (fBaseParams.g != 1) ? (m + m1 + 1) * t1 : 0;
+                int64_t rm3 = (g != 1) ? (m + m1 + 1) * t1 : 0;
                 rUpper += m1 + rm3;
             } else {
-                int64_t rm3 = (fBaseParams.g != 1) ? (m + m1 + 1) * t1 : 0;
+                int64_t rm3 = (g != 1) ? (m + m1 + 1) * t1 : 0;
                 rUpper += std::max(m1, MULT_BASE * m1 - MULT_BASE * k + 1) + rm3;
             }
             bTail = bTail - 1;
@@ -843,8 +1421,54 @@ void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams)
         L = MULT_BASE * (m - n) + ell;
     }
     rUpper += CeilDivideBy(ell1 * bTail, k) * L;
-    rUpper *= fBaseParams.g;
-    fBaseParams.deterMaxRound = rUpper;
+    return rUpper * g;
+}
+
+void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams, bool enableBatchMajor)
+{
+    fBaseParams.deterGqaCausalScheduleMode = DeterGqaCausalScheduleMode::ORIGINAL;
+    fBaseParams.deterGqaCausalRoundsPerBatch = 0;
+    int64_t m{fBaseParams.s1Outer}, n{fBaseParams.s2Outer}, k{static_cast<int64_t>(fBaseParams.aicNum)},
+        b{fBaseParams.b * fBaseParams.n2};
+    if (fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL) && m > n) {
+        int64_t skipM = (fBaseParams.s1 - fBaseParams.s2) / (fBaseParams.s1Inner * fBaseParams.s1CvRatio);
+        m -= skipM;
+    } else if ((fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::NO_MASK) ||
+                fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::LEFT_UP_CAUSAL)) &&
+               n > m) {
+        n = m;
+    } else if (fBaseParams.sparseMode == static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL) && m < n) {
+        fBaseParams.deterSparseType = static_cast<uint32_t>(DeterSparseType::DETER_BAND);
+        return;
+    }
+
+    const int64_t legacyRound = CalcCausalDeterRound(k, m, n, b, fBaseParams.g);
+    fBaseParams.deterMaxRound = legacyRound;
+    const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+    const bool supported = enableBatchMajor && fBaseParams.isDeterministic &&
+                           fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL) &&
+                           fBaseParams.layoutType != INPUT_FORMAT_TND &&
+                           fBaseParams.splitAxis == SplitAxisEnum::BN2GS1S2 && fBaseParams.g > 1 && b > 1 &&
+                           fBaseParams.coreNum == k * NUM_TWO &&
+                           fBaseParams.s1Inner * fBaseParams.s1CvRatio == cubeBase &&
+                           fBaseParams.s2Inner * fBaseParams.s2CvRatio == cubeBase;
+    // Process_NEW_DETER requests roundId + 1 while draining its last pipeline round.
+    if (!supported || legacyRound <= 0 || legacyRound >= std::numeric_limits<uint32_t>::max()) {
+        return;
+    }
+
+    const int64_t roundsPerBatch = CalcCausalDeterRound(k, m, n, 1, fBaseParams.g);
+    const int64_t roundLimit =
+        std::min<int64_t>(std::numeric_limits<uint32_t>::max() - 1,
+                          legacyRound + legacyRound * GQA_CAUSAL_BATCH_MAJOR_MAX_ROUND_GROWTH_PERCENT /
+                                            GQA_CAUSAL_BATCH_MAJOR_PERCENT_BASE);
+    // Compare before multiplying so a rejected batch-major candidate cannot overflow.
+    if (roundsPerBatch <= 0 || roundsPerBatch > roundLimit / b) {
+        return;
+    }
+    fBaseParams.deterGqaCausalScheduleMode = DeterGqaCausalScheduleMode::BATCH_MAJOR;
+    fBaseParams.deterGqaCausalRoundsPerBatch = roundsPerBatch;
+    fBaseParams.deterMaxRound = b * roundsPerBatch;
 }
 
 void SetSparsePrefixBlockInterval(const FuzzyBaseInfoParamsRegbase& fBaseParams, int64_t bIdx, int64_t nIdx,

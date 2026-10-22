@@ -24,12 +24,11 @@
 #define FAG_POST_CLASS_TEMPLATE \
     template <typename T1, typename T2, typename OUTDTYPE = T1, const uint8_t SPLIT_AXIS = 0, \
               const bool IS_ROPE = false, const uint8_t DETER_SPARSE_TYPE = 0, const bool IS_TND = 0, \
-              const bool IS_TND_SWIZZLE = 0>
+              const bool IS_SWIZZLE = 0>
 #define FAG_POST_FUNCTION_TEMPLATE \
     template <typename T1, typename T2, typename OUTDTYPE, const uint8_t SPLIT_AXIS, bool IS_ROPE, \
-              const uint8_t DETER_SPARSE_TYPE, const bool IS_TND, const bool IS_TND_SWIZZLE>
-#define FAG_POST_FUNCTION_PARAMS_TEMPLATE \
-    T1, T2, OUTDTYPE, SPLIT_AXIS, IS_ROPE, DETER_SPARSE_TYPE, IS_TND, IS_TND_SWIZZLE
+              const uint8_t DETER_SPARSE_TYPE, const bool IS_TND, const bool IS_SWIZZLE>
+#define FAG_POST_FUNCTION_PARAMS_TEMPLATE T1, T2, OUTDTYPE, SPLIT_AXIS, IS_ROPE, DETER_SPARSE_TYPE, IS_TND, IS_SWIZZLE
 
 FAG_POST_CLASS_TEMPLATE
 class FlashAttentionScoreGradS1S2BNGS1S2PostRegbase {

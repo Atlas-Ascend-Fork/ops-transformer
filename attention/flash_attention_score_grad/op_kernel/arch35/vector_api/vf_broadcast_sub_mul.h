@@ -14,6 +14,7 @@
 #ifndef MY_BROADCAST_SUB_MUL_INTERFACE_H
 #define MY_BROADCAST_SUB_MUL_INTERFACE_H
 #include "kernel_tensor.h"
+#include "../flash_attention_score_grad_common.h"
 
 namespace AscendC {
 #ifndef __CCE_KT_TEST__
@@ -100,6 +101,110 @@ __simd_vf__ inline void BroadcastSubMulVF128(uint64_t srcLocalInt, uint64_t dstL
     }
 }
 
+template <typename T, uint32_t srcN, uint16_t maskN, const bool IS_DETER_OLD>
+__simd_vf__ inline void BroadcastSubMulDropoutVF64(uint64_t srcLocalInt, uint64_t dstLocalInt, uint64_t dstLocalIntZero,
+                                                   uint64_t gradLocalInt, uint64_t sfmLocalInt, uint64_t maskLocalInt,
+                                                   float keepProbReciprocal, uint32_t srcM, uint32_t realN)
+{
+    RegTensor<float> vregSrc;
+    RegTensor<float> vregDrop;
+    RegTensor<float> vregScale;
+    RegTensor<float> vregGrad;
+    RegTensor<float> vregSub;
+    RegTensor<float> vregMul;
+    RegTensor<float> vregSfm;
+    RegTensor<float> vregZero;
+
+    MaskReg pregDropPacked;
+    MaskReg pregDrop;
+    MaskReg pregFullExe = CreateMask<float, MaskPattern::ALL>();
+    MaskReg pregTailExe = UpdateMask<float>(realN);
+    Duplicate(vregZero, 0);
+
+    // The 64-column path still advances by the full physical mask row.
+    constexpr uint16_t rowStride = maskN;
+    constexpr uint16_t gradRowStride = 1;
+    constexpr uint16_t maskUint32Stride = maskN / (sizeof(uint32_t) * commondef::NUM_EIGHT);
+    for (uint16_t m = 0; m < static_cast<uint16_t>(srcM); m++) {
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_BRC_B32>(
+            vregGrad, ((__ubuf__ float*&)gradLocalInt), gradRowStride);
+        LoadAlign<uint32_t, Reg::MaskDist::DIST_US>(pregDropPacked,
+                                                    ((__ubuf__ uint32_t*&)maskLocalInt) + m * maskUint32Stride);
+        UnPack<AscendC::Reg::HighLowPart::LOWEST>(pregDrop, pregDropPacked);
+
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(vregSrc, ((__ubuf__ float*&)srcLocalInt), rowStride);
+        Select(vregDrop, vregSrc, vregZero, pregDrop);
+        Muls(vregScale, vregDrop, keepProbReciprocal, pregFullExe);
+        Sub(vregSub, vregScale, vregGrad, pregTailExe);
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(vregSfm, ((__ubuf__ float*&)sfmLocalInt), rowStride);
+        Mul(vregMul, vregSub, vregSfm, pregTailExe);
+        StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(((__ubuf__ float*&)dstLocalInt), vregMul, rowStride,
+                                                              pregFullExe);
+        if constexpr (IS_DETER_OLD) { // Clear the unused second half of the physical row before deterministic matmul.
+            Duplicate(vregMul, 0);
+            StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>((__ubuf__ float*&)dstLocalIntZero, vregMul, rowStride,
+                                                                  pregFullExe);
+        }
+    }
+}
+
+template <typename T, uint32_t srcN, uint16_t maskN, const bool IS_DETER_OLD>
+__simd_vf__ inline void BroadcastSubMulDropoutVF128(uint64_t srcLocalInt, uint64_t dstLocalInt, uint64_t gradLocalInt,
+                                                    uint64_t sfmLocalInt, uint64_t maskLocalInt,
+                                                    float keepProbReciprocal, uint32_t realTailSize, uint32_t srcM)
+{
+    RegTensor<float> vregSrc;
+    RegTensor<float> vregDrop;
+    RegTensor<float> vregScale;
+    RegTensor<float> vregGrad;
+    RegTensor<float> vregSub;
+    RegTensor<float> vregMul;
+    RegTensor<float> vregSfm;
+    RegTensor<float> vregZero;
+
+    MaskReg pregDropPacked;
+    MaskReg pregDropFirst;
+    MaskReg pregDropSecond;
+    MaskReg pregFalse = CreateMask<int8_t, MaskPattern::ALLF>();
+    MaskReg pregFullExe = CreateMask<float, MaskPattern::ALL>();
+    MaskReg pregTailExe = UpdateMask<float>(realTailSize);
+    Duplicate(vregZero, 0);
+
+    constexpr uint16_t fp32VectorElements = VECTOR_REG_WIDTH / sizeof(float);
+    constexpr uint16_t gradRowStride = 1;
+    constexpr uint16_t maskUint32Stride = maskN / (sizeof(uint32_t) * commondef::NUM_EIGHT);
+    for (uint16_t m = 0; m < static_cast<uint16_t>(srcM); m++) {
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_BRC_B32>(
+            vregGrad, ((__ubuf__ float*&)gradLocalInt), gradRowStride);
+        LoadAlign<uint32_t, Reg::MaskDist::DIST_US>(pregDropPacked,
+                                                    ((__ubuf__ uint32_t*&)maskLocalInt) + m * maskUint32Stride);
+        MaskInterleave<half>(pregDropFirst, pregDropSecond, pregDropPacked, pregFalse);
+
+        // 主块
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(vregSrc, ((__ubuf__ float*&)srcLocalInt),
+                                                             fp32VectorElements);
+        Select(vregDrop, vregSrc, vregZero, pregDropFirst);
+        Muls(vregScale, vregDrop, keepProbReciprocal, pregFullExe);
+        Sub(vregSub, vregScale, vregGrad, pregFullExe);
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(vregSfm, ((__ubuf__ float*&)sfmLocalInt),
+                                                             fp32VectorElements);
+        Mul(vregMul, vregSub, vregSfm, pregFullExe);
+        StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(((__ubuf__ float*&)dstLocalInt), vregMul,
+                                                              fp32VectorElements, pregFullExe);
+        // 尾块
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(vregSrc, ((__ubuf__ float*&)srcLocalInt),
+                                                             fp32VectorElements);
+        Select(vregDrop, vregSrc, vregZero, pregDropSecond);
+        Muls(vregScale, vregDrop, keepProbReciprocal, pregFullExe);
+        Sub(vregSub, vregScale, vregGrad, pregTailExe);
+        LoadAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(vregSfm, ((__ubuf__ float*&)sfmLocalInt),
+                                                             fp32VectorElements);
+        Mul(vregMul, vregSub, vregSfm, pregTailExe);
+        StoreAlign<float, Reg::PostLiteral::POST_MODE_UPDATE>(((__ubuf__ float*&)dstLocalInt), vregMul,
+                                                              fp32VectorElements, pregFullExe);
+    }
+}
+
 template <typename T, uint16_t srcN, const bool IS_DETER_OLD = 0, const bool IS_FP8_INPUT = false>
 __aicore__ inline void BroadcastSubMul(const LocalTensor<T>& dstTensor, const LocalTensor<T>& srcTensor,
                                        const LocalTensor<T>& gradTensor, const LocalTensor<T>& sfmTensor, uint32_t srcM,
@@ -168,11 +273,47 @@ __aicore__ inline void BroadcastSubMul(const LocalTensor<T>& dstTensor, const Lo
                                                     srcM);
     }
 }
+
+template <typename T, uint16_t srcN, uint16_t maskN, const bool IS_DETER_OLD = false>
+__aicore__ inline void BroadcastSubMulDropout(const LocalTensor<T>& dstTensor, const LocalTensor<T>& srcTensor,
+                                              const LocalTensor<T>& gradTensor, const LocalTensor<T>& sfmTensor,
+                                              const LocalTensor<uint8_t>& maskTensor, float keepProbReciprocal,
+                                              uint32_t srcM, uint32_t realN = srcN)
+{
+    constexpr uint16_t fullExeSize = VECTOR_REG_WIDTH / sizeof(float);
+    // Caller provides FP32 tensors, a 64/128-column tile, and a 128-element mask row.
+
+    uint64_t srcLocalInt = srcTensor.GetPhyAddr();
+    uint64_t dstLocalInt = dstTensor.GetPhyAddr();
+    uint64_t dstLocalIntZero = dstTensor.GetPhyAddr() + fullExeSize * sizeof(float);
+    uint64_t gradLocalInt = gradTensor.GetPhyAddr();
+    uint64_t sfmLocalInt = sfmTensor.GetPhyAddr();
+    uint64_t maskLocalInt = maskTensor.GetPhyAddr();
+
+    if constexpr (srcN == fullExeSize) {
+        BroadcastSubMulDropoutVF64<T, srcN, maskN, IS_DETER_OLD>(srcLocalInt, dstLocalInt, dstLocalIntZero,
+                                                                 gradLocalInt, sfmLocalInt, maskLocalInt,
+                                                                 keepProbReciprocal, srcM, realN);
+    } else {
+        uint32_t tailSize = realN % fullExeSize;
+        uint32_t realTailSize = tailSize == 0 ? fullExeSize : tailSize;
+        BroadcastSubMulDropoutVF128<T, srcN, maskN, IS_DETER_OLD>(srcLocalInt, dstLocalInt, gradLocalInt, sfmLocalInt,
+                                                                  maskLocalInt, keepProbReciprocal, realTailSize, srcM);
+    }
+}
+
 #else
 template <typename T, uint16_t srcN, const bool IS_DETER_OLD = 0, const bool IS_FP8_INPUT = false>
 __aicore__ inline void BroadcastSubMul(const LocalTensor<T>& dstTensor, const LocalTensor<T>& srcTensor,
                                        const LocalTensor<T>& gradTensor, const LocalTensor<T>& sfmTensor, uint32_t srcM,
                                        uint32_t realN = srcN)
+{}
+
+template <typename T, uint16_t srcN, uint16_t maskN, const bool IS_DETER_OLD = false>
+__aicore__ inline void BroadcastSubMulDropout(const LocalTensor<T>& dstTensor, const LocalTensor<T>& srcTensor,
+                                              const LocalTensor<T>& gradTensor, const LocalTensor<T>& sfmTensor,
+                                              const LocalTensor<uint8_t>& maskTensor, float keepProbReciprocal,
+                                              uint32_t srcM, uint32_t realN = srcN)
 {}
 #endif
 } // namespace AscendC

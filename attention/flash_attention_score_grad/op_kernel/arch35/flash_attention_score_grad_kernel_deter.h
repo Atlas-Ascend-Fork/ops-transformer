@@ -24,15 +24,16 @@
 
 namespace FagBaseApi {
 
-template <typename CubeBlockType, typename VecBlockType>
+template <typename CubeBlockType, typename VecBlockType,
+          uint8_t OwnerSchedule = optiling::fag::GQA_BAND_OWNER_DISPATCH_GENERIC>
 
 class FlashAttentionScoreGradKernelDeter
-    : public FlashAttentionScoreGradKernelBase<FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>,
-                                               CubeBlockType, VecBlockType> {
+    : public FlashAttentionScoreGradKernelBase<
+          FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>, CubeBlockType, VecBlockType> {
 public:
     ARGS_TRAITS;
-    using BaseClass = FlashAttentionScoreGradKernelBase<FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>,
-                                                        CubeBlockType, VecBlockType>;
+    using BaseClass = FlashAttentionScoreGradKernelBase<
+        FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>, CubeBlockType, VecBlockType>;
     __aicore__ inline void Init(GM_ADDR key, GM_ADDR value, GM_ADDR dy, GM_ADDR query, GM_ADDR pseShift,
                                 GM_ADDR dropMask, GM_ADDR attenMask, GM_ADDR y, GM_ADDR softmaxMax, GM_ADDR softmaxSum,
                                 GM_ADDR prefixN, GM_ADDR actualSeqQlen, GM_ADDR actualSeqKvlen, GM_ADDR deqScaleQ,
@@ -74,6 +75,10 @@ protected:
     typename std::conditional<IS_DETER_NEW(DETER_SPARSE_TYPE), CoordinateInfo[2], std::nullptr_t>::type
         coordinateInfos{};
     typename std::conditional<DETER_SPARSE_TYPE == DETER_BAND, BandInfo, std::nullptr_t>::type bandInfo;
+    constexpr static bool IS_GQA_BAND_PIECEWISE_TEMPLATE =
+        IS_SWIZZLE && DETER_SPARSE_TYPE == DETER_BAND && !IS_N_EQUAL && !IS_TND && SPLIT_AXIS == BN2GS1S2 &&
+        BaseClass::CUBE_BASEM == static_cast<uint32_t>(S1TemplateType::Aligned128) &&
+        BaseClass::CUBE_BASEN == static_cast<uint32_t>(S2TemplateType::Aligned128);
     bool isMm3NeedWait = false;
     typename std::conditional<IS_DETER_OLD(DETER_SPARSE_TYPE), bool[2], std::nullptr_t>::type dqIsNeedDeter{};
     typename std::conditional<IS_DETER_OLD(DETER_SPARSE_TYPE), bool[2], std::nullptr_t>::type dkDvIsNeedDeter{};
@@ -81,8 +86,8 @@ protected:
     int64_t deterLoopMax = 0;
 };
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::Init(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::Init(
     GM_ADDR key, GM_ADDR value, GM_ADDR dy, GM_ADDR query, GM_ADDR pseShift, GM_ADDR dropMask, GM_ADDR attenMask,
     GM_ADDR y, GM_ADDR softmaxMax, GM_ADDR softmaxSum, GM_ADDR prefixN, GM_ADDR actualSeqQlen, GM_ADDR actualSeqKvlen,
     GM_ADDR deqScaleQ, GM_ADDR deqScaleK, GM_ADDR deqScaleV, GM_ADDR deqScaleDy, GM_ADDR queryRope, GM_ADDR keyRope,
@@ -102,8 +107,9 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     deterGmOffset = this->cBlockIdx * this->CUBE_BASEN * this->HEAD_DIM_ALIGN * NUM_TWO;
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::GetNextDxAndQueryOffsetTND(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::GetNextDxAndQueryOffsetTND(
     FagRunInfo& runInfo, int64_t nextIndex, PreloadArgs<IS_ROPE>& preloadArgs)
 {
     preloadArgs.copyNext = !(nextIndex == -1);
@@ -171,8 +177,9 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
                                    nextBoIdx == runInfo.commonRunInfo.boIdx);
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline bool FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::IsValidDeterForTnd(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline bool
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::IsValidDeterForTnd(
     FagRunInfo& runInfo, int64_t index, CoordinateInfo& coordinateInfo)
 {
     if (coordinateInfo.batchId < 0 || index < 0) {
@@ -218,8 +225,9 @@ __aicore__ inline bool FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     }
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::SetRunInfoDeterForTND(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::SetRunInfoDeterForTND(
     FagRunInfo& runInfo, int64_t taskId, int64_t index, CoordinateInfo& coordinateInfo, int64_t nextIndex)
 {
     int64_t bIdx = coordinateInfo.batchId;
@@ -338,8 +346,9 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     }
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::CalCausalDeterIndex(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline int64_t
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::CalCausalDeterIndex(
     uint32_t roundId, CoordinateInfo& coordinateInfo)
 {
     int64_t j = this->cBlockIdx + 1;
@@ -365,7 +374,7 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
             n = m;
         }
         if constexpr (BaseClass::IS_N_EQUAL) {
-            if (unlikely(this->tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx)) {
+            if constexpr (IS_SWIZZLE) {
                 if (this->constInfo.sparseMode == LEFT_UP_CAUSAL || this->constInfo.sparseMode == NO_MASK) {
                     CalLeftUpCausalSwizzleIndex(k, m, n, b, j, r, coordinateInfo);
                 } else {
@@ -375,7 +384,17 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
                 CalCausalIndex(k, m, n, b, j, r, coordinateInfo);
             }
         } else {
-            CalGQACausalIndex(k, m, n, b, j, r, this->constInfo.commonConstInfo.gSize, coordinateInfo);
+            uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterGqaCausalScheduleMode;
+            if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterGqaCausalScheduleMode::BATCH_MAJOR)) {
+                CalGQACausalBatchMajorIndex(k, m, n, b, j, r, this->constInfo.commonConstInfo.gSize,
+                                            this->tilingData->baseDeterParam.deterGqaCausalRoundsPerBatch,
+                                            coordinateInfo);
+                if (coordinateInfo.batchId < 1) {
+                    return -1;
+                }
+            } else {
+                CalGQACausalIndex(k, m, n, b, j, r, this->constInfo.commonConstInfo.gSize, coordinateInfo);
+            }
         }
     } else {
         TransDeterRound<BaseClass::DETER_TILING_SPLIT_MODE>(r, useEven, deterLoopMax / NUM_TWO);
@@ -434,15 +453,16 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
     }
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::CalDenseDeterIndex(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline int64_t
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::CalDenseDeterIndex(
     uint32_t roundId, CoordinateInfo& coordinateInfo)
 {
     int64_t j = this->cBlockIdx + 1;
     int64_t r = roundId + 1;
 
     if constexpr (BaseClass::IS_TND) {
-        if constexpr (IS_TND_SWIZZLE) {
+        if constexpr (BaseClass::IS_TND && IS_SWIZZLE) {
             CalTNDDenseSwizzleIndex<BaseClass::CUBE_BASEM, BaseClass::CUBE_BASEN>(
                 this->actualSeqQlenAddr, this->actualSeqKvlenAddr,
                 this->tilingData->tndSwizzleParam.tndS2BlockPrefixSum, this->constInfo.bSize, this->constInfo.n2Size,
@@ -461,7 +481,7 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
         int64_t k = static_cast<int64_t>(this->tilingData->s1s2BNGS1S2BaseParams.coreNum / NUM_TWO);
         int64_t b = this->constInfo.bSize * this->constInfo.n2Size;
         if constexpr (BaseClass::IS_N_EQUAL) {
-            if (unlikely(this->tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx)) {
+            if constexpr (IS_SWIZZLE) {
                 CalDenseSwizzleIndex(k, this->constInfo.s1Outer, this->constInfo.s2Outer, b, j, r, coordinateInfo);
             } else {
                 CalDenseIndex(k, this->constInfo.s1Outer, this->constInfo.s2Outer, b, j, r, coordinateInfo);
@@ -475,7 +495,7 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
 
     int64_t w = coordinateInfo.batchId;
     int64_t n1 = this->constInfo.commonConstInfo.gSize * this->constInfo.n2Size;
-    if ((!BaseClass::IS_TND || this->constInfo.commonConstInfo.gSize == 1) && !IS_TND_SWIZZLE) {
+    if ((!BaseClass::IS_TND || this->constInfo.commonConstInfo.gSize == 1) && !(BaseClass::IS_TND && IS_SWIZZLE)) {
         coordinateInfo.batchId = Ceil<int64_t>(w, n1) - 1;
         int64_t n1Idx = w - coordinateInfo.batchId * n1 - 1;
         coordinateInfo.n2Idx = n1Idx / this->constInfo.commonConstInfo.gSize;
@@ -500,8 +520,9 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
            coordinateInfo.s2Idx * this->constInfo.s1Outer + coordinateInfo.s1Idx;
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::CalBandDeterIndex(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline int64_t
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::CalBandDeterIndex(
     uint32_t roundId, CoordinateInfo& coordinateInfo)
 {
     int64_t j = this->cBlockIdx + 1;
@@ -511,34 +532,15 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
     if constexpr (!BaseClass::IS_TND) {
         if constexpr (BaseClass::IS_N_EQUAL) {
             int64_t b = this->constInfo.bSize * this->constInfo.n2Size;
-            if (unlikely(this->tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx)) {
+            if constexpr (IS_SWIZZLE) {
                 int64_t k = static_cast<int64_t>(this->tilingData->s1s2BNGS1S2BaseParams.coreNum / NUM_TWO);
                 int64_t m = this->bandInfo.m;
                 int64_t n = this->bandInfo.n;
                 uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterBandScheduleMode;
-                if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL)) {
-                    int64_t causalShift = this->bandInfo.q - 1;
-                    int64_t causalSize = m + causalShift;
-                    int64_t causalPairCount = b / NUM_TWO;
-                    int64_t pairedBatch = causalPairCount * NUM_TWO;
-                    int64_t causalK = Min(k, causalSize * causalPairCount);
-                    int64_t pairRound = causalPairCount > 0 ?
-                                            Ceil<int64_t>((causalSize + 1) * causalPairCount, causalK) * causalSize :
-                                            0;
-                    if ((b & 1) != 0 && r > pairRound) {
-                        CalCausalSingleBatchDeterIndex(k, causalSize, causalSize, j, r - pairRound, coordinateInfo);
-                        if (coordinateInfo.batchId != -1) {
-                            coordinateInfo.batchId = b;
-                        }
-                    } else {
-                        CalCausalSwizzleIndex(k, causalSize, causalSize, pairedBatch, j, r, coordinateInfo);
-                    }
-                    if (coordinateInfo.batchId != -1) {
-                        coordinateInfo.s1Idx -= causalShift;
-                        if (coordinateInfo.s1Idx < 1 || coordinateInfo.s1Idx > m || coordinateInfo.s2Idx > n) {
-                            coordinateInfo.batchId = -1;
-                        }
-                    }
+                const bool upperCausal =
+                    scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL_UPPER);
+                if (upperCausal || scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL)) {
+                    CalBandCausalIndex(this->bandInfo, j, r, upperCausal, coordinateInfo);
                 } else if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::DENSE)) {
                     CalDenseSwizzleIndex(k, m, n, b, j, r, coordinateInfo);
                 } else if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::BAND)) {
@@ -550,7 +552,23 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
                 CalBandIndex(this->bandInfo, j, r, coordinateInfo);
             }
         } else {
-            CalGQABandIndex(this->bandInfo, j, r, this->constInfo.commonConstInfo.gSize, coordinateInfo);
+            if constexpr (IS_GQA_BAND_PIECEWISE_TEMPLATE) {
+                if constexpr (OwnerSchedule == optiling::fag::GQA_BAND_OWNER_DISPATCH_OVERLAP) {
+                    CalGQABandOverlapIndex(this->tilingData->deterGqaBandSchedule, j, r, coordinateInfo);
+                } else if constexpr (OwnerSchedule != optiling::fag::GQA_BAND_OWNER_DISPATCH_GENERIC) {
+                    CalGQABandOwnerIndex<OwnerSchedule == optiling::fag::GQA_BAND_OWNER_DISPATCH_BALANCED,
+                                         OwnerSchedule == optiling::fag::GQA_BAND_OWNER_DISPATCH_TRANSLATED,
+                                         OwnerSchedule == optiling::fag::GQA_BAND_OWNER_DISPATCH_FOLDED>(
+                        this->tilingData->deterGqaBandSchedule, j, r, coordinateInfo);
+                } else if (this->tilingData->s1s2BNGS1S2BaseParams.deterGqaBandScheduleMode ==
+                           static_cast<uint8_t>(optiling::fag::DeterGqaBandScheduleMode::PIECEWISE)) {
+                    CalGQABandPiecewiseIndex<false>(this->tilingData->deterGqaBandSchedule, j, r, coordinateInfo);
+                } else {
+                    CalGQABandIndex(this->bandInfo, j, r, this->constInfo.commonConstInfo.gSize, coordinateInfo);
+                }
+            } else {
+                CalGQABandIndex(this->bandInfo, j, r, this->constInfo.commonConstInfo.gSize, coordinateInfo);
+            }
         }
     } else {
         int64_t k = static_cast<int64_t>(this->tilingData->s1s2BNGS1S2BaseParams.coreNum / NUM_TWO);
@@ -608,8 +626,9 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
            coordinateInfo.s2Idx * this->constInfo.s1Outer + coordinateInfo.s1Idx;
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::CalDeterMaxLoopNum()
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline int64_t
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::CalDeterMaxLoopNum()
 {
     int64_t b = this->constInfo.bSize * this->constInfo.n2Size;
     int64_t m = this->constInfo.s1Outer;
@@ -617,7 +636,7 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
     int64_t k = static_cast<int64_t>(this->tilingData->s1s2BNGS1S2BaseParams.coreNum / NUM_TWO);
     deterLoopMax = 0;
     if constexpr (BaseClass::IS_TND) {
-        if constexpr (IS_TND_SWIZZLE) {
+        if constexpr (BaseClass::IS_TND && IS_SWIZZLE) {
             return this->tilingData->tndSwizzleParam.tndS2BlockPrefixSum[this->constInfo.bSize];
         } else {
             return this->tilingData->baseDeterParam.deterMaxRound;
@@ -627,7 +646,7 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
     InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, 0, 0, this->coordinateInfos[0]);
     InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, 0, 0, this->coordinateInfos[1]);
     if constexpr (BaseClass::DETER_SPARSE_TYPE == DETER_CAUSAL) {
-        if (unlikely(this->tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx)) {
+        if constexpr (!BaseClass::IS_TND && BaseClass::IS_N_EQUAL && IS_SWIZZLE) {
             if (this->constInfo.sparseMode == LEFT_UP_CAUSAL || this->constInfo.sparseMode == NO_MASK) {
                 return CalLeftUpCausalSwizzleMaxRound(k, m, n, b);
             }
@@ -652,10 +671,9 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
     }
 
     if constexpr (BaseClass::DETER_SPARSE_TYPE == DETER_BAND) {
-        if constexpr (BaseClass::IS_N_EQUAL) {
+        if constexpr (BaseClass::IS_N_EQUAL && IS_SWIZZLE) {
             uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterBandScheduleMode;
-            if (unlikely(this->tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx &&
-                         scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::DISABLED) &&
+            if (unlikely(scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::DISABLED) &&
                          this->constInfo.sparseMode == RIGHT_DOWN_CAUSAL)) {
                 int64_t mNew = 0;
                 int64_t nNew = 0;
@@ -713,30 +731,31 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
         }
 
         if constexpr (BaseClass::IS_N_EQUAL) {
-            uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterBandScheduleMode;
-            // The Host sets a non-DISABLED mode only after DETER_BAND normalization. Keep this mode
-            // authoritative for both hybrid-info initialization and coordinate dispatch.
-            bool isHybridSchedule =
-                scheduleMode >= static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL) &&
-                scheduleMode <= static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::BAND);
-            if (unlikely(isHybridSchedule)) {
-                GenBandHybridInfo(k, actualM, actualN, actualP, actualQ, b, this->bandInfo);
-                InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
-                                   this->coordinateInfos[0]);
-                InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
-                                   this->coordinateInfos[1]);
-                if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL)) {
-                    // The odd-batch CAUSAL schedule has a paired section followed by a single-batch
-                    // tail. Host serializes the sum of both sections, so use it as the sole bound.
-                    deterLoopMax = this->tilingData->baseDeterParam.deterMaxRound;
-                } else if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::DENSE)) {
-                    int64_t denseK = Min(k, this->bandInfo.m * b);
-                    deterLoopMax = Ceil<int64_t>(this->bandInfo.n * b, denseK) * this->bandInfo.m;
-                } else {
-                    int64_t colsPerBatch = this->bandInfo.nSeg - this->bandInfo.hybridPairCount;
-                    deterLoopMax = Ceil<int64_t>(b * colsPerBatch, k) * (this->bandInfo.p + this->bandInfo.q - 1);
+            if constexpr (IS_SWIZZLE) {
+                uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterBandScheduleMode;
+                // The mode remains authoritative within the compile-time swizzle branch.
+                bool isHybridSchedule =
+                    scheduleMode >= static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL) &&
+                    scheduleMode <= static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL_UPPER);
+                if (unlikely(isHybridSchedule)) {
+                    GenBandHybridInfo(k, actualM, actualN, actualP, actualQ, b, this->bandInfo);
+                    InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
+                                       this->coordinateInfos[0]);
+                    InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
+                                       this->coordinateInfos[1]);
+                    if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL) ||
+                        scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL_UPPER)) {
+                        // The host's complete bound includes the odd-batch tail in either orientation.
+                        deterLoopMax = this->tilingData->baseDeterParam.deterMaxRound;
+                    } else if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::DENSE)) {
+                        int64_t denseK = Min(k, this->bandInfo.m * b);
+                        deterLoopMax = Ceil<int64_t>(this->bandInfo.n * b, denseK) * this->bandInfo.m;
+                    } else {
+                        int64_t colsPerBatch = this->bandInfo.nSeg - this->bandInfo.hybridPairCount;
+                        deterLoopMax = Ceil<int64_t>(b * colsPerBatch, k) * (this->bandInfo.p + this->bandInfo.q - 1);
+                    }
+                    return deterLoopMax;
                 }
-                return deterLoopMax;
             }
             GenBandInfo(k, actualM, actualN, actualP, actualQ, b, this->bandInfo);
             int64_t convertedMaxRound = BaseClass::DETER_TILING_SPLIT_MODE ?
@@ -744,6 +763,16 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
                                             this->tilingData->baseDeterParam.deterMaxRound;
             deterLoopMax = Max(convertedMaxRound, this->bandInfo.rm2);
         } else {
+            if constexpr (IS_GQA_BAND_PIECEWISE_TEMPLATE) {
+                if (this->tilingData->s1s2BNGS1S2BaseParams.deterGqaBandScheduleMode ==
+                    static_cast<uint8_t>(optiling::fag::DeterGqaBandScheduleMode::PIECEWISE)) {
+                    InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
+                                       this->coordinateInfos[0]);
+                    InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
+                                       this->coordinateInfos[1]);
+                    return this->tilingData->deterGqaBandSchedule.totalRounds;
+                }
+            }
             k = Min(Min(k, b * this->constInfo.commonConstInfo.gSize * m), b * n);
             int64_t b2 = b % k;
             GenGQABandInfo(k, actualM, actualN, actualP, actualQ, b, this->constInfo.commonConstInfo.gSize,
@@ -762,9 +791,9 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
     return deterLoopMax;
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::SpecialS2Index(
-    int64_t dkvGmOffset)
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline int64_t
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::SpecialS2Index(int64_t dkvGmOffset)
 {
     if constexpr (IS_DETER_NEW(DETER_SPARSE_TYPE)) {
         for (int8_t i = 0; i < MAX_CUBE_CORE_NUM; i++) {
@@ -776,8 +805,8 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
     return -1;
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::CalDeterIndex(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::CalDeterIndex(
     uint32_t roundId, uint32_t maxLoopNum, int64_t& nextValidRoundId, int64_t& nextValidIndex, int64_t taskId,
     CoordinateInfo& coordinateInfo, FagRunInfo& runInfo)
 {
@@ -806,8 +835,9 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     nextValidRoundId = maxLoopNum;
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::DeterSync(int64_t loopIdx)
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::DeterSync(
+    int64_t loopIdx)
 {
     if (loopIdx == 0) {
         return;
@@ -827,8 +857,9 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     }
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::Process_NEW_DETER()
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::Process_NEW_DETER()
 {
     if constexpr (SPLIT_AXIS == BN2S2) {
         if ASCEND_IS_AIV {
@@ -1106,8 +1137,8 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     }
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::Process()
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::Process()
 {
     if constexpr (IS_DETER_NEW(DETER_SPARSE_TYPE)) {
         Process_NEW_DETER();
@@ -1116,8 +1147,9 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     }
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::Process_OLD_DETER()
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void
+FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::Process_OLD_DETER()
 {
     // maxValidBBLen表示所有核中处理有效块最多的数量，需要做这么多次确定性计算
     int64_t maxValidBBLen = this->tilingData->s1s2BNGS1S2SplitCoreParams.maxValidBBLen;
@@ -1383,8 +1415,8 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
     }
 }
 
-template <typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::GetIsNeedDeter(
+template <typename CubeBlockType, typename VecBlockType, uint8_t OwnerSchedule>
+__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::GetIsNeedDeter(
     int64_t computeLoopIdx)
 {
     if (this->constInfo.deterConstInfo.noNeedDeter) {

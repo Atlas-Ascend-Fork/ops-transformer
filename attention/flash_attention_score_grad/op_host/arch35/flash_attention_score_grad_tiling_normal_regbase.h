@@ -26,6 +26,7 @@ namespace fag {
 
 #define TND_TILING_DATA_COMMON_ASSIGN(tilingData) \
     do { \
+        tilingData->deterGqaBandSchedule = {}; \
         s1s2BNGS1S2BaseParams_ = &tilingData->s1s2BNGS1S2BaseParams; \
         s1s2BNGS1S2SplitCoreParams_ = &tilingData->s1s2BNGS1S2SplitCoreParams; \
         s1s2BNGS1S2BlockNumList_ = &tilingData->s1s2BNGS1S2BlockNumList; \
@@ -36,6 +37,7 @@ namespace fag {
 
 #define BASE_TILING_DATA_COMMON_ASSIGN(tilingData) \
     do { \
+        tilingData->deterGqaBandSchedule = {}; \
         s1s2BNGS1S2BaseParams_ = &tilingData->s1s2BNGS1S2BaseParams; \
         s1s2BNGS1S2SplitCoreParams_ = &tilingData->s1s2BNGS1S2SplitCoreParams; \
         s1s2BNGS1S2BlockNumList_ = &tilingData->s1s2BNGS1S2BlockNumList; \
@@ -59,6 +61,7 @@ public:
     DeterParamRegbase* deterParam = nullptr;
     TndParamRegbase* tndParam_ = nullptr;
     TndSwizzleParamRegbase* tndSwizzleParam_ = nullptr;
+    GqaBandSchedule* deterGqaBandSchedule_ = nullptr;
 
 protected:
     bool IsCapable() override;
@@ -105,7 +108,7 @@ protected:
     ge::graphStatus DoBn2MultiBlkSparse();
     virtual ge::graphStatus GetBlockInfoOfTNDForBn2() {};
     ge::graphStatus GetSparseBlockInfoBn2();
-    FuzzyBaseInfoParamsRegbase fBaseParams;
+    FuzzyBaseInfoParamsRegbase fBaseParams{};
     platform_ascendc::SocVersion socVersion;
     NpuArch npuArch = NpuArch::DAV_RESV;
     TndBaseInfo tndBaseInfo;

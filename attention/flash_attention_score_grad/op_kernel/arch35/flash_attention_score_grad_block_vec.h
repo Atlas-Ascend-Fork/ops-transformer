@@ -32,6 +32,11 @@ constexpr uint32_t BIT32_ALIGN_NUM = 8;
 TEMPLATES_DEF
 class FAGBlockVec {
 private:
+    __aicore__ inline void PrepareDropMask(FagConstInfo& constInfo, FagRunInfo& runInfo);
+    template <uint16_t srcN, bool clearS2Tail>
+    __aicore__ inline void ComputeDs(LocalTensor<CALC_TYPE>& mm1ResTensor, LocalTensor<CALC_TYPE>& softmaxGradResTensor,
+                                     LocalTensor<CALC_TYPE>& mm2ResTensor, FagConstInfo& constInfo,
+                                     FagRunInfo& runInfo);
     template <uint8_t MM_IDX>
     __aicore__ inline void DqkvMulsAndCastFromUB(FagConstInfo& constInfo, FagRunInfo& runInfo,
                                                  LocalTensor<CALC_TYPE>& inputTensor,
@@ -467,6 +472,41 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::ProcessVec2(LocalTensor<CALC_
                                      VECTOR_BASEM, VECTOR_BASEN>(
         constInfo, runInfo, pseInfoPtr, attenMaskInfoPtr, maxSumQue[runInfo.commonRunInfo.taskIdMod2],
         attenMaskOrYInQue, pseOrDyInQue, mm2ResTensor, mm2ResTensor, pseSlope);
+    // Prepare the internal mask early; normal kernels wait for mm1 after Vec2. Vec3 and Vec4 reuse it.
+    PrepareDropMask(constInfo, runInfo);
+}
+
+TEMPLATES_DEF_NO_DEFAULT
+__aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::PrepareDropMask(FagConstInfo& constInfo, FagRunInfo& runInfo)
+{
+    if constexpr (IS_DROP) {
+        if (!dropInfoPtr.dropMaskOuter) {
+            GenDropMask<IS_DROP>(dropMaskBuf, dropmaskIndexVecBuf, runInfo.commonRunInfo, constInfo.commonConstInfo,
+                                 dropInfoPtr);
+        }
+    }
+}
+
+TEMPLATES_DEF_NO_DEFAULT
+template <uint16_t srcN, bool clearS2Tail>
+__aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::ComputeDs(LocalTensor<CALC_TYPE>& mm1ResTensor,
+                                                             LocalTensor<CALC_TYPE>& softmaxGradResTensor,
+                                                             LocalTensor<CALC_TYPE>& mm2ResTensor,
+                                                             FagConstInfo& constInfo, FagRunInfo& runInfo)
+{
+    if constexpr (IS_DROP && VECTOR_BASEN == static_cast<uint32_t>(S2TemplateType::Aligned128)) {
+        if (!dropInfoPtr.dropMaskOuter && !constInfo.isSink) {
+            LocalTensor<uint8_t> dropTensor = dropMaskBuf.template Get<uint8_t>();
+            BroadcastSubMulDropout<CALC_TYPE, srcN, VECTOR_BASEN, clearS2Tail>(
+                mm1ResTensor, mm1ResTensor, softmaxGradResTensor, mm2ResTensor, dropTensor,
+                1.0f / constInfo.commonConstInfo.keepProb, runInfo.commonRunInfo.halfS1RealSize,
+                runInfo.commonRunInfo.s2RealSize);
+            return;
+        }
+    }
+    BroadcastSubMul<CALC_TYPE, srcN, clearS2Tail, false>(mm1ResTensor, mm1ResTensor, softmaxGradResTensor, mm2ResTensor,
+                                                         runInfo.commonRunInfo.halfS1RealSize,
+                                                         runInfo.commonRunInfo.s2RealSize);
 }
 
 TEMPLATES_DEF_NO_DEFAULT
@@ -555,12 +595,15 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::ProcessVec3(
             CopyInDropOuter<IS_DROP>(dropMaskBuf, attenMaskOrYInQue, dropMaskGm, runInfo.commonRunInfo,
                                      constInfo.commonConstInfo, dropInfoPtr);
         }
-    } else {
-        GenDropMask<IS_DROP>(dropMaskBuf, dropmaskIndexVecBuf, runInfo.commonRunInfo, constInfo.commonConstInfo,
-                             dropInfoPtr);
     }
-    CalculateDropout<CALC_TYPE, IS_DROP, VECTOR_BASEN>(constInfo, runInfo, dropInfoPtr, mm1ResTensor, mm1ResTensor,
-                                                       dropMaskBuf);
+    // Sink consumes a separate copy of dP after dropout; external masks retain the existing path.
+    if constexpr (IS_DROP) {
+        if (dropInfoPtr.dropMaskOuter || constInfo.isSink ||
+            VECTOR_BASEN != static_cast<uint32_t>(S2TemplateType::Aligned128)) {
+            CalculateDropout<CALC_TYPE, IS_DROP, VECTOR_BASEN>(constInfo, runInfo, dropInfoPtr, mm1ResTensor,
+                                                               mm1ResTensor, dropMaskBuf);
+        }
+    }
     if (unlikely(constInfo.isSink && IS_DROP)) {
         CopyDpToTmpBuf(mm1ResTensor);
     }
@@ -576,26 +619,20 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::ProcessVec3(
 
     LocalTensor<INPUT_TYPE> vecOutBuffer = dSOutQue.AllocTensor<INPUT_TYPE>();
     if (runInfo.commonRunInfo.s2RealSize > static_cast<uint32_t>(S2TemplateType::Aligned64)) {
-        BroadcastSubMul<CALC_TYPE, static_cast<uint16_t>(S2TemplateType::Aligned128), 0, false>(
-            mm1ResTensor, mm1ResTensor, softmaxGradResTensor, mm2ResTensor, runInfo.commonRunInfo.halfS1RealSize,
-            runInfo.commonRunInfo.s2RealSize);
+        ComputeDs<static_cast<uint16_t>(S2TemplateType::Aligned128), false>(mm1ResTensor, softmaxGradResTensor,
+                                                                            mm2ResTensor, constInfo, runInfo);
     } else {
         if constexpr (IS_DETER_OLD(DETER_SPARSE_TYPE)) {
             if (constInfo.deterConstInfo.noNeedDeter) {
-                BroadcastSubMul<CALC_TYPE, static_cast<uint16_t>(S2TemplateType::Aligned64), 0, false>(
-                    mm1ResTensor, mm1ResTensor, softmaxGradResTensor, mm2ResTensor,
-                    runInfo.commonRunInfo.halfS1RealSize, runInfo.commonRunInfo.s2RealSize);
-            } else { // 64~128的脏数据需要清零，避免后面的mm有脏数据参与计算
-                BroadcastSubMul<CALC_TYPE, static_cast<uint16_t>(S2TemplateType::Aligned64),
-                                IS_DETER_OLD(DETER_SPARSE_TYPE), false>(
-                    mm1ResTensor, mm1ResTensor, softmaxGradResTensor, mm2ResTensor,
-                    runInfo.commonRunInfo.halfS1RealSize, runInfo.commonRunInfo.s2RealSize);
+                ComputeDs<static_cast<uint16_t>(S2TemplateType::Aligned64), false>(mm1ResTensor, softmaxGradResTensor,
+                                                                                   mm2ResTensor, constInfo, runInfo);
+            } else { // Clear columns 64..127 before deterministic matmul consumes the padded tile.
+                ComputeDs<static_cast<uint16_t>(S2TemplateType::Aligned64), true>(mm1ResTensor, softmaxGradResTensor,
+                                                                                  mm2ResTensor, constInfo, runInfo);
             }
         } else {
-            BroadcastSubMul<CALC_TYPE, static_cast<uint16_t>(S2TemplateType::Aligned64),
-                            IS_DETER_OLD(DETER_SPARSE_TYPE), false>(mm1ResTensor, mm1ResTensor, softmaxGradResTensor,
-                                                                    mm2ResTensor, runInfo.commonRunInfo.halfS1RealSize,
-                                                                    runInfo.commonRunInfo.s2RealSize);
+            ComputeDs<static_cast<uint16_t>(S2TemplateType::Aligned64), false>(mm1ResTensor, softmaxGradResTensor,
+                                                                               mm2ResTensor, constInfo, runInfo);
         }
     }
 
@@ -633,10 +670,24 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::ProcessVec4(
     ///////////////////////////////////////////////////////////////
     LocalTensor<uint8_t> selrIndexesTensor;
     LocalTensor<OUTDTYPE> vecOutBuffer1 = pOutQue.AllocTensor<OUTDTYPE>();
-    CalculateDropout<CALC_TYPE, IS_DROP, VECTOR_BASEN>(constInfo, runInfo, dropInfoPtr, mm2ResTensor, mm2ResTensor,
-                                                       dropMaskBuf);
-    CastTransdataDeconflict<OUTDTYPE, CALC_TYPE, VECTOR_BASEN>(vecOutBuffer1, mm2ResTensor, selrIndexesTensor,
-                                                               VECTOR_BASEM);
+    if constexpr (IS_DROP && VECTOR_BASEN == static_cast<uint32_t>(S2TemplateType::Aligned128)) {
+        if (!dropInfoPtr.dropMaskOuter) {
+            LocalTensor<uint8_t> dropTensor = dropMaskBuf.template Get<uint8_t>();
+            CastDropoutTransdataDeconflict<OUTDTYPE, CALC_TYPE, VECTOR_BASEN>(
+                vecOutBuffer1, mm2ResTensor, dropTensor, VECTOR_BASEM, runInfo.commonRunInfo.halfS1RealSize,
+                1.0f / constInfo.commonConstInfo.keepProb);
+        } else {
+            CalculateDropout<CALC_TYPE, IS_DROP, VECTOR_BASEN>(constInfo, runInfo, dropInfoPtr, mm2ResTensor,
+                                                               mm2ResTensor, dropMaskBuf);
+            CastTransdataDeconflict<OUTDTYPE, CALC_TYPE, VECTOR_BASEN>(vecOutBuffer1, mm2ResTensor, selrIndexesTensor,
+                                                                       VECTOR_BASEM);
+        }
+    } else {
+        CalculateDropout<CALC_TYPE, IS_DROP, VECTOR_BASEN>(constInfo, runInfo, dropInfoPtr, mm2ResTensor, mm2ResTensor,
+                                                           dropMaskBuf);
+        CastTransdataDeconflict<OUTDTYPE, CALC_TYPE, VECTOR_BASEN>(vecOutBuffer1, mm2ResTensor, selrIndexesTensor,
+                                                                   VECTOR_BASEM);
+    }
     pOutQue.EnQue(vecOutBuffer1);
     pOutQue.DeQue<OUTDTYPE>();
 

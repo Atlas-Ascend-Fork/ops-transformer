@@ -24,14 +24,14 @@ using namespace AscendC;
 #define PRE_FUNCTION_TEMPLATE \
     template <typename T1, typename T2, typename OUTDTYPE, DTemplateType dTemplateType, const int8_t IS_D_NO_EQUAL, \
               const uint8_t DETER_SPARSE_TYPE, const uint32_t IS_TND, const uint8_t SPLIT_AXIS, \
-              const uint8_t IS_TND_SWIZZLE>
+              const uint8_t IS_SWIZZLE>
 
 #define PRE_FUNCTION_ARGS_TEMPLATE \
-    T1, T2, OUTDTYPE, dTemplateType, IS_D_NO_EQUAL, DETER_SPARSE_TYPE, IS_TND, SPLIT_AXIS, IS_TND_SWIZZLE
+    T1, T2, OUTDTYPE, dTemplateType, IS_D_NO_EQUAL, DETER_SPARSE_TYPE, IS_TND, SPLIT_AXIS, IS_SWIZZLE
 
 template <typename T1, typename T2, typename OUTDTYPE, DTemplateType dTemplateType = DTemplateType::Aligned128,
           const int8_t IS_D_NO_EQUAL = 0, const uint8_t DETER_SPARSE_TYPE = 0, const uint32_t IS_TND = 0,
-          const uint8_t SPLIT_AXIS = 0, const uint8_t IS_TND_SWIZZLE = 0>
+          const uint8_t SPLIT_AXIS = 0, const uint8_t IS_SWIZZLE = 0>
 class FlashAttentionScoreGradPresfmgRegbase {
 public:
     __aicore__ inline FlashAttentionScoreGradPresfmgRegbase(){};

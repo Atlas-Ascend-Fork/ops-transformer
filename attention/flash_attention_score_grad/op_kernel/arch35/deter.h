@@ -22,6 +22,8 @@
 #include "kernel_operator.h"
 #endif
 #include "flash_attention_score_grad_common.h"
+#define FAG_GQA_BAND_INLINE __aicore__ inline
+#include "deter_gqa_band_index.h"
 
 namespace commondef {
 constexpr int64_t DETER_PREFIX_NUM = 132;
@@ -403,7 +405,7 @@ __aicore__ inline void CalCausalRecSingleBatchDeterIndex(int64_t k, int64_t m, i
 
 // 计算单batch切分
 __aicore__ inline void CalCausalSingleBatchDeterIndex(int64_t k, int64_t m, int64_t n, int64_t j, int64_t r,
-                                                      CoordinateInfo& coordinate)
+                                                      CoordinateInfo& coordinate, bool exactRoundBoundary = false)
 {
     // 0. special case
     if (k >= (n / NUM_TWO) + 1) {
@@ -422,8 +424,25 @@ __aicore__ inline void CalCausalSingleBatchDeterIndex(int64_t k, int64_t m, int6
     int64_t bound1 = (NUM_TWO * m + 1) * t1 - NUM_TWO * k * t1 * t1;
     if (r <= bound1) {
         // solve for group index i
-        int64_t disc = Square((NUM_TWO * m + 1)) - NUM_EIGHT * k * r;
-        int64_t i = Ceil<int64_t>(((NUM_TWO * m + 1) - sqrt(disc)), (NUM_FOUR * k));
+        int64_t i;
+        if (exactRoundBoundary) {
+            // The batch-major path must not depend on rounding a floating-point square root.
+            int64_t groupLow = 1;
+            int64_t groupHigh = t1;
+            while (groupLow < groupHigh) {
+                int64_t groupMid = groupLow + (groupHigh - groupLow) / NUM_TWO;
+                int64_t endRound = (NUM_TWO * m + 1) * groupMid - NUM_TWO * k * groupMid * groupMid;
+                if (r <= endRound) {
+                    groupHigh = groupMid;
+                } else {
+                    groupLow = groupMid + 1;
+                }
+            }
+            i = groupLow;
+        } else {
+            int64_t disc = Square((NUM_TWO * m + 1)) - NUM_EIGHT * k * r;
+            i = Ceil<int64_t>(((NUM_TWO * m + 1) - sqrt(disc)), (NUM_FOUR * k));
+        }
         rm = (NUM_TWO * m + 1) * (i - 1) - NUM_TWO * k * (i - 1) * (i - 1);
         offset = NUM_TWO * k * (i - 1);
         L1 = m - NUM_TWO * k * (i - 1);
@@ -769,7 +788,7 @@ __aicore__ inline void CalLeftUpCausalSwizzleIndex(int64_t k, int64_t m, int64_t
 }
 
 __aicore__ inline void CalGQACausalIndex(int64_t k, int64_t m, int64_t n, int64_t b, int64_t j, int64_t r, int64_t g,
-                                         CoordinateInfo& coordinate)
+                                         CoordinateInfo& coordinate, bool exactRoundBoundary = false)
 {
     // 1. b1, b2, rm1
     int64_t b1 = b / k;
@@ -872,7 +891,7 @@ __aicore__ inline void CalGQACausalIndex(int64_t k, int64_t m, int64_t n, int64_
                 int64_t N1_id = Ceil<int64_t>(a3, rm3);
                 a3 = a3 % rm3;
                 a3 = a3 != 0 ? a3 : rm3;
-                CalCausalSingleBatchDeterIndex(k, m, n, j, a3, coordinate);
+                CalCausalSingleBatchDeterIndex(k, m, n, j, a3, coordinate, exactRoundBoundary);
                 if (coordinate.batchId != -1) {
                     coordinate.batchId = (b - 1) * g + N1_id;
                     return;
@@ -889,7 +908,7 @@ __aicore__ inline void CalGQACausalIndex(int64_t k, int64_t m, int64_t n, int64_
                 int64_t N1_id = Ceil<int64_t>(a3, rm3);
                 a3 = a3 % rm3;
                 a3 = a3 != 0 ? a3 : rm3;
-                CalCausalSingleBatchDeterIndex(k, m, t * k, j, a3, coordinate);
+                CalCausalSingleBatchDeterIndex(k, m, t * k, j, a3, coordinate, exactRoundBoundary);
                 if (coordinate.batchId != -1) {
                     coordinate.batchId = (b - 1) * g + N1_id;
                     return;
@@ -990,6 +1009,30 @@ __aicore__ inline void CalGQACausalIndex(int64_t k, int64_t m, int64_t n, int64_
     return;
 }
 
+// Keep the single-batch GQA column schedule and serialize the flattened (B, N2) batches.
+// j, r and the returned coordinates are 1-based; roundsPerBatch includes all g query heads.
+__aicore__ inline void CalGQACausalBatchMajorIndex(int64_t k, int64_t m, int64_t n, int64_t b, int64_t j, int64_t r,
+                                                   int64_t g, int64_t roundsPerBatch, CoordinateInfo& coordinate)
+{
+    coordinate.batchId = -1;
+    if (k <= 0 || n <= 0 || m < n || b <= 0 || g <= 0 || j < 1 || j > k || r <= 0 || roundsPerBatch <= 0) {
+        return;
+    }
+    int64_t batchIdx = (r - 1) / roundsPerBatch;
+    if (batchIdx >= b) {
+        return;
+    }
+    int64_t localRound = (r - 1) % roundsPerBatch + 1;
+    CalGQACausalIndex(k, m, n, 1, j, localRound, g, coordinate, true);
+    // Never offset the invalid-slot sentinel into a valid flattened head index.
+    if (coordinate.batchId < 1 || coordinate.batchId > g || coordinate.s2Idx < 1 || coordinate.s2Idx > n ||
+        coordinate.s1Idx < coordinate.s2Idx || coordinate.s1Idx > m) {
+        coordinate.batchId = -1;
+        return;
+    }
+    coordinate.batchId += batchIdx * g;
+}
+
 struct BandInfo {
     int64_t k = 0;
     int64_t m = 0;
@@ -1037,6 +1080,44 @@ __aicore__ inline void GenBandHybridInfo(int64_t k, int64_t m, int64_t n, int64_
     }
     bandInfo.nSeg = bandInfo.L1 + bandInfo.L2 + bandInfo.L3;
     bandInfo.hybridPairCount = Max(0, Min(bandInfo.L1, bandInfo.L3 - p + 1));
+}
+
+// Both orientations retain the causal mapper's fixed owner for each KV column and unique
+// Q row per round. For upper BAND, rotate both axes; a transpose would exchange these invariants.
+__aicore__ inline void CalBandCausalIndex(const BandInfo& bandInfo, int64_t j, int64_t r, bool upper,
+                                          CoordinateInfo& coordinate)
+{
+    const int64_t k = bandInfo.k;
+    const int64_t b = bandInfo.b;
+    const int64_t causalShift = upper ? bandInfo.p - 1 : bandInfo.q - 1;
+    const int64_t causalSize = (upper ? bandInfo.n : bandInfo.m) + causalShift;
+    const int64_t causalPairCount = b / NUM_TWO;
+    const int64_t pairedBatch = causalPairCount * NUM_TWO;
+    const int64_t causalK = Min(k, causalSize * causalPairCount);
+    const int64_t pairRound =
+        causalPairCount > 0 ? Ceil<int64_t>((causalSize + 1) * causalPairCount, causalK) * causalSize : 0;
+    if ((b & 1) != 0 && r > pairRound) {
+        // Keep the tail group boundary exact for both orientations, including the first round.
+        CalCausalSingleBatchDeterIndex(k, causalSize, causalSize, j, r - pairRound, coordinate, true);
+        if (coordinate.batchId != -1) {
+            coordinate.batchId = b;
+        }
+    } else {
+        CalCausalSwizzleIndex(k, causalSize, causalSize, pairedBatch, j, r, coordinate);
+    }
+    if (coordinate.batchId == -1) {
+        return;
+    }
+    if (upper) {
+        coordinate.s1Idx = causalSize + 1 - coordinate.s1Idx;
+        coordinate.s2Idx = bandInfo.n + 1 - coordinate.s2Idx;
+    } else {
+        coordinate.s1Idx -= causalShift;
+    }
+    if (coordinate.s1Idx < 1 || coordinate.s1Idx > bandInfo.m || coordinate.s2Idx < 1 ||
+        coordinate.s2Idx > bandInfo.n) {
+        coordinate.batchId = -1;
+    }
 }
 
 __aicore__ inline bool SetBandHybridCoordinate(const BandInfo& bandInfo, int64_t w, int64_t y, int64_t localRound,
@@ -1178,6 +1259,271 @@ __aicore__ inline void CalGQADenseIndexNoTune(int64_t k, int64_t m, int64_t n, i
     int64_t w = ID % g;
     w = w != 0 ? w : g;
     coordinate.batchId = w + (b_id - 1) * g;
+}
+
+// Phase geometry and round boundaries are selected and serialized by the Host.
+// All coordinates remain 1-based until CalBandDeterIndex restores the physical tensor indices.
+template <bool IncludeColumnOwners = true>
+__aicore__ inline void CalGQABandPiecewiseIndex(const __gm__ optiling::fag::GqaBandSchedule& plan, int64_t j, int64_t r,
+                                                CoordinateInfo& coordinate)
+{
+    coordinate.batchId = -1;
+    if (j < 1 || j > plan.k || r < 1 || r > plan.totalRounds || plan.groupsPerChunk <= 0 || plan.fullRounds <= 0) {
+        return;
+    }
+    const int64_t fullChunks = plan.b / plan.groupsPerChunk;
+    const int64_t fullRounds = fullChunks * plan.fullRounds;
+    const bool isTail = r > fullRounds;
+    const int64_t chunk = isTail ? fullChunks : (r - 1) / plan.fullRounds;
+    const int64_t groups = isTail ? plan.b % plan.groupsPerChunk : plan.groupsPerChunk;
+    int64_t localRound = isTail ? r - fullRounds : (r - 1) % plan.fullRounds + 1;
+    const bool useTailPhases = isTail && plan.tailPhaseCount > 0;
+    const int64_t phaseCount = useTailPhases ? plan.tailPhaseCount : plan.phaseCount;
+    for (int64_t phaseIdx = 0; phaseIdx < phaseCount; ++phaseIdx) {
+        const __gm__ optiling::fag::GqaBandPhase& gmPhase =
+            useTailPhases ? plan.tailPhases[phaseIdx] : plan.phases[phaseIdx];
+        const int64_t phaseRounds = isTail ? gmPhase.tailRounds : gmPhase.fullRounds;
+        if (localRound > phaseRounds) {
+            localRound -= phaseRounds;
+            continue;
+        }
+        // Load only the selected phase's geometry; never materialize both phase arrays locally.
+        optiling::fag::GqaBandPhase phase;
+        phase.kind = gmPhase.kind;
+        phase.m = gmPhase.m;
+        phase.n = gmPhase.n;
+        phase.rowOffset = gmPhase.rowOffset;
+        phase.colOffset = gmPhase.colOffset;
+        // Current host routes single-domain owners to dedicated template keys.
+        // Keep the complete mapper available for host/device mapping oracles.
+        if constexpr (IncludeColumnOwners) {
+            if (phase.kind == optiling::fag::GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER ||
+                phase.kind == optiling::fag::GqaBandPhaseKind::FOLDED_LOWER_COLUMN_OWNER ||
+                phase.kind == optiling::fag::GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER) {
+                const auto domain = optiling::fag::DecodeGqaBandFoldedDomain(phase);
+                optiling::fag::GqaBandFoldedColumnOwnerIndex(plan.k, groups, plan.g, domain.m, domain.n, domain.p,
+                                                             domain.q, j, localRound, coordinate.batchId,
+                                                             coordinate.s1Idx, coordinate.s2Idx);
+                if (coordinate.batchId > 0) {
+                    coordinate.batchId += chunk * plan.groupsPerChunk * plan.g;
+                    coordinate.s1Idx += domain.rowOrigin;
+                    coordinate.s2Idx += domain.colOrigin;
+                }
+                return;
+            }
+            if (phase.kind == optiling::fag::GqaBandPhaseKind::BAND_COLUMN_OWNER) {
+                // A whole-band phase stores p/q in the offset fields and returns physical block coordinates.
+                if (plan.groupsPerChunk == plan.b && plan.phaseCount == 1 && plan.tailPhaseCount == 0) {
+                    optiling::fag::GqaBandColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.rowOffset,
+                                                           phase.colOffset, j, localRound, coordinate.batchId,
+                                                           coordinate.s1Idx, coordinate.s2Idx);
+                }
+                return;
+            }
+            if (phase.kind == optiling::fag::GqaBandPhaseKind::LOWER_TRIANGLE_COLUMN_OWNER) {
+                if (plan.groupsPerChunk == plan.b && plan.phaseCount == 1 && plan.tailPhaseCount == 0 &&
+                    phase.m == phase.n) {
+                    optiling::fag::GqaBandColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.m, 1, j,
+                                                           localRound, coordinate.batchId, coordinate.s1Idx,
+                                                           coordinate.s2Idx);
+                    if (coordinate.batchId > 0) {
+                        coordinate.s1Idx += phase.rowOffset;
+                        coordinate.s2Idx += phase.colOffset;
+                    }
+                }
+                return;
+            }
+        }
+        const bool isTriangle = phase.kind == optiling::fag::GqaBandPhaseKind::LOWER_TRIANGLE ||
+                                phase.kind == optiling::fag::GqaBandPhaseKind::UPPER_TRIANGLE;
+        const bool isEdgePair = optiling::fag::IsGqaBandEdgePair(phase);
+        int64_t localGroups = groups;
+        int64_t phaseGroupOffset = 0;
+        if (isTriangle) {
+            // Reorder whole rounds on every core together, preserving shared dK/dV uniqueness.
+            const int64_t sourceRound =
+                optiling::fag::GqaBandTriangleSourceRound(plan.k, phase.m, groups, plan.g, localRound);
+            CalGQACausalIndex(plan.k, phase.m, phase.n, groups, j, sourceRound, plan.g, coordinate, true);
+        } else if (phase.kind == optiling::fag::GqaBandPhaseKind::DIAGONAL_COLUMN_OWNER) {
+            optiling::fag::GqaBandDiagonalColumnIndex(plan.k, phase.m, groups, plan.g, j, localRound,
+                                                      coordinate.batchId, coordinate.s1Idx, coordinate.s2Idx);
+        } else if (phase.kind == optiling::fag::GqaBandPhaseKind::DIAGONAL) {
+            // Keep the local row equal on all cores before the column-dependent row translation.
+            CalGQADenseIndexNoTune(plan.k, phase.m, phase.n, groups, j, localRound, plan.g, coordinate);
+        } else {
+            int64_t sourceRound = localRound;
+            if (isEdgePair) {
+                sourceRound = optiling::fag::GqaBandEdgePairSourceRound(phase, plan.k, groups, plan.g, localRound);
+            } else if (phase.kind == optiling::fag::GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR) {
+                // The host planner proves equal rounds and identical per-column core ownership.
+                const int64_t roundsPerGroup = phaseRounds / groups;
+                phaseGroupOffset = (localRound - 1) / roundsPerGroup;
+                sourceRound = (localRound - 1) % roundsPerGroup + 1;
+                localGroups = 1;
+            }
+            CalGQADenseIndex(plan.k, phase.m, phase.n, localGroups, j, sourceRound, plan.g, coordinate);
+        }
+        // Never translate an invalid slot into a valid flattened query-head index.
+        if (coordinate.batchId < 1 || coordinate.batchId > localGroups * plan.g || coordinate.s1Idx < 1 ||
+            coordinate.s1Idx > phase.m || coordinate.s2Idx < 1 || coordinate.s2Idx > phase.n ||
+            (isTriangle && coordinate.s1Idx < coordinate.s2Idx)) {
+            coordinate.batchId = -1;
+            return;
+        }
+        if (phase.kind == optiling::fag::GqaBandPhaseKind::UPPER_TRIANGLE) {
+            // Reverse both axes; transposing a GQA schedule would violate shared dK/dV uniqueness.
+            coordinate.s1Idx = phase.m + 1 - coordinate.s1Idx;
+            coordinate.s2Idx = phase.n + 1 - coordinate.s2Idx;
+        } else if (phase.kind == optiling::fag::GqaBandPhaseKind::DIAGONAL) {
+            coordinate.s1Idx += coordinate.s2Idx - 1;
+        }
+        bool applyOffset = true;
+        if (isEdgePair) {
+            applyOffset = coordinate.s1Idx > optiling::fag::GqaBandEdgePairSplit(phase) + coordinate.s2Idx;
+        }
+        if (applyOffset) {
+            coordinate.s1Idx += phase.rowOffset;
+            coordinate.s2Idx += phase.colOffset;
+        }
+        coordinate.batchId += (chunk * plan.groupsPerChunk + phaseGroupOffset) * plan.g;
+        return;
+    }
+}
+
+// Overlap disjoint rectangle and triangle columns inside each physical KV group.
+// Every hardware core still participates in the existing global round/flush protocol;
+// an unused core or an earlier-finishing group returns an empty coordinate only.
+__aicore__ inline void CalGQABandOverlapIndex(const __gm__ optiling::fag::GqaBandSchedule& plan, int64_t j, int64_t r,
+                                              CoordinateInfo& coordinate)
+{
+    coordinate.batchId = -1;
+    const int64_t h = plan.groupsPerChunk;
+    if (h <= 0 || h > plan.b || plan.fullRounds <= 0 || plan.phaseCount != 1 || plan.tailPhaseCount < 0 ||
+        plan.tailPhaseCount > 1 || r < 1 || r > plan.totalRounds || j < 1 || j > plan.k) {
+        return;
+    }
+    const int64_t fullChunks = plan.b / h;
+    const int64_t fullEnd = fullChunks * plan.fullRounds;
+    const bool tail = r > fullEnd;
+    const int64_t chunk = tail ? fullChunks : (r - 1) / plan.fullRounds;
+    const int64_t groups = tail ? plan.b % h : h;
+    const int64_t localRound = tail ? r - fullEnd : r - chunk * plan.fullRounds;
+    const auto& phase = tail && plan.tailPhaseCount == 1 ? plan.tailPhases[0] : plan.phases[0];
+    const int64_t phaseRounds = tail ? phase.tailRounds : phase.fullRounds;
+    const bool upper = phase.kind == optiling::fag::GqaBandPhaseKind::OVERLAP_UPPER;
+    const int64_t m = phase.m;
+    const int64_t n = phase.n;
+    if ((!upper && phase.kind != optiling::fag::GqaBandPhaseKind::OVERLAP_LOWER) || localRound > phaseRounds ||
+        !optiling::fag::CanUseGqaBandOverlap(plan.k, groups, plan.g, m, n)) {
+        return;
+    }
+    int64_t group = -1;
+    int64_t localCore = 0;
+    int64_t localK = 0;
+    if (!optiling::fag::GqaBandOverlapCoreIndex(plan.k, groups, m, n, j, group, localCore, localK)) {
+        return;
+    }
+    const int64_t triangleCores = m / 2;
+    const int64_t stripeColumns = localK - triangleCores;
+    const int64_t prefixRounds = m * plan.g;
+    if (localRound <= prefixRounds) {
+        if (localCore <= triangleCores) {
+            const int64_t side = m - 1;
+            if (localRound > optiling::fag::GqaBandOverlapTriangleRounds(m, plan.g)) {
+                return;
+            }
+            const int64_t sourceRound =
+                optiling::fag::GqaBandTriangleSourceRound(triangleCores, side, 1, plan.g, localRound);
+            CalGQACausalIndex(triangleCores, side, side, 1, localCore, sourceRound, plan.g, coordinate, true);
+            if (coordinate.batchId > 0) {
+                coordinate.s1Idx += 1;
+                coordinate.s2Idx += n;
+            }
+        } else {
+            const int64_t lane = localCore - triangleCores - 1;
+            // Shift the stripe's query head by one relative to the triangle.
+            // Their KV columns are disjoint; distinct heads separate dQ writes.
+            coordinate.batchId = localRound % plan.g + 1;
+            coordinate.s1Idx = ((localRound - 1) / plan.g + lane) % m + 1;
+            coordinate.s2Idx = lane + 1;
+        }
+    } else {
+        if (n <= stripeColumns) {
+            return;
+        }
+        // Dense's own round bound also handles groups that finish before the
+        // common chunk length. Do not invoke Dense for a zero-width suffix.
+        CalGQADenseIndex(localK, m, n - stripeColumns, 1, localCore, localRound - prefixRounds, plan.g, coordinate);
+        if (coordinate.batchId > 0) {
+            coordinate.s2Idx += stripeColumns;
+        }
+    }
+    if (coordinate.batchId < 1) {
+        return;
+    }
+    if (upper) {
+        coordinate.s1Idx = m + 1 - coordinate.s1Idx;
+        coordinate.s2Idx = n + m - coordinate.s2Idx;
+    }
+    coordinate.s1Idx += phase.rowOffset;
+    coordinate.s2Idx += phase.colOffset;
+    coordinate.batchId += (chunk * h + group) * plan.g;
+}
+
+// A new owner template contains one complete-domain phase and no generic phase dispatcher.
+template <bool Balanced, bool TranslatedTriangle = false, bool Folded = false>
+__aicore__ inline void CalGQABandOwnerIndex(const __gm__ optiling::fag::GqaBandSchedule& plan, int64_t j, int64_t r,
+                                            CoordinateInfo& coordinate)
+{
+    coordinate.batchId = -1;
+    const int64_t h = plan.groupsPerChunk;
+    if (h <= 0 || plan.fullRounds <= 0 || r < 1 || r > plan.totalRounds || j < 1 || j > plan.k) {
+        return;
+    }
+    const int64_t fullChunks = plan.b / h;
+    const int64_t fullEnd = fullChunks * plan.fullRounds;
+    const bool tail = r > fullEnd;
+    const int64_t chunk = tail ? fullChunks : (r - 1) / plan.fullRounds;
+    const int64_t groups = tail ? plan.b % h : h;
+    const int64_t localRound = tail ? r - fullEnd : r - chunk * plan.fullRounds;
+    const auto& phase = plan.phases[0];
+    if constexpr (Folded) {
+        // Decode a local geometry value; the serialized phase remains in GM.
+        optiling::fag::GqaBandPhase foldedPhase;
+        foldedPhase.kind = phase.kind;
+        foldedPhase.m = phase.m;
+        foldedPhase.n = phase.n;
+        foldedPhase.rowOffset = phase.rowOffset;
+        foldedPhase.colOffset = phase.colOffset;
+        const auto domain = optiling::fag::DecodeGqaBandFoldedDomain(foldedPhase);
+        optiling::fag::GqaBandFoldedColumnOwnerIndex(plan.k, groups, plan.g, domain.m, domain.n, domain.p, domain.q, j,
+                                                     localRound, coordinate.batchId, coordinate.s1Idx,
+                                                     coordinate.s2Idx);
+        if (coordinate.batchId > 0) {
+            coordinate.batchId += chunk * h * plan.g;
+            coordinate.s1Idx += domain.rowOrigin;
+            coordinate.s2Idx += domain.colOrigin;
+        }
+        return;
+    } else if constexpr (TranslatedTriangle) {
+        optiling::fag::GqaBandColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.m, 1, j, localRound,
+                                               coordinate.batchId, coordinate.s1Idx, coordinate.s2Idx);
+    } else if constexpr (Balanced) {
+        optiling::fag::GqaBandBalancedColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.rowOffset,
+                                                       phase.colOffset, j, localRound, coordinate.batchId,
+                                                       coordinate.s1Idx, coordinate.s2Idx);
+    } else {
+        optiling::fag::GqaBandColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.rowOffset,
+                                               phase.colOffset, j, localRound, coordinate.batchId, coordinate.s1Idx,
+                                               coordinate.s2Idx);
+    }
+    if (coordinate.batchId > 0) {
+        coordinate.batchId += chunk * h * plan.g;
+        if constexpr (TranslatedTriangle) {
+            coordinate.s1Idx += phase.rowOffset;
+            coordinate.s2Idx += phase.colOffset;
+        }
+    }
 }
 
 __aicore__ inline void GenGQABandInfo(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t b, int64_t g,

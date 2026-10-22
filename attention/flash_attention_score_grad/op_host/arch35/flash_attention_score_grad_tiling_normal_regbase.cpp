@@ -34,7 +34,7 @@ struct DeterBandScheduleResult {
 };
 
 struct BlockScheduleResult {
-    bool isSplitByBlockIdx = false;
+    bool isSwizzle = false;
     DeterBandScheduleResult deterBandSchedule;
 };
 
@@ -309,27 +309,30 @@ DeterBandScheduleResult SelectDeterBandSchedule(int64_t k, int64_t m, int64_t n,
         }
     }
 
-    // Embed a near-lower BAND into a square causal triangle.  The kernel maps x back by q - 1;
-    // IsValidForDeter removes the padding and the part truncated by p.  Upper embedding is not used
-    // because transposing Mode03 would break the fixed-core-per-original-column requirement.
+    // Embed BAND into the smaller enclosing causal triangle. Upper embedding rotates both axes
+    // instead of transposing them, preserving fixed-core ownership of each original KV column.
+    // IsValidForDeter removes the padding and the opposite window boundary in either orientation.
     const int64_t lowerCausalSize = m + q - 1;
     const int64_t upperCausalSize = n + p - 1;
     const int64_t lowerWaste = lowerCausalSize * (lowerCausalSize + 1) / NUM_TWO - bandBlocks;
     const int64_t upperWaste = upperCausalSize * (upperCausalSize + 1) / NUM_TWO - bandBlocks;
-    bool useLowerCausal =
-        bandBlocks > 0 && lowerWaste >= 0 && lowerWaste <= upperWaste && lowerWaste <= (bandBlocks - 1) / 10;
-    if (useLowerCausal) {
+    const bool useUpperCausal = upperWaste < lowerWaste;
+    const int64_t causalSize = useUpperCausal ? upperCausalSize : lowerCausalSize;
+    const int64_t causalWaste = useUpperCausal ? upperWaste : lowerWaste;
+    constexpr int64_t causalPaddingBudgetDivisor = 10;
+    const bool useCausal =
+        bandBlocks > 0 && causalWaste >= 0 && causalWaste <= (bandBlocks - 1) / causalPaddingBudgetDivisor;
+    if (useCausal) {
         const int64_t causalPairCount = b / NUM_TWO;
-        const int64_t causalK = std::min(k, lowerCausalSize * causalPairCount);
+        const int64_t causalK = std::min(k, causalSize * causalPairCount);
         // CalCausalSwizzleIndex uses the dense swizzle internally, so do not select it when that
         // helper would reduce the active-core count below k.
-        if (causalPairCount > 0 && causalK == k && causalK <= lowerCausalSize) {
-            const int64_t pairRound =
-                PositiveCeilDiv((lowerCausalSize + 1) * causalPairCount, causalK) * lowerCausalSize;
-            const int64_t tailRound = (b & 1) == 0 ? 0 : CalcCausalSingleBatchRound(k, lowerCausalSize);
+        if (causalPairCount > 0 && causalK == k && causalK <= causalSize) {
+            const int64_t pairRound = PositiveCeilDiv((causalSize + 1) * causalPairCount, causalK) * causalSize;
+            const int64_t tailRound = (b & 1) == 0 ? 0 : CalcCausalSingleBatchRound(k, causalSize);
             const int64_t causalRound = pairRound + tailRound;
             if (causalRound < result.maxRound) {
-                result.mode = DeterBandScheduleMode::CAUSAL;
+                result.mode = useUpperCausal ? DeterBandScheduleMode::CAUSAL_UPPER : DeterBandScheduleMode::CAUSAL;
                 result.maxRound = causalRound;
             }
         }
@@ -353,34 +356,46 @@ DeterBandScheduleResult SelectDeterBandSchedule(int64_t k, int64_t m, int64_t n,
 BlockScheduleResult SelectBlockSchedule(const FuzzyBaseInfoParamsRegbase& params)
 {
     BlockScheduleResult result;
-    const bool canSplitByBlockIdx = params.enableSwizzle && params.layoutType != INPUT_FORMAT_TND &&
-                                    params.splitAxis == SplitAxisEnum::BN2GS1S2 &&
-                                    params.s1Inner * params.s1CvRatio == params.s2Inner * params.s2CvRatio &&
-                                    params.sparseType != static_cast<uint8_t>(SparseType::UNSUPPORTED);
-    result.isSplitByBlockIdx = canSplitByBlockIdx;
+    const bool canSwizzle = params.enableSwizzle && params.layoutType != INPUT_FORMAT_TND &&
+                            params.splitAxis == SplitAxisEnum::BN2GS1S2 &&
+                            params.s1Inner * params.s1CvRatio == params.s2Inner * params.s2CvRatio &&
+                            params.sparseType != static_cast<uint8_t>(SparseType::UNSUPPORTED);
+    result.isSwizzle = canSwizzle;
     if (!params.isDeterministic) {
+        return result;
+    }
+
+    if (params.g > 1 && params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND)) {
+        const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+        // The common swizzle gate controls every GQA BAND candidate. Candidate
+        // admission remains a later decision and can retain the original mapping.
+        result.isSwizzle = canSwizzle && params.aicNum > 0 && params.aicNum <= MAX_CORE_NUM &&
+                           params.coreNum == params.aicNum * NUM_TWO && params.b > params.tailZeroCount &&
+                           params.n2 > 0 && params.s1Outer > 0 && params.s2Outer > 0 &&
+                           params.s1Inner * params.s1CvRatio == cubeBase &&
+                           params.s2Inner * params.s2CvRatio == cubeBase;
         return result;
     }
 
     const bool causalCond = params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL);
     const bool rightDownBandCond = params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND) &&
                                    params.sparseMode == static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL);
-    result.isSplitByBlockIdx = canSplitByBlockIdx && (((params.b * params.n2) & 1) == 0) && params.g == 1 &&
-                               params.s1 >= params.aicNum * static_cast<uint32_t>(ConstAxisTemplateNum::NUM128) &&
-                               (params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_DENSE) ||
-                                causalCond || rightDownBandCond);
+    result.isSwizzle = canSwizzle && (((params.b * params.n2) & 1) == 0) && params.g == 1 &&
+                       params.s1 >= params.aicNum * static_cast<uint32_t>(ConstAxisTemplateNum::NUM128) &&
+                       (params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_DENSE) || causalCond ||
+                        rightDownBandCond);
 
     // Preserve the legacy RIGHT_DOWN_CAUSAL swizzle whenever its original entry conditions are met.
     // With schedule mode DISABLED, the kernel keeps using CalCausalSwizzleIndex and its matching
     // max-round formula. Re-selecting this path as a hybrid DENSE schedule can increase the rounds.
-    if (rightDownBandCond && result.isSplitByBlockIdx) {
+    if (rightDownBandCond && result.isSwizzle) {
         return result;
     }
 
     const int64_t actualBatch = (params.b - params.tailZeroCount) * params.n2;
     // DETER_BAND is the scheduling contract here. It covers BAND, compatible NO_MASK, and
     // unequal RIGHT_DOWN_CAUSAL after their tokens have been normalized to the same band geometry.
-    const bool hybridBandCond = canSplitByBlockIdx &&
+    const bool hybridBandCond = canSwizzle &&
                                 params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND) &&
                                 params.g == 1 && params.coreNum == params.aicNum * NUM_TWO && actualBatch > 0;
     if (!hybridBandCond) {
@@ -398,7 +413,7 @@ BlockScheduleResult SelectBlockSchedule(const FuzzyBaseInfoParamsRegbase& params
         SelectDeterBandSchedule(static_cast<int64_t>(params.aicNum), scheduleParams.m, scheduleParams.n,
                                 scheduleParams.p, scheduleParams.q, actualBatch, params.deterMaxRound);
     if (result.deterBandSchedule.mode != DeterBandScheduleMode::DISABLED) {
-        result.isSplitByBlockIdx = true;
+        result.isSwizzle = true;
     }
     return result;
 }
@@ -829,6 +844,7 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::GetPlatformInfo()
 
     OP_CHECK_IF(fBaseParams.ubSize <= 0, OP_LOGE(context_->GetNodeName(), "ubSize is invalid."),
                 return ge::GRAPH_FAILED);
+
     return ge::GRAPH_SUCCESS;
 }
 
@@ -889,18 +905,18 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::DoOpTiling()
         (!fBaseParams.isDeterministic && fBaseParams.splitAxis == SplitAxisEnum::BN2S2 &&
          (isLongSeqTndSwizzle || isShortSeqTndSwizzle) &&
          (fBaseParams.sparseType != static_cast<uint8_t>(SparseType::UNSUPPORTED)));
-    tndBaseInfo.isTndSwizzle = fBaseParams.enableSwizzle && fBaseParams.layoutType == INPUT_FORMAT_TND &&
-                               templateSupportCond && fBaseParams.b < TND_SWIZZLE_PREFIX_NUM &&
-                               !tndBaseInfo.isSeqExistZero && fBaseParams.tailZeroCount == 0;
-    if (fBaseParams.isDeterministic && fBaseParams.splitAxis == SplitAxisEnum::BN2S2 && tndBaseInfo.isTndSwizzle) {
+    fBaseParams.isSwizzle = fBaseParams.enableSwizzle && fBaseParams.layoutType == INPUT_FORMAT_TND &&
+                            templateSupportCond && fBaseParams.b < TND_SWIZZLE_PREFIX_NUM &&
+                            !tndBaseInfo.isSeqExistZero && fBaseParams.tailZeroCount == 0;
+    if (fBaseParams.isDeterministic && fBaseParams.splitAxis == SplitAxisEnum::BN2S2 && fBaseParams.isSwizzle) {
         ConfigureTndDeterBn2S2Swizzle(fBaseParams, tndBaseInfo);
     }
     OP_LOGI(context_,
             "isExceedL2Cache=[%d], sparseType=[%d], enableSwizzle=[%d], "
-            "deterTndSwizzleSupported=[%d], shortSeqTndSwizzle=[%d], isTndSwizzle=[%d], isNzOut=[%d].",
+            "deterTndSwizzleSupported=[%d], shortSeqTndSwizzle=[%d], isSwizzle=[%d], isNzOut=[%d].",
             static_cast<int>(isExceedL2Cache), static_cast<int>(fBaseParams.sparseType),
             static_cast<int>(fBaseParams.enableSwizzle), static_cast<int>(deterTndSwizzleSupported),
-            static_cast<int>(isShortSeqTndSwizzle), tndBaseInfo.isTndSwizzle, fBaseParams.isNzOut);
+            static_cast<int>(isShortSeqTndSwizzle), fBaseParams.isSwizzle, fBaseParams.isNzOut);
 
     ret = InitTilingData();
     if (ret != ge::GRAPH_SUCCESS) {
@@ -915,9 +931,29 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::DoOpTiling()
 
 void FlashAttentionScoreGradTilingNormalRegbase::DetermineBlockSchedule()
 {
+    const bool isGqaBand = fBaseParams.isDeterministic && fBaseParams.layoutType != INPUT_FORMAT_TND &&
+                           fBaseParams.g > 1 &&
+                           fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND);
+    if (isGqaBand) {
+        // Restore the legacy plan and round bound before applying the master gate,
+        // including when this host object previously selected an optimized plan.
+        // This retains the existing split-mode and effective-batch normalization.
+        CalcleDeterParam();
+    }
     const BlockScheduleResult result = SelectBlockSchedule(fBaseParams);
-    fBaseParams.isSplitByBlockIdx = result.isSplitByBlockIdx;
+    if (fBaseParams.layoutType != INPUT_FORMAT_TND) {
+        fBaseParams.isSwizzle = result.isSwizzle;
+    }
     fBaseParams.deterBandScheduleMode = result.deterBandSchedule.mode;
+    if (isGqaBand && fBaseParams.isSwizzle) {
+        const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+        const bool originalSquareBase = fBaseParams.s1Inner * fBaseParams.s1CvRatio == cubeBase &&
+                                        fBaseParams.s2Inner * fBaseParams.s2CvRatio == cubeBase;
+        const auto originalBatch = fBaseParams.b;
+        fBaseParams.b -= fBaseParams.tailZeroCount;
+        SelectGqaBandSchedule(fBaseParams, originalSquareBase);
+        fBaseParams.b = originalBatch;
+    }
     if (result.deterBandSchedule.mode != DeterBandScheduleMode::DISABLED) {
         fBaseParams.deterMaxRound = result.deterBandSchedule.maxRound;
         const int64_t actualBatch = (fBaseParams.b - fBaseParams.tailZeroCount) * fBaseParams.n2;
@@ -928,8 +964,11 @@ void FlashAttentionScoreGradTilingNormalRegbase::DetermineBlockSchedule()
                 fBaseParams.aicNum, actualBatch, result.deterBandSchedule.m, result.deterBandSchedule.n,
                 result.deterBandSchedule.p, result.deterBandSchedule.q);
     }
-    OP_LOGI(context_, "Determine block schedule, isSplitByBlockIdx=[%d], deterBandScheduleMode=[%u]",
-            static_cast<int>(fBaseParams.isSplitByBlockIdx), static_cast<uint32_t>(fBaseParams.deterBandScheduleMode));
+    OP_LOGI(context_,
+            "Determine block schedule, isSwizzle=[%d], deterBandScheduleMode=[%u], "
+            "deterGqaBandScheduleMode=[%u]",
+            static_cast<int>(fBaseParams.isSwizzle), static_cast<uint32_t>(fBaseParams.deterBandScheduleMode),
+            static_cast<uint32_t>(fBaseParams.deterGqaBandScheduleMode));
 }
 
 void FlashAttentionScoreGradTilingNormalRegbase::DoSplit()
@@ -1338,6 +1377,11 @@ uint8_t FlashAttentionScoreGradTilingNormalRegbase::GetSparseType()
 
 void FlashAttentionScoreGradTilingNormalRegbase::CalcleDeterParam()
 {
+    fBaseParams.deterGqaCausalScheduleMode = DeterGqaCausalScheduleMode::ORIGINAL;
+    fBaseParams.deterGqaCausalRoundsPerBatch = 0;
+    fBaseParams.deterGqaBandScheduleMode = DeterGqaBandScheduleMode::ORIGINAL;
+    fBaseParams.deterGqaBandGroups = 0;
+    fBaseParams.deterGqaBandSchedule = GqaBandSchedule{};
     if (!fBaseParams.isDeterministic ||
         fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_OLD)) {
         return;
@@ -1374,9 +1418,19 @@ void FlashAttentionScoreGradTilingNormalRegbase::CalcleDeterParam()
     }
     if (fBaseParams.layoutType != INPUT_FORMAT_TND &&
         fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL)) {
-        CalcleCausalDeterParam(fBaseParams);
+        // Use the original basic-block shape, before the temporary split-mode normalization above.
+        const int64_t causalCubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+        const bool enableBatchMajor = cubebaseM == causalCubeBase && cubebaseN == causalCubeBase;
+        CalcleCausalDeterParam(fBaseParams, enableBatchMajor);
+        if (fBaseParams.g > 1) {
+            OP_LOGI(context_,
+                    "Select deterministic GQA CAUSAL schedule, mode=[%u], roundsPerBatch=[%ld], maxRound=[%ld]",
+                    static_cast<uint32_t>(fBaseParams.deterGqaCausalScheduleMode),
+                    fBaseParams.deterGqaCausalRoundsPerBatch, fBaseParams.deterMaxRound);
+        }
     } else if (fBaseParams.layoutType != INPUT_FORMAT_TND &&
                fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND)) {
+        // GQA BAND optimization is selected only after the swizzle gate is known.
         CalcleBandDeterParam(fBaseParams);
     } else if (fBaseParams.layoutType != INPUT_FORMAT_TND &&
                fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_DENSE) &&
@@ -1923,24 +1977,46 @@ uint64_t FlashAttentionScoreGradTilingNormalRegbase::GetTilingKey() const
         context_,
         "splitAxis[%d], inputDtype[%d], isTnd[%d], dropValue[%d], pseValue[%d], attenMaskCfg[%d], s1TemplateType[%d], "
         "s2TemplateType[%d], dTemplateType[%u], isDeterministic[%d], nEqual[%d], isBn2MultiBlk[%d], dNoEqual[%d], "
-        "hasRope[%d], outDtype[%d], isNzOut[%d], isTndSwizzle[%d], isRegbasePlatformValue[%d]",
+        "hasRope[%d], outDtype[%d], isNzOut[%d], isSwizzle[%d], isRegbasePlatformValue[%d]",
         static_cast<int>(splitAxis), static_cast<int>(fBaseParams.inputDtype), isTnd, static_cast<int>(dropValue),
         static_cast<int>(pseValue), static_cast<int>(attenMaskCfg), static_cast<int>(fBaseParams.s1TemplateType),
         static_cast<int>(fBaseParams.s2TemplateType), static_cast<uint32_t>(fBaseParams.dTemplateType),
         static_cast<int>(fBaseParams.deterSparseType), static_cast<int>(isDeterNEqual),
         static_cast<int>(fBaseParams.isBn2MultiBlk), dNoEqual, static_cast<int>(fBaseParams.hasRope),
         static_cast<int>(fBaseParams.outDtype), static_cast<int>(fBaseParams.isNzOut),
-        static_cast<uint8_t>(tndBaseInfo.isTndSwizzle), static_cast<int>(isRegbasePlatformValue));
+        static_cast<uint8_t>(fBaseParams.isSwizzle), static_cast<int>(isRegbasePlatformValue));
+
+    uint8_t deterTemplateType = static_cast<uint8_t>(fBaseParams.deterSparseType);
+    const auto& schedule = fBaseParams.deterGqaBandSchedule;
+    if (fBaseParams.isSwizzle && deterTemplateType == static_cast<uint8_t>(DeterSparseType::DETER_BAND) &&
+        fBaseParams.deterGqaBandScheduleMode == DeterGqaBandScheduleMode::PIECEWISE && schedule.phaseCount == 1 &&
+        schedule.tailPhaseCount == 0) {
+        if (schedule.phases[0].kind == GqaBandPhaseKind::OVERLAP_LOWER ||
+            schedule.phases[0].kind == GqaBandPhaseKind::OVERLAP_UPPER) {
+            deterTemplateType = GQA_BAND_OVERLAP_TEMPLATE;
+        } else if (schedule.phases[0].kind == GqaBandPhaseKind::BAND_BALANCED_COLUMN_OWNER) {
+            deterTemplateType = GQA_BAND_BALANCED_OWNER_TEMPLATE;
+        } else if (schedule.phases[0].kind == GqaBandPhaseKind::BAND_COLUMN_OWNER) {
+            deterTemplateType = GQA_BAND_COLUMN_OWNER_TEMPLATE;
+        } else if (schedule.phases[0].kind == GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER ||
+                   schedule.phases[0].kind == GqaBandPhaseKind::FOLDED_LOWER_COLUMN_OWNER ||
+                   schedule.phases[0].kind == GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER) {
+            deterTemplateType = GQA_BAND_FOLDED_OWNER_TEMPLATE;
+        } else if (schedule.phases[0].kind == GqaBandPhaseKind::LOWER_TRIANGLE_COLUMN_OWNER &&
+                   schedule.phases[0].m == schedule.phases[0].n) {
+            deterTemplateType = GQA_BAND_TRANSLATED_OWNER_TEMPLATE;
+        }
+    }
 
     uint64_t tilingKey = GET_TPL_TILING_KEY(
         0, static_cast<uint8_t>(splitAxis), static_cast<uint8_t>(fBaseParams.inputDtype), static_cast<uint8_t>(isTnd),
         static_cast<uint8_t>(dropValue), static_cast<uint8_t>(pseValue), static_cast<uint8_t>(attenMaskCfg),
         static_cast<uint16_t>(fBaseParams.s1TemplateType), static_cast<uint16_t>(fBaseParams.s2TemplateType),
-        static_cast<uint16_t>(fBaseParams.dTemplateType), static_cast<uint8_t>(fBaseParams.deterSparseType),
-        static_cast<uint8_t>(isDeterNEqual), static_cast<uint8_t>(fBaseParams.isBn2MultiBlk),
-        static_cast<uint8_t>(dNoEqual), static_cast<uint8_t>(fBaseParams.hasRope),
-        static_cast<uint8_t>(fBaseParams.outDtype), static_cast<uint8_t>(fBaseParams.isNzOut),
-        static_cast<uint8_t>(tndBaseInfo.isTndSwizzle), static_cast<uint8_t>(isRegbasePlatformValue));
+        static_cast<uint16_t>(fBaseParams.dTemplateType), deterTemplateType, static_cast<uint8_t>(isDeterNEqual),
+        static_cast<uint8_t>(fBaseParams.isBn2MultiBlk), static_cast<uint8_t>(dNoEqual),
+        static_cast<uint8_t>(fBaseParams.hasRope), static_cast<uint8_t>(fBaseParams.outDtype),
+        static_cast<uint8_t>(fBaseParams.isNzOut), static_cast<uint8_t>(fBaseParams.isSwizzle),
+        static_cast<uint8_t>(isRegbasePlatformValue));
 
     OP_LOGI(context_, "FAGTiling S1s2Bn2gs1s2 DoTiling success, tiling is %lu.", tilingKey);
     return tilingKey;
@@ -2226,14 +2302,16 @@ void FlashAttentionScoreGradTilingNormalRegbase::FillBlockInfoLoadBalance(
 
 ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::InitTilingData()
 {
+    deterGqaBandSchedule_ = nullptr;
     bool isTnd = (fBaseParams.layoutType == INPUT_FORMAT_TND);
-    if (IsNewDeter(fBaseParams) && tndBaseInfo.isTndSwizzle) {
+    if (IsNewDeter(fBaseParams) && isTnd && fBaseParams.isSwizzle) {
         FagTilingWithTemplateTTTT* tilingData = this->context_->GetTilingData<FagTilingWithTemplateTTTT>();
         if (tilingData == nullptr) {
             OP_LOGE("InitTilingData", "InitTilingData failed.");
             return ge::GRAPH_FAILED;
         }
         s1s2BNGS1S2BaseParams_ = &tilingData->s1s2BNGS1S2BaseParams;
+        tilingData->deterGqaBandSchedule = {};
         s1s2BNGS1S2SplitCoreParams_ = &tilingData->s1s2BNGS1S2SplitCoreParams;
         s1s2BNGS1S2BlockNumList_ = &tilingData->s1s2BNGS1S2BlockNumList;
         preTilingData_ = &tilingData->preTilingData;
@@ -2248,19 +2326,21 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::InitTilingData()
             return ge::GRAPH_FAILED;
         }
         s1s2BNGS1S2BaseParams_ = &tilingData->s1s2BNGS1S2BaseParams;
+        tilingData->deterGqaBandSchedule = {};
         s1s2BNGS1S2SplitCoreParams_ = &tilingData->s1s2BNGS1S2SplitCoreParams;
         s1s2BNGS1S2BlockNumList_ = &tilingData->s1s2BNGS1S2BlockNumList;
         preTilingData_ = &tilingData->preTilingData;
         postTilingData_ = &tilingData->postTilingData;
         deterParam = &tilingData->deterParam;
         baseDeterParam_ = &tilingData->baseDeterParam;
-    } else if (tndBaseInfo.isTndSwizzle) {
+    } else if (isTnd && fBaseParams.isSwizzle) {
         FagTilingWithTemplateFFTT* tilingData = this->context_->GetTilingData<FagTilingWithTemplateFFTT>();
         if (tilingData == nullptr) {
             OP_LOGE("InitTilingData", "InitTilingData failed.");
             return ge::GRAPH_FAILED;
         }
         s1s2BNGS1S2BaseParams_ = &tilingData->s1s2BNGS1S2BaseParams;
+        tilingData->deterGqaBandSchedule = {};
         s1s2BNGS1S2SplitCoreParams_ = &tilingData->s1s2BNGS1S2SplitCoreParams;
         s1s2BNGS1S2BlockNumList_ = &tilingData->s1s2BNGS1S2BlockNumList;
         preTilingData_ = &tilingData->preTilingData;
@@ -2292,6 +2372,7 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::InitTilingData()
             }
             BASE_TILING_DATA_COMMON_ASSIGN(tilingData);
             baseDeterParam_ = &tilingData->baseDeterParam;
+            deterGqaBandSchedule_ = &tilingData->deterGqaBandSchedule;
         } else {
             FagTilingWithTemplateFFFF* tilingData = this->context_->GetTilingData<FagTilingWithTemplateFFFF>();
             if (tilingData == nullptr) {
@@ -2311,6 +2392,9 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::InitTilingData()
 
 ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::SaveToTilingData()
 {
+    if (deterGqaBandSchedule_ != nullptr) {
+        *deterGqaBandSchedule_ = fBaseParams.deterGqaBandSchedule;
+    }
     s1s2BNGS1S2BaseParams_->set_coreNum(fBaseParams.coreNum);
     // set tilingdata baseinfo
     s1s2BNGS1S2BaseParams_->set_b(fBaseParams.b - fBaseParams.tailZeroCount);
@@ -2345,11 +2429,16 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::SaveToTilingData()
     s1s2BNGS1S2BaseParams_->set_s1SinkOuter(fBaseParams.s1SinkOuter);
     s1s2BNGS1S2BaseParams_->set_s2SinkOuter(fBaseParams.s2SinkOuter);
 
-    s1s2BNGS1S2BaseParams_->set_isSplitByBlockIdx(static_cast<uint8_t>(fBaseParams.isSplitByBlockIdx));
+    // Keep the old ABI byte reserved; bit 53 of tilingKey now selects the compiled schedule.
+    s1s2BNGS1S2BaseParams_->set_isSplitByBlockIdx(0);
     s1s2BNGS1S2BaseParams_->set_deterBandScheduleMode(static_cast<uint8_t>(fBaseParams.deterBandScheduleMode));
+    s1s2BNGS1S2BaseParams_->set_deterGqaCausalScheduleMode(
+        static_cast<uint8_t>(fBaseParams.deterGqaCausalScheduleMode));
+    s1s2BNGS1S2BaseParams_->set_deterGqaBandScheduleMode(static_cast<uint8_t>(fBaseParams.deterGqaBandScheduleMode));
+    s1s2BNGS1S2BaseParams_->set_deterGqaBandGroups(fBaseParams.deterGqaBandGroups);
     s1s2BNGS1S2BaseParams_->set_reservedPad();
     s1s2BNGS1S2BaseParams_->set_totalPerBatchNum(0);
-    if (fBaseParams.isSplitByBlockIdx) {
+    if (fBaseParams.layoutType != INPUT_FORMAT_TND && fBaseParams.isSwizzle) {
         s1s2BNGS1S2BaseParams_->set_totalPerBatchNum(GetTotalPerBatchNum(fBaseParams, fBaseParams.sparseType));
     }
     s1s2BNGS1S2BaseParams_->set_sparseType(fBaseParams.sparseType);
@@ -2370,8 +2459,9 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::SaveToTilingData()
     s1s2BNGS1S2SplitCoreParams_->set_maxValidBBLen(fBaseParams.maxValidBBLen);
     if (fBaseParams.isDeterministic) {
         baseDeterParam_->set_noNeedDeter(fBaseParams.noNeedDeter);
-        baseDeterParam_->set_reserved1(0);
         baseDeterParam_->set_deterMaxRound(fBaseParams.deterMaxRound);
+        baseDeterParam_->set_deterGqaCausalRoundsPerBatch(
+            static_cast<uint32_t>(fBaseParams.deterGqaCausalRoundsPerBatch));
         if ((fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND) ||
              fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_DENSE)) &&
             fBaseParams.layoutType == INPUT_FORMAT_TND) {
@@ -2393,7 +2483,7 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::SaveToTilingData()
         deterParam->set_deterPrefix1(fBaseParams.deterPrefix1);
         deterParam->set_deterPrefix2(fBaseParams.deterPrefix2);
     }
-    if (tndBaseInfo.isTndSwizzle && tndSwizzleParam_ != nullptr) {
+    if (fBaseParams.layoutType == INPUT_FORMAT_TND && fBaseParams.isSwizzle && tndSwizzleParam_ != nullptr) {
         tndSwizzleParam_->set_tndS2BlockPrefixSum(tndBaseInfo.tndS2BlockPrefixSum);
         tndSwizzleParam_->set_tndSwizzleS1S2PrefixSum(tndBaseInfo.tndSwizzleS1S2PrefixSum);
         tndSwizzleParam_->set_tndSwizzleS1S2AlignPrefixSum(tndBaseInfo.tndSwizzleS1S2AlignPrefixSum);

@@ -294,7 +294,7 @@ __aicore__ constexpr bool GET_IS_NZ_OUT(const uint8_t SPLIT_AXIS, const uint32_t
     X(IS_D_NO_EQUAL, bool, false) \
     X(IS_ROPE, bool, false) \
     X(IS_NZ_OUT, bool, false) \
-    X(IS_TND_SWIZZLE, bool, false) \
+    X(IS_SWIZZLE, bool, false) \
     X(SPLIT_AXIS, uint8_t, 0) \
     X(s1TemplateType, S1TemplateType, S1TemplateType::Aligned128) \
     X(s2TemplateType, S2TemplateType, S2TemplateType::Aligned128) \
@@ -339,9 +339,8 @@ __aicore__ constexpr bool GET_IS_NZ_OUT(const uint8_t SPLIT_AXIS, const uint32_t
         NEED_DETER(DETER_SPARSE_TYPE), NEED_DETER_PREFIX(DETER_SPARSE_TYPE, IS_TND), IS_TND, false>* __restrict
 
 #define FagTilingType \
-    const __gm__ FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<NEED_DETER(DETER_SPARSE_TYPE), \
-                                                                        NEED_DETER_PREFIX(DETER_SPARSE_TYPE, IS_TND), \
-                                                                        IS_TND, IS_TND_SWIZZLE>* __restrict
+    const __gm__ FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase< \
+        NEED_DETER(DETER_SPARSE_TYPE), NEED_DETER_PREFIX(DETER_SPARSE_TYPE, IS_TND), IS_TND, IS_SWIZZLE>* __restrict
 
 struct LoopInfo {
     int64_t bIdx{0};

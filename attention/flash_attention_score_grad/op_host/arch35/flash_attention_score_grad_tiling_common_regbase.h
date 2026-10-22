@@ -143,6 +143,9 @@ constexpr int64_t GQA_DENSE_MAX_ROUND_GROWTH_PERCENT = 3;
 constexpr int64_t GQA_DENSE_MAX_INVALID_PERCENT = 4;
 constexpr int64_t GQA_DENSE_PERCENT_BASE = 100;
 
+constexpr int64_t GQA_CAUSAL_BATCH_MAJOR_MAX_ROUND_GROWTH_PERCENT = 0;
+constexpr int64_t GQA_CAUSAL_BATCH_MAJOR_PERCENT_BASE = 100;
+
 constexpr int64_t TND_DETER_SWIZZLE_MIN_SLOT_UTILIZATION_PERCENT = 90;
 constexpr int64_t TND_DETER_SWIZZLE_MAX_ROUND_GROWTH_PERCENT = 3;
 constexpr int64_t TND_DETER_SWIZZLE_PERCENT_BASE = 100;
@@ -355,7 +358,6 @@ struct TndBaseInfo {
     uint64_t tndSwizzleS1S2PrefixSum[TND_SWIZZLE_PREFIX_NUM] = {0};
     uint64_t tndSwizzleS1S2AlignPrefixSum[TND_SWIZZLE_PREFIX_NUM] = {0};
     uint64_t tndS2BlockPrefixSum[TND_SWIZZLE_PREFIX_NUM] = {0};
-    bool isTndSwizzle = false;
 
     // no swizzle
     uint64_t tndStartBIdx[CORE_LIST_NUM] = {0};
@@ -468,6 +470,11 @@ struct FuzzyBaseInfoParamsRegbase { // 频繁使用的基础参数
     bool coreDivide = false;
     uint8_t tndLineDeter = 0;
     int64_t deterMaxRound = 0;
+    DeterGqaCausalScheduleMode deterGqaCausalScheduleMode = DeterGqaCausalScheduleMode::ORIGINAL;
+    int64_t deterGqaCausalRoundsPerBatch = 0;
+    DeterGqaBandScheduleMode deterGqaBandScheduleMode = DeterGqaBandScheduleMode::ORIGINAL;
+    uint32_t deterGqaBandGroups = 0;
+    GqaBandSchedule deterGqaBandSchedule{};
     // 每个 batch 的前缀面积总和 prefix,
     // 小于128b传完整的前缀和，大于128b的，按步长传部分前缀和，在kernel内组装完整的前缀和
     int64_t deterPrefixThreshold = 128;
@@ -498,7 +505,7 @@ struct FuzzyBaseInfoParamsRegbase { // 频繁使用的基础参数
     int64_t qStartIdx;
     int64_t kvStartIdx;
     bool enableSwizzle = false;
-    bool isSplitByBlockIdx = false;
+    bool isSwizzle = false;
     DeterBandScheduleMode deterBandScheduleMode = DeterBandScheduleMode::DISABLED;
     uint32_t sinkOptional = 0;
     uint64_t sinkSize = 0;
@@ -600,7 +607,9 @@ bool IsNewDeter(const FuzzyBaseInfoParamsRegbase& fBaseParams);
 bool CheckPrefixNExist(FuzzyBaseInfoParamsRegbase& fBaseParams, const int64_t bIdx, const int64_t prefixN,
                        std::vector<std::vector<std::pair<int64_t, int64_t>>>& s1ValidIdx);
 void CalcleBandDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams);
-void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams);
+void SelectGqaBandSchedule(FuzzyBaseInfoParamsRegbase& params, bool originalSquareBase);
+int64_t CalcCausalDeterRound(int64_t k, int64_t m, int64_t n, int64_t b, int64_t g);
+void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams, bool enableBatchMajor = false);
 void SetSparsePrefixBlockInterval(const FuzzyBaseInfoParamsRegbase& fBaseParams, int64_t bIdx, int64_t nIdx,
                                   std::vector<std::vector<std::pair<int64_t, int64_t>>>& s1ValidIdx,
                                   int64_t (&blockStarts)[CORE_LIST_NUM], int64_t (&blockEnds)[CORE_LIST_NUM],

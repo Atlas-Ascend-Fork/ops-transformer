@@ -441,7 +441,7 @@ protected:
                                         std::vector<std::vector<float>>& acturalBlockInfo);
     ge::graphStatus GetSparseBlockInfoBn2();
 
-    FuzzyBaseInfoParamsDavid fBaseParams;
+    FuzzyBaseInfoParamsDavid fBaseParams{};
     platform_ascendc::SocVersion socVersion;
     NpuArch npuArch = NpuArch::DAV_RESV;
     TndBaseInfo tndBaseInfo;

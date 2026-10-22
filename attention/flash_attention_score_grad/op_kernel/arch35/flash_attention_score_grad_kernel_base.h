@@ -178,8 +178,8 @@ protected:
     typename std::conditional<IS_TND, int64_t, std::nullptr_t>::type curBatchTotalS1S2Size;
     typename std::conditional<IS_TND, int64_t, std::nullptr_t>::type curBatchTotalS2Size;
 
-    typename std::conditional<IS_TND_SWIZZLE, int64_t, std::nullptr_t>::type deltaCnt{};
-    typename std::conditional<IS_TND_SWIZZLE, int64_t, std::nullptr_t>::type bandLoopIdx{};
+    typename std::conditional<IS_TND && IS_SWIZZLE, int64_t, std::nullptr_t>::type deltaCnt{};
+    typename std::conditional<IS_TND && IS_SWIZZLE, int64_t, std::nullptr_t>::type bandLoopIdx{};
     bool enableDenseSwizzle = false;
     bool enableCasualSwizzle = false;
 };
@@ -303,7 +303,7 @@ __aicore__ inline void FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockTy
 template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
 __aicore__ inline void FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockType, VecBlockType>::SetOptionalInfo()
 {
-    if constexpr (!IS_DETER_NEW(DETER_SPARSE_TYPE) && IS_TND && !IS_TND_SWIZZLE) {
+    if constexpr (!IS_DETER_NEW(DETER_SPARSE_TYPE) && IS_TND && !IS_SWIZZLE) {
         curBatchIdx = tilingData->tndParam.tndStartBIdx[cBlockIdx];
         int64_t tndS1PrefixSum = (curBatchIdx == 0 ? 0 : ((__gm__ int64_t*)actualSeqQlenAddr)[curBatchIdx - 1]);
         int64_t tndS2PrefixSum = (curBatchIdx == 0 ? 0 : ((__gm__ int64_t*)actualSeqKvlenAddr)[curBatchIdx - 1]);
@@ -360,10 +360,7 @@ __aicore__ inline void FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockTy
 template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
 __aicore__ inline void FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockType, VecBlockType>::SetSwizzleConstInfo()
 {
-    if constexpr (IS_NORMAL_SWIZZLE) {
-        if (!tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx) {
-            return;
-        }
+    if constexpr (IS_NORMAL_SWIZZLE && IS_SWIZZLE) {
         // swizzle
         enableDenseSwizzle = (!IS_ATTEN_MASK || tilingData->s1s2BNGS1S2BaseParams.sparseType ==
                                                     static_cast<uint8_t>(SparseType::DENSE)) &&
@@ -779,7 +776,7 @@ template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
 __aicore__ inline void FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockType, VecBlockType>::SetRunInfo(
     FagRunInfo& runInfo, FagRunInfo& nextRunInfo, int64_t taskId, int64_t index, int64_t nextIndex)
 {
-    if constexpr (IS_TND_SWIZZLE) {
+    if constexpr (IS_TND && IS_SWIZZLE) {
         int64_t tndS1PrefixSum =
             (runInfo.commonRunInfo.boIdx == 0 ? 0 :
                                                 ((__gm__ int64_t*)actualSeqQlenAddr)[runInfo.commonRunInfo.boIdx - 1]);
@@ -1320,7 +1317,7 @@ template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
 __aicore__ inline int64_t FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockType, VecBlockType>::GetNextValidIdx(
     FagRunInfo& runInfo, int64_t taskId, int64_t blockInnerIdx, int64_t curLoopIdx)
 {
-    if constexpr (IS_TND_SWIZZLE) {
+    if constexpr (IS_TND && IS_SWIZZLE) {
         uint8_t sparseType = static_cast<uint8_t>(tilingData->s1s2BNGS1S2BaseParams.sparseType);
         if (sparseType == static_cast<uint8_t>(SparseType::DENSE)) {
             return GetNextValidIdxForTndSwizzleDense(runInfo, curLoopIdx);
@@ -1332,7 +1329,7 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelBase<ChildClass, CubeBloc
     } else {
         int64_t nextValidBlockInnerIdx = 0;
         if constexpr (IS_NORMAL_SWIZZLE) {
-            if (tilingData->s1s2BNGS1S2BaseParams.isSplitByBlockIdx) {
+            if constexpr (IS_SWIZZLE) {
                 nextValidBlockInnerIdx = GetNextValidIdxForSwizzle(runInfo, curLoopIdx);
                 return nextValidBlockInnerIdx;
             } else {
@@ -2165,7 +2162,7 @@ FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockType, VecBlockType>::GetN
     int64_t gOffsetDv = 0;
     int64_t s1OffsetDv = 0;
 
-    if constexpr (IS_TND_SWIZZLE) {
+    if constexpr (IS_TND && IS_SWIZZLE) {
         nextBoIdx = nextRunInfo.commonRunInfo.boIdx;
         nextN2oIdx = nextRunInfo.commonRunInfo.n2oIdx;
         nextGoIdx = nextRunInfo.commonRunInfo.goIdx;

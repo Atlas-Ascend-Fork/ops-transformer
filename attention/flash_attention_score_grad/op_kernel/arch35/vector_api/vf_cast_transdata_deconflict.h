@@ -15,6 +15,7 @@
 #define MY_CAST_TRANSDATA_DECONFLICT_INTERFACE_H
 
 #include "kernel_tensor.h"
+#include "../flash_attention_score_grad_common.h"
 
 namespace AscendC {
 #ifndef __CCE_KT_TEST__
@@ -311,10 +312,163 @@ __aicore__ inline void CastTransdataDeconflict(const LocalTensor<T1>& dstTensor,
         }
     }
 }
+
+/* **************************************************************************************************
+ * dropout + cast + ND_2_NZ                                                                         *
+ * ************************************************************************************************* */
+/*
+ * @brief Apply a one-bit dropout mask in FP32 registers, then cast and transform ND to NZ.
+ *        srcTensor is read-only. Only the first validM rows are masked; all srcM rows are transformed.
+ */
+template <typename T1, typename T>
+__simd_vf__ inline void CastDropoutTransdataDeconflictVFB16(const uint32_t fullExeSize, uint64_t srcLocalInt,
+                                                            uint64_t dstLocalInt, uint64_t maskLocalInt,
+                                                            uint32_t maskRowStride, uint32_t blockStride,
+                                                            uint32_t repeatStride, uint32_t srcM, uint32_t validM,
+                                                            float divValue)
+{
+    RegTensor<T> vregSrcEven;
+    RegTensor<T> vregSrcOdd;
+    RegTensor<T> vregSelectEven;
+    RegTensor<T> vregSelectOdd;
+    RegTensor<T> vregZero;
+    RegTensor<T1> vregCastEven;
+    RegTensor<T1> vregCastOdd;
+    RegTensor<T1> vregCastRes;
+    MaskReg pregFullExe = CreateMask<T1, MaskPattern::ALL>();
+    MaskReg pregAll = CreateMask<T, MaskPattern::ALL>();
+    MaskReg pregFalse = CreateMask<int8_t, MaskPattern::ALLF>();
+    MaskReg pregPacked;
+    MaskReg pregFirstHalf;
+    MaskReg pregSecondHalf;
+    MaskReg pregEven;
+    MaskReg pregOdd;
+    Duplicate(vregZero, 0);
+
+    // DIST_DINTLV_B32 deinterleaves FP32 lanes, so deinterleave the packed mask in the same way.
+    for (uint16_t m = 0; m < static_cast<uint16_t>(validM); ++m) {
+        LoadAlign<T, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_DINTLV_B32>(
+            vregSrcEven, vregSrcOdd, ((__ubuf__ T*&)srcLocalInt), fullExeSize);
+        LoadAlign<uint32_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::MaskDist::DIST_US>(
+            pregPacked, ((__ubuf__ uint32_t*&)maskLocalInt), maskRowStride);
+        MaskInterleave<half>(pregFirstHalf, pregSecondHalf, pregPacked, pregFalse);
+        MaskDeInterleave<T>(pregEven, pregOdd, pregFirstHalf, pregSecondHalf);
+        Select(vregSelectEven, vregSrcEven, vregZero, pregEven);
+        Select(vregSelectOdd, vregSrcOdd, vregZero, pregOdd);
+        Muls(vregSrcEven, vregSelectEven, divValue, pregAll);
+        Muls(vregSrcOdd, vregSelectOdd, divValue, pregAll);
+        Cast<T1, T, castTraitFp322Fp16Even>(vregCastEven, vregSrcEven, pregFullExe);
+        Cast<T1, T, castTraitFp322Fp16Odd>(vregCastOdd, vregSrcOdd, pregFullExe);
+        Or((RegTensor<uint16_t>&)vregCastRes, (RegTensor<uint16_t>&)vregCastEven, (RegTensor<uint16_t>&)vregCastOdd,
+           pregFullExe);
+        StoreAlign<T1, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T1*&)dstLocalInt), vregCastRes, blockStride, repeatStride, pregFullExe);
+    }
+
+    // Preserve the old tail-row behavior: transform the source value without applying dropout.
+    for (uint16_t m = static_cast<uint16_t>(validM); m < static_cast<uint16_t>(srcM); ++m) {
+        LoadAlign<T, Reg::PostLiteral::POST_MODE_UPDATE, Reg::LoadDist::DIST_DINTLV_B32>(
+            vregSrcEven, vregSrcOdd, ((__ubuf__ T*&)srcLocalInt), fullExeSize);
+        Cast<T1, T, castTraitFp322Fp16Even>(vregCastEven, vregSrcEven, pregFullExe);
+        Cast<T1, T, castTraitFp322Fp16Odd>(vregCastOdd, vregSrcOdd, pregFullExe);
+        Or((RegTensor<uint16_t>&)vregCastRes, (RegTensor<uint16_t>&)vregCastEven, (RegTensor<uint16_t>&)vregCastOdd,
+           pregFullExe);
+        StoreAlign<T1, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T1*&)dstLocalInt), vregCastRes, blockStride, repeatStride, pregFullExe);
+    }
+}
+
+template <typename T1, typename T>
+__simd_vf__ inline void CastDropoutTransdataDeconflictVFT(uint64_t srcLocalInt, uint64_t dstLocalInt,
+                                                          uint64_t dstLocalIntTail, uint64_t maskLocalInt,
+                                                          uint32_t maskRowStride, uint32_t blockStride,
+                                                          uint32_t repeatStride, uint32_t srcM, uint32_t validM,
+                                                          float divValue)
+{
+    constexpr uint32_t fp32VectorElements = VECTOR_REG_WIDTH / sizeof(float);
+    RegTensor<T> vregSrc;
+    RegTensor<T> vregSrcTail;
+    RegTensor<T> vregSelect;
+    RegTensor<T> vregSelectTail;
+    RegTensor<T> vregZero;
+    MaskReg pregAll = CreateMask<T, MaskPattern::ALL>();
+    MaskReg pregFalse = CreateMask<int8_t, MaskPattern::ALLF>();
+    MaskReg pregPacked;
+    MaskReg pregFirstHalf;
+    MaskReg pregSecondHalf;
+    Duplicate(vregZero, 0);
+
+    for (uint16_t m = 0; m < static_cast<uint16_t>(validM); ++m) {
+        LoadAlign<T1, Reg::PostLiteral::POST_MODE_UPDATE>(vregSrc, ((__ubuf__ T1*&)srcLocalInt), fp32VectorElements);
+        LoadAlign<T1, Reg::PostLiteral::POST_MODE_UPDATE>(vregSrcTail, ((__ubuf__ T1*&)srcLocalInt),
+                                                          fp32VectorElements);
+        LoadAlign<uint32_t, Reg::PostLiteral::POST_MODE_UPDATE, Reg::MaskDist::DIST_US>(
+            pregPacked, ((__ubuf__ uint32_t*&)maskLocalInt), maskRowStride);
+        MaskInterleave<half>(pregFirstHalf, pregSecondHalf, pregPacked, pregFalse);
+        Select(vregSelect, vregSrc, vregZero, pregFirstHalf);
+        Select(vregSelectTail, vregSrcTail, vregZero, pregSecondHalf);
+        Muls(vregSrc, vregSelect, divValue, pregAll);
+        Muls(vregSrcTail, vregSelectTail, divValue, pregAll);
+        StoreAlign<T, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T*&)dstLocalInt), vregSrc, blockStride, repeatStride, pregAll);
+        StoreAlign<T, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T*&)dstLocalIntTail), vregSrcTail, blockStride, repeatStride, pregAll);
+    }
+
+    for (uint16_t m = static_cast<uint16_t>(validM); m < static_cast<uint16_t>(srcM); ++m) {
+        LoadAlign<T1, Reg::PostLiteral::POST_MODE_UPDATE>(vregSrc, ((__ubuf__ T1*&)srcLocalInt), fp32VectorElements);
+        LoadAlign<T1, Reg::PostLiteral::POST_MODE_UPDATE>(vregSrcTail, ((__ubuf__ T1*&)srcLocalInt),
+                                                          fp32VectorElements);
+        StoreAlign<T, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T*&)dstLocalInt), vregSrc, blockStride, repeatStride, pregAll);
+        StoreAlign<T, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
+            ((__ubuf__ T*&)dstLocalIntTail), vregSrcTail, blockStride, repeatStride, pregAll);
+    }
+}
+
+template <typename T1, typename T, uint32_t srcN>
+__aicore__ inline void CastDropoutTransdataDeconflict(const LocalTensor<T1>& dstTensor, const LocalTensor<T>& srcTensor,
+                                                      const LocalTensor<uint8_t>& dropMaskTensor, uint32_t srcM,
+                                                      uint32_t validM, float divValue)
+{
+    // Caller provides a 128-column FP32 source and an FP16, BF16, or FP32 destination.
+    constexpr uint32_t fp32VectorElements = VECTOR_REG_WIDTH / sizeof(float);
+    // Each NZ column reserves one data block to avoid UB bank conflicts.
+    constexpr uint32_t nzPaddingBlocks = 1;
+    constexpr uint32_t nzRowStrideBlocks = 1;
+
+    constexpr uint32_t blockSize = ONE_BLK_SIZE;
+    constexpr uint32_t blockN = blockSize / sizeof(T1);
+    constexpr uint32_t fullExeSize = srcN;
+    // One dropout mask bit is stored for each source element.
+    constexpr uint32_t maskRowStride = srcN / commondef::NUM_EIGHT;
+    const uint32_t dropoutRows = validM < srcM ? validM : srcM;
+    uint64_t srcLocalInt = srcTensor.GetPhyAddr();
+    uint64_t dstLocalInt = dstTensor.GetPhyAddr();
+    uint64_t maskLocalInt = dropMaskTensor.GetPhyAddr();
+    uint32_t blockStride = (srcM * blockN) * sizeof(T1) / blockSize + nzPaddingBlocks;
+    constexpr uint32_t repeatStride = nzRowStrideBlocks;
+
+    if constexpr (IsSameType<T1, half>::value || IsSameType<T1, bfloat16_t>::value) {
+        CastDropoutTransdataDeconflictVFB16<T1, T>(fullExeSize, srcLocalInt, dstLocalInt, maskLocalInt, maskRowStride,
+                                                   blockStride, repeatStride, srcM, dropoutRows, divValue);
+    } else {
+        uint64_t dstLocalIntTail = dstTensor.GetPhyAddr() + (srcM + nzPaddingBlocks) * fp32VectorElements * sizeof(T1);
+        CastDropoutTransdataDeconflictVFT<T1, T>(srcLocalInt, dstLocalInt, dstLocalIntTail, maskLocalInt, maskRowStride,
+                                                 blockStride, repeatStride, srcM, dropoutRows, divValue);
+    }
+}
+
 #else
 template <typename T1, typename T, uint32_t srcN>
 __aicore__ inline void CastTransdataDeconflict(const LocalTensor<T1>& dstTensor, const LocalTensor<T>& srcTensor,
                                                const LocalTensor<uint8_t>& selrIndexesTensor, uint32_t srcM)
+{}
+
+template <typename T1, typename T, uint32_t srcN>
+__aicore__ inline void CastDropoutTransdataDeconflict(const LocalTensor<T1>& dstTensor, const LocalTensor<T>& srcTensor,
+                                                      const LocalTensor<uint8_t>& dropMaskTensor, uint32_t srcM,
+                                                      uint32_t validM, float divValue)
 {}
 #endif
 } // namespace AscendC

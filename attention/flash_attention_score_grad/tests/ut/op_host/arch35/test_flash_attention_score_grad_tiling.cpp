@@ -7,15 +7,25 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+#include <algorithm>
+#include <map>
+#include <set>
+#include <tuple>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <type_traits>
+#include <utility>
+#include <vector>
 #include <gtest/gtest.h>
 #include "tiling/platform/platform_ascendc.h"
 #include "../../../../common/include/op_host/tiling_base.h"
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
 #include "../../../../op_host/arch35/flash_attention_score_grad_tiling_common_regbase.h"
+#include "../../../../op_kernel/arch35/deter_gqa_band_common.h"
 
 using namespace std;
 
@@ -73,6 +83,2303 @@ protected:
         std::cout << "FlashAttentionScoreGradTiling TearDown" << std::endl;
     }
 };
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaCausalBatchMajorPreservesTilingLayout)
+{
+    using namespace optiling::fag;
+    // Both fields occupy former padding; unrelated serialized tiling fields must not move.
+    static_assert(sizeof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase) == 200,
+                  "Base tiling size must remain unchanged");
+    static_assert(offsetof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase, deterGqaCausalScheduleMode) == 193,
+                  "GQA mode must occupy the first former padding byte");
+    static_assert(sizeof(BaseDeterParamRegbase) == 32 + 2 * MAX_CORE_NUM * sizeof(uint64_t),
+                  "Deterministic tiling size must remain unchanged");
+    static_assert(offsetof(BaseDeterParamRegbase, deterGqaCausalRoundsPerBatch) == sizeof(uint32_t),
+                  "GQA rounds must occupy the former reserved uint32 field");
+    static_assert(offsetof(BaseDeterParamRegbase, deterMaxRound) == sizeof(uint64_t),
+                  "Maximum round offset must remain unchanged");
+    static_assert(offsetof(BaseDeterParamRegbase, dqIsNeedDeter) == 32,
+                  "Synchronization array offset must remain unchanged");
+
+    FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase baseParams{};
+    BaseDeterParamRegbase deterParams{};
+    EXPECT_EQ(baseParams.get_deterGqaCausalScheduleMode(), static_cast<uint8_t>(DeterGqaCausalScheduleMode::ORIGINAL));
+    EXPECT_EQ(deterParams.get_deterGqaCausalRoundsPerBatch(), 0);
+    baseParams.set_deterGqaCausalScheduleMode(static_cast<uint8_t>(DeterGqaCausalScheduleMode::BATCH_MAJOR));
+    deterParams.set_deterGqaCausalRoundsPerBatch(1040);
+    EXPECT_EQ(baseParams.get_deterGqaCausalScheduleMode(),
+              static_cast<uint8_t>(DeterGqaCausalScheduleMode::BATCH_MAJOR));
+    EXPECT_EQ(deterParams.get_deterGqaCausalRoundsPerBatch(), 1040);
+}
+
+// Complete-domain owner oracle adapter. Keep every serialized owner kind explicit;
+// an unrecognized tag must remain an invalid slot instead of silently using dense indexing.
+static void MapGqaBandOwnerScheduleForTest(const optiling::fag::GqaBandSchedule& plan, int64_t core, int64_t round,
+                                           int64_t& w, int64_t& x, int64_t& y)
+{
+    using namespace optiling::fag;
+    w = -1;
+    const int64_t h = plan.groupsPerChunk;
+    if (h <= 0 || plan.fullRounds <= 0 || plan.phaseCount != 1 || plan.tailPhaseCount != 0 || core < 1 ||
+        core > plan.k || round < 1 || round > plan.totalRounds) {
+        return;
+    }
+    const int64_t fullChunks = plan.b / h;
+    const int64_t fullEnd = fullChunks * plan.fullRounds;
+    const bool tail = round > fullEnd;
+    const int64_t chunk = tail ? fullChunks : (round - 1) / plan.fullRounds;
+    const int64_t groups = tail ? plan.b % h : h;
+    const int64_t local = tail ? round - fullEnd : round - chunk * plan.fullRounds;
+    const auto& phase = plan.phases[0];
+    switch (phase.kind) {
+        case GqaBandPhaseKind::BAND_COLUMN_OWNER:
+        case GqaBandPhaseKind::BAND_BALANCED_COLUMN_OWNER:
+            GqaBandColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.rowOffset, phase.colOffset, core,
+                                    local, w, x, y, phase.kind == GqaBandPhaseKind::BAND_BALANCED_COLUMN_OWNER);
+            break;
+        case GqaBandPhaseKind::LOWER_TRIANGLE_COLUMN_OWNER:
+            GqaBandColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.m, 1, core, local, w, x, y);
+            if (w > 0) {
+                x += phase.rowOffset;
+                y += phase.colOffset;
+            }
+            break;
+        case GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER:
+            GqaBandFoldedColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.rowOffset, phase.colOffset,
+                                          core, local, w, x, y);
+            break;
+        case GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER:
+            GqaBandFoldedColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, 1, phase.rowOffset, core, local, w,
+                                          x, y);
+            if (w > 0) {
+                y += phase.colOffset;
+            }
+            break;
+        case GqaBandPhaseKind::FOLDED_LOWER_COLUMN_OWNER:
+            GqaBandFoldedColumnOwnerIndex(plan.k, groups, plan.g, phase.m, phase.n, phase.colOffset, 1, core, local, w,
+                                          x, y);
+            if (w > 0) {
+                x += phase.rowOffset;
+            }
+            break;
+        default:
+            return;
+    }
+    if (w > 0) {
+        w += chunk * h * plan.g;
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandDiagonalColumnOwnerCoverageAndConflicts)
+{
+    using namespace optiling::fag;
+    constexpr int64_t k = 32;
+    for (int64_t groups : {1, 2, 3, 33}) {
+        for (int64_t size : {1, 7, 31, 32, 33}) {
+            for (int64_t g : {3, 7, 8}) {
+                GqaBandPlan plan{};
+                AppendGqaBandPhase(plan, GqaBandPhaseKind::DIAGONAL_COLUMN_OWNER, size, size, 0, 0);
+                SetGqaBandGroups(k, groups, g, groups, plan);
+                EXPECT_EQ(GqaBandKvRunUpperBound(plan), groups * size);
+                std::vector<int64_t> seen(groups * g * size, 0);
+                std::vector<int64_t> owners(groups * size, -1);
+                for (int64_t r = 1; r <= plan.totalRounds; ++r) {
+                    std::vector<bool> qSeen(groups * g * size, false);
+                    std::vector<bool> kvSeen(groups * size, false);
+                    for (int64_t j = 1; j <= k; ++j) {
+                        int64_t w = -1, x = 0, y = 0;
+                        GqaBandDiagonalColumnIndex(k, size, groups, g, j, r, w, x, y);
+                        if (w < 0) {
+                            continue;
+                        }
+                        ASSERT_GE(w, 1);
+                        ASSERT_LE(w, groups * g);
+                        ASSERT_EQ(x, y);
+                        ASSERT_GE(y, 1);
+                        ASSERT_LE(y, size);
+                        const int64_t q = (w - 1) * size + x - 1;
+                        const int64_t kv = (w - 1) / g * size + y - 1;
+                        EXPECT_FALSE(qSeen[q]);
+                        EXPECT_FALSE(kvSeen[kv]);
+                        qSeen[q] = kvSeen[kv] = true;
+                        ++seen[q];
+                        if (owners[kv] < 0) {
+                            owners[kv] = j;
+                        }
+                        EXPECT_EQ(owners[kv], j);
+                    }
+                }
+                for (int64_t visits : seen) {
+                    EXPECT_EQ(visits, 1);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandDiagonalColumnOwnerDrainAndIdleSlots)
+{
+    using namespace optiling::fag;
+    const int64_t cases[][6] = {
+        {32, 33, 1, 7, 0, 1}, {32, 33, 1, 7, 33, 1}, {32, 33, 1, 7, 1, 0}, {32, 33, 1, 7, 1, 15}, {32, 33, 1, 7, 2, 8},
+        {0, 33, 1, 7, 1, 1},  {32, 0, 1, 7, 1, 1},   {32, 33, 0, 7, 1, 1}, {32, 33, 1, 1, 1, 1},
+    };
+    for (const auto& c : cases) {
+        int64_t w = 99, x = 0, y = 0;
+        GqaBandDiagonalColumnIndex(c[0], c[1], c[2], c[3], c[4], c[5], w, x, y);
+        EXPECT_EQ(w, -1);
+    }
+}
+
+// Independent enumeration uses the band inequalities, rather than the
+// mapper's prefix formula. Include non-power-of-two heads/cores and tail columns.
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandColumnOwnerProperties)
+{
+    using namespace optiling::fag;
+    uint32_t seed = 1729;
+    const auto next = [&seed]() -> uint32_t {
+        seed = seed * 1664525U + 1013904223U;
+        return seed;
+    };
+    for (int trial = 0; trial < 2048; ++trial) {
+        const int64_t k = 1 + next() % 36;
+        const int64_t b = 1 + next() % k;
+        const int64_t g = 2 + next() % 17;
+        const int64_t m = 1 + next() % 47;
+        const int64_t n = 1 + next() % 51;
+        const int64_t p = 1 + next() % m;
+        const int64_t q = 1 + next() % n;
+        SCOPED_TRACE(::testing::Message() << k << "," << b << "," << g << "," << m << "," << n << "," << p << "," << q);
+        const int64_t lanes = GqaBandColumnOwnerLanes(k, b, g);
+        ASSERT_GT(lanes, 0);
+        const int64_t rounds = GqaBandColumnOwnerRounds(k, b, g, m, n, p, q);
+        std::vector<uint8_t> seen(b * g * m * n, 0);
+        std::vector<int64_t> owners(b * n, -1);
+        std::vector<int64_t> previous(k, -1);
+        std::vector<uint8_t> closed(b * n, 0);
+        int64_t lastActive = 0;
+        for (int64_t round = 1; round <= rounds + 1; ++round) {
+            std::vector<uint8_t> dq(b * g * m, 0), dkv(b * n, 0);
+            for (int64_t core = 1; core <= k; ++core) {
+                int64_t w = 99, x = 0, y = 0;
+                GqaBandColumnOwnerIndex(k, b, g, m, n, p, q, core, round, w, x, y);
+                if (w < 0) {
+                    continue;
+                }
+                ASSERT_LE(round, rounds);
+                ASSERT_GE(w, 1);
+                ASSERT_LE(w, b * g);
+                ASSERT_GE(x, 1);
+                ASSERT_LE(x, m);
+                ASSERT_GE(y, 1);
+                ASSERT_LE(y, n);
+                ASSERT_LE(x - y, p - 1);
+                ASSERT_LE(y - x, q - 1);
+                const int64_t query = (w - 1) * m + x - 1;
+                const int64_t kv = (w - 1) / g * n + y - 1;
+                const int64_t task = query * n + y - 1;
+                ASSERT_EQ(dq[query]++, 0);
+                ASSERT_EQ(dkv[kv]++, 0);
+                ASSERT_EQ(seen[task]++, 0);
+                if (owners[kv] < 0) {
+                    owners[kv] = core;
+                }
+                ASSERT_EQ(owners[kv], core);
+                if (previous[core - 1] != kv) {
+                    if (previous[core - 1] >= 0) {
+                        closed[previous[core - 1]] = 1;
+                    }
+                    ASSERT_EQ(closed[kv], 0);
+                    previous[core - 1] = kv;
+                }
+                lastActive = round;
+            }
+        }
+        EXPECT_EQ(lastActive, rounds);
+        for (int64_t w = 1; w <= b * g; ++w) {
+            for (int64_t x = 1; x <= m; ++x) {
+                for (int64_t y = 1; y <= n; ++y) {
+                    EXPECT_EQ(seen[((w - 1) * m + x - 1) * n + y - 1], x - y < p && y - x < q ? 1 : 0);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandColumnOwnerPrefixOracle)
+{
+    using namespace optiling::fag;
+    for (int64_t lanes : {1, 3, 5, 8, 13}) {
+        for (int64_t m : {1, 7, 31, 64, 129}) {
+            for (int64_t n : {1, 9, 32, 65, 130}) {
+                for (int64_t p : {int64_t(1), (m + 1) / 2, m}) {
+                    for (int64_t q : {int64_t(1), (n + 1) / 2, n}) {
+                        for (int64_t lane = 0; lane < lanes; ++lane) {
+                            int64_t expected = 0;
+                            for (int64_t pair = 0; pair <= (n + 2 * lanes - 1) / (2 * lanes); ++pair) {
+                                ASSERT_EQ(GqaBandColumnOwnerPairPrefix(m, n, p, q, lanes, lane, pair), expected);
+                                for (int64_t col : {2 * lanes * pair + lane + 1, 2 * lanes * pair + 2 * lanes - lane}) {
+                                    if (col > n) {
+                                        continue;
+                                    }
+                                    for (int64_t row = 1; row <= m; ++row) {
+                                        expected += row - col < p && col - row < q ? 1 : 0;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandColumnOwnerInvalidAndDrain)
+{
+    using namespace optiling::fag;
+    const int64_t invalid[][7] = {{0, 1, 3, 5, 7, 2, 3}, {7, 0, 3, 5, 7, 2, 3}, {7, 8, 3, 5, 7, 2, 3},
+                                  {7, 1, 1, 5, 7, 2, 3}, {7, 1, 3, 0, 7, 2, 3}, {7, 1, 3, 5, 0, 2, 3},
+                                  {7, 1, 3, 5, 7, 0, 3}, {7, 1, 3, 5, 7, 2, 0}, {7, 1, 3, 5, 7, 6, 3},
+                                  {7, 1, 3, 5, 7, 2, 8}};
+    for (const auto& v : invalid) {
+        int64_t w = 1, x = 0, y = 0;
+        EXPECT_EQ(GqaBandColumnOwnerRounds(v[0], v[1], v[2], v[3], v[4], v[5], v[6]), 0);
+        GqaBandColumnOwnerIndex(v[0], v[1], v[2], v[3], v[4], v[5], v[6], 1, 1, w, x, y);
+        EXPECT_EQ(w, -1);
+    }
+    for (int64_t core : {0, 1, 7, 8}) {
+        for (int64_t round : {0, 1000000}) {
+            int64_t w = 1, x = 0, y = 0;
+            GqaBandColumnOwnerIndex(7, 2, 5, 19, 23, 7, 3, core, round, w, x, y);
+            EXPECT_EQ(w, -1);
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandBalancedColumnPrefixIndependentOracle)
+{
+    using namespace optiling::fag;
+    uint32_t seed = 2917;
+    const auto next = [&seed]() -> uint32_t {
+        seed = seed * 1664525U + 1013904223U;
+        return seed >> 8;
+    };
+    for (int trial = 0; trial < 4096; ++trial) {
+        const int64_t m = 1 + next() % 53, n = 1 + next() % 67;
+        const int64_t p = 1 + next() % m, q = 1 + next() % n, lanes = 1 + next() % 32;
+        std::vector<int64_t> heights;
+        for (int64_t y = 1; y <= n; ++y) {
+            const int64_t height = std::max<int64_t>(0, std::min(m, y + p - 1) - std::max<int64_t>(1, y - q + 1) + 1);
+            if (height > 0) {
+                heights.push_back(height);
+            }
+        }
+        std::sort(heights.begin(), heights.end(), [](int64_t a, int64_t b) { return a > b; });
+        ASSERT_EQ(GqaBandBalancedColumnCount(m, n, q), heights.size());
+        std::vector<uint8_t> seen(n, 0);
+        for (int64_t rank = 0; rank < static_cast<int64_t>(heights.size()); ++rank) {
+            const int64_t y = GqaBandBalancedPhysicalColumn(m, n, p, q, rank);
+            ASSERT_GE(y, 1);
+            ASSERT_LE(y, n);
+            ASSERT_EQ(seen[y - 1]++, 0);
+            ASSERT_EQ(heights[rank], std::min(m, y + p - 1) - std::max<int64_t>(1, y - q + 1) + 1);
+        }
+        for (int64_t lane = 0; lane < lanes; ++lane) {
+            int64_t expected = 0;
+            for (int64_t pairs = 0; pairs <= (n + 2 * lanes - 1) / (2 * lanes) + 1; ++pairs) {
+                ASSERT_EQ(GqaBandBalancedPairPrefix(m, n, p, q, lanes, lane, pairs), expected);
+                for (int64_t rank : {2 * lanes * pairs + lane, 2 * lanes * pairs + 2 * lanes - 1 - lane}) {
+                    if (rank < static_cast<int64_t>(heights.size())) {
+                        expected += heights[rank];
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandOwnerChunksCoverageAndConflicts)
+{
+    using namespace optiling::fag;
+    uint32_t seed = 589;
+    const auto next = [&seed]() -> uint32_t {
+        seed = seed * 1664525U + 1013904223U;
+        return seed >> 8;
+    };
+    for (int trial = 0; trial < 512; ++trial) {
+        const int64_t k = 1 + next() % 36, b = 1 + next() % (2 * k + 3), g = 2 + next() % 11;
+        const int64_t m = 1 + next() % 19, n = 1 + next() % 23, p = 1 + next() % m, q = 1 + next() % n;
+        const int64_t h = 1 + next() % std::min(k, b);
+        const bool balanced = trial % 2 != 0;
+        GqaBandPlan plan{};
+        AppendGqaBandPhase(
+            plan, balanced ? GqaBandPhaseKind::BAND_BALANCED_COLUMN_OWNER : GqaBandPhaseKind::BAND_COLUMN_OWNER, m, n,
+            p, q);
+        SetGqaBandGroups(k, b, g, h, plan);
+        GqaBandSchedule schedule{};
+        SaveGqaBandSchedule(plan, schedule);
+        EXPECT_EQ(schedule.totalRounds, (b / h) * schedule.fullRounds + schedule.tailRounds);
+        std::vector<uint8_t> seen(b * g * m * n, 0);
+        std::vector<int64_t> owners(b * n, -1), previous(k, -1);
+        std::vector<uint8_t> closed(b * n, 0);
+        int64_t lastActive = 0;
+        for (int64_t r = 1; r <= schedule.totalRounds + 1; ++r) {
+            std::vector<uint8_t> dq(b * g * m, 0), dkv(b * n, 0);
+            const int64_t full = b / h * schedule.fullRounds;
+            const bool tail = r > full;
+            const int64_t chunk = tail ? b / h : (r - 1) / schedule.fullRounds;
+            const int64_t groups = tail ? b % h : h;
+            const int64_t local = tail ? r - full : (r - 1) % schedule.fullRounds + 1;
+            for (int64_t core = 1; core <= k; ++core) {
+                int64_t w = -1, x = 0, y = 0;
+                GqaBandColumnOwnerIndex(k, groups, g, m, n, p, q, core, local, w, x, y, balanced);
+                if (w < 0) {
+                    continue;
+                }
+                ASSERT_LE(r, schedule.totalRounds);
+                w += chunk * h * g;
+                ASSERT_GE(w, 1);
+                ASSERT_LE(w, b * g);
+                ASSERT_GE(x, 1);
+                ASSERT_LE(x, m);
+                ASSERT_GE(y, 1);
+                ASSERT_LE(y, n);
+                const int64_t query = (w - 1) * m + x - 1, kv = (w - 1) / g * n + y - 1;
+                ASSERT_EQ(dq[query]++, 0);
+                ASSERT_EQ(dkv[kv]++, 0);
+                ASSERT_EQ(seen[query * n + y - 1]++, 0);
+                if (owners[kv] < 0) {
+                    owners[kv] = core;
+                }
+                ASSERT_EQ(owners[kv], core);
+                if (previous[core - 1] != kv) {
+                    if (previous[core - 1] >= 0) {
+                        closed[previous[core - 1]] = 1;
+                    }
+                    ASSERT_EQ(closed[kv], 0);
+                    previous[core - 1] = kv;
+                }
+                lastActive = r;
+            }
+        }
+        EXPECT_EQ(lastActive, schedule.totalRounds);
+        for (int64_t w = 1; w <= b * g; ++w) {
+            for (int64_t x = 1; x <= m; ++x) {
+                for (int64_t y = 1; y <= n; ++y) {
+                    EXPECT_EQ(seen[((w - 1) * m + x - 1) * n + y - 1], x - y < p && y - x < q ? 1 : 0);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandFoldedOwnerIndependentCoverageAndConflicts)
+{
+    using namespace optiling::fag;
+    const int64_t geometries[][2] = {{7, 11}, {17, 9}, {31, 31}, {33, 35}, {37, 29}, {5, 19}};
+    for (int64_t k : {32, 36}) {
+        for (int64_t b : std::vector<int64_t>{1, 3, k + 1}) {
+            for (int64_t g : {2, 4, 7}) {
+                for (const auto& geometry : geometries) {
+                    const int64_t m = geometry[0], n = geometry[1];
+                    const int64_t bands[][2] = {
+                        {1, 1}, {1, n}, {m, 1}, {std::min<int64_t>(m, 4), std::min<int64_t>(n, 5)}};
+                    for (const auto& band : bands) {
+                        const int64_t p = band[0], q = band[1];
+                        SCOPED_TRACE(::testing::Message()
+                                     << k << "," << b << "," << g << "," << m << "," << n << "," << p << "," << q);
+                        const int64_t columns = b * std::min(m, n);
+                        const int64_t expectedRounds = ((columns + k - 1) / k) * (p + q - 1) * g;
+                        ASSERT_EQ(GqaBandFoldedColumnOwnerRounds(k, b, g, m, n, p, q), expectedRounds);
+                        std::vector<uint8_t> seen(b * g * m * n, 0), closed(b * n, 0);
+                        std::vector<int64_t> owners(b * n, -1), previous(k, -1);
+                        for (int64_t round = 1; round <= expectedRounds + 1; ++round) {
+                            std::vector<uint8_t> dq(b * g * m, 0), dkv(b * n, 0);
+                            for (int64_t core = 1; core <= k; ++core) {
+                                int64_t w = 0, x = 0, y = 0;
+                                GqaBandFoldedColumnOwnerIndex(k, b, g, m, n, p, q, core, round, w, x, y);
+                                if (round > expectedRounds) {
+                                    ASSERT_EQ(w, -1);
+                                }
+                                if (w < 0) {
+                                    continue;
+                                }
+                                ASSERT_GE(w, 1);
+                                ASSERT_LE(w, b * g);
+                                ASSERT_GE(x, 1);
+                                ASSERT_LE(x, m);
+                                ASSERT_GE(y, 1);
+                                ASSERT_LE(y, n);
+                                ASSERT_LT(x - y, p);
+                                ASSERT_LT(y - x, q);
+                                const int64_t query = (w - 1) * m + x - 1, kv = (w - 1) / g * n + y - 1;
+                                ASSERT_EQ(dq[query]++, 0);
+                                ASSERT_EQ(dkv[kv]++, 0);
+                                ASSERT_EQ(seen[query * n + y - 1]++, 0);
+                                if (owners[kv] < 0) {
+                                    owners[kv] = core;
+                                }
+                                ASSERT_EQ(owners[kv], core);
+                                if (previous[core - 1] != kv) {
+                                    if (previous[core - 1] >= 0) {
+                                        closed[previous[core - 1]] = 1;
+                                    }
+                                    ASSERT_EQ(closed[kv], 0);
+                                    previous[core - 1] = kv;
+                                }
+                                if ((round - 1) % g != 0) {
+                                    int64_t pw = 0, px = 0, py = 0;
+                                    GqaBandFoldedColumnOwnerIndex(k, b, g, m, n, p, q, core, round - 1, pw, px, py);
+                                    ASSERT_EQ(w, pw + 1);
+                                    ASSERT_EQ(x, px);
+                                    ASSERT_EQ(y, py);
+                                }
+                            }
+                        }
+                        // Independent dense-domain enumeration: no virtual-column or modulo formula is reused.
+                        for (int64_t w = 1; w <= b * g; ++w) {
+                            for (int64_t x = 1; x <= m; ++x) {
+                                for (int64_t y = 1; y <= n; ++y) {
+                                    ASSERT_EQ(seen[((w - 1) * m + x - 1) * n + y - 1], x - y < p && y - x < q ? 1 : 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandFoldedOwnerInvalidAndDrain)
+{
+    using namespace optiling::fag;
+    const int64_t invalid[][7] = {{0, 3, 2, 17, 19, 1, 4},   {32, 0, 2, 17, 19, 1, 4}, {32, 3, 1, 17, 19, 1, 4},
+                                  {32, 3, 2, 0, 19, 1, 4},   {32, 3, 2, 17, 0, 1, 4},  {32, 3, 2, 17, 19, 0, 4},
+                                  {32, 3, 2, 17, 19, 18, 4}, {32, 3, 2, 17, 19, 1, 0}, {32, 3, 2, 17, 19, 1, 20}};
+    for (const auto& v : invalid) {
+        int64_t w = 42, x = 0, y = 0;
+        EXPECT_EQ(GqaBandFoldedColumnOwnerRounds(v[0], v[1], v[2], v[3], v[4], v[5], v[6]), 0);
+        GqaBandFoldedColumnOwnerIndex(v[0], v[1], v[2], v[3], v[4], v[5], v[6], 1, 1, w, x, y);
+        EXPECT_EQ(w, -1);
+    }
+    for (int64_t core : {0, 1, 32, 33}) {
+        for (int64_t round : {0, 1, 28, 29}) {
+            int64_t w = 42, x = 0, y = 0;
+            GqaBandFoldedColumnOwnerIndex(32, 3, 7, 5, 9, 1, 4, core, round, w, x, y);
+            if (core < 1 || core > 32 || round < 1 || round > 28 || core > 15) {
+                EXPECT_EQ(w, -1);
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandFoldedOwnerChunksOffsetsAndKvRuns)
+{
+    using namespace optiling::fag;
+    static_assert(static_cast<int64_t>(GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER) == 13);
+    static_assert(static_cast<int64_t>(GqaBandPhaseKind::FOLDED_LOWER_COLUMN_OWNER) == 14);
+    static_assert(GQA_BAND_FOLDED_OWNER_TEMPLATE == 8);
+    for (int64_t k : {32, 36}) {
+        for (int64_t b : {4, 7, 37}) {
+            for (int64_t h : std::vector<int64_t>{1, 3, b}) {
+                for (int64_t g : {2, 4, 7}) {
+                    for (bool upper : {false, true}) {
+                        const int64_t m = k - 3, n = k + 5, p = upper ? 1 : 5, q = upper ? 7 : 1;
+                        const int64_t offx = upper ? 0 : 3, offy = upper ? 5 : 0;
+                        GqaBandPlan candidate{};
+                        AppendGqaBandPhase(candidate,
+                                           upper ? GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER :
+                                                   GqaBandPhaseKind::FOLDED_LOWER_COLUMN_OWNER,
+                                           m, n, upper ? q : offx, upper ? offy : p);
+                        SetGqaBandGroups(k, b, g, h, candidate);
+                        GqaBandSchedule plan{};
+                        SaveGqaBandSchedule(candidate, plan);
+                        EXPECT_EQ(plan.fullRounds, GqaBandFoldedColumnOwnerRounds(k, h, g, m, n, p, q));
+                        EXPECT_EQ(plan.tailRounds,
+                                  b % h == 0 ? 0 : GqaBandFoldedColumnOwnerRounds(k, b % h, g, m, n, p, q));
+                        EXPECT_EQ(GqaBandKvRunUpperBound(candidate), b * std::min(n, m + q - 1));
+                        std::vector<uint8_t> seen(b * g * m * n, 0), closed(b * n, 0);
+                        std::vector<int64_t> previous(k, -1);
+                        int64_t runs = 0;
+                        for (int64_t round = 0; round <= plan.totalRounds + 1; ++round) {
+                            std::vector<uint8_t> dq(b * g * m, 0), dkv(b * n, 0);
+                            for (int64_t core = 0; core <= k + 1; ++core) {
+                                int64_t w = 0, x = 0, y = 0;
+                                MapGqaBandOwnerScheduleForTest(plan, core, round, w, x, y);
+                                if (core < 1 || core > k || round < 1 || round > plan.totalRounds) {
+                                    ASSERT_EQ(w, -1);
+                                    continue;
+                                }
+                                if (w < 0) {
+                                    continue;
+                                }
+                                x -= offx;
+                                y -= offy;
+                                ASSERT_GE(w, 1);
+                                ASSERT_LE(w, b * g);
+                                ASSERT_GE(x, 1);
+                                ASSERT_LE(x, m);
+                                ASSERT_GE(y, 1);
+                                ASSERT_LE(y, n);
+                                const int64_t query = (w - 1) * m + x - 1, kv = (w - 1) / g * n + y - 1;
+                                ASSERT_EQ(dq[query]++, 0);
+                                ASSERT_EQ(dkv[kv]++, 0);
+                                ASSERT_EQ(seen[query * n + y - 1]++, 0);
+                                if (previous[core - 1] != kv) {
+                                    if (previous[core - 1] >= 0) {
+                                        closed[previous[core - 1]] = 1;
+                                    }
+                                    ASSERT_EQ(closed[kv], 0);
+                                    previous[core - 1] = kv;
+                                    ++runs;
+                                }
+                            }
+                        }
+                        EXPECT_EQ(runs, GqaBandKvRunUpperBound(candidate));
+                        for (int64_t w = 1; w <= b * g; ++w) {
+                            for (int64_t x = 1; x <= m; ++x) {
+                                for (int64_t y = 1; y <= n; ++y) {
+                                    ASSERT_EQ(seen[((w - 1) * m + x - 1) * n + y - 1], x - y < p && y - x < q ? 1 : 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandFoldedBandChunkSafetyAndExactRuns)
+{
+    using namespace optiling::fag;
+    static_assert(static_cast<int64_t>(GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER) == 17);
+    static_assert(GQA_BAND_FOLDED_OWNER_TEMPLATE == 8);
+    int64_t concurrentSameHeadRounds = 0;
+    for (int64_t k : {8, 32, 36}) {
+        for (int64_t m : std::vector<int64_t>{k - 1, k, k + 1}) {
+            for (int64_t n : std::vector<int64_t>{m - 2, m + 3}) {
+                for (int64_t b : {1, 5}) {
+                    for (int64_t h : std::set<int64_t>{1, std::min<int64_t>(3, b), b}) {
+                        for (int64_t g : {2, 3}) {
+                            // Include narrow two-sided bands and domains wider than a row.
+                            for (const auto& band : std::vector<std::pair<int64_t, int64_t>>{{2, 3}, {m, n}}) {
+                                const int64_t p = band.first, q = band.second;
+                                SCOPED_TRACE(::testing::Message() << k << "," << m << "," << n << "," << b << "," << h
+                                                                  << "," << g << "," << p << "," << q);
+                                GqaBandPlan candidate{};
+                                AppendGqaBandPhase(candidate, GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER, m, n, p, q);
+                                SetGqaBandGroups(k, b, g, h, candidate);
+                                GqaBandSchedule plan{};
+                                SaveGqaBandSchedule(candidate, plan);
+                                std::vector<uint8_t> seen(b * g * m * n, 0), closed(b * n, 0);
+                                std::vector<int64_t> previous(k, -1);
+                                int64_t actualRuns = 0;
+                                for (int64_t round = 0; round <= plan.totalRounds + 1; ++round) {
+                                    std::vector<uint8_t> dq(b * g * m, 0), dkv(b * n, 0);
+                                    std::vector<int64_t> sameHeadRows(b * g, 0);
+                                    for (int64_t core = 0; core <= k + 1; ++core) {
+                                        int64_t w = 0, x = 0, y = 0;
+                                        MapGqaBandOwnerScheduleForTest(plan, core, round, w, x, y);
+                                        if (core < 1 || core > k || round < 1 || round > plan.totalRounds) {
+                                            ASSERT_EQ(w, -1);
+                                            continue;
+                                        }
+                                        if (w < 0) {
+                                            continue;
+                                        }
+                                        ASSERT_GE(w, 1);
+                                        ASSERT_LE(w, b * g);
+                                        ASSERT_GE(x, 1);
+                                        ASSERT_LE(x, m);
+                                        ASSERT_GE(y, 1);
+                                        ASSERT_LE(y, n);
+                                        ASSERT_LT(x - y, p);
+                                        ASSERT_LT(y - x, q);
+                                        const int64_t query = (w - 1) * m + x - 1;
+                                        const int64_t kv = (w - 1) / g * n + y - 1;
+                                        ASSERT_EQ(dq[query]++, 0);
+                                        ASSERT_EQ(dkv[kv]++, 0);
+                                        ASSERT_EQ(seen[query * n + y - 1]++, 0);
+                                        ++sameHeadRows[w - 1];
+                                        if (previous[core - 1] != kv) {
+                                            if (previous[core - 1] >= 0) {
+                                                closed[previous[core - 1]] = 1;
+                                            }
+                                            ASSERT_EQ(closed[kv], 0);
+                                            previous[core - 1] = kv;
+                                            ++actualRuns;
+                                        }
+                                    }
+                                    for (int64_t rows : sameHeadRows) {
+                                        if (rows > 1) {
+                                            ++concurrentSameHeadRounds;
+                                        }
+                                    }
+                                }
+                                for (int64_t w = 1; w <= b * g; ++w) {
+                                    for (int64_t x = 1; x <= m; ++x) {
+                                        for (int64_t y = 1; y <= n; ++y) {
+                                            EXPECT_EQ(seen[((w - 1) * m + x - 1) * n + y - 1],
+                                                      x - y < p && y - x < q ? 1 : 0);
+                                        }
+                                    }
+                                }
+                                EXPECT_EQ(actualRuns, GqaBandKvRunUpperBound(candidate));
+                                EXPECT_EQ(actualRuns, GqaBandScheduleKvRunExact(plan));
+                                EXPECT_EQ(actualRuns, b * std::min(n, m + q - 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Small G does not cap core parallelism: dQ addresses are separated by physical rows.
+    EXPECT_GT(concurrentSameHeadRounds, 0);
+}
+
+// Enumerate valid row/column cells explicitly in the documented lane order.
+// This oracle does not use the optimized two-interval branch or prefix helpers.
+static std::vector<std::pair<int64_t, int64_t>> EnumerateGqaBandOwnerLaneForTest(int64_t lanes, int64_t lane, int64_t m,
+                                                                                 int64_t n, int64_t p, int64_t q)
+{
+    std::vector<std::pair<int64_t, int64_t>> cells;
+    for (int64_t start = 0; start < n; start += 2 * lanes) {
+        const int64_t columns[] = {start + lane + 1, start + 2 * lanes - lane};
+        for (int64_t y : columns) {
+            if (y > n) {
+                continue;
+            }
+            for (int64_t x = 1; x <= m; ++x) {
+                if (x - y < p && y - x < q) {
+                    cells.emplace_back(x, y);
+                }
+            }
+        }
+    }
+    return cells;
+}
+
+// Reorder an independently enumerated interval, without using the device's
+// rowSlot/height arithmetic. The original list remains the owner/empty-slot oracle.
+static std::vector<std::pair<int64_t, int64_t>> GqaBandOwnerRowOrderForTest(
+    const std::vector<std::pair<int64_t, int64_t>>& original, int64_t lanes, int64_t m, int64_t n, int64_t p)
+{
+    auto ordered = original;
+    if (p == m && n <= 2 * lanes && !ordered.empty()) {
+        const auto firstColumnEnd = std::find_if(ordered.begin(), ordered.end(), [&ordered](const auto& cell) {
+            return cell.second != ordered.front().second;
+        });
+        std::reverse(ordered.begin(), firstColumnEnd);
+    }
+    return ordered;
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandSinglePairIndependentOrder)
+{
+    using namespace optiling::fag;
+    int64_t changedRows = 0;
+    for (int64_t k : {32, 36}) {
+        for (int64_t groups : {1, 3, 5, 8}) {
+            for (int64_t g : {2, 4, 7, 16}) {
+                const int64_t lanes = std::min(k / groups, g);
+                for (int64_t m : {1, 7, 19}) {
+                    for (int64_t n : std::vector<int64_t>{1, std::max<int64_t>(1, lanes - 1), lanes, lanes + 1,
+                                                          2 * lanes - 1, 2 * lanes, 2 * lanes + 1}) {
+                        const int64_t bands[][2] = {{1, 1}, {1, n}, {m, 1}, {m, n}};
+                        for (const auto& band : bands) {
+                            const int64_t p = band[0], q = band[1];
+                            SCOPED_TRACE(::testing::Message() << k << "," << groups << "," << g << "," << m << "," << n
+                                                              << "," << p << "," << q);
+                            std::vector<std::vector<std::pair<int64_t, int64_t>>> expected, ordered;
+                            int64_t maxRows = 0, validRows = 0;
+                            for (int64_t lane = 0; lane < lanes; ++lane) {
+                                expected.push_back(EnumerateGqaBandOwnerLaneForTest(lanes, lane, m, n, p, q));
+                                ordered.push_back(GqaBandOwnerRowOrderForTest(expected.back(), lanes, m, n, p));
+                                maxRows = std::max(maxRows, static_cast<int64_t>(expected.back().size()));
+                                validRows += static_cast<int64_t>(expected.back().size());
+                            }
+                            const int64_t rounds = maxRows * g;
+                            ASSERT_EQ(GqaBandColumnOwnerRounds(k, groups, g, m, n, p, q), rounds);
+                            std::map<std::pair<int64_t, int64_t>, int64_t> owners;
+                            std::set<std::tuple<int64_t, int64_t, int64_t>> seen;
+                            for (int64_t round = 0; round <= rounds + 1; ++round) {
+                                std::set<std::pair<int64_t, int64_t>> dq, dkv;
+                                for (int64_t core = 0; core <= k + 1; ++core) {
+                                    int64_t w = 0, x = 0, y = 0;
+                                    GqaBandColumnOwnerIndex(k, groups, g, m, n, p, q, core, round, w, x, y);
+                                    if (core < 1 || core > groups * lanes || core > k || round < 1) {
+                                        ASSERT_EQ(w, -1);
+                                        continue;
+                                    }
+                                    const int64_t lane = (core - 1) % lanes, group = (core - 1) / lanes;
+                                    const int64_t index = (round - 1) / g;
+                                    // Original interval lengths remain the independent empty-slot oracle.
+                                    if (index >= static_cast<int64_t>(expected[lane].size())) {
+                                        ASSERT_EQ(w, -1);
+                                        continue;
+                                    }
+                                    ASSERT_EQ(x, ordered[lane][index].first);
+                                    ASSERT_EQ(y, expected[lane][index].second);
+                                    ASSERT_EQ(w, group * g + (((round - 1) % g + lane) % g) + 1);
+                                    changedRows += x != expected[lane][index].first;
+                                    ASSERT_TRUE(dq.emplace(w, x).second);
+                                    ASSERT_TRUE(dkv.emplace(group, y).second);
+                                    ASSERT_TRUE(seen.emplace(w, x, y).second);
+                                    const auto owner = owners.emplace(std::make_pair(group, y), core);
+                                    EXPECT_EQ(owner.first->second, core);
+                                }
+                            }
+                            EXPECT_EQ(seen.size(), static_cast<size_t>(validRows * groups * g));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_GT(changedRows, 0);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandSinglePairTailAndTranslatedOrder)
+{
+    using namespace optiling::fag;
+    int fullGeneralTailDirect = 0;
+    int64_t changedTailRows = 0;
+    for (int64_t k : {32, 36}) {
+        for (int64_t g : {2, 4, 7, 16}) {
+            const int64_t b = 12, h = 9, tail = b % h;
+            const int64_t n = 2 * std::min(k / tail, g);
+            for (bool translated : {false, true}) {
+                const int64_t m = translated ? n : n + 7, p = translated ? m : 3,
+                              q = translated ? 1 : std::min<int64_t>(n, 5);
+                GqaBandPlan candidate{};
+                AppendGqaBandPhase(
+                    candidate,
+                    translated ? GqaBandPhaseKind::LOWER_TRIANGLE_COLUMN_OWNER : GqaBandPhaseKind::BAND_COLUMN_OWNER, m,
+                    n, translated ? 3 : p, translated ? 2 : q);
+                SetGqaBandGroups(k, b, g, h, candidate);
+                GqaBandSchedule plan{};
+                SaveGqaBandSchedule(candidate, plan);
+                if (n > 2 * std::min(k / h, g) && n <= 2 * std::min(k / tail, g)) {
+                    ++fullGeneralTailDirect;
+                }
+                std::vector<std::vector<std::pair<int64_t, int64_t>>> expected[2], ordered[2];
+                int64_t expectedTasks = 0;
+                for (int chunk = 0; chunk < 2; ++chunk) {
+                    const int64_t groups = chunk == 0 ? h : tail;
+                    const int64_t lanes = std::min(k / groups, g);
+                    for (int64_t lane = 0; lane < lanes; ++lane) {
+                        expected[chunk].push_back(EnumerateGqaBandOwnerLaneForTest(lanes, lane, m, n, p, q));
+                        ordered[chunk].push_back(GqaBandOwnerRowOrderForTest(expected[chunk].back(), lanes, m, n, p));
+                        expectedTasks += static_cast<int64_t>(expected[chunk].back().size()) * groups * g;
+                    }
+                }
+                std::map<std::pair<int64_t, int64_t>, int64_t> owners;
+                std::set<std::tuple<int64_t, int64_t, int64_t>> seen;
+                for (int64_t round = 0; round <= plan.totalRounds + 1; ++round) {
+                    std::set<std::pair<int64_t, int64_t>> dq, dkv;
+                    for (int64_t core = 0; core <= k + 1; ++core) {
+                        int64_t w = 0, x = 0, y = 0;
+                        MapGqaBandOwnerScheduleForTest(plan, core, round, w, x, y);
+                        if (round < 1 || round > plan.totalRounds || core < 1 || core > k) {
+                            ASSERT_EQ(w, -1);
+                            continue;
+                        }
+                        const bool isTail = round > plan.fullRounds;
+                        const int64_t groups = isTail ? tail : h;
+                        const int64_t localRound = isTail ? round - plan.fullRounds : round;
+                        const int64_t lanes = std::min(k / groups, g);
+                        if (core > groups * lanes) {
+                            ASSERT_EQ(w, -1);
+                            continue;
+                        }
+                        const int64_t lane = (core - 1) % lanes, group = (core - 1) / lanes;
+                        const auto& original = expected[isTail][lane];
+                        const auto& rowOrder = ordered[isTail][lane];
+                        const int64_t index = (localRound - 1) / g;
+                        if (index >= static_cast<int64_t>(original.size())) {
+                            ASSERT_EQ(w, -1);
+                            continue;
+                        }
+                        ASSERT_EQ(x, rowOrder[index].first + (translated ? 3 : 0));
+                        ASSERT_EQ(y, original[index].second + (translated ? 2 : 0));
+                        ASSERT_EQ(w, (group + (isTail ? h : 0)) * g + (((localRound - 1) % g + lane) % g) + 1);
+                        changedTailRows += isTail && rowOrder[index].first != original[index].first;
+                        ASSERT_TRUE(dq.emplace(w, x).second);
+                        ASSERT_TRUE(dkv.emplace((w - 1) / g, y).second);
+                        ASSERT_TRUE(seen.emplace(w, x, y).second);
+                        const auto owner = owners.emplace(std::make_pair((w - 1) / g, y), core);
+                        EXPECT_EQ(owner.first->second, core);
+                    }
+                }
+                EXPECT_EQ(seen.size(), static_cast<size_t>(expectedTasks));
+            }
+        }
+    }
+    EXPECT_GT(fullGeneralTailDirect, 0);
+    EXPECT_GT(changedTailRows, 0);
+}
+
+// Core allocation must cover every logical group slot exactly once, including
+// clipped budgets that intentionally leave physical cores unused.
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandOverlapCorePartitionAndGuard)
+{
+    using namespace optiling::fag;
+    struct Partition {
+        int64_t k, groups, m, n;
+        std::vector<int64_t> budgets;
+    };
+    const Partition examples[] = {
+        {3, 1, 4, 1, {3}},  {36, 2, 16, 1, {9, 9}}, {32, 3, 8, 50, {11, 11, 10}},
+        {32, 1, 8, 1, {5}}, {32, 1, 16, 17, {24}},  {32, 1, 32, 66, {32}},
+    };
+    for (const auto& c : examples) {
+        ASSERT_TRUE(CanUseGqaBandOverlap(c.k, c.groups, 7, c.m, c.n));
+        std::vector<std::vector<int>> seen;
+        int64_t used = 0;
+        for (int64_t group = 0; group < c.groups; ++group) {
+            EXPECT_EQ(GqaBandOverlapCoreBudget(c.k, c.groups, c.m, c.n, group), c.budgets[group]);
+            seen.emplace_back(c.budgets[group], 0);
+            used += c.budgets[group];
+        }
+        int64_t active = 0;
+        for (int64_t core = 0; core <= c.k + 1; ++core) {
+            int64_t group = 99, local = 99, budget = 99;
+            const bool valid = GqaBandOverlapCoreIndex(c.k, c.groups, c.m, c.n, core, group, local, budget);
+            if (!valid) {
+                EXPECT_EQ(group, -1);
+                EXPECT_EQ(local, 0);
+                EXPECT_EQ(budget, 0);
+                continue;
+            }
+            ASSERT_GE(core, 1);
+            ASSERT_LE(core, c.k);
+            ASSERT_GE(group, 0);
+            ASSERT_LT(group, c.groups);
+            ASSERT_GE(local, 1);
+            ASSERT_LE(local, c.budgets[group]);
+            EXPECT_EQ(budget, c.budgets[group]);
+            EXPECT_EQ(seen[group][local - 1]++, 0);
+            ++active;
+        }
+        EXPECT_EQ(active, used);
+        for (const auto& group : seen) {
+            for (int visits : group) {
+                EXPECT_EQ(visits, 1);
+            }
+        }
+    }
+    const int64_t invalid[][5] = {
+        {0, 1, 2, 4, 1},  {32, 0, 2, 4, 1}, {32, 1, 1, 4, 1}, {32, 1, 2, 0, 1},
+        {32, 1, 2, 1, 1}, {32, 1, 2, 4, 0}, {4, 2, 2, 4, 1},  {32, 33, 2, 2, 1},
+    };
+    for (const auto& c : invalid) {
+        EXPECT_FALSE(CanUseGqaBandOverlap(c[0], c[1], c[2], c[3], c[4]));
+        EXPECT_EQ(GqaBandOverlapChunkRounds(c[0], c[1], c[2], c[3], c[4]), 0);
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandOverlapParityAndTailInvariants)
+{
+    using namespace optiling::fag;
+    for (int64_t k : {8, 16, 32, 36}) {
+        for (int64_t m = 2; m < 2 * k; ++m) {
+            for (int64_t g : {2, 3, 8}) {
+                // The triangle has (m-1)*m/2 tiles. Its floor(m/2) cores
+                // are exactly full for its entire active prefix, for either parity.
+                const int64_t triangleCores = m / 2;
+                const int64_t triangleRounds = GqaBandOverlapTriangleRounds(m, g);
+                EXPECT_EQ(triangleRounds, GqaBandTriangleRounds(triangleCores, m - 1, 1, g));
+                EXPECT_EQ(triangleCores * triangleRounds, (m - 1) * m / 2 * g);
+                EXPECT_LE(triangleRounds, m * g);
+                EXPECT_EQ(m * g - triangleRounds, m % 2 == 0 ? g : 0);
+                for (int64_t h : {1, 2, 3}) {
+                    for (int64_t q : std::vector<int64_t>{1, m, m + 1}) {
+                        if (!CanUseGqaBandOverlap(k, h, g, m, q)) {
+                            continue;
+                        }
+                        for (int64_t b : std::vector<int64_t>{h, 2 * h + 1}) {
+                            for (bool upper : {false, true}) {
+                                GqaBandPlan plan{};
+                                ASSERT_TRUE(BuildGqaBandOverlapCandidate(k, m, q + m - 1, upper ? 1 : m,
+                                                                         upper ? q + m - 1 : q, b, g, h, plan));
+                                EXPECT_EQ(plan.phases[0].kind,
+                                          upper ? GqaBandPhaseKind::OVERLAP_UPPER : GqaBandPhaseKind::OVERLAP_LOWER);
+                                EXPECT_EQ(plan.phases[0].m, m);
+                                EXPECT_EQ(plan.phases[0].n, q);
+                                EXPECT_EQ(plan.totalRounds, b / h * plan.fullRounds + plan.tailRounds);
+                                for (int64_t groups : std::vector<int64_t>{h, b % h}) {
+                                    if (groups == 0) {
+                                        EXPECT_EQ(plan.tailRounds, 0);
+                                        continue;
+                                    }
+                                    int64_t used = 0, longestSuffix = 0;
+                                    for (int64_t group = 0; group < groups; ++group) {
+                                        const int64_t budget = GqaBandOverlapCoreBudget(k, groups, m, q, group);
+                                        const int64_t stripes = budget - triangleCores;
+                                        ASSERT_GE(stripes, 1);
+                                        ASSERT_LE(stripes, std::min(m, q));
+                                        used += budget;
+                                        if (q > stripes) {
+                                            longestSuffix = std::max(longestSuffix,
+                                                                     GqaBandDenseRounds(budget, m, q - stripes, 1, g));
+                                        }
+                                    }
+                                    EXPECT_LE(used, k);
+                                    EXPECT_EQ(groups == h ? plan.fullRounds : plan.tailRounds, m * g + longestSuffix);
+                                }
+                                GqaBandSchedule serialized{};
+                                SaveGqaBandSchedule(plan, serialized);
+                                EXPECT_EQ(serialized.totalRounds, plan.totalRounds);
+                                EXPECT_EQ(serialized.fullRounds, plan.fullRounds);
+                                EXPECT_EQ(serialized.tailRounds, plan.tailRounds);
+                                EXPECT_GE(GqaBandKvRunUpperBound(plan), b * (q + m - 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_EQ(GqaBandOverlapTriangleRounds(1, 8), 0);
+    EXPECT_EQ(GqaBandOverlapTriangleRounds(3, 1), 0);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandOverlapGeometryFullTailAndCost)
+{
+    using namespace optiling::fag;
+    struct Cost {
+        int64_t k, groups, g, m, rectangle, rounds;
+    };
+    const Cost examples[] = {
+        {32, 1, 8, 32, 64, 640}, {32, 1, 8, 32, 66, 672}, {36, 2, 7, 16, 1, 112},
+        {32, 3, 8, 8, 50, 352},  {32, 1, 8, 8, 50, 288},  {3, 1, 2, 4, 1, 8},
+    };
+    for (const auto& c : examples) {
+        EXPECT_EQ(GqaBandOverlapChunkRounds(c.k, c.groups, c.g, c.m, c.rectangle), c.rounds);
+        for (bool reflected : {false, true}) {
+            const int64_t width = c.rectangle + c.m - 1;
+            GqaBandPlan plan{};
+            ASSERT_TRUE(BuildGqaBandOverlapCandidate(c.k, c.m, width, reflected ? 1 : c.m,
+                                                     reflected ? width : c.rectangle, c.groups, c.g, c.groups, plan));
+            ASSERT_EQ(plan.phaseCount, 1);
+            EXPECT_EQ(plan.tailPhaseCount, 0);
+            EXPECT_EQ(plan.phases[0].kind,
+                      reflected ? GqaBandPhaseKind::OVERLAP_UPPER : GqaBandPhaseKind::OVERLAP_LOWER);
+            EXPECT_EQ(plan.phases[0].m, c.m);
+            EXPECT_EQ(plan.phases[0].n, c.rectangle);
+            EXPECT_EQ(plan.phases[0].rowOffset, 0);
+            EXPECT_EQ(plan.phases[0].colOffset, 0);
+            EXPECT_EQ(plan.fullRounds, c.rounds);
+            EXPECT_EQ(plan.totalRounds, c.rounds);
+            EXPECT_EQ(plan.tailRounds, 0);
+            EXPECT_GE(GqaBandKvRunUpperBound(plan), c.groups * width);
+        }
+    }
+    // The third full-group budget is smaller; its longer work determines the
+    // shared full-chunk round count. The tail receives a fresh core budget.
+    GqaBandPlan tail{};
+    ASSERT_TRUE(BuildGqaBandOverlapCandidate(32, 8, 57, 8, 50, 7, 8, 3, tail));
+    EXPECT_EQ(tail.fullRounds, 352);
+    EXPECT_EQ(tail.tailRounds, 288);
+    EXPECT_EQ(tail.totalRounds, 992);
+    GqaBandSchedule serialized{};
+    SaveGqaBandSchedule(tail, serialized);
+    EXPECT_EQ(serialized.groupsPerChunk, 3);
+    EXPECT_EQ(serialized.b, 7);
+    EXPECT_EQ(serialized.fullRounds, 352);
+    EXPECT_EQ(serialized.tailRounds, 288);
+    EXPECT_EQ(serialized.totalRounds, 992);
+    // Saving rounds alone is insufficient: q=64 splits more KV runs than the
+    // fixed preceding schedule, while the adjacent wider rectangle need not.
+    EXPECT_EQ(GqaBandOverlapChunkKvRunUpperBound(32, 1, 8, 32, 64), 111);
+    EXPECT_EQ(GqaBandOverlapChunkKvRunUpperBound(32, 1, 8, 32, 66), 124);
+    for (const auto& geometry :
+         std::vector<std::vector<int64_t>>{{8, 57, 7, 50}, {7, 56, 6, 50}, {8, 56, 8, 50}, {8, 57, 1, 56}}) {
+        GqaBandPlan invalid{};
+        EXPECT_FALSE(
+            BuildGqaBandOverlapCandidate(32, geometry[0], geometry[1], geometry[2], geometry[3], 1, 8, 1, invalid));
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, SwizzleTilingLayoutAddsExtensionOnlyForTnd)
+{
+    using namespace optiling::fag;
+    using NonTnd = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<false, false, false, false>;
+    using NonTndSwizzle = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<false, false, false, true>;
+    using NonTndDeter = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<true, false, false, false>;
+    using NonTndDeterSwizzle = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<true, false, false, true>;
+    using Tnd = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<false, false, true, false>;
+    using TndSwizzle = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<false, false, true, true>;
+    using TndDeterSwizzle = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<true, true, true, true>;
+    static_assert(std::is_same<decltype(NonTndSwizzle::tndSwizzleParam), std::nullptr_t>::value,
+                  "A non-TND swizzle key must not append TND metadata");
+    static_assert(std::is_same<decltype(NonTndDeterSwizzle::tndSwizzleParam), std::nullptr_t>::value,
+                  "A non-TND deterministic swizzle key must not append TND metadata");
+    static_assert(std::is_same<decltype(TndSwizzle::tndSwizzleParam), TndSwizzleParamRegbase>::value,
+                  "TND swizzle must retain its extension");
+    static_assert(std::is_same<decltype(TndDeterSwizzle::tndSwizzleParam), TndSwizzleParamRegbase>::value,
+                  "Deterministic TND swizzle must retain its extension");
+    EXPECT_EQ(sizeof(NonTnd), sizeof(NonTndSwizzle));
+    EXPECT_EQ(sizeof(NonTndDeter), sizeof(NonTndDeterSwizzle));
+    EXPECT_EQ(offsetof(NonTnd, tndParam), offsetof(NonTndSwizzle, tndParam));
+    EXPECT_EQ(offsetof(NonTndDeter, deterParam), offsetof(NonTndDeterSwizzle, deterParam));
+    EXPECT_GT(sizeof(TndSwizzle), sizeof(Tnd));
+    static_assert(sizeof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase) == 200,
+                  "The reserved dispatch byte must preserve the base tiling ABI");
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewisePreservesTilingLayout)
+{
+    using namespace optiling::fag;
+    static_assert(sizeof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase) == 200,
+                  "Base tiling size must remain unchanged");
+    static_assert(offsetof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase, deterGqaBandScheduleMode) == 194,
+                  "GQA BAND mode must occupy a former padding byte");
+    static_assert(offsetof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase, deterGqaBandGroups) == 196,
+                  "GQA BAND group size must occupy the former trailing padding");
+    static_assert(sizeof(BaseDeterParamRegbase) == 608, "Deterministic tiling size must remain unchanged");
+    FuzzyBaseInfoParamsRegbase params{};
+    EXPECT_EQ(params.deterGqaBandScheduleMode, DeterGqaBandScheduleMode::ORIGINAL);
+    EXPECT_EQ(params.deterGqaBandGroups, 0);
+    FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase baseParams{};
+    EXPECT_EQ(baseParams.get_deterGqaBandScheduleMode(), static_cast<uint8_t>(DeterGqaBandScheduleMode::ORIGINAL));
+    EXPECT_EQ(baseParams.get_deterGqaBandGroups(), 0);
+    baseParams.set_deterGqaBandScheduleMode(static_cast<uint8_t>(DeterGqaBandScheduleMode::PIECEWISE));
+    baseParams.set_deterGqaBandGroups(2);
+    EXPECT_EQ(baseParams.get_deterGqaBandScheduleMode(), static_cast<uint8_t>(DeterGqaBandScheduleMode::PIECEWISE));
+    EXPECT_EQ(baseParams.get_deterGqaBandGroups(), 2);
+}
+
+static void ExpectGqaBandScheduleMatchesPlan(const optiling::fag::GqaBandSchedule& schedule,
+                                             const optiling::fag::GqaBandPlan& plan)
+{
+    using namespace optiling::fag;
+    EXPECT_EQ(schedule.phaseCount, plan.phaseCount);
+    EXPECT_EQ(schedule.tailPhaseCount, plan.tailPhaseCount);
+    EXPECT_EQ(schedule.k, plan.k);
+    EXPECT_EQ(schedule.b, plan.b);
+    EXPECT_EQ(schedule.g, plan.g);
+    EXPECT_EQ(schedule.groupsPerChunk, plan.groupsPerChunk);
+    EXPECT_EQ(schedule.fullRounds, plan.fullRounds);
+    EXPECT_EQ(schedule.tailRounds, plan.tailRounds);
+    EXPECT_EQ(schedule.totalRounds, plan.totalRounds);
+    for (int64_t tail = 0; tail < 2; ++tail) {
+        const int64_t count = tail == 0 ? plan.phaseCount : plan.tailPhaseCount;
+        ASSERT_GE(count, 0);
+        ASSERT_LE(count, GQA_BAND_MAX_PHASES);
+        for (int64_t i = 0; i < GQA_BAND_MAX_PHASES; ++i) {
+            SCOPED_TRACE(::testing::Message() << "tail=" << tail << ", phase=" << i);
+            const GqaBandPhase empty{};
+            const GqaBandPhase& expected = i >= count ? empty : (tail == 0 ? plan.phases[i] : plan.tailPhases[i]);
+            const GqaBandPhase& actual = tail == 0 ? schedule.phases[i] : schedule.tailPhases[i];
+            EXPECT_EQ(actual.kind, expected.kind);
+            EXPECT_EQ(actual.m, expected.m);
+            EXPECT_EQ(actual.n, expected.n);
+            EXPECT_EQ(actual.rowOffset, expected.rowOffset);
+            EXPECT_EQ(actual.colOffset, expected.colOffset);
+            EXPECT_EQ(actual.fullRounds, expected.fullRounds);
+            EXPECT_EQ(actual.tailRounds, expected.tailRounds);
+            if (i >= count) {
+                EXPECT_EQ(std::memcmp(&actual, &empty, sizeof(empty)), 0);
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandSerializedScheduleLayout)
+{
+    using namespace optiling::fag;
+    static_assert(sizeof(GqaBandPhaseKind) == sizeof(int64_t), "Wire phase tags must be eight bytes");
+    static_assert(sizeof(GqaBandPhase) == 56, "Wire phases must not contain padding");
+    static_assert(sizeof(GqaBandSchedule) == 632, "Wire schedules must not contain padding");
+    static_assert(offsetof(GqaBandSchedule, phaseCount) == 560, "Both five-phase arrays precede metadata");
+    static_assert(offsetof(GqaBandSchedule, totalRounds) == 624, "The round bound is the final wire word");
+    static_assert(std::is_standard_layout<GqaBandSchedule>::value, "The wire schedule must be standard layout");
+    static_assert(std::is_trivially_copyable<GqaBandSchedule>::value, "The wire schedule must allow byte copies");
+    using NonTnd = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<false, false, false, false>;
+    using NonTndDeter = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<true, false, false, false>;
+    using NonTndDeterSwizzle = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<true, false, false, true>;
+    using TndDeter = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<true, true, true, false>;
+    using TndDeterSwizzle = FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<true, true, true, true>;
+    static_assert(std::is_same<decltype(NonTndDeter::deterGqaBandSchedule), GqaBandSchedule>::value,
+                  "Only non-TND deterministic tiling carries the schedule");
+    static_assert(std::is_same<decltype(NonTndDeterSwizzle::deterGqaBandSchedule), GqaBandSchedule>::value,
+                  "The existing swizzle bit must not change the schedule layout");
+    static_assert(std::is_same<decltype(NonTnd::deterGqaBandSchedule), std::nullptr_t>::value,
+                  "Non-deterministic tiling must not carry the GQA schedule");
+    static_assert(std::is_same<decltype(TndDeter::deterGqaBandSchedule), std::nullptr_t>::value,
+                  "TND must not read a non-TND schedule");
+    static_assert(std::is_same<decltype(TndDeterSwizzle::deterGqaBandSchedule), std::nullptr_t>::value,
+                  "TND swizzle must not read a non-TND schedule");
+    // 1,904 bytes is the existing serialized TFFF prefix, including all previous placeholder fields.
+    EXPECT_EQ(offsetof(NonTndDeter, deterGqaBandSchedule), 1904U);
+    EXPECT_EQ(sizeof(NonTndDeter), 1904U + sizeof(GqaBandSchedule));
+    EXPECT_EQ(sizeof(NonTndDeterSwizzle), sizeof(NonTndDeter));
+    EXPECT_EQ(offsetof(NonTndDeter, deterGqaBandSchedule),
+              offsetof(NonTndDeter, tndSwizzleParam) + sizeof(std::nullptr_t));
+    EXPECT_EQ(offsetof(TndDeterSwizzle, deterGqaBandSchedule),
+              offsetof(TndDeterSwizzle, tndSwizzleParam) + sizeof(TndSwizzleParamRegbase));
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandScheduleCopyClearsInactivePhases)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    GqaBandSchedule schedule;
+    BuildGqaBandCandidate(32, 32, 32, 16, 17, 11, 16, 7, plan);
+    ASSERT_GT(plan.tailPhaseCount, 0);
+    SaveGqaBandSchedule(plan, schedule);
+    ExpectGqaBandScheduleMatchesPlan(schedule, plan);
+    // The reused candidate may retain inactive storage; the wire representation must not retain it.
+    BuildGqaBandCandidate(32, 32, 64, 32, 33, 4, 16, 2, plan);
+    ASSERT_EQ(plan.tailPhaseCount, 0);
+    for (int64_t i = plan.phaseCount; i < GQA_BAND_MAX_PHASES; ++i) {
+        plan.phases[i].m = 123;
+    }
+    for (auto& phase : plan.tailPhases) {
+        phase.n = 456;
+    }
+    SaveGqaBandSchedule(plan, schedule);
+    ExpectGqaBandScheduleMatchesPlan(schedule, plan);
+    const GqaBandPlan emptyPlan{};
+    const GqaBandSchedule emptySchedule{};
+    SaveGqaBandSchedule(emptyPlan, schedule);
+    EXPECT_EQ(std::memcmp(&schedule, &emptySchedule, sizeof(schedule)), 0);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewiseGeometryExactCoverage)
+{
+    using namespace optiling::fag;
+    // Check both triangle directions, diagonal strips, clipped columns and one-row/one-column shapes.
+    for (int64_t m = 1; m <= 8; ++m) {
+        for (int64_t n = 1; n <= 8; ++n) {
+            for (int64_t p = 1; p <= m; ++p) {
+                for (int64_t q = 1; q <= n; ++q) {
+                    SCOPED_TRACE(::testing::Message() << "m=" << m << ", n=" << n << ", p=" << p << ", q=" << q);
+                    GqaBandPlan plan;
+                    BuildGqaBandGeometry(m, n, p, q, plan);
+                    ASSERT_GT(plan.phaseCount, 0);
+                    ASSERT_LE(plan.phaseCount, GQA_BAND_MAX_PHASES);
+                    std::vector<int> visits(m * n, 0);
+                    for (int64_t phaseIdx = 0; phaseIdx < plan.phaseCount; ++phaseIdx) {
+                        const auto& phase = plan.phases[phaseIdx];
+                        for (int64_t x = 1; x <= phase.m; ++x) {
+                            for (int64_t y = 1; y <= phase.n; ++y) {
+                                if ((phase.kind == GqaBandPhaseKind::LOWER_TRIANGLE && x < y) ||
+                                    (phase.kind == GqaBandPhaseKind::UPPER_TRIANGLE && x > y)) {
+                                    continue;
+                                }
+                                const int64_t row =
+                                    x + phase.rowOffset + (phase.kind == GqaBandPhaseKind::DIAGONAL ? y - 1 : 0);
+                                const int64_t col = y + phase.colOffset;
+                                ASSERT_GE(row, 1);
+                                ASSERT_LE(row, m);
+                                ASSERT_GE(col, 1);
+                                ASSERT_LE(col, n);
+                                ++visits[(row - 1) * n + col - 1];
+                            }
+                        }
+                    }
+                    for (int64_t x = 1; x <= m; ++x) {
+                        for (int64_t y = 1; y <= n; ++y) {
+                            const bool valid = x >= y - q + 1 && x <= y + p - 1;
+                            EXPECT_EQ(visits[(x - 1) * n + y - 1], valid ? 1 : 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewiseUpperGeometryCandidates)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    BuildGqaBandGeometry(32, 64, 1, 64, plan);
+    SetGqaBandGroups(28, 4, 16, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::UPPER_TRIANGLE);
+    EXPECT_EQ(plan.totalRounds, 3632);
+
+    BuildGqaBandCandidate(28, 32, 64, 1, 64, 4, 16, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.totalRounds, 3600);
+    ASSERT_EQ(plan.phaseCount, 2);
+    EXPECT_EQ(plan.phases[0].kind, GqaBandPhaseKind::UPPER_TRIANGLE);
+    EXPECT_EQ(plan.phases[0].m, 31);
+    EXPECT_EQ(plan.phases[1].kind, GqaBandPhaseKind::RECTANGLE);
+    EXPECT_EQ(plan.phases[1].n, 33);
+
+    // Equal complete round counts must retain the previous geometry and reduction order.
+    BuildGqaBandCandidate(32, 32, 64, 1, 64, 4, 16, 2, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::UPPER_TRIANGLE);
+    EXPECT_EQ(plan.totalRounds, 3104);
+    BuildGqaBandCandidate(32, 64, 64, 1, 64, 4, 16, 1, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::UPPER_TRIANGLE);
+    EXPECT_EQ(plan.totalRounds, 4160);
+
+    // This non-upper BAND ties its reflected candidate and keeps the previous geometry.
+    BuildGqaBandCandidate(32, 32, 64, 32, 33, 4, 16, 2, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.totalRounds, 3104);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewiseUpperGeometryIncludesTail)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    BuildGqaBandCandidate(28, 32, 64, 1, 64, 5, 16, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.fullRounds, 3600);
+    EXPECT_EQ(plan.tailRounds, 1104);
+    EXPECT_EQ(plan.totalRounds, 4704);
+
+    // Full chunks tie, but the general geometry has a more expensive incomplete chunk.
+    BuildGqaBandGeneralGeometry(32, 64, 1, 64, plan);
+    SetGqaBandGroups(32, 5, 16, 2, plan);
+    EXPECT_EQ(plan.fullRounds, 1552);
+    EXPECT_EQ(plan.tailRounds, 1040);
+    EXPECT_EQ(plan.totalRounds, 4144);
+    BuildGqaBandCandidate(32, 32, 64, 1, 64, 5, 16, 2, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::UPPER_TRIANGLE);
+    EXPECT_EQ(plan.fullRounds, 1552);
+    EXPECT_EQ(plan.tailRounds, 1024);
+    EXPECT_EQ(plan.totalRounds, 4128);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewiseReflectionGuardsAndTies)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    // A worse reflected candidate must not undo the previous upper/general selection.
+    BuildGqaBandCandidate(28, 32, 64, 1, 64, 4, 16, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.totalRounds, 3600);
+    // Equal complete rounds retain the forward reduction order, including main-case ties.
+    BuildGqaBandCandidate(32, 32, 64, 32, 33, 4, 16, 2, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.totalRounds, 3104);
+    // Reflection with nonpositive normalized tokens is outside the first-version domain.
+    BuildGqaBandCandidate(32, 32, 64, 1, 32, 4, 16, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    BuildGqaBandCandidate(32, 64, 32, 32, 1, 4, 16, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    // Symmetric geometry does not need a second candidate; plan reuse resets reflected state.
+    BuildGqaBandCandidate(32, 64, 64, 1, 32, 4, 16, 2, plan);
+    ASSERT_EQ(plan.geometryMode, GqaBandGeometryMode::REVERSED_GENERAL);
+    BuildGqaBandCandidate(32, 64, 64, 2, 2, 4, 16, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::PAIRED_EDGES);
+    // A better piecewise candidate can still lose to the original folded BAND.
+    EXPECT_GT(plan.totalRounds, GqaBandLegacyRounds(32, 64, 64, 2, 2, 4, 16));
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewiseReflectedGeometryExactCoverage)
+{
+    using namespace optiling::fag;
+    for (int64_t m = 1; m <= 8; ++m) {
+        for (int64_t n = 1; n <= 8; ++n) {
+            for (int64_t p = 1; p <= m; ++p) {
+                for (int64_t q = 1; q <= n; ++q) {
+                    const int64_t reflectedP = m - n + q;
+                    const int64_t reflectedQ = n - m + p;
+                    if (reflectedP <= 0 || reflectedQ <= 0) {
+                        continue;
+                    }
+                    SCOPED_TRACE(::testing::Message() << "m=" << m << ", n=" << n << ", p=" << p << ", q=" << q);
+                    GqaBandPlan plan;
+                    BuildGqaBandGeometry(m, n, reflectedP, reflectedQ, plan);
+                    ReflectGqaBandGeometry(m, n, plan);
+                    ASSERT_GT(plan.phaseCount, 0);
+                    ASSERT_LE(plan.phaseCount, GQA_BAND_MAX_PHASES);
+                    std::vector<int> visits(m * n, 0);
+                    for (int64_t phaseIdx = 0; phaseIdx < plan.phaseCount; ++phaseIdx) {
+                        const auto& phase = plan.phases[phaseIdx];
+                        for (int64_t x = 1; x <= phase.m; ++x) {
+                            for (int64_t y = 1; y <= phase.n; ++y) {
+                                if ((phase.kind == GqaBandPhaseKind::LOWER_TRIANGLE && x < y) ||
+                                    (phase.kind == GqaBandPhaseKind::UPPER_TRIANGLE && x > y)) {
+                                    continue;
+                                }
+                                const int64_t row =
+                                    x + phase.rowOffset + (phase.kind == GqaBandPhaseKind::DIAGONAL ? y - 1 : 0);
+                                const int64_t col = y + phase.colOffset;
+                                ASSERT_GE(row, 1);
+                                ASSERT_LE(row, m);
+                                ASSERT_GE(col, 1);
+                                ASSERT_LE(col, n);
+                                ++visits[(row - 1) * n + col - 1];
+                            }
+                        }
+                    }
+                    for (int64_t x = 1; x <= m; ++x) {
+                        for (int64_t y = 1; y <= n; ++y) {
+                            const bool valid = x >= y - q + 1 && x <= y + p - 1;
+                            EXPECT_EQ(visits[(x - 1) * n + y - 1], valid ? 1 : 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Frozen pre-independent-tail construction is a test reference, not a production candidate.
+static void BuildGqaBandForwardCandidateReference(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t b,
+                                                  int64_t g, int64_t groups, optiling::fag::GqaBandPlan& plan)
+{
+    using namespace optiling::fag;
+    BuildGqaBandGeometry(m, n, p, q, plan);
+    SetGqaBandGroups(k, b, g, groups, plan);
+    if (p != 1 || q != n) {
+        return;
+    }
+    const int64_t originalRounds = plan.totalRounds;
+    BuildGqaBandGeneralGeometry(m, n, p, q, plan);
+    SetGqaBandGroups(k, b, g, groups, plan);
+    // Include all phases and the incomplete chunk. Ties retain the original
+    // upper-triangle specialization, not a different reduction order.
+    if (plan.totalRounds >= originalRounds) {
+        BuildGqaBandGeometry(m, n, p, q, plan);
+        SetGqaBandGroups(k, b, g, groups, plan);
+    }
+}
+
+static void BuildGqaBandUniformCandidateReference(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t b,
+                                                  int64_t g, int64_t groups, optiling::fag::GqaBandPlan& plan)
+{
+    using namespace optiling::fag;
+    BuildGqaBandForwardCandidateReference(k, m, n, p, q, b, g, groups, plan);
+    const int64_t reflectedP = m - n + q;
+    const int64_t reflectedQ = n - m + p;
+    // The existing builders require positive p/q. Self-symmetric shapes have
+    // identical costs, so retain their original geometry without rebuilding it.
+    if (reflectedP <= 0 || reflectedQ <= 0 || (reflectedP == p && reflectedQ == q)) {
+        return;
+    }
+    const int64_t forwardRounds = plan.totalRounds;
+    BuildGqaBandForwardCandidateReference(k, m, n, reflectedP, reflectedQ, b, g, groups, plan);
+    if (plan.totalRounds < forwardRounds) {
+        ReflectGqaBandGeometry(m, n, plan);
+    } else {
+        // Include every phase and the incomplete chunk; ties keep the forward mapping.
+        BuildGqaBandForwardCandidateReference(k, m, n, p, q, b, g, groups, plan);
+    }
+}
+
+// Frozen pre-cache reducer checks serialized order and independent-tail ties.
+static void BuildGqaBandCandidateUncachedReference(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t b,
+                                                   int64_t g, int64_t groups, optiling::fag::GqaBandPlan& plan)
+{
+    using namespace optiling::fag;
+    constexpr GqaBandGeometryMode candidateModes[] = {GqaBandGeometryMode::UPPER_TRIANGLE,
+                                                      GqaBandGeometryMode::GENERAL,
+                                                      GqaBandGeometryMode::REVERSED_UPPER_TRIANGLE,
+                                                      GqaBandGeometryMode::REVERSED_GENERAL,
+                                                      GqaBandGeometryMode::PAIRED_EDGES,
+                                                      GqaBandGeometryMode::GENERAL_PAIRED_EDGES};
+    GqaBandGeometryMode uniformMode = GqaBandGeometryMode::GENERAL;
+    GqaBandGeometryMode fullMode = GqaBandGeometryMode::GENERAL;
+    GqaBandGeometryMode tailMode = GqaBandGeometryMode::GENERAL;
+    int64_t uniformRounds = 0;
+    int64_t fullRounds = 0;
+    int64_t tailRounds = 0;
+    bool firstCandidate = true;
+    const int64_t fullChunks = b / groups;
+    for (const GqaBandGeometryMode mode : candidateModes) {
+        if (!BuildGqaBandGeometryByMode(m, n, p, q, mode, plan)) {
+            continue;
+        }
+        SetGqaBandGroups(k, b, g, groups, plan);
+        if (mode == GqaBandGeometryMode::GENERAL_PAIRED_EDGES) {
+            const int64_t previousRounds = GqaBandMin(uniformRounds, fullChunks * fullRounds + tailRounds);
+            const int64_t combinedRounds =
+                fullChunks * GqaBandMin(fullRounds, plan.fullRounds) + GqaBandMin(tailRounds, plan.tailRounds);
+            if (GqaBandMin(plan.totalRounds, combinedRounds) >= previousRounds) {
+                // A new uniform geometry can tie the previous mixed full/tail plan.
+                // Keep all previous modes on a total-round tie, not just per-part ties.
+                continue;
+            }
+        }
+        if (firstCandidate || plan.totalRounds < uniformRounds) {
+            uniformMode = mode;
+            uniformRounds = plan.totalRounds;
+        }
+        if (firstCandidate || plan.fullRounds < fullRounds) {
+            fullMode = mode;
+            fullRounds = plan.fullRounds;
+        }
+        if (firstCandidate || plan.tailRounds < tailRounds) {
+            tailMode = mode;
+            tailRounds = plan.tailRounds;
+        }
+        firstCandidate = false;
+    }
+    const int64_t tailGroups = b % groups;
+    const int64_t independentRounds = fullChunks * fullRounds + tailRounds;
+    if (tailGroups == 0 || independentRounds >= uniformRounds) {
+        if (plan.geometryMode != uniformMode) {
+            BuildGqaBandGeometryByMode(m, n, p, q, uniformMode, plan);
+            SetGqaBandGroups(k, b, g, groups, plan);
+        }
+        ConfigureGqaBandDensePhases(plan);
+        return;
+    }
+
+    BuildGqaBandGeometryByMode(m, n, p, q, tailMode, plan);
+    SetGqaBandGroups(k, tailGroups, g, tailGroups, plan);
+    const int64_t tailPhaseCount = plan.phaseCount;
+    const GqaBandGeometryMode tailGeometryMode = plan.geometryMode;
+    for (int64_t i = 0; i < tailPhaseCount; ++i) {
+        plan.tailPhases[i] = plan.phases[i];
+        plan.tailPhases[i].tailRounds = plan.phases[i].fullRounds;
+    }
+    // The builders only reset active metadata and the full-phase array. Preserve
+    // the saved tail array while rebuilding the full chunks in the same object.
+    BuildGqaBandGeometryByMode(m, n, p, q, fullMode, plan);
+    SetGqaBandGroups(k, groups, g, groups, plan);
+    plan.b = b;
+    plan.tailPhaseCount = tailPhaseCount;
+    plan.tailGeometryMode = tailGeometryMode;
+    plan.tailRounds = tailRounds;
+    plan.totalRounds = independentRounds;
+    ConfigureGqaBandDensePhases(plan);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandCacheRetainsRoundFirstWireAndTailTies)
+{
+    using namespace optiling::fag;
+    struct Domain {
+        int64_t k, m, n, p, q, b, g;
+    };
+    const Domain domains[] = {
+        {32, 32, 32, 16, 17, 11, 16}, {32, 32, 64, 1, 64, 5, 16}, {8, 4, 4, 4, 3, 5, 2},
+        {32, 64, 96, 64, 65, 5, 2},   {32, 14, 14, 7, 14, 36, 5}, {8, 17, 29, 4, 7, 19, 3},
+    };
+    for (const auto& d : domains) {
+        GqaBandCandidateCache cache(d.k, d.m, d.n, d.p, d.q, d.b, d.g);
+        std::vector<int64_t> groups;
+        for (int64_t h = 1; h <= std::min(d.b, d.k); ++h) {
+            groups.push_back(h);
+        }
+        if (d.b > d.k) {
+            groups.push_back(d.b);
+        }
+        for (int pass = 0; pass < 2; ++pass) {
+            for (const int64_t h : groups) {
+                SCOPED_TRACE(::testing::Message() << d.k << "," << d.m << "," << d.n << "," << d.b << "," << h);
+                GqaBandPlan cached, previous;
+                cache.BuildLegacy(h, cached);
+                BuildGqaBandCandidateUncachedReference(d.k, d.m, d.n, d.p, d.q, d.b, d.g, h, previous);
+                GqaBandSchedule actual{}, expected{};
+                SaveGqaBandSchedule(cached, actual);
+                SaveGqaBandSchedule(previous, expected);
+                EXPECT_EQ(std::memcmp(&actual, &expected, sizeof(actual)), 0);
+                EXPECT_EQ(cached.geometryMode, previous.geometryMode);
+                EXPECT_EQ(cached.tailGeometryMode, previous.tailGeometryMode);
+            }
+            // Reusing the cache in the opposite order must not alias a tail
+            // summary or change which uniform/mixed plan wins a tie.
+            std::reverse(groups.begin(), groups.end());
+        }
+    }
+    // The public one-group builder also supports H>K with a tail larger than K.
+    // Neither summary may alias the other merely because both exceed K.
+    for (int64_t h : {36, 40, 50}) {
+        GqaBandPlan current, previous;
+        BuildGqaBandCandidate(3, 15, 10, 13, 4, 61, 4, h, current);
+        BuildGqaBandCandidateUncachedReference(3, 15, 10, 13, 4, 61, 4, h, previous);
+        GqaBandSchedule actual{}, expected{};
+        SaveGqaBandSchedule(current, actual);
+        SaveGqaBandSchedule(previous, expected);
+        EXPECT_EQ(std::memcmp(&actual, &expected, sizeof(actual)), 0);
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandFoldedDomainPreservesWireAndPhysicalOrigin)
+{
+    using namespace optiling::fag;
+    const GqaBandPhaseKind kinds[] = {GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER,
+                                      GqaBandPhaseKind::FOLDED_LOWER_COLUMN_OWNER,
+                                      GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER};
+    for (const auto kind : kinds) {
+        for (int64_t origin : {0, 1, 7}) {
+            const bool upper = kind == GqaBandPhaseKind::FOLDED_UPPER_COLUMN_OWNER;
+            const bool whole = kind == GqaBandPhaseKind::BAND_FOLDED_COLUMN_OWNER;
+            const GqaBandDomain domain{
+                9, 13, upper ? 1 : 3, whole || upper ? 5 : 1, !whole && !upper ? origin : 0, upper ? origin : 0};
+            GqaBandPlan encoded, reference;
+            AppendGqaBandFoldedPhase(encoded, kind, domain);
+            // Expected serialized fields retain the established tag-specific ABI.
+            AppendGqaBandPhase(reference, kind, 9, 13, whole ? 3 : (upper ? 5 : origin),
+                               whole ? 5 : (upper ? origin : 3));
+            ASSERT_EQ(encoded.phaseCount, 1);
+            EXPECT_EQ(std::memcmp(&encoded.phases[0], &reference.phases[0], sizeof(GqaBandPhase)), 0);
+            const auto decoded = DecodeGqaBandFoldedDomain(encoded.phases[0]);
+            EXPECT_EQ(decoded.m, domain.m);
+            EXPECT_EQ(decoded.n, domain.n);
+            EXPECT_EQ(decoded.p, domain.p);
+            EXPECT_EQ(decoded.q, domain.q);
+            EXPECT_EQ(decoded.rowOrigin, domain.rowOrigin);
+            EXPECT_EQ(decoded.colOrigin, domain.colOrigin);
+            for (int64_t h : {1, 2, 3}) {
+                SetGqaBandGroups(32, 5, 3, h, encoded);
+                SetGqaBandGroups(32, 5, 3, h, reference);
+                GqaBandSchedule actual{}, expected{};
+                SaveGqaBandSchedule(encoded, actual);
+                SaveGqaBandSchedule(reference, expected);
+                EXPECT_EQ(std::memcmp(&actual, &expected, sizeof(actual)), 0);
+                EXPECT_EQ(GqaBandKvRunUpperBound(encoded), 5 * std::min(domain.n, domain.m + domain.q - 1));
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewiseIndependentTailResetAndTie)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    BuildGqaBandCandidate(32, 32, 32, 16, 17, 11, 16, 7, plan);
+    ASSERT_GT(plan.tailPhaseCount, 0);
+    // A full-chunk-only plan must not retain the preceding mixed tail metadata.
+    BuildGqaBandCandidate(32, 32, 32, 16, 17, 14, 16, 7, plan);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.tailRounds, 0);
+    EXPECT_EQ(plan.totalRounds, 5544);
+
+    BuildGqaBandCandidate(32, 32, 32, 16, 17, 11, 16, 7, plan);
+    ASSERT_GT(plan.tailPhaseCount, 0);
+    // Independent full/tail optima tie the existing uniform schedule here.
+    BuildGqaBandCandidate(32, 32, 64, 1, 64, 5, 16, 2, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::UPPER_TRIANGLE);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.fullRounds, 1552);
+    EXPECT_EQ(plan.tailRounds, 1024);
+    EXPECT_EQ(plan.totalRounds, 4128);
+
+    // Single full chunks tie; changing only their direction gives no total-round benefit.
+    // Keep the complete old reflected schedule, not a mixed forward/reflected plan.
+    BuildGqaBandCandidate(8, 4, 4, 4, 3, 5, 2, 3, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::REVERSED_GENERAL);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.totalRounds, 32);
+
+    BuildGqaBandCandidate(32, 32, 32, 16, 17, 11, 16, 7, plan);
+    BuildGqaBandUniformCandidateReference(32, 32, 32, 16, 17, 11, 16, 7, plan);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.totalRounds, 4360);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPiecewiseIndependentTailCoverage)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    BuildGqaBandCandidate(32, 32, 32, 16, 17, 11, 16, 7, plan);
+    ASSERT_EQ(plan.phaseCount, 4);
+    ASSERT_EQ(plan.tailPhaseCount, 4);
+    for (int64_t tail = 0; tail < 2; ++tail) {
+        std::vector<int> visits(32 * 32, 0);
+        const int64_t count = tail == 0 ? plan.phaseCount : plan.tailPhaseCount;
+        for (int64_t i = 0; i < count; ++i) {
+            const auto& phase = tail == 0 ? plan.phases[i] : plan.tailPhases[i];
+            for (int64_t x = 1; x <= phase.m; ++x) {
+                for (int64_t y = 1; y <= phase.n; ++y) {
+                    if ((phase.kind == GqaBandPhaseKind::LOWER_TRIANGLE && x < y) ||
+                        (phase.kind == GqaBandPhaseKind::UPPER_TRIANGLE && x > y)) {
+                        continue;
+                    }
+                    const int64_t row = x + phase.rowOffset + (phase.kind == GqaBandPhaseKind::DIAGONAL ? y - 1 : 0);
+                    const int64_t col = y + phase.colOffset;
+                    ASSERT_GE(row, 1);
+                    ASSERT_LE(row, 32);
+                    ASSERT_GE(col, 1);
+                    ASSERT_LE(col, 32);
+                    ++visits[(row - 1) * 32 + col - 1];
+                }
+            }
+        }
+        for (int64_t x = 1; x <= 32; ++x) {
+            for (int64_t y = 1; y <= 32; ++y) {
+                EXPECT_EQ(visits[(x - 1) * 32 + y - 1], (x >= y - 16 && x <= y + 15) ? 1 : 0);
+            }
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPairedEdgesGeometryCoverageAndGuards)
+{
+    using namespace optiling::fag;
+    for (int64_t width = 1; width <= 8; ++width) {
+        const int64_t minimum = std::max(2 * width, 4 * width - 2);
+        for (int64_t m = minimum; m <= minimum + 5; ++m) {
+            GqaBandPlan plan;
+            ASSERT_TRUE(BuildGqaBandGeometryByMode(m, m, width, width, GqaBandGeometryMode::PAIRED_EDGES, plan));
+            ASSERT_EQ(plan.geometryMode, GqaBandGeometryMode::PAIRED_EDGES);
+            ASSERT_EQ(plan.phases[0].kind, GqaBandPhaseKind::EDGE_PAIR);
+            // The two physical edge regions must have disjoint row and column domains.
+            EXPECT_LT(2 * width - 1, m - 2 * width + 2);
+            EXPECT_LT(width, m - width + 1);
+            std::vector<int> visits(m * m, 0);
+            for (int64_t i = 0; i < plan.phaseCount; ++i) {
+                const auto& phase = plan.phases[i];
+                for (int64_t x = 1; x <= phase.m; ++x) {
+                    for (int64_t y = 1; y <= phase.n; ++y) {
+                        int64_t row = x;
+                        int64_t col = y;
+                        if (phase.kind == GqaBandPhaseKind::EDGE_PAIR) {
+                            if (x > phase.n - 1 + y) {
+                                row += phase.rowOffset;
+                                col += phase.colOffset;
+                            }
+                        } else {
+                            ASSERT_EQ(phase.kind, GqaBandPhaseKind::DIAGONAL);
+                            row += y - 1 + phase.rowOffset;
+                            col += phase.colOffset;
+                        }
+                        ASSERT_GE(row, 1);
+                        ASSERT_LE(row, m);
+                        ASSERT_GE(col, 1);
+                        ASSERT_LE(col, m);
+                        ++visits[(row - 1) * m + col - 1];
+                    }
+                }
+            }
+            for (int64_t x = 1; x <= m; ++x) {
+                for (int64_t y = 1; y <= m; ++y) {
+                    EXPECT_EQ(visits[(x - 1) * m + y - 1], (x >= y - width + 1 && x <= y + width - 1) ? 1 : 0);
+                }
+            }
+        }
+        GqaBandPlan rejected;
+        EXPECT_FALSE(BuildGqaBandGeometryByMode(minimum - 1, minimum - 1, width, width,
+                                                GqaBandGeometryMode::PAIRED_EDGES, rejected));
+        EXPECT_FALSE(BuildGqaBandGeometryByMode(minimum + 1, minimum, width, width, GqaBandGeometryMode::PAIRED_EDGES,
+                                                rejected));
+        EXPECT_FALSE(BuildGqaBandGeometryByMode(minimum + 1, minimum + 1, width, width + 1,
+                                                GqaBandGeometryMode::PAIRED_EDGES, rejected));
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandPairedEdgesIndependentTailAndReset)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    BuildGqaBandCandidate(36, 64, 64, 16, 16, 7, 3, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.tailGeometryMode, GqaBandGeometryMode::PAIRED_EDGES);
+    EXPECT_EQ(plan.phaseCount, 5);
+    EXPECT_EQ(plan.tailPhaseCount, 2);
+    EXPECT_EQ(plan.fullRounds, 602);
+    EXPECT_EQ(plan.tailRounds, 436);
+    EXPECT_EQ(plan.totalRounds, 1038);
+    EXPECT_EQ(plan.tailPhases[0].kind, GqaBandPhaseKind::EDGE_PAIR);
+
+    // The reverse mixture also matters: pair complete chunks but retain the old tail.
+    BuildGqaBandCandidate(36, 32, 32, 8, 8, 16, 2, 9, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::PAIRED_EDGES);
+    EXPECT_EQ(plan.tailGeometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.phaseCount, 2);
+    EXPECT_EQ(plan.tailPhaseCount, 5);
+    EXPECT_EQ(plan.fullRounds, 212);
+    EXPECT_EQ(plan.tailRounds, 186);
+    EXPECT_EQ(plan.totalRounds, 398);
+    EXPECT_EQ(plan.phases[0].kind, GqaBandPhaseKind::EDGE_PAIR);
+
+    BuildGqaBandCandidate(32, 128, 128, 32, 32, 1, 16, 1, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::PAIRED_EDGES);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.tailRounds, 0);
+    EXPECT_EQ(plan.totalRounds, 3536);
+    // Width one is safe, but an equal-cost pairing must retain the older mapping.
+    BuildGqaBandCandidate(4, 2, 2, 1, 1, 5, 2, 5, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.totalRounds, 6);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandGeneralPairedEdgesCoverageAndGuards)
+{
+    using namespace optiling::fag;
+    int64_t qBoundCases = 0;
+    int64_t pBoundCases = 0;
+    for (int64_t m = 1; m <= 14; ++m) {
+        for (int64_t n = 1; n <= 14; ++n) {
+            for (int64_t p = 1; p <= std::min(m, int64_t{5}); ++p) {
+                for (int64_t q = 1; q <= std::min(n, int64_t{5}); ++q) {
+                    SCOPED_TRACE(::testing::Message() << "m=" << m << ", n=" << n << ", p=" << p << ", q=" << q);
+                    const int64_t validRows = std::min(m, n + p - 1);
+                    const int64_t validColumns = std::min(n, m + q - 1);
+                    const int64_t width = std::min(q, validColumns + p - validRows);
+                    const bool oldPaired = m == n && p == q && m >= std::max(2 * p, 4 * p - 2);
+                    const bool expected =
+                        !oldPaired && width > 0 && validColumns >= 2 * width && validColumns >= p + q + 2 * width - 2;
+                    GqaBandPlan plan;
+                    ASSERT_EQ(BuildGqaBandGeometryByMode(m, n, p, q, GqaBandGeometryMode::GENERAL_PAIRED_EDGES, plan),
+                              expected);
+                    if (!expected) {
+                        continue;
+                    }
+                    ASSERT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL_PAIRED_EDGES);
+                    ASSERT_GE(plan.phaseCount, 1);
+                    ASSERT_LE(plan.phaseCount, GQA_BAND_MAX_PHASES);
+                    EXPECT_LT(p + width - 1, validColumns - width - q + 2);
+                    EXPECT_LT(width, validColumns - width + 1);
+                    if (width == q) {
+                        ASSERT_EQ(plan.phases[0].kind, GqaBandPhaseKind::EDGE_PAIR_Q_BOUND);
+                        ++qBoundCases;
+                    } else {
+                        ASSERT_EQ(plan.phases[0].kind, GqaBandPhaseKind::EDGE_PAIR_P_BOUND);
+                        ++pBoundCases;
+                    }
+                    std::vector<int> visits(m * n, 0);
+                    for (int64_t i = 0; i < plan.phaseCount; ++i) {
+                        const auto& phase = plan.phases[i];
+                        for (int64_t x = 1; x <= phase.m; ++x) {
+                            for (int64_t y = 1; y <= phase.n; ++y) {
+                                if ((phase.kind == GqaBandPhaseKind::LOWER_TRIANGLE && x < y) ||
+                                    (phase.kind == GqaBandPhaseKind::UPPER_TRIANGLE && x > y)) {
+                                    continue;
+                                }
+                                int64_t row = x;
+                                int64_t col = y;
+                                if (phase.kind == GqaBandPhaseKind::EDGE_PAIR_Q_BOUND ||
+                                    phase.kind == GqaBandPhaseKind::EDGE_PAIR_P_BOUND) {
+                                    const int64_t bound = phase.kind == GqaBandPhaseKind::EDGE_PAIR_Q_BOUND ?
+                                                              phase.colOffset - phase.rowOffset - phase.n :
+                                                              phase.m + phase.rowOffset - phase.colOffset - 1;
+                                    if (x > bound + y) {
+                                        row += phase.rowOffset;
+                                        col += phase.colOffset;
+                                    }
+                                } else {
+                                    row += phase.rowOffset + (phase.kind == GqaBandPhaseKind::DIAGONAL ? y - 1 : 0);
+                                    col += phase.colOffset;
+                                }
+                                ASSERT_GE(row, 1);
+                                ASSERT_LE(row, m);
+                                ASSERT_GE(col, 1);
+                                ASSERT_LE(col, n);
+                                ++visits[(row - 1) * n + col - 1];
+                            }
+                        }
+                    }
+                    for (int64_t x = 1; x <= m; ++x) {
+                        for (int64_t y = 1; y <= n; ++y) {
+                            EXPECT_EQ(visits[(x - 1) * n + y - 1], (x >= y - q + 1 && x <= y + p - 1) ? 1 : 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    EXPECT_GT(qBoundCases, 0);
+    EXPECT_GT(pBoundCases, 0);
+    // Column ranges can be disjoint while the paired row ranges still overlap.
+    // This shape requires 11 valid columns, but only has 9: reject it for dQ safety.
+    GqaBandPlan rejected;
+    EXPECT_FALSE(BuildGqaBandGeometryByMode(6, 9, 1, 4, GqaBandGeometryMode::GENERAL_PAIRED_EDGES, rejected));
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandGeneralPairedEdgesMixedTieAndReset)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    BuildGqaBandCandidate(32, 31, 32, 2, 2, 33, 3, 21, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL_PAIRED_EDGES);
+    EXPECT_EQ(plan.tailGeometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.fullRounds, 187);
+    EXPECT_EQ(plan.tailRounds, 111);
+    EXPECT_EQ(plan.totalRounds, 298);
+    EXPECT_EQ(plan.phaseCount, 3);
+    EXPECT_EQ(plan.tailPhaseCount, 3);
+
+    BuildGqaBandCandidate(7, 73, 78, 5, 7, 5, 2, 4, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::REVERSED_GENERAL);
+    EXPECT_EQ(plan.tailGeometryMode, GqaBandGeometryMode::GENERAL_PAIRED_EDGES);
+    EXPECT_EQ(plan.fullRounds, 910);
+    EXPECT_EQ(plan.tailRounds, 246);
+    EXPECT_EQ(plan.totalRounds, 1156);
+    EXPECT_EQ(plan.phaseCount, 5);
+    EXPECT_EQ(plan.tailPhaseCount, 4);
+
+    // A new uniform candidate ties the old mixed plan exactly. Retain the old
+    // full/tail geometries, not merely the same total number of rounds.
+    GqaBandPlan uniform;
+    ASSERT_TRUE(BuildGqaBandGeometryByMode(62, 67, 32, 6, GqaBandGeometryMode::GENERAL_PAIRED_EDGES, uniform));
+    SetGqaBandGroups(28, 29, 2, 26, uniform);
+    EXPECT_EQ(uniform.fullRounds, 3391);
+    EXPECT_EQ(uniform.tailRounds, 478);
+    EXPECT_EQ(uniform.totalRounds, 3869);
+    BuildGqaBandCandidate(28, 62, 67, 32, 6, 29, 2, 26, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.tailGeometryMode, GqaBandGeometryMode::REVERSED_GENERAL);
+    EXPECT_EQ(plan.fullRounds, uniform.fullRounds);
+    EXPECT_EQ(plan.tailRounds, uniform.tailRounds);
+    EXPECT_EQ(plan.totalRounds, uniform.totalRounds);
+    EXPECT_EQ(plan.phaseCount, 4);
+    EXPECT_EQ(plan.tailPhaseCount, 4);
+
+    BuildGqaBandCandidate(4, 53, 54, 1, 3, 5, 2, 5, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL_PAIRED_EDGES);
+    EXPECT_EQ(plan.phases[0].kind, GqaBandPhaseKind::EDGE_PAIR_P_BOUND);
+    EXPECT_EQ(plan.totalRounds, 398);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.tailRounds, 0);
+    BuildGqaBandCandidate(32, 128, 128, 32, 32, 1, 16, 1, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::PAIRED_EDGES);
+    EXPECT_EQ(plan.phases[0].kind, GqaBandPhaseKind::EDGE_PAIR);
+    EXPECT_EQ(plan.totalRounds, 3536);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandDenseBatchMajorGuards)
+{
+    using namespace optiling::fag;
+    struct GuardCase {
+        int64_t rowDelta;
+        int64_t colDelta;
+        int64_t groups;
+        GqaBandPhaseKind kind;
+        bool enabled;
+    };
+    const GuardCase cases[] = {
+        {0, 0, 2, GqaBandPhaseKind::RECTANGLE, true},   {-1, 0, 2, GqaBandPhaseKind::RECTANGLE, false},
+        {0, -1, 2, GqaBandPhaseKind::RECTANGLE, false}, {0, 1, 2, GqaBandPhaseKind::RECTANGLE, false},
+        {0, 0, 1, GqaBandPhaseKind::RECTANGLE, false},  {0, 0, 2, GqaBandPhaseKind::DIAGONAL, false},
+        {0, 0, 2, GqaBandPhaseKind::EDGE_PAIR, false},  {0, 0, 2, GqaBandPhaseKind::UPPER_TRIANGLE, false},
+    };
+    for (int64_t k : {28, 32, 36}) {
+        for (const auto& testCase : cases) {
+            GqaBandPlan plan;
+            AppendGqaBandPhase(plan, testCase.kind, k + testCase.rowDelta, 2 * k + testCase.colDelta, 3, 5);
+            SetGqaBandGroups(k, testCase.groups, 2, testCase.groups, plan);
+            const int64_t rounds = plan.totalRounds;
+            ConfigureGqaBandDensePhases(plan);
+            EXPECT_EQ(plan.phases[0].kind, testCase.enabled ? GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR : testCase.kind);
+            EXPECT_EQ(plan.totalRounds, rounds);
+            EXPECT_EQ(plan.phases[0].rowOffset, 3);
+            EXPECT_EQ(plan.phases[0].colOffset, 5);
+            EXPECT_EQ(plan.tailPhaseCount, 0);
+            EXPECT_EQ(plan.tailRounds, 0);
+        }
+        // n == k has no repeated column wave and must retain the old mode.
+        GqaBandPlan singleWave;
+        AppendGqaBandPhase(singleWave, GqaBandPhaseKind::RECTANGLE, k, k, 0, 0);
+        SetGqaBandGroups(k, 2, 2, 2, singleWave);
+        ConfigureGqaBandDensePhases(singleWave);
+        EXPECT_EQ(singleWave.phases[0].kind, GqaBandPhaseKind::RECTANGLE);
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandDenseBatchMajorFullTailAndReset)
+{
+    using namespace optiling::fag;
+    for (int64_t b : {4, 5, 6}) {
+        GqaBandPlan plan;
+        BuildGqaBandGeneralGeometry(64, 96, 64, 65, plan);
+        SetGqaBandGroups(32, b, 2, 4, plan);
+        const int64_t rounds = plan.totalRounds;
+        const int64_t fullRounds = plan.fullRounds;
+        const int64_t tailRounds = plan.tailRounds;
+        const int64_t tailGroups = b % 4;
+        if (tailGroups > 0) {
+            GqaBandPlan tail;
+            BuildGqaBandGeneralGeometry(64, 96, 64, 65, tail);
+            SetGqaBandGroups(32, tailGroups, 2, tailGroups, tail);
+            plan.tailPhaseCount = tail.phaseCount;
+            for (int64_t i = 0; i < tail.phaseCount; ++i) {
+                plan.tailPhases[i] = tail.phases[i];
+                plan.tailPhases[i].tailRounds = tail.phases[i].fullRounds;
+            }
+        }
+        ConfigureGqaBandDensePhases(plan);
+        ASSERT_EQ(plan.phases[0].kind, GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR);
+        EXPECT_EQ(plan.totalRounds, rounds);
+        EXPECT_EQ(plan.fullRounds, fullRounds);
+        EXPECT_EQ(plan.tailRounds, tailRounds);
+        EXPECT_EQ(plan.phases[0].fullRounds % plan.groupsPerChunk, 0);
+        if (tailGroups > 0) {
+            EXPECT_EQ(plan.tailPhases[0].kind,
+                      tailGroups > 1 ? GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR : GqaBandPhaseKind::RECTANGLE);
+        } else {
+            EXPECT_EQ(plan.tailPhaseCount, 0);
+        }
+        // A reused plan must not keep a batch-major tag after its group count changes.
+        plan.groupsPerChunk = 1;
+        ConfigureGqaBandDensePhases(plan);
+        EXPECT_EQ(plan.phases[0].kind, GqaBandPhaseKind::RECTANGLE);
+        if (plan.tailPhaseCount > 0) {
+            EXPECT_EQ(plan.tailPhases[0].kind, GqaBandPhaseKind::RECTANGLE);
+        }
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandDenseBatchMajorCandidateRounds)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan;
+    GqaBandPlan previous;
+    // The complete chunks share a tagged geometry with a one-group tail.
+    BuildGqaBandCandidate(32, 64, 96, 64, 65, 5, 2, 2, plan);
+    BuildGqaBandUniformCandidateReference(32, 64, 96, 64, 65, 5, 2, 2, previous);
+    ASSERT_EQ(plan.phaseCount, 3);
+    EXPECT_EQ(plan.phases[0].kind, GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR);
+    EXPECT_EQ(previous.phases[0].kind, GqaBandPhaseKind::RECTANGLE);
+    EXPECT_EQ(plan.geometryMode, previous.geometryMode);
+    EXPECT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(plan.fullRounds, 706);
+    EXPECT_EQ(plan.tailRounds, 384);
+    EXPECT_EQ(plan.totalRounds, 1796);
+    EXPECT_EQ(plan.totalRounds, previous.totalRounds);
+    for (int64_t i = 0; i < plan.phaseCount; ++i) {
+        EXPECT_EQ(plan.phases[i].m, previous.phases[i].m);
+        EXPECT_EQ(plan.phases[i].n, previous.phases[i].n);
+        EXPECT_EQ(plan.phases[i].rowOffset, previous.phases[i].rowOffset);
+        EXPECT_EQ(plan.phases[i].colOffset, previous.phases[i].colOffset);
+        EXPECT_EQ(plan.phases[i].fullRounds, previous.phases[i].fullRounds);
+        EXPECT_EQ(plan.phases[i].tailRounds, previous.phases[i].tailRounds);
+    }
+    // This last rectangle shares physical columns with the preceding triangle.
+    BuildGqaBandCandidate(32, 184, 215, 33, 116, 2, 4, 2, plan);
+    ASSERT_EQ(plan.phaseCount, 5);
+    EXPECT_EQ(plan.phases[4].kind, GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR);
+    EXPECT_EQ(plan.totalRounds, 5820);
+    EXPECT_EQ(plan.tailRounds, 0);
+    // Independent full/tail geometries require configuring both physical phase arrays.
+    BuildGqaBandCandidate(28, 69, 120, 44, 82, 9, 4, 7, plan);
+    EXPECT_EQ(plan.geometryMode, GqaBandGeometryMode::GENERAL);
+    EXPECT_EQ(plan.tailGeometryMode, GqaBandGeometryMode::REVERSED_GENERAL);
+    ASSERT_EQ(plan.phaseCount, 5);
+    ASSERT_EQ(plan.tailPhaseCount, 5);
+    EXPECT_EQ(plan.phases[2].kind, GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR);
+    EXPECT_EQ(plan.tailPhases[2].kind, GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR);
+    EXPECT_EQ(plan.fullRounds, 7365);
+    EXPECT_EQ(plan.tailRounds, 2126);
+    EXPECT_EQ(plan.totalRounds, 9491);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandHeadInnerRoundFormulaAndBijection)
+{
+    using namespace optiling::fag;
+    // Main case: H=33, G=16. All cores use the same source round, including the wraparound.
+    EXPECT_EQ(GqaBandHeadInnerRound(1, 33, 16, 1), 2);
+    EXPECT_EQ(GqaBandHeadInnerRound(16, 33, 16, 1), 497);
+    EXPECT_EQ(GqaBandHeadInnerRound(17, 33, 16, 1), 3);
+    EXPECT_EQ(GqaBandHeadInnerRound(513, 33, 16, 1), 1);
+    EXPECT_EQ(GqaBandHeadInnerRound(528, 33, 16, 1), 496);
+    EXPECT_EQ(GqaBandHeadInnerRound(529, 33, 16, 1), 530);
+
+    for (const int64_t span : {1, 2, 5, 33}) {
+        for (const int64_t g : {1, 2, 3, 16}) {
+            for (const int64_t shift : {int64_t(0), int64_t(1), span - 1}) {
+                SCOPED_TRACE(::testing::Message() << "H=" << span << ", G=" << g << ", shift=" << shift);
+                const int64_t period = span * g;
+                const int64_t rounds = 3 * period;
+                std::vector<bool> seen(rounds, false);
+                for (int64_t r = 1; r <= rounds; ++r) {
+                    const int64_t block = (r - 1) / period;
+                    const int64_t local = (r - 1) % period;
+                    const int64_t expected = block * period + (local % g) * span + (local / g + shift) % span + 1;
+                    const int64_t source = GqaBandHeadInnerRound(r, span, g, shift);
+                    ASSERT_EQ(source, expected);
+                    ASSERT_GE(source, 1);
+                    ASSERT_LE(source, rounds);
+                    EXPECT_EQ((source - 1) / period, block);
+                    EXPECT_FALSE(seen[source - 1]);
+                    seen[source - 1] = true;
+                    const int64_t sourceLocal = (source - 1) % period;
+                    const int64_t spatial = (sourceLocal % span + span - shift % span) % span;
+                    EXPECT_EQ(block * period + spatial * g + sourceLocal / span + 1, r);
+                }
+                for (const bool visited : seen) {
+                    EXPECT_TRUE(visited);
+                }
+            }
+        }
+    }
+    EXPECT_EQ(GqaBandHeadInnerRound(0, 33, 16, 1), 0);
+    EXPECT_EQ(GqaBandHeadInnerRound(-1, 33, 16, 1), -1);
+    EXPECT_EQ(GqaBandHeadInnerRound(7, 0, 16, 1), 7);
+    EXPECT_EQ(GqaBandHeadInnerRound(7, 33, 0, 1), 7);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandTriangleHeadInnerSectionBoundaries)
+{
+    using namespace optiling::fag;
+    struct Section {
+        int64_t repeats;
+        int64_t span;
+        int64_t shift;
+        bool transpose;
+    };
+    struct TriangleCase {
+        int64_t k;
+        int64_t size;
+        int64_t groups;
+        int64_t g;
+        std::vector<Section> sections;
+    };
+    // Independently enumerated by FAG_Band_GQA_0906_v2.py. Each span excludes G.
+    // Cover rm1/full groups, repeated rm2/pairs, rm3/odd group and unchanged rm4/ell tail.
+    const TriangleCase cases[] = {
+        {8, 17, 8, 3, {{1, 153, 0, true}}},
+        {8, 17, 17, 3, {{2, 153, 0, true}, {1, 19, 0, true}, {1, 1, 0, false}}},
+        {8, 19, 3, 3, {{2, 23, 0, true}, {1, 23, 0, true}, {1, 3, 0, false}}},
+        {8, 9, 7, 3, {{3, 11, 2, true}, {1, 9, 0, true}, {1, 1, 0, false}}},
+        {8, 24, 3, 3, {{3, 25, 0, true}, {1, 41, 0, true}}},
+        {8, 7, 3, 3, {{1, 14, 0, false}}},
+        {32, 32, 2, 16, {{1, 33, 1, true}}},
+        {28, 32, 2, 16, {{1, 37, 5, true}, {1, 5, 0, false}}},
+        {36, 32, 2, 16, {{1, 33, 0, false}}},
+    };
+    for (const auto& testCase : cases) {
+        SCOPED_TRACE(::testing::Message() << "k=" << testCase.k << ", size=" << testCase.size
+                                          << ", groups=" << testCase.groups << ", G=" << testCase.g);
+        const int64_t rounds = GqaBandTriangleRounds(testCase.k, testCase.size, testCase.groups, testCase.g);
+        std::vector<bool> seen(rounds, false);
+        int64_t offset = 0;
+        for (const auto& section : testCase.sections) {
+            const int64_t period = section.span * testCase.g;
+            const int64_t count = section.repeats * period;
+            for (int64_t r = 1; r <= count; ++r) {
+                const int64_t local = (r - 1) % period;
+                const int64_t expectedLocal = section.transpose ?
+                                                  (r - 1) / period * period + (local % testCase.g) * section.span +
+                                                      (local / testCase.g + section.shift) % section.span + 1 :
+                                                  r;
+                const int64_t source =
+                    GqaBandTriangleSourceRound(testCase.k, testCase.size, testCase.groups, testCase.g, offset + r);
+                ASSERT_EQ(source, offset + expectedLocal);
+                ASSERT_GT(source, offset);
+                ASSERT_LE(source, offset + count);
+                ASSERT_LE(source, rounds);
+                EXPECT_FALSE(seen[source - 1]);
+                seen[source - 1] = true;
+            }
+            offset += count;
+        }
+        EXPECT_EQ(offset, rounds);
+        for (const bool visited : seen) {
+            EXPECT_TRUE(visited);
+        }
+        EXPECT_EQ(GqaBandTriangleSourceRound(testCase.k, testCase.size, testCase.groups, testCase.g, rounds + 1),
+                  rounds + 1);
+    }
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandTriangleHeadInnerBijectionAndGuards)
+{
+    using namespace optiling::fag;
+    for (const int64_t k : {2, 3, 4}) {
+        for (int64_t size = 1; size <= 2 * k + 1; ++size) {
+            for (int64_t groups = 1; groups <= k + 1; ++groups) {
+                for (const int64_t g : {2, 3}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "k=" << k << ", size=" << size << ", groups=" << groups << ", G=" << g);
+                    const int64_t rounds = GqaBandTriangleRounds(k, size, groups, g);
+                    std::vector<bool> seen(rounds, false);
+                    for (int64_t r = 1; r <= rounds; ++r) {
+                        const int64_t source = GqaBandTriangleSourceRound(k, size, groups, g, r);
+                        ASSERT_GE(source, 1);
+                        ASSERT_LE(source, rounds);
+                        EXPECT_FALSE(seen[source - 1]);
+                        seen[source - 1] = true;
+                    }
+                    for (const bool visited : seen) {
+                        EXPECT_TRUE(visited);
+                    }
+                }
+            }
+        }
+    }
+    for (int64_t r = 1; r <= GqaBandTriangleRounds(32, 32, 2, 1); ++r) {
+        EXPECT_EQ(GqaBandTriangleSourceRound(32, 32, 2, 1, r), r);
+    }
+    EXPECT_EQ(GqaBandTriangleSourceRound(32, 32, 2, 16, 0), 0);
+    EXPECT_EQ(GqaBandTriangleSourceRound(32, 32, 2, 16, -1), -1);
+    EXPECT_EQ(GqaBandTriangleSourceRound(0, 32, 2, 16, 7), 7);
+    EXPECT_EQ(GqaBandTriangleSourceRound(32, 0, 2, 16, 7), 7);
+    EXPECT_EQ(GqaBandTriangleSourceRound(32, 32, 0, 16, 7), 7);
+    EXPECT_EQ(GqaBandTriangleSourceRound(32, 32, 2, 0, 7), 7);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandEdgePairRoundBijectionAndGuards)
+{
+    using namespace optiling::fag;
+    const GqaBandPhase phases[] = {
+        {GqaBandPhaseKind::EDGE_PAIR, 23, 8, 41, 56},
+        {GqaBandPhaseKind::EDGE_PAIR_Q_BOUND, 48, 16, 16, 63},
+        {GqaBandPhaseKind::EDGE_PAIR_P_BOUND, 10, 1, 0, 7},
+    };
+    const int64_t splits[] = {7, 31, 2};
+    for (size_t i = 0; i < sizeof(phases) / sizeof(phases[0]); ++i) {
+        const auto& phase = phases[i];
+        ASSERT_TRUE(IsGqaBandEdgePair(phase));
+        EXPECT_EQ(GqaBandEdgePairSplit(phase), splits[i]);
+        for (const int64_t k : {28, 32, 36}) {
+            for (const int64_t groups : {int64_t(1), k / phase.n, k / phase.n + 1}) {
+                for (const int64_t g : {1, 2, 16}) {
+                    SCOPED_TRACE(::testing::Message()
+                                 << "phase=" << i << ", k=" << k << ", groups=" << groups << ", G=" << g);
+                    const bool enabled = g > 1 && groups * phase.n <= k;
+                    EXPECT_EQ(CanReorderGqaBandEdgePair(phase, k, groups, g), enabled);
+                    const int64_t rounds = GqaBandPhaseRounds(phase, k, groups, g);
+                    std::vector<bool> seen(rounds, false);
+                    for (int64_t r = 1; r <= rounds; ++r) {
+                        const int64_t expected =
+                            enabled ? ((r - 1) % g) * phase.m + ((r - 1) / g + splits[i] + 1) % phase.m + 1 : r;
+                        const int64_t source = GqaBandEdgePairSourceRound(phase, k, groups, g, r);
+                        ASSERT_EQ(source, expected);
+                        ASSERT_GE(source, 1);
+                        ASSERT_LE(source, rounds);
+                        ASSERT_FALSE(seen[source - 1]);
+                        seen[source - 1] = true;
+                    }
+                    for (const int64_t r : {int64_t(-1), int64_t(0), rounds + 1, rounds + 2}) {
+                        EXPECT_EQ(GqaBandEdgePairSourceRound(phase, k, groups, g, r), r);
+                    }
+                }
+            }
+        }
+        EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 0, 1, 2));
+        EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 32, 0, 2));
+        EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 32, 1, 0));
+    }
+    auto phase = phases[0];
+    // Full chunk rejects (40 virtual columns), while its 4-group tail accepts (32).
+    EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 32, 5, 16));
+    EXPECT_TRUE(CanReorderGqaBandEdgePair(phase, 32, 4, 16));
+    phase.kind = GqaBandPhaseKind::RECTANGLE;
+    EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 32, 4, 16));
+    EXPECT_EQ(GqaBandEdgePairSourceRound(phase, 32, 4, 16, 17), 17);
+    phase = phases[1];
+    for (const int64_t split : {int64_t(-1), int64_t(0), phase.m - phase.n - 1, phase.m - phase.n}) {
+        phase.colOffset = phase.rowOffset + phase.n + split;
+        EXPECT_EQ(CanReorderGqaBandEdgePair(phase, 32, 2, 16), split >= 0 && split < phase.m - phase.n);
+    }
+    phase.n = 0;
+    EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 32, 2, 16));
+    phase.n = phase.m + 1;
+    EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 32, 2, 16));
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandLocalityCostBounds)
+{
+    using namespace optiling::fag;
+    EXPECT_EQ(GqaBandGcd(128, 48), 16);
+    EXPECT_EQ(GqaBandGcd(64, 0), 64);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(0, 3, 28, 16, 8, true), -1);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 0, 28, 16, 8, true), -1);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 3, 0, 16, 8, true), -1);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 3, 28, 0, 8, true), -1);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 3, 28, 16, 0, true), -1);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(1, 1, 1, 1, std::numeric_limits<uint32_t>::max(), false), 1);
+
+    // Aligned core boundaries do not split a physical KV column; unaligned boundaries do.
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 3, 28, 16, 8, true), 448);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 32, 97, 1, 8, false), 125);
+    // With Dense ID correction, do not assume that adjacent head IDs share a physical column.
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 3, 32, 16, 8, false), 4096);
+    EXPECT_EQ(GqaBandDenseKvRunUpperBound(32, 3, 32, 16, 8, true), 512);
+
+    GqaBandPhase phase{};
+    EXPECT_EQ(GqaBandPhaseKvRunUpperBound(phase, 32, 2, 16), -1);
+    phase.kind = GqaBandPhaseKind::LOWER_TRIANGLE;
+    phase.m = phase.n = 32;
+    EXPECT_EQ(GqaBandPhaseKvRunUpperBound(phase, 32, 2, 16), 64);
+    phase.m = phase.n = 64;
+    EXPECT_EQ(GqaBandPhaseKvRunUpperBound(phase, 32, 2, 16), 190);
+    phase.kind = GqaBandPhaseKind::UPPER_TRIANGLE;
+    EXPECT_EQ(GqaBandPhaseKvRunUpperBound(phase, 32, 2, 16), 190);
+    phase.kind = GqaBandPhaseKind::RECTANGLE_BATCH_MAJOR;
+    phase.m = 32;
+    phase.n = 97;
+    EXPECT_EQ(GqaBandPhaseKvRunUpperBound(phase, 32, 3, 8), 375);
+    phase.m = 95;
+    phase.n = 32;
+    phase.colOffset = 63;
+    for (auto kind :
+         {GqaBandPhaseKind::EDGE_PAIR, GqaBandPhaseKind::EDGE_PAIR_Q_BOUND, GqaBandPhaseKind::EDGE_PAIR_P_BOUND}) {
+        phase.kind = kind;
+        EXPECT_TRUE(CanReorderGqaBandEdgePair(phase, 32, 1, 16));
+        EXPECT_EQ(GqaBandPhaseKvRunUpperBound(phase, 32, 1, 16), 64);
+        EXPECT_FALSE(CanReorderGqaBandEdgePair(phase, 32, 2, 16));
+        EXPECT_EQ(GqaBandPhaseKvRunUpperBound(phase, 32, 2, 16), 3072);
+    }
+
+    // Only the proven ordinary-Dense legacy branch permits a stronger bound than touched columns.
+    EXPECT_EQ(GqaBandLegacyKvRunLowerBound(32, 32, 97, 32, 66, 1, 8), 125);
+    EXPECT_EQ(GqaBandLegacyKvRunLowerBound(32, 32, 95, 32, 64, 1, 8), 95);
+    // Folded/symmetric branches still use a lower bound, not the exact legacy submission count.
+    // For this fixture the separately enumerated legacy cost is 539, whereas the bound is 512.
+    EXPECT_EQ(GqaBandLegacyKvRunLowerBound(32, 32, 32, 2, 2, 16, 8), 512);
+
+    GqaBandPlan plan{};
+    EXPECT_EQ(GqaBandKvRunUpperBound(plan), -1);
+    BuildGqaBandCandidate(32, 32, 64, 32, 33, 4, 16, 2, plan);
+    EXPECT_EQ(GqaBandChunkKvRunUpperBound(plan, false), 128);
+    EXPECT_EQ(GqaBandChunkKvRunUpperBound(plan, true), 0);
+    EXPECT_EQ(GqaBandKvRunUpperBound(plan), 256);
+    BuildGqaBandCandidate(32, 32, 64, 32, 33, 5, 16, 2, plan);
+    ASSERT_EQ(plan.tailPhaseCount, 0);
+    EXPECT_EQ(GqaBandChunkKvRunUpperBound(plan, true), 64);
+    EXPECT_EQ(GqaBandKvRunUpperBound(plan), 320);
+    BuildGqaBandCandidate(32, 32, 32, 16, 17, 11, 16, 7, plan);
+    ASSERT_GT(plan.tailPhaseCount, 0);
+    EXPECT_EQ(GqaBandChunkKvRunUpperBound(plan, false), 502);
+    EXPECT_EQ(GqaBandChunkKvRunUpperBound(plan, true), 1216);
+    EXPECT_EQ(GqaBandKvRunUpperBound(plan), 1718);
+}
+
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaBandQueryLocalityChecksFullAndTail)
+{
+    using namespace optiling::fag;
+    GqaBandPlan plan{};
+    EXPECT_FALSE(HasGqaBandQueryLocality(plan));
+    BuildGqaBandCandidate(32, 32, 32, 2, 2, 16, 8, 16, plan);
+    // 0354 passes KV admission exactly, but the thin DIAGONAL has H*G % R != 0.
+    EXPECT_EQ(GqaBandKvRunUpperBound(plan), GqaBandLegacyKvRunLowerBound(32, 32, 32, 2, 2, 16, 8));
+    EXPECT_FALSE(HasGqaBandQueryLocality(plan));
+
+    plan = GqaBandPlan{};
+    plan.k = 32;
+    plan.b = 4;
+    plan.g = 2;
+    plan.groupsPerChunk = 2;
+    plan.phaseCount = 1;
+    plan.phases[0].kind = GqaBandPhaseKind::DIAGONAL;
+    plan.phases[0].m = 2;
+    plan.phases[0].n = 7;
+    EXPECT_TRUE(HasGqaBandQueryLocality(plan)); // Full H=2: H*G=4, R=4.
+    plan.b = 3;
+    EXPECT_FALSE(HasGqaBandQueryLocality(plan)); // Shared tail H=1: H*G=2, R=4.
+    plan.tailPhaseCount = 1;
+    plan.tailPhases[0] = plan.phases[0];
+    plan.tailPhases[0].n = 2;
+    EXPECT_TRUE(HasGqaBandQueryLocality(plan)); // Independent tail has R=2 instead.
+    plan.phases[0].n = 2;
+    plan.tailPhases[0].n = 7;
+    EXPECT_FALSE(HasGqaBandQueryLocality(plan)); // Check independent tail, not full phases twice.
+
+    plan.b = 2; // An unused tail must not reject a complete full chunk.
+    EXPECT_TRUE(HasGqaBandQueryLocality(plan));
+    plan.phases[0].n = 7;
+    plan.groupsPerChunk = plan.b = 1;
+    EXPECT_FALSE(HasGqaBandQueryLocality(plan));
+    plan.phases[0].m = 1;
+    EXPECT_TRUE(HasGqaBandQueryLocality(plan)); // No cross-column reuse of a Q row.
+    plan.phases[0].m = plan.k;
+    EXPECT_TRUE(HasGqaBandQueryLocality(plan)); // This guard is limited to thin strips.
+    plan.phases[0].m = 2;
+    plan.phases[0].n = 1;
+    EXPECT_TRUE(HasGqaBandQueryLocality(plan));
+    plan.phases[0].n = 7;
+    plan.phases[0].kind = GqaBandPhaseKind::RECTANGLE;
+    EXPECT_TRUE(HasGqaBandQueryLocality(plan));
+}
 
 static Ops::Transformer::OpTiling::FlashAttentionScoreGradCompileInfo MakeA5CompileInfo()
 {
@@ -240,7 +2547,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_0)
         "549755813952 549755813952 2 549755814016 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 16384 8192 4 8192 "
         "8192 4 8192 8192 4 8192 0 0 0 4 61440 30720 114688 30720 1 16384 1 16384 1 0 0 0 0 0 0 0 0 0 0 1 32768 16384 "
-        "16384 1 32768 16384 16384 1 32768 16384 16384 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 1 32768 16384 16384 1 32768 16384 16384 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21037056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -449,7 +2757,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_2)
         "4294967360 4294967297 1 4294967424 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 32 1 1 1 1 1 1 1 1 1 0 0 0 "
         "1 61440 30720 114688 30720 1 32 1 32 1 0 0 0 0 0 0 0 0 0 0 1 1 16384 1 1 1 16384 1 1 1 16384 1 65536 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -555,7 +2864,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_3)
         "274877907008 274877907008 1 549755814016 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 8192 8256 1 8256 "
         "16512 1 16512 16512 1 16512 0 0 0 1 61440 30720 114688 30720 1 8192 1 8192 1 0 0 0 0 0 0 0 0 0 0 1 8256 16384 "
-        "8256 1 16512 16384 128 1 16512 16384 128 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "8256 1 16512 16384 128 1 16512 16384 128 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21037056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -655,16 +2965,17 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_4)
          {"out_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"softmax_in_layout", Ops::Transformer::AnyValue::CreateFrom<std::string>("")}},
         &compileInfo, "Ascend950", A5SocInfo, 4096);
-    int64_t expectTilingKey = 20125462445953072;
+    int64_t expectTilingKey = 29132661700694064;
     std::string expectTilingData =
         "32 2 8 1 2000 2000 192 128 4575657222441520442 255 2147483647 2147483647 2 0 256 1 1 0 0 0 0 "
-        "72057598332895232 0 0 0 16 549755813952 343597383696 16 343597383808 549755813920 0 0 128 256 384 512 640 768 "
+        "72057594037927936 0 0 0 16 549755813952 343597383696 16 343597383808 549755813920 0 0 128 256 384 512 640 768 "
         "896 1024 1152 1280 1408 1536 1664 1792 1920 2048 2176 2304 2432 2560 2688 2816 2944 3072 3200 3328 3456 3584 "
         "3712 3840 3968 0 0 0 0 128 256 384 512 640 768 896 1024 1152 1280 1408 1536 1664 1792 1920 2048 2176 2304 "
         "2432 2560 2688 2816 2944 3072 3200 3328 3456 3584 3712 3840 3968 4096 0 0 0 0 2000000 96000 64 96000 96000 64 "
         "96000 64000 64 64000 0 0 0 64 61440 30720 114688 30720 66 3200 600479950314048 27776 1 242442313924672 "
         "20203526216832 147 4 4 59 59 500 500 32000 6 6144000 18432 6144 6 6144000 18432 6144 4 4096000 18432 4096 "
-        "65536 24678912 49292288 0 65701376 0 0 0 0 0 0 0 0 0 ";
+        "65536 24678912 49292288 0 65701376 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {87698944};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -772,7 +3083,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_5)
         "288 320 352 384 416 448 480 512 544 576 608 640 672 704 736 768 800 832 864 896 928 960 992 1024 0 0 0 0 "
         "251904 1531104 32 1531104 796672 32 796672 796672 32 796672 0 0 0 32 61440 30720 114688 30720 9 6144 9 6144 1 "
         "0 0 0 0 0 0 0 0 0 0 47 48995328 16384 7168 25 25493504 16384 16384 25 25493504 16384 16384 65536 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {49349120};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -878,7 +3190,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_6)
         "549755813952 549755813952 1 519691042944 4294967299 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 15488 16384 3 16384 "
         "15488 3 15488 15488 3 15488 0 0 0 3 61440 30720 114688 30720 1 15488 1 15488 1 0 0 0 0 0 0 0 0 0 0 1 49152 "
-        "16384 16384 1 46464 16384 13696 1 46464 16384 13696 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 16384 1 46464 16384 13696 1 46464 16384 13696 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {25756160};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -985,7 +3298,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_7)
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 32 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 299008 7300 2 7300 409600 2 409600 409600 2 409600 0 0 0 2 61440 30720 114688 30720 10 22528 0 30720 "
         "1099511627777 244091581366274 15255723892224 111 1 1 37 36 37 36 73 1 14600 16384 14600 25 819200 16384 16384 "
-        "25 819200 16384 16384 65536 168448 3445760 0 6723072 0 0 0 0 0 0 0 0 0 ";
+        "25 819200 16384 16384 65536 168448 3445760 0 6723072 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {27699200};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1367,7 +3681,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_11_tnd_
         "81920 81920 81920 81920 81920 81920 81920 81920 229376 229376 229376 229376 229376 229376 229376 229376 0 0 "
         "0 0 0 0 16384 16384 16384 16384 16384 16384 16384 16384 81920 81920 81920 81920 81920 81920 81920 81920 "
         "81920 81920 81920 81920 81920 81920 229376 229376 229376 229376 229376 229376 229376 229376 0 0 0 0 0 0 1 1 "
-        "1 1 1 1 1 1 5 5 5 5 5 5 5 5 5 5 5 5 5 5 14 14 14 14 14 14 14 14 0 0 0 0 0 ";
+        "1 1 1 1 1 1 5 5 5 5 5 5 5 5 5 5 5 5 5 5 14 14 14 14 14 14 14 14 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21562880};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1434,7 +3749,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_12_pad_
         "0 0 0 0 0 0 1 16384 16384 16384 1 16384 16384 16384 1 16384 16384 16384 65536 131584 197632 0 0 0 0 0 0 0 1 "
         "3 0 0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 0 0 0 ";
+        "-1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {21235200};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1501,7 +3818,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_13_pad_
         "0 0 0 0 0 0 1 16384 16384 16384 1 16384 16384 16384 1 16384 16384 16384 65536 131584 197632 0 0 0 0 0 0 0 1 "
         "2 0 0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 0 0 0 ";
+        "-1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {21235200};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1567,7 +3886,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_15_pad_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2 4 5 6 8 9 10 12 13 14 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 21856 5462 12 5454 5462 12 5454 5462 12 5454 0 0 0 12 61440 30720 114688 30720 1 21856 1 "
         "21728 1 0 0 0 0 0 0 0 0 0 0 1 65536 16384 16384 1 65536 16384 16384 1 65536 16384 16384 65536 328192 590848 "
-        "0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21825024};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1633,7 +3953,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_16_pad_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2 4 5 6 8 9 10 12 13 14 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 21856 5462 12 5454 5462 12 5454 5462 12 5454 0 0 0 12 61440 30720 114688 30720 1 21856 1 "
         "21728 1 0 0 0 0 0 0 0 0 0 0 1 65536 16384 16384 1 65536 16384 16384 1 65536 16384 16384 65536 328192 590848 "
-        "0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21825024};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1702,7 +4023,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_17_tnd_
         "0 1 8192 16384 8192 1 8192 16384 8192 1 8192 16384 8192 65536 98816 132096 0 0 0 0 0 0 0 0 0 0 1 2 2 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1024 1024 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1024 1024 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21136896};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1773,7 +4095,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_18_tnd_
         "0 0 0 0 1 12288 16384 12288 1 12288 16384 12288 1 12288 16384 12288 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 2 2 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1024 1024 2048 2048 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1024 1024 2048 2048 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 1 1 2 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 1 1 2 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21037056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1837,7 +4160,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_19_oute
         "274877907008 274877907008 1 274877907072 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 1 4096 "
         "4096 1 4096 4096 1 4096 0 0 0 1 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 4096 16384 "
-        "4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1901,7 +4225,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_20_inne
         "274877907008 274877907008 1 274877907072 4294967298 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 2 4096 "
         "4096 2 4096 4096 2 4096 0 0 0 2 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 8192 16384 "
-        "8192 1 8192 16384 8192 1 8192 16384 8192 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "8192 1 8192 16384 8192 1 8192 16384 8192 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -1966,7 +4291,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_21_drop
         "0 0 0 0 0 0 0 0 0 0 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 7328 3650 4 "
         "3650 10000 4 10000 10000 4 10000 0 0 0 4 61440 30720 114688 30720 1 7328 0 23360 1 244091581366276 "
         "15255723892224 111 1 1 19 16 19 16 73 1 14600 16384 14600 1 40000 16384 7232 1 40000 16384 7232 65536 "
-        "168448 373760 0 579072 0 0 0 0 0 0 0 0 0 ";
+        "168448 373760 0 579072 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21555200};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2030,7 +4356,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_22_bn2)
         "274877907008 1 274877907072 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 4 4096 4096 4 4096 "
         "4096 4 4096 0 0 0 4 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 16384 16384 16384 1 "
-        "16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2094,7 +4421,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_23_bn2s
         "274877907008 274877907008 2 549755814016 4294967298 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 8192 2048 2 2048 "
         "8192 2 8192 8192 2 8192 0 0 0 2 61440 30720 114688 30720 1 8192 1 8192 1 0 0 0 0 0 0 0 0 0 0 1 4096 16384 "
-        "4096 1 16384 16384 16384 1 16384 16384 16384 65536 98816 164864 0 0 0 0 0 0 0 0 0 0 0 ";
+        "4096 1 16384 16384 16384 1 16384 16384 16384 65536 98816 164864 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21202432};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2160,7 +4488,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_24_bn2_
         "160 176 192 208 224 240 256 272 288 304 320 336 352 368 384 400 416 432 448 464 480 496 512 0 0 0 0 262144 "
         "65536 32 65536 65536 32 65536 65536 32 65536 0 0 0 32 61440 30720 114688 30720 9 16384 9 16384 1 0 0 0 0 0 "
         "0 0 0 0 0 2 2097152 16384 16384 2 2097152 16384 16384 2 2097152 16384 16384 65536 2424832 3604480 0 0 0 0 0 "
-        "0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {25755648};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2226,7 +4555,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_25_tnd_
         "274877907008 1 274877907072 4294967302 0 0 1 2 3 4 5 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 1 2 3 4 5 6 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 2048 6 2048 2048 6 2048 "
         "2048 6 2048 0 0 0 6 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 12288 16384 12288 1 "
-        "12288 16384 12288 1 12288 16384 12288 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "12288 16384 12288 1 12288 16384 12288 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2290,7 +4620,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_27_fp32
         "274877906976 274877906976 1 274877907072 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 20480 1 "
         "20480 20480 1 20480 20480 1 20480 0 0 0 1 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 "
-        "20480 16384 4096 1 20480 16384 4096 1 20480 16384 4096 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "20480 16384 4096 1 20480 16384 4096 1 20480 16384 4096 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21037056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2354,7 +4685,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_28_atte
         "274877907008 274877907008 1 274877907072 4294967298 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 2 4096 "
         "4096 2 4096 4096 2 4096 0 0 0 2 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 8192 16384 "
-        "8192 1 8192 16384 8192 1 8192 16384 8192 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "8192 1 8192 16384 8192 1 8192 16384 8192 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2420,7 +4752,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_29_tnd_
         "137438953536 137438953504 1 137438953600 4294967302 0 0 1 2 3 4 5 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 3 4 5 6 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1024 2048 6 2048 "
         "2048 6 2048 2048 6 2048 0 0 0 6 61440 30720 114688 30720 1 1024 1 1024 1 0 0 0 0 0 0 0 0 0 0 1 12288 16384 "
-        "12288 1 12288 16384 12288 1 12288 16384 12288 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "12288 1 12288 16384 12288 1 12288 16384 12288 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -2485,7 +4818,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_30_alib
         "28 30 36 38 45 47 55 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2 4 6 9 11 13 15 19 21 23 28 30 36 38 45 47 55 64 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 58272 3641 18 3639 3641 18 3639 3641 18 3639 0 0 0 18 61440 30720 "
         "114688 30720 2 27552 2 27232 1 0 0 0 0 0 0 0 0 0 0 1 65536 16384 16384 1 65536 16384 16384 1 65536 16384 "
-        "16384 65536 328192 590848 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 65536 328192 590848 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21825024};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3397,7 +5731,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_31_all_
         "0 0 0 1 274877907008 274877907008 1 274877907072 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 "
         "1 4096 4096 1 4096 4096 1 4096 0 0 0 1 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 4096 "
-        "16384 4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3461,7 +5796,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_32_pad_
         "281474976710656 0 0 0 1 274877907008 274877907008 1 274877907072 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 4096 4096 1 4096 4096 1 4096 4096 1 4096 0 0 0 1 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 "
-        "0 0 0 0 1 4096 16384 4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 1 4096 16384 4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3526,7 +5862,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_33_pref
         "0 0 0 0 0 0 0 0 0 0 0 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "16384 4096 16 4096 4096 16 4096 4096 16 4096 0 0 0 16 61440 30720 114688 30720 1 16384 1 16384 1 0 0 0 0 0 "
         "0 0 0 0 0 1 65536 16384 16384 1 65536 16384 16384 1 65536 16384 16384 65536 328192 590848 0 0 0 0 0 0 0 0 0 "
-        "0 0 ";
+        "0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21825024};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3590,7 +5927,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_34_oute
         "274877907008 1 274877907072 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 4 4096 4096 4 4096 "
         "4096 4 4096 0 0 0 4 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 16384 16384 16384 1 "
-        "16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3654,7 +5992,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_35_oute
         "274877907008 274877907008 1 274877907072 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 4 4096 "
         "4096 4 4096 4096 4 4096 0 0 0 4 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 16384 16384 "
-        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3718,7 +6057,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_36_atte
         "274877907008 274877907008 1 274877907072 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 4 4096 "
         "4096 4 4096 4096 4 4096 0 0 0 4 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 16384 16384 "
-        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3782,7 +6122,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_37_atte
         "274877907008 274877907008 1 274877907072 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 4 4096 "
         "4096 4 4096 4096 4 4096 0 0 0 4 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 16384 16384 "
-        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3848,7 +6189,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_38_qkv_
         "274877907008 274877907008 1 274877907072 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 1 4096 "
         "4096 1 4096 4096 1 4096 0 0 0 1 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 4096 16384 "
-        "4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3912,7 +6254,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_39_drop
         "279172874241 1 279172874368 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4256 4160 1 4160 4160 1 4160 "
         "4160 1 4160 0 0 0 1 61440 30720 114688 30720 1 4256 1 4256 0 0 0 0 0 0 0 0 0 0 0 1 4160 16384 4160 1 4160 "
-        "16384 4160 1 4160 16384 4160 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 4160 1 4160 16384 4160 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -3976,7 +6319,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_40_pad_
         "274877907008 1 274877907072 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 4 4096 2048 4 2048 "
         "2048 4 2048 0 0 0 4 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 16384 16384 16384 1 8192 "
-        "16384 8192 1 8192 16384 8192 65536 147968 197632 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 8192 1 8192 16384 8192 65536 147968 197632 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21218816};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -4040,7 +6384,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_41_atte
         "274877907008 274877907008 1 274877907072 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 1 4096 "
         "4096 1 4096 4096 1 4096 0 0 0 1 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 4096 16384 "
-        "4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "4096 1 4096 16384 4096 1 4096 16384 4096 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -4104,7 +6449,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_42_inne
         "274877907008 274877907008 1 274877907072 4294967300 0 0 1 2 3 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4096 4096 4 4096 "
         "4096 4 4096 4096 4 4096 0 0 0 4 61440 30720 114688 30720 1 4096 1 4096 1 0 0 0 0 0 0 0 0 0 0 1 16384 16384 "
-        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 1 16384 16384 16384 1 16384 16384 16384 65536 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23396864};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -4737,7 +7083,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_43_pref
         "114688 30720 2 21728 2 21344 1 0 0 0 0 0 0 0 0 0 0 1 131072 16384 16384 1 131072 16384 16384 1 131072 16384 "
         "16384 65536 590336 1115136 0 0 0 0 0 0 0 0 0 1639936 7931392 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 ";
+        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {28909056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -4805,7 +7153,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_44_sbh_
         "114688 30720 2 21728 2 21344 1 0 0 0 0 0 0 0 0 0 0 1 131072 16384 16384 1 131072 16384 16384 1 131072 16384 "
         "16384 65536 590336 1115136 0 0 0 0 0 0 0 0 0 1639936 7931392 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 ";
+        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {28909056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -4879,7 +7229,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_45_tnd_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 16384 16384 16384 16384 81920 81920 81920 81920 81920 81920 81920 81920 81920 "
         "229376 229376 229376 229376 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 16384 16384 16384 16384 81920 81920 81920 "
         "81920 81920 81920 81920 81920 81920 229376 229376 229376 229376 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 1 1 "
-        "1 5 5 5 5 5 5 5 5 5 14 14 14 14 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "1 5 5 5 5 5 5 5 5 5 14 14 14 14 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {28122624};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -4947,7 +7298,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_46_bnsd
         "114688 30720 2 21728 2 21344 1 0 0 0 0 0 0 0 0 0 0 1 131072 16384 16384 1 131072 16384 16384 1 131072 16384 "
         "16384 65536 590336 1115136 0 0 0 0 0 0 0 0 0 1639936 7931392 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 ";
+        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {28909056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5005,15 +7358,16 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_47_caus
          {"out_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"softmax_in_layout", Ops::Transformer::AnyValue::CreateFrom<std::string>("")}},
         &compileInfo, "Ascend950", A5SocInfo, 4096);
-    int64_t expectTilingKey = 19703248907146288;
+    int64_t expectTilingKey = 28710448161887280;
     std::string expectTilingData =
         "32 1 1 1 4096 16384 64 64 4575657222448611328 255 2147483647 0 0 0 528 1 1 0 0 8589934594 8796093022209 "
-        "281479271677952 0 0 0 32 549755813952 549755813952 128 549755814016 73014444064 0 0 17 35 52 71 88 108 125 "
+        "281474976710656 0 0 0 32 549755813952 549755813952 128 549755814016 73014444064 0 0 17 35 52 71 88 108 125 "
         "146 168 185 208 232 249 274 300 317 344 372 401 431 462 479 511 561 596 632 669 729 793 861 1023 0 0 0 0 17 "
         "35 52 71 88 108 125 146 168 185 208 232 249 274 300 317 344 372 401 431 462 479 511 561 596 632 669 729 793 "
         "861 1023 4096 0 0 0 0 2097152 8192 32 8192 32768 32 32768 32768 32 32768 0 0 0 32 61440 30720 114688 30720 "
         "69 8192 69 8192 1099511627777 0 0 0 0 0 0 0 0 0 0 1 262144 16384 16384 1 1048576 16384 16384 1 1048576 "
-        "16384 16384 65536 1114624 5309440 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 16384 65536 1114624 5309440 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {30475776};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5079,7 +7433,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_48_rd_c
         "3167 3305 3468 3674 0 0 0 0 113 226 339 452 565 678 791 904 1017 1130 1243 1356 1469 1582 1695 1808 1921 "
         "2034 2147 2260 2373 2486 2599 2712 2825 2938 3051 3167 3305 3468 3674 4096 0 0 0 0 2097152 8192 32 8192 "
         "32768 32 32768 32768 32 32768 0 0 0 32 61440 30720 114688 30720 69 8192 69 8192 1 0 0 0 0 0 0 0 0 0 0 1 "
-        "262144 16384 16384 1 1048576 16384 16384 1 1048576 16384 16384 65536 1114624 5309440 0 0 0 0 0 0 0 0 0 0 0 ";
+        "262144 16384 16384 1 1048576 16384 16384 1 1048576 16384 16384 65536 1114624 5309440 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {30475776};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5137,16 +7492,17 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_49_band
          {"out_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"softmax_in_layout", Ops::Transformer::AnyValue::CreateFrom<std::string>("")}},
         &compileInfo, "Ascend950", A5SocInfo, 4096);
-    int64_t expectTilingKey = 18577349537174544;
+    int64_t expectTilingKey = 27584548791915536;
     std::string expectTilingData =
         "32 2 8 1 4096 4096 128 128 4575657222443697349 255 256 256 0 0 154 1 1 0 0 17179869186 8796093022211 "
-        "562954248388608 0 0 0 32 549755813952 549755813952 32 549755814016 330712481824 0 0 526 1024 1550 2048 2574 "
+        "562949953421312 0 0 0 32 549755813952 549755813952 32 549755814016 330712481824 0 0 526 1024 1550 2048 2574 "
         "3072 3598 4096 4622 5120 5646 6144 6670 7168 7694 8192 8718 9216 9742 10240 10766 11264 11790 12288 12814 "
         "13312 13838 14336 14862 15360 15886 0 0 0 0 526 1024 1550 2048 2574 3072 3598 4096 4622 5120 5646 6144 6670 "
         "7168 7694 8192 8718 9216 9742 10240 10766 11264 11790 12288 12814 13312 13838 14336 14862 15360 15886 16384 "
         "0 0 0 0 8388608 262144 32 262144 262144 32 262144 262144 32 262144 0 0 0 32 61440 30720 114688 30720 274 "
         "2048 274 2048 1 0 0 0 0 0 0 0 0 0 0 8 8388608 16384 16384 8 8388608 16384 16384 8 8388608 16384 16384 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21037056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5211,7 +7567,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_50_alib
         "28 30 36 38 45 47 55 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 2 4 6 9 11 13 15 19 21 23 28 30 36 38 45 47 55 64 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 58272 3641 18 3639 3641 18 3639 3641 18 3639 0 0 0 18 61440 30720 "
         "114688 30720 2 27552 2 27232 1 0 0 0 0 0 0 0 0 0 0 1 65536 16384 16384 1 65536 16384 16384 1 65536 16384 "
-        "16384 65536 328192 590848 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 65536 328192 590848 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21825024};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5277,7 +7634,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_51_alib
         "68 74 79 86 94 103 119 131 137 142 149 157 166 182 194 199 205 212 220 229 239 256 0 0 0 0 0 0 0 144640 "
         "9040 29 9024 9040 29 9024 9040 29 9024 0 0 0 29 61440 30720 114688 30720 5 21760 5 21504 1 0 0 0 0 0 0 0 0 "
         "0 0 1 262144 16384 16384 1 262144 16384 16384 1 262144 16384 16384 65536 1114624 2163712 0 0 0 0 0 0 0 0 0 "
-        "0 0 ";
+        "0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {24184320};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5738,7 +8096,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_52_tnd_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 262176 -1 -1 -1 -1 -1 -1 -1 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {24380928};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5931,7 +8290,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_53_gqa_
         "0 0 0 0 0 0 0 0 0 1 655360 16384 16384 1 327680 16384 16384 1 327680 16384 16384 65536 2687488 3998720 0 0 "
         "0 0 0 0 0 1 24 0 0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 -1 -1 -1 -1 -1 0 0 0 ";
+        "-1 -1 -1 -1 -1 -1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {26281472};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -5998,7 +8359,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_55_dete
         "0 0 0 0 0 0 1 16384 16384 16384 1 16384 16384 16384 1 16384 16384 16384 65536 131584 197632 0 0 0 0 0 0 0 1 "
         "3 0 0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 0 0 0 ";
+        "-1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {21235200};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6064,7 +8427,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_56_dete
         "5460 5462 3 5460 5462 3 5460 0 0 0 3 61440 30720 114688 30720 1 21856 1 21824 1 0 0 0 0 0 0 0 0 0 0 1 16384 "
         "16384 16384 1 16384 16384 16384 1 16384 16384 16384 65536 131584 197632 0 0 0 0 0 0 0 1 3 0 0 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 ";
+        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {21235200};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6130,7 +8495,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_57_bn2_
         "64 96 128 160 192 224 256 288 320 352 384 416 448 480 512 544 576 608 640 672 704 736 768 800 832 864 896 "
         "928 960 992 1024 0 0 0 0 524288 131072 32 131072 131072 32 131072 131072 32 131072 0 0 0 32 61440 30720 "
         "114688 30720 18 2048 18 2048 1 0 0 0 0 0 0 0 0 0 0 4 4194304 16384 16384 4 4194304 16384 16384 4 4194304 "
-        "16384 16384 65536 2424832 3604480 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 16384 65536 2424832 3604480 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {25755648};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6196,7 +8562,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_58_bn2_
         "64 96 128 160 192 224 256 288 320 352 384 416 448 480 512 544 576 608 640 672 704 736 768 800 832 864 896 "
         "928 960 992 1024 0 0 0 0 524288 131072 32 131072 131072 32 131072 131072 32 131072 0 0 0 32 61440 30720 "
         "114688 30720 18 2048 18 2048 1 0 0 0 0 0 0 0 0 0 0 4 4194304 16384 16384 4 4194304 16384 16384 4 4194304 "
-        "16384 16384 65536 2424832 3604480 0 0 0 0 0 0 0 0 0 0 0 ";
+        "16384 16384 65536 2424832 3604480 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {25755648};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6262,7 +8629,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_59_nz_o
         "160 192 224 256 288 320 352 384 416 448 480 512 544 576 608 640 672 704 736 768 800 832 864 896 928 960 992 "
         "1024 0 0 0 0 524288 9216 64 9216 9216 64 9216 9216 64 9216 0 0 0 64 61440 30720 114688 30720 18 2048 "
         "600479950315538 2048 1 237494511599680 29686814005248 216 1 1 128 128 128 128 8192 1 589824 16384 16384 1 "
-        "589824 16384 16384 1 589824 16384 16384 65536 2425344 4785152 0 7144960 0 0 0 0 0 0 0 0 0 ";
+        "589824 16384 16384 1 589824 16384 16384 65536 2425344 4785152 0 7144960 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {28379136};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6332,7 +8700,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_60_tnd_
         "0 0 0 0 0 0 0 0 0 1 524288 16384 16384 1 524288 16384 16384 1 524288 16384 16384 65536 2163200 3343360 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {25495040};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6400,7 +8769,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_62_tnd_
         "160 192 224 256 288 320 352 384 416 448 480 512 544 576 608 640 672 704 736 768 800 832 864 896 928 960 992 "
         "1024 0 0 0 0 524288 9216 64 9216 2304 64 2304 2304 64 2304 0 0 0 64 61440 30720 114688 30720 18 2048 "
         "600479950315538 2048 1 237494511599680 29686814005248 216 1 1 128 128 128 128 8192 1 589824 16384 16384 1 "
-        "147456 16384 16384 1 147456 16384 16384 65536 2425344 3015680 0 3606016 0 0 0 0 0 0 0 0 0 ";
+        "147456 16384 16384 1 147456 16384 16384 65536 2425344 3015680 0 3606016 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {24840192};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6488,7 +8858,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_64_sink
         "549755813952 549755813952 1 549755814016 4294967297 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 16384 8192 1 8192 "
         "8192 1 8192 8192 1 8192 512 1 512 1 61440 30720 114688 30720 1 16384 1 16384 1 0 0 0 0 0 0 0 0 0 0 1 8192 "
-        "16384 8192 1 8192 16384 8192 1 8192 16384 8192 65536 0 0 0 0 2425344 2 1 1 2 0 0 0 0 ";
+        "16384 8192 1 8192 16384 8192 1 8192 16384 8192 65536 0 0 0 0 2425344 2 1 1 2 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23397376};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6555,7 +8926,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_65_rd_c
         "0 0 0 0 0 0 1 16384 16384 16384 1 16384 16384 16384 1 16384 16384 16384 65536 131584 197632 0 0 0 0 0 0 0 1 "
         "3 0 0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 0 0 0 ";
+        "-1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {21235200};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6651,7 +9024,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_66_tnd_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 128 256 384 512 640 768 896 1040 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {93915648};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6712,10 +9086,10 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_67_band
          {"out_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"softmax_in_layout", Ops::Transformer::AnyValue::CreateFrom<std::string>("")}},
         &compileInfo, "Ascend950", A5SocInfoHybrid, 4096, 1);
-    int64_t expectTilingKey = 19747229909128240;
+    int64_t expectTilingKey = 28754429163869232;
     std::string expectTilingData =
         "64 32 1 1 4096 4096 128 128 4575657222443697349 255 256 256 0 0 154 1 1 0 0 17179869186 8796093022211 "
-        "72620548286316544 0 0 3 32 549755813952 549755813952 32 549755814016 661424963616 0 0 1024 2048 3072 4096 "
+        "72620543991349248 0 0 3 32 549755813952 549755813952 32 549755814016 661424963616 0 0 1024 2048 3072 4096 "
         "5120 6144 7168 8192 9216 10240 11264 12288 13312 14336 15360 16384 17408 18432 19456 20480 21504 22528 "
         "23552 24576 25600 26624 27648 28672 29696 30720 31744 0 0 0 0 1024 2048 3072 4096 5120 6144 7168 8192 9216 "
         "10240 11264 12288 13312 14336 15360 16384 17408 18432 19456 20480 21504 22528 23552 24576 25600 26624 27648 "
@@ -6724,7 +9098,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_67_band
         "2048 2048 131072 16 16777216 16384 16384 16 16777216 16384 16384 16 16777216 16384 16384 65536 67174912 "
         "134284288 0 201393664 0 0 0 0 0 1 160 0 0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 ";
+        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {226560000};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6784,10 +9160,10 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_68_band
          {"out_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"softmax_in_layout", Ops::Transformer::AnyValue::CreateFrom<std::string>("")}},
         &compileInfo, "Ascend950", A5SocInfoHybrid, 4096, 1);
-    int64_t expectTilingKey = 19747229909128240;
+    int64_t expectTilingKey = 28754429163869232;
     std::string expectTilingData =
         "64 33 1 1 4096 4096 128 128 4575657222443697349 255 65536 0 0 0 528 1 1 0 0 17179869186 8796093022211 "
-        "72339073309605888 0 0 1 32 549755813952 549755813952 32 549755814016 2340757176352 0 0 1041 2083 3124 4167 "
+        "72339069014638592 0 0 1 32 549755813952 549755813952 32 549755814016 2340757176352 0 0 1041 2083 3124 4167 "
         "5208 6252 7293 8338 9384 10425 11472 12520 13561 14610 15660 16701 17752 18804 19857 20911 21966 23007 "
         "24063 25137 26196 27256 28317 29401 30489 31581 32767 0 0 0 0 1041 2083 3124 4167 5208 6252 7293 8338 9384 "
         "10425 11472 12520 13561 14610 15660 16701 17752 18804 19857 20911 21966 23007 24063 25137 26196 27256 28317 "
@@ -6796,7 +9172,9 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_68_band
         "2112 2112 135168 17 17301504 16384 16384 17 17301504 16384 16384 17 17301504 16384 16384 65536 69272064 "
         "138478592 0 207685120 0 0 0 0 0 1 576 0 0 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
-        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 ";
+        "-1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {232982528};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -6880,6 +9258,7 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_69_tnd_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 "
         "0 ";
     std::vector<size_t> expectWorkspaces = {55117312};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
@@ -6962,7 +9341,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_73_tnd_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 4 12 8 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {24577536};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7044,6 +9424,7 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_74_tnd_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 16 6 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 "
         "0 ";
     std::vector<size_t> expectWorkspaces = {22087168};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
@@ -7106,26 +9487,34 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_75_tnd_
         &compileInfo, "Ascend950", A5SocInfo, 262144, 1);
     int64_t expectTilingKey = 19747229372257456;
     std::string expectTilingData =
+
         "32 2 1 1 1280 384 64 64 4575657222448611328 255 256 256 0 0 0 4 1 0 0 17179869186 8796093022211 "
-        "844424930131968 0 0 0 10 549755813952 549755813952 3 549755814016 4294967315 0 0 5 6 7 13 14 15 21 22 23 24 "
-        "25 32 33 34 35 43 44 45 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 5 6 7 13 14 15 21 22 23 24 25 32 33 34 35 43 44 "
-        "45 46 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 39680 7761 19 7758 2156 19 2152 2156 19 2152 0 0 0 19 61440 30720 "
-        "114688 30720 2 8960 2 8704 1 0 0 0 0 0 0 0 0 0 0 1 147456 16384 16384 1 40960 16384 8192 1 40960 16384 8192 "
-        "65536 655872 820224 0 0 0 0 0 0 0 1 7 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 1040 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 262144 753664 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 262144 753664 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 12 33 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "844424930131968 0 0 0 10 549755813952 549755813952 3 "
+        "549755814016 4294967315 0 0 5 6 7 13 14 15 21 22 23 24 25 32 33 34 35 43 44 45 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 5 6 7 13 14 15 21 22 23 24 25 32 33 34 35 43 "
+        "44 45 46 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 39680 7761 19 7758 2156 19 2152 2156 19 2152 0 0 0 19 61440 30720 "
+        "114688 30720 2 8960 2 8704 1 0 0 0 0 0 0 0 0 0 0 "
+        "1 147456 16384 16384 1 40960 16384 8192 1 40960 16384 8192 65536 655872 820224 0 0 0 0 0 0 0 1 7 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 262144 753664 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 262144 753664 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 12 33 7 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {21956096};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7188,28 +9577,36 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_79_tnd_
         &compileInfo, "Ascend950", A5SocInfo, 262144, 1);
     int64_t expectTilingKey = 19747229372257456;
     std::string expectTilingData =
+
         "32 2 4 1 6144 3072 64 64 4575657222448611328 255 256 256 0 0 0 4 1 0 0 17179869186 8796093022211 "
-        "844424930131968 0 0 0 48 549755813952 549755813952 24 549755814016 107374182432 0 0 179 344 510 661 826 991 "
-        "1171 1336 1501 1653 1818 1983 2219 2464 2709 2954 3222 3467 3712 3957 4202 4426 4671 4916 5161 5406 5674 "
+        "844424930131968 0 0 0 48 549755813952 549755813952 24 "
+        "549755814016 107374182432 0 0 179 344 510 661 826 991 1171 1336 1501 1653 1818 1983 2219 2464 2709 2954 3222 "
+        "3467 3712 3957 4202 4426 4671 4916 5161 5406 5674 "
         "5919 6164 6409 6655 0 0 0 0 179 344 510 661 826 991 1171 1336 1501 1653 1818 1983 2219 2464 2709 2954 3222 "
-        "3467 3712 3957 4202 4426 4671 4916 5161 5406 5674 5919 6164 6409 6655 6656 0 0 0 0 3407872 81920 32 81920 "
-        "40960 32 40960 40960 32 40960 0 0 0 32 61440 30720 114688 30720 111 28672 111 28672 1 0 0 0 0 0 0 0 0 0 0 3 "
-        "2621440 16384 16384 2 1310720 16384 16384 2 1310720 16384 16384 65536 10551808 15795200 0 0 0 0 0 0 0 1 35 "
-        "0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1040 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 256 1 0 8388608 27262976 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 8388608 27262976 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 14 35 35 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 ";
+        "3467 3712 3957 4202 4426 4671 4916 5161 5406 5674 "
+        "5919 6164 6409 6655 6656 0 0 0 0 3407872 81920 32 81920 40960 32 40960 40960 32 40960 0 0 0 32 61440 30720 "
+        "114688 30720 111 28672 111 28672 1 0 0 0 0 0 0 0 0 "
+        "0 0 3 2621440 16384 16384 2 1310720 16384 16384 2 1310720 16384 16384 65536 10551808 15795200 0 0 0 0 0 0 0 1 "
+        "35 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 256 1 0 "
+        "8388608 27262976 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 8388608 27262976 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 14 35 35 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
     std::vector<size_t> expectWorkspaces = {42010112};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7272,26 +9669,34 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_80_tnd_
         &compileInfo, "Ascend950", A5SocInfo, 262144, 1);
     int64_t expectTilingKey = 19747229372257456;
     std::string expectTilingData =
+
         "32 2 1 1 512 512 64 64 4575657222448611328 255 256 256 0 0 0 4 1 0 0 17179869186 8796093022211 "
-        "562949953421312 0 0 0 4 549755813952 549755813952 4 549755814016 4294967314 0 0 1 2 3 4 5 6 8 9 10 11 12 13 "
-        "14 15 17 18 19 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 2 3 4 5 6 8 9 10 11 12 13 14 15 17 18 19 20 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 18208 2731 18 2725 2731 18 2725 2731 18 2725 0 0 0 18 61440 30720 114688 30720 1 "
-        "18208 1 18144 1 0 0 0 0 0 0 0 0 0 0 1 49152 16384 16384 1 49152 16384 16384 1 49152 16384 16384 65536 "
-        "262656 459776 0 0 0 0 0 0 0 1 4 0 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "1040 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 65536 327680 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 65536 327680 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 20 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 ";
+        "562949953421312 0 0 0 4 549755813952 549755813952 4 "
+        "549755814016 4294967314 0 0 1 2 3 4 5 6 8 9 10 11 12 13 14 15 17 18 19 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 "
+        "2 3 4 5 6 8 9 10 11 12 13 14 15 17 18 19 20 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 18208 2731 18 2725 2731 18 2725 2731 18 2725 0 0 0 18 61440 30720 114688 30720 "
+        "1 18208 1 18144 1 0 0 0 0 0 0 0 0 0 0 1 49152 "
+        "16384 16384 1 49152 16384 16384 1 49152 16384 16384 65536 262656 459776 0 0 0 0 0 0 0 1 4 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 65536 327680 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 65536 327680 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 4 20 "
+        "4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 0 ";
     std::vector<size_t> expectWorkspaces = {21628416};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7364,7 +9769,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_81_tnd_
         "131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 "
         "131072 131072 131072 131072 131072 131072 131072 131072 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 8 8 8 8 8 8 8 8 8 8 "
-        "8 8 8 8 8 8 8 8 8 8 0 0 0 0 0 0 0 ";
+        "8 8 8 8 8 8 8 8 8 8 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {23660032};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7436,7 +9842,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_82_tnd_
         "131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 "
         "131072 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 131072 131072 131072 131072 131072 131072 131072 131072 131072 "
         "131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 131072 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 0 0 0 0 0 ";
+        "0 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 8 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {24184320};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7510,7 +9917,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_83_tnd_
         "262144 262144 262144 262144 262144 262144 262144 262144 262144 0 0 0 0 0 0 0 0 0 0 0 0 262144 262144 262144 "
         "262144 262144 262144 262144 262144 262144 262144 262144 262144 262144 262144 262144 262144 262144 262144 "
         "262144 262144 262144 262144 262144 262144 0 0 0 0 0 0 0 0 0 0 0 0 16 16 16 16 16 16 16 16 16 16 16 16 16 16 "
-        "16 16 16 16 16 16 16 16 16 16 0 0 0 0 0 ";
+        "16 16 16 16 16 16 16 16 16 16 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {24970752};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7594,6 +10002,7 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_84_tnd_
         "0 0 0 0 0 0 0 0 8192 8192 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 -1 -1 -1 -1 -1 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 "
         "0 ";
     std::vector<size_t> expectWorkspaces = {21333504};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
@@ -7675,7 +10084,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_85_tnd_
         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
         "8192 8192 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 "
         "-1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
-        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 ";
+        "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 "
+        "0 ";
     std::vector<size_t> expectWorkspaces = {21464576};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
@@ -7742,8 +10152,8 @@ TEST_F(FlashAttentionScoreGradTiling, FlashAttentionScoreGrad_950_tiling_86_tnd_
 
     TilingInfo tilingInfo;
     ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo));
-    constexpr uint64_t tndSwizzleTilingKeyMask = 1ULL << 53;
-    ASSERT_EQ(tilingInfo.tilingKey & tndSwizzleTilingKeyMask, tndSwizzleTilingKeyMask);
+    constexpr uint64_t swizzleTilingKeyMask = 1ULL << 53;
+    ASSERT_EQ(tilingInfo.tilingKey & swizzleTilingKeyMask, swizzleTilingKeyMask);
     using TilingData = optiling::fag::FlashAttentionScoreGradTilingDataUs1s2Bbn2gs1s2Regbase<false, false, true, true>;
     ASSERT_GE(tilingInfo.tilingDataSize, sizeof(TilingData));
     TilingData tilingData;
