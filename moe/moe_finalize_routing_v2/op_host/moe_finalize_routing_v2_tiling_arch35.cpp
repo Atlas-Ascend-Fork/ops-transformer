@@ -1325,6 +1325,6 @@ void MoeFinalizeRoutingV2Regbase::DoPostTiling()
     return;
 }
 
-REGISTER_OPS_TILING_TEMPLATE(MoeFinalizeRoutingV2, MoeFinalizeRoutingV2Regbase, 1000);
+REGISTER_OPS_TILING_TEMPLATE(MoeFinalizeRoutingV2, MoeFinalizeRoutingV2Regbase, 30000);
 
 } // namespace optiling
