@@ -74,6 +74,7 @@ public:
         const FlashAttentionScoreSimplifiedTilingData* __restrict tiling, TPipe* tPipe);
     __aicore__ inline void InitLocalBuffer();
     __aicore__ inline void InitMMResBuf();
+    __aicore__ inline void UnInitMMResBuf();
     __aicore__ inline void InitActualKVPrefixLen(__gm__ uint8_t* actualSharedPrefixLen);
     __aicore__ inline void ComputeConstexpr();
     __aicore__ inline void SetRunInfo(RunInfo<isInfer>& runInfo, RunParamStr<isInfer>& runParam, int64_t taskId,
@@ -93,7 +94,10 @@ public:
     static constexpr uint32_t dTemplateAlign64 = Align64Func((uint16_t)dVTemplateType);
     static constexpr uint32_t s1BaseSize = (uint32_t)s1TemplateType;
     static constexpr uint32_t s2BaseSize = (uint32_t)s2TemplateType;
+    static constexpr uint32_t BANK0_START_ID = 0; // bank0对应的startId
+    static constexpr uint32_t BANK1_START_ID = 1; // bank1对应的startId
     static constexpr bool isFp8 = CubeBlockType::isFp8;
+    static constexpr bool useBankManager = CubeBlockType::useBankManager;
     /* 是否使能dn的信息; 没有可选输入并且S2切分的时候使用dn，s2比较小的时候nd效果更好 */
     static constexpr bool useDn = CubeBlockType::useDn;
     /* HIFLOAT8场景 softmax计算使用Nz格式计算，vec1ResBuffer可以和bmm1ResBuffer进行复用*/
@@ -111,12 +115,18 @@ public:
 
     BufferManager<BufferType::UB> ubBufferManager;
     BuffersPolicyDB<BufferType::UB, SyncType::CROSS_CORE_SYNC_BOTH> bmm1Buffers;
+#if __NPU_ARCH__ == 3510
     using bmm2ResBufferType = typename NoQuantCube::Bmm2ResBuffSel<useDn, isFp8, optionalDn>::Type;
+#else
+    using bmm2ResBufferType = typename NoQuantCube::Bmm2ResBuffSel<useDn, isFp8, s1BaseSize>::Type;
+#endif
     bmm2ResBufferType bmm2Buffers;
 
+    using BuffMgrType = typename CubeBlockType::BuffMgrType;
+    using L1PBuffType = typename CubeBlockType::L1PBuffType;
     // mm2左矩阵P
-    BufferManager<BufferType::L1> l1BufferManager;
-    BuffersPolicy3buff<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> l1PBuffers;
+    BuffMgrType l1BufferManager;
+    L1PBuffType l1PBuffers;
     CVSharedParams<isInfer, isPa> sharedParams;
     /* GM信息 */
     using keyGmType = typename std::conditional<isInfer, GlobalTensor<INPUT_T>, int32_t>::type;
@@ -167,7 +177,7 @@ __aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType
         this->aicIdx = GetBlockIdx();
     } else {
         constInfo.aivIdx = GetBlockIdx();
-        this->aicIdx = constInfo.aivIdx >> 1;
+        this->aicIdx = constInfo.aivIdx / CV_RATIO;
         this->tilingData = tiling;
     }
     this->pipe = tPipe;
@@ -196,7 +206,9 @@ __aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType
                            keySharedPrefix, valueSharedPrefix, actualSharedPrefixLen, queryRope, keyRope, blockTable,
                            queryPaddingSize, kvPaddingSize, learnableSink, softmaxMax, softmaxSum, softmaxOut,
                            workspace, tiling, tPipe); // gm设置
-    this->InitLocalBuffer();
+    if ASCEND_IS_AIV {
+        vecBlock.InitLocalBuffer(pipe, constInfo);
+    }
 }
 
 template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
@@ -339,9 +351,28 @@ __aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType
     constexpr uint32_t mm2LeftSize = s1BaseSize * s2BaseSize * sizeof(INPUT_T);
     l1BufferManager.Init(pipe, 524288); // 512 * 1024
     // 保存p结果的L1内存必须放在第一个L1 policy上，保证和vec申请的地址相同
-    l1PBuffers.Init(l1BufferManager, mm2LeftSize);
+    if constexpr (CV_RATIO == 2) {
+        l1PBuffers.Init(l1BufferManager, mm2LeftSize);
+    } else {
+        if constexpr (useBankManager) {
+            l1PBuffers.template Init<BANK0_START_ID>(l1BufferManager, mm2LeftSize);
+        } else {
+            l1PBuffers.Init(l1BufferManager, mm2LeftSize);
+        }
+        if ASCEND_IS_AIC {
+            l1PBuffers.Get().SetCrossCore();
+            l1PBuffers.Get().SetCrossCore();
+            if constexpr (isInfer) {
+                l1PBuffers.Get().SetCrossCore();
+            }
+        }
+    }
     if constexpr (bmm2Write2Ub) {
+#if __NPU_ARCH__ == 3510
         if constexpr (!((useDn && isFp8) || optionalDn)) {
+#else
+        if constexpr (!(useDn && isFp8) && (s1BaseSize / CV_RATIO) == 64) {
+#endif
             ubBufferManager.Init(pipe, mm1ResultSize * 2 + mm2ResultSize * 2);
             bmm2Buffers.Init(ubBufferManager, mm2ResultSize);
             if ASCEND_IS_AIV {
@@ -371,9 +402,51 @@ __aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType
 }
 
 template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
-__aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType, VecBlockType>::InitLocalBuffer()
+__aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType, VecBlockType>::UnInitMMResBuf()
 {
-    vecBlock.InitLocalBuffer(pipe, constInfo);
+    if constexpr (CV_RATIO == 2) {
+        // 不涉及
+        return;
+    } else {
+        if ASCEND_IS_AIV {
+            l1PBuffers.Get().WaitCrossCore();
+            l1PBuffers.Get().WaitCrossCore();
+            if constexpr (isInfer) {
+                l1PBuffers.Get().WaitCrossCore();
+            }
+        }
+        if constexpr (useBankManager) {
+            l1PBuffers.template Uninit<BANK0_START_ID>(l1BufferManager);
+        } else {
+            l1PBuffers.Uninit(l1BufferManager);
+        }
+    }
+
+    if constexpr (bmm2Write2Ub) {
+        if constexpr (!(useDn && isFp8) && (s1BaseSize / CV_RATIO) == 64) {
+            if ASCEND_IS_AIC {
+                bmm2Buffers.Get().WaitCrossCore();
+                bmm2Buffers.Get().WaitCrossCore();
+            }
+            bmm2Buffers.Uninit(ubBufferManager);
+        } else {
+            if ASCEND_IS_AIC {
+                bmm2Buffers.Get().WaitCrossCore();
+            }
+            bmm2Buffers.Uninit(ubBufferManager);
+        }
+    } else {
+    }
+    if ASCEND_IS_AIC {
+        if constexpr (useNz) {
+            bmm1Buffers.Get().WaitCrossCore<true>();
+            bmm1Buffers.Get().WaitCrossCore<true>();
+        } else {
+            bmm1Buffers.Get().WaitCrossCore();
+            bmm1Buffers.Get().WaitCrossCore();
+        }
+    }
+    bmm1Buffers.Uninit(ubBufferManager);
 }
 
 template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
@@ -692,6 +765,8 @@ __aicore__ inline void FlashAttentionNoQuantKernelBase<ChildClass, CubeBlockType
             runParam.halfS1RealSize =
                 runParam.s1RealSize <= 16 ? runParam.s1RealSize : (runParam.s1RealSizeAlign32 >> 1);
         }
+    } else if constexpr (CV_RATIO == 1) {
+        runParam.halfS1RealSize = runParam.s1RealSize;
     } else {
         runParam.halfS1RealSize = (runParam.s1RealSize + 1) >> 1;
     }

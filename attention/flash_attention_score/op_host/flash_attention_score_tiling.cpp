@@ -395,13 +395,13 @@ ASCENDC_EXTERN_C ge::graphStatus TilingFlashAttentionScore(gert::TilingContext* 
     OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
-    if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
-        OP_LOGW(context, "Current npu arch is dav-3510.");
+    if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510 || ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201) {
+        OP_LOGW(context, "Current npu arch is dav-3510 or dav-9201.");
         if (IsEmptyInputRegbase(context)) {
             return ge::GRAPH_SUCCESS;
         }
     } else {
-        OP_LOGW(context, "Current npu arch is not dav-3510.");
+        OP_LOGW(context, "Current npu arch is not dav-3510 nor dav-9201.");
         if (IsEmptyInput(context)) {
             return ge::GRAPH_SUCCESS;
         }

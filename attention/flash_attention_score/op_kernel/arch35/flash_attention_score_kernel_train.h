@@ -336,6 +336,15 @@ __aicore__ inline void FlashAttentionScoreKernelTrain<CubeBlockType, VecBlockTyp
             taskId++;
         }
     }
+
+#if __NPU_ARCH__ != 3510
+    this->UnInitMMResBuf();
+    if ASCEND_IS_AIC {
+        this->cubeBlock.UnInitCubeBlock();
+    } else {
+        this->vecBlock.UnInitLocalBuffer();
+    }
+#endif
 }
 
 // =========================================== private functions ===========================================

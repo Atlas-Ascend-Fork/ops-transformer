@@ -2005,9 +2005,19 @@ void FlashAttentionScoreTilingRegbase::CalcDVBasicBlock()
     }
 }
 
+int64_t FlashAttentionScoreTilingRegbase::CalcOptionInputNum()
+{
+    int64_t optionCount = 0;
+    optionCount += (hasPse && (pseType == static_cast<int64_t>(PseType::PSE_OUTER_MUL_ADD_TYPE) ||
+                               pseType == static_cast<int64_t>(PseType::PSE_OUTER_ADD_MUL_TYPE)));
+    optionCount += (hasDropOut && dropMaskOuter);
+    optionCount += hasAttenMask;
+    return optionCount;
+}
+
 ge::graphStatus FlashAttentionScoreTilingRegbase::PostTiling()
 {
-    auto numBlocks = CalcTschBlockDim(multiCoreParamsRegbase_->get_coreNum() * 2, aicNum, aivNum);
+    auto numBlocks = CalcTschBlockDim(multiCoreParamsRegbase_->get_coreNum() * (aivNum / aicNum), aicNum, aivNum);
     context_->SetBlockDim(numBlocks);
     size_t* workspaces = context_->GetWorkspaceSizes(1);
     if (inputParamsRegbase_->get_needDropMaskOp() == 1) {

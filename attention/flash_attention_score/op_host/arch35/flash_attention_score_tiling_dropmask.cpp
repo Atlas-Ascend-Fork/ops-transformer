@@ -82,6 +82,6 @@ protected:
 };
 
 REGISTER_TILING_TEMPLATE_WITH_ARCH(FlashAttentionScore, FlashAttentionScoreTilingDropMaskRegbase,
-                                   static_cast<int32_t>(NpuArch::DAV_3510), 81);
+                                   std::vector<int32_t>({(int32_t)NpuArch::DAV_3510, (int32_t)NpuArch::DAV_9201}), 81);
 } // namespace FA
 } // namespace optiling

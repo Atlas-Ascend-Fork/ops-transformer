@@ -244,7 +244,71 @@ protected:
     }
 };
 
+class FlashAttentionScoreTilingBasicV121 : public FlashAttentionScoreTilingBasic {
+public:
+    explicit FlashAttentionScoreTilingBasicV121(gert::TilingContext* context)
+        : FlashAttentionScoreTilingBasic(context)
+    {}
+    ~FlashAttentionScoreTilingBasicV121() override = default;
+
+protected:
+    int64_t CalcTotalSize() override
+    {
+        int64_t totalSize = bSize * n2Size * gSize * multiCoreParamsRegbase_->get_s1OuterSize();
+        return totalSize;
+    }
+
+    void CalcS1S2BasicBlock() override
+    {
+        if (dSize > NUM_128 || inputDtypeBytes == DATA_TYPE_FP32) {
+            s1TemplateType = STemplateType::ALIGNED_64;
+            s1BasicBlock = NUM_64;
+            s2TemplateType = STemplateType::ALIGNED_128;
+            s2BasicBlock = NUM_128;
+        } else {
+            // 防止UB空间不足，当外部传入可选输入大于1时，设置基本块64 128.
+            if (CalcOptionInputNum() > 1) {
+                s1TemplateType = STemplateType::ALIGNED_64;
+                s1BasicBlock = NUM_64;
+            } else {
+                s1TemplateType = STemplateType::ALIGNED_128;
+                s1BasicBlock = NUM_128;
+            }
+            s2TemplateType = STemplateType::ALIGNED_128;
+            s2BasicBlock = NUM_128;
+        }
+    }
+
+    bool IsCapable() override
+    {
+        if (npuArch != NpuArch::DAV_9201) {
+            OP_LOGD(opName, "Current npu arch is not dav-9201.");
+            return false;
+        }
+
+        return true;
+    }
+
+    void AnalyzeOptionalDn() override
+    {
+        if (hasRope ||
+            (hasAttenMask &&
+             attenMaskCompressMode != static_cast<uint8_t>(AttenMaskCompressMode::LEFT_UP_CAUSAL_MODE) &&
+             attenMaskCompressMode != static_cast<uint8_t>(AttenMaskCompressMode::RIGHT_DOWN_CAUSAL_MODE)) ||
+            (hasPse && pseType != static_cast<int64_t>(PseType::PSE_INNER_MUL_ADD_TYPE) &&
+             pseType != static_cast<int64_t>(PseType::PSE_INNER_MUL_ADD_SQRT_TYPE)) ||
+            (hasDropOut && dropMaskOuter) || inputDtypeBytes == DATA_TYPE_FP32 ||
+            dTemplateType > DTemplateType::ALIGNED_256 || dTemplateType != dVTemplateType) {
+            return;
+        }
+        optionalDn = true;
+    }
+};
+
 REGISTER_TILING_TEMPLATE_WITH_ARCH(FlashAttentionScore, FlashAttentionScoreTilingBasic,
                                    static_cast<int32_t>(NpuArch::DAV_3510), 83);
+REGISTER_TILING_TEMPLATE_WITH_ARCH(FlashAttentionScore, FlashAttentionScoreTilingBasicV121,
+                                   static_cast<int32_t>(NpuArch::DAV_9201), 83);
+
 } // namespace FA
 } // namespace optiling

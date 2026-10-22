@@ -398,6 +398,7 @@ protected:
     virtual void CalcDVBasicBlock();
     virtual int64_t CalcTotalSize();
     virtual void AnalyzeOptionalDn() {}
+    int64_t CalcOptionInputNum();
     virtual ge::graphStatus SetQKVStartIdx();
     virtual void SetOutputDtype();
     virtual void SetSplitCoreModeParam();

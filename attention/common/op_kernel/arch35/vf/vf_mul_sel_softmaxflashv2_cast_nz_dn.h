@@ -1867,8 +1867,8 @@ __simd_vf__ inline void ProcessVec1DnCausalVF(
     }
 }
 
-template <typename T, typename T2, bool isUpdate = false, bool hasAtten = false, uint16_t ubN = 128,
-          bool hasSink = false, bool hasInvalidLine = false>
+template <typename T, typename T2, bool isUpdate = false, bool hasAtten = false, uint32_t s1BaseSize,
+          uint16_t ubN = 128, bool hasSink = false, bool hasInvalidLine = false>
 __aicore__ inline void ProcessVec1DnCausal(
     const LocalTensor<T2>& dstTensor, const LocalTensor<T>& expSumTensor, const LocalTensor<T>& maxTensor,
     const LocalTensor<T>& srcTensor, const LocalTensor<T>& expMaxTensor, const LocalTensor<uint8_t>& vselrIndexesBuf,
@@ -1884,7 +1884,12 @@ __aicore__ inline void ProcessVec1DnCausal(
     __ubuf__ uint32_t* maskUb = (__ubuf__ uint32_t*)maskTensor.GetPhyAddr();
     __ubuf__ uint8_t* indexesUb = nullptr;
     __ubuf__ T* tmpExpSumUb = (__ubuf__ T*)sharedTmpBuffer.GetPhyAddr();
+#if __NPU_ARCH__ == 3510
+    // 3510上CV_RATIO为2，单次AIV最多处理64行，临时区布局为[64 T tmpExpSum][64 T tmpMax]
     __ubuf__ T* tmpMaxUb = (__ubuf__ T*)sharedTmpBuffer.GetPhyAddr() + 64;
+#else
+    __ubuf__ T* tmpMaxUb = (__ubuf__ T*)sharedTmpBuffer.GetPhyAddr() + s1BaseSize;
+#endif
     float dScale;
     uint32_t blockStride;
     uint32_t repeatStride;
@@ -1900,10 +1905,30 @@ __aicore__ inline void ProcessVec1DnCausal(
         repeatStride = 1;
     }
 
+#if __NPU_ARCH__ == 3510
+    // 3510上CV_RATIO为2，m为单AIV实际行数(<=64)，单次调用即可
     ProcessVec1DnCausalVF<T, T2, isUpdate, hasAtten, ubN, hasSink, hasInvalidLine>(
         x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, tmpExpSumUb, tmpMaxUb, indexesUb,
         m, n, originN, scale, deScaleQK, minValue, keepProb, needAtten, dScale, blockStride, repeatStride, pScale,
         sinkValue);
+#else
+    if constexpr (s1BaseSize == 64) {
+        ProcessVec1DnCausalVF<T, T2, isUpdate, hasAtten, ubN, hasSink, hasInvalidLine>(
+            x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, tmpExpSumUb, tmpMaxUb,
+            indexesUb, m, n, originN, scale, deScaleQK, minValue, keepProb, needAtten, dScale, blockStride,
+            repeatStride, pScale, sinkValue);
+    } else {
+        ProcessVec1DnCausalVF<T, T2, isUpdate, hasAtten, ubN, hasSink, hasInvalidLine>(
+            x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, tmpExpSumUb, tmpMaxUb,
+            indexesUb, 128, n, originN, scale, deScaleQK, minValue, keepProb, needAtten, dScale, blockStride,
+            repeatStride, pScale, sinkValue);
+        uint32_t stride = 64 * n + n;
+        ProcessVec1DnCausalVF<T, T2, isUpdate, hasAtten, ubN, hasSink, hasInvalidLine>(
+            x_exp + stride, input_x_local_UB + 64, exp_max_fp32, new_global_sum + 64, new_global_max + 64, maskUb + 16,
+            tmpExpSumUb + 64, tmpMaxUb + 64, indexesUb, 128, n, originN, scale, deScaleQK, minValue, keepProb,
+            needAtten, dScale, blockStride, repeatStride, pScale, sinkValue);
+    }
+#endif
 }
 // DN tail softmax initialization with BF16 P output.
 template <typename T, typename T2, uint16_t ubN = 128>
@@ -2357,8 +2382,8 @@ __aicore__ inline void ProcessVec1VfDn(const LocalTensor<T2>& dstTensor, const L
                                                            minValue, keepProb, needAtten, pScale, sinkValue);
     }
 }
-template <typename T, typename T2, bool isUpdate = false, bool hasAtten = false, uint16_t ubN = 256,
-          bool hasSink = false, bool hasInvalidLine = false>
+template <typename T, typename T2, bool isUpdate = false, bool hasAtten = false, uint32_t s1BaseSize,
+          uint16_t ubN = 256, bool hasSink = false, bool hasInvalidLine = false>
 __aicore__ inline void ProcessVec1VfDnCausal(const LocalTensor<T2>& dstTensor, const LocalTensor<T>& expSumTensor,
                                              const LocalTensor<T>& maxTensor, const LocalTensor<T>& srcTensor,
                                              const LocalTensor<T>& expMaxTensor, TBuf<>* vselrIndexesBuf,
@@ -2373,7 +2398,7 @@ __aicore__ inline void ProcessVec1VfDnCausal(const LocalTensor<T2>& dstTensor, c
                   IsSameType<T2, hifloat8_t>::value) {
         indexesTensor = vselrIndexesBuf[static_cast<int>(VselrIndexEnum::DN_INDEX)].template Get<uint8_t>();
     }
-    ProcessVec1DnCausal<T, T2, isUpdate, hasAtten, ubN, hasSink, hasInvalidLine>(
+    ProcessVec1DnCausal<T, T2, isUpdate, hasAtten, s1BaseSize, ubN, hasSink, hasInvalidLine>(
         dstTensor, expSumTensor, maxTensor, srcTensor, expMaxTensor, indexesTensor, maskTensor, sharedTmpBuffer, m, n,
         originN, scale, deScaleQK, minValue, keepProb, needAtten, pScale, sinkValue);
 }

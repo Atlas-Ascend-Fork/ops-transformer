@@ -20,7 +20,7 @@
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
-#ifdef __DAV_C310_CUBE__ // CUBE 实现
+#if defined(__DAV_C310_CUBE__) || defined(__DAV_CUBE__) // CUBE 实现
 
 #define INVOKE_FA_OP_IMPL_BASEAPI(templateClass, ...) \
     do { \
@@ -105,8 +105,12 @@ inline __aicore__ void flash_attention_score_regbase(
     __gm__ uint8_t* softmaxOut, __gm__ uint8_t* attentionOut, __gm__ uint8_t* sink, __gm__ uint8_t* workspace,
     __gm__ uint8_t* tiling)
 {
-#if __CCE_AICORE__ == 310
+#if (__NPU_ARCH__ != 2201) && (__NPU_ARCH__ != 5102)
+#if (__NPU_ARCH__ != 3510)
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+#else
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#endif
 #if (ORIG_DTYPE_QUERY == DT_FLOAT)
     INVOKE_FA_OP_IMPL_BASEAPI(BaseApi::FlashAttentionScoreKernelTrain, float, float, float, ImplModeEnum(implMode),
                               LayOutTypeEnum(layout), S1TemplateType(s1TemplateType), S2TemplateType(s2TemplateType),

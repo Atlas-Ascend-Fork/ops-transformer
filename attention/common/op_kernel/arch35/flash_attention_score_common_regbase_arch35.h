@@ -188,6 +188,17 @@ __aicore__ constexpr bool IsDn(bool isFp32, bool isValidFp8, regbaseutil::PseTyp
     return false;
 }
 
+__aicore__ constexpr bool IsDnForTrain(bool isFp32, bool isValidFp8, regbaseutil::PseTypeEnum pseMode, bool hasAtten,
+                                       bool hasDrop, bool isS1Base64, regbaseutil::DTemplateType dTemplateType,
+                                       bool hasRope, bool enableKVPrefix, bool isInfer, bool isHiFp8)
+{
+    if (!isFp32 && !ContainOptionalInput(pseMode, hasAtten, hasDrop) && !hasRope &&
+        (uint16_t)dTemplateType <= (uint16_t)regbaseutil::DTemplateType::Aligned256) {
+        return true;
+    }
+    return false;
+}
+
 template <typename INPUT_T>
 __aicore__ constexpr bool UbOutCondition(bool isFp32, regbaseutil::PseTypeEnum pseMode, bool hasAtten, bool hasDrop,
                                          bool hasRope, bool isS2Base64)
@@ -207,6 +218,13 @@ __aicore__ constexpr bool UbOutCondition(bool isFp32, regbaseutil::PseTypeEnum p
     return false;
 }
 
+template <typename INPUT_T>
+__aicore__ constexpr bool UbOutConditionForTrain(bool isFp32, regbaseutil::PseTypeEnum pseMode, bool hasAtten,
+                                                 bool hasDrop, bool hasRope, bool isS2Base64)
+{
+    return true;
+}
+
 __aicore__ constexpr TPosition GetC2Position(regbaseutil::DTemplateType dTemplateType, bool ubOutCondition,
                                              bool isNdS2Size256, bool isMlaFullQuant, bool isMlaNoQuant = false,
                                              bool optionalDn = false)
@@ -220,6 +238,16 @@ __aicore__ constexpr TPosition GetC2Position(regbaseutil::DTemplateType dTemplat
     if ((uint16_t)dTemplateType <= (uint16_t)regbaseutil::DTemplateType::Aligned128 ||
         (ubOutCondition && (uint16_t)dTemplateType <= (uint16_t)regbaseutil::DTemplateType::Aligned192) ||
         (ubOutCondition && isMlaFullQuant) || isNdS2Size256) {
+        return TPosition::VECCALC;
+    } else {
+        return TPosition::GM;
+    }
+}
+
+__aicore__ constexpr TPosition GetC2PositionForTrain(regbaseutil::DTemplateType dTemplateType, bool ubOutCondition,
+                                                     bool isNdS2Size256, bool isMlaFullQuant, bool isMlaNoQuant = false)
+{
+    if ((uint16_t)dTemplateType <= (uint16_t)regbaseutil::DTemplateType::Aligned256) {
         return TPosition::VECCALC;
     } else {
         return TPosition::GM;

@@ -420,6 +420,272 @@ __aicore__ inline void CopyInDropOuter(TBuf<>& dropMaskBuf, TQue<QuePosition::VE
         return;
     }
 }
+
+__aicore__ inline void GenIndexVecDnImpl64(LocalTensor<int32_t>& dropmaskIndexVec, uint32_t rowNums,
+                                           uint32_t eachColOffset)
+{
+    uint64_t indexVecDstLocalInt = dropmaskIndexVec.GetPhyAddr();
+    __VEC_SCOPE__
+    {
+        RegTensor<int32_t> inc_idx, inc_idx_unroll;
+        MaskReg preg;
+        uint32_t sreg = 64;
+        preg = UpdateMask<int32_t>(sreg);
+
+        Arange(inc_idx, 0);
+        Muls(inc_idx, inc_idx, eachColOffset, preg);
+        Adds(inc_idx_unroll, inc_idx, 1, preg);
+        for (uint16_t i = 0; i < static_cast<uint16_t>(rowNums >> 1); i++) {
+            StoreAlign<int32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE, MicroAPI::StoreDist::DIST_NORM_B32>(
+                (__ubuf__ int32_t*&)indexVecDstLocalInt, inc_idx, 64, preg);
+            StoreAlign<int32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE, MicroAPI::StoreDist::DIST_NORM_B32>(
+                (__ubuf__ int32_t*&)indexVecDstLocalInt, inc_idx_unroll, 64, preg);
+            Adds(inc_idx, inc_idx, 2, preg);
+            Adds(inc_idx_unroll, inc_idx_unroll, 2, preg);
+        }
+    }
+}
+
+__aicore__ inline void GenIndexVecDnImpl128(LocalTensor<int32_t>& dropmaskIndexVec, uint32_t rowNums,
+                                            uint32_t eachColOffset)
+{
+    uint64_t indexVecDstLocalInt = dropmaskIndexVec.GetPhyAddr();
+    __VEC_SCOPE__
+    {
+        RegTensor<int32_t> inc_idx, inc_idx_unroll;
+        MaskReg preg;
+        uint32_t sreg = 64;
+        preg = UpdateMask<int32_t>(sreg);
+
+        Arange(inc_idx, 0);
+        Arange(inc_idx_unroll, 64);
+        Muls(inc_idx, inc_idx, eachColOffset, preg);
+        Muls(inc_idx_unroll, inc_idx_unroll, eachColOffset, preg);
+        for (uint16_t i = 0; i < static_cast<uint16_t>(rowNums); i++) {
+            StoreAlign<int32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE, MicroAPI::StoreDist::DIST_NORM_B32>(
+                (__ubuf__ int32_t*&)indexVecDstLocalInt, inc_idx, 64, preg);
+            StoreAlign<int32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE, MicroAPI::StoreDist::DIST_NORM_B32>(
+                (__ubuf__ int32_t*&)indexVecDstLocalInt, inc_idx_unroll, 64, preg);
+            Adds(inc_idx, inc_idx, 1, preg);
+            Adds(inc_idx_unroll, inc_idx_unroll, 1, preg);
+        }
+    }
+}
+
+template <uint16_t s1BaseSize = 128>
+__aicore__ inline void GenIndexVecDn(LocalTensor<int32_t>& dropmaskIndexVec, uint32_t rowNums, uint32_t eachColOffset)
+{
+    if constexpr (s1BaseSize == 128) {
+        GenIndexVecDnImpl128(dropmaskIndexVec, rowNums, eachColOffset);
+    } else {
+        GenIndexVecDnImpl64(dropmaskIndexVec, rowNums, eachColOffset);
+    }
+}
+
+template <uint16_t s1BaseSize = 128>
+__aicore__ inline void GenMaskByIndexVecDn(const LocalTensor<uint8_t>& dstLocal,
+                                           const LocalTensor<int32_t>& indexTensor,
+                                           const LocalTensor<uint8_t>& vselrTensor, const PhiloxKey& philoxkey,
+                                           const PhiloxCounter& philoxCounter, uint16_t count,
+                                           uint8_t probValueUint8Scalar)
+{
+    constexpr uint16_t unrollTimes = s1BaseSize / 64;
+    __ubuf__ uint32_t* mask[2] = {(__ubuf__ uint32_t*)dstLocal.GetPhyAddr(),
+                                  (__ubuf__ uint32_t*)dstLocal.GetPhyAddr() + 128 * 128 / 32};
+    uint64_t indexVecLocalInt = indexTensor.GetPhyAddr();
+    uint64_t vselrUb = vselrTensor.GetPhyAddr();
+
+    // 一次可以生成256个uint32的随机数,
+    // 如果不够256，生成的mask后面有一部分脏数据，dropout计算中只使用前面的有效数据，unroll后为512
+    uint16_t mainLoop = CeilDiv(count, 256 * unrollTimes);
+
+    __VEC_SCOPE__
+    {
+        MaskReg pg = pge_b32(PAT_ALL);
+        MaskReg preg = pge_b8(PAT_ALL);
+        MaskReg pd;
+        MaskReg pm_0, pm_1, pm_2, pm_3;
+        MaskReg pm_0_0, pm_0_1, pm_1_0, pm_1_1, pm_2_0, pm_2_1, pm_3_0, pm_3_1;
+        RegTensor<uint32_t> ctr_3, ctr_2, ctr_1, ctr_0, key_1_0, key_0_0;
+        Duplicate(key_0_0, philoxkey[0]);
+        Duplicate(key_1_0, philoxkey[1]);
+        Duplicate(ctr_0, philoxCounter[0]);
+        Duplicate(ctr_1, philoxCounter[1]);
+        Duplicate(ctr_2, philoxCounter[2]);
+        Duplicate(ctr_3, philoxCounter[3]);
+
+        RegTensor<int32_t> inc_idx;
+        RegTensor<uint32_t> v_zero;
+        RegTensor<uint32_t> v_const_mul_0, v_const_mul_1;
+        RegTensor<uint8_t> vse_index;
+        RegTensor<uint32_t> key_0_1, key_0_2, key_0_3, key_0_4, key_0_5, key_0_6;
+        RegTensor<uint32_t> key_1_1, key_1_2, key_1_3, key_1_4, key_1_5, key_1_6;
+
+        LoadAlign<uint8_t>(vse_index, (__ubuf__ uint8_t*&)vselrUb);
+
+        Duplicate(v_zero, 0x0);
+        Duplicate(v_const_mul_0, (uint32_t)PHILOX_CONST_MUL_0);
+        Duplicate(v_const_mul_1, (uint32_t)PHILOX_CONST_MUL_1);
+
+        Adds(key_0_1, key_0_0, (uint32_t)PHILOX_CONST_KEY_ADD_0, pg);
+        Adds(key_1_1, key_1_0, (uint32_t)PHILOX_CONST_KEY_ADD_1, pg);
+        Adds(key_0_2, key_0_1, (uint32_t)PHILOX_CONST_KEY_ADD_0, pg);
+        Adds(key_1_2, key_1_1, (uint32_t)PHILOX_CONST_KEY_ADD_1, pg);
+        Adds(key_0_3, key_0_2, (uint32_t)PHILOX_CONST_KEY_ADD_0, pg);
+        Adds(key_1_3, key_1_2, (uint32_t)PHILOX_CONST_KEY_ADD_1, pg);
+        Adds(key_0_4, key_0_3, (uint32_t)PHILOX_CONST_KEY_ADD_0, pg);
+        Adds(key_1_4, key_1_3, (uint32_t)PHILOX_CONST_KEY_ADD_1, pg);
+        Adds(key_0_5, key_0_4, (uint32_t)PHILOX_CONST_KEY_ADD_0, pg);
+        Adds(key_1_5, key_1_4, (uint32_t)PHILOX_CONST_KEY_ADD_1, pg);
+        Adds(key_0_6, key_0_5, (uint32_t)PHILOX_CONST_KEY_ADD_0, pg);
+        Adds(key_1_6, key_1_5, (uint32_t)PHILOX_CONST_KEY_ADD_1, pg);
+
+        for (uint16_t i = 0; i < mainLoop; i++) {
+            for (uint16_t j = 0; j < unrollTimes; j++) {
+                LoadAlign<int32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
+                    inc_idx, ((__ubuf__ int32_t*&)indexVecLocalInt), ELE_CNT_B32);
+
+                RegTensor<uint32_t> tmp_ctr_0 = ctr_0;
+                RegTensor<uint32_t> tmp_ctr_1 = ctr_1;
+                RegTensor<uint32_t> tmp_ctr_2 = ctr_2;
+                RegTensor<uint32_t> tmp_ctr_3 = ctr_3;
+                AddCarryOut(pd, tmp_ctr_0, ctr_0, (RegTensor<uint32_t>&)inc_idx, pg);
+                AddCarryOuts(pd, tmp_ctr_1, ctr_1, v_zero, pd, pg);
+                AddCarryOuts(pd, tmp_ctr_2, ctr_2, v_zero, pd, pg);
+                AddCarryOuts(pd, tmp_ctr_3, ctr_3, v_zero, pd, pg);
+
+                RegTensor<uint32_t> tmp_l0, tmp_h0, tmp_l1, tmp_h1;
+                RegTensor<uint32_t> tmp_l2, tmp_l3;
+                Mull(tmp_l0, tmp_h0, tmp_ctr_0, v_const_mul_0, pg);
+                Mull(tmp_l1, tmp_h1, tmp_ctr_2, v_const_mul_1, pg);
+                Xor(tmp_h1, tmp_h1, tmp_ctr_1, pg);
+                Xor(tmp_ctr_0, tmp_h1, key_0_0, pg);
+                Xor(tmp_h0, tmp_h0, tmp_ctr_3, pg);
+                Xor(tmp_ctr_2, tmp_h0, key_1_0, pg);
+
+                Mull(tmp_l2, tmp_h0, tmp_ctr_0, v_const_mul_0, pg);
+                Mull(tmp_l3, tmp_h1, tmp_ctr_2, v_const_mul_1, pg);
+                Xor(tmp_h1, tmp_h1, tmp_l1, pg);
+                Xor(tmp_ctr_0, tmp_h1, key_0_1, pg);
+                Xor(tmp_h0, tmp_h0, tmp_l0, pg);
+                Xor(tmp_ctr_2, tmp_h0, key_1_1, pg);
+
+                Mull(tmp_l0, tmp_h0, tmp_ctr_0, v_const_mul_0, pg);
+                Mull(tmp_l1, tmp_h1, tmp_ctr_2, v_const_mul_1, pg);
+                Xor(tmp_h1, tmp_h1, tmp_l3, pg);
+                Xor(tmp_ctr_0, tmp_h1, key_0_2, pg);
+                Xor(tmp_h0, tmp_h0, tmp_l2, pg);
+                Xor(tmp_ctr_2, tmp_h0, key_1_2, pg);
+
+                Mull(tmp_l2, tmp_h0, tmp_ctr_0, v_const_mul_0, pg);
+                Mull(tmp_l3, tmp_h1, tmp_ctr_2, v_const_mul_1, pg);
+                Xor(tmp_h1, tmp_h1, tmp_l1, pg);
+                Xor(tmp_ctr_0, tmp_h1, key_0_3, pg);
+                Xor(tmp_h0, tmp_h0, tmp_l0, pg);
+                Xor(tmp_ctr_2, tmp_h0, key_1_3, pg);
+
+                Mull(tmp_l0, tmp_h0, tmp_ctr_0, v_const_mul_0, pg);
+                Mull(tmp_l1, tmp_h1, tmp_ctr_2, v_const_mul_1, pg);
+                Xor(tmp_h1, tmp_h1, tmp_l3, pg);
+                Xor(tmp_ctr_0, tmp_h1, key_0_4, pg);
+                Xor(tmp_h0, tmp_h0, tmp_l2, pg);
+                Xor(tmp_ctr_2, tmp_h0, key_1_4, pg);
+
+                Mull(tmp_l2, tmp_h0, tmp_ctr_0, v_const_mul_0, pg);
+                Mull(tmp_l3, tmp_h1, tmp_ctr_2, v_const_mul_1, pg);
+                Xor(tmp_h1, tmp_h1, tmp_l1, pg);
+                Xor(tmp_ctr_0, tmp_h1, key_0_5, pg);
+                Xor(tmp_h0, tmp_h0, tmp_l0, pg);
+                Xor(tmp_ctr_2, tmp_h0, key_1_5, pg);
+
+                Mull(tmp_l0, tmp_h0, tmp_ctr_0, v_const_mul_0, pg);
+                Mull(tmp_l1, tmp_h1, tmp_ctr_2, v_const_mul_1, pg);
+                Xor(tmp_h1, tmp_h1, tmp_l3, pg);
+                Xor(tmp_ctr_0, tmp_h1, key_0_6, pg);
+                Xor(tmp_h0, tmp_h0, tmp_l2, pg);
+                Xor(tmp_ctr_2, tmp_h0, key_1_6, pg);
+
+                tmp_ctr_1 = tmp_l1;
+                tmp_ctr_3 = tmp_l0;
+
+                // uint32转成4个uint8, 通过vselr指令转成DN上连续，与keepprob比较得到mask
+                RegTensor<uint8_t> tmp_ctr_0_u8_dn;
+                RegTensor<uint8_t> tmp_ctr_1_u8_dn;
+                RegTensor<uint8_t> tmp_ctr_2_u8_dn;
+                RegTensor<uint8_t> tmp_ctr_3_u8_dn;
+                vselr(tmp_ctr_0_u8_dn, (RegTensor<uint8_t>&)tmp_ctr_0, vse_index);
+                vselr(tmp_ctr_1_u8_dn, (RegTensor<uint8_t>&)tmp_ctr_1, vse_index);
+                vselr(tmp_ctr_2_u8_dn, (RegTensor<uint8_t>&)tmp_ctr_2, vse_index);
+                vselr(tmp_ctr_3_u8_dn, (RegTensor<uint8_t>&)tmp_ctr_3, vse_index);
+
+                CompareScalar<uint8_t, CMPMODE::LE>(pm_0, tmp_ctr_0_u8_dn, probValueUint8Scalar, preg);
+                CompareScalar<uint8_t, CMPMODE::LE>(pm_1, tmp_ctr_1_u8_dn, probValueUint8Scalar, preg);
+                CompareScalar<uint8_t, CMPMODE::LE>(pm_2, tmp_ctr_2_u8_dn, probValueUint8Scalar, preg);
+                CompareScalar<uint8_t, CMPMODE::LE>(pm_3, tmp_ctr_3_u8_dn, probValueUint8Scalar, preg);
+
+                // pm是256bit，32byte，偏移是按照byte来的，这里将每个bit扩展为2个bit，后续通过US拷贝可直接扩展为4bit，参与fp32计算
+                MaskInterleave<uint8_t>(pm_0_0, pm_0_1, pm_0, pm_0);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_0_0, 32);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_0_1, 32);
+                MaskInterleave<uint8_t>(pm_1_0, pm_1_1, pm_1, pm_1);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_1_0, 32);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_1_1, 32);
+                MaskInterleave<uint8_t>(pm_2_0, pm_2_1, pm_2, pm_2);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_2_0, 32);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_2_1, 32);
+                MaskInterleave<uint8_t>(pm_3_0, pm_3_1, pm_3, pm_3);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_3_0, 32);
+                StoreAlign<uint32_t, MicroAPI::PostLiteral::POST_MODE_UPDATE>((__ubuf__ uint32_t*&)mask[j], pm_3_1, 32);
+            }
+        }
+    }
+}
+
+template <uint16_t s1BaseSize = 128, bool hasRope = false>
+__aicore__ inline void GenDropMaskDn(TBuf<>& dropMaskBuf, TBuf<>& maskIndexBuf, TBuf<>& vselrBuf, uint64_t maskOffset,
+                                     RunInfo<false>& runInfo, ConstInfo<false, hasRope>& constInfo,
+                                     DropMaskInfo& dropMaskInfo)
+{
+    // 一次philox算法可以生成4个uint32(16个uint8)的随机数, DN场景这16个uint8是在D轴，列方向
+    uint64_t dropMaskOffset = CeilDiv(maskOffset, philoxRandomNumAlignSize);
+    int32_t rowNums = CeilDiv(constInfo.s2BaseSize, philoxRandomNumAlignSize);
+    int32_t eachColOffset = CeilDiv(runInfo.actualS2Size, philoxRandomNumAlignSize);
+
+    LocalTensor<int32_t> dropmaskIndexVec = maskIndexBuf.template Get<int32_t>();
+    if (runInfo.actualS1Size % constInfo.s1BaseSize == 0 && runInfo.actualS2Size % constInfo.s2BaseSize == 0) {
+        // 如果s1和s2方向上都没有尾块，一个核内dropmaskIndexVec只需要生成一次，可以复用
+        if (runInfo.taskId == 0) {
+            GenIndexVecDn<s1BaseSize>(dropmaskIndexVec, rowNums, eachColOffset);
+        }
+    } else if (runInfo.s2LoopCount == 0 || runInfo.s2LoopCount == runInfo.s2LoopLimit) {
+        // 如果有尾块的场景，统一在s2Idx首尾两块刷新dropmaskIndexVec
+        GenIndexVecDn<s1BaseSize>(dropmaskIndexVec, rowNums, eachColOffset);
+    }
+
+    uint64_t dropMaskSeed = static_cast<uint64_t>(dropMaskInfo.seed);
+    uint32_t seedHigh = static_cast<uint32_t>(dropMaskSeed >> 32);
+    uint32_t seedLow = static_cast<uint32_t>(dropMaskSeed & 0xffffffff);
+    uint32_t offsetHigh = static_cast<uint32_t>(dropMaskOffset >> 32);
+    uint32_t offsetLow = static_cast<uint32_t>(dropMaskOffset & 0xffffffff);
+    LocalTensor<uint8_t> dropMaskTensor = dropMaskBuf.template Get<uint8_t>();
+    LocalTensor<uint8_t> dropMaskVselrTensor = vselrBuf.template Get<uint8_t>();
+    GenMaskByIndexVecDn<s1BaseSize>(dropMaskTensor, dropmaskIndexVec, dropMaskVselrTensor, {seedLow, seedHigh},
+                                    {offsetLow, offsetHigh, 0, 0}, rowNums * s1BaseSize * 4,
+                                    dropMaskInfo.keepProbUint8);
+}
+
+template <bool hasDrop = true, uint16_t s1BaseSize = 128, bool hasRope = false>
+__aicore__ inline void GenDropMaskDn(TBuf<>& dropMaskBuf, TBuf<>& maskIndexBuf, TBuf<>& vselrBuf,
+                                     RunInfo<false>& runInfo, ConstInfo<false, hasRope>& constInfo,
+                                     DropMaskInfo& dropMaskInfo)
+{
+    if constexpr (hasDrop == true) {
+        int64_t dropMaskOffset = ComputeDropOffset<hasDrop>(runInfo, constInfo, dropMaskInfo);
+        GenDropMaskDn<s1BaseSize>(dropMaskBuf, maskIndexBuf, vselrBuf, dropMaskOffset, runInfo, constInfo,
+                                  dropMaskInfo);
+        return;
+    }
+}
 } // namespace regbaseutil
 
 #endif // DROPMASK_H

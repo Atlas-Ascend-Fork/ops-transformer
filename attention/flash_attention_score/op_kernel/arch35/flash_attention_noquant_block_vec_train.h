@@ -45,6 +45,7 @@ public:
     /* =====================UB变量==================== */
     TBuf<> dropMaskBuf;
     TBuf<> dropMaskIndexBuf;
+    TBuf<> dropMaskVselrBuf;
     TQue<QuePosition::VECIN, 1> dropMaskInQue;
     DropMaskInfo dropMaskInfo;
     /* =================编译期常量的基本块信息================= */
@@ -63,6 +64,8 @@ public:
     __aicore__ inline void GetS1LoopRange(CVSharedParams<isInfer, isPa>& sharedParams, const int64_t& aicIdx);
     __aicore__ inline void GenerateDropoutMask(RunInfo<isInfer>& runInfo, ConstInfo<isInfer, hasRope>& constInfo,
                                                LocalTensor<uint8_t>& dropMaskUb);
+    __aicore__ inline void GenerateDropoutMaskDn(RunInfo<isInfer>& runInfo, ConstInfo<isInfer, hasRope>& constInfo,
+                                                 LocalTensor<uint8_t>& dropMaskUb);
     __aicore__ inline void SoftmaxDataCopyOut(RunInfo<isInfer>& runInfo, ConstInfo<isInfer, hasRope>& constInfo,
                                               LocalTensor<float>& sumUb, LocalTensor<float>& maxUb);
     __aicore__ inline void SoftmaxDataCopyOutFp8(RunInfo<isInfer>& runInfo, ConstInfo<isInfer, hasRope>& constInfo,
@@ -108,11 +111,36 @@ __aicore__ inline void FANoQuantBlockVecTrain<TEMPLATE_ARGS>::InitUniqueLocalBuf
     ConstInfo<isInfer, hasRope>& constInfo)
 {
     if constexpr (hasDrop) {
+#if __NPU_ARCH__ == 3510
         if constexpr (!IsSameType<INPUT_T, float>::value || !BaseClass::containAllOptionalInput) {
             this->tPipe->InitBuffer(dropMaskInQue, 1, 8192);
         }
         this->tPipe->InitBuffer(dropMaskIndexBuf, 2048);
         this->tPipe->InitBuffer(dropMaskBuf, 1024);
+#else
+        if constexpr (BaseClass::useDn) {
+            this->tPipe->InitBuffer(dropMaskIndexBuf, BaseClass::s1BaseSize * BaseClass::s2BaseSize /
+                                                          philoxRandomNumAlignSize * sizeof(uint32_t));
+            this->tPipe->InitBuffer(dropMaskBuf, BaseClass::s1BaseSize * BaseClass::s2BaseSize / 8 * 2);
+            this->tPipe->InitBuffer(dropMaskVselrBuf, 256);
+
+            LocalTensor<uint8_t> vselrBuf = dropMaskVselrBuf.template Get<uint8_t>();
+            for (int i = 0; i < 4; i++) {
+                for (int j = 0; j < 64; j++) {
+                    vselrBuf.SetValue(i * 64 + j, i + j * 4);
+                }
+            }
+        } else {
+            if constexpr (!IsSameType<INPUT_T, float>::value || !BaseClass::containAllOptionalInput) {
+                if (this->tilingData->inputParamsRegbase.dropMaskOuter) {
+                    this->tPipe->InitBuffer(dropMaskInQue, 1, BaseClass::s1BaseSize * BaseClass::s2BaseSize);
+                }
+            }
+            this->tPipe->InitBuffer(dropMaskIndexBuf, BaseClass::s1BaseSize * BaseClass::s2BaseSize /
+                                                          philoxRandomNumAlignSize * sizeof(uint32_t));
+            this->tPipe->InitBuffer(dropMaskBuf, BaseClass::s1BaseSize * BaseClass::s2BaseSize / 8);
+        }
+#endif
         dropMaskInfo.seed = this->tilingData->inputParamsRegbase.seed;
         dropMaskInfo.offset = this->tilingData->inputParamsRegbase.offset;
         constInfo.keepProb = this->tilingData->inputParamsRegbase.keepProb;
@@ -214,6 +242,17 @@ __aicore__ inline void FANoQuantBlockVecTrain<TEMPLATE_ARGS>::GenerateDropoutMas
         } else {
             GenDropMask<hasDrop>(dropMaskBuf, dropMaskIndexBuf, runInfo, constInfo, dropMaskInfo);
         }
+        dropMaskUb = dropMaskBuf.template Get<uint8_t>();
+    }
+}
+
+TEMPLATES_DEF_NO_DEFAULT
+__aicore__ inline void FANoQuantBlockVecTrain<TEMPLATE_ARGS>::GenerateDropoutMaskDn(
+    RunInfo<isInfer>& runInfo, ConstInfo<isInfer, hasRope>& constInfo, LocalTensor<uint8_t>& dropMaskUb)
+{
+    if constexpr (hasDrop == true) {
+        GenDropMaskDn<hasDrop, BaseClass::s1BaseSize>(dropMaskBuf, dropMaskIndexBuf, dropMaskVselrBuf, runInfo,
+                                                      constInfo, dropMaskInfo);
         dropMaskUb = dropMaskBuf.template Get<uint8_t>();
     }
 }
