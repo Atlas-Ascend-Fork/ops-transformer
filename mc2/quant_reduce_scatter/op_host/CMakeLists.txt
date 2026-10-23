@@ -28,6 +28,12 @@ if (BUILD_OPEN_PROJECT)  # custom
             OP_NAME QuantReduceScatter
             OPTIONS --cce-auto-sync=off
         )
+    elseif("${CONDITION_UNIT}" STREQUAL "ascend960dt")
+        # A6(ascend960dt)复用950(arch35)编译选项
+        add_ops_compile_options(
+            OP_NAME QuantReduceScatter
+            OPTIONS --cce-auto-sync=off
+        )
     endif()
 else() # 回黄host
     add_mc2_modules_sources(OPTYPE quant_reduce_scatter quant_reduce_scatter ACLNNTYPE aclnn aclnn_inner)

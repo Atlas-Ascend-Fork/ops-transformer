@@ -759,6 +759,8 @@ class AdpBuilder(opdesc_parser.OpDesc):
                 arch_version = "arch31"
             elif compute_unit == "ascend950":
                 arch_version = "arch35"
+            elif compute_unit == "ascend960dt":
+                arch_version = "arch35"
             else:
                 arch_version = "arch22"
 
