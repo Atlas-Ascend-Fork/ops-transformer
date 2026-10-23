@@ -239,6 +239,11 @@ ge::graphStatus GroupedQmmBasicApiTiling::PostTiling()
 ge::graphStatus GroupedQmmBasicApiTiling::CalL1Tiling()
 {
     InitCommonL1TilingFields();
+    // Empty reductions need no L1 payload. Kernels handle the result: GMM writes
+    // zero while inplace-add preserves yRef. Keep zero baseK out of depth sizing.
+    if (inputParams_.kSize == 0) {
+        return ge::GRAPH_SUCCESS;
+    }
     uint64_t leftL1Size = 0;
     OP_CHECK_IF(CalcLeftL1Size(leftL1Size) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context_->GetNodeName(), "CalcLeftL1Size failed"), return ge::GRAPH_FAILED);

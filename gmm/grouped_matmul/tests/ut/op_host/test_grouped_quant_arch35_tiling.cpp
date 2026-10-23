@@ -66,15 +66,16 @@ string TilingData2Str(const void* tilingData, size_t tilingSize)
     return oss.str();
 }
 
-vector<gert::TilingContextPara::OpAttr> GetGroupedQmmAttrs(bool transposeX, bool transposeWeight, int64_t groupType)
+vector<gert::TilingContextPara::OpAttr> GetGroupedQmmAttrs(bool transposeX, bool transposeWeight, int64_t groupType,
+                                                           int64_t splitItem, int64_t groupListType)
 {
     return {
-        {"split_item", Ops::Transformer::AnyValue::CreateFrom<int64_t>(3)},
+        {"split_item", Ops::Transformer::AnyValue::CreateFrom<int64_t>(splitItem)},
         {"dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
         {"transpose_weight", Ops::Transformer::AnyValue::CreateFrom<bool>(transposeWeight)},
         {"transpose_x", Ops::Transformer::AnyValue::CreateFrom<bool>(transposeX)},
         {"group_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(groupType)},
-        {"group_list_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+        {"group_list_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(groupListType)},
         {"act_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
         {"tuning_config", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({0})},
     };
@@ -115,6 +116,9 @@ public:
 
         vector<int64_t> weightOriginDims =
             transposeWeight ? vector<int64_t>{groupNum, n, k} : vector<int64_t>{groupNum, k, n};
+        if (groupType == 2 && weightFormat == "ND") {
+            weightOriginDims = transposeWeight ? vector<int64_t>{n, k} : vector<int64_t>{k, n};
+        }
         vector<int64_t> weightStorageDims;
         if (weightFormat == "NZ") {
             const bool weight4Bit =
@@ -148,15 +152,34 @@ public:
                 {groupListShape, ge::DT_INT64, ge::FORMAT_ND},           // groupList
                 {perTokenScaleShape, perTokenScaleDtype, ge::FORMAT_ND}, // perTokenScale
             },
-            {{ops::ut::MakeGertStorageShape({m}, {n}), yDtype, ge::FORMAT_ND}},
-            GetGroupedQmmAttrs(transposeX, transposeWeight, groupType), &compileInfo, "3510", compileInfo.aicNum,
-            compileInfo.ubSize);
+            {{groupType == 2 ? ops::ut::MakeGertStorageShape(vector<int64_t>{groupNum, m, n}) :
+                               ops::ut::MakeGertStorageShape({m}, {n}),
+              yDtype, ge::FORMAT_ND}},
+            GetGroupedQmmAttrs(transposeX, transposeWeight, groupType, splitItem, groupListType), &compileInfo, "3510",
+            compileInfo.aicNum, compileInfo.ubSize);
 
         TilingInfo tilingInfo;
         bool tilingResult = ExecuteTiling(tilingContextPara, tilingInfo);
         ASSERT_EQ(tilingResult, result) << "prefix=" << prefix << ", case=" << caseName;
         if (!result) {
             return;
+        }
+        if (k == 0 && groupType == 2 && scaleDtype == ge::DT_FLOAT8_E8M0) {
+            ASSERT_EQ(tilingInfo.tilingKey, expectTilingKey) << "case=" << caseName;
+            ASSERT_EQ(tilingInfo.tilingDataSize, sizeof(GroupedMatmulTilingData::GMMQuantBasicApiTilingData));
+            const auto* data = reinterpret_cast<const GroupedMatmulTilingData::GMMQuantBasicApiTilingData*>(
+                tilingInfo.tilingData.get());
+            EXPECT_EQ(data->gmmQuantParams.groupNum, groupNum);
+            EXPECT_EQ(data->gmmQuantParams.groupType, 2);
+            EXPECT_EQ(data->gmmQuantParams.groupListType, groupListType);
+            EXPECT_EQ(data->mmTilingData.m, m);
+            EXPECT_EQ(data->mmTilingData.n, n);
+            EXPECT_EQ(data->mmTilingData.k, 0);
+            EXPECT_EQ(data->mmTilingData.baseK, 0);
+            EXPECT_EQ(data->mmTilingData.kAL1, 0);
+            EXPECT_EQ(data->mmTilingData.kBL1, 0);
+            EXPECT_EQ(data->mmTilingData.scaleKAL1, 0);
+            EXPECT_EQ(data->mmTilingData.scaleKBL1, 0);
         }
         if (expectTilingData.empty()) {
             // For some csv cases we only care success/failure path, not exact tiling binary details.
@@ -191,6 +214,8 @@ public:
     bool transposeX = false;
     bool transposeWeight = false;
     int64_t groupType = 0;
+    int64_t splitItem = 3;
+    int64_t groupListType = 0;
     string weightFormat;
     ge::DataType xDtype = ge::DT_UNDEFINED;
     ge::DataType weightDtype = ge::DT_UNDEFINED;
@@ -266,6 +291,13 @@ vector<GroupedQuantArch35TilingTestParam> GetParams(const string& socVersion)
             param.expectBlockDim = static_cast<uint64_t>(stoull(items[idx++]));
             param.expectTilingKey = static_cast<uint64_t>(stoull(items[idx++]));
             param.expectTilingData = items[idx++];
+            if (idx < items.size() && !Trim(items[idx]).empty()) {
+                param.splitItem = stoll(items[idx]);
+            }
+            ++idx;
+            if (idx < items.size() && !Trim(items[idx]).empty()) {
+                param.groupListType = stoll(items[idx]);
+            }
             params.push_back(param);
         } catch (const std::exception& error) {
             ADD_FAILURE() << ops::ut::BuildCsvParseErrorMessage(csvPath, lineNo, caseName, error);

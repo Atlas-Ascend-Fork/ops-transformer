@@ -133,6 +133,27 @@ struct QGmmInplaceAddArch35Param {
         if (checkTilingKey) {
             ASSERT_EQ(tilingInfo.tilingKey, expectTilingKey) << "case=" << caseName;
         }
+        if (k == 0 && xDtype == ge::DT_HIFLOAT8 &&
+            (scale2Shape.size() == 1U || (scale2Shape.size() == 2U && scale2Shape[1] == 1))) {
+            // The empty T-T reduction must still serialize the BasicApi layout;
+            // the kernel skips the product and leaves the existing yRef intact.
+            ASSERT_EQ(tilingInfo.tilingDataSize,
+                      sizeof(QuantGroupedMatmulInplaceAdd::QGmmInplaceAddBasicApiTilingData));
+            const auto* data = reinterpret_cast<const QuantGroupedMatmulInplaceAdd::QGmmInplaceAddBasicApiTilingData*>(
+                tilingInfo.tilingData.get());
+            EXPECT_EQ(data->gmmQuantParams.groupNum, groupNum);
+            EXPECT_EQ(data->gmmQuantParams.groupListType, groupListType);
+            EXPECT_EQ(data->gmmQuantParams.aQuantMode, static_cast<uint32_t>(optiling::QuantMode::PERTENSOR_MODE));
+            EXPECT_EQ(data->gmmQuantParams.bQuantMode, static_cast<uint32_t>(optiling::QuantMode::PERTENSOR_MODE));
+            EXPECT_EQ(data->mmTilingData.m, m);
+            EXPECT_EQ(data->mmTilingData.n, n);
+            EXPECT_GT(data->mmTilingData.baseM, 0U);
+            EXPECT_GT(data->mmTilingData.baseN, 0U);
+            EXPECT_EQ(data->mmTilingData.k, 0U);
+            EXPECT_EQ(data->mmTilingData.baseK, 0U);
+            EXPECT_EQ(data->mmTilingData.kAL1, 0U);
+            EXPECT_EQ(data->mmTilingData.kBL1, 0U);
+        }
     }
 };
 
