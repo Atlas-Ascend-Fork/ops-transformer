@@ -57,6 +57,7 @@ const std::string SO_NAME_LEGACY = "libccl_kernel.so";
 const std::string SO_NAME_MC2_SERVER = "libmc2_server.so";
 const std::string KERNEL_NAME_V1 = "RunAicpuKfcSrvLaunch";
 const std::string KERNEL_NAME_MC2_SERVER = "Mc2ServerKernel";
+constexpr int64_t INVALID_INT_VAL = -1;
 
 // key: op type
 // value: group cnt
@@ -216,7 +217,7 @@ ge::Status Mc2MoeGenTaskOpsUtils::Mc2MoeInsertTask(const gert::ExeResGenerationC
         OPS_LOG_E(nodeName, "No stream info found.");
         return ge::GRAPH_FAILED;
     }
-    const int64_t attachStreamId = streamInfos[0].stream_id;
+    const int64_t attachStreamId = streamInfos[0].is_valid ? streamInfos[0].stream_id : INVALID_INT_VAL;
     const int64_t streamId = context->GetStreamId();
 
     // 1. wait task
