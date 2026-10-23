@@ -156,6 +156,85 @@ def _compressor_forward_fake(
 
 
 # ===========================================================================
+# Graph-mode (aclgraph / npugraph_ex) forward: same operator, declared as a
+# mutating custom op so torch.compile can observe the in-place state_cache
+# refresh and write it back to the caller's tensor.  It deliberately has no
+# autograd: the public compressor() drives backward through _CompressorFunction
+# while the functional _compressor_forward above keeps its own register_autograd
+# for callers that invoke it directly.
+# ===========================================================================
+@torch.library.custom_op(
+    "cann_ops_transformer::_compressor_forward_graph",
+    mutates_args=("state_cache",),
+    device_types="npu",
+)
+def _compressor_forward_graph(
+    x: torch.Tensor,
+    wkv: torch.Tensor,
+    wgate: torch.Tensor,
+    state_cache: torch.Tensor,
+    ape: torch.Tensor,
+    cmp_ratio: int,
+    state_block_table: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
+    seqused: Optional[torch.Tensor] = None,
+    start_pos: Optional[torch.Tensor] = None,
+    coff: Optional[int] = 1,
+    cache_mode: Optional[int] = 1,
+    grad_enabled: Optional[bool] = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    op_module = compressor_op_builder.load()
+    return op_module.compressor(
+        x,
+        wkv,
+        wgate,
+        state_cache,
+        ape,
+        cmp_ratio,
+        state_block_table,
+        cu_seqlens,
+        seqused,
+        start_pos,
+        coff,
+        cache_mode,
+        grad_enabled,
+    )
+
+
+@torch.library.register_fake("cann_ops_transformer::_compressor_forward_graph")
+def _compressor_forward_graph_fake(
+    x: torch.Tensor,
+    wkv: torch.Tensor,
+    wgate: torch.Tensor,
+    state_cache: torch.Tensor,
+    ape: torch.Tensor,
+    cmp_ratio: int,
+    state_block_table: Optional[torch.Tensor] = None,
+    cu_seqlens: Optional[torch.Tensor] = None,
+    seqused: Optional[torch.Tensor] = None,
+    start_pos: Optional[torch.Tensor] = None,
+    coff: Optional[int] = 1,
+    cache_mode: Optional[int] = 1,
+    grad_enabled: Optional[bool] = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    return _compressor_forward_fake(
+        x,
+        wkv,
+        wgate,
+        state_cache,
+        ape,
+        cmp_ratio,
+        state_block_table,
+        cu_seqlens,
+        seqused,
+        start_pos,
+        coff,
+        cache_mode,
+        grad_enabled,
+    )
+
+
+# ===========================================================================
 # Register compressor backward
 # ===========================================================================
 @torch.library.custom_op(
@@ -258,6 +337,98 @@ def backward(ctx, dout, *grads):
 _compressor_forward.register_autograd(backward, setup_context=setup_context)
 
 
+class _CompressorFunction(torch.autograd.Function):
+    """Autograd wrapper for the public compressor() entry.
+
+    ``compressor()`` always goes through this Function, so the public entry has
+    a single code path (no gradient-dependent branch).  Forward uses the
+    *mutating* graph op (``_compressor_forward_graph``) so torch.compile /
+    npugraph_ex can observe the in-place state_cache refresh; backward calls
+    ``_compressor_backward`` (the compressor_grad op).  The functional
+    ``_compressor_forward`` above keeps its own ``register_autograd`` for
+    callers that invoke it directly.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        wkv,
+        wgate,
+        state_cache,
+        ape,
+        cmp_ratio,
+        state_block_table,
+        cu_seqlens,
+        seqused,
+        start_pos,
+        coff,
+        cache_mode,
+    ):
+        grad_enabled = torch.is_grad_enabled() and any(
+            t is not None and t.requires_grad for t in (x, wkv, wgate, ape)
+        )
+        cmp_kv, softmax_score, kv = _compressor_forward_graph(
+            x,
+            wkv,
+            wgate,
+            state_cache,
+            ape,
+            cmp_ratio,
+            state_block_table,
+            cu_seqlens,
+            seqused,
+            start_pos,
+            coff,
+            cache_mode,
+            grad_enabled,
+        )
+        ctx.set_materialize_grads(False)
+        ctx.save_for_backward(
+            x, wkv, wgate, cu_seqlens, seqused, start_pos, softmax_score, kv
+        )
+        ctx.cmp_ratio = cmp_ratio
+        ctx.coff = coff
+        return cmp_kv
+
+    @staticmethod
+    def backward(ctx, dout, *grads):
+        """
+        Args:
+            dout: d_cmp_kv
+        """
+        x, wkv, wgate, cu_seqlens, seqused, start_pos, softmax_score, kv = (
+            ctx.saved_tensors
+        )
+        d_x, d_wkv, d_wgate, d_ape = _compressor_backward(
+            dout,
+            x,
+            wkv,
+            wgate,
+            softmax_score,
+            kv,
+            ctx.cmp_ratio,
+            cu_seqlens,
+            seqused,
+            start_pos,
+            ctx.coff,
+        )
+        return (
+            d_x,
+            d_wkv,
+            d_wgate,
+            None,
+            d_ape,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 @impl(get_as_library(), compressor_op_builder.name, "PrivateUse1")
 @impl(get_as_library(), compressor_op_builder.name, "Autograd")
 def compressor(
@@ -281,8 +452,7 @@ def compressor(
     """
     if x is None or not isinstance(x, torch.Tensor):
         raise ValueError("x must be a torch.Tensor, got {}".format(type(x).__name__))
-    grad_enabled = x.requires_grad
-    cmp_kv, softmax_score, kv = _compressor_forward(
+    return _CompressorFunction.apply(
         x,
         wkv,
         wgate,
@@ -295,6 +465,4 @@ def compressor(
         start_pos,
         coff,
         cache_mode,
-        grad_enabled,
     )
-    return cmp_kv
