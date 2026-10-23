@@ -44,6 +44,7 @@ ENABLE_BUILT_CUSTOM=FALSE
 ENABLE_STATIC=FALSE
 ENABLE_EXPERIMENTAL=FALSE
 ENABLE_TORCH_EXTENSION_ONLY=FALSE
+OPKERNEL_PKG_PR=FALSE
 PACKAGE_TYPE="run"
 PACKAGE_TYPE_SET=FALSE
 KERNEL_TEMPLATE_INPUT=""
@@ -1679,6 +1680,28 @@ assemble_cmake_args() {
   CUSTOM_OPTION="${CUSTOM_OPTION} -DCUSTOM_ASCEND_CANN_PACKAGE_PATH=${ASCEND_CANN_PACKAGE_PATH} -DCHECK_COMPATIBLE=${CHECK_COMPATIBLE}"
 }
 
+parse_changed_pr() {
+    experimental_flag=""
+    if [[ "$ENABLE_EXPERIMENTAL" == "TRUE" ]]; then
+        experimental_flag="--experimental"
+    fi
+    if [[ "$ENABLE_BUILD_PKG" == "TRUE" ]]; then
+        ENABLE_BUILT_CUSTOM=TRUE
+        ENABLE_BUILT_IN=FALSE
+    fi
+    # 参数解析完成后, 若用户未显式指定 --soc, 则通过 lspci 设备 ID 自动探测 NPU 芯片型号
+    detect_soc_from_lspci
+    ops_names=$(python3 "$CURRENT_DIR"/cmake/scripts/parse_compile_scope.py -f "$PR_CHANGED_FILES" --soc "$ASCEND_SOC_UNITS" ${experimental_flag})
+    echo "Operators that need custom package compilation:$ops_names"
+    if [ -z "${ops_names}" ]; then
+        log "Info: No custom packages to build for this PR."
+        exit 200
+    fi
+    ops_names="${ops_names%;}"
+    ops_names="${ops_names//;/,}"
+    ascend_op_name="$ops_names"
+}
+
 ########################################################################################################################
 # 参数解析处理
 ########################################################################################################################
@@ -1839,16 +1862,8 @@ while [[ $# -gt 0 ]]; do
         ;;
     -f|--changed_list)
         PR_CHANGED_FILES="$2"
-        if [[ "$ENABLE_OPKERNEL" == "TRUE" ]]; then
-            ops_names=$(python3 scripts/ci/get_changed_files_ops.py $PR_CHANGED_FILES -s "$ASCEND_SOC_UNITS")
-            echo "Operators that need custom package compilation:$ops_names"
-            if [ -z "${ops_names}" ]; then
-                log "Info: No custom packages to build for this PR."
-                break
-            fi
-            ops_names="${ops_names%;}"
-            ops_names="${ops_names//;/,}"
-            ascend_op_name="$ops_names"
+        if [[ "$ENABLE_OPKERNEL" == "TRUE" ]] || [[ "$ENABLE_BUILD_PKG" == "TRUE" ]]; then
+            OPKERNEL_PKG_PR=TRUE
         else
             ENABLE_SMOKE=TRUE
             PKG_MODE="cust"
@@ -2168,6 +2183,10 @@ if [[ "$PACKAGE_TYPE" != "run" && "$PACKAGE_TYPE" != "all" ]]; then
         echo "[ERROR] --pkg-type=${PACKAGE_TYPE} only supports built-in ops-transformer packages; do not use --ops, --vendor_name, or --experimental"
         exit 1
     fi
+fi
+
+if [[ "${OPKERNEL_PKG_PR}" == "TRUE" ]]; then
+    parse_changed_pr
 fi
 
 assemble_cmake_args
