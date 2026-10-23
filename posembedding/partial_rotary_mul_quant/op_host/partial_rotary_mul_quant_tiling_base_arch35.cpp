@@ -13,7 +13,7 @@
  * \brief
  */
 
-#include "op_host/op_const_def_transformer.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include <graph/utils/type_utils.h>
 #include "tiling/tiling_api.h"
 #include "platform/platform_info.h"

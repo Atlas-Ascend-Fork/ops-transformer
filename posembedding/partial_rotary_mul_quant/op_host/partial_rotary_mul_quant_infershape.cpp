@@ -15,7 +15,7 @@
 #ifndef OPS_OP_PROTO_INC_PARTIAL_ROTARY_MUL_QUANT_OPS_H_
 #define OPS_OP_PROTO_INC_PARTIAL_ROTARY_MUL_QUANT_OPS_H_
 
-#include "op_host/op_const_def_transformer.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "util/shape_util.h"
 #include "util/math_util.h"
 #include "register/op_impl_registry.h"

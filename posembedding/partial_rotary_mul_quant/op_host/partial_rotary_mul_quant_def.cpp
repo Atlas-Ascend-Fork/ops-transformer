@@ -12,7 +12,7 @@
  * \file partial_rotary_mul_quant_def.cpp
  * \brief
  */
-#include "op_host/op_const_def_transformer.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "register/op_def_registry.h"
 
 namespace ops {
