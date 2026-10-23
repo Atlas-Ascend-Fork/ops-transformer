@@ -67,14 +67,16 @@ if("ascend350" IN_LIST ASCEND_COMPUTE_UNIT)
 endif()
 
 if(NOT BUILD_OPS_RTY_KERNEL)
-    if(UT_TEST_ALL OR OP_API_UT)
-        # Only the GMM L0 source uses this API UT shape stub.
-        set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../op_api/grouped_matmul.cpp
-            APPEND PROPERTY COMPILE_OPTIONS -include
-            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/ut/op_api/grouped_matmul_infer_shape_stub.h)
-    endif()
     add_modules_sources(
         OP_API_INDEPENDENT ON
         OP_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../op_api
         OPTYPE grouped_matmul ACLNNTYPE aclnn_exclude)
+    if(UT_TEST_ALL OR OP_API_UT)
+        # Only the GMM L0 source uses this API UT shape stub.
+        # The shared object target can be created in another operator's directory.
+        set_property(SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../op_api/grouped_matmul.cpp
+            TARGET_DIRECTORY ${OPHOST_NAME}_opapi_obj
+            APPEND PROPERTY COMPILE_OPTIONS -include
+            ${CMAKE_CURRENT_SOURCE_DIR}/../tests/ut/op_api/grouped_matmul_infer_shape_stub.h)
+    endif()
 endif()

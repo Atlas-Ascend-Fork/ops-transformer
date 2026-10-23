@@ -192,7 +192,7 @@ if(UT_TEST_ALL OR OP_GRAPH_UT)
       PRIVATE ${UT_PATH}/op_api/stub ${UT_COMMON_INC} ${GTEST_INCLUDE} ${ASCEND_DIR}/include
               ${ASCEND_DIR}/include/external ${ASCEND_DIR}/include/exe_graph
               ${ASCEND_DIR}/include/base/context_builder ${ASCEND_DIR}/include/ge
-              ${OPBASE_INC_DIRS} ${PROJECT_SOURCE_DIR}/common/include
+              ${OPBASE_INC_DIRS} ${PROJECT_SOURCE_DIR}/common/include ${PROJECT_SOURCE_DIR}
       )
     target_compile_definitions(${OP_GRAPH_MODULE_NAME}_cases_obj PRIVATE LOG_CPP)
     target_compile_options(${OP_GRAPH_MODULE_NAME}_cases_obj PRIVATE -fno-access-control)
