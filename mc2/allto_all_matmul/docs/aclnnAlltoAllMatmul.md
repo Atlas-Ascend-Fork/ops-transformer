@@ -299,7 +299,7 @@ aclnnStatus aclnnAlltoAllMatmul(
   - <term>Atlas A2系列产品</term>：支持2、4、8卡。
   <!-- end id7 -->
   <!-- npu="A3" id8 -->
-  - <term>Atlas A3系列产品</term>  ：支持2、4、8、16卡。
+  - <term>Atlas A3系列产品</term>：支持2、4、8、16卡。
   <!-- end id8 -->
   <!-- npu="950" id9 -->
   - <term>Ascend 950PR&950DT系列产品</term>：支持2、4、8、16卡。
@@ -328,7 +328,7 @@ aclnnStatus aclnnAlltoAllMatmul(
 * 非连续tensor的支持度根据不同设备型号有不同的限制：
 
   <!-- npu="A3,910b" id14 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：不支持任何非连续tensor。
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：不支持任何非连续tensor。
   <!-- end id14 -->
   <!-- npu="950" id15 -->
   - <term>Ascend 950PR&950DT系列产品</term>：仅支持x2为非连续tensor，其它非连续tensor均不支持。
@@ -338,7 +338,7 @@ aclnnStatus aclnnAlltoAllMatmul(
 * biasOptional的数据类型根据不同设备型号有不同的限制：
 
   <!-- npu="A3,910b" id16 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持FLOAT32。
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持FLOAT32。
   <!-- end id16 -->
   <!-- npu="950" id17 -->
   - <term>Ascend 950PR&950DT系列产品</term>：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16和FLOAT32；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持BFLOAT16和FLOAT32。
@@ -352,7 +352,7 @@ aclnnStatus aclnnAlltoAllMatmul(
    - <term>Atlas A2系列产品</term>：支持MTE通信，且通信缓冲区大于等于200MB。
    <!-- end id18 -->
    <!-- npu="A3" id19 -->
-   - <term>Atlas A3系列产品</term>  ：支持AI CPU通信。
+   - <term>Atlas A3系列产品</term>：支持AI CPU通信。
    <!-- end id19 -->
    <!-- npu="950" id20 -->
    - <term>Ascend 950PR&950DT系列产品</term>：支持AI CPU通信。
@@ -366,7 +366,7 @@ aclnnStatus aclnnAlltoAllMatmul(
 说明：本示例代码调用了部分HCCL集合通信库接口：HcclGetCommName、HcclCommInitAll、HcclCommDestroy,请参考[《HCCL API (C)》](https://hiascend.com/document/redirect/CannCommunityHcclCppApi)。
 
 <!-- npu="A3,910b" id21 -->
-- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
 
     ```cpp
     #include <thread>

@@ -267,7 +267,7 @@ aclnnStatus aclnnAlltoAllQuantMatmulV2(
     <tr>
     <td>x1QuantMode</td>
     <td>输入</td>
-    <td>左矩阵的量化方式</td>
+    <td>左矩阵的量化方式。</td>
     <td>根据设备型号对取值有不同限制，详细参见<a href="#约束说明">约束说明</a>。</td>
     <td>-</td>
     <td>-</td>
@@ -277,7 +277,7 @@ aclnnStatus aclnnAlltoAllQuantMatmulV2(
     <tr>
     <td>x2QuantMode</td>
     <td>输入</td>
-    <td>右矩阵的量化方式</td>
+    <td>右矩阵的量化方式。</td>
     <td>根据设备型号对取值有不同限制，详细参见<a href="#约束说明">约束说明</a>。</td>
     <td>-</td>
     <td>-</td>
@@ -298,7 +298,7 @@ aclnnStatus aclnnAlltoAllQuantMatmulV2(
     <td>commQuantDtype</td>
     <td>输入</td>
     <td>低比特通信的量化类型。</td>
-    <td>预留参数，当前仅支持配置为-1,表示ACL_DT_UNDEFINED。</td>
+    <td>预留参数，当前仅支持配置为-1，表示ACL_DT_UNDEFINED。</td>
     <td>-</td>
     <td>-</td>
     <td>-</td>
@@ -501,7 +501,7 @@ aclnnStatus aclnnAlltoAllQuantMatmulV2(
   - <term>Ascend 950PR&950DT系列产品</term>：支持2、4、8、16卡。
   <!-- end id12 -->
 
-* 参数说明中shape使用的变量BS必须整除rankSize。
+* 参数说明中shape使用的变量BS必须被rankSize整除。
 * BS和N的值不得超过2147483647（INT32_MAX），BS的值不得小于2，N的值不得小于1。
 * 不支持空tensor。
 * 非连续tensor的支持度根据不同设备型号有不同的限制：
@@ -546,7 +546,7 @@ aclnnStatus aclnnAlltoAllQuantMatmulV2(
       * 目前支持左矩阵perToken量化和perToken动态量化，x1QuantMode=3或7；右矩阵perChannel量化，x2QuantMode=2。
     * 类型约束：
       * x1、alltoAllOutOptional的数据类型必须一致。
-      * 若x1、x2、alltoallout输入int32类型，则视作8个int4打包，会被重新解释为int4。
+      * 若x1、x2、alltoAllOut输入INT32类型，则视作8个INT4打包，会被重新解释为INT4。
       * A16W8和A16W4时，smoothQuant场景，x1ScaleOptional与x1的数据类型必须一致。
       * A16W8时，x1、x2、biasOptional和output支持的数据类型组合有：
 
@@ -576,8 +576,8 @@ aclnnStatus aclnnAlltoAllQuantMatmulV2(
         | INT4 | INT4 | FLOAT32 | BFLOAT16 |
 
     * 维度约束：
-      * A16W8时，rankSize *H必须整除16；rankSize* H取值范围：[1, 35000]。
-      * A16W4时，rankSize *H必须整除16；N必须为偶数; rankSize* H取值范围：[1, 35000]。
+      * A16W8时，rankSize *H必须被16整除；rankSize* H取值范围：[1, 35000]。
+      * A16W4时，rankSize *H必须被16整除；N必须为偶数；rankSize* H取值范围：[1, 35000]。
       * A4W4时，H与N必须为偶数；rankSize * H取值范围：[1, 35000]。
   <!-- end id16 -->
   <!-- npu="950" id17 -->
@@ -628,7 +628,7 @@ aclnnStatus aclnnAlltoAllQuantMatmulV2(
 
     * 维度约束：
       * rankSize * H范围仅支持[1, 65535]。
-      * mx量化场景下，H必须整除64。
+      * mx量化场景下，H必须被64整除。
       * mx量化场景下，x2必须转置，shape为(H*rankSize, N)，transposeX2为True。
   <!-- end id17 -->
 

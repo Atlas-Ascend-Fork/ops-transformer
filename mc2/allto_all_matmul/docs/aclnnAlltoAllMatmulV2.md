@@ -328,13 +328,13 @@ aclnnStatus aclnnAlltoAllMatmulV2(
   - <term>Atlas A2系列产品</term>：支持2、4、8卡。
   <!-- end id10 -->
   <!-- npu="A3" id11 -->
-  - <term>Atlas A3系列产品</term>  ：支持2、4、8、16卡。
+  - <term>Atlas A3系列产品</term>：支持2、4、8、16卡。
   <!-- end id11 -->
   <!-- npu="950" id12 -->
   - <term>Ascend 950PR&950DT系列产品</term>：支持2、4、8、16卡。
   <!-- end id12 -->
 
-* 参数说明中shape使用的变量BS必须整除NPU卡数。
+* 参数说明中shape使用的变量BS必须被NPU卡数整除。
 * BS和N的值不得超过2147483647（INT32_MAX），BS的值不得小于0，N的值不得小于1。
 * H*rankSize范围，根据设备型号有不同限制：
 
@@ -357,7 +357,7 @@ aclnnStatus aclnnAlltoAllMatmulV2(
 * 非连续tensor的支持度根据不同设备型号有不同的限制：
 
   <!-- npu="A3,910b" id17 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：不支持任何非连续tensor。
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：不支持任何非连续tensor。
   <!-- end id17 -->
   <!-- npu="950" id18 -->
   - <term>Ascend 950PR&950DT系列产品</term>：仅支持x2为非连续tensor，其它非连续tensor均不支持。
@@ -367,7 +367,7 @@ aclnnStatus aclnnAlltoAllMatmulV2(
 * biasOptional的数据类型根据不同设备型号有不同的限制：
 
   <!-- npu="A3,910b" id19 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持FLOAT32。
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持FLOAT32。
   <!-- end id19 -->
   <!-- npu="950" id20 -->
   - <term>Ascend 950PR&950DT系列产品</term>：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16和FLOAT32；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持BFLOAT16和FLOAT32。
@@ -393,7 +393,7 @@ aclnnStatus aclnnAlltoAllMatmulV2(
    - <term>Atlas A2系列产品</term>：支持MTE通信。
    <!-- end id24 -->
    <!-- npu="A3" id25 -->
-   - <term>Atlas A3系列产品</term>  ：支持AI CPU通信。
+   - <term>Atlas A3系列产品</term>：支持AI CPU通信。
    <!-- end id25 -->
    <!-- npu="950" id26 -->
    - <term>Ascend 950PR&950DT系列产品</term>：
@@ -632,7 +632,7 @@ aclnnStatus aclnnAlltoAllMatmulV2(
 
 <!-- end id27 -->
 <!-- npu="A3" id28 -->
-- <term>Atlas A3系列产品</term>  ：
+- <term>Atlas A3系列产品</term>：
 
     ```cpp
     #include <thread>
