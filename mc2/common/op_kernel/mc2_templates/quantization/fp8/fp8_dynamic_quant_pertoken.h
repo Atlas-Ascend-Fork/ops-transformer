@@ -48,6 +48,11 @@ protected:
     static constexpr uint32_t UB_DATABLOCK = 32;
     static constexpr uint32_t COMPARE_ALIGN_LEN = 256;
     static constexpr uint32_t VECTOR_UB_SIZE = AscendC::TOTAL_UB_SIZE;
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+    static constexpr uint32_t AIV_TO_AIC_RATIO = ONE_FACTOR;
+#else
+    static constexpr uint32_t AIV_TO_AIC_RATIO = TWO_FACTOR;
+#endif
 
     static constexpr float FP8_E5M2_MAX_VALUE = 57344.0f;
     static constexpr float FP8_E4M3FN_MAX_VALUE = 448.0f;
@@ -169,7 +174,7 @@ __aicore__ inline void Fp8DynamicQuantPertoken<quantInputDataType, quantOutputDa
 
     tPipe_->Reset();
 
-    uint64_t totalCores = static_cast<uint64_t>(GetBlockNum() * TWO_FACTOR);
+    const uint64_t totalCores = static_cast<uint64_t>(GetBlockNum()) * AIV_TO_AIC_RATIO;
     this->usedCoreAivNum_ = (context_.rowNum < totalCores) ? context_.rowNum : totalCores;
     // 2. 均匀分配任务到各个核
     uint32_t coreIdx = GetBlockIdx();

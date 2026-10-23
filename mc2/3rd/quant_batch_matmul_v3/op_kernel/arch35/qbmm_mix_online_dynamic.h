@@ -97,12 +97,16 @@ protected:
     __aicore__ inline void WaitForVector()
     {
         AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE, PIPE_FIX>(AIV_SYNC_AIC_FLAG);
-        AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE, PIPE_FIX>(AIV_SYNC_AIC_FLAG + FLAG_ID_MAX);
+        if constexpr (CV_RATIO == 2) {
+            AscendC::CrossCoreWaitFlag<AIC_SYNC_AIV_MODE, PIPE_FIX>(AIV_SYNC_AIC_FLAG + FLAG_ID_MAX);
+        }
     }
     __aicore__ inline void NotifyVector()
     {
         AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE, PIPE_FIX>(AIC_SYNC_AIV_FLAG);
-        AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE, PIPE_FIX>(AIC_SYNC_AIV_FLAG + FLAG_ID_MAX);
+        if constexpr (CV_RATIO == 2) {
+            AscendC::CrossCoreSetFlag<AIC_SYNC_AIV_MODE, PIPE_FIX>(AIC_SYNC_AIV_FLAG + FLAG_ID_MAX);
+        }
     }
     __aicore__ inline void WaitForCube()
     {
@@ -156,7 +160,7 @@ __aicore__ inline void Mc2QuantBmmPertokenRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_
 {
     blockIdx_ = AscendC::GetBlockIdx();
     if ASCEND_IS_AIV {
-        blockIdx_ = blockIdx_ / AscendC::GetTaskRation();
+        blockIdx_ = blockIdx_ / CV_RATIO;
         subBlockIdx_ = AscendC::GetSubBlockIdx();
     }
     pipe_ = pipe;
@@ -344,7 +348,8 @@ __aicore__ inline void Mc2QuantBmmPertokenRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_
 LOCAL_TEMPLATE_CLASS_MIX_PARAMS
 __aicore__ inline void Mc2QuantBmmPertokenRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::DequantCompute()
 {
-    auto halfSingleM = DequantBmm::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(2)); // 分配给2个AIV计算
+    auto halfSingleM =
+        DequantBmm::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(CV_RATIO)); // 分配给AIV计算
     auto singleMInVec = subBlockIdx_ == 1 ? block_.params_.singleCoreM - halfSingleM : halfSingleM;
     if (singleMInVec == 0) {
         return;
@@ -389,7 +394,8 @@ __aicore__ inline void Mc2QuantBmmPertokenRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_
 LOCAL_TEMPLATE_CLASS_MIX_PARAMS
 __aicore__ inline void Mc2QuantBmmPertokenRegbaseKernel<LOCAL_TEMPLATE_FUNC_MIX_PARAMS>::CopyDataFromGm2Ub()
 {
-    auto halfSingleM = DequantBmm::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(2)); // 分配给2个AIV计算
+    auto halfSingleM =
+        DequantBmm::CeilDiv(block_.params_.singleCoreM, static_cast<uint64_t>(CV_RATIO)); // 分配给AIV计算
     auto singleMInVec = subBlockIdx_ == 1 ? block_.params_.singleCoreM - halfSingleM : halfSingleM;
     // scale: GM -> UB
     if (!static_cast<bool>(tilingData_->params.isPerTensor)) {
