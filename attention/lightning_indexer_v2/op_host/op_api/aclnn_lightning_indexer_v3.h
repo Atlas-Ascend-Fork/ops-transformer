@@ -31,10 +31,10 @@ __attribute__((visibility("default"))) aclnnStatus aclnnLightningIndexerV3GetWor
     const aclTensor* cuSeqlensKOptional, const aclTensor* sequsedQOptional, const aclTensor* sequsedKOptional,
     const aclTensor* cmpResidualKOptional, const aclTensor* blockTableOptional,
     const aclTensor* outputIdxOffsetOptional, const aclTensor* metadataOptional, int64_t topk, int64_t maxSeqlenQ,
-    char* layoutQ, char* layoutK, int64_t maskMode, int64_t cmpRatio, int64_t returnValue, int64_t candidateTopkBlocks,
-    int64_t candidateBlockSize, const aclTensor* sparseIndices, const aclTensor* sparseValues,
-    const aclTensor* candidateBlockIndices, const aclTensor* candidateBlockLength, uint64_t* workspaceSize,
-    aclOpExecutor** executor);
+    char* layoutQOptional, char* layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t returnValue,
+    int64_t candidateTopkBlocks, int64_t candidateBlockSize, const aclTensor* sparseIndices,
+    const aclTensor* sparseValues, const aclTensor* candidateBlockIndices, const aclTensor* candidateBlockLength,
+    uint64_t* workspaceSize, aclOpExecutor** executor);
 
 /**
  * @brief The second interface of aclnnLightningIndexerV3 is used to perform calculations.

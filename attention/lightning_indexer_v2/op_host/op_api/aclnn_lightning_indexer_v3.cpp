@@ -86,10 +86,10 @@ aclnnStatus aclnnLightningIndexerV3GetWorkspaceSize(
     const aclTensor* cuSeqlensKOptional, const aclTensor* sequsedQOptional, const aclTensor* sequsedKOptional,
     const aclTensor* cmpResidualKOptional, const aclTensor* blockTableOptional,
     const aclTensor* outputIdxOffsetOptional, const aclTensor* metadataOptional, int64_t topk, int64_t maxSeqlenQ,
-    char* layoutQ, char* layoutK, int64_t maskMode, int64_t cmpRatio, int64_t returnValue, int64_t candidateTopkBlocks,
-    int64_t candidateBlockSize, const aclTensor* sparseIndices, const aclTensor* sparseValues,
-    const aclTensor* candidateBlockIndices, const aclTensor* candidateBlockLength, uint64_t* workspaceSize,
-    aclOpExecutor** executor)
+    char* layoutQOptional, char* layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t returnValue,
+    int64_t candidateTopkBlocks, int64_t candidateBlockSize, const aclTensor* sparseIndices,
+    const aclTensor* sparseValues, const aclTensor* candidateBlockIndices, const aclTensor* candidateBlockLength,
+    uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     if (q == nullptr) {
         OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "q pointer is null, cannot get data type!");
@@ -128,9 +128,9 @@ aclnnStatus aclnnLightningIndexerV3GetWorkspaceSize(
 
     return aclnnInnerLightningIndexerV2GetWorkspaceSize(
         q, k, w, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional, cmpResidualKOptional,
-        blockTableOptional, outputIdxOffsetOptional, metadataOptional, topk, maxSeqlenQ, layoutQ, layoutK, maskMode,
-        cmpRatio, returnValue, candidateTopkBlocks, candidateBlockSize, sparseIndices, sparseValues,
-        candidateBlockIndices, candidateBlockLength, workspaceSize, executor);
+        blockTableOptional, outputIdxOffsetOptional, metadataOptional, topk, maxSeqlenQ, layoutQOptional,
+        layoutKOptional, maskMode, cmpRatio, returnValue, candidateTopkBlocks, candidateBlockSize, sparseIndices,
+        sparseValues, candidateBlockIndices, candidateBlockLength, workspaceSize, executor);
 }
 
 aclnnStatus aclnnLightningIndexerV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,

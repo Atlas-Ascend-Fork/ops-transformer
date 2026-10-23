@@ -50,8 +50,8 @@ aclnnStatus aclnnLightningIndexerV3GetWorkspaceSize(
     const aclTensor     *metadataOptional,
     int64_t              topk,
     int64_t              maxSeqlenQ,
-    char                *layoutQ,
-    char                *layoutK,
+    char                *layoutQOptional,
+    char                *layoutKOptional,
     int64_t              maskMode,
     int64_t              cmpRatio,
     int64_t              returnValue,
@@ -103,7 +103,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>q（aclTensor*）</td>
     <td>输入</td>
     <td>公式中的输入Q。支持的shape为：
-        <ul><li>layoutQ为BSND时，shape为(B,S1,N1,D)。</li><li>layoutQ为TND时，shape为(T1,N1,D)。</li></ul></td>
+        <ul><li>layoutQOptional为BSND时，shape为(B,S1,N1,D)。</li><li>layoutQOptional为TND时，shape为(T1,N1,D)。</li></ul></td>
     <td>不支持空tensor。</td>
     <td>BFLOAT16、FLOAT16</td>
     <td>ND</td>
@@ -114,7 +114,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>k（aclTensor*）</td>
     <td>输入</td>
     <td>公式中的输入K。支持的shape为：
-        <ul><li>layoutK为PA_BBND时，shape为(block_num, block_size, N2, D)。</li><li>layoutK为BSND时，shape为(B, S2, N2, D)。</li><li>layoutK为TND时，shape为(T2, N2, D)。</li></ul></td>
+        <ul><li>layoutKOptional为PA_BBND时，shape为(block_num, block_size, N2, D)。</li><li>layoutKOptional为BSND时，shape为(B, S2, N2, D)。</li><li>layoutKOptional为TND时，shape为(T2, N2, D)。</li></ul></td>
     <td><ul><li>不支持空tensor。</li><li>block_num为PageAttention时block总数，block_size为一个block的token数。</li></ul></td>
     <td>BFLOAT16、FLOAT16</td>
     <td>ND</td>
@@ -125,7 +125,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>w（aclTensor*）</td>
     <td>输入</td>
     <td>公式中的输入W。支持的shape为：
-        <ul><li>layoutQ为BSND时，shape为(B,S1,N1)。</li><li>layoutQ为TND时，shape为(T1,N1)。</li></ul></td>
+        <ul><li>layoutQOptional为BSND时，shape为(B,S1,N1)。</li><li>layoutQOptional为TND时，shape为(T1,N1)。</li></ul></td>
     <td>不支持空tensor。</td>
     <td>FLOAT</td>
     <td>ND</td>
@@ -166,7 +166,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>sequsedKOptional（aclTensor*）</td>
     <td>输入</td>
     <td>不同Batch中k的真实使用长度。</td>
-    <td><ul><li>shape约束为长度为B的一维tensor。</li><li>不能出现负值。</li><li>layoutK为PA_BBND时，该参数必须传入。</li></ul></td>
+    <td><ul><li>shape约束为长度为B的一维tensor。</li><li>不能出现负值。</li><li>layoutKOptional为PA_BBND时，该参数必须传入。</li></ul></td>
     <td>INT32</td>
     <td>ND</td>
     <td>1</td>
@@ -462,7 +462,7 @@ aclnnStatus aclnnLightningIndexerV3(
 - <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：
   - topk取值范围当前仅支持[1, 2048]，以及3072、4096、5120、6144、7168、8192。
   - 当前不支持sequsedQOptional、outputIdxOffsetOptional、maxSeqlenQ功能，不建议传入这些参数。
-  - 当layoutK为PA_BBND时，必须传入sequsedKOptional；当layoutK为BSND或TND时，sequsedKOptional可选传入。
+  - 当layoutKOptional为PA_BBND时，必须传入sequsedKOptional；当layoutK为BSND或TND时，sequsedKOptional可选传入。
   - 两级TopK候选源（source）模式仅在本系列产品上支持开启：candidateTopkBlocks传入非-1即开启；开启时topk仅支持[1, 2048]、returnValue已放开（值域{0,1}，rv=1时sparseValues输出位置级topk真实分数，shape与sparseIndices相同），且必须传入实际的candidateBlockIndices输出tensor（shape为[B, S1, N2, candidateTopkBlocks]或[T1, N2, candidateTopkBlocks]）。
 <!-- end id7 -->
 <!-- npu="950" id8 -->

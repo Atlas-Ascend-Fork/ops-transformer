@@ -102,7 +102,7 @@ aclnnStatus aclnnLightningIndexerV2GetWorkspaceSize(
     const aclTensor* cuSeqlensKOptional, const aclTensor* sequsedQOptional, const aclTensor* sequsedKOptional,
     const aclTensor* cmpResidualKOptional, const aclTensor* blockTableOptional,
     const aclTensor* outputIdxOffsetOptional, const aclTensor* metadataOptional, int64_t topk, int64_t maxSeqlenQ,
-    char* layoutQ, char* layoutK, int64_t maskMode, int64_t cmpRatio, int64_t returnValue,
+    char* layoutQOptional, char* layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t returnValue,
     const aclTensor* sparseIndices, const aclTensor* sparseValues, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     if (q == nullptr) {
@@ -140,10 +140,10 @@ aclnnStatus aclnnLightningIndexerV2GetWorkspaceSize(
     // V2 兼容接口固定 candidate 关闭：转发语义与已发布版本（单级 TopK）一致
     return aclnnInnerLightningIndexerV2GetWorkspaceSize(
         q, k, w, cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional, cmpResidualKOptional,
-        blockTableOptional, outputIdxOffsetOptional, metadataOptional, topk, maxSeqlenQ, layoutQ, layoutK, maskMode,
-        cmpRatio, returnValue, CANDIDATE_TOPK_BLOCKS_OFF, CANDIDATE_BLOCK_SIZE_DEFAULT, sparseIndices, sparseValues,
-        candidateOutputHolder.CandidateTopkIndices(), candidateOutputHolder.CandidateBlockLength(), workspaceSize,
-        executor);
+        blockTableOptional, outputIdxOffsetOptional, metadataOptional, topk, maxSeqlenQ, layoutQOptional,
+        layoutKOptional, maskMode, cmpRatio, returnValue, CANDIDATE_TOPK_BLOCKS_OFF, CANDIDATE_BLOCK_SIZE_DEFAULT,
+        sparseIndices, sparseValues, candidateOutputHolder.CandidateTopkIndices(),
+        candidateOutputHolder.CandidateBlockLength(), workspaceSize, executor);
 }
 
 aclnnStatus aclnnLightningIndexerV2(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,

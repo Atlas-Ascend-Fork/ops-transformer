@@ -21,6 +21,7 @@ extern "C" {
 /**
  * @brief 兼容接口：签名冻结为已发布的 V2 原型（无 candidate 参数，2 输出）。
  * candidate（两级 TopK）能力由 aclnnLightningIndexerV3 承接。
+ * 符号/参数顺序/类型与已发布版本一致。
  * @domain aclnn_ops_infer
  */
 __attribute__((visibility("default"))) aclnnStatus aclnnLightningIndexerV2GetWorkspaceSize(
@@ -28,7 +29,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnLightningIndexerV2GetWor
     const aclTensor* cuSeqlensKOptional, const aclTensor* sequsedQOptional, const aclTensor* sequsedKOptional,
     const aclTensor* cmpResidualKOptional, const aclTensor* blockTableOptional,
     const aclTensor* outputIdxOffsetOptional, const aclTensor* metadataOptional, int64_t topk, int64_t maxSeqlenQ,
-    char* layoutQ, char* layoutK, int64_t maskMode, int64_t cmpRatio, int64_t returnValue,
+    char* layoutQOptional, char* layoutKOptional, int64_t maskMode, int64_t cmpRatio, int64_t returnValue,
     const aclTensor* sparseIndices, const aclTensor* sparseValues, uint64_t* workspaceSize, aclOpExecutor** executor);
 
 /**
