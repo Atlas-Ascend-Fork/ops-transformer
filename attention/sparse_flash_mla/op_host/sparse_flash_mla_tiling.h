@@ -333,15 +333,15 @@ private:
     int64_t s2Size_ = 0;
     int64_t cmpS2Size_ = 0; // A5
     int64_t qHeadDim_ = 0;
-    uint32_t oriKvHeadDim_ = 0;
-    uint32_t cmpKvHeadDim_ = 0;
+    int64_t oriKvHeadDim_ = 0;
+    int64_t cmpKvHeadDim_ = 0;
 
     int64_t qTSize_ = 0; // 仅TND时生效
     int64_t cmpRatio_ = 1;
     int64_t oriWinLeft_ = 0;
     int64_t oriWinRight_ = 0;
     bool hasOriSparseIndices_ = false;
-    uint32_t oriSparseIndexWidth_ = 0;
+    int64_t oriSparseIndexWidth_ = 0;
 
     int64_t topkValueMode_;
 
@@ -439,18 +439,18 @@ public:
     int64_t cmpS2Size_ = 0; // A5
     int64_t qTSize_ = 0;
     int64_t qHeadDim_ = 0;
-    uint32_t oriKvHeadDim_ = 0;
-    uint32_t cmpKvHeadDim_ = 0;
+    int64_t oriKvHeadDim_ = 0;
+    int64_t cmpKvHeadDim_ = 0;
     int64_t sparseBlockSize_ = 0;
     int64_t oriSparseBlockCount_ = 0; // A5
     int64_t cmpSparseBlockCount_ = 0; // A5
     int64_t oriWinLeft_ = 0;
     int64_t oriWinRight_ = 0;
     bool hasOriSparseIndices_ = false;
-    uint32_t oriSparseIndexWidth_ = 0;
+    int64_t oriSparseIndexWidth_ = 0;
     int64_t topkValueMode_ = 0;
-    uint32_t actualLenDimsKV_ = 0;
-    uint32_t actualLenDimsQ_ = 0;
+    int64_t actualLenDimsKV_ = 0;
+    int64_t actualLenDimsQ_ = 0;
     bool batchConsistency_ = false;
 
     uint32_t actualLenDimsOriKV_ = 0;

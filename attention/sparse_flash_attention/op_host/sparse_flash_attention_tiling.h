@@ -619,8 +619,8 @@ public:
     bool isSameActualseq_ = true;
     int64_t maxActualseq_ = 0;
 
-    uint32_t actualLenDimsQ_ = 0;
-    uint32_t actualLenDimsKV_ = 0;
+    int64_t actualLenDimsQ_ = 0;
+    int64_t actualLenDimsKV_ = 0;
 
     gert::Shape queryShape_{};
     gert::Shape keyShape_{};
