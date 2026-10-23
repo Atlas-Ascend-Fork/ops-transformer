@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file all_gather_matmul_v2_apt_tiling_key.h
@@ -45,6 +45,13 @@ namespace Mc2Tiling {
 #define HCCL_COMM_MODE_AICPU 1
 #endif
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+// A6(ascend960) AIC:AIV为1:1
+#define ALL_GATHER_MATMUL_V2_MIX_AIC_TYPE ASCENDC_TPL_MIX_AIC_1_1
+#else
+#define ALL_GATHER_MATMUL_V2_MIX_AIC_TYPE ASCENDC_TPL_MIX_AIC_1_2
+#endif
+
 // 模板参数
 ASCENDC_TPL_ARGS_DECL(Mc2AllGatherMatmulV2Apt, // 算子OpType
                       ASCENDC_TPL_BOOL_DECL(INPUT_IS_BF16FP16, 0, 1), ASCENDC_TPL_BOOL_DECL(TRANS_B, 0, 1),
@@ -66,19 +73,22 @@ ASCENDC_TPL_ARGS_DECL(Mc2AllGatherMatmulV2Apt, // 算子OpType
 // 用于调用GET_TPL_TILING_KEY获取TilingKey时，接口内部校验TilingKey是否合法
 ASCENDC_TPL_SEL(
     // base_tiling
-    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_BOOL_SEL(INPUT_IS_BF16FP16, 1), ASCENDC_TPL_BOOL_SEL(TRANS_B, 0, 1),
+    ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_KERNEL_TYPE_SEL(ASCENDC_TPL_AIC_ONLY), ASCENDC_TPL_BOOL_SEL(INPUT_IS_BF16FP16, 1),
+                         ASCENDC_TPL_BOOL_SEL(TRANS_B, 0, 1),
                          ASCENDC_TPL_UINT_SEL(OUTPUTDTYPE, ASCENDC_TPL_UI_LIST, OUTPUT_TYPE_IS_FP16_BF16),
                          SET_NOT_USE_QUANT_BMM_SEL),
 
     // quant_bmm_tiling
     ASCENDC_TPL_ARGS_SEL(
-        ASCENDC_TPL_BOOL_SEL(INPUT_IS_BF16FP16, 0), ASCENDC_TPL_BOOL_SEL(TRANS_B, 0, 1),
+        ASCENDC_TPL_KERNEL_TYPE_SEL(ALL_GATHER_MATMUL_V2_MIX_AIC_TYPE), ASCENDC_TPL_BOOL_SEL(INPUT_IS_BF16FP16, 0),
+        ASCENDC_TPL_BOOL_SEL(TRANS_B, 0, 1),
         ASCENDC_TPL_UINT_SEL(OUTPUTDTYPE, ASCENDC_TPL_UI_LIST, OUTPUT_TYPE_IS_FP16_BF16, OUTPUT_TYPE_IS_FLOAT),
         ASCENDC_TPL_UINT_SEL(QUANTMMMODE, ASCENDC_TPL_UI_LIST, TPL_DEFAULT_MODE),
         ASCENDC_TPL_UINT_SEL(SCALETYPE, ASCENDC_TPL_UI_LIST, SCALE_TYPE_IS_MX),
         ASCENDC_TPL_UINT_SEL(HCCL_COMM_MODE, ASCENDC_TPL_UI_LIST, HCCL_COMM_MODE_CCU, HCCL_COMM_MODE_AICPU)),
     ASCENDC_TPL_ARGS_SEL(
-        ASCENDC_TPL_BOOL_SEL(INPUT_IS_BF16FP16, 0), ASCENDC_TPL_BOOL_SEL(TRANS_B, 0, 1),
+        ASCENDC_TPL_KERNEL_TYPE_SEL(ALL_GATHER_MATMUL_V2_MIX_AIC_TYPE), ASCENDC_TPL_BOOL_SEL(INPUT_IS_BF16FP16, 0),
+        ASCENDC_TPL_BOOL_SEL(TRANS_B, 0, 1),
         ASCENDC_TPL_UINT_SEL(OUTPUTDTYPE, ASCENDC_TPL_UI_LIST, OUTPUT_TYPE_IS_FP16_BF16, OUTPUT_TYPE_IS_FLOAT),
         ASCENDC_TPL_UINT_SEL(QUANTMMMODE, ASCENDC_TPL_UI_LIST, TPL_DEFAULT_MODE, TPL_PERBLOCK_MODE),
         ASCENDC_TPL_UINT_SEL(SCALETYPE, ASCENDC_TPL_UI_LIST, SCALE_TYPE_NOT_IS_MX),

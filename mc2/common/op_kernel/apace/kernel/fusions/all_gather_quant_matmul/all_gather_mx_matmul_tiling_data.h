@@ -19,9 +19,9 @@
 #include <cstdint>
 #endif
 #include "kernel_tiling/kernel_tiling.h"
-#include "apace/tiling/matmul_tiling/quant_matmul_tiling_data.h"
-#include "apace/tiling/tiling_data_struct_define.h"
-#include "apace/core/aiv_comm/collective_comm_context.h"
+#include "../../../tiling/matmul_tiling/quant_matmul_tiling_data.h"
+#include "../../../tiling/tiling_data_struct_define.h"
+#include "../../../core/aiv_comm/collective_comm_context.h"
 #include "../../../../mc2_tiling_struct.h"
 
 namespace Apace {

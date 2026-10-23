@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
- */
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file all_gather_matmul_v2_apt.cpp
@@ -19,6 +19,7 @@
 
 #if ((ORIG_DTYPE_X1 == ORIG_DTYPE_X2) && ((ORIG_DTYPE_X1 == DT_FLOAT16) || (ORIG_DTYPE_X1 == DT_BF16)))
 #include "all_gather_matmul_fp16_bf16.h"
+#include "all_gather_matmul_v2_hcomm_impl.h"
 #endif
 #if (((ORIG_DTYPE_X1 == ORIG_DTYPE_X2) && (ORIG_DTYPE_X1 == DT_HIFLOAT8)) || \
      (((ORIG_DTYPE_X1 == DT_FLOAT8_E4M3FN) || (ORIG_DTYPE_X1 == DT_FLOAT8_E5M2)) && \
@@ -46,6 +47,15 @@ using namespace AllGatherMatmulImpl;
         op.Init(aGM, bGM, biasGM, cGM, (__gm__ uint8_t*)context, workspaceGM, gatherOut, &tilingData, mc2InitTiling, \
                 mc2CcTiling, &pipe); \
         op.Process(); \
+    } while (0)
+
+#define INVOKE_AGMV2_APACE_HCOMM_OP_IMPL(hcclServerType) \
+    do { \
+        REGISTER_TILING_DEFAULT(Mc2Tiling::AllGatherMatmulTilingDataV2); \
+        GET_TILING_DATA_WITH_STRUCT(Apace::hcommAllGatherMatmulTilingData, tilingData, tilingGM); \
+        Apace::AllGatherMatmulHcommImpl<DTYPE_X1, DTYPE_X1, DTYPE_Y, hcclServerType, TRANS_B> op(&tilingData); \
+        op.Init(aGM, bGM, biasGM, cGM, gatherOut, workspaceGM); \
+        op.Run(); \
     } while (0)
 
 #define INVOKE_ALL_GATHER_QUANT_BATCHMATMUL_OP_IMPL(templateClass, isMxFp4, hcclCommType, ...) \
@@ -79,11 +89,6 @@ __global__ __aicore__ void all_gather_matmul_v2(GM_ADDR aGM, GM_ADDR bGM, GM_ADD
                                                 GM_ADDR scaleInv2, GM_ADDR scale, GM_ADDR cGM, GM_ADDR gatherOut,
                                                 GM_ADDR amax, GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
-#else
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
-#endif
     TPipe pipe;
     __gm__ HcclCombinOpParam* context = (__gm__ HcclCombinOpParam*)(GetHcclContext<0>());
 
@@ -109,9 +114,11 @@ __global__ __aicore__ void all_gather_matmul_v2(GM_ADDR aGM, GM_ADDR bGM, GM_ADD
                                                              Mc2CoreType::ON_CUBE, HCCL_COMM_MODE, false, TRANS_B);
     }
 #elif ((ORIG_DTYPE_X1 == ORIG_DTYPE_X2) && ((ORIG_DTYPE_X1 == DT_FLOAT16) || (ORIG_DTYPE_X1 == DT_BF16)))
-    if constexpr (SCALETYPE == SCALE_TYPE_NOT_IS_MX && INPUT_IS_BF16FP16 &&
-                  OUTPUTDTYPE == OUTPUT_TYPE_IS_FP16_BF16) { // full mesh+ no nd2nz +biasNoNeedCast
-        INVOKE_ALLGATHERMM_FP16_BF16_V2_OP_IMPL(AllGatherMatmulFP16BF16, TRANS_B, HCCL_COMM_MODE);
+    if constexpr (INPUT_IS_BF16FP16) {
+        constexpr HcclServerType hcclServerType = HCCL_COMM_MODE == HCCL_COMM_MODE_CCU ?
+                                                      HcclServerType::HCCL_SERVER_TYPE_CCU :
+                                                      HcclServerType::HCCL_SERVER_TYPE_AICPU;
+        INVOKE_AGMV2_APACE_HCOMM_OP_IMPL(hcclServerType);
     }
 #endif
 }

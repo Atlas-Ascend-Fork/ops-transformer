@@ -1,12 +1,12 @@
 /**
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
- * CANN Open Software License Agreement Version 2.0 (the "License").
- * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
-*/
+ * Copyright (c) 2025 Huawei Technologies Co., Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ */
 
 /*!
  * \file all_gather_matmul_tiling_v2.h
@@ -27,6 +27,7 @@
 #include "mc2_matmul_tiling_cfg.h"
 #include "mat_mul_v3/op_host/op_tiling/arch35/matmul_v3_tiling_strategy.h"
 #include "../../../op_kernel/all_gather_matmul_tiling_data.h"
+#include "apace/kernel/fusions/all_gather_quant_matmul/all_gather_mx_matmul_tiling_data.h"
 
 namespace optiling {
 
@@ -45,6 +46,10 @@ protected:
     ge::graphStatus DoOpTiling() override;
 
     ge::graphStatus PostTiling() override;
+
+    [[nodiscard]] uint64_t GetTilingKey() const override;
+
+    ge::graphStatus GetWorkspaceSize() override;
 
     CutResult GetTilingResult() override;
 
@@ -73,11 +78,15 @@ protected:
     ge::graphStatus CheckInput() override;
 
 private:
+    ge::graphStatus DoApaceTiling();
+    void FillApaceMmTile(const Mc2MatMulV3TilingData& localTiling);
+
     Mc2Tiling::AllGatherMatmulTilingDataV2 allGatherMatmulTilingDataV2Self_;
     Mc2Tiling::AllGatherMatmulTilingDataV2* allGatherMatmulTilingDataV2_;
     uint64_t myWorkSpaceSize_{0U};
-    Mc2MatMulV3Args mmV3Args_;
     Mc2MatmulV3CompileInfo compileInfo_;
+    Mc2MatMulV3Args mmV3Args_;
+    Apace::hcommAllGatherMatmulTilingData hcommTilingDataSelf_{};
 };
 ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context);
 } // namespace optiling
