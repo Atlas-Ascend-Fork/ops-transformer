@@ -48,6 +48,8 @@ endfunction()
 
 
 
+
+
 # useage: add_aicpu_cust_kernel_modules(target_name)
 # 添加aicpu cust kernel object target
 function(add_aicpu_cust_kernel_modules target_name)

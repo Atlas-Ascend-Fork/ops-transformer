@@ -13,18 +13,25 @@ if (BUILD_WITH_INSTALLED_DEPENDENCY_CANN_PKG)
     add_definitions(-D_GLIBCXX_USE_CXX11_ABI=1)
     set(CMAKE_CXX_COMPILER ${ASCEND_DIR}/toolkit/toolchain/hcc/bin/aarch64-target-linux-gnu-g++)
   endif()
+  get_filename_component(_AICPU_PARENT_DIR ${CMAKE_CURRENT_SOURCE_DIR} DIRECTORY)
+  get_filename_component(_AICPU_OP_NAME ${_AICPU_PARENT_DIR} NAME)
+  check_aicpu_builtin_pkg_admission(${_AICPU_OP_NAME} _AICPU_BUILTIN_PKG_ALLOWED)
 
   # aicpu json
   file(GLOB_RECURSE JSON_FILE ${CMAKE_CURRENT_SOURCE_DIR}/*.json)
-  set_property(GLOBAL APPEND PROPERTY AICPU_JSON_FILES ${JSON_FILE})
+  if(JSON_FILE AND _AICPU_BUILTIN_PKG_ALLOWED)
+    set_property(GLOBAL APPEND PROPERTY AICPU_JSON_FILES ${JSON_FILE})
+  endif()
 
   # aicpu cust kernel
   file(GLOB AICPU_SRC ${CMAKE_CURRENT_SOURCE_DIR}/*_aicpu*.cpp)
   message(STATUS "[sparse_flash_mla_metadata] Found aicpu sources: ${AICPU_SRC}, ascend dir: ${ASCEND_DIR}, ophsot name: ${OPHOST_NAME}")
 
-  set(OBJ_NAME sparse_flash_mla_metadata_cust_obj)
-  add_aicpu_cust_kernel_modules(${OBJ_NAME})
-  target_sources(${OBJ_NAME} PRIVATE ${AICPU_SRC})
+  if(AICPU_SRC AND _AICPU_BUILTIN_PKG_ALLOWED)
+    set(OBJ_NAME sparse_flash_mla_metadata_cust_obj)
+    add_aicpu_cust_kernel_modules(${OBJ_NAME})
+    target_sources(${OBJ_NAME} PRIVATE ${AICPU_SRC})
+  endif()
 endif()
 
 if(UT_TEST_ALL OR OP_KERNEL_AICPU_UT)

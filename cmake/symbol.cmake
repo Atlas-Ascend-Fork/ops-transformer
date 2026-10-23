@@ -370,7 +370,7 @@ function(gen_cust_aicpu_op_def_symbol)
   )
 endfunction()
 
-function(gen_cust_aicpu_json_symbol)
+function(gen_aicpu_json_symbol enable_built_in)
   get_property(ALL_AICPU_JSON_FILES GLOBAL PROPERTY AICPU_JSON_FILES)
   get_property(ALL_AICPU_OP_DEF_FILES GLOBAL PROPERTY AICPU_OP_DEF_FILES)
   if(NOT ALL_AICPU_OP_DEF_FILES AND NOT ALL_AICPU_JSON_FILES)
@@ -384,12 +384,16 @@ function(gen_cust_aicpu_json_symbol)
   endif()
 
   set(MERGED_JSON ${CMAKE_BINARY_DIR}/cust_aicpu_kernel.json)
+  set(OPDEF_JSON ${CMAKE_BINARY_DIR}/aicpu_opdef_kernel.json)
+  if(enable_built_in)
+    set(MERGED_JSON ${CMAKE_BINARY_DIR}/aicpu_transformer.json)
+    set(OPDEF_JSON ${CMAKE_BINARY_DIR}/aicpu_transformer_opdef_kernel.json)
+  endif()
   set(INPUT_JSONS "")
 
   if(ALL_AICPU_OP_DEF_FILES)
     gen_cust_aicpu_op_def_symbol()
     set(AICPU_INI ${ASCEND_AUTOGEN_PATH}/aicpu_kernel.ini)
-    set(OPDEF_JSON ${CMAKE_BINARY_DIR}/aicpu_opdef_kernel.json)
     add_custom_command(
       OUTPUT ${OPDEF_JSON}
       COMMAND ${ASCEND_PYTHON_EXECUTABLE} ${AICPU_PARSER_INI_SCRIPT} ${AICPU_INI} ${OPDEF_JSON}
@@ -416,12 +420,12 @@ function(gen_cust_aicpu_json_symbol)
   add_custom_target(merge_aicpu_json ALL DEPENDS ${MERGED_JSON})
   install(
     FILES ${MERGED_JSON}
-    DESTINATION packages/vendors/${VENDOR_NAME}_transformer/op_impl/cpu/config
+    DESTINATION ${AICPU_JSON_CONFIG}
     OPTIONAL
   )
 endfunction()
 
-function(gen_cust_aicpu_kernel_symbol)
+function(gen_aicpu_kernel_symbol enable_built_in)
   if(NOT AICPU_CUST_OBJ_TARGETS)
     message(STATUS "No aicpu cust obj targets found, skipping.")
     return()
@@ -460,16 +464,18 @@ function(gen_cust_aicpu_kernel_symbol)
       -Wl,--no-whole-archive
       -Wl,-Bsymbolic
       -Wl,--exclude-libs=libbase_ascend_protobuf.a
+      -Wl,-z,now
       -s
       -o ${ARM_SO_OUTPUT}
     DEPENDS ${AICPU_CUST_OBJ_TARGETS}
     COMMENT "Linking cust_aicpu_kernels.so using ARM toolchain"
+    COMMAND_EXPAND_LISTS
   )
   add_custom_target(cust_aicpu_kernels ALL DEPENDS ${ARM_SO_OUTPUT})
 
   install(
     FILES ${ARM_SO_OUTPUT}
-    DESTINATION packages/vendors/${VENDOR_NAME}_transformer/op_impl/cpu/aicpu_kernel/impl
+    DESTINATION ${AICPU_KERNEL_IMPL}
     OPTIONAL
   )
 endfunction()
@@ -512,6 +518,11 @@ function(gen_norm_symbol)
   gen_onnx_plugin_symbol()
   gen_aicpu_const_symbol()
 
+  if (ENABLE_AICPU AND ENABLE_BUILT_IN)
+    gen_aicpu_json_symbol(TRUE)
+    gen_aicpu_kernel_symbol(TRUE)
+  endif()
+
 endfunction()
 
 function(gen_cust_symbol)
@@ -523,12 +534,12 @@ function(gen_cust_symbol)
 
   gen_cust_proto_symbol()
 
-  gen_cust_aicpu_json_symbol()
+  gen_aicpu_json_symbol(FALSE)
 
-  gen_cust_aicpu_kernel_symbol()
+  gen_aicpu_kernel_symbol(FALSE)
 endfunction()
 
 function(gen_cust_aicpu_symbol)
-  gen_cust_aicpu_json_symbol()
-  gen_cust_aicpu_kernel_symbol()
+  gen_aicpu_json_symbol(FALSE)
+  gen_aicpu_kernel_symbol(FALSE)
 endfunction()
