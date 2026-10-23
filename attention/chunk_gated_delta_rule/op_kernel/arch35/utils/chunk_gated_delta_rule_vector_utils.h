@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include "chunk_gated_delta_rule_utils.h"
+#include "chunk_gated_delta_rule_utils_arch35.h"
 #include "basic_api/kernel_tensor.h"
 
 namespace ChunkGatedDeltaRule {

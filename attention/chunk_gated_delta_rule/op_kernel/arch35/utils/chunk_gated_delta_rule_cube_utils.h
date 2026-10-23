@@ -10,7 +10,7 @@
 
 #pragma once
 
-#include "chunk_gated_delta_rule_utils.h"
+#include "chunk_gated_delta_rule_utils_arch35.h"
 #include "catlass/gemm/tile/ascend950/copy_l0c_to_ub.hpp"
 
 namespace ChunkGatedDeltaRule {

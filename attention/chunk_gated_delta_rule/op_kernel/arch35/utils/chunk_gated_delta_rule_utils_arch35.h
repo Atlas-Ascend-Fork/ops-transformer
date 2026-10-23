@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file chunk_gated_delta_rule_utils.h
+ * \file chunk_gated_delta_rule_utils_arch35.h
  * \brief Common constants and alignment helpers for chunk_gated_delta_rule kernels
  */
 

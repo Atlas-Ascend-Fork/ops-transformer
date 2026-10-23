@@ -16,7 +16,7 @@
 
 #include "basic_api/kernel_basic_intf.h"
 #include "catlass/arch/arch.hpp"
-#include "chunk_gated_delta_rule_utils.h"
+#include "chunk_gated_delta_rule_utils_arch35.h"
 
 namespace ChunkGatedDeltaRule {
 
