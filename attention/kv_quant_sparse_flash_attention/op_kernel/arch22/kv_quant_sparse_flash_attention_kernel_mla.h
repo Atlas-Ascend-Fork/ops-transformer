@@ -101,7 +101,7 @@ private:
     static constexpr uint64_t kvHeadNum = 1ULL;
     static constexpr uint64_t headDim = 512ULL;
     static constexpr uint64_t headDimAlign = 512ULL;
-    static constexpr uint64_t headDimRope = QSFAT::noRope ? 0ULL : 64ULL;
+    static constexpr uint64_t headDimRope = 64ULL;
     static constexpr uint32_t msdIterNum = 2U;
 
     static constexpr uint32_t dbWorkspaceRatio = PRELOAD_NUM;
@@ -526,8 +526,7 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<QSFAT>::InitWorkspaceGloba
 
     if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
         // s2  d+rope bufNum
-        uint64_t kvMergeBytesPerCore =
-            512 * (QSFAT::noRope ? 576ULL : kvSfaKernelConstInfo.combineHeadDim) * 4 * sizeof(K_ROPE_T);
+        uint64_t kvMergeBytesPerCore = 512 * kvSfaKernelConstInfo.combineHeadDim * 4 * sizeof(K_ROPE_T);
         kvMergeGm_.SetGlobalBuffer((__gm__ K_ROPE_T*)(workspace + qsfaOffset + aiCoreIdx * kvMergeBytesPerCore));
         qsfaOffset += GetBlockNum() * kvMergeBytesPerCore;
 
@@ -834,7 +833,6 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<QSFAT>::ComputeMm1(const R
         kvSfaKernelSplitInfo.nBufferDealM =
             (i + 1 != nBufferLoopTimes) ? kvSfaKernelConstInfo.nBufferMBaseSize : nBufferTail;
         matmulService.ComputeMm1(kvSfaKernelRunInfo, kvSfaKernelSplitInfo);
-
         CrossCoreSetFlag<ConstInfo::QSFA_SYNC_MODE2, PIPE_FIX>(kvSfaKernelConstInfo.syncC1V1);
     }
 }
@@ -975,7 +973,6 @@ __aicore__ inline void KvQuantSparseFlashAttentionMla<QSFAT>::PreloadPipeline(
             if constexpr (TEMPLATE_MODE == V_TEMPLATE) {
                 CrossCoreWaitFlag(3);
                 kvSfaKernelVectorService.MergeKv(extraInfo0);
-
                 CrossCoreSetFlag<ConstInfo::QSFA_SYNC_MODE2, PIPE_MTE3>(kvSfaKernelConstInfo.syncV0C1);
             }
         }
