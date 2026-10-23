@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -25,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "../../../../common/cgmct/epilogue/cgmct_block_epilogue_swiglu_mx_quant.h"
 #include "../../../op_host/op_tiling/grouped_matmul_swiglu_quant_v2_base_tiling.h"
 #include "../../../op_host/op_tiling/grouped_matmul_swiglu_quant_v2_fusion_tiling.h"
 #include "../../../op_host/op_tiling/grouped_matmul_swiglu_quant_v2_tiling.h"
@@ -532,6 +534,70 @@ TEST_F(TestTilingParseForGroupedMatmulSwigluQuantV2, FusionTilingDataFieldCovera
     EXPECT_EQ(fusionData.get_groupListType(), 0);
     fusionData.set_isSingleTensor(1);
     EXPECT_EQ(fusionData.get_isSingleTensor(), 1);
+}
+
+namespace {
+using Cgmct::Gemm::Block::HasSwigluMxScalePadding;
+constexpr uint64_t SCALE_GROUP = 32UL;
+constexpr uint64_t SCALE_PAIR_WIDTH = 64UL;
+constexpr uint64_t SCALE_PAIR = 2UL;
+constexpr uint8_t POISON = 0xA5;
+constexpr uint8_t VALID_SCALE = 0x7F;
+constexpr uint64_t ROWS = 3UL;
+constexpr uint64_t PROCESSED_ROWS = 2UL;
+constexpr uint64_t MAX_OUTPUT_N = 1024UL;
+} // namespace
+
+TEST(GroupedMatmulSwigluQuantMxScalePadding, TailOwnership)
+{
+    EXPECT_TRUE(HasSwigluMxScalePadding(32UL, 32UL, 0UL));
+    EXPECT_TRUE(HasSwigluMxScalePadding(96UL, 32UL, 64UL));
+    EXPECT_TRUE(HasSwigluMxScalePadding(65UL, 1UL, 64UL));
+    EXPECT_FALSE(HasSwigluMxScalePadding(96UL, 32UL, 0UL));
+    EXPECT_FALSE(HasSwigluMxScalePadding(64UL, 32UL, 0UL));
+    EXPECT_FALSE(HasSwigluMxScalePadding(96UL, 32UL, 32UL));
+    EXPECT_FALSE(HasSwigluMxScalePadding(64UL, 32UL, 32UL));
+    EXPECT_FALSE(HasSwigluMxScalePadding(0UL, 0UL, 0UL));
+}
+
+TEST(GroupedMatmulSwigluQuantMxScalePadding, PoisonedRowsAllTails)
+{
+    // This tests write-range arithmetic, not device numerical precision.
+    // Leave one row unprocessed to model a groupList whose sum is less than M.
+    for (uint64_t outputN = 1UL; outputN <= MAX_OUTPUT_N; ++outputN) {
+        for (const uint64_t tileSize : {32UL, 64UL, 128UL, 256UL}) {
+            const uint64_t validRowScales = (outputN + SCALE_GROUP - 1UL) / SCALE_GROUP;
+            const uint64_t rowPitch = (outputN + SCALE_PAIR_WIDTH - 1UL) / SCALE_PAIR_WIDTH * SCALE_PAIR;
+            std::vector<uint8_t> output(ROWS * rowPitch + 1UL, POISON);
+            std::vector<uint32_t> writes(output.size(), 0);
+            for (uint64_t nOffset = 0UL; nOffset < outputN; nOffset += tileSize) {
+                const uint64_t tileN = std::min(tileSize, outputN - nOffset);
+                const uint64_t scaleColumn = nOffset / SCALE_GROUP;
+                const uint64_t validScales = (tileN + SCALE_GROUP - 1UL) / SCALE_GROUP;
+                const bool padded = HasSwigluMxScalePadding(outputN, tileN, nOffset);
+                const uint64_t writeScales = validScales + static_cast<uint64_t>(padded);
+                for (uint64_t row = 0UL; row < PROCESSED_ROWS; ++row) {
+                    for (uint64_t col = 0UL; col < writeScales; ++col) {
+                        const uint64_t index = row * rowPitch + scaleColumn + col;
+                        ASSERT_LT(index, PROCESSED_ROWS * rowPitch);
+                        output[index] = col < validScales ? VALID_SCALE : 0;
+                        ++writes[index];
+                    }
+                }
+            }
+            for (uint64_t row = 0UL; row < PROCESSED_ROWS; ++row) {
+                for (uint64_t col = 0UL; col < rowPitch; ++col) {
+                    const uint64_t index = row * rowPitch + col;
+                    EXPECT_EQ(writes[index], 1U) << outputN << ", tile=" << tileSize << ", col=" << col;
+                    EXPECT_EQ(output[index], col < validRowScales ? VALID_SCALE : 0);
+                }
+            }
+            for (uint64_t index = PROCESSED_ROWS * rowPitch; index < output.size(); ++index) {
+                EXPECT_EQ(output[index], POISON);
+                EXPECT_EQ(writes[index], 0U);
+            }
+        }
+    }
 }
 
 } // namespace GroupedMatmulSwigluQuantV2UT

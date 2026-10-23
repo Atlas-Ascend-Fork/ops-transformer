@@ -15,6 +15,32 @@
 
 #ifndef EPILOGUE_BLOCK_EPILOGUE_SWIGLU_MX_QUANT_H
 #define EPILOGUE_BLOCK_EPILOGUE_SWIGLU_MX_QUANT_H
+
+#include <cstdint>
+
+namespace Cgmct {
+namespace Gemm {
+namespace Block {
+
+// Only the last N tile owns the extra public scale byte when the number of
+// valid groups of 32 output elements is odd. Keep this arithmetic available
+// to host UT without pulling in the architecture-specific device headers.
+#if defined(__CCE_AICORE__)
+__aicore__
+#endif
+    inline constexpr bool
+    HasSwigluMxScalePadding(uint64_t outputN, uint64_t tileN, uint64_t outputColumn)
+{
+    constexpr uint64_t scaleGroup = 32UL;
+    constexpr uint64_t scalePair = 2UL;
+    const uint64_t validRowScales = (outputN + scaleGroup - 1UL) / scaleGroup;
+    return outputN != 0UL && tileN != 0UL && validRowScales % scalePair != 0UL && outputColumn + tileN == outputN;
+}
+
+} // namespace Block
+} // namespace Gemm
+} // namespace Cgmct
+
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201)
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
@@ -360,12 +386,14 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     // scaleBlockN_ is the UB source row pitch (it is based on Align64(singleN)
     // because ComputeMxQuant also computes the aligned tail).  It is not the
     // number of valid scale bytes in the public yScale row.  Copy only the
-    // valid groups; otherwise a 32-value tile would copy its padding byte and
-    // the following tile would be addressed past the compact yScale row.
+    // valid groups. Only the last N tile may also write the public padding
+    // byte; an internal tile must not overwrite the next tile's valid scale.
     constexpr uint64_t scaleGroupSize = MXFP_DIVISOR_SIZE / MXFP_MULTI_BASE_SIZE;
     auto validScaleN = CeilDiv(static_cast<uint64_t>(singleN_), scaleGroupSize);
+    const bool hasPadding = HasSwigluMxScalePadding(n_, singleN_, Get<Y_IDX>(blockCoord_) % n_);
+    const uint64_t writeScaleN = validScaleN + static_cast<uint64_t>(hasPadding);
     // quantScaleBlockOutput_ uses a 32-byte UB row for every logical M row,
-    // whereas yScale is compact (validScaleN bytes per row).  A multi-row
+    // whereas this tile writes writeScaleN compact bytes in each GM row. A multi-row
     // DataCopyPad with a sub-32-byte blockLen expresses its source stride in
     // hardware blocks, so it cannot represent this 32-byte-to-compact-row
     // conversion without rounding ambiguity.  Copy each row from its explicit
@@ -373,7 +401,7 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
     // for all N tiles, including the common N=64 output tile.
     AscendC::DataCopyExtParams params{SINGLE_DMA_BLOCK, 0, 0, 0, 0};
     params.blockCount = SINGLE_DMA_BLOCK;
-    params.blockLen = static_cast<uint32_t>(validScaleN * sizeof(SwigluMxScaleCopyType));
+    params.blockLen = static_cast<uint32_t>(writeScaleN * sizeof(SwigluMxScaleCopyType));
     for (uint64_t row = 0; row < blockCount; ++row) {
         AscendC::DataCopyPad(quantScaleGlobal_[offset + row * scaleN_], src[row * AscendC::ONE_BLK_SIZE], params);
     }
@@ -836,6 +864,13 @@ __aicore__ inline void BlockEpilogueSwigluQuant<QMM_BLOCK_EPILOGUE_DEQUANT_FUNC_
 {
     __ubuf__ int8_t* quantScaleOutputInUbAddr = (__ubuf__ int8_t*)quantScaleOutput_.GetPhyAddr();
     __ubuf__ int8_t* quantScaleBlockOutputInUbAddr = (__ubuf__ int8_t*)quantScaleBlockOutput_.GetPhyAddr();
+    if (HasSwigluMxScalePadding(n_, singleN_, Get<Y_IDX>(blockCoord_) % n_)) {
+        // Clear only the tail tile's UB staging rows. The VF below replaces
+        // their valid scales, leaving the completely padded slot at code 0.
+        auto scaleBytes = quantScaleBlockOutput_.template ReinterpretCast<int8_t>();
+        AscendC::Duplicate<int8_t>(scaleBytes, 0, mSize * AscendC::ONE_BLK_SIZE);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
     // scale layout: (mSize*8) -> (mSize,32)
     __VEC_SCOPE__
     {
