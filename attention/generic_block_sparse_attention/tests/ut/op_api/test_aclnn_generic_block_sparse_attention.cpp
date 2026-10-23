@@ -527,3 +527,222 @@ TEST_F(aclnn_generic_block_sparse_attention_ut, invalid_softmax_precision)
     aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
     EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
+
+// ============================================================================
+// Case 12: required value is nullptr
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, null_value)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockIdx = TensorDesc({kN2, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto sparseBlockCount = TensorDesc({kN2, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{1});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
+    char layoutQ[] = "TND";
+    char layoutKv[] = "PA_BBND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, nullptr, sparseBlockIdx, sparseBlockCount, metadata, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape,
+                              layoutQ, layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+}
+
+// ============================================================================
+// Case 13: required sparseBlockIdx is nullptr
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, null_sparse_block_idx)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockCount = TensorDesc({kN2, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{1});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
+    char layoutQ[] = "TND";
+    char layoutKv[] = "PA_BBND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, value, nullptr, sparseBlockCount, metadata, nullptr, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, layoutQ,
+                              layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+}
+
+// ============================================================================
+// Case 14: required sparseBlockCount is nullptr
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, null_sparse_block_count)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockIdx = TensorDesc({kN2, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
+    char layoutQ[] = "TND";
+    char layoutKv[] = "PA_BBND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, value, sparseBlockIdx, nullptr, metadata, nullptr, nullptr, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, layoutQ, layoutKv,
+                              kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+}
+
+// ============================================================================
+// Case 15: unsupported layoutKv
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, invalid_layout_kv)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockIdx = TensorDesc({kN2, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto sparseBlockCount = TensorDesc({kN2, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{1});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
+    char layoutQ[] = "TND";
+    char layoutKv[] = "TND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, value, sparseBlockIdx, sparseBlockCount, metadata, nullptr, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, layoutQ,
+                              layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+}
+
+// ============================================================================
+// Case 16: blockShape element not positive
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, invalid_block_shape_value)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockIdx = TensorDesc({kN2, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto sparseBlockCount = TensorDesc({kN2, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{1});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{0, kBlockSize});
+    char layoutQ[] = "TND";
+    char layoutKv[] = "PA_BBND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, value, sparseBlockIdx, sparseBlockCount, metadata, nullptr, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, layoutQ,
+                              layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+}
+
+// ============================================================================
+// Case 17: null layoutQ triggers ValidateParams null-pointer branch
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, null_layout_q)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockIdx = TensorDesc({kN2, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto sparseBlockCount = TensorDesc({kN2, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{1});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
+    char layoutKv[] = "PA_BBND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, value, sparseBlockIdx, sparseBlockCount, metadata, nullptr, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, nullptr,
+                              layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+}
+
+// ============================================================================
+// Case 18: null layoutKv triggers ValidateParams null-pointer branch
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, null_layout_kv)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockIdx = TensorDesc({kN2, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto sparseBlockCount = TensorDesc({kN2, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{1});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
+    char layoutQ[] = "TND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, value, sparseBlockIdx, sparseBlockCount, metadata, nullptr, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, layoutQ,
+                              nullptr, kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+}
+
+// ============================================================================
+// Case 19: unsupported query dtype
+// ============================================================================
+TEST_F(aclnn_generic_block_sparse_attention_ut, unsupported_query_dtype)
+{
+    auto query = TensorDesc({kT, kN1, kD}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({kMaxBlocks, kBlockSize, kN2, kD}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto sparseBlockIdx = TensorDesc({kN2, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto sparseBlockCount = TensorDesc({kN2, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{1});
+    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{0});
+    auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
+    char layoutQ[] = "TND";
+    char layoutKv[] = "PA_BBND";
+    auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
+                        INPUT(query, key, value, sparseBlockIdx, sparseBlockCount, metadata, nullptr, nullptr, nullptr,
+                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, layoutQ,
+                              layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 0, -1, -1, 0, 0, false),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+}

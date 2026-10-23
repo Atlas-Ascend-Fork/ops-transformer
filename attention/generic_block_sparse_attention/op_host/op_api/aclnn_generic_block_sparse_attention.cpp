@@ -11,6 +11,7 @@
 #include "aclnn_generic_block_sparse_attention.h"
 
 #include "generic_block_sparse_attention.h"
+#include "aclnn_kernels/common/op_error_check.h"
 #include "aclnn_kernels/contiguous.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -65,12 +66,12 @@ static aclnnStatus CheckMandatoryTensors(const aclTensor* query, const aclTensor
                                          const aclTensor* sparseBlockIdx, const aclTensor* sparseBlockCount,
                                          const aclTensor* metadataOptional)
 {
-    CHECK_RET(query != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(key != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(value != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(sparseBlockIdx != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(sparseBlockCount != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(metadataOptional != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(query, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(key, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(value, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(sparseBlockIdx, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(sparseBlockCount, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(metadataOptional, return ACLNN_ERR_PARAM_NULLPTR);
     return ACLNN_SUCCESS;
 }
 
@@ -105,9 +106,9 @@ static aclnnStatus ValidateParams(const aclTensor* query, const aclTensor* key, 
                                   const aclTensor* metadataOptional, const aclIntArray* blockShape, char* layoutQ,
                                   char* layoutKv)
 {
-    CHECK_RET(
-        CheckMandatoryTensors(query, key, value, sparseBlockIdx, sparseBlockCount, metadataOptional) == ACLNN_SUCCESS,
-        ACLNN_ERR_PARAM_NULLPTR);
+    if (CheckMandatoryTensors(query, key, value, sparseBlockIdx, sparseBlockCount, metadataOptional) != ACLNN_SUCCESS) {
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
 
     if (!CheckDataType(query, key, value)) {
         return ACLNN_ERR_PARAM_INVALID;
@@ -147,9 +148,8 @@ static aclnnStatus ValidateAdditionalParams(int64_t softmaxPrecision, const aclT
         return ACLNN_ERR_PARAM_INVALID;
     }
 
-    CHECK_RET(attentionOut != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(workspaceSize != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(executor != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(attentionOut, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_COMM_INPUT(workspaceSize, executor);
     return ACLNN_SUCCESS;
 }
 
@@ -360,7 +360,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
         DFX_OUT(attentionOut, softmaxLseOptional));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     auto* executorImpl = uniqueExecutor.get();
 
     ret = MakeContiguous(query, sparseBlockIdx, sparseBlockCount, metadataOptional, attenMaskOptional,

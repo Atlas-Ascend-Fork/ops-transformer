@@ -787,3 +787,378 @@ TEST_F(generic_block_sparse_attention_tiling_ut, batched_layout_rejects_invalid_
         ExecuteTestCase(ctx, ge::GRAPH_FAILED);
     }
 }
+
+// ============================================================================
+// Incremental coverage for error-reporting refactor: attr validation branches
+// ============================================================================
+
+TEST_F(generic_block_sparse_attention_tiling_ut, zero_aicore_num_rejected)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // Platform reporting 0 AIC cores must fail tiling instead of launching 0 blocks.
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
+                                              MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(1, 0, 0, 0), &compileInfo,
+                                              "Ascend910B", 0, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, invalid_block_shape_size)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // blockShape with a single element must be rejected: exactly [x, y] is required.
+    std::vector<int64_t> badBlockShape = {kBlockShapeX};
+    gert::TilingContextPara tilingContextPara(
+        "GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16), MakeOutputs(ge::DT_FLOAT16, false),
+        MakeAttrs(1, 0, 0, 0, 0.0f, -1, -1, 4, "TND", "PA_BBND", 0, false, badBlockShape), &compileInfo, "Ascend910B",
+        40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, invalid_block_shape_value)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // Non-positive blockShape elements must be rejected before narrowing to uint32_t.
+    std::vector<int64_t> badBlockShape = {0, kBlockSize};
+    gert::TilingContextPara tilingContextPara(
+        "GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16), MakeOutputs(ge::DT_FLOAT16, false),
+        MakeAttrs(1, 0, 0, 0, 0.0f, -1, -1, 4, "TND", "PA_BBND", 0, false, badBlockShape), &compileInfo, "Ascend910B",
+        40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_block_shape_y)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // blockShapeY must be within [1, 128]; 256 must be rejected.
+    std::vector<int64_t> badBlockShape = {kBlockShapeX, 256};
+    gert::TilingContextPara tilingContextPara(
+        "GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16), MakeOutputs(ge::DT_FLOAT16, false),
+        MakeAttrs(1, 0, 0, 0, 0.0f, -1, -1, 4, "TND", "PA_BBND", 0, false, badBlockShape), &compileInfo, "Ascend910B",
+        40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_softmax_precision_value)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // softmaxPrecision only accepts 0 (fp32 SM) or 1 (half/low SM).
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
+                                              MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(1, 0, 2, 0), &compileInfo,
+                                              "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_quant_type_value)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // quantType only accepts 0 (none) or 5 (full-quant).
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
+                                              MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(1, 3, 0, 0), &compileInfo,
+                                              "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_dst_type_max)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // dst_type_max is reserved and must stay disabled (0).
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
+                                              MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(1, 0, 0, 0, 1.0f),
+                                              &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_win_right)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // Windowed attention is not wired yet: win_right must stay -1.
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
+                                              MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(1, 0, 0, 0, 0.0f, -1, 127),
+                                              &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_layout_q)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara tilingContextPara(
+        "GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16), MakeOutputs(ge::DT_FLOAT16, false),
+        MakeAttrs(1, 0, 0, 0, 0.0f, -1, -1, 4, "BNSD", "PA_BBND"), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, fp8_invalid_out_dtype_950)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // FP8 Q/K/V requires attentionOut to be float16/bfloat16; float32 output must be rejected.
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT8_E4M3FN),
+                                              MakeOutputs(ge::DT_FLOAT, false), MakeAttrs(1, 5, 1, 0), &compileInfo,
+                                              "Ascend950", 56, 262144);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// ============================================================================
+// Incremental coverage: PA_BBND KV stride validation branches
+// ============================================================================
+
+TEST_F(generic_block_sparse_attention_tiling_ut, kv_dim0_stride_valid_910b)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // Dim0-only holes are legal for PA_BBND: stride0 >= pageElems and aligned to Nkv*D.
+    inputs[1].stride_ = gert::Stride({kMaxBlocks * 2 * kBlockSize * kN2 * kD, kD, kD, 1});
+    inputs[1].hasStride_ = true;
+    inputs[2].stride_ = gert::Stride({kMaxBlocks * 2 * kBlockSize * kN2 * kD, kD, kD, 1});
+    inputs[2].hasStride_ = true;
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, kFp16Tiling910B);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, kv_non_dim0_stride_rejected)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // Non-contiguous dim1 (blockSize axis) must be rejected: only dim0 may be strided.
+    inputs[1].stride_ = gert::Stride({kMaxBlocks * kBlockSize * kN2 * kD, kD * 2, kD, 1});
+    inputs[1].hasStride_ = true;
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, kv_dim0_stride_below_page_rejected)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // key stride0 smaller than one page (blockSize*Nkv*D) must be rejected.
+    inputs[1].stride_ = gert::Stride({kD, kD, kD, 1});
+    inputs[1].hasStride_ = true;
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, kv_dim0_stride_unaligned_rejected)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // key stride0 >= pageElems but not aligned to Nkv*D must be rejected.
+    inputs[1].stride_ = gert::Stride({kMaxBlocks * kBlockSize * kN2 * kD + 1, kD, kD, 1});
+    inputs[1].hasStride_ = true;
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, value_dim0_stride_below_page_rejected)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // Valid key stride but value stride0 below one page must be rejected on the value branch.
+    inputs[1].stride_ = gert::Stride({kMaxBlocks * 2 * kBlockSize * kN2 * kD, kD, kD, 1});
+    inputs[1].hasStride_ = true;
+    inputs[2].stride_ = gert::Stride({kD, kD, kD, 1});
+    inputs[2].hasStride_ = true;
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// ============================================================================
+// Incremental coverage: query/key/sparse shape validation branches
+// ============================================================================
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_head_dim)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // headDim above the 512 upper limit must be rejected on Ascend910B.
+    auto inputs = MakeInputs(ge::DT_FLOAT16, 576);
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs,
+                                              MakeOutputs(ge::DT_FLOAT16, false, 576), MakeAttrs(1, 0, 0, 0),
+                                              &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, key_block_size_mismatch)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // KV page blockSize must equal blockShapeY (128); 256 must be rejected.
+    inputs[1] = {{{kMaxBlocks, 256, kN2, kD}, {kMaxBlocks, 256, kN2, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, sparse_idx_not_3d)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // sparseBlockIdx must be 3D [N_kv, totalQBlocks, topK].
+    inputs[3] = {{{kN2, kTotalQBlocks}, {kN2, kTotalQBlocks}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, kv_heads_not_divisible)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // numHeads=4 is not divisible by N_kv=3: the GQA group split is impossible.
+    inputs[1] = {{{kMaxBlocks, kBlockSize, 3, kD}, {kMaxBlocks, kBlockSize, 3, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    inputs[2] = {{{kMaxBlocks, kBlockSize, 3, kD}, {kMaxBlocks, kBlockSize, 3, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    inputs[3] = {{{3, kTotalQBlocks, kTopK}, {3, kTotalQBlocks, kTopK}}, ge::DT_INT32, ge::FORMAT_ND};
+    inputs[4] = {{{3, kTotalQBlocks}, {3, kTotalQBlocks}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, zero_kv_heads_rejected)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // N_kv=0 must be rejected before the modulo division.
+    inputs[3] = {{{0, kTotalQBlocks, kTopK}, {0, kTotalQBlocks, kTopK}}, ge::DT_INT32, ge::FORMAT_ND};
+    inputs[4] = {{{0, kTotalQBlocks}, {0, kTotalQBlocks}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, group_size_exceeds_max)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // groupSize = numHeads/N_kv = 256 exceeds the L0C/UB-safe bound (128).
+    inputs[0] = {{{kT, 256, kD}, {kT, 256, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, topk_exceeds_max)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // topK is bounded by 256 on this build.
+    inputs[3] = {{{kN2, kTotalQBlocks, 257}, {kN2, kTotalQBlocks, 257}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, sparse_count_not_2d)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // sparseBlockCount must be 2D [N_kv, totalQBlocks].
+    inputs[4] = {{{kN2, kTotalQBlocks, 2}, {kN2, kTotalQBlocks, 2}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, sparse_count_shape_mismatch)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // sparseBlockCount must match sparseBlockIdx [N_kv, totalQBlocks].
+    inputs[4] = {{{kN2, kTotalQBlocks + 1}, {kN2, kTotalQBlocks + 1}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, qkv_dtype_mismatch)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // key dtype (bf16) diverging from query (fp16) must be rejected.
+    inputs[1] = {{{kMaxBlocks, kBlockSize, kN2, kD}, {kMaxBlocks, kBlockSize, kN2, kD}}, ge::DT_BF16, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_qkv_dtype)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    // fp32 Q/K/V is not supported: only fp16/bf16/fp8_e4m3fn.
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT),
+                                              MakeOutputs(ge::DT_FLOAT, false), MakeAttrs(1, 0, 0, 0), &compileInfo,
+                                              "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// ============================================================================
+// Incremental coverage: metadata / reserved optional input branches
+// ============================================================================
+
+TEST_F(generic_block_sparse_attention_tiling_ut, metadata_not_1d)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // metadata is a fixed-size 1D protocol buffer; 2D must be rejected.
+    inputs[5] = {{{2, 512}, {2, 512}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, invalid_metadata_dtype)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // Kernel reads metadata as int32; int64 must be rejected.
+    inputs[5] = {{{1024}, {1024}}, ge::DT_INT64, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, atten_mask_not_supported)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // atten_mask is reserved and must stay absent.
+    inputs[6] = {{{2}, {2}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, q_dequant_scale_not_supported)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // q/k/v_dequant_scale are reserved and must stay absent.
+    inputs[7] = {{{2}, {2}}, ge::DT_FLOAT, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, p_quant_scale_not_supported)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // p_quant_scale is reserved and must stay absent.
+    inputs[10] = {{{2}, {2}}, ge::DT_FLOAT, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, seqused_q_not_1d)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    auto inputs = MakeInputs(ge::DT_FLOAT16);
+    // sequsedQ is optional, but when present it must be 1D [batch].
+    inputs[13] = {{{1, kBatch}, {1, kBatch}}, ge::DT_INT32, ge::FORMAT_ND};
+    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
+                                              MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}

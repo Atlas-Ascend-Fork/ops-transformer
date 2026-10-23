@@ -67,7 +67,7 @@ static void SetEmptyLseShape(gert::Shape* softmaxLseShape)
 static ge::graphStatus InferShapeGenericBlockSparseAttention(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("GenericBlockSparseAttention", "context is nullptr!");
+        // 框架保证 context 非空,此为不可达防御分支,与仓库 infershape 惯例一致静默返回
         return ge::GRAPH_FAILED;
     }
 
@@ -108,40 +108,56 @@ static ge::graphStatus InferShapeGenericBlockSparseAttention(gert::InferShapeCon
     const bool isPaBnbd = (layoutKv == "PA_BNBD");
     const bool layoutIsPa = (layoutKv == "PA_BBND" || isPaBnbd);
     if ((!isBatched && layoutQ != "TND") || (isPaged ? !layoutIsPa : layoutKv != layoutQ)) {
-        OP_LOGE(context->GetNodeName(),
-                "Paged KV requires PA_BBND/PA_BNBD layout; dense Q/K/V must use the same layout.");
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "layout_q and layout_kv",
+                                               ("layout_q=" + layoutQ + ", layout_kv=" + layoutKv).c_str(),
+                                               "paged KV requires PA_BBND/PA_BNBD layout; dense Q/K/V must use "
+                                               "the same layout");
         return ge::GRAPH_FAILED;
     }
     const uint32_t qRank = isBatched ? 4U : TND_DIM_NUM;
     const uint32_t qHeadAxis = layoutQ == "BSND" ? 2U : TND_DIM_N;
     const uint32_t qSeqAxis = layoutQ == "BNSD" ? 2U : 1U;
     if (queryShape->GetDimNum() != qRank) {
-        OP_LOGE(context->GetNodeName(), "Query rank does not match its layout.");
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "queryShape",
+                                               ("queryShape dimNum=" + std::to_string(queryShape->GetDimNum())).c_str(),
+                                               ("qRank=" + std::to_string(qRank)).c_str());
         return ge::GRAPH_FAILED;
     }
     const uint32_t kvRank = isPaged ? PA_BBND_DIM_NUM : qRank;
     const uint32_t kvHeadAxis = isPaged ? (isPaBnbd ? PA_BNBD_DIM_KV_HEAD : PA_BBND_DIM_KV_HEAD) : qHeadAxis;
     const uint32_t kvDAxis = kvRank - 1U;
     if (keyShape->GetDimNum() != kvRank || valueShape->GetDimNum() != kvRank) {
-        OP_LOGE(context->GetNodeName(), "KV layout %s requires rank %u.", layoutKv.c_str(), kvRank);
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "KV layout", ("KV layout=" + layoutKv).c_str(),
+                                               ("kvRank=" + std::to_string(kvRank)).c_str());
         return ge::GRAPH_FAILED;
     }
     for (uint32_t axis = 0; axis < kvRank; ++axis) {
         if (keyShape->GetDim(axis) != valueShape->GetDim(axis)) {
-            OP_LOGE(context->GetNodeName(), "Key/value shapes must match.");
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "KV layout",
+                                                   ("KV layout=" + layoutKv).c_str(),
+                                                   ("axis=" + std::to_string(axis)).c_str());
             return ge::GRAPH_FAILED;
         }
     }
     if (isBatched && !isPaged && queryShape->GetDim(0) >= 0 && keyShape->GetDim(0) >= 0 &&
         queryShape->GetDim(0) != keyShape->GetDim(0)) {
-        OP_LOGE(context->GetNodeName(), "Q/K/V batch dimensions must match.");
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "query and key",
+                                               ("query batch=" + std::to_string(queryShape->GetDim(0)) +
+                                                ", key batch=" + std::to_string(keyShape->GetDim(0)))
+                                                   .c_str(),
+                                               "the batch dim of query/key/value must match in dense mode");
         return ge::GRAPH_FAILED;
     }
     const int64_t qHeads = queryShape->GetDim(qHeadAxis);
     const int64_t kvHeads = keyShape->GetDim(kvHeadAxis);
     if (keyShape->GetDim(kvDAxis) != queryShape->GetDim(qRank - 1U) ||
         (kvHeads >= 0 && (kvHeads == 0 || (qHeads >= 0 && qHeads % kvHeads != 0)))) {
-        OP_LOGE(context->GetNodeName(), "Q/KV head dimensions or head counts do not match.");
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            context->GetNodeName(), "query and key",
+            ("qHeads=" + std::to_string(qHeads) + ", kvHeads=" + std::to_string(kvHeads) + ", qD=" +
+             std::to_string(queryShape->GetDim(qRank - 1U)) + ", kvD=" + std::to_string(keyShape->GetDim(kvDAxis)))
+                .c_str(),
+            "the head dim of key must match query and qHeads must be divisible by kvHeads");
         return ge::GRAPH_FAILED;
     }
     *attentionOutShape = *queryShape;
@@ -149,8 +165,8 @@ static ge::graphStatus InferShapeGenericBlockSparseAttention(gert::InferShapeCon
     const int64_t* lseFlagPtr = attrs->GetAttrPointer<int64_t>(ATTR_RETURN_SOFTMAX_LSE_INDEX);
     const int64_t returnSoftmaxLse = (lseFlagPtr != nullptr) ? *lseFlagPtr : 0;
     if (returnSoftmaxLse != 0 && returnSoftmaxLse != 1) {
-        OP_LOGE(context->GetNodeName(), "Unsupported return_softmax_lse=%ld, only 0 or 1 are supported.",
-                returnSoftmaxLse);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "return_softmax_lse",
+                                              std::to_string(returnSoftmaxLse).c_str(), "only 0 or 1 are supported");
         return ge::GRAPH_FAILED;
     }
 
@@ -180,10 +196,9 @@ ge::graphStatus InferDataTypeGenericBlockSparseAttention(gert::InferDataTypeCont
         // FP8 input: derive output dtype from user-provided attentionOut tensor.
         dtype = context->GetOutputDataType(ATTENTION_OUT_INDEX);
         if (dtype != ge::DT_FLOAT16 && dtype != ge::DT_BF16) {
-            OP_LOGE(context->GetNodeName(),
-                    "When query is float8_e4m3fn, attentionOut dtype must be float16 or bfloat16, "
-                    "but got %d.",
-                    static_cast<int32_t>(dtype));
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                context->GetNodeName(), "attentionOut", std::to_string(static_cast<int32_t>(dtype)).c_str(),
+                "when query is float8_e4m3fn, the dtype of attentionOut must be float16 or bfloat16");
             return ge::GRAPH_FAILED;
         }
     }

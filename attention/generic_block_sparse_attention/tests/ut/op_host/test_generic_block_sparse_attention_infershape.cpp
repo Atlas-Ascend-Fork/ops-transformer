@@ -210,3 +210,97 @@ TEST_F(generic_block_sparse_attention_infershape_ut, batched_output_and_lse_layo
         }
     }
 }
+
+TEST_F(generic_block_sparse_attention_infershape_ut, value_d_mismatch)
+{
+    auto inputs = MakeInputs();
+    inputs[2] = {{{kMaxBlocks, kBlockSize, kN2, 64}, {kMaxBlocks, kBlockSize, kN2, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::InfershapeContextPara infershapeContextPara("GenericBlockSparseAttention", inputs,
+                                                      {
+                                                          {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                          {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                                      },
+                                                      MakeAttrs(0));
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_infershape_ut, key_not_4d)
+{
+    auto inputs = MakeInputs();
+    inputs[1] = {{{kMaxBlocks, kBlockSize, kD}, {kMaxBlocks, kBlockSize, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::InfershapeContextPara infershapeContextPara("GenericBlockSparseAttention", inputs,
+                                                      {
+                                                          {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                          {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                                      },
+                                                      MakeAttrs(0));
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_infershape_ut, key_value_block_num_mismatch)
+{
+    auto inputs = MakeInputs();
+    inputs[2] = {
+        {{kMaxBlocks + 1, kBlockSize, kN2, kD}, {kMaxBlocks + 1, kBlockSize, kN2, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::InfershapeContextPara infershapeContextPara("GenericBlockSparseAttention", inputs,
+                                                      {
+                                                          {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                          {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                                      },
+                                                      MakeAttrs(0));
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_infershape_ut, key_value_block_size_mismatch)
+{
+    auto inputs = MakeInputs();
+    inputs[2] = {
+        {{kMaxBlocks, kBlockSize * 2, kN2, kD}, {kMaxBlocks, kBlockSize * 2, kN2, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::InfershapeContextPara infershapeContextPara("GenericBlockSparseAttention", inputs,
+                                                      {
+                                                          {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                          {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                                      },
+                                                      MakeAttrs(0));
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_infershape_ut, key_value_kv_heads_mismatch)
+{
+    auto inputs = MakeInputs();
+    inputs[2] = {
+        {{kMaxBlocks, kBlockSize, kN2 + 1, kD}, {kMaxBlocks, kBlockSize, kN2 + 1, kD}}, ge::DT_FLOAT16, ge::FORMAT_ND};
+    gert::InfershapeContextPara infershapeContextPara("GenericBlockSparseAttention", inputs,
+                                                      {
+                                                          {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                          {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                                      },
+                                                      MakeAttrs(0));
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_infershape_ut, missing_block_table)
+{
+    auto inputs = MakeInputs();
+    inputs.pop_back(); // block_table (IR input 15) absent
+    const std::vector<uint32_t> inputInstanceNum = {1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 0U};
+    const std::vector<uint32_t> outputInstanceNum = {1U, 1U};
+    gert::InfershapeContextPara infershapeContextPara("GenericBlockSparseAttention", inputs,
+                                                      {
+                                                          {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                          {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                                      },
+                                                      MakeAttrs(0), inputInstanceNum, outputInstanceNum);
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_infershape_ut, invalid_return_softmax_lse)
+{
+    gert::InfershapeContextPara infershapeContextPara("GenericBlockSparseAttention", MakeInputs(),
+                                                      {
+                                                          {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                          {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                                      },
+                                                      MakeAttrs(2));
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_FAILED);
+}
