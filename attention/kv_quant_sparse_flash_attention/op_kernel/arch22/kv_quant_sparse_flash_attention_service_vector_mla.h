@@ -78,6 +78,23 @@ public:
                                    uint32_t kvDealRows, uint32_t kvColumns, uint32_t kvActualColumns);
     // ================================Vector0==========================================
     __aicore__ inline void MergeKv(const RunInfo& kvVecRunInfo);
+    __aicore__ inline bool PrepareQueryAddresses(int64_t topkBase, int64_t s2IdLimit, const RunInfo& info);
+    __aicore__ inline void MergeKvTq4(const RunInfo& kvVecRunInfo);
+    __aicore__ inline void DecodeTopkPairOptimized(int32_t idx0, int32_t idx1, int64_t posInBlock, int64_t& realS2Idx0,
+                                                   int64_t& realS2Idx1);
+    __aicore__ inline void GetRealS2IdxOptimized(int64_t topkIdx, int64_t posInBlock, int64_t& realS2Idx0,
+                                                 int64_t& realS2Idx1, int64_t topkGmBaseOffset);
+    __aicore__ inline int64_t GetKeyBNBOffsetOptimized(int64_t realS2Idx, int64_t blkTableBase, int64_t s2IdLimit,
+                                                       const RunInfo& kvVecRunInfo);
+    __aicore__ inline void CopyInSingleKvOptimized(int64_t& mte2Size, int64_t mte3Size, int64_t mergeMte3Idx,
+                                                   int64_t realS2Idx, int64_t keyBNBOffset, int64_t s2IdLimit,
+                                                   const RunInfo& kvVecRunInfo);
+    __aicore__ inline void CopyInKvOptimized(int64_t& mte2Size, int64_t mte3Size, int64_t mergeMte3Idx,
+                                             int64_t realS2Idx1, int64_t realS2Idx2, int64_t s2IdLimit,
+                                             int64_t blkTableBase, const RunInfo& kvVecRunInfo);
+    __aicore__ inline void MergeKvOptimized(const RunInfo& kvVecRunInfo);
+    __aicore__ inline void CopyOutMrgeResultOptimized(int64_t mte2Size, int64_t mte3Size, int64_t s2GmStartOffset,
+                                                      int64_t mergeMte3Idx, const RunInfo& kvVecRunInfo);
     __aicore__ inline int64_t GetKeyBNBOffset(int64_t realS2Idx, const RunInfo& kvVecRunInfo, int64_t s2IdLimit);
     __aicore__ inline void GetRealS2Idx(int64_t s2GmOffset, int64_t& realS2Idx, int64_t topkGmBaseOffset,
                                         const RunInfo& kvVecRunInfo);
@@ -221,6 +238,24 @@ private:
     TBuf<> tq4STIdxBuf_;
     TBuf<> tq4ScaleBuf_;
     LocalTensor<float> tq4Cent_;
+
+    static constexpr uint32_t MTE2_SLOT_NUM = 3;
+    // INT8 arch22 layouts are fixed by the tiling checks. Preserve compile-time
+    // row strides so gather address arithmetic does not gain runtime overhead.
+    // TQ4 uses MergeKvTq4 and does not consume these INT8 layout constants.
+    static constexpr uint32_t combineBytes_ = QSFAT::noRope ? 528U : 656U;
+    static constexpr uint32_t combineDim_ = combineBytes_;
+    static constexpr uint32_t combineDimAlign_ = QSFAT::noRope ? 544U : 672U;
+    static constexpr uint32_t mte2SlotElems_ = 32 * combineDimAlign_;
+    GlobalTensor<int64_t> topkI64Gm_;
+    int64_t sparseBlockSize_ = 1;
+    int64_t sparseBlockCount_ = 0;
+    int64_t s2BaseSize_ = 0;
+    int32_t addressTableBatch_ = -1;
+    bool addressTableValid_ = false;
+    bool queryAddressesValid_ = false;
+    int32_t kvCacheBlockShift_ = -1;
+    int64_t kvCacheBlockMask_ = 0;
 };
 
 template <typename QSFAT>
@@ -314,6 +349,18 @@ __aicore__ inline void QSFAVectorService<QSFAT>::InitParams(
 {
     this->kvVecConstInfo = kvVecConstInfo;
     this->tilingData = tilingData;
+    sparseBlockSize_ = kvVecConstInfo.sparseBlockSize;
+    sparseBlockCount_ = kvVecConstInfo.sparseBlockCount;
+    s2BaseSize_ = kvVecConstInfo.s2BaseSize;
+    int64_t block = kvVecConstInfo.kvCacheBlockSize;
+    if (block > 0 && (block & (block - 1)) == 0) {
+        kvCacheBlockShift_ = 0;
+        kvCacheBlockMask_ = block - 1;
+        while (block > 1) {
+            block >>= 1;
+            ++kvCacheBlockShift_;
+        }
+    }
 }
 
 template <typename QSFAT>
@@ -350,6 +397,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::InitVec1GlobalTensor(
     this->lseMaxFdGm = lseMaxFdGm;
     this->lseSumFdGm = lseSumFdGm;
     this->topkGm_ = topKGm;
+    topkI64Gm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(const_cast<__gm__ int32_t*>(topKGm.GetPhyAddr())));
 }
 
 template <typename QSFAT>
@@ -1089,7 +1137,7 @@ __aicore__ inline void QSFAVectorService<QSFAT>::CopyOutMrgeResult(int64_t mte2S
 
 // b s1 k
 template <typename QSFAT>
-__aicore__ inline void QSFAVectorService<QSFAT>::MergeKv(const RunInfo& kvVecRunInfo)
+__aicore__ inline void QSFAVectorService<QSFAT>::MergeKvTq4(const RunInfo& kvVecRunInfo)
 {
     int64_t s2ProcessSize = kvVecRunInfo.actualSingleProcessSInnerSize;
     int64_t s2Pair = CeilDiv(s2ProcessSize, 2L * kvVecConstInfo.sparseBlockSize);
@@ -1616,6 +1664,618 @@ __aicore__ inline void QSFAVectorService<QSFAT>::RowMuls(LocalTensor<T> dstUb, L
             }
         }
     }
+}
+
+template <typename QSFAT>
+__aicore__ inline void QSFAVectorService<QSFAT>::MergeKv(const RunInfo& kvVecRunInfo)
+{
+    if constexpr (!QSFAT::noRope) {
+        if (kvVecConstInfo.keyQuantMode == QUANT_MODE::TQ4) {
+            MergeKvTq4(kvVecRunInfo);
+            return;
+        }
+    }
+    MergeKvOptimized(kvVecRunInfo);
+}
+
+template <typename QSFAT>
+__aicore__ inline void QSFAVectorService<QSFAT>::DecodeTopkPairOptimized(int32_t idx0, int32_t idx1, int64_t posInBlock,
+                                                                         int64_t& realS2Idx0, int64_t& realS2Idx1)
+{
+    if (sparseBlockSize_ == 1 && posInBlock == 0) {
+        realS2Idx0 = idx0;
+        realS2Idx1 = idx1;
+        return;
+    }
+    realS2Idx0 = static_cast<int64_t>(idx0) * sparseBlockSize_ + posInBlock;
+    realS2Idx1 = static_cast<int64_t>(idx1) * sparseBlockSize_ + posInBlock;
+}
+
+template <typename QSFAT>
+__aicore__ inline void QSFAVectorService<QSFAT>::GetRealS2IdxOptimized(int64_t topkIdx, int64_t posInBlock,
+                                                                       int64_t& realS2Idx0, int64_t& realS2Idx1,
+                                                                       int64_t topkGmBaseOffset)
+{
+    if (unlikely(topkIdx >= sparseBlockCount_)) {
+        realS2Idx0 = -1;
+        realS2Idx1 = -1;
+        return;
+    }
+    int64_t elemOffset = topkGmBaseOffset + topkIdx;
+    // 相邻 sparse block 的 topk 下标连续，8 字节对齐且第二个下标不越界时一次取 int64
+    if ((topkIdx + 1 < sparseBlockCount_) && ((elemOffset & 1) == 0)) {
+        int64_t packed = topkI64Gm_.GetValue(static_cast<uint64_t>(elemOffset >> 1));
+        int32_t idx0 = static_cast<int32_t>(packed);
+        int32_t idx1 = static_cast<int32_t>(static_cast<uint64_t>(packed) >> 32);
+        DecodeTopkPairOptimized(idx0, idx1, posInBlock, realS2Idx0, realS2Idx1);
+        return;
+    }
+    int32_t idx0 = topkGm_.GetValue(static_cast<uint64_t>(elemOffset));
+    if (unlikely(topkIdx + 1 >= sparseBlockCount_)) {
+        realS2Idx0 = (sparseBlockSize_ == 1 && posInBlock == 0) ?
+                         idx0 :
+                         static_cast<int64_t>(idx0) * sparseBlockSize_ + posInBlock;
+        realS2Idx1 = -1;
+        return;
+    }
+    int32_t idx1 = topkGm_.GetValue(static_cast<uint64_t>(elemOffset + 1));
+    DecodeTopkPairOptimized(idx0, idx1, posInBlock, realS2Idx0, realS2Idx1);
+}
+
+template <typename QSFAT>
+__aicore__ inline int64_t QSFAVectorService<QSFAT>::GetKeyBNBOffsetOptimized(int64_t realS2Idx, int64_t blkTableBase,
+                                                                             int64_t s2IdLimit,
+                                                                             const RunInfo& kvVecRunInfo)
+{
+    if (realS2Idx < 0 || realS2Idx >= s2IdLimit) {
+        return -1;
+    }
+    int64_t realKeyBNBOffset = 0;
+    if constexpr (PAGE_ATTENTION) {
+        int64_t blkTableIdx;
+        int64_t blkTableOffset;
+        if (kvCacheBlockShift_ >= 0) {
+            blkTableIdx = realS2Idx >> kvCacheBlockShift_;
+            blkTableOffset = realS2Idx & kvCacheBlockMask_;
+        } else {
+            blkTableIdx = realS2Idx / kvVecConstInfo.kvCacheBlockSize;
+            blkTableOffset = realS2Idx % kvVecConstInfo.kvCacheBlockSize;
+        }
+        // kvHeadNum 编译期为 1，页内偏移不再乘 head
+        realKeyBNBOffset =
+            blkTableGm_.GetValue(blkTableBase + blkTableIdx) * static_cast<int64_t>(kvVecConstInfo.kvCacheBlockSize) +
+            blkTableOffset;
+    } else {
+        realKeyBNBOffset =
+            (kvVecRunInfo.tensorBOffset + realS2Idx * kvVecConstInfo.kvHeadNum * kvVecConstInfo.combineHeadDim) /
+            kvVecConstInfo.combineHeadDim;
+    }
+    return realKeyBNBOffset;
+}
+
+template <typename QSFAT>
+__aicore__ inline void QSFAVectorService<QSFAT>::CopyInSingleKvOptimized(int64_t& mte2Size, int64_t mte3Size,
+                                                                         int64_t mergeMte3Idx, int64_t realS2Idx,
+                                                                         int64_t keyBNBOffset, int64_t s2IdLimit,
+                                                                         const RunInfo& kvVecRunInfo)
+{
+    if (keyBNBOffset < 0) {
+        return;
+    }
+    int64_t validS2Count = ((realS2Idx + kvVecConstInfo.sparseBlockSize > s2IdLimit) ? (s2IdLimit - realS2Idx) :
+                                                                                       kvVecConstInfo.sparseBlockSize);
+    DataCopyExtParams intriParams;
+
+    intriParams.blockCount = validS2Count;
+    intriParams.dstStride = 0;
+    intriParams.srcStride = 0;
+    DataCopyPadExtParams<KV_T> padParams;
+    // 当前仅支持COMBINE模式
+    if (kvVecConstInfo.quantScaleRepoMode == QUANT_SCALE_REPO_MODE::COMBINE) {
+        intriParams.blockLen = combineBytes_;
+        padParams.isPad = true;
+        padParams.leftPadding = 0;
+        padParams.rightPadding = combineDimAlign_ - combineDim_;
+        padParams.paddingValue = 0;
+        DataCopyPad(
+            kvMergUb_[(mergeMte3Idx % MTE2_SLOT_NUM) * mte2SlotElems_ + (mte2Size - mte3Size) * combineDimAlign_],
+            keyGm_[keyBNBOffset * combineDim_], intriParams, padParams);
+    }
+    mte2Size += validS2Count;
+}
+
+template <typename QSFAT>
+__aicore__ inline void QSFAVectorService<QSFAT>::CopyInKvOptimized(int64_t& mte2Size, int64_t mte3Size,
+                                                                   int64_t mergeMte3Idx, int64_t realS2Idx1,
+                                                                   int64_t realS2Idx2, int64_t s2IdLimit,
+                                                                   int64_t blkTableBase, const RunInfo& kvVecRunInfo)
+{
+    int64_t keyBNBOffset1 = GetKeyBNBOffsetOptimized(realS2Idx1, blkTableBase, s2IdLimit, kvVecRunInfo);
+    int64_t keyBNBOffset2 = GetKeyBNBOffsetOptimized(realS2Idx2, blkTableBase, s2IdLimit, kvVecRunInfo);
+    if (unlikely(keyBNBOffset1 < 0 && keyBNBOffset2 < 0)) {
+        return;
+    }
+
+    int64_t sparseBlockSrcStride =
+        ((keyBNBOffset1 > keyBNBOffset2 ? (keyBNBOffset1 - keyBNBOffset2) : (keyBNBOffset2 - keyBNBOffset1)) -
+         sparseBlockSize_);
+    int64_t keySrcStride = sparseBlockSrcStride * static_cast<int64_t>(combineBytes_);
+    if (unlikely(keySrcStride >= INT32_MAX || keySrcStride < 0 ||
+                 realS2Idx1 + kvVecConstInfo.sparseBlockSize >= s2IdLimit ||
+                 realS2Idx2 + kvVecConstInfo.sparseBlockSize >= s2IdLimit) ||
+        kvVecConstInfo.sparseBlockSize > 1) {
+        // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令
+        CopyInSingleKvOptimized(mte2Size, mte3Size, mergeMte3Idx, realS2Idx1, keyBNBOffset1, s2IdLimit, kvVecRunInfo);
+        CopyInSingleKvOptimized(mte2Size, mte3Size, mergeMte3Idx, realS2Idx2, keyBNBOffset2, s2IdLimit, kvVecRunInfo);
+    } else {
+        DataCopyExtParams intriParams;
+        intriParams.blockCount = (keyBNBOffset1 >= 0) + (keyBNBOffset2 >= 0);
+        intriParams.dstStride = 0;
+        intriParams.srcStride = keySrcStride;
+        DataCopyPadExtParams<KV_T> padParams;
+
+        int64_t startGmOffset = keyBNBOffset1 > -1 ? keyBNBOffset1 : keyBNBOffset2;
+        if (keyBNBOffset2 > -1 && keyBNBOffset2 < keyBNBOffset1) {
+            startGmOffset = keyBNBOffset2;
+        }
+
+        // 当前仅支持COMBINE模式
+        if (kvVecConstInfo.quantScaleRepoMode == QUANT_SCALE_REPO_MODE::COMBINE) {
+            intriParams.blockLen = static_cast<uint32_t>(sparseBlockSize_) * combineBytes_;
+            padParams.isPad = true;
+            padParams.leftPadding = 0;
+            padParams.rightPadding = combineDimAlign_ - combineDim_;
+            padParams.paddingValue = 0;
+            DataCopyPad(
+                kvMergUb_[(mergeMte3Idx % MTE2_SLOT_NUM) * mte2SlotElems_ + (mte2Size - mte3Size) * combineDimAlign_],
+                keyGm_[startGmOffset * combineDim_], intriParams, padParams);
+        }
+        mte2Size += ((keyBNBOffset1 > -1) + (keyBNBOffset2 > -1)) * kvVecConstInfo.sparseBlockSize;
+    }
+}
+
+template <typename QSFAT>
+__aicore__ inline bool QSFAVectorService<QSFAT>::PrepareQueryAddresses(int64_t topkBase, int64_t s2IdLimit,
+                                                                       const RunInfo& info)
+{
+    // V0-only scratch: previous V1/V2 calls have returned. Preserve the
+    // address cache above v0ValidSizeUb_[512] across subsequent S2 blocks.
+    PipeBarrier<PIPE_ALL>();
+    queryAddressesValid_ = false;
+    int32_t valid = info.actS2Size;
+    if (valid <= 0 || valid > sparseBlockCount_) {
+        return false;
+    }
+    int32_t blocks = valid / 512;
+    int32_t tail = valid % 512;
+    int32_t count = blocks * 256 + tail;
+    int32_t span = ((count + 127) / 128) * 128;
+    LocalTensor<int32_t> work = inputBuff1.Get<int32_t>();
+    LocalTensor<int32_t> indices = work;
+    LocalTensor<int32_t> page = work[span];
+    LocalTensor<int32_t> offset = work[span * 2];
+    LocalTensor<int32_t> table = tq4ScaleBuf_.Get<int32_t>();
+    LocalTensor<int32_t> addresses = v0ValidSizeUb_[512];
+    DataCopyExtParams params;
+    params.blockCount = 1;
+    params.srcStride = 0;
+    params.dstStride = 0;
+    DataCopyPadExtParams<int32_t> padding{false, 0, 0, 0};
+    if (addressTableBatch_ != static_cast<int32_t>(info.bIdx)) {
+        params.blockLen = kvVecConstInfo.maxBlockNumPerBatch * sizeof(int32_t);
+        DataCopyPad(table, blkTableGm_[info.bIdx * kvVecConstInfo.maxBlockNumPerBatch], params, padding);
+        SetFlag<HardEvent::MTE2_S>(6);
+        WaitFlag<HardEvent::MTE2_S>(6);
+        addressTableValid_ = true;
+        for (int32_t i = 0; i < kvVecConstInfo.maxBlockNumPerBatch; ++i) {
+            int32_t physicalPage = table.GetValue(i);
+            // Keep the cached physical token offset within signed int32.
+            if (physicalPage < 0 || physicalPage > (INT32_MAX - 127) / 128) {
+                addressTableValid_ = false;
+            }
+        }
+        addressTableBatch_ = info.bIdx;
+    }
+    if (!addressTableValid_) {
+        return false;
+    }
+    if (blocks > 0) {
+        params.blockCount = blocks;
+        params.blockLen = 256 * sizeof(int32_t);
+        params.srcStride = 256 * sizeof(int32_t);
+        DataCopyPad(indices, topkGm_[topkBase + GetSubBlockIdx() * 256], params, padding);
+    }
+    if (tail >= 128) {
+        params.blockCount = 1;
+        params.blockLen = tail * sizeof(int32_t);
+        params.srcStride = 0;
+        DataCopyPad(indices[blocks * 256], topkGm_[topkBase + blocks * 512], params, padding);
+    }
+    SetFlag<HardEvent::MTE2_V>(6);
+    WaitFlag<HardEvent::MTE2_V>(6);
+    int32_t full = (count / 128) * 128;
+    if (full > 0) {
+        // Validate before Gather: negative/sentinel and causal-filtered
+        // indices use the existing compaction/termination path instead.
+        LocalTensor<float> values = work[span * 3].template ReinterpretCast<float>();
+        LocalTensor<float> reduceWork = work[span * 4].template ReinterpretCast<float>();
+        LocalTensor<float> bounds = work[span * 5].template ReinterpretCast<float>();
+        Cast(values, indices, RoundMode::CAST_NONE, full);
+        PipeBarrier<PIPE_V>();
+        ReduceMin(bounds, values, reduceWork, full, false);
+        PipeBarrier<PIPE_V>();
+        ReduceMax(bounds[8], values, reduceWork, full, false);
+        SetFlag<HardEvent::V_S>(6);
+        WaitFlag<HardEvent::V_S>(6);
+        int64_t indexLimit = s2IdLimit < kvVecConstInfo.maxBlockNumPerBatch * 128L ?
+                                 s2IdLimit :
+                                 kvVecConstInfo.maxBlockNumPerBatch * 128L;
+        if (bounds.GetValue(0) < 0 || bounds.GetValue(8) >= indexLimit) {
+            return false;
+        }
+        ShiftRight(page, indices, static_cast<int32_t>(7), full);
+        PipeBarrier<PIPE_V>();
+        ShiftLeft(offset, page, static_cast<int32_t>(7), full);
+        PipeBarrier<PIPE_V>();
+        Sub(offset, indices, offset, full);
+        ShiftLeft(page, page, static_cast<int32_t>(2), full);
+        PipeBarrier<PIPE_V>();
+        Gather(addresses, table, page.template ReinterpretCast<uint32_t>(), 0, full);
+        PipeBarrier<PIPE_V>();
+        ShiftLeft(addresses, addresses, static_cast<int32_t>(7), full);
+        PipeBarrier<PIPE_V>();
+        Add(addresses, addresses, offset, full);
+    }
+    SetFlag<HardEvent::V_S>(6);
+    WaitFlag<HardEvent::V_S>(6);
+    for (int32_t j = full; j < count; ++j) {
+        int32_t idx = topkGm_.GetValue(topkBase + blocks * 512 + (j - blocks * 256));
+        if (idx < 0 || idx >= s2IdLimit || (idx >> 7) >= kvVecConstInfo.maxBlockNumPerBatch) {
+            return false;
+        }
+        int32_t physicalPage = table.GetValue(idx >> 7);
+        addresses.SetValue(j, physicalPage * 128 + (idx & 127));
+    }
+    queryAddressesValid_ = true;
+    return true;
+}
+
+template <typename QSFAT>
+__aicore__ inline void QSFAVectorService<QSFAT>::MergeKvOptimized(const RunInfo& kvVecRunInfo)
+{
+    int64_t s2ProcessSize = kvVecRunInfo.actualSingleProcessSInnerSize;
+    int64_t s2Pair = CeilDiv(s2ProcessSize, 2L * kvVecConstInfo.sparseBlockSize);
+    int64_t topkGmBaseOffset = 0;
+
+    if constexpr (LAYOUT_T == QSFA_LAYOUT::TND) {
+        uint64_t qsfaActualSeqQPrefixSum =
+            (kvVecRunInfo.bIdx <= 0) ? 0 : actualSeqLengthsQGm.GetValue(kvVecRunInfo.bIdx - 1);
+        topkGmBaseOffset += (qsfaActualSeqQPrefixSum + kvVecRunInfo.gS1Idx / kvVecConstInfo.gSize) *
+                                kvVecConstInfo.kvHeadNum * kvVecConstInfo.sparseBlockCount +
+                            kvVecRunInfo.n2Idx * kvVecConstInfo.sparseBlockCount;
+    } else {
+        topkGmBaseOffset += kvVecRunInfo.bIdx * kvVecConstInfo.qSeqSize * kvVecConstInfo.sparseBlockCount +
+                            kvVecRunInfo.gS1Idx / kvVecConstInfo.gSize * kvVecConstInfo.sparseBlockCount;
+    }
+    int64_t qsfaMergeMte3Idx = 0;
+    int64_t qsfaMte2Size = 0;
+    int64_t qsfaMte3Size = 0;
+    int64_t qsfaS2IdxArray0 = -1;
+    int64_t qsfaS2IdxArray1 = -1;
+    bool qsfaNeedWaitMte3ToMte2 = true;
+    SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
+    SetFlag<AscendC::HardEvent::MTE3_MTE2>(1);
+    SetFlag<AscendC::HardEvent::MTE3_MTE2>(2);
+    int64_t qsfaS2GmStartOffset = GetSubBlockIdx() == 0 ? 0 : CeilDiv(s2Pair, 2L) * 2 * kvVecConstInfo.sparseBlockSize;
+    int64_t qsfaS2GmLimit =
+        GetSubBlockIdx() == 0 ? CeilDiv(s2Pair, 2L) * 2 * kvVecConstInfo.sparseBlockSize : s2ProcessSize;
+    if (qsfaS2GmLimit > s2ProcessSize) {
+        qsfaS2GmLimit = s2ProcessSize;
+    }
+    int64_t s2IdLimit = kvVecRunInfo.curActualSeqLenOri;
+    if (kvVecConstInfo.sparseMode == 3) {
+        s2IdLimit =
+            kvVecRunInfo.curActualSeqLenOri - kvVecRunInfo.actS1Size + kvVecRunInfo.gS1Idx / kvVecConstInfo.gSize + 1;
+    }
+    int64_t blkTableBase = kvVecRunInfo.bIdx * kvVecConstInfo.maxBlockNumPerBatch;
+    int64_t s2Step = sparseBlockSize_ << 1;
+    int64_t globalPos = qsfaS2GmStartOffset + kvVecRunInfo.s2Idx * s2BaseSize_;
+    int64_t topkIdx = globalPos / sparseBlockSize_;
+    int64_t posInBlock = globalPos - topkIdx * sparseBlockSize_;
+    int64_t lastTopkIdx = topkIdx;
+    if (qsfaS2GmStartOffset < qsfaS2GmLimit) {
+        lastTopkIdx = topkIdx + 2 * ((qsfaS2GmLimit - 1 - qsfaS2GmStartOffset) / s2Step);
+    }
+    bool useI64All = (qsfaS2GmStartOffset < qsfaS2GmLimit) && ((topkGmBaseOffset + topkIdx) & 1) == 0 &&
+                     (lastTopkIdx + 1 < sparseBlockCount_);
+    bool useQueryAddresses = false;
+    if constexpr (QSFAT::noRope && PAGE_ATTENTION && TEMPLATE_MODE == V_TEMPLATE) {
+        // The cache occupies the unused upper 6KB of v0ValidSizeBuff.
+        // At most 1535 offsets per AIV: half of each 512-row tile plus its tail.
+        if (sparseBlockSize_ == 1 && kvCacheBlockShift_ == 7 && s2BaseSize_ == 512 && sparseBlockCount_ > 0 &&
+            sparseBlockCount_ <= 2560 && !kvVecRunInfo.tndIsS2SplitCore && kvVecConstInfo.maxBlockNumPerBatch > 0 &&
+            kvVecConstInfo.maxBlockNumPerBatch <= 256 && kvVecConstInfo.keyQuantMode != QUANT_MODE::TQ4) {
+            if (kvVecRunInfo.s2Idx == 0) {
+                PrepareQueryAddresses(topkGmBaseOffset, s2IdLimit, kvVecRunInfo);
+            }
+            useQueryAddresses = queryAddressesValid_;
+        }
+        if (useQueryAddresses) {
+            int32_t totalRows = static_cast<int32_t>(qsfaS2GmLimit - qsfaS2GmStartOffset);
+            int32_t queryCacheBase = kvVecRunInfo.s2Idx * 256;
+            if (kvVecRunInfo.s2Idx == kvVecRunInfo.actS2Size / 512) {
+                queryCacheBase += qsfaS2GmStartOffset;
+            }
+            DataCopyExtParams kvParams;
+            kvParams.blockCount = 2;
+            kvParams.blockLen = 528;
+            kvParams.srcStride = 0;
+            kvParams.dstStride = 0;
+            DataCopyPadExtParams<KV_T> kvPadding{true, 0, 16, 0};
+            for (int32_t row = 0; row < totalRows; row += 32) {
+                int32_t rows = totalRows - row < 32 ? totalRows - row : 32;
+                WaitFlag<HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+                int64_t ubBase = (qsfaMergeMte3Idx % MTE2_SLOT_NUM) * mte2SlotElems_;
+                for (int32_t j = 0; j < rows; j += 2) {
+                    int64_t p0, p1;
+                    p0 = v0ValidSizeUb_.GetValue(512 + queryCacheBase + row + j);
+                    p1 = j + 1 < rows ? v0ValidSizeUb_.GetValue(512 + queryCacheBase + row + j + 1) : -1;
+                    int64_t lo = p0 < p1 ? p0 : p1;
+                    int64_t gap = p0 > p1 ? p0 - p1 : p1 - p0;
+                    int64_t stride = (gap - 1) * 528;
+                    if (j + 1 < rows && p0 >= 0 && p1 >= 0 && stride >= 0 && stride < INT32_MAX) {
+                        kvParams.blockCount = 2;
+                        kvParams.srcStride = stride;
+                        DataCopyPad(kvMergUb_[ubBase + j * 544], keyGm_[lo * 528], kvParams, kvPadding);
+                    } else {
+                        kvParams.blockCount = 1;
+                        kvParams.srcStride = 0;
+                        if (p0 >= 0) {
+                            DataCopyPad(kvMergUb_[ubBase + j * 544], keyGm_[p0 * 528], kvParams, kvPadding);
+                        }
+                        if (j + 1 < rows && p1 >= 0) {
+                            DataCopyPad(kvMergUb_[ubBase + (j + 1) * 544], keyGm_[p1 * 528], kvParams, kvPadding);
+                        }
+                    }
+                }
+                qsfaMte2Size += rows;
+                CopyOutMrgeResultOptimized(qsfaMte2Size, qsfaMte3Size, qsfaS2GmStartOffset, qsfaMergeMte3Idx,
+                                           kvVecRunInfo);
+                qsfaMte3Size = qsfaMte2Size;
+                SetFlag<HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+                ++qsfaMergeMte3Idx;
+            }
+        }
+    }
+    if (!useQueryAddresses) {
+        for (int64_t s2GmOffsetArray = qsfaS2GmStartOffset; s2GmOffsetArray < qsfaS2GmLimit;
+             s2GmOffsetArray += s2Step) {
+            if (qsfaNeedWaitMte3ToMte2) {
+                WaitFlag<AscendC::HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+                qsfaNeedWaitMte3ToMte2 = false;
+            }
+            if (useI64All) {
+                int64_t packed = topkI64Gm_.GetValue(static_cast<uint64_t>((topkGmBaseOffset + topkIdx) >> 1));
+                DecodeTopkPairOptimized(static_cast<int32_t>(packed),
+                                        static_cast<int32_t>(static_cast<uint64_t>(packed) >> 32), posInBlock,
+                                        qsfaS2IdxArray0, qsfaS2IdxArray1);
+            } else {
+                GetRealS2IdxOptimized(topkIdx, posInBlock, qsfaS2IdxArray0, qsfaS2IdxArray1, topkGmBaseOffset);
+            }
+            topkIdx += 2;
+            if (unlikely(qsfaS2IdxArray0 < 0)) {
+                CopyOutMrgeResultOptimized(qsfaMte2Size, qsfaMte3Size, qsfaS2GmStartOffset, qsfaMergeMte3Idx,
+                                           kvVecRunInfo);
+                SetFlag<AscendC::HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+                qsfaMergeMte3Idx++;
+                break;
+            }
+            CopyInKvOptimized(qsfaMte2Size, qsfaMte3Size, qsfaMergeMte3Idx, qsfaS2IdxArray0, qsfaS2IdxArray1, s2IdLimit,
+                              blkTableBase, kvVecRunInfo);
+            if ((qsfaMte2Size - qsfaMte3Size + s2Step > 32) || s2GmOffsetArray + s2Step >= qsfaS2GmLimit) {
+                CopyOutMrgeResultOptimized(qsfaMte2Size, qsfaMte3Size, qsfaS2GmStartOffset, qsfaMergeMte3Idx,
+                                           kvVecRunInfo);
+                qsfaMte3Size = qsfaMte2Size;
+                SetFlag<AscendC::HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+                qsfaMergeMte3Idx++;
+                qsfaNeedWaitMte3ToMte2 = true;
+            }
+        }
+    }
+
+    if (unlikely(qsfaS2GmStartOffset + qsfaMte2Size < qsfaS2GmLimit)) {
+        SetFlag<AscendC::HardEvent::MTE3_V>(0);
+        WaitFlag<AscendC::HardEvent::MTE3_V>(0);
+        WaitFlag<AscendC::HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+        LocalTensor<K_ROPE_T> mergeUb = kvMergUb_.template ReinterpretCast<K_ROPE_T>();
+        Duplicate(mergeUb, static_cast<K_ROPE_T>(0.0), kvVecConstInfo.headDim);
+        SetFlag<AscendC::HardEvent::V_MTE3>(0);
+        WaitFlag<AscendC::HardEvent::V_MTE3>(0);
+
+        uint64_t blockElementNum = FP32_BLOCK_ELEMENT_NUM * 2;
+        DataCopyExtParams dataCopyParams;
+        dataCopyParams.blockCount = kvVecConstInfo.headDim / blockElementNum;
+        dataCopyParams.blockLen = blockElementNum * sizeof(K_ROPE_T);
+        dataCopyParams.srcStride = 0;
+        dataCopyParams.dstStride = (kvVecConstInfo.s2BaseSize - 1) * blockElementNum * sizeof(K_ROPE_T);
+        for (int64_t s2GmOffset = qsfaS2GmStartOffset + qsfaMte2Size; s2GmOffset < qsfaS2GmLimit; s2GmOffset++) {
+            if constexpr (QSFAT::noRope) {
+                DataCopyExtParams ndParams{1, static_cast<uint32_t>(kvVecConstInfo.headDim * sizeof(K_ROPE_T)), 0, 0,
+                                           0};
+                DataCopyPad(kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                       s2GmOffset * kvVecConstInfo.headDim],
+                            mergeUb, ndParams);
+            } else {
+                DataCopyPad(
+                    kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 + s2GmOffset * blockElementNum],
+                    mergeUb, dataCopyParams);
+            }
+        }
+        if constexpr (!QSFAT::noRope) {
+            dataCopyParams.blockCount = (QSFAT::noRope ? 0U : 64U) / blockElementNum;
+            for (int64_t s2GmOffset = qsfaS2GmStartOffset + qsfaMte2Size; s2GmOffset < qsfaS2GmLimit; s2GmOffset++) {
+                DataCopyPad(kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                                       512 * kvVecConstInfo.headDim + s2GmOffset * blockElementNum],
+                            mergeUb, dataCopyParams);
+            }
+        }
+        SetFlag<AscendC::HardEvent::MTE3_MTE2>(qsfaMergeMte3Idx % MTE2_SLOT_NUM);
+        qsfaMergeMte3Idx++;
+    }
+    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
+    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(1);
+    WaitFlag<AscendC::HardEvent::MTE3_MTE2>(2);
+    v0ValidSizeUb_.SetValue(kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM, qsfaMte2Size);
+    SetFlag<AscendC::HardEvent::S_MTE3>(1);
+    WaitFlag<AscendC::HardEvent::S_MTE3>(1);
+    DataCopyExtParams dataCopyParams;
+    dataCopyParams.blockCount = 1;
+    dataCopyParams.blockLen = 128 * sizeof(int32_t);
+    dataCopyParams.srcStride = 0;
+    dataCopyParams.dstStride = 0;
+    DataCopyPad(kvValidSizeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * (128 * 2) + GetSubBlockIdx() * 128],
+                v0ValidSizeUb_, dataCopyParams);
+    return;
+}
+
+template <typename QSFAT>
+__aicore__ inline void QSFAVectorService<QSFAT>::CopyOutMrgeResultOptimized(int64_t mte2Size, int64_t mte3Size,
+                                                                            int64_t s2GmStartOffset,
+                                                                            int64_t mergeMte3Idx,
+                                                                            const RunInfo& kvVecRunInfo)
+{
+    if (mte2Size <= mte3Size) {
+        return;
+    }
+    int32_t dealRow = mte2Size - mte3Size;
+    SetFlag<AscendC::HardEvent::MTE2_V>(0);
+    WaitFlag<AscendC::HardEvent::MTE2_V>(0);
+    LocalTensor<half> kvTensorAsFp16 = tmpBuff1.template Get<half>();
+    uint64_t mask = ConstInfo::BUFFER_SIZE_BYTE_256B / sizeof(half);
+    LocalTensor<KV_T> srcTensor = kvMergUb_[(mergeMte3Idx % MTE2_SLOT_NUM) * mte2SlotElems_];
+    // packed row is a compile-time constant: rope 64 -> 21 blocks, rope 0 -> 17 blocks
+    static constexpr uint32_t ropeDim = (QSFAT::noRope ? 0U : 64U);
+    static constexpr uint32_t packedBytes = 512 + ropeDim * sizeof(K_ROPE_T) + 16;
+    static constexpr uint8_t rowStrideBlk =
+        static_cast<uint8_t>((packedBytes + ConstInfo::BUFFER_SIZE_BYTE_32B - 1) / ConstInfo::BUFFER_SIZE_BYTE_32B);
+    static constexpr uint32_t scaleOffset = 512 + ropeDim * sizeof(K_ROPE_T) / sizeof(KV_T);
+    if (dealRow == 1) {
+        Cast(kvTensorAsFp16, srcTensor, RoundMode::CAST_NONE, mask, 4, {1, 1, 8, 4});
+    } else {
+        uint8_t repeatTimes = static_cast<uint8_t>(dealRow);
+        Cast(kvTensorAsFp16, srcTensor, RoundMode::CAST_NONE, mask, repeatTimes, {1, 1, 32, rowStrideBlk});
+        Cast(kvTensorAsFp16[128], srcTensor[128], RoundMode::CAST_NONE, mask, repeatTimes, {1, 1, 32, rowStrideBlk});
+        Cast(kvTensorAsFp16[256], srcTensor[256], RoundMode::CAST_NONE, mask, repeatTimes, {1, 1, 32, rowStrideBlk});
+        Cast(kvTensorAsFp16[384], srcTensor[384], RoundMode::CAST_NONE, mask, repeatTimes, {1, 1, 32, rowStrideBlk});
+    }
+    PipeBarrier<PIPE_V>();
+    LocalTensor<T> antiQuantScale = tmpBuff2.template Get<T>();
+    LocalTensor<T> oriQuantScaleTensor = srcTensor[scaleOffset].template ReinterpretCast<T>();
+    if (dealRow == 1) {
+        Brcb(antiQuantScale, oriQuantScaleTensor, 1, {1, 4});
+    } else {
+        DataCopyParams params;
+        params.blockCount = dealRow;
+        params.blockLen = 1;
+        params.dstStride = 0;
+        params.srcStride = (512 + ropeDim * sizeof(K_ROPE_T)) / ConstInfo::BUFFER_SIZE_BYTE_32B;
+        LocalTensor<T> tmpAntiQuantScale = antiQuantScale[ConstInfo::BUFFER_SIZE_BYTE_1K];
+        DataCopy(tmpAntiQuantScale, oriQuantScaleTensor, params);
+        PipeBarrier<PIPE_V>();
+        Brcb(antiQuantScale, tmpAntiQuantScale, dealRow, {1, 4});
+    }
+    PipeBarrier<PIPE_V>();
+    uint32_t dealLoop = CeilDiv(dealRow, LIMIT_DEAL_ROW);
+    uint32_t dealRowFp32 = LIMIT_DEAL_ROW;
+    uint32_t element = LIMIT_DEAL_ROW * kvVecConstInfo.headDim;
+    LocalTensor<T> kvTensorAsFp32 = inputBuff2.template Get<T>();
+    LocalTensor<K_ROPE_T> antiKvTensorAsB16 = tmpBuff1.template Get<K_ROPE_T>();
+    if constexpr (QSFAT::noRope) {
+        antiKvTensorAsB16 = outputBuff1.template Get<K_ROPE_T>();
+    }
+    for (uint32_t i = 0; i < dealLoop; i++) {
+        if (i == dealLoop - 1) {
+            dealRowFp32 = dealRow - i * LIMIT_DEAL_ROW;
+        }
+        Cast(kvTensorAsFp32, kvTensorAsFp16[i * element], RoundMode::CAST_NONE,
+             static_cast<uint32_t>(dealRowFp32 * kvVecConstInfo.headDim));
+        PipeBarrier<PIPE_V>();
+        for (uint32_t j = 0; j < kvVecConstInfo.tileSize / FP32_REPEAT_ELEMENT_NUM; j++) {
+            Mul(kvTensorAsFp32[j * FP32_REPEAT_ELEMENT_NUM], kvTensorAsFp32[j * FP32_REPEAT_ELEMENT_NUM],
+                antiQuantScale[i * LIMIT_DEAL_ROW * 32], FP32_REPEAT_ELEMENT_NUM, 4 * dealRowFp32,
+                {1, 1, 0, 16, 16, 1});
+        }
+        PipeBarrier<PIPE_V>();
+        if constexpr (QSFAT::noRope) {
+            if (i == 0) {
+                // Preserve overlap until the first write into the ND output slot.
+                WaitFlag<HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
+            }
+        }
+        if constexpr (IsSameType<K_ROPE_T, bfloat16_t>::value) { // bf16 采取四舍六入五成双模式
+            Cast(antiKvTensorAsB16[i * element], kvTensorAsFp32, RoundMode::CAST_RINT,
+                 static_cast<uint32_t>(dealRowFp32 * kvVecConstInfo.headDim));
+        } else {
+            Cast(antiKvTensorAsB16[i * element], kvTensorAsFp32, RoundMode::CAST_ROUND,
+                 static_cast<uint32_t>(dealRowFp32 * kvVecConstInfo.headDim));
+        }
+        PipeBarrier<PIPE_V>();
+    }
+
+    if constexpr (QSFAT::noRope) {
+        SetFlag<HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
+        WaitFlag<HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
+        DataCopyExtParams ndParams;
+        ndParams.blockCount = 1;
+        ndParams.blockLen = dealRow * kvVecConstInfo.headDim * sizeof(K_ROPE_T);
+        ndParams.srcStride = 0;
+        ndParams.dstStride = 0;
+        DataCopyPad(kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                               (s2GmStartOffset + mte3Size) * kvVecConstInfo.headDim],
+                    antiKvTensorAsB16, ndParams);
+        SetFlag<HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
+        return;
+    }
+
+    LocalTensor<K_ROPE_T> antiKvTensorAsB16Nz = outputBuff1.template Get<K_ROPE_T>();
+    WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
+    int dataBlocks = REPEAT_BLOCK_BYTE / BYTE_BLOCK;
+    int loops = CeilDiv(dealRow, dataBlocks);
+    uint64_t tail = dealRow - (loops - 1) * dataBlocks;
+    uint64_t repeatElementNum = FP32_REPEAT_ELEMENT_NUM * 2;
+    uint64_t blockElementNum = FP32_BLOCK_ELEMENT_NUM * 2;
+    uint8_t repeatTimes = static_cast<uint8_t>(kvVecConstInfo.headDim / blockElementNum);
+    for (int i = 0; i < loops; i++) {
+        mask = (i == loops - 1) ? tail * blockElementNum : repeatElementNum;
+        Copy(antiKvTensorAsB16Nz[i * repeatElementNum], antiKvTensorAsB16[i * dataBlocks * kvVecConstInfo.headDim],
+             mask, repeatTimes, {1, 32, static_cast<uint16_t>(dealRow), 1});
+    }
+    SetFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
+    WaitFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
+    DataCopyExtParams dataCopyParams;
+    dataCopyParams.blockCount = kvVecConstInfo.headDim / blockElementNum;
+    dataCopyParams.blockLen = dealRow * blockElementNum * sizeof(K_ROPE_T);
+    dataCopyParams.srcStride = 0;
+    dataCopyParams.dstStride = (kvVecConstInfo.s2BaseSize - dealRow) * blockElementNum * sizeof(K_ROPE_T);
+    DataCopyPad(kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 +
+                           (s2GmStartOffset + mte3Size) * blockElementNum],
+                antiKvTensorAsB16Nz, dataCopyParams);
+    SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
+
+    WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
+    if constexpr (!QSFAT::noRope) {
+        LocalTensor<K_ROPE_T> kRopeUb = srcTensor[512].template ReinterpretCast<K_ROPE_T>();
+        LocalTensor<K_ROPE_T> kRopeUbNz = outputBuff2.template Get<K_ROPE_T>();
+        Copy(kRopeUbNz, kRopeUb, ropeDim, static_cast<uint8_t>(dealRow),
+             {static_cast<uint16_t>(dealRow), 1, 1, rowStrideBlk});
+        SetFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF2_FLAG);
+        WaitFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF2_FLAG);
+        dataCopyParams.blockCount = ropeDim / blockElementNum;
+        DataCopyPad(kvMergeGm_[kvVecRunInfo.loop % MERGE_CACHE_GM_BUF_NUM * 512 * 576 + 512 * 512 +
+                               (s2GmStartOffset + mte3Size) * blockElementNum],
+                    kRopeUbNz, dataCopyParams);
+    }
+    SetFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF2_FLAG);
 }
 
 #endif // KV_QUANT_SPARSE_FLASH_ATTENTION_SERVICE_VECTOR_MLA_H

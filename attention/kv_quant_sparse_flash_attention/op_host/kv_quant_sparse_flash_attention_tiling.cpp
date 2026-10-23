@@ -322,7 +322,8 @@ void QSFAMlaTiling::GenTilingKey()
 
     tilingKey_ =
         GET_TPL_TILING_KEY(0U, pageAttention, layoutQuery, layoutKV, perfMode_ == QSFAPerfMode::V_TEMPLATE_MODE,
-                           static_cast<uint32_t>(qsfaInfo_->gSize > 64), vectorizeFlag_); // G大于64时核间切G
+                           static_cast<uint32_t>(qsfaInfo_->gSize > 64), vectorizeFlag_,
+                           static_cast<uint32_t>(qsfaInfo_->ropeHeadDim == 0)); // G大于64时核间切G
     OP_LOGI(qsfaInfo_->opName, "QSFA tilingKey_: %lu.", tilingKey_);
 }
 
@@ -545,6 +546,17 @@ void QSFAMlaTiling::GetWorkspaceSize()
 
 void QSFAMlaTiling::CalcBlockDim()
 {
+    // Reduce idle launches on arch22 for both RoPE and no-RoPE paths.
+    if (qsfaInfo_->npuArch == NpuArch::DAV_2201) {
+        uint64_t taskNum = qsfaInfo_->s1Size;
+        if (qsfaInfo_->qLayout != QSFALayout::TND) {
+            taskNum = static_cast<uint64_t>(qsfaInfo_->bSize) * qsfaInfo_->s1Size;
+        }
+        if (taskNum > 0 && taskNum < usedCoreNum_) {
+            usedCoreNum_ = taskNum;
+            tilingData_.singleCoreParams.set_usedCoreNum(usedCoreNum_);
+        }
+    }
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(qsfaInfo_->platformInfo);
     auto aicNum = usedCoreNum_;
     auto aivNum = qsfaInfo_->isA6 ? usedCoreNum_ : (2 * usedCoreNum_);
@@ -1330,6 +1342,15 @@ ge::graphStatus QSFATilingCheck::CheckFeatureMlaAntiquantShapeSparseAndHeadDim()
                     return ge::GRAPH_FAILED);
     }
 
+    if (ropeHeadDim_ == 0) {
+        OP_CHECK_IF(qHeadDim_ != 512,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        opName_, "query", ToStringRaw(opParamInfo_.query.shape->GetStorageShape()).c_str(),
+                        "rope_head_dim=0 requires query dimension 512"),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
+
     OP_CHECK_IF(qHeadDim_ != 576, // 576:当前不泛化
                 OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
                     opName_, "query", ToStringRaw(opParamInfo_.query.shape->GetStorageShape()).c_str(),
@@ -1450,6 +1471,18 @@ ge::graphStatus QSFATilingCheck::CheckFeatureMlaAntiquantAttr() const
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "tile_size", std::to_string(tileSize_).c_str(),
                                                       "Tile_size should be 128"),
                 return ge::GRAPH_FAILED);
+
+    if (ropeHeadDim_ == 0) {
+        OP_CHECK_IF(npuArch_ != NpuArch::DAV_2201 || keyQuantMode_ != 2 || valueQuantMode_ != 2,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "rope_head_dim", "0",
+                                                          "rope_head_dim=0 supports arch22 INT8 per-tile only"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(kHeadDim_ != 528 || vHeadDim_ != 528,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "key/value slot dimension", "",
+                                                          "rope_head_dim=0 requires 528-byte key and value slots"),
+                    return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
+    }
 
     OP_CHECK_IF(ropeHeadDim_ != 64, // 64:当前不泛化
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "rope_head_dim", std::to_string(ropeHeadDim_).c_str(),
