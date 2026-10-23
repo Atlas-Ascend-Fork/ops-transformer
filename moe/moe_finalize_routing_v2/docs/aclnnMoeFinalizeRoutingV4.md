@@ -289,6 +289,7 @@ aclnnStatus aclnnMoeFinalizeRoutingV4(
   - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
     - expandedX要求是一个2D/3D的Tensor，支持的数据类型为FLOAT16、BFLOAT16、FLOAT32，支持drop less和drop pad场景。
     - scalesOptional：混合精度模式下，支持expandedX为BFLOAT16 时scalesOptional为FLOAT32；非混合精度模式下，数据类型要求与expandedX一致。
+    - xOptional、alpha1Optional、alpha2Optional、vOptional、zeroExpertRange、copyExpertRange、constantExpertRange仅支持传入nullptr。
   <!-- end id7 -->
   <!-- npu="950" id8 -->
   - <term>Ascend 950PR&950DT系列产品</term>：
@@ -299,9 +300,9 @@ aclnnStatus aclnnMoeFinalizeRoutingV4(
   - <term>Atlas推理系列产品</term>：
     - expandedX要求是一个2D的Tensor，数据类型支持FLOAT16、FLOAT32，shape要求尾轴H为32对齐。
     - x1Optional、x2Optional、biasOptional、expertIdxOptional仅支持传入nullptr
+    - xOptional、alpha1Optional、alpha2Optional、vOptional、zeroExpertRange、copyExpertRange、constantExpertRange仅支持传入nullptr
     - 仅支持dropPadMode传入2。
     - scalesOptional数据类型支持FLOAT16、FLOAT32，且需要与expandedX一致。
-
   <!-- end id9 -->
 
 - **返回值：**
@@ -411,7 +412,9 @@ aclnnStatus aclnnMoeFinalizeRoutingV4(
     - 2：drop less场景，expandedRowIdx按**行**排列（与[aclnnMoeInitRoutingV2](../../moe_init_routing_v2/docs/aclnnMoeInitRoutingV2.md)输出格式对应）。
     - 3：drop pad场景，expandedRowIdx按**行**排列（与[aclnnMoeInitRoutingV2](../../moe_init_routing_v2/docs/aclnnMoeInitRoutingV2.md)输出格式对应）。
 
-8. zeroExpertRange、copyExpertRange、constantExpertRange专家范围不能重叠。
+<!-- npu="950" id10 -->
+8. <term>Ascend 950PR&950DT系列产品</term>：支持零计算专家、拷贝专家、常量专家特性，xOptional、alpha1Optional、alpha2Optional、vOptional、zeroExpertRange、copyExpertRange、constantExpertRange支持传入非空值，zeroExpertRange、copyExpertRange、constantExpertRange专家范围不能重叠。
+<!-- end id10 -->
 
 ## 调用示例
 
