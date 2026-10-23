@@ -13,7 +13,7 @@
 
 ## 功能说明
 
-- 算子功能：完成量化的Matmul计算、Permute（保证通信后地址连续）和AlltoAll通信的融合，**先计算后通信**，支持非量化、K-C量化和mx[量化模式](../../docs/zh/context/quant_mode_introduction.md)。
+- 算子功能：完成量化的MatMul计算、Permute（保证通信后地址连续）和AlltoAll通信的融合，**先计算后通信**，支持非量化、K-C量化和mx[量化模式](../../docs/zh/context/quant_mode_introduction.md)。
 - 计算公式：假设x1的shape为(BS, H1)，x2的shape为(H1, H2)，rankSize为NPU卡数。
 
     - <term>Atlas A2系列产品</term>：
@@ -33,7 +33,7 @@
           output = AlltoAll(permutedOut).view(rankSize * BS, H2 / rankSize)
           $$
 
-    - <term>Atlas A3系列产品</term>  ：
+    - <term>Atlas A3系列产品</term>：
         - 非量化场景：
 
           $$
@@ -67,7 +67,7 @@
           output = AlltoAll(permutedOut).view(rankSize * BS, H2 / rankSize)
           $$
 
-## 参数说明​
+## 参数说明
 
  <table style="undefined;table-layout: fixed; width: 1576px"><colgroup>
   <col style="width: 170px">
@@ -102,7 +102,7 @@
     <tr>
     <td>bias</td>
     <td>可选输入</td>
-    <td>可选输入，阵乘运算后累加的偏置，对应公式中的bias。</td>
+    <td>可选输入，矩阵乘运算后累加的偏置，对应公式中的bias。</td>
     <td>FLOAT16、BFLOAT16、FLOAT32</td>
     <td>ND</td>
     </tr>
@@ -214,13 +214,13 @@
     <tr>
     <td>group_size</td>
     <td>可选属性</td>
-    <td>用于Matmul计算三个方向上的量化分组大小，仅在scale输入都是2维及以上数据时取值有效，其他场景默认传入0即可。</td>
+    <td>用于MatMul计算三个方向上的量化分组大小，仅在scale输入都是2维及以上数据时取值有效，其他场景默认传入0即可。</td>
     <td>INT</td>
     <td>-</td>
     </tr>
     </tbody></table>
 
-x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../docs/zh/context/quant_mode_introduction.md)关系如下:
+x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../docs/zh/context/quant_mode_introduction.md)关系如下：
 
 * 0: 不量化
 * 1: pertensor
@@ -236,7 +236,7 @@ x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../doc
 * 默认支持确定性计算。
 * NPU卡数(world_size)，根据设备型号有不同限制：
     - <term>Atlas A2系列产品</term>：支持2、4、8卡。
-    - <term>Atlas A3系列产品</term>  ：支持2、4、8、16卡。
+    - <term>Atlas A3系列产品</term>：支持2、4、8、16卡。
     - <term>Ascend 950PR&950DT系列产品</term>：支持2、4、8、16卡。
 * 空tensor和非连续tensor的支持度根据不同设备型号有不同的限制：
     - <term>Atlas A2系列产品</term>：不支持任何空tensor；不支持任何非连续tensor。
@@ -249,7 +249,7 @@ x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../doc
 * all2all_axes为1维数组，shape必须为(2)。
 * 目前支持的量化模式，根据设备型号有不同限制：
     - <term>Atlas A2系列产品</term>：支持K-C量化模式，x1QuantMode=3，x2QuantMode=2。
-    - <term>Atlas A3系列产品</term>  ：目前不支持量化场景。
+    - <term>Atlas A3系列产品</term>：目前不支持量化场景。
     - <term>Ascend 950PR&950DT系列产品</term>：支持K-C量化模式，x1QuantMode=3，x2QuantMode=2；mx量化模式，x1QuantMode=6，x2QuantMode=6。
 * 非量化场景x1、x2计算输入的数据类型要和output计算输出的数据类型一致，传入的x1、x2与output均不为空指针。
 * 量化场景传入的x1、x2、x1Scale、x2Scale与output均不为空指针，且
@@ -258,7 +258,7 @@ x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../doc
     - <term>Atlas A2系列产品</term>：
         - 非量化场景下，x1/x2计算输入的数据类型为FLOAT16时，bias计算输入的数据类型支持FLOAT16；x1/x2计算输入的数据类型为BFLOAT16时，bias计算输入的数据类型支持FLOAT32。
         - 量化场景下，支持K-C量化模式后加bias，x1、x2计算输入的数据类型必须为INT8；output计算输出的数据类型为BFLOAT16时，bias的数据类型为FLOAT32或BFLOAT16；output的数据类型为FLOAT16时，bias的数据类型为FLOAT16。
-    - <term>Atlas A3系列产品</term>  ：
+    - <term>Atlas A3系列产品</term>：
         - 非量化场景下，output计算输出的数据类型为FLOAT16时，bias计算输入的数据类型支持FLOAT16；output计算输出的数据类型为BFLOAT16时，bias计算输入的数据类型支持FLOAT32。
         - A3目前不支持量化场景。
     - <term>Ascend 950PR&950DT系列产品</term>：
@@ -269,8 +269,8 @@ x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../doc
 * 不支持跨超节点通信，只支持超节点内。
 * 通信引擎约束：
    - <term>Atlas A2系列产品</term>：支持MTE通信。
-   - <term>Atlas A3系列产品</term>：支持AI_CPU通信。
-   - <term>Ascend 950PR&950DT系列产品</term>：支持CCU通信和AI_CPU通信，CCU仅支持单机UB域内互联，AI_CPU可支持跨机UB域内互联。
+   - <term>Atlas A3系列产品</term>：支持AI CPU通信。
+   - <term>Ascend 950PR&950DT系列产品</term>：支持CCU通信和AI CPU通信，CCU仅支持单机UB域内互联，AI CPU可支持跨机UB域内互联。
 
 ## 调用说明
 

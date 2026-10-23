@@ -23,7 +23,7 @@
 
 ## 功能说明
 
-- 接口功能：完成Matmul计算、Permute（保证通信后地址连续）和AlltoAll通信的融合，**先计算后通信**。
+- 接口功能：完成MatMul计算、Permute（保证通信后地址连续）和AlltoAll通信的融合，**先计算后通信**。
 - 计算公式：假设x1的shape为(BS, H1)，x2的shape为(H1, H2)，rankSize为NPU卡数。
 
   $$
@@ -60,7 +60,7 @@ aclnnStatus aclnnMatmulAlltoAll(
 
 ## aclnnMatmulAlltoAllGetWorkspaceSize
 
-- ​**参数说明**​：
+* **参数说明：**
 
     <table style="undefined;table-layout: fixed; width: 1556px"> <colgroup>
     <col style="width: 154px">
@@ -107,7 +107,7 @@ aclnnStatus aclnnMatmulAlltoAll(
     <tr>
     <td>biasOptional</td>
     <td>输入</td>
-    <td>阵乘运算后累加的偏置，对应公式中的bias。</td>
+    <td>矩阵乘运算后累加的偏置，对应公式中的bias。</td>
     <td>支持传入空指针场景；根据设备型号对数据类型有不同限制，详细参见<a href="#约束说明">约束说明</a>。</td>
     <td>FLOAT16、BFLOAT16、FLOAT32</td>
     <td>ND</td>
@@ -340,7 +340,7 @@ aclnnStatus aclnnMatmulAlltoAll(
   - <term>Atlas A2系列产品</term>：output计算输出的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16；output计算输出的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持FLOAT32。
   <!-- end id19 -->
   <!-- npu="A3" id20 -->
-  - <term>Atlas A3系列产品</term>  ：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持FLOAT32。
+  - <term>Atlas A3系列产品</term>：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持FLOAT32。
   <!-- end id20 -->
   <!-- npu="950" id21 -->
   - <term>Ascend 950PR&950DT系列产品</term>：x1/x2计算输入的数据类型为FLOAT16时，biasOptional计算输入的数据类型支持FLOAT16和FLOAT32；x1/x2计算输入的数据类型为BFLOAT16时，biasOptional计算输入的数据类型支持BFLOAT16和FLOAT32。

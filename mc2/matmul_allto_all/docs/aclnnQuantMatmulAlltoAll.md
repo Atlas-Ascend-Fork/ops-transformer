@@ -23,7 +23,7 @@
 
 ## 功能说明
 
-- 接口功能：完成量化的Matmul计算、Permute（保证通信后地址连续）和AlltoAll通信的融合，**先计算后通信**，支持K-C量化、mx[量化模式](../../../docs/zh/context/quant_mode_introduction.md)。
+- 接口功能：完成量化的MatMul计算、Permute（保证通信后地址连续）和AlltoAll通信的融合，**先计算后通信**，支持K-C量化、mx[量化模式](../../../docs/zh/context/quant_mode_introduction.md)。
 - 计算公式：假设x1的shape为(BS, H1)，x2的shape为(H1, H2)，rankSize为NPU卡数。
 
   <!-- npu="910b" id7 -->
@@ -97,7 +97,7 @@ aclnnStatus aclnnQuantMatmulAlltoAll(
 
 ## aclnnQuantMatmulAlltoAllGetWorkspaceSize
 
-- ​**参数说明**​：
+* **参数说明：**
 
     <table style="undefined;table-layout: fixed; width: 1556px"> <colgroup>
     <col style="width: 154px">
@@ -144,7 +144,7 @@ aclnnStatus aclnnQuantMatmulAlltoAll(
     <tr>
     <td>biasOptional</td>
     <td>输入</td>
-    <td>阵乘运算后累加的偏置，对应公式中的bias。</td>
+    <td>矩阵乘运算后累加的偏置，对应公式中的bias。</td>
     <td>根据设备型号对数据类型有不同限制，详细参见<a href="#约束说明">约束说明</a>。</td>
     <td>FLOAT16、BFLOAT16、FLOAT32</td>
     <td>ND</td>
@@ -264,7 +264,7 @@ aclnnStatus aclnnQuantMatmulAlltoAll(
     <tr>
     <td>groupSize</td>
     <td>输入</td>
-    <td>用于Matmul计算三个方向上的量化分组大小，由3个方向的groupSizeM，groupSizeN，groupSizeK三个值拼接组成，每个值占16位，共占用int64_t类型groupSize的低48位（groupSize中的高16位的数值无效）。</td>
+    <td>用于MatMul计算三个方向上的量化分组大小，由3个方向的groupSizeM，groupSizeN，groupSizeK三个值拼接组成，每个值占16位，共占用int64_t类型groupSize的低48位（groupSize中的高16位的数值无效）。</td>
     <td><ul><li>mx量化场景下仅支持[groupSizeM, groupSizeN, groupSizeK] = [1, 1, 32]，对应的groupSize具体取值详细参见<a href="#约束说明">约束说明</a>。其余量化场景默认配置为0，取值不生效。</li><li>支持参数自动推导，当根据计算公式分解的groupSizeM，groupSizeN，groupSizeK任一或多个参数为0时，算子自动推导这些参数值，具体规则详细参见<a href="#约束说明">约束说明</a></li></ul></td>
     <td>-</td>
     <td>-</td>
@@ -323,7 +323,7 @@ aclnnStatus aclnnQuantMatmulAlltoAll(
     </tr>
     </tbody></table>
 
-  x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../../docs/zh/context/quant_mode_introduction.md)关系如下:
+  x1QuantMode、x2QuantMode、commQuantMode的枚举值与[量化模式](../../../docs/zh/context/quant_mode_introduction.md)关系如下：
   * 0: 不量化
   * 1: pertensor
   * 2: perchannel
