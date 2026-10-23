@@ -24,6 +24,7 @@ import argparse
 import logging
 import math
 import os
+import sys
 
 import numpy as np
 import torch
@@ -103,6 +104,9 @@ BLOCK_SIZE = 128
 MASK_MODE = 0
 SCALE_VALUE = None
 IS_CONTIGUOUS = True
+# 是否按 metadata 分核分段做 golden(复刻 kernel 每段独立 P 量化)。默认关闭:
+# 不传该参数时 golden 走全局量化语义, 需显式开启才复现 kernel 的分段 P 量化。
+ENABLE_SECTION_GOLDEN = False
 
 # Q scale layout 由 INPUT_LAYOUT 自动推导, 不再暴露独立的 Q_SCALE_LAYOUT 字段
 _Q_SCALE_LAYOUT_MAP = {
@@ -599,8 +603,10 @@ def get_qfmla_section_info(seqused_q, cache_seqlens):
     """调用 metadata 算子并解码 FA 分核分段信息, 返回 (m_base, s2_base, segments)
 
     segments[bn] = [ [(s2块起, s2块止), ...] 每个 m-block 的分段列表 ]
-    解码失败时返回 None, golden 退化为全局量化语义。
+    解码失败或未开启 ENABLE_SECTION_GOLDEN 时返回 None, golden 退化为全局量化语义。
     """
+    if not ENABLE_SECTION_GOLDEN:
+        return None
     key = (
         tuple(int(s) for s in seqused_q),
         tuple(int(s) for s in cache_seqlens),
@@ -616,7 +622,50 @@ def get_qfmla_section_info(seqused_q, cache_seqlens):
     return info
 
 
+def _cpu_section_info(seqused_q, cache_seqlens):
+    """metadata 算子不可用时, 用纯 CPU 规划器复刻其 (m_base, s2_base, segments) 分段。
+
+    分段语义直接决定 P 量化用的 running max: kernel 每段独立取 max 后按 FD 语义
+    重标定合并, 与全局 running max 的 P 量化实现不同(数学等价, 但 fp8 舍入不同),
+    因此 golden 必须复现真实分段才能与 NPU 对齐。
+    """
+    common_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "pytest", "common")
+    )
+    if common_dir not in sys.path:
+        sys.path.insert(0, common_dir)
+    import qfmla_section_plan_cpu as plan_cpu
+
+    seq_used = [int(v) for v in seqused_q]
+    cache_len = [int(v) for v in cache_seqlens]
+    m_base, s2_base, chunks = plan_cpu.plan_sections(
+        seq_used,
+        cache_len,
+        N_q,
+        N_kv,
+        mask_mode=MASK_MODE,
+        layout=INPUT_LAYOUT,
+        fd_on=True,
+        qk_dim=QFMLA_QK_HEAD_DIM,
+        v_dim=QFMLA_V_HEAD_DIM,
+    )
+    return plan_cpu.decode_sections(
+        chunks, seq_used, cache_len, N_q, N_kv, m_base, s2_base
+    )
+
+
 def _build_qfmla_section_info(seqused_q, cache_seqlens):
+    section_info = _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens)
+    if section_info is not None:
+        return section_info
+    try:
+        return _cpu_section_info(seqused_q, cache_seqlens)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("[Section] CPU 分段规划失败(%s), golden 使用全局量化语义", exc)
+        return None
+
+
+def _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens):
     if quant_flash_mla_metadata is None:
         logger.warning("[Section] metadata 算子不可用, golden 使用全局量化语义")
         return None
@@ -1088,6 +1137,186 @@ def cpu_fp8_fullquant_mla_golden(*args, **kwargs):
     """Backward-compatible CPU reference entry point."""
     kwargs["golden_device"] = "cpu"
     return fp8_fullquant_mla_golden(*args, **kwargs)
+
+
+_SECTION_M_BASE = 64
+_SECTION_S2_BASE = 256
+
+
+def _fixed_block_section_info(seqused_q, cache_seqlens):
+    """按 s2 基本块(256 列)固定切段, 与 kernel 分核分段解耦
+
+    kernel 的一个段是若干连续基本块在分核后的并集, 所以按单块切段的分段粒度
+    最细、段数最多; 作为三方 third_party 时其量化噪声只会不小于 target, 判据
+    不会因参考过干净而虚高。返回 (m_base, s2_base, segments), segments[bn][mi]
+    为该 m-block 的 [(s2块起, s2块止), ...] 分段列表。
+    """
+    group = N_q // N_kv
+    segments = []
+    for b, kv_len in enumerate(cache_seqlens):
+        s2_blocks = (int(kv_len) + _SECTION_S2_BASE - 1) // _SECTION_S2_BASE
+        m_blocks = (int(seqused_q[b]) * group + _SECTION_M_BASE - 1) // _SECTION_M_BASE
+        row_segments = [[(j, j + 1) for j in range(s2_blocks)] for _ in range(m_blocks)]
+        for _ in range(N_kv):
+            segments.append([list(segs) for segs in row_segments])
+    return _SECTION_M_BASE, _SECTION_S2_BASE, segments
+
+
+def fp8_fullquant_mla_sectioned_golden(
+    q_fp8,
+    k_fp8,
+    v_fp8,
+    deq_q,
+    deq_k,
+    deq_v,
+    seqused_q,
+    cache_seqlens,
+    *,
+    golden_device="cpu",
+):
+    """分段量化 golden, 仅供三方 cross_check 作为 third_party 使用。
+
+    两方 golden 固定走全局量化语义(fp8_fullquant_mla_golden); 本函数复刻 kernel
+    每个 s2 分段独立 running max + P 量化的行为, 使 third_party 的噪声水平与
+    target 可比。分段固定按 s2 基本块(256 列)切, 不依赖 metadata 分核规划。
+    """
+    device = torch.device(golden_device)
+    q_tensor = q_fp8.to(device=device, dtype=torch.float32).contiguous()
+    k_tensor = k_fp8.to(device=device, dtype=torch.float32).contiguous()
+    v_tensor = v_fp8.to(device=device, dtype=torch.float32).contiguous()
+    deq_q = deq_q.to(device=device, dtype=torch.float32).contiguous()
+    deq_k = deq_k.to(device=device, dtype=torch.float32).contiguous()
+    deq_v = deq_v.to(device=device, dtype=torch.float32).contiguous()
+
+    section_info = _fixed_block_section_info(seqused_q, cache_seqlens)
+    return _fp8_fullquant_mla_golden_sectioned(
+        q_tensor,
+        k_tensor,
+        v_tensor,
+        deq_q,
+        deq_k,
+        deq_v,
+        seqused_q,
+        cache_seqlens,
+        section_info,
+    )
+
+
+def fp8_fullquant_mla_bench(
+    q_fp8,
+    k_fp8,
+    v_fp8,
+    deq_q,
+    deq_k,
+    deq_v,
+    seqused_q,
+    cache_seqlens,
+    golden_device="cpu",
+):
+    """三方比对的 bench(标杆): 同语义、更高算术精度的参考实现。
+
+    与 golden 的差异:
+      - 全程 float64 累加/softmax, 排除归约顺序与 fp32 舍入噪声
+      - running max 跨整个 KV 单调累积, 不复现 metadata 分核分段
+        (分段只影响 running max 的取法, 属舍入级差异)
+      - 输入只做反量化(乘 deq), 不重新量化; P 的固定 scale 量化
+        (FP8 乘 448) 是算子语义, 必须保留
+    """
+    softmax_scale = get_softmax_scale(SCALE_VALUE, D)
+    device = torch.device(golden_device)
+
+    # 输入解码: FP8 升 float32; deq 在 float64 下应用
+    q_t = q_fp8.to(device=device, dtype=torch.float32)
+    k_t = k_fp8.to(device=device, dtype=torch.float32)
+    v_t = v_fp8.to(device=device, dtype=torch.float32)
+
+    deq_q = deq_q.to(device=device, dtype=torch.float64)
+    deq_k = deq_k.to(device=device, dtype=torch.float64)
+    deq_v = deq_v.to(device=device, dtype=torch.float64)
+    deq_k_scalar = deq_k.reshape(-1)[0] if deq_k.numel() == 1 else deq_k
+    deq_v_scalar = deq_v.reshape(-1)[0] if deq_v.numel() == 1 else deq_v
+
+    batch, heads, q_seq, _ = q_t.shape
+    v_dim = v_t.shape[-1]
+
+    # 空 KV 场景
+    if k_t.shape[2] == 0:
+        result = torch.zeros(
+            (batch, heads, q_seq, v_dim), dtype=torch.float32, device=device
+        )
+        lse = torch.full(
+            (batch, heads, q_seq, 1), float("inf"), dtype=torch.float32, device=device
+        )
+        return result, lse
+
+    # Q 反量化(per-token-head) + softmax_scale 预乘, 之后每个 KV 块只乘 deq_k
+    q64 = q_t.double() * deq_q
+    q64 = q64 * softmax_scale
+
+    Sq, Skv = q_seq, k_t.shape[2]
+    q_lens = torch.tensor(seqused_q, dtype=torch.int64, device=device).view(-1, 1, 1, 1)
+    k_lens = torch.tensor(cache_seqlens, dtype=torch.int64, device=device).view(
+        -1, 1, 1, 1
+    )
+    q_range = torch.arange(Sq, device=device).view(1, 1, -1, 1)
+    k_range = torch.arange(Skv, device=device).view(1, 1, 1, -1)
+    mask = (q_range >= q_lens) | (k_range >= k_lens)
+    if MASK_MODE == 3:
+        mask = mask | (k_range > (q_range + (k_lens - q_lens)))
+
+    out = torch.zeros((batch, heads, Sq, v_dim), dtype=torch.float64, device=device)
+    o_sum = torch.zeros((batch, heads, Sq, 1), dtype=torch.float64, device=device)
+    o_max = torch.full(
+        (batch, heads, Sq, 1), float("-inf"), dtype=torch.float64, device=device
+    )
+
+    n_kv = max(int(N_kv), 1)
+    group = max(heads // n_kv, 1)
+    fp8_e4m3_max = 448.0
+
+    for j in range(0, Skv, KV_BLOCK_SIZE):
+        jend = min(j + KV_BLOCK_SIZE, Skv)
+        kj_all = k_t[:, :, j:jend, :].double() * deq_k_scalar
+        vj_all = v_t[:, :, j:jend, :].double()
+        mask_j = mask[:, :, :, j:jend]
+
+        for kv in range(n_kv):
+            h0 = kv * group
+            h1 = min((kv + 1) * group, heads)
+            if h0 >= h1:
+                continue
+            # 用 matmul 广播代替 repeat_interleave, 避免按 head 复制 KV
+            sij = torch.matmul(q64[:, h0:h1], kj_all[:, kv : kv + 1].transpose(-1, -2))
+            sij = sij.masked_fill(mask_j, float("-inf"))
+
+            m_old = o_max[:, h0:h1]
+            m_new = torch.maximum(m_old, torch.amax(sij, dim=-1, keepdim=True))
+            upd = torch.exp(m_old - m_new)
+            # 整行被 mask 时 -inf - -inf = nan, 该行贡献置 0
+            upd = torch.where(torch.isnan(upd), torch.zeros_like(upd), upd)
+
+            pij = torch.exp(sij - m_new)
+            pij = torch.where(torch.isneginf(sij), torch.zeros_like(pij), pij)
+            s_blk = pij.sum(dim=-1, keepdim=True)
+
+            # P 量化是算子语义(固定 scale), 保留; 其余算术保持 float64
+            p_cast = (pij * fp8_e4m3_max).float().to(FP8_DTYPE).double()
+
+            bmm2 = torch.matmul(p_cast, vj_all[:, kv : kv + 1])
+            out[:, h0:h1] = out[:, h0:h1] * upd + bmm2
+            o_sum[:, h0:h1] = o_sum[:, h0:h1] * upd + s_blk
+            o_max[:, h0:h1] = m_new
+
+    result = out / (o_sum + EPSILON) / fp8_e4m3_max * deq_v_scalar
+
+    all_masked = o_max <= float("-inf")
+    lse = torch.where(
+        all_masked,
+        torch.full_like(o_max, float("inf")),
+        o_max + torch.log(o_sum + EPSILON),
+    )
+    result = torch.where(all_masked, torch.zeros_like(result), result)
+    return result.float().contiguous(), lse.float().contiguous()
 
 
 # ==============================================================================

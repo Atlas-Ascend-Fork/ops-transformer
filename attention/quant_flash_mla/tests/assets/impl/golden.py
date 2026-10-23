@@ -242,6 +242,9 @@ def _set_golden_globals(
     golden_mod.SCALE_VALUE = softmax_scale
     golden_mod.MAX_SEQLEN_Q = max_seqlen_q
     golden_mod.MAX_SEQLEN_KV = max_seqlen_kv
+    # 可选开关: 是否按 metadata 分核分段做 golden; 未提供时用 golden 模块默认值
+    if "enable_section_golden" in kwargs:
+        golden_mod.ENABLE_SECTION_GOLDEN = bool(kwargs["enable_section_golden"])
 
     # csv precision_tolerances / absolute_precision 暂存到 golden_mod 供 compare
     # 读取 (对齐 QFA golden.py 风格: ttk 框架不把 testcase 对象直接传给 custom
@@ -276,7 +279,208 @@ def _set_golden_globals(
     }
 
 
-def cpu_qfmla_mxfp8(
+def _bench_enabled():
+    """是否生成三方 bench: 仅 CLI 显式 --compare cross_check 时生成。
+
+    默认(未指定 --compare)不生成, 避免两方回归白跑一遍 fp64 bench。
+    """
+    try:
+        from ttk.switches import get_global_storage
+    except Exception:
+        try:
+            from ttk.utilities.container_utils import get_global_storage
+        except Exception:
+            return False
+    try:
+        method = getattr(get_global_storage(), "compare_method", None)
+    except Exception:  # pylint: disable=broad-except
+        return False
+    return method is not None and str(method).lower() == "cross_check"
+
+
+_BENCH_CACHE = {}
+_LAST_BENCH = None
+# 三方 third_party 专用: 分段量化参考 (复刻 kernel 每 s2 分段独立 P 量化)
+_REF_CACHE = {}
+
+
+def peek_bench(testcase_name=None):
+    """取当前用例的 bench 输出; 未生成时返回 None。"""
+    if testcase_name is not None:
+        return _BENCH_CACHE.get(str(testcase_name))
+    return _LAST_BENCH
+
+
+def peek_sectioned_ref(testcase_name=None):
+    """取当前用例的分段量化参考; 未生成时返回 None。"""
+    return _REF_CACHE.get(str(testcase_name))
+
+
+def _convert_tnd_full_rows(bnsd, seqused, cu_values, total_t, to_ntd=False):
+    """TND/NTD输出按算子语义转换: T=全量T(q行数), 每批按cu偏移定位,
+    有效行=seqused[b], 无效行attn补0/lse补inf (NPU实测: 无效行attn=0, lse=inf)。
+    bnsd: attn为(B,N,S,Dv) / lse为(B,N,S,1)"""
+    is_lse = bnsd.dim() == 4 and bnsd.shape[-1] == 1
+    fill_val = float("inf") if is_lse else 0.0
+    if to_ntd:
+        out = torch.full(
+            (bnsd.shape[1], total_t, bnsd.shape[3]), fill_val, dtype=bnsd.dtype
+        )
+    else:
+        out = torch.full(
+            (total_t, bnsd.shape[1], bnsd.shape[3]), fill_val, dtype=bnsd.dtype
+        )
+    for b in range(bnsd.shape[0]):
+        act_s = int(seqused[b])
+        if act_s <= 0:
+            continue
+        start = int(cu_values[b])
+        valid = bnsd[b, :, :act_s, :]  # (N, act_s, D)
+        if to_ntd:
+            out[:, start : start + act_s, :] = valid
+        else:
+            out[start : start + act_s, :, :] = valid.permute(1, 0, 2)
+    return out.contiguous()
+
+
+def _convert_outputs(
+    result_bnsd,
+    lse_bnsd,
+    q,
+    cfg,
+    kwargs,
+    golden_seqused,
+    return_softmax_lse,
+    layout_q,
+    to_bf16=True,
+):
+    """BNSD 结果转换到算子输出布局(golden 与 bench 共用)。
+
+    layout_q 是算子实际收到的 q 布局参数(决定输出是否全量 T), 与
+    input_layout 属性可能不同, 必须按 layout_q 判断。
+    to_bf16=True 用于 golden(对齐算子 bf16 输出); bench 保持 float32 以保留精度。
+    """
+    output_layout = cfg["output_layout"]
+    cu_values = kwargs.get("cu_seqlens_q_values")
+
+    if output_layout in ("TND", "NTD") and layout_q == "TND" and cu_values:
+        # 算子TND输出语义: 全量T(cu偏移定位), 部分seqused时无效行补0/inf
+        result_final = _convert_tnd_full_rows(
+            result_bnsd,
+            golden_seqused,
+            cu_values,
+            int(q.shape[0]),
+            to_ntd=(output_layout == "NTD"),
+        )
+    else:
+        result_final = golden_mod.convert_q_bnsd_to_layout(
+            result_bnsd, golden_seqused, output_layout
+        )
+
+    lse_final = None
+    if return_softmax_lse and lse_bnsd is not None:
+        if layout_q == "TND" and cu_values:
+            # TND输入: lse输出(N,T)全量T, 无效行补inf (与算子一致)
+            lse_final = _convert_tnd_full_rows(
+                lse_bnsd,
+                golden_seqused,
+                cu_values,
+                int(q.shape[0]),
+                to_ntd=True,
+            )
+            lse_final = lse_final.squeeze(-1)
+        else:
+            lse_layout = "BNSD" if output_layout in ("BSND", "BNSD") else output_layout
+            lse_final = golden_mod.convert_q_bnsd_to_layout(
+                lse_bnsd, golden_seqused, lse_layout
+            )
+            if output_layout == "TND":
+                # (T, N, 1) → (N, T)
+                lse_final = lse_final.permute(1, 0, 2).squeeze(-1).contiguous()
+            else:
+                # squeeze last dim: (B, N, S, 1) → (B, N, S)
+                lse_final = lse_final.squeeze(-1).contiguous()
+
+    if to_bf16:
+        result_final = result_final.to(torch.bfloat16)
+    return result_final, lse_final
+
+
+def _cache_bench(
+    testcase_name, cfg, kwargs, q, golden_seqused, return_softmax_lse, layout_q, tensors
+):
+    """生成并缓存当前用例的 fp64 bench, 供 compare 侧三方比对读取。"""
+    global _LAST_BENCH
+    name = str(testcase_name)
+    _BENCH_CACHE.pop(name, None)
+    _LAST_BENCH = None
+    if not _bench_enabled():
+        return
+    q_fp8, k_fp8, v_fp8, deq_q, deq_k, deq_v = tensors
+    bench_bnsd, bench_lse_bnsd = golden_mod.fp8_fullquant_mla_bench(
+        q_fp8,
+        k_fp8,
+        v_fp8,
+        deq_q,
+        deq_k,
+        deq_v,
+        golden_seqused,
+        list(cfg["cache_seqlens_vals"]),
+    )
+    bench_result, bench_lse = _convert_outputs(
+        bench_bnsd,
+        bench_lse_bnsd,
+        q,
+        cfg,
+        kwargs,
+        golden_seqused,
+        return_softmax_lse,
+        layout_q,
+        to_bf16=False,
+    )
+    _LAST_BENCH = [bench_result, bench_lse]
+    _BENCH_CACHE[name] = _LAST_BENCH
+
+    # 三方 third_party: 单独算一份分段量化参考, 使参考噪声水平与 kernel 可比;
+    # 两方 golden 保持全局量化语义不受影响。
+    _REF_CACHE.pop(name, None)
+    try:
+        ref = golden_mod.fp8_fullquant_mla_sectioned_golden(
+            q_fp8,
+            k_fp8,
+            v_fp8,
+            deq_q,
+            deq_k,
+            deq_v,
+            golden_seqused,
+            list(cfg["cache_seqlens_vals"]),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("[%s] sectioned reference failed: %s", name, exc)
+        ref = None
+    if ref is not None:
+        ref_result, ref_lse = _convert_outputs(
+            ref[0],
+            ref[1],
+            q,
+            cfg,
+            kwargs,
+            golden_seqused,
+            return_softmax_lse,
+            layout_q,
+            to_bf16=True,
+        )
+        _REF_CACHE[name] = [ref_result, ref_lse]
+        logger.info("[%s] sectioned ref: result=%s", name, tuple(ref_result.shape))
+    logger.info(
+        "[%s] bench(fp64): result=%s lse=%s",
+        name,
+        tuple(bench_result.shape),
+        None if bench_lse is None else tuple(bench_lse.shape),
+    )
+
+
+def cpu_qfmla(
     q,
     k_cache,
     q_descale,
@@ -370,79 +574,36 @@ def cpu_qfmla_mxfp8(
         tuple(lse_bnsd.shape) if lse_bnsd is not None else None,
     )
 
-    # ---- 4. Convert output to target layout ----
-    output_layout = cfg["output_layout"]
-
-    def _convert_tnd_full_rows(bnsd, seqused, cu_values, to_ntd=False):
-        """TND/NTD输出按算子语义转换: T=全量T(q行数), 每批按cu偏移定位,
-        有效行=seqused[b], 无效行attn补0/lse补inf (NPU实测: 无效行attn=0, lse=inf)。
-        bnsd: attn为(B,N,S,Dv) / lse为(B,N,S,1)"""
-        is_lse = bnsd.dim() == 4 and bnsd.shape[-1] == 1
-        T = int(q.shape[0])
-        fill_val = float("inf") if is_lse else 0.0
-        if to_ntd:
-            out = torch.full(
-                (bnsd.shape[1], T, bnsd.shape[3]), fill_val, dtype=bnsd.dtype
-            )
-        else:
-            out = torch.full(
-                (T, bnsd.shape[1], bnsd.shape[3]), fill_val, dtype=bnsd.dtype
-            )
-        for b in range(bnsd.shape[0]):
-            act_s = int(seqused[b])
-            if act_s <= 0:
-                continue
-            start = int(cu_values[b])
-            valid = bnsd[b, :, :act_s, :]  # (N, act_s, D)
-            if to_ntd:
-                out[:, start : start + act_s, :] = valid
-            else:
-                out[start : start + act_s, :, :] = valid.permute(1, 0, 2)
-        return out.contiguous()
-
-    cu_values = kwargs.get("cu_seqlens_q_values")
-    if output_layout in ("TND", "NTD") and layout_q == "TND" and cu_values:
-        # 算子TND输出语义: 全量T(cu偏移定位), 部分seqused时无效行补0/inf
-        result_final = _convert_tnd_full_rows(
-            result_bnsd,
-            cfg["seqused_q_vals"],
-            cu_values,
-            to_ntd=(output_layout == "NTD"),
-        )
-    else:
-        result_final = golden_mod.convert_q_bnsd_to_layout(
-            result_bnsd, cfg["seqused_q_vals"], output_layout
-        )
-
-    # ---- 5. Convert lse if needed ----
-    lse_final = None
-    if return_softmax_lse and lse_bnsd is not None:
-        if layout_q == "TND" and cu_values:
-            # TND输入: lse输出(N,T)全量T, 无效行补inf (与算子一致)
-            lse_final = _convert_tnd_full_rows(
-                lse_bnsd, cfg["seqused_q_vals"], cu_values, to_ntd=True
-            )
-            lse_final = lse_final.squeeze(-1)
-        else:
-            lse_layout = "BNSD" if output_layout in ("BSND", "BNSD") else output_layout
-            lse_final = golden_mod.convert_q_bnsd_to_layout(
-                lse_bnsd, cfg["seqused_q_vals"], lse_layout
-            )
-            if output_layout == "TND":
-                # (T, N, 1) → (N, T)
-                lse_final = lse_final.permute(1, 0, 2).squeeze(-1).contiguous()
-            else:
-                # squeeze last dim: (B, N, S, 1) → (B, N, S)
-                lse_final = lse_final.squeeze(-1).contiguous()
-
-    # Convert result to bfloat16 to match op output dtype
-    result_final = result_final.to(torch.bfloat16)
+    # ---- 4. Convert output to target layout (golden 与 bench 共用) ----
+    result_final, lse_final = _convert_outputs(
+        result_bnsd,
+        lse_bnsd,
+        q,
+        cfg,
+        kwargs,
+        cfg["seqused_q_vals"],
+        return_softmax_lse,
+        layout_q,
+        to_bf16=True,
+    )
 
     logger.info(
         "[%s] golden: final result=%s lse=%s",
         testcase_name,
         tuple(result_final.shape),
         tuple(lse_final.shape) if lse_final is not None else None,
+    )
+
+    # ---- 5. Cache fp64 bench for three-way (cross_check) comparison ----
+    _cache_bench(
+        testcase_name,
+        cfg,
+        kwargs,
+        q,
+        cfg["seqused_q_vals"],
+        return_softmax_lse,
+        layout_q,
+        (q_fp8, k_fp8, v_fp8, deq_q, deq_k, deq_v),
     )
 
     return result_final, lse_final

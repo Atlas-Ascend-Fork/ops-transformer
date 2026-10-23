@@ -30,6 +30,28 @@ if _GOLDEN_DIR not in sys.path:
     sys.path.insert(0, _GOLDEN_DIR)
 import qfmla_golden as golden_mod
 
+try:
+    from ttk.utilities.container_utils import get_global_storage
+except Exception:
+    try:
+        from ttk.switches import get_global_storage
+    except Exception:
+        get_global_storage = None
+
+try:
+    from ttk.core_modules.common.comparison.cross_check import CrossCheckComparison
+    from ttk.core_modules.common.comparison.resolve import resolve_tolerance
+
+    _CROSS_CHECK_AVAILABLE = True
+except Exception:
+    try:
+        from ttk.core_modules.comparison.cross_check import CrossCheckComparison
+        from ttk.core_modules.comparison.resolve import resolve_tolerance
+
+        _CROSS_CHECK_AVAILABLE = True
+    except Exception:
+        _CROSS_CHECK_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 _EPS = 1e-10
@@ -173,13 +195,168 @@ def check_result(
     return result, fulfill_percent, max_error
 
 
+# 三方 cross_check 判据(参考 flash_mla assets/impl/cross_check.py):
+# NPU 对 bench(fp64 标杆) 的误差以 golden 对 bench 的误差为基准做比值判定,
+# L0 = mare/mere/rmse 10/2/2 倍。仅在 --compare cross_check 时启用。
+CROSS_CHECK_TOLERANCE = {
+    dtype: {
+        "standard": "cross_check",
+        "level": "L0",
+        "mare_ratio": 10.0,
+        "mere_ratio": 2.0,
+        "rmse_ratio": 2.0,
+        "small_value": small_value,
+        "small_value_atol": small_value_atol,
+    }
+    for dtype, small_value, small_value_atol in (
+        ("float16", 2**-10, 2**-16),
+        ("bfloat16", 2**-10, 2**-16),
+        ("float32", 2**-14, 2**-30),
+    )
+}
+
+
+def is_cross_check_available():
+    return _CROSS_CHECK_AVAILABLE
+
+
+def cross_check_enabled():
+    """三方开关: 仅 CLI 显式 --compare cross_check 时开启, 默认走两方比较。"""
+    if not _CROSS_CHECK_AVAILABLE or get_global_storage is None:
+        return False
+    try:
+        method = getattr(get_global_storage(), "compare_method", None)
+    except Exception:  # pylint: disable=broad-except
+        return False
+    return method is not None and str(method).lower() == "cross_check"
+
+
+def _as_numpy(value):
+    """转 numpy 供 ttk CrossCheckComparison 使用(bf16 先升 fp32 以兼容 torch)."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().to(torch.float32).numpy()
+    return np.asarray(value)
+
+
+def _dtype_key(value):
+    if isinstance(value, torch.Tensor):
+        return str(value.dtype).removeprefix("torch.")
+    return str(np.asarray(value).dtype)
+
+
+def _is_empty_output(value):
+    if value is None:
+        return True
+    if hasattr(value, "numel"):
+        return int(value.numel()) == 0
+    return getattr(value, "size", 0) == 0
+
+
+def _resolve_cross_check_params(spec_tolerance, dtype_str):
+    standards = resolve_tolerance(
+        spec_tolerance, None, None, [dtype_str], "cross_check"
+    )
+    return standards[0].params
+
+
+def _run_cross_check(outputs, bench_outputs, spec_tolerance, third_party_outputs=None):
+    """三方比对: NPU 对 bench 的误差, 以 golden 对 bench 的误差为判据基准。"""
+    if len(outputs) < 2 or len(outputs) % 2 != 0:
+        return {
+            "pass": False,
+            "precision": "invalid",
+            "error_info": "cross_check expects NPU outputs followed by golden outputs",
+        }
+    half = len(outputs) // 2
+    results = []
+    for idx, (npu_out, golden_out) in enumerate(zip(outputs[:half], outputs[half:])):
+        bench = (
+            bench_outputs[idx]
+            if bench_outputs is not None and idx < len(bench_outputs)
+            else None
+        )
+        label = "atten" if idx == 0 else f"out{idx}"
+        if _is_empty_output(golden_out):
+            # golden 未提供该输出(如未开启 lse) → 不参与判定
+            results.append({"pass": True, "precision": "N/A"})
+            continue
+        if _is_empty_output(npu_out):
+            results.append(
+                {
+                    "pass": False,
+                    "precision": "NO_OUTPUT",
+                    "error_info": f"{label}: NPU output is missing",
+                }
+            )
+            continue
+        if _is_empty_output(bench):
+            results.append(
+                {
+                    "pass": False,
+                    "precision": "NO_BENCH",
+                    "error_info": f"{label}: cross_check bench is missing",
+                }
+            )
+            continue
+
+        dtype_str = _dtype_key(golden_out)
+        params = _resolve_cross_check_params(spec_tolerance, dtype_str)
+        # third_party 优先用分段量化参考: 与 target 同为逐段 P 量化, 噪声可比;
+        # 未提供时回退 golden slot 输出。
+        third_party = golden_out
+        if (
+            third_party_outputs is not None
+            and idx < len(third_party_outputs)
+            and third_party_outputs[idx] is not None
+            and not _is_empty_output(third_party_outputs[idx])
+        ):
+            third_party = third_party_outputs[idx]
+        logger.info(
+            "[CROSS_CHECK] %s: dtype=%s third_party=%s params=%s",
+            label,
+            dtype_str,
+            "sectioned_ref" if third_party is not golden_out else "golden",
+            params,
+        )
+        comparison = CrossCheckComparison(
+            _as_numpy(npu_out),
+            _as_numpy(bench),
+            idx,
+            dtype_str,
+            params,
+            third_party=_as_numpy(third_party),
+        )
+        precision_str, log, is_pass, metrics = comparison.compare()
+        metrics = dict(metrics or {})
+        metrics.setdefault("label", label)
+        results.append(
+            {
+                "pass": is_pass,
+                "precision": precision_str,
+                "metrics": metrics,
+                "error_info": None if is_pass else f"{label}: {log}",
+            }
+        )
+    return results[0] if len(results) == 1 else results
+
+
 def compare(*outputs, **kwargs):
     """Compare NPU outputs vs golden outputs.
 
     TTK passes [npu_out(, npu_lse), golden_out(, golden_lse)].
-    Filters None and empty tensors, then pairs first half (NPU) with
-    second half (golden).
+    bench_outputs 存在时走 ttk 三方 cross_check; 否则按 CSV 容差做双方比较。
     """
+    bench_outputs = kwargs.get("bench_outputs")
+    spec_tolerance = kwargs.get("spec_tolerance")
+    third_party_outputs = kwargs.get("third_party_outputs")
+    if (
+        bench_outputs is not None
+        and spec_tolerance is not None
+        and is_cross_check_available()
+    ):
+        return _run_cross_check(
+            outputs, bench_outputs, spec_tolerance, third_party_outputs
+        )
     non_none = [o for o in outputs if o is not None]
     if len(non_none) < 2:
         return {
