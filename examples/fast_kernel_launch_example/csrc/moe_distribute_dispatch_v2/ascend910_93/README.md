@@ -6,7 +6,6 @@
 
 关于Dispatch算子的核心功能、计算公式及通信原理，详见 [aclnnMoeDistributeDispatchV3文档介绍。
 
-
 ## 产品支持情况
 
 | 产品 | 是否支持 |

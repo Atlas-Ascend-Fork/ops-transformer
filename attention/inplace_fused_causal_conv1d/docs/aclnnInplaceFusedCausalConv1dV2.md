@@ -1,7 +1,5 @@
 # aclnnInplaceFusedCausalConv1dV2
 
-[📄 查看源码](https://atomgit.com/cann/ops-transformer/tree/master/attention/inplace_fused_causal_conv1d)
-
 ## 产品支持情况
 
 <!-- npu="950" id1 -->

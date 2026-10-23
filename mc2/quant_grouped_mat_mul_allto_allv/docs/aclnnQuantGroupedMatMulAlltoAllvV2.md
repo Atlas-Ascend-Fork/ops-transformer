@@ -1,7 +1,5 @@
 # aclnnQuantGroupedMatMulAlltoAllvV2
 
-[📄 查看源码](https://atomgit.com/cann/ops-transformer/tree/master/mc2/grouped_mat_mul_allto_allv)
-
 ## 产品支持情况
 
 <!-- npu="950" id1 -->
