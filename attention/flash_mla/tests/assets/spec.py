@@ -39,20 +39,14 @@ class FlashMlaSpec:
     def customize_inputs(*args, **kwargs):
         return _load("inputs").customize_inputs(*args, **kwargs)
 
-    @staticmethod
-    def compare(*outputs, compare_context=None, **kwargs):
-        cross_check = _load("cross_check")
-        if cross_check.enabled():
-            return cross_check.compare(
-                *outputs,
-                testcase_name=getattr(compare_context, "testcase_name", None),
-            )
-        return _load("compare").compare(*outputs)
+    compare = (
+        staticmethod(_load("cross_check").compare)
+        if _load("cross_check").enabled()
+        else None
+    )
 
-    tolerance = {
-        "float16": {"standard": "stat_rel_err"},
-        "bfloat16": {"standard": "stat_rel_err"},
-    }
+    pre_compare = staticmethod(_load("cross_check").pre_compare)
+
     torch_graph = _load("graph").FlashMlaAclGraph
     npu_preprocess = staticmethod(_load("npu_preprocess").run)
 

@@ -18,8 +18,8 @@ Example (peaks are decimal TFLOPS and TB/s, duration defaults to microseconds):
 By default, use api_name, tensor_view_shapes, tensor_dtypes and attributes in
 each result row. For reduced results, supply --cases testcase/cases.csv to join
 external case CSV(s) by testcase_name instead.
-Input encoding defaults to UTF-8 (with optional BOM), falling back to GB18030
-(compatible with GBK). Use --encoding to override; output is always UTF-8.
+Input encoding defaults to UTF-8 (with optional BOM).
+Use --encoding to select another encoding; output is always UTF-8.
 
 For graph results, select --duration-column graph_aclgraph_device_perf_us.
 Other duration columns can be selected explicitly, with --duration-unit us/ms/s.
@@ -48,10 +48,7 @@ from pathlib import Path
 import sys
 
 
-API_NAMES = {
-    "flash_mla_ttk_ops.flash_mla_ttk",
-    "torch.ops.cann_ops_transformer.flash_mla",
-}
+API_NAME = "torch.ops.cann_ops_transformer.flash_mla"
 METRIC_FIELDS = (
     "metrics_duration_us",
     "theoretical_flops",
@@ -111,9 +108,33 @@ def used_lengths(attrs, side, capacities):
     return used
 
 
+def visible_counts(q, k, left, right):
+    """Count right-aligned visible pairs, rows and columns."""
+    if not q or not k:
+        return 0, 0, 0
+    left = max(q, k) if left is None else left
+    right = max(q, k) if right is None else right
+    base = k - q
+
+    def clamp(x):
+        return max(0, min(x, q))
+
+    points = sorted({0, q, clamp(left - base), clamp(q - right), clamp(-base - right)})
+    pairs = 0
+    for start, end in zip(points, points[1:]):
+        if base + start + right < 0:
+            continue
+        pos = base + start
+        low, high = max(0, pos - left), min(k - 1, pos + right)
+        slope = int(pos - left < 0) - int(pos + right > k - 1)
+        count = end - start
+        pairs += count * (high - low + 1) + slope * count * (count - 1) // 2
+    return pairs, min(q, k + right), min(k, q + left)
+
+
 def theoretical_cost(row):
     """Decode MLA shapes/sequence values; no torch or operator import required."""
-    if row.get("api_name") not in API_NAMES:
+    if row.get("api_name") != API_NAME:
         raise ValueError(f"unsupported api_name: {row.get('api_name')!r}")
     shapes = literal(row, "tensor_view_shapes")
     dtypes = literal(row, "tensor_dtypes")
@@ -130,7 +151,7 @@ def theoretical_cost(row):
         raise ValueError("only FP16/BF16 Q/KV are supported")
     q, kv = shapes[:2]
     lq, lk = attrs.get("layout_q", "BSND"), attrs.get("layout_kv", "PA_BBND")
-    if lq not in ("TND", "BNSD", "BSND") or lk not in ("PA_BBND", "PA_NZ"):
+    if lq not in ("TND", "BNSD", "BSND") or lk not in ("PA_BBND", "PA_BNBD", "PA_NZ"):
         raise ValueError(f"unsupported layouts: {lq}/{lk}")
     for name, shape, rank in (
         ("Q", q, 3 if lq == "TND" else 4),
@@ -141,7 +162,7 @@ def theoretical_cost(row):
         if any(type(x) is not int or x < 0 for x in shape):
             raise ValueError(f"{name}: expected concrete nonnegative shape")
     heads = q[1 if lq in ("TND", "BNSD") else 2]
-    kv_heads = kv[1 if lk == "PA_NZ" else 2]
+    kv_heads = kv[2 if lk == "PA_BBND" else 1]
     kd = kv[2] * kv[4] if lk == "PA_NZ" else kv[-1]
     if (
         heads <= 0
@@ -163,22 +184,28 @@ def theoretical_cost(row):
             and attrs.get(field + "_values") is None
         ):
             raise ValueError(f"missing {field}_values for active sequence tensor")
-    page_size = kv[3 if lk == "PA_NZ" else 1]
-    if any(k > kv[0] * page_size for k in kv_used):
-        raise ValueError("cache length exceeds the KV page pool")
+    page_size = kv[3 if lk == "PA_NZ" else 1 if lk == "PA_BBND" else 2]
+    table = shapes[2]
+    if table is None or len(table) != 2 or table[0] != len(kv_used):
+        raise ValueError("block_table must have one row per cache sequence")
+    if any(k > table[1] * page_size for k in kv_used):
+        raise ValueError("cache length exceeds block_table capacity")
+    if any(kv_used) and kv[0] == 0:
+        raise ValueError("nonempty cache sequences require physical pages")
     mode = attrs.get("mask_mode", 0)
-    if mode not in (0, 3):
-        raise ValueError("only mask_mode 0/3 are supported")
-    if mode == 0 and len(shapes) > 6 and shapes[6] is not None:
-        raise ValueError("explicit mode-0 mask needs values to count visible pairs")
-    pairs = rows = columns = 0
-    for sq, sk in zip(q_used, kv_used):
-        if not sq or not sk:
-            continue
-        visible_q = min(sq, sk) if mode == 3 else sq
-        pairs += visible_q * sk - (visible_q * (visible_q - 1) // 2 if mode == 3 else 0)
-        rows += visible_q
-        columns += sk
+    if mode == 0:
+        left = right = None
+    elif mode == 3:
+        left, right = None, 0
+    elif mode == 4:
+        left, right = attrs.get("win_left", -1), attrs.get("win_right", -1)
+        if type(left) is not int or type(right) is not int or min(left, right) < -1:
+            raise ValueError("window bounds must be integers >= -1")
+        left, right = None if left == -1 else left, None if right == -1 else right
+    else:
+        raise ValueError("only mask_mode 0/3/4 are supported")
+    counts = [visible_counts(sq, sk, left, right) for sq, sk in zip(q_used, kv_used)]
+    pairs, rows, columns = (sum(x[i] for x in counts) for i in range(3))
     outputs = sum(capacities)
     flops = 2 * heads * (576 + 512) * pairs
     byte_count = 2 * (heads * 576 * rows + 576 * columns + heads * 512 * outputs)
@@ -187,24 +214,8 @@ def theoretical_cost(row):
     return flops, byte_count
 
 
-def read_csv(path, encoding="auto"):
-    data = path.read_bytes()
-    candidates = ("utf-8-sig", "gb18030") if encoding == "auto" else (encoding,)
-    for candidate in candidates:
-        try:
-            contents = data.decode(candidate)
-            break
-        except LookupError as exc:
-            raise ValueError(f"unknown encoding: {candidate}") from exc
-        except UnicodeDecodeError:
-            continue
-    else:
-        raise ValueError(
-            f"{path}: cannot decode using {', '.join(candidates)}; "
-            "specify the CSV encoding with --encoding"
-        )
-    if encoding == "auto" and candidate != "utf-8-sig":
-        print(f"{path}: using {candidate} input encoding", file=sys.stderr)
+def read_csv(path, encoding="utf-8-sig"):
+    contents = path.read_text(encoding=encoding)
     with io.StringIO(contents, newline="") as stream:
         reader = csv.DictReader(stream)
         if not reader.fieldnames or "testcase_name" not in reader.fieldnames:
@@ -212,7 +223,7 @@ def read_csv(path, encoding="auto"):
         return reader.fieldnames, list(reader)
 
 
-def load_cases(paths, encoding="auto"):
+def load_cases(paths, encoding="utf-8-sig"):
     cases = {}
     for path in paths:
         files = sorted(path.glob("*.csv")) if path.is_dir() else [path]
@@ -239,8 +250,8 @@ def main(argv=None):
     parser.add_argument("--result", "-r", required=True, type=Path)
     parser.add_argument(
         "--encoding",
-        default="auto",
-        help="input CSV encoding for result/cases: auto (UTF-8 then GB18030), gbk, etc.",
+        default="utf-8-sig",
+        help="input CSV encoding for result/cases (default: utf-8-sig)",
     )
     parser.add_argument(
         "--cases",
@@ -266,22 +277,16 @@ def main(argv=None):
     )
     parser.add_argument(
         "--duration-column",
-        help="default: eager_device_perf_us, duration_us or duration",
+        default="eager_device_perf_us",
+        help="duration column (default: eager_device_perf_us)",
     )
     parser.add_argument("--duration-unit", choices=("us", "ms", "s"), default="us")
     args = parser.parse_args(argv)
     try:
         fields, rows = read_csv(args.result, args.encoding)
         cases = load_cases(args.cases, args.encoding) if args.cases else {}
-        column = args.duration_column or next(
-            (
-                x
-                for x in ("eager_device_perf_us", "duration_us", "duration")
-                if x in fields
-            ),
-            None,
-        )
-        if column is None or column not in fields:
+        column = args.duration_column
+        if column not in fields:
             raise ValueError(
                 "duration column not found; select --duration-column explicitly"
             )
@@ -354,6 +359,7 @@ def main(argv=None):
             except (ValueError, TypeError, KeyError, IndexError) as exc:
                 errors += 1
                 row["metrics_error"] = str(exc)
+                print(f"{row['testcase_name']}: {exc}", file=sys.stderr)
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(

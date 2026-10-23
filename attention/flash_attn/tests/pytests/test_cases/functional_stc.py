@@ -93,6 +93,7 @@ TestCases = {
     "PA_07"    : {**BASE,
                   "layout_kv": ["PA_BBND", "PA_BNBD"], # 2条
                   # "layout_kv": ["PA_BBND", "PA_BNBD", "PA_NZ"], # 3条
+                  "seqused_kv": [[1024, 1024]],
                   "block_size": [128]},
     # PA时，block_size<s2Base，s2Base不整除block_size
     # PA时，block_size>s2Base，block_size不整除s2Base

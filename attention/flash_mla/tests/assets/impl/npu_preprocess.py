@@ -10,19 +10,58 @@
 
 """Materialize metadata after H2D, before timing and graph capture."""
 
-from .metadata import build_metadata
+import torch
 
 
 METADATA_SLOT_INDEX = 8
 
 
+def build_metadata(
+    q,
+    k_cache,
+    *,
+    cache_seqlens,
+    cu_seqlens_q=None,
+    seqused_q=None,
+    head_dim_v=512,
+    mask_mode=0,
+    win_left=-1,
+    win_right=-1,
+    max_seqlen_q=-1,
+    max_seqlen_kv=-1,
+    layout_q="BSND",
+    layout_kv="PA_BBND",
+):
+    # Keep device initialization out of TTK's parent process and CPU prepare.
+    import cann_ops_transformer  # noqa: F401
+
+    if cache_seqlens is None:
+        raise ValueError("cache_seqlens is required for MLA metadata")
+    if layout_q not in ("TND", "BNSD", "BSND"):
+        raise ValueError(f"unsupported layout_q: {layout_q}")
+    if layout_kv not in ("PA_BBND", "PA_BNBD", "PA_NZ"):
+        raise ValueError(f"unsupported layout_kv: {layout_kv}")
+    return torch.ops.cann_ops_transformer.flash_mla_metadata(
+        cache_seqlens,
+        int(q.shape[1 if layout_q in ("TND", "BNSD") else 2]),
+        int(k_cache.shape[2 if layout_kv == "PA_BBND" else 1]),
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_q=seqused_q,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_kv=max_seqlen_kv,
+        head_dim_qk=int(q.shape[-1]),
+        head_dim_v=int(head_dim_v),
+        mask_mode=int(mask_mode),
+        win_left=int(win_left),
+        win_right=int(win_right),
+        layout_q=layout_q,
+    ).to(device=q.device)
+
+
 def metadata_slot_declared(tensor_dtypes):
-    if tensor_dtypes is None:
-        return True
-    try:
-        return tensor_dtypes[METADATA_SLOT_INDEX] is not None
-    except (IndexError, TypeError):
-        return True
+    if not isinstance(tensor_dtypes, (tuple, list)) or len(tensor_dtypes) != 9:
+        raise ValueError("tensor_dtypes must declare all 9 FlashMla input slots")
+    return tensor_dtypes[METADATA_SLOT_INDEX] is not None
 
 
 def run(
@@ -38,6 +77,8 @@ def run(
     head_dim_v=512,
     softmax_scale=1.0,
     mask_mode=0,
+    win_left=-1,
+    win_right=-1,
     max_seqlen_q=-1,
     max_seqlen_kv=-1,
     layout_q="BSND",
@@ -46,11 +87,9 @@ def run(
     return_softmax_lse=False,
     **kwargs,
 ):
-    if metadata is not None and metadata.numel() != 0:
-        # Concrete slot: keep the random fake tensor prepared by customize_inputs.
+    if metadata is not None:
         return None
-    if metadata is None and not metadata_slot_declared(kwargs.get("tensor_dtypes")):
-        # Case file does not declare the metadata slot (dtype None): stay absent.
+    if not metadata_slot_declared(kwargs["tensor_dtypes"]):
         return None
     generated = build_metadata(
         q,
@@ -60,17 +99,11 @@ def run(
         seqused_q=seqused_q,
         head_dim_v=head_dim_v,
         mask_mode=mask_mode,
+        win_left=win_left,
+        win_right=win_right,
         max_seqlen_q=max_seqlen_q,
         max_seqlen_kv=max_seqlen_kv,
         layout_q=layout_q,
         layout_kv=layout_kv,
-        **kwargs,
     )
-    if metadata is None:
-        return {"metadata": generated}
-    if metadata.dtype != generated.dtype:
-        raise ValueError(
-            f"MLA metadata placeholder must be {generated.dtype}; got {metadata.dtype}"
-        )
-    metadata.resize_(generated.shape)
-    metadata.copy_(generated)
+    return {"metadata": generated}

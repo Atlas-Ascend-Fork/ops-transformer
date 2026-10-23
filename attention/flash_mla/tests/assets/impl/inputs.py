@@ -10,6 +10,8 @@
 
 """Fill TTK auxiliary tensors in place after CSV allocation."""
 
+import logging
+
 import torch
 
 
@@ -42,14 +44,30 @@ def customize_inputs(
         ("cache_seqlens", cache_seqlens),
         ("cu_seqlens_q", cu_seqlens_q),
         ("seqused_q", seqused_q),
+        ("sinks", sinks),
     ):
-        values = kwargs.get(f"{name}_values")
-        if tensor is not None and values is not None:
-            value = torch.as_tensor(values, dtype=tensor.dtype, device=tensor.device)
+        field = f"{name}_values"
+        if field in kwargs:
+            if tensor is None:
+                raise ValueError(f"{field} requires the {name} tensor")
+            value = torch.as_tensor(
+                kwargs[field], dtype=tensor.dtype, device=tensor.device
+            )
             if value.shape != tensor.shape:
                 raise ValueError(f"{name}_values shape does not match {name}")
             tensor.copy_(value)
-    if block_table is not None:
+    if "block_table_values" in kwargs:
+        if block_table is None:
+            raise ValueError("block_table_values requires block_table")
+        values = torch.as_tensor(
+            kwargs["block_table_values"],
+            dtype=block_table.dtype,
+            device=block_table.device,
+        )
+        if values.shape != block_table.shape:
+            raise ValueError("block_table_values shape does not match block_table")
+        block_table.copy_(values)
+    elif block_table is not None:
         if cache_seqlens is None:
             raise ValueError("block_table requires cache_seqlens")
         block_size = int(
@@ -74,8 +92,12 @@ def customize_inputs(
         if sum(counts) and physical_pages == 0:
             raise ValueError("nonempty cache sequences require physical pages")
         page_ids = torch.arange(sum(counts), device=table.device)
-        # Reuse physical pages when logical pages across batches exceed storage.
         if page_ids.numel() > physical_pages:
+            logging.warning(
+                "FlashMla block_table maps %d logical pages onto %d physical pages; page IDs will repeat",
+                page_ids.numel(),
+                physical_pages,
+            )
             page_ids = page_ids.remainder(physical_pages)
         if page_order == "reverse":
             page_ids = page_ids.flip(0)
@@ -87,15 +109,8 @@ def customize_inputs(
     if attn_mask is not None:
         if mask_mode in (3, 4):
             attn_mask.copy_(torch.ones_like(attn_mask).triu(diagonal=1))
-        elif mask_mode == 0:
-            attn_mask.zero_()
-    if metadata is not None and metadata.numel() > 0:
-        if metadata.is_floating_point():
-            fake = torch.rand(metadata.shape).to(metadata.dtype)
-        else:
-            fake = torch.randint(0, 1024, metadata.shape, dtype=metadata.dtype)
-        metadata.copy_(fake)
 
-    from .cross_check import prepare
+    from .cross_check import enabled, prepare
 
-    prepare(arguments, kwargs.get("testcase_name"))
+    if enabled():
+        prepare(arguments, kwargs["testcase_name"])

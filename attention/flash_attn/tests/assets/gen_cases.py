@@ -61,11 +61,12 @@ block_table is filled by customize_inputs.
 """
 
 import argparse
+import ast
 import csv
-import itertools
-import math
+from decimal import Decimal, InvalidOperation
 import os
 import sys
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PYTESTS = os.path.join(_HERE, "..", "pytests")
@@ -93,7 +94,6 @@ NC_HEADER = ["tensor_storage_shapes", "tensor_view_offsets", "tensor_view_stride
 
 DTYPE_MAP = {"fp16": "float16", "bf16": "bfloat16"}
 INT_DTYPE = "int32"
-ABSOLUTE_PRECISION_DEFAULT = 1e-8
 
 
 # ── param normalization (mirrors case_loader.normalize_params) ──
@@ -122,47 +122,20 @@ def normalize_params(raw):
     c.setdefault("mask_mode", 0)
     c.setdefault("win_left", -1)
     c.setdefault("win_right", -1)
-    # mask_mode=0(无掩码)/3(因果掩码)时算子不接受 win_left/win_right 有值:
-    # mask_checker 要求其必须为 -1 (op_host/checkers/mask_checker.cpp CheckParaExistence),
-    # 历史用例透传的 65536("无限窗口"哨兵值)语义与 -1 等价, 此处统一归 -1
-    if int(c.get("mask_mode", 0)) in (0, 3):
-        c["win_left"] = -1
-        c["win_right"] = -1
     c.setdefault("return_softmax_lse", False)
 
     for key in ("cu_seqlens_q", "cu_seqlens_kv", "seqused_q", "seqused_kv"):
         if c.get(key) == [None] or c.get(key) is None:
             c.pop(key, None)
 
-    # cu_seqlens 首值必须为 0; 若非 0 则整体平移(段长不变)
-    for key in ("cu_seqlens_q", "cu_seqlens_kv"):
-        v = c.get(key)
-        if isinstance(v, (list, tuple)) and len(v) > 0:
-            first = v[0]
-            if isinstance(first, (int, float)) and int(first) != 0:
-                c[key] = [int(x) - int(first) for x in v]
-
-    if layout_q == "TND":
-        cu_q = c.get("cu_seqlens_q")
-        if cu_q:
-            c.setdefault(
-                "seqused_q", [cu_q[i + 1] - cu_q[i] for i in range(len(cu_q) - 1)]
-            )
-            layout_kv_val = c.get("layout_kv", layout_q)
-            if layout_kv_val not in ("PA_BBND", "PA_BNBD", "PA_NZ"):
-                c.setdefault("cu_seqlens_kv", list(cu_q))
-                cu_kv = c.get("cu_seqlens_kv")
-                c.setdefault(
-                    "seqused_kv",
-                    [cu_kv[i + 1] - cu_kv[i] for i in range(len(cu_kv) - 1)],
-                )
-        c["B"] = 1
-
+    for layout, field in ((layout_q, "cu_seqlens_q"), (layout_kv, "cu_seqlens_kv")):
+        if layout == "TND" and c.get(field) is None:
+            raise ValueError(f"{field} is required for TND; declare it explicitly")
     layout_kv_val = c.get("layout_kv", layout_q)
     if layout_kv_val in ("PA_BBND", "PA_BNBD", "PA_NZ"):
         c.setdefault("block_size", 128)
         if "seqused_kv" not in c:
-            c["seqused_kv"] = [c.get("S2", c.get("S1"))] * c.get("B", 1)
+            raise ValueError("paged KV requires explicit seqused_kv")
 
         if layout_kv_val == "PA_NZ":
             dtype_str = c.get("Dtype", "fp16")
@@ -195,9 +168,13 @@ def normalize_params(raw):
         # 避免按 max_blk*B 整体分配导致 K/V 缓冲过度分配(如 (30,4096) 多出约 300 倍)
         used = 0
         for i in range(b_val):
-            s = seqused_kv[i] if i < len(seqused_kv) else seqused_kv[-1]
-            used += min((int(s) + block_size - 1) // block_size, max_blk)
-        c["num_blocks"] = max(used, 1)
+            if len(seqused_kv) != b_val:
+                raise ValueError("seqused_kv must have one length per batch")
+            s = seqused_kv[i]
+            if (s + block_size - 1) // block_size > max_blk:
+                raise ValueError("seqused_kv exceeds block_table_shape capacity")
+            used += (int(s) + block_size - 1) // block_size
+        c.setdefault("num_blocks", max(used, 1))
         c["_bt_b"] = b_val
         c["_bt_max_blk"] = max_blk
     return c
@@ -226,7 +203,7 @@ def _qkv_shapes(p):
         total_s1 = cu_q[-1] if cu_q else S1
         q_shape = (total_s1, N1, D)
     else:
-        q_shape = (B, N1, S1, D)
+        raise ValueError(f"unsupported layout_q: {layout_q}")
 
     if layout_kv == "BNSD":
         k_shape = (B, N2, S2, D)
@@ -258,8 +235,7 @@ def _qkv_shapes(p):
         k_shape = (num_blocks, N2, nz_sub, bs, nz_blk)
         v_shape = (num_blocks, N2, dv_nz_sub, bs, nz_blk)
     else:
-        k_shape = (B, N2, S2, D)
-        v_shape = (B, N2, S2, DV)
+        raise ValueError(f"unsupported layout_kv: {layout_kv}")
 
     return q_shape, k_shape, v_shape
 
@@ -281,15 +257,29 @@ def _aux_shapes(p):
     sq = p.get("seqused_q")
     skv = p.get("seqused_kv")
 
-    cu_q_shape = (len(cu_q),) if cu_q else None
-    cu_kv_shape = (len(cu_kv),) if cu_kv else None
-    sq_shape = (len(sq),) if sq else None
-    skv_shape = (len(skv),) if skv else None
+    cu_q_shape = (len(cu_q),) if cu_q is not None else None
+    cu_kv_shape = (len(cu_kv),) if cu_kv is not None else None
+    sq_shape = (len(sq),) if sq is not None else None
+    skv_shape = (len(skv),) if skv is not None else None
 
     return bt_shape, cu_q_shape, cu_kv_shape, sq_shape, skv_shape
 
 
 # ── attributes builder ──
+
+
+def _integer_attribute(name, value):
+    if isinstance(value, str):
+        try:
+            parsed = Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError(f"{name} must encode an integer, got {value!r}") from exc
+        if not parsed.is_finite() or parsed != parsed.to_integral_value():
+            raise ValueError(f"{name} must encode an integer, got {value!r}")
+        value = int(parsed)
+    if type(value) is not int:
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    return value
 
 
 def _build_attrs(p):
@@ -299,21 +289,16 @@ def _build_attrs(p):
         if val is not None:
             attrs[key] = val
 
-    dtype_str = p.get("Dtype", "fp16")
     D = p["D"]
     scale = p.get("scale")
     if scale is None:
         scale = 1.0 / (D**0.5)
     _set("softmax_scale", float(scale))
 
-    _set("mask_mode", int(p.get("mask_mode", 0)))
+    _set("mask_mode", _integer_attribute("mask_mode", p.get("mask_mode", 0)))
 
-    wl = p.get("win_left", -1)
-    wr = p.get("win_right", -1)
-    wl = int(float(wl)) if wl is not None else -1
-    wr = int(float(wr)) if wr is not None else -1
-    _set("win_left", wl)
-    _set("win_right", wr)
+    _set("win_left", _integer_attribute("win_left", p.get("win_left", -1)))
+    _set("win_right", _integer_attribute("win_right", p.get("win_right", -1)))
 
     _set("layout_q", p.get("layout_q", "BNSD"))
     _set("layout_kv", p.get("layout_kv", p.get("layout_q", "BNSD")))
@@ -341,10 +326,10 @@ def _build_attrs(p):
     # "张量参数名出现在 attrs" 重复计入输入数, 超出 FlashAttn 的
     # 11 参数上限导致 PARAM_PLAN_FAILURE。改用 *_values 键,
     # 由 impl/inputs.py customize_inputs 填入对应张量。
-    _set("cu_seqlens_q_values", list(cu_q) if cu_q else None)
-    _set("cu_seqlens_kv_values", list(cu_kv) if cu_kv else None)
-    _set("seqused_q_values", list(sq) if sq else None)
-    _set("seqused_kv_values", list(skv) if skv else None)
+    _set("cu_seqlens_q_values", list(cu_q) if cu_q is not None else None)
+    _set("cu_seqlens_kv_values", list(cu_kv) if cu_kv is not None else None)
+    _set("seqused_q_values", list(sq) if sq is not None else None)
+    _set("seqused_kv_values", list(skv) if skv is not None else None)
 
     _set("max_seqlen_q", _resolve_max_seqlen(p, "q", cu_q, sq))
     _set("max_seqlen_kv", _resolve_max_seqlen(p, "kv", cu_kv, skv))
@@ -353,6 +338,9 @@ def _build_attrs(p):
     if layout_kv in ("PA_BBND", "PA_BNBD", "PA_NZ"):
         _set("block_size", int(p.get("block_size", 128)))
 
+    for key in ("block_table", "sinks_values"):
+        if p.get(key) is not None:
+            attrs["block_table_values" if key == "block_table" else key] = p[key]
     return attrs
 
 
@@ -360,7 +348,7 @@ def _resolve_max_seqlen(p, suffix, cu_seqlens, seqused):
     """Same logic as pytests data.py _resolve_max_seqlen."""
     explicit = p.get(f"max_seqlen_{suffix}")
     if explicit is not None:
-        return int(explicit)
+        return _integer_attribute(f"max_seqlen_{suffix}", explicit)
     if seqused:
         return max(int(x) for x in seqused)
     if cu_seqlens and len(cu_seqlens) > 1:
@@ -375,10 +363,12 @@ def _resolve_max_seqlen(p, suffix, cu_seqlens, seqused):
 
 
 def _precision(p):
-    dtype_str = p.get("Dtype", "fp16")
-    if dtype_str == "bf16":
-        return ((0.0078125, 0.0001),)
-    return ((0.005, 0.000025),)
+    rtol = 0.0078125 if p["Dtype"] == "bf16" else 0.005
+    return ((rtol, 0.005), (0.005, 0.005))
+
+
+def _absolute_precision(p):
+    return (1e-4 if p["Dtype"] == "bf16" else 2.5e-5, 2.5e-5)
 
 
 # ── data ranges ──
@@ -404,12 +394,12 @@ def _nc_fields(shape, nc_kv_dims):
       nc_kv_dims == (0, 1) -> pad dim2 (+1 元素), 0/1 轴 stride 联动膨胀
     返回 (storage_shape, view_stride, view_offset); 无 NC 时返回 (None, None, None)。
     """
-    if nc_kv_dims == 0:
+    if nc_kv_dims in (0, (0,)):
         pad_dim = 1
     elif nc_kv_dims == (0, 1):
         pad_dim = 2
     else:
-        return None, None, None
+        raise ValueError(f"unsupported nc_kv_dims: {nc_kv_dims}")
     storage = list(shape)
     storage[pad_dim] += 1
     strides = [1] * len(shape)
@@ -433,7 +423,7 @@ def _build_row(case_name, p):
     bt_shape, cu_q_shape, cu_kv_shape, sq_shape, skv_shape = _aux_shapes(p)
     attrs = _build_attrs(p)
 
-    mask_mode = int(p.get("mask_mode", 0))
+    mask_mode = _integer_attribute("mask_mode", p.get("mask_mode", 0))
     attn_mask_shape = (2048, 2048) if mask_mode in (3, 4) else None
 
     # Metadata is allocated by npu_preprocess on the execution device.
@@ -448,22 +438,26 @@ def _build_row(case_name, p):
         cu_kv_shape,
         sq_shape,
         skv_shape,
-        None,
+        (p["N1"],) if p.get("sinks", p.get("enable_learnable_sink", False)) else None,
         attn_mask_shape,
         metadata_shape,
     ]
-    dtype_str = DTYPE_MAP.get(p.get("Dtype", "fp16"), "float16")
+    dtype_str = DTYPE_MAP[p["Dtype"]]
 
     dtypes = [dtype_str, dtype_str, dtype_str]
     for i in range(3, len(shapes)):
         if shapes[i] is None:
             dtypes.append(None)
+        elif i == 8:
+            dtypes.append("float32")
         elif i == 9:
             dtypes.append("int8")
         else:
             dtypes.append(INT_DTYPE)
 
     data_ranges = list(_data_ranges(p, len(shapes)))
+    if shapes[8] is not None:
+        data_ranges[8] = tuple(p.get("sinks_range", (-1.0, 1.0)))
     data_ranges[10] = (0, 0)  # metadata 占位: TTK 按 range 填充 0 即可
     data_ranges = tuple(data_ranges)
 
@@ -501,7 +495,7 @@ def _build_row(case_name, p):
         "",
         repr(data_ranges),
         repr(prec),
-        repr(ABSOLUTE_PRECISION_DEFAULT),
+        repr(_absolute_precision(p)),
         repr(tuple(storage_shapes)),
         repr(tuple(view_offsets)),
         repr(tuple(view_strides)),
@@ -509,6 +503,48 @@ def _build_row(case_name, p):
 
 
 # ── main ──
+
+
+def metadata_cases():
+    raw = dict(
+        B=1,
+        N1=1,
+        N2=1,
+        S1=1,
+        S2=16,
+        D=64,
+        Dtype="fp16",
+        layout_q="BSND",
+        layout_kv="BSND",
+        layout_out="BSND",
+        return_softmax_lse=True,
+        q_range=(0, 0),
+        k_range=(0, 0),
+        v_range=(1, 1),
+    )
+    rows = []
+    for name, shape, dtype, data_range in (
+        ("wrong_dtype", (8192,), "float32", (0, 1)),
+        ("wrong_rank", (64, 128), "int32", (0, 1)),
+        ("empty", (0,), "int32", (0, 0)),
+        ("absent", None, None, (None, None)),
+    ):
+        row = _build_row(f"fa_metadata_viewshape_{name}", normalize_params(raw))[
+            : len(HEADER)
+        ]
+        shapes = list(ast.literal_eval(row[2]))
+        dtypes = list(ast.literal_eval(row[3]))
+        ranges = list(ast.literal_eval(row[8]))
+        shapes[10] = shape
+        dtypes[10] = dtype
+        ranges[10] = data_range
+        row[2], row[3], row[8] = (
+            repr(tuple(shapes)),
+            repr(tuple(dtypes)),
+            repr(tuple(ranges)),
+        )
+        rows.append(row)
+    return rows
 
 
 def main():
@@ -526,8 +562,24 @@ def main():
         default="functional_stc",
         help="Test case module (default: functional_stc)",
     )
+    parser.add_argument("--suite", choices=("pytest", "metadata"), default="pytest")
     args = parser.parse_args()
-
+    if args.suite == "metadata":
+        output = (
+            Path(args.output)
+            if args.output != "testcase/flash_attn_stc.csv"
+            else Path("testcase/flash_attn_metadata_viewshape.csv")
+        )
+        if not output.is_absolute():
+            output = Path(_HERE) / output
+        output.parent.mkdir(parents=True, exist_ok=True)
+        rows = metadata_cases()
+        with output.open("w", newline="") as stream:
+            writer = csv.writer(stream, lineterminator="\n")
+            writer.writerow(HEADER)
+            writer.writerows(rows)
+        print(f"wrote {output} ({len(rows)} cases)")
+        return
     from core.case_loader import load_case_modules
 
     cases = load_case_modules([f"test_cases.{args.case_file}"])
@@ -536,19 +588,23 @@ def main():
     header = HEADER + NC_HEADER if has_nc else HEADER
 
     out_path = os.path.join(_HERE, args.output)
+    rows = []
+    for case_id, raw_params in sorted(cases.items()):
+        short_name = case_id.rsplit("/", 1)[-1]
+        try:
+            p = normalize_params(raw_params)
+            row = _build_row(short_name, p)
+        except (ValueError, KeyError) as exc:
+            raise ValueError(f"{case_id}: {exc}") from exc
+        rows.append(row if has_nc else row[: len(HEADER)])
+
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    written = 0
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
-        for case_id, raw_params in sorted(cases.items()):
-            short_name = case_id.rsplit("/", 1)[-1]
-            p = normalize_params(raw_params)
-            row = _build_row(short_name, p)
-            writer.writerow(row if has_nc else row[: len(HEADER)])
-            written += 1
+        writer.writerows(rows)
 
-    print(f"wrote {out_path} ({written} cases)")
+    print(f"wrote {out_path} ({len(rows)} cases)")
 
 
 if __name__ == "__main__":

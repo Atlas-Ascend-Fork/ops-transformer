@@ -18,8 +18,8 @@ Example (peaks are decimal TFLOPS and TB/s, duration defaults to microseconds):
 By default, use api_name, tensor_view_shapes, tensor_dtypes and attributes in
 each result row. For reduced results, supply --cases testcase/cases.csv to join
 external case CSV(s) by testcase_name instead.
-Input encoding defaults to UTF-8 (with optional BOM), falling back to GB18030
-(compatible with GBK). Use --encoding to override; output is always UTF-8.
+Input encoding defaults to UTF-8 (with optional BOM). Use --encoding to
+select another encoding explicitly; output is always UTF-8.
 
 For graph results, select --duration-column graph_aclgraph_device_perf_us.
 Other duration columns can be selected explicitly, with --duration-unit us/ms/s.
@@ -49,7 +49,6 @@ import sys
 
 
 API_NAMES = {
-    "flash_attn_ttk_ops.flash_attn_ttk",
     "torch.ops.cann_ops_transformer.flash_attn",
 }
 METRIC_FIELDS = (
@@ -122,7 +121,10 @@ def visible_counts(q, k, left, right):
     left = max(q, k) if left is None else left
     right = max(q, k) if right is None else right
     base = k - q
-    clamp = lambda x: max(0, min(x, q))
+
+    def clamp(x):
+        return max(0, min(x, q))
+
     points = sorted({0, q, clamp(left - base), clamp(q - right), clamp(-base - right)})
     pairs = 0
     for start, end in zip(points, points[1:]):
@@ -171,7 +173,10 @@ def theoretical_cost(row):
     n2 = k[2 if lk in ("BSND", "PA_BBND") else 1]
     kd = k[2] * k[4] if lk == "PA_NZ" else k[-1]
     dv = v[2] * v[4] if lk == "PA_NZ" else v[-1]
-    geometry = lambda s: (s[0], s[1], s[3], s[4]) if lk == "PA_NZ" else s[:-1]
+
+    def geometry(s):
+        return (s[0], s[1], s[3], s[4]) if lk == "PA_NZ" else s[:-1]
+
     if geometry(k) != geometry(v) or kd != d or min(n1, n2, d, dv) <= 0 or n1 % n2:
         raise ValueError("inconsistent Q/K/V heads or dimensions")
     q_capacity = capacity(q, lq, "q", attrs)
@@ -232,24 +237,13 @@ def theoretical_cost(row):
     return flops, total_bytes
 
 
-def read_csv(path, encoding="auto"):
-    data = path.read_bytes()
-    candidates = ("utf-8-sig", "gb18030") if encoding == "auto" else (encoding,)
-    for candidate in candidates:
-        try:
-            contents = data.decode(candidate)
-            break
-        except LookupError as exc:
-            raise ValueError(f"unknown encoding: {candidate}") from exc
-        except UnicodeDecodeError:
-            continue
-    else:
+def read_csv(path, encoding="utf-8-sig"):
+    try:
+        contents = path.read_text(encoding=encoding)
+    except (UnicodeDecodeError, LookupError) as exc:
         raise ValueError(
-            f"{path}: cannot decode using {', '.join(candidates)}; "
-            "specify the CSV encoding with --encoding"
-        )
-    if encoding == "auto" and candidate != "utf-8-sig":
-        print(f"{path}: using {candidate} input encoding", file=sys.stderr)
+            f"{path}: cannot decode with {encoding}; specify --encoding explicitly"
+        ) from exc
     with io.StringIO(contents, newline="") as stream:
         reader = csv.DictReader(stream)
         if not reader.fieldnames or "testcase_name" not in reader.fieldnames:
@@ -257,7 +251,7 @@ def read_csv(path, encoding="auto"):
         return reader.fieldnames, list(reader)
 
 
-def load_cases(paths, encoding="auto"):
+def load_cases(paths, encoding="utf-8-sig"):
     cases = {}
     for path in paths:
         files = sorted(path.glob("*.csv")) if path.is_dir() else [path]
@@ -284,8 +278,8 @@ def main(argv=None):
     parser.add_argument("--result", "-r", required=True, type=Path)
     parser.add_argument(
         "--encoding",
-        default="auto",
-        help="input CSV encoding for result/cases: auto (UTF-8 then GB18030), gbk, etc.",
+        default="utf-8-sig",
+        help="input CSV encoding for result/cases (default: utf-8-sig)",
     )
     parser.add_argument(
         "--cases",
@@ -311,21 +305,15 @@ def main(argv=None):
     )
     parser.add_argument(
         "--duration-column",
-        help="default: eager_device_perf_us, duration_us or duration",
+        default="eager_device_perf_us",
+        help="duration column (default: eager_device_perf_us)",
     )
     parser.add_argument("--duration-unit", choices=("us", "ms", "s"), default="us")
     args = parser.parse_args(argv)
     try:
         fields, rows = read_csv(args.result, args.encoding)
         cases = load_cases(args.cases, args.encoding) if args.cases else {}
-        column = args.duration_column or next(
-            (
-                x
-                for x in ("eager_device_perf_us", "duration_us", "duration")
-                if x in fields
-            ),
-            None,
-        )
+        column = args.duration_column
         if column is None or column not in fields:
             raise ValueError(
                 "duration column not found; select --duration-column explicitly"
@@ -399,6 +387,9 @@ def main(argv=None):
             except (ValueError, TypeError, KeyError, IndexError) as exc:
                 errors += 1
                 row["metrics_error"] = str(exc)
+                print(
+                    f"{row.get('testcase_name', '<unnamed>')}: {exc}", file=sys.stderr
+                )
         output.parent.mkdir(parents=True, exist_ok=True)
         with output.open("w", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(

@@ -8,10 +8,11 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""TTK three-way comparison with an in-process CPU CUDA bench."""
+"""TTK three-way comparison with an FP32 baseline."""
 
 import logging
 
+import numpy as np
 import torch
 
 
@@ -32,11 +33,9 @@ TOLERANCE = {
 
 
 def enabled():
-    try:
-        from ttk.utilities.container_utils import get_global_storage
-    except ImportError:
-        return False
-    return getattr(get_global_storage(), "compare_method", None) == "cross_check"
+    from ttk.switches import get_global_storage
+
+    return get_global_storage().compare_method == "cross_check"
 
 
 def prepare(arguments, testcase_name):
@@ -46,8 +45,8 @@ def prepare(arguments, testcase_name):
         return
     if testcase_name is None:
         raise ValueError("MLA cross_check requires testcase_name")
-    from .cuda_bench import CudaCpuBench
-    from .flash_mla_golden import FlashMlaGolden
+    from .golden import FlashMlaGolden
+    from .fp32_reference import FP32Reference
 
     arguments = {
         name: value.detach().cpu() if torch.is_tensor(value) else value
@@ -56,13 +55,11 @@ def prepare(arguments, testcase_name):
     }
     arguments["device_mode"] = "cpu"
     golden = FlashMlaGolden().forward_golden(**arguments)
-    bench = CudaCpuBench().forward_golden(**arguments)
+    bench = FP32Reference().forward_golden(**arguments)
     if not arguments["return_softmax_lse"]:
         golden, bench = (golden[0], None), (bench[0], None)
     _CASES[str(testcase_name)] = (golden, bench)
-    logging.info(
-        "[%s] MLA cross_check prepared CPU CUDA bench (single KV split)", testcase_name
-    )
+    logging.info("[%s] MLA cross_check prepared FP32 reference", testcase_name)
 
 
 def get_case(testcase_name):
@@ -75,20 +72,20 @@ def get_case(testcase_name):
         ) from exc
 
 
-def compare(*outputs, testcase_name=None):
-    from ttk.core_modules.comparison.cross_check import CrossCheckComparison
-    from ttk.core_modules.comparison.resolve import resolve_tolerance
-    from .compare import COMPARATOR
+def compare(*outputs, compare_context):
+    from ttk.core_modules.common.comparison.cross_check import CrossCheckComparison
+    from ttk.core_modules.common.comparison.resolve import resolve_tolerance
 
     if len(outputs) != 4:
         raise ValueError("MLA cross_check expects two NPU and two golden outputs")
+    testcase_name = compare_context.testcase_name
     _, bench_outputs = get_case(testcase_name)
     results = []
     for index, (npu, golden, bench) in enumerate(
         zip(outputs[:2], outputs[2:], bench_outputs)
     ):
         if golden is None:
-            if bench is not None:
+            if index != 1 or bench is not None:
                 raise ValueError(
                     "MLA cross_check output suppression differs from bench"
                 )
@@ -101,12 +98,19 @@ def compare(*outputs, testcase_name=None):
         params = resolve_tolerance(TOLERANCE, None, None, [dtype], "cross_check")[
             0
         ].params
-        arrays = [COMPARATOR.as_float32(value) for value in (npu, golden, bench)]
+        arrays = [
+            np.asarray(
+                value.detach().cpu().float().numpy()
+                if torch.is_tensor(value)
+                else value,
+                dtype=np.float32,
+            )
+            for value in (npu, golden, bench)
+        ]
         if arrays[0].shape != arrays[1].shape or arrays[0].shape != arrays[2].shape:
             results.append({"pass": False, "precision": "shape_mismatch"})
             continue
-        # Same operand mapping as SparseFlashAttention: bench is the baseline,
-        # existing low-precision golden occupies TTK's third_party argument.
+        # FP32 is the baseline; mixed precision is the other reference.
         comparator = CrossCheckComparison(
             arrays[0], arrays[2], index, dtype, params, third_party=arrays[1]
         )
@@ -120,3 +124,27 @@ def compare(*outputs, testcase_name=None):
             }
         )
     return results
+
+
+def as_float32(value):
+    if torch.is_tensor(value):
+        value = value.detach().cpu().float().numpy()
+    return np.asarray(value, dtype=np.float32)
+
+
+def pre_compare(*outputs):
+    if len(outputs) != 4:
+        raise ValueError("FlashMla expects two device and two golden outputs")
+    for index, (actual, expected) in enumerate(zip(outputs[:2], outputs[2:])):
+        if expected is None and index == 1:
+            continue
+        if actual is None or expected is None:
+            raise ValueError(f"FlashMla output {index} is missing")
+        actual, expected = as_float32(actual), as_float32(expected)
+        if actual.shape != expected.shape:
+            raise ValueError(
+                f"FlashMla output {index} shape mismatch: {actual.shape} vs {expected.shape}"
+            )
+        if np.isnan(actual).any() or np.isnan(expected).any():
+            raise ValueError(f"FlashMla output {index} contains NaN")
+    return outputs

@@ -10,15 +10,9 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-"""TTK graph adapter for the installed FlashAttn API."""
+"""Reuse metadata prepared before FlashAttn graph capture."""
 
 import torch
-
-
-def _resolve_max_seqlen(explicit):
-    if explicit is not None and int(explicit) > 0:
-        return int(explicit)
-    return -1
 
 
 class FlashAttnAclGraph(torch.nn.Module):
@@ -30,25 +24,26 @@ class FlashAttnAclGraph(torch.nn.Module):
         mask_mode=0,
         win_left=-1,
         win_right=-1,
-        max_seqlen_q=None,
-        max_seqlen_kv=None,
+        max_seqlen_q=-1,
+        max_seqlen_kv=-1,
         layout_q="BSND",
         layout_kv="BSND",
         layout_out="BSND",
         return_softmax_lse=False,
     ):
         super().__init__()
-        self.batch_size = batch_size
-        self.softmax_scale = float(softmax_scale)
-        self.mask_mode = int(mask_mode)
-        self.win_left = int(win_left)
-        self.win_right = int(win_right)
-        self.max_seqlen_q = _resolve_max_seqlen(max_seqlen_q)
-        self.max_seqlen_kv = _resolve_max_seqlen(max_seqlen_kv)
-        self.layout_q = layout_q
-        self.layout_kv = layout_kv
-        self.layout_out = layout_out
-        self.return_softmax_lse = bool(return_softmax_lse)
+        self.attrs = dict(
+            softmax_scale=softmax_scale,
+            mask_mode=mask_mode,
+            win_left=win_left,
+            win_right=win_right,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            layout_q=layout_q,
+            layout_kv=layout_kv,
+            layout_out=layout_out,
+            return_softmax_lse=return_softmax_lse,
+        )
 
     def forward(
         self,
@@ -69,7 +64,6 @@ class FlashAttnAclGraph(torch.nn.Module):
             raise ValueError(
                 "FlashAttn graph requires metadata prepared by npu_preprocess"
             )
-
         return torch.ops.cann_ops_transformer.flash_attn(
             q,
             k,
@@ -82,14 +76,5 @@ class FlashAttnAclGraph(torch.nn.Module):
             sinks=sinks,
             attn_mask=attn_mask,
             metadata=metadata,
-            softmax_scale=self.softmax_scale,
-            mask_mode=self.mask_mode,
-            win_left=self.win_left,
-            win_right=self.win_right,
-            max_seqlen_q=self.max_seqlen_q,
-            max_seqlen_kv=self.max_seqlen_kv,
-            layout_q=self.layout_q,
-            layout_kv=self.layout_kv,
-            layout_out=self.layout_out,
-            return_softmax_lse=self.return_softmax_lse,
+            **self.attrs,
         )

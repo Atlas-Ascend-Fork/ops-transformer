@@ -48,6 +48,14 @@ def contiguous_stride(shape):
     return tuple(strides)
 
 
+def precision_columns(dtype):
+    rtol, atol = {
+        "float16": (0.005, 2.5e-5),
+        "bfloat16": (0.0078125, 1e-4),
+    }[dtype]
+    return repr(((rtol, 0.005), (0.005, 0.005))), repr((atol, 2.5e-5))
+
+
 def coverage_row(
     name,
     dtype,
@@ -64,6 +72,9 @@ def coverage_row(
     num_blocks=None,
     scale=576**-0.5,
     num_heads_q=96,
+    sinks=False,
+    q_layout="TND",
+    window=(-1, -1),
 ):
     """Small valid TND/NTD case; strides are element strides, not byte strides."""
     assert len(kv_lengths) == len(q_lengths) and all(
@@ -74,16 +85,25 @@ def coverage_row(
     counts = [(length + 127) // 128 for length in kv_lengths]
     pages = sum(counts) if num_blocks is None else num_blocks
     assert pages > 0
-    kshape = (pages, 128, 1, 576) if layout == "PA_BBND" else (pages, 1, 36, 128, 16)
-    assert num_heads_q in (64, 96)
+    kshape = {
+        "PA_BBND": (pages, 128, 1, 576),
+        "PA_BNBD": (pages, 1, 128, 576),
+        "PA_NZ": (pages, 1, 36, 128, 16),
+    }[layout]
+    qshape = {
+        "TND": (sum(q_lengths), num_heads_q, 576),
+        "BSND": (batch, max(q_lengths), num_heads_q, 576),
+        "BNSD": (batch, num_heads_q, max(q_lengths), 576),
+    }[q_layout]
+    assert 1 <= num_heads_q <= 128
     shapes = (
-        (sum(q_lengths), num_heads_q, 576),
+        qshape,
         kshape,
         (batch, max(counts)),
         (batch,),
-        (batch + 1,),
+        (batch + 1,) if q_layout == "TND" else None,
         None if no_seqused else (batch,),
-        None,
+        (num_heads_q,) if sinks else None,
         (2048, 2048) if mask else None,
         (-1,),  # Materialized by npu_preprocess; CPU golden receives None.
     )
@@ -92,9 +112,9 @@ def coverage_row(
         dtype,
         "int32",
         "int32",
-        "int32",
+        "int32" if q_layout == "TND" else None,
         None if no_seqused else "int32",
-        None,
+        "float32" if sinks else None,
         "int8" if mask else None,
         "int32",
     )
@@ -104,20 +124,29 @@ def coverage_row(
         mask_mode=mask,
         max_seqlen_q=-1,
         max_seqlen_kv=-1,
-        layout_q="TND",
+        layout_q=q_layout,
         layout_kv=layout,
-        layout_out="NTD",
+        layout_out="NTD" if q_layout == "TND" else q_layout,
         return_softmax_lse=lse,
         cache_seqlens_values=kv_lengths,
-        cu_seqlens_q_values=[0] + list(itertools.accumulate(q_lengths)),
         page_order=page_order,
     )
+    if q_layout == "TND":
+        attrs["cu_seqlens_q_values"] = [0] + list(itertools.accumulate(q_lengths))
+    if mask == 4:
+        attrs["win_left"], attrs["win_right"] = window
     if not no_seqused:
         attrs["seqused_q_values"] = q_lengths
     for key in omit_max:
         attrs.pop(key)
     ranges = tuple(
-        (-1, 1) if i < 2 else (0, 0) if shape is not None else (None, None)
+        (-1, 1)
+        if i < 2
+        else (-3, 3)
+        if i == 6 and sinks
+        else (0, 0)
+        if shape is not None
+        else (None, None)
         for i, shape in enumerate(shapes)
     )
     row = dict(
@@ -133,8 +162,7 @@ def coverage_row(
                 "",
                 "",
                 repr(ranges),
-                "((0.005, 2.5e-05),)",
-                "1e-8",
+                *precision_columns(dtype),
             ),
         )
     )
@@ -182,7 +210,7 @@ def coverage_cases():
                     page_order="reverse",
                 )
             )
-    # 14: optional inputs/default attrs, stride, task pipeline and FD candidates.
+    # 16: optional inputs/default attrs, sinks, stride, pipeline and FD candidates.
     specials = [
         ("no_seqused", "float16", [257, 129], [2, 1], dict(no_seqused=True)),
         (
@@ -289,7 +317,7 @@ def coverage_cases():
             row.get("tensor_storage_shapes") or row["tensor_view_shapes"]
         )
         dtypes = ast.literal_eval(row["tensor_dtypes"])
-        sizes = {"float16": 2, "bfloat16": 2, "int32": 4, "int8": 1}
+        sizes = {"float16": 2, "bfloat16": 2, "float32": 4, "int32": 4, "int8": 1}
         assert (
             sum(
                 math.prod(s) * sizes[d] for s, d in zip(shapes, dtypes) if s is not None
@@ -365,29 +393,67 @@ def cases():
                     "",
                     "",
                     repr(ranges),
-                    "((0.005, 2.5e-05),)",
-                    "1e-8",
+                    *precision_columns(dtype),
                 ),
             )
         )
 
 
+def metadata_cases():
+    for name, shape, dtype, data_range in (
+        ("wrong_dtype", (8192,), "float32", (0, 1)),
+        ("wrong_rank", (64, 128), "int32", (0, 1)),
+        ("empty", (0,), "int32", (0, 0)),
+        ("absent", None, None, (None, None)),
+    ):
+        row = coverage_row(
+            f"metadata_viewshape_{name}", "float16", [16], [1], num_heads_q=1
+        )
+        shapes = list(ast.literal_eval(row["tensor_view_shapes"]))
+        dtypes = list(ast.literal_eval(row["tensor_dtypes"]))
+        ranges = list(ast.literal_eval(row["input_data_ranges"]))
+        shapes[8] = shape
+        dtypes[8] = dtype
+        ranges[0] = (0, 0)
+        ranges[1] = (1, 1)
+        ranges[8] = data_range
+        row["tensor_view_shapes"] = repr(tuple(shapes))
+        row["tensor_dtypes"] = repr(tuple(dtypes))
+        row["input_data_ranges"] = repr(tuple(ranges))
+        yield row
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-o", "--output", type=Path, default=None)
-    parser.add_argument("--suite", choices=("smoke", "coverage"), default="coverage")
+    parser.add_argument(
+        "--suite", choices=("smoke", "coverage", "metadata"), default="coverage"
+    )
     args = parser.parse_args()
-    requested = args.output or Path(f"testcase/flash_mla_e2e_{args.suite}.csv")
+    default_name = (
+        "flash_mla_metadata_viewshape.csv"
+        if args.suite == "metadata"
+        else f"flash_mla_e2e_{args.suite}.csv"
+    )
+    requested = args.output or Path("testcase") / default_name
     output = requested if requested.is_absolute() else Path(__file__).parent / requested
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="") as stream:
         writer = csv.DictWriter(
             stream,
-            fieldnames=COVERAGE_HEADER if args.suite == "coverage" else HEADER,
+            fieldnames=COVERAGE_HEADER
+            if args.suite in ("coverage", "metadata")
+            else HEADER,
             lineterminator="\n",
         )
         writer.writeheader()
-        writer.writerows(coverage_cases() if args.suite == "coverage" else cases())
+        writer.writerows(
+            metadata_cases()
+            if args.suite == "metadata"
+            else coverage_cases()
+            if args.suite == "coverage"
+            else cases()
+        )
 
 
 if __name__ == "__main__":

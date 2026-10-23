@@ -12,10 +12,7 @@
 
 """FlashAttn golden reference implementation and TTK adapter."""
 
-import importlib.util
 import math
-import sys
-from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
@@ -97,6 +94,33 @@ class FlashAttnGolden:
                         f"got {t.device}"
                     )
 
+        allowed = {
+            "BSND": (("BSND", "PA_BBND", "PA_BNBD", "PA_NZ"), ("BSND",)),
+            "BNSD": (("BNSD", "PA_BBND", "PA_BNBD", "PA_NZ"), ("BNSD", "BSND")),
+            "TND": (("TND", "PA_BBND", "PA_BNBD", "PA_NZ"), ("TND",)),
+        }
+        if (
+            layout_q not in allowed
+            or layout_kv not in allowed[layout_q][0]
+            or layout_out not in allowed[layout_q][1]
+        ):
+            raise ValueError(
+                f"unsupported layouts: {layout_q}, {layout_kv}, {layout_out}"
+            )
+        if mask_mode not in (0, 3, 4):
+            raise ValueError(f"unsupported mask_mode: {mask_mode}")
+        if (
+            self._num_heads_kv <= 0
+            or self._num_heads_q < self._num_heads_kv
+            or self._num_heads_q % self._num_heads_kv
+        ):
+            raise ValueError("num_heads_q must be a positive multiple of num_heads_kv")
+        if sinks is not None and sinks.shape == (0,):
+            sinks = None
+        if sinks is not None and (
+            sinks.dtype != torch.float32 or sinks.shape != (self._num_heads_q,)
+        ):
+            raise ValueError("sinks must be float32 with shape (num_heads_q,)")
         orig_dtype = q.dtype
         # P 的量化精度(算子 vector->Cube 交接时 exp 权重 cast 到输入精度)
         self._p_dtype = orig_dtype
@@ -122,23 +146,54 @@ class FlashAttnGolden:
         cu_q_list = cu_seqlens_q.tolist() if cu_seqlens_q is not None else None
         cu_kv_list = cu_seqlens_kv.tolist() if cu_seqlens_kv is not None else None
 
-        if is_tnd_q:
-            if seqused_q is not None:
-                q_lens = seqused_q.tolist()
-            else:
-                B = len(cu_q_list) - 1
-                q_lens = [cu_q_list[b + 1] - cu_q_list[b] for b in range(B)]
+        if is_tnd_q and cu_q_list is None:
+            raise ValueError("TND query requires cu_seqlens_q")
+        if is_tnd_kv and cu_kv_list is None:
+            raise ValueError("TND KV requires cu_seqlens_kv")
+        batch = len(cu_q_list) - 1 if is_tnd_q else q.shape[0]
+        for name, tensor, prefix, layout, total in (
+            ("q", seqused_q, cu_q_list, layout_q, q.shape[0]),
+            ("kv", seqused_kv, cu_kv_list, layout_kv, k.shape[0]),
+        ):
+            if layout == "TND" and (
+                len(prefix) != batch + 1
+                or prefix[0] != 0
+                or prefix[-1] != total
+                or any(x > y for x, y in zip(prefix, prefix[1:]))
+            ):
+                raise ValueError(f"cu_seqlens_{name} must cover the TND tensor from 0")
+            if tensor is not None and (tensor.ndim != 1 or tensor.numel() != batch):
+                raise ValueError(f"seqused_{name} must contain {batch} lengths")
+        q_physical = (
+            [cu_q_list[b + 1] - cu_q_list[b] for b in range(batch)]
+            if is_tnd_q
+            else [q.shape[2 if layout_q == "BNSD" else 1]] * batch
+        )
+        q_lens = seqused_q.tolist() if seqused_q is not None else q_physical
+        if layout_kv.startswith("PA_"):
+            if seqused_kv is None or block_table is None:
+                raise ValueError("paged KV requires seqused_kv and block_table")
+            bs = k.shape[
+                3 if layout_kv == "PA_NZ" else 1 if layout_kv == "PA_BBND" else 2
+            ]
+            if block_table.ndim != 2 or block_table.shape[0] != batch:
+                raise ValueError("block_table must have one row per batch")
+            kv_physical = [block_table.shape[1] * bs] * batch
+        elif is_tnd_kv:
+            kv_physical = [cu_kv_list[b + 1] - cu_kv_list[b] for b in range(batch)]
         else:
-            q_lens = seqused_q.tolist() if seqused_q is not None else None
-
-        if is_tnd_kv:
-            if seqused_kv is not None:
-                kv_lens = seqused_kv.tolist()
-            else:
-                B = len(cu_kv_list) - 1
-                kv_lens = [cu_kv_list[b + 1] - cu_kv_list[b] for b in range(B)]
-        else:
-            kv_lens = seqused_kv.tolist() if seqused_kv is not None else None
+            if k.shape[0] != batch or v.shape[0] != batch:
+                raise ValueError("query and KV batch dimensions must match")
+            kv_physical = [k.shape[2 if layout_kv == "BNSD" else 1]] * batch
+        kv_lens = seqused_kv.tolist() if seqused_kv is not None else kv_physical
+        for name, used, physical in (
+            ("q", q_lens, q_physical),
+            ("kv", kv_lens, kv_physical),
+        ):
+            if any(
+                length < 0 or length > limit for length, limit in zip(used, physical)
+            ):
+                raise ValueError(f"seqused_{name} exceeds physical sequence capacity")
 
         if compute_mode == "auto":
             if q_lens is not None and kv_lens is not None:
@@ -154,11 +209,7 @@ class FlashAttnGolden:
                 else:
                     max_skv = k.shape[2] if layout_kv == "BNSD" else k.shape[1]
                 max_product = max_sq * max_skv
-            compute_mode = (
-                "tiled"
-                if (max_sq >= self._tile_size and max_product > self.TILED_CROSSOVER)
-                else "full"
-            )
+            compute_mode = "tiled" if (max_product > self.TILED_CROSSOVER) else "full"
         self.last_compute_mode = compute_mode
 
         out_f32, lse_f32 = self._compute_per_batch(
@@ -248,7 +299,7 @@ class FlashAttnGolden:
             if layout_kv == "TND" and cu_kv is not None:
                 kv_lens = [cu_kv[b + 1] - cu_kv[b] for b in range(B)]
             elif block_table is not None:
-                kv_lens = self._get_kv_lens_from_block_table(block_table, B)
+                raise ValueError("paged KV requires seqused_kv")
             elif layout_kv == "BNSD":
                 kv_lens = [k.shape[2]] * B
             else:
@@ -261,7 +312,9 @@ class FlashAttnGolden:
                 total_q, N_q, dv, dtype=torch.float32, device=q.device
             )
             # 算子 lse 输出为 (N, T), 与算子对齐
-            lse_tnd = torch.zeros(N_q, total_q, dtype=torch.float32, device=q.device)
+            lse_tnd = torch.full(
+                (N_q, total_q), float("inf"), dtype=torch.float32, device=q.device
+            )
             out = None
             lse = None
         else:
@@ -272,7 +325,9 @@ class FlashAttnGolden:
             else:
                 max_sq = q.shape[2]
             out = torch.zeros(B, N_q, max_sq, dv, dtype=torch.float32, device=q.device)
-            lse = torch.zeros(B, N_q, max_sq, dtype=torch.float32, device=q.device)
+            lse = torch.full(
+                (B, N_q, max_sq), float("inf"), dtype=torch.float32, device=q.device
+            )
             out_tnd = None
             lse_tnd = None
 
@@ -413,6 +468,12 @@ class FlashAttnGolden:
             v_b = torch.zeros(1, N_kv, skv, dv, dtype=torch.float32, device=v.device)
             bt = block_table.to(torch.int64)
             num_blocks_b = (skv + bs - 1) // bs
+            ids = bt[b, :num_blocks_b]
+            if (
+                ids.numel() != num_blocks_b
+                or ((ids < 0) | (ids >= k.shape[0]) | (ids >= v.shape[0])).any()
+            ):
+                raise ValueError("block_table references a page outside the KV cache")
             for blk in range(num_blocks_b):
                 block_id = bt[b, blk].item()
                 offset = blk * bs
@@ -442,6 +503,12 @@ class FlashAttnGolden:
             v_b = torch.zeros(1, N_kv, skv, dv, dtype=torch.float32, device=v.device)
             bt = block_table.to(torch.int64)
             num_blocks_b = (skv + bs - 1) // bs
+            ids = bt[b, :num_blocks_b]
+            if (
+                ids.numel() != num_blocks_b
+                or ((ids < 0) | (ids >= k.shape[0]) | (ids >= v.shape[0])).any()
+            ):
+                raise ValueError("block_table references a page outside the KV cache")
             for blk in range(num_blocks_b):
                 block_id = bt[b, blk].item()
                 offset = blk * bs
@@ -480,131 +547,59 @@ class FlashAttnGolden:
         win_left=-1,
         win_right=-1,
     ):
-        Sq, D = q.shape
-        Skv = k.shape[0]
-        dv = v.shape[-1]
-        BS = self._tile_size
+        def mask_fn(qs, qe, ks, ke):
+            if mask_mode in (3, 4):
+                return self._build_mask_mode_mask(
+                    torch.arange(qs, qe, device=q.device),
+                    torch.arange(ks, ke, device=q.device),
+                    mask_mode,
+                    delta,
+                    win_left,
+                    win_right,
+                )
+            return None if mask is None else mask[qs:qe, ks:ke]
 
-        TILES_Q = (Sq + BS - 1) // BS
-        TILES_KV = (Skv + BS - 1) // BS
-
-        out = torch.zeros(Sq, dv, dtype=torch.float32, device=q.device)
-        if sink is not None:
-            # attention sink 等效于一个恒有 exp(sink) 权重、value=0 的虚拟 KV
-            o_sum = torch.ones(Sq, 1, dtype=torch.float32, device=q.device)
-            o_max = torch.full(
-                (Sq, 1), float(sink), dtype=torch.float32, device=q.device
-            )
-        else:
-            o_sum = torch.zeros(Sq, 1, dtype=torch.float32, device=q.device)
-            o_max = torch.full(
-                (Sq, 1),
-                torch.finfo(torch.float32).min,
-                dtype=torch.float32,
-                device=q.device,
-            )
-
-        Q_BLOCKS = list(torch.split(q, BS, dim=0))
-        K_BLOCKS = list(torch.split(k, BS, dim=0))
-        V_BLOCKS = list(torch.split(v, BS, dim=0))
-        o_BLOCKS = list(torch.split(out, BS, dim=0))
-        s_BLOCKS = list(torch.split(o_sum, BS, dim=0))
-        m_BLOCKS = list(torch.split(o_max, BS, dim=0))
-
-        for i in range(TILES_Q):
-            Qi = Q_BLOCKS[i]
-            Sq_start = i * BS
-            Sq_end = min(Sq_start + BS, Sq)
-
-            for j in range(TILES_KV):
-                oi, si, mi = o_BLOCKS[i], s_BLOCKS[i], m_BLOCKS[i]
-
-                Kj = K_BLOCKS[j]
-                Vj = V_BLOCKS[j]
-                Sk_start = j * BS
-                Sk_end = min(Sk_start + BS, Skv)
-
-                S_ij = torch.matmul(Qi, Kj.t()) * scale
-
-                if mask_mode in (3, 4):
-                    q_idx = torch.arange(Sq_start, Sq_end, device=q.device)
-                    k_idx = torch.arange(Sk_start, Sk_end, device=q.device)
-                    tile_mask = self._build_mask_mode_mask(
-                        q_idx,
-                        k_idx,
-                        mask_mode,
-                        delta,
-                        win_left,
-                        win_right,
-                    )
-                    if tile_mask is not None:
-                        S_ij = S_ij.masked_fill(tile_mask, float("-inf"))
-                elif mask is not None:
-                    S_ij = S_ij.masked_fill(
-                        mask[Sq_start:Sq_end, Sk_start:Sk_end], float("-inf")
-                    )
-
-                m_block = S_ij.amax(dim=-1, keepdim=True)
-                m_new = torch.maximum(mi, m_block)
-
-                P_ij = torch.exp(S_ij - m_new)
-                s_block = P_ij.sum(dim=-1, keepdim=True)
-
-                update_old = torch.exp(mi - m_new)
-                # 与 FlashMLA golden 对齐: PV 用量化到输入精度的 exp 权重,
-                # sum 与累加仍是 FP32。
-                P_V = torch.matmul(P_ij.to(self._p_dtype).float(), Vj[: Kj.shape[0], :])
-
-                o_BLOCKS[i] = update_old * oi + P_V
-                s_BLOCKS[i] = update_old * si + s_block
-                m_BLOCKS[i] = m_new
-
-        out = torch.cat(o_BLOCKS, dim=0)
-        out_sum = torch.cat(s_BLOCKS, dim=0)
-        out_max = torch.cat(m_BLOCKS, dim=0)
-
-        out = out / (out_sum + self.EPSILON)
-
-        lse = torch.log(out_sum + self.EPSILON) + out_max
-        lse = lse.squeeze(-1)
-        lse = torch.where(
-            out_sum.squeeze(-1) <= 0, torch.full_like(lse, float("inf")), lse
-        )
-
-        return out, lse
+        return self._attention(q, k, v, scale, self._tile_size, mask_fn, sink)
 
     def _compute_full_single(self, q, k, v, mask, scale, sink):
-        scores = torch.matmul(q, k.t()) * scale
-
-        if mask is not None:
-            scores = scores.masked_fill(mask, float("-inf"))
-
-        row_max = scores.amax(dim=-1, keepdim=True)
-        row_max = torch.where(
-            torch.isfinite(row_max), row_max, torch.zeros_like(row_max)
+        return self._attention(
+            q, k, v, scale, max(q.shape[0], k.shape[0], 1), lambda *args: mask, sink
         )
 
-        if sink is not None:
-            row_max = torch.maximum(row_max, torch.full_like(row_max, sink))
-
-        exp_scores = torch.exp(scores - row_max)
-        row_sum = exp_scores.sum(dim=-1, keepdim=True)
-
-        if sink is not None:
-            row_sum = row_sum + torch.exp(sink - row_max)
-
-        # 与 FlashMLA golden 对齐: 未归一化 exp 权重先量化到输入精度再进
-        # PV(算子 vector->Cube 交接的 P cast), sum 用未舍入权重, PV FP32
-        # 累加, 最后除以 FP32 sum。
-        quantized = exp_scores.to(self._p_dtype).float()
-        out = torch.matmul(quantized, v) / (row_sum + self.EPSILON)
-
-        lse = torch.log(row_sum + self.EPSILON) + row_max
-        lse = lse.squeeze(-1)
-        lse = torch.where(
-            row_sum.squeeze(-1) <= 0, torch.full_like(lse, float("inf")), lse
-        )
-
+    def _attention(self, q, k, v, scale, tile_size, mask_fn, sink):
+        rows, length = q.shape[0], k.shape[0]
+        out = torch.zeros((rows, v.shape[-1]), dtype=torch.float32, device=q.device)
+        lse = torch.full((rows,), float("inf"), dtype=torch.float32, device=q.device)
+        for qs in range(0, rows, tile_size):
+            qe = min(qs + tile_size, rows)
+            maximum = torch.full((qe - qs, 1), float("-inf"), device=q.device)
+            total = torch.zeros_like(maximum)
+            if sink is not None:
+                maximum.fill_(float(sink))
+                total.fill_(1.0)
+            acc = torch.zeros((qe - qs, v.shape[-1]), device=q.device)
+            for ks in range(0, length, tile_size):
+                ke = min(ks + tile_size, length)
+                scores = (q[qs:qe] @ k[ks:ke].T) * scale
+                mask = mask_fn(qs, qe, ks, ke)
+                if mask is not None:
+                    scores.masked_fill_(mask, float("-inf"))
+                new_max = torch.maximum(maximum, scores.amax(-1, keepdim=True))
+                safe_max = torch.where(torch.isneginf(new_max), 0.0, new_max)
+                correction = (maximum - safe_max).exp()
+                weights = (scores - safe_max).exp()
+                total = total * correction + weights.sum(-1, keepdim=True)
+                acc = acc * correction + weights.to(self._p_dtype).float() @ v[ks:ke]
+                maximum = new_max
+            empty = total == 0
+            output = acc / torch.where(empty, 1.0, total)
+            row_lse = (total.log() + maximum).squeeze(-1)
+            out[qs:qe] = output.masked_fill(empty, 0.0)
+            lse[qs:qe] = (
+                row_lse
+                if sink is not None
+                else row_lse.masked_fill(empty.squeeze(-1), float("inf"))
+            )
         return out, lse
 
     @staticmethod
@@ -660,16 +655,6 @@ class FlashAttnGolden:
 
         return None
 
-    @staticmethod
-    def _get_kv_lens_from_block_table(block_table, B):
-        bt = block_table.to(torch.int64)
-        lens = []
-        for b in range(B):
-            row = bt[b]
-            valid = (row >= 0).sum().item()
-            lens.append(int(valid))
-        return lens
-
 
 # ── TTK adapter ──
 
@@ -702,25 +687,6 @@ def _derive_head_dims(q, k, layout_q, layout_kv):
     else:
         num_heads_kv = int(k.shape[2])
     return num_heads_q, num_heads_kv, head_dim
-
-
-def _load_cross_check():
-    """Lazily load the sibling cross_check module by a stable module name."""
-    name = "fa_ttk_flash_attn_cross_check"
-    if name in sys.modules:
-        return sys.modules[name]
-    path = Path(__file__).with_name("cross_check.py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"cannot create import spec for {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        sys.modules.pop(name, None)
-        raise
-    return module
 
 
 def _run_reference(golden_cls, arguments):
@@ -756,18 +722,14 @@ def _run_reference(golden_cls, arguments):
         mask_mode=int(arguments["mask_mode"]),
         win_left=int(arguments["win_left"]),
         win_right=int(arguments["win_right"]),
-        max_seqlen_q=int(arguments["max_seqlen_q"])
-        if arguments.get("max_seqlen_q") is not None
-        else -1,
-        max_seqlen_kv=int(arguments["max_seqlen_kv"])
-        if arguments.get("max_seqlen_kv") is not None
-        else -1,
+        max_seqlen_q=int(arguments["max_seqlen_q"]),
+        max_seqlen_kv=int(arguments["max_seqlen_kv"]),
         layout_q=layout_q,
         layout_kv=layout_kv,
         layout_out=arguments["layout_out"],
         return_softmax_lse=bool(arguments["return_softmax_lse"]),
         device_mode="cpu",
-        compute_mode="full",
+        compute_mode="auto",
     )
 
     if not arguments["return_softmax_lse"]:
@@ -779,13 +741,11 @@ def cpu_flash_attn(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    *,
     block_table: Optional[torch.Tensor] = None,
     cu_seqlens_q: Optional[torch.Tensor] = None,
     cu_seqlens_kv: Optional[torch.Tensor] = None,
     seqused_q: Optional[torch.Tensor] = None,
     seqused_kv: Optional[torch.Tensor] = None,
-    batch_size: Optional[int] = None,
     sinks: Optional[torch.Tensor] = None,
     attn_mask: Optional[torch.Tensor] = None,
     metadata: Optional[torch.Tensor] = None,
@@ -793,8 +753,8 @@ def cpu_flash_attn(
     mask_mode: int = 0,
     win_left: int = -1,
     win_right: int = -1,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_kv: Optional[int] = None,
+    max_seqlen_q: int = -1,
+    max_seqlen_kv: int = -1,
     layout_q: str = "BSND",
     layout_kv: str = "BSND",
     layout_out: str = "BSND",
@@ -802,9 +762,10 @@ def cpu_flash_attn(
     **_unused,
 ):
     """Compute CPU golden reference using FlashAttnGolden."""
-    cross_check = _load_cross_check()
+    from . import cross_check
+
     if cross_check.enabled():
-        return cross_check.get_case(_unused.get("testcase_name"))[0]
+        return cross_check.get_case(_unused["testcase_name"])[0]
     arguments = dict(locals())
     arguments.pop("_unused")
     arguments.pop("cross_check")
