@@ -104,7 +104,7 @@ public:
 
         scheduler_.Init(tiling_->batch, tiling_->numQHeads, tiling_->maxBlocksPerBatch, tiling_->scoreBlockStride,
                         tiling_->sparseMode, tiling_->initBlocks, tiling_->localBlocks, tiling_->keyLayout,
-                        tiling_->kvChunks, gActualSeqQlen_, gActualSeqKlen_, gStartLoc_);
+                        tiling_->kvChunks, gActualSeqQlen_, gActualSeqKlen_, gStartLoc_, true);
     }
 
     __aicore__ inline void Process()
@@ -451,22 +451,77 @@ private:
         const Catlass::GemmCoord shape{mActual, MSA_BLOCK_SIZE, headDim};
         const uint64_t qOffset = static_cast<uint64_t>(task.globalRowBase) * tiling_->strideQn;
         const uint32_t pageStride = MSA_BLOCK_SIZE * MSA_K_TILE;
+        // headDim<=128 时一页 K 正好一块 L1。先把本 stile 的页号收齐，再让最多 3 页 MTE2 在飞，
+        // GetValue 不再卡在每一页的 WaitFlag(MTE2) 前面。
+        // 满 128 行的 prefill 沿用原来的单页 BlockMmad。M=128 时 3 级预取更慢。
+        const bool pipeK = (headDim <= MSA_K_TILE) && (mActual > 0U) && (mActual <= 32U);
+        if (!pipeK) {
+            for (uint32_t j = 0; j < MSA_BLOCKS_PER_STILE; ++j) {
+                const uint32_t blk = blkBase + j;
+                if (blk >= task.visibleEndBlk) {
+                    break;
+                }
+                if (KeyBlockNeedsScratch(task, blk)) {
+                    const uint64_t scratchOff = kScratchBase + static_cast<uint64_t>(j) * pageStride;
+                    blockMmad(gQuery_[qOffset], layoutQ, gKeyScratch_[scratchOff], layoutKScratch,
+                              gWorkspace_[sBase + static_cast<uint64_t>(j) * MSA_BLOCK_SIZE], layoutS, shape,
+                              needLoadL1);
+                } else if constexpr (!IS_QUANT_V) {
+                    const uint64_t kOffset = KeyBlockGmOffset(task, blk);
+                    blockMmad(gQuery_[qOffset], layoutQ, gKeyFp_[kOffset], layoutKGm,
+                              gWorkspace_[sBase + static_cast<uint64_t>(j) * MSA_BLOCK_SIZE], layoutS, shape,
+                              needLoadL1);
+                }
+                needLoadL1 = false;
+            }
+            return;
+        }
 
+        uint64_t pageOff[MSA_BLOCKS_PER_STILE];
+        uint8_t pageScratch[MSA_BLOCKS_PER_STILE];
+        uint32_t nPage = 0;
         for (uint32_t j = 0; j < MSA_BLOCKS_PER_STILE; ++j) {
             const uint32_t blk = blkBase + j;
             if (blk >= task.visibleEndBlk) {
                 break;
             }
-            if (KeyBlockNeedsScratch(task, blk)) {
-                const uint64_t scratchOff = kScratchBase + static_cast<uint64_t>(j) * pageStride;
-                blockMmad(gQuery_[qOffset], layoutQ, gKeyScratch_[scratchOff], layoutKScratch,
-                          gWorkspace_[sBase + static_cast<uint64_t>(j) * MSA_BLOCK_SIZE], layoutS, shape, needLoadL1);
+            pageScratch[nPage] = KeyBlockNeedsScratch(task, blk) ? 1U : 0U;
+            if (pageScratch[nPage] != 0U) {
+                pageOff[nPage] = kScratchBase + static_cast<uint64_t>(j) * pageStride;
             } else if constexpr (!IS_QUANT_V) {
-                const uint64_t kOffset = KeyBlockGmOffset(task, blk);
-                blockMmad(gQuery_[qOffset], layoutQ, gKeyFp_[kOffset], layoutKGm,
-                          gWorkspace_[sBase + static_cast<uint64_t>(j) * MSA_BLOCK_SIZE], layoutS, shape, needLoadL1);
+                pageOff[nPage] = KeyBlockGmOffset(task, blk);
+            } else {
+                pageOff[nPage] = 0;
             }
-            needLoadL1 = false;
+            ++nPage;
+        }
+        if (nPage == 0U) {
+            return;
+        }
+        if (needLoadL1) {
+            blockMmad.LoadQ(gQuery_[qOffset], layoutQ, shape);
+        }
+        const uint32_t depth = (nPage < BlockMmad::STAGES) ? nPage : BlockMmad::STAGES;
+        for (uint32_t i = 0; i < depth; ++i) {
+            IssuePageK(blockMmad, pageScratch[i], pageOff[i], shape, layoutKScratch, layoutKGm);
+        }
+        for (uint32_t i = 0; i < nPage; ++i) {
+            blockMmad.ConsumeK(gWorkspace_[sBase + static_cast<uint64_t>(i) * MSA_BLOCK_SIZE], layoutS, shape);
+            const uint32_t nxt = i + depth;
+            if (nxt < nPage) {
+                IssuePageK(blockMmad, pageScratch[nxt], pageOff[nxt], shape, layoutKScratch, layoutKGm);
+            }
+        }
+    }
+
+    __aicore__ inline void IssuePageK(BlockMmad& blockMmad, uint8_t scratch, uint64_t off,
+                                      const Catlass::GemmCoord& shape, const LayoutK& layoutKScratch,
+                                      const LayoutK& layoutKGm)
+    {
+        if (scratch != 0U) {
+            blockMmad.IssueK(gKeyScratch_[off], layoutKScratch, shape);
+        } else if constexpr (!IS_QUANT_V) {
+            blockMmad.IssueK(gKeyFp_[off], layoutKGm, shape);
         }
     }
 

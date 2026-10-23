@@ -203,6 +203,56 @@ inline uint32_t EstKvChunksA2BatchBalance(const MsaIndexScoreInfo& info, uint32_
     return bestChunks;
 }
 
+// 每请求只有一个 M-tile 时，packed+B 上界会让 chunks 整除不了真实 batch。
+// B=4、上界 packedM=5 时 chunks=4，实际只有 16 个 task，4 个 AIC 空转。
+// 这里改用 batch 本身。makespan 不差过约 1/6 时取更大的 chunks，
+// 避免长短不一的请求只被切成两三份、长请求堆在少数核上。
+inline uint32_t ChunkSpan(uint32_t mTasks, uint32_t chunks, uint32_t aicNum, uint32_t nStiles)
+{
+    const uint32_t tasks = mTasks * chunks;
+    const uint32_t tasksPerCore = (tasks + aicNum - 1U) / aicNum;
+    const uint32_t stilePerChunk = (nStiles + chunks - 1U) / chunks;
+    return tasksPerCore * stilePerChunk;
+}
+
+inline uint32_t EstKvChunksA2ByBatch(uint32_t aicNum, uint32_t mTasks, uint32_t nStiles)
+{
+    if (mTasks == 0U || aicNum == 0U || mTasks >= aicNum || nStiles <= 1U) {
+        return 1U;
+    }
+    uint32_t base = aicNum / GcdU32(mTasks, aicNum);
+    if (base > nStiles) {
+        base = nStiles;
+    }
+    if (base <= 1U) {
+        return 1U;
+    }
+    uint32_t bestChunks = base;
+    uint32_t bestSpan = ChunkSpan(mTasks, base, aicNum, nStiles);
+    const uint32_t spanLimit = bestSpan + ((bestSpan / 6U) > 1U ? (bestSpan / 6U) : 1U);
+    for (uint32_t chunks = base + 1U; chunks <= nStiles && chunks <= aicNum; ++chunks) {
+        const uint32_t tasks = mTasks * chunks;
+        if (tasks / chunks != mTasks) {
+            break;
+        }
+        if ((tasks % aicNum) != 0U) {
+            continue;
+        }
+        const uint32_t span = ChunkSpan(mTasks, chunks, aicNum, nStiles);
+        if (span < bestSpan || (span <= spanLimit && chunks > bestChunks)) {
+            if (span < bestSpan) {
+                bestSpan = span;
+            }
+            bestChunks = chunks;
+        }
+    }
+    const uint32_t oldSpan = ((mTasks + aicNum - 1U) / aicNum) * nStiles;
+    if (bestSpan >= oldSpan) {
+        return 1U;
+    }
+    return bestChunks;
+}
+
 // 950：M-task 填不满 AIC 且可见 KV stile 足够时，沿 S 切开打满核。A1 类 packedM≈aicNum 时 kvChunks=1。
 // A2/A3 走 EstKvChunksA2，不改变 950 的 chunks=aic/packedM。
 inline uint32_t EstKvChunks(const MsaIndexScoreInfo& info, uint32_t aicNum, uint32_t packedM, uint32_t visBlocks)
@@ -217,6 +267,13 @@ inline uint32_t EstKvChunks(const MsaIndexScoreInfo& info, uint32_t aicNum, uint
         return 1U;
     }
     if (!info.isAscend950) {
+        const uint64_t rows = static_cast<uint64_t>(info.totalQ) * static_cast<uint64_t>(info.numQHeads);
+        const bool oneTilePerReq = (info.batch >= 1U) && (info.batch < aicNum) && (rows > 0U) &&
+                                   (rows <= static_cast<uint64_t>(info.batch) * MSA_ROW_TILE_M);
+        if (oneTilePerReq) {
+            const uint32_t nStiles = (visBlocks + MSA_BLOCKS_PER_STILE - 1U) / MSA_BLOCKS_PER_STILE;
+            return EstKvChunksA2ByBatch(aicNum, info.batch, nStiles);
+        }
         return EstKvChunksA2(aicNum, packedM, visBlocks);
     }
     const uint32_t nStiles = (visBlocks + MSA_BLOCKS_PER_STILE - 1U) / MSA_BLOCKS_PER_STILE;
@@ -390,7 +447,8 @@ ge::graphStatus ParseAndCheck(gert::TilingContext* context, MsaIndexScoreInfo& i
     const gert::StorageShape* actualSeqKlenShape = context->GetOptionalInputShape(MSA_IDX_ACTUAL_SEQ_KLEN);
     OP_CHECK_IF(actualSeqKlenShape == nullptr, OP_LOGE(context, "actual_seq_klen is required."),
                 return ge::GRAPH_FAILED);
-    const gert::StorageShape* startLocShape = context->GetInputShape(MSA_IDX_START_LOC);
+    // start_loc 是 REQUIRED，但排在 block_table/scale/atten_mask 等 OPTIONAL 之后。
+    const gert::StorageShape* startLocShape = context->GetRequiredInputShape(MSA_IDX_START_LOC);
     OP_CHECK_NULL_WITH_CONTEXT(context, startLocShape);
 
     const gert::Shape& q = queryShape->GetStorageShape();

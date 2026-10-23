@@ -92,12 +92,14 @@ class MsaTaskScheduler {
 public:
     __aicore__ inline MsaTaskScheduler() {}
 
+    // rotateChunk：A2/A3 把每个请求的 chunk 0 错开到不同核。950 保持 false。
+    // nStiles 不能整除 chunks 时，多出来的 stile 否则会每个请求都落在核 0..extra-1 上。
     __aicore__ inline void Init(uint32_t batch, uint32_t numQHeads, uint32_t maxBlocksPerBatch,
                                 uint32_t scoreBlockStride, uint32_t sparseMode, uint32_t initBlocks,
                                 uint32_t localBlocks, uint32_t keyLayout, uint32_t kvChunks,
                                 const AscendC::GlobalTensor<int32_t>& actualSeqQlen,
                                 const AscendC::GlobalTensor<int32_t>& actualSeqKlen,
-                                const AscendC::GlobalTensor<int32_t>& startLoc)
+                                const AscendC::GlobalTensor<int32_t>& startLoc, bool rotateChunk = false)
     {
         batch_ = batch;
         numQHeads_ = numQHeads;
@@ -108,6 +110,7 @@ public:
         localBlocks_ = localBlocks;
         keyLayout_ = keyLayout;
         kvChunks_ = (kvChunks < 1U) ? 1U : kvChunks;
+        rotateChunk_ = rotateChunk;
         gActualSeqQlen_ = actualSeqQlen;
         gActualSeqKlen_ = actualSeqKlen;
         gStartLoc_ = startLoc;
@@ -171,6 +174,9 @@ public:
                 }
                 acc += sChunks;
             }
+        }
+        if (rotateChunk_ && sChunks > 1U) {
+            sChunkIdx = (sChunkIdx + curBatch_) % sChunks;
         }
         FillTask(task, mStart, mActual, sChunkIdx, sChunks);
     }
@@ -337,6 +343,7 @@ private:
     uint32_t localBlocks_ = MSA_DEFAULT_LOCAL_BLOCKS;
     uint32_t keyLayout_ = MSA_KEY_LAYOUT_BBND;
     uint32_t kvChunks_ = 1;
+    bool rotateChunk_ = false;
 
     uint32_t totalTasks_ = 0;
     uint32_t curBatch_ = 0;
