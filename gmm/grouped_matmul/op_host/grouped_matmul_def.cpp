@@ -143,10 +143,10 @@ public:
         this->Attr("dtype").AttrType(OPTIONAL).Int(0); // Reserved parameter, indicate output data type, not enabled.
         this->Attr("transpose_weight")
             .AttrType(OPTIONAL)
-            .Bool(false); // Reserved parameter, indicate wether input weight is transposed, not enabled.
+            .Bool(false); // Reserved parameter, indicate whether input weight is transposed, not enabled.
         this->Attr("transpose_x")
             .AttrType(OPTIONAL)
-            .Bool(false); // Reserved parameter, indicate wether input x is transposed, not enabled.
+            .Bool(false); // Reserved parameter, indicate whether input x is transposed, not enabled.
         this->Attr("group_type").AttrType(OPTIONAL).Int(-1); // Indicates the splited dimension.
         this->Attr("group_list_type")
             .AttrType(OPTIONAL)

@@ -48,9 +48,9 @@ namespace ge {
 * @li dtype: An int. only invalid for quant case. -1, output data type is int8.
 * 0, output data type is float16. 1, output data type is bfloat16. 2, output data type is int32. 3, output data type is float32. Default: 0.
 * @li transpose_weight: A bool. Reserved parameter,
-* indicate wether input weight is transposed, not enabled. Default: false.
+* indicate whether input weight is transposed, not enabled. Default: false.
 * @li transpose_x: A bool. Reserved parameter,
-* indicate wether input x is transposed, not enabled. Default: false.
+* indicate whether input x is transposed, not enabled. Default: false.
 * @li group_type: An int. Indicates the grouped dimension in group_list. -1, group_list is null.
 * 0, grouped dimension is M. 1, grouped dimension is N, not supported currently. 2, grouped dimension is K. Default: -1.
 * @li group_list_type: An int. Indicates whether the value in group_list is cumsum, count or sparse.
