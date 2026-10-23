@@ -954,7 +954,7 @@ TEST_PARAMS = {
         "batch_consistency_batch_split": [[2, 2]],
         "batch_consistency_mode_batch": [0],
         "batch_consistency_token_split": [[2, 2]],
-        "batch_consistency_shape_change": [[3, 1]],
+        "batch_consistency_shape_change": [[3, 0]],
         "template_run_mode": ["ORI_CMP_SPARSE"],
     },
 }
