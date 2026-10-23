@@ -66,6 +66,12 @@ public:
         return hcomm_.WriteNbi(batch, dst, src, bytes);
     }
 
+    __aicore__ inline int32_t WriteWithNotifyNbi(BatchHandle& batch, GM_ADDR dst, GM_ADDR src, uint32_t bytes,
+                                                 GM_ADDR notifyAddr, uint64_t notifyValue)
+    {
+        return hcomm_.WriteWithNotifyNbi(batch, dst, src, bytes, notifyAddr, notifyValue);
+    }
+
     __aicore__ inline int32_t ReadNbi(ChannelHandle channel, GM_ADDR dst, GM_ADDR src, uint64_t bytes)
     {
         return hcomm_.ReadNbi(channel, dst, src, bytes);

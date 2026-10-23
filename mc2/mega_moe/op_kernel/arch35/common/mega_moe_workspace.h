@@ -28,6 +28,12 @@ constexpr int64_t SIZE_BF_16 = 2U;
 
 constexpr int64_t INVALID_WORKSPACE_OFFSET = -1LL;
 
+// 每个源 Server 一行：int32 count+1、最多 capacity 个 int32 token ID，GM 行紧凑排列。
+HOST_DEVICE int64_t CalcServerCombineTokenListStrideBytes(int64_t capacity)
+{
+    return (capacity + 1) * static_cast<int64_t>(sizeof(int32_t));
+}
+
 // 每个共享专家按 256-token group 预留独立的同步槽，所有量化模式使用相同布局。
 HOST_DEVICE int64_t CalcSharedActivationFlagElementsPerExpert(int64_t tokenNum)
 {
@@ -97,6 +103,10 @@ struct WorkspaceLayout {
     // prefetch 软同步 GMM1 tile 状态区的 int32 元素总数（未分配时为 0）。
     int64_t gmm1TileStatusElementCount{0};
 
+    int64_t tokenIdsOffset{INVALID_WORKSPACE_OFFSET};
+    int64_t tokenBitmapsOffset{INVALID_WORKSPACE_OFFSET};
+    int64_t combineRelayCompletedCountOffset{INVALID_WORKSPACE_OFFSET};
+    int64_t serverCombineResetBytes{0};
     int64_t workspaceSize{0};
     HOST_DEVICE explicit WorkspaceLayout(const MegaMoeTilingData* tilingData)
     {
@@ -170,11 +180,30 @@ private:
         InitializeGmm1TileStatus(tilingData);
         InitializeDedupRowDesc(tilingData);
         InitializeUrmaDispatchBuffers(tilingData, serverNum);
+        if (IsServerCombineDedupOn(tilingData->dedupMode)) {
+            InitializeServerCombineBuffers(tilingData, serverNum);
+        }
         if (tilingData->sharedExpertNum > 0) {
             InitializeSharedExpertGmmOutputs(tilingData);
             InitializeUrmaSharedExpertInput(tilingData);
             InitializeSharedExpertActivationBuffers(tilingData);
         }
+    }
+
+    HOST_DEVICE void InitializeServerCombineBuffers(const MegaMoeTilingData* tilingData, uint32_t serverNum)
+    {
+        const int64_t capacity = tilingData->numMaxTokensPerRank;
+        combineRelayCompletedCountOffset = workspaceSize;
+        // 每个 Server 完成计数独占 64B，由负责归约的 AIV0 原子累加。
+        workspaceSize += Ops::Base::CeilAlign(
+            static_cast<int64_t>(serverNum) * INT_CACHELINE * static_cast<int64_t>(sizeof(int32_t)), ALIGN_512);
+        serverCombineResetBytes = workspaceSize - combineRelayCompletedCountOffset;
+        tokenIdsOffset = workspaceSize;
+        workspaceSize += Ops::Base::CeilAlign(
+            static_cast<int64_t>(serverNum) * CalcServerCombineTokenListStrideBytes(capacity), ALIGN_512);
+        tokenBitmapsOffset = workspaceSize;
+        workspaceSize += Ops::Base::CeilAlign(
+            static_cast<int64_t>(serverNum) * capacity * static_cast<int64_t>(sizeof(uint32_t)), ALIGN_512);
     }
 
     HOST_DEVICE void InitializeDispatchBuffers(const MegaMoeTilingData* tilingData)
@@ -196,9 +225,8 @@ private:
 
     HOST_DEVICE void InitializeDispatchRevWeights(const MegaMoeTilingData* tilingData)
     {
-        // dispatch 接收侧权重区，两种场景共用、MTE 与 URMA 两条初始化路径都必须调用：
-        // tkw=1 的权重预取；tkw=0 且 combine 去重——dispatch 侧把 LAST 行
-        // 整 token 的 topK 权重段落在这里，merge 一次连续读取后按成员 topkIndex 乘权。
+        // 接收侧权重区用于 tkw=1 预取或 MTE Combine 去重的 LAST 行权重。
+        // URMA mode4 未预取时在中继读取一级记录权重，不分配二级接收权重区。
         const bool dedupCombineWeights =
             tilingData->topkWeightsPrefetch == 0 && IsCombineDedupOn(tilingData->dedupMode);
         if (tilingData->topkWeightsPrefetch == 1 || dedupCombineWeights) {
@@ -483,6 +511,10 @@ struct WorkspaceInfo {
     GM_ADDR maskSlotPtr{nullptr};
     GM_ADDR dispatchRelaySendQueuePtr{nullptr};
     GM_ADDR dispatchRemoteReadyFlagSnapshotPtr{nullptr};
+    GM_ADDR tokenIdsPtr{nullptr};
+    GM_ADDR tokenBitmapsPtr{nullptr};
+    GM_ADDR combineRelayCompletedCountPtr{nullptr};
+    int64_t serverCombineResetBytes{0};
 
     int64_t flagResetElementCount{0};
     int64_t gmm1TileStatusElementCount{0};
@@ -533,6 +565,10 @@ public:
         dispatchRelaySendQueuePtr = ResolveWorkspaceAddress(base, layout.dispatchRelaySendQueueOffset);
         dispatchRemoteReadyFlagSnapshotPtr =
             ResolveWorkspaceAddress(base, layout.dispatchRemoteReadyFlagSnapshotOffset);
+        combineRelayCompletedCountPtr = ResolveWorkspaceAddress(base, layout.combineRelayCompletedCountOffset);
+        tokenIdsPtr = ResolveWorkspaceAddress(base, layout.tokenIdsOffset);
+        tokenBitmapsPtr = ResolveWorkspaceAddress(base, layout.tokenBitmapsOffset);
+        serverCombineResetBytes = layout.serverCombineResetBytes;
         flagResetElementCount = layout.flagResetElementCount;
         gmm1TileStatusElementCount = layout.gmm1TileStatusElementCount;
     }

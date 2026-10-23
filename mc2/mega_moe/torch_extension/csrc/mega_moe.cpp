@@ -590,7 +590,8 @@ int64_t CalcMteCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_
 }
 
 int64_t CalcUrmaCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank, int64_t numTopk,
-                                int64_t hidden, int64_t combineQuantMode, int64_t topkWeightsType, int64_t serverNum)
+                                int64_t hidden, int64_t combineQuantMode, int64_t topkWeightsType, int64_t serverNum,
+                                bool serverCombineReduce)
 {
     int64_t expertPerRank = moeExpertNum / epWorldSize;
     int64_t rankSyncSize = epWorldSize * PEERMEM_SYNC_SLOT_SIZE;
@@ -608,13 +609,28 @@ int64_t CalcUrmaCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64
     int64_t tokenBytes = CalcTokenScaleBytesA5(hidden, numTopk, topkWeightsType);
     int64_t relayRecordBytes = CeilAlign(tokenBytes, ALIGN_512);
     int64_t relayDataSize = CeilAlign(numMaxTokensPerRank * relayRecordBytes * serverNum, ALIGN_512);
-    int64_t relayFlagSize =
-        CeilAlign(serverNum * numMaxTokensPerRank * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_512);
+    int64_t readyRowBytes =
+        serverCombineReduce ? CeilAlign((numMaxTokensPerRank + 1) * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_32) :
+                              numMaxTokensPerRank * static_cast<int64_t>(sizeof(uint64_t));
+    int64_t relayFlagSize = CeilAlign(serverNum * readyRowBytes, ALIGN_512);
 
     int64_t combineTokenBytes = CalcCombineTokenBytesA5(hidden, combineQuantMode);
-    int64_t combineSendSize = CeilAlign(numMaxTokensPerRank * numTopk * combineTokenBytes, ALIGN_512);
+    int64_t combineSendSize =
+        serverCombineReduce ? 0 : CeilAlign(numMaxTokensPerRank * numTopk * combineTokenBytes, ALIGN_512);
 
-    return dataOffset + maskRecvSize + expertCountRecvSize + relayDataSize + relayFlagSize + combineSendSize;
+    int64_t totalBytes =
+        dataOffset + maskRecvSize + expertCountRecvSize + relayDataSize + relayFlagSize + combineSendSize;
+    if (serverCombineReduce) {
+        const int64_t contributionBytes = hidden * Y_DTYPE_SIZE;
+        const int64_t combineReceiveBytes = hidden * Y_DTYPE_SIZE;
+        totalBytes += CeilAlign(serverNum * readyRowBytes, ALIGN_512); // source Dispatch ready
+        totalBytes += CeilAlign(serverNum * numMaxTokensPerRank * numTopk * contributionBytes, ALIGN_512);
+        totalBytes += CeilAlign(serverNum * numMaxTokensPerRank * numTopk * static_cast<int64_t>(sizeof(uint64_t)),
+                                ALIGN_512); // Contribution ready
+        totalBytes +=
+            CeilAlign(serverNum * numMaxTokensPerRank * combineReceiveBytes, ALIGN_512); // 接收各 Server 部分和
+    }
+    return totalBytes;
 }
 
 // 创建 SymmBuffer 时尚未传入具体权重列表，按 WorkspaceLayout 的分配顺序保守预留：
@@ -635,6 +651,7 @@ struct CclDataBudget {
     int64_t sharedTokenGroupCount{0};
     bool isUrma;
     bool reserveCombineDedup;
+    bool reserveServerCombine;
     bool reserveDedup;
     bool needsGmm2Ready;
 
@@ -652,6 +669,7 @@ struct CclDataBudget {
           hiddenDim(intermediateHidden * 2LL),
           isUrma(serverNum > 0),
           reserveCombineDedup(!isUrma && combineCommMode == 1),
+          reserveServerCombine(isUrma && combineCommMode == 2),
           reserveDedup(!isUrma && (numTopk > 1 || reserveCombineDedup)),
           needsGmm2Ready(combineQuantMode != 0 || reserveCombineDedup)
     {
@@ -759,6 +777,15 @@ void AccumulateRoutingAuxSize(int64_t& cclDataSize, const CclDataBudget& budget)
         cclDataSize += CeilAlign(budget.serverNum * (ALIGN_32 + budget.numMaxTokensPerRank * ALIGN_32), ALIGN_512);
         cclDataSize +=
             ARCH35_MAX_AIC_NUM * CeilAlign(ARCH35_TILE_M * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_512);
+        if (budget.reserveServerCombine) {
+            // 与 WorkspaceLayout::InitializeServerCombineBuffers 的独立状态、列表和位图区域一致。
+            cclDataSize +=
+                CeilAlign(budget.serverNum * ARCH35_INT_CACHELINE * static_cast<int64_t>(sizeof(int32_t)), ALIGN_512);
+            const int64_t tokenListStride = (budget.numMaxTokensPerRank + 1LL) * static_cast<int64_t>(sizeof(int32_t));
+            cclDataSize += CeilAlign(budget.serverNum * tokenListStride, ALIGN_512);
+            cclDataSize += CeilAlign(
+                budget.serverNum * budget.numMaxTokensPerRank * static_cast<int64_t>(sizeof(uint32_t)), ALIGN_512);
+        }
     } else if (budget.reserveDedup) {
         int64_t rowDescStride =
             CeilAlign(ARCH35_DEDUP_ROW_DESC_HEADER_INT32 + 3LL * budget.numTopk, ARCH35_INT32_PER_32B);
@@ -816,6 +843,8 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
                                 int64_t topkWeightsType, int64_t serverNum)
 {
     TORCH_CHECK(serverNum >= 0, "server_num must be non-negative, but got ", serverNum);
+    TORCH_CHECK(combineCommMode >= 0 && combineCommMode <= 2, "combine_comm_mode only supports 0, 1 or 2, but got ",
+                combineCommMode);
     const char* socName = aclrtGetSocName();
     bool isA2 = (socName != nullptr && std::strstr(socName, "Ascend910B") != nullptr);
     bool isA3 = (socName != nullptr && std::strstr(socName, "Ascend910_93") != nullptr);
@@ -883,7 +912,7 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
                     ", but got ", maxRecvTokenNum);
         int64_t communicationBufferSize =
             CalcUrmaCclBufferSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, combineQuantMode,
-                                    topkWeightsType, serverNum);
+                                    combineCommMode == 2 ? 1 : topkWeightsType, serverNum, combineCommMode == 2);
         return CeilAlign(communicationBufferSize, ALIGN_512) +
                CalcCclDataSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden,
                                  maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode);

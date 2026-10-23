@@ -228,8 +228,8 @@ struct MegaMoeTilingData {
     bool isSharedQuantIndependent;
     // Appended to retain all existing field offsets; host and kernel packages must match.
     MegaMoeL1Layout a8w4L1Layout;
-    // 门控后实际开启的去重模式：0=全关，1=仅 combine 开，2=仅 dispatch 开，3=双开。
-    // 判断统一用 IsDispatchDedupOn/IsCombineDedupOn（mega_moe_peermem.h）。
+    // MTE：0=全关，1=仅 Combine，2=仅 Dispatch，3=两者；URMA：0=直接返回，4=Server Combine。
+    // 判断统一用 IsDispatchDedupOn/IsCombineDedupOn/IsServerCombineDedupOn（mega_moe_peermem.h）。
     // 0 时所有路径与无该字段时逐字等价；dispatch 去重数值恒等，combine 去重为生产卡预加权合并。
     int32_t dedupMode;
     // 预量化输入搬运 tile 配置。动态量化路径保持旧的 scratch 布局，这两个字段为 0。

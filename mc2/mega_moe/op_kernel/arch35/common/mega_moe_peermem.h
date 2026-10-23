@@ -29,11 +29,19 @@
 #define HOST_DEVICE inline
 // host 侧自洽：Ops::Base::CeilAlign/CeilDiv 的提供方，不再依赖包含方的 include 顺序。
 #include "op_common/op_host/util/math_util.h"
+#include "op_common/op_host/util/bfloat16.h"
 #endif
 #include "../mega_moe_tiling.h"
 #include "mega_moe_constants.h"
 
 namespace MegaMoeImpl {
+
+// Combine 输出和 Server 归约记录使用 BF16。
+#if defined(__DAV_C310_CUBE__) || defined(__DAV_C310_VEC__)
+constexpr int64_t SIZE_OF_BF16 = sizeof(bfloat16_t);
+#else
+constexpr int64_t SIZE_OF_BF16 = sizeof(Ops::Base::bfloat16);
+#endif
 
 // 原同步布局：前 48 KiB 是 rank 槽位，随后 12 KiB 是各 AIV 的同步计数区。
 // URMA 的 rank 槽位超过预留区时动态扩展；MTE 保持原 60 KiB 固定布局。
@@ -86,10 +94,9 @@ HOST_DEVICE int64_t CalcDispatchRouteIndexAlignSize(const MegaMoeTilingData* til
                                 ALIGN_32);
 }
 
-// dedupMode 的值就是门控后实际开启的去重模式：
-// 0 = dispatch 关、combine 关；1 = dispatch 关、combine 开；
-// 2 = dispatch 开、combine 关；3 = dispatch 开、combine 开。
-// 下面两个判断函数是唯一入口，host 和 kernel 都用它们，不要在别处自己写数值比较。
+// MTE: 0=全关，1=Combine，2=Dispatch，3=两者；URMA: 0=直接返回，4=Server Combine。
+// Topology-specific tiling validation rejects unsupported combinations.
+constexpr int32_t DEDUP_MODE_SERVER_COMBINE = 4;
 HOST_DEVICE constexpr bool IsDispatchDedupOn(int32_t dedupMode)
 {
     return dedupMode == DEDUP_MODE_DISPATCH_ONLY || dedupMode == DEDUP_MODE_BOTH;
@@ -98,6 +105,11 @@ HOST_DEVICE constexpr bool IsDispatchDedupOn(int32_t dedupMode)
 HOST_DEVICE constexpr bool IsCombineDedupOn(int32_t dedupMode)
 {
     return dedupMode == DEDUP_MODE_COMBINE_ONLY || dedupMode == DEDUP_MODE_BOTH;
+}
+
+HOST_DEVICE constexpr bool IsServerCombineDedupOn(int32_t dedupMode)
+{
+    return dedupMode == DEDUP_MODE_SERVER_COMBINE;
 }
 
 // 单 token 的量化记录包含数据和 mx scale，按 32B 对齐。
@@ -138,6 +150,12 @@ HOST_DEVICE int64_t CalcCombineTokenBytes(int64_t h, int64_t yDtypeSize, bool is
     return Ops::Base::CeilAlign(tokenStorageBytes + storedScaleBytes, ALIGN_32);
 }
 
+HOST_DEVICE int64_t CalcServerCombineReadyRowBytes(int64_t capacity)
+{
+    // mode4：B 个 uint64 槽保存低 32 位位图，后接 uint64 count+1；整行按 32B 对齐。
+    return Ops::Base::CeilAlign((capacity + 1) * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_32);
+}
+
 // GM 区域保存相对基址的偏移、字节数和初始化时计算的地址。
 struct GmMemoryRegion {
     int64_t offset{-1};
@@ -154,7 +172,11 @@ struct PeermemInfo {
     GmMemoryRegion quantTokenScale;
     GmMemoryRegion dispatchReceive;
     GmMemoryRegion dispatchFlag;
+    GmMemoryRegion sourceReady;
+    GmMemoryRegion contributionReady;
     GmMemoryRegion combineSend;
+    GmMemoryRegion contribution;
+    GmMemoryRegion combineReceive;
     GM_ADDR cclDataPtr{nullptr}; // 通信区之后按 512B 对齐的 Workspace 基址。
     int64_t totalSize{0};
 
@@ -205,17 +227,11 @@ private:
         quantTokenScale = Reserve(Ops::Base::CeilAlign(capacity * tokenScaleBytes, ALIGN_512));
 
         // Combine 接收区：保存回传结果，供 Unpermute 读取。
-        // 输出 dtype 在容量检查前已限定为 BF16。
-        constexpr int64_t outputElementBytes = 2;
-        const int64_t tokenBytes =
-            CalcCombineTokenBytes(tilingData.h, outputElementBytes, tilingData.combineQuantMode != COMBINE_NO_QUANT);
-        combineSend = Reserve(Ops::Base::CeilAlign(
-            static_cast<int64_t>(tilingData.numMaxTokensPerRank) * tilingData.topK * tokenBytes, ALIGN_512));
+        InitializeCombineSendRegion(tilingData);
     }
 
     HOST_DEVICE void InitializeUrmaLayout(const MegaMoeTilingData& tilingData, uint32_t elemsPerByte)
     {
-        const int64_t capacity = tilingData.numMaxTokensPerRank;
         uint32_t rankNumPerServer = tilingData.rankNumPerServer;
         if (rankNumPerServer == 0U || rankNumPerServer > tilingData.epWorldSize) {
             rankNumPerServer = tilingData.epWorldSize;
@@ -226,6 +242,23 @@ private:
         rankSync = Reserve(CalcUrmaRankSyncSize(tilingData.epWorldSize));
         syncCount = Reserve(PEERMEM_SYNC_COUNT_REGION_SIZE);
         totalSize = Ops::Base::CeilAlign(totalSize, ALIGN_512);
+
+        // 按模式分配 Dispatch 中继记录和 Combine 接收区。
+        if (IsServerCombineDedupOn(tilingData.dedupMode)) {
+            InitializeUrmaDispatchRegions(tilingData, elemsPerByte, serverNum, true);
+            InitializeUrmaReadyRegions(tilingData, serverNum, true);
+            InitializeServerCombineRegions(tilingData, serverNum);
+        } else {
+            InitializeUrmaDispatchRegions(tilingData, elemsPerByte, serverNum, tilingData.topkWeightsPrefetch == 1);
+            InitializeUrmaReadyRegions(tilingData, serverNum, false);
+            InitializeCombineSendRegion(tilingData);
+        }
+    }
+
+    HOST_DEVICE void InitializeUrmaDispatchRegions(const MegaMoeTilingData& tilingData, uint32_t elemsPerByte,
+                                                   int64_t serverNum, bool recordHasWeights)
+    {
+        const int64_t capacity = tilingData.numMaxTokensPerRank;
 
         // Dispatch mask 与专家计数：分别记录路由集合和各源 Rank 的 token 数。
         const int64_t maskAlignSize = CalcDispatchMaskAlignSize(capacity, tilingData.topK);
@@ -238,22 +271,46 @@ private:
                                              static_cast<int64_t>(sizeof(int32_t)),
                                          ALIGN_512));
 
-        // Dispatch 中继：按源 Server 保存量化记录及 ready 标志。
-        const bool recordHasWeights = tilingData.topkWeightsPrefetch == 1 || IsCombineDedupOn(tilingData.dedupMode);
+        // Dispatch 中继：按源 Server 保存量化记录。
         const int64_t tokenScaleBytes =
             CalcQuantTokenScaleBytes(tilingData.h, elemsPerByte, tilingData.topK, recordHasWeights);
         const int64_t relayRecordBytes = Ops::Base::CeilAlign(tokenScaleBytes, ALIGN_512);
         dispatchReceive = Reserve(Ops::Base::CeilAlign(capacity * relayRecordBytes * serverNum, ALIGN_512));
-        dispatchFlag =
-            Reserve(Ops::Base::CeilAlign(serverNum * capacity * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_512));
+    }
 
-        // Combine 接收区：保存回传结果，供 Unpermute 读取。
+    HOST_DEVICE void InitializeUrmaReadyRegions(const MegaMoeTilingData& tilingData, int64_t serverNum,
+                                                bool serverCombineReduce)
+    {
+        const int64_t capacity = tilingData.numMaxTokensPerRank;
+        const int64_t readyRowBytes = serverCombineReduce ? CalcServerCombineReadyRowBytes(capacity) :
+                                                            capacity * static_cast<int64_t>(sizeof(uint64_t));
+        dispatchFlag = Reserve(Ops::Base::CeilAlign(serverNum * readyRowBytes, ALIGN_512));
+        if (serverCombineReduce) {
+            // 三个状态区连续分配，供入口统一清零。
+            sourceReady = Reserve(Ops::Base::CeilAlign(serverNum * readyRowBytes, ALIGN_512));
+            contributionReady = Reserve(Ops::Base::CeilAlign(
+                serverNum * capacity * tilingData.topK * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_512));
+        }
+    }
+
+    HOST_DEVICE void InitializeCombineSendRegion(const MegaMoeTilingData& tilingData)
+    {
         // 输出 dtype 在容量检查前已限定为 BF16。
-        constexpr int64_t outputElementBytes = 2;
         const int64_t tokenBytes =
-            CalcCombineTokenBytes(tilingData.h, outputElementBytes, tilingData.combineQuantMode != COMBINE_NO_QUANT);
+            CalcCombineTokenBytes(tilingData.h, SIZE_OF_BF16, tilingData.combineQuantMode != COMBINE_NO_QUANT);
         combineSend = Reserve(Ops::Base::CeilAlign(
             static_cast<int64_t>(tilingData.numMaxTokensPerRank) * tilingData.topK * tokenBytes, ALIGN_512));
+    }
+
+    HOST_DEVICE void InitializeServerCombineRegions(const MegaMoeTilingData& tilingData, int64_t serverNum)
+    {
+        const int64_t capacity = tilingData.numMaxTokensPerRank;
+
+        // Contribution 和部分和固定使用 BF16。
+        const int64_t tokenBytes = static_cast<int64_t>(tilingData.h) * SIZE_OF_BF16;
+        contribution = Reserve(Ops::Base::CeilAlign(serverNum * capacity * tilingData.topK * tokenBytes, ALIGN_512));
+        // 接收区按 [token][贡献 Server][H] 排列，供源卡按 Server 顺序累加。
+        combineReceive = Reserve(Ops::Base::CeilAlign(serverNum * capacity * tokenBytes, ALIGN_512));
     }
 };
 

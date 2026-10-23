@@ -11,6 +11,8 @@
 #ifndef MEGA_MOE_LAYERED_COMBINE_SEND_H
 #define MEGA_MOE_LAYERED_COMBINE_SEND_H
 
+#include <type_traits>
+
 #include "../common/mega_moe_utils.h"
 #include "../common/mega_moe_mxfp8_utils.h"
 
@@ -19,6 +21,7 @@ namespace MegaMoeImpl::CombineImpl {
 
 template <typename CommPolicy>
 struct LayeredCombineBatchState {
+    // 实际接收卡：普通模式为 token 原始输入卡，Server 去重模式为本 Server 中继卡。
     uint32_t dstRankId = 0U;
     typename CommPolicy::BatchHandle batchHandle{};
     uint32_t pendingTokenCount = 0U;
@@ -72,6 +75,46 @@ __aicore__ inline void CombineSendTokenToRemote(uint32_t batchStart, uint32_t cu
         GM_ADDR remoteAddr = GetRankWinAddrWithOffset(toRankId, gmRemoteOffset) + dstBaseOffset * sizeof(DataType);
         // Combine 使用 Hcomm 默认 WQE 配置，不能复用 Dispatch 一级的无 CQE 配置。
         comm.WriteNbi(batchHandle, remoteAddr, srcAddr, quantTokenSize * sizeof(DataType));
+    }
+}
+
+/* 发送到本 Server 中继，metadata 中的 rank 仍表示 token 原始输入卡。 */
+template <typename CommPolicy>
+__aicore__ inline void CombineSendTokenToRelay(uint32_t batchStart, uint32_t n, uint32_t rankId,
+                                               LocalTensor<int32_t>& metaInfoTensor,
+                                               const LocalTensor<bfloat16_t>& tokenTensor, const Params& params,
+                                               GM_ADDR localSrcPtr, CommPolicy& comm,
+                                               LayeredCombineBatchState<CommPolicy>& batchState)
+{
+    uint32_t originRank = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + RANK_ID);
+    uint32_t tokenIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOKEN_ID);
+    uint32_t topkIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOPK_INDEX);
+
+    const uint32_t originServer = originRank / params.tilingData->rankNumPerServer;
+    const uint64_t slot = (static_cast<uint64_t>(originServer) * params.tilingData->numMaxTokensPerRank + tokenIdx) *
+                              params.tilingData->topK +
+                          topkIdx;
+    const uint64_t tokenBytes = static_cast<uint64_t>(n) * sizeof(bfloat16_t);
+    const uint32_t targetRank = batchState.dstRankId;
+    const uint64_t dataOffset = params.peermemInfo.contribution.offset + slot * tokenBytes;
+    const uint64_t readyOffset = params.peermemInfo.contributionReady.offset + slot * sizeof(uint64_t);
+    if (targetRank == rankId) {
+        // 本地贡献整 token 复制，写回完成后发布 ready。
+        GlobalTensor<bfloat16_t> gmm2OutGlobalTensor, contributionGlobalTensor;
+        gmm2OutGlobalTensor.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(localSrcPtr));
+        contributionGlobalTensor.SetGlobalBuffer(
+            reinterpret_cast<__gm__ bfloat16_t*>(GetRankWinAddrWithOffset(targetRank, dataOffset)));
+        const DataCopyExtParams copyParams{1U, static_cast<uint32_t>(tokenBytes), 0U, 0U, 0U};
+        DataCopyPad(tokenTensor, gmm2OutGlobalTensor, copyParams, {false, 0U, 0U, 0U});
+        SyncFuncStatic<HardEvent::MTE2_MTE3, SYNC_EVENT_ID2>();
+        DataCopyPad(contributionGlobalTensor, tokenTensor, copyParams);
+        SyncFuncStatic<HardEvent::MTE3_S, SYNC_EVENT_ID2>();
+        WriteGmByPassDCache(reinterpret_cast<__gm__ uint64_t*>(GetRankWinAddrWithOffset(targetRank, readyOffset)),
+                            uint64_t(1));
+    } else {
+        comm.WriteWithNotifyNbi(batchState.batchHandle, GetRankWinAddrWithOffset(targetRank, dataOffset), localSrcPtr,
+                                static_cast<uint32_t>(tokenBytes), GetRankWinAddrWithOffset(targetRank, readyOffset),
+                                uint64_t(1));
     }
 }
 
@@ -130,6 +173,40 @@ __aicore__ inline void CombineTokenGroup(uint32_t tokenStart, uint32_t tokenCoun
         }
     }
     SyncFuncStatic<AscendC::HardEvent::MTE3_MTE2, SYNC_EVENT_ID2>();
+}
+
+/*
+ * Server 去重发送 BF16 专家结果；本地复制由发送函数负责。
+ */
+template <typename CommPolicy>
+__aicore__ inline void CombineServerDedupTokenGroup(uint32_t tokenStart, uint32_t tokenCount, uint32_t n,
+                                                    uint32_t groupIdx, uint32_t rankId, GM_ADDR gmm2OutAddr,
+                                                    GM_ADDR metaInfoAddr, const Params& params, CommPolicy& comm,
+                                                    LayeredCombineBatchState<CommPolicy>& batchState)
+{
+    constexpr uint32_t BATCH_TOKENS = 256U;
+    int64_t offset = ALIGN_512;
+    LocalTensor<int32_t> metaInfoTensor(TPosition::VECIN, offset, tokenCount * META_INFO_SIZE);
+    offset += tokenCount * META_INFO_SIZE * sizeof(int32_t);
+    // 紧接 metadata 准备整 token 搬运缓冲，当前阶段由本 Group 复用。
+    LocalTensor<bfloat16_t> tokenTensor(TPosition::VECIN, offset, n);
+    AscendC::GlobalTensor<int32_t> metaInfoGlobalTensor;
+    metaInfoGlobalTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(metaInfoAddr));
+    SyncFuncStatic<AscendC::HardEvent::S_MTE2, SYNC_EVENT_ID1>();
+    AscendC::DataCopy(metaInfoTensor, metaInfoGlobalTensor, tokenCount * META_INFO_SIZE);
+    // 整批 metadata 搬入完成后，再逐 token 读取字段。
+    SyncFuncStatic<AscendC::HardEvent::MTE2_S, SYNC_EVENT_ID3>();
+    for (uint32_t i = 0; i < tokenCount; i++) {
+        GM_ADDR localSrcPtr = gmm2OutAddr + static_cast<uint64_t>(tokenStart + i) * n * sizeof(bfloat16_t);
+        CombineSendTokenToRelay(i, n, rankId, metaInfoTensor, tokenTensor, params, localSrcPtr, comm, batchState);
+        if (batchState.dstRankId != rankId) {
+            ++batchState.pendingTokenCount;
+            if (batchState.pendingTokenCount == BATCH_TOKENS) {
+                comm.BatchCommit(batchState.batchHandle);
+                batchState.pendingTokenCount = 0U;
+            }
+        }
+    }
 }
 
 } // namespace MegaMoeImpl::CombineImpl

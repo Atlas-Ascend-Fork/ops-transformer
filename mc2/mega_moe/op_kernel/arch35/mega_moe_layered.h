@@ -107,6 +107,52 @@ public:
     __aicore__ inline void Process();
 
 private:
+    __aicore__ inline bool IsCombineServerDedupEnabled() const
+    {
+        return IsServerCombineDedupOn(params_.tilingData->dedupMode);
+    }
+    __aicore__ inline bool RecordHasWeights() const
+    {
+        return TopkWeightsPrefetch || IsCombineServerDedupEnabled();
+    }
+    __aicore__ inline uint64_t GatherCombineTokenIds(uint32_t originServer, const WorkRange& tokenRange,
+                                                     const LocalTensor<int32_t>& tokenBitmaps,
+                                                     const LocalTensor<int32_t>& tokenIds,
+                                                     const LocalTensor<int32_t>& selectedTokenIds,
+                                                     const LocalTensor<int32_t>& selectedTokenBitmaps,
+                                                     const LocalTensor<uint8_t>& compareMask);
+    __aicore__ inline void BuildServerCombineLists();
+    __aicore__ inline bool IsServerContributionsReady(uint32_t originServer,
+                                                      const LocalTensor<uint32_t>& tokenIdsTensor,
+                                                      const LocalTensor<uint32_t>& expectedTopkBitmapsTensor,
+                                                      uint32_t batchTokenCount, uint32_t workUbOffset) const;
+    __aicore__ inline uint64_t WaitForServerCombineTokenCounts(const LocalTensor<uint32_t>& tokenCountsTensor,
+                                                               uint64_t tokenListStrideBytes) const;
+    __aicore__ inline void ProcessCombineRelay();
+    __aicore__ inline void ReduceRelayContributions();
+    __aicore__ inline void ReduceRelayContributionsInRange(const WorkRange& tokenRange,
+                                                           const LocalTensor<uint32_t>& tokenCountsTensor,
+                                                           const LocalTensor<uint32_t>& tokenIdsTensor,
+                                                           const LocalTensor<uint32_t>& expectedTopkBitmapsTensor,
+                                                           uint64_t tokenListStrideBytes, uint32_t workUbOffset);
+    __aicore__ inline void ReduceRelayContributionsForBatch(
+        uint32_t originServer, const WorkRange& batchRange, const GlobalTensor<uint32_t>& tokenIdsGlobalTensor,
+        const GlobalTensor<uint32_t>& expectedTopkBitmapsGlobalTensor, const LocalTensor<uint32_t>& tokenIdsTensor,
+        const LocalTensor<uint32_t>& expectedTopkBitmapsTensor, uint32_t workUbOffset);
+    __aicore__ inline void ReduceRelayContributionsForToken(uint32_t originServer, uint32_t tokenIdx,
+                                                            uint32_t expectedTopkBitmap, uint32_t workUbOffset);
+    __aicore__ inline void AccumulateRelayContributions(uint32_t expectedTopkBitmap,
+                                                        const GlobalTensor<bfloat16_t>& contributionGlobalTensor,
+                                                        const LocalTensor<bfloat16_t>& contributionTensor,
+                                                        const LocalTensor<float>& inputTensor,
+                                                        const LocalTensor<float>& sumTensor,
+                                                        const LocalTensor<float>& topkWeightsTensor);
+    __aicore__ inline void SendServerCombineResults();
+    __aicore__ inline void SendRelayResultsToTargetRank(uint32_t targetServer, uint32_t targetRank, uint32_t count,
+                                                        uint32_t batchTokens,
+                                                        const GlobalTensor<uint32_t>& tokenIdsGlobalTensor,
+                                                        const LocalTensor<uint32_t>& tokenIdsTensor);
+    __aicore__ inline void UnpermuteServerCombine();
     __aicore__ inline void InitTopology(const MegaMoeTilingData* tilingData);
     __aicore__ inline void InitDispatchLayout(const MegaMoeTilingData* tilingData);
     __aicore__ inline void InitWorkspace(GM_ADDR workspaceGM, const MegaMoeTilingData* tilingData);
@@ -188,17 +234,35 @@ private:
     __aicore__ inline void ExpertTokenNumCopyOut();
     __aicore__ inline void CopyLocalDispatchTokens(int32_t dstRow, int32_t srcRank, int32_t tokenOffset,
                                                    int32_t tokenCount);
-    __aicore__ inline void ResetContiguousGm(GM_ADDR dstAddr, uint64_t sizeBytes);
-    __aicore__ inline void ResetDispatchState();
+    __aicore__ inline void ResetCommunicationState();
+    __aicore__ inline void PublishLocalDispatchRelayCount();
+    __aicore__ inline void SendDispatchRelayQueue(uint32_t targetServer, uint32_t relayRank,
+                                                  const LocalTensor<int32_t>& tokenIds);
     __aicore__ inline void SendDispatchRelayQueues();
-    __aicore__ inline void BuildDispatchRelayQueues();
-    __aicore__ inline void AppendTokenToDispatchRelayQueues(GlobalTensor<int32_t>& topkIdsGlobal, uint32_t tokenIdx);
-    __aicore__ inline void AppendDispatchRelayData(uint32_t targetServer, uint32_t relayRank, BatchHandle& batchHandle,
-                                                   int32_t slot);
+    template <bool CombineServerDedup>
+    __aicore__ inline void BuildDispatchRelayCandidates(const LocalTensor<int32_t>& topkIds,
+                                                        const LocalTensor<uint32_t>& masks, uint32_t tokenCount,
+                                                        const WorkRange& serverRange);
+    __aicore__ inline void EnqueueDispatchRelayCandidates(const LocalTensor<uint32_t>& masks,
+                                                          const WorkRange& tokenRange, const WorkRange& serverRange);
+    __aicore__ inline uint32_t TransposeDispatchRelayBitmaps(const LocalTensor<uint32_t>& masks,
+                                                             const LocalTensor<uint32_t>& transposedMasks,
+                                                             uint32_t tokenCount);
+    __aicore__ inline void PublishDispatchRelayBitmaps(const LocalTensor<uint32_t>& masks, const WorkRange& tokenRange,
+                                                       const WorkRange& serverRange, uint32_t rowElements);
+    __aicore__ inline void PrepareDispatchRelayQueues();
+    template <bool CombineServerDedup>
+    __aicore__ inline void BuildDispatchRelayQueues(const LocalTensor<int32_t>& topkIds,
+                                                    const LocalTensor<uint32_t>& masks,
+                                                    const LocalTensor<uint32_t>& transposedMasks,
+                                                    const WorkRange& tokenRange, uint32_t batchTokens);
+    __aicore__ inline void EnqueueDispatchRelayToken(uint32_t targetServer, uint32_t tokenIdx);
+    __aicore__ inline void AppendDispatchRelayData(uint32_t relayRank, BatchHandle& batchHandle, int32_t tokenIdx);
     __aicore__ inline void AppendDispatchRelayFlag(uint32_t targetServer, uint32_t relayRank, BatchHandle& batchHandle,
-                                                   int32_t slot, bool firstFlag);
+                                                   int32_t tokenIdx, bool firstFlag);
     __aicore__ inline void CommitDispatchRelayBatch(uint32_t targetServer, uint32_t relayRank, BatchHandle& batchHandle,
-                                                    int32_t batchStart, uint32_t batchTokenCount);
+                                                    int32_t batchStart, uint32_t batchTokenCount,
+                                                    const LocalTensor<int32_t>& tokenIds);
     __aicore__ inline void LoadTokenFromLocalRelay(uint32_t srcServer, uint32_t tokenIndex, int32_t bufferIdx,
                                                    uint32_t copyInNum);
     __aicore__ inline void CopyTokensFromLocalRelay(int32_t rowDstOffsetInCore, uint32_t srcServer, int32_t copyNum,
@@ -237,9 +301,17 @@ private:
                                                   uint32_t expertTokenCount, uint32_t rowOffsetInExpert = 0U);
     __aicore__ inline bool GetCombineRankRange(uint32_t expertIdx, uint32_t dstRank, uint32_t& rowStart,
                                                uint32_t& tokenCount);
-    __aicore__ inline void ProcessCombineRank(const GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& gmm2State,
-                                              uint32_t expertIdx, uint32_t waveRowBegin, uint32_t waveRowEnd,
-                                              CombineBatchState& batchState);
+    template <bool CombineServerDedup>
+    __aicore__ inline void CombineTokensOfExpert(const GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& gmm2State,
+                                                 uint32_t expertIdx, const WorkRange& expertRowRange,
+                                                 CombineBatchState& batchState);
+    template <bool CombineServerDedup>
+    __aicore__ inline void ProcessCombineToTargetRank(ExpertLoopState waveBeginState, const ExpertTokenRange& range,
+                                                      uint32_t targetRank);
+    template <bool CombineServerDedup>
+    __aicore__ inline void CombineTokensInRange(const GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& gmm2State,
+                                                uint32_t expertIdx, const WorkRange& rowRange,
+                                                CombineBatchState& batchState);
     __aicore__ inline void LockOwnedRemoteChannels();
     __aicore__ inline void DrainAndUnlockOwnedRemoteChannels();
 
@@ -517,7 +589,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitDispa
     mxQuantScaleAlignBytes_ = mxQuantScaleNumAlignPerToken_ * sizeof(uint8_t);
     mxQuantTokenScaleAlignBytes_ =
         Ops::Base::CeilAlign(mxQuantTokenAlignBytes_ + mxQuantScaleAlignBytes_, static_cast<uint32_t>(ALIGN_32));
-    if constexpr (TopkWeightsPrefetch) {
+    if (RecordHasWeights()) {
         weightAlignBytes_ =
             Ops::Base::CeilAlign(static_cast<uint32_t>(topK_ * sizeof(float)), static_cast<uint32_t>(ALIGN_32));
         mxQuantTokenScaleAlignBytes_ += weightAlignBytes_;
@@ -1215,6 +1287,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessMo
     }
     gmm1PingPongIdx_ = 0U;
     if constexpr (g_coreType == AIV) {
+        if (IsCombineServerDedupEnabled()) {
+            ProcessCombineRelay();
+        }
         if (subBlockIdx_ == 1U) {
             PipeBarrier<PIPE_ALL>();
             ExpertTokenNumCopyOut();
@@ -1232,9 +1307,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
     int64_t oriOverflowMode = GetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>();
     SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(0);
     SendAndQuantBuffInit();
-    SendMaskCal();        // 源卡按全局专家计算掩码，并推送到目标专家卡
-    ResetFlagList();      // 清零工作空间中的同步标志
-    ResetDispatchState(); // 清零跨 Server URMA Dispatch 队列和中继就绪标志
+    SendMaskCal();             // 源卡按全局专家计算掩码，并推送到目标专家卡
+    ResetFlagList();           // 清零工作空间中的同步标志
+    ResetCommunicationState(); // 清零通信队列、CCL ready 及 Combine 工作空间状态
     if (sharedExpertNum_ > 0) {
         SharedExpertCopyInput();
     }
@@ -1256,12 +1331,15 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
     }
 
     if constexpr (g_coreType == AIV) {
-        // 全部物理 AIV 先量化各自 token 分片，再批量发布本 Server ready flag 并构造一级队列。
-        // 量化/flag 的 MTE3 与 Scalar 建队列允许重叠；CrossRankSync 尾部统一排空并同步全部 AIV。
+        // 全部物理 AIV 量化各自 token 分片，再构造一级队列；CrossRankSync 同步全部 AIV。
         DispatchPrepareBuffInit();
         QuantizeLocalTokensToRelay();
-        SetLocalRelayReadyFlags();
-        BuildDispatchRelayQueues();
+        if (!IsCombineServerDedupEnabled()) {
+            SetLocalRelayReadyFlags();
+            // 等待普通模式的本地 ready 搬出读完 UB，再交给建表阶段复用。
+            SyncFuncStatic<HardEvent::MTE3_MTE2, SYNC_EVENT_ID2>();
+        }
+        PrepareDispatchRelayQueues();
     }
 
     CrossRankSyncInWorldSize(true); // 同一物理 AIV 继续使用 SendMask 已取得的锁，并在同步结束后释放。
@@ -1279,9 +1357,13 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
 
     // 4. 本卡数据Unpermute
     if constexpr (g_coreType == AIV) {
-        UnpermuteBuffInit();
         CrossRankSyncInWorldSize(false); // Wave 已释放固定归属锁，同步核重新取得通道后确认 Combine 完成。
-        Unpermute();
+        if (IsCombineServerDedupEnabled()) {
+            UnpermuteServerCombine();
+        } else {
+            UnpermuteBuffInit();
+            Unpermute();
+        }
     }
     SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(oriOverflowMode);
 }
@@ -1293,6 +1375,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
 #if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL)
 #include "stage/mega_moe_layered_dispatch.h"
 #include "stage/mega_moe_layered_combine.h"
+#include "stage/mega_moe_layered_combine_relay.h"
 #endif
 
 #undef TemplateMegaMoeLayeredTypeClass

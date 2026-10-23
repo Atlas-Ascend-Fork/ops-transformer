@@ -21,6 +21,8 @@
 
 namespace MegaMoeImpl {
 
+using namespace AscendC;
+
 // 计算 layered 规划所需的专家计数元数据：
 //   result[0] = Σ ceil(expertCount[i] / L1_TILE_M_256)
 //   result[8] = 最后一个 expertCount[i] != 0 的下标；全部为空时为 -1
@@ -77,6 +79,76 @@ __simd_vf__ inline void ComputeLayeredWaveMetaVF(__ubuf__ int32_t* counts, __ubu
 
     AscendC::Reg::StoreAlign(result, groupSumReg, firstLaneMask);
     AscendC::Reg::StoreAlign(result + 8, lastIndexReg, firstLaneMask);
+}
+
+// 每个 token 输出一行 64 个 uint32 位图，对应当前 Server 段；未使用位置写零。
+template <bool CombineServerDedup>
+__simd_vf__ inline void BuildDispatchRelayCandidatesByServerVF(__ubuf__ int32_t* topkIds, __ubuf__ uint32_t* bitmaps,
+                                                               uint32_t tokenCount, uint32_t topK, int32_t expertCount,
+                                                               int32_t expertsPerServer, int32_t localServer,
+                                                               uint32_t serverStart, uint32_t serverCount)
+{
+    constexpr uint32_t ROW_ELEMENTS = AscendC::GetVecLen() / sizeof(int32_t);
+    using namespace AscendC::Reg;
+    RegTensor<int32_t> expertReg, laneReg;
+    RegTensor<uint32_t> oneReg, zeroReg, bitsReg, groupReg, bitmapReg, outputReg;
+    MaskReg fullMask = CreateMask<uint32_t, MaskPattern::ALL>();
+    MaskReg activeMask, lowerMask, groupMask, laneMask;
+    uint32_t activeCount = topK;
+    activeMask = UpdateMask<uint32_t>(activeCount);
+    Arange(laneReg, 0);
+    Duplicate(oneReg, 1U, fullMask);
+    Duplicate(zeroReg, 0U, fullMask);
+    ShiftLeft(bitsReg, oneReg, laneReg, activeMask);
+    for (uint32_t token = 0; token < tokenCount; ++token) {
+        LoadAlign(expertReg, topkIds + token * ROW_ELEMENTS);
+        Duplicate(outputReg, 0U, fullMask);
+        for (uint32_t index = 0; index < serverCount; ++index) {
+            const uint32_t server = serverStart + index;
+            if constexpr (!CombineServerDedup) {
+                if (server == static_cast<uint32_t>(localServer)) {
+                    continue;
+                }
+            }
+            int32_t begin = static_cast<int32_t>(static_cast<uint64_t>(server) * expertsPerServer);
+            uint64_t end = static_cast<uint64_t>(server + 1U) * expertsPerServer;
+            int32_t limit = end < static_cast<uint64_t>(expertCount) ? static_cast<int32_t>(end) : expertCount;
+            Compares<int32_t, CMPMODE::GE>(lowerMask, expertReg, begin, activeMask);
+            Compares<int32_t, CMPMODE::LT>(groupMask, expertReg, limit, lowerMask);
+            Select(groupReg, bitsReg, zeroReg, groupMask);
+            Reduce<ReduceType::SUM>(bitmapReg, groupReg, fullMask);
+            Duplicate(bitmapReg, bitmapReg, fullMask);
+            Compares<int32_t, CMPMODE::EQ>(laneMask, laneReg, static_cast<int32_t>(index), fullMask);
+            Select(outputReg, bitmapReg, outputReg, laneMask);
+        }
+        StoreAlign(bitmaps + token * ROW_ELEMENTS, outputReg, fullMask);
+    }
+}
+
+/* 整批匹配贡献位图，仅输出一个 pending：0 表示全部到齐，1 表示仍有缺失。 */
+__simd_vf__ inline void CheckServerContributionsVF(__ubuf__ uint32_t* arrivedBitmaps,
+                                                   __ubuf__ uint32_t* expectedBitmaps, __ubuf__ uint32_t* pending,
+                                                   uint32_t tokenCount)
+{
+    constexpr uint32_t ELEMENTS_PER_VECTOR = AscendC::GetVecLen() / sizeof(uint32_t);
+    using namespace AscendC::Reg;
+    RegTensor<uint32_t> arrivedReg, expectedReg, matchedReg, pendingReg, oneReg, resultReg;
+    MaskReg fullMask = CreateMask<uint32_t, MaskPattern::ALL>();
+    MaskReg firstLaneMask = CreateMask<uint32_t, MaskPattern::VL1>();
+    MaskReg activeMask, mismatchMask;
+    Duplicate(pendingReg, 0U, fullMask);
+    Duplicate(oneReg, 1U, fullMask);
+    for (uint32_t offset = 0U; offset < tokenCount; offset += ELEMENTS_PER_VECTOR) {
+        uint32_t validCount = tokenCount - offset;
+        activeMask = UpdateMask<uint32_t>(validCount);
+        LoadAlign(arrivedReg, arrivedBitmaps + offset);
+        LoadAlign(expectedReg, expectedBitmaps + offset);
+        And(matchedReg, arrivedReg, expectedReg, activeMask);
+        Compare<uint32_t, AscendC::CMPMODE::NE>(mismatchMask, matchedReg, expectedReg, activeMask);
+        Select(pendingReg, oneReg, pendingReg, mismatchMask);
+    }
+    Reduce<ReduceType::MAX>(resultReg, pendingReg, fullMask);
+    StoreAlign(pending, resultReg, firstLaneMask);
 }
 
 } // namespace MegaMoeImpl

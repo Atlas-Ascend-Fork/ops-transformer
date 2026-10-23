@@ -14,9 +14,6 @@
 // Internal member definitions; included by mega_moe_layered.h after the class declaration.
 namespace MegaMoeImpl {
 
-// =============================================
-// InitCombineBuffers：初始化 Combine 所需的 buffer 大小
-// =============================================
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitCombineBuffers()
 {
@@ -33,12 +30,13 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitCombi
 
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline bool MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GetCombineRankRange(uint32_t expertIdx,
-                                                                                           uint32_t dstRank,
+                                                                                           uint32_t originRank,
                                                                                            uint32_t& rowStart,
                                                                                            uint32_t& tokenCount)
 {
+    // originRank 指 token 原始输入卡，用于查询结果行范围；实际发送目标由 batchState 保存。
     uint64_t expertBegin = static_cast<uint64_t>(expertIdx) * worldSize_;
-    uint64_t rankEndIndex = expertBegin + dstRank;
+    uint64_t rankEndIndex = expertBegin + originRank;
     DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE, DcciDst::CACHELINE_OUT>(
         cumsumInfoGlobalTensor_[rankEndIndex]);
     int32_t rankEnd = cumsumInfoGlobalTensor_.GetValue(rankEndIndex);
@@ -50,7 +48,7 @@ __aicore__ inline bool MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GetCombin
         expertStart = cumsumInfoGlobalTensor_.GetValue(expertBegin - 1U);
     }
     int32_t rankStart = expertStart;
-    if (dstRank != 0U) {
+    if (originRank != 0U) {
         DataCacheCleanAndInvalid<int32_t, CacheLine::ENTIRE_DATA_CACHE, DcciDst::CACHELINE_OUT>(
             cumsumInfoGlobalTensor_[rankEndIndex - 1U]);
         rankStart = cumsumInfoGlobalTensor_.GetValue(rankEndIndex - 1U);
@@ -60,24 +58,14 @@ __aicore__ inline bool MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GetCombin
     return tokenCount != 0U;
 }
 
+/* 处理当前专家的一段结果行，等待对应 GMM2 分组完成，再构造普通写或去重贡献请求。 */
 template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCombineRank(
-    const GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& gmm2State, uint32_t expertIdx, uint32_t waveRowBegin,
-    uint32_t waveRowEnd, CombineBatchState& batchState)
+template <bool CombineServerDedup>
+__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CombineTokensInRange(
+    const GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& gmm2State, uint32_t expertIdx, const WorkRange& rowRange,
+    CombineBatchState& batchState)
 {
     constexpr bool IsQuantized = CombineQuantMode != COMBINE_NO_QUANT;
-    uint32_t rowStart = 0U;
-    uint32_t tokenCount = 0U;
-    if (!GetCombineRankRange(expertIdx, batchState.dstRankId, rowStart, tokenCount)) {
-        return;
-    }
-    uint32_t rankEnd = rowStart + tokenCount;
-    rowStart = rowStart > waveRowBegin ? rowStart : waveRowBegin;
-    rankEnd = rankEnd < waveRowEnd ? rankEnd : waveRowEnd;
-    if (rowStart >= rankEnd) {
-        return;
-    }
-    tokenCount = rankEnd - rowStart;
 
     uint32_t mExpert = Get<M_VALUE>(gmm2State.problemShape);
     uint32_t nTilesPerGroup = Ops::Base::CeilDiv(k_, L1_TILE_N);
@@ -87,8 +75,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCo
     __gm__ int32_t* expertCounterBase = reinterpret_cast<__gm__ int32_t*>(gmmAddrInfo.gmm2CombineSyncCounter);
 
     uint32_t processedCount = 0U;
-    while (processedCount < tokenCount) {
-        uint32_t currentRow = rowStart + processedCount;
+    while (processedCount < rowRange.count) {
+        uint32_t currentRow = rowRange.start + processedCount;
         uint32_t targetGroup = currentRow / L1_TILE_M_256;
         uint32_t firstSyncSlot = 0;
         uint32_t syncSlotCount = 0;
@@ -101,27 +89,121 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCo
         uint32_t groupEndRow = (targetGroup + 1U) * L1_TILE_M_256;
         groupEndRow = groupEndRow < mExpert ? groupEndRow : mExpert;
         uint32_t batchCount = groupEndRow - currentRow;
-        uint32_t remainingTokens = tokenCount - processedCount;
+        uint32_t remainingTokens = rowRange.count - processedCount;
         batchCount = batchCount < remainingTokens ? batchCount : remainingTokens;
 
-        int64_t offset = ALIGN_512;
-        LocalTensor<int32_t> metaInfoTensor(TPosition::VECIN, offset, batchCount * META_INFO_SIZE);
-        offset += batchCount * META_INFO_SIZE * sizeof(int32_t);
-        AscendC::GlobalTensor<int32_t> metaInfoGm;
-        metaInfoGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(
-            params_.workspaceInfo.metaInfoPtr +
-            static_cast<uint64_t>(gmm2State.expertBeforeCnt + currentRow) * META_INFO_SIZE * sizeof(int32_t)));
-        SyncFuncStatic<AscendC::HardEvent::S_MTE2, SYNC_EVENT_ID1>();
-        AscendC::DataCopy(metaInfoTensor, metaInfoGm, batchCount * META_INFO_SIZE);
-
-        CombineImpl::CombineTokenGroup<CombineQuantMode, bfloat16_t, IsQuantized>(
-            currentRow, batchCount, k_, expertIdx, rankId_, gmmAddrInfo.gmm2OutGlobal, params_, metaInfoTensor,
-            combineUbTensorSize_, offset, quantTokenSizeBytes, comm_, batchState);
+        if constexpr (CombineServerDedup) {
+            GM_ADDR metaInfoAddr =
+                params_.workspaceInfo.metaInfoPtr +
+                static_cast<uint64_t>(gmm2State.expertBeforeCnt + currentRow) * META_INFO_SIZE * sizeof(int32_t);
+            CombineImpl::CombineServerDedupTokenGroup(currentRow, batchCount, k_, expertIdx, rankId_,
+                                                      gmmAddrInfo.gmm2OutGlobal, metaInfoAddr, params_, comm_,
+                                                      batchState);
+        } else {
+            int64_t offset = ALIGN_512;
+            LocalTensor<int32_t> metaInfoTensor(TPosition::VECIN, offset, batchCount * META_INFO_SIZE);
+            offset += batchCount * META_INFO_SIZE * sizeof(int32_t);
+            AscendC::GlobalTensor<int32_t> metaInfoGm;
+            metaInfoGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(
+                params_.workspaceInfo.metaInfoPtr +
+                static_cast<uint64_t>(gmm2State.expertBeforeCnt + currentRow) * META_INFO_SIZE * sizeof(int32_t)));
+            SyncFuncStatic<AscendC::HardEvent::S_MTE2, SYNC_EVENT_ID1>();
+            AscendC::DataCopy(metaInfoTensor, metaInfoGm, batchCount * META_INFO_SIZE);
+            CombineImpl::CombineTokenGroup<CombineQuantMode, bfloat16_t, IsQuantized>(
+                currentRow, batchCount, k_, expertIdx, rankId_, gmmAddrInfo.gmm2OutGlobal, params_, metaInfoTensor,
+                combineUbTensorSize_, offset, quantTokenSizeBytes, comm_, batchState);
+        }
         processedCount += batchCount;
     }
 }
 
-// 按目标 rank 跨专家积累 Combine 批次，并在通信 Wave 尾提交不足 256-token 的尾批。
+/*
+ * 处理当前专家发往实际 targetRank 的结果，expertRowRange 限定当前通信 Wave 的专家行范围。
+ * 普通模式处理该输入卡；Server 去重模式处理各 Server 中与中继同编号的原始输入卡。
+ */
+template <TemplateMegaMoeLayeredTypeClass>
+template <bool CombineServerDedup>
+__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CombineTokensOfExpert(
+    const GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& gmm2State, uint32_t expertIdx,
+    const WorkRange& expertRowRange, CombineBatchState& batchState)
+{
+    const uint32_t targetRank = batchState.dstRankId;
+    // 处理当前专家中属于一张原始输入卡的结果，共用当前实际目标通道的批次。
+    auto combineTokensFromRank = [&](uint32_t originRank) __attribute__((cce_aicore))
+    {
+        WorkRange rowRange;
+        if (!GetCombineRankRange(expertIdx, originRank, rowRange.start, rowRange.count)) {
+            return;
+        }
+        // 一个专家可能跨多个通信 Wave；仅发送来源卡范围与本 Wave 的交集。
+        const uint32_t rowEnd = rowRange.start + rowRange.count;
+        const uint32_t waveEnd = expertRowRange.start + expertRowRange.count;
+        const uint32_t begin = rowRange.start > expertRowRange.start ? rowRange.start : expertRowRange.start;
+        const uint32_t end = rowEnd < waveEnd ? rowEnd : waveEnd;
+        if (begin >= end) {
+            return;
+        }
+        CombineTokensInRange<CombineServerDedup>(gmmAddrInfo, gmm2State, expertIdx, WorkRange{begin, end - begin},
+                                                 batchState);
+    };
+    if constexpr (!CombineServerDedup) {
+        combineTokensFromRank(targetRank);
+        return;
+    }
+
+    // 本 Server 中继负责各 Server 内与其同编号的原始输入卡。
+    const uint32_t rankInServer = targetRank % rankNumPerServer_;
+    for (uint32_t originServer = 0; originServer < serverNum_; ++originServer) {
+        const uint32_t originRank = originServer * rankNumPerServer_ + rankInServer;
+        if (originRank < worldSize_) {
+            combineTokensFromRank(originRank);
+        }
+    }
+}
+
+/*
+ * 向实际 targetRank 处理一个通信 Wave 的 Combine；保留完整专家状态，并逐专家裁剪行范围。
+ * 跨计算 Wave、专家和输入卡积累同一通道的请求，满批提交，通信 Wave 结束时提交尾批。
+ */
+template <TemplateMegaMoeLayeredTypeClass>
+template <bool CombineServerDedup>
+__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCombineToTargetRank(
+    ExpertLoopState waveBeginState, const ExpertTokenRange& range, uint32_t targetRank)
+{
+    CombineBatchState batchState{};
+    batchState.dstRankId = targetRank;
+    if (targetRank != rankId_) {
+        ChannelHandle channel = comm_.GetChannel(targetRank);
+        batchState.batchHandle = comm_.MakeBatchHandle(channel, hcommBatchWqeTensor_, LAYERED_HCOMM_BATCH_UB_BYTES,
+                                                       GetRankWinAddrWithOffset(targetRank, 0));
+    }
+    ExpertLoopState combineState = waveBeginState;
+    GMMAddrInfo combineAddrInfo{};
+    const uint32_t expertBegin = range.begin.expertIdx;
+    const uint32_t expertEnd = range.end.expertIdx + (range.end.tokenIndexInExpert != 0U ? 1U : 0U);
+    for (uint32_t expertIdx = expertBegin; expertIdx < expertEnd; ++expertIdx) {
+        const uint32_t rowBegin = expertIdx == expertBegin ? range.begin.tokenIndexInExpert : 0U;
+        // 首专家从中间行继续时，waveBeginState 已保留该专家的完整形状及基址。
+        if (rowBegin == 0U && !UpdateGroupParams<AddrUpdateMode::GMM2>(combineState, expertIdx)) {
+            continue;
+        }
+        const uint32_t expertRows = Get<M_VALUE>(combineState.problemShape);
+        const uint32_t rowEnd = expertIdx == range.end.expertIdx ? range.end.tokenIndexInExpert : expertRows;
+        if (rowBegin >= rowEnd) {
+            continue;
+        }
+        // 使用完整专家的 GM 基址和同步布局，行范围单独裁剪。
+        UpdateGlobalBuffer<AddrUpdateMode::GMM2>(combineAddrInfo, combineState);
+        CombineTokensOfExpert<CombineServerDedup>(combineAddrInfo, combineState, expertIdx,
+                                                  WorkRange{rowBegin, rowEnd - rowBegin}, batchState);
+    }
+    if (targetRank != rankId_ && batchState.pendingTokenCount != 0U) {
+        comm_.BatchCommit(batchState.batchHandle);
+        batchState.pendingTokenCount = 0U;
+    }
+}
+
+/* 按实际目标卡分配通信 Wave 的 Combine；去重模式的目标为本 Server 内中继，普通模式为源卡。 */
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCombineTokenRange(
     const ExpertLoopState& waveBeginState, const ExpertTokenRange& range)
@@ -135,39 +217,19 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCo
         return;
     }
 
-    // 每个目标 rank 在一个通信 Wave 内只创建一个 batch handle，WQE 可跨计算 Wave 和专家积累。
-    // 满 256 token 提交，通信 Wave 尾不足 256 的部分立即 flush，保证下游不会为凑包等待。
-    for (uint32_t dstRank = 0U; dstRank < worldSize_; ++dstRank) {
-        if (!IsChannelOwner(dstRank)) {
+    // 每个实际目标卡在一个通信 Wave 中共用批次；普通模式回源卡，去重模式发往本 Server 中继。
+    const bool combineServerDedup = IsCombineServerDedupEnabled();
+    const WorkRange targetRange =
+        combineServerDedup ? WorkRange{serverId_ * rankNumPerServer_, rankNumPerServer_} : WorkRange{0U, worldSize_};
+    for (uint32_t targetRank = targetRange.start;
+         targetRank < targetRange.start + targetRange.count && targetRank < worldSize_; ++targetRank) {
+        if (!IsChannelOwner(targetRank)) {
             continue;
         }
-        CombineBatchState batchState{};
-        batchState.dstRankId = dstRank;
-        if (dstRank != rankId_) {
-            ChannelHandle channel = comm_.GetChannel(dstRank);
-            batchState.batchHandle = comm_.MakeBatchHandle(channel, hcommBatchWqeTensor_, LAYERED_HCOMM_BATCH_UB_BYTES,
-                                                           GetRankWinAddrWithOffset(dstRank, 0));
-        }
-
-        ExpertLoopState combineState = waveBeginState;
-        GMMAddrInfo combineAddrInfo{};
-        for (uint32_t expertIdx = expertBegin; expertIdx < expertEnd; ++expertIdx) {
-            const uint32_t rowBegin = expertIdx == expertBegin ? range.begin.tokenIndexInExpert : 0U;
-            if (rowBegin == 0U && !UpdateGroupParams<AddrUpdateMode::GMM2>(combineState, expertIdx)) {
-                continue;
-            }
-            const uint32_t expertRows = Get<M_VALUE>(combineState.problemShape);
-            const uint32_t rowEnd = expertIdx == range.end.expertIdx ? range.end.tokenIndexInExpert : expertRows;
-            if (rowBegin >= rowEnd) {
-                continue;
-            }
-            // 保留完整专家的基地址和同步槽位布局，仅裁剪本次参与 Combine 的行范围。
-            UpdateGlobalBuffer<AddrUpdateMode::GMM2>(combineAddrInfo, combineState);
-            ProcessCombineRank(combineAddrInfo, combineState, expertIdx, rowBegin, rowEnd, batchState);
-        }
-        if (dstRank != rankId_ && batchState.pendingTokenCount != 0U) {
-            comm_.BatchCommit(batchState.batchHandle);
-            batchState.pendingTokenCount = 0U;
+        if (combineServerDedup) {
+            ProcessCombineToTargetRank<true>(waveBeginState, range, targetRank);
+        } else {
+            ProcessCombineToTargetRank<false>(waveBeginState, range, targetRank);
         }
     }
 }
