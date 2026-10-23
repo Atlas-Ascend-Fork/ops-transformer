@@ -191,6 +191,10 @@ static constexpr ConfigParams ConfigValue[] = {
      inferDTemplateType::Aligned128}, // 36
     {inferS1TemplateType::Aligned32, inferS2TemplateType::Aligned128, inferDTemplateType::Aligned576,
      inferDTemplateType::Aligned512}, // 37
+    {inferS1TemplateType::Aligned64, inferS2TemplateType::Aligned128, inferDTemplateType::Aligned192,
+     inferDTemplateType::Aligned128}, // 38
+    {inferS1TemplateType::Aligned64, inferS2TemplateType::Aligned128, inferDTemplateType::Aligned256,
+     inferDTemplateType::Aligned128}, // 39
 };
 
 #define Config_S1Aligned64_S2Aligned256_DAligned64_DVAligned64 0
@@ -231,6 +235,8 @@ static constexpr ConfigParams ConfigValue[] = {
 #define Config_S1Aligned64_S2Aligned128_DAligned128_DVAligned64 35
 #define Config_S1Aligned64_S2Aligned128_DAligned64_DVAligned128 36
 #define Config_S1Aligned32_S2Aligned128_DAligned576_DVAligned512 37
+#define Config_S1Aligned64_S2Aligned128_DAligned192_DVAligned128 38
+#define Config_S1Aligned64_S2Aligned128_DAligned256_DVAligned128 39
 
 #define PSE_MODE_PSE_OUTER_MUL_ADD_TYPE 0
 #define PSE_MODE_PSE_OUTER_ADD_MUL_TYPE 1
