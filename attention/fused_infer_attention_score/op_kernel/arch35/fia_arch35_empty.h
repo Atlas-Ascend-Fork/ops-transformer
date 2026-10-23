@@ -22,6 +22,7 @@
 inline __aicore__ void fia_empty_regbase(__gm__ uint8_t* attentionOut, __gm__ uint8_t* softmaxLse,
                                          __gm__ uint8_t* workspace, __gm__ uint8_t* tiling)
 {
+    KERNEL_TASK_TYPE_DEFAULT(FIA_ARCH35_TASK_TYPE);
     TPipe tPipe;
     FIA_REGBASE_COPY_TILING_DATA(tiling);
 #if (ORIG_DTYPE_ATTENTION_OUT != DT_FLOAT16 && ORIG_DTYPE_ATTENTION_OUT != DT_BF16)

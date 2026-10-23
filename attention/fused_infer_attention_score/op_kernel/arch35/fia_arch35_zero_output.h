@@ -55,36 +55,44 @@ __aicore__ inline void FiaZeroOutput<T>::Init(
 template <typename T>
 __aicore__ inline void FiaZeroOutput<T>::Process()
 {
-    uint32_t tmp_block_idx = GetBlockIdx();
-    auto& initParams = tilingData->initOutputParams;
-    uint32_t tailSize = initParams.totalOutputSize - tmp_block_idx * initParams.singleCoreSize;
-    uint32_t singleInitOutputSize = tailSize < initParams.singleCoreSize ? tailSize : initParams.singleCoreSize;
-    if (singleInitOutputSize > 0) {
-        if constexpr (POST_QUANT) {
-            InitOutput<half>(attentionOutGm[tmp_block_idx * initParams.singleCoreSize / 2], singleInitOutputSize / 2,
-                             0);
-        } else {
-            InitOutput<half>(attentionOutGm[tmp_block_idx * initParams.singleCoreSize], singleInitOutputSize, 0);
+    if ASCEND_IS_AIV {
+        uint32_t tmpBlockIdx = GetBlockIdx();
+        auto& initParams = tilingData->initOutputParams;
+        int64_t totalOutputSize = initParams.totalOutputSize;
+        int64_t singleCoreSize = static_cast<int64_t>(initParams.singleCoreSize);
+
+        if (static_cast<int64_t>(tmpBlockIdx) * singleCoreSize < totalOutputSize) {
+            int64_t dstOffset = static_cast<int64_t>(tmpBlockIdx) * singleCoreSize;
+            int64_t tailSize = totalOutputSize - dstOffset;
+            int64_t singleInitOutputSize = tailSize < singleCoreSize ? tailSize : singleCoreSize;
+            if (singleInitOutputSize > 0) {
+                if constexpr (POST_QUANT) {
+                    InitOutput<half>(attentionOutGm[dstOffset / 2], singleInitOutputSize / 2, 0);
+                } else {
+                    InitOutput<half>(attentionOutGm[dstOffset], singleInitOutputSize, 0);
+                }
+            }
         }
+
+        auto mte3ToV = GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>();
+        SetFlag<HardEvent::MTE3_V>(mte3ToV);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV);
+
+        int64_t coreNum = GetBlockNum() * GetTaskRation();
+        if (coreNum != 0 && static_cast<int64_t>(tmpBlockIdx) < coreNum) {
+            int64_t singleCoreLseSize = initParams.totalSoftMaxLseOutputSize / coreNum;
+            if (static_cast<int64_t>(tmpBlockIdx) == coreNum - 1) {
+                singleCoreLseSize += initParams.totalSoftMaxLseOutputSize % coreNum;
+            }
+            if (singleCoreLseSize > 0) {
+                InitOutput<float>(
+                    softmaxLseGm[static_cast<int64_t>(tmpBlockIdx) * (initParams.totalSoftMaxLseOutputSize / coreNum)],
+                    singleCoreLseSize, 3e+99); // 3e+99:set the value of invalid batch to inf
+            }
+        }
+
+        SetFlag<HardEvent::MTE3_V>(mte3ToV);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToV);
     }
-
-    auto mte3ToV = GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>();
-    SetFlag<HardEvent::MTE3_V>(mte3ToV);
-    WaitFlag<HardEvent::MTE3_V>(mte3ToV);
-
-    int64_t coreNum = GetBlockNum() * GetTaskRation();
-    if (coreNum != 0 && tmp_block_idx < coreNum) {
-        int64_t singleCoreLseSize = initParams.totalSoftMaxLseOutputSize / coreNum;
-        if (tmp_block_idx == coreNum - 1) {
-            singleCoreLseSize += initParams.totalSoftMaxLseOutputSize % coreNum;
-        }
-        if (singleCoreLseSize > 0) {
-            InitOutput<float>(softmaxLseGm[tmp_block_idx * (initParams.totalSoftMaxLseOutputSize / coreNum)],
-                              singleCoreLseSize, 3e+99); // 3e+99:set the value of invalid batch to inf
-        }
-    }
-
-    SetFlag<HardEvent::MTE3_V>(mte3ToV);
-    WaitFlag<HardEvent::MTE3_V>(mte3ToV);
 }
 #endif // FIA_ARCH35_ZERO_OUTPUT_H
