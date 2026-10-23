@@ -16,6 +16,9 @@
 #ifndef ATTENMASK_GS1_H
 #define ATTENMASK_GS1_H
 
+#include "kernel_operator.h"
+#include "../../../common/op_kernel/const_def.h"
+
 enum MaskFormat {
     GS,
     SG,
@@ -86,20 +89,20 @@ struct MaskInfo<MaskFormat::S1_ONLY> : CommonMaskInfo {
 // TODO，后续放到VF层
 __simd_vf__ inline void MergeBand(const uint64_t maskNextUb, const uint64_t maskPreUb, const uint16_t loopCount)
 {
-    RegTensor<uint32_t> vreg_pre;
-    RegTensor<uint32_t> vreg_next;
-    RegTensor<uint32_t> vreg_xor;
-    RegTensor<uint32_t> vreg_not;
-    RegTensor<uint32_t> vreg_or;
-    MaskReg preg_all = CreateMask<uint32_t, MaskPattern::ALL>();
-    Duplicate(vreg_xor, 0x1010101);
+    AscendC::Reg::RegTensor<uint32_t> vreg_pre;
+    AscendC::Reg::RegTensor<uint32_t> vreg_next;
+    AscendC::Reg::RegTensor<uint32_t> vreg_xor;
+    AscendC::Reg::RegTensor<uint32_t> vreg_not;
+    AscendC::Reg::RegTensor<uint32_t> vreg_or;
+    AscendC::Reg::MaskReg preg_all = AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::ALL>();
+    AscendC::Reg::Duplicate(vreg_xor, 0x1010101);
 
     for (uint16_t i = 0; i < loopCount; ++i) {
-        LoadAlign(vreg_pre, (__ubuf__ uint32_t*&)maskPreUb + i * 64);
-        LoadAlign(vreg_next, (__ubuf__ uint32_t*&)maskNextUb + i * 64);
-        Xor(vreg_not, vreg_pre, vreg_xor, preg_all);
-        Or(vreg_or, vreg_not, vreg_next, preg_all);
-        StoreAlign((__ubuf__ uint32_t*&)maskNextUb + i * 64, vreg_or, preg_all);
+        AscendC::Reg::LoadAlign(vreg_pre, (__ubuf__ uint32_t*&)maskPreUb + i * 64);
+        AscendC::Reg::LoadAlign(vreg_next, (__ubuf__ uint32_t*&)maskNextUb + i * 64);
+        AscendC::Reg::Xor(vreg_not, vreg_pre, vreg_xor, preg_all);
+        AscendC::Reg::Or(vreg_or, vreg_not, vreg_next, preg_all);
+        AscendC::Reg::StoreAlign((__ubuf__ uint32_t*&)maskNextUb + i * 64, vreg_or, preg_all);
     }
 }
 
@@ -109,44 +112,50 @@ __simd_vf__ void MaskUbCopyS1GVF(__ubuf__ T* maskUb, uint16_t headGLoop, uint16_
 {
     constexpr uint32_t repeatStride = s2BaseSize >> 5;
 
-    RegTensor<T> vreg_g_head;
-    RegTensor<T> vreg_g_mid;
-    RegTensor<T> vreg_g_tail;
+    AscendC::Reg::RegTensor<T> vreg_g_head;
+    AscendC::Reg::RegTensor<T> vreg_g_mid;
+    AscendC::Reg::RegTensor<T> vreg_g_tail;
 
-    MaskReg preg_all;
+    AscendC::Reg::MaskReg preg_all;
     if constexpr (s2BaseSize == 128) {
-        preg_all = CreateMask<bool, MaskPattern::VL128>();
+        preg_all = AscendC::Reg::CreateMask<bool, AscendC::Reg::MaskPattern::VL128>();
     } else { // s2BaseSize = 256
-        preg_all = CreateMask<bool, MaskPattern::ALL>();
+        preg_all = AscendC::Reg::CreateMask<bool, AscendC::Reg::MaskPattern::ALL>();
     }
 
     for (uint16_t x = headGLoop; x > 0; x = 0) { // if (headGLoop > 0) {}
-        LoadAlign<T, DataCopyMode::DATA_BLOCK_COPY, MicroAPI::PostLiteral::POST_MODE_UPDATE>(vreg_g_head, maskUb, 1,
-                                                                                             repeatStride, preg_all);
+        AscendC::Reg::LoadAlign<T, AscendC::Reg::DataCopyMode::DATA_BLOCK_COPY,
+                                MicroAPI::PostLiteral::POST_MODE_UPDATE>(vreg_g_head, maskUb, 1, repeatStride,
+                                                                         preg_all);
         for (uint16_t i = 1; i < headGLoop; ++i) {
-            StoreAlign<T, DataCopyMode::DATA_BLOCK_COPY, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                maskUb, vreg_g_head, 1, repeatStride, preg_all);
+            AscendC::Reg::StoreAlign<T, AscendC::Reg::DataCopyMode::DATA_BLOCK_COPY,
+                                     MicroAPI::PostLiteral::POST_MODE_UPDATE>(maskUb, vreg_g_head, 1, repeatStride,
+                                                                              preg_all);
         }
     }
 
     for (uint16_t x = midGLoop; x > 0; x = 0) { // if (midGLoop > 0) {}
         for (uint16_t i = 0; i < midS1Count; ++i) {
-            LoadAlign<T, DataCopyMode::DATA_BLOCK_COPY, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                vreg_g_mid, maskUb, 1, repeatStride, preg_all);
+            AscendC::Reg::LoadAlign<T, AscendC::Reg::DataCopyMode::DATA_BLOCK_COPY,
+                                    MicroAPI::PostLiteral::POST_MODE_UPDATE>(vreg_g_mid, maskUb, 1, repeatStride,
+                                                                             preg_all);
             for (uint16_t j = 1; j < midGLoop; ++j) {
-                StoreAlign<T, DataCopyMode::DATA_BLOCK_COPY, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                    maskUb, vreg_g_mid, 1, repeatStride, preg_all);
+                AscendC::Reg::StoreAlign<T, AscendC::Reg::DataCopyMode::DATA_BLOCK_COPY,
+                                         MicroAPI::PostLiteral::POST_MODE_UPDATE>(maskUb, vreg_g_mid, 1, repeatStride,
+                                                                                  preg_all);
             }
-            LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
+            AscendC::Reg::LocalMemBar<AscendC::Reg::MemType::VEC_STORE, AscendC::Reg::MemType::VEC_LOAD>();
         }
     }
 
     for (uint16_t x = tailGLoop; x > 0; x = 0) { // if (tailGLoop > 0) {}
-        LoadAlign<T, DataCopyMode::DATA_BLOCK_COPY, MicroAPI::PostLiteral::POST_MODE_UPDATE>(vreg_g_tail, maskUb, 1,
-                                                                                             repeatStride, preg_all);
+        AscendC::Reg::LoadAlign<T, AscendC::Reg::DataCopyMode::DATA_BLOCK_COPY,
+                                MicroAPI::PostLiteral::POST_MODE_UPDATE>(vreg_g_tail, maskUb, 1, repeatStride,
+                                                                         preg_all);
         for (uint16_t i = 1; i < tailGLoop; ++i) {
-            StoreAlign<T, DataCopyMode::DATA_BLOCK_COPY, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                maskUb, vreg_g_tail, 1, repeatStride, preg_all);
+            AscendC::Reg::StoreAlign<T, AscendC::Reg::DataCopyMode::DATA_BLOCK_COPY,
+                                     MicroAPI::PostLiteral::POST_MODE_UPDATE>(maskUb, vreg_g_tail, 1, repeatStride,
+                                                                              preg_all);
         }
     }
 }
@@ -333,7 +342,7 @@ __aicore__ inline void AttentionmaskDataCopy(LocalTensor<T>& attenMaskUb, Global
     dataCopyParams.blockLen = info.s2dealNum;
     dataCopyParams.srcStride = info.attenMaskS1Stride - info.s2dealNum;
     dataCopyParams.dstStride = info.attenMaskDstStride;
-    DataCopyPadExtParams<T> padParams{true, 0, static_cast<uint8_t>(attenMaskSizeAlign - info.s2dealNum), 1U};
+    AscendC::DataCopyPadExtParams<T> padParams{true, 0, static_cast<uint8_t>(attenMaskSizeAlign - info.s2dealNum), 1U};
     DataCopyPad(attenMaskUb, srcGmAddr[maskOffset], dataCopyParams, padParams);
 }
 
@@ -420,7 +429,8 @@ __aicore__ inline void AttentionmaskCopyInForSgLayout(LocalTensor<T>& attenMaskU
         dataCopyParams.srcStride = info.attenMaskS1Stride - info.s2dealNum;
         dataCopyParams.dstStride = (info.gSize - 1) * attenMaskS2Stride / 32 + info.attenMaskDstStride;
         // blockLen + padParams.len + dstStride = gSize * s2Size
-        DataCopyPadExtParams<T> padParams{true, 0, static_cast<uint8_t>(attenMaskSizeAlign - info.s2dealNum), 1U};
+        AscendC::DataCopyPadExtParams<T> padParams{true, 0, static_cast<uint8_t>(attenMaskSizeAlign - info.s2dealNum),
+                                                   1U};
         DataCopyPad(attenMaskUb[headGSize * attenMaskS2Stride], srcGmAddr[maskOffset], dataCopyParams, padParams);
     }
     Mutex::Unlock<PIPE_MTE2>(mte2ToVEventId);
@@ -483,7 +493,7 @@ __aicore__ inline void AttentionmaskCopyInDn(LocalTensor<T>& attenMaskUb, Global
         dataCopyParams.blockLen = info.s1dealNum;
         dataCopyParams.srcStride = info.attenMaskS1Stride - info.s1dealNum;
         dataCopyParams.dstStride = info.attenMaskDstStride;
-        DataCopyPadExtParams<T> padParams;
+        AscendC::DataCopyPadExtParams<T> padParams;
         DataCopyPad(attenMaskUb, srcGmAddr[maskOffset], dataCopyParams, padParams);
     }
 }

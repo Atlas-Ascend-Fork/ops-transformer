@@ -66,22 +66,32 @@ BASE = {
 TestCases = {
     # ------type
     "BF16_01"  : {**BASE,
-                  "Dtype": ["bf16"]},
+                  "Dtype": ["bf16"],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     "FP16_02"  : {**BASE,
-                  "Dtype": ["fp16"]},
+                  "Dtype": ["fp16"],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # ------layout
     "BSND_03"  : {**BASE,
                   "layout_q": ["BSND"],
                   "layout_kv": ["BSND"],
-                  "layout_out": ["BSND"]},
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     "BSND_04"  : {**BASE,
-                  "layout_out": ["BSND"]},
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     "TND_05"   : {**BASE,
                   "layout_q": ["TND"],
                   "layout_kv": ["TND"],
                   "layout_out": ["TND"],
                   "cu_seqlens_q": [[0, 64, 128, 192, 256, 320, 384, 448, 512]],
-                  "cu_seqlens_kv": [[0, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]]},
+                  "cu_seqlens_kv": [[0, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     "TND_06"   : {**BASE,
                   "layout_q": ["TND"],
                   "layout_kv": ["TND"],
@@ -89,12 +99,16 @@ TestCases = {
                   "cu_seqlens_q": [[0, 64, 128, 192, 256, 320, 384, 448, 512]],
                   "cu_seqlens_kv": [[0, 1024, 2048, 3072, 4096, 5120, 6144, 7168, 8192]],
                   "seqused_q": [[60] * 8],
-                  "seqused_kv": [[1000] * 8]},
+                  "seqused_kv": [[1000] * 8],
+                  "max_seqlen_q": [60],
+                  "max_seqlen_kv": [1000]},
     "PA_07"    : {**BASE,
                   "layout_kv": ["PA_BBND", "PA_BNBD"], # 2条
                   # "layout_kv": ["PA_BBND", "PA_BNBD", "PA_NZ"], # 3条
                   "seqused_kv": [[1024, 1024]],
-                  "block_size": [128]},
+                  "block_size": [128],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # PA时，block_size<s2Base，s2Base不整除block_size
     # PA时，block_size>s2Base，block_size不整除s2Base
     # 边界值 典型值
@@ -103,7 +117,9 @@ TestCases = {
     #               "block_size": [96, 192, 16, 1024, 512]}, # 5条
     # ------lse
     "LSE_09"   : {**BASE,
-                  "return_softmax_lse": [True]},
+                  "return_softmax_lse": [True],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # ------sink
     # "SINK_10"  : {**BASE,
     #               "enable_learnable_sink": [True]},
@@ -131,47 +147,101 @@ TestCases = {
     "GS1_14"   : {**BASE,
                   "N1": [1, 2, 3, 4], # 4条
                   "N2": [1],
-                  "S1": [64]},
+                  "S1": [64],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # GS1类型，S1<mBase，mBase%S1!=0，GS1<mBase
     # GS1类型，S1<mBase，mBase%S1!=0，GS1>mBase
     "GS1_15"   : {**BASE,
                   "N1": [1, 3], # 2条
                   "N2": [1],
-                  "S1": [65]},
+                  "S1": [65],
+                  "max_seqlen_q": [65],
+                  "max_seqlen_kv": [1024]},
     # GS1类型，S1=mBase，GS1>=mBase
+    "GS1_16_0" : {**BASE,
+                  "S1": [128],
+                  "max_seqlen_q": [128],
+                  "max_seqlen_kv": [1024]},
     # GS1类型，S1>mBase，S1%mBase==0
-    "GS1_16"   : {**BASE,
-                  "S1": [128, 256]}, # 2条
+    "GS1_16_1" : {**BASE,
+                  "S1": [256],
+                  "max_seqlen_q": [256],
+                  "max_seqlen_kv": [1024]},
     # GS1类型，S1>mBase，S1%mBase!=0，G=1
     "GS1_17"   : {**BASE,
                   "N1": [1],
                   "N2": [1],
-                  "S1": [257]},
+                  "S1": [257],
+                  "max_seqlen_q": [257],
+                  "max_seqlen_kv": [1024]},
     # GS1类型，S1>mBase，S1%mBase!=0，G>=2
     "GS1_18"   : {**BASE,
                   "N1": [2],
                   "N2": [1],
-                  "S1": [129]},
+                  "S1": [129],
+                  "max_seqlen_q": [129],
+                  "max_seqlen_kv": [1024]},
     # S1G类型，G<mBase，mBase%G==0，GS1<mBase
     # S1G类型，G<mBase，mBase%G==0，GS1=mBase
     # S1G类型，G<mBase，mBase%G==0，GS1>mBase，GS1%mBase!=0
     # S1G类型，G<mBase，mBase%G==0，GS1>mBase，GS1%mBase==0
-    "GS1_19"   : {**BASE,
+    "GS1_19_0" : {**BASE,
                   "N1": [64],
                   "N2": [1],
-                  "S1": [1, 2, 3, 4], # 4条
+                  "S1": [1],
                   "layout_q": ["BSND"],
                   "layout_kv": ["BSND"],
-                  "layout_out": ["BSND"]},
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [1],
+                  "max_seqlen_kv": [1024]},
+    "GS1_19_1" : {**BASE,
+                  "N1": [64],
+                  "N2": [1],
+                  "S1": [2],
+                  "layout_q": ["BSND"],
+                  "layout_kv": ["BSND"],
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [2],
+                  "max_seqlen_kv": [1024]},
+    "GS1_19_2" : {**BASE,
+                  "N1": [64],
+                  "N2": [1],
+                  "S1": [3],
+                  "layout_q": ["BSND"],
+                  "layout_kv": ["BSND"],
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [3],
+                  "max_seqlen_kv": [1024]},
+    "GS1_19_3" : {**BASE,
+                  "N1": [64],
+                  "N2": [1],
+                  "S1": [4],
+                  "layout_q": ["BSND"],
+                  "layout_kv": ["BSND"],
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [4],
+                  "max_seqlen_kv": [1024]},
     # S1G类型，G<mBase，mBase%G!=0，GS1<mBase
     # S1G类型，G<mBase，mBase%G!=0，GS1>mBase
-    "GS1_20"   : {**BASE,
+    "GS1_20_0" : {**BASE,
                   "N1": [65],
                   "N2": [1],
-                  "S1": [1, 3], # 2条
+                  "S1": [1],
                   "layout_q": ["BSND"],
                   "layout_kv": ["BSND"],
-                  "layout_out": ["BSND"]},
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [1],
+                  "max_seqlen_kv": [1024]},
+    "GS1_20_1" : {**BASE,
+                  "N1": [65],
+                  "N2": [1],
+                  "S1": [3],
+                  "layout_q": ["BSND"],
+                  "layout_kv": ["BSND"],
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [3],
+                  "max_seqlen_kv": [1024]},
     # S1G类型，G=mBase，GS1>=mBase
     # S1G类型，G>mBase，G%mBase==0
     "GS1_21"   : {**BASE,
@@ -179,7 +249,9 @@ TestCases = {
                    "N2": [128],
                   "layout_q": ["BSND"],
                   "layout_kv": ["BSND"],
-                  "layout_out": ["BSND"]},
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # S1G类型，G>mBase，G%mBase!=0，S1=1
     "GS1_22"   : {**BASE,
                   "N1": [257],
@@ -187,7 +259,9 @@ TestCases = {
                   "S1": [1],
                   "layout_q": ["BSND"],
                   "layout_kv": ["BSND"],
-                  "layout_out": ["BSND"]},
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [1],
+                  "max_seqlen_kv": [1024]},
     # S1G类型，G>mBase，G%mBase!=0，S1>=2
     "GS1_23"   : {**BASE,
                   "N1": [129],
@@ -195,34 +269,48 @@ TestCases = {
                   "S1": [2],
                   "layout_q": ["BSND"],
                   "layout_kv": ["BSND"],
-                  "layout_out": ["BSND"]},
+                  "layout_out": ["BSND"],
+                  "max_seqlen_q": [2],
+                  "max_seqlen_kv": [1024]},
     # Mmad在M=1时可能会当做GEMV处理，对左矩阵的L0A格式要求不是NZ，需要特殊测试。
     "GS1_24"   : {**BASE,
                   "N1": [1],
                   "N2": [1],
-                  "S1": [1]},
+                  "S1": [1],
+                  "max_seqlen_q": [1],
+                  "max_seqlen_kv": [1024]},
     # ------ s2
     # 前面部分batch为0
     "S2_25"    : {**BASE,
                   "B": [5],
-                  "seqused_kv": [[0, 0, 1024, 1024, 1024]]},
+                  "seqused_kv": [[0, 0, 1024, 1024, 1024]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # 尾部部分batch为0
     "S2_26"    : {**BASE,
                   "B": [5],
-                  "seqused_kv": [[1024, 1024, 1024, 0, 0]]},
+                  "seqused_kv": [[1024, 1024, 1024, 0, 0]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # 所有batch为0
     "S2_27"    : {**BASE,
                   "B": [5],
-                  "seqused_kv": [[0, 0, 0, 0, 0]]},
+                  "seqused_kv": [[0, 0, 0, 0, 0]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [0]},
     # 中间部分batch为0
     "S2_28"    : {**BASE,
                   "B": [5],
-                  "seqused_kv": [[1024, 0, 0, 0, 1024]]},
+                  "seqused_kv": [[1024, 0, 0, 0, 1024]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     # S2<mBase，S2仅一轮循环
     # S2=mBase，S2仅一轮循环
     "S2_29"    : {**BASE,
                   "B": [8],
-                  "seqused_kv": [[1, 2, 3, 5, 31, 32, 64, 128]]},
+                  "seqused_kv": [[1, 2, 3, 5, 31, 32, 64, 128]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [128]},
     # S2>mBase，S2%mBase==0，S2多轮循环且不存在尾块
     # S2>mBase，0<S2%mBase<8，S2多轮循环且存在尾块
     # S2>mBase，S2%mBase=8，S2多轮循环且存在尾块
@@ -232,20 +320,28 @@ TestCases = {
     # S2>mBase，S2%mBase=32，S2多轮循环且存在尾块
     "S2_30"    : {**BASE,
                   "B": [8],
-                  "seqused_kv": [[512, 513, 520, 524, 528, 531, 544, 550]]},
+                  "seqused_kv": [[512, 513, 520, 524, 528, 531, 544, 550]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [550]},
     "S2_31"    : {**BASE,
                   "B": [8],
-                  "seqused_kv": [[7, 513, 9, 524, 19, 531, 35, 550]]},
+                  "seqused_kv": [[7, 513, 9, 524, 19, 531, 35, 550]],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [550]},
     # ------mask
     # mask_mode=3, 覆盖：S1<=S2和S1>S2（存在行无效）
     "MASK_32"  : {**BASE,
                   "S1": [64],
                   "S2": [1024],
-                  "mask_mode": [3]},
+                  "mask_mode": [3],
+                  "max_seqlen_q": [64],
+                  "max_seqlen_kv": [1024]},
     "MASK_33"  : {**BASE,
                   "S1": [1024],
                   "S2": [64],
-                  "mask_mode": [3]},
+                  "mask_mode": [3],
+                  "max_seqlen_q": [1024],
+                  "max_seqlen_kv": [64]},
     # mask_mode=4，win_left/win_right生效，s1Base=Ceil(mBase，g)
     # 场景1:s1Base<s2Base
     # win_left : 1、0; 2、0~s1Base; 3、>=s1Base;
@@ -283,6 +379,8 @@ TestCases = {
         "N2": [1],
         "S1": [128],
         "S2": [128],
+        "max_seqlen_q": [128],
+        "max_seqlen_kv": [128],
         "cu_seqlens_q": [[0, 128, 256, 384, 512]],
         "cu_seqlens_kv": [[0, 128, 256, 384, 512]],
         "seqused_q": [[64, 128, 128, 128]],
@@ -303,6 +401,8 @@ TestCases = {
         "N2": [19],
         "S1": [1024],
         "S2": [1024],
+        "max_seqlen_q": [640],
+        "max_seqlen_kv": [1024],
         "D": [128],
         "layout_q": ["BNSD"],
         "layout_kv": ["BNSD"],
@@ -321,6 +421,8 @@ TestCases = {
         "N2": [19],
         "S1": [640],
         "S2": [1024],
+        "max_seqlen_q": [640],
+        "max_seqlen_kv": [1024],
         "D": [128],
         "layout_q": ["BNSD"],
         "layout_kv": ["BNSD"],
@@ -337,6 +439,8 @@ TestCases = {
         "N2": [1],
         "S1": [64],
         "S2": [256],
+        "max_seqlen_q": [64],
+        "max_seqlen_kv": [256],
         "D": [128],
         "layout_q": ["BSND"],
         "layout_kv": ["BSND"],
@@ -353,6 +457,8 @@ TestCases = {
         "N2": [1],
         "S1": [64],
         "S2": [256],
+        "max_seqlen_q": [64],
+        "max_seqlen_kv": [256],
         "D": [128],
         "layout_q": ["BNSD"],
         "layout_kv": ["BNSD"],
@@ -369,6 +475,8 @@ TestCases = {
         "N2": [1],
         "S1": [128],
         "S2": [128],
+        "max_seqlen_q": [128],
+        "max_seqlen_kv": [128],
         "cu_seqlens_q": [[0, 128, 256, 384, 512]],
         "cu_seqlens_kv": [[0, 128, 256, 384, 512]],
         "seqused_q": [[128, 128, 128, 128]],
@@ -388,6 +496,8 @@ TestCases = {
         "B": [8],
         "N1": [4],
         "N2": [4],
+        "max_seqlen_q": [118],
+        "max_seqlen_kv": [118],
         "cu_seqlens_q": [[0, 118, 236, 354, 472, 590, 708, 826, 944]],
         "cu_seqlens_kv": [[0, 118, 236, 354, 472, 590, 708, 826, 944]],
         "seqused_q": [[118, 118, 118, 118, 118, 118, 118, 118]],
@@ -421,6 +531,8 @@ TestCases = {
         "D": [128],
         "N2": [4],
         "S2": [3072],
+        "max_seqlen_q": [630],
+        "max_seqlen_kv": [3072],
     },
     "aclnnFusedInferAttentionScoreV5_FIA_16_8_8_4096_4096_case41": {
         "layout_q": ["BNSD"],
@@ -439,6 +551,8 @@ TestCases = {
         "D": [128],
         "N2": [4096],
         "S2": [8],
+        "max_seqlen_q": [8],
+        "max_seqlen_kv": [8],
     },
     # "aclnnFusedInferAttentionScoreV5_FIA_24_16_1_2206_2048_case49": {
     #     "layout_q": "TND",
@@ -458,6 +572,8 @@ TestCases = {
     "aclnnFusedInferAttentionScoreV5_FIA_24_16_1_2206_2048_case49": {
         "N1": [1],
         "N2": [1],
+        "max_seqlen_q": [2076],
+        "max_seqlen_kv": [1919],
         # cu_seqlens: (B+1,) 累积偏移 [0, s1, s1+s2, ...]，此处与 seqused 精确对应（无 padding）
         # 真实 padding 场景中 cu_seqlens 对应分配量、seqused 对应实际量，两者不同；
         # 此处为保证 CPU/NPU 张量尺寸一致取无 padding 形式，四个参数仍独立提供。
@@ -502,6 +618,8 @@ TestCases = {
         "B": [48],
         "S1": [256],
         "S2": [256],
+        "max_seqlen_q": [256],
+        "max_seqlen_kv": [256],
         "N1": [2],
         "N2": [2],
         "D": [128],
@@ -523,6 +641,8 @@ TestCases = {
         "D": [128],
         "N2": [13],
         "S2": [256],
+        "max_seqlen_q": [224],
+        "max_seqlen_kv": [256],
     },
     "aclnnFusedInferAttentionScoreV5_FIA_51_160_20_59_256_case56": {
         "layout_q": ["BSND"],
@@ -541,6 +661,8 @@ TestCases = {
         "D": [128],
         "N2": [20],
         "S2": [256],
+        "max_seqlen_q": [59],
+        "max_seqlen_kv": [256],
     },
     "aclnnFusedInferAttentionScoreV5_FIA_16_180_12_253_1600_case69": {
         "layout_q": ["BNSD"],
@@ -559,6 +681,8 @@ TestCases = {
         "D": [128],
         "N2": [12],
         "S2": [1600],
+        "max_seqlen_q": [253],
+        "max_seqlen_kv": [1448],
         "block_size": [256],
         "seqused_kv":[[1357,1085,35,1091,37,393,380,686,648,667,1448,999,387,1337,690,513]], #
         "block_table_shape": [[16, 1536]],
@@ -580,6 +704,8 @@ TestCases = {
         "D": [128],
         "N2": [4],
         "S2": [512],
+        "max_seqlen_q": [512],
+        "max_seqlen_kv": [512],
     },
     "aclnnFusedInferAttentionScoreV5_FIA_32_32_4_1_1600_case110": {
         "layout_q": ["BNSD"],
@@ -598,6 +724,8 @@ TestCases = {
         "D": [128],
         "N2": [4],
         "S2": [1600],
+        "max_seqlen_q": [1],
+        "max_seqlen_kv": [1600],
     },
     "aclnnFusedInferAttentionScoreV5_FIA_30_160_5_4_3583_case119": {
         "layout_q": ["BSND"],
@@ -616,6 +744,8 @@ TestCases = {
         "D": [128],
         "N2": [5],
         "S2": [3583],
+        "max_seqlen_q": [4],
+        "max_seqlen_kv": [3583],
     },
     "aclnnFusedInferAttentionScoreV5_FIA_30_64_2_3089_4096_case123": {
         "layout_q": ["BNSD"],
@@ -634,6 +764,8 @@ TestCases = {
         "D": [128],
         "N2": [2],
         "S2": [4096],
+        "max_seqlen_q": [3074],
+        "max_seqlen_kv": [4079],
         "seqused_q": [
             [
                 174, 1866, 2088, 2639, 2914, 734, 525, 2282, 1945, 2514,
@@ -668,6 +800,8 @@ TestCases = {
         "D": [64],
         "N2": [4],
         "S2": [1024],
+        "max_seqlen_q": [256],
+        "max_seqlen_kv": [1024],
     },
     # D=64 - BSND布局
     "aclnnFlashAttn_D64_32_16_8_512_2048_case202": {
@@ -688,6 +822,8 @@ TestCases = {
         "D": [64],
         "N2": [8],
         "S2": [2048],
+        "max_seqlen_q": [512],
+        "max_seqlen_kv": [2048],
     },
     # D=64 - GQA场景（N1/N2不等）
     "aclnnFlashAttn_D64_GQA_8_32_2_128_512_case203": {
@@ -708,6 +844,8 @@ TestCases = {
         "D": [64],
         "N2": [2],
         "S2": [512],
+        "max_seqlen_q": [128],
+        "max_seqlen_kv": [512],
     },
     # D=64 - MQA场景（N2=1）
     "aclnnFlashAttn_D64_MQA_4_64_1_64_1024_case204": {
@@ -728,6 +866,8 @@ TestCases = {
         "D": [64],
         "N2": [2],
         "S2": [1024],
+        "max_seqlen_q": [64],
+        "max_seqlen_kv": [1024],
     },
 
     # D=256基础用例 - BNSD布局
@@ -749,6 +889,8 @@ TestCases = {
         "D": [256],
         "N2": [4],
         "S2": [512],
+        "max_seqlen_q": [128],
+        "max_seqlen_kv": [512],
     },
     # D=256 - BSND布局
     "aclnnFlashAttn_D256_16_8_4_256_1024_case206": {
@@ -769,6 +911,8 @@ TestCases = {
         "D": [256],
         "N2": [4],
         "S2": [1024],
+        "max_seqlen_q": [128],
+        "max_seqlen_kv": [1024],
     },
     # D=256 - GQA场景
     "aclnnFlashAttn_D256_GQA_12_24_3_128_768_case207": {
@@ -789,6 +933,8 @@ TestCases = {
         "D": [256],
         "N2": [2],
         "S2": [512],
+        "max_seqlen_q": [128],
+        "max_seqlen_kv": [512],
     },
     # D=256 - MQA场景
     "aclnnFlashAttn_D256_MQA_6_32_1_64_512_case208": {
@@ -809,6 +955,8 @@ TestCases = {
         "D": [256],
         "N2": [2],
         "S2": [1024],
+        "max_seqlen_q": [64],
+        "max_seqlen_kv": [1024],
     },
 
     # ========== 任务2：PA_NZ排布支持 ==========
@@ -828,6 +976,8 @@ TestCases = {
         "D": [128],
         "N2": [12],
         "S2": [1600],
+        "max_seqlen_q": [253],
+        "max_seqlen_kv": [1448],
         "seqused_kv": [
             [
                 1357, 1085, 35, 1091, 37, 393, 380, 686, 648, 667,
@@ -854,6 +1004,8 @@ TestCases = {
         "D": [128],
         "N2": [2],
         "S2": [4096],
+        "max_seqlen_q": [3074],
+        "max_seqlen_kv": [4079],
         "seqused_q": [
             [
                 174, 1866, 2088, 2639, 2914, 734, 525, 2282, 1945, 2514,
@@ -887,6 +1039,8 @@ TestCases = {
         "D": [128],
         "N2": [1],
         "S2": [2048],
+        "max_seqlen_q": [1],
+        "max_seqlen_kv": [2048],
         "seqused_q": [[1]],
         "seqused_kv": [[2048]],
         "block_table": [[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127]]],
@@ -909,6 +1063,8 @@ TestCases = {
         "D": [128],
         "N2": [1],
         "S2": [1024],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "seqused_q": [[1024]],
         "seqused_kv": [[1024]],
         "block_table": [[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]]],
@@ -931,6 +1087,8 @@ TestCases = {
         "D": [128],
         "N2": [1],
         "S2": [2048],
+        "max_seqlen_q": [1],
+        "max_seqlen_kv": [2048],
         "seqused_q": [[1]],
         "seqused_kv": [[2048]],
         "block_table": [[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]]],
@@ -953,6 +1111,8 @@ TestCases = {
         "D": [128],
         "N2": [1],
         "S2": [2048],
+        "max_seqlen_q": [1],
+        "max_seqlen_kv": [2048],
         "seqused_q": [[1]],
         "seqused_kv": [[2048]],
         "block_table": [[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]]],
@@ -965,6 +1125,8 @@ TestCases = {
         "N2": [1],
         "S1": [1024],
         "S2": [1024],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "D": [128],
         "layout_q": ["BSND"],
         "layout_kv": ["PA_NZ"],
@@ -997,6 +1159,8 @@ TestCases = {
         "D": [128],
         "N2": [1],
         "S2": [2048],
+        "max_seqlen_q": [1],
+        "max_seqlen_kv": [2048],
         "seqused_q": [[1]],
         "seqused_kv": [[2048]],
         "block_table": [[[0, 1, 2, 3, 4, 5]]],
@@ -1018,6 +1182,8 @@ TestCases = {
         "S1": [1024],
         "N2": [1],
         "S2": [1024],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "D": [128],
         "cu_seqlens_q": [[0, 1024, 2048]],
         "seqused_q": [[1024, 1024]],
@@ -1041,6 +1207,8 @@ TestCases = {
         "S1": [1024],
         "N2": [1],
         "S2": [1024],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "D": [128],
         "cu_seqlens_q": [[0, 1024, 2048]],
         "seqused_q": [[1024, 1024]],
@@ -1054,6 +1222,8 @@ TestCases = {
     "aclnnFlashAttn_24_16_1_2206_2048_case401": {
         "N1": [1],
         "N2": [1],
+        "max_seqlen_q": [2076],
+        "max_seqlen_kv": [1919],
         "cu_seqlens_q": [
             [
                 0, 586, 1180, 3149, 3186, 5216, 6778, 8031, 10003, 11078,
@@ -1084,6 +1254,8 @@ TestCases = {
         "N2": [5],
         "S1": [1],
         "S2": [2048],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "D": [64],
         "layout_q": ["TND"],
         "layout_kv": ["TND"],
@@ -1106,6 +1278,8 @@ TestCases = {
         "N2": [18],
         "S1": [2188],
         "S2": [2188],
+        "max_seqlen_q": [1413],
+        "max_seqlen_kv": [1413],
         "D": [256],
         "layout_q": ["TND"],
         "layout_kv": ["TND"],
@@ -1126,6 +1300,8 @@ TestCases = {
         "N2": [13],
         "S1": [4389],
         "S2": [4389],
+        "max_seqlen_q": [1958],
+        "max_seqlen_kv": [1958],
         "D": [256],
         "layout_q": ["TND"],
         "layout_kv": ["TND"],
@@ -1169,6 +1345,8 @@ TestCases = {
         "D": [64],
         "N2": [12],
         "S2": [1600],
+        "max_seqlen_q": [253],
+        "max_seqlen_kv": [1448],
         "block_size": [256],
         "seqused_kv":[[1357,1085,35,1091,37,393,380,686,648,667,1448,999,387,1337,690,513]], #
         "block_table_shape": [[16, 1536]],
@@ -1190,6 +1368,8 @@ TestCases = {
         "D": [256],
         "N2": [2],
         "S2": [4096],
+        "max_seqlen_q": [3074],
+        "max_seqlen_kv": [4079],
         "seqused_q": [
             [
                 174, 1866, 2088, 2639, 2914, 734, 525, 2282, 1945, 2514,
@@ -1208,6 +1388,8 @@ TestCases = {
         "N2": [1],
         "S1": [1024],
         "S2": [1024],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "D": [64],
         "layout_q": ["BSND"],
         "layout_kv": ["PA_NZ"],
@@ -1230,6 +1412,8 @@ TestCases = {
         "N2": [1],
         "S1": [1],
         "S2": [2048],
+        "max_seqlen_q": [1],
+        "max_seqlen_kv": [2048],
         "D": [256],
         "layout_q": ["BSND"],
         "layout_kv": ["PA_NZ"],
@@ -1252,6 +1436,8 @@ TestCases = {
         "N2": [1],
         "S1": [1024],
         "S2": [1024],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "D": [64],
         "layout_q": ["TND"],
         "layout_kv": ["PA_NZ"],
@@ -1275,6 +1461,8 @@ TestCases = {
         "N2": [1],
         "S1": [1024],
         "S2": [1024],
+        "max_seqlen_q": [1024],
+        "max_seqlen_kv": [1024],
         "D": [256],
         "layout_q": ["TND"],
         "layout_kv": ["PA_NZ"],

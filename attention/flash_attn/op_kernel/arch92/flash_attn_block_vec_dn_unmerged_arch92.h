@@ -25,7 +25,6 @@
 #include "../../../common/op_kernel/vector_common.h"
 #include "../../../common/op_kernel/init_output.h"
 #include "../memory_copy_arch35.h"
-#include "../../../common/op_kernel/attn_sink_gs1.h"
 #include "../utils/attenmask_gs1.h"
 #include "../../../common/op_kernel/arch_info.h"
 
@@ -241,32 +240,14 @@ public:
         LocalTensor<T> sumUb = softmaxSumBuf_[slotIdx * softmaxBufElementCount];
         LocalTensor<T> maxUb = softmaxMaxBuf_[slotIdx * softmaxBufElementCount];
         if (constInfo_.learnableSinkFlag && runInfo.isFirstFdBlock) {
-            // sink 参与归一分母: sum 初始化为 1, max 由 sink 值按 GS1 坐标展开写入
-            Duplicate<T>(sumUb, static_cast<T>(1), softmaxBufElementCount);
-
-            // 不合轴 DN: 每任务仅一个 query 头, sink 按 GS 线性坐标定位: g * S1 + s1
-            uint32_t gs1Start = runInfo.gIdx * runInfo.actS1Size + runInfo.s1Idx + runInfo.vecMbaseIdx;
-
-            Mutex::Lock<PIPE_MTE2>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
-            {
-                LocalTensor<float> sinkTmpUb =
-                    ubVec1ResBuffers_[vec1ResUbBufId_ * UB_VEC1_RES_BUF_BYTES].template ReinterpretCast<float>();
-                AttentionCommon::SinkCopyInGS1(sinkTmpUb, sinkGm_, gs1Start, runInfo.actVecMSize, runInfo.actS1Size,
-                                               runInfo.n2Idx, constInfo_.gSize);
-            }
-            Mutex::Unlock<PIPE_MTE2>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
-
-            Mutex::Lock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
-            {
-                LocalTensor<float> sinkTmpUb =
-                    ubVec1ResBuffers_[vec1ResUbBufId_ * UB_VEC1_RES_BUF_BYTES].template ReinterpretCast<float>();
-                AttentionCommon::SinkExpandMaxVf<T, float, true>(maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize,
-                                                                 runInfo.actS1Size, constInfo_.gSize);
-            }
-            Mutex::Unlock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
+            // S1-only: 本 M 块属单一 head(n2Idx, gIdx), sink 为单值标量广播
+            // (sum=1, max=sink, 虚拟 sink token value=0)
+            float sinkValue = sinkGm_.GetValue(runInfo.n2Idx * constInfo_.gSize + runInfo.gIdx);
+            FaVectorApi::ResetSoftmaxBuffer<T, softmaxBufElementCount>(sumUb, maxUb, static_cast<T>(1),
+                                                                       static_cast<T>(sinkValue));
         } else {
-            Duplicate<T>(sumUb, static_cast<T>(0), softmaxBufElementCount);
-            Duplicate<T>(maxUb, static_cast<T>(-std::numeric_limits<float>::infinity()), softmaxBufElementCount);
+            FaVectorApi::ResetSoftmaxBuffer<T, softmaxBufElementCount>(
+                sumUb, maxUb, static_cast<T>(0), static_cast<T>(-std::numeric_limits<float>::infinity()));
         }
     }
 

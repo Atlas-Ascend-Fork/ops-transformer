@@ -208,6 +208,36 @@ __aicore__ inline void ProcessVec1VfDn(const LocalTensor<T2>& dstTensor, const L
                                                                 blockStride, repeatStride);
 }
 
+template <typename T, uint16_t elementCount>
+__simd_vf__ inline void ResetSoftmaxBufferVF(__ubuf__ T* sum_ub, __ubuf__ T* max_ub, const T sumValue, const T minValue)
+{
+    RegTensor<T> vreg_sum;
+    RegTensor<T> vreg_max;
+    MaskReg preg_all = CreateMask<T, MaskPattern::ALL>();
+
+    Duplicate(vreg_sum, sumValue);
+    Duplicate(vreg_max, minValue);
+
+    // 一个寄存器可存 64 个 float 元素，按 64 元素为一组循环写出
+    constexpr uint16_t elemPerReg = 64U;
+    static_assert(elementCount % elemPerReg == 0, "elementCount must be a multiple of 64");
+    constexpr uint16_t loopCount = elementCount / elemPerReg;
+    for (uint16_t i = 0; i < loopCount; ++i) {
+        StoreAlign<T, Reg::StoreDist::DIST_NORM_B32>(sum_ub + i * elemPerReg, vreg_sum, preg_all);
+        StoreAlign<T, Reg::StoreDist::DIST_NORM_B32>(max_ub + i * elemPerReg, vreg_max, preg_all);
+    }
+}
+
+template <typename T, uint32_t elementCount>
+__aicore__ inline void ResetSoftmaxBuffer(const LocalTensor<T>& sumTensor, const LocalTensor<T>& maxTensor,
+                                          const T sumValue, const T minValue)
+{
+    static_assert(elementCount <= 0xFFFFU, "elementCount exceeds uint16_t range");
+    __ubuf__ T* sum_ub = (__ubuf__ T*)sumTensor.GetPhyAddr();
+    __ubuf__ T* max_ub = (__ubuf__ T*)maxTensor.GetPhyAddr();
+    ResetSoftmaxBufferVF<T, static_cast<uint16_t>(elementCount)>(sum_ub, max_ub, sumValue, minValue);
+}
+
 #ifndef MUL_SEL_SOFTMAXFLASHV2_CAST_NZ_DN_H_
 template <typename T>
 __simd_vf__ inline void BroadCastMaxSumVF(__ubuf__ float* out_ub, __ubuf__ float* ori_ub, const uint16_t loopM)
