@@ -14,7 +14,7 @@
  */
 
 #include "grouped_weight_quant_matmul_asw_tiling.h"
-#include "../../../op_kernel/arch35/weight_quant_asw/weight_quant_tiling_key.h"
+#include "../../../op_kernel/arch35/weight_quant_asw/weight_quant_asw_tiling_key.h"
 
 namespace GmmTilingTool = optiling::GMMWeightQuantTilingTool;
 namespace GmmConstants = optiling::GMMWeightQuantConstants;

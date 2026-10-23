@@ -58,7 +58,7 @@ using GMMS8S4BasicApiTilingData = GroupedMatmulTilingData::GMMS8S4BasicApiTiling
 #endif
 #elif defined(V9201_GMM_ANTI_QUANT_CUBE)
 #include "arch35/weight_quant_asw/weight_quant_grouped_matmul_asw_cube.h"
-#include "arch35/weight_quant_asw/weight_quant_tiling_key.h"
+#include "arch35/weight_quant_asw/weight_quant_asw_tiling_key.h"
 #elif defined(V310_GMM_ANTI_QUANT)
 #include "arch35/weight_quant_basic_block/basic_block_config.h"
 #include "arch35/weight_quant_basic_block/grouped_matmul_weight_quant_basic_controller.h"

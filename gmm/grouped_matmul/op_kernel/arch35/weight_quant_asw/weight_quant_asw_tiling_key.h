@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file weight_quant_tiling_key.h
+ * \file weight_quant_asw_tiling_key.h
  * \brief
  */
 
