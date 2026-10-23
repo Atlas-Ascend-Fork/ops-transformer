@@ -15,21 +15,26 @@
 #include "mc2_log.h"
 
 namespace mc2tiling {
-// 根据ascendc提供的aic aiv数量，按照aic:aiv=1:2比例设置逻辑核数量，以aic和aiv/2较小的值为基点
+// 根据 AIC/AIV 核数量按实际配比计算逻辑核数(blockDim)。
+// 不同形态的 AIC:AIV 配比不同：A5 为 1:2、A6 为 1:1，
+// 因此这里由 aivNum/aicNum 动态推导配比，取 aicNum 与 aivNum/ratio 的较小值作为基点。
 inline uint64_t GetNumBlocks(const uint64_t aicNum, const uint64_t aivNum, const char* debugDesc)
 {
-    uint64_t halfAivNum = aivNum / 2; // aic:aiv按照1：2配比
-    uint64_t numBlocks = std::min(aicNum, halfAivNum);
-    if (numBlocks != aicNum || numBlocks != aivNum * 2) { // aic:aiv按照1：2配比
+    // 实际 AIC:AIV 配比（A5=1:2、A6=1:1）；aicNum 为 0 或 aivNum<aicNum 时按 1 兜底
+    uint64_t ratio = (aicNum != 0) ? (aivNum / aicNum) : 1;
+    ratio = (ratio == 0) ? 1 : ratio;
+    uint64_t pairedAicNum = aivNum / ratio; // AIV 核能配对的 AIC 核数
+    uint64_t numBlocks = std::min(aicNum, pairedAicNum);
+    if (numBlocks != aicNum) { // AIV 核不足，无法配对所有 AIC 核
         OP_LOGI(debugDesc,
-                "aicNum is %lu, aivNum is %lu. Since aicNum != 2 * aivNum, "
-                "the actual number of enabled AIC cores is %lu, and the number of AIV cores is %lu.",
-                aicNum, aivNum, numBlocks, numBlocks * 2); // aic:aiv按照1：2配比
+                "aicNum is %lu, aivNum is %lu, aic:aiv ratio is %lu. AIV cores can only pair %lu AIC cores, "
+                "so the actual enabled AIC cores is %lu and AIV cores is %lu.",
+                aicNum, aivNum, ratio, pairedAicNum, numBlocks, numBlocks * ratio);
     }
     OP_TILING_CHECK((numBlocks == 0U),
                     OP_LOGE_FOR_INVALID_VALUE(debugDesc, "aicNum, aivNum",
                                               (std::to_string(aicNum) + ", " + std::to_string(aivNum)).c_str(),
-                                              "numBlocks=min(aicNum, aivNum/2) should not be 0"),
+                                              "numBlocks=min(aicNum, aivNum/ratio) should not be 0"),
                     return ge::GRAPH_FAILED);
     return numBlocks;
 }
