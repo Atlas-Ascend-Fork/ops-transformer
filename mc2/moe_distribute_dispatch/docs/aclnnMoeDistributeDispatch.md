@@ -400,7 +400,7 @@ aclnnStatus aclnnMoeDistributeDispatch(
 
     <!-- end id7 -->
     <!-- npu="A3" id8 -->
-    - <term>Atlas A3系列产品</term>  ：
+    - <term>Atlas A3系列产品</term>：
         - 不支持`expandScales`。
         - 不支持`xActiveMask`输入。
         - `sharedExpertNum`当前取值范围[0, 1]，0表示无共享专家，1表示一个共享专家，当前版本仅支持传1。
@@ -513,7 +513,7 @@ aclnnStatus aclnnMoeDistributeDispatch(
 
 - 参数说明里shape格式说明：
     - `A`：表示本卡可能接收的最大token数量，取值范围如下：
-        - 对于共享专家，要满足`A` = `BS` \* `epWorldSize` \* `sharedExpertNum` / `sharedExpertRankNum。`
+        - 对于共享专家，要满足`A` = `BS` \* `epWorldSize` \* `sharedExpertNum` / `sharedExpertRankNum`。
         - 对于MoE专家，当`globalBs`为0时，要满足`A` >= `BS` \* `epWorldSize` \* min(`localExpertNum`, `K`)；当`globalBs`非0时，要满足`A` >= `globalBs` \* min(`localExpertNum`, `K`)。
     - `localExpertNum`：表示本卡专家数量。
         - 对于共享专家卡，`localExpertNum` = 1
@@ -526,7 +526,7 @@ aclnnStatus aclnnMoeDistributeDispatch(
     - 当前不支持TP域通信。
 
     <!-- npu="A3" id10 -->
-    - <term>Atlas A3系列产品</term>  ：一个通信域内的节点需在一个超节点内，不支持跨超节点。
+    - <term>Atlas A3系列产品</term>：一个通信域内的节点需在一个超节点内，不支持跨超节点。
 
     <!-- end id10 -->
 
@@ -554,7 +554,7 @@ aclnnStatus aclnnMoeDistributeDispatch(
 
 <!-- end id12 -->
 <!-- npu="A3" id13 -->
-- <term>Atlas A3系列产品</term>  ：
+- <term>Atlas A3系列产品</term>：
     - 该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
     - 参数说明里shape格式说明：
         - `H`：表示hidden size隐藏层大小，取值为7168。
@@ -606,7 +606,7 @@ aclnnStatus aclnnMoeDistributeDispatch(
 
         1. 开发者可以通过ranktable文件配置参与集合通信的NPU资源信息，详细配置请参考[《集合通信用户指南》](https://hiascend.com/document/redirect/CannCommunityHcclUg)中“通信功能开发>集群信息配置>ranktable文件配置资源信息”。
 
-        2. 使用`cat /etc/hccn.conf`或者`for i in seq 0 7; do echo "===================> dev$i, NPU$((i+1))"; hccn_tool -i $i -ip -g; done`查询机器的device ip。然后参考集合通信文档填写json文件。
+        2. 使用`cat /etc/hccn.conf`或者`for i in $(seq 0 7); do echo "===================> dev$i, NPU$((i+1))"; hccn_tool -i $i -ip -g; done`查询机器的device ip。然后参考集合通信文档填写json文件。
 
         > 注意：两机16卡场景中，两机器的device_id都是0~7，其中一台机器的rank_id为0~7，另一台机器的rank_id为8~15。单机16卡场景中，device_id和rank_id都是0~15。
 
@@ -641,12 +641,12 @@ aclnnStatus aclnnMoeDistributeDispatch(
         在所有机器上执行算子示例（两机场景中，需要同时在终端执行算子），执行命令如下：
 
         ```bash
-        bash build.sh --run_example --ops=moe_distribute_dispatch eager cust
+        bash build.sh --run_example moe_distribute_dispatch eager cust
         ```
 
 <!-- end id15 -->
 <!-- npu="A3" id16 -->
-- <term>Atlas A3系列产品</term>  ：
+- <term>Atlas A3系列产品</term>：
 
     - 环境变量配置：
 
@@ -661,7 +661,7 @@ aclnnStatus aclnnMoeDistributeDispatch(
 示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
 <!-- npu="950,A3,910b" id17 -->
-- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：
 
     ```Cpp
     #include <thread>
@@ -741,7 +741,7 @@ aclnnStatus aclnnMoeDistributeDispatch(
 
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed. ret: %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed. ret: %d\n", ret); return -1);
         LOG_PRINT(
             "[INFO] rank = %d, hcomEpName = %s, dispatchStream = %p, combineStream = %p, context = %p\n",
             args.rankId, hcomEpName, args.dispatchStream, args.combineStream, args.context

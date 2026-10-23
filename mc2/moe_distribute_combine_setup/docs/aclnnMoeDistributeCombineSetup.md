@@ -647,7 +647,7 @@ aclnnStatus aclnnMoeDistributeCombineSetupTeardownCalcOutputSize(
 
     1. 按照下方指导创建rank_table_m2.json文件并修改。
 
-    2. 将项目拷贝到两台服务器中，并根据机器的device ip配置rank_table_m2.json文件内容。注意两机rank_table_m2.json文件保持一致。
+    2. 将项目复制到两台服务器中，并根据机器的device ip配置rank_table_m2.json文件内容。注意两机rank_table_m2.json文件保持一致。
 
     3. 安装cann包，并根据[算子调用](../../../docs/zh/invocation/quick_op_invocation.md)编译运行。
 
@@ -655,9 +655,9 @@ aclnnStatus aclnnMoeDistributeCombineSetupTeardownCalcOutputSize(
 
     1. 开发者可以通过ranktable文件配置参与集合通信的NPU资源信息，详细配置请参考[《集合通信用户指南》](https://hiascend.com/document/redirect/CannCommunityHcclUg)中“通信功能开发>集群信息配置>ranktable文件配置资源信息”。
 
-    2. 使用`cat /etc/hccn.conf`或者`for i in seq 0 7; do echo "===================> dev$i, NPU$((i+1))"; hccn_tool -i $i -ip -g; done`查询机器的device ip。然后参考集合通信文档填写json文件。
+    2. 使用`cat /etc/hccn.conf`或者`for i in $(seq 0 7); do echo "===================> dev$i, NPU$((i+1))"; hccn_tool -i $i -ip -g; done`查询机器的device ip。然后参考集合通信文档填写json文件。
 
-    > 注意：两机16卡场景中，两机器的device_id都是0~7，其中一台机器的rank_id为0~7，另一台机器的rank_id为8~15。单机16卡场景中，device_id和rank_id都是0~15。
+    > 注意：两机16卡场景中，两机器的device_id都是0～7，其中一台机器的rank_id为0～7，另一台机器的rank_id为8～15。单机16卡场景中，device_id和rank_id都是0～15。
 
 - 环境变量配置：
 
@@ -669,6 +669,7 @@ aclnnStatus aclnnMoeDistributeCombineSetupTeardownCalcOutputSize(
     export FIRST_RANK_ID=<设备的起始rank_id>
     ## ENV_DEV_NUM说明：根据当前机器的卡数设置该变量，以两机16卡为例，将两台机器设置为16
     export ENV_DEV_NUM=16
+    ```
 
 - 机器数量设置：
 

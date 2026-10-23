@@ -52,7 +52,7 @@
 
     $$
     xFp32 = CastToFp32(X) \times scales \\
-    quantOut = Cast(xFp32,dstType) \\
+    quantOut = Cast(xFp32, dstType) \\
     allToAllXOut = AllToAllV(quantOut)\\
     expandXOut = AllToAllV(quantOut)
     $$
@@ -69,7 +69,7 @@
     dynamicScalesOut = allToAllDynamicScalesOut
     $$
 
-    - 情形4：如果quantMode=3（pertile动态量化场景）：
+    - 情形4：如果quantMode=3（pergroup动态量化场景）：
 
     $$
     xFp32 = CastToFp32(X) \times scales \\
@@ -638,17 +638,17 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
   <!-- npu="910b" id13 -->
   - <term>Atlas A2系列产品</term>：
       - `quantMode`取值为0时，表示非量化场景：
-          - 当`x`的数据类型为`FLOAT16`或`BFLOAT16`时，输入`scalesOptional`传空指针，`expandX`的数据类型与`x`一致。
-          - 当`x`的数据类型为`INT32`时，仅支持`commAlg`配置为"fullmesh"，输入`scalesOptional`必须为1D Tensor，数据类型为`FLOAT32`，shape为(`BS`, )；`expandX`的数据类型为`INT32`，输出`dynamicScalesOut`的数据类型为`FLOAT32`，shape为(`A`, )。
-      - `quantMode`取值为2时，表示pertoken动态量化场景，`expandX`的数据类型支持`INT8`。
+          - 当`x`的数据类型为`FLOAT16`或`BFLOAT16`时，输入`scalesOptional`传空指针，`expandXOut`的数据类型与`x`一致。
+          - 当`x`的数据类型为`INT32`时，仅支持`commAlg`配置为"fullmesh"，输入`scalesOptional`必须为1D Tensor，数据类型为`FLOAT32`，shape为(`BS`, )；`expandXOut`的数据类型为`INT32`，输出`dynamicScalesOut`的数据类型为`FLOAT32`，shape为(`A`, )。
+      - `quantMode`取值为2时，表示pertoken动态量化场景，`expandXOut`的数据类型支持`INT8`。
           - 输入`scalesOptional`可传入空指针。
           - 若输入`scalesOptional`传入有效数据时，其shape为(`moeExpertNum`, `H`)。
           - 输出`dynamicScalesOut`shape为`(A, )`
   <!-- end id13 -->
   <!-- npu="A3" id14 -->
   - <term>Atlas A3系列产品</term>  ：
-      - `quantMode`取值为0时，表示非量化场景，输入`scalesOptional`传空指针，`expandX`的数据类型支持`FLOAT16`、`BFLOAT16`。
-      - `quantMode`取值为2时，表示pertoken动态量化场景，`expandX`的数据类型支持`INT8`。
+      - `quantMode`取值为0时，表示非量化场景，输入`scalesOptional`传空指针，`expandXOut`的数据类型支持`FLOAT16`、`BFLOAT16`。
+      - `quantMode`取值为2时，表示pertoken动态量化场景，`expandXOut`的数据类型支持`INT8`。
           - 输入`scalesOptional`可传入空指针。
           - 若输入`scalesOptional`传入有效数据且存在共享专家卡时，其shape为(`sharedExpertNum` + `moeExpertNum`, `H`)。
           - 若输入`scalesOptional`传入有效数据且不存在共享专家卡时，其shape为(`moeExpertNum`, `H`)。
@@ -657,29 +657,29 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
   <!-- npu="950" id15 -->
   - <term>Ascend 950DT系列产品</term>：
       - `quantMode`取值为0时，表示非量化场景。
-          - 当`x`的数据类型为`FLOAT16`或`BFLOAT16`时，`expandX`的数据类型可与`x`一致，也可为`HIFLOAT8`，输入`scalesOptional`必须传空指针。
-          - 当`x`的数据类型为`HIFLOAT8`、`FLOAT8_E5M2`、`FLOAT8_E4M3FN`、`FLOAT4_E2M1`、`FLOAT4_E1M2`时，输入`scalesOptional`必须传入有效数据，`expandX`的数据类型与`x`一致。
+          - 当`x`的数据类型为`FLOAT16`或`BFLOAT16`时，`expandXOut`的数据类型可与`x`一致，也可为`HIFLOAT8`，输入`scalesOptional`必须传空指针。
+          - 当`x`的数据类型为`HIFLOAT8`、`FLOAT8_E5M2`、`FLOAT8_E4M3FN`、`FLOAT4_E2M1`、`FLOAT4_E1M2`时，输入`scalesOptional`必须传入有效数据，`expandXOut`的数据类型与`x`一致。
               - `x`的数据类型为`HIFLOAT8`时，`scalesOptional`的数据类型为`FLOAT`。
               - `x`的数据类型为`FLOAT8_E5M2`或`FLOAT8_E4M3FN`时，`scalesOptional`的数据类型为`FLOAT`或`FLOAT8_E8M0`。
               - `x`的数据类型为`FLOAT4_E2M1`或`FLOAT4_E1M2`时，`scalesOptional`的数据类型为`FLOAT8_E8M0`，且H必须为偶数。
               - `scalesOptional`的shape为(`BS`, `dim1`)，其中`dim1`需满足小于等于`H`。
-      - `quantMode`取值为1时，表示静态量化场景，`expandX`的数据类型支持`INT8`、`HIFLOAT8`。
-          - `expandX`的数据类型为`INT8`时有如下场景：
+      - `quantMode`取值为1时，表示静态量化场景，`expandXOut`的数据类型支持`INT8`、`HIFLOAT8`。
+          - `expandXOut`的数据类型为`INT8`时有如下场景：
               - 输入的`scalesOptional`代表量化系数，shape为(1, )；
               - 输入的`scalesOptional`表示每个专家共享的平滑权重时，shape为(`H`，)；
               - 输入的`scalesOptional`代表融了每个专家的平滑权重的量化系数时，若有共享专家卡，其shape为(`sharedExpertNum` + `moeExpertNum`, `H`)，若无共享专家卡，其shape为(`moeExpertNum`, `H`)。
-          - `expandX`的数据类型为`HIFLOAT8`时，`scalesOptional`的shape必须为(1, )。
-      - `quantMode`取值为2时，表示pertoken动态量化场景，`expandX`的数据类型支持`INT8`、`FLOAT8_E4M3FN`、`FLOAT8_E5M2`。
+          - `expandXOut`的数据类型为`HIFLOAT8`时，`scalesOptional`的shape必须为(1, )。
+      - `quantMode`取值为2时，表示pertoken动态量化场景，`expandXOut`的数据类型支持`INT8`、`FLOAT8_E4M3FN`、`FLOAT8_E5M2`。
           - 输入`scalesOptional`可传入空指针。
           - 若输入`scalesOptional`传入有效数据且存在共享专家卡时，其shape为(`sharedExpertNum` + `moeExpertNum`, `H`)。
           - 若输入`scalesOptional`传入有效数据且不存在共享专家卡时，其shape为(`moeExpertNum`, `H`)。
           - 输出`dynamicScalesOut`shape为`(A, )`
-      - `quantMode`取值为3时，表示pergroup动态量化场景，expandX的数据类型支持`FLOAT8_E4M3FN`、`FLOAT8_E5M2`。
+      - `quantMode`取值为3时，表示pergroup动态量化场景，expandXOut的数据类型支持`FLOAT8_E4M3FN`、`FLOAT8_E5M2`。
           - 输入`scalesOptional`可传入空指针。
           - 若输入`scalesOptional`传入有效数据且存在共享专家卡时，其shape为(`sharedExpertNum` + `moeExpertNum`, `H`)。
           - 若输入`scalesOptional`传入有效数据且不存在共享专家卡时，其shape为(`moeExpertNum`, `H`)。
           - 输出`dynamicScalesOut`shape为`(A, Ceil(H, 128))`，其中`Ceil(H, 128) = (H + 128 - 1) / 128`
-      - `quantMode`取值为4时，表示mx量化场景，`expandX`的数据类型支持`FLOAT8_E4M3FN`、`FLOAT8_E5M2`、`FLOAT4_E2M1`、`FLOAT4_E1M2`，输入`scalesOptional`必须传入空指针。输出`dynamicScalesOut`shape为`(A, Ceil(H, 64))`，其中`Ceil(H, 64) = (H + 64 - 1) / 64`。当`expandX`的数据类型为`FLOAT4_E2M1`或`FLOAT4_E1M2`时，H必须为偶数。
+      - `quantMode`取值为4时，表示mx量化场景，`expandXOut`的数据类型支持`FLOAT8_E4M3FN`、`FLOAT8_E5M2`、`FLOAT4_E2M1`、`FLOAT4_E1M2`，输入`scalesOptional`必须传入空指针。输出`dynamicScalesOut`shape为`(A, Ceil(H, 64))`，其中`Ceil(H, 64) = (H + 64 - 1) / 64`。当`expandXOut`的数据类型为`FLOAT4_E2M1`或`FLOAT4_E1M2`时，H必须为偶数。
 
   <!-- end id15 -->
 
@@ -690,8 +690,8 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
           <!-- npu="910b" id16 -->
           - <term>Atlas A2系列产品</term>：
               - commAlg为""或nullptr：依HCCL环境变量选择“fullmesh”或“hierarchy”公式。
-              - commAlg为"fullmesh"：当`x`的数据类型为`INT32`时，设置大小要求(≥ 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* (H \* sizeof(int32) + 32B) + 2MB))；其他数据类型设置大小要求(≥ 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* H \* sizeof(uint16) + 2MB))。
-              - commAlg为"hierarchy"：设置大小要求(≥ (`moeExpertNum` + `epWorldSize` / 4) \* Align512(`maxBS` \* (`H` \* 2 + 16 \* Align8  (`K`))) \* 1B + 8MB，其中Align8(x) = ((x + 8 - 1) / 8) \* 8，Align512(x) = ((x + 512 - 1) / 512) \* 512)。
+              - commAlg为"fullmesh"：当`x`的数据类型为`INT32`时，设置大小要求(≥ 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* (H \* sizeof(int32) + 32Byte) + 2MB))；其他数据类型设置大小要求(≥ 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* H \* sizeof(uint16) + 2MB))。
+              - commAlg为"hierarchy"：设置大小要求(≥ (`moeExpertNum` + `epWorldSize` / 4) \* Align512(`maxBS` \* (`H` \* 2 + 16 \* Align8  (`K`))) \* 1Byte + 8MB，其中Align8(x) = ((x + 8 - 1) / 8) \* 8，Align512(x) = ((x + 512 - 1) / 512) \* 512)。
           <!-- end id16 -->
           <!-- npu="A3" id17 -->
           - <term>Atlas A3系列产品</term>  ：
@@ -775,12 +775,12 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
     示例算子执行命令如下：
 
     ```bash
-    bash build.sh --run_example --ops=moe_distribute_dispatch_v2 eager cust
+    bash build.sh --run_example moe_distribute_dispatch_v2 eager cust
     ```
 
 <!-- end id24 -->
 <!-- npu="950,A3" id25 -->
-- <term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：
+- <term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：
 
     无需配置ranktable文件以及环境变量RANK_TABLE_FILE、FIRST_RANK_ID。
 
@@ -789,7 +789,7 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
 示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
 <!-- npu="950,A3,910b" id26 -->
-- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：
 
     ```Cpp
     #include <thread>
@@ -886,7 +886,7 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
 
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed. ret: %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed. ret: %d\n", ret); return -1);
         LOG_PRINT(
             "[INFO] rank = %d, hcomEpName = %s, dispatchV2Stream = %p, combineV2Stream = %p, context = %p\n",
             args.rankId, hcomEpName, args.dispatchV2Stream, args.combineV2Stream, args.context
@@ -1132,7 +1132,7 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSetCurrentContext failed, ret %d\n", ret); return ret);
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         LOG_PRINT("[INFO] rank = %d, hcomEpName = %s, dispatchV2Stream = %p, combineV2Stream = %p, \
                     context = %p\n", args.rankId, hcomEpName, args.dispatchV2Stream, args.combineV2Stream,                 \
                     args.context);

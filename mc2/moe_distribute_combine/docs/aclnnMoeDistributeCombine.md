@@ -33,6 +33,8 @@
     xOut = Sum(expertScales * ataOut) + sharedExpertX
     $$
 
+    其中，`sharedExpertX`不是本接口的入参，表示共享专家计算后的token。
+
 >注意该接口必须与`aclnnMoeDistributeDispatch`配套使用，相当于按`MoeDistributeDispatch`算子收集数据的路径原路返回。
 
 ## 函数原型
@@ -349,7 +351,7 @@ aclnnStatus aclnnMoeDistributeCombine(
     <tr>
     <td>groupListType</td>
     <td>输入</td>
-    <td>group List格式。</td>
+    <td>groupListType格式。</td>
     <td>预留参数，当前版本不支持，传0即可。</td>
     <td>INT64</td>
     <td>-</td>
@@ -534,7 +536,7 @@ aclnnStatus aclnnMoeDistributeCombine(
 
 5. 调用接口过程中使用的`groupEp`、`epWorldSize`、`moeExpertNum`、`groupTp`、`tpWorldSize`、`expertShardType`、`sharedExpertNum`、`sharedExpertRankNum`、`globalBs`参数取值所有卡需保持一致，网络中不同层中也需保持一致，且和`aclnnMoeDistributeDispatch`对应参数也保持一致。
 
-6. <term>Atlas A3系列产品</term>  ：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
+6. <term>Atlas A3系列产品</term>：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
 
 7. 参数说明里shape格式说明：
     - **A**：表示本卡需要分发的最大token数量，取值范围如下：
@@ -546,7 +548,7 @@ aclnnStatus aclnnMoeDistributeCombine(
       - <term>Atlas A2系列产品</term>：取值范围(0, 7168]，且需为32的整数倍。
       <!-- end id10 -->
       <!-- npu="950,A3" id11 -->
-      - <term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：取值为7168。
+      - <term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：取值为7168。
       <!-- end id11 -->
 
     - **BS**：表示batch sequence size（本卡最终输出的token数量）：
@@ -555,7 +557,7 @@ aclnnStatus aclnnMoeDistributeCombine(
       - <term>Atlas A2系列产品</term>：取值范围为(0 < BS ≤ 256)。
       <!-- end id12 -->
       <!-- npu="950,A3" id13 -->
-      - <term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：取值范围为(0 < BS ≤ 512)。
+      - <term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：取值范围为(0 < BS ≤ 512)。
       <!-- end id13 -->
 
     - **K**：表示选取topK个专家，需满足(0 < K ≤ moeExpertNum)：
@@ -564,7 +566,7 @@ aclnnStatus aclnnMoeDistributeCombine(
       - <term>Atlas A2系列产品</term>：取值范围为(0 < K ≤ 16)。
       <!-- end id14 -->
       <!-- npu="950,A3" id15 -->
-      - <term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：取值范围为(0 < K ≤ 8)，且需要满足0 < `K` ≤ moeExpertNum。
+      - <term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：取值范围为(0 < K ≤ 8)，且需要满足0 < `K` ≤ moeExpertNum。
       <!-- end id15 -->
 
     - **serverNum**：表示服务器的节点数，取值仅支持2、4、8。
@@ -581,7 +583,7 @@ aclnnStatus aclnnMoeDistributeCombine(
         - 设置大小要求(≥ 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* H \* sizeof(uint16) + 2MB))。
    <!-- end id16 -->
    <!-- npu="A3" id17 -->
-   - <term>Atlas A3系列产品</term>  ：
+   - <term>Atlas A3系列产品</term>：
         - ep通信域内：设置大小要求(≥ 2)且满足(1024^2 \* (HCCL_BUFFSIZE - 2) / 2 ≥ BS \* 2 \* (H + 128) \* (epWorldSize \* localExpertNum + K + 1))，其中`localExpertNum`需使用MoE专家卡的本卡专家数。
         - tp通信域内：预留参数，当前版本不支持。
    <!-- end id17 -->
@@ -600,7 +602,7 @@ aclnnStatus aclnnMoeDistributeCombine(
     - 当前不支持TP域通信。
 
     <!-- npu="A3" id19 -->
-    - <term>Atlas A3系列产品</term>  ：一个通信域内的节点需在一个超节点内，不支持跨超节点。
+    - <term>Atlas A3系列产品</term>：一个通信域内的节点需在一个超节点内，不支持跨超节点。
 
     <!-- end id19 -->
 
@@ -635,7 +637,7 @@ aclnnStatus aclnnMoeDistributeCombine(
 
         1. 开发者可以通过ranktable文件配置参与集合通信的NPU资源信息，详细配置请参考[《集合通信用户指南》](https://hiascend.com/document/redirect/CannCommunityHcclUg)中“通信功能开发>集群信息配置>ranktable文件配置资源信息”。
 
-        2. 使用`cat /etc/hccn.conf`或者`for i in seq 0 7; do echo "===================> dev$i, NPU$((i+1))"; hccn_tool -i $i -ip -g; done`查询机器的device ip。然后参考集合通信文档填写json文件。
+        2. 使用`cat /etc/hccn.conf`或者`for i in $(seq 0 7); do echo "===================> dev$i, NPU$((i+1))"; hccn_tool -i $i -ip -g; done`查询机器的device ip。然后参考集合通信文档填写json文件。
 
         > 注意：两机16卡场景中，两机器的device_id都是0~7，其中一台机器的rank_id为0~7，另一台机器的rank_id为8~15。单机16卡场景中，device_id和rank_id都是0~15。
 
@@ -670,12 +672,12 @@ aclnnStatus aclnnMoeDistributeCombine(
         在所有机器上执行算子示例（两机场景中，需要同时在终端执行算子），执行命令如下：
 
         ```bash
-        bash build.sh --run_example --ops=moe_distribute_combine eager cust
+        bash build.sh --run_example moe_distribute_combine eager cust
         ```
 
 <!-- end id22 -->
 <!-- npu="A3" id23 -->
-- <term>Atlas A3系列产品</term>  ：
+- <term>Atlas A3系列产品</term>：
 
     - 环境变量配置：
 
@@ -690,7 +692,7 @@ aclnnStatus aclnnMoeDistributeCombine(
 示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
 <!-- npu="950,A3,910b" id24 -->
-- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：
 
     ```Cpp
     #include <thread>
@@ -770,7 +772,7 @@ aclnnStatus aclnnMoeDistributeCombine(
 
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed. ret: %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed. ret: %d\n", ret); return -1);
         LOG_PRINT(
             "[INFO] rank = %d, hcomEpName = %s, dispatchStream = %p, combineStream = %p, context = %p\n",
             args.rankId, hcomEpName, args.dispatchStream, args.combineStream, args.context

@@ -37,7 +37,7 @@ x = combineOut + residualX\\
 y = \frac{x}{RMS(x)} * gamma,\quad\text{where}\ RMS(x) = \sqrt{\frac{1}{H}\sum_{i=1}^{H}x_{i}^{2}+normEps}
 $$
 
-> 注意该接口必须与`aclnnMoeDistributeDispatchV2`配套使用，相当于按`MoeDistributeDispatchV2`算子收集数据的路径原路返还。
+> 注意该接口必须与`aclnnMoeDistributeDispatchV2`配套使用，相当于按`MoeDistributeDispatchV2`算子收集数据的路径原路返回。
 
 ## 函数原型
 
@@ -121,7 +121,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
     <td>expandX</td>
     <td>输入</td>
     <td>根据expertIds进行扩展过的token特征。</td>
-    <td>要求为2D Tensor，shape为(A , H)。</td>
+    <td>要求为2D Tensor，shape为(A, H)。</td>
     <td>BFLOAT16</td>
     <td>ND</td>
     <td>2</td>
@@ -280,7 +280,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
     <tr>
     <td>epRankId</td>
     <td>输入</td>
-    <td>EP域本卡Id。</td>
+    <td>EP域本卡ID。</td>
     <td>取值范围[0, epWorldSize)，同一个EP通信域中各卡的epRankId不重复。</td>
     <td>INT64</td>
     <td>ND</td>
@@ -320,7 +320,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
     <tr>
     <td>tpRankId</td>
     <td>输入</td>
-    <td>TP域本卡Id（预留参数，当前版本不支持）。</td>
+    <td>TP域本卡ID（预留参数，当前版本不支持）。</td>
     <td>传0即可，默认值为0。</td>
     <td>INT64</td>
     <td>ND</td>
@@ -391,7 +391,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
     <td>groupListType</td>
     <td>输入</td>
     <td>group List格式，预留参数。</td>
-    <td>当前版本不支持，传0即可。</td>
+    <td>当前版本不支持，传1即可。</td>
     <td>INT64</td>
     <td>ND</td>
     <td>-</td>
@@ -430,8 +430,8 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
     <tr>
     <td>rstdOut</td>
     <td>输出</td>
-    <td>RmsNorm后的输出结果。</td>
-    <td>要求为3D Tensor，shape为（Bs，1，1）。</td>
+    <td>RMSNorm计算中的逆标准差（1/RMS(x)）。</td>
+    <td>要求为3D Tensor，shape为(Bs, 1, 1)。</td>
     <td>FLOAT32</td>
     <td>ND</td>
     <td>3</td>
@@ -441,7 +441,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
     <td>xOut</td>
     <td>输出</td>
     <td>Add后的输出结果。</td>
-    <td>要求为3D Tensor，shape为(Bs, 1，H)。</td>
+    <td>要求为3D Tensor，shape为(Bs, 1, H)。</td>
     <td>BFLOAT16</td>
     <td>ND</td>
     <td>3</td>
@@ -563,7 +563,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
 
 3. 调用接口过程中使用的`groupEp`、`epWorldSize`、`moeExpertNum`、`groupTp`、`tpWorldSize`、`expertShardType`、`sharedExpertNum`、`sharedExpertRankNum`、`globalBs`参数取值所有卡需保持一致，网络中不同层也需保持一致，且和`aclnnMoeDistributeDispatchV2`对应参数也保持一致。
 
-4. <term>Atlas A3系列产品</term>  ：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
+4. <term>Atlas A3系列产品</term>：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
 
 5. 参数说明里shape格式说明：
     - **A**：表示本卡需要分发的最大token数量，取值范围如下：
@@ -586,7 +586,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
     - 当前不支持TP域通信。
 
    <!-- npu="A3" id7 -->
-   - <term>Atlas A3系列产品</term>  ：一个通信域内的节点需在一个超节点内，不支持跨超节点。
+   - <term>Atlas A3系列产品</term>：一个通信域内的节点需在一个超节点内，不支持跨超节点。
 
    <!-- end id7 -->
 
@@ -602,7 +602,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
 示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
 <!-- npu="950,A3" id9 -->
-- <term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：
+- <term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：
 
     ```Cpp
     #include <thread>
@@ -674,7 +674,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNorm(
 
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         LOG_PRINT(
             "[INFO] rank = %d, hcomEpName = %s, dispatchStream = %p, combineStream = %p, context = %p\n",
             args.rankId, hcomEpName, args.dispatchStream, args.combineStream, args.context

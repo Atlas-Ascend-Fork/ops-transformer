@@ -87,7 +87,7 @@ int LaunchOneProcessDispatchAndCombine(Args& args)
 
     char hcomEpName[128] = {0};
     ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
     char hcomEpBarrierName[128] = {0};
     ret = HcclGetCommName(args.hcclEpBarrierComm, hcomEpBarrierName);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpBarrierCommName failed, ret %d\n", ret); return -1);
@@ -256,7 +256,7 @@ int LaunchOneProcessDispatchAndCombine(Args& args)
     /**************************************** 调用barrier********************************************/
 
     ret = aclnnDistributeBarrierGetWorkspaceSize(expandX, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize,
-                                                 &combineExecutor);
+                                                 &barrierExecutor);
 
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclnnDistributeBarrierGetWorkspaceSize failed. ret = %d \n", ret);
               return ret);
@@ -267,7 +267,7 @@ int LaunchOneProcessDispatchAndCombine(Args& args)
     }
 
     // 调用第二阶段接口
-    ret = aclnnDistributeBarrier(barrierWorkspaceAddr, barrierWorkspaceSize, combineExecutor, args.barrierStream);
+    ret = aclnnDistributeBarrier(barrierWorkspaceAddr, barrierWorkspaceSize, barrierExecutor, args.barrierStream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclnnDistributeBarrier failed. ret = %d \n", ret); return ret);
     ret = aclrtSynchronizeStreamWithTimeout(args.barrierStream, 10000);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtSynchronizeStreamWithTimeout failed. ret = %d \n", ret);
@@ -381,6 +381,7 @@ int LaunchOneProcessDispatchAndCombine(Args& args)
     HcclCommDestroy(args.hcclTpComm);
     aclrtDestroyStream(args.dispatchStream);
     aclrtDestroyStream(args.combineStream);
+    aclrtDestroyStream(args.barrierStream);
     aclrtDestroyContext(args.context);
     aclrtResetDevice(args.rankId);
 

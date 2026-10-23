@@ -152,15 +152,15 @@ aclnnStatus aclnnDistributeBarrierV2(
     </tbody></table>
 
     <!-- npu="A3" id7 -->
-    - <term>Atlas A3系列产品</term>  ：
+    - <term>Atlas A3系列产品</term>：
         - 不支持FLOAT8_E5M2、FLOAT8_E4M3FN、FLOAT4_E1M2、FLOAT4_E2M1、HIFLOAT8、INT4类型。
-        - `epWorldSize`取值支持[2, 384]。
+        - `worldSize`取值支持[2, 384]。
 
     <!-- end id7 -->
     <!-- npu="950" id8 -->
     - <term>Ascend 950DT系列产品</term>：
         - timeOut参数里的超时时间单位为us，建议配置5000000us，根据实际环境不同超时时间下限可能不同。
-        - `epWorldSize`取值支持[2, 1024]。
+        - `worldSize`取值支持[2, 1024]。
 
     <!-- end id8 -->
 
@@ -185,7 +185,7 @@ aclnnStatus aclnnDistributeBarrierV2(
     <tr>
     <td>ACLNN_ERR_PARAM_NULLPTR</td>
     <td>161001</td>
-    <td>传入的xRef，group或worldSize是空指针。</td>
+    <td>传入的xRef或group是空指针。</td>
     </tr>
     <tr>
     <td rowspan="3" align="left">ACLNN_ERR_PARAM_INVALID</td>
@@ -263,7 +263,7 @@ aclnnStatus aclnnDistributeBarrierV2(
 ## 调用示例
 
 <!-- npu="950,A3" id10 -->
-- <term>Atlas A3系列产品</term>  、<term>Ascend 950DT系列产品</term>：
+- <term>Atlas A3系列产品</term>、<term>Ascend 950DT系列产品</term>：
 
     具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
@@ -345,7 +345,7 @@ aclnnStatus aclnnDistributeBarrierV2(
 
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomEpBarrierName[128] = {0};
         ret = HcclGetCommName(args.hcclEpBarrierComm, hcomEpBarrierName);
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpBarrierCommName failed, ret %d\n", ret); return -1);
@@ -483,7 +483,7 @@ aclnnStatus aclnnDistributeBarrierV2(
         CHECK_RET(ret == ACL_SUCCESS, return ret);
         ret = CreateAclTensor(dynamicScalesHostData, dynamicScalesShape, &dynamicScalesDeviceAddr, aclDataType::ACL_FLOAT, &dynamicScales);
         CHECK_RET(ret == ACL_SUCCESS, return ret);
-         ret = CreateAclTensor(expandIdxHostData, expandIdxShape, &expandIdxDeviceAddr, aclDataType::ACL_INT32, &expandIdx);
+        ret = CreateAclTensor(expandIdxHostData, expandIdxShape, &expandIdxDeviceAddr, aclDataType::ACL_INT32, &expandIdx);
         CHECK_RET(ret == ACL_SUCCESS, return ret);
         ret = CreateAclTensor(expertTokenNumsHostData, expertTokenNumsShape, &expertTokenNumsDeviceAddr, aclDataType::ACL_INT64, &expertTokenNums);
         CHECK_RET(ret == ACL_SUCCESS, return ret);
@@ -730,6 +730,7 @@ aclnnStatus aclnnDistributeBarrierV2(
         HcclCommDestroy(args.hcclTpComm);
         aclrtDestroyStream(args.dispatchStream);
         aclrtDestroyStream(args.combineStream);
+        aclrtDestroyStream(args.barrierStream);
         aclrtDestroyContext(args.context);
         aclrtResetDevice(args.rankId);
 

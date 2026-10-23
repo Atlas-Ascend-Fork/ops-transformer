@@ -29,7 +29,7 @@
 
     - 接收MOE层EP（Expert Parallelism）域的AllToAllV通信发过来的数据，数据发送端由aclnnMoeDistributeDispatchSetup完成，本接口内完成通信状态确认和数据整理。
 
-    - 注意该接口必须与aclnnMoeDistributeDispatchSetup，aclnnMoeDistributeCombineSetup，aclnnMoeDistributeCombineTeardown配套使用。
+    - 注意该接口必须与aclnnMoeDistributeDispatchSetup、aclnnMoeDistributeCombineSetup和aclnnMoeDistributeCombineTeardown配套使用。
 
 ## 函数原型
 
@@ -231,7 +231,7 @@ aclnnStatus aclnnMoeDistributeDispatchTeardown(
     <td>expertTokenNumsType</td>
     <td>输入</td>
     <td>表示输出expertTokenNums中值的语义类型。</td>
-    <td><ul><li>expertTokenNums为0表示expertTokenNums中的输出为每个专家处理的token数的前缀和，1表示expertTokenNums中的输出为每个专家处理的token数量。</li></ul></td>
+    <td><ul><li>expertTokenNumsType为0表示expertTokenNums中的输出为每个专家处理的token数的前缀和，1表示expertTokenNums中的输出为每个专家处理的token数量。</li></ul></td>
     <td>INT64</td>
     <td>-</td>
     <td>-</td>
@@ -336,7 +336,7 @@ aclnnStatus aclnnMoeDistributeDispatchTeardown(
 
     <!-- end id7 -->
     <!-- npu="A3" id8 -->
-    - <term>Atlas A3系列产品</term>  ：
+    - <term>Atlas A3系列产品</term>：
         - groupEp字符串长度范围为[1, 128)。
         - epWorldSize取值范围[2, 384]。
         - epRankId取值范围[0, epWorldSize)。同一个EP通信域中各卡的epRankId不能重复。
@@ -414,7 +414,7 @@ aclnnStatus aclnnMoeDistributeDispatchTeardown(
     <tr>
         <td>workspaceSize</td>
         <td>输入</td>
-        <td>在Device侧申请的workspace大小，由第一段接口aclnnMoeDistributeCombineV2GetWorkspaceSize获取。</td>
+        <td>在Device侧申请的workspace大小，由第一段接口aclnnMoeDistributeDispatchTeardownGetWorkspaceSize获取。</td>
     </tr>
     <tr>
         <td>executor</td>
@@ -438,11 +438,11 @@ aclnnStatus aclnnMoeDistributeDispatchTeardown(
 1. 确定性计算：
      - aclnnMoeDistributeDispatchTeardown默认确定性实现。
 
-2. aclnnMoeDistributeDispatchTeardown接口与aclnnMoeDistributeDispatchSetup，aclnnMoeDistributeCombineSetup，aclnnMoeDistributeCombineTeardown接口必须配套使用。
+2. aclnnMoeDistributeDispatchTeardown接口与aclnnMoeDistributeDispatchSetup、aclnnMoeDistributeCombineSetup、aclnnMoeDistributeCombineTeardown接口必须配套使用。
 
-3. 调用接口过程中使用的`groupEp`、`epWorldSize`、`moeExpertNum`、`expertShardType`、`sharedExpertNum`、`sharedExpertRankNum`、`globalBs`、`commQuantMode`、`commType`、`commAlg`参数取值所有卡需保持一致，`groupEp`、`epWorldSize`、`expertShardType`、`sharedExpertNum`、`sharedExpertRankNum`、`globalBs`、`commQuantMode`、`commType`、`commAlg`参数取值在网络中不同层中也需保持一致，且和`aclnnMoeDistributeDispatchTeardown`，`aclnnMoeDistributeCombineSetup`，`aclnnMoeDistributeCombineTeardown`对应参数也保持一致。
+3. 调用接口过程中使用的`groupEp`、`epWorldSize`、`moeExpertNum`、`expertShardType`、`sharedExpertNum`、`sharedExpertRankNum`、`globalBs`、`quantMode`、`commType`、`commAlg`参数取值所有卡需保持一致，`groupEp`、`epWorldSize`、`expertShardType`、`sharedExpertNum`、`sharedExpertRankNum`、`globalBs`、`quantMode`、`commType`、`commAlg`参数取值在网络中不同层中也需保持一致，且和`aclnnMoeDistributeDispatchTeardown`、`aclnnMoeDistributeCombineSetup`、`aclnnMoeDistributeCombineTeardown`对应参数也保持一致。
 
-4. <term>Atlas A3系列产品</term>  ：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
+4. <term>Atlas A3系列产品</term>：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
 
 5. 参数说明里shape格式说明：
     * A：表示本卡可能接收的最大token数量，取值范围如下：
@@ -470,13 +470,13 @@ aclnnStatus aclnnMoeDistributeDispatchTeardown(
 
     <!-- end id9 -->
     <!-- npu="A3" id10 -->
-    - <term>Atlas A3系列产品</term>  ：
+    - <term>Atlas A3系列产品</term>：
       调用本接口前需检查`HCCL_BUFFSIZE`环境变量取值是否合理，该环境变量表示单个通信域占用内存大小，单位MB，不配置时默认为200MB。要求 >= 2且满足>= 2 \* (`localExpertNum` \* `maxBs` \* `epWorldSize` \* Align512(Align32(2 \* H) + 44) + (`K` + `sharedExpertNum`) \* `maxBs` \* Align512(2 \* `H`))，`localExpertNum`代表使用MoE专家卡的本卡专家数，其中Align512(x) = ((x + 512 - 1) / 512) \* 512，Align32(x) = ((x + 32 - 1) / 32) \* 32。
 
     <!-- end id10 -->
 
 7. 通信域使用约束：
-    - 一个模型中的aclnnMoeDistributeDispatchSetup接口，aclnnMoeDistributeDispatchTeardown接口，aclnnMoeDistributeCombineSetup接口，aclnnMoeDistributeCombineTeardown接口仅支持相同EP通信域，且该通信域中不允许有其他算子。
+    - 一个模型中的aclnnMoeDistributeDispatchSetup接口、aclnnMoeDistributeDispatchTeardown接口、aclnnMoeDistributeCombineSetup接口和aclnnMoeDistributeCombineTeardown接口仅支持相同EP通信域，且该通信域中不允许有其他算子。
 
 8. 通信方式约束：
 

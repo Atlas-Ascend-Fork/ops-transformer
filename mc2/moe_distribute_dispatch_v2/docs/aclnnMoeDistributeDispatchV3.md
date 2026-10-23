@@ -42,7 +42,7 @@
             $$Moe(oriXOptional) = constExpertAlpha1Optional * oriXOptional + constExpertAlpha2Optional * constExpertVOptional$$
 
         详细说明请参考以下参数说明。
-        参数oriXOptional、constExpertAlpha1Optional、constExpertAlpha2Optional、constExpertVOptional见aclnnMoeDistributeCombineV3.md文档。
+        参数oriXOptional、constExpertAlpha1Optional、constExpertAlpha2Optional、constExpertVOptional见[aclnnMoeDistributeCombineV3](../../moe_distribute_combine_v2/docs/aclnnMoeDistributeCombineV3.md)文档。
 
 - 计算公式：
 
@@ -690,8 +690,8 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
       - `quantMode`取值为0时，表示非量化场景。
           - 当`x`的数据类型为`FLOAT16`或`BFLOAT16`时，`expandX`的数据类型可与`x`一致，也可为`HIFLOAT8`，输入`scalesOptional`必须传空指针。
           - 当`x`的数据类型为`HIFLOAT8`、`FLOAT8_E5M2`、`FLOAT8_E4M3FN`、`FLOAT4_E2M1`、`FLOAT4_E1M2`时，输入`scalesOptional`必须传入有效数据，`expandX`的数据类型与`x`一致。
-              - `x`的数据类型为`HIFLOAT8`时，`scalesOptional`的数据类型为`FLOAT`。
-              - `x`的数据类型为`FLOAT8_E5M2`或`FLOAT8_E4M3FN`时，`scalesOptional`的数据类型为`FLOAT`或`FLOAT8_E8M0`。
+              - `x`的数据类型为`HIFLOAT8`时，`scalesOptional`的数据类型为`FLOAT32`。
+              - `x`的数据类型为`FLOAT8_E5M2`或`FLOAT8_E4M3FN`时，`scalesOptional`的数据类型为`FLOAT32`或`FLOAT8_E8M0`。
               - `x`的数据类型为`FLOAT4_E2M1`或`FLOAT4_E1M2`时，`scalesOptional`的数据类型为`FLOAT8_E8M0`，且H必须为偶数。
               - `scalesOptional`的shape为(`BS`, `dim1`)，其中`dim1`需满足小于等于`H`。
       - `quantMode`取值为1时，表示静态量化场景，`expandX`的数据类型支持`INT8`、`HIFLOAT8`。
@@ -722,7 +722,7 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
       <!-- npu="910b" id16 -->
       - <term>Atlas A2系列产品</term>：
           - commAlg配置为""或nullptr：依照HCCL_INTRA_PCIE_ENABLE和HCCL_INTRA_ROCE_ENABLE环境变量配置，选择"fullmesh"或"hierarchy"公式。
-          - commAlg配置为"fullmesh": 当`x`的数据类型为`INT32`时，设置大小要求 >= 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* (H \* sizeof(int32) + 32B) + 2MB)；其他数据类型设置大小要求 >= 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* H \* sizeof(uint16) + 2MB)。
+          - commAlg配置为"fullmesh": 当`x`的数据类型为`INT32`时，设置大小要求 >= 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* (H \* sizeof(int32) + 32Byte) + 2MB)；其他数据类型设置大小要求 >= 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* H \* sizeof(uint16) + 2MB)。
           - commAlg配置为"hierarchy": 设置大小要求 >= (`moeExpertNum` + `epWorldSize` / 4) \* Align512(`maxBS` \* (`H` \* 2 + 16 \* Align8(`K`))) \* 1Byte + 8MB，其中Align8(x) = ((x + 8 - 1) / 8) \* 8，Align512(x) = ((x + 512 - 1) / 512) \* 512。
       <!-- end id16 -->
       <!-- npu="950,A3" id17 -->
@@ -788,7 +788,7 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
     - 执行算子样例：示例算子执行命令如下，该命令会执行算子[examples](../examples/)目录下所有的示例代码文件。
 
         ```bash
-        bash build.sh --run_example --ops=moe_distribute_dispatch_v2 eager cust
+        bash build.sh --run_example moe_distribute_dispatch_v2 eager cust
         ```
 
     - A2示例代码：
@@ -957,7 +957,7 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
             // 定义当前场景下各变量维度
             std::vector<int64_t> xShape{BS, H};
             std::vector<int64_t> expertIdsShape{BS, K};
-            std::vector<int64_t> scalesShape{moeExpertNum + 1, H};
+            std::vector<int64_t> scalesShape{(sharedExpertRankNum > 0) ? 1 + moeExpertNum : moeExpertNum, H};
             std::vector<int64_t> expertScalesShape{BS, K};
 
             std::vector<int64_t> expandXShape{A, H};
@@ -1373,7 +1373,7 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
         // 定义当前场景下各变量维度
         std::vector<int64_t> xShape{BS, H};
         std::vector<int64_t> expertIdsShape{BS, K};
-        std::vector<int64_t> scalesShape{moeExpertNum + 1, H};
+        std::vector<int64_t> scalesShape{(sharedExpertRankNum > 0) ? 1 + moeExpertNum : moeExpertNum, H};
         std::vector<int64_t> expertScalesShape{BS, K};
 
         std::vector<int64_t> expandXShape{A, H};

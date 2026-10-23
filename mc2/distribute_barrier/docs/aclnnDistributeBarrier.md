@@ -93,7 +93,7 @@ aclnnStatus aclnnDistributeBarrier(
     <td>-</td>
     </tr>
     <tr>
-    <td>worldSize（int64_t）</td>
+    <td>worldSize(int64_t)</td>
     <td>输入</td>
     <td>通信域大小。</td>
     <td>-</td>
@@ -103,7 +103,7 @@ aclnnStatus aclnnDistributeBarrier(
     <td>-</td>
     </tr>
     <tr>
-    <td>workspaceSize（uint64_t*）</td>
+    <td>workspaceSize(uint64_t*)</td>
     <td>输出</td>
     <td>返回workspace大小。</td>
     <td>-</td>
@@ -157,12 +157,12 @@ aclnnStatus aclnnDistributeBarrier(
     <!-- npu="A3" id7 -->
     - <term>Atlas A3系列产品</term>  ：
         - 不支持FLOAT8_E5M2、FLOAT8_E4M3FN、FLOAT4_E1M2、FLOAT4_E2M1、HIFLOAT8、INT4类型。
-        - `epWorldSize`取值支持[2, 384]。
+        - `worldSize`取值支持[2, 384]。
 
     <!-- end id7 -->
     <!-- npu="950" id8 -->
     - <term>Ascend 950DT系列产品</term>：
-        - `epWorldSize`取值支持[2, 1024]。
+        - `worldSize`取值支持[2, 1024]。
 
     <!-- end id8 -->
 
@@ -308,7 +308,7 @@ aclnnStatus aclnnDistributeBarrier(
 
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomEpBarrierName[128] = {0};
         ret = HcclGetCommName(args.hcclEpBarrierComm, hcomEpBarrierName);
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpBarrierCommName failed, ret %d\n", ret); return -1);
@@ -415,7 +415,7 @@ aclnnStatus aclnnDistributeBarrier(
         CHECK_RET(ret == ACL_SUCCESS, return ret);
         ret = CreateAclTensor(dynamicScalesHostData, dynamicScalesShape, &dynamicScalesDeviceAddr, aclDataType::ACL_FLOAT, &dynamicScales);
         CHECK_RET(ret == ACL_SUCCESS, return ret);
-         ret = CreateAclTensor(expandIdxHostData, expandIdxShape, &expandIdxDeviceAddr, aclDataType::ACL_INT32, &expandIdx);
+        ret = CreateAclTensor(expandIdxHostData, expandIdxShape, &expandIdxDeviceAddr, aclDataType::ACL_INT32, &expandIdx);
         CHECK_RET(ret == ACL_SUCCESS, return ret);
         ret = CreateAclTensor(expertTokenNumsHostData, expertTokenNumsShape, &expertTokenNumsDeviceAddr, aclDataType::ACL_INT64, &expertTokenNums);
         CHECK_RET(ret == ACL_SUCCESS, return ret);
@@ -464,7 +464,7 @@ aclnnStatus aclnnDistributeBarrier(
 
         /**************************************** 调用barrier********************************************/
 
-        ret = aclnnDistributeBarrierGetWorkspaceSize(expandX, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &combineExecutor);
+        ret = aclnnDistributeBarrierGetWorkspaceSize(expandX, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
 
         CHECK_RET(ret == ACL_SUCCESS,
             LOG_PRINT("[ERROR] aclnnDistributeBarrierGetWorkspaceSize failed. ret = %d \n", ret); return ret);
@@ -476,7 +476,7 @@ aclnnStatus aclnnDistributeBarrier(
 
         // 调用第二阶段接口
         ret = aclnnDistributeBarrier(barrierWorkspaceAddr, barrierWorkspaceSize,
-                                     combineExecutor, args.barrierStream);
+                                     barrierExecutor, args.barrierStream);
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclnnDistributeBarrier failed. ret = %d \n", ret);  \
             return ret);
         ret = aclrtSynchronizeStreamWithTimeout(args.barrierStream, 10000);

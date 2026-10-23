@@ -541,7 +541,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNormV2(
     <td>rstdOut</td>
     <td>输出</td>
     <td>RmsNorm计算的标准化系数。</td>
-    <td>Device侧3D Tensor, shape为(Bs, 1, 1)。</td>
+    <td>Device侧3D Tensor， shape为(Bs, 1, 1)。</td>
     <td>FLOAT32</td>
     <td>ND</td>
     <td>3</td>
@@ -582,7 +582,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNormV2(
 
     <!-- npu="A3" id7 -->
     <details>
-    <summary><term>Atlas A3系列产品</term>  ：</summary>
+    <summary><term>Atlas A3系列产品</term>：</summary>
 
     - groupTp预留参数，当前版本不支持，传空字符即可。
     - tpWorldSize预留参数，当前版本不支持，传0即可。
@@ -698,7 +698,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNormV2(
 - 产品特定约束
 
   <!-- npu="A3" id9 -->
-  - <term>Atlas A3系列产品</term>  ：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
+  - <term>Atlas A3系列产品</term>：该场景下单卡包含双DIE（简称为“晶粒”或“裸片”），因此参数说明里的“本卡”均表示单DIE。
 
   <!-- end id9 -->
 
@@ -724,7 +724,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNormV2(
     - 当前不支持TP域通信。
 
     <!-- npu="A3" id10 -->
-    - <term>Atlas A3系列产品</term>  ：一个通信域内的节点需在一个超节点内，不支持跨超节点。
+    - <term>Atlas A3系列产品</term>：一个通信域内的节点需在一个超节点内，不支持跨超节点。
 
     <!-- end id10 -->
 
@@ -819,7 +819,7 @@ aclnnStatus aclnnMoeDistributeCombineAddRmsNormV2(
 
         char hcomEpName[128] = {0};
         ret = HcclGetCommName(args.hcclEpComm, hcomEpName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         LOG_PRINT(
             "[INFO] rank = %d, hcomEpName = %s, dispatchStream = %p, combineStream = %p, context = %p\n",
             args.rankId, hcomEpName, args.dispatchStream, args.combineStream, args.context
