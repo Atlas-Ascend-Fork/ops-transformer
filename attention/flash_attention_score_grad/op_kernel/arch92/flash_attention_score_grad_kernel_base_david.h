@@ -113,7 +113,7 @@ public:
     constexpr static uint32_t BASE_DKV_SIZE = CUBE_BASEN * HEAD_DIM_ALIGN;
     constexpr static int64_t OUTINDEX = -1;
     constexpr static uint32_t FRACTAL_NZ_C0_SIZE = 32 / sizeof(T1);
-    constexpr static uint32_t UB_BUF_NUM = IS_FP32_INPUT ? 2 : 3;
+    constexpr static uint32_t UB_BUF_NUM = (IS_FP32_INPUT || IS_DETER_OLD(DETER_SPARSE_TYPE)) ? 2 : 3;
 
     constexpr static uint8_t DETER_TILING_SPLIT_MODE =
         (CUBE_BASEM == CUBE_BASEN ? 0 : (CUBE_BASEM > CUBE_BASEN ? 2 : 1));
@@ -957,8 +957,8 @@ __aicore__ inline bool FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockTy
                     UpdateToken(runInfo, bIdx);
                     int64_t s2SparseLeft = Max(CUBE_BASEM * s1oDimIdx - actualCalcS1Token, 0);
                     s2SparseLeft = s2SparseLeft >> 6 << 6;
-                    int64_t s2SparseRight = AlignTo64(
-                        Min(CUBE_BASEM * (s1oDimIdx + 1), constInfo.commonConstInfo.s1Size) + actualCalcS2Token);
+                    int64_t s2SparseRight =
+                        AlignTo64(Min(CUBE_BASEM * (s1oDimIdx + 1), actualS1Len) + actualCalcS2Token);
                     s2SparseRight = Min(s2SparseRight, actualS2Len);
                     if constexpr (IS_BN2_MULTIBLK) {
                         multiBlkInfo.s2oDimIdx = s2oDimIdx;

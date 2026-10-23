@@ -54,6 +54,7 @@ public:
     __aicore__ inline void Process();
     __aicore__ inline void Process_NEW_DETER();
     __aicore__ inline void Process_OLD_DETER();
+    __aicore__ inline void ProcessOldDeterCompute(int64_t computeLoopIdx, int64_t remainLoopNum, int16_t deterPpFlag);
     __aicore__ inline void GetIsNeedDeter(int64_t computeLoopIdx);
     __aicore__ inline void DeterSync(int64_t loopIdx);
     __aicore__ inline int64_t SpecialS2Index(int64_t dkvGmOffset);
@@ -75,6 +76,7 @@ protected:
     static constexpr uint32_t BITS_EACH_UINT64 = 64;
     static constexpr uint32_t MAX_BITS_IN_TILING = 32 * BITS_EACH_UINT64;
     static constexpr uint64_t SYNC_MODE = 4;
+    static constexpr uint64_t SYNC_OLD_ROUND_START_FLAG = 6;
 };
 
 template <typename CubeBlockType, typename VecBlockType>
@@ -732,31 +734,19 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
 template <typename CubeBlockType, typename VecBlockType>
 __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::Process_OLD_DETER()
 {
-    int64_t maxValidBBLen = this->tilingData->s1s2BNGS1S2SplitCoreParams.maxValidBBLen;
-    int64_t remainLoopNum = maxValidBBLen;
-    int64_t blockInnerIdx = 0;
-    int64_t taskId = 0, preRunId = -1, runId = 0, nextRunId = 1;
-    int64_t loopIdx = 0;
-    FagRunInfo runInfos[3];
-    int16_t deterPpFlag = 1;
-    isFirstDeter = true;
-
-    bool isLastLoop = false;
-    int8_t ubBufIdx = 0;
+    const int64_t maxValidBBLen = this->tilingData->s1s2BNGS1S2SplitCoreParams.maxValidBBLen;
+    const int64_t blockStart = this->tilingData->s1s2BNGS1S2BlockNumList.blockStarts[this->cBlockIdx];
+    const int64_t blockEnd = this->tilingData->s1s2BNGS1S2BlockNumList.blockEnds[this->cBlockIdx];
     int64_t innerMm12LoopIdx = 0;
-    int64_t curLoopIdx = 0; // just for continuous split core
-    LocalTensor<T2> mm1ResTensor;
-    LocalTensor<T2> mm2ResTensor;
-    bool needSyncDkMM = false;
+    int8_t ubBufIdx = 0;
+    int64_t runId = 0, nextRunId = 1;
+    FagRunInfo runInfos[3];
+    int64_t blockInnerIdx = -1;
 
-    // Pre-Copy
-    if (this->tilingData->s1s2BNGS1S2BlockNumList.blockEnds[this->cBlockIdx] != 0) {
-        int64_t firstValidIdx =
-            this->GetNextValidIdx(runInfos[runId], taskId,
-                                  this->tilingData->s1s2BNGS1S2BlockNumList.blockStarts[this->cBlockIdx], curLoopIdx);
-        if (firstValidIdx != -1 &&
-            firstValidIdx <= this->tilingData->s1s2BNGS1S2BlockNumList.blockEnds[this->cBlockIdx]) {
-            this->SetRunInfo(runInfos[runId], 0, firstValidIdx);
+    if (blockEnd != 0 && maxValidBBLen > 0) {
+        blockInnerIdx = this->GetNextValidIdx(runInfos[runId], 0, blockStart, 0);
+        if (blockInnerIdx != -1) {
+            this->SetRunInfo(runInfos[runId], 0, blockInnerIdx);
             if ASCEND_IS_AIC {
                 CrossCoreWaitFlag<SYNC_MODE, PIPE_FIX>(this->QKDXV_RES_RELEASE[0]);
             }
@@ -767,158 +757,100 @@ __aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBloc
         }
     }
 
-    while (remainLoopNum > 0) {
-        blockInnerIdx = this->tilingData->s1s2BNGS1S2BlockNumList.blockStarts[this->cBlockIdx] + loopIdx;
-        if (this->tilingData->s1s2BNGS1S2BlockNumList.blockEnds[this->cBlockIdx] != 0 &&
-            blockInnerIdx <=
-                this->tilingData->s1s2BNGS1S2BlockNumList.blockEnds[this->cBlockIdx]) { // 有主流程需要处理的核
-            isLastLoop = (blockInnerIdx == this->tilingData->s1s2BNGS1S2BlockNumList.blockEnds[this->cBlockIdx]);
-
-            // 跳过无效块
-            if (!isLastLoop && !this->IsValid(runInfos[runId], taskId, blockInnerIdx)) {
-                loopIdx++;
-                continue;
+    for (int64_t reduceRound = 0; reduceRound < maxValidBBLen; ++reduceRound) {
+        if ASCEND_IS_AIC {
+            CrossCoreSetFlag<SYNC_MODE, PIPE_S>(SYNC_OLD_ROUND_START_FLAG);
+        }
+        if ASCEND_IS_AIV {
+            CrossCoreWaitFlag<SYNC_MODE, PIPE_S>(SYNC_OLD_ROUND_START_FLAG);
+        }
+        const int16_t deterPpFlag = reduceRound & 1;
+        const int64_t remainLoopNum = maxValidBBLen - reduceRound;
+        GetIsNeedDeter(reduceRound);
+        int64_t nextValidIdx = -1;
+        if (blockInnerIdx != -1) {
+            nextValidIdx = this->GetNextValidIdx(runInfos[nextRunId], reduceRound + 1, blockInnerIdx + 1, 0);
+            if (nextValidIdx != -1) {
+                this->SetRunInfo(runInfos[nextRunId], reduceRound + 1, nextValidIdx);
             }
-            if (!isLastLoop) {
-                int64_t nextValidIdx = -1;
-                nextValidIdx = this->GetNextValidIdx(runInfos[nextRunId], taskId, blockInnerIdx + 1, curLoopIdx);
-                if (nextValidIdx != -1) {
-                    this->SetRunInfo(runInfos[nextRunId], taskId + 1, nextValidIdx);
-                }
+            uint32_t innerLoopNum =
+                (runInfos[runId].commonRunInfo.s1RealSize + this->VECTOR_BASEM - 1) / this->VECTOR_BASEM;
+            for (uint32_t innerLoopIdx = 0; innerLoopIdx < innerLoopNum; ++innerLoopIdx) {
+                LocalTensor<T2> mm1ResTensor = this->mm1ResBuf[ubBufIdx].template Get<T2>();
+                LocalTensor<T2> mm2ResTensor = this->mm2ResBuf[ubBufIdx].template Get<T2>();
                 if ASCEND_IS_AIC {
-                    if (needSyncDkMM) {
-                        CrossCoreWaitFlag<SYNC_MODE, PIPE_FIX>(this->SYNC_DETER_FIX_FLAG);
+                    if (innerMm12LoopIdx >= this->UB_BUF_NUM) {
+                        CrossCoreWaitFlag<SYNC_MODE, PIPE_FIX>(this->QKDXV_RES_RELEASE[ubBufIdx]);
                     }
                 }
-                uint32_t innerLoopNum =
-                    (runInfos[runId].commonRunInfo.s1RealSize + this->VECTOR_BASEM - 1) / this->VECTOR_BASEM;
-                for (uint32_t innerLoopIdx = 0; innerLoopIdx < innerLoopNum; innerLoopIdx++) {
-                    mm1ResTensor = this->mm1ResBuf[ubBufIdx].template Get<T2>();
-                    mm2ResTensor = this->mm2ResBuf[ubBufIdx].template Get<T2>();
-                    if ASCEND_IS_AIC {
-                        if (innerMm12LoopIdx >= this->UB_BUF_NUM) {
-                            CrossCoreWaitFlag<SYNC_MODE, PIPE_FIX>(this->QKDXV_RES_RELEASE[ubBufIdx]);
-                        }
-                    }
-                    this->cubeBlock.IterateMmQKAndDyV(mm1ResTensor, mm2ResTensor, runInfos[runId], runInfos[nextRunId],
-                                                      this->constInfo, innerLoopNum, innerLoopIdx, ubBufIdx);
-                    if ASCEND_IS_AIC {
-                        CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(this->QKDXV_RES_READY[ubBufIdx]);
-                    }
-                    this->vecBlock.ProcessVec2(runInfos[runId], runInfos[nextRunId], this->constInfo,
-                                               nextValidIdx == -1, mm1ResTensor, mm2ResTensor, innerLoopNum,
-                                               innerLoopIdx, ubBufIdx);
-                    ubBufIdx = (ubBufIdx + 1 == this->UB_BUF_NUM) ? 0 : ubBufIdx + 1;
-                    innerMm12LoopIdx += 1;
-                }
-
-                if ASCEND_IS_AIV {
-                    this->vecBlock.WriteOffsetToGM(this->constInfo, static_cast<int64_t>(runInfos[runId].queryGmOffset),
-                                                   static_cast<int64_t>(runInfos[runId].keyGmOffset),
-                                                   static_cast<int64_t>(runInfos[runId].valueGmOffset), taskId,
-                                                   maxValidBBLen - taskId);
-                }
-            }
-
-            // mm345滞后一块
-            if (taskId > 0) {
-                deterPpFlag = 1 - deterPpFlag;
-                GetIsNeedDeter(taskId - 1);
+                this->cubeBlock.IterateMmQKAndDyV(mm1ResTensor, mm2ResTensor, runInfos[runId], runInfos[nextRunId],
+                                                  this->constInfo, innerLoopNum, innerLoopIdx, ubBufIdx);
                 if ASCEND_IS_AIC {
-                    // 这个位置同步需确认
-                    if (needSyncDkMM) {
-                        CrossCoreWaitFlag<SYNC_MODE, PIPE_FIX>(6);
-                    }
-                    runInfos[preRunId].nextS2IdxNoChange = isLastLoop ? false : runInfos[runId].isS2IdxNoChange;
-                    this->cubeBlock.IterateMmDsK(runInfos[preRunId], this->constInfo, this->dqWorkSpaceGm,
-                                                 dqIsNeedDeter[deterPpFlag], this->cBlockIdx, &this->deterGm,
-                                                 deterPpFlag);
-                    this->cubeBlock.IterateMmDsQ(runInfos[preRunId], this->constInfo, this->dkWorkSpaceGm,
-                                                 dkDvIsNeedDeter[deterPpFlag], this->cBlockIdx, &this->deterGm,
-                                                 deterPpFlag);
-                    this->cubeBlock.IterateMmPDy(runInfos[preRunId], this->constInfo, this->dvWorkSpaceGm,
-                                                 dkDvIsNeedDeter[deterPpFlag], this->cBlockIdx, &this->deterGm,
-                                                 deterPpFlag);
-                    CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(this->SYNC_C4_TO_V6_FLAG);
+                    CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(this->QKDXV_RES_READY[ubBufIdx]);
                 }
-                needSyncDkMM = !this->constInfo.deterConstInfo.noNeedDeter;
-                // 确定性计算再滞后一块
-                if (taskId > 1) {
-                    if ASCEND_IS_AIV {
-                        CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE2>(this->SYNC_C4_TO_V6_FLAG);
-                        mm1ResTensor = this->mm1ResBuf[runInfos[preRunId].commonRunInfo.taskIdMod2].template Get<T2>();
-                        mm2ResTensor = this->mm2ResBuf[runInfos[preRunId].commonRunInfo.taskIdMod2].template Get<T2>();
-                        int64_t curComputeBlockIdx = maxValidBBLen - remainLoopNum;
-                        this->vecBlock.DeterCompute(
-                            mm1ResTensor, mm2ResTensor, this->constInfo, dqIsNeedDeter[curComputeBlockIdx & 1],
-                            dkDvIsNeedDeter[curComputeBlockIdx & 1],
-                            /*isLastSort=*/false, curComputeBlockIdx, remainLoopNum, deterPpFlag);
-                    }
-                    remainLoopNum--;
-                }
-                if ASCEND_IS_AIV {
-                    CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(this->SYNC_DETER_FIX_FLAG);
-                    CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(6);
-                }
-
-                // 主流程末尾补一次确定性计算
-                if (isLastLoop) {
-                    if ASCEND_IS_AIV {
-                        mm1ResTensor = this->mm1ResBuf[runInfos[runId].commonRunInfo.taskIdMod2].template Get<T2>();
-                        mm2ResTensor = this->mm2ResBuf[runInfos[runId].commonRunInfo.taskIdMod2].template Get<T2>();
-                        CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE2>(this->SYNC_C4_TO_V6_FLAG);
-                        int64_t curComputeBlockIdx = maxValidBBLen - remainLoopNum;
-                        this->vecBlock.DeterCompute(
-                            mm1ResTensor, mm2ResTensor, this->constInfo, dqIsNeedDeter[curComputeBlockIdx & 1],
-                            dkDvIsNeedDeter[curComputeBlockIdx & 1],
-                            /*isLastSort=*/true, curComputeBlockIdx, remainLoopNum, deterPpFlag);
-                    }
-                    remainLoopNum--;
-                }
+                this->vecBlock.ProcessVec2(runInfos[runId], runInfos[nextRunId], this->constInfo, nextValidIdx == -1,
+                                           mm1ResTensor, mm2ResTensor, innerLoopNum, innerLoopIdx, ubBufIdx);
+                ubBufIdx = (ubBufIdx + 1) % this->UB_BUF_NUM;
+                ++innerMm12LoopIdx;
             }
-            taskId++;
-            if (preRunId == -1) {
-                preRunId = runId;
-            } else {
-                preRunId = runId;
+            if ASCEND_IS_AIV {
+                this->vecBlock.WriteOffsetToGM(this->constInfo, runInfos[runId].queryGmOffset,
+                                               runInfos[runId].keyGmOffset, runInfos[runId].valueGmOffset, reduceRound,
+                                               remainLoopNum);
             }
-            runId = nextRunId;
-            nextRunId = (nextRunId + 1 == 3) ? 0 : nextRunId + 1;
-        } else if (this->tilingData->s1s2BNGS1S2BlockNumList.blockEnds[this->cBlockIdx] !=
-                   0) { // 主流程结束，仍要进行确定性计算
-            int64_t computeLoopIdx = maxValidBBLen - remainLoopNum;
-            GetIsNeedDeter(computeLoopIdx);
+            if ASCEND_IS_AIC {
+                runInfos[runId].nextS2IdxNoChange = nextValidIdx != -1 && runInfos[nextRunId].isS2IdxNoChange;
+                this->cubeBlock.IterateMmDsK(runInfos[runId], this->constInfo, this->dqWorkSpaceGm,
+                                             dqIsNeedDeter[reduceRound & 1], this->cBlockIdx, &this->deterGm,
+                                             deterPpFlag);
+                this->cubeBlock.IterateMmDsQ(runInfos[runId], this->constInfo, this->dkWorkSpaceGm,
+                                             dkDvIsNeedDeter[reduceRound & 1], this->cBlockIdx, &this->deterGm,
+                                             deterPpFlag);
+                this->cubeBlock.IterateMmPDy(runInfos[runId], this->constInfo, this->dvWorkSpaceGm,
+                                             dkDvIsNeedDeter[reduceRound & 1], this->cBlockIdx, &this->deterGm,
+                                             deterPpFlag);
+                CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(this->SYNC_C4_TO_V6_FLAG);
+            }
+            if ASCEND_IS_AIV {
+                // Scalar wait prevents publishing the global ready barrier
+                // ahead of this C core's completed FIX writes.
+                CrossCoreWaitFlag<SYNC_MODE, PIPE_S>(this->SYNC_C4_TO_V6_FLAG);
+            }
+        } else {
             if ASCEND_IS_AIV {
                 this->vecBlock.WriteOffsetToGM(this->constInfo, this->OUTINDEX, this->OUTINDEX, this->OUTINDEX,
-                                               computeLoopIdx, remainLoopNum);
+                                               reduceRound, remainLoopNum);
             }
-            deterPpFlag = 1 - deterPpFlag;
-            if ASCEND_IS_AIV {
-                mm1ResTensor = this->mm1ResBuf[runInfos[runId].commonRunInfo.taskIdMod2].template Get<T2>();
-                mm2ResTensor = this->mm2ResBuf[runInfos[runId].commonRunInfo.taskIdMod2].template Get<T2>();
-                this->vecBlock.DeterCompute(mm1ResTensor, mm2ResTensor, this->constInfo,
-                                            dqIsNeedDeter[computeLoopIdx & 1], dkDvIsNeedDeter[computeLoopIdx & 1],
-                                            /*isLastSort=*/true, computeLoopIdx, remainLoopNum, deterPpFlag);
-            }
-            remainLoopNum--;
-        } else { // 没有主流程，仍要参与确定性计算
-            int64_t computeLoopIdx = maxValidBBLen - remainLoopNum;
-            GetIsNeedDeter(computeLoopIdx);
-            deterPpFlag = 1 - deterPpFlag;
-            if ASCEND_IS_AIV {
-                mm1ResTensor = this->mm1ResBuf[runInfos[runId].commonRunInfo.taskIdMod2].template Get<T2>();
-                mm2ResTensor = this->mm2ResBuf[runInfos[runId].commonRunInfo.taskIdMod2].template Get<T2>();
-                this->vecBlock.DeterCompute(mm1ResTensor, mm2ResTensor, this->constInfo,
-                                            dqIsNeedDeter[computeLoopIdx & 1], dkDvIsNeedDeter[computeLoopIdx & 1],
-                                            /*isLastSort=*/true, computeLoopIdx, remainLoopNum, deterPpFlag);
-            }
-            remainLoopNum--;
         }
-        loopIdx++;
+
+        if ASCEND_IS_AIV {
+            ProcessOldDeterCompute(reduceRound, remainLoopNum, deterPpFlag);
+            CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(this->SYNC_DETER_FIX_FLAG);
+        }
+        if ASCEND_IS_AIC {
+            CrossCoreWaitFlag<SYNC_MODE, PIPE_S>(this->SYNC_DETER_FIX_FLAG);
+        }
+        blockInnerIdx = nextValidIdx;
+        runId = nextRunId;
+        nextRunId = (nextRunId + 1) % 3;
     }
-    CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(this->ALL_DONE);
+
+    if ASCEND_IS_AIC {
+        this->cubeBlock.FreeAlloc(innerMm12LoopIdx);
+        CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(this->ALL_DONE);
+    }
     this->vecBlock.FreeAsync(this->constInfo);
     this->cubeBlock.FreeBuffer();
+}
+
+template <typename CubeBlockType, typename VecBlockType>
+__aicore__ inline void FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType>::ProcessOldDeterCompute(
+    int64_t computeLoopIdx, int64_t remainLoopNum, int16_t deterPpFlag)
+{
+    LocalTensor<T2> dkDeterBuf = this->vecBlock.GetOldDeterDkBuffer();
+    LocalTensor<T2> dvDeterBuf = this->vecBlock.GetOldDeterDvBuffer();
+    this->vecBlock.DeterCompute(dkDeterBuf, dvDeterBuf, this->constInfo, dqIsNeedDeter[computeLoopIdx & 1],
+                                dkDvIsNeedDeter[computeLoopIdx & 1], true, computeLoopIdx, remainLoopNum, deterPpFlag);
 }
 
 template <typename CubeBlockType, typename VecBlockType>

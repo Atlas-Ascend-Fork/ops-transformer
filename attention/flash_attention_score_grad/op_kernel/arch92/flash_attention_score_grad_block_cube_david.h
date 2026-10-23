@@ -72,7 +72,7 @@ public:
     constexpr static uint32_t L0C_DK_BUF_IDX = 2;
     constexpr static uint32_t L0C_DV_BUF_IDX = 3;
 
-    constexpr static uint32_t UB_BUF_NUM = IS_FP32_INPUT ? 2 : 3;
+    constexpr static uint32_t UB_BUF_NUM = (IS_FP32_INPUT || IS_DETER_OLD(DETER_SPARSE_TYPE)) ? 2 : 3;
     constexpr static bool IS_TSCM_REUSE =
         IS_FP32_INPUT ? false : (IS_FP8_INPUT ? (HEAD_DIM_ALIGN <= 256) : (HEAD_DIM_ALIGN <= 128));
     constexpr static bool IS_TSCM_REUSE_K =
@@ -934,8 +934,11 @@ __aicore__ inline void FAGBlockCube<TEMPLATE_ARGS>::IterateMmDsQ(FagRunInfo& run
                         ENABLE_UNITFLAG ? L0CTensorArr[l0cIdx] : L0CTensorArr[l0cBufferManager.GetBuffer(l0cIdx)];
                     mmadFirst = true;
                 }
-                uint32_t offsetA = kL0Idx * l0BaseK * 32 / sizeof(DsType) +
-                                   mL0Idx * AlignTo16(runInfo.commonRunInfo.s2RealSize) * l0BaseM;
+                uint32_t offsetA =
+                    kL0Idx * l0BaseK * 32 / sizeof(DsType) +
+                    mL0Idx *
+                        (IS_DETER_OLD(DETER_SPARSE_TYPE) ? CUBE_BASEM : AlignTo16(runInfo.commonRunInfo.s2RealSize)) *
+                        l0BaseM;
                 uint32_t offsetB = kL0Idx * l0BaseK * FRACTAL_NZ_C0_SIZE +
                                    nL0Idx * AlignTo16(runInfo.commonRunInfo.s1RealSize) * l0BaseN;
                 bool isFixpOut = true;
@@ -1113,8 +1116,11 @@ __aicore__ inline void FAGBlockCube<TEMPLATE_ARGS>::IterateMmPDy(
                         ENABLE_UNITFLAG ? L0CTensorArr[l0cIdx] : L0CTensorArr[l0cBufferManager.GetBuffer(l0cIdx)];
                     mmadFirst = true;
                 }
-                uint32_t offsetA = kL0Idx * l0BaseK * FRACTAL_NZ_C0_SIZE +
-                                   mL0Idx * AlignTo16(runInfo.commonRunInfo.s2RealSize) * l0BaseM;
+                uint32_t offsetA =
+                    kL0Idx * l0BaseK * FRACTAL_NZ_C0_SIZE +
+                    mL0Idx *
+                        (IS_DETER_OLD(DETER_SPARSE_TYPE) ? CUBE_BASEM : AlignTo16(runInfo.commonRunInfo.s2RealSize)) *
+                        l0BaseM;
                 uint32_t offsetB = kL0Idx * l0BaseK * FRACTAL_NZ_C0_SIZE +
                                    nL0Idx * AlignTo16(runInfo.commonRunInfo.s1RealSize) * l0BaseN;
                 bool isFixpOut = true;

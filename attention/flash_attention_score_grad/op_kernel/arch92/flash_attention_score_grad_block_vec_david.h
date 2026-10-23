@@ -104,23 +104,30 @@ public:
                                             int16_t deterPpFlag);
     __aicore__ inline void WriteDataToDkv(LocalTensor<T2>& dkBuf, LocalTensor<T2>& dvBuf, FagConstInfo& constInfo,
                                           uint32_t dkSrcOfs, uint32_t dvSrcOfs);
+    __aicore__ inline LocalTensor<T2> GetOldDeterDkBuffer()
+    {
+        return deterDkBuf.Get<T2>();
+    }
+    __aicore__ inline LocalTensor<T2> GetOldDeterDvBuffer()
+    {
+        return deterDvBuf.Get<T2>();
+    }
+    template <uint8_t RES_IDX>
+    __aicore__ inline uint16_t GetOldDeterCopyRows(FagConstInfo& constInfo, int64_t offset,
+                                                   const DataCopyExtParams& copyParams);
 
     constexpr static bool IS_FP8_INPUT = is_f8_v<T1>;
     constexpr static bool IS_FP32_INPUT = is_f32_v<T1>;
-    constexpr static uint32_t DETER_OFFSET_UB_SIZE = 1024 * 6;
+    constexpr static uint32_t DETER_OFFSET_UB_SIZE = MAX_CORE_NUM * 3 * 32;
     constexpr static uint32_t CUBE_BASEM = (uint32_t)s1TemplateType;
     constexpr static uint32_t CUBE_BASEN = (uint32_t)s2TemplateType;
     constexpr static uint32_t HEAD_DIM_ALIGN = (uint32_t)dTemplateType;
     constexpr static uint32_t VECTOR_BASEM = 64;
     constexpr static uint32_t VECTOR_BASEN = 128;
     constexpr static uint32_t FRACTAL_NZ_C0_SIZE = 32 / sizeof(T1);
-    constexpr static uint32_t DETER_DQ_UB_SIZE_FP16 = 32 * 1024;
-    constexpr static uint32_t DETER_DQ_UB_SIZE_FP32_D256 = 16 * 1024;
-    constexpr static uint32_t DETER_DQ_UB_SIZE_FP32_D512 = 64 * 1024;
-    constexpr static uint32_t DETER_DQ_UB_SIZE =
-        IS_FP32_INPUT ? (HEAD_DIM_ALIGN > 256 ? DETER_DQ_UB_SIZE_FP32_D512 : DETER_DQ_UB_SIZE_FP32_D256) :
-                        DETER_DQ_UB_SIZE_FP16;
-    constexpr static uint32_t UB_BUF_NUM = IS_FP32_INPUT ? 2 : 3;
+    constexpr static uint32_t DETER_DQ_UB_SIZE = 32 * 1024;
+    constexpr static uint32_t DETER_DKV_UB_SIZE = 16 * 1024;
+    constexpr static uint32_t UB_BUF_NUM = (IS_FP32_INPUT || IS_DETER_OLD(DETER_SPARSE_TYPE)) ? 2 : 3;
     constexpr static uint32_t POST_UB_SIZE = 32 * 1024;
     constexpr static uint32_t DS_P_L1_BUF_SIZE = CUBE_BASEM * CUBE_BASEN;
     constexpr static uint32_t OFFSET_NUM = 3;
@@ -131,7 +138,6 @@ public:
     constexpr static uint32_t BASE_DQ_SIZE = CUBE_BASEM * HEAD_DIM_ALIGN;
     constexpr static uint32_t BASE_DKV_SIZE = CUBE_BASEN * HEAD_DIM_ALIGN;
     constexpr static uint32_t FLOAT_BLOCK_SIZE = 32 / sizeof(float);
-    constexpr static uint32_t DETER_DKV_UB_SIZE = VECTOR_BASEM * VECTOR_BASEN * sizeof(T2);
     constexpr static uint32_t BIT32_ALIGN_NUM = 8;
 
     using DsType = std::conditional_t<is_e4m3_v<T1>, bfloat16_t, T1>;
@@ -160,6 +166,10 @@ public:
         dvOffsetArr{};
     TQueBind<TPosition::VECIN, TPosition::VECOUT, 1> deterInOutQue;
     TBuf<> deterOffsetBuf;
+    TBuf<> deterDkBuf;
+    TBuf<> deterDvBuf;
+    bool maxSumEventPending[UB_BUF_NUM]{};
+    bool deterScalarEventPending = false;
     TBuf<> vselrIndexesBuf;
     TBuf<> dsAmaxBuf;
     TBuf<> postBuf[2];
@@ -322,7 +332,9 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::InitUbBuffer()
 
     if constexpr (IS_DETER_OLD(DETER_SPARSE_TYPE)) {
         pipe->InitBuffer(deterInOutQue, 1, DETER_DQ_UB_SIZE);
-        pipe->InitBuffer(deterOffsetBuf, DETER_OFFSET_UB_SIZE); // 3k
+        pipe->InitBuffer(deterOffsetBuf, DETER_OFFSET_UB_SIZE);
+        pipe->InitBuffer(deterDkBuf, DETER_DKV_UB_SIZE);
+        pipe->InitBuffer(deterDvBuf, DETER_DKV_UB_SIZE);
     }
     if constexpr (IS_FP8_INPUT) {
         pipe->InitBuffer(vselrIndexesBuf, 128 * sizeof(uint8_t));
@@ -375,6 +387,7 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::InitAsync()
     for (int32_t i = 0; i < UB_BUF_NUM; i++) {
         maxSumMte2ToMte3[i] = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
         SetFlag<HardEvent::MTE3_MTE2>(maxSumMte2ToMte3[i]);
+        maxSumEventPending[i] = true;
 
         // Mte2 到 V 的同步
         mte2ToV[i] = GetTPipePtr()->AllocEventID<HardEvent::MTE2_V>();
@@ -391,11 +404,11 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::FreeAsync(FagConstInfo& const
 {
     CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE3>(this->DS_RELEASE);
     CrossCoreWaitFlag<SYNC_MODE, PIPE_MTE3>(this->POUT_RELEASE);
-    if constexpr (!IS_FP32_INPUT) {
-        toBeFreeBufIdx = (ubBufIdx + UB_BUF_NUM - 1) % UB_BUF_NUM; // 匹配消除
-        WaitFlag<HardEvent::MTE3_MTE2>(maxSumMte2ToMte3[toBeFreeBufIdx]);
-    }
     for (int32_t i = 0; i < UB_BUF_NUM; i++) {
+        if (maxSumEventPending[i]) {
+            WaitFlag<HardEvent::MTE3_MTE2>(maxSumMte2ToMte3[i]);
+            maxSumEventPending[i] = false;
+        }
         GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(maxSumMte2ToMte3[i]);
     }
 
@@ -407,6 +420,10 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::FreeAsync(FagConstInfo& const
     GetTPipePtr()->ReleaseEventID<HardEvent::MTE3_MTE2>(postMte2ToMte3[1]);
     // deter 相关参数
     if constexpr (IS_DETER_OLD(DETER_SPARSE_TYPE)) {
+        if (deterScalarEventPending) {
+            WaitFlag<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2);
+            deterScalarEventPending = false;
+        }
         GetTPipePtr()->ReleaseEventID<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2);
         GetTPipePtr()->ReleaseEventID<HardEvent::MTE2_S>(constInfo.deterConstInfo.eventIDMte2ToScalar);
         GetTPipePtr()->ReleaseEventID<HardEvent::S_MTE3>(constInfo.deterConstInfo.eventIDScalarToMte3);
@@ -543,6 +560,7 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::ProcessVec1(FagRunInfo& runIn
         runInfo.commonRunInfo.s1RealSize < VECTOR_BASEM ? runInfo.commonRunInfo.s1RealSize : VECTOR_BASEM;
     runInfo.commonRunInfo.vecS1Offset = 0;
     WaitFlag<HardEvent::MTE3_MTE2>(maxSumMte2ToMte3[ubBufIdx]);
+    maxSumEventPending[ubBufIdx] = false;
     CopyInMaxSumWithTbuf<T2, VECTOR_BASEM>(constInfo, runInfo, maxSumSfmgBuf[ubBufIdx], softmaxMaxGm, softmaxSumGm,
                                            sfmgWorkspaceGm);
     CopyInAttenMask<IS_ATTEN_MASK, VECTOR_BASEM, VECTOR_BASEN>(constInfo, runInfo, attenMaskInfo, dSOutBuf[ubBufIdx],
@@ -563,6 +581,7 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::AsyncAndMte2CopyBeforeReCompu
     // Copy for next buffer
     auto nextUbBufIdx = ubBufIdx + 1 == UB_BUF_NUM ? 0 : ubBufIdx + 1;
     WaitFlag<HardEvent::MTE3_MTE2>(maxSumMte2ToMte3[nextUbBufIdx]); // Wait ubBufIdx + 1
+    maxSumEventPending[nextUbBufIdx] = false;
     FagRunInfo actualRunInfo;
     if (!isInnerBlockLast) {
         actualRunInfo = runInfo;
@@ -807,6 +826,7 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::AsyncAfterReCompute(bool isIn
 {
     if (!isInnerBlockLast || !isInterBlockLast) {
         SetFlag<HardEvent::MTE3_MTE2>(maxSumMte2ToMte3[ubBufIdx]);
+        maxSumEventPending[ubBufIdx] = true;
     }
 }
 
@@ -816,10 +836,7 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::WriteOffsetToGM(FagConstInfo&
                                                                    int64_t computeBlockIdx, int64_t remainLoopNum)
 {
     // 将本核当前块的 q/k/v GM offset 写入 deterOffsetGm，供 DeterCompute 阶段读取
-    if (constInfo.deterConstInfo.noNeedDeter) {
-        return;
-    }
-    if (vSubBlockIdx == 1) {
+    if (constInfo.deterConstInfo.noNeedDeter || cBlockIdx >= constInfo.deterConstInfo.usedCubeCoreNum) {
         return;
     }
     LocalTensor<int64_t> deterOffsetTensor = deterOffsetBuf.Get<int64_t>();
@@ -846,31 +863,63 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterCompute(LocalTensor<T2>&
                                                                 bool isLastSort, int64_t computeBlockIdx,
                                                                 int64_t remainLoopNum, int16_t deterPpFlag)
 {
-    if (likely(constInfo.deterConstInfo.noNeedDeter)) {
-        if (remainLoopNum > 1) {
-            SyncAll();
-        }
-    } else {
-        if (dqIsNeedDeter && !dkDvIsNeedDeter) {
-            // 该轮次只有 dq 需要做 deter
-            DeterComputeDq(constInfo, isLastSort, computeBlockIdx, remainLoopNum, deterPpFlag);
-            isFirstDeter = false;
-        } else if (!dqIsNeedDeter && dkDvIsNeedDeter) {
-            // 该轮次只有 dk dv 需要做 deter
-            DeterComputeDkv(mm1ResTensor, mm2ResTensor, constInfo, isLastSort, computeBlockIdx, remainLoopNum,
-                            deterPpFlag);
-            isFirstDeter = false;
-        } else if (dqIsNeedDeter && dkDvIsNeedDeter) {
-            // 该轮次 dq dk dv 都需要做 deter
+    SyncAll<true, syncAllConfigMte3ToMte2>();
+    if (!constInfo.deterConstInfo.noNeedDeter) {
+        if (dqIsNeedDeter && dkDvIsNeedDeter) {
             DeterComputeDqkv(mm1ResTensor, mm2ResTensor, constInfo, isLastSort, computeBlockIdx, remainLoopNum,
                              deterPpFlag);
             isFirstDeter = false;
-        } else {
-            // 该轮次不需要做确定性计算，只需要加上全核同步
-            if (remainLoopNum > 1) {
-                SyncAll();
-            }
+        } else if (dqIsNeedDeter) {
+            DeterComputeDq(constInfo, isLastSort, computeBlockIdx, remainLoopNum, deterPpFlag);
+            isFirstDeter = false;
+        } else if (dkDvIsNeedDeter) {
+            DeterComputeDkv(mm1ResTensor, mm2ResTensor, constInfo, isLastSort, computeBlockIdx, remainLoopNum,
+                            deterPpFlag);
+            isFirstDeter = false;
         }
+    }
+    SyncAll<true, syncAllConfigMte3ToMte3>();
+}
+
+TEMPLATES_DEF_NO_DEFAULT
+template <uint8_t RES_IDX>
+__aicore__ inline uint16_t FAGBlockVec<TEMPLATE_ARGS>::GetOldDeterCopyRows(FagConstInfo& constInfo, int64_t offset,
+                                                                           const DataCopyExtParams& copyParams)
+{
+    if (offset < 0) {
+        return 0;
+    }
+    const uint16_t rows =
+        RES_IDX == DQ_IDX ? constInfo.deterConstInfo.eachVecCoreS1Offset : constInfo.deterConstInfo.eachVecCoreS2Offset;
+    if constexpr (!IS_FP32_INPUT) {
+        return rows;
+    } else {
+        uint64_t elements = 0;
+        if constexpr (IS_TND) {
+            const bool isDq = RES_IDX == DQ_IDX;
+            const __gm__ int64_t* seq =
+                isDq ? (__gm__ int64_t*)constInfo.seqS1_addr : (__gm__ int64_t*)constInfo.seqS2_addr;
+            const uint64_t stride =
+                isDq ? constInfo.commonConstInfo.n2GD :
+                       (RES_IDX == DK_IDX ? constInfo.commonConstInfo.n2D : constInfo.commonConstInfo.n2Dv);
+            elements = seq[constInfo.bSize - 1] * stride;
+        } else {
+            const uint64_t batchSize = RES_IDX == DQ_IDX ? constInfo.commonConstInfo.n2GS1D :
+                                                           (RES_IDX == DK_IDX ? constInfo.commonConstInfo.n2S2D :
+                                                                                constInfo.commonConstInfo.n2S2Dv);
+            elements = constInfo.bSize * batchSize;
+        }
+        const uint64_t start = static_cast<uint64_t>(offset);
+        if (start >= elements || rows == 0 || copyParams.blockLen == 0) {
+            return 0;
+        }
+        const uint64_t available = (elements - start) * sizeof(T2);
+        if (available < copyParams.blockLen) {
+            return 0;
+        }
+        const uint64_t rowStride = static_cast<uint64_t>(copyParams.blockLen) + copyParams.dstStride;
+        const uint64_t availableRows = 1 + (available - copyParams.blockLen) / rowStride;
+        return availableRows < rows ? static_cast<uint16_t>(availableRows) : rows;
     }
 }
 
@@ -881,11 +930,11 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDq(FagConstInfo& 
 {
     SetFlag<HardEvent::MTE3_MTE2>(constInfo.deterConstInfo.eventIDMte3ToMte2);
     WaitFlag<HardEvent::MTE3_MTE2>(constInfo.deterConstInfo.eventIDMte3ToMte2);
-    SyncAll<true, syncAllConfigMte2ToMte2>();
 
     LocalTensor<int64_t> deterOffsetTensor = deterOffsetBuf.Get<int64_t>();
     if (!isFirstDeter) {
-        WaitFlag<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2); // sclar已做完，可以开始gm搬运
+        WaitFlag<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2);
+        deterScalarEventPending = false; // sclar已做完，可以开始gm搬运
     }
     DataCopy(deterOffsetTensor,
              deterOffsetGm[computeBlockIdx * constInfo.deterConstInfo.usedCubeCoreNum * INT64_BLOCK_NUM * OFFSET_NUM],
@@ -942,6 +991,10 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDq(FagConstInfo& 
                 continue;
             }
             dqOffsetArr[cIx] += constInfo.deterConstInfo.deterVecCoreS1Offset;
+            dataCopyPadParams.blockCount = GetOldDeterCopyRows<DQ_IDX>(constInfo, dqOffsetArr[cIx], dataCopyPadParams);
+            if (dataCopyPadParams.blockCount == 0) {
+                continue;
+            }
             // todo fp32
             if (vBlockIdx < constInfo.deterConstInfo.usedVectorCoreNum) {
                 AscendC::DataCopyPad(dqWorkSpaceGm[dqOffsetArr[cIx]],
@@ -954,12 +1007,10 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDq(FagConstInfo& 
     }
     AscendC::SetAtomicNone();
 
-    if (remainLoopNum > 0) {
+    if (remainLoopNum > 1) {
         SetFlag<HardEvent::S_MTE2>(
             constInfo.deterConstInfo.eventIDScalarToMte2); // 上面的scaler操作已做完，通知deteroffset可以继续搬运？
-    }
-    if (remainLoopNum > NUM_TWO) {
-        SyncAll<true, syncAllConfigMte3ToMte3>();
+        deterScalarEventPending = true;
     }
 }
 
@@ -969,10 +1020,10 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDkv(LocalTensor<T
                                                                    bool isLastSort, int64_t computeBlockIdx,
                                                                    int64_t remainLoopNum, int16_t deterPpFlag)
 {
-    SyncAll<>();
     LocalTensor<int64_t> deterOffsetTensor = deterOffsetBuf.Get<int64_t>();
     if (!isFirstDeter) {
         WaitFlag<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2);
+        deterScalarEventPending = false;
     }
     DataCopy(deterOffsetTensor,
              deterOffsetGm[computeBlockIdx * constInfo.deterConstInfo.usedCubeCoreNum * INT64_BLOCK_NUM * OFFSET_NUM],
@@ -997,11 +1048,9 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDkv(LocalTensor<T
     WriteDataToDkv(dkDeterBuf, dvDeterBuf, constInfo, dkSrcOfs, dvSrcOfs);
     AscendC::SetAtomicNone();
 
-    if (remainLoopNum > 0) {
+    if (remainLoopNum > 1) {
         SetFlag<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2);
-    }
-    if (remainLoopNum > NUM_TWO) {
-        SyncAll();
+        deterScalarEventPending = true;
     }
 }
 
@@ -1012,10 +1061,10 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDqkv(LocalTensor<
                                                                     int64_t computeBlockIdx, int64_t remainLoopNum,
                                                                     int16_t deterPpFlag)
 {
-    SyncAll<>();
     LocalTensor<int64_t> deterOffsetTensor = deterOffsetBuf.Get<int64_t>();
     if (!isFirstDeter) {
         WaitFlag<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2);
+        deterScalarEventPending = false;
     }
     DataCopy(deterOffsetTensor,
              deterOffsetGm[computeBlockIdx * constInfo.deterConstInfo.usedCubeCoreNum * INT64_BLOCK_NUM * OFFSET_NUM],
@@ -1078,6 +1127,10 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDqkv(LocalTensor<
                 continue;
             }
             dqOffsetArr[cIx] += constInfo.deterConstInfo.deterVecCoreS1Offset;
+            dataCopyPadParams.blockCount = GetOldDeterCopyRows<DQ_IDX>(constInfo, dqOffsetArr[cIx], dataCopyPadParams);
+            if (dataCopyPadParams.blockCount == 0) {
+                continue;
+            }
             if (vBlockIdx < constInfo.deterConstInfo.usedVectorCoreNum) {
                 AscendC::DataCopyPad(dqWorkSpaceGm[dqOffsetArr[cIx]],
                                      dqDeterBuf[(cIx - eachLoopStart) * constInfo.deterConstInfo.dqEachVectorSize],
@@ -1091,11 +1144,9 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::DeterComputeDqkv(LocalTensor<
     WriteDataToDkv(dkDeterBuf, dvDeterBuf, constInfo, dkSrcOfs, dvSrcOfs);
     AscendC::SetAtomicNone();
 
-    if (remainLoopNum > 0) {
+    if (remainLoopNum > 1) {
         SetFlag<HardEvent::S_MTE2>(constInfo.deterConstInfo.eventIDScalarToMte2);
-    }
-    if (remainLoopNum > NUM_TWO) {
-        SyncAll();
+        deterScalarEventPending = true;
     }
 }
 
@@ -1152,12 +1203,21 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::WriteDataToDkv(LocalTensor<T2
             if (dkOffsetArr[cIx] == OUTINDEX && dvOffsetArr[cIx] == OUTINDEX) {
                 continue;
             }
-            dkOffsetArr[cIx] += constInfo.deterConstInfo.deterDkVecCoreS2Offset;
-            dvOffsetArr[cIx] += constInfo.deterConstInfo.deterDvVecCoreS2Offset;
-            if (vBlockIdx < constInfo.deterConstInfo.usedVectorCoreNum) {
+            if (dkOffsetArr[cIx] != OUTINDEX) {
+                dkOffsetArr[cIx] += constInfo.deterConstInfo.deterDkVecCoreS2Offset;
+            }
+            if (dvOffsetArr[cIx] != OUTINDEX) {
+                dvOffsetArr[cIx] += constInfo.deterConstInfo.deterDvVecCoreS2Offset;
+            }
+            dataCopyPadParams.blockCount = GetOldDeterCopyRows<DK_IDX>(constInfo, dkOffsetArr[cIx], dataCopyPadParams);
+            dataCopyDvPadParams.blockCount =
+                GetOldDeterCopyRows<DV_IDX>(constInfo, dvOffsetArr[cIx], dataCopyDvPadParams);
+            if (vBlockIdx < constInfo.deterConstInfo.usedVectorCoreNum && dataCopyPadParams.blockCount > 0) {
                 AscendC::DataCopyPad(dkWorkSpaceGm[dkOffsetArr[cIx]],
                                      dkDeterBuf[(cIx - eachLoopStart) * constInfo.deterConstInfo.dkvEachVectorSize],
                                      dataCopyPadParams);
+            }
+            if (vBlockIdx < constInfo.deterConstInfo.usedVectorCoreNum && dataCopyDvPadParams.blockCount > 0) {
                 AscendC::DataCopyPad(dvWorkSpaceGm[dvOffsetArr[cIx]],
                                      dvDeterBuf[(cIx - eachLoopStart) * constInfo.deterConstInfo.dkvEachVectorSize],
                                      dataCopyDvPadParams);
@@ -1323,6 +1383,14 @@ __aicore__ inline void FAGBlockVec<TEMPLATE_ARGS>::ProcessMulsAndCast(GlobalTens
 TEMPLATES_DEF
 class FAGBlockVecDummy {
 public:
+    __aicore__ inline LocalTensor<T2> GetOldDeterDkBuffer()
+    {
+        return LocalTensor<T2>();
+    }
+    __aicore__ inline LocalTensor<T2> GetOldDeterDvBuffer()
+    {
+        return LocalTensor<T2>();
+    }
     __aicore__ inline void SetVecBlockParams(TPipe* pipe, FagTilingType tilingData, uint32_t vBlockIdx,
                                              uint32_t cBlockIdx, uint32_t vSubBlockIdx, AttenMaskInfo& attenMaskInfo,
                                              PseInfo& pseInfo, DropMaskInfo& dropInfo) {};

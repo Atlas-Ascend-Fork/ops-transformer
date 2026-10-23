@@ -1337,7 +1337,7 @@ bool FlashAttentionScoreGradTilingUs1s2Bs2David::IsValid(int64_t blockIdx)
                                  static_cast<int64_t>(0));
                     s2SparseLeft = s2SparseLeft >> 6 << 6; // 6 is for 64 align
                     int64_t s2SparseRight =
-                        AlignTo(std::min(fBaseParams.s1Inner * S1CV_RATIO_DEFAULT * (s1oDimIdx + 1), fBaseParams.s1) +
+                        AlignTo(std::min(fBaseParams.s1Inner * S1CV_RATIO_DEFAULT * (s1oDimIdx + 1), actualS1Len) +
                                     actualCalcS2Token,
                                 static_cast<int64_t>(64));
                     s2SparseRight = std::min(s2SparseRight, actualS2Len);
