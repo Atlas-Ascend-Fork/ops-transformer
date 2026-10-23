@@ -103,12 +103,10 @@ static ge::graphStatus InferShapeGenericBlockSparseAttention(gert::InferShapeCon
     const std::string layoutQ = (layoutQPtr != nullptr) ? layoutQPtr : "TND";
     const std::string layoutKv = (layoutKvPtr != nullptr) ? layoutKvPtr : "TND";
 
-    // Only TND query + PA_BBND KV are supported.
-    // Metadata, stride, quant, and reserved-attr checks stay in tiling.
-    if (layoutQ != "TND" || layoutKv != "PA_BBND") {
+    if (layoutQ != "TND" || (layoutKv != "PA_BBND" && layoutKv != "TND")) {
         OP_LOGE(context->GetNodeName(),
                 "Unsupported layout_q=%s, layout_kv=%s. Regular path requires layout_q=TND and "
-                "layout_kv=PA_BBND.",
+                "layout_kv=PA_BBND or TND.",
                 layoutQ.c_str(), layoutKv.c_str());
         return ge::GRAPH_FAILED;
     }
@@ -118,42 +116,51 @@ static ge::graphStatus InferShapeGenericBlockSparseAttention(gert::InferShapeCon
         return ge::GRAPH_FAILED;
     }
 
-    // Light PA_BBND check; dim0-stride / origin vs storage stay in tiling.
-    if (keyShape->GetDimNum() != PA_BBND_DIM_NUM || valueShape->GetDimNum() != PA_BBND_DIM_NUM) {
-        OP_LOGE(context->GetNodeName(),
-                "layout_kv=PA_BBND requires key/value dims=4 [blockNum,blockSize,Nkv,D], "
-                "but got keyDims=%zu, valueDims=%zu.",
-                keyShape->GetDimNum(), valueShape->GetDimNum());
-        return ge::GRAPH_FAILED;
-    }
+    if (layoutKv == "TND") {
+        if (keyShape->GetDimNum() != TND_DIM_NUM || valueShape->GetDimNum() != TND_DIM_NUM ||
+            *keyShape != *valueShape || keyShape->GetDim(TND_DIM_D) != queryShape->GetDim(TND_DIM_D) ||
+            context->GetOptionalInputShape(BLOCK_TABLE_INDEX) != nullptr) {
+            OP_LOGE(context->GetNodeName(), "Dense TND requires matching 3D K/V, matching Q/K/V D, and no blockTable.");
+            return ge::GRAPH_FAILED;
+        }
+    } else {
+        // Light PA_BBND check; dim0-stride / origin vs storage stay in tiling.
+        if (keyShape->GetDimNum() != PA_BBND_DIM_NUM || valueShape->GetDimNum() != PA_BBND_DIM_NUM) {
+            OP_LOGE(context->GetNodeName(),
+                    "layout_kv=PA_BBND requires key/value dims=4 [blockNum,blockSize,Nkv,D], "
+                    "but got keyDims=%zu, valueDims=%zu.",
+                    keyShape->GetDimNum(), valueShape->GetDimNum());
+            return ge::GRAPH_FAILED;
+        }
 
-    const int64_t qD = queryShape->GetDim(TND_DIM_D);
-    const int64_t kBlockNum = keyShape->GetDim(PA_BBND_DIM_BLOCK_NUM);
-    const int64_t kBlockSize = keyShape->GetDim(PA_BBND_DIM_BLOCK_SIZE);
-    const int64_t kNkv = keyShape->GetDim(PA_BBND_DIM_KV_HEAD);
-    const int64_t kD = keyShape->GetDim(PA_BBND_DIM_D);
-    const int64_t vBlockNum = valueShape->GetDim(PA_BBND_DIM_BLOCK_NUM);
-    const int64_t vBlockSize = valueShape->GetDim(PA_BBND_DIM_BLOCK_SIZE);
-    const int64_t vNkv = valueShape->GetDim(PA_BBND_DIM_KV_HEAD);
-    const int64_t vD = valueShape->GetDim(PA_BBND_DIM_D);
+        const int64_t qD = queryShape->GetDim(TND_DIM_D);
+        const int64_t kBlockNum = keyShape->GetDim(PA_BBND_DIM_BLOCK_NUM);
+        const int64_t kBlockSize = keyShape->GetDim(PA_BBND_DIM_BLOCK_SIZE);
+        const int64_t kNkv = keyShape->GetDim(PA_BBND_DIM_KV_HEAD);
+        const int64_t kD = keyShape->GetDim(PA_BBND_DIM_D);
+        const int64_t vBlockNum = valueShape->GetDim(PA_BBND_DIM_BLOCK_NUM);
+        const int64_t vBlockSize = valueShape->GetDim(PA_BBND_DIM_BLOCK_SIZE);
+        const int64_t vNkv = valueShape->GetDim(PA_BBND_DIM_KV_HEAD);
+        const int64_t vD = valueShape->GetDim(PA_BBND_DIM_D);
 
-    if (kD != qD || vD != qD) {
-        OP_LOGE(context->GetNodeName(), "key/value D must match query D=%ld, but got keyD=%ld, valueD=%ld.", qD, kD,
-                vD);
-        return ge::GRAPH_FAILED;
-    }
-    if (kBlockNum != vBlockNum || kBlockSize != vBlockSize || kNkv != vNkv) {
-        OP_LOGE(context->GetNodeName(),
-                "key/value PA_BBND dims [blockNum,blockSize,Nkv] must match, "
-                "got key=[%ld,%ld,%ld], value=[%ld,%ld,%ld].",
-                kBlockNum, kBlockSize, kNkv, vBlockNum, vBlockSize, vNkv);
-        return ge::GRAPH_FAILED;
-    }
+        if (kD != qD || vD != qD) {
+            OP_LOGE(context->GetNodeName(), "key/value D must match query D=%ld, but got keyD=%ld, valueD=%ld.", qD, kD,
+                    vD);
+            return ge::GRAPH_FAILED;
+        }
+        if (kBlockNum != vBlockNum || kBlockSize != vBlockSize || kNkv != vNkv) {
+            OP_LOGE(context->GetNodeName(),
+                    "key/value PA_BBND dims [blockNum,blockSize,Nkv] must match, "
+                    "got key=[%ld,%ld,%ld], value=[%ld,%ld,%ld].",
+                    kBlockNum, kBlockSize, kNkv, vBlockNum, vBlockSize, vNkv);
+            return ge::GRAPH_FAILED;
+        }
 
-    const gert::Shape* blockTableShape = context->GetOptionalInputShape(BLOCK_TABLE_INDEX);
-    if (blockTableShape == nullptr) {
-        OP_LOGE(context->GetNodeName(), "layout_kv=PA_BBND requires block_table, but it is nullptr.");
-        return ge::GRAPH_FAILED;
+        const gert::Shape* blockTableShape = context->GetOptionalInputShape(BLOCK_TABLE_INDEX);
+        if (blockTableShape == nullptr) {
+            OP_LOGE(context->GetNodeName(), "layout_kv=PA_BBND requires block_table, but it is nullptr.");
+            return ge::GRAPH_FAILED;
+        }
     }
 
     *attentionOutShape = *queryShape;

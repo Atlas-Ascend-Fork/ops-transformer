@@ -48,6 +48,31 @@
 > q、k、v数据排布格式支持从多种维度解读，其中B（Batch）表示输入样本批量大小batch_size、S（Seq-Length）表示输入样本序列长度、H（Hidden-Size）表示隐藏层的大小、N（Head-Num）表示多头数、D（Head-Dim）表示隐藏层最小的单元尺寸headdim，且满足D=H/N、Q_T表示所有query Batch输入样本序列长度的累加和，KV_T表示所有k、v Batch输入样本序列长度的累加和。
 > Q_S表示seqlen_q，Q_N表示nheads_q，KV_S表示seqlen_kv，KV_N表示nheads_kv。
 
+## 分架构支持范围
+
+| 参数 | Atlas A2/A3 | Ascend 950（A5） |
+| ---- | ---- | ---- |
+| Query layout | TND | TND |
+| KV layout | TND、PA_BBND | PA_BBND |
+| headDim | 1～256 | 128 |
+| blockShape | X=1，Y∈{1,2,4,8,16,32,64,128} | [1,128] |
+| PA 页大小 | 128，与稀疏块 Y 独立 | 128 |
+| topK 上限 | 512 | 256 |
+| maskType | 0（no-mask）、1（causal） | 1 |
+| residualBlockMode | 0、1（非量化） | 0 |
+| LSE 输出 | PA_BBND 且 residualBlockMode=0 时支持 | 不支持 |
+
+A2/A3 仅支持 FP16/BF16 非量化；BF16 要求 softmaxPrecision=0，FP16 支持 0/1。两种架构均要求
+layoutSparsePattern=4、groupSize≤128、winLeft=winRight=-1。A5 保留本 beta 版本的能力范围。
+
+Dense TND 的 K/V 形状为 [totalKvTokens,numKvHeads,headDim]，须传 cuSeqLengthsKv，不传 blockTable；
+PA_BBND 须传 blockTable 和 sequsedKv，不传 cuSeqLengthsKv。序列前缀和从 0 开始，末项对应存储容量；
+seqused 不得超过对应存储段。Metadata 与主算子对应的序列、shape、mask 和 residual 等属性必须一致。
+
+每个 Q 块的 sparseBlockIdx 有效前缀须为合法块索引，严格升序且无重复；块可以随机选择，不要求等步长。
+residualBlockMode=1 时，当前可见 KV 范围末尾不足 Y 的块由算子补入，不得重复放在有效 sparseBlockIdx 中。
+causal 的可见范围为 kvLen-qLen+qToken+1；no-mask 使用整个有效 KV 序列。
+
 ## 函数原型
 
 调用generic_block_sparse_attention接口之前，请先调用前置接口generic_block_sparse_attention_metadata，完成generic_block_sparse_attention负载均衡的计算。
@@ -149,7 +174,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 
 > [!NOTE]
 >
-> 枚举为 `IntEnum`，可直接作为 int 传入底层算子；接口仅支持传入枚举或对应 int 值。当前仅支持 mask_mode = 1（`CAUSAL`）；quant_mode 当前仅支持 0（`NO_QUANT`）与 5（`FP8_E4M3_STATIC_CAST_P`）。
+> 枚举为 `IntEnum`，可直接作为 int 传入底层算子；接口仅支持传入枚举或对应 int 值。A2/A3 支持 mask_mode = 0/1，A5 支持 1（`CAUSAL`）；quant_mode 当前仅支持 0（`NO_QUANT`）与 5（`FP8_E4M3_STATIC_CAST_P`）。
 
 ## layout_sparse_pattern 取值与sparse_block_idx/sparse_block_count的shape对应关系说明
 
@@ -315,7 +340,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 |     Q_S     |      各batch的query逻辑序列长度，TND下一般由cu_seqlens_q差分得到      |
 |    KV_S    |  各batch的key/value逻辑序列长度；TND下一般由cu_seqlens_kv差分得到，Paged Attention下为block_table映射对应的逻辑KV长度  |
 |     D     |          输入q/k/v tensor隐藏层最小的单元尺寸headdim         |
-|  maxKvBlockCount  | sparse_block_idx最后一维，表示每个Q块最多选择的KV块数，须不小于sparseBlockCount中所有元素的最大值，当前上限为256 |
+|  maxKvBlockCount  | sparse_block_idx最后一维，表示每个Q块最多选择的KV块数，须不小于sparseBlockCount中所有元素的最大值，A2/A3 上限为512，A5 上限为256 |
 | totalQBlocks | 按blockShapeX分块后的Q块总数；$\sum_i\mathrm{ceil}(Q\_S_i / block\_x)$，为`sparse_block_idx`/`sparse_block_count`第二维 |
 | totalKBlocks | 按blockShapeY分块后的KV块总数，即$\sum_i\mathrm{ceilDiv}(kvStorageLen_i, blockShapeY)$ |
 | num_blocks | Paged KV Cache物理页总数 |
@@ -373,7 +398,7 @@ cann_ops_transformer.generic_block_sparse_attention(
                 <li>Q_T > 0</li>
                 <li>Q_N > 0</li>
                 <li>KV_N > 0</li>
-                <li>当前D仅支持128</li>
+                <li>A2/A3 的 D 支持 1～256；A5 的 D 仅支持 128</li>
                 <li>Q_N % KV_N == 0且Q_N / KV_N > 0</li>
                 <li>groupSize = Q_N / KV_N 当前须不超过128</li>
             </ul>
@@ -385,7 +410,7 @@ cann_ops_transformer.generic_block_sparse_attention(
             <ul>
                 <li>tensor_type支持bfloat16、float16、float8_e4m3fn</li>
                 <li>PA_BBND -> (num_blocks, block_size, KV_N, D)</li>
-                <li>当前block_size须等于128且等于block_shape[1]</li>
+                <li>PA block_size 为 128，A2/A3 的稀疏块 Y 可独立设置</li>
                 <li>非连续Tensor约束：PA_BBND仅dim0支持非连续</li>
             </ul>
         </td>
@@ -467,8 +492,8 @@ cann_ops_transformer.generic_block_sparse_attention(
         </td>
         <td rowspan="3">
             <ul>
-                <li>当前maxKvBlockCount不超过256</li>
-                <li>当前block_shape=[1, 128]</li>
+                <li>A2/A3 的 maxKvBlockCount 不超过512；A5 不超过256</li>
+                <li>block_shape 取值见分架构支持范围</li>
             </ul>
         </td>
     </tr>
@@ -590,7 +615,7 @@ mask_mode参数解释见「mask_mode 枚举」。
             <td>
                 <ul>
                     <li>data_type支持INT</li>
-                    <li>当前仅支持1</li>
+                    <li>A2/A3 支持 0/1；A5 支持 1</li>
                 </ul>
             </td>
             <td>可选输入，默认值为1</td>
@@ -852,7 +877,7 @@ quant_mode参数解释见「quant_mode 枚举」。
             <td>
                 <ul>
                     <li>data_type仅支持BOOL</li>
-                    <li>当前仅支持False</li>
+                    <li>A2/A3 的 PA_BBND 且 residual_block_mode=0 时支持 True；其他情况为 False</li>
                 </ul>
             </td>
             <td>可选属性，默认值为False</td>

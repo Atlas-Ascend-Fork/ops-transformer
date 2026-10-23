@@ -88,11 +88,19 @@ aclnnStatus aclnnGenericBlockSparseAttentionMetadataGetWorkspaceSize(
     CHECK_RET(cuSeqLengthsQOptional == nullptr || cuQContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
     const aclTensor* seqUsedQContiguous = MakeContiguousOptional(sequsedQOptional, uniqueExecutor.get());
     CHECK_RET(sequsedQOptional == nullptr || seqUsedQContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    const aclTensor* cuKvFinal = cuSeqLengthsKvOptional;
+    const aclTensor* usedKvFinal = sequsedKvOptional;
+    if (!isArch35) {
+        cuKvFinal = MakeContiguousOptional(cuSeqLengthsKvOptional, uniqueExecutor.get());
+        CHECK_RET(cuSeqLengthsKvOptional == nullptr || cuKvFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
+        usedKvFinal = MakeContiguousOptional(sequsedKvOptional, uniqueExecutor.get());
+        CHECK_RET(sequsedKvOptional == nullptr || usedKvFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    }
 
     const aclTensor* output = l0op::GenericBlockSparseAttentionMetadata(
-        idxContiguous, countContiguous, cuQContiguous, cuSeqLengthsKvOptional, seqUsedQContiguous, sequsedKvOptional,
-        maxQSeqLen, numQHeads, numKvHeads, headDim, blockShapeX, blockShapeY, isPackedGqaFlag, layoutQ, aicCoreNum,
-        residualBlockMode, isConsistentTopkFlag, metadataOptional, uniqueExecutor.get());
+        idxContiguous, countContiguous, cuQContiguous, cuKvFinal, seqUsedQContiguous, usedKvFinal, maxQSeqLen,
+        numQHeads, numKvHeads, headDim, blockShapeX, blockShapeY, isPackedGqaFlag, layoutQ, aicCoreNum,
+        residualBlockMode, isConsistentTopkFlag, maskType, isArch35 ? 0 : 1, metadataOptional, uniqueExecutor.get());
     CHECK_RET(output != nullptr, ACLNN_ERR_INNER_NULLPTR);
     *workspaceSize = 0;
     uniqueExecutor.ReleaseTo(executor);

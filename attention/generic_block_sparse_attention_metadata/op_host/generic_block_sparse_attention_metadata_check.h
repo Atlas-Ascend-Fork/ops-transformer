@@ -140,14 +140,15 @@ aclnnStatus CheckGbsaHeadAttrs(int64_t numQHeads, int64_t numKvHeads)
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus CheckGbsaBlockAttrs(int64_t blockShapeX, int64_t blockShapeY, int64_t layoutSparsePattern)
+aclnnStatus CheckGbsaBlockAttrs(int64_t blockShapeX, int64_t blockShapeY, int64_t layoutSparsePattern, bool isArch35)
 {
     if (blockShapeX != GBSA_CURRENT_BLOCK_SHAPE_X) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "blockShapeX currently only supports %lld, but got %lld.",
                 GBSA_CURRENT_BLOCK_SHAPE_X, blockShapeX);
         return ACLNN_ERR_PARAM_INVALID;
     }
-    if (blockShapeY != GBSA_CURRENT_BLOCK_SHAPE_Y) {
+    const bool validArch22Y = blockShapeY > 0 && blockShapeY <= 128 && (blockShapeY & (blockShapeY - 1)) == 0;
+    if (isArch35 ? blockShapeY != GBSA_CURRENT_BLOCK_SHAPE_Y : !validArch22Y) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "blockShapeY currently only supports %lld, but got %lld.",
                 GBSA_CURRENT_BLOCK_SHAPE_Y, blockShapeY);
         return ACLNN_ERR_PARAM_INVALID;
@@ -162,7 +163,7 @@ aclnnStatus CheckGbsaBlockAttrs(int64_t blockShapeX, int64_t blockShapeY, int64_
 }
 
 aclnnStatus CheckGbsaScalarAttrs(int64_t numQHeads, int64_t numKvHeads, int64_t headDim, int64_t blockShapeX,
-                                 int64_t blockShapeY, int64_t layoutSparsePattern)
+                                 int64_t blockShapeY, int64_t layoutSparsePattern, bool isArch35)
 {
     const struct {
         int64_t value;
@@ -179,12 +180,12 @@ aclnnStatus CheckGbsaScalarAttrs(int64_t numQHeads, int64_t numKvHeads, int64_t 
     if (status != ACLNN_SUCCESS) {
         return status;
     }
-    if (headDim != GBSA_CURRENT_HEAD_DIM) {
+    if (isArch35 ? headDim != GBSA_CURRENT_HEAD_DIM : headDim > 256) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "headDim currently only supports %lld, but got %lld.", GBSA_CURRENT_HEAD_DIM,
                 headDim);
         return ACLNN_ERR_PARAM_INVALID;
     }
-    return CheckGbsaBlockAttrs(blockShapeX, blockShapeY, layoutSparsePattern);
+    return CheckGbsaBlockAttrs(blockShapeX, blockShapeY, layoutSparsePattern, isArch35);
 }
 
 aclnnStatus CheckGbsaMaxSeqLenAttr(int64_t maxSeqLen, const char* attrName)
@@ -206,13 +207,13 @@ aclnnStatus CheckGbsaMaxSeqLenAttrs(int64_t maxQSeqLen, int64_t maxKvSeqLen)
     return CheckGbsaMaxSeqLenAttr(maxKvSeqLen, "maxKvSeqLen");
 }
 
-aclnnStatus CheckGbsaLayouts(const char* qInputLayout, const char* kvInputLayout)
+aclnnStatus CheckGbsaLayouts(const char* qInputLayout, const char* kvInputLayout, bool isArch35)
 {
     if (!GbsaIsLayout(qInputLayout, "TND")) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "qInputLayout currently only supports TND.");
         return ACLNN_ERR_PARAM_INVALID;
     }
-    if (!GbsaIsLayout(kvInputLayout, "PA_BBND")) {
+    if (!GbsaIsLayout(kvInputLayout, "PA_BBND") && (isArch35 || !GbsaIsLayout(kvInputLayout, "TND"))) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "kvInputLayout currently only supports PA_BBND.");
         return ACLNN_ERR_PARAM_INVALID;
     }
@@ -381,9 +382,9 @@ aclnnStatus CheckGbsaPlatformAttrs(int64_t quantType, int64_t softmaxPrecision, 
     return CheckGbsaSoftmaxPrecision(softmaxPrecision, isArch35);
 }
 
-aclnnStatus CheckGbsaResidualBlockMode(int64_t residualBlockMode)
+aclnnStatus CheckGbsaResidualBlockMode(int64_t residualBlockMode, bool isArch35)
 {
-    if (residualBlockMode != GBSA_RESIDUAL_BLOCK_MODE_NONE) {
+    if (residualBlockMode != GBSA_RESIDUAL_BLOCK_MODE_NONE && (isArch35 || residualBlockMode != 1)) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "residual_block_mode only supports %lld, but got %lld.",
                 GBSA_RESIDUAL_BLOCK_MODE_NONE, residualBlockMode);
         return ACLNN_ERR_PARAM_INVALID;
@@ -391,9 +392,9 @@ aclnnStatus CheckGbsaResidualBlockMode(int64_t residualBlockMode)
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus CheckGbsaMaskAttrs(int64_t maskType, int64_t windowSizeLeft, int64_t windowSizeRight)
+aclnnStatus CheckGbsaMaskAttrs(int64_t maskType, int64_t windowSizeLeft, int64_t windowSizeRight, bool isArch35)
 {
-    if (maskType != GBSA_CURRENT_MASK_TYPE) {
+    if (maskType != GBSA_CURRENT_MASK_TYPE && (isArch35 || maskType != 0)) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "maskType currently only supports %lld, but got %lld.", GBSA_CURRENT_MASK_TYPE,
                 maskType);
         return ACLNN_ERR_PARAM_INVALID;
@@ -407,13 +408,14 @@ aclnnStatus CheckGbsaMaskAttrs(int64_t maskType, int64_t windowSizeLeft, int64_t
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus CheckGbsaSparseBlockCapacity(const aclTensor* sparseBlockIdx)
+aclnnStatus CheckGbsaSparseBlockCapacity(const aclTensor* sparseBlockIdx, bool isArch35)
 {
     const int64_t dimNum = sparseBlockIdx->GetViewShape().GetDimNum();
     const int64_t capacity = sparseBlockIdx->GetViewShape().GetDim(dimNum - 1);
-    if (capacity > GBSA_CURRENT_MAX_SPARSE_BLOCK_COUNT) {
+    const int64_t maxCapacity = isArch35 ? GBSA_CURRENT_MAX_SPARSE_BLOCK_COUNT : 512;
+    if (capacity > maxCapacity) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "sparseBlockIdx last dimension currently cannot exceed %lld, but got %lld.",
-                GBSA_CURRENT_MAX_SPARSE_BLOCK_COUNT, capacity);
+                maxCapacity, capacity);
         return ACLNN_ERR_PARAM_INVALID;
     }
     return ACLNN_SUCCESS;
@@ -433,7 +435,7 @@ aclnnStatus CheckGbsaMetadataParams(const aclTensor* sparseBlockIdx, const aclTe
     if (status != ACLNN_SUCCESS) {
         return status;
     }
-    status = CheckGbsaLayouts(qInputLayout, kvInputLayout);
+    status = CheckGbsaLayouts(qInputLayout, kvInputLayout, isArch35);
     if (status != ACLNN_SUCCESS) {
         return status;
     }
@@ -441,7 +443,8 @@ aclnnStatus CheckGbsaMetadataParams(const aclTensor* sparseBlockIdx, const aclTe
     if (status != ACLNN_SUCCESS) {
         return status;
     }
-    status = CheckGbsaScalarAttrs(numQHeads, numKvHeads, headDim, blockShapeX, blockShapeY, layoutSparsePattern);
+    status =
+        CheckGbsaScalarAttrs(numQHeads, numKvHeads, headDim, blockShapeX, blockShapeY, layoutSparsePattern, isArch35);
     if (status != ACLNN_SUCCESS) {
         return status;
     }
@@ -459,7 +462,7 @@ aclnnStatus CheckGbsaMetadataParams(const aclTensor* sparseBlockIdx, const aclTe
     if (status != ACLNN_SUCCESS) {
         return status;
     }
-    status = CheckGbsaSparseBlockCapacity(sparseBlockIdx);
+    status = CheckGbsaSparseBlockCapacity(sparseBlockIdx, isArch35);
     if (status != ACLNN_SUCCESS) {
         return status;
     }
@@ -472,11 +475,11 @@ aclnnStatus CheckGbsaMetadataParams(const aclTensor* sparseBlockIdx, const aclTe
     if (status != ACLNN_SUCCESS) {
         return status;
     }
-    status = CheckGbsaResidualBlockMode(residualBlockMode);
+    status = CheckGbsaResidualBlockMode(residualBlockMode, isArch35);
     if (status != ACLNN_SUCCESS) {
         return status;
     }
-    return CheckGbsaMaskAttrs(maskType, windowSizeLeft, windowSizeRight);
+    return CheckGbsaMaskAttrs(maskType, windowSizeLeft, windowSizeRight, isArch35);
 }
 
 } // namespace

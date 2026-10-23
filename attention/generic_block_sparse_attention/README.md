@@ -31,7 +31,32 @@
   attentionOut = Softmax(scaleValue \cdot query \cdot key_{sparse}^{T} + atten\_mask) \cdot value_{sparse}
   $$
 
-  其中$key_{sparse}$、$value_{sparse}$为按`sparseBlockIdx`/`sparseBlockCount`从Paged KV Cache中选取的KV块。
+  其中$key_{sparse}$、$value_{sparse}$为按`sparseBlockIdx`/`sparseBlockCount`从 Dense TND 或 Paged KV Cache 中选取的 KV 块。
+
+## 分架构支持范围
+
+| 参数 | Atlas A2/A3 | Ascend 950（A5） |
+| ---- | ---- | ---- |
+| Query layout | TND | TND |
+| KV layout | TND、PA_BBND | PA_BBND |
+| headDim | 1～256 | 128 |
+| blockShape | X=1，Y∈{1,2,4,8,16,32,64,128} | [1,128] |
+| PA 页大小 | 128，与稀疏块 Y 独立 | 128 |
+| topK 上限 | 512 | 256 |
+| maskType | 0（no-mask）、1（causal） | 1 |
+| residualBlockMode | 0、1（非量化） | 0 |
+| LSE 输出 | PA_BBND 且 residualBlockMode=0 时支持 | 不支持 |
+
+A2/A3 仅支持 FP16/BF16 非量化；BF16 要求 softmaxPrecision=0，FP16 支持 0/1。两种架构均要求
+layoutSparsePattern=4、groupSize≤128、winLeft=winRight=-1。A5 保留本 beta 版本的能力范围。
+
+Dense TND 的 K/V 形状为 [totalKvTokens,numKvHeads,headDim]，须传 cuSeqLengthsKv，不传 blockTable；
+PA_BBND 须传 blockTable 和 sequsedKv，不传 cuSeqLengthsKv。序列前缀和从 0 开始，末项对应存储容量；
+seqused 不得超过对应存储段。Metadata 与主算子对应的序列、shape、mask 和 residual 等属性必须一致。
+
+每个 Q 块的 sparseBlockIdx 有效前缀须为合法块索引，严格升序且无重复；块可以随机选择，不要求等步长。
+residualBlockMode=1 时，当前可见 KV 范围末尾不足 Y 的块由算子补入，不得重复放在有效 sparseBlockIdx 中。
+causal 的可见范围为 kvLen-qLen+qToken+1；no-mask 使用整个有效 KV 序列。
 
 ## 参数说明
 
@@ -129,7 +154,7 @@
     <tr>
       <td>blockShape</td>
       <td>属性</td>
-      <td>稀疏块形状[blockShapeX, blockShapeY]，当前仅支持[1, 128]。</td>
+      <td>稀疏块形状[blockShapeX, blockShapeY]，取值见分架构支持范围。</td>
       <td>INT64</td>
       <td>-</td>
     </tr>
@@ -150,7 +175,7 @@
     <tr>
       <td>layoutKv</td>
       <td>属性</td>
-      <td>key/value数据排布格式，当前仅支持"PA_BBND"。</td>
+      <td>key/value数据排布格式，A2/A3 支持 TND、PA_BBND；A5 支持 PA_BBND。</td>
       <td>STRING</td>
       <td>-</td>
     </tr>
@@ -164,7 +189,7 @@
     <tr>
       <td>maskType</td>
       <td>属性</td>
-      <td>掩码类型，当前仅支持1（内置causal mask）。</td>
+      <td>掩码类型：A2/A3 支持 0（no-mask）和 1（causal）；A5 支持 1。</td>
       <td>INT64</td>
       <td>-</td>
     </tr>
@@ -185,7 +210,7 @@
     <tr>
       <td>returnSoftmaxlse</td>
       <td>属性</td>
-      <td>是否输出softmaxLse，当前仅支持0。</td>
+      <td>是否输出 softmaxLse，取值 0/1；支持条件见分架构支持范围。</td>
       <td>INT64</td>
       <td>-</td>
     </tr>
@@ -199,7 +224,7 @@
     <tr>
       <td>softmaxLseOptional</td>
       <td>输出</td>
-      <td>Softmax log-sum-exp中间结果；当前不支持，须传入nullptr。</td>
+      <td>Softmax log-sum-exp 输出。开启时为 FLOAT [T,N1,1]；关闭时传 nullptr。</td>
       <td>FLOAT</td>
       <td>ND</td>
     </tr>
@@ -209,8 +234,8 @@
 ## 约束说明
 
 - 调用前须先执行`aclnnGenericBlockSparseAttentionMetadata`生成`metadataOptional`，再调用本接口；metadata须与当前输入/属性配套，每次调用须重新生成。
-- query/key/value的headDim(D)当前仅支持128；KV页blockSize当前仅支持128，且须等于blockShapeY。
-- TND + isPackedGQA=1时：totalQBlocks按cuSeqLengthsQ差分得到的存储长度分块；sparse分块与QKV寻址均按该存储长度，不以seqused重切分；topK须≥`sparseBlockCount`中所有元素的最大值，当前上限为256。
+- headDim、blockShapeY 及 PA 页大小的约束见分架构支持范围。
+- TND + isPackedGQA=1时：totalQBlocks按cuSeqLengthsQ差分得到的存储长度分块；sparse分块与QKV寻址均按该存储长度，不以seqused重切分；topK须≥`sparseBlockCount`中所有元素的最大值，A2/A3 上限为512，A5 上限为256。
 - seqused与对应cu前缀和同时传入时（Q侧，及layoutKv为TND时的KV侧）：分核/任务空间按各batch实际有效长度（seqused）累加；各batch的seqused元素须≤对应cu存储长度，且须与Metadata侧完全一致。
 - layoutKv为"PA_BBND"时须传`sequsedKvOptional`，不传`cuSeqLengthsKvOptional`。
 - 输入query、key、value的数据类型必须一致。
@@ -218,6 +243,13 @@
 - PA_BBND下key/value仅dim0（物理页轴）可非连续；页内blockSize×N2×D须连续。
 
 ## 调用说明
+
+### A2/A3实现
+
+- 内部KV基块为256 token，独立于用户传入的稀疏块Y和PA页大小128；调用方无需设置基块。
+- K按128-token子块生成搬运记录，V复用记录；连续片段可合并，满足地址和步长条件的两个稀疏块可用pair搬运。随机索引或随机页表不满足合并条件时使用对应回退路径。
+- 满足条件的宽tile路径支持分段V搬运与PV计算重叠；QK的K搬运使用双缓冲。分核任务使用每核游标和KV256阶段记录。
+- 搬运记录、宽tile和流水线属于内部实现，不改变稀疏索引、残块或输出语义。
 
 | 调用方式 | 样例代码 | 说明 |
 | -------- | -------- | ---- |

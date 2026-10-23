@@ -25,7 +25,11 @@ constexpr uint32_t MAX_DECODE_CORE_NUM = 32U;
 constexpr uint32_t MAX_COMBINE_TASK_NUM = 32U;
 constexpr uint32_t MAX_FD_ACTIVE_CORE_NUM = MAX_DECODE_CORE_NUM;
 constexpr uint32_t MAX_FD_PARTIAL_PER_BASE_TASK = MAX_DECODE_CORE_NUM;
+#if (__CCE_AICORE__ == 220)
+constexpr uint32_t MAX_SPARSE_BLOCK_CAPACITY = 512U;
+#else
 constexpr uint32_t MAX_SPARSE_BLOCK_CAPACITY = 256U;
+#endif
 constexpr MetadataType METADATA_MAGIC = 0x5341534D;
 constexpr MetadataType METADATA_VERSION = 8;
 

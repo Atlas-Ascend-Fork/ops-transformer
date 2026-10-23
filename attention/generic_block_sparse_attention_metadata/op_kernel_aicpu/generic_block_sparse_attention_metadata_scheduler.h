@@ -45,6 +45,8 @@ struct ScheduleInput {
     int64_t isPackedGQA = 1;
     int64_t residualBlockMode = 0;
     int64_t isConsistentTopk = 0;
+    int64_t maskType = 1;
+    bool isArch22 = false;
     int64_t aicCoreNum = 0;
     std::vector<int64_t> qSeqLens; // seqUsed/cuQLens/maxQLen
     // qUnit-major, sparseHead-minor logical order.
@@ -138,6 +140,10 @@ inline uint32_t CalculateConfigSignature(const ScheduleInput& input)
     // participate in the signature so the main op rejects metadata generated with other settings.
     hash = HashConfigValue(hash, static_cast<uint32_t>(input.residualBlockMode));
     hash = HashConfigValue(hash, static_cast<uint32_t>(input.isConsistentTopk));
+    // Keep legacy causal metadata compatible; tag non-causal metadata separately.
+    if (input.maskType == 0) {
+        hash = HashConfigValue(hash, 0U);
+    }
     return hash;
 }
 
@@ -223,7 +229,9 @@ inline bool IsScheduleInputValid(const ScheduleInput& input)
     using namespace optiling::generic_block_sparse_attention_metadata;
     return input.batchSize >= 0 && input.numQHeads > 0 && input.numKvHeads > 0 && input.headDim > 0 &&
            input.blockShapeX == 1 && input.blockShapeY > 0 && input.blockIndexStride > 0 &&
-           input.qBlockStorageNum > 0 && (input.isPackedGQA == 0 || input.isPackedGQA == 1) && input.aicCoreNum > 0 &&
+           input.qBlockStorageNum > 0 && (input.isPackedGQA == 0 || input.isPackedGQA == 1) &&
+           (input.residualBlockMode == 0 || input.residualBlockMode == 1) &&
+           (input.maskType == 0 || input.maskType == 1) && input.aicCoreNum > 0 &&
            input.aicCoreNum <= MAX_AIC_CORE_NUM && input.qSeqLens.size() == static_cast<size_t>(input.batchSize);
 }
 
@@ -265,11 +273,15 @@ inline BSAScheduleStatus BuildBlockPrefix(const ScheduleInput& input, ScheduleRe
     const int64_t m16 = CeilDiv(qHeadCount, 16);
     for (int64_t task = 0; task < result.saTotalTaskNum; ++task) {
         const int64_t validBlockNum = input.validBlockNums[static_cast<size_t>(task)];
-        if (validBlockNum < 0 || validBlockNum > input.blockIndexStride) {
+        const int64_t maxValidBlockNum = input.blockIndexStride + (input.residualBlockMode == 1 ? 1 : 0);
+        if (validBlockNum < 0 || validBlockNum > maxValidBlockNum) {
             return BSAScheduleStatus::BSA_INVALID_PARAM;
         }
+        // Keep empty tasks in the flat FD range so the kernel writes zero O and empty LSE.
+        // This is only a scheduling slot; the actual sparse block count stays zero.
+        const int64_t scheduledBlocks = input.isArch22 && validBlockNum == 0 ? 1 : validBlockNum;
         int64_t prefix = 0;
-        if (AddOverflow(result.blockPrefix[static_cast<size_t>(task)], validBlockNum, prefix) ||
+        if (AddOverflow(result.blockPrefix[static_cast<size_t>(task)], scheduledBlocks, prefix) ||
             !FitsMetadataType(prefix)) {
             return BSAScheduleStatus::BSA_OVERFLOW;
         }
@@ -288,12 +300,14 @@ inline bool ShouldBuildDecodeSchedule(const ScheduleInput& input, const Schedule
                                       uint64_t totalValidBlockNum)
 {
     const int64_t totalSplitTaskNum = result.blockPrefix.back();
-    // Decode scheduling uses the FD kernel cost model calibrated for D=128 and blockShapeY=128.
+    // Decode scheduling partitions sparse-list block ranges. The kernel resolves each range with the runtime
+    // blockShapeY, so the schedule is independent of the sparse block's token width.
+    const bool archShapeSupported =
+        input.isArch22 ? input.headDim > 0 && input.headDim <= 256 && input.blockIndexStride <= 512 :
+                         input.headDim == 128 && input.blockShapeY == 128 && input.blockIndexStride <= 256;
     const bool fdShapeSupported =
-        input.headDim == 128 && input.blockShapeY == 128 && input.blockIndexStride >= 12 &&
-        input.blockIndexStride <=
-            static_cast<int64_t>(optiling::generic_block_sparse_attention_metadata::MAX_SPARSE_BLOCK_CAPACITY) &&
-        result.groupSize > 0 && result.groupSize <= 128 && result.saTotalTaskNum > 0 &&
+        archShapeSupported && input.blockIndexStride >= 12 && result.groupSize > 0 && result.groupSize <= 128 &&
+        result.saTotalTaskNum > 0 &&
         static_cast<uint64_t>(result.saTotalTaskNum) * 10U < static_cast<uint64_t>(input.aicCoreNum) * 3U;
     return fdShapeSupported && totalSplitTaskNum > result.saUsedCoreNum && totalCost > 0U && totalValidBlockNum > 0U;
 }

@@ -19,6 +19,7 @@
 #include "opdev/op_errno.h"
 #include "opdev/op_executor.h"
 #include "opdev/op_log.h"
+#include "opdev/platform.h"
 #include <algorithm>
 #include <string>
 #include <unordered_map>
@@ -123,8 +124,9 @@ static aclnnStatus ValidateParams(const aclTensor* query, const aclTensor* key, 
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "layoutQ only supports TND, got %s.", layoutQStr.c_str());
         return ACLNN_ERR_PARAM_INVALID;
     }
-    if (layoutKvStr != "PA_BBND") {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "layoutKv only supports PA_BBND, got %s.", layoutKvStr.c_str());
+    const bool isArch35 = op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510;
+    if (layoutKvStr != "PA_BBND" && (isArch35 || layoutKvStr != "TND")) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Unsupported layoutKv=%s on this platform.", layoutKvStr.c_str());
         return ACLNN_ERR_PARAM_INVALID;
     }
 
@@ -307,9 +309,22 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
         return ret;
     }
 
+    // Attribute / output-ptr checks before platform-optional tensor presence, so
+    // illegal softmaxPrecision returns ACLNN_ERR_PARAM_INVALID (161002) instead of
+    // being masked by ACLNN_ERR_PARAM_NULLPTR on missing cuSeqLengthsQ.
     ret = ValidateAdditionalParams(softmaxPrecision, attentionOut, workspaceSize, executor);
     if (ret != ACLNN_SUCCESS) {
         return ret;
+    }
+
+    if (op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510) {
+        const bool isPaged = ConvertLayoutString(layoutKv) == "PA_BBND";
+        CHECK_RET(isPaged == (blockTableOptional != nullptr), ACLNN_ERR_PARAM_INVALID);
+        CHECK_RET(quantType == 0, ACLNN_ERR_PARAM_INVALID);
+        CHECK_RET(cuSeqLengthsQOptional != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+        if (!isPaged) {
+            CHECK_RET(cuSeqLengthsKvOptional != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+        }
     }
 
     L2_DFX_PHASE_1(
@@ -336,9 +351,12 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
     std::string layoutQStr = ConvertLayoutString(layoutQ);
     std::string layoutKvStr = ConvertLayoutString(layoutKv);
 
-    const aclTensor* keyFinal = NormalizeDim0KvTensor(key, "key", executorImpl);
+    const bool isDense = layoutKvStr == "TND";
+    const aclTensor* keyFinal =
+        isDense ? l0op::Contiguous(key, executorImpl) : NormalizeDim0KvTensor(key, "key", executorImpl);
     CHECK_RET(keyFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    const aclTensor* valueFinal = NormalizeDim0KvTensor(value, "value", executorImpl);
+    const aclTensor* valueFinal =
+        isDense ? l0op::Contiguous(value, executorImpl) : NormalizeDim0KvTensor(value, "value", executorImpl);
     CHECK_RET(valueFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     auto outputs = l0op::GenericBlockSparseAttention(

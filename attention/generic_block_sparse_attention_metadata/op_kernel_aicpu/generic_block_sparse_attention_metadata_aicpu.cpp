@@ -11,6 +11,8 @@
 #include "log.h"
 #include "generic_block_sparse_attention_metadata_aicpu.h"
 
+#include <limits>
+
 namespace aicpu {
 namespace {
 
@@ -44,6 +46,15 @@ uint32_t GenericBlockSparseAttentionMetadataAicpu::Compute(CpuKernelContext& ctx
     std::vector<int64_t> qSeqLens;
     std::vector<int64_t> qStorageBlockStarts;
     std::vector<int64_t> validBlockNums;
+    if (residualBlockMode_ == 1) {
+        std::vector<int64_t> kvSeqLens;
+        if (!ParseResidualQSeqLens(qSeqLens, kvSeqLens, qStorageBlockStarts) ||
+            !ParseResidualValidBlockNums(qSeqLens, kvSeqLens, qStorageBlockStarts, validBlockNums) ||
+            !GenerateMetadata(qSeqLens, validBlockNums)) {
+            return KERNEL_STATUS_PARAM_INVALID;
+        }
+        return KERNEL_STATUS_OK;
+    }
     if (!ParseQSeqLens(qSeqLens, qStorageBlockStarts) ||
         !ParseValidBlockNums(qSeqLens, qStorageBlockStarts, validBlockNums) ||
         !GenerateMetadata(qSeqLens, validBlockNums)) {
@@ -58,6 +69,8 @@ bool GenericBlockSparseAttentionMetadataAicpu::Prepare(CpuKernelContext& ctx)
     sparseBlockCount_ = ctx.Input(static_cast<uint32_t>(ParamId::SPARSE_BLOCK_COUNT));
     cuSeqLengths_ = ctx.Input(static_cast<uint32_t>(ParamId::CU_SEQ_LENGTHS));
     seqUsedQ_ = ctx.Input(static_cast<uint32_t>(ParamId::SEQ_USED_Q));
+    cuSeqLengthsKv_ = ctx.Input(static_cast<uint32_t>(ParamId::CU_SEQ_LENGTHS_KV));
+    seqUsedKv_ = ctx.Input(static_cast<uint32_t>(ParamId::SEQ_USED_KV));
     metadata_ = ctx.Output(static_cast<uint32_t>(ParamId::METADATA));
     // An omitted optional input is represented by an empty Tensor in the AICPU context.
     if (!HasTensorData(cuSeqLengths_)) {
@@ -67,6 +80,12 @@ bool GenericBlockSparseAttentionMetadataAicpu::Prepare(CpuKernelContext& ctx)
         seqUsedQ_ = nullptr;
     }
 
+    if (!HasTensorData(cuSeqLengthsKv_)) {
+        cuSeqLengthsKv_ = nullptr;
+    }
+    if (!HasTensorData(seqUsedKv_)) {
+        seqUsedKv_ = nullptr;
+    }
     const bool attrsValid =
         GetAttrValue(ctx, "max_q_seq_len", maxQSeqLen_) && GetAttrValue(ctx, "num_q_heads", numQHeads_) &&
         GetAttrValue(ctx, "num_kv_heads", numKvHeads_) && GetAttrValue(ctx, "head_dim", headDim_) &&
@@ -75,7 +94,14 @@ bool GenericBlockSparseAttentionMetadataAicpu::Prepare(CpuKernelContext& ctx)
         GetAttrValue(ctx, "aic_core_num", aicCoreNum_) &&
         GetAttrValue(ctx, "residual_block_mode", residualBlockMode_) &&
         GetAttrValue(ctx, "is_consistent_topk", isConsistentTopk_);
-    return attrsValid && CheckInputs();
+    if (ctx.GetAttr("mask_type") != nullptr && !GetAttrValue(ctx, "mask_type", maskType_)) {
+        return false;
+    }
+    if (ctx.GetAttr("is_arch22") != nullptr && !GetAttrValue(ctx, "is_arch22", isArch22_)) {
+        return false;
+    }
+    return attrsValid && (isArch22_ == 0 || isArch22_ == 1) && (maskType_ == 1 || (isArch22_ == 1 && maskType_ == 0)) &&
+           CheckInputs() && (residualBlockMode_ == 0 || CheckKvSeqLens());
 }
 
 bool GenericBlockSparseAttentionMetadataAicpu::CheckOptionalTensor(const Tensor* tensor, DataType dataType,
@@ -114,7 +140,7 @@ bool GenericBlockSparseAttentionMetadataAicpu::CheckInputs()
     }
     if ((qInputLayout_ != "TND" && maxQSeqLen_ <= 0) || numQHeads_ <= 0 || numKvHeads_ <= 0 || headDim_ <= 0 ||
         blockShapeX_ != 1 || blockShapeY_ <= 0 || (isPackedGQA_ != 0 && isPackedGQA_ != 1) || aicCoreNum_ <= 0 ||
-        aicCoreNum_ > MAX_AIC_CORE_NUM || residualBlockMode_ != 0 ||
+        aicCoreNum_ > MAX_AIC_CORE_NUM || (residualBlockMode_ != 0 && !(isArch22_ == 1 && residualBlockMode_ == 1)) ||
         (isConsistentTopk_ != 0 && isConsistentTopk_ != 1)) {
         KERNEL_LOG_ERROR("Invalid scheduling attrs for GenericBlockSparseAttentionMetadata.");
         return false;
@@ -176,6 +202,119 @@ bool GenericBlockSparseAttentionMetadataAicpu::CheckInputs()
     if (!CheckOptionalTensor(cuSeqLengths_, DT_INT64, batchSize_ + 1, "cu_seq_lengths") ||
         !CheckOptionalTensor(seqUsedQ_, DT_INT32, batchSize_, "seq_used_q")) {
         return false;
+    }
+    return true;
+}
+
+bool GenericBlockSparseAttentionMetadataAicpu::CheckKvSeqLens() const
+{
+    if (!CheckOptionalTensor(cuSeqLengthsKv_, DT_INT64, batchSize_ + 1, "cu_seq_lengths_kv") ||
+        !CheckOptionalTensor(seqUsedKv_, DT_INT32, batchSize_, "seq_used_kv")) {
+        return false;
+    }
+    if (qInputLayout_ != "TND") {
+        return true;
+    }
+    // The public API enforces the layout-specific presence rules. Validate the
+    // prefix origin here; per-batch values are checked during the combined parse.
+    const auto* cu = cuSeqLengthsKv_ == nullptr ? nullptr : static_cast<const int64_t*>(cuSeqLengthsKv_->GetData());
+    if (cu != nullptr && cu[0] != 0) {
+        KERNEL_LOG_ERROR("cu_seq_lengths_kv must start at zero.");
+        return false;
+    }
+    // Per-batch values are validated while Q and KV lengths are parsed together.
+    // The main kernel checks cu[B] against the actual KV tensor capacity.
+    return true;
+}
+
+bool GenericBlockSparseAttentionMetadataAicpu::ParseResidualQSeqLens(std::vector<int64_t>& qSeqLens,
+                                                                     std::vector<int64_t>& kvSeqLens,
+                                                                     std::vector<int64_t>& qStorageBlockStarts) const
+{
+    const auto* kvPrefix =
+        cuSeqLengthsKv_ == nullptr ? nullptr : static_cast<const int64_t*>(cuSeqLengthsKv_->GetData());
+    const auto* kvUsed = seqUsedKv_ == nullptr ? nullptr : static_cast<const int32_t*>(seqUsedKv_->GetData());
+    if (kvPrefix == nullptr && kvUsed == nullptr) {
+        KERNEL_LOG_ERROR("Either cu_seq_lengths_kv or seq_used_kv is required.");
+        return false;
+    }
+    kvSeqLens.resize(static_cast<size_t>(batchSize_));
+    const auto readKvSeqLen = [&](int64_t batchIdx, int64_t& kvSeqLen) -> bool {
+        if (kvPrefix != nullptr && (kvPrefix[batchIdx] < 0 || kvPrefix[batchIdx + 1] < kvPrefix[batchIdx])) {
+            KERNEL_LOG_ERROR("cu_seq_lengths_kv must be nonnegative and nondecreasing.");
+            return false;
+        }
+        const int64_t storageKvSeqLen = kvPrefix == nullptr ? 0 : kvPrefix[batchIdx + 1] - kvPrefix[batchIdx];
+        if (kvUsed != nullptr &&
+            (kvUsed[batchIdx] < 0 || (kvPrefix != nullptr && kvUsed[batchIdx] > storageKvSeqLen))) {
+            KERNEL_LOG_ERROR("seq_used_kv must fit the corresponding storage segment.");
+            return false;
+        }
+        kvSeqLen = kvUsed != nullptr ? kvUsed[batchIdx] : storageKvSeqLen;
+        return true;
+    };
+
+    if (qInputLayout_ == "TND") {
+        const auto* qPrefix = static_cast<const int64_t*>(cuSeqLengths_->GetData());
+        if (qPrefix[0] != 0) {
+            KERNEL_LOG_ERROR("cu_seq_lengths[0] must be 0 for TND Q.");
+            return false;
+        }
+        const auto* qUsed = seqUsedQ_ == nullptr ? nullptr : static_cast<const int32_t*>(seqUsedQ_->GetData());
+        qSeqLens.resize(static_cast<size_t>(batchSize_));
+        qStorageBlockStarts.resize(static_cast<size_t>(batchSize_));
+        int64_t storageBlockBase = 0;
+        for (int64_t batchIdx = 0; batchIdx < batchSize_; ++batchIdx) {
+            const int64_t storageQSeqLen = qPrefix[batchIdx + 1] - qPrefix[batchIdx];
+            const int64_t actualQSeqLen = qUsed == nullptr ? storageQSeqLen : qUsed[batchIdx];
+            if (qPrefix[batchIdx] < 0 || storageQSeqLen < 0 || actualQSeqLen < 0 || actualQSeqLen > storageQSeqLen) {
+                KERNEL_LOG_ERROR("Invalid TND Q sequence length at batch %lld.", batchIdx);
+                return false;
+            }
+            qSeqLens[static_cast<size_t>(batchIdx)] = actualQSeqLen;
+            qStorageBlockStarts[static_cast<size_t>(batchIdx)] = storageBlockBase;
+            const int64_t storageBlockNum = storageQSeqLen == 0 ? 0 : (storageQSeqLen - 1) / blockShapeX_ + 1;
+            if (storageBlockBase > std::numeric_limits<int64_t>::max() - storageBlockNum) {
+                return false;
+            }
+            storageBlockBase += storageBlockNum;
+            if (!readKvSeqLen(batchIdx, kvSeqLens[static_cast<size_t>(batchIdx)])) {
+                return false;
+            }
+        }
+        return storageBlockBase == qBlockStorageNum_;
+    }
+
+    return false;
+}
+
+bool GenericBlockSparseAttentionMetadataAicpu::ParseResidualValidBlockNums(
+    const std::vector<int64_t>& qSeqLens, const std::vector<int64_t>& kvSeqLens,
+    const std::vector<int64_t>& qStorageBlockStarts, std::vector<int64_t>& validBlockNums) const
+{
+    const auto* counts = static_cast<const int32_t*>(sparseBlockCount_->GetData());
+    validBlockNums.clear();
+    for (int64_t batchIdx = 0; batchIdx < batchSize_; ++batchIdx) {
+        const int64_t qSeqLen = qSeqLens[static_cast<size_t>(batchIdx)];
+        const int64_t kvSeqLen = kvSeqLens[static_cast<size_t>(batchIdx)];
+        const int64_t qBlockNum = generic_block_sparse_attention_metadata::CeilDivQSeq(qSeqLen, blockShapeX_);
+        for (int64_t qBlock = 0; qBlock < qBlockNum; ++qBlock) {
+            const int64_t qToken = qBlock * blockShapeX_;
+            const int64_t visibleKvEnd = maskType_ == 1 ? kvSeqLen - qSeqLen + qToken + 1 : kvSeqLen;
+            const int64_t residual =
+                residualBlockMode_ == 1 && visibleKvEnd > 0 && visibleKvEnd % blockShapeY_ != 0 ? 1 : 0;
+            for (int64_t sparseHead = 0; sparseHead < sparseHeadNum_; ++sparseHead) {
+                const int64_t offset =
+                    sparseHead * qBlockStorageNum_ + qStorageBlockStarts[static_cast<size_t>(batchIdx)] + qBlock;
+                const int64_t count = counts[offset];
+                if (count < 0 || count > blockIndexStride_) {
+                    KERNEL_LOG_ERROR("sparse_block_count[%lld]=%lld exceeds capacity %lld.", offset, count,
+                                     blockIndexStride_);
+                    return false;
+                }
+                validBlockNums.push_back(count + residual);
+            }
+        }
     }
     return true;
 }
@@ -293,6 +432,8 @@ bool GenericBlockSparseAttentionMetadataAicpu::GenerateMetadata(const std::vecto
     input.isPackedGQA = isPackedGQA_;
     input.residualBlockMode = residualBlockMode_;
     input.isConsistentTopk = isConsistentTopk_;
+    input.maskType = maskType_;
+    input.isArch22 = isArch22_ == 1;
     input.aicCoreNum = aicCoreNum_;
     input.qSeqLens = qSeqLens;
     input.validBlockNums = validBlockNums;

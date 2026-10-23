@@ -515,12 +515,16 @@ TEST_F(aclnn_generic_block_sparse_attention_ut, invalid_softmax_precision)
     auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, kBlockSize});
     char layoutQ[] = "TND";
     char layoutKv[] = "PA_BBND";
+    auto cuSeqLengthsQ = TensorDesc({kBatch + 1}, ACL_INT64, ACL_FORMAT_ND).Value(vector<int64_t>{0, kS1});
+    auto sequsedKv = TensorDesc({kBatch}, ACL_INT32, ACL_FORMAT_ND).Value(vector<int32_t>{kS2});
     auto attentionOut = TensorDesc({kT, kN1, kD}, ACL_FLOAT16, ACL_FORMAT_ND);
 
+    // Only softmaxPrecision=2 is illegal; other args mirror the normal smoke case so the
+    // attribute check returns ACLNN_ERR_PARAM_INVALID (161002), not a masked NULLPTR.
     auto ut = OP_API_UT(aclnnGenericBlockSparseAttention,
                         INPUT(query, key, value, sparseBlockIdx, sparseBlockCount, metadata, nullptr, nullptr, nullptr,
-                              nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, blockTable, blockShape, layoutQ,
-                              layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 2, -1, -1, 0, 0, 0),
+                              nullptr, nullptr, cuSeqLengthsQ, nullptr, nullptr, sequsedKv, blockTable, blockShape,
+                              layoutQ, layoutKv, kLayoutSparse, kScale, 1, 0, 0.0, 2, -1, -1, 0, 0, false),
                         OUTPUT(attentionOut, nullptr));
 
     uint64_t workspaceSize = 0;

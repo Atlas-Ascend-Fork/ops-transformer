@@ -71,6 +71,9 @@ TILING_DATA_FIELD_DEF(uint64_t, fdPartialOOffset);
 TILING_DATA_FIELD_DEF(uint32_t, residualBlockMode);
 // 0: per-Q-block sparseBlockCount; 1: every Q block uses the same topK.
 TILING_DATA_FIELD_DEF(uint32_t, isConsistentTopk);
+TILING_DATA_FIELD_DEF(uint64_t, totalQTokens);
+TILING_DATA_FIELD_DEF(uint64_t, totalKvTokens);
+TILING_DATA_FIELD_DEF(uint32_t, maskType);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttention, GenericBlockSparseAttentionTilingData)
 
@@ -139,6 +142,9 @@ private:
     int64_t softmaxLseFlag_ = 0;
     bool returnSoftmaxlse_ = false;
     bool blockTablePresent_ = false;
+    bool isPaged_ = false;
+    uint64_t totalQTokens_ = 0;
+    uint64_t totalKvTokens_ = 0;
 
     uint64_t mm1OutSize_ = 0;
     uint64_t smOnlineOutSize_ = 0;

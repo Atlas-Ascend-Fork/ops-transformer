@@ -13,6 +13,7 @@
 #include <cstring>
 #include <cstdint>
 #include <limits>
+#include <initializer_list>
 #include <string>
 #include "log/log.h"
 #include "err/ops_err.h"
@@ -83,6 +84,8 @@ constexpr int ATTR_RESIDUAL_BLOCK_MODE_INDEX = 12;
 constexpr int ATTR_IS_CONSISTENT_TOPK_INDEX = 13;
 
 constexpr int64_t GBSA_RESIDUAL_BLOCK_MODE_NONE = 0;
+constexpr int64_t GBSA_RESIDUAL_BLOCK_MODE_FORCE = 1;
+constexpr uint64_t GBSA_RESIDUAL_BLOCK_MODE_TILING_OFFSET = 1000000000ULL;
 constexpr int64_t GBSA_LAYOUT_SPARSE_KVN_TOTALQB_KB = 4;
 
 constexpr uint32_t SOC_VER_950_CODE = 4;
@@ -126,7 +129,7 @@ namespace {
 
 ge::graphStatus ParseBlockShapeAttr(gert::TilingContext* context,
                                     const gert::TypedContinuousVector<int64_t>* blockShapeArr, uint32_t& blockShapeX,
-                                    uint32_t& blockShapeY)
+                                    uint32_t& blockShapeY, bool isArch22)
 {
     if (blockShapeArr == nullptr) {
         return ge::GRAPH_SUCCESS;
@@ -144,6 +147,15 @@ ge::graphStatus ParseBlockShapeAttr(gert::TilingContext* context,
     if (data[0] <= 0 || data[1] <= 0) {
         OP_LOGE(context->GetNodeName(), "blockShape values must be positive, got [%ld, %ld].", data[0], data[1]);
         return ge::GRAPH_FAILED;
+    }
+    if (isArch22) {
+        if (data[0] != 1 || data[1] > 128 || (data[1] & (data[1] - 1)) != 0) {
+            OP_LOGE(context->GetNodeName(), "A2/A3 requires blockShapeX=1 and power-of-two blockShapeY in [1,128].");
+            return ge::GRAPH_FAILED;
+        }
+        blockShapeX = static_cast<uint32_t>(data[0]);
+        blockShapeY = static_cast<uint32_t>(data[1]);
+        return ge::GRAPH_SUCCESS;
     }
     blockShapeX = static_cast<uint32_t>(data[0]);
     blockShapeY = static_cast<uint32_t>(data[1]);
@@ -185,8 +197,8 @@ ge::graphStatus GBSATiling::ParseCapabilityAttrs(gert::TilingContext* context)
     if (maskTypePtr != nullptr) {
         maskType_ = *maskTypePtr;
     }
-    if (maskType_ != 1) {
-        OP_LOGE(context->GetNodeName(), "Unsupported maskType=%ld, only maskType=1 is supported.", maskType_);
+    if (maskType_ != 1 && !(socVer_ != SOC_VER_950_CODE && maskType_ == 0)) {
+        OP_LOGE(context->GetNodeName(), "Unsupported maskType=%ld for socVer=%u.", maskType_, socVer_);
         return ge::GRAPH_FAILED;
     }
 
@@ -214,9 +226,11 @@ ge::graphStatus GBSATiling::ParseCapabilityAttrs(gert::TilingContext* context)
     if (residualModePtr != nullptr) {
         residualBlockMode_ = *residualModePtr;
     }
-    if (residualBlockMode_ != GBSA_RESIDUAL_BLOCK_MODE_NONE) {
-        OP_LOGE(context->GetNodeName(), "Unsupported residual_block_mode=%ld, only 0 is supported.",
-                residualBlockMode_);
+    if (residualBlockMode_ != GBSA_RESIDUAL_BLOCK_MODE_NONE &&
+        !(socVer_ != SOC_VER_950_CODE && residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE &&
+          quantType_ == GBSA_QUANT_TYPE_NONE)) {
+        OP_LOGE(context->GetNodeName(), "Unsupported residual_block_mode=%ld for socVer=%u.", residualBlockMode_,
+                socVer_);
         return ge::GRAPH_FAILED;
     }
 
@@ -229,11 +243,11 @@ ge::graphStatus GBSATiling::ParseCapabilityAttrs(gert::TilingContext* context)
     if (lseFlagPtr != nullptr) {
         softmaxLseFlag_ = *lseFlagPtr;
     }
-    if (softmaxLseFlag_ != 0) {
-        OP_LOGE(context->GetNodeName(), "Unsupported returnSoftmaxlse=%ld, only 0 is supported.", softmaxLseFlag_);
+    if (softmaxLseFlag_ != 0 && !(socVer_ != SOC_VER_950_CODE && softmaxLseFlag_ == 1)) {
+        OP_LOGE(context->GetNodeName(), "Unsupported returnSoftmaxlse=%ld for socVer=%u.", softmaxLseFlag_, socVer_);
         return ge::GRAPH_FAILED;
     }
-    returnSoftmaxlse_ = false;
+    returnSoftmaxlse_ = (softmaxLseFlag_ == 1);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -278,8 +292,8 @@ ge::graphStatus GBSATiling::ParseAttrs(gert::TilingContext* context)
         scaleValue_ = *scalePtr;
     }
 
-    if (ParseBlockShapeAttr(context, attrs->GetListInt(ATTR_BLOCK_SHAPE_INDEX), blockShapeX_, blockShapeY_) !=
-        ge::GRAPH_SUCCESS) {
+    if (ParseBlockShapeAttr(context, attrs->GetListInt(ATTR_BLOCK_SHAPE_INDEX), blockShapeX_, blockShapeY_,
+                            socVer_ != SOC_VER_950_CODE) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     if (ParseCapabilityAttrs(context) != ge::GRAPH_SUCCESS) {
@@ -311,6 +325,14 @@ ge::graphStatus GBSATiling::GetInputLayout(gert::TilingContext* context)
     if (layoutQ_ != "TND") {
         OP_LOGE(context->GetNodeName(), "layoutQ only supports TND, got %s.", layoutQ_.c_str());
         return ge::GRAPH_FAILED;
+    }
+    if (socVer_ != SOC_VER_950_CODE) {
+        isPaged_ = context->GetOptionalInputShape(BLOCK_TABLE_INDEX) != nullptr;
+        if ((isPaged_ && layoutKv_ != "PA_BBND") || (!isPaged_ && layoutKv_ != "TND")) {
+            OP_LOGE(context->GetNodeName(), "A2/A3 requires PA_BBND with blockTable, or dense TND without blockTable.");
+            return ge::GRAPH_FAILED;
+        }
+        return ge::GRAPH_SUCCESS;
     }
     if (layoutKv_ != "PA_BBND") {
         OP_LOGE(context->GetNodeName(), "layoutKv only supports PA_BBND, got %s.", layoutKv_.c_str());
@@ -373,6 +395,87 @@ static ge::graphStatus ValidatePagedBbndDim0OnlyNonContig(gert::TilingContext* c
 
 ge::graphStatus GBSATiling::ParseKvCacheStride0(gert::TilingContext* context)
 {
+    if (socVer_ != SOC_VER_950_CODE) {
+        if (!isPaged_) {
+            for (const int index : {QUERY_INDEX, KEY_INDEX, VALUE_INDEX}) {
+                const auto& shape = context->GetInputShape(index)->GetStorageShape();
+                const size_t rank = layoutQ_ == "TND" ? 3U : 4U;
+                if (shape.GetDimNum() != rank) {
+                    OP_LOGE(context->GetNodeName(),
+                            "Dense Q/K/V storage shape has an invalid rank, inputIndex=%d, "
+                            "storageRank=%zu.",
+                            index, shape.GetDimNum());
+                    return ge::GRAPH_FAILED;
+                }
+                const auto* stride = context->GetRequiredInputStride(index);
+                if (stride == nullptr || stride->GetDimNum() == 0) {
+                    continue; // No explicit stride: infer a contiguous layout from storage shape.
+                }
+                if (stride->GetDimNum() != shape.GetDimNum()) {
+                    OP_LOGE(context->GetNodeName(),
+                            "Dense Q/K/V explicit stride rank must equal storage shape rank, inputIndex=%d, "
+                            "storageRank=%zu, strideRank=%zu.",
+                            index, shape.GetDimNum(), stride->GetDimNum());
+                    return ge::GRAPH_FAILED;
+                }
+                int64_t expected = 1;
+                for (int axis = static_cast<int>(rank) - 1; axis >= 0; --axis) {
+                    if (shape.GetDim(axis) > 1 && stride->GetStride(axis) != expected) {
+                        OP_LOGE(context->GetNodeName(), "Dense Q/K/V must be contiguous.");
+                        return ge::GRAPH_FAILED;
+                    }
+                    expected *= shape.GetDim(axis);
+                }
+            }
+            kStride0_ = 0;
+            vStride0_ = 0;
+            return ge::GRAPH_SUCCESS;
+        }
+
+        const uint64_t pageElems =
+            static_cast<uint64_t>(blockSize_) * static_cast<uint64_t>(kvHeads_) * static_cast<uint64_t>(embeddingSize_);
+
+        const gert::StorageShape* keyShape = context->GetInputShape(KEY_INDEX);
+        const gert::StorageShape* valueShape = context->GetInputShape(VALUE_INDEX);
+
+        if (ValidatePagedBbndDim0OnlyNonContig(context, KEY_INDEX, keyShape->GetOriginShape(), "key") !=
+            ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+        if (ValidatePagedBbndDim0OnlyNonContig(context, VALUE_INDEX, valueShape->GetOriginShape(), "value") !=
+            ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+
+        auto* keyStrides = context->GetRequiredInputStride(KEY_INDEX);
+        kStride0_ = (keyStrides != nullptr && keyStrides->GetDimNum() > 0 && keyStrides->GetStride(0) > 0) ?
+                        static_cast<uint64_t>(keyStrides->GetStride(0)) :
+                        pageElems;
+        auto* valueStrides = context->GetRequiredInputStride(VALUE_INDEX);
+        vStride0_ = (valueStrides != nullptr && valueStrides->GetDimNum() > 0 && valueStrides->GetStride(0) > 0) ?
+                        static_cast<uint64_t>(valueStrides->GetStride(0)) :
+                        pageElems;
+
+        const uint64_t rowElems = static_cast<uint64_t>(kvHeads_) * static_cast<uint64_t>(embeddingSize_);
+        if (kStride0_ < pageElems || (rowElems > 0 && (kStride0_ % rowElems) != 0)) {
+            OP_LOGE(context->GetNodeName(),
+                    "key dim0 stride (%llu) invalid for paged KV: expect >= pageElems=%llu and "
+                    "aligned to Nkv*D=%llu.",
+                    static_cast<unsigned long long>(kStride0_), static_cast<unsigned long long>(pageElems),
+                    static_cast<unsigned long long>(rowElems));
+            return ge::GRAPH_FAILED;
+        }
+        if (vStride0_ < pageElems || (rowElems > 0 && (vStride0_ % rowElems) != 0)) {
+            OP_LOGE(context->GetNodeName(),
+                    "value dim0 stride (%llu) invalid for paged KV: expect >= pageElems=%llu and "
+                    "aligned to Nkv*D=%llu.",
+                    static_cast<unsigned long long>(vStride0_), static_cast<unsigned long long>(pageElems),
+                    static_cast<unsigned long long>(rowElems));
+            return ge::GRAPH_FAILED;
+        }
+        return ge::GRAPH_SUCCESS;
+    }
+
     const uint64_t pageElems =
         static_cast<uint64_t>(blockSize_) * static_cast<uint64_t>(kvHeads_) * static_cast<uint64_t>(embeddingSize_);
 
@@ -423,6 +526,84 @@ ge::graphStatus GBSATiling::ParseKvCacheStride0(gert::TilingContext* context)
 
 ge::graphStatus GBSATiling::ParseQueryKeyShapes(gert::TilingContext* context)
 {
+    if (socVer_ != SOC_VER_950_CODE) {
+        const auto* queryShape = context->GetInputShape(QUERY_INDEX);
+        const auto* keyShape = context->GetInputShape(KEY_INDEX);
+        const auto* valueShape = context->GetInputShape(VALUE_INDEX);
+        if (queryShape == nullptr || keyShape == nullptr || valueShape == nullptr) {
+            OP_LOGE(context->GetNodeName(), "Q/K/V shapes are required.");
+            return ge::GRAPH_FAILED;
+        }
+        const auto& q = queryShape->GetStorageShape();
+        const auto& k = keyShape->GetOriginShape();
+        const auto& v = valueShape->GetOriginShape();
+        const bool isPaged = isPaged_;
+        constexpr size_t qRank = 3U;
+        constexpr size_t qHeadAxis = 1U;
+        const size_t kvRank = isPaged ? 4U : qRank;
+        constexpr size_t pageAxis = 1U;
+        const size_t headAxis = isPaged ? 2U : qHeadAxis;
+        const size_t dAxis = kvRank - 1U;
+        if (q.GetDimNum() != qRank || k.GetDimNum() != kvRank || v.GetDimNum() != kvRank) {
+            OP_LOGE(context->GetNodeName(), "Invalid Q/K/V ranks for the selected layouts.");
+            return ge::GRAPH_FAILED;
+        }
+        for (size_t axis = 0; axis < qRank; ++axis) {
+            if (q.GetDim(axis) < 0 || q.GetDim(axis) > std::numeric_limits<int32_t>::max()) {
+                OP_LOGE(context->GetNodeName(), "Q dimensions must be nonnegative and fit INT32.");
+                return ge::GRAPH_FAILED;
+            }
+        }
+        if (q.GetDim(qHeadAxis) <= 0 || q.GetDim(qRank - 1U) <= 0 || q.GetDim(qRank - 1U) > 256U) {
+            OP_LOGE(context->GetNodeName(), "Invalid Q heads, headDim, batched capacity or Q/KV batch dimensions.");
+            return ge::GRAPH_FAILED;
+        }
+        for (size_t axis = 0; axis < kvRank; ++axis) {
+            if (k.GetDim(axis) < 0 || k.GetDim(axis) > std::numeric_limits<int32_t>::max() ||
+                k.GetDim(axis) != v.GetDim(axis)) {
+                OP_LOGE(context->GetNodeName(), "K/V shapes must match and fit the supported index range.");
+                return ge::GRAPH_FAILED;
+            }
+        }
+        numHeads_ = static_cast<uint32_t>(q.GetDim(qHeadAxis));
+        embeddingSize_ = static_cast<uint32_t>(q.GetDim(qRank - 1U));
+        kvHeads_ = static_cast<uint32_t>(k.GetDim(headAxis));
+        if (kvHeads_ == 0U || numHeads_ % kvHeads_ != 0U || k.GetDim(dAxis) != embeddingSize_) {
+            OP_LOGE(context->GetNodeName(), "Invalid Q/K/V head counts or head dimensions.");
+            return ge::GRAPH_FAILED;
+        }
+        keyKvHeads_ = kvHeads_;
+        groupSize_ = numHeads_ / kvHeads_;
+        if (groupSize_ > GBSA_MAX_GROUP_SIZE) {
+            OP_LOGE(
+                context->GetNodeName(),
+                "Unsupported groupSize=%u (numHeads=%u, kvHeads=%u), currently only groupSize <= %u is supported to "
+                "avoid kernel L0C/UB overflow.",
+                groupSize_, numHeads_, kvHeads_, GBSA_MAX_GROUP_SIZE);
+            return ge::GRAPH_FAILED;
+        }
+        totalQTokens_ = static_cast<uint64_t>(q.GetDim(0));
+        totalKvTokens_ = static_cast<uint64_t>(k.GetDim(0));
+        blockSize_ = 0U;
+        if (isPaged) {
+            blockSize_ = static_cast<uint32_t>(k.GetDim(pageAxis));
+            if (blockSize_ != 128U) {
+                OP_LOGE(context->GetNodeName(), "PA page size must be 128, independently of blockShapeY.");
+                return ge::GRAPH_FAILED;
+            }
+            totalKvTokens_ *= blockSize_;
+        }
+        if (totalKvTokens_ > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / kvHeads_ / embeddingSize_) {
+            OP_LOGE(context->GetNodeName(), "KV storage size exceeds the supported address range.");
+            return ge::GRAPH_FAILED;
+        }
+        if (totalQTokens_ > static_cast<uint64_t>(std::numeric_limits<int32_t>::max()) / kvHeads_) {
+            OP_LOGE(context->GetNodeName(), "Q task capacity exceeds the metadata index range.");
+            return ge::GRAPH_FAILED;
+        }
+        return ge::GRAPH_SUCCESS;
+    }
+
     const gert::StorageShape* queryShape = context->GetInputShape(QUERY_INDEX);
     if (queryShape == nullptr) {
         OP_LOGE(context->GetNodeName(), "Query shape is nullptr.");
@@ -459,6 +640,88 @@ ge::graphStatus GBSATiling::ParseQueryKeyShapes(gert::TilingContext* context)
 
 ge::graphStatus GBSATiling::ParseSparseTensors(gert::TilingContext* context)
 {
+    if (socVer_ != SOC_VER_950_CODE) {
+        // layout_sparse_pattern=KVN_TotalQB_KB: sparseBlockIdx 3D [N_kv, totalQBlocks, topK]
+        const gert::StorageShape* sparseIdxShape = context->GetInputShape(SPARSE_BLOCK_IDX_INDEX);
+        if (sparseIdxShape == nullptr) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockIdx shape is nullptr.");
+            return ge::GRAPH_FAILED;
+        }
+
+        if (sparseIdxShape->GetStorageShape().GetDimNum() != SPARSE_IDX_DIM_NUM) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockIdx must be 3D [N_kv, totalQBlocks, topK] but got %zu dims.",
+                    sparseIdxShape->GetStorageShape().GetDimNum());
+            return ge::GRAPH_FAILED;
+        }
+        auto sparseIdxDesc = context->GetInputDesc(SPARSE_BLOCK_IDX_INDEX);
+        if (sparseIdxDesc == nullptr) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockIdx desc is nullptr.");
+            return ge::GRAPH_FAILED;
+        }
+        if (sparseIdxDesc->GetDataType() != ge::DT_INT32) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockIdx dtype must be DT_INT32, but got %d.",
+                    static_cast<int32_t>(sparseIdxDesc->GetDataType()));
+            return ge::GRAPH_FAILED;
+        }
+
+        if (sparseIdxShape->GetStorageShape().GetDim(SPARSE_IDX_DIM_KV_HEAD) != kvHeads_) {
+            OP_LOGE(context->GetNodeName(), "Sparse head count must equal the K/V head count.");
+            return ge::GRAPH_FAILED;
+        }
+        const int64_t topK = sparseIdxShape->GetStorageShape().GetDim(SPARSE_IDX_DIM_KV_BLOCK);
+        qBlockNum_ =
+            static_cast<uint32_t>(sparseIdxShape->GetStorageShape().GetDim(SPARSE_IDX_DIM_Q_BLOCK)); // totalQBlocks
+        if (sparseIdxShape->GetStorageShape().GetDim(SPARSE_IDX_DIM_Q_BLOCK) != static_cast<int64_t>(totalQTokens_) ||
+            topK <= 0) {
+            OP_LOGE(
+                context->GetNodeName(),
+                "For blockShapeX=1, totalQBlocks must equal the Q storage token capacity and topK must be positive.");
+            return ge::GRAPH_FAILED;
+        }
+        constexpr int64_t maxTopK = 512;
+        if (topK > maxTopK) {
+            OP_LOGE(context->GetNodeName(), "Unsupported topK=%lld, maximum is %lld for this configuration.", topK,
+                    maxTopK);
+            return ge::GRAPH_FAILED;
+        }
+        topK_ = static_cast<uint32_t>(topK);
+
+        // sparseBlockCount 2D: [N_kv, totalQBlocks]
+        const gert::StorageShape* sparseCountShape = context->GetInputShape(SPARSE_BLOCK_COUNT_INDEX);
+        if (sparseCountShape == nullptr) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockCount shape is nullptr.");
+            return ge::GRAPH_FAILED;
+        }
+
+        if (sparseCountShape->GetStorageShape().GetDimNum() != SPARSE_COUNT_DIM_NUM) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockCount must be 2D [N_kv, totalQBlocks] but got %zu dims.",
+                    sparseCountShape->GetStorageShape().GetDimNum());
+            return ge::GRAPH_FAILED;
+        }
+        auto sparseCountDesc = context->GetInputDesc(SPARSE_BLOCK_COUNT_INDEX);
+        if (sparseCountDesc == nullptr) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockCount desc is nullptr.");
+            return ge::GRAPH_FAILED;
+        }
+        if (sparseCountDesc->GetDataType() != ge::DT_INT32) {
+            OP_LOGE(context->GetNodeName(), "sparseBlockCount dtype must be DT_INT32, but got %d.",
+                    static_cast<int32_t>(sparseCountDesc->GetDataType()));
+            return ge::GRAPH_FAILED;
+        }
+
+        const uint32_t sparseCountKvHeads =
+            static_cast<uint32_t>(sparseCountShape->GetStorageShape().GetDim(SPARSE_COUNT_DIM_KV_HEAD));
+        const uint32_t sparseCountQBlocks =
+            static_cast<uint32_t>(sparseCountShape->GetStorageShape().GetDim(SPARSE_COUNT_DIM_Q_BLOCK));
+        if (sparseCountKvHeads != kvHeads_ || sparseCountQBlocks != qBlockNum_) {
+            OP_LOGE(context->GetNodeName(),
+                    "sparseBlockCount shape [%u,%u] must match sparseBlockIdx [N_kv,totalQBlocks]=[%u,%u].",
+                    sparseCountKvHeads, sparseCountQBlocks, kvHeads_, qBlockNum_);
+            return ge::GRAPH_FAILED;
+        }
+        return ge::GRAPH_SUCCESS;
+    }
+
     // layout_sparse_pattern=KVN_TotalQB_KB: sparseBlockIdx 3D [N_kv, totalQBlocks, topK]
     const gert::StorageShape* sparseIdxShape = context->GetInputShape(SPARSE_BLOCK_IDX_INDEX);
     if (sparseIdxShape == nullptr) {
@@ -550,6 +813,28 @@ ge::graphStatus GBSATiling::ParseSparseTensors(gert::TilingContext* context)
 
 ge::graphStatus GBSATiling::ParseBlockTable(gert::TilingContext* context)
 {
+    if (socVer_ != SOC_VER_950_CODE) {
+        maxBlocksPerBatch_ = 0U;
+        if (!isPaged_) {
+            return ge::GRAPH_SUCCESS;
+        }
+        const auto* blockTableShape = context->GetOptionalInputShape(BLOCK_TABLE_INDEX);
+        if (blockTableShape == nullptr || blockTableShape->GetStorageShape().GetDimNum() != 2U ||
+            blockTableShape->GetStorageShape().GetDim(0) != batch_ ||
+            blockTableShape->GetStorageShape().GetDim(1) <= 0 ||
+            blockTableShape->GetStorageShape().GetDim(1) > std::numeric_limits<int32_t>::max()) {
+            OP_LOGE(context->GetNodeName(), "Paged KV requires blockTable[B,maxBlocksPerBatch].");
+            return ge::GRAPH_FAILED;
+        }
+        const auto* desc = context->GetOptionalInputDesc(BLOCK_TABLE_INDEX);
+        if (desc == nullptr || desc->GetDataType() != ge::DT_INT32) {
+            OP_LOGE(context->GetNodeName(), "blockTable must be INT32.");
+            return ge::GRAPH_FAILED;
+        }
+        maxBlocksPerBatch_ = static_cast<uint32_t>(blockTableShape->GetStorageShape().GetDim(1));
+        return ge::GRAPH_SUCCESS;
+    }
+
     // blockTable is OPTIONAL in OpDef — must use GetOptionalInputShape (GetInputShape always nullptr).
     const gert::StorageShape* blockTableShape = context->GetOptionalInputShape(BLOCK_TABLE_INDEX);
     if (blockTableShape == nullptr) {
@@ -625,6 +910,7 @@ ge::graphStatus GBSATiling::ParseQkvDtype(gert::TilingContext* context)
 ge::graphStatus GBSATiling::ParseInputTensors(gert::TilingContext* context)
 {
     if (ParseQueryKeyShapes(context) != ge::GRAPH_SUCCESS || ParseSparseTensors(context) != ge::GRAPH_SUCCESS ||
+        (socVer_ != SOC_VER_950_CODE && CheckCuSeqLengths(context) != ge::GRAPH_SUCCESS) ||
         ParseBlockTable(context) != ge::GRAPH_SUCCESS || ParseQkvDtype(context) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
@@ -642,8 +928,7 @@ ge::graphStatus GBSATiling::CalculateWorkSpace(gert::TilingContext* context)
         smOnlineOutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(uint16_t) * NUM3;
         mm2OutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
         updateSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
-        uint64_t identityIdxSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
-        pipelineWorkspaceSize = mm1OutSize_ + smOnlineOutSize_ + mm2OutSize_ + updateSize_ + identityIdxSize;
+        pipelineWorkspaceSize = mm1OutSize_ + smOnlineOutSize_ + mm2OutSize_ + updateSize_;
     } else {
         pipelineWorkspaceSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
     }
@@ -668,8 +953,9 @@ ge::graphStatus GBSATiling::CalculateWorkSpace(gert::TilingContext* context)
         const uint64_t partialLseSize =
             static_cast<uint64_t>(fdPartialCapacity_) * 2U * fdLseSubStride_ * sizeof(float);
         fdPartialOOffset_ = AlignUp(fdPartialLseOffset_ + partialLseSize, GSA_FD_WORKSPACE_ALIGNMENT);
+        const uint64_t partialOStride = socVer_ == SOC_VER_950_CODE ? embeddingSize_ : AlignUp(embeddingSize_, 16U);
         const uint64_t partialOSize =
-            static_cast<uint64_t>(fdPartialCapacity_) * groupSize_ * embeddingSize_ * sizeof(float);
+            static_cast<uint64_t>(fdPartialCapacity_) * groupSize_ * partialOStride * sizeof(float);
         if (fdPartialOOffset_ > std::numeric_limits<uint64_t>::max() - partialOSize) {
             OP_LOGE(context->GetNodeName(), "Flash Decoding workspace size overflow.");
             return ge::GRAPH_FAILED;
@@ -746,6 +1032,49 @@ ge::graphStatus GBSATiling::CheckReservedOptionalInputs(gert::TilingContext* con
 
 ge::graphStatus GBSATiling::CheckCuSeqLengths(gert::TilingContext* context)
 {
+    if (socVer_ != SOC_VER_950_CODE) {
+        const bool isPaged = isPaged_;
+        // TND derives B from cuQ; batched layouts already obtained B from Q shape.
+        const int indices[] = {CU_SEQ_LENGTHS_Q_INDEX, CU_SEQ_LENGTHS_KV_INDEX, SEQUSED_Q_INDEX, SEQUSED_KV_INDEX};
+        for (const int index : indices) {
+            const bool isCu = index == CU_SEQ_LENGTHS_Q_INDEX || index == CU_SEQ_LENGTHS_KV_INDEX;
+            const bool required = (index == CU_SEQ_LENGTHS_Q_INDEX && layoutQ_ == "TND") ||
+                                  (index == CU_SEQ_LENGTHS_KV_INDEX && layoutKv_ == "TND") ||
+                                  (index == SEQUSED_Q_INDEX && layoutQ_ != "TND") ||
+                                  (index == SEQUSED_KV_INDEX && (isPaged || layoutQ_ != "TND"));
+            const auto* shape = context->GetOptionalInputShape(index);
+            if (shape == nullptr) {
+                if (required) {
+                    OP_LOGE(context->GetNodeName(), "Required sequence input %d is absent.", index);
+                    return ge::GRAPH_FAILED;
+                }
+                continue;
+            }
+            if (isPaged && index == CU_SEQ_LENGTHS_KV_INDEX) {
+                OP_LOGE(context->GetNodeName(), "cuSeqLengthsKv must be absent for paged KV.");
+                return ge::GRAPH_FAILED;
+            }
+            const auto* desc = context->GetOptionalInputDesc(index);
+            if (desc == nullptr || desc->GetDataType() != (isCu ? ge::DT_INT64 : ge::DT_INT32) ||
+                shape->GetStorageShape().GetDimNum() != 1U) {
+                OP_LOGE(context->GetNodeName(), "Invalid sequence input %d dtype or shape.", index);
+                return ge::GRAPH_FAILED;
+            }
+            const int64_t length = shape->GetStorageShape().GetDim(0);
+            if (index == CU_SEQ_LENGTHS_Q_INDEX && layoutQ_ == "TND") {
+                if (length < 1 || length - 1 > std::numeric_limits<int32_t>::max()) {
+                    OP_LOGE(context->GetNodeName(), "TND Q requires cuSeqLengthsQ[B+1] with B within INT32.");
+                    return ge::GRAPH_FAILED;
+                }
+                batch_ = static_cast<uint32_t>(length - 1);
+            } else if (length != static_cast<int64_t>(batch_) + (isCu ? 1 : 0)) {
+                OP_LOGE(context->GetNodeName(), "Invalid sequence input %d length for batch=%u.", index, batch_);
+                return ge::GRAPH_FAILED;
+            }
+        }
+        return ge::GRAPH_SUCCESS;
+    }
+
     // layoutQ is fixed to TND and layoutKv is fixed to PA_BBND (validated in GetInputLayout).
     // Q uses cuSeqLengthsQ; PA KV uses sequsedKv (FA-style: cuSeqLengthsKv only for TND).
     if (context->GetOptionalInputTensor(CU_SEQ_LENGTHS_Q_INDEX) == nullptr) {
@@ -880,6 +1209,11 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
         OP_LOGE(context->GetNodeName(), "returnSoftmaxlse=1 is not supported for FP8 full-quant path.");
         return ge::GRAPH_FAILED;
     }
+    if (socVer_ != SOC_VER_950_CODE && returnSoftmaxlse_ &&
+        (!isPaged_ || residualBlockMode_ != GBSA_RESIDUAL_BLOCK_MODE_NONE)) {
+        OP_LOGE(context->GetNodeName(), "A2/A3 LSE requires PA_BBND and residual_block_mode=0.");
+        return ge::GRAPH_FAILED;
+    }
     fdStaticEnabled_ = topK_ >= 12U;
     return ge::GRAPH_SUCCESS;
 }
@@ -913,10 +1247,7 @@ uint64_t GBSATiling::GenerateTilingKey()
         }
     }
 
-    // KV layout: PA_BBND = 70
-    tilingKey += 70000000ULL;
-    // Paged cache required on current path
-    tilingKey += 1000000ULL;
+    tilingKey += !isArch35 && !isPaged_ ? 30000000ULL : 71000000ULL;
 
     // Softmax precision: only discriminates kernels on arch22
     if (!isArch35 && softmaxPrecision_ == 1) {
@@ -931,6 +1262,9 @@ uint64_t GBSATiling::GenerateTilingKey()
 
     if (returnSoftmaxlse_) {
         tilingKey += GBSA_LSE_OUT_OFFSET;
+    }
+    if (!isArch35 && residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE) {
+        tilingKey += GBSA_RESIDUAL_BLOCK_MODE_TILING_OFFSET;
     }
     return tilingKey;
 }
@@ -960,7 +1294,7 @@ ge::graphStatus GBSATiling::FillTilingData(gert::TilingContext* context)
 
     // BaseTileInfo
     uint32_t qBaseTile = (embeddingSize_ <= 128) ? 128 : 64;
-    uint32_t kvBaseTile = blockShapeY_;
+    uint32_t kvBaseTile = socVer_ == SOC_VER_950_CODE ? blockShapeY_ : 256U;
     tilingData_->set_qBaseTile(qBaseTile);
     tilingData_->set_kvBaseTile(kvBaseTile);
 
@@ -988,6 +1322,9 @@ ge::graphStatus GBSATiling::FillTilingData(gert::TilingContext* context)
     tilingData_->set_fdPartialOOffset(fdPartialOOffset_);
     tilingData_->set_residualBlockMode(static_cast<uint32_t>(residualBlockMode_));
     tilingData_->set_isConsistentTopk(static_cast<uint32_t>(isConsistentTopk_ ? 1 : 0));
+    tilingData_->set_totalQTokens(totalQTokens_);
+    tilingData_->set_totalKvTokens(totalKvTokens_);
+    tilingData_->set_maskType(static_cast<uint32_t>(maskType_));
 
     return ge::GRAPH_SUCCESS;
 }
