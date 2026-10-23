@@ -31,11 +31,11 @@ static constexpr uint32_t MX_FP4_PTG_PCG_SCALE_PARAM = 32; // mxfp4场景随路�
 static constexpr uint32_t HI_FP4_PTG_PCG_SCALE_PARAM = 64; // hifp4场景随路伪量化中64个元素共用一个scale
 
 struct MMParam {
-    uint32_t singleM;
-    uint32_t singleN;
-    uint32_t singleK;
-    bool isLeftTranspose;
-    bool isRightTranspose;
+    uint32_t singleM{};
+    uint32_t singleN{};
+    uint32_t singleK{};
+    bool isLeftTranspose{};
+    bool isRightTranspose{};
     bool cmatrixInitVal = true;
     bool isOutKFisrt = true; // 默认值为true， true：在L1切K轴的场景中，表示首轮K
     uint32_t unitFlag = 0;   // 0：disable: 不配置unitFlag

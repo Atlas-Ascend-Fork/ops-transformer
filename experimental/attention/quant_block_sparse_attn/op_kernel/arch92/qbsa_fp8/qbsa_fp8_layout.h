@@ -43,10 +43,10 @@ constexpr uint32_t QBSA_V121_SPARSE_BLOCKS_PER_TASK = 4U;
 
 namespace BaseApi {
 struct CubeCoordInfo {
-    uint32_t curBIdx;
-    uint32_t s1Coord;
-    uint32_t s2Coord;
-    int32_t sparseBlockIdx[QBSA_V121_SPARSE_BLOCKS_PER_TASK];
+    uint32_t curBIdx{};
+    uint32_t s1Coord{};
+    uint32_t s2Coord{};
+    int32_t sparseBlockIdx[QBSA_V121_SPARSE_BLOCKS_PER_TASK]{};
 };
 
 } // namespace BaseApi

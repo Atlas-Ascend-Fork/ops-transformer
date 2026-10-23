@@ -257,17 +257,18 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::InitLocalBuffer()
     l1KBuffers.Init((*l1BufferManagerPtr), mm1RightSize);
     l1VBuffers.Init((*l1BufferManagerPtr), mm2RightSize);
 
-    // L0A B C 当前写死，能否通过基础api获取
-    l0aBufferManager.Init(tPipe, 65536);  // 64 * 1024
-    l0bBufferManager.Init(tPipe, 65536);  // 64 * 1024
-    l0cBufferManager.Init(tPipe, 262144); // 256 * 1024
-    // L0A B C当前写死，要改成通过计算获取
-    if (IsSameType<INPUT_T, float>::value) {
-        mmL0ABuffers.Init(l0aBufferManager, 64 * 1024);
-        mmL0BBuffers.Init(l0bBufferManager, 64 * 1024);
+    constexpr uint32_t l0ABCapacityBytes = 64U * KB_TO_BYTES;
+    constexpr uint32_t l0CCapacityBytes = 256U * KB_TO_BYTES;
+    constexpr uint32_t l0ABHalfCapacityBytes = 32U * KB_TO_BYTES;
+    l0aBufferManager.Init(tPipe, l0ABCapacityBytes);
+    l0bBufferManager.Init(tPipe, l0ABCapacityBytes);
+    l0cBufferManager.Init(tPipe, l0CCapacityBytes);
+    if constexpr (IsSameType<INPUT_T, float>::value) {
+        mmL0ABuffers.Init(l0aBufferManager, l0ABCapacityBytes);
+        mmL0BBuffers.Init(l0bBufferManager, l0ABCapacityBytes);
     } else {
-        mmL0ABuffers.Init(l0aBufferManager, 32 * 1024);
-        mmL0BBuffers.Init(l0bBufferManager, 32 * 1024);
+        mmL0ABuffers.Init(l0aBufferManager, l0ABHalfCapacityBytes);
+        mmL0BBuffers.Init(l0bBufferManager, l0ABHalfCapacityBytes);
     }
 
     mmL0CBuffers.Init(l0cBufferManager, (L0C_SIZE / NUM_4) * KB_TO_BYTES);
@@ -343,7 +344,7 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
             const uint32_t firstSlot = roundIdx * 2U;
             const uint32_t roundRealSize = static_cast<uint32_t>(runInfo.s2SparseBlkRealSize[firstSlot] +
                                                                  runInfo.s2SparseBlkRealSize[firstSlot + 1U]);
-            if (roundRealSize == 0U) {
+            if (unlikely(roundRealSize == 0U)) {
                 continue;
             }
             // MatmulK consumes V as two independent K=256 tiles. Keep each round in
@@ -353,7 +354,7 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
             LocalTensor<INPUT_T> roundTensor = mm2BTensor[roundIdx * roundBufferStride];
             uint32_t copiedRows = 0U;
             for (uint32_t slot = firstSlot; slot < firstSlot + 2U; ++slot) {
-                if (runInfo.sparseBlkIdx[slot] < 0 || runInfo.s2SparseBlkRealSize[slot] == 0) {
+                if (unlikely(runInfo.sparseBlkIdx[slot] < 0 || runInfo.s2SparseBlkRealSize[slot] == 0)) {
                     continue;
                 }
                 startPos.s2Offset = runInfo.sparseBlkIdx[slot] * constInfo.kvSparseBlockSize;

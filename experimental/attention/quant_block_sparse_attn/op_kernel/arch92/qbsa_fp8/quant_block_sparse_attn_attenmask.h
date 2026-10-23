@@ -43,15 +43,15 @@ enum class AttenMaskComputeMode {
 };
 
 struct AttenMaskInfo {
-    int64_t preTokens;
-    int64_t nextTokens;
-    uint8_t compressMode;
-    int64_t attenMaskS2Size;
-    int64_t bandIndex;
-    GM_ADDR prefixNAddr;
-    int64_t attenMaskOffsetPre;
+    int64_t preTokens{};
+    int64_t nextTokens{};
+    uint8_t compressMode{};
+    int64_t attenMaskS2Size{};
+    int64_t bandIndex{};
+    GM_ADDR prefixNAddr{};
+    int64_t attenMaskOffsetPre{};
     AttenMaskComputeMode computeMode = AttenMaskComputeMode::NORMAL_MODE;
-    int64_t attenMaskS1Offset;
+    int64_t attenMaskS1Offset{};
 };
 
 __aicore__ inline void BoolCopyInRegbase(const LocalTensor<uint8_t>& dstTensor, GlobalTensor<uint8_t>& srcTensor,
@@ -189,7 +189,7 @@ __aicore__ inline void MergeBandModeMask(LocalTensor<uint8_t>& maskPre, LocalTen
     uint64_t maskNextUb = maskNext.GetPhyAddr();
     uint16_t rowNumEachLoop;
     uint64_t rowNumTimesEachLoop;
-    if (s2BaseSize > regBytes) {
+    if (likely(s2BaseSize > regBytes)) {
         rowNumEachLoop = 1;
         rowNumTimesEachLoop = static_cast<uint16_t>(s2BaseSize) / regBytes;
     } else {
@@ -225,7 +225,7 @@ __aicore__ inline void MergePrefixModeMask(LocalTensor<uint8_t>& maskPre, LocalT
     uint64_t maskNextUb = maskNext.GetPhyAddr();
     uint16_t rowNumEachLoop;
     uint64_t rowNumTimesEachLoop;
-    if (s2BaseSize > regBytes) {
+    if (likely(s2BaseSize > regBytes)) {
         rowNumEachLoop = 1;
         rowNumTimesEachLoop = static_cast<uint16_t>(s2BaseSize) / regBytes;
     } else {
@@ -326,7 +326,7 @@ __aicore__ inline void AttenMaskCopyInDnFun(LocalTensor<uint8_t> attenMaskUb, Gl
         int64_t maskOffset = 0;
         int64_t sparseBlkIdx = runInfo.sparseBlkIdx[sparseSlot];
         uint32_t s2Len = runInfo.s2SparseBlkRealSize[sparseSlot];
-        if (sparseBlkIdx == -1) {
+        if (unlikely(sparseBlkIdx == -1)) {
             // 丢弃块：s2Len(=s2SparseBlkRealSize)为0，必须按整块宽度(kvSparseBlockSize)清零该段，
             // 否则该段 mask 未初始化，vf 读到未初始化 mask + cube 未写过的 stale/NaN bmm1 区域 → NaN/随时序漂移。
             Duplicate<uint8_t>(attenMaskUb[offset], 0, constInfo.kvSparseBlockSize * constInfo.s1BaseSize);
