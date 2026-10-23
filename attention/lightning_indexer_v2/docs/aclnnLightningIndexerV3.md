@@ -107,7 +107,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>不支持空tensor。</td>
     <td>BFLOAT16、FLOAT16</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>x</td>
     </tr>
     <tr>
@@ -118,7 +118,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td><ul><li>不支持空tensor。</li><li>block_num为PageAttention时block总数，block_size为一个block的token数。</li></ul></td>
     <td>BFLOAT16、FLOAT16</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>✓</td>
     </tr>
     <tr>
@@ -129,7 +129,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>不支持空tensor。</td>
     <td>FLOAT</td>
     <td>ND</td>
-    <td>2/3</td>
+    <td>2-3</td>
     <td>x</td>
     </tr>
     <tr>
@@ -200,7 +200,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td><ul><li>值必须大于等于0。</li><li>加上偏移后，topK index不能超过int32最大值。</li><li>candidate模式下偏移不叠加到candidateBlockIndices。</li></ul></td>
     <td>INT32</td>
     <td>ND</td>
-    <td>2/3</td>
+    <td>2-3</td>
     <td>x</td>
     </tr>
     <tr>
@@ -312,7 +312,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>不支持空tensor。</td>
     <td>INT32</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>x</td>
     </tr>
     <tr>
@@ -323,7 +323,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td>returnValue为1时输出对应值；为0时输出shape为(0,)的空tensor。</td>
     <td>FLOAT</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>x</td>
     </tr>
     <tr>
@@ -334,7 +334,7 @@ aclnnStatus aclnnLightningIndexerV3(
     <td><ul><li>candidateTopkBlocks开启时必须传入实际tensor。</li><li>candidateTopkBlocks关闭时可传nullptr（接口内部以空tensor占位）。</li><li>块号为batch内相对块号（压缩K空间），无效槽位填-1，不叠加outputIdxOffset；消费侧按集合消费，不依赖槽位顺序。</li></ul></td>
     <td>INT32</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>x</td>
     </tr>
     <tr>

@@ -109,7 +109,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td>不支持空tensor。</td>
     <td>BFLOAT16、FLOAT16</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>x</td>
     </tr>
     <tr>
@@ -120,7 +120,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td><ul><li>不支持空tensor。</li><li>block_num为PageAttention时block总数，block_size为一个block的token数。</li></ul></td>
     <td>BFLOAT16、FLOAT16</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>✓</td>
     </tr>
     <tr>
@@ -131,7 +131,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td>不支持空tensor。</td>
     <td>FLOAT</td>
     <td>ND</td>
-    <td>2/3</td>
+    <td>2-3</td>
     <td>x</td>
     </tr>
     <tr>
@@ -202,7 +202,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td><ul><li>值必须大于等于0。</li><li>加上偏移后，topK index不能超过int32最大值</li></ul></td>
     <td>INT32</td>
     <td>ND</td>
-    <td>2/3</td>
+    <td>2-3</td>
     <td>x</td>
     </tr>
     <tr>
@@ -294,7 +294,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td>不支持空tensor。</td>
     <td>INT32</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>x</td>
     </tr>
     <tr>
@@ -305,7 +305,7 @@ aclnnStatus aclnnLightningIndexerV2(
     <td>returnValue为1时输出对应值；为0时输出shape为(0,)的空tensor。</td>
     <td>FLOAT</td>
     <td>ND</td>
-    <td>3/4</td>
+    <td>3-4</td>
     <td>x</td>
     </tr>
     <tr>
