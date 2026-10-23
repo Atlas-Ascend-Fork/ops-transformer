@@ -133,16 +133,19 @@ transformer-2@ops-transformer:
                 - ops/ops-transformer/attention/lightning_indexer/op_host/
                 - ops/ops-transformer/attention/lightning_indexer/op_kernel/arch35/
                 - ops/ops-transformer/attention/sparse_flash_attention/op_host/
-                - ops/ops-transformer/attention/sparse_flash_attention/op_kernel/
+                - ops/ops-transformer/attention/sparse_flash_attention/op_kernel/arch35/
                 - ops/ops-transformer/attention/quant_lightning_indexer/op_host/
                 - ops/ops-transformer/attention/quant_lightning_indexer/op_kernel/arch35/
                 - ops/ops-transformer/attention/kv_quant_sparse_flash_attention/op_host/
-                - ops/ops-transformer/attention/kv_quant_sparse_flash_attention/op_kernel/
-                - ops/ops-transformer/attention/mixed_quant_flash_attn/op_host/
-                - ops/ops-transformer/attention/mixed_quant_flash_attn/op_kernel/
-                - ops/ops-transformer/attention/mixed_quant_flash_attn/op_api/
-                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/
-                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_kernel/
+                - ops/ops-transformer/attention/kv_quant_sparse_flash_attention/op_kernel/arch35/
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/arch35/
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/checkers/
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/mixed_quant_sparse_flash_mla_check.h
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/mixed_quant_sparse_flash_mla_def.cpp
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/mixed_quant_sparse_flash_mla_infershape.cpp
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/mixed_quant_sparse_flash_mla_tiling.cpp
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_host/mixed_quant_sparse_flash_mla_tiling.h
+                - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_kernel/arch35
                 - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/op_api/
                 - ops/ops-transformer/attention/sparse_flash_mla/op_host/
                 - ops/ops-transformer/attention/sparse_flash_mla/op_kernel/arch35/
