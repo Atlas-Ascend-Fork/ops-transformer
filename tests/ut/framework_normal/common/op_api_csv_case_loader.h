@@ -42,7 +42,9 @@ const std::unordered_map<std::string, aclDataType> ACL_DTYPE{{"UNDEFINED", ACL_D
                                                              {"FLOAT6_E3M2", ACL_FLOAT6_E3M2},
                                                              {"FLOAT6_E2M3", ACL_FLOAT6_E2M3},
                                                              {"FLOAT4_E2M1", ACL_FLOAT4_E2M1},
-                                                             {"FLOAT4_E1M2", ACL_FLOAT4_E1M2}};
+                                                             {"FLOAT4_E1M2", ACL_FLOAT4_E1M2},
+                                                             {"HIFLOAT4", ACL_HIFLOAT4},
+                                                             {"HIF4_SCALE", ACL_HIFLOAT4_SCALE}};
 
 const std::unordered_map<std::string, aclFormat> ACL_FORMAT{{"UNDEFINED", ACL_FORMAT_UNDEFINED},
                                                             {"NCHW", ACL_FORMAT_NCHW},
@@ -72,7 +74,8 @@ const std::unordered_map<std::string, op::SocVersion> SOC_VERSION{
     {"Ascend310P", op::SocVersion::ASCEND310P},     {"Ascend310B", op::SocVersion::ASCEND310B},
     {"Ascend310C", op::SocVersion::ASCEND310C},     {"Ascend610LITE", op::SocVersion::ASCEND610LITE},
     {"KirinX90", op::SocVersion::KIRINX90},         {"Kirin9030", op::SocVersion::KIRIN9030},
-    {"Ascend5162A", op::SocVersion::ASCEND5162A},   {"DAV_3510", op::SocVersion::ASCEND950}}; // DAV_3510为arch串
+    {"Ascend5162A", op::SocVersion::ASCEND5162A},   {"DAV_3510", op::SocVersion::ASCEND950},
+    {"DAV_9201", op::SocVersion::ASCEND960DT}}; // DAV_3510/DAV_9201为arch串
 
 const std::unordered_map<std::string, aclnnStatus> ACR_RET{{"SUCCESS", ACLNN_SUCCESS},
                                                            {"PARAM_NULLPTR", ACLNN_ERR_PARAM_NULLPTR},

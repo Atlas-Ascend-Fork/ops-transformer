@@ -62,6 +62,9 @@ constexpr uint64_t GetX1HcclDataType()
         return AscendC::HCCL_DATA_TYPE_FP8E5M2;
     } else if constexpr (AscendC::IsSameType<T, fp4x2_e2m1_t>::value) {
         return AscendC::HCCL_DATA_TYPE_UINT8;
+    } else if constexpr (AscendC::IsSameType<T, hifloat4x2_t>::value) {
+        // HiF4 与 MXFP4 打包方式一致: 2 个 4-bit 元素打包为 1 字节, 按 UINT8 传输
+        return AscendC::HCCL_DATA_TYPE_UINT8;
     } else {
         return AscendC::HCCL_DATA_TYPE_FP8E4M3;
     }
@@ -133,7 +136,7 @@ struct HcommCommWaitPolicy {
 };
 
 template <typename X1Type, typename X2Type, typename YType, typename CommDataTypeX1,
-          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4,
+          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB,
           bool EnableHcommAllToAllOut>
 class AllToAllMxQuantMatmulHcommImpl {
 public:
@@ -147,7 +150,9 @@ public:
 
     // Layout 定义
     using LayoutA = asc::te::nd_ext_layout_ptn;
-    using LayoutB = asc::te::dn_ext_layout_ptn;
+    // B 矩阵布局: TransB=true 为转置 (N, K), false 为非转置 (K, N);
+    // MX 场景恒为转置, HiF4 场景转置/非转置均支持
+    using LayoutB = AscendC::Std::conditional_t<TransB, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
     using LayoutC = asc::te::nd_ext_layout_ptn;
     using LayoutBias = asc::te::nd_ext_layout_ptn;
     using BiasType = float;
@@ -171,6 +176,8 @@ public:
     using BlockSchedulerParams = typename QuantMatmulKernelImpl::BlockSchedulerParams;
     using QBMMTiling = typename QuantMatmulKernelImpl::QBMMTiling;
     using MatmulMode = typename QuantMatmulKernelImpl::MatmulMode;
+    using ScaleType = typename QuantMatmulKernelImpl::ScaleType;
+    static constexpr bool isHiF4 = BlockMmad::IS_HIF4;
 
     QuantMatmulKernelImpl quantMatmulKernelImpl_;
     HcommCommState<ServerType> commState_;
@@ -194,6 +201,8 @@ private:
     GM_ADDR permuteOutGM_{nullptr};
     AscendC::TPipe* pipe_{nullptr};
 
+    // Scale 通信数据类型: MX 为 E8M0; HiF4 的 hif4_scale 为完整 4 字节元数据(E6M2+E1_8+E1_16),
+    // HCCL 未提供专用类型, E8M0和hif4_scale 均按 FP8E8M0 传输, 实际传输时乘数据类型
     static constexpr uint64_t mxScaleHcclDataType_ = AscendC::HCCL_DATA_TYPE_FP8E8M0;
     static constexpr uint64_t x1HcclDataType_ = GetX1HcclDataType<X1Type>();
     uint32_t rankId_{0};
@@ -201,8 +210,6 @@ private:
     uint64_t splitAxisSize_{0};
     bool isBias_{false};
 
-    static constexpr uint64_t MXFP_GROUP_SIZE = 64UL;
-    static constexpr uint64_t MXFP_MULTI_BASE_SIZE = 2UL;
     static constexpr uint64_t MXFP_DATA_NUM_PER_BYTE = 2UL;
     static constexpr uint64_t ALIGN_NUM = 512UL;
 
@@ -214,13 +221,14 @@ private:
 };
 
 template <typename X1Type, typename X2Type, typename YType, typename CommDataTypeX1,
-          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4,
+          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB,
           bool EnableHcommAllToAllOut>
 __aicore__ inline void
 AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMatmulTilingDataType, ServerType, IsMxFp4,
-                               EnableHcommAllToAllOut>::Init(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias, GM_ADDR y,
-                                                             GM_ADDR all2all_out, GM_ADDR x1_scale, GM_ADDR x2_scale,
-                                                             GM_ADDR workspaceGM, AscendC::TPipe* pipe)
+                               TransB, EnableHcommAllToAllOut>::Init(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias, GM_ADDR y,
+                                                                     GM_ADDR all2all_out, GM_ADDR x1_scale,
+                                                                     GM_ADDR x2_scale, GM_ADDR workspaceGM,
+                                                                     AscendC::TPipe* pipe)
 {
     pipe_ = pipe;
     auto&& commTiling = tilingData_->commTilingData;
@@ -242,10 +250,10 @@ AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMa
     workspaceGM_ = workspaceGM;
     // The generated arch35 entry already passes user workspace, after the system reservation.
     commX1ScaleGM1_ = workspaceGM;
-    // Host validates per-rank K % 64 == 0, so grouping total K gives the same scale length
-    // as summing per-rank scale counts. Keep the existing 512-byte-aligned layout.
-    uint64_t x1ScaleLen = Blaze::Gemm::CeilDiv(commTiling.nonSplitAxisSize, MXFP_GROUP_SIZE) * MXFP_MULTI_BASE_SIZE *
-                          static_cast<uint64_t>(splitAxisSize_) * sizeof(AscendC::fp8_e8m0_t);
+    // scale 通信空间(字节): MX 为 组数*2(E8M0)*M 行; HiF4 为 组数*4(hif4_scale)*M 行
+    // 每 64 元素组 scale 单元数与单元宽度统一由 MxScaleKLen 泛化
+    uint64_t x1ScaleLen = static_cast<uint64_t>(Blaze::Gemm::MxScaleKLen<X1Type>(commTiling.nonSplitAxisSize)) *
+                          static_cast<uint64_t>(splitAxisSize_) * static_cast<uint64_t>(sizeof(ScaleType));
     x1ScaleLen = Blaze::Gemm::CeilDiv(x1ScaleLen, ALIGN_NUM) * ALIGN_NUM;
     if constexpr (EnableHcommAllToAllOut) {
         // AIC keeps reading raw communication data while AIV writes a separate output.
@@ -273,19 +281,21 @@ AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMa
 
         uint64_t originalRankForComm = commTiling.nonSplitAxisSize / rankDim_;
         uint64_t rankForComm = originalRankForComm;
-        if constexpr (IsMxFp4) {
+        if constexpr (IsMxFp4 || isHiF4) {
+            // 4-bit 打包(MXFP4/HiF4): 2 个元素共享 1 字节, 通信字节数为元素数的一半
             rankForComm = Blaze::Gemm::CeilDiv(rankForComm, MXFP_DATA_NUM_PER_BYTE);
         }
-        uint32_t scaleKPerRank =
-            static_cast<uint32_t>(Blaze::Gemm::CeilDiv(originalRankForComm, MXFP_GROUP_SIZE) * MXFP_MULTI_BASE_SIZE);
+        // scale 每 rank 通信单元数(按 scale 元素计): MX 为 E8M0 单元(Ka/64*2), HiF4 为 UINT32 单元(Ka/64)
+        uint32_t scaleKPerRank = static_cast<uint32_t>(Blaze::Gemm::MxScaleKLen<X1Type>(originalRankForComm));
 
         uint64_t dataStrideCount = static_cast<uint64_t>(splitAxisSize_) * rankForComm;
         uint64_t scaleSendCount = static_cast<uint64_t>(splitAxisSize_) * scaleKPerRank;
         opStateDump_.DoDump(DUMP_FIELD_STEP, POS_COMM_BEFORE, static_cast<uint8_t>(Utils::RT_PHASE_COMM_PREPARE));
         // DoDump does not count the scale commit.
         commState_.scaleHandle_ = commState_.hccl_.template AlltoAll<true>(
-            x1Scale_, commX1ScaleGM1_, scaleSendCount, static_cast<AscendC::HcclDataType>(mxScaleHcclDataType_),
-            scaleSendCount, 1);
+            x1Scale_, commX1ScaleGM1_, scaleSendCount * static_cast<uint64_t>(sizeof(ScaleType)),
+            static_cast<AscendC::HcclDataType>(mxScaleHcclDataType_),
+            scaleSendCount * static_cast<uint64_t>(sizeof(ScaleType)), 1);
 
         if (commTiling.splitAxisTileCnt > 0) {
             uint64_t headSendCount = static_cast<uint64_t>(commTiling.splitAxisTileSize) * rankForComm;
@@ -310,11 +320,11 @@ AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMa
 }
 
 template <typename X1Type, typename X2Type, typename YType, typename CommDataTypeX1,
-          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4,
+          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB,
           bool EnableHcommAllToAllOut>
 __aicore__ inline void
 AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMatmulTilingDataType, ServerType, IsMxFp4,
-                               EnableHcommAllToAllOut>::Run()
+                               TransB, EnableHcommAllToAllOut>::Run()
 {
     if constexpr (EnableHcommAllToAllOut) {
         if ASCEND_IS_AIC {
@@ -349,21 +359,25 @@ AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMa
 }
 
 template <typename X1Type, typename X2Type, typename YType, typename CommDataTypeX1,
-          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4,
+          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB,
           bool EnableHcommAllToAllOut>
 __aicore__ inline void
 AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMatmulTilingDataType, ServerType, IsMxFp4,
-                               EnableHcommAllToAllOut>::WaitOutputTiles()
+                               TransB, EnableHcommAllToAllOut>::WaitOutputTiles()
 {
     auto&& commTiling = tilingData_->commTilingData;
     const uint64_t elementsPerRank = commTiling.nonSplitAxisSize / rankDim_;
-    const uint64_t bytesPerRank = IsMxFp4 ? elementsPerRank / MXFP_DATA_NUM_PER_BYTE : elementsPerRank;
-    // MIX_AIC_1_2: AIV GetBlockIdx is already in [0, 2 * GetBlockNum()).
+    // 4-bit 打包场景(MXFP4/HiF4): 2 个元素共享 1 字节, 通信字节数为元素数的一半,
+    // 与 Init 中 rankForComm、tiling 中 commLen 的 (IsMxFp4 || isHiF4) 口径保持一致
+    const uint64_t bytesPerRank = (IsMxFp4 || isHiF4) ? elementsPerRank / MXFP_DATA_NUM_PER_BYTE : elementsPerRank;
     // This method is called only by AIV in the output specialization; AIC allocates no UB here.
     AllToAllPermute permute;
+    // WaitOutputTiles() 在 Run() 中已被 ASCEND_IS_AIV 守护。 GetTaskRatio() 在950下配置CV核 MIX_AIC_1_2
+    // 获得2，在960下配置CV核 MIX_AIC_1_1 获得1。
+    const uint32_t aivWorkerCount =
+        static_cast<uint32_t>(AscendC::GetBlockNum()) * static_cast<uint32_t>(AscendC::GetTaskRatio());
     permute.Init(commOutGM_, permuteOutGM_, splitAxisSize_, rankDim_, bytesPerRank,
-                 static_cast<uint32_t>(AscendC::GetBlockIdx()), static_cast<uint32_t>(2 * AscendC::GetBlockNum()),
-                 pipe_);
+                 static_cast<uint32_t>(AscendC::GetBlockIdx()), aivWorkerCount, pipe_);
     for (uint32_t tileIdx = 0; tileIdx < commState_.totalTileCnt_; ++tileIdx) {
         AscendC::CrossCoreWaitFlag(HCOMM_DATA_READY_FLAG);
         const bool isHead = tileIdx < commTiling.splitAxisTileCnt;
@@ -383,11 +397,11 @@ AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMa
 }
 
 template <typename X1Type, typename X2Type, typename YType, typename CommDataTypeX1,
-          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4,
+          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB,
           bool EnableHcommAllToAllOut>
 __aicore__ inline void
 AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMatmulTilingDataType, ServerType, IsMxFp4,
-                               EnableHcommAllToAllOut>::SetupParams(Params& out, MatmulMode matmulMode)
+                               TransB, EnableHcommAllToAllOut>::SetupParams(Params& out, MatmulMode matmulMode)
 {
     auto&& commTiling = tilingData_->commTilingData;
     const auto& mmTile = tilingData_->tileQbmmTilingData;
@@ -432,11 +446,11 @@ AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMa
 }
 
 template <typename X1Type, typename X2Type, typename YType, typename CommDataTypeX1,
-          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4,
+          typename AlltoAllMatmulTilingDataType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB,
           bool EnableHcommAllToAllOut>
 __aicore__ inline void
 AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMatmulTilingDataType, ServerType, IsMxFp4,
-                               EnableHcommAllToAllOut>::MatmulProcess(MatmulMode matmulMode)
+                               TransB, EnableHcommAllToAllOut>::MatmulProcess(MatmulMode matmulMode)
 {
     Params params;
     SetupParams(params, matmulMode);

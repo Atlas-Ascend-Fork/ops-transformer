@@ -28,10 +28,8 @@
 #include "allto_all_kc_quant_matmul_pipeline.h"
 #include "allto_all_mx_quant_matmul_arch35.h"
 #include "allto_all_mx_quant_matmul_pipeline.h"
-#if ALLTO_ALL_MATMUL_ENABLE_APACE
 #include "../../../common/op_kernel/apace/kernel/fusions/all_to_all_quant_matmul/all_to_all_matmul_tiling_data.h"
 #include "../../../common/op_kernel/apace/kernel/fusions/all_to_all_quant_matmul/all_to_all_mx_quant_matmul_hcomm_impl.h"
-#endif
 
 using AscendC::HcclServerType;
 using AscendC::TPipe;
@@ -160,25 +158,15 @@ __global__ __aicore__ void allto_all_matmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias
     REGISTER_TILING_DEFAULT(AlltoAllQuantMatmulTilingData); // 按当前最大的结构体申请内存
 #if (((ORIG_DTYPE_X1 == DT_FLOAT8_E4M3FN) || (ORIG_DTYPE_X1 == DT_FLOAT8_E5M2)) && \
      ((ORIG_DTYPE_X2 == DT_FLOAT8_E4M3FN) || (ORIG_DTYPE_X2 == DT_FLOAT8_E5M2)))
-#if ALLTO_ALL_MATMUL_ENABLE_APACE
     if constexpr (USING_APACE_IMPL) {
         GET_TILING_DATA_WITH_STRUCT(Apace::hcommAllToAllMatmulTilingData, tilingData, tilingGM);
-        if constexpr (ENABLE_HCOMM_ALL_TO_ALL_OUT) {
-            Apace::AllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_X1,
-                                                  Apace::hcommAllToAllMatmulTilingData, hcclServerType, false, true>
-                op(&tilingData);
-            op.Init(x1, x2, bias, y, all2all_out, x1_scale, x2_scale, workspaceGM, &pipe);
-            op.Run();
-        } else {
-            Apace::AllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_X1,
-                                                  Apace::hcommAllToAllMatmulTilingData, hcclServerType, false, false>
-                op(&tilingData);
-            op.Init(x1, x2, bias, y, all2all_out, x1_scale, x2_scale, workspaceGM, &pipe);
-            op.Run();
-        }
-    } else
-#endif
-    {
+        Apace::AllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_X1,
+                                              Apace::hcommAllToAllMatmulTilingData, hcclServerType, false, X2TRANSPOSE,
+                                              ENABLE_HCOMM_ALL_TO_ALL_OUT>
+            op(&tilingData);
+        op.Init(x1, x2, bias, y, all2all_out, x1_scale, x2_scale, workspaceGM, &pipe);
+        op.Run();
+    } else {
         GET_TILING_DATA_WITH_STRUCT(AlltoAllQuantMatmulTilingData, tilingData, tilingGM);
         AscendC::HcclDataType hcclDataType = AscendC::HCCL_DATA_TYPE_FP8E4M3;
         if constexpr (AscendC::IsSameType<DTYPE_X1, float8_e5m2_t>::value) {
@@ -187,28 +175,28 @@ __global__ __aicore__ void allto_all_matmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias
         ALLTO_ALL_MX_QUANT_MATMUL_IMPL(tilingData, pipe, hcclServerType, hcclDataType, DTYPE_X1, false);
     }
 #elif ((ORIG_DTYPE_X1 == DT_FLOAT4_E2M1) && (ORIG_DTYPE_X2 == DT_FLOAT4_E2M1))
-#if ALLTO_ALL_MATMUL_ENABLE_APACE
     if constexpr (USING_APACE_IMPL) {
         GET_TILING_DATA_WITH_STRUCT(Apace::hcommAllToAllMatmulTilingData, tilingData, tilingGM);
-        if constexpr (ENABLE_HCOMM_ALL_TO_ALL_OUT) {
-            Apace::AllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_X1,
-                                                  Apace::hcommAllToAllMatmulTilingData, hcclServerType, true, true>
-                op(&tilingData);
-            op.Init(x1, x2, bias, y, all2all_out, x1_scale, x2_scale, workspaceGM, &pipe);
-            op.Run();
-        } else {
-            Apace::AllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_X1,
-                                                  Apace::hcommAllToAllMatmulTilingData, hcclServerType, true, false>
-                op(&tilingData);
-            op.Init(x1, x2, bias, y, all2all_out, x1_scale, x2_scale, workspaceGM, &pipe);
-            op.Run();
-        }
-    } else
-#endif
-    {
+        Apace::AllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_X1,
+                                              Apace::hcommAllToAllMatmulTilingData, hcclServerType, true, X2TRANSPOSE,
+                                              ENABLE_HCOMM_ALL_TO_ALL_OUT>
+            op(&tilingData);
+        op.Init(x1, x2, bias, y, all2all_out, x1_scale, x2_scale, workspaceGM, &pipe);
+        op.Run();
+    } else {
         GET_TILING_DATA_WITH_STRUCT(AlltoAllQuantMatmulTilingData, tilingData, tilingGM);
         ALLTO_ALL_MX_QUANT_MATMUL_IMPL(tilingData, pipe, hcclServerType, AscendC::HCCL_DATA_TYPE_UINT8, uint8_t, true);
     }
+#elif ((ORIG_DTYPE_X1 == DT_HIFLOAT4) && (ORIG_DTYPE_X2 == DT_HIFLOAT4))
+    // HiF4 全量化: 仅支持 Apace Hcomm 通路, 无主线 pipeline 实现
+    GET_TILING_DATA_WITH_STRUCT(Apace::hcommAllToAllMatmulTilingData, tilingData, tilingGM);
+    // ScaleType 为 hif4_scale(devkit/blaze 提供, 4字节: E6M2+E1_8+E1_16);
+    // TransB 由 X2TRANSPOSE 决定, 支持转置/非转置两种 B 布局
+    Apace::AllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, DTYPE_X1, Apace::hcommAllToAllMatmulTilingData,
+                                          hcclServerType, false, X2TRANSPOSE, ENABLE_HCOMM_ALL_TO_ALL_OUT>
+        op(&tilingData);
+    op.Init(x1, x2, bias, y, all2all_out, x1_scale, x2_scale, workspaceGM, &pipe);
+    op.Run();
 #else
     GET_TILING_DATA_WITH_STRUCT(AlltoAllQuantMatmulTilingData, tilingData, tilingGM);
     if constexpr (QUANTMODE == KC_QUANT_FP8E5M2_MODE) {

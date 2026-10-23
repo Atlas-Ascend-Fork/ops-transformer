@@ -77,8 +77,9 @@ TEST_P(AlltoAllMatmulArch35TilingTest, param)
 
     gert::TilingContextPara tilingContextPara(OP_NAME, inputTensorDesc_, outputTensorDesc_, attrs_, &compileInfo,
                                               param.soc);
-    if (param.alltoalloutFlag && param.x1QuantMode == 6 && param.x2QuantMode == 6 && param.worldSize > 0 &&
-        param.worldSize <= 8) {
+    if (param.worldSize > 0 && param.worldSize <= 8 &&
+        ((param.x1QuantMode == 6 && param.x2QuantMode == 6) ||
+         (param.x1QuantMode == 8 && param.x2QuantMode == 8))) { // MX与HiF4量化均需mock通信域rank数
         Mc2Hcom::MC2HcomTopologyMocker::GetInstance().SetValue("rankNum", static_cast<uint64_t>(param.worldSize));
     }
     ExecuteTestCase(tilingContextPara, param.expectResult, param.expectTilingKey, param.expectTilingData,

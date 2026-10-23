@@ -259,15 +259,13 @@ extern "C" aclnnStatus InnerAlltoAllMatmulGetWorkspaceSize(
     int64_t x1QuantDtype = GE_UNDEFINED;
     int64_t commQuantDtype = GE_UNDEFINED;
     int64_t groupSize = 0;
-    OP_LOGD("AlltoAllMatmul commmode0 is . %s", commMode);
     char* str_commMode = const_cast<char*>(commMode);
-    OP_LOGD("AlltoAllMatmul commmode1 is . %s", str_commMode);
+    OP_LOGD("AlltoAllMatmul commmode is . %s", str_commMode);
     bool all2AllOutFlag = IsAll2AllOut("allto_all_matmul", alltoAllOutOptional);
 
     uint8_t commModeEnum = 0;
     aclnnStatus checkCommModeRet = CheckAndHandleCommMode("allto_all_matmul", group, commMode, commModeEnum);
     CHECK_RET(checkCommModeRet == ACLNN_SUCCESS, checkCommModeRet);
-    OP_LOGD("AlltoAllMatmul commmode2 is . %s", str_commMode);
 
     aclnnStatus ret = aclnnInnerAlltoAllMatmulGetWorkspaceSize(
         x1, x2, biasOptional, x1ScaleOptional, x2ScaleOptional, commScaleOptional, x1OffsetOptional, x2OffsetOptional,
@@ -333,10 +331,6 @@ extern "C" aclnnStatus aclnnAlltoAllMatmulBaseGetWorkspaceSize(
         return DealWithEmptyTensor(workspaceSize, executor);
     }
 
-    uint8_t commModeEnum = 0;
-    aclnnStatus checkCommModeRet = CheckAndHandleCommMode("allto_all_matmul", group, commMode, commModeEnum);
-    CHECK_RET(checkCommModeRet == ACLNN_SUCCESS, checkCommModeRet);
-
     aclnnStatus ret = InnerAlltoAllMatmulGetWorkspaceSize(x1, transX2, biasOptional, alltoAllAxesOptional, group,
                                                           transposeX1, transposeX2, commMode, output,
                                                           alltoAllOutOptional, workspaceSize, executor);
@@ -357,8 +351,7 @@ extern "C" aclnnStatus aclnnAlltoAllMatmulBase(void* workspace, uint64_t workspa
             void* arg = NnopbaseGetUserHandle(executor);
             uintptr_t handleVal = reinterpret_cast<uintptr_t>(arg);
             uint8_t commMode = static_cast<uint8_t>(handleVal);
-            if ((commMode == Mc2Comm::COMM_MODE_CCU) &&
-                (GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510)) {
+            if (commMode == Mc2Comm::COMM_MODE_CCU) {
                 OP_LOGD("aclnnAlltoAllMatmul: ENV_MC2_COMM_MODE_AICPU not set, use CCU mode");
                 NnopbaseSetHcclServerType(executor, NnopbaseHcclServerType::NNOPBASE_HCCL_SERVER_TYPE_CCU);
             } else {

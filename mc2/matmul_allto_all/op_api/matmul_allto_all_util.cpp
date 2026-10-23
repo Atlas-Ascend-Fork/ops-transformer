@@ -244,6 +244,13 @@ aclnnStatus CheckAndHandleCommMode(const char* opName, const char* group, const 
             return ACLNN_ERR_PARAM_INVALID;
         }
         OP_LOGD("The commMode is [%s].", commModeStr);
+    } else if (GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_9201) {
+        // A6(ascend960dt)无CCU引擎, 仅支持AI CPU通信
+        if (strncmp(commModeStr, "ai_cpu", maxLength) != 0) {
+            OP_LOGE_FOR_INVALID_VALUE(opName, "commMode", commModeStr, "\"ai_cpu\"");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+        commModeEnum = Mc2Comm::COMM_MODE_AICPU;
     } else if (GetCurrentPlatformInfo().GetSocVersion() == SocVersion::ASCEND910_93) {
         if (strncmp(commModeStr, "ai_cpu", maxLength) != 0) {
             OP_LOGE_FOR_INVALID_VALUE(opName, "commMode", commModeStr, "\"ai_cpu\"");
@@ -254,6 +261,9 @@ aclnnStatus CheckAndHandleCommMode(const char* opName, const char* group, const 
             OP_LOGE_FOR_INVALID_VALUE(opName, "commMode", commModeStr, "\"aiv\"");
             return ACLNN_ERR_PARAM_INVALID;
         }
+    } else {
+        OP_LOGE(ACLNN_ERR_INNER, "get wrong soc version when check commMode");
+        return ACLNN_ERR_INNER;
     }
 
     return ACLNN_SUCCESS;

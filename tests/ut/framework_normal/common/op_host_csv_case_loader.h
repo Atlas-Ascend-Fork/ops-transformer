@@ -59,7 +59,9 @@ const std::unordered_map<std::string, ge::DataType> GE_DTYPE{{"FLOAT", ge::DT_FL
                                                              {"FLOAT6_E3M2", ge::DT_FLOAT6_E3M2},
                                                              {"FLOAT6_E2M3", ge::DT_FLOAT6_E2M3},
                                                              {"FLOAT4_E2M1", ge::DT_FLOAT4_E2M1},
-                                                             {"FLOAT4_E1M2", ge::DT_FLOAT4_E1M2}};
+                                                             {"FLOAT4_E1M2", ge::DT_FLOAT4_E1M2},
+                                                             {"HIFLOAT4", ge::DT_HIFLOAT4},
+                                                             {"HIF4_SCALE", ge::DT_HIFLOAT4_SCALE}};
 
 const std::unordered_map<std::string, ge::Format> GE_FORMAT{
     {"NCHW", ge::FORMAT_NCHW},

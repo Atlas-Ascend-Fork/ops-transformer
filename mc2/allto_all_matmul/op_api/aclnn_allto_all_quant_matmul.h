@@ -25,11 +25,12 @@ extern "C" {
  * 算子功能：实现all2all + quant + matmul融合计算
  * @brief aclnnAlltoAllQuantMatMul的第一段接口，根据具体的计算流程，计算workspace大小。
  * @domain aclnn_ops_infer
- * @param [in] x1: 左矩阵输入张量，数据类型支持FLOAT16、BFLOAT16、INT4。
- * @param [in] x2: 右矩阵输入张量，数据类型支持FLOAT8_E4M3FN、FLOAT8_E5M2、INT8、INT4。
+ * @param [in] x1: 左矩阵输入张量，数据类型支持FLOAT16、BFLOAT16、INT4、HIFLOAT4。
+ * @param [in] x2: 右矩阵输入张量，数据类型支持FLOAT8_E4M3FN、FLOAT8_E5M2、INT8、INT4、HIFLOAT4。
  * @param [in] biasOptional: 可选输入张量，偏置项，仅在传入非空时生效，数据类型为FLOAT16、BFLOAT16、FLOAT32。
- * @param [in] x1ScaleOptional: 可选输入张量，左矩阵的量化参数，数据类型为FLOAT32。
- * @param [in] x2Scale: 右矩阵的反量化参数，数据类型为FLOAT32。
+ * @param [in] x1ScaleOptional:
+ * 可选输入张量，左矩阵的量化参数，数据类型为FLOAT32、FLOAT16、BFLOAT16、FLOAT8_E8M0、HIF4_SCALE。
+ * @param [in] x2Scale: 右矩阵的反量化参数，数据类型为FLOAT32、FLOAT8_E8M0、HIF4_SCALE。
  * @param [in] commScaleOptional: 可选输入张量，低比特通信的量化系数，暂不支持。
  * @param [in] x1OffsetOptional: 可选输入，左矩阵的量化偏置，暂不支持。
  * @param [in] x2OffsetOptional: 可选输入，右矩阵的量化偏置，暂不支持。
