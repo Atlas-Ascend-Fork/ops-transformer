@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include "fused_infer_attention_score_tiling_arch38.h"
 #include "../../../incre_flash_attention/op_host/incre_flash_attention_tiling_arch38.h"
 #include "../../../prompt_flash_attention/op_host/prompt_flash_attention_tiling_arch38.h"
@@ -1353,7 +1354,7 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
                 }
             }
         }
-        if (ascendcPlatform.GetCurNpuArch() != NpuArch::DAV_5102) {
+        if (ascendcPlatform.GetCurNpuArch() != Ops::Base::DAV_5102) {
             OP_CHECK_IF((((contextParamsForPFATiling.inputDataType == ge::DT_INT8) ||
                           (contextParamsForPFATiling.kDataType == ge::DT_INT8) ||
                           (contextParamsForPFATiling.outputDataType == ge::DT_INT8)) &&

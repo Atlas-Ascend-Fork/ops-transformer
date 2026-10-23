@@ -13,6 +13,7 @@
  * \brief MLA 全量化重构模板 tiling 实现
  */
 
+#include "op_host/util/op_const_def.h"
 #include "fia_tiling_fullquant_mla.h"
 #include <map>
 #include <vector>
@@ -744,5 +745,5 @@ void FiaTilingFullQuantMlaArch35::PrintAllTilingData()
 // 3. 个位代表特化模板到泛化模板的优先级排序
 // MLA 全量化: 2xx-全量化, x0x-mla, 优先级 200
 REGISTER_TILING_TEMPLATE_FIA(FusedInferAttentionScore, FiaTilingFullQuantMlaArch35,
-                             std::vector<int32_t>({static_cast<int32_t>(NpuArch::DAV_3510)}), 200);
+                             std::vector<int32_t>({static_cast<int32_t>(Ops::Base::DAV_3510)}), 200);
 } // namespace optiling

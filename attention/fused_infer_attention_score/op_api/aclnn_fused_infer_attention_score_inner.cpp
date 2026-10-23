@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "op_host/util/op_const_def.h"
 #include "fused_infer_attention_score_inner.h"
 #include "fused_infer_attention_score.h"
 #include "opdev/op_log.h"
@@ -392,7 +393,7 @@ bool IsArch22MlaD512RoutingCandidate(const aclTensor* query, const aclTensorList
                                      const char* inputLayout, int64_t numHeads, int64_t numKeyValueHeads,
                                      int64_t sparseMode, int64_t blockSize, bool hasUnsupportedFeature)
 {
-    if (op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_2201 || hasUnsupportedFeature ||
+    if (op::GetCurrentPlatformInfo().GetCurNpuArch() != Ops::Base::DAV_2201 || hasUnsupportedFeature ||
         query == nullptr || queryRopeOptional == nullptr || keyRopeOptional == nullptr || inputLayout == nullptr ||
         key == nullptr || value == nullptr || key->Size() != 1 || value->Size() != 1 || (*key)[0] == nullptr ||
         (*value)[0] == nullptr || numHeads <= 0 || numKeyValueHeads != 1 || numHeads % numKeyValueHeads != 0 ||

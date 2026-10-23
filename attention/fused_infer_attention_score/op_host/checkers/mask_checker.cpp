@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include <map>
 #include <numeric>
 #include <graph/utils/type_utils.h>
@@ -53,7 +54,7 @@ ge::graphStatus MaskChecker::CheckSparseMode(const FiaTilingInfo& fiaInfo) const
     // SparseMode only supports 0/1/2/3/4/9. SparseMode 9 only support in ascend910B.
     const std::vector<int32_t> sparseModeListWithoutTree = {
         SPARSE_MODE_NO_MASK, SPARSE_MODE_ALL_MASK, SPARSE_MODE_LEFT_UP, SPARSE_MODE_RIGHT_DOWN, SPARSE_MODE_BAND};
-    if (fiaInfo.npuArch == NpuArch::DAV_3510) {
+    if (fiaInfo.npuArch == Ops::Base::DAV_3510) {
         OP_CHECK_IF(ge::GRAPH_SUCCESS != CheckValueSupport(fiaInfo.sparseMode, sparseModeListWithoutTree),
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(fiaInfo.opName, "sparse_mode",
                                                           std::to_string(fiaInfo.sparseMode).c_str(),

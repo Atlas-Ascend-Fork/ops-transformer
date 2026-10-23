@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include <map>
 #include <numeric>
 #include <graph/utils/type_utils.h>
@@ -676,7 +677,7 @@ ge::graphStatus CommonChecker::CheckAxis(const FiaTilingInfo& fiaInfo)
         static const std::set<uint32_t> SUPPORT_G_IN_IFAMLA_FP8_TND = {
             1U, 2U, 4U, 6U, 8U, 12U, 16U, 24U, 32U, 48U, 64U, 96U, 128U}; // ifa mlaTND场景g轴支持范围
         const bool isNonQuant = enableNonQuant_;
-        const bool isArch35NonQuant = isNonQuant && fiaInfo.npuArch == NpuArch::DAV_3510;
+        const bool isArch35NonQuant = isNonQuant && fiaInfo.npuArch == Ops::Base::DAV_3510;
         const string inputLayout = fiaInfo.opParamInfo.layOut;
         const bool isMLAFullQuantNewTemplate = (inputLayout == "TND" && fiaInfo.inputQType == ge::DT_FLOAT8_E4M3FN);
         if (isNonQuant) {
@@ -1067,7 +1068,7 @@ ge::graphStatus CommonChecker::CheckQueryKeyConsistency(const FiaTilingInfo& fia
 
 ge::graphStatus CommonChecker::CheckMultiAttr(const FiaTilingInfo& fiaInfo)
 {
-    if (fiaInfo.npuArch == NpuArch::DAV_3510) {
+    if (fiaInfo.npuArch == Ops::Base::DAV_3510) {
         OP_CHECK_IF(fiaInfo.kvStorageMode == KvStorageMode::PAGE_ATTENTION && fiaInfo.isQKVDDifferent,
                     OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
                         fiaInfo.opName, "blockTable",

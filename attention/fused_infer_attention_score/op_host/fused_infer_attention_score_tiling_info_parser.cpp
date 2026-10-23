@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include <map>
 #include <numeric>
 #include "log/log.h"
@@ -603,8 +604,8 @@ ge::graphStatus FiaInfoParser::GetNpuInfo()
     socVersion_ = ascendcPlatform.GetSocVersion();
     npuArch_ = ascendcPlatform.GetCurNpuArch();
     if ((socVersion_ != platform_ascendc::SocVersion::ASCEND310P) &&
-        (socVersion_ != platform_ascendc::SocVersion::ASCEND910B) && (npuArch_ != NpuArch::DAV_3510) &&
-        (npuArch_ != NpuArch::DAV_9201) && (npuArch_ != NpuArch::DAV_9202)) {
+        (socVersion_ != platform_ascendc::SocVersion::ASCEND910B) && (npuArch_ != Ops::Base::DAV_3510) &&
+        (npuArch_ != Ops::Base::DAV_9201) && (npuArch_ != Ops::Base::DAV_9202)) {
         OPS_REPORT_VECTOR_INNER_ERR(opName_, "SOC Version[%d]/NpuArch[%d] is not support.",
                                     static_cast<int32_t>(socVersion_), static_cast<int32_t>(npuArch_));
         return GRAPH_FAILED;
@@ -1230,7 +1231,7 @@ ge::graphStatus FiaInfoParser::GetRopeMode()
         ((opParamInfo_.queryRope.tensor != nullptr) && (opParamInfo_.queryRope.desc != nullptr));
     bool existKeySplitRopeTensor = ((opParamInfo_.keyRope.tensor != nullptr) && (opParamInfo_.keyRope.desc != nullptr));
     bool existSplitRopeTensor = existQuerySplitRopeTensor && existKeySplitRopeTensor;
-    if (npuArch_ == NpuArch::DAV_3510) {
+    if (npuArch_ == Ops::Base::DAV_3510) {
         if (existSplitRopeTensor) {
             ropeMode_ = RopeMode::ROPE_SPLIT;
         } else if (qkHeadDim_ == 192 && vHeadDim_ == 128) {
@@ -1490,7 +1491,7 @@ ge::graphStatus FiaInfoParser::GetAttenMaskInfo()
             return ge::GRAPH_FAILED;
         }
         int32_t sparseMode = *opParamInfo_.sparseMode;
-        if (sparseMode == 9U && npuArch_ == NpuArch::DAV_3510) {
+        if (sparseMode == 9U && npuArch_ == Ops::Base::DAV_3510) {
             OP_LOGE(opName_, "NpuArch[%d] currently does not support sparse9.", static_cast<int32_t>(npuArch_));
             return ge::GRAPH_FAILED;
         }
@@ -1529,7 +1530,7 @@ ge::graphStatus FiaInfoParser::GetAttenMaskInfo()
 void FiaInfoParser::GetPaddingSizeFlag()
 {
     qPaddingSizeFlag_ =
-        ((!isLegacyIfa_ || npuArch_ == NpuArch::DAV_3510) && (opParamInfo_.queryPaddingSize.tensor != nullptr));
+        ((!isLegacyIfa_ || npuArch_ == Ops::Base::DAV_3510) && (opParamInfo_.queryPaddingSize.tensor != nullptr));
 
     if (isLegacyIfa_) {
         if ((opParamInfo_.kvPaddingSize.tensor != nullptr &&

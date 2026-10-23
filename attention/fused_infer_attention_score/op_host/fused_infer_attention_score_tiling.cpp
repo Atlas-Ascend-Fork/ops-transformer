@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include "fused_infer_attention_score_tiling.h"
 #include "fused_infer_attention_score_tiling_cache.h"
 #include <new>
@@ -2553,10 +2554,11 @@ FIA_EXTERN_C ge::graphStatus DoOpTilingFusedInferAttentionScore(gert::TilingCont
                 return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
 
-    if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510 || ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201 ||
-        ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9202) {
+    if (ascendcPlatform.GetCurNpuArch() == Ops::Base::DAV_3510 ||
+        ascendcPlatform.GetCurNpuArch() == Ops::Base::DAV_9201 ||
+        ascendcPlatform.GetCurNpuArch() == Ops::Base::DAV_9202) {
         return TilingFusedInferAttentionScoreV4(context);
-    } else if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_5102) {
+    } else if (ascendcPlatform.GetCurNpuArch() == Ops::Base::DAV_5102) {
         OP_CHECK_IF(
             HasNonContiguousCacheInput(context),
             OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
@@ -2564,7 +2566,7 @@ FIA_EXTERN_C ge::graphStatus DoOpTilingFusedInferAttentionScore(gert::TilingCont
             return ge::GRAPH_FAILED);
         return TilingFusedInferAttentionScoreArch38(context);
     }
-    if (ascendcPlatform.GetCurNpuArch() != NpuArch::DAV_2201 ||
+    if (ascendcPlatform.GetCurNpuArch() != Ops::Base::DAV_2201 ||
         FusedInferAttentionScoreTilingCache::IsCacheDisabled()) {
         return TilingFusedInferAttentionScore(context);
     }

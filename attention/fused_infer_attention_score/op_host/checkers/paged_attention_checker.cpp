@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include <algorithm>
 #include <map>
 #include <numeric>
@@ -39,7 +40,7 @@ bool HasNonContiguousCache(const FiaTilingInfo& fiaInfo)
 
 bool IsArch22MlaD512Dim0StrideCapable(const FiaTilingInfo& fiaInfo)
 {
-    if (fiaInfo.npuArch != NpuArch::DAV_2201 || fiaInfo.emptyTensorFlag ||
+    if (fiaInfo.npuArch != Ops::Base::DAV_2201 || fiaInfo.emptyTensorFlag ||
         fiaInfo.kvStorageMode != KvStorageMode::PAGE_ATTENTION || !fiaInfo.pageAttentionFlag ||
         fiaInfo.quantMode != FiaQuantMode::NO_QUANT || fiaInfo.ropeMode != RopeMode::ROPE_SPLIT ||
         fiaInfo.mlaMode != MlaMode::ROPE_SPLIT_D512) {
@@ -169,7 +170,7 @@ ge::graphStatus PagedAttentionChecker::CheckFeatureSupport(const FiaTilingInfo& 
                     fiaInfo.opName, "key_shared_prefix or value_shared_prefix",
                     "When page attention is enabled, key_shared_prefix and value_shared_prefix must both be empty"),
                 return ge::GRAPH_FAILED);
-    if (fiaInfo.npuArch == NpuArch::DAV_3510) {
+    if (fiaInfo.npuArch == Ops::Base::DAV_3510) {
         if (fiaInfo.isQKVDDifferent) {
             std::string shapeMsg = ToString(fiaInfo.opParamInfo.query.shape->GetStorageShape()) + ", " +
                                    ToString(fiaInfo.opParamInfo.key.shape->GetStorageShape()) + " and " +
@@ -723,7 +724,7 @@ ge::graphStatus PagedAttentionChecker::CheckNonContiguousSupport(const FiaTiling
     int32_t valueDim = fiaInfo.valueNonContigDim;
     int32_t keyRopeDim = fiaInfo.keyRopeNonContigDim;
     const string inputLayout = fiaInfo.opParamInfo.layOut;
-    if (fiaInfo.npuArch == NpuArch::DAV_2201) {
+    if (fiaInfo.npuArch == Ops::Base::DAV_2201) {
         OP_CHECK_IF(!IsArch22MlaD512Dim0StrideCapable(fiaInfo),
                     OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
                         fiaInfo.opName, "key/value/keyRope",
@@ -740,7 +741,7 @@ ge::graphStatus PagedAttentionChecker::CheckNonContiguousSupport(const FiaTiling
     }
 
     OP_CHECK_IF(
-        fiaInfo.npuArch != NpuArch::DAV_3510,
+        fiaInfo.npuArch != Ops::Base::DAV_3510,
         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(fiaInfo.opName, "key/value/keyRope",
                                                  "Non-contiguous cache is not supported on the current architecture."),
         return ge::GRAPH_FAILED);

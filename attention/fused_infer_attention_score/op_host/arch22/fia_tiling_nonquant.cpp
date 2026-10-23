@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include "fia_tiling_nonquant.h"
 #include <map>
 #include <vector>
@@ -788,5 +789,5 @@ ge::graphStatus FiaTilingNonQuant::DoOpTiling()
 // 2. 十位表示gqa、mla、泛化，即: x0x-mla, x1x-gpa, x2x-泛化
 // 3. 个位代表特化模板到泛化模板的优先级排序
 REGISTER_TILING_TEMPLATE_FIA(FusedInferAttentionScore, FiaTilingNonQuant,
-                             std::vector<int32_t>({static_cast<int32_t>(NpuArch::DAV_2201)}), 29);
+                             std::vector<int32_t>({static_cast<int32_t>(Ops::Base::DAV_2201)}), 29);
 } // namespace optiling

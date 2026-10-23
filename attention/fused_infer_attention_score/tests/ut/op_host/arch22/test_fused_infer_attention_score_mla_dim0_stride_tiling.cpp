@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "op_host/util/op_const_def.h"
 #include <gtest/gtest.h>
 
 #include <initializer_list>
@@ -33,7 +34,7 @@ optiling::FiaTilingInfo MakeArch22MlaD512Info(int32_t keyDim = -1, int32_t value
     static const char layout[] = "TND";
     optiling::FiaTilingInfo fiaInfo;
     fiaInfo.opName = "FiaMlaD512Dim0StrideTest";
-    fiaInfo.npuArch = NpuArch::DAV_2201;
+    fiaInfo.npuArch = Ops::Base::DAV_2201;
     fiaInfo.socVersion = platform_ascendc::SocVersion::ASCEND910B;
     fiaInfo.kvStorageMode = optiling::KvStorageMode::PAGE_ATTENTION;
     fiaInfo.pageAttentionFlag = true;

@@ -13,6 +13,7 @@
  * \brief MLA D512 non-quant tiling template (d=512, rope=64, v=512, no mask)
  */
 
+#include "op_host/util/op_const_def.h"
 #include "fia_tiling_nonquant_mla_arch35.h"
 #include <map>
 #include <vector>
@@ -786,6 +787,6 @@ void FiaTilingNonQuantMlaArch35::PrintAllTilingData()
 // 2. 十位表示gqa、mla、泛化，即: x0x-mla, x1x-gpa, x2x-泛化
 // 3. 个位代表特化模板到泛化模板的优先级排序
 REGISTER_TILING_TEMPLATE_FIA(FusedInferAttentionScore, FiaTilingNonQuantMlaArch35,
-                             std::vector<int32_t>({static_cast<int32_t>(NpuArch::DAV_3510)}),
+                             std::vector<int32_t>({static_cast<int32_t>(Ops::Base::DAV_3510)}),
                              5); // 0xx-非量化, x0x-mla, 优先级 005
 } // namespace optiling

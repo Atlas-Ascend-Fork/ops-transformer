@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "op_host/util/op_const_def.h"
 #include "fia_tiling_info.h"
 #include "../../common/op_host/fia_tiling_shape.h"
 
@@ -196,7 +197,7 @@ public:
 
     // 局部参数, 暂存
     platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND910B;
-    NpuArch npuArch_ = NpuArch::DAV_3510;
+    NpuArch npuArch_ = Ops::Base::DAV_3510;
 
     ge::DataType inputQType_ = ge::DT_FLOAT16;
     ge::DataType inputKvType_ = ge::DT_FLOAT16;

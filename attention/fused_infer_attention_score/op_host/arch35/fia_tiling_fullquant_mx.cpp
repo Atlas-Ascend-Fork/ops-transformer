@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include "fia_tiling_fullquant_mx.h"
 #include <map>
 #include <vector>
@@ -779,8 +780,8 @@ void FiaTilingFullQuantMxArch35::PrintAllTilingData()
 // 2. 十位表示gqa、mla、泛化，即: x0x-mla, x1x-gpa, x2x-泛化
 // 3. 个位代表特化模板到泛化模板的优先级排序
 REGISTER_TILING_TEMPLATE_FIA(FusedInferAttentionScore, FiaTilingFullQuantMxArch35,
-                             std::vector<int32_t>({static_cast<int32_t>(NpuArch::DAV_3510),
-                                                   static_cast<int32_t>(NpuArch::DAV_9201),
-                                                   static_cast<int32_t>(NpuArch::DAV_9202)}),
+                             std::vector<int32_t>({static_cast<int32_t>(Ops::Base::DAV_3510),
+                                                   static_cast<int32_t>(Ops::Base::DAV_9201),
+                                                   static_cast<int32_t>(Ops::Base::DAV_9202)}),
                              210);
 } // namespace optiling

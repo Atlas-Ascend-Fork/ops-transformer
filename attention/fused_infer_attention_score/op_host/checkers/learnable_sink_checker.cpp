@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include <map>
 #include <numeric>
 #include <graph/utils/type_utils.h>
@@ -35,7 +36,7 @@ ge::graphStatus LearnableSinkChecker::CheckSinkDtypeSupport(const FiaTilingInfo&
 {
     const gert::CompileTimeTensorDesc* learnableSinkDesc = fiaInfo.opParamInfo.learnableSink.desc;
     if (learnableSinkDesc != nullptr) {
-        if (fiaInfo.npuArch == NpuArch::DAV_3510) {
+        if (fiaInfo.npuArch == Ops::Base::DAV_3510) {
             if (learnableSinkDesc->GetDataType() != ge::DT_FLOAT16 && learnableSinkDesc->GetDataType() != ge::DT_BF16) {
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                     fiaInfo.opName, "learnable_sink", ToString(learnableSinkDesc->GetDataType()).c_str(),
@@ -178,7 +179,7 @@ ge::graphStatus LearnableSinkChecker::CheckParaExistence(const FiaTilingInfo& fi
 ge::graphStatus LearnableSinkChecker::CheckCrossFeature(const FiaTilingInfo& fiaInfo)
 {
     if ((ge::GRAPH_SUCCESS != CheckFeatureSupport(fiaInfo) || ge::GRAPH_SUCCESS != CheckAxisSupport(fiaInfo)) &&
-        fiaInfo.npuArch == NpuArch::DAV_3510) {
+        fiaInfo.npuArch == Ops::Base::DAV_3510) {
         return ge::GRAPH_FAILED;
     }
 

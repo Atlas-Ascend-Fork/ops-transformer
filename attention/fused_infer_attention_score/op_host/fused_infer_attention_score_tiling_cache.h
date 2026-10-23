@@ -10,6 +10,7 @@
 #ifndef FUSED_INFER_ATTENTION_SCORE_TILING_CACHE_H
 #define FUSED_INFER_ATTENTION_SCORE_TILING_CACHE_H
 
+#include "op_host/util/op_const_def.h"
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -65,7 +66,7 @@ public:
             return false;
         }
         platform_ascendc::PlatformAscendC platform(context->GetPlatformInfo());
-        if (platform.GetCurNpuArch() != NpuArch::DAV_2201) {
+        if (platform.GetCurNpuArch() != Ops::Base::DAV_2201) {
             return false;
         }
         key.clear();

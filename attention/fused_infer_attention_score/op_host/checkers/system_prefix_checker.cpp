@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "op_host/util/op_const_def.h"
 #include <numeric>
 #include <graph/utils/type_utils.h>
 #include "log/log.h"
@@ -294,7 +295,7 @@ ge::graphStatus SystemPrefixChecker::CheckUnSupportFeature(const FiaTilingInfo& 
                 return ge::GRAPH_FAILED);
     // 不支持tensorlist
     if ((fiaInfo.s1Size > 1U && fiaInfo.socVersion == platform_ascendc::SocVersion::ASCEND910B) ||
-        fiaInfo.npuArch == NpuArch::DAV_3510) {
+        fiaInfo.npuArch == Ops::Base::DAV_3510) {
         OP_CHECK_IF((fiaInfo.kvStorageMode == KvStorageMode::TENSOR_LIST),
                     OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(fiaInfo.opName, "prefix",
                                                              "prefix must be empty when tensorlist is enabled"),
