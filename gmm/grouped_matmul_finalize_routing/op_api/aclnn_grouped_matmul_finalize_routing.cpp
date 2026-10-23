@@ -1261,6 +1261,16 @@ aclnnStatus aclnnGroupedMatmulFinalizeRoutingWeightNzV2GetWorkspaceSize(
                    DFX_OUT(out));
     auto checkInputRet = CheckInputParamsForWeightNzV2(x1, x2, antiquantScaleOptional, antiquantOffsetOptional);
     CHECK_RET(checkInputRet == ACLNN_SUCCESS, checkInputRet);
+    // Validate A8W4 before empty-tensor shortcuts and before unpacking INT32 weights.
+    const bool isA8W4 =
+        (x1->GetDataType() == DataType::DT_INT8 &&
+         (x2->GetDataType() == DataType::DT_INT4 || x2->GetDataType() == DataType::DT_INT32)) ||
+        (x1->GetDataType() == DataType::DT_FLOAT8_E4M3FN && x2->GetDataType() == DataType::DT_FLOAT4_E2M1);
+    if (isA8W4 && dtype != ACLNN_OUT_DTYPE_FLOAT32) {
+        OP_LOGE_FOR_INVALID_VALUE("aclnnGroupedMatmulFinalizeRoutingWeightNzV2GetWorkspaceSize", "dtype",
+                                  std::to_string(dtype), "0 for A8W4");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     if (dtype != ACLNN_OUT_DTYPE_FLOAT32 && dtype != ACLNN_OUT_DTYPE_BF16) {
         OP_LOGE_FOR_INVALID_VALUE("aclnnGroupedMatmulFinalizeRoutingWeightNzV2GetWorkspaceSize", "dtype",
                                   std::to_string(dtype), "0 or 2");
