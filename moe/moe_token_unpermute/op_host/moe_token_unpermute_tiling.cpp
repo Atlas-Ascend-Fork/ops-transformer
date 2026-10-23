@@ -279,8 +279,10 @@ static inline void SetTilingKey(const gert::TilingContext* context, MoeTokenUnpe
     }
 }
 
-static inline void SetTilingData(gert::TilingContext* context, const MoeTokenUnpermuteParam& param)
+static inline ge::graphStatus SetTilingData(gert::TilingContext* context, const MoeTokenUnpermuteParam& param)
 {
+    auto rawTilingData = context->GetRawTilingData();
+    OP_CHECK_NULL_WITH_CONTEXT(context, rawTilingData);
     MoeTokenUnpermuteTilingData tilingData;
     tilingData.set_hidden_size(param.input.hiddenSize);
     tilingData.set_top_k(param.input.topK);
@@ -294,9 +296,10 @@ static inline void SetTilingData(gert::TilingContext* context, const MoeTokenUnp
     tilingData.set_tokens_splited_remain(param.tokenTiling.remain);
     tilingData.set_tokens_splited_num(param.tokenTiling.num);
     tilingData.set_buffer_num(param.core.bufferNum);
-    tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-    context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
+    tilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
+    rawTilingData->SetDataSize(tilingData.GetDataSize());
     context->SetBlockDim(param.core.usedCoreNum);
+    return ge::GRAPH_SUCCESS;
 }
 
 static inline void DebugPrint(const gert::TilingContext* context, const MoeTokenUnpermuteParam& param)
@@ -349,7 +352,9 @@ ge::graphStatus TilingCompute(gert::TilingContext* context, const int64_t topK)
     ComputeRemainMemerySpace(param);
     TilingToken(param);
     SetTilingKey(context, param);
-    SetTilingData(context, param);
+    if (SetTilingData(context, param) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
     DebugPrint(context, param);
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     size_t* workspaces = context->GetWorkspaceSizes(1);

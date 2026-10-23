@@ -13,20 +13,30 @@
  * \brief
  */
 #include "register/op_impl_registry.h"
+#include "log/log.h"
 
 using namespace ge;
 namespace ops {
 static ge::graphStatus InferShapeForMoeTokenPermuteWithRoutingMapGrad(gert::InferShapeContext* context)
 {
     const gert::Shape* permuted_token_output_grad_shape = context->GetInputShape(0);
-    const int64_t* tokens_num = context->GetAttrs()->GetAttrPointer<int64_t>(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, permuted_token_output_grad_shape);
+    auto attrs = context->GetAttrs();
+    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    const int64_t* tokens_num = attrs->GetAttrPointer<int64_t>(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, tokens_num);
     int64_t tokensNum = *tokens_num;
+    OP_CHECK_IF(tokensNum <= 0,
+                OP_LOGE(context->GetNodeName(), "tokens_num should be larger than 0, but got %ld.", tokensNum),
+                return GRAPH_FAILED);
 
     int64_t hidden_size = permuted_token_output_grad_shape->GetDim(1);
     int64_t topk_num = permuted_token_output_grad_shape->GetDim(0) / tokensNum;
 
     gert::Shape* tokens_grad_out_shape = context->GetOutputShape(0);
     gert::Shape* probs_grad_out_optional_shape = context->GetOutputShape(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, tokens_grad_out_shape);
+    OP_CHECK_NULL_WITH_CONTEXT(context, probs_grad_out_optional_shape);
     const int64_t out_dim_num = 2;
     tokens_grad_out_shape->SetDimNum(out_dim_num);
     tokens_grad_out_shape->SetDim(0, tokensNum);

@@ -113,10 +113,11 @@ static inline int64_t ComputeMaxHiddenSize(MoeTokenUnpermuteParam& param, int64_
     return AlignN(maxHiddenSize - ALIGN_512, ALIGN_512);
 }
 
-static inline void Init(gert::TilingContext* context, const int64_t topK, MoeTokenUnpermuteParam& param)
+static inline ge::graphStatus Init(gert::TilingContext* context, const int64_t topK, MoeTokenUnpermuteParam& param)
 {
     size_t sysWorkspaceSize = 16 * 1024 * 1024;
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, currentWorkspace);
     currentWorkspace[0] = sysWorkspaceSize;
 
     auto ascendPlaform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -144,6 +145,7 @@ static inline void Init(gert::TilingContext* context, const int64_t topK, MoeTok
         param.input.topK = topK == -1 ? 1 : topK;
         param.input.tokensNum = safeDiv(param.input.totalLength, param.input.topK);
     }
+    return ge::GRAPH_SUCCESS;
 }
 
 static void SetCoreNum(MoeTokenUnpermuteParam& param)
@@ -228,8 +230,10 @@ ge::graphStatus SetTilingKey(const gert::TilingContext* context, MoeTokenUnpermu
     return ge::GRAPH_SUCCESS;
 }
 
-static inline void SetTilingData(gert::TilingContext* context, const MoeTokenUnpermuteParam& param)
+static inline ge::graphStatus SetTilingData(gert::TilingContext* context, const MoeTokenUnpermuteParam& param)
 {
+    auto rawTilingData = context->GetRawTilingData();
+    OP_CHECK_NULL_WITH_CONTEXT(context, rawTilingData);
     MoeTokenPermuteWithRoutingMapGradTilingData tilingData;
     tilingData.moeTokenPermuteWithRoutingMapGradUnpermuteTilingData.set_hidden_size(param.input.hiddenSize);
     tilingData.moeTokenPermuteWithRoutingMapGradUnpermuteTilingData.set_top_k(param.input.topK);
@@ -245,23 +249,28 @@ static inline void SetTilingData(gert::TilingContext* context, const MoeTokenUnp
     tilingData.moeTokenPermuteWithRoutingMapGradUnpermuteTilingData.set_tokens_splited_remain(param.tokenTiling.remain);
     tilingData.moeTokenPermuteWithRoutingMapGradUnpermuteTilingData.set_tokens_splited_num(param.tokenTiling.num);
     tilingData.moeTokenPermuteWithRoutingMapGradUnpermuteTilingData.set_buffer_num(param.core.bufferNum);
-    tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-    context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
+    tilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
+    rawTilingData->SetDataSize(tilingData.GetDataSize());
     context->SetBlockDim(param.core.usedCoreNum);
+    return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus TilingCompute(gert::TilingContext* context, const int64_t topK)
 {
     MoeTokenUnpermuteParam param;
 
-    Init(context, topK, param);
+    if (Init(context, topK, param) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
     SetCoreNum(param);
     TilingHiddenSize(param);
     SetBufferNum(param);
     ComputeRemainMemerySpace(param);
     TilingToken(param);
     SetTilingKey(context, param);
-    SetTilingData(context, param);
+    if (SetTilingData(context, param) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
     DebugPrint(context, param);
     return context->SetTilingKey(param.core.tilingKey);
 }
@@ -294,13 +303,16 @@ ge::graphStatus TilingComputeDropPad(gert::TilingContext* context)
     int64_t lastCoreLen = (capacity * expertsNum) - (singleCoreLen * (CoreNum - 1));
     tilingData.moeTokenpermuteWithRoutingMapDropPadTilingData.set_singleCoreLen(singleCoreLen);
     tilingData.moeTokenpermuteWithRoutingMapDropPadTilingData.set_lastCoreLen(lastCoreLen);
-    tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
-    context->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
+    auto rawTilingData = context->GetRawTilingData();
+    OP_CHECK_NULL_WITH_CONTEXT(context, rawTilingData);
+    tilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
+    rawTilingData->SetDataSize(tilingData.GetDataSize());
     // 设置tilingKey
     int64_t tilingKey = TILINGKEY_DROPPAD;
     // 设置workspace
     size_t sysWorkspaceSize = 16 * 1024 * 1024;
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context, currentWorkspace);
     currentWorkspace[0] = sysWorkspaceSize;
 
     return context->SetTilingKey(tilingKey);

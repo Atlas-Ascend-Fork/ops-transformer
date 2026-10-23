@@ -57,6 +57,51 @@ TEST_F(MoeTokenPermuteWithRoutingMapGrad, infershape_bf16)
     ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape); // 框架中已提供该接口
 }
 
+namespace {
+gert::InfershapeContextPara MakeRoutingMapGradInferShapeContext(int64_t tokensNum)
+{
+    return gert::InfershapeContextPara("MoeTokenPermuteWithRoutingMapGrad",
+                                       {
+                                           {{{1024, 7168}, {1024, 7168}}, ge::DT_BF16, ge::FORMAT_ND},
+                                           {{{1024}, {1024}}, ge::DT_BF16, ge::FORMAT_ND},
+                                           {{{1024}, {1024}}, ge::DT_INT32, ge::FORMAT_ND},
+                                           {{{512, 512}, {512, 512}}, ge::DT_INT8, ge::FORMAT_ND},
+                                       },
+                                       {
+                                           {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND},
+                                           {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND},
+                                       },
+                                       {
+                                           {"num_experts", Ops::Transformer::AnyValue::CreateFrom<int64_t>(512)},
+                                           {"tokens_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(tokensNum)},
+                                           {"padded_mode", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                       });
+}
+} // namespace
+
+TEST_F(MoeTokenPermuteWithRoutingMapGrad, infershape_invalid_tokens_num)
+{
+    for (const int64_t tokensNum : {0, -1}) {
+        SCOPED_TRACE(tokensNum);
+        auto contextPara = MakeRoutingMapGradInferShapeContext(tokensNum);
+        ExecuteTestCase(contextPara, ge::GRAPH_FAILED, {});
+    }
+}
+
+TEST_F(MoeTokenPermuteWithRoutingMapGrad, infershape_missing_tokens_num)
+{
+    auto contextPara = MakeRoutingMapGradInferShapeContext(512);
+    contextPara.attrs_.erase(contextPara.attrs_.begin() + 1, contextPara.attrs_.end());
+    ExecuteTestCase(contextPara, ge::GRAPH_FAILED, {});
+}
+
+TEST_F(MoeTokenPermuteWithRoutingMapGrad, infershape_missing_attrs)
+{
+    auto contextPara = MakeRoutingMapGradInferShapeContext(512);
+    contextPara.attrs_.clear();
+    ExecuteTestCase(contextPara, ge::GRAPH_FAILED, {});
+}
+
 TEST_F(MoeTokenPermuteWithRoutingMapGrad, infershape_inferdtype)
 {
     auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
