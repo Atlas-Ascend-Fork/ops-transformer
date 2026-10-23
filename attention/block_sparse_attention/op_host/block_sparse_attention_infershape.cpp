@@ -51,7 +51,7 @@ static constexpr int32_t UNKNOWN_DIMS = -2;
 static ge::graphStatus InferShapeBlockSparseAttention(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("BlockSparseAttention", "context is nullptr!");
+        // 框架保证 context 非空,此为不可达防御分支,与仓库 infershape 惯例一致静默返回
         return ge::GRAPH_FAILED;
     }
 
@@ -110,37 +110,48 @@ static ge::graphStatus InferShapeBlockSparseAttention(gert::InferShapeContext* c
     // 验证Q layout (支持TND/BNSD/BSND)
     if (qLayout == "TND") {
         if (queryShape->GetDimNum() != TND_DIM_NUM) {
-            OP_LOGE(context->GetNodeName(), "Layout TND, queryDims(%zu) must be 3!", queryShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context->GetNodeName(), "query",
+                                                      ("dimNum=" + std::to_string(queryShape->GetDimNum())).c_str(),
+                                                      "when qInputLayout is TND, the dim num of query must be 3");
             return ge::GRAPH_FAILED;
         }
     } else if (qLayout == "BNSD") {
         if (queryShape->GetDimNum() != BNSD_DIM_NUM) {
-            OP_LOGE(context->GetNodeName(), "Layout BNSD, queryDims(%zu) must be 4!", queryShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context->GetNodeName(), "query",
+                                                      ("dimNum=" + std::to_string(queryShape->GetDimNum())).c_str(),
+                                                      "when qInputLayout is BNSD, the dim num of query must be 4");
             return ge::GRAPH_FAILED;
         }
     } else if (qLayout == "BSND") {
         if (queryShape->GetDimNum() != BSND_DIM_NUM) {
-            OP_LOGE(context->GetNodeName(), "Layout BSND, queryDims(%zu) must be 4!", queryShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context->GetNodeName(), "query",
+                                                      ("dimNum=" + std::to_string(queryShape->GetDimNum())).c_str(),
+                                                      "when qInputLayout is BSND, the dim num of query must be 4");
             return ge::GRAPH_FAILED;
         }
     } else {
-        OP_LOGE(context->GetNodeName(), "Unsupported Q layout: %s. Only TND/BNSD/BSND are supported.", qInputLayoutPtr);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "qInputLayout", qLayout.c_str(),
+                                              "unsupported Q layout, only TND/BNSD/BSND are supported");
         return ge::GRAPH_FAILED;
     }
 
     // 验证Q和KV格式一致性：两者必须相同
     if (qLayout != kvLayout) {
-        OP_LOGE(context->GetNodeName(),
-                "The parameters qInputLayout and kvInputLayout must be consistent, but currently qInputLayout is %s "
-                "and kvInputLayout is %s.",
-                qLayout.c_str(), kvLayout.c_str());
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "qInputLayout and kvInputLayout",
+                                               ("qInputLayout=" + qLayout + ", kvInputLayout=" + kvLayout).c_str(),
+                                               "qInputLayout and kvInputLayout must be consistent");
         return ge::GRAPH_FAILED;
     }
 
     // 验证KV layout
     if (kvLayout == "TND") {
         if (keyShape->GetDimNum() != TND_DIM_NUM || valueShape->GetDimNum() != TND_DIM_NUM) {
-            OP_LOGE(context->GetNodeName(), "Layout TND, KV dims must be 3!");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                ("key dimNum=" + std::to_string(keyShape->GetDimNum()) +
+                 ", value dimNum=" + std::to_string(valueShape->GetDimNum()))
+                    .c_str(),
+                "when kvInputLayout is TND, the dim num of key and value must be 3");
             return ge::GRAPH_FAILED;
         }
 
@@ -149,17 +160,31 @@ static ge::graphStatus InferShapeBlockSparseAttention(gert::InferShapeContext* c
         int64_t kvD = keyShape->GetDim(TND_DIM_D);
 
         if (*numKvHeadsPtr != 0 && kvN != *numKvHeadsPtr) {
-            OP_LOGE(context->GetNodeName(), "KV heads mismatch in TND format: %ld != %ld", kvN, *numKvHeadsPtr);
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key",
+                ("headNum in key(dim1)=" + std::to_string(kvN) +
+                 ", attr numKeyValueHeads=" + std::to_string(*numKvHeadsPtr))
+                    .c_str(),
+                "the head num of key must be equal to the attr numKeyValueHeads in TND format");
             return ge::GRAPH_FAILED;
         }
 
         if (valueShape->GetDim(TND_DIM_D) != kvD) {
-            OP_LOGE(context->GetNodeName(), "K and V head dimension mismatch in TND format");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context->GetNodeName(), "key and value",
+                                                      ("headDim in key=" + std::to_string(kvD) + ", headDim in value=" +
+                                                       std::to_string(valueShape->GetDim(TND_DIM_D)))
+                                                          .c_str(),
+                                                      "the head dim of key and value must be consistent in TND format");
             return ge::GRAPH_FAILED;
         }
     } else if (kvLayout == "BNSD") {
         if (keyShape->GetDimNum() != BNSD_DIM_NUM || valueShape->GetDimNum() != BNSD_DIM_NUM) {
-            OP_LOGE(context->GetNodeName(), "Layout BNSD, KV dims must be 4!");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                ("key dimNum=" + std::to_string(keyShape->GetDimNum()) +
+                 ", value dimNum=" + std::to_string(valueShape->GetDimNum()))
+                    .c_str(),
+                "when kvInputLayout is BNSD, the dim num of key and value must be 4");
             return ge::GRAPH_FAILED;
         }
 
@@ -169,22 +194,41 @@ static ge::graphStatus InferShapeBlockSparseAttention(gert::InferShapeContext* c
         int64_t kvD = keyShape->GetDim(BNSD_DIM_D);
 
         if (*numKvHeadsPtr != 0 && kvN != *numKvHeadsPtr) {
-            OP_LOGE(context->GetNodeName(), "KV heads mismatch in BNSD format: %ld != %ld", kvN, *numKvHeadsPtr);
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key",
+                ("headNum in key(dim1)=" + std::to_string(kvN) +
+                 ", attr numKeyValueHeads=" + std::to_string(*numKvHeadsPtr))
+                    .c_str(),
+                "the head num of key must be equal to the attr numKeyValueHeads in BNSD format");
             return ge::GRAPH_FAILED;
         }
 
         if (valueShape->GetDim(BNSD_DIM_B) != kvB) {
-            OP_LOGE(context->GetNodeName(), "K and V batch dimension mismatch in BNSD format");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context->GetNodeName(), "key and value",
+                                                      ("batch in key=" + std::to_string(kvB) + ", batch in value=" +
+                                                       std::to_string(valueShape->GetDim(BNSD_DIM_B)))
+                                                          .c_str(),
+                                                      "the batch of key and value must be consistent in BNSD format");
             return ge::GRAPH_FAILED;
         }
 
         if (valueShape->GetDim(BNSD_DIM_D) != kvD) {
-            OP_LOGE(context->GetNodeName(), "K and V head dimension mismatch in BNSD format");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                ("headDim in key=" + std::to_string(kvD) +
+                 ", headDim in value=" + std::to_string(valueShape->GetDim(BNSD_DIM_D)))
+                    .c_str(),
+                "the head dim of key and value must be consistent in BNSD format");
             return ge::GRAPH_FAILED;
         }
     } else if (kvLayout == "BSND") {
         if (keyShape->GetDimNum() != BSND_DIM_NUM || valueShape->GetDimNum() != BSND_DIM_NUM) {
-            OP_LOGE(context->GetNodeName(), "Layout BSND, KV dims must be 4!");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                ("key dimNum=" + std::to_string(keyShape->GetDimNum()) +
+                 ", value dimNum=" + std::to_string(valueShape->GetDimNum()))
+                    .c_str(),
+                "when kvInputLayout is BSND, the dim num of key and value must be 4");
             return ge::GRAPH_FAILED;
         }
 
@@ -194,22 +238,36 @@ static ge::graphStatus InferShapeBlockSparseAttention(gert::InferShapeContext* c
         int64_t kvD = keyShape->GetDim(BSND_DIM_D);
 
         if (*numKvHeadsPtr != 0 && kvN != *numKvHeadsPtr) {
-            OP_LOGE(context->GetNodeName(), "KV heads mismatch in BSND format: %ld != %ld", kvN, *numKvHeadsPtr);
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key",
+                ("headNum in key(dim2)=" + std::to_string(kvN) +
+                 ", attr numKeyValueHeads=" + std::to_string(*numKvHeadsPtr))
+                    .c_str(),
+                "the head num of key must be equal to the attr numKeyValueHeads in BSND format");
             return ge::GRAPH_FAILED;
         }
 
         if (valueShape->GetDim(BSND_DIM_B) != kvB) {
-            OP_LOGE(context->GetNodeName(), "K and V batch dimension mismatch in BSND format");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context->GetNodeName(), "key and value",
+                                                      ("batch in key=" + std::to_string(kvB) + ", batch in value=" +
+                                                       std::to_string(valueShape->GetDim(BSND_DIM_B)))
+                                                          .c_str(),
+                                                      "the batch of key and value must be consistent in BSND format");
             return ge::GRAPH_FAILED;
         }
 
         if (valueShape->GetDim(BSND_DIM_D) != kvD) {
-            OP_LOGE(context->GetNodeName(), "K and V head dimension mismatch in BSND format");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                ("headDim in key=" + std::to_string(kvD) +
+                 ", headDim in value=" + std::to_string(valueShape->GetDim(BSND_DIM_D)))
+                    .c_str(),
+                "the head dim of key and value must be consistent in BSND format");
             return ge::GRAPH_FAILED;
         }
     } else {
-        OP_LOGE(context->GetNodeName(), "Unsupported KV layout: %s. Only TND/BNSD/BSND format is supported.",
-                kvInputLayoutPtr);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "kvInputLayout", kvLayout.c_str(),
+                                              "unsupported KV layout, only TND/BNSD/BSND format is supported");
         return ge::GRAPH_FAILED;
     }
 
@@ -236,7 +294,9 @@ static ge::graphStatus InferShapeBlockSparseAttention(gert::InferShapeContext* c
         (*softmaxLseShape)[BSND_DIM_S] = queryShape->GetDim(BSND_DIM_S);
         (*softmaxLseShape)[BSND_DIM_D] = LSE_DIM_D;
     } else {
-        OP_LOGE(context->GetNodeName(), "Unexpected Q layout in softmaxLse shape calculation: %s", qInputLayoutPtr);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            context->GetNodeName(), "qInputLayout", qLayout.c_str(),
+            "unexpected Q layout in softmaxLse shape calculation, only TND/BNSD/BSND are supported");
         return ge::GRAPH_FAILED;
     }
 

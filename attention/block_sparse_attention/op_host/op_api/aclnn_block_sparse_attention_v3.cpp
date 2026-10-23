@@ -18,6 +18,7 @@
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
 #include "opdev/tensor_view_utils.h"
+#include "aclnn_kernels/common/op_error_check.h"
 #include "aclnn_kernels/contiguous.h"
 #include "block_sparse_attention.h"
 #include "aclnn_block_sparse_attention_v3.h"
@@ -182,9 +183,9 @@ static bool CheckQuantModeAndDtype(int64_t quantMode, const aclTensor* query, co
 
 static aclnnStatus CheckMandatoryTensors(const aclTensor* query, const aclTensor* key, const aclTensor* value)
 {
-    CHECK_RET(query != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(key != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(value != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(query, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(key, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(value, return ACLNN_ERR_PARAM_NULLPTR);
     return ACLNN_SUCCESS;
 }
 
@@ -219,7 +220,9 @@ static aclnnStatus ValidateParams(const aclTensor* query, const aclTensor* key, 
                                   const aclTensor* pQuantScaleOptional, char* qInputLayout, char* kvInputLayout,
                                   const aclIntArray* blockShapeOptional, int64_t quantMode)
 {
-    CHECK_RET(CheckMandatoryTensors(query, key, value) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_NULLPTR);
+    if (CheckMandatoryTensors(query, key, value) != ACLNN_SUCCESS) {
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
 
     if (!CheckDataType(query, key, value)) {
         return ACLNN_ERR_PARAM_INVALID;
@@ -398,9 +401,8 @@ static aclnnStatus ValidateAdditionalParams(int64_t innerPrecise, int64_t quantM
         }
     }
 
-    CHECK_RET(attentionOut != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(workspaceSize != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(executor != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(attentionOut, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_COMM_INPUT(workspaceSize, executor);
 
     return ACLNN_SUCCESS;
 }
@@ -481,7 +483,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnBlockSparseAttentionV3Ge
         DFX_OUT(attentionOut, softmaxLseOptional));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     auto* executorImpl = uniqueExecutor.get();
     string qInputLayoutStr = ConvertLayoutString(qInputLayout);
     string kvInputLayoutStr = ConvertLayoutString(kvInputLayout);
