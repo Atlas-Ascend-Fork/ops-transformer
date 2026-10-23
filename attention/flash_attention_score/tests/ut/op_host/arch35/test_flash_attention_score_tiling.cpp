@@ -36,7 +36,7 @@ TEST_P(FlashAttentionScoreArch35TilingTest, tiling)
         "FlashAttentionScore",
         {param.query, param.key, param.value, param.real_shift, param.drop_mask, param.padding_mask, param.atten_mask,
          param.prefix, param.actual_seq_qlen, param.actual_seq_kvlen, param.q_start_idx, param.kv_start_idx,
-         param.dScaleQ, param.dScaleK, param.dScaleV, param.queryRope, param.keyRope, param.sink},
+         param.dScaleQ, param.dScaleK, param.dScaleV, param.queryRope, param.keyRope, param.sink, param.pScale},
         {param.softmaxMax, param.softmaxSum, param.softmaxOut, param.attentionOut},
         {
             {"scale_value", Ops::Transformer::AnyValue::CreateFrom<float>(param.scale_value)},
@@ -62,6 +62,12 @@ TEST_P(FlashAttentionScoreArch35TilingTest, tiling)
 INSTANTIATE_TEST_SUITE_P(
     FlashAttentionScore, FlashAttentionScoreArch35TilingTest,
     testing::ValuesIn(GetCasesFromCsv<FlashAttentionScoreTilingUtParam>(ReplaceFileExtension2Csv(__FILE__))),
+    PrintCaseInfoString<FlashAttentionScoreTilingUtParam>);
+
+INSTANTIATE_TEST_SUITE_P(
+    FlashAttentionScoreCoverage, FlashAttentionScoreArch35TilingTest,
+    testing::ValuesIn(GetCasesFromCsv<FlashAttentionScoreTilingUtParam>(
+        (std::filesystem::path(__FILE__).parent_path() / "test_flash_attention_score_tiling_coverage.csv").string())),
     PrintCaseInfoString<FlashAttentionScoreTilingUtParam>);
 
 } // namespace FlashAttentionScoreUT

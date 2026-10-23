@@ -119,6 +119,7 @@ struct FlashAttentionScoreTilingUtParam : public FlashAttentionScoreHostUtParamB
     gert::TilingContextPara::TensorDescription queryRope = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription keyRope = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription sink = TD_DEFAULT;
+    gert::TilingContextPara::TensorDescription pScale = TD_DEFAULT;
 
     gert::TilingContextPara::TensorDescription softmaxMax = TD_DEFAULT;
     gert::TilingContextPara::TensorDescription softmaxSum = TD_DEFAULT;
@@ -131,6 +132,10 @@ struct FlashAttentionScoreTilingUtParam : public FlashAttentionScoreHostUtParamB
 
     std::shared_ptr<std::vector<int64_t>> actual_seq_qlen_data;
     std::shared_ptr<std::vector<int64_t>> actual_seq_kvlen_data;
+
+    std::shared_ptr<std::vector<int64_t>> prefix_data;
+    std::shared_ptr<std::vector<int64_t>> q_start_idx_data;
+    std::shared_ptr<std::vector<int64_t>> kv_start_idx_data;
 
     FlashAttentionScoreTilingUtParam(const csv_map& csvMap)
         : FlashAttentionScoreHostUtParamBase(csvMap)
@@ -150,6 +155,7 @@ struct FlashAttentionScoreTilingUtParam : public FlashAttentionScoreHostUtParamB
             GetTensorGE(csvMap, "atten_mask_shape", "atten_mask_dtype", "atten_mask_format", this->atten_mask));
         this->inputInstance.emplace_back(
             GetTensorGE(csvMap, "prefix_shape", "prefix_dtype", "prefix_format", this->prefix));
+        ApplyConstData(csvMap, "prefix", this->prefix, this->prefix_data);
         this->inputInstance.emplace_back(GetTensorGE(csvMap, "actual_seq_qlen_shape", "actual_seq_qlen_dtype",
                                                      "actual_seq_qlen_format", this->actual_seq_qlen));
         ApplyConstData(csvMap, "actual_seq_qlen", this->actual_seq_qlen, this->actual_seq_qlen_data);
@@ -158,8 +164,10 @@ struct FlashAttentionScoreTilingUtParam : public FlashAttentionScoreHostUtParamB
         ApplyConstData(csvMap, "actual_seq_kvlen", this->actual_seq_kvlen, this->actual_seq_kvlen_data);
         this->inputInstance.emplace_back(
             GetTensorGE(csvMap, "q_start_idx_shape", "q_start_idx_dtype", "q_start_idx_format", this->q_start_idx));
+        ApplyConstData(csvMap, "q_start_idx", this->q_start_idx, this->q_start_idx_data);
         this->inputInstance.emplace_back(
             GetTensorGE(csvMap, "kv_start_idx_shape", "kv_start_idx_dtype", "kv_start_idx_format", this->kv_start_idx));
+        ApplyConstData(csvMap, "kv_start_idx", this->kv_start_idx, this->kv_start_idx_data);
         this->inputInstance.emplace_back(
             GetTensorGE(csvMap, "dScaleQ_shape", "dScaleQ_dtype", "dScaleQ_format", this->dScaleQ));
         this->inputInstance.emplace_back(
@@ -171,6 +179,8 @@ struct FlashAttentionScoreTilingUtParam : public FlashAttentionScoreHostUtParamB
         this->inputInstance.emplace_back(
             GetTensorGE(csvMap, "keyRope_shape", "keyRope_dtype", "keyRope_format", this->keyRope));
         this->inputInstance.emplace_back(GetTensorGE(csvMap, "sink_shape", "sink_dtype", "sink_format", this->sink));
+        this->inputInstance.emplace_back(
+            GetTensorGE(csvMap, "pScale_shape", "pScale_dtype", "pScale_format", this->pScale));
 
         this->outputInstance.emplace_back(
             GetTensorGE(csvMap, "softmaxMax_shape", "softmaxMax_dtype", "softmaxMax_format", this->softmaxMax));
