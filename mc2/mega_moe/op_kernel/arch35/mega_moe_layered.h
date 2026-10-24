@@ -32,20 +32,20 @@
 #include "../../../common/op_kernel/mc2_kernel_utils.h"
 #include "../../../common/op_kernel/quantize_functions.h"
 
-#include "common/mega_moe_types.h"
-#include "common/mega_moe_workspace.h"
-#include "common/mega_moe_utils.h"
-#include "common/mega_moe_mxfp8_utils.h"
-#include "common/mega_moe_layered_comm.h"
+#include "../arch35_92/common/mega_moe_types.h"
+#include "common/mega_moe_workspace_arch35.h"
+#include "../arch35_92/common/mega_moe_utils.h"
+#include "../arch35_92/common/mega_moe_mxfp8_utils.h"
+#include "../arch35_92/common/mega_moe_layered_comm.h"
 
-#include "blaze/epilogue/block_epilogue_activation_mx_quant.h"
+#include "../arch35_92/blaze/epilogue/mega_moe_block_epilogue_activation_mx_quant.h"
 
-#include "stage/mega_moe_token_quant.h"
-#include "stage/mega_moe_expert_count.h"
-#include "mega_moe_vf/mega_moe_layered_vf.h"
-#include "stage/mega_moe_gmm1_activation.h"
-#include "stage/mega_moe_gmm2_combine.h"
-#include "stage/mega_moe_layered_combine_send.h"
+#include "../arch35_92/stage/mega_moe_token_quant.h"
+#include "../arch35_92/stage/mega_moe_expert_count.h"
+#include "../arch35_92/mega_moe_vf/mega_moe_layered_vf.h"
+#include "../arch35_92/stage/mega_moe_gmm1_activation.h"
+#include "../arch35_92/stage/mega_moe_gmm2_combine.h"
+#include "../arch35_92/stage/mega_moe_layered_combine_send.h"
 
 namespace MegaMoeImpl {
 
@@ -610,7 +610,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitWorks
     (void)workspaceGM;
     params_.peermemInfo = PeermemInfo(tilingData, A_ELEMS_PER_BYTE, g_winRankAddr_[rankId_]);
     {
-        WorkspaceLayout workspaceLayout(tilingData, serverNum_);
+        WorkspaceLayoutArch35 workspaceLayout(tilingData, serverNum_);
         params_.workspaceInfo.Bind(params_.peermemInfo.cclDataPtr, workspaceLayout);
     }
     params_.tilingData = tilingData;
@@ -1373,9 +1373,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
 } // namespace MegaMoeImpl
 
 #if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL)
-#include "stage/mega_moe_layered_dispatch.h"
-#include "stage/mega_moe_layered_combine.h"
-#include "stage/mega_moe_layered_combine_relay.h"
+#include "../arch35_92/stage/mega_moe_layered_dispatch.h"
+#include "../arch35_92/stage/mega_moe_layered_combine.h"
+#include "../arch35_92/stage/mega_moe_layered_combine_relay.h"
 #endif
 
 #undef TemplateMegaMoeLayeredTypeClass

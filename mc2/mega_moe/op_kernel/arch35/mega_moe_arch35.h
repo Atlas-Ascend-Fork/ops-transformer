@@ -20,18 +20,18 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "../../../common/op_kernel/mc2_kernel_utils.h"
 #include "kernel_operator_list_tensor_intf.h"
-#include "common/mega_moe_types.h"
-#include "common/mega_moe_workspace.h"
-#include "common/mega_moe_utils.h"
-#include "common/mega_moe_exception_dump_policy.h"
-#include "blaze/epilogue/block_epilogue_activation_mx_quant.h"
-#include "stage/mega_moe_token_quant.h"
-#include "stage/mega_moe_send_mask.h"
-#include "stage/mega_moe_workspace_reset.h"
-#include "stage/mega_moe_token_dispatch_dedup.h"
-#include "stage/mega_moe_gmm1_activation.h"
-#include "stage/mega_moe_gmm2_combine_dedup.h"
-#include "stage/mega_moe_unpermute.h"
+#include "../arch35_92/common/mega_moe_types.h"
+#include "common/mega_moe_workspace_arch35.h"
+#include "../arch35_92/common/mega_moe_utils.h"
+#include "../arch35_92/common/mega_moe_arch35_92_exception_dump_policy.h"
+#include "../arch35_92/blaze/epilogue/mega_moe_block_epilogue_activation_mx_quant.h"
+#include "../arch35_92/stage/mega_moe_token_quant.h"
+#include "../arch35_92/stage/mega_moe_send_mask.h"
+#include "../arch35_92/stage/mega_moe_workspace_reset.h"
+#include "../arch35_92/stage/mega_moe_token_dispatch_dedup.h"
+#include "../arch35_92/stage/mega_moe_gmm1_activation.h"
+#include "../arch35_92/stage/mega_moe_gmm2_combine_dedup.h"
+#include "../arch35_92/stage/mega_moe_unpermute.h"
 #include "../../../common/op_kernel/quantize_functions.h"
 
 namespace MegaMoeImpl {
@@ -90,6 +90,10 @@ protected:
     typename SharedA8W4Config::BlockContext sharedBlockContext_{};
     __aicore__ inline void SendAndQuantBuffInit();
     __aicore__ inline void DispatchBuffInit();
+    template <bool NeedCumsumReload = false>
+    __aicore__ inline void PrepareMoeExpertTokenCountTable();
+    __aicore__ inline void ReloadDispatchCumsumRange(uint32_t firstExpertIdx, uint32_t lastExpertIdx);
+    __aicore__ inline void ExportExpertTokenCounts();
     __aicore__ inline void EnterSteadyDispatch();
     __aicore__ inline void InitQuantTokenBufferConfig();
     __aicore__ inline UnpermuteBufferConfig InitTokenUnpermuteBuffers();
@@ -326,7 +330,7 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::Init(
     (void)workspaceGM;
     params_.peermemInfo = PeermemInfo(tilingData, A_ELEMS_PER_BYTE, g_winRankAddr_[rankId_]);
     {
-        WorkspaceLayout workspaceLayout(tilingData);
+        WorkspaceLayoutArch35 workspaceLayout(tilingData);
         params_.workspaceInfo.Bind(params_.peermemInfo.cclDataPtr, workspaceLayout);
     }
     params_.tilingData = tilingData;
@@ -412,6 +416,101 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::DispatchBuffInit()
         LocalTensor<int32_t>(TPosition::VECCALC, metaInfoTensorAddr, metaInfoTensorSize / sizeof(int32_t));
     scratch.dedupUbBaseAddr = static_cast<uint32_t>(Ops::Base::CeilAlign(
         static_cast<uint64_t>(metaInfoTensorAddr + metaInfoTensorSize), static_cast<uint64_t>(ALIGN_512)));
+}
+
+// A5 按原有模式保存前缀表，发布专家计数和准备完成标志。
+template <TemplateMegaMoeTypeClass>
+template <bool NeedCumsumReload>
+__aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::PrepareMoeExpertTokenCountTable()
+{
+    if constexpr (g_coreType == AIC) {
+        return;
+    }
+    if (GetSubBlockIdx() != 1U) {
+        // AIV0 不读取 count，但 mode 0 需要全部 AIV 每轮各上报一次；参与去重建表的 AIV0
+        // 经 PrepareDedupPrepassAiv0Local -> LoadAndComputeExpertCountTable 已上报，此处不得重复。
+        // 条件必须与 PrepareDedupPrepassAiv0Local 的启用门严格互补（含 hiddenDim 档位），
+        // 否则计算主导档的 AIV0 无人上报，ExportAndResetExpertCounts 等 read-done 挂死。
+        if (params_.tilingData->dedupMode == 0 || params_.tilingData->hiddenDim > DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
+            CrossCoreSetFlag<ALL_AICORE_SYNC_MODE, PIPE_V>(COUNT_TABLE_READ_DONE_FLAG);
+        }
+        return;
+    }
+    LoadAndComputeExpertCountTable(commonConfig_, params_, tokenDispatchScratch_);
+    uint32_t rawCountElementCount = commonConfig_.worldSize * commonConfig_.moeExpertPerRank;
+    uint64_t countOffset = GetExpertCountWorkspaceOffset(countWorkspace_, commonConfig_.moeExpertPerRank, 0U, true);
+    SyncFuncStatic<AscendC::HardEvent::V_MTE3, SYNC_EVENT_ID2>();
+    DataCopyPad(tokenDispatchScratch_.expertRevNumsGlobalTensor[countOffset],
+                tokenDispatchScratch_.expertTokenNumsOutTensor,
+                {1U, commonConfig_.moeExpertPerRank * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U});
+    if constexpr (NeedCumsumReload) {
+        DataCopyPad(tokenDispatchScratch_.cumsumInfoGlobalTensor, tokenDispatchScratch_.cumsumInfoTensor,
+                    {1U, rawCountElementCount * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U});
+    }
+    SyncFuncStatic<AscendC::HardEvent::MTE3_S, SYNC_EVENT_ID2>();
+
+    __gm__ int32_t* countTableReady =
+        reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.flagSendCntCalToUpdParamsPtr) +
+        static_cast<uint64_t>(countWorkspace_.blockIdx) * INT_CACHELINE;
+    WriteGmByPassDCache(countTableReady, static_cast<int32_t>(1));
+}
+
+// Activation 可能覆盖前缀表，Dispatch 前恢复所需专家范围。
+template <TemplateMegaMoeTypeClass>
+__aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::ReloadDispatchCumsumRange(uint32_t firstExpertIdx,
+                                                                                   uint32_t lastExpertIdx)
+{
+    if constexpr (g_coreType == AIC) {
+        return;
+    }
+    if (GetSubBlockIdx() != 1U) {
+        return;
+    }
+
+    if (firstExpertIdx >= commonConfig_.moeExpertPerRank || firstExpertIdx > lastExpertIdx) {
+        return;
+    }
+    if (lastExpertIdx >= commonConfig_.moeExpertPerRank) {
+        lastExpertIdx = commonConfig_.moeExpertPerRank - 1U;
+    }
+    constexpr uint32_t INT32_PER_32B = ALIGN_32 / sizeof(int32_t);
+    uint32_t requiredBeginIndex = firstExpertIdx == 0U ? 0U : firstExpertIdx * commonConfig_.worldSize - 1U;
+    uint32_t alignedBeginIndex = requiredBeginIndex / INT32_PER_32B * INT32_PER_32B;
+    uint32_t requiredEndIndex = (lastExpertIdx + 1U) * commonConfig_.worldSize;
+    uint32_t reloadElementCount = requiredEndIndex - alignedBeginIndex;
+    DataCopyPad(tokenDispatchScratch_.cumsumInfoTensor[alignedBeginIndex],
+                tokenDispatchScratch_.cumsumInfoGlobalTensor[alignedBeginIndex],
+                {1U, reloadElementCount * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U}, {true, 0U, 0U, 0U});
+    SyncFuncStatic<AscendC::HardEvent::MTE2_S, SYNC_EVENT_ID2>();
+}
+
+// 调用方已限定为 block 0 的 AIV1；A5 导出前从 GM 恢复专家计数表。
+template <TemplateMegaMoeTypeClass>
+__aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::ExportExpertTokenCounts()
+{
+    if constexpr (g_coreType == AIC) {
+        return;
+    }
+    if (countWorkspace_.blockIdx != 0U) {
+        return;
+    }
+
+    {
+        uint64_t countOffset = GetExpertCountWorkspaceOffset(countWorkspace_, commonConfig_.moeExpertPerRank, 0U, true);
+        GlobalTensor<int32_t> expertRecvTokenCount;
+        expertRecvTokenCount.SetGlobalBuffer(
+            reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.expertRecvTokenCountPtr));
+        DataCopyPad(tokenDispatchScratch_.expertTokenNumsOutTensor, expertRecvTokenCount[countOffset],
+                    {1U, commonConfig_.moeExpertPerRank * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U},
+                    {true, 0U, 0U, 0U});
+        SyncFuncStatic<HardEvent::MTE2_MTE3, SYNC_EVENT_ID2>();
+    }
+
+    GlobalTensor<int32_t> expertTokenNumsOut;
+    expertTokenNumsOut.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params_.expertTokenNumsOutGmAddr));
+    DataCopyPad(expertTokenNumsOut, tokenDispatchScratch_.expertTokenNumsOutTensor,
+                {1U, commonConfig_.moeExpertPerRank * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U});
+    SyncFuncStatic<HardEvent::MTE3_S, SYNC_EVENT_ID2>();
 }
 
 template <TemplateMegaMoeTypeClass>
@@ -825,7 +924,7 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::RunGmm2CombineForExpert
                         }
                     }
                     combineBufferConfig =
-                        InitWaveCombineBuffersDedup<true>(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
+                        InitWaveCombineBuffersDedup(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
                     RunWaveCombineStageDedup<true>(commonConfig_, waveCombineJob_, combineBufferConfig,
                                                    waveCombineScratch_, waveCombineDedupScratch_, params_, state,
                                                    state.expertIdx, combineRowSequence);
@@ -912,7 +1011,7 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::ExportAndResetExpertCou
         resetRange = GetBalancedWorkRange(commonConfig_.worldSize * commonConfig_.moeExpertPerRank,
                                           {.jobIndex = blockIdx_, .totalJobs = blockNum_});
     } else if (blockIdx_ == 0U) {
-        ExportExpertTokenCounts(commonConfig_, countWorkspace_, params_, tokenDispatchScratch_);
+        ExportExpertTokenCounts();
     }
     // 输出核先搬出再消费事件；清零核在写 GM 前等待全部读取完成，每个 AIV 每轮 wait 一次。
     CrossCoreWaitFlag<ALL_AICORE_SYNC_MODE, PIPE_MTE3>(COUNT_TABLE_READ_DONE_FLAG);

@@ -16,7 +16,7 @@
 #ifndef MEGA_MOE_WAVE_A8W8_H
 #define MEGA_MOE_WAVE_A8W8_H
 
-#include "common/mega_moe_utils.h"
+#include "../arch35_92/common/mega_moe_utils.h"
 #include "mega_moe_arch35.h"
 
 namespace MegaMoeImpl {
@@ -57,6 +57,7 @@ private:
     static constexpr uint32_t EPILOGUE_TILE_M = MegaMoeBase::EPILOGUE_TILE_M;
 
     using MegaMoeBase::DispatchBuffInit;
+    using MegaMoeBase::PrepareMoeExpertTokenCountTable;
     using MegaMoeBase::EnterSteadyDispatch;
     using MegaMoeBase::commonConfig_;
     using MegaMoeBase::countWorkspace_;
@@ -551,7 +552,7 @@ __aicore__ inline void MegaMoeA8W8Wave<TemplateMegaMoeA8W8WaveTypeFunc>::Process
         // 预挂去重事件（必须在上面的 early return 之后：不干活的 wave 不挂，挂了没人收）。
         ArmWaveCombineDedupEvents();
         CombineBufferConfig activeBufferConfig =
-            InitWaveCombineBuffersDedup<true>(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
+            InitWaveCombineBuffersDedup(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
         uint32_t rowSequence = 0U;
         RunWaveCombineStageDedup<true>(commonConfig_, waveCombineJob_, activeBufferConfig, waveCombineScratch_,
                                        waveCombineDedupScratch_, params_, allCoreCombineExpertState,
@@ -592,8 +593,12 @@ MegaMoeA8W8Wave<TemplateMegaMoeA8W8WaveTypeFunc>::InitMoeCombineBufferConfig(boo
     if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
         combineBufferConfig = InitCombineBuffers();
     } else if (dedupCombineActive) {
-        combineBufferConfig =
-            InitWaveCombineBuffersDedup<false>(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
+        if constexpr (g_coreType == AIV) {
+            if (GetSubBlockIdx() == 1U) {
+                combineBufferConfig =
+                    InitWaveCombineBuffersDedup(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
+            }
+        }
     }
     return combineBufferConfig;
 }
@@ -602,7 +607,7 @@ MegaMoeA8W8Wave<TemplateMegaMoeA8W8WaveTypeFunc>::InitMoeCombineBufferConfig(boo
 template <TemplateMegaMoeA8W8WaveTypeClass>
 __aicore__ inline void MegaMoeA8W8Wave<TemplateMegaMoeA8W8WaveTypeFunc>::PrepareMoeCountAndDedupTables()
 {
-    PrepareMoeExpertTokenCountTable(commonConfig_, countWorkspace_, params_, tokenDispatchScratch_);
+    PrepareMoeExpertTokenCountTable();
     if (tokenDispatchConfig_.dedup.dedupMode != 0) {
         // 去重建表：route 槽到达保证与 count epoch 校验同源；函数尾部含 AIV1 间栅栏。
         PrepareDedupPrepassAiv0Local(tokenDispatchConfig_.dedup, commonConfig_, params_, tokenDispatchScratch_);

@@ -15,8 +15,8 @@
 #include <string>
 #include <vector>
 #include <gtest/gtest.h>
-#include "../../../../op_kernel/arch35/common/mega_moe_workspace.h"
-#include "../../../../op_kernel/arch35/mega_moe_tiling.h"
+#include "../../../../op_kernel/arch35/common/mega_moe_workspace_arch35.h"
+#include "../../../../op_kernel/arch35_92/mega_moe_tiling.h"
 #include "mc2_tiling_case_executor.h"
 
 namespace MegaMoeUT {
@@ -132,7 +132,7 @@ static void ExpectCclBufferCapacity(const TilingInfo& tilingInfo, int64_t cclBuf
     ASSERT_GE(tilingInfo.tilingDataSize, sizeof(MegaMoeTilingData));
     MegaMoeTilingData tilingData{};
     std::memcpy(&tilingData, tilingInfo.tilingData.get(), sizeof(tilingData));
-    MegaMoeImpl::WorkspaceLayout workspaceLayout(&tilingData);
+    MegaMoeImpl::WorkspaceLayoutArch35 workspaceLayout(&tilingData);
     const int64_t communicationCapacity = CalcCclCommunicationCapacity(tilingData);
 
     ASSERT_GT(workspaceLayout.workspaceSize, 0);
@@ -221,7 +221,7 @@ TEST_F(MegaMoeArch35TilingTest, CclBufferExactCapacityAndOneByteShort)
     ASSERT_GE(initialInfo.tilingDataSize, sizeof(MegaMoeTilingData));
     MegaMoeTilingData tilingData{};
     std::memcpy(&tilingData, initialInfo.tilingData.get(), sizeof(tilingData));
-    MegaMoeImpl::WorkspaceLayout workspaceLayout(&tilingData);
+    MegaMoeImpl::WorkspaceLayoutArch35 workspaceLayout(&tilingData);
     const int64_t communicationCapacity = CalcCclCommunicationCapacity(tilingData);
     const int64_t requiredSize = communicationCapacity + workspaceLayout.workspaceSize;
 
@@ -570,7 +570,7 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
     std::memcpy(&tilingData, tilingInfo.tilingData.get(), sizeof(tilingData));
     if (combineCommMode == 2) {
         EXPECT_EQ(tilingData.dedupMode, MegaMoeImpl::DEDUP_MODE_SERVER_COMBINE);
-        MegaMoeImpl::WorkspaceLayout workspace(&tilingData);
+        MegaMoeImpl::WorkspaceLayoutArch35 workspace(&tilingData);
         EXPECT_GE(workspace.tokenIdsOffset, 0);
     }
     if (activation != "situglu") {
@@ -728,7 +728,7 @@ TEST_F(MegaMoeArch35TilingTest, BS128_NumMaxTokens256_URMA_WorkspaceUsesCapacity
     tilingData.numMaxTokensPerRank = 256;
     tilingData.rankNumPerServer = 1;
 
-    MegaMoeImpl::WorkspaceLayout workspaceLayout(&tilingData);
+    MegaMoeImpl::WorkspaceLayoutArch35 workspaceLayout(&tilingData);
     const int64_t actualMaskWorkspaceBytes =
         workspaceLayout.dispatchRelaySendQueueOffset - workspaceLayout.maskSlotOffset;
     const int64_t capacityMaskSlotBytes =
@@ -1157,11 +1157,11 @@ TEST_F(MegaMoeArch35TilingTest, ServerCombineCountAndContributionSlotsStayWithin
                     const int64_t clearBytes =
                         layout.dispatchFlag.size + layout.sourceReady.size + layout.contributionReady.size;
                     EXPECT_EQ(layout.dispatchFlag.offset + clearBytes, layout.contribution.offset);
-                    WorkspaceLayout workspace(&tiling, serverNum);
+                    WorkspaceLayoutArch35 workspace(&tiling, serverNum);
                     EXPECT_EQ(workspace.dispatchRevWeightsOffset, INVALID_WORKSPACE_OFFSET);
                     auto prefetchTiling = tiling;
                     prefetchTiling.topkWeightsPrefetch = 1;
-                    WorkspaceLayout prefetchWorkspace(&prefetchTiling, serverNum);
+                    WorkspaceLayoutArch35 prefetchWorkspace(&prefetchTiling, serverNum);
                     EXPECT_NE(prefetchWorkspace.dispatchRevWeightsOffset, INVALID_WORKSPACE_OFFSET);
                     EXPECT_EQ(workspace.serverCombineResetBytes,
                               Ops::Base::CeilAlign(serverNum * INT_CACHELINE * static_cast<int64_t>(sizeof(int32_t)),

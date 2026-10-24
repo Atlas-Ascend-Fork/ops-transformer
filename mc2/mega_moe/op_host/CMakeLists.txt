@@ -17,13 +17,17 @@ if (BUILD_OPEN_PROJECT)  # custom
         OP_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../op_api
         OP_MC2_ENABLE ON
         OPTYPE mega_moe ACLNNTYPE aclnn_inner)
+
     set(SUB_MC2_COMPILE TRUE PARENT_SCOPE)
     set(MC2_OPT ON PARENT_SCOPE)
     set(mega_moe_depends mc2/common mc2/3rd  PARENT_SCOPE)
     set(mega_moe_apt_depends mc2/common mc2/3rd PARENT_SCOPE)
+    set(mega_moe_apt_arch92_depends mc2/common mc2/3rd PARENT_SCOPE)
+    set(mega_moe_apt_arch92_dir ${CMAKE_CURRENT_SOURCE_DIR}/.. PARENT_SCOPE)
 
     set(CONDITION_UNIT ${ASCEND_COMPUTE_UNIT})
-    if ("${CONDITION_UNIT}" STREQUAL "ascend950")
+    if ("${CONDITION_UNIT}" STREQUAL "ascend950" OR
+        "${CONDITION_UNIT}" STREQUAL "ascend960dt")
         add_ops_compile_options(
             OP_NAME MegaMoe
             OPTIONS --cce-auto-sync=off

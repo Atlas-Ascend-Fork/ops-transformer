@@ -16,7 +16,7 @@
 #ifndef MEGA_MOE_WAVE_A8W4_H
 #define MEGA_MOE_WAVE_A8W4_H
 
-#include "common/mega_moe_utils.h"
+#include "../arch35_92/common/mega_moe_utils.h"
 #include "mega_moe_arch35.h"
 
 namespace MegaMoeImpl {
@@ -51,6 +51,8 @@ private:
     static constexpr uint32_t EPILOGUE_TILE_M = MegaMoeBase::EPILOGUE_TILE_M;
 
     using MegaMoeBase::DispatchBuffInit;
+    using MegaMoeBase::PrepareMoeExpertTokenCountTable;
+    using MegaMoeBase::ReloadDispatchCumsumRange;
     using MegaMoeBase::EnterSteadyDispatch;
     using MegaMoeBase::RunGmm2CombineForExpert;
     using MegaMoeBase::exceptionDump_;
@@ -165,8 +167,7 @@ __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::Dispatc
         // 规划完成后再判断是否得到有效专家 slice，调度函数本身不参与流程分支。
         if (nextExpertDispatchRange.end.globalTokenIndex > nextExpertDispatchRange.begin.globalTokenIndex) {
             // 当前 WAVE 的 Activation 可能覆盖 prefix UB；只恢复本专家 slice 所需的前缀。
-            ReloadDispatchCumsumRange(commonConfig_, tokenDispatchScratch_, nextExpertDispatchRange.begin.expertIdx,
-                                      nextExpertDispatchRange.begin.expertIdx);
+            ReloadDispatchCumsumRange(nextExpertDispatchRange.begin.expertIdx, nextExpertDispatchRange.begin.expertIdx);
             DispatchTokenRange<TopkIndexType, ActivationType, QuantScaleOutType, GMM1_TILE_M, TopkWeightsPrefetch>(
                 tokenDispatchConfig_, commonConfig_, gmmExecutionConfig_.blockJob, syncWorkspaceLayout_, params_,
                 g_winRankAddr_, tokenDispatchScratch_, nextExpertDispatchRange);
@@ -281,7 +282,7 @@ __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::Process
     // GMM1/GMM2 交错流水只记录一次阶段入口，各 Wave 完成轮次由独立计数记录。
     exceptionDump_.UpdateStage(MegaMoeImpl::Stage::MOE_GMM1_ACTIVATION);
     DispatchBuffInit();
-    PrepareMoeExpertTokenCountTable<true>(commonConfig_, countWorkspace_, params_, tokenDispatchScratch_);
+    this->template PrepareMoeExpertTokenCountTable<true>();
     if (tokenDispatchConfig_.dedup.dedupMode != 0) {
         // 去重建表：route 槽到达保证与 count epoch 校验同源；函数尾部含 AIV1 间栅栏。
         PrepareDedupPrepassAiv0Local(tokenDispatchConfig_.dedup, commonConfig_, params_, tokenDispatchScratch_);
@@ -293,8 +294,12 @@ __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::Process
         combineBufferConfig = InitWaveCombineBuffers<CombineQuantMode>(commonConfig_, waveCombineScratch_);
     } else if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
         // 非量化 combine 去重：专家粒度独立消费（基类 RunGmm2CombineForExpert 内接入）。
-        combineBufferConfig =
-            InitWaveCombineBuffersDedup<false>(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
+        if constexpr (g_coreType == AIV) {
+            if (GetSubBlockIdx() == 1U) {
+                combineBufferConfig =
+                    InitWaveCombineBuffersDedup(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
+            }
+        }
     }
 
     GMMAddrInfo gmm1AddrInfo{};

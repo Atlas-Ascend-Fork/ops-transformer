@@ -295,6 +295,20 @@ public:
 
         this->AICore().AddConfig("ascend950", aicore_config);
 
+        OpAICoreConfig aicore_config_arch92;
+        aicore_config_arch92.DynamicCompileStaticFlag(true)
+            .DynamicFormatFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .NeedCheckSupportFlag(false)
+            .PrecisionReduceFlag(true)
+            .ExtendCfgInfo("aclnnSupport.value", "support_aclnn")
+            .ExtendCfgInfo("prebuildPattern.value", "Opaque")
+            .ExtendCfgInfo("jitCompile.flag", "static_true")
+            .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel")
+            .ExtendCfgInfo("opFile.value", "mega_moe_apt_arch92");
+        this->AICore().AddConfig("ascend960dt", aicore_config_arch92);
+
         OpAICoreConfig aicore_config_arch22;
         aicore_config_arch22.Input("context")
             .ParamType(REQUIRED)

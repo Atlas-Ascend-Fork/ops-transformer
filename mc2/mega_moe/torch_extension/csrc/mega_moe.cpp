@@ -168,8 +168,8 @@ struct MegaMoeTensorInputs {
     const c10::optional<at::Tensor>& maskBuffer;
 };
 
-// 950 的 x 物理存储类型校验，量化模式和类型组合仍由 tiling 校验。
-static void CheckMegaMoeXInput950(const at::Tensor& x, const char* socName)
+// MX 平台的存储类型校验；量化模式及类型组合仍由 tiling 校验。
+static void CheckMegaMoeMxXInput(const at::Tensor& x, const char* socName)
 {
     CheckNpuInput(x, "x", socName);
     const auto xScalarType = x.scalar_type();
@@ -180,24 +180,24 @@ static void CheckMegaMoeXInput950(const at::Tensor& x, const char* socName)
                 socName, ", but got ", xScalarType, ".");
 }
 
-static void CheckMegaMoeInputsA5(const MegaMoeTensorInputs& inputs, int64_t epWorldSize, int64_t moeExpertNum,
+static void CheckMegaMoeMxInputs(const MegaMoeTensorInputs& inputs, int64_t epWorldSize, int64_t moeExpertNum,
                                  const char* socName)
 {
     TORCH_CHECK(moeExpertNum >= epWorldSize && moeExpertNum <= 2048 && moeExpertNum % epWorldSize == 0,
                 "num_experts must be in [ep_world_size, 2048] and divisible by ep_world_size on ", socName,
                 ", but got num_experts=", moeExpertNum, " and ep_world_size=", epWorldSize);
-    TORCH_CHECK(!inputs.weight1.empty(), "l1_weights must not be empty on Ascend950.");
-    TORCH_CHECK(!inputs.weight2.empty(), "l2_weights must not be empty on Ascend950.");
+    TORCH_CHECK(!inputs.weight1.empty(), "l1_weights must not be empty on ", socName, ".");
+    TORCH_CHECK(!inputs.weight2.empty(), "l2_weights must not be empty on ", socName, ".");
     TORCH_CHECK(inputs.weightScales1.has_value() && !inputs.weightScales1->empty(),
-                "l1_weights_sf must not be None or empty on Ascend950.");
+                "l1_weights_sf must not be None or empty on ", socName, ".");
     TORCH_CHECK(inputs.weightScales2.has_value() && !inputs.weightScales2->empty(),
-                "l2_weights_sf must not be None or empty on Ascend950.");
+                "l2_weights_sf must not be None or empty on ", socName, ".");
     CheckInputAbsent(inputs.xActiveMask, "x_active_mask", socName);
     CheckInputAbsent(inputs.bias1, "l1_bias", socName);
     CheckInputAbsent(inputs.bias2, "l2_bias", socName);
     CheckInputAbsent(inputs.sharedBias1, "shared_l1_bias", socName);
     CheckInputAbsent(inputs.sharedBias2, "shared_l2_bias", socName);
-    CheckMegaMoeXInput950(inputs.x, socName);
+    CheckMegaMoeMxXInput(inputs.x, socName);
     CheckNpuInput(inputs.context, "context", socName);
     CheckNpuInput(inputs.topkIds, "topk_ids", socName);
     CheckNpuInput(inputs.topkWeights, "topk_weights", socName);
@@ -228,14 +228,14 @@ static void CheckMegaMoeInputsA5(const MegaMoeTensorInputs& inputs, int64_t epWo
 }
 
 static void CheckMegaMoeInputs(const MegaMoeTensorInputs& inputs, int64_t epWorldSize, int64_t moeExpertNum,
-                               const char* socName, bool isAscend950)
+                               const char* socName, bool isMxPlatform)
 {
     TORCH_CHECK((epWorldSize > 0), "The ep_world_sizes should be greater than 0, current is: ", epWorldSize);
-    if (isAscend950) {
-        CheckMegaMoeInputsA5(inputs, epWorldSize, moeExpertNum, socName);
+    if (isMxPlatform) {
+        CheckMegaMoeMxInputs(inputs, epWorldSize, moeExpertNum, socName);
     }
     TORCH_CHECK((inputs.x.dim() == DIM_TWO) && (inputs.topkIds.dim() == DIM_TWO), "The x and topk_ids should be 2D");
-    if (!isAscend950) {
+    if (!isMxPlatform) {
         TORCH_CHECK(inputs.x.scalar_type() == at::kBFloat16 || inputs.x.scalar_type() == at::kHalf,
                     "dtype of x should be bfloat16 or float16.");
     }
@@ -291,9 +291,10 @@ std::tuple<at::Tensor, at::Tensor> NpuMegaMoe(
     const char* socName = aclrtGetSocName();
     const bool isArch22 = socName != nullptr && (std::strstr(socName, "Ascend910B") != nullptr ||
                                                  std::strstr(socName, "Ascend910_93") != nullptr);
-    const bool isAscend950 = socName != nullptr && std::strstr(socName, "Ascend950") != nullptr;
-    CheckMegaMoeInputs(inputs, epWorldSize, moeExpertNum, socName, isAscend950);
-    if (isAscend950) {
+    const bool isMxPlatform = socName != nullptr && (std::strstr(socName, "Ascend950") != nullptr ||
+                                                     std::strstr(socName, "Ascend960DT") != nullptr);
+    CheckMegaMoeInputs(inputs, epWorldSize, moeExpertNum, socName, isMxPlatform);
+    if (isMxPlatform) {
         CheckWeightType(weight1Type, "weight1_type", socName);
         CheckWeightType(weight2Type, "weight2_type", socName);
         CheckWeightType(sharedWeight1Type, "shared_weight1_type", socName);
@@ -303,6 +304,8 @@ std::tuple<at::Tensor, at::Tensor> NpuMegaMoe(
     const auto xScalarType = x.scalar_type();
     const bool hasDispatchQuantOutDtype =
         dispatchQuantOutDtype.has_value() && dispatchQuantOutDtype.value() != GE_DTYPE_UNDEFINED;
+    const bool hasSharedExpertQuantOutDtype =
+        sharedExpertQuantOutDtype.has_value() && sharedExpertQuantOutDtype.value() != GE_DTYPE_UNDEFINED;
     aclDataType dispatchQuantAclDtype =
         hasDispatchQuantOutDtype ? GetAclDataType(dispatchQuantOutDtype.value()) : ACL_DT_UNDEFINED;
     // 当前 Torch C++ ScalarType 未统一提供 FP4 枚举；只有协议明确声明 FP4 时，uint8 才承载两个 E2M1 元素。
@@ -349,7 +352,7 @@ std::tuple<at::Tensor, at::Tensor> NpuMegaMoe(
 
     const bool dispatchQuantOutIsFp4 =
         dispatchQuantOutDtype.has_value() && dispatchQuantOutDtype.value() == static_cast<int64_t>(DType::FLOAT4_E2M1);
-    const bool sharedQuantOutIsFp4 = sharedExpertQuantOutDtype.has_value() ?
+    const bool sharedQuantOutIsFp4 = hasSharedExpertQuantOutDtype ?
                                          sharedExpertQuantOutDtype.value() == static_cast<int64_t>(DType::FLOAT4_E2M1) :
                                          dispatchQuantOutIsFp4;
     if (dispatchQuantOutIsFp4 || sharedQuantOutIsFp4) {
@@ -372,9 +375,10 @@ std::tuple<at::Tensor, at::Tensor> NpuMegaMoe(
     int64_t rankNumPerServerValue = rankNumPerServer.value_or(2);
 
     // 这里传给 ACLNN 的是 GE dtype 属性；GE DT_UNDEFINED 为 28，与 ACL_DT_UNDEFINED=-1 不同。
-    int64_t dispatchQuantResultType =
-        dispatchQuantOutDtype.has_value() ? static_cast<int64_t>(GetAclDataType(dispatchQuantOutDtype.value())) : 28;
-    int64_t sharedExpertQuantResultType = sharedExpertQuantOutDtype.has_value() ?
+    int64_t dispatchQuantResultType = hasDispatchQuantOutDtype ?
+                                          static_cast<int64_t>(GetAclDataType(dispatchQuantOutDtype.value())) :
+                                          GE_DTYPE_UNDEFINED;
+    int64_t sharedExpertQuantResultType = hasSharedExpertQuantOutDtype ?
                                               static_cast<int64_t>(GetAclDataType(sharedExpertQuantOutDtype.value())) :
                                               dispatchQuantResultType;
 
@@ -391,7 +395,7 @@ std::tuple<at::Tensor, at::Tensor> NpuMegaMoe(
     aclDataType xAclDtype = isPackedFp4X ? ACL_FLOAT4_E2M1 : ConvertToAclDataType(xScalarType);
     TensorWrapper xWrapper = {x, xAclDtype};
 
-    if (isAscend950) {
+    if (isMxPlatform) {
         CheckWeightDtype(weight1Ref, weight1RefDtype, "l1_weights", socName);
         CheckWeightDtype(weight2Ref, weight2RefDtype, "l2_weights", socName);
     }
@@ -421,7 +425,7 @@ std::tuple<at::Tensor, at::Tensor> NpuMegaMoe(
                    aclDataType::ACL_UINT64;
     };
 
-    if (isAscend950) {
+    if (isMxPlatform) {
         CheckWeightDtype(sharedWeight1Ref, sharedWeight1RefDtype, "shared_l1_weights", socName);
         CheckWeightDtype(sharedWeight2Ref, sharedWeight2RefDtype, "shared_l2_weights", socName);
     }
@@ -468,8 +472,9 @@ constexpr int64_t EXCEPTION_DUMP_REGION_SIZE = 60LL * 1024LL;
 constexpr int64_t PEERMEM_DATA_OFFSET = 60LL * 1024LL;
 constexpr int64_t PEERMEM_MTE_COUNT_REGION_SIZE = 512LL * 2048LL;
 // 此 JIT 源文件随 wheel 搬移，包中不包含 op_kernel 头文件。下列架构和布局上界须与
-// arch35/common/mega_moe_constants.h、arch35/common/mega_moe_workspace.h 保持一致。
+// arch35_92/common/mega_moe_constants.h 及 arch35、arch92 各自的 Workspace 布局保持一致。
 constexpr int64_t ARCH35_MAX_AIC_NUM = 36LL;
+constexpr int64_t ARCH92_MAX_AIC_NUM = 64LL;
 constexpr int64_t ARCH35_MAX_SHARED_EXPERT_NUM = 4LL;
 constexpr int64_t ARCH35_INT_CACHELINE = 16LL;
 constexpr int64_t ARCH35_MX_SCALE_DIVISOR = 64LL;
@@ -634,7 +639,7 @@ int64_t CalcUrmaCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64
 }
 
 // 创建 SymmBuffer 时尚未传入具体权重列表，按 WorkspaceLayout 的分配顺序保守预留：
-// A8W4、共享专家独立量化、arch35 核数上界及 4 个共享专家。
+// A8W4、共享专家独立量化、对应架构的核数上界及 4 个共享专家。
 // 根据已知通信模式排除 tiling 不会分配的区域。
 struct CclDataBudget {
     int64_t epWorldSize;
@@ -645,6 +650,7 @@ struct CclDataBudget {
     int64_t topkWeightsType;
     int64_t serverNum;
     int64_t expertPerRank;
+    int64_t aicNum;
     int64_t hiddenDim;
     int64_t maxOutput{0};
     int64_t wavesPerExpert{0};
@@ -657,7 +663,7 @@ struct CclDataBudget {
 
     CclDataBudget(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank, int64_t numTopk,
                   int64_t hidden, int64_t intermediateHidden, int64_t maxRecvTokenNum, int64_t topkWeightsType,
-                  int64_t serverNum, int64_t combineQuantMode, int64_t combineCommMode)
+                  int64_t serverNum, int64_t combineQuantMode, int64_t combineCommMode, int64_t maxAicNum)
         : epWorldSize(epWorldSize),
           numMaxTokensPerRank(numMaxTokensPerRank),
           numTopk(numTopk),
@@ -666,6 +672,7 @@ struct CclDataBudget {
           topkWeightsType(topkWeightsType),
           serverNum(serverNum),
           expertPerRank(moeExpertNum / epWorldSize),
+          aicNum(maxAicNum),
           hiddenDim(intermediateHidden * 2LL),
           isUrma(serverNum > 0),
           reserveCombineDedup(!isUrma && combineCommMode == 1),
@@ -701,8 +708,8 @@ void AccumulateActivationAndMetadataSize(int64_t& cclDataSize, const CclDataBudg
     cclDataSize += CeilAlign(
         budget.maxOutput * CeilDiv(budget.intermediateHidden, ARCH35_MX_SCALE_DIVISOR) * ARCH35_MX_MULTI_BASE_SIZE,
         ALIGN_512);
-    int64_t expertRecvTokenCountBytes = CeilAlign(budget.expertPerRank, ARCH35_INT_CACHELINE) *
-                                        static_cast<int64_t>(sizeof(int32_t)) * ARCH35_MAX_AIC_NUM;
+    int64_t expertRecvTokenCountBytes =
+        CeilAlign(budget.expertPerRank, ARCH35_INT_CACHELINE) * static_cast<int64_t>(sizeof(int32_t)) * budget.aicNum;
     cclDataSize += CeilAlign(expertRecvTokenCountBytes, ALIGN_512);
     cclDataSize += CeilAlign(budget.maxOutput * ALIGN_32, ALIGN_512);
 }
@@ -718,28 +725,28 @@ void AccumulateSyncSize(int64_t& cclDataSize, const CclDataBudget& budget)
     if (budget.isUrma) {
         AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.wavesPerExpert); // 激活到 GMM2 的通知。
         AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.wavesPerExpert); // 分发到 GMM1 的通知。
-        AccumulateFlagSize(cclDataSize, budget.expertPerRank * ARCH35_MAX_AIC_NUM); // 接收数量元数据就绪通知。
-        AccumulateFlagSize(cclDataSize, ARCH35_MAX_AIC_NUM);                        // GMM 到后处理的通知。
+        AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.aicNum); // 接收数量元数据就绪通知。
+        AccumulateFlagSize(cclDataSize, budget.aicNum);                        // GMM 到后处理的通知。
         int64_t maxTokenGroups = CeilDiv(budget.numMaxTokensPerRank * budget.epWorldSize, ARCH35_TILE_M);
-        int64_t combineSyncSlots = std::max(maxTokenGroups, ARCH35_MAX_AIC_NUM);
+        int64_t combineSyncSlots = std::max(maxTokenGroups, budget.aicNum);
         AccumulateFlagSize(cclDataSize, combineSyncSlots * budget.expertPerRank); // GMM2 到分层合并的通知。
     } else {
         AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.wavesPerExpert); // 激活到 GMM2 的通知。
         // 共享专家激活到 GMM2 的通知。
         AccumulateFlagSize(cclDataSize, budget.sharedTokenGroupCount * ARCH35_MAX_SHARED_EXPERT_NUM);
         AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.wavesPerExpert); // 分发到 GMM1 的通知。
-        AccumulateFlagSize(cclDataSize, budget.expertPerRank * ARCH35_MAX_AIC_NUM); // 接收数量元数据就绪通知。
+        AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.aicNum); // 接收数量元数据就绪通知。
         // topK=1 时收益门必定关闭分发去重；其他情况同时覆盖收益门开启和关闭的结果。
         if (budget.reserveDedup) {
             AccumulateFlagSize(cclDataSize, 1LL + budget.epWorldSize * ARCH35_DEDUP_PREPASS_MAX_CHUNKS);
         }
-        AccumulateFlagSize(cclDataSize, ARCH35_MAX_AIC_NUM); // GMM 到后处理的通知。
+        AccumulateFlagSize(cclDataSize, budget.aicNum); // GMM 到后处理的通知。
         if (budget.needsGmm2Ready) {
-            AccumulateFlagSize(cclDataSize, budget.expertPerRank * ARCH35_MAX_AIC_NUM);
+            AccumulateFlagSize(cclDataSize, budget.expertPerRank * budget.aicNum);
         }
         // 共享专家 GMM2 到最终输出累加的通知。
         AccumulateFlagSize(cclDataSize, budget.sharedTokenGroupCount * ARCH35_MAX_SHARED_EXPERT_NUM);
-        AccumulateFlagSize(cclDataSize, ARCH35_MAX_AIC_NUM); // 保留已有 AIV1 topK 同步区预算。
+        AccumulateFlagSize(cclDataSize, budget.aicNum); // 保留已有 AIV1 topK 同步区预算。
     }
 }
 
@@ -748,7 +755,7 @@ void AccumulateGmmSize(int64_t& cclDataSize, const CclDataBudget& budget)
     // 依次预留累计计数、A8W4 GMM1 结果和 GMM2 结果；A8W4 覆盖当前最大的路由专家布局。
     cclDataSize +=
         CeilAlign(static_cast<int64_t>(sizeof(int32_t)) * budget.expertPerRank * budget.epWorldSize, ALIGN_32) *
-        ARCH35_MAX_AIC_NUM;
+        budget.aicNum;
     cclDataSize += static_cast<int64_t>(sizeof(int16_t)) * budget.maxOutput * budget.hiddenDim;
     if (!budget.isUrma) {
         // 对齐累计偏移，因此必须包含前面标志位区域的大小。
@@ -775,10 +782,9 @@ void AccumulateRoutingAuxSize(int64_t& cclDataSize, const CclDataBudget& budget)
         int64_t maskAlignSize = CeilAlign(alignedRouteCount / 8LL, ALIGN_32);
         cclDataSize += CeilAlign(budget.expertPerRank * budget.epWorldSize * (maskAlignSize + ALIGN_32), ALIGN_512);
         cclDataSize += CeilAlign(budget.serverNum * (ALIGN_32 + budget.numMaxTokensPerRank * ALIGN_32), ALIGN_512);
-        cclDataSize +=
-            ARCH35_MAX_AIC_NUM * CeilAlign(ARCH35_TILE_M * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_512);
+        cclDataSize += budget.aicNum * CeilAlign(ARCH35_TILE_M * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_512);
         if (budget.reserveServerCombine) {
-            // 与 WorkspaceLayout::InitializeServerCombineBuffers 的独立状态、列表和位图区域一致。
+            // 与 WorkspaceLayoutArch35::InitializeServerCombineBuffers 的独立状态、列表和位图区域一致。
             cclDataSize +=
                 CeilAlign(budget.serverNum * ARCH35_INT_CACHELINE * static_cast<int64_t>(sizeof(int32_t)), ALIGN_512);
             const int64_t tokenListStride = (budget.numMaxTokensPerRank + 1LL) * static_cast<int64_t>(sizeof(int32_t));
@@ -821,10 +827,11 @@ void AccumulateSharedExpertSize(int64_t& cclDataSize, const CclDataBudget& budge
 
 int64_t CalcCclDataSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank, int64_t numTopk,
                           int64_t hidden, int64_t intermediateHidden, int64_t maxRecvTokenNum, int64_t topkWeightsType,
-                          int64_t serverNum, int64_t combineQuantMode, int64_t combineCommMode)
+                          int64_t serverNum, int64_t combineQuantMode, int64_t combineCommMode, int64_t maxAicNum)
 {
     const CclDataBudget budget(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden,
-                               maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode);
+                               maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode,
+                               maxAicNum);
     int64_t cclDataSize = 0;
     AccumulateDispatchSize(cclDataSize, budget);
     AccumulateActivationAndMetadataSize(cclDataSize, budget);
@@ -848,6 +855,7 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
     const char* socName = aclrtGetSocName();
     bool isA2 = (socName != nullptr && std::strstr(socName, "Ascend910B") != nullptr);
     bool isA3 = (socName != nullptr && std::strstr(socName, "Ascend910_93") != nullptr);
+    const bool isArch92 = socName != nullptr && std::strstr(socName, "Ascend960DT") != nullptr;
     if (isA2 || isA3) {
         TORCH_CHECK(serverNum == 0, "server_num is only supported by the Ascend950 channel backend");
         TORCH_CHECK(epWorldSize == 2 || epWorldSize == 4 || epWorldSize == 8 || epWorldSize == 16 ||
@@ -877,6 +885,8 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
                                         numTopk);
     }
 
+    const int64_t maxAicNum = isArch92 ? ARCH92_MAX_AIC_NUM : ARCH35_MAX_AIC_NUM;
+    TORCH_CHECK(!isArch92 || serverNum == 0, "Ascend960DT MegaMoe only supports the MTE topology (server_num=0)");
     TORCH_CHECK(epWorldSize >= 2 && epWorldSize <= 1024, "ep_world_size only support in [2, 1024], but got ",
                 epWorldSize);
     TORCH_CHECK(hidden >= 1024 && hidden <= 8192, "hidden only support in [1024, 8192], but got ", hidden);
@@ -915,7 +925,8 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
                                     combineCommMode == 2 ? 1 : topkWeightsType, serverNum, combineCommMode == 2);
         return CeilAlign(communicationBufferSize, ALIGN_512) +
                CalcCclDataSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden,
-                                 maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode);
+                                 maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode,
+                                 maxAicNum);
     }
     // 与 arch35 host/kernel 的记录带权重段判定同式：tkw=1 或 combine 去重开
     // Ascend950 不通过 comm_alg 选择去重，仅由 combine_comm_mode 控制合并去重位。
@@ -924,7 +935,7 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
         CalcMteCclBufferSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, layoutTopkWeights);
     return CeilAlign(communicationBufferSize, ALIGN_512) +
            CalcCclDataSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden,
-                             maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode);
+                             maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode, maxAicNum);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)

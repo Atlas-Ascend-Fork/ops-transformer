@@ -389,6 +389,7 @@ class SymmBuffer:
                 "Ascend910B": "kfc",
                 "Ascend910_93": "kfc",
                 "Ascend950": "channel",
+                "Ascend960DT": "channel",
             },
             customCclBufferSize=required_ccl_buffer_size,
             customCclBufferSizeResolver=ccl_buffer_size_params,
@@ -400,37 +401,38 @@ class SymmBuffer:
         self.mask_buffer = None
 
     def _check_params(self) -> None:
-        if "Ascend950" in torch.npu.get_device_name():
+        soc_name = torch.npu.get_device_name()
+        if "Ascend950" in soc_name or "Ascend960DT" in soc_name:
             _check_int_type(self.dispatch_quant_mode, "dispatch_quant_mode")
             if self.dispatch_quant_mode not in (0, 4):
                 raise ValueError(
                     "dispatch_quant_mode only supports 0 (pre-quantized passthrough) "
-                    "or 4 (MXFP) on Ascend950, "
+                    f"or 4 (MXFP) on {soc_name}, "
                     f"got {self.dispatch_quant_mode!r} (type: {type(self.dispatch_quant_mode).__name__})."
                 )
             if _dtype_to_int(self.dispatch_quant_out_dtype) not in (23, 24, 296):
                 raise ValueError(
                     "dispatch_quant_out_dtype only supports float8_e5m2 (23), "
-                    "float8_e4m3fn (24) and float4_e2m1 (296) on Ascend950, "
+                    f"float8_e4m3fn (24) and float4_e2m1 (296) on {soc_name}, "
                     f"got {self.dispatch_quant_out_dtype!r} (type: {type(self.dispatch_quant_out_dtype).__name__})."
                 )
             _check_int_type(self.combine_quant_mode, "combine_quant_mode")
             if self.combine_quant_mode not in (0, 3, 4):
                 raise ValueError(
-                    "combine_quant_mode only supports 0, 3 or 4 on Ascend950, "
+                    f"combine_quant_mode only supports 0, 3 or 4 on {soc_name}, "
                     f"got {self.combine_quant_mode!r} (type: {type(self.combine_quant_mode).__name__})."
                 )
             _check_int_type(self.topk_weights_type, "topk_weights_type")
             if self.topk_weights_type not in (0, 1):
                 raise ValueError(
-                    "topk_weights_type only supports 0 or 1 on Ascend950, "
+                    f"topk_weights_type only supports 0 or 1 on {soc_name}, "
                     f"got {self.topk_weights_type!r} (type: {type(self.topk_weights_type).__name__})."
                 )
             _check_int_type(self.combine_comm_mode, "combine_comm_mode")
             if self.combine_comm_mode not in (0, 1, 2):
                 raise ValueError(
                     "combine_comm_mode only supports 0 (off), 1 (card combine dedup) "
-                    "or 2 (server combine reduction) on Ascend950, "
+                    f"or 2 (server combine reduction) on {soc_name}, "
                     f"got {self.combine_comm_mode!r} (type: {type(self.combine_comm_mode).__name__})."
                 )
 
