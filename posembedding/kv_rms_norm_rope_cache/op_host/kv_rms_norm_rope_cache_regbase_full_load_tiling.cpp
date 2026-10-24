@@ -390,7 +390,8 @@ ge::graphStatus KvRmsNormRopeCacheRegbaseFullLoadTiling::PostTiling()
     context_->SetTilingKey(GetTilingKey());
     context_->SetBlockDim(usedCoreNum_);
     size_t* workspaces = context_->GetWorkspaceSizes(1);
-    workspaces[0] = DEFAULT_WORKSPACE_SIZE;
+    OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+    workspaces[0] = 0;
     tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
     return ge::GRAPH_SUCCESS;
