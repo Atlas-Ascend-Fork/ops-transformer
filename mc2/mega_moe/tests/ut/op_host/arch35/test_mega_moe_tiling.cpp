@@ -485,6 +485,8 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
     ASSERT_GT(hiddenDim, 0);
     ASSERT_EQ(hiddenDim % (MegaMoeImpl::ACTIVATION_N_HALF * MegaMoeImpl::MXFP_DIVISOR_SIZE), 0);
 
+    const int64_t activationHidden = activation == "gelu" ? hiddenDim : hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF;
+
     struct MegaMoeCompileInfo {
     } compileInfo;
 
@@ -496,12 +498,10 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
             {{{topkIdsBs, 8}, {topkIdsBs, 8}}, ge::DT_INT32, ge::FORMAT_ND},
             {{{topkWeightsBs, 8}, {topkWeightsBs, 8}}, ge::DT_FLOAT, ge::FORMAT_ND},
             {{{8, hiddenDim, h}, {8, hiddenDim, h}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_FRACTAL_NZ},
-            {{{8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF}, {8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF}},
-             ge::DT_FLOAT8_E4M3FN,
-             ge::FORMAT_FRACTAL_NZ},
+            {{{8, h, activationHidden}, {8, h, activationHidden}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_FRACTAL_NZ},
             {{{8, hiddenDim, (h + 63) / 64, 2}, {8, hiddenDim, (h + 63) / 64, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
-            {{{8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2},
-              {8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2}},
+            {{{8, h, activationHidden / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2},
+              {8, h, activationHidden / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2}},
              ge::DT_FLOAT8_E8M0,
              ge::FORMAT_ND},
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
@@ -560,11 +560,6 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
     ASSERT_TRUE(tilingSucceeded);
     ExpectCclBufferCapacity(tilingInfo);
 
-    if (activation != "situglu") {
-        return;
-    }
-
-    ASSERT_TRUE(activationParams.size() == 1U || activationParams.size() == 2U);
     ASSERT_GE(tilingInfo.tilingDataSize, sizeof(MegaMoeTilingData));
     MegaMoeTilingData tilingData{};
     std::memcpy(&tilingData, tilingInfo.tilingData.get(), sizeof(tilingData));
@@ -576,12 +571,42 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
     if (activation != "situglu") {
         return;
     }
+    ASSERT_TRUE(activationParams.size() == 1U || activationParams.size() == 2U);
     EXPECT_EQ(tilingData.actMode, static_cast<uint8_t>(MegaMoeImpl::MegaMoeActMode::SITU));
     EXPECT_EQ(tilingData.actSubMode,
               static_cast<uint8_t>(activationParams.size() == 2U ? MegaMoeImpl::MegaMoeActSubMode::LINEAR :
                                                                    MegaMoeImpl::MegaMoeActSubMode::DEFAULT));
     EXPECT_FLOAT_EQ(tilingData.activationAlpha, activationParams.size() == 2U ? activationParams[1] : 0.0f);
     EXPECT_FLOAT_EQ(tilingData.activationBeta, activationParams[0]);
+}
+
+TEST_F(MegaMoeArch35TilingTest, UbxUsesOrdinaryLayeredTiling)
+{
+    RunUrmaTilingCase(17, 17, 17, 33, 0, 2048, "swiglu", {std::numeric_limits<float>::max()}, ge::GRAPH_SUCCESS, 0, 0,
+                      2);
+}
+
+TEST_F(MegaMoeArch35TilingTest, UbxSupportsServerCombineDedup)
+{
+    RunUrmaTilingCase(17, 17, 17, 33, 0, 2048, "swiglu", {std::numeric_limits<float>::max()}, ge::GRAPH_SUCCESS, 2, 0,
+                      2);
+}
+
+TEST_F(MegaMoeArch35TilingTest, UbxRejectsQuantizedServerCombineDedup)
+{
+    RunUrmaTilingCase(17, 17, 17, 33, 0, 2048, "swiglu", {std::numeric_limits<float>::max()}, ge::GRAPH_FAILED, 2, 3,
+                      2);
+}
+
+TEST_F(MegaMoeArch35TilingTest, UbxRejectsCardCombineDedup)
+{
+    RunUrmaTilingCase(17, 17, 17, 33, 0, 2048, "swiglu", {std::numeric_limits<float>::max()}, ge::GRAPH_FAILED, 1, 0,
+                      2);
+}
+
+TEST_F(MegaMoeArch35TilingTest, UbxSupportsGeluServerCombineDedup)
+{
+    RunUrmaTilingCase(17, 17, 17, 33, 0, 2048, "gelu", {std::numeric_limits<float>::max()}, ge::GRAPH_SUCCESS, 2, 0, 2);
 }
 
 static void RunUrmaVariableBsInputShapeCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeightsBs,

@@ -59,6 +59,11 @@ constexpr int64_t PEERMEM_SYNC_SLOT_SIZE = static_cast<int64_t>(INT_CACHELINE) *
 // 通信拓扑：决定窗口数据区按 MTE 还是 URMA 布局推进。
 constexpr int64_t TOPO_TYPE_MTE = 0U;
 constexpr int64_t TOPO_TYPE_URMA = 1U;
+constexpr int64_t TOPO_TYPE_URMA_ROCE = 2U;
+HOST_DEVICE bool IsLayeredTopology(int64_t topo)
+{
+    return topo == TOPO_TYPE_URMA || topo == TOPO_TYPE_URMA_ROCE;
+}
 
 HOST_DEVICE int64_t CalcUrmaRankSyncSize(int64_t epWorldSize)
 {

@@ -427,7 +427,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendMaskC
     int32_t totalExperts = static_cast<int32_t>(worldSize_);
     // 按卡处理，只使用前 worldSize 个核。
     for (uint32_t curRankId = aivCoreIdx_; curRankId < static_cast<uint32_t>(totalExperts); curRankId += blockAivNum_) {
-        ChannelHandle maskChannel{};
+        Channel maskChannel{};
         if (curRankId != rankId_) {
             maskChannel = comm_.GetChannel(curRankId);
             // SendMask 与紧随其后的第一次全卡同步由同一物理 AIV 负责，锁跨两个阶段复用，
@@ -467,7 +467,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendMaskC
         if (curRankId == rankId_) {
             continue;
         }
-        ChannelHandle maskChannel = comm_.GetChannel(curRankId);
+        Channel maskChannel = comm_.GetChannel(curRankId);
         comm_.Drain(maskChannel);
     }
 }
@@ -907,7 +907,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendDispa
     __gm__ int32_t* countPtr = reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.dispatchRelaySendQueuePtr +
                                                                  DispatchRelayQueueServerOffset(targetServer));
     int32_t tokenCount = ReadGmByPassDCache(countPtr);
-    ChannelHandle channel = comm_.GetChannel(relayRank);
+    Channel channel = comm_.GetChannel(relayRank);
     BatchHandle batchHandle = comm_.MakeBatchHandle(channel, hcommBatchWqeTensor_, LAYERED_HCOMM_BATCH_UB_BYTES,
                                                     GetRankWinAddrWithOffset(relayRank, 0));
     for (int32_t batchStart = 0; batchStart < tokenCount;
@@ -1186,7 +1186,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReceiveRe
     GlobalTensor<uint64_t> scratchFlagGlobalTensor;
     scratchFlagGlobalTensor.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t*>(scratchAddr));
     DataCopyPadExtParams<uint64_t> flagCopyPadParams{true, 0U, 0U, 0U};
-    ChannelHandle channel = comm_.GetChannel(relayRank);
+    Channel channel = comm_.GetChannel(relayRank);
 
     // 批次可以跨专家和源 Server，但不能跨 relay 通道。ready flag 按 token-id 的 256 槽窗口读取，
     // 只处理当前批次实际命中的窗口。token id 属于源 Rank，上界必须用全卡容量而非本卡 m_。

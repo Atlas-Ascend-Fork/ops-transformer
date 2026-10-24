@@ -193,7 +193,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCo
     CombineBatchState batchState{};
     batchState.dstRankId = targetRank;
     if (targetRank != rankId_) {
-        ChannelHandle channel = comm_.GetChannel(targetRank);
+        Channel channel = comm_.GetChannel(targetRank);
         batchState.batchHandle = comm_.MakeBatchHandle(channel, hcommBatchWqeTensor_, LAYERED_HCOMM_BATCH_UB_BYTES,
                                                        GetRankWinAddrWithOffset(targetRank, 0));
     }

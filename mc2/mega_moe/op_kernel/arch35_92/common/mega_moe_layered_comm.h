@@ -22,6 +22,7 @@ using namespace AscendC;
 // 封装 Layered 路径使用的 URMA 通信接口。
 class LayeredUrmaComm {
 public:
+    using Channel = AscendC::ChannelHandle;
     using BatchHandle = AscendC::BatchHandle<AscendC::ChannelHandle>;
 
     __aicore__ inline explicit LayeredUrmaComm(__gm__ Mc2Aclnn::Mc2MoeContext* context)
@@ -114,7 +115,109 @@ private:
         .odr = 6, .fence = 1, .se = 0, .cqe = 0, .inlineEn = 0};
     __gm__ Mc2Aclnn::Mc2MoeContext* const context_;
     const uint32_t rankId_;
-    Hcomm<COMM_PROTOCOL_UBC_CTP> hcomm_;
+    Hcomm<COMM_PROTOCOL_UB_CTP> hcomm_;
+};
+
+// The communication library owns SQ/CQ reclamation for consecutive commits.
+// Explicit completion waits follow the existing business dependencies.
+// The scheduling/peermem layout remains the real Layered path.
+// Calls forward native return codes, like LayeredUrmaComm.
+class LayeredUbxComm {
+public:
+    struct Channel {
+        ChannelHandle native{};
+        bool roce = false;
+    };
+    struct BatchHandle {
+        AscendC::BatchHandle<ChannelHandle> native{};
+        bool roce = false;
+    };
+    __aicore__ inline LayeredUbxComm(__gm__ Mc2Aclnn::Mc2MoeContext* context)
+        : ctx_(context),
+          rank_(context->epRankId),
+          rankNumPerServer_(context->rankSizePerServer),
+          serverId_(rank_ / rankNumPerServer_)
+    {}
+    __aicore__ inline int32_t Init(const LocalTensor<uint8_t>& scratch, uint32_t bytes)
+    {
+        const int32_t urmaRet = urma_.Init(scratch, bytes);
+        const int32_t roceRet = roce_.Init(scratch, bytes);
+        return urmaRet != HCOMM_SUCCESS ? urmaRet : roceRet;
+    }
+    __aicore__ inline Channel GetChannel(uint32_t peer) const
+    {
+        // Retain peer routing with the native handle; later calls need no reverse lookup.
+        return {ctx_->hcommHandle_[peer > rank_ ? peer - 1 : peer], peer / rankNumPerServer_ != serverId_};
+    }
+    __aicore__ inline int32_t Lock(Channel ch)
+    {
+        return ch.roce ? roce_.Lock(ch.native) : urma_.Lock(ch.native);
+    }
+    __aicore__ inline int32_t Unlock(Channel ch)
+    {
+        return ch.roce ? roce_.Unlock(ch.native) : urma_.Unlock(ch.native);
+    }
+    __aicore__ inline BatchHandle MakeBatchHandle(Channel ch, const LocalTensor<uint8_t>& buffer, uint32_t bytes,
+                                                  GM_ADDR remote)
+    {
+        BatchHandle b{};
+        b.roce = ch.roce;
+        GM_ADDR local = reinterpret_cast<GM_ADDR>(ctx_->epHcclBuffer_[rank_]);
+        b.native = b.roce ? roce_.MakeBatchHandle(ch.native, buffer, bytes, remote, local) :
+                            urma_.MakeBatchHandle(ch.native, buffer, bytes, remote);
+        return b;
+    }
+    __aicore__ inline int32_t WriteNbi(Channel ch, GM_ADDR dst, GM_ADDR src, uint64_t bytes)
+    {
+        return ch.roce ? roce_.WriteNbi(ch.native, dst, src, bytes) : urma_.WriteNbi(ch.native, dst, src, bytes);
+    }
+    __aicore__ inline int32_t WriteNbi(BatchHandle& b, GM_ADDR dst, GM_ADDR src, uint32_t bytes)
+    {
+        return b.roce ? roce_.WriteNbi(b.native, dst, src, bytes) : urma_.WriteNbi(b.native, dst, src, bytes);
+    }
+    // Server combine contributions target peers inside the local UB domain.
+    __aicore__ inline int32_t WriteWithNotifyNbi(BatchHandle& b, GM_ADDR dst, GM_ADDR src, uint32_t bytes,
+                                                 GM_ADDR notifyAddr, uint64_t notifyValue)
+    {
+        return urma_.WriteWithNotifyNbi(b.native, dst, src, bytes, notifyAddr, notifyValue);
+    }
+    __aicore__ inline int32_t WriteRelaxedNbi(BatchHandle& b, GM_ADDR dst, GM_ADDR src, uint32_t bytes)
+    {
+        return WriteNbi(b, dst, src, bytes);
+    }
+    __aicore__ inline int32_t WriteStrongNbi(BatchHandle& b, GM_ADDR dst, GM_ADDR src, uint32_t bytes)
+    {
+        return WriteNbi(b, dst, src, bytes);
+    }
+    __aicore__ inline int32_t ReadNbi(Channel ch, GM_ADDR dst, GM_ADDR src, uint64_t bytes)
+    {
+        return ch.roce ? roce_.ReadNbi(ch.native, dst, src, bytes) : urma_.ReadNbi(ch.native, dst, src, bytes);
+    }
+    __aicore__ inline int32_t ReadNbi(BatchHandle& b, GM_ADDR dst, GM_ADDR src, uint32_t bytes)
+    {
+        return b.roce ? roce_.ReadNbi(b.native, dst, src, bytes) : urma_.ReadNbi(b.native, dst, src, bytes);
+    }
+    __aicore__ inline int32_t BatchCommit(BatchHandle& b)
+    {
+        return b.roce ? roce_.BatchCommit(b.native) : urma_.BatchCommit(b.native);
+    }
+    __aicore__ inline int32_t Drain(BatchHandle& b)
+    {
+        return b.roce ? roce_.Drain(b.native) : urma_.Drain(b.native);
+    }
+
+    __aicore__ inline int32_t Drain(Channel ch)
+    {
+        return ch.roce ? roce_.Drain(ch.native) : urma_.Drain(ch.native);
+    }
+
+private:
+    __gm__ Mc2Aclnn::Mc2MoeContext* ctx_;
+    uint32_t rank_;
+    const uint32_t rankNumPerServer_;
+    const uint32_t serverId_;
+    Hcomm<COMM_PROTOCOL_UB_CTP> urma_;
+    Hcomm<COMM_PROTOCOL_ROCE> roce_;
 };
 
 } // namespace MegaMoeImpl

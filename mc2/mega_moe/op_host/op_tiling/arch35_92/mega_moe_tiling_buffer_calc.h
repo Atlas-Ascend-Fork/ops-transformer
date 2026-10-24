@@ -213,7 +213,7 @@ static uint64_t CalcTilingKey(const gert::TilingContext* context, const MegaMoeC
     auto dispatchQuantModePtr = context->GetAttrs()->GetAttrPointer<int64_t>(config.attrDispatchQuantModeIndex);
 
     int64_t topoType = TILINGKEY_TPL_MTE;
-    if (tilingData->topoType == TOPO_TYPE_URMA) {
+    if (IsLayeredTopology(tilingData->topoType)) {
         topoType = TILINGKEY_TPL_URMA;
     }
     int64_t topkIndexType = TILINGKEY_TOPK_INDEX_INT32;

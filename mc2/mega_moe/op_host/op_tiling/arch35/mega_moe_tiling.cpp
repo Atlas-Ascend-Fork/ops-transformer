@@ -95,14 +95,14 @@ static ge::graphStatus CheckAndSetDedupMode(const gert::TilingContext* context, 
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "combineCommMode", std::to_string(combineCommMode).c_str(),
                                               "only support 0, 1 or 2"),
                     return ge::GRAPH_FAILED);
-    if (tilingData->topoType == TOPO_TYPE_URMA) {
+    if (IsLayeredTopology(tilingData->topoType)) {
         return CheckAndSetUrmaDedupMode(combineCommMode, tilingData, nodeName);
     }
     if (tilingData->topoType == TOPO_TYPE_MTE) {
         return CheckAndSetMteDedupMode(context, config, combineCommMode, tilingData, nodeName);
     }
     OP_LOGE_FOR_INVALID_VALUE(nodeName, "topoType", std::to_string(tilingData->topoType).c_str(),
-                              "only support MTE(0) or URMA(1)");
+                              "only support MTE(0), URMA(1) or UBX(2)");
     return ge::GRAPH_FAILED;
 }
 
@@ -243,7 +243,7 @@ static MegaMoeDispatchBufferConfig CalcDispatchBufferConfig(const MegaMoeTilingD
 static uint64_t CalcCombineSyncSlotCountPerExpert(const MegaMoeTilingData* tilingData)
 {
     // MTE 统一使用 per-expert AIC ready 表；group counter 服务 URMA Layered Combine。
-    if (tilingData->topoType != TOPO_TYPE_URMA || tilingData->moeExpertPerRank == 0U) {
+    if (!IsLayeredTopology(tilingData->topoType) || tilingData->moeExpertPerRank == 0U) {
         return 0U;
     }
 
@@ -278,7 +278,7 @@ static uint64_t CalcHostFlagElementCount(const MegaMoeTilingData* tilingData)
     if (tilingData->topoType == TOPO_TYPE_MTE && tilingData->combineQuantMode != COMBINE_NO_QUANT) {
         flagElementCount += moeExpertCount * tilingData->aicNum * INT_CACHELINE;
     }
-    if (tilingData->topoType == TOPO_TYPE_URMA) {
+    if (IsLayeredTopology(tilingData->topoType)) {
         flagElementCount += tilingData->combineSyncSlotCountPerExpert * moeExpertCount * INT_CACHELINE;
     }
     if (tilingData->sharedExpertNum > 0 && tilingData->topoType == TOPO_TYPE_MTE) {

@@ -746,7 +746,7 @@ sym_buffer.update_group(group) -> None
         <td>combine_comm_mode</td>
         <td>int</td>
         <td>可选</td>
-        <td>combine阶段通信去重开关。0表示关闭，1表示开启（同一token在本卡命中的多个专家，其combine结果先在本卡合并为一行再发回源卡，combine阶段通信量从组内行数降为1）。取值仅支持0或1，是否开启完全由调用方决定，算子内部不做收益裁决。开启会改变通信缓冲区布局，必须在创建sym_buffer时指定，且同一通信域内所有Rank取值一致。各产品支持情况与开启条件见约束说明。默认值为0。</td>
+        <td>combine阶段通信去重开关。0表示关闭，1表示开启（同一token在本卡命中的多个专家，其combine结果先在本卡合并为一行再发回源卡，combine阶段通信量从组内行数降为1）。2表示Server内归约及域间二级回传（URMA或URMA+RoCE混合拓扑）。取值支持0、1或2，是否开启完全由调用方决定，算子内部不做收益裁决。开启会改变通信缓冲区布局，必须在创建sym_buffer时指定，且同一通信域内所有Rank取值一致。各产品支持情况与开启条件见约束说明。默认值为0。</td>
     </tr>
     <tr>
         <td>topk_weights_type</td>
@@ -1458,7 +1458,7 @@ sym_buffer.update_group(group) -> None
     - `activation`支持"swiglu"、"swiglustep"、"swigluoai"和"situglu"。`activation_clamp`用于配置前三种激活的截断值；`activation_params`用于配置"swigluoai"的`alpha`、`beta`以及"situglu"的`beta`、`linear_beta`。
     - num_tokens（x.dim0）范围[1, +∞)，每次调用必须不大于创建`sym_buffer`时配置的`num_max_tokens_per_rank`。不同Rank的实际num_tokens可以不同，同一个`sym_buffer`也可以用于多次不同num_tokens的调用。
     - `num_max_tokens_per_rank`必须大于等于1，所有Rank取值必须一致，建议设置为`sym_buffer`复用期间所有Rank可能出现的最大单卡token数。超过原上界时需使用更大的上界重新创建`sym_buffer`。
-    - hidden为逻辑隐藏维，范围[1024, 8192]；topo_type = 0（MTE拓扑）下各量化场景均要求hidden为64的倍数，topo_type = 1（URMA跨超拓扑）要求hidden为1024的倍数。非打包类型下hidden = x.dim1，float4_e2m1以uint8打包传入时x.dim1 = hidden / 2。A4W4-FP场景仅支持l1_weights为FRACTAL_NZ格式。
+    - hidden为逻辑隐藏维，范围[1024, 8192]；topo_type = 0（MTE拓扑）下各量化场景均要求hidden为64的倍数，topo_type = 1或2（Layered拓扑）要求hidden为1024的倍数。非打包类型下hidden = x.dim1，float4_e2m1以uint8打包传入时x.dim1 = hidden / 2。A4W4-FP场景仅支持l1_weights为FRACTAL_NZ格式。
     - num_topk（topk_ids.dim1）支持[1, 32]。
     - local_moe_expert_num（= num_experts / ep_world_size）范围 [1, 1024]；shared_expert_num_per_rank 另按 [0, 4] 单独约束，不计入该上限。
     - intermediate_hidden表示激活后的中间特征维度，范围[256, 4096]且128对齐；Linear1的完整输出宽度为2 × intermediate_hidden。
@@ -1474,7 +1474,7 @@ sym_buffer.update_group(group) -> None
     - comm_alg为预留参数，保持默认空字符串""即可。
     - y的数据类型固定为bfloat16。
     - **通信去重约束**：
-        - combine_comm_mode取值为0或1，0表示关闭combine阶段通信去重，1表示开启。是否开启完全由调用方决定，算子内部不做收益裁决。适用场景：num_topk较大、同一token命中同卡多个专家的比例较高、性能瓶颈在通信的形状，开启后收益明显；专家数多且瓶颈在计算的形状可能没有收益甚至变慢，建议按实际形状实测后再决定。
+        - combine_comm_mode取值为0、1或2：0表示关闭combine阶段通信去重，1表示MTE卡内去重，2表示URMA或URMA+RoCE混合拓扑的Server内归约及域间二级回传。模式2要求combine_quant_mode=0。是否开启完全由调用方决定，算子内部不做收益裁决。适用场景：num_topk较大、同一token命中同卡多个专家的比例较高、性能瓶颈在通信的形状，开启后收益明显；专家数多且瓶颈在计算的形状可能没有收益甚至变慢，建议按实际形状实测后再决定。
         - combine_comm_mode在`get_symm_buffer_for_mega_moe`处设置，`mega_moe`调用时从`sym_buffer`继承，无需重复传入；同一通信域内所有Rank必须配置相同取值，否则跨卡的通信记录布局不一致会导致读写错位。
         - combine_comm_mode = 1时的能力约束（不满足时算子在tiling阶段直接报错并提示改回0，不做静默回退）：仅支持topo_type = 0（MTE拓扑）；combine_quant_mode必须为0（combine不量化）；topk_weights_type = 0时不支持预量化x；num_max_tokens_per_rank需满足 num_max_tokens_per_rank ≤ 128 × min(512, ⌊4608 / num_topk⌋)（例如num_topk = 32时上限为18432，num_topk ≤ 9时上限为65536）。
         - combine_comm_mode = 1时，同一token在同一张卡上的多个专家输出改为在该卡按float32累加后一次转bfloat16发送，累加顺序与中间取整次数与关闭态不同，因此y与combine_comm_mode = 0的结果不逐位相同。偏差来源是bfloat16累加顺序与中间取整次数的差异，在存在数值抵消的元素上相对偏差可能明显放大；需要与关闭态逐位一致时请使用combine_comm_mode = 0，切换该开关后请按目标形状重新做精度验证。
@@ -1482,8 +1482,9 @@ sym_buffer.update_group(group) -> None
     - l1_weights_sf和l2_weights_sf不可为空指针。
     - local_moe_expert_num = num_experts / ep_world_size；启用共享专家时，shared_expert_num_per_rank = shared_l1_weights.dim0；num_experts_per_rank = shared_expert_num_per_rank + local_moe_expert_num，未启用共享专家时 shared_expert_num_per_rank = 0。
     - shared_expert_num_per_rank范围 [0, 4]。
-    - topo_type由通信域上下文自动推导。0表示MTE拓扑，1表示URMA跨超拓扑。
-    - URMA拓扑下，`activation`不支持"swiglustep"和"swigluoai"。
+    - topo_type由通信域上下文自动推导。0表示MTE拓扑，1表示URMA跨超拓扑，2表示域内URMA、域间RoCE的混合拓扑。
+    - URMA+RoCE混合拓扑要求UB域等宽且域内group rank连续，rank_num_per_server表示每个UB域的rank数；域内使用UB_CTP，域间使用RoCE，由extension查询RankGraph决定，不按物理主机数推断。支持combine_comm_mode=0（普通回传）或2（Server内归约及域间二级回传）；模式2要求combine_quant_mode=0，域内贡献通过URMA WriteWithNotifyNbi发送，域间聚合结果通过RoCE batch WriteNbi回传。
+    - Layered拓扑（topo_type为1或2）下，`activation`不支持"swiglustep"和"swigluoai"。
     - topk_weights_type取值为0或1，0表示关闭topkWeights前移，1表示开启。
     - 通信buffer由`get_symm_buffer_for_mega_moe`自动计算并申请，用户无需自行计算或设置`ccl_buffer_size`。
     - l1_weights和l2_weights的数据类型必须一致，且仅支持FLOAT8_E5M2、FLOAT8_E4M3FN、FLOAT4_E2M1。

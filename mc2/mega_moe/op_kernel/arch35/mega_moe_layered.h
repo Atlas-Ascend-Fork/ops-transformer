@@ -70,6 +70,7 @@ template <typename XType, typename OutputType, typename TopkWeightsType, typenam
           int32_t CombineQuantMode, bool TopkWeightsPrefetch, typename CommPolicy = LayeredUrmaComm>
 class MegaMoeLayered {
 public:
+    using Channel = typename CommPolicy::Channel;
     using BatchHandle = typename CommPolicy::BatchHandle;
     using CombineBatchState = CombineImpl::LayeredCombineBatchState<CommPolicy>;
     template <int32_t QM>
@@ -890,7 +891,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::DrainAndU
         if (rank == rankId_ || !IsChannelOwner(rank)) {
             continue;
         }
-        ChannelHandle channel = comm_.GetChannel(rank);
+        Channel channel = comm_.GetChannel(rank);
         BatchHandle batchHandle = comm_.MakeBatchHandle(channel, hcommBatchWqeTensor_, LAYERED_HCOMM_BATCH_UB_BYTES,
                                                         GetRankWinAddrWithOffset(rank, 0));
         // 同一通道可能同时残留 Dispatch 一级和 Combine 的已提交批次，统一按批量句柄等待完成。
@@ -920,7 +921,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CrossRank
         if (rankIndex == rankId_) {
             continue;
         }
-        ChannelHandle channel = comm_.GetChannel(rankIndex);
+        Channel channel = comm_.GetChannel(rankIndex);
         if (!reuseSendMaskChannelLock) {
             // Wave 结束后同步任务重新按物理 AIV 分核，可能不同于 Wave 的固定归属核，因此先取得通道锁。
             comm_.Lock(channel);
@@ -932,7 +933,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CrossRank
         if (rankIndex == rankId_) {
             continue;
         }
-        ChannelHandle channel = comm_.GetChannel(rankIndex);
+        Channel channel = comm_.GetChannel(rankIndex);
         auto syncCheck = syncRank + rankIndex * 16;
         GmSignalWaitBarrier(syncCheck, count);
         // Drain 后 Unlock 发布通道 counter。第一次调用释放 SendMask 延续的锁，第二次调用释放本函数取得的锁。

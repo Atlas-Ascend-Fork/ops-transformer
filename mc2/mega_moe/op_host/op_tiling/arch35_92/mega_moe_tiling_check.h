@@ -184,7 +184,7 @@ static ge::graphStatus CheckActivationParams(const gert::TilingContext* context,
                     return ge::GRAPH_FAILED);
 
     // URMA Layered 支持 swiglu、situglu 和逐元素 GELU。
-    OP_TILING_CHECK(topoType == TOPO_TYPE_URMA && !isSwiGlu && !isSituGlu && !isGelu,
+    OP_TILING_CHECK(IsLayeredTopology(topoType) && !isSwiGlu && !isSituGlu && !isGelu,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "activation", activationPtr,
                                               "'swiglu', 'situglu' or 'gelu' for URMA topology"),
                     return ge::GRAPH_FAILED);
@@ -210,7 +210,7 @@ static ge::graphStatus CheckAndSetEpWorldSizeAttr(const gert::TilingContext* con
     auto attrs = context->GetAttrs();
     auto epWorldSizePtr = attrs->GetAttrPointer<int64_t>((config.attrEpWorldSizeIndex));
     int64_t epWorldSize = static_cast<int64_t>(*epWorldSizePtr);
-    int64_t maxEpWorldSize = tilingData->topoType == TOPO_TYPE_URMA ? MAX_URMA_EP_WORLD_SIZE : MAX_MTE_EP_WORLD_SIZE;
+    int64_t maxEpWorldSize = IsLayeredTopology(tilingData->topoType) ? MAX_URMA_EP_WORLD_SIZE : MAX_MTE_EP_WORLD_SIZE;
     OP_TILING_CHECK(epWorldSize < MIN_EP_WORLD_SIZE || epWorldSize > maxEpWorldSize,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "epWorldSize", std::to_string(epWorldSize).c_str(),
                                               (std::string("should in [") + std::to_string(MIN_EP_WORLD_SIZE) + ", " +
@@ -221,13 +221,13 @@ static ge::graphStatus CheckAndSetEpWorldSizeAttr(const gert::TilingContext* con
     tilingData->epWorldSize = static_cast<uint32_t>(epWorldSize);
     int64_t rankNumPerServer = *attrs->GetAttrPointer<int64_t>(config.attrRankNumPerServerIndex);
     OP_TILING_CHECK(
-        tilingData->topoType == TOPO_TYPE_URMA &&
+        IsLayeredTopology(tilingData->topoType) &&
             (rankNumPerServer <= 0 || rankNumPerServer > epWorldSize || epWorldSize % rankNumPerServer != 0),
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "rankNumPerServer", std::to_string(rankNumPerServer).c_str(),
                                   "should be in [1, epWorldSize] and divide epWorldSize for URMA"),
         return ge::GRAPH_FAILED);
-    tilingData->rankNumPerServer = tilingData->topoType == TOPO_TYPE_URMA ? static_cast<uint32_t>(rankNumPerServer) :
-                                                                            static_cast<uint32_t>(epWorldSize);
+    tilingData->rankNumPerServer = IsLayeredTopology(tilingData->topoType) ? static_cast<uint32_t>(rankNumPerServer) :
+                                                                             static_cast<uint32_t>(epWorldSize);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -561,10 +561,10 @@ static ge::graphStatus CheckAndSetMaxTokensPerRankAttr(const gert::TilingContext
     auto attrs = context->GetAttrs();
     auto numMaxTokensPerRankPtr = attrs->GetAttrPointer<int64_t>((config.attrNumMaxTokensPerRankIndex));
     int64_t numMaxTokensPerRank = static_cast<int64_t>(*numMaxTokensPerRankPtr);
-    OP_TILING_CHECK(tilingData->topoType == TOPO_TYPE_URMA && tilingData->bs == 0U,
+    OP_TILING_CHECK(IsLayeredTopology(tilingData->topoType) && tilingData->bs == 0U,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "bs", "0", "should be greater than 0 for URMA"),
                     return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(tilingData->topoType == TOPO_TYPE_URMA && numMaxTokensPerRank == 0,
+    OP_TILING_CHECK(IsLayeredTopology(tilingData->topoType) && numMaxTokensPerRank == 0,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "numMaxTokensPerRank", "0",
                                               "should be >= bs and identical on all ranks for URMA"),
                     return ge::GRAPH_FAILED);
@@ -582,8 +582,8 @@ static ge::graphStatus CheckAndSetMaxTokensPerRankAttr(const gert::TilingContext
     int64_t maxOutputCapacity = numMaxTokensPerRank * static_cast<int64_t>(tilingData->epWorldSize) *
                                 std::min(tilingData->topK, tilingData->moeExpertPerRank);
     OP_TILING_CHECK(
-        tilingData->topoType == TOPO_TYPE_URMA && (routeCapacity > std::numeric_limits<int32_t>::max() ||
-                                                   maxOutputCapacity > std::numeric_limits<int32_t>::max()),
+        IsLayeredTopology(tilingData->topoType) && (routeCapacity > std::numeric_limits<int32_t>::max() ||
+                                                    maxOutputCapacity > std::numeric_limits<int32_t>::max()),
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "URMA token capacity", std::to_string(maxOutputCapacity).c_str(),
                                   "route indexes and prefix sums should fit in INT32_MAX"),
         return ge::GRAPH_FAILED);
@@ -660,7 +660,7 @@ static ge::graphStatus CheckAndSetMaxRecvTokenNumAttr(const gert::TilingContext*
                                               "should be less than or equal to UINT32_MAX"),
                     return ge::GRAPH_FAILED);
     OP_TILING_CHECK(
-        tilingData->topoType == TOPO_TYPE_URMA && static_cast<uint64_t>(maxRecvTokenNum) > defaultMaxOutputSize,
+        IsLayeredTopology(tilingData->topoType) && static_cast<uint64_t>(maxRecvTokenNum) > defaultMaxOutputSize,
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "maxRecvTokenNum", std::to_string(maxRecvTokenNum).c_str(),
                                   "should not exceed the URMA maximum receive token capacity"),
         return ge::GRAPH_FAILED);
@@ -1617,7 +1617,7 @@ static ge::graphStatus CheckAndSetTokenDimensions(const gert::TilingContext* con
         return ge::GRAPH_FAILED);
     // MTE 与 URMA/Layered 统一按 64 对齐：满足 W4 NZ_C0_32 的 GMM K 分形要求，
     // A8W8 的 ND/NZ 路径沿用同一口径。
-    int64_t requiredHAlignment = tilingData->topoType == TOPO_TYPE_URMA ? URMA_H_ALIGN : MTE_H_ALIGN;
+    int64_t requiredHAlignment = IsLayeredTopology(tilingData->topoType) ? URMA_H_ALIGN : MTE_H_ALIGN;
     OP_TILING_CHECK(
         xDim1 % requiredHAlignment != 0,
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "H", std::to_string(xDim1).c_str(),
@@ -1661,9 +1661,9 @@ static ge::graphStatus CheckAndSetTopoType(const gert::TilingContext* context, c
                                            MegaMoeTilingData* tilingData, const char* nodeName)
 {
     int64_t topoType = *context->GetAttrs()->GetAttrPointer<int64_t>(config.attrTopoTypeIndex);
-    OP_TILING_CHECK(topoType != TOPO_TYPE_MTE && topoType != TOPO_TYPE_URMA,
+    OP_TILING_CHECK(topoType != TOPO_TYPE_MTE && !IsLayeredTopology(topoType),
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "topoType", std::to_string(topoType).c_str(),
-                                              "only support MTE(0) or URMA(1)"),
+                                              "only support MTE(0), URMA(1) or UBX(2)"),
                     return ge::GRAPH_FAILED);
     tilingData->topoType = topoType;
     return ge::GRAPH_SUCCESS;

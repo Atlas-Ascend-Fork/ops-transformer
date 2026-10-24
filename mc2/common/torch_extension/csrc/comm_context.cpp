@@ -45,8 +45,9 @@ constexpr uint32_t MIX_CLOS_CHANNEL_PARTS = 2U;
 constexpr uint32_t MIX_CHANNEL_PARTS_TOTAL = 3U;
 
 enum class TopoType : uint32_t {
-    INTRA_SUPER_NODE = 0, // 超节点内通信（默认）
-    CROSS_SUPER_NODE = 1, // 跨超节点通信
+    INTRA_SUPER_NODE = 0,     // 超节点内通信（默认）
+    CROSS_SUPER_NODE = 1,     // 跨超节点通信
+    CROSS_SUPER_NODE_UBX = 2, // UB域内UB_CTP，域间RoCE；可位于同一物理主机
 };
 
 struct RankLinkInfo {
@@ -258,7 +259,6 @@ public:
         GetCommProtocol(hcclHandle, protocol);
         rankNumPerServer_ = rankNumPerUbDomain_;
         ResolveCustomCclBufferSize(worldSize, customCclBufferSizeResolver);
-
         if (commAlg == "urma" && multiChannel_) {
             CheckIsMixLayered(hcclHandle);
         }
@@ -280,7 +280,7 @@ public:
 
     void ResolveCustomCclBufferSize(int64_t worldSize, const py::object& customCclBufferSizeResolver)
     {
-        if (topoType_ != TopoType::CROSS_SUPER_NODE || customCclBufferSizeResolver.is_none()) {
+        if (topoType_ == TopoType::INTRA_SUPER_NODE || customCclBufferSizeResolver.is_none()) {
             return;
         }
 
@@ -320,7 +320,10 @@ public:
             return;
         }
 
-        CheckProtocolSupport(commHandle, layerList, layerNum, protocol);
+        // RankGraph query storage may be reused by later calls.
+        const std::vector<uint32_t> layerIds(layerList, layerList + layerNum);
+        const uint32_t* topologyLayers = layerIds.data();
+        CheckProtocolSupport(commHandle, topologyLayers, layerNum, protocol);
     }
 
     // Protocol discovery may probe layers that do not connect the rank pair; treat those probes as unsupported.
@@ -373,14 +376,37 @@ public:
 
         TORCH_CHECK(CheckIntraUbDomainProtocol(commHandle, layerList, layerNum, srcRankId), "Rank ", srcRankId,
                     " does not support UB_CTP with peers inside its UB domain");
-        TORCH_CHECK(CheckCrossUbDomainProtocols(commHandle, layerList, layerNum, srcRankId), "Rank ", srcRankId,
-                    " has no UBG link to a peer outside its UB domain");
-        ValidateRankLinkMap(rankSize, srcRankId);
-        TORCH_CHECK(rankLinkMap_.size() == rankSize - 1, "Incomplete topology info for rank ", srcRankId, ", recorded ",
-                    rankLinkMap_.size(), " of ", rankSize - 1);
+        if (CheckCrossUbDomainProtocols(commHandle, layerList, layerNum, srcRankId,
+                                        CommProtocol::COMM_PROTOCOL_UB_RTP)) {
+            ValidateRankLinkMap(rankSize, srcRankId);
+            TORCH_CHECK(rankLinkMap_.size() == rankSize - 1, "Incomplete topology info for rank ", srcRankId,
+                        ", recorded ", rankLinkMap_.size(), " of ", rankSize - 1);
+            topoType_ = TopoType::CROSS_SUPER_NODE;
+            ASCEND_LOGI("Cross-server confirmed, use UB_CTP inside UB domain and UBG across UB domains");
+            return;
+        }
 
-        topoType_ = TopoType::CROSS_SUPER_NODE;
-        ASCEND_LOGI("Cross-server confirmed, use UB_CTP inside UB domain and UBG across UB domains");
+        // No cross-domain UBG link was found; try the UBX topology.
+        if (!multiChannel_) {
+            const uint32_t begin = srcRankId / rankNumPerUbDomain_ * rankNumPerUbDomain_;
+            for (uint32_t peer = 0; peer < rankSize; ++peer) {
+                if (peer == srcRankId) {
+                    continue;
+                }
+                const bool intra = peer >= begin && peer < begin + rankNumPerUbDomain_;
+                TORCH_CHECK((rankLinkMap_.count(peer) != 0) == intra,
+                            "Layered requires Server-contiguous UB-domain group ranks, rank=", srcRankId,
+                            " peer=", peer);
+            }
+            if (CheckCrossUbDomainProtocols(commHandle, layerList, layerNum, srcRankId,
+                                            CommProtocol::COMM_PROTOCOL_ROCE) &&
+                rankLinkMap_.size() == rankSize - 1) {
+                ValidateRankLinkMap(rankSize, srcRankId);
+                topoType_ = TopoType::CROSS_SUPER_NODE_UBX;
+                return;
+            }
+        }
+        TORCH_CHECK(false, "No complete supported cross-UB-domain topology for rank ", srcRankId);
     }
 
     // Extend the UB domain through consecutive inner-to-outer layers; record each peer's innermost usable layer.
@@ -428,25 +454,27 @@ public:
 
     // Search all layers because the cross-domain protocol may differ from the protocol used to identify the UB domain.
     bool CheckCrossUbDomainProtocols(const HcclComm& commHandle, const uint32_t* layerList, uint32_t layerNum,
-                                     uint32_t srcRankId)
+                                     uint32_t srcRankId, const CommProtocol& crossProtocol)
     {
-        bool hasCrossDomainUbgLink = false;
+        bool hasCrossDomainLink = false;
         for (uint32_t layerIndex = 0; layerIndex < layerNum; ++layerIndex) {
             LayerRanks layer = GetLayerRanks(commHandle, layerList[layerIndex]);
             for (uint32_t dstRank : layer.ranks) {
                 if (dstRank == srcRankId || rankLinkMap_.count(dstRank) > 0) {
                     continue;
                 }
-                if (SupportsProtocol(commHandle, layer.layer, srcRankId, dstRank, CommProtocol::COMM_PROTOCOL_UB_RTP)) {
-                    ASCEND_LOGI("Rank %u does support UBG with cross-domain rank %u in layer %u", srcRankId, dstRank,
-                                layer.layer);
-                    hasCrossDomainUbgLink = true;
-                    rankLinkMap_[dstRank] = {CommProtocol::COMM_PROTOCOL_UB_RTP, layer.layer};
+                if (SupportsProtocol(commHandle, layer.layer, srcRankId, dstRank, crossProtocol)) {
+                    if (crossProtocol == CommProtocol::COMM_PROTOCOL_UB_RTP) {
+                        ASCEND_LOGI("Rank %u does support UBG with cross-domain rank %u in layer %u", srcRankId,
+                                    dstRank, layer.layer);
+                    }
+                    hasCrossDomainLink = true;
+                    rankLinkMap_[dstRank] = {crossProtocol, layer.layer};
                 }
             }
         }
         // The caller separately verifies that every remote rank has a resolved topology entry.
-        return hasCrossDomainUbgLink;
+        return hasCrossDomainLink;
     }
 
     LayerRanks GetLayerRanks(const HcclComm& commHandle, uint32_t layerId) const
@@ -836,6 +864,43 @@ public:
         return {protocol, netLayerList[HCCL_COMM_LAYERS_UB_MEM]};
     }
 
+    void AcquireUbxChannels(const HcclComm& commHandle, const CommEngine& engine,
+                            std::vector<HcclChannelDesc>& channelDesc, ChannelHandle* channels)
+    {
+        std::vector<CommProtocol> protocols;
+        for (const auto& desc : channelDesc) {
+            if (std::find(protocols.begin(), protocols.end(), desc.channelProtocol) == protocols.end()) {
+                protocols.push_back(desc.channelProtocol);
+            }
+        }
+        // Every rank uses the same protocol order; RoCE follows the intra-domain protocols.
+        std::sort(protocols.begin(), protocols.end(), [](CommProtocol lhs, CommProtocol rhs) {
+            if (lhs == CommProtocol::COMM_PROTOCOL_ROCE || rhs == CommProtocol::COMM_PROTOCOL_ROCE) {
+                return rhs == CommProtocol::COMM_PROTOCOL_ROCE && lhs != rhs;
+            }
+            return lhs < rhs;
+        });
+        for (CommProtocol selectedProtocol : protocols) {
+            std::vector<HcclChannelDesc> selectedDescs;
+            std::vector<uint32_t> selectedIndices;
+            for (uint32_t index = 0; index < channelDesc.size(); ++index) {
+                if (channelDesc[index].channelProtocol == selectedProtocol) {
+                    selectedDescs.push_back(channelDesc[index]);
+                    selectedIndices.push_back(index);
+                }
+            }
+            std::vector<ChannelHandle> handles(selectedDescs.size());
+            auto ret = HcclChannelAcquireFunc(commHandle, engine, selectedDescs.data(),
+                                              static_cast<uint32_t>(selectedDescs.size()), handles.data());
+            TORCH_CHECK(ret == HCCL_SUCCESS,
+                        "Acquire HCCL channel failed, protocol=", static_cast<uint32_t>(selectedProtocol),
+                        ", ret: ", ret);
+            for (uint32_t i = 0; i < handles.size(); ++i) {
+                channels[selectedIndices[i]] = handles[i];
+            }
+        }
+    }
+
     void GetHcclCommChannel(const HcclComm& commHandle, uint32_t rankDim, uint32_t srcRankId,
                             const CommProtocol& protocol, const CommEngine& engine, CommContext* commContextStruct)
     {
@@ -851,9 +916,13 @@ public:
 
             InitHcclChannel(commHandle, rankDim, srcRankId, 1U, protocol, channelDesc);
 
-            auto hcclRet = HcclChannelAcquireFunc(commHandle, engine, channelDesc.data(), channelNum,
+            if (topoType_ == TopoType::CROSS_SUPER_NODE_UBX) {
+                AcquireUbxChannels(commHandle, engine, channelDesc, commContextStruct->hcommHandle_);
+            } else {
+                auto ret = HcclChannelAcquireFunc(commHandle, engine, channelDesc.data(), channelNum,
                                                   commContextStruct->hcommHandle_);
-            TORCH_CHECK(hcclRet == HCCL_SUCCESS, "Acquire HCCL channel failed, ret: ", hcclRet);
+                TORCH_CHECK(ret == HCCL_SUCCESS, "Acquire HCCL channel failed, ret: ", ret);
+            }
             return;
         }
         commContextStruct->channelsPerRank = 1U;
@@ -879,8 +948,8 @@ public:
 
         InitHcclChannel(commHandle, rankDim, srcRankId, channelsPerRank, protocol, channelDesc);
 
-        auto hcclRet = HcclChannelAcquireFunc(commHandle, engine, channelDesc.data(), channelNum, channelBuf);
-        TORCH_CHECK(hcclRet == HCCL_SUCCESS, "Acquire HCCL channel failed, ret: ", hcclRet);
+        auto ret = HcclChannelAcquireFunc(commHandle, engine, channelDesc.data(), channelNum, channelBuf);
+        TORCH_CHECK(ret == HCCL_SUCCESS, "Acquire HCCL channel failed, ret: ", ret);
 
         // Scatter to by-rank layout: hcommHandle_[peer * channelsPerRank + channel]; the local
         // rank's slots stay zero and are never used by the kernels.
