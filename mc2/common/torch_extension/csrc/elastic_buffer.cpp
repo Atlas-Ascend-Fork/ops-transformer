@@ -2051,6 +2051,9 @@ int64_t ElasticBuffer::ResolveTopoType(int64_t epWorldSize, int64_t rankNumPerSe
 
 void ElasticBuffer::CheckExternalStorageUnchanged(const at::Tensor& storage, bool zeroCopy, bool localMode) const
 {
+    const int64_t currentBytes = zeroCopy && storage.storage_offset() == 0 ?
+                                     static_cast<int64_t>(storage.storage().nbytes()) :
+                                     static_cast<int64_t>(storage.nbytes());
     if (withGrad_) {
         TORCH_CHECK(engramHostBufPtr_ == storage.data_ptr(),
                     "engram_write: engram storage is already initialized from a different address, expected ptr=",
@@ -2073,8 +2076,8 @@ void ElasticBuffer::CheckExternalStorageUnchanged(const at::Tensor& storage, boo
     const char* mode = localMode ? "local zero-copy" : "zero-copy";
     TORCH_CHECK(engramHostBufPtr_ == storage.data_ptr(), "engram_write: ", mode, " storage address changed, expected ",
                 engramHostBufPtr_, ", got ", storage.data_ptr());
-    TORCH_CHECK(engramExternalBytes_ == static_cast<int64_t>(storage.nbytes()), "engram_write: ", mode,
-                " storage size changed, registered ", engramExternalBytes_, " bytes, got ", storage.nbytes(), " bytes");
+    TORCH_CHECK(engramExternalBytes_ == currentBytes, "engram_write: ", mode, " storage size changed, registered ",
+                engramExternalBytes_, " bytes, got ", currentBytes, " bytes");
 }
 
 // EngramWrite - write data with automatic barrier.
@@ -2082,6 +2085,11 @@ void ElasticBuffer::EngramWrite(const at::Tensor& storage, const c10::optional<a
 {
     TORCH_CHECK(!destroyed_, "engram_write cannot be called after destroy, "
                              "please create a new ElasticBuffer instance");
+    // Zero-copy inference may be backed by a padded mmap.  Register the full
+    // storage when the tensor starts at offset 0 so the driver sees a 2 MiB
+    // aligned length; otherwise preserve the tensor's logical byte count.
+    const int64_t registrationBytes = storage.storage_offset() == 0 ? static_cast<int64_t>(storage.storage().nbytes()) :
+                                                                      static_cast<int64_t>(storage.nbytes());
     void* externalHostPtr = nullptr;
     int64_t externalBytes = 0;
     void* sfHostPtr = nullptr;
@@ -2093,7 +2101,7 @@ void ElasticBuffer::EngramWrite(const at::Tensor& storage, const c10::optional<a
         } else {
             if (zeroCopy) {
                 externalHostPtr = storage.data_ptr();
-                externalBytes = static_cast<int64_t>(storage.nbytes());
+                externalBytes = registrationBytes;
             } else if (engramNumCpuBytes_ == 0) {
                 engramNumCpuBytes_ = AlignTo(static_cast<int64_t>(storage.nbytes()), BUFFER_ALIGNMENT);
             }
@@ -2117,7 +2125,7 @@ void ElasticBuffer::EngramWrite(const at::Tensor& storage, const c10::optional<a
             CheckExternalStorageUnchanged(storage, zeroCopy, false);
         } else if (zeroCopy) {
             externalHostPtr = storage.data_ptr();
-            externalBytes = static_cast<int64_t>(storage.nbytes());
+            externalBytes = registrationBytes;
         }
     }
     EnsureEngramContext(externalHostPtr, externalBytes, sfHostPtr, sfBytes);
