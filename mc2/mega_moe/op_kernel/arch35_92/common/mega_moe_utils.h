@@ -17,8 +17,29 @@
 #define MEGA_MOE_UTILS_H
 
 #include <cstdint>
-#include "c_api/asc_simd.h"
+#include "mega_moe_memory_layout.h"
+#include "mega_moe_constants.h"
 
+namespace MegaMoeImpl {
+
+// 物理数据行在固定容量内回绕，逻辑行和元数据行不使用此转换。
+HOST_DEVICE uint64_t CalcMteRingPhysicalRow(uint64_t globalPaddedRow, uint64_t ringRows)
+{
+    return ringRows == 0U ? globalPaddedRow : globalPaddedRow % ringRows;
+}
+
+// 专家尾块不足 256 行也占满一个物理 group；metadata 仍按紧凑逻辑行存放。
+HOST_DEVICE uint64_t CalcMtePaddedRowCount(uint64_t validRows)
+{
+    return (validRows + L1_TILE_M_256 - 1U) / L1_TILE_M_256 * L1_TILE_M_256;
+}
+
+} // namespace MegaMoeImpl
+
+#if defined(__DAV_C310_CUBE__) || defined(__DAV_C310_VEC__) || defined(__DAV_310R6_CUBE__) || \
+    defined(__DAV_310R6_VEC__) || defined(__DAV_920R1_CUBE__) || defined(__DAV_920R1_VEC__) || \
+    defined(__NPU_ARCH__) || defined(__CCE_AICORE__)
+#include "c_api/asc_simd.h"
 #include "kernel_operator.h"
 #include "op_kernel/math_util.h"
 #include "mega_moe_constants.h"
@@ -358,6 +379,7 @@ __aicore__ inline void UpdateExpertLoopState(ExpertLoopState& state, uint32_t ex
 {
     if (expertIdx != state.expertIdx) {
         state.globalTokenStartIndex += Get<M_VALUE>(state.problemShape);
+        state.paddedTokenStartIndex += CalcMtePaddedRowCount(static_cast<uint64_t>(Get<M_VALUE>(state.problemShape)));
     }
     state.expertIdx = expertIdx;
     Get<M_VALUE>(state.problemShape) = static_cast<int64_t>(expertTokenCount);
@@ -375,6 +397,7 @@ __aicore__ inline uint32_t AdvanceExpertTokenPositionInWave(uint32_t expertToken
     waveMGroupCount += Ops::Base::CeilDiv(sliceTokenCount, TileM);
     position.tokenIndexInExpert += sliceTokenCount;
     position.globalTokenIndex += sliceTokenCount;
+    position.paddedTokenIndex += CalcMtePaddedRowCount(sliceTokenCount);
     if (position.tokenIndexInExpert >= expertTokenCount) {
         ++position.expertIdx;
         position.tokenIndexInExpert = 0U;
@@ -485,5 +508,7 @@ __aicore__ inline void SyncFuncStatic()
 }
 
 } // namespace MegaMoeImpl
+
+#endif // 核内辅助函数
 
 #endif // MEGA_MOE_UTILS_H

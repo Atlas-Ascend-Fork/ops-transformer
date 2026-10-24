@@ -400,7 +400,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     bool isWholeExpert =
         gmm2Position.tokenIndexInExpert == 0U && static_cast<uint64_t>(waveEndTokenIndexInExpert) == expertRowCount;
     void* blockMmadContext = GetRoutedGmm2MmadContext();
-    if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
+    if (IsCombineDedupOn(static_cast<int32_t>(params_.tilingData->compute.dedupMode))) {
         RunGmm2Generic<COMBINE_NO_QUANT, ActivationQuantOutType, MoeWeightType, bfloat16_t, QuantScaleOutType,
                        QuantScaleOutType, MoeWeight2Format != FORMAT_ND, false, GMM1_TILE_M, TopkWeightsPrefetch, false,
                        true, false>(gmm2WaveProblemShape, gmm2AddrInfo, startBlockIdx, gmmExecutionConfig_.blockJob,
@@ -426,7 +426,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Adv
     if (gmm2Position.tokenIndexInExpert >= expertRowCount) {
         if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
             NotifyWaveGmm2Ready(waveCombineJob_, params_, gmm2Position.expertIdx);
-        } else if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
+        } else if (IsCombineDedupOn(static_cast<int32_t>(params_.tilingData->compute.dedupMode))) {
             NotifyWaveGmm2Ready(waveCombineJob_, params_, gmm2Position.expertIdx);
         }
         ++gmm2Position.expertIdx;
@@ -472,7 +472,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     }
     CombineBufferConfig activeBufferConfig = bufferConfig;
     uint32_t rowSequence = 0U;
-    const bool dedupCombine = IsCombineDedupOn(params_.tilingData->dedupMode);
+    const bool dedupCombine = IsCombineDedupOn(static_cast<int32_t>(params_.tilingData->compute.dedupMode));
     if (dedupCombine) {
         ArmWaveCombineDedupEvents();
     }
@@ -527,7 +527,8 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
 {
     ProcessGmm2Wave(state.position, waveEndPosition, state.expertState, state.addrInfo, startBlockIdx_);
     UpdateGmmLoopCount(gmmLoopCount_, LoopCountIndex::GMM2, ++state.loopCount);
-    if (CombineQuantMode != COMBINE_NO_QUANT || IsCombineDedupOn(params_.tilingData->dedupMode)) {
+    if (CombineQuantMode != COMBINE_NO_QUANT ||
+        IsCombineDedupOn(static_cast<int32_t>(params_.tilingData->compute.dedupMode))) {
         ProcessCombineExperts(state.combineBeginExpertIndex, waveEndPosition.expertIdx, state.combineExpertState,
                               state.combineAddrInfo, combineBufferConfig, state.finalCombineExpertIndex);
         state.combineBeginExpertIndex = waveEndPosition.expertIdx;
@@ -554,7 +555,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     CombineBufferConfig combineBufferConfig{};
     if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
         combineBufferConfig = InitCombineBuffers();
-    } else if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
+    } else if (IsCombineDedupOn(static_cast<int32_t>(params_.tilingData->compute.dedupMode))) {
         combineBufferConfig = InitWaveCombineBuffersDedup(commonConfig_, waveCombineScratch_, waveCombineDedupScratch_);
     }
     PrepareMoeExpertTokenCountTable();
@@ -569,7 +570,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     Gmm2WaveState gmm2State{};
     gmm1AddrInfo.gmm1ActivationSync = &gmm1ActivationSync;
     if constexpr (CombineQuantMode == COMBINE_NO_QUANT) {
-        if (!IsCombineDedupOn(params_.tilingData->dedupMode)) {
+        if (!IsCombineDedupOn(static_cast<int32_t>(params_.tilingData->compute.dedupMode))) {
             gmm2State.addrInfo.gmm2CombineSync = &gmm2CombineSync;
         }
     }

@@ -18,8 +18,8 @@ namespace MegaMoeImpl {
 // ============================== dispatch 去重 ==============================
 // 干什么：一个 token 选中的 topK 个专家里，落在同一张卡上的专家会让基线把同一行激活
 // 重复拉取多次。dispatch 去重把这些重复拉取合并成一次：把落在同一张卡的同一 token 的
-// 多条记录看成一个「组」，只有组里第一行（FIRST）真正跨片拉数据，拉完后在本地把数据
-// 复制给组内其它行（这一步叫「扇出」）；组内其它行（SKIP）什么都不做。
+// 多条记录看成一个「组」。全量布局由第一行（FIRST）跨片拉取后扇出，组内其它行跳过；
+// 去重路径始终保留全量专家输入，FIRST 可直接扇出到后续专家，不随 wave 回绕。
 // 怎么知道谁跟谁一组：prepass（见 mega_moe_token_dedup.h）提前建好每行的描述表
 // （rowDesc），本文件按表办事。数值结果与基线逐比特相同，去重只省通信量。
 // 本文件包含：dispatch 去重的搬运/扇出/发布实现，以及按开关分流去重/基线的路由入口。
@@ -135,14 +135,14 @@ __aicore__ inline void StoreDedupEntry(const TokenDispatchConfig& context, const
                                        int32_t selfTopkIndex, int32_t descBase)
 {
     TEventID eventId = static_cast<TEventID>(bufferIdx);
-    const int32_t topK = static_cast<int32_t>(params.tilingData->topK);
+    const int32_t topK = static_cast<int32_t>(params.tilingData->compute.topK);
     WaitFlag<AscendC::HardEvent::MTE2_MTE3>(eventId);
     LocalTensor<ActivationType> tokenScaleBuffer = GetDispatchCopyBuffer(context, scratch, bufferIdx);
     LocalTensor<QuantScaleType> scaleBuffer =
         tokenScaleBuffer[context.quantTokenAlignBytes].template ReinterpretCast<QuantScaleType>();
     // 与 Fetch 侧事件分叉同条件：记录带权重段（prefetch 或 tkw=0 combine 去重）走 MTE2_S。
     const bool recordHasWeights = TopkWeightsPrefetch || (params.tilingData->topkWeightsPrefetch == 1 ||
-                                                          IsCombineDedupOn(params.tilingData->dedupMode));
+                                                          IsCombineDedupOn(params.tilingData->compute.dedupMode));
     LocalTensor<int32_t> weightBitsTensor;
     if (recordHasWeights) {
         WaitFlag<AscendC::HardEvent::MTE2_S>(eventId);
@@ -189,7 +189,7 @@ __aicore__ inline void WaitDedupPrepassForBatch(const TokenDispatchConfig& conte
                                                 uint32_t localExpertId, uint32_t remoteRankIdx, int32_t batchCount,
                                                 int32_t& confirmedChunkEnd)
 {
-    const int32_t topK = static_cast<int32_t>(params.tilingData->topK);
+    const int32_t topK = static_cast<int32_t>(params.tilingData->compute.topK);
     const int32_t chunkTokens = static_cast<int32_t>(context.dedup.prepassChunkTokens);
     const int32_t tokenFirst = scratch.validTopkIndexTensor.GetValue(0U) / topK;
     const int32_t tokenLast = scratch.validTopkIndexTensor.GetValue(static_cast<uint32_t>(batchCount - 1)) / topK;
@@ -357,9 +357,8 @@ __aicore__ inline void PublishDedupFanoutMembers(
 }
 
 /*
- * DispatchRankTokens 的去重版本：按批装载 route 条目与 rowDesc；SKIP 行（组内非首行）不产生任何
- * 拉取与写入（由其组首行扇出写入）；PLAIN/FIRST 行沿用基线的 fetch/store 软流水（对活跃条目
- * 压紧后流水）。批尾统一发布 tile-ready。
+ * DispatchRankTokens 的去重版本：按批装载 route 条目与 rowDesc。全量布局压紧 PLAIN/FIRST，
+ * 由 FIRST 直接扇出全组；批尾只发布本路径实际写入及扇出成员的 tile-ready。
  */
 template <typename TopkIndexType, typename ActivationType, typename QuantScaleType, uint32_t PipelineTileM,
           bool TopkWeightsPrefetch>
@@ -444,7 +443,7 @@ __aicore__ inline void DispatchOwnedExpertRowsDedup(const TokenDispatchConfig& c
 __aicore__ inline void WaitDedupPrepassPublishGate(const TokenDispatchConfig& context, const Params& params)
 {
     if (MegaMoeHardwarePolicy::VECTOR_CORE_COUNT_PER_CUBE == 1U || context.dedup.dedupMode == 0 ||
-        params.tilingData->hiddenDim > DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
+        params.tilingData->compute.hiddenDim > DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
         return;
     }
     // 为什么要这道门：AIV0 建表用的 UB 区，会在 GMM1 开始算之后被 AIC 覆写。而 GMM1 是
@@ -505,6 +504,7 @@ __aicore__ inline void DispatchTokenRange(const TokenDispatchConfig& context, co
     if (lastExpertExclusive > common.moeExpertPerRank) {
         lastExpertExclusive = common.moeExpertPerRank;
     }
+    uint64_t paddedExpertRowBegin = range.begin.paddedTokenIndex - range.begin.tokenIndexInExpert;
     for (uint32_t expertIdx = range.begin.expertIdx; expertIdx < lastExpertExclusive; ++expertIdx) {
         uint32_t expertGlobalRowBegin =
             expertIdx == 0U ?
@@ -513,6 +513,7 @@ __aicore__ inline void DispatchTokenRange(const TokenDispatchConfig& context, co
         uint32_t expertGlobalRowEnd =
             static_cast<uint32_t>(scratch.cumsumInfoTensor.GetValue((expertIdx + 1U) * common.worldSize - 1U));
         if (expertGlobalRowEnd <= coreGlobalRowBegin) {
+            paddedExpertRowBegin += CalcMtePaddedRowCount(expertGlobalRowEnd - expertGlobalRowBegin);
             continue;
         }
         if (expertGlobalRowBegin >= coreGlobalRowEnd) {
@@ -524,11 +525,12 @@ __aicore__ inline void DispatchTokenRange(const TokenDispatchConfig& context, co
         if (overlapGlobalRowBegin < overlapGlobalRowEnd) {
             // 将本核的全局连续区间投影为当前专家内的局部 row 区间，按去重开关走对应 dispatch 路径。
             ExpertDispatchCoreRange expertRange{expertGlobalRowBegin, overlapGlobalRowBegin - expertGlobalRowBegin,
-                                                overlapGlobalRowEnd - expertGlobalRowBegin};
+                                                overlapGlobalRowEnd - expertGlobalRowBegin, paddedExpertRowBegin};
             DispatchOwnedExpertRowsRouted<TopkIndexType, ActivationType, QuantScaleType, PipelineTileM,
                                           TopkWeightsPrefetch>(context, common, syncLayout, params, winRankAddr,
                                                                scratch, expertIdx, expertRange);
         }
+        paddedExpertRowBegin += CalcMtePaddedRowCount(expertGlobalRowEnd - expertGlobalRowBegin);
     }
 }
 /*
@@ -555,7 +557,7 @@ __aicore__ inline void PrepareDedupPrepassAiv0Local(const DedupConfig& dedup, co
         return;
     }
     if (MegaMoeHardwarePolicy::VECTOR_CORE_COUNT_PER_CUBE == 1U || dedup.dedupMode == 0 || GetSubBlockIdx() != 0U ||
-        params.tilingData->hiddenDim > DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
+        params.tilingData->compute.hiddenDim > DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
         return;
     }
     const uint32_t cumsumInfoTensorSize = static_cast<uint32_t>(

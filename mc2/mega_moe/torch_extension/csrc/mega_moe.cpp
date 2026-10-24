@@ -14,6 +14,11 @@
 #include <cstring>
 #include <limits>
 #include "aclnn_common.h"
+#if __has_include("aclnnop/mega_moe_memory_layout.h")
+#include "aclnnop/mega_moe_memory_layout.h"
+#else
+#include "../../op_kernel/arch35_92/common/mega_moe_memory_layout.h"
+#endif
 
 namespace op_api {
 using npu_utils = at_npu::native::NpuUtils;
@@ -457,11 +462,7 @@ constexpr int64_t MB_SIZE = 1024LL * 1024LL;
 constexpr int64_t RESERVED_SPACE_SIZE = 10LL * 1024 * 1024;
 constexpr int64_t MAX_EXPERTS_PER_RANK_A2A3 = 128LL;
 constexpr int64_t SYNC_STATE_RESERVED_SIZE = 512LL * 1024;
-constexpr int64_t PEERMEM_MIN_RANK_SYNC_SIZE = 48LL * 1024LL;
-constexpr int64_t PEERMEM_SYNC_COUNT_REGION_SIZE = 12LL * 1024LL;
-constexpr int64_t PEERMEM_SYNC_SLOT_SIZE = 64LL;
 constexpr int64_t MXFP_SCALE_GROUP_NUM = 32LL;
-constexpr int64_t MXFP_MULTI_BASE_SIZE = 2LL;
 constexpr int64_t Y_DTYPE_SIZE = 2LL;
 constexpr int64_t URMA_H_ALIGN = 64LL;
 constexpr int64_t MTE_H_ALIGN = 64LL;
@@ -473,7 +474,6 @@ constexpr int64_t PEERMEM_DATA_OFFSET = 60LL * 1024LL;
 constexpr int64_t PEERMEM_MTE_COUNT_REGION_SIZE = 512LL * 2048LL;
 // 此 JIT 源文件随 wheel 搬移，包中不包含 op_kernel 头文件。下列架构和布局上界须与
 // arch35_92/common/mega_moe_constants.h 及 arch35、arch92 各自的 Workspace 布局保持一致。
-constexpr int64_t ARCH35_MAX_AIC_NUM = 36LL;
 constexpr int64_t ARCH92_MAX_AIC_NUM = 64LL;
 constexpr int64_t ARCH35_MAX_SHARED_EXPERT_NUM = 4LL;
 constexpr int64_t ARCH35_INT_CACHELINE = 16LL;
@@ -556,17 +556,6 @@ int64_t CalcTokenScaleBytesA5(int64_t hidden, int64_t numTopk, int64_t topkWeigh
     return tokenBytes;
 }
 
-int64_t CalcCombineTokenBytesA5(int64_t hidden, int64_t combineQuantMode)
-{
-    if (combineQuantMode == 0) {
-        return hidden * Y_DTYPE_SIZE;
-    }
-    int64_t tokenStorageBytes = CeilAlign(hidden, ALIGN_256);
-    int64_t scaleCount = (hidden + MXFP_SCALE_GROUP_NUM - 1) / MXFP_SCALE_GROUP_NUM;
-    int64_t storedScaleBytes = CeilAlign(scaleCount, MXFP_MULTI_BASE_SIZE);
-    return CeilAlign(tokenStorageBytes + storedScaleBytes, ALIGN_32);
-}
-
 int64_t CalcMteCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank, int64_t numTopk,
                                int64_t hidden, int64_t topkWeightsType)
 {
@@ -591,50 +580,6 @@ int64_t CalcMteCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_
     int64_t totalBytes = EXCEPTION_DUMP_REGION_SIZE + PEERMEM_DATA_OFFSET + routeRecvSize + expertCountRecvSize +
                          dispatchRecordAreaSize + combineSendSize;
 
-    return totalBytes;
-}
-
-int64_t CalcUrmaCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank, int64_t numTopk,
-                                int64_t hidden, int64_t combineQuantMode, int64_t topkWeightsType, int64_t serverNum,
-                                bool serverCombineReduce)
-{
-    int64_t expertPerRank = moeExpertNum / epWorldSize;
-    int64_t rankSyncSize = epWorldSize * PEERMEM_SYNC_SLOT_SIZE;
-    int64_t dataOffset =
-        CeilAlign(std::max(rankSyncSize, PEERMEM_MIN_RANK_SYNC_SIZE) + PEERMEM_SYNC_COUNT_REGION_SIZE, ALIGN_512);
-
-    int64_t routeCapacity = numMaxTokensPerRank * numTopk;
-    int64_t alignedRouteCount = CeilAlign(routeCapacity * static_cast<int64_t>(sizeof(int32_t)), ALIGN_256) /
-                                static_cast<int64_t>(sizeof(int32_t));
-    int64_t maskAlignSize = CeilAlign(alignedRouteCount / 8, ALIGN_32);
-    int64_t maskRecvSize = CeilAlign(expertPerRank * epWorldSize * (maskAlignSize + ALIGN_32), ALIGN_512);
-    int64_t expertCountRecvSize =
-        CeilAlign(expertPerRank * epWorldSize * static_cast<int64_t>(sizeof(int32_t)), ALIGN_512);
-
-    int64_t tokenBytes = CalcTokenScaleBytesA5(hidden, numTopk, topkWeightsType);
-    int64_t relayRecordBytes = CeilAlign(tokenBytes, ALIGN_512);
-    int64_t relayDataSize = CeilAlign(numMaxTokensPerRank * relayRecordBytes * serverNum, ALIGN_512);
-    int64_t readyRowBytes =
-        serverCombineReduce ? CeilAlign((numMaxTokensPerRank + 1) * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_32) :
-                              numMaxTokensPerRank * static_cast<int64_t>(sizeof(uint64_t));
-    int64_t relayFlagSize = CeilAlign(serverNum * readyRowBytes, ALIGN_512);
-
-    int64_t combineTokenBytes = CalcCombineTokenBytesA5(hidden, combineQuantMode);
-    int64_t combineSendSize =
-        serverCombineReduce ? 0 : CeilAlign(numMaxTokensPerRank * numTopk * combineTokenBytes, ALIGN_512);
-
-    int64_t totalBytes =
-        dataOffset + maskRecvSize + expertCountRecvSize + relayDataSize + relayFlagSize + combineSendSize;
-    if (serverCombineReduce) {
-        const int64_t contributionBytes = hidden * Y_DTYPE_SIZE;
-        const int64_t combineReceiveBytes = hidden * Y_DTYPE_SIZE;
-        totalBytes += CeilAlign(serverNum * readyRowBytes, ALIGN_512); // source Dispatch ready
-        totalBytes += CeilAlign(serverNum * numMaxTokensPerRank * numTopk * contributionBytes, ALIGN_512);
-        totalBytes += CeilAlign(serverNum * numMaxTokensPerRank * numTopk * static_cast<int64_t>(sizeof(uint64_t)),
-                                ALIGN_512); // Contribution ready
-        totalBytes +=
-            CeilAlign(serverNum * numMaxTokensPerRank * combineReceiveBytes, ALIGN_512); // 接收各 Server 部分和
-    }
     return totalBytes;
 }
 
@@ -841,6 +786,97 @@ int64_t CalcCclDataSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_t num
     AccumulateSharedExpertSize(cclDataSize, budget);
     return cclDataSize;
 }
+
+// Arch35 使用公共布局规划器，Arch92 保留上方主线全量分配预算。
+// 容量查询尚未知核数、共享专家数及权重模式，未知特征在申请侧保留安全上界。
+struct MemoryBudgetParams {
+    MegaMoeImpl::CclCommLayoutParams comm;
+    MegaMoeImpl::CclComputeLayoutParams compute;
+};
+
+MemoryBudgetParams BuildMemoryBudgetParams(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank,
+                                           int64_t numTopk, int64_t h, int64_t intermediateHidden,
+                                           int64_t maxRecvTokenNum, int64_t topkWeightsType, int64_t serverNum,
+                                           int64_t combineQuantMode, int64_t combineCommMode,
+                                           aclDataType dispatchQuantOutDtype)
+{
+    MemoryBudgetParams budget{};
+    auto& params = budget.compute;
+    params.topoType = serverNum > 0 ? MegaMoeImpl::TOPO_TYPE_URMA : MegaMoeImpl::TOPO_TYPE_MTE;
+    params.maxOutputSize = maxRecvTokenNum == 0 ?
+                               numMaxTokensPerRank * epWorldSize *
+                                   (numTopk < moeExpertNum / epWorldSize ? numTopk : moeExpertNum / epWorldSize) :
+                               maxRecvTokenNum;
+    params.h = h;
+    params.hiddenDim = intermediateHidden * 2;
+    params.bs = numMaxTokensPerRank;
+    params.moeExpertPerRank = moeExpertNum / epWorldSize;
+    params.epWorldSize = epWorldSize;
+    params.aicNum = 36;
+    params.sharedExpertNum = 4;
+    // 创建窗口时尚未知激活类型，按 GELU 的较窄 GMM1 输出取较大的 wave 行预算。
+    // GMM1 结果宽度仍按门控激活的两倍 intermediateHidden 预留。
+    params.mGroupsPerWave = MegaMoeImpl::CalcMemoryMGroupsPerWave(intermediateHidden, params.h, params.aicNum);
+    params.maxTilesPerExpert = MegaMoeImpl::CalcMemoryMaxTilesPerExpert(params.maxOutputSize, params.hiddenDim);
+    const int64_t maxTokenGroups = MegaMoeImpl::MemoryLayoutDetail::CeilDiv(
+        numMaxTokensPerRank * epWorldSize, MegaMoeImpl::MemoryLayoutDetail::L1_TILE_M_256);
+    params.combineSyncSlotCountPerExpert = maxTokenGroups > params.aicNum ? maxTokenGroups : params.aicNum;
+    params.serverNum = serverNum;
+    params.numMaxTokensPerRank = numMaxTokensPerRank;
+    params.topK = numTopk;
+    params.dedupMode = params.topoType == MegaMoeImpl::TOPO_TYPE_MTE ?
+                           (combineCommMode == 1 ? 1 : 0) :
+                           (combineCommMode == 2 ? MegaMoeImpl::DEDUP_MODE_SERVER_COMBINE : 0);
+    params.combineQuant = combineQuantMode != 0;
+    params.topkWeightsPrefetch = topkWeightsType == 1;
+    const bool isFp4 = dispatchQuantOutDtype == ACL_FLOAT4_E2M1;
+    const bool isE5M2 = dispatchQuantOutDtype == ACL_FLOAT8_E5M2;
+    params.dispatchFp4 = isFp4;
+    // E5M2 仅支持 A8W8，FP4 仅支持 A4W4；两者的 GMM1 仅在权重前移时落 GM。
+    params.reserveGmm1Output = params.topkWeightsPrefetch || (!isFp4 && !isE5M2);
+    params.reserveCumsum = !isE5M2;
+    // 共享专家的量化配置独立于 MoE，仍按 W4 与独立量化的上界预留。
+    params.needsGmmEpilogue = true;
+    params.sharedInputIndependent = true;
+
+    auto& comm = budget.comm;
+    comm.numMaxTokensPerRank = numMaxTokensPerRank;
+    comm.topK = numTopk;
+    comm.h = h;
+    comm.moeExpertPerRank = params.moeExpertPerRank;
+    comm.epWorldSize = epWorldSize;
+    comm.yDtypeSize = MegaMoeImpl::SIZE_BF_16;
+    // 已知 FP4 时与 tiling 的实际记录宽度一致；未知类型继续保留 FP8 上界。
+    comm.elemsPerByte = isFp4 ? 2U : 1U;
+    comm.serverCombineReduce = MegaMoeImpl::IsServerCombineDedupOn(params.dedupMode);
+    comm.topkWeightsPrefetch =
+        params.topkWeightsPrefetch || MegaMoeImpl::IsCombineDedupOn(params.dedupMode) || comm.serverCombineReduce;
+    comm.isQuantCombine = params.combineQuant;
+    comm.topoType = params.topoType;
+    comm.serverNum = serverNum;
+    params.ring = MegaMoeImpl::CalcCclStageRingConfig(params);
+    return budget;
+}
+
+int64_t CalcCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank, int64_t numTopk,
+                            int64_t hidden, int64_t intermediateHidden, int64_t maxRecvTokenNum,
+                            int64_t topkWeightsType, int64_t serverNum, int64_t combineQuantMode,
+                            int64_t combineCommMode, aclDataType dispatchQuantOutDtype)
+{
+    // 创建 SymmBuffer 时尚未知权重和共享专家配置，统一构造安全上界。
+    const auto budget = BuildMemoryBudgetParams(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden,
+                                                intermediateHidden, maxRecvTokenNum, topkWeightsType, serverNum,
+                                                combineQuantMode, combineCommMode, dispatchQuantOutDtype);
+    int64_t dataBytes = MegaMoeImpl::CclComputeLayout(budget.compute).workspaceSize;
+    if (budget.compute.topoType == MegaMoeImpl::TOPO_TYPE_MTE) {
+        // Dispatch 由 tiling 自动选择；分别计算开、关布局，覆盖数据区、去重描述符及标志区。
+        auto dispatchDedupParams = budget.compute;
+        dispatchDedupParams.dedupMode |= 2;
+        dispatchDedupParams.ring = MegaMoeImpl::CalcCclStageRingConfig(dispatchDedupParams);
+        dataBytes = std::max(dataBytes, MegaMoeImpl::CclComputeLayout(dispatchDedupParams).workspaceSize);
+    }
+    return MegaMoeImpl::CalcCclComputeOffset(budget.comm) + dataBytes;
+}
 } // namespace
 
 int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64_t numMaxTokensPerRank, int64_t numTopk,
@@ -885,7 +921,6 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
                                         numTopk);
     }
 
-    const int64_t maxAicNum = isArch92 ? ARCH92_MAX_AIC_NUM : ARCH35_MAX_AIC_NUM;
     TORCH_CHECK(!isArch92 || serverNum == 0, "Ascend960DT MegaMoe only supports the MTE topology (server_num=0)");
     TORCH_CHECK(epWorldSize >= 2 && epWorldSize <= 1024, "ep_world_size only support in [2, 1024], but got ",
                 epWorldSize);
@@ -920,22 +955,24 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
         TORCH_CHECK(maxRecvTokenNum <= maxOutputCapacity,
                     "max_recv_token_num should not exceed the URMA maximum receive token capacity ", maxOutputCapacity,
                     ", but got ", maxRecvTokenNum);
-        int64_t communicationBufferSize =
-            CalcUrmaCclBufferSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, combineQuantMode,
-                                    combineCommMode == 2 ? 1 : topkWeightsType, serverNum, combineCommMode == 2);
+    }
+    if (isArch92) {
+        // Arch92 沿用主线全量分配和 64 核容量上界，不接入 Arch35 的布局优化。
+        const int64_t layoutTopkWeights = (topkWeightsType == 1 || combineCommMode == 1) ? 1 : 0;
+        const int64_t communicationBufferSize =
+            CalcMteCclBufferSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, layoutTopkWeights);
         return CeilAlign(communicationBufferSize, ALIGN_512) +
                CalcCclDataSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden,
                                  maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode,
-                                 maxAicNum);
+                                 ARCH92_MAX_AIC_NUM);
     }
-    // 与 arch35 host/kernel 的记录带权重段判定同式：tkw=1 或 combine 去重开
-    // Ascend950 不通过 comm_alg 选择去重，仅由 combine_comm_mode 控制合并去重位。
-    int64_t layoutTopkWeights = (topkWeightsType == 1 || combineCommMode == 1) ? 1 : 0;
-    int64_t communicationBufferSize =
-        CalcMteCclBufferSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, layoutTopkWeights);
-    return CeilAlign(communicationBufferSize, ALIGN_512) +
-           CalcCclDataSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden,
-                             maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode, maxAicNum);
+    const bool hasDispatchQuantOutDtype =
+        dispatchQuantOutDtype.has_value() && dispatchQuantOutDtype.value() != GE_DTYPE_UNDEFINED;
+    const aclDataType quantOutDtype =
+        hasDispatchQuantOutDtype ? GetAclDataType(dispatchQuantOutDtype.value()) : ACL_DT_UNDEFINED;
+    return CalcCclBufferSizeA5(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden,
+                               maxRecvTokenNum, topkWeightsType, serverNum, combineQuantMode, combineCommMode,
+                               quantOutDtype);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)

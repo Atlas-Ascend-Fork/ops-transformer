@@ -14,7 +14,7 @@
  *
  * 背景：MTE dispatch 为 pull 模式，接收卡按源 tokenIndex 从远端窗口拉取记录。topK 路由下同一
  * 源 token 常被本卡多个专家选中，基线会把同一远端记录跨片拉 K 次。去重后每个 (srcRank, token)
- * 只拉一次，由组首行从 UB 直接扇出写到组内全部目的行（数据/scale/metaInfo 三区），数值 bit 恒等。
+ * 只拉一次。Dispatch 去重保留全量专家输入，由组首行直接扇出，不再中转缓存或回读。
  */
 
 #ifndef MEGA_MOE_TOKEN_DEDUP_H
@@ -29,8 +29,8 @@ using namespace AscendC;
 // ============================== 去重 prepass（建表） ==============================
 // 干什么：在 dispatch 搬数据之前，先把「哪些行是重复的、谁跟谁一组」算出来，写成每行
 // 一条的描述表（rowDesc）。同一 token 发到同一张卡的多行为一组：组里第一行标 FIRST
-// （真正拉数据并扇出给全组），其余行标 SKIP（什么都不做），组内最大专家那行标 LAST
-// （combine 合并由它驱动）。不在任何组里的行标 PLAIN，走基线路径。
+// （拉数据并直接扇出给全组），其余行标 SKIP；输入按逻辑行持久保存，不随 wave 回绕。
+// 组内最大专家那行标 LAST（combine 合并由它驱动）。不在任何组里的行标 PLAIN，走基线路径。
 // dispatch 去重与 combine 去重都按这张表办事，表只建一次。
 // =================================================================================
 
@@ -56,7 +56,7 @@ constexpr int32_t DEDUP_PACK_INIT = 0x00FF0000;
 struct DedupConfig {
     GM_ADDR rowDescPtr = nullptr; // workspace rowDesc 表基址
     GM_ADDR prepassReadyPtr = nullptr; // prepass 完成标记区（槽0=每核done计数，槽1+item=项ready；随 launch 清零）
-    int32_t dedupMode = 0;           // 同 tilingData->dedupMode（0=全关 1=仅combine 2=仅dispatch 3=双开）
+    int32_t dedupMode = 0; // 同 tilingData->compute.dedupMode（0=全关 1=仅combine 2=仅dispatch 3=双开）
     uint32_t rowDescStrideInt32 = 0; // 每行描述符 int32 数（CalcDedupRowDescStrideInt32）
     uint32_t prepassChunkTokens = 1; // 工作项 token 切片宽（CalcDedupPrepassChunkTokens 单源）
     uint32_t prepassChunkCount = 1;  // 每 srcRank 的 chunk 数 = ceil(numTokens/chunkTokens)
@@ -124,17 +124,19 @@ __aicore__ inline uint32_t CalcDedupPrepassChunkTokens(uint32_t numTokens, uint3
 __aicore__ inline DedupConfig CreateDedupConfig(const Params& params)
 {
     DedupConfig config;
-    config.dedupMode = params.tilingData->dedupMode;
+    config.dedupMode = params.tilingData->compute.dedupMode;
     if (config.dedupMode == 0) {
         return config;
     }
     config.rowDescPtr = params.workspaceInfo.dedupRowDescPtr;
     config.prepassReadyPtr = params.workspaceInfo.dedupPrepassReadyPtr;
     config.rowDescStrideInt32 =
-        static_cast<uint32_t>(CalcDedupRowDescStrideInt32(static_cast<int64_t>(params.tilingData->topK)));
-    const uint32_t numTokens = params.tilingData->numMaxTokensPerRank;
-    config.prepassChunkTokens = CalcDedupPrepassChunkTokens(numTokens, params.tilingData->epWorldSize,
-                                                            params.tilingData->topK, params.tilingData->aicNum);
+        static_cast<uint32_t>(CalcDedupRowDescStrideInt32(static_cast<int64_t>(params.tilingData->compute.topK)));
+    const uint32_t numTokens = static_cast<uint32_t>(params.tilingData->compute.numMaxTokensPerRank);
+    config.prepassChunkTokens =
+        CalcDedupPrepassChunkTokens(numTokens, static_cast<uint32_t>(params.tilingData->compute.epWorldSize),
+                                    static_cast<uint32_t>(params.tilingData->compute.topK),
+                                    static_cast<uint32_t>(params.tilingData->compute.aicNum));
     config.prepassChunkCount = (numTokens + config.prepassChunkTokens - 1U) / config.prepassChunkTokens;
     return config;
 }
@@ -171,9 +173,9 @@ __aicore__ inline DedupPrepassWorker<TopkIndexType> CreateDedupPrepassWorker(con
         LocalTensor<int32_t>(TPosition::VECCALC, descAsmAddr, DEDUP_DESC_ASM_UB_BYTES / sizeof(int32_t));
     worker.memberTensor = LocalTensor<int32_t>(TPosition::VECCALC, memberAddr, DEDUP_MEMBER_UB_BYTES / sizeof(int32_t));
     worker.rowDescGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(dedup.rowDescPtr));
-    worker.topK = params.tilingData->topK;
+    worker.topK = static_cast<uint32_t>(params.tilingData->compute.topK);
     worker.strideInt32 = dedup.rowDescStrideInt32;
-    worker.maxOutputSize = params.tilingData->maxOutputSize;
+    worker.maxOutputSize = static_cast<uint32_t>(params.tilingData->compute.maxOutputSize);
     worker.dispatchFlagSlotCountPerExpert = syncLayout.dispatchFlagSlotCountPerExpert;
     return worker;
 }
@@ -423,7 +425,7 @@ __aicore__ inline void DedupStoreRowDescChunk(DedupPrepassWorker<TopkIndexType>&
 __aicore__ inline bool GetDedupPrepassWorkerSlot(const BlockJobContext& blockJob, const Params& params,
                                                  uint32_t& workerIndex, uint32_t& totalWorkers)
 {
-    const bool aiv0Joins = params.tilingData->hiddenDim <= DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM;
+    const bool aiv0Joins = params.tilingData->compute.hiddenDim <= DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM;
     if (!IsSubBlockIdx<1U>() && !aiv0Joins) {
         return false;
     }
@@ -468,8 +470,9 @@ __aicore__ inline void RunDedupPrepassWorkItem(DedupPrepassWorker<TopkIndexType>
     const uint32_t srcRank = workItem / dedup.prepassChunkCount;
     const uint32_t chunkIdx = workItem % dedup.prepassChunkCount;
     int32_t tokenHi = 0;
-    const DedupChunkWindow window = MakeDedupChunkWindow(chunkIdx, dedup.prepassChunkTokens,
-                                                         params.tilingData->numMaxTokensPerRank, worker.topK, tokenHi);
+    const DedupChunkWindow window = MakeDedupChunkWindow(
+        chunkIdx, dedup.prepassChunkTokens, static_cast<uint32_t>(params.tilingData->compute.numMaxTokensPerRank),
+        worker.topK, tokenHi);
     // 上一工作项的标量 count 写先于本项向量清零（S→V），再保证清零结果对标量可见（V→S）。
     SyncFuncStatic<AscendC::HardEvent::S_V, SYNC_EVENT_ID2>();
     Duplicate<int32_t>(worker.countTensor, DEDUP_PACK_INIT, static_cast<int32_t>(dedup.prepassChunkTokens));

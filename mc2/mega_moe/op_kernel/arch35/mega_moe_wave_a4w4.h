@@ -255,7 +255,7 @@ __aicore__ inline void MegaMoeA4W4Wave<TemplateMegaMoeA4W4WaveTypeFunc>::Process
 {
     // 去重 combine：进 wave 前预挂事件（与函数尾的 Drain 配对，条件逐字一致）。
     if constexpr (CombineQuantMode == COMBINE_NO_QUANT) {
-        if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
+        if (IsCombineDedupOn(params_.tilingData->compute.dedupMode)) {
             ArmWaveCombineDedupEvents();
         }
     }
@@ -272,7 +272,7 @@ __aicore__ inline void MegaMoeA4W4Wave<TemplateMegaMoeA4W4WaveTypeFunc>::Process
     }
     if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
         DrainCombineRowBuffers(combineRowSequence, combineBufferConfig.rowBufferCount);
-    } else if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
+    } else if (IsCombineDedupOn(params_.tilingData->compute.dedupMode)) {
         DrainCombineRowBuffersDedup(combineRowSequence, combineBufferConfig.rowBufferCount);
     }
 }
@@ -318,7 +318,7 @@ __aicore__ inline void MegaMoeA4W4Wave<TemplateMegaMoeA4W4WaveTypeFunc>::Process
     WaveCombineBufferConfig combineBufferConfig{};
     if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
         combineBufferConfig = InitWaveCombineBuffers<CombineQuantMode>(commonConfig_, waveCombineScratch_);
-    } else if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
+    } else if (IsCombineDedupOn(params_.tilingData->compute.dedupMode)) {
         // 非量化 combine 去重：专家粒度独立消费（基类 RunGmm2CombineForExpert 内接入）。
         if constexpr (g_coreType == AIV) {
             if (GetSubBlockIdx() == 1U) {
@@ -340,7 +340,7 @@ __aicore__ inline void MegaMoeA4W4Wave<TemplateMegaMoeA4W4WaveTypeFunc>::Process
         // combine 去重开时不挂握手对象：W4 路径的握手启用位（NotifyCombineTileReady）编译期恒真
         // （见 gmm2_combine.h 对编译器问题的说明），AIC 是否真握手靠这里挂/不挂 + mmad 处判空决定；
         // 去重开时 AIV1 不做逐 tile 消费，挂上 AIC 会死等 credit。
-        if (!IsCombineDedupOn(params_.tilingData->dedupMode)) {
+        if (!IsCombineDedupOn(params_.tilingData->compute.dedupMode)) {
             gmm2AddrInfo.gmm2CombineSync = &gmm2CombineSync;
         }
     }

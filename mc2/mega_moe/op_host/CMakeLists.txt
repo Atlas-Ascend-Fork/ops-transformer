@@ -45,3 +45,12 @@ else() # 回黄host
     add_mc2_modules_sources(OPTYPE mega_moe ACLNNTYPE aclnn_inner)
     set(SUB_MC2_COMPILE TRUE PARENT_SCOPE)
 endif()
+
+# Torch 复用算子包中的纯布局头，不再单独维护 CCL 容量公式。
+if (BUILD_OPEN_PROJECT OR ENABLE_BUILT_IN)
+    set(MEGA_MOE_LAYOUT_INC_INSTALL_DIR ${ACLNN_INC_INSTALL_DIR})
+else()
+    set(MEGA_MOE_LAYOUT_INC_INSTALL_DIR ${ACLNN_INC_INSTALL_DIR}/aclnnop)
+endif()
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/arch35_92/common/mega_moe_memory_layout.h
+        DESTINATION ${MEGA_MOE_LAYOUT_INC_INSTALL_DIR})

@@ -223,16 +223,18 @@ template <TemplateMegaMoeTypeClass>
 __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::InitSyncWorkspaceConfigs(int32_t dispatchFlagSlotsPerExpert,
                                                                                   int32_t activationFlagSlotsPerExpert)
 {
-    countWorkspace_ = {.blockIdx = blockIdx_, .blockNum = params_.tilingData->aicNum};
-    syncWorkspaceLayout_ = {.dispatchFlagSlotCountPerExpert = dispatchFlagSlotsPerExpert,
-                            .activationFlagSlotCountPerExpert = activationFlagSlotsPerExpert,
-                            .gmm1TileStatusCountPerExpert = params_.tilingData->maxTilesPerExpert};
+    countWorkspace_ = {.blockIdx = blockIdx_, .blockNum = static_cast<uint32_t>(params_.tilingData->compute.aicNum)};
+    syncWorkspaceLayout_ = {
+        .dispatchFlagSlotCountPerExpert = dispatchFlagSlotsPerExpert,
+        .activationFlagSlotCountPerExpert = activationFlagSlotsPerExpert,
+        .gmm1TileStatusCountPerExpert = static_cast<uint32_t>(params_.tilingData->compute.maxTilesPerExpert)};
 }
 
 template <TemplateMegaMoeTypeClass>
 __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::InitGmmConfigs()
 {
-    gmmExecutionConfig_ = {.blockJob = {.jobIndex = blockIdx_, .totalJobs = blockNum_},
+    gmmExecutionConfig_ = {.ring = params_.tilingData->compute.ring,
+                           .blockJob = {.jobIndex = blockIdx_, .totalJobs = blockNum_},
                            .isPerExpertWeightTensor = params_.tilingData->isPerExpertWeightTensor};
     waveCombineJob_ = {.jobIndex = blockIdx_, .totalJobs = blockNum_};
 }
@@ -263,10 +265,10 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::InitEpilogueAndCommonCo
                      .worldSize = worldSize_,
                      .moeExpertPerRank = moeExpertPerRank_,
                      .sharedExpertNum = sharedExpertNum_,
-                     .tokenNum = tilingData->bs,
-                     .topK = tilingData->topK,
+                     .tokenNum = static_cast<uint32_t>(tilingData->compute.bs),
+                     .topK = static_cast<uint32_t>(tilingData->compute.topK),
                      .tokenHiddenDim = k_,
-                     .gmm1OutputDim = tilingData->hiddenDim,
+                     .gmm1OutputDim = static_cast<uint32_t>(tilingData->compute.hiddenDim),
                      .activationOutputDivisor = activationOutputDivisor};
 }
 
@@ -275,7 +277,7 @@ template <TemplateMegaMoeTypeClass>
 __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::InitStageConfigs(const MegaMoeTilingData* tilingData)
 {
     InitEpilogueAndCommonConfig(tilingData);
-    const int64_t maxOutput = static_cast<int64_t>(tilingData->maxOutputSize);
+    const int64_t maxOutput = static_cast<int64_t>(tilingData->compute.maxOutputSize);
     const int64_t tileM = static_cast<int64_t>(GMM1_TILE_M);
     int32_t dispatchFlagSlotsPerExpert = static_cast<int32_t>(Ops::Base::CeilDiv(maxOutput, tileM)) * INT_CACHELINE;
     int32_t activationFlagSlotsPerExpert =
@@ -298,11 +300,11 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::Init(
     GM_ADDR sharedWeight2, GM_ADDR sharedWeightScales1, GM_ADDR sharedWeightScales2, GM_ADDR yOut,
     GM_ADDR expertTokenNumsOut, GM_ADDR workspaceGM, const MegaMoeTilingData* tilingData, GM_ADDR tilingGM)
 {
-    k_ = tilingData->h;
-    worldSize_ = tilingData->epWorldSize;
-    moeExpertPerRank_ = tilingData->moeExpertPerRank;
-    sharedExpertNum_ = tilingData->sharedExpertNum;
-    mGroupsPerWave_ = tilingData->mGroupsPerWave;
+    k_ = static_cast<uint32_t>(tilingData->compute.h);
+    worldSize_ = static_cast<uint32_t>(tilingData->compute.epWorldSize);
+    moeExpertPerRank_ = static_cast<uint32_t>(tilingData->compute.moeExpertPerRank);
+    sharedExpertNum_ = static_cast<uint32_t>(tilingData->compute.sharedExpertNum);
+    mGroupsPerWave_ = static_cast<uint32_t>(tilingData->compute.mGroupsPerWave);
     gmm1PingPongIdx_ = 0;
     gmmTileSequence_ = 0;
     startBlockIdx_ = 0;
@@ -328,10 +330,10 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::Init(
     params_.expertTokenNumsOutGmAddr = expertTokenNumsOut;
     params_.probsGmAddr = topkWeights;
     (void)workspaceGM;
-    params_.peermemInfo = PeermemInfo(tilingData, A_ELEMS_PER_BYTE, g_winRankAddr_[rankId_]);
+    params_.peermemInfo = PeermemInfo(tilingData->comm, g_winRankAddr_[rankId_]);
     {
-        WorkspaceLayoutArch35 workspaceLayout(tilingData);
-        params_.workspaceInfo.Bind(params_.peermemInfo.cclDataPtr, workspaceLayout);
+        WorkspaceLayoutArch35 workspaceLayout(tilingData->compute);
+        params_.workspaceInfo.Bind(params_.peermemInfo.cclComputePtr, workspaceLayout);
     }
     params_.tilingData = tilingData;
     InitStageConfigs(tilingData);
@@ -431,7 +433,8 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::PrepareMoeExpertTokenCo
         // 经 PrepareDedupPrepassAiv0Local -> LoadAndComputeExpertCountTable 已上报，此处不得重复。
         // 条件必须与 PrepareDedupPrepassAiv0Local 的启用门严格互补（含 hiddenDim 档位），
         // 否则计算主导档的 AIV0 无人上报，ExportAndResetExpertCounts 等 read-done 挂死。
-        if (params_.tilingData->dedupMode == 0 || params_.tilingData->hiddenDim > DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
+        if (params_.tilingData->compute.dedupMode == 0 ||
+            params_.tilingData->compute.hiddenDim > DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
             CrossCoreSetFlag<ALL_AICORE_SYNC_MODE, PIPE_V>(COUNT_TABLE_READ_DONE_FLAG);
         }
         return;
@@ -766,8 +769,8 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::SyncBeforeMoeExpertStag
                 // 共享直接读取输入时，AIV0 在进入 MoE 前等待全部 quant/pack 完成。
                 CrossCoreWaitFlag<ALL_AICORE_SYNC_MODE, PIPE_MTE3>(TOKEN_DATA_READY_FLAG);
             }
-            if (params_.tilingData->dedupMode != 0 &&
-                params_.tilingData->hiddenDim <= DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
+            if (params_.tilingData->compute.dedupMode != 0 &&
+                params_.tilingData->compute.hiddenDim <= DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM) {
                 // AIV0 参与去重建表，先通过 MTE2 搬入 count 表，等待前序搬出读完 UB。
                 SyncFuncStatic<HardEvent::MTE3_MTE2, SYNC_EVENT_ID3>();
             } else {
@@ -911,7 +914,7 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::RunGmm2CombineForExpert
     }
 
     if constexpr (CombineQuantMode == COMBINE_NO_QUANT) {
-        if (IsCombineDedupOn(params_.tilingData->dedupMode)) {
+        if (IsCombineDedupOn(params_.tilingData->compute.dedupMode)) {
             // combine 去重：跨 WAVE 的专家等最后一个 slice 完成后按专家粒度独立消费（与量化路径
             // 同构；AIC 被跳过 problem 的情形也会到达本分支，per-expert 标记不漏发）。
             if (tokenStartIndexInExpert + sliceTokenCount >= expertTokenCount) {

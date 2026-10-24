@@ -295,10 +295,10 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ResetFlag
     ResetWorkspaceRegion<1>(job, params_.workspaceInfo.flagActivationToGmm2Ptr,
                             params_.workspaceInfo.flagResetElementCount, resetBatchElementCount_, resetTensor_);
     if constexpr (TopkWeightsPrefetch) {
-        int32_t statusElementCount =
-            (static_cast<int32_t>(moeExpertPerRank_) * static_cast<int32_t>(params_.tilingData->maxTilesPerExpert) +
-             1) *
-            INT_CACHELINE;
+        int32_t statusElementCount = (static_cast<int32_t>(moeExpertPerRank_) *
+                                          static_cast<int32_t>(params_.tilingData->compute.maxTilesPerExpert) +
+                                      1) *
+                                     INT_CACHELINE;
         ResetWorkspaceRegion(GetBalancedWorkRange(static_cast<uint32_t>(statusElementCount), job),
                              params_.workspaceInfo.gmm1TileStatusPtr, resetBatchElementCount_, resetTensor_);
     }
@@ -506,7 +506,8 @@ template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline uint64_t MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::RelayTokenOffset(uint32_t sourceServer,
                                                                                             uint32_t tokenId) const
 {
-    return (static_cast<uint64_t>(sourceServer) * static_cast<uint64_t>(params_.tilingData->numMaxTokensPerRank) +
+    return (static_cast<uint64_t>(sourceServer) *
+                static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank) +
             tokenId) *
            static_cast<uint64_t>(relayRecordBytes_);
 }
@@ -516,10 +517,11 @@ __aicore__ inline uint64_t MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Relay
                                                                                            uint32_t tokenId) const
 {
     if (IsCombineServerDedupEnabled()) {
-        return sourceServer * CalcServerCombineReadyRowBytes(params_.tilingData->numMaxTokensPerRank) +
+        return sourceServer * CalcServerCombineReadyRowBytes(params_.tilingData->compute.numMaxTokensPerRank) +
                static_cast<uint64_t>(tokenId) * sizeof(uint64_t);
     }
-    return (static_cast<uint64_t>(sourceServer) * static_cast<uint64_t>(params_.tilingData->numMaxTokensPerRank) +
+    return (static_cast<uint64_t>(sourceServer) *
+                static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank) +
             tokenId) *
            sizeof(uint64_t);
 }
@@ -532,7 +534,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ResetComm
     }
 
     // 同一 AIV owner 清零目标 Server 的队列 count 和 Combine 列表行头。
-    const int64_t tokenListStride = CalcServerCombineTokenListStrideBytes(params_.tilingData->numMaxTokensPerRank);
+    const int64_t tokenListStride =
+        CalcServerCombineTokenListStrideBytes(params_.tilingData->compute.numMaxTokensPerRank);
     for (uint32_t targetServer = aivCoreIdx_; targetServer < serverNum_; targetServer += blockAivNum_) {
         auto countPtr = reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.dispatchRelaySendQueuePtr +
                                                           DispatchRelayQueueServerOffset(targetServer));
@@ -641,7 +644,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SetLocalR
     SyncFuncStatic<AscendC::HardEvent::V_MTE3, SYNC_EVENT_ID2>();
     GlobalTensor<uint64_t> readyFlagGlobal;
     readyFlagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t*>(params_.peermemInfo.dispatchFlag.ptr) +
-                                    static_cast<uint64_t>(serverId_) * params_.tilingData->numMaxTokensPerRank +
+                                    static_cast<uint64_t>(serverId_) * params_.tilingData->compute.numMaxTokensPerRank +
                                     tokenStart);
     for (uint32_t offset = 0U; offset < tokenNumInCore; offset += DISPATCH_READY_FLAG_BATCH_TOKENS) {
         uint32_t remaining = tokenNumInCore - offset;
@@ -888,7 +891,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CommitDis
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PublishLocalDispatchRelayCount()
 {
-    const uint32_t capacity = params_.tilingData->numMaxTokensPerRank;
+    const uint32_t capacity = static_cast<uint32_t>(params_.tilingData->compute.numMaxTokensPerRank);
     auto countPtr = reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.dispatchRelaySendQueuePtr +
                                                       DispatchRelayQueueServerOffset(serverId_));
     const uint64_t encodedCount = static_cast<uint64_t>(ReadGmByPassDCache(countPtr)) + 1U;
@@ -920,7 +923,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendDispa
         CommitDispatchRelayBatch(targetServer, relayRank, batchHandle, batchStart, batchTokenCount, tokenIds);
     }
     if (IsCombineServerDedupEnabled()) {
-        const uint32_t capacity = params_.tilingData->numMaxTokensPerRank;
+        const uint32_t capacity = static_cast<uint32_t>(params_.tilingData->compute.numMaxTokensPerRank);
         GM_ADDR sourceCount = params_.peermemInfo.sourceReady.ptr + RelayFlagOffset(targetServer, capacity);
         WriteGmByPassDCache(reinterpret_cast<__gm__ uint64_t*>(sourceCount), static_cast<uint64_t>(tokenCount) + 1U);
         // 空队列也发布 count+1；默认写生成 CQE，完成等待留给后续读依赖或 Wave 出口统一 Drain。
@@ -1192,12 +1195,12 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReceiveRe
     // 只处理当前批次实际命中的窗口。token id 属于源 Rank，上界必须用全卡容量而非本卡 m_。
     for (uint32_t srcServer = 0U; srcServer < serverNum_; ++srcServer) {
         for (uint64_t windowStart64 = 0U;
-             windowStart64 < static_cast<uint64_t>(params_.tilingData->numMaxTokensPerRank);
+             windowStart64 < static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
              windowStart64 += DISPATCH_RECEIVE_BATCH_TOKEN_CAPACITY) {
             uint32_t windowStart = static_cast<uint32_t>(windowStart64);
             uint64_t windowEnd64 = windowStart64 + DISPATCH_RECEIVE_BATCH_TOKEN_CAPACITY;
-            if (windowEnd64 > static_cast<uint64_t>(params_.tilingData->numMaxTokensPerRank)) {
-                windowEnd64 = static_cast<uint64_t>(params_.tilingData->numMaxTokensPerRank);
+            if (windowEnd64 > static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank)) {
+                windowEnd64 = static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
             }
             uint32_t windowEnd = static_cast<uint32_t>(windowEnd64);
             bool windowHasToken = false;

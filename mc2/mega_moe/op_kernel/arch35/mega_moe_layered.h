@@ -109,7 +109,7 @@ public:
 private:
     __aicore__ inline bool IsCombineServerDedupEnabled() const
     {
-        return IsServerCombineDedupOn(params_.tilingData->dedupMode);
+        return IsServerCombineDedupOn(params_.tilingData->compute.dedupMode);
     }
     __aicore__ inline bool RecordHasWeights() const
     {
@@ -543,22 +543,23 @@ MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::MakeWaveProblemState(const Exper
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitTopology(const MegaMoeTilingData* tilingData)
 {
-    m_ = tilingData->bs;
-    k_ = tilingData->h;
-    aicNum_ = tilingData->aicNum;
-    topK_ = tilingData->topK;
+    m_ = static_cast<uint32_t>(tilingData->compute.bs);
+    k_ = static_cast<uint32_t>(tilingData->compute.h);
+    aicNum_ = static_cast<uint32_t>(tilingData->compute.aicNum);
+    topK_ = static_cast<uint32_t>(tilingData->compute.topK);
     sendTotalNum_ = static_cast<uint64_t>(m_) * static_cast<uint64_t>(topK_);
-    maskRouteCapacity_ = static_cast<uint64_t>(tilingData->numMaxTokensPerRank) * static_cast<uint64_t>(topK_);
-    worldSize_ = tilingData->epWorldSize;
-    moeExpertPerRank_ = tilingData->moeExpertPerRank;
-    mGroupsPerWave_ = tilingData->mGroupsPerWave == 0U ? 1U : tilingData->mGroupsPerWave;
-    sharedExpertNum_ = tilingData->sharedExpertNum;
-    maxOutputSize_ = tilingData->maxOutputSize;
+    maskRouteCapacity_ = static_cast<uint64_t>(tilingData->compute.numMaxTokensPerRank) * static_cast<uint64_t>(topK_);
+    worldSize_ = static_cast<uint32_t>(tilingData->compute.epWorldSize);
+    moeExpertPerRank_ = static_cast<uint32_t>(tilingData->compute.moeExpertPerRank);
+    mGroupsPerWave_ =
+        tilingData->compute.mGroupsPerWave == 0 ? 1U : static_cast<uint32_t>(tilingData->compute.mGroupsPerWave);
+    sharedExpertNum_ = static_cast<uint32_t>(tilingData->compute.sharedExpertNum);
+    maxOutputSize_ = static_cast<uint64_t>(tilingData->compute.maxOutputSize);
     // 与 WorkspaceInfo 构造里 flagDispatchToGmm1Ptr 的分配公式保持一致。
     maxWavesPerExpert_ = static_cast<int32_t>(
         Ops::Base::CeilDiv(static_cast<int64_t>(maxOutputSize_), static_cast<int64_t>(L1_TILE_M_256)));
     dispatchFlagSlotsPerExpert_ = maxWavesPerExpert_ * INT_CACHELINE;
-    hiddenDim_ = tilingData->hiddenDim;
+    hiddenDim_ = tilingData->compute.hiddenDim;
     activationOutputDivisor_ = GetActivationOutputDivisor(tilingData->actMode);
     rankId_ = mc2Context_->epRankId;
     rankNumPerServer_ = tilingData->rankNumPerServer;
@@ -578,8 +579,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitDispa
     const MegaMoeTilingData* tilingData)
 {
     // mask 是跨 Rank 共享的槽布局，几何必须与 PeermemInfo 一样按全卡容量计算。
-    maskAlignSize_ =
-        static_cast<uint32_t>(CalcDispatchMaskAlignSize(tilingData->numMaxTokensPerRank, tilingData->topK));
+    maskAlignSize_ = static_cast<uint32_t>(
+        CalcDispatchMaskAlignSize(tilingData->compute.numMaxTokensPerRank, tilingData->compute.topK));
     // 每个 win 槽位再追加 32B 存 count(源卡 SendMaskCal 同步算好), 须与 PeermemInfo 的 maskSlotSize 一致。
     maskSlotSize_ = maskAlignSize_ + static_cast<uint32_t>(ALIGN_32);
     mxQuantScaleNumAlignPerToken_ = Ops::Base::CeilDiv(k_, static_cast<uint32_t>(ALIGN_32));
@@ -610,10 +611,10 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitWorks
     GM_ADDR workspaceGM, const MegaMoeTilingData* tilingData)
 {
     (void)workspaceGM;
-    params_.peermemInfo = PeermemInfo(tilingData, A_ELEMS_PER_BYTE, g_winRankAddr_[rankId_]);
+    params_.peermemInfo = PeermemInfo(tilingData->comm, g_winRankAddr_[rankId_]);
     {
-        WorkspaceLayoutArch35 workspaceLayout(tilingData, serverNum_);
-        params_.workspaceInfo.Bind(params_.peermemInfo.cclDataPtr, workspaceLayout);
+        WorkspaceLayoutArch35 workspaceLayout(tilingData->compute);
+        params_.workspaceInfo.Bind(params_.peermemInfo.cclComputePtr, workspaceLayout);
     }
     params_.tilingData = tilingData;
     if constexpr (ENABLE_A8W4 || ENABLE_A4W4) {
@@ -754,11 +755,12 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::UpdateGlo
 
         uint32_t expertIdx = static_cast<uint32_t>(Get<IDX_FLAG_OFFSET>(state.baseOffset));
         if constexpr (TopkWeightsPrefetch) {
-            gmmAddrInfo.gmm1TileStatus = reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.gmm1TileStatusPtr) +
-                                         (static_cast<uint64_t>(expertIdx) * params_.tilingData->maxTilesPerExpert +
-                                          static_cast<uint64_t>(rowOffsetInExpert / GMM1_TILE_M) *
-                                              Ops::Base::CeilDiv(static_cast<uint32_t>(hiddenDim_), L1_TILE_N)) *
-                                             INT_CACHELINE;
+            gmmAddrInfo.gmm1TileStatus =
+                reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.gmm1TileStatusPtr) +
+                (static_cast<uint64_t>(expertIdx) * params_.tilingData->compute.maxTilesPerExpert +
+                 static_cast<uint64_t>(rowOffsetInExpert / GMM1_TILE_M) *
+                     Ops::Base::CeilDiv(static_cast<uint32_t>(hiddenDim_), L1_TILE_N)) *
+                    INT_CACHELINE;
         }
         gmmAddrInfo.bGlobal =
             GetExpertWeightAddr<Weight1Type>(params_.bGmAddr, params_.tilingData->isPerExpertWeightTensor, expertIdx,
@@ -795,7 +797,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::UpdateGlo
             GetExpertWeightAddr<QuantScaleOutType>(params_.b2ScaleGmAddr, params_.tilingData->isPerExpertWeightTensor,
                                                    expertIdx, Get<IDX_B2_SCALE_OFFSET>(state.baseOffset));
         uint64_t expertSyncSlotOffset = static_cast<uint64_t>(Get<IDX_FLAG_OFFSET>(state.baseOffset)) *
-                                        params_.tilingData->combineSyncSlotCountPerExpert;
+                                        params_.tilingData->compute.combineSyncSlotCountPerExpert;
         gmmAddrInfo.gmm2CombineSyncCounter = (__gm__ int32_t*)params_.workspaceInfo.gmm2CombineSyncCounterPtr +
                                              expertSyncSlotOffset * static_cast<uint64_t>(INT_CACHELINE);
         gmmAddrInfo.gmm2CombineLogicalCoreCount = blockNum_;
@@ -1281,7 +1283,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessMo
         int32_t allDoneTag = static_cast<int32_t>(moeExpertPerRank_ + 1U);
         __gm__ int32_t* allDoneAddr =
             reinterpret_cast<__gm__ int32_t*>(params_.workspaceInfo.gmm1TileStatusPtr) +
-            static_cast<uint64_t>(moeExpertPerRank_) * params_.tilingData->maxTilesPerExpert * INT_CACHELINE;
+            static_cast<uint64_t>(moeExpertPerRank_) * params_.tilingData->compute.maxTilesPerExpert * INT_CACHELINE;
         Gmm1GmCompletionSync sync(allDoneAddr, allDoneTag, subBlockIdx_, ENABLE_A8W4 ? 1U : 0U);
         sync.EndSync();
     } else {

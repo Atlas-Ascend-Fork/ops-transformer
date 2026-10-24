@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include "kernel_tiling/kernel_tiling.h"
+#include "common/mega_moe_memory_layout.h"
 
 // MegaMoe adaptive UB buffer policy shared by host tiling and kernel address binding.
 // 实际 UB 预算由 host tiling 从平台获取，并通过 availableUbBytes 参与以下配置计算。
@@ -187,25 +188,15 @@ struct MegaMoeL1Layout {
 };
 
 struct MegaMoeTilingData {
-    uint32_t moeExpertPerRank; // 本卡参与 topK 路由的 MoE 专家数，与 weight1 表达的专家数一致
-    uint32_t bs;
-    uint32_t h;
-    uint32_t hiddenDim;
-    uint32_t epWorldSize;
+    // 通信布局和本地计算布局直接供 host 与 kernel 共用；修改本结构后需配套更新算子包。
+    MegaMoeImpl::CclCommLayoutParams comm;
+    MegaMoeImpl::CclComputeLayoutParams compute;
     uint32_t blockNumPerEP;
-    uint32_t maxOutputSize;
-    uint32_t topK;
-    uint32_t aicNum;
     uint32_t blockAivNum;
     int64_t combineQuantMode;
     float clampLimit;
     uint8_t moeGmmMode;
     uint8_t sharedGmmMode;
-    int64_t topoType;
-    uint32_t sharedExpertNum; // 独立 dense 路径的共享专家数，不进入 topK/SendMask expert id 空间
-
-    // 每个 MoE 专家固定预留的 GMM2 -> Combine 同步 slot 数。
-    uint64_t combineSyncSlotCountPerExpert;
 
     // Dispatch 的分核不改变 UB 布局，所有 AIV core 共用一套配置；对应 kernel DispatchBuffInit。
     MegaMoeDispatchBufferConfig dispatchBufferConfig;
@@ -219,30 +210,16 @@ struct MegaMoeTilingData {
     MegaMoeUnpermuteBufferConfig unpermuteConfigForFullTokenChunk;
     MegaMoeUnpermuteBufferConfig unpermuteConfigForTailTokenChunk;
     uint32_t unpermuteFullTokenChunkCoreCount;
-    // 调度扩展字段统一追加在末尾，保持已有字段偏移不变。
     int32_t topkWeightsPrefetch;
-    uint32_t maxTilesPerExpert; // GMM1 tile 状态位区每 expert 的容量，按交织调度的完整 N 上界预留
-    uint8_t actMode;            // MegaMoeImpl::MegaMoeActMode 的底层协议值
-    uint8_t actSubMode;         // MegaMoeImpl::MegaMoeActSubMode 的底层协议值
-    float activationAlpha;      // situ: linear_beta; swigluoai: alpha(默认1.702); swiglu/swiglustep: 占位
-    float activationBeta;       // situ/swigluoai: beta(默认1.0); swiglu/swiglustep: 占位
-    uint32_t mGroupsPerWave;    // 每个 routed expert Wave 消费的 256-row M 分组数
+    uint8_t actMode;       // MegaMoeImpl::MegaMoeActMode 的底层协议值
+    uint8_t actSubMode;    // MegaMoeImpl::MegaMoeActSubMode 的底层协议值
+    float activationAlpha; // situ: linear_beta; swigluoai: alpha(默认1.702); swiglu/swiglustep: 占位
+    float activationBeta;  // situ/swigluoai: beta(默认1.0); swiglu/swiglustep: 占位
     // MoE 和共享专家使用相同布局：true 表示每个专家一个二维 tensor，false 表示单个三维堆叠 tensor。
     bool isPerExpertWeightTensor;
-    // 全卡一致的单卡 token 数上界（attr num_max_tokens_per_rank）。
-    // MTE 保留 attr=0 时回退到 bs 的兼容语义；URMA 必须显式传入非 0 上界。
-    // 跨卡窗口和 mask 槽几何使用该上界，bs 仅描述本卡真实 token 数。
-    uint32_t numMaxTokensPerRank;
     // URMA 分层拓扑；Host workspace 计算与 Device 通道映射必须使用同一个值。
     uint32_t rankNumPerServer;
-    // MTE 下 MoE/shared 量化输出类型不同时，需要为共享专家准备独立的 token/scale 拼接数据。
-    bool isSharedQuantIndependent;
-    // Appended to retain all existing field offsets; host and kernel packages must match.
     MegaMoeL1Layout a8w4L1Layout;
-    // MTE：0=全关，1=仅 Combine，2=仅 Dispatch，3=两者；URMA：0=直接返回，4=Server Combine。
-    // 判断统一用 IsDispatchDedupOn/IsCombineDedupOn/IsServerCombineDedupOn（mega_moe_peermem.h）。
-    // 0 时所有路径与无该字段时逐字等价；dispatch 去重数值恒等，combine 去重为生产卡预加权合并。
-    int32_t dedupMode;
     // 预量化输入搬运 tile 配置。动态量化路径保持旧的 scratch 布局，这两个字段为 0。
     uint32_t preQuantTileTokens;
     uint32_t preQuantStageBytes;

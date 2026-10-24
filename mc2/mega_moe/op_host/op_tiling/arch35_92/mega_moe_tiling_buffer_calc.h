@@ -178,7 +178,7 @@ static int64_t GetSingleExpertTensorDimSize(const gert::StorageShape* tensorShap
 }
 
 /*
- * 算去重的请求模式，取值含义与 tilingData->dedupMode 相同：
+ * 算去重的请求模式，取值含义与 tilingData->compute.dedupMode 相同：
  * 0=全关，1=仅 combine 开，2=仅 dispatch 开，3=双开。
  * dispatch 恒先请求（这个形状开了是否划算，由后面的收益门决定）；combine 完全听
  * combine_comm_mode 属性（1=强制开、0=强制关，门控无权改）。非 MTE 拓扑没有去重能力，
@@ -213,11 +213,12 @@ static uint64_t CalcTilingKey(const gert::TilingContext* context, const MegaMoeC
     auto dispatchQuantModePtr = context->GetAttrs()->GetAttrPointer<int64_t>(config.attrDispatchQuantModeIndex);
 
     int64_t topoType = TILINGKEY_TPL_MTE;
-    if (IsLayeredTopology(tilingData->topoType)) {
+    if (IsLayeredTopology(tilingData->compute.topoType)) {
         topoType = TILINGKEY_TPL_URMA;
     }
     int64_t topkIndexType = TILINGKEY_TOPK_INDEX_INT32;
-    if (topoType == TILINGKEY_TPL_MTE && UseInt16TopkIndex(tilingData->numMaxTokensPerRank, tilingData->topK)) {
+    if (topoType == TILINGKEY_TPL_MTE &&
+        UseInt16TopkIndex(tilingData->compute.numMaxTokensPerRank, tilingData->compute.topK)) {
         topkIndexType = TILINGKEY_TOPK_INDEX_INT16;
     }
 
@@ -268,30 +269,6 @@ static void RegisterMegaMoeException()
 #endif
 
 /*
- * 根据 GMM1/GMM2 的逻辑 tile 数和 AIC 数量，计算单个 wave 覆盖的 M group 数。
- */
-uint32_t CalcMGroupsPerWave(const MegaMoeTilingData* tilingData, uint32_t aicNum)
-{
-    if (tilingData->hiddenDim == 0U || tilingData->h == 0U || aicNum == 0U) {
-        return 1U;
-    }
-
-    /*
-     * hiddenDim 是 GMM1 的完整 N。交织模式每核至少调度 4 个独立 N tile；非交织门控
-     * 调度每个物理任务成对处理 gate/up，每核 2 个物理任务同样等价于 4 个逻辑 N tile。
-     * GELU 保留完整 N，沿用按完整宽度计算的逻辑 tile 数。
-     * hiddenDim 已校验为 GMM_TILE_N(256) 的倍数（MTE 与 URMA 统一），CeilDiv 对
-     * 非交织半宽产生的尾 tile 只影响 wave 粒度估算，不影响正确性，两种编译模式共用本公式。
-     */
-    uint64_t gmm1LogicalTilesPerMGroup = ops::CeilDiv<uint64_t>(tilingData->hiddenDim, GMM_TILE_N);
-    uint64_t gmm2TilesPerMGroup = ops::CeilDiv<uint64_t>(tilingData->h, GMM_TILE_N);
-    uint64_t gmm1RequiredMGroups = ops::CeilDiv<uint64_t>(
-        static_cast<uint64_t>(aicNum) * GMM1_MIN_LOGICAL_TILES_PER_CORE, gmm1LogicalTilesPerMGroup);
-    uint64_t gmm2RequiredMGroups = ops::CeilDiv<uint64_t>(static_cast<uint64_t>(aicNum), gmm2TilesPerMGroup);
-    return static_cast<uint32_t>(std::max(gmm1RequiredMGroups, gmm2RequiredMGroups));
-}
-
-/*
  * 设置 prefetch 状态位区上限与 wave 粒度。maxTilesPerExpert 先无条件置零、再由 prefetch 分支覆盖，
  * 非 prefetch 路径依赖这次置零，不可改成只在分支内赋值。
  * 本步读 maxOutputSize，必须排在 CheckAndSetMaxRecvTokenNumAttr 之后。
@@ -301,16 +278,14 @@ static void SetPrefetchAndWaveParams(MegaMoeTilingData* tilingData, const uint32
     // GMM1 tile 状态位区每 expert 的 tile 上限（仅 prefetch 软同步路径使用）。
     // 非交织门控调度只遍历 hiddenDim / 2，交织调度及 GELU 会遍历完整 hiddenDim；host 无法感知 kernel
     // 编译期开关，因此按完整 hiddenDim 预留，避免交织模式覆盖下一 expert 的状态槽。
-    tilingData->maxTilesPerExpert = 0;
+    tilingData->compute.maxTilesPerExpert = 0;
     if (tilingData->topkWeightsPrefetch == 1) {
-        int64_t maxSchedulerN = static_cast<int64_t>(tilingData->hiddenDim);
-        int64_t maxTilesM = ops::CeilDiv(static_cast<int64_t>(tilingData->maxOutputSize), static_cast<int64_t>(256));
-        int64_t maxTilesN = ops::CeilDiv(maxSchedulerN, static_cast<int64_t>(256));
-        tilingData->maxTilesPerExpert =
-            static_cast<uint32_t>(ops::CeilAlign(maxTilesM * maxTilesN, GMM_TILE_STATUS_COUNT_ALIGN));
+        tilingData->compute.maxTilesPerExpert = static_cast<uint32_t>(
+            CalcMemoryMaxTilesPerExpert(tilingData->compute.maxOutputSize, tilingData->compute.hiddenDim));
     }
 
-    tilingData->mGroupsPerWave = CalcMGroupsPerWave(tilingData, aicNum);
+    tilingData->compute.mGroupsPerWave =
+        static_cast<uint32_t>(CalcMemoryMGroupsPerWave(tilingData->compute.hiddenDim, tilingData->compute.h, aicNum));
 }
 
 /*
@@ -318,11 +293,12 @@ static void SetPrefetchAndWaveParams(MegaMoeTilingData* tilingData, const uint32
  */
 static uint32_t CalcQuantTokenAndScaleBytes(const MegaMoeTilingData* tilingData, uint32_t activationElementsPerByte)
 {
-    uint32_t quantTokenBytes =
-        ops::CeilAlign(tilingData->h / activationElementsPerByte, static_cast<uint32_t>(ALIGN_256));
-    uint32_t quantScaleAlignBytes = ops::CeilAlign(
-        ops::CeilDiv(tilingData->h, static_cast<uint32_t>(ALIGN_32)) * static_cast<uint32_t>(sizeof(int8_t)),
-        static_cast<uint32_t>(ALIGN_32));
+    uint32_t quantTokenBytes = ops::CeilAlign(static_cast<uint32_t>(tilingData->compute.h) / activationElementsPerByte,
+                                              static_cast<uint32_t>(ALIGN_256));
+    uint32_t quantScaleAlignBytes =
+        ops::CeilAlign(ops::CeilDiv(static_cast<uint32_t>(tilingData->compute.h), static_cast<uint32_t>(ALIGN_32)) *
+                           static_cast<uint32_t>(sizeof(int8_t)),
+                       static_cast<uint32_t>(ALIGN_32));
     return quantTokenBytes + quantScaleAlignBytes;
 }
 
@@ -333,10 +309,10 @@ static uint32_t CalcQuantTokenAndScaleBytes(const MegaMoeTilingData* tilingData,
 static uint32_t CalcDispatchCopyBufferBytes(const MegaMoeTilingData* tilingData, uint32_t activationElementsPerByte)
 {
     uint32_t copyBufferBytes = CalcQuantTokenAndScaleBytes(tilingData, activationElementsPerByte);
-    if (tilingData->topkWeightsPrefetch == 1 || IsCombineDedupOn(tilingData->dedupMode) ||
-        IsServerCombineDedupOn(tilingData->dedupMode)) {
-        uint32_t weightBytes =
-            ops::CeilAlign(static_cast<uint32_t>(tilingData->topK * sizeof(float)), static_cast<uint32_t>(ALIGN_32));
+    if (tilingData->topkWeightsPrefetch == 1 || IsCombineDedupOn(tilingData->compute.dedupMode) ||
+        IsServerCombineDedupOn(tilingData->compute.dedupMode)) {
+        uint32_t weightBytes = ops::CeilAlign(static_cast<uint32_t>(tilingData->compute.topK * sizeof(float)),
+                                              static_cast<uint32_t>(ALIGN_32));
         copyBufferBytes += weightBytes;
     }
     return copyBufferBytes;
@@ -407,10 +383,10 @@ static MegaMoeSendMaskBufferConfig CalcTopkValidIndexBufferConfig(const MegaMoeT
 {
     MegaMoeSendMaskBufferConfig bufferConfig{};
     // 发送批网格按 numMaxTokensPerRank * topK 容量上界划分，kernel 再按实际 bs * topK 裁剪。
-    uint64_t sendTotalNum = static_cast<uint64_t>(tilingData->numMaxTokensPerRank) * tilingData->topK;
+    uint64_t sendTotalNum = static_cast<uint64_t>(tilingData->compute.numMaxTokensPerRank) * tilingData->compute.topK;
     uint64_t alignedTotalRouteItems = ops::CeilAlign(sendTotalNum, static_cast<uint64_t>(ALIGN_256));
-    uint32_t topkIndexTypeBytes =
-        static_cast<uint32_t>(CalcTopkIndexTypeBytes(tilingData->numMaxTokensPerRank, tilingData->topK));
+    uint32_t topkIndexTypeBytes = static_cast<uint32_t>(
+        CalcTopkIndexTypeBytes(tilingData->compute.numMaxTokensPerRank, tilingData->compute.topK));
 
     // 第一阶段：使用基准 batch 确定 route ring 深度。
     bufferConfig.routeItemsPerBatch =
@@ -418,7 +394,7 @@ static MegaMoeSendMaskBufferConfig CalcTopkValidIndexBufferConfig(const MegaMoeT
     bufferConfig.routeBatchCount =
         static_cast<int32_t>(ops::CeilDiv(sendTotalNum, static_cast<uint64_t>(bufferConfig.routeItemsPerBatch)));
     bufferConfig.bufferBytes = static_cast<uint32_t>(CalcTopkValidIndexRingSlotBytes(
-        static_cast<uint32_t>(bufferConfig.routeItemsPerBatch), tilingData->topK, topkIndexTypeBytes));
+        static_cast<uint32_t>(bufferConfig.routeItemsPerBatch), tilingData->compute.topK, topkIndexTypeBytes));
 
     // topkIdsTensor 保持 int32；生成及 gather 后发送的 index 根据容量使用 int16 或 int32。
     uint32_t topkIdsBufferBytes =
@@ -447,7 +423,7 @@ static MegaMoeSendMaskBufferConfig CalcTopkValidIndexBufferConfig(const MegaMoeT
             routeItemBudgetBytes * BITS_PER_BYTE /
             ((sizeof(int32_t) + topkIndexTypeBytes) * BITS_PER_BYTE + static_cast<uint64_t>(bufferConfig.bufferCount) +
              ops::CeilDiv(static_cast<uint64_t>(bufferConfig.bufferCount) * topkIndexTypeBytes * BITS_PER_BYTE,
-                          static_cast<uint64_t>(tilingData->topK)));
+                          static_cast<uint64_t>(tilingData->compute.topK)));
         expandedRouteItems = expandedRouteItems / ALIGN_256 * ALIGN_256;
         expandedRouteItems = std::min(expandedRouteItems, alignedTotalRouteItems);
         if (expandedRouteItems > static_cast<uint64_t>(bufferConfig.routeItemsPerBatch)) {
@@ -455,7 +431,7 @@ static MegaMoeSendMaskBufferConfig CalcTopkValidIndexBufferConfig(const MegaMoeT
             bufferConfig.routeBatchCount = static_cast<int32_t>(
                 ops::CeilDiv(sendTotalNum, static_cast<uint64_t>(bufferConfig.routeItemsPerBatch)));
             bufferConfig.bufferBytes = static_cast<uint32_t>(CalcTopkValidIndexRingSlotBytes(
-                static_cast<uint32_t>(expandedRouteItems), tilingData->topK, topkIndexTypeBytes));
+                static_cast<uint32_t>(expandedRouteItems), tilingData->compute.topK, topkIndexTypeBytes));
         }
     }
     return bufferConfig;
@@ -469,10 +445,10 @@ static void CalcUnpermuteSlotAndScaleBytes(const MegaMoeTilingData* tilingData,
                                            MegaMoeUnpermuteBufferConfig& bufferConfig, uint32_t& dataSlotBytes,
                                            uint32_t& scaleBytes)
 {
-    uint32_t bf16SlotBytes = static_cast<uint32_t>(
-        ops::CeilAlign(static_cast<uint64_t>(tilingData->h) * sizeof(uint16_t), static_cast<uint64_t>(ALIGN_32)));
+    uint32_t bf16SlotBytes = static_cast<uint32_t>(ops::CeilAlign(
+        static_cast<uint64_t>(tilingData->compute.h) * sizeof(uint16_t), static_cast<uint64_t>(ALIGN_32)));
     uint32_t fp32SlotBytes = static_cast<uint32_t>(
-        ops::CeilAlign(static_cast<uint64_t>(tilingData->h) * sizeof(float), static_cast<uint64_t>(ALIGN_32)));
+        ops::CeilAlign(static_cast<uint64_t>(tilingData->compute.h) * sizeof(float), static_cast<uint64_t>(ALIGN_32)));
     // dataSlotBytes 是同一 token 的 BF16 搬入区和 FP32 计算区之和。
     dataSlotBytes = bf16SlotBytes + fp32SlotBytes;
     bufferConfig.bf16SlotElementCount = bf16SlotBytes / sizeof(uint16_t);
@@ -481,7 +457,7 @@ static void CalcUnpermuteSlotAndScaleBytes(const MegaMoeTilingData* tilingData,
     // scaleBytes 是 combine quant 使用的 BF16/FP32 scale 展开区大小。
     scaleBytes = 0U;
     if (tilingData->combineQuantMode != COMBINE_NO_QUANT) {
-        uint32_t scaleElementCount = (tilingData->h + ALIGN_32 - 1U) / ALIGN_32;
+        uint32_t scaleElementCount = (tilingData->compute.h + ALIGN_32 - 1U) / ALIGN_32;
         scaleBytes = static_cast<uint32_t>(ops::CeilAlign(
                          static_cast<uint64_t>(scaleElementCount) * sizeof(uint16_t) * DEQUANT_BF16_SCALE_EXPANSION,
                          static_cast<uint64_t>(ALIGN_32))) +
@@ -525,9 +501,9 @@ static MegaMoeUnpermuteBufferConfig CalcUnpermuteBufferConfig(const MegaMoeTilin
     CalcUnpermuteSlotAndScaleBytes(tilingData, bufferConfig, dataSlotBytes, scaleBytes);
 
     // 第一阶段：按基准 weight batch 确定每批 token 数和 weight 区，再以剩余 UB 分配输入 ring。
-    uint32_t baseTokensPerBatch = UNPERMUTE_WEIGHT_ITEMS_PER_BATCH / tilingData->topK;
+    uint32_t baseTokensPerBatch = UNPERMUTE_WEIGHT_ITEMS_PER_BATCH / tilingData->compute.topK;
     bufferConfig.tokensPerBatch = static_cast<int32_t>(std::min(baseTokensPerBatch, coreTokenCount));
-    uint32_t weightElementCount = static_cast<uint32_t>(bufferConfig.tokensPerBatch) * tilingData->topK;
+    uint32_t weightElementCount = static_cast<uint32_t>(bufferConfig.tokensPerBatch) * tilingData->compute.topK;
     SetUnpermuteWeightBufferBytes(bufferConfig, weightElementCount, topKWeightsConversionElementBytes);
 
     // bytesBeforeInputBuffers 包含 weight、scale 和一个累加/输出 data slot。
@@ -538,7 +514,8 @@ static MegaMoeUnpermuteBufferConfig CalcUnpermuteBufferConfig(const MegaMoeTilin
     bufferConfig.inputBufferCount = static_cast<int32_t>(inputBufferBudgetBytes / dataSlotBytes);
     bufferConfig.inputBufferCount = std::min(bufferConfig.inputBufferCount, MAX_UNPERMUTE_INPUT_BUFFER_COUNT);
     int32_t accumulationItemCount =
-        bufferConfig.tokensPerBatch * static_cast<int32_t>(tilingData->topK + tilingData->sharedExpertNum);
+        bufferConfig.tokensPerBatch *
+        static_cast<int32_t>(tilingData->compute.topK + tilingData->compute.sharedExpertNum);
     bufferConfig.inputBufferCount = std::min(bufferConfig.inputBufferCount, accumulationItemCount);
     bufferConfig.inputBufferCount = std::max(bufferConfig.inputBufferCount, MIN_UNPERMUTE_INPUT_BUFFER_COUNT);
 
@@ -549,11 +526,11 @@ static MegaMoeUnpermuteBufferConfig CalcUnpermuteBufferConfig(const MegaMoeTilin
         // weightBudgetBytes 是 FP32 weight 及可选转换中转区可使用的 UB。
         uint32_t weightBudgetBytes = availableUbBytes - fixedBytes - UNPERMUTE_WEIGHT_ALIGNMENT_RESERVE_BYTES;
         uint32_t weightBytesPerToken =
-            tilingData->topK * (static_cast<uint32_t>(sizeof(float)) + topKWeightsConversionElementBytes);
+            tilingData->compute.topK * (static_cast<uint32_t>(sizeof(float)) + topKWeightsConversionElementBytes);
         uint32_t expandedTokensPerBatch = std::min(weightBudgetBytes / weightBytesPerToken, coreTokenCount);
         if (expandedTokensPerBatch > static_cast<uint32_t>(bufferConfig.tokensPerBatch)) {
             bufferConfig.tokensPerBatch = static_cast<int32_t>(expandedTokensPerBatch);
-            weightElementCount = expandedTokensPerBatch * tilingData->topK;
+            weightElementCount = expandedTokensPerBatch * tilingData->compute.topK;
             SetUnpermuteWeightBufferBytes(bufferConfig, weightElementCount, topKWeightsConversionElementBytes);
         }
     }
@@ -573,7 +550,7 @@ static uint32_t CalcPreQuantStageBytes(const MegaMoeTilingData* tilingData, uint
         static_cast<uint64_t>(CalcDispatchCopyBufferBytes(tilingData, activationElementsPerByte)) * tileTokens;
     if (tilingData->topkWeightsPrefetch == 1 && topKWeightsDataType == ge::DT_BF16) {
         uint64_t weightSrcRowBytes =
-            ops::CeilAlign(static_cast<uint64_t>(tilingData->topK) * ge::GetSizeByDataType(topKWeightsDataType),
+            ops::CeilAlign(static_cast<uint64_t>(tilingData->compute.topK) * ge::GetSizeByDataType(topKWeightsDataType),
                            static_cast<uint64_t>(ALIGN_32));
         stageBytes += weightSrcRowBytes * tileTokens;
     }
@@ -589,15 +566,16 @@ static void SetPreQuantTileConfig(MegaMoeTilingData* tilingData, bool isPreQuant
 {
     tilingData->preQuantTileTokens = 0U;
     tilingData->preQuantStageBytes = 0U;
-    if (!isPreQuantizedX || tilingData->h == 0U) {
+    if (!isPreQuantizedX || tilingData->compute.h == 0U) {
         return;
     }
 
     // PrepareLocalTokens 按 blockAivNum 个 AIV 分工，stage 不需要为 route 上界之外的 token 预留空间。
-    uint32_t maxTokensPerAiv = ops::CeilDiv(tilingData->bs, std::max(tilingData->blockAivNum, 1U));
+    uint32_t maxTokensPerAiv =
+        ops::CeilDiv(static_cast<uint32_t>(tilingData->compute.bs), std::max(tilingData->blockAivNum, 1U));
     // 仅以单个 token 的 scale 行宽作为 B 的性能基准。
     uint32_t scaleRowBytes = static_cast<uint32_t>(
-        ops::CeilAlign(ops::CeilDiv(static_cast<uint64_t>(tilingData->h), static_cast<uint64_t>(ALIGN_32)),
+        ops::CeilAlign(ops::CeilDiv(static_cast<uint64_t>(tilingData->compute.h), static_cast<uint64_t>(ALIGN_32)),
                        static_cast<uint64_t>(ALIGN_32)));
     uint32_t scaleBasedTokens = std::max(1U, static_cast<uint32_t>(ops::CeilDiv(static_cast<uint64_t>(ALIGN_512),
                                                                                 static_cast<uint64_t>(scaleRowBytes))));
@@ -627,9 +605,9 @@ static void SetUnpermuteBufferConfigs(MegaMoeTilingData* tilingData, ge::DataTyp
      */
     uint32_t topKWeightsConversionElementBytes =
         topKWeightsDataType == ge::DT_FLOAT ? 0U : static_cast<uint32_t>(ge::GetSizeByDataType(topKWeightsDataType));
-    uint32_t fullTokenChunkSize = ops::CeilDiv(tilingData->bs, tilingData->blockAivNum);
-    uint32_t activeCoreCount = ops::CeilDiv(tilingData->bs, fullTokenChunkSize);
-    uint32_t tailTokenChunkSize = tilingData->bs - (activeCoreCount - 1U) * fullTokenChunkSize;
+    uint32_t fullTokenChunkSize = ops::CeilDiv(static_cast<uint32_t>(tilingData->compute.bs), tilingData->blockAivNum);
+    uint32_t activeCoreCount = ops::CeilDiv(static_cast<uint32_t>(tilingData->compute.bs), fullTokenChunkSize);
+    uint32_t tailTokenChunkSize = tilingData->compute.bs - (activeCoreCount - 1U) * fullTokenChunkSize;
     bool tailIsFullTokenChunk = tailTokenChunkSize == fullTokenChunkSize;
     tilingData->unpermuteFullTokenChunkCoreCount = tailIsFullTokenChunk ? activeCoreCount : activeCoreCount - 1U;
     tilingData->unpermuteConfigForFullTokenChunk =

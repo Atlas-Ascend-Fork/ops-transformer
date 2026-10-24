@@ -123,7 +123,7 @@ __global__ __aicore__ void mega_moe(GM_ADDR context, GM_ADDR x, GM_ADDR topkIds,
     } else if constexpr (CommModeType == TILINGKEY_TPL_URMA) {
 #if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL) && (ORIG_DTYPE_X == DT_BF16)
         if constexpr (DispatchQuantMode == DISPATCH_QUANT_MODE_MXFP) {
-            if (tilingData.topoType == MegaMoeImpl::TOPO_TYPE_URMA_ROCE) {
+            if (tilingData.compute.topoType == MegaMoeImpl::TOPO_TYPE_URMA_ROCE) {
                 MegaMoeImpl::MegaMoeLayered<DTYPE_X, DTYPE_Y, DTYPE_TOPK_WEIGHTS, DTYPE_WEIGHT1, DispatchQuantOutType,
                                             CombineQuantOutType, TopkWeightsPrefetch, MegaMoeImpl::LayeredUbxComm>
                     op(context);

@@ -124,7 +124,7 @@ constexpr uint32_t L0_TILE_K = 128U;
 constexpr uint32_t ACTIVATION_N_HALF = 2U;
 
 // ============ MTE 通信去重 ============
-// 开关的唯一真源是 tilingData->dedupMode（0=全关 1=仅combine开 2=仅dispatch开 3=双开），
+// 开关的唯一真源是 tilingData->compute.dedupMode（0=全关 1=仅combine开 2=仅dispatch开 3=双开），
 // 判断统一用 mega_moe_peermem.h 的 IsDispatchDedupOn/IsCombineDedupOn。
 constexpr int32_t DEDUP_MODE_OFF = 0;
 constexpr int32_t DEDUP_MODE_COMBINE_ONLY = 1;

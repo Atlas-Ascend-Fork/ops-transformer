@@ -51,7 +51,8 @@ __aicore__ inline void CombineSendTokenToRemote(uint32_t batchStart, uint32_t cu
     }
 
     gmLocalD.SetGlobalBuffer(reinterpret_cast<__gm__ DataType*>(srcAddr));
-    uint64_t dstBaseOffset = (static_cast<uint64_t>(tokenIdx) * params.tilingData->topK + topkIdx) * quantTokenSize;
+    uint64_t dstBaseOffset =
+        (static_cast<uint64_t>(tokenIdx) * params.tilingData->compute.topK + topkIdx) * quantTokenSize;
     AscendC::DataCopyExtParams singleCopyParams{1, static_cast<uint32_t>(quantTokenSize * sizeof(DataType)), 0, 0, 0};
 
     if constexpr (!IsQuantized) {
@@ -92,9 +93,10 @@ __aicore__ inline void CombineSendTokenToRelay(uint32_t batchStart, uint32_t n, 
     uint32_t topkIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOPK_INDEX);
 
     const uint32_t originServer = originRank / params.tilingData->rankNumPerServer;
-    const uint64_t slot = (static_cast<uint64_t>(originServer) * params.tilingData->numMaxTokensPerRank + tokenIdx) *
-                              params.tilingData->topK +
-                          topkIdx;
+    const uint64_t slot =
+        (static_cast<uint64_t>(originServer) * params.tilingData->compute.numMaxTokensPerRank + tokenIdx) *
+            params.tilingData->compute.topK +
+        topkIdx;
     const uint64_t tokenBytes = static_cast<uint64_t>(n) * sizeof(bfloat16_t);
     const uint32_t targetRank = batchState.dstRankId;
     const uint64_t dataOffset = params.peermemInfo.contribution.offset + slot * tokenBytes;

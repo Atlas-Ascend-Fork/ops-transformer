@@ -71,7 +71,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::BuildServ
     LocalTensor<int32_t> selectedTokenIds(TPosition::VECCALC, ALIGN_512 + 2U * ID_BYTES, BATCH_TOKENS);
     LocalTensor<int32_t> selectedTokenBitmaps(TPosition::VECCALC, ALIGN_512 + 3U * ID_BYTES, BATCH_TOKENS);
     LocalTensor<uint8_t> compareMask(TPosition::VECCALC, ALIGN_512 + 4U * ID_BYTES, MASK_BYTES);
-    const uint64_t maxTokensPerRank = params_.tilingData->numMaxTokensPerRank;
+    const uint64_t maxTokensPerRank = static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
     // 先发布本核负责的全部 Server 列表，再进入贡献归约。
     for (uint32_t originServer = blockIdx_; originServer < serverNum_; originServer += blockNum_) {
         auto tokenCountAddr = reinterpret_cast<__gm__ uint64_t*>(params_.peermemInfo.dispatchFlag.ptr +
@@ -132,7 +132,8 @@ __aicore__ inline bool MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::IsServerC
     // 前轮向量读取结束后，MTE2 才能覆盖整批 ready 工作区。
     SyncFuncStatic<HardEvent::V_MTE2, SYNC_EVENT_ID2>();
     for (uint32_t tokenIndex = 0; tokenIndex < batchTokenCount; ++tokenIndex) {
-        const uint64_t tokenSlot = static_cast<uint64_t>(originServer) * params_.tilingData->numMaxTokensPerRank +
+        const uint64_t tokenSlot = static_cast<uint64_t>(originServer) *
+                                       static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank) +
                                    tokenIdsTensor.GetValue(tokenIndex);
         GlobalTensor<uint32_t> contributionReadyGlobalTensor;
         contributionReadyGlobalTensor.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(
@@ -202,7 +203,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReduceRel
 {
     constexpr uint32_t BATCH_TOKENS = 256U;
     constexpr uint32_t BATCH_BYTES = BATCH_TOKENS * sizeof(uint32_t);
-    const uint64_t maxTokensPerRank = params_.tilingData->numMaxTokensPerRank;
+    const uint64_t maxTokensPerRank = static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
     const uint64_t tokenListStrideBytes = CalcServerCombineTokenListStrideBytes(maxTokensPerRank);
     const uint32_t tokenCountsBytes =
         Ops::Base::CeilAlign(serverNum_ * static_cast<uint32_t>(sizeof(uint32_t)), static_cast<uint32_t>(ALIGN_32));
@@ -232,7 +233,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReduceRel
     uint64_t tokenListStrideBytes, uint32_t workUbOffset)
 {
     constexpr uint32_t TOKEN_LIST_HEADER_ELEMENTS = 1U;
-    const uint64_t maxTokensPerRank = params_.tilingData->numMaxTokensPerRank;
+    const uint64_t maxTokensPerRank = static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
     const uint32_t batchTokens = tokenIdsTensor.GetSize();
     WorkRange serverTokenRange{0U, 0U};
     for (uint32_t originServer = 0; originServer < serverNum_; ++originServer) {
@@ -310,7 +311,7 @@ template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReduceRelayContributionsForToken(
     uint32_t originServer, uint32_t tokenIdx, uint32_t expectedTopkBitmap, uint32_t workUbOffset)
 {
-    const uint64_t capacity = params_.tilingData->numMaxTokensPerRank;
+    const uint64_t capacity = static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
     const uint64_t tokenBytes = static_cast<uint64_t>(k_) * sizeof(bfloat16_t);
     const uint64_t tokenSlot = static_cast<uint64_t>(originServer) * capacity + tokenIdx;
     LocalTensor<float> topkWeightsTensor;
@@ -382,7 +383,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendServe
 {
     constexpr uint32_t BATCH_TOKENS = 256U;
     constexpr uint32_t TOKEN_LIST_HEADER_ELEMENTS = 1U;
-    const uint64_t capacity = params_.tilingData->numMaxTokensPerRank;
+    const uint64_t capacity = static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
     LocalTensor<uint32_t> tokenIdsTensor(TPosition::VECIN, ALIGN_512, BATCH_TOKENS);
     for (uint32_t targetServer = 0; targetServer < serverNum_; ++targetServer) {
         const uint32_t targetRank = targetServer * rankNumPerServer_ + rankIdInServer_;
@@ -419,7 +420,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendRelay
     uint32_t targetServer, uint32_t targetRank, uint32_t count, uint32_t batchTokens,
     const GlobalTensor<uint32_t>& tokenIdsGlobalTensor, const LocalTensor<uint32_t>& tokenIdsTensor)
 {
-    const uint64_t capacity = params_.tilingData->numMaxTokensPerRank;
+    const uint64_t capacity = static_cast<uint64_t>(params_.tilingData->compute.numMaxTokensPerRank);
     const uint64_t tokenBytes = static_cast<uint64_t>(k_) * sizeof(bfloat16_t);
     const auto channel = comm_.GetChannel(targetRank);
     auto batch = comm_.MakeBatchHandle(channel, hcommBatchWqeTensor_, LAYERED_HCOMM_BATCH_UB_BYTES,

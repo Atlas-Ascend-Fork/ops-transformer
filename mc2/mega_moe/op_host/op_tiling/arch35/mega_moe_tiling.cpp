@@ -54,7 +54,7 @@ static ge::graphStatus CheckAndSetUrmaDedupMode(int64_t combineCommMode, MegaMoe
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "combine_comm_mode", "2",
                                               "server combine reduction requires combineQuantMode=0"),
                     return ge::GRAPH_FAILED);
-    tilingData->dedupMode = combineCommMode == 2 ? DEDUP_MODE_SERVER_COMBINE : DEDUP_MODE_OFF;
+    tilingData->compute.dedupMode = combineCommMode == 2 ? DEDUP_MODE_SERVER_COMBINE : DEDUP_MODE_OFF;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -77,7 +77,7 @@ static ge::graphStatus CheckAndSetMteDedupMode(const gert::TilingContext* contex
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "combine_comm_mode", "1",
                                   "combine dedup with topk_weights_type=0 does not support pre-quantized x"),
         return ge::GRAPH_FAILED);
-    tilingData->dedupMode = combineCommMode == 1 ? DEDUP_MODE_BOTH : DEDUP_MODE_DISPATCH_ONLY;
+    tilingData->compute.dedupMode = combineCommMode == 1 ? DEDUP_MODE_BOTH : DEDUP_MODE_DISPATCH_ONLY;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -95,13 +95,13 @@ static ge::graphStatus CheckAndSetDedupMode(const gert::TilingContext* context, 
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "combineCommMode", std::to_string(combineCommMode).c_str(),
                                               "only support 0, 1 or 2"),
                     return ge::GRAPH_FAILED);
-    if (IsLayeredTopology(tilingData->topoType)) {
+    if (IsLayeredTopology(tilingData->compute.topoType)) {
         return CheckAndSetUrmaDedupMode(combineCommMode, tilingData, nodeName);
     }
-    if (tilingData->topoType == TOPO_TYPE_MTE) {
+    if (tilingData->compute.topoType == TOPO_TYPE_MTE) {
         return CheckAndSetMteDedupMode(context, config, combineCommMode, tilingData, nodeName);
     }
-    OP_LOGE_FOR_INVALID_VALUE(nodeName, "topoType", std::to_string(tilingData->topoType).c_str(),
+    OP_LOGE_FOR_INVALID_VALUE(nodeName, "topoType", std::to_string(tilingData->compute.topoType).c_str(),
                               "only support MTE(0), URMA(1) or UBX(2)");
     return ge::GRAPH_FAILED;
 }
@@ -121,7 +121,7 @@ static ge::graphStatus CheckAndSetIndependentAttrs(const gert::TilingContext* co
                     OP_LOGE(nodeName, "EP world size is invalid."), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(CheckAndSetQuantModeAttrs(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "quantization mode attributes are invalid."), return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(CheckActivationParams(context, config, tilingData->topoType, nodeName) != ge::GRAPH_SUCCESS,
+    OP_TILING_CHECK(CheckActivationParams(context, config, tilingData->compute.topoType, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "activation parameters are invalid."), return ge::GRAPH_FAILED);
     SetActivationAttrParams(context, config, tilingData);
     OP_TILING_CHECK(CheckAndSetTopkWeightsTypeAttr(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
@@ -141,11 +141,11 @@ static ge::graphStatus CheckAndSetExpertExecutionParams(const gert::TilingContex
                                                         MegaMoeExpertParams& expertParams,
                                                         MegaMoeTilingData* tilingData, const char* nodeName)
 {
-    OP_TILING_CHECK(
-        CheckAndSetQuantOutDtypes(context, config, expertParams, tilingData->topoType, nodeName) != ge::GRAPH_SUCCESS,
-        OP_LOGE(nodeName, "expert quantization settings are invalid."), return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(CheckAndSetExpertGmmModes(context, expertParams, tilingData->topoType, tilingData, nodeName) !=
+    OP_TILING_CHECK(CheckAndSetQuantOutDtypes(context, config, expertParams, tilingData->compute.topoType, nodeName) !=
                         ge::GRAPH_SUCCESS,
+                    OP_LOGE(nodeName, "expert quantization settings are invalid."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckAndSetExpertGmmModes(context, expertParams, tilingData->compute.topoType, tilingData,
+                                              nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "expert GMM modes are invalid."), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(CheckAndSetTokenDimensions(context, tilingData, config, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "token dimensions are invalid."), return ge::GRAPH_FAILED);
@@ -155,7 +155,7 @@ static ge::graphStatus CheckAndSetExpertExecutionParams(const gert::TilingContex
         CheckAndSetExpertCountAttrs(context, config, expertParams, tilingData, nodeName) != ge::GRAPH_SUCCESS,
         OP_LOGE(nodeName, "expert counts are invalid."), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(
-        CheckExpertTokenNumsShape(context, config, tilingData->moeExpertPerRank, nodeName) != ge::GRAPH_SUCCESS,
+        CheckExpertTokenNumsShape(context, config, tilingData->compute.moeExpertPerRank, nodeName) != ge::GRAPH_SUCCESS,
         OP_LOGE(nodeName, "expertTokenNums tensor shape is invalid."), return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -180,7 +180,8 @@ static ge::graphStatus CheckAndSetTokenCapacityAttrs(const gert::TilingContext* 
  */
 static ge::graphStatus CheckMteDedupCapacityAndBenefit(MegaMoeTilingData* tilingData, const char* nodeName)
 {
-    OP_TILING_CHECK(tilingData->topoType != TOPO_TYPE_MTE || tilingData->dedupMode < 0 || tilingData->dedupMode > 3,
+    OP_TILING_CHECK(tilingData->compute.topoType != TOPO_TYPE_MTE || tilingData->compute.dedupMode < 0 ||
+                        tilingData->compute.dedupMode > 3,
                     OP_LOGE(nodeName, "MTE dedupMode only supports 0, 1, 2 or 3"), return ge::GRAPH_FAILED);
 
     OP_TILING_CHECK(ApplyDedupPrepassChunkGuard(tilingData, nodeName) != ge::GRAPH_SUCCESS,
@@ -198,11 +199,12 @@ static uint32_t CalcDispatchFixedBufferBytes(const MegaMoeTilingData* tilingData
 {
     // fixedBufferBytes 包含 cumsumInfoTensor_ 和 expertTokenNumsOutTensor_。
     uint32_t fixedBufferBytes =
-        static_cast<uint32_t>(ops::CeilAlign(
-            static_cast<uint64_t>(tilingData->epWorldSize) * tilingData->moeExpertPerRank * sizeof(int32_t),
-            static_cast<uint64_t>(ALIGN_32))) +
-        static_cast<uint32_t>(ops::CeilAlign(static_cast<uint64_t>(tilingData->moeExpertPerRank) * sizeof(int32_t),
-                                             static_cast<uint64_t>(ALIGN_32)));
+        static_cast<uint32_t>(ops::CeilAlign(static_cast<uint64_t>(tilingData->compute.epWorldSize) *
+                                                 tilingData->compute.moeExpertPerRank * sizeof(int32_t),
+                                             static_cast<uint64_t>(ALIGN_32))) +
+        static_cast<uint32_t>(
+            ops::CeilAlign(static_cast<uint64_t>(tilingData->compute.moeExpertPerRank) * sizeof(int32_t),
+                           static_cast<uint64_t>(ALIGN_32)));
     return fixedBufferBytes;
 }
 
@@ -216,12 +218,12 @@ static MegaMoeDispatchBufferConfig CalcDispatchBufferConfig(const MegaMoeTilingD
     MegaMoeDispatchBufferConfig bufferConfig{};
     // 去重模式：批内 desc/扇出 meta/活跃表暂存紧跟 dispatch 固定区尾动态落位，
     // 此处先从自适应预算里扣掉预留，保证暂存区在任意合法规格下不越 UB。
-    if (tilingData->dedupMode != 0 && tilingData->topoType == TOPO_TYPE_MTE) {
+    if (tilingData->compute.dedupMode != 0 && tilingData->compute.topoType == TOPO_TYPE_MTE) {
         availableUbBytes = availableUbBytes > MegaMoeImpl::DEDUP_DISPATCH_UB_RESERVE_BYTES ?
                                availableUbBytes - MegaMoeImpl::DEDUP_DISPATCH_UB_RESERVE_BYTES :
                                0U;
     }
-    uint64_t sendTotalNum = static_cast<uint64_t>(tilingData->numMaxTokensPerRank);
+    uint64_t sendTotalNum = static_cast<uint64_t>(tilingData->compute.numMaxTokensPerRank);
     uint64_t alignedTotalRouteItems = ops::CeilAlign(sendTotalNum, static_cast<uint64_t>(ALIGN_256));
     uint32_t copyBufferBytes = CalcDispatchCopyBufferBytes(tilingData, activationElementsPerByte);
     bufferConfig.copyBufferBytes = copyBufferBytes;
@@ -229,8 +231,8 @@ static MegaMoeDispatchBufferConfig CalcDispatchBufferConfig(const MegaMoeTilingD
     uint32_t fixedBufferBytes = CalcDispatchFixedBufferBytes(tilingData);
     // 一个 dispatch ring slot 包含 token/scale copy buffer 和一条 32B triple。
     uint32_t dispatchSlotBytes = copyBufferBytes + static_cast<uint32_t>(ALIGN_32);
-    uint32_t topkIndexTypeBytes =
-        static_cast<uint32_t>(CalcTopkIndexTypeBytes(tilingData->numMaxTokensPerRank, tilingData->topK));
+    uint32_t topkIndexTypeBytes = static_cast<uint32_t>(
+        CalcTopkIndexTypeBytes(tilingData->compute.numMaxTokensPerRank, tilingData->compute.topK));
 
     SelectDispatchRingAndRouteBatch(bufferConfig, sendTotalNum, alignedTotalRouteItems, fixedBufferBytes,
                                     dispatchSlotBytes, topkIndexTypeBytes, availableUbBytes);
@@ -243,7 +245,7 @@ static MegaMoeDispatchBufferConfig CalcDispatchBufferConfig(const MegaMoeTilingD
 static uint64_t CalcCombineSyncSlotCountPerExpert(const MegaMoeTilingData* tilingData)
 {
     // MTE 统一使用 per-expert AIC ready 表；group counter 服务 URMA Layered Combine。
-    if (!IsLayeredTopology(tilingData->topoType) || tilingData->moeExpertPerRank == 0U) {
+    if (!IsLayeredTopology(tilingData->compute.topoType) || tilingData->compute.moeExpertPerRank == 0U) {
         return 0U;
     }
 
@@ -251,47 +253,11 @@ static uint64_t CalcCombineSyncSlotCountPerExpert(const MegaMoeTilingData* tilin
     uint64_t combineCoreCount = tilingData->blockAivNum / 2U;
     // 同一 token 的 topK expert id 不重复，因此单 expert 从每张卡最多接收 bs 个 token。
     uint64_t maxTokenCountForOneExpert =
-        static_cast<uint64_t>(tilingData->numMaxTokensPerRank) * tilingData->epWorldSize;
+        static_cast<uint64_t>(tilingData->compute.numMaxTokensPerRank) * tilingData->compute.epWorldSize;
     uint64_t maxTokenGroupCountForOneExpert =
         ops::CeilDiv(maxTokenCountForOneExpert, static_cast<uint64_t>(COMBINE_TOKEN_GROUP_SIZE));
     // Workspace 在路由结果产生前分配，因此每个本卡 MoE expert 都按独立最坏情况预留 slot。
     return std::max(maxTokenGroupCountForOneExpert, combineCoreCount);
-}
-
-/*
- * 汇总各执行路径在 workspace 中需要的 host flag 与同步计数器元素数量。
- */
-static uint64_t CalcHostFlagElementCount(const MegaMoeTilingData* tilingData)
-{
-    uint64_t maxWavesPerExpert = ops::CeilDiv<uint64_t>(tilingData->maxOutputSize, L1_TILE_M_256);
-    uint64_t waveFlagSlotsPerExpert = maxWavesPerExpert * INT_CACHELINE;
-    uint64_t activationFlagSlotsPerExpert = waveFlagSlotsPerExpert;
-    uint64_t moeExpertCount = tilingData->moeExpertPerRank;
-
-    uint64_t flagElementCount = moeExpertCount * (activationFlagSlotsPerExpert + waveFlagSlotsPerExpert +
-                                                  static_cast<uint64_t>(INT_CACHELINE) * tilingData->aicNum);
-    bool hasSharedW4Gmm = tilingData->sharedExpertNum > 0 && IsW4GmmMode(tilingData->sharedGmmMode);
-    if (IsW4GmmMode(tilingData->moeGmmMode) || hasSharedW4Gmm ||
-        (tilingData->topoType == TOPO_TYPE_MTE && tilingData->combineQuantMode == COMBINE_NO_QUANT)) {
-        flagElementCount += static_cast<uint64_t>(tilingData->aicNum) * INT_CACHELINE;
-    }
-    if (tilingData->topoType == TOPO_TYPE_MTE && tilingData->combineQuantMode != COMBINE_NO_QUANT) {
-        flagElementCount += moeExpertCount * tilingData->aicNum * INT_CACHELINE;
-    }
-    if (IsLayeredTopology(tilingData->topoType)) {
-        flagElementCount += tilingData->combineSyncSlotCountPerExpert * moeExpertCount * INT_CACHELINE;
-    }
-    if (tilingData->sharedExpertNum > 0 && tilingData->topoType == TOPO_TYPE_MTE) {
-        uint64_t tokenGroupCount = ops::CeilDiv<uint64_t>(tilingData->bs, L1_TILE_M_256);
-        flagElementCount += tokenGroupCount * tilingData->sharedExpertNum * INT_CACHELINE;
-        flagElementCount +=
-            static_cast<uint64_t>(CalcSharedActivationFlagElementsPerExpert(static_cast<int64_t>(tilingData->bs))) *
-            tilingData->sharedExpertNum;
-    }
-    if (tilingData->sharedExpertNum > 0 && tilingData->topoType == TOPO_TYPE_MTE) {
-        flagElementCount += static_cast<uint64_t>(tilingData->aicNum) * INT_CACHELINE;
-    }
-    return flagElementCount;
 }
 
 /*
@@ -302,15 +268,16 @@ static uint32_t CalcTopkValidIndexFixedBufferBytes(const MegaMoeTilingData* tili
                                                    uint32_t sharedActivationElementsPerByte,
                                                    bool isSharedQuantIndependent, uint32_t topkValidIndexCoreNum)
 {
-    uint64_t totalFlagElementCount = CalcHostFlagElementCount(tilingData);
+    const WorkspaceLayoutArch35 workspaceLayout(tilingData->compute);
+    uint64_t totalFlagElementCount = static_cast<uint64_t>(workspaceLayout.flagResetElementCount);
     /*
      * SendAndQuantBuffInit 会清零普通 flag 区域和预取 GMM1 tile 状态区域中较大的一块。
      * Host 侧的 UB reset 预算必须与 device 侧的最大值保持一致，否则 route ring 可能与 reset UB 重叠。
      */
     if (tilingData->topkWeightsPrefetch == 1U) {
-        uint64_t statusSlots =
-            static_cast<uint64_t>(tilingData->moeExpertPerRank) * static_cast<uint64_t>(tilingData->maxTilesPerExpert) +
-            1U;
+        uint64_t statusSlots = static_cast<uint64_t>(tilingData->compute.moeExpertPerRank) *
+                                   static_cast<uint64_t>(tilingData->compute.maxTilesPerExpert) +
+                               1U;
         uint64_t statusElementCount = statusSlots * static_cast<uint64_t>(INT_CACHELINE);
         totalFlagElementCount = std::max(totalFlagElementCount, statusElementCount);
     }
@@ -329,10 +296,13 @@ static uint32_t CalcTopkValidIndexFixedBufferBytes(const MegaMoeTilingData* tili
         quantOutputBufferBytes += sharedQuantOutputBufferBytes;
     }
 
-    uint32_t quantInputBufferBytes = ops::CeilAlign(tilingData->h, static_cast<uint32_t>(ALIGN_128)) * sizeof(uint16_t);
+    uint32_t quantInputBufferBytes =
+        ops::CeilAlign(static_cast<uint32_t>(tilingData->compute.h), static_cast<uint32_t>(ALIGN_128)) *
+        sizeof(uint16_t);
     // sendCntAccTensor_ 按每个 topK 有效下标计算发送核负责的最大专家数分配，与 kernel 地址布局一致。
     uint32_t maxExpertCountPerCore =
-        ops::CeilDiv(tilingData->epWorldSize * tilingData->moeExpertPerRank, topkValidIndexCoreNum);
+        ops::CeilDiv(static_cast<uint32_t>(tilingData->compute.epWorldSize * tilingData->compute.moeExpertPerRank),
+                     topkValidIndexCoreNum);
     uint32_t sendCountAccumulatorBytes = static_cast<uint32_t>(ops::CeilAlign(
         static_cast<uint64_t>(maxExpertCountPerCore) * sizeof(int32_t), static_cast<uint64_t>(ALIGN_32)));
     if (tilingData->preQuantTileTokens != 0U) {
@@ -348,15 +318,15 @@ static uint32_t CalcTopkValidIndexFixedBufferBytes(const MegaMoeTilingData* tili
 
 /*
  * 设置 topK 有效下标发送的两套 UB 配置：先算固定占用，再按 expert 分核的两类 core 各算一套。
- * 本函数读 tilingData->combineSyncSlotCountPerExpert（经 CalcHostFlagElementCount），
+ * 本函数通过 WorkspaceLayoutArch35 读取 tilingData->compute.combineSyncSlotCountPerExpert，
  * 该字段必须在调用前写好。
  */
 static void SetTopkValidIndexBufferConfigs(MegaMoeTilingData* tilingData, uint32_t moeActivationElementsPerByte,
                                            uint32_t sharedActivationElementsPerByte, bool isSharedQuantIndependent,
                                            uint32_t availableUbBytes)
 {
-    const bool sharedMte = tilingData->sharedExpertNum > 0U && tilingData->topoType == TOPO_TYPE_MTE;
-    const uint32_t topkValidIndexCoreNum = sharedMte ? tilingData->aicNum : tilingData->blockAivNum;
+    const bool sharedMte = tilingData->compute.sharedExpertNum > 0U && tilingData->compute.topoType == TOPO_TYPE_MTE;
+    const uint32_t topkValidIndexCoreNum = sharedMte ? tilingData->compute.aicNum : tilingData->blockAivNum;
     uint32_t sendMaskFixedBufferBytes =
         CalcTopkValidIndexFixedBufferBytes(tilingData, moeActivationElementsPerByte, sharedActivationElementsPerByte,
                                            isSharedQuantIndependent, topkValidIndexCoreNum);
@@ -365,7 +335,7 @@ static void SetTopkValidIndexBufferConfigs(MegaMoeTilingData* tilingData, uint32
      * 按发送核数均衡分配专家，前 remainder 个发送核多处理一个专家。
      * 分别计算这两类发送核的 UB 配置。
      */
-    uint32_t totalExpertCount = tilingData->epWorldSize * tilingData->moeExpertPerRank;
+    uint32_t totalExpertCount = tilingData->compute.epWorldSize * tilingData->compute.moeExpertPerRank;
     uint32_t expertCountPerCoreWithoutExtraExpert = totalExpertCount / topkValidIndexCoreNum;
     tilingData->sendMaskCoreCountWithExtraExpert = totalExpertCount % topkValidIndexCoreNum;
     uint32_t expertCountPerCoreWithExtraExpert = expertCountPerCoreWithoutExtraExpert + 1U;
@@ -373,6 +343,41 @@ static void SetTopkValidIndexBufferConfigs(MegaMoeTilingData* tilingData, uint32
         tilingData, sendMaskFixedBufferBytes, expertCountPerCoreWithExtraExpert, availableUbBytes);
     tilingData->sendMaskConfigForCoreWithoutExtraExpert = CalcTopkValidIndexBufferConfig(
         tilingData, sendMaskFixedBufferBytes, expertCountPerCoreWithoutExtraExpert, availableUbBytes);
+}
+
+static void SetCclLayoutParams(MegaMoeTilingData* tilingData)
+{
+    auto& compute = tilingData->compute;
+    const uint32_t rankNumPerServer =
+        tilingData->rankNumPerServer == 0U || tilingData->rankNumPerServer > compute.epWorldSize ?
+            static_cast<uint32_t>(compute.epWorldSize) :
+            tilingData->rankNumPerServer;
+    compute.serverNum = ops::CeilDiv(compute.epWorldSize, static_cast<int64_t>(rankNumPerServer));
+    compute.activationOutputDivisor = GetActivationOutputDivisor(tilingData->actMode);
+    compute.combineQuant = tilingData->combineQuantMode != COMBINE_NO_QUANT;
+    compute.topkWeightsPrefetch = tilingData->topkWeightsPrefetch == 1;
+    compute.dispatchFp4 = IsA4W4GmmMode(tilingData->moeGmmMode);
+    compute.reserveGmm1Output = tilingData->moeGmmMode == GMM_MODE_A8W4_NZ || compute.topkWeightsPrefetch;
+    compute.reserveCumsum = IsW4GmmMode(tilingData->moeGmmMode);
+    compute.needsGmmEpilogue =
+        compute.reserveCumsum || (compute.sharedExpertNum > 0 && IsW4GmmMode(tilingData->sharedGmmMode));
+    compute.sharedInputElementsPerByte = IsA4W4GmmMode(tilingData->sharedGmmMode) ? 2U : 1U;
+    compute.ring = CalcCclStageRingConfig(compute);
+
+    auto& comm = tilingData->comm;
+    comm.numMaxTokensPerRank = compute.numMaxTokensPerRank;
+    comm.topK = compute.topK;
+    comm.h = compute.h;
+    comm.moeExpertPerRank = compute.moeExpertPerRank;
+    comm.epWorldSize = compute.epWorldSize;
+    comm.yDtypeSize = SIZE_BF_16;
+    comm.elemsPerByte = compute.dispatchFp4 ? 2U : 1U;
+    comm.serverCombineReduce = IsServerCombineDedupOn(compute.dedupMode);
+    comm.topkWeightsPrefetch =
+        compute.topkWeightsPrefetch || IsCombineDedupOn(compute.dedupMode) || comm.serverCombineReduce;
+    comm.isQuantCombine = compute.combineQuant;
+    comm.topoType = compute.topoType;
+    comm.serverNum = compute.serverNum;
 }
 
 /*
@@ -393,16 +398,17 @@ static void SetAdaptiveBufferConfigs(const gert::TilingContext* context, const M
     tilingData->dispatchBufferConfig =
         CalcDispatchBufferConfig(tilingData, activationElementsPerByte, availableUbBytes);
 
-    // 先于 topK 有效下标配置写入：CalcHostFlagElementCount 会读这个字段累加 flag 区大小，
+    // 先于 topK 有效下标配置写入：WorkspaceLayoutArch35 会读取本字段计算 flag 区大小，
     // 该依赖只经 tilingData 传递，调换顺序会静默改变 flag 区尺寸。
-    tilingData->combineSyncSlotCountPerExpert = CalcCombineSyncSlotCountPerExpert(tilingData);
+    tilingData->compute.combineSyncSlotCountPerExpert = CalcCombineSyncSlotCountPerExpert(tilingData);
+    SetCclLayoutParams(tilingData);
 
     const bool isPreQuantizedX = xDesc != nullptr && IsPreQuantizedXType(xDesc->GetDataType());
     SetPreQuantTileConfig(tilingData, isPreQuantizedX, activationElementsPerByte,
                           topKWeightsDesc == nullptr ? ge::DT_FLOAT : topKWeightsDesc->GetDataType());
 
     SetTopkValidIndexBufferConfigs(tilingData, activationElementsPerByte, sharedActivationElementsPerByte,
-                                   tilingData->isSharedQuantIndependent == 1U, availableUbBytes);
+                                   tilingData->compute.sharedInputIndependent == 1U, availableUbBytes);
 
     ge::DataType topKWeightsDataType = topKWeightsDesc->GetDataType();
     SetUnpermuteBufferConfigs(tilingData, topKWeightsDataType, availableUbBytes);
@@ -492,10 +498,10 @@ static ge::graphStatus CommitTilingResult(gert::TilingContext* context, const Me
                                           const char* nodeName)
 {
     // 共享专家与路由专家的 H、hiddenDim 已校验一致。
-    tilingData->a8w4L1Layout = CalcMegaMoeL1Layout(
-        std::max(uint64_t{tilingData->h}, static_cast<uint64_t>(GetActivationOutputWidth(tilingData))));
+    tilingData->a8w4L1Layout = CalcMegaMoeL1Layout(std::max(
+        static_cast<uint64_t>(tilingData->compute.h), static_cast<uint64_t>(GetActivationOutputWidth(tilingData))));
 
-    WorkspaceLayoutArch35 workspaceLayout(tilingData);
+    WorkspaceLayoutArch35 workspaceLayout(tilingData->compute);
     OP_TILING_CHECK(CheckCclBufferCapacity(context, config, tilingData, workspaceLayout, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "CCL buffer capacity is insufficient."), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(SetWorkspace(context, nodeName) != ge::GRAPH_SUCCESS,
@@ -503,7 +509,7 @@ static ge::graphStatus CommitTilingResult(gert::TilingContext* context, const Me
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     context->SetBlockDim(
-        ascendcPlatform.CalcTschBlockDim(tilingData->blockAivNum, tilingData->aicNum, tilingData->blockAivNum));
+        ascendcPlatform.CalcTschBlockDim(tilingData->blockAivNum, tilingData->compute.aicNum, tilingData->blockAivNum));
     context->SetScheduleMode(1);
     uint64_t tilingKey = CalcTilingKey(context, config, expertParams, tilingData);
     OP_LOGI(nodeName, "OP TilingKey is %lu", tilingKey);
@@ -561,7 +567,7 @@ ge::graphStatus MegaMoeTilingFuncImplArch35(gert::TilingContext* context, MegaMo
                     OP_LOGE(nodeName, "token capacity attributes are invalid."), return ge::GRAPH_FAILED);
 
     // MTE 去重容量与收益检查依赖 token 数量上限；最终模式用于后续布局和 CCL 容量检查。
-    if (tilingData->topoType == TOPO_TYPE_MTE) {
+    if (tilingData->compute.topoType == TOPO_TYPE_MTE) {
         OP_TILING_CHECK(CheckMteDedupCapacityAndBenefit(tilingData, nodeName) != ge::GRAPH_SUCCESS,
                         OP_LOGE(nodeName, "MTE dedup capacity or benefit check failed."), return ge::GRAPH_FAILED);
     }

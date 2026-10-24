@@ -86,7 +86,7 @@ __aicore__ inline CombineTokenRoute LoadCombineTokenRoute(const LocalTensor<int3
 // 目标卡 combine 接收区按 (token, topk) 展开的紧凑行号。
 __aicore__ inline uint64_t GetCombineDstRowIndex(const CombineTokenRoute& route, const Params& params)
 {
-    return static_cast<uint64_t>(route.tokenIdx) * params.tilingData->topK + route.topkIdx;
+    return static_cast<uint64_t>(route.tokenIdx) * params.tilingData->compute.topK + route.topkIdx;
 }
 
 // 为 tile 内每个 token 行发送一段有效的 GMM2 tile 数据。
@@ -471,7 +471,7 @@ __aicore__ inline void Gmm2AicMmadGeneric(BlockMmad& blockMmad, WorkSet& workSet
         auto gmBlockC = workSet.gmC.slice(asc::te::make_coord(mLoc, nLoc),
                                           asc::te::make_shape(Get<M_VALUE>(actualShape), Get<N_VALUE>(actualShape)));
         if constexpr (NotifyCombineTileReady && !IsShared) {
-            // NotifyCombineTileReady 为真即 per-tile credit 握手启用（combine 去重开时调用方实例化为 false）。
+            // 非去重路径逐 tile 发送；去重路径在完整专家结束后独立消费。
             gmmAddrInfo.gmm2CombineSync->WaitForCombine();
         }
         blockMmad(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, workSet.gmBias, gmBlockC, singleShape);
@@ -732,7 +732,7 @@ __aicore__ inline void Gmm2ExecA8W4(Scheduler& scheduler, const GMMAddrInfo& gmm
             Gmm2Aiv0PrologueA8W4(*pipeline.block, workSet.scheduler, workSet.gmB, config, startLoopIdx, tileNum);
         } else if constexpr (NotifyCombineTileReady) {
             // 同上：W4 路径去重开关走运行时判断（嵌套模板参数触发编译器代码生成问题）。
-            if (!IsCombineDedupOn(params->tilingData->dedupMode)) {
+            if (!IsCombineDedupOn(params->tilingData->compute.dedupMode)) {
                 using MakeLayoutC = typename KernelConfig::MakeLayoutC;
                 CombineTokenRange<ElementC, MakeLayoutC>(workSet.scheduler, workSet.gmC, *params, gmmAddrInfo, config,
                                                          startLoopIdx, tileNum);
@@ -874,18 +874,24 @@ __aicore__ inline void UpdateMoeExpertGmm2GlobalBuffer(const GmmExecutionConfig&
     constexpr uint32_t activationOutputElementsPerByte = PackedElementTraits<ActivationOutType>::ELEMENTS_PER_BYTE;
     uint64_t tokenHiddenDim = static_cast<uint64_t>(Get<K_VALUE>(state.problemShape));
     uint64_t globalTokenStartIndex = static_cast<uint64_t>(state.globalTokenStartIndex) + rowOffsetInExpert;
+    uint64_t physicalTokenStartIndex =
+        gmmConfig.ring.activation ?
+            CalcMteRingPhysicalRow(state.paddedTokenStartIndex + rowOffsetInExpert, gmmConfig.ring.rows) :
+            globalTokenStartIndex;
     uint32_t expertMGroupOffset = rowOffsetInExpert / L1_TILE_M_256;
     uint64_t activationScaleWidth =
         Ops::Base::CeilDiv(static_cast<uint64_t>(activationOutputWidth), static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
         MXFP_MULTI_BASE_SIZE;
 
-    gmmAddrInfo.gmm2OutGlobal = workspace.gmm2MmadResPtr + globalTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
+    // 激活输入按自身循环容量读取；Combine 去重时结果按紧凑逻辑行全量保存。
+    const uint64_t outputTokenStartIndex = gmmConfig.ring.gmm2 ? physicalTokenStartIndex : globalTokenStartIndex;
+    gmmAddrInfo.gmm2OutGlobal = workspace.gmm2MmadResPtr + outputTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
     gmmAddrInfo.metaInfoGlobal = workspace.metaInfoPtr + globalTokenStartIndex * META_INFO_SIZE * sizeof(int32_t);
-    gmmAddrInfo.aGlobal = workspace.activationQuantDataPtr + globalTokenStartIndex * activationOutputWidth /
+    gmmAddrInfo.aGlobal = workspace.activationQuantDataPtr + physicalTokenStartIndex * activationOutputWidth /
                                                                  activationOutputElementsPerByte *
                                                                  sizeof(ActivationOutType);
     gmmAddrInfo.aScaleGlobal =
-        workspace.activationQuantScalePtr + globalTokenStartIndex * activationScaleWidth * sizeof(QuantScaleType);
+        workspace.activationQuantScalePtr + physicalTokenStartIndex * activationScaleWidth * sizeof(QuantScaleType);
     gmmAddrInfo.bGlobal = GetExpertWeightAddr<WeightType>(
         weights.weight2, gmmConfig.isPerExpertWeightTensor, state.expertIdx,
         static_cast<uint64_t>(state.expertIdx) * tokenHiddenDim * activationOutputWidth / weightElementsPerByte);
@@ -969,7 +975,7 @@ __aicore__ inline uint64_t GetWaveGmm2ReadySlotStride(const AivJobContext& job)
     return static_cast<uint64_t>(job.totalJobs) * INT_CACHELINE;
 }
 
-// 每个 AIC 在 GMM2 写入可见后发布一个独占 cache line 的完成标记。
+// AIC 等待 Fixpipe 写完专家结果后发布，专家粒度 Combine 按原协议消费。
 __aicore__ inline void NotifyWaveGmm2Ready(const AivJobContext& job, const Params& params, uint32_t slotIdx)
 {
     if constexpr (g_coreType == AIC) {
@@ -982,7 +988,7 @@ __aicore__ inline void NotifyWaveGmm2Ready(const AivJobContext& job, const Param
     }
 }
 
-// 一个 AIV Combine 任务等待全部 AIC 完成指定专家。
+// 一个 AIV Combine 任务等待指定专家的全部 GMM2 结果落地。
 __aicore__ inline void WaitWaveGmm2Ready(const AivJobContext& job, const Params& params, uint32_t slotIdx)
 {
     if constexpr (g_coreType == AIC) {

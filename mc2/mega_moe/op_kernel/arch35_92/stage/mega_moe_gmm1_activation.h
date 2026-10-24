@@ -777,11 +777,18 @@ __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
     int64_t k = Get<K_VALUE>(state.problemShape);
     int64_t expertOffset = state.expertIdx;
     int64_t globalTokenStartIndex = state.globalTokenStartIndex + rowOffsetInExpert;
+    uint64_t physicalTokenStartIndex =
+        gmmConfig.ring.gmm1 ?
+            CalcMteRingPhysicalRow(state.paddedTokenStartIndex + rowOffsetInExpert, gmmConfig.ring.rows) :
+            static_cast<uint64_t>(globalTokenStartIndex);
+    // Dispatch 输入按自身循环开关选择行号；GMM1 输出和激活仍按各自的循环物理行寻址。
+    const uint64_t dispatchTokenStartIndex =
+        gmmConfig.ring.dispatch ? physicalTokenStartIndex : static_cast<uint64_t>(globalTokenStartIndex);
     uint32_t expertMGroupOffset = rowOffsetInExpert / L1_TILE_M_256;
     int64_t scaleK = Ops::Base::CeilDiv(k, static_cast<int64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
 
     if constexpr (UseA8W4Gmm1 || TopkWeightsPrefetch) {
-        gmmAddrInfo.gmm1OutGlobal = workspace.gmm1MmadResPtr + globalTokenStartIndex * n * sizeof(bfloat16_t);
+        gmmAddrInfo.gmm1OutGlobal = workspace.gmm1MmadResPtr + physicalTokenStartIndex * n * sizeof(bfloat16_t);
     }
     if constexpr (TopkWeightsPrefetch) {
         gmmAddrInfo.gmm1TileStatus = reinterpret_cast<__gm__ int32_t*>(workspace.gmm1TileStatusPtr) +
@@ -794,8 +801,9 @@ __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
                                        expertOffset * syncLayout.activationFlagSlotCountPerExpert +
                                        static_cast<uint64_t>(expertMGroupOffset) * INT_CACHELINE;
     gmmAddrInfo.aGlobal =
-        workspace.dispatchRevDataPtr + globalTokenStartIndex * k / ActivationElementsPerByte * sizeof(ActivationType);
-    gmmAddrInfo.aScaleGlobal = workspace.dispatchRevScalePtr + globalTokenStartIndex * scaleK * sizeof(QuantScaleType);
+        workspace.dispatchRevDataPtr + dispatchTokenStartIndex * k / ActivationElementsPerByte * sizeof(ActivationType);
+    gmmAddrInfo.aScaleGlobal =
+        workspace.dispatchRevScalePtr + dispatchTokenStartIndex * scaleK * sizeof(QuantScaleType);
     gmmAddrInfo.bGlobal =
         GetExpertWeightAddr<WeightType>(weights.weight1, gmmConfig.isPerExpertWeightTensor, state.expertIdx,
                                         static_cast<uint64_t>(state.expertIdx) * n * k / weightElementsPerByte);
@@ -812,8 +820,8 @@ __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
                                                 static_cast<int64_t>(MXFP_DIVISOR_SIZE)) *
                              MXFP_MULTI_BASE_SIZE;
             AscendC::Coord<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t> vecBaseOffset{
-                globalTokenStartIndex * activationOutputCols / outputElementsPerByte,
-                globalTokenStartIndex * scaleN,
+                static_cast<int64_t>(physicalTokenStartIndex) * activationOutputCols / outputElementsPerByte,
+                static_cast<int64_t>(physicalTokenStartIndex) * scaleN,
                 expertOffset * syncLayout.activationFlagSlotCountPerExpert / INT_CACHELINE + expertMGroupOffset,
                 0L,
                 0L,

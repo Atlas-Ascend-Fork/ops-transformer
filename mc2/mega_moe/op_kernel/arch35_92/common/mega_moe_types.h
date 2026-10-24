@@ -56,6 +56,8 @@ using ProblemShape = Shape<int64_t, int64_t, int64_t, int64_t>;
 struct ExpertLoopState {
     ProblemShape problemShape;
     int64_t globalTokenStartIndex = 0;
+    // 物理行序列将每个专家的尾部补齐到完整的 256 行组。
+    uint64_t paddedTokenStartIndex = 0U;
     uint32_t expertIdx = 0U;
     bool expertCountTableReady = false;
 };
@@ -73,6 +75,8 @@ struct ExpertTokenPosition {
     uint32_t tokenIndexInExpert = 0U;
     // 从全部本卡 MoE 专家起点累计的全局连续 row，避免末波 Combine 重新标量扫描 count 表。
     uint64_t globalTokenIndex = 0U;
+    // 独立于紧凑的元数据行，按完整 Mgroup 推进。
+    uint64_t paddedTokenIndex = 0U;
 };
 
 // 标识 MoE 专家紧凑 token 序列中的左闭右开区间 [begin, end)。
@@ -267,6 +271,7 @@ struct MoeStageCommonConfig {
 
 // GMM1/GMM2 共用的执行方式：当前 block 的任务分工、专家权重布局与输入步长。
 struct GmmExecutionConfig {
+    CclStageRingConfig ring{};
     BlockJobContext blockJob;
     bool isPerExpertWeightTensor;
     StridedAConfig inputLayout{};

@@ -162,7 +162,7 @@ __aicore__ inline WaveCombineBufferConfig InitWaveCombineBuffersDedup(const MoeS
 __aicore__ inline void LoadDedupMergeWeightBits(WaveCombineDedupScratch& dedupScratch, const Params& params,
                                                 uint32_t descRowBase, uint32_t memberCount, TEventID mergeEvent)
 {
-    const uint32_t topK = params.tilingData->topK;
+    const uint32_t topK = static_cast<uint32_t>(params.tilingData->compute.topK);
     const uint32_t weightAlignBytes =
         Ops::Base::CeilAlign(topK * static_cast<uint32_t>(sizeof(float)), static_cast<uint32_t>(ALIGN_32));
     const uint64_t lastRow = static_cast<uint64_t>(static_cast<uint32_t>(
@@ -183,7 +183,7 @@ __aicore__ inline float GetDedupMemberWeight(const WaveCombineDedupScratch& dedu
     const int32_t memberTopkIdx =
         dedupScratch.descTensor.GetValue(descRowBase + DEDUP_ROW_DESC_HEADER_INT32 + memberIdx * 3U + 1U);
     const int32_t weightBits =
-        dedupScratch.weightTensor.GetValue(static_cast<uint32_t>(memberTopkIdx) % params.tilingData->topK);
+        dedupScratch.weightTensor.GetValue(static_cast<uint32_t>(memberTopkIdx) % params.tilingData->compute.topK);
     return *reinterpret_cast<const float*>(&weightBits);
 }
 
@@ -288,7 +288,8 @@ __aicore__ inline void SendWaveCombineTokenDedupMerge(const MoeStageCommonConfig
     gmRemoteD.SetGlobalBuffer(
         reinterpret_cast<__gm__ bfloat16_t*>(GetRankWinAddrWithOffset(route.dstRankId, gmRemoteBaseOffset)));
     uint64_t gmDstRowOffset =
-        (static_cast<uint64_t>(route.tokenIdx) * params.tilingData->topK + static_cast<uint64_t>(minTopkIdx)) * h;
+        (static_cast<uint64_t>(route.tokenIdx) * params.tilingData->compute.topK + static_cast<uint64_t>(minTopkIdx)) *
+        h;
 
     const uint32_t mergeBuf = dedupScratch.mergeRowSequence & 1U;
     dedupScratch.mergeRowSequence++;
@@ -350,7 +351,7 @@ __aicore__ inline void DrainCombineRowBuffersDedup(uint32_t& issuedRowCount, uin
 __aicore__ inline void WaitDedupPrepassAllDone(const Params& params)
 {
     WaitUntilGmFlagEquals(reinterpret_cast<__gm__ int32_t*>(params.workspaceInfo.dedupPrepassReadyPtr),
-                          params.tilingData->hiddenDim <= DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM ?
+                          params.tilingData->compute.hiddenDim <= DEDUP_AIV0_PREPASS_MAX_HIDDEN_DIM ?
                               (static_cast<int32_t>(GetBlockNum()) |
                                (static_cast<int32_t>(GetBlockNum()) << DEDUP_PREPASS_DONE_AIV0_SHIFT)) :
                               static_cast<int32_t>(GetBlockNum()));
@@ -372,10 +373,11 @@ __aicore__ inline WaveCombineDedupGmViews CreateWaveCombineDedupGmViews(const Mo
 {
     WaveCombineDedupGmViews views;
     views.rowDescGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.workspaceInfo.dedupRowDescPtr));
-    views.gmm2AbsGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(params.workspaceInfo.gmm2MmadResPtr));
+    // Combine 去重的 GMM2 结果全量保存，跨专家和跨 wave 的成员按逻辑行读取。
+    GM_ADDR combineData = params.workspaceInfo.gmm2MmadResPtr;
+    views.gmm2AbsGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(combineData));
     views.gmm2OutGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(
-        params.workspaceInfo.gmm2MmadResPtr +
-        static_cast<uint64_t>(state.globalTokenStartIndex) * common.tokenHiddenDim * sizeof(bfloat16_t)));
+        combineData + static_cast<uint64_t>(state.globalTokenStartIndex) * common.tokenHiddenDim * sizeof(bfloat16_t)));
     views.gmRemoteBaseOffset = static_cast<uint64_t>(params.peermemInfo.combineSend.offset);
     return views;
 }
@@ -437,7 +439,7 @@ __aicore__ inline void RunWaveCombineStageDedup(const MoeStageCommonConfig& comm
     WaitDedupPrepassAllDone(params);
 
     const uint32_t strideInt32 =
-        static_cast<uint32_t>(CalcDedupRowDescStrideInt32(static_cast<int64_t>(params.tilingData->topK)));
+        static_cast<uint32_t>(CalcDedupRowDescStrideInt32(static_cast<int64_t>(params.tilingData->compute.topK)));
     uint32_t batchCap = WAVE_COMBINE_DEDUP_DESC_UB_BYTES / (strideInt32 * static_cast<uint32_t>(sizeof(int32_t)));
     batchCap = batchCap > WAVE_COMBINE_META_INFO_TOKEN_CAPACITY ? WAVE_COMBINE_META_INFO_TOKEN_CAPACITY : batchCap;
     WaveCombineDedupGmViews gmViews = CreateWaveCombineDedupGmViews(common, params, state);

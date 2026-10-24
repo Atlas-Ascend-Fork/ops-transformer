@@ -74,34 +74,35 @@ void PrintMegaMoeTilingData(const MegaMoeTilingData* tilingData, const char* nod
 
     // 问题规模、专家拓扑及执行模式。
     OP_LOGD(nodeName,
-            "shape: bs=%u, numMaxTokensPerRank=%u, h=%u, hiddenDim=%u, topK=%u, maxOutputSize=%u, "
+            "shape: bs=%ld, numMaxTokensPerRank=%ld, h=%ld, hiddenDim=%ld, topK=%ld, maxOutputSize=%ld, "
             "isPerExpertWeightTensor=%d",
-            tilingData->bs, tilingData->numMaxTokensPerRank, tilingData->h, tilingData->hiddenDim, tilingData->topK,
-            tilingData->maxOutputSize, tilingData->isPerExpertWeightTensor);
+            tilingData->compute.bs, tilingData->compute.numMaxTokensPerRank, tilingData->compute.h,
+            tilingData->compute.hiddenDim, tilingData->compute.topK, tilingData->compute.maxOutputSize,
+            tilingData->isPerExpertWeightTensor);
     OP_LOGD(nodeName,
-            "topology: moeExpertPerRank=%u, sharedExpertNum=%u, epWorldSize=%u, aicNum=%u, blockAivNum=%u, "
+            "topology: moeExpertPerRank=%ld, sharedExpertNum=%ld, epWorldSize=%ld, aicNum=%ld, blockAivNum=%u, "
             "blockNumPerEP=%u, topoType=%ld, rankNumPerServer=%u",
-            tilingData->moeExpertPerRank, tilingData->sharedExpertNum, tilingData->epWorldSize, tilingData->aicNum,
-            tilingData->blockAivNum, tilingData->blockNumPerEP, tilingData->topoType, tilingData->rankNumPerServer);
+            tilingData->compute.moeExpertPerRank, tilingData->compute.sharedExpertNum, tilingData->compute.epWorldSize,
+            tilingData->compute.aicNum, tilingData->blockAivNum, tilingData->blockNumPerEP,
+            tilingData->compute.topoType, tilingData->rankNumPerServer);
     OP_LOGD(nodeName,
             "mode: moeGmmMode=%u, sharedGmmMode=%u, isSharedQuantIndependent=%u, combineQuantMode=%ld, "
             "clampLimit=%f",
             static_cast<uint32_t>(tilingData->moeGmmMode), static_cast<uint32_t>(tilingData->sharedGmmMode),
-            static_cast<uint32_t>(tilingData->isSharedQuantIndependent), tilingData->combineQuantMode,
+            static_cast<uint32_t>(tilingData->compute.sharedInputIndependent), tilingData->combineQuantMode,
             tilingData->clampLimit);
-    OP_LOGD(nodeName, "combineSync: slotCountPerExpert=%lu", tilingData->combineSyncSlotCountPerExpert);
-    OP_LOGD(nodeName, "dedup: dedupMode=%d, topkWeightsPrefetch=%d", tilingData->dedupMode,
+    OP_LOGD(nodeName, "combineSync: slotCountPerExpert=%ld", tilingData->compute.combineSyncSlotCountPerExpert);
+    OP_LOGD(nodeName, "dedup: dedupMode=%d, topkWeightsPrefetch=%d", tilingData->compute.dedupMode,
             tilingData->topkWeightsPrefetch);
     OP_LOGD(nodeName, "topkWeightsPrefetch is %d", tilingData->topkWeightsPrefetch);
     OP_LOGD(nodeName, "preQuant: tileTokens=%u, stageBytes=%u", tilingData->preQuantTileTokens,
             tilingData->preQuantStageBytes);
-    OP_LOGD(nodeName, "mGroupsPerWave is %u", tilingData->mGroupsPerWave);
-
+    OP_LOGD(nodeName, "mGroupsPerWave is %ld", tilingData->compute.mGroupsPerWave);
     PrintMegaMoeBufferConfigs(tilingData, nodeName);
 }
 
 /*
- * 输出 workspace 各分区的偏移和总大小，供 host/device 布局核对使用。
+ * 输出 CCL 计算区域的偏移和总大小，供主机与核内布局核对使用。
  */
 template <typename WorkspaceLayoutType>
 void PrintWorkspaceLayout(const WorkspaceLayoutType* layout, const char* nodeName)
@@ -130,11 +131,11 @@ void PrintWorkspaceLayout(const WorkspaceLayoutType* layout, const char* nodeNam
 void PrintPeermemInfo(const MegaMoeTilingData* tilingData, const char* nodeName)
 {
     OP_LOGD(nodeName, "========== PeermemInfo ==========");
-    int64_t exceptionDumpRegionSize = tilingData->topoType == TOPO_TYPE_MTE ? EXCEPTION_DUMP_REGION_SIZE : 0;
+    int64_t exceptionDumpRegionSize = tilingData->compute.topoType == TOPO_TYPE_MTE ? EXCEPTION_DUMP_REGION_SIZE : 0;
     OP_LOGD(nodeName, "exceptionDumpRegionSize: {%ld}\n", exceptionDumpRegionSize);
-    const PeermemInfo info(tilingData, IsA4W4GmmMode(tilingData->moeGmmMode) ? 2U : 1U);
+    const PeermemInfo info(tilingData->comm);
     const int64_t dataOffset =
-        tilingData->topoType == TOPO_TYPE_MTE ? info.expertCountRecv.offset : info.maskRecv.offset;
+        tilingData->compute.topoType == TOPO_TYPE_MTE ? info.expertCountRecv.offset : info.maskRecv.offset;
     OP_LOGD(nodeName, "peermemDataOffset: {%ld}\n", dataOffset);
     OP_LOGD(nodeName, "maskRecvSize: {%ld}\n", info.maskRecv.size);
     OP_LOGD(nodeName, "expertCountRecvSize: {%ld}\n", info.expertCountRecv.size);
