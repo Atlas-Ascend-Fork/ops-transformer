@@ -34,6 +34,8 @@ using namespace optiling;
 using namespace DequantBmm;
 constexpr size_t X1_QUANTMODE_VALUES = 6;
 constexpr size_t X2_QUANTMODE_VALUES = 6;
+// HiF4 量化模式: QuantModeType::HIFLOAT4_QUANT (x1/x2 quant mode 均为 8)
+constexpr size_t HIF4_QUANTMODE_VALUES = 8;
 constexpr uint64_t MX_SCALE_OFFSET = 64;
 constexpr uint64_t EVEN_ALIGN = 2;
 constexpr uint64_t GROUP_M_OFFSET = 32;
@@ -42,6 +44,10 @@ constexpr uint64_t GROUP_MNK_BIT_SIZE = 0xFFFF;
 constexpr uint64_t MX_GROUP_SIZE_K = 32;
 constexpr uint64_t MX_GROUP_SIZE_M = 1;
 constexpr uint64_t MX_GROUP_SIZE_N = 1;
+// HiF4: 每 64 个元素共享 1 个 4-byte hif4_scale 元数据, scale shape 为 [M, K/64, 1]
+constexpr uint64_t HIF4_SCALE_BLOCK_K = 64;
+constexpr uint64_t HIF4_SCALE_LAST_DIM = 1;
+constexpr uint64_t HIF4_SCALE_UNIT_BYTES = 4;
 
 class MxQuantMatmulAllToAllTilingBase : public MatmulAllToAllTilingBase {
     friend class MxQuantMatmulAlltoAllHelper;
@@ -85,6 +91,7 @@ private:
     uint64_t mmMvalueLen_ = 0;
     hcommMatmulAllToAllTilingData hcommTilingData_;
     bool isMxfp4_ = false;
+    bool isHiF4_ = false;
     void PrintMxQuantMatmulAlltoAllTilingInfo(const std::string& opName, MatmulAlltoAllTilingInfo& tilingInfo);
     bool usingApaceImpl_ = false;
     void PrintMxQuantMMV3TilingData(const std::string& opName,

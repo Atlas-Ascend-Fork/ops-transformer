@@ -456,15 +456,24 @@ private:
         uint64_t baseASize = GetSizeWithDataType<aDataType>(runInfo_.baseM * runInfo_.baseK);
         uint64_t baseBSize = GetSizeWithDataType<bDataType>(runInfo_.baseN * runInfo_.baseK);
 
-        // HiFP4 每 64 个元素使用 4 字节 scale，后续深度及复用窗口沿用主线算法。
-        const uint64_t scaleBytesPerARow =
-            isHiF4_ ? CeilDiv(runInfo_.baseK, uint64_t{64}) * sizeof(uint32_t) :
-                      Align(CeilDiv(runInfo_.baseK, GetPerGroupSize<aDataType>()), GetAlignSize<aDataType>()) *
-                          GetScaleUnitPerGroup<aDataType>();
-        const uint64_t scaleBytesPerBRow =
-            isHiF4_ ? CeilDiv(runInfo_.baseK, uint64_t{64}) * sizeof(uint32_t) :
-                      Align(CeilDiv(runInfo_.baseK, GetPerGroupSize<bDataType>()), GetAlignSize<bDataType>()) *
-                          GetScaleUnitPerGroup<bDataType>();
+        // Scale bytes per K row of a base block(两种机制并存):
+        // - isHiF4_ 运行时开关(主线机制): MRSv2 等以 FP4 模板实例化并通过 SetHiF4Enable 启用,
+        //   每 64 元素 1 个 4 字节 hif4_scale;
+        // - 编译期模板分发(默认): MX 每 32 元素组 1 字节 E8M0(2 字节配对对齐),
+        //   HiF4(DT_HIFLOAT4 模板)每 64 元素组 1 个 4 字节 hif4_scale, 即 scale shape (M, K/group, 1)
+        uint64_t scaleBytesPerARow;
+        uint64_t scaleBytesPerBRow;
+        if (isHiF4_) {
+            scaleBytesPerARow = CeilDiv(runInfo_.baseK, uint64_t{64}) * sizeof(uint32_t);
+            scaleBytesPerBRow = scaleBytesPerARow;
+        } else {
+            scaleBytesPerARow =
+                Align(CeilDiv(runInfo_.baseK, GetPerGroupSize<aDataType>()), GetAlignSize<aDataType>()) *
+                GetScaleUnitPerGroup<aDataType>();
+            scaleBytesPerBRow =
+                Align(CeilDiv(runInfo_.baseK, GetPerGroupSize<bDataType>()), GetAlignSize<bDataType>()) *
+                GetScaleUnitPerGroup<bDataType>();
+        }
         uint64_t baseScaleASize = scaleBytesPerARow * runInfo_.baseM;
         uint64_t baseScaleBSize = scaleBytesPerBRow * runInfo_.baseN;
         // Bias occupies DB_SIZE ping-pong L1 buffers next to the scale windows.

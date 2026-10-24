@@ -25,7 +25,7 @@ enum class DataType {
     DT_FLOAT4_E2M1,
     DT_FLOAT8_E4M3FN,
     DT_FLOAT8_E5M2,
-    DT_HIFLOAT4,
+    DT_HIFLOAT4, // HiFloat4: S1P2 element, 2 elements/byte packing, group size 64
 };
 
 // Bias element dtype for the SWAT tiling L1 budget; width mapping mirrors the
@@ -111,21 +111,7 @@ constexpr T GetSizeWithDataType(T shape)
     }
 }
 
-// 量化数据类型位宽（bit）
-constexpr uint64_t MXFP4_BITS = 4UL;
-constexpr uint64_t MXFP8_BITS = 8UL;
-
-// win 区 buffer 复用深度决策常量
-// HCCL_BUFFSIZE 默认 200MB，框架层翻倍分配为 400MB
-constexpr uint64_t WIN_REUSE_BUDGET_CAP = 400UL * 1024UL * 1024UL;
-constexpr uint64_t WIN_REUSE_DEPTH_CAP = 128UL; // flag 同步安全上限（FLAG_ID_MODULO=11，64/11≈6 轮复用）
-constexpr uint64_t WIN_REUSE_DEPTH_MIN = 2UL;
-
-// Per-group element count of the quantization format along the K axis:
-// MX formats carry one scale unit per 32 elements, HiF4 per 64 elements.
-// The canonical names live in apace_constant.h (MX_GROUP_SIZE / HIF4_GROUP_SIZE);
-// this header may be included ahead of apace_constant.h, so keep the widths
-// local instead of pulling in that dependency (mirrors GetBiasDataSize above).
+// K 轴每个量化分组的元素数: MX 每 32 元素 1 组, HiF4 每 64 元素 1 组。
 template <mm::DataType dataType>
 constexpr uint64_t GetPerGroupSize()
 {
@@ -136,9 +122,8 @@ constexpr uint64_t GetPerGroupSize()
     }
 }
 
-// Scale bytes carried per group: MX emits one E8M0 byte per 32-element group,
-// HiF4 emits one 4-byte hif4_scale element (E6M2 + E1_8 + E1_16) per
-// 64-element group, i.e. scale shape (M, K/group, 1) with 4-byte elements.
+// 每分组 scale 字节数: MX 每 32 元素组 1 个 1 字节的 E8M0;
+// HiF4 每 64 元素组 1 个 4 字节 hif4_scale (E6M2 + E1_8 + E1_16)。
 template <mm::DataType dataType>
 constexpr uint64_t GetScaleUnitPerGroup()
 {
@@ -149,8 +134,7 @@ constexpr uint64_t GetScaleUnitPerGroup()
     }
 }
 
-// Scale-group alignment (in scale units) required by the L1 layout framing:
-// MX frames E8M0 scale units in pairs, HiF4 needs no extra alignment.
+// L1 framing 要求的 scale 单元对齐: MX 按 2 个 E8M0 配对, HiF4 无额外对齐。
 template <mm::DataType dataType>
 constexpr uint64_t GetAlignSize()
 {
@@ -160,3 +144,13 @@ constexpr uint64_t GetAlignSize()
         return 2UL; // TILING_MXFP_MULTI_BASE_SIZE
     }
 }
+
+// 量化数据类型位宽（bit）
+constexpr uint64_t MXFP4_BITS = 4UL;
+constexpr uint64_t MXFP8_BITS = 8UL;
+
+// win 区 buffer 复用深度决策常量
+// HCCL_BUFFSIZE 默认 200MB，框架层翻倍分配为 400MB
+constexpr uint64_t WIN_REUSE_BUDGET_CAP = 400UL * 1024UL * 1024UL;
+constexpr uint64_t WIN_REUSE_DEPTH_CAP = 128UL; // flag 同步安全上限（FLAG_ID_MODULO=11，64/11≈6 轮复用）
+constexpr uint64_t WIN_REUSE_DEPTH_MIN = 2UL;

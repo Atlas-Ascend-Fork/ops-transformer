@@ -110,9 +110,7 @@ struct Mc2MatmulShapeInfo {
     bool isMxfp{false};
     bool isBTrans{false};
     const char* opName{nullptr};
-    // HiF4 scale shape is [m, k/64, 1] (one 4-byte hif4_scale per 64-element
-    // group) instead of the MX [m, k/64, 2]; appended at the end to keep all
-    // existing aggregate initializations valid.
+    // HiF4 scale shape 为 [m, k/64, 1] (每 64 元素组 1 个 4 字节 hif4_scale), 区别于 MX 的 [m, k/64, 2];
     bool isHif4{false};
 };
 

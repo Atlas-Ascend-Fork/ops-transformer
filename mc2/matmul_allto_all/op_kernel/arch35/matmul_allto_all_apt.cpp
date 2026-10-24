@@ -132,7 +132,18 @@ using MC2KernelTemplate::MC2AlltoAllPrimitives;
 #define MATMUL_ALLTO_ALL_APACE_MX_QUANT_IMPL(tilingData, ServerType) \
     do { \
         Apace::MatmulAllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, hcommMatmulAllToAllTilingData, \
-                                                    ServerType> \
+                                                    ServerType, true> \
+            op(&tilingData); \
+        op.Init(x1, x2, bias, y, x1Scale, x2Scale, workspaceGM); \
+        op.Run(); \
+    } while (0)
+#endif
+
+#ifndef MATMUL_ALLTO_ALL_APACE_HIF4_QUANT_IMPL
+#define MATMUL_ALLTO_ALL_APACE_HIF4_QUANT_IMPL(tilingData, ServerType, TransB) \
+    do { \
+        Apace::MatmulAllToAllMxQuantMatmulHcommImpl<DTYPE_X1, DTYPE_X2, DTYPE_Y, hcommMatmulAllToAllTilingData, \
+                                                    ServerType, TransB> \
             op(&tilingData); \
         op.Init(x1, x2, bias, y, x1Scale, x2Scale, workspaceGM); \
         op.Run(); \
@@ -168,6 +179,10 @@ __global__ __aicore__ void matmul_allto_all(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias
         GET_TILING_DATA_WITH_STRUCT(QuantMatmulAlltoAllTilingData, tilingData, tilingGM);
         MATMUL_ALLTO_ALL_APT_MX_QUANT_IMPL(tilingData, pipe, commServerType);
     }
+#elif ((ORIG_DTYPE_X1 == DT_HIFLOAT4) && (ORIG_DTYPE_X2 == DT_HIFLOAT4))
+    REGISTER_TILING_DEFAULT(QuantMatmulAlltoAllTilingData);
+    GET_TILING_DATA_WITH_STRUCT(hcommMatmulAllToAllTilingData, tilingData, tilingGM);
+    MATMUL_ALLTO_ALL_APACE_HIF4_QUANT_IMPL(tilingData, commServerType, X2TRANSPOSE);
 #else
     REGISTER_TILING_DEFAULT(QuantMatmulAlltoAllTilingData);
     if constexpr (QUANTMODE == KC_QUANT_MODE) {

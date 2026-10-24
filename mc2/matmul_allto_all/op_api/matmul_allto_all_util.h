@@ -51,7 +51,7 @@ enum class QuantModeType : int64_t {
     PERBLOCK_QUANT = 5,
     MX_QUANT = 6,
     DYN_PERTOKEN_QUANT = 7,
-    HIFLOAT4_QUANT = 8,
+    HIFLOAT4_QUANT = 8
 };
 
 // 带场景标识的校验宏，用于区分不同量化场景下的校验错误

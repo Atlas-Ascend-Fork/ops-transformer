@@ -82,9 +82,6 @@ constexpr uint64_t DATA_SIZE_L0C = 4UL;
 constexpr uint64_t MX_GROUP_SIZE = 32UL;
 constexpr uint64_t TILING_MXFP_DIVISOR_SIZE = 64UL;
 constexpr uint64_t TILING_MXFP_MULTI_BASE_SIZE = 2UL;
-// HiF4 quantization: one 4-byte hif4_scale element (E6M2 + E1_8 + E1_16) is
-// shared by every 64 elements, i.e. scale shape (M, K/64, 1); no extra scale
-// unit alignment is required beyond the group itself.
 constexpr uint64_t HIF4_GROUP_SIZE = 64UL;
 constexpr uint64_t HIF4_SCALE_UNIT = 4UL;
 constexpr uint64_t TILING_HIF4_MULTI_BASE_SIZE = 1UL;

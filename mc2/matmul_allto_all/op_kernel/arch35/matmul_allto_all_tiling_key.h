@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file matmul_all_to_all_tiling_key.h
+ * \file matmul_allto_all_tiling_key.h
  * \brief 定义tiling_key
  */
 #ifndef MATMUL_ALLTO_ALL_TILING_KEY_H
@@ -21,6 +21,7 @@
 #define NON_QUANT_MODE 0
 #define KC_QUANT_MODE 1
 #define MX_QUANT_MODE 2
+#define HIF4_PREGROUP_QUANT_MODE 3
 
 // bias的数据类型
 #define DTYPE_BIAS_SAME_WITH_X 0
@@ -45,7 +46,7 @@
 // 模板参数范围声明
 ASCENDC_TPL_ARGS_DECL(MatmulAlltoAll,
                       ASCENDC_TPL_UINT_DECL(QUANTMODE, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, NON_QUANT_MODE,
-                                            KC_QUANT_MODE, MX_QUANT_MODE),
+                                            KC_QUANT_MODE, MX_QUANT_MODE, HIF4_PREGROUP_QUANT_MODE),
                       ASCENDC_TPL_BOOL_DECL(X2TRANSPOSE, 0, 1),
                       ASCENDC_TPL_UINT_DECL(DTYPEBIAS, ASCENDC_TPL_4_BW, ASCENDC_TPL_UI_LIST, DTYPE_BIAS_SAME_WITH_X,
                                             DTYPE_BIAS_FP32),
@@ -59,6 +60,8 @@ ASCENDC_TPL_ARGS_DECL(MatmulAlltoAll,
 // NON_QUANT_MODE: X2TRANSPOSE(0,1) x DTYPEBIAS(0,1) x COMMMODE(0,1) x ADDBIASSPLITMODE(0,1,2,3) x USING_APACE_IMPL(0)
 // KC/MX_QUANT_MODE: ADDBIASSPLITMODE 恒为 OFF
 // MX_QUANT_MODE + USING_APACE_IMPL(1): Apace 路径, AIC only, 仅支持 X2TRANSPOSE=1
+// HIF4_PREGROUP_QUANT_MODE: HiF4全量化, 仅 Apace Hcomm 纯C通信(AIC_ONLY) + USING_APACE_IMPL=1,
+// 支持转置/非转置两种B布局, DTYPEBIAS 恒为 FP32, ADDBIASSPLITMODE 恒为 OFF
 // 用于调用GET_TPL_TILING_KEY获取TilingKey时，接口内部校验TilingKey是否合法
 ASCENDC_TPL_SEL(
     ASCENDC_TPL_ARGS_SEL(MATMUL_ALLTOALL_ORIGINAL_KERNEL_TYPE_SEL ASCENDC_TPL_UINT_SEL(QUANTMODE, ASCENDC_TPL_UI_LIST,
