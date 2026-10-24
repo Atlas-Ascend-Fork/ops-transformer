@@ -274,7 +274,6 @@ using biasType = MatmulType<AscendC::TPosition::GM, CubeFormat::ND, DTYPE_BIAS>;
 
 #define GMM_QUANT_HIF4_BASIC_API_IMPL_CLASS(xLayout, wLayout, yLayout) \
     do { \
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantBasicApiTilingData, tilingData, tiling) \
         GET_TILING_DATA_MEMBER(GMMQuantBasicApiTilingData, gmmQuantParams, gmmQuantParams_, tiling); \
         GET_TILING_DATA_MEMBER(GMMQuantBasicApiTilingData, mmTilingData, mmTilingData_, tiling); \
         GmmCgmctMxKernel<DTYPE_X, DTYPE_WEIGHT, DTYPE_BIAS, DTYPE_SCALE, float, DTYPE_Y, xLayout, wLayout, yLayout, \
@@ -320,25 +319,22 @@ __global__ __aicore__ void grouped_matmul(GM_ADDR x, GM_ADDR weight, GM_ADDR bia
 #if defined(V310_GMM_QUANT_S4S4) && IS_BLAZE
     REGISTER_TILING_DEFAULT(GMMS4S4IntQuantTilingData);
 #else
-    REGISTER_NONE_TILING;
+    REGISTER_TILING_DEFAULT(GMMQuantTilingData);
 #endif
 #if defined(V310_GMM_QUANT_MX) // mx
     if constexpr (wFormat == CubeFormat::ND) {
         if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                       KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-            GET_TILING_DATA_WITH_STRUCT(GMMQuantBasicApiTilingData, tilingData, tiling);
             GMM_QUANT_MX_IMPL_CLASS(Cgmct::Gemm::layout::RowMajor, Cgmct::Gemm::layout::RowMajor,
                                     Cgmct::Gemm::layout::RowMajorAlign, asc::te::nd_ext_layout_ptn,
                                     asc::te::nd_ext_layout_ptn, asc::te::nd_ext_layout_ptn);
         } else if constexpr (QUANT_B_TRANS == GMM_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                              KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-            GET_TILING_DATA_WITH_STRUCT(GMMQuantBasicApiTilingData, tilingData, tiling);
             GMM_QUANT_MX_IMPL_CLASS(Cgmct::Gemm::layout::RowMajor, Cgmct::Gemm::layout::ColumnMajor,
                                     Cgmct::Gemm::layout::RowMajorAlign, asc::te::nd_ext_layout_ptn,
                                     asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn);
         } else if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_TRANS &&
                              KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-            GET_TILING_DATA_WITH_STRUCT(GMMQuantBasicApiTilingData, tilingData, tiling);
             if ASCEND_IS_AIV {
                 GMM_QUANT_BASIC_API_EMPTY_TENSOR_WITHOUT_BIAS_IMPL_CLASS();
             }
@@ -351,13 +347,11 @@ __global__ __aicore__ void grouped_matmul(GM_ADDR x, GM_ADDR weight, GM_ADDR bia
     } else {
         if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                       KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-            GET_TILING_DATA_WITH_STRUCT(GMMQuantBasicApiTilingData, tilingData, tiling);
             GMM_QUANT_MX_IMPL_CLASS(Cgmct::Gemm::layout::RowMajor, Cgmct::Gemm::layout::Nz,
                                     Cgmct::Gemm::layout::RowMajorAlign, asc::te::nd_ext_layout_ptn,
                                     asc::te::nz_layout_ptn, asc::te::nd_ext_layout_ptn);
         } else if constexpr (QUANT_B_TRANS == GMM_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                              KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-            GET_TILING_DATA_WITH_STRUCT(GMMQuantBasicApiTilingData, tilingData, tiling);
             GMM_QUANT_MX_IMPL_CLASS(Cgmct::Gemm::layout::RowMajor, Cgmct::Gemm::layout::Zn,
                                     Cgmct::Gemm::layout::RowMajorAlign, asc::te::nd_ext_layout_ptn,
                                     asc::te::zn_layout_ptn, asc::te::nd_ext_layout_ptn);
@@ -423,48 +417,39 @@ __global__ __aicore__ void grouped_matmul(GM_ADDR x, GM_ADDR weight, GM_ADDR bia
     }
 #endif
     if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_NO_TRANS && KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_IMPL_CLASS(false, false, GmmASWKernel);
     } else if constexpr (QUANT_B_TRANS == GMM_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                          KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_IMPL_CLASS(false, true, GmmASWKernel);
     }
 #endif
 #if defined(V310_GMM_QUANT_PERTENSOR_CUBE) // perTensor/double perTensor
     if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_TRANS && KERNEL_TYPE == GMM_DEQUANT_FIXP) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_WITH_EMPTY_TENSOR_IMPL_CLASS(true, false, GmmASWKernel);
     }
 #endif
 #if defined(V310_GMM_QUANT_MIX) // perToken/SPLIT_K/scale bf16/fp32
     if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_NO_TRANS && KERNEL_TYPE == GMM_DEQUANT_VECTOR) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_MIX_IMPL_CLASS(false, false, GQmmMixRegbaseKernel);
     } else if constexpr (QUANT_B_TRANS == GMM_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                          KERNEL_TYPE == GMM_DEQUANT_VECTOR) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_MIX_IMPL_CLASS(false, true, GQmmMixRegbaseKernel);
     } else if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_TRANS &&
                          KERNEL_TYPE == GMM_DEQUANT_VECTOR) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_MIX_IMPL_CLASS(true, false, GQmmMixRegbaseKernel);
     }
 #endif
 #if defined(V310_GMM_QUANT_PERTILE)
     if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                   KERNEL_TYPE == GMM_PERGROUP_PERBLOCK) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_GB_IMPL_CLASS(Cgmct::Gemm::layout::RowMajor, Cgmct::Gemm::layout::RowMajor,
                                 Cgmct::Gemm::layout::RowMajorAlign);
     } else if constexpr (QUANT_B_TRANS == GMM_TRANS && QUANT_A_TRANS == GMM_NO_TRANS &&
                          KERNEL_TYPE == GMM_PERGROUP_PERBLOCK) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_GB_IMPL_CLASS(Cgmct::Gemm::layout::RowMajor, Cgmct::Gemm::layout::ColumnMajor,
                                 Cgmct::Gemm::layout::RowMajorAlign);
     } else if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_TRANS &&
                          KERNEL_TYPE == GMM_PERGROUP_PERBLOCK) {
-        GET_TILING_DATA_WITH_STRUCT(GMMQuantTilingData, tilingData, tiling);
         GMM_QUANT_GB_IMPL_CLASS(Cgmct::Gemm::layout::ColumnMajor, Cgmct::Gemm::layout::RowMajor,
                                 Cgmct::Gemm::layout::RowMajorAlign);
     }
@@ -473,13 +458,11 @@ __global__ __aicore__ void grouped_matmul(GM_ADDR x, GM_ADDR weight, GM_ADDR bia
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2); // S4S4 需 1:2 AIC:AIV
     if constexpr (wFormat == CubeFormat::ND) {
         if constexpr (QUANT_B_TRANS == GMM_NO_TRANS && QUANT_A_TRANS == GMM_NO_TRANS && KERNEL_TYPE == GMM_S4S4_MIX) {
-            GET_TILING_DATA_WITH_STRUCT(GMMS4S4IntQuantTilingData, tilingData, tiling);
             GMM_S4S4_IMPL_CLASS(asc::te::nd_ext_layout_ptn, asc::te::nd_ext_layout_ptn, asc::te::nd_ext_layout_ptn);
         }
     } else {
         if constexpr ((QUANT_B_TRANS == GMM_NO_TRANS || QUANT_B_TRANS == GMM_TRANS) && QUANT_A_TRANS == GMM_NO_TRANS &&
                       KERNEL_TYPE == GMM_S4S4_MIX) {
-            GET_TILING_DATA_WITH_STRUCT(GMMS4S4IntQuantTilingData, tilingData, tiling);
             GMM_S4S4_IMPL_CLASS(asc::te::nd_ext_layout_ptn, asc::te::nz_layout_ptn, asc::te::nd_ext_layout_ptn);
         }
     }
