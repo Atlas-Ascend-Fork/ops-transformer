@@ -82,6 +82,7 @@ constexpr int64_t MIN_EP_WORLD_SIZE = 2;
 constexpr int64_t EP_RESTRICT_8 = 8;
 constexpr int64_t MAX_TP_WORLD_SIZE = 1;
 constexpr int64_t BS_UPPER_BOUND = 512;
+constexpr int64_t BS_UPPER_BOUND_A6 = 1024;
 constexpr int64_t BS_UPPER_BOUND_LAYERED = 256;
 constexpr uint32_t H_BASIC_BLOCK_LAYERED = 32;
 constexpr int64_t RESIDUAL_X_DIM2_SIZE = 1;
@@ -1749,11 +1750,14 @@ static bool CheckAttrs(const gert::TilingContext* context, MoeDistributeCombineV
     // 校验输入expertIds的维度0并设bs
     const gert::StorageShape* expertIdsStorageShape = context->GetInputShape(config.expertIdsIndex);
     int64_t expertIdsDim0 = expertIdsStorageShape->GetStorageShape().GetDim(0);
-    int64_t bsUpperBound = isLayered ? BS_UPPER_BOUND_LAYERED : BS_UPPER_BOUND;
-    OP_TILING_CHECK((expertIdsDim0 <= 0) || (expertIdsDim0 > bsUpperBound),
-                    OP_LOGE_FOR_INVALID_VALUE(nodeName, "expertIds(BS)", std::to_string(expertIdsDim0).c_str(),
-                                              "in range [1, bsUpperBound]"),
-                    return false);
+    NpuArch npuArch = mc2tiling::GetNpuArch(context);
+    bool isA6 = (npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202);
+    int64_t bsUpperBound = isLayered ? BS_UPPER_BOUND_LAYERED : (isA6 ? BS_UPPER_BOUND_A6 : BS_UPPER_BOUND);
+    OP_TILING_CHECK(
+        (expertIdsDim0 <= 0) || (expertIdsDim0 > bsUpperBound),
+        OP_LOGE_FOR_INVALID_VALUE(nodeName, "expertIds(BS)", std::to_string(expertIdsDim0).c_str(),
+                                  (std::string("in range [1,") + std::to_string(bsUpperBound) + "]").c_str()),
+        return false);
     tilingData.moeDistributeCombineV2Info.bs = static_cast<uint32_t>(expertIdsDim0);
 
     if (!CheckAndSetGlobalBs(context, tilingData, nodeName, config, expertIdsDim0, epWorldSize)) {
