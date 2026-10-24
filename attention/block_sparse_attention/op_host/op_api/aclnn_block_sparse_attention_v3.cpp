@@ -466,6 +466,9 @@ __attribute__((visibility("default"))) aclnnStatus aclnnBlockSparseAttentionV3Ge
     if (ret != ACLNN_SUCCESS) {
         return ret;
     }
+    if (softmaxLseFlag == LSE_OUT) {
+        OP_CHECK_NULL(softmaxLseOptional, return ACLNN_ERR_PARAM_NULLPTR);
+    }
 
     // mxfp4 量化限制检查
     ret = ValidateMxfp4Constraints(quantMode, softmaxLseFlag, innerPrecise, attenMaskOptional, blockTableOptional);

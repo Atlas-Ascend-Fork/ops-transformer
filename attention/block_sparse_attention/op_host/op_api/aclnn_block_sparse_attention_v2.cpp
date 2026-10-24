@@ -238,6 +238,9 @@ __attribute__((visibility("default"))) aclnnStatus aclnnBlockSparseAttentionV2Ge
     if (ret != ACLNN_SUCCESS) {
         return ret;
     }
+    if (softmaxLseFlag == LSE_OUT) {
+        OP_CHECK_NULL(softmaxLseOptional, return ACLNN_ERR_PARAM_NULLPTR);
+    }
     // 去掉了idx ,idxnums
     L2_DFX_PHASE_1(aclnnBlockSparseAttentionV2,
                    DFX_IN(query, key, value, blockSparseMask, attenMaskOptional, blockShape, actualSeqLengthsOptional,

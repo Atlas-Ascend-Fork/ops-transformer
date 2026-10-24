@@ -710,3 +710,96 @@ TEST_F(aclnn_block_sparse_attention_v2_ut, unsupported_innerPrecise)
     aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
     EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
+
+// ============================================================================
+// 用例 16: softmaxLseFlag=1 但 softmaxLseOptional 为空指针
+// ============================================================================
+TEST_F(aclnn_block_sparse_attention_v2_ut, softmaxLse_flag1_lse_nullptr)
+{
+    auto query = TensorDesc({batch, numHeads, qSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({batch, numKvHeads, kvSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({batch, numKvHeads, kvSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto blockSparseMask =
+        TensorDesc({batch, numHeads, qBlockNum, kvBlockNum}, ACL_INT8, ACL_FORMAT_ND).Value(vector<int8_t>{1});
+    auto blockShape = IntArrayDesc(vector<int64_t>{blockShapeX, blockShapeY});
+    char qInputLayout[] = "BNSD";
+    char kvInputLayout[] = "BNSD";
+    auto attentionOut = TensorDesc({batch, numHeads, qSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnBlockSparseAttentionV2,
+                        INPUT(query,           // query
+                              key,             // key
+                              value,           // value
+                              blockSparseMask, // blockSparseMask
+                              nullptr,         // attenMask
+                              blockShape,      // blockShape
+                              nullptr,         // actualSeqLengths
+                              nullptr,         // actualSeqLengthsKv
+                              nullptr,         // blockTable
+                              nullptr,         // qDequantScale
+                              nullptr,         // kDequantScale
+                              nullptr,         // vDequantScale
+                              qInputLayout,    // qInputLayout
+                              kvInputLayout,   // kvInputLayout
+                              numKvHeads,      // numKeyValueHeads
+                              0,               // maskType
+                              scaleValue,      // scaleValue
+                              0,               // innerPrecise
+                              0,               // blockSize
+                              2147483647,      // preTokens
+                              2147483647,      // nextTokens
+                              1                // softmaxLseFlag
+                              ),
+                        OUTPUT(attentionOut, nullptr));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_NULLPTR);
+}
+
+// ============================================================================
+// 用例 17: softmaxLseFlag=1 且 softmaxLseOptional 有效
+// ============================================================================
+TEST_F(aclnn_block_sparse_attention_v2_ut, softmaxLse_flag1_with_lse)
+{
+    auto query = TensorDesc({batch, numHeads, qSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto key = TensorDesc({batch, numKvHeads, kvSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto value = TensorDesc({batch, numKvHeads, kvSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto blockSparseMask =
+        TensorDesc({batch, numHeads, qBlockNum, kvBlockNum}, ACL_INT8, ACL_FORMAT_ND).Value(vector<int8_t>{1});
+    auto blockShape = IntArrayDesc(vector<int64_t>{blockShapeX, blockShapeY});
+    char qInputLayout[] = "BNSD";
+    char kvInputLayout[] = "BNSD";
+    auto attentionOut = TensorDesc({batch, numHeads, qSeqlen, headDim}, ACL_FLOAT16, ACL_FORMAT_ND);
+    auto softmaxLse = TensorDesc({batch, numHeads, qSeqlen, 1}, ACL_FLOAT, ACL_FORMAT_ND);
+
+    auto ut = OP_API_UT(aclnnBlockSparseAttentionV2,
+                        INPUT(query,           // query
+                              key,             // key
+                              value,           // value
+                              blockSparseMask, // blockSparseMask
+                              nullptr,         // attenMask
+                              blockShape,      // blockShape
+                              nullptr,         // actualSeqLengths
+                              nullptr,         // actualSeqLengthsKv
+                              nullptr,         // blockTable
+                              nullptr,         // qDequantScale
+                              nullptr,         // kDequantScale
+                              nullptr,         // vDequantScale
+                              qInputLayout,    // qInputLayout
+                              kvInputLayout,   // kvInputLayout
+                              numKvHeads,      // numKeyValueHeads
+                              0,               // maskType
+                              scaleValue,      // scaleValue
+                              0,               // innerPrecise
+                              0,               // blockSize
+                              2147483647,      // preTokens
+                              2147483647,      // nextTokens
+                              1                // softmaxLseFlag
+                              ),
+                        OUTPUT(attentionOut, softmaxLse));
+
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_SUCCESS);
+}
