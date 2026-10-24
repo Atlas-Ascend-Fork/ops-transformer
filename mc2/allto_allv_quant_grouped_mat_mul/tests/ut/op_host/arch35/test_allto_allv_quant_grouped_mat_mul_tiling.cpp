@@ -30,6 +30,20 @@ protected:
     }
 };
 
+TEST(AlltoAllvQuantGroupedMatMulTilingStandaloneTest, mxApaceNetworkCaseUsesFourExpertsPerBatch)
+{
+    constexpr uint64_t expertNum = 32U;
+    constexpr uint64_t rankSize = 2U;
+    constexpr uint64_t bsk = 100352U;
+    constexpr uint64_t n = 1024U;
+    constexpr uint32_t expectedBatchExpertNum = 4U;
+    constexpr uint32_t expectedLoopCount = 8U;
+
+    const uint32_t batchExpertNum = optiling::AlltoAllvQuantGmmTilingCommon::CalcExpertNum(expertNum, rankSize, bsk, n);
+    EXPECT_EQ(batchExpertNum, expectedBatchExpertNum);
+    EXPECT_EQ((expertNum + batchExpertNum - 1U) / batchExpertNum, expectedLoopCount);
+}
+
 TEST_P(AlltoAllvQuantGroupedMatMulTilingTest, param)
 {
     auto param = GetParam();
