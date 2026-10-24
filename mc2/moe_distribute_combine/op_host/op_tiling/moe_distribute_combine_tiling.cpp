@@ -70,6 +70,7 @@ constexpr uint64_t INIT_TILINGKEY_TP_1 = 1000UL;
 constexpr uint32_t TILINGKEY_INT8_COMM_QUANT = 20U;
 
 const int64_t BS_UPPER_BOUND = 512;
+const int64_t BS_UPPER_BOUND_A6 = 1024;
 const size_t MAX_GROUP_NAME_LENGTH = 128UL;
 
 constexpr uint32_t SYSTEM_NEED_WORKSPACE = 16 * 1024 * 1024;
@@ -349,10 +350,14 @@ static bool CheckBatchAttrs(gert::TilingContext* context, MoeDistributeCombineTi
         OP_LOGE_WITH_INVALID_INPUT(nodeName, "expertIds");
         return false;
     }
+
     int64_t expertIdsDim0 = expertIdsStorageShape->GetStorageShape().GetDim(0);
-    if ((expertIdsDim0 <= 0) || (expertIdsDim0 > BS_UPPER_BOUND)) {
+    NpuArch npuArch = mc2tiling::GetNpuArch(context);
+    int64_t bsUpperBound =
+        (npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202) ? BS_UPPER_BOUND_A6 : BS_UPPER_BOUND;
+    if ((expertIdsDim0 <= 0) || (expertIdsDim0 > bsUpperBound)) {
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "BS", std::to_string(expertIdsDim0).c_str(),
-                                  (std::string("[1, ") + std::to_string(BS_UPPER_BOUND) + "]").c_str());
+                                  (std::string("[1, ") + std::to_string(bsUpperBound) + "]").c_str());
         return false;
     }
     tilingData.moeDistributeCombineInfo.bs = static_cast<uint32_t>(expertIdsDim0);
