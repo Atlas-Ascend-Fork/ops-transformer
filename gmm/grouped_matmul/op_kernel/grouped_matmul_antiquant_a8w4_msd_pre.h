@@ -64,6 +64,7 @@ private:
     GlobalTensor<int64_t> groupListGm;
     GlobalTensor<float> xRowSumGm;
 
+    uint32_t m;
     uint32_t vK;
     uint32_t vKAlign;
     uint32_t totalGroup{0};
@@ -74,6 +75,8 @@ private:
     uint32_t groupNum;
     uint32_t xRowSumRepeatNum;
     uint32_t withOffset;
+    uint32_t quantGroupNum;
+    uint32_t quantGroupSize;
 };
 
 __aicore__ inline void GMMA8W4PreProcess::Init(GM_ADDR x, GM_ADDR y, GM_ADDR groupList, GM_ADDR workspace,
@@ -83,8 +86,11 @@ __aicore__ inline void GMMA8W4PreProcess::Init(GM_ADDR x, GM_ADDR y, GM_ADDR gro
     yGm.SetGlobalBuffer(GetTensorAddr<int8_t>(0, y));
     groupListGm.SetGlobalBuffer((__gm__ int64_t*)groupList);
 
+    m = tilingData.m;
     vK = tilingData.k;
     withOffset = tilingData.withOffset;
+    quantGroupNum = tilingData.quantGroupNum;
+    quantGroupSize = vK / quantGroupNum;
     pipe->InitBuffer(vecInQueueX, BUFFER_NUM_A8W4_PRE, vK * sizeof(int8_t));    // 2KB
     pipe->InitBuffer(vecOutQueueA1, BUFFER_NUM_A8W4_PRE, vK * sizeof(int4b_t)); // 1KB
     pipe->InitBuffer(vecOutQueueA2, BUFFER_NUM_A8W4_PRE, vK * sizeof(int4b_t)); // 1KB
@@ -103,7 +109,8 @@ __aicore__ inline void GMMA8W4PreProcess::Init(GM_ADDR x, GM_ADDR y, GM_ADDR gro
 
     if (withOffset == WITH_OFFSET) {
         xRowSumGm.SetGlobalBuffer((__gm__ float*)workspace);
-        pipe->InitBuffer(vecOutQueueRowSum, BUFFER_NUM_A8W4_PRE, 1 * sizeof(float));
+        // Each group result occupies a 32-byte UB slot for the strided DataCopyPad.
+        pipe->InitBuffer(vecOutQueueRowSum, BUFFER_NUM_A8W4_PRE, quantGroupNum * DATA_BLOCK_SIZE_32);
     }
 
     startNum = GetBlockIdx();
@@ -153,6 +160,9 @@ __aicore__ inline void GMMA8W4PreProcess::Process()
     SetFlag<HardEvent::V_MTE2>(EVENT_ID0);
     SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
     SetFlag<HardEvent::MTE3_V>(EVENT_ID1);
+    if (withOffset == WITH_OFFSET) {
+        SetFlag<HardEvent::MTE3_V>(EVENT_ID2);
+    }
     for (uint32_t xloop = startNum; xloop < totalGroup; xloop += blockDim) {
         uint64_t startAddr = xloop * vK;
         WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
@@ -166,15 +176,44 @@ __aicore__ inline void GMMA8W4PreProcess::Process()
             Cast(xHighFloatTensor, xHighHalfTensor, AscendC::RoundMode::CAST_NONE, vK);
             PipeBarrier<PIPE_V>();
 
-            SetFlag<HardEvent::MTE3_V>(EVENT_ID2);
             WaitFlag<HardEvent::MTE3_V>(EVENT_ID2);
-            ReduceSum(xRowSumTensor, xHighFloatTensor, workTensor, vK);
+            constexpr uint32_t FLOATS_PER_BLOCK = DATA_BLOCK_SIZE_32 / sizeof(float);
+            constexpr uint32_t FP32_ELEMENTS_PER_REPEAT = 64;
+            constexpr uint32_t MAX_REDUCE_REPEATS = 255;
+            if (quantGroupSize == FP32_ELEMENTS_PER_REPEAT && quantGroupNum <= MAX_REDUCE_REPEATS) {
+                // Each repeat reduces one K group and preserves the 32-byte result slot.
+                WholeReduceSum<float>(xRowSumTensor, xHighFloatTensor, FP32_ELEMENTS_PER_REPEAT, quantGroupNum,
+                                      FLOATS_PER_BLOCK, 1, FP32_ELEMENTS_PER_REPEAT / FLOATS_PER_BLOCK);
+                PipeBarrier<PIPE_V>();
+            } else if ((quantGroupSize == FP32_ELEMENTS_PER_REPEAT * TWO ||
+                        quantGroupSize == FP32_ELEMENTS_PER_REPEAT * TWO * TWO) &&
+                       quantGroupNum <= MAX_REDUCE_REPEATS) {
+                const uint8_t groupStride = static_cast<uint8_t>(quantGroupSize / FLOATS_PER_BLOCK);
+                BinaryRepeatParams addParams{1, 1, 1, groupStride, groupStride, groupStride};
+                // Fold chunks in the temporary FP32 buffer; INT4 splitting uses the original input tensors.
+                for (uint32_t offset = FP32_ELEMENTS_PER_REPEAT; offset < quantGroupSize;
+                     offset += FP32_ELEMENTS_PER_REPEAT) {
+                    Add(xHighFloatTensor, xHighFloatTensor, xHighFloatTensor[offset], FP32_ELEMENTS_PER_REPEAT,
+                        quantGroupNum, addParams);
+                    PipeBarrier<PIPE_V>();
+                }
+                WholeReduceSum<float>(xRowSumTensor, xHighFloatTensor, FP32_ELEMENTS_PER_REPEAT, quantGroupNum,
+                                      FLOATS_PER_BLOCK, 1, groupStride);
+                PipeBarrier<PIPE_V>();
+            } else {
+                for (uint32_t quantGroupIdx = 0; quantGroupIdx < quantGroupNum; ++quantGroupIdx) {
+                    ReduceSum(xRowSumTensor[quantGroupIdx * FLOATS_PER_BLOCK],
+                              xHighFloatTensor[quantGroupIdx * quantGroupSize], workTensor, quantGroupSize);
+                    PipeBarrier<PIPE_V>();
+                }
+            }
             SetFlag<HardEvent::V_MTE3>(EVENT_ID2);
             WaitFlag<HardEvent::V_MTE3>(EVENT_ID2);
-
-            DataCopyExtParams xRowSumParams{1, static_cast<uint32_t>(1 * sizeof(float)), 0, 0, 0};
+            // GM layout is [quantGroupNum, m], so adjacent group results are m floats apart.
+            DataCopyExtParams xRowSumParams{static_cast<uint16_t>(quantGroupNum), static_cast<uint32_t>(sizeof(float)),
+                                            0, static_cast<uint32_t>((m - 1) * sizeof(float)), 0};
             DataCopyPad(xRowSumGm[xloop], xRowSumTensor, xRowSumParams);
-            AscendC::PipeBarrier<PIPE_V>();
+            SetFlag<HardEvent::MTE3_V>(EVENT_ID2);
         }
 
         Muls(xHighHalfTensor, xHighHalfTensor, one_eight, vK);
@@ -210,6 +249,9 @@ __aicore__ inline void GMMA8W4PreProcess::Process()
     WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_V>(EVENT_ID1);
+    if (withOffset == WITH_OFFSET) {
+        WaitFlag<HardEvent::MTE3_V>(EVENT_ID2);
+    }
     SyncAll<false>();
     vecInQueueX.FreeTensor(xTensor);
     vecOutQueueA1.FreeTensor(xHighI4Tensor);
