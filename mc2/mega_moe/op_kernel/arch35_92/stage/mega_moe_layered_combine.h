@@ -14,6 +14,28 @@
 // Internal member definitions; included by mega_moe_layered.h after the class declaration.
 namespace MegaMoeImpl {
 
+struct LayeredDequantScaleBufferBytes {
+    uint32_t bf16;
+    uint32_t fp32;
+};
+
+/*
+ * 按公共 DeQuantMxFp8 的实际存储轮次计算两块 scale scratch 的字节数，包含尾轮无效元素。
+ * 设 VL 为向量寄存器字节数：DIST_INTLV_B16/B32 忽略 mask，每轮交织写出 2 * VL 字节。
+ * BF16 阶段每轮转换 VL / sizeof(bfloat16_t) 个原始 scale，并交织复制为两份。
+ * FP32 阶段的输入已有 scaleNum * 2 个 BF16 元素，每轮转换 VL / sizeof(float) 个，再复制为两份。
+ * 因此先将每阶段转换后的单份数据字节数向上对齐到 VL（计算完整轮数），再乘 2（双寄存器存储）。
+ * 不能先乘 2 再仅按 VL 对齐：例如 VL=256B、scaleNum=34，BF16 阶段一轮实际写 512B，
+ * Align256(34 * 2B) * 2 = 512B，而 Align256(34 * 2B * 2) 只有 256B。
+ */
+__aicore__ inline LayeredDequantScaleBufferBytes CalcLayeredDequantScaleBufferBytes(uint32_t scaleNum)
+{
+    constexpr uint32_t vectorBytes = AscendC::VECTOR_REG_WIDTH;
+    uint32_t bf16Bytes = Ops::Base::CeilAlign(scaleNum * static_cast<uint32_t>(sizeof(bfloat16_t)), vectorBytes) * 2U;
+    uint32_t fp32Bytes = Ops::Base::CeilAlign(scaleNum * 2U * static_cast<uint32_t>(sizeof(float)), vectorBytes) * 2U;
+    return {bf16Bytes, fp32Bytes};
+}
+
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitCombineBuffers()
 {
@@ -21,8 +43,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitCombi
         // Combine 仅在当前 AIV1 完成 Dispatch 张量使用后启动，并从 UB 首地址重建视图。
         // Hcomm 使用前 512 字节；Combine metadata 和计算临时区从其后开始复用 UB。
         uint32_t nAlign32 = Ops::Base::CeilAlign(k_, static_cast<uint32_t>(ALIGN_32));
-        uint32_t nScale = Ops::Base::CeilDiv(k_, uint32_t(MXFP_SCALE_GROUP_NUM));
-        uint32_t quantTokenSizeBytes = Ops::Base::CeilAlign(k_ + nScale, static_cast<uint32_t>(ALIGN_32));
+        uint32_t quantTokenSizeBytes = static_cast<uint32_t>(CalcCombineTokenBytes(k_, sizeof(bfloat16_t), true));
         uint32_t singleTokenBytes = nAlign32 * sizeof(bfloat16_t) + quantTokenSizeBytes;
         combineUbTensorSize_ = (singleTokenBytes * 2) / sizeof(bfloat16_t);
     }
@@ -69,8 +90,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CombineTo
 
     uint32_t mExpert = Get<M_VALUE>(gmm2State.problemShape);
     uint32_t nTilesPerGroup = Ops::Base::CeilDiv(k_, L1_TILE_N);
-    uint32_t nScale = Ops::Base::CeilDiv(k_, uint32_t(MXFP_SCALE_GROUP_NUM));
-    uint32_t quantTokenSizeBytes = Ops::Base::CeilAlign(k_ + nScale, static_cast<uint32_t>(ALIGN_32));
+    uint32_t quantTokenSizeBytes = static_cast<uint32_t>(CalcCombineTokenBytes(k_, sizeof(bfloat16_t), true));
     GroupSyncSlotLayout slotLayout = CalcGroupSyncSlotLayout(mExpert, blockNum_);
     __gm__ int32_t* expertCounterBase = reinterpret_cast<__gm__ int32_t*>(gmmAddrInfo.gmm2CombineSyncCounter);
 
@@ -241,12 +261,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitUnper
     uint32_t fixedUbBeforeTopK = dataResBufAlign + dataResFp32BufAlign;
     uint32_t scaleUbCost = 0;
     if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
-        // 预算公式必须与 UnpermuteBuffInit 的张量一致：每 32 个元素一个 scale，再扩展为两份。
         uint32_t scaleNum = Ops::Base::CeilDiv(static_cast<uint32_t>(k_), static_cast<uint32_t>(MXFP_SCALE_GROUP_NUM));
-        scaleUbCost = Ops::Base::CeilAlign(static_cast<uint32_t>(scaleNum * sizeof(bfloat16_t) * DEQUANT_SCALE_EXPAND),
-                                           static_cast<uint32_t>(ALIGN_32)) +
-                      Ops::Base::CeilAlign(static_cast<uint32_t>(scaleNum * sizeof(float) * DEQUANT_SCALE_EXPAND),
-                                           static_cast<uint32_t>(ALIGN_32));
+        auto scaleBytes = CalcLayeredDequantScaleBufferBytes(scaleNum);
+        scaleUbCost = scaleBytes.bf16 + scaleBytes.fp32;
     }
     uint32_t fixedUbCost = fixedUbBeforeTopK + scaleUbCost;
     uint32_t availUb = fixedUbCost < SEND_MASK_UB_LIMIT ? SEND_MASK_UB_LIMIT - fixedUbCost : 0U;
@@ -297,18 +314,13 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Unpermute
     uint32_t tempAddr = topKWeightsAddr + topKWeightsBufAlign;
     if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
         uint32_t scaleNum = Ops::Base::CeilDiv(static_cast<uint32_t>(k_), static_cast<uint32_t>(MXFP_SCALE_GROUP_NUM));
-        // Tensor用处：DeQuantMxFp8 中用于存储 bf16 格式的 scale（e8m0 转换后的中间结果）
-        // Tensor大小：scaleNum * sizeof(bfloat16_t) * DEQUANT_SCALE_EXPAND，用于 scale 扩展。
-        uint32_t bf16ScaleBufAlign =
-            Ops::Base::CeilAlign(static_cast<uint32_t>(scaleNum * sizeof(bfloat16_t) * DEQUANT_SCALE_EXPAND),
-                                 static_cast<uint32_t>(ALIGN_32));
+        auto scaleBytes = CalcLayeredDequantScaleBufferBytes(scaleNum);
+        // 按实际双寄存器存储范围预留，尾轮不能只按有效 scale 长度分配。
+        uint32_t bf16ScaleBufAlign = scaleBytes.bf16;
         bf16ScaleTensor_ =
             LocalTensor<bfloat16_t>(TPosition::VECCALC, tempAddr, bf16ScaleBufAlign / sizeof(bfloat16_t));
         tempAddr += bf16ScaleBufAlign;
-        // Tensor用处：DeQuantMxFp8 中用于存储 fp32 格式的 scale（广播后的最终 scale）
-        // Tensor大小：scaleNum * sizeof(float) * DEQUANT_SCALE_EXPAND，用于 scale 扩展。
-        uint32_t fp32ScaleBufAlign = Ops::Base::CeilAlign(
-            static_cast<uint32_t>(scaleNum * sizeof(float) * DEQUANT_SCALE_EXPAND), static_cast<uint32_t>(ALIGN_32));
+        uint32_t fp32ScaleBufAlign = scaleBytes.fp32;
         fp32ScaleTensor_ = LocalTensor<float>(TPosition::VECCALC, tempAddr, fp32ScaleBufAlign / sizeof(float));
         tempAddr += fp32ScaleBufAlign;
     }
@@ -390,7 +402,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::LoadUnper
         Cast(dataInFp32, dataInBf16, AscendC::RoundMode::CAST_NONE, k_);
     } else {
         uint32_t nScale = Ops::Base::CeilDiv(k_, uint32_t(MXFP_SCALE_GROUP_NUM));
-        uint32_t quantTokenSize = k_ + nScale;
+        // 与发送端及 Peermem 容量使用相同的 padded record stride，包含真正的 scale 区。
+        uint32_t quantTokenSize = static_cast<uint32_t>(CalcCombineTokenBytes(k_, sizeof(bfloat16_t), true));
         uint32_t quantEleNum = quantTokenSize / sizeof(bfloat16_t);
         WaitFlag<AscendC::HardEvent::V_MTE2>(event);
         DataCopy(dataInBf16, expandedX[(tokenIdx * topK_ + expId) * quantEleNum], quantEleNum);

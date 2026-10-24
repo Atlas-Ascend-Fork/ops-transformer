@@ -36,7 +36,8 @@ __aicore__ inline void CombineSendTokenToRemote(uint32_t batchStart, uint32_t cu
                                                 typename CommPolicy::BatchHandle& batchHandle)
 {
     SyncFuncStatic<AscendC::HardEvent::MTE2_S, SYNC_EVENT_ID3>();
-    int64_t quantTokenSize = IsQuantized ? (n + nScale) : n;
+    // FP8 记录的 scale 位于 Align256(n) 之后；发送长度同时也是接收 GM 的 record stride。
+    int64_t quantTokenSize = CalcCombineTokenBytes(n, sizeof(DataType), IsQuantized) / sizeof(DataType);
     uint32_t toRankId = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + RANK_ID);
     uint32_t tokenIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOKEN_ID);
     uint32_t topkIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOPK_INDEX);

@@ -1615,8 +1615,8 @@ static ge::graphStatus CheckAndSetTokenDimensions(const gert::TilingContext* con
             nodeName, "H", std::to_string(xDim1).c_str(),
             (std::string("should in [") + std::to_string(MIN_H) + ", " + std::to_string(MAX_H) + "]").c_str()),
         return ge::GRAPH_FAILED);
-    // URMA/Layered 保持 1K 对齐；其余 MTE 路径统一按 64 对齐——W4 的 NZ_C0_32 分形硬性要求
-    // GMM K 按 64 对齐，A8W8 的 ND/NZ 路径按需求对齐到同一口径（原为 32）。
+    // MTE 与 URMA/Layered 统一按 64 对齐：满足 W4 NZ_C0_32 的 GMM K 分形要求，
+    // A8W8 的 ND/NZ 路径沿用同一口径。
     int64_t requiredHAlignment = tilingData->topoType == TOPO_TYPE_URMA ? URMA_H_ALIGN : MTE_H_ALIGN;
     OP_TILING_CHECK(
         xDim1 % requiredHAlignment != 0,

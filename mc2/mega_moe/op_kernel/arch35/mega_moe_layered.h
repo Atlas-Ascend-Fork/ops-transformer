@@ -53,7 +53,6 @@ using namespace AscendC;
 
 constexpr uint32_t UNPERMUTE_LIST_NUM = 3U;
 constexpr int64_t HALF_TO_FP32 = 2U;
-constexpr int64_t DEQUANT_SCALE_EXPAND = 2U;
 
 #if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL)
 using TupleShape = Shape<int64_t, int64_t, int64_t, int64_t>;
@@ -586,7 +585,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitDispa
     mxQuantTokenAlignBytes_ =
         Ops::Base::CeilAlign(static_cast<uint32_t>(k_ / A_ELEMS_PER_BYTE), static_cast<uint32_t>(ALIGN_256)) *
         sizeof(ActivationType);
-    mxQuantScaleAlignBytes_ = mxQuantScaleNumAlignPerToken_ * sizeof(uint8_t);
+    // 有效 scale 数仅用于量化；存储段须对齐，使后续权重的 UB 起点满足 32B 要求。
+    mxQuantScaleAlignBytes_ = Ops::Base::CeilAlign(
+        mxQuantScaleNumAlignPerToken_ * static_cast<uint32_t>(sizeof(uint8_t)), static_cast<uint32_t>(ALIGN_32));
     mxQuantTokenScaleAlignBytes_ =
         Ops::Base::CeilAlign(mxQuantTokenAlignBytes_ + mxQuantScaleAlignBytes_, static_cast<uint32_t>(ALIGN_32));
     if (RecordHasWeights()) {

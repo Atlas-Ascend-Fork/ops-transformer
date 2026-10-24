@@ -463,7 +463,7 @@ constexpr int64_t PEERMEM_SYNC_SLOT_SIZE = 64LL;
 constexpr int64_t MXFP_SCALE_GROUP_NUM = 32LL;
 constexpr int64_t MXFP_MULTI_BASE_SIZE = 2LL;
 constexpr int64_t Y_DTYPE_SIZE = 2LL;
-constexpr int64_t URMA_H_ALIGN = 1024LL;
+constexpr int64_t URMA_H_ALIGN = 64LL;
 constexpr int64_t MTE_H_ALIGN = 64LL;
 constexpr int64_t MOE_PERMUTE_CHUNK = 1024LL;
 // 异常 Dump 区

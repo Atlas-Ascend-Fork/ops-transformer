@@ -479,7 +479,8 @@ TEST_F(MegaMoeArch35TilingTest, DifferentNConfig)
 static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeightsBs, int64_t numMaxTokensPerRank,
                               int64_t maxRecvTokenNum, int64_t hiddenDim, const std::string& activation,
                               const std::vector<float>& activationParams, ge::graphStatus expectedStatus,
-                              int64_t combineCommMode = 0, int64_t combineQuantMode = 0, int64_t topoType = 1)
+                              int64_t combineCommMode = 0, int64_t combineQuantMode = 0, int64_t topoType = 1,
+                              int64_t h = 4096)
 {
     ASSERT_GT(hiddenDim, 0);
     ASSERT_EQ(hiddenDim % (MegaMoeImpl::ACTIVATION_N_HALF * MegaMoeImpl::MXFP_DIVISOR_SIZE), 0);
@@ -491,17 +492,16 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
         "MegaMoe",
         {
             {{{1}, {1}}, ge::DT_INT32, ge::FORMAT_ND},
-            {{{xBs, 4096}, {xBs, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{xBs, h}, {xBs, h}}, ge::DT_BF16, ge::FORMAT_ND},
             {{{topkIdsBs, 8}, {topkIdsBs, 8}}, ge::DT_INT32, ge::FORMAT_ND},
             {{{topkWeightsBs, 8}, {topkWeightsBs, 8}}, ge::DT_FLOAT, ge::FORMAT_ND},
-            {{{8, hiddenDim, 4096}, {8, hiddenDim, 4096}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_FRACTAL_NZ},
-            {{{8, 4096, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF},
-              {8, 4096, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF}},
+            {{{8, hiddenDim, h}, {8, hiddenDim, h}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_FRACTAL_NZ},
+            {{{8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF}, {8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF}},
              ge::DT_FLOAT8_E4M3FN,
              ge::FORMAT_FRACTAL_NZ},
-            {{{8, hiddenDim, 64, 2}, {8, hiddenDim, 64, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
-            {{{8, 4096, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2},
-              {8, 4096, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2}},
+            {{{8, hiddenDim, (h + 63) / 64, 2}, {8, hiddenDim, (h + 63) / 64, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
+            {{{8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2},
+              {8, h, hiddenDim / MegaMoeImpl::ACTIVATION_N_HALF / MegaMoeImpl::MXFP_DIVISOR_SIZE, 2}},
              ge::DT_FLOAT8_E8M0,
              ge::FORMAT_ND},
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
@@ -516,7 +516,7 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
         },
         {
-            {{{xBs, 4096}, {xBs, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{xBs, h}, {xBs, h}}, ge::DT_BF16, ge::FORMAT_ND},
             {{{8}, {8}}, ge::DT_INT32, ge::FORMAT_ND},
         },
         {
@@ -754,7 +754,7 @@ TEST_F(MegaMoeArch35TilingTest, BS128_NumMaxTokens256_URMA_WorkspaceUsesCapacity
 }
 
 static void RunA8W4FormatCase(ge::Format weightOneFormat, ge::Format weightTwoFormat, ge::graphStatus expectedStatus,
-                              uint64_t expectedTilingKey)
+                              uint64_t expectedTilingKey, int64_t h = 4096)
 {
     struct MegaMoeCompileInfo {
     } compileInfo;
@@ -763,13 +763,13 @@ static void RunA8W4FormatCase(ge::Format weightOneFormat, ge::Format weightTwoFo
         "MegaMoe",
         {
             {{{1}, {1}}, ge::DT_INT32, ge::FORMAT_ND},
-            {{{128, 4096}, {128, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{128, h}, {128, h}}, ge::DT_BF16, ge::FORMAT_ND},
             {{{128, 6}, {128, 6}}, ge::DT_INT32, ge::FORMAT_ND},
             {{{128, 6}, {128, 6}}, ge::DT_FLOAT, ge::FORMAT_ND},
-            {{{4, 2048, 4096}, {4, 2048, 4096}}, ge::DT_FLOAT4_E2M1, weightOneFormat},
-            {{{4, 4096, 1024}, {4, 4096, 1024}}, ge::DT_FLOAT4_E2M1, weightTwoFormat},
-            {{{4, 2048, 64, 2}, {4, 2048, 64, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
-            {{{4, 4096, 16, 2}, {4, 4096, 16, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
+            {{{4, 2048, h}, {4, 2048, h}}, ge::DT_FLOAT4_E2M1, weightOneFormat},
+            {{{4, h, 1024}, {4, h, 1024}}, ge::DT_FLOAT4_E2M1, weightTwoFormat},
+            {{{4, 2048, (h + 63) / 64, 2}, {4, 2048, (h + 63) / 64, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
+            {{{4, h, 16, 2}, {4, h, 16, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
             {{}, ge::DT_INT8, ge::FORMAT_ND},
@@ -782,7 +782,7 @@ static void RunA8W4FormatCase(ge::Format weightOneFormat, ge::Format weightTwoFo
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
         },
         {
-            {{{128, 4096}, {128, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{128, h}, {128, h}}, ge::DT_BF16, ge::FORMAT_ND},
             {{{4}, {4}}, ge::DT_INT32, ge::FORMAT_ND},
         },
         {
@@ -824,6 +824,11 @@ static void RunA8W4FormatCase(ge::Format weightOneFormat, ge::Format weightTwoFo
     ASSERT_GE(tilingInfo.tilingDataSize, sizeof(MegaMoeTilingData));
     MegaMoeTilingData tilingData{};
     std::memcpy(&tilingData, tilingInfo.tilingData.get(), sizeof(tilingData));
+    EXPECT_EQ(tilingData.h, h);
+    ExpectCclBufferCapacity(tilingInfo);
+    if (h != 4096) {
+        return; // 下方固定 L1 offset 断言仅对应原 H4096 用例。
+    }
     const auto& layout = tilingData.a8w4L1Layout;
     EXPECT_EQ(layout.aBufferNum, 3U);
     EXPECT_EQ(layout.bBufferNum, 4U);
@@ -911,7 +916,7 @@ TEST_F(MegaMoeArch35TilingTest, H4096_BS128_A4W4_URMA)
 }
 
 static void RunA4W4NzFormatCase(ge::Format weightOneFormat, ge::Format weightTwoFormat, ge::graphStatus expectedStatus,
-                                uint64_t expectedTilingKey)
+                                uint64_t expectedTilingKey, int64_t h = 4096)
 {
     struct MegaMoeCompileInfo {
     } compileInfo;
@@ -920,13 +925,13 @@ static void RunA4W4NzFormatCase(ge::Format weightOneFormat, ge::Format weightTwo
         "MegaMoe",
         {
             {{{1}, {1}}, ge::DT_INT32, ge::FORMAT_ND},
-            {{{128, 4096}, {128, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{128, h}, {128, h}}, ge::DT_BF16, ge::FORMAT_ND},
             {{{128, 6}, {128, 6}}, ge::DT_INT32, ge::FORMAT_ND},
             {{{128, 6}, {128, 6}}, ge::DT_FLOAT, ge::FORMAT_ND},
-            {{{4, 2048, 4096}, {4, 2048, 4096}}, ge::DT_FLOAT4_E2M1, weightOneFormat},
-            {{{4, 4096, 1024}, {4, 4096, 1024}}, ge::DT_FLOAT4_E2M1, weightTwoFormat},
-            {{{4, 2048, 64, 2}, {4, 2048, 64, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
-            {{{4, 4096, 16, 2}, {4, 4096, 16, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
+            {{{4, 2048, h}, {4, 2048, h}}, ge::DT_FLOAT4_E2M1, weightOneFormat},
+            {{{4, h, 1024}, {4, h, 1024}}, ge::DT_FLOAT4_E2M1, weightTwoFormat},
+            {{{4, 2048, (h + 63) / 64, 2}, {4, 2048, (h + 63) / 64, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
+            {{{4, h, 16, 2}, {4, h, 16, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND},
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
             {{}, ge::DT_INT8, ge::FORMAT_ND},
@@ -939,7 +944,7 @@ static void RunA4W4NzFormatCase(ge::Format weightOneFormat, ge::Format weightTwo
             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
         },
         {
-            {{{128, 4096}, {128, 4096}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{128, h}, {128, h}}, ge::DT_BF16, ge::FORMAT_ND},
             {{{4}, {4}}, ge::DT_INT32, ge::FORMAT_ND},
         },
         {
@@ -975,6 +980,38 @@ static void RunA4W4NzFormatCase(ge::Format weightOneFormat, ge::Format weightTwo
 TEST_F(MegaMoeArch35TilingTest, H4096_BS128_A4W4_NZ_URMA)
 {
     RunA4W4NzFormatCase(ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_32, ge::GRAPH_SUCCESS, 62138408UL);
+}
+
+TEST_F(MegaMoeArch35TilingTest, UrmaH1088PaddedRecords)
+{
+    using namespace MegaMoeImpl;
+    // 有效 scale 是 34B，一级权重起点分别为 1344B（FP8）与 832B（FP4）。
+    EXPECT_EQ(CalcQuantTokenScaleBytes(1088, 1, 11, false), 1344);
+    EXPECT_EQ(CalcQuantTokenScaleBytes(1088, 1, 11, true), 1408);
+    EXPECT_EQ(CalcQuantTokenScaleBytes(1088, 2, 11, false), 832);
+    EXPECT_EQ(CalcQuantTokenScaleBytes(1088, 2, 11, true), 896);
+    EXPECT_EQ(CalcCombineTokenBytes(1088, 2, true), 1344);
+    EXPECT_EQ(CalcCombineTokenBytes(1088, 2, false), 2176);
+}
+
+TEST_F(MegaMoeArch35TilingTest, UrmaH64AlignmentQuantModes)
+{
+    for (int64_t h : {1024, 1088, 1152, 1216, 1984, 2048, 8128, 8192}) {
+        SCOPED_TRACE(h);
+        RunUrmaTilingCase(128, 128, 128, 256, 0, 2048, "swiglu", {std::numeric_limits<float>::max()}, ge::GRAPH_SUCCESS,
+                          0, 0, 1, h);
+        RunA8W4FormatCase(ge::FORMAT_FRACTAL_NZ_C0_32, ge::FORMAT_FRACTAL_NZ_C0_32, ge::GRAPH_SUCCESS, 46802984UL, h);
+        RunA4W4NzFormatCase(ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_32, ge::GRAPH_SUCCESS, 62138408UL, h);
+    }
+}
+
+TEST_F(MegaMoeArch35TilingTest, UrmaH64AlignmentKeepsRangeAndGranularity)
+{
+    for (int64_t h : {960, 1056, 8256}) {
+        SCOPED_TRACE(h);
+        RunUrmaTilingCase(128, 128, 128, 256, 0, 2048, "swiglu", {std::numeric_limits<float>::max()}, ge::GRAPH_FAILED,
+                          0, 0, 1, h);
+    }
 }
 
 TEST_F(MegaMoeArch35TilingTest, H4096_BS128_A4W4_NZ_URMA_InvalidWeight1Format)

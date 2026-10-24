@@ -66,7 +66,7 @@ const static int64_t MAX_H = 8LL * 1024LL; // 8K
 // MX 量化按每 32 个元素一组，仅用于 scales 的 shape 校验，与 H 的对齐要求无关
 const static int64_t MX_SCALE_GROUP = 32LL;
 const static int64_t MTE_H_ALIGN = 64LL;
-const static int64_t URMA_H_ALIGN = 1024LL;
+const static int64_t URMA_H_ALIGN = 64LL;
 const static int64_t MAX_HIDDEN_DIM = 8LL * 1024LL; // 8K
 // hiddenDim 是 GMM1 的完整输出宽度；门控激活按 gate/up 划分，GELU 保留全宽。
 // 256 对齐保证门控激活半宽按 128 对齐，下限 512 保证半宽至少覆盖一个完整 tile。
@@ -280,7 +280,7 @@ uint32_t CalcMGroupsPerWave(const MegaMoeTilingData* tilingData, uint32_t aicNum
      * hiddenDim 是 GMM1 的完整 N。交织模式每核至少调度 4 个独立 N tile；非交织门控
      * 调度每个物理任务成对处理 gate/up，每核 2 个物理任务同样等价于 4 个逻辑 N tile。
      * GELU 保留完整 N，沿用按完整宽度计算的逻辑 tile 数。
-     * hiddenDim 已校验为 GMM_TILE_N(256) 的倍数（MTE；URMA 仍为 1024），CeilDiv 对
+     * hiddenDim 已校验为 GMM_TILE_N(256) 的倍数（MTE 与 URMA 统一），CeilDiv 对
      * 非交织半宽产生的尾 tile 只影响 wave 粒度估算，不影响正确性，两种编译模式共用本公式。
      */
     uint64_t gmm1LogicalTilesPerMGroup = ops::CeilDiv<uint64_t>(tilingData->hiddenDim, GMM_TILE_N);
