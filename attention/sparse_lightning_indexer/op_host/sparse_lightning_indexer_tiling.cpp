@@ -495,6 +495,47 @@ ge::graphStatus SparseLIInfoParser::GetAndCheckOptionalInput()
                     "metadata is not supported on ascend910b/ascend910_93 (arch22 uses runtime SplitCore)"),
                 return ge::GRAPH_FAILED);
 
+    // =============== cmpResidualK 一致性校验（与 LIV2 同规，全 arch 生效）===============
+    if (opParamInfo_.cmpRatio != nullptr && *opParamInfo_.cmpRatio != 1 && opParamInfo_.maskMode != nullptr &&
+        *opParamInfo_.maskMode != 0) {
+        OP_CHECK_IF(opParamInfo_.cmpResidualK.tensor == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        opName_, "cmp_residual_k",
+                        "Cmp_ratio is not 1 and mask_mode is not 0, cmp_residual_k must not be null"),
+                    return ge::GRAPH_FAILED);
+        // cmpResidualK 传入时校验维度 & 数据类型
+        if (qLayout_ == DataLayout::BSND) {
+            OP_CHECK_IF(
+                opParamInfo_.query.shape->GetStorageShape().GetDim(DIM_IDX_ZERO) !=
+                    opParamInfo_.cmpResidualK.tensor->GetStorageShape().GetShapeSize(),
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    opName_, "cmp_residual_k", ToStringRaw(opParamInfo_.cmpResidualK.tensor->GetStorageShape()).c_str(),
+                    "When layout_q is BSND, the shape of cmp_residual_k must be (B,)"),
+                return ge::GRAPH_FAILED);
+        } else if (qLayout_ == DataLayout::TND && opParamInfo_.cuSeqlensQ.tensor != nullptr) {
+            // cu_seqlens_q 为 null 时由上方 TND 必传校验拒绝，此处不重复判空
+            OP_CHECK_IF(opParamInfo_.cmpResidualK.tensor->GetStorageShape().GetShapeSize() !=
+                            opParamInfo_.cuSeqlensQ.tensor->GetStorageShape().GetShapeSize() - 1,
+                        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                            opName_, "cmp_residual_k",
+                            std::to_string(opParamInfo_.cmpResidualK.tensor->GetStorageShape().GetShapeSize()),
+                            "When layout_q is TND, the shape size of cmp_residual_k "
+                            "must equal the shape size - 1 of cu_seqlens_q"),
+                        return ge::GRAPH_FAILED);
+        }
+        OP_CHECK_IF(opParamInfo_.cmpResidualK.desc->GetDataType() != ge::DT_INT32,
+                    OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                        opName_, "cmp_residual_k",
+                        SparseLIDataTypeToSerialString(opParamInfo_.cmpResidualK.desc->GetDataType()).c_str(),
+                        "The dtype of cmp_residual_k supports int32"),
+                    return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF(opParamInfo_.cmpResidualK.tensor != nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        opName_, "cmp_residual_k", "Cmp_ratio is 1 or sparse_mode is 0, cmp_residual_k must be null"),
+                    return ge::GRAPH_FAILED);
+    }
+
     return ge::GRAPH_SUCCESS;
 }
 

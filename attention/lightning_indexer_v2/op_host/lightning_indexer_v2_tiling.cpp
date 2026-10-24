@@ -290,14 +290,12 @@ ge::graphStatus LIV2InfoParser::GetAndCheckAttrParaInfo()
                         std::string(liV2Params_.layOut) + " and " + std::string(liV2Params_.layOutKey),
                         "Outside of PA, layout_q and layout_k must be the same"),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(
-            (*liV2Params_.maxSeqlenQ < -1),
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                opName_, "max_seqlen_q", std::to_string(*liV2Params_.maxSeqlenQ).c_str(), "Max_seqlen_q must >= -1"),
-            return ge::GRAPH_FAILED);
     }
-    // return_value 值域双架构守门（原位于 DAV_3510 分支内，arch22 裸 aclnn 链路存在 rv=2 静默按真值执行的缺口；
-    // 提升后 910B/950 host 均拒绝 ∉{0,1}，与 torch 入口 TORCH_CHECK 镜像）
+    OP_CHECK_IF(
+        (*liV2Params_.maxSeqlenQ < -1),
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "max_seqlen_q", std::to_string(*liV2Params_.maxSeqlenQ).c_str(),
+                                              "Max_seqlen_q must >= -1"),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         (*liV2Params_.returnValue != 0) && (*liV2Params_.returnValue != 1),
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "return_value", std::to_string(*liV2Params_.returnValue).c_str(),
@@ -338,12 +336,10 @@ ge::graphStatus LIV2InfoParser::GetAndCheckAttrParaInfo()
                         opName_, "candidate_topk_blocks", std::to_string(candTopkBlocks),
                         "Candidate_topk_blocks must be -1(off) or in (0, 2048] and a multiple of 64"),
                     return ge::GRAPH_FAILED);
-        // 双保险：candidate 仅 arch22(910B/910_93) 支持。950 正常走 ParseAndCheckLIV2Arch35 路由
-        // 不经本函数（入口守卫已先行拒绝），此断言防御路由误配
-        OP_CHECK_IF(npuArch_ == NpuArch::DAV_3510,
+        OP_CHECK_IF(npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201,
                     OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
                         opName_, "candidate_topk_blocks", "candidate_topk_blocks=" + std::to_string(candTopkBlocks),
-                        "Candidate_topk_blocks is only supported on ascend910b/ascend910_93, not on ascend950"),
+                        "Candidate_topk_blocks is only supported on ascend910b/ascend910_93, not on ascend950/960"),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF(*liV2Params_.topk > SPARSE_2K,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "topk", std::to_string(*liV2Params_.topk),
@@ -511,8 +507,7 @@ ge::graphStatus LIV2InfoParser::GetAndCheckOptionalInput()
         }
     }
     // =============== cmpResidualK 校验 ===============
-    // cmpRatio 不等于 1 且 maskMode 不等于 0 时 cmpResidualK 必传
-    if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201) {
+    {
         if (liV2Params_.cmpRatio != nullptr && *liV2Params_.cmpRatio != 1 && liV2Params_.maskMode != nullptr &&
             *liV2Params_.maskMode != 0) {
             OP_CHECK_IF(liV2Params_.cmpResidualK.tensor == nullptr,
@@ -529,7 +524,8 @@ ge::graphStatus LIV2InfoParser::GetAndCheckOptionalInput()
                                 ToStringRaw(liV2Params_.cmpResidualK.tensor->GetStorageShape()).c_str(),
                                 "When layout_q is BSND, the shape of cmp_residual_k must be (B,)"),
                             return ge::GRAPH_FAILED);
-            } else if (qLayout_ == DataLayout::TND) {
+            } else if (qLayout_ == DataLayout::TND && liV2Params_.cuSeqlensQ.tensor != nullptr) {
+                // cu_seqlens_q 为 null 时由下方 TND 必传校验拒绝，此处不重复判空
                 OP_CHECK_IF(liV2Params_.cmpResidualK.tensor->GetStorageShape().GetShapeSize() !=
                                 liV2Params_.cuSeqlensQ.tensor->GetStorageShape().GetShapeSize() - 1,
                             OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
@@ -743,15 +739,13 @@ ge::graphStatus LIV2InfoParser::GetGSize()
                                                "The head num of q must be a multiple of the head num of k");
     }
     gSize_ = n1Size_ / n2Size_;
-    if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201) {
-        OP_CHECK_IF(gSize_ > G_SIZE_LIMIT,
-                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                        opName_, "q and k",
-                        Ops::Base::ToString(liV2Params_.query.shape->GetStorageShape()) + " and " +
-                            Ops::Base::ToString(liV2Params_.key.shape->GetStorageShape()),
-                        "The value of (the head num of q divided by the head num of k) must <= 64"),
-                    return ge::GRAPH_FAILED);
-    }
+    OP_CHECK_IF(gSize_ > G_SIZE_LIMIT,
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName_, "q and k",
+                    Ops::Base::ToString(liV2Params_.query.shape->GetStorageShape()) + " and " +
+                        Ops::Base::ToString(liV2Params_.key.shape->GetStorageShape()),
+                    "The value of (the head num of q divided by the head num of k) must <= 64"),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1288,17 +1282,15 @@ ge::graphStatus TilingForLightningIndexerV2(gert::TilingContext* context)
     auto platformInfoPtr = context->GetPlatformInfo();
     OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
-    // candidate (two-level topk) 仅 arch22(ascend910b/ascend910_93) 生效：950(DAV_3510) 上启用必须显式拒绝。
-    // 守卫置于 useArch35Checker 路由之前：950 走 ParseAndCheckLIV2Arch35 路径（不读 candidate 属性），
-    // 入口守卫是覆盖 arch22/arch35 两条路由的唯一单点；缺省 -1(off) 不受影响。
     const auto* candAttrs = context->GetAttrs();
     if (candAttrs != nullptr) {
         const int64_t* candTopkBlocks = candAttrs->GetAttrPointer<int64_t>(ATTR_CANDIDATE_TOPK_BLOCKS_INDEX);
         if (candTopkBlocks != nullptr && *candTopkBlocks != CANDIDATE_TOPK_BLOCKS_OFF &&
-            ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
+            (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510 ||
+             ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201)) {
             OP_LOGE(context->GetNodeName(),
                     "candidate_topk_blocks[%lld] is only supported on ascend910b/ascend910_93; "
-                    "enabling candidate mode on ascend950(DAV_3510) is rejected.",
+                    "enabling candidate mode on ascend950/960 is rejected.",
                     *candTopkBlocks);
             return ge::GRAPH_FAILED;
         }

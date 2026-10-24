@@ -251,9 +251,10 @@ __aicore__ inline void SparseLightningIndexerServiceCube<LIT>::KeyNd2NzForPA(uin
     while (s2L1Offset < s2L1RealSize) {
         uint64_t s2BlkId = (s2L1Offset + s2GmOffset) / constInfo_.kCacheBlockSize;
         uint64_t s2BlkOffset = (s2L1Offset + s2GmOffset) % constInfo_.kCacheBlockSize;
-        uint64_t keyGmOffset = blkTableGm_.GetValue(runInfo.bIdx * constInfo_.maxBlockNumPerBatch + s2BlkId) *
-                                   constInfo_.kCacheBlockSize * constInfo_.kHeadNum * constInfo_.headDim +
-                               s2BlkOffset * constInfo_.headDim;
+        uint64_t keyGmOffset =
+            static_cast<uint64_t>(blkTableGm_.GetValue(runInfo.bIdx * constInfo_.maxBlockNumPerBatch + s2BlkId)) *
+                constInfo_.kCacheBlockSize * constInfo_.kHeadNum * constInfo_.headDim +
+            s2BlkOffset * constInfo_.headDim;
         // 搬运按照S2_BASIC_BLOCK_L0*D_BASIC_BLOCK_L0的方式在l1上排布, 方便后续mte1
         // 根据s2的offset判断当前属于前一个L0分型还是后一个L0分型，暂时只支持两个分型
         uint64_t s2Mte2Size = (s2L1RealSize <= S2_BASIC_BLOCK_L0 || s2L1Offset >= S2_BASIC_BLOCK_L0) ?

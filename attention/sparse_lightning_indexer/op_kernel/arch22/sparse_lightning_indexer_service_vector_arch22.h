@@ -971,6 +971,7 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ProcessLD()
                    innerS1Idx * 2 * 2 * BASE_TOPK + 2 * BASE_TOPK;
         SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
         SetWaitFlag<HardEvent::S_MTE2>(HardEvent::S_MTE2);
+        SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
         DataCopyPad(curValueIdxUb, vec1ResGm[wsOffset],
                     {1, static_cast<uint16_t>(2 * BASE_TOPK * sizeof(int32_t)), 0, 0}, {true, 0, 0, 0});
         acc_list_num++;
@@ -990,6 +991,7 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ProcessLD()
                        innerS1Idx * 2 * 2 * BASE_TOPK;
             SetWaitFlag<HardEvent::V_MTE2>(HardEvent::V_MTE2);
             SetWaitFlag<HardEvent::S_MTE2>(HardEvent::S_MTE2);
+            SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
             DataCopyPad(curValueIdxUb[valueOffset], vec1ResGm[wsOffset],
                         {1, static_cast<uint16_t>(2 * BASE_TOPK * sizeof(int32_t)), 0, 0}, {true, 0, 0, 0});
             valueOffset += 2 * BASE_TOPK;
