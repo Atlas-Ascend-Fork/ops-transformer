@@ -1151,6 +1151,7 @@ __aicore__ inline void SWAVectorBlock<SMLAT>::DealBmm2ResBaseBlock(const RunInfo
     } else {
         LocalTensor<T> outUb = outputBuff1.Get<T>();
         WaitFlag<AscendC::HardEvent::MTE3_V>(SYNC_OUTPUT_BUF1_FLAG);
+        PipeBarrier<PIPE_V>();
         DataCopy(outUb, bmm2ResUb, dealRowCount * columnCount);
         SetFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
         WaitFlag<AscendC::HardEvent::V_MTE3>(SYNC_OUTPUT_BUF1_FLAG);
