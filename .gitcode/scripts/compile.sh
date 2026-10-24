@@ -137,6 +137,13 @@ GET_PR_RELATED_OPS()
     LOG_INFO "ops_name kirin filtered: ${filtered}" >&2
     echo "${filtered}"
 }
+# Log error
+function LOG_ERROR() {
+    local assert_msg=${1}
+    date_time=$(date +%Y%m%d-%H%M%S)
+    echo -e "${BRed}[ERROR] ${date_time} ${assert_msg}${Color_Off}"
+}
+
 
 LOG_HEAD "Build ${REPOSITORY_NAME}."
 cd "${WORKSPACE}/" || exit 1
@@ -145,6 +152,15 @@ non_skip_count=$(grep -vE '(\.md$|^tests/)' "${WORKSPACE}/pr_filelist.txt" | gre
 if [ "${non_skip_count}" -eq 0 ]; then
     LOG_HEAD "pr_filelist.txt only contains .md or tests/ files, skip build"
     mkdir -p build_out
+    # host/kernel 拆分任务: touch 对应空占位产物, 保证 package 任务可下载并跳过 repack
+    case "${task_name}" in
+        *host*910B*)    touch build_out/custom_host_ascend910b.run;  exit 0 ;;
+        *host*950*)     touch build_out/custom_host_ascend950.run;   exit 0 ;;
+        *kernel*910B*)  touch build_out/kernel_ascend910b.tar.gz;    exit 0 ;;
+        *kernel*950*)   touch build_out/kernel_ascend950.tar.gz;     exit 0 ;;
+        *oneshot*910B*) touch build_out/custom_oneshot_ascend910b.run; exit 0 ;;
+        *oneshot*950*)  touch build_out/custom_oneshot_ascend950.run;  exit 0 ;;
+    esac
     touch build_out/skip_build.run
     touch single.tar.gz
     echo "api-check=continue" >> "${ATOMGIT_OUTPUT}"
@@ -156,7 +172,7 @@ if [[ "${task_name}" =~ Compile_Ascend_X86_ubuntu24 ]]; then
 else
     echo "api-check=continue" >> "${ATOMGIT_OUTPUT}"
 fi
-if [ "${task_name}" == "Pre_Compile" ]; then
+if [ "${task_name}" == "Pre_Compile" ];then
     LOG_DO bash build.sh --PR_PKG ./pr_filelist.txt -j32 --cann_3rd_lib_path=${ASCEND_3RD_LIB_PATH}
     ret=$?
     if [ $ret -eq 200 ]; then
@@ -164,6 +180,105 @@ if [ "${task_name}" == "Pre_Compile" ]; then
         exit 0
     fi
     DP_ASSERT_EQUAL "$ret" "0" "Build ${REPOSITORY_NAME}"
+elif [[ "${task_name}" == "Pre_Compile_host_910B" || "${task_name}" == "Pre_Compile_host_950" ]]; then
+    echo "==========pre compile host ${task_name} start:================="
+    if [ "${task_name}" == "Pre_Compile_host_950" ]; then
+        SOC_ARG="--soc=ascend950"
+        SOC_NAME="ascend950"
+    else
+        SOC_ARG=""
+        SOC_NAME="ascend910b"
+    fi
+    # HOST: 只编 host, 产物为不含 kernel bin 的 custom run 包(供 repackage 任务下载合并)
+    LOG_DO bash build.sh --pkg --jit -f "pr_filelist.txt" ${SOC_ARG} --cann_3rd_lib_path=${ASCEND_3RD_LIB_PATH} -j16
+    BUILD_EXIT_CODE=$?
+    # 空跑兼容: build.sh 返回 200 表示无编译范围, 跳过产物收集, touch 空包占位
+    if [ $BUILD_EXIT_CODE -eq 200 ]; then
+        LOG_HEAD "NOTE: no custom packages to build for this PR (exit 200), touch placeholder"
+        mkdir -p "${WORKSPACE}/build_out"
+        touch "${WORKSPACE}/build_out/custom_host_${SOC_NAME}.run"
+        exit 0
+    fi
+    DP_ASSERT_CHECK_SKIP "$BUILD_EXIT_CODE" "Build ${REPOSITORY_NAME}."
+    run_file=$(find "${WORKSPACE}/build_out" "${WORKSPACE}/build" -maxdepth 2 -type f -name "*.run" 2>/dev/null | head -n 1)
+    if [[ -z "${run_file}" ]]; then
+        # 增量编译空跑兼容: 修改不涉及算子编译时无产物, touch 空包占位, 保证 package 任务可下载
+        LOG_HEAD "NOTE: no host run package produced (empty compile scope), touch placeholder"
+        mkdir -p "${WORKSPACE}/build_out"
+        touch "${WORKSPACE}/build_out/custom_host_${SOC_NAME}.run"
+        exit 0
+    fi
+    mkdir -p "${WORKSPACE}/build_out"
+    cp -f "${run_file}" "${WORKSPACE}/build_out/custom_host_${SOC_NAME}.run"
+    # 清理其余 run 包, 避免干扰 rename_package 步骤
+    find "${WORKSPACE}/build_out" -maxdepth 1 -type f -name "*.run" ! -name "custom_host_${SOC_NAME}.run" -exec rm -f {} +
+elif [[ "${task_name}" == "Pre_package_oneshot_910B" || "${task_name}" == "Pre_package_oneshot_950" ]]; then
+    echo "==========pre package oneshot ${task_name} start:================="
+    if [ "${task_name}" == "Pre_package_oneshot_950" ]; then
+        SOC_ARG="--soc=ascend950"
+        SOC_NAME="ascend950"
+    else
+        SOC_ARG=""
+        SOC_NAME="ascend910b"
+    fi
+    # 一次性编包: --pkg -f (不带 --jit), 与 A(host+kernel+package) 区分产物名
+    LOG_DO bash build.sh --pkg -f "pr_filelist.txt" ${SOC_ARG} --cann_3rd_lib_path=${ASCEND_3RD_LIB_PATH} -j32
+    BUILD_EXIT_CODE=$?
+    # 空跑兼容: build.sh 返回 200 表示无编译范围, 跳过产物收集, touch 空包占位
+    if [ $BUILD_EXIT_CODE -eq 200 ]; then
+        LOG_HEAD "NOTE: no custom packages to build for this PR (exit 200), touch placeholder"
+        mkdir -p "${WORKSPACE}/build_out"
+        touch "${WORKSPACE}/build_out/custom_oneshot_${SOC_NAME}.run"
+        exit 0
+    fi
+    DP_ASSERT_CHECK_SKIP "$BUILD_EXIT_CODE" "Build ${REPOSITORY_NAME}."
+    run_file=$(find "${WORKSPACE}/build_out" "${WORKSPACE}/build" -maxdepth 2 -type f -name "*.run" 2>/dev/null | head -n 1)
+    if [[ -z "${run_file}" ]]; then
+        # 兜底: 构建成功但无产物, 同样 touch 空包占位
+        LOG_HEAD "NOTE: no oneshot run package produced (empty compile scope), touch placeholder"
+        mkdir -p "${WORKSPACE}/build_out"
+        touch "${WORKSPACE}/build_out/custom_oneshot_${SOC_NAME}.run"
+        exit 0
+    fi
+    mkdir -p "${WORKSPACE}/build_out"
+    cp -f "${run_file}" "${WORKSPACE}/build_out/custom_oneshot_${SOC_NAME}.run"
+    find "${WORKSPACE}/build_out" -maxdepth 1 -type f -name "*.run" ! -name "custom_oneshot_${SOC_NAME}.run" -exec rm -f {} +
+elif [[ "${task_name}" == "Pre_Compile_kernel_910B" || "${task_name}" == "Pre_Compile_kernel_950" ]]; then
+    echo "==========pre compile kernel ${task_name} ${task_type} start:================="
+    if [ "${task_name}" == "Pre_Compile_kernel_950" ]; then
+        SOC_ARG="--soc=ascend950"
+        SOC_NAME="ascend950"
+    else
+        SOC_ARG=""
+        SOC_NAME="ascend910b"
+    fi
+    # kernel: 只编 kernel, 产物为 *.o/*.json(供 repackage 任务下载合并)
+    if [ "${task_type}X" = "disX" ]; then
+        LOG_DO bash build.sh --opkernel -f "pr_filelist.txt" ${SOC_ARG} -j96
+    else
+        LOG_DO bash build.sh --opkernel -f "pr_filelist.txt" ${SOC_ARG} --cann_3rd_lib_path=${ASCEND_3RD_LIB_PATH} -j32
+    fi
+    BUILD_EXIT_CODE=$?
+    # 空跑兼容: build.sh 返回 200 表示无编译范围, 跳过产物收集, touch 空包占位
+    if [ $BUILD_EXIT_CODE -eq 200 ]; then
+        LOG_HEAD "NOTE: no custom packages to build for this PR (exit 200), touch placeholder"
+        mkdir -p "${WORKSPACE}/build_out"
+        touch "${WORKSPACE}/build_out/kernel_${SOC_NAME}.tar.gz"
+        exit 0
+    fi
+    DP_ASSERT_CHECK_SKIP "$BUILD_EXIT_CODE" "Build ${REPOSITORY_NAME}."
+    if [[ ! -d "${WORKSPACE}/build/binary/${SOC_NAME}/bin" ]]; then
+        # 增量编译空跑兼容: 修改不涉及算子编译(或该 soc 无编译范围)时无 kernel 产物, touch 空包占位
+        LOG_HEAD "NOTE: no kernel products under build/binary/${SOC_NAME} (empty compile scope), touch placeholder"
+        mkdir -p "${WORKSPACE}/build_out"
+        touch "${WORKSPACE}/build_out/kernel_${SOC_NAME}.tar.gz"
+        exit 0
+    fi
+    mkdir -p "${WORKSPACE}/build_out"
+    # kernel 产物打包上传, 供 repackage 任务下载
+    tar -czf "${WORKSPACE}/build_out/kernel_${SOC_NAME}.tar.gz" -C "${WORKSPACE}/build/binary" "${SOC_NAME}"
+    # kernel 任务无 run 包产物, 直接退出以跳过末尾的 run 包检查
+    exit 0
 else
     if [ "${GE_ST_RT2}X" == "kirinx90X" ]; then
         if [ "${GIT_TARGET_BRANCH}" = "master" ]; then

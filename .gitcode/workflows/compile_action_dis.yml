@@ -1,0 +1,154 @@
+name: compile_action_dis
+
+on:
+  workflow_call:
+    inputs:
+      task_name:
+        required: true
+        type: string
+      image_version:
+        required: true
+        type: string
+      package_name:
+        required: false
+        type: string
+        default: ''
+      arch:
+        required: false
+        type: string
+        default: 'x64'
+      spec:
+        required: false
+        type: string
+        default: 'xlarge'
+    outputs:
+      arm_run_url:
+        value: ${{jobs.JOB_compile.outputs.primary-url}}
+      arm_run_key:
+        value: ${{jobs.JOB_compile.outputs.primary-key}}
+      package_name:
+        value: ${{jobs.JOB_compile.outputs.package_name}}
+
+jobs:
+  JOB_Precompile:
+    name: compile
+    steps:
+      -
+        name: Checkout
+        identifier: process_checkout
+        uses: checkout
+        with:
+          ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+          skip-ssl-verify: true
+          token: ${{secrets.GIT_TOKEN}}
+      -
+        name: download
+        uses: obs-download
+        with:
+          endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+          bucket: "ascend-ci"
+          access-key: ${{ secrets.AK }}
+          secret-key: ${{ secrets.SK }}
+          key: |
+            ${{ env.obs_path }}/pr_filelist.txt
+            ${{ env.obs_path }}/pr_filelist_mod.txt
+            ${{ env.obs_path }}/update_file_detail.txt
+            ${{ env.obs_path }}/compile.sh
+          path: ${{ steps.process_checkout.outputs.path }}
+      -
+        name: task_info
+        identifier: task_info
+        run: |
+            cd ${{ steps.process_checkout.outputs.path }}
+            echo "===========swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ inputs.image_version }}========="
+            task_name="${{ inputs.task_name }}"
+            # host/kernel 拆分任务按任务名确定 soc
+            soc="ascend950"
+            if [[ "${task_name}" == *910B* ]]; then
+              soc="ascend910b"
+            fi
+            full_out=$(bash scripts/ci/check_distributed_compile.sh ${soc} pr_filelist.txt)
+            check_ret=$?
+            check_out=$(printf '%s\n' "${full_out}" | tail -n 1)
+            echo "check_distributed_compile.sh stdout: ${full_out}"
+            echo "check_distributed_compile.sh checkout: ${check_out}"
+            echo "check_distributed_compile.sh return code: ${check_ret}"
+            if [[ "${task_name}" == "Pre_Compile_nodis" ]]; then
+              echo "cache"
+              echo "task_type=cache" >> "${ATOMGIT_OUTPUT}"
+              echo "ac_mode=cache" >> "${ATOMGIT_OUTPUT}"
+            elif [[ "${task_name}" == "Pre_Compile_dis" ]]; then
+              if [[ "${check_out}" == "true" ]]; then
+                echo "dis"
+                echo "task_type=dis" >> "${ATOMGIT_OUTPUT}"
+                echo "ac_mode=dis" >> "${ATOMGIT_OUTPUT}"
+              else
+                echo "accache"
+                echo "task_type=accache" >> "${ATOMGIT_OUTPUT}"
+                echo "ac_mode=accache" >> "${ATOMGIT_OUTPUT}"
+              fi
+            elif [[ "${task_name}" == "Pre_Compile_kernel_910B" || "${task_name}" == "Pre_Compile_kernel_950" ]]; then
+              # kernel 任务: 变更算子支持分布式编译时走 DIS, 否则 NODIS
+              if [[ "${check_out}" == "true" ]]; then
+                echo "dis"
+                echo "task_type=dis" >> "${ATOMGIT_OUTPUT}"
+                echo "ac_mode=dis" >> "${ATOMGIT_OUTPUT}"
+              else
+                echo "nodis"
+                echo "task_type=nodis" >> "${ATOMGIT_OUTPUT}"
+                echo "ac_mode=accache" >> "${ATOMGIT_OUTPUT}"
+              fi
+            else
+              # host 任务无分布式编译概念, 走 accache 加速缓存
+              echo "nodis"
+              echo "task_type=nodis" >> "${ATOMGIT_OUTPUT}"
+              echo "ac_mode=accache" >> "${ATOMGIT_OUTPUT}"
+            fi
+      -
+        name: compile_acc
+        identifier: compile
+        uses: build-accelerate
+        with:
+          command: |
+            export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+            echo "==============${{ steps.task_info.outputs.task_type }}================="
+            cd ${{ steps.process_checkout.outputs.path }}
+            export task_name=${{ inputs.task_name }}
+            export task_type=${{ steps.task_info.outputs.task_type }}
+            export TARGET_BRANCH=${{ env.TARGET_BRANCH }}
+            export GIT_TARGET_BRANCH=${{ env.TARGET_BRANCH }}
+            env|grep NB
+            env|grep XCACHE
+            BuildAccelerate bash .gitcode/scripts/compile.sh
+          AC_SERVER_IP: 172.27.24.172:172.27.21.11:172.27.16.21:172.27.26.226:172.27.21.217:172.27.25.11:172.27.18.206:172.27.28.19:172.27.31.229:172.27.24.180
+          AC_MODE: ${{ steps.task_info.outputs.ac_mode }}
+          AC_DIS_IMAGE: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ inputs.image_version }}
+      -
+        name: rename_package
+        run: |
+          cd ${{ steps.process_checkout.outputs.path }}/build_out
+          for f in *.run; do
+            [ -f "$f" ] || continue
+            [ "$f" = "${{ inputs.package_name }}" ] && continue
+            mv "$f" "${{ inputs.package_name }}"
+            echo "Renamed: $f -> ${{ inputs.package_name }}"
+            break
+          done
+      -
+        name: upload
+        uses: obs-upload
+        with:
+          endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+          bucket: "ascend-ci"
+          access-key: ${{ secrets.AK }}
+          secret-key: ${{ secrets.SK }}
+          artifact-path: |
+            ${{ steps.process_checkout.outputs.path }}/build_out/${{ inputs.package_name != '' && inputs.package_name || '*.run' }}
+          object-prefix: ${{ env.obs_path }}/dis/
+    if: "${{ default() }}"
+    runs-on:
+      - self-hosted
+      - arch=${{ inputs.arch }}
+      - spec=${{ inputs.spec }}
+    container:
+      image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ inputs.image_version }}

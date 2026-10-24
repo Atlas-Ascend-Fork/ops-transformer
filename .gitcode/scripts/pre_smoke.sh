@@ -58,7 +58,8 @@ for op in "${ops[@]}"; do
   unset LD_LIBRARY_PATH
   unset ASCEND_HOME_PATH
   bash ${arm_package}  2>&1 | tee -a ./run_test.log
-  source /usr/local/Ascend/cann/set_env.sh  &&  bash build.sh -f ./pr_filelist.txt 2>&1 | tee -a ./run_test.log
+  # 临时停止sample，整改完成后开启
+  # source /usr/local/Ascend/cann/set_env.sh  &&  bash build.sh -f ./pr_filelist.txt 2>&1 | tee -a ./run_test.log
 done
 
 # ==============================

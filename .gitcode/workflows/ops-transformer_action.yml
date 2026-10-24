@@ -39,7 +39,7 @@ stages:
             identifier: revise_image
             uses: cann/.gitcode/actions/revise-img@master
             with:
-              repo_name: ${{ env.repo_name }}
+              repo_name: "ops-transformer"
               target_branch: ${{ env.TARGET_BRANCH }}
               comment: ${{ atomgit.event.comment.body }}
               token: ${{ secrets.TESTTOKEN }}
@@ -93,14 +93,6 @@ stages:
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_ARM_experimental }}
           arch: 'arm64'
           package_name: 'cann-ops-transformer_experimental_linux-aarch64.run'
-      JOB_Pre_Compile:
-        name: Compile_pre
-        uses: .gitcode/workflows/compile_action.yml
-        with:
-          task_name: 'Pre_Compile'
-          image_version: ${{ jobs.JOB_image.outputs.Pre_Compile }}
-          arch: 'arm64'
-          spec: '2xlarge'
       JOB_x86_compile_ubuntu24:
         name: Compile_x86_ubuntu24
         uses: .gitcode/workflows/compile_action.yml
@@ -235,6 +227,159 @@ stages:
         with:
           check_type: 'md_check'
           image_version: ${{ jobs.JOB_image.outputs.staticcheck }}
+      # ============ distest: HOST 只编 host, 产物 custom_host_<soc>.run(不含 kernel bin) ============
+      Pre_compile_host_910B:
+        name: Pre_compile_host_910B
+        uses: .gitcode/workflows/compile_action.yml
+        with:
+          task_name: 'Pre_Compile_host_910B'
+          image_version: ${{ jobs.JOB_image.outputs.Pre_Compile }}
+          arch: 'arm64'
+          spec: 'xlarge'
+          package_name: 'custom_host_ascend910b.run'
+      Pre_compile_host_950:
+        name: Pre_compile_host_950
+        uses: .gitcode/workflows/compile_action.yml
+        with:
+          task_name: 'Pre_Compile_host_950'
+          image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
+          arch: 'x64'
+          spec: 'xlarge'
+          package_name: 'custom_host_ascend950.run'
+      # ============ distest: kernel 只编 kernel, 产物 kernel_<soc>.tar.gz(*.o/*.json) ============
+      Pre_compile_kernel_910B:
+        name: Pre_compile_kernel_910B
+        uses: .gitcode/workflows/compile_action_dis.yml
+        with:
+          task_name: 'Pre_Compile_kernel_910B'
+          image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
+          arch: 'x64'
+          spec: '2xlarge'
+          package_name: 'kernel_ascend910b.tar.gz'
+      Pre_compile_kernel_950:
+        name: Pre_compile_kernel_950
+        uses: .gitcode/workflows/compile_action_dis.yml
+        with:
+          task_name: 'Pre_Compile_kernel_950'
+          image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
+          arch: 'x64'
+          spec: '2xlarge'
+          package_name: 'kernel_ascend950.tar.gz'
+      # ============ repackage 下载 host/kernel 产物, 调用 repack 脚本合并成最终 custom 包 ============
+      Pre_compile_package_910B:
+        name: Pre_compile_package_910B
+        needs:
+          - Pre_compile_host_910B
+          - Pre_compile_kernel_910B
+        runs-on: ["self-hosted", "arch=arm64", "spec=xlarge"]
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.Pre_Compile }}
+        steps:
+          - name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+          - name: download
+            uses: obs-download
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              key: |
+                ${{ env.obs_path }}/custom_host_ascend910b.run
+                ${{ env.obs_path }}/dis/kernel_ascend910b.tar.gz
+              path: ${{ steps.process_checkout.outputs.path }}/build_out_distest
+          - name: repackage
+            run: |
+              set -e
+              export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+              cd "${WORKSPACE}"
+              if [ -f /home/jenkins/Ascend/cann/bin/setenv.bash ]; then
+                  source /home/jenkins/Ascend/cann/bin/setenv.bash
+              fi
+              # 空跑兼容: host/kernel 产物为空占位文件(0字节)时跳过 repack, touch 空的最终包
+              if [ ! -s build_out_distest/custom_host_ascend910b.run ] || [ ! -s build_out_distest/kernel_ascend910b.tar.gz ]; then
+                  echo "skip repackage: empty host/kernel artifacts (no compile scope)"
+                  touch build_out_distest/cann-ops-transformer-custom_linux-aarch64.run
+                  exit 0
+              fi
+              mkdir -p kernel_pkg
+              tar -xzf build_out_distest/kernel_ascend910b.tar.gz -C kernel_pkg
+              chmod +x build_out_distest/custom_host_ascend910b.run
+              bash scripts/ci/repack_custom_operator.sh \
+                  --host-pkg "${WORKSPACE}/build_out_distest/custom_host_ascend910b.run" \
+                  --kernel-dir "${WORKSPACE}/kernel_pkg/ascend910b" \
+                  --soc ascend910b \
+                  --vendor-name custom \
+                  --output "${WORKSPACE}/build_out_distest/cann-ops-transformer-custom_linux-aarch64.run"
+          - name: upload
+            uses: obs-upload
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              artifact-path: ${{ steps.process_checkout.outputs.path }}/build_out_distest/cann-ops-transformer-custom_linux-aarch64.run
+              object-prefix: ${{ env.obs_path }}/
+      Pre_compile_package_950:
+        name: Pre_compile_package_950
+        needs:
+          - Pre_compile_host_950
+          - Pre_compile_kernel_950
+        runs-on: ["self-hosted", "arch=x64", "spec=xlarge"]
+        container:
+          image: swr.cn-north-4.myhuaweicloud.com/ci_cann/${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
+        steps:
+          - name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+          - name: download
+            uses: obs-download
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              key: |
+                ${{ env.obs_path }}/custom_host_ascend950.run
+                ${{ env.obs_path }}/dis/kernel_ascend950.tar.gz
+              path: ${{ steps.process_checkout.outputs.path }}/build_out_distest
+          - name: repackage
+            run: |
+              set -e
+              export WORKSPACE=${{ steps.process_checkout.outputs.path }}
+              cd "${WORKSPACE}"
+              if [ -f /home/jenkins/Ascend/cann/bin/setenv.bash ]; then
+                  source /home/jenkins/Ascend/cann/bin/setenv.bash
+              fi
+              # 空跑兼容: host/kernel 产物为空占位文件(0字节)时跳过 repack, touch 空的最终包
+              if [ ! -s build_out_distest/custom_host_ascend950.run ] || [ ! -s build_out_distest/kernel_ascend950.tar.gz ]; then
+                  echo "skip repackage: empty host/kernel artifacts (no compile scope)"
+                  touch build_out_distest/cann-ops-transformer-ascend950-custom_linux-x86_64.run
+                  exit 0
+              fi
+              mkdir -p kernel_pkg
+              tar -xzf build_out_distest/kernel_ascend950.tar.gz -C kernel_pkg
+              chmod +x build_out_distest/custom_host_ascend950.run
+              bash scripts/ci/repack_custom_operator.sh \
+                  --host-pkg "${WORKSPACE}/build_out_distest/custom_host_ascend950.run" \
+                  --kernel-dir "${WORKSPACE}/kernel_pkg/ascend950" \
+                  --soc ascend950 \
+                  --vendor-name custom \
+                  --output "${WORKSPACE}/build_out_distest/cann-ops-transformer-ascend950-custom_linux-x86_64.run"
+          - name: upload
+            uses: obs-upload
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              artifact-path: ${{ steps.process_checkout.outputs.path }}/build_out_distest/cann-ops-transformer-ascend950-custom_linux-x86_64.run
+              object-prefix: ${{ env.obs_path }}/
     pre:
     - type: auto
     fail-fast: false

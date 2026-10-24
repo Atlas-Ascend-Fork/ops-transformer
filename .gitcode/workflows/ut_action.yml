@@ -43,6 +43,7 @@ jobs:
       -
         name: ut_acc
         identifier: ut
+        timeout-minutes: 90
         run: |
           export WORKSPACE=${{ steps.process_checkout.outputs.path }}
           cd ${{ steps.process_checkout.outputs.path }}
