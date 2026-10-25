@@ -319,7 +319,7 @@ __global__ __aicore__ void grouped_matmul(GM_ADDR x, GM_ADDR weight, GM_ADDR bia
 #if defined(V310_GMM_QUANT_S4S4) && IS_BLAZE
     REGISTER_TILING_DEFAULT(GMMS4S4IntQuantTilingData);
 #else
-    REGISTER_NONE_TILING;
+    REGISTER_TILING_DEFAULT(GMMQuantTilingData);
 #endif
 #if defined(V310_GMM_QUANT_MX) // mx
     if constexpr (wFormat == CubeFormat::ND) {
