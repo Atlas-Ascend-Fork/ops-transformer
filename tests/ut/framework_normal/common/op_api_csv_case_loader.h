@@ -43,8 +43,8 @@ const std::unordered_map<std::string, aclDataType> ACL_DTYPE{{"UNDEFINED", ACL_D
                                                              {"FLOAT6_E2M3", ACL_FLOAT6_E2M3},
                                                              {"FLOAT4_E2M1", ACL_FLOAT4_E2M1},
                                                              {"FLOAT4_E1M2", ACL_FLOAT4_E1M2},
-                                                             {"HIFLOAT4", ACL_HIFLOAT4},
-                                                             {"HIF4_SCALE", ACL_HIFLOAT4_SCALE}};
+                                                             {"HIFLOAT4", static_cast<aclDataType>(42)},
+                                                             {"HIFLOAT4_SCALE", static_cast<aclDataType>(43)}};
 
 const std::unordered_map<std::string, aclFormat> ACL_FORMAT{{"UNDEFINED", ACL_FORMAT_UNDEFINED},
                                                             {"NCHW", ACL_FORMAT_NCHW},
