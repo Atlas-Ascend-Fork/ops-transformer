@@ -58,6 +58,16 @@
   </tr>
   <tr>
     <td>attention</td>
+    <td><a href="../../attention/block_sparse_attention/README.md">block_sparse_attention</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>基于块稀疏模式完成注意力计算，支持多种Query与KV Cache布局。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
     <td><a href="../../attention/bsa_select_block_mask/README.md">bsa_select_block_mask</a></td>
     <td>✓</td>
     <td>✓</td>
@@ -105,6 +115,36 @@
     <td>✗</td>
     <td>AI Core</td>
     <td>推理场景下线性注意力Gated Delta Rule的chunk版本，用于prefill节点。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
+    <td><a href="../../attention/chunk_kda_fwd/README.md">chunk_kda_fwd</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>完成不涉及CP切分的KDA分块前向计算，输出注意力结果、最终状态及可选的反向中间结果。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
+    <td><a href="../../attention/dense_lightning_indexer_grad_kl_loss/README.md">dense_lightning_indexer_grad_kl_loss</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>计算LightningIndexer的反向梯度，并融合KL散度损失计算。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
+    <td><a href="../../attention/dense_lightning_indexer_softmax_lse/README.md">dense_lightning_indexer_softmax_lse</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>计算DenseLightningIndexerGradKlLoss所需的Softmax中间结果，输出softmax_max和softmax_sum。</td>
   </tr>
   <tr>
     <td>attention</td>
@@ -288,6 +328,16 @@
   </tr>
   <tr>
     <td>attention</td>
+    <td><a href="../../attention/kda_input_proj/README.md">kda_input_proj</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>完成Recurrent KDA的前置投影，生成qkv、beta、gate和g。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
     <td><a href="../../attention/kv_compress_epilog/README.md">kv_compress_epilog</a></td>
     <td>✓</td>
     <td>✓</td>
@@ -405,6 +455,16 @@
     <td>✗</td>
     <td>AI CPU</td>
     <td>mixed_quant_sparse_flash_mla算子的前置算子，用于计算mixed_quant_sparse_flash_mla的负载均衡。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
+    <td><a href="../../attention/mla_preprocess_v2/README.md">mla_preprocess_v2</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>完成Multi-Head Latent Attention前处理，融合归一化、矩阵乘、旋转位置编码与Cache更新。</td>
   </tr>
   <tr>
     <td>attention</td>
@@ -545,6 +605,26 @@
     <td>✗</td>
     <td>AI Core</td>
     <td>训练场景下，实现NativeSparseAttention算法中selected-attention（选择注意力）的计算。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
+    <td><a href="../../attention/rain_fusion_attention/README.md">rain_fusion_attention</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>根据稀疏块选择结果完成Rain稀疏注意力计算。</td>
+  </tr>
+  <tr>
+    <td>attention</td>
+    <td><a href="../../attention/scatter_pa_kv_cache/README.md">scatter_pa_kv_cache</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>更新KV Cache中指定位置的key和value。</td>
   </tr>
   <tr>
     <td>attention</td>
@@ -867,6 +947,16 @@
     <td>对每个输入token分别执行K投影和Gate投影，将连续的`cmpRatio`个token分为一组，按Gate与位置偏置确定的权重将组内K合并为一个Key，并将未完成压缩组所需的中间状态写入分页`stateCache`。</td>
   </tr>
   <tr>
+    <td>attention</td>
+    <td><a href="../../attention/swin_attention_score_quant/docs/aclnnSwinAttentionScoreQuant.md">swin_attention_score_quant</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>完成Swin Transformer场景的Attention计算，支持int8量化。</td>
+  </tr>
+  <tr>
     <td>ffn</td>
     <td><a href="../../ffn/ffn/README.md">ffn</a></td>
     <td>✓</td>
@@ -1008,6 +1098,16 @@
   </tr>
   <tr>
     <td>gmm</td>
+    <td><a href="../../gmm/quant_grouped_matmul_dequant/README.md">quant_grouped_matmul_dequant</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>融合输入量化、分组矩阵乘和反量化计算。</td>
+  </tr>
+  <tr>
+    <td>gmm</td>
     <td><a href="../../gmm/quant_grouped_matmul_inplace_add/README.md">quant_grouped_matmul_inplace_add</a></td>
     <td>✓</td>
     <td>✓</td>
@@ -1025,6 +1125,16 @@
     <td>✓</td>
     <td>AI Core</td>
     <td>完成AllGather通信与MatMul计算融合。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
+    <td><a href="../../mc2/all_gather_matmul_v2/README.md">all_gather_matmul_v2</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>完成AllGather通信与MatMul计算融合，扩展all_gather_matmul的能力。</td>
   </tr>
   <tr>
     <td>mc2</td>
@@ -1055,6 +1165,16 @@
     <td>✓</td>
     <td>AI Core</td>
     <td>完成路由专家AlltoAllv、Permute、GroupedMatMul融合并实现与共享专家MatMul并行融合，先通信后计算。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
+    <td><a href="../../mc2/allto_allv_quant_grouped_mat_mul/README.md">allto_allv_quant_grouped_mat_mul</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>融合路由专家AlltoAllv、Permute和量化GroupedMatMul计算，并与共享专家量化MatMul并行。</td>
   </tr>
   <tr>
     <td>mc2</td>
@@ -1198,6 +1318,16 @@
   </tr>
   <tr>
     <td>mc2</td>
+    <td><a href="../../mc2/matmul_reduce_scatter_v2/README.md">matmul_reduce_scatter_v2</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>完成MatMul计算与ReduceScatter通信融合，扩展matmul_reduce_scatter的能力。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
     <td><a href="../../mc2/mega_moe/README.md">mega_moe</a></td>
     <td>✓</td>
     <td>✓</td>
@@ -1228,6 +1358,26 @@
   </tr>
   <tr>
     <td>mc2</td>
+    <td><a href="../../mc2/moe_distribute_combine_setup/README.md">moe_distribute_combine_setup</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>MoE Combine的准备阶段，发送数据并启动通信，与teardown配套使用。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
+    <td><a href="../../mc2/moe_distribute_combine_teardown/README.md">moe_distribute_combine_teardown</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>MoE Combine的收尾阶段，等待通信完成并整合结果，与setup配套使用。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
     <td><a href="../../mc2/moe_distribute_combine_v2/README.md">moe_distribute_combine_v2</a></td>
     <td>✓</td>
     <td>✓</td>
@@ -1245,6 +1395,26 @@
     <td>✓</td>
     <td>AI Core</td>
     <td>对Token数据进行量化（可选），当存在TP域通信时，先进行EP（Expert Parallelism）域的AllToAllV通信，再进行TP（Tensor Parallelism）域的AllGatherV通信；当不存在TP域通信时，进行EP（Expert Parallelism）域的AllToAllV通信。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
+    <td><a href="../../mc2/moe_distribute_dispatch_setup/README.md">moe_distribute_dispatch_setup</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>MoE Dispatch的准备阶段，发送数据并启动通信，与teardown配套使用。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
+    <td><a href="../../mc2/moe_distribute_dispatch_teardown/README.md">moe_distribute_dispatch_teardown</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>MoE Dispatch的收尾阶段，等待通信完成并整理接收数据，与setup配套使用。</td>
   </tr>
   <tr>
     <td>mc2</td>
@@ -1275,6 +1445,16 @@
     <td>✓</td>
     <td>AI Core</td>
     <td>完成每个token的topK个专家逻辑专家号到物理卡号的映射。</td>
+  </tr>
+  <tr>
+    <td>mc2</td>
+    <td><a href="../../mc2/quant_grouped_mat_mul_allto_allv/README.md">quant_grouped_mat_mul_allto_allv</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>融合路由专家量化GroupedMatMul、AlltoAllv和Unpermute计算，并与共享专家量化MatMul并行。</td>
   </tr>
   <tr>
     <td>moe</td>
@@ -1315,6 +1495,16 @@
     <td>✓</td>
     <td>AI Core</td>
     <td>aclnnMoeFinalizeRoutingV2的反向传播。</td>
+  </tr>
+  <tr>
+    <td>moe</td>
+    <td><a href="../../moe/moe_fused_topk/README.md">moe_fused_topk</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>融合Sigmoid、专家分组筛选和TopK计算，选取路由专家及权重。</td>
   </tr>
   <tr>
     <td>moe</td>
@@ -1735,6 +1925,36 @@
     <td>✓</td>
     <td>AI Core</td>
     <td>执行局部旋转位置编码InplacePartialRotaryMul的反向计算，对输入dy的D维度上切片[start, end)区域执行旋转位置编码梯度计算，结果inplace写回dy。</td>
+  </tr>
+  <tr>
+    <td>posembedding</td>
+    <td><a href="../../posembedding/norm_rope_concat/README.md">norm_rope_concat</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>融合多模态注意力中的归一化、旋转位置编码和张量拼接。</td>
+  </tr>
+  <tr>
+    <td>posembedding</td>
+    <td><a href="../../posembedding/norm_rope_concat_grad/README.md">norm_rope_concat_grad</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>计算norm_rope_concat的反向梯度。</td>
+  </tr>
+  <tr>
+    <td>posembedding</td>
+    <td><a href="../../posembedding/partial_rotary_mul_quant/docs/aclnnPartialRotaryMulQuant.md">partial_rotary_mul_quant</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>AI Core</td>
+    <td>对指定区间执行部分旋转位置编码，并对结果进行量化。</td>
   </tr>
   <tr>
     <td>posembedding</td>
