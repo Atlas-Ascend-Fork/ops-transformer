@@ -15,6 +15,7 @@
 
 #include <climits>
 #include "log/log.h"
+#include "util/shape_util.h"
 #include "platform/platform_info_def.h"
 #include "tiling/tiling_api.h"
 #include "gather_pa_kv_cache_tiling.h"
@@ -90,8 +91,10 @@ bool CommonGatherPaKvCacheTiling(gert::TilingContext* context)
     if (mode == nullptr || mode[0] == '\0') {
         mode = "Norm";
     }
-    OP_CHECK_IF((strcmp(mode, "PA_NZ") != 0 && strcmp(mode, "Norm") != 0),
-                OP_LOGE(context, "%s is not supported", mode), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (strcmp(mode, "PA_NZ") != 0 && strcmp(mode, "Norm") != 0),
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "cache_mode", mode, "Unsupported cache mode"),
+        return ge::GRAPH_FAILED);
     int32_t blockSize;
     int32_t tokenSizeK;
     int32_t tokenSizeV;
@@ -120,17 +123,29 @@ bool CommonGatherPaKvCacheTiling(gert::TilingContext* context)
     int32_t numblkTabCol =
         static_cast<int32_t>(blockTablesShape->GetStorageShape().GetDim(DIM_1)); // block tables column
 
-    OP_CHECK_IF((blockSize <= 0 || blockSize > INT_MAX), OP_LOGE(context, "blockSize is invalid."),
+    OP_CHECK_IF((blockSize <= 0 || blockSize > INT_MAX),
+                OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "blockSize", std::to_string(blockSize),
+                                          "greater than 0 and no greater than INT_MAX"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF((numTokens <= 0 || numTokens > INT_MAX), OP_LOGE(context, "numTokens is invalid."),
+    OP_CHECK_IF((numTokens <= 0 || numTokens > INT_MAX),
+                OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "numTokens", std::to_string(numTokens),
+                                          "greater than 0 and no greater than INT_MAX"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF((numblkTabCol <= 0 || numblkTabCol > INT_MAX), OP_LOGE(context, "numblkTabCol is invalid."),
+    OP_CHECK_IF((numblkTabCol <= 0 || numblkTabCol > INT_MAX),
+                OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "numblkTabCol", std::to_string(numblkTabCol),
+                                          "greater than 0 and no greater than INT_MAX"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF((tokenSizeK <= 0 || tokenSizeK > INT_MAX), OP_LOGE(context, "tokenSizeK is invalid."),
+    OP_CHECK_IF((tokenSizeK <= 0 || tokenSizeK > INT_MAX),
+                OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "tokenSizeK", std::to_string(tokenSizeK),
+                                          "greater than 0 and no greater than INT_MAX"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF((tokenSizeV <= 0 || tokenSizeV > INT_MAX), OP_LOGE(context, "tokenSizeV is invalid."),
+    OP_CHECK_IF((tokenSizeV <= 0 || tokenSizeV > INT_MAX),
+                OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "tokenSizeV", std::to_string(tokenSizeV),
+                                          "greater than 0 and no greater than INT_MAX"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF((typeByte <= 0 || typeByte > INT_MAX), OP_LOGE(context, "typeByte is invalid."),
+    OP_CHECK_IF((typeByte <= 0 || typeByte > INT_MAX),
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context->GetNodeName(), "key_cache", Ops::Base::ToString(inDtype),
+                                                      "Failed to get the element size for this dtype"),
                 return ge::GRAPH_FAILED);
     GatherPaKvCacheTilingData tilingData;
 
@@ -179,7 +194,7 @@ ge::graphStatus Tiling4GatherPaKvCache(gert::TilingContext* context)
 {
     GatherPaKvCacheTilingData tilingData;
     auto ret = CommonGatherPaKvCacheTiling(context);
-    OP_CHECK_IF((!ret), OP_LOGE(context, "value is invalid."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF((!ret), OP_LOGE_WITHOUT_REPORT(context, "value is invalid."), return ge::GRAPH_FAILED);
     context->SetBlockDim(GatherPaKvCacheGetBlockDim(context));
     return ge::GRAPH_SUCCESS;
 }
@@ -188,19 +203,25 @@ ge::graphStatus TilingPrepare4GatherPaKvCache(gert::TilingParseContext* context)
 {
     OP_LOGD(context, "TilingPrepare4GatherPaKvCache enter.");
     auto compileInfo = context->GetCompiledInfo<Tiling4GatherPaKvCacheCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "compileInfo"),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "platformInfo"),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     compileInfo->coreNum = ascendcPlatform.GetCoreNumAiv();
-    OP_CHECK_IF((compileInfo->coreNum <= 0),
-                OP_LOGE(context, "Get core num failed, core num: %u", static_cast<uint32_t>(compileInfo->coreNum)),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (compileInfo->coreNum <= 0),
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "coreNum", std::to_string(compileInfo->coreNum),
+                                              "Failed to get a valid coreNum from platformInfo"),
+        return ge::GRAPH_FAILED);
 
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo->ubSize);
-    OP_CHECK_IF((compileInfo->ubSize <= 0),
-                OP_LOGE(context, "Get ub size failed, ub size: %u", static_cast<uint32_t>(compileInfo->ubSize)),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (compileInfo->ubSize <= 0),
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "ubSize", std::to_string(compileInfo->ubSize),
+                                              "Failed to get a valid ubSize from platformInfo"),
+        return ge::GRAPH_FAILED);
 
     compileInfo->sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     OP_LOGD(context, "TilingPrepare4GatherPaKvCache exit.");

@@ -510,8 +510,11 @@ aclnnStatus aclnnGatherPaKvCacheGetWorkspaceSize(const aclTensor* keyCache, cons
 aclnnStatus aclnnGatherPaKvCache(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor, aclrtStream stream)
 {
     L2_DFX_PHASE_2(aclnnGatherPaKvCache);
-    CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS, ACLNN_ERR_INNER,
-               "GatherPaKvCache launch aicore failed.");
+    const auto ret = CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
+    if (ret != ACLNN_SUCCESS) {
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER, "GatherPaKvCache launch aicore failed.");
+        return ACLNN_ERR_INNER;
+    }
     return ACLNN_SUCCESS;
 }
 

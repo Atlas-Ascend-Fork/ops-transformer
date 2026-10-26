@@ -36,15 +36,19 @@ static constexpr size_t CACHE_MODE_INDEX = 0;
 static ge::graphStatus CheckCommonPagedCacheLoad(gert::InferShapeContext* context)
 {
     auto blockTables_shape = context->GetInputShape(DIM_2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, blockTables_shape);
+    OP_CHECK_IF(blockTables_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "block_tables"),
+                return ge::GRAPH_FAILED);
     auto seqLens_shape = context->GetInputShape(DIM_3);
-    OP_CHECK_NULL_WITH_CONTEXT(context, seqLens_shape);
+    OP_CHECK_IF(seqLens_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "seq_lens"),
+                return ge::GRAPH_FAILED);
     if (blockTables_shape->GetDimNum() != DIM_2) {
-        OP_LOGE(context, "blockTables's dim num should be 2.");
+        OP_LOGE_FOR_INVALID_SHAPEDIM(context->GetNodeName(), "block_tables",
+                                     std::to_string(blockTables_shape->GetDimNum()), "2");
         return ge::GRAPH_FAILED;
     }
     if (seqLens_shape->GetDimNum() != DIM_1) {
-        OP_LOGE(context, "seqLens's dim num should be 1.");
+        OP_LOGE_FOR_INVALID_SHAPEDIM(context->GetNodeName(), "seq_lens", std::to_string(seqLens_shape->GetDimNum()),
+                                     "1");
         return ge::GRAPH_FAILED;
     }
 
@@ -52,14 +56,20 @@ static ge::graphStatus CheckCommonPagedCacheLoad(gert::InferShapeContext* contex
     auto is_seq_lens_cumsum = attrs->GetAttrPointer<bool>(IS_SEQ_LENS_CUMSUM_INDEX);
     if (is_seq_lens_cumsum == nullptr || *is_seq_lens_cumsum) {
         if ((blockTables_shape->GetDim(DIM_0) + 1) != seqLens_shape->GetDim(DIM_0)) {
-            OP_LOGE(context, "seqLens's dim_0 %ld must equal blockTables's dim_0+1 %ld.", seqLens_shape->GetDim(DIM_0),
-                    blockTables_shape->GetDim(DIM_0) + 1);
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "seq_lens, block_tables",
+                Ops::Base::ToString(*seqLens_shape) + ", " + Ops::Base::ToString(*blockTables_shape),
+                "seqLens's dim_0 " + std::to_string(seqLens_shape->GetDim(DIM_0)) +
+                    " must equal blockTables's dim_0+1 " + std::to_string(blockTables_shape->GetDim(DIM_0) + 1));
             return ge::GRAPH_FAILED;
         }
     } else {
         if (blockTables_shape->GetDim(DIM_0) != seqLens_shape->GetDim(DIM_0)) {
-            OP_LOGE(context, "seqLens's dim_0 %ld must equal blockTables's dim_0 %ld.", seqLens_shape->GetDim(DIM_0),
-                    blockTables_shape->GetDim(DIM_0));
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "seq_lens, block_tables",
+                Ops::Base::ToString(*seqLens_shape) + ", " + Ops::Base::ToString(*blockTables_shape),
+                "seqLens's dim_0 " + std::to_string(seqLens_shape->GetDim(DIM_0)) + " must equal blockTables's dim_0 " +
+                    std::to_string(blockTables_shape->GetDim(DIM_0)));
             return ge::GRAPH_FAILED;
         }
     };
@@ -69,20 +79,30 @@ static ge::graphStatus CheckCommonPagedCacheLoad(gert::InferShapeContext* contex
 static ge::graphStatus InferShape4GatherPaKvCacheNz(gert::InferShapeContext* context)
 {
     auto valueCacheShape = context->GetInputShape(DIM_1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, valueCacheShape);
+    OP_CHECK_IF(valueCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_cache"),
+                return ge::GRAPH_FAILED);
     auto keyCacheShape = context->GetInputShape(DIM_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyCacheShape);
+    OP_CHECK_IF(keyCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache"),
+                return ge::GRAPH_FAILED);
     if (keyCacheShape->GetDimNum() != DIM_4 || valueCacheShape->GetDimNum() != DIM_4) {
-        OP_LOGE(context, "KCache&VCache's dim num should be 4.");
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+            context->GetNodeName(), "key_cache, value_cache",
+            std::to_string(keyCacheShape->GetDimNum()) + ", " + std::to_string(valueCacheShape->GetDimNum()),
+            "KCache&VCache's dim num should be 4");
         return ge::GRAPH_FAILED;
     }
     auto valueOutshape = context->GetOutputShape(DIM_1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, valueOutshape);
+    OP_CHECK_IF(valueOutshape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value output shape"),
+                return ge::GRAPH_FAILED);
     auto keyOutshape = context->GetOutputShape(DIM_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyOutshape);
+    OP_CHECK_IF(keyOutshape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key output shape"),
+                return ge::GRAPH_FAILED);
 
     if (keyOutshape->GetDimNum() != DIM_2 || valueOutshape->GetDimNum() != DIM_2) {
-        OP_LOGE(context, "K&V's dim num should be 2.");
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+            context->GetNodeName(), "key, value",
+            std::to_string(keyOutshape->GetDimNum()) + ", " + std::to_string(valueOutshape->GetDimNum()),
+            "K&V's dim num should be 2");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -91,20 +111,30 @@ static ge::graphStatus InferShape4GatherPaKvCacheNz(gert::InferShapeContext* con
 static ge::graphStatus InferShape4GatherPaKvCacheNd(gert::InferShapeContext* context)
 {
     auto keyCacheShape = context->GetInputShape(DIM_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyCacheShape);
+    OP_CHECK_IF(keyCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache"),
+                return ge::GRAPH_FAILED);
     auto valueCacheShape = context->GetInputShape(DIM_1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, valueCacheShape);
+    OP_CHECK_IF(valueCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_cache"),
+                return ge::GRAPH_FAILED);
     auto keyOutshape = context->GetOutputShape(DIM_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyOutshape);
+    OP_CHECK_IF(keyOutshape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key output shape"),
+                return ge::GRAPH_FAILED);
     auto valueOutshape = context->GetOutputShape(DIM_1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, valueOutshape);
+    OP_CHECK_IF(valueOutshape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value output shape"),
+                return ge::GRAPH_FAILED);
 
     if (keyCacheShape->GetDimNum() != DIM_4 || valueCacheShape->GetDimNum() != DIM_4) {
-        OP_LOGE(context, "KCache&VCache's dim num should be 4.");
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+            context->GetNodeName(), "key_cache, value_cache",
+            std::to_string(keyCacheShape->GetDimNum()) + ", " + std::to_string(valueCacheShape->GetDimNum()),
+            "KCache&VCache's dim num should be 4");
         return ge::GRAPH_FAILED;
     }
     if (keyOutshape->GetDimNum() != DIM_3 || valueOutshape->GetDimNum() != DIM_3) {
-        OP_LOGE(context, "K&V's dim num should be 3.");
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+            context->GetNodeName(), "key, value",
+            std::to_string(keyOutshape->GetDimNum()) + ", " + std::to_string(valueOutshape->GetDimNum()),
+            "K&V's dim num should be 3");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -114,13 +144,17 @@ static ge::graphStatus InferShape4GatherPaKvCache(gert::InferShapeContext* conte
 {
     OP_LOGD(context, "Begin to do InferShape4GatherPaKvCache");
     auto tensorKeyIn_shape = context->GetInputShape(DIM_4);
-    OP_CHECK_NULL_WITH_CONTEXT(context, tensorKeyIn_shape);
+    OP_CHECK_IF(tensorKeyIn_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key"),
+                return ge::GRAPH_FAILED);
     auto tensorValueIn_shape = context->GetInputShape(DIM_5);
-    OP_CHECK_NULL_WITH_CONTEXT(context, tensorValueIn_shape);
+    OP_CHECK_IF(tensorValueIn_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value"),
+                return ge::GRAPH_FAILED);
     auto output0_shape = context->GetOutputShape(DIM_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, output0_shape);
+    OP_CHECK_IF(output0_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key output shape"),
+                return ge::GRAPH_FAILED);
     auto output1_shape = context->GetOutputShape(DIM_1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, output1_shape);
+    OP_CHECK_IF(output1_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value output shape"),
+                return ge::GRAPH_FAILED);
     *output0_shape = *tensorKeyIn_shape;
     *output1_shape = *tensorValueIn_shape;
 
@@ -148,7 +182,7 @@ static ge::graphStatus InferShape4GatherPaKvCache(gert::InferShapeContext* conte
     }
 
     OP_CHECK_IF(CheckCommonPagedCacheLoad(context) == ge::GRAPH_FAILED,
-                OP_LOGE(context, "Failed to check common launch param."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context, "Failed to check common launch param."), return ge::GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
     const char* mode = attrs->GetAttrPointer<char>(CACHE_MODE_INDEX);

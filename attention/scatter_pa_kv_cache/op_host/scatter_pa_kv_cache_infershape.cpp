@@ -39,16 +39,21 @@ ge::graphStatus InferShape4ScatterPaKvCache(gert::InferShapeContext* context)
     // inferShape key_cache
     OP_LOGD(context, "Begin to do InferShape4ScatterPaKvCache");
     auto inputKeyCacheShape = context->GetInputShape(INPUT_KEY_CACHE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputKeyCacheShape);
+    OP_CHECK_IF(inputKeyCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache"),
+                return ge::GRAPH_FAILED);
     auto outputKeyCacheShape = context->GetOutputShape(OUTPUT_KEY_CACHE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputKeyCacheShape);
+    OP_CHECK_IF(outputKeyCacheShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache output shape"), return ge::GRAPH_FAILED);
     *outputKeyCacheShape = *inputKeyCacheShape;
 
     // inferShape value_cache
     auto inputValueCacheShape = context->GetInputShape(INPUT_VALUE_CACHE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputValueCacheShape);
+    OP_CHECK_IF(inputValueCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_cache"),
+                return ge::GRAPH_FAILED);
     auto outputValueCacheShape = context->GetOutputShape(OUTPUT_VALUE_CACHE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputValueCacheShape);
+    OP_CHECK_IF(outputValueCacheShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_cache output shape"),
+                return ge::GRAPH_FAILED);
     *outputValueCacheShape = *inputValueCacheShape;
     OP_LOGD(context, "End to do InferShape4ScatterPaKvCache");
     return GRAPH_SUCCESS;
@@ -58,16 +63,19 @@ ge::graphStatus InferDataType4ScatterPaKvCache(gert::InferDataTypeContext* conte
 {
     OP_LOGD(context, "Begin to do InferDataType4ScatterPaKvCache");
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "attributes"),
+                return ge::GRAPH_FAILED);
     auto cache_mode = attrs->GetAttrPointer<char>(ATTR_CACHE_MODE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, cache_mode);
+    OP_CHECK_IF(cache_mode == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "cache_mode"),
+                return ge::GRAPH_FAILED);
     if (strcmp(cache_mode, "") != 0 && strcmp(cache_mode, "Norm") != 0 && strcmp(cache_mode, "PA_NZ") != 0) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "cache_mode", cache_mode,
                                               "The cache_mode must be one of '', 'Norm', or 'PA_NZ'.");
         return ge::GRAPH_FAILED;
     }
     auto scatter_mode = attrs->GetAttrPointer<char>(INPUT_SCATTER_MODE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, scatter_mode);
+    OP_CHECK_IF(scatter_mode == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "scatter_mode"),
+                return ge::GRAPH_FAILED);
     if (strcmp(scatter_mode, "") != 0 && strcmp(scatter_mode, "None") != 0 && strcmp(scatter_mode, "Alibi") != 0 &&
         strcmp(scatter_mode, "Rope") != 0 && strcmp(scatter_mode, "Omni") != 0 && strcmp(scatter_mode, "Nct") != 0) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
