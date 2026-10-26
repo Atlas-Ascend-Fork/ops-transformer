@@ -435,7 +435,7 @@ static aclnnStatus CheckDimNumAndFormat(const gmm::GroupedMatmulParams& gmmParam
 {
     uint64_t tensorListLength = tensorList->Size();
     for (size_t i = 0; i < tensorListLength; ++i) {
-        CHECK_COND((*tensorList)[i] != nullptr, ACLNN_ERR_PARAM_INVALID, "%s[%lu] is null, which is not supported.",
+        CHECK_COND((*tensorList)[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR, "%s[%lu] is null, which is not supported.",
                    tensorType.c_str(), i);
         CHECK_COND(CheckFormat((*tensorList)[i], tensorType, i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                    "Invalid format.");
@@ -476,12 +476,12 @@ static aclnnStatus CheckDimNumAndGroupListNoSplitAndFormat(const gmm::GroupedMat
     int64_t preGoupList = 0;
     for (size_t i = 0; i < tensorListLength; ++i) {
         // Check dims
-        CHECK_COND((*gmmParams.x)[i] != nullptr, ACLNN_ERR_PARAM_INVALID, "X[%lu] is null, which is not supported.", i);
-        CHECK_COND((*gmmParams.weight)[i] != nullptr, ACLNN_ERR_PARAM_INVALID,
+        CHECK_COND((*gmmParams.x)[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR, "X[%lu] is null, which is not supported.", i);
+        CHECK_COND((*gmmParams.weight)[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR,
                    "Weight[%lu] is null, which is not supported.", i);
         CHECK_COND(gmm::IsTransposeLastTwoDims((*gmmParams.weight)[i]) == gmmParams.transposeWeight,
                    ACLNN_ERR_PARAM_INVALID, "The transpose state must be the same for each tensor in weight.");
-        CHECK_COND((*gmmParams.y)[i] != nullptr, ACLNN_ERR_PARAM_INVALID, "Y[%lu] is null, which is not supported.", i);
+        CHECK_COND((*gmmParams.y)[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR, "Y[%lu] is null, which is not supported.", i);
         CHECK_COND(CheckFormat((*gmmParams.x)[i], "x", i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID, "Invalid format.");
         CHECK_COND(CheckFormat((*gmmParams.weight)[i], "weight", i) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                    "Invalid format.");
@@ -3163,7 +3163,7 @@ static aclnnStatus CheckEmptyTensor(const aclTensorList* x, const aclTensorList*
     bool zeroK = false;
     // current view_shape transpose is always false false
     for (size_t i = 0; i < x->Size(); ++i) {
-        CHECK_COND((*x)[i] != nullptr, ACLNN_ERR_PARAM_INVALID, "GroupedMatmul x tensor should not be null");
+        CHECK_COND((*x)[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR, "GroupedMatmul x tensor should not be null");
         auto xShape = (*x)[i]->GetViewShape();
         size_t xDimNum = xShape.GetDimNum();
         CHECK_COND(xDimNum >= gmm::MIN_FM_DIM && xDimNum <= gmm::MAX_FM_DIM, ACLNN_ERR_PARAM_INVALID,
@@ -3176,7 +3176,7 @@ static aclnnStatus CheckEmptyTensor(const aclTensorList* x, const aclTensorList*
         zeroK = zeroK || (xShape.GetDim(xShape.GetDimNum() - 1) == 0);
     }
     for (size_t i = 0; i < weight->Size(); ++i) {
-        CHECK_COND((*weight)[i] != nullptr, ACLNN_ERR_PARAM_INVALID, "GroupedMatmul weight tensor should not be null");
+        CHECK_COND((*weight)[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR, "GroupedMatmul weight tensor should not be null");
         auto wShape = (*weight)[i]->GetViewShape();
         CHECK_COND(wShape.GetDimNum() >= gmm::MIN_FM_DIM, ACLNN_ERR_PARAM_INVALID,
                    "GroupedMatmul weight dim num should be 2 or 3, but actual %zu.", wShape.GetDimNum());
