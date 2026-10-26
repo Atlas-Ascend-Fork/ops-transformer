@@ -26,7 +26,6 @@ const uint32_t SCALE_DEQUANT1_IDX = 4;
 const uint32_t SCALE_DEQUANT2_IDX = 5;
 const uint32_t BIAS_QUANT_IDX = 6;
 const uint32_t BIAS_DEQUANT1_IDX = 7;
-const uint32_t BIAS_DEQUANT2_IDX = 8;
 const uint32_t MASK1_IDX = 9;
 const uint32_t MASK2_IDX = 10;
 const uint32_t QKV_DIM_SIZE = 4;
@@ -57,36 +56,57 @@ inline uint32_t RoundUp(uint32_t num, uint32_t align)
 
 struct SwinAttentionScoreQuantCompileInfo {};
 
+// 合法输入下Tiling失败时，按EZ1008正式首报（Arglist: op_name, reason），并输出PLOG上下文
+inline void ReportTilingFailure(gert::TilingContext* context, const char* reason)
+{
+    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "%s\n", reason);
+    const std::vector<const char*> msgKey = {"op_name", "reason"};
+    const std::vector<const char*> msgvalue = {context->GetNodeName(), reason};
+    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
+}
+
 inline bool CheckQTensor(gert::TilingContext* context, gert::Shape& qOriShape)
 {
-    OP_CHECK_IF(qOriShape.GetDimNum() != QKV_DIM_SIZE,
-                OP_LOGE(context->GetNodeName(), "input tensor %ld's dim is not equal to %d\n", qOriShape.GetDimNum(),
-                        QKV_DIM_SIZE),
-                return false);
+    OP_CHECK_IF(
+        qOriShape.GetDimNum() != QKV_DIM_SIZE,
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query", std::to_string(qOriShape.GetDimNum()),
+                                                 "the dim num of query must be 4"),
+        return false);
     int64_t dimB = qOriShape.GetDim(0);
     int64_t dimN = qOriShape.GetDim(1);
     int64_t dimS = qOriShape.GetDim(2); // query的第2维是S
     int64_t dimH = qOriShape.GetDim(3); // query的第3维是H
     int64_t dimBN = dimB * dimN;
     OP_CHECK_IF(dimS < MIN_S_DIM || dimS > MAX_S_DIM,
-                OP_LOGE(context->GetNodeName(),
-                        "input tensor query's s dim is %ld should great than 0 and less than 1024\n", dimS),
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query", std::to_string(dimS),
+                                                         "the S dim of query should be in range [1, 1024]"),
                 return false);
     OP_CHECK_IF(dimH != MIN_H_DIM && dimH != MAX_H_DIM,
-                OP_LOGE(context->GetNodeName(), "input tensor query's h dim is %ld should be 32 or 64\n", dimH),
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query", std::to_string(dimH),
+                                                         "the H dim of query should be 32 or 64"),
                 return false);
     OP_CHECK_IF(dimBN < 0 || dimBN > (int64_t)UINT32_MAX / dimS,
-                OP_LOGE(context->GetNodeName(), "input tensor size exceeds the limit\n"), return false);
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(context->GetNodeName(), "query", std::to_string(dimBN),
+                                                          "B * N * S of query exceeds the uint32 upper limit"),
+                return false);
     return true;
 }
 
-inline bool CheckQKVDimSize(gert::TilingContext* context, gert::Shape& qOriShape, gert::Shape& kvOriShape)
+inline bool CheckQKVDimSize(gert::TilingContext* context, const char* kvName, gert::Shape& qOriShape,
+                            gert::Shape& kvOriShape)
 {
-    OP_CHECK_IF(kvOriShape.GetDimNum() != QKV_DIM_SIZE,
-                OP_LOGE(context->GetNodeName(), "input tensor kv's dim num is not equal to q\n"), return false);
+    OP_CHECK_IF(
+        kvOriShape.GetDimNum() != QKV_DIM_SIZE,
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), kvName, std::to_string(kvOriShape.GetDimNum()),
+                                                 "the dim num of key/value must be 4, same as query"),
+        return false);
     for (uint32_t i = 0; i < qOriShape.GetDimNum(); i++) {
         OP_CHECK_IF(qOriShape.GetDim(i) != kvOriShape.GetDim(i),
-                    OP_LOGE(context->GetNodeName(), "input tensor kv's dim is not equal to q\n"), return false);
+                    OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                        context->GetNodeName(), (std::string("query, ") + kvName).c_str(),
+                        (std::to_string(qOriShape.GetDim(i)) + " and " + std::to_string(kvOriShape.GetDim(i))).c_str(),
+                        "the dims of key/value must be equal to the dims of query"),
+                    return false);
     }
     return true;
 }
@@ -94,13 +114,15 @@ inline bool CheckQKVDimSize(gert::TilingContext* context, gert::Shape& qOriShape
 inline bool CheckKVTensor(gert::TilingContext* context, gert::Shape& qOriShape)
 {
     for (uint32_t i = K_IDX; i <= V_IDX; i++) {
+        const char* kvName = (i == K_IDX) ? "key" : "value";
         auto kvShape = context->GetInputShape(i);
         if (kvShape != nullptr) {
             auto kvOriShape = kvShape->GetOriginShape();
-            OP_CHECK_IF(!CheckQKVDimSize(context, qOriShape, kvOriShape),
-                        OP_LOGE(context->GetNodeName(), "input tensor kv's dim check failed\n"), return false);
+            OP_CHECK_IF(!CheckQKVDimSize(context, kvName, qOriShape, kvOriShape),
+                        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "input tensor %s dim check failed\n", kvName),
+                        return false);
         } else {
-            OP_LOGE(context->GetNodeName(), "input tensor %d is nullptr\n", i);
+            OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), kvName);
             return false;
         }
     }
@@ -109,9 +131,10 @@ inline bool CheckKVTensor(gert::TilingContext* context, gert::Shape& qOriShape)
 
 inline bool CheckQuantTensor(gert::TilingContext* context)
 {
-    for (uint32_t i = SCALE_QUANT_IDX; i < BIAS_DEQUANT2_IDX; i++) {
-        auto quantShape = context->GetOptionalInputShape(i);
-        OP_CHECK_IF(quantShape == nullptr, OP_LOGE(context->GetNodeName(), "input tensor %d is nullptr\n", i),
+    const char* quantNames[] = {"scale_quant", "scale_dequant1", "scale_dequant2", "bias_quant", "bias_dequant1"};
+    for (uint32_t i = 0; i < sizeof(quantNames) / sizeof(quantNames[0]); i++) {
+        auto quantShape = context->GetOptionalInputShape(SCALE_QUANT_IDX + i);
+        OP_CHECK_IF(quantShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), quantNames[i]),
                     return false);
     }
     return true;
@@ -120,16 +143,32 @@ inline bool CheckQuantTensor(gert::TilingContext* context)
 inline bool CheckMaskDimSize(gert::TilingContext* context, gert::Shape& qOriShape, gert::Shape& maskOriShape)
 {
     OP_CHECK_IF(maskOriShape.GetDimNum() != QKV_DIM_SIZE,
-                OP_LOGE(context->GetNodeName(), "input tensor mask's dim num not equal to q\n"), return false);
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "padding_mask1",
+                                                         std::to_string(maskOriShape.GetDimNum()),
+                                                         "the dim num of padding_mask1 must be 4, same as query"),
+                return false);
     OP_CHECK_IF(maskOriShape.GetDim(0) != 1,
-                OP_LOGE(context->GetNodeName(), "input tensor mask[0] is not equal to 1\n"), return false);
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "padding_mask1",
+                                                         std::to_string(maskOriShape.GetDim(0)),
+                                                         "the dim 0 of padding_mask1 must be 1"),
+                return false);
     for (uint32_t i = 1; i < QKV_DIM_SIZE - 1; i++) {
-        OP_CHECK_IF(qOriShape.GetDim(i) != maskOriShape.GetDim(i),
-                    OP_LOGE(context->GetNodeName(), "input dim[%d] of mask is wrong\n", i), return false);
+        OP_CHECK_IF(
+            qOriShape.GetDim(i) != maskOriShape.GetDim(i),
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "query, padding_mask1",
+                (std::to_string(qOriShape.GetDim(i)) + " and " + std::to_string(maskOriShape.GetDim(i))).c_str(),
+                "the dim of padding_mask1 must be equal to the dim of query"),
+            return false);
     }
-    OP_CHECK_IF(qOriShape.GetDim(QKV_DIM_SIZE - 2) != maskOriShape.GetDim(QKV_DIM_SIZE - 1),
-                OP_LOGE(context->GetNodeName(), "input dim[3] of mask is wrong\n"),
-                return false); // Mask的最后2维大小相等
+    OP_CHECK_IF(
+        qOriShape.GetDim(QKV_DIM_SIZE - 2) != maskOriShape.GetDim(QKV_DIM_SIZE - 1),
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context->GetNodeName(), "query, padding_mask1",
+                                                  (std::to_string(qOriShape.GetDim(QKV_DIM_SIZE - 2)) + " and " +
+                                                   std::to_string(maskOriShape.GetDim(QKV_DIM_SIZE - 1)))
+                                                      .c_str(),
+                                                  "the last dim of padding_mask1 must be equal to the S dim of query"),
+        return false); // Mask的最后2维大小相等
     return true;
 }
 
@@ -139,7 +178,8 @@ inline bool CheckMaskTensor(gert::TilingContext* context, gert::Shape& qOriShape
     if (maskShape1 != nullptr) {
         auto maskOriShape = maskShape1->GetOriginShape();
         OP_CHECK_IF(!CheckMaskDimSize(context, qOriShape, maskOriShape),
-                    OP_LOGE(context->GetNodeName(), "input mask check failed\n"), return false);
+                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "input padding_mask1 dim check failed\n"),
+                    return false);
     }
     return true;
 }
@@ -147,17 +187,16 @@ inline bool CheckMaskTensor(gert::TilingContext* context, gert::Shape& qOriShape
 inline bool CheckInTensor(gert::TilingContext* context)
 {
     auto qShape = context->GetInputShape(Q_IDX);
-    OP_CHECK_IF(qShape == nullptr, OP_LOGE(context->GetNodeName(), "input tensor %d is nullptr\n", Q_IDX),
-                return false);
+    OP_CHECK_IF(qShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "query"), return false);
     auto qOriShape = qShape->GetOriginShape();
-    OP_CHECK_IF(!CheckQTensor(context, qOriShape), OP_LOGE(context->GetNodeName(), "input q check failed\n"),
-                return false);
-    OP_CHECK_IF(!CheckKVTensor(context, qOriShape), OP_LOGE(context->GetNodeName(), "input kv check failed\n"),
-                return false);
-    OP_CHECK_IF(!CheckQuantTensor(context), OP_LOGE(context->GetNodeName(), "input quant check failed\n"),
-                return false);
-    OP_CHECK_IF(!CheckMaskTensor(context, qOriShape), OP_LOGE(context->GetNodeName(), "input mask check failed\n"),
-                return false);
+    OP_CHECK_IF(!CheckQTensor(context, qOriShape),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "input query check failed\n"), return false);
+    OP_CHECK_IF(!CheckKVTensor(context, qOriShape),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "input key/value check failed\n"), return false);
+    OP_CHECK_IF(!CheckQuantTensor(context),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "input quant check failed\n"), return false);
+    OP_CHECK_IF(!CheckMaskTensor(context, qOriShape),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "input padding_mask1 check failed\n"), return false);
 
     return true;
 }
@@ -185,8 +224,7 @@ inline ge::graphStatus SwinAttentionCfgTiling(SwinAttentionScoreQuantTilingData&
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1Size);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, l0CSize);
     auto inputShape = context->GetInputShape(0);
-    OP_CHECK_IF(inputShape == nullptr, OP_LOGE(context->GetNodeName(), "[SwinAttentionCfgTiling] inputShape is null."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, inputShape);
     auto qOriShape = inputShape->GetOriginShape();
     uint32_t dimB = qOriShape.GetDim(0);
     uint32_t dimN = qOriShape.GetDim(1);
@@ -224,10 +262,11 @@ inline ge::graphStatus SwinAttentionCfgTiling(SwinAttentionScoreQuantTilingData&
     qkBmm.SetBias(true);
     qkBmm.SetBufferSpace(l1Size / 2, l0CSize); // 使用1/2的l1空间
     OP_CHECK_IF(qkBmm.GetTiling(tiling.qkBmmTilingData) == -1,
-                OP_LOGE(context->GetNodeName(), "get qk tiling failed\n"), return ge::GRAPH_FAILED);
+                ReportTilingFailure(context, "failed to get qk matmul tiling under current hardware and shape"),
+                return ge::GRAPH_FAILED);
     matmul_tiling::SysTilingTempBufSize qkBufSize;
     OP_CHECK_IF(MatmulGetTmpBufSize(tiling.qkBmmTilingData, qkBufSize) == -1,
-                OP_LOGE(context->GetNodeName(), "get qk buf size failed\n"), return ge::GRAPH_FAILED);
+                ReportTilingFailure(context, "failed to get qk matmul tmp buffer size"), return ge::GRAPH_FAILED);
     cubeSharedUbSize = qkBufSize.ubSize;
 
     // pv tiling
@@ -242,7 +281,8 @@ inline ge::graphStatus SwinAttentionCfgTiling(SwinAttentionScoreQuantTilingData&
     pvBmm.SetBias(true);
     pvBmm.SetBufferSpace(l1Size / 2, l0CSize); // 使用1/2的l1空间
     OP_CHECK_IF(pvBmm.GetTiling(tiling.pvBmmTilingData) == -1,
-                OP_LOGE(context->GetNodeName(), "get pv tiling failed\n"), return ge::GRAPH_FAILED);
+                ReportTilingFailure(context, "failed to get pv matmul tiling under current hardware and shape"),
+                return ge::GRAPH_FAILED);
     uint32_t pvUbSize = tiling.pvBmmTilingData.get_transLength() + tiling.pvBmmTilingData.get_transLength();
     uint32_t pvUbSizeTmp = round32S * dimH + round32S * dimH;
     pvUbSize = std::max(pvUbSize, pvUbSizeTmp);
@@ -355,7 +395,7 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
     uint32_t coreNum;
     uint32_t tmpSize;
 
-    OP_CHECK_IF(!CheckInTensor(context), OP_LOGE(context->GetNodeName(), "input tensor check failed\n"),
+    OP_CHECK_IF(!CheckInTensor(context), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "input tensor check failed\n"),
                 return ge::GRAPH_FAILED);
 
     auto maskShape = context->GetOptionalInputShape(MASK1_IDX);
@@ -369,14 +409,14 @@ static ge::graphStatus TilingFunc(gert::TilingContext* context)
         res = SwinAttentionCfgTiling(tiling, coreNum, tmpSize, context, true);
     }
 
-    OP_CHECK_IF(res == ge::GRAPH_FAILED, OP_LOGE(context->GetNodeName(), "get tiling failed\n"),
+    OP_CHECK_IF(res == ge::GRAPH_FAILED,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "SwinAttentionCfgTiling failed\n"),
                 return ge::GRAPH_FAILED);
 
     TilingLog(tiling);
 
     size_t* workspaces = context->GetWorkspaceSizes(1);
-    OP_CHECK_IF(workspaces == nullptr, OP_LOGE(context->GetNodeName(), "failed to get workspace size"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_NULL_WITH_CONTEXT(context, workspaces);
     workspaces[0] = tmpSize + WORKSPACE_SIZE;
     context->SetBlockDim(coreNum);
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
