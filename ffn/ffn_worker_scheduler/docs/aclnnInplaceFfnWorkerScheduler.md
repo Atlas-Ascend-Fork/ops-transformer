@@ -171,7 +171,7 @@ aclnnStatus aclnnInplaceFfnWorkerScheduler(
       <td>syncGroupSize（int32_t）</td>
       <td>输入</td>
       <td>每个同步组处理的session个数。</td>
-      <td>取值范围为(0，session_num]，session_num表示待处理数据的最大会话数，即调用示例中结构体ScheduleContext中CommonArea域的session_num字段。</td>
+      <td>取值范围为(0，session_num]，session_num表示待处理数据的最大会话数，即调用示例中结构体ScheduleContext中CommonArea域的session_num字段，且session_num必须能被同步组大小整除。</td>
       <td>INT32</td>
       <td>-</td>
       <td>-</td>

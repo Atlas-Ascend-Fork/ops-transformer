@@ -149,7 +149,7 @@ $$
       <td>sync_group_size</td>
       <td>属性</td>
       <td>每个同步组处理的session个数。</td>
-      <td>取值范围为(0，session_num]，session_num表示待处理数据的最大会话数。</td>
+      <td>取值范围为(0，session_num]，session_num表示待处理数据的最大会话数，且session_num必须能被同步组大小整除。</td>
       <td>Int</td>
       <td>-</td>
       <td>-</td>
