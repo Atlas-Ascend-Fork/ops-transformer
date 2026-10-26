@@ -220,7 +220,7 @@ __aicore__ inline void MoeV3CutOriginT<T>::Init(GM_ADDR x, GM_ADDR expertIdx, GM
         expandedXInt8Gm_.SetGlobalBuffer((__gm__ int8_t*)expandedX);
     }
     expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t*)expandedRowIdx);
-    if (expertTokensNumFlag_ != EXERPT_TOKENS_NONE) {
+    if (expertTokensNumFlag_ != EXPERT_TOKENS_NONE) {
         expertTokensGm_.SetGlobalBuffer((__gm__ int64_t*)expertTokens);
     }
     if (isInputScale_) {
@@ -349,7 +349,7 @@ __aicore__ inline void MoeV3CutOriginT<T>::Process()
 
     // // // // ======= Phase B: Global reduce + offset (all cores parallel) =======
     ComputeGlobalOffset();
-    if (expertTokensNumFlag_ != EXERPT_TOKENS_NONE) {
+    if (expertTokensNumFlag_ != EXPERT_TOKENS_NONE) {
         WriteExpertTokens();
     }
 
@@ -666,11 +666,11 @@ __aicore__ inline void MoeV3CutOriginT<T>::ComputeGlobalOffset()
 template <typename T>
 __aicore__ inline void MoeV3CutOriginT<T>::WriteExpertTokens()
 {
-    if (blockIdx_ == 0 && expertTokensNumFlag_ != EXERPT_TOKENS_NONE) {
+    if (blockIdx_ == 0 && expertTokensNumFlag_ != EXPERT_TOKENS_NONE) {
         LocalTensor<int32_t> totalCountLocal = buf_.Get<int32_t>()[totalCountLocalOffset_ / sizeof(int32_t)];
         LocalTensor<int64_t> expertTokensLocal = buf_.Get<int64_t>()[expertTokensLocalOffset_ / sizeof(int64_t)];
 
-        if (expertTokensNumType_ == EXERPT_TOKENS_COUNT) {
+        if (expertTokensNumType_ == EXPERT_TOKENS_COUNT) {
             Cast(expertTokensLocal, totalCountLocal, RoundMode::CAST_NONE, static_cast<int32_t>(actualExpertNum_));
             PipeBarrier<PIPE_V>();
             SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
@@ -678,7 +678,7 @@ __aicore__ inline void MoeV3CutOriginT<T>::WriteExpertTokens()
                                          static_cast<uint32_t>(actualExpertNum_ * sizeof(int64_t)), 0, 0, 0};
             DataCopyPad(expertTokensGm_, expertTokensLocal, copyParams);
 
-        } else if (expertTokensNumType_ == EXERPT_TOKENS_CUMSUM) {
+        } else if (expertTokensNumType_ == EXPERT_TOKENS_CUMSUM) {
             SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
             int64_t cumsum = 0;
             for (int64_t e = 0; e < actualExpertNum_; e++) {
@@ -690,7 +690,7 @@ __aicore__ inline void MoeV3CutOriginT<T>::WriteExpertTokens()
                                          static_cast<uint32_t>(actualExpertNum_ * sizeof(int64_t)), 0, 0, 0};
             DataCopyPad(expertTokensGm_, expertTokensLocal, copyParams);
 
-        } else if (expertTokensNumType_ == EXERPT_TOKENS_KEY_VALUE) {
+        } else if (expertTokensNumType_ == EXPERT_TOKENS_KEY_VALUE) {
             int64_t kvTotalElements = (actualExpertNum_ + 1) * 2;
             Duplicate(expertTokensLocal.ReinterpretCast<int32_t>(), static_cast<int32_t>(0),
                       static_cast<int32_t>(kvTotalElements * 2));

@@ -247,7 +247,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
     // Counting sort optimization: intercept gather-first four tiling keys
     if (TILING_KEY_IS(MOE_INIT_ROUTING_V3_GATHER_SORTONECORE_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_GATHER_SORTONECORE_SCATTER)) {
-        bool useCountingSort = (t->dropPadMode == 0 && t->expertTokensNumType == EXERPT_TOKENS_COUNT &&
+        bool useCountingSort = (t->dropPadMode == 0 && t->expertTokensNumType == EXPERT_TOKENS_COUNT &&
                                 t->quantMode == -1 && t->actualExpertNum <= 128 &&
                                 !(t->n <= COUNTING_SORT_THRESHOLD && t->rowIdxType == SCATTER &&
                                   (t->expertEnd - t->expertStart) <= PERFORMANCE_MODE_RANGE_MAX));
@@ -267,7 +267,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_GATHER_SORTMULTICORE_SCATTER)) {
         bool useCountingSort =
             (!(t->n <= COUNTING_SORT_THRESHOLD && t->rowIdxType == SCATTER && t->quantMode == -1 &&
-               t->expertTokensNumType == EXERPT_TOKENS_COUNT &&
+               t->expertTokensNumType == EXPERT_TOKENS_COUNT &&
                (t->expertEnd - t->expertStart) <= PERFORMANCE_MODE_RANGE_MAX && t->k == 8 && t->expertNum == 256));
         if (useCountingSort) {
             // Non-FullLoad counting sort (prefill large T)
@@ -370,7 +370,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
         }
 
     } else {
-        if (t->dropPadMode == 1 || t->ep == 1 || t->expertTokensNumFlag != EXERPT_TOKENS_NONE) {
+        if (t->dropPadMode == 1 || t->ep == 1 || t->expertTokensNumFlag != EXPERT_TOKENS_NONE) {
             TPipe histogramPipe;
             if (t->expertTokensNumType == CUMSUM_MODE) {
                 ExpertTokensCount<CUMSUM_MODE> countOp;

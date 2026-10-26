@@ -264,8 +264,8 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
             GlobalTensor<int64_t> expertTokensCountGm;
             TBuf<TPosition::VECCALC> zeroBuf;
             TPipe pipe;
-            int32_t expertCountElements = (t->expertTokensNumType == EXERPT_TOKENS_KEY_VALUE) ?
-                                              static_cast<int32_t>(t->expertNum * EXERPT_TOKENS_KEY_VALUE) :
+            int32_t expertCountElements = (t->expertTokensNumType == EXPERT_TOKENS_KEY_VALUE) ?
+                                              static_cast<int32_t>(t->expertNum * EXPERT_TOKENS_KEY_VALUE) :
                                               static_cast<int32_t>(t->actualExpertNum);
             expertTokensCountGm.SetGlobalBuffer((__gm__ int64_t*)expertTokensCountOrCumsum, expertCountElements);
             pipe.InitBuffer(zeroBuf, AlignBytes(expertCountElements, sizeof(int64_t)));

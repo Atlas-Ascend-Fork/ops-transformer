@@ -274,7 +274,7 @@ __aicore__ inline void ExpertTokensCount<HISTOGRAMTYPE>::Compute(int64_t curLoop
             }
         }
     } else {
-        if constexpr (HISTOGRAMTYPE == EXERPT_TOKENS_CUMSUM) {
+        if constexpr (HISTOGRAMTYPE == EXPERT_TOKENS_CUMSUM) {
             for (int64_t j = lastlastExpertId; j < expertEnd_; j++) {
                 expertCountOutLocal.SetValue(j - expertStart_, loopTokenCount);
             }

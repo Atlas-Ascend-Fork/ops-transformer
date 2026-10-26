@@ -134,8 +134,8 @@ __aicore__ inline void MoeV3FullLoadBase<T>::Init(GM_ADDR expertIdx, GM_ADDR exp
         expertTokensCountOrCumsumGm_.SetGlobalBuffer((__gm__ int64_t*)expertTokensCountOrCumsum);
     }
 
-    if (expertTokensNumType_ == EXERPT_TOKENS_KEY_VALUE) {
-        expertCountElements_ = expertNum_ * EXERPT_TOKENS_KEY_VALUE;
+    if (expertTokensNumType_ == EXPERT_TOKENS_KEY_VALUE) {
+        expertCountElements_ = expertNum_ * EXPERT_TOKENS_KEY_VALUE;
     } else {
         expertCountElements_ = actualExpertNum_;
     }
@@ -376,7 +376,7 @@ __aicore__ inline void MoeV3FullLoadBase<T>::CopyOutDefaultTokenCountOrCumsum()
 {
     LocalTensor<int64_t> expertTokensOut = expertTokensCopyOutQueue_.AllocTensor<int64_t>();
     Duplicate(expertTokensOut.ReinterpretCast<int32_t>(), static_cast<int32_t>(0),
-              static_cast<int32_t>(expertCountElements_ * EXERPT_TOKENS_KEY_VALUE));
+              static_cast<int32_t>(expertCountElements_ * EXPERT_TOKENS_KEY_VALUE));
     SetWaitFlag<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     DataCopyExtParams copyParams{static_cast<uint16_t>(1),
                                  static_cast<uint32_t>(expertCountElements_ * sizeof(int64_t)), 0, 0, 0};
@@ -428,7 +428,7 @@ __aicore__ inline void MoeV3FullLoadBase<T>::ComputeExpertTokenCountOrCumsum()
     LocalTensor<int32_t> expandedExpertIdx = expandedExpertIdxCopyOutQueue_.DeQue<int32_t>();
     LocalTensor<int64_t> expertTokensOut = expertTokensCopyOutQueue_.AllocTensor<int64_t>();
     Duplicate(expertTokensOut.ReinterpretCast<int32_t>(), static_cast<int32_t>(0),
-              static_cast<int32_t>(expertCountElements_ * EXERPT_TOKENS_KEY_VALUE));
+              static_cast<int32_t>(expertCountElements_ * EXPERT_TOKENS_KEY_VALUE));
     SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
     int64_t i = 0;
     int32_t lastExpertId = expandedExpertIdx.GetValue(0);
@@ -443,11 +443,11 @@ __aicore__ inline void MoeV3FullLoadBase<T>::ComputeExpertTokenCountOrCumsum()
         int32_t curExpertId = expandedExpertIdx.GetValue(i);
         if (curExpertId != lastExpertId || curExpertId >= expertEnd_) {
             int64_t expertOffset = lastExpertId - expertStart_;
-            if (expertTokensNumType_ == EXERPT_TOKENS_KEY_VALUE) {
-                expertTokensOut.SetValue(Offset * EXERPT_TOKENS_KEY_VALUE, lastExpertId);
-                expertTokensOut.SetValue(Offset * EXERPT_TOKENS_KEY_VALUE + 1, i - lastIndex);
+            if (expertTokensNumType_ == EXPERT_TOKENS_KEY_VALUE) {
+                expertTokensOut.SetValue(Offset * EXPERT_TOKENS_KEY_VALUE, lastExpertId);
+                expertTokensOut.SetValue(Offset * EXPERT_TOKENS_KEY_VALUE + 1, i - lastIndex);
                 Offset += 1;
-            } else if (expertTokensNumType_ == EXERPT_TOKENS_COUNT) {
+            } else if (expertTokensNumType_ == EXPERT_TOKENS_COUNT) {
                 expertTokensOut.SetValue(expertOffset, i - lastIndex);
             } else {
                 for (int64_t j = lastLastId; j < lastExpertId; j++) {
@@ -463,10 +463,10 @@ __aicore__ inline void MoeV3FullLoadBase<T>::ComputeExpertTokenCountOrCumsum()
     }
     if ((i == actual_idx_num_) && ((lastExpertId >= expertStart_) && (lastExpertId < expertEnd_))) {
         int64_t expertOffset = lastExpertId - expertStart_;
-        if (expertTokensNumType_ == EXERPT_TOKENS_KEY_VALUE) {
-            expertTokensOut.SetValue(Offset * EXERPT_TOKENS_KEY_VALUE, lastExpertId);
-            expertTokensOut.SetValue(Offset * EXERPT_TOKENS_KEY_VALUE + 1, i - lastIndex);
-        } else if (expertTokensNumType_ == EXERPT_TOKENS_COUNT) {
+        if (expertTokensNumType_ == EXPERT_TOKENS_KEY_VALUE) {
+            expertTokensOut.SetValue(Offset * EXPERT_TOKENS_KEY_VALUE, lastExpertId);
+            expertTokensOut.SetValue(Offset * EXPERT_TOKENS_KEY_VALUE + 1, i - lastIndex);
+        } else if (expertTokensNumType_ == EXPERT_TOKENS_COUNT) {
             expertTokensOut.SetValue(expertOffset, i - lastIndex);
         } else {
             for (int64_t j = lastLastId; j < lastExpertId; j++) {
@@ -479,7 +479,7 @@ __aicore__ inline void MoeV3FullLoadBase<T>::ComputeExpertTokenCountOrCumsum()
             }
         }
     } else {
-        if (expertTokensNumType_ == EXERPT_TOKENS_CUMSUM) {
+        if (expertTokensNumType_ == EXPERT_TOKENS_CUMSUM) {
             for (int64_t j = lastLastId; j < expertEnd_; j++) {
                 expertTokensOut.SetValue(j - expertStart_, tokenCount);
             }

@@ -162,7 +162,7 @@ __aicore__ inline void MoeV3FullLoadCutOriginT<T>::Init(GM_ADDR x, GM_ADDR exper
     expandedXGm_.SetGlobalBuffer((__gm__ T*)expandedX);
     expandedRowIdxGm_.SetGlobalBuffer((__gm__ int32_t*)expandedRowIdx);
     workspaceGm_.SetGlobalBuffer((__gm__ int32_t*)workspace);
-    if (expertTokensNumFlag_ != EXERPT_TOKENS_NONE) {
+    if (expertTokensNumFlag_ != EXPERT_TOKENS_NONE) {
         expertTokensGm_.SetGlobalBuffer((__gm__ int64_t*)expertTokens);
     }
     if (isInputScale_) {
@@ -266,7 +266,7 @@ __aicore__ inline void MoeV3FullLoadCutOriginT<T>::Process()
     // ======= Phase B: Global reduce + offset computation (all cores parallel) =======
     ComputeGlobalOffset();
     // Modification 5: Only write expert tokens when flag is set
-    if (expertTokensNumFlag_ != EXERPT_TOKENS_NONE) {
+    if (expertTokensNumFlag_ != EXPERT_TOKENS_NONE) {
         WriteExpertTokens();
     }
 
@@ -455,7 +455,7 @@ __aicore__ inline void MoeV3FullLoadCutOriginT<T>::ComputeGlobalOffset()
         int32_t totalForExpert = totalForExpertArr[e];
         int32_t prefixForExpert = prefixSumLocal.GetValue(e);
 
-        if (blockIdx_ == 0 && expertTokensNumFlag_ != EXERPT_TOKENS_NONE) {
+        if (blockIdx_ == 0 && expertTokensNumFlag_ != EXPERT_TOKENS_NONE) {
             expertTokensLocal.SetValue(e, static_cast<int64_t>(totalForExpert));
         }
 

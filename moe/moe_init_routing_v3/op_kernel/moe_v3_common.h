@@ -51,10 +51,10 @@ static constexpr int64_t NO_SCALE = 0;
 static constexpr int64_t SCALE_1H = 1;
 static constexpr int64_t SCALE_EH = 2;
 
-constexpr int64_t EXERPT_TOKENS_CUMSUM = 0;
-constexpr int64_t EXERPT_TOKENS_COUNT = 1;
-constexpr int64_t EXERPT_TOKENS_KEY_VALUE = 2;
-constexpr int64_t EXERPT_TOKENS_NONE = 0;
+constexpr int64_t EXPERT_TOKENS_CUMSUM = 0;
+constexpr int64_t EXPERT_TOKENS_COUNT = 1;
+constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
+constexpr int64_t EXPERT_TOKENS_NONE = 0;
 constexpr int64_t COUNTING_SORT_THRESHOLD = 1536;
 constexpr int64_t PERFORMANCE_MODE_RANGE_MAX = 32;
 
