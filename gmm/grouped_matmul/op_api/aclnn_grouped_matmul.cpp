@@ -2470,6 +2470,7 @@ static aclnnStatus DataContiguous(const aclTensorList*& tensors, aclOpExecutor* 
     const aclTensor* contiguousTensor = nullptr;
     for (size_t i = 0; i < tensors->Size(); ++i) {
         const aclTensor* tensor = (*tensors)[i];
+        CHECK_COND(tensor != nullptr, ACLNN_ERR_PARAM_NULLPTR, "Tensor[%lu] is null, which is not supported.", i);
         contiguousTensor = l0op::Contiguous(tensor, executor);
         CHECK_RET(contiguousTensor != nullptr, ACLNN_ERR_INNER_NULLPTR);
         tensorsVec.push_back(contiguousTensor);
@@ -3197,7 +3198,6 @@ static aclnnStatus PrepareGmmParams(gmm::GroupedMatmulParams& gmmParams, const a
     if (IsNpuArch3510Series()) {
         // Check elements before reading scale dtype or normalizing empty optional inputs.
         CHECK_RET_CODE(CheckOptionalTensorListNotNull(gmmParams.biasOptional, "bias"), "Invalid bias tensor list.");
-        CHECK_RET_CODE(CheckOptionalTensorListNotNull(gmmParams.scaleOptional, "scale"), "Invalid scale tensor list.");
         CHECK_RET_CODE(CheckOptionalTensorListNotNull(gmmParams.offsetOptional, "offset"),
                        "Invalid offset tensor list.");
         CHECK_RET_CODE(CheckOptionalTensorListNotNull(gmmParams.antiquantScaleOptional, "antiquantScale"),
@@ -3207,6 +3207,7 @@ static aclnnStatus PrepareGmmParams(gmm::GroupedMatmulParams& gmmParams, const a
         CHECK_RET_CODE(CheckOptionalTensorListNotNull(gmmParams.perTokenScaleOptional, "perTokenScale"),
                        "Invalid perTokenScale tensor list.");
     }
+    CHECK_RET_CODE(CheckOptionalTensorListNotNull(gmmParams.scaleOptional, "scale"), "Invalid scale tensor list.");
     if (gmmParams.scaleOptional != nullptr) {
         for (size_t i = 0; i < gmmParams.scaleOptional->Size(); i++) {
             if ((*gmmParams.scaleOptional)[i]->GetDataType() == DataType::DT_INT64) {
