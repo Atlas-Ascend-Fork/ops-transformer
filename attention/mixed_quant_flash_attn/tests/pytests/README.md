@@ -23,14 +23,12 @@ pytest/
 │   ├── functional_stc.py                # STC 功能用例
 │   └── functional_rdv.py                # RDV 功能用例
 │
-├── data/
-│   └── <testset>/                       # 默认 functional_stc；按用例名分子目录
-│       └── <case_safe>/                 # 例 functional_stc_fp4e2m1_stc_bnsd_bf16
-│           ├── <case_safe>_input.pt     # gen 阶段产物
-│           ├── <case_safe>_cpu.pt       # cpu 阶段产物
-│           └── <case_safe>_npu.pt       # npu 阶段产物
-└── tools/
-    └── precision_analysis.py            # 离线精度分析工具
+└── data/
+    └── <testset>/                       # 默认 functional_stc；按用例名分子目录
+        └── <case_safe>/                 # 例 functional_stc_fp4e2m1_stc_bnsd_bf16
+            ├── <case_safe>_input.pt     # gen 阶段产物
+            ├── <case_safe>_cpu.pt       # cpu 阶段产物
+            └── <case_safe>_npu.pt       # npu 阶段产物
 ```
 
 ## 核心流程
@@ -149,12 +147,6 @@ pytest test_mixed_quant_flash_attn.py -m func_stc --mode gen -n 4
 
 # CPU golden 单独跑（无需 pytest）
 python core/cpu.py --input_dir data/functional_stc/functional_stc_fp4e2m1_stc_bnsd_bf16
-
-# 离线精度分析（独立工具）
-python tools/precision_analysis.py \
-    --cpu_pt data/functional_stc/functional_stc_fp4e2m1_stc_bnsd_bf16/functional_stc_fp4e2m1_stc_bnsd_bf16_cpu.pt \
-    --npu_pt data/functional_stc/functional_stc_fp4e2m1_stc_bnsd_bf16/functional_stc_fp4e2m1_stc_bnsd_bf16_npu.pt \
-    --output_dir ./analysis
 ```
 
 ### 命令行参数

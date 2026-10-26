@@ -180,9 +180,6 @@ transformer-2@ops-transformer:
                 - ops/ops-transformer/attention/quant_sparse_flash_mla/tests/
                 - ops/ops-transformer/attention/quant_sparse_flash_mla/docs/
                 - ops/ops-transformer/attention/quant_sparse_flash_mla/examples/
-                - ops/ops-transformer/attention/mixed_quant_flash_attn/tests/
-                - ops/ops-transformer/attention/mixed_quant_flash_attn/docs/
-                - ops/ops-transformer/attention/mixed_quant_flash_attn/examples/
                 - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/tests/
                 - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/docs/
                 - ops/ops-transformer/attention/mixed_quant_sparse_flash_mla/examples/
@@ -450,6 +447,9 @@ transformer-quant@ops-transformer:
                 - ops/ops-transformer/attention/quant_compressor/op_kernel/arch35/vf/vf_softmax_quant_compressor.h
                 - ops/ops-transformer/attention/quant_compressor/op_kernel/arch35/vf/vf_dequant_quant_compressor.h
                 - ops/ops-transformer/attention/quant_compressor/op_kernel/quant_compressor.cpp
+                - ops/ops-transformer/attention/mixed_quant_flash_attn/op_host/
+                - ops/ops-transformer/attention/mixed_quant_flash_attn/op_kernel/
+                - ops/ops-transformer/attention/mixed_quant_flash_attn/op_api/
             opensource_style: null
             kernel_style: null
         unrelease:
@@ -458,6 +458,9 @@ transformer-quant@ops-transformer:
                 - ops/ops-transformer/attention/quant_compressor/examples
                 - ops/ops-transformer/attention/quant_compressor/README.md
                 - ops/ops-transformer/attention/quant_compressor/tests
+                - ops/ops-transformer/attention/mixed_quant_flash_attn/tests/
+                - ops/ops-transformer/attention/mixed_quant_flash_attn/docs/
+                - ops/ops-transformer/attention/mixed_quant_flash_attn/examples/
             non_delivery: null
             open_source: null
     llt:
