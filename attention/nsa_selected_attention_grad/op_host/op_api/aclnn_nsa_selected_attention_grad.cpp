@@ -286,7 +286,10 @@ aclnnStatus aclnnNsaSelectedAttentionGradGetWorkspaceSize(
                                           dvOut};
     // check params
     aclnnStatus ret = CheckParams(params);
-    CHECK_COND(ret == ACLNN_SUCCESS, ret, "aclnnNsaSelectedAttentionGradGetWorkspaceSize checkParams failed.");
+    if (ret != ACLNN_SUCCESS) {
+        OP_LOGE_WITHOUT_REPORT(ret, "aclnnNsaSelectedAttentionGradGetWorkspaceSize checkParams failed. ret=%d.", ret);
+        return ret;
+    }
     CheckFormatValid(params);
     // create OpExecutor
     auto uniqueExecutor = CREATE_EXECUTOR();
@@ -298,7 +301,10 @@ aclnnStatus aclnnNsaSelectedAttentionGradGetWorkspaceSize(
     }
     // call l0 interface
     ret = ContiguousAndNsaSelectedAttentionGrad(params, uniqueExecutor.get(), dqOut, dkOut, dvOut);
-    CHECK_COND(ret == ACLNN_SUCCESS, ret, "ContiguousAndNsaSelectedAttentionGrad failed.");
+    if (ret != ACLNN_SUCCESS) {
+        OP_LOGE_WITHOUT_REPORT(ret, "ContiguousAndNsaSelectedAttentionGrad failed. ret=%d.", ret);
+        return ret;
+    }
     // get workspace size
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
     uniqueExecutor.ReleaseTo(executor);

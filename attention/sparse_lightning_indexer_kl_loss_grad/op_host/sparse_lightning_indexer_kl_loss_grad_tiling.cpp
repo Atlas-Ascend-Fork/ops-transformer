@@ -1,3 +1,4 @@
+#include "log/log.h"
 /* *
  * Copyright (c) 2026 Huawei Technologies Co., Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
@@ -55,12 +56,17 @@ static ge::graphStatus CheckRequiredInputsNotEmpty(gert::TilingContext* context)
 
     for (size_t inputIdx = 0; inputIdx < sizeof(requiredInputIndices) / sizeof(requiredInputIndices[0]); ++inputIdx) {
         const gert::StorageShape* inputShape = context->GetInputShape(requiredInputIndices[inputIdx]);
-        OP_CHECK_NULL_WITH_CONTEXT(context, inputShape);
+        OP_CHECK_IF(inputShape == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), requiredInputNames[inputIdx],
+                                                             "required input shape is missing"),
+                    return ge::GRAPH_FAILED);
         const gert::Shape& storageShape = inputShape->GetStorageShape();
         for (size_t axis = 0; axis < storageShape.GetDimNum(); ++axis) {
             OP_CHECK_IF(storageShape.GetDim(axis) == 0,
-                        OP_LOGE(context, "Input %s has an empty dimension at axis %zu, which is not supported.",
-                                requiredInputNames[inputIdx], axis),
+                        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                            context->GetNodeName(), requiredInputNames[inputIdx],
+                            std::to_string(storageShape.GetDim(axis)).c_str(),
+                            ("empty dimension at axis " + std::to_string(axis) + " is not supported").c_str()),
                         return ge::GRAPH_FAILED);
         }
     }
@@ -72,9 +78,10 @@ ge::graphStatus TilingSparseLightningIndexerKLLossGrad(gert::TilingContext* cont
     if (context == nullptr) {
         return ge::GRAPH_FAILED;
     }
-    OP_CHECK_IF(CheckRequiredInputsNotEmpty(context) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context, "SparseLightningIndexerKLLossGrad does not support empty input tensors."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        CheckRequiredInputsNotEmpty(context) != ge::GRAPH_SUCCESS,
+        OP_LOGE_WITHOUT_REPORT(context, "SparseLightningIndexerKLLossGrad does not support empty input tensors."),
+        return ge::GRAPH_FAILED);
 
     auto platformInfoPtr = context->GetPlatformInfo();
     auto sligPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
@@ -96,7 +103,11 @@ ge::graphStatus TilingPrepareForSparseLightningIndexerKLLossGrad(gert::TilingPar
 {
     OP_LOGW(context, "Start registering tiling.");
     auto compileInfoPtr = context->GetCompiledInfo<SparseLightningIndexerKLLossGradCompileInfo>();
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context, "compileInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(compileInfoPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(), "compileInfoPtr is null"})),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }

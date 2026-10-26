@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "log/log.h"
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -43,22 +44,51 @@ ge::graphStatus InferShapeSparseLightningIndexerKLLossGrad(gert::InferShapeConte
     }
 
     const gert::Shape* qShape = context->GetInputShape(qEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, qShape);
+    OP_CHECK_IF(qShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "q",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* kShape = context->GetInputShape(kEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kShape);
+    OP_CHECK_IF(kShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "k",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* wShape = context->GetInputShape(wEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, wShape);
+    OP_CHECK_IF(wShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "w",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* softmaxShape = context->GetInputShape(attnSoftmaxL1NormEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, softmaxShape);
+    OP_CHECK_IF(softmaxShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "attn_softmax_l1_norm",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* dqShape = context->GetOutputShape(dqEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dqShape);
+    OP_CHECK_IF(dqShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "dq is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     gert::Shape* dkShape = context->GetOutputShape(dkEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dkShape);
+    OP_CHECK_IF(dkShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "dk is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     gert::Shape* dwShape = context->GetOutputShape(dwEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dwShape);
+    OP_CHECK_IF(dwShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "dw is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     gert::Shape* softmaxOutShape = context->GetOutputShape(softmaxOutEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, softmaxOutShape);
+    OP_CHECK_IF(
+        softmaxOutShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            "softmax_out is null; InferShape cannot continue"})),
+        return ge::GRAPH_FAILED);
 
     *dqShape = *qShape;
     *dkShape = *kShape;

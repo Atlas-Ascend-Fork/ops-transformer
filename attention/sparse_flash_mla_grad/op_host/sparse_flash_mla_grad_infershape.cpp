@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "log/log.h"
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -67,38 +68,76 @@ enum class AttrIndex : uint32_t {
 
 ge::graphStatus InferShape4SparseFlashMlaGrad(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashMlaGrad", "InferShapeContext is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"SparseFlashMlaGrad", "InferShapeContext is nullptr"})),
+        return ge::GRAPH_FAILED);
     OP_LOGD(context, "Enter InferShape4SparseFlashMlaGrad.");
 
     const gert::Shape* queryShape = context->GetInputShape(static_cast<size_t>(InputIndex::QUERY));
     const gert::Shape* oriKvShape = context->GetInputShape(static_cast<size_t>(InputIndex::ORI_KV));
     const gert::Shape* cmpKvShape = context->GetInputShape(static_cast<size_t>(InputIndex::CMP_KV));
     const gert::Shape* sinksShape = context->GetOptionalInputShape(static_cast<size_t>(InputIndex::SINKS));
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, oriKvShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, cmpKvShape);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "query",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(oriKvShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "ori_kv",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(cmpKvShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "cmp_kv",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
     auto scaleValue = attrs->GetFloat(static_cast<size_t>(AttrIndex::SCALE_VALUE));
     auto cmpRatio = attrs->GetInt(static_cast<size_t>(AttrIndex::CMP_RATIO));
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
-    OP_CHECK_NULL_WITH_CONTEXT(context, scaleValue);
-    OP_CHECK_NULL_WITH_CONTEXT(context, cmpRatio);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "attributes",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(scaleValue == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "scale_value",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(cmpRatio == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "cmp_ratio",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* dqShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DQ));
     gert::Shape* dOriKvShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DORI_KV));
     gert::Shape* dCmpKvShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DCMP_KV));
-    OP_CHECK_NULL_WITH_CONTEXT(context, dqShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dOriKvShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dCmpKvShape);
+    OP_CHECK_IF(dqShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "dq is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(dOriKvShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "d_ori_kv is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(dCmpKvShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "d_cmp_kv is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     *dqShape = *queryShape;
     *dOriKvShape = *oriKvShape;
     *dCmpKvShape = *cmpKvShape;
 
     if (sinksShape != nullptr) {
         gert::Shape* dSinksShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DSINKS));
-        OP_CHECK_NULL_WITH_CONTEXT(context, dSinksShape);
+        OP_CHECK_IF(
+            dSinksShape == nullptr,
+            REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                      (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                "d_sinks is null; InferShape cannot continue"})),
+            return ge::GRAPH_FAILED);
         *dSinksShape = *sinksShape;
     }
 
@@ -107,8 +146,11 @@ ge::graphStatus InferShape4SparseFlashMlaGrad(gert::InferShapeContext* context)
 
 ge::graphStatus InferDataType4SparseFlashMlaGrad(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashMlaGrad", "InferDataTypeContext is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"SparseFlashMlaGrad", "InferDataTypeContext is nullptr"})),
+        return ge::GRAPH_FAILED);
     OP_LOGD(context, "Enter InferDataType4SparseFlashMlaGrad.");
 
     auto dtype = context->GetInputDataType(static_cast<size_t>(InputIndex::QUERY));

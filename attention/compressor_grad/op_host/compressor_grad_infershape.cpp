@@ -12,6 +12,7 @@
 #include <register/op_impl_registry.h>
 #include <cstdint>
 #include "log/log.h"
+#include "err/ops_err.h"
 
 using namespace ge;
 
@@ -64,9 +65,15 @@ ge::graphStatus GetCompressorGradShapeDim(const gert::InferShapeContext* context
                                           CompressorGradProtoShapeParam& shapeParam)
 {
     auto xShape = context->GetRequiredInputShape(TOKEN_X_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(
+        xShape == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "x", "required parameter metadata is missing"),
+        return ge::GRAPH_FAILED);
     auto wkvShape = context->GetRequiredInputShape(WEIGHT_KV_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, wkvShape);
+    OP_CHECK_IF(wkvShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "wkv",
+                                                         "required parameter metadata is missing"),
+                return ge::GRAPH_FAILED);
 
     auto xDim = xShape->GetDimNum();
     OP_CHECK_IF((xDim != DIM_NUM_2 && xDim != DIM_NUM_3),
@@ -74,7 +81,11 @@ ge::graphStatus GetCompressorGradShapeDim(const gert::InferShapeContext* context
                 return ge::GRAPH_FAILED);
 
     auto attr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attr);
+    OP_CHECK_IF(attr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "attr is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
     const int64_t* cmpRatioPtr = attr->GetAttrPointer<int64_t>(CMP_RATIO_ATTR_INDEX);
     OP_CHECK_IF((cmpRatioPtr == nullptr),
                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "cmp_ratio", "attr is required"),
@@ -106,13 +117,29 @@ ge::graphStatus SetCompressorGradShapeDim(const CompressorGradProtoShapeParam& s
                                           gert::InferShapeContext* context)
 {
     auto dxShape = context->GetOutputShape(D_X_OUTPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dxShape);
+    OP_CHECK_IF(dxShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "dxShape is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
     auto dWkvShape = context->GetOutputShape(D_WKV_OUTPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dWkvShape);
+    OP_CHECK_IF(dWkvShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "dWkvShape is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
     auto dWgateShape = context->GetOutputShape(D_WGATE_OUTPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dWgateShape);
+    OP_CHECK_IF(dWgateShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "dWgateShape is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
     auto dApeShape = context->GetOutputShape(D_APE_OUTPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dApeShape);
+    OP_CHECK_IF(dApeShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "dApeShape is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
 
     if (!shapeParam.isBsMerge) {
         dxShape->SetDimNum(DIM_NUM_3);
@@ -142,8 +169,11 @@ ge::graphStatus SetCompressorGradShapeDim(const CompressorGradProtoShapeParam& s
 
 ge::graphStatus InferDataTypeCompressorGrad(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("CompressorGrad", "context", "is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"CompressorGrad", "InferDataType context is unavailable"})),
+        return ge::GRAPH_FAILED);
     OP_LOGI(context->GetNodeName(), "Enter CompressorGrad inferDataType impl.");
     context->SetOutputDataType(D_X_OUTPUT_INDEX, context->GetRequiredInputDataType(TOKEN_X_INPUT_INDEX));
     context->SetOutputDataType(D_WKV_OUTPUT_INDEX, context->GetRequiredInputDataType(TOKEN_X_INPUT_INDEX));
@@ -154,19 +184,20 @@ ge::graphStatus InferDataTypeCompressorGrad(gert::InferDataTypeContext* context)
 
 ge::graphStatus InferShapeCompressorGrad(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("CompressorGrad", "context", "is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"CompressorGrad", "InferShape context is unavailable"})),
+        return ge::GRAPH_FAILED);
     OP_LOGI(context->GetNodeName(), "Enter CompressorGrad infershape impl.");
 
     CompressorGradProtoShapeParam shapeParam{};
     auto apiRet = GetCompressorGradShapeDim(context, shapeParam);
-    OP_CHECK_IF((apiRet != GRAPH_SUCCESS),
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "context", "get input shape failed"),
+    OP_CHECK_IF((apiRet != GRAPH_SUCCESS), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "get input shape failed"),
                 return ge::GRAPH_FAILED);
 
     apiRet = SetCompressorGradShapeDim(shapeParam, context);
-    OP_CHECK_IF((apiRet != GRAPH_SUCCESS),
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "context", "set output shape failed"),
+    OP_CHECK_IF((apiRet != GRAPH_SUCCESS), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "set output shape failed"),
                 return ge::GRAPH_FAILED);
     return GRAPH_SUCCESS;
 }

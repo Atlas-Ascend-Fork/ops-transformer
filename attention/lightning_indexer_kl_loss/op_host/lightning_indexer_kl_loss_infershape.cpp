@@ -26,11 +26,18 @@ static ge::graphStatus InferShapeLightningIndexerKLLoss(gert::InferShapeContext*
 
     // get input shapes
     const gert::Shape* targetScoreShape = context->GetInputShape(IDX_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, targetScoreShape);
+    OP_CHECK_IF(targetScoreShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "target_score",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     // get output shapes
     gert::Shape* lossShape = context->GetOutputShape(IDX_0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, lossShape);
+    OP_CHECK_IF(lossShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "loss is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
 
     // 填充输出shape大小
     auto targetScoreShapeSize = targetScoreShape->GetDimNum();

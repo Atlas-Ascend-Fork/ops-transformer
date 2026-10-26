@@ -59,8 +59,10 @@ const aclTensor* SparseFlashMlaGradMetadata(
         OP_ATTR(numHeadsQ, numHeadsKv, headDim, batchSize, maxSeqlenQ, maxSeqlenOriKv, maxSeqlenCmpKv, oriTopk, cmpTopk,
                 cmpRatio, oriMaskMode, cmpMaskMode, oriWinLeft, oriWinRight, layoutQOptional, layoutKvOptional,
                 hasOriKv, hasCmpKv, socVersion, aicCoreNum, aivCoreNum));
+    // MakeOpArgContext and AicpuTaskSpace::GetOrCreateTask own the first error.
+    // Preserve it for both argument-construction and task-initialization failures.
     OP_CHECK(ret == ACL_SUCCESS,
-             OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "SparseFlashMlaGradMetadata ADD_TO_LAUNCHER_LIST_AICPU failed."),
+             OP_LOGE_WITHOUT_REPORT(ret, "SparseFlashMlaGradMetadata ADD_TO_LAUNCHER_LIST_AICPU failed, ret=%d.", ret),
              return nullptr);
     return metaData;
 }

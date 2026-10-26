@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "log/log.h"
 #include "sparse_flash_attention_grad_tiling.h"
 #include <register/op_impl_registry.h>
 #include "op_host/data_copy_transpose_tiling.h"
@@ -40,14 +41,23 @@ ASCENDC_EXTERN_C ge::graphStatus TilingSparseFlashAttentionGrad(gert::TilingCont
 
 ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForSparseFlashAttentionGrad(gert::TilingParseContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttentionGrad", "context is null."), return ge::GRAPH_FAILED);
-    fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "platformInfoPtr is null."),
+    OP_CHECK_IF(context == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"SparseFlashAttentionGrad", "context is null."})),
                 return ge::GRAPH_FAILED);
+    fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
+    OP_CHECK_IF(
+        platformInfoPtr == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{context->GetNodeName(), "platformInfoPtr is null."})),
+        return ge::GRAPH_FAILED);
 
     auto compileInfoPtr = context->GetCompiledInfo<SparseFlashAttentionGradCompileInfo>();
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "compileInfoPtr is null."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        compileInfoPtr == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{context->GetNodeName(), "compileInfoPtr is null."})),
+        return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     compileInfoPtr->aivNum = ascendcPlatform.GetCoreNumAiv();

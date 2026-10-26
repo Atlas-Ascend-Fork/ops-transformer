@@ -49,9 +49,16 @@ bool NsaCompressGradTiling::PreparePlatformInfo()
     if (platformInfoPtr == nullptr) {
         OP_LOGI(context_, "NsaCompressGrad get platformInfo is null.");
         auto compileInfoPtr = context_->GetCompileInfo<NsaCompileInfo>();
-        OP_CHECK_IF(compileInfoPtr == nullptr,
-                    OPS_REPORT_CUBE_INNER_ERR(context_->GetNodeName(), "NsaCompressGrad CompileInfoPtr is null."),
-                    return false);
+        if (compileInfoPtr == nullptr) {
+            // GetCompileInfo may return nullptr per exe_graph tiling_context.h contract;
+            // both platform and compile metadata unavailable is a config/platform loading failure.
+            const std::vector<const char*> msgKey = {"opName", "reason"};
+            const std::vector<const char*> msgValue = {context_->GetNodeName(),
+                                                       "platform info and compile info are both unavailable"};
+            OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "platformInfo and compileInfo are both null.");
+            REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+            return false;
+        }
         aicNum_ = compileInfoPtr->aicNum;
         aivNum_ = compileInfoPtr->aivNum;
         ubMaxSize_ = compileInfoPtr->ubSize;
@@ -79,7 +86,13 @@ bool NsaCompressGradTiling::IsCapable()
 ge::graphStatus NsaCompressGradTiling::DoOpTiling()
 {
     OP_CHECK_IF(!PreparePlatformInfo(),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "NsaCompressGrad SetPlatformInfoForTiling fail."),
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "NsaCompressGrad SetPlatformInfoForTiling fail."),
+                return ge::GRAPH_FAILED);
+
+    OP_CHECK_IF(aivNum_ == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling requires vector cores, but aivNum=0"})),
                 return ge::GRAPH_FAILED);
 
     const auto& outGradShape = GetShapeOfInput(INDEXZERO);
@@ -99,18 +112,33 @@ ge::graphStatus NsaCompressGradTiling::DoOpTiling()
     }
 
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+
+    OP_CHECK_IF(
+        attrs == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{context_->GetNodeName(),
+                                                            "attrs is unavailable during shape inference or tiling"})),
+        return ge::GRAPH_FAILED);
 
     const auto* blockSizePtr = attrs->GetAttrPointer<uint32_t>(INDEXZERO);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, blockSizePtr);
+    OP_CHECK_IF(blockSizePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "compressBlockSize",
+                                                         "required parameter metadata is missing"),
+                return ge::GRAPH_FAILED);
     uint32_t blockSize = *blockSizePtr;
 
     const auto* blockStridePtr = attrs->GetAttrPointer<uint32_t>(INDEXONE);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, blockStridePtr);
+    OP_CHECK_IF(blockStridePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "compressStride",
+                                                         "required parameter metadata is missing"),
+                return ge::GRAPH_FAILED);
     uint32_t blockStride = *blockStridePtr;
 
     const auto* seqLenTypePtr = attrs->GetAttrPointer<uint32_t>(INDEXTWO);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, seqLenTypePtr);
+    OP_CHECK_IF(seqLenTypePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "actSeqLenType",
+                                                         "required parameter metadata is missing"),
+                return ge::GRAPH_FAILED);
     uint32_t seqLenType = *seqLenTypePtr;
 
     tilingData_.set_batchSize(batchSize);
@@ -155,11 +183,9 @@ uint64_t NsaCompressGradTiling::GetTilingKey() const
 
 ge::graphStatus NsaCompressGradTiling::PostTiling()
 {
-    OP_CHECK_IF(!CheckTilingData(), OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "Tiling data not support."),
+    OP_CHECK_IF(!CheckTilingData(), OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "Tiling data not support."),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(aivNum_ == 0, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "Get block dim is 0."),
-                return ge::GRAPH_FAILED);
     context_->SetBlockDim(aivNum_);
 
     context_->SetTilingKey(GetTilingKey());
@@ -186,9 +212,16 @@ ASCENDC_EXTERN_C ge::graphStatus TilingNsaCompressGrad(gert::TilingContext* cont
 ge::graphStatus TilingPrepareForNsaCompressGrad(gert::TilingParseContext* context)
 {
     auto platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfoPtr);
     auto compileInfoPtr = context->GetCompiledInfo<NsaCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfoPtr);
+    if (platformInfoPtr == nullptr || compileInfoPtr == nullptr) {
+        // platform/compile metadata loading failure at tiling-prepare stage
+        std::string reason = "platform info or compile info is unavailable at tiling prepare";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "platformInfoPtr or compileInfoPtr is null.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     compileInfoPtr->aicNum = ascendcPlatform.GetCoreNumAic();
@@ -209,13 +242,22 @@ ge::graphStatus TilingPrepareForNsaCompressGrad(gert::TilingParseContext* contex
 bool NsaCompressGradTiling::CheckTilingData()
 {
     OP_CHECK_IF(tilingData_.get_blockSize() % BLOCK_SIZE_16 != 0,
-                OP_LOGE(context_->GetNodeName(), "Compress block size must be align to 16."), return false);
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "compressBlockSize",
+                                                      std::to_string(tilingData_.get_blockSize()),
+                                                      "compressBlockSize must be a multiple of 16"),
+                return false);
 
     OP_CHECK_IF(tilingData_.get_blockStride() % BLOCK_SIZE_16 != 0,
-                OP_LOGE(context_->GetNodeName(), "Compress block stride must be align to 16."), return false);
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "compressStride",
+                                                      std::to_string(tilingData_.get_blockStride()),
+                                                      "compressStride must be a multiple of 16"),
+                return false);
 
     OP_CHECK_IF(tilingData_.get_dimOfHead() % BLOCK_SIZE_16 != 0,
-                OP_LOGE(context_->GetNodeName(), "Head dim must be align to 16."), return false);
+                OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context_->GetNodeName(), "outputGrad",
+                                                          std::to_string(tilingData_.get_dimOfHead()),
+                                                          "the head dimension (dim 2) must be a multiple of 16"),
+                return false);
 
     return true;
 }

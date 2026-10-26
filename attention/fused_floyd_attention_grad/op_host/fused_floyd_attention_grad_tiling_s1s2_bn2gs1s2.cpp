@@ -125,7 +125,16 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetPlatformInfo()
     auto platformInfoPtr = context_->GetPlatformInfo();
     if (platformInfoPtr == nullptr) {
         auto compileInfoPtr = reinterpret_cast<const FlashAttentionScoreGradCompileInfo*>(context_->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context_, "compile_info is null"), return ge::GRAPH_FAILED);
+        if (compileInfoPtr == nullptr) {
+            // GetCompileInfo may return nullptr per exe_graph tiling_context.h contract;
+            // both platform and compile metadata unavailable is a config/platform loading failure.
+            const std::vector<const char*> msgKey = {"opName", "reason"};
+            const std::vector<const char*> msgValue = {context_->GetNodeName(),
+                                                       "platform info and compile info are both unavailable"};
+            OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "platformInfo and compileInfo are both null.");
+            REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+            return ge::GRAPH_FAILED;
+        }
 
         fBaseParams.coreNum = compileInfoPtr->aivNum;
         fBaseParams.aicNum = compileInfoPtr->aicNum;
@@ -144,13 +153,25 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetPlatformInfo()
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, fBaseParams.l0aSize);
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, fBaseParams.l0cSize);
     }
-    OP_CHECK_IF((fBaseParams.coreNum == 0) || (fBaseParams.aicNum == 0),
-                OP_LOGE(context_, "num of coreNum(aivNum) is %ld, num of aicNum is %ld.", fBaseParams.coreNum,
-                        fBaseParams.aicNum),
-                return ge::GRAPH_FAILED);
+    if ((fBaseParams.coreNum == 0) || (fBaseParams.aicNum == 0)) {
+        std::string reason = "invalid platform core count";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "num of coreNum(aivNum) is %ld, num of aicNum is %ld.",
+                               fBaseParams.coreNum, fBaseParams.aicNum);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
 
     fBaseParams.ubSize -= MATMUL_SIZE;
-    OP_CHECK_IF(fBaseParams.ubSize <= 0, OP_LOGE(context_, "ubSize is invalid."), return ge::GRAPH_FAILED);
+    if (fBaseParams.ubSize <= 0) {
+        std::string reason = "insufficient UB size on the current platform";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "ubSize is invalid.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
 
     return ge::GRAPH_SUCCESS;
 }
@@ -163,9 +184,13 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetBaseShapeInfo()
 
     const char* inputLayout = "BNSD";
 
-    OP_CHECK_IF(queryShape == nullptr, OP_LOGE(context_, "queryShape is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "query", "input shape is missing"),
+                return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(keyShape == nullptr, OP_LOGE(context_, "keyShape is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "key1", "input shape is missing"),
+                return ge::GRAPH_FAILED);
 
     if (strcmp(inputLayout, "BNSD") == 0) {
         OP_LOGD(context_, "inputLayout == BNSD queryShape");
@@ -180,19 +205,32 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetBaseShapeInfo()
                 queryShape->GetStorageShape().GetDim(DIM_0), queryShape->GetStorageShape().GetDim(DIM_1),
                 queryShape->GetStorageShape().GetDim(DIM_2), queryShape->GetStorageShape().GetDim(DIM_3));
     } else {
-        OP_LOGE(context_, "FAG inputLayout is invalid");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context_->GetNodeName(), "unsupported internal input layout"}));
         return ge::GRAPH_FAILED;
     }
-    OP_CHECK_IF(fBaseParams.n2 == 0, OP_LOGE(context_, "n2 is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        fBaseParams.n2 == 0,
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "key1", std::to_string(fBaseParams.n2),
+                                                 "head number must be greater than zero"),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetShapeAttrsInfo()
 {
-    OP_CHECK_IF(context_ == nullptr, OP_LOGE(context_, "context is nullptr."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(context_->GetAttrs() == nullptr, OP_LOGE(context_, "GetAttrs is nullptr."), return ge::GRAPH_FAILED);
-
+    OP_CHECK_IF(
+        context_ == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"FusedFloydAttentionGrad", "context is unavailable"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context_->GetAttrs() == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "attribute container is unavailable"})),
+                return ge::GRAPH_FAILED);
     auto ret = GetBaseShapeInfo();
     if (ret != ge::GRAPH_SUCCESS) {
         return ret;
@@ -210,8 +248,10 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetShapeAttrsInfo()
     fBaseParams.dropMaskSize = fBaseParams.b * fBaseParams.n2 * fBaseParams.g * fBaseParams.s2 * fBaseParams.s1;
 
     // mBaseParams is used for matmal tiling module
-    OP_CHECK_IF(context_->GetInputDesc(QUERY) == nullptr, OP_LOGE(context_, "InputDesc of query is nullptr."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context_->GetInputDesc(QUERY) == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "query", "input descriptor is missing"),
+        return ge::GRAPH_FAILED);
     auto queryType = context_->GetInputDesc(QUERY)->GetDataType();
     fBaseParams.queryType = queryType;
     fBaseParams.isBf16 = queryType == ge::DT_BF16 ? true : false;
@@ -247,9 +287,14 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetShapeAttrsInfo()
 
     fBaseParams.scaleValue = *(context_->GetAttrs()->GetAttrPointer<float>(0));
     fBaseParams.keepProb = 1;
-    OP_CHECK_IF((fBaseParams.keepProb <= 0 || fBaseParams.keepProb > 1), OP_LOGE(context_, "keepProb is illegal."),
-                return ge::GRAPH_FAILED);
 
+    OP_CHECK_IF((fBaseParams.keepProb <= 0 || fBaseParams.keepProb > 1),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        context_->GetNodeName(),
+                        "tiling calculation failed: (fBaseParams.keepProb <= 0 || fBaseParams.keepProb > 1)"})),
+                return ge::GRAPH_FAILED);
     fBaseParams.dropoutIsDivisibleBy8 = 1;
 
     // token_info
@@ -262,8 +307,9 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetShapeAttrsInfo()
         fBaseParams.attenMaskOptional = NORMAL_TENSOR;
         auto attenMaskType = attenMask->GetDataType();
         OP_CHECK_IF(attenMaskType != ge::DT_BOOL && attenMaskType != ge::DT_UINT8,
-                    OP_LOGE(context_, "invalid attenMask dtype[%s], only support bool or uint8.",
-                            ge::TypeUtils::DataTypeToSerialString(attenMaskType).c_str()),
+                    OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "atten_mask",
+                                                          ge::TypeUtils::DataTypeToSerialString(attenMaskType).c_str(),
+                                                          "atten_mask dtype must be DT_BOOL or DT_UINT8"),
                     return ge::GRAPH_FAILED);
         fBaseParams.attenMaskDtype = ATTEN_MASK_TYPE_U8_BOOL;
     }
@@ -327,7 +373,11 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoSplit()
     fBaseParams.tmpBufferSize = tmpBufferSize;
 
     uint32_t s1CvInner = s1Inner * fBaseParams.s1CvRatio;
-    OP_CHECK_IF(s1CvInner == 0, OP_LOGE(context_, "divisor s1CvInner is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(s1CvInner == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: s1CvInner == 0"})),
+                return ge::GRAPH_FAILED);
     int64_t s1Outer = (fBaseParams.s1 + s1CvInner - 1) / s1CvInner;
     uint32_t s1TailTmp = fBaseParams.s1 % s1Inner;
     uint32_t s1CvTailTmp = fBaseParams.s1 % s1CvInner;
@@ -338,7 +388,11 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoSplit()
     fBaseParams.s1Outer = s1Outer;
 
     uint32_t cvS2Inner = s2Inner * fBaseParams.s2CvRatio;
-    OP_CHECK_IF(cvS2Inner == 0, OP_LOGE(context_, "divisor cvS2Inner is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(cvS2Inner == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: cvS2Inner == 0"})),
+                return ge::GRAPH_FAILED);
     int64_t s2Outer = (fBaseParams.s2 + cvS2Inner - 1) / cvS2Inner;
     uint32_t s2TailTmp = fBaseParams.s2 % s2Inner;
     uint32_t s2CvTailTmp = fBaseParams.s2 % cvS2Inner;
@@ -352,12 +406,20 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoSplit()
     fBaseParams.gTail = fBaseParams.g - (fBaseParams.gOuter - 1) * fBaseParams.gInner;
     fBaseParams.baseMN = fBaseParams.gInner * s1Inner * s2Inner;
 
-    OP_CHECK_IF((fBaseParams.baseMN == 0 || fBaseParams.s2Outer == 0 || fBaseParams.s1Outer == 0),
-                OP_LOGE(context_, "baseMN or s2Outer or s1Outer is 0."), return ge::GRAPH_FAILED);
-
+    OP_CHECK_IF(
+        (fBaseParams.baseMN == 0 || fBaseParams.s2Outer == 0 || fBaseParams.s1Outer == 0),
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{context_->GetNodeName(),
+                                                            "tiling calculation failed: (fBaseParams.baseMN == 0 || "
+                                                            "fBaseParams.s2Outer == 0 || fBaseParams.s1Outer == 0)"})),
+        return ge::GRAPH_FAILED);
     uint32_t sfmgdInner = 128; // 先写死
 
-    OP_CHECK_IF(sfmgdInner == 0, OP_LOGE(context_, "divisor sfmgdInner is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(sfmgdInner == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: sfmgdInner == 0"})),
+                return ge::GRAPH_FAILED);
     uint32_t sfmgdOuter = (fBaseParams.d + sfmgdInner - 1) / sfmgdInner;
     uint32_t sfmgdTailTmp = fBaseParams.d % sfmgdInner;
     uint32_t sfmgdTail = sfmgdTailTmp == 0 ? sfmgdInner : sfmgdTailTmp;
@@ -376,11 +438,19 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoSparse()
                          fBaseParams.s1Outer * fBaseParams.s2Outer; // 总块数
     // coreNum前面已做非0校验
     int64_t blockFactor = (fusedOuter + fBaseParams.coreNum - 1) / fBaseParams.coreNum; // 单核块数
-    // 除0校验
-    OP_CHECK_IF(blockFactor == 0, OP_LOGE(context_, "divisor blockFactor is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(blockFactor == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: blockFactor == 0"})),
+                return ge::GRAPH_FAILED);
     int64_t blockOuter = (fusedOuter + blockFactor - 1) / blockFactor; // 实际核数
     // 防止下标越界
-    OP_CHECK_IF(blockOuter > CORE_LIST_NUM, OP_LOGE(context_, "blockStarts and blockEnds array bound."),
+    // kept as internal fallback: guards array overflow if platform core count exceeds internal constant
+    OP_CHECK_IF(blockOuter > CORE_LIST_NUM,
+                OP_LOGE(context_,
+                        "DoSparse: internal core partition invariant failed, blockOuter=%ld, "
+                        "capacity=%u, aivNum=%ld, fusedOuter=%ld; preserve tiling and platform metadata.",
+                        blockOuter, static_cast<unsigned>(CORE_LIST_NUM), fBaseParams.coreNum, fusedOuter),
                 return ge::GRAPH_FAILED);
 
     fBaseParams.blockOuter = blockOuter;
@@ -438,26 +508,58 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoLibApiTiling()
         mm1.SetFixSplit(-1, -1, -1);
     }
 
-    OP_CHECK_IF(mm1.GetTiling(tilingData.mm1TilingData) != 0, OP_LOGE(context_, "matmul1 tilingData get fail."),
-                return ge::GRAPH_FAILED);
+    int tilingRet = mm1.GetTiling(tilingData.mm1TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm1 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "matmul1 tilingData get fail. ret=%d.", tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     SetMatmulTilingBufferInfo(tilingData.mm1TilingData);
 
     matmul_tiling::MatmulApiTiling bmm1k1;
     SetBmm1k1TilingInput(bmm1k1, inputAType);
-    OP_CHECK_IF(bmm1k1.GetTiling(tilingData.bmm1TilingData) != 0, OP_LOGE(context_, "bmm1k1 tilingData get fail."),
-                return ge::GRAPH_FAILED);
+    tilingRet = bmm1k1.GetTiling(tilingData.bmm1TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("bmm1k1 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "bmm1k1 tilingData get fail. ret=%d.", tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     SetMatmulTilingBufferInfo(tilingData.bmm1TilingData);
 
     matmul_tiling::MatmulApiTiling bmm2k1;
     SetBmm2k1TilingInput(bmm2k1, inputAType);
-    OP_CHECK_IF(bmm2k1.GetTiling(tilingData.bmm2TilingData) != 0, OP_LOGE(context_, "bmm2k1 tilingData get fail."),
-                return ge::GRAPH_FAILED);
+    tilingRet = bmm2k1.GetTiling(tilingData.bmm2TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("bmm2k1 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "bmm2k1 tilingData get fail. ret=%d.", tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     SetMatmulTilingBufferInfo(tilingData.bmm2TilingData);
 
     matmul_tiling::MatmulApiTiling bmm3k1v1;
     SetBmm3k1V1TilingInput(bmm3k1v1, inputAType);
-    OP_CHECK_IF(bmm3k1v1.GetTiling(tilingData.bmm3TilingData) != 0, OP_LOGE(context_, "bmm3k1v1 tilingData get fail."),
-                return ge::GRAPH_FAILED);
+    tilingRet = bmm3k1v1.GetTiling(tilingData.bmm3TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("bmm3k1v1 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "bmm3k1v1 tilingData get fail. ret=%d.", tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     SetMatmulTilingBufferInfo(tilingData.bmm3TilingData);
 
     // format left[B, N2, G, S1, S2] right[B, N2, G, S1, D] result[B, N2, G, S2, D]
@@ -475,8 +577,16 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoLibApiTiling()
 
     mm2.SetFixSplit(-1, -1, -1);
 
-    OP_CHECK_IF(mm2.GetTiling(tilingData.mm2TilingData) != 0, OP_LOGE(context_, "matmul2 tilingData get fail."),
-                return ge::GRAPH_FAILED);
+    tilingRet = mm2.GetTiling(tilingData.mm2TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm2 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "matmul2 tilingData get fail. ret=%d.", tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     SetMatmulTilingBufferInfo(tilingData.mm2TilingData);
 
     // format left[B, N2, G, S1, S2] right[B, N2, 1, S2, D] result[B, N2, G, S1, D]
@@ -497,8 +607,16 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoLibApiTiling()
     } else {
         mm3.SetFixSplit(-1, -1, -1);
     }
-    OP_CHECK_IF(mm3.GetTiling(tilingData.mm3TilingData) != 0, OP_LOGE(context_, "matmul3 tilingData get fail."),
-                return ge::GRAPH_FAILED);
+    tilingRet = mm3.GetTiling(tilingData.mm3TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm3 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "matmul3 tilingData get fail. ret=%d.", tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     SetMatmulTilingBufferInfo(tilingData.mm3TilingData);
 
     uint32_t cvS2Inner = fBaseParams.s2Inner * fBaseParams.s2CvRatio;
@@ -592,7 +710,10 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::GetWorkspaceSize()
     size_t* workspaces = context_->GetWorkspaceSizes(1);
     size_t workspaceSize = MUL_CORE_SYNC_BUFFER;
     uint32_t s1Inner = std::min(INITIAL_S1_SPLIT_NUM, fBaseParams.s1Align);
-    OP_CHECK_IF(s1Inner <= 0, OP_LOGE(context_, "s1Inner is less than or equal to 0, s1Inner is %u.", s1Inner),
+    OP_CHECK_IF(s1Inner <= 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: s1Inner <= 0"})),
                 return ge::GRAPH_FAILED);
 
     // matmal3 q
@@ -662,10 +783,11 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::PostTiling()
     SaveToTilingData();
     auto blockdim = CalcTschBlockDim(tilingData.s1s2BNGS1S2SplitCoreParams.get_blockOuter(), fBaseParams.aicNum,
                                      fBaseParams.coreNum);
-    OP_CHECK_IF(
-        blockdim == 0,
-        OP_LOGE(context_, "blockdim is 0, aicNum is %ld, aivNum is %ld.", fBaseParams.aicNum, fBaseParams.coreNum),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(blockdim == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: blockdim == 0"})),
+                return ge::GRAPH_FAILED);
     context_->SetBlockDim(blockdim);
     context_->SetScheduleMode(1);
 
@@ -770,22 +892,41 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoPreTiling()
     tilingData.preTilingData.set_maskTailCoreLoop(tailCoreUBLoop);
     tilingData.preTilingData.set_maskTailCoreLastLoopNum(tailCoreUBLastLoopNum);
 
-    OP_CHECK_IF(maskUsedCoreNum == 0, OP_LOGE(context_, "divisor maskUsedCoreNum is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        maskUsedCoreNum == 0,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: maskUsedCoreNum == 0"})),
+        return ge::GRAPH_FAILED);
     int64_t qPreBlockFactor = (fBaseParams.qSizeAlign + maskUsedCoreNum - 1) / maskUsedCoreNum;
-    OP_CHECK_IF(qPreBlockFactor == 0, OP_LOGE(context_, "divisor qPreBlockFactor is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        qPreBlockFactor == 0,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: qPreBlockFactor == 0"})),
+        return ge::GRAPH_FAILED);
     int64_t qPreBlockTotal = (fBaseParams.qSizeAlign + qPreBlockFactor - 1) / qPreBlockFactor;
     int64_t qPreTailNumTmp = fBaseParams.qSizeAlign % qPreBlockFactor;
     int64_t qPreTailNum = qPreTailNumTmp == 0 ? qPreBlockFactor : qPreTailNumTmp;
 
     int64_t kvPreBlockFactor = (fBaseParams.kvSizeAlign + maskUsedCoreNum - 1) / maskUsedCoreNum;
-    OP_CHECK_IF(kvPreBlockFactor == 0, OP_LOGE(context_, "divisor kvPreBlockFactor is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        kvPreBlockFactor == 0,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: kvPreBlockFactor == 0"})),
+        return ge::GRAPH_FAILED);
     int64_t kvPreBlockTotal = (fBaseParams.kvSizeAlign + kvPreBlockFactor - 1) / kvPreBlockFactor;
     int64_t kvPreTailNumTmp = fBaseParams.kvSizeAlign % kvPreBlockFactor;
     int64_t kvPreTailNum = kvPreTailNumTmp == 0 ? kvPreBlockFactor : kvPreTailNumTmp;
 
     int64_t k1v1PreBlockFactor = (fBaseParams.k1v1SizeAlign + maskUsedCoreNum - 1) / maskUsedCoreNum;
-    OP_CHECK_IF(k1v1PreBlockFactor == 0, OP_LOGE(context_, "divisor k1v1PreBlockFactor is 0."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        k1v1PreBlockFactor == 0,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: k1v1PreBlockFactor == 0"})),
+        return ge::GRAPH_FAILED);
     int64_t k1v1PreBlockTotal = (fBaseParams.k1v1SizeAlign + k1v1PreBlockFactor - 1) / k1v1PreBlockFactor;
     int64_t k1v1PreTailNumTmp = fBaseParams.k1v1SizeAlign % k1v1PreBlockFactor;
     int64_t k1v1PreTailNum = k1v1PreTailNumTmp == 0 ? k1v1PreBlockFactor : k1v1PreTailNumTmp;
@@ -826,9 +967,20 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoPostTiling()
     int64_t qPostBaseNum = fBaseParams.mm2IsNZOut ?
                                (postUbBaseSize / fBaseParams.dataTypeSize / dAlign * fBaseParams.d) :
                                (postUbBaseSize / fBaseParams.dataTypeSize);
-    OP_CHECK_IF(qPostBaseNum == 0, OP_LOGE(context_, "divisor qPostBaseNum is 0."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(fBaseParams.blockOuter == 0, OP_LOGE(context_, "divisor fBaseParams.blockOuter is 0."),
-                return ge::GRAPH_FAILED);
+    if (qPostBaseNum == 0) {
+        std::string reason = "insufficient UB size for the post process on the current platform";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "divisor qPostBaseNum is 0.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
+    OP_CHECK_IF(
+        fBaseParams.blockOuter == 0,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{context_->GetNodeName(),
+                                                            "tiling calculation failed: fBaseParams.blockOuter == 0"})),
+        return ge::GRAPH_FAILED);
     int64_t qPostBlockTotal = fBaseParams.qSize;
     int64_t qPostTailNumTmp = qPostBlockTotal % qPostBaseNum;
     int64_t qPostTailNum = qPostTailNumTmp == 0 ? qPostBaseNum : qPostTailNumTmp;
@@ -836,7 +988,11 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoPostTiling()
     int64_t qPostBlockFactor = (qPostBlockOuterTotal + fBaseParams.blockOuter - 1) / fBaseParams.blockOuter;
 
     int64_t kvPostBaseNum = qPostBaseNum;
-    OP_CHECK_IF(kvPostBaseNum == 0, OP_LOGE(context_, "divisor kvPostBaseNum is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(kvPostBaseNum == 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{context_->GetNodeName(),
+                                                                    "tiling calculation failed: kvPostBaseNum == 0"})),
+                return ge::GRAPH_FAILED);
     int64_t kvPostBlockTotal = fBaseParams.kvSize;
     int64_t kvPostTailNumTmp = kvPostBlockTotal % kvPostBaseNum;
     int64_t kvPostTailNum = kvPostTailNumTmp == 0 ? kvPostBaseNum : kvPostTailNumTmp;
@@ -844,7 +1000,12 @@ ge::graphStatus FusedFloydAttentionGradTilingS1s2Bn2gs1s2::DoPostTiling()
     int64_t kvPostBlockFactor = (kvPostBlockOuterTotal + fBaseParams.blockOuter - 1) / fBaseParams.blockOuter;
 
     int64_t k1v1PostBaseNum = qPostBaseNum;
-    OP_CHECK_IF(k1v1PostBaseNum == 0, OP_LOGE(context_, "divisor k1v1PostBaseNum is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        k1v1PostBaseNum == 0,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: k1v1PostBaseNum == 0"})),
+        return ge::GRAPH_FAILED);
     int64_t k1v1PostBlockTotal = fBaseParams.k1v1Size;
     int64_t k1v1PostTailNumTmp = k1v1PostBlockTotal % k1v1PostBaseNum;
     int64_t k1v1PostTailNum = k1v1PostTailNumTmp == 0 ? k1v1PostBaseNum : k1v1PostTailNumTmp;

@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "log/log.h"
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -55,7 +56,10 @@ enum class AttrIndex : uint32_t {
 
 ge::graphStatus InferShape4SparseFlashAttentionGrad(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttentionGrad", "InferShapeContext is nullptr"),
+    OP_CHECK_IF(context == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"SparseFlashAttentionGrad", "InferShapeContext is nullptr"})),
                 return ge::GRAPH_FAILED);
     OP_LOGD(context, "Enter InferShape4SparseFlashAttentionGrad.");
 
@@ -65,33 +69,63 @@ ge::graphStatus InferShape4SparseFlashAttentionGrad(gert::InferShapeContext* con
     const gert::Shape* sinksShape = context->GetOptionalInputShape(static_cast<size_t>(InputIndex::SINKS));
     const gert::Shape* queryRopeShape = context->GetOptionalInputShape(static_cast<size_t>(InputIndex::Q_ROPE));
     const gert::Shape* keyRopeShape = context->GetOptionalInputShape(static_cast<size_t>(InputIndex::K_ROPE));
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "query",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "key",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "attributes",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     auto scaleValue = attrs->GetInt(static_cast<size_t>(AttrIndex::SCALE_VALUE));
-    OP_CHECK_NULL_WITH_CONTEXT(context, scaleValue);
+    OP_CHECK_IF(scaleValue == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "scale_value",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     auto selectedBlockSize = attrs->GetInt(static_cast<size_t>(AttrIndex::SELECTED_BLOCK_SIZE));
-    OP_CHECK_NULL_WITH_CONTEXT(context, selectedBlockSize);
+    OP_CHECK_IF(selectedBlockSize == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "selected_block_size",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const char* inputLayout = attrs->GetAttrPointer<char>(static_cast<size_t>(AttrIndex::INPUT_LAYOUT));
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayout);
+    OP_CHECK_IF(inputLayout == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "input_layout",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     std::string inputLayoutSfag = std::string(inputLayout);
     for (auto& c : inputLayoutSfag) {
         c = toupper(c);
     }
     if (inputLayoutSfag != "BSND" && inputLayoutSfag != "TND") {
-        OP_LOGE(context, "The SparseFlashAttentionGrad inputLayout should be BSND/TND, but got %s.",
-                inputLayoutSfag.c_str());
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            Ops::Base::GetOpInfo(context).c_str(), "attributes",
+            (std::string() + std::string(inputLayoutSfag.c_str())).c_str(),
+            (std::string() + "The SparseFlashAttentionGrad inputLayout should be BSND/TND, but got " +
+             std::string(inputLayoutSfag.c_str()) + ".")
+                .c_str());
         return GRAPH_FAILED;
     }
 
     gert::Shape* dqShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DQ));
     gert::Shape* dkShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DK));
     gert::Shape* dvShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DV));
-    OP_CHECK_NULL_WITH_CONTEXT(context, dqShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dkShape);
+    OP_CHECK_IF(dqShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "dq is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(dkShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "dk is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     *dqShape = *queryShape;
     *dkShape = *keyShape;
     if (valueShape != nullptr && dvShape != nullptr) {
@@ -100,18 +134,32 @@ ge::graphStatus InferShape4SparseFlashAttentionGrad(gert::InferShapeContext* con
 
     if (queryRopeShape != nullptr) {
         gert::Shape* dqRopeShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DQ_ROPE));
-        OP_CHECK_NULL_WITH_CONTEXT(context, dqRopeShape);
+        OP_CHECK_IF(
+            dqRopeShape == nullptr,
+            REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                      (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                "d_query_rope is null; InferShape cannot continue"})),
+            return ge::GRAPH_FAILED);
         *dqRopeShape = *queryRopeShape;
     }
     if (keyRopeShape != nullptr) {
         gert::Shape* dkRopeShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::DK_ROPE));
-        OP_CHECK_NULL_WITH_CONTEXT(context, dkRopeShape);
+        OP_CHECK_IF(
+            dkRopeShape == nullptr,
+            REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                      (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                "d_key_rope is null; InferShape cannot continue"})),
+            return ge::GRAPH_FAILED);
         *dkRopeShape = *keyRopeShape;
     }
 
     // d_sinks shape 随 sinks：sinks 存在时 = sinks shape ([N1])，否则强制返回空 (shape [0])
     gert::Shape* dSinksShape = context->GetOutputShape(static_cast<size_t>(OutputIndex::D_SINKS));
-    OP_CHECK_NULL_WITH_CONTEXT(context, dSinksShape);
+    OP_CHECK_IF(dSinksShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "d_sinks is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     if (sinksShape != nullptr && sinksShape->GetDimNum() > 0) {
         *dSinksShape = *sinksShape;
     } else {
@@ -124,7 +172,10 @@ ge::graphStatus InferShape4SparseFlashAttentionGrad(gert::InferShapeContext* con
 
 ge::graphStatus InferDataType4SparseFlashAttentionGrad(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttentionGrad", "InferDataTypeContext is nullptr"),
+    OP_CHECK_IF(context == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"SparseFlashAttentionGrad", "InferDataTypeContext is nullptr"})),
                 return ge::GRAPH_FAILED);
     OP_LOGD(context, "Enter InferDataType4SparseFlashAttentionGrad.");
 

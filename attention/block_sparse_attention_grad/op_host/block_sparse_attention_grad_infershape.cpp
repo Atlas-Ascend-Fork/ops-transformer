@@ -50,7 +50,9 @@ static constexpr int32_t UNKNOWN_DIMS = -2;
 static ge::graphStatus InferShapeBlockSparseAttentionGrad(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("BlockSparseAttentionGrad", "context is nullptr!");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"BlockSparseAttentionGrad", "InferShape context is unavailable"}));
         return ge::GRAPH_FAILED;
     }
 
@@ -58,25 +60,43 @@ static ge::graphStatus InferShapeBlockSparseAttentionGrad(gert::InferShapeContex
 
     // 获取Query shape
     const gert::Shape* queryShape = context->GetInputShape(QUERY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "query", "input shape is required"),
+                return ge::GRAPH_FAILED);
 
     // 获取Key shape
     const gert::Shape* keyShape = context->GetInputShape(KEY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "key", "input shape is required"),
+                return ge::GRAPH_FAILED);
 
     // 获取Value shape
     const gert::Shape* valueShape = context->GetInputShape(VALUE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, valueShape);
+    OP_CHECK_IF(valueShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "value", "input shape is required"),
+                return ge::GRAPH_FAILED);
 
     // 获取输出shape
     gert::Shape* dqOutShape = context->GetOutputShape(DQ_OUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dqOutShape);
+    OP_CHECK_IF(dqOutShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "dqOutShape is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* dkOutShape = context->GetOutputShape(DK_OUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dkOutShape);
+    OP_CHECK_IF(dkOutShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "dkOutShape is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* dvOutShape = context->GetOutputShape(DV_OUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dvOutShape);
+    OP_CHECK_IF(dvOutShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "dvOutShape is unavailable during InferShape"})),
+                return ge::GRAPH_FAILED);
 
     // 设置AttentionGradOut shape
     *dqOutShape = *queryShape;

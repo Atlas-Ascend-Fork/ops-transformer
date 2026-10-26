@@ -32,18 +32,41 @@ static graphStatus InferShape4RingAttentionUpdate(gert::InferShapeContext* conte
     OP_LOGD(context->GetNodeName(), "Begin to do InferShape4RingAttentionUpdate");
     // get input shape
     const gert::Shape* inputAttnShape = context->GetInputShape(INPUT_ATTN);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputAttnShape);
+    OP_CHECK_IF(inputAttnShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_attn_out",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* inputSoftmaxMax = context->GetInputShape(INPUT_SOFTMAX_MAX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputSoftmaxMax);
+    OP_CHECK_IF(inputSoftmaxMax == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_softmax_max",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* inputSoftmaxSum = context->GetInputShape(INPUT_SOFTMAX_SUM);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputSoftmaxSum);
+    OP_CHECK_IF(inputSoftmaxSum == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_softmax_sum",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     // get output shape
     gert::Shape* outputAttnShape = context->GetOutputShape(OUTPUT_ATTN);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputAttnShape);
+    OP_CHECK_IF(outputAttnShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "attn_out is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     gert::Shape* outputSoftmaxMax = context->GetOutputShape(OUTPUT_SOFTMAX_MAX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputSoftmaxMax);
+    OP_CHECK_IF(
+        outputSoftmaxMax == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            "softmax_max is null; InferShape cannot continue"})),
+        return ge::GRAPH_FAILED);
     gert::Shape* outputSoftmaxSum = context->GetOutputShape(OUTPUT_SOFTMAX_SUM);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputSoftmaxSum);
+    OP_CHECK_IF(
+        outputSoftmaxSum == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            "softmax_sum is null; InferShape cannot continue"})),
+        return ge::GRAPH_FAILED);
     // infer shape
     *outputAttnShape = *inputAttnShape;
     *outputSoftmaxMax = *inputSoftmaxMax;

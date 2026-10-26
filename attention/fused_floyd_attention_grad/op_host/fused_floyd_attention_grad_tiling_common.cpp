@@ -19,6 +19,22 @@
 
 namespace optiling {
 namespace FFAG {
+static std::string ShapeToString(const gert::StorageShape* shape)
+{
+    if (shape == nullptr) {
+        return "null";
+    }
+    const gert::Shape& shapeValue = shape->GetStorageShape();
+    std::string shapeStr = "[";
+    for (uint32_t i = 0; i < shapeValue.GetDimNum(); i++) {
+        shapeStr += std::to_string(shapeValue.GetDim(i));
+        if (i + 1 != shapeValue.GetDimNum()) {
+            shapeStr += ",";
+        }
+    }
+    return shapeStr + "]";
+}
+
 bool CheckSameShape(const gert::StorageShape* aShape, const gert::StorageShape* bShape)
 {
     OP_CHECK_IF((aShape == nullptr) || (bShape == nullptr),
@@ -47,16 +63,32 @@ ge::graphStatus CheckSupportShape(gert::TilingContext* context)
     const gert::StorageShape* key2Shape = context->GetInputShape(KEY_2);
     const gert::StorageShape* value2Shape = context->GetInputShape(VALUE_2);
     const gert::StorageShape* dyShape = context->GetInputShape(DY);
-    const gert::StorageShape* attentionInShape = context->GetInputShape(ATTENTION_IN);
+    const gert::StorageShape* attentionInShape = context->GetOptionalInputShape(ATTENTION_IN);
 
     OP_CHECK_IF(!CheckSameShape(key1Shape, value1Shape),
-                OP_LOGE(context, "key1's shape and value1's shape is different"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!CheckSameShape(key2Shape, value2Shape),
-                OP_LOGE(context, "key2's shape and value2's shape is different"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!CheckSameShape(queryShape, dyShape), OP_LOGE(context, "query's shape and dy's shape is different"),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    context->GetNodeName(), "key1 and value1",
+                    (ShapeToString(key1Shape) + " and " + ShapeToString(value1Shape)).c_str(),
+                    "key1 and value1 must have the same shape"),
                 return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!CheckSameShape(key2Shape, value2Shape),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    context->GetNodeName(), "key2 and value2",
+                    (ShapeToString(key2Shape) + " and " + ShapeToString(value2Shape)).c_str(),
+                    "key2 and value2 must have the same shape"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        !CheckSameShape(queryShape, dyShape),
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context->GetNodeName(), "query and dy",
+                                               (ShapeToString(queryShape) + " and " + ShapeToString(dyShape)).c_str(),
+                                               "query and dy must have the same shape"),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF(!CheckSameShape(queryShape, attentionInShape),
-                OP_LOGE(context, "query's shape and attentionIn's shape is different"), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    context->GetNodeName(), "query and attentionIn",
+                    (ShapeToString(queryShape) + " and " + ShapeToString(attentionInShape)).c_str(),
+                    "query and attentionIn must have the same shape"),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -70,7 +102,9 @@ ge::graphStatus CheckAttentionMaskShape(gert::TilingContext* context, int64_t b,
     }
     auto attentionMaskShapeDim = attentionMaskShape->GetStorageShape().GetDimNum();
     if (attentionMaskShapeDim != SUPPORT_DIM_NUM) { // attentionMask only support 5 dimensions
-        OP_LOGE(context, "The shape of atten_mask is invalid, got %lu dimensions", attentionMaskShapeDim);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "atten_mask",
+                                                 std::to_string(attentionMaskShapeDim).c_str(),
+                                                 "atten_mask must be a 5D tensor");
         return ge::GRAPH_FAILED;
     }
     auto dim0 = attentionMaskShape->GetStorageShape().GetDim(0); // 0:b
@@ -79,11 +113,11 @@ ge::graphStatus CheckAttentionMaskShape(gert::TilingContext* context, int64_t b,
     auto dim3 = attentionMaskShape->GetStorageShape().GetDim(3); // 3:1
     auto dim4 = attentionMaskShape->GetStorageShape().GetDim(4); // 4:s3
 
-    OP_CHECK_IF(
-        (dim0 != b || dim1 != 1 || dim2 != s1 || dim3 != 1 || dim4 != s3),
-        OP_LOGE(context, "The shape of atten_mask is invalid, got (%ld,%ld,%ld,%ld,%ld), should be (%ld,1,%ld,1,%ld)",
-                dim0, dim1, dim2, dim3, dim4, b, s1, s3),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF((dim0 != b || dim1 != 1 || dim2 != s1 || dim3 != 1 || dim4 != s3),
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    context->GetNodeName(), "atten_mask", ShapeToString(attentionMaskShape).c_str(),
+                    "atten_mask shape must be (b, 1, s1, 1, s3) derived from the query and key1 shapes"),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -97,7 +131,9 @@ ge::graphStatus CheckSoftmaxMaxAndSumShape(gert::TilingContext* context, int64_t
     }
     auto softmaxMaxAndSumShapeDim = softmaxMaxAndSumShape->GetStorageShape().GetDimNum();
     if (softmaxMaxAndSumShapeDim != SUPPORT_DIM_NUM) { // softmaxMax/softmaxSum only support 5 dimensions
-        OP_LOGE(context, "The shape of softmaxMax/softmaxSum is invalid, got %lu dimensions", softmaxMaxAndSumShapeDim);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "softmax_max/softmax_sum",
+                                                 std::to_string(softmaxMaxAndSumShapeDim).c_str(),
+                                                 "softmax_max and softmax_sum must be 5D tensors");
         return ge::GRAPH_FAILED;
     }
     auto dim0 = softmaxMaxAndSumShape->GetStorageShape().GetDim(0); // 0:b
@@ -107,13 +143,11 @@ ge::graphStatus CheckSoftmaxMaxAndSumShape(gert::TilingContext* context, int64_t
     auto dim4 = softmaxMaxAndSumShape->GetStorageShape().GetDim(4); // 4:8
 
     // softmaxMaxAndSum pad to 8
-    OP_CHECK_IF(
-        (dim0 != b || dim1 != n || dim2 != s1 || dim3 != s2 || dim4 != 8),
-        OP_LOGE(
-            context,
-            "The shape of softmaxMax/softmaxSum is invalid, got (%ld,%ld,%ld,%ld,%ld), should be (%ld,%ld,%ld,%ld,8)",
-            dim0, dim1, dim2, dim3, dim4, b, n, s1, s2),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF((dim0 != b || dim1 != n || dim2 != s1 || dim3 != s2 || dim4 != 8),
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    context->GetNodeName(), "softmax_max/softmax_sum", ShapeToString(softmaxMaxAndSumShape).c_str(),
+                    "softmax_max and softmax_sum shape must be (b, n, s1, s2, 8), the last dim is padded to 8"),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -122,20 +156,28 @@ ge::graphStatus CheckInputShapeValid(gert::TilingContext* context, int64_t b, in
                                      int64_t s3, int64_t d)
 {
     OP_CHECK_IF((b == 0 || n == 0 || s1 == 0 || s2 == 0 || s3 == 0 || d == 0),
-                OP_LOGE(context, "input shape error, got 0 in bhmnkd(%ld,%ld,%ld,%ld,%ld,%ld)", b, n, s1, s2, s3, d),
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query and key1", "0",
+                                                         "all shape dimensions must be greater than 0"),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF((s1 % ALIGNED_NUM_16 != 0 || s2 % ALIGNED_NUM_128 != 0),
-                OP_LOGE(context, "The third dimension of the query only supports 16-byte alignment, and the fourth "
-                                 "dimension only supports 128-byte alignment"),
-                return ge::GRAPH_FAILED);
+    if (s1 % ALIGNED_NUM_16 != 0 || s2 % ALIGNED_NUM_128 != 0) {
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+            context->GetNodeName(), "query", std::to_string(s1) + ", " + std::to_string(s2),
+            "query dim 2 (G) must be a multiple of 16 and dim 3 (S1) must be a multiple of 128");
+        return ge::GRAPH_FAILED;
+    }
 
-    OP_CHECK_IF(s3 % ALIGNED_NUM_128 != 0,
-                OP_LOGE(context, "The fourth dimension of the key1 only supports 128-byte alignment"),
-                return ge::GRAPH_FAILED);
+    if (s3 % ALIGNED_NUM_128 != 0) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "key1", std::to_string(s3),
+                                                 "key1 dim 3 (S2) must be a multiple of 128");
+        return ge::GRAPH_FAILED;
+    }
 
-    OP_CHECK_IF((d != 32 && d != 64 && d != 128), OP_LOGE(context, "Headdim only supports 32/64/128."),
-                return ge::GRAPH_FAILED);
+    if (d != 32 && d != 64 && d != 128) { // 32, 64, 128: supported head dims
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query", std::to_string(d),
+                                                 "query head dimension must be one of 32, 64 and 128");
+        return ge::GRAPH_FAILED;
+    }
 
     auto ret = CheckSupportShape(context);
     if (ret != ge::GRAPH_SUCCESS) {

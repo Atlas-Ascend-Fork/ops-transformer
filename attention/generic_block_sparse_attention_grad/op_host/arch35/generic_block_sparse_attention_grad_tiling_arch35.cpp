@@ -45,36 +45,50 @@ protected:
     bool IsCapable() override
     {
         if (context_->GetDeterministic() == 1) {
-            OP_LOGE(context_->GetNodeName(), "GenericBlockSparseAttentionGrad does not support Deterministic.");
+            const char* nodeName = context_->GetNodeName();
+            const std::string reason =
+                "arch35 AiCore template does not implement deterministic=1; supported mode is deterministic=0";
+            const std::vector<const char*> msgKey = {"optype", "opskernel", "reason"};
+            const std::vector<const char*> msgValue = {"GenericBlockSparseAttentionGrad", "AiCore", reason.c_str()};
+            OP_LOGE_WITHOUT_REPORT(nodeName, "%s", reason.c_str());
+            REPORT_PREDEFINED_ERR_MSG("EZ3002", msgKey, msgValue);
             return false;
         }
         if (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16) {
-            OP_LOGE(context_->GetNodeName(), "only support DT_FLOAT16 and DT_BF16.");
+            OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(context_->GetNodeName(), "query, key, value",
+                                                   std::to_string(static_cast<int64_t>(dataType_)),
+                                                   "supported dtypes are FP16 and BF16 for the current template");
             return false;
         }
         if (headDim_ != HEAD_DIM) {
-            OP_LOGE(context_->GetNodeName(), "only support head_dim 128.");
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "query", std::to_string(headDim_),
+                                                     "query head dimension must be 128 for the current template");
             return false;
         }
         if (blockShapeX_ != 1) {
-            OP_LOGE(context_->GetNodeName(), "only support block_shape[0] == 1.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "block_shape", std::to_string(blockShapeX_),
+                                                  "the first block dimension must be 1 for the current template");
             return false;
         }
         if (blockShapeY_ < 128 || blockShapeY_ % 64 != 0) {
-            OP_LOGE(context_->GetNodeName(), "block_shape[1] must be >= 128 and 64-aligned, got blockShapeY=%ld.",
-                    static_cast<int64_t>(blockShapeY_));
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context_->GetNodeName(), "block_shape", std::to_string(blockShapeY_),
+                "the second block dimension must be at least 128 and a multiple of 64");
             return false;
         }
         if (qHeadNum_ <= 0 || qHeadNum_ > MAX_HEAD_NUM) {
-            OP_LOGE(context_->GetNodeName(), "qHeadNum=%ld must be in [1, %ld].", qHeadNum_, MAX_HEAD_NUM);
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "query", std::to_string(qHeadNum_),
+                                                     "head number must be in the range [1, 128]");
             return false;
         }
         if (kvHeadNum_ <= 0 || kvHeadNum_ > MAX_HEAD_NUM) {
-            OP_LOGE(context_->GetNodeName(), "kvHeadNum=%ld must be in [1, %ld].", kvHeadNum_, MAX_HEAD_NUM);
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "key", std::to_string(kvHeadNum_),
+                                                     "head number must be in the range [1, 128]");
             return false;
         }
         if (maskType_ != SUPPORTED_MASK_TYPE) {
-            OP_LOGE(context_->GetNodeName(), "only support mask_type == %u, got %u.", SUPPORTED_MASK_TYPE, maskType_);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "mask_type", std::to_string(maskType_),
+                                                  "only 1 is supported by the current template");
             return false;
         }
         return true;
@@ -93,11 +107,25 @@ protected:
         const auto* attrs = context_->GetAttrs();
         if (attrs == nullptr || qInputDesc == nullptr || queryShape == nullptr || keyShape == nullptr ||
             valueShape == nullptr || idxShape == nullptr || cntShape == nullptr) {
-            OP_LOGE(context_->GetNodeName(), "required inputs/attrs are null.");
+            if (attrs == nullptr) {
+                const std::vector<const char*> keys = {"opName", "reason"};
+                const std::vector<const char*> values = {
+                    context_->GetNodeName(), "GetShapeAttrsInfo: attribute container is unavailable in TilingContext"};
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", keys, values);
+            } else {
+                const char* missingInput = qInputDesc == nullptr || queryShape == nullptr ? "query" :
+                                           keyShape == nullptr                            ? "key" :
+                                           valueShape == nullptr                          ? "value" :
+                                           idxShape == nullptr                            ? "sparse_block_idx" :
+                                                                                            "sparse_block_count";
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), missingInput,
+                                                         "required input descriptor or shape is missing");
+            }
             return ge::GRAPH_FAILED;
         }
         if (metaShape == nullptr) {
-            OP_LOGE(context_->GetNodeName(), "metadata must be provided.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "metadata", "null",
+                                                  "is required by the current sparse pattern");
             return ge::GRAPH_FAILED;
         }
 
@@ -111,9 +139,10 @@ protected:
         layoutSparsePattern_ = sparseLayout != nullptr ? *sparseLayout : 1;
         residualBlockMode_ = residualMode != nullptr ? *residualMode : 0;
         if (layoutSparsePattern_ != 1 || residualBlockMode_ != 0) {
-            OP_LOGE(context_->GetNodeName(),
-                    "Only layout_sparse_pattern=1 and residual_block_mode=0 are supported, got %ld and %ld.",
-                    layoutSparsePattern_, residualBlockMode_);
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                context_->GetNodeName(), "layout_sparse_pattern and residual_block_mode",
+                std::to_string(layoutSparsePattern_) + " and " + std::to_string(residualBlockMode_),
+                "supported combination is sparse_pattern=1 with residual_block_mode=0");
             return ge::GRAPH_FAILED;
         }
         // is_consistent_topk (10) needs no specialization: each block uses its actual count.
@@ -122,30 +151,45 @@ protected:
         winLeft_ = static_cast<int32_t>(*attrs->GetAttrPointer<int64_t>(7));
         winRight_ = static_cast<int32_t>(*attrs->GetAttrPointer<int64_t>(8));
 
-        if (qLayout_ == nullptr || kvLayout_ == nullptr || strcmp(qLayout_, kvLayout_) != 0) {
-            OP_LOGE(context_->GetNodeName(), "layout_q must equal layout_kv.");
+        if (qLayout_ == nullptr || kvLayout_ == nullptr) {
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "layout_q, layout_kv",
+                                                     "both layout attributes must be provided");
+            return ge::GRAPH_FAILED;
+        }
+        if (strcmp(qLayout_, kvLayout_) != 0) {
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context_->GetNodeName(), "layout_q and layout_kv",
+                                                   std::string(qLayout_) + " and " + std::string(kvLayout_),
+                                                   "layout_q must equal layout_kv");
             return ge::GRAPH_FAILED;
         }
 
         if (blockShapeList == nullptr) {
-            OP_LOGE(context_->GetNodeName(), "block_shape attr is missing.");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "block_shape",
+                                                     "block_shape attribute must be provided");
             return ge::GRAPH_FAILED;
         }
+
         if (blockShapeList->GetSize() != 2) {
-            OP_LOGE(context_->GetNodeName(), "block_shape must contain two elements [x, y], got size %zu.",
-                    blockShapeList->GetSize());
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "block_shape",
+                                                  std::to_string(blockShapeList->GetSize()),
+                                                  "block_shape must have exactly 2 elements");
             return ge::GRAPH_FAILED;
         }
         const int64_t* data = blockShapeList->GetData();
         blockShapeX_ = static_cast<int32_t>(data[0]);
         blockShapeY_ = static_cast<int32_t>(data[1]);
         if (blockShapeY_ <= 0) {
-            OP_LOGE(context_->GetNodeName(), "block_shape[1] must be positive, got %d.", blockShapeY_);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "block_shape", std::to_string(blockShapeY_),
+                                                  "block_shape[1] must be greater than 0");
             return ge::GRAPH_FAILED;
         }
 
         if (idxShape->GetOriginShape().GetDimNum() != 4 || cntShape->GetOriginShape().GetDimNum() != 3) {
-            OP_LOGE(context_->GetNodeName(), "sparse_block_idx must be 4D and sparse_block_count must be 3D.");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context_->GetNodeName(),
+                                                      "sparse_block_idx and sparse_block_count",
+                                                      std::to_string(idxShape->GetOriginShape().GetDimNum()) + " and " +
+                                                          std::to_string(cntShape->GetOriginShape().GetDimNum()),
+                                                      "sparse_block_idx must be 4D and sparse_block_count must be 3D");
             return ge::GRAPH_FAILED;
         }
         const auto& idxStorage = idxShape->GetStorageShape();
@@ -156,9 +200,12 @@ protected:
         maxS1_ = idxStorage.GetDim(3);
         if (cntStorage.GetDim(0) != idxBatchNum || cntStorage.GetDim(1) != idxKvHeadNum ||
             cntStorage.GetDim(2) != numJ_) {
-            OP_LOGE(context_->GetNodeName(),
-                    "sparse_block_count must match sparse_block_idx [B, N2, J] = [%ld, %ld, %ld].", idxBatchNum,
-                    idxKvHeadNum, numJ_);
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context_->GetNodeName(), "sparse_block_idx and sparse_block_count",
+                "[" + std::to_string(cntStorage.GetDim(0)) + ", " + std::to_string(cntStorage.GetDim(1)) + ", " +
+                    std::to_string(cntStorage.GetDim(2)) + "]",
+                "sparse_block_count must match sparse_block_idx [B, N2, J] = [" + std::to_string(idxBatchNum) + ", " +
+                    std::to_string(idxKvHeadNum) + ", " + std::to_string(numJ_) + "]");
             return ge::GRAPH_FAILED;
         }
         batchNum_ = idxBatchNum;
@@ -166,28 +213,33 @@ protected:
 
         if (strcmp(qLayout_, TND_STR) == 0) {
             if (queryShape->GetOriginShape().GetDimNum() != 3) {
-                OP_LOGE(context_->GetNodeName(), "TND query must be 3D.");
+                OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(context_->GetNodeName(), "query, key, value",
+                                                          std::to_string(queryShape->GetOriginShape().GetDimNum()),
+                                                          "TND requires query/key/value to be 3-D");
                 return ge::GRAPH_FAILED;
             }
             const gert::StorageShape* cuQShape = context_->GetOptionalInputShape(10);
             const gert::StorageShape* cuKvShape = context_->GetOptionalInputShape(11);
             if (cuQShape == nullptr || cuKvShape == nullptr) {
-                OP_LOGE(context_->GetNodeName(), "TND requires cu_seq_lengths_q and cu_seq_lengths_kv.");
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "cu_seq_lengths_q/cu_seq_lengths_kv",
+                                                      "null", "required when layout is TND");
                 return ge::GRAPH_FAILED;
             }
             const int64_t cuQElems = cuQShape->GetStorageShape().GetShapeSize();
             const int64_t cuKvElems = cuKvShape->GetStorageShape().GetShapeSize();
             if (cuQElems != idxBatchNum + 1 || cuKvElems != idxBatchNum + 1) {
-                OP_LOGE(context_->GetNodeName(),
-                        "cu_seq_lengths_q/kv must hold B+1=%ld prefix offsets, got %ld and %ld.", idxBatchNum + 1,
-                        cuQElems, cuKvElems);
+                OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                    context_->GetNodeName(), "cu_seq_lengths_q and cu_seq_lengths_kv",
+                    std::to_string(cuQElems) + " and " + std::to_string(cuKvElems),
+                    "must hold B+1=" + std::to_string(idxBatchNum + 1) + " prefix offsets");
                 return ge::GRAPH_FAILED;
             }
             for (int32_t idx = 12; idx <= 13; ++idx) {
                 const gert::StorageShape* shape = context_->GetOptionalInputShape(idx);
                 if (shape != nullptr && shape->GetStorageShape().GetShapeSize() != idxBatchNum) {
-                    OP_LOGE(context_->GetNodeName(), "seqused (input %d) must hold B=%ld lengths, got %ld.", idx,
-                            idxBatchNum, shape->GetStorageShape().GetShapeSize());
+                    OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                        context_->GetNodeName(), "seqused", std::to_string(shape->GetStorageShape().GetShapeSize()),
+                        "input " + std::to_string(idx) + " must hold B=" + std::to_string(idxBatchNum) + " lengths");
                     return ge::GRAPH_FAILED;
                 }
             }
@@ -211,39 +263,50 @@ protected:
             kvHeadNum_ = keyShape->GetStorageShape().GetDim(1);
             kvSeqLen_ = keyShape->GetStorageShape().GetDim(2);
         } else {
-            OP_LOGE(context_->GetNodeName(), "layout must be TND/BSND/BNSD.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "layout", qLayout_,
+                                                  "supported values are TND, BSND and BNSD");
             return ge::GRAPH_FAILED;
         }
 
         if (kvHeadNum_ <= 0 || qHeadNum_ % kvHeadNum_ != 0) {
-            OP_LOGE(context_->GetNodeName(), "qHeadNum must be divisible by kvHeadNum.");
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context_->GetNodeName(), "query and key",
+                std::to_string(qHeadNum_) + " and " + std::to_string(kvHeadNum_),
+                "key head number must be positive and query head number must be divisible by key head number");
             return ge::GRAPH_FAILED;
         }
         qGroup_ = qHeadNum_ / kvHeadNum_;
 
         if (batchNum_ != idxBatchNum || kvHeadNum_ != idxKvHeadNum) {
-            OP_LOGE(context_->GetNodeName(),
-                    "sparse_block_idx [B, N2] = [%ld, %ld] mismatch with query/key [B, N2] = [%ld, %ld].", idxBatchNum,
-                    idxKvHeadNum, batchNum_, kvHeadNum_);
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context_->GetNodeName(), "sparse_block_idx, query and key",
+                "[" + std::to_string(idxBatchNum) + ", " + std::to_string(idxKvHeadNum) + "]",
+                "sparse_block_idx [B, N2] must match query/key [B, N2] = [" + std::to_string(batchNum_) + ", " +
+                    std::to_string(kvHeadNum_) + "]");
             return ge::GRAPH_FAILED;
         }
         const bool isTnd = strcmp(qLayout_, TND_STR) == 0;
         const int64_t expectNumJ = (kvSeqLen_ + blockShapeY_ - 1) / blockShapeY_;
         if (isTnd ? (numJ_ > expectNumJ) : (numJ_ != expectNumJ)) {
-            OP_LOGE(context_->GetNodeName(), "sparse_block_idx J=%ld must %s ceilDiv(kvSeqLen=%ld, BlockY=%d)=%ld.",
-                    numJ_, isTnd ? "be <=" : "equal", kvSeqLen_, blockShapeY_, expectNumJ);
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context_->GetNodeName(), "sparse_block_idx", std::to_string(numJ_),
+                "J must " + std::string(isTnd ? "be <=" : "equal") + " ceilDiv(kvSeqLen=" + std::to_string(kvSeqLen_) +
+                    ", BlockY=" + std::to_string(blockShapeY_) + ")=" + std::to_string(expectNumJ));
             return ge::GRAPH_FAILED;
         }
         if (!isTnd && maxS1_ < qSeqLen_) {
-            OP_LOGE(context_->GetNodeName(), "sparse_block_idx maxS1=%ld must be >= qSeqLen=%ld.", maxS1_, qSeqLen_);
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context_->GetNodeName(), "sparse_block_idx and query",
+                std::to_string(maxS1_) + " and " + std::to_string(qSeqLen_),
+                "sparse_block_idx maxS1 must be greater than or equal to the query sequence length");
             return ge::GRAPH_FAILED;
         }
         const int64_t metaElems = metaShape->GetStorageShape().GetShapeSize();
         const int64_t requiredMetaElems = METADATA_HEADER_SIZE + batchNum_ * qHeadNum_ * numJ_ * TASK_ENTRY_SIZE;
         if (metaElems < requiredMetaElems) {
-            OP_LOGE(context_->GetNodeName(),
-                    "metadata must hold at least %ld int32 elements (80 + B * N1 * J * 4), got %ld.", requiredMetaElems,
-                    metaElems);
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                context_->GetNodeName(), "metadata", std::to_string(metaElems) + " elements",
+                "must hold at least " + std::to_string(requiredMetaElems) + " int32 elements (80 + B * N1 * J * 4)");
             return ge::GRAPH_FAILED;
         }
 

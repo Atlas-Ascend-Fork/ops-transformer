@@ -32,14 +32,23 @@ ASCENDC_EXTERN_C ge::graphStatus TilingNsaSelectedAttentionGrad(gert::TilingCont
 
 ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForNsaSelectedAttentionGrad(gert::TilingParseContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE(context->GetNodeName(), "context is null."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"NsaSelectedAttentionGrad", "context is unavailable"})),
+        return ge::GRAPH_FAILED);
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "platformInfoPtr is null."),
-                return ge::GRAPH_FAILED);
 
     auto compileInfoPtr = context->GetCompiledInfo<NsaSelectedAttentionGradCompileInfo>();
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "compileInfoPtr is null."),
-                return ge::GRAPH_FAILED);
+    if (platformInfoPtr == nullptr || compileInfoPtr == nullptr) {
+        // platform/compile metadata loading failure at tiling-prepare stage
+        std::string reason = "platform info or compile info is unavailable at tiling prepare";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "platformInfoPtr or compileInfoPtr is null.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     compileInfoPtr->aivNum = ascendcPlatform.GetCoreNumAiv();
     compileInfoPtr->aicNum = ascendcPlatform.GetCoreNumAic();

@@ -37,11 +37,11 @@ aclnnStatus aclnnSparseLightningIndexerKLLossGradMetadataGetWorkspaceSize(
     aclOpExecutor** executor)
 {
     if (workspaceSize == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "workspaceSize is nullptr");
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "workspaceSize is nullptr");
         return ACLNN_ERR_INNER_NULLPTR;
     }
     if (executor == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "executor is nullptr");
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "executor is nullptr");
         return ACLNN_ERR_INNER_NULLPTR;
     }
     L2_DFX_PHASE_1(aclnnSparseLightningIndexerKLLossGradMetadata,

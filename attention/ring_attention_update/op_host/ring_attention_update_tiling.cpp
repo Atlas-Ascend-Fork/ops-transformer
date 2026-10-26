@@ -149,11 +149,18 @@ static ge::graphStatus IfShapeSupport(const gert::TilingContext* context, const 
     const size_t indexNull = -1;
     if (inputIndex != indexNull) {
         auto dataShapePtr = context->GetInputShape(inputIndex);
-        OP_CHECK_NULL_WITH_CONTEXT(context, dataShapePtr);
+        OP_CHECK_IF(dataShapePtr == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), paramName,
+                                                             "required shape, descriptor or attribute is missing"),
+                    return ge::GRAPH_FAILED);
         dataShape = dataShapePtr->GetStorageShape();
     } else {
         auto dataShapePtr = context->GetOutputShape(outputIndex);
-        OP_CHECK_NULL_WITH_CONTEXT(context, dataShapePtr);
+        OP_CHECK_IF(dataShapePtr == nullptr,
+                    REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                              (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                        "dataShape is null; Tiling cannot continue"})),
+                    return ge::GRAPH_FAILED);
         dataShape = dataShapePtr->GetStorageShape();
     }
 
@@ -191,35 +198,43 @@ static ge::graphStatus IfShapeSupport(const gert::TilingContext* context, const 
 static ge::graphStatus RingAttentionUpdateCheckShape(const gert::TilingContext* context)
 {
     auto prevAttnOutShapePtr = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, prevAttnOutShapePtr);
+    OP_CHECK_IF(prevAttnOutShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevAttnOutShape",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     gert::Shape prevAttnOutShape = prevAttnOutShapePtr->GetStorageShape();
 
     auto prevSoftmaxMaxShapePtr = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, prevSoftmaxMaxShapePtr);
+    OP_CHECK_IF(prevSoftmaxMaxShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevSoftmaxMaxShape",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     gert::Shape prevSoftmaxMaxShape = prevSoftmaxMaxShapePtr->GetStorageShape();
 
     OP_CHECK_IF(CheckAttnAndSoftmaxShapeSBH(context, prevAttnOutShape, prevSoftmaxMaxShape) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "CheckAttnAndSoftmaxShapeSBH failed"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "CheckAttnAndSoftmaxShapeSBH failed"),
+                return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(IfShapeSupport(context, prevSoftmaxMaxShape, 2, -1, "prev_softmax_sum", "prev_softmax_max") !=
                     ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "prev_softmax_sum check failed"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "prev_softmax_sum check failed"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(IfShapeSupport(context, prevAttnOutShape, 3, -1, "cur_attn_out", "prev_attn_out") != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "cur_attn_out check failed"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "cur_attn_out check failed"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         IfShapeSupport(context, prevSoftmaxMaxShape, 4, -1, "cur_softmax_max", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-        OP_LOGE(context->GetNodeName(), "cur_softmax_max check failed"), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "cur_softmax_max check failed"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         IfShapeSupport(context, prevSoftmaxMaxShape, 5, -1, "cur_softmax_sum", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-        OP_LOGE(context->GetNodeName(), "cur_softmax_sum check failed"), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "cur_softmax_sum check failed"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(IfShapeSupport(context, prevAttnOutShape, -1, 0, "attn_out", "prev_attn_out") != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "attn_out check failed"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "attn_out check failed"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         IfShapeSupport(context, prevSoftmaxMaxShape, -1, 1, "softmax_max", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-        OP_LOGE(context->GetNodeName(), "softmax_max check failed"), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "softmax_max check failed"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         IfShapeSupport(context, prevSoftmaxMaxShape, -1, 2, "softmax_sum", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-        OP_LOGE(context->GetNodeName(), "softmax_sum check failed"), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "softmax_sum check failed"), return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -232,11 +247,17 @@ static ge::graphStatus IfDtypeSupport(const gert::TilingContext* context, const 
     const size_t indexNull = -1;
     if (inputIndex != indexNull) {
         auto inputTensor = context->GetInputDesc(inputIndex);
-        OP_CHECK_NULL_WITH_CONTEXT(context, inputTensor);
+        OP_CHECK_IF(inputTensor == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), paramName,
+                                                             "required shape, descriptor or attribute is missing"),
+                    return ge::GRAPH_FAILED);
         dataDtype = inputTensor->GetDataType();
     } else {
         auto outputTensor = context->GetInputDesc(outputIndex);
-        OP_CHECK_NULL_WITH_CONTEXT(context, outputTensor);
+        OP_CHECK_IF(outputTensor == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), paramName,
+                                                             "required shape, descriptor or attribute is missing"),
+                    return ge::GRAPH_FAILED);
         dataDtype = outputTensor->GetDataType();
     }
     if (dataDtype != labelDtype) {
@@ -254,11 +275,17 @@ static ge::graphStatus IfDtypeSupport(const gert::TilingContext* context, const 
 static ge::graphStatus RingAttentionUpdateCheckDtype(const gert::TilingContext* context)
 {
     auto attnTensor = context->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attnTensor);
+    OP_CHECK_IF(attnTensor == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_attn_out",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     ge::DataType attnDtype = attnTensor->GetDataType();
 
     auto softmaxTensor = context->GetInputDesc(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, softmaxTensor);
+    OP_CHECK_IF(softmaxTensor == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_softmax_max",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     ge::DataType softmaxDtype = softmaxTensor->GetDataType();
 
     if (attnDtype != ge::DT_FLOAT16 && attnDtype != ge::DT_BF16 && attnDtype != ge::DT_FLOAT) {
@@ -273,21 +300,24 @@ static ge::graphStatus RingAttentionUpdateCheckDtype(const gert::TilingContext* 
     }
     OP_CHECK_IF(
         IfDtypeSupport(context, softmaxDtype, 2, -1, "prev_softmax_sum", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-        OP_LOGE(context->GetNodeName(), "prev_softmax_sum dtype not support"), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "prev_softmax_sum dtype not support"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(IfDtypeSupport(context, attnDtype, 3, -1, "cur_attn_out", "prev_attn_out") != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "cur_attn_out dtype not support"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "cur_attn_out dtype not support"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         IfDtypeSupport(context, softmaxDtype, 4, -1, "cur_softmax_max", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-        OP_LOGE(context->GetNodeName(), "cur_softmax_max dtype not support"), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "cur_softmax_max dtype not support"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         IfDtypeSupport(context, softmaxDtype, 5, -1, "cur_softmax_sum", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-        OP_LOGE(context->GetNodeName(), "cur_softmax_sum dtype not support"), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "cur_softmax_sum dtype not support"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(IfDtypeSupport(context, attnDtype, -1, 0, "attn_out", "prev_attn_out") != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "attn_out dtype not support"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "attn_out dtype not support"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(IfDtypeSupport(context, softmaxDtype, -1, 1, "softmax_max", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "softmax_max dtype not support"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "softmax_max dtype not support"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(IfDtypeSupport(context, softmaxDtype, -1, 2, "softmax_sum", "prev_softmax_max") != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "softmax_sum dtype not support"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "softmax_sum dtype not support"),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -305,11 +335,17 @@ static ge::graphStatus RingAttentionUpdateInitShapeInfo(const gert::TilingContex
                                                         RingAttentionUpdateTilingData& tiling)
 {
     auto prevAttnOutShapePtr = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, prevAttnOutShapePtr);
+    OP_CHECK_IF(prevAttnOutShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevAttnOutShape",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     gert::Shape prevAttnOutShape = prevAttnOutShapePtr->GetStorageShape();
 
     auto prevSoftmaxMaxShapePtr = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, prevSoftmaxMaxShapePtr);
+    OP_CHECK_IF(prevSoftmaxMaxShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevSoftmaxMaxShape",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     gert::Shape prevSoftmaxMaxShape = prevSoftmaxMaxShapePtr->GetStorageShape();
 
     int64_t seqNum = prevAttnOutShape.GetDim(0);
@@ -356,17 +392,25 @@ static ge::graphStatus RingAttentionUpdateSplitCore(const gert::TilingContext* c
     int64_t bnNum = batchSize * headNum;
     int64_t groupNum = RingAttentionUpdateGcd(bnNum, maxCoreNum);
     OP_CHECK_IF(SafeDivisionCheck(groupNum) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(groupNum) is not supported"),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "Division by zero(groupNum) is not supported"})),
                 return ge::GRAPH_FAILED);
     int64_t coreNumGroup = maxCoreNum / groupNum;
     int64_t bnNumGroup = bnNum / groupNum;
-    OP_CHECK_IF(SafeDivisionCheck(coreNumGroup) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(coreNumGroup) is not supported"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        SafeDivisionCheck(coreNumGroup) != ge::GRAPH_SUCCESS,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context->GetNodeName(), "Division by zero(coreNumGroup) is not supported"})),
+        return ge::GRAPH_FAILED);
     int64_t seqNumCoreEach = (seqNum + coreNumGroup - 1) / coreNumGroup;
-    OP_CHECK_IF(SafeDivisionCheck(seqNumCoreEach) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(seqNumCoreEach) is not supported"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        SafeDivisionCheck(seqNumCoreEach) != ge::GRAPH_SUCCESS,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context->GetNodeName(), "Division by zero(seqNumCoreEach) is not supported"})),
+        return ge::GRAPH_FAILED);
     coreNumGroup = (seqNum + seqNumCoreEach - 1) / seqNumCoreEach;
     int64_t seqNumCoreTail = seqNum - (coreNumGroup - 1) * seqNumCoreEach;
     int64_t coreNum = coreNumGroup * groupNum;
@@ -391,7 +435,10 @@ static ge::graphStatus RingAttentionUpdateSplitLoop(const gert::TilingContext* c
 
     int64_t inputSize;
     auto attnTensor = context->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attnTensor);
+    OP_CHECK_IF(attnTensor == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_attn_out",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     auto attnDtype = attnTensor->GetDataType();
     if (attnDtype == ge::DT_FLOAT16 || attnDtype == ge::DT_BF16) {
         inputSize = SIZE_B16;
@@ -417,11 +464,16 @@ static ge::graphStatus RingAttentionUpdateSplitLoop(const gert::TilingContext* c
     int64_t ubSizeRemain = maxUbSize - softmaxSizeMin;
 
     int64_t headDimLoopAlign = REPEAT_NUM_B32;
-    OP_CHECK_IF(SafeDivisionCheck(seqNumLoopMin) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(seqNumLoopMin) is not supported"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        SafeDivisionCheck(seqNumLoopMin) != ge::GRAPH_SUCCESS,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context->GetNodeName(), "Division by zero(seqNumLoopMin) is not supported"})),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF(SafeDivisionCheck(attnEleSize) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(attnEleSize) is not supported"),
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{context->GetNodeName(),
+                                                                    "Division by zero(attnEleSize) is not supported"})),
                 return ge::GRAPH_FAILED);
     int64_t headDimLoopMax = ubSizeRemain / (seqNumLoopMin * attnEleSize);
     headDimLoopMax = headDimLoopMax / headDimLoopAlign * headDimLoopAlign;
@@ -447,7 +499,10 @@ static ge::graphStatus RingAttentionUpdateSplitLoop(const gert::TilingContext* c
 static ge::graphStatus RingAttentionUpdateTNDQLenCheck(const gert::TilingContext* context)
 {
     auto qLenTensor = context->GetOptionalInputDesc(CONST_SIX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, qLenTensor);
+    OP_CHECK_IF(qLenTensor == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "actual_seq_qlen",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     auto qLendataDtype = qLenTensor->GetDataType();
     if (qLendataDtype != ge::DT_INT64) {
         std::string dtypeStr = ToString(qLendataDtype);
@@ -463,16 +518,22 @@ static ge::graphStatus RingAttentionUpdateTNDUbSizeCheck(const gert::TilingConte
     OP_LOGD(context->GetNodeName(), "headNum in TND = %ld", headNum);
     OP_LOGD(context->GetNodeName(), "headDim in TND = %ld", headDim);
     if (headDim % HEAD_DIM_ALIGN_TND != 0) {
-        OP_LOGD(context->GetNodeName(), "headDim in TND should be aligned to 64!");
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context->GetNodeName(), "prev_attn_out", std::to_string(headDim).c_str(),
+                                              "headDim in TND must be aligned to 64");
         return ge::GRAPH_FAILED;
     }
     if (headNumLoopEach == 0) {
-        OP_LOGE(context->GetNodeName(), "Don't support this shape currently, please try to use smaller D!");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "prev_attn_out, prev_softmax_max, prev_softmax_sum, cur_attn_out, cur_softmax_max",
+            "Don't support this shape currently, please try to use smaller D!");
         return ge::GRAPH_FAILED;
     }
     if (headDim > MAX_HEAD_DIM_LIMIT_SIZE) {
         auto prevAttnOutShapePtr = context->GetInputShape(0);
-        OP_CHECK_NULL_WITH_CONTEXT(context, prevAttnOutShapePtr);
+        OP_CHECK_IF(prevAttnOutShapePtr == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevAttnOutShape",
+                                                             "required shape, descriptor or attribute is missing"),
+                    return ge::GRAPH_FAILED);
         gert::Shape prevAttnOutShape = prevAttnOutShapePtr->GetStorageShape();
         std::string reasonMsg = "The D-dimension of input prev_attn_out must be less than or equal to " +
                                 std::to_string(MAX_HEAD_DIM_LIMIT_SIZE) +
@@ -483,7 +544,10 @@ static ge::graphStatus RingAttentionUpdateTNDUbSizeCheck(const gert::TilingConte
     }
     if (headNum > MAX_HEAD_NUM_LIMIT_SIZE) {
         auto prevAttnOutShapePtr = context->GetInputShape(0);
-        OP_CHECK_NULL_WITH_CONTEXT(context, prevAttnOutShapePtr);
+        OP_CHECK_IF(prevAttnOutShapePtr == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevAttnOutShape",
+                                                             "required shape, descriptor or attribute is missing"),
+                    return ge::GRAPH_FAILED);
         gert::Shape prevAttnOutShape = prevAttnOutShapePtr->GetStorageShape();
         std::string reasonMsg = "The N-dimension of input prev_attn_out must be less than or equal to " +
                                 std::to_string(MAX_HEAD_NUM_LIMIT_SIZE) +
@@ -519,15 +583,25 @@ static ge::graphStatus Tiling4RingAttentionUpdateTND(const gert::TilingContext* 
 {
     // infer shape
     auto prevAttnOutShapePtr = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, prevAttnOutShapePtr);
+    OP_CHECK_IF(prevAttnOutShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevAttnOutShape",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     gert::Shape prevAttnOutShape = prevAttnOutShapePtr->GetStorageShape();
 
     auto prevSoftmaxMaxShapePtr = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, prevSoftmaxMaxShapePtr);
+    OP_CHECK_IF(prevSoftmaxMaxShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevSoftmaxMaxShape",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     gert::Shape prevSoftmaxMaxShape = prevSoftmaxMaxShapePtr->GetStorageShape();
 
     auto prevActualSeqQlenShapePtr = context->GetInputShape(6);
-    OP_CHECK_NULL_WITH_CONTEXT(context, prevActualSeqQlenShapePtr);
+    OP_CHECK_IF(
+        prevActualSeqQlenShapePtr == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prevActualSeqQlenShape",
+                                                 "required shape, descriptor or attribute is missing"),
+        return ge::GRAPH_FAILED);
     gert::Shape prevActualSeqQlenShape = prevActualSeqQlenShapePtr->GetStorageShape();
 
     int64_t batchSize = prevActualSeqQlenShape.GetDim(0) - 1;
@@ -544,7 +618,10 @@ static ge::graphStatus Tiling4RingAttentionUpdateTND(const gert::TilingContext* 
     // get attr
     uint8_t tndSoftmaxLayout = 0;
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "attributes",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const char* softmaxInputLayout = attrs->GetAttrPointer<char>(SOFTMAX_LAYOUT_INDEX);
     if (softmaxInputLayout == nullptr || strcmp(softmaxInputLayout, "") == 0 ||
         strcmp(softmaxInputLayout, "SBH") == 0) {
@@ -562,12 +639,17 @@ static ge::graphStatus Tiling4RingAttentionUpdateTND(const gert::TilingContext* 
     auto maxCoreNum = ascendcPlatform.GetCoreNumAiv();
 
     OP_CHECK_IF(SafeDivisionCheck(maxCoreNum) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(maxCoreNum) is not supported"),
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{context->GetNodeName(),
+                                                                    "Division by zero(maxCoreNum) is not supported"})),
                 return ge::GRAPH_FAILED);
     int64_t dimTCoreEach = (dimT + maxCoreNum - 1) / maxCoreNum;
-    OP_CHECK_IF(SafeDivisionCheck(dimTCoreEach) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(dimTCoreEach) is not supported"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        SafeDivisionCheck(dimTCoreEach) != ge::GRAPH_SUCCESS,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{context->GetNodeName(), "Division by zero(dimTCoreEach) is not supported"})),
+        return ge::GRAPH_FAILED);
     int64_t newCoreNum = (dimT + dimTCoreEach - 1) / dimTCoreEach;
     int64_t dimTCoreTail = dimT - (newCoreNum - 1) * dimTCoreEach;
 
@@ -579,7 +661,10 @@ static ge::graphStatus Tiling4RingAttentionUpdateTND(const gert::TilingContext* 
     tiling.set_headNumLoopEach(headNum);
 
     auto attnTensor = context->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attnTensor);
+    OP_CHECK_IF(attnTensor == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_attn_out",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     auto attnDtype = attnTensor->GetDataType();
     uint32_t inputDataSize;
     if (attnDtype == ge::DT_FLOAT) {
@@ -596,7 +681,9 @@ static ge::graphStatus Tiling4RingAttentionUpdateTND(const gert::TilingContext* 
     int64_t headNumAllCount = MAX_UB_SIZE - REPEAT_NUM_B32 * (inputDataSize * 6 + 8) - REPEAT_NUM_B32 * 56;
     int64_t headDimEach = headDim * (inputDataSize * 6 + 8) + 8 * 56;
     OP_CHECK_IF(SafeDivisionCheck(headDimEach) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Division by zero(headDimEach) is not supported"),
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{context->GetNodeName(),
+                                                                    "Division by zero(headDimEach) is not supported"})),
                 return ge::GRAPH_FAILED);
     int64_t loopEachMax = headNumAllCount / headDimEach;
     int64_t headNumLoopEach = tndSoftmaxLayout == 1 || headNum == 1 ? loopEachMax :
@@ -605,11 +692,13 @@ static ge::graphStatus Tiling4RingAttentionUpdateTND(const gert::TilingContext* 
     tiling.set_headNumLoopEach(headNumLoopEach);
     OP_CHECK_IF(RingAttentionUpdateTNDUbSizeCheck(context, headNum, headDim, inputDataSize, headNumLoopEach) !=
                     ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Input conflicts with TND constraints! Please check your input."),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(),
+                                       "Input conflicts with TND constraints! Please check your input."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(RingAttentionUpdateTNDQLenCheck(context) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "Input actual_seq_qlen check failed."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Input actual_seq_qlen check failed."),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -618,7 +707,11 @@ static ge::graphStatus Tiling4RingAttentionUpdate(gert::TilingContext* context)
     OP_LOGD(context->GetNodeName(), "RingAttentionUpdateTiling tiling start");
 
     auto platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfoPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(), "platformInfoPtr is null"})),
+                return ge::GRAPH_FAILED);
     if (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context)) {
         OP_LOGD(context->GetNodeName(), "RingAttentionUpdateRegbaseTiling tiling start");
         return Tiling4RingAttentionUpdateRegbase(context);
@@ -629,47 +722,58 @@ static ge::graphStatus Tiling4RingAttentionUpdate(gert::TilingContext* context)
     InitTilingData(tiling);
     // get attr
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "attributes",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const char* inputLayout = attrs->GetAttrPointer<char>(0);
 
-    OP_CHECK_IF(inputLayout == nullptr,
-                OP_LOGE(context->GetNodeName(), "Get required attr input_layout failed, tiling failed"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        inputLayout == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "prev_attn_out, prev_softmax_max, prev_softmax_sum, cur_attn_out, cur_softmax_max",
+            "Get required attr input_layout failed, tiling failed"),
+        return ge::GRAPH_FAILED);
     std::string inputLayoutStr = inputLayout;
     OP_LOGD(context->GetNodeName(), "test input_layout currently.");
     uint32_t tilingKey = 0;
     if (inputLayoutStr == "TND") {
         OP_LOGD(context->GetNodeName(), "Attr input_layout is TND.");
-        OP_CHECK_IF(Tiling4RingAttentionUpdateTND(context, tiling) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "Tiling4RingAttentionUpdateTND failed, tiling failed"),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            Tiling4RingAttentionUpdateTND(context, tiling) != ge::GRAPH_SUCCESS,
+            OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Tiling4RingAttentionUpdateTND failed, tiling failed"),
+            return ge::GRAPH_FAILED);
         // check dtype
         OP_LOGD(context->GetNodeName(), "RingAttentionUpdateTNDCheckDtype start");
         OP_CHECK_IF(RingAttentionUpdateCheckDtype(context) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "RingAttentionUpdateTNDCheckDtype failed."),
+                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "RingAttentionUpdateTNDCheckDtype failed."),
                     return ge::GRAPH_FAILED);
         tilingKey = TND_KEY;
     } else {
         // check shape
         OP_LOGD(context->GetNodeName(), "RingAttentionUpdateCheckShape start");
         OP_CHECK_IF(RingAttentionUpdateCheckShape(context) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "RingAttentionUpdateCheckShape failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "RingAttentionUpdateCheckShape failed."),
+                    return ge::GRAPH_FAILED);
         // check dtype
         OP_LOGD(context->GetNodeName(), "RingAttentionUpdateCheckDtype start");
         OP_CHECK_IF(RingAttentionUpdateCheckDtype(context) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "RingAttentionUpdateCheckDtype failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "RingAttentionUpdateCheckDtype failed."),
+                    return ge::GRAPH_FAILED);
         // init shape info
         OP_CHECK_IF(RingAttentionUpdateInitShapeInfo(context, tiling) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "RingAttentionUpdateInitShapeInfo failed."),
+                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "RingAttentionUpdateInitShapeInfo failed."),
                     return ge::GRAPH_FAILED);
         OP_LOGD(context->GetNodeName(), "RingAttentionUpdateTiling RingAttentionUpdateInitShapeInfo");
         // tiling core
         OP_CHECK_IF(RingAttentionUpdateSplitCore(context, tiling) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "RingAttentionUpdateSplitCore failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "RingAttentionUpdateSplitCore failed."),
+                    return ge::GRAPH_FAILED);
         OP_LOGD(context->GetNodeName(), "RingAttentionUpdateTiling RingAttentionUpdateSplitCore");
         // tiling loop
         OP_CHECK_IF(RingAttentionUpdateSplitLoop(context, tiling) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context->GetNodeName(), "RingAttentionUpdateSplitLoop failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "RingAttentionUpdateSplitLoop failed."),
+                    return ge::GRAPH_FAILED);
         OP_LOGD(context->GetNodeName(), "RingAttentionUpdateTiling RingAttentionUpdateSplitLoop");
     }
     // print tiling param
@@ -685,7 +789,10 @@ static ge::graphStatus Tiling4RingAttentionUpdate(gert::TilingContext* context)
     currentWorkspace[0] = sysWorkspaceSize;
 
     auto attnTensor = context->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attnTensor);
+    OP_CHECK_IF(attnTensor == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "prev_attn_out",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     auto attnDtype = attnTensor->GetDataType();
     if (attnDtype == ge::DT_FLOAT16) {
         tilingKey = tilingKey + DTYPE_KEY_FP16;
@@ -706,7 +813,11 @@ static ge::graphStatus Tiling4RingAttentionUpdate(gert::TilingContext* context)
 static ge::graphStatus TilingPrepare4RingAttentionUpdate(gert::TilingParseContext* context)
 {
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "platformInfo is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 

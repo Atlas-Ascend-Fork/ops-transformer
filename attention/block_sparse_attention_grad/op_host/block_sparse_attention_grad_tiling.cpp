@@ -27,7 +27,10 @@ namespace bsag {
 
 ASCENDC_EXTERN_C ge::graphStatus TilingBlockSparseAttentionGrad(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("BlockSparseAttentionGrad", "Context is nullptr."),
+    OP_CHECK_IF(context == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"BlockSparseAttentionGrad", "Tiling context is unavailable"})),
                 return ge::GRAPH_FAILED);
     return Ops::Transformer::OpTiling::TilingRegistryArch::GetInstance().DoTilingImpl(context);
 }

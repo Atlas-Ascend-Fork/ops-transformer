@@ -54,12 +54,19 @@ uint64_t NsaSelectedAttentionGradTiling::GetTilingKey() const
 ge::graphStatus NsaSelectedAttentionGradTiling::GetPlatformInfo()
 {
     auto platformInfoPtr = context_->GetPlatformInfo();
-    uint64_t l2CacheSize;
+    uint64_t l2CacheSize = 0;
     if (platformInfoPtr == nullptr) {
         auto compileInfoPtr = context_->GetCompileInfo<NsaSelectedAttentionGradCompileInfo>();
-        OP_CHECK_IF(compileInfoPtr == nullptr,
-                    OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "compile_info is null."),
-                    return ge::GRAPH_FAILED);
+        if (compileInfoPtr == nullptr) {
+            // GetCompileInfo may return nullptr per exe_graph tiling_context.h contract;
+            // both platform and compile metadata unavailable is a config/platform loading failure.
+            const std::vector<const char*> msgKey = {"opName", "reason"};
+            const std::vector<const char*> msgValue = {context_->GetNodeName(),
+                                                       "platform info and compile info are both unavailable"};
+            OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "platformInfo and compileInfo are both null.");
+            REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+            return ge::GRAPH_FAILED;
+        }
         aicoreParams_.numBlocks = compileInfoPtr->aivNum;
         aicoreParams_.aicNum = compileInfoPtr->aicNum;
         aicoreParams_.ubSize = compileInfoPtr->ubSize;
@@ -81,29 +88,37 @@ ge::graphStatus NsaSelectedAttentionGradTiling::GetPlatformInfo()
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, aicoreParams_.l0cSize);
     }
 
-    OP_CHECK_IF(
-        (aicoreParams_.numBlocks == 0) || (aicoreParams_.aicNum == 0),
-        OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "num of coreNum(aivNum) is %lu, num of aicNum is %lu.",
-                                    aicoreParams_.numBlocks, aicoreParams_.aicNum),
-        return ge::GRAPH_FAILED);
-
-    OP_CHECK_IF(aicoreParams_.ubSize <= 0 || l2CacheSize <= 0,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "ubSize or l2CacheSize is invalid."),
-                return ge::GRAPH_FAILED);
+    if (aicoreParams_.numBlocks == 0 || aicoreParams_.aicNum == 0 || aicoreParams_.ubSize == 0 || l2CacheSize == 0) {
+        const std::string reason =
+            "GetPlatformInfo: invalid platform resources, aivNum=" + std::to_string(aicoreParams_.numBlocks) +
+            ", aicNum=" + std::to_string(aicoreParams_.aicNum) + ", ubBytes=" + std::to_string(aicoreParams_.ubSize) +
+            ", l2Bytes=" + std::to_string(l2CacheSize) +
+            "; check the SoC platform configuration and loaded compile info";
+        const std::vector<const char*> keys = {"opName", "reason"};
+        const std::vector<const char*> values = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "%s", reason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", keys, values);
+        return ge::GRAPH_FAILED;
+    }
 
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus NsaSelectedAttentionGradTiling::GetShapeAttrsInfo()
 {
+    OP_CHECK_IF(
+        context_ == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"NsaSelectedAttentionGrad", "context is unavailable"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context_->GetAttrs() == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "attribute container is unavailable"})),
+                return ge::GRAPH_FAILED);
     /*
     Get all shape info and attr
     */
-    OP_CHECK_IF(context_ == nullptr, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "context is nullptr."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(context_->GetAttrs() == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "GetAttrs is nullptr."), return ge::GRAPH_FAILED);
-
     auto status = GetLayoutInfo();
     if (status != ge::GRAPH_SUCCESS) {
         return status;
@@ -125,16 +140,17 @@ ge::graphStatus NsaSelectedAttentionGradTiling::GetShapeAttrsInfo()
         OP_LOGI(context_, "NsaSelectedAttentionGrad AttenMask enable.");
         tmpData.attenEnable = true;
     } else {
-        OP_LOGE(context_, "NsaSelectedAttentionGrad only support sparse_mode=2, now sparse_mode=%d.", sparse_mode);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            context_->GetNodeName(), "sparse_mode", std::to_string(sparse_mode),
+            "supported values are 0 (no mask) and 2 (left-up causal) for the current template");
         return ge::GRAPH_FAILED;
     }
 
     if (selected_block_count > static_cast<int>(SELECTED_BLOCK_COUNT_MAX) ||
         selected_block_count < static_cast<int>(SELECTED_BLOCK_COUNT_MIN)) {
-        OP_LOGE(context_,
-                "NsaSelectedAttentionGrad only support selected_block_count [1,128], now "
-                "selected_block_count=%d.",
-                selected_block_count);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            context_->GetNodeName(), "selected_block_count", std::to_string(selected_block_count),
+            "selected_block_count must be in range [1, 128]; set selected_block_count within this range");
         return ge::GRAPH_FAILED;
     }
 
@@ -143,10 +159,9 @@ ge::graphStatus NsaSelectedAttentionGradTiling::GetShapeAttrsInfo()
      * If you need to support larger sizes, you should split and modify the scatter process in kernel code.
      */
     if (selected_block_size > 128 || selected_block_size < 16 || selected_block_size % 16 != 0) {
-        OP_LOGE(context_,
-                "NsaSelectedAttentionGrad only support selected_block_size [16,128] and must align to 16, now "
-                "selected_block_size=%d.",
-                selected_block_size);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            context_->GetNodeName(), "selected_block_size", std::to_string(selected_block_size),
+            "selected_block_size must be in range [16, 128] and aligned to 16; set selected_block_size accordingly");
         return ge::GRAPH_FAILED;
     }
 
@@ -318,9 +333,18 @@ ge::graphStatus NsaSelectedAttentionGradTiling::DoCastTiling()
                      BASE_LEN_256 * BASE_LEN_256;
     qPostBaseNum = postUbBaseSize / typeSize / dAlign * tilingData.opInfo.get_D();
 
-    OP_CHECK_IF(qPostBaseNum == 0, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "qPostBaseNum is 0."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(usedCoreNum == 0, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "castUsedCoreNum is 0."),
+    if (qPostBaseNum == 0) {
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {
+            context_->GetNodeName(), "post vector base size calculation underflowed; check head_dim upper limit"};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "qPostBaseNum is 0.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
+    OP_CHECK_IF(usedCoreNum == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: usedCoreNum == 0"})),
                 return ge::GRAPH_FAILED);
     int64_t qPostBlockTotal = allNumQuery / dAlign * tilingData.opInfo.get_D();
     int64_t qSizeAlign = (qPostBlockTotal + BASE_LEN_256 - 1) / GM_ALIGN * GM_ALIGN * typeSize;
@@ -330,7 +354,10 @@ ge::graphStatus NsaSelectedAttentionGradTiling::DoCastTiling()
     int64_t qPostBlockFactor = (qPostBlockOuterTotal + usedCoreNum - 1) / usedCoreNum;
 
     int64_t kPostBaseNum = qPostBaseNum;
-    OP_CHECK_IF(kPostBaseNum == 0, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "kPostBaseNum is 0."),
+    OP_CHECK_IF(kPostBaseNum == 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{context_->GetNodeName(),
+                                                                    "tiling calculation failed: kPostBaseNum == 0"})),
                 return ge::GRAPH_FAILED);
     int64_t kPostBlockTotal = allNumKey / dAlign * tilingData.opInfo.get_D();
     int64_t kSizeAlign = (kPostBlockTotal + GM_ALIGN - 1) / GM_ALIGN * GM_ALIGN * typeSize;
@@ -340,8 +367,14 @@ ge::graphStatus NsaSelectedAttentionGradTiling::DoCastTiling()
     int64_t kPostBlockFactor = (kPostBlockOuterTotal + usedCoreNum - 1) / usedCoreNum;
 
     int64_t vPostBaseNum = postUbBaseSize / typeSize / d2Align * tilingData.opInfo.get_D2();
-    OP_CHECK_IF(vPostBaseNum == 0, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "vPostBaseNum is 0."),
-                return ge::GRAPH_FAILED);
+    if (vPostBaseNum == 0) {
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {
+            context_->GetNodeName(), "post vector base size calculation underflowed; check head_dim upper limit"};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "vPostBaseNum is 0.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     int64_t vPostBlockTotal = allNumValue / d2Align * tilingData.opInfo.get_D2();
     int64_t vSizeAlign = (vPostBlockTotal + GM_ALIGN - 1) / GM_ALIGN * GM_ALIGN * typeSize;
     int64_t vPostTailNumTmp = vPostBlockTotal % vPostBaseNum;
@@ -397,8 +430,9 @@ ge::graphStatus NsaSelectedAttentionGradTiling::GetWorkspaceSize()
     // Tiling传递的内存大小、起始地址，统一为字节数，单位为B
     auto blockdim = CalcTschBlockDim(launchBlockDims, aicoreParams_.aicNum, aicoreParams_.numBlocks);
     OP_CHECK_IF(blockdim == 0,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "blockdim is 0, aicNum is %lu, aivNum is %lu.",
-                                            aicoreParams_.aicNum, aicoreParams_.numBlocks),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context_->GetNodeName(), "tiling calculation failed: blockdim == 0"})),
                 return ge::GRAPH_FAILED);
     context_->SetBlockDim(blockdim);
     context_->SetScheduleMode(1);
@@ -479,16 +513,16 @@ ge::graphStatus NsaSelectedAttentionGradTiling::GetWorkspaceSize()
 ge::graphStatus NsaSelectedAttentionGradTiling::PostTiling()
 {
     // 判断如果GetDataSize > GetCapacity的异常情况,其中确定性计算下终止流程，非确定性计算流入下一个模板判断
-    OP_CHECK_IF(
-        (tilingData.GetDataSize() > context_->GetRawTilingData()->GetCapacity()) && (context_->GetDeterministic() == 1),
-        OP_LOGE(context_, "The size of TilingDataSize[%zu] is larger than the size of MaxDataCapacity[%zu].",
-                tilingData.GetDataSize(), context_->GetRawTilingData()->GetCapacity()),
-        return ge::GRAPH_FAILED);
-    OP_CHECK_IF(
-        (tilingData.GetDataSize() > context_->GetRawTilingData()->GetCapacity()) && (context_->GetDeterministic() != 1),
-        OP_LOGE(context_, "The size of TilingDataSize[%zu] is larger than the size of MaxDataCapacity[%zu].",
-                tilingData.GetDataSize(), context_->GetRawTilingData()->GetCapacity()),
-        return ge::GRAPH_FAILED);
+    if (tilingData.GetDataSize() > context_->GetRawTilingData()->GetCapacity()) {
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(),
+                                                   "serialized tiling data size exceeds the tiling buffer capacity"};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(),
+                               "The size of TilingDataSize[%zu] is larger than the size of MaxDataCapacity[%zu].",
+                               tilingData.GetDataSize(), context_->GetRawTilingData()->GetCapacity());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
 
     tilingData.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(tilingData.GetDataSize());
@@ -500,7 +534,8 @@ ge::graphStatus NsaSelectedAttentionGradTiling::GetLayoutInfo()
 {
     const char* inputLayout = context_->GetAttrs()->GetAttrPointer<char>(static_cast<size_t>(AttrIndex::INPUT_LAYOUT));
     if (strcmp(inputLayout, TND_STR) != 0) {
-        OP_LOGE(context_, "NsaSelectedAttentionGrad only support TND layout, now layout is %s.", inputLayout);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "input_layout", inputLayout,
+                                              "inputLayout must be TND; set inputLayout to TND");
         return ge::GRAPH_FAILED;
     }
 
@@ -512,25 +547,38 @@ ge::graphStatus NsaSelectedAttentionGradTiling::GetLayoutInfo()
 ge::graphStatus NsaSelectedAttentionGradTiling::SetBaseInfo(const gert::Shape& queryShape, const gert::Shape& keyShape,
                                                             const gert::Shape& valueShape, int64_t dimN1)
 {
-    OP_CHECK_IF(dimN1 == 0, OP_LOGW(context_, "headNum is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        dimN1 == 0,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "head_num", std::to_string(dimN1),
+                                              "head_num must be greater than 0 and match the head dimension of query"),
+        return ge::GRAPH_FAILED);
 
     uint32_t dimSize = queryShape.GetDimNum();
     const char* inputLayout = context_->GetAttrs()->GetAttrPointer<char>(static_cast<size_t>(AttrIndex::INPUT_LAYOUT));
     OP_CHECK_IF(static_cast<size_t>(dimSize) != strlen(inputLayout),
-                OP_LOGW(context_, "layout dims is not inputLayout's length."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                    context_->GetNodeName(), "query",
+                    std::to_string(dimSize) + ", should be " + std::to_string(strlen(inputLayout)),
+                    "shape dim count must equal the length of input_layout"),
+                return ge::GRAPH_FAILED);
 
     if (tilingData.opInfo.get_layout() == static_cast<uint32_t>(InputLayout::TND)) {
         auto actualSeqQlenTensor = context_->GetOptionalInputTensor(static_cast<size_t>(InputIndex::ACTUAL_SEQ_Q_LEN));
         auto actualSeqKvlenTensor =
             context_->GetOptionalInputTensor(static_cast<size_t>(InputIndex::ACTUAL_SEQ_KV_LEN));
         OP_CHECK_IF((actualSeqQlenTensor == nullptr || actualSeqKvlenTensor == nullptr),
-                    OP_LOGW(context_, "actualSeqQlenTensor or actualSeqKvlenTensor is nullptr."),
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        context_->GetNodeName(), "actual_seq_qlen and actual_seq_kvlen", "nullptr",
+                        "actual_seq_qlen and actual_seq_kvlen are required inputs in TND layout; provide both tensors"),
                     return ge::GRAPH_FAILED);
 
         const size_t seqQShapeSize = static_cast<size_t>(actualSeqQlenTensor->GetShapeSize());
         const size_t kvSeqShapeSize = static_cast<size_t>(actualSeqKvlenTensor->GetShapeSize());
         OP_CHECK_IF((seqQShapeSize != kvSeqShapeSize),
-                    OP_LOGW(context_, "actualSeqQlenTensor shapeSize is not equal actualSeqKvlenTensor."),
+                    OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                        context_->GetNodeName(), "actual_seq_qlen and actual_seq_kvlen",
+                        std::to_string(seqQShapeSize) + " and " + std::to_string(kvSeqShapeSize),
+                        "actual_seq_qlen and actual_seq_kvlen must have the same size"),
                     return ge::GRAPH_FAILED);
 
         std::vector<int64_t> actualSeqQlen;
@@ -538,7 +586,9 @@ ge::graphStatus NsaSelectedAttentionGradTiling::SetBaseInfo(const gert::Shape& q
         const int64_t* qValue = actualSeqQlenTensor->GetData<int64_t>();
         const int64_t* kvValue = actualSeqKvlenTensor->GetData<int64_t>();
         OP_CHECK_IF((qValue == nullptr || kvValue == nullptr),
-                    OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "qValue or kvValue is nullptr."),
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        context_->GetNodeName(), "actual_seq_qlen/actual_seq_kvlen", "nullptr",
+                        "data of actual_seq_qlen and actual_seq_kvlen tensors must not be empty"),
                     return ge::GRAPH_FAILED);
         for (size_t i = 0; i < seqQShapeSize; i++) {
             int64_t qSeqLen = (i == 0 ? qValue[i] : (qValue[i] - qValue[i - 1]));
@@ -546,7 +596,10 @@ ge::graphStatus NsaSelectedAttentionGradTiling::SetBaseInfo(const gert::Shape& q
             tmpData.actualSeqQlen.push_back(qSeqLen);
             tmpData.actualSeqKvlen.push_back(kvSeqLen);
             if (qSeqLen <= 0 || kvSeqLen <= 0) {
-                OP_LOGE(context_, "NSAG get invaild actualSeqlen.");
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    context_->GetNodeName(), "actual_seq_qlen/actual_seq_kvlen tensor values",
+                    "qSeqLen=" + std::to_string(qSeqLen) + ", kvSeqLen=" + std::to_string(kvSeqLen),
+                    "cumulative sequence lengths must be positive and non-decreasing");
                 return ge::GRAPH_FAILED;
             }
         }
@@ -568,23 +621,35 @@ ge::graphStatus NsaSelectedAttentionGradTiling::SetBaseInfo(const gert::Shape& q
         int64_t dk = keyShape.GetDim(DIM_2);
         int64_t dv = valueShape.GetDim(DIM_2);
         OP_CHECK_IF((dq != dk),
-                    OP_LOGE(context_, "head_dim of Query[%ld] should be equal to head_dim of Key[%ld].", dq, dk),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context_->GetNodeName(), "query and key", std::to_string(dq) + " and " + std::to_string(dk),
+                        "head_dim (dim 2) of query must be equal to head_dim (dim 2) of key"),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF((dq < dv),
-                    OP_LOGE(context_, "head_dim of Query[%ld] can not less than head_dim of Value[%ld].", dq, dv),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context_->GetNodeName(), "query and value", std::to_string(dq) + " and " + std::to_string(dv),
+                        "head_dim (dim 2) of query can not be less than head_dim (dim 2) of value"),
                     return ge::GRAPH_FAILED);
 
         // query [t1, n1, d]   k [t2, n2, d]  v [t2, n2, d2]   dy/attentionIn [t1, n1, d2]
-        OP_CHECK_IF(keyShape.GetDim(DIM_1) == 0, OP_LOGE(context_, "dim 1 of key is 0."), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(keyShape.GetDim(DIM_1) == 0,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "key", "dim 1 = 0 (head number)",
+                                                             "dim 1 (head number) of key must be greater than 0"),
+                    return ge::GRAPH_FAILED);
         tilingData.opInfo.set_G(queryShape.GetDim(DIM_1) / keyShape.GetDim(DIM_1));
-        OP_CHECK_IF(tilingData.opInfo.get_G() == 0, OP_LOGE(context_, "g is 0"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(tilingData.opInfo.get_G() == 0,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context_->GetNodeName(), "query and key",
+                        std::to_string(queryShape.GetDim(DIM_1)) + " and " + std::to_string(keyShape.GetDim(DIM_1)),
+                        "query dim 1 must be divisible by key dim 1 and greater than 0"),
+                    return ge::GRAPH_FAILED);
         tilingData.opInfo.set_N2(keyShape.GetDim(DIM_1));
         tilingData.opInfo.set_S1(*std::max_element(tmpData.actualSeqQlen.begin(), tmpData.actualSeqQlen.end()));
         tilingData.opInfo.set_S2(*std::max_element(tmpData.actualSeqKvlen.begin(), tmpData.actualSeqKvlen.end()));
         tilingData.opInfo.set_D(dq);
         tilingData.opInfo.set_D2(dv);
     } else {
-        OP_LOGE(context_, "inputLayout is invalid");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "inputLayout", "inputLayout is invalid");
         return ge::GRAPH_FAILED;
     }
 
@@ -598,17 +663,20 @@ ge::graphStatus NsaSelectedAttentionGradTiling::SetBaseInfo(const gert::Shape& q
     tmpData.s2 = tilingData.opInfo.get_S2();
 
     auto ret = CheckDtypeValid(context_);
-    OP_CHECK_IF(ret != ge::GRAPH_SUCCESS, OP_LOGW(context_, "dtype is invalid."), return ret);
+    if (ret != ge::GRAPH_SUCCESS) {
+        return ret;
+    }
 
     return CheckTndShapeValid(context_, tmpData.t1, dimN1, tmpData.d, tmpData.d2);
 }
 
 ge::graphStatus NsaSelectedAttentionGradTiling::GetBaseShapeInfo()
 {
-    OP_CHECK_IF(((context_->GetInputShape(static_cast<size_t>(InputIndex::QUERY)) == nullptr) ||
-                 (context_->GetInputShape(static_cast<size_t>(InputIndex::KEY)) == nullptr) ||
-                 (context_->GetInputShape(static_cast<size_t>(InputIndex::VALUE)) == nullptr)),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "InputShape of query, key or value is nullptr."),
+    OP_CHECK_IF(context_->GetInputShape(static_cast<size_t>(InputIndex::QUERY)) == nullptr ||
+                    context_->GetInputShape(static_cast<size_t>(InputIndex::KEY)) == nullptr ||
+                    context_->GetInputShape(static_cast<size_t>(InputIndex::VALUE)) == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "query, key, value",
+                                                         "input shape is missing"),
                 return ge::GRAPH_FAILED);
     const gert::Shape& queryShape = context_->GetInputShape(static_cast<size_t>(InputIndex::QUERY))->GetStorageShape();
     const gert::Shape& keyShape = context_->GetInputShape(static_cast<size_t>(InputIndex::KEY))->GetStorageShape();
@@ -639,8 +707,15 @@ ge::graphStatus NsaSelectedAttentionGradTiling::Setmm1TilingData(matmul_tiling::
     mm1.SetBias(false);
     mm1.SetBufferSpace(aicoreParams_.l1Size, aicoreParams_.l0cSize);
 
-    if (mm1.GetTiling(tilingData.mm1TilingData) != 0) {
-        OP_LOGE(context_, "NsaSelectedAttentionGrad mm1 GetTiling Failed.");
+    int tilingRet = mm1.GetTiling(tilingData.mm1TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm1 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "NsaSelectedAttentionGrad mm1 GetTiling Failed. ret=%d.",
+                               tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
         return ge::GRAPH_FAILED;
     }
     tilingData.mm1TilingData.set_shareMode(0);
@@ -663,8 +738,15 @@ ge::graphStatus NsaSelectedAttentionGradTiling::Setmm2TilingData(matmul_tiling::
     mm2.SetBias(false);
     mm2.SetBufferSpace(aicoreParams_.l1Size, aicoreParams_.l0cSize);
 
-    if (mm2.GetTiling(tilingData.mm2TilingData) != 0) {
-        OP_LOGE(context_, "NsaSelectedAttentionGrad mm2 GetTiling Failed.");
+    int tilingRet = mm2.GetTiling(tilingData.mm2TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm2 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "NsaSelectedAttentionGrad mm2 GetTiling Failed. ret=%d.",
+                               tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
         return ge::GRAPH_FAILED;
     }
     tilingData.mm2TilingData.set_shareMode(0);
@@ -687,8 +769,15 @@ ge::graphStatus NsaSelectedAttentionGradTiling::Setmm3TilingData(matmul_tiling::
     mm31.SetBias(false);
     mm31.SetBufferSpace(aicoreParams_.l1Size, aicoreParams_.l0cSize);
 
-    if (mm31.GetTiling(tilingData.mm31TilingData) != 0) {
-        OP_LOGE(context_, "NsaSelectedAttentionGrad mm3 GetTiling Failed.");
+    int tilingRet = mm31.GetTiling(tilingData.mm31TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm3 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "NsaSelectedAttentionGrad mm3 GetTiling Failed. ret=%d.",
+                               tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
         return ge::GRAPH_FAILED;
     }
     tilingData.mm31TilingData.set_shareMode(0);
@@ -711,8 +800,15 @@ ge::graphStatus NsaSelectedAttentionGradTiling::Setmm4TilingData(matmul_tiling::
     mm4.SetBias(false);
     mm4.SetBufferSpace(aicoreParams_.l1Size, aicoreParams_.l0cSize);
 
-    if (mm4.GetTiling(tilingData.mm4TilingData) != 0) {
-        OP_LOGE(context_, "NsaSelectedAttentionGrad mm4 GetTiling Failed.");
+    int tilingRet = mm4.GetTiling(tilingData.mm4TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm4 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "NsaSelectedAttentionGrad mm4 GetTiling Failed. ret=%d.",
+                               tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
         return ge::GRAPH_FAILED;
     }
     tilingData.mm4TilingData.set_shareMode(0);
@@ -735,8 +831,15 @@ ge::graphStatus NsaSelectedAttentionGradTiling::Setmm5TilingData(matmul_tiling::
     mm5.SetBias(false);
     mm5.SetBufferSpace(aicoreParams_.l1Size, aicoreParams_.l0cSize);
 
-    if (mm5.GetTiling(tilingData.mm5TilingData) != 0) {
-        OP_LOGE(context_, "NsaSelectedAttentionGrad mm5 GetTiling Failed.");
+    int tilingRet = mm5.GetTiling(tilingData.mm5TilingData);
+    if (tilingRet != 0) {
+        std::string reason = std::string("mm5 tiling solve failed, ret=") + std::to_string(tilingRet) +
+                             "; check L1/L0C resource limits for the given shapes";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context_->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "NsaSelectedAttentionGrad mm5 GetTiling Failed. ret=%d.",
+                               tilingRet);
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
         return ge::GRAPH_FAILED;
     }
     tilingData.mm5TilingData.set_shareMode(0);

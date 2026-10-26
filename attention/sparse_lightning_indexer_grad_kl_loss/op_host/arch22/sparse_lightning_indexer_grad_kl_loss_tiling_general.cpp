@@ -12,6 +12,7 @@
  * \file sparse_lightning_indexer_grad_kl_loss_tiling_general.cpp
  * \brief
  */
+#include "log/log.h"
 #include "sparse_lightning_indexer_grad_kl_loss_tiling_general.h"
 #include "op_host/tiling_templates_registry.h"
 #include <tiling/tiling_api.h>
@@ -120,9 +121,9 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::CheckOutPut()
             queryIndexShape.GetDim(DIM_NUM_1) != dQueryIndexShape.GetDim(DIM_NUM_1) ||
             (qIdxDimNum > DIM_NUM_2 && queryIndexShape.GetDim(DIM_NUM_2) != dQueryIndexShape.GetDim(DIM_NUM_2)) ||
             (qIdxDimNum > DIM_NUM_3 && queryIndexShape.GetDim(DIM_NUM_3) != dQueryIndexShape.GetDim(DIM_NUM_3))) {
-            OP_LOGE(context_,
-                    "SparseLightningIndexerGradKLLoss Input query_index %s is not equal to Output d_query_index %s",
-                    Ops::Base::ToString(queryIndexShape).c_str(), Ops::Base::ToString(dQueryIndexShape).c_str());
+            OP_LOGE_FOR_INVALID_SHAPE(Ops::Base::GetOpInfo(context_).c_str(), "d_query_index",
+                                      Ops::Base::ToString(dQueryIndexShape).c_str(),
+                                      Ops::Base::ToString(queryIndexShape).c_str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -134,9 +135,9 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::CheckOutPut()
             keyIndexShape.GetDim(DIM_NUM_1) != dkeyIndexShape.GetDim(DIM_NUM_1) ||
             (kIdxDimNum > DIM_NUM_2 && keyIndexShape.GetDim(DIM_NUM_2) != dkeyIndexShape.GetDim(DIM_NUM_2)) ||
             (kIdxDimNum > DIM_NUM_3 && keyIndexShape.GetDim(DIM_NUM_3) != dkeyIndexShape.GetDim(DIM_NUM_3))) {
-            OP_LOGE(context_,
-                    "SparseLightningIndexerGradKLLoss Input key_index %s is not equal to Output d_key_index %s",
-                    Ops::Base::ToString(keyIndexShape).c_str(), Ops::Base::ToString(dkeyIndexShape).c_str());
+            OP_LOGE_FOR_INVALID_SHAPE(Ops::Base::GetOpInfo(context_).c_str(), "d_key_index",
+                                      Ops::Base::ToString(dkeyIndexShape).c_str(),
+                                      Ops::Base::ToString(keyIndexShape).c_str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -146,8 +147,9 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::CheckOutPut()
         if (wDimNum != dWeightsShape.GetDimNum() || weightsShape.GetDim(DIM_NUM_0) != dWeightsShape.GetDim(DIM_NUM_0) ||
             weightsShape.GetDim(DIM_NUM_1) != dWeightsShape.GetDim(DIM_NUM_1) ||
             (wDimNum > DIM_NUM_2 && weightsShape.GetDim(DIM_NUM_2) != dWeightsShape.GetDim(DIM_NUM_2))) {
-            OP_LOGE(context_, "SparseLightningIndexerGradKLLoss Input weights %s is not equal to Output d_weights %s",
-                    Ops::Base::ToString(weightsShape).c_str(), Ops::Base::ToString(dWeightsShape).c_str());
+            OP_LOGE_FOR_INVALID_SHAPE(Ops::Base::GetOpInfo(context_).c_str(), "d_weights",
+                                      Ops::Base::ToString(dWeightsShape).c_str(),
+                                      Ops::Base::ToString(weightsShape).c_str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -158,7 +160,10 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::CheckOutPut()
 ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::CheckContext()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "attributes",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     size_t idx = 0;
     // 输入属性参数验证
     auto scaleValuePtr = attrs->GetAttrPointer<float>(idx++);
@@ -169,10 +174,23 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::CheckContext()
     idx++;
     size_t* workspaces = context_->GetWorkspaceSizes(1);
 
-    OP_CHECK_NULL_WITH_CONTEXT(context_, scaleValuePtr);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, inputLayoutPtr);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, sparseModePtr);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+    OP_CHECK_IF(scaleValuePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "scale_value",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(inputLayoutPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "layout",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(sparseModePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "sparse_mode",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(workspaces == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context_).c_str(),
+                                                                    "workspaces is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
 
     // 输入shape验证
     auto queryShape = context_->GetInputShape(QUERY_INPUT_INDEX);
@@ -189,28 +207,83 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::CheckContext()
     auto dWeightsShape = context_->GetOutputShape(D_WEIGHTS_OUTPUT_INDEX);
     auto lossShape = context_->GetOutputShape(LOSS_OUTPUT_INDEX);
 
-    OP_CHECK_NULL_WITH_CONTEXT(context_, queryShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, keyShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, queryIndexShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, keyIndexShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, weightsShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, sparseIndicesShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, softmaxMaxShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, softmaxSumShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, dQueryIndexShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, dkeyIndexShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, dWeightsShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, lossShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetRawTilingData());
-    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetRawTilingData()->GetData());
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "query",
+                                                         "required input query shape is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "key",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(queryIndexShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "query_index",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyIndexShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "key_index",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(weightsShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "weight",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(sparseIndicesShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "sparse_indices",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(softmaxMaxShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "softmax_max",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(softmaxSumShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "softmax_sum",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(dQueryIndexShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{Ops::Base::GetOpInfo(context_).c_str(),
+                                              "output d_query_index shape is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(dkeyIndexShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{Ops::Base::GetOpInfo(context_).c_str(),
+                                              "output d_key_index shape is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        dWeightsShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context_).c_str(),
+                                                            "output d_weights shape is null; Tiling cannot continue"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        lossShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context_).c_str(),
+                                                            "output loss shape is null; Tiling cannot continue"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{Ops::Base::GetOpInfo(context_).c_str(),
+                                              "context_->GetRawTilingData() is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context_->GetRawTilingData()->GetData() == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{Ops::Base::GetOpInfo(context_).c_str(),
+                                      "context_->GetRawTilingData()->GetData() is null; Tiling cannot continue"})),
+        return ge::GRAPH_FAILED);
 
     if (lossShape->GetStorageShape().GetShapeSize() != SIZE_1) {
-        OP_LOGE(context_, "The Shape Len of Loss should be 1, but got %ld.",
-                lossShape->GetStorageShape().GetShapeSize());
+        OP_LOGE_FOR_INVALID_SHAPESIZE(Ops::Base::GetOpInfo(context_).c_str(), "loss",
+                                      std::to_string(lossShape->GetStorageShape().GetShapeSize()).c_str(), "1");
         return GRAPH_FAILED;
     } else if (lossShape->GetStorageShape().GetDim(DIM_NUM_0) != SIZE_1) {
-        OP_LOGE(context_, "The Shape data of Loss should be 1, but got %ld.",
-                lossShape->GetStorageShape().GetDim(DIM_NUM_0));
+        OP_LOGE_FOR_INVALID_SHAPEDIM(Ops::Base::GetOpInfo(context_).c_str(), "loss",
+                                     std::to_string(lossShape->GetStorageShape().GetDim(DIM_NUM_0)).c_str(), "1");
         return GRAPH_FAILED;
     }
 
@@ -233,10 +306,18 @@ bool SparseLightningIndexerGradKLLossTilingBase::AnalyzeAttrs()
     deterministic = (context_->GetDeterministic() == 1);
 
     OP_CHECK_IF(sparseMode != SPARSE_MODE_SIZE_3,
-                OP_LOGE(opName, " The value of sparse_mode is [%d], but currently only supports mode [3].", sparseMode),
+                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                    opName, "attributes", (std::string() + std::to_string(sparseMode)).c_str(),
+                    (std::string() + " The value of sparse_mode is [" + std::to_string(sparseMode) +
+                     "], but currently only supports mode [3].")
+                        .c_str()),
                 return false);
     OP_CHECK_IF(strcmp(inputLayout, "TND") != 0 && strcmp(inputLayout, "BSND") != 0,
-                OP_LOGE(opName, "Layout only support TND or BSND, now layout is %s.", inputLayout), return false);
+                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                    opName, "attributes", (std::string() + std::string(inputLayout)).c_str(),
+                    (std::string() + "Layout only support TND or BSND, now layout is " + std::string(inputLayout) + ".")
+                        .c_str()),
+                return false);
     OP_LOGD(context_, "attrs: scaleValue[%f] input_layout[%s] sparse_mode[%ld].", scaleValue, inputLayout, sparseMode);
 
     if (CheckOutPut() == ge::GRAPH_FAILED) {
@@ -297,27 +378,45 @@ bool SparseLightningIndexerGradKLLossTilingBase::AnalyzeDimLayout(
             std::fill(actualSeqLenKData.begin(), actualSeqLenKData.end(), 0);
             GetActualSeqLenData(ACTUAL_SEQ_LENGTHS_QUERY_INPUT_INDEX, actualSeqLenData, actualSeqQLen);
             GetActualSeqLenData(ACTUAL_SEQ_LENGTHS_KEY_INPUT_INDEX, actualSeqLenKData, actualSeqKLen);
-            OP_CHECK_IF(actualSeqQLen != actualSeqKLen,
-                        OP_LOGE(opName, "VarLen scene, q[%ld] is not equal k[%ld].", actualSeqQLen, actualSeqKLen),
-                        return false);
+            OP_CHECK_IF(
+                actualSeqQLen != actualSeqKLen,
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "query, key, query_index, key_index, weight",
+                    (std::string() + std::to_string(actualSeqQLen) + ", " + std::to_string(actualSeqKLen)).c_str(),
+                    (std::string() + "VarLen scene, q[" + std::to_string(actualSeqQLen) + "] is not equal k[" +
+                     std::to_string(actualSeqKLen) + "].")
+                        .c_str()),
+                return false);
             // 校验actualQ 对应每一个元素是否大于 actualK ，大于则拦截
             for (int i = 0; i < actualSeqQLen; i++) {
-                OP_CHECK_IF(
-                    actualSeqLenData[i] > actualSeqLenKData[i],
-                    OP_LOGE(opName,
-                            "Every element of actualSeqLenData must be less than every element of actualSeqLenKData,\
-                        but actualSeqLenData[%d]:[%d] is larger than actualSeqLenKData[%d]:[%d].",
-                            i, actualSeqLenData[i], i, actualSeqLenKData[i]),
-                    return false);
+                OP_CHECK_IF(actualSeqLenData[i] > actualSeqLenKData[i],
+                            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                                opName, "query, key, query_index, key_index, weight",
+                                (std::string() + std::to_string(i) + ", " + std::to_string(actualSeqLenData[i]) + ", " +
+                                 std::to_string(i) + ", " + std::to_string(actualSeqLenKData[i]))
+                                    .c_str(),
+                                (std::string() +
+                                 "Every element of actualSeqLenData must be less than every element of "
+                                 "actualSeqLenKData, but actualSeqLenData[" +
+                                 std::to_string(i) + "]:[" + std::to_string(actualSeqLenData[i]) +
+                                 "] is larger than actualSeqLenKData[" + std::to_string(i) + "]:[" +
+                                 std::to_string(actualSeqLenKData[i]) + "].")
+                                    .c_str()),
+                            return false);
             }
             bSize = actualSeqQLen;
             accumS1 = std::accumulate(actualSeqLenData.begin(), actualSeqLenData.begin() + actualSeqQLen, 0LL);
             accumS2 = std::accumulate(actualSeqLenKData.begin(), actualSeqLenKData.begin() + actualSeqKLen, 0LL);
             OP_CHECK_IF(t1Size < accumS1 || t2Size < accumS2,
-                        OP_LOGE(opName,
-                                "Query Tsize(%ld) and key Tsize(%ld) must be larger than sum of seqQLen(%ld) and "
-                                "seqkLen(%ld), respectively.",
-                                t1Size, t2Size, accumS1, accumS2),
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName, "query, key",
+                            (std::string() + std::to_string(t1Size) + ", " + std::to_string(t2Size) + ", " +
+                             std::to_string(accumS1) + ", " + std::to_string(accumS2))
+                                .c_str(),
+                            (std::string() + "Query Tsize(" + std::to_string(t1Size) + ") and key Tsize(" +
+                             std::to_string(t2Size) + ") must be larger than sum of seqQLen(" +
+                             std::to_string(accumS1) + ") and seqkLen(" + std::to_string(accumS2) + "), respectively.")
+                                .c_str()),
                         return false);
             realT1Size = accumS1;
             maxS1Val = *std::max_element(actualSeqLenData.begin(), actualSeqLenData.end());
@@ -325,23 +424,36 @@ bool SparseLightningIndexerGradKLLossTilingBase::AnalyzeDimLayout(
             s1Size = maxS1Val;
             s2Size = maxS2Val;
             OP_CHECK_IF(s1Size > s2Size || t1Size > t2Size || accumS1 > accumS2,
-                        OP_LOGE(opName,
-                                "Query s1Size(%ld), t1Size(%ld) and the sum of seqQLen(%ld) must be small than Key "
-                                "s2Size(%ld), t2Size(%ld) and seqkLen(%ld), respectively.",
-                                s1Size, t1Size, accumS1, s2Size, t2Size, accumS2),
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName, "query, key",
+                            (std::string() + std::to_string(s1Size) + ", " + std::to_string(t1Size) + ", " +
+                             std::to_string(accumS1) + ", " + std::to_string(s2Size) + ", " + std::to_string(t2Size) +
+                             ", " + std::to_string(accumS2))
+                                .c_str(),
+                            (std::string() + "Query s1Size(" + std::to_string(s1Size) + "), t1Size(" +
+                             std::to_string(t1Size) + ") and the sum of seqQLen(" + std::to_string(accumS1) +
+                             ") must be small than Key s2Size(" + std::to_string(s2Size) + "), t2Size(" +
+                             std::to_string(t2Size) + ") and seqkLen(" + std::to_string(accumS2) + "), respectively.")
+                                .c_str()),
                         return false);
             n2Size = keyShape.GetDim(1);
-            OP_CHECK_IF(n2Size == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "N2 is zero."), return false);
+            OP_CHECK_IF(n2Size == 0,
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query, key, query_index, key_index, weight",
+                                                                 "N2 is zero."),
+                        return false);
             gSizeQuery = queryShape.GetDim(1) / n2Size;
             gSizeQueryIndex = queryIndexShape.GetDim(1) / n2Size;
             dSizeQuery = queryShape.GetDim(2);
             dSizeQueryIndex = queryIndexShape.GetDim(2);
             kSize = topKShape.GetDim(2);
-            OP_CHECK_IF(
-                kSize > BUFFER_SIZE_BYTE_8K || kSize % BUFFER_SIZE_BYTE_1K > 0,
-                OP_LOGE(opName, "topK(%d) should be small than 8192, and should be an integer multiple of 1024.",
-                        kSize),
-                return false);
+            OP_CHECK_IF(kSize > BUFFER_SIZE_BYTE_8K || kSize % BUFFER_SIZE_BYTE_1K > 0,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName, "query, key, query_index, key_index, weight",
+                            (std::string() + std::to_string(kSize)).c_str(),
+                            (std::string() + "topK(" + std::to_string(kSize) +
+                             ") should be small than 8192, and should be an integer multiple of 1024.")
+                                .c_str()),
+                        return false);
             topkSize = (TopKRange)kSize;
             if (hasRope) {
                 dQueryRopeSize = queryRopeShape.GetDim(2);
@@ -359,19 +471,30 @@ bool SparseLightningIndexerGradKLLossTilingBase::AnalyzeDimLayout(
             s2Size = keyShape.GetDim(1);
             n2Size = keyShape.GetDim(2);
             OP_CHECK_IF(s1Size > s2Size,
-                        OP_LOGE(opName, "Query s1Size(%ld) must be small than Key s2Size(%ld).", s1Size, s2Size),
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName, "query, key",
+                            (std::string() + std::to_string(s1Size) + ", " + std::to_string(s2Size)).c_str(),
+                            (std::string() + "Query s1Size(" + std::to_string(s1Size) +
+                             ") must be small than Key s2Size(" + std::to_string(s2Size) + ").")
+                                .c_str()),
                         return false);
-            OP_CHECK_IF(n2Size == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "N2 is zero."), return false);
+            OP_CHECK_IF(n2Size == 0,
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query, key, query_index, key_index, weight",
+                                                                 "N2 is zero."),
+                        return false);
             gSizeQuery = queryShape.GetDim(2) / n2Size;
             gSizeQueryIndex = queryIndexShape.GetDim(2) / n2Size;
             dSizeQuery = queryShape.GetDim(3);
             dSizeQueryIndex = queryIndexShape.GetDim(3);
             kSize = topKShape.GetDim(3);
-            OP_CHECK_IF(
-                kSize > BUFFER_SIZE_BYTE_8K || kSize % BUFFER_SIZE_BYTE_1K > 0,
-                OP_LOGE(opName, "topK(%d) should be small than 8192, and should be an integer multiple of 1024.",
-                        kSize),
-                return false);
+            OP_CHECK_IF(kSize > BUFFER_SIZE_BYTE_8K || kSize % BUFFER_SIZE_BYTE_1K > 0,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName, "query, key, query_index, key_index, weight",
+                            (std::string() + std::to_string(kSize)).c_str(),
+                            (std::string() + "topK(" + std::to_string(kSize) +
+                             ") should be small than 8192, and should be an integer multiple of 1024.")
+                                .c_str()),
+                        return false);
             topkSize = (TopKRange)kSize;
             if (hasRope) {
                 dQueryRopeSize = queryRopeShape.GetDim(3);
@@ -400,14 +523,38 @@ bool SparseLightningIndexerGradKLLossTilingBase::AnalyzeDtype()
     auto sparseIndicesDesc = context_->GetInputDesc(SPARSE_INDICES_INPUT_INDEX);
     auto softmaxMaxDesc = context_->GetInputDesc(SOFTMAX_MAX_INPUT_INDEX);
     auto softmaxSumDesc = context_->GetInputDesc(SOFTMAX_SUM_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, queryDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, keyDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, queryIndexDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, keyIndexDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, weightsDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, sparseIndicesDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, softmaxMaxDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, softmaxSumDesc);
+    OP_CHECK_IF(queryDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "query",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "key",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(queryIndexDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "query_index",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyIndexDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "key_index",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(weightsDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "weight",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(sparseIndicesDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "sparse_indices",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(softmaxMaxDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "softmax_max",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(softmaxSumDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "softmax_sum",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     // 以下5个为16类型保持一致
     auto queryDtype = queryDesc->GetDataType();
@@ -489,168 +636,245 @@ bool SparseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sh
         int64_t t2Len = keyShape[0];
         int64_t n2Len = keyShape[1];
         // 验证T1
-        OP_CHECK_IF(
-            queryIndexShape[0] != t1Len || weightsShape[0] != t1Len || softmaxMaxShape[1] != t1Len ||
-                softmaxSumShape[1] != t1Len,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify T1 is failed, the value of query[0], query_index[0], weights[0], softmax_max[1] \
-                 and softmax_sum[1] are respectively (%ld), (%ld), (%ld), (%ld), (%ld). Their values should be equal.",
-                queryShape[0], queryIndexShape[0], weightsShape[0], softmaxMaxShape[1], softmaxSumShape[1]),
-            return false);
+        OP_CHECK_IF(queryIndexShape[0] != t1Len || weightsShape[0] != t1Len || softmaxMaxShape[1] != t1Len ||
+                        softmaxSumShape[1] != t1Len,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "query_index, query, weight, softmax_max, softmax_sum",
+                        (std::string() + std::to_string(queryShape[0]) + ", " + std::to_string(queryIndexShape[0]) +
+                         ", " + std::to_string(weightsShape[0]) + ", " + std::to_string(softmaxMaxShape[1]) + ", " +
+                         std::to_string(softmaxSumShape[1]))
+                            .c_str(),
+                        (std::string() +
+                         "CrossShapeVerify T1 is failed, the value of query[0], query_index[0], weights[0], "
+                         "softmax_max[1]  and softmax_sum[1] are respectively (" +
+                         std::to_string(queryShape[0]) + "), (" + std::to_string(queryIndexShape[0]) + "), (" +
+                         std::to_string(weightsShape[0]) + "), (" + std::to_string(softmaxMaxShape[1]) + "), (" +
+                         std::to_string(softmaxSumShape[1]) + "). Their values should be equal.")
+                            .c_str()),
+                    return false);
         // 验证N Query数字是否正确
         OP_CHECK_IF(
             queryShape[1] != NQUERY_SIZE_32 && queryShape[1] != NQUERY_SIZE_64 && queryShape[1] != NQUERY_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify failed, shape N of query must be one of the {32, 64, 128}, "
-                                        "but the value of query[1] is (%ld)",
-                                        queryShape[1]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName, "query",
+                                                   (std::string() + std::to_string(queryShape[1])).c_str(),
+                                                   (std::string() +
+                                                    "CrossShapeVerify failed, shape N of query must be one of the {32, "
+                                                    "64, 128}, but the value of query[1] is (" +
+                                                    std::to_string(queryShape[1]) + ")")
+                                                       .c_str()),
             return false);
         // 验证N Index数字是否正确
         OP_CHECK_IF(queryIndexShape[1] != NQUERYINDEX_SIZE_8 && queryIndexShape[1] != NQUERYINDEX_SIZE_16 &&
                         queryIndexShape[1] != NQUERYINDEX_SIZE_32 && queryIndexShape[1] != NQUERYINDEX_SIZE_64,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of query_index must be one of the "
-                                                "{8, 16, 32, 64}, but the value of query_index[1] is (%ld).",
-                                                queryIndexShape[1]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "query_index, query", (std::string() + std::to_string(queryIndexShape[1])).c_str(),
+                        (std::string() +
+                         "CrossShapeVerify failed, shape N of query_index must be one of the {8, 16, 32, 64}, but the "
+                         "value of query_index[1] is (" +
+                         std::to_string(queryIndexShape[1]) + ").")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(weightsShape[1] != NQUERYINDEX_SIZE_8 && weightsShape[1] != NQUERYINDEX_SIZE_16 &&
                         weightsShape[1] != NQUERYINDEX_SIZE_32 && weightsShape[1] != NQUERYINDEX_SIZE_64,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of weights must be one of the {8, "
-                                                "16, 32, 64}, but the value of weights[1] is (%ld).",
-                                                weightsShape[1]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName, "weight",
+                                                           (std::string() + std::to_string(weightsShape[1])).c_str(),
+                                                           (std::string() +
+                                                            "CrossShapeVerify failed, shape N of weights must be one "
+                                                            "of the {8, 16, 32, 64}, but the value of weights[1] is (" +
+                                                            std::to_string(weightsShape[1]) + ").")
+                                                               .c_str()),
                     return false);
         // 验证N Index
         OP_CHECK_IF(
             queryIndexShape[1] != weightsShape[1],
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify N index is failed, the value of query_index[1] and "
-                                        "weights[1] are respectively (%ld), (%ld). Their values should be equal.",
-                                        queryIndexShape[1], weightsShape[1]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query_index, query, weight",
+                (std::string() + std::to_string(queryIndexShape[1]) + ", " + std::to_string(weightsShape[1])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify N index is failed, the value of query_index[1] and weights[1] are respectively (" +
+                 std::to_string(queryIndexShape[1]) + "), (" + std::to_string(weightsShape[1]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
         // 验证T2
         OP_CHECK_IF(keyIndexShape[0] != keyShape[0],
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify T2 is failed, the value of key[0] and key_index[0] "
-                                                "are respectively (%ld), (%ld). Their values should be equal.",
-                                                keyShape[0], keyIndexShape[0]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "key_index, key",
+                        (std::string() + std::to_string(keyShape[0]) + ", " + std::to_string(keyIndexShape[0])).c_str(),
+                        (std::string() +
+                         "CrossShapeVerify T2 is failed, the value of key[0] and key_index[0] are respectively (" +
+                         std::to_string(keyShape[0]) + "), (" + std::to_string(keyIndexShape[0]) +
+                         "). Their values should be equal.")
+                            .c_str()),
                     return false);
         // 验证N2 数字是否正确
-        OP_CHECK_IF(
-            keyShape[1] != N2_SIZE_1,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, N2 must be 1, but the value of key[1] is (%ld).", keyShape[1]),
-            return false);
+        OP_CHECK_IF(keyShape[1] != N2_SIZE_1,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "key", (std::string() + std::to_string(keyShape[1])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of key[1] is (" +
+                         std::to_string(keyShape[1]) + ").")
+                            .c_str()),
+                    return false);
         OP_CHECK_IF(keyIndexShape[1] != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2 must be 1, but the value of key_index[1] is (%ld).",
-                        keyIndexShape[1]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "key_index, key", (std::string() + std::to_string(keyIndexShape[1])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of key_index[1] is (" +
+                         std::to_string(keyIndexShape[1]) + ").")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(softmaxMaxShape[0] != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2 must be 1, but the value of softmax_max[0] is (%ld).",
-                        softmaxMaxShape[0]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "softmax_max", (std::string() + std::to_string(softmaxMaxShape[0])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of softmax_max[0] is (" +
+                         std::to_string(softmaxMaxShape[0]) + ").")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(softmaxSumShape[0] != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2 must be 1, but the value of softmax_sum[0] is (%ld).",
-                        softmaxSumShape[0]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "softmax_sum", (std::string() + std::to_string(softmaxSumShape[0])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of softmax_sum[0] is (" +
+                         std::to_string(softmaxSumShape[0]) + ").")
+                            .c_str()),
                     return false);
         // 验证N2
         OP_CHECK_IF(
             keyIndexShape[1] != keyShape[1] || softmaxMaxShape[0] != keyShape[1] || softmaxSumShape[0] != keyShape[1],
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify N2 is failed, the value of key[1], key_index[1], softmax_max[0] and softmax_sum[0] "
-                "are respectively (%ld), (%ld), (%ld), (%ld). Their values should be equal.",
-                keyShape[1], keyIndexShape[1], softmaxMaxShape[0], softmaxSumShape[0]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "key_index, key, softmax_max, softmax_sum",
+                (std::string() + std::to_string(keyShape[1]) + ", " + std::to_string(keyIndexShape[1]) + ", " +
+                 std::to_string(softmaxMaxShape[0]) + ", " + std::to_string(softmaxSumShape[0]))
+                    .c_str(),
+                (std::string() +
+                 "CrossShapeVerify N2 is failed, the value of key[1], key_index[1], softmax_max[0] and softmax_sum[0] "
+                 "are respectively (" +
+                 std::to_string(keyShape[1]) + "), (" + std::to_string(keyIndexShape[1]) + "), (" +
+                 std::to_string(softmaxMaxShape[0]) + "), (" + std::to_string(softmaxSumShape[0]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
         // 验证D 数字是否正确
-        OP_CHECK_IF(
-            queryShape[2] != D_SIZE_512,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, shape D of query must be 512, but the value of query[2] is (%ld)",
-                queryShape[2]),
-            return false);
-        OP_CHECK_IF(keyShape[2] != D_SIZE_512,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, shape D of key must be 512, but the value of key[2] is (%ld)",
-                        keyShape[2]),
+        OP_CHECK_IF(queryShape[2] != D_SIZE_512,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "query", (std::string() + std::to_string(queryShape[2])).c_str(),
+                        (std::string() +
+                         "CrossShapeVerify failed, shape D of query must be 512, but the value of query[2] is (" +
+                         std::to_string(queryShape[2]) + ")")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(
+            keyShape[2] != D_SIZE_512,
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "key", (std::string() + std::to_string(keyShape[2])).c_str(),
+                (std::string() + "CrossShapeVerify failed, shape D of key must be 512, but the value of key[2] is (" +
+                 std::to_string(keyShape[2]) + ")")
+                    .c_str()),
+            return false);
+        OP_CHECK_IF(
             queryIndexShape[2] != DINDEX_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify failed, shape D of query_index must be 128, but the value of query_index[2] is (%ld)",
-                queryIndexShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query_index, query", (std::string() + std::to_string(queryIndexShape[2])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify failed, shape D of query_index must be 128, but the value of query_index[2] is (" +
+                 std::to_string(queryIndexShape[2]) + ")")
+                    .c_str()),
             return false);
         OP_CHECK_IF(
             keyIndexShape[2] != DINDEX_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify failed, shape D of key_index must be 128, but the value of key_index[2] is (%ld)",
-                keyIndexShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "key_index, key", (std::string() + std::to_string(keyIndexShape[2])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify failed, shape D of key_index must be 128, but the value of key_index[2] is (" +
+                 std::to_string(keyIndexShape[2]) + ")")
+                    .c_str()),
             return false);
         // 验证D
         OP_CHECK_IF(
             keyShape[2] != queryShape[2],
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify query-key shape D is failed, the value of query[2] and "
-                                        "key[2] are respectively (%ld), (%ld). Their values should be equal.",
-                                        queryShape[2], keyShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query, key",
+                (std::string() + std::to_string(queryShape[2]) + ", " + std::to_string(keyShape[2])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify query-key shape D is failed, the value of query[2] and key[2] are respectively (" +
+                 std::to_string(queryShape[2]) + "), (" + std::to_string(keyShape[2]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
-        OP_CHECK_IF(queryIndexShape[2] != keyIndexShape[2],
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName,
-                        "CrossShapeVerify query-key_index shape D is failed, the value of query_index[2] and "
-                        "key_index[2] are respectively (%ld), (%ld). Their values should be equal.",
-                        queryIndexShape[2], keyIndexShape[2]),
-                    return false);
-        // 验证ROPE是否使能
         OP_CHECK_IF(
-            hasRope == 0,
-            OPS_REPORT_VECTOR_INNER_ERR(opName, "CrossShapeVerify query or key rope is failed, rope can't be null"),
+            queryIndexShape[2] != keyIndexShape[2],
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query_index, key_index, query, key",
+                (std::string() + std::to_string(queryIndexShape[2]) + ", " + std::to_string(keyIndexShape[2])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify query-key_index shape D is failed, the value of query_index[2] and key_index[2] are "
+                 "respectively (" +
+                 std::to_string(queryIndexShape[2]) + "), (" + std::to_string(keyIndexShape[2]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
+        // 验证ROPE是否使能
+        OP_CHECK_IF(hasRope == 0,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        opName, "query, key", "CrossShapeVerify query or key rope is failed, rope can't be null"),
+                    return false);
         if (hasRope) {
             // 验证queryrope
             OP_CHECK_IF(
                 queryRopeShape[0] != t1Len || queryRopeShape[1] != n1Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify query_rope is failed, the value of query_rope[0] is (%ld), it should be equal to tlSize(%ld). \
-                    the value of query_rope[1] is (%ld), it should be equal to nQuerySize(%ld).",
-                    queryRopeShape[0], t1Len, queryRopeShape[1], n1Len),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "query_rope, query",
+                    (std::string() + std::to_string(queryRopeShape[0]) + ", " + std::to_string(t1Len) + ", " +
+                     std::to_string(queryRopeShape[1]) + ", " + std::to_string(n1Len))
+                        .c_str(),
+                    (std::string() + "CrossShapeVerify query_rope is failed, the value of query_rope[0] is (" +
+                     std::to_string(queryRopeShape[0]) + "), it should be equal to tlSize(" + std::to_string(t1Len) +
+                     ").  the value of query_rope[1] is (" + std::to_string(queryRopeShape[1]) +
+                     "), it should be equal to nQuerySize(" + std::to_string(n1Len) + ").")
+                        .c_str()),
                 return false);
             // 验证keyrope
             OP_CHECK_IF(
                 keyRopeShape[0] != t2Len || keyRopeShape[1] != n2Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify key_rope is failed, the value of key_rope[0] is (%ld), it should be equal to t2Size(%ld). \
-                    the value of key_rope[1] is (%ld), it should be equal to n2Size(%ld)",
-                    keyRopeShape[0], t2Len, keyRopeShape[1], n2Len),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "key_rope, key",
+                    (std::string() + std::to_string(keyRopeShape[0]) + ", " + std::to_string(t2Len) + ", " +
+                     std::to_string(keyRopeShape[1]) + ", " + std::to_string(n2Len))
+                        .c_str(),
+                    (std::string() + "CrossShapeVerify key_rope is failed, the value of key_rope[0] is (" +
+                     std::to_string(keyRopeShape[0]) + "), it should be equal to t2Size(" + std::to_string(t2Len) +
+                     ").  the value of key_rope[1] is (" + std::to_string(keyRopeShape[1]) +
+                     "), it should be equal to n2Size(" + std::to_string(n2Len) + ")")
+                        .c_str()),
                 return false);
             // 验证rope D 数字是否正确
-            OP_CHECK_IF(queryRopeShape[2] != DROPE_SIZE_64,
-                        OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                    "CrossShapeVerify failed, shape D of query_rope must be 64, but "
-                                                    "the value of query_rope[2] is (%ld).",
-                                                    queryRopeShape[2]),
-                        return false);
+            OP_CHECK_IF(
+                queryRopeShape[2] != DROPE_SIZE_64,
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "query_rope, query", (std::string() + std::to_string(queryRopeShape[2])).c_str(),
+                    (std::string() +
+                     "CrossShapeVerify failed, shape D of query_rope must be 64, but the value of query_rope[2] is (" +
+                     std::to_string(queryRopeShape[2]) + ").")
+                        .c_str()),
+                return false);
             OP_CHECK_IF(
                 keyRopeShape[2] != DROPE_SIZE_64,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify failed, shape D of key_rope must be 64, but the value of key_rope[2] is (%ld).",
-                    keyRopeShape[2]),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "key_rope, key", (std::string() + std::to_string(keyRopeShape[2])).c_str(),
+                    (std::string() +
+                     "CrossShapeVerify failed, shape D of key_rope must be 64, but the value of key_rope[2] is (" +
+                     std::to_string(keyRopeShape[2]) + ").")
+                        .c_str()),
                 return false);
             // 验证rope D
             OP_CHECK_IF(queryRopeShape[2] != keyRopeShape[2],
-                        OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                    "CrossShapeVerify query_rope D is not equal to key_rope D, the "
-                                                    "value of query_rope[2] and key_rope[2] is (%ld), (%ld).",
-                                                    queryRopeShape[2], keyRopeShape[2]),
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName, "query_rope, key_rope, query, key",
+                            (std::string() + std::to_string(queryRopeShape[2]) + ", " + std::to_string(keyRopeShape[2]))
+                                .c_str(),
+                            (std::string() +
+                             "CrossShapeVerify query_rope D is not equal to key_rope D, the value of query_rope[2] and "
+                             "key_rope[2] is (" +
+                             std::to_string(queryRopeShape[2]) + "), (" + std::to_string(keyRopeShape[2]) + ").")
+                                .c_str()),
                         return false);
         }
     } else if (inputLayout[0] == 'B' && inputLayout[1] == 'S' && inputLayout[2] == 'N' && inputLayout[3] == 'D') {
@@ -666,176 +890,268 @@ bool SparseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sh
             queryIndexShape[0] != bLen || weightsShape[0] != bLen || softmaxMaxShape[0] != bLen ||
                 softmaxSumShape[0] != bLen || keyShape[0] != bLen || keyIndexShape[0] != bLen ||
                 sparseIndicesShape[0] != bLen,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify shape B is failed, the value of query[0], key[0], query_index[0], key_index[0], weights[0], softmax_max[0], softmax_sum[0] and sparse_indices[0] are respectively (%ld), (%ld), (%ld), (%ld), (%ld), (%ld), (%ld), (%ld).\
-                 Their values should be equal.",
-                queryShape[0], keyShape[0], queryIndexShape[0], keyIndexShape[0], weightsShape[0], softmaxMaxShape[0],
-                softmaxSumShape[0], sparseIndicesShape[0]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query_index, key_index, query, key, weight, softmax_max, softmax_sum, sparse_indices",
+                (std::string() + std::to_string(queryShape[0]) + ", " + std::to_string(keyShape[0]) + ", " +
+                 std::to_string(queryIndexShape[0]) + ", " + std::to_string(keyIndexShape[0]) + ", " +
+                 std::to_string(weightsShape[0]) + ", " + std::to_string(softmaxMaxShape[0]) + ", " +
+                 std::to_string(softmaxSumShape[0]) + ", " + std::to_string(sparseIndicesShape[0]))
+                    .c_str(),
+                (std::string() +
+                 "CrossShapeVerify shape B is failed, the value of query[0], key[0], query_index[0], key_index[0], "
+                 "weights[0], softmax_max[0], softmax_sum[0] and sparse_indices[0] are respectively (" +
+                 std::to_string(queryShape[0]) + "), (" + std::to_string(keyShape[0]) + "), (" +
+                 std::to_string(queryIndexShape[0]) + "), (" + std::to_string(keyIndexShape[0]) + "), (" +
+                 std::to_string(weightsShape[0]) + "), (" + std::to_string(softmaxMaxShape[0]) + "), (" +
+                 std::to_string(softmaxSumShape[0]) + "), (" + std::to_string(sparseIndicesShape[0]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
         // 验证s1
-        OP_CHECK_IF(
-            queryIndexShape[1] != s1Len || weightsShape[1] != s1Len || softmaxMaxShape[2] != s1Len ||
-                softmaxSumShape[2] != s1Len,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify S1 is failed, the value of query[1], query_index[1], weights[1], softmax_max[2] \
-                 and softmax_sum[2] are respectively (%ld), (%ld), (%ld), (%ld), (%ld). Their values should be equal.",
-                queryShape[1], queryIndexShape[1], weightsShape[1], softmaxMaxShape[2], softmaxSumShape[2]),
-            return false);
+        OP_CHECK_IF(queryIndexShape[1] != s1Len || weightsShape[1] != s1Len || softmaxMaxShape[2] != s1Len ||
+                        softmaxSumShape[2] != s1Len,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "query_index, query, weight, softmax_max, softmax_sum",
+                        (std::string() + std::to_string(queryShape[1]) + ", " + std::to_string(queryIndexShape[1]) +
+                         ", " + std::to_string(weightsShape[1]) + ", " + std::to_string(softmaxMaxShape[2]) + ", " +
+                         std::to_string(softmaxSumShape[2]))
+                            .c_str(),
+                        (std::string() +
+                         "CrossShapeVerify S1 is failed, the value of query[1], query_index[1], weights[1], "
+                         "softmax_max[2]  and softmax_sum[2] are respectively (" +
+                         std::to_string(queryShape[1]) + "), (" + std::to_string(queryIndexShape[1]) + "), (" +
+                         std::to_string(weightsShape[1]) + "), (" + std::to_string(softmaxMaxShape[2]) + "), (" +
+                         std::to_string(softmaxSumShape[2]) + "). Their values should be equal.")
+                            .c_str()),
+                    return false);
         // 验证s2
         OP_CHECK_IF(
             keyIndexShape[1] != s2Len,
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify shape S2 is failed, the value of key[1] and key_index[1] are "
-                                        "respectively (%ld), (%ld). Their values should be equal.",
-                                        keyShape[1], keyIndexShape[1]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "key_index, key",
+                (std::string() + std::to_string(keyShape[1]) + ", " + std::to_string(keyIndexShape[1])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify shape S2 is failed, the value of key[1] and key_index[1] are respectively (" +
+                 std::to_string(keyShape[1]) + "), (" + std::to_string(keyIndexShape[1]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
         // 验证N Query数字是否正确
         OP_CHECK_IF(
             queryShape[2] != NQUERY_SIZE_32 && queryShape[2] != NQUERY_SIZE_64 && queryShape[2] != NQUERY_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify failed, shape N of query must be one of the {32, 64, 128}, "
-                                        "but the value of query[2] is (%ld)",
-                                        queryShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName, "query",
+                                                   (std::string() + std::to_string(queryShape[2])).c_str(),
+                                                   (std::string() +
+                                                    "CrossShapeVerify failed, shape N of query must be one of the {32, "
+                                                    "64, 128}, but the value of query[2] is (" +
+                                                    std::to_string(queryShape[2]) + ")")
+                                                       .c_str()),
             return false);
         // 验证N Index数字是否正确
         OP_CHECK_IF(queryIndexShape[2] != NQUERYINDEX_SIZE_8 && queryIndexShape[2] != NQUERYINDEX_SIZE_16 &&
                         queryIndexShape[2] != NQUERYINDEX_SIZE_32 && queryIndexShape[2] != NQUERYINDEX_SIZE_64,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of query_index must be one of the "
-                                                "{8, 16, 32, 64}, but the value of query_index[2] is (%ld).",
-                                                queryIndexShape[2]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "query_index, query", (std::string() + std::to_string(queryIndexShape[2])).c_str(),
+                        (std::string() +
+                         "CrossShapeVerify failed, shape N of query_index must be one of the {8, 16, 32, 64}, but the "
+                         "value of query_index[2] is (" +
+                         std::to_string(queryIndexShape[2]) + ").")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(weightsShape[2] != NQUERYINDEX_SIZE_8 && weightsShape[2] != NQUERYINDEX_SIZE_16 &&
                         weightsShape[2] != NQUERYINDEX_SIZE_32 && weightsShape[2] != NQUERYINDEX_SIZE_64,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of weights must be one of the {8, "
-                                                "16, 32, 64}, but the value of weights[2] is (%ld).",
-                                                weightsShape[2]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName, "weight",
+                                                           (std::string() + std::to_string(weightsShape[2])).c_str(),
+                                                           (std::string() +
+                                                            "CrossShapeVerify failed, shape N of weights must be one "
+                                                            "of the {8, 16, 32, 64}, but the value of weights[2] is (" +
+                                                            std::to_string(weightsShape[2]) + ").")
+                                                               .c_str()),
                     return false);
         // 验证N Index
         OP_CHECK_IF(
             queryIndexShape[2] != weightsShape[2],
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify N index is failed, the value of query_index[2] and "
-                                        "weights[2] are respectively (%ld), (%ld). Their values should be equal.",
-                                        queryIndexShape[2], weightsShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query_index, query, weight",
+                (std::string() + std::to_string(queryIndexShape[2]) + ", " + std::to_string(weightsShape[2])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify N index is failed, the value of query_index[2] and weights[2] are respectively (" +
+                 std::to_string(queryIndexShape[2]) + "), (" + std::to_string(weightsShape[2]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
         // 验证N2 数字是否正确
-        OP_CHECK_IF(
-            keyShape[2] != N2_SIZE_1,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, N2 must be 1, but the value of key[2] is (%ld).", keyShape[2]),
-            return false);
+        OP_CHECK_IF(keyShape[2] != N2_SIZE_1,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "key", (std::string() + std::to_string(keyShape[2])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of key[2] is (" +
+                         std::to_string(keyShape[2]) + ").")
+                            .c_str()),
+                    return false);
         OP_CHECK_IF(keyIndexShape[2] != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2 must be 1, but the value of key_index[2] is (%ld).",
-                        keyIndexShape[2]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "key_index, key", (std::string() + std::to_string(keyIndexShape[2])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of key_index[2] is (" +
+                         std::to_string(keyIndexShape[2]) + ").")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(softmaxMaxShape[1] != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2 must be 1, but the value of softmax_max[1] is (%ld).",
-                        softmaxMaxShape[1]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "softmax_max", (std::string() + std::to_string(softmaxMaxShape[1])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of softmax_max[1] is (" +
+                         std::to_string(softmaxMaxShape[1]) + ").")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(softmaxSumShape[1] != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2 must be 1, but the value of softmax_sum[1] is (%ld).",
-                        softmaxSumShape[1]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "softmax_sum", (std::string() + std::to_string(softmaxSumShape[1])).c_str(),
+                        (std::string() + "CrossShapeVerify failed, N2 must be 1, but the value of softmax_sum[1] is (" +
+                         std::to_string(softmaxSumShape[1]) + ").")
+                            .c_str()),
                     return false);
         // 验证N2
         OP_CHECK_IF(keyIndexShape[2] != n2Len || softmaxMaxShape[1] != n2Len || softmaxSumShape[1] != n2Len,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName,
-                        "CrossShapeVerify N2 is failed, the value of key[2], key_index[2], softmax_max[1] and "
-                        "softmax_sum[1] are respectively (%ld), (%ld), (%ld), (%ld). Their values should be equal.",
-                        keyShape[2], keyIndexShape[2], softmaxMaxShape[1], softmaxSumShape[1]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "key_index, key, softmax_max, softmax_sum",
+                        (std::string() + std::to_string(keyShape[2]) + ", " + std::to_string(keyIndexShape[2]) + ", " +
+                         std::to_string(softmaxMaxShape[1]) + ", " + std::to_string(softmaxSumShape[1]))
+                            .c_str(),
+                        (std::string() +
+                         "CrossShapeVerify N2 is failed, the value of key[2], key_index[2], softmax_max[1] and "
+                         "softmax_sum[1] are respectively (" +
+                         std::to_string(keyShape[2]) + "), (" + std::to_string(keyIndexShape[2]) + "), (" +
+                         std::to_string(softmaxMaxShape[1]) + "), (" + std::to_string(softmaxSumShape[1]) +
+                         "). Their values should be equal.")
+                            .c_str()),
                     return false);
         // 验证D 数字是否正确
-        OP_CHECK_IF(
-            queryShape[3] != D_SIZE_512,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, shape D of query must be 512, but the value of query[3] is (%ld)",
-                queryShape[3]),
-            return false);
-        OP_CHECK_IF(keyShape[3] != D_SIZE_512,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, shape D of key must be 512, but the value of key[3] is (%ld)",
-                        keyShape[3]),
+        OP_CHECK_IF(queryShape[3] != D_SIZE_512,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        opName, "query", (std::string() + std::to_string(queryShape[3])).c_str(),
+                        (std::string() +
+                         "CrossShapeVerify failed, shape D of query must be 512, but the value of query[3] is (" +
+                         std::to_string(queryShape[3]) + ")")
+                            .c_str()),
                     return false);
         OP_CHECK_IF(
+            keyShape[3] != D_SIZE_512,
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "key", (std::string() + std::to_string(keyShape[3])).c_str(),
+                (std::string() + "CrossShapeVerify failed, shape D of key must be 512, but the value of key[3] is (" +
+                 std::to_string(keyShape[3]) + ")")
+                    .c_str()),
+            return false);
+        OP_CHECK_IF(
             queryIndexShape[3] != DINDEX_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify failed, shape D of query_index must be 128, but the value of query_index[3] is (%ld)",
-                queryIndexShape[3]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query_index, query", (std::string() + std::to_string(queryIndexShape[3])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify failed, shape D of query_index must be 128, but the value of query_index[3] is (" +
+                 std::to_string(queryIndexShape[3]) + ")")
+                    .c_str()),
             return false);
         OP_CHECK_IF(
             keyIndexShape[3] != DINDEX_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify failed, shape D of key_index must be 128, but the value of key_index[3] is (%ld)",
-                keyIndexShape[3]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "key_index, key", (std::string() + std::to_string(keyIndexShape[3])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify failed, shape D of key_index must be 128, but the value of key_index[3] is (" +
+                 std::to_string(keyIndexShape[3]) + ")")
+                    .c_str()),
             return false);
         // 验证D
         OP_CHECK_IF(
             keyShape[3] != queryShape[3],
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify query-key shape D is failed, the value of query[3] and "
-                                        "key[3] are respectively (%ld), (%ld). Their values should be equal.",
-                                        queryShape[3], keyShape[3]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query, key",
+                (std::string() + std::to_string(queryShape[3]) + ", " + std::to_string(keyShape[3])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify query-key shape D is failed, the value of query[3] and key[3] are respectively (" +
+                 std::to_string(queryShape[3]) + "), (" + std::to_string(keyShape[3]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
-        OP_CHECK_IF(queryIndexShape[3] != keyIndexShape[3],
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName,
-                        "CrossShapeVerify query-key_index shape D is Failed, the value of query_index[3] and "
-                        "key_index[3] are respectively (%ld), (%ld). Their values should be equal.",
-                        queryIndexShape[3], keyIndexShape[3]),
-                    return false);
-        // 验证ROPE是否使能
         OP_CHECK_IF(
-            hasRope == 0,
-            OPS_REPORT_VECTOR_INNER_ERR(opName, "CrossShapeVerify query or key rope is failed, rope can't be null"),
+            queryIndexShape[3] != keyIndexShape[3],
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                opName, "query_index, key_index, query, key",
+                (std::string() + std::to_string(queryIndexShape[3]) + ", " + std::to_string(keyIndexShape[3])).c_str(),
+                (std::string() +
+                 "CrossShapeVerify query-key_index shape D is Failed, the value of query_index[3] and key_index[3] are "
+                 "respectively (" +
+                 std::to_string(queryIndexShape[3]) + "), (" + std::to_string(keyIndexShape[3]) +
+                 "). Their values should be equal.")
+                    .c_str()),
             return false);
+        // 验证ROPE是否使能
+        OP_CHECK_IF(hasRope == 0,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        opName, "query, key", "CrossShapeVerify query or key rope is failed, rope can't be null"),
+                    return false);
         if (hasRope) {
             // 验证queryrope
             OP_CHECK_IF(
                 queryRopeShape[0] != bLen || queryRopeShape[1] != s1Len || queryRopeShape[2] != n1Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify query_rope is failed, the value of query_rope[0] is (%ld), it should be equal to bSize(%ld). \
-                    the value of query_rope[1] is (%ld), it should be equal to s1Size(%ld), the value of query_rope[2] is (%ld), it should be equal to nQuerySize(%ld).",
-                    queryRopeShape[0], bLen, queryRopeShape[1], s1Len, queryRopeShape[2], n1Len),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "query_rope, query",
+                    (std::string() + std::to_string(queryRopeShape[0]) + ", " + std::to_string(bLen) + ", " +
+                     std::to_string(queryRopeShape[1]) + ", " + std::to_string(s1Len) + ", " +
+                     std::to_string(queryRopeShape[2]) + ", " + std::to_string(n1Len))
+                        .c_str(),
+                    (std::string() + "CrossShapeVerify query_rope is failed, the value of query_rope[0] is (" +
+                     std::to_string(queryRopeShape[0]) + "), it should be equal to bSize(" + std::to_string(bLen) +
+                     ").  the value of query_rope[1] is (" + std::to_string(queryRopeShape[1]) +
+                     "), it should be equal to s1Size(" + std::to_string(s1Len) + "), the value of query_rope[2] is (" +
+                     std::to_string(queryRopeShape[2]) + "), it should be equal to nQuerySize(" +
+                     std::to_string(n1Len) + ").")
+                        .c_str()),
                 return false);
             // 验证keyrope
             OP_CHECK_IF(
                 keyRopeShape[0] != bLen || keyRopeShape[1] != s2Len || keyRopeShape[2] != n2Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify key_rope is failed, the value of key_rope[0] is (%ld), it should be equal to bSize(%ld), the value of key_rope[1] is (%ld), it should be equal to s2Size(%ld). \
-                    the value of key_rope[2] is (%ld), it should be equal to n2Size(%ld)",
-                    keyRopeShape[0], bLen, keyRopeShape[1], s2Len, keyRopeShape[2], n2Len),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "key_rope, key",
+                    (std::string() + std::to_string(keyRopeShape[0]) + ", " + std::to_string(bLen) + ", " +
+                     std::to_string(keyRopeShape[1]) + ", " + std::to_string(s2Len) + ", " +
+                     std::to_string(keyRopeShape[2]) + ", " + std::to_string(n2Len))
+                        .c_str(),
+                    (std::string() + "CrossShapeVerify key_rope is failed, the value of key_rope[0] is (" +
+                     std::to_string(keyRopeShape[0]) + "), it should be equal to bSize(" + std::to_string(bLen) +
+                     "), the value of key_rope[1] is (" + std::to_string(keyRopeShape[1]) +
+                     "), it should be equal to s2Size(" + std::to_string(s2Len) + ").  the value of key_rope[2] is (" +
+                     std::to_string(keyRopeShape[2]) + "), it should be equal to n2Size(" + std::to_string(n2Len) + ")")
+                        .c_str()),
                 return false);
             // 验证rope D 数字是否正确
-            OP_CHECK_IF(queryRopeShape[3] != DROPE_SIZE_64,
-                        OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                    "CrossShapeVerify failed, shape D of query_rope  must be 64, but "
-                                                    "the value of query_rope[3] is (%ld).",
-                                                    queryRopeShape[3]),
-                        return false);
+            OP_CHECK_IF(
+                queryRopeShape[3] != DROPE_SIZE_64,
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "query_rope, query", (std::string() + std::to_string(queryRopeShape[3])).c_str(),
+                    (std::string() +
+                     "CrossShapeVerify failed, shape D of query_rope  must be 64, but the value of query_rope[3] is (" +
+                     std::to_string(queryRopeShape[3]) + ").")
+                        .c_str()),
+                return false);
             OP_CHECK_IF(
                 keyRopeShape[3] != DROPE_SIZE_64,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify failed, shape D of key_rope must be 64, but the value of key_rope[3] is (%ld).",
-                    keyRopeShape[3]),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName, "key_rope, key", (std::string() + std::to_string(keyRopeShape[3])).c_str(),
+                    (std::string() +
+                     "CrossShapeVerify failed, shape D of key_rope must be 64, but the value of key_rope[3] is (" +
+                     std::to_string(keyRopeShape[3]) + ").")
+                        .c_str()),
                 return false);
             // 验证rope D
             OP_CHECK_IF(queryRopeShape[3] != keyRopeShape[3],
-                        OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                    "CrossShapeVerify query_rope D is not equal to key_rope D, the "
-                                                    "value of queryRope[3] and keyRope[3] is (%ld), (%ld).",
-                                                    queryRopeShape[3], keyRopeShape[3]),
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            opName, "query_rope, key_rope, query, key",
+                            (std::string() + std::to_string(queryRopeShape[3]) + ", " + std::to_string(keyRopeShape[3]))
+                                .c_str(),
+                            (std::string() +
+                             "CrossShapeVerify query_rope D is not equal to key_rope D, the value of queryRope[3] and "
+                             "keyRope[3] is (" +
+                             std::to_string(queryRopeShape[3]) + "), (" + std::to_string(keyRopeShape[3]) + ").")
+                                .c_str()),
                         return false);
         }
     }
@@ -855,7 +1171,9 @@ bool SparseLightningIndexerGradKLLossTilingBase::AnalyzeLayout()
     auto keyRope = context_->GetOptionalInputShape(KEY_ROPE_INPUT_INDEX);
     bool hasKeyRope = keyRope != nullptr && keyRope->GetStorageShape().GetDimNum() != 0;
     if (hasQueryRope ^ hasKeyRope) {
-        OP_LOGE(opName, "query_rope and key_rope should be present or absent at the same time, check this.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            opName, "query_rope, key_rope, query, key",
+            "query_rope and key_rope should be present or absent at the same time, check this.");
         return false;
     }
     // TND和BSND的dim位置不同来赋值
@@ -864,19 +1182,32 @@ bool SparseLightningIndexerGradKLLossTilingBase::AnalyzeLayout()
     auto& keyRopeShape = keyRope->GetStorageShape();
 
     size_t layoutLen = strlen(inputLayout);
-    OP_CHECK_IF(queryShape.GetDimNum() != layoutLen || keyShape.GetDimNum() != layoutLen ||
-                    queryIndexShape.GetDimNum() != layoutLen || keyIndexShape.GetDimNum() != layoutLen,
-                OP_LOGE(opName, "Invalid data, inputdata shapelen [%d] is not equal to inputLayout [%s] len[%d].",
-                        queryShape.GetDimNum(), inputLayout, layoutLen),
-                return false);
+    OP_CHECK_IF(
+        queryShape.GetDimNum() != layoutLen || keyShape.GetDimNum() != layoutLen ||
+            queryIndexShape.GetDimNum() != layoutLen || keyIndexShape.GetDimNum() != layoutLen,
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            opName, "query, key, query_index, key_index, weight",
+            (std::string() + std::to_string(queryShape.GetDimNum()) + ", " + std::string(inputLayout) + ", " +
+             std::to_string(layoutLen))
+                .c_str(),
+            (std::string() + "Invalid data, inputdata shapelen [" + std::to_string(queryShape.GetDimNum()) +
+             "] is not equal to inputLayout [" + std::string(inputLayout) + "] len[" + std::to_string(layoutLen) + "].")
+                .c_str()),
+        return false);
     OP_CHECK_IF(!CrossShapeVerify(queryRopeShape, keyRopeShape),
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "CrossShapeVerify Failed"), return false);
+                OP_LOGE_WITHOUT_REPORT(opName, "CrossShapeVerify Failed"), return false);
     OP_CHECK_IF(
         !AnalyzeDimLayout(queryShape, keyShape, queryIndexShape, topKShape, layoutLen, queryRopeShape, keyRopeShape),
-        OP_LOGE(opName, "Layout %s data analyze failed.", inputLayout), return false);
-    OP_CHECK_IF(gSizeQuery == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "gSizeQuery is zero"), return false);
-    OP_CHECK_IF(n2Size == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "n2Size is zero"), return false);
-    OP_CHECK_IF(dSizeQuery <= 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "dSizeQuery  is not support <= 0"), return false);
+        OP_LOGE_WITHOUT_REPORT(opName, "Layout %s data analyze failed.", inputLayout), return false);
+    OP_CHECK_IF(gSizeQuery == 0, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query", "gSizeQuery is zero"),
+                return false);
+    OP_CHECK_IF(n2Size == 0,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query, key, query_index, key_index, weight",
+                                                         "n2Size is zero"),
+                return false);
+    OP_CHECK_IF(dSizeQuery <= 0,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query", "dSizeQuery  is not support <= 0"),
+                return false);
     return true;
 }
 
@@ -886,7 +1217,10 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::GetPlatformInfo()
     if (platformInfoPtr == nullptr) {
         auto compileInfoPtr =
             reinterpret_cast<const SparseLightningIndexerGradKLLossCompileInfo*>(context_->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(opName, "compileInfoPtr is null."), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(compileInfoPtr == nullptr,
+                    REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                              (std::vector<const char*>{opName, "compileInfoPtr is null."})),
+                    return ge::GRAPH_FAILED);
         aivNum = compileInfoPtr->aivNum;
         aicNum = compileInfoPtr->aicNum;
         aicoreParams_.ubSize = compileInfoPtr->ubSize;
@@ -913,10 +1247,11 @@ ge::graphStatus SparseLightningIndexerGradKLLossTilingBase::GetShapeAttrsInfo()
     opName = context_->GetNodeName();
     OP_LOGD(opName, "TilingContext: %s.", GetTilingContextDebugStr().c_str());
 
-    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE(opName, "invalid context."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(opName, "invalid context."),
+                return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(!AnalyzeAttrs() || !AnalyzeDtype() || !AnalyzeLayout(),
-                OP_LOGE(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
     // 将基本输入参数传给tilingdata
     sliGradkllossBaseParams_->set_bSize(bSize);
     sliGradkllossBaseParams_->set_n2Size(n2Size);
@@ -956,7 +1291,9 @@ int64_t SparseLightningIndexerGradKLLossTilingBase::GetS2RealSize(int32_t sparse
 bool SparseLightningIndexerGradKLLossTilingBase::InitSparseValidArray(std::vector<int64_t>& sparseValidArray)
 {
     OP_CHECK_IF(sparseValidArray.size() == 0,
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "Sparse valid array size should be larger than 0."), return false);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query, key, query_index, key_index, weight",
+                                                         "Sparse valid array size should be larger than 0."),
+                return false);
 
     uint32_t sparseMode = sliGradkllossBaseParams_->get_sparseMode();
     if (tilingKeyLayout == LayoutType::LAYOUT_TND) {
@@ -1099,7 +1436,9 @@ bool SparseLightningIndexerGradKLLossTilingBase::SetSparseStartIdx(const std::ve
     int64_t* sparseStartIdx = sliGradkllossMultiCoreParams_->get_bS1Ptr();
     int64_t splitFactorSize = sliGradkllossMultiCoreParams_->get_splitFactorSize();
 
-    OP_CHECK_IF(totalSize <= 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "totalSize should be larger than 0."),
+    OP_CHECK_IF(totalSize <= 0,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query, key, query_index, key_index, weight",
+                                                         "totalSize should be larger than 0."),
                 return false);
     if (tilingKeyLayout == LayoutType::LAYOUT_TND) {
         // initLoad: 使用均分策略, 保证后续不会比均分差

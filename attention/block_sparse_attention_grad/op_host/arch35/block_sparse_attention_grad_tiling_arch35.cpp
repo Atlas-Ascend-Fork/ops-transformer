@@ -55,16 +55,28 @@ ge::graphStatus InputCheck(const std::vector<int32_t>& q_shape, const std::vecto
      * shape：[b, n, s, d]
      */
     if (!IsSameShape(q_shape[0], k_shape[0], v_shape[0])) {
-        OP_LOGE(context->GetNodeName(), "q_batch must be same as k_batch and v_batch.");
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            context->GetNodeName(), "query, key, value",
+            std::to_string(q_shape[0]) + ", " + std::to_string(k_shape[0]) + ", " + std::to_string(v_shape[0]),
+            "batch sizes must be equal and positive");
         return ge::GRAPH_FAILED;
     } else if (!IsSameShape(q_shape[1], k_shape[1] * q_group, v_shape[1] * q_group)) {
-        OP_LOGE(context->GetNodeName(), "q_group * kv_head_num must same as q_head_num.");
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            context->GetNodeName(), "query, key, value",
+            std::to_string(q_shape[1]) + ", " + std::to_string(k_shape[1]) + ", " + std::to_string(v_shape[1]),
+            "query heads must equal key/value heads multiplied by q_group");
         return ge::GRAPH_FAILED;
     } else if (!IsSameShape(q_shape[2], k_shape[2], v_shape[2])) {
-        OP_LOGE(context->GetNodeName(), "q_seq_len must be same as k_seq_len and v_seq_len.");
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            context->GetNodeName(), "query, key, value",
+            std::to_string(q_shape[2]) + ", " + std::to_string(k_shape[2]) + ", " + std::to_string(v_shape[2]),
+            "sequence lengths must be equal and positive");
         return ge::GRAPH_FAILED;
     } else if (!IsSameShape(q_shape[3], k_shape[3], v_shape[3])) {
-        OP_LOGE(context->GetNodeName(), "q_head_dim must be same as k_head_dim and v_head_dim.");
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            context->GetNodeName(), "query, key, value",
+            std::to_string(q_shape[3]) + ", " + std::to_string(k_shape[3]) + ", " + std::to_string(v_shape[3]),
+            "head dimensions must be equal and positive");
         return ge::GRAPH_FAILED;
     }
 
@@ -81,18 +93,22 @@ protected:
     bool IsCapable() override
     {
         if (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16) {
-            OP_LOGE(context_->GetNodeName(), "BlockSparseAttentionGrad only support DT_FLOAT16 and DT_BF16.");
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "query",
+                                                  std::to_string(static_cast<int64_t>(dataType_)),
+                                                  "supported dtypes are FP16 and BF16");
             return false;
         }
 
         if (head_dim_ != 128) {
-            OP_LOGE(context_->GetNodeName(), "BlockSparseAttentionGrad only support head_dim 128.");
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "query", std::to_string(head_dim_),
+                                                     "head dimension must be 128 for the current template");
             return false;
         }
 
         if (blockShapeX_ == 0 || blockShapeY_ == 0 || blockShapeX_ % 16 != 0 || blockShapeY_ % 16 != 0) {
-            OP_LOGE(context_->GetNodeName(),
-                    "BlockSparseAttentionGrad only supports blockShapeX and blockShapeY that are multiples of 16.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "blockShapeOptional",
+                                                  std::to_string(blockShapeX_) + ", " + std::to_string(blockShapeY_),
+                                                  "both block dimensions must be nonzero multiples of 16");
             return false;
         }
 
@@ -114,36 +130,43 @@ protected:
         const float softmaxScale = *context_->GetAttrs()->GetAttrPointer<float>(4);
         auto blockShapeOptional = context_->GetInputTensor(8);
         if (blockShapeOptional == nullptr) {
-            OP_LOGE(context_->GetNodeName(), "Block shape tensor is null");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "blockShapeOptional",
+                                                     "tensor and host data must be provided");
             return ge::GRAPH_FAILED;
         }
         const int64_t* blockShapeList = blockShapeOptional->GetData<int64_t>();
         if (blockShapeList == nullptr) {
-            OP_LOGE(context_->GetNodeName(), "Block shape tensor is null");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "blockShapeOptional",
+                                                     "tensor and host data must be provided");
             return ge::GRAPH_FAILED;
         }
 
         if (qInputDesc == nullptr) {
-            OP_LOGE(context_->GetNodeName(), "Query inputDesc is null");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "query", "input descriptor is missing");
             return ge::GRAPH_FAILED;
         } else {
             dataType_ = qInputDesc->GetDataType();
         }
 
         if (strcmp(qInputLayout, kvInputLayout) != 0) {
-            OP_LOGE(context_->GetNodeName(), "kvInputLayout must same as qInputLayout.");
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context_->GetNodeName(), "qInputLayout, kvInputLayout",
+                                                   std::string(qInputLayout) + ", " + kvInputLayout,
+                                                   "layouts must be the same");
             return ge::GRAPH_FAILED;
         }
 
         if (queryShape == nullptr || keyShape == nullptr || valueShape == nullptr) {
-            OP_LOGE(context_->GetNodeName(), "queryShape or keyShape or valueShape is nullptr.");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "query, key, value",
+                                                     "all input shapes must be provided");
             return ge::GRAPH_FAILED;
         }
 
         if (strcmp(qInputLayout, BSND_STR) == 0) {
             // BSND layout
             if (queryShape->GetOriginShape().GetDimNum() != 4) {
-                OP_LOGE(context_->GetNodeName(), "The shape of query must be 4 dimension.");
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "query",
+                                                         std::to_string(queryShape->GetOriginShape().GetDimNum()),
+                                                         "BSND/BNSD requires rank 4");
                 return ge::GRAPH_FAILED;
             }
             // query
@@ -165,7 +188,9 @@ protected:
         } else if (strcmp(qInputLayout, BNSD_STR) == 0) {
             // BNSD layout
             if (queryShape->GetOriginShape().GetDimNum() != 4) {
-                OP_LOGE(context_->GetNodeName(), "The shape of query must be 4 dimension.");
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "query",
+                                                         std::to_string(queryShape->GetOriginShape().GetDimNum()),
+                                                         "BSND/BNSD requires rank 4");
                 return ge::GRAPH_FAILED;
             }
             // query
@@ -187,14 +212,17 @@ protected:
         } else if (strcmp(qInputLayout, TND_STR) == 0) {
             // TND layout
             if (queryShape->GetOriginShape().GetDimNum() != 3) {
-                OP_LOGE(context_->GetNodeName(), "The shape of query must be 3 dimension.");
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "query",
+                                                         std::to_string(queryShape->GetOriginShape().GetDimNum()),
+                                                         "TND requires rank 3");
                 return ge::GRAPH_FAILED;
             }
             auto actualSeqLengths = context_->GetOptionalInputTensor(9);
             auto actualKVSeqLengths = context_->GetOptionalInputTensor(10);
             if (actualSeqLengths == nullptr || actualKVSeqLengths == nullptr) {
-                OP_LOGE(context_->GetNodeName(),
-                        "The layout is TND, actualSeqLengths or actualKVSeqLengths must not be nullptr.");
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(),
+                                                         "actual_seq_lengths, actual_seq_lengths_kv",
+                                                         "both inputs are required for TND layout");
                 return ge::GRAPH_FAILED;
             }
             q_batch_num = static_cast<uint32_t>(actualSeqLengths->GetShapeSize());
@@ -214,7 +242,8 @@ protected:
             v_head_dim = valueShape->GetStorageShape().GetDim(2);
             q_group = q_head_num / k_head_num;
         } else {
-            OP_LOGE(context_->GetNodeName(), "Invaild Input Layout: InputLayout must be BSND or BNSD or TND.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "qInputLayout", qInputLayout,
+                                                  "supported layouts are BSND, BNSD and TND");
             return ge::GRAPH_FAILED;
         }
 
@@ -261,13 +290,13 @@ protected:
         if (!deterministic_) {
             uint64_t vecCoreNum = cubeCoreNum_ * 2;
             uint64_t vecRegLen = ascendcPlatform.GetVecRegLen();
-            uint64_t ubSize;
+            uint64_t ubSize = 0;
             ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
             NonZeroAscendCTilingImpl tilingImpl = NonZeroAscendCTilingImpl(context_);
 
-            if (tilingImpl.DoTiling(vecCoreNum, ubSize, vecRegLen, tilingData_.mNonZeroTilingData) !=
-                ge::GRAPH_SUCCESS) {
-                OP_LOGE(context_->GetNodeName(), "Tiling4NonZero do tiling failed, unsupported shape.");
+            const auto ret = tilingImpl.DoTiling(vecCoreNum, ubSize, vecRegLen, tilingData_.mNonZeroTilingData);
+            if (ret != ge::GRAPH_SUCCESS) {
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "NonZero tiling failed, ret=%u.", ret);
                 return ge::GRAPH_FAILED;
             }
         }
@@ -313,7 +342,8 @@ protected:
             dv_size = dk_size;
             sftg_size = q_seq_len_ * q_head_num_ * 8; // 存放逻辑按[B,N,S,8]
         } else {
-            OP_LOGE(context_->GetNodeName(), "Invaild Input Layout: InputLayout must be BSDN or BNSD or TND.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "qInputLayout", layout_,
+                                                  "supported layouts are BSND, BNSD and TND");
             return ge::GRAPH_FAILED;
         }
 
@@ -323,8 +353,8 @@ protected:
             // 存放 NonZero 预 kernel 输出的有效 block 下标（数量上界 = mask 元素个数）
             auto maskShape = context_->GetInputShape(6);
             if (maskShape == nullptr) {
-                OP_LOGE(context_->GetNodeName(),
-                        "BlockSparseAttentionGrad only support blockSparseMask is not nullptr.");
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "block_sparse_mask",
+                                                         "input shape is required for NonZero workspace calculation");
                 return ge::GRAPH_FAILED;
             }
             const gert::Shape& shape = maskShape->GetStorageShape();

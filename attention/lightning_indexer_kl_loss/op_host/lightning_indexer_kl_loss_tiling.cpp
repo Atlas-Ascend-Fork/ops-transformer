@@ -24,12 +24,24 @@ struct LightningIndexerKLLossCompileInfo {};
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfoPtr);
+    OP_CHECK_IF(platformInfoPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "platformInfo is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     coreNum = ascendcPlatform.GetCoreNumAiv();
-    OP_CHECK_IF(coreNum == 0, OP_LOGE(context, "coreNum is 0"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        coreNum == 0,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(), "coreNum is 0"})),
+        return ge::GRAPH_FAILED);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
-    OP_CHECK_IF(ubSize == 0, OP_LOGE(context, "ubSize is 0"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        ubSize == 0,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(), "ubSize is 0"})),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -59,7 +71,12 @@ int Ceil(int a, int b)
 ge::graphStatus GetWorkspaceSize(gert::TilingContext* context, bool deterministic, bool isHalf, int64_t coreNum)
 {
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, currentWorkspace);
+    OP_CHECK_IF(
+        currentWorkspace == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            "currentWorkspace is null; Tiling cannot continue"})),
+        return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     if (deterministic || isHalf) {
@@ -80,7 +97,10 @@ static ge::graphStatus CheckInputDim(gert::TilingContext* context)
         OP_LOGE_FOR_INVALID_SHAPEDIM(context->GetNodeName(), "target_score", dimNumStr.c_str(), "2D or 3D");
         return ge::GRAPH_FAILED;
     }
-    OP_CHECK_NULL_WITH_CONTEXT(context, indexProbsShape);
+    OP_CHECK_IF(indexProbsShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "index_probs",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     auto targetScoreOrigin = targetScoreShape->GetOriginShape();
     auto indexProbsOrigin = indexProbsShape->GetOriginShape();
     std::string targetShapeStr = std::to_string(targetScoreOrigin.GetDim(0));
@@ -113,12 +133,16 @@ static ge::graphStatus LightningIndexerKLLossTilingFunc(gert::TilingContext* con
     uint64_t ubSize;
     int64_t coreNum;
     OP_CHECK_IF(GetPlatformInfo(context, ubSize, coreNum) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context, "GetPlatformInfo error"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context, "GetPlatformInfo error"), return ge::GRAPH_FAILED);
 
     const auto targetScoreShape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, targetScoreShape);
+    OP_CHECK_IF(targetScoreShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "target_score",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(CheckInputDim(context) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context, "LightningIndexerKLLoss CheckInputDim FAILED."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context, "LightningIndexerKLLoss CheckInputDim FAILED."),
+                return ge::GRAPH_FAILED);
 
     auto inputShape = targetScoreShape->GetOriginShape();
     int64_t dimNum = static_cast<int64_t>(inputShape.GetDimNum());
@@ -146,10 +170,17 @@ static ge::graphStatus LightningIndexerKLLossTilingFunc(gert::TilingContext* con
     int64_t tailTileNum = totalTileNum / coreNum;
 
     LightningIndexerKLLossTilingData* tiling = context->GetTilingData<LightningIndexerKLLossTilingData>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
+    OP_CHECK_IF(tiling == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "tiling is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         memset_s(tiling, sizeof(LightningIndexerKLLossTilingData), 0, sizeof(LightningIndexerKLLossTilingData)) != EOK,
-        OP_LOGE(context, "set tiling data error"), return ge::GRAPH_FAILED);
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(), "set tiling data error"})),
+        return ge::GRAPH_FAILED);
     tiling->totalLength = M;
     tiling->K = K;
     tiling->KAligned = KAligned;
@@ -170,7 +201,7 @@ static ge::graphStatus LightningIndexerKLLossTilingFunc(gert::TilingContext* con
                                                          0;
     ASCENDC_TPL_SEL_PARAM(context, deterministic, dataTypeVal, weightType);
     OP_CHECK_IF(GetWorkspaceSize(context, deterministic, dataTypeVal != 1, coreNum) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context, "GetWorkspaceSize error"), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context, "GetWorkspaceSize error"), return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 

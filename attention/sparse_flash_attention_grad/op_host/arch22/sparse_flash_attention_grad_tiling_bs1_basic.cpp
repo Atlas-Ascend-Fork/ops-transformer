@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "log/log.h"
 #include "sparse_flash_attention_grad_tiling_bs1_basic.h"
 #include "op_host/tiling_templates_registry.h"
 #include <algorithm>
@@ -126,9 +127,13 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetShapeAttrsInfo()
     Get all shape info and attr
     */
     opName = (context_ != nullptr) ? context_->GetNodeName() : nullptr;
-    OP_CHECK_IF(context_ == nullptr, OPS_REPORT_VECTOR_INNER_ERR(opName, "context is nullptr."),
+    OP_CHECK_IF(context_ == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName, "context is nullptr."})),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(context_->GetAttrs() == nullptr, OPS_REPORT_VECTOR_INNER_ERR(opName, "GetAttrs is nullptr."),
+    OP_CHECK_IF(context_->GetAttrs() == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName, "GetAttrs is nullptr."})),
                 return ge::GRAPH_FAILED);
 
     auto status = GetBaseShapeInfo();
@@ -149,7 +154,9 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetPlatformInfo()
     uint64_t l2CacheSize;
     if (platformInfoPtr == nullptr) {
         auto compileInfoPtr = reinterpret_cast<const SparseFlashAttentionGradCompileInfo*>(context_->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, OPS_REPORT_VECTOR_INNER_ERR(opName, "compile_info is null."),
+        OP_CHECK_IF(compileInfoPtr == nullptr,
+                    REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                              (std::vector<const char*>{opName, "compile_info is null."})),
                     return ge::GRAPH_FAILED);
         aicoreParams_.numBlocks = compileInfoPtr->aivNum;
         aicoreParams_.aicNum = compileInfoPtr->aicNum;
@@ -172,12 +179,18 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetPlatformInfo()
     }
 
     OP_CHECK_IF((aicoreParams_.numBlocks == 0) || (aicoreParams_.aicNum == 0),
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "num of coreNum(aivNum) is %lu, num of aicNum is %lu.",
-                                            aicoreParams_.numBlocks, aicoreParams_.aicNum),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{opName, (std::string() + "num of coreNum(aivNum) is " +
+                                                       std::to_string(aicoreParams_.numBlocks) + ", num of aicNum is " +
+                                                       std::to_string(aicoreParams_.aicNum) + ".")
+                                                          .c_str()})),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(aicoreParams_.ubSize <= 0 || l2CacheSize <= 0,
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "ubSize or l2CacheSize is invalid."), return ge::GRAPH_FAILED);
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName, "ubSize or l2CacheSize is invalid."})),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -244,8 +257,12 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetWorkspaceSize()
     // Tiling传递的内存大小、起始地址，统一为字节数，单位为B
     auto blockdim = CalcTschBlockDim(launchBlockDims, aicoreParams_.aicNum, aicoreParams_.numBlocks);
     OP_CHECK_IF(blockdim == 0,
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "blockdim is 0, aicNum is %lu, aivNum is %lu.",
-                                            aicoreParams_.aicNum, aicoreParams_.numBlocks),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        opName, (std::string() + "blockdim is 0, aicNum is " + std::to_string(aicoreParams_.aicNum) +
+                                 ", aivNum is " + std::to_string(aicoreParams_.numBlocks) + ".")
+                                    .c_str()})),
                 return ge::GRAPH_FAILED);
     context_->SetBlockDim(blockdim);
 
@@ -425,10 +442,15 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::DoSftTiling()
     }
     OP_CHECK_IF(
         sftBaseM == 0,
-        OPS_REPORT_VECTOR_INNER_ERR(
-            opName, "No valid sftBaseM fits UB: ubSize=%lu, G=%u, N=%u, D=%ld, D2=%ld, ropeD=%ld, optimized=%d.",
-            availableUbSize, tmpData.singleM, sftBaseN, tmpData.d, tmpData.d2, tmpData.ropeDim,
-            static_cast<int32_t>(tmpData.enableOptimizedScatter)),
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{
+                opName, (std::string() + "No valid sftBaseM fits UB: ubSize=" + std::to_string(availableUbSize) +
+                         ", G=" + std::to_string(tmpData.singleM) + ", N=" + std::to_string(sftBaseN) +
+                         ", D=" + std::to_string(tmpData.d) + ", D2=" + std::to_string(tmpData.d2) +
+                         ", ropeD=" + std::to_string(tmpData.ropeDim) +
+                         ", optimized=" + std::to_string(static_cast<int32_t>(tmpData.enableOptimizedScatter)) + ".")
+                            .c_str()})),
         return ge::GRAPH_FAILED);
 
     OP_LOGI(context_->GetNodeName(), "SFAG sftBaseM=%u, estimated vector UB=%lu/%lu bytes, optimized=%d.", sftBaseM,
@@ -481,8 +503,13 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::DoCastTiling()
                      BASE_LEN_256 * BASE_LEN_256;
     qPostBaseNum = postUbBaseSize / typeSize / dAlign * (tilingData.opInfo.get_D() + tilingData.opInfo.get_ropeD());
 
-    OP_CHECK_IF(qPostBaseNum == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "qPostBaseNum is 0."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(usedCoreNum == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "castUsedCoreNum is 0."),
+    OP_CHECK_IF(qPostBaseNum == 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName, "qPostBaseNum is 0."})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(usedCoreNum == 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName, "castUsedCoreNum is 0."})),
                 return ge::GRAPH_FAILED);
     int64_t qPostBlockTotal = allNumQuery / dAlign * (tilingData.opInfo.get_D() + tilingData.opInfo.get_ropeD());
     int64_t qSizeAlign = (qPostBlockTotal + BASE_LEN_256 - 1) / GM_ALIGN * GM_ALIGN * typeSize;
@@ -492,7 +519,10 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::DoCastTiling()
     int64_t qPostBlockFactor = (qPostBlockOuterTotal + usedCoreNum - 1) / usedCoreNum;
 
     int64_t kPostBaseNum = qPostBaseNum;
-    OP_CHECK_IF(kPostBaseNum == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "kPostBaseNum is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(kPostBaseNum == 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName, "kPostBaseNum is 0."})),
+                return ge::GRAPH_FAILED);
     int64_t kPostBlockTotal = allNumKey / dAlign * (tilingData.opInfo.get_D() + tilingData.opInfo.get_ropeD());
     int64_t kSizeAlign = (kPostBlockTotal + GM_ALIGN - 1) / GM_ALIGN * GM_ALIGN * typeSize;
     int64_t kPostTailNumTmp = kPostBlockTotal % kPostBaseNum;
@@ -501,7 +531,10 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::DoCastTiling()
     int64_t kPostBlockFactor = (kPostBlockOuterTotal + usedCoreNum - 1) / usedCoreNum;
 
     int64_t vPostBaseNum = postUbBaseSize / typeSize / d2Align * tilingData.opInfo.get_D2();
-    OP_CHECK_IF(vPostBaseNum == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "vPostBaseNum is 0."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(vPostBaseNum == 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName, "vPostBaseNum is 0."})),
+                return ge::GRAPH_FAILED);
     int64_t vPostBlockTotal = allNumValue / d2Align * tilingData.opInfo.get_D2();
     int64_t vSizeAlign = (vPostBlockTotal + GM_ALIGN - 1) / GM_ALIGN * GM_ALIGN * typeSize;
     int64_t vPostTailNumTmp = vPostBlockTotal % vPostBaseNum;
@@ -549,10 +582,11 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::DoCastTiling()
 
 ge::graphStatus SparseFlashAttentionGradBasicTiling::GetBaseShapeInfo()
 {
-    OP_CHECK_IF(((context_->GetInputShape(static_cast<size_t>(InputIndex::QUERY)) == nullptr) ||
-                 (context_->GetInputShape(static_cast<size_t>(InputIndex::KEY)) == nullptr)),
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "InputShape of query, key or value is nullptr."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        ((context_->GetInputShape(static_cast<size_t>(InputIndex::QUERY)) == nullptr) ||
+         (context_->GetInputShape(static_cast<size_t>(InputIndex::KEY)) == nullptr)),
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName, "query, key", "InputShape of query, key or value is nullptr."),
+        return ge::GRAPH_FAILED);
     // input
     // TND: query [t1, n1, d]   k [t2, n2, d]  v [t2, n2, d2]   dy/attentionIn [t1, n1, d2]
     // BSND: query [b, s1, n1, d]   k [b, s2, n2, d]  v [b, s2, n2, d2]   dy/attentionIn [b, s1, n1, d2]
@@ -584,26 +618,47 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetBaseShapeInfo()
         OP_LOGI(context_, "SparseFlashAttentionGrad AttenMask enable.");
         tmpData.attenEnable = true;
     } else {
-        OP_LOGE(context_, "SparseFlashAttentionGrad only support sparse_mode=0 or 3, now sparse_mode=%d.", sparse_mode);
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            Ops::Base::GetOpInfo(context_).c_str(), "attributes", (std::string() + std::to_string(sparse_mode)).c_str(),
+            (std::string() + "SparseFlashAttentionGrad only support sparse_mode=0 or 3, now sparse_mode=" +
+             std::to_string(sparse_mode) + ".")
+                .c_str());
         return ge::GRAPH_FAILED;
     }
 
     if (dimDq != dimDk) {
-        OP_LOGE(context_, "head_dim of Query[%ld] should be equal to head_dim of Key[%ld].", dimDq, dimDk);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context_).c_str(), "query, key",
+            (std::string() + std::to_string(dimDq) + ", " + std::to_string(dimDk)).c_str(),
+            (std::string() + "head_dim of Query[" + std::to_string(dimDq) + "] should be equal to head_dim of Key[" +
+             std::to_string(dimDk) + "].")
+                .c_str());
         return ge::GRAPH_FAILED;
     }
     if (dimDq < dimDv) {
-        OP_LOGE(context_, "head_dim of Query[%ld] can not less than head_dim of Value[%ld].", dimDq, dimDv);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context_).c_str(), "query",
+            (std::string() + std::to_string(dimDq) + ", " + std::to_string(dimDv)).c_str(),
+            (std::string() + "head_dim of Query[" + std::to_string(dimDq) + "] can not less than head_dim of Value[" +
+             std::to_string(dimDv) + "].")
+                .c_str());
         return ge::GRAPH_FAILED;
     }
     if (strcmp(inputLayout, TND_STR) != 0 && strcmp(inputLayout, BSND_STR) != 0) {
-        OP_LOGE(context_, "SparseFlashAttentionGrad only support TND or BSND layout, now layout is %s.", inputLayout);
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            Ops::Base::GetOpInfo(context_).c_str(), "attributes", (std::string() + std::string(inputLayout)).c_str(),
+            (std::string() + "SparseFlashAttentionGrad only support TND or BSND layout, now layout is " +
+             std::string(inputLayout) + ".")
+                .c_str());
         return ge::GRAPH_FAILED;
     }
     if (static_cast<size_t>(dimSize) != strlen(inputLayout)) {
-        OP_LOGE(context_,
-                "SparseFlashAttentionGrad layout dims is not equal to the input's dim, now the query of dim is %u.",
-                dimSize);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context_).c_str(), "query", (std::string() + std::to_string(dimSize)).c_str(),
+            (std::string() +
+             "SparseFlashAttentionGrad layout dims is not equal to the input's dim, now the query of dim is " +
+             std::to_string(dimSize) + ".")
+                .c_str());
         return ge::GRAPH_FAILED;
     }
 
@@ -617,7 +672,9 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetBaseShapeInfo()
         auto qRopeDim = qRopeShape.GetDim(dimSize - 1);
         auto kRopeDim = kRopeShape.GetDim(dimSize - 1);
         if (qRopeDim != kRopeDim) {
-            OP_LOGE(context_, "SparseFlashAttentionGrad headDim of qRope and kRope should be equal.");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                Ops::Base::GetOpInfo(context_).c_str(), "query, key, sparse_indices, d_out, out",
+                "SparseFlashAttentionGrad headDim of qRope and kRope should be equal.");
             return ge::GRAPH_FAILED;
         }
         tmpData.ropeDim = kRopeDim;
@@ -629,52 +686,77 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetBaseShapeInfo()
     if (strcmp(inputLayout, TND_STR) == 0) {
         auto actSeqQLen = context_->GetOptionalInputTensor(static_cast<size_t>(InputIndex::ACTUAL_SEQ_Q_LEN));
         auto actSeqKVLen = context_->GetOptionalInputTensor(static_cast<size_t>(InputIndex::ACTUAL_SEQ_KV_LEN));
-        OP_CHECK_IF(
-            actSeqQLen == nullptr || actSeqKVLen == nullptr,
-            OPS_REPORT_VECTOR_INNER_ERR(opName, "When layout is TND, actSeqQLen / actSeqKVLen can not be nullptr"),
-            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(actSeqQLen == nullptr || actSeqKVLen == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        opName, "attributes", "When layout is TND, actSeqQLen / actSeqKVLen can not be nullptr"),
+                    return ge::GRAPH_FAILED);
         const gert::Shape& actSeqQLenShape =
             context_->GetOptionalInputTensor(static_cast<size_t>(InputIndex::ACTUAL_SEQ_Q_LEN))->GetStorageShape();
         tmpData.b = actSeqQLenShape.GetDim(DIM_0);
-        OP_CHECK_IF(tmpData.b == 0, OP_LOGE(context_, "batchNum is 0"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(tmpData.b == 0,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(),
+                                                             "query, key, sparse_indices, d_out, out", "batchNum is 0"),
+                    return ge::GRAPH_FAILED);
         tmpData.t1 = queryShape.GetDim(DIM_0);
         tmpData.t2 = keyShape.GetDim(DIM_0);
         tmpData.s1 = tmpData.t1;
         tmpData.s2 = tmpData.t2;
         tmpData.n2 = keyShape.GetDim(DIM_1);
-        OP_CHECK_IF(tmpData.n2 == 0, OP_LOGE(context_, "key headNum is 0"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            tmpData.n2 == 0,
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "key", "key headNum is 0"),
+            return ge::GRAPH_FAILED);
         tmpData.g = queryShape.GetDim(DIM_1) / tmpData.n2;
         tmpData.layout = static_cast<uint32_t>(InputLayout::TND);
     } else { // BSND
         tmpData.b = queryShape.GetDim(DIM_0);
-        OP_CHECK_IF(tmpData.b == 0, OP_LOGE(context_, "batchNum is 0"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(tmpData.b == 0,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(),
+                                                             "query, key, sparse_indices, d_out, out", "batchNum is 0"),
+                    return ge::GRAPH_FAILED);
         tmpData.s1 = queryShape.GetDim(DIM_1);
         tmpData.s2 = keyShape.GetDim(DIM_1);
         tmpData.n2 = keyShape.GetDim(DIM_2);
-        OP_CHECK_IF(tmpData.n2 == 0, OP_LOGE(context_, "key headNum is 0"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            tmpData.n2 == 0,
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(), "key", "key headNum is 0"),
+            return ge::GRAPH_FAILED);
         tmpData.g = queryShape.GetDim(DIM_2) / tmpData.n2;
         tmpData.layout = static_cast<uint32_t>(InputLayout::BSND);
         // BSND 下 kernel 用 S1 做 t1Idx / curS1 分核，S1 须严格为正
-        OP_CHECK_IF(tmpData.s1 <= 0, OP_LOGE(context_, "S1 must be > 0, but got S1=%ld.", tmpData.s1),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            tmpData.s1 <= 0,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), "query", std::to_string(tmpData.s1).c_str(),
+                                                  "S1 must be greater than 0 in BSND layout"),
+            return ge::GRAPH_FAILED);
     }
 
     if (tmpData.g <= 0) {
-        OP_LOGE(context_, "g (N1 / N2) should be larger than 0, but got g=%ld.", tmpData.g);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context_).c_str(), "query, key, sparse_indices, d_out, out",
+            (std::string() + std::to_string(tmpData.g)).c_str(),
+            (std::string() + "g (N1 / N2) should be larger than 0, but got g=" + std::to_string(tmpData.g) + ".")
+                .c_str());
         return ge::GRAPH_FAILED;
     }
 
     int64_t n1 = tmpData.n2 * tmpData.g;
     if (tmpData.n2 != 1 || n1 > 128 || (n1 & (n1 - 1)) != 0) {
-        OP_LOGE(context_,
-                "SparseFlashAttentionGrad only support n2=1 and n1=1/2/4/8/16/32/64/128, but got n2=%ld n1=%ld.",
-                tmpData.n2, n1);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context_).c_str(), "query, key, sparse_indices, d_out, out",
+            (std::string() + std::to_string(tmpData.n2) + ", " + std::to_string(n1)).c_str(),
+            (std::string() + "SparseFlashAttentionGrad only support n2=1 and n1=1/2/4/8/16/32/64/128, but got n2=" +
+             std::to_string(tmpData.n2) + " n1=" + std::to_string(n1) + ".")
+                .c_str());
         return ge::GRAPH_FAILED;
     }
 
     tilingData.opInfo.set_B(tmpData.b);
     tilingData.opInfo.set_G(tmpData.g);
-    OP_CHECK_IF(tilingData.opInfo.get_G() == 0, OP_LOGE(context_, "g is 0"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(tilingData.opInfo.get_G() == 0,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context_).c_str(),
+                                                         "query, key, sparse_indices, d_out, out", "g is 0"),
+                return ge::GRAPH_FAILED);
     tilingData.opInfo.set_N2(tmpData.n2);
     tilingData.opInfo.set_S1(tmpData.s1);
     tilingData.opInfo.set_S2(tmpData.s2);
@@ -714,7 +796,7 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetBaseShapeInfo()
     auto ret = CheckDtypeValid(context_);
 
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context_, "SparseFlashAttentionGrad the dtype of input is invalid.");
+        OP_LOGE_WITHOUT_REPORT(context_, "SparseFlashAttentionGrad the dtype of input is invalid.");
         return ge::GRAPH_FAILED;
     }
 
@@ -723,7 +805,7 @@ ge::graphStatus SparseFlashAttentionGradBasicTiling::GetBaseShapeInfo()
     }
 
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context_, "SparseFlashAttentionGrad the input shpae of TND Layout is invalid.");
+        OP_LOGE_WITHOUT_REPORT(context_, "SparseFlashAttentionGrad the input shpae of TND Layout is invalid.");
         return ge::GRAPH_FAILED;
     }
 

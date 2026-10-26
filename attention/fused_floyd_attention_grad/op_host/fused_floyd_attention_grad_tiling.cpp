@@ -63,7 +63,16 @@ public:
         auto platformInfoPtr = context->GetPlatformInfo();
         if (platformInfoPtr == nullptr) {
             auto compilePtr = reinterpret_cast<const FlashAttentionScoreGradCompileInfo*>(context->GetCompileInfo());
-            OP_CHECK_IF(compilePtr == nullptr, OP_LOGE(context, "compile_info is null"), return ge::GRAPH_FAILED);
+            if (compilePtr == nullptr) {
+                // GetCompileInfo may return nullptr per exe_graph tiling_context.h contract;
+                // both platform and compile metadata unavailable is a config/platform loading failure.
+                std::string reason = "platform info and compile info are both unavailable";
+                const std::vector<const char*> msgKey = {"opName", "reason"};
+                const std::vector<const char*> msgValue = {context->GetNodeName(), reason.c_str()};
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "platformInfo and compileInfo are both null.");
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+                return ge::GRAPH_FAILED;
+            }
             aivNum = compilePtr->aivNum;
             aicNum = compilePtr->aicNum;
         } else {
@@ -71,7 +80,14 @@ public:
             aicNum = ascendcPlatform.GetCoreNumAic();
             aivNum = ascendcPlatform.GetCoreNumAiv();
         }
-        OP_CHECK_IF(aivNum == 0, OP_LOGE("fused_floyd_attention_grad", "num of aiv is 0."), return GRAPH_FAILED);
+        if (aivNum == 0) {
+            std::string reason = "invalid platform core count";
+            const std::vector<const char*> msgKey = {"opName", "reason"};
+            const std::vector<const char*> msgValue = {"fused_floyd_attention_grad", reason.c_str()};
+            OP_LOGE_WITHOUT_REPORT("fused_floyd_attention_grad", "num of aiv is 0.");
+            REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+            return GRAPH_FAILED;
+        }
         uint64_t dqNum =
             static_cast<uint64_t>(context->GetOutputShape(OUTPUT_IDX_DQ)->GetStorageShape().GetShapeSize());
         if (dqNum % aivNum == 0) {
@@ -129,13 +145,23 @@ static bool IsEmptyOutput(gert::TilingContext* context)
 static ge::graphStatus CheckAttrs(gert::TilingContext* context)
 {
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "attribute container is unavailable"})),
+                return ge::GRAPH_FAILED);
     size_t idx = 0;
     auto scaleValuePtr = attrs->GetAttrPointer<float>(idx++);
     size_t* workspaces = context->GetWorkspaceSizes(1);
 
-    OP_CHECK_NULL_WITH_CONTEXT(context, scaleValuePtr);
-    OP_CHECK_NULL_WITH_CONTEXT(context, workspaces);
+    OP_CHECK_IF(scaleValuePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "scale_value", "attribute is missing"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(workspaces == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{context->GetNodeName(), "workspace size storage is unavailable"})),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -145,16 +171,27 @@ static ge::graphStatus CheckBaseInput(gert::TilingContext* context)
     auto& keyShape = context->GetInputShape(KEY1_INPUT_INDEX)->GetStorageShape();
     OP_CHECK_IF((queryShape.GetDim(0) != keyShape.GetDim(0) || queryShape.GetDim(1) != keyShape.GetDim(1) ||
                  queryShape.GetDim(4) != keyShape.GetDim(4)),
-                OP_LOGE(context, "query or key shape is invalid"), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    context->GetNodeName(), "query and key",
+                    (std::to_string(queryShape.GetDim(0)) + "," + std::to_string(queryShape.GetDim(1)) + "," +
+                     std::to_string(queryShape.GetDim(4)) + " and " + std::to_string(keyShape.GetDim(0)) + "," +
+                     std::to_string(keyShape.GetDim(1)) + "," + std::to_string(keyShape.GetDim(4)))
+                        .c_str(),
+                    "query and key must have the same dims 0, 1 and 4"),
+                return ge::GRAPH_FAILED);
 
     return ge::SUCCESS;
 }
 
 static ge::graphStatus CheckParams(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE(context, "context is null"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckAttrs(context) != ge::GRAPH_SUCCESS, OP_LOGE(context->GetNodeName(), "invalid attrs"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"FusedFloydAttentionGrad", "context is unavailable"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(CheckAttrs(context) != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "invalid attrs"), return ge::GRAPH_FAILED);
     if (context->GetInputShape(QUERY_INPUT_INDEX) != nullptr && context->GetInputShape(KEY1_INPUT_INDEX) != nullptr &&
         context->GetInputShape(VALUE1_INPUT_INDEX) != nullptr && context->GetInputShape(KEY2_INPUT_INDEX) != nullptr &&
         context->GetInputShape(VALUE2_INPUT_INDEX) != nullptr && context->GetInputShape(DY_INPUT_INDEX) != nullptr &&
@@ -164,8 +201,19 @@ static ge::graphStatus CheckParams(gert::TilingContext* context)
         if (CheckBaseInput(context) == ge::GRAPH_SUCCESS) {
             return ge::SUCCESS;
         }
+        return ge::GRAPH_FAILED;
     }
-    OP_LOGE(context, "fail to get shape or attr from context");
+    const char* missingInput = context->GetInputShape(QUERY_INPUT_INDEX) == nullptr   ? "query" :
+                               context->GetInputShape(KEY1_INPUT_INDEX) == nullptr    ? "key1" :
+                               context->GetInputShape(VALUE1_INPUT_INDEX) == nullptr  ? "value1" :
+                               context->GetInputShape(KEY2_INPUT_INDEX) == nullptr    ? "key2" :
+                               context->GetInputShape(VALUE2_INPUT_INDEX) == nullptr  ? "value2" :
+                               context->GetInputShape(DY_INPUT_INDEX) == nullptr      ? "dy" :
+                               context->GetOptionalInputShape(SOFTMAX_MAX) == nullptr ? "softmax_max" :
+                               context->GetOptionalInputShape(SOFTMAX_SUM) == nullptr ? "softmax_sum" :
+                                                                                        "attention_in";
+    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), missingInput,
+                                             "input shape is missing; this input is required by the current template");
     return ge::GRAPH_FAILED;
 }
 
@@ -184,13 +232,24 @@ ASCENDC_EXTERN_C ge::graphStatus TilingFusedFloydAttentionGrad(gert::TilingConte
 
 ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForFusedFloydAttentionGrad(gert::TilingParseContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE(context, "context is null."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"FusedFloydAttentionGrad", "context is unavailable"})),
+        return ge::GRAPH_FAILED);
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null."), return ge::GRAPH_FAILED);
 
     auto compileInfoPtr = context->GetCompiledInfo<FlashAttentionScoreGradCompileInfo>();
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context, "compileInfoPtr is null."), return ge::GRAPH_FAILED);
 
+    if (platformInfoPtr == nullptr || compileInfoPtr == nullptr) {
+        // platform/compile metadata loading failure at tiling-prepare stage
+        std::string reason = "platform info or compile info is unavailable at tiling prepare";
+        const std::vector<const char*> msgKey = {"opName", "reason"};
+        const std::vector<const char*> msgValue = {context->GetNodeName(), reason.c_str()};
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "platformInfoPtr or compileInfoPtr is null.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgValue);
+        return ge::GRAPH_FAILED;
+    }
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     compileInfoPtr->aivNum = ascendcPlatform.GetCoreNumAiv();
     compileInfoPtr->aicNum = ascendcPlatform.GetCoreNumAic();

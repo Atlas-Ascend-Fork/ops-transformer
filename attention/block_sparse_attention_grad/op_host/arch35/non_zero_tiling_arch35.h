@@ -313,19 +313,25 @@ ge::graphStatus NonZeroAscendCTilingImpl::DoTiling(int64_t coreNum, int64_t ubSi
     coreNum_ = coreNum;
     ubSize_ = ubSize;
     vRegSize_ = vRegSize;
-    OP_CHECK_IF(
-        coreNum_ <= 0 || ubSize_ <= 0 || vRegSize_ <= 0,
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-            context_->GetNodeName(), "coreNum, ubSize, vRegSize",
-            (std::to_string(coreNum_) + ", " + std::to_string(ubSize_) + ", " + std::to_string(vRegSize_)).c_str(),
-            "value must be greater than 0"),
-        return ge::GRAPH_FAILED);
+    if (coreNum_ <= 0 || ubSize_ <= 0 || vRegSize_ <= 0) {
+        const std::string reason = "NonZero tiling: invalid platform resources, coreNum=" + std::to_string(coreNum_) +
+                                   ", ubBytes=" + std::to_string(ubSize_) +
+                                   ", vecRegBytes=" + std::to_string(vRegSize_) +
+                                   "; check the SoC platform configuration";
+        const std::vector<const char*> keys = {"opName", "reason"};
+        const std::vector<const char*> values = {context_->GetNodeName(), reason.c_str()};
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", keys, values);
+        return ge::GRAPH_FAILED;
+    }
     needTranspose_ = 0;
     intputDtypeSize_ = sizeof(uint8_t);
     outputDtypeSize_ = sizeof(int32_t);
     // 获取blockMask，并展开成1维
     auto blockSparseMaskShape = context_->GetInputShape(6);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, blockSparseMaskShape);
+    OP_CHECK_IF(blockSparseMaskShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "blockSparseMaskOptional",
+                                                         "input shape is required for NonZero tiling"),
+                return ge::GRAPH_FAILED);
     xShape_ = EnsureNotScalar(blockSparseMaskShape->GetStorageShape());
     const std::vector<int64_t> xRunShape = GetXShape(xShape_);
     inputDims_ = static_cast<int64_t>(1);

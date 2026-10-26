@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "log/log.h"
 #include "sparse_flash_attention_grad_tiling_common.h"
 
 namespace optiling {
@@ -26,7 +27,11 @@ ge::graphStatus CheckTndSoftmaxMaxShape(gert::TilingContext* context, int64_t t1
     }
     auto softmaxMaxShapeDim = softmaxMaxShape->GetStorageShape().GetDimNum();
     if (softmaxMaxShapeDim != 3) { // TND softmaxMax only support 3 dimensions
-        OP_LOGE(context, "The shape of softmaxMax is invalid, got %lu dimensions", softmaxMaxShapeDim);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "softmax_max",
+                                               (std::string() + std::to_string(softmaxMaxShapeDim)).c_str(),
+                                               (std::string() + "The shape of softmaxMax is invalid, got " +
+                                                std::to_string(softmaxMaxShapeDim) + " dimensions")
+                                                   .c_str());
         return ge::GRAPH_FAILED;
     }
     auto dim0 = softmaxMaxShape->GetStorageShape().GetDim(0); // 0:n2
@@ -35,8 +40,15 @@ ge::graphStatus CheckTndSoftmaxMaxShape(gert::TilingContext* context, int64_t t1
 
     // softmaxMax shape: [N2, T1, G]
     OP_CHECK_IF((dim0 != n2 || dim1 != t1 || dim2 != g),
-                OP_LOGE(context, "The shape of softmaxMax is invalid, got (%ld,%ld,%ld), should be (%ld,%ld,%ld)", dim0,
-                        dim1, dim2, n2, t1, g),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    Ops::Base::GetOpInfo(context).c_str(), "softmax_max",
+                    (std::string() + std::to_string(dim0) + ", " + std::to_string(dim1) + ", " + std::to_string(dim2) +
+                     ", " + std::to_string(n2) + ", " + std::to_string(t1) + ", " + std::to_string(g))
+                        .c_str(),
+                    (std::string() + "The shape of softmaxMax is invalid, got (" + std::to_string(dim0) + "," +
+                     std::to_string(dim1) + "," + std::to_string(dim2) + "), should be (" + std::to_string(n2) + "," +
+                     std::to_string(t1) + "," + std::to_string(g) + ")")
+                        .c_str()),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -49,7 +61,11 @@ ge::graphStatus CheckTndSoftmaxSumShape(gert::TilingContext* context, int64_t t1
     }
     auto softmaxSumShapeDim = softmaxSumShape->GetStorageShape().GetDimNum();
     if (softmaxSumShapeDim != 3) { // TND softmaxSum only support 3 dimensions
-        OP_LOGE(context, "The shape of softmaxSum is invalid, got %lu dimensions", softmaxSumShapeDim);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "softmax_sum",
+                                               (std::string() + std::to_string(softmaxSumShapeDim)).c_str(),
+                                               (std::string() + "The shape of softmaxSum is invalid, got " +
+                                                std::to_string(softmaxSumShapeDim) + " dimensions")
+                                                   .c_str());
         return ge::GRAPH_FAILED;
     }
     auto dim0 = softmaxSumShape->GetStorageShape().GetDim(0); // 0:n2
@@ -58,8 +74,15 @@ ge::graphStatus CheckTndSoftmaxSumShape(gert::TilingContext* context, int64_t t1
 
     // softmaxMax shape: [N2, T1, G]
     OP_CHECK_IF((dim0 != n2 || dim1 != t1 || dim2 != g),
-                OP_LOGE(context, "The shape of softmaxSum is invalid, got (%ld,%ld,%ld), should be (%ld,%ld,%ld)", dim0,
-                        dim1, dim2, n2, t1, g),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    Ops::Base::GetOpInfo(context).c_str(), "softmax_sum",
+                    (std::string() + std::to_string(dim0) + ", " + std::to_string(dim1) + ", " + std::to_string(dim2) +
+                     ", " + std::to_string(n2) + ", " + std::to_string(t1) + ", " + std::to_string(g))
+                        .c_str(),
+                    (std::string() + "The shape of softmaxSum is invalid, got (" + std::to_string(dim0) + "," +
+                     std::to_string(dim1) + "," + std::to_string(dim2) + "), should be (" + std::to_string(n2) + "," +
+                     std::to_string(t1) + "," + std::to_string(g) + ")")
+                        .c_str()),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -79,29 +102,51 @@ ge::graphStatus CheckAttentionInShape(gert::TilingContext* context)
     auto queryShapeDim = queryShape->GetStorageShape().GetDimNum();
     auto valueShapeDim = valueShape->GetStorageShape().GetDimNum();
     if (attentionInShapeDim != queryShapeDim) {
-        OP_LOGE(context, "The dimnum of attentionIn %zu should be equal to query %zu", attentionInShapeDim,
-                queryShapeDim);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context).c_str(), "query, out",
+            (std::string() + std::to_string(attentionInShapeDim) + ", " + std::to_string(queryShapeDim)).c_str(),
+            (std::string() + "The dimnum of attentionIn " + std::to_string(attentionInShapeDim) +
+             " should be equal to query " + std::to_string(queryShapeDim))
+                .c_str());
         return ge::GRAPH_FAILED;
     }
     if (attentionInShapeDim != valueShapeDim) {
-        OP_LOGE(context, "The dimnum of attentionIn %zu should be equal to value %zu", attentionInShapeDim,
-                valueShapeDim);
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context).c_str(), "out",
+            (std::string() + std::to_string(attentionInShapeDim) + ", " + std::to_string(valueShapeDim)).c_str(),
+            (std::string() + "The dimnum of attentionIn " + std::to_string(attentionInShapeDim) +
+             " should be equal to value " + std::to_string(valueShapeDim))
+                .c_str());
         return ge::GRAPH_FAILED;
     }
 
     for (size_t i = 0; i < queryShapeDim - 1; i++) {
         if (attentionInShape->GetStorageShape().GetDim(i) != queryShape->GetStorageShape().GetDim(i)) {
-            OP_LOGE(context, "The dim %zu of attentionIn shape is invalid, got %ld, should be %ld", i,
-                    attentionInShape->GetStorageShape().GetDim(i), queryShape->GetStorageShape().GetDim(i));
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                Ops::Base::GetOpInfo(context).c_str(), "out",
+                (std::string() + std::to_string(i) + ", " +
+                 std::to_string(attentionInShape->GetStorageShape().GetDim(i)) + ", " +
+                 std::to_string(queryShape->GetStorageShape().GetDim(i)))
+                    .c_str(),
+                (std::string() + "The dim " + std::to_string(i) + " of attentionIn shape is invalid, got " +
+                 std::to_string(attentionInShape->GetStorageShape().GetDim(i)) + ", should be " +
+                 std::to_string(queryShape->GetStorageShape().GetDim(i)))
+                    .c_str());
             return ge::GRAPH_FAILED;
         }
     }
     // check head_dim, attention D == value D
     if (attentionInShape->GetStorageShape().GetDim(queryShapeDim - 1) !=
         valueShape->GetStorageShape().GetDim(queryShapeDim - 1)) {
-        OP_LOGE(context, "The head_dim of attentionIn shape is invalid, got %ld, should be %ld",
-                attentionInShape->GetStorageShape().GetDim(queryShapeDim - 1),
-                valueShape->GetStorageShape().GetDim(queryShapeDim - 1));
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            Ops::Base::GetOpInfo(context).c_str(), "out",
+            (std::string() + std::to_string(attentionInShape->GetStorageShape().GetDim(queryShapeDim - 1)) + ", " +
+             std::to_string(valueShape->GetStorageShape().GetDim(queryShapeDim - 1)))
+                .c_str(),
+            (std::string() + "The head_dim of attentionIn shape is invalid, got " +
+             std::to_string(attentionInShape->GetStorageShape().GetDim(queryShapeDim - 1)) + ", should be " +
+             std::to_string(valueShape->GetStorageShape().GetDim(queryShapeDim - 1)))
+                .c_str());
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -112,17 +157,19 @@ ge::graphStatus CheckSoftmaxDtype(gert::TilingContext* context)
     auto softmaxMax = context->GetOptionalInputDesc(static_cast<size_t>(InputIndex::SOFTMAX_MAX));
     auto softmaxSum = context->GetOptionalInputDesc(static_cast<size_t>(InputIndex::SOFTMAX_SUM));
     OP_CHECK_IF(softmaxMax == nullptr || softmaxSum == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "softmax_max or softmax_sum is nullptr."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "softmax_max, softmax_sum",
+                                                         "softmax_max or softmax_sum is nullptr."),
                 return ge::GRAPH_FAILED);
 
     auto softmaxMaxType = static_cast<uint32_t>(softmaxMax->GetDataType());
     auto softmaxSumType = static_cast<uint32_t>(softmaxSum->GetDataType());
 
     bool softmaxTypeCheck = (softmaxMaxType == softmaxSumType) && (softmaxMaxType == ge::DT_FLOAT);
-    OP_CHECK_IF(softmaxTypeCheck != true,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
-                                            "softmaxMaxType should be DT_FLOAT and same with softmaxSumType"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        softmaxTypeCheck != true,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "softmax_max, softmax_sum",
+                                                 "softmaxMaxType should be DT_FLOAT and same with softmaxSumType"),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -132,15 +179,16 @@ ge::graphStatus CheckAttentionInDtype(gert::TilingContext* context)
     auto query = context->GetInputDesc(static_cast<size_t>(InputIndex::QUERY));
     auto attentionIn = context->GetOptionalInputDesc(static_cast<size_t>(InputIndex::ATTENTION_OUT));
     OP_CHECK_IF(query == nullptr || attentionIn == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "query or attentionIn is nullptr."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "query, out",
+                                                         "query or attentionIn is nullptr."),
                 return ge::GRAPH_FAILED);
 
     auto queryType = static_cast<uint32_t>(query->GetDataType());
     auto attentionInType = static_cast<uint32_t>(attentionIn->GetDataType());
 
     OP_CHECK_IF(queryType != attentionInType,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(),
-                                            "invalid attentionIn dtype should be same with query's dtype"),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "query, out",
+                                                         "invalid attentionIn dtype should be same with query's dtype"),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -150,15 +198,24 @@ ge::graphStatus CheckTndShapeValid(gert::TilingContext* context, int64_t t1, int
                                    int64_t n2)
 {
     if (context == nullptr) {
-        OP_LOGE(context, "context is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(), "context is nullptr"}));
         return ge::GRAPH_FAILED;
     }
 
     auto isShapeInValid = (t1 == 0 || n1 == 0 || d == 0 || d2 == 0 || n2 == 0);
-    OP_CHECK_IF(
-        isShapeInValid,
-        OP_LOGE(context, "input shape error, got 0 in tnd(%ld,%ld,%ld) or tnd(%ld,%ld,%ld)", t1, n1, d, t1, n1, d2),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(isShapeInValid,
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    Ops::Base::GetOpInfo(context).c_str(), "query, key, sparse_indices, d_out, out",
+                    (std::string() + std::to_string(t1) + ", " + std::to_string(n1) + ", " + std::to_string(d) + ", " +
+                     std::to_string(t1) + ", " + std::to_string(n1) + ", " + std::to_string(d2))
+                        .c_str(),
+                    (std::string() + "input shape error, got 0 in tnd(" + std::to_string(t1) + "," +
+                     std::to_string(n1) + "," + std::to_string(d) + ") or tnd(" + std::to_string(t1) + "," +
+                     std::to_string(n1) + "," + std::to_string(d2) + ")")
+                        .c_str()),
+                return ge::GRAPH_FAILED);
 
     auto g = n1 / n2;
     auto ret = CheckTndSoftmaxMaxShape(context, t1, n2, g);
@@ -180,7 +237,9 @@ ge::graphStatus CheckTndShapeValid(gert::TilingContext* context, int64_t t1, int
 ge::graphStatus CheckDtypeValid(gert::TilingContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE(context, "context is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(), "context is nullptr"}));
         return ge::GRAPH_FAILED;
     }
 

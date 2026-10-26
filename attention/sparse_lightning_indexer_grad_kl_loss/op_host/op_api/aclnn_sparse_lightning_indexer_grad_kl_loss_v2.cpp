@@ -9,6 +9,7 @@
  */
 
 #include "aclnn_sparse_lightning_indexer_grad_kl_loss_v2.h"
+#include "base/err_msg.h"
 #include "aclnnInner_sparse_lightning_indexer_grad_kl_loss.h"
 #include "opdev/op_log.h"
 #include "opdev/platform.h"
@@ -62,9 +63,11 @@ aclnnStatus aclnnSparseLightningIndexerGradKLLossV2GetWorkspaceSize(
     if (sinksOptional != nullptr && op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510 &&
         op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_9201 &&
         op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_9202) {
-        OP_LOGE(
-            ACLNN_ERR_RUNTIME_ERROR,
-            "The sinks input of aclnnSparseLightningIndexerGradKLLossV2 is only supported on Ascend950 and Ascend960.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1009", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"aclnnSparseLightningIndexerGradKLLossV2",
+                                      "The sinks input of aclnnSparseLightningIndexerGradKLLossV2 is only supported on "
+                                      "Ascend950 and Ascend960."}));
         return ACLNN_ERR_RUNTIME_ERROR;
     }
     return aclnnInnerSparseLightningIndexerGradKLLossGetWorkspaceSize(

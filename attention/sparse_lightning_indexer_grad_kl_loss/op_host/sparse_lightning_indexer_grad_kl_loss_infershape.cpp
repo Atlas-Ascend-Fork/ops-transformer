@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include "log/log.h"
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -54,40 +55,83 @@ ge::graphStatus InferShapeSparseLightningIndexerGradKLLoss(gert::InferShapeConte
         return ge::GRAPH_FAILED;
     }
     const gert::Shape* queryShape = context->GetInputShape(queryEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "query",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* keyShape = context->GetInputShape(keyEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "key",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* weightShape = context->GetInputShape(weightEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, weightShape);
+    OP_CHECK_IF(weightShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "weight",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* queryIndexShape = context->GetInputShape(queryIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryIndexShape);
+    OP_CHECK_IF(queryIndexShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "query_index",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* keyIndexShape = context->GetInputShape(keyIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyIndexShape);
+    OP_CHECK_IF(keyIndexShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "key_index",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "attributes",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     const char* inputLayout = attrs->GetAttrPointer<char>(INDEX_LAYOUT);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayout);
+    OP_CHECK_IF(inputLayout == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(), "input_layout",
+                                                         "required shape, descriptor or attribute is missing"),
+                return ge::GRAPH_FAILED);
 
     std::string inputLayoutSlig = std::string(inputLayout);
     for (auto& c : inputLayoutSlig) {
         c = toupper(c);
     }
     if (inputLayoutSlig != "BSND" && inputLayoutSlig != "TND") {
-        OP_LOGE(context, "The SparseLightningIndexerGradKLLoss inputLayout should be BSND/TND, but got %s.",
-                inputLayoutSlig.c_str());
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            Ops::Base::GetOpInfo(context).c_str(), "attributes",
+            (std::string() + std::string(inputLayoutSlig.c_str())).c_str(),
+            (std::string() + "The SparseLightningIndexerGradKLLoss inputLayout should be BSND/TND, but got " +
+             std::string(inputLayoutSlig.c_str()) + ".")
+                .c_str());
         return GRAPH_FAILED;
     }
 
     gert::Shape* lossShape = context->GetOutputShape(lossEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, lossShape);
+    OP_CHECK_IF(lossShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "loss is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     gert::Shape* dWeightShape = context->GetOutputShape(dWeightEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dWeightShape);
+    OP_CHECK_IF(dWeightShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "d_weight is null; InferShape cannot continue"})),
+                return ge::GRAPH_FAILED);
     gert::Shape* dQIndexShape = context->GetOutputShape(dQueryIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dQIndexShape);
+    OP_CHECK_IF(
+        dQIndexShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            "d_query_index is null; InferShape cannot continue"})),
+        return ge::GRAPH_FAILED);
     gert::Shape* dKIndexShape = context->GetOutputShape(dKeyIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dKIndexShape);
+    OP_CHECK_IF(
+        dKIndexShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            "d_key_index is null; InferShape cannot continue"})),
+        return ge::GRAPH_FAILED);
 
     lossShape->SetDimNum(SIZE_1);         // 设置维度为1
     lossShape->SetDim(DIM_NUM_0, SIZE_1); // 设置第0维数值为1
@@ -96,10 +140,20 @@ ge::graphStatus InferShapeSparseLightningIndexerGradKLLoss(gert::InferShapeConte
     *dKIndexShape = *keyIndexShape;
 
     if (lossShape->GetShapeSize() != 1) {
-        OP_LOGE(context, "The Shape Len of Loss should be 1, but got %ld.", lossShape->GetShapeSize());
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(),
+                                               "query, key, query_index, key_index, weight",
+                                               (std::string() + std::to_string(lossShape->GetShapeSize())).c_str(),
+                                               (std::string() + "The Shape Len of Loss should be 1, but got " +
+                                                std::to_string(lossShape->GetShapeSize()) + ".")
+                                                   .c_str());
         return GRAPH_FAILED;
     } else if (lossShape->GetDim(DIM_NUM_0) != 1) {
-        OP_LOGE(context, "The Shape data of Loss should be 1, but got %ld.", lossShape->GetDim(DIM_NUM_0));
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(Ops::Base::GetOpInfo(context).c_str(),
+                                               "query, key, query_index, key_index, weight",
+                                               (std::string() + std::to_string(lossShape->GetDim(DIM_NUM_0))).c_str(),
+                                               (std::string() + "The Shape data of Loss should be 1, but got " +
+                                                std::to_string(lossShape->GetDim(DIM_NUM_0)) + ".")
+                                                   .c_str());
         return GRAPH_FAILED;
     }
 

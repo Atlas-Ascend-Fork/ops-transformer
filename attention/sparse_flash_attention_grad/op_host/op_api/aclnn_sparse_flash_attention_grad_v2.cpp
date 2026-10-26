@@ -9,6 +9,7 @@
  */
 
 #include "aclnn_sparse_flash_attention_grad_v2.h"
+#include "base/err_msg.h"
 
 #include "opdev/platform.h"
 #include "opdev/op_log.h"
@@ -58,8 +59,11 @@ aclnnStatus aclnnSparseFlashAttentionGradV2GetWorkspaceSize(
         return ACLNN_ERR_PARAM_INVALID;
     }
     if (sinks != nullptr && op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510) {
-        OP_LOGE(ACLNN_ERR_RUNTIME_ERROR,
-                "The sinks input of aclnnSparseFlashAttentionGradV2 is only supported on Ascend950.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1009", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{
+                "aclnnSparseFlashAttentionGradV2",
+                "The sinks input of aclnnSparseFlashAttentionGradV2 is only supported on Ascend950."}));
         return ACLNN_ERR_RUNTIME_ERROR;
     }
     return aclnnInnerSparseFlashAttentionGradGetWorkspaceSize(
