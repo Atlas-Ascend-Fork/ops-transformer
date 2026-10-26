@@ -61,6 +61,8 @@ public:
     void CalcShortTile();
     void CalcBackTile();
     void RedistributeTile();
+    void NormalizeInvertedTail();
+    void AlignLongTiles();
 };
 
 inline void CutPlanner::SetMinLenByMax(uint64_t newLen)
@@ -113,6 +115,19 @@ inline void CutPlanner::GenerateInitialPartition()
     cutRes.longTileLen = std::max(cutRes.longTileLen, cutRes.shortTileLen);
     cutRes.longTileLen = std::min(cutRes.longTileLen, totalLen - cutRes.shortTileLen);
     uint64_t newTileLen = cutRes.longTileLen / tileArgs.mAlignLen * tileArgs.mAlignLen;
+    const uint64_t minLongLen = 2UL * tileArgs.mAlignLen;
+    if (newTileLen > 0UL && newTileLen < minLongLen && minLongLen < totalLen) {
+        newTileLen = minLongLen;
+    }
+    if (newTileLen == 0UL) {
+        // 对齐退化守卫: 短块下限可能占满总长，使对齐后长块归零——退化为不切
+        cutRes.numLongTile = 1U;
+        cutRes.longTileLen = totalLen;
+        cutRes.numShortTile = 0U;
+        cutRes.shortTileLen = 0U;
+        cutRes.totalTileCnt = 1U;
+        return;
+    }
 
     // 计算 bound 时正常四舍五入，通信 bound 时消极进位
     double alignRatio = ALIGN_TOL_CALC_BOUND;
@@ -191,6 +206,45 @@ inline void CutPlanner::FitTileLengthDiscrete(bool goodLinearityShape, bool loca
     } else {
         AlignTileSmall();
     }
+    // 防止长块非对齐 && 防止长短块长度倒挂
+    AlignLongTiles();
+    NormalizeInvertedTail();
+}
+
+inline void CutPlanner::AlignLongTiles()
+{
+    if (cutRes.totalTileCnt <= 1U || cutRes.numLongTile == 0U || cutRes.longTileLen == 0U) {
+        return;
+    }
+    const uint64_t alignedLong = cutRes.longTileLen / tileArgs.mAlignLen * tileArgs.mAlignLen;
+    if (alignedLong == 0UL || alignedLong == cutRes.longTileLen) {
+        return;
+    }
+    cutRes.longTileLen = alignedLong;
+    cutRes.shortTileLen = totalLen - cutRes.numLongTile * alignedLong;
+    cutRes.numShortTile = (cutRes.shortTileLen > 0U) ? 1U : 0U;
+    cutRes.totalTileCnt = cutRes.numLongTile + cutRes.numShortTile;
+}
+
+inline void CutPlanner::NormalizeInvertedTail()
+{
+    if (cutRes.numShortTile == 0U || cutRes.shortTileLen <= cutRes.longTileLen) {
+        return;
+    }
+    uint64_t shareLen = totalLen / cutRes.totalTileCnt;
+    shareLen = (shareLen + tileArgs.mAlignLen - 1U) / tileArgs.mAlignLen * tileArgs.mAlignLen;
+    if (shareLen > totalLen) {
+        // 份额对齐后超总长(总长不足两格): 退未对齐 ceil 份额
+        shareLen = (totalLen + cutRes.totalTileCnt - 1U) / cutRes.totalTileCnt;
+    }
+    if (shareLen == 0U) {
+        return; // 退化态(总长不足块数): 无从均分, 保持原样
+    }
+    cutRes.longTileLen = shareLen;
+    cutRes.numLongTile = totalLen / shareLen;
+    cutRes.shortTileLen = totalLen - cutRes.numLongTile * shareLen;
+    cutRes.numShortTile = (cutRes.shortTileLen > 0U) ? 1U : 0U;
+    cutRes.totalTileCnt = cutRes.numLongTile + cutRes.numShortTile;
 }
 
 inline void CutPlanner::NoCutTiling()

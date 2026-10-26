@@ -57,8 +57,8 @@ inline bool IsCommCalibrated(uint32_t rankDim, TilingCommEngine commEngine, cons
     return FindCommFitRow(calib, commEngine, rankDim) != nullptr;
 }
 
-// 切分器构造: 对齐粒度/短块下限基准取 baseM; 标定 miss(slope=0)时下限抬到全量 mValue,
-// 按不切分处理(兼防 InverseCommTime 除零)。
+// 切分器构造: 短块下限基准取 baseM, 对齐粒度取 256;
+// 标定 miss(slope=0)时下限抬到全量 mValue, 按不切分处理(防止 InverseCommTime 除零)。
 inline CutPlanner MakeCutPlanner(const FitBalanceTilingArgs& args, const MatmulInputParams& mmInput,
                                  const CommModelParams& comm)
 {
@@ -68,7 +68,7 @@ inline CutPlanner MakeCutPlanner(const FitBalanceTilingArgs& args, const MatmulI
         tilingM.SetMinLenByMax(mmInput.mValue);
     }
     tilingM.SetMinLenByMax(mmInput.baseM);
-    tilingM.SetAlignLength(mmInput.baseM);
+    tilingM.SetAlignLength(M_ALIGN_GRANULARITY);
     return tilingM;
 }
 
@@ -118,7 +118,7 @@ inline CommCutResult Schedule(const FitBalanceFlow& flow, const MatmulInputParam
 
     // ---- [1] Estimate: 总量估计 + 短块位置判定 ----
     const auto estimate = EstimateTotalTimes(mmInput, mmModel, comm);
-    tilingM.cutRes.shortTileAtBack = ChooseShortTileAtBack(flow, estimate);
+    tilingM.cutRes.shortTileAtBack = ChooseShortTileAtBack(flow, estimate, mmInput);
 
     // ---- [2] SetShort: 设置短块下限 (由每轮通信启动开销反解——短块独立占一轮通信,
     //      其通信时长须大于等于两倍的每轮启动开销才值得成轮) ----
@@ -164,10 +164,30 @@ inline CommCutResult CutResultFromCof(const CommTilingData& data)
     return result;
 }
 
+inline bool MapCutToHeadTail(const CommCutResult& cut, CommTilingData& data)
+{
+    const bool shortFront = !cut.shortTileAtBack && cut.numShortTile > 0U;
+    if (shortFront) {
+        data.splitAxisTileSize = cut.shortTileLen;
+        data.splitAxisTileCnt = cut.numShortTile;
+        data.splitAxisTailSize = cut.longTileLen;
+        data.splitAxisTailCnt = cut.numLongTile;
+    } else {
+        data.splitAxisTileSize = cut.longTileLen;
+        data.splitAxisTileCnt = cut.numLongTile;
+        data.splitAxisTailSize = cut.shortTileLen;
+        data.splitAxisTailCnt = cut.numShortTile;
+    }
+    return shortFront;
+}
+
 // 旧入参转换(存量算子过渡用): 从旧全局 mc2tiling::TilingArgs 挑字段构造引擎入参;
-// commEngine 由调用方解析后补入。新算子直接构造 FitBalanceTilingArgs。
+// commEngine 由调用方解析后补入; 新算子可直接构造 FitBalanceTilingArgs。
+// 要注意看算子的 kernel 是否支持把短块放在前面, 定好 allowShortFront 的值, 防止
+// 模型产生 kernel 不支持的切分方式(默认 false 恒后置)
 template <typename LegacyArgs>
-inline FitBalanceTilingArgs MakeFitBalanceArgs(const LegacyArgs& legacyArgs, TilingCommEngine commEngine)
+inline FitBalanceTilingArgs MakeFitBalanceArgs(const LegacyArgs& legacyArgs, TilingCommEngine commEngine,
+                                               bool allowShortFront = false)
 {
     FitBalanceTilingArgs engineArgs = {};
     engineArgs.mValue = legacyArgs.mValue;
@@ -179,13 +199,14 @@ inline FitBalanceTilingArgs MakeFitBalanceArgs(const LegacyArgs& legacyArgs, Til
     engineArgs.inputADtypeSize = legacyArgs.inputDtypeSize;
     engineArgs.outputDtypeSize = legacyArgs.outputDtypeSize;
     engineArgs.commEngine = commEngine;
+    engineArgs.allowShortFront = allowShortFront;
     return engineArgs;
 }
 // 标定组装(多形态/动态标定算子用): dataflow / 通信拟合行 / matmul 拟合三轴分开维护,
 // 调用处一行组装。通信行为不随形态变化的算子三份表里共享同一份行表; 未填的通信行
 // 保持哨兵(rankDim = 0), 行数超上限在编译期拦截。mmFit 条目不填的项走默认值。
 template <size_t COMM_ROW_COUNT>
-inline constexpr FitBalanceCalibration MakeFitBalanceCalibration(
+inline FitBalanceCalibration MakeFitBalanceCalibration(
     const FitBalanceCalibration::DataflowShape& dataflow,
     const FitBalanceCalibration::CommFitRow (&commRows)[COMM_ROW_COUNT], const FitBalanceCalibration::MatmulFit& mmFit)
 {
@@ -267,16 +288,25 @@ inline CommModelParams MakeCommModelParams(const FitBalanceTilingArgs& args, con
 }
 
 // mm 定参: 梯度与本地块时长一次算清——此后公式对入参纯读
-inline void FinalizeMmModelParams(const MatmulInputParams& mmInput, MatmulModelParams& mmModel, const uint64_t shares)
+// localDiv: 本地块折算分母(本地块=通信前即可计算的部分)。perRankM=false(K 轴通信, 如
+// a2a)时 mValue 为本卡全量计算, 本地份额 = 1/rankDim; perRankM=true(M 轴聚合)时本地块
+// 即 mValue 行, 不折算。全量口径会使配平长块反解系统性偏长(种子塌缩)
+inline void FinalizeMmModelParams(const MatmulInputParams& mmInput, MatmulModelParams& mmModel, const uint64_t shares,
+                                  const uint64_t localDiv)
 {
     mmModel.matmulGradient = CalcMatmulGradient(mmInput, mmModel, shares);
-    // 本地块计算时长。更小块的本地 Matmul 预期利用率会更低
+    // 本地块计算时长(悲观 util 口径, 配平长块反解消费)。更小块的本地 Matmul 预期利用率会更低
     const double localMMUtil =
         FindCubeUtil(mmInput, mmInput.mValue, 1, MatmulPerfConst::LOCAL_MM_UTIL_EXPONENT_COEFFICIENT);
-    // 除零/NaN 防护: 退化 shape(某维为 0)下 util 可为 0 或 NaN, 退回梯度口径估时
-    mmModel.localMMTime = (std::abs(localMMUtil) > 1e-10) ?
-                              MatmulTime(mmInput, mmModel, mmInput.mValue, 1) / localMMUtil :
-                              MatmulTime(mmInput, mmModel, mmInput.mValue, 1);
+    const double localFullTime = (std::abs(localMMUtil) > 1e-10) ?
+                                     MatmulTime(mmInput, mmModel, mmInput.mValue, 1) / localMMUtil :
+                                     MatmulTime(mmInput, mmModel, mmInput.mValue, 1);
+    mmModel.localMMTime = localFullTime / static_cast<double>(std::max<uint64_t>(localDiv, 1U));
+    // localMMTime 为保守估计，在计算长块时使用为了防止最后的长短块整形或者模型预估的误差导致长块长度不足；
+    // FRONT 估时的头部取值也用该保守口径
+    // localShareTime 为物理估计，在耗时计算时使用，为了防止高估Local块带来的掩盖效果，导致模型过于倾向选择不切分
+    mmModel.localShareTime =
+        MatmulTime(mmInput, mmModel, mmInput.mValue, 1) / static_cast<double>(std::max<uint64_t>(localDiv, 1U));
 }
 
 // 对外唯一入口: 四件构造 → 切分器 → 求解, 顺序读完
@@ -292,22 +322,39 @@ inline CommCutResult FitBalanceCut(const FitBalanceTilingArgs& args, const FitBa
     mmModel.cyclePerMicroSec = calib.mmFit.cyclePerMicroSec;
     const CommModelParams comm = MakeCommModelParams(args, calib, order, mmInput, rankDim);
     mmModel.mmRankMul = comm.commVolumeMul;
-    // 利用率按同批计算的数据份数取值(FRONT 有一个 rank 的数据不经通信 → rankDim−1)
-    const uint64_t shares = (localMMPosition == LocalMMPosition::FRONT) ? (rankDim - 1U) : comm.commVolumeMul;
-    FinalizeMmModelParams(mmInput, mmModel, shares);
+    // 利用率的 M 宽度系数按轴语义: M 轴聚合家族(perRankM=true)FRONT 流的远程块是输出 M
+    // 的一部分 → rankDim−1; K 轴通信家族(perRankM=false)远程份额乘的是 K 工作量(已计入
+    // kValue), 输出 M 宽度不倍增 → commVolumeMul
+    const uint64_t shares =
+        (localMMPosition == LocalMMPosition::FRONT && calib.dataflow.perRankM) ? (rankDim - 1U) : comm.commVolumeMul;
+    // 本地块折算: perRankM=false(K 轴通信) → 本卡份额 1/rankDim; perRankM=true → 不折算
+    const uint64_t localDiv = calib.dataflow.perRankM ? 1U : rankDim;
+    FinalizeMmModelParams(mmInput, mmModel, shares, localDiv);
 
-    const FitBalanceFlow flow{localMMPosition, order, args.commEngine};
+    const FitBalanceFlow flow{localMMPosition, order, args.commEngine, args.allowShortFront};
     CutPlanner tilingM = MakeCutPlanner(args, mmInput, comm);
     CommCutResult cut = Schedule(flow, mmInput, mmModel, comm, tilingM);
 
-    // 核利用率优先切分与Fit Balance切分择优返回
+    // 核利用率优先切分与Fit Balance切分择优返回。通信标定 miss 时比较双方一方退化为
+    // NoCut、另一方是零通信成本口径下的占位估计, 比较无意义——保持 miss 路径的 NoCut
+    // 防御姿态(与配平求解侧的 miss 处理一致), 仅在标定命中时比时
     CommCutResult occupancyCut = MakeCoreOccupancyCut(mmInput);
+    // 当核利用率优先只能切出不多于一个长块时，第二轮通信的启动开销会吃掉重叠收益
+    // 回退成fit balance 切分（一般为不切分）
+    if (occupancyCut.numLongTile <= 1U && occupancyCut.numShortTile > 0U) {
+        occupancyCut = cut; // 配平侧(Schedule)结果优先
+    }
     if (flow.commEngine == TilingCommEngine::CCU) {
         ApplySingleRoundCommLimit(occupancyCut, mmInput, comm);
     }
-    if (EstimateCutTotalTime(flow, mmInput, mmModel, comm, occupancyCut) <
-        EstimateCutTotalTime(flow, mmInput, mmModel, comm, cut)) {
-        cut = occupancyCut;
+    if (comm.slopeUsPerMb != 0.0) {
+        const double occTime = EstimateCutTotalTime(flow, mmInput, mmModel, comm, occupancyCut);
+        const double fitTime = EstimateCutTotalTime(flow, mmInput, mmModel, comm, cut);
+        constexpr double OCC_NEAR_TIE_EPS_US = 5.0;
+        const bool fitMultiTile = (cut.numLongTile + cut.numShortTile) > 1U;
+        if (occTime <= fitTime || (fitMultiTile && occTime - fitTime < OCC_NEAR_TIE_EPS_US)) {
+            cut = occupancyCut;
+        }
     }
     return cut;
 }

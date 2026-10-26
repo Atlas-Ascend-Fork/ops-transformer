@@ -9,6 +9,7 @@
  */
 
 #include "allto_all_matmul_v2_tiling_base.h"
+#include "allto_all_matmul_v2_fit_balance_tiling.h"
 
 namespace MC2Tiling {
 
@@ -589,8 +590,6 @@ ge::graphStatus AlltoAllMatmulV2TilingClass::DoOpTiling()
 
     auto* td = reinterpret_cast<allToAllMatmulTilingData*>(rt->GetData());
 
-    // MXFP4 使用打包存储(2 个 fp4 占 1 字节)，tiling 引擎需要按 fp4 数据类型
-    // 推导 baseK 块大小(256 vs 128)与 L1 布局，其余 dtype 均按 fp8 处理。
     auto* x1DescTiling = context_->GetInputDesc(IDX_INPUT_X1);
     if (x1DescTiling == nullptr) {
         OP_LOGE_WITH_INVALID_INPUT(opName, "x1 desc");
@@ -598,27 +597,10 @@ ge::graphStatus AlltoAllMatmulV2TilingClass::DoOpTiling()
     }
     auto x1Dtype = x1DescTiling->GetDataType();
     bool hasBias = context_->GetOptionalInputShape(IDX_INPUT_BIAS) != nullptr;
-    if (x1Dtype == ge::DT_FLOAT4_E2M1) {
-        QuantMatmulTilingSwat<mm::DataType::DT_FLOAT4_E2M1, mm::DataType::DT_FLOAT4_E2M1, mm::BiasDataType::DT_FLOAT>
-            tilingEngine;
-        tilingEngine.SetPlatformInfoPtr(context_->GetPlatformInfo());
-        tilingEngine.SetBiasInfo(hasBias);
-        tilingEngine.EnableBaseMHalving(true);
-        tilingEngine.SetOptimizeEnable(false);
-        tilingEngine.GetTilingData(m_, n_, k_, false, true, td->tileQbmmTilingData);
-    } else {
-        QuantMatmulTilingSwat<mm::DataType::DT_FLOAT8_E4M3FN, mm::DataType::DT_FLOAT8_E4M3FN,
-                              mm::BiasDataType::DT_FLOAT>
-            tilingEngine;
-        tilingEngine.SetPlatformInfoPtr(context_->GetPlatformInfo());
-        tilingEngine.SetBiasInfo(hasBias);
-        tilingEngine.EnableBaseMHalving(true);
-        tilingEngine.SetOptimizeEnable(false);
-        tilingEngine.GetTilingData(m_, n_, k_, false, true, td->tileQbmmTilingData);
-    }
+    GetCoreOccupancyFirstTiling(context_->GetPlatformInfo(), m_, n_, ka, x1Dtype == ge::DT_FLOAT4_E2M1, hasBias,
+                                td->tileQbmmTilingData, td->commTilingData, td->scaleCommTilingData);
 
-    auto& mm = td->tileQbmmTilingData;
-    usedCoreNum_ = mm.usedCoreNum;
+    usedCoreNum_ = td->tileQbmmTilingData.usedCoreNum;
 
     // matmul 实际分配核数必须 >= rankSize（kernel 侧通信切分依赖每 rank 至少一个核，
     // 见 RunAllToAll: if (GetBlockIdx() < rankSize)），否则部分 rank 无核参与 alltoall 导致死锁。
@@ -638,7 +620,30 @@ ge::graphStatus AlltoAllMatmulV2TilingClass::DoOpTiling()
         return ge::GRAPH_FAILED;
     }
 
-    CoreOccupancyFirstTiling::GetCommTilingData(m_, n_, ka, mm, td->commTilingData, td->scaleCommTilingData);
+    auto* commModePtr = context_->GetAttrs()->GetAttrPointer<char>(IDX_ATTR_COMM_MODE);
+    const char* commMode = (commModePtr != nullptr) ? commModePtr : "aiv_urma";
+    CommCutResult cut{};
+    auto* yDesc = context_->GetOutputDesc(IDX_OUTPUT_Y);
+    const uint64_t outputDtypeSize = ge::GetSizeByDataType(yDesc->GetDataType());
+
+    const bool fitBalanceHit = GetA2aFitBalanceCut(m_, n_, ka, worldSize_, usedCoreNum_, precisionMode_, x1Dtype,
+                                                   ge::GetSizeByDataType(x1Dtype), outputDtypeSize, commMode,
+                                                   td->tileQbmmTilingData.baseM, td->tileQbmmTilingData.baseN, cut);
+    if (fitBalanceHit) {
+        const bool shortFront = MapCutToHeadTail(cut, td->commTilingData);
+        td->commTilingData.nonSplitAxisSize = ka;
+        td->scaleCommTilingData = td->commTilingData;
+        td->scaleCommTilingData.nonSplitAxisSize = (ka / MX_SCALE_ALIGN) * SCALE_LAST_DIM;
+        OP_LOGI(opName,
+                "fit-balance comm tiling: engine=%d, mode=%u, shortFront=%d, totalCnt=%lu, "
+                "tiling result=%lu x %lu + %lu x %lu",
+                static_cast<int32_t>(ParseCommEngine(commMode)), precisionMode_, static_cast<int32_t>(shortFront),
+                cut.totalTileCnt, td->commTilingData.splitAxisTileCnt, td->commTilingData.splitAxisTileSize,
+                td->commTilingData.splitAxisTailCnt, td->commTilingData.splitAxisTailSize);
+    } else {
+        // 标定 miss: 通信切分沿用核利用率优先切分结果
+        OP_LOGI(opName, "comm tiling dispatch: calibration miss (commMode=%s), keep coreOccupancyFirst", commMode);
+    }
 
     // MXFP4 打包存储(2 个 fp4 占 1 字节)，数据通信的 K 轴字节数需减半；
     // scale 仍是 e8m0(每 32 元素 1 字节)，不受 fp4 影响。

@@ -80,8 +80,11 @@ inline EstimateTimesResult EstimateTotalTimes(const MatmulInputParams& mmInput, 
 }
 
 // 短块位置判定: 本地块形态恒定(FRONT 短块在后收尾 / BACK 短块在前启动通信);
-// 无本地块时按 bound 方向选择边界配对方向(注释见各分支)
-inline bool ChooseShortTileAtBack(const FitBalanceFlow& flow, const EstimateTimesResult& estimate)
+// 无本地块时按 bound 方向选择边界配对方向, kernel 不具备短块前置能力时恒后置。
+// 短块在前仅当总长为对齐粒度整数倍时可交付: 长块恒对齐(终态对齐契约)时短块承担
+// 总长的非对齐余数, 居首则其边界必被计算块跨界(kernel 一块一槽读取)。
+inline bool ChooseShortTileAtBack(const FitBalanceFlow& flow, const EstimateTimesResult& estimate,
+                                  const MatmulInputParams& mmInput)
 {
     if (flow.localMMPosition == LocalMMPosition::FRONT) {
         return true;
@@ -89,14 +92,21 @@ inline bool ChooseShortTileAtBack(const FitBalanceFlow& flow, const EstimateTime
     if (flow.localMMPosition == LocalMMPosition::BACK) {
         return false;
     }
+    bool shortAtBack;
     if (flow.order == CommComputeOrder::COMPUTE_FIRST) {
         // 计算 Bound 场景下，短块放在后面，这样最后一块计算（短）和倒数第二块通信（长）可以互相掩盖
         // 通信 Bound 场景下，短块放在前面，这样第二块计算（长）和第一块通信（短）可以互相掩盖
-        return estimate.totalMatmulTime >= estimate.totalCommTimeNoCut;
+        shortAtBack = estimate.totalMatmulTime >= estimate.totalCommTimeNoCut;
+    } else {
+        // 通信 Bound 场景下，短块放在后面，这样最后一块通信（短）和倒数第二块计算（长）可以互相掩盖
+        // 计算 Bound 场景下，短块放在前面，这样第二块通信（长）和第一块计算（短）可以互相掩盖
+        shortAtBack = estimate.totalCommTimeNoCut > estimate.totalMatmulTime;
     }
-    // 通信 Bound 场景下，短块放在后面，这样最后一块通信（短）和倒数第二块计算（长）可以互相掩盖
-    // 计算 Bound 场景下，短块放在前面，这样第二块通信（长）和第一块计算（短）可以互相掩盖
-    return estimate.totalCommTimeNoCut > estimate.totalMatmulTime;
+    // kernel 不支持或输入 shape 不支持短块前置，固定后置
+    if (!flow.allowShortFront || mmInput.mValue % M_ALIGN_GRANULARITY != 0U) {
+        return true;
+    }
+    return shortAtBack;
 }
 
 // 流水线总时估计(切 N 轮的近似): 不可重叠段在流水线两端, 中段取瓶颈侧。
@@ -107,8 +117,12 @@ inline double EstimateCutTotalTime(const FitBalanceFlow& flow, const MatmulInput
                                    const CommCutResult& cut)
 {
     const double totalMmTime = MatmulTime(mmInput, mmModel, mmInput.mValue, mmModel.mmRankMul);
-    const double serialTotalTime = TotalCommTime(comm, mmInput.mValue, 1U) + totalMmTime;
+    const double totalCommTimeNoCut = TotalCommTime(comm, mmInput.mValue, 1U);
+    const double serialTotalTime = totalCommTimeNoCut + totalMmTime;
     if (cut.totalTileCnt <= 1U) {
+        if (flow.localMMPosition == LocalMMPosition::FRONT) {
+            return serialTotalTime - std::min(mmModel.localShareTime, totalCommTimeNoCut);
+        }
         return serialTotalTime;
     }
     const uint64_t mValue = mmInput.mValue;
@@ -116,25 +130,23 @@ inline double EstimateCutTotalTime(const FitBalanceFlow& flow, const MatmulInput
     const uint64_t firstLen = (cut.numShortTile > 0U && !cut.shortTileAtBack) ? cut.shortTileLen : cut.longTileLen;
     const uint64_t lastLen = (cut.numShortTile > 0U && cut.shortTileAtBack) ? cut.shortTileLen : cut.longTileLen;
     if (flow.localMMPosition == LocalMMPosition::FRONT) {
-        // 通信在前 + 本地首块: 首轮通信(含算子级一次性启动开销, 通信链头部无处可藏)不可重叠, 末段计算收尾
         const double commFirst = comm.fixedOverheadUs + CommTime(comm, firstLen);
         const double mmLast = MatmulTime(mmInput, mmModel, lastLen, mmModel.mmRankMul);
-        return commFirst + std::max(totalCommTime - commFirst, totalMmTime - mmLast) + mmLast;
+        const double headTime = std::max(commFirst, mmModel.localMMTime);
+        const double mmRestTime = totalMmTime - mmModel.localMMTime - mmLast;
+        return headTime + std::max(totalCommTime - headTime, mmRestTime) + mmLast;
     }
     if (flow.localMMPosition == LocalMMPosition::BACK) {
-        // 计算在前 + 本地尾块: 首块计算不可重叠, 末段本地窗口与末块通信并行
         const double mmFirst = MatmulTime(mmInput, mmModel, firstLen, mmModel.mmRankMul);
         const double commLast = CommTime(comm, lastLen);
-        const double mmRest = totalMmTime - mmFirst - mmModel.localMMTime;
-        return mmFirst + std::max(mmRest, totalCommTime - commLast) + std::max(commLast, mmModel.localMMTime);
+        const double mmRest = totalMmTime - mmFirst - mmModel.localShareTime;
+        return mmFirst + std::max(mmRest, totalCommTime - commLast) + std::max(commLast, mmModel.localShareTime);
     }
     if (flow.order == CommComputeOrder::COMM_FIRST) {
-        // 无本地块 + 通信在前: 首轮通信(含算子级一次性启动开销, 通信链头部无处可藏)不可重叠, 末块计算收尾
         const double commFirst = comm.fixedOverheadUs + CommTime(comm, firstLen);
         const double mmLast = MatmulTime(mmInput, mmModel, lastLen, mmModel.mmRankMul);
         return commFirst + std::max(totalCommTime - commFirst, totalMmTime - mmLast) + mmLast;
     }
-    // 无本地块 + 计算在前: 首块计算不可重叠, 末块通信收尾
     const double mmFirst = MatmulTime(mmInput, mmModel, firstLen, mmModel.mmRankMul);
     const double commLast = CommTime(comm, lastLen);
     return mmFirst + std::max(totalMmTime - mmFirst, totalCommTime - commLast) + commLast;

@@ -52,6 +52,7 @@ struct CutParams {
 constexpr uint64_t MAX_COMM_ROUNDS = 63;
 
 constexpr uint32_t DEFAULT_BASE_M = 128;
+constexpr uint32_t M_ALIGN_GRANULARITY = 256;
 constexpr uint32_t DEFAULT_BASE_N = 256;
 constexpr uint32_t DEFAULT_BASE_K = 64;
 
@@ -94,6 +95,9 @@ struct FitBalanceTilingArgs {
     uint64_t inputADtypeSize; // A 每元素字节数(计算/通信体积用; fp4 时=0)
     uint64_t outputDtypeSize; // C 每元素字节数
     TilingCommEngine commEngine;
+    // kernel 是否支持短块前置交付: 仅影响无本地块形态的短块位置选择(不支持时恒后置);
+    // 本地块形态的短块位置是结构性的(FRONT 恒后/BACK 恒前)。默认 false(保守)
+    bool allowShortFront = false;
 };
 
 // 通算顺序
@@ -116,6 +120,7 @@ struct FitBalanceFlow {
     LocalMMPosition localMMPosition;
     CommComputeOrder order;
     TilingCommEngine commEngine;
+    bool allowShortFront;
 };
 
 // mm 输入事实: 形状/基本块/字节/核数——由入参与标定基本块构成

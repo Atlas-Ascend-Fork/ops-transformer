@@ -101,7 +101,7 @@ ge::graphStatus MyOpTiling::DoTiling()
                                     mmTiling, dataTiling, scaleTiling);
         cut = CutResultFromCof(dataTiling);
     }
-    // 直接消费 CommCutResult: kernel 侧按 shortTileAtBack 指示的顺序执行 1 短 + N 长
+    // 引擎消费 CommTilingData 的时候可以用 MapCutToHeadTail 把 CommCutResult 的切分结果填入
     UseCutResult(cut);
     return ge::GRAPH_SUCCESS;
 }
@@ -127,7 +127,7 @@ k = 带宽斜率（us/MB），b = 每轮启动开销（us，切几轮付几份�
 **计算模型**（mmFit 的算力档 + 平台规格）：
 
 ```
-每行耗时  gradient = max(baseN, n) × max(baseK, k) / (computesPerCycle × 频率 × 核数 × util)
+每行耗时  gradient = n × k / (computesPerCycle × 频率 × 核数 × util)
 块耗时    = 总计算量 × gradient
 利用率    util = min(0.95, 0.75 × (K/1280)^0.7 × (调和平均/820)^0.7)
 调和平均  = (m × shares × n) / (m × shares + n)
@@ -197,16 +197,17 @@ dataflow 三元组按算子接入定死，但 `FitBalanceCut` 的 `calib` 参数
 用 `MakeFitBalanceCalibration` 分轴维护、调用处一行组装：
 
 ```cpp
-// 标定头: 三轴各一张表——轴间解耦, 每张表只存本轴的独立变体, 组合不在表上放大
-constexpr FitBalanceCalibration::DataflowShape DATAFLOWS[] = {
+// 标定头: 三轴各一张表——轴间解耦, 每张表只存本轴的独立变体, 组合不在表上放大。
+// 表用 const(勿用 constexpr): 未填项走 NSDMI 默认值, 部分主机编译器不支持
+// NSDMI 的 constexpr 聚合初始化; 标定为运行期组装, 表无需常量表达式
+const FitBalanceCalibration::DataflowShape DATAFLOWS[] = {
     {CommComputeOrder::COMM_FIRST, LocalMMPosition::NONE,  true},   // 形态0
     {CommComputeOrder::COMM_FIRST, LocalMMPosition::FRONT, true},   // 形态1
-    {CommComputeOrder::COMM_FIRST, LocalMMPosition::FRONT, true},   // 形态2
 };
-constexpr FitBalanceCalibration::CommFitRow COMM_ROWS[] = {         // 通信不随轴变: 全局共享
+const FitBalanceCalibration::CommFitRow COMM_ROWS[] = {             // 通信不随轴变: 全局共享
     {TilingCommEngine::AICPU, 4, 26.5894, 33.17, 20.58},
 };
-constexpr FitBalanceCalibration::MatmulFit MM_FITS[] = {            // 每元素 = 一个形态的 mmFit, 不填的项走默认值
+const FitBalanceCalibration::MatmulFit MM_FITS[] = {                // 每元素 = 一个形态的 mmFit, 不填的项走默认值
     {{256, 256, 128}, 0.0, 8192.0, 1.65 * BYTES_PER_KB},            // 全显式(常规形态, 算力 0 = 走公式)
     {{128, 128, 128}, 7000.0},                                      // 特殊调度: 基本块/算力不同, 平台规格默认
 };
