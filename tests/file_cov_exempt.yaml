@@ -1,0 +1,184 @@
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+# file_cov_exempt.yaml
+#
+# 用来配置「文件覆盖率」统计时需要豁免的路径
+#
+# 配置以组件为最小单位，组件名与 classify_rule 一致，例如：
+# components:
+#   mc2_training@ops-transformer:
+#   mc2_moe@ops-transformer:
+#   mc2_moe_advanced@ops-transformer:
+#   mc2_inference@ops-transformer:
+#
+# 对于一个组件，允许配置的字段如下：
+# component_name@ops-transformer:
+#   dirs: --------------------- [可选] 整目录豁免，按路径前缀匹配（host UT 通常不出覆盖的层）
+#     - mc2/<op>/op_kernel/ --- 算子 kernel 目录一般需要豁免
+#     - mc2/<op>/op_graph/ ---- 若 host UT 不看护 graph，也可整目录豁免
+#   files: -------------------- [可选] 单文件或 glob 豁免（声明头 / 模板头 / 个案）
+#     - mc2/<op>/op_api/aclnn_*.h
+#     - mc2/<op>/op_api/*_base.h
+#     - mc2/<op>/op_host/.../*_tiling_*.h
+#
+# 注意：禁止把应看护的 op_host / op_api 实现 .cpp 写入本文件；收到命中告警后及时删条目！
+
+components:
+  mc2_training@ops-transformer:
+    dirs:
+      - mc2/allto_all_all_gather_batch_mat_mul/op_kernel/
+      - mc2/batch_mat_mul_reduce_scatter_allto_all/op_kernel/
+      - mc2/allto_all_matmul/op_kernel/
+      - mc2/allto_all_matmul_v2/op_kernel/
+      - mc2/matmul_allto_all/op_kernel/
+      - mc2/allto_allv_grouped_mat_mul/op_kernel/
+      - mc2/grouped_mat_mul_allto_allv/op_kernel/
+      - mc2/matmul_all_reduce/op_kernel/
+      - mc2/all_gather_matmul_v2/op_kernel/
+      - mc2/all_gather_matmul_v3/op_kernel/
+      - mc2/matmul_reduce_scatter_v2/op_kernel/
+      - mc2/quant_all_reduce/op_kernel/
+      - mc2/quant_grouped_mat_mul_allto_allv/op_kernel/
+      - mc2/quant_reduce_scatter/op_kernel/
+      - mc2/common/op_kernel/
+      - mc2/all_gather_matmul/op_graph/
+      - mc2/all_gather_matmul_v2/op_graph/
+      - mc2/allto_all_all_gather_batch_mat_mul/op_graph/
+      - mc2/allto_all_matmul/op_graph/
+      - mc2/allto_allv_grouped_mat_mul/op_graph/
+      - mc2/allto_allv_quant_grouped_mat_mul/op_graph/
+      - mc2/batch_mat_mul_reduce_scatter_allto_all/op_graph/
+      - mc2/grouped_mat_mul_allto_allv/op_graph/
+      - mc2/inplace_matmul_all_reduce_add_rms_norm/op_graph/
+      - mc2/matmul_all_reduce/op_graph/
+      - mc2/matmul_all_reduce_add_rms_norm/op_graph/
+      - mc2/matmul_allto_all/op_graph/
+      - mc2/matmul_reduce_scatter/op_graph/
+      - mc2/matmul_reduce_scatter_v2/op_graph/
+      - mc2/quant_all_reduce/op_graph/
+      - mc2/quant_grouped_mat_mul_allto_allv/op_graph/
+      - mc2/quant_reduce_scatter/op_graph/
+    files:
+      - mc2/allto_all_all_gather_batch_mat_mul/op_api/aclnn_all_to_all_all_gather_batch_matmul.h
+      - mc2/batch_mat_mul_reduce_scatter_allto_all/op_api/aclnn_batch_matmul_reduce_scatter_all_to_all.h
+      - mc2/allto_all_matmul/op_api/aclnn_allto_all_matmul.h
+      - mc2/allto_all_matmul/op_api/aclnn_allto_all_matmul_v2.h
+      - mc2/allto_all_matmul/op_api/aclnn_allto_all_quant_matmul.h
+      - mc2/allto_all_matmul/op_api/aclnn_allto_all_quant_matmul_v2.h
+      - mc2/matmul_allto_all/op_api/aclnn_matmul_allto_all.h
+      - mc2/matmul_allto_all/op_api/aclnn_matmul_allto_all_v2.h
+      - mc2/matmul_allto_all/op_api/aclnn_quant_matmul_allto_all.h
+      - mc2/matmul_allto_all/op_api/aclnn_quant_matmul_allto_all_v2.h
+      - mc2/allto_allv_grouped_mat_mul/op_api/aclnn_allto_allv_grouped_mat_mul.h
+      - mc2/allto_allv_grouped_mat_mul/op_api/aclnn_allto_allv_grouped_mat_mul_v2.h
+      - mc2/grouped_mat_mul_allto_allv/op_api/aclnn_grouped_mat_mul_allto_allv.h
+      - mc2/grouped_mat_mul_allto_allv/op_api/aclnn_grouped_mat_mul_allto_allv_v2.h
+      - mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce.h
+      - mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v2.h
+      - mc2/matmul_all_reduce/op_api/aclnn_matmul_all_reduce_v3.h
+      - mc2/matmul_all_reduce/op_api/aclnn_quant_matmul_all_reduce.h
+      - mc2/matmul_all_reduce/op_api/aclnn_quant_matmul_all_reduce_v2.h
+      - mc2/matmul_all_reduce/op_api/aclnn_quant_matmul_all_reduce_v3.h
+      - mc2/matmul_all_reduce/op_api/aclnn_quant_matmul_all_reduce_v4.h
+      - mc2/matmul_all_reduce/op_api/aclnn_quant_matmul_all_reduce_v5.h
+      - mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce.h
+      - mc2/matmul_all_reduce/op_api/aclnn_weight_quant_matmul_all_reduce_v2.h
+      - mc2/matmul_all_reduce_add_rms_norm/op_api/aclnn_matmul_all_reduce_add_rms_norm.h
+      - mc2/matmul_all_reduce_add_rms_norm/op_api/aclnn_quant_matmul_all_reduce_add_rms_norm.h
+      - mc2/matmul_all_reduce_add_rms_norm/op_api/aclnn_weight_quant_matmul_all_reduce_add_rms_norm.h
+      - mc2/inplace_matmul_all_reduce_add_rms_norm/op_api/aclnn_inplace_matmul_all_reduce_add_rms_norm.h
+      - mc2/inplace_matmul_all_reduce_add_rms_norm/op_api/aclnn_inplace_quant_matmul_all_reduce_add_rms_norm.h
+      - mc2/inplace_matmul_all_reduce_add_rms_norm/op_api/aclnn_inplace_weight_quant_matmul_all_reduce_add_rms_norm.h
+      - mc2/all_gather_matmul/op_api/aclnn_all_gather_matmul.h
+      - mc2/all_gather_matmul_v2/op_api/aclnn_all_gather_matmul_v2.h
+      - mc2/matmul_reduce_scatter/op_api/aclnn_matmul_reduce_scatter.h
+      - mc2/matmul_reduce_scatter_v2/op_api/aclnn_matmul_reduce_scatter_v2.h
+      - mc2/quant_grouped_mat_mul_allto_allv/op_api/aclnn_quant_grouped_mat_mul_allto_allv.h
+      - mc2/quant_grouped_mat_mul_allto_allv/op_api/aclnn_quant_grouped_mat_mul_allto_allv_v2.h
+      - mc2/allto_all_matmul/op_api/allto_all_matmul_base.h
+      - mc2/allto_all_matmul/op_api/allto_all_quant_matmul_base.h
+      - mc2/matmul_allto_all/op_api/matmul_allto_all_base.h
+      - mc2/matmul_allto_all/op_api/quant_matmul_allto_all_base.h
+      - mc2/matmul_allto_all/op_api/matmul_allto_all_util.h
+      - mc2/matmul_all_reduce_add_rms_norm/op_api/matmul_all_reduce_arn_util.h
+
+  mc2_moe@ops-transformer:
+    dirs:
+      - mc2/mega_moe/op_kernel/
+      - mc2/mega_moe/op_graph/
+    files: []
+
+  mc2_moe_advanced@ops-transformer:
+    dirs:
+      - mc2/grouped_mat_mul_all_reduce/op_kernel/
+      - mc2/distribute_barrier/op_kernel/
+      - mc2/distribute_barrier_extend/op_kernel/
+      - mc2/engram_fetch/op_kernel/
+      - mc2/engram_fetch_grad/op_kernel/
+      - mc2/engram_fetch_wait/op_kernel/
+      - mc2/moe_distribute_combine/op_kernel/
+      - mc2/moe_distribute_combine_add_rms_norm/op_kernel/
+      - mc2/moe_distribute_combine_setup/op_kernel/
+      - mc2/moe_distribute_combine_teardown/op_kernel/
+      - mc2/moe_distribute_combine_v2/op_kernel/
+      - mc2/moe_distribute_combine_v3/op_kernel/
+      - mc2/moe_distribute_dispatch/op_kernel/
+      - mc2/moe_distribute_dispatch_setup/op_kernel/
+      - mc2/moe_distribute_dispatch_teardown/op_kernel/
+      - mc2/moe_distribute_dispatch_v2/op_kernel/
+      - mc2/moe_distribute_dispatch_v3/op_kernel/
+      - mc2/moe_ep_combine/op_kernel/
+      - mc2/moe_ep_combine_epilogue/op_kernel/
+      - mc2/moe_ep_dispatch/op_kernel/
+      - mc2/moe_ep_dispatch_epilogue/op_kernel/
+      - mc2/moe_update_expert/op_kernel/
+      - mc2/tools/bandwidth_test/op_kernel/
+      - mc2/grouped_mat_mul_all_reduce/op_graph/
+      - mc2/distribute_barrier/op_graph/
+      - mc2/distribute_barrier_extend/op_graph/
+      - mc2/moe_distribute_combine/op_graph/
+      - mc2/moe_distribute_combine_add_rms_norm/op_graph/
+      - mc2/moe_distribute_combine_setup/op_graph/
+      - mc2/moe_distribute_combine_teardown/op_graph/
+      - mc2/moe_distribute_combine_v2/op_graph/
+      - mc2/moe_distribute_combine_v3/op_graph/
+      - mc2/moe_distribute_dispatch/op_graph/
+      - mc2/moe_distribute_dispatch_setup/op_graph/
+      - mc2/moe_distribute_dispatch_teardown/op_graph/
+      - mc2/moe_distribute_dispatch_v2/op_graph/
+      - mc2/moe_distribute_dispatch_v3/op_graph/
+      - mc2/moe_update_expert/op_graph/
+    files:
+      - mc2/grouped_mat_mul_all_reduce/op_api/aclnn_grouped_mat_mul_all_reduce.h
+      - mc2/distribute_barrier/op_api/aclnn_distribute_barrier.h
+      - mc2/distribute_barrier/op_api/aclnn_distribute_barrier_v2.h
+      - mc2/distribute_barrier/op_api/distribute_barrier_base.h
+      - mc2/moe_distribute_combine/op_api/aclnn_moe_distribute_combine.h
+      - mc2/moe_distribute_combine_add_rms_norm/op_api/aclnn_moe_distribute_combine_add_rms_norm.h
+      - mc2/moe_distribute_combine_add_rms_norm/op_api/aclnn_moe_distribute_combine_add_rms_norm_v2.h
+      - mc2/moe_distribute_combine_add_rms_norm/op_api/moe_distribute_combine_add_rms_norm_base.h
+      - mc2/moe_distribute_combine_setup/op_api/aclnn_moe_distribute_combine_setup.h
+      - mc2/moe_distribute_combine_teardown/op_api/aclnn_moe_distribute_combine_teardown.h
+      - mc2/moe_distribute_combine_v2/op_api/aclnn_moe_distribute_combine_v2.h
+      - mc2/moe_distribute_combine_v2/op_api/aclnn_moe_distribute_combine_v3.h
+      - mc2/moe_distribute_combine_v2/op_api/aclnn_moe_distribute_combine_v4.h
+      - mc2/moe_distribute_combine_v2/op_api/moe_distribute_combine_v2_base.h
+      - mc2/moe_distribute_dispatch/op_api/aclnn_moe_distribute_dispatch.h
+      - mc2/moe_distribute_dispatch_setup/op_api/aclnn_moe_distribute_dispatch_setup.h
+      - mc2/moe_distribute_dispatch_teardown/op_api/aclnn_moe_distribute_dispatch_teardown.h
+      - mc2/moe_distribute_dispatch_v2/op_api/aclnn_moe_distribute_dispatch_v2.h
+      - mc2/moe_distribute_dispatch_v2/op_api/aclnn_moe_distribute_dispatch_v3.h
+      - mc2/moe_distribute_dispatch_v2/op_api/aclnn_moe_distribute_dispatch_v4.h
+      - mc2/moe_distribute_dispatch_v2/op_api/moe_distribute_dispatch_v2_base.h
+      - mc2/moe_update_expert/op_api/aclnn_moe_update_expert.h
+      - mc2/distribute_barrier/op_host/op_tiling/distribute_barrier_tiling_helper.h
+      - mc2/moe_distribute_combine_add_rms_norm/op_host/op_tiling/arch35/moe_distribute_combine_add_rms_norm_tiling_a5.h
+      - mc2/moe_distribute_combine_v3/op_host/op_tiling/arch35/moe_distribute_combine_v3_tiling_a5.h
+      - mc2/moe_distribute_dispatch_v3/op_host/op_tiling/arch35/moe_distribute_dispatch_v3_tiling_a5.h

@@ -991,6 +991,13 @@ mc2_training@ops-transformer:
                 - ops/ops-transformer/mc2/allto_all_matmul/op_kernel/arch35/
                 - ops/ops-transformer/mc2/allto_all_matmul/CMakeLists.txt
                 - ops/ops-transformer/mc2/allto_all_matmul/README.md
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/op_host/allto_all_matmul_v2_def.cpp
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/op_host/allto_all_matmul_v2_infershape.cpp
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/op_host/CMakeLists.txt
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/op_host/op_tiling/
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/op_api/
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/op_kernel/arch35/
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/CMakeLists.txt
                 - ops/ops-transformer/mc2/matmul_allto_all/op_host/matmul_allto_all_def.cpp
                 - ops/ops-transformer/mc2/matmul_allto_all/op_host/matmul_allto_all_infershape.cpp
                 - ops/ops-transformer/mc2/matmul_allto_all/op_host/CMakeLists.txt
@@ -1027,6 +1034,14 @@ mc2_training@ops-transformer:
                 - ops/ops-transformer/mc2/matmul_all_reduce/op_kernel/arch35/
                 - ops/ops-transformer/mc2/matmul_all_reduce/CMakeLists.txt
                 - ops/ops-transformer/mc2/matmul_all_reduce/README.md
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_api/
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_graph/
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/CMakeLists.txt
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/README.md
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_api/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_graph/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/CMakeLists.txt
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/README.md
                 - ops/ops-transformer/mc2/all_gather_matmul/op_host/op_tiling/arch35/
                 - ops/ops-transformer/mc2/all_gather_matmul/op_api/
                 - ops/ops-transformer/mc2/all_gather_matmul/op_graph/
@@ -1039,6 +1054,10 @@ mc2_training@ops-transformer:
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/op_kernel/arch35/
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/CMakeLists.txt
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/README.md
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/op_host/op_tiling/arch35/
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/op_api/
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/op_kernel/arch35/
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/CMakeLists.txt
                 - ops/ops-transformer/mc2/matmul_reduce_scatter/op_host/op_tiling/arch35/
                 - ops/ops-transformer/mc2/matmul_reduce_scatter/op_api/
                 - ops/ops-transformer/mc2/matmul_reduce_scatter/op_graph/
@@ -1092,9 +1111,13 @@ mc2_training@ops-transformer:
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/tests/
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/examples/
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/docs/
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/tests/
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/docs/
                 - ops/ops-transformer/mc2/allto_all_matmul/tests/
                 - ops/ops-transformer/mc2/allto_all_matmul/examples/
                 - ops/ops-transformer/mc2/allto_all_matmul/docs/
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/tests/
+                - ops/ops-transformer/mc2/allto_all_matmul_v2/docs/
                 - ops/ops-transformer/mc2/allto_allv_grouped_mat_mul/tests/
                 - ops/ops-transformer/mc2/allto_allv_grouped_mat_mul/examples/
                 - ops/ops-transformer/mc2/allto_allv_grouped_mat_mul/docs/
@@ -1107,6 +1130,12 @@ mc2_training@ops-transformer:
                 - ops/ops-transformer/mc2/matmul_all_reduce/tests/
                 - ops/ops-transformer/mc2/matmul_all_reduce/examples/
                 - ops/ops-transformer/mc2/matmul_all_reduce/docs/
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/tests/
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/examples/
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/docs/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/tests/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/examples/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/docs/
                 - ops/ops-transformer/mc2/matmul_allto_all/tests/
                 - ops/ops-transformer/mc2/matmul_allto_all/examples/
                 - ops/ops-transformer/mc2/matmul_allto_all/docs/
@@ -1145,6 +1174,16 @@ mc2_inference@ops-transformer:
                 - ops/ops-transformer/mc2/ffn_to_attention/op_kernel/
                 - ops/ops-transformer/mc2/ffn_to_attention/CMakeLists.txt
                 - ops/ops-transformer/mc2/ffn_to_attention/README.md
+                - ops/ops-transformer/mc2/attention_to_ffn_v2/op_host/
+                - ops/ops-transformer/mc2/attention_to_ffn_v2/op_api/
+                - ops/ops-transformer/mc2/attention_to_ffn_v2/op_kernel/
+                - ops/ops-transformer/mc2/attention_to_ffn_v2/CMakeLists.txt
+                - ops/ops-transformer/mc2/attention_to_ffn_v2/README.md
+                - ops/ops-transformer/mc2/ffn_to_attention_v2/op_host/
+                - ops/ops-transformer/mc2/ffn_to_attention_v2/op_api/
+                - ops/ops-transformer/mc2/ffn_to_attention_v2/op_kernel/
+                - ops/ops-transformer/mc2/ffn_to_attention_v2/CMakeLists.txt
+                - ops/ops-transformer/mc2/ffn_to_attention_v2/README.md
                 - ops/ops-transformer/mc2/all_gather_matmul/op_host/all_gather_matmul_def.cpp
                 - ops/ops-transformer/mc2/all_gather_matmul/op_host/all_gather_matmul_infershape.cpp
                 - ops/ops-transformer/mc2/all_gather_matmul/op_host/CMakeLists.txt
@@ -1183,6 +1222,9 @@ mc2_inference@ops-transformer:
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/op_host/op_tiling/all_gather_matmul_v2_tiling_common.h
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/op_host/op_tiling/arch22/
                 - ops/ops-transformer/mc2/all_gather_matmul_v2/op_host/op_tiling/arch31/
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/op_host/all_gather_matmul_v3_def.cpp
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/op_host/all_gather_matmul_v3_infershape.cpp
+                - ops/ops-transformer/mc2/all_gather_matmul_v3/op_host/CMakeLists.txt
                 - ops/ops-transformer/mc2/allto_all_matmul/op_kernel/arch22/
                 - ops/ops-transformer/mc2/allto_all_matmul/op_host/op_tiling/arch22/
                 - ops/ops-transformer/mc2/allto_allv_grouped_mat_mul/op_host/op_tiling/arch22/
@@ -1215,6 +1257,18 @@ mc2_inference@ops-transformer:
                 - ops/ops-transformer/mc2/matmul_all_reduce/op_host/op_tiling/matmul_all_reduce_tiling.cpp
                 - ops/ops-transformer/mc2/matmul_all_reduce/op_host/op_tiling/matmul_all_reduce_tiling_base.cpp
                 - ops/ops-transformer/mc2/matmul_all_reduce/op_host/op_tiling/matmul_all_reduce_tiling_base.h
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_host/matmul_all_reduce_add_rms_norm_def.cpp
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_host/matmul_all_reduce_add_rms_norm_infershape.cpp
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_host/CMakeLists.txt
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_host/config/
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_host/op_tiling/arch22/
+                - ops/ops-transformer/mc2/matmul_all_reduce_add_rms_norm/op_kernel/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_host/inplace_matmul_all_reduce_add_rms_norm_def.cpp
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_host/inplace_matmul_all_reduce_add_rms_norm_infershape.cpp
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_host/CMakeLists.txt
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_host/config/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_host/op_tiling/arch22/
+                - ops/ops-transformer/mc2/inplace_matmul_all_reduce_add_rms_norm/op_kernel/
                 - ops/ops-transformer/mc2/matmul_allto_all/op_kernel/arch22/
                 - ops/ops-transformer/mc2/matmul_allto_all/op_host/op_tiling/arch22/
                 - ops/ops-transformer/mc2/matmul_reduce_scatter/op_host/matmul_reduce_scatter_def.cpp
@@ -1356,12 +1410,16 @@ mc2_inference@ops-transformer:
                 - ops/ops-transformer/mc2/attention_to_ffn/tests/
                 - ops/ops-transformer/mc2/attention_to_ffn/examples/
                 - ops/ops-transformer/mc2/attention_to_ffn/docs/
+                - ops/ops-transformer/mc2/attention_to_ffn_v2/tests/
+                - ops/ops-transformer/mc2/attention_to_ffn_v2/docs/
                 - ops/ops-transformer/mc2/batch_mat_mul_reduce_scatter_allto_all/tests/
                 - ops/ops-transformer/mc2/batch_mat_mul_reduce_scatter_allto_all/examples/
                 - ops/ops-transformer/mc2/batch_mat_mul_reduce_scatter_allto_all/docs/
                 - ops/ops-transformer/mc2/ffn_to_attention/tests/
                 - ops/ops-transformer/mc2/ffn_to_attention/examples/
                 - ops/ops-transformer/mc2/ffn_to_attention/docs/
+                - ops/ops-transformer/mc2/ffn_to_attention_v2/tests/
+                - ops/ops-transformer/mc2/ffn_to_attention_v2/docs/
                 - ops/ops-transformer/mc2/grouped_mat_mul_all_reduce/tests/
                 - ops/ops-transformer/mc2/grouped_mat_mul_all_reduce/examples/
                 - ops/ops-transformer/mc2/grouped_mat_mul_all_reduce/docs/
