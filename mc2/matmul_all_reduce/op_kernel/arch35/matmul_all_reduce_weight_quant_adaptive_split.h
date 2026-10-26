@@ -80,6 +80,14 @@ private:
     Mc2Tiling::WeightQuantMatmulAllReduceA5Fp8TilingData* mc2TilingData_;
 };
 
+#ifndef WQ_MATMUL_ALLREDUCE_WS
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+#define WQ_MATMUL_ALLREDUCE_WS userWS
+#else
+#define WQ_MATMUL_ALLREDUCE_WS workspaceGM
+#endif
+#endif
+
 #define INVOKE_MC2_WEIGHT_QUANT_ADAPTIVE_SPLIT_KERNEL(bTransFlag, offsetFlag, quantType, biasType, vecAntiQuantConfig, \
                                                       basedA2aRsAg, commMode) \
     do { \
@@ -88,7 +96,7 @@ private:
             false, bTransFlag, quantType, offsetFlag, Mc2QuantType::NONE, CubeFormat::ND}; \
         using OpType = Mc2WeightQuantBatchMatmulV2::Arch35::WeightQuantBatchMatmulV2BasicBlockController< \
             DTYPE_X1, DTYPE_X2, DTYPE_X1, biasType, DTYPE_Y, wqmmCfg, vecAntiQuantConfig>; \
-        MC2GmAddrs addrs = {aGM, bGM, biasGM, addGM, cGM, workspaceGM, cGM}; \
+        MC2GmAddrs addrs = {aGM, bGM, biasGM, addGM, cGM, WQ_MATMUL_ALLREDUCE_WS, cGM}; \
 \
         QuantGmAddrs quantAddrs = {antiquantScaleGM, antiquantOffsetGM, nullptr, nullptr}; \
         MatmulAllReduceWeightQuantAdaptiveSplit<DTYPE_X1, DTYPE_X2, DTYPE_Y, OpType, basedA2aRsAg, commMode> op( \

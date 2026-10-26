@@ -79,12 +79,20 @@ private:
     Mc2Tiling::WeightQuantMatmulAllReduceA5TilingData* mc2TilingData_;
 };
 
+#ifndef WQ_MATMUL_ALLREDUCE_WS
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+#define WQ_MATMUL_ALLREDUCE_WS userWS
+#else
+#define WQ_MATMUL_ALLREDUCE_WS workspaceGM
+#endif
+#endif
+
 #define INVOKE_MC2_WEIGHT_QUANT_KERNEL(bTransFlag, quantType, offsetFlag, weightNz, basedA2aRsAg, commMode) \
     do { \
         GET_TILING_DATA_WITH_STRUCT(Mc2Tiling::WeightQuantMatmulAllReduceA5TilingData, tilingData, tilingGM); \
         using OpType = Mc2WeightQuantBatchMatmulV2::Arch35::Mc2WeightQuantBatchMatmulV2RegBaseKernel< \
             DTYPE_X1, DTYPE_X2, DTYPE_BIAS, DTYPE_Y, false, bTransFlag, offsetFlag, quantType, weightNz>; \
-        MC2GmAddrs addrs = {aGM, bGM, biasGM, addGM, cGM, workspaceGM, cGM}; \
+        MC2GmAddrs addrs = {aGM, bGM, biasGM, addGM, cGM, WQ_MATMUL_ALLREDUCE_WS, cGM}; \
         QuantGmAddrs quantAddrs = {antiquantScaleGM, antiquantOffsetGM, nullptr, nullptr}; \
         MatmulAllReduceWeightQuantRegBase<DTYPE_X1, DTYPE_X2, DTYPE_Y, OpType, basedA2aRsAg, commMode> op( \
             &addrs, &quantAddrs, nullptr, (MC2TilingHeader*)&tilingData, &tPipe); \

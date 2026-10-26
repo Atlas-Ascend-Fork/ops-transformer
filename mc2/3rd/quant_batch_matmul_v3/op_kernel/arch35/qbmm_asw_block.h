@@ -402,7 +402,7 @@ template <bool aTrans, bool bTrans>
 __aicore__ inline void Mc2QuantBmmAswBlock::UpdatePerBlockMmParam()
 {
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
-    ubParams_.fixpipeSplitN =
+    mmParams_.fixpipeSplitN =
         (params_.singleCoreN > PER_BLOCK_SIZE || params_.singleCoreM == 1) && (AscendC::GetTaskRation() > 1);
 #else
     mmParams_.fixpipeSplitN = (params_.singleCoreN > PER_BLOCK_SIZE || params_.singleCoreM == 1);

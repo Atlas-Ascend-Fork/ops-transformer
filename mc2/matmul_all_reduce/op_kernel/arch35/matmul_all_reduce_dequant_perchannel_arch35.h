@@ -20,7 +20,11 @@ namespace MatmulAllReduceDequantPerchannelImpl {
 using namespace AscendC;
 using namespace std;
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
+constexpr uint32_t TOTAL_UBSIZE_MATMUL_ALLREDUCE_INT8 = 385024;
+#else
 constexpr uint32_t TOTAL_UBSIZE_MATMUL_ALLREDUCE_INT8 = 192 * 1024;
+#endif
 constexpr uint16_t DOUBLE_BUFFER_MATMUL_ALLREDUCE_INT8 = 2;
 constexpr uint32_t BF16_BUF_CNT_MATMUL_ALLREDUCE_INT8 = 8;
 constexpr uint32_t FP16_BUF_CNT_MATMUL_ALLREDUCE_INT8 = 4;
