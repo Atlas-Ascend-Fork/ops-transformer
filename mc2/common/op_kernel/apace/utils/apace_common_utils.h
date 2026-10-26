@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include "apace_constant.h"
 
 namespace mm {
 // Quantized MX element layouts for non-type template parameters.
@@ -116,9 +117,9 @@ template <mm::DataType dataType>
 constexpr uint64_t GetPerGroupSize()
 {
     if constexpr (dataType == mm::DataType::DT_HIFLOAT4) {
-        return 64UL; // HIF4_GROUP_SIZE
+        return HIF4_GROUP_SIZE;
     } else {
-        return 32UL; // MX_GROUP_SIZE
+        return MX_GROUP_SIZE;
     }
 }
 
@@ -128,9 +129,9 @@ template <mm::DataType dataType>
 constexpr uint64_t GetScaleUnitPerGroup()
 {
     if constexpr (dataType == mm::DataType::DT_HIFLOAT4) {
-        return 4UL; // HIF4_SCALE_UNIT (sizeof(hif4_scale))
+        return HIF4_SCALE_UNIT;
     } else {
-        return 1UL;
+        return 1UL; // sizeof(E8M0)
     }
 }
 
@@ -139,9 +140,9 @@ template <mm::DataType dataType>
 constexpr uint64_t GetAlignSize()
 {
     if constexpr (dataType == mm::DataType::DT_HIFLOAT4) {
-        return 1UL; // TILING_HIF4_MULTI_BASE_SIZE
+        return TILING_HIF4_MULTI_BASE_SIZE;
     } else {
-        return 2UL; // TILING_MXFP_MULTI_BASE_SIZE
+        return TILING_MXFP_MULTI_BASE_SIZE;
     }
 }
 

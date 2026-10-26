@@ -51,6 +51,7 @@
 namespace Apace {
 static constexpr AscendC::HcclServerConfig HCOMM_CONFIG = {AscendC::CoreType::ON_AIC, 0};
 // Separate from SyncAll's reserved flags 11-14 and the matmul API's flags 0-7.
+static constexpr uint16_t AIC_SYNC_EVENT_ID = 3;
 static constexpr uint16_t HCOMM_DATA_READY_FLAG = 9;
 static constexpr uint16_t HCOMM_WINDOW_ACK_FLAG = 10;
 static constexpr uint32_t HCOMM_NOTIFY_WINDOW = 8;
@@ -218,6 +219,12 @@ private:
     __aicore__ inline void SetupParams(Params& out, MatmulMode matmulMode);
     __aicore__ inline void MatmulProcess(MatmulMode matmulMode);
     __aicore__ inline void WaitOutputTiles();
+
+    __aicore__ inline void SyncAicCores()
+    {
+        AscendC::CrossCoreSetFlag<0, PIPE_FIX>(AIC_SYNC_EVENT_ID);
+        AscendC::CrossCoreWaitFlag(AIC_SYNC_EVENT_ID);
+    }
 };
 
 template <typename X1Type, typename X2Type, typename YType, typename CommDataTypeX1,
@@ -352,7 +359,7 @@ AllToAllMxQuantMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMa
         }
         opStateDump_.DoDump(DUMP_FIELD_POSITION, POS_COMP_REMOTE_BEFORE);
         MatmulProcess(MatmulMode::REMOTE);
-        AscendC::SyncAll();
+        SyncAicCores();
         commState_.hccl_.Finalize();
         opStateDump_.DoDump(DUMP_FIELD_PHASE, 0, static_cast<uint8_t>(Utils::RT_PHASE_COMM_FINALIZE));
     }
