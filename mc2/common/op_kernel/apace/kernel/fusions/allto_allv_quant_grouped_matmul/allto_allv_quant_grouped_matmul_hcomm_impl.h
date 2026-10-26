@@ -135,8 +135,6 @@ private:
 
     __aicore__ inline uint32_t BatchExpertNum() const
     {
-        // permuteOut exposes the communication buffer and therefore keeps the
-        // historical expert-major layout produced by one-expert collectives.
         if (tilingData_->isPermuteOut) {
             return 1U;
         }
@@ -161,12 +159,6 @@ private:
 
     __aicore__ inline void BuildGroupLists()
     {
-        // Every AIC core redundantly writes the same metadata (sparse group list,
-        // A/scaleA offset tables and the local-matmul group list). Redundant stores of
-        // identical values are idempotent, so no core depends on another core having
-        // flushed its cache: we drop the block0-writer + DataCacheCleanAndInvalid +
-        // SyncAll publication dance that could leave a reader core on stale lines and
-        // produce a wild write (aicore error 161 / fixpipe write to invalid GM).
         __gm__ int64_t* sparseGroupList = reinterpret_cast<__gm__ int64_t*>(sparseGroupListGM_);
         for (uint32_t expert = 0U; expert < ExpertNum(); ++expert) {
             for (uint32_t peer = 0U; peer < RankSize(); ++peer) {
@@ -270,8 +262,6 @@ private:
     {
         hccl_.Wait(scaleHandle_);
         hccl_.Wait(dataHandle_);
-        // Wait records the dependency on the data-move pipe.  Drain it before
-        // the scalar side reuses the parameter arrays for the next collective.
         AscendC::PipeBarrier<PIPE_ALL>();
     }
 
@@ -356,10 +346,6 @@ private:
         out.baseM = static_cast<uint32_t>(mmTiling.baseM);
         out.baseN = static_cast<uint32_t>(mmTiling.baseN);
         out.baseK = static_cast<uint32_t>(mmTiling.baseK);
-        // Force the single-L0-block window (kAL1/kBL1/scaleKL1 == 0 walks baseK). The
-        // multi-L0-block K-window path has confirmed real-hardware hang/corruption
-        // evidence (see quant_grouped_matmul_all_to_all_v FillGmmA2avTiling), which
-        // produced the aicore page-fault on rank0 and wrong local-matmul on rank1.
         out.kAL1 = 0U;
         out.kBL1 = 0U;
         out.scaleKL1 = 0U;
