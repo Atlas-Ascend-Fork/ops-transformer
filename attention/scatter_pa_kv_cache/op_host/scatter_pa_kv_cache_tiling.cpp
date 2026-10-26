@@ -394,6 +394,7 @@ ge::graphStatus ScatterPaKvCacheMembaseTiling::CheckInputShapeSiso()
     params_.kHeadSize = inputKeyShape_.GetDim(DIM_2);
     int64_t numBlocks = inputKeyCacheInShape_.GetDim(DIM_0);
     params_.blockSize = inputKeyCacheInShape_.GetDim(DIM_1);
+    params_.numBlocks = numBlocks;
 
     OP_CHECK_IF((static_cast<uint64_t>(numBlocks) * params_.blockSize < params_.numTokens),
                 OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
@@ -470,6 +471,7 @@ ge::graphStatus ScatterPaKvCacheMembaseTiling::CheckInputShapeNHSD()
     params_.vHeadSize = inputValueShape_.GetDim(DIM_2);
     int64_t numBlocks = inputKeyCacheInShape_.GetDim(DIM_0);
     params_.blockSize = inputKeyCacheInShape_.GetDim(DIM_2);
+    params_.numBlocks = numBlocks;
     bool isAlign =
         ((params_.kHeadSize * params_.typeByteK) % ALIGN == 0 && (params_.vHeadSize * params_.typeByteV) % ALIGN == 0);
     OP_CHECK_IF((!isAlign),
@@ -545,6 +547,7 @@ ge::graphStatus ScatterPaKvCacheMembaseTiling::CheckInputShapeNz()
     params_.vHeadSize = inputValueShape_.GetDim(DIM_2);
     params_.blockSize = inputKeyCacheInShape_.GetDim(inputKeyCacheInShape_.GetDimNum() - DIM_2);
     int64_t numBlocks = inputKeyCacheInShape_.GetDim(DIM_0);
+    params_.numBlocks = numBlocks;
     int64_t lastDimK = ALIGN / params_.typeByteK;
     int64_t lastDimV = ALIGN / params_.typeByteV;
 
@@ -923,6 +926,7 @@ ge::graphStatus ScatterPaKvCacheMembaseTiling::PostTiling()
     tilingData_.set_kHeadSize(params_.kHeadSize);
     tilingData_.set_vHeadSize(params_.vHeadSize);
     tilingData_.set_numHead(params_.numHead);
+    tilingData_.set_numBlocks(params_.numBlocks);
     tilingData_.set_blockSize(params_.blockSize);
     tilingData_.set_ubSize(params_.ubSize);
     tilingData_.set_batch(params_.numBatchs);

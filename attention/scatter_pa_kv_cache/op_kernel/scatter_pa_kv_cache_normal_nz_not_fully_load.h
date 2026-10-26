@@ -172,7 +172,7 @@ __aicore__ inline void ScatterPaKvCacheNormalNzNotFullyLoad<T1, T2, IndexDtype>:
     for (int32_t loopToken = 0; loopToken < curBlockFactor; loopToken++) {
         // The offset of the token's initial address, with a unit of 32B
         int64_t slotValue = slotMappingGm_.GetValue(loopToken + startTaskId);
-        if (slotValue < 0) {
+        if (slotValue < 0 || slotValue >= tilingData_->numBlocks * tilingData_->blockSize) {
             continue;
         }
         uint64_t startK = (loopToken + startTaskId) * tokenSizeK_;

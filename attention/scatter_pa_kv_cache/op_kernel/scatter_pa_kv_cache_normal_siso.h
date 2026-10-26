@@ -51,7 +51,7 @@ public:
 
         for (int64_t i = 0; i < curBlockFactor_; i++) {
             int64_t slotValue = slotMappingGm_.GetValue(startTaskId_ + i);
-            if (slotValue < 0) {
+            if (slotValue < 0 || slotValue >= tilingData_->numBlocks * tilingData_->blockSize) {
                 continue;
             }
             // key
@@ -81,7 +81,7 @@ public:
 
         for (int64_t i = 0; i < curBlockFactor_; i++) {
             int64_t slotValue = slotMappingGm_.GetValue(startTaskId_ + i);
-            if (slotValue < 0) {
+            if (slotValue < 0 || slotValue >= tilingData_->numBlocks * tilingData_->blockSize) {
                 continue;
             }
             int64_t kOffsetIn = (startTaskId_ + i) * kTokenSize;

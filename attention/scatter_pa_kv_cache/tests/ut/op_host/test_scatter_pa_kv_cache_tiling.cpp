@@ -1314,3 +1314,76 @@ TEST_F(ScatterPaKvCacheTilingTest, tiling_error_nct_kc_vc_dim0_mismatch)
         &compileInfo);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
 }
+
+namespace {
+
+// kernel 侧用 numBlocks * blockSize 判定 slotMapping 上界，这里保证 membase tiling 真的下发了这两个字段，
+// 避免 numBlocks 恒为 0 时所有合法 token 被当成越界跳过。
+// 字段顺序见 scatter_pa_kv_cache_tiling.h 中的 TilingData 定义：numBlocks 为第 21 个、blockSize 为第 22 个字段
+void ExpectMembaseTilingDataPublished(const gert::TilingContextPara& tilingContextPara, int64_t expectTilingKey,
+                                      int64_t expectNumBlocks, int64_t expectBlockSize)
+{
+    TilingInfo tilingInfo;
+    ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo));
+    EXPECT_EQ(tilingInfo.tilingKey, expectTilingKey);
+    ASSERT_EQ(tilingInfo.tilingDataSize / sizeof(int64_t), 41U);
+    const int64_t* data = reinterpret_cast<const int64_t*>(tilingInfo.tilingData.get());
+    EXPECT_EQ(data[20], expectNumBlocks);
+    EXPECT_EQ(data[21], expectBlockSize);
+}
+
+} // namespace
+
+TEST_F(ScatterPaKvCacheTilingTest, tiling_normal_publish_num_blocks)
+{
+    optiling::ScatterPaKvCacheCompileInfo compileInfo = {64, 262144};
+    gert::TilingContextPara tilingContextPara(
+        "ScatterPaKvCache",
+        {
+            {{{102, 1, 128}, {102, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{306, 128, 1, 128}, {306, 128, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{102}, {102}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{102, 1, 128}, {102, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{306, 128, 1, 128}, {306, 128, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+        },
+        {
+            {{{306, 128, 1, 128}, {306, 128, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{306, 128, 1, 128}, {306, 128, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+        },
+        {
+            {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("Norm")},
+            {"scatter_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("None")},
+            {"strides", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({1, 1})},
+            {"offsets", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({0, 0})},
+        },
+        &compileInfo);
+    // TEMPLATE_NORMAL=1，numTokens < SMALL_TOKEN -> tilingKey = 1000*1+1；cache 容量 = 306*128
+    ExpectMembaseTilingDataPublished(tilingContextPara, 1001, 306, 128);
+}
+
+TEST_F(ScatterPaKvCacheTilingTest, tiling_nz_publish_num_blocks)
+{
+    optiling::ScatterPaKvCacheCompileInfo compileInfo = {64, 262144};
+    gert::TilingContextPara tilingContextPara(
+        "ScatterPaKvCache",
+        {
+            {{{102, 1, 128}, {102, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{306, 8, 128, 16}, {306, 8, 128, 16}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{102}, {102}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{102, 1, 128}, {102, 1, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{306, 8, 128, 16}, {306, 8, 128, 16}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+        },
+        {
+            {{{306, 8, 128, 16}, {306, 8, 128, 16}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{306, 8, 128, 16}, {306, 8, 128, 16}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+        },
+        {
+            {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("PA_NZ")},
+            {"scatter_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("None")},
+            {"strides", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({1, 1})},
+            {"offsets", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({0, 0})},
+        },
+        &compileInfo);
+    // TEMPLATE_NZ=2，NZ 恒走 fully load -> tilingKey = 1000*2+1；NZ 下 blockSize 取倒数第二维（128）
+    ExpectMembaseTilingDataPublished(tilingContextPara, 2001, 306, 128);
+}

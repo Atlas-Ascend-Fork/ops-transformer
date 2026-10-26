@@ -92,7 +92,7 @@ __aicore__ inline void ScatterPaKvCacheNormalNzFullyLoad<T1, T2, IndexDtype>::Pr
     uint32_t startTaskId = blockIdx_ * tilingData_->blockFactor;
     for (uint32_t i = 0; i < curBlockFactor_; ++i) {
         int64_t cacheIndex = slotMappingGm_.GetValue(i + startTaskId);
-        if (cacheIndex < 0) {
+        if (cacheIndex < 0 || cacheIndex >= tilingData_->numBlocks * tilingData_->blockSize) {
             continue;
         }
         uint64_t startK = (i + startTaskId) * tokenSizeK_;

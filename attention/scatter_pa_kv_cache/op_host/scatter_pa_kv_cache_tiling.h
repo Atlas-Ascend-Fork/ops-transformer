@@ -211,6 +211,7 @@ struct ScatterPaKvCacheMembaseParams {
     int64_t numHead{0};
     int64_t kHeadSize{0};
     int64_t vHeadSize{0};
+    int64_t numBlocks{0};
     int64_t blockSize{0};
     int64_t typeByteK{0};
     int64_t typeByteV{0};
