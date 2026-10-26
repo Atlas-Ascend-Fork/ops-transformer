@@ -23,9 +23,9 @@ __aicore__ inline MMParam MxMakeMMParam(uint32_t singleM, uint32_t singleN, uint
                                         bool isRightTranspose, bool cmatrixInitVal = true, bool isOutKFisrt = true,
                                         uint32_t unitFlag = 0, uint32_t realM = 0)
 {
-    // MX 调用点使用的小型构造函数，用于让 matmul 维度和转置标志更易读。
-    // 在 MX 路径中，这些标志描述的是 LoadDataToL0*Mx 消费的 L1 视图，
-    // 并不表示额外启动一个显式转置 kernel。
+    // Small constructors for MX call sites to make matmul dimensions and transpose flags easier to read.
+    // In the MX path, these flags describe the L1 views consumed by LoadDataToL0*Mx;
+    // they do not launch an additional explicit transpose kernel.
     MMParam param;
     param.singleM = singleM;
     param.singleN = singleN;
@@ -48,9 +48,9 @@ __aicore__ inline void MxMatmulFull(const LocalTensor<A>& aL1Tensor, const Local
                                     const LocalTensor<AScaleType>& aScaleL1Tensor = LocalTensor<AScaleType>(),
                                     const LocalTensor<BScaleType>& bScaleL1Tensor = LocalTensor<BScaleType>())
 {
-    // 对现有 MatmulFull 模板的 MX 包装。它与普通 fp8 matmul 的关键差异是：
-    // A/B scale tensor 会被透传，同时 L0ADType/L0BDType 可指定为 mx_fp8_e4m3_t，
-    // 从而在 L1->L0 LoadData 阶段选择硬件随路反量化。
+    // MX wrapper around the existing MatmulFull template. The key differences from ordinary FP8 matmul are:
+    // A/B scale tensors are passed through, and L0ADType/L0BDType can be set to mx_fp8_e4m3_t,
+    // selecting hardware dequantization during the L1-to-L0 LoadData transfer.
     // Use the physical L1 width, not param.singleK (which can be a shorter tail).
     MatmulFull<A, B, C, baseM, baseN, baseK, AL, BL, L0AType, L0BType, AScaleType, BScaleType, L0ADType, L0BDType>(
         aL1Tensor, bL1Tensor, aL0BuffsDb, bL0BuffsDb, cL0Tensor, param, aScaleL1Tensor, bScaleL1Tensor);
@@ -112,7 +112,8 @@ __aicore__ inline void MxMatmulFullReuseB(const LocalTensor<A>& aL1Tensor, const
     params.cmatrixSource = false;
     params.unitFlag = param.unitFlag;
     constexpr uint32_t singleRowM = 1U;
-    // M=1 使用 MMAD 的最小 16 行分形执行；其余 M 值保持真实行数，由底层 matmul 处理尾块。
+    // For M=1, use the minimum 16-row MMAD fractal; otherwise keep the actual row count and let the underlying matmul
+    // handle the tail.
     if (params.m == singleRowM) {
         params.m = ONE_FRACTAL_H_ELEMENT;
     }

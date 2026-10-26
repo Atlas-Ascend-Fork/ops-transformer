@@ -35,7 +35,7 @@ static constexpr uint64_t CROSS_CORE_SYNC_MODE = 4;
 
 template <BufferType Type>
 struct BufferInfo {
-    // Cons 消费者，Prod 生产者
+    // Cons: consumer; Prod: producer.
     __aicore__ const static constexpr HardEvent ConsWaitProdStatus()
     {
         if constexpr (Type == BufferType::L1) {
@@ -85,18 +85,19 @@ struct BufferInfo {
         }
     }
 
-    static constexpr HardEvent EventP2C =
-        ConsWaitProdStatus(); // 生产者到消费者方向的HardEvent：消费者等生产者提供/生产者通知消费者已生成
+    static constexpr HardEvent EventP2C = ConsWaitProdStatus(); // Producer-to-consumer HardEvent: the consumer waits
+                                                                // for data, or the producer signals that data is ready.
     static constexpr HardEvent EventC2P =
-        ProdWaitConsStatus(); // 消费者到生产者方向的HardEvent：生产者等消费者消耗/消费者通知生产者已消耗’
+        ProdWaitConsStatus(); // Consumer-to-producer HardEvent: the producer waits for consumption, or the consumer
+                              // signals that data has been consumed.
     static constexpr TPosition Position = GetTPosition();
 };
 
-// buffer绑定生产者、消费者关系
-// L1 buffer的生产者为MTE2或者MTE3，消费者为MTE1
-// L0A buffer的生产者为MTE1，消费者为M
-// L0B buffer的生产者为MTE1，消费者为M
-// L0C buffer的生产者为M，消费者为FIX
+// Bind a buffer to its producer and consumer.
+// L1 buffer: MTE2 or MTE3 produces data; MTE1 consumes it.
+// L0A buffer: MTE1 produces data; M consumes it.
+// L0B buffer: MTE1 produces data; M consumes it.
+// L0C buffer: M produces data; FIX consumes it.
 } // namespace fa_base_matmul
 
 #endif // QBSA_ARCH92_QBSA_BUFFER_TYPES_H

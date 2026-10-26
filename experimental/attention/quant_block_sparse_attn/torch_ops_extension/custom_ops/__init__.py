@@ -9,7 +9,7 @@
 import torch
 import torch_npu
 
-# 导入so 和 python
+# Import the shared library and Python modules.
 from . import custom_ops_lib  # noqa: F401 - registers the schemas and eager/Meta implementations
 from .converter import npu_quant_block_sparse_attn as _attn_converter  # noqa: F401
 from .converter import npu_quant_block_sparse_attn_metadata as _metadata_converter  # noqa: F401

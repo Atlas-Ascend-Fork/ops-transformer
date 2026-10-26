@@ -46,7 +46,7 @@ private:
             DataCopyExtParams dataCopyParams;
             dataCopyParams.blockCount = 1;
 
-            // 当 runInfo.sparseBlkIdx2 >= 0 的情况时，runInfo.s2SparseBlk1RealSize = constInfo.kvSparseBlockSize
+            // When runInfo.sparseBlkIdx2 >= 0, runInfo.s2SparseBlk1RealSize = constInfo.kvSparseBlockSize.
             dataCopyParams.blockLen = runInfo.s2SparseBlk1RealSize * sizeof(float);
             dataCopyParams.srcStride = 0;
             dataCopyParams.dstStride = 0;

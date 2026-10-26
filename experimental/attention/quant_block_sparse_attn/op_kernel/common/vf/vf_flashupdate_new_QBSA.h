@@ -295,7 +295,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
     Reg::MaskReg pregCompare;
     Reg::MaskReg pregZeroSum;
     constexpr uint32_t dealRows = 8;
-    constexpr uint32_t floatRepSize = 64; // 64: 一个寄存器存64个float
+    constexpr uint32_t floatRepSize = 64; // 64: one register holds 64 float values.
     constexpr float infValue = 3e+99;     // 3e+99 for float inf
     constexpr float negInfValue = -3e+99; // -3e+99 for float -inf
     constexpr uint32_t tmpMin = 0xFF7FFFFF;
@@ -310,7 +310,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
     if constexpr (negativeInfWhenEmpty) {
         Reg::Duplicate<float, float>(vregInfValue, negInfValue);
     } else {
-        // 保持原 FP8 实例化的寄存器初始化与指令路径不变。
+        // Preserve the register initialization and instruction path of the original FP8 instantiation.
         Reg::Duplicate<float, float>(vregInfValue, infValue);
     }
     Reg::Duplicate<float, float>(vregZero, 0.0f);
@@ -329,7 +329,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
             Reg::Select<T>(vregResFinal, vregMinValue, vregRes, pregCompare);
         }
 
-        // sum == 0 表示空 softmax 行：MX 输出 -Inf，其他路径保留 -FLT_MAX。
+        // sum == 0 indicates an empty softmax row: MX outputs -Inf; other paths retain -FLT_MAX.
         Reg::Compare<float, CMPMODE::EQ>(pregZeroSum, vregSum, vregZero, pregAll);
         if constexpr (negativeInfWhenEmpty) {
             Reg::Select<T>(vregResFinal, vregInfValue, vregResFinal, pregZeroSum);
@@ -354,7 +354,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
             Reg::Select<T>(vregResFinal, vregMinValue, vregRes, pregCompare);
         }
 
-        // sum == 0 表示空 softmax 行：MX 输出 -Inf，其他路径保留 -FLT_MAX。
+        // sum == 0 indicates an empty softmax row: MX outputs -Inf; other paths retain -FLT_MAX.
         Reg::Compare<float, CMPMODE::EQ>(pregZeroSum, vregSum, vregZero, pregTail);
         if constexpr (negativeInfWhenEmpty) {
             Reg::Select<T>(vregResFinal, vregInfValue, vregResFinal, pregZeroSum);
@@ -382,7 +382,7 @@ __simd_vf__ inline void RowInvalidUpdateVF(__ubuf__ T* finalUb, __ubuf__ float* 
                                            const uint16_t d, int64_t dSize, const uint32_t pltTailD,
                                            const uint16_t hasTail)
 {
-    constexpr uint16_t floatRepSize = 64; // 64: 一个寄存器可以存储64个float类型数据
+    constexpr uint16_t floatRepSize = 64; // 64: one register can hold 64 float values.
     const uint16_t dLoops = d / floatRepSize;
 
     constexpr uint32_t tmpZero = 0x00000000; // zero value of fp16 and fp32

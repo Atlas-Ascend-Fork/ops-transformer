@@ -213,7 +213,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateMxfp8FullNVF(__ubuf__ T2* x_exp, __
         FusedExpSub(vreg_x_exp_4, vreg_x_f32_4, max0, preg_134);
         FusedExpSub(vreg_x_exp_5, vreg_x_f32_5, max0, preg_134);
         FusedExpSub(vreg_x_exp_6, vreg_x_f32_6, max0, preg_134);
-        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i softmax分子
+        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i: softmax numerator.
         Select(vreg_x_exp_4, vreg_zero, vreg_x_exp_4, preg_invalid_cur);
         Select(vreg_x_exp_5, vreg_zero, vreg_x_exp_5, preg_invalid_cur);
         Select(vreg_x_exp_6, vreg_zero, vreg_x_exp_6, preg_invalid_cur);
@@ -602,7 +602,8 @@ __simd_vf__ inline void ProcessVec1DnUpdateMxfp8FullNVF(
                                                              vreg_p_scale_f8e8m0, preg_134);
     } else {
         if constexpr (USE_RECURSIVE_SUM) {
-            // subLoop0 已将 Sprev * exp(Mprev - Mfirst) + S0 写回；这里只需随新 max 再缩放并累加 S1。
+            // subLoop0 has written back Sprev * exp(Mprev - Mfirst) + S0; rescale for the new maximum and accumulate S1
+            // here.
             LoadAlign(vreg_l0, new_global_sum);
             Mul(vreg_l0, vreg_subloop_update, vreg_l0, preg_134);
             Add(vreg_l0, vreg_l0, vreg_x_sum0, preg_134);

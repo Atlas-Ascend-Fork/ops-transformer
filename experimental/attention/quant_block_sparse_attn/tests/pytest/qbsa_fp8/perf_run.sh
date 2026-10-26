@@ -12,7 +12,7 @@
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$SCRIPT_DIR" || exit 1
 
-# 性能数据分析脚本
+# Performance data analysis script.
 rm -f result.xlsx
 msprof python3 -m pytest -rA -s test_quant_block_sparse_attn_batch.py -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning 2>&1 | tee res.log
 python3 utils/process_perf_data.py --test_result_path="result.xlsx" --is_compare True --delete_perf_file True

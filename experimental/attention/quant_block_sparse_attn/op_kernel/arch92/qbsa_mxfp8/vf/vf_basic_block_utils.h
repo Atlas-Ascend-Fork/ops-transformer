@@ -30,8 +30,9 @@ constexpr float fp8e4m3MaxValue = 448.0f;
 constexpr float int8MaxValue = 127.0f;
 constexpr float hifp8MaxValue = 32768.0f;
 constexpr float floatEps = 2.220446049250313e-16;
-// MX V1 沿用 common softmax 技巧：先用 log2 转换以配合 exp2 指令，
-// 再通过 ln2 转回自然指数语义。MXFP8 DN VF 实现需要这两个常量。
+// MX V1 reuses the common softmax approach: convert with log2 for the exp2 instruction,
+// then convert back using ln2 to preserve natural-exponential semantics. The MXFP8 DN VF implementation requires both
+// constants.
 constexpr float LN2 = static_cast<float>(0.6931471806f);
 constexpr float INV_LN2 = static_cast<float>(1.4426950409F);
 /* **************************************************************************************************
@@ -74,9 +75,9 @@ constexpr static AscendC::RoundMode pScaleE8M0RoundMode = AscendC::RoundMode::CA
 constexpr static AscendC::Reg::SatMode pScaleE8M0SatMode = AscendC::Reg::SatMode::UNKNOWN;
 
 constexpr static AscendC::Reg::CastTrait castTraitE8M0Zero = {
-    // 这里不是 cast 输入的 quantScale1；quantScale1 传入时已经是 fp8_e8m0。
-    // VF 会根据 softmax/update 过程重新生成给 BMM2 使用的 per-group PScale，
-    // 生成过程先得到 bf16 lane 形式的 scale 编码，再 cast 成 fp8_e8m0 写入 UB/L1。
+    // This is not a cast of the quantScale1 input; quantScale1 is already fp8_e8m0.
+    // VF regenerates per-group PScale for BMM2 during softmax/update,
+    // first encoding scales as BF16 lanes, then casting to fp8_e8m0 for UB/L1 writes.
     AscendC::Reg::RegLayout::ZERO,
     pScaleE8M0SatMode,
     AscendC::Reg::MaskMergeMode::ZEROING,

@@ -53,7 +53,7 @@ __aicore__ inline void ComputeParamBatch(RunParamStr& runParam, const ConstInfo&
                                          const AttenMaskInfo& attenMaskInfo, GlobalTensor<INPUT_T>& keyGm,
                                          __gm__ int32_t* cuSeqQlenAddr, __gm__ int32_t* seqUsedKvlenAddr)
 {
-    // 计算实际序列长度
+    // Calculate the actual sequence length.
     runParam.actualS1Size =
         CalculateActualS1Size<TEMPLATE_INTF_ARGS>(runParam, constInfo, runParam.boIdx, cuSeqQlenAddr);
     runParam.actualS2Size =
@@ -69,7 +69,7 @@ __aicore__ inline void ComputeParamBatch(RunParamStr& runParam, const ConstInfo&
             }
         }
     }
-    // 计算query偏移量
+    // Calculate the query offset.
     if constexpr (layout == QBSALayout::TND) {
         runParam.qBScalarOffset = cuSeqQlenAddr[runParam.boIdx] * constInfo.n2G;
         runParam.qBOffset = runParam.qBScalarOffset * constInfo.dSize;
@@ -90,7 +90,7 @@ __aicore__ inline void ComputeS1LoopInfo(RunParamStr& runParam, const ConstInfo&
 
     if constexpr (hasAtten) {
         if (runParam.nextTokensPerBatch < 0) {
-            int64_t nextTokensOuterSize = (-runParam.nextTokensPerBatch) / constInfo.s1BaseSize; // 向下取整
+            int64_t nextTokensOuterSize = (-runParam.nextTokensPerBatch) / constInfo.s1BaseSize; // Round down.
             runParam.s1LoopStart = Max(runParam.s1LoopStart, nextTokensOuterSize);
         }
     }
@@ -143,7 +143,7 @@ __aicore__ inline void LoopSOuterOffsetInit(RunParamStr& runParam, const ConstIn
         }
     } else {
         if constexpr (layout == QBSALayout::TND || layout == QBSALayout::NTD) {
-            // 起始地址  需要stride偏移
+            // The start address requires a stride offset.
             runParam.attentionOutOffset = seqOffset * constInfo.n2GDv + runParam.sOuterOffset * constInfo.n2GDv +
                                           runParam.n2oIdx * constInfo.gDv + runParam.goIdx * constInfo.dSizeV;
         }
@@ -165,7 +165,7 @@ TEMPLATE_INTF
 __aicore__ inline void ComputeParamS1(RunParamStr& runParam, const ConstInfo& constInfo, uint32_t sOuterLoopIdx,
                                       __gm__ int32_t* cuSeqQlenAddr)
 {
-    // 后续的函数依赖 sOuterOffset
+    // Subsequent functions depend on sOuterOffset.
     ComputeSouterParam<TEMPLATE_INTF_ARGS>(runParam, constInfo, sOuterLoopIdx);
     LoopSOuterOffsetInit<TEMPLATE_INTF_ARGS>(runParam, constInfo, runParam.boIdx, cuSeqQlenAddr);
 }
@@ -230,16 +230,16 @@ __aicore__ inline void AttentionMaskFullProcessingOrRequired(int64_t s1Offset, i
 {
     int64_t offsetDiff = s1Offset - s2Offset + delta;
     if (offsetDiff + realSize - 1 < 0) {
-        // 情景三：该 sparse block 全部被 mask 掉。DN 流水仍会用 sparseBlkIdx 做 PA GM 搬运，
-        // 因此不能写成 -1；保留原 index，由 mask 阶段把该块全部置无效。
+        // Case 3: the entire sparse block is masked out. The DN pipeline still uses sparseBlkIdx for PA GM transfers,
+        // so do not replace it with -1. Keep the original index and invalidate the entire block during masking.
         sparseBlkPartialMask = true;
         return;
     }
     if (offsetDiff - realSize + 1 < 0) {
-        // 情景二
+        // Case 2.
         sparseBlkPartialMask = true;
     } else {
-        // 情景一
+        // Case 1.
         sparseBlkPartialMask = false;
     }
 }

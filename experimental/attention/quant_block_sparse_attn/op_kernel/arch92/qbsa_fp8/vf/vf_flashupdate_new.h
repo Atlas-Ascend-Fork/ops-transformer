@@ -503,7 +503,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
     MicroAPI::MaskReg pregCompare;
     MicroAPI::MaskReg pregZeroSum;
     constexpr uint32_t dealRows = 8;
-    constexpr uint32_t floatRepSize = 64; // 64: 一个寄存器存64个float
+    constexpr uint32_t floatRepSize = 64; // 64: one register holds 64 float values.
     constexpr float infValue = 3e+99;     // 3e+99 for float inf
     constexpr uint32_t tmpMin = 0xFF7FFFFF;
     float minValue = *((float*)&tmpMin);
@@ -527,7 +527,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
         MicroAPI::Compare<float, CMPMODE::EQ>(pregCompare, vregMax, vregMinValue, pregAll);
         MicroAPI::Select<T>(vregResFinal, vregMinValue, vregRes, pregCompare);
 
-        // sum == 0 保护：ln(0) + max = -inf, 需替换为 vregMinValue
+        // Guard sum == 0: ln(0) + max = -inf, which must be replaced by vregMinValue.
         MicroAPI::Compare<float, CMPMODE::EQ>(pregZeroSum, vregSum, vregZero, pregAll);
         MicroAPI::Select<T>(vregResFinal, vregMinValue, vregResFinal, pregZeroSum);
 
@@ -544,7 +544,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
         MicroAPI::Compare<float, CMPMODE::EQ>(pregCompare, vregMax, vregMinValue, pregTail);
         MicroAPI::Select<T>(vregResFinal, vregMinValue, vregRes, pregCompare);
 
-        // sum == 0 保护：ln(0) + max = -inf, 需替换为 vregMinValue
+        // Guard sum == 0: ln(0) + max = -inf, which must be replaced by vregMinValue.
         MicroAPI::Compare<float, CMPMODE::EQ>(pregZeroSum, vregSum, vregZero, pregTail);
         MicroAPI::Select<T>(vregResFinal, vregMinValue, vregResFinal, pregZeroSum);
 
@@ -569,7 +569,7 @@ __simd_vf__ inline void RowInvalidUpdateVF(__ubuf__ T* finalUb, __ubuf__ float* 
                                            const uint16_t d, int64_t dSize, const uint32_t pltTailD,
                                            const uint16_t hasTail)
 {
-    constexpr uint16_t floatRepSize = 64; // 64: 一个寄存器可以存储64个float类型数据
+    constexpr uint16_t floatRepSize = 64; // 64: one register can hold 64 float values.
     const uint16_t dLoops = d / floatRepSize;
 
     constexpr uint32_t tmpZero = 0x00000000; // zero value of fp16 and fp32

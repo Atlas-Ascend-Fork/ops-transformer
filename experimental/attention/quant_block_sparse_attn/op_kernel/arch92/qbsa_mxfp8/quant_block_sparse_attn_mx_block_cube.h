@@ -10,7 +10,7 @@
 
 /*!
  * \file quant_block_sparse_attn_mx_block_cube.h
- * \brief QuantBlockSparseAttn 的 MXFP8 全量化 cube 路径。
+ * \brief Fully quantized MXFP8 Cube path for QuantBlockSparseAttn.
  */
 #ifndef QUANT_BLOCK_SPARSE_ATTN_MX_BLOCK_CUBE_H_
 #define QUANT_BLOCK_SPARSE_ATTN_MX_BLOCK_CUBE_H_
@@ -72,9 +72,9 @@ public:
                   "MX cube currently only supports TND query and PA_BNBD KV");
     static_assert(LOGICAL_M_BASE == 128U && S2_BASE == 512U && D_BASE == 128U && DV_BASE == 128U,
                   "MX cube currently only supports logical S1=128, S2=512, D=128 and DV=128");
-    // 每 32 个 fp8 数据元素对应一个 e8m0 scale。
+    // One e8m0 scale per 32 FP8 data elements.
     static constexpr uint32_t MX_SCALE_GROUP = 32U;
-    // V scale 为 [blockNum,N,blockSize/64,DV,2]。
+    // V scales use [blockNum,N,blockSize/64,DV,2].
     static constexpr uint32_t MX_TOKEN_GROUP = 64U;
     static constexpr uint32_t MX_SCALE_LAST_DIM = 2U;
     static constexpr FixpipeConfig BMM2_FIXPIPE_CONFIG = {CO2Layout::ROW_MAJOR, true};
@@ -120,7 +120,7 @@ public:
         if ASCEND_IS_AIC {
             static_assert(USE_DN, "MXFullQuantMode cube currently implements DN copy/load path; "
                                   "use_dn is kept for future non-DN extension");
-            // data 与 scale 连续存放，LoadData 在 L1->L0 时完成随路反量化。
+            // Data and scales are stored contiguously; LoadData performs dequantization during the L1-to-L0 transfer.
             constexpr uint32_t qSize = M_BASE * D_BASE * sizeof(INPUT_T);
             constexpr uint32_t qScaleSize = M_BASE * D_BASE / MX_SCALE_GROUP * sizeof(SCALE_T);
             constexpr uint32_t kvSize = S2_SPLIT * D_BASE * sizeof(INPUT_T);
@@ -128,12 +128,12 @@ public:
             constexpr uint32_t valueScaleSize =
                 (S2_SPLIT / MX_TOKEN_GROUP) * DV_BASE * MX_SCALE_LAST_DIM * sizeof(SCALE_T);
 
-            // Q 双 buffer；K 四 buffer；V 双 buffer。
+            // Double buffers for Q and V; four buffers for K.
             l1QBuffers_.Init(*l1BufferManager_, qSize + qScaleSize);
             l1KVBuffers_.Init(*l1BufferManager_, kvSize + kvScaleSize);
             l1VBuffers_.Init(*l1BufferManager_, kvSize + valueScaleSize);
 
-            // L0A/L0B 双 buffer；L0C 双 buffer。单槽 C1 为 [256,M_BASE] fp32。
+            // Double buffers for L0A/L0B and L0C. Each C1 slot is [256,M_BASE] in FP32.
             l0aBufferManager_.Init(tPipe_, 64U * 1024U);
             l0bBufferManager_.Init(tPipe_, 64U * 1024U);
             l0cBufferManager_.Init(tPipe_, 256U * 1024U);
@@ -212,7 +212,7 @@ private:
         // scale offset and C1 N dimension at 64 so every lane has defined data and scale.
         const uint64_t qScaleOffset = static_cast<uint64_t>(M_BASE) * constInfo.dSize;
         if (unlikely(runInfo.isFirstS2Loop)) {
-            // Q 用 ND2NZ，QScale 用 DN2NZ；后续 S2 loop 复用。
+            // Q uses ND2NZ and QScale uses DN2NZ; reuse both in subsequent S2 loops.
             qBuf = l1QBuffers_.Get();
             qBuf.Wait<HardEvent::MTE1_MTE2>();
             LocalTensor<INPUT_T> qTensor = qBuf.GetTensor<INPUT_T>();
@@ -245,7 +245,7 @@ private:
         // LoadData rounds the tail to a fractal; MMAD also promotes M=1 to M=16.
         // Padding must be initialized before those lanes are read, even if V1 later masks them.
         InitMxRowPadding(kTensor, kScaleTensor, s2CalcSize, AlignUp32(s2CalcSize), constInfo.dSize);
-        // [PLAN_A_PA_REUSE_OPT] K/KScale 共用 sparse overlap 和 PA 页号，分别搬运 data/scale。
+        // [PLAN_A_PA_REUSE_OPT] K/KScale share sparse overlaps and PA page IDs, with separate data/scale transfers.
         CopyKeyAndScaleToL1<SUB_LOOP>(kTensor, kScaleTensor, runInfo, constInfo, s2CalcSize);
         kBuf.Set<HardEvent::MTE2_MTE1>();
         return kBuf;
@@ -271,7 +271,7 @@ private:
 
         Buffer<BufferType::L0C> mm1ResL0C = mmL0CBuffers_.Get();
         mm1ResL0C.Wait<HardEvent::FIX_M>();
-        // MxMatmulFull 同时消费 fp8 data 与 e8m0 scale。
+        // MxMatmulFull consumes both FP8 data and e8m0 scales.
         MMParam param = MxMakeMMParam(s2CalcSize, M_BASE, constInfo.dSize, false, true);
         if constexpr (LOAD_Q_TO_L0B && RELEASE_Q_L0B) {
             MxMatmulFull<INPUT_T, INPUT_T, MM_T, S2_SPLIT, M_BASE, D_BASE, ABLayout::MK, ABLayout::KN,
@@ -308,7 +308,7 @@ public:
         MxBmm2Buf& outputBuf, BuffersPolicy3buff<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD, 1U>& inputBuf,
         MxRunInfo& runInfo, const MxConstInfo& constInfo, Bmm2Prefetch& inputs)
     {
-        // C2: P[64,512] x V[512,DV]，P/V 均携带 e8m0 scale。
+        // C2: P[64,512] x V[512,DV], with e8m0 scales for both P and V.
         Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD, 1U> pBuf = inputBuf.GetCube();
         pBuf.WaitCrossCore();
         constexpr uint64_t pScaleOffset = static_cast<uint64_t>(M_BASE) * S2_BASE;
@@ -341,7 +341,7 @@ public:
 
             MMParam param =
                 MxMakeMMParam(M_BASE, constInfo.dSizeV, AlignUp64(realK), true, false, kIdx == 0U, kIdx == 0U);
-            // P 转置，V 保持 KN。
+            // Transpose P and keep V in KN order.
             MxMatmulFull<INPUT_T, INPUT_T, MM_T, M_BASE, DV_BASE, baseK, ABLayout::MK, ABLayout::KN,
                          BuffersPolicyDB<BufferType::L0A>, BuffersPolicyDB<BufferType::L0B>, SCALE_T, SCALE_T,
                          mx_fp8_e4m3_t, mx_fp8_e4m3_t>(
@@ -470,7 +470,7 @@ private:
                                                const MxConstInfo& constInfo, uint32_t s2CalcSize)
     {
         static_assert(SUB_LOOP < 2U, "MX C1 only supports subLoop 0/1");
-        // PA BNBD K 与 KScale 使用相同的 sparse 顺序和 token overlap。
+        // PA BNBD K and KScale use the same sparse order and token overlap.
         constexpr uint32_t tileStart = SUB_LOOP * S2_SPLIT;
         const uint32_t tileEnd = tileStart + s2CalcSize;
         const uint32_t copyRowNumAlign = AlignUp32(s2CalcSize);
@@ -491,7 +491,7 @@ private:
         keyShape.pageStride = constInfo.paBlockStride;
         keyShape.rowStride = constInfo.dSize;
 
-        // KScale GM 为 [physicalBlock,kvHeads,blockSize,D/64,2]，单行使用 DN2NZ。
+        // KScale GM uses [physicalBlock,kvHeads,blockSize,D/64,2]; use DN2NZ for each row.
         PAShape keyScaleShape{};
         keyScaleShape.blockSize = constInfo.paBlockSize;
         keyScaleShape.headNum = constInfo.n2Size;
@@ -529,7 +529,7 @@ private:
     __aicore__ inline void CopyValueToL1(LocalTensor<INPUT_T>& dstTensor, const MxRunInfo& runInfo,
                                          const MxConstInfo& constInfo, uint32_t realK, uint32_t kIdx)
     {
-        // V 使用与 K 相同的 PA 拼接顺序。
+        // V uses the same PA concatenation order as K.
         const uint32_t tileStart = kIdx * S2_SPLIT;
         const uint32_t tileEnd = tileStart + realK;
         constexpr uint32_t blockElementCnt = 32U / sizeof(INPUT_T);
@@ -572,7 +572,7 @@ private:
     __aicore__ inline void CopyValueScaleToL1(LocalTensor<SCALE_T>& dstTensor, const MxRunInfo& runInfo,
                                               const MxConstInfo& constInfo, uint32_t realK, uint32_t kIdx)
     {
-        // VScale GM 为 [physicalBlock, kvHeads, blockSize/64, DV, 2]，offset 单位为 64-token group。
+        // VScale GM uses [physicalBlock,kvHeads,blockSize/64,DV,2]; offsets are in groups of 64 tokens.
         const uint32_t tileStart = kIdx * S2_SPLIT;
         const uint32_t tileEnd = tileStart + realK;
         const uint32_t totalGroupCount = AlignUp64(realK) / MX_TOKEN_GROUP;
@@ -623,13 +623,13 @@ private:
     __aicore__ inline void FixpipeMm1(const LocalTensor<MM_T>& dstTensor, const LocalTensor<MM_T>& l0C,
                                       const MxRunInfo&, uint32_t s2RealSize)
     {
-        // C1 写为 VF 使用的 row-major UB layout。
+        // Write C1 in the row-major UB layout consumed by VF.
         FixpipeParamsC310<CO2Layout::ROW_MAJOR> fixpipeParams{};
         fixpipeParams.nSize = M_BASE;
         fixpipeParams.mSize = (s2RealSize + 7U) >> 3 << 3;
         fixpipeParams.srcStride = ((fixpipeParams.mSize + 15U) >> 4) << 4U;
         fixpipeParams.dstStride = 64U;
-        // arch92 的唯一 AIV 消费完整 N=64 结果，不做双目标拆分。
+        // The single AIV on arch92 consumes the full N=64 result without dual-destination splitting.
         fixpipeParams.dualDstCtl = 0U;
         fixpipeParams.params.ndNum = 1;
         fixpipeParams.params.srcNdStride = 0;
@@ -640,13 +640,13 @@ private:
     __aicore__ inline void FixpipeMm2(const LocalTensor<MM_T>& dstTensor, const LocalTensor<MM_T>& l0C,
                                       const MxRunInfo&, const MxConstInfo& constInfo)
     {
-        // C2 以 fp32 写入 UB，供 V2 update。
+        // Write C2 to UB in FP32 for the V2 update.
         FixpipeParamsC310<CO2Layout::ROW_MAJOR> fixpipeParams{};
         fixpipeParams.nSize = (constInfo.dSizeV + 7U) >> 3 << 3;
         fixpipeParams.mSize = M_BASE;
         fixpipeParams.srcStride = ((M_BASE + 15U) >> 4) << 4U;
         fixpipeParams.dstStride = (DV_BASE + 15U) >> 4 << 4;
-        // arch92 的唯一 AIV 消费完整 M=64 结果，不做双目标拆分。
+        // The single AIV on arch92 consumes the full M=64 result without dual-destination splitting.
         fixpipeParams.dualDstCtl = 0U;
         fixpipeParams.params.ndNum = 1;
         fixpipeParams.params.srcNdStride = 0;
@@ -656,7 +656,7 @@ private:
 
     __aicore__ inline void InitValuePadding(const LocalTensor<INPUT_T>& valueL1, uint32_t realK, uint32_t curN)
     {
-        // V tail 补零到 64-token 对齐。
+        // Pad the V tail with zeros to 64-token alignment.
         const uint32_t curPadK = AlignUp64(realK);
         if (likely(curPadK == realK)) {
             return;

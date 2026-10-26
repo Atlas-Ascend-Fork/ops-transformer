@@ -30,10 +30,10 @@ struct CopyParam {
 struct PAShape {
     uint32_t blockNum;
     uint32_t blockSize;
-    uint32_t headNum;             // 一般为kv的head num
-    uint32_t headDim;             // mla下rope为64， 非rope为512
-    uint32_t maxblockNumPerBatch; // block table 每一行的最大个数
-    uint32_t actHeadDim;          // 实际拷贝col大小，考虑到N切块 s*d， 对应d
+    uint32_t headNum;             // Usually the KV head count.
+    uint32_t headDim;             // For MLA, the RoPE dimension is 64 and the non-RoPE dimension is 512.
+    uint32_t maxblockNumPerBatch; // Maximum number of entries per block table row.
+    uint32_t actHeadDim;          // Actual copied column count, corresponding to d when tiling N in s*d.
     uint32_t copyRowNum;
     uint32_t copyRowNumAlign;
     uint32_t pageStride = 0;
@@ -44,7 +44,7 @@ struct Position {
     uint32_t bIdx;
     uint32_t n2Idx;
     uint64_t s2Offset;
-    uint32_t dIdx; // N轴被切，对应D轴被切
+    uint32_t dIdx; // Splitting the N axis corresponds to splitting the D axis.
 };
 
 template <typename L1Type>
@@ -52,22 +52,24 @@ __aicore__ inline void GmCopyInToL1(LocalTensor<L1Type>& L1Tensor, GlobalTensor<
                                     const CopyParam& mmCopyParam)
 {
     Nd2NzParams Gm2L1Nd2NzParams;
-    Gm2L1Nd2NzParams.ndNum = 1;                   // ND矩阵的个数
-    Gm2L1Nd2NzParams.nValue = mmCopyParam.height; // 单个ND矩阵的实际行数，单位为元素个数
-    Gm2L1Nd2NzParams.dValue = mmCopyParam.width;  // 单个ND矩阵的实际列数(vD)，单位为元素个数
-    Gm2L1Nd2NzParams.srcNdMatrixStride = 0;       // 相邻ND矩阵起始地址之间的偏移， 单位为元素个数
-    Gm2L1Nd2NzParams.srcDValue = mmCopyParam.orgWidth; // 同一个ND矩阵中相邻行起始地址之间的偏移， 单位为元素个数
-    Gm2L1Nd2NzParams.dstNzC0Stride =
-        (Gm2L1Nd2NzParams.nValue + 15) >> 4 << 4; // 转换为NZ矩阵后，相邻Block起始地址之间的偏移， 单位为Block个数
-    Gm2L1Nd2NzParams.dstNzNStride = 1; // 转换为NZ矩阵后，ND之间相邻两行在NZ矩阵中起始地址之间的偏移， 单位为Block个数
-    Gm2L1Nd2NzParams.dstNzMatrixStride = 0; // 两个NZ矩阵，起始地址之间的偏移， 单位为元素数量
+    Gm2L1Nd2NzParams.ndNum = 1;                   // Number of ND matrices.
+    Gm2L1Nd2NzParams.nValue = mmCopyParam.height; // Actual row count of one ND matrix, in elements.
+    Gm2L1Nd2NzParams.dValue = mmCopyParam.width;  // Actual column count (vD) of one ND matrix, in elements.
+    Gm2L1Nd2NzParams.srcNdMatrixStride = 0;       // Offset between the starts of adjacent ND matrices, in elements.
+    Gm2L1Nd2NzParams.srcDValue =
+        mmCopyParam.orgWidth; // Offset between the starts of adjacent rows within one ND matrix, in elements.
+    Gm2L1Nd2NzParams.dstNzC0Stride = (Gm2L1Nd2NzParams.nValue + 15) >>
+                                     4 << 4; // After conversion to NZ, offset between adjacent block starts, in blocks.
+    Gm2L1Nd2NzParams.dstNzNStride =
+        1; // After conversion to NZ, offset between the starts of adjacent ND rows in the NZ matrix, in blocks.
+    Gm2L1Nd2NzParams.dstNzMatrixStride = 0; // Offset between the starts of two NZ matrices, in elements.
     DataCopy(L1Tensor, GmTensor, Gm2L1Nd2NzParams);
 }
 
-// 场景：key、value GM to L1
-// GM按ND格式存储
-// L1按NZ格式存储
-// GM的行、列、列的stride（D or ND）BNSD 和 BSH的区别
+// Scenario: transfer key/value from GM to L1.
+// GM stores data in ND format.
+// L1 stores data in NZ format.
+// GM rows, columns, and column strides (D or ND) distinguish BNSD from BSH.
 template <typename L1Type>
 __aicore__ inline void DataCopyGmNDToL1(LocalTensor<L1Type>& l1Tensor, GlobalTensor<L1Type>& gmTensor, uint32_t rowAct,
                                         uint32_t rowAlign,
@@ -76,7 +78,7 @@ __aicore__ inline void DataCopyGmNDToL1(LocalTensor<L1Type>& l1Tensor, GlobalTen
 {
     Nd2NzParams nd2nzPara;
     nd2nzPara.ndNum = 1;
-    nd2nzPara.nValue = rowAct; // 行数
+    nd2nzPara.nValue = rowAct; // Row count.
 
     nd2nzPara.dValue = col;
     nd2nzPara.srcDValue = colStride;
@@ -152,21 +154,22 @@ __aicore__ inline void GmCopyInToL1HasRopePANoContinue(LocalTensor<L1Type>& nope
                                                        const Position& startPos)
 {
     uint32_t copyFinishRowCnt = 0;
-    uint64_t blockTableBaseOffset = static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch; // 块表的基偏移量
+    uint64_t blockTableBaseOffset =
+        static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch; // Base offset into the block table.
     uint64_t curS2Idx = startPos.s2Offset;
-    uint32_t blockElementCnts = 32U / sizeof(L1Type); // 每个块的元素数量
-    // ropeshape的M方向与nopeshape保持一样， 此处只判断nopeshape的
+    uint32_t blockElementCnts = 32U / sizeof(L1Type); // Number of elements per block.
+    // The M dimension of ropeshape matches nopeshape; check only nopeshape here.
     while (copyFinishRowCnt < shape.copyRowNum) {
-        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // 获取block table上的索引
-        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // 获取在单个块上超出的行数
+        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // Get the block table index.
+        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // Get the number of rows exceeding the current block.
         uint64_t idInBlockTable =
-            blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // 从block table上获取的编号
-        // 计算可以拷贝行数
-        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // 一次只能处理一个Block
+            blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // Block number read from the block table.
+        // Calculate the number of rows that can be copied.
+        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // Process only one block at a time.
         if (copyFinishRowCnt + copyRowCnt > shape.copyRowNum) {
-            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // 一个block未拷满
+            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // The current block has not been fully copied.
         }
-        uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim; // PA的偏移
+        uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim; // PA offset.
         if (shape.pageStride > 0) {
             offset = idInBlockTable * shape.pageStride;
         }
@@ -229,22 +232,23 @@ __aicore__ inline void GmCopyInToL1HasRopePA(LocalTensor<L1Type>& nopeTensor, Lo
                                              const PAShape& shape, const PAShape& ropeShape, const Position& startPos)
 {
     uint32_t copyFinishRowCnt = 0;
-    uint64_t blockTableOffset = startPos.bIdx * shape.maxblockNumPerBatch; // 块表的基偏移量
+    uint64_t blockTableOffset = startPos.bIdx * shape.maxblockNumPerBatch; // Base offset into the block table.
     uint64_t curS2Idx = startPos.s2Offset;
-    uint32_t blockElementCnt = 32U / sizeof(L1Type); // 每个块的元素数量
-    // ropeshape的M方向与nopeshape保持一样， 此处只判断nopeshape的
+    uint32_t blockElementCnt = 32U / sizeof(L1Type); // Number of elements per block.
+    // The M dimension of ropeshape matches nopeshape; check only nopeshape here.
     while (copyFinishRowCnt < shape.copyRowNum) {
-        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // 获取block table上的索引
-        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // 获取在单个块上超出的行数
-        uint64_t idInBlockTable = blockTableGm.GetValue(blockTableOffset + blockIdOffset); // 从block table上获取的编号
-        // 计算可以拷贝行数
-        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // 一次只能处理一个Block
+        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // Get the block table index.
+        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // Get the number of rows exceeding the current block.
+        uint64_t idInBlockTable =
+            blockTableGm.GetValue(blockTableOffset + blockIdOffset); // Block number read from the block table.
+        // Calculate the number of rows that can be copied.
+        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // Process only one block at a time.
         if (copyFinishRowCnt + copyRowCnt > shape.copyRowNum) {
-            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // 一个block未拷满
+            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // The current block has not been fully copied.
         }
         uint64_t offset = (shape.pageStride > 0) ?
                               (idInBlockTable * shape.pageStride) :
-                              (idInBlockTable * shape.blockSize * shape.headNum * shape.headDim); // PA的偏移
+                              (idInBlockTable * shape.blockSize * shape.headNum * shape.headDim); // PA offset.
         uint64_t keyRopeOffset = (ropeShape.pageStride > 0) ?
                                      (idInBlockTable * ropeShape.pageStride) :
                                      (idInBlockTable * ropeShape.blockSize * ropeShape.headNum * ropeShape.headDim);
@@ -324,18 +328,19 @@ __aicore__ inline void GmCopyInToL1PA(LocalTensor<L1Type>& l1Tensor, GlobalTenso
                                       const Position& startPos)
 {
     uint32_t copyFinishRowCnt = 0;
-    uint64_t blockTableBaseOffset = static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch; // 块表的基偏移量
+    uint64_t blockTableBaseOffset =
+        static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch; // Base offset into the block table.
     uint64_t curS2Idx = startPos.s2Offset;
-    uint32_t blockElementCnt = 32U / sizeof(L1Type); // 每个块的元素数量
+    uint32_t blockElementCnt = 32U / sizeof(L1Type); // Number of elements per block.
     while (copyFinishRowCnt < shape.copyRowNum) {
-        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // 获取block table上的索引
-        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // 获取在单个块上超出的行数
+        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // Get the block table index.
+        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // Get the number of rows exceeding the current block.
         uint64_t idInBlockTable =
-            blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // 从block table上获取的编号
-        // 计算可以拷贝行数
-        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // 一次只能处理一个Block
+            blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // Block number read from the block table.
+        // Calculate the number of rows that can be copied.
+        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // Process only one block at a time.
         if (copyFinishRowCnt + copyRowCnt > shape.copyRowNum) {
-            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // 一个block未拷满
+            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // The current block has not been fully copied.
         }
         uint64_t offset = (shape.pageStride > 0) ? (idInBlockTable * shape.pageStride) :
                                                    (idInBlockTable * shape.blockSize * shape.headNum * shape.headDim);
@@ -476,11 +481,12 @@ __aicore__ inline void CopyToL1Nd2Nz(const LocalTensor<INPUT_T>& l1Tensor, const
                                      uint32_t nValue, uint32_t dValue, uint32_t srcDValue)
 {
     Nd2NzParams gm2L1Nd2NzParams;
-    gm2L1Nd2NzParams.ndNum = 1;             // ND矩阵的个数
-    gm2L1Nd2NzParams.nValue = nValue;       // 单个ND矩阵的实际行数，单位为元素个数
-    gm2L1Nd2NzParams.dValue = dValue;       // 单个ND矩阵的实际列数，单位为元素个数
-    gm2L1Nd2NzParams.srcNdMatrixStride = 0; // 相邻ND矩阵起始地址之间的偏移， 单位为元素个数
-    gm2L1Nd2NzParams.srcDValue = srcDValue; // 同一个ND矩阵中相邻行起始地址之间的偏移， 单位为元素个数
+    gm2L1Nd2NzParams.ndNum = 1;             // Number of ND matrices.
+    gm2L1Nd2NzParams.nValue = nValue;       // Actual row count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.dValue = dValue;       // Actual column count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.srcNdMatrixStride = 0; // Offset between the starts of adjacent ND matrices, in elements.
+    gm2L1Nd2NzParams.srcDValue =
+        srcDValue; // Offset between the starts of adjacent rows within one ND matrix, in elements.
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__NPU_ARCH__ == 5102)
     if constexpr (IsSameType<INPUT_T, fp8_e5m2_t>::value || IsSameType<INPUT_T, fp8_e4m3fn_t>::value ||
                   IsSameType<INPUT_T, hifloat8_t>::value || IsSameType<INPUT_T, int8_t>::value) {
@@ -489,10 +495,12 @@ __aicore__ inline void CopyToL1Nd2Nz(const LocalTensor<INPUT_T>& l1Tensor, const
         gm2L1Nd2NzParams.dstNzC0Stride = (nValue + 15) >> 4 << 4;
     }
 #else
-    gm2L1Nd2NzParams.dstNzC0Stride = (nValue + 15) >> 4 << 4; // NZ矩阵相邻Block起始地址之间的偏移， 单位为Block个数
+    gm2L1Nd2NzParams.dstNzC0Stride =
+        (nValue + 15) >> 4 << 4; // Offset between the starts of adjacent NZ blocks, in blocks.
 #endif
-    gm2L1Nd2NzParams.dstNzNStride = 1; // 转换为NZ矩阵后，ND之间相邻两行在NZ矩阵中起始地址之间的偏移， 单位为Block个数
-    gm2L1Nd2NzParams.dstNzMatrixStride = 0; // 两个NZ矩阵，起始地址之间的偏移， 单位为元素数量
+    gm2L1Nd2NzParams.dstNzNStride =
+        1; // After conversion to NZ, offset between the starts of adjacent ND rows in the NZ matrix, in blocks.
+    gm2L1Nd2NzParams.dstNzMatrixStride = 0; // Offset between the starts of two NZ matrices, in elements.
     DataCopy(l1Tensor, gmTensor, gm2L1Nd2NzParams);
 }
 
@@ -501,14 +509,17 @@ __aicore__ inline void CopyScaleToL1Nd2Nz(const LocalTensor<INPUT_T>& l1Tensor, 
                                           uint32_t nValue, uint32_t dValue, uint32_t srcDValue)
 {
     Nd2NzParams gm2L1Nd2NzParams;
-    gm2L1Nd2NzParams.ndNum = 1;             // ND矩阵的个数
-    gm2L1Nd2NzParams.nValue = nValue / 2;   // 单个ND矩阵的实际行数，单位为元素个数
-    gm2L1Nd2NzParams.dValue = dValue;       // 单个ND矩阵的实际列数，单位为元素个数
-    gm2L1Nd2NzParams.srcNdMatrixStride = 0; // 相邻ND矩阵起始地址之间的偏移， 单位为元素个数
-    gm2L1Nd2NzParams.srcDValue = srcDValue; // 同一个ND矩阵中相邻行起始地址之间的偏移， 单位为元素个数
-    gm2L1Nd2NzParams.dstNzC0Stride = nValue / 2; // NZ矩阵相邻Block起始地址之间的偏移， 单位为Block个数
-    gm2L1Nd2NzParams.dstNzNStride = 1; // 转换为NZ矩阵后，ND之间相邻两行在NZ矩阵中起始地址之间的偏移， 单位为Block个数
-    gm2L1Nd2NzParams.dstNzMatrixStride = gm2L1Nd2NzParams.nValue; // 两个NZ矩阵，起始地址之间的偏移， 单位为元素数量
+    gm2L1Nd2NzParams.ndNum = 1;             // Number of ND matrices.
+    gm2L1Nd2NzParams.nValue = nValue / 2;   // Actual row count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.dValue = dValue;       // Actual column count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.srcNdMatrixStride = 0; // Offset between the starts of adjacent ND matrices, in elements.
+    gm2L1Nd2NzParams.srcDValue =
+        srcDValue; // Offset between the starts of adjacent rows within one ND matrix, in elements.
+    gm2L1Nd2NzParams.dstNzC0Stride = nValue / 2; // Offset between the starts of adjacent NZ blocks, in blocks.
+    gm2L1Nd2NzParams.dstNzNStride =
+        1; // After conversion to NZ, offset between the starts of adjacent ND rows in the NZ matrix, in blocks.
+    gm2L1Nd2NzParams.dstNzMatrixStride =
+        gm2L1Nd2NzParams.nValue; // Offset between the starts of two NZ matrices, in elements.
 
     LocalTensor<bfloat16_t> l1TensorCast = l1Tensor.template ReinterpretCast<bfloat16_t>();
     GlobalTensor<bfloat16_t> gmTensorCast;
@@ -521,14 +532,17 @@ __aicore__ inline void CopyScaleToL1Dn2Nz(const LocalTensor<INPUT_T>& l1Tensor, 
                                           uint32_t nValue, uint32_t dValue, uint32_t srcDValue)
 {
     Dn2NzParams gm2L1Dn2NzParams;
-    gm2L1Dn2NzParams.dnNum = 1;             // ND矩阵的个数
-    gm2L1Dn2NzParams.nValue = nValue / 2;   // 单个DN矩阵的实际列数，单位为元素个数
-    gm2L1Dn2NzParams.dValue = dValue;       // 单个DN矩阵的实际行数，单位为元素个数
-    gm2L1Dn2NzParams.srcDnMatrixStride = 0; // 相邻Dn矩阵起始地址之间的偏移， 单位为元素个数
-    gm2L1Dn2NzParams.srcDValue = srcDValue / 2; // 同一个Dn矩阵中相邻行起始地址之间的偏移， 单位为元素个数
+    gm2L1Dn2NzParams.dnNum = 1;             // Number of ND matrices.
+    gm2L1Dn2NzParams.nValue = nValue / 2;   // Actual column count of one DN matrix, in elements.
+    gm2L1Dn2NzParams.dValue = dValue;       // Actual row count of one DN matrix, in elements.
+    gm2L1Dn2NzParams.srcDnMatrixStride = 0; // Offset between the starts of adjacent DN matrices, in elements.
+    gm2L1Dn2NzParams.srcDValue =
+        srcDValue / 2; // Offset between the starts of adjacent rows within one DN matrix, in elements.
     gm2L1Dn2NzParams.dstNzC0Stride = nValue / 2;
-    gm2L1Dn2NzParams.dstNzNStride = 1; // 转换为NZ矩阵后，ND之间相邻两行在NZ矩阵中起始地址之间的偏移， 单位为Block个数
-    gm2L1Dn2NzParams.dstNzMatrixStride = gm2L1Dn2NzParams.nValue; // 两个NZ矩阵，起始地址之间的偏移， 单位为元素数量
+    gm2L1Dn2NzParams.dstNzNStride =
+        1; // After conversion to NZ, offset between the starts of adjacent ND rows in the NZ matrix, in blocks.
+    gm2L1Dn2NzParams.dstNzMatrixStride =
+        gm2L1Dn2NzParams.nValue; // Offset between the starts of two NZ matrices, in elements.
 
     LocalTensor<bfloat16_t> l1TensorCast = l1Tensor.template ReinterpretCast<bfloat16_t>();
     GlobalTensor<bfloat16_t> gmTensorCast;
@@ -540,30 +554,35 @@ template <typename INPUT_T>
 __aicore__ inline void CopyToL1Nd2NzGS1Merge(const LocalTensor<INPUT_T>& l1Tensor,
                                              const GlobalTensor<INPUT_T>& gmTensor, uint32_t ndNum, uint32_t nValue,
                                              uint32_t dValue, uint32_t srcNdMatrixStride, uint32_t srcDValue,
-                                             uint32_t dstNzC0Stride) // BSNGD 合轴拷贝
+                                             uint32_t dstNzC0Stride) // Copy with merged BSNGD axes.
 {
     Nd2NzParams gm2L1Nd2NzParams;
-    gm2L1Nd2NzParams.ndNum = ndNum;                         // ND矩阵的个数
-    gm2L1Nd2NzParams.nValue = nValue;                       // 单个ND矩阵的实际行数，单位为元素个数
-    gm2L1Nd2NzParams.dValue = dValue;                       // 单个ND矩阵的实际列数，单位为元素个数
-    gm2L1Nd2NzParams.srcNdMatrixStride = srcNdMatrixStride; // 相邻ND矩阵起始地址之间的偏移， 单位为元素个数
-    gm2L1Nd2NzParams.srcDValue = srcDValue; // 同一个ND矩阵中相邻行起始地址之间的偏移， 单位为元素个数
+    gm2L1Nd2NzParams.ndNum = ndNum;   // Number of ND matrices.
+    gm2L1Nd2NzParams.nValue = nValue; // Actual row count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.dValue = dValue; // Actual column count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.srcNdMatrixStride =
+        srcNdMatrixStride; // Offset between the starts of adjacent ND matrices, in elements.
+    gm2L1Nd2NzParams.srcDValue =
+        srcDValue; // Offset between the starts of adjacent rows within one ND matrix, in elements.
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || (__NPU_ARCH__ == 5102)
     if constexpr (IsSameType<INPUT_T, fp8_e5m2_t>::value || IsSameType<INPUT_T, fp8_e4m3fn_t>::value ||
                   IsSameType<INPUT_T, hifloat8_t>::value || IsSameType<INPUT_T, int8_t>::value) {
         gm2L1Nd2NzParams.dstNzC0Stride =
-            (dstNzC0Stride + 31) >> 5 << 5; // NZ矩阵相邻Block起始地址之间的偏移，单位为Block个数，32对齐
+            (dstNzC0Stride + 31) >>
+            5 << 5; // Offset between the starts of adjacent NZ blocks, in blocks, aligned to 32.
     } else {
         gm2L1Nd2NzParams.dstNzC0Stride =
-            (dstNzC0Stride + 15) >> 4 << 4; // NZ矩阵相邻Block起始地址之间的偏移，单位为Block个数，16对齐
+            (dstNzC0Stride + 15) >>
+            4 << 4; // Offset between the starts of adjacent NZ blocks, in blocks, aligned to 16.
     }
 #else
     gm2L1Nd2NzParams.dstNzC0Stride =
-        (dstNzC0Stride + 15) >> 4 << 4; // NZ矩阵相邻Block起始地址之间的偏移，单位为Block个数，16对齐
+        (dstNzC0Stride + 15) >> 4 << 4; // Offset between the starts of adjacent NZ blocks, in blocks, aligned to 16.
 #endif
-    gm2L1Nd2NzParams.dstNzNStride = 1; // 转换为NZ矩阵后，ND之间相邻两行在NZ矩阵中起始地址之间的偏移， 单位为Block个数
+    gm2L1Nd2NzParams.dstNzNStride =
+        1; // After conversion to NZ, offset between the starts of adjacent ND rows in the NZ matrix, in blocks.
     gm2L1Nd2NzParams.dstNzMatrixStride =
-        nValue * 32 / sizeof(INPUT_T); // 两个NZ矩阵，起始地址之间的偏移， 单位为元素数量
+        nValue * 32 / sizeof(INPUT_T); // Offset between the starts of two NZ matrices, in elements.
     DataCopy(l1Tensor, gmTensor, gm2L1Nd2NzParams);
 }
 #endif

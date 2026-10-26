@@ -144,10 +144,11 @@ __aicore__ inline int64_t ComputeOffsetForCausal(const int64_t& delta, const uin
         if (delta >= 0) {
             return Min(delta, s2BaseSize) + vecCoreOffset;
         }
-        // 非对齐 RDC：deltaN(=actualS1Size-actualS2Size) 非 0、非 128 倍数时，diagonal-crossing 的
-        // sparse block 走 delta<0 分支。原 "+1" 在 DN(转置) 读取下把对角线右移一列，使该块多保留
-        // 一列 kv(causal 过宽，c<=r+D+1 而非 c<=r+D)，导致 555/666 等非对齐 shape 在需要 partial mask
-        // 的 q block 上精度大面积越界(对齐场景 deltaN=0、对角块走 delta==0 的 >=0 分支，不触发此 +1，故不受影响)。
+        // Unaligned RDC: when deltaN (=actualS1Size-actualS2Size) is nonzero and not a multiple of 128, a
+        // diagonal-crossing sparse block takes the delta<0 branch. The original "+1" shifts the diagonal one column
+        // right when read in DN (transposed) order, retaining one extra KV column (c<=r+D+1 instead of c<=r+D). This
+        // causes widespread accuracy failures for unaligned shapes such as 555/666 on Q blocks requiring a partial
+        // mask. Aligned cases with deltaN=0 take the delta==0 (>=0) branch and do not use this +1.
         return (Min(-1 * delta, s1BaseSize)) * attenMaskS2Size + vecCoreOffset;
     }
     if (delta <= 0) {
@@ -157,9 +158,10 @@ __aicore__ inline int64_t ComputeOffsetForCausal(const int64_t& delta, const uin
 }
 
 #ifndef __CCE_KT_TEST__
-// 128bit 寄存器每次加载 4 个 uint32_t，偏移量 = 128bit/8 = 16 字节，即 64 个字节时为 4 个 128bit 元素
+// A 128-bit register loads four uint32_t values at a time; the offset is 128/8 = 16 bytes, so 64 bytes contain four
+// 128-bit elements.
 constexpr uint32_t VREG_STRIDE_BYTES = 64;
-// XOR 掩码: 对每个字节取反低 8bit，用于 mask 合并
+// XOR mask: invert the low 8 bits of each byte to combine masks.
 constexpr uint32_t XOR_MASK = 0x1010101;
 
 __simd_vf__ inline void MergeBandVF(const uint64_t maskPreUb, const uint64_t maskNextUb, const uint16_t loopCount)
@@ -255,7 +257,8 @@ __aicore__ inline int64_t ComputeAttenMaskInnerOffset(const RunInfo& runInfo, Co
                                                       const bool useDn = false, const int32_t subLoop = 0)
 {
     if constexpr (hasAtten) {
-        // compress mode, 推理场景的TND和TND的offset计算相同，因为mask被padding到了最大的s2Size
+        // Compression mode: inference TND offsets are calculated identically because the mask is padded to the maximum
+        // s2Size.
         int64_t deltaCausalOrNext = 0;
         int64_t deltaPre = 0;
         int64_t deltaN = runInfo.actualS1Size - runInfo.actualS2Size;
@@ -327,8 +330,9 @@ __aicore__ inline void AttenMaskCopyInDnFun(LocalTensor<uint8_t> attenMaskUb, Gl
         int64_t sparseBlkIdx = runInfo.sparseBlkIdx[sparseSlot];
         uint32_t s2Len = runInfo.s2SparseBlkRealSize[sparseSlot];
         if (unlikely(sparseBlkIdx == -1)) {
-            // 丢弃块：s2Len(=s2SparseBlkRealSize)为0，必须按整块宽度(kvSparseBlockSize)清零该段，
-            // 否则该段 mask 未初始化，vf 读到未初始化 mask + cube 未写过的 stale/NaN bmm1 区域 → NaN/随时序漂移。
+            // Discarded block: s2Len (=s2SparseBlkRealSize) is zero; clear the entire segment using the full block
+            // width (kvSparseBlockSize). Otherwise, VF reads an uninitialized mask and stale/NaN BMM1 data not written
+            // by Cube, causing NaNs or timing-dependent results.
             Duplicate<uint8_t>(attenMaskUb[offset], 0, constInfo.kvSparseBlockSize * constInfo.s1BaseSize);
         } else {
             if (needAtten) {

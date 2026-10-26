@@ -21,11 +21,11 @@ import shutil
 
 def process_profiler_data(args):
     """
-    读取性能数据写入test result表格
+    Read performance data and write it to the test results table.
     """
     print("=============开始处理性能分析数据=============")
 
-    # 检查是否存在PROF开头的文件夹
+    # Check for directories whose names start with PROF.
     prof_folders = [
         f for f in os.listdir() if os.path.isdir(f) and f.startswith("PROF")
     ]
@@ -44,7 +44,7 @@ def process_profiler_data(args):
         print(f"在 {prof_folder} 中不存在mindstudio_profiler_output文件夹")
         return
 
-    # 检查是否存在op_summary开头的表格
+    # Check for tables whose names start with op_summary.
     op_summary_files = []
     for ext in [".csv"]:
         pattern = os.path.join(profiler_output_path, f"op_summary*{ext}")
@@ -57,7 +57,7 @@ def process_profiler_data(args):
     op_summary_file = op_summary_files[0]
     print(f"从 {op_summary_file}解析性能数据")
 
-    # 读取表格A (op_summary)
+    # Read table A (op_summary).
     try:
         if op_summary_file.endswith(".csv"):
             df_a = pd.read_csv(op_summary_file)
@@ -66,7 +66,7 @@ def process_profiler_data(args):
         print(f"读取表格A失败: {e}")
         return
 
-    # 读取表格B (result表格)
+    # Read table B (results).
     try:
         df_b = pd.read_excel(args.test_result_path)
 
@@ -74,7 +74,7 @@ def process_profiler_data(args):
         print(f"读取表格B失败: {e}")
         return
 
-    # 读取表格C (duration 基线数据表格)
+    # Read table C (duration baseline data).
     if args.is_compare:
         try:
             df_c = pd.read_excel(args.perf_golden_path)
@@ -83,7 +83,7 @@ def process_profiler_data(args):
             print(f"读取表格C失败: {e}")
             return
 
-    # 抓取durfation数据存入表格B
+    # Extract duration data and store it in table B.
     perf_fail_list = []
     perf_threshold = 10
     row_idx = 0
@@ -96,10 +96,10 @@ def process_profiler_data(args):
         df_b["perf_result"] = ""
 
         for i in range(df_b.shape[0]):
-            a_row1_idx = 2 * row_idx  # 当前case metadata性能数据
-            a_row2_idx = 2 * row_idx + 1  # 当前case sas性能数据
+            a_row1_idx = 2 * row_idx  # Metadata performance data for the current case.
+            a_row2_idx = 2 * row_idx + 1  # SAS performance data for the current case.
 
-            if df_b.iloc[i]["result"] != "NPU ERROR":  # NPU ERROR时跳过
+            if df_b.iloc[i]["result"] != "NPU ERROR":  # Skip on NPU ERROR.
                 cur_metadata_perf = df_a.iloc[a_row1_idx][task_duration_col]
                 df_b.at[i, "metadata_duration"] = cur_metadata_perf
                 cur_sas_perf = df_a.iloc[a_row2_idx][task_duration_col]
@@ -136,7 +136,7 @@ def process_profiler_data(args):
         traceback.print_exc()
         return
 
-    # 保存处理后的表格B
+    # Save the processed table B.
     new_result_path = args.test_result_path.replace(".xlsx", "_perf.xlsx")
     if os.path.exists(new_result_path):
         try:
@@ -167,7 +167,7 @@ def process_profiler_data(args):
     return new_result_path
 
 
-# 命令行接口
+# Command-line interface.
 def main():
     parser = argparse.ArgumentParser(description="处理性能数据")
     parser.add_argument(

@@ -28,10 +28,10 @@ DATA_RANGE_LEFT = -1000
 DATA_RANGE_RIGHT = 1000
 FP8_E4M3_MAX = 448.0
 SCALE_EPSILON = 1e-8
-# CUDA SDPA 空 softmax 行的 LSE 语义是 -Inf；kernel 侧 FP8_EMPTY_LSE_VALUE(-3e+99)
-# 经 FP32 溢出后同样是 -Inf。SOFTMAX_MAX_SENTINEL 与之共用：kernel V1 在线 max
-# 空态哨兵仍是有限 -FLT_MAX，但 -Inf 哨兵在比较/合并语义上与 -FLT_MAX 等价
-# （-Inf score 与空态判空一致、NaN 仍传播），仅 LSE 输出值随本常量变为 -Inf。
+# CUDA SDPA uses LSE=-Inf for empty softmax rows; the kernel's FP8_EMPTY_LSE_VALUE (-3e+99)
+# also becomes -Inf on FP32 overflow. SOFTMAX_MAX_SENTINEL shares this value; the kernel V1 online maximum
+# still uses finite -FLT_MAX for empty rows, but -Inf is equivalent for comparisons and merges
+# (empty-row detection matches -Inf scores and NaNs still propagate). Only LSE output changes to -Inf with this constant.
 EMPTY_LSE = float("-inf")
 SOFTMAX_MAX_SENTINEL = EMPTY_LSE
 MASK_VALUE = -10000.0
@@ -576,7 +576,7 @@ def _make_fullquant_tensors(case, cu_seqlens_q, seqused_kv, generator):
     )
     query, q_scale = _quantize_per_token_head(query_source, q_max)
 
-    # KV 实际长度以 seqused_kv 为准（与 kernel 读取一致），不再依赖 cu_seqlens_kv 构造扁平化 k_scale
+    # Use seqused_kv for actual KV lengths, matching kernel reads; do not derive flattened k_scale from cu_seqlens_kv.
     kv_shape = (batch, case["S2"], n2, head_dim)
     dense_key_source, k_max = _make_source(
         case, "k_datarange", kv_shape, 1.0, amp_high, generator
@@ -872,19 +872,19 @@ def _reference_attention_a6(
     q_lengths,
     kv_lengths,
 ):
-    # 向量化版本（采纳 MR!40 的 einops 思路把 query token 维度批量进 matmul），
-    # 但严格保留参考实现的数据流以保证逐位一致：
-    #  - 标度在 QK matmul 之后乘到 score 上（q_scale*k_scale*softmax_scale），不在 matmul 前缩放 q/k；
-    #  - 每个 round 沿 KV 轴处理 2 个 sparse block，每个 s2LoopCount 处理 2 个 round；
-    #  - 与 A6 kernel 一致，每 4 个 block 内按 sparse index 排序；
-    #  - 实际长度掩码（q>=q_len、kv>=kv_len 无效；causal 对角线为 kv_len - q_len）；
-    #  - 全掩码空行：输出 0、lse = A6_EMPTY_LSE。
+    # Vectorized version using the MR!40 einops approach to batch query tokens into matmul,
+    # while strictly preserving the reference data flow for bitwise agreement:
+    #  - Apply q_scale*k_scale*softmax_scale to scores after QK matmul; do not scale Q/K before matmul.
+    #  - Each round processes two sparse blocks along KV; each s2LoopCount processes two rounds.
+    #  - Sort every four blocks by sparse index, matching the A6 kernel.
+    #  - Apply actual-length masks: q>=q_len and kv>=kv_len are invalid; the causal diagonal is kv_len-q_len.
+    #  - Fully masked empty rows: output 0 and lse=A6_EMPTY_LSE.
     query = query.to(torch.float32)
     kv_key, kv_value, kv_k_scale = combined_kv_cache.make_combined_kv_views(
         kv_cache_storage, kv_cache_meta
     )
-    # fp8 视图不支持张量索引（"index_cpu" not implemented for float8_e4m3），
-    # 先在循环外整体转成 float32（fp8->fp32 无损）再按索引取值
+    # FP8 views do not support tensor indexing ("index_cpu" is not implemented for float8_e4m3).
+    # Convert the full tensor to FP32 losslessly before the loop, then index it.
     kv_key = kv_key.to(torch.float32)
     kv_value = kv_value.to(torch.float32)
 
@@ -932,7 +932,7 @@ def _reference_attention_a6(
                     continue
                 positions = [p for chunk in chunk_positions for p in chunk]
 
-                # gather q 向量（批量），shape (nq, D)
+                # Gather Q vectors in a batch; shape (nq,D).
                 base = int(cu_seqlens_q[batch_idx].item())
                 if layout_q == "NTD":
                     q_block = query[head_idx, base + q_start : base + q_end].to(
@@ -950,8 +950,8 @@ def _reference_attention_a6(
                     )
                 nq = q_block.shape[0]
 
-                # gather k/v/k_scale（按 positions 顺序）：
-                # 通过 block_table 把逻辑块映射到 kv_cache 物理块，与 kernel 读取路径一致
+                # Gather K/V/k_scale in positions order:
+                # Map logical blocks to physical kv_cache blocks through block_table, matching the kernel read path.
                 pos_tensor = torch.as_tensor(positions, dtype=torch.long)
                 logical_block = pos_tensor // sparse_kv_block_size
                 token_in_block = pos_tensor % sparse_kv_block_size
@@ -967,7 +967,7 @@ def _reference_attention_a6(
                 )  # (npos,)
 
                 npos = pos_tensor.shape[0]
-                # valid_mask: (nq, npos) — causal/actlen，与参考 _mask_positions 一致
+                # valid_mask: (nq,npos), combining causal/actual-length masks, matching reference _mask_positions.
                 if case["mask_mode"] == 0:
                     valid_mask = torch.ones((nq, npos), dtype=torch.bool)
                 elif case["mask_mode"] == 3:
@@ -977,9 +977,9 @@ def _reference_attention_a6(
                 else:
                     raise ValueError(f"unsupported mask_mode: {case['mask_mode']}")
 
-                # scores: (nq, npos)，标度在 matmul 之后施加（保持 FP8 桶一致）
-                # 与 kernel 对齐乘法顺序：先将 q_scale 乘以 softmax_scale(dScale)，
-                # 再乘到 QK 结果上，最后乘 k_scale，避免浮点非结合律导致的量化边界差异
+                # scores: (nq,npos); apply scales after matmul to preserve FP8 quantization buckets.
+                # Match the kernel multiplication order: first multiply q_scale by softmax_scale (dScale),
+                # then multiply the QK result, and finally apply k_scale to avoid quantization boundary differences from floating-point non-associativity.
                 scores = torch.matmul(q_block, k_mat.transpose(0, 1))
                 scores = (
                     scores
@@ -990,17 +990,17 @@ def _reference_attention_a6(
                     valid_mask, scores, torch.full_like(scores, MASK_VALUE)
                 )
 
-                # 按 2-block round 的 online/flash FP8 数据流，向量化到 q 维。
-                # A6 每个 s2LoopCount 有 2 个 round，
-                # round1 更新 max 后会对已经 FP8 量化的 round0 概率再缩放、再量化，
-                # 然后将两个 round 拼接进入同一次 BMM2。
-                # p_scale 通过 ln(pScale) 编入 max（与 kernel FusedExpSub 路径对齐），
-                # 使 exp 的数值路径与 kernel 一致：exp(score - (actual_max - ln(pScale))) = p_c * pScale
-                # v_scale 乘入时机与 kernel 对齐：
-                #   loop 0 (DataCopy): acc = pv_raw（不含 v_scale）
+                # Online/flash FP8 data flow in two-block rounds, vectorized along Q.
+                # A6 has two rounds per s2LoopCount.
+                # After round1 updates the maximum, rescale and requantize the already quantized FP8 round0 probabilities,
+                # then concatenate the two rounds for one BMM2.
+                # Encode p_scale into the maximum through ln(pScale), matching the kernel FusedExpSub path,
+                # so exp follows the kernel's numerical path: exp(score - (actual_max - ln(pScale))) = p_c * pScale.
+                # Match the kernel's timing for applying v_scale:
+                #   Loop 0 (DataCopy): acc = pv_raw, without v_scale.
                 #   loop 1 (isUpdatePre=true): acc = acc * rescale * v_scale + pv_raw * v_scale
                 #   loop >1 (isUpdatePre=false): acc = acc * rescale + pv_raw * v_scale
-                #   单 loop 最后除法 (LastDivNew): output = pv_raw * v_scale / sum
+                #   Final division for a single loop (LastDivNew): output = pv_raw * v_scale / sum.
                 m_run = torch.full((nq,), A6_EMPTY_LSE, dtype=torch.float32)
                 m_run_offset = torch.full((nq,), A6_EMPTY_LSE, dtype=torch.float32)
                 l_run = torch.zeros((nq,), dtype=torch.float32)
@@ -1022,7 +1022,7 @@ def _reference_attention_a6(
                         offset = c1
                         s_c = scores[:, c0:c1]
                         vm_c = valid_mask[:, c0:c1]
-                        # 每行的局部 max；无有效位置时保留 kernel 使用的有限哨兵。
+                        # Per-row local maximum; retain the kernel's finite sentinel when no position is valid.
                         masked_scores = torch.where(
                             vm_c,
                             s_c,
@@ -1035,18 +1035,18 @@ def _reference_attention_a6(
                         )
                         round_has = round_max != A6_EMPTY_LSE
                         run_started = m_run != A6_EMPTY_LSE
-                        # m_new：未开始的行取 round_max；已开始的行取历史与当前 max。
+                        # m_new: use round_max for unstarted rows; otherwise combine historical and current maxima.
                         m_new = torch.where(
                             run_started, torch.maximum(m_run, round_max), round_max
                         )
-                        # 该 round 对此行无有效位置 -> 此行本轮不更新
+                        # If this round has no valid positions for a row, do not update that row.
                         m_new = torch.where(round_has, m_new, m_run)
-                        # 编入 ln(pScale)，与 kernel 的 max0 = actual_max - ln(pScale) 对齐
+                        # Encode ln(pScale), matching kernel max0 = actual_max - ln(pScale).
                         m_new_offset = m_new - ln_p_scale
-                        # 与 kernel FusedExpSub 对齐：kernel 的 FusedExpSub(x, y) 计算 exp(x - y) 时，
-                        # 减法在硬件内部以更高精度完成（融合，无 float32 中间舍入）。
-                        # golden 用 float64 减法模拟该融合减法，避免 float32 减法舍入导致
-                        # exp 结果落在 FP8 量化边界的错误一侧。
+                        # Match kernel FusedExpSub: when calculating exp(x-y),
+                        # the hardware performs the subtraction at higher precision, fused without intermediate FP32 rounding.
+                        # The golden implementation uses FP64 subtraction to emulate this fusion and avoid FP32 rounding
+                        # that could place exp results on the wrong side of an FP8 quantization boundary.
                         rescale = torch.where(
                             run_started,
                             torch.exp(
@@ -1060,54 +1060,54 @@ def _reference_attention_a6(
                             torch.zeros_like(rescale),
                         )
                         loop_rescale = loop_rescale * rescale
-                        # FusedExpSub 等价：exp(score - (actual_max - ln(pScale))) = p_c * pScale
+                        # FusedExpSub equivalence: exp(score - (actual_max - ln(pScale))) = p_c * pScale.
                         p_scaled = torch.exp(
                             s_c.double() - m_new_offset.double().view(nq, 1)
                         ).float()
                         p_scaled = torch.where(
                             vm_c, p_scaled, torch.zeros_like(p_scaled)
                         )
-                        # 仅对本轮有有效位置的行参与量化累加；其余行贡献 0
+                        # Quantize and accumulate only rows with valid positions in this round; other rows contribute zero.
                         p_scaled = torch.where(
                             round_has.view(nq, 1),
                             p_scaled,
                             torch.zeros_like(p_scaled),
                         )
-                        # FP8 量化：p_scaled 已含 pScale 因子，直接 cast（与 kernel 一致）
+                        # FP8 quantization: p_scaled already includes pScale; cast directly, matching the kernel.
                         p_quant = p_scaled.to(fp8_dtype).to(torch.float32)
                         if round_in_loop == 1:
-                            # arch-920r1 RescaleRound0：在 round1 刷新 max 后，
-                            # round0 先前的 FP8 结果乘 alpha，再次落回 FP8。
+                            # arch-920r1 RescaleRound0: after round1 updates the maximum,
+                            # multiply the previous round0 FP8 result by alpha, then cast back to FP8.
                             p_quant_rounds[0] = (
                                 (p_quant_rounds[0] * rescale.view(nq, 1))
                                 .to(fp8_dtype)
                                 .to(torch.float32)
                             )
                         p_quant_rounds.append(p_quant)
-                        # sum 累加含 pScale 因子的值（与 kernel 一致）
+                        # Accumulate sums including the pScale factor, matching the kernel.
                         l_run = l_run * rescale + p_scaled.sum(dim=-1)
                         m_run = torch.where(round_has, m_new, m_run)
                         m_run_offset = torch.where(
                             round_has, m_new_offset, m_run_offset
                         )
 
-                    # A6 将同一 s2LoopCount 的 round0/round1 拼接后执行一次 BMM2。
+                    # A6 concatenates round0/round1 from the same s2LoopCount for one BMM2.
                     p_quant_loop = torch.cat(p_quant_rounds, dim=1)
                     pv_raw = torch.matmul(
                         p_quant_loop, v_mat[loop_c0:offset]
-                    )  # (nq, D)，不含 v_scale
-                    # 与 kernel FlashUpdate/FlashUpdateLast 的 isUpdatePre 逻辑对齐 v_scale 乘入时机
+                    )  # (nq,D), without v_scale.
+                    # Match the v_scale timing of isUpdatePre in kernel FlashUpdate/FlashUpdateLast.
                     if loop_idx == 0:
-                        # 第一个 loop：acc = pv_raw（与 kernel DataCopy 一致，不含 v_scale）
+                        # First loop: acc = pv_raw, matching kernel DataCopy, without v_scale.
                         acc = pv_raw
                     elif loop_idx == 1:
-                        # 第二个 loop（isUpdatePre=true）：历史项和当前项首次乘 v_scale
+                        # Second loop (isUpdatePre=true): apply v_scale to both historical and current terms for the first time.
                         acc = (
                             acc * loop_rescale.view(nq, 1) * v_scale_value
                             + pv_raw * v_scale_value
                         )
                     else:
-                        # 后续 loop（isUpdatePre=false）：历史项已含 v_scale
+                        # Subsequent loops (isUpdatePre=false): the historical term already includes v_scale.
                         acc = acc * loop_rescale.view(nq, 1) + pv_raw * v_scale_value
 
                 attn, lse = _finalize_fp8_attention_rows(
@@ -1151,19 +1151,19 @@ def _reference_attention_a5(
     q_lengths,
     kv_lengths,
 ):
-    # 向量化版本（采纳 MR!40 的 einops 思路把 query token 维度批量进 matmul），
-    # 但严格保留参考实现的数据流以保证逐位一致：
-    #  - 标度在 QK matmul 之后乘到 score 上（q_scale*k_scale*softmax_scale），不在 matmul 前缩放 q/k；
-    #  - 沿 KV 轴按「2 个 sparse block」(s2LoopCount*2) 分块的 online/flash FP8 量化（运行中局部 max）；
-    #  - 按 sparse_indices 中 block 的出现顺序拼接 positions（random/reverse/tail 非物理升序）来分块；
-    #  - 实际长度掩码（q>=q_len、kv>=kv_len 无效；causal 对角线为 kv_len - q_len）；
-    #  - 全掩码空行：输出 0、lse = EMPTY_LSE。
+    # Vectorized version using the MR!40 einops approach to batch query tokens into matmul,
+    # while strictly preserving the reference data flow for bitwise agreement:
+    #  - Apply q_scale*k_scale*softmax_scale to scores after QK matmul; do not scale Q/K before matmul.
+    #  - Online/flash FP8 quantization in two-sparse-block chunks along KV (s2LoopCount*2), with a running local maximum.
+    #  - Concatenate positions in sparse_indices order (random/reverse/tail order need not match physical ascending order) before chunking.
+    #  - Apply actual-length masks: q>=q_len and kv>=kv_len are invalid; the causal diagonal is kv_len-q_len.
+    #  - Fully masked empty rows: output 0 and lse=EMPTY_LSE.
     query = query.to(torch.float32)
     kv_key, kv_value, kv_k_scale = combined_kv_cache.make_combined_kv_views(
         kv_cache_storage, kv_cache_meta
     )
-    # fp8 视图不支持张量索引（"index_cpu" not implemented for float8_e4m3），
-    # 先在循环外整体转成 float32（fp8->fp32 无损）再按索引取值
+    # FP8 views do not support tensor indexing ("index_cpu" is not implemented for float8_e4m3).
+    # Convert the full tensor to FP32 losslessly before the loop, then index it.
     kv_key = kv_key.to(torch.float32)
     kv_value = kv_value.to(torch.float32)
 
@@ -1211,7 +1211,7 @@ def _reference_attention_a5(
                     continue
                 positions = [p for chunk in chunk_positions for p in chunk]
 
-                # gather q 向量（批量），shape (nq, D)
+                # Gather Q vectors in a batch; shape (nq,D).
                 base = int(cu_seqlens_q[batch_idx].item())
                 if layout_q == "NTD":
                     q_block = query[head_idx, base + q_start : base + q_end].to(
@@ -1229,8 +1229,8 @@ def _reference_attention_a5(
                     )
                 nq = q_block.shape[0]
 
-                # gather k/v/k_scale（按 positions 顺序）：
-                # 通过 block_table 把逻辑块映射到 kv_cache 物理块，与 kernel 读取路径一致
+                # Gather K/V/k_scale in positions order:
+                # Map logical blocks to physical kv_cache blocks through block_table, matching the kernel read path.
                 pos_tensor = torch.as_tensor(positions, dtype=torch.long)
                 logical_block = pos_tensor // sparse_kv_block_size
                 token_in_block = pos_tensor % sparse_kv_block_size
@@ -1246,7 +1246,7 @@ def _reference_attention_a5(
                 )  # (npos,)
 
                 npos = pos_tensor.shape[0]
-                # valid_mask: (nq, npos) — causal/actlen，与参考 _mask_positions 一致
+                # valid_mask: (nq,npos), combining causal/actual-length masks, matching reference _mask_positions.
                 if case["mask_mode"] == 0:
                     valid_mask = torch.ones((nq, npos), dtype=torch.bool)
                 elif case["mask_mode"] == 3:
@@ -1256,9 +1256,9 @@ def _reference_attention_a5(
                 else:
                     raise ValueError(f"unsupported mask_mode: {case['mask_mode']}")
 
-                # scores: (nq, npos)，标度在 matmul 之后施加（保持 FP8 桶一致）
-                # 与 kernel 对齐乘法顺序：先将 q_scale 乘以 softmax_scale(dScale)，
-                # 再乘到 QK 结果上，最后乘 k_scale，避免浮点非结合律导致的量化边界差异
+                # scores: (nq,npos); apply scales after matmul to preserve FP8 quantization buckets.
+                # Match the kernel multiplication order: first multiply q_scale by softmax_scale (dScale),
+                # then multiply the QK result, and finally apply k_scale to avoid quantization boundary differences from floating-point non-associativity.
                 scores = torch.matmul(q_block, k_mat.transpose(0, 1))
                 scores = (
                     scores
@@ -1269,14 +1269,14 @@ def _reference_attention_a5(
                     valid_mask, scores, torch.full_like(scores, MASK_VALUE)
                 )
 
-                # 按 2-block chunk 的 online/flash FP8 数据流，向量化到 q 维
-                # p_scale 通过 ln(pScale) 编入 max（与 kernel FusedExpSub 路径对齐），
-                # 使 exp 的数值路径与 kernel 一致：exp(score - (actual_max - ln(pScale))) = p_c * pScale
-                # v_scale 乘入时机与 kernel 对齐：
-                #   chunk 0 (DataCopy): acc = pv_raw（不含 v_scale）
+                # Online/flash FP8 data flow in two-block chunks, vectorized along Q.
+                # Encode p_scale into the maximum through ln(pScale), matching the kernel FusedExpSub path,
+                # so exp follows the kernel's numerical path: exp(score - (actual_max - ln(pScale))) = p_c * pScale.
+                # Match the kernel's timing for applying v_scale:
+                #   Chunk 0 (DataCopy): acc = pv_raw, without v_scale.
                 #   chunk 1 (isUpdatePre=true): acc = acc * rescale * v_scale + pv_raw * v_scale
                 #   chunk >1 (isUpdatePre=false): acc = acc * rescale + pv_raw * v_scale
-                #   单 chunk 最后除法 (LastDivNew): output = pv_raw * v_scale / sum
+                #   Final division for a single chunk (LastDivNew): output = pv_raw * v_scale / sum.
                 m_run = torch.full((nq,), SOFTMAX_MAX_SENTINEL, dtype=torch.float32)
                 m_run_offset = torch.full(
                     (nq,), SOFTMAX_MAX_SENTINEL, dtype=torch.float32
@@ -1292,7 +1292,7 @@ def _reference_attention_a5(
                     offset = c1
                     s_c = scores[:, c0:c1]
                     vm_c = valid_mask[:, c0:c1]
-                    # 每行的局部 max；无有效位置时保留 kernel 使用的有限哨兵。
+                    # Per-row local maximum; retain the kernel's finite sentinel when no position is valid.
                     masked_scores = torch.where(
                         vm_c,
                         s_c,
@@ -1305,18 +1305,18 @@ def _reference_attention_a5(
                     )
                     chunk_has = chunk_max != SOFTMAX_MAX_SENTINEL
                     run_started = m_run != SOFTMAX_MAX_SENTINEL
-                    # m_new：未开始的行取 chunk_max；已开始的行取历史与当前 max。
+                    # m_new: use chunk_max for unstarted rows; otherwise combine historical and current maxima.
                     m_new = torch.where(
                         run_started, torch.maximum(m_run, chunk_max), chunk_max
                     )
-                    # 该 chunk 对此行无有效位置 -> 此行本轮不更新
+                    # If this chunk has no valid positions for a row, do not update that row.
                     m_new = torch.where(chunk_has, m_new, m_run)
-                    # 编入 ln(pScale)，与 kernel 的 max0 = actual_max - ln(pScale) 对齐
+                    # Encode ln(pScale), matching kernel max0 = actual_max - ln(pScale).
                     m_new_offset = m_new - ln_p_scale
-                    # 与 kernel FusedExpSub 对齐：kernel 的 FusedExpSub(x, y) 计算 exp(x - y) 时，
-                    # 减法在硬件内部以更高精度完成（融合，无 float32 中间舍入）。
-                    # golden 用 float64 减法模拟该融合减法，避免 float32 减法舍入导致
-                    # exp 结果落在 FP8 量化边界的错误一侧。
+                    # Match kernel FusedExpSub: when calculating exp(x-y),
+                    # the hardware performs the subtraction at higher precision, fused without intermediate FP32 rounding.
+                    # The golden implementation uses FP64 subtraction to emulate this fusion and avoid FP32 rounding
+                    # that could place exp results on the wrong side of an FP8 quantization boundary.
                     rescale = torch.where(
                         run_started,
                         torch.exp(
@@ -1327,35 +1327,35 @@ def _reference_attention_a5(
                     rescale = torch.where(
                         torch.isfinite(rescale), rescale, torch.zeros_like(rescale)
                     )
-                    # FusedExpSub 等价：exp(score - (actual_max - ln(pScale))) = p_c * pScale
+                    # FusedExpSub equivalence: exp(score - (actual_max - ln(pScale))) = p_c * pScale.
                     p_scaled = torch.exp(
                         s_c.double() - m_new_offset.double().view(nq, 1)
                     ).float()
                     p_scaled = torch.where(vm_c, p_scaled, torch.zeros_like(p_scaled))
-                    # 仅对本轮有有效位置的行参与量化累加；其余行贡献 0
+                    # Quantize and accumulate only rows with valid positions in this round; other rows contribute zero.
                     p_scaled = torch.where(
                         chunk_has.view(nq, 1), p_scaled, torch.zeros_like(p_scaled)
                     )
-                    # FP8 量化：p_scaled 已含 pScale 因子，直接 cast（与 kernel 一致）
+                    # FP8 quantization: p_scaled already includes pScale; cast directly, matching the kernel.
                     p_quant = p_scaled.to(fp8_dtype).to(torch.float32)
-                    # BMM2：不除 pScale（与 kernel 一致，pScale 在分子分母中同时出现，数学上约掉）
+                    # BMM2: do not divide by pScale, matching the kernel; pScale appears in both numerator and denominator and cancels mathematically.
                     pv_raw = torch.matmul(
                         p_quant, v_mat[c0:c1]
-                    )  # (nq, D)，不含 v_scale
-                    # 与 kernel FlashUpdate/FlashUpdateLast 的 isUpdatePre 逻辑对齐 v_scale 乘入时机
+                    )  # (nq,D), without v_scale.
+                    # Match the v_scale timing of isUpdatePre in kernel FlashUpdate/FlashUpdateLast.
                     if chunk_idx == 0:
-                        # 第一个 chunk：acc = pv_raw（与 kernel DataCopy 一致，不含 v_scale）
+                        # First chunk: acc = pv_raw, matching kernel DataCopy, without v_scale.
                         acc = pv_raw
                     elif chunk_idx == 1:
-                        # 第二个 chunk（isUpdatePre=true）：acc * rescale * v_scale + pv_raw * v_scale
+                        # Second chunk (isUpdatePre=true): acc * rescale * v_scale + pv_raw * v_scale.
                         acc = (
                             acc * rescale.view(nq, 1) * v_scale_value
                             + pv_raw * v_scale_value
                         )
                     else:
-                        # 后续 chunk（isUpdatePre=false）：acc * rescale + pv_raw * v_scale
+                        # Subsequent chunks (isUpdatePre=false): acc * rescale + pv_raw * v_scale.
                         acc = acc * rescale.view(nq, 1) + pv_raw * v_scale_value
-                    # sum 累加含 pScale 因子的值（与 kernel 一致）
+                    # Accumulate sums including the pScale factor, matching the kernel.
                     l_run = l_run * rescale + p_scaled.sum(dim=-1)
                     m_run = torch.where(chunk_has, m_new, m_run)
                     m_run_offset = torch.where(chunk_has, m_new_offset, m_run_offset)

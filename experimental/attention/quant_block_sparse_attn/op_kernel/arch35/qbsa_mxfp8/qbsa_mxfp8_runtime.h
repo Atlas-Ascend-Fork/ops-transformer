@@ -21,53 +21,53 @@ constexpr uint32_t QBSA_MX_S2_BASE_SIZE = 512U;
 constexpr uint32_t QBSA_MX_MIN_KV_BLOCK_SIZE = 64U;
 constexpr uint32_t QBSA_MX_MAX_SPARSE_BLOCK_PER_TASK = QBSA_MX_S2_BASE_SIZE / QBSA_MX_MIN_KV_BLOCK_SIZE;
 
-// 单个 (B, N1, S1 block, 512-token logical S2 tile) 的运行期状态。
+// Runtime state for one (B,N1,S1 block,512-token logical S2 tile).
 struct MxRunInfo {
-    // 流水状态。
+    // Pipeline state.
     uint32_t loop = 0U;
     uint32_t mLoop = 0U;
     bool isValid = false;
     bool isFirstS2Loop = false;
     bool isLastS2Loop = false;
-    // bit0/bit1分别表示256-token subLoop 0/1是否需要真实causal mask。
+    // Bits 0/1 indicate whether 256-token subLoops 0/1 require an actual causal mask.
     uint8_t attenMaskSubLoopBits = 0U;
 
-    // Batch/head/query 坐标。
+    // Batch/head/query coordinates.
     uint32_t bIdx = 0U;
-    // KV head index。
+    // KV head index.
     uint32_t n2Idx = 0U;
     uint32_t s1Idx = 0U;
     uint32_t realN2Idx = 0U;
 
-    // 实际序列长度及两个 AIV 的 M 轴切分。
+    // Actual sequence lengths and the M-axis split between two AIV cores.
     uint64_t actS1Size = 1U;
     uint64_t actS2Size = 1U;
     uint32_t actMSize = 0U;
     uint32_t actVecMSize = 0U;
     uint32_t vecMbaseIdx = 0U;
 
-    // 拼接后 logical S2 tile 的有效长度。
+    // Valid length of the concatenated logical S2 tile.
     uint32_t actSingleLoopS2Size = 0U;
 
-    // Sparse block 索引与拼接信息，单 task 最多 8 个 block。
+    // Sparse block indices and concatenation information; up to 8 blocks per task.
     uint32_t sparseBlockCount = 0U;
-    // 有效 block id 升序，负 index 在末尾。
+    // Valid block IDs in ascending order, with negative indices at the end.
     int64_t sparseBlockIdx[QBSA_MX_MAX_SPARSE_BLOCK_PER_TASK] = {};
-    // 原始 KV token 起点，用于 PA/mask 寻址。
+    // Original KV token start for PA/mask addressing.
     uint64_t sparseBlockTokenOffset[QBSA_MX_MAX_SPARSE_BLOCK_PER_TASK] = {};
-    // 拼接后 tile 起点，K/V/scale/mask 共用。
+    // Concatenated tile start shared by K/V/scale/mask.
     uint32_t sparseBlockTileOffset[QBSA_MX_MAX_SPARSE_BLOCK_PER_TASK] = {};
     uint32_t sparseBlockRealSize[QBSA_MX_MAX_SPARSE_BLOCK_PER_TASK] = {};
-    // true 表示跨 causal 边界或整块不可见，需要搬压缩 mask。
+    // True for a causal boundary crossing or a fully invisible block, requiring a compressed mask transfer.
     bool sparseBlockPartialMask[QBSA_MX_MAX_SPARSE_BLOCK_PER_TASK] = {};
 
-    // Q/QScale 的 TND GM offset。
+    // TND GM offsets for Q/QScale.
     uint64_t queryTokenBase = 0U;
     uint64_t queryOffset = 0U;
     uint64_t queryScaleOffset = 0U;
 };
 
-// 基础 shape 与 TND stride；scale/data offset 默认以元素为单位。
+// Base shapes and TND strides; scale/data offsets are in elements by default.
 struct MxBaseConstInfo {
     uint32_t dSize = 0U;
     uint32_t dSizeV = 0U;
@@ -82,7 +82,7 @@ struct MxBaseConstInfo {
     uint8_t subBlockIdx = 0U;
     uint32_t n2GD = 0U;
     uint32_t qScaleN1D = 0U;
-    // PA BNBD scale 中单个 kv head 的 stride。
+    // Stride of one KV head in PA BNBD scales.
     uint32_t kScaleN2D = 0U;
     uint32_t valueScaleN2D = 0U;
     uint32_t attentionOutStride = 0U;
@@ -90,7 +90,7 @@ struct MxBaseConstInfo {
     float scaleValue = 0.0F;
 };
 
-// PA BNBD 寻址参数。
+// PA BNBD addressing parameters.
 struct MxPageAttentionConstInfo {
     uint32_t maxBlockNumPerBatch = 0U;
     uint32_t paBlockStride = 0U;
@@ -99,13 +99,13 @@ struct MxPageAttentionConstInfo {
     uint32_t paBlockSize = 0U;
 };
 
-// B_N_Qb_Kb sparse 参数。
+// B_N_Qb_Kb sparse parameters.
 struct MxSparseConstInfo {
     uint32_t maxQb = 0U;
     uint32_t maxKb = 0U;
 };
 
-// QScale 为 [T,N,D/64,2]；K/V scale 为 PA BNBD 布局。
+// QScale uses [T,N,D/64,2]; K/V scales use the PA BNBD layout.
 struct MxScaleConstInfo {
     uint32_t scaleLastDim = QBSA_MX_SCALE_LAST_DIM;
     uint32_t queryScaleDSize = 0U;

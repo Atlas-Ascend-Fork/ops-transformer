@@ -24,7 +24,7 @@
 #include "kernel_operator.h"
 #endif
 
-// metadata获取: head[8] + qbsa[sectionNum][AIC_CORE_NUM][8] + fd[AIV_CORE_NUM][8]
+// Fetch metadata: head[8] + qbsa[sectionNum][AIC_CORE_NUM][8] + fd[AIV_CORE_NUM][8].
 constexpr uint32_t QBSA_FA_HEAD_METADATA_SIZE = 8U;
 constexpr uint32_t QBSA_FA_HEAD_SECTION_NUM_INDEX = 0U;
 #if QBSA_ARCH_9102R1

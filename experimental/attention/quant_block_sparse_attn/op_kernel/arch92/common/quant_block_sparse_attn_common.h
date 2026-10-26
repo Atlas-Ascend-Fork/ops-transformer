@@ -67,46 +67,46 @@ enum class S2TemplateType {
     int64_t n1oIdx; \
     int64_t n2oIdx; \
     int64_t goIdx; \
-    int32_t s2LoopEndIdx; /* S2方向的循环控制信息 souter层确定 */ \
-    /* cube视角的sOuter，在SAMEAB场景中cubeSOuterSize为两倍的 halfS1RealSize souter层确定 */ \
+    int32_t s2LoopEndIdx; /* S2 loop control information, determined at the souter level. */ \
+    /* Cube's sOuter; for SAMEAB, cubeSOuterSize is twice halfS1RealSize, determined at the souter level. */ \
     uint32_t s1RealSize; \
-    uint32_t s1RealSizeAlign32; /* dn场景使用 */ \
+    uint32_t s1RealSizeAlign32; /* Used in the DN case. */ \
     uint32_t halfS1RealSize; \
     uint32_t firstHalfS1RealSize; \
-    int64_t tensorQOffset;      /* query的offset souter层确定 */ \
-    int64_t attentionOutOffset; /* attentionOut的offset souter层确定 */ \
-    int64_t actualS1Size;       /* Q的实际长度，由cuSeqQlen相邻前缀差计算 */ \
-    int64_t actualS2Size;       /* KV的实际长度，由seqUsedKvlen读取 */ \
+    int64_t tensorQOffset;      /* Query offset, determined at the souter level. */ \
+    int64_t attentionOutOffset; /* attentionOut offset, determined at the souter level. */ \
+    int64_t actualS1Size;       /* Actual Q length, calculated from adjacent cuSeqQlen prefix differences. */ \
+    int64_t actualS2Size;       /* Actual KV length, read from seqUsedKvlen. */ \
     uint64_t b1SSOffsetAlign16; \
-    int64_t qRopeNBGOffset; /* QueryRope 的 offset */ \
-    int64_t kRopeNBGOffset; /* G方向上,不同g的KeyRope的offset */
+    int64_t qRopeNBGOffset; /* QueryRope offset. */ \
+    int64_t kRopeNBGOffset; /* KeyRope offsets for different g values along G. */
 
-struct RunParamStr { // 分核与切块需要使用到参数
+struct RunParamStr { // Parameters required for core partitioning and tiling.
     COMMON_RUN_PARAM;
-    /* 推理新增 */
+    /* Added for inference. */
     int32_t actSparseLen;
     int64_t s1LoopStart;
     int64_t s1LoopEnd;
-    // BN循环生产的数据
-    int64_t preTokensPerBatch = MAX_PRE_NEXT_TOKENS;  // 左上顶点的pretoken
-    int64_t nextTokensPerBatch = MAX_PRE_NEXT_TOKENS; // 左上顶点的nexttoken
+    // Data produced by the BN loop.
+    int64_t preTokensPerBatch = MAX_PRE_NEXT_TOKENS;  // pretoken at the upper-left corner.
+    int64_t nextTokensPerBatch = MAX_PRE_NEXT_TOKENS; // nexttoken at the upper-left corner.
 
-    // NBS1循环生产的数据
-    int64_t sOuterOffset;     // 单个S内 souter的 souterIdx * halfS1RealSize souter层确定
-    int64_t cubeSOuterOffset; // 单个S内 souter的 souterIdx * halfS1RealSize souter层确定
-    int64_t keyOffset;        // mm1 Key 的offset,后续更名为KFinalOffset
+    // Data produced by the NBS1 loop.
+    int64_t sOuterOffset;     // souterIdx * halfS1RealSize within one S, determined at the souter level.
+    int64_t cubeSOuterOffset; // souterIdx * halfS1RealSize within one S, determined at the souter level.
+    int64_t keyOffset;        // MM1 Key offset; to be renamed KFinalOffset.
 
-    // q k v attenMask不同轴的offset
-    // B轴offset
+    // Offsets along different axes for Q/K/V/attenMask.
+    // B-axis offset.
     int64_t qBOffset;
     int64_t qBScalarOffset;
 
-    // lse 输出offset
-    int64_t softmaxLseOffset; // souter层确定
+    // LSE output offset.
+    int64_t softmaxLseOffset; // Determined at the souter level.
 };
 
 #define COMMON_CONST_INFO \
-    /* 全局的基本块信息 */ \
+    /* Global basic block information. */ \
     uint32_t s1BaseSize; \
     uint32_t s2BaseSize; \
     int64_t bSize; \
@@ -116,9 +116,9 @@ struct RunParamStr { // 分核与切块需要使用到参数
     int64_t dBasicBlock; \
     int64_t dSizeRope; \
     int64_t n1Size; \
-    int64_t gSize; /* g轴的大小 */ \
+    int64_t gSize; /* Size of the g axis. */ \
     int64_t n2Size; \
-    /* 轴的乘积 */ \
+    /* Product of axis sizes. */ \
     int64_t gD; \
     int64_t n2D; \
     int64_t bN2D; \
@@ -154,11 +154,11 @@ struct RunParamStr { // 分核与切块需要使用到参数
     int32_t s1BaseDv; \
     int32_t s2BaseDv; \
     int64_t s1OuterSize; \
-    /* matmul跳读参数 */ \
+    /* Matmul parameters for strided reads. */ \
     int64_t mm1Ka; \
     int64_t mm1Kb; \
     int64_t mm2Kb; \
-    /* dq 或者attentionOut的Stride */ \
+    /* Stride of dq or attentionOut. */ \
     int64_t attentionOutStride; \
     uint32_t aivIdx; \
     uint8_t layoutType; \
@@ -168,16 +168,16 @@ struct RunParamStr { // 分核与切块需要使用到参数
     float pScale;
 
 #define INFER_CONST_INFO \
-    /* sparseIndices 相关 */ \
+    /* Related to sparseIndices. */ \
     uint32_t maxQb; \
     uint32_t maxKb; \
-    /* 推理新增 */ \
-    bool isRowInvalid; /* 是否使能行无效 */ \
+    /* Added for inference. */ \
+    bool isRowInvalid; /* Whether invalid rows are enabled. */ \
     bool isGqa; \
 \
-    uint32_t seqUsedQlenSize;  /* 去掉前导0后的cuSeqQlen长度 */ \
-    uint32_t seqUsedKvlenSize; /* seqUsedKvlen 的长度 */ \
-    uint32_t isKvContinuous;   /* 是否为tensorlist */ \
+    uint32_t seqUsedQlenSize;  /* Length of cuSeqQlen after removing the leading zero. */ \
+    uint32_t seqUsedKvlenSize; /* Length of seqUsedKvlen. */ \
+    uint32_t isKvContinuous;   /* Whether the input is a tensor list. */ \
     /* service mm1 mm2 pageAttention */ \
     uint32_t blockTableDim2; \
     uint32_t blockSize; \
@@ -189,7 +189,7 @@ struct RunParamStr { // 分核与切块需要使用到参数
     bool isSoftmaxLseEnable; \
     int64_t queryRightPaddingSize; \
     int64_t kvRightPaddingSize; \
-    /* 后量化 */ \
+    /* Post-quantization. */ \
     bool isPostQuantPerChnl; \
     bool isPostQuantBF16; \
     bool isPostQuantOffsetExist; \
@@ -232,7 +232,7 @@ struct ConstInfo {
 template <bool isPa = false>
 struct CVSharedParams;
 
-/* CVSharedParams需要小于等于CacheLine的大小：128Bytes */
+/* CVSharedParams must fit within one cache line: 128 bytes. */
 template <>
 struct CVSharedParams<false> {
     CV_SHARED_PARAMS;

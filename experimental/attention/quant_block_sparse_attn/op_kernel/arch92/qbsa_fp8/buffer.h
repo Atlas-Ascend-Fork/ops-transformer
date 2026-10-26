@@ -10,7 +10,7 @@
 
 /*!
  * \file buffer.h
- * \brief同步管理
+ * \brief Synchronization management.
  */
 #ifndef BUFFER_H
 #define BUFFER_H
@@ -29,7 +29,7 @@ namespace fa_base_matmul {
 __BLOCK_LOCAL__ __inline__ uint32_t idCounterNum;
 #define MAKE_ID ((++idCounterNum) % 11)
 
-// 核间同步中，AIC(flagId 0-10)对应AIV0(flagId 0-10)，对应AIV1(flagId 16-26)
+// For cross-core synchronization, AIC flag IDs 0-10 map to AIV0 IDs 0-10 and AIV1 IDs 16-26.
 #define AIV0_AIV1_OFFSET 11
 
 template <BufferType bufferType, SyncType syncType = SyncType::INNER_CORE_SYNC>
@@ -64,7 +64,8 @@ public:
     {
         if ASCEND_IS_AIC {
             if constexpr (syncType == SyncType::INNER_CORE_SYNC) {
-                p2cEventId_ = GetTPipePtr()->AllocEventID<BufferInfo<bufferType>::EventP2C>(); // 确保只能被调用一次
+                p2cEventId_ =
+                    GetTPipePtr()->AllocEventID<BufferInfo<bufferType>::EventP2C>(); // Ensure this is called only once.
                 c2pEventId_ = GetTPipePtr()->AllocEventID<BufferInfo<bufferType>::EventC2P>();
                 SetFlag<BufferInfo<bufferType>::EventC2P>(c2pEventId_);
             }
@@ -76,7 +77,8 @@ public:
         if ASCEND_IS_AIC {
             if constexpr (syncType == SyncType::INNER_CORE_SYNC) {
                 WaitFlag<BufferInfo<bufferType>::EventC2P>(c2pEventId_);
-                GetTPipePtr()->ReleaseEventID<BufferInfo<bufferType>::EventP2C>(p2cEventId_); // 确保只能被调用一次
+                GetTPipePtr()->ReleaseEventID<BufferInfo<bufferType>::EventP2C>(
+                    p2cEventId_); // Ensure this is called only once.
                 GetTPipePtr()->ReleaseEventID<BufferInfo<bufferType>::EventC2P>(c2pEventId_);
             }
         }
@@ -88,9 +90,11 @@ public:
         if ASCEND_IS_AIC {
             if constexpr (syncType == SyncType::INNER_CORE_SYNC) {
                 if constexpr (EventType == BufferInfo<bufferType>::EventP2C) {
-                    WaitFlag<BufferInfo<bufferType>::EventP2C>(p2cEventId_); // 消费者等待生产者完成生产
+                    WaitFlag<BufferInfo<bufferType>::EventP2C>(
+                        p2cEventId_); // The consumer waits for the producer to finish producing data.
                 } else {
-                    WaitFlag<BufferInfo<bufferType>::EventC2P>(c2pEventId_); // 生产者等待消费者完成消费
+                    WaitFlag<BufferInfo<bufferType>::EventC2P>(
+                        c2pEventId_); // The producer waits for the consumer to finish consuming data.
                 }
             }
         }
@@ -102,9 +106,11 @@ public:
         if ASCEND_IS_AIC {
             if constexpr (syncType == SyncType::INNER_CORE_SYNC) {
                 if constexpr (EventType == BufferInfo<bufferType>::EventP2C) {
-                    SetFlag<BufferInfo<bufferType>::EventP2C>(p2cEventId_); // 生产者通知消费者已完成生产
+                    SetFlag<BufferInfo<bufferType>::EventP2C>(
+                        p2cEventId_); // The producer signals that data production is complete.
                 } else {
-                    SetFlag<BufferInfo<bufferType>::EventC2P>(c2pEventId_); // 消费者通知生产者已完成消费
+                    SetFlag<BufferInfo<bufferType>::EventC2P>(
+                        c2pEventId_); // The consumer signals that data consumption is complete.
                 }
             }
         }
@@ -113,7 +119,8 @@ public:
     __aicore__ inline void SetEventID()
     {
         if ASCEND_IS_AIC {
-            p2cEventId_ = GetTPipePtr()->AllocEventID<BufferInfo<bufferType>::EventP2C>(); // 确保只能被调用一次
+            p2cEventId_ =
+                GetTPipePtr()->AllocEventID<BufferInfo<bufferType>::EventP2C>(); // Ensure this is called only once.
             c2pEventId_ = GetTPipePtr()->AllocEventID<BufferInfo<bufferType>::EventC2P>();
         }
     }
@@ -123,9 +130,9 @@ public:
     {
         if ASCEND_IS_AIC {
             if constexpr (EventType == BufferInfo<bufferType>::EventP2C) {
-                return p2cEventId_; // 生产者通知消费者已完成生产
+                return p2cEventId_; // The producer signals that data production is complete.
             } else {
-                return c2pEventId_; // 消费者通知生产者已完成消费
+                return c2pEventId_; // The consumer signals that data consumption is complete.
             }
         }
     }
@@ -134,7 +141,7 @@ public:
     __aicore__ inline void WaitCrossCore()
     {
         if constexpr (bufferType == BufferType::GM && syncType == SyncType::CROSS_CORE_SYNC_BACKWARD) {
-            // AIC属于消费者，AIV属于生产者，且一个AIC对应两个AIV
+            // AIC is the consumer and AIV is the producer; one AIC corresponds to two AIV cores.
             if ASCEND_IS_AIC {
                 CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE2>(id1_);
                 if constexpr (CV_RATIO == 2) {
@@ -144,7 +151,7 @@ public:
                 CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE2>(id0_);
             }
         } else if constexpr (bufferType == BufferType::UB || bufferType == BufferType::GM) {
-            // AIC属于生产者，AIV属于消费者，且一个AIC对应两个AIV
+            // AIC is the producer and AIV is the consumer; one AIC corresponds to two AIV cores.
             if ASCEND_IS_AIC {
                 CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_FIX>(id1_);
                 if constexpr (CV_RATIO == 2) {
@@ -158,7 +165,7 @@ public:
                 }
             }
         } else if constexpr (bufferType == BufferType::L1) {
-            // AIC属于消费者，AIV属于生产者，且一个AIC对应两个AIV
+            // AIC is the consumer and AIV is the producer; one AIC corresponds to two AIV cores.
             if ASCEND_IS_AIC {
                 CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(id0_);
                 if constexpr (CV_RATIO == 2) {
@@ -176,7 +183,7 @@ public:
     __aicore__ inline void SetCrossCore()
     {
         if constexpr (bufferType == BufferType::GM && syncType == SyncType::CROSS_CORE_SYNC_BACKWARD) {
-            // AIC属于消费者，AIV属于生产者，且一个AIC对应两个AIV
+            // AIC is the consumer and AIV is the producer; one AIC corresponds to two AIV cores.
             if ASCEND_IS_AIC {
                 CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_FIX>(id0_);
                 if constexpr (CV_RATIO == 2) {
@@ -186,7 +193,7 @@ public:
                 CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE3>(id1_);
             }
         } else if constexpr (bufferType == BufferType::UB || bufferType == BufferType::GM) {
-            // AIC属于生产者，AIV属于消费者，且一个AIC对应两个AIV
+            // AIC is the producer and AIV is the consumer; one AIC corresponds to two AIV cores.
             if ASCEND_IS_AIC {
                 CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_FIX>(id0_);
                 if constexpr (CV_RATIO == 2) {
@@ -200,7 +207,7 @@ public:
                 }
             }
         } else if constexpr (bufferType == BufferType::L1) {
-            // AIC属于消费者，AIV属于生产者，且一个AIC对应两个AIV
+            // AIC is the consumer and AIV is the producer; one AIC corresponds to two AIV cores.
             if ASCEND_IS_AIC {
                 if constexpr (syncType == SyncType::CROSS_CORE_SYNC_BOTH) {
                     CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(id1_);
@@ -232,8 +239,10 @@ private:
     uint32_t size_;
     TEventID p2cEventId_;
     TEventID c2pEventId_;
-    uint32_t id0_; // 用作正向同步：生产者通知消费者，或者消费者等待生产者；
-    uint32_t id1_; // 用作反向同步：消费者通知生产者，或者生产者等待消费者；
+    uint32_t
+        id0_; // Forward synchronization: the producer notifies the consumer, or the consumer waits for the producer.
+    uint32_t
+        id1_; // Reverse synchronization: the consumer notifies the producer, or the producer waits for the consumer.
 };
 } // namespace fa_base_matmul
 #endif

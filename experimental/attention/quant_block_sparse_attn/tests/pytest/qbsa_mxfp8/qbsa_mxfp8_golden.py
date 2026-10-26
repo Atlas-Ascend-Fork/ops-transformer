@@ -12,11 +12,11 @@
 """
 MXFP8 Flash Attention Golden
 
-功能：参考式生成输入 → CPU golden → NPU 调用 → layout 对齐 → 精度对比
-支持：MXFP8 Q/QDescale 公共输入为 TND/BSND/BNSD；NPU 侧 K/V 使用 PA KV cache
-支持：PA 场景、GQA、causal/dense sparse mode、QDescale 固定 TND D-group 打包
-数据：随机 FP8 Q/K/V + MXFP8 D-group descale，生成结构对齐 quant_block_sparse_attn_golden.py
-输出：逐元素表格 + 统计汇总 (PctRlt 通过率，双千分之五标准)
+Workflow: reference-style input generation -> CPU golden -> NPU invocation -> layout alignment -> accuracy comparison.
+Supported: public MXFP8 Q/QDescale inputs in TND/BSND/BNSD; NPU K/V use the PA KV cache.
+Supported: PA, GQA, causal/dense sparse modes, and fixed TND D-group packing for QDescale.
+Data: random FP8 Q/K/V and MXFP8 D-group descales, following quant_block_sparse_attn_golden.py.
+Output: per-element tables and aggregate statistics (PctRlt pass rate, dual 0.5% criteria).
 
 """
 
@@ -146,7 +146,7 @@ _CASE_REQUIRED_RUNTIME_FIELDS = {
     "quant_mode",
 }
 
-# 其余列作为用例设计参考信息原样保留，不参与 pytest 计算。CSV 按列名解析，允许继续携带扩展字段。
+# Keep other columns as test design reference information; pytest does not use them. Parse CSV by column name and allow extra fields.
 
 
 def _ensure_custom_ops_registered():
@@ -222,8 +222,8 @@ def _parse_case_field(field_name, value):
             except json.JSONDecodeError:
                 if not value.endswith("]"):
                     raise
-                # JSON 不接受 inf、nan 等 IEEE 拼写。这里是 MXFP8 测试数据
-                # 的取值范围，因此用 float() 解析这些值，普通范围仍按 JSON 解析。
+                # JSON does not accept IEEE spellings such as inf and nan. For MXFP8 test data
+                # ranges, parse these values with float(); parse ordinary ranges as JSON.
                 parsed = [item.strip() for item in value[1:-1].split(",")]
         if isinstance(parsed, (list, tuple)):
             if len(parsed) != 2:
@@ -296,7 +296,7 @@ def _resolve_sparse_mode(case):
 
 
 def validate_mxfp8_case(case):
-    """只校验实际参与运行的字段；参考字段允许由外部泛化表自由扩展。"""
+    """Validate only runtime fields; external generalization tables may freely extend reference fields."""
     if case.get("layout_q") not in ("TND", "BSND", "BNSD"):
         raise ValueError(
             f"MXFP8 layout_q must be TND/BSND/BNSD, got {case.get('layout_q')!r}"
@@ -537,11 +537,11 @@ CASE = _load_initial_case()
 set_active_case(CASE)
 
 # ==============================================================================
-# 固定运行常量
+# Fixed runtime constants.
 # ==============================================================================
-# Q/K/V 使用 fp8_e4m3fn；Q/K/V descale 与 P scale 使用 fp8_e8m0。
-# e8m0fnu 最小正数: 2^(-127)，用于替换 descale 中的数值 0 和非有限值。
-# e8m0fnu 没有数值 0；字节 0x00 表示 2^(-127)，0xFF 才表示 NaN。
+# Q/K/V use fp8_e4m3fn; Q/K/V descales and P scales use fp8_e8m0.
+# Minimum positive e8m0fnu value: 2^(-127); replace zero and nonfinite descale values with this value.
+# e8m0fnu has no numeric zero; byte 0x00 represents 2^(-127), and 0xFF represents NaN.
 E8M0_MIN_POSITIVE = 2 ** (-127)
 E8M0_MAX_FINITE = float(2**127)
 _EMAX_MAP = {
@@ -549,13 +549,13 @@ _EMAX_MAP = {
 }
 
 # ==============================================================================
-# 参考式数据生成 helper
-# 与 quant_block_sparse_attn_golden.py 保持同一组织方式：
+# Reference-style data generation helpers.
+# Follow the organization of quant_block_sparse_attn_golden.py:
 #   case -> rng/generator -> query/key/value/descale/block_table/sparse_indices
-# 当前文件的 MXFP8 full-quant 差异：
-#   - Q/QDescale 直接生成 TND，不经过其他 Q layout 中间格式
-#   - K/V 先按参考文件的 BSND 语义生成，再适配为本文件 CPU/PA 路径使用的 BNSD
-#   - Q/K/V descale 由对应 FP8 数据按 MXFP8 group 规则生成
+# MXFP8 full-quantization differences in this file:
+#   - Generate Q/QDescale directly in TND without an intermediate Q layout.
+#   - Generate K/V using the reference BSND semantics, then adapt to BNSD for the CPU/PA path in this file.
+#   - Generate Q/K/V descales from the corresponding FP8 data using MXFP8 group rules.
 # ==============================================================================
 
 
@@ -567,7 +567,7 @@ def _prefix(lengths):
 
 
 def _normalize_data_range(data_range):
-    """将标量或 [最小值, 最大值] 转换为统一的范围描述。"""
+    """Convert a scalar or [minimum,maximum] into a uniform range description."""
     if isinstance(data_range, (list, tuple)):
         if len(data_range) != 2:
             raise ValueError(
@@ -644,7 +644,7 @@ def _rand_float(shape, generator, data_range=1.0):
             else:
                 result.reshape(-1)[-1] = high
             return result
-        # 显式 [a, b] 表示闭区间，固定首尾元素以确保两个端点都被覆盖。
+        # An explicit [a,b] denotes a closed interval; fix the first and last elements to cover both endpoints.
         flattened = result.view(-1)
         flattened[0] = low
         if flattened.numel() > 1:
@@ -653,7 +653,7 @@ def _rand_float(shape, generator, data_range=1.0):
 
 
 def _log_tensor_ranges(prefix, **tensors):
-    """将低精度 Tensor 转为 FP32 后打印最大值和最小值。"""
+    """Convert a low-precision tensor to FP32 and print its maximum and minimum."""
     ranges = []
     for name, tensor in tensors.items():
         if tensor is None:
@@ -681,13 +681,13 @@ def _validate_fp8_dtype(fp8_dtype):
 
 
 def quantize_mxfp8_qk(tensor_fp32, fp8_dtype, group_size=32):
-    """MXFP8 配套量化 Q/K: per-32-element-group along D axis。
+    """Quantize Q/K with matching MXFP8 scales in groups of 32 elements along D.
 
-    正确流程: 从 fp32 算 descale → fp8 = clamp(fp32/descale)。
-    保证 fp8 × descale ≈ 原始 fp32，反量化不溢出。
+    Correct flow: derive descale from FP32, then compute fp8 = clamp(fp32/descale).
+    Ensure fp8 * descale approximates the original FP32 values without dequantization overflow.
 
     Input:  (..., D) fp32
-    Output: (fp8 (..., D), descale (..., D//group_size))  -- descale 与 fp8 配套
+    Output: (fp8 (..., D), descale (..., D//group_size)); descale matches the FP8 data.
     """
     _validate_fp8_dtype(fp8_dtype)
     tensor_fp32 = tensor_fp32.to(torch.float32)
@@ -732,10 +732,10 @@ def quantize_mxfp8_qk(tensor_fp32, fp8_dtype, group_size=32):
 
 
 def quantize_mxfp8_v(tensor_fp32, fp8_dtype, group_size=32):
-    """MXFP8 配套量化 V: per-32-element-group along S axis。
+    """Quantize V with matching MXFP8 scales in groups of 32 elements along S.
 
     Input:  (B, S, N, D) fp32 = BSND
-    Output: (fp8 (B, S, N, D), descale (B, S//group_size, N, D))  -- descale 与 fp8 配套
+    Output: (fp8 (B, S, N, D), descale (B, S//group_size, N, D)); descale matches the FP8 data.
     """
     _validate_fp8_dtype(fp8_dtype)
     tensor_fp32 = tensor_fp32.to(torch.float32)
@@ -984,8 +984,8 @@ def _make_reference_sparse_for_lengths(q_lengths, kv_lengths):
 
 
 # ==============================================================================
-# Layout 转换函数 - 数据
-# MXFP8 Q/QDescale 公共输入只接受 TND；BNSD 仅作为 K/V 和 PA KV cache 的内部布局。
+# Layout conversion functions: data.
+# Public MXFP8 Q/QDescale inputs only accept TND; BNSD is an internal layout for K/V and the PA KV cache.
 # ==============================================================================
 
 
@@ -1006,15 +1006,15 @@ def require_q_tnd(tensor, seq_lens, num_heads, name="Q"):
 
 
 # ==============================================================================
-# Layout 转换函数 - Descale
-# QDescale 公共输入为 TND；K/V descale 在生成后按 NPU layout 打包。
+# Layout conversion functions: descales.
+# Public QDescale input uses TND; pack generated K/V descales in the NPU layout.
 # ==============================================================================
 
 
 def fp32_to_e8m0fnu(tensor_fp32):
-    """FP32 → e8m0fnu (uint8)，提取 IEEE 754 biased exponent
-    e8m0fnu 格式: 只有指数位，没有尾数，表示 2^(e-127)
-    biased exponent = 0xFF 时表示 NaN
+    """Convert FP32 to e8m0fnu (uint8) by extracting the IEEE 754 biased exponent.
+    e8m0fnu contains only exponent bits, with no mantissa, and represents 2^(e-127).
+    A biased exponent of 0xFF represents NaN.
     """
     bits = tensor_fp32.float().view(torch.int32)
     biased_exp = ((bits >> 23) & 0xFF).to(torch.uint8)
@@ -1022,7 +1022,7 @@ def fp32_to_e8m0fnu(tensor_fp32):
 
 
 def sanitize_e8m0_scale(scale, name="scale"):
-    """e8m0fnu 没有 0 值语义；非有限值进入 0xFF 会在 NPU 侧变 NaN。"""
+    """e8m0fnu has no numeric zero; nonfinite values encoded as 0xFF become NaN on the NPU."""
     result = torch.as_tensor(scale, dtype=torch.float32).clone()
     bad_mask = ~torch.isfinite(result)
     zero_mask = result == 0
@@ -1081,7 +1081,7 @@ def e8m0fnu_to_fp32(scale_e8m0, name="scale"):
 
 def pack_qk_scale_for_npu(scale_flat):
     """Pack Q/K D-group descale: (..., Dg) -> (..., Dg//2, 2).
-    NPU 要求 Q/K descale 按 (偶, 奇) 对打包，每两个相邻 scale 值合并为一个 [..., 2]
+    The NPU requires Q/K descales packed as (even,odd) pairs, combining adjacent scales into [...,2].
     """
     orig_shape = scale_flat.shape
     last_dim = orig_shape[-1]
@@ -1096,8 +1096,8 @@ def pack_q_scale_tnd_for_npu(scale, seq_lens):
 
 
 # ==============================================================================
-# PA 格式转换 - mxfp8_pa_preprocessing
-# 仅处理 K/V 及 K/V descale；Q/QDescale 不走 PA 预处理。
+# PA format conversion: mxfp8_pa_preprocessing.
+# Process only K/V and their descales; Q/QDescale do not undergo PA preprocessing.
 # ==============================================================================
 
 
@@ -1115,12 +1115,12 @@ def mxfp8_pa_preprocessing(
     physical_block_count=0,
 ):
     """
-    MXFP8 PA 预处理: internal K/V BNSD -> PagedAttention KV Cache
+    MXFP8 PA preprocessing: internal K/V BNSD -> PagedAttention KV cache.
 
-    输入: [B, N, S, D]，仅用于 K/V 或 K/V descale
-    输出 (is_scale=False): [BlockNum, N, BlockSize, D] (fp8 K/V)
-    输出 (is_scale=True, is_vscale=False): [BlockNum, N, BlockSize, D//64, 2] (K descale)
-    输出 (is_scale=True, is_vscale=True): [BlockNum, N, BlockSize//64, D, 2] (V descale)
+    Input: [B,N,S,D], used only for K/V or their descales.
+    Output (is_scale=False): [BlockNum,N,BlockSize,D] (FP8 K/V).
+    Output (is_scale=True,is_vscale=False): [BlockNum,N,BlockSize,D//64,2] (K descale).
+    Output (is_scale=True,is_vscale=True): [BlockNum,N,BlockSize//64,D,2] (V descale).
 
     kv_layout:
       - BnNBsD: fp8=[Bn,N,Bs,D], KDescale=[Bn,N,Bs,D//64,2], VDescale=[Bn,N,Bs//64,D,2]
@@ -1199,9 +1199,9 @@ def mxfp8_pa_preprocessing(
 
 def convert_v_scale_to_pa(scale_bnsd, seq_lens, group_size=32):
     """
-    V descale 偶奇行交错 packing，用于 PA 预处理
-    输入: [B, N, Sg, D], Sg = ceil(orgS/32)
-    输出: [B, N, Sg//2, D, 2]，奇数行 pad 到偶数
+    Interleave even/odd V descale rows for PA preprocessing.
+    Input: [B,N,Sg,D], Sg = ceil(orgS/32).
+    Output: [B,N,Sg//2,D,2]; pad odd row counts to an even number.
     """
     scale_bnsd = (
         scale_bnsd
@@ -1307,15 +1307,15 @@ def _materialize_pa_bnsd(tensor):
 
 
 # ==============================================================================
-# 数据生成
+# Data generation.
 # ==============================================================================
 
 
 def generate_mxfp8_inputs(case=None, max_block_per_batch=None, atten_mask_shape=None):
     """Generate test inputs with paired fp8 + descale.
 
-    流程: fp32 随机 → 从 fp32 算 descale → fp8 = clamp(fp32/descale)
-    fp8 和 descale 配套生成，保证 fp8 × descale ≈ 原始 fp32，反量化不溢出。
+    Flow: random FP32 -> derive descale from FP32 -> fp8 = clamp(fp32/descale).
+    Generate matching FP8 data and descales so fp8 * descale approximates the original FP32 values without dequantization overflow.
     """
     if case is not None or max_block_per_batch is not None:
         active_case = dict(CASE if case is None else case)
@@ -1343,7 +1343,7 @@ def generate_mxfp8_inputs(case=None, max_block_per_batch=None, atten_mask_shape=
     n1 = case["N1"]
     n2 = case["N2"]
     head_dim = case["D"]
-    # Q: fp32 随机 → MXFP8 配套量化 (per-32-group along D)
+    # Q: random FP32 -> corresponding MXFP8 quantization (groups of 32 along D).
     q_fp32 = _rand_float((total_q, n1, head_dim), generator, DATA_RANGE_Q)
     query, q_descale = quantize_mxfp8_qk(
         q_fp32.unsqueeze(0), FP8_DTYPE, QUANT_GROUP_SIZE
@@ -1480,15 +1480,15 @@ def generate_data():
 
 # ==============================================================================
 # CPU Golden
-# 参考 quant_block_sparse_attn_golden.py 的 sparse block 计算流：
-#   - Q/QDescale 公共输入为 TND；K/V 与 K/V descale 使用 PA_BNBD
-#   - 按 sparse_indices 中记录的 KV block 顺序收集 positions，并按 256-token C1 粒度做 online 累加
-#   - Q/K 使用 per-token D-group descale；V 使用 per-channel S-group descale
-#   - 输出 OUT 固定 TND，MXFP8 TND LSE 固定 TN
+# Follow the sparse block computation flow in quant_block_sparse_attn_golden.py:
+#   - Public Q/QDescale inputs use TND; K/V and their descales use PA_BNBD.
+#   - Gather positions in the KV block order recorded in sparse_indices and accumulate online in 256-token C1 chunks.
+#   - Q/K use descales per token and D group; V uses descales per channel and S group.
+#   - OUT always uses TND; MXFP8 TND LSE always uses TN.
 # ==============================================================================
 
-# CUDA SDPA 空 softmax 行的 LSE 语义是 -Inf；kernel 侧 MX_EMPTY_LSE_VALUE(-3e+99)
-# 经 FP32 溢出后同样是 -Inf。仅变更空行 LSE 哨兵，attention_out=0 语义不变。
+# CUDA SDPA uses LSE=-Inf for empty softmax rows; the kernel's MX_EMPTY_LSE_VALUE (-3e+99)
+# also becomes -Inf on FP32 overflow. Only the empty-row LSE sentinel changes; attention_out remains zero.
 EMPTY_LSE = float("-inf")
 MASK_VALUE = -10000.0
 # Keep the exact FP32 constants and operation order used by the VF.  For
@@ -2253,13 +2253,13 @@ def cpu_mxfp8_golden(
                 q_indices = list(range(q_start, q_end))
                 nq = q_end - q_start
 
-                # chunk_positions 对齐 kernel 侧一次 C1V1 的 K 读取粒度：
-                #   - sparse_indices 记录的是当前 QB 可访问的 KV basic block id。
-                #   - _positions_from_sparse 按 256-token C1 粒度取 KV basic block，
-                #     并展开成 token 级 KV index。
-                #   - blockSize=128 时每个 C1 取 2 块，blockSize=64 时每个 C1 取 4 块。
-                #   - 无效 block id(-1) 或超出 kv_len 的 block 会被跳过，
-                #     所以尾 chunk 可能不足 256 token。
+                # chunk_positions matches the K read granularity of one kernel C1V1 operation:
+                #   - sparse_indices records KV basic block IDs accessible to the current QB.
+                #   - _positions_from_sparse selects KV basic blocks in 256-token C1 chunks,
+                #     then expands them into token-level KV indices.
+                #   - Each C1 selects two blocks for blockSize=128, or four blocks for blockSize=64.
+                #   - Skip invalid block IDs (-1) and blocks beyond kv_len,
+                #     so the tail chunk may contain fewer than 256 tokens.
                 all_task_chunks = _positions_from_sparse(
                     sparse_indices, sparse_seq_len, batch_idx, head_idx, qb_idx, kv_len
                 )
@@ -2476,10 +2476,10 @@ def cpu_mxfp8_golden(
 
 
 # ==============================================================================
-# NPU 调用
-# 只支持单算子模式。
-# Q: 使用 Q_INPUT_LAYOUT；QDescale: 固定按 TND 打包 D-group pair。
-# K/V 与 K/V descale: 固定走 PA 预处理 (block_table + block_size)。
+# NPU invocation.
+# Only single-operator mode is supported.
+# Q: use Q_INPUT_LAYOUT; QDescale: always pack D-group pairs in TND.
+# K/V and their descales: always use PA preprocessing (block_table + block_size).
 # ==============================================================================
 
 
@@ -2510,7 +2510,7 @@ def _prepare_npu_metadata(
     sparse_indices,
     sparse_seq_len,
 ):
-    """准备 metadata 算子输入，并生成主算子依赖的 metadata。"""
+    """Prepare metadata operator inputs and generate metadata required by the main operator."""
     cu_seqlens_q = None if layout_q in ("BSND", "BNSD") else _to_npu(cu_seqlens_q)
     cu_seqlens_kv = _optional_npu_tensor(cu_seqlens_kv)
     seqused_q = _optional_npu_tensor(seqused_q)
@@ -2519,8 +2519,8 @@ def _prepare_npu_metadata(
     sparse_seq_len = _to_npu(sparse_seq_len)
     block_table = _to_npu(block_table)
 
-    # metadata 算子在主算子及图捕获之外执行。前一次同步保证异步 H2D 输入就绪，
-    # 后一次同步保证 metadata 完成物化；二者对应不同的数据依赖，不能合并。
+    # Execute the metadata operator outside the main operator and graph capture. The first synchronization ensures asynchronous H2D inputs are ready;
+    # the second ensures metadata is materialized. They serve different data dependencies and cannot be merged.
     torch_npu.npu.synchronize()
     metadata = torch.ops.custom.npu_quant_block_sparse_attn_metadata(
         sparse_seq_len,
@@ -2746,7 +2746,7 @@ def _call_npu_fa_op(
     sparse_indices,
     sparse_seq_len,
 ):
-    """调用 QuantBlockSparseAttn 单算子，入参对齐 custom op schema。"""
+    """Invoke QuantBlockSparseAttn in single-operator mode with arguments matching the custom operator schema."""
     _ensure_custom_ops_registered()
     torch_npu.npu.set_device(int(DEVICE_ID))
 
@@ -2922,7 +2922,7 @@ def _call_npu_fa_op_graph(
     sparse_indices,
     sparse_seq_len,
 ):
-    """调用 QuantBlockSparseAttn 图模式，入参对齐 custom op schema。"""
+    """Invoke QuantBlockSparseAttn in graph mode with arguments matching the custom operator schema."""
     _ensure_custom_ops_registered()
     torch_npu.npu.set_device(int(DEVICE_ID))
 
@@ -2949,8 +2949,8 @@ def _call_npu_fa_op_graph(
         sparse_seq_len,
     )
 
-    # 与批量 ACL 图路径保持一致。QBSA 是 AIC/AIV 混合核，图捕获需固定输入 shape，
-    # 同时禁止对 custom op 仍在使用的 Buffer 执行 reinplace。
+    # Match the batched ACL graph path. QBSA mixes AIC/AIV cores, so graph capture requires fixed input shapes
+    # and must disable reinplace on buffers still used by the custom operator.
     config = CompilerConfig()
     config.mode = "reduce-overhead"
     config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass = True
@@ -3197,7 +3197,7 @@ def npu_mxfp8_fa(
     sparse_seq_len=None,
     graph=False,
 ):
-    """调用 QuantBlockSparseAttn NPU 算子。"""
+    """Invoke the QuantBlockSparseAttn NPU operator."""
     torch_npu.npu.set_device(int(DEVICE_ID))
 
     if sparse_indices is None or sparse_seq_len is None:

@@ -10,7 +10,7 @@
 
 /*!
  * \file quant_block_sparse_attn_mx_m128_v64_block_vec.h
- * \brief QuantBlockSparseAttn 的 MXFP8 全量化 vector 路径。
+ * \brief Fully quantized MXFP8 Vector path for QuantBlockSparseAttn.
  */
 #ifndef QUANT_BLOCK_SPARSE_ATTN_MX_M128_V64_BLOCK_VEC_H_
 #define QUANT_BLOCK_SPARSE_ATTN_MX_M128_V64_BLOCK_VEC_H_
@@ -32,7 +32,7 @@ using namespace AscendC::Impl::Detail;
 using namespace regbasemx;
 
 namespace BaseApi {
-// V1 执行 softmax/P 量化，V2 更新并写回 attention output/LSE。
+// V1 performs softmax/P quantization; V2 updates and writes attention output/LSE.
 template <typename inputType, typename mmType, typename outputType, QBSALayout layout, QBSALayout kvLayout,
           S1TemplateType s1TemplateType, S2TemplateType s2TemplateType, DTemplateType dTemplateType,
           DTemplateType dVTemplateType, bool hasAtten, bool hasLse, bool isPa, bool useDn = true>
@@ -71,8 +71,8 @@ public:
     static constexpr uint32_t DN_VSELR_GROUP_SIZE = DN_VSELR_INDEX_SIZE / DN_VSELR_GROUP_NUM;
     static constexpr uint32_t ATTEN_MASK_UB_SIZE = S2_SPLIT * VEC_M_BASE;
     static constexpr uint32_t MASK_COPY_BLOCK_BYTES = 32U;
-    // VF 输出的 P 使用 DN packed layout：每个 AIV 处理 VEC_M_BASE 行，每行 S2_SPLIT 个 P 元素，
-    // 并额外保留 S2_SPLIT / MX_SCALE_GROUP 个元素作为行内 padding/重排空间。
+    // VF outputs P in a packed DN layout: each AIV processes VEC_M_BASE rows of S2_SPLIT P elements,
+    // with S2_SPLIT / MX_SCALE_GROUP extra elements per row for padding/reordering.
     static constexpr uint32_t STAGE1_CAST_ROW_STRIDE = S2_SPLIT + S2_SPLIT / MX_SCALE_GROUP;
     static constexpr uint32_t STAGE1_OUT_UB_SIZE = VEC_M_BASE * STAGE1_CAST_ROW_STRIDE * sizeof(INPUT_T);
     static constexpr uint32_t PSCALE_SUB_LOOP_UB_SIZE = VEC_M_BASE * S2_SPLIT / MX_SCALE_GROUP * sizeof(SCALE_T);
@@ -136,20 +136,20 @@ public:
             tPipe_->InitBuffer(softmaxExpBuf_[0], SOFTMAX_STATE_UB_SIZE);
             tPipe_->InitBuffer(softmaxExpBuf_[1], SOFTMAX_STATE_UB_SIZE);
             tPipe_->InitBuffer(softmaxExpBuf_[2], SOFTMAX_STATE_UB_SIZE);
-            // 进入当前 512-column block 前的 Max；Sum 直接在 softmaxSumBuf_ 上递推。
+            // Max before entering the current 512-column block; Sum is updated directly in softmaxSumBuf_.
             tPipe_->InitBuffer(preLoopMaxBuf_, SOFTMAX_STATE_UB_SIZE);
             if constexpr (HAS_LSE) {
                 tPipe_->InitBuffer(softmaxLseQueue_, 1, VEC_M_BASE * sizeof(float) * 8U);
             }
             if constexpr (HAS_ATTEN) {
-                // DN mask UB：[256,64]，按 sparse segment 拼接。
+                // DN mask UB: [256,64], concatenated by sparse segment.
                 if constexpr (QBSA_9102_MX_M128_MASK_PREFETCH != 0) {
                     InitMaskPrefetchBuffers();
                 } else {
                     tPipe_->InitBuffer(attenMaskInQue_, 1, ATTEN_MASK_UB_SIZE);
                 }
             }
-            // DN VF lane 重排索引；保留 USE_DN 分支，便于后续补充非 DN 索引表。
+            // DN VF lane reordering indices; keep the USE_DN branch for a future non-DN index table.
             if constexpr (USE_DN) {
                 tPipe_->InitBuffer(vselrIndexesBuf_[static_cast<uint32_t>(VselrIndexEnum::DN_INDEX)],
                                    DN_VSELR_INDEX_SIZE);
@@ -185,8 +185,9 @@ public:
             const uint32_t blockMSize = blockS1Idx + constInfo.qSparseBlockSize > actualS1Size ?
                                             actualS1Size - blockS1Idx :
                                             constInfo.qSparseBlockSize;
-            // 9102r1 只有一个 V 核；按 64 行切片清完整 logical Q block。这样清零范围与 metadata
-            // 分配范围一致，不需要不存在的跨 AIV 全局屏障，也不会覆盖其他核已经写回的有效 head。
+            // 9102r1 has only one Vector core; clear the full logical Q block in slices of 64 rows. This matches the
+            // metadata allocation range, requires no unavailable cross-AIV global barrier, and does not overwrite valid
+            // heads written by other cores.
             for (uint32_t mBase = 0U; mBase < blockMSize; mBase += VEC_M_BASE) {
                 const uint32_t actMSize = blockMSize - mBase > VEC_M_BASE ? VEC_M_BASE : blockMSize - mBase;
                 const uint64_t tokenOffset = static_cast<uint64_t>(queryTokenBase) + blockS1Idx + mBase;
@@ -212,7 +213,7 @@ public:
                     lseCopyParams.dstStride = constInfo.softmaxLseStride;
                     const uint64_t lseOffset = tokenOffset * constInfo.realN2Size + n1Idx;
                     LocalTensor<float> emptyLse = softmaxLseQueue_.template AllocTensor<float>();
-                    // LSE 的 UB->GM 搬运按 E2B 布局读取，每一行占一个 32B 槽。
+                    // LSE UB-to-GM transfers read the E2B layout, with each row occupying one 32-byte slot.
                     Duplicate<float>(emptyLse, MX_EMPTY_LSE_VALUE, actMSize * 8U);
                     softmaxLseQueue_.template EnQue(emptyLse);
                     emptyLse = softmaxLseQueue_.template DeQue<float>();
@@ -242,7 +243,7 @@ public:
         }
     }
 
-    // V1：C1[64,256] -> P/PScale；两个 subLoop 写成 P[64,512]。
+    // V1: C1[64,256] -> P/PScale; two subLoops produce P[64,512].
     template <uint32_t SUB_LOOP>
     __aicore__ inline void ProcessVec1(Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD, 1U>& outputBuf,
                                        Buffer<BufferType::UB, SyncType::CROSS_CORE_SYNC_BOTH, 1U>& bmm1ResBuf,
@@ -324,14 +325,14 @@ public:
         stage1OutQue_[stage1Offset].template FreeTensor(stage1CastTensor);
 
         if (unlikely(runInfo.isLastS2Loop && IsLastSubLoop<SUB_LOOP>(runInfo))) {
-            // 最后一个 S2/subLoop 后写 LSE。
+            // Write LSE after the last S2/subLoop.
             if constexpr (HAS_LSE) {
                 SoftmaxLseCopyOut(runInfo, constInfo, sumUb, maxUb);
             }
         }
     }
 
-    // V2：更新 C2[64,DV]，最后归一化并写回 bf16。
+    // V2: update C2[64,DV], then normalize and write BF16 output on the last tile.
     __aicore__ inline void ProcessVec2(MxBmm2Buf& bmm2ResBuf, MxRunInfo& runInfo, const MxConstInfo& constInfo)
     {
         bmm2ResBuf.WaitCrossCore();
@@ -351,16 +352,16 @@ public:
         LocalTensor<MM_T> mmRes = bmm2ResBuf.template GetTensor<MM_T>();
         WaitV2OutputReuse(runInfo.vecMbaseIdx);
         if (unlikely(isFirstS2Loop)) {
-            // 首个 S2 tile 直接作为累计值。
+            // Use the first S2 tile directly as the accumulated value.
             DataCopy(vec2ResUb, mmRes, vec2CalcSize);
         } else {
             LocalTensor<MM_T> expUb = softmaxExpBuf_[loopIdx].template Get<MM_T>()[runInfo.vecMbaseIdx * VEC_M_BASE];
             if (!isLastS2Loop) {
-                // 中间 tile 保留 fp32 累计值。
+                // Keep FP32 accumulated values for intermediate tiles.
                 FaVectorApi::FlashUpdateNew<MM_T, INPUT_T, OUTPUT_T, dTemplateAlign64, false>(
                     vec2ResUb, mmRes, vec2ResUb, expUb, vecMSize, dTemplateAlign64, 1.0f, 1.0f);
             } else {
-                // 最后一个 tile 完成 update 与归一化。
+                // Complete the update and normalization on the last tile.
                 LocalTensor<float> sumUb =
                     softmaxSumBuf_[mLoopIdx].template Get<float>()[runInfo.vecMbaseIdx * VEC_M_BASE];
                 FaVectorApi::FlashUpdateLastNew<MM_T, INPUT_T, OUTPUT_T, dTemplateAlign64, false, true>(
@@ -370,7 +371,7 @@ public:
         bmm2ResBuf.SetCrossCore();
         if (isLastS2Loop) {
             if (unlikely(isFirstS2Loop)) {
-                // 单 tile 场景单独归一化。
+                // Normalize separately for the single-tile case.
                 if constexpr (QBSA_9102_MX_M128_MTE3_SCOPE != 0) {
                     PipeBarrier<PIPE_V>(); // UB copy stores must precede LastDiv's reads.
                 }
@@ -567,12 +568,13 @@ private:
     __aicore__ inline void BoolCopyInMxMask(const LocalTensor<uint8_t>& dstTensor, uint64_t srcOffset, uint32_t s2Len,
                                             uint32_t qLen)
     {
-        // DN mask 按 GM row stride 搬到 [S2,64] UB。
+        // Transfer the DN mask to [S2,64] UB using the GM row stride.
         DataCopyParams dataCopyParams{};
         dataCopyParams.blockCount = s2Len;
         dataCopyParams.blockLen = CeilDiv(qLen, MASK_COPY_BLOCK_BYTES);
         dataCopyParams.dstStride = CeilDiv(VEC_M_BASE, MASK_COPY_BLOCK_BYTES) - dataCopyParams.blockLen;
-        // Host 固定 mask 为 [2048,2048]，当前 AIV 固定搬 64 列，源/目标行宽均满足 32B 对齐。
+        // Host fixes the mask at [2048,2048]; the current AIV transfers 64 columns, with both source and destination
+        // row widths aligned to 32 bytes.
         dataCopyParams.srcStride = (attenMaskS2Size_ - qLen) / MASK_COPY_BLOCK_BYTES;
         DataCopy(dstTensor, attenMaskGm_[srcOffset], dataCopyParams);
     }
@@ -591,12 +593,13 @@ private:
                                                 uint32_t dstS2Offset, uint32_t segmentS2Len,
                                                 uint64_t segmentS2TokenOffset, bool needAtten)
     {
-        // 返回值仅表示本段是否发起了 GM->UB 的 MTE2 搬运；Duplicate 写 UB 不需要 MTE2_V 同步。
+        // The return value only indicates whether this segment initiated an MTE2 GM-to-UB transfer; Duplicate writes
+        // require no MTE2_V synchronization.
         const uint64_t dstOffset = static_cast<uint64_t>(dstS2Offset) * VEC_M_BASE;
         if (unlikely(segmentS2Len == 0U)) {
             return false;
         }
-        // mask_mode=3 的 MX kernel 固定使用 right-down causal mask；完全可见段直接填 1。
+        // The MX kernel with mask_mode=3 uses a right-down causal mask; fill fully visible segments with 1.
         if (!needAtten) {
             Duplicate<uint8_t>(attenMaskUb[dstOffset], 1, segmentS2Len * VEC_M_BASE);
             return false;
@@ -656,18 +659,19 @@ private:
         LocalTensor<SCALE_T> pScaleL1Tensor =
             outputBuf.template GetTensor<SCALE_T>(pScaleL1Offset + runInfo.vecMbaseIdx * PSCALE_SUB_LOOP_UB_SIZE);
         // Caller dequeues the joint P+scale owner before issuing either DMA.
-        // 唯一 AIV 处理完整 M_BASE 行；每 MX_SCALE_GROUP 个 P 元素生成一个 scale。
-        // DataCopy 以 32B 为基本块，fp8_e8m0_t 每块 32 个元素。每行有
-        // S2_SPLIT / MX_SCALE_GROUP 个 scale；DN packed 后按 4 个搬运列组写入。
+        // The single AIV processes all M_BASE rows, generating one scale per MX_SCALE_GROUP P elements.
+        // DataCopy uses 32-byte blocks, each containing 32 fp8_e8m0_t elements. Each row contains
+        // S2_SPLIT / MX_SCALE_GROUP scales; write packed DN data in four transfer column groups.
         constexpr uint16_t pScaleDstStride = ((S2_SPLIT / MX_SCALE_GROUP) >> 1U) - 1U;
         if constexpr (SUB_LOOP == 1U) {
-            // subLoop1 生成第一半 P 的修正系数，写 PScale 前 512B；4 个 column group 起点相隔 32B。
-            // Each row slice writes its own 512B in the dynamic half; the last 1024B stay constant.
+            // subLoop1 generates correction factors for the first half of P and writes the first 512 bytes of PScale;
+            // four column groups start 32 bytes apart. Each row slice writes its own 512B in the dynamic half; the last
+            // 1024B stay constant.
             for (uint16_t i = 0U; i < 4U; ++i) {
                 DataCopy(pScaleL1Tensor[i << 5U], pScaleSubLoopTensor, {4, 1, 0, pScaleDstStride});
             }
         } else if (runInfo.actSingleLoopS2Size <= S2_SPLIT) {
-            // 单 subLoop 时，两次 256B 拷贝合计覆盖 PScale 前 512B。
+            // With one subLoop, two 256-byte copies cover the first 512 bytes of PScale.
             // The resident half is not consumed by a single-S2-half C2.
             for (uint16_t i = 0U; i < 2U; ++i) {
                 DataCopy(pScaleL1Tensor[i << 8U], pScaleSubLoopTensor, {1, 8, 0, 0});
@@ -680,7 +684,7 @@ private:
                                      LocalTensor<INPUT_T>& stage1CastTensor, const MxRunInfo& runInfo)
     {
         static_assert(SUB_LOOP < 2U, "MX V1 only supports subLoop 0/1");
-        // 唯一 AIV 的两个 subLoop 分别写入 P 的前/后 256 列。
+        // The single AIV's two subLoops write the first and last 256 columns of P, respectively.
         LocalTensor<INPUT_T> pL1Tensor = outputBuf.template GetTensor<INPUT_T>();
         const uint64_t subLoopOffset = MxM128V64Layout::PDataOffset(SUB_LOOP, runInfo.vecMbaseIdx);
         constexpr uint16_t elementSize = 32U;
@@ -701,7 +705,7 @@ private:
         // dependencies retroactively. Complete normalization before reading it.
         PipeBarrier<PIPE_V>();
         if constexpr (HAS_ATTEN) {
-            // 使用所有 S2 loop 累计后的 max 判断整行是否始终无有效 key。
+            // Use the maximum accumulated across all S2 loops to detect rows with no valid key throughout.
             LocalTensor<float> maxUb = softmaxMaxBuf_[runInfo.mLoop % (PRELOAD_N + 1U)]
                                            .template Get<float>()[runInfo.vecMbaseIdx * VEC_M_BASE];
             FaVectorApi::RowInvalidUpdateVF<MM_T>(vec2ResUb, maxUb, runInfo.actVecMSize, constInfo.dSizeV,
@@ -711,7 +715,7 @@ private:
             // read/write the overlapping address range.
             PipeBarrier<PIPE_V>();
         }
-        // 按 TND token/head stride 写回。
+        // Write back using TND token/head strides.
         LocalTensor<OUTPUT_T> attenOut;
         attenOut.SetAddr(vec2ResUb.address_);
         Cast(attenOut, vec2ResUb, RoundMode::CAST_ROUND, static_cast<int64_t>(runInfo.actVecMSize) * dTemplateAlign64);

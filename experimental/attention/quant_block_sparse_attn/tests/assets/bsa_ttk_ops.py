@@ -495,18 +495,18 @@ def _should_pack_combined_kv():
     try:
         from ttk.utilities import get_global_storage
     except (ImportError, ModuleNotFoundError):
-        # pytest、直接调用或未安装 TTK：维持原来的正常 pack 行为
+        # For pytest, direct calls, or environments without TTK, preserve normal packing behavior.
         return True
 
     switches = get_global_storage()
 
-    # 非 TTK E2E 环境保持原行为
+    # Preserve original behavior outside the TTK E2E environment.
     if getattr(switches, "test_mode", None) != "framework-api":
         return True
 
-    # TTK E2E：
-    # 带 --plugin    -> plugin_path 非空 -> 正常 pack
-    # 不带 --plugin  -> plugin_path 为空 -> 负向用例不 pack
+    # TTK E2E:
+    # With --plugin: plugin_path is nonempty; pack normally.
+    # Without --plugin: plugin_path is empty; skip packing for negative test cases.
     return bool(getattr(switches, "plugin_path", None))
 
 

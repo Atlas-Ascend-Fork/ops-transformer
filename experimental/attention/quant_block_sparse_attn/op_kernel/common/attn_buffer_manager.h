@@ -10,7 +10,7 @@
 
 /*!
  * \file buffer_manager.h
- * \brief buffer内存管理
+ * \brief Buffer memory management.
  */
 #ifndef BUFFER_MANAGER_H
 #define BUFFER_MANAGER_H
@@ -40,7 +40,7 @@ public:
         mem_ = tbuf.template Get<uint8_t>();
     }
 
-    // 静态Tensor使用这个函数
+    // Use this function for static tensors.
     __aicore__ inline void Init(uint32_t size)
     {
         static_assert(bufferType != BufferType::GM, "GM should use workspace.");

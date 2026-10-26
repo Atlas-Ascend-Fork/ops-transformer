@@ -266,8 +266,8 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateVF(__ubuf__ T2* x_exp, __ubuf__ flo
             Cast<T2, T, castTraitZero>(vreg_x_exp_odd_bf16_1, vreg_x_exp_3, preg_135);
             DeInterleave(vreg_x_exp_bf16_1_pack, vreg_x_exp_bf16_1_packa, vreg_x_exp_even_bf16_1,
                          vreg_x_exp_odd_bf16_1);
-            /* vreg_x_exp_bf16_pack会不连续的存储在x_exp上，shape为2*4*64*16， 其中每64*16个的head之间跳129 * 16
-                个数，中间跳的部分就是vreg_x_exp_bf16_1_pack的 */
+            /* vreg_x_exp_bf16_pack is stored noncontiguously in x_exp with shape 2*4*64*16; heads of 64*16 elements are
+               separated by 129*16 elements, with vreg_x_exp_bf16_1_pack occupying the gaps. */
             StoreAlign<T2, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                 ((__ubuf__ T2*&)x_exp), vreg_x_exp_bf16_pack, blockStride, repeatStride, preg_136);
             Add(vreg_x_sum_0, vreg_x_exp_0, vreg_x_sum_0, preg_134);
@@ -339,8 +339,8 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateVF(__ubuf__ T2* x_exp, __ubuf__ flo
             Cast<T2, T, castTraitZero>(vreg_x_exp_even_f16_1, vreg_x_exp_1, preg_135);
             Cast<T2, T, castTraitZero>(vreg_x_exp_odd_f16_1, vreg_x_exp_3, preg_135);
             DeInterleave(vreg_x_exp_f16_1_pack, vreg_x_exp_f16_1_packa, vreg_x_exp_even_f16_1, vreg_x_exp_odd_f16_1);
-            /* vreg_x_exp_f16_pack会不连续的存储在x_exp上，shape为2*4*64*16， 其中每64*16个的head之间跳129 * 16
-                个数，中间跳的部分就是vreg_x_exp_f16_1_pack的 */
+            /* vreg_x_exp_f16_pack is stored noncontiguously in x_exp with shape 2*4*64*16; heads of 64*16 elements are
+               separated by 129*16 elements, with vreg_x_exp_f16_1_pack occupying the gaps. */
             StoreAlign<T2, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                 ((__ubuf__ T2*&)x_exp), vreg_x_exp_f16_pack, blockStride, repeatStride, preg_136);
             Add(vreg_x_sum_0, vreg_x_exp_0, vreg_x_sum_0, preg_134);
@@ -652,8 +652,8 @@ __simd_vf__ inline void ProcessVec1DnUpdateVF(__ubuf__ T2* x_exp, __ubuf__ float
             Cast<T2, T, castTraitZero>(vreg_x_exp_odd_bf16_1, vreg_x_exp_3, preg_135);
             DeInterleave(vreg_x_exp_bf16_1_pack, vreg_x_exp_bf16_1_packa, vreg_x_exp_even_bf16_1,
                          vreg_x_exp_odd_bf16_1);
-            /* vreg_x_exp_bf16_pack会不连续的存储156在x_exp上，shape为2*4*64*16， 其中每64*16个的head之间跳129 * 16
-                个数，中间跳的部分就是vreg_x_exp_bf16_1_pack的 */
+            /* vreg_x_exp_bf16_pack is stored noncontiguously in x_exp with shape 2*4*64*16; heads of 64*16 elements are
+               separated by 129*16 elements, with vreg_x_exp_bf16_1_pack occupying the gaps. */
             StoreAlign<T2, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                 ((__ubuf__ T2*&)x_exp), vreg_x_exp_bf16_pack, blockStride, repeatStride, preg_136);
             Add(vreg_x_sum_0, vreg_x_exp_0, vreg_x_sum_0, preg_134);
@@ -726,8 +726,8 @@ __simd_vf__ inline void ProcessVec1DnUpdateVF(__ubuf__ T2* x_exp, __ubuf__ float
 
             DeInterleave(vreg_x_exp_f16_1_pack, vreg_x_exp_f16_1_packa, vreg_x_exp_even_f16_1, vreg_x_exp_odd_f16_1);
 
-            /* vreg_x_exp_f16_pack会不连续的存储在x_exp上，shape为2*4*64*16， 其中每64*16个的head之间跳129 * 16
-                个数，中间跳的部分就是vreg_x_exp_f16_1_pack的 */
+            /* vreg_x_exp_f16_pack is stored noncontiguously in x_exp with shape 2*4*64*16; heads of 64*16 elements are
+               separated by 129*16 elements, with vreg_x_exp_f16_1_pack occupying the gaps. */
             StoreAlign<T2, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                 ((__ubuf__ T2*&)x_exp), vreg_x_exp_f16_pack, blockStride, repeatStride, preg_136);
             Add(vreg_x_sum_0, vreg_x_exp_0, vreg_x_sum_0, preg_134);
@@ -956,7 +956,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateMxfp8VF(__ubuf__ T2* x_exp, __ubuf_
     Duplicate<T, Reg::MaskMergeMode::ZEROING, T>(vreg_x_sum_7, 0, preg_134);
     RegTensor<uint8_t> idx_nd2nz;
     LoadAlign(idx_nd2nz, indexesUb);
-    uint16_t loopNum = ubN / 8; // ubN：s2BaseSize = 256
+    uint16_t loopNum = ubN / 8; // ubN:s2BaseSize = 256
 
     if constexpr (hasAtten == true) {
         LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
@@ -1011,7 +1011,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateMxfp8VF(__ubuf__ T2* x_exp, __ubuf_
         FusedExpSub(vreg_x_exp_4, vreg_x_f32_4, max0, preg_134);
         FusedExpSub(vreg_x_exp_5, vreg_x_f32_5, max0, preg_134);
         FusedExpSub(vreg_x_exp_6, vreg_x_f32_6, max0, preg_134);
-        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i softmax分子
+        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i: softmax numerator.
 
         Cast<T2, T, castTraitRintZero>(vreg_x_exp_fp8_1, vreg_x_exp_4, preg_135);
         Add(vreg_x_sum_4, vreg_x_exp_4, vreg_x_sum_4, preg_134);
@@ -1320,7 +1320,7 @@ __simd_vf__ inline void ProcessVec1DnUpdateMxfp8VF(
         FusedExpSub(vreg_x_exp_4, vreg_x_f32_4, max0, preg_134);
         FusedExpSub(vreg_x_exp_5, vreg_x_f32_5, max0, preg_134);
         FusedExpSub(vreg_x_exp_6, vreg_x_f32_6, max0, preg_134);
-        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i softmax分子
+        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i: softmax numerator.
 
         Cast<T2, T, castTraitRintZero>(vreg_x_exp_fp8_1, vreg_x_exp_4, preg_135);
         Add(vreg_x_sum_4, vreg_x_exp_4, vreg_x_sum_4, preg_134);
@@ -1755,8 +1755,8 @@ __simd_vf__ inline void ProcessVec1DnCausalVF(
             Cast<T2, T, castTraitZero>(vreg_x_exp_odd_bf16_1, vreg_x_exp_3, preg_135);
             DeInterleave(vreg_x_exp_bf16_1_pack, vreg_x_exp_bf16_1_packa, vreg_x_exp_even_bf16_1,
                          vreg_x_exp_odd_bf16_1);
-            /* vreg_x_exp_bf16_pack会不连续的存储156在x_exp上，shape为2*4*64*16， 其中每64*16个的head之间跳129 * 16
-                个数，中间跳的部分就是vreg_x_exp_bf16_1_pack的 */
+            /* vreg_x_exp_bf16_pack is stored noncontiguously in x_exp with shape 2*4*64*16; heads of 64*16 elements are
+               separated by 129*16 elements, with vreg_x_exp_bf16_1_pack occupying the gaps. */
             StoreAlign<T2, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                 ((__ubuf__ T2*&)x_exp), vreg_x_exp_bf16_pack, blockStride, repeatStride, preg_136);
             Add(vreg_x_sum_0, vreg_x_exp_0, vreg_x_sum_0, preg_134);
@@ -1829,8 +1829,8 @@ __simd_vf__ inline void ProcessVec1DnCausalVF(
 
             DeInterleave(vreg_x_exp_f16_1_pack, vreg_x_exp_f16_1_packa, vreg_x_exp_even_f16_1, vreg_x_exp_odd_f16_1);
 
-            /* vreg_x_exp_f16_pack会不连续的存储在x_exp上，shape为2*4*64*16， 其中每64*16个的head之间跳129 * 16
-                个数，中间跳的部分就是vreg_x_exp_f16_1_pack的 */
+            /* vreg_x_exp_f16_pack is stored noncontiguously in x_exp with shape 2*4*64*16; heads of 64*16 elements are
+               separated by 129*16 elements, with vreg_x_exp_f16_1_pack occupying the gaps. */
             StoreAlign<T2, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                 ((__ubuf__ T2*&)x_exp), vreg_x_exp_f16_pack, blockStride, repeatStride, preg_136);
             Add(vreg_x_sum_0, vreg_x_exp_0, vreg_x_sum_0, preg_134);
@@ -1929,8 +1929,9 @@ __aicore__ inline void ProcessVec1VfDn(const LocalTensor<T2>& dstTensor, const L
                                        const float sinkValue = 0.0f)
 {
     if constexpr (!isUpdate) {
-        // 索引序列，用于在VF代码中量化cast后的gather指令
-        // 在对计算结果进行cast之后，数据从fp32转换成了fp8，可能会得到一个乱序的非紧密排布的结果，需要定义一个索引序列来把结果调整正确
+        // Index sequence for gather instructions after the quantization cast in VF code.
+        // Casting results from FP32 to FP8 may produce reordered, noncontiguous data; define an index sequence to
+        // restore the correct order.
         LocalTensor<uint8_t> indexesTensor;
         if constexpr (IsSameType<T2, fp8_e5m2_t>::value || IsSameType<T2, fp8_e4m3fn_t>::value ||
                       IsSameType<T2, hifloat8_t>::value) {
@@ -2074,7 +2075,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadVF(
             Mul(src1, src1, vreg_qscale_vec, preg_135);
             Mul(src2, src2, vreg_qscale_vec, preg_135);
             Mul(src3, src3, vreg_qscale_vec, preg_135);
-            // 4份ub，解bank冲突
+            // Use four UB regions to resolve bank conflicts.
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + iter_m * 4);
             Mul(src0, src0, vreg_kscale_val, preg_135);
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + NUM_264 + iter_m * 4 + 1);
@@ -2117,7 +2118,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadVF(
             Mul(src1, src1, vreg_qscale_vec, preg_135);
             Mul(src2, src2, vreg_qscale_vec, preg_135);
             Mul(src3, src3, vreg_qscale_vec, preg_135);
-            // 4份ub，解bank冲突
+            // Use four UB regions to resolve bank conflicts.
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + iter_m * 4);
             Mul(src0, src0, vreg_kscale_val, preg_135);
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + NUM_264 + iter_m * 4 + 1);
@@ -2317,7 +2318,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadTailVF(
     Duplicate(vreg_min, minValue);
     Duplicate(vreg_local_max, minValue);
 
-    // qscale和kscale应用循环
+    // Loop applying qscale and kscale.
     LoadAlign(vreg_qscale_vec, qScaleUb);
     Muls(vreg_qscale_vec, vreg_qscale_vec, dScale, preg_108);
     for (uint16_t iter_m = 0; iter_m < uint16_t(ubN / 4); ++iter_m) {
@@ -2331,7 +2332,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadTailVF(
         Mul(vreg_data_tmp1, vreg_data_tmp1, vreg_qscale_vec, preg_135);
         Mul(vreg_data_tmp2, vreg_data_tmp2, vreg_qscale_vec, preg_135);
         Mul(vreg_data_tmp3, vreg_data_tmp3, vreg_qscale_vec, preg_135);
-        // 4份ub，解bank冲突
+        // Use four UB regions to resolve bank conflicts.
         LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + iter_m * 4);
         Mul(vreg_data_tmp0, vreg_data_tmp0, vreg_kscale_val, preg_135);
         LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + NUM_264 + iter_m * 4 + 1);
@@ -2598,7 +2599,7 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadVF(
             Mul(src1, src1, vreg_qscale_vec, preg_135);
             Mul(src2, src2, vreg_qscale_vec, preg_135);
             Mul(src3, src3, vreg_qscale_vec, preg_135);
-            // 4份ub，解bank冲突
+            // Use four UB regions to resolve bank conflicts.
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + iter_m * 4);
             Mul(src0, src0, vreg_kscale_val, preg_135);
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + NUM_264 + iter_m * 4 + 1);
@@ -2641,7 +2642,7 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadVF(
             Mul(src1, src1, vreg_qscale_vec, preg_135);
             Mul(src2, src2, vreg_qscale_vec, preg_135);
             Mul(src3, src3, vreg_qscale_vec, preg_135);
-            // 4份ub，解bank冲突
+            // Use four UB regions to resolve bank conflicts.
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + iter_m * 4);
             Mul(src0, src0, vreg_kscale_val, preg_135);
             LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + NUM_264 + iter_m * 4 + 1);
@@ -2850,7 +2851,7 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadTailVF(
     Duplicate(vreg_min, minValue);
     Duplicate(vreg_local_max, minValue);
 
-    // qscale和kscale应用循环
+    // Loop applying qscale and kscale.
     LoadAlign(vreg_qscale_vec, qScaleUb);
     Muls(vreg_qscale_vec, vreg_qscale_vec, dScale, preg_108);
     for (uint16_t iter_m = 0; iter_m < uint16_t(ubN / 4); ++iter_m) {
@@ -2864,7 +2865,7 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadTailVF(
         Mul(vreg_data_tmp1, vreg_data_tmp1, vreg_qscale_vec, preg_135);
         Mul(vreg_data_tmp2, vreg_data_tmp2, vreg_qscale_vec, preg_135);
         Mul(vreg_data_tmp3, vreg_data_tmp3, vreg_qscale_vec, preg_135);
-        // 4份ub，解bank冲突
+        // Use four UB regions to resolve bank conflicts.
         LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + iter_m * 4);
         Mul(vreg_data_tmp0, vreg_data_tmp0, vreg_kscale_val, preg_135);
         LoadAlign<float, Reg::LoadDist::DIST_BRC_B32>(vreg_kscale_val, kScaleUb + NUM_264 + iter_m * 4 + 1);
@@ -3316,7 +3317,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateHif8VF(__ubuf__ T2* x_exp, __ubuf__
     Duplicate<T, Reg::MaskMergeMode::ZEROING, T>(vreg_x_sum_7, 0, preg_134);
     RegTensor<uint8_t> idx_nd2nz;
     LoadAlign(idx_nd2nz, indexesUb);
-    uint16_t loopNum = ubN / 8; // ubN：s2BaseSize = 256
+    uint16_t loopNum = ubN / 8; // ubN:s2BaseSize = 256
 
     if constexpr (hasAtten) {
         LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
@@ -3371,7 +3372,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateHif8VF(__ubuf__ T2* x_exp, __ubuf__
         FusedExpSub(vreg_x_exp_4, vreg_x_f32_4, max0, preg_134);
         FusedExpSub(vreg_x_exp_5, vreg_x_f32_5, max0, preg_134);
         FusedExpSub(vreg_x_exp_6, vreg_x_f32_6, max0, preg_134);
-        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i softmax分子
+        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i: softmax numerator.
 
         Cast<T2, T, castTraitZero>(vreg_x_exp_fp8_1, vreg_x_exp_4, preg_135);
         Add(vreg_x_sum_4, vreg_x_exp_4, vreg_x_sum_4, preg_134);
@@ -3605,7 +3606,7 @@ __simd_vf__ inline void ProcessVec1DnUpdateHif8VF(__ubuf__ T2* x_exp, __ubuf__ f
         FusedExpSub(vreg_x_exp_4, vreg_x_f32_4, max0, preg_134);
         FusedExpSub(vreg_x_exp_5, vreg_x_f32_5, max0, preg_134);
         FusedExpSub(vreg_x_exp_6, vreg_x_f32_6, max0, preg_134);
-        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i softmax分子
+        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i: softmax numerator.
 
         Cast<T2, T, castTraitZero>(vreg_x_exp_fp8_1, vreg_x_exp_4, preg_135);
         Add(vreg_x_sum_4, vreg_x_exp_4, vreg_x_sum_4, preg_134);

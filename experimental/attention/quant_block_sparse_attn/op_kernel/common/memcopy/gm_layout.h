@@ -46,7 +46,7 @@ enum class GmFormat {
     SBNGD = 19,
     SBND = 20,
     NTGD = 21,
-    TND2 = 22, // VSCALE, 尾轴2
+    TND2 = 22, // VSCALE: last dimension is 2.
     PA_NZ_K_SCALE = 23,
     NGT = 24,
     TNG = 25,

@@ -53,9 +53,9 @@ __aicore__ inline void MxCopyScaleToL1Nd2Nz(const LocalTensor<INPUT_T>& l1Tensor
                                             uint32_t nValue, uint32_t dValue, uint32_t srcDValue,
                                             uint32_t dstNzC0Stride)
 {
-    // MXFP8 scale 为 fp8_e8m0，但 scale 搬运路径按 bf16 粒度执行。
-    // value scale 的 GM shape 是 [physicalBlock, N, blockSize/64, DV, 2]，最后一维两个 e8m0
-    // reinterpret 成一个 bf16 lane，因此压缩的是 D 方向，block 内 token group 行数不能除以 2。
+    // MXFP8 scales use fp8_e8m0, but the scale transfer path operates at BF16 granularity.
+    // Value scale GM shape is [physicalBlock,N,blockSize/64,DV,2]; the last two e8m0 elements
+    // are reinterpreted as one BF16 lane. This compresses D, so do not halve the token-group row count within a block.
     Nd2NzParams gm2L1Nd2NzParams;
     gm2L1Nd2NzParams.ndNum = 1;
     gm2L1Nd2NzParams.nValue = nValue;
@@ -76,11 +76,11 @@ template <typename INPUT_T>
 __aicore__ inline void MxCopyScaleToL1Dn2Nz(const LocalTensor<INPUT_T>& l1Tensor, const GlobalTensor<INPUT_T>& gmTensor,
                                             uint32_t nValue, uint32_t dValue, uint32_t srcDValue)
 {
-    // DN2NZ 版本用于跟随 BMM1 转置操作数的 scale。
-    // QScale GM shape 为 [T,N,D/64,2]；KScale GM shape 为 [blockNum,N,blockSize,D/64,2]。
-    // reinterpret 为 bf16 后，
-    // 最后一维两个 e8m0 元素变成一个拷贝元素。这样可以保证 Q/K 按转置语义
-    // 被 MX LoadData 消费时，scale layout 与数据 layout 对齐。
+    // The DN2NZ variant handles scales for transposed BMM1 operands.
+    // QScale GM shape is [T,N,D/64,2]; KScale GM shape is [blockNum,N,blockSize,D/64,2].
+    // After reinterpretation as BF16,
+    // two e8m0 elements in the last dimension become one copy element. This ensures that when Q/K are consumed
+    // by MX LoadData with transpose semantics, the scale layout matches the data layout.
     Dn2NzParams gm2L1Dn2NzParams;
     gm2L1Dn2NzParams.dnNum = 1;
     gm2L1Dn2NzParams.nValue = nValue >> 1;
@@ -102,10 +102,10 @@ __aicore__ inline void MxGmFlatScaleCopyInToL1PAForDN(LocalTensor<L1Type>& l1Ten
                                                       GlobalTensor<int32_t>& blockTableGm, const PAShape& shape,
                                                       const Position& startPos)
 {
-    // PA scale helper，用于 K per-token-group scale：
-    //   GM 逻辑 shape：[physicalBlock, N, blockSize, D/64, 2]
-    //   PA 查表流程：逻辑 token 偏移 -> block_table -> 物理 block id + block 内 token offset
-    //   L1 拷贝方式：DN2NZ，因为对应的数据操作数按转置方式加载。
+    // PA scale helper for K scales per token group:
+    //   Logical GM shape: [physicalBlock,N,blockSize,D/64,2].
+    //   PA lookup: logical token offset -> block_table -> physical block ID + token offset within the block.
+    //   Use DN2NZ for the L1 copy because the corresponding data operand is loaded transposed.
     uint32_t copyFinishRowCnt = 0;
     uint64_t blockTableBaseOffset = static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch;
     uint64_t curS2Idx = startPos.s2Offset;
@@ -134,10 +134,10 @@ __aicore__ inline void MxGmFlatScaleCopyInToL1PAForND(LocalTensor<L1Type>& l1Ten
                                                       GlobalTensor<int32_t>& blockTableGm, const PAShape& shape,
                                                       const Position& startPos)
 {
-    // PA scale helper，用于 value per-channel-group scale：
-    // GM 逻辑 shape：[physicalBlock, N, blockSize/64, DV, 2]
-    // 每个拷贝行覆盖 block 内 64 个 value token。
-    // 这里使用 ND2NZ，因为 V 在 BMM2 中作为非转置右操作数被消费。
+    // PA scale helper for value scales per channel group:
+    // Logical GM shape: [physicalBlock,N,blockSize/64,DV,2].
+    // Each copied row covers 64 value tokens within a block.
+    // Use ND2NZ because V is consumed as the non-transposed right operand in BMM2.
     uint32_t copyFinishRowCnt = 0;
     uint64_t blockTableBaseOffset = static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch;
     uint64_t curS2Idx = startPos.s2Offset;

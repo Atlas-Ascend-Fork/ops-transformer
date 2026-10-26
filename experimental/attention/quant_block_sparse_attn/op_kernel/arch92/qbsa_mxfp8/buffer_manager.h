@@ -10,7 +10,7 @@
 
 /*!
  * \file buffer_manager.h
- * \brief buffer内存管理
+ * \brief Buffer memory management.
  */
 #ifndef BUFFER_MANAGER_H
 #define BUFFER_MANAGER_H

@@ -500,7 +500,7 @@ __simd_vf__ inline void ComputeLseOutputVF(__ubuf__ T* srcSumUb, __ubuf__ T* src
     Reg::RegTensor<float> vregInfValue;
     Reg::MaskReg pregCompare;
     constexpr uint32_t dealRows = 8;
-    constexpr uint32_t floatRepSize = 64; // 64: 一个寄存器存64个float
+    constexpr uint32_t floatRepSize = 64; // 64: one register holds 64 float values.
     constexpr float infValue = 3e+99;     // 3e+99 for float inf
     const float minValue = *((float*)&min);
     uint16_t updateLoops = dealCount / dealRows;
@@ -669,7 +669,7 @@ __simd_vf__ inline void RowInvalidUpdateVF(__ubuf__ T* finalUb, __ubuf__ float* 
                                            const uint16_t d, int64_t dSize, const uint32_t pltTailD,
                                            const uint16_t hasTail, const uint32_t min = 0xFF7FFFFF)
 {
-    constexpr uint16_t floatRepSize = 64; // 64: 一个寄存器可以存储64个float类型数据
+    constexpr uint16_t floatRepSize = 64; // 64: one register can hold 64 float values.
     const uint16_t dLoops = d / floatRepSize;
 
     constexpr uint32_t tmpZero = 0x00000000; // zero value of fp16 and fp32

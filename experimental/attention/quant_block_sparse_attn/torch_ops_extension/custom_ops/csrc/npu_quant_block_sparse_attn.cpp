@@ -45,9 +45,9 @@ void CheckPaddedQueryInputs(const at::Tensor& query, const at::Tensor& qDescale,
         "BSND/BNSD q_descale must match Q batch/sequence/head axes and [ceil(D/64),2]");
 }
 
-// 工具函数，推导输出 attention_out / softmax_lse 的 shape 与 dtype
-//   - attention_out: BF16，保持 Q 布局（NTD 转为 TND），末维取 Value 的 Dv
-//   - softmax_lse: FLOAT32，FP8 为 (N1,T)，MXFP8 TND 为 (T,N1)，BSND/BNSD 为 (B,N1,S)
+// Helper to infer attention_out / softmax_lse shapes and data types.
+//   - attention_out: BF16; preserve the Q layout (convert NTD to TND) and use Value's Dv as the last dimension.
+//   - softmax_lse: FLOAT32; FP8 uses (N1,T), MXFP8 TND uses (T,N1), and BSND/BNSD use (B,N1,S).
 std::tuple<at::Tensor, at::Tensor> construct_bsa_output_tensors(const at::Tensor& query, const at::Tensor& value,
                                                                 c10::string_view layout_q, c10::string_view layout_out,
                                                                 int64_t quant_mode, bool return_softmax_lse)
@@ -102,7 +102,7 @@ std::tuple<at::Tensor, at::Tensor> construct_bsa_output_tensors(const at::Tensor
     return std::tuple<at::Tensor, at::Tensor>(attention_out, softmax_lse);
 }
 
-// step2, 为NPU设备实现前向接口（函数形参顺序 = schema 顺序）
+// Step 2: implement the forward interface for NPU devices; parameter order follows the schema.
 std::tuple<at::Tensor, at::Tensor> npu_quant_block_sparse_attn_npu(
     const at::Tensor& query, const at::Tensor& key, const at::Tensor& value, const at::Tensor& q_descale,
     const at::Tensor& k_descale, const at::Tensor& v_descale, const c10::optional<at::Tensor>& p_scale,
@@ -212,8 +212,8 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_block_sparse_attn_npu(
     char* layout_sparse_indices_ptr = const_cast<char*>(layout_sparse_indices_str.c_str());
     char* layout_out_ptr = const_cast<char*>(layout_out_str.c_str());
 
-    // aclnn 框架不接受 nullptr aclTensor*：将未提供的 optional p_scale 归一化为 numel=0 空 tensor。
-    // dtype 须匹配 CheckScaleDtype：FP8->FLOAT, MXFP8->FLOAT8_E8M0
+    // The aclnn framework rejects nullptr aclTensor*; normalize an absent optional p_scale to an empty tensor with
+    // numel=0. Match CheckScaleDtype: FP8 -> FLOAT; MXFP8 -> FLOAT8_E8M0.
     at::Tensor p_scale_placeholder;
     const at::Tensor* p_scale_arg;
     if (p_scale.has_value() && p_scale.value().defined()) {
@@ -225,7 +225,8 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_block_sparse_attn_npu(
         p_scale_arg = &p_scale_placeholder;
     }
 
-    // EXEC_NPU_CMD_V1 实参顺序 = 算子 IR 声明顺序（输入 -> 属性 -> 输出），与 schema 形参顺序不同
+    // EXEC_NPU_CMD_V1 argument order follows operator IR declarations (inputs -> attributes -> outputs), unlike schema
+    // parameter order.
     EXEC_NPU_CMD_V1(aclnnQuantBlockSparseAttn, query, key, value, q_descale, k_descale, v_descale, sparse_indices,
                     sparse_seq_len, *p_scale_arg, cu_seqlens_q, cu_seqlens_kv, seqused_q, seqused_kv, block_table,
                     atten_mask, metadata, softmax_scale, sparse_q_block_size, sparse_kv_block_size, layout_kv_ptr,
@@ -235,7 +236,7 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_block_sparse_attn_npu(
     return std::tuple<at::Tensor, at::Tensor>(attention_out, softmax_lse);
 }
 
-// step3, 为META设备实现前向接口
+// Step 3: implement the forward interface for META devices.
 std::tuple<at::Tensor, at::Tensor> npu_quant_block_sparse_attn_meta(
     const at::Tensor& query, const at::Tensor& key, const at::Tensor& value, const at::Tensor& q_descale,
     const at::Tensor& k_descale, const at::Tensor& v_descale, const c10::optional<at::Tensor>& p_scale,
@@ -252,13 +253,13 @@ std::tuple<at::Tensor, at::Tensor> npu_quant_block_sparse_attn_meta(
 }
 } // namespace custom
 
-// step4, 为NPU设备注册前向实现
+// Step 4: register the forward implementation for NPU devices.
 TORCH_LIBRARY_IMPL(custom, PrivateUse1, m)
 {
     m.impl("npu_quant_block_sparse_attn", &custom::npu_quant_block_sparse_attn_npu);
 }
 
-// step5, 为META设备注册前向实现
+// Step 5: register the forward implementation for META devices.
 TORCH_LIBRARY_IMPL(custom, Meta, m)
 {
     m.impl("npu_quant_block_sparse_attn", &custom::npu_quant_block_sparse_attn_meta);

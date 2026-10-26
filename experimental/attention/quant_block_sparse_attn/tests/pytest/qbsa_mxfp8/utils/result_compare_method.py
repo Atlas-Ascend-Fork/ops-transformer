@@ -49,7 +49,7 @@ def _display_offsets(total_count):
 
 
 def get_compare_tolerance(npu_result):
-    """返回与 check_result 完全一致的逐元素 rtol/atol。"""
+    """Return per-element rtol/atol values identical to those used by check_result."""
     if isinstance(npu_result, torch.Tensor) and npu_result.dtype == torch.bfloat16:
         return _BF16_RTOL, _BF16_ATOL
     return _DEFAULT_RTOL, _DEFAULT_ATOL
@@ -276,7 +276,7 @@ def save_precision_map(
     max_display_rows=2048,
     max_display_cols=2048,
 ):
-    """生成白色通过、蓝色失败的逐元素精度分布图；大 Tensor 按区域聚合显示。"""
+    """Plot per-element accuracy with white for passes and blue for failures; aggregate large tensors by region."""
     try:
         import matplotlib
 
@@ -321,7 +321,7 @@ def save_precision_map(
         display_mask = torch.zeros((display_rows, display_cols), dtype=torch.uint8)
         fail_count = 0
 
-        # 按最终图片的一行分块比较，避免 MIX 大用例额外构造完整 FP32 失败矩阵。
+        # Compare one row chunk of the final image at a time to avoid allocating a full FP32 failure matrix for large MIX cases.
         for display_row in range(display_rows):
             source_row_begin = display_row * logical_rows // display_rows
             source_row_end = (display_row + 1) * logical_rows // display_rows

@@ -11,10 +11,10 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 
-// 在custom命名空间里注册quant_block_sparse_attn算子，每次新增自定义aten ir都需先增加定义
-// step1, 为新增自定义算子添加定义
-//   - schema 入参顺序：必选张量 + 必选标量在前，'*' 之后为可选张量与带默认值的属性
-//   - 张量 dtype / 属性默认值对齐 op_host/quant_block_sparse_attn_def.cpp
+// Register quant_block_sparse_attn in the custom namespace; add a definition before introducing each custom ATen IR.
+// Step 1: add a definition for the new custom operator.
+//   - Schema argument order: required tensors and scalars first; optional tensors and defaulted attributes follow '*'.
+//   - Match tensor data types and attribute defaults in op_host/quant_block_sparse_attn_def.cpp.
 TORCH_LIBRARY(custom, m)
 {
     m.def("npu_quant_block_sparse_attn(Tensor query, Tensor key, Tensor value, "
@@ -34,7 +34,5 @@ TORCH_LIBRARY(custom, m)
           "str layout_q='TND', str layout_kv='PA_BNBD', str layout_sparse_indices='B_N_Qb_Kb') -> Tensor");
 }
 
-// 通过pybind将c++接口和python接口绑定，这里绑定的是接口不是算子
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
-{
-}
+// Bind the C++ and Python interfaces through pybind; this binds an interface, not an operator.
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {}

@@ -57,7 +57,7 @@ struct CubeCoordInfo {
     uint32_t curBIdx;
     uint32_t s1Coord;
     uint32_t s2Coord;
-    int32_t sparseBlockIdx[2]; // QBSA: 当前迭代的 2 个 sparse block index
+    int32_t sparseBlockIdx[2]; // QBSA: two sparse block indices for the current iteration.
 };
 
 __aicore__ constexpr uint16_t Align64Func(uint16_t data)
@@ -106,7 +106,7 @@ __aicore__ constexpr TPosition GetC2Position()
     X(isPa, bool, false) \
     X(useDn, bool, false)
 
-/* 1. 生成带默认值的模版Template */
+/* 1. Generate Template with default values. */
 #define GEN_TYPE_PARAM(name) typename name,
 #define GEN_CONST_PARAM(name, type, default_val) type name = default_val,
 
@@ -114,7 +114,7 @@ __aicore__ constexpr TPosition GetC2Position()
     template <CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_TYPE_PARAM) CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_CONST_PARAM) bool end = \
                   true>
 
-/* 2. 生成不带带默认值的模版Template */
+/* 2. Generate Template without default values. */
 #define GEN_TEMPLATE_TYPE_NODEF(name) typename name,
 #define GEN_TEMPLATE_CONST_NODEF(name, type, default_val) type name,
 
@@ -122,26 +122,26 @@ __aicore__ constexpr TPosition GetC2Position()
     template <CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_TEMPLATE_TYPE_NODEF) \
                   CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_TEMPLATE_CONST_NODEF) bool end>
 
-/* 3. 生成有默认值, 不带ChildClass的Args */
+/* 3. Generate Args with default values and without ChildClass. */
 #define GEN_ARG_NAME(name, ...) name,
 #define TEMPLATE_ARGS \
     CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_ARG_NAME) \
     CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_ARG_NAME) \
     end
 
-/* 4. 生成BASE的有默认值的Template, BASE带ChildClass */
+/* 4. Generate the BASE Template with default values and ChildClass. */
 
 #define TEMPLATES_DEF_BASE \
     template <typename ChildClass, CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_TYPE_PARAM) \
                                        CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_CONST_PARAM) bool end = true>
 
-/* 5. 生成BASE的没有默认值的Template, BASE带ChildClass */
+/* 5. Generate the BASE Template without default values and with ChildClass. */
 
 #define TEMPLATES_DEF_BASE_NO_DEFAULT \
     template <typename ChildClass, CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_TEMPLATE_TYPE_NODEF) \
                                        CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_TEMPLATE_CONST_NODEF) bool end>
 
-/* 6. 生成BASE的BaseArgs, BASE带ChildClass */
+/* 6. Generate BaseArgs for BASE with ChildClass. */
 #define TEMPLATE_BASE_ARGS \
     ChildClass, CUBE_BLOCK_TRAITS_TYPE_FIELDS(GEN_ARG_NAME) CUBE_BLOCK_TRAITS_CONST_FIELDS(GEN_ARG_NAME) end
 

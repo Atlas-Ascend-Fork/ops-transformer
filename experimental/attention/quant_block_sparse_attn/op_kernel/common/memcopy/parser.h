@@ -38,8 +38,8 @@ class ActualSeqLensParser<ActualSeqLensMode::ACCUM, ACTLEN_T, false> {
 public:
     __aicore__ inline ActualSeqLensParser() = default;
 
-    // actualSeqLengthsGm:[3, 6, 8], 长度是batch_size, batch_size=3
-    // actualLenDims表示actualSeqLengthsGm的长度, 上面的例子中actualLenDims=3
+    // actualSeqLengthsGm: [3,6,8], with length batch_size; batch_size=3.
+    // actualLenDims is the length of actualSeqLengthsGm; actualLenDims=3 in the example above.
     // TBase(bIdx) = (bIdx == 0) ? 0 : actualSeqLengthsGm[bIdx - 1]
     // ActualSeqLength(bIdx) = actualSeqLengthsGm[bIdx] - ((bIdx == 0) ? 0 : actualSeqLengthsGm[bIdx - 1])
     // TSize = actualSeqLengthsGm[actualLenDims - 1]
@@ -104,8 +104,8 @@ class ActualSeqLensParser<ActualSeqLensMode::ACCUM, ACTLEN_T, true> {
 public:
     __aicore__ inline ActualSeqLensParser() = default;
 
-    // actualSeqLengthsGm:[0, 3, 6, 8], 长度是batch_size+1, batch_size=3
-    // actualLenDims表示actualSeqLengthsGm的长度, 上面的例子中actualLenDims=4
+    // actualSeqLengthsGm: [0,3,6,8], with length batch_size+1; batch_size=3.
+    // actualLenDims is the length of actualSeqLengthsGm; actualLenDims=4 in the example above.
     // TBase(bIdx) = actualSeqLengthsGm[bIdx]
     // ActualSeqLength(bIdx) = actualSeqLengthsGm[bIdx + 1] - actualSeqLengthsGm[bIdx]
     // TSize = actualSeqLengthsGm[actualLenDims - 1]

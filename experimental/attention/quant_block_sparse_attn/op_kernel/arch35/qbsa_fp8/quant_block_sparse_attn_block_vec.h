@@ -58,8 +58,8 @@ public:
     static constexpr bool POST_QUANT = false;
     static constexpr bool USE_DN = true;
     static constexpr int64_t FP8_QUANT_KV_BLOCK_SIZE = 256;
-    // 与 CUDA 空 softmax 行的 LSE=-Inf 语义一致；仅用于 LSE 输出初始化，
-    // V1 在线 max 空态哨兵仍为 VF_QBSA_EMPTY_LSE_VALUE(-FLT_MAX)。
+    // Match CUDA semantics for empty softmax rows (LSE=-Inf); used only to initialize LSE output.
+    // The V1 online maximum sentinel for empty rows remains VF_QBSA_EMPTY_LSE_VALUE (-FLT_MAX).
     static constexpr float FP8_EMPTY_LSE_VALUE = -3e+99;
     static constexpr int64_t FP8_QUANT_K_BLOCK_SIZE = 256;
     static constexpr int64_t FP8_QUANT_V_BLOCK_SIZE = 512;
@@ -284,8 +284,8 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::ProcessVec1Dn(
     if (unlikely(runInfo.s2SparseBlk2RealSize < constInfo.kvSparseBlockSize)) {
         Duplicate<float>(kScaleUbTensor, 1, s2BaseSize);
         TEventID vDoneEvent = GetTPipePtr()->AllocEventID<HardEvent::V_MTE2>();
-        SetFlag<HardEvent::V_MTE2>(vDoneEvent);  // Vector 完成
-        WaitFlag<HardEvent::V_MTE2>(vDoneEvent); // MTE2 等待
+        SetFlag<HardEvent::V_MTE2>(vDoneEvent);  // Vector completes.
+        WaitFlag<HardEvent::V_MTE2>(vDoneEvent); // MTE2 waits.
         GetTPipePtr()->ReleaseEventID<HardEvent::V_MTE2>(vDoneEvent);
     }
 
@@ -339,7 +339,7 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::ProcessVec1Dn(
     //-------------------------Data copy to l1-------------------------
     LocalTensor<INPUT_T> mm2AL1Tensor = outputBuf.GetTensor<INPUT_T>();
 
-    // 按照64对齐搬运
+    // Transfer with 64-element alignment.
     DataCopy(mm2AL1Tensor[constInfo.subBlockIdx * vec1HalfS1BaseSize *
                           Align64Func(static_cast<uint16_t>(runInfo.s2RealSize))],
              stage1CastTensor, {static_cast<uint16_t>((runInfo.s2RealSize + 63) >> 6), 64, 66, 0});
@@ -378,9 +378,9 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::ProcessVec2OnUb(
 
     int64_t vec2CalcSize = runInfo.vec2S1RealSize * dTemplateAlign64;
     float deSCaleVValue = 1.0f;
-    // QBSA: V 为 per-head 反量化，vScale shape [N2]，按 n2 head 取值。
-    // 原 deScaleKvOffset 未被赋值（未初始化），GetValue 会越界读 GM，
-    // 触发 AICore SVM page fault(507015)。
+    // QBSA: V uses per-head dequantization; vScale has shape [N2] and is indexed by the n2 head.
+    // Previously, deScaleKvOffset was uninitialized, causing GetValue to read GM out of bounds
+    // and trigger an AICore SVM page fault (507015).
     deSCaleVValue = this->deScaleVGm.GetValue(runInfo.n2oIdx);
     LocalTensor<T> vec2ResUb = this->stage2OutBuf.template Get<T>();
     LocalTensor<T> mmRes = bmm2ResBuf.template GetTensor<T>();
@@ -389,8 +389,9 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::ProcessVec2OnUb(
         DataCopy(vec2ResUb, mmRes, vec2CalcSize);
     } else {
         LocalTensor<T> expUb = softmaxExpBuf[runInfo.taskIdMod3].template Get<T>();
-        // QBSA: V per-head 反量化，前一块与当前块同为 vScale[n2oIdx]（非 FIA 的 per-block scale），
-        // 不能用 deScaleKvOffset 的 per-block ping-pong（未初始化且 -1 会越界，触发 507015）。
+        // QBSA: V uses per-head dequantization; both the previous and current blocks use vScale[n2oIdx], unlike FIA
+        // per-block scaling. Do not use deScaleKvOffset for per-block ping-pong: it is uninitialized, and -1 causes an
+        // out-of-bounds access (507015).
         float deSCalePreVValue = this->deScaleVGm.GetValue(runInfo.n2oIdx);
         if (runInfo.s2LoopCount < runInfo.s2LoopLimit) {
             if (unlikely(runInfo.s2LoopCount == 1)) {
@@ -468,8 +469,9 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::Bmm2DataCopyOut(QbsaRunInfo&
     int64_t attenOutOffset = constInfo.dSizeV;
     if constexpr (layout == QBSALayout::TND) {
         attenOutOffset = constInfo.n2GDv;
-        // QBSA: 每核独立计算一个 (n2,g) head，输出 TND [T, N1, Dv]，按 head 直写；
-        // 不走 FIA 的 GS1 合轴输出，避免把单 head 结果按 G 合并散写到错误位置。
+        // QBSA: each core independently computes one (n2,g) head and writes it directly to TND output [T,N1,Dv].
+        // Avoid FIA GS1 axis merging, which would scatter a single head's result to incorrect positions as if G heads
+        // were merged.
         if (constInfo.isGqa) {
             attenOutOffset = constInfo.dSizeV;
         }
@@ -504,7 +506,7 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::InitLocalBuffer(TPipe* pipe,
             tPipe->InitBuffer(stage2OutBuf, 64 * dTemplateAlign64 * sizeof(T));
             SoftmaxInitBuffer();
             // s1BaseSize/2 * s2BaseSize = 128/2 * 256 = 16384,
-            // 为防止硬件copy的冲突，会多开辟512
+            // Allocate an extra 512 to prevent hardware copy conflicts.
             tPipe->InitBuffer(stage1OutQue[0], 1, 16896);
             tPipe->InitBuffer(stage1OutQue[1], 1, 16896);
             if constexpr (hasAtten) {
@@ -518,7 +520,7 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::InitLocalBuffer(TPipe* pipe,
             tPipe->InitBuffer(stage1OutQue[0], 1, 16896);
             tPipe->InitBuffer(stage1OutQue[1], 1, 16896);
             if constexpr (hasAtten) {
-                // 8192 = s1BaseSize=128 * s2BaseSize=64 * 1B(mask), UB buffer 分配
+                // 8192 = s1BaseSize=128 * s2BaseSize=64 * 1 byte per mask element; allocate the UB buffer.
                 tPipe->InitBuffer(attenMaskInQue[0], 1, 8192);
                 tPipe->InitBuffer(attenMaskInQue[1], 1, 8192);
             }
@@ -700,16 +702,16 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::SoftmaxLseCopyOut(LocalTenso
         return;
     }
 
-    // 复用 qScaleInputQue 的 2048B buffer：ProcessVec1Dn 中 qScale 已先 FreeTensor 释放，
-    // 不再单独分配 softmaxLseQueue，节省一块 2048B UB。
+    // Reuse the 2048-byte qScaleInputQue buffer: ProcessVec1Dn has already released qScale through FreeTensor.
+    // Avoid a separate softmaxLseQueue allocation to save 2048 bytes of UB.
     LocalTensor<float> lseUb = this->qScaleInputQue.template AllocTensor<float>();
-    // lse 事件按次分配/释放（与 vDoneEvent 模式一致），避免长期占用事件池。
+    // Allocate and release LSE events per use, as with vDoneEvent, to avoid holding event pool entries indefinitely.
     TEventID lseVToMte3Id = GetTPipePtr()->AllocEventID<HardEvent::V_MTE3>();
     TEventID lseMte3ToMte2Id = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
 
     QbsaVectorApi::ComputeLseOutputVF<float, true>(lseUb, softmaxSumTmp, softmaxMaxTmp, runInfo.halfS1RealSize);
 
-    // Vector 写完 lseUb 后，MTE3 才能读取。
+    // MTE3 can read lseUb only after Vector finishes writing it.
     SetFlag<HardEvent::V_MTE3>(lseVToMte3Id);
     WaitFlag<HardEvent::V_MTE3>(lseVToMte3Id);
 
@@ -720,7 +722,7 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::SoftmaxLseCopyOut(LocalTenso
     intriParams1.dstStride = 0;
     DataCopyPad(this->softmaxLseGm[runInfo.softmaxLseOffset], lseUb, intriParams1);
 
-    // MTE3 读完 lseUb 后，下一轮 MTE2 才能覆写该 UB。
+    // The next MTE2 transfer can overwrite this UB only after MTE3 finishes reading lseUb.
     SetFlag<HardEvent::MTE3_MTE2>(lseMte3ToMte2Id);
     WaitFlag<HardEvent::MTE3_MTE2>(lseMte3ToMte2Id);
 

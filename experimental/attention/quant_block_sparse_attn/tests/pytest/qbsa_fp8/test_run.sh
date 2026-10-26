@@ -12,21 +12,21 @@
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 cd "$SCRIPT_DIR" || exit 1
 
-# 脚本路径
+# Script path.
 BSA_PT_SAVE_SCRIPT="test_quant_block_sparse_attn_pt_save.py"
 TEST_BSA_PT_BATCH_SCRIPT="test_quant_block_sparse_attn_batch.py"
 TEST_BSA_SINGLE_SCRIPT="test_quant_block_sparse_attn_single.py"
 TEST_BSA_GRAPH_SCRIPT="test_quant_block_sparse_attn_batch_graph.py"
 
-# ====================== 执行区======================
+# ====================== Execution ======================
 
-# 单用例算子调测
+# Debug a single operator test case.
 run_single() {
     echo "===== 执行单用例算子调测 ====="
     python3 -m pytest -rA -s $TEST_BSA_SINGLE_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
 }
 
-# 用例批量生成调试
+# Generate test cases in batches for debugging.
 run_batch() {
     echo "===== 执行用例批量生成测试 ====="
 
@@ -47,7 +47,7 @@ run_batch() {
     echo -e "\n=====执行完成！====="
 }
 
-# 图模式（aclgraph reduce-overhead）批量测试
+# Batch tests in graph mode (aclgraph reduce-overhead).
 run_graph() {
     echo "===== 执行图模式（aclgraph）批量测试 ====="
 
@@ -68,7 +68,7 @@ run_graph() {
     echo -e "\n=====执行完成！====="
 }
 
-# 显示帮助信息
+# Show help information.
 show_help() {
     echo "用法: $0 [参数]"
     echo "参数说明："
@@ -82,15 +82,15 @@ show_help() {
     echo "  $0 graph   # 执行graph模式"
 }
 
-# ====================== 主逻辑 ======================
-# 检查传入的参数数量
+# ====================== Main logic ======================
+# Check the number of input arguments.
 if [ $# -ne 1 ]; then
     echo "错误：必须传入且仅传入一个参数（single/batch/graph/help）"
     show_help
     exit 1
 fi
 
-# 根据参数执行对应函数
+# Execute the corresponding function based on the arguments.
 case "$1" in
     single)
         run_single

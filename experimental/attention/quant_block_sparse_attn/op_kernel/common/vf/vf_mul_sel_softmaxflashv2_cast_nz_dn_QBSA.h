@@ -116,14 +116,14 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + m;
     __ubuf__ float* src_ub2 = src_ub0 + m * 2;
     __ubuf__ float* src_ub3 = src_ub0 + m * 3;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -143,9 +143,9 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateVF(
     uint32_t sreg_qmask = (uint32_t)0xFFULL;
     preg_qstore8 = UpdateMask<uint16_t>(sreg_qmask);
     for (uint32_t c = 0; c < 8; ++c) {
-        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 表示元素个数
+        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 is the element count.
         Gather(vreg_data_tmp1, vreg_data_tmp0, vreg_qgather_idx);
-        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 表示元素个数
+        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 is the element count.
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
     LoadAlign(vreg_qscale_vec, qScaleUb);
@@ -220,7 +220,8 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateVF(
         LoadAlign(vreg_x_f32_2, input_x_local_UB + ubN_m_m_div_2 + i0 * m * 2);
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2);
 
-        LoadAlign(vreg_x_f32_4, input_x_local_UB + i0 * m * 2 + 64); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+        LoadAlign(vreg_x_f32_4,
+                  input_x_local_UB + i0 * m * 2 + 64); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2 + 64);
@@ -349,14 +350,14 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateAttenTailVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + m;
     __ubuf__ float* src_ub2 = src_ub0 + m * 2;
     __ubuf__ float* src_ub3 = src_ub0 + m * 3;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -382,9 +383,9 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateAttenTailVF(
     uint32_t sreg_qmask = (uint32_t)0xFFULL;
     preg_qstore8 = UpdateMask<uint16_t>(sreg_qmask);
     for (uint32_t c = 0; c < 8; ++c) {
-        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 表示元素个数
+        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 is the element count.
         Gather(vreg_data_tmp1, vreg_data_tmp0, vreg_qgather_idx);
-        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 表示元素个数
+        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 is the element count.
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
     LoadAlign(vreg_qscale_vec, qScaleUb);
@@ -467,7 +468,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateAttenTailVF(
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2);
 
         LoadAlign(vreg_x_f32_4,
-                  input_x_local_UB + i0 * m * 2 + 64); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+                  input_x_local_UB + i0 * m * 2 + 64); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2 + 64);
@@ -554,7 +555,8 @@ __aicore__ inline void ProcessVec1DnNoUpdate(const LocalTensor<T2>& dstTensor, c
     uint32_t blockStride;
     uint32_t repeatStride;
     dScale = scale;
-    blockStride = ubN >> 2 | 0x1; // ubN / 4 + 1，表示搬运到UB上的时候，每块会间隔32bit，避免bank冲突
+    blockStride =
+        ubN >> 2 | 0x1; // ubN / 4 + 1: leave a 32-bit gap between blocks written to UB to avoid bank conflicts.
     repeatStride = 2;
     indexesUb = (__ubuf__ uint8_t*)vselrIndexesBuf.GetPhyAddr();
     uint32_t ubN_div_8 = ubN >> 3;
@@ -650,14 +652,14 @@ __simd_vf__ inline void ProcessVec1DnUpdateVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + m;
     __ubuf__ float* src_ub2 = src_ub0 + m * 2;
     __ubuf__ float* src_ub3 = src_ub0 + m * 3;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -677,9 +679,9 @@ __simd_vf__ inline void ProcessVec1DnUpdateVF(
     uint32_t sreg_qmask = (uint32_t)0xFFULL;
     preg_qstore8 = UpdateMask<uint16_t>(sreg_qmask);
     for (uint32_t c = 0; c < 8; ++c) {
-        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 表示元素个数
+        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 is the element count.
         Gather(vreg_data_tmp1, vreg_data_tmp0, vreg_qgather_idx);
-        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 表示元素个数
+        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 is the element count.
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
     LoadAlign(vreg_qscale_vec, qScaleUb);
@@ -759,7 +761,7 @@ __simd_vf__ inline void ProcessVec1DnUpdateVF(
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2);
 
         LoadAlign(vreg_x_f32_4,
-                  input_x_local_UB + i0 * m * 2 + 64); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+                  input_x_local_UB + i0 * m * 2 + 64); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2 + 64);
@@ -894,14 +896,14 @@ __simd_vf__ inline void ProcessVec1DnUpdateAttenTailVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + m;
     __ubuf__ float* src_ub2 = src_ub0 + m * 2;
     __ubuf__ float* src_ub3 = src_ub0 + m * 3;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -927,9 +929,9 @@ __simd_vf__ inline void ProcessVec1DnUpdateAttenTailVF(
     uint32_t sreg_qmask = (uint32_t)0xFFULL;
     preg_qstore8 = UpdateMask<uint16_t>(sreg_qmask);
     for (uint32_t c = 0; c < 8; ++c) {
-        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 表示元素个数
+        LoadAlign(vreg_data_tmp0, qScaleUb + c * 64); // 64 is the element count.
         Gather(vreg_data_tmp1, vreg_data_tmp0, vreg_qgather_idx);
-        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 表示元素个数
+        StoreAlign<float>(qScaleUb + c * 8, vreg_data_tmp1, preg_qstore8); // 8 is the element count.
     }
     LocalMemBar<MemType::VEC_STORE, MemType::VEC_LOAD>();
     LoadAlign(vreg_qscale_vec, qScaleUb);
@@ -1016,7 +1018,7 @@ __simd_vf__ inline void ProcessVec1DnUpdateAttenTailVF(
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2);
 
         LoadAlign(vreg_x_f32_4,
-                  input_x_local_UB + i0 * m * 2 + 64); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+                  input_x_local_UB + i0 * m * 2 + 64); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m * 2 + 64);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m * 2 + 64);
@@ -1108,7 +1110,8 @@ __aicore__ inline void ProcessVec1DnUpdate(const LocalTensor<T2>& dstTensor, con
     uint32_t blockStride;
     uint32_t repeatStride;
     dScale = scale;
-    blockStride = ubN >> 2 | 0x1; // ubN / 4 + 1，表示搬运到UB上的时候，每块会间隔32bit，避免bank冲突
+    blockStride =
+        ubN >> 2 | 0x1; // ubN / 4 + 1: leave a 32-bit gap between blocks written to UB to avoid bank conflicts.
     repeatStride = 2;
     indexesUb = (__ubuf__ uint8_t*)vselrIndexesBuf.GetPhyAddr();
     uint32_t ubN_div_8 = ubN >> 3;
@@ -1141,20 +1144,20 @@ __aicore__ inline void ProcessVec1DnUpdate(const LocalTensor<T2>& dstTensor, con
 
 /*
  * @ingroup ProcessVec1Vf
- * @brief 计算 max = reducemax 以及 exp(x-max)/sum(exp(x-max))
- * @param [out] dstTensor 输出 LocalTensor
- * @param [out] expSumTensor 最后一维 sum(exp(x-max)) 输出
- * @param [out] maxTensor 最后一维 max 输出
- * @param [in] srcTensor 输入 LocalTensor
- * @param [out] expMaxTensor expmax 输出 LocalTensor
- * @param [in] sharedTmpBuffer 本地临时 Tensor
- * @param [in] m 输入行数
- * @param [in] n 输入列数，需要 256B 对齐，取值为 originN 按 64 对齐后的结果
- * @param [in] originN 原始输入列数，支持范围为 0 < originN <= 128
- * @param [in] scale scale 值
- * @param [in] minValue 最小值
- * @param [in] isUpdate 是否启用 flash update 模式
- * @param [in] oriNRange originN 范围
+ * @brief Calculate max = reducemax and exp(x-max)/sum(exp(x-max)).
+ * @param [out] dstTensor Output LocalTensor.
+ * @param [out] expSumTensor Output sum(exp(x-max)) along the last dimension.
+ * @param [out] maxTensor Output maximum along the last dimension.
+ * @param [in] srcTensor Input LocalTensor.
+ * @param [out] expMaxTensor Output expmax LocalTensor.
+ * @param [in] sharedTmpBuffer Local temporary tensor.
+ * @param [in] m Input row count.
+ * @param [in] n Input column count, requiring 256-byte alignment; originN rounded up to a multiple of 64.
+ * @param [in] originN Original input column count; supported range: 0 < originN <= 128.
+ * @param [in] scale Scale value.
+ * @param [in] minValue Minimum value.
+ * @param [in] isUpdate Whether flash update mode is enabled.
+ * @param [in] oriNRange Range of originN.
  */
 
 template <typename T, typename T2, bool isUpdate = false, bool hasAtten = false, uint32_t ubN = 256>
@@ -1255,14 +1258,14 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + mConst;
     __ubuf__ float* src_ub2 = src_ub0 + m2Const;
     __ubuf__ float* src_ub3 = src_ub0 + m3Const;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -1346,7 +1349,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadVF(
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const);
 
         LoadAlign(vreg_x_f32_4,
-                  input_x_local_UB + i0 * m2Const + mConst); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+                  input_x_local_UB + i0 * m2Const + mConst); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const + mConst);
@@ -1483,14 +1486,14 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadAttenTailVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + mConst;
     __ubuf__ float* src_ub2 = src_ub0 + m2Const;
     __ubuf__ float* src_ub3 = src_ub0 + m3Const;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -1554,8 +1557,8 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadAttenTailVF(
         Max(max3, max3, vreg_data_tmp3, preg_135);
     }
 
-    // 第二个 sparse block 不存在时，尾部列可能对应零 scale。
-    // q/k scale 处理后重新写入 minValue，避免无效列进入 softmax。
+    // When the second sparse block is absent, tail columns may correspond to zero scales.
+    // Restore minValue after applying Q/K scales to keep invalid columns out of softmax.
     for (uint16_t i = originN; i < ubN; ++i) {
         StoreAlign<T, Reg::StoreDist::DIST_NORM_B32>((__ubuf__ T*&)input_x_local_UB + i * mConst, vreg_min, preg_135);
     }
@@ -1589,7 +1592,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdatePerTokenHeadAttenTailVF(
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const);
 
         LoadAlign(vreg_x_f32_4,
-                  input_x_local_UB + i0 * m2Const + mConst); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+                  input_x_local_UB + i0 * m2Const + mConst); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const + mConst);
@@ -1674,7 +1677,8 @@ __aicore__ inline void ProcessVec1DnNoUpdatePerTokenHead(
     uint32_t blockStride;
     uint32_t repeatStride;
     dScale = scale;
-    blockStride = ubN >> 2 | 0x1; // ubN / 4 + 1，表示搬运到UB上的时候，每块会间隔32bit，避免bank冲突
+    blockStride =
+        ubN >> 2 | 0x1; // ubN / 4 + 1: leave a 32-bit gap between blocks written to UB to avoid bank conflicts.
     repeatStride = 2;
     indexesUb = (__ubuf__ uint8_t*)vselrIndexesBuf.GetPhyAddr();
 
@@ -1770,14 +1774,14 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + mConst;
     __ubuf__ float* src_ub2 = src_ub0 + m2Const;
     __ubuf__ float* src_ub3 = src_ub0 + m3Const;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -1866,7 +1870,7 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadVF(
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const);
 
         LoadAlign(vreg_x_f32_4,
-                  input_x_local_UB + i0 * m2Const + mConst); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+                  input_x_local_UB + i0 * m2Const + mConst); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const + mConst);
@@ -2009,14 +2013,14 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadAttenTailVF(
     RegTensor<T2> vreg_x_exp_fp8_1, vreg_x_exp_f8_pack_1;
 
     __ubuf__ T2* x_exp_1;
-    x_exp_1 = x_exp + 32; // Cast 之后第二个寄存器搬运到UB上的目标地址需偏移32字节
+    x_exp_1 = x_exp + 32; // After Cast, offset the second register's destination address in UB by 32 bytes.
 
     __ubuf__ float* src_ub0 = input_x_local_UB;
     __ubuf__ float* src_ub1 = src_ub0 + mConst;
     __ubuf__ float* src_ub2 = src_ub0 + m2Const;
     __ubuf__ float* src_ub3 = src_ub0 + m3Const;
     __ubuf__ uint32_t* mask_ub0 = maskUb;
-    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 个元素个数(attenMaskUb 的数据类型为uint8，这里是uint32)
+    __ubuf__ uint32_t* mask_ub1 = maskUb + 16; // 16 * 4 elements (attenMaskUb uses uint8, while this uses uint32).
     __ubuf__ uint32_t* mask_ub2 = maskUb + 32; // 32 * 4
     __ubuf__ uint32_t* mask_ub3 = maskUb + 48; // 48 * 4
 
@@ -2119,7 +2123,7 @@ __simd_vf__ inline void ProcessVec1DnUpdatePerTokenHeadAttenTailVF(
         LoadAlign(vreg_x_f32_3, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const);
 
         LoadAlign(vreg_x_f32_4,
-                  input_x_local_UB + i0 * m2Const + mConst); // 64 表示元素个数，取到了vreg_x_f32_0的下一行
+                  input_x_local_UB + i0 * m2Const + mConst); // 64 elements: access the next row of vreg_x_f32_0.
         LoadAlign(vreg_x_f32_5, input_x_local_UB + ubN_m_m_div_4 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_6, input_x_local_UB + ubN_m_m_div_2 + i0 * m2Const + mConst);
         LoadAlign(vreg_x_f32_7, input_x_local_UB + ubN_m_m_mul3_div_4 + i0 * m2Const + mConst);
@@ -2209,7 +2213,8 @@ __aicore__ inline void ProcessVec1DnUpdatePerTokenHead(
     uint32_t blockStride;
     uint32_t repeatStride;
     dScale = scale;
-    blockStride = ubN >> 2 | 0x1; // ubN / 4 + 1，表示搬运到UB上的时候，每块会间隔32bit，避免bank冲突
+    blockStride =
+        ubN >> 2 | 0x1; // ubN / 4 + 1: leave a 32-bit gap between blocks written to UB to avoid bank conflicts.
     repeatStride = 2;
     indexesUb = (__ubuf__ uint8_t*)vselrIndexesBuf.GetPhyAddr();
 
@@ -2456,7 +2461,7 @@ __simd_vf__ inline void ProcessVec1DnNoUpdateMxfp8VF(__ubuf__ T2* x_exp, __ubuf_
         FusedExpSub(vreg_x_exp_4, vreg_x_f32_4, max0, preg_134);
         FusedExpSub(vreg_x_exp_5, vreg_x_f32_5, max0, preg_134);
         FusedExpSub(vreg_x_exp_6, vreg_x_f32_6, max0, preg_134);
-        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i softmax分子
+        FusedExpSub(vreg_x_exp_7, vreg_x_f32_7, max0, preg_134); // vreg_x_exp_i: softmax numerator.
         Select(vreg_x_exp_4, vreg_zero, vreg_x_exp_4, preg_invalid_cur);
         Select(vreg_x_exp_5, vreg_zero, vreg_x_exp_5, preg_invalid_cur);
         Select(vreg_x_exp_6, vreg_zero, vreg_x_exp_6, preg_invalid_cur);
@@ -2892,18 +2897,18 @@ __aicore__ inline void ProcessVec1DnUpdateMxfp8(
 
 /*
  * @ingroup ProcessVec1Vf
- * @brief 计算 max = reducemax 以及 exp(x-max)/sum(exp(x-max))
- * @param [out] dstTensor 输出 LocalTensor
- * @param [out] expSumTensor 最后一维 sum(exp(x-max)) 输出
- * @param [out] maxTensor 最后一维 max 输出
- * @param [in] srcTensor 输入 LocalTensor
- * @param [out] expMaxTensor expmax 输出 LocalTensor
- * @param [in] sharedTmpBuffer 本地临时 Tensor
- * @param [in] originN 原始输入列数，支持范围为 0 < originN <= 128
- * @param [in] dScale QK 反量化与 softmax scale 的乘积
- * @param [in] minValue 最小值
- * @param [in] isUpdate 是否启用 flash update 模式
- * @param [in] oriNRange originN 范围
+ * @brief Calculate max = reducemax and exp(x-max)/sum(exp(x-max)).
+ * @param [out] dstTensor Output LocalTensor.
+ * @param [out] expSumTensor Output sum(exp(x-max)) along the last dimension.
+ * @param [out] maxTensor Output maximum along the last dimension.
+ * @param [in] srcTensor Input LocalTensor.
+ * @param [out] expMaxTensor Output expmax LocalTensor.
+ * @param [in] sharedTmpBuffer Local temporary tensor.
+ * @param [in] originN Original input column count; supported range: 0 < originN <= 128.
+ * @param [in] dScale Product of the QK dequantization scale and softmax scale.
+ * @param [in] minValue Minimum value.
+ * @param [in] isUpdate Whether flash update mode is enabled.
+ * @param [in] oriNRange Range of originN.
  */
 
 template <typename T, typename T2, bool isUpdate = false, bool hasAtten = false, uint16_t ubN = 256,
@@ -2915,7 +2920,7 @@ __aicore__ inline void ProcessVec1VfDnMxfp8(
     const float dScale, float pScale, const T minValue, const LocalTensor<T>& preLoopMaxTensor,
     const LocalTensor<T>& preLoopSumTensor, const LocalTensor<T>& firstLoopSumTensor)
 {
-    // 将 256-column C1 转为 P(e4m3)/PScale(e8m0)；isUpdate 控制 online-softmax 更新。
+    // Convert 256-column C1 to P(e4m3)/PScale(e8m0); isUpdate controls the online softmax update.
     LocalTensor<uint8_t> indexesTensor;
     indexesTensor = vselrIndexesBuf[static_cast<int>(VselrIndexEnum::DN_INDEX)].template Get<uint8_t>();
     if constexpr (!isUpdate) {

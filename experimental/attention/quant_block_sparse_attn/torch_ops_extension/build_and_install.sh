@@ -9,13 +9,13 @@
 
 BASE_DIR=$(pwd)
 
-# 移除历史编译结果
+# Remove previous build artifacts.
 rm -rf build
 
-# 编译wheel包
+# Build the wheel package.
 python3 setup.py build bdist_wheel
 
-# 安装wheel包
+# Install the wheel package.
 cd ${BASE_DIR}/dist
 pip3 install *.whl -I
 cd -

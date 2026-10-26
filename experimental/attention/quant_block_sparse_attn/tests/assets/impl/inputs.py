@@ -443,7 +443,7 @@ def _mxfp8_customize_inputs(
         data_range_k=data_range_k,
         data_range_v=data_range_v,
     )
-    # 根据 target p_scale tensor 的 dtype 注入 p_scale_type，使 golden 生成正确 dtype 的数据
+    # Inject p_scale_type from the target p_scale tensor dtype so the golden generator produces the correct data type.
     if p_scale is not None and _numel(p_scale) > 0 and p_scale.dtype == torch.float32:
         case["p_scale_type"] = "float32"
     # Golden owns MXFP8 validation and all input construction, including the

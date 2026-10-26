@@ -40,7 +40,7 @@ struct CubeCoordInfo {
     uint32_t curBIdx;
     uint32_t s1Coord;
     uint32_t s2Coord;
-    int32_t sparseBlockIdx[2]; // QBSA: 当前迭代的 2 个 sparse block index
+    int32_t sparseBlockIdx[2]; // QBSA: two sparse block indices for the current iteration.
 };
 
 } // namespace BaseApi
@@ -59,5 +59,5 @@ struct CubeCoordInfo {
     X(isPa, bool, false) \
     X(useDn, bool, false)
 
-/* 1. 生成带默认值的模版Template */
+/* 1. Generate Template with default values. */
 #endif

@@ -22,11 +22,12 @@ __aicore__ inline void CopyToL1Nd2Nz(const LocalTensor<INPUT_T>& l1Tensor, const
                                      uint32_t nValue, uint32_t dValue, uint32_t srcDValue)
 {
     Nd2NzParams gm2L1Nd2NzParams;
-    gm2L1Nd2NzParams.ndNum = 1;             // ND矩阵的个数
-    gm2L1Nd2NzParams.nValue = nValue;       // 单个ND矩阵的实际行数，单位为元素个数
-    gm2L1Nd2NzParams.dValue = dValue;       // 单个ND矩阵的实际列数，单位为元素个数
-    gm2L1Nd2NzParams.srcNdMatrixStride = 0; // 相邻ND矩阵起始地址之间的偏移， 单位为元素个数
-    gm2L1Nd2NzParams.srcDValue = srcDValue; // 同一个ND矩阵中相邻行起始地址之间的偏移， 单位为元素个数
+    gm2L1Nd2NzParams.ndNum = 1;             // Number of ND matrices.
+    gm2L1Nd2NzParams.nValue = nValue;       // Actual row count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.dValue = dValue;       // Actual column count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.srcNdMatrixStride = 0; // Offset between the starts of adjacent ND matrices, in elements.
+    gm2L1Nd2NzParams.srcDValue =
+        srcDValue; // Offset between the starts of adjacent rows within one ND matrix, in elements.
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || \
     (defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202)))
     if constexpr (IsSameType<INPUT_T, fp8_e5m2_t>::value || IsSameType<INPUT_T, fp8_e4m3fn_t>::value ||
@@ -36,10 +37,12 @@ __aicore__ inline void CopyToL1Nd2Nz(const LocalTensor<INPUT_T>& l1Tensor, const
         gm2L1Nd2NzParams.dstNzC0Stride = (nValue + 15) >> 4 << 4;
     }
 #else
-    gm2L1Nd2NzParams.dstNzC0Stride = (nValue + 15) >> 4 << 4; // NZ矩阵相邻Block起始地址之间的偏移， 单位为Block个数
+    gm2L1Nd2NzParams.dstNzC0Stride =
+        (nValue + 15) >> 4 << 4; // Offset between the starts of adjacent NZ blocks, in blocks.
 #endif
-    gm2L1Nd2NzParams.dstNzNStride = 1; // 转换为NZ矩阵后，ND之间相邻两行在NZ矩阵中起始地址之间的偏移， 单位为Block个数
-    gm2L1Nd2NzParams.dstNzMatrixStride = 0; // 两个NZ矩阵，起始地址之间的偏移， 单位为元素数量
+    gm2L1Nd2NzParams.dstNzNStride =
+        1; // After conversion to NZ, offset between the starts of adjacent ND rows in the NZ matrix, in blocks.
+    gm2L1Nd2NzParams.dstNzMatrixStride = 0; // Offset between the starts of two NZ matrices, in elements.
     DataCopy(l1Tensor, gmTensor, gm2L1Nd2NzParams);
 }
 
@@ -47,31 +50,36 @@ template <typename INPUT_T>
 __aicore__ inline void CopyToL1Nd2NzGS1Merge(const LocalTensor<INPUT_T>& l1Tensor,
                                              const GlobalTensor<INPUT_T>& gmTensor, uint32_t ndNum, uint32_t nValue,
                                              uint32_t dValue, uint32_t srcNdMatrixStride, uint32_t srcDValue,
-                                             uint32_t dstNzC0Stride) // BSNGD 合轴拷贝
+                                             uint32_t dstNzC0Stride) // Copy with merged BSNGD axes.
 {
     Nd2NzParams gm2L1Nd2NzParams;
-    gm2L1Nd2NzParams.ndNum = ndNum;                         // ND矩阵的个数
-    gm2L1Nd2NzParams.nValue = nValue;                       // 单个ND矩阵的实际行数，单位为元素个数
-    gm2L1Nd2NzParams.dValue = dValue;                       // 单个ND矩阵的实际列数，单位为元素个数
-    gm2L1Nd2NzParams.srcNdMatrixStride = srcNdMatrixStride; // 相邻ND矩阵起始地址之间的偏移， 单位为元素个数
-    gm2L1Nd2NzParams.srcDValue = srcDValue; // 同一个ND矩阵中相邻行起始地址之间的偏移， 单位为元素个数
+    gm2L1Nd2NzParams.ndNum = ndNum;   // Number of ND matrices.
+    gm2L1Nd2NzParams.nValue = nValue; // Actual row count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.dValue = dValue; // Actual column count of one ND matrix, in elements.
+    gm2L1Nd2NzParams.srcNdMatrixStride =
+        srcNdMatrixStride; // Offset between the starts of adjacent ND matrices, in elements.
+    gm2L1Nd2NzParams.srcDValue =
+        srcDValue; // Offset between the starts of adjacent rows within one ND matrix, in elements.
 #if (__CCE_AICORE__ == 310) || (defined __DAV_310R6__) || \
     (defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202)))
     if constexpr (IsSameType<INPUT_T, fp8_e5m2_t>::value || IsSameType<INPUT_T, fp8_e4m3fn_t>::value ||
                   IsSameType<INPUT_T, hifloat8_t>::value || IsSameType<INPUT_T, int8_t>::value) {
         gm2L1Nd2NzParams.dstNzC0Stride =
-            (dstNzC0Stride + 31) >> 5 << 5; // NZ矩阵相邻Block起始地址之间的偏移，单位为Block个数，32对齐
+            (dstNzC0Stride + 31) >>
+            5 << 5; // Offset between the starts of adjacent NZ blocks, in blocks, aligned to 32.
     } else {
         gm2L1Nd2NzParams.dstNzC0Stride =
-            (dstNzC0Stride + 15) >> 4 << 4; // NZ矩阵相邻Block起始地址之间的偏移，单位为Block个数，16对齐
+            (dstNzC0Stride + 15) >>
+            4 << 4; // Offset between the starts of adjacent NZ blocks, in blocks, aligned to 16.
     }
 #else
     gm2L1Nd2NzParams.dstNzC0Stride =
-        (dstNzC0Stride + 15) >> 4 << 4; // NZ矩阵相邻Block起始地址之间的偏移，单位为Block个数，16对齐
+        (dstNzC0Stride + 15) >> 4 << 4; // Offset between the starts of adjacent NZ blocks, in blocks, aligned to 16.
 #endif
-    gm2L1Nd2NzParams.dstNzNStride = 1; // 转换为NZ矩阵后，ND之间相邻两行在NZ矩阵中起始地址之间的偏移， 单位为Block个数
+    gm2L1Nd2NzParams.dstNzNStride =
+        1; // After conversion to NZ, offset between the starts of adjacent ND rows in the NZ matrix, in blocks.
     gm2L1Nd2NzParams.dstNzMatrixStride =
-        nValue * 32 / sizeof(INPUT_T); // 两个NZ矩阵，起始地址之间的偏移， 单位为元素数量
+        nValue * 32 / sizeof(INPUT_T); // Offset between the starts of two NZ matrices, in elements.
     DataCopy(l1Tensor, gmTensor, gm2L1Nd2NzParams);
 }
 #endif

@@ -16,12 +16,13 @@
 #define FIXPIPEOUT_H
 
 constexpr FixpipeConfig PFA_CFG_ROW_MAJOR_UB = {
-    CO2Layout::ROW_MAJOR, true}; // ROW_MAJOR: 使能NZ2ND，输出数据格式为ND格式; true: 用于用户指定目的地址的位置是否是UB
+    CO2Layout::ROW_MAJOR,
+    true}; // ROW_MAJOR: enable NZ2ND and output ND data; true specifies that the destination address is in UB.
 constexpr FixpipeConfig PFA_CFG_ROW_MAJOR_GM = {
     CO2Layout::ROW_MAJOR,
-    false}; // ROW_MAJOR: 使能NZ2ND，输出数据格式为ND格式; true: 用于用户指定目的地址的位置是否是UB
+    false}; // ROW_MAJOR: enable NZ2ND and output ND data; true specifies that the destination address is in UB.
 constexpr FixpipeConfig FA_CFG_NZ_UB = {
-    CO2Layout::NZ, true}; // 不使能NZ2ND，输出数据格式为NZ格式; true: 用于用户指定目的地址的位置是否是UB
+    CO2Layout::NZ, true}; // Disable NZ2ND and output NZ data; true specifies that the destination address is in UB.
 
 struct fixpipeOutParams {
     uint32_t fixpOutMSize;
@@ -33,24 +34,28 @@ __aicore__ inline void FixpipeMmCopyOutToUB(LocalTensor<mmOutputType>& mmResUb, 
                                             const fixpipeOutParams& fixpOutParam)
 {
     FixpipeParamsC310<CO2Layout::ROW_MAJOR> L0C2UbFixpParams; // L0C->UB
-    L0C2UbFixpParams.nSize = (fixpOutParam.fixpOutNSize + 7) >>
-                             3 << 3; // L0C上的bmm1结果矩阵N方向的size大小；同mmadParams.n；8个元素（32B)对齐
+    L0C2UbFixpParams.nSize =
+        (fixpOutParam.fixpOutNSize + 7) >>
+        3 << 3; // N dimension of the BMM1 result in L0C, equal to mmadParams.n; align to 8 elements (32 bytes).
     L0C2UbFixpParams.mSize =
-        (fixpOutParam.fixpOutMSize + 1) >>
-        1 << 1; // 有效数据不足16行，只需输出部分行即可;L0C上的bmm1结果矩阵M方向的size大小必须是偶数
+        (fixpOutParam.fixpOutMSize + 1) >> 1 << 1; // If fewer than 16 rows are valid, output only those rows; the M
+                                                   // dimension of the BMM1 result in L0C must be even.
     L0C2UbFixpParams.srcStride =
         ((L0C2UbFixpParams.mSize + 15) >> 4)
-        << 4; // L0C上matmul结果相邻连续数据片断间隔（前面一个数据块的头与后面数据块的头的间隔），单位为16
-              // *sizeof(T) //源NZ矩阵中相邻Z排布的起始地址偏移
+        << 4; // Stride between consecutive matmul result segments in L0C (distance between adjacent data block starts),
+              // in units of 16 *sizeof(T). // Start address offset between adjacent Z blocks in the source NZ matrix.
     L0C2UbFixpParams.dstStride =
-        (L0C2UbFixpParams.nSize + 15) >> 4 << 4; // mmResUb上两行之间的间隔，单位：element。 //
-                                                 // 128：根据比对dump文件得到，ND方案(S1 * S2)时脏数据用mask剔除
-    L0C2UbFixpParams.dualDstCtl = 1; // 双目标模式，按M维度拆分， M / 2 * N写入每个UB，M必须为2的倍数
+        (L0C2UbFixpParams.nSize + 15) >>
+        4 << 4; // Stride between rows in mmResUb, in elements. //
+                // 128: determined by comparing dump files; for ND (S1*S2), use the mask to discard invalid data.
+    L0C2UbFixpParams.dualDstCtl =
+        1; // Dual-destination mode splits along M and writes M/2*N to each UB; M must be a multiple of 2.
     L0C2UbFixpParams.params.ndNum = 1;
     L0C2UbFixpParams.params.srcNdStride = 0;
     L0C2UbFixpParams.params.dstNdStride = 0;
-    Fixpipe<mmOutputType, computeType, PFA_CFG_ROW_MAJOR_UB>(mmResUb, L0CTensor,
-                                                             L0C2UbFixpParams); // 将matmul结果从L0C搬运到UB
+    Fixpipe<mmOutputType, computeType, PFA_CFG_ROW_MAJOR_UB>(
+        mmResUb, L0CTensor,
+        L0C2UbFixpParams); // Transfer the matrix multiplication result from L0C to UB.
 }
 
 template <typename mmOutputType, typename computeType, typename l0cType>
@@ -60,18 +65,21 @@ __aicore__ inline void FixpipeMmCopyOutToGm(GlobalTensor<mmOutputType>& mmResGm,
     FixpipeParamsC310<CO2Layout::ROW_MAJOR> L0C2GmFixpParams; // L0C->Gm
     L0C2GmFixpParams.nSize =
         (fixpOutParam.fixpOutNSize + 7) >>
-        3 << 3; // L0C上的bmm1结果矩阵N方向的size大小；同mmadParams.n；8个元素（32B)对齐；分档计算且vector1中通过mask筛选出实际有效值
+        3 << 3; // N dimension of the BMM1 result in L0C, equal to mmadParams.n; align to 8 elements (32 bytes),
+                // calculate by size bucket, and select valid values using the mask in vector1.
     L0C2GmFixpParams.mSize =
-        (fixpOutParam.fixpOutMSize + 1) >>
-        1 << 1; // 有效数据不足16行，只需输出部分行即可;L0C上的bmm1结果矩阵M方向的size大小；同mmadParams.m
-    L0C2GmFixpParams.srcStride = ((L0C2GmFixpParams.mSize + 15) >> 4)
-                                 << 4; // L0C上bmm1结果相邻连续数据片断间隔（前面一个数据块的头与后面数据块的头的间隔）
-    L0C2GmFixpParams.dstStride = (L0C2GmFixpParams.nSize + 15) >> 4 << 4; // mmResGm上两行之间的间隔
+        (fixpOutParam.fixpOutMSize + 1) >> 1 << 1; // If fewer than 16 rows are valid, output only those rows; the M
+                                                   // dimension of the BMM1 result in L0C equals mmadParams.m.
+    L0C2GmFixpParams.srcStride =
+        ((L0C2GmFixpParams.mSize + 15) >> 4)
+        << 4; // Stride between consecutive BMM1 result segments in L0C (distance between adjacent data block starts).
+    L0C2GmFixpParams.dstStride = (L0C2GmFixpParams.nSize + 15) >> 4 << 4; // Stride between rows in mmResGm.
     L0C2GmFixpParams.dualDstCtl = 1;
     L0C2GmFixpParams.params.ndNum = 1;
     L0C2GmFixpParams.params.srcNdStride = 0;
     L0C2GmFixpParams.params.dstNdStride = 0;
-    Fixpipe<mmOutputType, computeType, PFA_CFG_ROW_MAJOR_GM>(mmResGm, L0CTensor,
-                                                             L0C2GmFixpParams); // 将matmul结果从L0C搬运到Gm
+    Fixpipe<mmOutputType, computeType, PFA_CFG_ROW_MAJOR_GM>(
+        mmResGm, L0CTensor,
+        L0C2GmFixpParams); // Transfer the matmul result from L0C to GM.
 }
 #endif

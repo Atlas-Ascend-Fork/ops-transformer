@@ -592,8 +592,9 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::Bmm2DataCopyOut(RunInfo& run
     int64_t attenOutOffset = constInfo.dSizeV;
     if constexpr (layout == QBSALayout::TND) {
         attenOutOffset = constInfo.n2GDv;
-        // QBSA: 每核独立计算一个 (n2,g) head，输出 TND [T, N1, Dv]，按 head 直写；
-        // 不走 FIA 的 GS1 合轴输出，避免把单 head 结果按 G 合并散写到错误位置。
+        // QBSA: each core independently computes one (n2,g) head and writes it directly to TND output [T,N1,Dv].
+        // Avoid FIA GS1 axis merging, which would scatter a single head's result to incorrect positions as if G heads
+        // were merged.
         if (constInfo.isGqa) {
             attenOutOffset = constInfo.dSizeV;
         }
@@ -797,13 +798,13 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::SoftmaxLseCopyOut(LocalTenso
     }
 
     LocalTensor<float> lseUb = lseTmpBuff[runInfo.taskIdMod2].template Get<float>();
-    // lse 事件按次分配/释放（与 vDoneEvent 模式一致），避免长期占用事件池。
+    // Allocate and release LSE events per use, as with vDoneEvent, to avoid holding event pool entries indefinitely.
     TEventID lseVToMte3Id = GetTPipePtr()->AllocEventID<HardEvent::V_MTE3>();
     TEventID lseMte3ToMte2Id = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
 
     ComputeLseOutputVF(lseUb, softmaxSumTmp, softmaxMaxTmp, runInfo.halfS1RealSize);
 
-    // Vector 写完 lseUb 后，MTE3 才能读取。
+    // MTE3 can read lseUb only after Vector finishes writing it.
     SetFlag<HardEvent::V_MTE3>(lseVToMte3Id);
     WaitFlag<HardEvent::V_MTE3>(lseVToMte3Id);
 
@@ -814,7 +815,7 @@ __aicore__ inline void QBSABlockVec<TEMPLATE_ARGS>::SoftmaxLseCopyOut(LocalTenso
     intriParams1.dstStride = 0;
     DataCopyPad(this->softmaxLseGm[runInfo.softmaxLseOffset], lseUb, intriParams1);
 
-    // MTE3 读完 lseUb 后，下一轮 MTE2 才能覆写该 UB。
+    // The next MTE2 transfer can overwrite this UB only after MTE3 finishes reading lseUb.
     SetFlag<HardEvent::MTE3_MTE2>(lseMte3ToMte2Id);
     WaitFlag<HardEvent::MTE3_MTE2>(lseMte3ToMte2Id);
 

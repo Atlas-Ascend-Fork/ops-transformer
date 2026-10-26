@@ -145,8 +145,9 @@ __aicore__ inline void QuantBlockSparseAttnKernel<CubeBlockType, VecBlockType>::
 {
     fa_base_matmul::idCounterNum = 0;
     constInfo.subBlockIdx = GetSubBlockIdx();
-    // tilingData 必须在 AIC/AIV 两侧都设置：InitVecBlock 与 ComputeConstexpr 在两核均会解引用
-    // this->tilingData，若仅 AIV 赋值，AIC 将解引用未初始化指针导致访存异常（507015）。
+    // Set tilingData on both AIC and AIV: InitVecBlock and ComputeConstexpr dereference
+    // this->tilingData on both cores. Setting it only on AIV leaves AIC with an uninitialized pointer, causing a memory
+    // access error (507015).
     this->tilingData = tiling;
     if ASCEND_IS_AIC {
         this->aicIdx = GetBlockIdx();
@@ -223,11 +224,12 @@ __aicore__ inline void QuantBlockSparseAttnKernel<CubeBlockType, VecBlockType>::
     vecBlock.InitGlobalBuffer(deqScaleQ, deqScaleK, deqScaleV, pScalePtr, prefix, attenMask, blockTable,
                               queryPaddingSize, kvPaddingSize, softmaxMax, softmaxSum, workspace, singleCoreOffset,
                               this->aicIdx, constInfo);
-    // NTD 的 query 走 offsetCalculator(NGTD)，其 ACCUM(no-zero-head) parser 期望"不含前导0的累加序列"
-    // [s0, s0+s1, ...]：GetTSize() 取末元素=总 token 数(决定 head/n2 的 stride=d*T、d*T*g)，
-    // GetTBase(b)=arr[b-1]=batch b 的 token 起始。cuSeqlens 含前导0 [0,s0,s0+s1,...]，故传 cuSeqQlenAddr+1
-    // 去掉前导0。否则 B>1 时 GetTSize 取到单 batch 长度而非总 T，head>=1 的 query 读取整体错位，精度大面积错。
-    // (KV 为 PA，靠 blockTable 寻址，不依赖该 parser，保持 seqUsedKvlenAddr。)
+    // NTD query uses offsetCalculator(NGTD), whose ACCUM (no-zero-head) parser expects cumulative lengths without a
+    // leading zero: [s0,s0+s1,...]. GetTSize() returns the last element, the total token count, defining head/n2
+    // strides d*T and d*T*g. GetTBase(b)=arr[b-1] is the token start of batch b. cuSeqlens includes a leading zero
+    // [0,s0,s0+s1,...], so pass cuSeqQlenAddr+1 to skip it. Otherwise, for B>1, GetTSize returns a single batch length
+    // instead of total T, misaligning query reads for head>=1. KV uses PA and blockTable addressing, independent of
+    // this parser; keep seqUsedKvlenAddr.
     cubeBlock.InitCubeInput(key, value, &sharedParams, &attenMaskInfo, cuSeqQlenAddr + 1, seqUsedKvlenAddr);
     cubeBlock.InitDequantParams(deqScaleQ, deqScaleK, deqScaleV);
 }
@@ -316,8 +318,9 @@ __aicore__ inline void QuantBlockSparseAttnKernel<CubeBlockType, VecBlockType>::
         constInfo.mm1Kb = constInfo.n2Size * constInfo.dSize;
         constInfo.mm2Kb = constInfo.n2Dv;
         if ASCEND_IS_AIV {
-            // QBSA: 输出 TND [T, N1, Dv]，同一 head 相邻 token 间隔 (n2G-1)*Dv 个元素（跳过其余 head）。
-            // 每核独立计算一个 head，不做 FIA GS1 合轴/连续 GQA 输出，固定使用 per-head stride。
+            // QBSA: TND output [T,N1,Dv] skips (n2G-1)*Dv elements between adjacent tokens of the same head, bypassing
+            // other heads. Each core independently computes one head; use a per-head stride instead of FIA GS1 axis
+            // merging or contiguous GQA output.
             constInfo.attentionOutStride = (constInfo.n2G - 1) * constInfo.dSizeV * sizeof(OUTPUT_T);
         }
     } else if constexpr (layout == QBSALayout::NTD) {
@@ -377,7 +380,7 @@ __aicore__ inline void QuantBlockSparseAttnKernel<CubeBlockType, VecBlockType>::
         runInfo.s2SparseBlk2RealAlignedSize = runInfo.s2SparseBlk2RealSize;
     }
 
-    // 将sparseBlkIdx映射为phyBlkNumIdx  并按照phyBlkNumIdx的大小顺序排列
+    // Map sparseBlkIdx to phyBlkNumIdx and sort in ascending phyBlkNumIdx order.
     IdxSortBySparseIdx(runInfo);
 }
 
@@ -394,9 +397,10 @@ __aicore__ inline void QuantBlockSparseAttnKernel<CubeBlockType, VecBlockType>::
     runInfo.multiCoreIdxMod2 = static_cast<uint64_t>(multiCoreInnerIdx) & 1;
     runInfo.multiCoreIdxMod3 = multiCoreInnerIdx % 3;
 
-    // sparseIndices 相关计算
+    // Calculations related to sparseIndices.
     SetSparseIndicesRunInfo(runInfo, runParam, s2LoopCount, s2LoopLimit, sparseBase);
-    runInfo.s2StartIdx = 0; // sparsemode仅支持0/3  且  逻辑分核不会对S2进行分核
+    runInfo.s2StartIdx =
+        0; // Only sparse modes 0/3 are supported; logical core partitioning does not split S2 across cores.
     runInfo.s2LoopCount = s2LoopCount;
     runInfo.qBOffset = runParam.qBOffset;
     runInfo.qBScalarOffset = runParam.qBScalarOffset;

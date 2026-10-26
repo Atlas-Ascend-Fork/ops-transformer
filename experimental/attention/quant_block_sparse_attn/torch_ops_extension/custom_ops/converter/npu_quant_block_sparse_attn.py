@@ -60,8 +60,8 @@ from torchair._ge_concrete_graph.supported_declaration import (
 from torchair.ge import attr
 
 
-# 为自定义算子注册converter，用于torch.compile 场景成图
-# 注意： meta_outputs形参名为固定写法，若写错会影响ge节点的输出dtype与shape推导
+# Register a converter for the custom operator to build graphs with torch.compile.
+# Note: the parameter name meta_outputs is fixed; an incorrect name affects GE output dtype and shape inference.
 @register_fx_node_ge_converter(torch.ops.custom.npu_quant_block_sparse_attn.default)
 def convert_npu_quant_block_sparse_attn(
     query: Tensor,

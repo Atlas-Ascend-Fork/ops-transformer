@@ -26,10 +26,10 @@ struct CopyParam {
 struct PAShape {
     uint32_t blockNum;
     uint32_t blockSize;
-    uint32_t headNum;             // 一般为kv的head num
-    uint32_t headDim;             // mla下rope为64， 非rope为512
-    uint32_t maxblockNumPerBatch; // block table 每一行的最大个数
-    uint32_t actHeadDim;          // 实际拷贝col大小，考虑到N切块 s*d， 对应d
+    uint32_t headNum;             // Usually the KV head count.
+    uint32_t headDim;             // For MLA, the RoPE dimension is 64 and the non-RoPE dimension is 512.
+    uint32_t maxblockNumPerBatch; // Maximum number of entries per block table row.
+    uint32_t actHeadDim;          // Actual copied column count, corresponding to d when tiling N in s*d.
     uint32_t copyRowNum;
     uint32_t copyRowNumAlign;
     uint32_t pageStride;
@@ -40,13 +40,13 @@ struct Position {
     uint32_t bIdx;
     uint32_t n2Idx;
     uint64_t s2Offset;
-    uint32_t dIdx; // N轴被切，对应D轴被切
+    uint32_t dIdx; // Splitting the N axis corresponds to splitting the D axis.
 };
 
-// 场景：key、value GM to L1
-// GM按ND格式存储
-// L1按NZ格式存储
-// GM 的行、列、列 stride 由输入布局决定，可为 D 或 N*D
+// Scenario: transfer key/value from GM to L1.
+// GM stores data in ND format.
+// L1 stores data in NZ format.
+// GM rows, columns, and column strides depend on the input layout and may be D or N*D.
 template <typename L1Type>
 __aicore__ inline void DataCopyGmNDToL1(LocalTensor<L1Type>& l1Tensor, GlobalTensor<L1Type>& gmTensor, uint32_t rowAct,
                                         uint32_t rowAlign,
@@ -55,7 +55,7 @@ __aicore__ inline void DataCopyGmNDToL1(LocalTensor<L1Type>& l1Tensor, GlobalTen
 {
     Nd2NzParams nd2nzPara;
     nd2nzPara.ndNum = 1;
-    nd2nzPara.nValue = rowAct; // 行数
+    nd2nzPara.nValue = rowAct; // Row count.
 
     nd2nzPara.dValue = col;
     nd2nzPara.srcDValue = colStride;
@@ -131,20 +131,21 @@ __aicore__ inline void GmCopyInToL1PA(LocalTensor<L1Type>& l1Tensor, GlobalTenso
                                       const Position& startPos)
 {
     uint32_t copyFinishRowCnt = 0;
-    uint64_t blockTableBaseOffset = static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch; // 块表的基偏移量
+    uint64_t blockTableBaseOffset =
+        static_cast<uint64_t>(startPos.bIdx) * shape.maxblockNumPerBatch; // Base offset into the block table.
     uint64_t curS2Idx = startPos.s2Offset;
-    uint32_t blockElementCnt = 32U / sizeof(L1Type); // 每个块的元素数量
+    uint32_t blockElementCnt = 32U / sizeof(L1Type); // Number of elements per block.
     while (copyFinishRowCnt < shape.copyRowNum) {
-        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // 获取block table上的索引
-        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // 获取在单个块上超出的行数
+        uint64_t blockIdOffset = curS2Idx / shape.blockSize; // Get the block table index.
+        uint64_t remainRowCnt = curS2Idx % shape.blockSize;  // Get the number of rows exceeding the current block.
         uint64_t idInBlockTable =
-            blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // 从block table上获取的编号
-        // 计算可以拷贝行数
-        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // 一次只能处理一个Block
+            blockTableGm.GetValue(blockTableBaseOffset + blockIdOffset); // Block number read from the block table.
+        // Calculate the number of rows that can be copied.
+        uint32_t copyRowCnt = shape.blockSize - remainRowCnt; // Process only one block at a time.
         if (copyFinishRowCnt + copyRowCnt > shape.copyRowNum) {
-            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // 一个block未拷满
+            copyRowCnt = shape.copyRowNum - copyFinishRowCnt; // The current block has not been fully copied.
         }
-        uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim; // PA的偏移
+        uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim; // PA offset.
         if (kvLayout == KVLAYOUT::NZ) {
             offset += static_cast<uint64_t>(startPos.n2Idx) * shape.blockSize * shape.headDim +
                       remainRowCnt * blockElementCnt + static_cast<uint64_t>(startPos.dIdx) * shape.blockSize;

@@ -10,7 +10,7 @@
 
 /*!
  * \file quant_block_sparse_attn_mx_kernel.h
- * \brief QuantBlockSparseAttn 的 MXFP8 全量化 kernel 入口。
+ * \brief Fully quantized MXFP8 kernel entry for QuantBlockSparseAttn.
  */
 #ifndef QUANT_BLOCK_SPARSE_ATTN_MX_KERNEL_H_
 #define QUANT_BLOCK_SPARSE_ATTN_MX_KERNEL_H_
@@ -40,7 +40,7 @@ using namespace AscendC;
 using namespace optiling;
 
 namespace BaseApi {
-// MX 独立 tiling/kernel 路径：两个 256 C1/V1 subLoop 生成 P[64,512]，再执行一次 C2/V2。
+// Independent MX tiling/kernel path: two 256-column C1/V1 subLoops produce P[64,512], followed by one C2/V2.
 template <typename inputType, typename mmType, typename outputType, QBSALayout layout, QBSALayout kvLayout,
           S1TemplateType s1TemplateType, S2TemplateType s2TemplateType, DTemplateType dTemplateType,
           DTemplateType dVTemplateType, bool hasAtten, bool hasLse, bool isPa, bool useDn = true>
@@ -65,7 +65,7 @@ public:
                   "MXFullQuantMode currently only supports TND query and PA_BNBD KV");
     static_assert(LOGICAL_M_BASE == 128U && S2_BASE == 512U && D_BASE == 128U && DV_BASE == 128U,
                   "MXFullQuantMode currently only supports logical S1=128, S2=512, D=128 and DV=128");
-    // 延迟两个 task 执行 C2/V2。
+    // Execute C2/V2 with a delay of two tasks.
     static constexpr uint32_t PRELOAD_N = 2U;
     static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N + 1U;
 
@@ -83,10 +83,10 @@ public:
         // InitConstInfo overwrites the fields used by the active sub-core; the aggregate reset also covers
         // fields that are intentionally unused on AIC or AIV.
         constInfo = {};
-        // 跨核 Buffer ID 由核内状态生成，ACL 图重放会复用该状态；每次启动时需重置计数器，
-        // 保证 AIC 与 AIV 使用相同的事件 ID 序列。
+        // Cross-core buffer IDs are generated from core-local state, which ACL graph replay reuses. Reset the counters
+        // at each launch to ensure AIC and AIV use the same event ID sequence.
         fa_base_matmul::idCounterNum = 0;
-        // Q/K/V 在 cube 中结合 block_table 完成 PA 搬运。
+        // Cube transfers Q/K/V through PA addressing using block_table.
         pipe = tPipe;
         tilingData = tiling;
         queryPtr = query;
@@ -97,7 +97,7 @@ public:
         metadataGm.SetGlobalBuffer((__gm__ int32_t*)metadata);
         cuSeqlensQGm.SetGlobalBuffer((__gm__ int32_t*)cuSeqlensQ);
         seqUsedKvGm.SetGlobalBuffer((__gm__ int32_t*)seqUsedKv);
-        // 预取序列长度元数据，重叠 InitBuffers 期间的 HBM 延迟。
+        // Prefetch sequence length metadata to overlap HBM latency with InitBuffers.
         dc_preload(reinterpret_cast<__gm__ uint64_t*>(cuSeqlensQ), 0);
         dc_preload(reinterpret_cast<__gm__ uint64_t*>(seqUsedKv), 0);
         InitConstInfo();
@@ -142,7 +142,7 @@ public:
 private:
     __aicore__ inline void InitConstInfo()
     {
-        // 9102r1 一个 AIV 对应一个 AIC。
+        // On 9102r1, one AIV corresponds to one AIC.
         if ASCEND_IS_AIC {
             constInfo.aicIdx = GetBlockIdx();
         } else {
@@ -175,7 +175,7 @@ private:
         constInfo.maxQb = sparseParams.sparseSeqLenStride;
         constInfo.maxKb = sparseParams.sparseIndicesStride;
 
-        // QScale 为 [T,N,D/64,2]；K/V scale 在 PA 场景按 BNBD 映射。
+        // QScale uses [T,N,D/64,2]; K/V scales use BNBD mapping for PA.
         constInfo.scaleLastDim = scaleParams.scaleLastDim;
         constInfo.queryScaleDSize = scaleParams.queryScaleDSize;
         constInfo.keyScaleDSize = scaleParams.keyScaleDSize;
@@ -187,15 +187,15 @@ private:
 
     __aicore__ inline void InitMMResBuf()
     {
-        // C1 UB 为 [64,256] fp32，C2 UB 为 [64,128] fp32。
+        // C1 UB is [64,256] in FP32; C2 UB is [64,128] in FP32.
         constexpr uint32_t mm1ResultSize = M_BASE * S2_SPLIT * sizeof(MM_T);
         constexpr uint32_t mm2ResultSize = M_BASE * DV_BASE * sizeof(MM_T);
-        // L1 连续保存 P(e4m3) 和 PScale(e8m0)，供 C2 随路反量化。
+        // L1 stores P(e4m3) and PScale(e8m0) contiguously for C2 dequantization during transfer.
         constexpr uint32_t mm2LeftSize = M_BASE * S2_BASE * sizeof(INPUT_T) + M_BASE * S2_BASE / 32U;
         l1BufferManager.Init(pipe, 512U * 1024U);
         l1PBuffers.Init(l1BufferManager, mm2LeftSize);
-        // C1 三槽覆盖 PRELOAD_N+1。
-        // 1:1 路径 3*2(C1) + 1*2(C2) + 3*1(P-L1) 正好使用 11 个跨核事件 ID。
+        // Three C1 slots cover PRELOAD_N+1.
+        // The 1:1 path uses exactly 11 cross-core event IDs: 3*2 (C1) + 1*2 (C2) + 3*1 (P-L1).
         constexpr uint32_t c1BufferNum = 3U;
         ubBufferManager.Init(pipe, mm1ResultSize * c1BufferNum + mm2ResultSize);
         bmm1Buffers.Init(ubBufferManager, mm1ResultSize);
@@ -246,7 +246,7 @@ private:
 
     __aicore__ inline bool ShouldMoveSparseBlockBack(int64_t previousBlockIdx, int64_t currentBlockIdx) const
     {
-        // 有效 block 升序，无效 block 放末尾。
+        // Sort valid blocks in ascending order and place invalid blocks last.
         if (previousBlockIdx < 0) {
             return currentBlockIdx >= 0;
         }
@@ -258,7 +258,7 @@ private:
 
     __aicore__ inline void SortSparseBlocks(MxRunInfo& runInfo) const
     {
-        // 最多 8 个 block，排序后再统一生成 offset 与 mask 状态。
+        // Up to 8 blocks; generate offsets and mask state after sorting.
         for (uint32_t i = 1U; i < runInfo.sparseBlockCount; ++i) {
             const int64_t currentBlockIdx = runInfo.sparseBlockIdx[i];
             uint32_t insertPos = i;
@@ -304,8 +304,8 @@ private:
                                        uint32_t sparseBlockCount, uint64_t sparseBase, bool isFirstValidS2Loop,
                                        bool isLastValidS2Loop)
     {
-        // 构造一个 512-token logical S2 tile 的运行参数。
-        // 仅清零必要的字段
+        // Build runtime parameters for a logical S2 tile of 512 tokens.
+        // Zero only the required fields.
         runInfo.actSingleLoopS2Size = 0U;
         runInfo.loop = static_cast<uint32_t>(loop);
         runInfo.mLoop = mLoop;
@@ -313,7 +313,7 @@ private:
         runInfo.bIdx = bIdx;
         runInfo.realN2Idx = n1Idx;
         runInfo.n2Idx = n2Idx;
-        // s1OuterIdx 是 sparse Q block 下标；每个 M-part 固定最多处理 64 行。
+        // s1OuterIdx is the sparse Q block index; each M-part processes at most 64 rows.
         runInfo.s1Idx = s1OuterIdx * constInfo.qSparseBlockSize + mPart * M_BASE;
         runInfo.queryTokenBase = queryTokenBase;
         runInfo.actS1Size = actualS1Size;
@@ -343,7 +343,7 @@ private:
             uint64_t sparseTokenOffset = 0U;
             uint32_t sparseBlockRealSize = 0U;
             runInfo.sparseBlockTileOffset[i] = runInfo.actSingleLoopS2Size;
-            // 负 index 不参与拼接。
+            // Exclude negative indices from concatenation.
             if (sparseBlkIdx >= 0) {
                 sparseTokenOffset = static_cast<uint64_t>(sparseBlkIdx) * constInfo.kvSparseBlockSize;
                 const int64_t remainS2 =
@@ -407,7 +407,7 @@ private:
 
     __aicore__ inline void ExecuteTask(uint64_t loop, MxRunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE])
     {
-        // 当前 task 做 C1/V1，PRELOAD_N 之前的 task 做 C2/V2。
+        // Run C1/V1 for the current task and C2/V2 for the task PRELOAD_N steps earlier.
         MxRunInfo& runInfoCur = taskRunInfo[loop % PRELOAD_TASK_CACHE_SIZE];
         MxRunInfo& runInfoPre = taskRunInfo[(loop - PRELOAD_N) % PRELOAD_TASK_CACHE_SIZE];
         const bool hasBmm2 = loop >= PRELOAD_N && runInfoPre.isValid;
@@ -462,13 +462,13 @@ private:
 
     __aicore__ inline void ProcessMainLoop()
     {
-        // 三槽环形缓存组织 C1/V1 与延迟 C2/V2。
+        // A three-slot ring buffer organizes C1/V1 and delayed C2/V2.
         MxRunInfo taskRunInfo[PRELOAD_TASK_CACHE_SIZE] = {};
         uint64_t loop = 0U;
         uint32_t mLoop = 0U;
-        // S2_BASE=512, kvSparseBlockSize=64/128(host 侧已拦截), 结果必为 8 或 4。
+        // S2_BASE=512 and kvSparseBlockSize=64/128 (validated by the host), so the result is 8 or 4.
         const uint32_t sparseBlocksPerTask = S2_BASE / constInfo.kvSparseBlockSize;
-        // metadata 可包含多个 section；每个 section 为当前 AIC 提供一段独立的 BN1/S1 边界。
+        // Metadata may contain multiple sections; each provides independent BN1/S1 boundaries for the current AIC.
         const uint32_t sectionNum = GetBsaSectionNum(metadataGm);
         const uint32_t layoutAicCoreNum = regbasemx::GetMxMetadataAicCoreNum(metadataGm);
         uint32_t cachedBIdx = static_cast<uint32_t>(-1);
@@ -514,7 +514,7 @@ private:
                     const uint32_t s1LoopStart = GetS1LoopStart(bn1Idx, bn1StartIdx, s1StartIdx);
                     const uint32_t s1LoopEnd = GetS1LoopEnd(bn1Idx, bn1EndIdx, s1EndIdx, actualS1Size);
                     for (uint32_t s1OuterIdx = s1LoopStart; s1OuterIdx < s1LoopEnd; ++s1OuterIdx) {
-                        // 当前 query block 的有效 sparse block 数。
+                        // Number of valid sparse blocks in the current query block.
                         const int32_t sparseLen = sparseSeqLenGm.GetValue(
                             (static_cast<uint64_t>(bIdx) * constInfo.realN2Size + n1Idx) * constInfo.maxQb +
                             s1OuterIdx);
@@ -524,7 +524,7 @@ private:
                             }
                             continue;
                         }
-                        // sparseBase 指向 sparseIndices[B,N1,Qb,0]。
+                        // sparseBase points to sparseIndices[B,N1,Qb,0].
                         const uint64_t sparseBase = (static_cast<uint64_t>(bIdx) * constInfo.realN2Size + n1Idx) *
                                                         constInfo.maxQb * constInfo.maxKb +
                                                     static_cast<uint64_t>(s1OuterIdx) * constInfo.maxKb;
@@ -582,7 +582,7 @@ private:
                 DrainPendingTasks(loop, taskRunInfo);
             }
         }
-        // 排空尚未执行 C2/V2 的尾部 task。
+        // Drain tail tasks whose C2/V2 has not yet executed.
         DrainPendingTasks(loop, taskRunInfo);
     }
 

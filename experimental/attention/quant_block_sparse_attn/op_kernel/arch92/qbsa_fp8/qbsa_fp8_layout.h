@@ -65,5 +65,5 @@ struct CubeCoordInfo {
     X(isPa, bool, false) \
     X(useDn, bool, false)
 
-/* 1. 生成带默认值的模版Template */
+/* 1. Generate Template with default values. */
 #endif // QUANT_BLOCK_SPARSE_ATTN_COMMON_ARCH92_H

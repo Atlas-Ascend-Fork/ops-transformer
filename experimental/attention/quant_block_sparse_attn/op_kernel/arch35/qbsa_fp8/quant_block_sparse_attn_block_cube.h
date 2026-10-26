@@ -51,7 +51,7 @@ __aicore__ inline constexpr GmFormat GetKVGmFormat()
     return GmFormat::TND;
 }
 
-/* ============确定Query的L1类型============= */
+/* ============Determine the Query L1 type============= */
 template <typename INPUT_T, uint32_t dBaseSize>
 struct QL1BuffSel {
     using Type = std::conditional_t<std::is_same_v<INPUT_T, float> || (!(std::is_same_v<INPUT_T, fp8_e4m3fn_t> ||
@@ -61,7 +61,7 @@ struct QL1BuffSel {
                                     BuffersPolicySingleBuffer<BufferType::L1>, BuffersPolicyDB<BufferType::L1>>;
 };
 
-/* ============确定Key的L1类型============= */
+/* ============Determine the Key L1 type============= */
 template <typename INPUT_T, uint32_t s2BaseSize, uint32_t dBaseSize>
 struct KVL1BuffSel {
     constexpr static bool isFP8DType = std::is_same_v<INPUT_T, fp8_e4m3fn_t> || std::is_same_v<INPUT_T, fp8_e5m2_t> ||
@@ -72,13 +72,13 @@ struct KVL1BuffSel {
                            BuffersPolicySingleBuffer<BufferType::L1>, BuffersPolicyDB<BufferType::L1>>>;
 };
 
-/* ============确定L0A的类型============= */
+/* ============Determine the L0A type============= */
 template <typename INPUT_T>
 struct L0ABuffSel {
     using Type = std::conditional_t<std::is_same_v<INPUT_T, float>, BuffersPolicySingleBuffer<BufferType::L0A>,
                                     BuffersPolicyDB<BufferType::L0A>>;
 };
-/* ============确定L0B的类型============= */
+/* ============Determine the L0B type============= */
 template <typename INPUT_T, uint32_t s2BaseSize, uint32_t dBaseSize>
 struct L0BBuffSel {
     using Type = std::conditional_t<std::is_same_v<INPUT_T, float> ||
@@ -87,7 +87,7 @@ struct L0BBuffSel {
                                            std::is_same_v<INPUT_T, fp8_e5m2_t> || std::is_same_v<INPUT_T, hifloat8_t>)),
                                     BuffersPolicySingleBuffer<BufferType::L0B>, BuffersPolicyDB<BufferType::L0B>>;
 };
-/* ============确定L0C的类型============= */
+/* ============Determine the L0C type============= */
 template <typename INPUT_T, uint32_t s1BaseSize, uint32_t s2BaseSize, uint32_t dVBaseSize>
 struct L0CBuffSel {
     using Type = std::conditional_t<(s1BaseSize * s2BaseSize * FLOAT_BYTES <= (L0C_SIZE * KB_TO_BYTES) / NUM_4 &&
@@ -99,7 +99,7 @@ struct L0CBuffSel {
 TEMPLATES_DEF
 class QBSABlockCube {
 public:
-    /* =================编译期常量的基本块信息================= */
+    /* =================Basic block information for compile-time constants================= */
     static constexpr uint32_t s1BaseSize = (uint32_t)s1TemplateType;
     static constexpr uint32_t s2BaseSize = (uint32_t)s2TemplateType;
     static constexpr uint32_t dBaseSize = (uint32_t)dTemplateType;
@@ -127,7 +127,7 @@ public:
                                        QbsaRunInfo& runInfo, QbsaConstInfo& constInfo);
     __aicore__ inline void InitDequantParams(__gm__ uint8_t* deqScaleQ, __gm__ uint8_t* deqScaleK,
                                              __gm__ uint8_t* deqScaleV);
-    GlobalTensor<int32_t> blockTableGm; // pageattention需要
+    GlobalTensor<int32_t> blockTableGm; // Required for paged attention.
 private:
     __aicore__ inline void InitLocalBuffer();
     __aicore__ inline void InitGmTensor(QbsaCVSharedParams<isPa>* sharedParams, __gm__ int32_t* actualSeqQlenAddr);
@@ -143,10 +143,10 @@ private:
                                          QbsaRunInfo& runInfo, QbsaConstInfo& constInfo);
 
     TPipe* tPipe;
-    /* =====================GM变量==================== */
-    __gm__ uint8_t* currentKey;    // pageattention需要
-    __gm__ uint8_t* currentValue;  // pageattention需要
-    __gm__ uint8_t* blocktablePtr; // pageattention需要
+    /* =====================GM variables==================== */
+    __gm__ uint8_t* currentKey;    // Required for paged attention.
+    __gm__ uint8_t* currentValue;  // Required for paged attention.
+    __gm__ uint8_t* blocktablePtr; // Required for paged attention.
     static constexpr GmFormat Q_FORMAT = QuantBlockSparseAttnCube::GetQueryGmFormat<layout>();
     static constexpr GmFormat KV_FORMAT = QuantBlockSparseAttnCube::GetKVGmFormat<kvLayout>();
     FaGmTensor<INPUT_T, Q_FORMAT, int32_t> queryGm;
@@ -156,25 +156,26 @@ private:
     GlobalTensor<float> deScaleKGm;
     GlobalTensor<float> deScaleVGm;
 
-    uint32_t maxBlockNumPerBatch = 0; // pageattention需要
-    KVLAYOUT pa_kvLayout;             // pageattention需要
+    uint32_t maxBlockNumPerBatch = 0; // Required for paged attention.
+    KVLAYOUT pa_kvLayout;             // Required for paged attention.
 
-    /* =====================运行时变量==================== */
+    /* =====================Runtime variables==================== */
     CubeCoordInfo coordInfo[3];
 
-    /* =====================LocalBuffer变量==================== */
+    /* =====================LocalBuffer variables==================== */
     BufferManager<BufferType::L1>* l1BufferManagerPtr;
     BufferManager<BufferType::L0A> l0aBufferManager;
     BufferManager<BufferType::L0B> l0bBufferManager;
     BufferManager<BufferType::L0C> l0cBufferManager;
 
-    // D小于等于256 mm1左矩阵Q，GS1循环内左矩阵复用,
-    // GS1循环间开pingpong；D大于256使用单块Buffer，S1循环间驻留；fp32场景单块不驻留
+    // For D<=256, the MM1 left matrix Q is reused within the GS1 loop.
+    // Use ping-pong buffers across GS1 loops. For D>256, keep one buffer resident across S1 loops; FP32 uses a
+    // nonresident single buffer.
     typename QuantBlockSparseAttnCube::QL1BuffSel<INPUT_T, dBaseSize>::Type l1QBuffers;
-    // mm1右矩阵K
+    // MM1 right matrix K.
     typename QuantBlockSparseAttnCube::KVL1BuffSel<INPUT_T, s2BaseSize, dBaseSize>::Type l1KBuffers;
 
-    // mm2右矩阵V
+    // MM2 right matrix V.
     typename QuantBlockSparseAttnCube::KVL1BuffSel<INPUT_T, s2BaseSize, dBaseSize>::Type l1VBuffers;
     // L0A
     using L0AType = typename QuantBlockSparseAttnCube::L0ABuffSel<INPUT_T>::Type;
@@ -234,7 +235,7 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::InitCubeInput(__gm__ uint8_
         if constexpr (isPa) {
             this->blockTableGm.SetGlobalBuffer((__gm__ int32_t*)blocktablePtr);
             this->maxBlockNumPerBatch = sharedParams->blockTableDim2;
-            if (sharedParams->paLayoutType == 2) { // NZ下paLayoutType == 2
+            if (sharedParams->paLayoutType == 2) { // paLayoutType == 2 for NZ.
                 pa_kvLayout = KVLAYOUT::NZ;
             } else {
                 pa_kvLayout = sharedParams->paLayoutType == 1 ? KVLAYOUT::BBH : KVLAYOUT::BNBD;
@@ -254,11 +255,11 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::InitLocalBuffer()
     l1KBuffers.Init((*l1BufferManagerPtr), mm1RightSize);
     l1VBuffers.Init((*l1BufferManagerPtr), mm2RightSize);
 
-    // L0A B C 当前写死，能否通过基础api获取
+    // L0A/B/C sizes are currently hardcoded; check whether the base API can provide them.
     l0aBufferManager.Init(tPipe, 65536);  // 64 * 1024
     l0bBufferManager.Init(tPipe, 65536);  // 64 * 1024
     l0cBufferManager.Init(tPipe, 262144); // 256 * 1024
-    // L0A B C当前写死，要改成通过计算获取
+    // L0A/B/C sizes are currently hardcoded and should be calculated instead.
     if (IsSameType<INPUT_T, float>::value) {
         mmL0ABuffers.Init(l0aBufferManager, 64 * 1024);
         mmL0BBuffers.Init(l0bBufferManager, 64 * 1024);
@@ -275,7 +276,7 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::InitLocalBuffer()
     }
 }
 
-/* 初始化GmTensor,设置shape信息并计算strides */
+/* Initialize GmTensor, set shape information, and calculate strides. */
 TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::InitGmTensor(QbsaCVSharedParams<isPa>* sharedParams,
                                                                   __gm__ int32_t* actualSeqQlenAddr)
@@ -291,7 +292,7 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::InitGmTensor(QbsaCVSharedPa
 TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::CalcS2Coord(QbsaRunInfo& runInfo, QbsaConstInfo& constInfo)
 {
-    // QBSA sparse: sparse block indices 已在 SetRunInfo 中预计算
+    // QBSA sparse: sparse block indices are precalculated in SetRunInfo.
     coordInfo[runInfo.taskIdMod3].sparseBlockIdx[0] = runInfo.sparseBlkIdx1;
     coordInfo[runInfo.taskIdMod3].sparseBlockIdx[1] = runInfo.sparseBlkIdx2;
 }
@@ -318,7 +319,7 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
     Buffer<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> mm2A = inputBuf.Get();
     Buffer<BufferType::L1> mm2B = l1VBuffers.Get();
     // mm2A.WaitCrossCore();
-    mm2B.Wait<HardEvent::MTE1_MTE2>(); // 占用L1B
+    mm2B.Wait<HardEvent::MTE1_MTE2>(); // Acquire L1B.
     LocalTensor<INPUT_T> mm2BTensor = mm2B.GetTensor<INPUT_T>();
     uint32_t actualS2RealSize = (uint32_t)runInfo.s2SparseBlk1RealSize;
     if (likely(runInfo.sparseBlkIdx2 != -1)) {
@@ -366,11 +367,11 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
         CopyToL1Nd2Nz<INPUT_T>(mm2BTensor, GetValueGm(runInfo, constInfo)[gmOffset], runInfo.s2RealSize,
                                constInfo.dSizeV, constInfo.mm2Kb);
     }
-    mm2B.Set<HardEvent::MTE2_MTE1>(); // 通知
+    mm2B.Set<HardEvent::MTE2_MTE1>(); // Notify.
 
     mm2A.WaitCrossCore();
     Buffer<BufferType::L0C> mm2ResL0C = mmL0CBuffers.Get();
-    mm2ResL0C.Wait<HardEvent::FIX_M>(); // 占用
+    mm2ResL0C.Wait<HardEvent::FIX_M>(); // Acquire.
     MMParam param = {
         (uint32_t)s1BaseSize,       // singleM 128
         (uint32_t)constInfo.dSizeV, // singleN 128
@@ -381,7 +382,7 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
     if constexpr (!useDn) {
         param.realM = (uint32_t)runInfo.s1RealSize;
     }
-    mm2B.Wait<HardEvent::MTE2_MTE1>(); // 等待
+    mm2B.Wait<HardEvent::MTE2_MTE1>(); // Wait.
     if constexpr (isFp8) {
         MatmulFull<INPUT_T, INPUT_T, T, 128, (uint32_t)dVTemplateType, 128, ABLayout::MK, ABLayout::KN>(
             mm2A.GetTensor<INPUT_T>(), mm2BTensor, mmL0ABuffers, mmL0BBuffers, mm2ResL0C.GetTensor<T>(), param);
@@ -400,10 +401,10 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
         }
     }
 
-    mm2B.Set<HardEvent::MTE1_MTE2>(); // 释放L1B
+    mm2B.Set<HardEvent::MTE1_MTE2>(); // Release L1B.
 
-    mm2ResL0C.Set<HardEvent::M_FIX>();  // 通知
-    mm2ResL0C.Wait<HardEvent::M_FIX>(); // 等待
+    mm2ResL0C.Set<HardEvent::M_FIX>();  // Notify.
+    mm2ResL0C.Wait<HardEvent::M_FIX>(); // Wait.
 
     if constexpr (bmm2Write2Ub) {
         outputBuf.WaitCrossCore();
@@ -411,9 +412,9 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
 
     FixpipeParamsC310<CO2Layout::ROW_MAJOR> fixpipeParams; // L0C→UB;FixpipeParamsM300:L0C→UB
     if constexpr (bmm2Write2Ub) {
-        fixpipeParams.nSize = (constInfo.dSizeV + 7) >> 3 << 3; // L0C上的bmm1结果矩阵N方向的size大小
+        fixpipeParams.nSize = (constInfo.dSizeV + 7) >> 3 << 3; // N dimension of the BMM1 result matrix in L0C.
     } else {
-        fixpipeParams.nSize = constInfo.dSizeV; // L0C上的bmm1结果矩阵N方向的size大小
+        fixpipeParams.nSize = constInfo.dSizeV; // N dimension of the BMM1 result matrix in L0C.
     }
 
     if constexpr (useDn) {
@@ -421,23 +422,24 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm2(
         fixpipeParams.srcStride = ((s1BaseSize + 15) / 16) * 16;
     } else {
         fixpipeParams.mSize =
-            (runInfo.s1RealSize + 1) >>
-            1 << 1; // 有效数据不足16行，只需输出部分行即可;L0C上的bmm1结果矩阵M方向的size大小必须是偶数
-        fixpipeParams.srcStride = ((fixpipeParams.mSize + 15) / 16) *
-                                  16; // L0C上bmm1结果相邻连续数据片段间隔（前面一个数据块的头与后面数据块的头的间隔）
+            (runInfo.s1RealSize + 1) >> 1 << 1; // If fewer than 16 rows are valid, output only those rows; the M
+                                                // dimension of the BMM1 result in L0C must be even.
+        fixpipeParams.srcStride =
+            ((fixpipeParams.mSize + 15) / 16) * 16; // Stride between consecutive BMM1 result segments in L0C (distance
+                                                    // between the starts of adjacent data blocks).
     }
     if constexpr (bmm2Write2Ub) {
         fixpipeParams.dstStride = ((uint32_t)dVTemplateType + 15) >> 4 << 4;
     } else {
-        fixpipeParams.dstStride = (uint32_t)constInfo.dSizeV; // dstGm 两行之间的间隔
+        fixpipeParams.dstStride = (uint32_t)constInfo.dSizeV; // Stride between two rows in dstGm.
     }
     fixpipeParams.dualDstCtl = 1;
     fixpipeParams.params.ndNum = 1;
     fixpipeParams.params.srcNdStride = 0;
     fixpipeParams.params.dstNdStride = 0;
     Fixpipe<T, T, BMM2_FIXPIPE_CONFIG>(outputBuf.template GetTensor<T>(), mm2ResL0C.GetTensor<T>(),
-                                       fixpipeParams); // 将matmul结果从L0C搬运到UB
-    mm2ResL0C.Set<HardEvent::FIX_M>();                 // 释放
+                                       fixpipeParams); // Transfer the matrix multiplication result from L0C to UB.
+    mm2ResL0C.Set<HardEvent::FIX_M>();                 // Release.
     outputBuf.SetCrossCore();
 }
 
@@ -594,35 +596,35 @@ TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm1Nd(
     Buffer<BufferType::UB, SyncType::CROSS_CORE_SYNC_BOTH>& outputBuf, QbsaRunInfo& runInfo, QbsaConstInfo& constInfo)
 {
-    // 计算key的offset
+    // Calculate the key offset.
     Buffer<BufferType::L1> mm1A;
     Buffer<BufferType::L1> mm1B;
-    // 左矩阵复用，S2的第一次循环加载左矩阵
-    // 加载左矩阵到L1 ,当前使用全载方式
-    if (unlikely(runInfo.s2LoopCount == 0)) { // sOuter循环第一个基本块：搬运Q
+    // Reuse the left matrix; load it on the first S2 iteration.
+    // Load the left matrix into L1; currently load the entire matrix.
+    if (unlikely(runInfo.s2LoopCount == 0)) { // First basic block of the sOuter loop: transfer Q.
         mm1A = l1QBuffers.Get();
-        mm1A.Wait<HardEvent::MTE1_MTE2>(); // 占用L1A
+        mm1A.Wait<HardEvent::MTE1_MTE2>(); // Acquire L1A.
         LocalTensor<INPUT_T> mm1ATensor = mm1A.GetTensor<INPUT_T>();
 
         CopyToL1Nd2Nz<INPUT_T>(mm1ATensor, this->queryGm.gmTensor[runInfo.queryOffset], runInfo.s1RealSize,
                                constInfo.dSize, constInfo.mm1Ka);
 
-        mm1A.Set<HardEvent::MTE2_MTE1>(); // 通知
-    } else {                              // 非S2的第一次循环直接复用Q
+        mm1A.Set<HardEvent::MTE2_MTE1>(); // Notify.
+    } else {                              // Reuse Q directly after the first S2 iteration.
         mm1A = l1QBuffers.GetPre();
-        // 左矩阵复用时，sinner循环内不需要MTE2同步等待
-        mm1A.Set<HardEvent::MTE2_MTE1>(); // 通知
+        // When reusing the left matrix, no MTE2 synchronization wait is needed within the sinner loop.
+        mm1A.Set<HardEvent::MTE2_MTE1>(); // Notify.
     }
 
-    // 加载当前轮的右矩阵到L1
+    // Load the right matrix for the current iteration into L1.
     mm1B = l1KBuffers.Get();
-    mm1B.Wait<HardEvent::MTE1_MTE2>(); // 占用L1B
+    mm1B.Wait<HardEvent::MTE1_MTE2>(); // Acquire L1B.
     LocalTensor<INPUT_T> mm1BTensor = mm1B.GetTensor<INPUT_T>();
     if constexpr (isPa) {
         Position startPos;
         startPos.bIdx = runInfo.boIdx;
         startPos.n2Idx = runInfo.n2oIdx;
-        startPos.s2Offset = runInfo.s2StartIdx + runInfo.s2LoopCount * s2BaseSize; // 非FD场景
+        startPos.s2Offset = runInfo.s2StartIdx + runInfo.s2LoopCount * s2BaseSize; // Non-FD case.
         startPos.dIdx = 0;
         PAShape shape;
         shape.blockSize = constInfo.kvSparseBlockSize;
@@ -645,13 +647,13 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm1Nd(
         CopyToL1Nd2Nz<INPUT_T>(mm1BTensor, GetKeyGm(runInfo, constInfo)[runInfo.keyOffset], runInfo.s2RealSize,
                                constInfo.dSize, constInfo.mm1Kb);
     }
-    mm1B.Set<HardEvent::MTE2_MTE1>(); // 通知
+    mm1B.Set<HardEvent::MTE2_MTE1>(); // Notify.
 
-    mm1A.Wait<HardEvent::MTE2_MTE1>(); // 等待L1A
-    mm1B.Wait<HardEvent::MTE2_MTE1>(); // 等待L1B
+    mm1A.Wait<HardEvent::MTE2_MTE1>(); // Wait for L1A.
+    mm1B.Wait<HardEvent::MTE2_MTE1>(); // Wait for L1B.
 
     Buffer<BufferType::L0C> mm1ResL0C = mmL0CBuffers.Get();
-    mm1ResL0C.Wait<HardEvent::FIX_M>(); // 占用
+    mm1ResL0C.Wait<HardEvent::FIX_M>(); // Acquire.
     MMParam param = {
         (uint32_t)runInfo.s1RealSize, // singleM
         (uint32_t)runInfo.s2RealSize, // singleN
@@ -663,43 +665,46 @@ __aicore__ inline void QBSABlockCube<TEMPLATE_ARGS>::IterateBmm1Nd(
         mm1A.GetTensor<INPUT_T>(), mm1B.GetTensor<INPUT_T>(), mmL0ABuffers, mmL0BBuffers, mm1ResL0C.GetTensor<T>(),
         param);
     if (unlikely(runInfo.s2LoopCount == runInfo.s2LoopLimit)) {
-        mm1A.Set<HardEvent::MTE1_MTE2>(); // 释放L1A
+        mm1A.Set<HardEvent::MTE1_MTE2>(); // Release L1A.
     }
 
-    mm1B.Set<HardEvent::MTE1_MTE2>(); // 释放L1B
+    mm1B.Set<HardEvent::MTE1_MTE2>(); // Release L1B.
 
-    mm1ResL0C.Set<HardEvent::M_FIX>();  // 通知
-    mm1ResL0C.Wait<HardEvent::M_FIX>(); // 等待L0C
+    mm1ResL0C.Set<HardEvent::M_FIX>();  // Notify.
+    mm1ResL0C.Wait<HardEvent::M_FIX>(); // Wait for L0C.
 
     outputBuf.WaitCrossCore();
 
     FixpipeParamsC310<CO2Layout::ROW_MAJOR> fixpipeParams; // L0C→UB
     fixpipeParams.nSize =
-        (runInfo.s2RealSize + 7) >>
-        3 << 3; // L0C上的bmm1结果矩阵N方向的size大小; 同mmadParams.n; 为什么要8个元素对齐(32B对齐) // 128
+        (runInfo.s2RealSize + 7) >> 3 << 3; // N dimension of the BMM1 result in L0C, equal to mmadParams.n; why align
+                                            // to 8 elements (32 bytes)? // 128
     fixpipeParams.mSize =
-        (runInfo.s1RealSize + 1) >>
-        1 << 1; // 有效数据不足16行，只需要输出部分行即可; L0C上的bmm1结果矩阵M方向的size大小(必须为偶数) // 128
+        (runInfo.s1RealSize + 1) >> 1 << 1; // If fewer than 16 rows are valid, output only those rows; the M dimension
+                                            // of the BMM1 result in L0C must be even. // 128
     fixpipeParams.srcStride = ((fixpipeParams.mSize + 15) / 16) *
-                              16; // L0C上bmm1结果相邻连续数据片段间隔(前面一个数据块的头与后面数据块的头的间隔),
-                                  // 单位为16*sizeof(T) // 源Nz矩阵中相邻大Z排布的起始地址偏移
-    fixpipeParams.dstStride = s2BaseSize; // mmResUb上两行之间的间隔，单位：element。 // 128:根据比对dump文件得到,
-                                          // ND方案(S1*S2)时脏数据用mask剔除
-    fixpipeParams.dualDstCtl = 1; // 双目标模式，按M维度拆分，M / 2 * N写入每个UB, M必须为2的倍数
+                              16; // Stride between consecutive BMM1 result segments in L0C (distance between adjacent
+                                  // data block starts), in units of 16*sizeof(T). // Start address offset between
+                                  // adjacent large Z blocks in the source NZ matrix.
+    fixpipeParams.dstStride =
+        s2BaseSize; // Stride between rows in mmResUb, in elements. // 128: determined by comparing dump files.
+                    // For the ND scheme (S1*S2), discard invalid data using the mask.
+    fixpipeParams.dualDstCtl =
+        1; // Dual-destination mode splits along M and writes M/2*N to each UB; M must be a multiple of 2.
     fixpipeParams.params.ndNum = 1;
     fixpipeParams.params.srcNdStride = 0;
     fixpipeParams.params.dstNdStride = 0;
 
     Fixpipe<T, T, PFA_CFG_ROW_MAJOR_UB>(outputBuf.template GetTensor<T>(), mm1ResL0C.GetTensor<T>(),
-                                        fixpipeParams); // 将matmul结果从L0C搬运到UB
-    mm1ResL0C.Set<HardEvent::FIX_M>();                  // 释放L0C
+                                        fixpipeParams); // Transfer the matrix multiplication result from L0C to UB.
+    mm1ResL0C.Set<HardEvent::FIX_M>();                  // Release L0C.
     outputBuf.SetCrossCore();
 }
 
 TEMPLATES_DEF
 class QBSABlockCubeDummy {
 public:
-    GlobalTensor<int32_t> blockTableGm; // pageattention需要
+    GlobalTensor<int32_t> blockTableGm; // Required for paged attention.
     static constexpr bool isFp8 = QBSABlockCube<TEMPLATE_ARGS>::isFp8;
     static constexpr TPosition bmm2OutPos = QBSABlockCube<TEMPLATE_ARGS>::bmm2OutPos;
     static constexpr bool bmm2Write2Ub = QBSABlockCube<TEMPLATE_ARGS>::bmm2Write2Ub;
@@ -728,9 +733,9 @@ public:
 };
 
 template <typename T>
-struct CubeBlockTraits; // 声明
+struct CubeBlockTraits; // Declaration.
 
-/* 生成CubeBlockTraits */
+/* Generate CubeBlockTraits. */
 #define GEN_TRAIT_TYPE(name, ...) using name##_TRAITS = name;
 #define GEN_TRAIT_CONST(name, type, ...) static constexpr type name##Traits = name;
 
@@ -744,7 +749,7 @@ struct CubeBlockTraits; // 声明
 DEFINE_CUBE_BLOCK_TRAITS(QBSABlockCube);
 DEFINE_CUBE_BLOCK_TRAITS(QBSABlockCubeDummy);
 
-// /* 生成Arg Traits, kernel中只需要调用ARGS_TRAITS就可以获取所有CubeBlock中的模板参数 */
+// /* Generate Arg Traits; the kernel only needs ARGS_TRAITS to obtain all CubeBlock template parameters. */
 #define GEN_ARGS_TYPE(name, ...) using name = typename CubeBlockTraits<CubeBlockType>::name##_TRAITS;
 #define GEN_ARGS_CONST(name, type, ...) static constexpr type name = CubeBlockTraits<CubeBlockType>::name##Traits;
 #define ARGS_TRAITS \

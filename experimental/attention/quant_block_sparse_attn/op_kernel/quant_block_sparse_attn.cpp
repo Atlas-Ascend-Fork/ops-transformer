@@ -38,11 +38,11 @@
 using namespace AscendC;
 using namespace optiling;
 
-// 仿 kv_quant_sparse_attn_sharedkv.cpp 的 kernel 侧调用写法：
-//   - 按 g_coreType 选择实/Dummy 的 Cube/Vec block（AIC 跑真 Cube + Dummy Vec，AIV 跑 Dummy Cube + 真 Vec）
-//   - 实例化 QuantBlockSparseAttnKernel<CubeBlockType, VecBlockType>
+// Follow the kernel invocation pattern in kv_quant_sparse_attn_sharedkv.cpp:
+//   - Select real/Dummy Cube/Vec blocks by g_coreType: AIC runs real Cube + Dummy Vec; AIV runs Dummy Cube + real Vec.
+//   - Instantiate QuantBlockSparseAttnKernel<CubeBlockType,VecBlockType>.
 //   - GET_TILING_DATA -> InitBaseAPI -> Process()
-// __VA_ARGS__ 为 block 模板参数（严格对齐 CUBE_BLOCK_TRAITS 字段顺序）。
+// __VA_ARGS__ contains block template parameters in exactly the CUBE_BLOCK_TRAITS field order.
 
 #define QBSA_OP_IMPL_WITH_TILING(tilingDataPtr, ...) \
     do { \
@@ -129,13 +129,13 @@ __global__ __aicore__ void quant_block_sparse_attn(
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 #endif
 
-    // mask 模式和 softmaxLse 使能由 tiling key 选择对应的编译期模板。
+    // The tiling key selects compile-time templates for the mask mode and softmaxLse enable flag.
     TPipe tPipe;
     __gm__ uint8_t* user = GetUserWorkspace(workspace);
 
     constexpr QBSALayout layout = static_cast<QBSALayout>(LAYOUT_T);
     constexpr QBSALayout kvLayout = static_cast<QBSALayout>(KV_LAYOUT_T);
-    // isPa: KV 连续 -> false; PA_ND -> true
+    // isPa: contiguous KV -> false; PA_ND -> true.
     constexpr bool bsaIsPa = true;
     constexpr bool bsaUseDn = BaseApi::IsDn();
     constexpr bool HAS_ATTENTION = (MASK_MODE == 3);
