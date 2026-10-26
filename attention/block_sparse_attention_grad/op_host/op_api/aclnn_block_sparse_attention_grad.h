@@ -28,7 +28,7 @@ extern "C" {
  * @param [in] attentionOut: attention out tensor输入
  * @param [in] softmaxLse: softmax tensor输入
  * @param [in] blockSparseMaskOptional: 稀疏块索引 [T, headNum, maxKvBlockNum]
- * @param [in] attenMaskOptional: Attention mask (只支持传入nullptr)
+ * @param [in] attenMaskOptional: maskType=1 PerBlockSizeMask 块级变长掩码；maskType=0 时传 nullptr
  * @param [in] blockShapeOptional: 稀疏块形状数组 [blockShapeX, blockShapeY]
  * @param [in] actualSeqLengthsOptional: 实际序列长度Q (在qInputLayout为“TND”时必选)
  * @param [in] actualSeqLengthsKvOptional: 实际序列长度KV (在kvInputLayout为“TND”时必选)

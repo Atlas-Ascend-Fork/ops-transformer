@@ -94,6 +94,7 @@ static aclnnStatus ParseBlockShape(const aclIntArray* blockShapeOptional)
 
     return ACLNN_SUCCESS;
 }
+
 static aclnnStatus ValidateParams(const BSAGParams& params)
 {
     CHECK_COND(params.qInputLayout != nullptr && params.kvInputLayout != nullptr, ACLNN_ERR_PARAM_INVALID,
@@ -195,13 +196,31 @@ static aclnnStatus ValidateParams(const BSAGParams& params)
                    "The dim's 3 of value and dvOut must be same.");
     }
 
-    if (params.attenMaskOptional != nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "attenMaskOptional currently only supports nullptr.");
-        return ACLNN_ERR_PARAM_INVALID;
-    }
-
-    if (params.maskType != 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "maskType only supports 0, got %ld.", params.maskType);
+    if (params.maskType == 0) {
+        CHECK_COND(params.attenMaskOptional == nullptr, ACLNN_ERR_PARAM_INVALID,
+                   "attenMaskOptional must be nullptr when maskType=0.");
+    } else if (params.maskType == 1) {
+        CHECK_COND(op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510, ACLNN_ERR_PARAM_INVALID,
+                   "maskType=1 are currently supported only on A2 or A3.");
+        CHECK_COND(params.attenMaskOptional != nullptr, ACLNN_ERR_PARAM_INVALID,
+                   "maskType=1 requires attenMaskOptional.");
+        CHECK_COND(params.attenMaskOptional->GetDataType() == ACL_INT32, ACLNN_ERR_PARAM_INVALID,
+                   "attenMask must have INT32 dtype.");
+        const auto maskShape = params.attenMaskOptional->GetViewShape();
+        CHECK_COND(maskShape.GetDimNum() == 4, ACLNN_ERR_PARAM_INVALID, "attenMask must have shape [B,Nq,M,2].");
+        CHECK_COND(maskShape.GetDim(3) == 2, ACLNN_ERR_PARAM_INVALID, "attenMask last dimension must be 2.");
+        CHECK_COND(maskShape.GetDim(1) == queryShape.GetDim(1), ACLNN_ERR_PARAM_INVALID,
+                   "attenMask head dimension must equal query heads.");
+        if (qLayout == "BNSD") {
+            CHECK_COND(maskShape.GetDim(0) == queryShape.GetDim(0), ACLNN_ERR_PARAM_INVALID,
+                       "attenMask batch dimension must equal query batch.");
+        } else {
+            CHECK_COND(params.actualSeqLengthsOptional != nullptr &&
+                           maskShape.GetDim(0) == static_cast<int64_t>(params.actualSeqLengthsOptional->Size()),
+                       ACLNN_ERR_PARAM_INVALID, "attenMask batch must match TND sequence lengths.");
+        }
+    } else {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "maskType only supports 0 or 1, got %ld.", params.maskType);
         return ACLNN_ERR_PARAM_INVALID;
     }
 

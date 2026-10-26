@@ -11,6 +11,7 @@
 #include "../block_sparse_attention_grad_tiling.h"
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 #include "log/log.h"
 
@@ -64,6 +65,10 @@ constexpr int VALID_HEAD_DIM_128 = 128;
 constexpr uint64_t VEC_POST_DIVISION = 3; // post 划分的空间块数， input 2份，output 1份
 constexpr uint64_t WORKSPACE_NUM_ALIGN = 256;
 constexpr uint32_t BATCH_SCHEDULE_MODE = 1;
+constexpr uint32_t SCHEDULE_LEGACY = 0;
+constexpr uint32_t SCHEDULE_WIDE = 2;
+constexpr uint32_t WIDE_MAX_EDGES = 8;
+constexpr uint32_t WIDE_COMPACT_Q_TASKS = 2;
 
 namespace optiling {
 
@@ -220,6 +225,43 @@ ge::graphStatus BSAGradTiling::ProcessAttrs(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus BSAGradTiling::ParseAttnMaskCounts(gert::TilingContext* context)
+{
+    const auto* maskType = context->GetAttrs()->GetAttrPointer<int64_t>(MASK_TYPE_INDEX);
+    const int64_t requestedMaskType = maskType == nullptr ? 0 : *maskType;
+    maskType_ = 0;
+    hasPerBlockMask_ = false;
+    maxMaskBlocks_ = 0;
+    auto mask = context->GetOptionalInputTensor(ATTENTION_MASK_INDEX);
+    if (requestedMaskType == 0) {
+        // L0 launcher 会为 nullptr 创建空占位 Tensor。
+        if (mask != nullptr && mask->GetStorageShape().GetDimNum() != 0 && mask->GetShapeSize() != 0) {
+            OP_LOGE(context->GetNodeName(), "maskType=0 requires an absent or empty attention mask.");
+            return ge::GRAPH_FAILED;
+        }
+        return ge::GRAPH_SUCCESS;
+    }
+    auto desc = context->GetOptionalInputDesc(ATTENTION_MASK_INDEX);
+    if (requestedMaskType != 1 || mask == nullptr || desc == nullptr || desc->GetDataType() != ge::DT_INT32) {
+        OP_LOGE(context->GetNodeName(),
+                "maskType=1 requires INT32 counts [B,Nq,M,2]; only maskType 0/1 are supported.");
+        return ge::GRAPH_FAILED;
+    }
+    const uint32_t minBlocks = std::max(CeilDiv(maxQSeqlen_, static_cast<uint32_t>(blockShapeX_)),
+                                        CeilDiv(maxKvSeqlen_, static_cast<uint32_t>(blockShapeY_)));
+    const auto& shape = mask->GetStorageShape();
+    if (shape.GetDimNum() != 4 || shape.GetDim(0) != batch_ || shape.GetDim(1) != numHeads_ ||
+        shape.GetDim(2) < minBlocks || shape.GetDim(2) > std::numeric_limits<uint32_t>::max() || shape.GetDim(3) != 2) {
+        OP_LOGE(context->GetNodeName(), "prefix counts must have shape [B=%u,Nq=%u,M>=%u,2].", batch_, numHeads_,
+                minBlocks);
+        return ge::GRAPH_FAILED;
+    }
+    maxMaskBlocks_ = static_cast<uint32_t>(shape.GetDim(2));
+    maskType_ = 1;
+    hasPerBlockMask_ = true;
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus BSAGradTiling::ProcessInput(gert::TilingContext* context)
 {
     if (context->GetAttrs()->GetAttrPointer<char>(Q_INPUT_LAYOUT_INDEX) == nullptr) {
@@ -262,7 +304,10 @@ ge::graphStatus BSAGradTiling::ProcessInput(gert::TilingContext* context)
     }
 
     deterministic_ = (context->GetDeterministic() == 1);
-    return ProcessAttrs(context);
+    if (ProcessAttrs(context) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    return ParseAttnMaskCounts(context);
 }
 
 ge::graphStatus BSAGradTiling::CalculatePostUbBaseSize(gert::TilingContext* context)
@@ -366,6 +411,7 @@ ge::graphStatus BSAGradTiling::AssignCoreTasks(uint32_t numHeads, uint32_t kvHea
 
 ge::graphStatus BSAGradTiling::CalculateTaskSplit(gert::TilingContext* context)
 {
+    SelectSchedule();
     uint32_t numHeads = numHeads_;
     uint32_t kvHeads = kvHeads_;
     uint32_t blockX = blockShapeX_;
@@ -395,7 +441,8 @@ ge::graphStatus BSAGradTiling::CalculateTaskSplit(gert::TilingContext* context)
         }
 
         uint32_t qBlocks = GetQBlocks(qSeqlen, blockX);
-        tasksInBatch[b] = qBlocks * numHeads;
+        tasksInBatch[b] =
+            (scheduleMode_ == SCHEDULE_WIDE ? CeilDiv(qBlocks, wideQTasksPerWorkItem_) : qBlocks) * numHeads;
         totalTaskNum_ += tasksInBatch[b];
 
         uint32_t curQBlockNum = CeilDiv(qSeqlen, blockX) * numHeads;
@@ -405,12 +452,60 @@ ge::graphStatus BSAGradTiling::CalculateTaskSplit(gert::TilingContext* context)
         kvPrefixTokenSum[b + 1] = kvPrefixTokenSum[b] + kvSeqlen;
     }
 
+    if (scheduleMode_ == SCHEDULE_WIDE) {
+        blockDim_ = std::min(aicNum_, totalTaskNum_);
+        return AssignWideCoreTasks(blockDim_);
+    }
     if (AssignCoreTasks(numHeads, kvHeads, blockX, coreNum, tasksInBatch, qPrefixTokenSum, kvPrefixTokenSum) !=
         ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
 
     blockDim_ = std::min(aicNum_, totalTaskNum_);
+    return ge::GRAPH_SUCCESS;
+}
+
+// deterministic 优先使用原 legacy 路径；未迁移的 grouped 形状同样回退 legacy。
+uint32_t BSAGradTiling::SelectSchedule()
+{
+    const bool wideEligible = layout_ == InputLayout::BNSD && blockShapeY_ <= BASIC_BLOCK_SIZE &&
+                              (blockShapeY_ == BASIC_BLOCK_SIZE || (blockShapeX_ == 64 && blockShapeY_ == 64));
+    scheduleMode_ = !deterministic_ && wideEligible ? SCHEDULE_WIDE : SCHEDULE_LEGACY;
+    // 固定聚合两个 Q task。
+    wideQTasksPerWorkItem_ = scheduleMode_ == SCHEDULE_WIDE ? WIDE_COMPACT_Q_TASKS : 0;
+    return scheduleMode_;
+}
+
+/**
+ * @brief 为 BNSD wide work item 分配核起点和任务数量。
+ * @param coreNum 实际启动的 AIC 核数，等于 min(aicNum, work item 总数)。
+ * @return 非空任务成功返回 GRAPH_SUCCESS，零任务返回 GRAPH_FAILED。
+ */
+ge::graphStatus BSAGradTiling::AssignWideCoreTasks(uint32_t coreNum)
+{
+    if (coreNum == 0) {
+        return ge::GRAPH_FAILED;
+    }
+
+    const uint32_t fragmentsPerBlock = CeilDiv(static_cast<uint32_t>(blockShapeX_), BASIC_BLOCK_SIZE);
+    const uint32_t workItemsPerHead = CeilDiv(GetQBlocks(maxQSeqlen_, blockShapeX_), wideQTasksPerWorkItem_);
+    taskNumPerCore_ = totalTaskNum_ / coreNum;
+    tailTaskNum_ = totalTaskNum_ % coreNum;
+    for (uint32_t coreIndex = 0; coreIndex < coreNum; ++coreIndex) {
+        const uint32_t workItemIndex = coreIndex; // 本核负责的第一个 work item 的全局编号
+        const uint32_t headIndex = workItemIndex / workItemsPerHead;
+        const uint32_t firstQTask = (workItemIndex % workItemsPerHead) * wideQTasksPerWorkItem_;
+        const uint32_t queryStart =
+            (firstQTask / fragmentsPerBlock) * blockShapeX_ + (firstQTask % fragmentsPerBlock) * BASIC_BLOCK_SIZE;
+        const uint32_t batchIndex = headIndex / numHeads_;
+        const uint32_t queryHead = headIndex % numHeads_;
+        tilingData_->get_beginBatch()[coreIndex] = batchIndex;
+        tilingData_->get_beginHead()[coreIndex] = queryHead;
+        tilingData_->get_beginQSeqOffset()[coreIndex] = queryStart;
+        tilingData_->get_preQSeqLengths()[coreIndex] = static_cast<uint64_t>(headIndex) * maxQSeqlen_ + queryStart;
+        tilingData_->get_preKVSeqLengths()[coreIndex] =
+            (static_cast<uint64_t>(batchIndex) * kvHeads_ + queryHead / (numHeads_ / kvHeads_)) * maxKvSeqlen_;
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -423,6 +518,15 @@ ge::graphStatus BSAGradTiling::CalculateWorkSpace(gert::TilingContext* context)
 
     sOutSize_ = blockDim_ * WORKSPACE_BLOCK_SIZE_DB * sizeof(float);
     dPOutSize_ = blockDim_ * WORKSPACE_BLOCK_SIZE_DB * sizeof(float);
+    if (scheduleMode_ == SCHEDULE_WIDE) {
+        // 每个核两个 stage，每个 stage 最多 8 个 128x128 tile；S/P、dP/dS 各占一组 plane。
+        wideWorkspaceStageElements_ = BASIC_BLOCK_SIZE * BASIC_BLOCK_SIZE * WIDE_MAX_EDGES;
+        wideWorkspaceCoreElements_ = wideWorkspaceStageElements_ * 2;
+        wideRawPlaneBytes_ = static_cast<uint64_t>(blockDim_) * wideWorkspaceCoreElements_ * sizeof(float);
+        sOutSize_ =
+            wideRawPlaneBytes_ + static_cast<uint64_t>(blockDim_) * wideWorkspaceCoreElements_ * sizeof(uint16_t);
+        dPOutSize_ = sOutSize_;
+    }
     if (layout_ == InputLayout::TND) {
         dQOutSize_ = totalTokensT_ * numHeads_ * headDim_ * sizeof(float);
         dKOutSize_ = kvTotalSeqlen_ * kvHeads_ * headDim_ * sizeof(float);
@@ -463,6 +567,8 @@ ge::graphStatus BSAGradTiling::FillTilingData(gert::TilingContext* context)
     tilingData_->set_headDim(headDim_);
     tilingData_->set_totalTaskNum(totalTaskNum_);
     tilingData_->set_maskType(maskType_);
+    tilingData_->set_hasPerBlockMask(hasPerBlockMask_ ? 1U : 0U);
+    tilingData_->set_maxMaskBlocks(maxMaskBlocks_);
     tilingData_->set_blockShapeX(blockShapeX_);
     tilingData_->set_blockShapeY(blockShapeY_);
     tilingData_->set_totalQBlocks(totalQBlocks_);
@@ -470,7 +576,15 @@ ge::graphStatus BSAGradTiling::FillTilingData(gert::TilingContext* context)
     tilingData_->set_maxQSeqlen(maxQSeqlen_);
     tilingData_->set_maxKvSeqlen(maxKvSeqlen_);
     tilingData_->set_basicQBlockSize(BASIC_BLOCK_SIZE);
-    tilingData_->set_basicKVBlockSize(BASIC_BLOCK_SIZE);
+    tilingData_->set_basicKVBlockSize(
+        scheduleMode_ == SCHEDULE_WIDE ? std::min<int64_t>(blockShapeY_, BASIC_BLOCK_SIZE) : BASIC_BLOCK_SIZE);
+    tilingData_->set_scheduleMode(scheduleMode_);
+    tilingData_->set_wideQTasksPerWorkItem(wideQTasksPerWorkItem_);
+    tilingData_->set_widePacketEdgeCapacity(scheduleMode_ == SCHEDULE_WIDE ? WIDE_MAX_EDGES : 0);
+    tilingData_->set_wideWorkspaceStageElements(wideWorkspaceStageElements_);
+    tilingData_->set_wideWorkspaceCoreElements(wideWorkspaceCoreElements_);
+    tilingData_->set_wideRawPlaneBytes(wideRawPlaneBytes_);
+    tilingData_->set_wideTaskStride(scheduleMode_ == SCHEDULE_WIDE ? blockDim_ : 0);
     tilingData_->set_taskNumPerCore(taskNumPerCore_);
     tilingData_->set_tailTaskNum(tailTaskNum_);
 

@@ -31,6 +31,7 @@
 #include "attn_infra/epilogue/block/block_epilogue_post.hpp"
 #include "attn_infra/epilogue/block/block_epilogue_softmaxgrad.hpp"
 #include "attn_infra/epilogue/block/block_epilogue_simply_softmax.hpp"
+#include "block_sparse_attention_grad_kernel_wide.h"
 
 using namespace NpuArch;
 
@@ -148,6 +149,47 @@ public:
         uint64_t kvOffset; // K, V, dk, dv
         uint64_t sOffset;  // workspace : S, P, dp, ds
     };
+
+    /**
+     * @brief 根据 prefix mask 获取当前 Q/KV 物理 tile 的有效长度。
+     *
+     * mask 按 [B, Nq, M, 2] 排列，分别对应 batch、query head、物理 block 和
+     * 分量；末维分量 0 保存 Q 前缀长度，1 保存 KV 前缀长度。当前片段的有效
+     * 长度为 max(0, min(physicalLength, maskCount - fragmentOffset))。本函数
+     * 只裁剪当前 tile，不调整物理 task 游标；调用方须按物理 tiling 推进后续
+     * tile。未启用 prefix mask 时返回 physicalLength。
+     *
+     * @param params 算子输入、输出及 workspace 地址集合。
+     * @param tilingData tiling 元数据，包含 mask 开关、head 数和物理 mask block 步长。
+     * @param batchIndex 当前 tile 所属的 batch 索引。
+     * @param queryHeadIndex 用于寻址 prefix mask 的 query head 索引。
+     * @param blockIndex 当前 Q 或 KV 物理 block 索引，具体含义由 countComponent 决定。
+     * @param countComponent mask 末维分量，0 表示 Q，1 表示 KV。
+     * @param physicalLength 当前 tile 在 prefix mask 裁剪前的物理 token 数。
+     * @param fragmentOffset 当前片段在所属 user block 中的起始 token 偏移，未分片时默认为 0。
+     * @return 当前 tile 的有效 token 数，范围为 [0, physicalLength]；未启用 prefix mask 时返回 physicalLength。
+     */
+    __aicore__ inline uint32_t GetEffectivePrefixLength(const Params& params,
+                                                        const __gm__ BlockSparseAttentionGradTilingData* tilingData,
+                                                        uint32_t batchIndex, uint32_t queryHeadIndex,
+                                                        uint32_t blockIndex, uint32_t countComponent,
+                                                        uint32_t physicalLength, uint32_t fragmentOffset = 0) const
+    {
+        if (tilingData->hasPerBlockMask == 0) {
+            return physicalLength;
+        }
+        const auto* maskCounts = reinterpret_cast<__gm__ int32_t*>(params.attentionMask);
+        const uint64_t countIndex =
+            ((static_cast<uint64_t>(batchIndex) * tilingData->numHeads + queryHeadIndex) * tilingData->maxMaskBlocks +
+             blockIndex) *
+                2 +
+            countComponent;
+        const int64_t remainingPrefixLength = static_cast<int64_t>(maskCounts[countIndex]) - fragmentOffset;
+        return remainingPrefixLength <= 0 ?
+                   0 :
+                   (remainingPrefixLength < physicalLength ? static_cast<uint32_t>(remainingPrefixLength) :
+                                                             physicalLength);
+    }
 
     __aicore__ inline void SetFlag()
     {
@@ -310,6 +352,12 @@ public:
     template <>
     __aicore__ inline void operator()<AscendC::AIC>(Params const& params)
     {
+        auto* scheduleData = reinterpret_cast<__gm__ BlockSparseAttentionGradTilingData*>(params.tiling);
+        if (scheduleData->scheduleMode == WideDetail::SCHEDULE_WIDE) {
+            WideDetail::WideExecutor<BlockSparseAttentionGradKernel> executor(*this, params);
+            executor.ProcessWideAic(params, scheduleData);
+            return;
+        }
         uint32_t coreIdx = AscendC::GetBlockIdx();
         uint32_t coreNum = AscendC::GetBlockNum();
 
@@ -416,21 +464,26 @@ public:
         uint32_t vec2CubeFlag = 0;
         for (uint32_t i = 0; i < taskLength; i++) {
             TaskInfo curInfo = taskInfo[i % 2];
+            curInfo.curCalQSize = GetEffectivePrefixLength(params, tilingData, curInfo.curBatchIdx, curInfo.curHeadIdx,
+                                                           curInfo.curQBlcokIdx, 0, curInfo.curCalQSize,
+                                                           curInfo.curQSeqIdx % blockShapeX);
             uint64_t kvBlockOffset = 0;
             uint64_t beginKVOffset = curInfo.kvOffset;
             uint32_t curKvBlockNum = (curInfo.kvSeqlen + blockShapeY - 1) / blockShapeY;
-            for (uint32_t idx = 0; idx < curKvBlockNum; idx++) {
+            for (uint32_t idx = 0; curInfo.curCalQSize != 0 && idx < curKvBlockNum; idx++) {
                 // BlcokSpaseMask shape : [batch, numhead, CeilDiv(maxQSeqlen, blockShapeX), CeilDiv(maxKvSeqlen,
                 // blockShapeY)]
                 uint64_t maskOffset = curInfo.curBatchIdx * batchBlocks + curInfo.curHeadIdx * headBlocks +
                                       curInfo.curQBlcokIdx * maskKvBlockNum + idx;
                 if (gBlcokSpaseMask.GetValue(maskOffset)) {
-                    vec2CubeFlag++;
                     uint64_t kvBlockBasicOffset = 0;
                     uint32_t kvBlockSize =
                         (idx != curKvBlockNum - 1) ? blockShapeY : curInfo.kvSeqlen - blockShapeY * idx;
+                    kvBlockSize = GetEffectivePrefixLength(params, tilingData, curInfo.curBatchIdx, curInfo.curHeadIdx,
+                                                           idx, 1, kvBlockSize);
                     uint32_t kvLoop = (kvBlockSize + basicKVBlockSize - 1) / basicKVBlockSize;
                     for (uint32_t loop = 0; loop < kvLoop; loop++) {
+                        ++vec2CubeFlag;
                         curInfo.curCalKVSize =
                             (loop != kvLoop - 1) ? basicKVBlockSize : kvBlockSize - basicKVBlockSize * loop;
                         if (inputLayout == 0) {
@@ -578,6 +631,12 @@ public:
 
     __aicore__ inline void VecOp(Params const& params)
     {
+        auto* scheduleData = reinterpret_cast<__gm__ BlockSparseAttentionGradTilingData*>(params.tiling);
+        if (scheduleData->scheduleMode == WideDetail::SCHEDULE_WIDE) {
+            WideDetail::WideExecutor<BlockSparseAttentionGradKernel> executor(*this, params);
+            executor.ProcessWideAiv(params, scheduleData);
+            return;
+        }
         uint32_t vecCoreIdx = AscendC::GetBlockIdx(); // vecore 核数idx
         uint32_t coreIdx = vecCoreIdx / 2;            // cube 核数idx
 
@@ -634,29 +693,26 @@ public:
 
         for (uint32_t i = 0; i < taskLengthVec; i++) {
             TaskInfo curInfo = taskInfoVec[i % 2];
+            curInfo.curCalQSize = GetEffectivePrefixLength(params, tilingData, curInfo.curBatchIdx, curInfo.curHeadIdx,
+                                                           curInfo.curQBlcokIdx, 0, curInfo.curCalQSize,
+                                                           curInfo.curQSeqIdx % blockShapeX);
             uint64_t beginKVOffset = curInfo.kvOffset;
 
             // idx, 计算的行数
             // 一个ai core里的aiv 0执行的行数：actualRow / 2 + actualRow % 2
             // 一个ai core里的aiv 1执行的行数：actualRow / 2
-            // if (vecCoreIdx % 2 != 0) {
-            //     vecSftmg(curInfo.qOffset / headDim + curInfo.curCalQSize / 2 + curInfo.curCalQSize % 2,
-            //         curInfo.curCalQSize / 2);
-            // } else {
-            //     vecSftmg(curInfo.qOffset / headDim, curInfo.curCalQSize / 2 + curInfo.curCalQSize % 2);
-            // }
 
             uint32_t subBlockIdx = vecCoreIdx % 2;
-            if (inputLayout == 0) {
+            if (curInfo.curCalQSize != 0 && inputLayout == 0) {
                 vecSftmg(curInfo.qOffset / headDim + subBlockIdx * (curInfo.curCalQSize + 1) / 2 * numHeads,
                          (curInfo.curCalQSize + 1 - subBlockIdx) / 2);
-            } else {
+            } else if (curInfo.curCalQSize != 0) {
                 vecSftmg(curInfo.qOffset / headDim + subBlockIdx * (curInfo.curCalQSize + 1) / 2,
                          (curInfo.curCalQSize + 1 - subBlockIdx) / 2);
             }
 
             uint32_t curKvBlockNum = (curInfo.kvSeqlen + blockShapeY - 1) / blockShapeY;
-            for (uint32_t idx = 0; idx < curKvBlockNum; idx++) {
+            for (uint32_t idx = 0; curInfo.curCalQSize != 0 && idx < curKvBlockNum; idx++) {
                 // BlcokSpaseMask shape : [batch, numhead, CeilDiv(maxQSeqlen, blockShapeX), CeilDiv(maxKvSeqlen,
                 // blockShapeY)]
                 uint64_t maskOffset = curInfo.curBatchIdx * batchBlocks + curInfo.curHeadIdx * headBlocks +
@@ -664,6 +720,8 @@ public:
                 if (gBlcokSpaseMask.GetValue(maskOffset)) {
                     uint32_t kvBlockSize =
                         (idx != curKvBlockNum - 1) ? blockShapeY : curInfo.kvSeqlen - blockShapeY * idx;
+                    kvBlockSize = GetEffectivePrefixLength(params, tilingData, curInfo.curBatchIdx, curInfo.curHeadIdx,
+                                                           idx, 1, kvBlockSize);
                     uint32_t kvLoop = (kvBlockSize + basicKVBlockSize - 1) / basicKVBlockSize;
                     for (uint32_t loop = 0; loop < kvLoop; loop++) {
                         curInfo.curCalKVSize =

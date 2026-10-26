@@ -50,9 +50,11 @@ const std::array<const aclTensor*, 3> BlockSparseAttentionGrad(
     L0_DFX(BlockSparseAttentionGrad, dout, query, key, value, attentionOut, softmaxLse, blockSparseMaskOptional,
            attenMaskOptional, blockShapeOptional, actualSeqLengthsOptional, actualSeqLengthsKvOptional, qInputLayout,
            safeKvInputLayout, numKeyValueHeads, maskType, scaleValue, preTokens, nextTokens);
+    // maskType=0 的空输入使用 schema 约定的 UINT8 占位 tensor。
     const aclTensor* attenMaskTensor =
-        (attenMaskOptional != nullptr) ? attenMaskOptional :
-                                         executor->AllocTensor(DataType::DT_BOOL, Format::FORMAT_ND, Format::FORMAT_ND);
+        (attenMaskOptional != nullptr) ?
+            attenMaskOptional :
+            executor->AllocTensor(DataType::DT_UINT8, Format::FORMAT_ND, Format::FORMAT_ND);
     const aclTensor* blockShapeTensor = ConvertIntArrayToTensor(blockShapeOptional, executor, DataType::DT_INT64);
     const aclTensor* actualSeqTensor = ConvertIntArrayToTensor(actualSeqLengthsOptional, executor, DataType::DT_INT64);
     const aclTensor* actualSeqKvTensor =

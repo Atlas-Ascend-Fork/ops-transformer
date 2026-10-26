@@ -327,7 +327,6 @@ public:
         uint64_t bOffset = 0;
         uint64_t outOffset = 0;
         if constexpr (INPUT_LAYOUT == TND) {
-            // TODO: 这里太耗时了，提到外面，每个batch只算一次
             uint64_t prefixSum = 0;
             for (uint64_t b = 0; b < curBatch; b++) {
                 prefixSum += ((__gm__ uint64_t*)seqLen)[b];

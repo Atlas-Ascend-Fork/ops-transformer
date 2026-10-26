@@ -139,6 +139,17 @@ TILING_DATA_FIELD_DEF(uint64_t, dkvSize);
 TILING_DATA_FIELD_DEF(uint64_t, postUbBaseSize);
 TILING_DATA_FIELD_DEF(uint64_t, ubSize);
 TILING_DATA_FIELD_DEF_STRUCT(SoftMaxTiling, softmaxGradTilingData);
+// arch22 prefix 表按物理 M 寻址；追加字段保持既有字段顺序。
+TILING_DATA_FIELD_DEF(uint32_t, hasPerBlockMask);
+TILING_DATA_FIELD_DEF(uint32_t, maxMaskBlocks);
+// arch22 wide 调度字段只追加；workspace 元素偏移与字节偏移分别记录。
+TILING_DATA_FIELD_DEF(uint32_t, scheduleMode); // 0=legacy，2=wide；deterministic 请求固定选择 legacy。
+TILING_DATA_FIELD_DEF(uint32_t, wideQTasksPerWorkItem);      // 每个 work item 的物理 Q task 容量。
+TILING_DATA_FIELD_DEF(uint32_t, widePacketEdgeCapacity);     // 每个 packet 的有效边容量。
+TILING_DATA_FIELD_DEF(uint32_t, wideWorkspaceStageElements); // 单核单 stage 的 tile 元素数。
+TILING_DATA_FIELD_DEF(uint32_t, wideWorkspaceCoreElements);  // 单核双 stage 的 tile 元素数。
+TILING_DATA_FIELD_DEF(uint64_t, wideRawPlaneBytes);          // 全部启动核的单个 FP32 plane 字节数。
+TILING_DATA_FIELD_DEF(uint32_t, wideTaskStride); // wide 为启动 AIC 核数，表示 cyclic work item 步长；legacy 为 0。
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(BlockSparseAttentionGrad, BlockSparseAttentionGradTilingData)
 REGISTER_TILING_DATA_CLASS(BlockSparseAttentionGrad_1000, BlockSparseAttentionGradTilingDataArch35)
@@ -195,6 +206,9 @@ private:
     ge::graphStatus ProcessTND(gert::TilingContext* context);
     ge::graphStatus ProcessBNSD(gert::TilingContext* context);
     ge::graphStatus ProcessAttrs(gert::TilingContext* context);
+    ge::graphStatus ParseAttnMaskCounts(gert::TilingContext* context);
+    uint32_t SelectSchedule();
+    ge::graphStatus AssignWideCoreTasks(uint32_t coreNum);
 
     ge::graphStatus AssignCoreTasks(uint32_t numHeads, uint32_t kvHeads, uint32_t blockX, uint32_t coreNum,
                                     const std::vector<uint32_t>& tasksInBatch,
@@ -217,6 +231,13 @@ private:
     int64_t blockShapeY_ = 0; // block的y维度
     float scaleValue_ = 0.0f;
     uint32_t maskType_ = 0;
+    uint32_t maxMaskBlocks_ = 0;
+    bool hasPerBlockMask_ = false;
+    uint32_t scheduleMode_ = 0;
+    uint32_t wideQTasksPerWorkItem_ = 0;
+    uint32_t wideWorkspaceStageElements_ = 0;
+    uint32_t wideWorkspaceCoreElements_ = 0;
+    uint64_t wideRawPlaneBytes_ = 0;
 
     uint32_t totalQBlocks_ = 0;
 
