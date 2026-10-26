@@ -51,4 +51,7 @@ third_party/
 
 # pre-commit log
 log/
-pre-commit_reports/
+codespell_reports/
+
+# OAT 远程 hook 报告目录
+oat_reports/

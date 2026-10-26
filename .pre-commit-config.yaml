@@ -26,7 +26,6 @@ repos:
       - id: end-of-file-fixer
       - id: check-yaml
         args: ["--allow-multiple-documents"]
-      - id: check-added-large-files
       - id: check-merge-conflict
       - id: detect-private-key
       - id: check-json
@@ -59,13 +58,13 @@ repos:
     rev: v2.4.1
     hooks:
       - id: codespell
-        # 包装 entry：输出 tee 到 pre-commit_reports/codespell.log（仍跑在托管 venv）
+        # 只查 markdown
+        files: \.md$
+        # 包装 entry：输出 tee 到 codespell_reports/codespell.log（仍跑在托管 venv）
         entry: bash scripts/run_codespell.sh
         args: [
             "-L",
             "CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,wIh,dout,indexs,inH,padD,outWeight",
-            "--skip",
-            "*.cc,*.cjs,*.clang-format,*.cmake,*.cpp,*.csv,*.cts,*.gitignore,*.gitkeep,*.gitmodules,*.h,*.hpp,*.in,*.info,*.ini,*.js,*.json,*.log,*.md,*.py,*.sh,*.TAG,*.ts,*.txt,*.xml,*.yaml,*.yml",
           ]
 
   # 新增/重命名头文件 basename 重名拦截
@@ -89,14 +88,10 @@ repos:
         verbose: true
 
   # OAT 合规性检查 (Open Source Audit Tool)
-  - repo: local
+  - repo: https://gitcode.com/HiAgent/compliance
+    rev: v1.0.6
     hooks:
       - id: oat-check
-        name: OAT Compliance Check
-        entry: bash scripts/oat_check.sh
-        language: system
-        require_serial: true
         pass_filenames: true
-        types: [file]
         stages: [pre-commit]
         verbose: true

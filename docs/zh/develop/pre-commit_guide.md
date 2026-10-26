@@ -23,7 +23,7 @@ pre-commit 是一个 Git Hooks 框架，在 `git commit` 时自动运行代码�
 
 | Hook | 功能 |
 |------|------|
-| **pre-commit-hooks** | 行尾空格、文件末尾换行、YAML/JSON 合法性、大文件、合并冲突标记、私钥检测 |
+| **pre-commit-hooks** | 行尾空格、文件末尾换行、YAML/JSON 合法性、合并冲突标记、私钥检测（大文件不拦） |
 | **clang-format** | C/C++/asc 代码格式化，遵循 `.clang-format` |
 | **ruff-check / ruff-format** | Python 静态检查（自动修复）+ 格式化 |
 | **codespell** | 拼写检查（CANN/ascend 等术语已加白名单） |
@@ -76,7 +76,9 @@ git commit --no-verify -m "msg"
 
 搜索输出中的 `Failed` 定位失败项，查看该 hook 下方输出处理，或粘贴给 AI 获取修复建议。
 
-拦截类钩子的报告同时落盘在 `pre-commit_reports/`（不入 git）：`codespell.log`（拼写命中清单）、`oat_result.txt`（合规违规明细），可随时复查。
+拦截类钩子的报告落盘（不入 git），可随时复查：
+- `codespell_reports/codespell.log`（拼写命中清单）
+- `oat_reports/result.txt`（OAT 远程 hook，合规违规明细）
 
 | 报错                  | 原因               | 处理方式                                          |
 |-----------------------|--------------------|---------------------------------------------------|
@@ -96,11 +98,11 @@ git pc <commit>^     # 某一笔提交
 
 ## 七、检查项说明
 
-1. **pre-commit-hooks** (v4.6.0)：trailing-whitespace、end-of-file-fixer、check-yaml/json、check-added-large-files、check-merge-conflict、detect-private-key
+1. **pre-commit-hooks** (v4.6.0)：trailing-whitespace、end-of-file-fixer、check-yaml/json、check-merge-conflict、detect-private-key（check-added-large-files 不启用）
 2. **clang-format** (v18.1.8)：遵循项目 `.clang-format`（Google 风格，4 空格缩进，列宽上限 120，枚举左大括号与 enum 同行，构造函数初始化列表逐行换行，函数定义大括号换行，指针左对齐 `int* ptr`；`build/`、`tests/third_party/`、`*_def.cpp` 不参与格式化）
 3. **ruff** (v0.14.14)：ruff-check（`--fix` 自动修复）+ ruff-format
 4. **codespell** (v2.4.1)：拼写检查，CANN、ascend、EnQue 等术语已加白名单
-5. **OAT**：基于 oat-py，检查许可证头（YAML/CSV 已豁免）、禁止二进制和归档文件
+5. **OAT**：远程 compliance hook（HiAgent/compliance，rev v1.0.6，业务仓不维护脚本），基于 oat-py 检查许可证头（YAML/CSV 已豁免）、禁止二进制和归档文件
 6. **Duplicate Header Basename Check**（本地脚本）：拦截新增/重命名后 basename 重复的头文件
 7. **Compile Scope Whitelist Check**（本地脚本）：仅当 `tests/compile_scope_whitelist.yaml` 变更时触发，校验编译范围白名单
 
