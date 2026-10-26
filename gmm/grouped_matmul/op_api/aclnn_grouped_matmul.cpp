@@ -633,9 +633,8 @@ static aclnnStatus CheckGroupListSplitK(const gmm::GroupedMatmulParams& gmmParam
                    ACLNN_ERR_PARAM_INVALID, "CheckGroupListCommonTensor failed in groupType 2.");
         return ACLNN_SUCCESS;
     }
-    CHECK_COND(CheckGroupListCommonIntArray(gmmParams, isRequiredGroupList, groupNum, groupListLastValue, opName) ==
-                   ACLNN_SUCCESS,
-               ACLNN_ERR_PARAM_INVALID, "CheckGroupListCommonIntArray failed.");
+    CHECK_RET_CODE(CheckGroupListCommonIntArray(gmmParams, isRequiredGroupList, groupNum, groupListLastValue, opName),
+                   "CheckGroupListCommonIntArray failed.");
     if (gmmParams.groupListOptional != nullptr) {
         if (xSeparated) {
             int64_t preOffset = 0;
@@ -683,9 +682,8 @@ static aclnnStatus CheckGroupListSplitM(const gmm::GroupedMatmulParams& gmmParam
                    ACLNN_ERR_PARAM_INVALID, "CheckGroupListCommonTensor failed in groupType 0.");
         return ACLNN_SUCCESS;
     }
-    CHECK_COND(CheckGroupListCommonIntArray(gmmParams, isRequiredGroupList, groupNum, groupListLastValue, opName) ==
-                   ACLNN_SUCCESS,
-               ACLNN_ERR_PARAM_INVALID, "CheckGroupListCommonIntArray failed!");
+    CHECK_RET_CODE(CheckGroupListCommonIntArray(gmmParams, isRequiredGroupList, groupNum, groupListLastValue, opName),
+                   "CheckGroupListCommonIntArray failed!");
     if (gmmParams.groupListOptional != nullptr) {
         if (xSeparated) {
             int64_t preGoupList = 0;
@@ -1814,10 +1812,10 @@ static aclnnStatus SplitMSingleXSingleWeightSingleY(const gmm::GroupedMatmulPara
         opName);
     // check groupList
     size_t batchSizeWeight = (*gmmParams.weight)[0]->GetViewShape().GetDim(0);
-    CHECK_COND(CheckGroupListSplitM(gmmParams, true, false, false, batchSizeWeight, opName) == ACLNN_SUCCESS,
-               ACLNN_ERR_PARAM_INVALID,
-               "In op [%s], when groupType == 0(split-M) with single x, single weight and single y, [%s] check failed.",
-               opName, "groupList");
+    CHECK_RET_CODE(
+        CheckGroupListSplitM(gmmParams, true, false, false, batchSizeWeight, opName),
+        "In op [%s], when groupType == 0(split-M) with single x, single weight and single y, [%s] check failed.",
+        opName, "groupList");
     return ACLNN_SUCCESS;
 }
 
@@ -1887,10 +1885,9 @@ static aclnnStatus SplitMSingleXSeparatedWeightSingleY(const gmm::GroupedMatmulP
               ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckSplitMShape(gmmParams, opName, errorMessage, weightSize) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     // check groupList
-    CHECK_COND(CheckGroupListSplitM(gmmParams, true, false, false, weightSize, opName) == ACLNN_SUCCESS,
-               ACLNN_ERR_PARAM_INVALID,
-               "In op [%s], when %s with single x, separated weight and single y, [%s] check failed.", opName,
-               errorMessage.c_str(), "groupList");
+    CHECK_RET_CODE(CheckGroupListSplitM(gmmParams, true, false, false, weightSize, opName),
+                   "In op [%s], when %s with single x, separated weight and single y, [%s] check failed.", opName,
+                   errorMessage.c_str(), "groupList");
     return ACLNN_SUCCESS;
 }
 
@@ -1955,10 +1952,9 @@ static aclnnStatus SplitMSingleXSeparatedWeightSeparatedY(const gmm::GroupedMatm
                "In op [%s], when %s with single x, separated weight and separated y, weight inner axis check failed.",
                opName, errorMessage.c_str());
     // check groupList
-    CHECK_COND(CheckGroupListSplitM(gmmParams, true, false, true, ySize, opName) == ACLNN_SUCCESS,
-               ACLNN_ERR_PARAM_INVALID,
-               "In op [%s], when %s with single x, separated weight and separated y, [%s] check failed.", opName,
-               errorMessage.c_str(), "groupList");
+    CHECK_RET_CODE(CheckGroupListSplitM(gmmParams, true, false, true, ySize, opName),
+                   "In op [%s], when %s with single x, separated weight and separated y, [%s] check failed.", opName,
+                   errorMessage.c_str(), "groupList");
     return ACLNN_SUCCESS;
 }
 
@@ -2018,10 +2014,9 @@ static aclnnStatus SplitMSeparatedXSeparatedWeightSingleY(const gmm::GroupedMatm
     CHECK_RET(CheckSeparatedXShape(gmmParams, opName, errorMessage, weightSize) == ACLNN_SUCCESS,
               ACLNN_ERR_PARAM_INVALID);
     // check groupList
-    CHECK_COND(CheckGroupListSplitM(gmmParams, false, true, false, xSize, opName) == ACLNN_SUCCESS,
-               ACLNN_ERR_PARAM_INVALID,
-               "In op [%s], when %s with separated x, separated weight and single y, [%s] check failed.", opName,
-               errorMessage.c_str(), "groupList");
+    CHECK_RET_CODE(CheckGroupListSplitM(gmmParams, false, true, false, xSize, opName),
+                   "In op [%s], when %s with separated x, separated weight and single y, [%s] check failed.", opName,
+                   errorMessage.c_str(), "groupList");
     return ACLNN_SUCCESS;
 }
 
@@ -2034,24 +2029,26 @@ static aclnnStatus CheckCaseSplitM(const gmm::GroupedMatmulParams& gmmParams, co
         gmmParams.apiVersion == gmm::GMMApiVersion::WeightNz || gmmParams.apiVersion == gmm::GMMApiVersion::V5 ||
         gmmParams.apiVersion == gmm::GMMApiVersion::V4 || gmmParams.apiVersion == gmm::GMMApiVersion::V3;
     if (IsWeightNzMultiTensorCase(gmmParams)) {
-        CHECK_COND(SplitMSingleXSeparatedWeightSingleY(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-                   "In op [%s], when groupType == 0(split-M) with single x, separated weight and single y, parameter "
-                   "check failed.",
-                   opName);
+        CHECK_RET_CODE(
+            SplitMSingleXSeparatedWeightSingleY(gmmParams, opName),
+            "In op [%s], when groupType == 0(split-M) with single x, separated weight and single y, parameter "
+            "check failed.",
+            opName);
         return ACLNN_SUCCESS;
     }
     if (xSize == 1UL && weightSize == 1UL && ySize == 1UL) {
-        CHECK_COND(SplitMSingleXSingleWeightSingleY(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-                   "In op [%s], when groupType == 0(split-M) with single x, single weight and single y, parameter "
-                   "check failed.",
-                   opName);
+        CHECK_RET_CODE(SplitMSingleXSingleWeightSingleY(gmmParams, opName),
+                       "In op [%s], when groupType == 0(split-M) with single x, single weight and single y, parameter "
+                       "check failed.",
+                       opName);
         return ACLNN_SUCCESS;
     }
     if (xSize == 1UL && weightSize > 1UL && ySize == 1UL) {
-        CHECK_COND(SplitMSingleXSeparatedWeightSingleY(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-                   "In op [%s], when groupType == 0(split-M) with single x, separated weight and single y, parameter "
-                   "check failed.",
-                   opName);
+        CHECK_RET_CODE(
+            SplitMSingleXSeparatedWeightSingleY(gmmParams, opName),
+            "In op [%s], when groupType == 0(split-M) with single x, separated weight and single y, parameter "
+            "check failed.",
+            opName);
         return ACLNN_SUCCESS;
     }
     if (xSize == 1UL && weightSize > 1UL && ySize > 1UL) {
@@ -2059,16 +2056,16 @@ static aclnnStatus CheckCaseSplitM(const gmm::GroupedMatmulParams& gmmParams, co
                    "In op [%s], when groupList is tensor and groupType == 0(split-M) with single x, separated weight "
                    "and separated y, this scenario is not supported.",
                    opName);
-        CHECK_COND(
-            SplitMSingleXSeparatedWeightSeparatedY(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
+        CHECK_RET_CODE(
+            SplitMSingleXSeparatedWeightSeparatedY(gmmParams, opName),
             "In op [%s], when groupType == 0(split-M) with single x, separated weight and separated y, parameter "
             "check failed.",
             opName);
         return ACLNN_SUCCESS;
     }
     if (xSize > 1UL && weightSize > 1UL && ySize == 1UL) {
-        CHECK_COND(
-            SplitMSeparatedXSeparatedWeightSingleY(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
+        CHECK_RET_CODE(
+            SplitMSeparatedXSeparatedWeightSingleY(gmmParams, opName),
             "In op [%s], when groupType == 0(split-M) with separated x, separated weight and single y, parameter "
             "check failed.",
             opName);
@@ -2147,10 +2144,10 @@ static aclnnStatus CheckCaseSplitK(const gmm::GroupedMatmulParams& gmmParams, co
                 opName, "weight", "y");
             // check groupList
             size_t batchSizeY = (*gmmParams.y)[0]->GetViewShape().GetDim(0);
-            CHECK_COND(CheckGroupListSplitK(gmmParams, true, false, false, batchSizeY, opName) == ACLNN_SUCCESS,
-                       ACLNN_ERR_PARAM_INVALID,
-                       "In op [%s], when groupType == 2(split-K) with single weight and single y, [%s] check failed.",
-                       opName, "groupList");
+            CHECK_RET_CODE(
+                CheckGroupListSplitK(gmmParams, true, false, false, batchSizeY, opName),
+                "In op [%s], when groupType == 2(split-K) with single weight and single y, [%s] check failed.", opName,
+                "groupList");
         }
         return ACLNN_SUCCESS;
     }
@@ -2276,13 +2273,13 @@ static aclnnStatus CheckParamsByGroupType(const gmm::GroupedMatmulParams& gmmPar
                                        "groupType == 0(split-M)";
         CHECK_COND(!gmmParams.transposeX, ACLNN_ERR_PARAM_INVALID, "In op [%s], when %s, [%s] is not supported.",
                    opName, errorMessage.c_str(), "transposeX");
-        CHECK_COND(CheckCaseSplitM(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-                   "In op [%s], when %s, parameter check failed.", opName, errorMessage.c_str());
+        CHECK_RET_CODE(CheckCaseSplitM(gmmParams, opName), "In op [%s], when %s, parameter check failed.", opName,
+                       errorMessage.c_str());
     } else if (gmmParams.groupType == gmm::SPLIT_K) {
         CHECK_COND(gmmParams.biasOptional == nullptr, ACLNN_ERR_PARAM_INVALID,
                    "In op [%s], when groupType == 2(split-K), [%s] must be empty.", opName, "bias");
-        CHECK_COND(CheckCaseSplitK(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-                   "In op [%s], when groupType == 2(split-K), parameter check failed.", opName);
+        CHECK_RET_CODE(CheckCaseSplitK(gmmParams, opName),
+                       "In op [%s], when groupType == 2(split-K), parameter check failed.", opName);
     }
     return ACLNN_SUCCESS;
 }
@@ -2318,16 +2315,15 @@ static aclnnStatus CheckParamDifferentGroupType(const gmm::GroupedMatmulParams& 
             if (IsMultiTensorWeight(gmmParams)) {
                 batchSizeWeight = gmmParams.weight->Size();
             }
-            CHECK_COND(CheckGroupListSplitM(gmmParams, true, false, false, batchSizeWeight, opName) == ACLNN_SUCCESS,
-                       ACLNN_ERR_PARAM_INVALID,
-                       "In op [%s], when DAV_3510 weight quant and groupType == 0(split-M), [%s] check failed.", opName,
-                       "groupList");
+            CHECK_RET_CODE(CheckGroupListSplitM(gmmParams, true, false, false, batchSizeWeight, opName),
+                           "In op [%s], when DAV_3510 weight quant and groupType == 0(split-M), [%s] check failed.",
+                           opName, "groupList");
         }
         return ACLNN_SUCCESS;
     }
 
-    CHECK_COND(CheckParamsByGroupType(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
-               "In op [%s], groupType specific parameter check failed.", opName);
+    CHECK_RET_CODE(CheckParamsByGroupType(gmmParams, opName), "In op [%s], groupType specific parameter check failed.",
+                   opName);
     if (gmmParams.biasOptional != nullptr) {
         CHECK_RET_CODE(CheckOptionalTensorList(gmmParams, gmmParams.biasOptional, "bias"),
                        "In op [%s], [%s] check failed.", opName, "bias");
@@ -2410,7 +2406,7 @@ static aclnnStatus CheckParam(const gmm::GroupedMatmulParams& gmmParams, const c
 {
     CHECK_COND(CheckUnusedParams(gmmParams) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID, "Invalid unused params.");
     CHECK_RET(CheckFunctionParams(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
-    CHECK_RET(CheckParamDifferentGroupType(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET_CODE(CheckParamDifferentGroupType(gmmParams, opName), "CheckParamDifferentGroupType failed.");
     CHECK_RET(CheckGroupSize(gmmParams) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckTuningConfig(gmmParams) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     return ACLNN_SUCCESS;
@@ -3216,7 +3212,7 @@ static aclnnStatus PrepareGmmParams(gmm::GroupedMatmulParams& gmmParams, const a
         }
     }
     ResetEmptyTensor(gmmParams); // make empty tensor/tensorList nullptr
-    CHECK_RET(CheckParam(gmmParams, opName) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET_CODE(CheckParam(gmmParams, opName), "CheckParam failed.");
     gmmParams.splitItem = CorrectSplitItem(x, y, splitItem);
     return ACLNN_SUCCESS;
 }
