@@ -326,6 +326,7 @@ aclnnStatus aclnnAllGatherMatmulV2(
     <!-- npu="A3,910b" id9 -->
     - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>  ：
         - x1、x2：数据类型支持FLOAT16、BFLOAT16、INT8、INT4。
+        - x2：当x1和x2数据类型为INT4（A4W4）时，仅支持ND格式，不支持FRACTAL_NZ（NZ）格式。
         - bias：在commMode为aiv时，当前版本仅支持输入nullptr。
         - x1Scale：数据类型支持FLOAT。当x1和x2数据类型为FLOAT16/BFLOAT16时，仅支持输入为nullptr。在pertoken场景，shape为(m, 1)。
         - x2Scale：数据类型支持FLOAT、INT64。INT64数据类型仅在x1和x2数据类型为INT8或者output数据类型为FLOAT16场景支持。当x1和x2数据类型为FLOAT16/BFLOAT16时，仅支持输入为nullptr。在perchannel场景，shape为(1, n)。
@@ -461,7 +462,7 @@ aclnnStatus aclnnAllGatherMatmulV2(
     - 输出为2维，其shape为\(m*rank\_size, n\), rank\_size为卡数。
     - 不支持空tensor。
     - x1和x2的数据类型需要保持一致。
-    - x1和x2数据类型为INT4时，k与n必须为偶数。
+    - x1和x2数据类型为INT4（A4W4）时，k与n必须为偶数；x2仅支持ND格式，不支持FRACTAL_NZ（NZ）格式。
     - 支持2、4、8卡。
     - 通信缓冲区大于等于200MB。
 

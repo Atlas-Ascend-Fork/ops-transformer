@@ -164,6 +164,17 @@ static bool CheckAIVModeDtypeValid(const aclTensor* x1, const aclTensor* x2, con
     return true;
 }
 
+static bool CheckAIVModeFormatValid(const aclTensor* x2)
+{
+    if (x2->GetDataType() == op::DataType::DT_INT4 && x2->GetStorageFormat() == op::Format::FORMAT_FRACTAL_NZ) {
+        OP_LOGE_FOR_INVALID_FORMATS_WITH_REASON("aclnnAllGatherMatmulV2", "x2",
+                                                op::ToString(x2->GetStorageFormat()).GetString(),
+                                                "FRACTAL_NZ format is not supported for INT4 x2");
+        return false;
+    }
+    return true;
+}
+
 static bool CheckAttr(int64_t streamMode)
 {
     if (streamMode != NUM_ACL_STOP_ON_FAILURE) {
@@ -295,6 +306,8 @@ static aclnnStatus CheckParamsForAIVMode(const aclTensor* x1, const aclTensor* x
     CHECK_RET(CheckNotNull(x1, x2, output), ACLNN_ERR_PARAM_NULLPTR);
 
     CHECK_RET(CheckAIVModeDtypeValid(x1, x2, output), ACLNN_ERR_PARAM_INVALID);
+
+    CHECK_RET(CheckAIVModeFormatValid(x2), ACLNN_ERR_PARAM_INVALID);
 
     CHECK_RET(CheckAttr(streamMode), ACLNN_ERR_PARAM_INVALID);
 

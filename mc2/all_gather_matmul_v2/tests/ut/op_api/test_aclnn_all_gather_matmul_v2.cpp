@@ -617,6 +617,70 @@ protected:
     }
 };
 
+struct A4W4HistoricalNzCase {
+    int id;
+    int64_t m;
+    int64_t k;
+    int64_t x2Dim0;
+    int64_t x2Dim1;
+    aclDataType outputType;
+};
+
+// Frozen metadata from A4W4/8P/cases/a4w4_8p_false_nz_unsupported.json.
+// These are descriptor-only negative tests, not eight-rank numerical replays.
+class AllGatherMatmulV2A4W4NzTest : public AllGatherMatmulV2AclnnAIVTest,
+                                    public testing::WithParamInterface<A4W4HistoricalNzCase> {};
+
+TEST_P(AllGatherMatmulV2A4W4NzTest, RejectHistoricalNzBeforeWorkspacePlanning)
+{
+    const auto& c = GetParam();
+    SCOPED_TRACE("historical A4W4 8P case " + std::to_string(c.id));
+    const int64_t n = c.x2Dim0 == c.k ? c.x2Dim1 : c.x2Dim0;
+    auto x1 = TensorDesc({c.m, c.k}, ACL_INT4, ACL_FORMAT_ND).ToAclType();
+    auto x2 = TensorDesc({c.x2Dim0, c.x2Dim1}, ACL_INT4, ACL_FORMAT_FRACTAL_NZ).ToAclType();
+    auto output = TensorDesc({c.m * 8, n}, c.outputType, ACL_FORMAT_ND).ToAclType();
+    ASSERT_NE(x1.get(), nullptr);
+    ASSERT_NE(x2.get(), nullptr);
+    ASSERT_NE(output.get(), nullptr);
+    ASSERT_EQ(x2->GetDataType(), op::DataType::DT_INT4);
+    ASSERT_EQ(x2->GetStorageFormat(), op::Format::FORMAT_FRACTAL_NZ);
+
+    // No data allocation, HCCL group, or second-stage execution is needed:
+    // the NZ guard must reject before consulting scales or the group.
+    uint64_t workspaceSize = 12345;
+    aclOpExecutor* executor = nullptr;
+    auto ret = aclnnAllGatherMatmulV2GetWorkspaceSize(x1.get(), x2.get(), nullptr, nullptr, nullptr, nullptr, 0,
+                                                      "test_all_gather_group", 0, 0, 1, 0, "aiv", output.get(), nullptr,
+                                                      nullptr, &workspaceSize, &executor);
+    EXPECT_EQ(ret, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(workspaceSize, 12345U);
+    EXPECT_EQ(executor, nullptr);
+    if (executor != nullptr) {
+        delete executor;
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(Historical8P, AllGatherMatmulV2A4W4NzTest,
+                         testing::Values(A4W4HistoricalNzCase{18, 3072, 256, 256, 256, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{19, 1536, 256, 2048, 256, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{26, 1536, 256, 4160, 256, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{27, 3072, 288, 2048, 288, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{39, 9216, 256, 256, 384, ACL_BF16},
+                                         A4W4HistoricalNzCase{42, 128, 256, 10240, 256, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{43, 10240, 256, 256, 1536, ACL_BF16},
+                                         A4W4HistoricalNzCase{53, 4097, 1024, 1024, 16, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{56, 7684, 256, 256, 12288, ACL_BF16},
+                                         A4W4HistoricalNzCase{72, 514, 1024, 1024, 10240, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{79, 1025, 7696, 7696, 1024, ACL_BF16},
+                                         A4W4HistoricalNzCase{81, 10240, 1536, 1024, 1536, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{85, 12288, 1024, 9216, 1024, ACL_BF16},
+                                         A4W4HistoricalNzCase{89, 1024, 10304, 10304, 1536, ACL_FLOAT16},
+                                         A4W4HistoricalNzCase{93, 12544, 1536, 1536, 8192, ACL_BF16},
+                                         A4W4HistoricalNzCase{96, 9216, 4096, 272, 4096, ACL_FLOAT16}),
+                         [](const testing::TestParamInfo<A4W4HistoricalNzCase>& info) {
+                             return "Case" + std::to_string(info.param.id);
+                         });
+
 TEST_F(AllGatherMatmulV2AclnnAIVTest, TestAIVFP16Basic)
 {
     TensorDesc x1 = TensorDesc({8, 256}, ACL_FLOAT16, ACL_FORMAT_ND);

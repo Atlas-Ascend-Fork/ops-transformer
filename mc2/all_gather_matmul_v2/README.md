@@ -225,7 +225,7 @@
     - 输出为2维，其shape为\(m*rank\_size, n\), rank\_size为卡数。
     - 不支持空tensor。
     - x1和x2的数据类型需要保持一致。
-    - x1和x2数据类型为INT4时，k与n必须为偶数。
+    - x1和x2数据类型为INT4（A4W4）时，k与n必须为偶数；x2仅支持ND格式，不支持FRACTAL_NZ（NZ）格式。
     - 支持2、4、8卡。
 
 ## 调用说明
