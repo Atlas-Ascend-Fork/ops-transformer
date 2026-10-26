@@ -9,15 +9,21 @@
  */
 
 /*!
- * \file comm_channel_builder.cpp
- * \brief Host 侧 HCCL channel 创建工具，通过 CommChannelBuilderManager 对外暴露接口
+ * \file comm_channel_builder_manager.cpp
+ * \brief Host 侧 HCCL 通信 context 构建工具，通过 CommChannelBuilderManager 对外暴露接口
  *
  * CommChannelBuilder 直接引用 mc2/common/op_kernel/apace 下的 comm_channel_builder.h 原版实现，
  * CommChannelBuilderManager 负责适配 torch_extension：
- * - 从 group name 获取 HcclComm handle
- * - 动态加载 HCCL 函数指针 (InitHcclEngineCtxFunctions)
- * - 持有 CommContext 成员，调用原版 CreateDeviceContext 填充
- * - 用 at::from_blob 将 device 指针包装为 at::Tensor 返回
+ *
+ * - 从 group name 获取 HcclComm handle，动态加载 HCCL 函数指针 (InitHcclEngineCtxFunctions)
+ *
+ * - 旧版 channel 路径（CreateContext）：经原版 CreateDeviceContext 构建 URMA/UBMEM channel
+ *   context，用 at::from_blob 将 device 指针包装为 at::Tensor 返回
+ *
+ * - quant MTE 路径（低比特量化算子族 quant_all_reduce/quant_reduce_scatter 的公共 context）：
+ *   eager（CreateQuantMteContext，tensor 产物缓存在 DeviceContextCache）与图模式
+ *   （GetQuantMteContextData，FakeTensorMode 安全的 host 数据）共用 BuildOrLookupHostContext，
+ *   以固定 ctxTag 保证 eager/静态图/动态图共享同一份 context
  */
 
 #include <torch/extension.h>
@@ -39,6 +45,7 @@ namespace op_api {
 using ApaceCommUdmaContext = Apace::AivComm::CommUdmaContext;
 using ApaceCommUbmemContext = Apace::AivComm::CommUbmemContext;
 
+// 旧版 channel 路径的 device context 内容（URMA/UBMEM channel 句柄），供 CreateContext 使用
 struct CommContext {
     ApaceCommUdmaContext udmaCtx;
     ApaceCommUbmemContext ubmemCtx;
@@ -60,6 +67,8 @@ using DefaultCommChannelBuilder = CommChannelBuilder<ChannelMode::URMA, ChannelM
 
 class CommChannelBuilderManager {
 public:
+    // 每次构造都查询 group 当前的 comm 句柄：quant MTE 产物缓存以 comm 句柄校验有效性，
+    // 同名 group 销毁重建后句柄变化，据此判定缓存失效并重建
     explicit CommChannelBuilderManager(const std::string& group)
         : group_(group)
     {
@@ -84,7 +93,7 @@ public:
     }
 
     /*!
-     * \brief 创建 device context 并包装为 at::Tensor 返回
+     * \brief 创建旧版 URMA/UBMEM channel 的 device context 并包装为 at::Tensor 返回
      *
      * 内部流程：
      * 1. 调用原版 CreateDeviceContext(hostCtx, size, tag, dataCtx, barrierCtx) 填充 CommContext
@@ -106,11 +115,13 @@ public:
     /*!
      * \brief 获取或创建 quant MTE 算子族公共 context 的 host 侧内容
      *
-     * 固定 ctxTag 保证 eager/静态图/动态图共享同一份 context。HcclEngineCtxGet 命中时
-     * 直接读进程内 host 缓存；未命中时交换各 rank 内置 buffer 地址（UB_MEM 协议）、
-     * 创建 engine context 并拷贝。全程仅调用 HCCL/ACL C 接口，不经过 PyTorch
-     * dispatcher，可在 FakeTensorMode（torchair GE converter 在 AOT 编译期处于
-     * fake mode）下安全调用。
+     * 固定 ctxTag 保证 eager/静态图/动态图共享同一份 context；eager
+     * (CreateQuantMteContext) 与图模式 (GetQuantMteContextData) 都经由本接口，
+     * engine ctx 与 host 缓存在此同步创建/刷新，tensor 产物缓存（DeviceContextCache）
+     * 则仅由 eager 路径填充。HcclEngineCtxGet 命中时直接读进程内 host 缓存；
+     * 未命中时交换各 rank 内置 buffer 地址（UB_MEM 协议）、创建 engine context
+     * 并拷贝。全程仅调用 HCCL/ACL C 接口，不经过 PyTorch dispatcher，可在
+     * FakeTensorMode（torchair GE converter 在 AOT 编译期处于 fake mode）下安全调用。
      */
     QuantMteContext BuildOrLookupHostContext(const std::string& ctxTag)
     {
@@ -174,11 +185,34 @@ public:
 
     /*!
      * \brief 创建 quant MTE 算子族公共 context 并以 NPU tensor 返回（eager 路径）
+     *
+     * 以 DeviceContextCache 为缓存真值：命中且 comm 未变化时直接复用缓存的
+     * (tensor, hccl_buffer_size)，稳态无 H2D memcpy、无 HCCL host 查询，避免每次
+     * 调用插入的 memcpy 任务叠加 host 查询抖动，造成多 rank kernel 下发时序偏移
+     * 被 one-shot push kernel 的核内自旋等待计入耗时。
+     * 未命中或 comm 变化时（图路径已先行创建 engine ctx、同名 group 销毁重建等，
+     * 详见 DeviceContextCache 注释），经幂等的 BuildOrLookupHostContext 取 host
+     * 内容重建 tensor 并回填缓存，不允许因缓存未命中报错退出。
      */
     std::tuple<at::Tensor, int64_t> CreateQuantMteContext(const std::string& ctxTag)
     {
+        const std::string key = MakeHostContextKey(ctxTag);
+        {
+            std::lock_guard<std::mutex> guard(DeviceContextCacheMutex());
+            auto iter = DeviceContextCache().find(key);
+            if (iter != DeviceContextCache().end() && iter->second.comm == comm_) {
+                return {iter->second.context, iter->second.hcclBufferSize};
+            }
+        }
+
         QuantMteContext hostContext = BuildOrLookupHostContext(ctxTag);
-        return {WrapQuantMteContext(hostContext), static_cast<int64_t>(GetHcclBufferSize())};
+        at::Tensor context = WrapQuantMteContext(hostContext);
+        int64_t hcclBuffSize = static_cast<int64_t>(GetHcclBufferSize());
+        {
+            std::lock_guard<std::mutex> guard(DeviceContextCacheMutex());
+            DeviceContextCache()[key] = {context, hcclBuffSize, comm_};
+        }
+        return {context, hcclBuffSize};
     }
 
     /*!
@@ -187,7 +221,9 @@ public:
      * torchair 的 fx2ge converter 在 AOT 编译期处于 FakeTensorMode，任何经过 PyTorch
      * dispatcher 的 tensor 创建/拷贝（如 at::empty / copy_ / Tensor.cpu）都会触发
      * fake mode 断言；converter 只需要 context 的 int32 内容构造 ge.Const，因此
-     * 走本接口直接取 host 内容，不产生任何 tensor op。
+     * 走本接口直接取 host 内容，不产生任何 tensor op。本路径只创建 engine ctx 与
+     * host 缓存、不构建 tensor（也就不填充 DeviceContextCache），后续 eager 路径
+     * 首次调用时需自行重建 tensor。
      */
     std::tuple<std::vector<int32_t>, int64_t> GetQuantMteContextData(const std::string& ctxTag)
     {
@@ -234,9 +270,10 @@ private:
     /*!
      * \brief 进程内缓存 host 侧 context 内容（key: group + ctxTag）
      *
-     * 内容（rankId/rankSizePerServer/各 rank 内置 buffer 地址）在 (group, ctxTag)
-     * 确定后不变，缓存安全；engine ctx 生命周期与进程一致，HcclEngineCtxGet 命中时
-     * 本进程必然已走过创建路径并写入缓存，因此命中路径无需回读 device 内存。
+     * 内容（rankId/rankSizePerServer/各 rank 内置 buffer 地址）由当前 comm 上的
+     * 创建流程一次性确定，缓存安全。engine ctx 随 comm 存在：HcclEngineCtxGet 在
+     * 当前 comm 上命中时，必然已走过创建路径并同步写入本缓存（同名 group 销毁重建
+     * 后在新 comm 上未命中，会完整重建并覆盖），因此命中路径无需回读 device 内存。
      */
     static std::map<std::string, QuantMteContext>& HostContextCache()
     {
@@ -262,6 +299,38 @@ private:
     {
         std::lock_guard<std::mutex> guard(HostContextCacheMutex());
         HostContextCache()[MakeHostContextKey(ctxTag)] = hostContext;
+    }
+
+    /*! \brief eager 路径 context 构建产物缓存条目 */
+    struct QuantMteContextCacheEntry {
+        at::Tensor context;     // 构建产物 tensor
+        int64_t hcclBufferSize; // 构建时查询的 HCCL 内置 buffer 大小
+        HcclComm comm;          // 构建时的 comm 句柄，用于校验缓存是否仍对应当前通信组
+    };
+
+    /*!
+     * \brief 进程内缓存 eager 路径已构建的 context 产物（key: group + ctxTag）
+     *
+     * engine ctx 在 HCCL 侧有幂等缓存（HcclEngineCtxGet），但 tensor 需经
+     * at::empty + H2D copy_ 构建且不能 from_blob 零拷贝包装（aclnn 转换链 UB），
+     * 故将构建产物按 tag 缓存一次、命中复用。注意图路径（GetQuantMteContextData）
+     * 不填充本缓存，eager 在其之后首次调用时未命中属正常路径，需重建；条目
+     * 同时记录构建时的 comm 句柄，同名 group 销毁重建（comm 变化）后判定缓存
+     * 失效并重建，避免复用旧 comm 的陈旧 buffer 映射地址导致 kernel 访问无效
+     * 远端内存（device 侧 MTE trap）。
+     * 有意用泄漏指针持有：at::Tensor 析构不可延迟到进程退出的静态析构阶段执行，
+     * 届时 torch_npu 分配器/设备上下文可能已销毁，会引发退出时崩溃。
+     */
+    static std::map<std::string, QuantMteContextCacheEntry>& DeviceContextCache()
+    {
+        static auto* cache = new std::map<std::string, QuantMteContextCacheEntry>();
+        return *cache;
+    }
+
+    static std::mutex& DeviceContextCacheMutex()
+    {
+        static std::mutex mutex;
+        return mutex;
     }
 
     std::string MakeHostContextKey(const std::string& ctxTag) const
