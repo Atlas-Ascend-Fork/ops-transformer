@@ -25,8 +25,8 @@ const int64_t QUANT_MODE_HIF4 = 10;
 const int64_t FLOAT4_E2M1 = 296;
 const int64_t FLOAT8_E8M0 = 293;
 const int64_t HIFLOAT8 = 34;
-const int64_t HIFLOAT4 = 298;
-const int64_t HIFLOAT4_SCALE = static_cast<int64_t>(ACL_HIFLOAT4_SCALE);
+const int64_t HIFLOAT4 = 42;
+const int64_t HIFLOAT4_SCALE = 43;
 
 inline int64_t GetQkvDtypeRatio(int64_t quant_mode)
 {
@@ -50,11 +50,11 @@ TensorWrapper make_wrapper(const at::Tensor& tensor, const int64_t real_dtype)
         } else if (real_dtype == HIFLOAT8) {
             wrapper.dtype = ACL_HIFLOAT8;
         } else if (real_dtype == HIFLOAT4) {
-            wrapper.dtype = ACL_HIFLOAT4;
+            wrapper.dtype = Ops::Transformer::ACL_HIFLOAT4;
         }
     } else if (kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(tensor.scalar_type())] == ACL_FLOAT &&
                real_dtype == HIFLOAT4_SCALE) {
-        wrapper.dtype = ACL_HIFLOAT4_SCALE;
+        wrapper.dtype = Ops::Transformer::ACL_HIFLOAT4_SCALE;
     } else {
         wrapper.dtype = kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(tensor.scalar_type())];
     }

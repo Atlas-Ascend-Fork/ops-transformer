@@ -15,6 +15,7 @@
 
 #pragma once
 
+#include "acl/acl_base.h"
 #include "graph/types.h"
 
 namespace Ops {
@@ -62,5 +63,36 @@ constexpr ge::DataType DT_FLOAT4_E2M1 = static_cast<ge::DataType>(40);
 constexpr ge::DataType DT_FLOAT4_E1M2 = static_cast<ge::DataType>(41);
 constexpr ge::DataType DT_HIFLOAT4 = static_cast<ge::DataType>(42);
 constexpr ge::DataType DT_HIFLOAT4_SCALE = static_cast<ge::DataType>(43);
+
+constexpr ::aclDataType ACL_DT_UNDEFINED = static_cast<::aclDataType>(-1);
+constexpr ::aclDataType ACL_FLOAT = static_cast<::aclDataType>(0);
+constexpr ::aclDataType ACL_FLOAT16 = static_cast<::aclDataType>(1);
+constexpr ::aclDataType ACL_INT8 = static_cast<::aclDataType>(2);
+constexpr ::aclDataType ACL_INT32 = static_cast<::aclDataType>(3);
+constexpr ::aclDataType ACL_UINT8 = static_cast<::aclDataType>(4);
+constexpr ::aclDataType ACL_INT16 = static_cast<::aclDataType>(6);
+constexpr ::aclDataType ACL_UINT16 = static_cast<::aclDataType>(7);
+constexpr ::aclDataType ACL_UINT32 = static_cast<::aclDataType>(8);
+constexpr ::aclDataType ACL_INT64 = static_cast<::aclDataType>(9);
+constexpr ::aclDataType ACL_UINT64 = static_cast<::aclDataType>(10);
+constexpr ::aclDataType ACL_DOUBLE = static_cast<::aclDataType>(11);
+constexpr ::aclDataType ACL_BOOL = static_cast<::aclDataType>(12);
+constexpr ::aclDataType ACL_STRING = static_cast<::aclDataType>(13);
+constexpr ::aclDataType ACL_COMPLEX64 = static_cast<::aclDataType>(16);
+constexpr ::aclDataType ACL_COMPLEX128 = static_cast<::aclDataType>(17);
+constexpr ::aclDataType ACL_BF16 = static_cast<::aclDataType>(27);
+constexpr ::aclDataType ACL_INT4 = static_cast<::aclDataType>(29);
+constexpr ::aclDataType ACL_UINT1 = static_cast<::aclDataType>(30);
+constexpr ::aclDataType ACL_COMPLEX32 = static_cast<::aclDataType>(33);
+constexpr ::aclDataType ACL_HIFLOAT8 = static_cast<::aclDataType>(34);
+constexpr ::aclDataType ACL_FLOAT8_E5M2 = static_cast<::aclDataType>(35);
+constexpr ::aclDataType ACL_FLOAT8_E4M3FN = static_cast<::aclDataType>(36);
+constexpr ::aclDataType ACL_FLOAT8_E8M0 = static_cast<::aclDataType>(37);
+constexpr ::aclDataType ACL_FLOAT6_E3M2 = static_cast<::aclDataType>(38);
+constexpr ::aclDataType ACL_FLOAT6_E2M3 = static_cast<::aclDataType>(39);
+constexpr ::aclDataType ACL_FLOAT4_E2M1 = static_cast<::aclDataType>(40);
+constexpr ::aclDataType ACL_FLOAT4_E1M2 = static_cast<::aclDataType>(41);
+constexpr ::aclDataType ACL_HIFLOAT4 = static_cast<::aclDataType>(42);
+constexpr ::aclDataType ACL_HIFLOAT4_SCALE = static_cast<::aclDataType>(43);
 } // namespace Transformer
 } // namespace Ops

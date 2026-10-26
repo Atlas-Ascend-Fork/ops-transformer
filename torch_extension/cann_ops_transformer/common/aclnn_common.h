@@ -50,6 +50,7 @@
 #if __has_include("torch_npu/csrc/flopcount/FlopCount.h")
 #include "torch_npu/csrc/flopcount/FlopCount.h"
 #endif
+#include "common/include/op_host/op_const_def_transformer.h"
 #define NPU_NAME_SPACE at_npu::native
 
 using aclOpExecutor = struct aclOpExecutor;
@@ -187,7 +188,7 @@ typedef struct {
 inline bool Is4BitDtype(const aclDataType acl_data_type)
 {
     return acl_data_type == ACL_FLOAT4_E2M1 || acl_data_type == ACL_FLOAT4_E1M2 || acl_data_type == ACL_INT4 ||
-           acl_data_type == ACL_HIFLOAT4;
+           acl_data_type == Ops::Transformer::ACL_HIFLOAT4;
 }
 
 inline int64_t ConvertToAclStorageOffset(const at::Tensor& at_tensor, const aclDataType acl_data_type)

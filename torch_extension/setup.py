@@ -323,6 +323,17 @@ class BuildPyWithOps(_build_py):
                     dst = os.path.join(build_pkg, rel_path)
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     shutil.copy2(src_abs, dst)
+        # aclnn_common.h 以仓库根相对路径 "common/include/op_host/..." 引入公共头文件；
+        # wheel 安装后无仓库根，需将 common/include 一并打入包内，运行期 JIT 编译才能解析。
+        repo_inc_dir = os.path.join(OPS_TRANSFORMER_ROOT, "common", "include")
+        if os.path.isdir(repo_inc_dir):
+            for root_dir, _, filenames in os.walk(repo_inc_dir):
+                for filename in filenames:
+                    src_abs = os.path.join(root_dir, filename)
+                    rel_path = os.path.relpath(src_abs, OPS_TRANSFORMER_ROOT)
+                    dst = os.path.join(build_pkg, rel_path)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.copy2(src_abs, dst)
 
 
 _all_packages = find_packages() + _extra_packages
