@@ -116,8 +116,9 @@ ge::graphStatus RFATiling::ParseKvInputLayout(gert::TilingContext* rfaContext)
     } else if (kvLayout == "BNSD") {
         kvCacheLayout_ = RFAKvCacheLayout::BNSD;
     } else {
-        OP_LOGE(rfaContext->GetNodeName(), "Unsupported KV layout: %s. Supported formats: TND, BNSD.",
-                rfaContext->GetAttrs()->GetAttrPointer<char>(KV_INPUT_LAYOUT_INDEX));
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(rfaContext->GetNodeName(), "kvInputLayout",
+                                              rfaContext->GetAttrs()->GetAttrPointer<char>(KV_INPUT_LAYOUT_INDEX),
+                                              "Supported formats: TND, BNSD");
         return ge::GRAPH_FAILED;
     }
 
@@ -136,8 +137,9 @@ ge::graphStatus RFATiling::ParseQInputLayout(gert::TilingContext* rfaContext)
     } else if (qLayout == "BNSD") {
         qInputLayout_ = RFAQInputLayout::BNSD_Q;
     } else {
-        OP_LOGE(rfaContext->GetNodeName(), "Unsupported Q layout: %s. Supported formats: TND, BNSD",
-                rfaContext->GetAttrs()->GetAttrPointer<char>(Q_INPUT_LAYOUT_INDEX));
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(rfaContext->GetNodeName(), "qInputLayout",
+                                              rfaContext->GetAttrs()->GetAttrPointer<char>(Q_INPUT_LAYOUT_INDEX),
+                                              "Supported formats: TND, BNSD");
         return ge::GRAPH_FAILED;
     }
 
@@ -147,8 +149,15 @@ ge::graphStatus RFATiling::ParseQInputLayout(gert::TilingContext* rfaContext)
 ge::graphStatus RFATiling::ValidateTNDFormat(gert::TilingContext* rfaContext)
 {
     const auto* kvShape = rfaContext->GetInputShape(KEY_INDEX);
-    if (kvShape == nullptr || kvShape->GetStorageShape().GetDimNum() != TND_DIM_NUM) {
-        OP_LOGE(rfaContext->GetNodeName(), "TND format KV cache must have 3 dimensions");
+    if (kvShape == nullptr) {
+        // 内部契约错误：必选输入shape由框架保证非空，仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "key shape is null in TND format");
+        return ge::GRAPH_FAILED;
+    }
+    if (kvShape->GetStorageShape().GetDimNum() != TND_DIM_NUM) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "key",
+                                                 std::to_string(kvShape->GetStorageShape().GetDimNum()).c_str(),
+                                                 "TND format KV cache must have 3 dimensions");
         return ge::GRAPH_FAILED;
     }
 
@@ -158,12 +167,16 @@ ge::graphStatus RFATiling::ValidateTNDFormat(gert::TilingContext* rfaContext)
     int64_t headDim = kvShape->GetStorageShape().GetDim(2);
 
     if (kvHeads != kvHeads_) {
-        OP_LOGE(rfaContext->GetNodeName(), "KV heads mismatch: shape=%ld, attr=%u", kvHeads, kvHeads_);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            rfaContext->GetNodeName(), "numKeyValueHeads", std::to_string(kvHeads_).c_str(),
+            ("does not match N dimension of key in TND format (" + std::to_string(kvHeads) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
 
     if (headDim != embeddingSize_) {
-        OP_LOGE(rfaContext->GetNodeName(), "Head dimension mismatch: shape=%ld, attr=%u", headDim, embeddingSize_);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            rfaContext->GetNodeName(), "key", std::to_string(headDim).c_str(),
+            ("must match embeddingSize (" + std::to_string(embeddingSize_) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
 
@@ -173,8 +186,15 @@ ge::graphStatus RFATiling::ValidateTNDFormat(gert::TilingContext* rfaContext)
 ge::graphStatus RFATiling::ValidateBNSDFormat(gert::TilingContext* rfaContext)
 {
     const auto* kvShape = rfaContext->GetInputShape(KEY_INDEX);
-    if (kvShape == nullptr || kvShape->GetStorageShape().GetDimNum() != BNSD_DIM_NUM) {
-        OP_LOGE(rfaContext->GetNodeName(), "BNSD format KV cache must have 4 dimensions");
+    if (kvShape == nullptr) {
+        // 内部契约错误：必选输入shape由框架保证非空，仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "key shape is null in BNSD format");
+        return ge::GRAPH_FAILED;
+    }
+    if (kvShape->GetStorageShape().GetDimNum() != BNSD_DIM_NUM) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "key",
+                                                 std::to_string(kvShape->GetStorageShape().GetDimNum()).c_str(),
+                                                 "BNSD format KV cache must have 4 dimensions");
         return ge::GRAPH_FAILED;
     }
 
@@ -188,24 +208,37 @@ ge::graphStatus RFATiling::ValidateBNSDFormat(gert::TilingContext* rfaContext)
     maxKvSeqlen_ = static_cast<uint32_t>(kvSeqlen);
 
     if (kvBatch != batch_) {
-        OP_LOGE(rfaContext->GetNodeName(), "KV batch mismatch: shape=%ld, tiling=%u", kvBatch, batch_);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            rfaContext->GetNodeName(), "key", std::to_string(kvBatch).c_str(),
+            ("BNSD format KV batch must match query batch (" + std::to_string(batch_) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
 
     if (kvHeads != kvHeads_) {
-        OP_LOGE(rfaContext->GetNodeName(), "KV heads mismatch: shape=%ld, attr=%u", kvHeads, kvHeads_);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            rfaContext->GetNodeName(), "numKeyValueHeads", std::to_string(kvHeads_).c_str(),
+            ("does not match N dimension of key in BNSD format (" + std::to_string(kvHeads) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
 
     if (headDim != embeddingSize_) {
-        OP_LOGE(rfaContext->GetNodeName(), "Head dimension mismatch: shape=%ld, attr=%u", headDim, embeddingSize_);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            rfaContext->GetNodeName(), "key", std::to_string(headDim).c_str(),
+            ("must match embeddingSize (" + std::to_string(embeddingSize_) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
 
     // 验证Value shape
     const auto* valueShape = rfaContext->GetInputShape(VALUE_INDEX);
-    if (valueShape == nullptr || valueShape->GetStorageShape().GetDimNum() != BNSD_DIM_NUM) {
-        OP_LOGE(rfaContext->GetNodeName(), "BNSD format Value cache must have 4 dimensions");
+    if (valueShape == nullptr) {
+        // 内部契约错误：必选输入shape由框架保证非空，仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "value shape is null in BNSD format");
+        return ge::GRAPH_FAILED;
+    }
+    if (valueShape->GetStorageShape().GetDimNum() != BNSD_DIM_NUM) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "value",
+                                                 std::to_string(valueShape->GetStorageShape().GetDimNum()).c_str(),
+                                                 "BNSD format Value cache must have 4 dimensions");
         return ge::GRAPH_FAILED;
     }
 
@@ -213,7 +246,11 @@ ge::graphStatus RFATiling::ValidateBNSDFormat(gert::TilingContext* rfaContext)
         valueShape->GetStorageShape().GetDim(BNSD_DIM_N) != kvHeads ||
         valueShape->GetStorageShape().GetDim(BNSD_DIM_S) != kvSeqlen ||
         valueShape->GetStorageShape().GetDim(BNSD_DIM_D) != headDim) {
-        OP_LOGE(rfaContext->GetNodeName(), "Value shape mismatch with Key shape in BNSD format");
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(rfaContext->GetNodeName(), "key and value",
+                                               (Ops::Base::ToString(kvShape->GetStorageShape()) + ", " +
+                                                Ops::Base::ToString(valueShape->GetStorageShape()))
+                                                   .c_str(),
+                                               "Value shape must match Key shape in BNSD format");
         return ge::GRAPH_FAILED;
     }
 
@@ -232,10 +269,9 @@ ge::graphStatus RFATiling::CheckKvCacheLayout(gert::TilingContext* rfaContext)
     bool isKvBNSD = (kvCacheLayout_ == RFAKvCacheLayout::BNSD);
 
     if (isQBNSD != isKvBNSD) {
-        OP_LOGE(rfaContext->GetNodeName(),
-                "Q and KV layouts must match: if one is BNSD, the other must also be BNSD. "
-                "Q layout: %s, KV layout: %s",
-                (isQBNSD ? "BNSD" : "non-BNSD"), (isKvBNSD ? "BNSD" : "non-BNSD"));
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            rfaContext->GetNodeName(), "qInputLayout, kvInputLayout", (isQBNSD ? "BNSD, non-BNSD" : "non-BNSD, BNSD"),
+            "Q and KV layouts must match: if one is BNSD, the other must also be BNSD");
         return ge::GRAPH_FAILED;
     }
 
@@ -244,7 +280,8 @@ ge::graphStatus RFATiling::CheckKvCacheLayout(gert::TilingContext* rfaContext)
     } else if (kvCacheLayout_ == RFAKvCacheLayout::BNSD) {
         ret = ValidateBNSDFormat(rfaContext);
     } else {
-        OP_LOGE(rfaContext->GetNodeName(), "Unsupported KV cache layout");
+        // 不可达：ParseKvInputLayout已保证layout只可能是TND/BNSD，防御性分支仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Unsupported KV cache layout");
         return ge::GRAPH_FAILED;
     }
 
@@ -255,13 +292,16 @@ ge::graphStatus RFATiling::ProcessQueryShape(gert::TilingContext* rfaContext)
 {
     const auto* queryShape = rfaContext->GetInputShape(QUERY_INDEX);
     if (queryShape == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "Query shape is null");
+        // 内部契约错误：必选输入shape由框架保证非空，仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Query shape is null");
         return ge::GRAPH_FAILED;
     }
 
     if (qInputLayout_ == RFAQInputLayout::TND_Q) {
         if (queryShape->GetStorageShape().GetDimNum() != TND_DIM_NUM) {
-            OP_LOGE(rfaContext->GetNodeName(), "TND format must have 3 dimensions");
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "query",
+                                                     std::to_string(queryShape->GetStorageShape().GetDimNum()).c_str(),
+                                                     "TND format must have 3 dimensions");
             return ge::GRAPH_FAILED;
         }
         totalTokensT_ = queryShape->GetStorageShape().GetDim(TND_DIM_T);
@@ -269,7 +309,9 @@ ge::graphStatus RFATiling::ProcessQueryShape(gert::TilingContext* rfaContext)
         embeddingSize_ = static_cast<uint32_t>(queryShape->GetStorageShape().GetDim(TND_DIM_D));
     } else if (qInputLayout_ == RFAQInputLayout::BNSD_Q) {
         if (queryShape->GetStorageShape().GetDimNum() != BNSD_DIM_NUM) {
-            OP_LOGE(rfaContext->GetNodeName(), "BNSD format must have 4 dimensions");
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "query",
+                                                     std::to_string(queryShape->GetStorageShape().GetDimNum()).c_str(),
+                                                     "BNSD format must have 4 dimensions");
             return ge::GRAPH_FAILED;
         }
         // 保存BNSD格式的batch和S维度
@@ -280,7 +322,8 @@ ge::graphStatus RFATiling::ProcessQueryShape(gert::TilingContext* rfaContext)
     }
 
     if (numHeads_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "numHeads deduced from query is zero");
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "query", std::to_string(numHeads_).c_str(),
+                                                 "N dimension (numHeads) deduced from query must be greater than 0");
         return ge::GRAPH_FAILED;
     }
 
@@ -291,7 +334,8 @@ ge::graphStatus RFATiling::ProcessSelectIdx(gert::TilingContext* rfaContext)
 {
     auto selectIdxShape = rfaContext->GetInputShape(SELECT_IDX_INDEX);
     if (selectIdxShape == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "Select idx is null");
+        // 内部契约错误：必选输入shape由框架保证非空，仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Select idx is null");
         return ge::GRAPH_FAILED;
     }
 
@@ -305,12 +349,16 @@ ge::graphStatus RFATiling::GetKvSeqlenFromShape(gert::TilingContext* rfaContext,
 {
     const auto* kvShape = rfaContext->GetInputShape(KEY_INDEX);
     if (kvShape == nullptr || kvShape->GetStorageShape().GetDimNum() != BNSD_DIM_NUM) {
-        OP_LOGE(rfaContext->GetNodeName(), "BNSD format: KV shape is invalid, cannot get S dimension");
+        // ProcessActualSeqLengths先于CheckKvCacheLayout执行，key维度非法时本分支先于
+        // ValidateBNSDFormat中的同类校验触发（UT用例rain_fusion_attention_bnsd_key_dims_invalid已覆盖）
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "BNSD format: KV shape is invalid, cannot get S dimension");
         return ge::GRAPH_FAILED;
     }
     int64_t kvSeqlenInt64 = kvShape->GetStorageShape().GetDim(BNSD_DIM_S);
     if (kvSeqlenInt64 <= 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "BNSD format: KV seqlen (%ld) is invalid", kvSeqlenInt64);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "key",
+                                                 std::to_string(kvSeqlenInt64).c_str(),
+                                                 "BNSD format: KV seqlen (S dimension) must be greater than 0");
         return ge::GRAPH_FAILED;
     }
     kvSeqlen = static_cast<uint32_t>(kvSeqlenInt64);
@@ -324,14 +372,19 @@ ge::graphStatus RFATiling::ValidateBNSDQSeqlen(gert::TilingContext* rfaContext)
     }
 
     if (maxQSeqlen_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "BNSD format: maxQSeqlen_ is 0, cannot validate seq lengths");
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            rfaContext->GetNodeName(), "query", std::to_string(maxQSeqlen_).c_str(),
+            "BNSD format: S dimension (maxQSeqlen) must be greater than 0 when actualSeqLengths is provided");
         return ge::GRAPH_FAILED;
     }
 
     for (uint32_t i = 0; i < batch_; i++) {
         if (qSeqLenList[i] > static_cast<int64_t>(maxQSeqlen_)) {
-            OP_LOGE(rfaContext->GetNodeName(), "BNSD format validation failed: qseqlen[%u] (%ld) > maxQSeqlen (%u)", i,
-                    qSeqLenList[i], maxQSeqlen_);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                rfaContext->GetNodeName(), "actualSeqLengths", std::to_string(qSeqLenList[i]).c_str(),
+                ("BNSD format: qseqlen[" + std::to_string(i) + "] must not be greater than maxQSeqlen (" +
+                 std::to_string(maxQSeqlen_) + ")")
+                    .c_str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -345,14 +398,19 @@ ge::graphStatus RFATiling::ValidateBNSDKvSeqlen(gert::TilingContext* rfaContext)
     }
 
     if (maxKvSeqlen_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "BNSD format: maxKvSeqlen_ is 0, cannot validate kv seq lengths");
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            rfaContext->GetNodeName(), "key", std::to_string(maxKvSeqlen_).c_str(),
+            "BNSD format: KV S dimension (maxKvSeqlen) must be greater than 0 when actualSeqLengthsKv is provided");
         return ge::GRAPH_FAILED;
     }
 
     for (uint32_t i = 0; i < batch_; i++) {
         if (kvSeqLenList[i] > static_cast<int64_t>(maxKvSeqlen_)) {
-            OP_LOGE(rfaContext->GetNodeName(), "BNSD format validation failed: kvseqlen[%u] (%ld) > maxKvSeqlen (%u)",
-                    i, kvSeqLenList[i], maxKvSeqlen_);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                rfaContext->GetNodeName(), "actualSeqLengthsKv", std::to_string(kvSeqLenList[i]).c_str(),
+                ("BNSD format: kvseqlen[" + std::to_string(i) + "] must not be greater than maxKvSeqlen (" +
+                 std::to_string(maxKvSeqlen_) + ")")
+                    .c_str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -380,11 +438,15 @@ ge::graphStatus RFATiling::ProcessQSeqLengths(gert::TilingContext* rfaContext, c
         if (shouldUseUniform) {
             // BNSD格式下，actualSeqLengths为nullptr或batch不匹配，使用BNSD中的S值
             if (batch_ == 0) {
-                OP_LOGE(rfaContext->GetNodeName(), "BNSD format: batch_ is 0, cannot process seq lengths");
+                // 内部契约错误：batch_由query shape B维度推导且numHeads校验已通过，防御性分支仅记录日志
+                OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(),
+                                       "BNSD format: batch_ is 0, cannot process seq lengths");
                 return ge::GRAPH_FAILED;
             }
             if (maxQSeqlen_ == 0) {
-                OP_LOGE(rfaContext->GetNodeName(), "BNSD format: maxQSeqlen_ is 0, cannot process seq lengths");
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                    rfaContext->GetNodeName(), "query", std::to_string(maxQSeqlen_).c_str(),
+                    "BNSD format: S dimension (maxQSeqlen) must be greater than 0 when actualSeqLengths is not usable");
                 return ge::GRAPH_FAILED;
             }
             useUniformQSeqlen_ = true;
@@ -395,20 +457,23 @@ ge::graphStatus RFATiling::ProcessQSeqLengths(gert::TilingContext* rfaContext, c
     } else {
         // TND格式
         if (actualSeqLengths == nullptr) {
-            OP_LOGE(rfaContext->GetNodeName(), "TND format: Actual seq lengths cannot be null");
+            OP_LOGE_WITH_INVALID_INPUT(rfaContext->GetNodeName(), "actualSeqLengths");
             return ge::GRAPH_FAILED;
         }
         // TND格式下，从actualSeqLengths获取batch
         batch_ = static_cast<uint32_t>(actualSeqLengths->GetShapeSize());
         if (batch_ == 0) {
-            OP_LOGE(rfaContext->GetNodeName(), "batch size is 0");
+            OP_LOGE_FOR_INVALID_LISTSIZE_WITH_REASON(rfaContext->GetNodeName(), "actualSeqLengths",
+                                                     std::to_string(batch_).c_str(),
+                                                     "batch size must be greater than 0");
             return ge::GRAPH_FAILED;
         }
     }
 
     qSeqLenList = actualSeqLengths->GetData<int64_t>();
     if (qSeqLenList == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "Actual seq lengths GetData is nullptr");
+        // 内部契约错误：带数据的输入tensor由框架保证可取到数据，仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Actual seq lengths GetData is nullptr");
         return ge::GRAPH_FAILED;
     }
     useUniformQSeqlen_ = false;
@@ -429,7 +494,8 @@ bool RFATiling::CheckShouldUseUniformKvSeqlen(const gert::Tensor* actualSeqLengt
 ge::graphStatus RFATiling::SetupUniformKvSeqlen(gert::TilingContext* rfaContext)
 {
     if (batch_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "BNSD format: batch_ is 0, cannot process kv seq lengths");
+        // 内部契约错误：batch_由query shape B维度推导，防御性分支仅记录日志
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "BNSD format: batch_ is 0, cannot process kv seq lengths");
         return ge::GRAPH_FAILED;
     }
 
@@ -461,14 +527,15 @@ ge::graphStatus RFATiling::ProcessKvSeqLengthsTND(gert::TilingContext* rfaContex
                                                   const gert::Tensor* actualSeqLengthsKv)
 {
     if (actualSeqLengthsKv == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "TND format: Actual seq lengths kv cannot be null");
+        OP_LOGE_WITH_INVALID_INPUT(rfaContext->GetNodeName(), "actualSeqLengthsKv");
         return ge::GRAPH_FAILED;
     }
 
     uint32_t kvBatch = static_cast<uint32_t>(actualSeqLengthsKv->GetShapeSize());
     if (kvBatch != batch_) {
-        OP_LOGE(rfaContext->GetNodeName(), "TND format: actualSeqLengthsKv batch (%u) mismatch with batch (%u)",
-                kvBatch, batch_);
+        OP_LOGE_FOR_INVALID_LISTSIZE_WITH_REASON(rfaContext->GetNodeName(), "actualSeqLengthsKv",
+                                                 std::to_string(kvBatch).c_str(),
+                                                 ("must match batch (" + std::to_string(batch_) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -489,7 +556,7 @@ ge::graphStatus RFATiling::ProcessKvSeqLengthsWithArray(gert::TilingContext* rfa
 
     kvSeqLenList = actualSeqLengthsKv->GetData<int64_t>();
     if (kvSeqLenList == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "Actual seq lengths kv GetData is nullptr");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Actual seq lengths kv GetData is nullptr");
         return ge::GRAPH_FAILED;
     }
     useUniformKvSeqlen_ = false;
@@ -551,13 +618,13 @@ ge::graphStatus RFATiling::ProcessBlockShape(gert::TilingContext* rfaContext)
 {
     auto blockShape = rfaContext->GetInputTensor(BLOCK_SHAPE_INDEX);
     if (blockShape == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "Block shape tensor is null");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Block shape tensor is null");
         return ge::GRAPH_FAILED;
     }
 
     blockShapeList = blockShape->GetData<int64_t>();
     if (blockShapeList == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "Block shape GetData is nullptr");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Block shape GetData is nullptr");
         return ge::GRAPH_FAILED;
     }
 
@@ -576,23 +643,23 @@ ge::graphStatus RFATiling::ValidateTNDSeqlenSum(gert::TilingContext* rfaContext)
 
     // TND格式下，不应该使用统一值，必须提供actualSeqLengths数组
     if (useUniformQSeqlen_ || useUniformKvSeqlen_) {
-        OP_LOGE(rfaContext->GetNodeName(), "TND format: useUniformQSeqlen or useUniformKvSeqlen should be false, "
-                                           "actualSeqLengths must be provided");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "TND format: useUniformQSeqlen or useUniformKvSeqlen should "
+                                                          "be false, actualSeqLengths must be provided");
         return ge::GRAPH_FAILED;
     }
 
     if (qSeqLenList == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "qSeqLenList is nullptr, cannot validate TND seqlen sum");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "qSeqLenList is nullptr, cannot validate TND seqlen sum");
         return ge::GRAPH_FAILED;
     }
 
     if (kvSeqLenList == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "kvSeqLenList is nullptr, cannot validate TND seqlen sum");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "kvSeqLenList is nullptr, cannot validate TND seqlen sum");
         return ge::GRAPH_FAILED;
     }
 
     if (batch_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "batch_ is 0, cannot validate TND seqlen sum");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "batch_ is 0, cannot validate TND seqlen sum");
         return ge::GRAPH_FAILED;
     }
 
@@ -607,17 +674,17 @@ ge::graphStatus RFATiling::ValidateTNDSeqlenSum(gert::TilingContext* rfaContext)
 
     // 校验qseqlen之和是否等于Q的T
     if (sumQSeqlen != totalTokensT_) {
-        OP_LOGE(rfaContext->GetNodeName(),
-                "TND format validation failed: sum of qseqlen across all batches (%ld) != Q T (%ld)", sumQSeqlen,
-                totalTokensT_);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            rfaContext->GetNodeName(), "actualSeqLengths", std::to_string(sumQSeqlen).c_str(),
+            ("sum of qseqlen across all batches must equal Q T (" + std::to_string(totalTokensT_) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
 
     // 校验kvseqlen之和是否等于KV的T
     if (sumKvSeqlen != totalTokensKv_) {
-        OP_LOGE(rfaContext->GetNodeName(),
-                "TND format validation failed: sum of kvseqlen across all batches (%ld) != KV T (%ld)", sumKvSeqlen,
-                totalTokensKv_);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            rfaContext->GetNodeName(), "actualSeqLengthsKv", std::to_string(sumKvSeqlen).c_str(),
+            ("sum of kvseqlen across all batches must equal KV T (" + std::to_string(totalTokensKv_) + ")").c_str());
         return ge::GRAPH_FAILED;
     }
 
@@ -626,29 +693,44 @@ ge::graphStatus RFATiling::ValidateTNDSeqlenSum(gert::TilingContext* rfaContext)
 
 ge::graphStatus RFATiling::ValidateConfiguration(gert::TilingContext* rfaContext)
 {
-    if (embeddingSize_ == 0 || numHeads_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "Invalid head or embedding configuration");
+    if (embeddingSize_ == 0) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(rfaContext->GetNodeName(), "query",
+                                                 std::to_string(embeddingSize_).c_str(),
+                                                 "embeddingSize (D dimension) must be greater than 0");
+        return ge::GRAPH_FAILED;
+    }
+
+    if (numHeads_ == 0) {
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "numHeads is 0 in ValidateConfiguration");
         return ge::GRAPH_FAILED;
     }
 
     if (embeddingSize_ != VALID_EMBEDDING_SIZE_64 && embeddingSize_ != VALID_EMBEDDING_SIZE_128) {
-        OP_LOGE(rfaContext->GetNodeName(), "Invalid embedding size, embeddingSize must be 64 or 128");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(rfaContext->GetNodeName(), "query",
+                                              std::to_string(embeddingSize_).c_str(),
+                                              "embeddingSize (D dimension) must be 64 or 128");
         return ge::GRAPH_FAILED;
     }
 
     if (blockShapeX_ <= 0 || blockShapeY_ <= 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "Invalid block shape, blockShapeX and blockShapeY must be greater than 0");
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            rfaContext->GetNodeName(), "blockShape",
+            (std::to_string(blockShapeX_) + ", " + std::to_string(blockShapeY_)).c_str(),
+            "blockShapeX and blockShapeY must be greater than 0");
         return ge::GRAPH_FAILED;
     }
 
     if (blockShapeY_ % BASIC_BLOCK_SIZE != 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "Invalid block shape, blockShapeY must be divisible by %u",
-                BASIC_BLOCK_SIZE);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            rfaContext->GetNodeName(), "blockShape", std::to_string(blockShapeY_).c_str(),
+            ("blockShapeY must be divisible by " + std::to_string(BASIC_BLOCK_SIZE)).c_str());
         return ge::GRAPH_FAILED;
     }
     dataType_ = rfaContext->GetInputDesc(QUERY_INDEX)->GetDataType();
     if (innerPrecise_ == 1 && dataType_ == ge::DT_BF16) {
-        OP_LOGE(rfaContext->GetNodeName(), "Invalid innerPrecise, innerPrecise must be 0 when dataType is BF16");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(rfaContext->GetNodeName(), "innerPrecise",
+                                              std::to_string(innerPrecise_).c_str(),
+                                              "innerPrecise must be 0 when dataType is BF16");
         return ge::GRAPH_FAILED;
     }
 
@@ -701,7 +783,7 @@ ge::graphStatus RFATiling::ProcessInput(gert::TilingContext* rfaContext)
 ge::graphStatus RFATiling::CheckAttr(gert::TilingContext* rfaContext)
 {
     if (rfaContext->GetAttrs()->GetAttrPointer<int64_t>(NUM_KEY_VALUE_HEADS_INDEX) == nullptr) {
-        OP_LOGE(rfaContext->GetNodeName(), "numKeyValueHeads is null");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "numKeyValueHeads is null");
         return ge::GRAPH_FAILED;
     }
     kvHeads_ = static_cast<uint32_t>(*rfaContext->GetAttrs()->GetAttrPointer<int64_t>(NUM_KEY_VALUE_HEADS_INDEX));
@@ -740,11 +822,13 @@ ge::graphStatus RFATiling::CalculateTaskSplit(gert::TilingContext* rfaContext)
     totalQBlocks_ = 0;
 
     if (kvHeads_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "kvHeads_ is 0, cannot calculate groupSize");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(rfaContext->GetNodeName(), "numKeyValueHeads",
+                                              std::to_string(kvHeads_).c_str(),
+                                              "numKeyValueHeads must be greater than 0");
         return ge::GRAPH_FAILED;
     }
     if (batch_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "batch_ is 0 in CalculateTaskSplit");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "batch_ is 0 in CalculateTaskSplit");
         return ge::GRAPH_FAILED;
     }
 
@@ -761,7 +845,8 @@ ge::graphStatus RFATiling::CalculateTaskSplit(gert::TilingContext* rfaContext)
         } else {
             // 使用actualSeqLengths数组（TND格式或BNSD格式但提供了actualSeqLengths）
             if (qSeqLenList == nullptr) {
-                OP_LOGE(rfaContext->GetNodeName(), "qSeqLenList is nullptr, cannot calculate task split");
+                OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(),
+                                       "qSeqLenList is nullptr, cannot calculate task split");
                 return ge::GRAPH_FAILED;
             }
             qSeqlen = qSeqLenList[i];
@@ -785,7 +870,7 @@ ge::graphStatus RFATiling::CalculateTaskSplit(gert::TilingContext* rfaContext)
 ge::graphStatus RFATiling::CalculateWorkSpace(gert::TilingContext* rfaContext)
 {
     if (blockDim_ == 0) {
-        OP_LOGE(rfaContext->GetNodeName(), "blockDim is 0");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "blockDim is 0");
         return ge::GRAPH_FAILED;
     }
 
@@ -917,49 +1002,49 @@ ge::graphStatus RFATiling::GetRFATiling(gert::TilingContext* rfaContext, RainFus
     tilingData_ = &tilingData;
     ge::graphStatus ret = GetNpuInfo(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "GetNpuInfo failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "GetNpuInfo failed");
         return ret;
     }
 
     ret = CheckAttr(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "CheckAttr failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "CheckAttr failed");
         return ret;
     }
     ret = ProcessInput(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "ProcessInput failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "ProcessInput failed");
         return ret;
     }
 
     ret = CheckKvCacheLayout(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "CheckKvCacheLayout failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "CheckKvCacheLayout failed");
         return ret;
     }
 
     // 校验TND格式下qseqlen和kvseqlen之和是否分别等于Q和KV的T
     ret = ValidateTNDSeqlenSum(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "ValidateTNDSeqlenSum failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "ValidateTNDSeqlenSum failed");
         return ret;
     }
 
     ret = CalculateTaskSplit(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "CalculateTaskSplit failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "CalculateTaskSplit failed");
         return ret;
     }
 
     ret = CalculateWorkSpace(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "CalculateWorkSpace failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "CalculateWorkSpace failed");
         return ret;
     }
 
     ret = FillTilingData(rfaContext);
     if (ret != ge::GRAPH_SUCCESS) {
-        OP_LOGE(rfaContext->GetNodeName(), "FillTilingData failed");
+        OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "FillTilingData failed");
         return ret;
     }
 
@@ -986,7 +1071,7 @@ ASCENDC_EXTERN_C ge::graphStatus TilingRainFusionAttention(gert::TilingContext* 
         rfiTiling.RFASetTilingData(context, tilingData);
         return ge::GRAPH_SUCCESS;
     } else {
-        OP_LOGE(context->GetNodeName(), "GetRFATiling failed");
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "GetRFATiling failed");
         return ge::GRAPH_FAILED;
     }
 }

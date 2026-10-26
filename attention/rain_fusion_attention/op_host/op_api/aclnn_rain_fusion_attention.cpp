@@ -238,7 +238,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnRainFusionAttentionGetWo
                                              qInputLayoutStr.c_str(), kvInputLayoutStr.c_str(), numKeyValueHeads,
                                              maskType, scaleValue, innerPrecise, blockSize, executorImpl);
     if (outputs[0] == nullptr || outputs[1] == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "RainFusionAttention returned nullptr outputs.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "RainFusionAttention returned nullptr outputs.");
         return ACLNN_ERR_INNER_NULLPTR;
     }
 

@@ -49,7 +49,8 @@ static constexpr int32_t UNKNOWN_DIMS = -2;
 static ge::graphStatus InferShapeRainFusionAttention(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("RainFusionAttention", "context is nullptr!");
+        // 内部契约错误：框架保证InferShape上下文非空，不属于算子逻辑报错，仅记录日志不重复上报
+        OP_LOGE_WITHOUT_REPORT("RainFusionAttention", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
 
@@ -108,16 +109,21 @@ static ge::graphStatus InferShapeRainFusionAttention(gert::InferShapeContext* co
     // 验证Q layout (只支持TND和BNSD)
     if (qLayout == "TND") {
         if (queryShape->GetDimNum() != DIM_TND) {
-            OP_LOGE(context->GetNodeName(), "Layout TND, queryDims(%zu) must be 3!", queryShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
+                                                     std::to_string(queryShape->GetDimNum()).c_str(),
+                                                     "Layout TND, queryDims must be 3");
             return ge::GRAPH_FAILED;
         }
     } else if (qLayout == "BNSD") {
         if (queryShape->GetDimNum() != DIM_BNSD) {
-            OP_LOGE(context->GetNodeName(), "Layout BNSD, queryDims(%zu) must be 4!", queryShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
+                                                     std::to_string(queryShape->GetDimNum()).c_str(),
+                                                     "Layout BNSD, queryDims must be 4");
             return ge::GRAPH_FAILED;
         }
     } else {
-        OP_LOGE(context->GetNodeName(), "Unsupported Q layout: %s. Only TND and BNSD are supported.", qInputLayoutPtr);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "qInputLayout", qInputLayoutPtr,
+                                              "Only TND and BNSD are supported");
         return ge::GRAPH_FAILED;
     }
 
@@ -126,17 +132,19 @@ static ge::graphStatus InferShapeRainFusionAttention(gert::InferShapeContext* co
     bool isKvBNSD = (kvLayout == "BNSD");
 
     if (isQBNSD != isKvBNSD) {
-        OP_LOGE(context->GetNodeName(),
-                "Q and KV layouts must match: if one is BNSD, the other must also be BNSD. "
-                "Q layout: %s, KV layout: %s",
-                qLayout.c_str(), kvLayout.c_str());
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            context->GetNodeName(), "qInputLayout, kvInputLayout", (qLayout + ", " + kvLayout).c_str(),
+            "Q and KV layouts must match: if one is BNSD, the other must also be BNSD");
         return ge::GRAPH_FAILED;
     }
 
     // 验证KV layout
     if (kvLayout == "TND") {
         if (keyShape->GetDimNum() != DIM_TND || valueShape->GetDimNum() != DIM_TND) {
-            OP_LOGE(context->GetNodeName(), "Layout TND, KV dims must be 3!");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                (std::to_string(keyShape->GetDimNum()) + ", " + std::to_string(valueShape->GetDimNum())).c_str(),
+                "Layout TND, KV dims must be 3");
             return ge::GRAPH_FAILED;
         }
 
@@ -145,17 +153,25 @@ static ge::graphStatus InferShapeRainFusionAttention(gert::InferShapeContext* co
         int64_t kvD = keyShape->GetDim(TND_DIM_D);
 
         if (*numKvHeadsPtr != 0 && kvN != *numKvHeadsPtr) {
-            OP_LOGE(context->GetNodeName(), "KV heads mismatch in TND format: %ld != %ld", kvN, *numKvHeadsPtr);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context->GetNodeName(), "numKeyValueHeads", std::to_string(*numKvHeadsPtr).c_str(),
+                ("N dimension of key in TND format is " + std::to_string(kvN) + ", they must match").c_str());
             return ge::GRAPH_FAILED;
         }
 
         if (valueShape->GetDim(TND_DIM_D) != kvD) {
-            OP_LOGE(context->GetNodeName(), "K and V head dimension mismatch in TND format");
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                (Ops::Base::ToString(*keyShape) + ", " + Ops::Base::ToString(*valueShape)).c_str(),
+                "K and V head dimension mismatch in TND format");
             return ge::GRAPH_FAILED;
         }
     } else if (kvLayout == "BNSD") {
         if (keyShape->GetDimNum() != DIM_BNSD || valueShape->GetDimNum() != DIM_BNSD) {
-            OP_LOGE(context->GetNodeName(), "Layout BNSD, KV dims must be 4!");
+            OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                (std::to_string(keyShape->GetDimNum()) + ", " + std::to_string(valueShape->GetDimNum())).c_str(),
+                "Layout BNSD, KV dims must be 4");
             return ge::GRAPH_FAILED;
         }
 
@@ -165,16 +181,22 @@ static ge::graphStatus InferShapeRainFusionAttention(gert::InferShapeContext* co
         int64_t kvD = keyShape->GetDim(BNSD_DIM_D);
 
         if (*numKvHeadsPtr != 0 && kvN != *numKvHeadsPtr) {
-            OP_LOGE(context->GetNodeName(), "KV heads mismatch in BNSD format: %ld != %ld", kvN, *numKvHeadsPtr);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context->GetNodeName(), "numKeyValueHeads", std::to_string(*numKvHeadsPtr).c_str(),
+                ("N dimension of key in BNSD format is " + std::to_string(kvN) + ", they must match").c_str());
             return ge::GRAPH_FAILED;
         }
 
         if (valueShape->GetDim(BNSD_DIM_D) != kvD) {
-            OP_LOGE(context->GetNodeName(), "K and V head dimension mismatch in BNSD format");
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "key and value",
+                (Ops::Base::ToString(*keyShape) + ", " + Ops::Base::ToString(*valueShape)).c_str(),
+                "K and V head dimension mismatch in BNSD format");
             return ge::GRAPH_FAILED;
         }
     } else {
-        OP_LOGE(context->GetNodeName(), "Unsupported KV layout: %s. Only TND format is supported.", kvInputLayoutPtr);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "kvInputLayout", kvInputLayoutPtr,
+                                              "Only TND and BNSD are supported");
         return ge::GRAPH_FAILED;
     }
 
@@ -192,7 +214,9 @@ static ge::graphStatus InferShapeRainFusionAttention(gert::InferShapeContext* co
         (*softmaxLseShape)[BNSD_DIM_N] = queryShape->GetDim(BNSD_DIM_N);
         (*softmaxLseShape)[BNSD_DIM_S] = queryShape->GetDim(BNSD_DIM_S);
     } else {
-        OP_LOGE(context->GetNodeName(), "Unexpected Q layout in softmaxLse shape calculation: %s", qInputLayoutPtr);
+        // 不可达：qLayout已在上方校验并返回，防御性分支仅记录日志
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Unexpected Q layout in softmaxLse shape calculation: %s",
+                               qInputLayoutPtr);
         return ge::GRAPH_FAILED;
     }
 

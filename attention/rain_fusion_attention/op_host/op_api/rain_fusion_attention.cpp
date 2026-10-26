@@ -70,7 +70,8 @@ const std::array<const aclTensor*, 2> RainFusionAttention(
                                    static_cast<uint32_t>(maskType), static_cast<float>(scaleValue),
                                    static_cast<uint32_t>(innerPrecise), static_cast<uint32_t>(blockSize)));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "RainFusionAttention infer shape failed, scaleValue: %f.", scaleValue);
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_INVALID, "RainFusionAttention infer shape failed, scaleValue: %f.",
+                               scaleValue);
         return {nullptr, nullptr};
     }
 
