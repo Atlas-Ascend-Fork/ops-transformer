@@ -409,7 +409,7 @@ static inline ge::graphStatus CheckHif4QuantOnCurrentPlatform(const gert::Tiling
 }
 
 static ge::graphStatus CheckQuantModeAndScales(const gert::TilingContext* context, const char* nodeName, bool isScales,
-                                               const uint32_t quantMode)
+                                               const uint32_t quantMode, DispatchV2Config& config)
 {
     OP_TILING_CHECK(CheckHif4QuantOnCurrentPlatform(context, nodeName, quantMode) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "HiF4 quant is not supported on the current platform."), return ge::GRAPH_FAILED);
@@ -420,7 +420,7 @@ static ge::graphStatus CheckQuantModeAndScales(const gert::TilingContext* contex
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "scales", "provided", reason.c_str());
         return ge::GRAPH_FAILED;
     }
-    auto xDesc = context->GetInputDesc(X_INDEX);
+    auto xDesc = context->GetInputDesc(config.xIndex);
     if (xDesc == nullptr) {
         OP_LOGE_WITH_INVALID_INPUT(nodeName, "xDesc");
         return ge::GRAPH_FAILED;
@@ -434,7 +434,8 @@ static ge::graphStatus CheckQuantModeAndScales(const gert::TilingContext* contex
     }
     if (!isScales && (quantMode == static_cast<uint32_t>(QuantModeA5::NON_QUANT)) &&
         ((xDesc->GetDataType() == ge::DT_HIFLOAT8) || (xDesc->GetDataType() == ge::DT_FLOAT8_E5M2) ||
-         (xDesc->GetDataType() == ge::DT_FLOAT8_E4M3FN) || (xDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4))) {
+         (xDesc->GetDataType() == ge::DT_FLOAT8_E4M3FN) || (xDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4) ||
+         (xDesc->GetDataType() == ge::DT_FLOAT4_E2M1) || (xDesc->GetDataType() == ge::DT_FLOAT4_E1M2))) {
         std::string reason = "scales must be provided when quantMode is NON_QUANT and x dtype is " + xDtypeStr;
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "scales", "not provided", reason.c_str());
         return ge::GRAPH_FAILED;
@@ -1042,7 +1043,8 @@ ge::graphStatus MoeDistributeDispatchTilingImpl(gert::TilingContext* context, ui
     // Scales and Quant
     const gert::StorageShape* scalesStorageShape = context->GetOptionalInputShape(SCALES_INDEX);
     bool isScales = (scalesStorageShape != nullptr);
-    OP_TILING_CHECK(CheckQuantModeAndScales(context, nodeName, isScales, quantMode) != ge::GRAPH_SUCCESS,
+    DispatchV2Config config;
+    OP_TILING_CHECK(CheckQuantModeAndScales(context, nodeName, isScales, quantMode, config) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "quant mode and scales not match, isScales is %d, quantMode is %u.",
                             static_cast<int32_t>(isScales), quantMode),
                     return ge::GRAPH_FAILED);
@@ -1208,7 +1210,7 @@ static bool CheckTensorDataTypeNonQuant(const gert::TilingContext* context, cons
             return false);
         OP_TILING_CHECK(((xDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4) &&
                          (scalesDesc->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE)),
-                        OP_LOGE(nodeName, "scales datatype is invalid, datatype should be e8m0, but is %s.",
+                        OP_LOGE(nodeName, "scales datatype is invalid, datatype should be hifloat4_scale, but is %s.",
                                 Ops::Base::ToString(scalesDesc->GetDataType()).c_str()),
                         return false);
         OP_TILING_CHECK(
@@ -1382,7 +1384,7 @@ ge::graphStatus MoeDistributeDispatchV2TilingFuncA5::CheckQuantModeMatchScales(g
                                                                                uint32_t quantMode,
                                                                                DispatchV2Config& config)
 {
-    OP_TILING_CHECK(CheckQuantModeAndScales(context, nodeName, isScales, quantMode) != ge::GRAPH_SUCCESS,
+    OP_TILING_CHECK(CheckQuantModeAndScales(context, nodeName, isScales, quantMode, config) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "quant mode and scales not match, isScales is %d,quantMode is %u.",
                             static_cast<int32_t>(isScales), quantMode),
                     return ge::GRAPH_FAILED);

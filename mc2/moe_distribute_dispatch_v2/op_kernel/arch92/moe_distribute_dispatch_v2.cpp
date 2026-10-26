@@ -60,13 +60,13 @@ __global__ __aicore__ void moe_distribute_dispatch_v2(GM_ADDR x, GM_ADDR expertI
     TPipe pipe;
 #if (ORIG_DTYPE_X == ORIG_DTYPE_EXPAND_X)
 #if ((ORIG_DTYPE_EXPAND_X == DT_BF16) || (ORIG_DTYPE_EXPAND_X == DT_FLOAT16))
-    if (!hasScales && QuantMode == TILINGKEY_NO_QUANT) {
+    if constexpr (!hasScales && QuantMode == TILINGKEY_NO_QUANT) {
         ExecMoeDistributeDispatchV2A6<Mc2Kernel::HcclContextHolder, DTYPE_X, DTYPE_EXPAND_X, Mc2Kernel::UNQUANT, false>(
             x, expertIds, scales, xActiveMask, expertScales, elasticInfo, performanceInfo, expandXOut, dynamicScalesOut,
             assistInfoOut, expandScalesOut, expertTokenNumsOut, epSendCountsOut, workspaceGM, tilingGM, &pipe);
     }
 #else
-    if (hasScales && QuantMode == TILINGKEY_NO_QUANT) {
+    if constexpr (hasScales && QuantMode == TILINGKEY_NO_QUANT) {
         ExecMoeDistributeDispatchV2A6<Mc2Kernel::HcclContextHolder, DTYPE_X, DTYPE_EXPAND_X, Mc2Kernel::UNQUANT, true>(
             x, expertIds, scales, xActiveMask, expertScales, elasticInfo, performanceInfo, expandXOut, dynamicScalesOut,
             assistInfoOut, expandScalesOut, expertTokenNumsOut, epSendCountsOut, workspaceGM, tilingGM, &pipe);

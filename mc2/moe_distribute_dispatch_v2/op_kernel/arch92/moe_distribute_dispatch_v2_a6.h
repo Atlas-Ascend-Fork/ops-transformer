@@ -626,7 +626,7 @@ __aicore__ inline void MoeDistributeDispatchV2A6<DISPATCH_V2_A6_TEMPLATE_ARGS>::
     uint32_t fillExpertIdx, uint32_t quantExpertIdx, bool writeExpertScale)
 {
     LocalTensor<XInType> xInTensor = inQueue.DeQue<XInType>();
-    // 三元组写入区位于 tokenQuantAlign_（量化数据+scales 之后），与 QuantProcess 数据区不重叠，不依赖V完成
+    SyncFunc<AscendC::HardEvent::V_S>();
     FillTriple(tempTensor_, srcTokenIndex, fillExpertIdx, writeExpertScale);
 
     if constexpr (QuantMode > UNQUANT) {
@@ -1220,16 +1220,23 @@ __aicore__ inline void MoeDistributeDispatchV2A6<DISPATCH_V2_A6_TEMPLATE_ARGS>::
     TBuf<> smoothScalesBuf, receiveDataCastFloatBuf;
     expertIdsBufSize_ = Ceil(expertIdsCnt_ * sizeof(int32_t), SIZE_ALIGN_256) * SIZE_ALIGN_256; // 支持compareScalar
     AscendC::TBufPool<AscendC::TPosition::VECIN> tbufPool0, tbufPool1;
-    tpipe_->InitBufPool(tbufPool0, SEND_IN_DEPTH * hAlignSize_);
-    tpipe_->InitBufPool(tbufPool1, BUFFER_NUM * hAlignSize_, tbufPool0);
+    uint32_t tokenInBufferSize = hAlignSize_;
+    // 透传时需要在搬入张量末尾填入三元组
+    // 传输expert scales时还需填入对应expert scale
+    if constexpr (Std::IsSame<ExpandXOutType, XType>::value) {
+        tokenInBufferSize += UB_ALIGN;
+    }
 
-    tbufPool0.InitBuffer(inQueue, SEND_IN_DEPTH, hAlignSize_);
-    tbufPool1.InitBuffer(inQueueCleanBuf, BUFFER_NUM * hAlignSize_);
+    tpipe_->InitBufPool(tbufPool0, SEND_IN_DEPTH * tokenInBufferSize);
+    tpipe_->InitBufPool(tbufPool1, BUFFER_NUM * tokenInBufferSize, tbufPool0);
+
+    tbufPool0.InitBuffer(inQueue, SEND_IN_DEPTH, tokenInBufferSize);
+    tbufPool1.InitBuffer(inQueueCleanBuf, BUFFER_NUM * tokenInBufferSize);
     // MX以及PERGROUP量化在计算scales时每次搬入256字节数据，
     // 所以在token搬入前需要对空间填0，避免引入脏数据
     if constexpr ((QuantMode == MX_QUANT) || (QuantMode == PERGROUP_DYNAMIC_QUANT) || (QuantMode == MX_QUANT_CLIP)) {
         LocalTensor<uint8_t> inTensor8 = inQueueCleanBuf.Get<uint8_t>();
-        Duplicate(inTensor8, QUANT_PADDING_VALUE, BUFFER_NUM * hAlignSize_);
+        Duplicate(inTensor8, QUANT_PADDING_VALUE, BUFFER_NUM * tokenInBufferSize);
     }
     uint32_t calTokenIdxBuffSize = Ceil(axisBS_ * axisK_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
     tpipe_->InitBuffer(expertIdsBuf_, expertIdsBufSize_);

@@ -35,7 +35,7 @@ constexpr uint32_t MAX_MODULE_DEVICE_NUM = 32;
 constexpr uint32_t EP_RANK_OFFSET_STEP = 1024;
 
 namespace Mc2Kernel {
-constexpr uint64_t A5_MTE_STATE_WIN_SIZE = 1024UL * 1024UL;
+constexpr uint64_t STATE_WIN_SIZE = 1024UL * 1024UL;
 }
 
 struct HcclSignalInfo {
@@ -483,7 +483,7 @@ __aicore__ inline GM_ADDR GetStatusDataSpaceGm(__gm__ HcclOpParam* winContext)
 __aicore__ inline GM_ADDR GetBaseWindAddrByRankId(__gm__ HcclOpParam* winContext, const int32_t rankId,
                                                   const int32_t curRankId)
 {
-    return (GM_ADDR)(winContext->windowsIn[rankId] + A5_MTE_STATE_WIN_SIZE + rankId * EP_RANK_OFFSET_STEP);
+    return (GM_ADDR)(winContext->windowsIn[rankId] + STATE_WIN_SIZE + rankId * EP_RANK_OFFSET_STEP);
 }
 
 __aicore__ inline GM_ADDR GetBaseWindStateAddrByRankId(__gm__ HcclOpParam* winContext, const int32_t rankId,
@@ -500,7 +500,7 @@ __aicore__ inline GM_ADDR GetStatusDataSpaceGm(__gm__ HcclOpParam* winContext)
 __aicore__ inline GM_ADDR GetBaseWindAddrByRankId(__gm__ HcclOpParam* winContext, const int32_t rankId,
                                                   const int32_t curRankId)
 {
-    return (GM_ADDR)(winContext->windowsIn[rankId] + A5_MTE_STATE_WIN_SIZE);
+    return (GM_ADDR)(winContext->windowsIn[rankId] + STATE_WIN_SIZE);
 }
 
 __aicore__ inline GM_ADDR GetBaseWindStateAddrByRankId(__gm__ HcclOpParam* winContext, const int32_t rankId,

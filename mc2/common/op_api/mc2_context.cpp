@@ -18,6 +18,8 @@
 #include <cstdlib>
 #include <dlfcn.h>
 #include "mc2_context.h"
+#include "opdev/platform.h"
+#include "op_host/util/op_const_def.h"
 #if HCOMM_VERSION_NUM >= HCCL_CHANNEL_SUPPORT_VERSION
 
 namespace {
@@ -361,7 +363,11 @@ aclnnStatus Mc2Context::GetHcclCommResource(const HcclComm& hcclHandle, const Co
             return ACLNN_ERR_INNER;
         }
 
-        mc2ContextStruct->epHcclBuffer_[i] = reinterpret_cast<uint64_t>(tempBuffer) + i * EP_RANK_OFFSET_STEP;
+        if (op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510) {
+            mc2ContextStruct->epHcclBuffer_[i] = reinterpret_cast<uint64_t>(tempBuffer) + i * EP_RANK_OFFSET_STEP;
+        } else {
+            mc2ContextStruct->epHcclBuffer_[i] = reinterpret_cast<uint64_t>(tempBuffer);
+        }
     }
     OP_LOGD("Get HCCL CommResource success");
     return ACLNN_SUCCESS;

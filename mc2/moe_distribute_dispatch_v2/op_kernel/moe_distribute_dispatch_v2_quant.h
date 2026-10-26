@@ -315,7 +315,6 @@ public:
         uint32_t groupNum = Ceil(axisH_, Quant::HIF4_QUANT_GROUP_ELE_NUM);
         uint32_t e8BufSize = Align32(groupNum * static_cast<uint32_t>(sizeof(uint16_t)));
         uint32_t e1p8BufSize = Align32(groupNum * static_cast<uint32_t>(sizeof(uint8_t)));
-        uint32_t e1p16BufSize = Align32(groupNum * static_cast<uint32_t>(sizeof(uint16_t)));
 
         __ubuf__ bfloat16_t* srcAddr = (__ubuf__ bfloat16_t*)inLocal.GetPhyAddr();
         __ubuf__ uint8_t* outLocalAddr = (__ubuf__ uint8_t*)outLocal.GetPhyAddr();

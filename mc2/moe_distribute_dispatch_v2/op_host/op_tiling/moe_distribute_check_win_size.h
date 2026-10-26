@@ -198,19 +198,22 @@ inline ge::graphStatus CheckWinSize(const gert::TilingContext* context, const ch
         maxWindowSizeEp = *cclBuffSizePtr - MB_SIZE;
         hcclBufferSizeEp = *cclBuffSizePtr;
     }
+    OP_LOGD(nodeName, "windowSize = %lu", maxWindowSizeEp);
     OP_TILING_CHECK(
         CheckActualWinSize(context, nodeName, winSizeData, maxWindowSizeEp, hcclBufferSizeEp) != ge::GRAPH_SUCCESS,
         OP_LOGE_WITHOUT_REPORT(nodeName, "Tiling check actual window size failed."), return ge::GRAPH_FAILED);
-    // A3 context holders start at the data window without a per-rank offset.
-    // Keep the checked capacity intact when splitting its ping-pong windows.
-    const bool isA3FullMesh = mc2tiling::GetSocVersion(context) == "Ascend910_93" && !winSizeData.isLayered;
-    uint64_t rankOffsetSize = isA3FullMesh ? 0UL : winSizeData.epWorldSize * EP_RANK_OFFSET_STEP;
-    OP_TILING_CHECK(maxWindowSizeEp < rankOffsetSize,
-                    OP_LOGE_WITHOUT_REPORT(nodeName, "maxWindowSizeEp is too small: %lu B < %lu B (epWorldSize=%lu).",
-                                           maxWindowSizeEp, rankOffsetSize, winSizeData.epWorldSize),
-                    return ge::GRAPH_FAILED);
-    winSizeData.totalWinSizeEp = maxWindowSizeEp - rankOffsetSize;
-    OP_LOGD(nodeName, "windowSize = %lu", maxWindowSizeEp);
+
+    winSizeData.totalWinSizeEp = maxWindowSizeEp;
+    if (mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510) {
+        uint64_t rankOffsetSize = winSizeData.epWorldSize * EP_RANK_OFFSET_STEP;
+        OP_TILING_CHECK(
+            maxWindowSizeEp < rankOffsetSize,
+            OP_LOGE_WITHOUT_REPORT(nodeName, "maxWindowSizeEp is too small: %lu B < %lu B (epWorldSize=%lu).",
+                                   maxWindowSizeEp, rankOffsetSize, winSizeData.epWorldSize),
+            return ge::GRAPH_FAILED);
+        winSizeData.totalWinSizeEp = maxWindowSizeEp - rankOffsetSize;
+    }
+
     return ge::GRAPH_SUCCESS;
 }
 } // namespace Mc2Tiling

@@ -1034,11 +1034,10 @@ static ge::graphStatus CheckFloat4LastAxis(const gert::TilingContext* context, c
     auto expandXDesc = context->GetOutputDesc(OUTPUT_EXPAND_X_INDEX);
     if ((expandXDesc->GetDataType() == ge::DT_FLOAT4_E2M1) || (expandXDesc->GetDataType() == ge::DT_FLOAT4_E1M2) ||
         (expandXDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4)) {
-        OP_TILING_CHECK(
-            xDim1 % EVEN_ALIGN,
-            OP_LOGE(nodeName,
-                    "When expandx data type is FLOAT_E2M1/FLOAT_E1M2, the last axis should be even, please check."),
-            return ge::GRAPH_FAILED);
+        OP_TILING_CHECK(xDim1 % EVEN_ALIGN,
+                        OP_LOGE(nodeName, "When expandx data type is FLOAT_E2M1/FLOAT_E1M2/HIFLOAT4, the last axis "
+                                          "should be even, please check."),
+                        return ge::GRAPH_FAILED);
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -1663,7 +1662,7 @@ static uint32_t SendToMoeExpertUsedBuffer(const gert::TilingContext* context,
 static uint32_t AllToAllBasicUsedBuffer(const gert::TilingContext* context,
                                         const MoeDistributeDispatchV2TilingData& tilingData, uint32_t quantMode,
                                         uint32_t& expertIdsBufSize, uint32_t hSize, uint32_t expertIdsCnt,
-                                        uint32_t& hOutSizeAlign, const char* nodeName)
+                                        uint32_t& hOutSizeAlign, const char* nodeName, const DispatchV2Config& config)
 {
     uint32_t UbForBasic = 0;
     uint32_t epWorldSize = tilingData.moeDistributeDispatchV2Info.epWorldSize;
@@ -1675,9 +1674,15 @@ static uint32_t AllToAllBasicUsedBuffer(const gert::TilingContext* context,
 
     uint32_t sizeofX = 2U;
     uint32_t hAlignSize = Ceil(hSize * sizeofX, UB_ALIGN, nodeName);
+    auto xDesc = context->GetInputDesc(config.xIndex);
+    auto expandXDesc = context->GetOutputDesc(OUTPUT_EXPAND_X_INDEX);
+    // xDesc与expandXDesc在之前的函数中已校验非空，此处不做校验
+    if (xDesc->GetDataType() == expandXDesc->GetDataType()) {
+        hAlignSize += UB_ALIGN;
+    }
     UbForBasic = UbForBasic + hAlignSize * BUFFER_NUM; // inQueue
 
-    const gert::StorageShape* scalesStorageShape = context->GetOptionalInputShape(SCALES_INDEX);
+    const gert::StorageShape* scalesStorageShape = context->GetOptionalInputShape(config.scalesIndex);
     bool isScales = (scalesStorageShape != nullptr);
     uint32_t hOutSize = (quantMode == static_cast<uint32_t>(QuantModeA5::NON_QUANT)) ? hSize * SIZE_OF_UNQUANT : hSize;
     hOutSizeAlign = Ceil(hOutSize, UB_ALIGN, nodeName);
@@ -1798,10 +1803,10 @@ static ge::graphStatus CheckUBSize(const gert::TilingContext* context, MoeDistri
     uint32_t expertIdsBufSize = 0;
     uint32_t hOutSizeAlign = 0;
     ubSize = ubSize + AllToAllBasicUsedBuffer(context, tilingData, quantMode, expertIdsBufSize, hSize, expertIdsCnt,
-                                              hOutSizeAlign, nodeName);
+                                              hOutSizeAlign, nodeName, config);
 
-    const gert::StorageShape* xActiveMaskStorageShape = context->GetOptionalInputShape(X_ACTIVE_MASK_INDEX);
-    const gert::StorageShape* scalesStorageShape = context->GetOptionalInputShape(SCALES_INDEX);
+    const gert::StorageShape* xActiveMaskStorageShape = context->GetOptionalInputShape(config.xActiveMaskIndex);
+    const gert::StorageShape* scalesStorageShape = context->GetOptionalInputShape(config.scalesIndex);
     bool isActiveMask = (xActiveMaskStorageShape != nullptr);
     bool isScales = (scalesStorageShape != nullptr);
     bool needMaskCalFlag = (isActiveMask || tilingData.moeDistributeDispatchV2Info.zeroComputeExpertNum != 0);

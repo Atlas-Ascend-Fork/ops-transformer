@@ -906,8 +906,8 @@ __simd_vf__ inline void Hif4ElementQuant(__ubuf__ ST* srcAddrOri, __ubuf__ uint8
 
     int32_t sysRegLen = static_cast<int32_t>(GetVecLen());
     int32_t gmCopyInRegStep = sysRegLen / sizeof(float) * 2; // 按照类型float，双搬入
-    int32_t gmCopyOutRegStep = sysRegLen / sizeof(int32_t) / HIF4_QUANT_CAST_COPYOUT_PACK4_NUM; // 类型 uint32
-    int32_t gmCopyInRegStep2 = sysRegLen / sizeof(ST);                                          // 按照类型float
+    int32_t gmCopyOutRegStep = sysRegLen / sizeof(int32_t) / HIF4_QUANT_CAST_COPYOUT_PACK4_NUM; // 按照类型 int32搬出
+    int32_t gmCopyInRegStep2 = sysRegLen / sizeof(ST);                                          // 按照类型ST搬入
 
     __ubuf__ float* srcAddr = (__ubuf__ float*)srcAddrOri;
     __ubuf__ ST* srcAddr2 = (__ubuf__ ST*)srcAddrOri;
