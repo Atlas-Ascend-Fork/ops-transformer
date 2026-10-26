@@ -39,7 +39,8 @@ const std::tuple<const aclTensor*, const aclTensor*> AttentionUpdate(const aclTe
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(AttentionUpdate, OP_INPUT(lse, go), OP_OUTPUT(out, lseOut),
                                            OP_ATTR(updateType, sp));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "AttentionUpdateAiCore ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        // launcher注册失败属内部错误，仅记录PLOG日志，不做ErrorManager上报
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "AttentionUpdateAiCore ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return std::tuple<aclTensor*, aclTensor*>(nullptr, nullptr);
     }
 

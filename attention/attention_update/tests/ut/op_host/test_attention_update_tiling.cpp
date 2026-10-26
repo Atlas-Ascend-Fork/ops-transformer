@@ -198,3 +198,186 @@ TEST_F(AttentionUpdateTilingTest, LegacyFloatUpdateType0Sp128LargeTotalLength)
                                        {{128000, 128}, {128000, 128}}, {{128000, 128}, {128000, 128}});
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10010);
 }
+
+// ==================== OP_LOGE 分支覆盖用例（错误码整改配套） ====================
+
+namespace {
+using TensorSpec = std::pair<ge::DataType, gert::StorageShape>;
+
+gert::TilingContextPara BuildCustomCase(optiling::DecodeUpdateCompileInfo& compileInfo,
+                                        const std::vector<TensorSpec>& lseTensors,
+                                        const std::vector<TensorSpec>& goTensors,
+                                        const std::vector<TensorSpec>& outTensors,
+                                        std::vector<gert::TilingContextPara::OpAttr> attrs,
+                                        uint64_t coreNumOverride = 0, uint64_t ubSizeOverride = 0)
+{
+    std::vector<gert::TilingContextPara::TensorDescription> inputs;
+    for (auto& t : lseTensors) {
+        inputs.push_back({t.second, t.first, ge::FORMAT_ND});
+    }
+    for (auto& t : goTensors) {
+        inputs.push_back({t.second, t.first, ge::FORMAT_ND});
+    }
+    std::vector<gert::TilingContextPara::TensorDescription> outputs;
+    for (auto& t : outTensors) {
+        outputs.push_back({t.second, t.first, ge::FORMAT_ND});
+    }
+    uint64_t coreNum = coreNumOverride > 0 ? coreNumOverride : compileInfo.coreNum;
+    uint64_t ubSize = ubSizeOverride > 0 ? ubSizeOverride : compileInfo.ubSize;
+    return gert::TilingContextPara("AttentionUpdate", inputs, outputs, attrs, &compileInfo, "Ascend910B", coreNum,
+                                   ubSize);
+}
+
+std::vector<gert::TilingContextPara::OpAttr> DefaultAttrs(int64_t updateType, int64_t sp)
+{
+    return {{"update_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(updateType)},
+            {"sp", Ops::Transformer::AnyValue::CreateFrom<int64_t>(sp)}};
+}
+} // namespace
+
+// 分支: CheckInputDtype - lse dtype必须为FLOAT (OP_LOGE_FOR_INVALID_DTYPE "lse")
+TEST_F(AttentionUpdateTilingTest, AscendCLseDtypeFp16Rejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT16, {{128}, {128}}}}, {{ge::DT_FLOAT16, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT16, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 1));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputDtype - go各tensor dtype必须一致 (OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON "go[i]")
+TEST_F(AttentionUpdateTilingTest, AscendCGoDtypeInconsistentRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}, {ge::DT_FLOAT, {{128}, {128}}}},
+                        {{ge::DT_FLOAT16, {{128, 8}, {128, 8}}}, {ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT16, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 2));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputDtype - lse各tensor dtype必须一致 (OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON "lse[i]")
+TEST_F(AttentionUpdateTilingTest, AscendCLseDtypeInconsistentRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}, {ge::DT_FLOAT16, {{128}, {128}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}, {ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 2));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputDim - go维度数必须为2D (OP_LOGE_FOR_INVALID_SHAPEDIM "go[i]")
+TEST_F(AttentionUpdateTilingTest, AscendCGoDimNumNot2DRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    // go[0]为2D保证d_合法，go[1]为1D触发go维度数校验
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}, {ge::DT_FLOAT, {{128}, {128}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}, {ge::DT_FLOAT, {{128}, {128}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 2));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputDim - lse维度数必须为1D (OP_LOGE_FOR_INVALID_SHAPEDIM "lse[i]")
+TEST_F(AttentionUpdateTilingTest, AscendCLseDimNumNot1DRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    // sp=1且tensor数量匹配，lse[0]为2D触发lse维度数校验
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 1));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputDim - go各tensor的H维必须一致 (OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON "go[i]")
+TEST_F(AttentionUpdateTilingTest, AscendCGoHDimInconsistentRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}, {ge::DT_FLOAT, {{128}, {128}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}, {ge::DT_FLOAT, {{128, 16}, {128, 16}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 2));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputDim - 所有tensor的batch维(第0维)必须一致 (OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON batch)
+TEST_F(AttentionUpdateTilingTest, AscendCBatchDimInconsistentRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    // sp=2且tensor数量匹配，lse的第0维(64)与go的第0维(128)不一致触发batch轴校验
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{64}, {64}}}, {ge::DT_FLOAT, {{64}, {64}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}, {ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 2));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputParams - update_type必须为0或1 (OP_LOGE_FOR_INVALID_VALUE "update_type")
+TEST_F(AttentionUpdateTilingTest, AscendCUpdateTypeInvalidRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}}, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, DefaultAttrs(2, 1));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckInputParams - sp必须在[1,16] (OP_LOGE_FOR_INVALID_VALUE "sp")
+TEST_F(AttentionUpdateTilingTest, AscendCSpOutOfRangeRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    std::vector<TensorSpec> lseTensors;
+    std::vector<TensorSpec> goTensors;
+    for (int64_t i = 0; i < 17; ++i) {
+        lseTensors.push_back({ge::DT_FLOAT, {{128}, {128}}});
+        goTensors.push_back({ge::DT_FLOAT, {{128, 8}, {128, 8}}});
+    }
+    auto tilingContextPara = BuildCustomCase(compileInfo, lseTensors, goTensors, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                                             DefaultAttrs(0, 17));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: GetShapeAttrsInfo - lse/go tensor数量必须为sp的2倍 (OP_LOGE_FOR_INVALID_TENSORNUMS_WITH_REASON)
+TEST_F(AttentionUpdateTilingTest, AscendCTensorNumsMismatchRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    // sp属性为2，但仅提供1个lse和1个go输入，触发tensor数量校验失败
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}}, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 2));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: GetShapeAttrsInfo - 缺失sp属性，GetAttrPointer返回nullptr（OP_LOGE_WITHOUT_REPORT "spPtr is null"）
+TEST_F(AttentionUpdateTilingTest, AscendCMissingSpAttrRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara = BuildCustomCase(
+        compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}}, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}}, {{"update_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}});
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckOutputParams - output与go的dtype必须一致 (OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON "go and output")
+TEST_F(AttentionUpdateTilingTest, AscendCOutputDtypeMismatchRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}}, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT16, {{128, 8}, {128, 8}}}}, DefaultAttrs(0, 1));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: CheckOutputParams - update_type=1时lse_m必须为FLOAT (OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON "lse_m")
+TEST_F(AttentionUpdateTilingTest, AscendCOutputLseMDtypeMismatchRejected)
+{
+    auto compileInfo = AscendCCompileInfo();
+    auto tilingContextPara =
+        BuildCustomCase(compileInfo, {{ge::DT_FLOAT, {{128}, {128}}}}, {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}},
+                        {{ge::DT_FLOAT, {{128, 8}, {128, 8}}}, {ge::DT_FLOAT16, {{128}, {128}}}}, DefaultAttrs(1, 1));
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// 分支: GetPlatformInfo - 平台Vector核数为0 / UB大小为0（OP_LOGE_WITHOUT_REPORT）
+// 说明：平台coreNum/ubSize由硬件信息保证非0，UT假平台不随TilingContextPara参数变化，该分支UT不可达，不构造用例。

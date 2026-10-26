@@ -57,7 +57,8 @@ uint64_t GetTilingKey(uint32_t sp, ge::DataType goType_)
 
 ge::graphStatus DecodeUpdateTiling(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("AttentionUpdate", "context is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context == nullptr, OP_LOGE_WITHOUT_REPORT("AttentionUpdate", "context is null"),
+                return ge::GRAPH_FAILED);
     auto compileInfo = reinterpret_cast<const DecodeUpdateCompileInfo*>(context->GetCompileInfo());
     if (compileInfo->is_ascendc) {
         return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context);
@@ -126,7 +127,8 @@ ge::graphStatus DecodeUpdateTiling(gert::TilingContext* context)
 static ge::graphStatus TilingPrepare4DecodeUpdate(gert::TilingParseContext* context)
 {
     auto compileInfo = context->GetCompiledInfo<DecodeUpdateCompileInfo>();
-    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE(context, "compileInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE_WITHOUT_REPORT(context, "compileInfoPtr is null"),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     uint64_t ubSize;
@@ -135,14 +137,15 @@ static ge::graphStatus TilingPrepare4DecodeUpdate(gert::TilingParseContext* cont
     compileInfo->ubSize = ubSize;
     compileInfo->is_ascendc = Ops::Transformer::OpTiling::IsRegbaseSocVersion(context);
 
-    OP_CHECK_IF(compileInfo->coreNum <= 0,
-                OP_LOGE(context->GetNodeName(), "AttentionUpdate GetHardwareInfo Failed, vectorCoreNum: %u",
-                        compileInfo->coreNum),
-                return ge::GRAPH_FAILED);
     OP_CHECK_IF(
-        compileInfo->ubSize <= 0,
-        OP_LOGE(context->GetNodeName(), "AttentionUpdate GetHardwareInfo Failed, ubSize: %lu", compileInfo->ubSize),
+        compileInfo->coreNum <= 0,
+        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "AttentionUpdate GetHardwareInfo Failed, vectorCoreNum: %u",
+                               compileInfo->coreNum),
         return ge::GRAPH_FAILED);
+    OP_CHECK_IF(compileInfo->ubSize <= 0,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "AttentionUpdate GetHardwareInfo Failed, ubSize: %lu",
+                                       compileInfo->ubSize),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 

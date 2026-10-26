@@ -58,20 +58,21 @@ ge::graphStatus AttentionUpdateTiling::GetPlatformInfo()
     auto platformInfo = context_->GetPlatformInfo();
     if (platformInfo == nullptr) {
         auto compileInfoPtr = reinterpret_cast<const DecodeUpdateCompileInfo*>(context_->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context_, "compile info is null"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE_WITHOUT_REPORT(context_, "compile info is null"),
+                    return ge::GRAPH_FAILED);
         totalCoreNum_ = compileInfoPtr->coreNum;
         ubSize_ = compileInfoPtr->ubSize;
     } else {
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
         totalCoreNum_ = static_cast<uint64_t>(ascendcPlatform.GetCoreNumAiv());
         if (totalCoreNum_ == 0UL) {
-            OP_LOGE(context_->GetNodeName(), "coreNum is 0");
+            OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "coreNum is 0");
             return ge::GRAPH_FAILED;
         }
         uint64_t ubSize = 0;
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
         if (ubSize == static_cast<uint64_t>(0)) {
-            OP_LOGE(context_->GetNodeName(), "ubSize is 0");
+            OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "ubSize is 0");
             return ge::GRAPH_FAILED;
         }
         ubSize_ = static_cast<uint64_t>(ubSize);
@@ -214,7 +215,8 @@ ge::graphStatus AttentionUpdateTiling::CheckInputParams()
 ge::graphStatus AttentionUpdateTiling::CheckOutputParams()
 {
     auto outputDesc = context_->GetOutputDesc(OUTPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, outputDesc);
+    OP_CHECK_IF(outputDesc == nullptr, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "outputDesc is nullptr!"),
+                return ge::GRAPH_FAILED);
     auto outputType = outputDesc->GetDataType();
     if (goType_ != outputType) {
         std::string dtypeMsg = ToString(goType_) + " and " + ToString(outputType);
@@ -225,7 +227,9 @@ ge::graphStatus AttentionUpdateTiling::CheckOutputParams()
 
     if (updateType_ == 1) {
         auto outputLseMDesc = context_->GetOutputDesc(OUTPUT_LSE_M_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, outputLseMDesc);
+        OP_CHECK_IF(outputLseMDesc == nullptr,
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "outputLseMDesc is nullptr!"),
+                    return ge::GRAPH_FAILED);
         auto outputLseMType = outputLseMDesc->GetDataType();
         if (outputLseMType != ge::DataType::DT_FLOAT) {
             std::string dtypeStr = ToString(outputLseMType);
@@ -240,12 +244,15 @@ ge::graphStatus AttentionUpdateTiling::CheckOutputParams()
 
 ge::graphStatus AttentionUpdateTiling::GetShapeAttrsInfo()
 {
-    OP_CHECK_IF(context_ == nullptr, OP_LOGE("AttentionUpdate", "context is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context_ == nullptr, OP_LOGE_WITHOUT_REPORT("AttentionUpdate", "context is null"),
+                return ge::GRAPH_FAILED);
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "attrs is nullptr!"),
+                return ge::GRAPH_FAILED);
 
     const int64_t* spPtr = attrs->GetAttrPointer<int64_t>(ATTR_SP_INDEX);
-    OP_CHECK_IF(spPtr == nullptr, OP_LOGE("AttentionUpdate", "spPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(spPtr == nullptr, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "spPtr is null"),
+                return ge::GRAPH_FAILED);
     sp_ = static_cast<uint64_t>(*spPtr);
 
     uint32_t allTensorCount = context_->GetComputeNodeInputNum();
@@ -259,13 +266,19 @@ ge::graphStatus AttentionUpdateTiling::GetShapeAttrsInfo()
     }
 
     for (uint64_t i = 0; i < NUM_2 * sp_; i++) {
-        OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputShape(i));
+        OP_CHECK_IF(context_->GetInputShape(i) == nullptr,
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "input shape %llu is nullptr!",
+                                           static_cast<unsigned long long>(i)),
+                    return ge::GRAPH_FAILED);
     }
     goShape_ = context_->GetInputShape(INPUT_GO_INDEX * sp_)->GetOriginShape();
     lseShape_ = context_->GetInputShape(INPUT_LSE_INDEX)->GetOriginShape();
 
     for (uint64_t i = 0; i < NUM_2 * sp_; i++) {
-        OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetInputDesc(i));
+        OP_CHECK_IF(context_->GetInputDesc(i) == nullptr,
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "input desc %llu is nullptr!",
+                                           static_cast<unsigned long long>(i)),
+                    return ge::GRAPH_FAILED);
     }
     goType_ = context_->GetInputDesc(INPUT_GO_INDEX * sp_)->GetDataType();
     lseType_ = context_->GetInputDesc(INPUT_LSE_INDEX)->GetDataType();
@@ -274,7 +287,8 @@ ge::graphStatus AttentionUpdateTiling::GetShapeAttrsInfo()
     bshSize_ = goShape_.GetDim(DIM_0);
 
     const int64_t* updateTypePtr = attrs->GetAttrPointer<int64_t>(ATTR_UPDATE_TYPE_INDEX);
-    OP_CHECK_IF(updateTypePtr == nullptr, OP_LOGE("AttentionUpdate", "updateTypePtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(updateTypePtr == nullptr, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "updateTypePtr is null"),
+                return ge::GRAPH_FAILED);
     updateType_ = static_cast<int64_t>(*updateTypePtr);
     goDtypeSize_ = GetSizeByDataType(goType_);
     if (goDtypeSize_ == 0) {
@@ -283,10 +297,13 @@ ge::graphStatus AttentionUpdateTiling::GetShapeAttrsInfo()
                                               "The dtype size of input go cannot be 0");
         return ge::GRAPH_FAILED;
     }
+    // 内层CheckInputParams/CheckOutputParams已完成正式首报，此处仅补充PLOG上下文，不再重复上报
     OP_CHECK_IF(CheckInputParams() != ge::GRAPH_SUCCESS,
-                OP_LOGE(context_->GetNodeName(), "AttentionUpdate CheckInputParams FAILED."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "AttentionUpdate CheckInputParams FAILED."),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(CheckOutputParams() != ge::GRAPH_SUCCESS,
-                OP_LOGE(context_->GetNodeName(), "AttentionUpdate CheckOutputParams FAILED."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "AttentionUpdate CheckOutputParams FAILED."),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -352,7 +369,8 @@ ge::graphStatus AttentionUpdateTiling::GetWorkspaceSize()
 ge::graphStatus AttentionUpdateTiling::PostTiling()
 {
     auto workspaces = context_->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+    OP_CHECK_IF(workspaces == nullptr, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "workspaces is nullptr!"),
+                return ge::GRAPH_FAILED);
     workspaces[0] = workspaceSize_;
 
     context_->SetBlockDim(usedCoreNum_);
