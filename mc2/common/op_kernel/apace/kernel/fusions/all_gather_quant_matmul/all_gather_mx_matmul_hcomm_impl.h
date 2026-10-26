@@ -24,6 +24,15 @@
 
 #pragma once
 
+// 低版本 devkit(如 9.2.0) 的编译环境不含 hifloat4x2_t/AscendC::hif4_scale，
+// 以 devkit 版本守卫 HIF4 kernel 代码（CANN >= 9.3 才启用，与 op_host 侧
+// ENABLE_ALL_GATHER_MATMUL_DT_HIFLOAT4 守卫配套、阈值一致）
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define APACE_HIF4_TYPE_SUPPORTED 1
+#else
+#define APACE_HIF4_TYPE_SUPPORTED 0
+#endif
+
 #include "include/tensor_api/tensor.h"
 #include "lib/hccl/hccl.h"
 #include "blaze/gemm/utils/common_utils.h"
@@ -42,6 +51,10 @@ constexpr uint64_t GetHcclDataType()
         return AscendC::HCCL_DATA_TYPE_FP8E5M2;
     } else if constexpr (AscendC::IsSameType<T, fp4x2_e2m1_t>::value) {
         return AscendC::HCCL_DATA_TYPE_UINT8;
+#if APACE_HIF4_TYPE_SUPPORTED
+    } else if constexpr (AscendC::IsSameType<T, hifloat4x2_t>::value) {
+        return AscendC::HCCL_DATA_TYPE_UINT8;
+#endif
     } else {
         return AscendC::HCCL_DATA_TYPE_FP8E4M3;
     }
@@ -85,7 +98,7 @@ struct HcommCommWaitPolicy {
     }
 };
 
-template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4>
+template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB>
 class AllGatherMxQuantMatmulHcommImpl {
 public:
     explicit __aicore__ inline AllGatherMxQuantMatmulHcommImpl(Apace::hcommAllGatherMatmulTilingData* tilingData)
@@ -96,7 +109,8 @@ public:
                                 GM_ADDR cGM, GM_ADDR gatherOut, GM_ADDR workspaceGM);
     __aicore__ inline void Run();
 
-    using QuantMatmulKernelImpl = AllGatherQbmmMxKernel<AType, BType, CType, HcommCommWaitPolicy<ServerType>, false>;
+    using QuantMatmulKernelImpl =
+        AllGatherQbmmMxKernel<AType, BType, CType, HcommCommWaitPolicy<ServerType>, false, TransB>;
     using KernelParams = typename QuantMatmulKernelImpl::Params;
 
     QuantMatmulKernelImpl quantMatmulKernelImpl_;
@@ -141,14 +155,24 @@ private:
     uint64_t dataRegionBytes_{};
     uint64_t scaleRegionBytes_{};
 
+#if APACE_HIF4_TYPE_SUPPORTED
+    static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
+    // HiF4 scale 为 4 字节(uint32)/64K 组，MXFP8/FP4 为 1 字节/组；ScaleType 决定每组字节数
+    using ScaleType = AscendC::Std::conditional_t<IS_HIF4, AscendC::hif4_scale, AscendC::fp8_e8m0_t>;
+#else
+    static constexpr bool IS_HIF4 = false;
+    using ScaleType = AscendC::fp8_e8m0_t;
+#endif
+    static constexpr int32_t SCALE_C0 = IS_HIF4 ? 1 : 2;
     static constexpr uint32_t kPaddingLength = 16;
-    static constexpr uint64_t scaleDataType_ = HCCL_DATA_TYPE_FP8E8M0;
+    static constexpr uint64_t scaleDataType_ = IS_HIF4 ? HCCL_DATA_TYPE_UINT32 : HCCL_DATA_TYPE_FP8E8M0;
     static constexpr uint64_t dataDataType_ = GetHcclDataType<AType>();
     static constexpr uint64_t MXFP_DATA_NUM_PER_BYTE = 2UL;
 };
 
-template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4>
-__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4>::InitBaseParams()
+template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB>
+__aicore__ inline void
+AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4, TransB>::InitBaseParams()
 {
     const auto& ct = tilingData_->commTile;
     tileCnt_ = static_cast<uint32_t>(ct.splitAxisTileCnt);
@@ -163,22 +187,23 @@ __aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, Serv
     headRows_ = static_cast<uint64_t>(tileCnt_) * tileM_;
 
     scaleKGroups_ = Blaze::Gemm::CeilDiv(static_cast<uint64_t>(k_), Blaze::Gemm::MXFP_DIVISOR_SIZE);
-    scaleKLen_ = scaleKGroups_ * static_cast<uint64_t>(Blaze::Gemm::MXFP_MULTI_BASE_SIZE);
-    // FP4 (fp4x2) 1 字节装 2 个元素：每行字节数 = k/2；FP8 等 = k * sizeof(AType)（与 URMA impl 契约一致）
-    // 以类模板参数 IsMxFp4 为唯一判断源（与 kForComm_ 一致），保证所有实例化场景 AType 与 IsMxFp4 配对
-    dataBytesPerMRow_ = IsMxFp4 ? (static_cast<uint64_t>(k_) >> 1) : static_cast<uint64_t>(k_) * sizeof(AType);
-    scaleBytesPerMRow_ =
-        scaleKGroups_ * static_cast<uint64_t>(Blaze::Gemm::MXFP_MULTI_BASE_SIZE) * sizeof(AscendC::fp8_e8m0_t);
+    scaleKLen_ = scaleKGroups_ * static_cast<uint64_t>(SCALE_C0);
+    // FP4 / HiF4 (fp4x2 / hifloat4x2) 1 字节装 2 个元素：每行字节数 = k/2；FP8 等 = k * sizeof(AType)（与 URMA impl
+    // 契约一致） 以类模板参数 IsMxFp4 或 IS_HIF4 为判断源（与 kForComm_ 一致），保证所有实例化场景 AType 与 4bit
+    // 类型配对
+    dataBytesPerMRow_ =
+        (IsMxFp4 || IS_HIF4) ? (static_cast<uint64_t>(k_) >> 1) : static_cast<uint64_t>(k_) * sizeof(AType);
+    scaleBytesPerMRow_ = scaleKGroups_ * static_cast<uint64_t>(SCALE_C0) * sizeof(ScaleType);
     cBytesPerM_ = static_cast<uint64_t>(n_) * sizeof(CType);
-    // FP4: 2 个元素打包为 1 字节，通信 count/stride 需用 CeilDiv(K, 2) 减半
+    // FP4 / HiF4: 2 个元素打包为 1 字节，通信 count/stride 需用 CeilDiv(K, 2) 减半
     kForComm_ = static_cast<uint64_t>(k_);
-    if constexpr (IsMxFp4) {
+    if constexpr (IsMxFp4 || IS_HIF4) {
         kForComm_ = Blaze::Gemm::CeilDiv(kForComm_, MXFP_DATA_NUM_PER_BYTE);
     }
 }
 
-template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4>
-__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4>::Init(
+template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB>
+__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4, TransB>::Init(
     GM_ADDR aGM, GM_ADDR aScaleGM, GM_ADDR bGM, GM_ADDR bScaleGM, GM_ADDR biasGM, GM_ADDR cGM, GM_ADDR gatherOut,
     GM_ADDR workspaceGM)
 {
@@ -219,8 +244,9 @@ __aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, Serv
     commState_.tileCnt_ = tileCnt_;
 }
 
-template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4>
-__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4>::CommitAllGather()
+template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB>
+__aicore__ inline void
+AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4, TransB>::CommitAllGather()
 {
     // Scale: 全量一次性提交（repeat=1）
     commState_.scaleHandle_ =
@@ -246,9 +272,9 @@ __aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, Serv
     }
 }
 
-template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4>
-__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4>::SetupKernelParams(
-    KernelParams& params)
+template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB>
+__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4,
+                                                       TransB>::SetupKernelParams(KernelParams& params)
 {
     params.mmTile = &(tilingData_->mmTile);
     params.qbmmParams = {tilingData_->mmTile.baseM, tilingData_->mmTile.baseN, tilingData_->mmTile.baseK,
@@ -280,12 +306,14 @@ __aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, Serv
     params.cBytesPerM = cBytesPerM_;
 }
 
-template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4>
-__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4>::Run()
+template <typename AType, typename BType, typename CType, AscendC::HcclServerType ServerType, bool IsMxFp4, bool TransB>
+__aicore__ inline void AllGatherMxQuantMatmulHcommImpl<AType, BType, CType, ServerType, IsMxFp4, TransB>::Run()
 {
     KernelParams params;
     SetupKernelParams(params);
     quantMatmulKernelImpl_(params, opStateDump_);
+    AscendC::CrossCoreSetFlag<0, PIPE_FIX>(3);
+    AscendC::CrossCoreWaitFlag(3);
     commState_.hccl_.Finalize();
 }
 

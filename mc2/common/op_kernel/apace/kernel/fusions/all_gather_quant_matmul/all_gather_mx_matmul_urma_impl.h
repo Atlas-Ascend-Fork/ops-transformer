@@ -58,7 +58,7 @@ public:
                                 const AllGatherMxMatmulUrmaTilingData* tilingData);
     __aicore__ inline void Process();
 
-    using QuantMatmulKernelImpl = AllGatherQbmmMxKernel<AType, BType, CType, UrmaBufferSync, true>;
+    using QuantMatmulKernelImpl = AllGatherQbmmMxKernel<AType, BType, CType, UrmaBufferSync, true, true>;
     using KernelParams = typename QuantMatmulKernelImpl::Params;
     using QBMMTiling = typename QuantMatmulKernelImpl::QBMMTiling;
     using FragmentParams = typename QuantMatmulKernelImpl::FragmentParams;

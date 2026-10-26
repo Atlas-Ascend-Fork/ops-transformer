@@ -35,7 +35,7 @@ namespace Blaze {
 namespace Gemm {
 namespace Block {
 
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201))
 
 static constexpr uint64_t AG_SYNC_INTERVAL = 1024UL;
 static constexpr uint16_t CROSS_CORE_FLAG_NUM_NINE = 9;

@@ -15,6 +15,15 @@
 
 #pragma once
 
+// 低版本 devkit(如 9.2.0) 的编译环境不含 hifloat4x2_t/AscendC::hif4_scale，
+// 以 devkit 版本守卫 HIF4 kernel 代码（CANN >= 9.3 才启用，与 op_host 侧
+// ENABLE_ALL_GATHER_MATMUL_DT_HIFLOAT4 守卫配套、阈值一致）
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define APACE_HIF4_TYPE_SUPPORTED 1
+#else
+#define APACE_HIF4_TYPE_SUPPORTED 0
+#endif
+
 #include "kernel_basic_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
 
@@ -56,17 +65,29 @@ enum RegionTag {
  * enableBufferReuse=true（urma）：win 区 remote 紧凑 + data 槽回绕复用，A/scaleA 连续读，
  *   消费后 Release 通知写端可覆盖；false（hcomm）：保持 rank-major 全量 frag 读。
  */
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
 class AllGatherQbmmMxKernel {
 public:
     __aicore__ inline AllGatherQbmmMxKernel() {}
     __aicore__ inline ~AllGatherQbmmMxKernel() {}
 
+    // ---- B layout: TransB -> DN (x2 [N,K]), non-TransB -> ND (x2 [K,N]) ----
+    static constexpr bool transB = TransB;
+    using LayoutB = AscendC::Std::conditional_t<TransB, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
+
     // ---- Component types ----
     using DispatchPolicy = Blaze::Gemm::MatmulWithScaleMx<0, 0>;
     using BlockEpilogue = Blaze::Gemm::Block::BlockEpilogueEmpty;
+    // Reuse MXFP4's B4 scheduler geometry for HiFP4; MMAD keeps the real type.
+#if APACE_HIF4_TYPE_SUPPORTED
+    using SchedulerAType =
+        AscendC::Std::conditional_t<AscendC::IsSameType<AType, hifloat4x2_t>::value, fp4x2_e2m1_t, AType>;
+#else
+    using SchedulerAType = AType;
+#endif
     using BlockScheduler =
-        Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<ProblemShape, 0, LayoutA, LayoutB, AType>;
+        Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<ProblemShape, 0, LayoutA, LayoutB, SchedulerAType>;
     using BlockMmad =
         Blaze::Gemm::Block::BlockMmad<DispatchPolicy, AType, LayoutA, BType, LayoutB, CType, LayoutC, float, LayoutC>;
     using BlockMmadParams = typename BlockMmad::Params;
@@ -74,16 +95,26 @@ public:
     using BlockSchedulerParams = typename BlockScheduler::Params;
 
     // ---- Compile-time constants ----
-    static constexpr int64_t kC0Size = 32;               // C0_SIZE_B8 for non-fp4
-    static constexpr int64_t kCacheLineAlignMask = 0x7f; // 128B cache line alignment for fp8
-    static constexpr int32_t kScaleC0 = 2;
+#if APACE_HIF4_TYPE_SUPPORTED
+    static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
+    using ScaleType = AscendC::Std::conditional_t<IS_HIF4, AscendC::hif4_scale, AscendC::fp8_e8m0_t>;
+#else
+    static constexpr bool IS_HIF4 = false;
+    using ScaleType = AscendC::fp8_e8m0_t;
+#endif
+    static constexpr int64_t kC0Size =
+        (IS_HIF4 || Blaze::Gemm::IsFp4<AType>()) ? Blaze::Gemm::C0_SIZE_B4 : Blaze::Gemm::C0_SIZE_B8;
+    static constexpr int64_t kCacheLineAlignMask = (IS_HIF4 || Blaze::Gemm::IsFp4<AType>()) ? 0xff : 0x7f;
+    static constexpr int32_t kScaleC0 = IS_HIF4 ? 1 : 2;
     static constexpr uint32_t DIMS_NUM = 2UL;
 
     // ---- Layout factories ----
     using MakeLayoutA = asc::te::frame_layout_format<LayoutA, AscendC::Std::Int<kC0Size>>;
     using MakeLayoutScaleA = asc::te::frame_layout_format<asc::te::scalea_nd_layout_ptn, AscendC::Std::Int<kScaleC0>>;
     using MakeLayoutB = asc::te::frame_layout_format<LayoutB, AscendC::Std::Int<kC0Size>>;
-    using MakeLayoutScaleB = asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<kScaleC0>>;
+    using MakeLayoutScaleB = AscendC::Std::conditional_t<
+        TransB, asc::te::frame_layout_format<asc::te::scaleb_dn_layout_ptn, AscendC::Std::Int<kScaleC0>>,
+        asc::te::frame_layout_format<asc::te::scaleb_nd_layout_ptn, AscendC::Std::Int<kScaleC0>>>;
     using MakeLayoutC = asc::te::frame_layout_format<LayoutC, AscendC::Std::Int<asc::te::c0_element<CType>>>;
 
     // ---- Fragment MMAD types ----
@@ -96,7 +127,7 @@ public:
     // ---- FragmentTensor types ----
     using FragTensorA = Apace::Basic::FragmentTensor<DIMS_NUM, Apace::Basic::MAX_FRAGMENT_COUNT, MakeLayoutA, AType>;
     using FragScaleA =
-        Apace::Basic::FragmentTensor<DIMS_NUM, Apace::Basic::MAX_FRAGMENT_COUNT, MakeLayoutScaleA, AscendC::fp8_e8m0_t>;
+        Apace::Basic::FragmentTensor<DIMS_NUM, Apace::Basic::MAX_FRAGMENT_COUNT, MakeLayoutScaleA, ScaleType>;
     using FragTensorC = Apace::Basic::FragmentTensor<DIMS_NUM, Apace::Basic::MAX_FRAGMENT_COUNT, MakeLayoutC, CType>;
 
     /**
@@ -208,9 +239,9 @@ private:
 
     // ---- GM addresses ----
     __gm__ AType* aGmAddr_{nullptr};
-    __gm__ AscendC::fp8_e8m0_t* scaleAGmAddr_{nullptr};
+    __gm__ ScaleType* scaleAGmAddr_{nullptr};
     __gm__ BType* bGmAddr_{nullptr};
-    __gm__ AscendC::fp8_e8m0_t* scaleBGmAddr_{nullptr};
+    __gm__ ScaleType* scaleBGmAddr_{nullptr};
     __gm__ CType* cGmAddr_{nullptr};
     __gm__ float* biasGmAddr_{nullptr};
 
@@ -257,8 +288,9 @@ private:
     uint64_t tileMCStride_{};
 };
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::Init(
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse, TransB>::Init(
     const Params& params)
 {
     if ASCEND_IS_AIV {
@@ -267,39 +299,62 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     aGmAddr_ = reinterpret_cast<__gm__ AType*>(params.aGM);
     bGmAddr_ = reinterpret_cast<__gm__ BType*>(params.bGM);
     cGmAddr_ = reinterpret_cast<__gm__ CType*>(params.cGM);
-    scaleAGmAddr_ = reinterpret_cast<__gm__ AscendC::fp8_e8m0_t*>(params.aScaleGM);
-    scaleBGmAddr_ = reinterpret_cast<__gm__ AscendC::fp8_e8m0_t*>(params.bScaleGM);
+    scaleAGmAddr_ = reinterpret_cast<__gm__ ScaleType*>(params.aScaleGM);
+    scaleBGmAddr_ = reinterpret_cast<__gm__ ScaleType*>(params.bScaleGM);
     biasGmAddr_ = reinterpret_cast<__gm__ float*>(params.biasGM);
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
 template <typename TensorB, typename TensorScaleB>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::SetL2Cache(
-    const ProblemShape& problemShape, int64_t baseM, int64_t baseN, TensorB& gmB, TensorScaleB& gmScaleB)
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse,
+                                             TransB>::SetL2Cache(const ProblemShape& problemShape, int64_t baseM,
+                                                                 int64_t baseN, TensorB& gmB, TensorScaleB& gmScaleB)
 {
     const bool fullMBlock = (baseM >= asc::te::get<Blaze::Gemm::MNK_M>(problemShape));
 
-    // B (DN layout): K 轴为 leading dim，对齐 128B 时关闭 L2 cache 以 streaming
+    // B L2 hint: 对齐 128B 时关闭 L2 cache 以 streaming
     if constexpr (weightNz) {
         gmB.set_l2_cache_hint(fullMBlock ? asc::te::cache_mode::disable : asc::te::cache_mode::normal);
     } else {
-        // DN: transB → fast dim = K
-        const bool bAlignForL2Stream = (asc::te::get<Blaze::Gemm::MNK_K>(problemShape) & kCacheLineAlignMask) == 0;
-        gmB.set_l2_cache_hint((fullMBlock && bAlignForL2Stream) ? asc::te::cache_mode::disable :
-                                                                  asc::te::cache_mode::normal);
+        if constexpr (transB) {
+            // DN: fast dim = K
+            const bool bAlignForL2Stream = (asc::te::get<Blaze::Gemm::MNK_K>(problemShape) & kCacheLineAlignMask) == 0;
+            gmB.set_l2_cache_hint((fullMBlock && bAlignForL2Stream) ? asc::te::cache_mode::disable :
+                                                                      asc::te::cache_mode::normal);
+        } else {
+            // ND: fast dim = N
+            const bool bAlignForL2Stream =
+                (asc::te::get<Blaze::Gemm::MNK_N>(problemShape) & kCacheLineAlignMask) == 0 &&
+                (baseN & kCacheLineAlignMask) == 0;
+            gmB.set_l2_cache_hint((fullMBlock && bAlignForL2Stream) ? asc::te::cache_mode::disable :
+                                                                      asc::te::cache_mode::normal);
+        }
     }
 
-    // ScaleB (DN layout): N * scaleC0 bytes 对齐
-    const int64_t scaleNStrideBytes = asc::te::get<Blaze::Gemm::MNK_N>(problemShape) * kScaleC0;
-    const int64_t scaleBaseNStrideBytes = baseN * kScaleC0;
-    const bool scaleAlignForL2Stream =
-        (scaleNStrideBytes & kCacheLineAlignMask) == 0 && (scaleBaseNStrideBytes & kCacheLineAlignMask) == 0;
-    gmScaleB.set_l2_cache_hint((fullMBlock && scaleAlignForL2Stream) ? asc::te::cache_mode::disable :
-                                                                       asc::te::cache_mode::normal);
+    // ScaleB L2 hint
+    if constexpr (transB) {
+        // ScaleBDN: 连续段为 scaleK 方向
+        const int64_t scaleKRowBytes = Blaze::Gemm::CeilDiv(asc::te::get<Blaze::Gemm::MNK_K>(problemShape),
+                                                            static_cast<int64_t>(Blaze::Gemm::MXFP_DIVISOR_SIZE)) *
+                                       kScaleC0 * sizeof(ScaleType);
+        const bool scaleAlignForL2Stream = (scaleKRowBytes & kCacheLineAlignMask) == 0;
+        gmScaleB.set_l2_cache_hint((fullMBlock && scaleAlignForL2Stream) ? asc::te::cache_mode::disable :
+                                                                           asc::te::cache_mode::normal);
+    } else {
+        // ScaleBND: 连续段为 N 方向
+        const int64_t scaleNStrideBytes = asc::te::get<Blaze::Gemm::MNK_N>(problemShape) * kScaleC0 * sizeof(ScaleType);
+        const int64_t scaleBaseNStrideBytes = baseN * kScaleC0 * sizeof(ScaleType);
+        const bool scaleAlignForL2Stream =
+            (scaleNStrideBytes & kCacheLineAlignMask) == 0 && (scaleBaseNStrideBytes & kCacheLineAlignMask) == 0;
+        gmScaleB.set_l2_cache_hint((fullMBlock && scaleAlignForL2Stream) ? asc::te::cache_mode::disable :
+                                                                           asc::te::cache_mode::normal);
+    }
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::Run(
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse, TransB>::Run(
     const Params& params, Mc2Kernel::OpStateDump& opStateDump)
 {
     Init(params);
@@ -344,10 +399,12 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     Process(params, problemShape, sch, mmadFrag, opStateDump);
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::Process(
-    const Params& params, const ProblemShape& problemShape, BlockScheduler& sch, BlockMmadFragC& mmadFrag,
-    Mc2Kernel::OpStateDump& opStateDump)
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse,
+                                             TransB>::Process(const Params& params, const ProblemShape& problemShape,
+                                                              BlockScheduler& sch, BlockMmadFragC& mmadFrag,
+                                                              Mc2Kernel::OpStateDump& opStateDump)
 {
     const auto& mmT = *params.mmTile;
     const auto& fp = params.fragParams;
@@ -467,7 +524,7 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
                                              reinterpret_cast<__gm__ char*>(params.winDataBase) + dataSlotOffset)),
                                          MakeLayoutA{}(mainRoundRows, Ki));
                 auto gmScaleA = asc::te::make_tensor(
-                    asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ AscendC::fp8_e8m0_t*>(
+                    asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ ScaleType*>(
                         reinterpret_cast<__gm__ char*>(params.winScaleBase) + scaleSlotOffset)),
                     MakeLayoutScaleA{}(mainRoundRows, scaleKLen));
                 auto blockA = gmA.slice(asc::te::make_coord(ctx.regionMPos, 0L), asc::te::make_shape(curMtile, Ki));
@@ -521,13 +578,12 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     }
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
 __aicore__ inline Apace::Basic::FragmentParam<
-    AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::DIMS_NUM>
-AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::MakeFragParam(uint64_t fragSize,
-                                                                                                uint64_t realFragSize,
-                                                                                                uint32_t fragCnt,
-                                                                                                uint64_t shape1) const
+    AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse, TransB>::DIMS_NUM>
+AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse, TransB>::MakeFragParam(
+    uint64_t fragSize, uint64_t realFragSize, uint32_t fragCnt, uint64_t shape1) const
 {
     Apace::Basic::FragmentParam<DIMS_NUM> param{};
     param.assembleAxis = 0;
@@ -539,9 +595,10 @@ AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>
     return param;
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager,
-                                             enableBufferReuse>::BuildFragmentTensors(const Params& params)
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse,
+                                             TransB>::BuildFragmentTensors(const Params& params)
 {
     const auto& fp = params.fragParams;
 
@@ -559,16 +616,17 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     headAddrListC_[0] = cFragAddrs_[fp.rankId];
     headFragA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutA, AType>(
         MakeFragParam(fp.headRows, fp.headRows, 1, fp.k), headAddrListA_);
-    headFragScaleA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutScaleA, AscendC::fp8_e8m0_t>(
+    headFragScaleA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutScaleA, ScaleType>(
         MakeFragParam(fp.headRows, fp.headRows, 1, fp.scaleKLen), headAddrListScale_);
     headFragC_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutC, CType>(
         MakeFragParam(fp.headRows, fp.headRows, 1, fp.n), headAddrListC_);
     // main / tail 的 fragment tensor 延迟到首次使用时构建，构建开销被 comm wait 掩盖。
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager,
-                                             enableBufferReuse>::EnsureWinRankBasesReady(const Params& params)
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse,
+                                             TransB>::EnsureWinRankBasesReady(const Params& params)
 {
     if (winBasesReady_) {
         return;
@@ -581,10 +639,10 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     winBasesReady_ = true;
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager,
-                                             enableBufferReuse>::BuildMainFragment(const Params& params,
-                                                                                   uint32_t roundIdx)
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse,
+                                             TransB>::BuildMainFragment(const Params& params, uint32_t roundIdx)
 {
     if constexpr (!enableBufferReuse) {
         EnsureWinRankBasesReady(params);
@@ -612,7 +670,7 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     if constexpr (!enableBufferReuse) {
         curMainA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutA, AType>(
             MakeFragParam(fp.tileM, fp.tileM, fp.rankSize - 1, fp.k), mainAddrListA_);
-        curMainScaleA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutScaleA, AscendC::fp8_e8m0_t>(
+        curMainScaleA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutScaleA, ScaleType>(
             MakeFragParam(fp.tileM, fp.tileM, fp.rankSize - 1, fp.scaleKLen), mainAddrListScale_);
     }
     curMainC_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutC, CType>(
@@ -620,9 +678,10 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     curMainRoundIdx_ = roundIdx;
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager,
-                                             enableBufferReuse>::BuildTailFragment(const Params& params)
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse,
+                                             TransB>::BuildTailFragment(const Params& params)
 {
     if constexpr (!enableBufferReuse) {
         EnsureWinRankBasesReady(params);
@@ -662,16 +721,16 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     }
     tailFragA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutA, AType>(
         MakeFragParam(fp.paddedTailM, fp.tailM, fp.rankSize, fp.k), tailAddrListA_);
-    tailFragScaleA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutScaleA, AscendC::fp8_e8m0_t>(
+    tailFragScaleA_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutScaleA, ScaleType>(
         MakeFragParam(fp.paddedTailM, fp.tailM, fp.rankSize, fp.scaleKLen), tailAddrListScale_);
     tailFragC_ = Apace::Basic::MakeFragmentTensor<DIMS_NUM, MAX_FRAG, MakeLayoutC, CType>(
         MakeFragParam(fp.paddedTailM, fp.tailM, fp.rankSize, fp.n), tailAddrListC_);
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager,
-                                             enableBufferReuse>::UpdateMainRoundAddrs(const Params& params,
-                                                                                      uint32_t roundIdx)
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse,
+                                             TransB>::UpdateMainRoundAddrs(const Params& params, uint32_t roundIdx)
 {
     const auto& fp = params.fragParams;
     uint32_t delta = roundIdx - curMainRoundIdx_;
@@ -701,11 +760,13 @@ __aicore__ inline void AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncMana
     curMainRoundIdx_ = roundIdx;
 }
 
-template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse>
-__aicore__ inline typename AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::TileCtx
-AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse>::ResolveTileCtx(
-    int64_t mPos, int64_t headMainRows, int64_t mainRoundRows, int64_t mainSectionRows, uint32_t rankSize,
-    uint32_t commTurn) const
+template <typename AType, typename BType, typename CType, typename BufferSyncManager, bool enableBufferReuse,
+          bool TransB>
+__aicore__ inline
+    typename AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse, TransB>::TileCtx
+    AllGatherQbmmMxKernel<AType, BType, CType, BufferSyncManager, enableBufferReuse, TransB>::ResolveTileCtx(
+        int64_t mPos, int64_t headMainRows, int64_t mainRoundRows, int64_t mainSectionRows, uint32_t rankSize,
+        uint32_t commTurn) const
 {
     TileCtx ctx{};
     if (mPos < headMainRows) {

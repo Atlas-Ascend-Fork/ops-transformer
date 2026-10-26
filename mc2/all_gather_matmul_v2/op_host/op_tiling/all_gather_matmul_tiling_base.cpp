@@ -27,6 +27,7 @@
 #include "all_gather_matmul_tiling_base_v2.h"
 #include "../../op_kernel/all_gather_matmul_v2_apt_tiling_key.h"
 #include "graph/utils/type_utils.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "mc2_comm_utils.h"
 #include "mc2_hcom_topo_info.h"
 #include "mc2_log.h"
@@ -49,7 +50,8 @@ static constexpr uint64_t SINGLE_BYTE_BIT_LENGTH = 8;
 static const std::initializer_list<ge::DataType> FP8_DTYPE_SUPPORT_LIST = {
     ge::DataType::DT_FLOAT8_E4M3FN, ge::DataType::DT_FLOAT8_E5M2, ge::DataType::DT_HIFLOAT8};
 
-static const std::initializer_list<ge::DataType> FP4_DTYPE_SUPPORT_LIST = {ge::DataType::DT_FLOAT4_E2M1};
+static const std::initializer_list<ge::DataType> FP4_DTYPE_SUPPORT_LIST = {ge::DataType::DT_FLOAT4_E2M1,
+                                                                           Ops::Transformer::DT_HIFLOAT4};
 
 static bool CheckSupportDtype(const ge::DataType x1DataType, const std::initializer_list<ge::DataType>& supportTypes)
 {
@@ -339,7 +341,10 @@ void AllGatherMatmulTilingBase::SetTilingArgsDataType()
         biasType = context_->GetOptionalInputDesc(BIAS)->GetDataType();
     }
 
-    args_.inputDtypeSize = mc2tiling::GetDataTypeSize(opName_, aType);
+    // HiF4 用 E4M3FN 代理字节宽，native APACE tiler 单独预算打包 B4 数据与 32-bit scale
+    const auto modelAType = aType == Ops::Transformer::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : aType;
+    const auto modelBType = bType == Ops::Transformer::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : bType;
+    args_.inputDtypeSize = mc2tiling::GetDataTypeSize(opName_, modelAType);
     args_.outputDtypeSize = mc2tiling::GetDataTypeSize(opName_, cType);
 
     args_.isBias = isBias;
@@ -347,8 +352,8 @@ void AllGatherMatmulTilingBase::SetTilingArgsDataType()
     args_.geBType = bType;
     args_.geCType = cType;
     args_.geBiasType = biasType;
-    args_.aType = mc2tiling::ConvertGeTypeToMmType(opName_, aType);
-    args_.bType = mc2tiling::ConvertGeTypeToMmType(opName_, bType);
+    args_.aType = mc2tiling::ConvertGeTypeToMmType(opName_, modelAType);
+    args_.bType = mc2tiling::ConvertGeTypeToMmType(opName_, modelBType);
     args_.cType = mc2tiling::ConvertGeTypeToMmType(opName_, cType);
     args_.biasType = mc2tiling::ConvertGeTypeToMmType(opName_, biasType); // 因为bias可能不存在，先采用biasType规避
     inputIsBf16Fp16_ = ((aType == ge::DT_BF16) || (aType == ge::DT_FLOAT16)) ? true : false;
@@ -460,7 +465,7 @@ void AllGatherMatmulTilingBase::DoAllGatherTiling(Mc2Tiling::RCSTiling& rcsCfg, 
 
     SetMC2AllGatherDataInfo(rcsCfg, mmTiling, tailTiling, debugMode_);
 
-    if (args_.geAType == ge::DataType::DT_FLOAT4_E2M1) {
+    if (args_.geAType == ge::DataType::DT_FLOAT4_E2M1 || args_.geAType == Ops::Transformer::DT_HIFLOAT4) {
         dataType = static_cast<uint32_t>(mc2tiling::HcclDataType::HCCL_DATA_TYPE_UINT8);
     } else {
         dataType = (static_cast<uint32_t>(mc2tiling::ConvertGeTypeToHcclType(opName_, args_.geAType))); // hccl数据类型
@@ -717,8 +722,8 @@ uint64_t AllGatherMatmulTilingBase::GetStorageA(Mc2Tiling::RCSTiling& rcsCfg)
     uint64_t nd2nzLen = 0;
     uint64_t storageA = 0;
 
-    // DAV_3510 全场景未使用nd2nzLen这个空间，无需申请
-    if (npuArch_ != Ops::Base::DAV_3510) {
+    // DAV_3510/DAV_9201 全场景未使用nd2nzLen这个空间，无需申请
+    if (npuArch_ != Ops::Base::DAV_3510 && npuArch_ != Ops::Base::DAV_9201) {
         // step1: ND2NZ
         if (gatherIndex == 0U) { // 转置B
             // 计算ND2NZ需使用空间方法保持与MMV3 tiling计算逻辑一致

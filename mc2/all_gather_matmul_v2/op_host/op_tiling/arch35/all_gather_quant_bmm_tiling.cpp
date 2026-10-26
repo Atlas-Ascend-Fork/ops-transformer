@@ -18,6 +18,7 @@
 #include "all_gather_fit_balance_tiling.h"
 #include "all_gather_hccl_utils.h"
 #include "common/utils/op_mc2.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "mc2_comm_utils.h"
 #include "mc2_log.h"
 #include "../../../op_kernel/all_gather_matmul_v2_apt_tiling_key.h"
@@ -38,6 +39,8 @@ constexpr uint64_t MX_SCALE_OFFSET = 63;
 constexpr uint64_t MX_SCALE_ALIGN = 64;
 constexpr uint64_t EVEN_ALIGN = 2;
 constexpr uint64_t MX_SCALE_K_VALUE_ALIGN = 32;
+// HIF4 组大小复用 apace_constant.h 权威定义（本 TU 经 quant_matmul_tiling.h 可见，64UL）
+constexpr uint64_t HIF4_SCALE_LAST_DIM = 1;
 constexpr uint64_t MX_SCALE_BLOCK_M = 1;
 constexpr uint64_t MX_SCALE_BLOCK_K = 32;
 constexpr uint64_t MX_SCALE_BLOCK_N = 1;
@@ -63,6 +66,10 @@ constexpr int32_t IDX_B_LOW = 6;
 
 constexpr uint32_t X1_INDEX = 0;
 constexpr uint32_t X2_INDEX = 1;
+constexpr uint64_t APACE_KERNEL_ALIGN_M =
+    256; // 与 all_gather_matmul_tiling_v2.cpp 同名常量一致（同一 APACE kernel 的 tileM 对齐契约）
+constexpr uint32_t APACE_TAIL_ALIGN = 16;
+constexpr uint32_t APACE_HCOMM_MAX_RANK_SIZE = 16; // 对齐 qbmm kernel MAX_RANK_SIZE 地址表容量，扩容前显式拒绝更大卡数
 } // namespace
 
 static constexpr int64_t CMP_MAX_LEN = 7;
@@ -89,6 +96,11 @@ bool AllGatherQuantBmmTiling::IsCapable()
     if ((args_.geAType == ge::DataType::DT_FLOAT4_E2M1) && (args_.geBType == ge::DataType::DT_FLOAT4_E2M1)) {
         OP_LOGI(opName_, "Start with allgather quantbmm mxfp4 tiling.");
         isFp4_ = true;
+        return true;
+    }
+    if ((args_.geAType == Ops::Transformer::DT_HIFLOAT4) && (args_.geBType == Ops::Transformer::DT_HIFLOAT4)) {
+        OP_LOGI(opName_, "Start with allgather quantbmm hif4 tiling, apace Hcomm path.");
+        isHiF4_ = true;
         return true;
     }
     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "x1/x2 dtype", Ops::Base::ToString(args_.geAType).c_str(),
@@ -143,6 +155,15 @@ ge::graphStatus AllGatherQuantBmmTiling::CheckGroupSize()
                                                       .c_str(),
                                                   "The value of groupSize must be [128, 128, 128] in perblock scene"),
             return ge::GRAPH_FAILED);
+    } else if (isHiF4_) {
+        groupSizeM = groupSizeM == 0 ? 1 : groupSizeM;
+        groupSizeN = groupSizeN == 0 ? 1 : groupSizeN;
+        groupSizeK = groupSizeK == 0 ? HIF4_GROUP_SIZE : groupSizeK;
+        OP_TILING_CHECK(groupSizeM != 1 || groupSizeN != 1 || groupSizeK != HIF4_GROUP_SIZE,
+                        CUBE_INNER_ERR_REPORT(opName_, "HiFP4 groupSize must be [1,1,64], got [%lu,%lu,%lu]",
+                                              groupSizeM, groupSizeN, groupSizeK),
+                        return ge::GRAPH_FAILED);
+        return ge::GRAPH_SUCCESS;
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -167,6 +188,54 @@ ge::graphStatus AllGatherQuantBmmTiling::CheckMXFP4Input()
                         "The dtypes of scale1 must be float8_e8m0 when x1/x2 is float4_e2m1"),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus AllGatherQuantBmmTiling::HiF4SceneParamCheck(const gert::StorageShape* x1ScaleShape,
+                                                             const gert::StorageShape* x2ScaleShape)
+{
+    OP_TILING_CHECK(npuArch_ != Ops::Base::DAV_9201,
+                    OP_LOGE(opName_, "HiFP4 requires A6 APACE, current arch does not support HiFP4"),
+                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(args_.isATrans,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "isTrans", std::to_string(args_.isATrans).c_str(),
+                                                          "HiFP4 requires non-transposed x1"),
+                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(args_.kValue % EVEN_ALIGN != 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "kValue", std::to_string(args_.kValue).c_str(),
+                                                          "HiFP4 requires K to be even"),
+                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(!args_.isBTrans && (args_.nValue % EVEN_ALIGN != 0),
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "nValue", std::to_string(args_.nValue).c_str(),
+                                                          "HiFP4 requires N to be even when x2 is non-transposed"),
+                    return ge::GRAPH_FAILED);
+    const auto& aScale = x1ScaleShape->GetStorageShape();
+    const auto& bScale = x2ScaleShape->GetStorageShape();
+    const uint64_t scaleK = Ops::Base::CeilDiv(args_.kValue, HIF4_GROUP_SIZE);
+    OP_TILING_CHECK(aScale.GetDimNum() != DIM_NUM_IS_THREE || bScale.GetDimNum() != DIM_NUM_IS_THREE,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        opName_, "x1Scale/x2Scale",
+                        (std::to_string(aScale.GetDimNum()) + "/" + std::to_string(bScale.GetDimNum())).c_str(),
+                        "HiFP4 x1Scale and x2Scale must both be 3-dimensional"),
+                    return ge::GRAPH_FAILED);
+    const uint64_t bScaleDim0 = args_.isBTrans ? args_.nValue : scaleK;
+    const uint64_t bScaleDim1 = args_.isBTrans ? scaleK : args_.nValue;
+    OP_TILING_CHECK(aScale.GetDim(0) != static_cast<int64_t>(args_.orgMValue) ||
+                        aScale.GetDim(1) != static_cast<int64_t>(scaleK) || aScale.GetDim(2) != HIF4_SCALE_LAST_DIM ||
+                        bScale.GetDim(0) != static_cast<int64_t>(bScaleDim0) ||
+                        bScale.GetDim(1) != static_cast<int64_t>(bScaleDim1) || bScale.GetDim(2) != HIF4_SCALE_LAST_DIM,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        opName_, "x1Scale/x2Scale", "mismatched scale shape",
+                        (std::string("HiFP4 scale shapes must be x1Scale=[") + std::to_string(args_.orgMValue) + "," +
+                         std::to_string(scaleK) + ",1], x2Scale=[" + std::to_string(bScaleDim0) + "," +
+                         std::to_string(bScaleDim1) + ",1]")
+                            .c_str()),
+                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(args_.isBias,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "bias", std::to_string(args_.isBias).c_str(),
+                                                          "HiFP4 does not support bias"),
+                    return ge::GRAPH_FAILED);
+    scale1kSpaceSize_ = args_.rankDim * args_.orgMValue * scaleK * sizeof(uint32_t);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -366,8 +435,17 @@ ge::graphStatus AllGatherQuantBmmTiling::SetQuantScene()
         return ge::GRAPH_SUCCESS;
     } else if ((scaleInv1Shape->GetStorageShape().GetDimNum() == DIM_NUM_IS_THREE) &&
                (scaleInv2Shape->GetStorageShape().GetDimNum() == DIM_NUM_IS_THREE) &&
+               (scaleInv1Desc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE) &&
+               (scaleInv2Desc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE)) {
+        quantMmMode_ = mc2tiling::Mc2QuantMode::PERTENSOR_MODE;
+        isMxScene_ = true;
+        isHiF4_ = true;
+        return ge::GRAPH_SUCCESS;
+    } else if ((scaleInv1Shape->GetStorageShape().GetDimNum() == DIM_NUM_IS_THREE) &&
+               (scaleInv2Shape->GetStorageShape().GetDimNum() == DIM_NUM_IS_THREE) &&
                (scaleInv1Desc->GetDataType() == ge::DataType::DT_FLOAT8_E8M0)) {
         quantMmMode_ = mc2tiling::Mc2QuantMode::PERTENSOR_MODE;
+        isMxScene_ = true;
         return ge::GRAPH_SUCCESS;
     } else if ((scaleInv1Shape->GetStorageShape().GetDimNum() == DIM_NUM_IS_TWO) &&
                (scaleInv2Shape->GetStorageShape().GetDimNum() == DIM_NUM_IS_TWO) &&
@@ -397,6 +475,12 @@ ge::graphStatus AllGatherQuantBmmTiling::CheckScaleInvShape()
         OP_LOGI(opName_, "Check pertensor scale input!");
         OP_TILING_CHECK(CheckPerTensorScaleInput() == ge::GRAPH_FAILED,
                         OP_LOGE(opName_, "Check pertensor scale input failed."), return ge::GRAPH_FAILED);
+    } else if ((quantMmMode_ == mc2tiling::Mc2QuantMode::PERTENSOR_MODE) &&
+               (scaleInv1Desc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE)) {
+        OP_LOGI(opName_, "Check hif4 scale input!");
+        OP_TILING_CHECK(HiF4SceneParamCheck(context_->GetOptionalInputShape(SCALE_INV1),
+                                            context_->GetOptionalInputShape(SCALE_INV2)) == ge::GRAPH_FAILED,
+                        CUBE_INNER_ERR_REPORT(opName_, "Check hif4 scale input failed"), return ge::GRAPH_FAILED);
     } else if ((quantMmMode_ == mc2tiling::Mc2QuantMode::PERTENSOR_MODE) &&
                (scaleInv1Desc->GetDataType() == ge::DataType::DT_FLOAT8_E8M0)) {
         OP_LOGI(opName_, "Check mxfp scale input!");
@@ -444,14 +528,30 @@ ge::graphStatus AllGatherQuantBmmTiling::CheckInputValid()
 
     OP_TILING_CHECK(
         (((scaleInv1Desc->GetDataType() != ge::DataType::DT_FLOAT) &&
-          (scaleInv1Desc->GetDataType() != ge::DataType::DT_FLOAT8_E8M0)) ||
+          (scaleInv1Desc->GetDataType() != ge::DataType::DT_FLOAT8_E8M0) &&
+          (scaleInv1Desc->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE)) ||
          ((scaleInv2Desc->GetDataType() != ge::DataType::DT_FLOAT) &&
-          (scaleInv2Desc->GetDataType() != ge::DataType::DT_FLOAT8_E8M0))),
+          (scaleInv2Desc->GetDataType() != ge::DataType::DT_FLOAT8_E8M0) &&
+          (scaleInv2Desc->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE))),
         OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "scale1 and scale2",
                                                (Ops::Base::ToString(scaleInv1Desc->GetDataType()) + " and " +
                                                 Ops::Base::ToString(scaleInv2Desc->GetDataType()))
                                                    .c_str(),
-                                               "The dtypes of scale1 and scale2 must be float32 or float8_e8m0"),
+                                               "The dtypes of scale1 and scale2 must be float32, float8_e8m0 or "
+                                               "hifloat4_scale"),
+        return ge::GRAPH_FAILED);
+
+    const bool hasHiF4Input =
+        args_.geAType == Ops::Transformer::DT_HIFLOAT4 || args_.geBType == Ops::Transformer::DT_HIFLOAT4;
+    const bool hasHiF4Scale = scaleInv1Desc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE ||
+                              scaleInv2Desc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE;
+    OP_TILING_CHECK(
+        hasHiF4Input != hasHiF4Scale,
+        OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "scale1 and scale2",
+                                               (Ops::Base::ToString(scaleInv1Desc->GetDataType()) + " and " +
+                                                Ops::Base::ToString(scaleInv2Desc->GetDataType()))
+                                                   .c_str(),
+                                               "DT_HIFLOAT4 inputs must be paired with DT_HIFLOAT4_SCALE scales"),
         return ge::GRAPH_FAILED);
 
     auto scaleInv1Shape = context_->GetOptionalInputShape(SCALE_INV1);
@@ -510,7 +610,7 @@ ge::graphStatus AllGatherQuantBmmTiling::SetMc2Hcomm()
     OP_LOGD(opName_, "Tiling SetMc2Hcom commMode_: %s", commMode_);
     OP_LOGD(opName_, "Tiling SetMc2Hcom commEngine: %d", commEngine);
     uint32_t hcclDataType;
-    if (isFp4_) {
+    if (isFp4_ || isHiF4_) {
         hcclDataType = static_cast<uint32_t>(mc2tiling::HcclDataType::HCCL_DATA_TYPE_UINT8);
     } else {
         hcclDataType = static_cast<uint32_t>(mc2tiling::ConvertGeTypeToHcclType(opName_, args_.geAType));
@@ -541,15 +641,176 @@ ge::graphStatus AllGatherQuantBmmTiling::DoOpTiling()
     if (quantMmMode_ == mc2tiling::Mc2QuantMode::PERBLOCK_MODE) {
         PostDoSplitMTiling(MutableRCSTilingDataA5(), GetQuantScene());
     }
+    DoAllGatherTiling(MutableRCSTilingDataA5(), MutableTCubeTileTilingData(), MutableTCubeTailTilingData(),
+                      allGatherMatmulTilingDataFp8_->debugMode, allGatherMatmulTilingDataFp8_->dataType);
     // 通信配置放在切分之后：单轮通信量依赖切分结果 tileMValue_（对齐 alltoall 先切分后配置的时序）
     OP_TILING_CHECK(SetMc2Hcomm() != ge::GRAPH_SUCCESS, OP_LOGE(opName_, "Tiling SetHcommCfg failed."),
                     return ge::GRAPH_FAILED);
-    if (args_.nValue != 0) {
-        MC2_CHECK_LOG_RET(opName_, DoAdaptSlidWindowTiling());
+    if (isMxScene_) {
+        // qbmm kernel 地址表容量 MAX_RANK_SIZE=16，32/64 卡在 kernel 扩容前显式拒绝（防地址表越界写 GM）
+        OP_TILING_CHECK(args_.rankDim > APACE_HCOMM_MAX_RANK_SIZE,
+                        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "rankDim", std::to_string(args_.rankDim).c_str(),
+                                                              "APACE hcomm path supports at most 16 ranks"),
+                        return ge::GRAPH_FAILED);
+        // 空 M/N 场景跳过 APACE tiler（SWAT 对 0 维会抛异常逃逸），kernel 零 tile 自然退化为仅通信
+        if (args_.nValue != 0 && args_.mValue != 0) {
+            MC2_CHECK_LOG_RET(opName_, DoApaceMatmulTiling());
+        }
+    } else {
+        if (args_.nValue != 0) {
+            MC2_CHECK_LOG_RET(opName_, DoAdaptSlidWindowTiling());
+        }
     }
-    DoAllGatherTiling(MutableRCSTilingDataA5(), MutableTCubeTileTilingData(), MutableTCubeTailTilingData(),
-                      allGatherMatmulTilingDataFp8_->debugMode, allGatherMatmulTilingDataFp8_->dataType);
     return ge::GRAPH_SUCCESS;
+}
+
+void AllGatherQuantBmmTiling::SetHcommTilingInfo()
+{
+    auto& param = MutableRCSTilingDataA5();
+    hcommTilingData_.commTile.splitAxisTileSize = tileMValue_;
+    hcommTilingData_.commTile.splitAxisTileCnt = param.tileCnt;
+    hcommTilingData_.commTile.splitAxisTailSize = param.tailM;
+    hcommTilingData_.commTile.splitAxisTailCnt = param.tailCnt;
+    hcommTilingData_.commTile.nonSplitAxisSize = args_.kValue;
+}
+
+ge::graphStatus AllGatherQuantBmmTiling::DoApaceMatmulTiling()
+{
+    auto& param = MutableRCSTilingDataA5();
+
+    CutResult cutRes{};
+    cutRes.longTileLen = (tileMValue_ > 0) ? tileMValue_ : args_.mValue;
+    cutRes.numLongTile = param.tileCnt;
+    cutRes.shortTileLen = param.tailM;
+    cutRes.numShortTile = param.tailCnt;
+    AlignApaceCutResForKernel(cutRes, args_.mValue);
+
+    param.tileCnt = static_cast<uint32_t>(cutRes.numLongTile);
+    tileMValue_ = cutRes.longTileLen;
+    param.tailM = static_cast<uint32_t>(cutRes.shortTileLen);
+    param.tailCnt = static_cast<uint32_t>(cutRes.numShortTile);
+
+    uint32_t tileM = static_cast<uint32_t>(tileMValue_);
+    uint32_t paddedTailM =
+        (param.tailM > 0) ?
+            static_cast<uint32_t>((param.tailM + APACE_TAIL_ALIGN - 1) / APACE_TAIL_ALIGN * APACE_TAIL_ALIGN) :
+            0U;
+    const uint64_t totalLogicalM =
+        static_cast<uint64_t>(args_.rankDim) *
+        (static_cast<uint64_t>(param.tileCnt) * tileM + static_cast<uint64_t>(param.tailCnt) * paddedTailM);
+
+    // bias 与 A/B/scale 同驻 L1，tiling 预算须同步计入；hasBias 与 kernel 侧 isBias 同源，dtype 为 float
+    bool hasBias = args_.isBias;
+
+    if (isFp4_) {
+        QuantMatmulTilingSwat<mm::DataType::DT_FLOAT4_E2M1, mm::DataType::DT_FLOAT4_E2M1, mm::BiasDataType::DT_FLOAT>
+            tilingEngine;
+        tilingEngine.SetPlatformInfoPtr(context_->GetPlatformInfo());
+        tilingEngine.SetOptimizeEnable(false);
+        tilingEngine.SetMTailAlignEnable(true);
+        tilingEngine.SetAdjustBasicBlockEnable(false);
+        tilingEngine.SetBiasInfo(hasBias);
+        tilingEngine.GetTilingData(totalLogicalM, args_.nValue, args_.kValue, false, args_.isBTrans,
+                                   hcommTilingData_.mmTile);
+    } else if (isHiF4_) {
+        QuantMatmulTilingSwat<mm::DataType::DT_FLOAT4_E2M1, mm::DataType::DT_FLOAT4_E2M1, mm::BiasDataType::DT_FLOAT>
+            tilingEngine;
+        tilingEngine.SetPlatformInfoPtr(context_->GetPlatformInfo());
+        tilingEngine.SetOptimizeEnable(false);
+        tilingEngine.SetMTailAlignEnable(true);
+        tilingEngine.SetAdjustBasicBlockEnable(false);
+        // HiFP4 每 64 元素 4 字节 scale，让 tiler 按真实 scale 预算给出 stepK/scaleKL1 初始提案
+        tilingEngine.SetHiF4Enable(true);
+        tilingEngine.GetTilingData(totalLogicalM, args_.nValue, args_.kValue, false, args_.isBTrans,
+                                   hcommTilingData_.mmTile);
+        OP_TILING_CHECK(AdjustHiF4Tiling(hcommTilingData_.mmTile) == ge::GRAPH_FAILED,
+                        OP_LOGE(opName_, "Adjust HiF4 tiling failed."), return ge::GRAPH_FAILED);
+    } else {
+        QuantMatmulTilingSwat<mm::DataType::DT_FLOAT8_E4M3FN, mm::DataType::DT_FLOAT8_E4M3FN,
+                              mm::BiasDataType::DT_FLOAT>
+            tilingEngine;
+        tilingEngine.SetPlatformInfoPtr(context_->GetPlatformInfo());
+        tilingEngine.SetOptimizeEnable(false);
+        tilingEngine.SetMTailAlignEnable(true);
+        tilingEngine.SetAdjustBasicBlockEnable(false);
+        tilingEngine.SetBiasInfo(hasBias);
+        tilingEngine.GetTilingData(totalLogicalM, args_.nValue, args_.kValue, false, args_.isBTrans,
+                                   hcommTilingData_.mmTile);
+    }
+
+    OP_LOGI(opName_,
+            "DoApaceMatmulTiling: isFp4=%d, isHiF4=%d, tileM=%u, tileCnt=%u, tailM=%u, tailCnt=%u, totalLogicalM=%lu, "
+            "n=%lu, k=%lu, isBTrans=%d, usedCoreNum=%u",
+            isFp4_, isHiF4_, tileM, param.tileCnt, param.tailM, param.tailCnt, totalLogicalM, args_.nValue,
+            args_.kValue, args_.isBTrans, hcommTilingData_.mmTile.usedCoreNum);
+    return ge::GRAPH_SUCCESS;
+}
+
+void AllGatherQuantBmmTiling::AlignApaceCutResForKernel(CutResult& cutRes, uint64_t mValue) const
+{
+    if (cutRes.longTileLen == 0 || mValue == 0) {
+        OP_LOGD(opName_, "AlignApaceCutResForKernel skip: longTileLen=%lu mValue=%lu", cutRes.longTileLen, mValue);
+        return;
+    }
+    uint64_t longTile = mc2tiling::AlignUp(cutRes.longTileLen, APACE_KERNEL_ALIGN_M);
+    if (longTile >= mValue) {
+        if (mValue >= APACE_KERNEL_ALIGN_M) {
+            // 保持 tileM 256 对齐（区域边界契约）：最大 256 对齐头块，余量走 tail（paddedTailM 16 对齐）
+            cutRes.longTileLen = mc2tiling::AlignDown(mValue, APACE_KERNEL_ALIGN_M);
+            cutRes.numLongTile = 1;
+            cutRes.shortTileLen = mValue - cutRes.longTileLen;
+            cutRes.numShortTile = (cutRes.shortTileLen > 0) ? 1 : 0;
+        } else {
+            // mValue < 256：无 256 对齐头块可用，整块走纯尾块路径（tileCnt=0，全 TAIL 区域）
+            cutRes.longTileLen = 0;
+            cutRes.numLongTile = 0;
+            cutRes.shortTileLen = mValue;
+            cutRes.numShortTile = 1;
+        }
+    } else {
+        cutRes.longTileLen = longTile;
+        cutRes.numLongTile = mValue / longTile;
+        uint64_t remainder = mValue % longTile;
+        if (remainder > 0) {
+            cutRes.shortTileLen = remainder;
+            cutRes.numShortTile = 1;
+        } else {
+            cutRes.shortTileLen = 0;
+            cutRes.numShortTile = 0;
+        }
+    }
+    cutRes.shortTileAtBack = true;
+    OP_LOGD(opName_, "AlignApaceCutResForKernel: longTile=%lu numLong=%lu shortTile=%lu numShort=%lu atBack=%d",
+            cutRes.longTileLen, cutRes.numLongTile, cutRes.shortTileLen, cutRes.numShortTile, cutRes.shortTileAtBack);
+}
+
+ge::graphStatus AllGatherQuantBmmTiling::AdjustHiF4Tiling(QuantMatmulTilingData& tiling) const
+{
+    OP_TILING_CHECK(tiling.baseM == 0 || tiling.baseN == 0 || tiling.baseK == 0 || tiling.stepK == 0 ||
+                        tiling.nBufferNum == 0 || tiling.baseK % HIF4_GROUP_SIZE != 0,
+                    OP_LOGE(opName_, "invalid HiFP4 APACE basic block or K step"), return ge::GRAPH_FAILED);
+    // Reuse MXFP4 geometry, but budget native HiF4 scales locally: 4 bytes/64 K.
+    auto platform = platform_ascendc::PlatformAscendC(context_->GetPlatformInfo());
+    uint64_t l1Size = 0;
+    platform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1Size);
+    const uint64_t bankSize = l1Size / tiling.nBufferNum;
+    const uint64_t mn = static_cast<uint64_t>(tiling.baseM) + tiling.baseN;
+    const uint64_t biasBytes = args_.isBias ? static_cast<uint64_t>(tiling.baseN) * sizeof(float) : 0;
+    const uint64_t originalScaleKL1 = tiling.scaleKL1;
+    while (tiling.stepK > 0) {
+        const uint64_t kL1 = static_cast<uint64_t>(tiling.stepK) * tiling.baseK;
+        const uint64_t dataBytes = mn * kL1 / 2;
+        const uint64_t oneScaleStepBytes = mn * (kL1 / HIF4_GROUP_SIZE) * sizeof(uint32_t);
+        if (dataBytes + oneScaleStepBytes + biasBytes <= bankSize) {
+            const uint64_t maxScaleSteps = (bankSize - dataBytes - biasBytes) / oneScaleStepBytes;
+            const uint64_t scaleSteps = std::max(uint64_t{1}, std::min(maxScaleSteps, originalScaleKL1 / kL1));
+            tiling.scaleKL1 = static_cast<uint32_t>(scaleSteps * kL1);
+            return ge::GRAPH_SUCCESS;
+        }
+        --tiling.stepK;
+    }
+    OP_LOGE(opName_, "HiFP4 APACE basic block and hierarchical scales exceed L1 capacity");
+    return ge::GRAPH_FAILED;
 }
 
 void AllGatherQuantBmmTiling::SetTilingKeyParams()
@@ -600,10 +861,10 @@ void AllGatherQuantBmmTiling::BuildWorkspaceLayout()
 ge::graphStatus AllGatherQuantBmmTiling::GetWorkspaceSize()
 {
     MC2_CHECK_LOG_RET(opName_, AllGatherMatmulTilingBase::GetWorkspaceSize());
-    // 当N=0时，Helper不执行，myWorkSpaceSize_未被设置，需要手动赋值
     // workspaceSize_包含：libApiWorkSpaceSize_ + storageA_(含gatherLen) + biasLen_
     // scale1kSpaceSize_为scale1通信所需空间
-    if (args_.nValue == 0) {
+    // MX 场景不走 DoAdaptSlidWindowTiling，myWorkSpaceSize_ 未被设置，与 N==0 路径一致用 workspaceSize_ 作基线
+    if (isMxScene_ || args_.nValue == 0) {
         myWorkSpaceSize_ = workspaceSize_ + scale1kSpaceSize_;
     } else {
         myWorkSpaceSize_ = myWorkSpaceSize_ + MutableRCSTilingDataA5().gatherLen + scale1kSpaceSize_;
@@ -622,25 +883,27 @@ ge::graphStatus AllGatherQuantBmmTiling::GetWorkspaceSize()
 
 uint64_t AllGatherQuantBmmTiling::GetTilingKey() const
 {
-    uint8_t outputType = 0;
+    uint8_t outputType = OUTPUT_TYPE_IS_FP16_BF16;
     uint32_t yDtype = static_cast<uint32_t>(*context_->GetAttrs()->GetAttrPointer<uint64_t>(YDTYPE_INDEX));
     if (yDtype == DTYPE_ENUM_FLOAT) {
         outputType = OUTPUT_TYPE_FLOAT;
     } else if ((yDtype == DTYPE_ENUM_FLOAT16) || (yDtype == DTYPE_ENUM_BF16)) {
-        outputType = static_cast<uint8_t>(0);
+        outputType = OUTPUT_TYPE_IS_FP16_BF16;
     } else {
-        outputType = static_cast<uint8_t>(1);
+        outputType = OUTPUT_TYPE_IS_OTHER;
     }
 
-    uint8_t scaleType = 0;
+    uint8_t scaleType = SCALE_TYPE_NOT_IS_MX;
 
     auto scaleInv1Desc = context_->GetOptionalInputDesc(SCALE_INV1);
     auto scaleInv2Desc = context_->GetOptionalInputDesc(SCALE_INV2);
     if ((scaleInv1Desc->GetDataType() == ge::DataType::DT_FLOAT8_E8M0) &&
         (scaleInv2Desc->GetDataType() == ge::DataType::DT_FLOAT8_E8M0)) {
-        scaleType = static_cast<uint8_t>(1);
+        scaleType = SCALE_TYPE_IS_MX;
+    } else if (isHiF4_) {
+        scaleType = SCALE_TYPE_IS_HIF4;
     } else {
-        scaleType = static_cast<uint8_t>(0);
+        scaleType = SCALE_TYPE_NOT_IS_MX;
     }
 
     uint8_t quanMmMode = static_cast<uint8_t>(quantMmMode_) - 1;
@@ -721,6 +984,34 @@ ge::graphStatus AllGatherQuantBmmTiling::PostTiling()
 #if MC2_DFX_ENABLE
     allGatherMatmulTilingDataFp8_->dumpInfo.workspaceLayout = workspaceLayout_;
 #endif
+    if (isMxScene_) {
+        // Hcomm 路径: 填充 hcommAllGatherMatmulTilingData 并输出
+        SetHcommTilingInfo();
+        hcommTilingData_.mc2InitTiling = allGatherMatmulTilingDataFp8_->mc2InitTiling;
+        hcommTilingData_.mc2CcTiling = allGatherMatmulTilingDataFp8_->mc2CcTiling;
+        hcommTilingData_.gatherLen = MutableRCSTilingDataA5().gatherLen;
+        // 不填充 dumpInfo（保持零布局，kernel 侧 opStateDump 早退）：apace hcomm 路径的
+        // workspace 使用与 BuildWorkspaceLayout 的旧路径段体系不一致，激活 DFX 会写坏收集数据
+        Apace::hcommAllGatherMatmulTilingData* outTilingData =
+            context_->GetTilingData<Apace::hcommAllGatherMatmulTilingData>();
+        OP_TILING_CHECK(outTilingData == nullptr, OP_LOGE(opName_, "Fail to get hcomm tiling data from context"),
+                        return ge::GRAPH_FAILED);
+        size_t tilingBufCap = context_->GetRawTilingData()->GetCapacity();
+        OP_TILING_CHECK(tilingBufCap < sizeof(hcommTilingData_),
+                        OP_LOGE(opName_, "TilingBuffer capacity is too small, capacity = %zu, need = %zu.",
+                                tilingBufCap, sizeof(hcommTilingData_)),
+                        return ge::GRAPH_FAILED);
+        errno_t ret = memcpy_s(outTilingData, tilingBufCap, &hcommTilingData_, sizeof(hcommTilingData_));
+        OP_TILING_CHECK(ret != EOK, OP_LOGE(opName_, "PostTiling: memcpy_s hcomm tiling data failed, ret=%d.", ret),
+                        return ge::GRAPH_FAILED);
+        context_->GetRawTilingData()->SetDataSize(sizeof(Apace::hcommAllGatherMatmulTilingData));
+        context_->SetBlockDim(args_.aicCoreNum);
+        OP_TILING_CHECK(context_->SetScheduleMode(1) != ge::GRAPH_SUCCESS,
+                        OP_LOGE(opName_, "SetScheduleMode(1) failed."), return ge::GRAPH_FAILED);
+        OP_LOGI(opName_, "PostTiling: output hcommAllGatherMatmulTilingData, size=%zu.", sizeof(hcommTilingData_));
+        return ge::GRAPH_SUCCESS;
+    }
+
     OP_LOGD(opName_, "The final tiling data size=%zu and context capacity size=%zu ",
             sizeof(AllGatherMatmulTilingDataFp8), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(sizeof(AllGatherMatmulTilingDataFp8));

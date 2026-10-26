@@ -22,6 +22,7 @@
 #include "mc2_log_compat.h"
 #include "opdev/platform.h"
 #include "op_host/util/op_const_def.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "common/op_host/op_api/mc2_3rd_matmul_util.h"
 #include "common/utils/hccl_util.h"
 #include "common/op_api/mc2_aclnn_util.h"
@@ -74,7 +75,8 @@ static bool CheckNotNull(const aclTensor* x1, const aclTensor* x2, const aclTens
 // 根据API定义，需要列出所能支持的所有dtype
 static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST = {
     op::DataType::DT_FLOAT16,     op::DataType::DT_BF16,     op::DataType::DT_FLOAT8_E4M3FN,
-    op::DataType::DT_FLOAT8_E5M2, op::DataType::DT_HIFLOAT8, op::DataType::DT_FLOAT4_E2M1};
+    op::DataType::DT_FLOAT8_E5M2, op::DataType::DT_HIFLOAT8, op::DataType::DT_FLOAT4_E2M1,
+    Ops::Transformer::DT_HIFLOAT4};
 
 static const std::initializer_list<op::DataType> BIAS_DTYPE_SUPPORT_LIST = {
     op::DataType::DT_FLOAT16, op::DataType::DT_BF16, op::DataType::DT_FLOAT};
@@ -82,7 +84,8 @@ static const std::initializer_list<op::DataType> BIAS_DTYPE_SUPPORT_LIST = {
 static const std::initializer_list<op::DataType> FP8_DTYPE_SUPPORT_LIST = {
     op::DataType::DT_FLOAT8_E4M3FN, op::DataType::DT_FLOAT8_E5M2, op::DataType::DT_HIFLOAT8};
 
-static const std::initializer_list<op::DataType> FP4_DTYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT4_E2M1};
+static const std::initializer_list<op::DataType> FP4_DTYPE_SUPPORT_LIST = {op::DataType::DT_FLOAT4_E2M1,
+                                                                           Ops::Transformer::DT_HIFLOAT4};
 
 static const std::initializer_list<op::DataType> OUT_DTYPE_SUPPORT_LIST = BIAS_DTYPE_SUPPORT_LIST;
 
@@ -123,6 +126,9 @@ static bool CheckDataTypeFp8Fp4Valid(const aclTensor* x1, const aclTensor* x2, c
     if (x1->GetDataType() == op::DataType::DT_FLOAT4_E2M1) {
         OP_CHECK_DTYPE_NOT_SAME(x1, x2, return false);
     }
+    if (x1->GetDataType() == Ops::Transformer::DT_HIFLOAT4) {
+        OP_CHECK_DTYPE_NOT_SAME(x1, x2, return false);
+    }
     if (bias != nullptr) {
         // 当x1类型为fp16/bf16时, bias类型为与x1保持一致
         if (bias->GetDataType() != op::DataType::DT_FLOAT) {
@@ -144,6 +150,12 @@ static bool CheckDtypeValid(const aclTensor* x1, const aclTensor* x2, const aclT
     OP_CHECK_DTYPE_NOT_SUPPORT(x1, DTYPE_SUPPORT_LIST, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(x2, DTYPE_SUPPORT_LIST, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(output, OUT_DTYPE_SUPPORT_LIST, return false);
+    // HiF4 场景输出仅支持 fp16/bf16
+    if (x1->GetDataType() == Ops::Transformer::DT_HIFLOAT4 && output->GetDataType() == op::DataType::DT_FLOAT) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("aclnnAllGatherMatmulV2", "output", "fp32",
+                                              "HiF4 output only supports fp16/bf16");
+        return false;
+    }
     if (bias != nullptr) {
         OP_CHECK_DTYPE_NOT_SUPPORT(bias, BIAS_DTYPE_SUPPORT_LIST, return false);
     }
@@ -382,6 +394,16 @@ static aclnnStatus CheckScale(const aclTensor* x1Scale, const aclTensor* x2Scale
     if (x2Scale == nullptr) {
         OP_LOGE_WITH_INVALID_INPUT("aclnnAllGatherMatmulV2", "x2Scale");
         return ACLNN_ERR_PARAM_INVALID;
+    }
+    // HiF4 场景要求 x1Scale/x2Scale 均为 DT_HIFLOAT4_SCALE
+    if (x1Scale->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE ||
+        x2Scale->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE) {
+        if (x1Scale->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE ||
+            x2Scale->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE) {
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("aclnnAllGatherMatmulV2", "x1Scale/x2Scale", "mismatched dtype",
+                                                  "HiFP4 requires both x1Scale and x2Scale to be DT_HIFLOAT4_SCALE");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
     }
     if (x1Scale->GetStorageFormat() != op::Format::FORMAT_ND && x1Scale->GetStorageFormat() != op::Format::FORMAT_NCL) {
         OP_LOGE_FOR_INVALID_FORMATS_WITH_REASON("aclnnAllGatherMatmulV2", "x1Scale",
@@ -693,7 +715,7 @@ aclnnStatus aclnnAllGatherMatmulV2GetWorkspaceSize(const aclTensor* x1, const ac
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
             "aclnnAllGatherMatmulV2", "npuArch",
             std::to_string(static_cast<int>(GetCurrentPlatformInfo().GetCurNpuArch())).c_str(),
-            "The value of npuArch must be DAV_3510 or DAV_2201");
+            "The value of npuArch must be DAV_3510, DAV_9201 or DAV_2201");
         return ACLNN_ERR_PARAM_INVALID;
     }
     return ret;

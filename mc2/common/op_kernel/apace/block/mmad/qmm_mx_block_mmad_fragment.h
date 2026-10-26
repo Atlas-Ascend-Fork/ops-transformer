@@ -14,6 +14,16 @@
  */
 
 #pragma once
+
+// 低版本 devkit(如 9.2.0) 的编译环境不含 hifloat4x2_t/AscendC::hif4_scale，
+// 以 devkit 版本守卫 HIF4 kernel 代码（CANN >= 9.3 才启用，与 op_host 侧
+// ENABLE_ALL_GATHER_MATMUL_DT_HIFLOAT4 守卫配套、阈值一致）
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define APACE_HIF4_TYPE_SUPPORTED 1
+#else
+#define APACE_HIF4_TYPE_SUPPORTED 0
+#endif
+
 #if ASC_DEVKIT_MAJOR >= 9
 #include "kernel_basic_intf.h"
 #else
@@ -49,7 +59,7 @@ struct IsFragmentTensor<Apace::Basic::FragmentTensor<Dims, MaxFragments, LayoutF
     static constexpr bool value = true;
 };
 
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510)
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201))
 
 template <uint64_t A_FULL_LOAD_MODE, bool ATOMIC_ADD, class AType_, class LayoutA_, class BType_, class LayoutB_,
           class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
@@ -80,8 +90,38 @@ public:
 
     constexpr static uint64_t HALF_L0_SIZE = AscendC::TOTAL_L0A_SIZE / DOUBLE_BUFFER_COUNT;
     constexpr static uint64_t HALF_L0C_SIZE = AscendC::TOTAL_L0C_SIZE / DOUBLE_BUFFER_COUNT;
-    constexpr static uint64_t C0_SIZE = IsFp4<AType>() ? C0_SIZE_B4 : C0_SIZE_B8;
-    constexpr static uint64_t SCALE_C0 = 2;
+#if APACE_HIF4_TYPE_SUPPORTED
+    static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
+    using ScaleType = AscendC::Std::conditional_t<IS_HIF4, AscendC::hif4_scale, AscendC::fp8_e8m0_t>;
+#else
+    static constexpr bool IS_HIF4 = false;
+    using ScaleType = AscendC::fp8_e8m0_t;
+#endif
+    using ByteScaleType = AscendC::fp8_e8m0_t;
+    constexpr static uint64_t C0_SIZE = (IS_HIF4 || IsFp4<AType>()) ? C0_SIZE_B4 : C0_SIZE_B8;
+    // 两个 scale 域不可混用（hif4 精度问题根因）：GM 域（ScaleType/GM_SCALE_C0）按真实 scale 元素数
+    // 计算 offset/length；L1/L0 域（ByteScaleType/SCALE_BYTES_PER_GROUP）恒为 1 字节载体，用于
+    // 分形与 L1 缓冲预算。SCALE_FRAME_C0 为 Te 分形 C0。
+    constexpr static uint64_t GM_SCALE_C0 = IS_HIF4 ? 1 : 2;
+    constexpr static uint64_t SCALE_BYTES_PER_GROUP = GM_SCALE_C0 * sizeof(ScaleType);
+    constexpr static uint64_t SCALE_FRAME_C0 = 2;
+    // 等价于上游 AscendC::Te::GetScaleDivisor<T>()（该接口 devkit 未提供，本地按同一契约以常量表达）：
+    // divisor = 数据分形字节数 / 配套 scale 字节数，fp8/fp4 (2B/64K) -> 16，hif4 (4B/64K) -> 8；
+    // hif4 取值为本地推导，上板需与 GetScaleDivisor 实际返回值核对。
+    template <typename T>
+    __aicore__ constexpr static uint64_t ScaleBytesPerGroupOf()
+    {
+#if APACE_HIF4_TYPE_SUPPORTED
+        return AscendC::IsSameType<T, hifloat4x2_t>::value ? 4U : 2U;
+#else
+        return 2U;
+#endif
+    }
+    template <typename T>
+    __aicore__ constexpr static uint64_t ScaleL0OffsetDivisor()
+    {
+        return 32U / ScaleBytesPerGroupOf<T>();
+    }
     constexpr static uint64_t SCALE_BUFFER_NUM = 2;
 
     using MakeLayoutAL1 =
@@ -174,13 +214,13 @@ public:
         isBias_ = isBias;
         l1BufNum_ = l1Params.l1BufNum;
         enableL0cPingPong_ = dbL0C;
-        constexpr uint64_t sizeShift = IsFp4<AType>() ? 1 : 0;
+        constexpr uint64_t sizeShift = (IS_HIF4 || IsFp4<AType>()) ? 1 : 0;
         bL1OneBuffer_ = (baseN_ * kL1_) >> sizeShift;
-        scaleBL1OneBuffer_ = baseN_ * Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+        scaleBL1OneBuffer_ = baseN_ * Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP;
         biasL1OneBuffer_ = isBias_ ? baseN_ * sizeof(BiasType) : 0;
         if constexpr (DispatchPolicy::FULL_LOAD_MODE == 0) {
             aL1OneBuffer_ = (baseM_ * Blaze::Gemm::CeilAlign(kL1_, MXFP_DIVISOR_SIZE)) >> sizeShift;
-            scaleAL1OneBuffer_ = baseM_ * Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+            scaleAL1OneBuffer_ = baseM_ * Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP;
             for (int32_t bufferId = 0; bufferId < l1BufNum_; bufferId++) {
                 // 2 buffer: L1 space is : A0|B0|AScale0|BScale0|bias0|...|A1|B1|AScale1|BScale1|bias1|...
                 // 4 buffer: L1 space is : A0A2|B0B2|AScale0|BScale0|bias0|...|A1A3|B1B3|AScale1|BScale1|bias1|...
@@ -198,7 +238,7 @@ public:
             uint64_t mAlign = Blaze::Gemm::CeilAlign(baseM_, transA ? C0_SIZE : BLOCK_CUBE);
             uint64_t kAlign = Blaze::Gemm::CeilAlign(k_, MXFP_DIVISOR_SIZE);
             aL1OneBuffer_ = (mAlign * kAlign) >> sizeShift;
-            scaleAL1OneBuffer_ = baseM_ * Blaze::Gemm::CeilDiv(k_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+            scaleAL1OneBuffer_ = baseM_ * Blaze::Gemm::CeilDiv(k_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP;
             // 2 buffer: L1 space is : B0|BScale0|bias0|A|AScale|...|B1|BScale1|bias1|
             // 4 buffer: L1 space is : B0B2|BScale0|bias0|A|AScale|...|B1B3|BScale1|bias1|...
             l1BufferAOffset_[0] = bL1OneBuffer_ * (l1BufNum_ >> 1) + scaleBL1OneBuffer_ + biasL1OneBuffer_;
@@ -233,17 +273,17 @@ public:
                                           TileL1L0Param& tileL1L0Param, uint64_t scaleL1BufId, uint64_t iter0)
     {
         uint64_t kL1Offset = iter0 * kL1_;
-        auto layoutScaleBL1 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
-            Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE, tileL1L0Param.curN);
+        auto layoutScaleBL1 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<SCALE_FRAME_C0>>(
+            Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP, tileL1L0Param.curN);
         auto tensorScaleBL1 = asc::te::make_tensor(
-            asc::te::make_mem_ptr<asc::te::location::l1, fp8_e8m0_t>(l1BufferScaleBOffset_[scaleL1BufId]),
+            asc::te::make_mem_ptr<asc::te::location::l1, ByteScaleType>(l1BufferScaleBOffset_[scaleL1BufId]),
             layoutScaleBL1);
         auto CopyScaleGM2L1 = asc::te::make_copy(asc::te::copy_gm_to_l1{});
         if constexpr (DispatchPolicy::FULL_LOAD_MODE == 0) {
-            auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
-                tileL1L0Param.curM, Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE);
+            auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_FRAME_C0>>(
+                tileL1L0Param.curM, Blaze::Gemm::CeilDiv(scaleKL1_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP);
             auto tensorScaleAL1 = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::l1, fp8_e8m0_t>(l1BufferScaleAOffset_[scaleL1BufId]),
+                asc::te::make_mem_ptr<asc::te::location::l1, ByteScaleType>(l1BufferScaleAOffset_[scaleL1BufId]),
                 layoutScaleAL1);
             if (iter0 % (scaleKL1_ / kL1_) == 0) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(SCALE_BUFFER_FLAG_0 + scaleL1BufId);
@@ -251,8 +291,8 @@ public:
                 if (kL1Offset + curScaleKL1 > k_) {
                     curScaleKL1 = k_ - kL1Offset;
                 }
-                uint64_t scaleKStart = iter0 * Blaze::Gemm::CeilDiv(kL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
-                uint64_t scaleKLength = Blaze::Gemm::CeilDiv(curScaleKL1, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+                uint64_t scaleKStart = iter0 * Blaze::Gemm::CeilDiv(kL1_, MXFP_DIVISOR_SIZE) * GM_SCALE_C0;
+                uint64_t scaleKLength = Blaze::Gemm::CeilDiv(curScaleKL1, MXFP_DIVISOR_SIZE) * GM_SCALE_C0;
                 auto blockScaleA = gmScaleA.slice(asc::te::make_coord(0, scaleKStart),
                                                   asc::te::make_shape(tileL1L0Param.curM, scaleKLength));
                 CopyGmToL1(CopyScaleGM2L1, tensorScaleAL1, blockScaleA);
@@ -263,18 +303,18 @@ public:
             }
             return ScalePair<decltype(tensorScaleAL1), decltype(tensorScaleBL1)>{tensorScaleAL1, tensorScaleBL1};
         } else {
-            auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
-                tileL1L0Param.curM, Blaze::Gemm::CeilDiv(k_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE);
+            auto layoutScaleAL1 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_FRAME_C0>>(
+                tileL1L0Param.curM, Blaze::Gemm::CeilDiv(k_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP);
             auto tensorScaleAL1 = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::l1, fp8_e8m0_t>(l1BufferScaleAOffset_[0]), layoutScaleAL1);
+                asc::te::make_mem_ptr<asc::te::location::l1, ByteScaleType>(l1BufferScaleAOffset_[0]), layoutScaleAL1);
             if (iter0 % (scaleKL1_ / kL1_) == 0) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(SCALE_BUFFER_FLAG_0 + scaleL1BufId);
                 uint64_t curScaleKL1 = scaleKL1_;
                 if (kL1Offset + curScaleKL1 > k_) {
                     curScaleKL1 = k_ - kL1Offset;
                 }
-                uint64_t scaleKStart = iter0 * Blaze::Gemm::CeilDiv(kL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
-                uint64_t scaleKLength = Blaze::Gemm::CeilDiv(curScaleKL1, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+                uint64_t scaleKStart = iter0 * Blaze::Gemm::CeilDiv(kL1_, MXFP_DIVISOR_SIZE) * GM_SCALE_C0;
+                uint64_t scaleKLength = Blaze::Gemm::CeilDiv(curScaleKL1, MXFP_DIVISOR_SIZE) * GM_SCALE_C0;
                 auto gmBlockScaleB = gmScaleB.slice(asc::te::make_coord(scaleKStart, 0),
                                                     asc::te::make_shape(scaleKLength, tileL1L0Param.curN));
                 asc::te::copy(CopyScaleGM2L1, tensorScaleBL1, gmBlockScaleB);
@@ -322,7 +362,7 @@ public:
                                    TensorBiasL1& tensorBiasL1, TensorL0C& tensorL0C, uint64_t splitKIdx)
     {
         // 从scaleKL1中切出kL1_对应的部分
-        auto scaleKL1Len = Blaze::Gemm::CeilDiv(kL1_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE;
+        auto scaleKL1Len = Blaze::Gemm::CeilDiv(kL1_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP;
         auto coordScaleKL1 = (iter0 % (scaleKL1_ / kL1_)) * scaleKL1Len;
         auto tensorBlockScaleBL1 = tensorScaleBL1.slice(asc::te::make_coord(coordScaleKL1, 0),
                                                         asc::te::make_shape(scaleKL1Len, tileL1L0Param.curN));
@@ -353,16 +393,18 @@ public:
             asc::te::copy(CopyL12L0A, tensorAL0, tensorBlockAL1);
 
             auto CopyL12L0ScaleA = asc::te::make_copy(asc::te::copy_l1_to_l0scalea{});
-            auto layoutScaleAL0 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
-                tileL1L0Param.curM, Blaze::Gemm::CeilDiv(curKL0, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE);
-            auto tensorScaleAL0 = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::l0scalea, fp8_e8m0_t>(l0Offset >> 4), layoutScaleAL0);
+            auto layoutScaleAL0 = asc::te::make_frame_layout<asc::te::zz_layout_ptn, AscendC::Std::Int<SCALE_FRAME_C0>>(
+                tileL1L0Param.curM, Blaze::Gemm::CeilDiv(curKL0, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP);
+            auto tensorScaleAL0 =
+                asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0scalea, ByteScaleType>(
+                                         l0Offset / ScaleL0OffsetDivisor<AType>()),
+                                     layoutScaleAL0);
             asc::te::copy(CopyL12L0ScaleA, tensorScaleAL0,
                           tensorBlockScaleAL1.slice(
                               asc::te::make_coord(
-                                  0, iter1 * Blaze::Gemm::CeilDiv(baseK_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE),
+                                  0, iter1 * Blaze::Gemm::CeilDiv(baseK_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP),
                               asc::te::make_shape(tileL1L0Param.curM, Blaze::Gemm::CeilDiv(curKL0, MXFP_DIVISOR_SIZE) *
-                                                                          MXFP_MULTI_BASE_SIZE)));
+                                                                          SCALE_BYTES_PER_GROUP)));
 
             // bias L1->BT
             auto layoutBt = asc::te::make_frame_layout<asc::te::nd_ext_layout_ptn>(
@@ -385,16 +427,18 @@ public:
             asc::te::copy(CopyL12L0B, tensorBL0, tensorBlockBL1);
 
             auto CopyL12L0ScaleB = asc::te::make_copy(asc::te::copy_l1_to_l0scaleb{});
-            auto layoutScaleBL0 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<SCALE_C0>>(
-                Blaze::Gemm::CeilDiv(curKL0, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE, tileL1L0Param.curN);
-            auto tensorScaleBL0 = asc::te::make_tensor(
-                asc::te::make_mem_ptr<asc::te::location::l0scaleb, fp8_e8m0_t>(l0Offset >> 4), layoutScaleBL0);
+            auto layoutScaleBL0 = asc::te::make_frame_layout<asc::te::nn_layout_ptn, AscendC::Std::Int<SCALE_FRAME_C0>>(
+                Blaze::Gemm::CeilDiv(curKL0, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP, tileL1L0Param.curN);
+            auto tensorScaleBL0 =
+                asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::l0scaleb, ByteScaleType>(
+                                         l0Offset / ScaleL0OffsetDivisor<BType>()),
+                                     layoutScaleBL0);
             asc::te::copy(
                 CopyL12L0ScaleB, tensorScaleBL0,
                 tensorBlockScaleBL1.slice(
-                    asc::te::make_coord(iter1 * Blaze::Gemm::CeilDiv(baseK_, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE,
+                    asc::te::make_coord(iter1 * Blaze::Gemm::CeilDiv(baseK_, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP,
                                         0),
-                    asc::te::make_shape(Blaze::Gemm::CeilDiv(curKL0, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE,
+                    asc::te::make_shape(Blaze::Gemm::CeilDiv(curKL0, MXFP_DIVISOR_SIZE) * SCALE_BYTES_PER_GROUP,
                                         tileL1L0Param.curN)));
 
             AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(l0PingPong_ & 0x1);

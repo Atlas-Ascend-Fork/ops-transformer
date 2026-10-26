@@ -45,7 +45,7 @@ template <uint64_t A_FULL_LOAD_MODE, bool ATOMIC_ADD, class AType_, class Layout
           class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
 class BmmBlockMmadFragment;
 
-#if (defined(__NPU_ARCH__) && __NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201)
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201))
 
 template <uint64_t A_FULL_LOAD_MODE, bool ATOMIC_ADD, class AType_, class LayoutA_, class BType_, class LayoutB_,
           class CType_, class LayoutC_, class BiasType_, class LayoutBias_>
