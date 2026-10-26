@@ -36,14 +36,14 @@ op_level_list_barrier = ["distribute_barrier", "distribute_barrier_extend"]
 # obj分组字典,需要分组的算子在字典中对应soc xxxx: obj分组数
 group_op_dict = {
     "ascend910b": {
-        "fused_infer_attention_score": 10,
+        "fused_infer_attention_score": 7,
         "incre_flash_attention": 5,
         "prompt_flash_attention": 5,
         "flash_attention_score": 3,
         "flash_attention_score_grad": 3,
     },
     "ascend910_93": {
-        "fused_infer_attention_score": 10,
+        "fused_infer_attention_score": 7,
         "incre_flash_attention": 5,
         "prompt_flash_attention": 5,
         "flash_attention_score": 3,
