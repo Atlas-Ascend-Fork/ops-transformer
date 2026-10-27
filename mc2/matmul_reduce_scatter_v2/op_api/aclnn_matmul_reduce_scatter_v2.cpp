@@ -37,6 +37,7 @@
 #include "common/include/op_host/op_const_def_transformer.h"
 #endif
 #include "mc2_log_compat.h"
+#include "common/op_api/mc2_context.h"
 #include "common/op_host/op_api/mc2_3rd_matmul_util.h"
 #include "common/op_api/mc2_aclnn_util.h"
 #include "aclnn_matmul_reduce_scatter_v2.h"
@@ -275,6 +276,43 @@ static aclnnStatus CheckAndSetCommMode(const char* commMode, CommType& commModeE
     } else {
         OP_LOGE_FOR_INVALID_VALUE("aclnnMatmulReduceScatterV2GetWorkspaceSize", "commMode", commMode,
                                   "\"ccu\" or \"ai_cpu\"");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    return ACLNN_SUCCESS;
+}
+
+// 校验output形状：dim1须等于x2的n维，dim0须等于x1的m除以通信域rankSize。
+// 必须取得有效rankSize后检查输出容量；查询失败不得跳过校验。
+static aclnnStatus CheckOutputShape(const aclTensor* x1, const aclTensor* x2, const char* group,
+                                    const aclTensor* output)
+{
+    if (output->GetViewShape().GetDimNum() != TWO_DIMS) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON("aclnnMatmulReduceScatterV2GetWorkspaceSize", "output",
+                                                 (std::to_string(output->GetViewShape().GetDimNum()) + "D").c_str(),
+                                                 "The shape of output must be 2D.");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    int64_t nVal = x2->GetViewShape().GetDim(1);
+    if (output->GetViewShape().GetDim(1) != nVal) {
+        OP_LOGE_FOR_INVALID_SHAPE(
+            "aclnnMatmulReduceScatterV2GetWorkspaceSize", "x2/output",
+            (std::string("n=") + std::to_string(nVal) + "/" + std::to_string(output->GetViewShape().GetDim(1))).c_str(),
+            "output dim1 must be equal to n of x2.");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    CHECK_RET(group != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    uint32_t rankSize = 0;
+    auto ret = Mc2Aclnn::Mc2Context::GetMc2RankSize(group, rankSize);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
+    CHECK_RET(rankSize != 0, ACLNN_ERR_INNER);
+    int64_t mVal = x1->GetViewShape().GetDim(0);
+    int64_t rank = static_cast<int64_t>(rankSize);
+    if ((mVal % rank != 0) || (output->GetViewShape().GetDim(0) != mVal / rank)) {
+        OP_LOGE_FOR_INVALID_SHAPE("aclnnMatmulReduceScatterV2GetWorkspaceSize", "x1/output",
+                                  (std::string("m/rankSize=") + std::to_string(mVal) + "/" + std::to_string(rankSize) +
+                                   ", output dim0=" + std::to_string(output->GetViewShape().GetDim(0)))
+                                      .c_str(),
+                                  "m must be divisible by rankSize and output dim0 must equal m/rankSize.");
         return ACLNN_ERR_PARAM_INVALID;
     }
     return ACLNN_SUCCESS;
@@ -562,6 +600,8 @@ aclnnStatus matmulReduceScatterV2GetWorkSpaceSizeA5(const aclTensor* x1, const a
         return ACLNN_ERR_PARAM_INVALID;
     });
 #endif
+    ret = CheckOutputShape(x1, x2, group, output);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
     if (transposeX2Scale) {
         transX2Scale = TransX2Tensor(x2Scale);
     }
@@ -639,6 +679,8 @@ aclnnStatus matmulReduceScatterV2GetWorkSpaceSizeAivMode(
             return ACLNN_ERR_PARAM_INVALID;
         }
     }
+    auto ret_output_shape = CheckOutputShape(x1, x2, group, output);
+    CHECK_RET(ret_output_shape == ACLNN_SUCCESS, ret_output_shape);
     aclnnStatus ret = aclnnInnerMatmulReduceScatterV2GetWorkspaceSize(
         x1, x2, bias, x1Scale, x2Scale, quantScale, const_cast<char*>(group), const_cast<char*>(reduceOp), transposeX1,
         transposeX2, commTurn, rankSize, blockSize, groupSize, isAmaxOut, yDtype, const_cast<char*>(commMode), output,

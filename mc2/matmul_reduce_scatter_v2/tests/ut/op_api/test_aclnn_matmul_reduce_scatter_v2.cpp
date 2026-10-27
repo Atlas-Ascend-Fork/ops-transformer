@@ -110,7 +110,7 @@ TEST_F(MatmulReduceScatterV2AclnnTest, EmptyTensor)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_NE(aclRet, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
 
 TEST_F(MatmulReduceScatterV2AclnnTest, Fp16)
@@ -1002,7 +1002,7 @@ TEST_F(MatmulReduceScatterV2AclnnTest, Bf16EmptyTensor)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_NE(aclRet, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
 
 TEST_F(MatmulReduceScatterV2AclnnTest, BiasNotNullFp16)
