@@ -20,19 +20,23 @@
 #include "../../../attn_infra/gbsa_gemm_coord.hpp"
 #include "../../../attn_infra/gemm/tile_common/gbsa_gemm_tile_copy.hpp"
 #include "../../../attn_infra/gemm/tile_common/gbsa_tile_mmad.hpp"
+#include "../../../gbsa_sparse_kv_geometry.hpp"
+#include "../../../gbsa_sparse_pair_copy.hpp"
 
 ////////////////////////////////////////////////////////////////////
 
 namespace NpuArch::Gemm::Block {
 ////////////////////////////////////////////////////////////////////
 
-template <bool PAGED_CACHE_FLAG_, bool ENABLE_UNIT_FLAG_, class L1TileShape_, class L0TileShape_, class AType_,
-          class BType_, class CType_, class BiasType_, class TileCopy_, class TileMmad_>
-struct BlockMmad<MmadAtlasA2SFAIPV<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>, L1TileShape_, L0TileShape_, AType_, BType_,
-                 CType_, BiasType_, TileCopy_, TileMmad_> {
+template <bool PAGED_CACHE_FLAG_, bool ENABLE_UNIT_FLAG_, bool HAS_RESIDUAL_BLOCK_, class L1TileShape_,
+          class L0TileShape_, class AType_, class BType_, class CType_, class BiasType_, class TileCopy_,
+          class TileMmad_>
+struct BlockMmad<MmadAtlasA2SFAIPV<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_, HAS_RESIDUAL_BLOCK_>, L1TileShape_,
+                 L0TileShape_, AType_, BType_, CType_, BiasType_, TileCopy_, TileMmad_> {
 public:
     // Type Aliases
-    using DispatchPolicy = MmadAtlasA2SFAIPV<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_>;
+    using DispatchPolicy = MmadAtlasA2SFAIPV<PAGED_CACHE_FLAG_, ENABLE_UNIT_FLAG_, HAS_RESIDUAL_BLOCK_>;
+    static constexpr bool HAS_RESIDUAL_BLOCK = DispatchPolicy::HAS_RESIDUAL_BLOCK;
     using ArchTag = typename DispatchPolicy::ArchTag;
     using L1TileShape = L1TileShape_;
     using L0TileShape = L0TileShape_;
@@ -89,7 +93,7 @@ public:
     __aicore__ inline ~BlockMmad() {}
 
     __aicore__ inline void getBlockShape(GemmCoord& actualShape, uint32_t& nowNIdx, uint32_t& nLoop,
-                                         uint32_t& stackSeqTile, uint32_t& blockSize)
+                                         uint32_t& stackSeqTile, uint32_t blockSize)
     {
         uint32_t nSplitSize = blockSize;
         if (nowNIdx == nLoop - 1) {
@@ -104,7 +108,9 @@ public:
                                       LayoutC layoutC, GemmCoord actualOriShape, uint32_t nIdx, uint32_t nLoop,
                                       uint32_t& blockSize, uint32_t kvSeqlen, uint32_t strideKV, uint32_t blockStackNum,
                                       Arch::CrossCoreFlag softmaxFlag, uint32_t& y, uint32_t selectNum,
-                                      uint32_t kvYBlockNum)
+                                      uint32_t kvYBlockNum, uint32_t pageSize, uint64_t pageStride,
+                                      uint32_t localExplicitBlockCount, uint32_t residualBlockId,
+                                      uint64_t peerPageStride, GbsaSparsePairCopy::KvCopyInfo* kvCopyInfo = nullptr)
     {
         uint32_t rowNum = actualOriShape[0];
         uint32_t embed = actualOriShape[1];
@@ -113,125 +119,216 @@ public:
 
         // load V
         LayoutBInL1 layoutBInL1 = LayoutBInL1::template MakeLayout<ElementB>(stackSeqTile, embed);
+        constexpr uint32_t copySubTileTokens = GbsaSparsePairCopy::KV_COPY_SUB_TILE_TOKENS;
+        const uint32_t maxPlanRecords = y != 0U && copySubTileTokens % y == 0U ? copySubTileTokens / y : 0U;
+        const bool streamV =
+            PAGED_CACHE_FLAG_ && pageSize == copySubTileTokens && L1TileShape::N == copySubTileTokens &&
+            L1TileShape::K == 2U * copySubTileTokens && copySubTileTokens % L0TileShape::K == 0U &&
+            stackSeqTile == 2U * copySubTileTokens && rowNum > 0U && rowNum <= L1TileShape::M && embed > 0U &&
+            embed <= L0TileShape::N && maxPlanRecords != 0U && kvCopyInfo != nullptr &&
+            kvCopyInfo[0].records != nullptr && kvCopyInfo[1].records != nullptr && kvCopyInfo[0].count > 0U &&
+            kvCopyInfo[0].count <= maxPlanRecords && kvCopyInfo[1].count > 0U && kvCopyInfo[1].count <= maxPlanRecords;
         AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID4);
         uint32_t nL1Loop = CeilDiv<L1TileShape::N>(stackSeqTile);
 
         for (uint32_t blockStackIdx = 0; blockStackIdx < nL1Loop; ++blockStackIdx) {
-            uint32_t nowNIdx = nIdx + blockStackIdx;
-            getBlockShape(actualShape, blockStackIdx, nL1Loop, stackSeqTile, blockSize);
+            if (streamV && blockStackIdx != 0U) {
+                break;
+            }
+            getBlockShape(actualShape, blockStackIdx, nL1Loop, stackSeqTile, L1TileShape::N);
             uint32_t kActual = actualShape.k();
             uint32_t nActual = actualShape.n();
 
             uint32_t processSize = 0;
-            uint32_t nBlockOffset = nowNIdx * blockSize;
-            uint32_t currentSelectYIdx = nBlockOffset / y;
-            uint32_t currentYoffset = nBlockOffset % y;
-            uint32_t currentYIdx = gSelectIdx.GetValue(currentSelectYIdx);
-            uint32_t offsetInKV = currentYIdx * y + currentYoffset;
-
-            while (processSize < kActual && currentSelectYIdx < selectNum && currentYIdx < kvYBlockNum &&
-                   offsetInKV < kvSeqlen) {
-                uint32_t yAcutal =
-                    (currentSelectYIdx == selectNum - 1 && currentYIdx == kvYBlockNum - 1 && kvSeqlen % y != 0) ?
-                        (kvSeqlen - y * currentYIdx) :
-                        y;
-                uint32_t remainingInYBlock = yAcutal - currentYoffset;
-                uint32_t remainingInNBlock = kActual - processSize;
-
-                uint32_t actualYSize = min(remainingInNBlock, remainingInYBlock);
-                if (actualYSize == 0) {
-                    break;
+            uint32_t nBlockOffset = nIdx * blockSize + blockStackIdx * L1TileShape::N;
+            const bool yFitsPage = y != 0U && pageSize == 128U && (pageSize % y) == 0U;
+            const uint32_t firstSlot = nBlockOffset / y;
+            const __gm__ int32_t* selectIdx = gSelectIdx.GetPhyAddr();
+            const __gm__ int32_t* blockPages = nullptr;
+            uint32_t cachedLogicalPage = 0xFFFFFFFFU;
+            uint32_t cachedPhysicalPage = 0U;
+            if constexpr (PAGED_CACHE_FLAG_) {
+                blockPages = gBlockTable.GetPhyAddr();
+            }
+            uint32_t fastBlockCount = 0U;
+            if (L1TileShape::N == 128U && strideKV < 65536U && PAGED_CACHE_FLAG_ && yFitsPage &&
+                (nBlockOffset % y) == 0U && firstSlot < localExplicitBlockCount) {
+                const uint32_t explicitAvail = localExplicitBlockCount - firstSlot;
+                const uint32_t byTokens = kActual / y;
+                fastBlockCount = byTokens < explicitAvail ? byTokens : explicitAvail;
+                if (fastBlockCount != 0U &&
+                    (static_cast<uint64_t>(selectIdx[firstSlot + fastBlockCount - 1U]) + 1U) * y > kvSeqlen) {
+                    fastBlockCount = 0U;
                 }
+            }
+            uint32_t currentSelectYIdx = firstSlot;
+            uint32_t currentYoffset = nBlockOffset % y;
+            uint32_t currentYIdx = 0U;
+            uint64_t offsetInKV = 0;
 
-                auto layoutBTile = layoutB.GetTileLayout(MakeCoord(actualYSize, nActual));
-                MatrixCoord l1BTileCoord{blockStackIdx * blockSize + processSize, 0};
-                auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BTileCoord)];
+            auto* subCopyInfo = kvCopyInfo == nullptr ? nullptr : kvCopyInfo + blockStackIdx;
+            if (fastBlockCount != 0U && subCopyInfo != nullptr && subCopyInfo->count <= fastBlockCount) {
+                for (uint32_t ri = 0; ri < subCopyInfo->count; ++ri) {
+                    const auto& r = subCopyInfo->records[ri];
+                    GbsaSparsePairCopy::Emit<false>(l1BTensor, gB, layoutBInL1,
+                                                    blockStackIdx * L1TileShape::N + r.dstRow, r.source, r.rows,
+                                                    r.ndNum, r.stride, nActual, strideKV);
+                }
+                processSize = fastBlockCount * y;
+                currentSelectYIdx = firstSlot + fastBlockCount;
+                currentYoffset = 0U;
+            } else if (fastBlockCount != 0U) {
+                GbsaSparsePairCopy::Load<false>(l1BTensor, gB, layoutBInL1, gSelectIdx, gBlockTable, firstSlot,
+                                                fastBlockCount, blockStackIdx * L1TileShape::N, nActual, strideKV,
+                                                pageStride, peerPageStride, y, kvYBlockNum, kvSeqlen);
+                processSize = fastBlockCount * y;
+                currentSelectYIdx = firstSlot + fastBlockCount;
+                currentYoffset = 0U;
+            }
+            if (processSize < kActual && currentSelectYIdx < selectNum) {
+                currentYIdx = GbsaSparseGeometry::ReadSparseBlockId<HAS_RESIDUAL_BLOCK>(
+                    selectIdx, currentSelectYIdx, localExplicitBlockCount, residualBlockId);
+                offsetInKV = static_cast<uint64_t>(currentYIdx) * y + currentYoffset;
+                while (processSize < kActual && currentSelectYIdx < selectNum && currentYIdx < kvYBlockNum &&
+                       offsetInKV < kvSeqlen) {
+                    uint32_t yAcutal =
+                        (currentSelectYIdx == selectNum - 1 && currentYIdx == kvYBlockNum - 1 && kvSeqlen % y != 0) ?
+                            (kvSeqlen - y * currentYIdx) :
+                            y;
+                    uint32_t remainingInYBlock = yAcutal - currentYoffset;
+                    uint32_t remainingInNBlock = kActual - processSize;
 
-                copyGmToL1B(l1BTile, gB[offsetInKV * strideKV], layoutBInL1, layoutBTile);
-
-                processSize += actualYSize;
-                currentYoffset += actualYSize;
-                offsetInKV += actualYSize;
-
-                if (currentYoffset >= yAcutal) {
-                    currentSelectYIdx++;
-                    if (currentSelectYIdx >= selectNum) {
+                    uint32_t actualYSize = min(remainingInNBlock, remainingInYBlock);
+                    if (actualYSize == 0) {
                         break;
                     }
-                    currentYoffset = 0;
-                    currentYIdx = gSelectIdx.GetValue(currentSelectYIdx);
-                    offsetInKV = currentYIdx * y;
+
+                    auto layoutBTile = layoutB.GetTileLayout(MakeCoord(actualYSize, nActual));
+                    MatrixCoord l1BTileCoord{blockStackIdx * L1TileShape::N + processSize, 0};
+                    auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BTileCoord)];
+
+                    uint64_t sourceOffset = offsetInKV * strideKV;
+                    if constexpr (PAGED_CACHE_FLAG_) {
+                        const uint32_t pageIdx = static_cast<uint32_t>(offsetInKV / pageSize);
+                        if (pageIdx != cachedLogicalPage) {
+                            cachedLogicalPage = pageIdx;
+                            cachedPhysicalPage = static_cast<uint32_t>(blockPages[pageIdx]);
+                        }
+                        sourceOffset =
+                            static_cast<uint64_t>(cachedPhysicalPage) * pageStride + (offsetInKV % pageSize) * strideKV;
+                    }
+                    copyGmToL1B(l1BTile, gB[sourceOffset], layoutBInL1, layoutBTile);
+
+                    processSize += actualYSize;
+                    currentYoffset += actualYSize;
+                    offsetInKV += actualYSize;
+
+                    if (currentYoffset >= yAcutal) {
+                        currentSelectYIdx++;
+                        if (currentSelectYIdx >= selectNum) {
+                            break;
+                        }
+                        currentYoffset = 0;
+                        currentYIdx = GbsaSparseGeometry::ReadSparseBlockId<HAS_RESIDUAL_BLOCK>(
+                            selectIdx, currentSelectYIdx, localExplicitBlockCount, residualBlockId);
+                        offsetInKV = static_cast<uint64_t>(currentYIdx) * y;
+                    }
                 }
             }
         }
 
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
+        if (streamV) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID4);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID4);
+        } else {
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID0);
+        }
 
         Arch::CrossCoreWaitFlag(softmaxFlag);
 
         uint32_t mL1Loop = CeilDiv<L1TileShape::M>(rowNum);
         uint32_t kL1Loop = CeilDiv<L1TileShape::K>(stackSeqTile);
-        for (uint32_t mL1Idx = 0; mL1Idx < mL1Loop; mL1Idx++) {
-            uint32_t mL1Actual = (mL1Idx < mL1Loop - 1) ? L1TileShape::M : (rowNum - mL1Idx * L1TileShape::M);
-            uint32_t mRound = RoundUp<L1AAlignHelper::M_ALIGNED>(mL1Actual);
-            AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(l0CPingPongFlag);
-            for (uint32_t kL1Idx = 0; kL1Idx < kL1Loop; kL1Idx++) {
-                uint32_t kL1Actual = (kL1Idx < kL1Loop - 1) ? L1TileShape::K : (stackSeqTile - kL1Idx * L1TileShape::K);
+        uint32_t nL1LoopN = CeilDiv<L0TileShape::N>(embed);
+        for (uint32_t nL1Idx = 0; nL1Idx < nL1LoopN; nL1Idx++) {
+            uint32_t nL1Actual = (nL1Idx < nL1LoopN - 1) ? L0TileShape::N : (embed - nL1Idx * L0TileShape::N);
+            for (uint32_t mL1Idx = 0; mL1Idx < mL1Loop; mL1Idx++) {
+                uint32_t mL1Actual = (mL1Idx < mL1Loop - 1) ? L1TileShape::M : (rowNum - mL1Idx * L1TileShape::M);
+                uint32_t mRound = RoundUp<L1AAlignHelper::M_ALIGNED>(mL1Actual);
+                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(l0CPingPongFlag);
+                for (uint32_t kL1Idx = 0; kL1Idx < kL1Loop; kL1Idx++) {
+                    uint32_t kL1Actual =
+                        (kL1Idx < kL1Loop - 1) ? L1TileShape::K : (stackSeqTile - kL1Idx * L1TileShape::K);
 
-                // load P
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1PPingPongFlag);
-                MatrixCoord gmATileCoord{mL1Idx * L1TileShape::M, kL1Idx * L1TileShape::K};
-                auto gmTileA = gA[layoutA.GetOffset(gmATileCoord)];
-                auto layoutTileA = layoutA.GetTileLayout(MakeCoord(mL1Actual, kL1Actual));
-                LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(mL1Actual, kL1Actual);
-                copyGmToL1A(l1ATensor[l1PPingPongFlag], gmTileA, layoutAInL1, layoutTileA);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1PPingPongFlag);
+                    // load P
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1PPingPongFlag);
+                    MatrixCoord gmATileCoord{mL1Idx * L1TileShape::M, kL1Idx * L1TileShape::K};
+                    auto gmTileA = gA[layoutA.GetOffset(gmATileCoord)];
+                    auto layoutTileA = layoutA.GetTileLayout(MakeCoord(mL1Actual, kL1Actual));
+                    LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(mL1Actual, kL1Actual);
+                    copyGmToL1A(l1ATensor[l1PPingPongFlag], gmTileA, layoutAInL1, layoutTileA);
+                    AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1PPingPongFlag);
 
-                uint32_t kL0Loop = CeilDiv<L0TileShape::K>(kL1Actual);
-                for (uint32_t kL0Idx = 0; kL0Idx < kL0Loop; kL0Idx++) {
-                    uint32_t kL0Actual =
-                        (kL0Idx < kL0Loop - 1) ? L0TileShape::K : (kL1Actual - kL0Idx * L0TileShape::K);
+                    uint32_t kL0Loop = CeilDiv<L0TileShape::K>(kL1Actual);
+                    for (uint32_t kL0Idx = 0; kL0Idx < kL0Loop; kL0Idx++) {
+                        uint32_t kL0Actual =
+                            (kL0Idx < kL0Loop - 1) ? L0TileShape::K : (kL1Actual - kL0Idx * L0TileShape::K);
 
-                    LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mL1Actual, kL0Actual);
-                    MatrixCoord l1ATileCoord{0, kL0Idx * L0TileShape::K};
-                    auto l1ATile = l1ATensor[l1PPingPongFlag][layoutAInL1.GetOffset(l1ATileCoord)];
+                        LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mL1Actual, kL0Actual);
+                        MatrixCoord l1ATileCoord{0, kL0Idx * L0TileShape::K};
+                        auto l1ATile = l1ATensor[l1PPingPongFlag][layoutAInL1.GetOffset(l1ATileCoord)];
 
-                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag);
-                    if (kL0Idx == 0) {
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1PPingPongFlag);
+                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag);
+                        if (kL0Idx == 0) {
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1PPingPongFlag);
+                        }
+                        copyL1ToL0A(l0ATensor[l0ABPingPongFlag], l1ATile, layoutAInL0, layoutAInL1);
+                        if (kL0Idx == kL0Loop - 1) {
+                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1PPingPongFlag);
+                        }
+
+                        LayoutBInL0 layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kL0Actual, nL1Actual);
+                        MatrixCoord l1BTileCoord{kL1Idx * L1TileShape::K + kL0Idx * L0TileShape::K,
+                                                 L0TileShape::N * nL1Idx};
+                        auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BTileCoord)];
+
+                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag + 2);
+                        if (streamV && kL1Idx == 0U && kL0Idx * L0TileShape::K == copySubTileTokens) {
+                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID4);
+                        }
+                        copyL1ToL0B(l0BTensor[l0ABPingPongFlag], l1BTile, layoutBInL0, layoutBInL1);
+
+                        AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
+                        bool initMmad = kL1Idx == 0 && kL0Idx == 0;
+                        tileMmad(l0CTensor[l0CPingPongFlag], l0ATensor[l0ABPingPongFlag], l0BTensor[l0ABPingPongFlag],
+                                 mRound, nL1Actual, kL0Actual, initMmad);
+                        if (streamV && kL1Idx == 0U && kL0Idx == 0U) {
+                            const auto& plan = kvCopyInfo[1];
+                            for (uint32_t ri = 0U; ri < plan.count; ++ri) {
+                                const auto& r = plan.records[ri];
+                                GbsaSparsePairCopy::Emit<false>(l1BTensor, gB, layoutBInL1,
+                                                                copySubTileTokens + r.dstRow, r.source, r.rows, r.ndNum,
+                                                                r.stride, embed, strideKV);
+                            }
+                            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID4);
+                        }
+                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag);
+                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag + 2);
+                        l0ABPingPongFlag = 1 - l0ABPingPongFlag;
                     }
-                    copyL1ToL0A(l0ATensor[l0ABPingPongFlag], l1ATile, layoutAInL0, layoutAInL1);
-                    if (kL0Idx == kL0Loop - 1) {
-                        AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1PPingPongFlag);
-                    }
-
-                    LayoutBInL0 layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kL0Actual, embed);
-                    MatrixCoord l1BTileCoord{kL1Idx * L1TileShape::K + kL0Idx * L0TileShape::K, 0};
-                    auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BTileCoord)];
-
-                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag + 2);
-                    copyL1ToL0B(l0BTensor[l0ABPingPongFlag], l1BTile, layoutBInL0, layoutBInL1);
-
-                    AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-                    bool initMmad = kL1Idx == 0 && kL0Idx == 0;
-                    tileMmad(l0CTensor[l0CPingPongFlag], l0ATensor[l0ABPingPongFlag], l0BTensor[l0ABPingPongFlag],
-                             mRound, embed, kL0Actual, initMmad);
-                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag);
-                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0ABPingPongFlag + 2);
-                    l0ABPingPongFlag = 1 - l0ABPingPongFlag;
+                    l1PPingPongFlag = 1 - l1PPingPongFlag;
                 }
-                l1PPingPongFlag = 1 - l1PPingPongFlag;
+                AscendC::SetFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
+                AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
+                MatrixCoord gmCTileCoord{mL1Idx * L0TileShape::M, L0TileShape::N * nL1Idx};
+                uint32_t nFixAligned = RoundUp(nL1Actual, 8U);
+                LayoutC layoutCTile = layoutC.GetTileLayout(MakeCoord(mL1Actual, nFixAligned));
+                auto layoutInL0C = LayoutCInL0::MakeLayoutInL0C(MakeCoord(mL1Actual, nL1Actual));
+                copyL0CToGm(gC[layoutC.GetOffset(gmCTileCoord)], l0CTensor[l0CPingPongFlag], layoutCTile, layoutInL0C);
+                AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CPingPongFlag);
+                l0CPingPongFlag = 1 - l0CPingPongFlag;
             }
-            AscendC::SetFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(EVENT_ID0);
-            MatrixCoord gmCTileCoord{mL1Idx * L0TileShape::M, 0};
-            LayoutC layoutCTile = layoutC.GetTileLayout(MakeCoord(mL1Actual, embed));
-            auto layoutInL0C = LayoutCInL0::MakeLayoutInL0C(MakeCoord(mL1Actual, embed));
-            copyL0CToGm(gC[layoutC.GetOffset(gmCTileCoord)], l0CTensor[l0CPingPongFlag], layoutCTile, layoutInL0C);
-            AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CPingPongFlag);
-            l0CPingPongFlag = 1 - l0CPingPongFlag;
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(EVENT_ID4);
     }

@@ -44,7 +44,11 @@ __aicore__ inline uint32_t CalculateConfigSignature(
     hash = HashConfigValue(hash, tilingData->residualBlockMode);
     hash = HashConfigValue(hash, tilingData->isConsistentTopk);
     // Preserve the existing causal signature; tag the new non-causal configuration.
+#if (__CCE_AICORE__ == 220)
+    if (tilingData->maskType == 0U) {
+#else
     if constexpr (!isCausal) {
+#endif
         hash = HashConfigValue(hash, 0U);
     }
     return hash;
@@ -156,6 +160,66 @@ __aicore__ inline bool DecodeTaskStorage(uint32_t taskIdx, uint32_t kvHeads, uin
         actualPrefix += actualLen;
     }
     return false;
+}
+
+struct TaskStorageCursor {
+    uint32_t batchIdx = 0U;
+    uint32_t actualStart = 0U;
+    uint32_t actualEnd = 0U;
+    uint32_t storageStart = 0U;
+    bool loaded = false;
+
+    template <class CuSeqTensor, class SeqUsedTensor>
+    __aicore__ inline bool Decode(uint32_t taskIdx, uint32_t kvHeads, uint32_t batch, CuSeqTensor& cu,
+                                  SeqUsedTensor& used, bool hasSeqUsedQ, uint32_t& qStorageToken,
+                                  uint32_t& qTokenInBatch, uint32_t& outBatchIdx, uint32_t& kvHeadIdx)
+    {
+        if (kvHeads == 0U) {
+            return false;
+        }
+        const uint32_t qToken = taskIdx / kvHeads;
+        kvHeadIdx = taskIdx % kvHeads;
+        if (qToken < actualStart) {
+            batchIdx = 0U;
+            actualStart = 0U;
+            actualEnd = 0U;
+            loaded = false;
+        }
+        while (batchIdx < batch) {
+            if (!loaded) {
+                storageStart = static_cast<uint32_t>(cu.GetValue(batchIdx));
+                const uint32_t len = hasSeqUsedQ ? static_cast<uint32_t>(used.GetValue(batchIdx)) :
+                                                   static_cast<uint32_t>(cu.GetValue(batchIdx + 1U)) - storageStart;
+                actualEnd = actualStart + len;
+                loaded = true;
+            }
+            if (qToken < actualEnd) {
+                outBatchIdx = batchIdx;
+                qTokenInBatch = qToken - actualStart;
+                qStorageToken = storageStart + qTokenInBatch;
+                return true;
+            }
+            actualStart = actualEnd;
+            ++batchIdx;
+            loaded = false;
+        }
+        return false;
+    }
+};
+
+template <class CuSeqTensor>
+__aicore__ inline uint32_t StorageQBlock(CuSeqTensor& cu, uint32_t batchIdx, uint32_t qTokenInBatch,
+                                         uint32_t qStorageToken, uint32_t blockX)
+{
+    if (blockX == 1U) {
+        return qStorageToken - static_cast<uint32_t>(cu.GetValue(0U));
+    }
+    uint32_t prefix = 0U;
+    for (uint32_t b = 0U; b < batchIdx; ++b) {
+        const uint32_t len = static_cast<uint32_t>(cu.GetValue(b + 1U) - cu.GetValue(b));
+        prefix += (len + blockX - 1U) / blockX;
+    }
+    return prefix + qTokenInBatch / blockX;
 }
 
 } // namespace GsaFd

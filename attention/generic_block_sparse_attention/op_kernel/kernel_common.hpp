@@ -74,6 +74,8 @@ struct GenericBlockSparseAttentionTilingData {
     uint32_t kvOffsetTileWords;
     uint32_t qSeqCapacity;
     uint32_t kvSeqCapacity;
+    // Mask mode consumed by arch22: 0 = none, 1 = built-in causal.
+    uint32_t maskType;
 };
 
 } // namespace GenericBlockSparseAttn

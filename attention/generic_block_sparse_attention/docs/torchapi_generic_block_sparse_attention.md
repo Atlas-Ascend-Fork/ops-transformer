@@ -149,7 +149,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 
 > [!NOTE]
 >
-> 枚举为 `IntEnum`，可直接作为 int 传入底层算子；接口仅支持传入枚举或对应 int 值。mask_mode支持1（`CAUSAL`），Ascend 950非量化FLOAT16/BFLOAT16场景另支持0（`NO_MASK`）；quant_mode 当前仅支持 0（`NO_QUANT`）与 5（`FP8_E4M3_STATIC_CAST_P`）。
+> 枚举为 `IntEnum`，可直接作为 int 传入底层算子；接口仅支持传入枚举或对应 int 值。mask_mode支持1（`CAUSAL`），<term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16场景另支持0（`NO_MASK`）；quant_mode 当前仅支持 0（`NO_QUANT`）与 5（`FP8_E4M3_STATIC_CAST_P`）。
 
 ## layout_sparse_pattern 取值与sparse_block_idx/sparse_block_count的shape对应关系说明
 
@@ -259,11 +259,31 @@ cann_ops_transformer.generic_block_sparse_attention(
 
 ### 产品差异约束
 
-- Ascend 950非量化FLOAT16/BFLOAT16场景：`head_dim`支持1～256的任意值；`layout_q/layout_kv`支持`TND/PA_BBND`、`TND/PA_BNBD`、`TND/TND`、`BSND/BSND`、`BNSD/BNSD`、`BSND/PA_BBND`、`BNSD/PA_BBND`、`BSND/PA_BNBD`和`BNSD/PA_BNBD`，不支持其他组合；`mask_mode`支持0（非因果）和1（causal）；`residual_block_mode`支持0或1。
-- 其余场景与Metadata配套使用时，`head_dim`仅支持128，`layout_kv`仅支持`"PA_BBND"`，`mask_mode`仅支持1，`residual_block_mode`仅支持0。
-- 稀疏索引最后一维容量：Ascend 950非量化FLOAT16/BFLOAT16场景支持1～INT32_MAX，其余场景支持1～256；容量均须不小于稀疏块有效计数的最大值。
-- `quant_mode`：Ascend 950支持0（非量化）或5（FP8量化）；Atlas A2/A3仅支持0。
-- `softmax_precision`：Ascend 950非量化FLOAT16/BFLOAT16场景支持0或1，FP8量化场景仅支持1；Atlas A2/A3上FLOAT16支持0或1，BFLOAT16仅支持0。
+<!-- npu="950" id7 -->
+- <term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16场景：`head_dim`支持1～256的任意值；`layout_q/layout_kv`支持`TND/PA_BBND`、`TND/PA_BNBD`、`TND/TND`、`BSND/BSND`、`BNSD/BNSD`、`BSND/PA_BBND`、`BNSD/PA_BBND`、`BSND/PA_BNBD`和`BNSD/PA_BNBD`，不支持其他组合；`mask_mode`支持0（非因果）和1（causal）；`residual_block_mode`支持0或1。
+<!-- end id7 -->
+<!-- npu="A3,910b" id8 -->
+- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>非量化FLOAT16/BFLOAT16场景：`head_dim`支持1～256的任意值；`layout_q/layout_kv`支持`TND/PA_BBND`和`TND/TND`；`block_shape=[1,Y]`，Y支持1、2、4、8、16、32、64、128；`mask_mode`支持0（非因果）和1（causal）；`residual_block_mode`支持0或1。TND KV须传入`cu_seqlens_kv`，Q/K/V按连续TND存储；causal模式下各batch须满足实际KV长度不小于实际Q长度。
+<!-- end id8 -->
+<!-- npu="950" id9 -->
+- <term>Ascend 950PR&950DT系列产品</term> FP8量化场景：`head_dim`仅支持128，`layout_q/layout_kv`仅支持`TND/PA_BBND`，`mask_mode=1`、`residual_block_mode=0`、`block_shape=[1,128]`。
+<!-- end id9 -->
+<!-- npu="950,A3,910b" id10 -->
+- 稀疏索引最后一维容量：<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>支持1～512，<term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16支持1～INT32_MAX，<term>Ascend 950PR&950DT系列产品</term> FP8量化支持1～256；容量均须不小于稀疏块有效计数的最大值。
+<!-- end id10 -->
+<!-- npu="950,A3,910b" id11 -->
+- `quant_mode`：<term>Ascend 950PR&950DT系列产品</term>支持0（非量化）或5（FP8量化）；<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>仅支持0。
+<!-- end id11 -->
+<!-- npu="950,A3,910b" id12 -->
+- `softmax_precision`：<term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16场景支持0或1，FP8量化场景仅支持1；<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>上FLOAT16支持0或1，BFLOAT16仅支持0。
+<!-- end id12 -->
+<!-- npu="A3,910b" id13 -->
+- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>支持在`layout_q=TND`、`layout_kv=PA_BBND`或`TND`、`residual_block_mode=0`或1时输出LSE。FP8量化场景不支持输出LSE。
+<!-- end id13 -->
+- 每组有效稀疏索引须非负、严格升序且不重复，位于前`sparse_block_count`个位置；随机升序即可，不要求等步长或物理页连续。
+<!-- npu="A3,910b" id14 -->
+- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>在`mask_mode=1`时，第q个有效Q token的KV可见长度为`kvLen-qLen+q+1`，q从0开始；`mask_mode=0`时可见长度为`kvLen`。`residual_block_mode=1`时显式列表只包含可见范围内的完整KV块，尾部不完整块由算子隐式加入，不计入`sparse_block_count`及topK容量。
+<!-- end id14 -->
 
 ### 特性参数组
 
@@ -484,7 +504,7 @@ cann_ops_transformer.generic_block_sparse_attention(
         <td rowspan="3">
             <ul>
                 <li>maxKvBlockCount：容量上限见<a href="#产品差异约束">产品差异约束</a></li>
-                <li>非量化场景支持block_shape=[1, Y]，Y为1-128任意整数；量化场景为[1,128]。</li>
+                <li>block_shape=[1,Y]。</li>
             </ul>
         </td>
     </tr>
@@ -507,6 +527,13 @@ cann_ops_transformer.generic_block_sparse_attention(
     </tr>
     </tbody>
     </table>
+
+<!-- npu="A3,910b" id15 -->
+- block_shape=[1,Y]：<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>的Y支持1、2、4、8、16、32、64、128。
+<!-- end id15 -->
+<!-- npu="950" id16 -->
+- <term>Ascend 950PR&950DT系列产品</term>非量化的Y支持1-128任意整数；量化场景为[1,128]。
+<!-- end id16 -->
 
 - metadata校验:
 

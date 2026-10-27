@@ -89,6 +89,8 @@ TILING_DATA_FIELD_DEF(uint32_t, kvOffsetTileWords);
 // Fixed per-batch storage capacities for BSND/BNSD. TND uses cuSeqLengths instead.
 TILING_DATA_FIELD_DEF(uint32_t, qSeqCapacity);
 TILING_DATA_FIELD_DEF(uint32_t, kvSeqCapacity);
+// Mask mode consumed by arch22: 0 = none, 1 = built-in causal.
+TILING_DATA_FIELD_DEF(uint32_t, maskType);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttention, GenericBlockSparseAttentionTilingData)
 

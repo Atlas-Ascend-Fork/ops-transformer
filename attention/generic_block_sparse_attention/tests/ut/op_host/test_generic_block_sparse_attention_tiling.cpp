@@ -51,6 +51,7 @@ constexpr float kScale = 1.0f / sqrt(static_cast<float>(kD));
 
 // Expected host tiling keys (BSA-style bitfields; must match GenerateTilingKey).
 constexpr uint64_t kFp16Tiling910B = 9200000071001002ULL;
+constexpr uint64_t kFp16TndTndTiling910B = 9200000030001002ULL;
 constexpr uint64_t kBf16Tiling910B = 9200000071023222ULL;
 constexpr uint64_t kFp16HalfSmTiling910B = 9200000071101002ULL;
 constexpr uint64_t kFp16Tiling950 = 9250000071101002ULL;
@@ -88,6 +89,25 @@ std::vector<gert::TilingContextPara::TensorDescription> MakeInputs(ge::DataType 
         {{{kBatch}, {kBatch}}, ge::DT_INT32, ge::FORMAT_ND},
         {{{kBatch, kMaxBlocks}, {kBatch, kMaxBlocks}}, ge::DT_INT32, ge::FORMAT_ND},
     };
+}
+
+std::vector<gert::TilingContextPara::TensorDescription> MakeDenseInputs(ge::DataType qkvDtype, int64_t headDim = kD,
+                                                                        int64_t topK = kTopK)
+{
+    auto inputs = MakeInputs(qkvDtype, headDim);
+    inputs[1] = {{{kS2, kN2, headDim}, {kS2, kN2, headDim}}, qkvDtype, ge::FORMAT_ND};
+    inputs[2] = inputs[1];
+    inputs[3] = {{{kN2, kTotalQBlocks, topK}, {kN2, kTotalQBlocks, topK}}, ge::DT_INT32, ge::FORMAT_ND};
+    inputs[12] = {{{kBatch + 1}, {kBatch + 1}}, ge::DT_INT64, ge::FORMAT_ND};
+    inputs[15] = {{}, ge::DT_UNDEFINED, ge::FORMAT_ND};
+    return inputs;
+}
+
+uint32_t ReadTilingU32(const TilingInfo& tilingInfo, size_t byteOffset)
+{
+    uint32_t value = 0;
+    std::memcpy(&value, tilingInfo.tilingData.get() + byteOffset, sizeof(uint32_t));
+    return value;
 }
 
 std::vector<gert::TilingContextPara::TensorDescription> MakeOutputs(ge::DataType outDtype, bool returnLse,
@@ -319,7 +339,7 @@ TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_layout_sparse_patte
 
 TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_residual_block_mode)
 {
-    for (int64_t residualMode : {-1, 1, 2}) {
+    for (int64_t residualMode : {-1, 2}) {
         SCOPED_TRACE(residualMode);
         GenericBlockSparseAttentionCompileInfo compileInfo;
         gert::TilingContextPara tilingContextPara(
@@ -365,11 +385,14 @@ TEST_F(generic_block_sparse_attention_tiling_ut, residual_none_and_consistent_to
 
 TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_mask_type)
 {
-    GenericBlockSparseAttentionCompileInfo compileInfo;
-    gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
-                                              MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(0, 0, 0, 0), &compileInfo,
-                                              "Ascend910B", 40, 196608);
-    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+    for (int64_t maskType : {-1, 2}) {
+        SCOPED_TRACE(maskType);
+        GenericBlockSparseAttentionCompileInfo compileInfo;
+        gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
+                                                  MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(maskType, 0, 0, 0),
+                                                  &compileInfo, "Ascend910B", 40, 196608);
+        ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+    }
 }
 
 TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_block_shape_x)
@@ -1043,8 +1066,8 @@ TEST_F(generic_block_sparse_attention_tiling_ut, topk_exceeds_max)
 {
     GenericBlockSparseAttentionCompileInfo compileInfo;
     auto inputs = MakeInputs(ge::DT_FLOAT16);
-    // topK is bounded by 256 on this build.
-    inputs[3] = {{{kN2, kTotalQBlocks, 257}, {kN2, kTotalQBlocks, 257}}, ge::DT_INT32, ge::FORMAT_ND};
+    // A2/A3 supports topK up to 512; 513 must be rejected.
+    inputs[3] = {{{kN2, kTotalQBlocks, 513}, {kN2, kTotalQBlocks, 513}}, ge::DT_INT32, ge::FORMAT_ND};
     gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
                                               MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
@@ -1161,4 +1184,85 @@ TEST_F(generic_block_sparse_attention_tiling_ut, seqused_q_not_1d)
     gert::TilingContextPara tilingContextPara("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
                                               MakeAttrs(1, 0, 0, 0), &compileInfo, "Ascend910B", 40, 196608);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, supported_dense_head_dim_910b)
+{
+    constexpr size_t kEmbeddingSizeOffset = 3U * sizeof(uint32_t);
+    constexpr size_t kFdStaticEnabledOffset = 120U;
+    for (int64_t headDim : {1, 17, 64, 128, 240, 256}) {
+        SCOPED_TRACE(headDim);
+        GenericBlockSparseAttentionCompileInfo compileInfo;
+        gert::TilingContextPara tilingContextPara(
+            "GenericBlockSparseAttention", MakeDenseInputs(ge::DT_FLOAT16, headDim),
+            MakeOutputs(ge::DT_FLOAT16, false, headDim), MakeAttrs(1, 0, 0, 0, 0.0f, -1, -1, 4, "TND", "TND"),
+            &compileInfo, "Ascend910B", 40, 196608);
+        TilingInfo tilingInfo;
+        ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo));
+        EXPECT_EQ(tilingInfo.tilingKey, static_cast<int64_t>(kFp16TndTndTiling910B));
+        ASSERT_NE(tilingInfo.tilingData, nullptr);
+        ASSERT_GT(tilingInfo.tilingDataSize, kFdStaticEnabledOffset + sizeof(uint32_t));
+        EXPECT_EQ(ReadTilingU32(tilingInfo, kEmbeddingSizeOffset), static_cast<uint32_t>(headDim));
+        EXPECT_EQ(ReadTilingU32(tilingInfo, kFdStaticEnabledOffset), 0U);
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, fd_enabled_dense_head_dim_17_910b)
+{
+    constexpr int64_t headDim = 17;
+    constexpr int64_t topK = 12;
+    constexpr size_t kEmbeddingSizeOffset = 3U * sizeof(uint32_t);
+    constexpr size_t kFdStaticEnabledOffset = 120U;
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara tilingContextPara(
+        "GenericBlockSparseAttention", MakeDenseInputs(ge::DT_FLOAT16, headDim, topK),
+        MakeOutputs(ge::DT_FLOAT16, false, headDim), MakeAttrs(1, 0, 0, 0, 0.0f, -1, -1, 4, "TND", "TND"), &compileInfo,
+        "Ascend910B", 40, 196608);
+    TilingInfo tilingInfo;
+    ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo));
+    EXPECT_EQ(tilingInfo.tilingKey, static_cast<int64_t>(kFp16TndTndTiling910B));
+    ASSERT_NE(tilingInfo.tilingData, nullptr);
+    ASSERT_GT(tilingInfo.tilingDataSize, kFdStaticEnabledOffset + sizeof(uint32_t));
+    EXPECT_EQ(ReadTilingU32(tilingInfo, kEmbeddingSizeOffset), static_cast<uint32_t>(headDim));
+    EXPECT_EQ(ReadTilingU32(tilingInfo, kFdStaticEnabledOffset), 1U);
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, unsupported_dense_head_dim_910b)
+{
+    for (int64_t headDim : {int64_t(0), int64_t(257)}) {
+        SCOPED_TRACE(headDim);
+        GenericBlockSparseAttentionCompileInfo compileInfo;
+        gert::TilingContextPara tilingContextPara(
+            "GenericBlockSparseAttention", MakeDenseInputs(ge::DT_FLOAT16, headDim),
+            MakeOutputs(ge::DT_FLOAT16, false, headDim), MakeAttrs(1, 0, 0, 0, 0.0f, -1, -1, 4, "TND", "TND"),
+            &compileInfo, "Ascend910B", 40, 196608);
+        ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, lse_all_arch22_layouts_and_residual_modes)
+{
+    for (auto dtype : {ge::DT_FLOAT16, ge::DT_BF16}) {
+        for (bool paged : {false, true}) {
+            for (int64_t residual : {0, 1}) {
+                for (int64_t mask : {0, 1}) {
+                    for (int64_t precision : {0, 1}) {
+                        if (dtype == ge::DT_BF16 && precision == 1) {
+                            continue;
+                        }
+                        GenericBlockSparseAttentionCompileInfo compileInfo;
+                        auto inputs = paged ? MakeInputs(dtype) : MakeDenseInputs(dtype);
+                        gert::TilingContextPara ctx("GenericBlockSparseAttention", inputs, MakeOutputs(dtype, true),
+                                                    MakeAttrs(mask, 0, precision, 1, 0.0f, -1, -1, 4, "TND",
+                                                              paged ? "PA_BBND" : "TND", residual),
+                                                    &compileInfo, "Ascend910B", 40, 196608);
+                        const uint64_t key = 9200000000000000ULL + (paged ? 71000000ULL : 30000000ULL) +
+                                             (dtype == ge::DT_BF16 ? 22220ULL : 0ULL) + precision * 100000ULL +
+                                             mask * 1000ULL + 2ULL + 100000000ULL + residual * 1000000000ULL;
+                        ExecuteTestCase(ctx, ge::GRAPH_SUCCESS, key);
+                    }
+                }
+            }
+        }
+    }
 }

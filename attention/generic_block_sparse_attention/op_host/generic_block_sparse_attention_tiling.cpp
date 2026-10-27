@@ -222,13 +222,13 @@ ge::graphStatus GBSATiling::ParseCapabilityAttrs(gert::TilingContext* context)
     if (residualModePtr != nullptr) {
         residualBlockMode_ = *residualModePtr;
     }
-    const bool residualModeSupported = residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_NONE ||
-                                       (residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE &&
-                                        socVer_ == SOC_VER_950_CODE && quantType_ == GBSA_QUANT_TYPE_NONE);
+    const bool residualModeSupported =
+        residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_NONE ||
+        (residualBlockMode_ == GBSA_RESIDUAL_BLOCK_MODE_FORCE && quantType_ == GBSA_QUANT_TYPE_NONE);
     if (!residualModeSupported) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "residual_block_mode",
                                               std::to_string(residualBlockMode_).c_str(),
-                                              "mode 1 only supports A5 non-quant currently");
+                                              "mode 1 only supports non-quant currently");
         return ge::GRAPH_FAILED;
     }
 
@@ -349,10 +349,10 @@ ge::graphStatus GBSATiling::GetInputLayout(gert::TilingContext* context)
                                               "PA_BNBD KV is only supported on chip 950");
         return ge::GRAPH_FAILED;
     }
-    if ((!isPaged_ || layoutQ_ != "TND") && socVer_ != SOC_VER_950_CODE) {
+    if (layoutQ_ != "TND" && socVer_ != SOC_VER_950_CODE) {
         OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "q_input_layout and kv_input_layout",
                                                ("layout_q=" + layoutQ_ + ", layout_kv=" + layoutKv_).c_str(),
-                                               "dense non-paged KV is only supported on chip 950");
+                                               "BSND/BNSD Q layouts are only supported on chip 950");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -564,6 +564,10 @@ ge::graphStatus GBSATiling::ParseQueryKeyShapes(gert::TilingContext* context)
             "invalid Q heads, headDim, batched capacity or Q/KV batch dimensions");
         return ge::GRAPH_FAILED;
     }
+    if (socVer_ != SOC_VER_950_CODE && q.GetDim(qRank - 1U) > GBSA_TILE_SIZE_256) {
+        OP_LOGE(context->GetNodeName(), "A2/A3 headDim must be in [1, 256].");
+        return ge::GRAPH_FAILED;
+    }
     for (size_t axis = 0; axis < kvRank; ++axis) {
         if (k.GetDim(axis) < 0 || k.GetDim(axis) > std::numeric_limits<int32_t>::max() ||
             k.GetDim(axis) != v.GetDim(axis)) {
@@ -691,9 +695,10 @@ ge::graphStatus GBSATiling::ParseSparseTensors(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
     constexpr int64_t GBSA_LEGACY_MAX_TOPK = 256;
+    constexpr int64_t GBSA_ARCH22_MAX_TOPK = 512;
     const int64_t maxTopK = socVer_ == SOC_VER_950_CODE && quantType_ == GBSA_QUANT_TYPE_NONE ?
                                 std::numeric_limits<int32_t>::max() :
-                                GBSA_LEGACY_MAX_TOPK;
+                                (socVer_ != SOC_VER_950_CODE ? GBSA_ARCH22_MAX_TOPK : GBSA_LEGACY_MAX_TOPK);
     if (topK > maxTopK) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
             context->GetNodeName(), "sparseBlockIdx",
@@ -854,13 +859,11 @@ ge::graphStatus GBSATiling::CalculateWorkSpace(gert::TilingContext* context)
     if (socVer_ != SOC_VER_950_CODE) {
         constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = 131072;
         constexpr uint32_t NUM3 = 3;
-        // Identity reserved after S/P/O buffers (must match kernel layout).
         mm1OutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
         smOnlineOutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(uint16_t) * NUM3;
         mm2OutSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
         updateSize_ = static_cast<uint64_t>(blockDim_) * WORKSPACE_BLOCK_SIZE_DB * sizeof(float) * NUM3;
-        uint64_t identityIdxSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
-        pipelineWorkspaceSize = mm1OutSize_ + smOnlineOutSize_ + mm2OutSize_ + updateSize_ + identityIdxSize;
+        pipelineWorkspaceSize = mm1OutSize_ + smOnlineOutSize_ + mm2OutSize_ + updateSize_;
     } else {
         pipelineWorkspaceSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
         if (quantType_ == 0U && embeddingSize_ > GBSA_TILE_SIZE_256 && qBaseTile_ > GBSA_TILE_SIZE_64) {
@@ -1090,13 +1093,6 @@ ge::graphStatus GBSATiling::CheckSoftmaxPrecision(gert::TilingContext* context)
 
 ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
 {
-    if (blockShapeY_ != 128U &&
-        (socVer_ != SOC_VER_950_CODE || quantType_ != 0 || (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16))) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "block_shape_y",
-                                              std::to_string(blockShapeY_).c_str(),
-                                              "generalized blockShapeY requires arch35 FP16/BF16 quantType=0");
-        return ge::GRAPH_FAILED;
-    }
     // Full-quant contract: quantType=5 iff Q/K/V dtype is FLOAT8_E4M3FN; FP8 only on 950.
     if ((!isPaged_ || layoutQ_ != "TND") &&
         (quantType_ != 0 || (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16))) {
@@ -1117,10 +1113,9 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
             "FP8 full-quant requires quantType=5 with FLOAT8_E4M3FN query/key/value");
         return ge::GRAPH_FAILED;
     }
-    if (maskType_ == 0 && (socVer_ != SOC_VER_950_CODE || isQuant5)) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-            context->GetNodeName(), "mask_type", std::to_string(maskType_).c_str(),
-            "non-causal attention (mask_type=0) only supports chip 950 FP16/BF16 non-quant");
+    if (maskType_ == 0 && isQuant5) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "mask_type", std::to_string(maskType_).c_str(),
+                                              "non-causal attention (mask_type=0) only supports FP16/BF16 non-quant");
         return ge::GRAPH_FAILED;
     }
     if (isQuant5 && socVer_ != SOC_VER_950_CODE) {
@@ -1135,15 +1130,38 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
             "returnSoftmaxlse=1 is not supported for the FP8 full-quant path");
         return ge::GRAPH_FAILED;
     }
+    if (blockShapeY_ != 128U) {
+        const bool arch35NonQuant =
+            socVer_ == SOC_VER_950_CODE && quantType_ == 0 && (dataType_ == ge::DT_FLOAT16 || dataType_ == ge::DT_BF16);
+        const bool arch22NonQuant =
+            socVer_ != SOC_VER_950_CODE && quantType_ == 0 && (dataType_ == ge::DT_FLOAT16 || dataType_ == ge::DT_BF16);
+        const bool supportedArch22DenseY =
+            blockShapeY_ >= 1U && blockShapeY_ <= 128U && (blockShapeY_ & (blockShapeY_ - 1U)) == 0U;
+        const bool supportedArch22PagedY =
+            blockShapeY_ >= 1U && blockShapeY_ <= 128U && (blockShapeY_ & (blockShapeY_ - 1U)) == 0U;
+        const bool arch22DenseNonQuant = arch22NonQuant && !isPaged_ && layoutKv_ == "TND" && supportedArch22DenseY;
+        const bool arch22PagedNonQuant = arch22NonQuant && isPaged_ && layoutKv_ == "PA_BBND" && blockSize_ == 128U &&
+                                         supportedArch22PagedY && (128U % blockShapeY_) == 0U;
+        if (!arch35NonQuant && !arch22DenseNonQuant && !arch22PagedNonQuant) {
+            OP_LOGE(context->GetNodeName(),
+                    "Generalized blockShapeY=%u requires arch35 FP16/BF16 quantType=0, or arch22 "
+                    "FP16/BF16 quantType=0 with power-of-two Y in [1, 128] (PA page size 128).",
+                    blockShapeY_);
+            return ge::GRAPH_FAILED;
+        }
+    }
     if (socVer_ == SOC_VER_950_CODE && !isQuant5 && embeddingSize_ > GBSA_TILE_SIZE_256) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "embedding_size",
                                               std::to_string(embeddingSize_).c_str(),
                                               "on chip 950 FP16/BF16 non-quant currently supports headDim up to 256");
         return ge::GRAPH_FAILED;
     }
-    const bool fdHeadDimSupported = embeddingSize_ == GBSA_TILE_SIZE_128 ||
-                                    (socVer_ == SOC_VER_950_CODE && !isQuant5 && embeddingSize_ <= GBSA_TILE_SIZE_256);
-    fdStaticEnabled_ = topK_ >= 12U && fdHeadDimSupported;
+    const bool fdHeadDimSupported =
+        socVer_ == SOC_VER_950_CODE ?
+            (embeddingSize_ == GBSA_TILE_SIZE_128 || (!isQuant5 && embeddingSize_ <= GBSA_TILE_SIZE_256)) :
+            (embeddingSize_ >= 1U && embeddingSize_ <= GBSA_TILE_SIZE_256);
+    constexpr uint32_t GBSA_FD_MAX_TOPK = 512U;
+    fdStaticEnabled_ = topK_ >= 12U && fdHeadDimSupported && (socVer_ == SOC_VER_950_CODE || topK_ <= GBSA_FD_MAX_TOPK);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1319,6 +1337,7 @@ ge::graphStatus GBSATiling::FillTilingData(gert::TilingContext* context)
     tilingData_->set_kvSeqCapacity(kvSeqCapacity_);
     tilingData_->set_totalQTokens(totalQTokens_);
     tilingData_->set_totalKvTokens(totalKvTokens_);
+    tilingData_->set_maskType(static_cast<uint32_t>(maskType_));
 
     return ge::GRAPH_SUCCESS;
 }
@@ -1340,6 +1359,8 @@ ge::graphStatus GBSATiling::GetTiling(gert::TilingContext* context, GenericBlock
     if (socVer_ == SOC_VER_950_CODE && quantType_ == GBSA_QUANT_TYPE_NONE) {
         CalcBaseTileTilingParams950();
         CalcMatmulPhaseL1TileInfo950();
+    } else if (socVer_ != SOC_VER_950_CODE) {
+        kvBaseTile_ = GBSA_TILE_SIZE_256;
     }
     ret = CalculateWorkSpace(context);
     if (ret != ge::GRAPH_SUCCESS) {

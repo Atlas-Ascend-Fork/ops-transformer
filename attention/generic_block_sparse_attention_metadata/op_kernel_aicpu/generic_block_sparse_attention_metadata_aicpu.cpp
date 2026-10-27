@@ -180,7 +180,6 @@ bool GenericBlockSparseAttentionMetadataAicpu::CheckKvSeqLens() const
         return false;
     }
     // Per-batch values are validated while Q and KV lengths are parsed together.
-    // The main kernel checks cu[B] against the actual KV tensor capacity.
     return true;
 }
 
