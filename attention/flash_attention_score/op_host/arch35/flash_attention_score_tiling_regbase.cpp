@@ -54,7 +54,7 @@ ge::graphStatus FlashAttentionScoreTilingRegbase::GetPlatformInfo()
     auto platformInfoPtr = context_->GetPlatformInfo();
     if (platformInfoPtr == nullptr) {
         auto compileInfoPtr = reinterpret_cast<const FlashAttentionScoreCompileInfo*>(context_->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, ReportTilingFailure(opName, "compileInfoPtr is null."),
+        OP_CHECK_IF(compileInfoPtr == nullptr, OPS_REPORT_VECTOR_INNER_ERR(opName, "compileInfoPtr is null."),
                     return ge::GRAPH_FAILED);
         aivNum = compileInfoPtr->aivNum;
         aicNum = compileInfoPtr->aicNum;
@@ -340,7 +340,7 @@ bool FlashAttentionScoreTilingRegbase::GetActualSeqLenData(int64_t inputIdx, std
     try {
         res.reserve(seqLen);
     } catch (...) {
-        ReportTilingFailure(opName, "Init actual_seq_len failed, array is too long.");
+        OPS_REPORT_VECTOR_INNER_ERR(opName, "Init actual_seq_len failed, array is too long.");
         return false;
     }
     res.emplace_back(value[0]);
@@ -591,11 +591,11 @@ ge::graphStatus FlashAttentionScoreTilingRegbase::GetShapeAttrsInfo()
 {
     opName = context_->GetNodeName();
     OP_LOGD(opName, "TilingContext: %s.", GetTilingContextDebugStr().c_str());
-    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(opName, "invalid context."),
+    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OPS_REPORT_VECTOR_INNER_ERR(opName, "invalid context."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(!AnalyzeAttrs() || !AnalyzeDtype() || !AnalyzeLayout() || !AnalyzeOptionalInput(),
-                OP_LOGE_WITHOUT_REPORT(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
+                OPS_REPORT_VECTOR_INNER_ERR(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
 
     if (inputDtype == ge::DT_HIFLOAT8) {
         if (hasAttenMask || hasPse || hasDropOut || hasRope) {
@@ -606,7 +606,7 @@ ge::graphStatus FlashAttentionScoreTilingRegbase::GetShapeAttrsInfo()
             return ge::GRAPH_FAILED;
         }
         if (tilingKeyLayout != LayoutType::LAYOUT_BSND) {
-            OP_LOGE_FOR_INVALID_VALUE(opName, "input_layout", inputLayout, "BSND");
+            OP_LOGE_WITH_INVALID_ATTR(opName, "input_layout", inputLayout, "BSND");
             return ge::GRAPH_FAILED;
         }
         if (bSize != 1) {
@@ -780,10 +780,10 @@ bool FlashAttentionScoreTilingRegbase::AnalyzePseOptionalInput()
             }
         } else if (inputParamsRegbase_->get_layoutType() == static_cast<uint8_t>(LayoutType::LAYOUT_TND)) {
             OP_CHECK_IF(!AnalyzeTndPseOptionalInput(pseShapeType, pseShapeDims, pseDimNum, pseBSize),
-                        OP_LOGE_WITHOUT_REPORT(opName, "Analyze tnd mode pse shape fail."), return false);
+                        OPS_REPORT_VECTOR_INNER_ERR(opName, "Analyze tnd mode pse shape fail."), return false);
         } else {
             OP_CHECK_IF(!AnalyzeGeneralPseOptionalInput(pseShapeType, pseShapeDims, pseDimNum, pseBSize),
-                        OP_LOGE_WITHOUT_REPORT(opName, "Analyze general pse shape fail."), return false);
+                        OPS_REPORT_VECTOR_INNER_ERR(opName, "Analyze general pse shape fail."), return false);
         }
         inputParamsRegbase_->set_pseBSize(static_cast<uint32_t>(pseBSize));
     }
@@ -893,10 +893,10 @@ bool FlashAttentionScoreTilingRegbase::AnalyzeAttenOptionalInput()
         size_t attenMaskDimNum = attenMaskStorageShape.GetDimNum();
         if (attenMaskDimNum == ATTENTION_MASK_DIM_NUM_4) {
             OP_CHECK_IF(!Analyze4DimAttenOptionalInput(attenMaskShapeType, attenMaskStorageShape),
-                        OP_LOGE_WITHOUT_REPORT(opName, "Analyze dim 4 attenmask shape fail."), return false);
+                        OPS_REPORT_VECTOR_INNER_ERR(opName, "Analyze dim 4 attenmask shape fail."), return false);
         } else if (attenMaskDimNum == ATTENTION_MASK_DIM_NUM_2) {
             OP_CHECK_IF(!Analyze2DimAttenOptionalInput(attenMaskShapeType, attenMaskStorageShape),
-                        OP_LOGE_WITHOUT_REPORT(opName, "Analyze dim 2 attenmask shape fail."), return false);
+                        OPS_REPORT_VECTOR_INNER_ERR(opName, "Analyze dim 2 attenmask shape fail."), return false);
         } else {
             OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "atten_mask",
                                          (std::to_string(attenMaskDimNum) + "D").c_str(), "2D or 4D");
@@ -905,7 +905,7 @@ bool FlashAttentionScoreTilingRegbase::AnalyzeAttenOptionalInput()
 
         inputParamsRegbase_->set_attenMaskShapeType(static_cast<uint8_t>(attenMaskShapeType));
         OP_CHECK_IF(!AnalyzeAttenOptionalInputDimNumLimit(attenMaskStorageShape, attenMaskDimNum),
-                    OP_LOGE_WITHOUT_REPORT(opName, "Analyze attenmask dim num limit error."), return false);
+                    OPS_REPORT_VECTOR_INNER_ERR(opName, "Analyze attenmask dim num limit error."), return false);
         inputParamsRegbase_->set_attenMaskS2Size(attenMaskStorageShape.GetDim(attenMaskDimNum - 1));
     }
     return true;
@@ -1144,7 +1144,7 @@ bool FlashAttentionScoreTilingRegbase::AnalyzeOptionalInput()
 {
     OP_CHECK_IF(!AnalyzePseOptionalInput() || !AnalyzeAttenOptionalInput() || !AnalyzeDropOptionalInput() ||
                     !AnalyzeFp8OptionalInput() || !AnalyzeSinkOptionalInput(),
-                OP_LOGE_WITHOUT_REPORT(opName, "Analyze Optional Input error."), return false);
+                OPS_REPORT_VECTOR_INNER_ERR(opName, "Analyze Optional Input error."), return false);
     OP_LOGD(context_, "hasPse: %d, hasAttenMask: %d, hasDropOut: %d, dropMaskOuter %d, hasSink: %d.", hasPse,
             hasAttenMask, hasDropOut, dropMaskOuter, hasSink);
     return true;
@@ -1198,7 +1198,7 @@ ge::graphStatus FlashAttentionScoreTilingRegbase::DoOpTiling()
     CalcDVBasicBlock();
     CalcS1S2BasicBlock();
     SparseEnum sparseType = SparseEnum::ALL;
-    OP_CHECK_IF(!GetSparseInfo(sparseType), OP_LOGE_WITHOUT_REPORT(opName, "fail to get sparse info."),
+    OP_CHECK_IF(!GetSparseInfo(sparseType), OPS_REPORT_VECTOR_INNER_ERR(opName, "fail to get sparse info."),
                 return ge::GRAPH_FAILED);
     SetSparseTilingInfo(sparseType);
     inputParamsRegbase_->set_implMode(static_cast<uint8_t>(implMode));
@@ -1221,7 +1221,7 @@ ge::graphStatus FlashAttentionScoreTilingRegbase::DoOpTiling()
     SetMultiCoreParamsRegbase(totalSize, static_cast<int64_t>(aicNum));
     SetSplitCoreModeParam();
     SetSparseParamsRegbase(static_cast<int64_t>(aicNum));
-    OP_CHECK_IF(!SetPseAlibiParamsRegbase(), OP_LOGE_WITHOUT_REPORT(opName, "fail to set pse alibi info."),
+    OP_CHECK_IF(!SetPseAlibiParamsRegbase(), OPS_REPORT_VECTOR_INNER_ERR(opName, "fail to set pse alibi info."),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -1505,12 +1505,9 @@ bool FlashAttentionScoreTilingRegbase::SparseBandModeCheck(int64_t maxS1Val, int
             sparseType = SparseEnum::BAND;
             return true;
         } else {
-            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                context_->GetNodeName(), "preTokens and nextTokens",
-                ("preTokens = " + std::to_string(oriPreTokens) + ", nextTokens = " + std::to_string(oriNextTokens))
-                    .c_str(),
-                ("there is no valid data block for the current band sparse mode: S1 = " + std::to_string(minS1Val))
-                    .c_str());
+            OP_LOGE(context_,
+                    "PreTokens[%ld] and nextTokens[%ld] config error with S1[%ld], there is no valid data block.",
+                    oriPreTokens, oriNextTokens, minS1Val);
             return false;
         }
     }
@@ -1526,12 +1523,9 @@ bool FlashAttentionScoreTilingRegbase::SparseBandModeCheck(int64_t maxS1Val, int
             sparseType = SparseEnum::BAND;
             return true;
         } else {
-            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                context_->GetNodeName(), "preTokens and nextTokens",
-                ("preTokens = " + std::to_string(oriPreTokens) + ", nextTokens = " + std::to_string(oriNextTokens))
-                    .c_str(),
-                ("there is no valid data block for the current band sparse mode: S2 = " + std::to_string(minS2Val))
-                    .c_str());
+            OP_LOGE(context_,
+                    "PreTokens[%ld] and nextTokens[%ld] config error with S2[%ld], there is no valid data block.",
+                    oriPreTokens, oriNextTokens, minS2Val);
             return false;
         }
     }
@@ -1549,7 +1543,7 @@ bool FlashAttentionScoreTilingRegbase::SparseModeProcess(SparseEnum& sparseType)
         std::ostringstream failReason;
         sparseType = GetPrefixNList(failReason);
         if (sparseType != SparseEnum::PREFIX && sparseMode == static_cast<int64_t>(SparseMode::PREFIX_COMPRESS)) {
-            OP_LOGE_WITHOUT_REPORT(context_, "[%s] %s.", templateName, failReason.str().c_str());
+            OP_LOGE(context_, "[%s] %s.", templateName, failReason.str().c_str());
             return false;
         }
 
@@ -1559,9 +1553,7 @@ bool FlashAttentionScoreTilingRegbase::SparseModeProcess(SparseEnum& sparseType)
             inputParamsRegbase_->get_attenMaskShapeType() !=
                 static_cast<uint8_t>(AttenMaskShapeType::ATTEN_B_1_1_S1_S2) &&
             bSize != 1) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                context_->GetNodeName(), "atten_mask shape", "invalid shape under prefix mode",
-                "the shape of input atten_mask should be [BNSS] or [B1SS] under prefix mode");
+            OP_LOGE(context_, "Prefix mode get invalid atten_mask shape, should be [BNSS] or [B1SS].");
             return false;
         }
     }

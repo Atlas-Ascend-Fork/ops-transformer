@@ -12,8 +12,6 @@
 #define ARCH35_FLASH_ATTENTION_SCORE_TILING_REGBASE_H_
 
 #include <numeric>
-#include <string>
-#include <vector>
 #include <alog_pub.h>
 #include <tiling/tiling_api.h>
 #include "op_host/tiling_base.h"
@@ -27,16 +25,6 @@
 using namespace Ops::Transformer::OpTiling;
 namespace optiling {
 namespace FA {
-// Report a tiling failure caused by internal computation/registration errors under legal inputs with the
-// registered formal code EZ1008, instead of an illegal internal code (EZ9999/E89999).
-inline void ReportTilingFailure(const char* opName, const char* reason)
-{
-    OP_LOGE_WITHOUT_REPORT(opName, "%s\n", reason);
-    const std::vector<const char*> msgKey = {"op_name", "reason"};
-    const std::vector<const char*> msgvalue = {opName, reason};
-    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
-}
-
 static const int64_t DN_D_64 = 64L;
 static const int64_t DN_S1_128 = 128L;
 static const uint32_t NUM_10 = 10;

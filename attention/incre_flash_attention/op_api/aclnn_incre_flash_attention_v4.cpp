@@ -8,7 +8,6 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "base/err_msg.h"
 #include "opdev/op_log.h"
 #include "opdev/common_types.h"
 #include "opdev/platform.h"
@@ -29,11 +28,8 @@ aclnnStatus aclnnIncreFlashAttentionV4GetWorkspaceSize(
     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510) {
-        REPORT_PREDEFINED_ERR_MSG(
-            "EZ1009", (std::vector<const char*>{"opName", "reason"}),
-            (std::vector<const char*>{"aclnnIncreFlashAttentionV4",
-                                      "Interface aclnnIncreFlashAttention versions V1 to V4 are no longer supported "
-                                      "on Ascend950."}));
+        OP_LOGE(ACLNN_ERR_RUNTIME_ERROR,
+                "Interface aclnnIncreFlashAttention versions V1 to V4 are no longer supported on Ascend950.");
         return ACLNN_ERR_RUNTIME_ERROR;
     }
     aclnnStatus ret = aclnnInnerIncreFlashAttentionGetWorkspaceSize(
@@ -48,11 +44,8 @@ aclnnStatus aclnnIncreFlashAttentionV4(void* workspace, uint64_t workspaceSize, 
                                        const aclrtStream stream)
 {
     if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510) {
-        REPORT_PREDEFINED_ERR_MSG(
-            "EZ1009", (std::vector<const char*>{"opName", "reason"}),
-            (std::vector<const char*>{"aclnnIncreFlashAttentionV4",
-                                      "Interface aclnnIncreFlashAttention versions V1 to V4 are no longer supported "
-                                      "on Ascend950."}));
+        OP_LOGE(ACLNN_ERR_RUNTIME_ERROR,
+                "Interface aclnnIncreFlashAttention versions V1 to V4 are no longer supported on Ascend950.");
         return ACLNN_ERR_RUNTIME_ERROR;
     }
     aclnnStatus ret = aclnnInnerIncreFlashAttention(workspace, workspaceSize, executor, stream);

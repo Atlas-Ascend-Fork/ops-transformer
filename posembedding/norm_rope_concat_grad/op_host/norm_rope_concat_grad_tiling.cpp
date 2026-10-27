@@ -13,32 +13,12 @@
  * \brief
  */
 
-#include <string>
 #include "norm_rope_concat_grad_tiling.h"
 #include "err/ops_err.h"
 
 using namespace ge;
 using namespace AscendC;
 namespace optiling {
-// 合法输入下 Tiling 失败时，按 EZ1008 正式错误码首报（Arglist: op_name, reason），并输出 PLOG 上下文
-inline void ReportTilingFailure(const char* opName, const char* reason)
-{
-    OP_LOGE_WITHOUT_REPORT(opName, "%s\n", reason);
-    const std::vector<const char*> msgKey = {"op_name", "reason"};
-    const std::vector<const char*> msgvalue = {opName, reason};
-    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
-}
-
-// 将 StorageShape 渲染为 "[d0,d1,...]" 形式，供错误码消息的 incorrect_shape 字段使用
-static std::string ShapeToString(const gert::Shape& shape)
-{
-    std::string result = "[";
-    for (size_t i = 0; i < shape.GetDimNum(); ++i) {
-        result += (i == 0 ? "" : ",") + std::to_string(shape.GetDim(i));
-    }
-    return result + "]";
-}
-
 ge::graphStatus NormRopeConcatGradTiling::CheckInput(const InputTensorInfo& x)
 {
     if (x.isRequired) {
@@ -49,17 +29,10 @@ ge::graphStatus NormRopeConcatGradTiling::CheckInput(const InputTensorInfo& x)
     if (x.desc != nullptr) {
         if (x.type == TensorType::GRADIENT_NORM_TENSOR) {
             OP_CHECK_IF(x.desc->GetDataType() != ge::DT_FLOAT,
-                        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-                            context_.opName, BACKWARD_INPUT_NAME[x.index],
-                            ge::TypeUtils::DataTypeToSerialString(x.desc->GetDataType()).c_str(),
-                            "the dtype of norm mean or rstd must be float"),
+                        OP_LOGE(context_.opName, "Check dtype Failed, norm mean or rstd dtype should be float!"),
                         return ge::GRAPH_FAILED);
         } else {
-            OP_CHECK_IF(x.desc->GetDataType() != inputDtype_,
-                        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-                            context_.opName, BACKWARD_INPUT_NAME[x.index],
-                            ge::TypeUtils::DataTypeToSerialString(x.desc->GetDataType()).c_str(),
-                            "the dtype of this input must be the same as grad_query_output"),
+            OP_CHECK_IF(x.desc->GetDataType() != inputDtype_, OP_LOGE(context_.opName, "Check dtype Failed!"),
                         return ge::GRAPH_FAILED);
         }
     }
@@ -69,107 +42,78 @@ ge::graphStatus NormRopeConcatGradTiling::CheckInput(const InputTensorInfo& x)
             case TensorType::INPUT_TENSOR:
             case TensorType::ENCODER_TENSOR:
                 OP_CHECK_IF(shape.GetDimNum() != INPUT_DIM_NUM,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, BACKWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 4"),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE(context_.opName, "Shape Dims of tensor should be 4"), return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(BATCH_DIM) != batchSize_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the batch dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should be batchSize_(%lu)",
+                                    shape.GetDim(BATCH_DIM), batchSize_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(HEAD_DIM) != headNum_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the head dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM2(%ld) Value of Shape should be headNum_(%lu)",
+                                    shape.GetDim(HEAD_DIM), headNum_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(DIM_DIM) != headDim_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the last dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM3(%ld) Value of Shape should be headDim_(%lu)",
+                                    shape.GetDim(DIM_DIM), headDim_),
                             return ge::GRAPH_FAILED);
                 break;
             case TensorType::GRADIENT_TENSOR:
                 OP_CHECK_IF(shape.GetDimNum() != INPUT_DIM_NUM,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, BACKWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 4"),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE(context_.opName, "Shape Dims of tensor should be 4"), return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(BATCH_DIM) != batchSize_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the batch dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should be batchSize_(%lu)",
+                                    shape.GetDim(BATCH_DIM), batchSize_),
                             return ge::GRAPH_FAILED);
-                OP_CHECK_IF(shape.GetDim(GRAD_SEQ_DIM) < ropeSeq_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the seq dim of this input must not be smaller than the rope seq length"),
-                            return ge::GRAPH_FAILED);
+                OP_CHECK_IF(
+                    shape.GetDim(GRAD_SEQ_DIM) < ropeSeq_,
+                    OP_LOGE(context_.opName, "DIM2(%ld) Value of Shape should not be smaller than ropeSeq_(%lu)",
+                            shape.GetDim(GRAD_SEQ_DIM), ropeSeq_),
+                    return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(GRAD_HEAD_DIM) != headNum_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the head dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM1(%ld) Value of Shape should be headNum_(%lu)",
+                                    shape.GetDim(GRAD_HEAD_DIM), headNum_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(DIM_DIM) != headDim_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the last dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM3(%ld) Value of Shape should be headDim_(%lu)",
+                                    shape.GetDim(DIM_DIM), headDim_),
                             return ge::GRAPH_FAILED);
                 break;
             case TensorType::NORM_TENSOR:
-                OP_CHECK_IF(shape.GetDimNum() != 1,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, BACKWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 1"),
+                OP_CHECK_IF(shape.GetDimNum() != 1, OP_LOGE(context_.opName, "Shape Dims of tensor should be 1"),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(0) != headDim_, // NOTE: not support cross heads
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the dim of this input must equal the head dim of query"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should be headDim_(%lu)",
+                                    shape.GetDim(0), headDim_),
                             return ge::GRAPH_FAILED);
                 break;
             case TensorType::GRADIENT_NORM_TENSOR:
                 OP_CHECK_IF(shape.GetDimNum() != INPUT_DIM_NUM,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, BACKWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 4"),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE(context_.opName, "Shape Dims of tensor should be 4"), return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(BATCH_DIM) != batchSize_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the batch dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should be Seq_(%lu)", shape.GetDim(0),
+                                    batchSize_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(HEAD_DIM) != headNum_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the head dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM2(%ld) Value of Shape should be headNum_(%lu)",
+                                    shape.GetDim(2), headNum_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(DIM_DIM) != 1,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_.opName, BACKWARD_INPUT_NAME[x.index],
-                                                                  ShapeToString(shape).c_str(),
-                                                                  "the last dim of this input must be 1"),
+                            OP_LOGE(context_.opName, "DIM3(%ld) Value of Shape should be 1", shape.GetDim(DIM_DIM)),
                             return ge::GRAPH_FAILED);
                 break;
             case TensorType::ROPE_TENSOR:
                 OP_CHECK_IF(shape.GetDimNum() != ROPE_DIM_NUM,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, BACKWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 2"),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE(context_.opName, "Shape Dims of tensor should be 2"), return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(ROPE_SEQ_DIM) > maxSeq_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the seq dim of this input must not exceed the max sequence length"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should smaller than maxSeq_(%lu)",
+                                    shape.GetDim(ROPE_SEQ_DIM), maxSeq_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(ROPE_SEQ_DIM) != ropeSeq_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the seq dim of this input must equal the rope seq length"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should be ropeSeq_(%lu)",
+                                    shape.GetDim(ROPE_SEQ_DIM), ropeSeq_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(ROPE_DIM_DIM) != headDim_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, BACKWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the dim of this input must equal the head dim of query"),
+                            OP_LOGE(context_.opName, "DIM1(%ld) Value of Shape should be headDim_(%lu)",
+                                    shape.GetDim(ROPE_DIM_DIM), headDim_),
                             return ge::GRAPH_FAILED);
                 break;
             default:
@@ -182,8 +126,7 @@ ge::graphStatus NormRopeConcatGradTiling::CheckInput(const InputTensorInfo& x)
 ge::graphStatus NormRopeConcatGradTiling::CheckInput()
 {
     OP_CHECK_IF((headDim_ % 2 != 0) || (headDim_ > 1024),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "query", std::to_string(headDim_).c_str(),
-                                                      "the last dim of query must be even and not greater than 1024"),
+                OP_LOGE(context_.opName, "headDim of shape value should be even number and smaller than 1024 "),
                 return ge::GRAPH_FAILED);
 
     for (size_t i = 0; i < context_.maxInputNum; ++i) {
@@ -191,8 +134,15 @@ ge::graphStatus NormRopeConcatGradTiling::CheckInput()
             return ge::GRAPH_FAILED;
         }
     }
-    // total*Seq_ / valueSeq_ / encoderValueSeq_ 均在本函数之前的 GetShapeInfo() 中由其组成项直接赋值，
-    // 此处再与同一表达式比较恒不成立，原检查为不可达死代码，已删除。
+    OP_CHECK_IF(totalQuerySeq_ != querySeq_ + encoderQuerySeq_,
+                OP_LOGE(context_.opName, "totalQuerySeq_ != querySeq_ + encoderQuerySeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(totalKeySeq_ != keySeq_ + encoderKeySeq_,
+                OP_LOGE(context_.opName, "totalKeySeq_ != keySeq_ + encoderKeySeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(totalValueSeq_ != valueSeq_ + encoderValueSeq_,
+                OP_LOGE(context_.opName, "totalValueSeq_ != valueSeq_ + encoderValueSeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keySeq_ != valueSeq_, OP_LOGE(context_.opName, "keySeq_ != valueSeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(encoderKeySeq_ != encoderValueSeq_, OP_LOGE(context_.opName, "encoderKeySeq_ != encoderValueSeq_"),
+                return ge::GRAPH_FAILED);
 
     normDim_ = headDim_;
     scale_ = 1 / float(headDim_);
@@ -206,17 +156,9 @@ ge::graphStatus NormRopeConcatGradTiling::GetShapeInfo()
     const gert::StorageShape* queryShape = context_.inputs[queryIndex].shape;
     const gert::StorageShape* keyShape = context_.inputs[keyIndex].shape;
     OP_CHECK_IF(queryShape == nullptr || queryShape->GetStorageShape().GetDimNum() != INPUT_DIM_NUM,
-                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                    context_.opName, "query",
-                    std::to_string(queryShape == nullptr ? 0 : queryShape->GetStorageShape().GetDimNum()).c_str(),
-                    "the shape dim of query must be 4"),
-                return ge::GRAPH_FAILED);
+                OP_LOGE(context_.opName, "Shape of tensor query should be 4"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(keyShape == nullptr || keyShape->GetStorageShape().GetDimNum() != INPUT_DIM_NUM,
-                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                    context_.opName, "key",
-                    std::to_string(keyShape == nullptr ? 0 : keyShape->GetStorageShape().GetDimNum()).c_str(),
-                    "the shape dim of key must be 4"),
-                return ge::GRAPH_FAILED);
+                OP_LOGE(context_.opName, "Shape of tensor key should be 4"), return ge::GRAPH_FAILED);
 
     batchSize_ = queryShape->GetStorageShape().GetDim(BATCH_DIM);
     headNum_ = queryShape->GetStorageShape().GetDim(HEAD_DIM);
@@ -255,36 +197,26 @@ ge::graphStatus NormRopeConcatGradTiling::ComputeTilingKey()
 {
     OP_CHECK_IF(context_.normType == nullptr, OP_LOGE(context_.opName, "normType is nullptr"), return ge::GRAPH_FAILED);
     int64_t normType = *context_.normType;
-    OP_CHECK_IF(!IsNormTypeValid(normType),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "norm_type", std::to_string(normType).c_str(),
-                                                      "the value of norm_type is out of the supported range"),
+    OP_CHECK_IF(!IsNormTypeValid(normType), OP_LOGE(context_.opName, "normType is out of range"),
                 return ge::GRAPH_FAILED);
     tilingKey_ += normType * NORM_TYPE_TILING_KEY;
     OP_CHECK_IF(context_.normAddedType == nullptr, OP_LOGE(context_.opName, "normAddedType is nullptr"),
                 return ge::GRAPH_FAILED);
     int64_t normAddedType = *context_.normAddedType;
-    OP_CHECK_IF(
-        !IsNormTypeValid(normAddedType),
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "norm_added_type", std::to_string(normAddedType).c_str(),
-                                              "the value of norm_added_type is out of the supported range"),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!IsNormTypeValid(normAddedType), OP_LOGE(context_.opName, "normAddedType is out of range"),
+                return ge::GRAPH_FAILED);
     tilingKey_ += normAddedType * NORM_ADDED_TYPE_TILING_KEY;
     OP_CHECK_IF(context_.ropeType == nullptr, OP_LOGE(context_.opName, "ropeType is nullptr"), return ge::GRAPH_FAILED);
     int64_t ropeType = *context_.ropeType;
-    OP_CHECK_IF(!IsRopeTypeValid(ropeType),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "rope_type", std::to_string(ropeType).c_str(),
-                                                      "the value of rope_type is out of the supported range"),
+    OP_CHECK_IF(!IsRopeTypeValid(ropeType), OP_LOGE(context_.opName, "ropeType is out of range"),
                 return ge::GRAPH_FAILED);
 
     tilingKey_ += ropeType * ROPE_TYPE_TILING_KEY;
     OP_CHECK_IF(context_.concatOrder == nullptr, OP_LOGE(context_.opName, "concatOrder is nullptr"),
                 return ge::GRAPH_FAILED);
     int64_t concatOrder = *context_.concatOrder;
-    OP_CHECK_IF(
-        !IsConcatOrderValid(concatOrder),
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "concat_order", std::to_string(concatOrder).c_str(),
-                                              "the value of concat_order is out of the supported range"),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!IsConcatOrderValid(concatOrder), OP_LOGE(context_.opName, "concatOrder is out of range"),
+                return ge::GRAPH_FAILED);
     tilingKey_ += concatOrder * CONCAT_ORDER_TILING_KEY;
     return ge::GRAPH_SUCCESS;
 }
@@ -418,12 +350,10 @@ ge::graphStatus NormRopeConcatGradTiling::ComputeUBTilingStrategy()
     avgHeads_ =
         (compileInfo_.ubSize - ropeCoef * ropeUsedUbSize - normCoef * normUsedUbSize - RES_UB_BUFFER) / oneHeadUbSize;
     avgHeads_ = std::min(avgHeads_, static_cast<uint64_t>(AVGHEAD_MAX_NUM));
-    OP_CHECK_IF(avgHeads_ < 2,
-                ReportTilingFailure(context_.opName, "the input dim is too large to be tiled, avgHeads should be >= 2"),
+    OP_CHECK_IF(avgHeads_ < 2, OP_LOGE(context_.opName, "input dim is too large, avgHeads_ should larger than 1"),
                 return ge::GRAPH_FAILED);
     avgHeads_ = std::min(avgHeads_, headNum_);
-    OP_CHECK_IF(avgHeads_ == 0, ReportTilingFailure(context_.opName, "the input dim is too large to be tiled"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(avgHeads_ == 0, OP_LOGE(context_.opName, "input dim is too large"), return ge::GRAPH_FAILED);
     splitHeadNum_ = CeilDiv(headNum_, avgHeads_);
     tailHeads_ = headNum_ - (splitHeadNum_ - 1) * avgHeads_;
     return ge::GRAPH_SUCCESS;
@@ -440,11 +370,12 @@ ge::graphStatus NormRopeConcatGradTiling::DoTiling(gert::TilingContext* ctx)
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo_.ubSize);
     compileInfo_.sysWorkspace = ascendcPlatform.GetLibApiWorkSpaceSize();
 
-    OP_CHECK_IF(ctx->GetAttrs() == nullptr, OP_LOGE_WITHOUT_REPORT(ctx->GetNodeName(), "attrs got from GE is nullptr"),
+    OP_CHECK_IF(ctx->GetAttrs() == nullptr,
+                OPS_REPORT_VECTOR_INNER_ERR(ctx->GetNodeName(), "attrs got from GE is nullptr"),
                 return ge::GRAPH_FAILED);
 
-    // attrs 非空已在上方校验，此处不再重复判断
     auto attrs = ctx->GetAttrs();
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE(ctx->GetNodeName(), "attrs got from GE is nullptr"), return ge::GRAPH_FAILED);
 
     context_.opName = ctx->GetNodeName();
     for (size_t i = 0; i < context_.requiredInputNum; ++i) {
@@ -480,7 +411,7 @@ ge::graphStatus NormRopeConcatGradTiling::DoTiling(gert::TilingContext* ctx)
 
     size_t* workspaceSizes = ctx->GetWorkspaceSizes(1);
     OP_CHECK_IF(workspaceSizes == nullptr,
-                OP_LOGE_WITHOUT_REPORT(ctx->GetNodeName(), "workSpaceSize got from GE is nullptr"),
+                OPS_REPORT_VECTOR_INNER_ERR(ctx->GetNodeName(), "workSpaceSize got from GE is nullptr"),
                 return ge::GRAPH_FAILED);
     workspace_ = workspaceSizes;
 
@@ -502,7 +433,7 @@ ge::graphStatus NormRopeConcatGradTiling::DoTiling(gert::TilingContext* ctx)
 ge::graphStatus NormRopeConcatGradTiling::SetTiling(gert::TilingContext* ctx)
 {
     OP_CHECK_IF(ctx->GetRawTilingData() == nullptr,
-                OP_LOGE_WITHOUT_REPORT(ctx->GetNodeName(), "RawTilingData got from GE context is nullptr."),
+                OPS_REPORT_VECTOR_INNER_ERR(ctx->GetNodeName(), "RawTilingData got from GE context is nullptr."),
                 return GRAPH_FAILED);
     tilingData_.SaveToBuffer(ctx->GetRawTilingData()->GetData(), ctx->GetRawTilingData()->GetCapacity());
     ctx->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
@@ -512,7 +443,7 @@ ge::graphStatus NormRopeConcatGradTiling::SetTiling(gert::TilingContext* ctx)
 
 ge::graphStatus TilingNormRopeConcatGrad(gert::TilingContext* ctx)
 {
-    OP_CHECK_IF(ctx == nullptr, OP_LOGE_WITHOUT_REPORT("NormRopeConcatGrad", "Context is nullptr."),
+    OP_CHECK_IF(ctx == nullptr, OPS_REPORT_VECTOR_INNER_ERR("NormRopeConcatGrad", "Context is nullptr."),
                 return ge::GRAPH_FAILED);
     NormRopeConcatGradTiling tiling;
     if (tiling.DoTiling(ctx) == ge::SUCCESS) {

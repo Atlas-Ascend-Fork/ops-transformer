@@ -46,7 +46,7 @@ const std::array<const aclTensor*, 2> MoeFusedTopk(const aclTensor* x, const acl
         MoeFusedTopk, OP_INPUT(x, addNum, mappingNum, mappingTable), OP_OUTPUT(y, indices),
         OP_ATTR(groupNum, groupTopk, topN, topK, activateType, isNorm, scale, enableExpertMapping));
     if (ret != ACL_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "MoeFusedTopkAiCore ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "MoeFusedTopkAiCore ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return {nullptr, nullptr};
     }
     return {y, indices};

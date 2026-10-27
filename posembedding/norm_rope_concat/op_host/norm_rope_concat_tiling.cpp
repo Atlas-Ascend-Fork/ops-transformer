@@ -13,32 +13,12 @@
  * \brief
  */
 
-#include <string>
 #include "norm_rope_concat_tiling.h"
 
 using namespace ge;
 using namespace nrc;
 using namespace AscendC;
 namespace optiling {
-// 合法输入下 Tiling 失败时，按 EZ1008 正式错误码首报（Arglist: op_name, reason），并输出 PLOG 上下文
-inline void ReportTilingFailure(const char* opName, const char* reason)
-{
-    OP_LOGE_WITHOUT_REPORT(opName, "%s\n", reason);
-    const std::vector<const char*> msgKey = {"op_name", "reason"};
-    const std::vector<const char*> msgvalue = {opName, reason};
-    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
-}
-
-// 将 StorageShape 渲染为 "[d0,d1,...]" 形式，供错误码消息的 incorrect_shape 字段使用
-static std::string ShapeToString(const gert::Shape& shape)
-{
-    std::string result = "[";
-    for (size_t i = 0; i < shape.GetDimNum(); ++i) {
-        result += (i == 0 ? "" : ",") + std::to_string(shape.GetDim(i));
-    }
-    return result + "]";
-}
-
 ge::graphStatus NormRopeConcatTiling::CheckInput(const InputTensorInfo& x)
 {
     if (x.isRequired) {
@@ -46,12 +26,10 @@ ge::graphStatus NormRopeConcatTiling::CheckInput(const InputTensorInfo& x)
         OP_CHECK_IF(x.shape == nullptr, OP_LOGE(context_.opName, "shape is nullptr"), return ge::GRAPH_FAILED);
     }
     if (x.desc != nullptr) {
-        OP_CHECK_IF(
-            x.desc->GetDataType() != inputDtype_,
-            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_.opName, FORWARD_INPUT_NAME[x.index],
-                                                  ge::TypeUtils::DataTypeToSerialString(x.desc->GetDataType()).c_str(),
-                                                  "the dtype of this input must be the same as query"),
-            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(x.desc->GetDataType() != inputDtype_,
+                    OP_LOGE(context_.opName, "DataType of tensor mismatch, expected %d, got %d",
+                            static_cast<int>(inputDtype_), static_cast<int>(x.desc->GetDataType())),
+                    return ge::GRAPH_FAILED);
     }
     if (x.shape != nullptr) {
         auto shape = x.shape->GetStorageShape();
@@ -59,53 +37,38 @@ ge::graphStatus NormRopeConcatTiling::CheckInput(const InputTensorInfo& x)
             case TensorType::INPUT_TENSOR:
             case TensorType::ENCODER_TENSOR:
                 OP_CHECK_IF(shape.GetDimNum() != INPUT_DIM_NUM,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, FORWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 4"),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE(context_.opName, "Shape Dims of tensor should be 4"), return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(BATCH_DIM) != batchSize_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, FORWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the batch dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should be batchSize_(%ld)",
+                                    shape.GetDim(BATCH_DIM), batchSize_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(HEAD_DIM) != headNum_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, FORWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the head dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM2(%ld) Value of Shape should be headNum_(%ld)",
+                                    shape.GetDim(HEAD_DIM), headNum_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(DIM_DIM) != headDim_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, FORWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the last dim of this input must be the same as query"),
+                            OP_LOGE(context_.opName, "DIM3(%ld) Value of Shape should be headDim_(%ld)",
+                                    shape.GetDim(DIM_DIM), headDim_),
                             return ge::GRAPH_FAILED);
                 break;
             case TensorType::NORM_TENSOR:
-                OP_CHECK_IF(shape.GetDimNum() != 1,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, FORWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 1"),
+                OP_CHECK_IF(shape.GetDimNum() != 1, OP_LOGE(context_.opName, "Shape Dims of tensor should be 1"),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(0) != headDim_, // NOTE: not support cross heads
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, FORWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the dim of this input must equal the head dim of query"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should be headDim_(%ld)",
+                                    shape.GetDim(0), headDim_),
                             return ge::GRAPH_FAILED);
                 break;
             case TensorType::ROPE_TENSOR:
                 OP_CHECK_IF(shape.GetDimNum() != ROPE_DIM_NUM,
-                            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_.opName, FORWARD_INPUT_NAME[x.index],
-                                                                     std::to_string(shape.GetDimNum()).c_str(),
-                                                                     "the shape dim of this input must be 2"),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE(context_.opName, "Shape Dims of tensor should be 2"), return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(ROPE_SEQ_DIM) > maxSeq_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, FORWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the seq dim of this input must not exceed the max sequence length"),
+                            OP_LOGE(context_.opName, "DIM0(%ld) Value of Shape should smaller than maxSeq_(%ld)",
+                                    shape.GetDim(ROPE_SEQ_DIM), maxSeq_),
                             return ge::GRAPH_FAILED);
                 OP_CHECK_IF(shape.GetDim(ROPE_DIM_DIM) != headDim_,
-                            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                                context_.opName, FORWARD_INPUT_NAME[x.index], ShapeToString(shape).c_str(),
-                                "the dim of this input must equal the head dim of query"),
+                            OP_LOGE(context_.opName, "DIM1(%ld) Value of Shape should be headDim_(%ld)",
+                                    shape.GetDim(ROPE_DIM_DIM), headDim_),
                             return ge::GRAPH_FAILED);
                 break;
             default:
@@ -118,8 +81,7 @@ ge::graphStatus NormRopeConcatTiling::CheckInput(const InputTensorInfo& x)
 ge::graphStatus NormRopeConcatTiling::CheckInput()
 {
     OP_CHECK_IF((headDim_ % 2 != 0) || (headDim_ > 1024),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "query", std::to_string(headDim_).c_str(),
-                                                      "the last dim of query must be even and not greater than 1024"),
+                OP_LOGE(context_.opName, "headDim of shape value should be even number and smaller than 1024 "),
                 return ge::GRAPH_FAILED);
 
     for (size_t i = 0; i < context_.maxInputNum; ++i) {
@@ -127,18 +89,14 @@ ge::graphStatus NormRopeConcatTiling::CheckInput()
             return ge::GRAPH_FAILED;
         }
     }
-    OP_CHECK_IF(keySeq_ != valueSeq_,
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_.opName, "key,value",
-                    ("key seq=" + std::to_string(keySeq_) + ",value seq=" + std::to_string(valueSeq_)).c_str(),
-                    "key and value must have the same seq length"),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(encoderKeySeq_ != encoderValueSeq_,
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_.opName, "encoder_key,encoder_value",
-                                                       ("encoder_key seq=" + std::to_string(encoderKeySeq_) +
-                                                        ",encoder_value seq=" + std::to_string(encoderValueSeq_))
-                                                           .c_str(),
-                                                       "encoder_key and encoder_value must have the same seq length"),
+    OP_CHECK_IF(totalQuerySeq_ != querySeq_ + encoderQuerySeq_,
+                OP_LOGE(context_.opName, "totalQuerySeq_ != querySeq_ + encoderQuerySeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(totalKeySeq_ != keySeq_ + encoderKeySeq_,
+                OP_LOGE(context_.opName, "totalKeySeq_ != keySeq_ + encoderKeySeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(totalValueSeq_ != valueSeq_ + encoderValueSeq_,
+                OP_LOGE(context_.opName, "totalValueSeq_ != valueSeq_ + encoderValueSeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keySeq_ != valueSeq_, OP_LOGE(context_.opName, "keySeq_ != valueSeq_"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(encoderKeySeq_ != encoderValueSeq_, OP_LOGE(context_.opName, "encoderKeySeq_ != encoderValueSeq_"),
                 return ge::GRAPH_FAILED);
 
     normDim_ = headDim_;
@@ -146,16 +104,11 @@ ge::graphStatus NormRopeConcatTiling::CheckInput()
     eps_ = *(context_.eps);
     scale_ = 1 / float(headDim_);
     int64_t normType = *context_.normType;
-    OP_CHECK_IF(!IsNormTypeValid(normType),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "norm_type", std::to_string(normType).c_str(),
-                                                      "the value of norm_type is out of the supported range"),
+    OP_CHECK_IF(!IsNormTypeValid(normType), OP_LOGE(context_.opName, "normType is out of range"),
                 return ge::GRAPH_FAILED);
     int64_t normAddedType = *context_.normAddedType;
-    OP_CHECK_IF(
-        !IsNormTypeValid(normAddedType),
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_.opName, "norm_added_type", std::to_string(normAddedType).c_str(),
-                                              "the value of norm_added_type is out of the supported range"),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!IsNormTypeValid(normAddedType), OP_LOGE(context_.opName, "normAddedType is out of range"),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -166,17 +119,9 @@ ge::graphStatus NormRopeConcatTiling::GetShapeInfo()
     const gert::StorageShape* queryShape = context_.inputs[queryIndex].shape;
     const gert::StorageShape* keyShape = context_.inputs[keyIndex].shape;
     OP_CHECK_IF(queryShape == nullptr || queryShape->GetStorageShape().GetDimNum() != INPUT_DIM_NUM,
-                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                    context_.opName, "query",
-                    std::to_string(queryShape == nullptr ? 0 : queryShape->GetStorageShape().GetDimNum()).c_str(),
-                    "the shape dim of query must be 4"),
-                return ge::GRAPH_FAILED);
+                OP_LOGE(context_.opName, "Shape of tensor query should be 4"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(keyShape == nullptr || keyShape->GetStorageShape().GetDimNum() != INPUT_DIM_NUM,
-                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                    context_.opName, "key",
-                    std::to_string(keyShape == nullptr ? 0 : keyShape->GetStorageShape().GetDimNum()).c_str(),
-                    "the shape dim of key must be 4"),
-                return ge::GRAPH_FAILED);
+                OP_LOGE(context_.opName, "Shape of tensor key should be 4"), return ge::GRAPH_FAILED);
 
     batchSize_ = queryShape->GetStorageShape().GetDim(BATCH_DIM);
     headNum_ = queryShape->GetStorageShape().GetDim(HEAD_DIM);
@@ -338,11 +283,7 @@ ge::graphStatus NormRopeConcatTiling::ComputeUBTilingStrategy()
     avgHeads_ = (compileInfo_.ubSize - ropeCoef * ropeUsedUbSize - normCoef * normUsedUbSize) / oneHeadUbSize;
     avgHeads_ = std::min(avgHeads_, static_cast<int64_t>(AVGHEAD_MAX_NUM));
     avgHeads_ = std::min(avgHeads_, headNum_);
-    OP_CHECK_IF(
-        avgHeads_ == 0,
-        ReportTilingFailure(context_.opName,
-                            ("the input dim is too large to be tiled, headDim=" + std::to_string(headDim_)).c_str()),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(avgHeads_ == 0, OP_LOGE(context_.opName, "input dim is too large"), return ge::GRAPH_FAILED);
     splitHeadNum_ = CeilDiv(headNum_, avgHeads_);
     tailHeads_ = headNum_ - (splitHeadNum_ - 1) * avgHeads_;
     return ge::GRAPH_SUCCESS;

@@ -30,18 +30,6 @@
 using namespace Ops::Transformer::OpTiling;
 namespace optiling {
 namespace FA {
-namespace {
-// Report a tiling failure caused by internal computation/registration errors under legal inputs with the
-// registered formal code EZ1008, instead of an illegal internal code (EZ9999/E89999).
-inline void ReportTilingFailure(const char* opName, const char* reason)
-{
-    OP_LOGE_WITHOUT_REPORT(opName, "%s\n", reason);
-    const std::vector<const char*> msgKey = {"op_name", "reason"};
-    const std::vector<const char*> msgvalue = {opName, reason};
-    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
-}
-} // namespace
-
 static const uint32_t BYTE_BLOCK = 32;
 static const int64_t GM_ALIGN = 512;
 static const int64_t FRACTAL_NUM = 16L;
@@ -650,8 +638,7 @@ ge::graphStatus FlashAttentionScoreTilingBase::GetPlatformInfo()
     auto platformInfoPtr = context_->GetPlatformInfo();
     if (platformInfoPtr == nullptr) {
         auto compileInfoPtr = reinterpret_cast<const FlashAttentionScoreCompileInfo*>(context_->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, ReportTilingFailure(opName, "compileInfoPtr is null."),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(opName, "compileInfoPtr is null."), return ge::GRAPH_FAILED);
         aivNum = compileInfoPtr->aivNum;
         aicNum = compileInfoPtr->aicNum;
         aicoreParams_.ubSize = compileInfoPtr->ubSize;
@@ -876,7 +863,7 @@ bool FlashAttentionScoreTilingBase::SparseModeProcess(SparseEnum& sparseType)
         std::ostringstream failReason;
         sparseType = GetPrefixNList(failReason);
         if (sparseType != SparseEnum::PREFIX && sparseMode == static_cast<int64_t>(PREFIX_COMPRESS)) {
-            OP_LOGE_WITHOUT_REPORT(context_, "[%s] %s.", templateName, failReason.str().c_str());
+            OP_LOGE(context_, "[%s] %s.", templateName, failReason.str().c_str());
             return false;
         }
 
@@ -988,11 +975,10 @@ ge::graphStatus FlashAttentionScoreTilingBase::GetShapeAttrsInfo()
     GetMaxWorkspaceFlag();
     opName = context_->GetNodeName();
     OP_LOGD(opName, "TilingContext: %s.", GetTilingContextDebugStr().c_str());
-    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(opName, "invalid context."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE(opName, "invalid context."), return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(!AnalyzeAttrs() || !AnalyzeDtype() || !AnalyzeLayout() || !AnalyzeOptionalInput(),
-                OP_LOGE_WITHOUT_REPORT(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
+                OP_LOGE(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
 
     alignedS1 = AlignUp(s1Size, FRACTAL_NUM);
     alignedS2 = AlignUp(s2Size, FRACTAL_NUM);
@@ -1999,8 +1985,7 @@ ge::graphStatus FlashAttentionScoreTilingBase::DoOpTiling()
     }
 
     SparseEnum sparseType = SparseEnum::ALL;
-    OP_CHECK_IF(!GetSparseInfo(sparseType), OP_LOGE_WITHOUT_REPORT(opName, "fail to get sparse info."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!GetSparseInfo(sparseType), OP_LOGE(opName, "fail to get sparse info."), return ge::GRAPH_FAILED);
     SetSparseTilingInfo(sparseType);
     inputParams.set_implMode(implMode);
     if (!isSparseValidSizeAligned) {
@@ -2012,8 +1997,7 @@ ge::graphStatus FlashAttentionScoreTilingBase::DoOpTiling()
     SetMultiCoreParams();
     SetTensorSizeParams();
     SetSparseParams();
-    OP_CHECK_IF(!SetPseAlibiParams(), OP_LOGE_WITHOUT_REPORT(opName, "fail to set pse alibi info."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!SetPseAlibiParams(), OP_LOGE(opName, "fail to set pse alibi info."), return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -2316,7 +2300,7 @@ bool FlashAttentionScoreTilingBase::SetMatMulTiling(int64_t tmpS1BasicBlock, int
     }
 
     if (bmm1.GetTiling(tilingData->bmm1TilingData) == -1) {
-        ReportTilingFailure(context_->GetNodeName(), "BMM1 tiling failed.");
+        OP_LOGE(context_, "BMM1 tiling failed.");
         return false;
     }
 
@@ -2337,7 +2321,7 @@ bool FlashAttentionScoreTilingBase::SetMatMulTiling(int64_t tmpS1BasicBlock, int
     tilingData->bmm1TilingData.shareL0CSize = aicoreParams_.l0cSize;
 
     if (bmm2.GetTiling(tilingData->bmm2TilingData) == -1) {
-        ReportTilingFailure(context_->GetNodeName(), "BMM2 tiling failed.");
+        OP_LOGE(context_, "BMM2 tiling failed.");
         return false;
     }
 
@@ -2822,8 +2806,8 @@ protected:
 
     bool AnalyzeDtype() override
     {
-        OP_CHECK_IF(!FlashAttentionScoreTilingBase::AnalyzeDtype(),
-                    OP_LOGE_WITHOUT_REPORT(opName, "fail to analyze base dtype."), return false);
+        OP_CHECK_IF(!FlashAttentionScoreTilingBase::AnalyzeDtype(), OP_LOGE(opName, "fail to analyze base dtype."),
+                    return false);
         bmm2OutDtype = bmmDtype;
         return true;
     }
@@ -3360,12 +3344,12 @@ protected:
             notMatched = true;
         }
         if (notMatched) {
-            OP_LOGE_WITHOUT_REPORT(context_,
-                                   "[%s]not match template[%s], input params: bn2gs1s2d[%ld, %ld, %ld, %ld, %ld, %ld], "
-                                   "keepProb[%f]",
-                                   templateName, expectTemplate.ToString().c_str(), inputParams.get_bSize(),
-                                   inputParams.get_n2Size(), inputParams.get_gSize(), inputParams.get_s1Size(),
-                                   inputParams.get_s2Size(), inputParams.get_dSize(), inputParams.get_keepProb());
+            OP_LOGE(context_,
+                    "[%s]not match template[%s], input params: bn2gs1s2d[%ld, %ld, %ld, %ld, %ld, %ld], "
+                    "keepProb[%f]",
+                    templateName, expectTemplate.ToString().c_str(), inputParams.get_bSize(), inputParams.get_n2Size(),
+                    inputParams.get_gSize(), inputParams.get_s1Size(), inputParams.get_s2Size(),
+                    inputParams.get_dSize(), inputParams.get_keepProb());
             return false;
         }
         return true;

@@ -109,26 +109,6 @@ static constexpr TensorType FORWARD_INPUT_TYPE[MAX_FORWARD_INPUT_NUM] = {
     TensorType::ROPE_TENSOR,    // rope_cos
 };
 
-// 与 FORWARD_INPUT_TYPE 一一对应，用于错误码上报中引用算子原型里的稳定参数名
-static constexpr const char* FORWARD_INPUT_NAME[MAX_FORWARD_INPUT_NUM] = {
-    "query",                   // query
-    "key",                     // key
-    "value",                   // value
-    "encoder_query",           // encoder_query
-    "encoder_key",             // encoder_key
-    "encoder_value",           // encoder_value
-    "norm_query_weight",       // norm_query_weight
-    "norm_query_bias",         // norm_query_bias
-    "norm_key_weight",         // norm_key_weight
-    "norm_key_bias",           // norm_key_bias
-    "norm_added_query_weight", // norm_added_query_weight
-    "norm_added_query_bias",   // norm_added_query_bias
-    "norm_added_key_weight",   // norm_added_key_weight
-    "norm_added_key_bias",     // norm_added_key_bias
-    "rope_sin",                // rope_sin
-    "rope_cos",                // rope_cos
-};
-
 // tiling key
 constexpr int64_t IS_TRAINING_TILING_KEY = 1;
 constexpr int64_t CONCAT_ORDER_TILING_KEY = 10;

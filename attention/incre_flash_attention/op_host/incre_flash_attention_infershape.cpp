@@ -38,8 +38,7 @@ static constexpr uint32_t IFA_QUANT_SCALE2_INDEX = 9;
 static ge::graphStatus InferShapeIncreFlashAttention(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        // 内部契约错误：框架保证InferShape/InferDataType上下文非空，不属于算子逻辑报错，仅记录日志
-        OP_LOGE_WITHOUT_REPORT("IncreFlashAttention", "context is nullptr!");
+        OP_LOGE("IncreFlashAttention", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
     OP_LOGD(context->GetNodeName(), "Enter IncreFlashAttention inferShape impl.");
@@ -70,42 +69,31 @@ static ge::graphStatus InferShapeIncreFlashAttention(gert::InferShapeContext* co
 
     if (strcmp(inputLayoutPtr, "SH") == 0) {
         if (queryShape->GetDimNum() != IFA_LAYOUT_SH_DIMS) {
-            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
-                                                     std::to_string(queryShape->GetDimNum()).c_str(),
-                                                     "Layout SH, queryDims must be 2");
+            OP_LOGE(context->GetNodeName(), "Layout SH, queryDims(%zu) must be 2!", queryShape->GetDimNum());
             return ge::GRAPH_FAILED;
         }
     } else if (strcmp(inputLayoutPtr, "BSH") == 0) {
         if (queryShape->GetDimNum() != IFA_LAYOUT_BSH_DIMS) {
-            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
-                                                     std::to_string(queryShape->GetDimNum()).c_str(),
-                                                     "Layout BSH, queryDims must be 3");
+            OP_LOGE(context->GetNodeName(), "Layout BSH, queryDims(%zu) must be 3!", queryShape->GetDimNum());
             return ge::GRAPH_FAILED;
         }
     } else if (strcmp(inputLayoutPtr, "NSD") == 0) {
         if (queryShape->GetDimNum() != IFA_LAYOUT_NSD_DIMS) {
-            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
-                                                     std::to_string(queryShape->GetDimNum()).c_str(),
-                                                     "Layout NSD, queryDims must be 3");
+            OP_LOGE(context->GetNodeName(), "Layout NSD, queryDims(%zu) must be 3!", queryShape->GetDimNum());
             return ge::GRAPH_FAILED;
         }
     } else if (strcmp(inputLayoutPtr, "BNSD") == 0) {
         if (queryShape->GetDimNum() != IFA_LAYOUT_BNSD_DIMS) {
-            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
-                                                     std::to_string(queryShape->GetDimNum()).c_str(),
-                                                     "Layout BNSD, queryDims must be 4");
+            OP_LOGE(context->GetNodeName(), "Layout BNSD, queryDims(%zu) must be 4!", queryShape->GetDimNum());
             return ge::GRAPH_FAILED;
         }
     } else if (strcmp(inputLayoutPtr, "BSND") == 0) {
         if (queryShape->GetDimNum() != IFA_LAYOUT_BSND_DIMS) {
-            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
-                                                     std::to_string(queryShape->GetDimNum()).c_str(),
-                                                     "Layout BSND, queryDims must be 4");
+            OP_LOGE(context->GetNodeName(), "Layout BSND, queryDims(%zu) must be 4!", queryShape->GetDimNum());
             return ge::GRAPH_FAILED;
         }
     } else {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "inputLayout", inputLayoutPtr,
-                                              "Only SH, BSH, NSD, BNSD and BSND are supported");
+        OP_LOGE(context->GetNodeName(), "Invalid input layout: %s, not support!", inputLayoutPtr);
         return ge::GRAPH_FAILED;
     }
 
@@ -116,8 +104,7 @@ static ge::graphStatus InferShapeIncreFlashAttention(gert::InferShapeContext* co
 static ge::graphStatus InferDataTypeIncreFlashAttention(gert::InferDataTypeContext* context)
 {
     if (context == nullptr) {
-        // 内部契约错误：框架保证InferShape/InferDataType上下文非空，不属于算子逻辑报错，仅记录日志
-        OP_LOGE_WITHOUT_REPORT("IncreFlashAttention", "context is nullptr!");
+        OP_LOGE("IncreFlashAttention", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
     OP_LOGD(context->GetNodeName(), "Enter IncreFlashAttention inferDataType impl.");

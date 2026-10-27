@@ -1034,7 +1034,7 @@ aclnnStatus aclnnFFN(void* workspace, uint64_t workspaceSize, aclOpExecutor* exe
     L2_DFX_PHASE_2(aclnnFFN);
     auto ret = CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER, "This is an error in FFN launch aicore");
+        OP_LOGE(ACLNN_ERR_INNER, "This is an error in FFN launch aicore");
         return ACLNN_ERR_INNER;
     }
     return ACLNN_SUCCESS;
@@ -1091,7 +1091,7 @@ aclnnStatus aclnnFFNV2(void* workspace, uint64_t workspaceSize, aclOpExecutor* e
     L2_DFX_PHASE_2(aclnnFFNV2);
     auto ret = CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER, "This is an error in FFN launch aicore");
+        OP_LOGE(ACLNN_ERR_INNER, "This is an error in FFN launch aicore");
         return ACLNN_ERR_INNER;
     }
     return ACLNN_SUCCESS;
@@ -1148,7 +1148,7 @@ aclnnStatus aclnnFFNV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* e
     L2_DFX_PHASE_2(aclnnFFNV3);
     auto ret = CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER, "This is an error in FFN launch aicore");
+        OP_LOGE(ACLNN_ERR_INNER, "This is an error in FFN launch aicore");
         return ACLNN_ERR_INNER;
     }
     return ACLNN_SUCCESS;

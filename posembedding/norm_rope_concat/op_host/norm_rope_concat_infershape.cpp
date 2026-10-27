@@ -13,7 +13,6 @@
  * \brief
  */
 
-#include <string>
 #include <register/op_impl_registry.h>
 #include "log/log.h"
 #include "norm_rope_concat_base_host.h"
@@ -21,22 +20,15 @@
 using namespace ge;
 using namespace nrc;
 namespace ops {
-static ge::graphStatus CheckShape(gert::InferShapeContext* context, const gert::Shape* shape, const char* paramName,
-                                  int64_t batch, int64_t head, int64_t dim, int64_t& seq)
+static ge::graphStatus CheckShape(gert::InferShapeContext* context, const gert::Shape* shape, int64_t batch,
+                                  int64_t head, int64_t dim, int64_t& seq)
 {
     if (shape->GetDimNum() != INPUT_DIM_NUM) {
-        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), paramName,
-                                                 std::to_string(shape->GetDimNum()).c_str(),
-                                                 "the shape dim of this input must be 4");
+        OP_LOGE(context->GetNodeName(), "Input must be 4D tensors(B, S, H, D).");
         return ge::GRAPH_FAILED;
     }
     if (shape->GetDim(BATCH_DIM) != batch || shape->GetDim(HEAD_DIM) != head || shape->GetDim(DIM_DIM) != dim) {
-        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-            context->GetNodeName(), (std::string(paramName) + ",query").c_str(),
-            ("batch=" + std::to_string(shape->GetDim(BATCH_DIM)) + ",head=" + std::to_string(shape->GetDim(HEAD_DIM)) +
-             ",dim=" + std::to_string(shape->GetDim(DIM_DIM)))
-                .c_str(),
-            "the batch, head and dim of this input must be the same as query");
+        OP_LOGE(context->GetNodeName(), "Input must have the same batch, head and dim as Query.");
         return ge::GRAPH_FAILED;
     }
     seq = shape->GetDim(SEQ_DIM);
@@ -72,9 +64,7 @@ static ge::graphStatus InferShape4NormRopeConcat(gert::InferShapeContext* contex
 
     // check required Input tensor And Set Shape
     if (queryShape->GetDimNum() != INPUT_DIM_NUM) {
-        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
-                                                 std::to_string(queryShape->GetDimNum()).c_str(),
-                                                 "the shape dim of query must be 4");
+        OP_LOGE(context->GetNodeName(), "Query and Key must be 4D tensors(B, S, H, D).");
         return ge::GRAPH_FAILED;
     }
     int64_t batch = queryShape->GetDim(BATCH_DIM);
@@ -87,10 +77,10 @@ static ge::graphStatus InferShape4NormRopeConcat(gert::InferShapeContext* contex
     int64_t encoderKeySeq = 0;
     int64_t encoderValueSeq = 0;
 
-    if (CheckShape(context, keyShape, "key", batch, head, dim, keySeq) != ge::GRAPH_SUCCESS) {
+    if (CheckShape(context, keyShape, batch, head, dim, keySeq) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    if (CheckShape(context, valueShape, "value", batch, head, dim, valueSeq) != ge::GRAPH_SUCCESS) {
+    if (CheckShape(context, valueShape, batch, head, dim, valueSeq) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     const gert::Shape* encoderQueryShape =
@@ -99,16 +89,16 @@ static ge::graphStatus InferShape4NormRopeConcat(gert::InferShapeContext* contex
         context->GetInputShape(static_cast<size_t>(InputIndexForward::ENCODER_KEY_INDEX));
     const gert::Shape* encoderValueShape =
         context->GetInputShape(static_cast<size_t>(InputIndexForward::ENCODER_VALUE_INDEX));
-    if (encoderQueryShape != nullptr && CheckShape(context, encoderQueryShape, "encoder_query", batch, head, dim,
-                                                   encoderQuerySeq) != ge::GRAPH_SUCCESS) {
+    if (encoderQueryShape != nullptr &&
+        CheckShape(context, encoderQueryShape, batch, head, dim, encoderQuerySeq) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     if (encoderKeyShape != nullptr &&
-        CheckShape(context, encoderKeyShape, "encoder_key", batch, head, dim, encoderKeySeq) != ge::GRAPH_SUCCESS) {
+        CheckShape(context, encoderKeyShape, batch, head, dim, encoderKeySeq) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    if (encoderValueShape != nullptr && CheckShape(context, encoderValueShape, "encoder_value", batch, head, dim,
-                                                   encoderValueSeq) != ge::GRAPH_SUCCESS) {
+    if (encoderValueShape != nullptr &&
+        CheckShape(context, encoderValueShape, batch, head, dim, encoderValueSeq) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     *queryOutputShape = {batch, head, querySeq + encoderQuerySeq, dim}; // B, H, S, D
