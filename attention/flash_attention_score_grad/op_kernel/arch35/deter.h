@@ -1993,19 +1993,126 @@ __aicore__ inline void CalTNDDenseSwizzleIndex(const __gm__ uint8_t* actualSeqQl
     }
 }
 
+// Both schedules assign complete ownership units. Prefixes contain per-batch tile
+// counts before multiplying by N2*G, at the existing compressed-prefix stride.
+// Coordinates returned here are one-based, as in the existing TND decoders.
+template <const int64_t CUBE_BASEM, const int64_t CUBE_BASEN, const bool CAUSAL_MIRROR>
+__aicore__ inline void CalTNDGqaOwnedIndex(const __gm__ uint8_t* actualSeqQlenAddr,
+                                           const __gm__ uint8_t* actualSeqKvlenAddr, const __gm__ int64_t* prefix,
+                                           const __gm__ int64_t* unitStart, int64_t deterMaxRound, int64_t b,
+                                           int64_t n2, int64_t g, int64_t j, int64_t r, int64_t step, int64_t pairGroup,
+                                           CoordinateInfo& coordinateInfo)
+{
+    coordinateInfo.batchId = -1;
+    if (r > deterMaxRound || unitStart[j - 1] + r > unitStart[j]) {
+        return;
+    }
+    const int64_t task = unitStart[j - 1] + r - 1;
+    const int64_t n1 = n2 * g;
+    int64_t group = 0;
+    if constexpr (CAUSAL_MIRROR) {
+        while ((group + 1) * step < b && task >= prefix[group + 1] * n1) {
+            ++group;
+        }
+    } else {
+        // Find the last batch-group start not greater than this zero-based task.
+        // The endpoint prefix, when present, is not a valid batch-group start.
+        int64_t high = (b - 1) / step;
+        while (group < high) {
+            const int64_t middle = group + (high - group + 1) / NUM_TWO;
+            if (task >= prefix[middle] * n1) {
+                group = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+    }
+    int64_t batch = group * step;
+    int64_t local = task - prefix[group] * n1;
+    int64_t actualS1Len = 0;
+    int64_t actualS2Len = 0;
+    int64_t m = 0;
+    int64_t n = 0;
+    // Resolve at most one compressed-prefix interval, including its last batch.
+    while (batch < b) {
+        GetSeqQlenKvlenByBidx(actualSeqQlenAddr, actualSeqKvlenAddr, batch, actualS1Len, actualS2Len);
+        m = (actualS1Len + CUBE_BASEM - 1) / CUBE_BASEM;
+        n = (actualS2Len + CUBE_BASEN - 1) / CUBE_BASEN;
+        int64_t batchTasks;
+        if constexpr (CAUSAL_MIRROR) {
+            batchTasks = m * (m + 1) / NUM_TWO * n1;
+        } else {
+            batchTasks = m * n * n1;
+        }
+        if (local < batchTasks) {
+            break;
+        }
+        local -= batchTasks;
+        ++batch;
+    }
+    if (batch >= b || m == 0 || n == 0) {
+        return;
+    }
+    coordinateInfo.actualS1Len = actualS1Len;
+    coordinateInfo.actualS2Len = actualS2Len;
+    coordinateInfo.s1Outer = m;
+    coordinateInfo.s2Outer = n;
+    coordinateInfo.batchId = batch + 1;
+    if constexpr (CAUSAL_MIRROR) {
+        // N2=1, equal Q/KV lengths, even G, and pairGroup|(G/2) are Host guards.
+        const int64_t virtualRows = m + 1;
+        const int64_t columnTasks = virtualRows * (g / NUM_TWO);
+        const int64_t columnRank = local / columnTasks;
+        // Unit order is {1,m}, {2,m-1}, ...; an odd centre column occurs once.
+        const int64_t y = columnRank % NUM_TWO == 0 ? columnRank / NUM_TWO + 1 : m - columnRank / NUM_TWO;
+        // The common logical round, not local task offset, prevents dQ writers
+        // on distinct virtual columns from colliding within the same round.
+        const int64_t z = (r - 1 + y) % columnTasks;
+        const int64_t a = z / pairGroup;
+        const int64_t headPair = pairGroup * (a / virtualRows) + z % pairGroup;
+        const int64_t x = a % virtualRows + 1;
+        coordinateInfo.n2Idx = 1;
+        if (x >= y + 1) {
+            coordinateInfo.gIdx = NUM_TWO * headPair + 1;
+            coordinateInfo.s1Idx = x - 1;
+            coordinateInfo.s2Idx = y;
+        } else {
+            coordinateInfo.gIdx = NUM_TWO * headPair + NUM_TWO;
+            coordinateInfo.s1Idx = m + 1 - x;
+            coordinateInfo.s2Idx = m + 1 - y;
+        }
+    } else {
+        const int64_t groupTasks = m * n * g;
+        coordinateInfo.n2Idx = local / groupTasks + 1;
+        local %= groupTasks;
+        // Keep one S2 column in the existing L1 reuse path across all G heads.
+        coordinateInfo.s2Idx = local / (g * m) + 1;
+        coordinateInfo.gIdx = (local % (g * m)) / m + 1;
+        coordinateInfo.s1Idx = local % m + 1;
+    }
+}
+
 template <const int64_t CUBE_BASEM, const int64_t CUBE_BASEN, const uint8_t DETER_SPARSE_TYPE = DETER_DENSE,
           const bool IS_N_EQUAL = true>
 __aicore__ inline void CalTNDDenseIndex(const __gm__ uint8_t* actualSeqQlenAddr,
                                         const __gm__ uint8_t* actualSeqKvlenAddr, const __gm__ int64_t* prefix,
                                         int64_t deterMaxRound, int64_t b, int64_t n2, int64_t g, int64_t j, int64_t r,
-                                        uint8_t flag, int64_t step, CoordinateInfo& coordinateInfo)
+                                        uint8_t flag, int64_t step, CoordinateInfo& coordinateInfo,
+                                        const __gm__ int64_t* colStart = nullptr, int64_t headGroup = 1)
 {
     coordinateInfo.batchId = -1;
     if (r > deterMaxRound) {
         return;
     }
     int64_t n1 = n2 * g;
+    // 列独占时每个核起点各不相同，区间长度也不等，超出本核区间的轮次直接空转
     int64_t ID = (j - 1) * deterMaxRound + r;
+    if (colStart != nullptr) {
+        ID = colStart[j - 1] + r;
+        if (ID > colStart[j]) {
+            return;
+        }
+    }
     int64_t w = 0;
     int64_t batchId = 0;
 
@@ -2013,8 +2120,23 @@ __aicore__ inline void CalTNDDenseIndex(const __gm__ uint8_t* actualSeqQlenAddr,
 
     // GQA 需要将 b n2 g 转换为 b*n2 g
     if constexpr (!IS_N_EQUAL) {
-        while (w * step < b && prefixMaxIndex > w + 1 && ID > prefix[w + 1] * n1) {
-            w += 1;
+        if (colStart != nullptr) {
+            // Preserve the one-based strict comparison and the linear scan's
+            // endpoint bound. In particular, the round-count suffix is not a
+            // batch prefix, including when the last interval is compressed.
+            int64_t high = Min(Ceil<int64_t>(b, step), prefixMaxIndex - 1);
+            while (w < high) {
+                const int64_t middle = w + (high - w + 1) / NUM_TWO;
+                if (ID > prefix[middle] * n1) {
+                    w = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+        } else {
+            while (w * step < b && prefixMaxIndex > w + 1 && ID > prefix[w + 1] * n1) {
+                w += 1;
+            }
         }
         batchId = w;
     } else {
@@ -2088,6 +2210,29 @@ __aicore__ inline void CalTNDDenseIndex(const __gm__ uint8_t* actualSeqQlenAddr,
     batchId = w + 1;
 
     int64_t x, y;
+    if constexpr (!IS_N_EQUAL && DETER_SPARSE_TYPE == DETER_CAUSAL) {
+        if (colStart != nullptr && headGroup == 128) {
+            // F4 preserves C4's exact coordinates and four-round dQ ordering.
+            // delta-1 = pair*(m*n*g) + column*(m*g) + offset, so one
+            // column quotient resolves both pair and column. Keep task/prefix
+            // arithmetic and all head-count operations at signed 64 bits.
+            const int64_t column = (delta - 1) / (m * g);
+            const int64_t t = r - 1;
+            // Host proves r<=R<UINT32_MAX, j<=36 and actual Q<=INT32_MAX
+            // with 128-row blocks: a<=2^30-1 and m<=16777217. Only these
+            // two nonnegative phase divisions are narrowed; a+j<2^31.
+            const uint32_t a = static_cast<uint32_t>(t >> 2);
+            const uint32_t virtualRows = static_cast<uint32_t>(m);
+            const int64_t h = NUM_FOUR * (static_cast<int64_t>(a / virtualRows) % (g >> 2)) + (t & 3);
+            const int64_t u = (a + static_cast<uint32_t>(j)) % virtualRows + 1;
+            coordinateInfo.batchId = batchId;
+            coordinateInfo.n2Idx = column / n + 1;
+            coordinateInfo.gIdx = h + 1;
+            coordinateInfo.s1Idx = u;
+            coordinateInfo.s2Idx = column % n + 1;
+            return;
+        }
+    }
     if constexpr (IS_N_EQUAL) {
         int64_t deltaN = (delta - 1) / currentBaseNum + 1;
         delta = delta % currentBaseNum;
@@ -2119,27 +2264,65 @@ __aicore__ inline void CalTNDDenseIndex(const __gm__ uint8_t* actualSeqQlenAddr,
         delta = delta != 0 ? delta : currentBaseNum;
 
         int64_t m_new = m * g;
-        int64_t gcd = Gcd(m_new, deterMaxRound);
-        int64_t t1 = deterMaxRound / gcd;
-        int64_t t2 = m_new / gcd;
-
         x = delta % m_new;
         x = x != 0 ? x : m_new;
         y = Ceil<int64_t>(delta, m_new);
 
-        if (t1 < n) {
-            int64_t nTail = (n % t1);
-            nTail = nTail != 0 ? nTail : t1;
-            if (y <= n - nTail) {
-                int64_t delta_adj = Ceil<int64_t>(y, t1);
-                delta += delta_adj;
-                if (delta > delta_adj * t2 * deterMaxRound) {
-                    delta -= t2 * deterMaxRound;
+        if (colStart == nullptr) {
+            int64_t gcd = Gcd(m_new, deterMaxRound);
+            int64_t t1 = deterMaxRound / gcd;
+            int64_t t2 = m_new / gcd;
+            if (t1 < n) {
+                int64_t nTail = (n % t1);
+                nTail = nTail != 0 ? nTail : t1;
+                if (y <= n - nTail) {
+                    int64_t delta_adj = Ceil<int64_t>(y, t1);
+                    delta += delta_adj;
+                    if (delta > delta_adj * t2 * deterMaxRound) {
+                        delta -= t2 * deterMaxRound;
+                    }
+                    x = delta % m_new;
+                    x = x != 0 ? x : m_new;
+                    y = Ceil<int64_t>(delta, m_new);
                 }
-                x = delta % m_new;
-                x = x != 0 ? x : m_new;
-                y = Ceil<int64_t>(delta, m_new);
             }
+        } else if (headGroup > 1) {
+            // Host admits one common H for the launch, with H|G and complete
+            // columns/cuts/rounds divisible by H. Use the global logical round,
+            // not the local column offset: within an H-round group every core
+            // has a fixed virtual row and distinct query heads. Core phases
+            // then keep dQ writers on different cores disjoint for the group.
+            // The caller supplies r>=1 (r>R already returned above). The
+            // mode1 helper restricts H to 2/4/8 here, and Host proves H|G,
+            // G>=H. Thus both shifted operands are nonnegative and G/H>0.
+            // 16/32 encode H=8 with a 2/4-row token window. Host proves that
+            // every shared KV-pair has C*stride<=m; different core windows
+            // therefore remain disjoint even across internal column boundaries.
+            const int64_t rowStride = headGroup == 32 ? 4 : (headGroup == 16 ? 2 : 1);
+            const int64_t hGroup = headGroup == 64 ? NUM_FOUR : (headGroup >= NUM_EIGHT ? NUM_EIGHT : headGroup);
+            const int64_t headShift = hGroup == NUM_EIGHT ? 3 : (hGroup == NUM_FOUR ? 2 : 1);
+            const int64_t t = r - 1;
+            const int64_t a = t >> headShift;
+            int64_t h;
+            int64_t u;
+            if (headGroup == 64) {
+                // A complete column covers the M*(G/4) (row, head-group)
+                // states. Consecutive core phases are distinct on this ring,
+                // so each global four-round group has disjoint dQ writers.
+                const int64_t groups = g >> headShift;
+                const int64_t z = a + j;
+                h = hGroup * (z % groups) + (t & (hGroup - 1));
+                u = (z / groups) % m + 1;
+            } else {
+                h = hGroup * ((a / m) % (g >> headShift)) + (t & (hGroup - 1));
+                u = (a + rowStride * j) % m + 1;
+            }
+            x = h * m + u;
+        } else {
+            // 列独占的切点落在列边界上，同一 batch 内各核的 x 相位会完全重合，原来那段
+            // Gcd 偏移不再适用。按虚拟列号旋转 x 即可错开：列独占保证同一轮里落在同一
+            // batch 的两个核必定处于不同的列，而 y 与 y' 都在 [1, n] 内且 n < m_new。
+            x = ((x - 1 + y) % m_new) + 1;
         }
 
         int64_t N1_id = Ceil<int64_t>(x, m);
@@ -2318,7 +2501,8 @@ __aicore__ inline void CalTNDGQACausalIndex(const __gm__ uint8_t* actualSeqQlenA
                                             const __gm__ uint8_t* actualSeqKvlenAddr, const __gm__ int64_t* prefix0,
                                             const __gm__ int64_t* prefix1, const __gm__ int64_t* prefix2, int64_t b,
                                             int64_t g, int64_t N2, int64_t k, int64_t j, int64_t r, int64_t step,
-                                            bool coreDivide, CoordinateInfo& coordinateInfo)
+                                            bool coreDivide, CoordinateInfo& coordinateInfo,
+                                            const __gm__ int64_t* colStart = nullptr, int64_t headGroup = 1)
 {
     int64_t maxRoundIndex = b > DETER_PREFIX_THRESHOLD ? Ceil<int64_t>(b + 1, step) : b + 1;
     int64_t N2_1 = N2 / NUM_TWO;
@@ -2345,8 +2529,10 @@ __aicore__ inline void CalTNDGQACausalIndex(const __gm__ uint8_t* actualSeqQlenA
     }
 
     if (isFlag0) {
-        CalTNDDenseIndex<CUBE_BASEM, CUBE_BASEN, DETER_CAUSAL, false>(
-            actualSeqQlenAddr, actualSeqKvlenAddr, prefix0, R0, b, N2_1, g, j, curRoundId, 0, step, coordinateInfo);
+        // 列独占只覆盖 N2 为偶数的场景，此时 flag1 / flag2 为空，切点数组只在 flag0 生效
+        CalTNDDenseIndex<CUBE_BASEM, CUBE_BASEN, DETER_CAUSAL, false>(actualSeqQlenAddr, actualSeqKvlenAddr, prefix0,
+                                                                      R0, b, N2_1, g, j, curRoundId, 0, step,
+                                                                      coordinateInfo, colStart, headGroup);
         if (coordinateInfo.batchId < 0) {
             return;
         }

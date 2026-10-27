@@ -59,6 +59,55 @@ public:
     __aicore__ inline void GetIsNeedDeter(int64_t computeLoopIdx);
     __aicore__ inline void DeterSync(int64_t loopIdx);
     __aicore__ inline int64_t SpecialS2Index(int64_t dkvGmOffset);
+    __aicore__ inline bool IsTndGqaSchedule(uint8_t schedule) const
+    {
+        if constexpr (IS_DETER_OLD(DETER_SPARSE_TYPE) || !BaseClass::IS_TND || BaseClass::IS_N_EQUAL ||
+                      SPLIT_AXIS == BN2S2) {
+            return false;
+        } else {
+            return this->tilingData->deterParam.reserved2 == schedule;
+        }
+    }
+    // Keep decoder selection independent of gradient-writer ownership.
+    __aicore__ inline bool IsTndGqaColumnExclusive() const
+    {
+        return IsTndGqaSchedule(optiling::fag::DeterParamRegbase::SCHEDULE_TND_GQA_COLUMN_EXCLUSIVE);
+    }
+    __aicore__ inline int64_t TndGqaColumnScheduleCode() const
+    {
+        if constexpr (IS_DETER_OLD(DETER_SPARSE_TYPE) || !BaseClass::IS_TND || BaseClass::IS_N_EQUAL ||
+                      SPLIT_AXIS == BN2S2) {
+            return 1;
+        } else {
+            // This is the mode1 decoder encoding, independent of the dQ
+            // synchronization group. Mode3 continues to interpret its own P.
+            if (IsTndGqaColumnExclusive()) {
+                const int64_t group = this->tilingData->deterParam.reserved3;
+                if (group == NUM_TWO || group == NUM_FOUR || group == 8 || group == 16 || group == 32 || group == 64 ||
+                    (group == 128 && DETER_SPARSE_TYPE == DETER_CAUSAL)) {
+                    return group;
+                }
+            }
+            return 1;
+        }
+    }
+    __aicore__ inline int64_t TndGqaColumnHeadGroup() const
+    {
+        const int64_t code = TndGqaColumnScheduleCode();
+        return code == 64 || code == 128 ? NUM_FOUR : code;
+    }
+    __aicore__ inline bool IsTndGqaBn2Exclusive() const
+    {
+        return IsTndGqaSchedule(optiling::fag::DeterParamRegbase::SCHEDULE_TND_GQA_BN2_EXCLUSIVE);
+    }
+    __aicore__ inline bool IsTndGqaMirrorColumnExclusive() const
+    {
+        return IsTndGqaSchedule(optiling::fag::DeterParamRegbase::SCHEDULE_TND_GQA_CAUSAL_MIRROR_COLUMN_EXCLUSIVE);
+    }
+    __aicore__ inline bool HasExclusiveKvWriter() const
+    {
+        return IsTndGqaColumnExclusive() || IsTndGqaBn2Exclusive() || IsTndGqaMirrorColumnExclusive();
+    }
 
 protected:
     GlobalTensor<float> deterGm;
@@ -412,11 +461,22 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
                     this->tilingData->deterParam.deterPrefixStep, coordinateInfo);
             }
         } else {
-            CalTNDGQACausalIndex<BaseClass::DETER_CUBE_BASEM, BaseClass::DETER_CUBE_BASEN>(
-                this->actualSeqQlenAddr, this->actualSeqKvlenAddr, this->tilingData->deterParam.deterPrefix0,
-                this->tilingData->deterParam.deterPrefix1, this->tilingData->deterParam.deterPrefix2,
-                this->constInfo.bSize, this->constInfo.commonConstInfo.gSize, this->constInfo.n2Size, k, j, r,
-                this->tilingData->deterParam.deterPrefixStep, this->tilingData->deterParam.coreDivide, coordinateInfo);
+            if (IsTndGqaMirrorColumnExclusive()) {
+                CalTNDGqaOwnedIndex<BaseClass::CUBE_BASEM, BaseClass::CUBE_BASEN, true>(
+                    this->actualSeqQlenAddr, this->actualSeqKvlenAddr, this->tilingData->deterParam.deterPrefix0,
+                    this->tilingData->deterParam.deterColStart, this->tilingData->baseDeterParam.deterMaxRound,
+                    this->constInfo.bSize, this->constInfo.n2Size, this->constInfo.commonConstInfo.gSize, j, r,
+                    this->tilingData->deterParam.deterPrefixStep, this->tilingData->deterParam.reserved3,
+                    coordinateInfo);
+            } else {
+                CalTNDGQACausalIndex<BaseClass::DETER_CUBE_BASEM, BaseClass::DETER_CUBE_BASEN>(
+                    this->actualSeqQlenAddr, this->actualSeqKvlenAddr, this->tilingData->deterParam.deterPrefix0,
+                    this->tilingData->deterParam.deterPrefix1, this->tilingData->deterParam.deterPrefix2,
+                    this->constInfo.bSize, this->constInfo.commonConstInfo.gSize, this->constInfo.n2Size, k, j, r,
+                    this->tilingData->deterParam.deterPrefixStep, this->tilingData->deterParam.coreDivide,
+                    coordinateInfo, IsTndGqaColumnExclusive() ? this->tilingData->deterParam.deterColStart : nullptr,
+                    TndGqaColumnScheduleCode());
+            }
         }
     }
 
@@ -469,13 +529,20 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
                 this->constInfo.commonConstInfo.gSize, j,
                 static_cast<int64_t>(this->tilingData->s1s2BNGS1S2BaseParams.coreNum / NUM_TWO), r, coordinateInfo);
         } else {
-            int64_t b = this->constInfo.bSize;
-            CalTNDDenseIndex<BaseClass::CUBE_BASEM, BaseClass::CUBE_BASEN, BaseClass::DETER_SPARSE_TYPE,
-                             BaseClass::IS_N_EQUAL>(
-                this->actualSeqQlenAddr, this->actualSeqKvlenAddr, this->tilingData->deterParam.deterPrefix0,
-                this->tilingData->baseDeterParam.deterMaxRound, this->constInfo.bSize, this->constInfo.n2Size,
-                this->constInfo.commonConstInfo.gSize, j, r, 0, this->tilingData->deterParam.deterPrefixStep,
-                coordinateInfo);
+            if (IsTndGqaBn2Exclusive()) {
+                CalTNDGqaOwnedIndex<BaseClass::CUBE_BASEM, BaseClass::CUBE_BASEN, false>(
+                    this->actualSeqQlenAddr, this->actualSeqKvlenAddr, this->tilingData->deterParam.deterPrefix0,
+                    this->tilingData->deterParam.deterColStart, this->tilingData->baseDeterParam.deterMaxRound,
+                    this->constInfo.bSize, this->constInfo.n2Size, this->constInfo.commonConstInfo.gSize, j, r,
+                    this->tilingData->deterParam.deterPrefixStep, 1, coordinateInfo);
+            } else {
+                CalTNDDenseIndex<BaseClass::CUBE_BASEM, BaseClass::CUBE_BASEN, BaseClass::DETER_SPARSE_TYPE,
+                                 BaseClass::IS_N_EQUAL>(
+                    this->actualSeqQlenAddr, this->actualSeqKvlenAddr, this->tilingData->deterParam.deterPrefix0,
+                    this->tilingData->baseDeterParam.deterMaxRound, this->constInfo.bSize, this->constInfo.n2Size,
+                    this->constInfo.commonConstInfo.gSize, j, r, 0, this->tilingData->deterParam.deterPrefixStep,
+                    coordinateInfo);
+            }
         }
     } else {
         int64_t k = static_cast<int64_t>(this->tilingData->s1s2BNGS1S2BaseParams.coreNum / NUM_TWO);
@@ -868,6 +935,12 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
                 this->CUBE_BASEN * this->HEAD_DIM_ALIGN, 0);
         }
     }
+    // Whole BN2 ownership also makes dQ exclusive. Column ownership alone only
+    // removes dK/dV ordering. For the Host-proved core-phase schedule, dQ
+    // ordering is shared by an H-round group; all other schedules keep H=1.
+    const bool exclusiveDqWriter = IsTndGqaBn2Exclusive();
+    const bool exclusiveKvWriter = HasExclusiveKvWriter();
+    const int64_t dqSyncGroup = TndGqaColumnHeadGroup();
     deterLoopMax = CalDeterMaxLoopNum();
     int64_t blockInnerIdx = 0;
     int64_t taskId = 0;
@@ -1058,23 +1131,31 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
                 // ------ deter 特殊部分 END ------
             } else {
                 if ASCEND_IS_AIC {
-                    CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
+                    if (!exclusiveDqWriter && ((loopIdx - 1) & (dqSyncGroup - 1)) == 0) {
+                        CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
+                    }
                 }
                 // compute dq
                 this->cubeBlock.template IterateMmDsK<CALC_TYPE, BaseClass::IS_DQ_WRITE_UB>(
                     this->dqWorkSpaceGm, dSL1Buffer, this->constInfo,
                     runInfos[(taskId + 1) & 1]); // c3
                 if ASCEND_IS_AIC {
-                    CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
-                    CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
+                    if (!exclusiveDqWriter && (loopIdx & (dqSyncGroup - 1)) == 0) {
+                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
+                    }
+                    if (!exclusiveKvWriter) {
+                        CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
+                    }
                 }
                 // compute dk
                 this->cubeBlock.template IterateMmDsQ<CALC_TYPE, BaseClass::IS_DK_WRITE_UB>(
                     this->dkWorkSpaceGm, dSL1Buffer, this->constInfo,
                     runInfos[(taskId + 1) & 1]); // c4
                 if ASCEND_IS_AIC {
-                    CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
-                    CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                    if (!exclusiveKvWriter) {
+                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
+                        CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                    }
 
                     CrossCoreSetFlag<SYNC_MODE, PIPE_MTE1>(SYNC_C4_TO_V3_FLAG);
                     CrossCoreSetFlag<SYNC_MODE, PIPE_MTE1>(16 + SYNC_C4_TO_V3_FLAG);
@@ -1083,7 +1164,9 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
                 this->cubeBlock.template IterateMmPDy<CALC_TYPE, BaseClass::IS_DV_WRITE_UB>(
                     this->dvWorkSpaceGm, pL1Buffer, this->constInfo, runInfos[(taskId + 1) & 1]); // c5
                 if ASCEND_IS_AIC {
-                    CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                    if (!exclusiveKvWriter) {
+                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                    }
 
                     CrossCoreSetFlag<SYNC_MODE, PIPE_MTE1>(SYNC_C5_TO_V4_FLAG);
                     CrossCoreSetFlag<SYNC_MODE, PIPE_MTE1>(16 + SYNC_C5_TO_V4_FLAG);
@@ -1095,16 +1178,29 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
             if constexpr (SPLIT_AXIS != BN2S2) {
                 if ASCEND_IS_AIC {
                     if (loopIdx > 0) {
-                        CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
-                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
-                        CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
-                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
-                        CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
-                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                        // Compute is one iteration behind prefetch: loopIdx=1
+                        // performs logical round 1. Idle cores participate in
+                        // exactly the same group boundary token operations.
+                        if (!exclusiveDqWriter && ((loopIdx - 1) & (dqSyncGroup - 1)) == 0) {
+                            CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
+                        }
+                        if (!exclusiveDqWriter && (loopIdx & (dqSyncGroup - 1)) == 0) {
+                            CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
+                        }
+                        if (!exclusiveKvWriter) {
+                            CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
+                            CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
+                            CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                            CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                        }
                     } else {
-                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
-                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
-                        CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                        if (!exclusiveDqWriter) {
+                            CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
+                        }
+                        if (!exclusiveKvWriter) {
+                            CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
+                            CrossCoreSetFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+                        }
                     }
                 }
             }
@@ -1120,9 +1216,13 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
     }
     if constexpr (SPLIT_AXIS != BN2S2) {
         if ASCEND_IS_AIC {
-            CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
-            CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
-            CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+            if (!exclusiveDqWriter) {
+                CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DETER_FIX_FLAG);
+            }
+            if (!exclusiveKvWriter) {
+                CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DK_DETER_FIX_FLAG);
+                CrossCoreWaitFlag<0, PIPE_FIX>(SYNC_DV_DETER_FIX_FLAG);
+            }
         }
     }
     if constexpr (SPLIT_AXIS == BN2S2) {

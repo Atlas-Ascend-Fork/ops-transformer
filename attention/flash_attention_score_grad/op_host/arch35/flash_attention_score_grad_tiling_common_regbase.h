@@ -428,7 +428,8 @@ struct FuzzyBaseInfoParamsRegbase { // 频繁使用的基础参数
     float dsScale = 1;
     float pScale = 1;
     float pScaleLog = 1;
-    uint32_t bandIdx;
+    // No-mask inputs return before FindBandIdx; their serialized inactive band index must still be initialized.
+    uint32_t bandIdx = 0;
     int64_t seed;
     int64_t offset;
     DtypeEnum outDtype;
@@ -469,6 +470,14 @@ struct FuzzyBaseInfoParamsRegbase { // 频繁使用的基础参数
     bool isS1S2Same = false;
     bool coreDivide = false;
     uint8_t tndLineDeter = 0;
+    // 写入 reserved2：0 原调度，1 双 KV 头列独占，2 整 BN2 独占，3 单 KV 头镜像列独占。
+    uint8_t tndGqaScheduleMode = 0;
+    // 写入 reserved3：模式 1 为查询头分组 H（0 为旧遍历），模式 3 为查询头对微分组 P；其他模式为 0。
+    uint8_t tndGqaHeadPairGroup = 0;
+    // 列独占只在调整切分之前 M/N 基本块已经相等时成立。不等块会先放大再把轮次乘 2，折叠公式不能套。
+    bool tndGqaColumnOwnerAllowed = false;
+    // 核 c 独占线性任务号区间 (deterColStart[c], deterColStart[c + 1]]
+    int64_t deterColStart[CORE_LIST_NUM + 1] = {0};
     int64_t deterMaxRound = 0;
     DeterGqaCausalScheduleMode deterGqaCausalScheduleMode = DeterGqaCausalScheduleMode::ORIGINAL;
     int64_t deterGqaCausalRoundsPerBatch = 0;
@@ -484,9 +493,9 @@ struct FuzzyBaseInfoParamsRegbase { // 频繁使用的基础参数
     int64_t deterPrefix0[DETER_PREFIX_ARRAY_SIZE] = {0};
     int64_t deterPrefix1[DETER_PREFIX_ARRAY_SIZE] = {0};
     int64_t deterPrefix2[DETER_PREFIX_ARRAY_SIZE] = {0};
-    // 确定性计算需要全核同步的轮次
-    uint64_t startNeedSyncRound[CORE_LIST_NUM];
-    uint64_t endNeedSyncRound[CORE_LIST_NUM];
+    // 确定性计算需要全核同步的轮次。没走到 BNS2 同步计算时保持 0，避免未初始化内存写入 tiling。
+    uint64_t startNeedSyncRound[CORE_LIST_NUM] = {0};
+    uint64_t endNeedSyncRound[CORE_LIST_NUM] = {0};
     int64_t separateDkOffset[CORE_LIST_NUM];
 
     bool isBn2 = false;

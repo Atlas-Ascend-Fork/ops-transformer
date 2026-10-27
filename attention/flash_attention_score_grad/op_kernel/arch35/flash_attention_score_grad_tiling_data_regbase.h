@@ -1358,11 +1358,18 @@ public:
 class DeterParamRegbase {
 public:
     constexpr static int64_t DETER_PREFIX_NUM = 132;
+    // 列独占调度的切点，每核一个起点再加一个总长，所以是核数加一
+    constexpr static int64_t DETER_COL_START_NUM = MAX_CORE_NUM + 1;
+    // reserved2 承载调度模式
+    constexpr static uint8_t SCHEDULE_DEFAULT = 0;
+    constexpr static uint8_t SCHEDULE_TND_GQA_COLUMN_EXCLUSIVE = 1;
+    constexpr static uint8_t SCHEDULE_TND_GQA_BN2_EXCLUSIVE = 2;
+    constexpr static uint8_t SCHEDULE_TND_GQA_CAUSAL_MIRROR_COLUMN_EXCLUSIVE = 3;
 
     bool coreDivide;
     uint8_t tndLineDeter;
     uint8_t reserved2;  // tilingData需要8字节对齐
-    uint8_t reserved3;  // tilingData需要8字节对齐
+    uint8_t reserved3;  // mode 3: query-head-pair microgroup size; otherwise reserved
     uint32_t reserved4; // tilingData需要8字节对齐
     int64_t deterPrefixStep;
     int64_t deterPrefix[DETER_PREFIX_NUM];
@@ -1370,6 +1377,9 @@ public:
     int64_t deterPrefix0[DETER_PREFIX_NUM];
     int64_t deterPrefix1[DETER_PREFIX_NUM];
     int64_t deterPrefix2[DETER_PREFIX_NUM];
+    // 核 c 独占线性任务号区间 (deterColStart[c], deterColStart[c + 1]]。
+    // mode 1: 完整虚拟列; mode 2: 完整(batch,N2); mode 3: 完整镜像S2列对。
+    int64_t deterColStart[DETER_COL_START_NUM];
 
     bool get_coreDivide() const
     {
@@ -1490,6 +1500,24 @@ public:
     void set_deterPrefix2(int index, int64_t val)
     {
         deterPrefix2[index] = val;
+    }
+    const int64_t* get_deterColStart() const
+    {
+        return deterColStart;
+    }
+    int64_t get_deterColStart(int index) const
+    {
+        return deterColStart[index];
+    }
+    void set_deterColStart(const int64_t* val)
+    {
+        for (int i = 0; i < DETER_COL_START_NUM; ++i) {
+            deterColStart[i] = val[i];
+        }
+    }
+    void set_deterColStart(int index, int64_t val)
+    {
+        deterColStart[index] = val;
     }
 };
 

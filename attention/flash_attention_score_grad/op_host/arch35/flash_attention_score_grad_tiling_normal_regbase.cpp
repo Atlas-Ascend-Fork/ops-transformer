@@ -1392,6 +1392,8 @@ void FlashAttentionScoreGradTilingNormalRegbase::CalcleDeterParam()
 
     int64_t cubebaseM = fBaseParams.s1Inner * fBaseParams.s1CvRatio;
     int64_t cubebaseN = fBaseParams.s2Inner * fBaseParams.s2CvRatio;
+    // 列独占依赖 CalVirtualIndex 的 (2m - n + 1) x n 折叠，基本块不等时轮次会被另行放大，公式不成立
+    fBaseParams.tndGqaColumnOwnerAllowed = cubebaseM > 0 && cubebaseM == cubebaseN;
     uint8_t deterTilingSplitMode = (cubebaseM == cubebaseN ? 0 : (cubebaseM > cubebaseN ? 2 : 1));
     int64_t s1Outer{fBaseParams.s1Outer};
     int64_t s2Outer{fBaseParams.s2Outer};
@@ -2475,13 +2477,14 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::SaveToTilingData()
     if (IsNewDeter(fBaseParams) && deterParam != nullptr) {
         deterParam->set_coreDivide(fBaseParams.coreDivide);
         deterParam->set_tndLineDeter(fBaseParams.tndLineDeter);
-        deterParam->set_reserved();
+        deterParam->set_reserved(fBaseParams.tndGqaScheduleMode, fBaseParams.tndGqaHeadPairGroup, 0);
         deterParam->set_deterPrefixStep(fBaseParams.deterPrefixStep);
         deterParam->set_deterPrefix(fBaseParams.deterPrefix);
         deterParam->set_deterPrefixAlign(fBaseParams.deterPrefixAlign);
         deterParam->set_deterPrefix0(fBaseParams.deterPrefix0);
         deterParam->set_deterPrefix1(fBaseParams.deterPrefix1);
         deterParam->set_deterPrefix2(fBaseParams.deterPrefix2);
+        deterParam->set_deterColStart(fBaseParams.deterColStart);
     }
     if (fBaseParams.layoutType == INPUT_FORMAT_TND && fBaseParams.isSwizzle && tndSwizzleParam_ != nullptr) {
         tndSwizzleParam_->set_tndS2BlockPrefixSum(tndBaseInfo.tndS2BlockPrefixSum);

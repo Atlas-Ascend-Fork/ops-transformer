@@ -13,6 +13,21 @@
  * \brief
  */
 #include "flash_attention_score_grad_tiling_normal_regbase.h"
+#include <limits>
+
+// Isolated candidate builds: 0 = frozen scheduling, 1 = D-A10 / P1, 2 = D-R / P2.
+#ifndef FAG_GATE114_VARIANT
+#define FAG_GATE114_VARIANT 2
+#endif
+
+// Selected production policy: guarded C4 with equivalent fast power-of-two phase arithmetic.
+// Other values are explicit diagnostic builds for the archived candidate comparisons.
+#ifndef FAG_CAUSAL38_VARIANT
+#define FAG_CAUSAL38_VARIANT 4
+#endif
+#ifndef FAG_CAUSAL38_DISABLE_MODE1
+#define FAG_CAUSAL38_DISABLE_MODE1 0
+#endif
 
 using namespace Ops::Transformer::OpTiling;
 
@@ -453,7 +468,10 @@ protected:
         std::fill(std::begin(fBaseParams.deterPrefix0), std::end(fBaseParams.deterPrefix0), static_cast<int64_t>(0));
         std::fill(std::begin(fBaseParams.deterPrefix1), std::end(fBaseParams.deterPrefix1), static_cast<int64_t>(0));
         std::fill(std::begin(fBaseParams.deterPrefix2), std::end(fBaseParams.deterPrefix2), static_cast<int64_t>(0));
+        std::fill(std::begin(fBaseParams.deterColStart), std::end(fBaseParams.deterColStart), static_cast<int64_t>(0));
         fBaseParams.tndLineDeter = 0;
+        fBaseParams.tndGqaScheduleMode = DeterParamRegbase::SCHEDULE_DEFAULT;
+        fBaseParams.tndGqaHeadPairGroup = 0;
 
         if (PreferTNDLineDeter(fBaseParams)) {
             ApplyTNDLineDeterParam(fBaseParams, BuildTNDLineDeter(fBaseParams));
@@ -522,6 +540,9 @@ protected:
         std::copy(deterPrefixData.deterPrefix.begin(), deterPrefixData.deterPrefix.end(), fBaseParams.deterPrefix);
         std::copy(deterPrefixData.deterPrefixAlign.begin(), deterPrefixData.deterPrefixAlign.end(),
                   fBaseParams.deterPrefixAlign);
+        if (TryApplyTndGqaBn2Exclusive(deterPrefixData.prefix1.back())) {
+            return;
+        }
         deterPrefixData.prefix1.push_back(fBaseParams.deterMaxRound);
         CalcleTNDDenseBns2DeterParam(deterPrefixData);
         return;
@@ -547,6 +568,8 @@ protected:
             CalcleTNDCausalDeterParamNormal(deterPrefixData, m0Max, m1Max, m2Max);
         } else {
             CalcleTNDCausalDeterParamGQA(deterPrefixData, m0Max, m1Max, m2Max);
+            // Establish the complete fallback, including its round count and prefixes, before evaluating ownership.
+            TryApplyTndGqaCausalMirrorColumnExclusive();
         }
     }
 
@@ -699,6 +722,709 @@ protected:
         }
     }
 
+    struct TndExclusiveRun {
+        int64_t count;
+        int64_t rounds;
+        int64_t area;
+    };
+
+    struct TndExclusiveCandidate {
+        std::vector<int64_t> cuts;
+        int64_t maxRounds = 0;
+        int64_t totalTasks = 0;
+        int64_t activeCores = 0;
+    };
+
+    static int64_t ExclusiveCeilDivide(int64_t value, int64_t divisor)
+    {
+        return value / divisor + static_cast<int64_t>(value % divisor != 0);
+    }
+
+    bool CanApplyTndGqaExclusive() const
+    {
+        constexpr int64_t kCubeSize = 128;
+        const bool supported =
+            FAG_GATE114_VARIANT != 0 && fBaseParams.isDeterministic && fBaseParams.layoutType == INPUT_FORMAT_TND &&
+            fBaseParams.splitAxis == SplitAxisEnum::BN2GS1S2 && fBaseParams.tndGqaColumnOwnerAllowed &&
+            !fBaseParams.coreDivide && fBaseParams.g > 1 && fBaseParams.b > 0 && fBaseParams.n2 > 0 &&
+            fBaseParams.aicNum > 0 && fBaseParams.aicNum <= CORE_LIST_NUM && fBaseParams.s1Inner > 0 &&
+            kCubeSize % fBaseParams.s1Inner == 0 && fBaseParams.s1CvRatio == kCubeSize / fBaseParams.s1Inner &&
+            fBaseParams.s2Inner > 0 && kCubeSize % fBaseParams.s2Inner == 0 &&
+            fBaseParams.s2CvRatio == kCubeSize / fBaseParams.s2Inner &&
+            static_cast<int64_t>(fBaseParams.actualSeqQlen.size()) >= fBaseParams.b &&
+            static_cast<int64_t>(fBaseParams.actualSeqKvlen.size()) >= fBaseParams.b;
+        if (!supported) {
+            return false;
+        }
+        for (int64_t batch = 0; batch < fBaseParams.b; ++batch) {
+            // Token normalization uses INT32_MAX. Beyond that window, nominal
+            // rectangle/triangle counts do not prove the number of useful tasks.
+            const int64_t qLen = fBaseParams.actualSeqQlen[batch];
+            const int64_t kvLen = fBaseParams.actualSeqKvlen[batch];
+            if (qLen <= 0 || kvLen <= 0 || qLen > std::numeric_limits<int32_t>::max() ||
+                kvLen > std::numeric_limits<int32_t>::max()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Keep the Host search proportional to batches, not to the number of BN2 units or S2 columns.
+    bool AppendExclusiveRun(std::vector<TndExclusiveRun>& runs, int64_t count, int64_t rounds, int64_t area,
+                            int64_t& totalRounds, int64_t& totalArea) const
+    {
+        if (count == 0) {
+            return true;
+        }
+        constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+        if (count < 0 || rounds <= 0 || area <= 0 || rounds > (kMax - totalRounds) / count ||
+            area > (kMax - totalArea) / count) {
+            return false;
+        }
+        runs.push_back({count, rounds, area});
+        totalRounds += count * rounds;
+        totalArea += count * area;
+        return true;
+    }
+
+    // Positive weights make maximal-prefix greedy an exact feasibility test for fixed-order partitions,
+    // including two simultaneous upper bounds. It does not assert globally optimal device time.
+    bool ExclusiveFits(const std::vector<TndExclusiveRun>& runs, int64_t roundCap, int64_t areaCap) const
+    {
+        int64_t coreCount = 1;
+        int64_t rounds = 0;
+        int64_t area = 0;
+        for (const auto& run : runs) {
+            if (run.rounds > roundCap || run.area > areaCap) {
+                return false;
+            }
+            int64_t left = run.count;
+            while (left > 0) {
+                int64_t take = std::min((roundCap - rounds) / run.rounds, (areaCap - area) / run.area);
+                if (take == 0) {
+                    if (++coreCount > static_cast<int64_t>(fBaseParams.aicNum)) {
+                        return false;
+                    }
+                    rounds = 0;
+                    area = 0;
+                    take = std::min(roundCap / run.rounds, areaCap / run.area);
+                }
+                take = std::min(take, left);
+                rounds += take * run.rounds;
+                area += take * run.area;
+                left -= take;
+            }
+        }
+        return true;
+    }
+
+    int64_t MinExclusiveLimit(const std::vector<TndExclusiveRun>& runs, int64_t total, int64_t fixedCap,
+                              bool minimizeRounds) const
+    {
+        int64_t lo = ExclusiveCeilDivide(total, static_cast<int64_t>(fBaseParams.aicNum));
+        for (const auto& run : runs) {
+            lo = std::max(lo, minimizeRounds ? run.rounds : run.area);
+        }
+        int64_t hi = total;
+        while (lo < hi) {
+            const int64_t mid = lo + (hi - lo) / NUM_TWO;
+            const bool fits = minimizeRounds ? ExclusiveFits(runs, mid, fixedCap) : ExclusiveFits(runs, fixedCap, mid);
+            if (fits) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        return lo;
+    }
+
+    bool BuildExclusiveCuts(const std::vector<TndExclusiveRun>& runs, int64_t roundCap, int64_t areaCap, int64_t total,
+                            int64_t taskScale, TndExclusiveCandidate& candidate) const
+    {
+        if (taskScale <= 0 || total <= 0 || total > std::numeric_limits<int64_t>::max() / taskScale || runs.empty()) {
+            return false;
+        }
+        const int64_t aicNum = static_cast<int64_t>(fBaseParams.aicNum);
+        std::vector<int64_t> cuts(aicNum + 1, 0);
+        int64_t coreIdx = 0;
+        int64_t rounds = 0;
+        int64_t area = 0;
+        int64_t cursor = 0;
+        int64_t maxRounds = 0;
+        for (const auto& run : runs) {
+            if (run.count <= 0 || run.rounds <= 0 || run.area <= 0 || run.rounds > roundCap || run.area > areaCap ||
+                run.rounds > (total - cursor) / run.count) {
+                return false;
+            }
+            int64_t left = run.count;
+            while (left > 0) {
+                int64_t take = std::min((roundCap - rounds) / run.rounds, (areaCap - area) / run.area);
+                if (take == 0) {
+                    maxRounds = std::max(maxRounds, rounds);
+                    if (++coreIdx >= aicNum) {
+                        return false;
+                    }
+                    cuts[coreIdx] = cursor * taskScale;
+                    rounds = 0;
+                    area = 0;
+                    take = std::min(roundCap / run.rounds, areaCap / run.area);
+                }
+                take = std::min(take, left);
+                rounds += take * run.rounds;
+                area += take * run.area;
+                cursor += take * run.rounds;
+                left -= take;
+            }
+        }
+        maxRounds = std::max(maxRounds, rounds);
+        if (cursor != total || maxRounds <= 0 || maxRounds > roundCap) {
+            return false;
+        }
+        for (int64_t c = coreIdx + 1; c <= aicNum; c++) {
+            cuts[c] = cursor * taskScale;
+        }
+        candidate.cuts = std::move(cuts);
+        candidate.maxRounds = maxRounds * taskScale;
+        candidate.totalTasks = total * taskScale;
+        candidate.activeCores = coreIdx + 1;
+        return true;
+    }
+
+    bool AdmitExclusiveCandidate(const std::vector<TndExclusiveRun>& runs, int64_t taskScale,
+                                 const TndExclusiveCandidate& candidate, const char* mode,
+                                 bool columnMode = false) const
+    {
+        const int64_t cores = static_cast<int64_t>(fBaseParams.aicNum);
+        const int64_t oldRounds = fBaseParams.deterMaxRound;
+        if (cores <= 0 || cores > CORE_LIST_NUM || taskScale <= 0 || candidate.totalTasks <= 0 || oldRounds <= 0 ||
+            candidate.cuts.size() != static_cast<size_t>(cores + 1)) {
+            OP_LOGD("AdmitExclusiveCandidate", "%s rejected: invalid candidate or fallback.", mode);
+            return false;
+        }
+        const int64_t lowerBound = ExclusiveCeilDivide(candidate.totalTasks, cores);
+        const char* reason = nullptr;
+        int64_t maxRounds = 0;
+        int64_t activeCores = 0;
+        int64_t runBegin = 0;
+        int64_t runEnd = 0;
+        size_t runIdx = 0;
+        for (int64_t core = 0; core <= cores; ++core) {
+            const int64_t cut = candidate.cuts[core];
+            if (cut < 0 || cut > candidate.totalTasks || cut % taskScale != 0 ||
+                (core > 0 && cut < candidate.cuts[core - 1])) {
+                reason = "invalid or non-monotonic cut";
+                break;
+            }
+            const int64_t normalizedCut = cut / taskScale;
+            while (normalizedCut > runEnd && runIdx < runs.size()) {
+                const auto& run = runs[runIdx++];
+                if (run.count <= 0 || run.rounds <= 0 ||
+                    run.rounds > (candidate.totalTasks / taskScale - runEnd) / run.count) {
+                    reason = "invalid unit extent";
+                    break;
+                }
+                runBegin = runEnd;
+                runEnd += run.count * run.rounds;
+            }
+            if (reason != nullptr || normalizedCut > runEnd ||
+                (runIdx > 0 && (normalizedCut - runBegin) % runs[runIdx - 1].rounds != 0)) {
+                reason = "cut splits an owned unit";
+                break;
+            }
+            if (core > 0) {
+                const int64_t load = cut - candidate.cuts[core - 1];
+                maxRounds = std::max(maxRounds, load);
+                activeCores += static_cast<int64_t>(load > 0);
+            }
+        }
+        if (reason == nullptr && (candidate.cuts.front() != 0 || candidate.cuts.back() != candidate.totalTasks ||
+                                  maxRounds != candidate.maxRounds || activeCores != candidate.activeCores ||
+                                  runIdx != runs.size() || runEnd != candidate.totalTasks / taskScale)) {
+            reason = "incomplete replay";
+        }
+        // CalDeterIndex uses uint32_t round arguments. The final drain asks for R + 1;
+        // allow R <= UINT32_MAX - 1 so neither the prefetch argument nor its search loop wraps.
+        if (reason == nullptr && maxRounds >= std::numeric_limits<uint32_t>::max()) {
+            reason = "rounds exceed decoder uint32 drain boundary";
+        }
+        // Positive excess comparisons avoid overflowing a cross multiplication or reference + allowance.
+        // Modes 2/3 retain 5% / 5%; mode 1 retains its 15% fallback budget and adds a 10% lower-bound budget.
+        const int64_t oldAllowance = columnMode ? (oldRounds / 20) * 3 + ((oldRounds % 20) * 3) / 20 : oldRounds / 20;
+        const int64_t lowerAllowance = lowerBound / (columnMode ? 10 : 20);
+        if (reason == nullptr && maxRounds > oldRounds && maxRounds - oldRounds > oldAllowance) {
+            reason = "rounds exceed fallback budget";
+        }
+        if (reason == nullptr && maxRounds > lowerBound && maxRounds - lowerBound > lowerAllowance) {
+            reason = "rounds exceed task lower-bound budget";
+        }
+        if (reason == nullptr && activeCores != std::min(cores, candidate.totalTasks)) {
+            reason = "insufficient active cores";
+        }
+        OP_LOGD("AdmitExclusiveCandidate", "%s %s: %s; tasks %ld, cores %ld, active %ld, old %ld, new %ld, lower %ld.",
+                mode, reason == nullptr ? "accepted" : "rejected", reason == nullptr ? "balanced" : reason,
+                candidate.totalTasks, cores, activeCores, oldRounds, maxRounds, lowerBound);
+        return reason == nullptr;
+    }
+
+    void CommitExclusiveCuts(const TndExclusiveCandidate& candidate)
+    {
+        std::fill(std::begin(fBaseParams.deterColStart), std::end(fBaseParams.deterColStart), static_cast<int64_t>(0));
+        std::copy(candidate.cuts.begin(), candidate.cuts.end(), fBaseParams.deterColStart);
+        fBaseParams.deterMaxRound = candidate.maxRounds;
+    }
+
+    bool TryApplyTndGqaBn2Exclusive(int64_t prefixArea)
+    {
+        if (!CanApplyTndGqaExclusive()) {
+            return false;
+        }
+        constexpr int64_t kCubeSize = 128;
+        constexpr int64_t kAlignSize = 16;
+        constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+        std::vector<TndExclusiveRun> runs;
+        runs.reserve(fBaseParams.b);
+        int64_t totalRounds = 0;
+        int64_t totalArea = 0;
+        for (int64_t bIdx = 0; bIdx < fBaseParams.b; bIdx++) {
+            const int64_t qLen = fBaseParams.actualSeqQlen[bIdx];
+            const int64_t kvLen = fBaseParams.actualSeqKvlen[bIdx];
+            if (qLen <= 0 || kvLen <= 0) {
+                return false;
+            }
+            const int64_t m = ExclusiveCeilDivide(qLen, kCubeSize);
+            const int64_t n = ExclusiveCeilDivide(kvLen, kCubeSize);
+            const int64_t mq = ExclusiveCeilDivide(qLen, kAlignSize);
+            const int64_t nkv = ExclusiveCeilDivide(kvLen, kAlignSize);
+            if (m > kMax / n || mq > kMax / nkv ||
+                !AppendExclusiveRun(runs, fBaseParams.n2, m * n, mq * nkv, totalRounds, totalArea)) {
+                return false;
+            }
+        }
+        if (prefixArea <= 0 || prefixArea > kMax / fBaseParams.n2 || totalRounds != prefixArea * fBaseParams.n2) {
+            return false;
+        }
+        int64_t roundCap = MinExclusiveLimit(runs, totalRounds, totalArea, true);
+        if (FAG_GATE114_VARIANT == 1 && totalRounds <= kMax / 11) {
+            const int64_t candidateCap = 11 * totalRounds / (10 * static_cast<int64_t>(fBaseParams.aicNum));
+            if (ExclusiveFits(runs, candidateCap, totalArea)) {
+                roundCap = candidateCap;
+            }
+        }
+        const int64_t areaCap = MinExclusiveLimit(runs, totalArea, roundCap, false);
+        roundCap = MinExclusiveLimit(runs, totalRounds, areaCap, true);
+        const int64_t oldRounds = fBaseParams.deterMaxRound;
+        TndExclusiveCandidate candidate;
+        if (!BuildExclusiveCuts(runs, roundCap, areaCap, totalRounds, fBaseParams.g, candidate)) {
+            OP_LOGD("TryApplyTndGqaBn2Exclusive", "invalid or overflowing candidate cuts; keep old schedule.");
+            return false;
+        }
+        if (!AdmitExclusiveCandidate(runs, fBaseParams.g, candidate, "dense_bn2")) {
+            return false;
+        }
+        CommitExclusiveCuts(candidate);
+        fBaseParams.tndGqaScheduleMode = DeterParamRegbase::SCHEDULE_TND_GQA_BN2_EXCLUSIVE;
+        OP_LOGD("TryApplyTndGqaBn2Exclusive", "variant %d, rounds %ld -> %ld, area cap %ld, tasks %ld.",
+                FAG_GATE114_VARIANT, oldRounds, fBaseParams.deterMaxRound, areaCap, totalRounds * fBaseParams.g);
+        return true;
+    }
+
+    bool TryApplyTndGqaCausalMirrorColumnExclusive()
+    {
+        constexpr int64_t kCubeSize = 128;
+        constexpr int64_t kHeadPairGroup = FAG_GATE114_VARIANT == 2 ? 2 : 1;
+        // A token-window NO_MASK input may also be classified DETER_CAUSAL,
+        // but its skipped blocks invalidate the full-triangle load proof.
+        if (fBaseParams.sparseMode != static_cast<uint32_t>(SparseMode::LEFT_UP_CAUSAL) &&
+            fBaseParams.sparseMode != static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL)) {
+            return false;
+        }
+        if (!CanApplyTndGqaExclusive() || fBaseParams.n2 != 1 || fBaseParams.g % NUM_TWO != 0 ||
+            (fBaseParams.g / NUM_TWO) % kHeadPairGroup != 0) {
+            return false;
+        }
+        constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+        std::vector<TndExclusiveRun> runs;
+        std::vector<int64_t> prefix = {0};
+        runs.reserve(fBaseParams.b * NUM_TWO);
+        prefix.reserve(fBaseParams.b + 1);
+        int64_t totalRounds = 0;
+        int64_t totalArea = 0;
+        for (int64_t bIdx = 0; bIdx < fBaseParams.b; bIdx++) {
+            const int64_t qLen = fBaseParams.actualSeqQlen[bIdx];
+            if (qLen <= 0 || qLen != fBaseParams.actualSeqKvlen[bIdx]) {
+                return false;
+            }
+            const int64_t m = ExclusiveCeilDivide(qLen, kCubeSize);
+            if (m >= kMax / NUM_TWO) {
+                return false;
+            }
+            const int64_t virtualRows = m + 1;
+            if (!AppendExclusiveRun(runs, m / NUM_TWO, NUM_TWO * virtualRows, NUM_TWO * virtualRows, totalRounds,
+                                    totalArea) ||
+                !AppendExclusiveRun(runs, m % NUM_TWO, virtualRows, virtualRows, totalRounds, totalArea)) {
+                return false;
+            }
+            // Each batch's normalized full-rectangle area is twice its physical causal triangle.
+            prefix.push_back(totalRounds / NUM_TWO);
+        }
+        if (totalRounds <= 0) {
+            return false;
+        }
+        const int64_t roundCap = MinExclusiveLimit(runs, totalRounds, totalArea, true);
+        TndExclusiveCandidate candidate;
+        if (!BuildExclusiveCuts(runs, roundCap, totalArea, totalRounds, fBaseParams.g / NUM_TWO, candidate)) {
+            OP_LOGD("TryApplyTndGqaCausalMirrorColumnExclusive",
+                    "invalid or overflowing candidate cuts; keep old schedule.");
+            return false;
+        }
+        if (fBaseParams.deterPrefixStep <= 0) {
+            OP_LOGD("TryApplyTndGqaCausalMirrorColumnExclusive", "invalid prefix step; keep old schedule.");
+            return false;
+        }
+        auto serializedPrefix = SliceVector(prefix, fBaseParams.deterPrefixStep);
+        serializedPrefix.push_back(candidate.maxRounds);
+        if (serializedPrefix.size() > DETER_PREFIX_ARRAY_SIZE) {
+            OP_LOGD("TryApplyTndGqaCausalMirrorColumnExclusive", "prefix does not fit; keep old schedule.");
+            return false;
+        }
+        if (!AdmitExclusiveCandidate(runs, fBaseParams.g / NUM_TWO, candidate, "causal_mirror")) {
+            return false;
+        }
+        // All validation and allocation are complete. Rejection above leaves every fallback field untouched.
+        CommitExclusiveCuts(candidate);
+        CopyTNDPrefix(serializedPrefix, fBaseParams.deterPrefix0, DETER_PREFIX_ARRAY_SIZE);
+        std::fill(std::begin(fBaseParams.deterPrefix1), std::end(fBaseParams.deterPrefix1), static_cast<int64_t>(0));
+        std::fill(std::begin(fBaseParams.deterPrefix2), std::end(fBaseParams.deterPrefix2), static_cast<int64_t>(0));
+        fBaseParams.tndGqaScheduleMode = DeterParamRegbase::SCHEDULE_TND_GQA_CAUSAL_MIRROR_COLUMN_EXCLUSIVE;
+        fBaseParams.tndGqaHeadPairGroup = kHeadPairGroup;
+        OP_LOGD("TryApplyTndGqaCausalMirrorColumnExclusive", "P %ld, rounds %ld, tasks %ld.", kHeadPairGroup,
+                fBaseParams.deterMaxRound, totalRounds * (fBaseParams.g / NUM_TWO));
+        return true;
+    }
+
+    // 把列权重按 batch 聚合成区段后，求最小的"每核任务量上限"，使顺序填充不超过 aicNum 个核。
+    // 同一 batch 内每个虚拟列的权重相同，所以不必把列展开，batch 数就是区段数。
+    bool ColumnExclusiveFits(const std::vector<int64_t>& runCount, const std::vector<int64_t>& runWeight,
+                             int64_t aicNum, int64_t limit) const
+    {
+        int64_t used = 1;
+        int64_t acc = 0;
+        for (size_t i = 0; i < runCount.size(); i++) {
+            const int64_t w = runWeight[i];
+            if (w > limit) {
+                return false;
+            }
+            int64_t left = runCount[i];
+            while (left > 0) {
+                int64_t canTake = (limit - acc) / w;
+                if (canTake == 0) {
+                    used++;
+                    if (used > aicNum) {
+                        return false;
+                    }
+                    acc = 0;
+                    canTake = limit / w;
+                }
+                const int64_t take = std::min(canTake, left);
+                acc += take * w;
+                left -= take;
+            }
+        }
+        return true;
+    }
+
+    // 列独占。把各核的切点吸附到虚拟列边界上，使每个物理 KV 列全程只被一个核写入。
+    // dK/dV 因此不再需要跨核定序，kernel 可以去掉 dk、dv 两条全 cube 屏障链，只保留 dq 那条。
+    // 代价是各核任务量不再严格相等，轮次会略增，超过现有轮次的 kRoundCapNum / kRoundCapDen 就不启用。
+    void TryApplyTndGqaColumnExclusiveLegacy(int64_t prefix0Area, int64_t N11)
+    {
+        constexpr int64_t kRoundCapNum = 23; // 1.15 倍
+        constexpr int64_t kRoundCapDen = 20;
+
+        if (!fBaseParams.tndGqaColumnOwnerAllowed || fBaseParams.coreDivide || fBaseParams.g <= 1 ||
+            fBaseParams.b <= 0 || fBaseParams.aicNum == 0 || fBaseParams.aicNum > CORE_LIST_NUM ||
+            fBaseParams.deterMaxRound <= 0) {
+            return;
+        }
+        if (static_cast<int64_t>(fBaseParams.actualSeqQlen.size()) < fBaseParams.b ||
+            static_cast<int64_t>(fBaseParams.actualSeqKvlen.size()) < fBaseParams.b) {
+            return;
+        }
+        const int64_t aicNum = static_cast<int64_t>(fBaseParams.aicNum);
+
+        std::vector<int64_t> runCount;
+        std::vector<int64_t> runWeight;
+        runCount.reserve(fBaseParams.b);
+        runWeight.reserve(fBaseParams.b);
+        int64_t total = 0;
+        int64_t area = 0;
+        for (int64_t i = 0; i < fBaseParams.b; i++) {
+            int64_t m = CeilDivideBy(fBaseParams.actualSeqQlen[i], fBaseParams.s1Inner * fBaseParams.s1CvRatio);
+            int64_t n = CeilDivideBy(fBaseParams.actualSeqKvlen[i], fBaseParams.s2Inner * fBaseParams.s2CvRatio);
+            if (m <= 0 || n <= 0) {
+                return;
+            }
+            if (m < n) {
+                n = m;
+            }
+            const int64_t mVirtual = NUM_TWO * m - n + 1;
+            runCount.push_back(n * N11);
+            runWeight.push_back(mVirtual * fBaseParams.g);
+            total += n * N11 * mVirtual * fBaseParams.g;
+            area += mVirtual * n;
+        }
+        // 与 host 的 prefix0 对不上说明虚拟矩形前提不成立，不冒险替换调度
+        if (total <= 0 || area != prefix0Area) {
+            OP_LOGD("TryApplyTndGqaColumnExclusive", "virtual area %ld does not match prefix0 %ld, keep old schedule.",
+                    area, prefix0Area);
+            return;
+        }
+
+        int64_t lo = *std::max_element(runWeight.begin(), runWeight.end());
+        int64_t hi = total;
+        while (lo < hi) {
+            const int64_t mid = lo + (hi - lo) / NUM_TWO;
+            if (ColumnExclusiveFits(runCount, runWeight, aicNum, mid)) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
+        }
+        const int64_t limit = lo;
+        if (limit * kRoundCapDen > fBaseParams.deterMaxRound * kRoundCapNum) {
+            OP_LOGD("TryApplyTndGqaColumnExclusive", "rounds %ld -> %ld exceeds the cap, keep old schedule.",
+                    fBaseParams.deterMaxRound, limit);
+            return;
+        }
+
+        // 用选定的上限重放一遍顺序填充，记录每个核的起始任务号
+        std::fill(std::begin(fBaseParams.deterColStart), std::end(fBaseParams.deterColStart), static_cast<int64_t>(0));
+        int64_t coreIdx = 0;
+        int64_t acc = 0;
+        int64_t run = 0;
+        int64_t maxRound = 0;
+        for (size_t i = 0; i < runCount.size(); i++) {
+            const int64_t w = runWeight[i];
+            int64_t left = runCount[i];
+            while (left > 0) {
+                int64_t canTake = (limit - acc) / w;
+                if (canTake == 0) {
+                    maxRound = std::max(maxRound, acc);
+                    coreIdx++;
+                    if (coreIdx >= aicNum) {
+                        return; // 重放与可行性判断不一致，放弃替换
+                    }
+                    fBaseParams.deterColStart[coreIdx] = run;
+                    acc = 0;
+                    canTake = limit / w;
+                }
+                const int64_t take = std::min(canTake, left);
+                acc += take * w;
+                run += take * w;
+                left -= take;
+            }
+        }
+        maxRound = std::max(maxRound, acc);
+        for (int64_t c = coreIdx + 1; c <= aicNum; c++) {
+            fBaseParams.deterColStart[c] = run;
+        }
+        if (run != total || maxRound <= 0 || maxRound > limit) {
+            return;
+        }
+
+        OP_LOGD("TryApplyTndGqaColumnExclusive", "column exclusive on, rounds %ld -> %ld, tasks %ld, cores used %ld.",
+                fBaseParams.deterMaxRound, maxRound, total, coreIdx + 1);
+        fBaseParams.deterMaxRound = maxRound;
+        fBaseParams.tndGqaScheduleMode = DeterParamRegbase::SCHEDULE_TND_GQA_COLUMN_EXCLUSIVE;
+    }
+
+    // Validate dimensions before multiplying them; this method must not mutate fallback state.
+    bool CanApplyTndGqaColumnExclusive(int64_t N11, int64_t headGroup) const
+    {
+        // DETER_CAUSAL can also describe a negative-token window in NO_MASK mode.
+        // Its folded columns may contain skipped blocks, so nominal task counts
+        // do not prove useful-core occupancy or load balance for that window.
+        // Explicit causal modes normalize their tokens before this scheduler.
+        if (fBaseParams.sparseMode != static_cast<uint32_t>(SparseMode::LEFT_UP_CAUSAL) &&
+            fBaseParams.sparseMode != static_cast<uint32_t>(SparseMode::RIGHT_DOWN_CAUSAL)) {
+            return false;
+        }
+        constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+        if (!fBaseParams.isDeterministic || fBaseParams.layoutType != INPUT_FORMAT_TND ||
+            fBaseParams.splitAxis != SplitAxisEnum::BN2GS1S2 || !fBaseParams.tndGqaColumnOwnerAllowed ||
+            fBaseParams.deterSparseType != static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL) ||
+            fBaseParams.coreDivide || fBaseParams.g <= 1 || fBaseParams.b <= 0 || fBaseParams.n2 < 2 ||
+            fBaseParams.n2 % NUM_TWO != 0 || N11 != fBaseParams.n2 / NUM_TWO || fBaseParams.aicNum == 0 ||
+            fBaseParams.aicNum > CORE_LIST_NUM || fBaseParams.deterMaxRound <= 0 || fBaseParams.s1Inner <= 0 ||
+            fBaseParams.s2Inner <= 0 || fBaseParams.s1CvRatio <= 0 || fBaseParams.s2CvRatio <= 0 ||
+            fBaseParams.s1Inner > kMax / fBaseParams.s1CvRatio || fBaseParams.s2Inner > kMax / fBaseParams.s2CvRatio ||
+            static_cast<int64_t>(fBaseParams.actualSeqQlen.size()) < fBaseParams.b ||
+            static_cast<int64_t>(fBaseParams.actualSeqKvlen.size()) < fBaseParams.b) {
+            return false;
+        }
+        const int64_t cubeM = fBaseParams.s1Inner * fBaseParams.s1CvRatio;
+        const int64_t cubeN = fBaseParams.s2Inner * fBaseParams.s2CvRatio;
+        if (cubeM != cubeN) {
+            return false;
+        }
+        if (headGroup != 0 && ((headGroup != 2 && headGroup != 4 && headGroup != 8) || fBaseParams.g % headGroup != 0 ||
+                               cubeM != 128 || fBaseParams.inputDtype != DtypeEnum::BFLOAT16 ||
+                               fBaseParams.d != fBaseParams.d1 || (fBaseParams.d != 128 && fBaseParams.d != 256))) {
+            return false;
+        }
+        for (int64_t batch = 0; batch < fBaseParams.b; ++batch) {
+            // Causal preTokens is INT32_MAX, not an unbounded left window.
+            // Longer queries could therefore skip nominally assigned blocks.
+            if (fBaseParams.actualSeqQlen[batch] > std::numeric_limits<int32_t>::max() ||
+                (headGroup != 0 && fBaseParams.actualSeqQlen[batch] != fBaseParams.actualSeqKvlen[batch])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool CanUseCausalRowWindow(const TndExclusiveCandidate& candidate, int64_t stride) const
+    {
+        // Called only after the complete C4 admission. Adjacent owners of one
+        // KV-head pair have phases stride apart. C*stride <= M makes their
+        // stride-row circular windows disjoint for every global token group.
+        if ((stride != 2 && stride != 4) || fBaseParams.g % 8 != 0 || candidate.maxRounds % (8 * stride) != 0) {
+            return false;
+        }
+        constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+        const int64_t pairs = fBaseParams.n2 / 2;
+        const int64_t g = fBaseParams.g;
+        if (pairs <= 0 || g <= 0 || candidate.cuts.size() != static_cast<size_t>(fBaseParams.aicNum) + 1) {
+            return false;
+        }
+        int64_t start = 0;
+        for (int64_t batch = 0; batch < fBaseParams.b; ++batch) {
+            const int64_t m = ExclusiveCeilDivide(fBaseParams.actualSeqQlen[batch], int64_t(128));
+            if (m <= 0 || m == kMax) {
+                return false;
+            }
+            const int64_t height = m + 1;
+            if (height < stride || m > kMax / height || m * height > kMax / g) {
+                return false;
+            }
+            const int64_t pairTasks = m * height * g;
+            if (pairTasks > (kMax - start) / pairs) {
+                return false;
+            }
+            const int64_t end = start + pairTasks * pairs;
+            if (end > candidate.totalTasks) {
+                return false;
+            }
+            int64_t lastPair = -1;
+            int64_t owners = 1;
+            // Count cuts strictly inside a pair, without expanding its columns
+            // or all N2 pairs. Exact pair boundaries introduce no shared writer.
+            for (size_t core = 1; core + 1 < candidate.cuts.size(); ++core) {
+                const int64_t cut = candidate.cuts[core];
+                if (cut <= start || cut >= end || (cut - start) % pairTasks == 0) {
+                    continue;
+                }
+                const int64_t pair = (cut - start) / pairTasks;
+                owners = pair == lastPair ? owners + 1 : 2;
+                lastPair = pair;
+                if (owners > height / stride) {
+                    return false;
+                }
+            }
+            start = end;
+        }
+        return start == candidate.totalTasks;
+    }
+
+    void TryApplyTndGqaColumnExclusive(int64_t prefix0Area, int64_t N11)
+    {
+        if (FAG_CAUSAL38_DISABLE_MODE1 != 0) {
+            return; // Diagnostic same-source reference: preserve all mode-0 state and all other modes.
+        }
+        if (FAG_CAUSAL38_VARIANT == 0) {
+            TryApplyTndGqaColumnExclusiveLegacy(prefix0Area, N11);
+            return;
+        }
+        // Candidate 8 extends only the C4 domain: G=4 stays H=4 and G=6
+        // still falls back. In particular, do not introduce an H=2 subcase.
+        const int64_t kHeadGroup = FAG_CAUSAL38_VARIANT >= 16 ? 4 :
+                                   FAG_CAUSAL38_VARIANT == 8  ? (fBaseParams.g % 8 == 0 ? 8 : 4) :
+                                                                (FAG_CAUSAL38_VARIANT == 1 ? 0 : FAG_CAUSAL38_VARIANT);
+        if (!CanApplyTndGqaColumnExclusive(N11, kHeadGroup) || prefix0Area <= 0) {
+            OP_LOGD("TryApplyTndGqaColumnExclusive", "candidate %d rejected: entry or H prerequisites.",
+                    FAG_CAUSAL38_VARIANT);
+            return;
+        }
+        constexpr int64_t kMax = std::numeric_limits<int64_t>::max();
+        const int64_t cubeM = fBaseParams.s1Inner * fBaseParams.s1CvRatio;
+        const int64_t cubeN = fBaseParams.s2Inner * fBaseParams.s2CvRatio;
+        std::vector<TndExclusiveRun> runs;
+        runs.reserve(fBaseParams.b);
+        int64_t area = 0;
+        int64_t totalRounds = 0;
+        int64_t totalArea = 0;
+        for (int64_t batch = 0; batch < fBaseParams.b; ++batch) {
+            const int64_t q = fBaseParams.actualSeqQlen[batch];
+            const int64_t kv = fBaseParams.actualSeqKvlen[batch];
+            if (q <= 0 || kv <= 0) {
+                return;
+            }
+            const int64_t m = ExclusiveCeilDivide(q, cubeM);
+            const int64_t n = std::min(m, ExclusiveCeilDivide(kv, cubeN));
+            if (m > (kMax - 1) / NUM_TWO || n > kMax / N11) {
+                return;
+            }
+            const int64_t virtualHeight = m + (m - n) + 1;
+            if (virtualHeight > (kMax - area) / n) {
+                return;
+            }
+            area += virtualHeight * n;
+            // Normalize out G: accepted ownership remains identical when only the query-head count changes.
+            if (!AppendExclusiveRun(runs, n * N11, virtualHeight, virtualHeight, totalRounds, totalArea)) {
+                return;
+            }
+        }
+        if (area != prefix0Area || totalRounds <= 0 || totalRounds > kMax / fBaseParams.g) {
+            OP_LOGD("TryApplyTndGqaColumnExclusive", "candidate rejected: prefix extent or task overflow.");
+            return;
+        }
+        const int64_t limit = MinExclusiveLimit(runs, totalRounds, totalArea, true);
+        TndExclusiveCandidate candidate;
+        if (!BuildExclusiveCuts(runs, limit, totalArea, totalRounds, fBaseParams.g, candidate) ||
+            !AdmitExclusiveCandidate(runs, fBaseParams.g, candidate, "Causal column", true)) {
+            return;
+        }
+        if (kHeadGroup != 0) {
+            // All column, batch and core boundaries are multiples of G, hence of H. Check serialized cuts too.
+            const int64_t kAlignment = kHeadGroup;
+            if (candidate.maxRounds % kAlignment != 0) {
+                return;
+            }
+            for (const int64_t cut : candidate.cuts) {
+                if (cut % kAlignment != 0) {
+                    return;
+                }
+            }
+        }
+        int64_t scheduleGroup = kHeadGroup;
+        if ((FAG_CAUSAL38_VARIANT == 16 || FAG_CAUSAL38_VARIANT == 32) &&
+            CanUseCausalRowWindow(candidate, FAG_CAUSAL38_VARIANT / 8)) {
+            scheduleGroup = FAG_CAUSAL38_VARIANT;
+        }
+        if (FAG_CAUSAL38_VARIANT == 64 || FAG_CAUSAL38_VARIANT == 128) {
+            // T4 changes traversal; F4 only simplifies the C4 decoder. Both
+            // retain the C4 domain, cuts and four-round dQ synchronization.
+            scheduleGroup = FAG_CAUSAL38_VARIANT;
+        }
+        // Encodings 16/32 mean H=8 and row stride 2/4. Internal boundaries
+        // remain H-aligned; global groups may cross them. Idle paths keep the
+        // same group clock and final R is group-aligned. Otherwise preserve C4.
+        // Commit only after final cuts, max load, active cores and decoder/synchronization premises agree.
+        CommitExclusiveCuts(candidate);
+        fBaseParams.tndGqaScheduleMode = DeterParamRegbase::SCHEDULE_TND_GQA_COLUMN_EXCLUSIVE;
+        fBaseParams.tndGqaHeadPairGroup = static_cast<uint8_t>(scheduleGroup);
+    }
+
     void CalcleTNDCausalDeterParamGQA(DeterPrefixData& deterPrefixData, const int64_t m0Max, const int64_t m1Max,
                                       const int64_t m2Max)
     {
@@ -722,6 +1448,8 @@ protected:
             prefix1Max = 0;
             prefix2Max = 0;
             fBaseParams.deterMaxRound = prefix0Max;
+            TryApplyTndGqaColumnExclusive(deterPrefixData.prefix0.back(), N11);
+            prefix0Max = fBaseParams.deterMaxRound;
         } else {
             prefix0Max = std::max(CeilDivideBy(deterPrefixData.prefix0.back() * fBaseParams.g * N11,
                                                static_cast<int64_t>(fBaseParams.aicNum)),
