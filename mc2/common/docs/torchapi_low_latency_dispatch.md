@@ -584,8 +584,22 @@ MoeDistributeBuffer.low_latency_dispatch(x, topk_idx, num_experts, *, quant_mode
   - H：表示hidden size隐藏层大小。取值为\[1024, 8192\]。
 
   - BS：表示batch sequence size，即本卡最终输出的token数量。取值范围为0<BS≤512。
+    - 当`comm_alg`为"fullmesh_v2"时
+        <!-- npu="A3" id12 -->
+        - <term>Atlas A3系列产品</term>: BS取值范围为0<BS≤256。
+        <!-- end id12 -->
+        <!-- npu="950" id13 -->
+        - <term>Ascend 950PR&950DT系列产品</term>: BS取值范围为0<BS≤512。
+        <!-- end id13 -->
 
   - K：表示选取topK个专家，取值范围为0<K≤16，同时满足0 < K ≤ num\_experts + zero_expert_num + copy_expert_num + const_expert_num。
+    - `comm_alg`为"fullmesh_v2"时
+        <!-- npu="A3" id11 -->
+        - <term>Atlas A3系列产品</term>: K取值范围为0<K≤12。
+        <!-- end id11 -->
+        <!-- npu="950" id14 -->
+        - <term>Ascend 950PR&950DT系列产品</term>: K取值范围为0<K≤16。
+        <!-- end id14 -->
 
   - local\_expert\_num：表示本卡专家数量。
     - 对于共享专家卡，local\_expert\_num为1。
@@ -609,6 +623,7 @@ MoeDistributeBuffer.low_latency_dispatch(x, topk_idx, num_experts, *, quant_mode
   <!-- end id8 -->
   <!-- npu="950" id9 -->
   - <term>Ascend 950PR&950DT系列产品</term>：
+    - <b>`comm_alg`为"fullmesh_v2"时支持0<K≤16。</b>
     - `topk_weights`可传有效Tensor或None。传有效Tensor时使能topK专家权重功能，有效Tensor为2D Tensor，shape为(BS, K)，且`expand_scales`输出有效；传None时不使能topK专家权重功能，`expand_scales`输出无效。不支持空Tensor。
     - `quant_mode=0`表示非量化场景。当`x`为float16或bfloat16时，`expand_x`可与`x`一致，也可通过`y_dtype`指定为hifloat8，`x_smooth_scale`必须为None；当`x`为hifloat8、float8_e5m2、float8_e4m3fn、float4_e2m1、float4_e1m2时，`x_smooth_scale`必须传有效Tensor，`expand_x`与`x`逻辑类型一致。`x`为hifloat8时，`x_smooth_scale`逻辑类型为float；`x`为float8_e5m2或float8_e4m3fn时，`x_smooth_scale`逻辑类型为float或float8_e8m0；`x`为float4_e2m1或float4_e1m2时，`x_smooth_scale`逻辑类型为float8_e8m0，且H必须为偶数。此时`x_smooth_scale` shape为(BS, dim1)，其中dim1 <= H。
     - `quant_mode=1`表示静态量化场景，`expand_x`支持int8、hifloat8，`x_smooth_scale`必须传有效Tensor。`expand_x`为int8时，`x_smooth_scale`可表示量化系数，shape为(1,)；也可表示每个专家共享的平滑权重，shape为(H,)；也可表示融合了每个专家平滑权重的量化系数，有共享专家时shape为(shared_expert_num + num_experts, H)，无共享专家时shape为(num_experts, H)。`expand_x`为hifloat8时，`x_smooth_scale` shape必须为(1,)。
@@ -620,8 +635,8 @@ MoeDistributeBuffer.low_latency_dispatch(x, topk_idx, num_experts, *, quant_mode
 - HCCL通信域缓存区大小:
     调用本接口前需检查HCCL\_BUFFSIZE环境变量取值是否合理，该环境变量表示单个通信域占用内存大小，单位MB，不配置时默认为200MB。
   - 该场景仅支持通过环境变量HCCL\_BUFFSIZE配置，该环境变量按通信域粒度管理，每个通信域独占一组“2*HCCL\_BUFFSIZE”大小的内存。
-  - ep通信域内，comm\_alg配置为"fullmesh_v1"或"": 设置大小要求 \>= 2 \* \(local\_expert\_num \* max\_bs \* ep\_world\_size \* Align512\(Align32\(2 \* H\) + 64\) + \(K + shared\_expert\_num\) \* max\_bs \* Align512\(2 \* H\)\)。
-  - ep通信域内，comm\_alg配置为"fullmesh_v2": 设置大小要求 \>= 2 \* \(local\_expert\_num \* max\_bs \* ep\_world\_size \* 480Align512\(Align32\(2 \* H\) + 64\) + \(K + shared\_expert\_num\) \* max\_bs \* Align512\(2 \* H\)\)。
+  - ep通信域内，comm\_alg配置为"fullmesh_v1"或"": 设置大小要求 \>= 2 \* \(local\_expert\_num \* max\_bs \* ep\_world\_size \* Align512\(Align32\(2 \* H\) + <b>44</b>\) + \(K + shared\_expert\_num\) \* max\_bs \* Align512\(2 \* H\)\)。
+  - ep通信域内，comm\_alg配置为"fullmesh_v2": 设置大小要求 \>= 2 \* \(local\_expert\_num \* max\_bs \* ep\_world\_size \* 480Align512\(Align32\(2 \* H\) + <b>44</b>\) + \(K + shared\_expert\_num\) \* max\_bs \* Align512\(2 \* H\)\)。
   - 其中480Align512(x) = ((x+480-1)/480)\*512,Align512(x) = ((x+512-1)/512)\*512,Align32(x) = ((x+32-1)/32)\*32。
   - 通信域开设大小可通过调用MoeDistributeBuffer.get_low_latency_ccl_buffer_size接口计算。
 
