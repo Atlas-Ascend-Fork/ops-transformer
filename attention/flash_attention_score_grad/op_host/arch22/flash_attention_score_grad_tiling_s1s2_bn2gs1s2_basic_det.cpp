@@ -278,7 +278,13 @@ bool FlashAttentionScoreGraTilingBasicDet::IsCapable()
      * 4. Sparse mode not equal to 0 or 3
      * 5. PSE
      * 6. headDim <= 128
+     * 7. Sink, with or without attenMask
      */
+    auto sinkShape = context_->GetOptionalInputShape(SINK_IN);
+    if (sinkShape != nullptr && sinkShape->GetStorageShape().GetDimNum() == 1) {
+        OP_LOGI(context_, "FlashAttentionScoreGraTilingBasicDet does not support sink, skip this template.");
+        return false;
+    }
     if (context_->GetDeterministic() == 0) {
         OP_LOGI(context_, "FlashAttentionScoreGraTilingBasicDet only support Deterministic.");
         return false;
