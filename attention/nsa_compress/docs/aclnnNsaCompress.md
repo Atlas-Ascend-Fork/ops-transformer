@@ -190,7 +190,8 @@ aclnnStatus aclnnNsaCompress(
           <ul>
             <li>不支持空Tensor。</li>
             <li>数据类型与input保持一致。</li>
-            <li>shape支持[T, N, D]。</li>
+            <li>shape为[T_compressed, N, D]，其中T_compressed为各Batch压缩窗数之和：Σ_i max(0, floor((S_i - compressBlockSize) / compressStride) + 1)。S_i为第i个Batch序列长度，首个序列取actSeqLenOptional[0]，后续序列取相邻累计边界之差（actSeqLenType=0）。</li>
+            <li>例如，input=[48,32,16]、actSeqLenOptional=[16,32,48]、compressBlockSize=compressStride=16时，T_compressed=3，output shape=[3,32,16]。</li>
           </ul>
         </td>
         <td>FLOAT16、BFLOAT16</td>
