@@ -4112,6 +4112,12 @@ public:
 
 protected:
     int64_t s2sizeLimitMax = 1024;
+    struct SameABWorkload {
+        double queryBlockCount = 0;
+        double kvIterationCount = 0;
+        int64_t maxKvIterations = 0;
+        bool hasSingleVectorTail = false;
+    };
 
     int64_t GetNRatio() override
     {
@@ -4316,20 +4322,110 @@ protected:
         if (tilingKeyLayout != LayoutType::LAYOUT_TND) {
             return false;
         }
-        // 此处走SameAB模板的准入条件均为经验值
-        if ((bSize >= SPACE_NUM_4 && accumS1 >= SAMEAB_TND_BASIC_SIZE && accumS2 >= SAMEAB_TND_BASIC_SIZE &&
+        const bool supportsSameAB = inputDtypeBytes != DATA_TYPE_FP32 && implMode != AA_INVALID_LINE_HIGH_PRECISION;
+        const bool isSingleHead = n1Size == 1 && n2Size == 1;
+        const bool meetsSequenceThreshold =
+            (bSize >= SPACE_NUM_4 && accumS1 >= SAMEAB_TND_BASIC_SIZE && accumS2 >= SAMEAB_TND_BASIC_SIZE &&
              s1Size >= S2_REUSE_SIZE_512 && s2Size >= S2_REUSE_SIZE_512) ||
-            (s2Size > S2_REUSE_SIZE_5120 && s1Size > S2_REUSE_SIZE_5120)) {
-            isSameAB = true;
-        }
+            (s2Size > S2_REUSE_SIZE_5120 && s1Size > S2_REUSE_SIZE_5120);
 
-        // FP32是因为sameAB暂不支持FP32，n1Size == 1 && n2Size == 1是因为测到的这种情况的case性能劣化较大
-        if (inputDtypeBytes == DATA_TYPE_FP32 || (n1Size == 1 && n2Size == 1) ||
-            implMode == AA_INVALID_LINE_HIGH_PRECISION) {
-            isSameAB = false;
+        // 多头且达到序列规模门槛时直接准入；单头或较小规模需检查KV复用量和并行工作量。
+        const bool needsWorkloadCheck = isSingleHead || !meetsSequenceThreshold;
+        isSameAB = supportsSameAB && (!needsWorkloadCheck || ShouldEnableSameABByWorkload());
+        return true;
+    }
+
+    bool CanEstimateSameABWorkload() const
+    {
+        // 估算针对两个Vector各处理128行Q的SameAB路径，需要真实序列长度。
+        // PSE/dropout/sink的额外工作尚未计入；RoPE会影响L1Carry，使用已解析的dRopeSize判断。
+        return !isMaxWorkspace && bSize > 0 && aicNum != 0 && s1BasicBlockBest == TND_S1_BASICBLOCK_128 &&
+               (inputDtype == ge::DT_BF16 || inputDtype == ge::DT_FLOAT16) && dRopeSize == 0 && pseExistFlag == 0 &&
+               dropMaskExistFlag == 0 && sinkExistFlag == 0;
+    }
+
+    bool IsProfitableSameABWorkloadDim(bool isFullAttention) const
+    {
+        // 以下是新路径的性能限制：避开PV访存或通用Matmul开销抵消KV复用收益的维度。
+        constexpr int64_t unprofitableAlignedDim = 112;
+        if (alignedD == unprofitableAlignedDim || (dSize > SAMEAB_D_LIMIT_192 && dSize <= D_SIZE_L1CARRY_MAX)) {
+            return false;
+        }
+        // 全注意力在D <= 256时仅保留已验证收益稳定的128/192；这不是L1Carry的支持范围。
+        const bool isPreferredFullAttentionDim = dSize == SAMEAB_D_LIMIT_128 || dSize == SAMEAB_D_LIMIT_192;
+        return !isFullAttention || isPreferredFullAttentionDim || dSize > D_SIZE_L1CARRY_MAX;
+    }
+
+    bool EstimateSameABWorkload(bool isCausal, int64_t kvBlockSize, SameABWorkload& workload) const
+    {
+        const int64_t queryBlocksPerKvBlock = kvBlockSize / TND_S1_BASICBLOCK_256;
+        for (int64_t i = 0; i < bSize; ++i) {
+            const int64_t sequenceLength = actualSeqLenData[i];
+            // 当前估算要求每段Q/KV等长；不同batch之间仍可变长。
+            if (sequenceLength < 0 || sequenceLength != actualSeqLenKvData[i]) {
+                return false;
+            }
+            const int64_t queryBlocks = CeilDivision(sequenceLength, TND_S1_BASICBLOCK_256);
+            const int64_t kvIterations = CeilDivision(sequenceLength, kvBlockSize);
+            const int64_t queryTail = sequenceLength % TND_S1_BASICBLOCK_256;
+            workload.queryBlockCount += queryBlocks;
+            workload.maxKvIterations = std::max(workload.maxKvIterations, kvIterations);
+            workload.hasSingleVectorTail |= queryTail > 0 && queryTail <= TND_S1_BASICBLOCK_128;
+            if (isCausal) {
+                const int64_t fullGroups = queryBlocks / queryBlocksPerKvBlock;
+                const int64_t remainingQueryBlocks = queryBlocks % queryBlocksPerKvBlock;
+                // 每组Q块的KV迭代次数依次为1、2、...；先转double，再按等差数列求和。
+                workload.kvIterationCount +=
+                    static_cast<double>(queryBlocksPerKvBlock) * fullGroups * (fullGroups + 1) / 2 +
+                    static_cast<double>(remainingQueryBlocks) * (fullGroups + 1);
+            } else {
+                workload.kvIterationCount += static_cast<double>(queryBlocks) * kvIterations;
+            }
         }
         return true;
     }
+
+    bool ShouldEnableSameABByWorkload() const
+    {
+        if (!CanEstimateSameABWorkload()) {
+            return false;
+        }
+        const bool isCausal = attenMaskExistFlag != 0 && (sparseMode == static_cast<int64_t>(LEFT_UP_CAUSAL) ||
+                                                          sparseMode == static_cast<int64_t>(RIGHT_DOWN_CAUSAL));
+        const bool isFullAttention = sparseMode == static_cast<int64_t>(NO_MASK) && attenMaskExistFlag == 0 &&
+                                     preTokens >= s1Size && nextTokens >= s2Size;
+        if ((!isCausal && !isFullAttention) || !IsProfitableSameABWorkloadDim(isFullAttention)) {
+            return false;
+        }
+        // 按候选SameAB的KV分块估算，不依赖当前isSameAB状态；GetNRatio保留原实现。
+        const bool useSmallKvBlock =
+            l2CacheSize <= B4_L2_CACHESIZE && alignedD == SAMEAB_D_LIMIT_128 && realT1Size >= B4_SEQ_LIMIT;
+        const int64_t kvBlockSize = useSmallKvBlock ? S2_REUSE_SIZE_512 : S2_REUSE_SIZE_1024;
+        if (s2Size <= kvBlockSize) {
+            return false;
+        }
+        SameABWorkload workload;
+        if (!EstimateSameABWorkload(isCausal, kvBlockSize, workload)) {
+            return false;
+        }
+
+        // 复用门槛：平均至少1.5次KV迭代，以摊薄较大Q块的启动开销。
+        constexpr int64_t minKvIterations = 2;
+        constexpr double minAverageKvIterations = 1.5;
+        if (workload.maxKvIterations < minKvIterations ||
+            workload.kvIterationCount < minAverageKvIterations * workload.queryBlockCount) {
+            return false;
+        }
+
+        // 并行门槛：按最长任务折算每个Cube的工作量；全注意力和单Vector尾块保留两份裕量。
+        constexpr double causalTaskWaves = 1.0;
+        constexpr double overlappingTaskWaves = 2.0;
+        const double minTaskWaves =
+            (isFullAttention || workload.hasSingleVectorTail) ? overlappingTaskWaves : causalTaskWaves;
+        return static_cast<double>(n1Size) * workload.kvIterationCount >=
+               minTaskWaves * aicNum * workload.maxKvIterations;
+    }
+
     void SetMultiCoreParams() override
     {
         auto& multiCoreParams = tilingData->multiCoreParams;
@@ -4705,6 +4801,10 @@ protected:
         int64_t s2RealSize = s2Size;
         if (sparseType == static_cast<uint8_t>(SparseEnum::CAUSAL)) {
             s2RealSize = s1BasicBlock * (s1OutIdx + 1);
+        } else if (sparseType == static_cast<uint8_t>(SparseEnum::RIGHT_DOWN_CAUSAL)) {
+            // 与核函数的可见KV终点一致；普通模板的空可见区间按零计算。
+            s2RealSize =
+                std::max(s1BasicBlock * (s1OutIdx + 1) + actualSeqLenKvData[bOutIdx] - actualSeqLenData[bOutIdx], 0L);
         } else if (sparseType == static_cast<uint8_t>(SparseEnum::PREFIX)) {
             s2RealSize =
                 std::max(s1BasicBlock * (s1OutIdx + 1) - actualSeqLenData[bOutIdx] + actualSeqLenKvData[bOutIdx],
