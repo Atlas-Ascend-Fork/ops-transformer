@@ -15,22 +15,20 @@
 - 算子功能：MoE网络中，进行AlltoAll操作从其他卡上拿到需要算的token后，将token按照专家顺序重新排列。
 
 - 计算公式：
-  通过双重求和计算当前token在源位置的偏移量：
+  设 `expert_token_num_per_rank` 的形状为 `[rank_num, expert_num]`，其中 `rank_num` 是卡数，`expert_num` 是每张卡上的专家数。以下公式分别计算当前 rank 和 expert 对应 token 分段在源输入、目标输出中的起始偏移量：
 
   $$
   SrcOffset =
-  \sum_{i=0}^{cur\_rank} \left( \sum_{j=0}^{cur\_expert} {expert\_token\_num\_per\_rank}(i,j) \right)
+  \sum_{i=0}^{cur\_rank-1} \left( \sum_{j=0}^{expert\_num-1} {expert\_token\_num\_per\_rank}(i,j) \right) + \sum_{j=0}^{cur\_expert-1} {expert\_token\_num\_per\_rank}(cur\_rank,j)
   $$
-
-  通过双重求和计算当前token在目标位置的偏移量：
 
   $$
   DstOffset =
-  \sum_{j=0}^{cur\_expert} \left( \sum_{i=0}^{cur\_rank} {expert\_token\_num\_per\_rank}(i,j) \right)
+  \sum_{j=0}^{cur\_expert-1} \left( \sum_{i=0}^{rank\_num-1} {expert\_token\_num\_per\_rank}(i,j) \right) + \sum_{i=0}^{cur\_rank-1} {expert\_token\_num\_per\_rank}(i,cur\_expert)
   $$
 
-  - SrcOffset指当前需要移动的token源偏移，根据输入expert_token_num_per_rank的值进行计算。
-  - DstOffset指当前需要移动的token目的偏移。
+  - SrcOffset是当前 rank 与 expert 对应 token 分段在 rank-major 源输入中的起始偏移。
+  - DstOffset是同一 token 分段在 expert-major 目标输出中的起始偏移。
   - cur_rank是expert_token_num_per_rank的纵轴索引，表示该token原本在的卡。
   - cur_expert是expert_token_num_per_rank的横轴索引，表示该token由卡上专家cur_expert计算。
 
