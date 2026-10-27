@@ -7,6 +7,7 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
 /*!
  * \file bsa_select_block_mask_common.h
  * \brief
@@ -21,8 +22,10 @@
 using namespace AscendC;
 
 constexpr uint8_t SYNC_V1_TO_C1_FLAG[2] = {0, 1};
-constexpr uint8_t SYNC_C1_TO_V1_FLAG[9] = {2, 3, 4, 5, 6, 7, 8, 9, 10};
-constexpr uint32_t SYNC_C1_TO_V1_FLAG_NUMS = 9;
+constexpr uint8_t SYNC_C1_TO_V1_FLAG[2] = {2, 3};
+constexpr uint32_t SYNC_C1_TO_V1_FLAG_NUMS = 2;
+constexpr uint8_t SYNC_V2_TO_C2_FLAG[2] = {4, 5};
+
 constexpr uint32_t CV_EXEC_RATIO = 4;
 constexpr uint8_t SYNC_MODE = 2;
 constexpr uint32_t BSA_FIXPIPE_SYNC_ANCHOR_M = 16;
@@ -43,6 +46,7 @@ static constexpr uint32_t FLOAT_REPEAT_NUM = 64;
 static constexpr uint32_t D_SIZE = 128;
 static constexpr uint32_t Q_CHUNK_SIZE = 128;
 static constexpr uint32_t K_CHUNK_SIZE = 128;
+static constexpr uint32_t K_TILE_COLS = K_CHUNK_SIZE * CV_EXEC_RATIO;
 static constexpr uint32_t REPEAT_SIZE = 256;
 static constexpr uint32_t BROC_BASE_NUM = 8;
 static constexpr uint32_t BYTE_SIZE = 8;
@@ -131,7 +135,9 @@ struct BSAConstInfo {
     uint64_t attnScoreOffset;
     uint64_t softmaxTmpOffset;
     uint64_t topkWorkspaceOffset;
-    uint64_t pooledScoreOffset;
+    uint64_t partSumOffset;
+    uint64_t partMaxOffset;
+    uint64_t postStagingOffset;
 
     uint8_t usePostBlockShape;
     uint16_t postBlockShapeX;
@@ -139,6 +145,22 @@ struct BSAConstInfo {
     uint32_t postXBlocks;
     uint32_t postYBlocks;
 };
+
+constexpr uint32_t BSA_SCRATCH_RING_TILES = 2;
+__aicore__ inline uint64_t BSAScratchTileOffset(uint32_t aicIdx, uint32_t qChunkStart, uint32_t kChunkStart,
+                                                uint32_t yBlocks, bool postRingMode)
+{
+    const uint32_t ktiles = (yBlocks + K_TILE_COLS - 1) / K_TILE_COLS;
+    const uint64_t tileElems = static_cast<uint64_t>(Q_CHUNK_SIZE) * K_TILE_COLS;
+    if (!postRingMode) {
+        return static_cast<uint64_t>(aicIdx) * ktiles * tileElems +
+               static_cast<uint64_t>(kChunkStart / K_TILE_COLS) * tileElems;
+    }
+    const uint64_t globalTile =
+        (static_cast<uint64_t>(qChunkStart) / Q_CHUNK_SIZE) * ktiles + kChunkStart / K_TILE_COLS;
+    return static_cast<uint64_t>(aicIdx) * BSA_SCRATCH_RING_TILES * tileElems +
+           (globalTile % BSA_SCRATCH_RING_TILES) * tileElems;
+}
 
 struct BSARunInfo {
     uint32_t taskId;
@@ -177,4 +199,79 @@ __aicore__ inline T BSAAlignTo(T n, T alignSize)
     return (n + alignSize - 1) & (~(alignSize - 1));
 }
 
-#endif // BSA_SELECT_BLOCK_MASK_COMMON_H
+__aicore__ inline void BSASubRowBroadcast(LocalTensor<float> const& ubOut, LocalTensor<float> const& ubIn0,
+                                          LocalTensor<float> const& ubIn1, uint64_t row, uint64_t col)
+{
+    uint32_t countEachRepeat = 256 / sizeof(float);
+    uint32_t colLoop = (col + countEachRepeat - 1) / countEachRepeat;
+    uint32_t remain = col % countEachRepeat;
+    uint64_t mask = countEachRepeat;
+    uint8_t repeatTimes = row;
+    AscendC::BinaryRepeatParams repeatParams;
+    repeatParams.dstBlkStride = 1;
+    repeatParams.src0BlkStride = 1;
+    repeatParams.src1BlkStride = 0;
+    repeatParams.dstRepStride = col / FLOAT_DATA_BLOCK_NUM;
+    repeatParams.src0RepStride = col / FLOAT_DATA_BLOCK_NUM;
+    repeatParams.src1RepStride = 1;
+
+    for (uint32_t i = 0; i < colLoop; i++) {
+        if (i == colLoop - 1 && remain != 0) {
+            mask = remain;
+        }
+        AscendC::Sub(ubOut[i * countEachRepeat], ubIn0[i * countEachRepeat], ubIn1[0], mask, repeatTimes, repeatParams);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+}
+
+__aicore__ inline void BSAvRowBroadcastMul(LocalTensor<float> const& ubOut, LocalTensor<float> const& ubIn1,
+                                           uint64_t row, uint64_t col)
+{
+    uint32_t countEachRepeat = 256 / sizeof(float);
+    uint32_t colLoop = (col + countEachRepeat - 1) / countEachRepeat;
+    uint32_t remain = col % countEachRepeat;
+    uint64_t mask = countEachRepeat;
+    uint8_t repeatTimes = row;
+    AscendC::BinaryRepeatParams repeatParams;
+    repeatParams.dstBlkStride = 1;
+    repeatParams.src0BlkStride = 1;
+    repeatParams.src1BlkStride = 0;
+    repeatParams.dstRepStride = col / FLOAT_DATA_BLOCK_NUM;
+    repeatParams.src0RepStride = col / FLOAT_DATA_BLOCK_NUM;
+    repeatParams.src1RepStride = 1;
+
+    for (uint32_t i = 0; i < colLoop; i++) {
+        if (i == colLoop - 1 && remain != 0) {
+            mask = remain;
+        }
+        AscendC::Mul(ubOut[i * countEachRepeat], ubOut[i * countEachRepeat], ubIn1[0], mask, repeatTimes, repeatParams);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+}
+
+__aicore__ inline void BSADivRowBroadcast(LocalTensor<float> const& ubOut, LocalTensor<float> const& ubIn0,
+                                          LocalTensor<float> const& ubIn1, uint64_t row, uint64_t col)
+{
+    uint32_t countEachRepeat = 256 / sizeof(float);
+    uint32_t colLoop = (col + countEachRepeat - 1) / countEachRepeat;
+    uint32_t remain = col % countEachRepeat;
+    uint64_t mask = countEachRepeat;
+    uint8_t repeatTimes = row;
+    AscendC::BinaryRepeatParams repeatParams;
+    repeatParams.dstBlkStride = 1;
+    repeatParams.src0BlkStride = 1;
+    repeatParams.src1BlkStride = 0;
+    repeatParams.dstRepStride = col / FLOAT_DATA_BLOCK_NUM;
+    repeatParams.src0RepStride = col / FLOAT_DATA_BLOCK_NUM;
+    repeatParams.src1RepStride = 1;
+
+    for (uint32_t i = 0; i < colLoop; i++) {
+        if (i == colLoop - 1 && remain != 0) {
+            mask = remain;
+        }
+        AscendC::Div(ubOut[i * countEachRepeat], ubIn0[i * countEachRepeat], ubIn1[0], mask, repeatTimes, repeatParams);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+}
+
+#endif

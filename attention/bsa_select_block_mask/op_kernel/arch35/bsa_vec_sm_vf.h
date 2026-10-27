@@ -18,7 +18,7 @@
 
 namespace BSASelectBlockMaskVF {
 using namespace AscendC;
-using namespace Reg;
+using namespace MicroAPI;
 
 __simd_vf__ inline void DoSoftmaxSecondPassFp32VF(__ubuf__ float* scoreUb, __ubuf__ float* rowMaxUb,
                                                   __ubuf__ float* rowSumUb, float scaleValue, uint32_t row,
@@ -93,4 +93,4 @@ __aicore__ inline void DoSoftmaxFirstPassExpFp32VfWrapper(const LocalTensor<floa
 
 } // namespace BSASelectBlockMaskVF
 
-#endif // BSA_VEC_SM_VF_H
+#endif

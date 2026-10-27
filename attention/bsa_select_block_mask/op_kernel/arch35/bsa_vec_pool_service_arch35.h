@@ -27,8 +27,8 @@ public:
     using IN_T = typename BSAT::inputT; ///< 输入数据类型 (FP16/BF16)
     using OUT_T = half;                 ///< 输出数据类型 (float16)
 
-    static constexpr BSALayout LAYOUT_Q = BSAT::layoutQ;   // BNSD or TND
-    static constexpr BSALayout LAYOUT_KV = BSAT::layoutKV; // BNSD or TND
+    static constexpr BSALayout LAYOUT_Q = BSAT::layoutQ;
+    static constexpr BSALayout LAYOUT_KV = BSAT::layoutKV;
 
     __aicore__ inline BSAVecPoolService(){};
     __aicore__ inline void InitParams(const BSAConstInfo& constInfo,
@@ -54,10 +54,20 @@ public:
                                                GlobalTensor<OUT_T>& kCmpGm, uint64_t seqPrefixSumKV,
                                                uint64_t blockPrefixSumKV);
 
+    __aicore__ inline bool FastPoolingQRange(uint32_t batchIdx, uint32_t headIdx, uint32_t startQBlockIdx,
+                                             uint32_t endQBlockIdx, uint64_t seqPrefixSumQ);
+
+    __aicore__ inline bool FastPoolingKRange(uint32_t batchIdx, uint32_t headIdx, uint32_t startKBlock,
+                                             uint32_t endKBlock, uint64_t seqPrefixSumKV);
+
 private:
     __aicore__ inline void PoolingSingleBlockImpl(GlobalTensor<IN_T>& srcGm, uint64_t srcOffset, uint32_t actualLen,
                                                   uint32_t blockSize, GlobalTensor<OUT_T>& dstGm, uint64_t dstOffset,
                                                   bool isTnd, uint32_t timeStrideElems);
+
+    __aicore__ inline void BatchPoolingRange(GlobalTensor<IN_T>& srcGm, uint64_t srcFirstElem, uint32_t rowPitchElems,
+                                             uint32_t blockSize, uint32_t nBlocks, GlobalTensor<OUT_T>& dstGm,
+                                             uint64_t dstFirstElem);
 
     __aicore__ inline void PoolingLen0Impl(GlobalTensor<IN_T>& srcGm, GlobalTensor<OUT_T>& dstGm, uint64_t srcOffset,
                                            uint64_t dstOffset);
@@ -83,17 +93,24 @@ private:
     GlobalTensor<int64_t> actualSeqLensQGmTensor;   ///< Q 各 batch 实际序列长度 (TND 必选)
     GlobalTensor<int64_t> actualSeqLensKVGmTensor;  ///< KV 各 batch 实际序列长度 (TND 必选)
 
-    constexpr static int32_t BUFFER = 2;   // 开启double buffer
+    constexpr static int32_t BUFFER = 2;
     LocalTensor<IN_T> poolInputUb[BUFFER]; ///< 池化输入双缓冲 [2][blockShapeX * dSize] (FP16/BF16)
     LocalTensor<T> poolInFp32Ub[BUFFER];   ///< Cast后的FP32数据 [blockShapeX * dSize] (FP32)
 
     LocalTensor<T> poolOut;
     LocalTensor<OUT_T> poolOutCast;
-    LocalTensor<T> poolOutTemp; // 临时存储out
+    LocalTensor<T> poolOutTemp;
     LocalTensor<uint8_t> reduceSharedTemp[BUFFER];
 
     event_t eventPing;
     event_t eventPong;
+
+    uint32_t batchBlk = 0;
+    uint32_t batchWMax = 0;
+    LocalTensor<IN_T> batchFp16;
+    LocalTensor<T> batchFp32;
+    LocalTensor<T> batchOutFp32;
+    LocalTensor<OUT_T> batchOutFp16;
 };
 
 template <typename BSAT>
@@ -111,13 +128,6 @@ __aicore__ inline void BSAVecPoolService<BSAT>::InitBuffers(TBuf<>* uBuf_)
     uint32_t ubOffset = 0;
 
     // 池化步骤内存分配
-    /*
-    FP16 :30KB
-    ||{fp16[0] | fp16[1] }||{ fp32[0] | fp32[1]}|| outTemp 9 * 128 * 4 || fina out 128 * 4||
-    || reduceSum ||
-
-    sum: 30 * 2 + 60 * 2 + 4.5 + 0.5 = 185k
-    */
 
     // input fp16 ub
     for (int32_t i = 0; i < BUFFER; i++) {
@@ -140,7 +150,7 @@ __aicore__ inline void BSAVecPoolService<BSAT>::InitBuffers(TBuf<>* uBuf_)
         ubOffset = BSAAlignTo(ubOffset, static_cast<uint32_t>(VEC_ALIGN_SIZE));
     }
 
-    uint32_t poolOutTempMaxEles = 9 * 128; // (8 + 1) * 128
+    uint32_t poolOutTempMaxEles = 9 * 128;
     poolOutTemp = uBuf_->GetWithOffset<T>(poolOutTempMaxEles, ubOffset);
     ubOffset += poolOutTempMaxEles * sizeof(T);
     ubOffset = BSAAlignTo(ubOffset, static_cast<uint32_t>(VEC_ALIGN_SIZE));
@@ -152,6 +162,24 @@ __aicore__ inline void BSAVecPoolService<BSAT>::InitBuffers(TBuf<>* uBuf_)
 
     uint32_t poolOutCastEles = 1 * 128;
     poolOutCast = uBuf_->GetWithOffset<OUT_T>(poolOutCastEles, ubOffset);
+
+    {
+        const uint32_t bs = constInfo.blockShapeX;
+        const uint32_t d = constInfo.dSize;
+        uint32_t blkCap = (bs > 0 && d > 0) ? (30720 / (bs + 1) / d) : 0;
+        batchBlk = BSAMin(blkCap, static_cast<uint32_t>(24));
+        if (batchBlk >= 4) {
+            batchWMax = batchBlk * d;
+            batchFp16 = uBuf_->GetWithOffset<IN_T>(bs * batchWMax, 0);
+            batchFp32 = uBuf_->GetWithOffset<T>(bs * batchWMax, 60 * 1024);
+            uint32_t batchOff = 60 * 1024 + bs * batchWMax * sizeof(T);
+            batchOutFp32 = uBuf_->GetWithOffset<T>(batchWMax, batchOff);
+            batchOff += batchWMax * sizeof(T);
+            batchOutFp16 = uBuf_->GetWithOffset<OUT_T>(batchWMax, batchOff);
+        } else {
+            batchBlk = 0;
+        }
+    }
 }
 
 template <typename BSAT>
@@ -314,18 +342,145 @@ __aicore__ inline void BSAVecPoolService<BSAT>::PoolingSingleKBlock(uint32_t bat
 }
 
 template <typename BSAT>
+__aicore__ inline void BSAVecPoolService<BSAT>::BatchPoolingRange(GlobalTensor<IN_T>& srcGm, uint64_t srcFirstElem,
+                                                                  uint32_t rowPitchElems, uint32_t blockSize,
+                                                                  uint32_t nBlocks, GlobalTensor<OUT_T>& dstGm,
+                                                                  uint64_t dstFirstElem)
+{
+    const uint32_t d = constInfo.dSize;
+
+    AscendC::PipeBarrier<PIPE_ALL>();
+    DataCopyExtParams copyInParams;
+    DataCopyPadExtParams<IN_T> padInParams = {false, 0, 0, 0};
+    copyInParams.blockLen = d * sizeof(IN_T);
+    copyInParams.blockCount = 0;
+    copyInParams.srcStride = (rowPitchElems - d) * sizeof(IN_T);
+    copyInParams.dstStride = 0;
+    DataCopyExtParams copyOutParams;
+    copyOutParams.blockCount = 1;
+    copyOutParams.srcStride = 0;
+    copyOutParams.dstStride = 0;
+
+    for (uint32_t b0 = 0; b0 < nBlocks; b0 += batchBlk) {
+        const uint32_t nb = BSAMin(batchBlk, nBlocks - b0);
+        const uint32_t w = nb * d;
+        if (b0 > 0) {
+            SetFlag<HardEvent::MTE3_MTE2>(eventPing);
+            WaitFlag<HardEvent::MTE3_MTE2>(eventPing);
+        }
+        copyInParams.blockCount = nb;
+        for (uint32_t r = 0; r < blockSize; r++) {
+            DataCopyPad(batchFp16[r * w], srcGm[srcFirstElem + b0 * rowPitchElems + r * d], copyInParams, padInParams);
+        }
+        SetFlag<HardEvent::MTE2_V>(eventPing);
+        WaitFlag<HardEvent::MTE2_V>(eventPing);
+
+        Cast(batchFp32, batchFp16, RoundMode::CAST_NONE, blockSize * w);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        for (uint32_t half = blockSize / 2; half >= 1; half >>= 1) {
+            AscendC::Add(batchFp32, batchFp32, batchFp32[half * w], half * w);
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+        const float invBlockSize = 1.0f / static_cast<int32_t>(blockSize);
+        AscendC::Muls(batchOutFp32, batchFp32, invBlockSize, w);
+        AscendC::PipeBarrier<PIPE_V>();
+
+        Cast(batchOutFp16, batchOutFp32, RoundMode::CAST_NONE, w);
+        SetFlag<HardEvent::V_MTE3>(eventPing);
+        WaitFlag<HardEvent::V_MTE3>(eventPing);
+
+        copyOutParams.blockLen = w * sizeof(OUT_T);
+        DataCopyPad(dstGm[dstFirstElem + b0 * d], batchOutFp16, copyOutParams);
+    }
+}
+
+template <typename BSAT>
+__aicore__ inline bool BSAVecPoolService<BSAT>::FastPoolingQRange(uint32_t batchIdx, uint32_t headIdx,
+                                                                  uint32_t startQBlockIdx, uint32_t endQBlockIdx,
+                                                                  uint64_t seqPrefixSumQ)
+{
+    if (batchBlk == 0 || startQBlockIdx >= endQBlockIdx) {
+        return false;
+    }
+    if (tilingData->baseParams.useActualBlockLenQ || tilingData->baseParams.useActualSeqLenQ) {
+        return false;
+    }
+    if ((constInfo.blockShapeX & (constInfo.blockShapeX - 1)) != 0) {
+        return false;
+    }
+    if (static_cast<uint64_t>(endQBlockIdx) * constInfo.blockShapeX > constInfo.maxQSeqlen) {
+        return false;
+    }
+    const uint32_t d = constInfo.dSize;
+    const uint64_t bs = constInfo.blockShapeX;
+    uint64_t srcFirst;
+    uint32_t rowPitch;
+    if constexpr (BSAT::layoutQ == BSALayout::BNSD) {
+        const uint64_t perHeadElems = static_cast<uint64_t>(constInfo.maxQSeqlen) * d;
+        srcFirst = static_cast<uint64_t>(batchIdx) * perHeadElems * constInfo.numHeads +
+                   static_cast<uint64_t>(headIdx) * perHeadElems + startQBlockIdx * bs * d;
+        rowPitch = static_cast<uint32_t>(bs * d);
+    } else {
+        const uint64_t perSeqHeadElems = static_cast<uint64_t>(constInfo.numHeads) * d;
+        srcFirst = seqPrefixSumQ * perSeqHeadElems + startQBlockIdx * bs * perSeqHeadElems + headIdx * d;
+        rowPitch = static_cast<uint32_t>(bs * perSeqHeadElems);
+    }
+    BatchPoolingRange(queryGmTensor, srcFirst, rowPitch, static_cast<uint32_t>(bs), endQBlockIdx - startQBlockIdx,
+                      qCmpWrkTensor, static_cast<uint64_t>(startQBlockIdx) * d);
+    return true;
+}
+
+template <typename BSAT>
+__aicore__ inline bool BSAVecPoolService<BSAT>::FastPoolingKRange(uint32_t batchIdx, uint32_t headIdx,
+                                                                  uint32_t startKBlock, uint32_t endKBlock,
+                                                                  uint64_t seqPrefixSumKV)
+{
+    if (batchBlk == 0 || startKBlock >= endKBlock) {
+        return false;
+    }
+    if (tilingData->baseParams.useActualBlockLenK || tilingData->baseParams.useActualSeqLenK) {
+        return false;
+    }
+    if ((constInfo.blockShapeY & (constInfo.blockShapeY - 1)) != 0) {
+        return false;
+    }
+    if (static_cast<uint64_t>(endKBlock) * constInfo.blockShapeY > constInfo.maxKvSeqlen) {
+        return false;
+    }
+    const uint32_t d = constInfo.dSize;
+    const uint64_t bs = constInfo.blockShapeY;
+    uint64_t srcFirst;
+    uint32_t rowPitch;
+    if constexpr (BSAT::layoutKV == BSALayout::BNSD) {
+        const uint64_t perHeadElems = static_cast<uint64_t>(constInfo.maxKvSeqlen) * d;
+        srcFirst = static_cast<uint64_t>(batchIdx) * perHeadElems * constInfo.numHeads +
+                   static_cast<uint64_t>(headIdx) * perHeadElems + startKBlock * bs * d;
+        rowPitch = static_cast<uint32_t>(bs * d);
+    } else {
+        const uint64_t perSeqHeadElems = static_cast<uint64_t>(constInfo.numHeads) * d;
+        srcFirst = seqPrefixSumKV * perSeqHeadElems + startKBlock * bs * perSeqHeadElems + headIdx * d;
+        rowPitch = static_cast<uint32_t>(bs * perSeqHeadElems);
+    }
+    BatchPoolingRange(keyGmTensor, srcFirst, rowPitch, static_cast<uint32_t>(bs), endKBlock - startKBlock,
+                      kCmpWrkTensor, static_cast<uint64_t>(startKBlock) * d);
+    return true;
+}
+
+template <typename BSAT>
 __aicore__ inline void BSAVecPoolService<BSAT>::PoolingSingleBlockImpl(GlobalTensor<IN_T>& srcGm, uint64_t srcOffset,
                                                                        uint32_t actualLen, uint32_t blockSize,
                                                                        GlobalTensor<OUT_T>& dstGm, uint64_t dstOffset,
                                                                        bool isTnd, uint32_t timeStrideElems)
 {
     uint32_t dSize = constInfo.dSize;
+    uint32_t maxLen = BSAConstInfo::BUFFER_SIZE_BYTE_60K / BUFFER / sizeof(IN_T) / dSize;
     // 等上个步骤结束，防止内存踩踏
     AscendC::PipeBarrier<PIPE_ALL>();
     if (actualLen == 0) {
         PoolingLen0Impl(srcGm, dstGm, srcOffset, dstOffset);
         return;
-    } else if (actualLen <= 128) {
+    } else if (actualLen <= maxLen) {
         PoolingLen256Impl(srcGm, dstGm, srcOffset, dstOffset, actualLen, isTnd, timeStrideElems);
         return;
     } else {
@@ -379,6 +534,8 @@ __aicore__ inline void BSAVecPoolService<BSAT>::PoolingLen256Impl(GlobalTensor<I
 
     SetFlag<HardEvent::MTE3_MTE2>(eventPing);
     WaitFlag<HardEvent::MTE3_MTE2>(eventPing);
+    SetFlag<HardEvent::MTE3_MTE2>(eventPong);
+    WaitFlag<HardEvent::MTE3_MTE2>(eventPong);
 
     // Step 1: DataCopyPad GM→UB，搬入 actualLen × D 个 IN_T 元素到 poolInputUb[bufferId]
     DataCopyExtParams copyInParams;
@@ -443,7 +600,7 @@ __aicore__ inline void BSAVecPoolService<BSAT>::PoolingLenAllImpl(GlobalTensor<I
 {
     uint32_t dSize = constInfo.dSize;
     uint32_t numHeads = constInfo.numHeads;
-    uint32_t maxLen = BSAConstInfo::BUFFER_SIZE_BYTE_60K / BUFFER / sizeof(IN_T) / 128;
+    uint32_t maxLen = BSAConstInfo::BUFFER_SIZE_BYTE_60K / BUFFER / sizeof(IN_T) / dSize;
     uint32_t loops = (actualLen + maxLen - 1) / maxLen;
     uint32_t tailLen = actualLen % maxLen == 0 ? maxLen : actualLen % maxLen;
 
@@ -560,17 +717,17 @@ __aicore__ inline void BSAVecPoolService<BSAT>::PoolingLenAllImpl(GlobalTensor<I
             // Step 2: Add accumulated sum (row 8) to chunk sum (row 0)
             Add(poolOutTemp[0], poolOutTemp[0], poolOutTemp[FLOAT_DATA_BLOCK_NUM * dSize], static_cast<int32_t>(dSize));
             AscendC::PipeBarrier<PIPE_V>();
-            finalOutLocation = 0; // result in row 0
+            finalOutLocation = 0;
         } else {
             // - isFirstMerge: chunks in rows 0..loopNum-1, rDim=loopNum
-            uint32_t mergeOutOffset = FLOAT_DATA_BLOCK_NUM * dSize; // write to row 8
+            uint32_t mergeOutOffset = FLOAT_DATA_BLOCK_NUM * dSize;
             uint32_t mergeInOffset = 0;
             uint32_t rDim = isFirstMerge ? loopNum : (loopNum + 1);
             uint32_t finalShape[] = {rDim, dSize};
             AscendC::ReduceSum<T, AscendC::Pattern::Reduce::RA, true>(
                 poolOutTemp[mergeOutOffset], poolOutTemp[mergeInOffset], reduceSharedTemp[bufferId], finalShape, true);
             AscendC::PipeBarrier<PIPE_V>();
-            finalOutLocation = 1; // result in row 8
+            finalOutLocation = 1;
         }
     }
 
@@ -605,4 +762,4 @@ __aicore__ inline void BSAVecPoolService<BSAT>::PoolingLenAllImpl(GlobalTensor<I
     copyOutCastParams.dstStride = 0;
     DataCopyPad(dstGm[dstOffset], poolOutCast, copyOutCastParams);
 }
-#endif // BSA_VEC_POOL_SERVICE_ARCH35_H
+#endif

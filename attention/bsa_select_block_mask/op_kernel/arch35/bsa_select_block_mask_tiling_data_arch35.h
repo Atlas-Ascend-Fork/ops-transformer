@@ -7,12 +7,13 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
 /*!
  * \file bsa_select_block_mask_tiling_data_arch35.h
  * \brief
  */
-#ifndef __BSA_SELECT_BLOCK_MASK_TILING_DATA_H___ARCH35
-#define __BSA_SELECT_BLOCK_MASK_TILING_DATA_H___ARCH35
+#ifndef __BSA_SELECT_BLOCK_MASK_TILING_DATA_ARCH35_H__
+#define __BSA_SELECT_BLOCK_MASK_TILING_DATA_ARCH35_H__
 
 #include <cstdint>
 #include "kernel_tiling/kernel_tiling.h"
@@ -389,8 +390,10 @@ public:
     uint64_t topkWorkspaceSize;
     uint64_t softmaxTmpSize;
     uint64_t totalWorkspaceSize;
-    uint64_t pooledScoreSize;
-    uint64_t pooledScoreOffset;
+    uint64_t postStagingSize;
+    uint64_t postStagingOffset;
+    uint64_t partSumSize;
+    uint64_t partMaxSize;
 
     uint64_t get_qCmpSize() const
     {
@@ -440,21 +443,41 @@ public:
     {
         this->totalWorkspaceSize = v;
     }
-    uint64_t get_pooledScoreSize() const
+    uint64_t get_postStagingSize() const
     {
-        return pooledScoreSize;
+        return postStagingSize;
     }
-    void set_pooledScoreSize(uint64_t v)
+    void set_postStagingSize(uint64_t v)
     {
-        this->pooledScoreSize = v;
+        this->postStagingSize = v;
     }
-    uint64_t get_pooledScoreOffset() const
+    uint64_t get_postStagingOffset() const
     {
-        return pooledScoreOffset;
+        return postStagingOffset;
     }
-    void set_pooledScoreOffset(uint64_t v)
+    void set_postStagingOffset(uint64_t v)
     {
-        this->pooledScoreOffset = v;
+        this->postStagingOffset = v;
+    }
+
+    uint64_t get_partSumSize() const
+    {
+        return partSumSize;
+    }
+
+    void set_partSumSize(uint64_t v)
+    {
+        this->partSumSize = v;
+    }
+
+    uint64_t get_partMaxSize() const
+    {
+        return partMaxSize;
+    }
+
+    void set_partMaxSize(uint64_t v)
+    {
+        this->partMaxSize = v;
     }
 };
 

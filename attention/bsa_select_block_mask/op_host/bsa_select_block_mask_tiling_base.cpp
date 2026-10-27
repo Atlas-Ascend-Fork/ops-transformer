@@ -7,12 +7,14 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
 /*!
  * \file bsa_select_block_mask_tiling_base.cpp
  * \brief
  */
 #include "bsa_select_block_mask_tiling_base.h"
 #include <tiling/tiling_api.h>
+#include <cstdlib>
 using namespace ge;
 using namespace AscendC;
 namespace optiling {
@@ -330,13 +332,20 @@ void BSASelectBlockMaskTilingBase::CalcOutputParams()
 {
     uint64_t qCmpSize = static_cast<uint64_t>(xBlocks) * dSize * (sizeof(float) / 2);
     uint64_t kCmpSize = static_cast<uint64_t>(yBlocks) * dSize * (sizeof(float) / 2);
-    uint64_t attnScoreFp16Size = static_cast<uint64_t>(xBlocks) * yBlocks * (sizeof(float) / 2);
+    uint64_t attnScoreFp16Size = usePostBlockShape ?
+                                     static_cast<uint64_t>(postXBlocks) * postYBlocks * (sizeof(float) / 2) :
+                                     static_cast<uint64_t>(xBlocks) * yBlocks * (sizeof(float) / 2);
 
-    uint64_t pooledScoreSize = usePostBlockShape ? static_cast<uint64_t>(batchSize) * numHeads * postXBlocks *
-                                                       postYBlocks * (sizeof(float) / 2) :
-                                                   0;
+    uint64_t postStagingSize = 0;
+    if (usePostBlockShape && Q_CHUNK_SIZE % postBlockShapeX != 0) {
+        postStagingSize = static_cast<uint64_t>(aivNum) * 2 * postYBlocks * sizeof(float);
+    }
 
-    uint64_t scoreFp32Size = Q_CHUNK_SIZE * aicNum * yBlocks * sizeof(float);
+    constexpr uint32_t SCRATCH_RING_TILES = 2;
+    const uint32_t npKtiles = static_cast<uint32_t>((yBlocks + 511) / 512);
+    uint64_t scoreFp32Size =
+        (usePostBlockShape ? static_cast<uint64_t>(SCRATCH_RING_TILES) : static_cast<uint64_t>(npKtiles)) * aicNum *
+        Q_CHUNK_SIZE * 512 * sizeof(float);
 
     uint64_t sortLen =
         usePostBlockShape ? static_cast<uint64_t>(postXBlocks) * postYBlocks : static_cast<uint64_t>(xBlocks) * yBlocks;
@@ -349,19 +358,37 @@ void BSASelectBlockMaskTilingBase::CalcOutputParams()
     uint64_t topkWorkspaceSize = topkHeaderSize + topkTileDataSize;
 
     uint64_t totalWorkspaceSize = qCmpSize + kCmpSize + attnScoreFp16Size + scoreFp32Size + topkWorkspaceSize;
-    uint64_t pooledScoreOffset = 0;
+    uint64_t postStagingOffset = 0;
     if (usePostBlockShape) {
-        pooledScoreOffset = attnScoreFp16Size;
-        totalWorkspaceSize += pooledScoreSize;
+        postStagingOffset = (qCmpSize + kCmpSize + attnScoreFp16Size + 511) / 512 * 512;
+        const uint64_t softmaxTmpPad =
+            (postStagingOffset + postStagingSize + 511) / 512 * 512 - (postStagingOffset + postStagingSize);
+        totalWorkspaceSize +=
+            postStagingOffset - (qCmpSize + kCmpSize + attnScoreFp16Size) + postStagingSize + softmaxTmpPad;
     }
+
+    constexpr uint32_t KTILE_COLS = 4 * 128;
+    const uint32_t foldW = (usePostBlockShape && postBlockShapeY % 16 != 0) ? 8u : 16u;
+    const uint32_t foldG = KTILE_COLS / foldW;
+    uint32_t ktilesPerChunk = static_cast<uint32_t>((yBlocks + KTILE_COLS - 1) / KTILE_COLS);
+    uint32_t aivSubCoreNum = aicNum * 2;
+    uint64_t partSumSize = 0;
+    uint64_t partMaxSize = 0;
+    if (usePostBlockShape) {
+        partSumSize = static_cast<uint64_t>(aivSubCoreNum) * ktilesPerChunk * Q_CHUNK_SIZE * foldG * sizeof(float);
+        partMaxSize = static_cast<uint64_t>(aivSubCoreNum) * ktilesPerChunk * Q_CHUNK_SIZE * sizeof(float);
+    }
+    totalWorkspaceSize += partSumSize + partMaxSize;
 
     outputParams_->set_qCmpSize(qCmpSize);
     outputParams_->set_kCmpSize(kCmpSize);
     outputParams_->set_attnScoreSize(attnScoreFp16Size);
     outputParams_->set_softmaxTmpSize(scoreFp32Size);
     outputParams_->set_topkWorkspaceSize(topkWorkspaceSize);
-    outputParams_->set_pooledScoreSize(pooledScoreSize);
-    outputParams_->set_pooledScoreOffset(pooledScoreOffset);
+    outputParams_->set_postStagingSize(postStagingSize);
+    outputParams_->set_postStagingOffset(postStagingOffset);
+    outputParams_->set_partSumSize(partSumSize);
+    outputParams_->set_partMaxSize(partMaxSize);
     outputParams_->set_totalWorkspaceSize(totalWorkspaceSize);
 }
 
