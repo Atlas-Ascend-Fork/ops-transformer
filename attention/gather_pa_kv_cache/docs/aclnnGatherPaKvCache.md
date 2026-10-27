@@ -129,7 +129,7 @@ aclnnStatus aclnnGatherPaKvCache(
       <td class="tg-0pky">INT32、INT64</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">2</td>
-      <td class="tg-0pky">x</td>
+      <td class="tg-0pky">√</td>
     </tr>
     <tr>
       <td class="tg-0pky">seqLens（aclTensor*）</td>
@@ -139,7 +139,7 @@ aclnnStatus aclnnGatherPaKvCache(
       <td class="tg-0pky">与blockTables保持一致</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">1</td>
-      <td class="tg-0pky">x</td>
+      <td class="tg-0pky">√</td>
     </tr>
     <tr>
       <td class="tg-0pky">keyRef（aclTensor*）</td>
@@ -169,7 +169,7 @@ aclnnStatus aclnnGatherPaKvCache(
       <td class="tg-0pky">与blockTables保持一致</td>
       <td class="tg-0pky">ND</td>
       <td class="tg-0pky">1</td>
-      <td class="tg-0pky">x</td>
+      <td class="tg-0pky">√</td>
     </tr>
     <tr>
       <td class="tg-0pky">cacheMode（char*）</td>
