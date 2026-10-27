@@ -122,7 +122,7 @@ aclnnStatus aclnnMoeGatingTopKSoftmaxV2(
     <td>k</td>
     <td>输入</td>
     <td>topK的k值，专家数。</td>
-    <td>0 <= k <= x的-1轴大小，且k不大于1024。</td>
+    <td>1 <= k <= min(1024, x的-1轴大小)。</td>
     <td>INT64</td>
     <td>-</td>
     <td>-</td>
