@@ -296,6 +296,9 @@ CATLASS_DEVICE void CrossRankAllGatherCollectShared(
             AscendC::DataCopyPad(
                 preSumBeforeRankForDispatch, prevSumBuf,
                 AscendC::DataCopyParams{1, static_cast<uint16_t>(realExpertNum * sizeof(int32_t)), 0, 0});
+            // Finish reading the dispatch prefixes before Scalar reuses their UB buffer for combine.
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(EVENT_ID0);
         }
         for (int32_t i = 0, j = 0, prevSum = 0; i < (rank + 1) * expertPerRank; i++) {
             if (i >= rank * expertPerRank) {
