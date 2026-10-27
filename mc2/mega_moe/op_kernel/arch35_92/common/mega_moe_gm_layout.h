@@ -8,10 +8,13 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#ifndef MEGA_MOE_MEMORY_LAYOUT_H
-#define MEGA_MOE_MEMORY_LAYOUT_H
+#ifndef MEGA_MOE_GM_LAYOUT_H
+#define MEGA_MOE_GM_LAYOUT_H
 
 #include <cstdint>
+
+// Shared GM layout: host, kernel and Torch use the same byte offsets and capacities.
+// No allocation, address binding, or synchronization is performed here.
 
 #if defined(__DAV_C310_CUBE__) || defined(__DAV_C310_VEC__) || defined(__DAV_310R6_CUBE__) || \
     defined(__DAV_310R6_VEC__) || defined(__DAV_920R1_CUBE__) || defined(__DAV_920R1_VEC__) || defined(__NPU_ARCH__)
@@ -21,6 +24,33 @@
 #endif
 
 namespace MegaMoeImpl {
+
+enum class MegaMoeActMode : uint8_t {
+    SWIGLU = 0U,
+    SITU = 1U,
+    SWIGLU_STEP = 2U,
+    SWIGLU_OAI = 3U,
+    GELU = 4U,
+};
+
+enum class MegaMoeActSubMode : uint8_t {
+    DEFAULT = 0U,
+    LINEAR = 1U,
+};
+
+enum class MegaMoeGmmMode : uint8_t {
+    A8W8_ND = 0U,
+    A8W4_NZ = 1U,
+    A8W8_NZ = 2U,
+    A4W4_ND = 3U,
+    A4W4_NZ = 4U,
+};
+
+constexpr uint8_t GMM_MODE_A8W8_ND = static_cast<uint8_t>(MegaMoeGmmMode::A8W8_ND);
+constexpr uint8_t GMM_MODE_A8W4_NZ = static_cast<uint8_t>(MegaMoeGmmMode::A8W4_NZ);
+constexpr uint8_t GMM_MODE_A8W8_NZ = static_cast<uint8_t>(MegaMoeGmmMode::A8W8_NZ);
+constexpr uint8_t GMM_MODE_A4W4_ND = static_cast<uint8_t>(MegaMoeGmmMode::A4W4_ND);
+constexpr uint8_t GMM_MODE_A4W4_NZ = static_cast<uint8_t>(MegaMoeGmmMode::A4W4_NZ);
 
 // 本头只计算容量和偏移，供容量申请、tiling 校验和核内地址绑定共同使用。
 namespace MemoryLayoutDetail {
@@ -39,12 +69,12 @@ constexpr int64_t DEDUP_PREPASS_MAX_CHUNKS = 128;
 constexpr int64_t DEDUP_ROW_DESC_HEADER_INT32 = 2;
 constexpr int64_t MAX_INT16_TOPK_INDEX_COUNT = 1LL << 15;
 
-HOST_DEVICE int64_t CeilDiv(int64_t value, int64_t divisor)
+HOST_DEVICE constexpr int64_t CeilDiv(int64_t value, int64_t divisor)
 {
     return (value + divisor - 1) / divisor;
 }
 
-HOST_DEVICE int64_t CeilAlign(int64_t value, int64_t alignment)
+HOST_DEVICE constexpr int64_t CeilAlign(int64_t value, int64_t alignment)
 {
     return CeilDiv(value, alignment) * alignment;
 }
@@ -71,12 +101,32 @@ constexpr int64_t TOPO_TYPE_MTE = 0U;
 constexpr int64_t TOPO_TYPE_URMA = 1U;
 constexpr int64_t TOPO_TYPE_URMA_ROCE = 2U;
 
-HOST_DEVICE bool IsLayeredTopology(int64_t topo)
+HOST_DEVICE constexpr bool IsW4GmmMode(uint8_t gmmMode)
+{
+    return gmmMode == GMM_MODE_A8W4_NZ || gmmMode == GMM_MODE_A4W4_ND || gmmMode == GMM_MODE_A4W4_NZ;
+}
+
+HOST_DEVICE constexpr bool IsA4W4GmmMode(uint8_t gmmMode)
+{
+    return gmmMode == GMM_MODE_A4W4_ND || gmmMode == GMM_MODE_A4W4_NZ;
+}
+
+HOST_DEVICE constexpr uint32_t GetActivationOutputDivisor(uint8_t actMode)
+{
+    return actMode == static_cast<uint8_t>(MegaMoeActMode::GELU) ? 1U : MemoryLayoutDetail::ACTIVATION_N_HALF;
+}
+
+HOST_DEVICE constexpr int64_t GetActivationOutputWidth(int64_t hiddenDim, uint8_t actMode)
+{
+    return hiddenDim / GetActivationOutputDivisor(actMode);
+}
+
+HOST_DEVICE constexpr bool IsLayeredTopology(int64_t topo)
 {
     return topo == TOPO_TYPE_URMA || topo == TOPO_TYPE_URMA_ROCE;
 }
 
-HOST_DEVICE int64_t CalcUrmaRankSyncSize(int64_t epWorldSize)
+HOST_DEVICE constexpr int64_t CalcUrmaRankSyncSize(int64_t epWorldSize)
 {
     int64_t rankSyncSize = epWorldSize * PEERMEM_SYNC_SLOT_SIZE;
     return rankSyncSize > PEERMEM_MIN_RANK_SYNC_SIZE ? rankSyncSize : PEERMEM_MIN_RANK_SYNC_SIZE;
@@ -85,7 +135,7 @@ HOST_DEVICE int64_t CalcUrmaRankSyncSize(int64_t epWorldSize)
 // ============================ 各区尺寸（host / device 共用） ============================
 
 // URMA layered 路径仍使用 mask 槽；MTE WAVE 不再经过该布局。
-HOST_DEVICE int64_t CalcDispatchMaskAlignSize(int64_t numMaxTokensPerRank, int64_t topK)
+HOST_DEVICE constexpr int64_t CalcDispatchMaskAlignSize(int64_t numMaxTokensPerRank, int64_t topK)
 {
     int64_t sendTotalNum = numMaxTokensPerRank * topK;
     int64_t alignedRouteCount = MemoryLayoutDetail::CeilAlign(sendTotalNum * static_cast<int64_t>(sizeof(int32_t)),
@@ -96,13 +146,13 @@ HOST_DEVICE int64_t CalcDispatchMaskAlignSize(int64_t numMaxTokensPerRank, int64
 }
 
 // 所有 Rank 使用一致的 numMaxTokensPerRank，因此可据此统一选择 int16 或 int32 编码。
-HOST_DEVICE bool UseInt16TopkIndex(int64_t numMaxTokensPerRank, int64_t topK)
+HOST_DEVICE constexpr bool UseInt16TopkIndex(int64_t numMaxTokensPerRank, int64_t topK)
 {
     return topK > 0 && numMaxTokensPerRank >= 0 &&
            numMaxTokensPerRank * topK <= MemoryLayoutDetail::MAX_INT16_TOPK_INDEX_COUNT;
 }
 
-HOST_DEVICE int64_t CalcTopkIndexTypeBytes(int64_t numMaxTokensPerRank, int64_t topK)
+HOST_DEVICE constexpr int64_t CalcTopkIndexTypeBytes(int64_t numMaxTokensPerRank, int64_t topK)
 {
     return UseInt16TopkIndex(numMaxTokensPerRank, topK) ? static_cast<int64_t>(sizeof(int16_t)) :
                                                           static_cast<int64_t>(sizeof(int32_t));
@@ -111,20 +161,21 @@ HOST_DEVICE int64_t CalcTopkIndexTypeBytes(int64_t numMaxTokensPerRank, int64_t 
 // 每个 (localExpert, srcRank) 槽直接保存有序 topkIndex。
 // 同一 token 的 topK expert id 不重复，因此单专家从一张源卡最多接收 numMaxTokensPerRank 个 index。
 // route index 接收区不携带槽尾 count；MTE count 使用独立的 512B 间隔表。
-HOST_DEVICE int64_t CalcRouteIndexRecvSize(int64_t routeIndexAlignSize, int64_t moeExpertPerRank, int64_t epWorldSize)
+HOST_DEVICE constexpr int64_t CalcRouteIndexRecvSize(int64_t routeIndexAlignSize, int64_t moeExpertPerRank,
+                                                     int64_t epWorldSize)
 {
     return MemoryLayoutDetail::CeilAlign(moeExpertPerRank * epWorldSize * routeIndexAlignSize,
                                          MemoryLayoutDetail::ALIGN_512);
 }
 
-HOST_DEVICE int64_t CalcMaskRecvSize(int64_t maskAlignSize, int64_t moeExpertPerRank, int64_t epWorldSize)
+HOST_DEVICE constexpr int64_t CalcMaskRecvSize(int64_t maskAlignSize, int64_t moeExpertPerRank, int64_t epWorldSize)
 {
     int64_t maskSlotSize = maskAlignSize + MemoryLayoutDetail::ALIGN_32;
     return MemoryLayoutDetail::CeilAlign(moeExpertPerRank * epWorldSize * maskSlotSize, MemoryLayoutDetail::ALIGN_512);
 }
 
 // URMA 的独立 raw count 表仍按 [localExpert][sourceRank] 连续排列；不使用 MTE slot 布局。
-HOST_DEVICE int64_t CalcExpertCountRecvSize(int64_t moeExpertPerRank, int64_t epWorldSize)
+HOST_DEVICE constexpr int64_t CalcExpertCountRecvSize(int64_t moeExpertPerRank, int64_t epWorldSize)
 {
     return MemoryLayoutDetail::CeilAlign(moeExpertPerRank * epWorldSize * static_cast<int64_t>(sizeof(int32_t)),
                                          MemoryLayoutDetail::ALIGN_512);
@@ -150,21 +201,22 @@ HOST_DEVICE constexpr bool IsServerCombineDedupOn(int32_t dedupMode)
     return dedupMode == DEDUP_MODE_SERVER_COMBINE;
 }
 
-HOST_DEVICE int64_t CalcServerCombineReadyRowBytes(int64_t capacity)
+HOST_DEVICE constexpr int64_t CalcServerCombineReadyRowBytes(int64_t capacity)
 {
     // 每个 token 一份 uint64 位图，末尾另存 count+1，整行按 32B 对齐。
     return MemoryLayoutDetail::CeilAlign((capacity + 1) * static_cast<int64_t>(sizeof(uint64_t)),
                                          MemoryLayoutDetail::ALIGN_32);
 }
 
-HOST_DEVICE int64_t CalcServerCombineTokenListStrideBytes(int64_t capacity)
+HOST_DEVICE constexpr int64_t CalcServerCombineTokenListStrideBytes(int64_t capacity)
 {
     // 每个源 Server 紧凑保存 int32 count+1 和最多 capacity 个 token ID。
     return (capacity + 1) * static_cast<int64_t>(sizeof(int32_t));
 }
 
 // 单 token 的量化记录字节数 = 量化数据 + mx scale（prefetch 场景再拼 topk 权重），按 32B 对齐。
-HOST_DEVICE int64_t CalcQuantTokenScaleBytes(int64_t h, uint32_t elemsPerByte, int64_t topK, bool topkWeightsPrefetch)
+HOST_DEVICE constexpr int64_t CalcQuantTokenScaleBytes(int64_t h, uint32_t elemsPerByte, int64_t topK,
+                                                       bool topkWeightsPrefetch)
 {
     uint32_t mxScaleNum =
         MemoryLayoutDetail::CeilDiv(static_cast<uint32_t>(h), static_cast<uint32_t>(MemoryLayoutDetail::ALIGN_32));
@@ -186,14 +238,14 @@ HOST_DEVICE int64_t CalcQuantTokenScaleBytes(int64_t h, uint32_t elemsPerByte, i
 
 // 去重 rowDesc 每行的 int32 数：头 2 个 + 成员三元组 3*topK 个，向上对齐到 8 个 int32（32B），
 // 使描述符批量搬运天然 32B 对齐。字段语义见 mega_moe_constants.h 的 DEDUP_ROW_* 注释。
-HOST_DEVICE int64_t CalcDedupRowDescStrideInt32(int64_t topK)
+HOST_DEVICE constexpr int64_t CalcDedupRowDescStrideInt32(int64_t topK)
 {
     int64_t rawInt32 = static_cast<int64_t>(MemoryLayoutDetail::DEDUP_ROW_DESC_HEADER_INT32) + 3LL * topK;
     return MemoryLayoutDetail::CeilAlign(rawInt32, static_cast<int64_t>(MemoryLayoutDetail::INT32_PER_32B));
 }
 
 // combine 接收区单 token 记录字节数：须与 kernel InitCombineBuffers 的 combine record 布局一致。
-HOST_DEVICE int64_t CalcCombineTokenBytes(int64_t h, int64_t yDtypeSize, bool isQuantCombine)
+HOST_DEVICE constexpr int64_t CalcCombineTokenBytes(int64_t h, int64_t yDtypeSize, bool isQuantCombine)
 {
     if (!isQuantCombine) {
         return h * yDtypeSize;
@@ -221,41 +273,118 @@ struct CclCommLayoutParams {
     bool serverCombineReduce{false};
 };
 
-// 纯布局只记录区域的偏移和容量，核内适配层再绑定 GM 地址。
-struct MemoryRegionLayout {
-    int64_t offset{-1};
-    int64_t size{0};
+// Offsets and capacities are bytes; the caller owns the supplied GM base.
+struct GmBuffer {
+    int64_t offsetBytes{-1};
+    int64_t sizeBytes{0};
+    template <typename T = uint8_t>
+#if defined(__NPU_ARCH__) || defined(__DAV_C310_CUBE__) || defined(__DAV_C310_VEC__) || defined(__DAV_310R6_CUBE__) || \
+    defined(__DAV_310R6_VEC__) || defined(__DAV_920R1_CUBE__) || defined(__DAV_920R1_VEC__)
+    HOST_DEVICE __gm__ T* get_ptr(__gm__ uint8_t* base) const
+    {
+        return base != nullptr && offsetBytes >= 0 ? reinterpret_cast<__gm__ T*>(base + offsetBytes) : nullptr;
+    }
+#else
+    HOST_DEVICE T* get_ptr(uint8_t* base) const
+    {
+        return base != nullptr && offsetBytes >= 0 ? reinterpret_cast<T*>(base + offsetBytes) : nullptr;
+    }
+#endif
+};
+
+struct QuantizedBuffers {
+    GmBuffer data{};
+    GmBuffer scale{};
+};
+
+struct GmmBuffers {
+    QuantizedBuffers gmm1Input;
+    GmBuffer gmm1Output{};
+    QuantizedBuffers gmm2Input;
+    GmBuffer gmm2Output{};
+};
+
+struct RoutingBuffers {
+    GmBuffer recvCounts{};
+    GmBuffer receivedTokenMetadata{};
+    GmBuffer recvPrefixBackup{};
+    GmBuffer tokenWeights{};
+};
+
+struct SyncBuffers {
+    GmBuffer activationReady{};
+    GmBuffer dispatchReady{};
+    GmBuffer countsReady{};
+    GmBuffer epilogueReady{};
+    GmBuffer gmm1Tiles{};
+};
+
+struct MteSyncBuffers {
+    GmBuffer sharedActivationReady{};
+    GmBuffer aiv1TopkReady{};
+    GmBuffer gmm2Ready{};
+    GmBuffer sharedGmm2Tiles{};
+    GmBuffer dedupReady{};
+};
+
+struct MteBuffers {
+    GmBuffer dedupRowDescriptors{};
+    MteSyncBuffers sync;
+};
+
+struct UrmaSyncBuffers {
+    GmBuffer combineCounters{};
+};
+
+struct ServerCombineBuffers {
+    GmBuffer tokenIds{};
+    GmBuffer tokenBitmaps{};
+    GmBuffer completedCounts{};
+};
+
+struct UrmaBuffers {
+    ServerCombineBuffers serverCombine;
+    GmBuffer mask{};
+    GmBuffer relaySendQueue{};
+    GmBuffer remoteReadySnapshot{};
+    UrmaSyncBuffers sync;
+};
+
+// These ranges reference existing sync storage; they do not allocate extra buffers.
+// gmm1Tiles excludes allocation-tail padding, matching the existing reset contract.
+struct WorkspaceResetRanges {
+    GmBuffer serverCombine;
+    GmBuffer flags;
+    GmBuffer gmm1Tiles;
 };
 
 // CCL 通信布局的尺寸与偏移，容量申请、主机校验和核内地址绑定共用。
-template <typename Region>
-struct CclCommLayoutBase {
-    Region rankSync;
-    Region syncCount;
-    Region maskRecv;
-    Region expertCountRecv;
-    Region quantTokenScale;
-    Region dispatchReceive;
-    Region dispatchFlag;
-    Region sourceReady;
-    Region contributionReady;
-    Region combineSend;
-    Region contribution;
-    Region combineReceive;
+struct CclCommLayout {
+    GmBuffer rankSync;
+    GmBuffer syncCount;
+    GmBuffer maskRecv;
+    GmBuffer expertCountRecv;
+    GmBuffer quantTokenScale;
+    GmBuffer dispatchReceive;
+    GmBuffer dispatchFlag;
+    GmBuffer sourceReady;
+    GmBuffer contributionReady;
+    GmBuffer combineSend;
+    GmBuffer contribution;
+    GmBuffer combineReceive;
     int64_t totalSize{0};
 
-    HOST_DEVICE Region AppendRegion(int64_t bytes)
+    HOST_DEVICE constexpr GmBuffer AppendRegion(int64_t bytes)
     {
-        Region region{totalSize, bytes};
+        GmBuffer region{totalSize, bytes};
         totalSize += bytes;
         return region;
     }
 };
 
-template <typename Region = MemoryRegionLayout>
-HOST_DEVICE CclCommLayoutBase<Region> CalcMteCclCommLayout(const CclCommLayoutParams& params)
+HOST_DEVICE constexpr CclCommLayout CalcMteCclCommLayout(const CclCommLayoutParams& params)
 {
-    CclCommLayoutBase<Region> sizes{};
+    CclCommLayout sizes{};
     sizes.rankSync = sizes.AppendRegion(PEERMEM_MIN_RANK_SYNC_SIZE);
     sizes.syncCount = sizes.AppendRegion(PEERMEM_SYNC_COUNT_REGION_SIZE);
     const int64_t routeIndexAlignSize = MemoryLayoutDetail::CeilAlign(
@@ -277,10 +406,9 @@ HOST_DEVICE CclCommLayoutBase<Region> CalcMteCclCommLayout(const CclCommLayoutPa
     return sizes;
 }
 
-template <typename Region = MemoryRegionLayout>
-HOST_DEVICE CclCommLayoutBase<Region> CalcUrmaCclCommLayout(const CclCommLayoutParams& params)
+HOST_DEVICE constexpr CclCommLayout CalcUrmaCclCommLayout(const CclCommLayoutParams& params)
 {
-    CclCommLayoutBase<Region> sizes{};
+    CclCommLayout sizes{};
     sizes.rankSync = sizes.AppendRegion(CalcUrmaRankSyncSize(params.epWorldSize));
     sizes.syncCount = sizes.AppendRegion(PEERMEM_SYNC_COUNT_REGION_SIZE);
     sizes.totalSize = MemoryLayoutDetail::CeilAlign(sizes.totalSize, MemoryLayoutDetail::ALIGN_512);
@@ -321,14 +449,20 @@ HOST_DEVICE CclCommLayoutBase<Region> CalcUrmaCclCommLayout(const CclCommLayoutP
     return sizes;
 }
 
-template <typename Region = MemoryRegionLayout>
-HOST_DEVICE CclCommLayoutBase<Region> CalcCclCommLayout(const CclCommLayoutParams& params)
+HOST_DEVICE constexpr CclCommLayout CalcCclCommLayout(const CclCommLayoutParams& params)
 {
-    return params.topoType == TOPO_TYPE_MTE ? CalcMteCclCommLayout<Region>(params) :
-                                              CalcUrmaCclCommLayout<Region>(params);
+    return params.topoType == TOPO_TYPE_MTE ? CalcMteCclCommLayout(params) : CalcUrmaCclCommLayout(params);
 }
 
-using CclCommLayout = CclCommLayoutBase<MemoryRegionLayout>;
+// Communication regions are relative to the caller's window; workspace is its local-compute suffix.
+struct PeermemInfo : CclCommLayout {
+    GmBuffer workspace{};
+    HOST_DEVICE constexpr PeermemInfo() = default;
+    HOST_DEVICE constexpr explicit PeermemInfo(const CclCommLayoutParams& params, int64_t workspaceBytes = 0)
+        : CclCommLayout(CalcCclCommLayout(params)),
+          workspace{MemoryLayoutDetail::CeilAlign(totalSize, MemoryLayoutDetail::ALIGN_512), workspaceBytes}
+    {}
+};
 
 // 各阶段的循环配置同时用于容量规划与核内寻址，不再嵌套判断总开关。
 struct CclStageRingConfig {
@@ -369,8 +503,15 @@ struct CclComputeLayoutParams {
     uint32_t sharedInputElementsPerByte{1};
 };
 
+HOST_DEVICE constexpr int64_t CalcDispatchRouteIndexAlignSize(const CclComputeLayoutParams& params)
+{
+    return MemoryLayoutDetail::CeilAlign(
+        params.numMaxTokensPerRank * CalcTopkIndexTypeBytes(params.numMaxTokensPerRank, params.topK),
+        MemoryLayoutDetail::ALIGN_32);
+}
+
 // GMM1 每核至少覆盖四个逻辑 N tile，GMM2 每核至少覆盖一个。
-HOST_DEVICE int64_t CalcMemoryMGroupsPerWave(int64_t hiddenDim, int64_t h, int64_t aicNum)
+HOST_DEVICE constexpr int64_t CalcMemoryMGroupsPerWave(int64_t hiddenDim, int64_t h, int64_t aicNum)
 {
     if (hiddenDim == 0 || h == 0 || aicNum == 0) {
         return 1;
@@ -382,7 +523,7 @@ HOST_DEVICE int64_t CalcMemoryMGroupsPerWave(int64_t hiddenDim, int64_t h, int64
     return gmm1Groups > gmm2Groups ? gmm1Groups : gmm2Groups;
 }
 
-HOST_DEVICE int64_t CalcMemoryMaxTilesPerExpert(int64_t maxOutputSize, int64_t hiddenDim)
+HOST_DEVICE constexpr int64_t CalcMemoryMaxTilesPerExpert(int64_t maxOutputSize, int64_t hiddenDim)
 {
     return MemoryLayoutDetail::CeilAlign(MemoryLayoutDetail::CeilDiv(maxOutputSize, MemoryLayoutDetail::L1_TILE_M_256) *
                                              MemoryLayoutDetail::CeilDiv(hiddenDim, MemoryLayoutDetail::L1_TILE_M_256),
@@ -390,20 +531,20 @@ HOST_DEVICE int64_t CalcMemoryMaxTilesPerExpert(int64_t maxOutputSize, int64_t h
 }
 
 // CCL 本地计算区从通信布局尾部开始，MTE 另保留头部异常记录区域。
-HOST_DEVICE int64_t CalcCclComputeOffset(const CclCommLayoutParams& params)
+HOST_DEVICE constexpr int64_t CalcCclComputeOffset(const CclCommLayoutParams& params)
 {
     const int64_t exceptionBytes = params.topoType == TOPO_TYPE_MTE ? EXCEPTION_DUMP_REGION_SIZE : 0;
     return MemoryLayoutDetail::CeilAlign(exceptionBytes + CalcCclCommLayout(params).totalSize,
                                          MemoryLayoutDetail::ALIGN_512);
 }
 
-HOST_DEVICE int64_t CalcMemoryRingRows(int64_t mGroupsPerWave)
+HOST_DEVICE constexpr int64_t CalcMemoryRingRows(int64_t mGroupsPerWave)
 {
     return static_cast<int64_t>(MTE_RING_WAVE_COUNT) * mGroupsPerWave * MemoryLayoutDetail::L1_TILE_M_256;
 }
 
 // 准入规则仅在此处维护；布局与核内寻址直接使用对应阶段的配置。
-HOST_DEVICE CclStageRingConfig CalcCclStageRingConfig(const CclComputeLayoutParams& params)
+HOST_DEVICE constexpr CclStageRingConfig CalcCclStageRingConfig(const CclComputeLayoutParams& params)
 {
     CclStageRingConfig ring{};
     ring.rows = CalcMemoryRingRows(params.mGroupsPerWave);
@@ -417,77 +558,76 @@ HOST_DEVICE CclStageRingConfig CalcCclStageRingConfig(const CclComputeLayoutPara
     return ring;
 }
 
-HOST_DEVICE int64_t CalcSharedActivationFlagElementsPerExpert(int64_t tokenNum)
+HOST_DEVICE constexpr int64_t CalcSharedActivationFlagElementsPerExpert(int64_t tokenNum)
 {
     return MemoryLayoutDetail::CeilDiv(tokenNum, MemoryLayoutDetail::L1_TILE_M_256) * MemoryLayoutDetail::INT_CACHELINE;
 }
 
-// 仅描述 CCL 本地计算区域相对 cclComputePtr 的字节偏移，不持有或构造地址。
-struct CclComputeLayout {
-    int64_t dispatchRevDataOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t dispatchRevScaleOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t dispatchRevWeightsOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t activationQuantDataOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t activationQuantScaleOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t expertRecvTokenCountOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t metaInfoOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t flagActivationToGmm2Offset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedActivationToGmm2Offset{INVALID_WORKSPACE_OFFSET};
-    int64_t flagDispatchToGmm1Offset{INVALID_WORKSPACE_OFFSET};
-    int64_t flagSendCntCalToUpdParamsOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t flagGmmToEpilogueOffset{INVALID_WORKSPACE_OFFSET};
-    // 仅 MTE 启用共享专家时使用：AIV1 子组分别在 topk 有效下标发送完成、跨卡握手完成后同步。
-    int64_t flagAiv1TopkValidIndexSyncOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t gmm2ReadyOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t gmm2CombineSyncCounterOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t cumsumInfoOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t gmm1MmadResOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t gmm2MmadResOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedExpertResultOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedExpertGmm1OutOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedExpertInputOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedExpertInputDataOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedExpertInputScaleOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedExpertActivationDataOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t sharedExpertActivationScaleOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t gmm1TileStatusOffset{INVALID_WORKSPACE_OFFSET}; // GMM1 tile 就绪状态位区（仅 prefetch 软同步分配）
-    int64_t sharedExpertGmm2TileCounterOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t dedupPrepassReadyOffset{INVALID_WORKSPACE_OFFSET}; // 去重 prepass 完成计数（flag 区内，自动清零）
-    int64_t dedupRowDescOffset{INVALID_WORKSPACE_OFFSET};      // 去重 rowDesc 表（仅 MTE 且 dedupMode!=0）
-    int64_t maskSlotOffset{INVALID_WORKSPACE_OFFSET};          // urma发送mask临时GM
-    int64_t dispatchRelaySendQueueOffset{INVALID_WORKSPACE_OFFSET}; // 按目标 Server 划分的一级中继发送队列
-    int64_t dispatchRemoteReadyFlagSnapshotOffset{
-        INVALID_WORKSPACE_OFFSET}; // 各逻辑核的固定 256-token 远端就绪标志窗口
-    int64_t tokenIdsOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t tokenBitmapsOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t combineRelayCompletedCountOffset{INVALID_WORKSPACE_OFFSET};
-    int64_t serverCombineResetBytes{0};
-
-    // 连续 flag 通知区（自 flagActivationToGmm2Offset 起）的 int32 元素总数。
-    // 在分配处顺手记账，保证 ResetSyncStatus 的清零范围与分配范围恒同源。
-    int64_t flagResetElementCount{0};
-    // prefetch 软同步 GMM1 tile 状态区的 int32 元素总数（未分配时为 0）。
-    int64_t gmm1TileStatusElementCount{0};
+// Regions are relative to the workspace base. Architecture-specific differences enter through constructors.
+struct WorkspaceLayout {
+    // Logical grouping does not determine physical allocation order.
+    GmmBuffers routed;
+    GmmBuffers shared;
+    RoutingBuffers routing;
+    SyncBuffers sync;
+    MteBuffers mte;
+    UrmaBuffers urma;
+    WorkspaceResetRanges reset;
 
     int64_t workspaceSize{0};
-    HOST_DEVICE explicit CclComputeLayout(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr WorkspaceLayout() = default;
+
+    // Arch92 supplies its GMM modes; all other geometry comes from the shared params.
+    struct Arch92 {
+        uint8_t moeGmmMode;
+        uint8_t sharedGmmMode;
+    };
+
+    HOST_DEVICE constexpr explicit WorkspaceLayout(const CclComputeLayoutParams& params)
     {
-        Initialize(params, params.serverNum);
+        Initialize(params, Architecture::Arch35);
+    }
+
+    HOST_DEVICE constexpr WorkspaceLayout(const CclComputeLayoutParams& params, Arch92 modes)
+    {
+        auto archParams = params;
+        archParams.ring = {};
+        archParams.dispatchFp4 = IsA4W4GmmMode(modes.moeGmmMode);
+        archParams.reserveGmm1Output =
+            params.topoType == TOPO_TYPE_MTE || modes.moeGmmMode == GMM_MODE_A8W4_NZ || params.topkWeightsPrefetch;
+        archParams.reserveCumsum = false;
+        archParams.needsGmmEpilogue = params.topoType == TOPO_TYPE_MTE || IsW4GmmMode(modes.moeGmmMode) ||
+                                      (params.sharedExpertNum > 0 && IsW4GmmMode(modes.sharedGmmMode));
+        archParams.sharedInputElementsPerByte = IsA4W4GmmMode(modes.sharedGmmMode) ? 2U : 1U;
+        Initialize(archParams, Architecture::Arch92);
     }
 
 private:
-    HOST_DEVICE void Initialize(const CclComputeLayoutParams& params, int64_t serverNum)
+    enum class Architecture {
+        Arch35,
+        Arch92
+    };
+
+    // Append exactly the supplied bytes; alignment is explicit at the call site.
+    HOST_DEVICE constexpr void Allocate(GmBuffer& buffer, int64_t sizeBytes)
+    {
+        buffer.offsetBytes = workspaceSize;
+        buffer.sizeBytes = sizeBytes;
+        workspaceSize += sizeBytes;
+    }
+
+    HOST_DEVICE constexpr void Initialize(const CclComputeLayoutParams& params, Architecture arch)
     {
         workspaceSize = 0;
         // MTE 与 URMA 分别保持既有分区顺序。
         if (params.topoType == TOPO_TYPE_MTE) {
-            InitializeMte(params);
+            InitializeMte(params, arch);
         } else {
-            InitializeUrma(params, serverNum);
+            InitializeUrma(params, params.serverNum, arch);
         }
     }
 
-    HOST_DEVICE void InitializeMte(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeMte(const CclComputeLayoutParams& params, Architecture arch)
     {
         InitializeDispatchBuffers(params);
         // tkw=0 且 combine 去重：dispatch 把 LAST 行整 token 权重段落 revWeights 区、merge 读回乘权，
@@ -501,7 +641,7 @@ private:
             params.moeExpertPerRank, static_cast<uint32_t>(MemoryLayoutDetail::INT_CACHELINE)));
         int64_t expertRecvTokenCountBytes =
             expertRecvTokenCountStride * static_cast<int64_t>(sizeof(int32_t)) * params.aicNum;
-        InitializeActivationBuffers(params);
+        InitializeActivationBuffers(params, arch == Architecture::Arch92 && params.dispatchFp4 ? 2U : 1U);
         InitializeRoutingMetadata(params, expertRecvTokenCountBytes);
         InitializeMteSyncFlags(params);
         const bool needsReloadCumsum = params.reserveCumsum;
@@ -513,11 +653,13 @@ private:
             if (params.sharedInputIndependent) {
                 InitializeMteSharedExpertInput(params);
             }
-            InitializeSharedExpertActivationBuffers(params);
+            InitializeSharedExpertActivationBuffers(
+                params, arch == Architecture::Arch92 ? params.sharedInputElementsPerByte : 1U);
         }
     }
 
-    HOST_DEVICE void InitializeUrma(const CclComputeLayoutParams& params, int64_t serverNum)
+    HOST_DEVICE constexpr void InitializeUrma(const CclComputeLayoutParams& params, int64_t serverNum,
+                                              Architecture arch)
     {
         InitializeDispatchBuffers(params);
         InitializeDispatchRevWeights(params);
@@ -532,7 +674,7 @@ private:
         InitializeGmm1TileStatus(params);
         InitializeDedupRowDesc(params);
         InitializeUrmaDispatchBuffers(params, serverNum);
-        if (IsServerCombineDedupOn(params.dedupMode)) {
+        if (arch == Architecture::Arch35 && IsServerCombineDedupOn(params.dedupMode)) {
             InitializeServerCombineBuffers(params, serverNum);
         }
         if (params.sharedExpertNum > 0) {
@@ -542,97 +684,100 @@ private:
         }
     }
 
-    HOST_DEVICE void InitializeServerCombineBuffers(const CclComputeLayoutParams& params, int64_t serverNum)
+    HOST_DEVICE constexpr void InitializeServerCombineBuffers(const CclComputeLayoutParams& params, int64_t serverNum)
     {
         const int64_t capacity = params.numMaxTokensPerRank;
-        combineRelayCompletedCountOffset = workspaceSize;
         // 每个 Server 的完成计数独占 64B，仅本段在入口统一清零。
-        workspaceSize += MemoryLayoutDetail::CeilAlign(serverNum * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32,
-                                                       MemoryLayoutDetail::ALIGN_512);
-        serverCombineResetBytes = workspaceSize - combineRelayCompletedCountOffset;
-        tokenIdsOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(serverNum * CalcServerCombineTokenListStrideBytes(capacity),
-                                                       MemoryLayoutDetail::ALIGN_512);
-        tokenBitmapsOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(serverNum * capacity * static_cast<int64_t>(sizeof(uint32_t)),
-                                                       MemoryLayoutDetail::ALIGN_512);
+        Allocate(urma.serverCombine.completedCounts,
+                 MemoryLayoutDetail::CeilAlign(serverNum * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32,
+                                               MemoryLayoutDetail::ALIGN_512));
+        reset.serverCombine = GmBuffer{urma.serverCombine.completedCounts.offsetBytes,
+                                       workspaceSize - urma.serverCombine.completedCounts.offsetBytes};
+        Allocate(urma.serverCombine.tokenIds,
+                 MemoryLayoutDetail::CeilAlign(serverNum * CalcServerCombineTokenListStrideBytes(capacity),
+                                               MemoryLayoutDetail::ALIGN_512));
+        Allocate(urma.serverCombine.tokenBitmaps,
+                 MemoryLayoutDetail::CeilAlign(serverNum * capacity * static_cast<int64_t>(sizeof(uint32_t)),
+                                               MemoryLayoutDetail::ALIGN_512));
     }
 
-    HOST_DEVICE void InitializeDispatchBuffers(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeDispatchBuffers(const CclComputeLayoutParams& params)
     {
         const int64_t dataRows = params.ring.dispatch ? static_cast<int64_t>(params.ring.rows) : params.maxOutputSize;
-        dispatchRevDataOffset = workspaceSize;
         // dispatchRevData 按 GMM1 激活的实际物理字节数分配：FP8 每字节 1 个元素，FP4 每字节 2 个元素。
         const int64_t dispatchDataElementsPerByte = params.dispatchFp4 ? 2LL : 1LL;
         const int64_t dispatchDataBytesPerToken = static_cast<int64_t>(params.h) / dispatchDataElementsPerByte;
-        workspaceSize +=
-            MemoryLayoutDetail::CeilAlign(dataRows * dispatchDataBytesPerToken, MemoryLayoutDetail::ALIGN_512);
-        dispatchRevScaleOffset = workspaceSize;
+        Allocate(routed.gmm1Input.data,
+                 MemoryLayoutDetail::CeilAlign(dataRows * dispatchDataBytesPerToken, MemoryLayoutDetail::ALIGN_512));
 
         int64_t dispatchScaleElementsPerToken =
             MemoryLayoutDetail::CeilDiv(static_cast<int64_t>(params.h),
                                         static_cast<int64_t>(MemoryLayoutDetail::MXFP_DIVISOR_SIZE)) *
             MemoryLayoutDetail::MXFP_MULTI_BASE_SIZE;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(SIZE_INT_8 * dataRows * dispatchScaleElementsPerToken,
-                                                       MemoryLayoutDetail::ALIGN_512);
+        Allocate(routed.gmm1Input.scale,
+                 MemoryLayoutDetail::CeilAlign(SIZE_INT_8 * dataRows * dispatchScaleElementsPerToken,
+                                               MemoryLayoutDetail::ALIGN_512));
     }
 
-    HOST_DEVICE void InitializeDispatchRevWeights(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeDispatchRevWeights(const CclComputeLayoutParams& params)
     {
         // dispatch 接收侧权重区，两种场景共用、MTE 与 URMA 两条初始化路径都必须调用：
         // tkw=1 的权重预取；tkw=0 且 combine 去重——dispatch 侧把 LAST 行
         // 整 token 的 topK 权重段落在这里，merge 一次连续读取后按成员 topkIndex 乘权。
         const bool dedupCombineWeights = params.topkWeightsPrefetch == 0 && IsCombineDedupOn(params.dedupMode);
         if (params.topkWeightsPrefetch == 1 || dedupCombineWeights) {
-            dispatchRevWeightsOffset = workspaceSize;
             uint32_t weightAlignBytes =
                 MemoryLayoutDetail::CeilAlign(static_cast<uint32_t>(params.topK * sizeof(float)),
                                               static_cast<uint32_t>(MemoryLayoutDetail::ALIGN_32));
-            workspaceSize += MemoryLayoutDetail::CeilAlign(
-                static_cast<int64_t>(params.maxOutputSize) * static_cast<int64_t>(weightAlignBytes),
-                MemoryLayoutDetail::ALIGN_512);
+            Allocate(routing.tokenWeights, MemoryLayoutDetail::CeilAlign(static_cast<int64_t>(params.maxOutputSize) *
+                                                                             static_cast<int64_t>(weightAlignBytes),
+                                                                         MemoryLayoutDetail::ALIGN_512));
         }
     }
 
-    HOST_DEVICE void InitializeActivationBuffers(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeActivationBuffers(const CclComputeLayoutParams& params,
+                                                           uint32_t elementsPerByte = 1U)
     {
         const int64_t dataRows = params.ring.activation ? static_cast<int64_t>(params.ring.rows) : params.maxOutputSize;
-        activationQuantDataOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(
-            SIZE_INT_8 * dataRows * params.hiddenDim / params.activationOutputDivisor, MemoryLayoutDetail::ALIGN_512);
+        Allocate(routed.gmm2Input.data,
+                 MemoryLayoutDetail::CeilAlign(
+                     SIZE_INT_8 * dataRows * params.hiddenDim / params.activationOutputDivisor / elementsPerByte,
+                     MemoryLayoutDetail::ALIGN_512));
 
-        activationQuantScaleOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(
-            SIZE_INT_8 * dataRows *
-                MemoryLayoutDetail::CeilDiv(static_cast<int64_t>(params.hiddenDim / params.activationOutputDivisor),
-                                            static_cast<int64_t>(MemoryLayoutDetail::MXFP_DIVISOR_SIZE)) *
-                MemoryLayoutDetail::MXFP_MULTI_BASE_SIZE,
-            MemoryLayoutDetail::ALIGN_512);
+        Allocate(
+            routed.gmm2Input.scale,
+            MemoryLayoutDetail::CeilAlign(
+                SIZE_INT_8 * dataRows *
+                    MemoryLayoutDetail::CeilDiv(static_cast<int64_t>(params.hiddenDim / params.activationOutputDivisor),
+                                                static_cast<int64_t>(MemoryLayoutDetail::MXFP_DIVISOR_SIZE)) *
+                    MemoryLayoutDetail::MXFP_MULTI_BASE_SIZE,
+                MemoryLayoutDetail::ALIGN_512));
     }
 
-    HOST_DEVICE void InitializeRoutingMetadata(const CclComputeLayoutParams& params, int64_t expertRecvTokenCountBytes)
+    HOST_DEVICE constexpr void InitializeRoutingMetadata(const CclComputeLayoutParams& params,
+                                                         int64_t expertRecvTokenCountBytes)
     {
-        expertRecvTokenCountOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(expertRecvTokenCountBytes, MemoryLayoutDetail::ALIGN_512);
+        Allocate(routing.recvCounts,
+                 MemoryLayoutDetail::CeilAlign(expertRecvTokenCountBytes, MemoryLayoutDetail::ALIGN_512));
 
-        metaInfoOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(params.maxOutputSize * MemoryLayoutDetail::ALIGN_32,
-                                                       MemoryLayoutDetail::ALIGN_512);
+        Allocate(routing.receivedTokenMetadata,
+                 MemoryLayoutDetail::CeilAlign(params.maxOutputSize * MemoryLayoutDetail::ALIGN_32,
+                                               MemoryLayoutDetail::ALIGN_512));
     }
 
-    HOST_DEVICE void InitializeMteSyncFlags(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeMteSyncFlags(const CclComputeLayoutParams& params)
     {
         // 标量通知区连续分配，保证统一清零范围。
         int64_t flagRegionBeginOffset = workspaceSize;
         int64_t moeExpertCount = static_cast<int64_t>(params.moeExpertPerRank);
-        flagActivationToGmm2Offset = workspaceSize;
         int64_t wavesPerExpert = MemoryLayoutDetail::CeilDiv(static_cast<int64_t>(params.maxOutputSize),
                                                              static_cast<int64_t>(MemoryLayoutDetail::L1_TILE_M_256));
-        workspaceSize += SIZE_INT_32 * moeExpertCount * wavesPerExpert * MemoryLayoutDetail::INT_CACHELINE;
+        Allocate(sync.activationReady,
+                 SIZE_INT_32 * moeExpertCount * wavesPerExpert * MemoryLayoutDetail::INT_CACHELINE);
         if (params.sharedExpertNum > 0) {
-            sharedActivationToGmm2Offset = workspaceSize;
-            workspaceSize += SIZE_INT_32 * CalcSharedActivationFlagElementsPerExpert(static_cast<int64_t>(params.bs)) *
-                             static_cast<int64_t>(params.sharedExpertNum);
+            Allocate(mte.sync.sharedActivationReady,
+                     SIZE_INT_32 * CalcSharedActivationFlagElementsPerExpert(static_cast<int64_t>(params.bs)) *
+                         static_cast<int64_t>(params.sharedExpertNum));
         }
         InitializeRoutingFlags(params);
         // 去重 prepass 完成标记（flag 连续区内，随 ResetSyncStatus 每 launch 自动清零）：
@@ -640,85 +785,82 @@ private:
         // 槽 1+item = 该工作项 ready（dispatch 每批只等自己覆盖的 (srcRank,chunk) 项）。
         // 按 worldSize*MemoryLayoutDetail::DEDUP_PREPASS_MAX_CHUNKS 上界分配，每槽独占一个 cache line。
         if (params.dedupMode != 0) {
-            dedupPrepassReadyOffset = workspaceSize;
-            workspaceSize +=
-                SIZE_INT_32 * MemoryLayoutDetail::INT_CACHELINE *
-                (1 + static_cast<int64_t>(params.epWorldSize) * MemoryLayoutDetail::DEDUP_PREPASS_MAX_CHUNKS);
+            Allocate(mte.sync.dedupReady,
+                     SIZE_INT_32 * MemoryLayoutDetail::INT_CACHELINE *
+                         (1 + static_cast<int64_t>(params.epWorldSize) * MemoryLayoutDetail::DEDUP_PREPASS_MAX_CHUNKS));
         }
         if (params.needsGmmEpilogue || !params.combineQuant) {
-            flagGmmToEpilogueOffset = workspaceSize;
-            workspaceSize += static_cast<int64_t>(params.aicNum) * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32;
+            Allocate(sync.epilogueReady,
+                     static_cast<int64_t>(params.aicNum) * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32);
         }
         // 量化 Combine 在完整专家结束后等待每个 AIC 的完成标记；combine 去重下非量化路径的
         // 合并驱动行也要等组内成员所在专家的 GMM2 全部落地，同样需要该 per-expert 标记区。
         if (params.combineQuant || IsCombineDedupOn(params.dedupMode)) {
-            gmm2ReadyOffset = workspaceSize;
-            workspaceSize += SIZE_INT_32 * moeExpertCount * params.aicNum * MemoryLayoutDetail::INT_CACHELINE;
+            Allocate(mte.sync.gmm2Ready,
+                     SIZE_INT_32 * moeExpertCount * params.aicNum * MemoryLayoutDetail::INT_CACHELINE);
         }
         if (params.sharedExpertNum > 0) {
-            sharedExpertGmm2TileCounterOffset = workspaceSize;
             int64_t tokenGroupCount = MemoryLayoutDetail::CeilDiv(
                 static_cast<int64_t>(params.bs), static_cast<int64_t>(MemoryLayoutDetail::L1_TILE_M_256));
-            workspaceSize += SIZE_INT_32 * tokenGroupCount * static_cast<int64_t>(params.sharedExpertNum) *
-                             MemoryLayoutDetail::INT_CACHELINE;
+            Allocate(mte.sync.sharedGmm2Tiles, SIZE_INT_32 * tokenGroupCount *
+                                                   static_cast<int64_t>(params.sharedExpertNum) *
+                                                   MemoryLayoutDetail::INT_CACHELINE);
 
-            flagAiv1TopkValidIndexSyncOffset = workspaceSize;
-            workspaceSize += static_cast<int64_t>(params.aicNum) * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32;
+            Allocate(mte.sync.aiv1TopkReady,
+                     static_cast<int64_t>(params.aicNum) * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32);
         }
-        flagResetElementCount = (workspaceSize - flagRegionBeginOffset) / SIZE_INT_32;
+        reset.flags = GmBuffer{sync.activationReady.offsetBytes,
+                               ((workspaceSize - flagRegionBeginOffset) / SIZE_INT_32) * SIZE_INT_32};
     }
 
-    HOST_DEVICE void InitializeUrmaSyncFlags(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeUrmaSyncFlags(const CclComputeLayoutParams& params)
     {
         // 标量通知区连续分配，保证统一清零范围。
         int64_t flagRegionBeginOffset = workspaceSize;
         int64_t moeExpertCount = static_cast<int64_t>(params.moeExpertPerRank);
-        flagActivationToGmm2Offset = workspaceSize;
         // Layered token wave 为专家内每个 256 行分组保留激活完成标志。
         const int64_t maxGroupsPerExpert =
             MemoryLayoutDetail::CeilDiv(params.maxOutputSize, MemoryLayoutDetail::L1_TILE_M_256);
-        workspaceSize += SIZE_INT_32 * moeExpertCount * maxGroupsPerExpert * MemoryLayoutDetail::INT_CACHELINE;
+        Allocate(sync.activationReady,
+                 SIZE_INT_32 * moeExpertCount * maxGroupsPerExpert * MemoryLayoutDetail::INT_CACHELINE);
         InitializeRoutingFlags(params);
         if (params.needsGmmEpilogue) {
-            flagGmmToEpilogueOffset = workspaceSize;
-            workspaceSize += static_cast<int64_t>(params.aicNum) * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32;
+            Allocate(sync.epilogueReady,
+                     static_cast<int64_t>(params.aicNum) * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32);
         }
-        gmm2CombineSyncCounterOffset = workspaceSize;
-        workspaceSize += static_cast<int64_t>(params.combineSyncSlotCountPerExpert) * moeExpertCount *
-                         MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32;
-        flagResetElementCount = (workspaceSize - flagRegionBeginOffset) / SIZE_INT_32;
+        Allocate(urma.sync.combineCounters, static_cast<int64_t>(params.combineSyncSlotCountPerExpert) *
+                                                moeExpertCount * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32);
+        reset.flags = GmBuffer{sync.activationReady.offsetBytes,
+                               ((workspaceSize - flagRegionBeginOffset) / SIZE_INT_32) * SIZE_INT_32};
     }
 
-    HOST_DEVICE void InitializeRoutingFlags(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeRoutingFlags(const CclComputeLayoutParams& params)
     {
         int64_t moeExpertCount = static_cast<int64_t>(params.moeExpertPerRank);
         int64_t maxWavesPerExpert = MemoryLayoutDetail::CeilDiv(
             static_cast<int64_t>(params.maxOutputSize), static_cast<int64_t>(MemoryLayoutDetail::L1_TILE_M_256));
         int64_t waveFlagSlotsPerExpert = maxWavesPerExpert * static_cast<int64_t>(MemoryLayoutDetail::INT_CACHELINE);
-        flagDispatchToGmm1Offset = workspaceSize;
-        workspaceSize += SIZE_INT_32 * moeExpertCount * waveFlagSlotsPerExpert;
+        Allocate(sync.dispatchReady, SIZE_INT_32 * moeExpertCount * waveFlagSlotsPerExpert);
 
         // 每(expert, aiCore)单独占一个cache_line
-        flagSendCntCalToUpdParamsOffset = workspaceSize;
-        workspaceSize += SIZE_INT_32 * MemoryLayoutDetail::INT_CACHELINE * moeExpertCount * params.aicNum;
+        Allocate(sync.countsReady, SIZE_INT_32 * MemoryLayoutDetail::INT_CACHELINE * moeExpertCount * params.aicNum);
     }
 
-    HOST_DEVICE void InitializeGmmIntermediateBuffers(const CclComputeLayoutParams& params, bool reserveCumsum,
-                                                      bool alignGmm2Output)
+    HOST_DEVICE constexpr void InitializeGmmIntermediateBuffers(const CclComputeLayoutParams& params,
+                                                                bool reserveCumsum, bool alignGmm2Output)
     {
         const int64_t dataRows = params.ring.gmm1 ? static_cast<int64_t>(params.ring.rows) : params.maxOutputSize;
         if (reserveCumsum) {
             // cumsumInfo：逐核备份 cumsum 状态，每核 moeExpertPerRank × epWorldSize 个 int32。
-            cumsumInfoOffset = workspaceSize;
-            workspaceSize += MemoryLayoutDetail::CeilAlign(
-                                 static_cast<int64_t>(SIZE_INT_32 * params.moeExpertPerRank * params.epWorldSize),
-                                 MemoryLayoutDetail::ALIGN_32) *
-                             params.aicNum;
+            Allocate(routing.recvPrefixBackup,
+                     MemoryLayoutDetail::CeilAlign(
+                         static_cast<int64_t>(SIZE_INT_32 * params.moeExpertPerRank * params.epWorldSize),
+                         MemoryLayoutDetail::ALIGN_32) *
+                         params.aicNum);
         }
         if (params.reserveGmm1Output) {
             // 支持复用的 MTE 路径按循环容量分配，其余路径保留全量 GMM1 结果。
-            gmm1MmadResOffset = workspaceSize;
-            workspaceSize += SIZE_BF_16 * dataRows * params.hiddenDim;
+            Allocate(routed.gmm1Output, SIZE_BF_16 * dataRows * params.hiddenDim);
         }
         // Combine 去重使用全量逻辑行，其余可复用路径使用循环物理行；结果始终只有一份。
         const int64_t gmm2Rows = params.ring.gmm2 ? static_cast<int64_t>(params.ring.rows) : params.maxOutputSize;
@@ -729,117 +871,115 @@ private:
             outputBytes =
                 MemoryLayoutDetail::CeilAlign(outputBytes, static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512));
         }
-        gmm2MmadResOffset = workspaceSize;
-        workspaceSize += outputBytes;
+        Allocate(routed.gmm2Output, outputBytes);
     }
 
     // 去重 rowDesc 表：每个接收行一条定长描述符。无需清零——prepass 在 dispatch 读取前
     // 覆盖写全部有效行，超出实际接收计数的行不会被读取。
-    HOST_DEVICE void InitializeDedupRowDesc(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeDedupRowDesc(const CclComputeLayoutParams& params)
     {
         if (params.topoType == TOPO_TYPE_MTE && params.dedupMode != 0) {
-            dedupRowDescOffset = workspaceSize;
             int64_t rowDescStrideInt32 = CalcDedupRowDescStrideInt32(static_cast<int64_t>(params.topK));
-            workspaceSize += MemoryLayoutDetail::CeilAlign(
-                SIZE_INT_32 * rowDescStrideInt32 * static_cast<int64_t>(params.maxOutputSize),
-                MemoryLayoutDetail::ALIGN_512);
+            Allocate(mte.dedupRowDescriptors,
+                     MemoryLayoutDetail::CeilAlign(
+                         SIZE_INT_32 * rowDescStrideInt32 * static_cast<int64_t>(params.maxOutputSize),
+                         MemoryLayoutDetail::ALIGN_512));
         }
     }
 
-    HOST_DEVICE void InitializeGmm1TileStatus(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeGmm1TileStatus(const CclComputeLayoutParams& params)
     {
         // GMM1 tile 状态位区（仅 prefetch 路径分配，用于 AIC→AIV 软同步）。
         // 每个 tile 状态和末尾 allDone 状态都独占一条 64B cache line。
-        gmm1TileStatusOffset = INVALID_WORKSPACE_OFFSET;
+        sync.gmm1Tiles.offsetBytes = INVALID_WORKSPACE_OFFSET;
         if (params.topkWeightsPrefetch == 1) {
-            gmm1TileStatusOffset = workspaceSize;
             int64_t statusSlots = static_cast<int64_t>(params.moeExpertPerRank) * params.maxTilesPerExpert + 1;
-            gmm1TileStatusElementCount = statusSlots * MemoryLayoutDetail::INT_CACHELINE;
             int64_t statusBytes = SIZE_INT_32 * statusSlots * MemoryLayoutDetail::INT_CACHELINE;
-            workspaceSize += MemoryLayoutDetail::CeilAlign(statusBytes, MemoryLayoutDetail::ALIGN_512);
+            Allocate(sync.gmm1Tiles, MemoryLayoutDetail::CeilAlign(statusBytes, MemoryLayoutDetail::ALIGN_512));
+            reset.gmm1Tiles =
+                GmBuffer{sync.gmm1Tiles.offsetBytes, (statusSlots * MemoryLayoutDetail::INT_CACHELINE) * SIZE_INT_32};
         }
     }
 
-    HOST_DEVICE void InitializeUrmaDispatchBuffers(const CclComputeLayoutParams& params, int64_t serverNum)
+    HOST_DEVICE constexpr void InitializeUrmaDispatchBuffers(const CclComputeLayoutParams& params, int64_t serverNum)
     {
-        maskSlotOffset = workspaceSize;
         // 远端 mask 槽的 count 位于全卡共用的容量尾部，本地发送暂存必须使用相同槽宽。
         const int64_t maskAlignSize = CalcDispatchMaskAlignSize(params.numMaxTokensPerRank, params.topK);
         int64_t maskSlotSize = maskAlignSize + static_cast<int64_t>(MemoryLayoutDetail::ALIGN_32); // mask + 32B count
 
-        workspaceSize += MemoryLayoutDetail::CeilAlign(
-            static_cast<int64_t>(params.moeExpertPerRank) * params.epWorldSize * maskSlotSize,
-            static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512));
+        Allocate(urma.mask, MemoryLayoutDetail::CeilAlign(
+                                static_cast<int64_t>(params.moeExpertPerRank) * params.epWorldSize * maskSlotSize,
+                                static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512)));
 
-        dispatchRelaySendQueueOffset = workspaceSize;
         int64_t serverWorkspaceBytes = static_cast<int64_t>(MemoryLayoutDetail::ALIGN_32) +
                                        static_cast<int64_t>(params.bs) * MemoryLayoutDetail::ALIGN_32;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(static_cast<int64_t>(serverNum) * serverWorkspaceBytes,
-                                                       static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512));
+        Allocate(urma.relaySendQueue,
+                 MemoryLayoutDetail::CeilAlign(static_cast<int64_t>(serverNum) * serverWorkspaceBytes,
+                                               static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512)));
 
-        dispatchRemoteReadyFlagSnapshotOffset = workspaceSize;
         // 每个逻辑核只缓存当前 256-token 窗口；稀疏 token 按命中的窗口分块读取。
         int64_t flagSnapshotBytes = static_cast<int64_t>(MemoryLayoutDetail::L1_TILE_M_256) * sizeof(uint64_t);
         int64_t relayFlagSnapshotBytesPerBlock =
             MemoryLayoutDetail::CeilAlign(flagSnapshotBytes, static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512));
-        workspaceSize += static_cast<int64_t>(params.aicNum) * relayFlagSnapshotBytesPerBlock;
+        Allocate(urma.remoteReadySnapshot, static_cast<int64_t>(params.aicNum) * relayFlagSnapshotBytesPerBlock);
     }
 
-    HOST_DEVICE void InitializeSharedExpertGmmOutputs(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeSharedExpertGmmOutputs(const CclComputeLayoutParams& params)
     {
         // sharedExpertResult：共享专家 GMM2 输出 [sharedExpertNum × bs × h]。
-        sharedExpertResultOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(SIZE_BF_16 * params.bs * params.sharedExpertNum * params.h,
-                                                       MemoryLayoutDetail::ALIGN_512);
+        Allocate(shared.gmm2Output,
+                 MemoryLayoutDetail::CeilAlign(SIZE_BF_16 * params.bs * params.sharedExpertNum * params.h,
+                                               MemoryLayoutDetail::ALIGN_512));
         // sharedExpertGmm1Out：共享专家 GMM1 输出 [sharedExpertNum × bs × hiddenDim]。
-        sharedExpertGmm1OutOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(
-            SIZE_BF_16 * params.bs * params.sharedExpertNum * params.hiddenDim, MemoryLayoutDetail::ALIGN_512);
+        Allocate(shared.gmm1Output,
+                 MemoryLayoutDetail::CeilAlign(SIZE_BF_16 * params.bs * params.sharedExpertNum * params.hiddenDim,
+                                               MemoryLayoutDetail::ALIGN_512));
     }
 
-    HOST_DEVICE void InitializeMteSharedExpertInput(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeMteSharedExpertInput(const CclComputeLayoutParams& params)
     {
         // MTE 共享专家使用逐 token 交织数据 [Align256(data) | Align32(scale)]，仅独立量化时分配。
-        sharedExpertInputOffset = workspaceSize;
         uint32_t elementsPerByte = params.sharedInputElementsPerByte;
         int64_t recordBytes = CalcQuantTokenScaleBytes(static_cast<int64_t>(params.h), elementsPerByte, 0LL, false);
-        workspaceSize += MemoryLayoutDetail::CeilAlign(static_cast<int64_t>(params.bs) * recordBytes,
-                                                       static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512));
+        Allocate(shared.gmm1Input.data,
+                 MemoryLayoutDetail::CeilAlign(static_cast<int64_t>(params.bs) * recordBytes,
+                                               static_cast<int64_t>(MemoryLayoutDetail::ALIGN_512)));
     }
 
-    HOST_DEVICE void InitializeUrmaSharedExpertInput(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeUrmaSharedExpertInput(const CclComputeLayoutParams& params)
     {
         // URMA layered kernel 仍使用连续 data/scale，两块地址契约保持不变。
-        sharedExpertInputDataOffset = workspaceSize;
-        workspaceSize +=
-            MemoryLayoutDetail::CeilAlign(SIZE_INT_8 * params.bs * params.h, MemoryLayoutDetail::ALIGN_512);
-        sharedExpertInputScaleOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(
-            SIZE_INT_8 * params.bs *
-                MemoryLayoutDetail::CeilDiv(static_cast<uint32_t>(params.h),
-                                            static_cast<uint32_t>(MemoryLayoutDetail::MXFP_SCALE_GROUP_NUM)) *
-                MemoryLayoutDetail::MXFP_MULTI_BASE_SIZE,
-            MemoryLayoutDetail::ALIGN_512);
+        Allocate(shared.gmm1Input.data,
+                 MemoryLayoutDetail::CeilAlign(SIZE_INT_8 * params.bs * params.h, MemoryLayoutDetail::ALIGN_512));
+        Allocate(shared.gmm1Input.scale,
+                 MemoryLayoutDetail::CeilAlign(
+                     SIZE_INT_8 * params.bs *
+                         MemoryLayoutDetail::CeilDiv(static_cast<uint32_t>(params.h),
+                                                     static_cast<uint32_t>(MemoryLayoutDetail::MXFP_SCALE_GROUP_NUM)) *
+                         MemoryLayoutDetail::MXFP_MULTI_BASE_SIZE,
+                     MemoryLayoutDetail::ALIGN_512));
     }
 
-    HOST_DEVICE void InitializeSharedExpertActivationBuffers(const CclComputeLayoutParams& params)
+    HOST_DEVICE constexpr void InitializeSharedExpertActivationBuffers(const CclComputeLayoutParams& params,
+                                                                       uint32_t elementsPerByte = 1U)
     {
         // 共享专家激活输出宽度随激活类型变化：门控激活减半，GELU 保留完整宽度。
-        sharedExpertActivationDataOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(
-            SIZE_INT_8 * params.bs * params.sharedExpertNum * params.hiddenDim / params.activationOutputDivisor,
-            MemoryLayoutDetail::ALIGN_512);
+        Allocate(shared.gmm2Input.data,
+                 MemoryLayoutDetail::CeilAlign(SIZE_INT_8 * params.bs * params.sharedExpertNum * params.hiddenDim /
+                                                   params.activationOutputDivisor / elementsPerByte,
+                                               MemoryLayoutDetail::ALIGN_512));
         // sharedExpertActivationScale：每个 MXFP scale group 保存两个 multi-base 分量。
-        sharedExpertActivationScaleOffset = workspaceSize;
-        workspaceSize += MemoryLayoutDetail::CeilAlign(
-            SIZE_INT_8 * params.bs * params.sharedExpertNum *
-                MemoryLayoutDetail::CeilDiv(static_cast<int64_t>(params.hiddenDim / params.activationOutputDivisor),
-                                            static_cast<int64_t>(MemoryLayoutDetail::MXFP_DIVISOR_SIZE)) *
-                MemoryLayoutDetail::MXFP_MULTI_BASE_SIZE,
-            MemoryLayoutDetail::ALIGN_512);
+        Allocate(
+            shared.gmm2Input.scale,
+            MemoryLayoutDetail::CeilAlign(
+                SIZE_INT_8 * params.bs * params.sharedExpertNum *
+                    MemoryLayoutDetail::CeilDiv(static_cast<int64_t>(params.hiddenDim / params.activationOutputDivisor),
+                                                static_cast<int64_t>(MemoryLayoutDetail::MXFP_DIVISOR_SIZE)) *
+                    MemoryLayoutDetail::MXFP_MULTI_BASE_SIZE,
+                MemoryLayoutDetail::ALIGN_512));
     }
 };
 
 } // namespace MegaMoeImpl
 
-#endif // MEGA_MOE_MEMORY_LAYOUT_H
+#endif // MEGA_MOE_GM_LAYOUT_H

@@ -11,8 +11,10 @@
 #ifndef MEGA_MOE_UNPERMUTE_H
 #define MEGA_MOE_UNPERMUTE_H
 
+#include "../common/mega_moe_sync.h"
 #include "../common/mega_moe_mxfp8_utils.h"
 #include "../common/mega_moe_utils.h"
+#include "../common/mega_moe_copy.h"
 
 namespace MegaMoeImpl {
 
@@ -27,12 +29,12 @@ struct TokenUnpermuteConfig {
 };
 
 struct TokenUnpermuteScratch {
-    LocalTensor<bfloat16_t> dataResTensor;
-    LocalTensor<float> dataResFp32Tensor;
-    LocalTensor<float> topKWeightsTensor;
-    LocalTensor<float> fp32ScaleTensor;
-    LocalTensor<bfloat16_t> bf16ScaleTensor;
-    LocalTensor<bfloat16_t> topKWeightsBf16Tensor;
+    __ubuf__ bfloat16_t* dataResTensor = nullptr;
+    __ubuf__ float* dataResFp32Tensor = nullptr;
+    __ubuf__ float* topKWeightsTensor = nullptr;
+    __ubuf__ float* fp32ScaleTensor = nullptr;
+    __ubuf__ bfloat16_t* bf16ScaleTensor = nullptr;
+    __ubuf__ bfloat16_t* topKWeightsBf16Tensor = nullptr;
 };
 
 // 加载并转换一批 top-k 权重。
@@ -42,48 +44,56 @@ __aicore__ inline void LoadTokenUnpermuteWeights(const MoeStageCommonConfig& com
                                                  int32_t batchTokenOffset, int32_t batchTokenCount)
 {
     if constexpr (Std::IsSame<TopkWeightsType, float>::value) {
-        GlobalTensor<float> topKWeightsGm;
-        topKWeightsGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(params.probsGmAddr));
-        DataCopyPad(scratch.topKWeightsTensor,
-                    topKWeightsGm[static_cast<uint64_t>(jobOffset + batchTokenOffset) * common.topK],
-                    {1U, static_cast<uint32_t>(batchTokenCount * common.topK * sizeof(float)), 0U, 0U, 0U},
-                    {false, 0U, 0U, 0U});
-        SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+        __gm__ float* topKWeightsGm = reinterpret_cast<__gm__ float*>(params.probsGmAddr);
+        CopyGmToUb(scratch.topKWeightsTensor,
+                   (topKWeightsGm + (static_cast<uint64_t>(jobOffset + batchTokenOffset) * common.topK)),
+                   static_cast<uint32_t>(batchTokenCount * common.topK * sizeof(float)));
+        PipeNotify<PIPE_MTE2, PIPE_S>(EVENT_ID0);
+        PipeWait<PIPE_MTE2, PIPE_S>(EVENT_ID0);
     }
     if constexpr (Std::IsSame<TopkWeightsType, bfloat16_t>::value) {
-        GlobalTensor<bfloat16_t> topKWeightsGm;
-        topKWeightsGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(params.probsGmAddr));
-        DataCopyPad(scratch.topKWeightsBf16Tensor,
-                    topKWeightsGm[static_cast<uint64_t>(jobOffset + batchTokenOffset) * common.topK],
-                    {1U, static_cast<uint32_t>(batchTokenCount * common.topK * sizeof(bfloat16_t)), 0U, 0U, 0U},
-                    {false, 0U, 0U, 0U});
-        SyncFuncStatic<HardEvent::MTE2_V, SYNC_EVENT_ID2>();
-        Cast(scratch.topKWeightsTensor, scratch.topKWeightsBf16Tensor, RoundMode::CAST_NONE,
-             batchTokenCount * common.topK);
-        SetFlag<HardEvent::V_S>(EVENT_ID0);
-        WaitFlag<HardEvent::V_S>(EVENT_ID0);
+        __gm__ bfloat16_t* topKWeightsGm = reinterpret_cast<__gm__ bfloat16_t*>(params.probsGmAddr);
+        CopyGmToUb(scratch.topKWeightsBf16Tensor,
+                   (topKWeightsGm + (static_cast<uint64_t>(jobOffset + batchTokenOffset) * common.topK)),
+                   static_cast<uint32_t>(batchTokenCount * common.topK * sizeof(bfloat16_t)));
+        PipeFence<PIPE_MTE2, PIPE_V, SYNC_EVENT_ID2>();
+        {
+            LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.topKWeightsTensor),
+                                   batchTokenCount * common.topK);
+            LocalTensor<bfloat16_t> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.topKWeightsBf16Tensor),
+                                        batchTokenCount * common.topK);
+            Cast(dst, src, RoundMode::CAST_NONE, batchTokenCount * common.topK);
+        }
+        PipeNotify<PIPE_V, PIPE_S>(EVENT_ID0);
+        PipeWait<PIPE_V, PIPE_S>(EVENT_ID0);
     }
 }
 
 // 将一个 MoE 专家的输入搬入 UB，并按 Combine 模式完成 Cast 或 MXFP8 反量化。
 template <uint8_t CombineMode>
 __aicore__ inline void LoadMoeExpertInput(const TokenUnpermuteConfig& context, const MoeStageCommonConfig& common,
-                                          TokenUnpermuteScratch& scratch, const GlobalTensor<bfloat16_t>& expandedX,
-                                          uint64_t expertInputIndex, TEventID event,
-                                          LocalTensor<bfloat16_t>& dataInBf16, LocalTensor<float>& dataInFp32)
+                                          TokenUnpermuteScratch& scratch, __gm__ bfloat16_t* expandedX,
+                                          uint64_t expertInputIndex, TEventID event, __ubuf__ bfloat16_t* dataInBf16,
+                                          __ubuf__ float* dataInFp32)
 {
-    WaitFlag<HardEvent::V_MTE2>(event);
+    PipeWait<PIPE_V, PIPE_MTE2>(event);
     if constexpr (CombineMode == COMBINE_NO_QUANT) {
-        DataCopy(dataInBf16, expandedX[expertInputIndex * common.tokenHiddenDim], common.tokenHiddenDim);
-        SetFlag<HardEvent::MTE2_V>(event);
-        WaitFlag<HardEvent::MTE2_V>(event);
-        Cast(dataInFp32, dataInBf16, RoundMode::CAST_NONE, common.tokenHiddenDim);
+        CopyGmToUb(dataInBf16, (expandedX + (expertInputIndex * common.tokenHiddenDim)),
+                   (common.tokenHiddenDim) * sizeof(bfloat16_t));
+        PipeNotify<PIPE_MTE2, PIPE_V>(event);
+        PipeWait<PIPE_MTE2, PIPE_V>(event);
+        {
+            LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
+            LocalTensor<bfloat16_t> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInBf16),
+                                        common.tokenHiddenDim);
+            Cast(dst, src, RoundMode::CAST_NONE, common.tokenHiddenDim);
+        }
     } else {
         uint32_t quantTokenElementCount = context.quantTokenSizeBytes / sizeof(bfloat16_t);
-        DataCopy(dataInBf16, expandedX[expertInputIndex * quantTokenElementCount], quantTokenElementCount);
-        SetFlag<HardEvent::MTE2_V>(event);
-        WaitFlag<HardEvent::MTE2_V>(event);
+        CopyGmToUb(dataInBf16, (expandedX + (expertInputIndex * quantTokenElementCount)),
+                   (quantTokenElementCount) * sizeof(bfloat16_t));
+        PipeNotify<PIPE_MTE2, PIPE_V>(event);
+        PipeWait<PIPE_MTE2, PIPE_V>(event);
         uint32_t nScale = Ops::Base::CeilDiv(common.tokenHiddenDim, static_cast<uint32_t>(MXFP_SCALE_GROUP_NUM));
         using Fp8Type = typename std::conditional<CombineMode == MXFP8_E4M3_COMM_QUANT, fp8_e4m3fn_t, fp8_e5m2_t>::type;
         Mxfp8::DeQuantMxFp8<Fp8Type, bfloat16_t>(dataInBf16, dataInFp32, scratch.bf16ScaleTensor,
@@ -99,7 +109,7 @@ __aicore__ inline void LoadTokenExpertRanks(const MoeStageCommonConfig& common, 
     __gm__ int32_t* topkIdsBase =
         reinterpret_cast<__gm__ int32_t*>(params.expertIdxGmAddr) + static_cast<uint64_t>(tokenIdx) * common.topK;
     for (int32_t k = 0; k < static_cast<int32_t>(common.topK); ++k) {
-        expertRanks[k] = ReadGmByPassDCache(topkIdsBase + k) / static_cast<int32_t>(common.moeExpertPerRank);
+        expertRanks[k] = GmRead(topkIdsBase + k) / static_cast<int32_t>(common.moeExpertPerRank);
     }
 }
 
@@ -124,31 +134,44 @@ __aicore__ inline bool JudgeDedupCanonicalSlot(const int32_t (&expertRanks)[32],
 // 把一个专家槽的输入累加进 dataResFp32Tensor（首槽直拷/乘权，后续槽乘权后加）。
 template <bool TopkWeightsPrefetch>
 __aicore__ inline void AccumulateExpertSlotInput(const MoeStageCommonConfig& common, TokenUnpermuteScratch& scratch,
-                                                 const LocalTensor<float>& dataInFp32, int32_t localIdx,
-                                                 int32_t expertIdx, bool applyScale, bool accumStarted)
+                                                 __ubuf__ float* dataInFp32, int32_t localIdx, int32_t expertIdx,
+                                                 bool applyScale, bool accumStarted)
 {
     if (!accumStarted) {
         if constexpr (TopkWeightsPrefetch) {
-            DataCopy(scratch.dataResFp32Tensor, dataInFp32, common.tokenHiddenDim);
+            CopyUbToUb(scratch.dataResFp32Tensor, dataInFp32, (common.tokenHiddenDim) * sizeof(float));
         } else {
             if (applyScale) {
-                float expertScale = scratch.topKWeightsTensor.GetValue(localIdx * common.topK + expertIdx);
-                Muls(scratch.dataResFp32Tensor, dataInFp32, expertScale, common.tokenHiddenDim);
+                float expertScale = scratch.topKWeightsTensor[localIdx * common.topK + expertIdx];
+                {
+                    LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.dataResFp32Tensor),
+                                           common.tokenHiddenDim);
+                    LocalTensor<float> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32),
+                                           common.tokenHiddenDim);
+                    Muls(dst, src, expertScale, common.tokenHiddenDim);
+                }
             } else {
-                DataCopy(scratch.dataResFp32Tensor, dataInFp32, common.tokenHiddenDim);
+                CopyUbToUb(scratch.dataResFp32Tensor, dataInFp32, (common.tokenHiddenDim) * sizeof(float));
             }
         }
         return;
     }
     if constexpr (!TopkWeightsPrefetch) {
         if (applyScale) {
-            float expertScale = scratch.topKWeightsTensor.GetValue(localIdx * common.topK + expertIdx);
-            Muls(dataInFp32, dataInFp32, expertScale, common.tokenHiddenDim);
-            PipeBarrier<PIPE_V>();
+            float expertScale = scratch.topKWeightsTensor[localIdx * common.topK + expertIdx];
+            {
+                LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32),
+                                       common.tokenHiddenDim);
+                Muls(dst, dst, expertScale, common.tokenHiddenDim);
+            }
         }
     }
-    Add(scratch.dataResFp32Tensor, scratch.dataResFp32Tensor, dataInFp32, common.tokenHiddenDim);
-    PipeBarrier<PIPE_V>();
+    {
+        LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.dataResFp32Tensor),
+                               common.tokenHiddenDim);
+        LocalTensor<float> rhs(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
+        Add(dst, dst, rhs, common.tokenHiddenDim);
+    }
 }
 
 // 累加一个 token 对应的全部 MoE 专家输入。
@@ -158,7 +181,7 @@ template <uint8_t CombineMode, bool TopkWeightsPrefetch>
 __aicore__ inline void AccumulateMoeExpertsForToken(const TokenUnpermuteConfig& context,
                                                     const MoeStageCommonConfig& common, const Params& params,
                                                     TokenUnpermuteScratch& scratch, int32_t tokenIdx, int32_t localIdx,
-                                                    const GlobalTensor<bfloat16_t>& expandedX,
+                                                    __gm__ bfloat16_t* expandedX,
                                                     const MegaMoeUnpermuteBufferConfig& bufferConfig)
 {
     const bool dedupCombineActive = IsCombineDedupOn(params.tilingData->compute.dedupMode);
@@ -176,21 +199,21 @@ __aicore__ inline void AccumulateMoeExpertsForToken(const TokenUnpermuteConfig& 
         int32_t accumulationItemIdx = localIdx * static_cast<int32_t>(common.topK + common.sharedExpertNum) + expertIdx;
         int32_t inputBufferIdx = accumulationItemIdx % bufferConfig.inputBufferCount;
         TEventID event = static_cast<TEventID>(inputBufferIdx);
-        LocalTensor<bfloat16_t> dataInBf16 =
-            scratch.dataResTensor[(inputBufferIdx + 1) * bufferConfig.bf16SlotElementCount];
-        LocalTensor<float> dataInFp32 =
-            scratch.dataResFp32Tensor[(inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount];
+        __ubuf__ bfloat16_t* dataInBf16 =
+            (scratch.dataResTensor + ((inputBufferIdx + 1) * bufferConfig.bf16SlotElementCount));
+        __ubuf__ float* dataInFp32 =
+            (scratch.dataResFp32Tensor + ((inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount));
         uint64_t expertInputIndex = static_cast<uint64_t>(tokenIdx) * common.topK + expertIdx;
         LoadMoeExpertInput<CombineMode>(context, common, scratch, expandedX, expertInputIndex, event, dataInBf16,
                                         dataInFp32);
-        SetFlag<HardEvent::S_V>(event);
-        WaitFlag<HardEvent::S_V>(event);
-        PipeBarrier<PIPE_V>();
+        PipeNotify<PIPE_S, PIPE_V>(event);
+        PipeWait<PIPE_S, PIPE_V>(event);
+
         const bool applyScale = !dedupCombineActive || sameRankCount == 1;
         AccumulateExpertSlotInput<TopkWeightsPrefetch>(common, scratch, dataInFp32, localIdx, expertIdx, applyScale,
                                                        accumStarted);
         accumStarted = true;
-        SetFlag<HardEvent::V_MTE2>(event);
+        PipeNotify<PIPE_V, PIPE_MTE2>(event);
     }
 }
 
@@ -201,54 +224,67 @@ __aicore__ inline void AccumulateSharedExpertForToken(const MoeStageCommonConfig
                                                       int32_t localIdx, uint32_t sharedExpertIdx,
                                                       const MegaMoeUnpermuteBufferConfig& bufferConfig)
 {
+    const auto& workspace = params.workspace.layout;
+    const auto& buffer = params.workspace.base;
     uint32_t tokenGroupIndex = static_cast<uint32_t>(tokenIdx) / Gmm1TileM;
     uint32_t tokenGroupCount = Ops::Base::CeilDiv(common.tokenNum, Gmm1TileM);
     uint64_t sharedExpertStride = static_cast<uint64_t>(tokenGroupCount) * INT_CACHELINE;
-    __gm__ int32_t* counterAddr = GetCombineSyncCounterAddress(
-        reinterpret_cast<__gm__ int32_t*>(params.workspaceInfo.sharedExpertGmm2TileCounterPtr) +
-            static_cast<uint64_t>(sharedExpertIdx) * sharedExpertStride,
-        tokenGroupIndex);
+    __gm__ int32_t* counterAddr =
+        GetCombineSyncCounterAddress(workspace.mte.sync.sharedGmm2Tiles.get_ptr<int32_t>(buffer) +
+                                         static_cast<uint64_t>(sharedExpertIdx) * sharedExpertStride,
+                                     tokenGroupIndex);
     uint32_t gmm2NTilesPerGroup = Ops::Base::CeilDiv(common.tokenHiddenDim, L1_TILE_N);
     WaitUntilGmFlagEquals(counterAddr, static_cast<int32_t>(gmm2NTilesPerGroup));
 
-    GlobalTensor<bfloat16_t> sharedResult;
-    sharedResult.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(params.workspaceInfo.sharedExpertResultPtr));
+    __gm__ bfloat16_t* sharedResult = workspace.shared.gmm2Output.get_ptr<bfloat16_t>(buffer);
     int32_t accumulationItemIdx = localIdx * static_cast<int32_t>(common.topK + common.sharedExpertNum) +
                                   static_cast<int32_t>(common.topK + sharedExpertIdx);
     int32_t inputBufferIdx = accumulationItemIdx % bufferConfig.inputBufferCount;
     TEventID event = static_cast<TEventID>(inputBufferIdx);
-    LocalTensor<bfloat16_t> dataInBf16 =
-        scratch.dataResTensor[(inputBufferIdx + 1) * bufferConfig.bf16SlotElementCount];
-    LocalTensor<float> dataInFp32 = scratch.dataResFp32Tensor[(inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount];
-    WaitFlag<HardEvent::V_MTE2>(event);
-    DataCopy(
-        dataInBf16,
-        sharedResult[(static_cast<uint64_t>(sharedExpertIdx) * common.tokenNum + tokenIdx) * common.tokenHiddenDim],
-        common.tokenHiddenDim);
-    SetFlag<HardEvent::MTE2_V>(event);
-    WaitFlag<HardEvent::MTE2_V>(event);
-    SetFlag<HardEvent::S_V>(event);
-    WaitFlag<HardEvent::S_V>(event);
-    Cast(dataInFp32, dataInBf16, RoundMode::CAST_NONE, common.tokenHiddenDim);
-    PipeBarrier<PIPE_V>();
-    Add(scratch.dataResFp32Tensor, scratch.dataResFp32Tensor, dataInFp32, common.tokenHiddenDim);
-    PipeBarrier<PIPE_V>();
-    SetFlag<HardEvent::V_MTE2>(event);
+    __ubuf__ bfloat16_t* dataInBf16 =
+        (scratch.dataResTensor + ((inputBufferIdx + 1) * bufferConfig.bf16SlotElementCount));
+    __ubuf__ float* dataInFp32 =
+        (scratch.dataResFp32Tensor + ((inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount));
+    PipeWait<PIPE_V, PIPE_MTE2>(event);
+    CopyGmToUb(dataInBf16,
+               (sharedResult +
+                ((static_cast<uint64_t>(sharedExpertIdx) * common.tokenNum + tokenIdx) * common.tokenHiddenDim)),
+               (common.tokenHiddenDim) * sizeof(bfloat16_t));
+    PipeNotify<PIPE_MTE2, PIPE_V>(event);
+    PipeWait<PIPE_MTE2, PIPE_V>(event);
+    PipeNotify<PIPE_S, PIPE_V>(event);
+    PipeWait<PIPE_S, PIPE_V>(event);
+    {
+        LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
+        LocalTensor<bfloat16_t> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInBf16), common.tokenHiddenDim);
+        Cast(dst, src, RoundMode::CAST_NONE, common.tokenHiddenDim);
+    }
+
+    {
+        LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.dataResFp32Tensor),
+                               common.tokenHiddenDim);
+        LocalTensor<float> rhs(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
+        Add(dst, dst, rhs, common.tokenHiddenDim);
+    }
+
+    PipeNotify<PIPE_V, PIPE_MTE2>(event);
 }
 
 template <uint8_t CombineMode, typename TopkWeightsType, bool TopkWeightsPrefetch, uint32_t Gmm1TileM>
-__aicore__ inline void ProcessTokenUnpermuteBatch(
-    const TokenUnpermuteConfig& context, const MoeStageCommonConfig& common, const Params& params,
-    TokenUnpermuteScratch& scratch, const MegaMoeUnpermuteBufferConfig& bufferConfig,
-    const GlobalTensor<bfloat16_t>& expandedX, GlobalTensor<bfloat16_t>& output, int32_t jobOffset,
-    int32_t batchTokenOffset, int32_t batchTokenCount, TEventID outputBufferEvent)
+__aicore__ inline void ProcessTokenUnpermuteBatch(const TokenUnpermuteConfig& context,
+                                                  const MoeStageCommonConfig& common, const Params& params,
+                                                  TokenUnpermuteScratch& scratch,
+                                                  const MegaMoeUnpermuteBufferConfig& bufferConfig,
+                                                  __gm__ bfloat16_t* expandedX, __gm__ bfloat16_t* output,
+                                                  int32_t jobOffset, int32_t batchTokenOffset, int32_t batchTokenCount,
+                                                  TEventID outputBufferEvent)
 {
     if constexpr (!TopkWeightsPrefetch) {
         LoadTokenUnpermuteWeights<TopkWeightsType>(common, params, scratch, jobOffset, batchTokenOffset,
                                                    batchTokenCount);
     }
     for (int32_t bufferIdx = 0; bufferIdx < bufferConfig.inputBufferCount; ++bufferIdx) {
-        SetFlag<HardEvent::V_MTE2>(static_cast<TEventID>(bufferIdx));
+        PipeNotify<PIPE_V, PIPE_MTE2>(static_cast<TEventID>(bufferIdx));
     }
     for (int32_t localIdx = 0; localIdx < batchTokenCount; ++localIdx) {
         int32_t tokenIdx = jobOffset + batchTokenOffset + localIdx;
@@ -258,15 +294,21 @@ __aicore__ inline void ProcessTokenUnpermuteBatch(
             AccumulateSharedExpertForToken<Gmm1TileM>(common, params, scratch, tokenIdx, localIdx, sharedExpertIdx,
                                                       bufferConfig);
         }
-        WaitFlag<HardEvent::MTE3_V>(outputBufferEvent);
-        Cast(scratch.dataResTensor, scratch.dataResFp32Tensor, RoundMode::CAST_RINT, common.tokenHiddenDim);
-        SyncFuncStatic<HardEvent::V_MTE3, SYNC_EVENT_ID3>();
-        DataCopy(output[static_cast<uint64_t>(tokenIdx) * common.tokenHiddenDim], scratch.dataResTensor,
-                 common.tokenHiddenDim);
-        SetFlag<HardEvent::MTE3_V>(outputBufferEvent);
+        PipeWait<PIPE_MTE3, PIPE_V>(outputBufferEvent);
+        {
+            LocalTensor<bfloat16_t> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.dataResTensor),
+                                        common.tokenHiddenDim);
+            LocalTensor<float> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.dataResFp32Tensor),
+                                   common.tokenHiddenDim);
+            Cast(dst, src, RoundMode::CAST_RINT, common.tokenHiddenDim);
+        }
+        PipeFence<PIPE_V, PIPE_MTE3, SYNC_EVENT_ID3>();
+        CopyUbToGm((output + (static_cast<uint64_t>(tokenIdx) * common.tokenHiddenDim)), scratch.dataResTensor,
+                   (common.tokenHiddenDim) * sizeof(bfloat16_t));
+        PipeNotify<PIPE_MTE3, PIPE_V>(outputBufferEvent);
     }
     for (int32_t bufferIdx = 0; bufferIdx < bufferConfig.inputBufferCount; ++bufferIdx) {
-        WaitFlag<HardEvent::V_MTE2>(static_cast<TEventID>(bufferIdx));
+        PipeWait<PIPE_V, PIPE_MTE2>(static_cast<TEventID>(bufferIdx));
     }
 }
 
@@ -306,26 +348,21 @@ __aicore__ inline MegaMoeUnpermuteBufferConfig CreateTokenUnpermuteBuffers(const
     uint32_t dataResBufBytes = (bufferConfig.inputBufferCount + 1) * bf16SlotBytes;
     uint32_t dataResFp32BufBytes = (bufferConfig.inputBufferCount + 1) * fp32SlotBytes;
     uint32_t dataResAddr = 0U;
-    scratch.dataResTensor =
-        LocalTensor<bfloat16_t>(TPosition::VECCALC, dataResAddr, dataResBufBytes / sizeof(bfloat16_t));
+    scratch.dataResTensor = reinterpret_cast<__ubuf__ bfloat16_t*>(dataResAddr);
     uint32_t dataResFp32Addr = dataResAddr + dataResBufBytes;
-    scratch.dataResFp32Tensor =
-        LocalTensor<float>(TPosition::VECCALC, dataResFp32Addr, dataResFp32BufBytes / sizeof(float));
+    scratch.dataResFp32Tensor = reinterpret_cast<__ubuf__ float*>(dataResFp32Addr);
     uint32_t tempAddr = dataResFp32Addr + dataResFp32BufBytes;
 
-    scratch.topKWeightsTensor =
-        LocalTensor<float>(TPosition::VECCALC, tempAddr, bufferConfig.topKWeightsBufferBytes / sizeof(float));
+    scratch.topKWeightsTensor = reinterpret_cast<__ubuf__ float*>(tempAddr);
     tempAddr += bufferConfig.topKWeightsBufferBytes;
     if constexpr (Std::IsSame<TopkWeightsType, bfloat16_t>::value) {
-        scratch.topKWeightsBf16Tensor = LocalTensor<bfloat16_t>(
-            TPosition::VECCALC, tempAddr, bufferConfig.topKWeightsConversionBufferBytes / sizeof(bfloat16_t));
+        scratch.topKWeightsBf16Tensor = reinterpret_cast<__ubuf__ bfloat16_t*>(tempAddr);
         tempAddr += bufferConfig.topKWeightsConversionBufferBytes;
     }
     if constexpr (CombineQuantMode != COMBINE_NO_QUANT) {
-        scratch.bf16ScaleTensor =
-            LocalTensor<bfloat16_t>(TPosition::VECCALC, tempAddr, bf16ScaleBufAlign / sizeof(bfloat16_t));
+        scratch.bf16ScaleTensor = reinterpret_cast<__ubuf__ bfloat16_t*>(tempAddr);
         tempAddr += bf16ScaleBufAlign;
-        scratch.fp32ScaleTensor = LocalTensor<float>(TPosition::VECCALC, tempAddr, fp32ScaleBufAlign / sizeof(float));
+        scratch.fp32ScaleTensor = reinterpret_cast<__ubuf__ float*>(tempAddr);
     }
     return bufferConfig;
 }
@@ -336,6 +373,8 @@ __aicore__ inline void UnpermuteTokens(const TokenUnpermuteConfig& context, cons
                                        const Params& params, TokenUnpermuteScratch& scratch,
                                        const MegaMoeUnpermuteBufferConfig& bufferConfig)
 {
+    const auto& peermem = params.communication.layout;
+    const auto& commBuffer = params.communication.base;
     if constexpr (g_coreType == AIC) {
         return;
     }
@@ -345,13 +384,11 @@ __aicore__ inline void UnpermuteTokens(const TokenUnpermuteConfig& context, cons
     }
     int32_t jobLen = static_cast<int32_t>(tokenRange.count);
     int32_t jobOffset = static_cast<int32_t>(tokenRange.start);
-    GlobalTensor<bfloat16_t> expandedX;
-    expandedX.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(params.peermemInfo.combineSend.ptr));
-    GlobalTensor<bfloat16_t> output;
-    output.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(params.y2GmAddr));
+    __gm__ bfloat16_t* expandedX = peermem.combineSend.template get_ptr<bfloat16_t>(commBuffer);
+    __gm__ bfloat16_t* output = reinterpret_cast<__gm__ bfloat16_t*>(params.y2GmAddr);
 
     constexpr TEventID outputBufferEvent = EVENT_ID0;
-    SetFlag<HardEvent::MTE3_V>(outputBufferEvent);
+    PipeNotify<PIPE_MTE3, PIPE_V>(outputBufferEvent);
     for (int32_t batchTokenOffset = 0; batchTokenOffset < jobLen; batchTokenOffset += bufferConfig.tokensPerBatch) {
         int32_t batchTokenCount = batchTokenOffset + bufferConfig.tokensPerBatch > jobLen ? jobLen - batchTokenOffset :
                                                                                             bufferConfig.tokensPerBatch;
@@ -359,7 +396,7 @@ __aicore__ inline void UnpermuteTokens(const TokenUnpermuteConfig& context, cons
             context, common, params, scratch, bufferConfig, expandedX, output, jobOffset, batchTokenOffset,
             batchTokenCount, outputBufferEvent);
     }
-    WaitFlag<HardEvent::MTE3_V>(outputBufferEvent);
+    PipeWait<PIPE_MTE3, PIPE_V>(outputBufferEvent);
 }
 
 } // namespace MegaMoeImpl

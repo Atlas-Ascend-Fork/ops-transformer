@@ -104,6 +104,8 @@ __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::RunGmm1
     ExpertLoopState& state, GMMAddrInfo& gmmAddrInfo, uint32_t& startBlockIdx, uint32_t tokenStartIndexInExpert,
     uint32_t sliceTokenCount, uint32_t gmm1TilesPerMGroup, const BlockContext& pipeline)
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     uint32_t problemTileCount = GetMGroupCountForRows(sliceTokenCount, GMM1_TILE_M) * gmm1TilesPerMGroup;
     if (HandleWaveProblemWithoutWork(problemTileCount, gmmExecutionConfig_.blockJob, startBlockIdx)) {
         return;
@@ -111,7 +113,7 @@ __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::RunGmm1
     UpdateMoeExpertGmm1GlobalBuffer<
         typename MoeQuantConfig::QuantStorageType, MoeWeightType, typename MoeQuantConfig::ActivationQuantOutType,
         typename MoeQuantConfig::QuantScaleType, MoeQuantConfig::A_ELEMS_PER_BYTE, true, TopkWeightsPrefetch>(
-        gmmExecutionConfig_, syncWorkspaceLayout_, params_.workspaceInfo, moeWeightTensorListAddrs_, epilogueOp_,
+        gmmExecutionConfig_, syncWorkspaceLayout_, workspace, buffer, moeWeightTensorListAddrs_, epilogueOp_,
         gmmAddrInfo, state, commonConfig_.gmm1OutputDim / commonConfig_.activationOutputDivisor,
         tokenStartIndexInExpert, gmm1TilesPerMGroup);
     ProblemShape sliceProblemShape = state.problemShape;
@@ -127,6 +129,8 @@ __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::RunGmm1
 template <TemplateMegaMoeA8W4WaveTypeClass>
 __aicore__ inline ExpertTokenPosition MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::DispatchFirstWave()
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     ExpertTokenPosition dispatchPosition{};
     // 启动阶段：GMM1 开始消费输入前，由 AIV1 先 Dispatch 第一个完整 Wave。
     if constexpr (g_coreType == AIV) {
@@ -138,7 +142,7 @@ __aicore__ inline ExpertTokenPosition MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTyp
         uint32_t firstDispatchWaveMGroupCount = 0U;
         while (IsPositionWithinWave(plannedDispatchPosition, firstDispatchWaveMGroupCount)) {
             ExpertTokenRange nextDispatchRange = PlanNextExpertTokenRangeInWave<GMM1_TILE_M>(
-                params_.workspaceInfo.expertRecvTokenCountPtr, countWorkspace_, commonConfig_.moeExpertPerRank,
+                workspace.routing.recvCounts.get_ptr(buffer), countWorkspace_, commonConfig_.moeExpertPerRank,
                 mGroupsPerWave_, firstDispatchWaveMGroupCount, plannedDispatchPosition);
             plannedDispatchPosition = nextDispatchRange.end;
             firstDispatchRange.end = nextDispatchRange.end;
@@ -157,12 +161,14 @@ template <TemplateMegaMoeA8W4WaveTypeClass>
 __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::DispatchNextWaveExpertSlice(
     ExpertTokenPosition& dispatchPosition, uint32_t& nextDispatchWaveMGroupCount)
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     if constexpr (g_coreType == AIV) {
         if (GetSubBlockIdx() != 1U) {
             return;
         }
         ExpertTokenRange nextExpertDispatchRange = PlanNextExpertTokenRangeInWave<GMM1_TILE_M>(
-            params_.workspaceInfo.expertRecvTokenCountPtr, countWorkspace_, commonConfig_.moeExpertPerRank,
+            workspace.routing.recvCounts.get_ptr(buffer), countWorkspace_, commonConfig_.moeExpertPerRank,
             mGroupsPerWave_, nextDispatchWaveMGroupCount, dispatchPosition);
         // 规划完成后再判断是否得到有效专家 slice，调度函数本身不参与流程分支。
         if (nextExpertDispatchRange.end.globalTokenIndex > nextExpertDispatchRange.begin.globalTokenIndex) {
@@ -263,7 +269,7 @@ template <TemplateMegaMoeA8W4WaveTypeClass>
 __aicore__ inline void MegaMoeA8W4Wave<TemplateMegaMoeA8W4WaveTypeFunc>::SyncBeforeMoeExpertStages()
 {
     // 权重转换先由 MTE2 搬入权重，需等待前序搬出完成后再覆盖 UB。
-    SyncFuncStatic<HardEvent::MTE3_MTE2, SYNC_EVENT_ID3>();
+    PipeFence<PIPE_MTE3, PIPE_MTE2, SYNC_EVENT_ID3>();
 }
 
 /*

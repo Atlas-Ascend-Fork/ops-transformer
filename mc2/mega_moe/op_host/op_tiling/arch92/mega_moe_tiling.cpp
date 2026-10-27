@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "../../../op_kernel/arch92/common/mega_moe_workspace_arch92.h"
+#include "../../../op_kernel/arch35_92/common/mega_moe_gm_layout.h"
 #include "../arch35_92/mega_moe_tiling_check.h"
 #include "../arch35_92/mega_moe_tiling_print.h"
 
@@ -485,11 +485,13 @@ static ge::graphStatus CommitTilingResult(gert::TilingContext* context, const Me
 
     // 共享专家与路由专家使用相同且已校验的 H/hiddenDim 维度。
     OP_TILING_CHECK(CalcMegaMoeL1Layout(std::max(static_cast<uint64_t>(tilingData->compute.h),
-                                                 static_cast<uint64_t>(GetActivationOutputWidth(tilingData))),
+                                                 static_cast<uint64_t>(GetActivationOutputWidth(
+                                                     tilingData->compute.hiddenDim, tilingData->actMode))),
                                         l1Size, tilingData->a8w4L1Layout, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "calculate A8W4 L1 layout failed"), return ge::GRAPH_FAILED);
 
-    WorkspaceLayoutArch92 workspaceLayout(tilingData);
+    WorkspaceLayout workspaceLayout(tilingData->compute,
+                                    WorkspaceLayout::Arch92{tilingData->moeGmmMode, tilingData->sharedGmmMode});
     // Preserve Arch92's existing FP8-sized admission bound for packed FP4 records.
     auto capacityComm = tilingData->comm;
     capacityComm.elemsPerByte = 1U;

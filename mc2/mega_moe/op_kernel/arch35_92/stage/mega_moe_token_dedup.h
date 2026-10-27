@@ -20,7 +20,9 @@
 #ifndef MEGA_MOE_TOKEN_DEDUP_H
 #define MEGA_MOE_TOKEN_DEDUP_H
 
+#include "../common/mega_moe_sync.h"
 #include "../common/mega_moe_utils.h"
+#include "../common/mega_moe_copy.h"
 
 namespace MegaMoeImpl {
 
@@ -76,11 +78,11 @@ struct DedupPrepassWorker {
         static_cast<int32_t>(DEDUP_ROUTE_LOAD_UB_BYTES / 2U / sizeof(TopkIndexType));
     static constexpr uint32_t DESC_ASM_HALF_INT32 = DEDUP_DESC_ASM_UB_BYTES / 2U / sizeof(int32_t);
 
-    LocalTensor<TopkIndexType> routeLoadTensor; // route 槽装载区（两半双缓冲）
-    LocalTensor<int32_t> countTensor;           // 逐 token 打包状态字（DEDUP_PACK_INIT 语义）
-    LocalTensor<int32_t> memberTensor;          // 逐 token 成员三元组 (row, topkIndex, flagSlotOffset)
-    LocalTensor<int32_t> descAsmTensor;         // desc 拼装区（两半乒乓）
-    GlobalTensor<int32_t> rowDescGm;            // workspace rowDesc 表
+    __ubuf__ TopkIndexType* routeLoadTensor = nullptr; // route 槽装载区（两半双缓冲）
+    __ubuf__ int32_t* countTensor = nullptr;           // 逐 token 打包状态字（DEDUP_PACK_INIT 语义）
+    __ubuf__ int32_t* memberTensor = nullptr;          // 逐 token 成员三元组 (row, topkIndex, flagSlotOffset)
+    __ubuf__ int32_t* descAsmTensor = nullptr;         // desc 拼装区（两半乒乓）
+    __gm__ int32_t* rowDescGm = nullptr;               // workspace rowDesc 表
     uint32_t topK = 0;
     uint32_t strideInt32 = 0;
     uint32_t maxOutputSize = 0;
@@ -123,13 +125,15 @@ __aicore__ inline uint32_t CalcDedupPrepassChunkTokens(uint32_t numTokens, uint3
 
 __aicore__ inline DedupConfig CreateDedupConfig(const Params& params)
 {
+    const auto& workspace = params.workspace.layout;
+    const auto& buffer = params.workspace.base;
     DedupConfig config;
     config.dedupMode = params.tilingData->compute.dedupMode;
     if (config.dedupMode == 0) {
         return config;
     }
-    config.rowDescPtr = params.workspaceInfo.dedupRowDescPtr;
-    config.prepassReadyPtr = params.workspaceInfo.dedupPrepassReadyPtr;
+    config.rowDescPtr = workspace.mte.dedupRowDescriptors.get_ptr(buffer);
+    config.prepassReadyPtr = workspace.mte.sync.dedupReady.get_ptr(buffer);
     config.rowDescStrideInt32 =
         static_cast<uint32_t>(CalcDedupRowDescStrideInt32(static_cast<int64_t>(params.tilingData->compute.topK)));
     const uint32_t numTokens = static_cast<uint32_t>(params.tilingData->compute.numMaxTokensPerRank);
@@ -166,13 +170,11 @@ __aicore__ inline DedupPrepassWorker<TopkIndexType> CreateDedupPrepassWorker(con
     const uint32_t countAddr = routeLoadAddr + DEDUP_ROUTE_LOAD_UB_BYTES;
     const uint32_t descAsmAddr = countAddr + DEDUP_COUNT_UB_BYTES;
     const uint32_t memberAddr = descAsmAddr + DEDUP_DESC_ASM_UB_BYTES;
-    worker.routeLoadTensor = LocalTensor<TopkIndexType>(TPosition::VECCALC, routeLoadAddr,
-                                                        DEDUP_ROUTE_LOAD_UB_BYTES / sizeof(TopkIndexType));
-    worker.countTensor = LocalTensor<int32_t>(TPosition::VECCALC, countAddr, DEDUP_COUNT_UB_BYTES / sizeof(int32_t));
-    worker.descAsmTensor =
-        LocalTensor<int32_t>(TPosition::VECCALC, descAsmAddr, DEDUP_DESC_ASM_UB_BYTES / sizeof(int32_t));
-    worker.memberTensor = LocalTensor<int32_t>(TPosition::VECCALC, memberAddr, DEDUP_MEMBER_UB_BYTES / sizeof(int32_t));
-    worker.rowDescGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(dedup.rowDescPtr));
+    worker.routeLoadTensor = reinterpret_cast<__ubuf__ TopkIndexType*>(routeLoadAddr);
+    worker.countTensor = reinterpret_cast<__ubuf__ int32_t*>(countAddr);
+    worker.descAsmTensor = reinterpret_cast<__ubuf__ int32_t*>(descAsmAddr);
+    worker.memberTensor = reinterpret_cast<__ubuf__ int32_t*>(memberAddr);
+    worker.rowDescGm = reinterpret_cast<__gm__ int32_t*>(dedup.rowDescPtr);
     worker.topK = static_cast<uint32_t>(params.tilingData->compute.topK);
     worker.strideInt32 = dedup.rowDescStrideInt32;
     worker.maxOutputSize = static_cast<uint32_t>(params.tilingData->compute.maxOutputSize);
@@ -183,10 +185,9 @@ __aicore__ inline DedupPrepassWorker<TopkIndexType> CreateDedupPrepassWorker(con
 // 对已装载进 UB 半区的一个 route 槽段做判界扫描，更新 count/member 表。
 // 槽内按 topkIndex 升序，故低于窗口下界 continue、达到上界即 break。
 template <typename TopkIndexType>
-__aicore__ inline void DedupPrepassScanSlot(DedupPrepassWorker<TopkIndexType>& worker,
-                                            LocalTensor<TopkIndexType>& routeSeg, const DedupChunkWindow& window,
-                                            int32_t segCount, int32_t rowBase, int32_t segBase, uint32_t expertIdx,
-                                            int32_t expertRowBegin)
+__aicore__ inline void DedupPrepassScanSlot(DedupPrepassWorker<TopkIndexType>& worker, __ubuf__ TopkIndexType* routeSeg,
+                                            const DedupChunkWindow& window, int32_t segCount, int32_t rowBase,
+                                            int32_t segBase, uint32_t expertIdx, int32_t expertRowBegin)
 {
     /*
      * 槽内升序：二分首个 >= targetLo 的条目作扫描起点，窗口前的条目免逐条标量跳过
@@ -198,7 +199,7 @@ __aicore__ inline void DedupPrepassScanSlot(DedupPrepassWorker<TopkIndexType>& w
         int32_t hi = segCount;
         while (lo < hi) {
             const int32_t mid = (lo + hi) >> 1;
-            if (static_cast<int32_t>(routeSeg.GetValue(static_cast<uint32_t>(mid))) < window.targetLo) {
+            if (static_cast<int32_t>(routeSeg[static_cast<uint32_t>(mid)]) < window.targetLo) {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -207,7 +208,7 @@ __aicore__ inline void DedupPrepassScanSlot(DedupPrepassWorker<TopkIndexType>& w
         scanBegin = lo;
     }
     for (int32_t entryIdx = scanBegin; entryIdx < segCount; ++entryIdx) {
-        const int32_t topkIndex = static_cast<int32_t>(routeSeg.GetValue(entryIdx));
+        const int32_t topkIndex = static_cast<int32_t>(routeSeg[entryIdx]);
         if (topkIndex < window.targetLo) {
             continue;
         }
@@ -217,7 +218,7 @@ __aicore__ inline void DedupPrepassScanSlot(DedupPrepassWorker<TopkIndexType>& w
         const int32_t row = rowBase + segBase + entryIdx;
         const int32_t localToken = topkIndex / static_cast<int32_t>(worker.topK) - window.tokenLo;
         const int32_t k = topkIndex % static_cast<int32_t>(worker.topK);
-        int32_t packed = worker.countTensor.GetValue(localToken);
+        int32_t packed = worker.countTensor[localToken];
         int32_t survivorCount = packed & 0xFF;
         int32_t fullCount = (packed >> 8) & 0xFF;
         int32_t fullMinK = (packed >> 16) & 0xFF;
@@ -230,12 +231,12 @@ __aicore__ inline void DedupPrepassScanSlot(DedupPrepassWorker<TopkIndexType>& w
                 static_cast<int32_t>(expertIdx) * worker.dispatchFlagSlotCountPerExpert + tileIdx * INT_CACHELINE;
             const uint32_t memberBase =
                 static_cast<uint32_t>(localToken) * worker.topK * 3U + static_cast<uint32_t>(survivorCount) * 3U;
-            worker.memberTensor.SetValue(memberBase, row);
-            worker.memberTensor.SetValue(memberBase + 1U, topkIndex);
-            worker.memberTensor.SetValue(memberBase + 2U, flagSlotOffset);
+            worker.memberTensor[memberBase] = row;
+            worker.memberTensor[memberBase + 1U] = topkIndex;
+            worker.memberTensor[memberBase + 2U] = flagSlotOffset;
             ++survivorCount;
         }
-        worker.countTensor.SetValue(localToken, survivorCount | (fullCount << 8) | (fullMinK << 16));
+        worker.countTensor[localToken] = survivorCount | (fullCount << 8) | (fullMinK << 16);
     }
 }
 
@@ -248,12 +249,12 @@ __aicore__ inline void DedupFlushPendingSlot(DedupPrepassWorker<TopkIndexType>& 
         return;
     }
     const TEventID evt = DedupRouteHalfEvent(pending.half);
-    WaitFlag<AscendC::HardEvent::MTE2_S>(evt);
-    LocalTensor<TopkIndexType> seg =
-        worker.routeLoadTensor[pending.half * static_cast<uint32_t>(worker.ROUTE_HALF_ITEMS)];
+    PipeWait<PIPE_MTE2, PIPE_S>(evt);
+    __ubuf__ TopkIndexType* seg =
+        (worker.routeLoadTensor + (pending.half * static_cast<uint32_t>(worker.ROUTE_HALF_ITEMS)));
     DedupPrepassScanSlot(worker, seg, window, pending.slotCount, pending.rowBase, 0,
                          static_cast<uint32_t>(pending.expertIdx), pending.expertRowBegin);
-    SetFlag<AscendC::HardEvent::S_MTE2>(evt);
+    PipeNotify<PIPE_S, PIPE_MTE2>(evt);
     pending.expertIdx = -1;
 }
 
@@ -265,27 +266,26 @@ __aicore__ inline void DedupScanLargeSlot(DedupPrepassWorker<TopkIndexType>& wor
                                           int32_t rowBase, uint32_t expertIdx, int32_t expertRowBegin)
 {
     const TEventID evt = DedupRouteHalfEvent(loadHalf);
-    LocalTensor<TopkIndexType> seg = worker.routeLoadTensor[loadHalf * static_cast<uint32_t>(worker.ROUTE_HALF_ITEMS)];
+    __ubuf__ TopkIndexType* seg =
+        (worker.routeLoadTensor + (loadHalf * static_cast<uint32_t>(worker.ROUTE_HALF_ITEMS)));
     bool reachedEnd = false;
     for (int32_t segBase = 0; segBase < slotCount && !reachedEnd; segBase += worker.ROUTE_HALF_ITEMS) {
         const int32_t segCount =
             (slotCount - segBase) < worker.ROUTE_HALF_ITEMS ? (slotCount - segBase) : worker.ROUTE_HALF_ITEMS;
-        GlobalTensor<TopkIndexType> slotGm;
-        slotGm.SetGlobalBuffer(slotPtr + segBase);
-        WaitFlag<AscendC::HardEvent::S_MTE2>(evt); // 本半区上次扫描已完成，可复写
-        DataCopyExtParams segCopyParams{1U, static_cast<uint32_t>(segCount * sizeof(TopkIndexType)), 0U, 0U, 0U};
-        DataCopyPadExtParams<TopkIndexType> segCopyPad{false, 0U, 0U, 0U};
-        DataCopyPad(seg, slotGm, segCopyParams, segCopyPad);
-        SetFlag<AscendC::HardEvent::MTE2_S>(evt);
-        WaitFlag<AscendC::HardEvent::MTE2_S>(evt);
-        if (seg.GetValue(static_cast<uint32_t>(segCount - 1)) >= window.targetLo) {
-            const int32_t lastVal = seg.GetValue(static_cast<uint32_t>(segCount - 1));
+        __gm__ TopkIndexType* slotGm = slotPtr + segBase;
+        PipeWait<PIPE_S, PIPE_MTE2>(evt); // 本半区上次扫描已完成，可复写
+
+        CopyGmToUb(seg, slotGm, static_cast<uint32_t>(segCount * sizeof(TopkIndexType)));
+        PipeNotify<PIPE_MTE2, PIPE_S>(evt);
+        PipeWait<PIPE_MTE2, PIPE_S>(evt);
+        if (seg[static_cast<uint32_t>(segCount - 1)] >= window.targetLo) {
+            const int32_t lastVal = seg[static_cast<uint32_t>(segCount - 1)];
             DedupPrepassScanSlot(worker, seg, window, segCount, rowBase, segBase, expertIdx, expertRowBegin);
             if (lastVal >= window.targetHi) {
                 reachedEnd = true;
             }
         }
-        SetFlag<AscendC::HardEvent::S_MTE2>(evt);
+        PipeNotify<PIPE_S, PIPE_MTE2>(evt);
     }
 }
 
@@ -300,22 +300,25 @@ __aicore__ inline void DedupScanRouteSlots(DedupPrepassWorker<TopkIndexType>& wo
                                            const MoeStageCommonConfig& common, const Params& params,
                                            DispatchScratch& scratch, uint32_t srcRank, const DedupChunkWindow& window)
 {
-    const uint64_t routeIndexAlignSize = static_cast<uint64_t>(CalcDispatchRouteIndexAlignSize(params.tilingData));
-    SetFlag<AscendC::HardEvent::S_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID4));
-    SetFlag<AscendC::HardEvent::S_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID6));
+    const auto& peermem = params.communication.layout;
+    const auto& commBuffer = params.communication.base;
+    const uint64_t routeIndexAlignSize =
+        static_cast<uint64_t>(CalcDispatchRouteIndexAlignSize(params.tilingData->compute));
+    PipeNotify<PIPE_S, PIPE_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID4));
+    PipeNotify<PIPE_S, PIPE_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID6));
     uint32_t loadHalf = 0U;
     DedupPendingSlot pending;
     for (uint32_t expertIdx = 0U; expertIdx < common.moeExpertPerRank; ++expertIdx) {
         const uint32_t prefixIdx = expertIdx * common.worldSize + srcRank;
-        const int32_t rowBase = prefixIdx == 0U ? 0 : scratch.cumsumInfoTensor.GetValue(prefixIdx - 1U);
-        const int32_t slotCount = scratch.cumsumInfoTensor.GetValue(prefixIdx) - rowBase;
+        const int32_t rowBase = prefixIdx == 0U ? 0 : scratch.cumsumInfoTensor[prefixIdx - 1U];
+        const int32_t slotCount = scratch.cumsumInfoTensor[prefixIdx] - rowBase;
         if (slotCount <= 0) {
             continue;
         }
         const int32_t expertRowBegin =
-            expertIdx == 0U ? 0 : scratch.cumsumInfoTensor.GetValue(expertIdx * common.worldSize - 1U);
+            expertIdx == 0U ? 0 : scratch.cumsumInfoTensor[expertIdx * common.worldSize - 1U];
         __gm__ TopkIndexType* slotPtr = reinterpret_cast<__gm__ TopkIndexType*>(
-            params.peermemInfo.maskRecv.ptr + static_cast<uint64_t>(prefixIdx) * routeIndexAlignSize);
+            peermem.maskRecv.get_ptr(commBuffer) + static_cast<uint64_t>(prefixIdx) * routeIndexAlignSize);
         if (slotCount > worker.ROUTE_HALF_ITEMS) {
             DedupFlushPendingSlot(worker, pending, window); // 大槽独占半区前先清空在途
             DedupScanLargeSlot(worker, slotPtr, slotCount, loadHalf, window, rowBase, expertIdx, expertRowBegin);
@@ -323,15 +326,13 @@ __aicore__ inline void DedupScanRouteSlots(DedupPrepassWorker<TopkIndexType>& wo
         }
         // 先发起本槽装载，再扫描在途槽：装载的 MTE2 与扫描的标量操作重叠。
         const TEventID loadEvt = DedupRouteHalfEvent(loadHalf);
-        LocalTensor<TopkIndexType> loadSeg =
-            worker.routeLoadTensor[loadHalf * static_cast<uint32_t>(worker.ROUTE_HALF_ITEMS)];
-        GlobalTensor<TopkIndexType> slotGm;
-        slotGm.SetGlobalBuffer(slotPtr);
-        WaitFlag<AscendC::HardEvent::S_MTE2>(loadEvt);
-        DataCopyExtParams slotCopyParams{1U, static_cast<uint32_t>(slotCount * sizeof(TopkIndexType)), 0U, 0U, 0U};
-        DataCopyPadExtParams<TopkIndexType> slotCopyPad{false, 0U, 0U, 0U};
-        DataCopyPad(loadSeg, slotGm, slotCopyParams, slotCopyPad);
-        SetFlag<AscendC::HardEvent::MTE2_S>(loadEvt);
+        __ubuf__ TopkIndexType* loadSeg =
+            (worker.routeLoadTensor + (loadHalf * static_cast<uint32_t>(worker.ROUTE_HALF_ITEMS)));
+        __gm__ TopkIndexType* slotGm = slotPtr;
+        PipeWait<PIPE_S, PIPE_MTE2>(loadEvt);
+
+        CopyGmToUb(loadSeg, slotGm, static_cast<uint32_t>(slotCount * sizeof(TopkIndexType)));
+        PipeNotify<PIPE_MTE2, PIPE_S>(loadEvt);
         DedupFlushPendingSlot(worker, pending, window);
         pending.expertIdx = static_cast<int32_t>(expertIdx);
         pending.rowBase = rowBase;
@@ -341,23 +342,24 @@ __aicore__ inline void DedupScanRouteSlots(DedupPrepassWorker<TopkIndexType>& wo
         loadHalf ^= 1U;
     }
     DedupFlushPendingSlot(worker, pending, window);
-    WaitFlag<AscendC::HardEvent::S_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID4));
-    WaitFlag<AscendC::HardEvent::S_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID6));
+    PipeWait<PIPE_S, PIPE_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID4));
+    PipeWait<PIPE_S, PIPE_MTE2>(static_cast<TEventID>(SYNC_EVENT_ID6));
 }
 
 // 落一条 PLAIN 行 desc（该 token 全量只出现一次，dispatch/combine 走原路径）：word0 = 0。
 template <typename TopkIndexType>
 __aicore__ inline void DedupStorePlainRowDesc(DedupPrepassWorker<TopkIndexType>& worker, uint32_t memberBase)
 {
-    const int32_t row = worker.memberTensor.GetValue(memberBase);
+    const int32_t row = worker.memberTensor[memberBase];
     const TEventID evt = DedupDescHalfEvent(worker.descHalf);
-    LocalTensor<int32_t> asmHalf = worker.descAsmTensor[worker.descHalf * worker.DESC_ASM_HALF_INT32];
-    WaitFlag<AscendC::HardEvent::MTE3_S>(evt); // 该半区上次 GM 写已完成，可复写
-    asmHalf.SetValue(0U, 0);
-    SetFlag<AscendC::HardEvent::S_MTE3>(evt);
-    WaitFlag<AscendC::HardEvent::S_MTE3>(evt);
-    DataCopy(worker.rowDescGm[static_cast<uint64_t>(row) * worker.strideInt32], asmHalf, INT32_PER_256B);
-    SetFlag<AscendC::HardEvent::MTE3_S>(evt); // 写完武装，下次复用本半区时消费
+    __ubuf__ int32_t* asmHalf = (worker.descAsmTensor + (worker.descHalf * worker.DESC_ASM_HALF_INT32));
+    PipeWait<PIPE_MTE3, PIPE_S>(evt); // 该半区上次 GM 写已完成，可复写
+    asmHalf[0U] = 0;
+    PipeNotify<PIPE_S, PIPE_MTE3>(evt);
+    PipeWait<PIPE_S, PIPE_MTE3>(evt);
+    CopyUbToGm((worker.rowDescGm + (static_cast<uint64_t>(row) * worker.strideInt32)), asmHalf,
+               (INT32_PER_256B) * sizeof(int32_t));
+    PipeNotify<PIPE_MTE3, PIPE_S>(evt); // 写完武装，下次复用本半区时消费
     worker.descHalf ^= 1U;
 }
 
@@ -372,26 +374,27 @@ __aicore__ inline void DedupStoreGroupRowDesc(DedupPrepassWorker<TopkIndexType>&
         flags |= (m == 0 ? DEDUP_ROW_FLAG_FIRST : 0);
         flags |= (m == survivorCount - 1 ? DEDUP_ROW_FLAG_LAST : 0);
         const TEventID evt = DedupDescHalfEvent(worker.descHalf);
-        LocalTensor<int32_t> asmHalf = worker.descAsmTensor[worker.descHalf * worker.DESC_ASM_HALF_INT32];
-        WaitFlag<AscendC::HardEvent::MTE3_S>(evt); // 该半区上次 GM 写已完成，可复写
-        asmHalf.SetValue(0U, flags);
+        __ubuf__ int32_t* asmHalf = (worker.descAsmTensor + (worker.descHalf * worker.DESC_ASM_HALF_INT32));
+        PipeWait<PIPE_MTE3, PIPE_S>(evt); // 该半区上次 GM 写已完成，可复写
+        asmHalf[0U] = flags;
         // 两个半区严格交替，本 token 内每个半区只在首次使用（m<2）时拼整表，之后复用只改 word0，
         // 标量拼装从每 token s 次降到至多 2 次。不得取消该复用：desc 落盘曾是 prepass 的第一大头。
         if (m < 2) {
-            asmHalf.SetValue(1U, fullMinK);
+            asmHalf[1U] = fullMinK;
             for (int32_t survivorIdx = 0; survivorIdx < survivorCount; ++survivorIdx) {
                 const uint32_t srcBase = memberBase + static_cast<uint32_t>(survivorIdx) * 3U;
                 const uint32_t dstBase = DEDUP_ROW_DESC_HEADER_INT32 + static_cast<uint32_t>(survivorIdx) * 3U;
-                asmHalf.SetValue(dstBase, worker.memberTensor.GetValue(srcBase));
-                asmHalf.SetValue(dstBase + 1U, worker.memberTensor.GetValue(srcBase + 1U));
-                asmHalf.SetValue(dstBase + 2U, worker.memberTensor.GetValue(srcBase + 2U));
+                asmHalf[dstBase] = worker.memberTensor[srcBase];
+                asmHalf[dstBase + 1U] = worker.memberTensor[srcBase + 1U];
+                asmHalf[dstBase + 2U] = worker.memberTensor[srcBase + 2U];
             }
         }
-        const int32_t row = worker.memberTensor.GetValue(memberBase + static_cast<uint32_t>(m) * 3U);
-        SetFlag<AscendC::HardEvent::S_MTE3>(evt);
-        WaitFlag<AscendC::HardEvent::S_MTE3>(evt);
-        DataCopy(worker.rowDescGm[static_cast<uint64_t>(row) * worker.strideInt32], asmHalf, worker.strideInt32);
-        SetFlag<AscendC::HardEvent::MTE3_S>(evt);
+        const int32_t row = worker.memberTensor[memberBase + static_cast<uint32_t>(m) * 3U];
+        PipeNotify<PIPE_S, PIPE_MTE3>(evt);
+        PipeWait<PIPE_S, PIPE_MTE3>(evt);
+        CopyUbToGm((worker.rowDescGm + (static_cast<uint64_t>(row) * worker.strideInt32)), asmHalf,
+                   (worker.strideInt32) * sizeof(int32_t));
+        PipeNotify<PIPE_MTE3, PIPE_S>(evt);
         worker.descHalf ^= 1U;
     }
 }
@@ -402,7 +405,7 @@ template <typename TopkIndexType>
 __aicore__ inline void DedupStoreRowDescChunk(DedupPrepassWorker<TopkIndexType>& worker, int32_t chunkTokenCount)
 {
     for (int32_t localToken = 0; localToken < chunkTokenCount; ++localToken) {
-        const int32_t packed = worker.countTensor.GetValue(localToken);
+        const int32_t packed = worker.countTensor[localToken];
         const int32_t survivorCount = packed & 0xFF;
         const int32_t fullCount = (packed >> 8) & 0xFF;
         const int32_t fullMinK = (packed >> 16) & 0xFF;
@@ -474,19 +477,23 @@ __aicore__ inline void RunDedupPrepassWorkItem(DedupPrepassWorker<TopkIndexType>
         chunkIdx, dedup.prepassChunkTokens, static_cast<uint32_t>(params.tilingData->compute.numMaxTokensPerRank),
         worker.topK, tokenHi);
     // 上一工作项的标量 count 写先于本项向量清零（S→V），再保证清零结果对标量可见（V→S）。
-    SyncFuncStatic<AscendC::HardEvent::S_V, SYNC_EVENT_ID2>();
-    Duplicate<int32_t>(worker.countTensor, DEDUP_PACK_INIT, static_cast<int32_t>(dedup.prepassChunkTokens));
-    SyncFuncStatic<AscendC::HardEvent::V_S, SYNC_EVENT_ID2>();
+    PipeFence<PIPE_S, PIPE_V, SYNC_EVENT_ID2>();
+    {
+        LocalTensor<int32_t> values(TPosition::VECCALC, reinterpret_cast<uint64_t>(worker.countTensor),
+                                    static_cast<int32_t>(dedup.prepassChunkTokens));
+        Duplicate<int32_t>(values, DEDUP_PACK_INIT, static_cast<int32_t>(dedup.prepassChunkTokens));
+    }
+    PipeFence<PIPE_V, PIPE_S, SYNC_EVENT_ID2>();
     DedupScanRouteSlots(worker, common, params, scratch, srcRank, window);
     DedupStoreRowDescChunk(worker, tokenHi - window.tokenLo);
     // ready 置位前 drain desc 乒乓两半（末尾 1-2 行的 GM 写可能还在飞，而 ready 语义 = 本项
     // desc 全部落盘），随即重新武装供下一工作项。
-    WaitFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
-    WaitFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
-    SetFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
-    SetFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
+    PipeWait<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
+    PipeWait<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
+    PipeNotify<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
+    PipeNotify<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
     __gm__ int32_t* readyBase = reinterpret_cast<__gm__ int32_t*>(dedup.prepassReadyPtr);
-    AtomicAdd(readyBase + (1U + workItem) * INT_CACHELINE, static_cast<int32_t>(1));
+    atomicAdd(readyBase + (1U + workItem) * INT_CACHELINE, static_cast<int32_t>(1));
 }
 
 /*
@@ -522,15 +529,15 @@ __aicore__ inline void BuildDedupRowDescTable(const DedupConfig& dedup, const Mo
     DedupPrepassWorker<TopkIndexType> worker =
         CreateDedupPrepassWorker<TopkIndexType>(dedup, syncLayout, params, scratch);
     // 武装 desc 乒乓两半的 MTE3_S；每个工作项尾 drain 后重新武装，函数尾统一消费，零悬挂。
-    SetFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
-    SetFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
+    PipeNotify<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
+    PipeNotify<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
 
     for (uint32_t workItem = workerIndex; workItem < totalWorkItems; workItem += totalWorkers) {
         RunDedupPrepassWorkItem(worker, common, params, scratch, dedup, workItem);
     }
     // 消费掉最后一次武装，不留悬挂 flag 毒化后续同 id 同步。
-    WaitFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
-    WaitFlag<AscendC::HardEvent::MTE3_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
+    PipeWait<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID3));
+    PipeWait<PIPE_MTE3, PIPE_S>(static_cast<TEventID>(SYNC_EVENT_ID5));
 
     // 槽 0 = done 计数，AIV1 计低 16 位、AIV0 计高 16 位。dispatch 发布 gate 只等高位（全体 AIV0）：
     // 每个 AIV1 发布前自己必然已建完，AIV1 互等会打断 prepass 与 dispatch 的流水交叠（实测大形状

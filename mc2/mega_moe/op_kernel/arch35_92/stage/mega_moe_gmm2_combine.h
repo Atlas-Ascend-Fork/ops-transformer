@@ -11,6 +11,7 @@
 #ifndef MEGA_MOE_GMM2_COMBINE_H
 #define MEGA_MOE_GMM2_COMBINE_H
 
+#include "../common/mega_moe_sync.h"
 #include <type_traits>
 
 #if ASC_DEVKIT_MAJOR >= 9
@@ -26,6 +27,7 @@
 #include "../common/mega_moe_arch_policy.h"
 #include "../common/mega_moe_gmm_common.h"
 #include "../common/mega_moe_utils.h"
+#include "../common/mega_moe_copy.h"
 #include "../common/mega_moe_mxfp8_utils.h"
 #include "../../../../common/op_kernel/mc2_kernel_utils.h"
 #include "../../../../common/op_kernel/quantize_functions.h"
@@ -51,9 +53,9 @@ struct WaveCombineBufferConfig {
 };
 
 struct WaveCombineScratch {
-    LocalTensor<int32_t> metaInfoTensor;
-    LocalTensor<bfloat16_t> rowBufferTensor;
-    LocalTensor<float> quantTempTensor;
+    __ubuf__ int32_t* metaInfoTensor = nullptr;
+    __ubuf__ bfloat16_t* rowBufferTensor = nullptr;
+    __ubuf__ float* quantTempTensor = nullptr;
 };
 
 constexpr uint32_t WAVE_COMBINE_MIN_ROW_BUFFER_COUNT = 2U;
@@ -74,13 +76,12 @@ struct CombineTokenRoute {
     uint32_t topkIdx;
 };
 
-__aicore__ inline CombineTokenRoute LoadCombineTokenRoute(const LocalTensor<int32_t>& metaInfoTensor,
-                                                          uint32_t recordIdx)
+__aicore__ inline CombineTokenRoute LoadCombineTokenRoute(__ubuf__ int32_t* metaInfoTensor, uint32_t recordIdx)
 {
     uint32_t recordBase = recordIdx * META_INFO_SIZE;
-    return {static_cast<uint32_t>(metaInfoTensor.GetValue(recordBase + RANK_ID)),
-            static_cast<uint32_t>(metaInfoTensor.GetValue(recordBase + TOKEN_ID)),
-            static_cast<uint32_t>(metaInfoTensor.GetValue(recordBase + TOPK_INDEX))};
+    return {static_cast<uint32_t>(metaInfoTensor[recordBase + RANK_ID]),
+            static_cast<uint32_t>(metaInfoTensor[recordBase + TOKEN_ID]),
+            static_cast<uint32_t>(metaInfoTensor[recordBase + TOPK_INDEX])};
 }
 
 // 目标卡 combine 接收区按 (token, topk) 展开的紧凑行号。
@@ -91,60 +92,59 @@ __aicore__ inline uint64_t GetCombineDstRowIndex(const CombineTokenRoute& route,
 
 // 为 tile 内每个 token 行发送一段有效的 GMM2 tile 数据。
 template <typename ElementMMadOut2, typename BlockShape>
-__aicore__ inline void CombineTokens(uint32_t nLoc, uint32_t n, LocalTensor<int32_t>& metaInfoTensor,
-                                     LocalTensor<ElementMMadOut2>& l0cOutUbGMM2, BlockShape& actualBlockShape,
+__aicore__ inline void CombineTokens(uint32_t nLoc, uint32_t n, __ubuf__ int32_t* metaInfoTensor,
+                                     __ubuf__ ElementMMadOut2* l0cOutUbGMM2, BlockShape& actualBlockShape,
                                      uint32_t ubTileN, const Params& params)
 {
+    const auto& peermem = params.communication.layout;
     // 调用方在进入该数据操作前，保证批量加载的 metadata 对 Scalar 可见。
     int32_t lenTile = Get<M_VALUE>(actualBlockShape);
-    AscendC::GlobalTensor<ElementMMadOut2> gmRemoteD;
-    uint64_t gmRemoteBaseOffset = static_cast<uint64_t>(params.peermemInfo.combineSend.offset);
-    AscendC::DataCopyExtParams ub2GmParams{1, 0, 0, 0, 0};
-    ub2GmParams.blockCount = 1;
-    ub2GmParams.blockLen = Get<N_VALUE>(actualBlockShape) * sizeof(ElementMMadOut2);
+    __gm__ ElementMMadOut2* gmRemoteD = nullptr;
+    uint64_t gmRemoteBaseOffset = static_cast<uint64_t>(peermem.combineSend.offsetBytes);
+
     for (int32_t tileIdx = 0; tileIdx < lenTile; ++tileIdx) {
         CombineTokenRoute route = LoadCombineTokenRoute(metaInfoTensor, static_cast<uint32_t>(tileIdx));
-        gmRemoteD.SetGlobalBuffer(
-            reinterpret_cast<__gm__ ElementMMadOut2*>(GetRankWinAddrWithOffset(route.dstRankId, gmRemoteBaseOffset)));
+        gmRemoteD =
+            reinterpret_cast<__gm__ ElementMMadOut2*>(GetRankWinAddrWithOffset(route.dstRankId, gmRemoteBaseOffset));
         uint64_t gmDstOffset = GetCombineDstRowIndex(route, params) * n + nLoc;
-        AscendC::DataCopyPad(gmRemoteD[gmDstOffset], l0cOutUbGMM2[tileIdx * ubTileN], ub2GmParams);
+        CopyUbToGm(gmRemoteD + gmDstOffset, (l0cOutUbGMM2 + (tileIdx * ubTileN)),
+                   Get<N_VALUE>(actualBlockShape) * sizeof(ElementMMadOut2));
     }
 }
 
 // 发送一行完整的 Combine 数据，BF16 与 FP8 记录复用相同的定长搬运流程。
 template <typename Element>
 __aicore__ inline void SendCombineTokenRow(uint32_t rowElements, uint64_t gmRemoteBaseOffset,
-                                           LocalTensor<int32_t>& metaInfoTensor, LocalTensor<Element>& rowTensor,
+                                           __ubuf__ int32_t* metaInfoTensor, __ubuf__ Element* rowTensor,
                                            const Params& params)
 {
     CombineTokenRoute route = LoadCombineTokenRoute(metaInfoTensor, 0U);
 
-    GlobalTensor<Element> gmRemoteD;
-    gmRemoteD.SetGlobalBuffer(
-        reinterpret_cast<__gm__ Element*>(GetRankWinAddrWithOffset(route.dstRankId, gmRemoteBaseOffset)));
+    __gm__ Element* gmRemoteD =
+        reinterpret_cast<__gm__ Element*>(GetRankWinAddrWithOffset(route.dstRankId, gmRemoteBaseOffset));
     uint64_t gmDstRowOffset = GetCombineDstRowIndex(route, params) * rowElements;
 
-    DataCopyExtParams ub2GmParams{1U, static_cast<uint32_t>(rowElements * sizeof(Element)), 0U, 0U, 0U};
-    DataCopyPad(gmRemoteD[gmDstRowOffset], rowTensor, ub2GmParams);
+    CopyUbToGm(gmRemoteD + gmDstRowOffset, rowTensor, static_cast<uint32_t>(rowElements * sizeof(Element)));
 }
 
 // 将一条量化 token 记录发送到 metadata 指定的 rank 和目标行。
 template <typename QuantOutType>
 __aicore__ inline void CombineQuantizedTokens(uint32_t batchStart, uint32_t curRows, uint32_t n, uint32_t nScale,
-                                              uint32_t groupIdx, uint32_t rankId, LocalTensor<int32_t>& metaInfoTensor,
-                                              LocalTensor<QuantOutType>& ubQuant, const Params& params,
+                                              uint32_t groupIdx, uint32_t rankId, __ubuf__ int32_t* metaInfoTensor,
+                                              __ubuf__ QuantOutType* ubQuant, const Params& params,
                                               uint32_t quantTokenSizeBytes)
 {
+    const auto& peermem = params.communication.layout;
     CombineTokenRoute route = LoadCombineTokenRoute(metaInfoTensor, batchStart);
 
-    AscendC::GlobalTensor<QuantOutType> gmRemoteD;
-    uint64_t gmRemoteOffset = static_cast<uint64_t>(params.peermemInfo.combineSend.offset);
+    __gm__ QuantOutType* gmRemoteD = nullptr;
+    uint64_t gmRemoteOffset = static_cast<uint64_t>(peermem.combineSend.offsetBytes);
     __gm__ void* dstPeermemPtr = GetRankWinAddrWithOffset(route.dstRankId, gmRemoteOffset);
-    gmRemoteD.SetGlobalBuffer(reinterpret_cast<__gm__ QuantOutType*>(dstPeermemPtr));
+    gmRemoteD = reinterpret_cast<__gm__ QuantOutType*>(dstPeermemPtr);
 
     uint64_t dstBaseOffset = GetCombineDstRowIndex(route, params) * quantTokenSizeBytes;
-    AscendC::DataCopyExtParams singleCopyParams{1, quantTokenSizeBytes, 0, 0, 0};
-    AscendC::DataCopyPad(gmRemoteD[dstBaseOffset], ubQuant, singleCopyParams);
+
+    CopyUbToGm(gmRemoteD + dstBaseOffset, ubQuant, quantTokenSizeBytes);
 }
 
 } // namespace CombineImpl
@@ -193,13 +193,10 @@ __aicore__ inline WaveCombineBufferConfig InitWaveCombineBuffers(const MoeStageC
             bufferConfig.rowBufferCount > MaxRowBufferCount ? MaxRowBufferCount : bufferConfig.rowBufferCount;
     }
     uint32_t rowRingBytes = bufferConfig.rowBufferCount * bufferConfig.slotStrideBytes;
-    scratch.rowBufferTensor =
-        LocalTensor<bfloat16_t>(TPosition::VECIN, WAVE_COMBINE_UB_BASE, rowRingBytes / sizeof(bfloat16_t));
-    scratch.metaInfoTensor = LocalTensor<int32_t>(TPosition::VECCALC, META_INFO_TENSOR_ADDR,
-                                                  WAVE_COMBINE_META_INFO_TOKEN_CAPACITY * META_INFO_SIZE);
+    scratch.rowBufferTensor = reinterpret_cast<__ubuf__ bfloat16_t*>(WAVE_COMBINE_UB_BASE);
+    scratch.metaInfoTensor = reinterpret_cast<__ubuf__ int32_t*>(META_INFO_TENSOR_ADDR);
     if constexpr (CombineMode != COMBINE_NO_QUANT) {
-        scratch.quantTempTensor =
-            LocalTensor<float>(TPosition::VECIN, WAVE_COMBINE_UB_BASE + rowRingBytes, bufferConfig.quantTempElements);
+        scratch.quantTempTensor = reinterpret_cast<__ubuf__ float*>(WAVE_COMBINE_UB_BASE + rowRingBytes);
     }
     return bufferConfig;
 }
@@ -258,7 +255,7 @@ __aicore__ inline void DrainCombineRowBuffers(uint32_t& issuedRowCount, uint32_t
 {
     uint32_t activeSlotCount = issuedRowCount < rowBufferCount ? issuedRowCount : rowBufferCount;
     for (uint32_t slot = 0U; slot < activeSlotCount; ++slot) {
-        WaitFlag<HardEvent::MTE3_MTE2>(
+        PipeWait<PIPE_MTE3, PIPE_MTE2>(
             static_cast<TEventID>(static_cast<int32_t>(EVENT_ID0) + static_cast<int32_t>(slot)));
     }
     /*
@@ -273,53 +270,54 @@ __aicore__ inline void DrainCombineRowBuffers(uint32_t& issuedRowCount, uint32_t
 __aicore__ inline void PreloadWaveCombineMetaInfo(const Params& params, WaveCombineScratch& scratch,
                                                   uint64_t gmTokenOffset, uint32_t tokenCount, uint32_t ubTokenOffset)
 {
+    const auto& workspace = params.workspace.layout;
+    const auto& buffer = params.workspace.base;
     if (tokenCount == 0U) {
         return;
     }
-    LocalTensor<int32_t> metaInfoUb = scratch.metaInfoTensor[ubTokenOffset * META_INFO_SIZE];
-    GlobalTensor<int32_t> metaInfoGm;
-    metaInfoGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(params.workspaceInfo.metaInfoPtr));
-    DataCopy(metaInfoUb, metaInfoGm[gmTokenOffset * META_INFO_SIZE], tokenCount * META_INFO_SIZE);
-    SetFlag<HardEvent::MTE2_S>(EVENT_ID0);
-    WaitFlag<HardEvent::MTE2_S>(EVENT_ID0);
+    __ubuf__ int32_t* metaInfoUb = (scratch.metaInfoTensor + (ubTokenOffset * META_INFO_SIZE));
+    __gm__ int32_t* metaInfoGm = workspace.routing.receivedTokenMetadata.get_ptr<int32_t>(buffer);
+    CopyGmToUb(metaInfoUb, (metaInfoGm + (gmTokenOffset * META_INFO_SIZE)),
+               (tokenCount * META_INFO_SIZE) * sizeof(int32_t));
+    PipeNotify<PIPE_MTE2, PIPE_S>(EVENT_ID0);
+    PipeWait<PIPE_MTE2, PIPE_S>(EVENT_ID0);
 }
 
 // 搬运并按需量化一个 wave Combine token 后发送；函数内部不包含 GMM2-ready 依赖。
 template <uint8_t CombineMode, bool IsBufferReuse>
 __aicore__ inline void SendWaveCombineToken(const MoeStageCommonConfig& common,
                                             const WaveCombineBufferConfig& bufferConfig, WaveCombineScratch& scratch,
-                                            const Params& params, GlobalTensor<bfloat16_t>& gmm2OutGm,
+                                            const Params& params, __gm__ bfloat16_t* gmm2OutGm,
                                             uint64_t gmRemoteBaseOffset, uint32_t tokenLocal,
-                                            LocalTensor<int32_t>& tokenMetaInfo, uint32_t slot)
+                                            __ubuf__ int32_t* tokenMetaInfo, uint32_t slot)
 {
     TEventID eventId = static_cast<TEventID>(static_cast<int32_t>(EVENT_ID0) + static_cast<int32_t>(slot));
     if constexpr (IsBufferReuse) {
-        WaitFlag<HardEvent::MTE3_MTE2>(eventId);
+        PipeWait<PIPE_MTE3, PIPE_MTE2>(eventId);
     }
     uint32_t slotElementOffset = slot * bufferConfig.slotStrideBytes / sizeof(bfloat16_t);
-    LocalTensor<bfloat16_t> rowUb = scratch.rowBufferTensor[slotElementOffset];
-    DataCopyExtParams gm2UbParams{1U, bufferConfig.rowBytes, 0U, 0U, 0U};
-    DataCopyPadExtParams<bfloat16_t> gm2UbPad{false, 0U, 0U, 0U};
-    DataCopyPad(rowUb, gmm2OutGm[static_cast<uint64_t>(tokenLocal) * common.tokenHiddenDim], gm2UbParams, gm2UbPad);
+    __ubuf__ bfloat16_t* rowUb = (scratch.rowBufferTensor + (slotElementOffset));
+
+    CopyGmToUb(rowUb, (gmm2OutGm + (static_cast<uint64_t>(tokenLocal) * common.tokenHiddenDim)), bufferConfig.rowBytes);
     if constexpr (CombineMode == COMBINE_NO_QUANT) {
-        SetFlag<HardEvent::MTE2_MTE3>(eventId);
-        WaitFlag<HardEvent::MTE2_MTE3>(eventId);
+        PipeNotify<PIPE_MTE2, PIPE_MTE3>(eventId);
+        PipeWait<PIPE_MTE2, PIPE_MTE3>(eventId);
         CombineImpl::SendCombineTokenRow<bfloat16_t>(common.tokenHiddenDim, gmRemoteBaseOffset, tokenMetaInfo, rowUb,
                                                      params);
     } else {
-        LocalTensor<bfloat16_t> quantUb =
-            scratch.rowBufferTensor[slotElementOffset + bufferConfig.rowStrideBytes / sizeof(bfloat16_t)];
-        SetFlag<HardEvent::MTE2_V>(eventId);
-        WaitFlag<HardEvent::MTE2_V>(eventId);
+        __ubuf__ bfloat16_t* quantUb =
+            (scratch.rowBufferTensor + (slotElementOffset + bufferConfig.rowStrideBytes / sizeof(bfloat16_t)));
+        PipeNotify<PIPE_MTE2, PIPE_V>(eventId);
+        PipeWait<PIPE_MTE2, PIPE_V>(eventId);
         Mxfp8::QuantMxFp8<CombineMode, bfloat16_t>(quantUb, rowUb, scratch.quantTempTensor, common.tokenHiddenDim);
-        SetFlag<HardEvent::V_MTE3>(eventId);
-        WaitFlag<HardEvent::V_MTE3>(eventId);
+        PipeNotify<PIPE_V, PIPE_MTE3>(eventId);
+        PipeWait<PIPE_V, PIPE_MTE3>(eventId);
         using Fp8Type = typename std::conditional<CombineMode == MXFP8_E4M3_COMM_QUANT, fp8_e4m3fn_t, fp8_e5m2_t>::type;
-        LocalTensor<Fp8Type> quantSendUb = quantUb.template ReinterpretCast<Fp8Type>();
+        __ubuf__ Fp8Type* quantSendUb = reinterpret_cast<__ubuf__ Fp8Type*>(quantUb);
         CombineImpl::SendCombineTokenRow<Fp8Type>(bufferConfig.quantRowElements, gmRemoteBaseOffset, tokenMetaInfo,
                                                   quantSendUb, params);
     }
-    SetFlag<HardEvent::MTE3_MTE2>(eventId);
+    PipeNotify<PIPE_MTE3, PIPE_MTE2>(eventId);
 }
 
 // 使用行级流水发送当前逻辑 AIV 任务负责的已就绪 token 区间。
@@ -329,30 +327,30 @@ __aicore__ inline void CombineWaveTokenRange(const MoeStageCommonConfig& common,
                                              const Params& params, GM_ADDR gmm2OutGlobal, uint32_t tokenStart,
                                              uint32_t tokenCount, uint32_t metaInfoUbTokenOffset, uint32_t& rowSequence)
 {
+    const auto& peermem = params.communication.layout;
     if constexpr (g_coreType == AIC) {
         return;
     }
     if (tokenCount == 0U) {
         return;
     }
-    GlobalTensor<bfloat16_t> gmm2OutGm;
-    gmm2OutGm.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(gmm2OutGlobal));
-    uint64_t gmRemoteBaseOffset = static_cast<uint64_t>(params.peermemInfo.combineSend.offset);
+    __gm__ bfloat16_t* gmm2OutGm = reinterpret_cast<__gm__ bfloat16_t*>(gmm2OutGlobal);
+    uint64_t gmRemoteBaseOffset = static_cast<uint64_t>(peermem.combineSend.offsetBytes);
     uint32_t rowBufferCount = bufferConfig.rowBufferCount;
     uint32_t tokenIdxInSlice = 0U;
     uint32_t firstUseCount = rowSequence < rowBufferCount ? rowBufferCount - rowSequence : 0U;
     firstUseCount = firstUseCount < tokenCount ? firstUseCount : tokenCount;
     for (; tokenIdxInSlice < firstUseCount; ++tokenIdxInSlice, ++rowSequence) {
         uint32_t slot = rowSequence % rowBufferCount;
-        LocalTensor<int32_t> tokenMetaInfo =
-            scratch.metaInfoTensor[(metaInfoUbTokenOffset + tokenIdxInSlice) * META_INFO_SIZE];
+        __ubuf__ int32_t* tokenMetaInfo =
+            (scratch.metaInfoTensor + ((metaInfoUbTokenOffset + tokenIdxInSlice) * META_INFO_SIZE));
         SendWaveCombineToken<CombineMode, false>(common, bufferConfig, scratch, params, gmm2OutGm, gmRemoteBaseOffset,
                                                  tokenStart + tokenIdxInSlice, tokenMetaInfo, slot);
     }
     for (; tokenIdxInSlice < tokenCount; ++tokenIdxInSlice, ++rowSequence) {
         uint32_t slot = rowSequence % rowBufferCount;
-        LocalTensor<int32_t> tokenMetaInfo =
-            scratch.metaInfoTensor[(metaInfoUbTokenOffset + tokenIdxInSlice) * META_INFO_SIZE];
+        __ubuf__ int32_t* tokenMetaInfo =
+            (scratch.metaInfoTensor + ((metaInfoUbTokenOffset + tokenIdxInSlice) * META_INFO_SIZE));
         SendWaveCombineToken<CombineMode, true>(common, bufferConfig, scratch, params, gmm2OutGm, gmRemoteBaseOffset,
                                                 tokenStart + tokenIdxInSlice, tokenMetaInfo, slot);
     }
@@ -390,26 +388,26 @@ __aicore__ inline void NotifyCombineConsumersOfTileCompletion(uint32_t rowTileOf
                                                               const GroupSyncSlotLayout& slotLayout,
                                                               __gm__ int32_t* expertCounterBase)
 {
-    AscendC::SetFlag<AscendC::HardEvent::FIX_S>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::FIX_S>(0);
+    PipeNotify<PIPE_FIX, PIPE_S>(0);
+    PipeWait<PIPE_FIX, PIPE_S>(0);
 
     uint32_t tokenGroupIndex = rowTileOffset / COMBINE_TOKEN_GROUP_SIZE;
     uint32_t firstSyncSlot = 0;
     uint32_t syncSlotCount = 0;
     GetGroupSyncSlotRange(tokenGroupIndex, slotLayout, firstSyncSlot, syncSlotCount);
     for (uint32_t syncSlot = firstSyncSlot; syncSlot < firstSyncSlot + syncSlotCount; ++syncSlot) {
-        AscendC::AtomicAdd(GetCombineSyncCounterAddress(expertCounterBase, syncSlot), int32_t(1));
+        atomicAdd(GetCombineSyncCounterAddress(expertCounterBase, syncSlot), int32_t(1));
     }
 }
 
 // Notifies the AIV consumer assigned to the completed shared-expert token group.
 __aicore__ inline void NotifySharedExpertTileCompletion(uint32_t rowTileOffset, __gm__ int32_t* sharedExpertCounterBase)
 {
-    AscendC::SetFlag<AscendC::HardEvent::FIX_S>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::FIX_S>(0);
+    PipeNotify<PIPE_FIX, PIPE_S>(0);
+    PipeWait<PIPE_FIX, PIPE_S>(0);
 
     uint32_t tokenGroupIndex = rowTileOffset / COMBINE_TOKEN_GROUP_SIZE;
-    AscendC::AtomicAdd(GetCombineSyncCounterAddress(sharedExpertCounterBase, tokenGroupIndex), int32_t(1));
+    atomicAdd(GetCombineSyncCounterAddress(sharedExpertCounterBase, tokenGroupIndex), int32_t(1));
 }
 
 namespace GmmKernel {
@@ -508,23 +506,22 @@ __aicore__ inline void CombineTokenRange(Scheduler& scheduler, TensorC& l0cOutGm
         auto layoutTileUb = MakeLayoutC{}(config.tileM, L1_TILE_N);
         auto tensorBlockUb =
             asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, ElementC>(tileUbBase), layoutTileUb);
-        LocalTensor<ElementC> tileUb = LocalTensor<ElementC>(TPosition::VECIN, tileUbBase, config.tileM * L1_TILE_N);
+        __ubuf__ ElementC* tileUb = reinterpret_cast<__ubuf__ ElementC*>(tileUbBase);
         auto copyGM2UB = asc::te::make_copy(asc::te::copy_gm_to_ub{});
         asc::te::copy(copyGM2UB, tensorBlockUb, tensorBlockGm);
 
         int32_t lenTile = Get<M_VALUE>(actualShape);
-        GlobalTensor<int32_t> metaInfoGm;
-        LocalTensor<int32_t> metaInfoTensor =
-            LocalTensor<int32_t>(TPosition::VECCALC, META_INFO_TENSOR_ADDR, lenTile * META_INFO_SIZE);
-        metaInfoGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(
-            gmmAddrInfo.metaInfoGlobal + static_cast<uint64_t>(mLoc) * META_INFO_SIZE * sizeof(int32_t)));
-        AscendC::DataCopy(metaInfoTensor, metaInfoGm, lenTile * META_INFO_SIZE);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(0);
+        __gm__ int32_t* metaInfoGm = nullptr;
+        __ubuf__ int32_t* metaInfoTensor = reinterpret_cast<__ubuf__ int32_t*>(META_INFO_TENSOR_ADDR);
+        metaInfoGm = reinterpret_cast<__gm__ int32_t*>(gmmAddrInfo.metaInfoGlobal +
+                                                       static_cast<uint64_t>(mLoc) * META_INFO_SIZE * sizeof(int32_t));
+        CopyGmToUb(metaInfoTensor, metaInfoGm, (lenTile * META_INFO_SIZE) * sizeof(int32_t));
+        PipeNotify<PIPE_MTE2, PIPE_S>(0);
+        PipeWait<PIPE_MTE2, PIPE_S>(0);
         CombineImpl::CombineTokens<ElementC, decltype(actualShape)>(nLoc, config.n, metaInfoTensor, tileUb, actualShape,
                                                                     L1_TILE_N, params);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(0);
+        PipeNotify<PIPE_MTE3, PIPE_MTE2>(0);
+        PipeWait<PIPE_MTE3, PIPE_MTE2>(0);
         gmmAddrInfo.gmm2CombineSync->NotifyGmm2();
     }
 }
@@ -865,7 +862,7 @@ __aicore__ inline void RunGmm2A8W4(const BlockContext& pipeline,
 template <typename WeightType, typename ActivationOutType, typename QuantScaleType>
 __aicore__ inline void UpdateMoeExpertGmm2GlobalBuffer(const GmmExecutionConfig& gmmConfig,
                                                        const MoeSyncWorkspaceLayout& syncLayout,
-                                                       const WorkspaceInfo& workspace,
+                                                       const WorkspaceLayout& workspace, GM_ADDR workspaceBase,
                                                        const ExpertWeightTensorListAddrs& weights,
                                                        GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state,
                                                        uint32_t activationOutputWidth, uint32_t rowOffsetInExpert = 0U)
@@ -885,13 +882,15 @@ __aicore__ inline void UpdateMoeExpertGmm2GlobalBuffer(const GmmExecutionConfig&
 
     // 激活输入按自身循环容量读取；Combine 去重时结果按紧凑逻辑行全量保存。
     const uint64_t outputTokenStartIndex = gmmConfig.ring.gmm2 ? physicalTokenStartIndex : globalTokenStartIndex;
-    gmmAddrInfo.gmm2OutGlobal = workspace.gmm2MmadResPtr + outputTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
-    gmmAddrInfo.metaInfoGlobal = workspace.metaInfoPtr + globalTokenStartIndex * META_INFO_SIZE * sizeof(int32_t);
-    gmmAddrInfo.aGlobal = workspace.activationQuantDataPtr + physicalTokenStartIndex * activationOutputWidth /
-                                                                 activationOutputElementsPerByte *
-                                                                 sizeof(ActivationOutType);
-    gmmAddrInfo.aScaleGlobal =
-        workspace.activationQuantScalePtr + physicalTokenStartIndex * activationScaleWidth * sizeof(QuantScaleType);
+    gmmAddrInfo.gmm2OutGlobal = workspace.routed.gmm2Output.get_ptr(workspaceBase) +
+                                outputTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
+    gmmAddrInfo.metaInfoGlobal = workspace.routing.receivedTokenMetadata.get_ptr(workspaceBase) +
+                                 globalTokenStartIndex * META_INFO_SIZE * sizeof(int32_t);
+    gmmAddrInfo.aGlobal =
+        workspace.routed.gmm2Input.data.get_ptr(workspaceBase) +
+        physicalTokenStartIndex * activationOutputWidth / activationOutputElementsPerByte * sizeof(ActivationOutType);
+    gmmAddrInfo.aScaleGlobal = workspace.routed.gmm2Input.scale.get_ptr(workspaceBase) +
+                               physicalTokenStartIndex * activationScaleWidth * sizeof(QuantScaleType);
     gmmAddrInfo.bGlobal = GetExpertWeightAddr<WeightType>(
         weights.weight2, gmmConfig.isPerExpertWeightTensor, state.expertIdx,
         static_cast<uint64_t>(state.expertIdx) * tokenHiddenDim * activationOutputWidth / weightElementsPerByte);
@@ -899,28 +898,29 @@ __aicore__ inline void UpdateMoeExpertGmm2GlobalBuffer(const GmmExecutionConfig&
         weights.weightScales2, gmmConfig.isPerExpertWeightTensor, state.expertIdx,
         static_cast<uint64_t>(state.expertIdx) * tokenHiddenDim * activationScaleWidth);
     gmmAddrInfo.activationToGmm2Flag =
-        reinterpret_cast<__gm__ int32_t*>(workspace.flagActivationToGmm2Ptr) +
+        reinterpret_cast<__gm__ int32_t*>(workspace.sync.activationReady.get_ptr(workspaceBase)) +
         static_cast<uint64_t>(state.expertIdx) * syncLayout.activationFlagSlotCountPerExpert +
         static_cast<uint64_t>(expertMGroupOffset) * INT_CACHELINE;
     gmmAddrInfo.dispatchToGmm1Flag =
-        reinterpret_cast<__gm__ int32_t*>(workspace.flagDispatchToGmm1Ptr) +
+        reinterpret_cast<__gm__ int32_t*>(workspace.sync.dispatchReady.get_ptr(workspaceBase)) +
         static_cast<uint64_t>(state.expertIdx) * syncLayout.dispatchFlagSlotCountPerExpert +
         static_cast<uint64_t>(expertMGroupOffset) * INT_CACHELINE;
 }
 
 // Combine 只消费当前专家的 GMM2 输出；避免复用完整 GMM2 绑定接口时计算无关的输入、权重和 flag 地址。
-__aicore__ inline void UpdateMoeExpertCombineGlobalBuffer(const WorkspaceInfo& workspace, GMMAddrInfo& gmmAddrInfo,
-                                                          const ExpertLoopState& state)
+__aicore__ inline void UpdateMoeExpertCombineGlobalBuffer(const WorkspaceLayout& workspace, GM_ADDR workspaceBase,
+                                                          GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state)
 {
     uint64_t tokenHiddenDim = static_cast<uint64_t>(Get<K_VALUE>(state.problemShape));
     uint64_t globalTokenStartIndex = static_cast<uint64_t>(state.globalTokenStartIndex);
-    gmmAddrInfo.gmm2OutGlobal = workspace.gmm2MmadResPtr + globalTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
+    gmmAddrInfo.gmm2OutGlobal = workspace.routed.gmm2Output.get_ptr(workspaceBase) +
+                                globalTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
 }
 
 template <typename ActivationType, typename WeightType, typename QuantScaleType, uint32_t Gmm1TileM>
 __aicore__ inline void UpdateSharedExpertGmm2GlobalBuffer(const MoeStageCommonConfig& commonConfig,
                                                           const GmmExecutionConfig& gmmConfig,
-                                                          const WorkspaceInfo& workspace,
+                                                          const WorkspaceLayout& workspace, GM_ADDR workspaceBase,
                                                           const ExpertWeightTensorListAddrs& weights,
                                                           GMMAddrInfo& gmmAddrInfo, uint32_t sharedExpertIdx)
 {
@@ -933,12 +933,12 @@ __aicore__ inline void UpdateSharedExpertGmm2GlobalBuffer(const MoeStageCommonCo
         Ops::Base::CeilDiv(activationOutputWidth, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
     uint64_t sharedExpertTokenStartIndex = static_cast<uint64_t>(sharedExpertIdx) * tokenNum;
 
-    gmmAddrInfo.gmm2OutGlobal =
-        workspace.sharedExpertResultPtr + sharedExpertTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
+    gmmAddrInfo.gmm2OutGlobal = workspace.shared.gmm2Output.get_ptr(workspaceBase) +
+                                sharedExpertTokenStartIndex * tokenHiddenDim * sizeof(bfloat16_t);
     gmmAddrInfo.aGlobal =
-        workspace.sharedExpertActivationDataPtr +
+        workspace.shared.gmm2Input.data.get_ptr(workspaceBase) +
         sharedExpertTokenStartIndex * activationOutputWidth / activationElementsPerByte * sizeof(ActivationType);
-    gmmAddrInfo.aScaleGlobal = workspace.sharedExpertActivationScalePtr +
+    gmmAddrInfo.aScaleGlobal = workspace.shared.gmm2Input.scale.get_ptr(workspaceBase) +
                                sharedExpertTokenStartIndex * activationScaleWidth * sizeof(QuantScaleType);
     gmmAddrInfo.bGlobal = GetExpertWeightAddr<WeightType>(
         weights.weight2, gmmConfig.isPerExpertWeightTensor, sharedExpertIdx,
@@ -947,17 +947,18 @@ __aicore__ inline void UpdateSharedExpertGmm2GlobalBuffer(const MoeStageCommonCo
         weights.weightScales2, gmmConfig.isPerExpertWeightTensor, sharedExpertIdx,
         static_cast<uint64_t>(sharedExpertIdx) * tokenHiddenDim * activationScaleWidth);
     gmmAddrInfo.activationToGmm2Flag = nullptr;
-    if (workspace.sharedActivationToGmm2Ptr != nullptr) {
+    if (workspace.mte.sync.sharedActivationReady.get_ptr(workspaceBase) != nullptr) {
         uint64_t sharedActivationFlagElementCount =
             static_cast<uint64_t>(CalcSharedActivationFlagElementsPerExpert(static_cast<int64_t>(tokenNum)));
-        gmmAddrInfo.activationToGmm2Flag = reinterpret_cast<__gm__ int32_t*>(workspace.sharedActivationToGmm2Ptr) +
-                                           static_cast<uint64_t>(sharedExpertIdx) * sharedActivationFlagElementCount;
+        gmmAddrInfo.activationToGmm2Flag =
+            reinterpret_cast<__gm__ int32_t*>(workspace.mte.sync.sharedActivationReady.get_ptr(workspaceBase)) +
+            static_cast<uint64_t>(sharedExpertIdx) * sharedActivationFlagElementCount;
     }
     gmmAddrInfo.sharedExpertGmm2TileCounter = nullptr;
-    if (workspace.sharedExpertGmm2TileCounterPtr != nullptr) {
+    if (workspace.mte.sync.sharedGmm2Tiles.get_ptr(workspaceBase) != nullptr) {
         uint32_t tokenGroupCount = Ops::Base::CeilDiv(commonConfig.tokenNum, Gmm1TileM);
         gmmAddrInfo.sharedExpertGmm2TileCounter =
-            reinterpret_cast<__gm__ int32_t*>(workspace.sharedExpertGmm2TileCounterPtr) +
+            reinterpret_cast<__gm__ int32_t*>(workspace.mte.sync.sharedGmm2Tiles.get_ptr(workspaceBase)) +
             static_cast<uint64_t>(sharedExpertIdx) * tokenGroupCount * INT_CACHELINE;
     }
 }
@@ -978,19 +979,22 @@ __aicore__ inline uint64_t GetWaveGmm2ReadySlotStride(const AivJobContext& job)
 // AIC 等待 Fixpipe 写完专家结果后发布，专家粒度 Combine 按原协议消费。
 __aicore__ inline void NotifyWaveGmm2Ready(const AivJobContext& job, const Params& params, uint32_t slotIdx)
 {
+    const auto& workspace = params.workspace.layout;
+    const auto& buffer = params.workspace.base;
     if constexpr (g_coreType == AIC) {
-        AscendC::SetFlag<AscendC::HardEvent::FIX_S>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::FIX_S>(0);
-        __gm__ int32_t* readyBase = reinterpret_cast<__gm__ int32_t*>(params.workspaceInfo.gmm2ReadyPtr);
+        PipeNotify<PIPE_FIX, PIPE_S>(0);
+        PipeWait<PIPE_FIX, PIPE_S>(0);
+        __gm__ int32_t* readyBase = workspace.mte.sync.gmm2Ready.get_ptr<int32_t>(buffer);
         uint64_t slotOffset = static_cast<uint64_t>(slotIdx) * GetWaveGmm2ReadySlotStride(job);
-        AscendC::WriteGmByPassDCache(readyBase + slotOffset + static_cast<uint64_t>(job.jobIndex) * INT_CACHELINE,
-                                     int32_t(1));
+        GmWrite(readyBase + slotOffset + static_cast<uint64_t>(job.jobIndex) * INT_CACHELINE, int32_t(1));
     }
 }
 
 // 一个 AIV Combine 任务等待指定专家的全部 GMM2 结果落地。
 __aicore__ inline void WaitWaveGmm2Ready(const AivJobContext& job, const Params& params, uint32_t slotIdx)
 {
+    const auto& workspace = params.workspace.layout;
+    const auto& buffer = params.workspace.base;
     if constexpr (g_coreType == AIC) {
         return;
     }
@@ -998,26 +1002,27 @@ __aicore__ inline void WaitWaveGmm2Ready(const AivJobContext& job, const Params&
         return;
     }
     uint32_t readyElements = job.totalJobs * static_cast<uint32_t>(INT_CACHELINE);
-    __gm__ int32_t* readyBase = reinterpret_cast<__gm__ int32_t*>(params.workspaceInfo.gmm2ReadyPtr);
+    __gm__ int32_t* readyBase = workspace.mte.sync.gmm2Ready.get_ptr<int32_t>(buffer);
     uint64_t readySlotOffset = static_cast<uint64_t>(slotIdx) * GetWaveGmm2ReadySlotStride(job);
-    GlobalTensor<int32_t> readyGm;
-    readyGm.SetGlobalBuffer(readyBase);
-    LocalTensor<int32_t> scanUb(TPosition::VECCALC, WAVE_GMM2_READY_SCAN_UB_ADDR, readyElements);
-    LocalTensor<uint8_t> reduceTmpUb(TPosition::VECCALC, WAVE_GMM2_READY_REDUCE_TMP_UB_ADDR, ALIGN_512);
-    LocalTensor<int32_t> sumUb(TPosition::VECCALC, WAVE_GMM2_READY_SUM_UB_ADDR, INT_CACHELINE);
+    __gm__ int32_t* readyGm = readyBase;
+    __ubuf__ int32_t* scanUb = reinterpret_cast<__ubuf__ int32_t*>(WAVE_GMM2_READY_SCAN_UB_ADDR);
+    __ubuf__ int32_t* sumUb = reinterpret_cast<__ubuf__ int32_t*>(WAVE_GMM2_READY_SUM_UB_ADDR);
+    LocalTensor<int32_t> scan(TPosition::VECCALC, WAVE_GMM2_READY_SCAN_UB_ADDR, readyElements);
+    LocalTensor<uint8_t> reduceTmp(TPosition::VECCALC, WAVE_GMM2_READY_REDUCE_TMP_UB_ADDR, ALIGN_512);
+    LocalTensor<int32_t> sum(TPosition::VECCALC, WAVE_GMM2_READY_SUM_UB_ADDR, INT_CACHELINE);
     const uint32_t readyShape[] = {1U, readyElements};
     while (true) {
-        DataCopy(scanUb, readyGm[readySlotOffset], readyElements);
-        SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
-        ReduceSum<int32_t, AscendC::Pattern::Reduce::AR, true>(sumUb, scanUb, reduceTmpUb, readyShape, true);
-        SetFlag<HardEvent::V_S>(EVENT_ID0);
-        WaitFlag<HardEvent::V_S>(EVENT_ID0);
-        if (sumUb.GetValue(0) >= static_cast<int32_t>(job.totalJobs)) {
+        CopyGmToUb(scanUb, readyGm + readySlotOffset, (readyElements) * sizeof(int32_t));
+        PipeNotify<PIPE_MTE2, PIPE_V>(EVENT_ID0);
+        PipeWait<PIPE_MTE2, PIPE_V>(EVENT_ID0);
+        ReduceSum<int32_t, AscendC::Pattern::Reduce::AR, true>(sum, scan, reduceTmp, readyShape, true);
+        PipeNotify<PIPE_V, PIPE_S>(EVENT_ID0);
+        PipeWait<PIPE_V, PIPE_S>(EVENT_ID0);
+        if (sumUb[0] >= static_cast<int32_t>(job.totalJobs)) {
             return;
         }
-        int64_t waitStart = AscendC::GetSystemCycle();
-        while (AscendC::GetSystemCycle() - waitStart < GM_FLAG_POLL_BACKOFF_CYCLES) {
+        int64_t waitStart = GetDeviceCycle();
+        while (GetDeviceCycle() - waitStart < GM_FLAG_POLL_BACKOFF_CYCLES) {
         }
     }
 }

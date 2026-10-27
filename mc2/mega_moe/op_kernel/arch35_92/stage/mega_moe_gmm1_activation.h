@@ -11,6 +11,7 @@
 #ifndef MEGA_MOE_GMM1_ACTIVATION_H
 #define MEGA_MOE_GMM1_ACTIVATION_H
 
+#include "../common/mega_moe_sync.h"
 #include <type_traits>
 
 #include "kernel_operator.h"
@@ -66,7 +67,7 @@ __aicore__ inline void NotifyGmm2InputReady(__gm__ int32_t* flagBase, uint32_t f
     if constexpr (IsWaveFlagGrained) {
         flagBase += static_cast<uint64_t>(flagSlotIdx) * INT_CACHELINE;
     }
-    AscendC::AtomicAdd(flagBase, 1);
+    atomicAdd(flagBase, 1);
 }
 
 // 计算一个 Prefetch GMM1 tile 并直接写入 GM。
@@ -295,18 +296,19 @@ __aicore__ inline void Gmm1Aiv0PrefetchEpilogueTileGeneric(const Config& config,
     auto copyGm2Ub = asc::te::make_copy(asc::te::copy_gm_to_ub{});
     auto topkWeightTensor = activationQuantOp.GetTopkWeightTensor();
 
-    AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
+    PipeNotify<PIPE_V, PIPE_MTE2>(0);
     for (uint32_t subOffset = 0; subOffset < mLen; subOffset += subTileM) {
         uint32_t subM = mLen - subOffset < subTileM ? mLen - subOffset : subTileM;
         uint32_t subMLoc = mLoc + subOffset;
         uint64_t metaInfoRow = expertBeforeCnt + subMLoc;
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
-        AscendC::DataCopy(topkWeightTensor, metaInfoGm[metaInfoRow * INT32_PER_256B], subM * INT32_PER_256B);
+        PipeWait<PIPE_V, PIPE_MTE2>(0);
+        CopyGmToUb(topkWeightTensor, (metaInfoGm + (metaInfoRow * INT32_PER_256B)),
+                   (subM * INT32_PER_256B) * sizeof(int32_t));
         auto tensorBlockGm =
             gmC.slice(asc::te::make_coord(subMLoc, nLoc), asc::te::make_shape(subM, Get<N_VALUE>(actualShape)));
         asc::te::copy(copyGm2Ub, tensorBlockUb, tensorBlockGm);
-        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(0);
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(0);
+        PipeNotify<PIPE_MTE2, PIPE_V>(0);
+        PipeWait<PIPE_MTE2, PIPE_V>(0);
 
         uint32_t epilogueN = Get<N_VALUE>(actualShape) / config.activationOutputDivisor;
         uint32_t epilogueNLoc = nLoc / config.activationOutputDivisor;
@@ -322,9 +324,9 @@ __aicore__ inline void Gmm1Aiv0PrefetchEpilogueTileGeneric(const Config& config,
         AscendC::SetCtrlSpr<60, 60>(0);
         activationQuantOp(epilogueShape, epilogueOffset, 0U);
         NotifyGmm2InputReady<IsWaveFlagGrained>(gmmAddrInfo.activationToGmm2Flag, subMLoc / L1_TILE_M_256);
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(0);
+        PipeNotify<PIPE_V, PIPE_MTE2>(0);
     }
-    AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(0);
+    PipeWait<PIPE_V, PIPE_MTE2>(0);
 }
 
 // 非 Prefetch 交错路径直接消费 AIC 的 UB ping-pong tile。
@@ -374,19 +376,19 @@ __aicore__ inline void Gmm1AivReadGmEpilogueTileGeneric(ActivationQuantOp& activ
     if (Get<M_VALUE>(actualShape) == 0U) {
         return;
     }
-    AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(0);
+    PipeNotify<PIPE_S, PIPE_MTE2>(0);
+    PipeWait<PIPE_S, PIPE_MTE2>(0);
     auto tensorBlockGm = l0cOutGm.slice(asc::te::make_coord(mLoc, nLoc),
                                         asc::te::make_shape(Get<M_VALUE>(actualShape), Get<N_VALUE>(actualShape)));
     auto layoutL0cUb = MakeLayoutC{}(config.tileM, L1_TILE_N);
     auto tensorBlockUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, ElementC>(0), layoutL0cUb);
     auto copyGm2Ub = asc::te::make_copy(asc::te::copy_gm_to_ub{});
     asc::te::copy(copyGm2Ub, tensorBlockUb, tensorBlockGm);
-    AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(0);
+    PipeNotify<PIPE_MTE2, PIPE_V>(0);
+    PipeWait<PIPE_MTE2, PIPE_V>(0);
     Gmm1Aiv0EpilogueTileGeneric<IsWaveFlagGrained>(config, activationQuantOp, gmmAddrInfo, actualShape, mLoc, nLoc, 0U);
-    AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(0);
-    AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(0);
+    PipeNotify<PIPE_S, PIPE_MTE2>(0);
+    PipeWait<PIPE_S, PIPE_MTE2>(0);
 }
 
 // AIV0 在 UB 拼接两段 W1 权重并展开 A8W4，每个配对 tile 只提交一次 prologue。
@@ -487,9 +489,9 @@ __aicore__ inline void Gmm1ExecGeneric(Scheduler& scheduler, const Params& param
     }
     auto gmC = asc::te::make_tensor(
         asc::te::make_mem_ptr<asc::te::location::gm>(reinterpret_cast<__gm__ ElementC*>(cGlobal)), layouts.c);
-    AscendC::GlobalTensor<float> metaInfoGm;
+    __gm__ float* metaInfoGm = nullptr;
     if constexpr (TopkWeightsPrefetch && g_coreType == AscendC::AIV) {
-        metaInfoGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(gmmAddrInfo.metaInfoGlobal));
+        metaInfoGm = reinterpret_cast<__gm__ float*>(gmmAddrInfo.metaInfoGlobal);
     }
 
     using WorkSetType = Gmm1WorkSet<Scheduler, decltype(gmA), decltype(gmB), decltype(gmScaleA), decltype(gmScaleB),
@@ -602,9 +604,9 @@ __aicore__ inline void Gmm1ExecA8W4(Scheduler& scheduler, const Params& params, 
     auto gmScaleB = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::gm>(
                                              reinterpret_cast<__gm__ ElementMxScaleB*>(gmmAddrInfo.bScaleGlobal)),
                                          layouts.scaleB);
-    AscendC::GlobalTensor<float> metaInfoGm;
+    __gm__ float* metaInfoGm = nullptr;
     if constexpr (TopkWeightsPrefetch && g_coreType == AscendC::AIV) {
-        metaInfoGm.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(gmmAddrInfo.metaInfoGlobal));
+        metaInfoGm = reinterpret_cast<__gm__ float*>(gmmAddrInfo.metaInfoGlobal);
     }
 
     using WorkSetType = Gmm1WorkSet<Scheduler, decltype(gmA), decltype(gmB), decltype(gmScaleA), decltype(gmScaleB),
@@ -760,10 +762,10 @@ __aicore__ inline void RunGmm1A8W4(const BlockContext& pipeline, BlockEpilogue& 
 template <typename ActivationType, typename WeightType, typename ActivationOutType, typename QuantScaleType,
           uint32_t ActivationElementsPerByte, bool UseA8W4Gmm1, bool TopkWeightsPrefetch, typename BlockEpilogue>
 __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
-    const GmmExecutionConfig& gmmConfig, const MoeSyncWorkspaceLayout& syncLayout, const WorkspaceInfo& workspace,
-    const ExpertWeightTensorListAddrs& weights, BlockEpilogue& epilogueOp, GMMAddrInfo& gmmAddrInfo,
-    const ExpertLoopState& state, uint32_t activationOutputCols, uint32_t rowOffsetInExpert = 0U,
-    uint32_t gmm1TilesPerMGroup = 0U)
+    const GmmExecutionConfig& gmmConfig, const MoeSyncWorkspaceLayout& syncLayout, const WorkspaceLayout& workspace,
+    GM_ADDR workspaceBase, const ExpertWeightTensorListAddrs& weights, BlockEpilogue& epilogueOp,
+    GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state, uint32_t activationOutputCols,
+    uint32_t rowOffsetInExpert = 0U, uint32_t gmm1TilesPerMGroup = 0U)
 {
     if constexpr (g_coreType == AIV && !UseA8W4Gmm1) {
         if (!IsSubBlockIdx<0U>()) {
@@ -788,22 +790,25 @@ __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
     int64_t scaleK = Ops::Base::CeilDiv(k, static_cast<int64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
 
     if constexpr (UseA8W4Gmm1 || TopkWeightsPrefetch) {
-        gmmAddrInfo.gmm1OutGlobal = workspace.gmm1MmadResPtr + physicalTokenStartIndex * n * sizeof(bfloat16_t);
+        gmmAddrInfo.gmm1OutGlobal =
+            workspace.routed.gmm1Output.get_ptr(workspaceBase) + physicalTokenStartIndex * n * sizeof(bfloat16_t);
     }
     if constexpr (TopkWeightsPrefetch) {
-        gmmAddrInfo.gmm1TileStatus = reinterpret_cast<__gm__ int32_t*>(workspace.gmm1TileStatusPtr) +
-                                     (static_cast<uint64_t>(state.expertIdx) * syncLayout.gmm1TileStatusCountPerExpert +
-                                      static_cast<uint64_t>(expertMGroupOffset) * gmm1TilesPerMGroup) *
-                                         INT_CACHELINE;
+        gmmAddrInfo.gmm1TileStatus =
+            reinterpret_cast<__gm__ int32_t*>(workspace.sync.gmm1Tiles.get_ptr(workspaceBase)) +
+            (static_cast<uint64_t>(state.expertIdx) * syncLayout.gmm1TileStatusCountPerExpert +
+             static_cast<uint64_t>(expertMGroupOffset) * gmm1TilesPerMGroup) *
+                INT_CACHELINE;
     }
-    gmmAddrInfo.metaInfoGlobal = workspace.metaInfoPtr;
-    gmmAddrInfo.activationToGmm2Flag = reinterpret_cast<__gm__ int32_t*>(workspace.flagActivationToGmm2Ptr) +
-                                       expertOffset * syncLayout.activationFlagSlotCountPerExpert +
-                                       static_cast<uint64_t>(expertMGroupOffset) * INT_CACHELINE;
-    gmmAddrInfo.aGlobal =
-        workspace.dispatchRevDataPtr + dispatchTokenStartIndex * k / ActivationElementsPerByte * sizeof(ActivationType);
-    gmmAddrInfo.aScaleGlobal =
-        workspace.dispatchRevScalePtr + dispatchTokenStartIndex * scaleK * sizeof(QuantScaleType);
+    gmmAddrInfo.metaInfoGlobal = workspace.routing.receivedTokenMetadata.get_ptr(workspaceBase);
+    gmmAddrInfo.activationToGmm2Flag =
+        reinterpret_cast<__gm__ int32_t*>(workspace.sync.activationReady.get_ptr(workspaceBase)) +
+        expertOffset * syncLayout.activationFlagSlotCountPerExpert +
+        static_cast<uint64_t>(expertMGroupOffset) * INT_CACHELINE;
+    gmmAddrInfo.aGlobal = workspace.routed.gmm1Input.data.get_ptr(workspaceBase) +
+                          dispatchTokenStartIndex * k / ActivationElementsPerByte * sizeof(ActivationType);
+    gmmAddrInfo.aScaleGlobal = workspace.routed.gmm1Input.scale.get_ptr(workspaceBase) +
+                               dispatchTokenStartIndex * scaleK * sizeof(QuantScaleType);
     gmmAddrInfo.bGlobal =
         GetExpertWeightAddr<WeightType>(weights.weight1, gmmConfig.isPerExpertWeightTensor, state.expertIdx,
                                         static_cast<uint64_t>(state.expertIdx) * n * k / weightElementsPerByte);
@@ -830,15 +835,17 @@ __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
         }
     }
     if constexpr (g_coreType == AIC) {
-        gmmAddrInfo.dispatchToGmm1Flag = reinterpret_cast<__gm__ int32_t*>(workspace.flagDispatchToGmm1Ptr) +
-                                         expertOffset * syncLayout.dispatchFlagSlotCountPerExpert +
-                                         static_cast<uint64_t>(expertMGroupOffset) * INT_CACHELINE;
+        gmmAddrInfo.dispatchToGmm1Flag =
+            reinterpret_cast<__gm__ int32_t*>(workspace.sync.dispatchReady.get_ptr(workspaceBase)) +
+            expertOffset * syncLayout.dispatchFlagSlotCountPerExpert +
+            static_cast<uint64_t>(expertMGroupOffset) * INT_CACHELINE;
     }
     if constexpr (UseA8W4Gmm1) {
         gmmAddrInfo.gmmToEpilogueFlag = nullptr;
-        if (workspace.flagGmmToEpiloguePtr != nullptr) {
-            gmmAddrInfo.gmmToEpilogueFlag = reinterpret_cast<__gm__ int32_t*>(workspace.flagGmmToEpiloguePtr) +
-                                            static_cast<uint64_t>(gmmConfig.blockJob.jobIndex) * INT_CACHELINE;
+        if (workspace.sync.epilogueReady.get_ptr(workspaceBase) != nullptr) {
+            gmmAddrInfo.gmmToEpilogueFlag =
+                reinterpret_cast<__gm__ int32_t*>(workspace.sync.epilogueReady.get_ptr(workspaceBase)) +
+                static_cast<uint64_t>(gmmConfig.blockJob.jobIndex) * INT_CACHELINE;
         }
     }
 }
@@ -848,7 +855,7 @@ template <typename WeightType, typename ActivationOutType, typename QuantScaleTy
           typename BlockEpilogue>
 __aicore__ inline void UpdateSharedExpertGmm1GlobalBuffer(const MoeStageCommonConfig& commonConfig,
                                                           const GmmExecutionConfig& gmmConfig,
-                                                          const WorkspaceInfo& workspace,
+                                                          const WorkspaceLayout& workspace, GM_ADDR workspaceBase,
                                                           const ExpertWeightTensorListAddrs& weights,
                                                           BlockEpilogue& epilogueOp, GMMAddrInfo& gmmAddrInfo,
                                                           uint32_t sharedExpertIdx)
@@ -864,26 +871,29 @@ __aicore__ inline void UpdateSharedExpertGmm1GlobalBuffer(const MoeStageCommonCo
     uint64_t expertIdx = sharedExpertIdx;
 
     if constexpr (UseGmOutput) {
-        gmmAddrInfo.gmm1OutGlobal = workspace.sharedExpertGmm1OutPtr + expertIdx * m * n * sizeof(bfloat16_t);
+        gmmAddrInfo.gmm1OutGlobal =
+            workspace.shared.gmm1Output.get_ptr(workspaceBase) + expertIdx * m * n * sizeof(bfloat16_t);
     }
     gmmAddrInfo.bGlobal = GetExpertWeightAddr<WeightType>(weights.weight1, gmmConfig.isPerExpertWeightTensor,
                                                           sharedExpertIdx, expertIdx * n * k / weightElemsPerByte);
     gmmAddrInfo.bScaleGlobal = GetExpertWeightAddr<QuantScaleType>(
         weights.weightScales1, gmmConfig.isPerExpertWeightTensor, sharedExpertIdx, expertIdx * n * scaleK);
     gmmAddrInfo.activationToGmm2Flag = nullptr;
-    if (workspace.sharedActivationToGmm2Ptr != nullptr) {
+    if (workspace.mte.sync.sharedActivationReady.get_ptr(workspaceBase) != nullptr) {
         uint64_t sharedActivationFlagElementCount =
             static_cast<uint64_t>(CalcSharedActivationFlagElementsPerExpert(static_cast<int64_t>(m)));
-        gmmAddrInfo.activationToGmm2Flag = reinterpret_cast<__gm__ int32_t*>(workspace.sharedActivationToGmm2Ptr) +
-                                           expertIdx * sharedActivationFlagElementCount;
+        gmmAddrInfo.activationToGmm2Flag =
+            reinterpret_cast<__gm__ int32_t*>(workspace.mte.sync.sharedActivationReady.get_ptr(workspaceBase)) +
+            expertIdx * sharedActivationFlagElementCount;
     }
     gmmAddrInfo.metaInfoGlobal = nullptr;
     gmmAddrInfo.dispatchToGmm1Flag = nullptr;
     if constexpr (UseGmOutput) {
         gmmAddrInfo.gmmToEpilogueFlag = nullptr;
-        if (workspace.flagGmmToEpiloguePtr != nullptr) {
-            gmmAddrInfo.gmmToEpilogueFlag = reinterpret_cast<__gm__ int32_t*>(workspace.flagGmmToEpiloguePtr) +
-                                            static_cast<uint64_t>(gmmConfig.blockJob.jobIndex) * INT_CACHELINE;
+        if (workspace.sync.epilogueReady.get_ptr(workspaceBase) != nullptr) {
+            gmmAddrInfo.gmmToEpilogueFlag =
+                reinterpret_cast<__gm__ int32_t*>(workspace.sync.epilogueReady.get_ptr(workspaceBase)) +
+                static_cast<uint64_t>(gmmConfig.blockJob.jobIndex) * INT_CACHELINE;
         }
     }
 

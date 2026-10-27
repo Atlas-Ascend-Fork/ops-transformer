@@ -37,7 +37,7 @@
 #include "../../../op_kernel/arch35_92/mega_moe_tiling.h"
 #include "../../../op_kernel/arch35_92/mega_moe_arch35_92_tiling_key.h"
 #include "../../../op_kernel/arch35_92/common/mega_moe_constants.h"
-#include "../../../op_kernel/arch35_92/common/mega_moe_peermem.h"
+#include "../../../op_kernel/arch35_92/common/mega_moe_gm_layout.h"
 
 using namespace Mc2Tiling;
 using namespace AscendC;

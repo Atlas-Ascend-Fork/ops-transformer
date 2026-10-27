@@ -79,7 +79,9 @@ __aicore__ inline void CopyGmm1WeightConcatToUb(const Dst& dst, const Src& src, 
                    { KERNEL_LOG(KERNEL_ERROR, "A8W4 prologue consumes packed C0=32 ZN weights"); });
     const uint64_t c0 = AscendC::Std::get<0>(AscendC::Std::get<0>(src.layout().shape()));
     const uint64_t columnBytes = c0 / 2U;
-    const uint32_t blockCount = 2U * ConcatTensorRows(src) / c0;
+    // Preserve the 16-bit burst count of the original C API overload, including
+    // when compiling against SDK headers that accept a 32-bit burst count.
+    const uint16_t blockCount = static_cast<uint16_t>(2U * ConcatTensorRows(src) / c0);
     const uint32_t blockBytes = ConcatTensorColumns(src) / 2U * columnBytes;
     // Unlike tensor strides, these intrinsics take byte distances between block starts.
     asc_copy_gm2ub_align(reinterpret_cast<__ubuf__ uint8_t*>(dst.data().get()),

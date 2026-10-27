@@ -11,6 +11,7 @@
 #ifndef MEGA_MOE_WORKSPACE_RESET_H
 #define MEGA_MOE_WORKSPACE_RESET_H
 
+#include "../common/mega_moe_sync.h"
 #include "../common/mega_moe_utils.h"
 
 namespace MegaMoeImpl {
@@ -19,21 +20,23 @@ using namespace AscendC;
 
 #if defined(MEGA_MOE_IS_KERNEL_COMPILE)
 // 仅由 AIV 调用。清理连续 flag workspace；prefetch 路径额外清理独立分配的 GMM1 tile 状态区。
-// 清零范围一律取自 WorkspaceInfo 在分配处记账的元素数，与布局恒同源。
+// 清零地址和字节范围由布局给出；在调用 int32 清零函数时转换为元素数。
 template <bool TopkWeightsPrefetch>
 __aicore__ inline void ResetSyncStatus(const AivJobContext& job, const Params& params, int32_t resetBatchElementCount,
-                                       LocalTensor<int32_t>& resetTensor)
+                                       __ubuf__ int32_t* resetTensor)
 {
+    const auto& workspace = params.workspace.layout;
+    const auto& buffer = params.workspace.base;
     if (job.totalJobs == 0U || job.jobIndex >= job.totalJobs || resetBatchElementCount <= 0) {
         return;
     }
-    SyncFuncStatic<AscendC::HardEvent::V_MTE3, SYNC_EVENT_ID2>();
-    ResetWorkspaceRegion<1>(job, params.workspaceInfo.flagActivationToGmm2Ptr,
-                            static_cast<int32_t>(params.workspaceInfo.flagResetElementCount), resetBatchElementCount,
+    PipeFence<PIPE_V, PIPE_MTE3, SYNC_EVENT_ID2>();
+    ResetWorkspaceRegion<1>(job, workspace.reset.flags.get_ptr(buffer),
+                            static_cast<int32_t>(workspace.reset.flags.sizeBytes / SIZE_INT_32), resetBatchElementCount,
                             resetTensor);
     if constexpr (TopkWeightsPrefetch) {
-        ResetWorkspaceRegion<1>(job, params.workspaceInfo.gmm1TileStatusPtr,
-                                static_cast<int32_t>(params.workspaceInfo.gmm1TileStatusElementCount),
+        ResetWorkspaceRegion<1>(job, workspace.reset.gmm1Tiles.get_ptr(buffer),
+                                static_cast<int32_t>(workspace.reset.gmm1Tiles.sizeBytes / SIZE_INT_32),
                                 resetBatchElementCount, resetTensor);
     }
 }

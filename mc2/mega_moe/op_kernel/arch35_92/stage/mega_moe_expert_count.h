@@ -11,6 +11,7 @@
 #ifndef MEGA_MOE_EXPERT_COUNT_H
 #define MEGA_MOE_EXPERT_COUNT_H
 
+#include "../common/mega_moe_sync.h"
 #include "kernel_operator.h"
 #include "../common/mega_moe_constants.h"
 #include "../common/mega_moe_utils.h"
@@ -54,37 +55,34 @@ __simd_vf__ inline void CheckCountRoundTagsVF(__ubuf__ uint32_t* counts, __ubuf_
 // pending 为独立、32B 对齐的 UB 暂存区（至少一个 int32）。
 // 首次立即读取；失败后等待 500 cycle，再重读整表。成功快照直接交给后续 VF cumsum。
 // 调用方保证在 AIV 上执行，且 elementCount > 0。
-__aicore__ inline void WaitForCountTable(const AscendC::GlobalTensor<int32_t>& countGm,
-                                         const AscendC::LocalTensor<int32_t>& counts,
-                                         const AscendC::LocalTensor<int32_t>& pending, uint32_t elementCount,
-                                         uint32_t expectedSyncRoundTag)
+__aicore__ inline void WaitForCountTable(__gm__ int32_t* countGm, __ubuf__ int32_t* counts, __ubuf__ int32_t* pending,
+                                         uint32_t elementCount, uint32_t expectedSyncRoundTag)
 {
     // 首次搬运前保护此前的 Vector 访问；重试时上一轮 V_S 和 Scalar 判断已保证 VF 完成。
-    SyncFuncStatic<AscendC::HardEvent::V_MTE2, SYNC_EVENT_ID2>();
+    PipeFence<PIPE_V, PIPE_MTE2, SYNC_EVENT_ID2>();
     while (true) {
         // Compact 将每个 GM 槽首部的 4B 紧密排入 UB，保持后续 epoch 校验和前缀和布局不变。
-        AscendC::DataCopyPad<int32_t, AscendC::PaddingMode::Compact>(
+        CopyGmToUb(
             counts, countGm,
-            {static_cast<uint16_t>(elementCount), sizeof(int32_t),
-             static_cast<int64_t>(MTE_COUNT_SLOT_BYTES) - static_cast<int64_t>(sizeof(int32_t)), 0U, 0U},
-            {true, 0U, 0U, 0U});
-        SyncFuncStatic<AscendC::HardEvent::MTE2_V, SYNC_EVENT_ID2>();
-        asc_vf_call<CheckCountRoundTagsVF>(reinterpret_cast<__ubuf__ uint32_t*>(counts.GetPhyAddr()),
-                                           reinterpret_cast<__ubuf__ uint32_t*>(pending.GetPhyAddr()), elementCount,
-                                           expectedSyncRoundTag);
-        SyncFuncStatic<AscendC::HardEvent::V_S, SYNC_EVENT_ID2>();
-        if (pending.GetValue(0U) == 0) {
+            CopyRows{static_cast<uint16_t>(elementCount), sizeof(int32_t), MTE_COUNT_SLOT_BYTES, sizeof(int32_t)},
+            GmLoadCacheMode::NORMAL_FIRST_VICTIM, true);
+        PipeFence<PIPE_MTE2, PIPE_V, SYNC_EVENT_ID2>();
+        CallVf<CheckCountRoundTagsVF>(reinterpret_cast<__ubuf__ uint32_t*>(counts),
+                                      reinterpret_cast<__ubuf__ uint32_t*>(pending), elementCount,
+                                      expectedSyncRoundTag);
+        PipeFence<PIPE_V, PIPE_S, SYNC_EVENT_ID2>();
+        if (pending[0U] == 0) {
             return;
         }
-        int64_t startCycle = AscendC::GetSystemCycle();
-        while (AscendC::GetSystemCycle() - startCycle < COUNT_TABLE_POLL_BACKOFF_CYCLES) {
+        int64_t startCycle = GetDeviceCycle();
+        while (GetDeviceCycle() - startCycle < COUNT_TABLE_POLL_BACKOFF_CYCLES) {
         }
     }
 }
 
 /*
  * MegaMoe count 表的融合版本：先复用 int32 prefix-scan，再在同一次 VF 中提取每个专家的累计尾值
- * 并作差。相比先调用通用前缀和、再启动第二个 VF，融合实现省去一次 asc_vf_call 和外部流水同步。
+ * 并作差。相比先调用通用前缀和、再启动第二个 VF，融合实现省去一次 CallVf 和外部流水同步。
  */
 __simd_vf__ inline void ComputeExpertCountTablesVF(__ubuf__ int32_t* count, __ubuf__ int32_t* expertCounts,
                                                    uint32_t elementCount, uint32_t expertCount, uint32_t worldSize,
@@ -145,14 +143,11 @@ __simd_vf__ inline void ComputeExpertCountTablesVF(__ubuf__ int32_t* count, __ub
     }
 }
 
-__aicore__ inline void ComputeExpertCountTables(LocalTensor<int32_t> countTensor,
-                                                LocalTensor<int32_t> expertCountTensor, uint32_t expertCount,
-                                                uint32_t worldSize, uint32_t maxOutputSize)
+__aicore__ inline void ComputeExpertCountTables(__ubuf__ int32_t* countTensor, __ubuf__ int32_t* expertCountTensor,
+                                                uint32_t expertCount, uint32_t worldSize, uint32_t maxOutputSize)
 {
-    __ubuf__ int32_t* count = reinterpret_cast<__ubuf__ int32_t*>(countTensor.GetPhyAddr());
-    __ubuf__ int32_t* expertCounts = reinterpret_cast<__ubuf__ int32_t*>(expertCountTensor.GetPhyAddr());
-    asc_vf_call<ComputeExpertCountTablesVF>(count, expertCounts, expertCount * worldSize, expertCount, worldSize,
-                                            maxOutputSize);
+    CallVf<ComputeExpertCountTablesVF>(countTensor, expertCountTensor, expertCount * worldSize, expertCount, worldSize,
+                                       maxOutputSize);
 }
 
 } // namespace MegaMoeImpl

@@ -18,7 +18,7 @@
 
 #include <cstdint>
 #include "kernel_tiling/kernel_tiling.h"
-#include "common/mega_moe_memory_layout.h"
+#include "common/mega_moe_gm_layout.h"
 
 // MegaMoe adaptive UB buffer policy shared by host tiling and kernel address binding.
 // 实际 UB 预算由 host tiling 从平台获取，并通过 availableUbBytes 参与以下配置计算。

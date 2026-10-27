@@ -52,5 +52,5 @@ if (BUILD_OPEN_PROJECT OR ENABLE_BUILT_IN)
 else()
     set(MEGA_MOE_LAYOUT_INC_INSTALL_DIR ${ACLNN_INC_INSTALL_DIR}/aclnnop)
 endif()
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/arch35_92/common/mega_moe_memory_layout.h
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel/arch35_92/common/mega_moe_gm_layout.h
         DESTINATION ${MEGA_MOE_LAYOUT_INC_INSTALL_DIR})

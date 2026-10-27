@@ -14,6 +14,8 @@
 #include <type_traits>
 
 #include "../common/mega_moe_utils.h"
+#include "../common/mega_moe_copy.h"
+#include "../common/mega_moe_sync.h"
 #include "../common/mega_moe_mxfp8_utils.h"
 
 #if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL)
@@ -30,46 +32,44 @@ struct LayeredCombineBatchState {
 // 通过本地 MTE 路径或远端 URMA 路径发送一个 layered 模板 token。
 template <typename DataType, bool IsQuantized, typename CommPolicy>
 __aicore__ inline void CombineSendTokenToRemote(uint32_t batchStart, uint32_t curRows, uint32_t n, uint32_t nScale,
-                                                uint32_t groupIdx, uint32_t rankId,
-                                                LocalTensor<int32_t>& metaInfoTensor, LocalTensor<DataType>& ubQuant,
-                                                const Params& params, GM_ADDR localSrcPtr, CommPolicy& comm,
-                                                typename CommPolicy::BatchHandle& batchHandle)
+                                                uint32_t groupIdx, uint32_t rankId, __ubuf__ int32_t* metaInfoTensor,
+                                                __ubuf__ DataType* ubQuant, const Params& params, GM_ADDR localSrcPtr,
+                                                CommPolicy& comm, typename CommPolicy::BatchHandle& batchHandle)
 {
-    SyncFuncStatic<AscendC::HardEvent::MTE2_S, SYNC_EVENT_ID3>();
+    const auto& peermem = params.communication.layout;
+    PipeFence<PIPE_MTE2, PIPE_S, SYNC_EVENT_ID3>();
     // FP8 记录的 scale 位于 Align256(n) 之后；发送长度同时也是接收 GM 的 record stride。
     int64_t quantTokenSize = CalcCombineTokenBytes(n, sizeof(DataType), IsQuantized) / sizeof(DataType);
-    uint32_t toRankId = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + RANK_ID);
-    uint32_t tokenIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOKEN_ID);
-    uint32_t topkIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOPK_INDEX);
+    uint32_t toRankId = metaInfoTensor[batchStart * META_INFO_SIZE + RANK_ID];
+    uint32_t tokenIdx = metaInfoTensor[batchStart * META_INFO_SIZE + TOKEN_ID];
+    uint32_t topkIdx = metaInfoTensor[batchStart * META_INFO_SIZE + TOPK_INDEX];
 
-    AscendC::GlobalTensor<DataType> gmLocalD;
-    uint64_t gmRemoteOffset = params.peermemInfo.combineSend.offset;
+    __gm__ DataType* gmLocalD = nullptr;
+    uint64_t gmRemoteOffset = peermem.combineSend.offsetBytes;
     GM_ADDR srcAddr = localSrcPtr;
 
     if (toRankId == rankId) {
         srcAddr = GetRankWinAddrWithOffset(toRankId, gmRemoteOffset);
     }
 
-    gmLocalD.SetGlobalBuffer(reinterpret_cast<__gm__ DataType*>(srcAddr));
+    gmLocalD = reinterpret_cast<__gm__ DataType*>(srcAddr);
     uint64_t dstBaseOffset =
         (static_cast<uint64_t>(tokenIdx) * params.tilingData->compute.topK + topkIdx) * quantTokenSize;
     AscendC::DataCopyExtParams singleCopyParams{1, static_cast<uint32_t>(quantTokenSize * sizeof(DataType)), 0, 0, 0};
 
     if constexpr (!IsQuantized) {
-        DataCopyPadExtParams<DataType> copyPadParams{false, 0U, 0U, 0U};
         if (toRankId == rankId) {
-            AscendC::GlobalTensor<DataType> gmm2OutGm;
-            gmm2OutGm.SetGlobalBuffer(reinterpret_cast<__gm__ DataType*>(localSrcPtr));
-            SyncFuncStatic<AscendC::HardEvent::MTE3_MTE2, SYNC_EVENT_ID3>();
-            AscendC::DataCopyPad(ubQuant, gmm2OutGm, singleCopyParams, copyPadParams);
-            SyncFuncStatic<AscendC::HardEvent::MTE2_MTE3, SYNC_EVENT_ID4>();
+            __gm__ DataType* gmm2OutGm = reinterpret_cast<__gm__ DataType*>(localSrcPtr);
+            PipeFence<PIPE_MTE3, PIPE_MTE2, SYNC_EVENT_ID3>();
+            CopyGmToUb(ubQuant, gmm2OutGm, static_cast<uint32_t>(quantTokenSize * sizeof(DataType)));
+            PipeFence<PIPE_MTE2, PIPE_MTE3, SYNC_EVENT_ID4>();
         }
     }
 
     if (IsQuantized || toRankId == rankId) {
         uint64_t dstOffset = toRankId == rankId ? dstBaseOffset : 0;
-        AscendC::DataCopyPad(gmLocalD[dstOffset], ubQuant, singleCopyParams);
-        SyncFuncStatic<AscendC::HardEvent::MTE3_S, SYNC_EVENT_ID4>();
+        CopyUbToGm(gmLocalD + dstOffset, ubQuant, static_cast<uint32_t>(quantTokenSize * sizeof(DataType)));
+        PipeFence<PIPE_MTE3, PIPE_S, SYNC_EVENT_ID4>();
     }
 
     if (toRankId != rankId) {
@@ -88,6 +88,7 @@ __aicore__ inline void CombineSendTokenToRelay(uint32_t batchStart, uint32_t n, 
                                                GM_ADDR localSrcPtr, CommPolicy& comm,
                                                LayeredCombineBatchState<CommPolicy>& batchState)
 {
+    const auto& peermem = params.communication.layout;
     uint32_t originRank = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + RANK_ID);
     uint32_t tokenIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOKEN_ID);
     uint32_t topkIdx = metaInfoTensor.GetValue(batchStart * META_INFO_SIZE + TOPK_INDEX);
@@ -99,21 +100,23 @@ __aicore__ inline void CombineSendTokenToRelay(uint32_t batchStart, uint32_t n, 
         topkIdx;
     const uint64_t tokenBytes = static_cast<uint64_t>(n) * sizeof(bfloat16_t);
     const uint32_t targetRank = batchState.dstRankId;
-    const uint64_t dataOffset = params.peermemInfo.contribution.offset + slot * tokenBytes;
-    const uint64_t readyOffset = params.peermemInfo.contributionReady.offset + slot * sizeof(uint64_t);
+    const uint64_t dataOffset = peermem.contribution.offsetBytes + slot * tokenBytes;
+    const uint64_t readyOffset = peermem.contributionReady.offsetBytes + slot * sizeof(uint64_t);
     if (targetRank == rankId) {
         // 本地贡献整 token 复制，写回完成后发布 ready。
-        GlobalTensor<bfloat16_t> gmm2OutGlobalTensor, contributionGlobalTensor;
-        gmm2OutGlobalTensor.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(localSrcPtr));
-        contributionGlobalTensor.SetGlobalBuffer(
-            reinterpret_cast<__gm__ bfloat16_t*>(GetRankWinAddrWithOffset(targetRank, dataOffset)));
+        __gm__ bfloat16_t* gmm2OutGlobalTensor = nullptr;
+        __gm__ bfloat16_t* contributionGlobalTensor = nullptr;
+        gmm2OutGlobalTensor = reinterpret_cast<__gm__ bfloat16_t*>(localSrcPtr);
+        contributionGlobalTensor =
+            reinterpret_cast<__gm__ bfloat16_t*>(GetRankWinAddrWithOffset(targetRank, dataOffset));
         const DataCopyExtParams copyParams{1U, static_cast<uint32_t>(tokenBytes), 0U, 0U, 0U};
-        DataCopyPad(tokenTensor, gmm2OutGlobalTensor, copyParams, {false, 0U, 0U, 0U});
-        SyncFuncStatic<HardEvent::MTE2_MTE3, SYNC_EVENT_ID2>();
-        DataCopyPad(contributionGlobalTensor, tokenTensor, copyParams);
-        SyncFuncStatic<HardEvent::MTE3_S, SYNC_EVENT_ID2>();
-        WriteGmByPassDCache(reinterpret_cast<__gm__ uint64_t*>(GetRankWinAddrWithOffset(targetRank, readyOffset)),
-                            uint64_t(1));
+        CopyGmToUb(reinterpret_cast<__ubuf__ bfloat16_t*>((tokenTensor).GetPhyAddr()), gmm2OutGlobalTensor,
+                   static_cast<uint32_t>(tokenBytes));
+        PipeFence<PIPE_MTE2, PIPE_MTE3, SYNC_EVENT_ID2>();
+        CopyUbToGm(contributionGlobalTensor, reinterpret_cast<__ubuf__ bfloat16_t*>((tokenTensor).GetPhyAddr()),
+                   static_cast<uint32_t>(tokenBytes));
+        PipeFence<PIPE_MTE3, PIPE_S, SYNC_EVENT_ID2>();
+        GmWrite(reinterpret_cast<__gm__ uint64_t*>(GetRankWinAddrWithOffset(targetRank, readyOffset)), uint64_t(1));
     } else {
         comm.WriteWithNotifyNbi(batchState.batchHandle, GetRankWinAddrWithOffset(targetRank, dataOffset), localSrcPtr,
                                 static_cast<uint32_t>(tokenBytes), GetRankWinAddrWithOffset(targetRank, readyOffset),
@@ -125,42 +128,39 @@ __aicore__ inline void CombineSendTokenToRelay(uint32_t batchStart, uint32_t n, 
 template <uint8_t QuantMode, typename T, bool IsQuantized, typename CommPolicy>
 __aicore__ inline void CombineTokenGroup(uint32_t tokenStart, uint32_t tokenCount, uint32_t n, uint32_t groupIdx,
                                          uint32_t rankId, GM_ADDR gmm2OutAddr, const Params& params,
-                                         LocalTensor<int32_t>& metaInfoTensor, int64_t ubTensorSize, int64_t offset,
+                                         __ubuf__ int32_t* metaInfoTensor, int64_t ubTensorSize, int64_t offset,
                                          uint32_t quantTokenSizeBytes, CommPolicy& comm,
                                          LayeredCombineBatchState<CommPolicy>& batchState)
 {
-    LocalTensor<T> combineUbTensor(TPosition::VECIN, offset, ubTensorSize);
+    __ubuf__ T* combineUbTensor = reinterpret_cast<__ubuf__ T*>(offset);
     offset += ubTensorSize * sizeof(T);
 
     uint32_t nScale = Ops::Base::CeilDiv(n, uint32_t(MXFP_SCALE_GROUP_NUM));
     uint32_t mxScaleNum = Ops::Base::CeilAlign(nScale, 2U);
     uint32_t nAlign32 = Ops::Base::CeilAlign(n, static_cast<uint32_t>(ALIGN_32));
     uint32_t floatTempSize = Ops::Base::CeilAlign(mxScaleNum, static_cast<uint32_t>(ALIGN_32)) + mxScaleNum / 2;
-    LocalTensor<float> floatTemp = LocalTensor<float>(TPosition::VECIN, offset, floatTempSize);
+    __ubuf__ float* floatTemp = reinterpret_cast<__ubuf__ float*>(offset);
 
-    GlobalTensor<T> gmm2OutGm;
-    gmm2OutGm.SetGlobalBuffer(reinterpret_cast<__gm__ T*>(gmm2OutAddr));
+    __gm__ T* gmm2OutGm = reinterpret_cast<__gm__ T*>(gmm2OutAddr);
     using Fp8Type = typename std::conditional<QuantMode == MXFP8_E4M3_COMM_QUANT, fp8_e4m3fn_t, fp8_e5m2_t>::type;
 
     uint32_t singleTokenElems = (nAlign32 * sizeof(T) + quantTokenSizeBytes) / sizeof(T);
-    DataCopyPadExtParams<T> copyPadParams{false, 0U, 0U, 0U};
-    AscendC::DataCopyExtParams gm2UbParams{static_cast<uint16_t>(1), static_cast<uint32_t>(n * sizeof(T)), 0, 0, 0};
 
     for (uint32_t i = 0; i < tokenCount; i++) {
         uint32_t pingPong = i % 2;
-        LocalTensor<T> ubBf16 = combineUbTensor[pingPong * singleTokenElems];
-        LocalTensor<T> ubQuantData = ubBf16[nAlign32];
+        __ubuf__ T* ubBf16 = combineUbTensor + pingPong * singleTokenElems;
+        __ubuf__ T* ubQuantData = ubBf16 + nAlign32;
 
         if constexpr (IsQuantized) {
-            SyncFuncStatic<AscendC::HardEvent::MTE3_MTE2, SYNC_EVENT_ID3>();
-            AscendC::DataCopyPad(ubBf16, gmm2OutGm[(tokenStart + i) * n], gm2UbParams, copyPadParams);
-            SyncFuncStatic<AscendC::HardEvent::MTE2_V, SYNC_EVENT_ID4>();
+            PipeFence<PIPE_MTE3, PIPE_MTE2, SYNC_EVENT_ID3>();
+            CopyGmToUb(ubBf16, gmm2OutGm + (tokenStart + i) * n, static_cast<uint32_t>(n * sizeof(T)));
+            PipeFence<PIPE_MTE2, PIPE_V, SYNC_EVENT_ID4>();
             Mxfp8::QuantMxFp8<QuantMode, T>(ubQuantData, ubBf16, floatTemp, n);
-            SyncFuncStatic<AscendC::HardEvent::V_S, SYNC_EVENT_ID5>();
+            PipeFence<PIPE_V, PIPE_S, SYNC_EVENT_ID5>();
         }
 
         using SendType = typename std::conditional<IsQuantized, Fp8Type, T>::type;
-        LocalTensor<SendType> ubQuantSend = ubQuantData.template ReinterpretCast<SendType>();
+        __ubuf__ SendType* ubQuantSend = reinterpret_cast<__ubuf__ SendType*>(ubQuantData);
         if constexpr (!IsQuantized) {
             ubQuantSend = ubBf16;
         }
@@ -175,7 +175,7 @@ __aicore__ inline void CombineTokenGroup(uint32_t tokenStart, uint32_t tokenCoun
             }
         }
     }
-    SyncFuncStatic<AscendC::HardEvent::MTE3_MTE2, SYNC_EVENT_ID2>();
+    PipeFence<PIPE_MTE3, PIPE_MTE2, SYNC_EVENT_ID2>();
 }
 
 /*
@@ -193,12 +193,13 @@ __aicore__ inline void CombineServerDedupTokenGroup(uint32_t tokenStart, uint32_
     offset += tokenCount * META_INFO_SIZE * sizeof(int32_t);
     // 紧接 metadata 准备整 token 搬运缓冲，当前阶段由本 Group 复用。
     LocalTensor<bfloat16_t> tokenTensor(TPosition::VECIN, offset, n);
-    AscendC::GlobalTensor<int32_t> metaInfoGlobalTensor;
-    metaInfoGlobalTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(metaInfoAddr));
-    SyncFuncStatic<AscendC::HardEvent::S_MTE2, SYNC_EVENT_ID1>();
-    AscendC::DataCopy(metaInfoTensor, metaInfoGlobalTensor, tokenCount * META_INFO_SIZE);
+    __gm__ int32_t* metaInfoGlobalTensor = nullptr;
+    metaInfoGlobalTensor = reinterpret_cast<__gm__ int32_t*>(metaInfoAddr);
+    PipeFence<PIPE_S, PIPE_MTE2, SYNC_EVENT_ID1>();
+    CopyGmToUb(reinterpret_cast<__ubuf__ int32_t*>((metaInfoTensor).GetPhyAddr()), metaInfoGlobalTensor,
+               (tokenCount * META_INFO_SIZE) * sizeof(int32_t));
     // 整批 metadata 搬入完成后，再逐 token 读取字段。
-    SyncFuncStatic<AscendC::HardEvent::MTE2_S, SYNC_EVENT_ID3>();
+    PipeFence<PIPE_MTE2, PIPE_S, SYNC_EVENT_ID3>();
     for (uint32_t i = 0; i < tokenCount; i++) {
         GM_ADDR localSrcPtr = gmm2OutAddr + static_cast<uint64_t>(tokenStart + i) * n * sizeof(bfloat16_t);
         CombineSendTokenToRelay(i, n, rankId, metaInfoTensor, tokenTensor, params, localSrcPtr, comm, batchState);

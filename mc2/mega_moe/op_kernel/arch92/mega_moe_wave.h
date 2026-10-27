@@ -217,10 +217,12 @@ template <TemplateMegaMoeArch92WaveTypeClass>
 __aicore__ inline uint32_t MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::GetMoeExpertTokenCount(
     uint32_t expertIdx) const
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     if constexpr (g_coreType == AIV) {
-        return static_cast<uint32_t>(tokenDispatchScratch_.expertTokenNumsOutTensor.GetValue(expertIdx));
+        return static_cast<uint32_t>(tokenDispatchScratch_.expertTokenNumsOutTensor[expertIdx]);
     } else {
-        return GetExpertTokenCountFromWorkspace(params_.workspaceInfo.expertRecvTokenCountPtr, countWorkspace_,
+        return GetExpertTokenCountFromWorkspace(workspace.routing.recvCounts.get_ptr(buffer), countWorkspace_,
                                                 moeExpertPerRank_, expertIdx);
     }
 }
@@ -284,6 +286,8 @@ MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::ProcessNextDispatchAndCurr
     ExpertTokenPosition& dispatchPosition, ExpertTokenPosition& gmm1Position, ExpertLoopState& gmm1ExpertState,
     GMMAddrInfo& gmm1AddrInfo)
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     uint32_t processedMGroupCount = 0U;
     uint32_t dispatchWaveMGroupCount = 0U;
     bool nextWaveNeedsDispatch = false;
@@ -304,8 +308,7 @@ MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::ProcessNextDispatchAndCurr
         }
         if (gmm1Position.tokenIndexInExpert == 0U) {
             if (!gmm1ExpertState.expertCountTableReady) {
-                WaitForMoeExpertTokenCountReady(params_.workspaceInfo.flagSendCntCalToUpdParamsPtr, countWorkspace_,
-                                                0U);
+                WaitForMoeExpertTokenCountReady(workspace.sync.countsReady.get_ptr(buffer), countWorkspace_, 0U);
                 gmm1ExpertState.expertCountTableReady = true;
             }
             uint32_t expertTokenCount = GetMoeExpertTokenCount(gmm1Position.expertIdx);
@@ -344,7 +347,7 @@ MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::ProcessNextDispatchAndCurr
         Get<M_VALUE>(gmm1WaveProblemShape) = waveEndTokenIndexInExpert - gmm1Position.tokenIndexInExpert;
         UpdateMoeExpertGmm1GlobalBufferToGm<ActivationType, MoeWeightType, ActivationQuantOutType, QuantScaleOutType,
                                             PackedElementTraits<QuantOutType>::ELEMENTS_PER_BYTE, TopkWeightsPrefetch>(
-            gmmExecutionConfig_, syncWorkspaceLayout_, params_.workspaceInfo, moeWeightTensorListAddrs_, epilogueOp_,
+            gmmExecutionConfig_, syncWorkspaceLayout_, workspace, buffer, moeWeightTensorListAddrs_, epilogueOp_,
             gmm1AddrInfo, gmm1ExpertState, commonConfig_.gmm1OutputDim / commonConfig_.activationOutputDivisor,
             gmm1Position.tokenIndexInExpert, gmm1TilesPerMGroup_);
         /*
@@ -378,6 +381,8 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     const ExpertTokenPosition& gmm2Position, uint32_t waveEndTokenIndexInExpert, const ExpertLoopState& gmm2ExpertState,
     GMMAddrInfo& gmm2AddrInfo, uint32_t& startBlockIdx)
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     uint64_t expertRowCount = Get<M_VALUE>(gmm2ExpertState.problemShape);
     uint32_t waveRowCount = waveEndTokenIndexInExpert - gmm2Position.tokenIndexInExpert;
     uint32_t problemMGroupCount = GetMGroupCountForRows(waveRowCount, GMM1_TILE_M);
@@ -393,7 +398,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     ProblemShape gmm2WaveProblemShape = gmm2ExpertState.problemShape;
     Get<M_VALUE>(gmm2WaveProblemShape) = waveEndTokenIndexInExpert - gmm2Position.tokenIndexInExpert;
     UpdateMoeExpertGmm2GlobalBuffer<MoeWeightType, ActivationQuantOutType, QuantScaleOutType>(
-        gmmExecutionConfig_, syncWorkspaceLayout_, params_.workspaceInfo, moeWeightTensorListAddrs_, gmm2AddrInfo,
+        gmmExecutionConfig_, syncWorkspaceLayout_, workspace, buffer, moeWeightTensorListAddrs_, gmm2AddrInfo,
         gmm2ExpertState, commonConfig_.gmm1OutputDim / commonConfig_.activationOutputDivisor,
         gmm2Position.tokenIndexInExpert);
     // GMM2 与 GMM1 使用相同保护：只有完整专家 problem 才允许进一步判断是否绕过 L2。
@@ -467,6 +472,8 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     uint32_t expertBegin, uint32_t expertEnd, ExpertLoopState& combineState, GMMAddrInfo& combineAddrInfo,
     const CombineBufferConfig& bufferConfig, uint32_t finalCombineExpertIndex)
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     if constexpr (g_coreType == AIC) {
         return;
     }
@@ -482,7 +489,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
         if (expertTokenCount == 0U) {
             continue;
         }
-        UpdateMoeExpertCombineGlobalBuffer(params_.workspaceInfo, combineAddrInfo, combineState);
+        UpdateMoeExpertCombineGlobalBuffer(workspace, buffer, combineAddrInfo, combineState);
         if (dedupCombine) {
             RunWaveCombineStageDedup(commonConfig_, waveCombineJob_, activeBufferConfig, waveCombineScratch_,
                                      waveCombineDedupScratch_, params_, combineState, expertIdx, rowSequence);
@@ -544,6 +551,8 @@ template <TemplateMegaMoeArch92WaveTypeClass>
 __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::ProcessMoeExpertStages(
     Gmm1ActivationSync& gmm1ActivationSync, Gmm2CombineSync& gmm2CombineSync)
 {
+    const auto& workspace = params_.workspace.layout;
+    const auto& buffer = params_.workspace.base;
     const uint32_t gmm1SchedulerWidth = commonConfig_.gmm1OutputDim;
     gmm1TilesPerMGroup_ = Ops::Base::CeilDiv(gmm1SchedulerWidth, static_cast<uint32_t>(L1_TILE_N));
     gmm2TilesPerMGroup_ = Ops::Base::CeilDiv(commonConfig_.tokenHiddenDim, static_cast<uint32_t>(L1_TILE_N));
@@ -589,7 +598,7 @@ __aicore__ inline void MegaMoeArch92Wave<TemplateMegaMoeArch92WaveTypeFunc>::Pro
     bool hasPendingGmm2Wave = false;
 
     if constexpr (g_coreType == AIV) {
-        WaitForMoeExpertTokenCountReady(params_.workspaceInfo.flagSendCntCalToUpdParamsPtr, countWorkspace_, 0U);
+        WaitForMoeExpertTokenCountReady(workspace.sync.countsReady.get_ptr(buffer), countWorkspace_, 0U);
     }
     gmm2State.finalCombineExpertIndex = FindFinalCombineExpert();
     if constexpr (g_coreType == AIV) {

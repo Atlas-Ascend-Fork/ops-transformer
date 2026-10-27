@@ -14,10 +14,10 @@
 #include <cstring>
 #include <limits>
 #include "aclnn_common.h"
-#if __has_include("aclnnop/mega_moe_memory_layout.h")
-#include "aclnnop/mega_moe_memory_layout.h"
+#if __has_include("aclnnop/mega_moe_gm_layout.h")
+#include "aclnnop/mega_moe_gm_layout.h"
 #else
-#include "../../op_kernel/arch35_92/common/mega_moe_memory_layout.h"
+#include "../../op_kernel/arch35_92/common/mega_moe_gm_layout.h"
 #endif
 
 namespace op_api {
@@ -729,7 +729,7 @@ void AccumulateRoutingAuxSize(int64_t& cclDataSize, const CclDataBudget& budget)
         cclDataSize += CeilAlign(budget.serverNum * (ALIGN_32 + budget.numMaxTokensPerRank * ALIGN_32), ALIGN_512);
         cclDataSize += budget.aicNum * CeilAlign(ARCH35_TILE_M * static_cast<int64_t>(sizeof(uint64_t)), ALIGN_512);
         if (budget.reserveServerCombine) {
-            // 与 WorkspaceLayoutArch35::InitializeServerCombineBuffers 的独立状态、列表和位图区域一致。
+            // 与 WorkspaceLayout::InitializeServerCombineBuffers 的独立状态、列表和位图区域一致。
             cclDataSize +=
                 CeilAlign(budget.serverNum * ARCH35_INT_CACHELINE * static_cast<int64_t>(sizeof(int32_t)), ALIGN_512);
             const int64_t tokenListStride = (budget.numMaxTokensPerRank + 1LL) * static_cast<int64_t>(sizeof(int32_t));
@@ -867,13 +867,13 @@ int64_t CalcCclBufferSizeA5(int64_t epWorldSize, int64_t moeExpertNum, int64_t n
     const auto budget = BuildMemoryBudgetParams(epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden,
                                                 intermediateHidden, maxRecvTokenNum, topkWeightsType, serverNum,
                                                 combineQuantMode, combineCommMode, dispatchQuantOutDtype);
-    int64_t dataBytes = MegaMoeImpl::CclComputeLayout(budget.compute).workspaceSize;
+    int64_t dataBytes = MegaMoeImpl::WorkspaceLayout(budget.compute).workspaceSize;
     if (budget.compute.topoType == MegaMoeImpl::TOPO_TYPE_MTE) {
         // Dispatch 由 tiling 自动选择；分别计算开、关布局，覆盖数据区、去重描述符及标志区。
         auto dispatchDedupParams = budget.compute;
         dispatchDedupParams.dedupMode |= 2;
         dispatchDedupParams.ring = MegaMoeImpl::CalcCclStageRingConfig(dispatchDedupParams);
-        dataBytes = std::max(dataBytes, MegaMoeImpl::CclComputeLayout(dispatchDedupParams).workspaceSize);
+        dataBytes = std::max(dataBytes, MegaMoeImpl::WorkspaceLayout(dispatchDedupParams).workspaceSize);
     }
     return MegaMoeImpl::CalcCclComputeOffset(budget.comm) + dataBytes;
 }

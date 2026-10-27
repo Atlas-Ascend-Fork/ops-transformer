@@ -19,22 +19,12 @@
 #include "mega_moe_arch_policy.h"
 #include "mega_moe_constants.h"
 #include "mega_moe_gmm_epilogue_sync.h"
-#ifdef MEGA_MOE_ARCH92_DEVICE
-#include "../../arch92/common/mega_moe_workspace_arch92.h"
-#else
-#include "../../arch35/common/mega_moe_workspace_arch35.h"
-#endif
+#include "mega_moe_gm_layout.h"
 #include "../../../../common/op_kernel/mc2_moe_context.h"
 
 namespace MegaMoeImpl {
 
 using namespace AscendC;
-
-#ifdef MEGA_MOE_ARCH92_DEVICE
-using WorkspaceInfo = WorkspaceInfoArch92;
-#else
-using WorkspaceInfo = WorkspaceInfoArch35;
-#endif
 
 // 共享 GMM 的输入来源决定 AIC 搬入前是否需要等待 quant/pack。
 enum class SharedGmmStartCondition {
@@ -95,12 +85,12 @@ struct GMMAddrInfo {
     GM_ADDR gmm1OutGlobal;
     GM_ADDR gmm2OutGlobal;
     GM_ADDR metaInfoGlobal;
-    __gm__ int32_t* activationToGmm2Flag;
-    __gm__ int32_t* dispatchToGmm1Flag;
-    __gm__ int32_t* gmm2CombineSyncCounter;
-    __gm__ int32_t* gmmToEpilogueFlag;
-    __gm__ int32_t* gmm1TileStatus;
-    __gm__ int32_t* sharedExpertGmm2TileCounter;
+    __gm__ int32_t* activationToGmm2Flag = nullptr;
+    __gm__ int32_t* dispatchToGmm1Flag = nullptr;
+    __gm__ int32_t* gmm2CombineSyncCounter = nullptr;
+    __gm__ int32_t* gmmToEpilogueFlag = nullptr;
+    __gm__ int32_t* gmm1TileStatus = nullptr;
+    __gm__ int32_t* sharedExpertGmm2TileCounter = nullptr;
     uint32_t gmm2CombineLogicalCoreCount = 0U;
     Gmm1ActivationSync* gmm1ActivationSync = nullptr;
     Gmm2CombineSync* gmm2CombineSync =
@@ -121,6 +111,17 @@ struct ExpertWeightTensorListAddrs {
     GM_ADDR weightScales2 = nullptr;
 };
 
+// Runtime addresses are paired with the relative layout they belong to.
+struct Workspace {
+    GM_ADDR base;
+    WorkspaceLayout layout;
+};
+
+struct CommBuffer {
+    GM_ADDR base;
+    PeermemInfo layout;
+};
+
 struct Params {
     GM_ADDR aGmAddr;
     GM_ADDR xScaleGmAddr;
@@ -136,8 +137,8 @@ struct Params {
     GM_ADDR probsGmAddr;
     GM_ADDR y2GmAddr;
     GM_ADDR expertTokenNumsOutGmAddr;
-    WorkspaceInfo workspaceInfo;
-    PeermemInfo peermemInfo;
+    Workspace workspace;
+    CommBuffer communication;
     const MegaMoeTilingData* tilingData;
 };
 

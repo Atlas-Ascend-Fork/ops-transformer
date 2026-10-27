@@ -8,7 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include "../../../op_kernel/arch35/common/mega_moe_workspace_arch35.h"
+#include "../../../op_kernel/arch35_92/common/mega_moe_gm_layout.h"
 #include "../arch35_92/mega_moe_tiling_check.h"
 #include "../arch35_92/mega_moe_tiling_print.h"
 
@@ -268,8 +268,8 @@ static uint32_t CalcTopkValidIndexFixedBufferBytes(const MegaMoeTilingData* tili
                                                    uint32_t sharedActivationElementsPerByte,
                                                    bool isSharedQuantIndependent, uint32_t topkValidIndexCoreNum)
 {
-    const WorkspaceLayoutArch35 workspaceLayout(tilingData->compute);
-    uint64_t totalFlagElementCount = static_cast<uint64_t>(workspaceLayout.flagResetElementCount);
+    const WorkspaceLayout workspaceLayout(tilingData->compute);
+    uint64_t totalFlagElementCount = static_cast<uint64_t>((workspaceLayout.reset.flags.sizeBytes / SIZE_INT_32));
     /*
      * SendAndQuantBuffInit 会清零普通 flag 区域和预取 GMM1 tile 状态区域中较大的一块。
      * Host 侧的 UB reset 预算必须与 device 侧的最大值保持一致，否则 route ring 可能与 reset UB 重叠。
@@ -318,7 +318,7 @@ static uint32_t CalcTopkValidIndexFixedBufferBytes(const MegaMoeTilingData* tili
 
 /*
  * 设置 topK 有效下标发送的两套 UB 配置：先算固定占用，再按 expert 分核的两类 core 各算一套。
- * 本函数通过 WorkspaceLayoutArch35 读取 tilingData->compute.combineSyncSlotCountPerExpert，
+ * 本函数通过 WorkspaceLayout 读取 tilingData->compute.combineSyncSlotCountPerExpert，
  * 该字段必须在调用前写好。
  */
 static void SetTopkValidIndexBufferConfigs(MegaMoeTilingData* tilingData, uint32_t moeActivationElementsPerByte,
@@ -398,7 +398,7 @@ static void SetAdaptiveBufferConfigs(const gert::TilingContext* context, const M
     tilingData->dispatchBufferConfig =
         CalcDispatchBufferConfig(tilingData, activationElementsPerByte, availableUbBytes);
 
-    // 先于 topK 有效下标配置写入：WorkspaceLayoutArch35 会读取本字段计算 flag 区大小，
+    // 先于 topK 有效下标配置写入：WorkspaceLayout 会读取本字段计算 flag 区大小，
     // 该依赖只经 tilingData 传递，调换顺序会静默改变 flag 区尺寸。
     tilingData->compute.combineSyncSlotCountPerExpert = CalcCombineSyncSlotCountPerExpert(tilingData);
     SetCclLayoutParams(tilingData);
@@ -498,10 +498,11 @@ static ge::graphStatus CommitTilingResult(gert::TilingContext* context, const Me
                                           const char* nodeName)
 {
     // 共享专家与路由专家的 H、hiddenDim 已校验一致。
-    tilingData->a8w4L1Layout = CalcMegaMoeL1Layout(std::max(
-        static_cast<uint64_t>(tilingData->compute.h), static_cast<uint64_t>(GetActivationOutputWidth(tilingData))));
+    tilingData->a8w4L1Layout = CalcMegaMoeL1Layout(
+        std::max(static_cast<uint64_t>(tilingData->compute.h),
+                 static_cast<uint64_t>(GetActivationOutputWidth(tilingData->compute.hiddenDim, tilingData->actMode))));
 
-    WorkspaceLayoutArch35 workspaceLayout(tilingData->compute);
+    WorkspaceLayout workspaceLayout(tilingData->compute);
     OP_TILING_CHECK(CheckCclBufferCapacity(context, config, tilingData, workspaceLayout, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "CCL buffer capacity is insufficient."), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(SetWorkspace(context, nodeName) != ge::GRAPH_SUCCESS,

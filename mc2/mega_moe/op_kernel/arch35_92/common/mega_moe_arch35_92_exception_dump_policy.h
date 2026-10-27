@@ -12,7 +12,7 @@
 #define MEGA_MOE_ARCH35_EXCEPTION_DUMP_POLICY_H
 
 #include "../../../../common/op_kernel/mc2_exception_dump.h"
-#include "mega_moe_peermem.h"
+#include "mega_moe_gm_layout.h"
 #include "../mega_moe_tiling.h"
 
 namespace MegaMoeImpl {
@@ -62,14 +62,14 @@ __aicore__ inline __gm__ GmmLoopCount* RegisterMegaMoeExceptionDump(ExceptionDum
                                                                     GM_ADDR tilingGM,
                                                                     const MegaMoeTilingData* tilingData,
                                                                     const MegaMoeImpl::PeermemInfo& peermemInfo,
-                                                                    GM_ADDR epRankIdAddr)
+                                                                    GM_ADDR peermemBase, GM_ADDR epRankIdAddr)
 {
 #if MC2_ENABLE_EXCEPTION_DUMP
     engine.Init(dumpBase, tilingGM);
     engine.UpdateStage(Stage::INIT);
     engine.Dump(epRankIdAddr, sizeof(uint32_t));
-    engine.Dump(peermemInfo.rankSync.ptr, static_cast<size_t>(MegaMoeImpl::PEERMEM_DATA_OFFSET));
-    engine.Dump(peermemInfo.maskRecv.ptr, static_cast<size_t>(peermemInfo.maskRecv.size));
+    engine.Dump(peermemInfo.rankSync.get_ptr(peermemBase), static_cast<size_t>(MegaMoeImpl::PEERMEM_DATA_OFFSET));
+    engine.Dump(peermemInfo.maskRecv.get_ptr(peermemBase), static_cast<size_t>(peermemInfo.maskRecv.sizeBytes));
     GM_ADDR loopCountBase = dumpBase + GMM_LOOP_COUNT_REGION_OFFSET;
     engine.Dump(loopCountBase, tilingData->blockAivNum, GMM_LOOP_COUNT_DATA_SIZE, sizeof(GmmLoopCount));
 
@@ -79,9 +79,8 @@ __aicore__ inline __gm__ GmmLoopCount* RegisterMegaMoeExceptionDump(ExceptionDum
     __gm__ GmmLoopCount* loopCount = reinterpret_cast<__gm__ GmmLoopCount*>(loopCountBase) + GetBlockIdx();
     loopCount->gmm1Count = 0U;
     loopCount->gmm2Count = 0U;
-    GlobalTensor<uint8_t> loopCountGlobal;
-    loopCountGlobal.SetGlobalBuffer(reinterpret_cast<GM_ADDR>(loopCount));
-    DataCacheCleanAndInvalid<uint8_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(loopCountGlobal);
+    __gm__ uint8_t* loopCountGlobal = reinterpret_cast<GM_ADDR>(loopCount);
+    CleanInvalidateGmCacheLine(loopCountGlobal);
     return loopCount;
 #else
     (void)engine;
@@ -89,6 +88,7 @@ __aicore__ inline __gm__ GmmLoopCount* RegisterMegaMoeExceptionDump(ExceptionDum
     (void)tilingGM;
     (void)tilingData;
     (void)peermemInfo;
+    (void)peermemBase;
     (void)epRankIdAddr;
     return nullptr;
 #endif
@@ -108,9 +108,8 @@ __aicore__ inline void UpdateGmmLoopCount(__gm__ GmmLoopCount* loopCount, LoopCo
         countAddr = &loopCount->gmm1Count;
     }
     *countAddr = count;
-    GlobalTensor<uint8_t> countGlobal;
-    countGlobal.SetGlobalBuffer(reinterpret_cast<GM_ADDR>(countAddr));
-    DataCacheCleanAndInvalid<uint8_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(countGlobal);
+    __gm__ uint8_t* countGlobal = reinterpret_cast<GM_ADDR>(countAddr);
+    CleanInvalidateGmCacheLine(countGlobal);
 #else
     (void)loopCount;
     (void)index;

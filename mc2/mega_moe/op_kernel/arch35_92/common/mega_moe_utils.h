@@ -17,7 +17,7 @@
 #define MEGA_MOE_UTILS_H
 
 #include <cstdint>
-#include "mega_moe_memory_layout.h"
+#include "mega_moe_gm_layout.h"
 #include "mega_moe_constants.h"
 
 namespace MegaMoeImpl {
@@ -39,8 +39,12 @@ HOST_DEVICE uint64_t CalcMtePaddedRowCount(uint64_t validRows)
 #if defined(__DAV_C310_CUBE__) || defined(__DAV_C310_VEC__) || defined(__DAV_310R6_CUBE__) || \
     defined(__DAV_310R6_VEC__) || defined(__DAV_920R1_CUBE__) || defined(__DAV_920R1_VEC__) || \
     defined(__NPU_ARCH__) || defined(__CCE_AICORE__)
+#if !defined(__NPU_ARCH__) || ((__NPU_ARCH__ != 9201) && (__NPU_ARCH__ != 9202))
 #include "c_api/asc_simd.h"
+#endif
 #include "kernel_operator.h"
+#include "mega_moe_sync.h"
+#include "mega_moe_copy.h"
 #include "op_kernel/math_util.h"
 #include "mega_moe_constants.h"
 #include "mega_moe_arch_policy.h"
@@ -50,6 +54,12 @@ HOST_DEVICE uint64_t CalcMtePaddedRowCount(uint64_t validRows)
 namespace MegaMoeImpl {
 
 using namespace AscendC;
+
+template <auto Function, typename... Args>
+__aicore__ inline void CallVf(Args&&... args)
+{
+    asc_vf_call<Function>(static_cast<Args&&>(args)...);
+}
 
 constexpr uint32_t UINT64_BYTE_OFFSET_SHIFT = 3U;
 
@@ -63,10 +73,10 @@ __aicore__ inline __gm__ int32_t* GetSyncCountAddress(GM_ADDR rankSyncBase, uint
 __aicore__ inline void IncrementSyncCount(GM_ADDR rankSyncBase, uint32_t aivCoreIdx)
 {
     auto* sequenceAddr = GetSyncCountAddress(rankSyncBase, aivCoreIdx);
-    uint32_t nextSequence = static_cast<uint32_t>(ReadGmByPassDCache(sequenceAddr)) + 1U;
-    WriteGmByPassDCache(sequenceAddr, static_cast<int32_t>(nextSequence));
+    uint32_t nextSequence = static_cast<uint32_t>(GmRead(sequenceAddr)) + 1U;
+    GmWrite(sequenceAddr, static_cast<int32_t>(nextSequence));
     // 等待旁路 GM 写完成后再读取 epoch。
-    asc_sync_data_barrier(mem_dsb_t::DSB_DDR);
+    GmDataBarrier();
 }
 
 __aicore__ inline uint32_t GetSyncRoundTag(int32_t syncCount)
@@ -240,43 +250,42 @@ __aicore__ inline WorkRange GetRotatedBalancedWorkRange(uint32_t totalWorkItems,
 }
 
 // 按 strideBytes 字节间距清零 int32；range 以逻辑元素为单位，strideBytes 至少为 4 且为 4 的倍数。
-// 调用方提供已填零、非空且 32B 对齐的 UB Tensor，并保护其 MTE3 生命周期。
+// 调用方提供已填零、32B 对齐且容量非零的 UB 缓冲区，并保护其 MTE3 生命周期。
 __aicore__ inline void ResetWorkspaceRegionWithStride(const WorkRange& range, GM_ADDR regionPtr, uint64_t strideBytes,
-                                                      LocalTensor<int32_t>& resetTensor)
+                                                      __ubuf__ int32_t* resetTensor, uint32_t resetElements)
 {
-    GlobalTensor<int32_t> regionGm;
-    regionGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(regionPtr));
-    const uint32_t batchCapacity = resetTensor.GetSize() < UINT16_MAX ? resetTensor.GetSize() : UINT16_MAX;
+    __gm__ int32_t* regionGm = reinterpret_cast<__gm__ int32_t*>(regionPtr);
+    const uint32_t batchCapacity = resetElements < UINT16_MAX ? resetElements : UINT16_MAX;
     for (uint32_t offset = 0U; offset < range.count;) {
         const uint32_t remaining = range.count - offset;
         const uint32_t batchCount = remaining < batchCapacity ? remaining : batchCapacity;
         const uint64_t dstElement = (static_cast<uint64_t>(range.start) + offset) * (strideBytes / sizeof(int32_t));
-        DataCopyExtParams copyParams{static_cast<uint16_t>(batchCount), sizeof(int32_t), 0U,
-                                     static_cast<int64_t>(strideBytes - sizeof(int32_t)), 0U};
-        DataCopyPad<int32_t, PaddingMode::Compact>(regionGm[dstElement], resetTensor, copyParams);
+
+        CopyUbToGm(regionGm + dstElement, resetTensor,
+                   CopyRows{static_cast<uint16_t>(batchCount), sizeof(int32_t), strideBytes, sizeof(int32_t)});
         offset += batchCount;
     }
 }
 
-// 使用调用方准备的全零 UB Tensor 清理指定范围；range 以 int32 元素为单位。
+// 使用调用方准备的全零 UB 缓冲区清理指定范围；range 以 int32 元素为单位。
 __aicore__ inline void ResetWorkspaceRegion(const WorkRange& range, GM_ADDR regionPtr, int32_t batchElementCount,
-                                            LocalTensor<int32_t>& resetTensor)
+                                            __ubuf__ int32_t* resetTensor)
 {
-    GlobalTensor<int32_t> regionGm;
-    regionGm.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(regionPtr));
+    __gm__ int32_t* regionGm = reinterpret_cast<__gm__ int32_t*>(regionPtr);
     for (uint32_t offset = 0; offset < range.count; offset += static_cast<uint32_t>(batchElementCount)) {
         uint32_t batchCount = range.count - offset < static_cast<uint32_t>(batchElementCount) ?
                                   range.count - offset :
                                   static_cast<uint32_t>(batchElementCount);
-        DataCopyExtParams copyParams{1U, static_cast<uint32_t>(batchCount * sizeof(int32_t)), 0U, 0U, 0U};
-        DataCopyPad(regionGm[range.start + offset], resetTensor, copyParams);
+
+        CopyUbToGm((regionGm + (range.start + offset)), resetTensor,
+                   static_cast<uint32_t>(batchCount * sizeof(int32_t)));
     }
 }
 
 // 按任务划分对齐范围，再复用范围版本执行清零。
 template <int32_t JobAlignment>
 __aicore__ inline void ResetWorkspaceRegion(const AivJobContext& job, GM_ADDR regionPtr, int32_t elementCount,
-                                            int32_t batchElementCount, LocalTensor<int32_t>& resetTensor)
+                                            int32_t batchElementCount, __ubuf__ int32_t* resetTensor)
 {
     const WorkRange range = TilingByJobContext(static_cast<uint32_t>(elementCount), job.jobIndex, job.totalJobs,
                                                static_cast<uint32_t>(JobAlignment));
@@ -315,7 +324,7 @@ __aicore__ inline uint64_t GetExpertCountWorkspaceOffset(const BlockWorkspaceCon
 __aicore__ inline void GmSignalWaitBarrier(__gm__ int32_t* sigAddr, int32_t compareValue)
 {
     do {
-        if (ReadGmByPassDCache(sigAddr) == compareValue) {
+        if (GmRead(sigAddr) == compareValue) {
             return;
         }
     } while (true);
@@ -408,9 +417,9 @@ __aicore__ inline uint32_t AdvanceExpertTokenPositionInWave(uint32_t expertToken
 // 轮询 GM 中的 int32 ready flag，并在两次读取之间加入短暂退避。
 __aicore__ inline void WaitUntilGmFlagIsNonZero(__gm__ int32_t* flagAddr)
 {
-    while (AscendC::ReadGmByPassDCache(flagAddr) == 0) {
-        int64_t startCycle = AscendC::GetSystemCycle();
-        while (AscendC::GetSystemCycle() - startCycle < GM_FLAG_POLL_BACKOFF_CYCLES) {
+    while (GmRead(flagAddr) == 0) {
+        int64_t startCycle = GetDeviceCycle();
+        while (GetDeviceCycle() - startCycle < GM_FLAG_POLL_BACKOFF_CYCLES) {
         }
     }
 }
@@ -436,7 +445,7 @@ __aicore__ inline uint32_t GetExpertTokenCountFromWorkspace(GM_ADDR expertTokenC
     uint64_t countSlotIndex = GetExpertCountWorkspaceOffset(countWorkspace, expertCount, expertIdx, true);
     __gm__ int32_t* expertTokenCountAddr =
         reinterpret_cast<__gm__ int32_t*>(expertTokenCountWorkspace) + countSlotIndex;
-    return static_cast<uint32_t>(AscendC::ReadGmByPassDCache(expertTokenCountAddr));
+    return static_cast<uint32_t>(GmRead(expertTokenCountAddr));
 }
 
 /*
@@ -475,18 +484,18 @@ __aicore__ inline int32_t CrossRankHandshakeInWorldSize(GM_ADDR rankSyncInWorldP
                                                         const AivJobContext& syncJob, __gm__ int32_t* syncCount)
 {
     auto* syncRank = reinterpret_cast<__gm__ int32_t*>(rankSyncInWorldPtr);
-    const int32_t count = static_cast<int32_t>(static_cast<uint32_t>(ReadGmByPassDCache(syncCount)) + 1U);
+    const int32_t count = static_cast<int32_t>(static_cast<uint32_t>(GmRead(syncCount)) + 1U);
     for (uint32_t rankIdx = syncJob.jobIndex; rankIdx < worldSize; rankIdx += syncJob.totalJobs) {
         auto* remoteSyncAddr = reinterpret_cast<__gm__ int32_t*>(g_winRankAddr_[rankIdx]) + rankId * INT_CACHELINE;
-        WriteGmByPassDCache(remoteSyncAddr, count);
+        GmWrite(remoteSyncAddr, count);
         GmSignalWaitBarrier(syncRank + rankIdx * INT_CACHELINE, count);
     }
-    WriteGmByPassDCache(syncCount, count);
+    GmWrite(syncCount, count);
     /*
      * 出口 posted 写与下一次 graph replay 的入口旁路回读仅隔微秒级：不排空则下轮读到旧计数，
      * epoch tag 永久错位 1，两卡互等挂死。每 AIV 每 kernel 仅一条 DSB，出口处写队列近空、开销可忽略。
      */
-    asc_sync_data_barrier(mem_dsb_t::DSB_DDR);
+    GmDataBarrier();
     return count;
 }
 
@@ -497,14 +506,7 @@ __aicore__ inline void CrossRankSyncInWorldSize(GM_ADDR rankSyncInWorldPtr, uint
     auto* syncCount = GetSyncCountAddress(rankSyncInWorldPtr, aivJob.jobIndex);
     CrossRankHandshakeInWorldSize(rankSyncInWorldPtr, rankId, worldSize, aivJob, syncCount);
     PipeBarrier<PIPE_ALL>();
-    SyncAll<true>();
-}
-
-template <AscendC::HardEvent event, int32_t eventId>
-__aicore__ inline void SyncFuncStatic()
-{
-    AscendC::SetFlag<event>(static_cast<event_t>(eventId));
-    AscendC::WaitFlag<event>(static_cast<event_t>(eventId));
+    AllVectorBarrier();
 }
 
 } // namespace MegaMoeImpl

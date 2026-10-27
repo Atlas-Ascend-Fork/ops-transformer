@@ -17,7 +17,7 @@
 #define MEGA_MOE_TILING_PRINT_H
 
 #include "../../../op_kernel/arch35_92/mega_moe_tiling.h"
-#include "../../../op_kernel/arch35_92/common/mega_moe_peermem.h"
+#include "../../../op_kernel/arch35_92/common/mega_moe_gm_layout.h"
 #include "mc2_log.h"
 
 namespace optiling {
@@ -104,25 +104,49 @@ void PrintMegaMoeTilingData(const MegaMoeTilingData* tilingData, const char* nod
 /*
  * 输出 CCL 计算区域的偏移和总大小，供主机与核内布局核对使用。
  */
-template <typename WorkspaceLayoutType>
-void PrintWorkspaceLayout(const WorkspaceLayoutType* layout, const char* nodeName)
+void PrintWorkspaceLayout(const WorkspaceLayout* layout, const char* nodeName)
 {
-    OP_LOGD(nodeName, "dispatchRevDataOffset:         %ld\n", layout->dispatchRevDataOffset);
-    OP_LOGD(nodeName, "dispatchRevScaleOffset:        %ld\n", layout->dispatchRevScaleOffset);
-    OP_LOGD(nodeName, "activationQuantDataOffset:     %ld\n", layout->activationQuantDataOffset);
-    OP_LOGD(nodeName, "activationQuantScaleOffset:    %ld\n", layout->activationQuantScaleOffset);
-    OP_LOGD(nodeName, "expertRecvTokenCountOffset:    %ld\n", layout->expertRecvTokenCountOffset);
-    OP_LOGD(nodeName, "metaInfoOffset:                %ld\n", layout->metaInfoOffset);
-    OP_LOGD(nodeName, "flagActivationToGmm2Offset:    %ld\n", layout->flagActivationToGmm2Offset);
-    OP_LOGD(nodeName, "sharedActivationToGmm2Offset:  %ld\n", layout->sharedActivationToGmm2Offset);
-    OP_LOGD(nodeName, "flagDispatchToGmm1Offset:      %ld\n", layout->flagDispatchToGmm1Offset);
-    OP_LOGD(nodeName, "flagSendCntCalToUpdParamsOffset: %ld\n", layout->flagSendCntCalToUpdParamsOffset);
-    OP_LOGD(nodeName, "flagGmmToEpilogueOffset:       %ld\n", layout->flagGmmToEpilogueOffset);
-    OP_LOGD(nodeName, "gmm2ReadyOffset:               %ld\n", layout->gmm2ReadyOffset);
-    OP_LOGD(nodeName, "gmm2CombineSyncCounterOffset:  %ld\n", layout->gmm2CombineSyncCounterOffset);
-    OP_LOGD(nodeName, "gmm2MmadResOffset:             %ld\n", layout->gmm2MmadResOffset);
-    OP_LOGD(nodeName, "sharedExpertInputOffset:       %ld\n", layout->sharedExpertInputOffset);
-    OP_LOGD(nodeName, "workspaceSize:                 %ld\n", layout->workspaceSize);
+    const auto printBuffer = [nodeName](const char* name, const GmBuffer& buffer) {
+        OP_LOGD(nodeName, "%s: offsetBytes=%ld, sizeBytes=%ld", name, buffer.offsetBytes, buffer.sizeBytes);
+    };
+    printBuffer("routed.gmm1Input.data", layout->routed.gmm1Input.data);
+    printBuffer("routed.gmm1Input.scale", layout->routed.gmm1Input.scale);
+    printBuffer("routing.tokenWeights", layout->routing.tokenWeights);
+    printBuffer("routed.gmm2Input.data", layout->routed.gmm2Input.data);
+    printBuffer("routed.gmm2Input.scale", layout->routed.gmm2Input.scale);
+    printBuffer("routing.recvCounts", layout->routing.recvCounts);
+    printBuffer("routing.receivedTokenMetadata", layout->routing.receivedTokenMetadata);
+    printBuffer("routing.recvPrefixBackup", layout->routing.recvPrefixBackup);
+    printBuffer("routed.gmm1Output", layout->routed.gmm1Output);
+    printBuffer("routed.gmm2Output", layout->routed.gmm2Output);
+    printBuffer("shared.gmm2Output", layout->shared.gmm2Output);
+    printBuffer("shared.gmm1Output", layout->shared.gmm1Output);
+    printBuffer("shared.gmm1Input.data", layout->shared.gmm1Input.data);
+    printBuffer("shared.gmm1Input.scale", layout->shared.gmm1Input.scale);
+    printBuffer("shared.gmm2Input.data", layout->shared.gmm2Input.data);
+    printBuffer("shared.gmm2Input.scale", layout->shared.gmm2Input.scale);
+    printBuffer("sync.activationReady", layout->sync.activationReady);
+    printBuffer("mte.sync.sharedActivationReady", layout->mte.sync.sharedActivationReady);
+    printBuffer("sync.dispatchReady", layout->sync.dispatchReady);
+    printBuffer("sync.countsReady", layout->sync.countsReady);
+    printBuffer("sync.epilogueReady", layout->sync.epilogueReady);
+    printBuffer("mte.sync.aiv1TopkReady", layout->mte.sync.aiv1TopkReady);
+    printBuffer("mte.sync.gmm2Ready", layout->mte.sync.gmm2Ready);
+    printBuffer("urma.sync.combineCounters", layout->urma.sync.combineCounters);
+    printBuffer("sync.gmm1Tiles", layout->sync.gmm1Tiles);
+    printBuffer("mte.sync.sharedGmm2Tiles", layout->mte.sync.sharedGmm2Tiles);
+    printBuffer("mte.sync.dedupReady", layout->mte.sync.dedupReady);
+    printBuffer("mte.dedupRowDescriptors", layout->mte.dedupRowDescriptors);
+    printBuffer("urma.mask", layout->urma.mask);
+    printBuffer("urma.relaySendQueue", layout->urma.relaySendQueue);
+    printBuffer("urma.remoteReadySnapshot", layout->urma.remoteReadySnapshot);
+    printBuffer("urma.serverCombine.tokenIds", layout->urma.serverCombine.tokenIds);
+    printBuffer("urma.serverCombine.tokenBitmaps", layout->urma.serverCombine.tokenBitmaps);
+    printBuffer("urma.serverCombine.completedCounts", layout->urma.serverCombine.completedCounts);
+    printBuffer("reset.serverCombine", layout->reset.serverCombine);
+    printBuffer("reset.flags", layout->reset.flags);
+    printBuffer("reset.gmm1Tiles", layout->reset.gmm1Tiles);
+    OP_LOGD(nodeName, "workspaceSize=%ld bytes", layout->workspaceSize);
 }
 
 /*
@@ -135,17 +159,17 @@ void PrintPeermemInfo(const MegaMoeTilingData* tilingData, const char* nodeName)
     OP_LOGD(nodeName, "exceptionDumpRegionSize: {%ld}\n", exceptionDumpRegionSize);
     const PeermemInfo info(tilingData->comm);
     const int64_t dataOffset =
-        tilingData->compute.topoType == TOPO_TYPE_MTE ? info.expertCountRecv.offset : info.maskRecv.offset;
+        tilingData->compute.topoType == TOPO_TYPE_MTE ? info.expertCountRecv.offsetBytes : info.maskRecv.offsetBytes;
     OP_LOGD(nodeName, "peermemDataOffset: {%ld}\n", dataOffset);
-    OP_LOGD(nodeName, "maskRecvSize: {%ld}\n", info.maskRecv.size);
-    OP_LOGD(nodeName, "expertCountRecvSize: {%ld}\n", info.expertCountRecv.size);
+    OP_LOGD(nodeName, "maskRecvSize: {%ld}\n", info.maskRecv.sizeBytes);
+    OP_LOGD(nodeName, "expertCountRecvSize: {%ld}\n", info.expertCountRecv.sizeBytes);
     OP_LOGD(nodeName, "dispatchRecordAreaSize: {%ld}\n",
-            info.quantTokenScale.size + info.dispatchReceive.size + info.dispatchFlag.size);
-    OP_LOGD(nodeName, "combineSendSize: {%ld}\n", info.combineSend.size);
-    OP_LOGD(nodeName, "sourceReadySize: {%ld}\n", info.sourceReady.size);
-    OP_LOGD(nodeName, "contributionSize: {%ld}\n", info.contribution.size);
-    OP_LOGD(nodeName, "contributionReadySize: {%ld}\n", info.contributionReady.size);
-    OP_LOGD(nodeName, "combineReceiveSize: {%ld}\n", info.combineReceive.size);
+            info.quantTokenScale.sizeBytes + info.dispatchReceive.sizeBytes + info.dispatchFlag.sizeBytes);
+    OP_LOGD(nodeName, "combineSendSize: {%ld}\n", info.combineSend.sizeBytes);
+    OP_LOGD(nodeName, "sourceReadySize: {%ld}\n", info.sourceReady.sizeBytes);
+    OP_LOGD(nodeName, "contributionSize: {%ld}\n", info.contribution.sizeBytes);
+    OP_LOGD(nodeName, "contributionReadySize: {%ld}\n", info.contributionReady.sizeBytes);
+    OP_LOGD(nodeName, "combineReceiveSize: {%ld}\n", info.combineReceive.sizeBytes);
     OP_LOGD(nodeName, "total PeermemInfo Size: {%ld}\n", exceptionDumpRegionSize + info.totalSize);
 }
 

@@ -82,13 +82,13 @@ __aicore__ constexpr inline ActivationMxQuantUbOffsets BuildActivationMxQuantUbO
 
 template <typename InputType>
 struct ActivationMxQuantUbPointers {
-    __ubuf__ InputType* firstInput;
-    __ubuf__ InputType* secondInput;
-    __ubuf__ bfloat16_t* activationOutput;
-    __ubuf__ int8_t* quantOutput;
-    __ubuf__ uint16_t* quantScale;
-    __ubuf__ uint16_t* maxExp;
-    __ubuf__ uint16_t* inverseMxScale;
+    __ubuf__ InputType* firstInput = nullptr;
+    __ubuf__ InputType* secondInput = nullptr;
+    __ubuf__ bfloat16_t* activationOutput = nullptr;
+    __ubuf__ int8_t* quantOutput = nullptr;
+    __ubuf__ uint16_t* quantScale = nullptr;
+    __ubuf__ uint16_t* maxExp = nullptr;
+    __ubuf__ uint16_t* inverseMxScale = nullptr;
     uint32_t selectedSlotOffsetBytes;
 };
 

@@ -12,6 +12,7 @@
 #define MEGA_MOE_CONSTANTS_H
 
 #include <cstdint>
+#include "mega_moe_gm_layout.h"
 
 namespace MegaMoeImpl {
 
@@ -37,33 +38,6 @@ constexpr uint16_t INPUT_PREPARE_DONE_FLAG = 2;
 constexpr uint16_t INPUT_UB_FREE_FLAG = 15;
 
 constexpr int64_t MAX_INT16_TOPK_INDEX_COUNT = 1LL << 15;
-
-enum class MegaMoeActMode : uint8_t {
-    SWIGLU = 0U,
-    SITU = 1U,
-    SWIGLU_STEP = 2U,
-    SWIGLU_OAI = 3U,
-    GELU = 4U,
-};
-
-enum class MegaMoeActSubMode : uint8_t {
-    DEFAULT = 0U,
-    LINEAR = 1U,
-};
-
-enum class MegaMoeGmmMode : uint8_t {
-    A8W8_ND = 0U,
-    A8W4_NZ = 1U,
-    A8W8_NZ = 2U,
-    A4W4_ND = 3U,
-    A4W4_NZ = 4U,
-};
-
-constexpr uint8_t GMM_MODE_A8W8_ND = static_cast<uint8_t>(MegaMoeGmmMode::A8W8_ND);
-constexpr uint8_t GMM_MODE_A8W4_NZ = static_cast<uint8_t>(MegaMoeGmmMode::A8W4_NZ);
-constexpr uint8_t GMM_MODE_A8W8_NZ = static_cast<uint8_t>(MegaMoeGmmMode::A8W8_NZ);
-constexpr uint8_t GMM_MODE_A4W4_ND = static_cast<uint8_t>(MegaMoeGmmMode::A4W4_ND);
-constexpr uint8_t GMM_MODE_A4W4_NZ = static_cast<uint8_t>(MegaMoeGmmMode::A4W4_NZ);
 
 constexpr uint64_t M_VALUE = 0UL;
 constexpr uint64_t N_VALUE = 1UL;
@@ -125,7 +99,7 @@ constexpr uint32_t ACTIVATION_N_HALF = 2U;
 
 // ============ MTE 通信去重 ============
 // 开关的唯一真源是 tilingData->compute.dedupMode（0=全关 1=仅combine开 2=仅dispatch开 3=双开），
-// 判断统一用 mega_moe_peermem.h 的 IsDispatchDedupOn/IsCombineDedupOn。
+// 判断统一用 mega_moe_gm_layout.h 的 IsDispatchDedupOn/IsCombineDedupOn。
 constexpr int32_t DEDUP_MODE_OFF = 0;
 constexpr int32_t DEDUP_MODE_COMBINE_ONLY = 1;
 constexpr int32_t DEDUP_MODE_DISPATCH_ONLY = 2;

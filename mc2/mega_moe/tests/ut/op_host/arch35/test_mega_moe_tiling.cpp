@@ -16,7 +16,8 @@
 #include <type_traits>
 #include <vector>
 #include <gtest/gtest.h>
-#include "../../../../op_kernel/arch35/common/mega_moe_workspace_arch35.h"
+#include "op_common/op_host/util/math_util.h"
+#include "../../../../op_kernel/arch35_92/common/mega_moe_gm_layout.h"
 #include "../../../../op_kernel/arch35_92/common/mega_moe_utils.h"
 #include "../../../../op_kernel/arch35_92/mega_moe_tiling.h"
 #include "mc2_tiling_case_executor.h"
@@ -109,7 +110,7 @@ TEST_F(MegaMoeArch35TilingTest, DedupModePredicatesMatchKernelContract)
     EXPECT_TRUE(IsCombineDedupOn(DEDUP_MODE_BOTH));
 }
 
-TEST_F(MegaMoeArch35TilingTest, GmMemoryRegionsPreserveTopologyOrder)
+TEST_F(MegaMoeArch35TilingTest, GmBuffersPreserveTopologyOrder)
 {
     using namespace MegaMoeImpl;
     MegaMoeTilingData params{};
@@ -123,71 +124,69 @@ TEST_F(MegaMoeArch35TilingTest, GmMemoryRegionsPreserveTopologyOrder)
     FinalizeTestLayoutParams(params);
     const PeermemInfo mte(params.comm);
     // 固定输入的通信分区参考值，不通过公共布局函数重新生成预期偏移和容量。
-    const MemoryRegionLayout mteExpected[] = {{0, 49152},        {49152, 12288}, {1110016, 4096}, {61440, 1048576},
-                                              {1114112, 540672}, {-1, 0},        {-1, 0},         {1654784, 8388608}};
-    const GmMemoryRegion mteRegions[] = {mte.rankSync,        mte.syncCount,       mte.maskRecv,
-                                         mte.expertCountRecv, mte.quantTokenScale, mte.dispatchReceive,
-                                         mte.dispatchFlag,    mte.combineSend};
+    const GmBuffer mteExpected[] = {{0, 49152},        {49152, 12288}, {1110016, 4096}, {61440, 1048576},
+                                    {1114112, 540672}, {-1, 0},        {-1, 0},         {1654784, 8388608}};
+    const GmBuffer mteRegions[] = {mte.rankSync,        mte.syncCount,       mte.maskRecv,     mte.expertCountRecv,
+                                   mte.quantTokenScale, mte.dispatchReceive, mte.dispatchFlag, mte.combineSend};
     for (uint32_t index = 0; index < 8U; ++index) {
-        EXPECT_EQ(mteRegions[index].offset, mteExpected[index].offset);
-        EXPECT_EQ(mteRegions[index].size, mteExpected[index].size);
+        EXPECT_EQ(mteRegions[index].offsetBytes, mteExpected[index].offsetBytes);
+        EXPECT_EQ(mteRegions[index].sizeBytes, mteExpected[index].sizeBytes);
     }
     EXPECT_EQ(mte.totalSize, 10043392LL);
-    EXPECT_EQ(mte.rankSync.offset, 0);
-    EXPECT_EQ(mte.syncCount.offset + mte.syncCount.size, PEERMEM_DATA_OFFSET);
-    EXPECT_EQ(mte.expertCountRecv.offset, PEERMEM_DATA_OFFSET);
-    EXPECT_EQ(mte.expertCountRecv.size, PEERMEM_MTE_COUNT_REGION_SIZE);
-    EXPECT_EQ(mte.maskRecv.offset, mte.expertCountRecv.offset + mte.expertCountRecv.size);
-    EXPECT_EQ(mte.combineSend.offset, mte.quantTokenScale.offset + mte.quantTokenScale.size);
-    EXPECT_EQ(mte.totalSize, mte.combineSend.offset + mte.combineSend.size);
-    EXPECT_EQ(mte.dispatchReceive.ptr, nullptr);
-    EXPECT_EQ(mte.dispatchFlag.ptr, nullptr);
-    EXPECT_EQ(mte.combineSend.ptr, nullptr);
+    EXPECT_EQ(mte.rankSync.offsetBytes, 0);
+    EXPECT_EQ(mte.syncCount.offsetBytes + mte.syncCount.sizeBytes, PEERMEM_DATA_OFFSET);
+    EXPECT_EQ(mte.expertCountRecv.offsetBytes, PEERMEM_DATA_OFFSET);
+    EXPECT_EQ(mte.expertCountRecv.sizeBytes, PEERMEM_MTE_COUNT_REGION_SIZE);
+    EXPECT_EQ(mte.maskRecv.offsetBytes, mte.expertCountRecv.offsetBytes + mte.expertCountRecv.sizeBytes);
+    EXPECT_EQ(mte.combineSend.offsetBytes, mte.quantTokenScale.offsetBytes + mte.quantTokenScale.sizeBytes);
+    EXPECT_EQ(mte.totalSize, mte.combineSend.offsetBytes + mte.combineSend.sizeBytes);
+    EXPECT_EQ(mte.dispatchReceive.get_ptr(nullptr), nullptr);
+    EXPECT_EQ(mte.dispatchFlag.get_ptr(nullptr), nullptr);
+    EXPECT_EQ(mte.combineSend.get_ptr(nullptr), nullptr);
     std::vector<uint8_t> window(static_cast<size_t>(mte.totalSize));
-    const PeermemInfo bound(params.comm, window.data());
-    EXPECT_EQ(bound.rankSync.ptr, window.data());
-    EXPECT_EQ(bound.maskRecv.ptr, window.data() + bound.maskRecv.offset);
-    EXPECT_EQ(bound.combineSend.ptr, window.data() + bound.combineSend.offset);
-    EXPECT_EQ(bound.cclComputePtr, window.data() + Ops::Base::CeilAlign(bound.totalSize, ALIGN_512));
-    EXPECT_EQ(bound.dispatchReceive.ptr, nullptr);
-    EXPECT_EQ(bound.dispatchFlag.ptr, nullptr);
+    const PeermemInfo bound(params.comm);
+    EXPECT_EQ(bound.rankSync.get_ptr(window.data()), window.data());
+    EXPECT_EQ(bound.maskRecv.get_ptr(window.data()), window.data() + bound.maskRecv.offsetBytes);
+    EXPECT_EQ(bound.combineSend.get_ptr(window.data()), window.data() + bound.combineSend.offsetBytes);
+    EXPECT_EQ(bound.workspace.get_ptr(window.data()), window.data() + Ops::Base::CeilAlign(bound.totalSize, ALIGN_512));
+    EXPECT_EQ(bound.dispatchReceive.get_ptr(window.data()), nullptr);
+    EXPECT_EQ(bound.dispatchFlag.get_ptr(window.data()), nullptr);
     const PeermemInfo copy = bound;
-    EXPECT_EQ(copy.maskRecv.ptr, bound.maskRecv.ptr);
-    EXPECT_EQ(copy.combineSend.ptr, bound.combineSend.ptr);
+    EXPECT_EQ(copy.maskRecv.get_ptr(window.data()), bound.maskRecv.get_ptr(window.data()));
+    EXPECT_EQ(copy.combineSend.get_ptr(window.data()), bound.combineSend.get_ptr(window.data()));
     EXPECT_EQ(copy.totalSize, bound.totalSize);
     auto emptyParams = params;
     emptyParams.compute.numMaxTokensPerRank = 0;
     FinalizeTestLayoutParams(emptyParams);
-    const PeermemInfo empty(emptyParams.comm, window.data());
-    EXPECT_EQ(empty.combineSend.size, 0);
-    EXPECT_EQ(empty.combineSend.ptr, window.data() + empty.combineSend.offset);
+    const PeermemInfo empty(emptyParams.comm);
+    EXPECT_EQ(empty.combineSend.sizeBytes, 0);
+    EXPECT_EQ(empty.combineSend.get_ptr(window.data()), window.data() + empty.combineSend.offsetBytes);
 
     params.compute.topoType = TOPO_TYPE_URMA;
     params.compute.epWorldSize = 1024;
     params.rankNumPerServer = 8;
     FinalizeTestLayoutParams(params);
     const PeermemInfo urma(params.comm);
-    const MemoryRegionLayout urmaExpected[] = {{0, 65536}, {65536, 12288},     {77824, 655360},    {733184, 16384},
-                                               {-1, 0},    {749568, 75497472}, {76247040, 131072}, {76378112, 8388608}};
-    const GmMemoryRegion urmaRegions[] = {urma.rankSync,        urma.syncCount,       urma.maskRecv,
-                                          urma.expertCountRecv, urma.quantTokenScale, urma.dispatchReceive,
-                                          urma.dispatchFlag,    urma.combineSend};
+    const GmBuffer urmaExpected[] = {{0, 65536}, {65536, 12288},     {77824, 655360},    {733184, 16384},
+                                     {-1, 0},    {749568, 75497472}, {76247040, 131072}, {76378112, 8388608}};
+    const GmBuffer urmaRegions[] = {urma.rankSync,        urma.syncCount,       urma.maskRecv,     urma.expertCountRecv,
+                                    urma.quantTokenScale, urma.dispatchReceive, urma.dispatchFlag, urma.combineSend};
     for (uint32_t index = 0; index < 8U; ++index) {
-        EXPECT_EQ(urmaRegions[index].offset, urmaExpected[index].offset);
-        EXPECT_EQ(urmaRegions[index].size, urmaExpected[index].size);
+        EXPECT_EQ(urmaRegions[index].offsetBytes, urmaExpected[index].offsetBytes);
+        EXPECT_EQ(urmaRegions[index].sizeBytes, urmaExpected[index].sizeBytes);
     }
     EXPECT_EQ(urma.totalSize, 84766720LL);
-    EXPECT_EQ(urma.syncCount.offset, 1024 * PEERMEM_SYNC_SLOT_SIZE);
-    EXPECT_EQ(urma.maskRecv.offset, urma.syncCount.offset + urma.syncCount.size);
-    EXPECT_EQ(urma.expertCountRecv.offset, urma.maskRecv.offset + urma.maskRecv.size);
-    EXPECT_EQ(urma.dispatchReceive.offset, urma.expertCountRecv.offset + urma.expertCountRecv.size);
-    EXPECT_EQ(urma.dispatchFlag.offset, urma.dispatchReceive.offset + urma.dispatchReceive.size);
-    EXPECT_EQ(urma.combineSend.offset, urma.dispatchFlag.offset + urma.dispatchFlag.size);
-    EXPECT_EQ(urma.totalSize, urma.combineSend.offset + urma.combineSend.size);
-    EXPECT_EQ(urma.quantTokenScale.ptr, nullptr);
+    EXPECT_EQ(urma.syncCount.offsetBytes, 1024 * PEERMEM_SYNC_SLOT_SIZE);
+    EXPECT_EQ(urma.maskRecv.offsetBytes, urma.syncCount.offsetBytes + urma.syncCount.sizeBytes);
+    EXPECT_EQ(urma.expertCountRecv.offsetBytes, urma.maskRecv.offsetBytes + urma.maskRecv.sizeBytes);
+    EXPECT_EQ(urma.dispatchReceive.offsetBytes, urma.expertCountRecv.offsetBytes + urma.expertCountRecv.sizeBytes);
+    EXPECT_EQ(urma.dispatchFlag.offsetBytes, urma.dispatchReceive.offsetBytes + urma.dispatchReceive.sizeBytes);
+    EXPECT_EQ(urma.combineSend.offsetBytes, urma.dispatchFlag.offsetBytes + urma.dispatchFlag.sizeBytes);
+    EXPECT_EQ(urma.totalSize, urma.combineSend.offsetBytes + urma.combineSend.sizeBytes);
+    EXPECT_EQ(urma.quantTokenScale.get_ptr(nullptr), nullptr);
 }
 
-TEST_F(MegaMoeArch35TilingTest, GmMemoryRegionsKeepCapacityOptionsIndependent)
+TEST_F(MegaMoeArch35TilingTest, GmBuffersKeepCapacityOptionsIndependent)
 {
     using namespace MegaMoeImpl;
     MegaMoeTilingData params{};
@@ -200,26 +199,26 @@ TEST_F(MegaMoeArch35TilingTest, GmMemoryRegionsKeepCapacityOptionsIndependent)
     params.rankNumPerServer = 770;
     FinalizeTestLayoutParams(params);
     const PeermemInfo a8(params.comm);
-    EXPECT_EQ(a8.maskRecv.offset % ALIGN_512, 0);
-    EXPECT_GT(a8.maskRecv.offset, a8.syncCount.offset + a8.syncCount.size);
+    EXPECT_EQ(a8.maskRecv.offsetBytes % ALIGN_512, 0);
+    EXPECT_GT(a8.maskRecv.offsetBytes, a8.syncCount.offsetBytes + a8.syncCount.sizeBytes);
     auto fp4Comm = params.comm;
     fp4Comm.elemsPerByte = 2U;
     const PeermemInfo a4(fp4Comm);
-    EXPECT_LT(a4.dispatchReceive.size, a8.dispatchReceive.size);
+    EXPECT_LT(a4.dispatchReceive.sizeBytes, a8.dispatchReceive.sizeBytes);
     EXPECT_LE(a4.totalSize, a8.totalSize); // Host 的 1 byte 容量上界覆盖 A4。
     params.topkWeightsPrefetch = true;
     FinalizeTestLayoutParams(params);
     params.comm.elemsPerByte = 2U;
     const PeermemInfo weights(params.comm);
-    EXPECT_GE(weights.dispatchReceive.size, a4.dispatchReceive.size);
-    EXPECT_EQ(weights.combineSend.size, a4.combineSend.size);
+    EXPECT_GE(weights.dispatchReceive.sizeBytes, a4.dispatchReceive.sizeBytes);
+    EXPECT_EQ(weights.combineSend.sizeBytes, a4.combineSend.sizeBytes);
     params.combineQuantMode = 1;
     FinalizeTestLayoutParams(params);
     params.comm.elemsPerByte = 2U;
     const PeermemInfo quant(params.comm);
-    EXPECT_EQ(quant.dispatchReceive.size, weights.dispatchReceive.size);
-    EXPECT_LT(quant.combineSend.size, weights.combineSend.size);
-    EXPECT_EQ(quant.totalSize, quant.combineSend.offset + quant.combineSend.size);
+    EXPECT_EQ(quant.dispatchReceive.sizeBytes, weights.dispatchReceive.sizeBytes);
+    EXPECT_LT(quant.combineSend.sizeBytes, weights.combineSend.sizeBytes);
+    EXPECT_EQ(quant.totalSize, quant.combineSend.offsetBytes + quant.combineSend.sizeBytes);
 }
 
 static int64_t CalcCclCommunicationCapacity(const MegaMoeTilingData& tilingData)
@@ -236,7 +235,7 @@ static void ExpectCclBufferCapacity(const TilingInfo& tilingInfo, int64_t cclBuf
     ASSERT_GE(tilingInfo.tilingDataSize, sizeof(MegaMoeTilingData));
     MegaMoeTilingData tilingData{};
     std::memcpy(&tilingData, tilingInfo.tilingData.get(), sizeof(tilingData));
-    MegaMoeImpl::WorkspaceLayoutArch35 workspaceLayout(tilingData.compute);
+    MegaMoeImpl::WorkspaceLayout workspaceLayout(tilingData.compute);
     const int64_t communicationCapacity = CalcCclCommunicationCapacity(tilingData);
 
     ASSERT_GT(workspaceLayout.workspaceSize, 0);
@@ -403,7 +402,7 @@ TEST_F(MegaMoeArch35TilingTest, CclBufferExactCapacityAndOneByteShort)
     ASSERT_GE(initialInfo.tilingDataSize, sizeof(MegaMoeTilingData));
     MegaMoeTilingData tilingData{};
     std::memcpy(&tilingData, initialInfo.tilingData.get(), sizeof(tilingData));
-    MegaMoeImpl::WorkspaceLayoutArch35 workspaceLayout(tilingData.compute);
+    MegaMoeImpl::WorkspaceLayout workspaceLayout(tilingData.compute);
     const int64_t communicationCapacity = CalcCclCommunicationCapacity(tilingData);
     const int64_t requiredSize = communicationCapacity + workspaceLayout.workspaceSize;
 
@@ -438,12 +437,12 @@ TEST_F(MegaMoeArch35TilingTest, MteCombineDedupTilingUsesExpertReadyAndFullResul
     ASSERT_TRUE(tilingData.compute.ring.activation);
     EXPECT_FALSE(tilingData.compute.ring.dispatch);
     EXPECT_FALSE(tilingData.compute.ring.gmm2);
-    const MegaMoeImpl::WorkspaceLayoutArch35 layout(tilingData.compute);
-    EXPECT_EQ(layout.gmm2CombineSyncCounterOffset, MegaMoeImpl::INVALID_WORKSPACE_OFFSET);
-    EXPECT_GE(layout.gmm2ReadyOffset, layout.flagActivationToGmm2Offset);
-    EXPECT_GE(layout.gmm2MmadResOffset, 0);
-    EXPECT_EQ(layout.gmm2MmadResOffset % 512LL, 0);
-    EXPECT_EQ(layout.dedupRowDescOffset - layout.gmm2MmadResOffset,
+    const MegaMoeImpl::WorkspaceLayout layout(tilingData.compute);
+    EXPECT_EQ(layout.urma.sync.combineCounters.offsetBytes, MegaMoeImpl::INVALID_WORKSPACE_OFFSET);
+    EXPECT_GE(layout.mte.sync.gmm2Ready.offsetBytes, layout.sync.activationReady.offsetBytes);
+    EXPECT_GE(layout.routed.gmm2Output.offsetBytes, 0);
+    EXPECT_EQ(layout.routed.gmm2Output.offsetBytes % 512LL, 0);
+    EXPECT_EQ(layout.mte.dedupRowDescriptors.offsetBytes - layout.routed.gmm2Output.offsetBytes,
               Ops::Base::CeilAlign(2LL * tilingData.compute.maxOutputSize * tilingData.compute.h, 512LL));
     ExpectCclBufferCapacity(tilingInfo, cclBufferSize);
 }
@@ -784,11 +783,11 @@ static void RunUrmaTilingCase(int64_t xBs, int64_t topkIdsBs, int64_t topkWeight
         EXPECT_FALSE(tilingData.compute.ring.gmm1);
         EXPECT_FALSE(tilingData.compute.ring.activation);
         EXPECT_FALSE(tilingData.compute.ring.gmm2);
-        MegaMoeImpl::WorkspaceLayoutArch35 workspace(tilingData.compute);
-        EXPECT_GE(workspace.combineRelayCompletedCountOffset, 0);
-        EXPECT_GE(workspace.tokenIdsOffset, 0);
-        EXPECT_GE(workspace.tokenBitmapsOffset, 0);
-        EXPECT_GT(workspace.serverCombineResetBytes, 0);
+        MegaMoeImpl::WorkspaceLayout workspace(tilingData.compute);
+        EXPECT_GE(workspace.urma.serverCombine.completedCounts.offsetBytes, 0);
+        EXPECT_GE(workspace.urma.serverCombine.tokenIds.offsetBytes, 0);
+        EXPECT_GE(workspace.urma.serverCombine.tokenBitmaps.offsetBytes, 0);
+        EXPECT_GT(workspace.reset.serverCombine.sizeBytes, 0);
     }
     if (activation != "situglu") {
         return;
@@ -976,9 +975,9 @@ TEST_F(MegaMoeArch35TilingTest, BS128_NumMaxTokens256_URMA_WorkspaceUsesCapacity
     tilingData.rankNumPerServer = 1;
 
     FinalizeTestLayoutParams(tilingData);
-    MegaMoeImpl::WorkspaceLayoutArch35 workspaceLayout(tilingData.compute);
+    MegaMoeImpl::WorkspaceLayout workspaceLayout(tilingData.compute);
     const int64_t actualMaskWorkspaceBytes =
-        workspaceLayout.dispatchRelaySendQueueOffset - workspaceLayout.maskSlotOffset;
+        workspaceLayout.urma.relaySendQueue.offsetBytes - workspaceLayout.urma.mask.offsetBytes;
     const int64_t capacityMaskSlotBytes =
         MegaMoeImpl::CalcDispatchMaskAlignSize(tilingData.compute.numMaxTokensPerRank, tilingData.compute.topK) +
         MegaMoeImpl::ALIGN_32;
@@ -987,7 +986,7 @@ TEST_F(MegaMoeArch35TilingTest, BS128_NumMaxTokens256_URMA_WorkspaceUsesCapacity
                                  tilingData.compute.epWorldSize * capacityMaskSlotBytes,
                              static_cast<int64_t>(MegaMoeImpl::ALIGN_512));
     const int64_t actualRelayQueueBytes =
-        workspaceLayout.dispatchRemoteReadyFlagSnapshotOffset - workspaceLayout.dispatchRelaySendQueueOffset;
+        workspaceLayout.urma.remoteReadySnapshot.offsetBytes - workspaceLayout.urma.relaySendQueue.offsetBytes;
     const int64_t serverNum = Ops::Base::CeilDiv<int64_t>(tilingData.compute.epWorldSize, tilingData.rankNumPerServer);
     const int64_t expectedRelayQueueBytes = Ops::Base::CeilAlign(
         serverNum * (MegaMoeImpl::ALIGN_32 + static_cast<int64_t>(tilingData.compute.bs) * MegaMoeImpl::ALIGN_32),
@@ -1410,16 +1409,16 @@ TEST_F(MegaMoeArch35TilingTest, ServerCombineOmitsLegacyReceiveRegion)
     params.rankNumPerServer = 1;
     FinalizeTestLayoutParams(params);
     const auto legacy = PeermemInfo(params.comm);
-    EXPECT_EQ(legacy.combineSend.size, 256LL * 8 * 4096 * 2);
+    EXPECT_EQ(legacy.combineSend.sizeBytes, 256LL * 8 * 4096 * 2);
     params.compute.dedupMode = DEDUP_MODE_SERVER_COMBINE;
     params.compute.aicNum = 28;
     FinalizeTestLayoutParams(params);
     const auto relay = PeermemInfo(params.comm);
-    EXPECT_EQ(relay.combineSend.size, 0);
-    EXPECT_GT(relay.sourceReady.size, 0);
-    EXPECT_EQ(relay.combineSend.offset, -1);
-    EXPECT_EQ(relay.combineSend.ptr, nullptr);
-    EXPECT_EQ(relay.totalSize, relay.combineReceive.offset + relay.combineReceive.size);
+    EXPECT_EQ(relay.combineSend.sizeBytes, 0);
+    EXPECT_GT(relay.sourceReady.sizeBytes, 0);
+    EXPECT_EQ(relay.combineSend.offsetBytes, -1);
+    EXPECT_EQ(relay.combineSend.get_ptr(nullptr), nullptr);
+    EXPECT_EQ(relay.totalSize, relay.combineReceive.offsetBytes + relay.combineReceive.sizeBytes);
 }
 
 TEST_F(MegaMoeArch35TilingTest, ServerCombineCountAndContributionSlotsStayWithinRegions)
@@ -1444,82 +1443,95 @@ TEST_F(MegaMoeArch35TilingTest, ServerCombineCountAndContributionSlotsStayWithin
                     const int64_t readyRowBytes = CalcServerCombineReadyRowBytes(tokenCapacity);
                     EXPECT_EQ(readyRowBytes, Ops::Base::CeilAlign((tokenCapacity + 1) * 8, ALIGN_32));
                     EXPECT_LE(tokenCapacity * 8 + 8, readyRowBytes);
-                    EXPECT_EQ(layout.dispatchFlag.size, Ops::Base::CeilAlign(serverNum * readyRowBytes, ALIGN_512));
-                    EXPECT_EQ(layout.sourceReady.size, layout.dispatchFlag.size);
-                    const int64_t tokenBytes = static_cast<int64_t>(h) * SIZE_OF_BF16;
+                    EXPECT_EQ(layout.dispatchFlag.sizeBytes,
+                              Ops::Base::CeilAlign(serverNum * readyRowBytes, ALIGN_512));
+                    EXPECT_EQ(layout.sourceReady.sizeBytes, layout.dispatchFlag.sizeBytes);
+                    const int64_t tokenBytes = static_cast<int64_t>(h) * SIZE_BF_16;
                     const int64_t slots = topK;
                     const int64_t tokens = serverNum * tokenCapacity;
-                    EXPECT_EQ(layout.contribution.size, Ops::Base::CeilAlign(tokens * slots * tokenBytes, ALIGN_512));
+                    EXPECT_EQ(layout.contribution.sizeBytes,
+                              Ops::Base::CeilAlign(tokens * slots * tokenBytes, ALIGN_512));
                     // 专家贡献数据和 ready 均按 K 个槽分配，回传接收区独立按 S 分配。
-                    EXPECT_EQ(layout.contributionReady.size, Ops::Base::CeilAlign(tokens * topK * 8, ALIGN_512));
-                    EXPECT_LE(((tokens - 1) * slots + 1) * tokenBytes, layout.contribution.size);
-                    EXPECT_LE(((tokens - 1) * slots + topK) * tokenBytes, layout.contribution.size);
-                    EXPECT_EQ(layout.sourceReady.offset, layout.dispatchFlag.offset + layout.dispatchFlag.size);
-                    EXPECT_EQ(layout.contributionReady.offset, layout.sourceReady.offset + layout.sourceReady.size);
-                    EXPECT_EQ(layout.contribution.offset,
-                              layout.contributionReady.offset + layout.contributionReady.size);
-                    EXPECT_EQ(layout.combineReceive.offset, layout.contribution.offset + layout.contribution.size);
-                    const int64_t clearBytes =
-                        layout.dispatchFlag.size + layout.sourceReady.size + layout.contributionReady.size;
-                    EXPECT_EQ(layout.dispatchFlag.offset + clearBytes, layout.contribution.offset);
-                    WorkspaceLayoutArch35 workspace(tiling.compute);
-                    EXPECT_EQ(workspace.dispatchRevWeightsOffset, INVALID_WORKSPACE_OFFSET);
+                    EXPECT_EQ(layout.contributionReady.sizeBytes, Ops::Base::CeilAlign(tokens * topK * 8, ALIGN_512));
+                    EXPECT_LE(((tokens - 1) * slots + 1) * tokenBytes, layout.contribution.sizeBytes);
+                    EXPECT_LE(((tokens - 1) * slots + topK) * tokenBytes, layout.contribution.sizeBytes);
+                    EXPECT_EQ(layout.sourceReady.offsetBytes,
+                              layout.dispatchFlag.offsetBytes + layout.dispatchFlag.sizeBytes);
+                    EXPECT_EQ(layout.contributionReady.offsetBytes,
+                              layout.sourceReady.offsetBytes + layout.sourceReady.sizeBytes);
+                    EXPECT_EQ(layout.contribution.offsetBytes,
+                              layout.contributionReady.offsetBytes + layout.contributionReady.sizeBytes);
+                    EXPECT_EQ(layout.combineReceive.offsetBytes,
+                              layout.contribution.offsetBytes + layout.contribution.sizeBytes);
+                    const int64_t clearBytes = layout.dispatchFlag.sizeBytes + layout.sourceReady.sizeBytes +
+                                               layout.contributionReady.sizeBytes;
+                    EXPECT_EQ(layout.dispatchFlag.offsetBytes + clearBytes, layout.contribution.offsetBytes);
+                    WorkspaceLayout workspace(tiling.compute);
+                    EXPECT_EQ(workspace.routing.tokenWeights.offsetBytes, INVALID_WORKSPACE_OFFSET);
                     auto prefetchTiling = tiling;
                     prefetchTiling.topkWeightsPrefetch = 1;
                     FinalizeTestLayoutParams(prefetchTiling);
-                    WorkspaceLayoutArch35 prefetchWorkspace(prefetchTiling.compute);
-                    EXPECT_NE(prefetchWorkspace.dispatchRevWeightsOffset, INVALID_WORKSPACE_OFFSET);
-                    EXPECT_EQ(workspace.serverCombineResetBytes,
+                    WorkspaceLayout prefetchWorkspace(prefetchTiling.compute);
+                    EXPECT_NE(prefetchWorkspace.routing.tokenWeights.offsetBytes, INVALID_WORKSPACE_OFFSET);
+                    EXPECT_EQ(workspace.reset.serverCombine.sizeBytes,
                               Ops::Base::CeilAlign(serverNum * INT_CACHELINE * static_cast<int64_t>(sizeof(int32_t)),
                                                    ALIGN_512));
-                    EXPECT_EQ(workspace.combineRelayCompletedCountOffset + workspace.serverCombineResetBytes,
-                              workspace.tokenIdsOffset);
+                    EXPECT_EQ(workspace.urma.serverCombine.completedCounts.offsetBytes +
+                                  workspace.reset.serverCombine.sizeBytes,
+                              workspace.urma.serverCombine.tokenIds.offsetBytes);
                     const int64_t rowStride = CalcServerCombineTokenListStrideBytes(tokenCapacity);
                     EXPECT_EQ(rowStride % sizeof(int32_t), 0);
                     EXPECT_EQ((tokenCapacity + 1) * static_cast<int64_t>(sizeof(int32_t)), rowStride);
                     const int64_t listsSize = Ops::Base::CeilAlign(serverNum * rowStride, ALIGN_512);
                     EXPECT_LE((serverNum - 1) * rowStride + (tokenCapacity + 1) * 4, listsSize);
-                    EXPECT_EQ(workspace.tokenBitmapsOffset, workspace.tokenIdsOffset + listsSize);
+                    EXPECT_EQ(workspace.urma.serverCombine.tokenBitmaps.offsetBytes,
+                              workspace.urma.serverCombine.tokenIds.offsetBytes + listsSize);
                     const int64_t bitmapBytes = Ops::Base::CeilAlign(
                         serverNum * tokenCapacity * static_cast<int64_t>(sizeof(uint32_t)), ALIGN_512);
-                    EXPECT_EQ(workspace.workspaceSize, workspace.tokenBitmapsOffset + bitmapBytes);
-                    EXPECT_EQ(layout.combineReceive.size, Ops::Base::CeilAlign(tokens * tokenBytes, ALIGN_512));
-                    EXPECT_EQ(layout.totalSize, layout.combineReceive.offset + layout.combineReceive.size);
+                    EXPECT_EQ(workspace.workspaceSize,
+                              workspace.urma.serverCombine.tokenBitmaps.offsetBytes + bitmapBytes);
+                    EXPECT_EQ(layout.combineReceive.sizeBytes, Ops::Base::CeilAlign(tokens * tokenBytes, ALIGN_512));
+                    EXPECT_EQ(layout.totalSize, layout.combineReceive.offsetBytes + layout.combineReceive.sizeBytes);
                     EXPECT_FALSE(tiling.compute.ring.dispatch);
                     EXPECT_FALSE(tiling.compute.ring.gmm1);
                     EXPECT_FALSE(tiling.compute.ring.activation);
                     EXPECT_FALSE(tiling.compute.ring.gmm2);
                     // 检查全部通信区域；未分配区域不占空间，已分配区域按协议连续推进。
-                    const GmMemoryRegion regions[] = {
+                    const GmBuffer regions[] = {
                         layout.rankSync,          layout.syncCount,       layout.maskRecv,     layout.expertCountRecv,
                         layout.quantTokenScale,   layout.dispatchReceive, layout.dispatchFlag, layout.sourceReady,
                         layout.contributionReady, layout.combineSend,     layout.contribution, layout.combineReceive};
                     int64_t cursor = 0;
                     for (const auto& region : regions) {
-                        if (region.offset < 0) {
-                            EXPECT_EQ(region.size, 0);
+                        if (region.offsetBytes < 0) {
+                            EXPECT_EQ(region.sizeBytes, 0);
                         } else {
-                            EXPECT_EQ(region.offset, cursor);
-                            cursor += region.size;
+                            EXPECT_EQ(region.offsetBytes, cursor);
+                            cursor += region.sizeBytes;
                         }
-                        EXPECT_EQ(region.ptr, nullptr);
+                        EXPECT_EQ(region.get_ptr(nullptr), nullptr);
                     }
                     EXPECT_EQ(cursor, layout.totalSize);
                     if (h == 4096U && tokenCapacity == 1 && topK == 1U && serverNum == 2U) {
                         std::vector<uint8_t> commStorage(static_cast<size_t>(layout.totalSize + ALIGN_512));
-                        const PeermemInfo bound(tiling.comm, commStorage.data());
-                        EXPECT_EQ(bound.sourceReady.ptr, commStorage.data() + bound.sourceReady.offset);
-                        EXPECT_EQ(bound.contributionReady.ptr, commStorage.data() + bound.contributionReady.offset);
-                        EXPECT_EQ(bound.contribution.ptr, commStorage.data() + bound.contribution.offset);
-                        EXPECT_EQ(bound.combineReceive.ptr, commStorage.data() + bound.combineReceive.offset);
+                        const PeermemInfo bound(tiling.comm);
+                        EXPECT_EQ(bound.sourceReady.get_ptr(commStorage.data()),
+                                  commStorage.data() + bound.sourceReady.offsetBytes);
+                        EXPECT_EQ(bound.contributionReady.get_ptr(commStorage.data()),
+                                  commStorage.data() + bound.contributionReady.offsetBytes);
+                        EXPECT_EQ(bound.contribution.get_ptr(commStorage.data()),
+                                  commStorage.data() + bound.contribution.offsetBytes);
+                        EXPECT_EQ(bound.combineReceive.get_ptr(commStorage.data()),
+                                  commStorage.data() + bound.combineReceive.offsetBytes);
                         std::vector<uint8_t> computeStorage(static_cast<size_t>(workspace.workspaceSize));
-                        WorkspaceInfoArch35 info;
-                        info.Bind(computeStorage.data(), workspace);
-                        EXPECT_EQ(info.combineRelayCompletedCountPtr,
-                                  computeStorage.data() + workspace.combineRelayCompletedCountOffset);
-                        EXPECT_EQ(info.tokenIdsPtr, computeStorage.data() + workspace.tokenIdsOffset);
-                        EXPECT_EQ(info.tokenBitmapsPtr, computeStorage.data() + workspace.tokenBitmapsOffset);
-                        EXPECT_EQ(info.serverCombineResetBytes, workspace.serverCombineResetBytes);
+                        const WorkspaceLayout info = workspace;
+                        EXPECT_EQ(info.urma.serverCombine.completedCounts.get_ptr(computeStorage.data()),
+                                  computeStorage.data() + workspace.urma.serverCombine.completedCounts.offsetBytes);
+                        EXPECT_EQ(info.urma.serverCombine.tokenIds.get_ptr(computeStorage.data()),
+                                  computeStorage.data() + workspace.urma.serverCombine.tokenIds.offsetBytes);
+                        EXPECT_EQ(info.urma.serverCombine.tokenBitmaps.get_ptr(computeStorage.data()),
+                                  computeStorage.data() + workspace.urma.serverCombine.tokenBitmaps.offsetBytes);
+                        EXPECT_EQ(info.reset.serverCombine.sizeBytes, workspace.reset.serverCombine.sizeBytes);
                     }
                 }
             }
@@ -1551,7 +1563,7 @@ static MegaMoeTilingData MakeMteRingLayoutCase()
 static void ExpectRoutedBufferRows(MegaMoeTilingData tilingData, int64_t rows)
 {
     FinalizeTestLayoutParams(tilingData);
-    MegaMoeImpl::WorkspaceLayoutArch35 layout(tilingData.compute);
+    MegaMoeImpl::WorkspaceLayout layout(tilingData.compute);
     const int64_t scaleGroup = 64;
     const int64_t storageAlign = 512;
     const int64_t dispatchElementsPerByte = MegaMoeImpl::IsA4W4GmmMode(tilingData.moeGmmMode) ? 2LL : 1LL;
@@ -1565,36 +1577,39 @@ static void ExpectRoutedBufferRows(MegaMoeTilingData tilingData, int64_t rows)
     const int64_t activationBytes = rows * tilingData.compute.hiddenDim / 2LL;
     const int64_t activationScaleBytes =
         rows * Ops::Base::CeilDiv(static_cast<int64_t>(tilingData.compute.hiddenDim / 2U), scaleGroup) * 2LL;
-    EXPECT_EQ(layout.dispatchRevScaleOffset - layout.dispatchRevDataOffset,
+    EXPECT_EQ(layout.routed.gmm1Input.scale.offsetBytes - layout.routed.gmm1Input.data.offsetBytes,
               Ops::Base::CeilAlign(dispatchBytes, storageAlign));
-    const int64_t afterDispatchScale =
-        layout.dispatchRevWeightsOffset >= 0 ? layout.dispatchRevWeightsOffset : layout.activationQuantDataOffset;
-    EXPECT_EQ(afterDispatchScale - layout.dispatchRevScaleOffset,
+    const int64_t afterDispatchScale = layout.routing.tokenWeights.offsetBytes >= 0 ?
+                                           layout.routing.tokenWeights.offsetBytes :
+                                           layout.routed.gmm2Input.data.offsetBytes;
+    EXPECT_EQ(afterDispatchScale - layout.routed.gmm1Input.scale.offsetBytes,
               Ops::Base::CeilAlign(dispatchScaleBytes, storageAlign));
-    EXPECT_EQ(layout.activationQuantScaleOffset - layout.activationQuantDataOffset,
+    EXPECT_EQ(layout.routed.gmm2Input.scale.offsetBytes - layout.routed.gmm2Input.data.offsetBytes,
               Ops::Base::CeilAlign(activationBytes, storageAlign));
-    EXPECT_EQ(layout.expertRecvTokenCountOffset - layout.activationQuantScaleOffset,
+    EXPECT_EQ(layout.routing.recvCounts.offsetBytes - layout.routed.gmm2Input.scale.offsetBytes,
               Ops::Base::CeilAlign(activationScaleBytes, storageAlign));
-    EXPECT_LE(layout.dispatchRevScaleOffset + Ops::Base::CeilAlign(dispatchScaleBytes, storageAlign),
-              layout.activationQuantDataOffset);
-    const int64_t firstGmmResult = layout.gmm1MmadResOffset >= 0 ? layout.gmm1MmadResOffset : layout.gmm2MmadResOffset;
-    EXPECT_LE(layout.activationQuantScaleOffset + Ops::Base::CeilAlign(activationScaleBytes, storageAlign),
+    EXPECT_LE(layout.routed.gmm1Input.scale.offsetBytes + Ops::Base::CeilAlign(dispatchScaleBytes, storageAlign),
+              layout.routed.gmm2Input.data.offsetBytes);
+    const int64_t firstGmmResult = layout.routed.gmm1Output.offsetBytes >= 0 ? layout.routed.gmm1Output.offsetBytes :
+                                                                               layout.routed.gmm2Output.offsetBytes;
+    EXPECT_LE(layout.routed.gmm2Input.scale.offsetBytes + Ops::Base::CeilAlign(activationScaleBytes, storageAlign),
               firstGmmResult);
-    if (layout.gmm1MmadResOffset >= 0) {
+    if (layout.routed.gmm1Output.offsetBytes >= 0) {
         const int64_t afterGmm1 =
-            layout.gmm1MmadResOffset + static_cast<int64_t>(2) * rows * tilingData.compute.hiddenDim;
-        EXPECT_EQ(layout.gmm2MmadResOffset, Ops::Base::CeilAlign(afterGmm1, storageAlign));
+            layout.routed.gmm1Output.offsetBytes + static_cast<int64_t>(2) * rows * tilingData.compute.hiddenDim;
+        EXPECT_EQ(layout.routed.gmm2Output.offsetBytes, Ops::Base::CeilAlign(afterGmm1, storageAlign));
     }
-    const int64_t afterGmm2 = layout.gmm1TileStatusOffset >= 0     ? layout.gmm1TileStatusOffset :
-                              layout.dedupRowDescOffset >= 0       ? layout.dedupRowDescOffset :
-                              layout.maskSlotOffset >= 0           ? layout.maskSlotOffset :
-                              layout.sharedExpertResultOffset >= 0 ? layout.sharedExpertResultOffset :
-                                                                     layout.workspaceSize;
+    const int64_t afterGmm2 = layout.sync.gmm1Tiles.offsetBytes >= 0 ? layout.sync.gmm1Tiles.offsetBytes :
+                              layout.mte.dedupRowDescriptors.offsetBytes >= 0 ?
+                                                                       layout.mte.dedupRowDescriptors.offsetBytes :
+                              layout.urma.mask.offsetBytes >= 0         ? layout.urma.mask.offsetBytes :
+                              layout.shared.gmm2Output.offsetBytes >= 0 ? layout.shared.gmm2Output.offsetBytes :
+                                                                          layout.workspaceSize;
     const int64_t gmm2Rows = MegaMoeImpl::IsCombineDedupOn(tilingData.compute.dedupMode) ?
                                  static_cast<int64_t>(tilingData.compute.maxOutputSize) :
                                  rows;
-    EXPECT_GE(layout.gmm2MmadResOffset, 0);
-    EXPECT_EQ(afterGmm2 - layout.gmm2MmadResOffset,
+    EXPECT_GE(layout.routed.gmm2Output.offsetBytes, 0);
+    EXPECT_EQ(afterGmm2 - layout.routed.gmm2Output.offsetBytes,
               Ops::Base::CeilAlign(static_cast<int64_t>(2) * gmm2Rows * tilingData.compute.h, storageAlign));
 }
 
@@ -1607,17 +1622,18 @@ TEST_F(MegaMoeArch35TilingTest, MteRingsUseWaveBudgetAndRetainGlobalMetadata)
                                                     tilingData.compute.maxOutputSize),
               ringRows);
     ExpectRoutedBufferRows(tilingData, ringRows);
-    MegaMoeImpl::WorkspaceLayoutArch35 first(tilingData.compute);
-    EXPECT_EQ(first.flagActivationToGmm2Offset - first.metaInfoOffset, 32768LL * 32LL);
+    MegaMoeImpl::WorkspaceLayout first(tilingData.compute);
+    EXPECT_EQ(first.sync.activationReady.offsetBytes - first.routing.receivedTokenMetadata.offsetBytes, 32768LL * 32LL);
 
     tilingData.compute.maxOutputSize *= 2U;
     FinalizeTestLayoutParams(tilingData);
-    MegaMoeImpl::WorkspaceLayoutArch35 second(tilingData.compute);
+    MegaMoeImpl::WorkspaceLayout second(tilingData.compute);
     EXPECT_EQ((tilingData.compute.ring.activation ? static_cast<int64_t>(tilingData.compute.ring.rows) :
                                                     tilingData.compute.maxOutputSize),
               ringRows);
     ExpectRoutedBufferRows(tilingData, ringRows);
-    EXPECT_EQ(second.flagActivationToGmm2Offset - second.metaInfoOffset, 65536LL * 32LL);
+    EXPECT_EQ(second.sync.activationReady.offsetBytes - second.routing.receivedTokenMetadata.offsetBytes,
+              65536LL * 32LL);
     EXPECT_GT(second.workspaceSize, first.workspaceSize);
     EXPECT_LT(second.workspaceSize - first.workspaceSize, 32768LL * tilingData.compute.h);
 
@@ -1637,15 +1653,15 @@ TEST_F(MegaMoeArch35TilingTest, MteRingsOnlyAllocateActualGmm1GmResults)
         tilingData.moeGmmMode = mode;
         tilingData.topkWeightsPrefetch = 0;
         FinalizeTestLayoutParams(tilingData);
-        MegaMoeImpl::WorkspaceLayoutArch35 noPrefetch(tilingData.compute);
-        EXPECT_EQ(noPrefetch.gmm1MmadResOffset, MegaMoeImpl::INVALID_WORKSPACE_OFFSET);
+        MegaMoeImpl::WorkspaceLayout noPrefetch(tilingData.compute);
+        EXPECT_EQ(noPrefetch.routed.gmm1Output.offsetBytes, MegaMoeImpl::INVALID_WORKSPACE_OFFSET);
         ExpectRoutedBufferRows(tilingData, 3LL * 14LL * 256LL);
         tilingData.topkWeightsPrefetch = 1;
         tilingData.compute.maxTilesPerExpert = 1024;
         FinalizeTestLayoutParams(tilingData);
-        MegaMoeImpl::WorkspaceLayoutArch35 prefetch(tilingData.compute);
-        EXPECT_GE(prefetch.gmm1MmadResOffset, 0);
-        EXPECT_EQ(prefetch.gmm1TileStatusElementCount, (4LL * 1024LL + 1LL) * 16LL);
+        MegaMoeImpl::WorkspaceLayout prefetch(tilingData.compute);
+        EXPECT_GE(prefetch.routed.gmm1Output.offsetBytes, 0);
+        EXPECT_EQ((prefetch.reset.gmm1Tiles.sizeBytes / MegaMoeImpl::SIZE_INT_32), (4LL * 1024LL + 1LL) * 16LL);
         ExpectRoutedBufferRows(tilingData, 3LL * 14LL * 256LL);
     }
 }
@@ -1653,41 +1669,42 @@ TEST_F(MegaMoeArch35TilingTest, MteRingsOnlyAllocateActualGmm1GmResults)
 static void ExpectMteDedupLayouts(MegaMoeTilingData tilingData)
 {
     FinalizeTestLayoutParams(tilingData);
-    const MegaMoeImpl::WorkspaceLayoutArch35 layout(tilingData.compute);
+    const MegaMoeImpl::WorkspaceLayout layout(tilingData.compute);
     const bool ringEnabled = tilingData.compute.ring.activation;
     const bool dispatchRingEnabled = ringEnabled && tilingData.compute.dedupMode == 0;
     const bool gmm2RingEnabled = ringEnabled && !MegaMoeImpl::IsCombineDedupOn(tilingData.compute.dedupMode);
     EXPECT_EQ(tilingData.compute.ring.dispatch, dispatchRingEnabled);
     EXPECT_EQ(tilingData.compute.ring.gmm2, gmm2RingEnabled);
-    EXPECT_GE(layout.gmm2MmadResOffset, 0);
+    EXPECT_GE(layout.routed.gmm2Output.offsetBytes, 0);
     if (tilingData.compute.topoType == MegaMoeImpl::TOPO_TYPE_MTE) {
-        EXPECT_EQ(layout.gmm2MmadResOffset % 512LL, 0LL);
+        EXPECT_EQ(layout.routed.gmm2Output.offsetBytes % 512LL, 0LL);
         if (MegaMoeImpl::IsCombineDedupOn(tilingData.compute.dedupMode)) {
             // 专家粒度 Combine 不限制专家内部的 Dispatch 前进，mode1/3 都必须保留完整输入。
             const int64_t inputElementsPerByte = tilingData.compute.dispatchFp4 ? 2LL : 1LL;
-            EXPECT_EQ(layout.dispatchRevScaleOffset - layout.dispatchRevDataOffset,
+            EXPECT_EQ(layout.routed.gmm1Input.scale.offsetBytes - layout.routed.gmm1Input.data.offsetBytes,
                       Ops::Base::CeilAlign<int64_t>(
                           tilingData.compute.maxOutputSize * tilingData.compute.h / inputElementsPerByte, 512LL));
-            const int64_t afterDispatchScale = layout.dispatchRevWeightsOffset >= 0 ? layout.dispatchRevWeightsOffset :
-                                                                                      layout.activationQuantDataOffset;
+            const int64_t afterDispatchScale = layout.routing.tokenWeights.offsetBytes >= 0 ?
+                                                   layout.routing.tokenWeights.offsetBytes :
+                                                   layout.routed.gmm2Input.data.offsetBytes;
             const int64_t inputScaleBytes =
                 tilingData.compute.maxOutputSize * Ops::Base::CeilDiv<int64_t>(tilingData.compute.h, 64LL) * 2LL;
-            EXPECT_EQ(afterDispatchScale - layout.dispatchRevScaleOffset,
+            EXPECT_EQ(afterDispatchScale - layout.routed.gmm1Input.scale.offsetBytes,
                       Ops::Base::CeilAlign<int64_t>(inputScaleBytes, 512LL));
 
             auto otherDedupMode = tilingData;
             otherDedupMode.compute.dedupMode = tilingData.compute.dedupMode == 1 ? 3 : 1;
             FinalizeTestLayoutParams(otherDedupMode);
-            const MegaMoeImpl::WorkspaceLayoutArch35 otherLayout(otherDedupMode.compute);
-            EXPECT_EQ(layout.dispatchRevDataOffset, otherLayout.dispatchRevDataOffset);
-            EXPECT_EQ(layout.dispatchRevScaleOffset, otherLayout.dispatchRevScaleOffset);
-            EXPECT_EQ(layout.dispatchRevWeightsOffset, otherLayout.dispatchRevWeightsOffset);
-            EXPECT_EQ(layout.activationQuantDataOffset, otherLayout.activationQuantDataOffset);
-            EXPECT_EQ(layout.flagActivationToGmm2Offset, otherLayout.flagActivationToGmm2Offset);
-            EXPECT_EQ(layout.gmm1MmadResOffset, otherLayout.gmm1MmadResOffset);
-            EXPECT_EQ(layout.gmm2MmadResOffset, otherLayout.gmm2MmadResOffset);
-            EXPECT_EQ(layout.dedupRowDescOffset, otherLayout.dedupRowDescOffset);
-            EXPECT_EQ(layout.sharedExpertResultOffset, otherLayout.sharedExpertResultOffset);
+            const MegaMoeImpl::WorkspaceLayout otherLayout(otherDedupMode.compute);
+            EXPECT_EQ(layout.routed.gmm1Input.data.offsetBytes, otherLayout.routed.gmm1Input.data.offsetBytes);
+            EXPECT_EQ(layout.routed.gmm1Input.scale.offsetBytes, otherLayout.routed.gmm1Input.scale.offsetBytes);
+            EXPECT_EQ(layout.routing.tokenWeights.offsetBytes, otherLayout.routing.tokenWeights.offsetBytes);
+            EXPECT_EQ(layout.routed.gmm2Input.data.offsetBytes, otherLayout.routed.gmm2Input.data.offsetBytes);
+            EXPECT_EQ(layout.sync.activationReady.offsetBytes, otherLayout.sync.activationReady.offsetBytes);
+            EXPECT_EQ(layout.routed.gmm1Output.offsetBytes, otherLayout.routed.gmm1Output.offsetBytes);
+            EXPECT_EQ(layout.routed.gmm2Output.offsetBytes, otherLayout.routed.gmm2Output.offsetBytes);
+            EXPECT_EQ(layout.mte.dedupRowDescriptors.offsetBytes, otherLayout.mte.dedupRowDescriptors.offsetBytes);
+            EXPECT_EQ(layout.shared.gmm2Output.offsetBytes, otherLayout.shared.gmm2Output.offsetBytes);
             EXPECT_EQ(layout.workspaceSize, otherLayout.workspaceSize);
         }
     }
@@ -1726,8 +1743,8 @@ TEST_F(MegaMoeArch35TilingTest, MteRingsDedupKeepPersistentStageInputsAndOtherFa
     EXPECT_EQ((urmaData.compute.ring.activation ? static_cast<int64_t>(urmaData.compute.ring.rows) :
                                                   urmaData.compute.maxOutputSize),
               32768LL);
-    MegaMoeImpl::WorkspaceLayoutArch35 urma(urmaData.compute);
-    EXPECT_EQ(urma.dispatchRevScaleOffset - urma.dispatchRevDataOffset, 32768LL * 4096LL);
+    MegaMoeImpl::WorkspaceLayout urma(urmaData.compute);
+    EXPECT_EQ(urma.routed.gmm1Input.scale.offsetBytes - urma.routed.gmm1Input.data.offsetBytes, 32768LL * 4096LL);
     urmaData.compute.dedupMode = 3;
     ExpectMteDedupLayouts(urmaData);
 
@@ -1768,13 +1785,13 @@ TEST_F(MegaMoeArch35TilingTest, MteDedupPersistentAreasRetainClippedLogicalRows)
         ExpectRoutedBufferRows(tilingData, maxOutput);
         ExpectMteDedupLayouts(tilingData);
         FinalizeTestLayoutParams(tilingData);
-        const MegaMoeImpl::WorkspaceLayoutArch35 layout(tilingData.compute);
+        const MegaMoeImpl::WorkspaceLayout layout(tilingData.compute);
         EXPECT_FALSE(tilingData.compute.ring.dispatch);
         EXPECT_FALSE(tilingData.compute.ring.gmm2);
-        EXPECT_GE(layout.gmm2MmadResOffset, 0);
-        EXPECT_EQ(layout.activationQuantDataOffset - layout.dispatchRevWeightsOffset,
+        EXPECT_GE(layout.routed.gmm2Output.offsetBytes, 0);
+        EXPECT_EQ(layout.routed.gmm2Input.data.offsetBytes - layout.routing.tokenWeights.offsetBytes,
                   Ops::Base::CeilAlign(static_cast<int64_t>(maxOutput) * 32LL, 512LL));
-        EXPECT_EQ(layout.flagActivationToGmm2Offset - layout.metaInfoOffset,
+        EXPECT_EQ(layout.sync.activationReady.offsetBytes - layout.routing.receivedTokenMetadata.offsetBytes,
                   Ops::Base::CeilAlign(static_cast<int64_t>(maxOutput) * 32LL, 512LL));
     }
 }
@@ -1789,38 +1806,41 @@ TEST_F(MegaMoeArch35TilingTest, MteCombineDedupKeepsExpertReadyAndOneFullResultA
             tilingData.compute.sharedExpertNum = 1;
             tilingData.compute.combineSyncSlotCountPerExpert = Ops::Base::CeilDiv<uint64_t>(maxOutput, 256U);
             FinalizeTestLayoutParams(tilingData);
-            const MegaMoeImpl::WorkspaceLayoutArch35 layout(tilingData.compute);
+            const MegaMoeImpl::WorkspaceLayout layout(tilingData.compute);
             const int64_t readyBytes = static_cast<int64_t>(sizeof(int32_t)) * tilingData.compute.moeExpertPerRank *
                                        tilingData.compute.aicNum * MegaMoeImpl::INT_CACHELINE;
-            EXPECT_EQ(layout.gmm2CombineSyncCounterOffset, MegaMoeImpl::INVALID_WORKSPACE_OFFSET);
-            ASSERT_GE(layout.gmm2ReadyOffset, layout.flagActivationToGmm2Offset);
-            EXPECT_EQ(layout.sharedExpertGmm2TileCounterOffset - layout.gmm2ReadyOffset, readyBytes);
-            const int64_t resetRegionEnd = layout.flagActivationToGmm2Offset +
-                                           static_cast<int64_t>(sizeof(int32_t)) * layout.flagResetElementCount;
-            EXPECT_LE(layout.gmm2ReadyOffset + readyBytes, resetRegionEnd);
-            EXPECT_LE(resetRegionEnd, layout.gmm1MmadResOffset);
+            EXPECT_EQ(layout.urma.sync.combineCounters.offsetBytes, MegaMoeImpl::INVALID_WORKSPACE_OFFSET);
+            ASSERT_GE(layout.mte.sync.gmm2Ready.offsetBytes, layout.sync.activationReady.offsetBytes);
+            EXPECT_EQ(layout.mte.sync.sharedGmm2Tiles.offsetBytes - layout.mte.sync.gmm2Ready.offsetBytes, readyBytes);
+            const int64_t resetRegionEnd =
+                layout.sync.activationReady.offsetBytes +
+                static_cast<int64_t>(sizeof(int32_t)) * (layout.reset.flags.sizeBytes / MegaMoeImpl::SIZE_INT_32);
+            EXPECT_LE(layout.mte.sync.gmm2Ready.offsetBytes + readyBytes, resetRegionEnd);
+            EXPECT_LE(resetRegionEnd, layout.routed.gmm1Output.offsetBytes);
             const bool ringEnabled = tilingData.compute.ring.activation;
             const int64_t rows = ringEnabled ? 3LL * 14LL * 256LL : static_cast<int64_t>(maxOutput);
-            EXPECT_GE(layout.gmm2MmadResOffset, 0);
-            EXPECT_EQ(layout.dedupRowDescOffset - layout.gmm2MmadResOffset,
+            EXPECT_GE(layout.routed.gmm2Output.offsetBytes, 0);
+            EXPECT_EQ(layout.mte.dedupRowDescriptors.offsetBytes - layout.routed.gmm2Output.offsetBytes,
                       Ops::Base::CeilAlign(2LL * maxOutput * tilingData.compute.h, 512LL));
             ExpectRoutedBufferRows(tilingData, rows);
             ExpectMteDedupLayouts(tilingData);
 
             // GMM2 始终使用同一个结果区；容量随去重与循环配置变化，未取得基址时不构造地址。
-            MegaMoeImpl::WorkspaceInfoArch35 info;
-            info.Bind(nullptr, layout);
-            EXPECT_EQ(info.gmm2CombineSyncCounterPtr, nullptr);
-            EXPECT_EQ(info.gmm2ReadyPtr, nullptr);
-            EXPECT_EQ(info.gmm2MmadResPtr, nullptr);
-            EXPECT_EQ(info.flagResetElementCount, layout.flagResetElementCount);
+            const MegaMoeImpl::WorkspaceLayout info = layout;
+            EXPECT_EQ(info.urma.sync.combineCounters.get_ptr(nullptr), nullptr);
+            EXPECT_EQ(info.mte.sync.gmm2Ready.get_ptr(nullptr), nullptr);
+            EXPECT_EQ(info.routed.gmm2Output.get_ptr(nullptr), nullptr);
+            EXPECT_EQ((info.reset.flags.sizeBytes / MegaMoeImpl::SIZE_INT_32),
+                      (layout.reset.flags.sizeBytes / MegaMoeImpl::SIZE_INT_32));
             if (maxOutput == 1U) {
                 // 使用小容量实例核对真实基址绑定，避免只覆盖空指针分支。
                 std::vector<uint8_t> storage(static_cast<size_t>(layout.workspaceSize));
-                info.Bind(storage.data(), layout);
-                EXPECT_EQ(info.gmm2MmadResPtr, storage.data() + layout.gmm2MmadResOffset);
-                EXPECT_EQ(info.sharedExpertResultPtr, storage.data() + layout.sharedExpertResultOffset);
-                EXPECT_LE(layout.gmm2MmadResOffset + 2LL * maxOutput * tilingData.compute.h, layout.dedupRowDescOffset);
+                EXPECT_EQ(info.routed.gmm2Output.get_ptr(storage.data()),
+                          storage.data() + layout.routed.gmm2Output.offsetBytes);
+                EXPECT_EQ(info.shared.gmm2Output.get_ptr(storage.data()),
+                          storage.data() + layout.shared.gmm2Output.offsetBytes);
+                EXPECT_LE(layout.routed.gmm2Output.offsetBytes + 2LL * maxOutput * tilingData.compute.h,
+                          layout.mte.dedupRowDescriptors.offsetBytes);
             }
         }
     }
@@ -1850,10 +1870,10 @@ TEST_F(MegaMoeArch35TilingTest, MteSmallCasesFallBackAtThreeWaveCapacity)
             ExpectMteDedupLayouts(tilingData);
             if (!ringEnabled) {
                 FinalizeTestLayoutParams(tilingData);
-                const MegaMoeImpl::WorkspaceLayoutArch35 layout(tilingData.compute);
+                const MegaMoeImpl::WorkspaceLayout layout(tilingData.compute);
                 EXPECT_FALSE(tilingData.compute.ring.dispatch);
                 EXPECT_FALSE(tilingData.compute.ring.gmm2);
-                EXPECT_GE(layout.gmm2MmadResOffset, 0);
+                EXPECT_GE(layout.routed.gmm2Output.offsetBytes, 0);
             }
         }
     }
@@ -1969,7 +1989,8 @@ static void ExpectSharedMemoryBudgetCoversExact(MegaMoeTilingData tilingData)
     budgetParams.bs = tilingData.compute.numMaxTokensPerRank;
     budgetParams.aicNum = 36;
     budgetParams.sharedExpertNum = 4;
-    budgetParams.hiddenDim = 2LL * MegaMoeImpl::GetActivationOutputWidth(&tilingData);
+    budgetParams.hiddenDim =
+        2LL * MegaMoeImpl::GetActivationOutputWidth(tilingData.compute.hiddenDim, tilingData.actMode);
     budgetParams.activationOutputDivisor = 2;
     budgetParams.mGroupsPerWave =
         MegaMoeImpl::CalcMemoryMGroupsPerWave(budgetParams.hiddenDim / 2LL, budgetParams.h, budgetParams.aicNum);
@@ -1993,11 +2014,11 @@ static void ExpectSharedMemoryBudgetCoversExact(MegaMoeTilingData tilingData)
         dispatchOnParams.dedupMode |= 2;
     }
     dispatchOnParams.ring = MegaMoeImpl::CalcCclStageRingConfig(dispatchOnParams);
-    const MegaMoeImpl::CclComputeLayout dispatchOffBudget(budgetParams);
-    const MegaMoeImpl::CclComputeLayout dispatchOnBudget(dispatchOnParams);
+    const MegaMoeImpl::WorkspaceLayout dispatchOffBudget(budgetParams);
+    const MegaMoeImpl::WorkspaceLayout dispatchOnBudget(dispatchOnParams);
     const auto& budget =
         dispatchOnBudget.workspaceSize > dispatchOffBudget.workspaceSize ? dispatchOnBudget : dispatchOffBudget;
-    const MegaMoeImpl::WorkspaceLayoutArch35 exact(tilingData.compute);
+    const MegaMoeImpl::WorkspaceLayout exact(tilingData.compute);
     EXPECT_GE(budget.workspaceSize, exact.workspaceSize);
     auto commBudgetParams = tilingData.comm;
     commBudgetParams.elemsPerByte = 1;
@@ -2006,8 +2027,9 @@ static void ExpectSharedMemoryBudgetCoversExact(MegaMoeTilingData tilingData)
 
     if (MegaMoeImpl::IsDispatchDedupOn(tilingData.compute.dedupMode) ||
         MegaMoeImpl::IsCombineDedupOn(tilingData.compute.dedupMode)) {
-        EXPECT_EQ(dispatchOnBudget.dispatchRevScaleOffset - dispatchOnBudget.dispatchRevDataOffset,
-                  Ops::Base::CeilAlign(1LL * tilingData.compute.maxOutputSize * tilingData.compute.h, 512LL));
+        EXPECT_EQ(
+            dispatchOnBudget.routed.gmm1Input.scale.offsetBytes - dispatchOnBudget.routed.gmm1Input.data.offsetBytes,
+            Ops::Base::CeilAlign(1LL * tilingData.compute.maxOutputSize * tilingData.compute.h, 512LL));
     }
     const int64_t threeWaveRows = 3LL * budgetParams.mGroupsPerWave * 256LL;
     const bool budgetRingEnabled = budgetParams.topoType == MegaMoeImpl::TOPO_TYPE_MTE && !budgetParams.combineQuant &&
@@ -2015,13 +2037,14 @@ static void ExpectSharedMemoryBudgetCoversExact(MegaMoeTilingData tilingData)
     const int64_t budgetResultRows = budgetRingEnabled && !MegaMoeImpl::IsCombineDedupOn(budgetParams.dedupMode) ?
                                          threeWaveRows :
                                          budgetParams.maxOutputSize;
-    const int64_t afterGmm2 = budget.gmm1TileStatusOffset >= 0     ? budget.gmm1TileStatusOffset :
-                              budget.dedupRowDescOffset >= 0       ? budget.dedupRowDescOffset :
-                              budget.maskSlotOffset >= 0           ? budget.maskSlotOffset :
-                              budget.sharedExpertResultOffset >= 0 ? budget.sharedExpertResultOffset :
-                                                                     budget.workspaceSize;
-    EXPECT_GE(budget.gmm2MmadResOffset, 0);
-    EXPECT_EQ(afterGmm2 - budget.gmm2MmadResOffset,
+    const int64_t afterGmm2 = budget.sync.gmm1Tiles.offsetBytes >= 0 ? budget.sync.gmm1Tiles.offsetBytes :
+                              budget.mte.dedupRowDescriptors.offsetBytes >= 0 ?
+                                                                       budget.mte.dedupRowDescriptors.offsetBytes :
+                              budget.urma.mask.offsetBytes >= 0         ? budget.urma.mask.offsetBytes :
+                              budget.shared.gmm2Output.offsetBytes >= 0 ? budget.shared.gmm2Output.offsetBytes :
+                                                                          budget.workspaceSize;
+    EXPECT_GE(budget.routed.gmm2Output.offsetBytes, 0);
+    EXPECT_EQ(afterGmm2 - budget.routed.gmm2Output.offsetBytes,
               Ops::Base::CeilAlign(2LL * budgetResultRows * tilingData.compute.h, 512LL));
 }
 
@@ -2151,18 +2174,18 @@ TEST_F(MegaMoeArch35TilingTest, SharedCclCommPlannerMapsRegionsAndParameters)
                                                         MegaMoeImpl::COMBINE_NO_QUANT, prefetch);
                 const auto planned = MegaMoeImpl::CalcCclCommLayout(tilingData.comm);
                 const MegaMoeImpl::PeermemInfo actual(tilingData.comm);
-                const MegaMoeImpl::MemoryRegionLayout plannedRegions[] = {
+                const MegaMoeImpl::GmBuffer plannedRegions[] = {
                     planned.rankSync,          planned.syncCount,       planned.maskRecv,     planned.expertCountRecv,
                     planned.quantTokenScale,   planned.dispatchReceive, planned.dispatchFlag, planned.sourceReady,
                     planned.contributionReady, planned.combineSend,     planned.contribution, planned.combineReceive};
-                const MegaMoeImpl::GmMemoryRegion actualRegions[] = {
+                const MegaMoeImpl::GmBuffer actualRegions[] = {
                     actual.rankSync,          actual.syncCount,       actual.maskRecv,     actual.expertCountRecv,
                     actual.quantTokenScale,   actual.dispatchReceive, actual.dispatchFlag, actual.sourceReady,
                     actual.contributionReady, actual.combineSend,     actual.contribution, actual.combineReceive};
                 for (uint32_t index = 0; index < 12U; ++index) {
-                    EXPECT_EQ(plannedRegions[index].offset, actualRegions[index].offset);
-                    EXPECT_EQ(plannedRegions[index].size, actualRegions[index].size);
-                    EXPECT_EQ(actualRegions[index].ptr, nullptr);
+                    EXPECT_EQ(plannedRegions[index].offsetBytes, actualRegions[index].offsetBytes);
+                    EXPECT_EQ(plannedRegions[index].sizeBytes, actualRegions[index].sizeBytes);
+                    EXPECT_EQ(actualRegions[index].get_ptr(nullptr), nullptr);
                 }
                 EXPECT_EQ(planned.totalSize, actual.totalSize);
             }
