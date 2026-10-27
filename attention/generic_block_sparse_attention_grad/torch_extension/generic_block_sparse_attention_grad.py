@@ -8,6 +8,7 @@
 
 """PyTorch registration for GenericBlockSparseAttentionGrad."""
 
+import math
 from enum import IntEnum
 from typing import List, Optional, Tuple, Union
 
@@ -20,12 +21,14 @@ GSAG_TASK_LIST_OFFSET = 80  # 8 + 2 * 36
 GSAG_TASK_ENTRY_SIZE = 4
 GSAG_METADATA_OP_NAME = "generic_block_sparse_attention_grad_metadata"
 ARC22_GBSAG_TASK_LIST_SIZE = 198  # 6 + 64 * 3
+FLOAT32_MAX = torch.finfo(torch.float32).max
 _OP_PREFIX = "GenericBlockSparseAttentionGrad"
 
 
 class MaskMode(IntEnum):
     """mask_mode 枚举：对外 str/int/IntEnum 经由本枚举映射为传给算子侧的 int。"""
 
+    NO_MASK = 0
     CAUSAL = 1
 
 
@@ -34,14 +37,14 @@ class ResidualBlockMode(IntEnum):
 
     MARKED_BY_SPARSE_BLK_IDX = 0  # 是否参与计算由 sparse_block_idx 决定。
     INCOMPLETE_BLK_KEPT_BUT_NOT_IN_SPARSE_BLK_IDX = (
-        1  # 必定参与计算但不在索引中；当前不支持。
+        1  # QSAG：必定参与计算但不在索引中。
     )
 
 
 def _resolve_mask_mode(mask_mode: Union[str, int, MaskMode, None]) -> int:
     """对外 str/int/IntEnum/None mask_mode 统一为传给算子侧的 int。
 
-    None 视为默认 CAUSAL（当前唯一支持取值）。
+    None 视为默认 CAUSAL；QSAG 还支持 NO_MASK。
     """
     if mask_mode is None:
         return int(MaskMode.CAUSAL)
@@ -76,7 +79,7 @@ def _resolve_residual_block_mode(
         raise ValueError(
             f"{_OP_PREFIX}: invalid residual_block_mode {residual_block_mode!r}; "
             f"expected an enum name or value in [{valid}]. Only "
-            "ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX (0) is currently supported."
+            "mode 0 is supported by GBSAG; mode 1 is supported by QSAG."
         ) from exc
 
 
@@ -93,6 +96,125 @@ def _check_sparse_attributes(
             "ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX (0), "
             f"got {residual_block_mode}"
         )
+
+
+def _check_qsag(
+    q,
+    k,
+    v,
+    dout,
+    attn_out,
+    lse,
+    indices,
+    counts,
+    block_shape,
+    *,
+    metadata,
+    attn_mask,
+    cu_q,
+    cu_kv,
+    used_q,
+    used_kv,
+    layout_q,
+    layout_kv,
+    residual_block_mode,
+    is_consistent_topk,
+    scale,
+    mask,
+    precision,
+    left,
+    right,
+):
+    """Descriptor checks only: preserve asynchronous execution and FakeTensor support."""
+    if residual_block_mode != 1:
+        raise ValueError("QSAG requires residual_block_mode=1")
+    if layout_q != layout_kv or layout_q not in ("TND", "BNSD", "BSND"):
+        raise ValueError("QSAG requires matching TND/BNSD/BSND layouts")
+    if (
+        mask not in (0, 1)
+        or precision != 0
+        or left != -1
+        or right != -1
+        or not math.isfinite(scale)
+        or abs(scale) > FLOAT32_MAX
+    ):
+        raise ValueError(
+            "QSAG supports mask 0/1, precision 0, windows -1 and finite FP32 scale"
+        )
+    if metadata is not None or attn_mask is not None:
+        raise ValueError("QSAG requires metadata=None and attn_mask=None")
+    packed = layout_q == "TND"
+    rank = 3 if packed else 4
+    if q.dim() != rank or k.dim() != rank:
+        raise ValueError("Q/K ranks must match layout")
+    if v.shape != k.shape or dout.shape != q.shape or attn_out.shape != q.shape:
+        raise ValueError("Q/dout/attn_out and K/V shapes must match")
+    if q.dtype not in (torch.float16, torch.bfloat16) or any(
+        t.dtype != q.dtype for t in (k, v, dout, attn_out)
+    ):
+        raise ValueError("QSAG inputs must have matching FP16/BF16 dtype")
+    if (
+        lse.dtype != torch.float32
+        or indices.dtype != torch.int32
+        or counts.dtype != torch.int32
+    ):
+        raise ValueError("QSAG requires FP32 LSE and INT32 indices/counts")
+    if lse.shape not in (q.shape[:-1], q.shape[:-1] + (1,)):
+        raise ValueError(
+            "QSAG LSE must follow Q layout with D removed or replaced by 1"
+        )
+    h = 1 if packed or layout_q == "BNSD" else 2
+    sq_axis = 0 if packed else (2 if layout_q == "BNSD" else 1)
+    nq, nk, d = q.shape[h], k.shape[h], q.shape[-1]
+    if nq <= 0 or nk <= 0 or nq % nk or d <= 0 or k.shape[-1] != d:
+        raise ValueError(
+            "QSAG requires positive divisible head counts and common positive D"
+        )
+    # Architecture-specific Bs/G/D limits are checked by the selected tiling.
+    if len(block_shape) != 2 or block_shape[0] != 1 or block_shape[1] <= 0:
+        raise ValueError("QSAG requires block_shape=[1,Bs], Bs>0")
+    if indices.dim() != 4 or counts.dim() != 3:
+        raise ValueError("QSAG indices/count ranks must be 4/3")
+    b, n, qcap, topk = indices.shape
+    if (
+        b <= 0
+        or n != nk
+        or not 1 <= topk <= 2147483647
+        or counts.shape != (b, nk, qcap)
+    ):
+        raise ValueError(
+            "QSAG requires indices [B,N2,Qcap,topK] and counts [B,N2,Qcap], topK>=1"
+        )
+    if packed:
+        for t in (cu_q, cu_kv):
+            if t is None or t.dtype != torch.int64 or t.shape != (b + 1,):
+                raise ValueError("TND QSAG requires INT64 cu lengths [B+1]")
+        for t in (used_q, used_kv):
+            if t is not None and (t.dtype != torch.int32 or t.shape != (b,)):
+                raise ValueError("QSAG seqused must be INT32 [B]")
+    elif any(t is not None for t in (cu_q, cu_kv, used_q, used_kv)):
+        raise ValueError("dense QSAG does not accept cu lengths or seqused")
+    elif q.shape[0] != b or k.shape[0] != b or qcap != q.shape[sq_axis]:
+        raise ValueError("QSAG dense batch and Qcap must match Q/K")
+    for t in (
+        q,
+        k,
+        v,
+        dout,
+        attn_out,
+        lse,
+        indices,
+        counts,
+        cu_q,
+        cu_kv,
+        used_q,
+        used_kv,
+    ):
+        # Match qsag::ValidShape's bound for padded FP32 workspace offsets.
+        if t is not None and t.numel() > (2**63 - 1) // 64:
+            raise ValueError("QSAG tensor shape overflow")
+        if t is not None and t.device != q.device:
+            raise ValueError("all QSAG tensors must be on the same device")
 
 
 def calc_gsag_metadata_size(batch_size: int, num_heads_q: int, num_j: int) -> int:
@@ -302,7 +424,35 @@ class GenericBlockSparseAttentionGradOpBuilder(OpBuilder):
             residual_block_mode: int = 0,
             is_consistent_topk: bool = False,
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            _check_sparse_attributes(layout_sparse_pattern, residual_block_mode)
+            if layout_sparse_pattern == 0:
+                _check_qsag(
+                    q,
+                    k,
+                    v,
+                    dout,
+                    attn_out,
+                    softmax_lse,
+                    sparse_block_idx,
+                    sparse_block_count,
+                    block_shape,
+                    metadata=metadata,
+                    attn_mask=attn_mask,
+                    cu_q=cu_seqlens_q,
+                    cu_kv=cu_seqlens_kv,
+                    used_q=seqused_q,
+                    used_kv=seqused_kv,
+                    layout_q=layout_q,
+                    layout_kv=layout_kv,
+                    residual_block_mode=residual_block_mode,
+                    is_consistent_topk=is_consistent_topk,
+                    scale=softmax_scale,
+                    mask=_resolve_mask_mode(mask_mode),
+                    precision=softmax_precision,
+                    left=win_left,
+                    right=win_right,
+                )
+            else:
+                _check_sparse_attributes(layout_sparse_pattern, residual_block_mode)
             if len(block_shape) != 2:
                 raise ValueError(
                     f"{_OP_PREFIX}: block_shape is required and must be [block_x, block_y]"
@@ -447,9 +597,37 @@ def generic_block_sparse_attention_grad(
     ] = ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX,
     is_consistent_topk: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """计算 GBSAG 梯度；residual_block_mode 支持模式 0 的枚举、整数或枚举名字符串。"""
+    """计算 GBSAG/QSAG 梯度；QSAG 使用 layout=0、residual=1，支持两种 TopK 提示。"""
     residual_block_mode = _resolve_residual_block_mode(residual_block_mode)
-    _check_sparse_attributes(layout_sparse_pattern, residual_block_mode)
+    if layout_sparse_pattern == 0:
+        _check_qsag(
+            q,
+            k,
+            v,
+            dout,
+            attn_out,
+            softmax_lse,
+            sparse_block_idx,
+            sparse_block_count,
+            block_shape,
+            metadata=metadata,
+            attn_mask=attn_mask,
+            cu_q=cu_seqlens_q,
+            cu_kv=cu_seqlens_kv,
+            used_q=seqused_q,
+            used_kv=seqused_kv,
+            layout_q=layout_q,
+            layout_kv=layout_kv,
+            residual_block_mode=residual_block_mode,
+            is_consistent_topk=is_consistent_topk,
+            scale=softmax_scale,
+            mask=_resolve_mask_mode(mask_mode),
+            precision=softmax_precision,
+            left=win_left,
+            right=win_right,
+        )
+    else:
+        _check_sparse_attributes(layout_sparse_pattern, residual_block_mode)
     if len(block_shape) != 2:
         raise ValueError(
             f"{_OP_PREFIX}: block_shape is required and must be [block_x, block_y]"

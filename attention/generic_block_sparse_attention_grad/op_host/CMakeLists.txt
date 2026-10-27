@@ -43,6 +43,7 @@ if(NOT BUILD_OPS_RTY_KERNEL)
     add_tiling_modules()
     target_sources(${OPHOST_NAME}_tiling_obj PRIVATE
         ./arch35/generic_block_sparse_attention_grad_tiling_arch35.cpp
+        ./arch35/qsag_tiling.cpp
         ./arch22/generic_block_sparse_attention_grad_tiling_arch22.cpp
     )
 endif()

@@ -14,6 +14,7 @@
  */
 
 #include "aclnn_generic_block_sparse_attention_grad.h"
+#include "../qsag_validation.h"
 #include "generic_block_sparse_attention_grad.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/common/op_error_check.h"
@@ -477,6 +478,54 @@ aclnnStatus Validate(const aclTensor* query, const aclTensor* key, const aclTens
     return ACLNN_SUCCESS;
 }
 
+aclnnStatus ValidateQsag(const std::array<const aclTensor*, 17>& inputs, const aclIntArray* blockShape,
+                         const char* layoutQ, const char* layoutKv, double scale, int64_t mask, int64_t precision,
+                         int64_t left, int64_t right, int64_t residual, bool consistent)
+{
+    for (size_t i : {0, 1, 2, 3, 4, 5, 6, 7, 14, 15, 16}) {
+        CHECK_RET(inputs[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    }
+    CHECK_RET(layoutQ != nullptr && layoutKv != nullptr && blockShape != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    if (!std::isfinite(scale) || std::abs(scale) > static_cast<double>(std::numeric_limits<float>::max())) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "GenericBlockSparseAttentionGrad QSAG: scale must be finite FP32.");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    std::array<qsag::TensorInfo, 17> tensors;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        if (inputs[i] == nullptr) {
+            continue;
+        }
+        auto& t = tensors[i];
+        t.present = true;
+        t.dtype = inputs[i]->GetDataType();
+        const auto& shape = inputs[i]->GetViewShape();
+        for (size_t j = 0; j < shape.GetDimNum(); ++j) {
+            t.shape.push_back(shape.GetDim(j));
+        }
+    }
+    qsag::Config cfg;
+    cfg.layoutQ = layoutQ;
+    cfg.layoutKv = layoutKv;
+    for (size_t i = 0; i < blockShape->Size(); ++i) {
+        cfg.block.push_back((*blockShape)[i]);
+    }
+    cfg.scale = static_cast<float>(scale);
+    cfg.mask = mask;
+    cfg.precision = precision;
+    cfg.left = left;
+    cfg.right = right;
+    cfg.residual = residual;
+    cfg.consistent = consistent;
+    qsag::ShapeInfo shape{};
+    const auto error = qsag::Validate(tensors, cfg, ACL_FLOAT16, ACL_BF16, ACL_FLOAT, ACL_INT32, ACL_INT64, shape);
+    if (!error.empty()) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "GenericBlockSparseAttentionGrad QSAG: %s", error.c_str());
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    // Deterministic capability is checked by the selected architecture's tiling.
+    return ACLNN_SUCCESS;
+}
+
 } // namespace
 
 aclnnStatus aclnnGenericBlockSparseAttentionGradGetWorkspaceSize(
@@ -500,10 +549,17 @@ aclnnStatus aclnnGenericBlockSparseAttentionGradGetWorkspaceSize(
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
-    auto ret = Validate(query, key, value, dout, out, lse, sparseBlockIdx, sparseBlockCount, metadataOptional,
-                        attenMaskOptional, cuSeqLengthsQOptional, cuSeqLengthsKvOptional, sequsedQOptional,
-                        sequsedKvOptional, blockShape, layoutQ, layoutKv, layoutSparsePattern, maskType,
-                        softmaxPrecision, winLeft, winRight, residualBlockMode, isConsistentTopk, dQuery, dKey, dValue);
+    auto ret =
+        layoutSparsePattern == 0 ?
+            ValidateQsag({query, key, value, dout, out, lse, sparseBlockIdx, sparseBlockCount, metadataOptional,
+                          attenMaskOptional, cuSeqLengthsQOptional, cuSeqLengthsKvOptional, sequsedQOptional,
+                          sequsedKvOptional, dQuery, dKey, dValue},
+                         blockShape, layoutQ, layoutKv, scaleValue, maskType, softmaxPrecision, winLeft, winRight,
+                         residualBlockMode, isConsistentTopk) :
+            Validate(query, key, value, dout, out, lse, sparseBlockIdx, sparseBlockCount, metadataOptional,
+                     attenMaskOptional, cuSeqLengthsQOptional, cuSeqLengthsKvOptional, sequsedQOptional,
+                     sequsedKvOptional, blockShape, layoutQ, layoutKv, layoutSparsePattern, maskType, softmaxPrecision,
+                     winLeft, winRight, residualBlockMode, isConsistentTopk, dQuery, dKey, dValue);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
 
     auto queryC = l0op::Contiguous(query, uniqueExecutor.get());
@@ -514,8 +570,10 @@ aclnnStatus aclnnGenericBlockSparseAttentionGradGetWorkspaceSize(
     auto lseC = l0op::Contiguous(lse, uniqueExecutor.get());
     auto idxC = l0op::Contiguous(sparseBlockIdx, uniqueExecutor.get());
     auto cntC = l0op::Contiguous(sparseBlockCount, uniqueExecutor.get());
-    auto metaC = l0op::Contiguous(metadataOptional, uniqueExecutor.get());
-    CHECK_RET(queryC && keyC && valueC && doutC && outC && lseC && idxC && cntC && metaC, ACLNN_ERR_INNER_NULLPTR);
+    auto metaC = metadataOptional ? l0op::Contiguous(metadataOptional, uniqueExecutor.get()) : nullptr;
+    CHECK_RET(queryC && keyC && valueC && doutC && outC && lseC && idxC && cntC &&
+                  (metadataOptional == nullptr || metaC != nullptr),
+              ACLNN_ERR_INNER_NULLPTR);
 
     const aclTensor* attenC = nullptr;
     const aclTensor* cuQC = nullptr;

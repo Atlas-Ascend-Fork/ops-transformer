@@ -12,6 +12,7 @@
 #include "kernel_operator_list_tensor_intf.h"
 #if __CCE_AICORE__ == 310
 #include "arc35/generic_block_sparse_attention_grad_kernel.h"
+#include "arc35/qsag_kernel.h"
 #else
 #include "arc22/generic_block_sparse_attention_grad_interface.h"
 #endif
@@ -34,6 +35,22 @@ extern "C" __global__ __aicore__ void generic_block_sparse_attention_grad(
 
 #if __CCE_AICORE__ == 310
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    // QSAG has its own packet. Dispatch before interpreting legacy fields.
+    if (TILING_KEY_IS(2000)) {
+        GET_TILING_DATA_WITH_STRUCT(QsagTilingDataArch35, qsagData, tiling);
+        TPipe pipe;
+        QSAG::Kernel<bfloat16_t, QsagTilingDataArch35> op;
+        op.Run(query, key, value, dout, out, softmaxLse, sparseBlockIdx, sparseBlockCount, cuSeqLengthsQ,
+               cuSeqLengthsKv, sequsedQ, sequsedKv, dq, dk, dv, user, &qsagData, &pipe);
+        return;
+    } else if (TILING_KEY_IS(2001)) {
+        GET_TILING_DATA_WITH_STRUCT(QsagTilingDataArch35, qsagData, tiling);
+        TPipe pipe;
+        QSAG::Kernel<half, QsagTilingDataArch35> op;
+        op.Run(query, key, value, dout, out, softmaxLse, sparseBlockIdx, sparseBlockCount, cuSeqLengthsQ,
+               cuSeqLengthsKv, sequsedQ, sequsedKv, dq, dk, dv, user, &qsagData, &pipe);
+        return;
+    }
     GET_TILING_DATA_WITH_STRUCT(GenericBlockSparseAttentionGradTilingDataArch35, tiling_data_in, tiling);
     const GenericBlockSparseAttentionGradTilingDataArch35* __restrict tilingDataPtr = &tiling_data_in;
     using ARC35_TILING_CLASS = GenericBlockSparseAttentionGradTilingDataArch35;
