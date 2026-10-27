@@ -16,7 +16,6 @@
 #include "opdev/op_def.h"
 #include "opdev/op_log.h"
 #include "opdev/op_dfx.h"
-#include "op_common/log/log.h"
 #include "fused_infer_attention_score_inner.h"
 #include "aclnnInner_fused_infer_attention_score.h" // 该文件为自动生成，在build/autogen/inner路径下
 
@@ -71,11 +70,8 @@ aclnnStatus aclnnFusedInferAttentionScoreV4GetMaxWorkspaceSize(
     const aclTensor* softmaxLse, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     if (op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510) {
-        OP_LOGE_WITHOUT_REPORT(
-            ACLNN_ERR_RUNTIME_ERROR,
-            "Interface aclnnFusedInferAttentionScore versions V1 to V4 are no longer supported on Ascend950.");
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(GetOpName().c_str(), "interface", "...",
-                                              "V1-V4 not supported on Ascend950; use aclnnFusedInferAttentionScoreV5");
+        OP_LOGE(ACLNN_ERR_RUNTIME_ERROR,
+                "Interface aclnnFusedInferAttentionScore versions V1 to V4 are no longer supported on Ascend950.");
         return ACLNN_ERR_RUNTIME_ERROR;
     }
     OP_LOGD("start aclnnFusedInferAttentionScoreV4GetMaxWorkspaceSize");
@@ -92,14 +88,14 @@ aclnnStatus aclnnFusedInferAttentionScoreV4GetMaxWorkspaceSize(
 
     ret = FakeArray(actualSeqLengthsKvOptional, fakeActualSeqLengthsKvOptional);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSeqLengthsKvOptional failed");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSeqLengthsKvOptional failed");
         aclDestroyTensor(fakeActualSeqLengthsOptional); // 没有返回值无需校验
         return ret;
     }
 
     ret = FakeArray(actualSharedPrefixLenOptional, fakeActualSharedPrefixLenOptional);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSharedPrefixLenOptional failed");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSharedPrefixLenOptional failed");
         aclDestroyTensor(fakeActualSeqLengthsOptional); // 没有返回值无需校验
         aclDestroyTensor(fakeActualSeqLengthsKvOptional);
         return ret;
@@ -208,11 +204,8 @@ aclnnStatus aclnnFusedInferAttentionScoreV4GetWorkspaceSize(
         DFX_OUT(attentionOut, softmaxLse));
 
     if (op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510) {
-        OP_LOGE_WITHOUT_REPORT(
-            ACLNN_ERR_RUNTIME_ERROR,
-            "Interface aclnnFusedInferAttentionScore versions V1 to V4 are no longer supported on Ascend950.");
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(GetOpName().c_str(), "interface", "...",
-                                              "V1-V4 not supported on Ascend950; use aclnnFusedInferAttentionScoreV5");
+        OP_LOGE(ACLNN_ERR_RUNTIME_ERROR,
+                "Interface aclnnFusedInferAttentionScore versions V1 to V4 are no longer supported on Ascend950.");
         return ACLNN_ERR_RUNTIME_ERROR;
     }
 
@@ -244,11 +237,8 @@ aclnnStatus aclnnFusedInferAttentionScoreV4(void* workspace, uint64_t workspaceS
                                             const aclrtStream stream)
 {
     if (op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510) {
-        OP_LOGE_WITHOUT_REPORT(
-            ACLNN_ERR_RUNTIME_ERROR,
-            "Interface aclnnFusedInferAttentionScore versions V1 to V4 are no longer supported on Ascend950.");
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(GetOpName().c_str(), "interface", "...",
-                                              "V1-V4 not supported on Ascend950; use aclnnFusedInferAttentionScoreV5");
+        OP_LOGE(ACLNN_ERR_RUNTIME_ERROR,
+                "Interface aclnnFusedInferAttentionScore versions V1 to V4 are no longer supported on Ascend950.");
         return ACLNN_ERR_RUNTIME_ERROR;
     }
     return InnerFusedInferAttentionScore(workspace, workspaceSize, executor, stream);

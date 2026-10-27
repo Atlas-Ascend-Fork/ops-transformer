@@ -92,18 +92,18 @@ std::tuple<const aclTensor*, const aclTensor*> FusedInferAttentionScore(
         (actualSharedPrefixLenOptional != nullptr && actualSharedPrefixLenTensor == nullptr) ||
         (qStartIdxOptional != nullptr && qStartIdxTensor == nullptr) ||
         (kvStartIdxOptional != nullptr && kvStartIdxTensor == nullptr)) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "FusedInferAttentionScore: convert IntArray to Tensor failed.");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "FusedInferAttentionScore: convert IntArray to Tensor failed.");
         return {nullptr, nullptr};
     }
 
     auto attentionOutOut = executor->AllocTensor(attentionOut->GetDataType(), Format::FORMAT_ND, Format::FORMAT_ND);
     if (attentionOutOut == nullptr) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "FusedInferAttentionScore: alloc attentionOutOut failed.");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "FusedInferAttentionScore: alloc attentionOutOut failed.");
         return {nullptr, nullptr};
     }
     auto softmaxLseOut = executor->AllocTensor(softmaxLse->GetDataType(), Format::FORMAT_ND, Format::FORMAT_ND);
     if (softmaxLseOut == nullptr) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "FusedInferAttentionScore: alloc softmaxLseOut failed.");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "FusedInferAttentionScore: alloc softmaxLseOut failed.");
         return {nullptr, nullptr};
     }
     auto ret = INFER_SHAPE(

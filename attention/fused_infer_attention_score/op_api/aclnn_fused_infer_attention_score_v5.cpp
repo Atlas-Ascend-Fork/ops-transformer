@@ -95,14 +95,14 @@ aclnnStatus aclnnFusedInferAttentionScoreV5GetMaxWorkspaceSize(
 
     ret = FakeArray(actualSeqLengthsKvOptional, fakeActualSeqLengthsKvOptional);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSeqLengthsKvOptional failed");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSeqLengthsKvOptional failed");
         aclDestroyTensor(fakeActualSeqLengthsOptional);
         return ret;
     }
 
     ret = FakeArray(actualSharedPrefixLenOptional, fakeActualSharedPrefixLenOptional);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSharedPrefixLenOptional failed");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake actualSharedPrefixLenOptional failed");
         aclDestroyTensor(fakeActualSeqLengthsOptional);
         aclDestroyTensor(fakeActualSeqLengthsKvOptional);
         return ret;
@@ -110,7 +110,7 @@ aclnnStatus aclnnFusedInferAttentionScoreV5GetMaxWorkspaceSize(
 
     ret = FakeArray(qStartIdxOptional, fakeQStartIdxOptional);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake qStartIdxOptional failed");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake qStartIdxOptional failed");
         aclDestroyTensor(fakeActualSeqLengthsOptional);
         aclDestroyTensor(fakeActualSeqLengthsKvOptional);
         aclDestroyTensor(fakeActualSharedPrefixLenOptional);
@@ -119,7 +119,7 @@ aclnnStatus aclnnFusedInferAttentionScoreV5GetMaxWorkspaceSize(
 
     ret = FakeArray(kvStartIdxOptional, fakeKVStartIdxOptional);
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake kvStartIdxOptional failed");
+        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc fake kvStartIdxOptional failed");
         aclDestroyTensor(fakeActualSeqLengthsOptional);
         aclDestroyTensor(fakeActualSeqLengthsKvOptional);
         aclDestroyTensor(fakeActualSharedPrefixLenOptional);
@@ -213,8 +213,7 @@ aclnnStatus aclnnFusedInferAttentionScoreV5GetWorkspaceSize(
     aclnnStatus ret = CheckTensorContiguous(key, value, keyAntiquantScaleOptional, valueAntiquantScaleOptional,
                                             keyAntiquantOffsetOptional, valueAntiquantOffsetOptional, keyRopeOptional);
     if (ret != ACLNN_SUCCESS && NnopbaseSupportTensorV2 == nullptr) {
-        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_TILING_ERROR,
-                               "When tensor is not contiguous, opbase package version check failed");
+        OP_LOGE(ACLNN_ERR_INNER_TILING_ERROR, "When tensor is not contiguous, opbase package version check failed");
         return ret;
     }
 
