@@ -204,6 +204,7 @@ protected:
     int64_t oriWinLeft;
     int64_t oriWinRight;
     int64_t oriWinLen;
+    uint8_t isSink{0};
     // workspace
     uint32_t mm12WorkspaceLen;
     int64_t dqWorkspaceLen;
@@ -303,6 +304,7 @@ __aicore__ inline void VecOp<SMLAGT>::InitParams(const TILING_CLASS* __restrict 
     oriWinLeft = tilingData->opInfo.oriWinLeft;
     oriWinRight = tilingData->opInfo.oriWinRight;
     oriWinLen = oriWinLeft + oriWinRight + 1;
+    isSink = tilingData->opInfo.isSink;
 
     if constexpr (IS_BSND == false) {
         dimTq = tilingData->opInfo.S1;
@@ -339,8 +341,10 @@ __aicore__ inline void VecOp<SMLAGT>::InitGMBuffer(GM_ADDR ori_kv, GM_ADDR cmp_k
     topkIndicesGm.SetGlobalBuffer((__gm__ int32_t*)topk_indices);
     oriKvGm.SetGlobalBuffer((__gm__ T1*)ori_kv);
     cmpKvGm.SetGlobalBuffer((__gm__ T1*)cmp_kv);
-    dSinksGm.SetGlobalBuffer((__gm__ float*)dsinks);
-    sinksGm.SetGlobalBuffer((__gm__ float*)sinks);
+    if (isSink) {
+        dSinksGm.SetGlobalBuffer((__gm__ float*)dsinks);
+        sinksGm.SetGlobalBuffer((__gm__ float*)sinks);
+    }
     cmpSoftmaxL1Gm.SetGlobalBuffer((__gm__ float*)cmp_softmax_l1_norm);
 
     /*
@@ -521,7 +525,9 @@ __aicore__ inline void VecOp<SMLAGT>::AtomicClean()
     } else {
         DumpGmZero(dkWorkspaceGm, dkWorkspaceLen / sizeof(float));
     }
-    DumpGmZero(dSinksGm, dimN2 * dimG);
+    if (isSink) {
+        DumpGmZero(dSinksGm, dimN2 * dimG);
+    }
     if constexpr (MODE == SMLAG_SCFA_MODE) {
         DumpGmZero(additionalWorkspaceGm, additionalWorkspaceLen / sizeof(float));
         DumpGmZero(cmpSoftmaxL1Gm, dimTq * dimN2 * selectedBlockCount);
@@ -670,13 +676,17 @@ __aicore__ inline void VecOp<SMLAGT>::CalSoftmax(const int32_t processM, const i
                 {static_cast<uint16_t>(processM), static_cast<uint32_t>(actualSelS2 * sizeof(float)),
                  static_cast<uint32_t>((params.sftBaseN - actualSelS2) * sizeof(float)), 0, 0},
                 {false, 0, 0, 0});
-    DataCopyPad(sinkTmp, sinksGm[mOffset], {1, static_cast<uint32_t>(processM * sizeof(float)), 0, 0, 0},
-                {false, 0, 0, 0});
+    if (isSink) {
+        DataCopyPad(sinkTmp, sinksGm[mOffset], {1, static_cast<uint32_t>(processM * sizeof(float)), 0, 0, 0},
+                    {false, 0, 0, 0});
+    }
     SET_FLAG(MTE2, V, vWaitMte2);
     WAIT_FLAG(MTE2, V, vWaitMte2);
 
-    Brcb(sinkTensor, sinkTmp, CeilDiv(params.sftBaseM, BLOCK_FP32), {1, 8});
-    PIPE_BARRIER(PIPE_V);
+    if (isSink) {
+        Brcb(sinkTensor, sinkTmp, CeilDiv(params.sftBaseM, BLOCK_FP32), {1, 8});
+        PIPE_BARRIER(PIPE_V);
+    }
 
     Muls(pTensor, pTensor, scaleValue, dataSize);
     PIPE_BARRIER(PIPE_V);
@@ -723,10 +733,12 @@ __aicore__ inline void VecOp<SMLAGT>::CalSoftmax(const int32_t processM, const i
         }
     }
 
-    Sub(sinkTensor, sinkTensor, lseTensor, processM * 8);
-    PIPE_BARRIER(PIPE_V);
-    Exp(sinkTensor, sinkTensor, processM * 8);
-    PIPE_BARRIER(PIPE_V);
+    if (isSink) {
+        Sub(sinkTensor, sinkTensor, lseTensor, processM * 8);
+        PIPE_BARRIER(PIPE_V);
+        Exp(sinkTensor, sinkTensor, processM * 8);
+        PIPE_BARRIER(PIPE_V);
+    }
 
     DataCopyPad(pWorkspaceGm[mm345Addr], sftOutT1Tensor,
                 {static_cast<uint16_t>(processM), static_cast<uint32_t>(actualSelS2 * sizeof(T1)), 0,
@@ -819,6 +831,9 @@ __aicore__ inline void VecOp<SMLAGT>::CalDsinks(const int32_t processM, const Ru
 template <typename SMLAGT>
 __aicore__ inline void VecOp<SMLAGT>::CopyOutDsinks()
 {
+    if (!isSink) {
+        return;
+    }
     if constexpr (IS_DETER) {
         // dSinkTensor 布局为 [g]*BLOCK_FP32（每元素占 8 个 float），压成连续 [G] 再写 workspace
         event_t eventIdVToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
@@ -994,7 +1009,9 @@ __aicore__ inline void VecOp<SMLAGT>::Process(const RunInfo& runInfo)
 
         CalSoftmax(processM, mm12Addr, mm345Addr, runInfo, mOffset, s1Index);
         CalSoftmaxGrad(processM, mm12Addr, mm345Addr, runInfo);
-        CalDsinks(processM, runInfo, mOffset);
+        if (isSink) {
+            CalDsinks(processM, runInfo, mOffset);
+        }
         SET_FLAG(V, MTE2, mte2WaitV);
         SET_FLAG(MTE3, MTE2, mte2WaitMte3);
 

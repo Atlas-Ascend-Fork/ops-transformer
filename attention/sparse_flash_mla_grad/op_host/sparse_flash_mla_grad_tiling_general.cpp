@@ -761,9 +761,24 @@ ge::graphStatus SparseFlashMlaGradBasicTiling::GetBaseShapeInfo()
         }
     }
 
+    // torch 包装层在 sinks 缺省时分配 shape [0] 的 d_sinks，与 nullptr 一样视为未提供。
+    auto sinksTensor = context_->GetOptionalInputTensor(static_cast<size_t>(InputIndex::SINKS));
+    const gert::StorageShape* dSinksStorage = context_->GetOutputShape(static_cast<size_t>(OutputIndex::DSINKS));
+    auto isZeroElement = [](const gert::Shape& shape) { return shape.GetDimNum() == 1 && shape.GetDim(0) == 0; };
+    bool hasSinks = sinksTensor != nullptr && !isZeroElement(sinksTensor->GetStorageShape());
+    bool hasDSinks = dSinksStorage != nullptr && !isZeroElement(dSinksStorage->GetStorageShape());
+    if (hasSinks != hasDSinks) {
+        OP_LOGE(context_,
+                "sinks and d_sinks must both be provided or both be omitted, but got hasSinks=%d, hasDSinks=%d.",
+                static_cast<int>(hasSinks), static_cast<int>(hasDSinks));
+        return ge::GRAPH_FAILED;
+    }
+    tmpData.sinks = hasSinks;
+
     tilingData.opInfo.set_hasUsedSeqQ(tmpData.usedSeqQ);
     tilingData.opInfo.set_hasUsedSeqOriKV(tmpData.usedSeqOriKV);
     tilingData.opInfo.set_hasUsedSeqCmpKV(tmpData.usedSeqCmpKV);
+    tilingData.opInfo.set_isSink(static_cast<uint8_t>(tmpData.sinks));
     tilingData.opInfo.set_selectedBlockSize(1);
 
     return ge::GRAPH_SUCCESS;

@@ -56,6 +56,7 @@ public:
     int64_t aivNum{0};
     int64_t dimG{0};
     uint32_t isDeterministic{0};
+    uint8_t isSink{0};
     // query
     int64_t ubBaseSize;
     int64_t qPostBlockFactor;
@@ -106,7 +107,6 @@ __aicore__ inline void SparseFlashMlaGradPost<OUT_TYPE, TILING_TYPE, CAST_DV, LA
     dqGm.SetGlobalBuffer((__gm__ OUT_TYPE*)dq);
     dOriKvGm.SetGlobalBuffer((__gm__ OUT_TYPE*)d_ori_kv);
     dCmpKvGm.SetGlobalBuffer((__gm__ OUT_TYPE*)d_cmp_kv);
-    dsinkGm.SetGlobalBuffer((__gm__ float*)dsinks);
 
     // tiling_data
     usedCoreNum = tilingData->postTilingData.coreNum;
@@ -129,6 +129,7 @@ __aicore__ inline void SparseFlashMlaGradPost<OUT_TYPE, TILING_TYPE, CAST_DV, LA
     dimDqk = tilingData->opInfo.D;
     dimG = tilingData->opInfo.G;
     isDeterministic = tilingData->opInfo.isDeterministic;
+    isSink = tilingData->opInfo.isSink;
     aivNum = tilingData->opInfo.aivNum;
     dOriKvSize = LAYOUT == 3 ? tilingData->opInfo.S2 * tilingData->opInfo.N2 * dimDqk :
                                tilingData->opInfo.B * tilingData->opInfo.S2 * tilingData->opInfo.N2 * dimDqk;
@@ -139,7 +140,8 @@ __aicore__ inline void SparseFlashMlaGradPost<OUT_TYPE, TILING_TYPE, CAST_DV, LA
                                   tilingData->postTilingData.dqWorkSpaceOffset / sizeof(float));
     dkWorkSpaceGm.SetGlobalBuffer((__gm__ float*)workspace +
                                   tilingData->postTilingData.dkWorkSpaceOffset / sizeof(float));
-    if (isDeterministic) {
+    if (isDeterministic && isSink) {
+        dsinkGm.SetGlobalBuffer((__gm__ float*)dsinks);
         dsinkWorkspaceGm.SetGlobalBuffer((__gm__ float*)workspace +
                                          tilingData->postTilingData.dSinkWorkSpaceOffset / sizeof(float));
     }
@@ -360,7 +362,7 @@ __aicore__ inline void SparseFlashMlaGradPost<OUT_TYPE, TILING_TYPE, CAST_DV, LA
         PIPE_BARRIER(PIPE_ALL);
     }
 
-    if (isDeterministic) {
+    if (isDeterministic && isSink) {
         ProcessSink();
     }
 }
