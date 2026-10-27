@@ -291,8 +291,10 @@ def ffn_worker_batching(
         fullgraph=True, dynamic=False)。上下文及其引用的缓冲必须在图执行期间
         保持有效，外部生产者需正确同步。
         不支持反向。已注册 TorchAir GE Converter；GE 需要原型及编译封装均包含
-        sync_flag，暂不支持 FP4 和 MX uint8 输出视图。当前环境 GE 编译尚未通过，
-        具体限制见 docs/torchapi_ffn_worker_batching.md。
+        sync_flag。全部 token_dtype 均支持 GE 图模式（-c/-d）：FP4 原生 x2 输出需要
+        TorchAir FP4 物化支持（ge_type_to_torch_type 将 DT_FLOAT4_E2M1 映射为
+        float4_e2m1fn_x2），旧版 TorchAir 会得到清晰的 NotImplementedError，
+        可改用 mx_output_uint8=True 的 uint8 传输（字节一致）。
     """
     return torch.ops.cann_ops_transformer.ffn_worker_batching(
         schedule_context,

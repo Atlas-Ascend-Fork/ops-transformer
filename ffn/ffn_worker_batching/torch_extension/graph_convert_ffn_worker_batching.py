@@ -15,7 +15,13 @@ from typing import List, Optional
 try:
     import torch
     from torchair.ge import attr
-    from torchair.ge._ge_graph import Tensor, TensorSpec, auto_convert_to_tensor
+    from torchair.ge._ge_graph import (
+        Tensor,
+        TensorSpec,
+        auto_convert_to_tensor,
+        DataType,
+    )
+    from torchair._ge_concrete_graph import ge_apis as ge
     from torchair._ge_concrete_graph.compat_ir import ge_op, IrDef, is_cann_compat
     from torchair._ge_concrete_graph.fx2ge_converter import (
         register_fx_node_ge_converter,
@@ -37,6 +43,39 @@ _OUTPUT_NAMES = (
     "dynamic_scale",
     "actual_token_num",
 )
+
+
+def _pack_fp4_to_uint8(y):
+    """Pack a logical-nibble FP4 GE tensor (..., H) into packed uint8 (..., H/2).
+
+    Mirrors the official npu_add_rms_norm_dynamic_mx_quant converter: reshape
+    to (..., H/2, 2) nibble pairs, Bitcast to uint8 bytes, reshape to the
+    packed shape. The byte layout matches torch's float4_e2m1fn_x2 storage,
+    so eager (mx_output_uint8=True) and GE graph outputs compare equal.
+    """
+    rank = 2  # y is always [Y, H]; op outputs carry no shape at conversion time
+    div_x2 = ge.Cast(ge.Const([1] * (rank - 1) + [2]), dst_type=DataType.DT_INT32)
+    packed_shape = ge.Div(ge.Shape(y), div_x2)
+    pair_shape = ge.ConcatV2(
+        [packed_shape, ge.Cast(ge.Const([2]), dst_type=DataType.DT_INT32)],
+        concat_dim=0,
+        N=2,
+    )
+    packed = ge.Bitcast(ge.Reshape(y, pair_shape), type=DataType.DT_UINT8)
+    return ge.Reshape(packed, packed_shape)
+
+
+def _torchair_supports_fp4_x2():
+    """Detect TorchAir FP4 x2 output materialization (GE logical nibbles ->
+    torch packed pairs). Older bundled builds map DT_FLOAT4_E2M1 to uint8."""
+    try:
+        from torchair.ge._ge_graph import DataType, ge_type_to_torch_type
+
+        return ge_type_to_torch_type(DataType.DT_FLOAT4_E2M1) is getattr(
+            torch, "float4_e2m1fn_x2", None
+        )
+    except Exception:  # noqa: BLE001
+        return False
 
 
 if _TORCHAIR_AVAILABLE:
@@ -144,24 +183,29 @@ if _TORCHAIR_AVAILABLE:
 
         Requires the current FfnWorkerBatching OPP and TorchAir support for the
         mutable schema's auto_functionalized_v2 lowering. Referenced buffers must
-        remain alive; external producers own their synchronization. Native FP4
-        and MX uint8 transport currently require the npugraph_ex backend.
+        remain alive; external producers own their synchronization. GE graph
+        transport for FP4 uses the mx_output_uint8 byte contract (packed
+        uint8, same bytes as eager); native float4_e2m1fn_x2 outputs require
+        TorchAir FP4 materialization support and are rejected here until then.
         """
         # This flag changes the Torch storage representation, not the GE/ACLNN
-        # operator contract. Forwarding it as a GE attribute would be incorrect;
-        # casting MX values to uint8 would also corrupt the raw exponent bytes.
-        if token_dtype == _FP4_TOKEN_DTYPE or (
-            mx_output_uint8 and token_dtype >= _FIRST_MX_TOKEN_DTYPE
-        ):
-            raise NotImplementedError(
-                "FfnWorkerBatching GE does not support packed FP4 or MX uint8 "
-                "output views; use npugraph_ex with mx_output_uint8=True. "
-                f"Got token_dtype={token_dtype}, mx_output_uint8={mx_output_uint8}."
-            )
-        # Keep Tensor(a!) in the dispatcher schema. TorchAir functionalization
-        # orders the updated context after this node; returning a ninth context
-        # tensor here would break the actual eight-output GE operator contract.
-        return FfnWorkerBatching(
+        # operator contract. The GE graph honors it via a Bitcast epilogue on
+        # the op outputs (below), never by forwarding it as a GE attribute.
+        if token_dtype == _FP4_TOKEN_DTYPE and not mx_output_uint8:
+            if not _torchair_supports_fp4_x2():
+                raise NotImplementedError(
+                    "FfnWorkerBatching GE requires TorchAir FP4 x2 output "
+                    "materialization (ge_type_to_torch_type maps DT_FLOAT4_E2M1 "
+                    "to torch.float4_e2m1fn_x2). Upgrade TorchAir, or run GE "
+                    "graph legs with mx_output_uint8=True (byte-identical "
+                    "uint8 transport). Got token_dtype={token_dtype}, "
+                    "mx_output_uint8={mx_output_uint8}.".format(
+                        token_dtype=token_dtype, mx_output_uint8=mx_output_uint8
+                    )
+                )
+            # Native x2: the op's logical (Y, H) FP4 output flows to NetOutput
+            # unchanged; TorchAir materializes it as float4_e2m1fn_x2 (Y, H/2).
+        outputs = FfnWorkerBatching(
             schedule_context,
             expert_num=expert_num,
             max_out_shape=max_out_shape,
@@ -170,6 +214,17 @@ if _TORCHAIR_AVAILABLE:
             layer_num=layer_num,
             sync_flag=sync_flag,
         )
+        if mx_output_uint8 and token_dtype >= _FIRST_MX_TOKEN_DTYPE:
+            outputs = list(outputs)
+            # E8M0 scale shares uint8 itemsize: bitcast keeps shape, exposes
+            # the raw exponent bytes without any value conversion.
+            outputs[6] = ge.Bitcast(outputs[6], type=DataType.DT_UINT8)
+            if token_dtype == _FP4_TOKEN_DTYPE:
+                outputs[0] = _pack_fp4_to_uint8(outputs[0])
+            # auto_functionalized_v2 unpacks tuple returns (op outputs + base
+            # views must line up with the FX node meta); a list would nest.
+            return tuple(outputs)
+        return outputs
 else:
 
     def convert_ffn_worker_batching(*args, **kwargs):

@@ -32,12 +32,262 @@ import struct
 import numpy as np
 import torch
 
+# ttk 导入一律惰性（见 _ttk_global_storage）：golden 需能在无 ttk 的
+# xpu-server executor 进程中导入（三方参考 FfnWbTorchRef 在该端执行）。
+
 __spec__ = {
     "aclnnFfnWorkerBatching": "AclnnFfnWorkerBatchingLegacyTestSpec",
     "aclnnFfnWorkerBatchingV2": "AclnnFfnWorkerBatchingTestSpec",
     "ffn_worker_batching": "FfnWorkerBatchingKernelTestSpec",
     "torch.ops.cann_ops_transformer.ffn_worker_batching": "TorchFfnWorkerBatchingTestSpec",
 }
+
+# ==================== XPU 三方参考（cross_check） ====================
+# ScheduleContext.reserve6：结构体显式 padding（attention_ffn_schedule.h，偏移
+# 640-1024），kernel 不读。种子载荷 = [4B 小端长度 + JSON{"seed","ranges"}]，
+# 供远端 torch 参考按种子确定性再生与本进程同源的测试数据（真实数据在 NPU
+# HBM 中，无法随 1024B 指针头部跨机传输）。
+_XPU_SEED_OFFSET = 640
+_XPU_SEED_CAPACITY = 384
+
+
+def _pack_xpu_seed(testcase_name, input_ranges):
+    ranges = list(input_ranges[0]) if input_ranges else None
+    payload = json.dumps(
+        {"seed": testcase_name, "ranges": ranges}, sort_keys=True
+    ).encode("utf-8")
+    if len(payload) > _XPU_SEED_CAPACITY - 4:
+        raise ValueError("xpu seed payload exceeds reserve6 capacity")
+    blob = bytearray(_XPU_SEED_CAPACITY)
+    blob[0:4] = len(payload).to_bytes(4, "little")
+    blob[4 : 4 + len(payload)] = payload
+    return bytes(blob)
+
+
+def _parse_xpu_seed(context_bytes):
+    tail = bytes(
+        context_bytes[_XPU_SEED_OFFSET : _XPU_SEED_OFFSET + _XPU_SEED_CAPACITY]
+    )
+    n = int.from_bytes(tail[0:4], "little")
+    if n <= 0 or 4 + n > len(tail):
+        raise ValueError("schedule_context reserve6 carries no xpu seed payload")
+    info = json.loads(tail[4 : 4 + n].decode("utf-8"))
+    ranges = tuple(info["ranges"]) if info.get("ranges") else None
+    return info["seed"], ranges
+
+
+def _write_xpu_seed(scheduleContext, testcase_name, input_ranges):
+    blob = _pack_xpu_seed(testcase_name, input_ranges or ((None, None),))
+    arr = np.frombuffer(blob, dtype=np.int8)
+    view = scheduleContext.reshape(-1)
+    numel = view.numel() if isinstance(scheduleContext, torch.Tensor) else view.size
+    end = _XPU_SEED_OFFSET + _XPU_SEED_CAPACITY
+    if numel < end:
+        raise ValueError(f"schedule_context needs {end} elements to carry the xpu seed")
+    if isinstance(scheduleContext, np.ndarray):
+        view[_XPU_SEED_OFFSET:end] = arr
+    else:
+        view[_XPU_SEED_OFFSET:end] = torch.from_numpy(arr.copy())
+
+
+class FfnWbTorchRef:
+    """torch 三方参考（xpu-server 端执行，GPU/CPU 由注入的 device 决定）。
+
+    契约：bind_params 按名喂 inputs ∪ attrs——aclnn 通路为 camelCase
+    （scheduleContext/expertNum/...），kernel 通路为 snake_case，故统一经
+    **kwargs 收取后双拼写解析。从 context reserve6 解析种子，按
+    _generate_test_data 再生同源数据，再复刻 customize_inputs 的 RECV 同步
+    构造（layer_ids/ready/async_layers 取模）与 golden 的 layer 变换，最后用
+    torch（stable sort/gather）独立计算八个输出；输出按 TTK pure-output
+    初始化语义构造（前缀写入、尾部常量 1、group_list 全量清零写满），与本侧
+    NPU 执行语义逐位一致。支持 NORM / RECV / 同步（syncFlag）与 dtype 0/1/2；
+    MX（dtype>=3）未实现，显式报错。
+    """
+
+    def __call__(self, device=None, **kwargs):
+        import numpy as np
+        import torch
+
+        def pick(*names):
+            for n in names:
+                if kwargs.get(n) is not None:
+                    return kwargs[n]
+            return None
+
+        schedule_context = pick("scheduleContext", "schedule_context")
+        max_out_shape = pick("maxOutShape", "max_out_shape")
+        if schedule_context is None or max_out_shape is None:
+            raise ValueError(
+                "third-party reference requires scheduleContext and maxOutShape"
+            )
+        expert_num = int(pick("expertNum", "expert_num") or 8)
+        token_dtype = int(pick("tokenDtype", "token_dtype") or 0)
+        need_schedule = int(pick("needSchedule", "need_schedule") or 0)
+
+        raw = schedule_context.detach().cpu().numpy().tobytes()
+        name, ranges = _parse_xpu_seed(raw)
+        A, BS, K, H = (int(v) for v in max_out_shape)
+        M = 3 if any(t in name for t in ("sync_skip_mb", "micro_last")) else 1
+        sync_flag = bool(pick("syncFlag", "sync_flag") or False)
+        layer_num = int(pick("layerNum", "layer_num") or 1)
+        if token_dtype >= 3:
+            raise ValueError(
+                "third-party reference supports token_dtype 0/1/2 only "
+                "(MX fp8/fp4 cross_check not implemented)"
+            )
+
+        data = _generate_test_data(
+            name,
+            A,
+            M,
+            BS,
+            K,
+            H,
+            expert_num,
+            token_dtype,
+            need_schedule,
+            input_ranges=[ranges] if ranges else None,
+        )
+        expert_ids = data["expert_ids"]
+        token_data = data["token_data"]
+        token_scales = data.get("token_scales")
+        session_ids_buf = data["session_ids_buf"]
+        micro_batch_ids_buf = data["micro_batch_ids_buf"]
+
+        dev = torch.device(device)
+        mask_value = _MASK_VALUE
+
+        # 复刻 customize_inputs 的 RECV 同步构造（layer_ids/ready/async_layers
+        # 取模）与 golden 的 layer 变换，保证与 NPU 侧语义一致。
+        cur_mb = None
+        if need_schedule == 1:
+            layer_ids = np.zeros((A, M), dtype=np.int32)
+            ready = np.ones((A, M), dtype=bool)
+            if sync_flag:
+                if "async_layers" in name:
+                    per_layer = expert_num // layer_num
+                    vmask = (expert_ids >= 0) & (expert_ids < mask_value)
+                    expert_ids[vmask] %= per_layer
+                    layer_ids[:] = (np.arange(A, dtype=np.int32)[::-1] % layer_num)[
+                        :, None
+                    ]
+                if "layer_boundary" in name:
+                    layer_ids[:] = (
+                        -1
+                        if "negative" in name
+                        else (
+                            np.iinfo(np.int32).max
+                            if "int32max" in name
+                            else (layer_num if "invalid" in name else layer_num - 1)
+                        )
+                    )
+                if "sync_" in name:
+                    if "sync_partial" in name:
+                        ready[1::2, :] = False
+                    elif "sync_last" in name or "sync_skip_mb" in name:
+                        ready[:] = False
+                        ready[-1, -1] = True
+                    elif "sync_masked" in name:
+                        ready[1:, :] = False
+                        expert_ids[0, :, :, :] = mask_value
+            cur_mb = next(m for m in range(M) if ready[:, m].any())
+            ids = expert_ids[:, cur_mb].copy()
+            if sync_flag:
+                per_layer = expert_num // layer_num
+                lid = layer_ids[:, cur_mb]
+                valid = (
+                    (ids >= 0)
+                    & (ids < per_layer)
+                    & (lid[:, None, None] >= 0)
+                    & (lid[:, None, None] < layer_num)
+                )
+                ids = np.where(
+                    valid,
+                    ids.astype(np.int64) + lid[:, None, None] * per_layer,
+                    mask_value,
+                ).astype(np.int32)
+                ids[~ready[:, cur_mb]] = mask_value
+        else:
+            ids = expert_ids
+        flat = (
+            torch.from_numpy(np.ascontiguousarray(ids.reshape(-1)))
+            .to(torch.int32)
+            .to(dev)
+        )
+        sort_key = torch.where(
+            flat < mask_value,
+            flat,
+            torch.tensor(torch.iinfo(torch.int32).max, dtype=torch.int32, device=dev),
+        ).to(torch.int64)
+        order = torch.argsort(sort_key, stable=True)
+        valid = int((flat < mask_value).sum().item())
+        gidx = order[:valid]
+
+        bsk = BS * K
+        a_idx = gidx // bsk
+        rem = gidx % bsk
+        bs_idx = rem // K
+        k_idx = rem % K
+
+        if cur_mb is None:
+            s_idx = torch.from_numpy(np.ascontiguousarray(session_ids_buf)).to(dev)[
+                a_idx
+            ]
+            mb_idx = torch.from_numpy(np.ascontiguousarray(micro_batch_ids_buf)).to(
+                dev
+            )[a_idx]
+        else:
+            s_idx = a_idx
+            mb_idx = torch.full_like(a_idx, cur_mb)
+
+        Y = A * BS * K
+        y_dtype = {0: torch.float16, 1: torch.bfloat16, 2: torch.int8}[token_dtype]
+        tokens = torch.from_numpy(np.ascontiguousarray(token_data)).to(dev)
+        y = torch.ones((Y, H), dtype=y_dtype, device=dev)
+        y[:valid] = tokens[s_idx, mb_idx, bs_idx, k_idx, :].to(y_dtype)
+
+        session_out = torch.ones((Y,), dtype=torch.int32, device=dev)
+        micro_out = torch.ones((Y,), dtype=torch.int32, device=dev)
+        token_out = torch.ones((Y,), dtype=torch.int32, device=dev)
+        offset_out = torch.ones((Y,), dtype=torch.int32, device=dev)
+        session_out[:valid] = s_idx.to(torch.int32)
+        micro_out[:valid] = mb_idx.to(torch.int32)
+        token_out[:valid] = bs_idx.to(torch.int32)
+        offset_out[:valid] = k_idx.to(torch.int32)
+
+        scale_out = torch.ones((Y,), dtype=torch.float32, device=dev)
+        if token_dtype >= 2 and token_scales is not None:
+            scales = torch.from_numpy(np.ascontiguousarray(token_scales)).to(dev)
+            scale_out[:valid] = scales[s_idx, mb_idx, bs_idx, k_idx].to(torch.float32)
+
+        group_list = torch.zeros((expert_num, 2), dtype=torch.int64, device=dev)
+        if valid:
+            svi = flat[order[:valid]].to(torch.int64)
+            change = torch.cat(
+                [torch.ones((1,), dtype=torch.bool, device=dev), svi[1:] != svi[:-1]]
+            )
+            starts = torch.nonzero(change, as_tuple=False).flatten()
+            ends = torch.cat([starts[1:], torch.tensor([valid], device=dev)])
+            run_ids = svi[starts]
+            run_counts = ends - starts
+            n_run = min(run_ids.numel(), expert_num)
+            # 与 golden/_generate_group_list 一致：紧凑填充前 n_run 行（按专家
+            # id 升序），未用行清零；不是按专家 id 散落放置。
+            group_list[:n_run, 0] = run_ids[:n_run]
+            group_list[:n_run, 1] = run_counts[:n_run]
+
+        actual = torch.tensor([valid], dtype=torch.int64, device=dev)
+        return [
+            y,
+            group_list,
+            session_out,
+            micro_out,
+            token_out,
+            offset_out,
+            scale_out,
+            actual,
+        ]
+
 
 # ==================== Shared cache ====================
 
@@ -323,6 +573,12 @@ def _pin_run_time(need_schedule):
     “输入生成先于执行器读取 run_time”的时序（aclnn / kernel 两模式均如此）。"""
     global _ORIG_RUN_TIME
     try:
+        # 四通路 customize_inputs/图腿配置均汇聚于此（早于比对）：
+        # 惰性安装三方比对注入（kit 源不改动，见 ttk_compat）。
+        try:
+            _ttk_assets_compat().install_compare_third_parties()
+        except ImportError:
+            pass
         storage = _ttk_global_storage()
         if _ORIG_RUN_TIME is None:
             _ORIG_RUN_TIME = storage.run_time
@@ -936,6 +1192,11 @@ class AclnnFfnWorkerBatchingTestSpec:
                 torch.from_numpy(ctx_arr).untyped_storage()
             )
 
+        # XPU 三方参考的种子通道：ScheduleContext.reserve6（结构体显式 padding，
+        # 偏移 640-1024，kernel 不读）。写入 [4B 长度 + JSON{seed, ranges}]，
+        # 供远端 torch 参考按种子再生同源数据（真实数据在 NPU HBM，无法跨机）。
+        _write_xpu_seed(scheduleContext, testcase_name, kwargs.get("input_ranges"))
+
         data["HS"] = HS
         _DATA_CACHE[testcase_name] = data
 
@@ -1124,10 +1385,19 @@ class AclnnFfnWorkerBatchingTestSpec:
         "int64": {"standard": "binary_equal"},
     }
 
+    # XPU 三方参考声明：仅 cross_check / --xpu-perf / --dump xpu 等 XPU 派发
+    # 场景被消费；普通精度验证不触发远端派发，行为不变。
+    third_party = {"torch": FfnWbTorchRef}
+
     @staticmethod
-    def compare(*outputs, **kwargs):
+    def compare(*outputs, third_parties=None, **kwargs):
         # 接口固定返回八个张量。先验证数量和元数据，不能通过截短到 min(size)
         # 来比较，否则空输出/缺行输出会因“没有发现不同元素”而被误判为通过。
+        #
+        # third_parties（TTK 注入，声明该形参才传递）：cross_check 等场景已采集
+        # 的三方输出。存在时在每个输出上额外做一次 NPU vs 三方的前缀比对，与
+        # golden 比对合并判定——任一失配即失败；未注入（普通运行 / 旧版 TTK）
+        # 时行为与历史版本逐位一致。
         def failure(message):
             return {"pass": False, "precision": "0%", "error_info": message}
 
@@ -1147,48 +1417,66 @@ class AclnnFfnWorkerBatchingTestSpec:
                 return array
             return np.asarray(t)
 
+        def check_one(idx, npu, ref):
+            """单个输出的前缀感知比对（golden 与三方参考共用）。"""
+            if npu.shape != ref.shape or npu.dtype != ref.dtype:
+                return failure(
+                    f"metadata mismatch [idx={idx}]: {npu.shape}/{npu.dtype} "
+                    f"!= {ref.shape}/{ref.dtype}"
+                )
+            # FP16/BF16 没有 scale 载荷，只有数值内容未定义；张量元数据仍须正确。
+            if idx == _OUT_SCALE and not has_scale:
+                return {"pass": True, "precision": "100%", "error_info": None}
+            # y/索引/scale 只保证有效 token 前缀，容量尾部允许未写入。
+            # group_list 则要求所有未使用行清零，尤其全 mask 场景不能直接 PASS。
+            if idx in _TOKEN_PREFIX_OUTPUTS:
+                if not 0 <= actual_token_num <= ref.shape[0]:
+                    return failure(f"invalid golden token count [idx={idx}]")
+                npu = npu[:actual_token_num]
+                ref = ref[:actual_token_num]
+            # Payloads are copied verbatim: NaN payloads and signed zero matter.
+            if idx in (_OUT_Y, _OUT_SCALE):
+                npu = npu.view(np.uint8)
+                ref = ref.view(np.uint8)
+            diff = int(np.count_nonzero(npu != ref))
+            total = ref.size
+            passed = diff == 0
+            return {
+                "pass": passed,
+                "precision": f"{(total - diff) / total * 100}%" if total else "100%",
+                "error_info": None if passed else f"{diff} mismatches [idx={idx}]",
+            }
+
         npu_outputs = [to_np(t) for t in outputs[:_NUM_OUTPUTS]]
         golden_outputs = [to_np(t) for t in outputs[_NUM_OUTPUTS:]]
         actual_token_num = int(golden_outputs[_OUT_TOKEN_COUNT].flat[0])
         has_scale = golden_outputs[_OUT_Y].dtype.name not in ("float16", "bfloat16")
-        results = []
-        for idx, (npu, gold) in enumerate(zip(npu_outputs, golden_outputs)):
-            if npu.shape != gold.shape or npu.dtype != gold.dtype:
-                results.append(
+        results = [
+            check_one(idx, npu, gold)
+            for idx, (npu, gold) in enumerate(zip(npu_outputs, golden_outputs))
+        ]
+
+        if third_parties is not None:
+            import logging
+
+            logging.info("FFN cross_check: third-party outputs engaged in compare")
+            third_outputs = [to_np(t) for t in third_parties]
+            if len(third_outputs) != _NUM_OUTPUTS:
+                return [
                     failure(
-                        f"metadata mismatch [idx={idx}]: {npu.shape}/{npu.dtype} "
-                        f"!= {gold.shape}/{gold.dtype}"
+                        f"third_party returned {len(third_outputs)} outputs, "
+                        f"expected {_NUM_OUTPUTS}"
                     )
-                )
-                continue
-            # FP16/BF16 没有 scale 载荷，只有数值内容未定义；张量元数据仍须正确。
-            if idx == _OUT_SCALE and not has_scale:
-                results.append({"pass": True, "precision": "100%", "error_info": None})
-                continue
-            # y/索引/scale 只保证有效 token 前缀，容量尾部允许未写入。
-            # group_list 则要求所有未使用行清零，尤其全 mask 场景不能直接 PASS。
-            if idx in _TOKEN_PREFIX_OUTPUTS:
-                if not 0 <= actual_token_num <= gold.shape[0]:
-                    results.append(failure(f"invalid golden token count [idx={idx}]"))
-                    continue
-                npu = npu[:actual_token_num]
-                gold = gold[:actual_token_num]
-            # Payloads are copied verbatim: NaN payloads and signed zero matter.
-            if idx in (_OUT_Y, _OUT_SCALE):
-                npu = npu.view(np.uint8)
-                gold = gold.view(np.uint8)
-            diff = int(np.count_nonzero(npu != gold))
-            total = gold.size
-            passed = diff == 0
-            results.append(
-                {
-                    "pass": passed,
-                    "precision": f"{(total - diff) / total * 100}%"
-                    if total
-                    else "100%",
-                    "error_info": None if passed else f"{diff} mismatches [idx={idx}]",
-                }
-            )
+                    for _ in range(_NUM_OUTPUTS)
+                ]
+            for idx, (npu, third) in enumerate(zip(npu_outputs, third_outputs)):
+                party = check_one(idx, npu, third)
+                if not party["pass"]:
+                    results[idx]["pass"] = False
+                    results[idx]["error_info"] = (
+                        f"{results[idx]['error_info'] or ''}; "
+                        f"third_party: {party['error_info']}"
+                    ).strip("; ")
         return results
 
 
@@ -1213,19 +1501,33 @@ def _ttk_assets_compat():
     return sys.modules[name]
 
 
+def _torch_ge_legs_enabled():
+    storage = _ttk_global_storage()
+    return any(
+        getattr(getattr(storage, name, None), "enabled", False)
+        for name in ("cst_switches", "dyn_switches")
+    )
+
+
+def _in_torch_graph_leg():
+    """npu_preprocess 钩子不携带腿别元信息：GE 图腿（-c/-d）经
+    graph_runner.execute_graph 调入，eager 腿经 execute._execute_eager 调入，
+    以调用栈区分。"""
+    import inspect
+
+    return any(frame.function == "execute_graph" for frame in inspect.stack())
+
+
 def _configure_torch_execution(need_schedule):
-    """Eager consumes once; ACL graph republishes descriptors before each call."""
+    """Eager consumes once; ACL/GE graph legs republish descriptors per call."""
     global _TORCH_ORIG_WARMUP
     storage = _ttk_global_storage()
+    if _torch_ge_legs_enabled() and _in_torch_graph_leg():
+        # TTK resolve_function 每次解析都直调 _OpNamespace.__getattr__ 新造
+        # OpOverloadPacket，丢弃 torchair 注册的 GE converter（mx_output_uint8
+        # 与 AscendIR attrs 数量不匹配时自动生成 converter 报错）；编译前重挂。
+        _ttk_assets_compat().reattach_ge_converter()
     if need_schedule == 1:
-        ge_enabled = any(
-            getattr(getattr(storage, name, None), "enabled", False)
-            for name in ("cst_switches", "dyn_switches")
-        )
-        if ge_enabled:
-            raise ValueError(
-                "Torch RECV graph testing currently requires --aclgraph; GE is not adapted"
-            )
         if getattr(storage, "aclgraph_enabled", False):
             graph_execution = _ttk_assets_compat().load_graph_execution()
             if graph_execution is None:
@@ -1235,6 +1537,20 @@ def _configure_torch_execution(need_schedule):
                 )
             if not getattr(graph_execution, "SUPPORTS_NPU_GRAPH_BEFORE_RUN", False):
                 _ttk_assets_compat().install_graph()
+            if _TORCH_ORIG_WARMUP is not None:
+                storage.warmup = _TORCH_ORIG_WARMUP
+            _pin_run_time(0)
+            return
+        if _torch_ge_legs_enabled() and _in_torch_graph_leg():
+            # GE 静态/动态图腿（-c/-d）：安装回放包装（编译产物逐调用恢复描述符），
+            # 恢复 warmup/run_time 以正常多轮执行——回放保证每轮消费后可复位。
+            graph_execution = _ttk_assets_compat().load_graph_execution()
+            if graph_execution is None:
+                raise ImportError(
+                    "TTK GE graph compile entry not found (neither "
+                    "framework_api.torch.graph_runner nor framework_api.graph_execution)"
+                )
+            _ttk_assets_compat().install_ge_graph()
             if _TORCH_ORIG_WARMUP is not None:
                 storage.warmup = _TORCH_ORIG_WARMUP
             _pin_run_time(0)
@@ -1252,10 +1568,11 @@ def _configure_torch_execution(need_schedule):
 
 
 class TorchFfnWorkerBatchingTestSpec:
-    """TTK NORM, single-call eager RECV, and republished ACL graph RECV.
+    """TTK NORM, single-call eager RECV, and republished ACL/GE graph RECV.
 
-    Eager RECV consumes once. ACL graph restores the original descriptor bytes
-    and context in place before every compiled call, preserving device pointers.
+    Eager RECV consumes once. ACL graph and GE graph (-c/-d) legs restore the
+    original descriptor bytes and context in place before every compiled call,
+    preserving device pointers.
     """
 
     @staticmethod
@@ -1308,6 +1625,14 @@ class TorchFfnWorkerBatchingTestSpec:
         if archive:
             save_context_archive(archive, header, attributes)
         if need_schedule == 1:
+            replay_key = kwargs.get("testcase_name", "default")
+            if replay_key in _TORCH_GRAPH_REPLAY:
+                # eager 腿（或前一图腿）已在设备侧消费描述符；GE 图腿紧随其后
+                # 执行时，先按旧快照回放，把描述符恢复为未消费状态再重新快照。
+                _ctx_ptr, _hdr, _ptr, _desc = _TORCH_GRAPH_REPLAY[replay_key]
+                _snap_ptr, _ = struct.unpack_from("<QQ", _hdr, _OFF_FFN_TOKEN_INFO_BUF)
+                if _snap_ptr == _ptr:
+                    _hbm_copy(_desc, _ptr)
             pointer, size = struct.unpack_from("<QQ", header, _OFF_FFN_TOKEN_INFO_BUF)
             descriptors = np.empty(size, dtype=np.uint8)
             lib = _load_acl()
@@ -1316,17 +1641,19 @@ class TorchFfnWorkerBatchingTestSpec:
             )
             if ret:
                 raise RuntimeError(f"Torch RECV descriptor snapshot failed: {ret}")
-            _TORCH_GRAPH_REPLAY[kwargs.get("testcase_name", "default")] = (
+            _TORCH_GRAPH_REPLAY[replay_key] = (
                 schedule_context.data_ptr(),
                 header.copy(),
                 pointer,
                 descriptors.tobytes(),
             )
-            _TORCH_GRAPH_REPLAY_CHECKS[kwargs.get("testcase_name", "default")] = 0
-            if getattr(_ttk_global_storage(), "aclgraph_enabled", False):
+            _TORCH_GRAPH_REPLAY_CHECKS[replay_key] = 0
+            if getattr(_ttk_global_storage(), "aclgraph_enabled", False) or (
+                _torch_ge_legs_enabled() and _in_torch_graph_leg()
+            ):
                 hook_args = {
                     **attributes,
-                    "testcase_name": kwargs.get("testcase_name", "default"),
+                    "testcase_name": replay_key,
                 }
                 _ttk_assets_compat().remember_graph_state(
                     schedule_context,
@@ -1489,6 +1816,9 @@ class TorchFfnWorkerBatchingTestSpec:
 
     compare = staticmethod(AclnnFfnWorkerBatchingTestSpec.compare)
     tolerance = AclnnFfnWorkerBatchingTestSpec.tolerance
+    # 委托式类（非继承）：三方参考显式挂载，torch e2e 通路 cross_check 可用
+    # （FfnWbTorchRef 在 xpu-server 端执行，支持 dtype 0/1/2）
+    third_party = AclnnFfnWorkerBatchingTestSpec.third_party
 
 
 class FfnWorkerBatchingKernelTestSpec:
@@ -1588,6 +1918,8 @@ class FfnWorkerBatchingKernelTestSpec:
 
     compare = staticmethod(AclnnFfnWorkerBatchingTestSpec.compare)
     tolerance = AclnnFfnWorkerBatchingTestSpec.tolerance
+    # 委托式类（非继承）：三方参考同样显式挂载，kernel 通路 cross_check 可用
+    third_party = AclnnFfnWorkerBatchingTestSpec.third_party
 
 
 class AclnnFfnWorkerBatchingLegacyTestSpec(AclnnFfnWorkerBatchingTestSpec):

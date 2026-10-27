@@ -112,6 +112,206 @@ def install_graph():
     logging.info("FFN assets adapter: ACL graph replay enabled (TTK source unchanged)")
 
 
+def install_ge_graph():
+    """Wrap TTK's GE graph compile entry with FFN RECV descriptor replay.
+
+    Mirrors install_graph(): _compile_model (-c const / -d dynamic legs) is
+    patched so every compiled invocation restores (before) and verifies
+    (after) the device-side descriptors when need_schedule=1. GE timed rounds
+    run on clones of the context tensor; the lookup then falls back to the
+    single registered state (one case executes per worker), the descriptor
+    buffer pointer embedded in the header being shared across clones.
+    """
+    graph = load_graph_execution()
+    if graph is None:
+        raise RuntimeError(
+            "FFN TTK compatibility: GE graph module not found "
+            "(framework_api.torch.graph_runner / framework_api.graph_execution)"
+        )
+    original = graph._compile_model
+    if getattr(original, "_ffn_assets_adapter", False):
+        return
+    _require_parameters(original, ("model", "backend", "dynamic", "fullgraph"))
+
+    @functools.wraps(original)
+    def compile_ffn_ge(model, backend, dynamic, fullgraph):
+        import torch
+
+        target = torch.ops.cann_ops_transformer.ffn_worker_batching
+        api = getattr(model, "api_func", None)
+        if api is None:
+            # TTK may wrap the model (SuperKernel scope / core limit); unwrap once.
+            api = getattr(getattr(model, "_model", None), "api_func", None)
+        compiled = original(model, backend, dynamic, fullgraph)
+        if api is not target and api is not target.default:
+            return compiled
+
+        @functools.wraps(compiled)
+        def call(*args, **kwargs):
+            import torch_npu
+
+            context = args[0] if args else kwargs["schedule_context"]
+            # The official FFN schema puts need_schedule among keyword-only attrs.
+            if kwargs.get("need_schedule", 0) != 1:
+                return compiled(*args, **kwargs)
+            hooks = _GRAPH_STATES.get(context.data_ptr())
+            if hooks is None and len(_GRAPH_STATES) == 1:
+                hooks = next(iter(_GRAPH_STATES.values()))
+            if hooks is None:
+                raise RuntimeError(
+                    "FFN GE graph replay has no snapshot for this context address"
+                )
+            before, after = hooks
+            torch_npu.npu.synchronize(context.device)
+            before()
+            torch_npu.npu.synchronize(context.device)
+            result = compiled(*args, **kwargs)
+            torch_npu.npu.synchronize(context.device)
+            after()
+            return result
+
+        return call
+
+    compile_ffn_ge._ffn_assets_adapter = True
+    graph._compile_model = compile_ffn_ge
+    logging.info("FFN assets adapter: GE graph replay enabled (TTK source unchanged)")
+
+
+_SAVED_GE_CONVERTER = None
+
+
+def reattach_ge_converter():
+    """Re-register the TorchAir GE converter on the current op overload object.
+
+    TTK api_model.resolve_function() invokes _OpNamespace.__getattr__()
+    directly, which mints a fresh OpOverloadPacket on every API resolution and
+    silently drops the _ge_converter that graph_convert_ffn_worker_batching
+    registered at package import. TorchAir then falls back to an auto-generated
+    converter, which fails on the mx_output_uint8 schema mismatch. Call this
+    from npu_preprocess before each GE graph leg compiles.
+    """
+    global _SAVED_GE_CONVERTER
+    import torch
+
+    import cann_ops_transformer  # noqa: F401  (registers the op + converter)
+
+    overload = torch.ops.cann_ops_transformer.ffn_worker_batching.default
+    converter = getattr(overload, "_ge_converter", None)
+    if converter is not None:
+        _SAVED_GE_CONVERTER = converter
+        return
+    if _SAVED_GE_CONVERTER is not None:
+        overload._ge_converter = _SAVED_GE_CONVERTER
+        return
+    # Late rescue: the packet was replaced before the first snapshot was kept.
+    # Re-exec the converter module source so its decorator runs against the
+    # current overload object (its only relative import is rewritten).
+    import importlib
+    import sys
+    import types
+
+    module_name = "cann_ops_transformer.ops.ffn.ffn_worker_batching.ffn_worker_batching"
+    importlib.import_module(module_name)
+    # The package __init__ rebinds the same name to a function; sys.modules
+    # keeps the real module object.
+    op_module = sys.modules[module_name]
+    source_path = Path(op_module.__file__).with_name(
+        "graph_convert_ffn_worker_batching.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+    anchor = "from .ffn_worker_batching import _checked_y_rows"
+    if source.count(anchor) != 1:
+        raise RuntimeError(
+            "FFN GE converter re-registration: unsupported module source"
+        )
+    source = source.replace(
+        anchor,
+        "from cann_ops_transformer.ops.ffn.ffn_worker_batching.ffn_worker_batching"
+        " import _checked_y_rows",
+    )
+    module = types.ModuleType("_ffn_ge_converter_reregister")
+    module.__file__ = str(source_path)
+    exec(compile(source, str(source_path), "exec"), module.__dict__)
+    if (
+        getattr(
+            torch.ops.cann_ops_transformer.ffn_worker_batching.default,
+            "_ge_converter",
+            None,
+        )
+        is None
+    ):
+        raise RuntimeError("FFN GE converter re-registration failed")
+
+
+def install_compare_third_parties():
+    """Inject collected third-party (XPU) outputs into TestSpec custom compare.
+
+    Baseline ttk's invoke_custom_compare passes only compare_context to spec
+    compare hooks; a spec whose compare declares a ``third_parties`` parameter
+    (cross_check) never receives the collected parties, so its NPU-vs-third-
+    party comparison silently degrades to golden-only. This adapter wraps
+    compare_with_hooks to rebind hooks.custom_compare to an injecting closure
+    — TTK source stays unchanged (same pattern as install_graph / install_geir).
+
+    The four pathway compare modules import compare_with_hooks by direct name
+    binding, so every binding (plus the comparison module attribute) is
+    patched, not just the definition module.
+    """
+    import dataclasses
+    import inspect
+
+    import ttk.core_modules.aclnn.compare as aclnn_compare
+    import ttk.core_modules.framework_api.compare as fw_compare
+    import ttk.core_modules.geir.compare as geir_compare
+    import ttk.core_modules.kernel.compare as kernel_compare
+    from ttk.core_modules.common.comparison import comparison
+
+    def declares_third_parties(func):
+        try:
+            sig = inspect.signature(func)
+        except (TypeError, ValueError):
+            return False
+        param = sig.parameters.get("third_parties")
+        return param is not None and param.kind != inspect.Parameter.POSITIONAL_ONLY
+
+    def wrap(original):
+        if getattr(original, "_ffn_assets_adapter", False):
+            return original
+
+        @functools.wraps(original)
+        def compare_with_hooks_ffn(testcase, outputs, goldens, standards, hooks):
+            parties = getattr(hooks, "third_parties", None)
+            custom = getattr(hooks, "custom_compare", None)
+            if parties and custom is not None and declares_third_parties(custom):
+
+                @functools.wraps(custom)
+                def injected(*args, **kwargs):
+                    kwargs.setdefault("third_parties", parties)
+                    return custom(*args, **kwargs)
+
+                hooks = dataclasses.replace(hooks, custom_compare=injected)
+            return original(testcase, outputs, goldens, standards, hooks)
+
+        compare_with_hooks_ffn._ffn_assets_adapter = True
+        return compare_with_hooks_ffn
+
+    patched = []
+    for mod in (aclnn_compare, kernel_compare, fw_compare, geir_compare, comparison):
+        current = getattr(mod, "compare_with_hooks", None)
+        if current is None or getattr(current, "_ffn_assets_adapter", False):
+            continue
+        _require_parameters(
+            current, ("testcase", "outputs", "goldens", "standards", "hooks")
+        )
+        setattr(mod, "compare_with_hooks", wrap(current))
+        patched.append(mod.__name__.rsplit(".", 1)[-1])
+    if patched:
+        logging.info(
+            "FFN assets adapter: compare third_parties injection enabled (%s)",
+            ", ".join(patched),
+        )
+
+
 def adapt_geir_source(source):
     """Extend only the generated FFN executable, with checked unique anchors."""
     if "static bool RelocateInput(" in source:
