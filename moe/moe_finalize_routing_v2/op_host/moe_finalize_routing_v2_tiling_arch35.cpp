@@ -641,7 +641,7 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetDropPadModeAndExpertRangeAttrs()
     dropPadMode = *dropPadModePtr;
     OP_CHECK_IF(dropPadMode != DROP_LESS_ROW && dropPadMode != DROP_LESS_COL && dropPadMode != DROP_PAD_COL &&
                     dropPadMode != DROP_PAD_ROW,
-                OP_LOGE_WITH_INVALID_ATTR(context_->GetNodeName(), "drop_pad_mode", std::to_string(dropPadMode).c_str(),
+                OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "drop_pad_mode", std::to_string(dropPadMode).c_str(),
                                           "0, 1, 2 or 3"),
                 return ge::GRAPH_FAILED);
 

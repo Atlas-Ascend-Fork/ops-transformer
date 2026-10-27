@@ -209,7 +209,7 @@ ge::graphStatus MoeReRoutingTilingBase::CheckDtypeAndAttr() const
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         (idxType_ != 0 && idxType_ != 1),
-        OP_LOGE_WITH_INVALID_ATTR(context_->GetNodeName(), "idxType", std::to_string(idxType_).c_str(), "0 or 1"),
+        OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "idxType", std::to_string(idxType_).c_str(), "0 or 1"),
         return ge::GRAPH_FAILED);
     if (hasTopkWeight_) {
         auto outputTopkWeightDesc = context_->GetOutputDesc(OUT_PERMUTE_TOPK_WEIGHT_INDEX);
@@ -436,7 +436,7 @@ ge::graphStatus MoeReRoutingTilingBase::GetShapeAttrsInfo()
     auto expertTokenNumType = attrs->GetInt(ATTR_EXPERT_TOKEN_NUM_TYPE_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, expertTokenNumType);
     OP_CHECK_IF(*expertTokenNumType != 1,
-                OP_LOGE_WITH_INVALID_ATTR(context_->GetNodeName(), "expertTokenNumType",
+                OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "expertTokenNumType",
                                           std::to_string(*expertTokenNumType).c_str(), "1"),
                 return ge::GRAPH_FAILED);
 
