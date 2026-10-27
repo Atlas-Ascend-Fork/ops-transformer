@@ -567,7 +567,9 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     xOutTint32(tokenQuantAlign_ + 2) = k;          // 2:topK value index
     if ((k < axisK_) && writeExpertScale) {
         LocalTensor<float> xOutTfloat = xOutTensor.template ReinterpretCast<float>();
-        xOutTfloat(expertScaleAlign_) = expertScalesTensor_.GetValue(tokenIndex * axisK_ + k);
+        DataCacheCleanAndInvalid<float, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
+            expertScalesGMTensor_[tokenIndex * axisK_ + k]);
+        xOutTfloat(expertScaleAlign_) = expertScalesGMTensor_(tokenIndex * axisK_ + k);
     }
 }
 
@@ -752,6 +754,9 @@ template <TemplateMC2A5FullMeshTypeClass>
 __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::SendToSharedExpert(
     TQue<QuePosition::VECIN, 1> inQueue, TBuf<> outBuf)
 {
+    if (sendTokenBufNum_ == 0) {
+        return;
+    }
     LocalTensor<float> outTensorFp32 = outBuf.Get<float>();
     Duplicate<float>(outTensorFp32, float(1), hCommuSize_ * sendTokenBufNum_ / sizeof(float));
     PipeBarrier<PIPE_V>();
@@ -849,6 +854,9 @@ template <TemplateMC2A5FullMeshTypeClass>
 __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::SendToMoeExpert(
     TQue<QuePosition::VECIN, 1> inQueue, TBuf<> outBuf)
 {
+    if (sendTokenBufNum_ == 0) {
+        return;
+    }
     // 按Token分核
     LocalTensor<float> outTensorFp32 = outBuf.Get<float>();
     Duplicate<float>(outTensorFp32, float(1), hCommuSize_ * sendTokenBufNum_ / sizeof(float));
@@ -1193,7 +1201,12 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     tpipe_->InitBuffer(calEndBuf_, UB_ALIGN);
     uint64_t beiginUbAddr = (calBeginBuf_.Get<uint8_t>()).GetPhyAddr();
     uint64_t endUbAddr = (calEndBuf_.Get<uint8_t>()).GetPhyAddr();
-    uint64_t remainUbSize = totalUbSize_ - (endUbAddr - beiginUbAddr + UB_ALIGN);
+    uint64_t usedUbSize = endUbAddr - beiginUbAddr + UB_ALIGN;
+    if (usedUbSize >= totalUbSize_ || (totalUbSize_ - usedUbSize) < hCommuSize_) {
+        sendTokenBufNum_ = 0;
+        return;
+    }
+    uint64_t remainUbSize = totalUbSize_ - usedUbSize;
 
     sendTokenBufNum_ = remainUbSize / hCommuSize_;
     if (sendTokenBufNum_ > VALID_EVENT_FLAG_NUM)
@@ -1236,19 +1249,19 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     }
     uint32_t calTokenIdxBuffSize = Ceil(axisBS_ * axisK_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
     tpipe_->InitBuffer(expertIdsBuf_, expertIdsBufSize_);
-    if (hasExpertScalesFlag_) {
-        tpipe_->InitBuffer(expertScalesBuf_, expertIdsBufSize_);
-    }
     bool needMaskCalFlag = (isTokenMaskFlag_ || isExpertMaskFlag_ || zeroComputeExpertNum_ != 0);
     if (needMaskCalFlag) {
         tpipe_->InitBuffer(gatherMaskTBuf_, expertIdsBufSize_);
     }
     if constexpr ((QuantMode > UNQUANT) || (QuantMode == UNQUANT && !Std::IsSame<ExpandXOutType, XType>::value)) {
         hOutAlignUbSize_ = Ceil(hOutSizeAlign_, UB_ALIGN) * UB_ALIGN;
-        tpipe_->InitBuffer(tempBuf, hOutAlignUbSize_);
+        bool reuseValidExpertIndexForTemp = (isExpertMaskFlag_ || (zeroComputeExpertNum_ != 0));
+        if (!reuseValidExpertIndexForTemp) {
+            tpipe_->InitBuffer(tempBuf, hOutAlignUbSize_);
+            tempTensor_ = tempBuf.Get<XOutType>();
+        }
         tpipe_->InitBuffer(receiveDataCastFloatBuf, maxSize_);
         tpipe_->InitBuffer(smoothScalesBuf, maxSize_);
-        tempTensor_ = tempBuf.Get<XOutType>();
         floatLocalTemp_ = receiveDataCastFloatBuf.Get<float>();
         smoothScalesTensor_ = smoothScalesBuf.Get<float>();
         dstExpBuf_ = receiveDataCastFloatBuf; // 内存复用
@@ -1261,11 +1274,16 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
         tpipe_->InitBuffer(subExpBuf_, calTokenIdxBuffSize);
     }
     const uint32_t routeCount = axisBS_ * axisK_;
-    // A5规约只需保存每64个float的中间结果
-    const uint32_t reduceBytes =
-        routeCount <= 256U ? UB_ALIGN : Ceil(Ceil(routeCount, 64U) * sizeof(float), SIZE_ALIGN_256) * SIZE_ALIGN_256;
-    tpipe_->InitBuffer(calTempBuf, reduceBytes);
-    workLocalTensor_ = calTempBuf.Get<float>();
+    if (needMaskCalFlag) {
+        workLocalTensor_ = gatherMaskTBuf_.Get<float>();
+    } else {
+        // A5规约只需保存每64个float的中间结果
+        const uint32_t reduceBytes = routeCount <= 256U ?
+                                         UB_ALIGN :
+                                         Ceil(Ceil(routeCount, 64U) * sizeof(float), SIZE_ALIGN_256) * SIZE_ALIGN_256;
+        tpipe_->InitBuffer(calTempBuf, reduceBytes);
+        workLocalTensor_ = calTempBuf.Get<float>();
+    }
     if (useSendGroupIndices_) {
         const uint32_t indexBytes = Ceil(routeCount * sizeof(int16_t), UB_ALIGN) * UB_ALIGN;
         tpipe_->InitBuffer(sendGroupIndexBuf, indexBytes);
@@ -1842,9 +1860,6 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     tpipe_->InitBuffer(gatherMaskTBuf_, expertIdsBufSize_);                                     // BS * K * 4
     tpipe_->InitBuffer(expertIdsBuf_, expertIdsBufSize_);
     tpipe_->InitBuffer(statusBuf_, statusCntAlign_ * UB_ALIGN);
-    if (hasExpertScalesFlag_) {
-        tpipe_->InitBuffer(expertScalesBuf_, expertIdsBufSize_);
-    }
     workLocalTensor_ = gatherMaskTBuf_.Get<float>();
     statusTensor_ = statusBuf_.Get<int32_t>();
     uint32_t histoGroupNum = Ceil(moeExpertNum_, EXPERT_PER_HISTO_GROUP);
@@ -2551,9 +2566,17 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     uint32_t xActivateMaskSize = axisBS_ * (Ceil(axisK_ * sizeof(bool), UB_ALIGN) * UB_ALIGN) * sizeof(half);
     tpipe_->InitBuffer(validBsIndexTBuf_, axisBSAlign);
     uint32_t validBufferSize = expertIdsSize_ > xActivateMaskSize ? expertIdsSize_ : xActivateMaskSize;
+    if constexpr ((QuantMode > UNQUANT) || (QuantMode == UNQUANT && !Std::IsSame<ExpandXOutType, XType>::value)) {
+        if (hOutAlignUbSize_ > validBufferSize) {
+            validBufferSize = hOutAlignUbSize_;
+        }
+    }
     tpipe_->InitBuffer(validExpertIndexBuf_, validBufferSize);
     validBsIndexTensor_ = validBsIndexTBuf_.Get<int32_t>();
     gatherMaskTensor_ = gatherMaskTBuf_.Get<uint32_t>();
+    if constexpr ((QuantMode > UNQUANT) || (QuantMode == UNQUANT && !Std::IsSame<ExpandXOutType, XType>::value)) {
+        tempTensor_ = validExpertIndexBuf_.Get<XOutType>();
+    }
 }
 
 template <TemplateMC2A5FullMeshTypeClass>
@@ -2694,13 +2717,6 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
                                              0U}; // 第二个参数blockLen 范围[1, 2097151] 不能为0
         SyncFunc<AscendC::HardEvent::V_MTE2>();
         DataCopyPad(validExpertIdsTensor_, expertIdsGMTensor_, expertIdsCntParams, expertIdsCntCopyPadParams);
-        SyncFunc<AscendC::HardEvent::MTE2_S>();
-    }
-    if (hasExpertScalesFlag_) {
-        expertScalesTensor_ = expertScalesBuf_.Get<float>();
-        DataCopyExtParams expertScalesParams{1U, static_cast<uint32_t>(expertIdsCnt_ * sizeof(float)), 0U, 0U, 0U};
-        DataCopyPadExtParams<float> expertScalesPadParams{false, 0U, 0U, 0U};
-        DataCopyPad(expertScalesTensor_, expertScalesGMTensor_, expertScalesParams, expertScalesPadParams);
         SyncFunc<AscendC::HardEvent::MTE2_S>();
     }
 }
