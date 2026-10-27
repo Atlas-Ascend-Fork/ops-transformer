@@ -190,7 +190,7 @@ aclnnStatus aclnnMhcPostBackward(
       <td>输出</td>
       <td>网络中MHC层的输入数据hRes的梯度</td>
       <td>-</td>
-      <td>数据类型与hRes一致</td>
+      <td>数据类型与hRes一致；hRes为nullptr时必须为FLOAT32</td>
       <td>ND</td>
       <td>[B,S,N,N]、[T,N,N]</td>
       <td>√</td>
@@ -257,7 +257,7 @@ aclnnStatus aclnnMhcPostBackward(
         <tr>
           <td>ACLNN_ERR_PARAM_NULLPTR</td>
           <td>161001</td>
-          <td>gradOutput、x、hRes、hOut、hPost存在空指针。</td>
+          <td>gradOutput、x、hOut、hPost存在空指针。</td>
         </tr>
         <tr>
           <td rowspan="3">ACLNN_ERR_PARAM_INVALID</td>
@@ -324,6 +324,13 @@ aclnnStatus aclnnMhcPostBackward(
 - <term>Ascend 950PR&950DT系列产品</term>：参数说明中维度N的取值目前仅支持4、6和8。
 
 <!-- end id8 -->
+
+<!-- npu="A3,910b" id9 -->
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：hRes为必传参数，不支持传入nullptr，传入空指针时返回错误码161001。
+<!-- end id9 -->
+<!-- npu="950" id10 -->
+- <term>Ascend 950PR&950DT系列产品</term>：hRes支持传入nullptr，此时gradX与gradOutput相等，gradHRes必须为FLOAT32。
+<!-- end id10 -->
 
 ## 调用示例
 
