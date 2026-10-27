@@ -48,7 +48,7 @@ TEST_F(MhcPostTiling, test_mhc_post_950_3d_fp16_success)
                                               {}, &compileInfo, kSocVersion950);
     uint64_t expectTilingKey = 6;
     string expectTilingDataStr = "4 5120 64 16 64 16 4 1 4 2560 2 2560 ";
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingDataStr, expectWorkspaces);
 }
 
@@ -68,6 +68,6 @@ TEST_F(MhcPostTiling, test_mhc_post_950_regbase_4d_fp16)
                                               {}, &compileInfo, kSocVersion950);
     uint64_t expectTilingKey = 6;
     string expectTilingDataStr = "8 128 64 2 64 2 8 1 8 128 1 128 ";
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingDataStr, expectWorkspaces);
 }

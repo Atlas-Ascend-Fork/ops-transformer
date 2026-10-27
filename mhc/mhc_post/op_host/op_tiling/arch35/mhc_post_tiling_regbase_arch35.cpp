@@ -593,8 +593,7 @@ ge::graphStatus MhcPostTilingRegBaseArch35::GetWorkspaceSize()
         return ge::GRAPH_FAILED;
     }
 
-    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
-    workspaceSize_ = ascendcPlatform.GetLibApiWorkSpaceSize();
+    workspaceSize_ = 0;
 
     OP_LOGI(context_, "Workspace size: %ld bytes (%.2f MB)", workspaceSize_, workspaceSize_ / (1024.0 * 1024.0));
 

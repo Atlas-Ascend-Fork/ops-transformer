@@ -494,8 +494,7 @@ ge::graphStatus MhcPostTilingNoHResArch35::GetWorkspaceSize()
         return ge::GRAPH_FAILED;
     }
 
-    auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
-    workspaceSize_ = ascendcPlatform.GetLibApiWorkSpaceSize();
+    workspaceSize_ = 0;
 
     return ge::GRAPH_SUCCESS;
 }
