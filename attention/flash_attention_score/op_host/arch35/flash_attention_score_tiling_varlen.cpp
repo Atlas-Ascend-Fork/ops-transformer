@@ -381,8 +381,13 @@ protected:
                 return false;
             }
             if ((i == bandIndex) && (actualSeqLenData[i] - nextTokens > actualSeqLenKvData[i])) {
-                OP_LOGE(context_, "Batch[%ld], s1[%ld], s2[%ld], next_tokens[%ld], has invalid row.", i,
-                        actualSeqLenData[i], actualSeqLenKvData[i], nextTokens);
+                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                    opName, "actual_seq_len and next_tokens",
+                    ("batch index = " + std::to_string(i) + ", s1 = " + std::to_string(actualSeqLenData[i]) +
+                     ", s2 = " + std::to_string(actualSeqLenKvData[i]) +
+                     ", next_tokens = " + std::to_string(nextTokens))
+                        .c_str(),
+                    "there is no valid data block for the current band sparse mode");
                 return false;
             }
         }
@@ -507,7 +512,8 @@ protected:
     {
         auto prefixN = context_->GetOptionalInputTensor(PREFIX_INPUT_INDEX);
         if (prefixN == nullptr) {
-            OP_LOGE(context_, "[%s] prefixN is null pointer while sparse mode is prefix compress", templateName);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "prefix", "nullptr",
+                                                  "prefix must be provided when sparse_mode is prefix compress");
             return false;
         }
 
@@ -529,7 +535,8 @@ protected:
         /* Get Data from tensor. */
         prefixNData = prefixN->GetData<int64_t>();
         if (prefixNData == nullptr) {
-            OP_LOGE(context_, "[%s] prefixN data is null pointer", templateName);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "prefix", "nullptr",
+                                                  "the data of input prefix must not be null");
             return false;
         }
 

@@ -478,7 +478,7 @@ static aclnnStatus InputDtypeCheck(const aclTensor* query, const aclTensor* key,
         auto sinkDtype = sinkOptional->GetDataType();
         if (sinkDtype != op::DataType::DT_FLOAT) {
             std::string dtypeStr = op::ToString(DataType(sinkDtype)).GetString();
-            OP_LOGE_WITH_INVALID_INPUT_DTYPE(op::internal::GetLogApiInfo().c_str(), "sink", dtypeStr.c_str(), "FLOAT");
+            OP_LOGE_FOR_INVALID_DTYPE(op::internal::GetLogApiInfo().c_str(), "sink", dtypeStr.c_str(), "FLOAT");
             return ACLNN_ERR_PARAM_INVALID;
         }
     }
@@ -1154,7 +1154,6 @@ aclnnStatus aclnnFlashAttentionScoreGetWorkspaceSize(
                    DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
@@ -1274,7 +1273,6 @@ aclnnStatus aclnnFlashAttentionVarLenScoreGetWorkspaceSize(
                    DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {
@@ -1390,7 +1388,6 @@ aclnnStatus aclnnFlashAttentionScoreV2GetWorkspaceSize(
                    DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {
@@ -1503,7 +1500,6 @@ aclnnStatus aclnnFlashAttentionScoreV3GetWorkspaceSize(
         DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {
@@ -1626,7 +1622,6 @@ aclnnStatus aclnnFlashAttentionScoreV4GetWorkspaceSize(
                    DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {
@@ -1748,7 +1743,6 @@ aclnnStatus aclnnFlashAttentionVarLenScoreV2GetWorkspaceSize(
         DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {
@@ -1866,7 +1860,6 @@ aclnnStatus aclnnFlashAttentionVarLenScoreV3GetWorkspaceSize(
                    DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {
@@ -1987,7 +1980,6 @@ aclnnStatus aclnnFlashAttentionVarLenScoreV4GetWorkspaceSize(
         DFX_OUT(softmaxMaxOut, softmaxSumOut, softmaxOutOut, attentionOutOut));
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {
@@ -2098,7 +2090,6 @@ aclnnStatus ExecFlashAttentionVarLenScoreV5GetWorkspaceSize(
     bool isMaxWorkspace = false)
 {
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     // b, n1, s1 为0时，不进行任何处理
     // n2, s2, d 为0时，直接调用l0接口处理
     if (softmaxMaxOut->IsEmpty() && softmaxSumOut->IsEmpty() && attentionOutOut->IsEmpty()) {

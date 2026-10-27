@@ -137,8 +137,8 @@ static ge::graphStatus GetQueryBSND(const gert::Shape* queryShape, const std::st
         n1 = (*queryShape)[FIA_LAYOUT_DIM0];
         d1 = (*queryShape)[FIA_LAYOUT_DIM2];
     } else {
-        OP_LOGE("FusedInferAttentionScore", "Layout %s is not supported in GetQueryBSND function!",
-                queryLayout.c_str());
+        OP_LOGE_WITHOUT_REPORT("FusedInferAttentionScore", "Layout %s is not supported in GetQueryBSND function!",
+                               queryLayout.c_str());
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -156,7 +156,8 @@ static ge::graphStatus GetQueryTND(const gert::Shape* queryShape, const std::str
         n1 = (*queryShape)[FIA_LAYOUT_DIM0];
         d1 = (*queryShape)[FIA_LAYOUT_DIM2];
     } else {
-        OP_LOGE("FusedInferAttentionScore", "Layout %s is not supported in GetQueryTND function!", queryLayout.c_str());
+        OP_LOGE_WITHOUT_REPORT("FusedInferAttentionScore", "Layout %s is not supported in GetQueryTND function!",
+                               queryLayout.c_str());
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -281,7 +282,7 @@ static ge::graphStatus InferLseOutShape(const char* inputLayoutPtr, gert::Shape*
 static ge::graphStatus InferShapeFusedInferAttentionScore(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("FusedInferAttentionScore", "context is nullptr!");
+        OP_LOGE_WITHOUT_REPORT("FusedInferAttentionScore", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
     OP_LOGD(context->GetNodeName(), "Enter FusedInferAttentionScore InferShape impl.");
@@ -373,7 +374,7 @@ static ge::graphStatus InferShapeFusedInferAttentionScore(gert::InferShapeContex
 static ge::graphStatus InferDataTypeFusedInferAttentionScore(gert::InferDataTypeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("FusedInferAttentionScore", "context is nullptr!");
+        OP_LOGE_WITHOUT_REPORT("FusedInferAttentionScore", "context is nullptr!");
         return ge::GRAPH_FAILED;
     }
     OP_LOGD(context->GetNodeName(), "Enter FusedInferAttentionScore InferDataType impl.");

@@ -61,6 +61,15 @@ constexpr uint32_t FP16_BLOCK_ALIGN_NUM = 16U;
 namespace optiling {
 using Ops::Base::CeilAlign;
 
+// 合法输入下 Tiling 失败时，按正式错误码 EZ1008（Arglist: opName, reason）首报，并输出 PLOG 上下文
+inline void ReportTilingFailure(const char* opName, const char* reason)
+{
+    OP_LOGE_WITHOUT_REPORT(opName, "%s\n", reason);
+    const std::vector<const char*> msgKey = {"opName", "reason"};
+    const std::vector<const char*> msgvalue = {opName, reason};
+    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
+}
+
 class MoeFusedTopkTilingArch35 {
 public:
     explicit MoeFusedTopkTilingArch35(gert::TilingContext* context)
@@ -190,12 +199,14 @@ ge::graphStatus MoeFusedTopkTilingArch35::GetTopKTiling()
     OP_CHECK_IF(
         !AscendC::TopKTilingFunc(ascendcPlatform, topkInner, groupNum_, topN_, FP32_DTYPE_SIZE, TOPK_IS_INIT_INDEX,
                                  AscendC::TopKMode::TOPK_NORMAL, TOPK_IS_LARGEST, tilingData_.topkTilingData),
-        OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "TopKTilingFunc Failed"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!AscendC::GetTopKMaxMinTmpSize(ascendcPlatform, topkInner, groupNum_, TOPK_IS_REUSE_SOURCE,
-                                               TOPK_IS_INIT_INDEX, AscendC::TopKMode::TOPK_NORMAL, TOPK_IS_LARGEST,
-                                               FP32_DTYPE_SIZE, topkMaxValue_, topkMinValue_),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "GetTopKMaxMinTmpSize Failed"),
-                return ge::GRAPH_FAILED);
+        ReportTilingFailure(context_->GetNodeName(), "AscendC::TopKTilingFunc failed for current input shape"),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        !AscendC::GetTopKMaxMinTmpSize(ascendcPlatform, topkInner, groupNum_, TOPK_IS_REUSE_SOURCE, TOPK_IS_INIT_INDEX,
+                                       AscendC::TopKMode::TOPK_NORMAL, TOPK_IS_LARGEST, FP32_DTYPE_SIZE, topkMaxValue_,
+                                       topkMinValue_),
+        ReportTilingFailure(context_->GetNodeName(), "AscendC::GetTopKMaxMinTmpSize failed for current input shape"),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -258,9 +269,8 @@ ge::graphStatus MoeFusedTopkTilingArch35::SplitUb()
     needUbSize += topkMaxValue_;
 
     OP_CHECK_IF(needUbSize > ubSize_,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    context_->GetNodeName(),
-                    "This case need minimum UB size is %lu, which is out of total UB size: %lu.", needUbSize, ubSize_),
+                ReportTilingFailure(context_->GetNodeName(),
+                                    "required UB size is larger than available UB size for current input shape"),
                 return ge::GRAPH_FAILED);
     OP_LOGD(context_->GetNodeName(), "Ascend950 case need minimum UB size is %lu.", needUbSize);
     return ge::GRAPH_SUCCESS;
@@ -296,9 +306,8 @@ ge::graphStatus MoeFusedTopkTilingArch35::SetKernelTiling()
     OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData);
     OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData->GetData());
     OP_CHECK_IF(rawTilingData->GetCapacity() < tilingData_.GetDataSize(),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(),
-                                            "Raw tiling data capacity %zu is smaller than required %zu.",
-                                            rawTilingData->GetCapacity(), tilingData_.GetDataSize()),
+                ReportTilingFailure(context_->GetNodeName(),
+                                    "raw tiling data capacity is smaller than required tiling data size"),
                 return ge::GRAPH_FAILED);
     tilingData_.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
 
@@ -328,17 +337,17 @@ void MoeFusedTopkTilingArch35::TilingDataPrint()
 ge::graphStatus MoeFusedTopkTilingArch35::Run()
 {
     OP_CHECK_NULL_WITH_CONTEXT(context_, context_);
-    OP_CHECK_IF(GetPlatformInfo() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "GetPlatformInfo failed."),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(GetShapeAttrsInfo() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "GetShapeAttrsInfo failed."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(GetPlatformInfo() != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "GetPlatformInfo failed."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(GetShapeAttrsInfo() != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "GetShapeAttrsInfo failed."), return ge::GRAPH_FAILED);
 
     GetTilingKey();
     GetUsedCore();
-    OP_CHECK_IF(GetTopKTiling() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "GetTopKTiling failed."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(GetTopKTiling() != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "GetTopKTiling failed."), return ge::GRAPH_FAILED);
     GetTmpBuffSize();
-    OP_CHECK_IF(SplitUb() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "SplitUb failed."),
+    OP_CHECK_IF(SplitUb() != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "SplitUb failed."),
                 return ge::GRAPH_FAILED);
     return SetKernelTiling();
 }
