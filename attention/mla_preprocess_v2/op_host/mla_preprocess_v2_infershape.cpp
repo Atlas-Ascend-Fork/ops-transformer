@@ -46,24 +46,37 @@ static bool IsDisabledRopeShape(const gert::Shape* shape)
     return shape != nullptr && shape->GetDimNum() == 1 && shape->GetDim(0) == 0;
 }
 
+static void ReportAclnnParamError(const char* opName, const char* message)
+{
+    OP_LOGE_WITHOUT_REPORT(opName, "%s", message);
+    const std::vector<const char*> msgKey = {"message"};
+    const std::vector<const char*> msgValue = {message};
+    REPORT_PREDEFINED_ERR_MSG("EZ1001", msgKey, msgValue);
+}
+
 static ge::graphStatus CheckRopeInputShapes(gert::InferShapeContext* context, int64_t tokenNum)
 {
+    const char* opName = context->GetNodeName();
     const gert::Shape* cosShape = context->GetRequiredInputShape(INPUT_COS);
     const gert::Shape* sinShape = context->GetRequiredInputShape(INPUT_SIN);
-    OP_CHECK_IF(cosShape == nullptr || sinShape == nullptr,
-                OP_LOGE(context->GetNodeName(), "cos and sin must be provided."), return ge::GRAPH_FAILED);
+    if (cosShape == nullptr || sinShape == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(opName, "cos,sin");
+        return ge::GRAPH_FAILED;
+    }
 
     const bool cosDisablesRope = IsDisabledRopeShape(cosShape);
     const bool sinDisablesRope = IsDisabledRopeShape(sinShape);
-    OP_CHECK_IF(cosDisablesRope != sinDisablesRope,
-                OP_LOGE(context->GetNodeName(), "cos and sin must both have shape [0] or neither have shape [0]."),
-                return ge::GRAPH_FAILED);
+    if (cosDisablesRope != sinDisablesRope) {
+        ReportAclnnParamError(opName, "cos and sin must both have shape [0] or neither have shape [0].");
+        return ge::GRAPH_FAILED;
+    }
     if (!cosDisablesRope) {
-        OP_CHECK_IF(cosShape->GetDimNum() != 2 || sinShape->GetDimNum() != 2 || cosShape->GetDim(0) != tokenNum ||
-                        sinShape->GetDim(0) != tokenNum || cosShape->GetDim(1) != ROPE_HEAD_DIM ||
-                        sinShape->GetDim(1) != ROPE_HEAD_DIM,
-                    OP_LOGE(context->GetNodeName(), "cos and sin must have shape [tokenNum, 64]."),
-                    return ge::GRAPH_FAILED);
+        if (cosShape->GetDimNum() != 2 || sinShape->GetDimNum() != 2 || cosShape->GetDim(0) != tokenNum ||
+            sinShape->GetDim(0) != tokenNum || cosShape->GetDim(1) != ROPE_HEAD_DIM ||
+            sinShape->GetDim(1) != ROPE_HEAD_DIM) {
+            ReportAclnnParamError(opName, "cos and sin must have shape [tokenNum, 64].");
+            return ge::GRAPH_FAILED;
+        }
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -72,7 +85,7 @@ static ge::graphStatus InferShapeMlaPreprocessV2(gert::InferShapeContext* contex
 {
     OP_LOGD(context->GetNodeName(), "Begin to do InferShapeMlaPreprocessV2.");
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "attrs"), return ge::GRAPH_FAILED);
 
     const int64_t* cacheModePtr = attrs->GetAttrPointer<int64_t>(ATTR_CACHE_MODE);
     if (cacheModePtr == nullptr) {
@@ -129,7 +142,7 @@ static ge::graphStatus InferDataTypeMlaPreprocessV2(gert::InferDataTypeContext* 
 {
     OP_LOGD(context->GetNodeName(), "Begin to do InferDataTypeMlaPreprocess.");
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "attrs"), return ge::GRAPH_FAILED);
 
     const int64_t* cacheModePtr = attrs->GetAttrPointer<int64_t>(ATTR_CACHE_MODE);
     if (cacheModePtr == nullptr) {

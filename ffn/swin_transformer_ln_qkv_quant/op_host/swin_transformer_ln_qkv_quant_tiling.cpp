@@ -26,6 +26,15 @@ using namespace std;
 using namespace ge;
 using namespace matmul_tiling;
 namespace optiling {
+namespace {
+void ReportAclnnParamError(const char* opName, const char* message)
+{
+    OP_LOGE_WITHOUT_REPORT(opName, "%s", message);
+    const std::vector<const char*> msgKey = {"message"};
+    const std::vector<const char*> msgValue = {message};
+    REPORT_PREDEFINED_ERR_MSG("EZ1001", msgKey, msgValue);
+}
+} // namespace
 constexpr static uint32_t USE_CORE_THRESHOLD = 8;
 constexpr static uint32_t BUFFER_NUM = 2;
 constexpr static uint32_t BLOCK_UINT_16 = 16;
@@ -84,7 +93,7 @@ ge::graphStatus SwinTransformerLnQkvQuantTilingCompute::SwinTransformerLnQkvQuan
     gert::TilingContext* context)
 {
     size_t* workspaces = context->GetWorkspaceSizes(1);
-    OP_CHECK_IF(workspaces == nullptr, OP_LOGE("SwinTransformerLnQkvQuantTiling", "failed to get workspace size"),
+    OP_CHECK_IF(workspaces == nullptr, OP_LOGE_WITH_INVALID_INPUT("SwinTransformerLnQkvQuantTiling", "workspaces"),
                 return ge::GRAPH_FAILED);
     workspaces[0] = sizePerHead * sizePerHead * sizePerHead * sizePerHead;
     return ge::GRAPH_SUCCESS;
@@ -239,7 +248,7 @@ ge::graphStatus SwinTransformerLnQkvQuantTilingCompute::GetBaseParams(gert::Tili
 {
     const gert::StorageShape* x1Shape = context->GetInputShape(0);
     int32_t dataSize = 1;
-    OP_CHECK_IF(x1Shape == nullptr, OP_LOGE("SwinTransformerLnQkvQuant", "The INPUT x1Shape param is null!"),
+    OP_CHECK_IF(x1Shape == nullptr, OP_LOGE_WITH_INVALID_INPUT("SwinTransformerLnQkvQuant", "x"),
                 return ge::GRAPH_FAILED);
     for (uint32_t i = 0; i < x1Shape->GetStorageShape().GetDimNum(); ++i) {
         dataSize *= x1Shape->GetStorageShape().GetDim(i);
@@ -250,10 +259,10 @@ ge::graphStatus SwinTransformerLnQkvQuantTilingCompute::GetBaseParams(gert::Tili
     hLength = x1Shape->GetStorageShape().GetDim(2); // 2 shape dim2
 
     const gert::StorageShape* weightShape = context->GetInputShape(3); // 3 is weight
-    OP_CHECK_IF(weightShape == nullptr, OP_LOGE("SwinTransformerLnQkvQuant", "The INPUT weight param is null!"),
+    OP_CHECK_IF(weightShape == nullptr, OP_LOGE_WITH_INVALID_INPUT("SwinTransformerLnQkvQuant", "weight"),
                 return ge::GRAPH_FAILED);
     auto attrs = context->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OP_LOGE("SwinTransformerLnQkvQuant", "The attrs param is null!"),
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_WITH_INVALID_INPUT("SwinTransformerLnQkvQuant", "attrs"),
                 return ge::GRAPH_FAILED);
     size_t idx = 0;
     headNum = *attrs->GetAttrPointer<int64_t>(idx++);
@@ -268,6 +277,8 @@ ge::graphStatus SwinTransformerLnQkvQuantTilingCompute::GetBaseParams(gert::Tili
     transposeB = bTransOpt;
     if ((transposeB == false) || (hWinSize < 7) || (hWinSize > 32) || // win [7 - 32]
         (wWinSize < 7) || (wWinSize > 32)) {                          // win [7 - 32]
+        ReportAclnnParamError("SwinTransformerLnQkvQuant",
+                              "transposeB must be true and hWinSize/wWinSize must be in [7, 32].");
         return ge::GRAPH_FAILED;
     }
     auto patchHeight = oriHeight / hWinSize;
@@ -282,6 +293,7 @@ ge::graphStatus SwinTransformerLnQkvQuantTilingCompute::GetBaseParams(gert::Tili
     tilingData.opBaseInfo.set_patchHeight(patchHeight);
     tilingData.opBaseInfo.set_patchWeight(patchWeight);
     if ((patchHeight == 0) || (patchWeight == 0)) {
+        ReportAclnnParamError("SwinTransformerLnQkvQuant", "oriHeight/hWinSize and oriWeight/wWinSize must be > 0.");
         return ge::GRAPH_FAILED;
     }
     if (transposeB) {
@@ -292,9 +304,11 @@ ge::graphStatus SwinTransformerLnQkvQuantTilingCompute::GetBaseParams(gert::Tili
         tilingData.set_weightN(weightShape->GetStorageShape().GetDim(1));
     }
     if ((sizePerHead != 32) && (sizePerHead != 64)) { // seqLengh = 32 / 64
+        ReportAclnnParamError("SwinTransformerLnQkvQuant", "seq_length (sizePerHead) must be 32 or 64.");
         return ge::GRAPH_FAILED;
     }
     if ((hLength > 1024) || (bLength > 32)) { // K <= 1024, b <=32
+        ReportAclnnParamError("SwinTransformerLnQkvQuant", "hLength must be <= 1024 and bLength must be <= 32.");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -330,11 +344,14 @@ ge::graphStatus SwinTransformerLnQkvQuantTilingCompute::SwinTransformerLnQkvQuan
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     auto checkRet = GetBaseParams(context);
     if (checkRet != ge::GRAPH_SUCCESS) {
-        OP_LOGE("SwinTransformerLnQkvQuantTilingProc", "inputPara is invalid!");
+        OP_LOGE_WITHOUT_REPORT("SwinTransformerLnQkvQuantTilingProc",
+                               "GetBaseParams failed; propagate lower-layer first error.");
         return ge::GRAPH_FAILED;
     }
     if (IsSupport(context) != ge::GRAPH_SUCCESS) {
-        OP_LOGE("SwinTransformerLnQkvQuantTilingProc", "inputPara is not support!");
+        ReportAclnnParamError(
+            "SwinTransformerLnQkvQuantTilingProc",
+            "SwinTransformerLnQkvQuant input combination is not supported (shape/attr constraints failed).");
         return ge::GRAPH_FAILED;
     }
     tilingData.opBaseInfo.set_bSize(bLength);
@@ -530,7 +547,8 @@ ge::graphStatus TilingPrepareForSwinTransformerLnQkvQuant(gert::TilingParseConte
 {
     // auto compileInfo = GetCompileInfoPtr<SwinTransformerLnQkvQuantCompileInfo>(context);
     auto compileInfo = context->GetCompiledInfo<SwinTransformerLnQkvQuantCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "compileInfo"),
+                return ge::GRAPH_FAILED);
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = (uint32_t)platformInfo.GetCoreNum();
     uint64_t ubSizePlatform;

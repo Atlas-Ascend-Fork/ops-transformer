@@ -122,15 +122,15 @@ ge::graphStatus SwinTransformerLnQKVTilingCompute::SwinTransformerLnQKVTilingMai
     const gert::StorageShape* x1Shape =
         context->GetInputShape(0); // [B,S, H]   [8,65536, 128] -> [1, 65536,128] -> 32 * [8,256,128]
     int32_t dataSize = 1;          // 8(batch) *32(out loop) * [32, 64, 128] ->  [8192, 64 ,128]
-    OP_CHECK_IF(x1Shape == nullptr, OP_LOGE("SwinTransformerLnQkv", "The INPUT x1Shape param is null!"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(x1Shape == nullptr, OP_LOGE_WITH_INVALID_INPUT("SwinTransformerLnQkv", "x"), return ge::GRAPH_FAILED);
     for (uint32_t i = 0; i < x1Shape->GetStorageShape().GetDimNum(); i++) {
         dataSize *= x1Shape->GetStorageShape().GetDim(i);
     }
     tilingData.set_inputSizeSum(dataSize);
 
     auto compileInfo = reinterpret_cast<const SwinTransformerLnQKVCompileInfo*>(context->GetCompileInfo());
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "compileInfo"),
+                return ge::GRAPH_FAILED);
     tilingData.set_maxCoreNum(uint32_t(compileInfo->coreNum));
 
     SwinTransformerLnQKVSetLayernormTilingData(context, tilingData.layernormTilingParams);
@@ -139,18 +139,19 @@ ge::graphStatus SwinTransformerLnQKVTilingCompute::SwinTransformerLnQKVTilingMai
     tilingData.opBaseInfo.set_inputsize(dataSize);
     tilingData.opBaseInfo.set_hSize(256); // The default value is 256.
     size_t* workspaces = context->GetWorkspaceSizes(1);
-    OP_CHECK_IF(workspaces == nullptr, OP_LOGE("SwinTransformerLnQkv", "failed to get workspace size"),
+    OP_CHECK_IF(workspaces == nullptr, OP_LOGE_WITH_INVALID_INPUT("SwinTransformerLnQkv", "workspaces"),
                 return ge::GRAPH_FAILED);
 
     auto platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "platformInfoPtr is null"),
+    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "platformInfo"),
                 return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     if (ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::KIRINX90 ||
         ascendcPlatform.GetSocVersion() == platform_ascendc::SocVersion::KIRIN9030) {
         OP_LOGD(context->GetNodeName(), "Current soc version is KIRIN.");
         const gert::StorageShape* qShape = context->GetOutputShape(0);
-        OP_CHECK_IF(qShape == nullptr, OP_LOGE(context->GetNodeName(), "qShape is null"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(qShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "query_output"),
+                    return ge::GRAPH_FAILED);
         int32_t outSize = 1;
         for (uint32_t i = 0; i < qShape->GetStorageShape().GetDimNum(); i++) {
             outSize *= qShape->GetStorageShape().GetDim(i);
@@ -181,7 +182,8 @@ static ge::graphStatus TilingPrepareForSwinTransformerLnQKV(gert::TilingParseCon
 {
     // auto compileInfo = GetCompileInfoPtr<SwinTransformerLnQKVCompileInfo>(context);
     auto compileInfo = context->GetCompiledInfo<SwinTransformerLnQKVCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "compileInfo"),
+                return ge::GRAPH_FAILED);
     auto platformInfo = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint32_t coreNum = (uint32_t)platformInfo.GetCoreNum();
     uint64_t ubSizePlatForm;

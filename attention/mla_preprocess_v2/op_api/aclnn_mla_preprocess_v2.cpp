@@ -63,7 +63,8 @@ extern "C" aclnnStatus aclnnMlaPreprocessV2GetWorkspaceSize(
     MlaPreprocessApi::EmptyTensorHolder cosHolder(cos, ropeDataType);
     MlaPreprocessApi::EmptyTensorHolder sinHolder(sin, ropeDataType);
     if (cosIsNull && (!cosHolder.IsValid() || !sinHolder.IsValid())) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Failed to create empty cos or sin tensor.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR,
+                               "Failed to create empty cos or sin tensor; aclCreateTensor returned nullptr.");
         return ACLNN_ERR_INNER_NULLPTR;
     }
 

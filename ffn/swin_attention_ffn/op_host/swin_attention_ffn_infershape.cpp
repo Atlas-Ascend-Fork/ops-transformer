@@ -24,10 +24,10 @@ static ge::graphStatus InferShapeSwinAttentionFFN(gert::InferShapeContext* conte
     OP_LOGI(context->GetNodeName(), "Enter SwinAttentionFFN infershape impl.");
 
     const gert::Shape* x1_shape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, x1_shape);
+    OP_CHECK_IF(x1_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x1"), return ge::GRAPH_FAILED);
 
     gert::Shape* y_shape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, y_shape);
+    OP_CHECK_IF(y_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "y"), return ge::GRAPH_FAILED);
 
     *y_shape = *x1_shape;
     OP_LOGI(context->GetNodeName(), "SwinAttentionFFN infershape end.");

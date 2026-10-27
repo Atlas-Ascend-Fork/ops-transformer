@@ -100,7 +100,8 @@ ge::graphStatus SAFFNTilingComp::SAFFNTilingMM()
 ge::graphStatus SAFFNTilingComp::SAFFNTilingTPROLL(const gert::TilingContext* context)
 {
     auto compileInfo = static_cast<const SwinAttentionFFNCompileInfo*>(context->GetCompileInfo());
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "compileInfo"),
+                return ge::GRAPH_FAILED);
 
     auto platformInfo = context->GetPlatformInfo();
     auto acInfo = platform_ascendc::PlatformAscendC(platformInfo);
@@ -215,9 +216,11 @@ ge::graphStatus TilingFuncForSwinAttentionFFN(gert::TilingContext* context)
 static ge::graphStatus TilingPrepareForSwinAttentionFFN(gert::TilingParseContext* context)
 {
     auto compileInfo = context->GetCompiledInfo<SwinAttentionFFNCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "compileInfo"),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "platformInfo"),
+                return ge::GRAPH_FAILED);
     auto acInfo = platform_ascendc::PlatformAscendC(platformInfo);
 
     uint64_t aicNum = 0;

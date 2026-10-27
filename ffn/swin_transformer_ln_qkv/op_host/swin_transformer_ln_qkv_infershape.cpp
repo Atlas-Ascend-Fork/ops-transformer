@@ -23,14 +23,17 @@ static ge::graphStatus InferShapeSwinTransformerLnQKV(gert::InferShapeContext* c
     OP_LOGI(context->GetNodeName(), "Enter SwinTransformerLnQKV infershape impl.");
     // x1_shape shape : (B, S, H)
     const gert::Shape* x1_shape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, x1_shape);
+    OP_CHECK_IF(x1_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
 
     gert::Shape* q_shape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, q_shape);
+    OP_CHECK_IF(q_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "query_output"),
+                return ge::GRAPH_FAILED);
     gert::Shape* k_shape = context->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, k_shape);
+    OP_CHECK_IF(k_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_output"),
+                return ge::GRAPH_FAILED);
     gert::Shape* v_shape = context->GetOutputShape(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, v_shape);
+    OP_CHECK_IF(v_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_output"),
+                return ge::GRAPH_FAILED);
     uint32_t inputSize = 1;
     for (uint32_t dimIdx = 0; dimIdx < x1_shape->GetDimNum(); dimIdx++) {
         inputSize *= x1_shape->GetDim(dimIdx);

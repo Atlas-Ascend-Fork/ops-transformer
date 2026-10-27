@@ -51,21 +51,19 @@ static ge::graphStatus InferShapeSwinTransformerLnQkvQuant(gert::InferShapeConte
     OP_LOGI(context->GetNodeName(), "Enter SwinTransformerLnQkvQuant infershape impl.");
     // xShape shape : (B, S, H)
     const gert::Shape* xShape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(xShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
 
     gert::Shape* qShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, qShape);
+    OP_CHECK_IF(qShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "query_output"),
+                return ge::GRAPH_FAILED);
     gert::Shape* kShape = context->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kShape);
+    OP_CHECK_IF(kShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_output"),
+                return ge::GRAPH_FAILED);
     gert::Shape* vShape = context->GetOutputShape(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, vShape);
+    OP_CHECK_IF(vShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_output"),
+                return ge::GRAPH_FAILED);
     uint32_t inputSize = 1;
     ge::graphStatus ret;
-
-    if (xShape == nullptr) {
-        OP_LOGE(context->GetNodeName(), "Input shape is nullptr");
-        return ge::GRAPH_FAILED;
-    }
 
     const gert::Shape& xShapeRef = *xShape;
 
@@ -96,9 +94,10 @@ static ge::graphStatus InferShapeSwinTransformerLnQkvQuant(gert::InferShapeConte
     kShape->SetDimNum(OUTPUT_CHANNEL);
     vShape->SetDimNum(OUTPUT_CHANNEL);
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "attrs"), return ge::GRAPH_FAILED);
     const auto* headNum = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, headNum);
+    OP_CHECK_IF(headNum == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "head_num"),
+                return ge::GRAPH_FAILED);
     const auto* seqLength = attrs->GetAttrPointer<int64_t>(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, seqLength);
     const auto* hWinSize = attrs->GetAttrPointer<int64_t>(5); // attr param 5 is hWin
