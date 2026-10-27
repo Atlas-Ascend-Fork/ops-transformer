@@ -190,9 +190,9 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
     </tr>
     <tr>
       <td>numAcceptedTokens</td>
-      <td>输入</td>
+      <td>可选输入</td>
       <td>每个序列接受的token数量。</td>
-      <td>不支持空Tensor。</td>
+      <td><ul><li>可选输入，传入nullptr时不使用该参数。</li><li>传入时不支持空Tensor。</li></ul></td>
       <td>INT32</td>
       <td>ND</td>
       <td>(B,)</td>
@@ -254,7 +254,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
     <tr>
       <td>ACLNN_ERR_PARAM_NULLPTR</td>
       <td>161001</td>
-      <td>query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, numAcceptedTokens, out存在空指针。</td>
+      <td>query, key, value, beta, stateRef, actualSeqLengths, ssmStateIndices, out存在空指针。</td>
     </tr>
     <tr>
       <td rowspan="3">ACLNN_ERR_PARAM_INVALID</td>
@@ -322,7 +322,7 @@ aclnnStatus aclnnRecurrentGatedDeltaRule(
 - 以下约束由于算子无法获取tensor中具体数值，故需用户保证，算子不校验：
   - $ssmStateIndices[i] < BlockNum$
   - $0 < actualSeqLengths[i] \le 8$，且$actualSeqLengths[i]$累加和等于$T$
-  - $1 \le numAcceptedTokens[i] \le actualSeqLengths[i]$
+  - 仅当提供numAcceptedTokens时，需满足$1 \le numAcceptedTokens[i] \le actualSeqLengths[i]$。
   - $-1 \le query[i][j][k] \le 1$
   - $-1 \le key[i][j][k] \le 1$
   - $g[i][j] < 0$
