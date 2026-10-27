@@ -85,7 +85,7 @@ std::tuple<at::Tensor, at::Tensor> mixed_quant_flash_attn(
         if (quant_mode == 1) {
             wrapperK.dtype = ACL_FLOAT4_E2M1;
         } else if (quant_mode == 2) {
-            wrapperK.dtype = ACL_HIFLOAT4;
+            wrapperK.dtype = cann_ops_transformer::ACL_HIFLOAT4;
         }
     } else {
         wrapperK.dtype = kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(k.scalar_type())];
@@ -97,7 +97,7 @@ std::tuple<at::Tensor, at::Tensor> mixed_quant_flash_attn(
         if (quant_mode == 1) {
             wrapperV.dtype = ACL_FLOAT4_E2M1;
         } else if (quant_mode == 2) {
-            wrapperV.dtype = ACL_HIFLOAT4;
+            wrapperV.dtype = cann_ops_transformer::ACL_HIFLOAT4;
         }
     } else {
         wrapperV.dtype = kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(v.scalar_type())];
@@ -108,7 +108,7 @@ std::tuple<at::Tensor, at::Tensor> mixed_quant_flash_attn(
     if (quant_mode == 1 && kATenScalarTypeToAclDataTypeTable[tempKDescale] == ACL_UINT8) {
         wrapperKDescale.dtype = ACL_FLOAT8_E8M0;
     } else if (quant_mode == 2 && kATenScalarTypeToAclDataTypeTable[tempKDescale] == ACL_FLOAT) {
-        wrapperKDescale.dtype = ACL_HIFLOAT4_SCALE;
+        wrapperKDescale.dtype = cann_ops_transformer::ACL_HIFLOAT4_SCALE;
     } else {
         wrapperKDescale.dtype = kATenScalarTypeToAclDataTypeTable[tempKDescale];
     }
@@ -118,7 +118,7 @@ std::tuple<at::Tensor, at::Tensor> mixed_quant_flash_attn(
     if (quant_mode == 1 && kATenScalarTypeToAclDataTypeTable[tempVDescale] == ACL_UINT8) {
         wrapperVDescale.dtype = ACL_FLOAT8_E8M0;
     } else if (quant_mode == 2 && kATenScalarTypeToAclDataTypeTable[tempVDescale] == ACL_FLOAT) {
-        wrapperVDescale.dtype = ACL_HIFLOAT4_SCALE;
+        wrapperVDescale.dtype = cann_ops_transformer::ACL_HIFLOAT4_SCALE;
     } else {
         wrapperVDescale.dtype = kATenScalarTypeToAclDataTypeTable[tempVDescale];
     }

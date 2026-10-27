@@ -50,11 +50,11 @@ TensorWrapper make_wrapper(const at::Tensor& tensor, const int64_t real_dtype)
         } else if (real_dtype == HIFLOAT8) {
             wrapper.dtype = ACL_HIFLOAT8;
         } else if (real_dtype == HIFLOAT4) {
-            wrapper.dtype = Ops::Transformer::ACL_HIFLOAT4;
+            wrapper.dtype = cann_ops_transformer::ACL_HIFLOAT4;
         }
     } else if (kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(tensor.scalar_type())] == ACL_FLOAT &&
                real_dtype == HIFLOAT4_SCALE) {
-        wrapper.dtype = Ops::Transformer::ACL_HIFLOAT4_SCALE;
+        wrapper.dtype = cann_ops_transformer::ACL_HIFLOAT4_SCALE;
     } else {
         wrapper.dtype = kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(tensor.scalar_type())];
     }

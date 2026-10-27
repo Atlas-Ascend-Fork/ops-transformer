@@ -141,16 +141,6 @@ class OpBuilder(ABC):
                 os.path.join(self._package_path, "common"),
             ]
         )
-        # aclnn_common.h 以仓库根相对路径 "common/include/op_host/op_const_def_transformer.h"
-        # 引入公共头文件。源码目录运行时该头文件位于仓库根（本包上两级）；wheel 安装后由
-        # setup.py 将 common/include 拷贝至包内。两个候选根目录存在即加入，且排在末尾，
-        # 避免遮蔽前面的 CANN/torch_npu 头文件。
-        for inc_root in (
-            os.path.normpath(os.path.join(self._package_path, "..", "..")),
-            self._package_path,
-        ):
-            if os.path.isdir(os.path.join(inc_root, "common", "include")):
-                paths.append(inc_root)
         return paths
 
     def cxx_args(self):
