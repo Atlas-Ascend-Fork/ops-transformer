@@ -156,7 +156,7 @@ aclnnStatus aclnnPromptFlashAttentionV3(
         <td>mask矩阵</td>
         <td><ul><li>不使用该功能可传入nullptr。</li>
             <li>综合约束请见<a href="#约束说明">约束说明</a>。</li></ul></td>
-        <td>BOOL、INT8、UINT8</td>
+        <td>FLOAT16、BOOL、INT8、UINT8</td>
         <td>ND</td>
         <td>2-4</td>
         <td>×</td>
@@ -543,7 +543,8 @@ aclnnStatus aclnnPromptFlashAttentionV3(
   - 通常建议shape输入Q_S, KV_S; B, Q_S, KV_S; 1, Q_S, KV_S; B, 1, Q_S, KV_S; 1, 1, Q_S, KV_S，其中Q_S为query的shape中的S，KV_S为key和value的shape中的S。
 
   <!-- npu="910b" id11 -->
-  - <term>Atlas A2系列产品</term>：数据类型支持BOOL、INT8和UINT8。
+  - <term>Atlas A2系列产品</term>：数据类型支持FLOAT16、BOOL、INT8和UINT8。
+  - FLOAT16 mask不支持BFLOAT16输入、高精度模式和无效行校正场景。
   <!-- end id11 -->
   - <term>Atlas推理系列产品</term>：仅支持BOOL。
 
