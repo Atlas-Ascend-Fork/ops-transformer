@@ -1096,7 +1096,7 @@ mask_mode参数解释
                     <li>当return_softmax_lse为True时，softmax_lse必须非空，输出shape见<a href="#layout匹配关系表">layout匹配关系表</a></li>
                 </ul>
             </td>
-            <td>无</td>
+            <td>MxFP4（quant_mode=5）不支持开启，置True将被拦截报错</td>
         </tr>
         <tr>
             <td>softmax_lse</td>

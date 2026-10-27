@@ -32,9 +32,9 @@ using std::string;
 using namespace ge;
 using namespace Ops::Base;
 
-ge::graphStatus SoftmaxLSEChecker::CheckSingleParaReturnSoftmaxLse(const QuantFlashAttnTilingInfo &qfaInfo)
+ge::graphStatus SoftmaxLSEChecker::CheckSingleParaReturnSoftmaxLse(const QuantFlashAttnTilingInfo& qfaInfo)
 {
-    const bool *returnSoftmaxLse = qfaInfo.opParamInfo.returnSoftMaxLse;
+    const bool* returnSoftmaxLse = qfaInfo.opParamInfo.returnSoftMaxLse;
     if (returnSoftmaxLse == nullptr) {
         return ge::GRAPH_SUCCESS;
     }
@@ -45,16 +45,22 @@ ge::graphStatus SoftmaxLSEChecker::CheckSingleParaReturnSoftmaxLse(const QuantFl
                                                       (returnSoftmaxLseVal ? "true" : "false"),
                                                       "The value of return_softmax_lse must be True or False"),
                 return ge::GRAPH_FAILED);
+    // MxFP4 (quant_mode=5) 未实现 softmax_lse 输出, 开启时直接拦截
+    OP_CHECK_IF(returnSoftmaxLseVal && qfaInfo.opParamInfo.quantMode != nullptr &&
+                    *qfaInfo.opParamInfo.quantMode == QUANT_MODE_MXFP4,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfaInfo.opName, RETURN_SOFTMAX_LSE_NAME.c_str(), "true",
+                                                      "softmax_lse is not supported in MxFP4 quant mode"),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus SoftmaxLSEChecker::CheckSingleParaSoftmaxLse(const QuantFlashAttnTilingInfo &qfaInfo)
+ge::graphStatus SoftmaxLSEChecker::CheckSingleParaSoftmaxLse(const QuantFlashAttnTilingInfo& qfaInfo)
 {
     if (qfaInfo.returnSoftmaxLse == 0) {
         return ge::GRAPH_SUCCESS;
     }
 
-    const gert::CompileTimeTensorDesc *lseOutDesc = qfaInfo.opParamInfo.lseOut.desc;
+    const gert::CompileTimeTensorDesc* lseOutDesc = qfaInfo.opParamInfo.lseOut.desc;
     if (lseOutDesc == nullptr) {
         return ge::GRAPH_SUCCESS;
     }
@@ -70,7 +76,7 @@ ge::graphStatus SoftmaxLSEChecker::CheckSingleParaSoftmaxLse(const QuantFlashAtt
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus SoftmaxLSEChecker::CheckSinglePara(const QuantFlashAttnTilingInfo &qfaInfo)
+ge::graphStatus SoftmaxLSEChecker::CheckSinglePara(const QuantFlashAttnTilingInfo& qfaInfo)
 {
     if (CheckSingleParaReturnSoftmaxLse(qfaInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
