@@ -18,8 +18,7 @@
 #   返回值：结果通过stdout输出true/false，脚本退出码0表示执行成功，1表示参数/文件/执行错误
 
 set -u
-
-REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/" && pwd)
 
 # 全soc通用长耗时算子字典：命中的算子无论什么soc都返回true，其他soc的字典均为其扩展
 LONG_COMPILE_OPS_ALL=(
@@ -67,7 +66,7 @@ main() {
 
     # 受影响算子以parse_compile_scope.py返回值为准（与PR_COMPILE实际编译范围一致）
     local affected_ops
-    affected_ops=$(python3 "${REPO_ROOT}/cmake/scripts/parse_compile_scope.py" \
+    affected_ops=$(python3 "${REPO_ROOT}/parse_compile_scope.py" \
         -f "$pr_file" --soc "$soc") || exit 1
     echo "affected_ops: $affected_ops"
 	if [ -z "$affected_ops" ]; then

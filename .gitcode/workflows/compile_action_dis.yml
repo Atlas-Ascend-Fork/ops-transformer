@@ -53,7 +53,8 @@ jobs:
             ${{ env.obs_path }}/pr_filelist.txt
             ${{ env.obs_path }}/pr_filelist_mod.txt
             ${{ env.obs_path }}/update_file_detail.txt
-            ${{ env.obs_path }}/compile.sh
+            ${{ env.obs_path }}/check_distributed_compile.sh
+            ${{ env.obs_path }}/parse_compile_scope.py
           path: ${{ steps.process_checkout.outputs.path }}
       -
         name: task_info
@@ -67,7 +68,7 @@ jobs:
             if [[ "${task_name}" == *910B* ]]; then
               soc="ascend910b"
             fi
-            full_out=$(bash scripts/ci/check_distributed_compile.sh ${soc} pr_filelist.txt)
+            full_out=$(bash check_distributed_compile.sh ${soc} pr_filelist.txt)
             check_ret=$?
             check_out=$(printf '%s\n' "${full_out}" | tail -n 1)
             echo "check_distributed_compile.sh stdout: ${full_out}"
