@@ -178,6 +178,98 @@ static bool CheckNormDtypeValid(const aclTensor* normQueryMean, const aclTensor*
     return true;
 }
 
+static bool CheckOptionalParamValid(const aclTensor* encoderQuery, const aclTensor* encoderKey,
+                                    const aclTensor* normQueryWeight, const aclTensor* normQueryMean,
+                                    const aclTensor* normQueryRstd, const aclTensor* normKeyWeight,
+                                    const aclTensor* normKeyMean, const aclTensor* normKeyRstd,
+                                    const aclTensor* normAddedQueryWeight, const aclTensor* normAddedQueryMean,
+                                    const aclTensor* normAddedQueryRstd, const aclTensor* normAddedKeyWeight,
+                                    const aclTensor* normAddedKeyMean, const aclTensor* normAddedKeyRstd,
+                                    const aclTensor* ropeSin, const aclTensor* ropeCos, int64_t normType,
+                                    int64_t normAddedType, int64_t ropeType)
+{
+    // ropeType使能时ropeSin/ropeCos必须成对传入
+    if (ropeType != static_cast<int64_t>(RopeType::NONE)) {
+        OP_CHECK(
+            ropeSin != nullptr,
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input ropeSin should not be nullptr when ropeType is %ld.", ropeType),
+            return false);
+        OP_CHECK(
+            ropeCos != nullptr,
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input ropeCos should not be nullptr when ropeType is %ld.", ropeType),
+            return false);
+    }
+    // normType使能时mean/rstd必须传入；带仿射LayerNorm时weight必须传入
+    if (normType != static_cast<int64_t>(NormType::NONE)) {
+        OP_CHECK(normQueryMean != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input normQueryMean should not be nullptr when normType is %ld.",
+                         normType),
+                 return false);
+        OP_CHECK(normQueryRstd != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input normQueryRstd should not be nullptr when normType is %ld.",
+                         normType),
+                 return false);
+        OP_CHECK(
+            normKeyMean != nullptr,
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input normKeyMean should not be nullptr when normType is %ld.", normType),
+            return false);
+        OP_CHECK(
+            normKeyRstd != nullptr,
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input normKeyRstd should not be nullptr when normType is %ld.", normType),
+            return false);
+        if (normType == static_cast<int64_t>(NormType::LAYER_NORM_AFFINE)) {
+            OP_CHECK(normQueryWeight != nullptr,
+                     OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                             "Input normQueryWeight should not be nullptr when normType is %ld.", normType),
+                     return false);
+            OP_CHECK(normKeyWeight != nullptr,
+                     OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input normKeyWeight should not be nullptr when normType is %ld.",
+                             normType),
+                     return false);
+        }
+    }
+    // normAddedType使能时encoder输入必须存在，mean/rstd必须传入；带仿射LayerNorm时weight必须传入
+    if (normAddedType != static_cast<int64_t>(NormType::NONE)) {
+        OP_CHECK(encoderQuery != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input encoderQuery should not be nullptr when normAddedType is %ld.",
+                         normAddedType),
+                 return false);
+        OP_CHECK(encoderKey != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Input encoderKey should not be nullptr when normAddedType is %ld.",
+                         normAddedType),
+                 return false);
+        OP_CHECK(normAddedQueryMean != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                         "Input normAddedQueryMean should not be nullptr when normAddedType is %ld.", normAddedType),
+                 return false);
+        OP_CHECK(normAddedQueryRstd != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                         "Input normAddedQueryRstd should not be nullptr when normAddedType is %ld.", normAddedType),
+                 return false);
+        OP_CHECK(normAddedKeyMean != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                         "Input normAddedKeyMean should not be nullptr when normAddedType is %ld.", normAddedType),
+                 return false);
+        OP_CHECK(normAddedKeyRstd != nullptr,
+                 OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                         "Input normAddedKeyRstd should not be nullptr when normAddedType is %ld.", normAddedType),
+                 return false);
+        if (normAddedType == static_cast<int64_t>(NormType::LAYER_NORM_AFFINE)) {
+            OP_CHECK(
+                normAddedQueryWeight != nullptr,
+                OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                        "Input normAddedQueryWeight should not be nullptr when normAddedType is %ld.", normAddedType),
+                return false);
+            OP_CHECK(
+                normAddedKeyWeight != nullptr,
+                OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                        "Input normAddedKeyWeight should not be nullptr when normAddedType is %ld.", normAddedType),
+                return false);
+        }
+    }
+    return true;
+}
+
 inline static aclnnStatus CheckParam(
     const aclTensor* gradQueryOutput, const aclTensor* gradKeyOutput, const aclTensor* gradValueOutput,
     const aclTensor* query, const aclTensor* key, const aclTensor* encoderQuery, const aclTensor* encoderKey,
@@ -190,7 +282,7 @@ inline static aclnnStatus CheckParam(
     const aclTensor* gradEncoderValue, const aclTensor* gradNormQueryWeight, const aclTensor* gradNormQueryBias,
     const aclTensor* gradNormKeyWeight, const aclTensor* gradNormKeyBias, const aclTensor* gradNormAddedQueryWeight,
     const aclTensor* gradNormAddedQueryBias, const aclTensor* gradNormAddedKeyWeight,
-    const aclTensor* gradNormAddedKeyBias)
+    const aclTensor* gradNormAddedKeyBias, int64_t normType, int64_t normAddedType, int64_t ropeType)
 {
     // check nullptr
     CHECK_RET(CheckNotNull(gradQueryOutput, gradKeyOutput, gradValueOutput, query, key, gradQuery, gradKey, gradValue),
@@ -209,12 +301,20 @@ inline static aclnnStatus CheckParam(
                                   normAddedQueryRstd, normAddedKeyMean, normAddedKeyRstd),
               ACLNN_ERR_PARAM_INVALID);
 
+    // check optional param with attr
+    CHECK_RET(CheckOptionalParamValid(encoderQuery, encoderKey, normQueryWeight, normQueryMean, normQueryRstd,
+                                      normKeyWeight, normKeyMean, normKeyRstd, normAddedQueryWeight, normAddedQueryMean,
+                                      normAddedQueryRstd, normAddedKeyWeight, normAddedKeyMean, normAddedKeyRstd,
+                                      ropeSin, ropeCos, normType, normAddedType, ropeType),
+              ACLNN_ERR_PARAM_INVALID);
+
     return ACLNN_SUCCESS;
 }
 
 bool checkViewCopyResult(const aclTensor* l0Tensor, const aclTensor* inTensor, aclOpExecutor* l0Executor)
 {
-    if (l0Tensor != nullptr) {
+    // 可选输出未请求（用户传nullptr）时跳过ViewCopy，避免空指针解引用
+    if (l0Tensor != nullptr && inTensor != nullptr) {
         auto viewCopyResult = l0op::ViewCopy(l0Tensor, inTensor, l0Executor);
         CHECK_RET(viewCopyResult != nullptr, false);
     }
@@ -250,13 +350,13 @@ aclnnStatus aclnnNormRopeConcatBackwardGetWorkspaceSize(
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
     // check input tensor
-    auto ret =
-        CheckParam(gradQueryOutput, gradKeyOutput, gradValueOutput, query, key, encoderQuery, encoderKey,
-                   normQueryWeight, normQueryMean, normQueryRstd, normKeyWeight, normKeyMean, normKeyRstd,
-                   normAddedQueryWeight, normAddedQueryMean, normAddedQueryRstd, normAddedKeyWeight, normAddedKeyMean,
-                   normAddedKeyRstd, ropeSin, ropeCos, gradQuery, gradKey, gradValue, gradEncoderQuery, gradEncoderKey,
-                   gradEncoderValue, gradNormQueryWeight, gradNormQueryBias, gradNormKeyWeight, gradNormKeyBias,
-                   gradNormAddedQueryWeight, gradNormAddedQueryBias, gradNormAddedKeyWeight, gradNormAddedKeyBias);
+    auto ret = CheckParam(gradQueryOutput, gradKeyOutput, gradValueOutput, query, key, encoderQuery, encoderKey,
+                          normQueryWeight, normQueryMean, normQueryRstd, normKeyWeight, normKeyMean, normKeyRstd,
+                          normAddedQueryWeight, normAddedQueryMean, normAddedQueryRstd, normAddedKeyWeight,
+                          normAddedKeyMean, normAddedKeyRstd, ropeSin, ropeCos, gradQuery, gradKey, gradValue,
+                          gradEncoderQuery, gradEncoderKey, gradEncoderValue, gradNormQueryWeight, gradNormQueryBias,
+                          gradNormKeyWeight, gradNormKeyBias, gradNormAddedQueryWeight, gradNormAddedQueryBias,
+                          gradNormAddedKeyWeight, gradNormAddedKeyBias, normType, normAddedType, ropeType);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
 
     aclOpExecutor* l0Executor = uniqueExecutor.get();
