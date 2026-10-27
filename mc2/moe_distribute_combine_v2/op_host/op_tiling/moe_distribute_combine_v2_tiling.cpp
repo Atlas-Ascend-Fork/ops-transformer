@@ -2104,12 +2104,18 @@ static uint64_t GetCommBufferSize(const gert::TilingContext* context,
     moeQueueBytes = packedDataBytes > rawPackedDataBytes ? packedDataBytes : rawPackedDataBytes;
     moeQueueBytes = moeQueueBytes > hExpandXAlign32Size ? moeQueueBytes : hExpandXAlign32Size;
 
-    // flag检查和比较复用计算scratch，通信侧只保留清零buffer
+    // 清零buffer独立保留，轮询标志复用接收队列
     uint32_t clearFlagCount = flagRcvCount * blockCntPerToken * SPLIT_BLOCK_FLAG_COUNT;
     uint32_t clearFlagBufSize = (clearFlagCount * sizeof(float) + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN;
     uint64_t commBufferSize = static_cast<uint64_t>(scaleNumAlignSize) + clearFlagBufSize;
     dispatchBufferSize =
         GetDispatchBufferSize(tilingData, moeQueueBytes, quantResultDataBytes, packedDataBytes, quantBufferSize);
+    // 只扩接收队列，不改变发送侧预算
+    uint32_t maxSlotCount =
+        std::max(tilingData->moeDistributeCombineV2Info.k, tilingData->moeDistributeCombineV2Info.sharedExpertNum);
+    uint32_t flagBytes = maxSlotCount * blockCntPerToken * SPLIT_BLOCK_FLAG_COUNT * sizeof(float);
+    flagBytes = (flagBytes + ALIGNED_LEN - 1U) / ALIGNED_LEN * ALIGNED_LEN;
+    moeQueueBytes = std::max(moeQueueBytes, flagBytes);
     return commBufferSize;
 }
 
@@ -2131,6 +2137,12 @@ static uint64_t GetReceiveBufferSize(const MoeDistributeCombineV2TilingData* til
         totalBufferSize +=
             (tilingData->moeDistributeCombineV2Info.epWorldSize * sizeof(int64_t) + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN;
         totalBufferSize += (tokenPerAivNum * flagRcvCount * sizeof(int32_t) + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN;
+    }
+    if (tilingData->moeDistributeCombineV2Info.hasElasticInfo) {
+        uint32_t elasticInfoSize =
+            (ELASTIC_METAINFO_OFFSET + RANK_LIST_NUM * tilingData->moeDistributeCombineV2Info.epWorldSize) *
+            sizeof(int32_t);
+        totalBufferSize += (elasticInfoSize + UB_ALIGN - 1U) / UB_ALIGN * UB_ALIGN;
     }
     return totalBufferSize;
 }

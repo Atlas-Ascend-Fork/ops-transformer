@@ -86,6 +86,8 @@ public:
     __aicore__ inline void Process();
 
 private:
+    __aicore__ inline uint32_t GetNextGroupRoute(uint32_t* rankCursors, uint32_t endIndex, uint32_t routeStep,
+                                                 uint32_t targetGroup, uint32_t& nextRank);
     __aicore__ inline uint32_t GetSendGroupOffset(uint32_t roundId, uint32_t sendRoundNum);
     __aicore__ inline uint32_t GetSendTargetGroup(uint32_t sourceGroup, uint32_t groupOffset, uint32_t groupNum);
     __aicore__ inline uint32_t BuildSendGroupIndices(uint32_t routeCount, uint32_t targetGroup);
@@ -118,9 +120,9 @@ private:
     __aicore__ inline void CalCumSum();
     __aicore__ inline void WaitCumSumFlag();
     __aicore__ inline int32_t CalExpertCnt(uint32_t expertId);
-    __aicore__ inline void CalExpertCntByHistogram(uint32_t calCnt);
-    __aicore__ inline void CalAndSendCntByExp();
-    __aicore__ inline void CalAndSendCntByRankAndExpert();
+    __aicore__ inline void CalExpertCntByHistogram(uint32_t calCnt, uint32_t startExpertId, uint32_t endExpertId);
+    __aicore__ inline void CalAndSendCntByExp(uint32_t startExpertId, uint32_t endExpertId);
+    __aicore__ inline void CalAndSendCntByRankAndExpert(uint32_t startExpertId, uint32_t endExpertId);
     __aicore__ inline void SendExpertCntRange(uint32_t startExpertId, uint32_t endExpertId, uint32_t statusIdxOffset);
     __aicore__ inline void BufferInit();
     __aicore__ inline void WaitDispatchClearStatus();
@@ -279,6 +281,7 @@ private:
     uint32_t moeExpertRankNum_{0}; // moe专家卡数，等于epWorldSize_ - sharedExpertRankNum_
     uint32_t moeExpertNumPerRank_{0};
     uint32_t totalExpertNum_{0};
+    uint32_t expertFreqStart_{0};
     uint32_t hOutSize_{0};
     uint32_t hOutSizeAlign_{0};
     uint32_t hAlignSize_{0};
@@ -1022,6 +1025,34 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
 }
 
 template <TemplateMC2A5FullMeshTypeClass>
+__aicore__ inline uint32_t MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::GetNextGroupRoute(
+    uint32_t* rankCursors, uint32_t endIndex, uint32_t routeStep, uint32_t targetGroup, uint32_t& nextRank)
+{
+    // 各目的卡沿原分核序列推进，交替取下一条有效路由
+    for (uint32_t attempt = 0U; attempt < SEND_GROUP_RANK_NUM; ++attempt) {
+        const uint32_t lane = nextRank;
+        nextRank = (nextRank + 1U) % SEND_GROUP_RANK_NUM;
+        while (rankCursors[lane] < endIndex) {
+            const uint32_t routeIndex = rankCursors[lane];
+            rankCursors[lane] += routeStep;
+            const uint32_t index = useSendGroupIndices_ ? sendGroupIndices_.GetValue(routeIndex) : routeIndex;
+            const int32_t expertId = validExpertIdsTensor_(index);
+            if (expertId < 0 || expertId >= moeExpertNum_) {
+                continue;
+            }
+            uint32_t toRankId = expertId / moeExpertNumPerRank_ + sharedExpertRankNum_;
+            if (isScalingDownFlag_) {
+                toRankId = elasticInfoTensor_.GetValue(ELASTIC_INFO_OFFSET + epWorldSizeOriginal_ + toRankId);
+            }
+            if (toRankId == targetGroup * SEND_GROUP_RANK_NUM + lane) {
+                return routeIndex;
+            }
+        }
+    }
+    return endIndex;
+}
+
+template <TemplateMC2A5FullMeshTypeClass>
 __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::SendToMoeExpertLoop(
     TQue<QuePosition::VECIN, 1> inQueue, uint32_t validTokenNum, bool writeExpertScale)
 {
@@ -1063,10 +1094,24 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
                     routeStep *= localPartNum;
                 }
             }
+            uint32_t rankCursors[SEND_GROUP_RANK_NUM];
+            uint32_t nextRank = 0U;
+            if (targetGroup != sourceGroup) {
+                for (uint32_t lane = 0U; lane < SEND_GROUP_RANK_NUM; ++lane) {
+                    rankCursors[lane] = startIndex;
+                }
+                nextRank = (aivId_ + epRankIdOriginal_) % SEND_GROUP_RANK_NUM;
+            }
             for (uint32_t routeIndex = startIndex; routeIndex < endIndex; routeIndex += routeStep) {
                 uint32_t index = routeIndex;
+                if (targetGroup != sourceGroup) {
+                    index = GetNextGroupRoute(rankCursors, endIndex, routeStep, targetGroup, nextRank);
+                    if (index == endIndex) {
+                        break;
+                    }
+                }
                 if (useSendGroupIndices_) {
-                    index = static_cast<uint32_t>(sendGroupIndices_.GetValue(routeIndex));
+                    index = static_cast<uint32_t>(sendGroupIndices_.GetValue(index));
                 }
                 int32_t tokenId = index / axisK_;
                 int32_t topKId = index % axisK_;
@@ -1325,6 +1370,8 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     uint32_t dstExpertId, int32_t calCnt, int32_t& curExpertCnt)
 {
     if (calCnt < axisK_) {
+        // 首个token不做规约，也需等待上一轮打包完成
+        SyncFunc<AscendC::HardEvent::V_S>();
         curExpertCnt = 0;
         return;
     }
@@ -1350,10 +1397,15 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
 
 template <TemplateMC2A5FullMeshTypeClass>
 __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::CalExpertCntByHistogram(
-    uint32_t calCnt)
+    uint32_t calCnt, uint32_t startExpertId, uint32_t endExpertId)
 {
-    uint32_t groupNum = Ceil(moeExpertNum_, EXPERT_PER_HISTO_GROUP);
-    groupNum = (groupNum == 0) ? 1U : groupNum;
+    // 共享专家单独计数，Histogram只统计本核负责的MoE专家
+    expertFreqStart_ = startExpertId > sharedExpertRankNum_ ? startExpertId - sharedExpertRankNum_ : 0U;
+    const uint32_t endMoeExpertId = endExpertId > sharedExpertRankNum_ ? endExpertId - sharedExpertRankNum_ : 0U;
+    const uint32_t groupNum = Ceil(endMoeExpertId - expertFreqStart_, EXPERT_PER_HISTO_GROUP);
+    if (groupNum == 0U) {
+        return;
+    }
     static_assert(AscendC::GetVecLen() == EXPERT_HISTO_BIN_NUM, "EXPERT_HISTO_BIN_NUM must match GetVecLen()");
     if (calCnt == 0) {
         Duplicate<uint16_t>(expertFreqTensor_, 0, groupNum * EXPERT_HISTO_BIN_NUM);
@@ -1363,9 +1415,9 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     LocalTensor<int32_t> shiftTensor = dstExpBuf_.Get<int32_t>();
     LocalTensor<uint8_t> binTensor = subExpBuf_.Get<uint8_t>();
     for (uint32_t group = 0; group < groupNum; ++group) {
-        uint32_t base = group * EXPERT_PER_HISTO_GROUP;
+        uint32_t base = expertFreqStart_ + group * EXPERT_PER_HISTO_GROUP;
         uint32_t groupSize =
-            (base + EXPERT_PER_HISTO_GROUP > moeExpertNum_) ? (moeExpertNum_ - base) : EXPERT_PER_HISTO_GROUP;
+            (base + EXPERT_PER_HISTO_GROUP > endMoeExpertId) ? (endMoeExpertId - base) : EXPERT_PER_HISTO_GROUP;
         Subs(shiftTensor, validExpertIdsTensor_, static_cast<int32_t>(base) - 1, calCnt);
         PipeBarrier<PIPE_V>();
         Mins(shiftTensor, shiftTensor, static_cast<int32_t>(groupSize + 1), calCnt);
@@ -1391,7 +1443,7 @@ __aicore__ inline int32_t MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMes
             expertCnt = activeMaskBsCnt_;
         }
     } else if (sendToMoeExpTokenCnt_ > 0) { // 当前处理卡为moe专家卡
-        uint32_t moeExpertId = expertId - sharedExpertRankNum_;
+        uint32_t moeExpertId = expertId - sharedExpertRankNum_ - expertFreqStart_;
         uint32_t group = moeExpertId / EXPERT_PER_HISTO_GROUP;
         uint32_t bin = moeExpertId % EXPERT_PER_HISTO_GROUP + 1;
         expertCnt = static_cast<int32_t>(expertFreqTensor_(group * EXPERT_HISTO_BIN_NUM + bin));
@@ -1400,10 +1452,9 @@ __aicore__ inline int32_t MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMes
 }
 
 template <TemplateMC2A5FullMeshTypeClass>
-__aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::CalAndSendCntByExp()
+__aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::CalAndSendCntByExp(
+    uint32_t startExpertId, uint32_t endExpertId)
 {
-    uint32_t startExpertId, endExpertId, sendExpertNum;
-    SplitToCore(totalExpertNum_, aivTokenCnt_, startExpertId, endExpertId, sendExpertNum, false);
     if (startExpertId >= totalExpertNum_) {
         return;
     }
@@ -1473,12 +1524,10 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
 }
 
 template <TemplateMC2A5FullMeshTypeClass>
-__aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::CalAndSendCntByRankAndExpert()
+__aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTypeFunc>::CalAndSendCntByRankAndExpert(
+    uint32_t startExpertId, uint32_t endExpertId)
 {
-    uint32_t startExpertId, endExpertId, sendExpertNum;
-    // 将(rank, localExpert)展平为expertId后分核，使同一rank可由多个核并行处理。
-    SplitToCore(totalExpertNum_, aivTokenCnt_, startExpertId, endExpertId, sendExpertNum, false);
-    if (sendExpertNum == 0) {
+    if (startExpertId == endExpertId) {
         return;
     }
 
@@ -1876,11 +1925,14 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     expertFreqTensor_ = expertFreqBuf_.Get<uint16_t>();
     ExpIdsCopyAndMaskCal();
     uint32_t maskCnt = isTokenMaskFlag_ ? (activeMaskBsCnt_ * axisK_) : static_cast<uint32_t>(expertIdsCnt_);
-    CalExpertCntByHistogram(maskCnt);
+    uint32_t startExpertId, endExpertId, sendExpertNum;
+    // 统计和发送共用同一份专家分核结果
+    SplitToCore(totalExpertNum_, aivTokenCnt_, startExpertId, endExpertId, sendExpertNum, false);
+    CalExpertCntByHistogram(maskCnt, startExpertId, endExpertId);
     if (hasElasticInfoFlag_) {
-        CalAndSendCntByExp();
+        CalAndSendCntByExp(startExpertId, endExpertId);
     } else {
-        CalAndSendCntByRankAndExpert();
+        CalAndSendCntByRankAndExpert(startExpertId, endExpertId);
     }
     if (aivId_ - aivUsedAllToAll_ >= aivUsedCumSum_) {
         return;
