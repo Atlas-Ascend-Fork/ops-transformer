@@ -456,6 +456,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendMaskC
                     reinterpret_cast<__gm__ int32_t*>(workspace.urma.mask.get_ptr(buffer) + srcOffset + maskAlignSize_);
                 GmWrite(wsCountPtr, static_cast<int32_t>(totalSendCnt));
                 PipeBarrier<PIPE_ALL>();
+                // E_dsburma2: WriteNbi 的 DMA 引擎从 maskSlot 直读（含尾部 count），旁路写必须先 DSB 排空，
+                // 否则远端专家计数表可能收到旧 count，等待目标与实际 token 数错位即挂死/丢数。
+                GmDataBarrier();
                 GM_ADDR remoteDataAddr = GetRankWinAddrWithOffset(curRankId, dstOffset);
                 GM_ADDR localGmAddr = workspace.urma.mask.get_ptr(buffer) + srcOffset;
                 comm_.WriteNbi(maskChannel, remoteDataAddr, localGmAddr, maskSlotSize_);
@@ -961,6 +964,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendDispa
         const uint32_t capacity = static_cast<uint32_t>(params_.tilingData->compute.numMaxTokensPerRank);
         GM_ADDR sourceCount = peermem.sourceReady.get_ptr(commBuffer) + RelayFlagOffset(targetServer, capacity);
         GmWrite(reinterpret_cast<__gm__ uint64_t*>(sourceCount), static_cast<uint64_t>(tokenCount) + 1U);
+        // E_dsburma3: 该 count 只发布一次且远端以非零为放行判据；旁路写未排空时 DMA 会把 0 发走，
+        // 远端 BuildServerCombineLists 等非零即永挂。WriteNbi 读源前必须 DSB。
+        GmDataBarrier();
         // 空队列也发布 count+1；默认写生成 CQE，完成等待留给后续读依赖或 Wave 出口统一 Drain。
         GM_ADDR remoteCount = GetRankWinAddrWithOffset(relayRank, peermem.dispatchFlag.offsetBytes) +
                               RelayFlagOffset(serverId_, capacity);

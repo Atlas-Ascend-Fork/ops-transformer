@@ -827,7 +827,8 @@ __aicore__ inline void RunGmm2A8W4(const BlockContext& pipeline,
     GmmKernel::BlockScheduler scheduler({config.m, config.outputN, config.k},
                                         GmmKernel::BlockScheduler::Params{asc::te::make_coord(
                                             static_cast<int64_t>(config.tileM), static_cast<int64_t>(L1_TILE_N))});
-    uint32_t tileNum = scheduler.GetTileNum();
+    // tileNum 与 mega_moe_utils.h 的 GetGmmProblemTileCount 同源，预判无活的口径不得各算一份。
+    uint32_t tileNum = GetGmmProblemTileCount(config.m, config.outputN);
     uint32_t startLoopIdx =
         (config.blockIdx < startBlockIdx ? config.blockIdx + config.blockNum : config.blockIdx) - startBlockIdx;
     if (startLoopIdx >= tileNum) {

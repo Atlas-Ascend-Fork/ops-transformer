@@ -937,6 +937,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CrossRank
         (__gm__ int32_t*)(peermem.syncCount.get_ptr(commBuffer) + aivCoreIdx_ * PEERMEM_SYNC_SLOT_SIZE);
     int count = GmRead(syncCount) + 1;
     GmWrite(syncCount, count);
+    // E_dsburma1: 旁路 GM 写只进本核写队列，WriteNbi 的 DMA 引擎直读 GM，不嗅探未排空的写队列；
+    // 不加 DSB 则 DMA 可能把上一轮 count 发往远端，对端 GmSignalWaitBarrier 等值等待永不命中即全卡挂死。
+    GmDataBarrier();
     // 先向本 AIV 负责的所有 peer 发出通知，再进入等待。256P 场景下可同时维持多个
     // channel 在途，避免原实现逐 peer“写-等-Drain”造成的串行握手。
     for (int rankIndex = aivCoreIdx_; rankIndex < worldSize_; rankIndex += blockAivNum_) {
@@ -1040,6 +1043,17 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
             blockContext_, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob, expertTokenCount,
             rowOffsetInExpert, nullptr, activationOutputDivisor_);
     } else if constexpr (ENABLE_A4W4) {
+        // 空 slice 三角色整对跳过，避免每 slice 局部构造的 BlockMmad/BlockPrologue 跨核额度收支失配。
+        // 跳过后额度 flag（SYNC_AIV_AIC_FLAG）未消费计数恒 <16：AIC 侧构造 Set 与逐 chunk 就绪 Wait
+        // 同在 PIPE_MTE1，AIV0 侧额度 Wait、就绪 Set 与析构回收 Wait 同在 PIPE_MTE3；两条管内序使
+        // AIC 发第 N 个 slice 的构造额度前必已走完第 N-1 个 slice 的就绪 Wait，彼时 AIV0 已回收完
+        // 第 N-2 个及更早 slice 的全部额度，在途至多两批即 2*bBufferNum；Host L1 布局（512KiB，
+        // A/B 槽各 64KiB，另留两组最小 scale）给出 bBufferNum<=6，峰值 12<16。
+        if (SkipProblemWithoutWorkOnAllRoles(
+                GetGmmProblemTileCount(Get<M_VALUE>(state.problemShape), Get<K_VALUE>(state.problemShape)), blockJob,
+                startBlockIdx_)) {
+            return;
+        }
         // A4W4 GMM1 uses a different block; keep the FP8/W4 objects local to GMM2.
         if constexpr (g_coreType == AscendC::AIC) {
             typename A8W4Config::BlockMmad block(params_.tilingData->a8w4L1Layout);

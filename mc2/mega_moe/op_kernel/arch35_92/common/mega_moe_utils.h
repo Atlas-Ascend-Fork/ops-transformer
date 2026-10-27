@@ -195,22 +195,35 @@ __aicore__ inline uint32_t GetMGroupCountForRows(uint64_t rowCount, uint32_t row
     return static_cast<uint32_t>((rowCount - 1U) / rowsPerMGroup + 1U);
 }
 
-// 当前 AIC 未分到该 Wave problem 的任何 tile 时，补偿推进 rolling 游标并返回 true。
+// 本核在该 problem 上无 tile 时，补偿推进 rolling 游标并返回 true；AIC/AIV0/AIV1 三角色同判据。
+__aicore__ inline bool SkipProblemWithoutWorkOnAllRoles(uint32_t problemTileCount, const BlockJobContext& blockJob,
+                                                        uint32_t& startBlockIdx)
+{
+    uint32_t firstOwnedTile =
+        (blockJob.jobIndex < startBlockIdx ? blockJob.jobIndex + blockJob.totalJobs : blockJob.jobIndex) -
+        startBlockIdx;
+    if (firstOwnedTile >= problemTileCount) {
+        startBlockIdx = (startBlockIdx + problemTileCount) % blockJob.totalJobs;
+        return true;
+    }
+    return false;
+}
+
+// 同 SkipProblemWithoutWorkOnAllRoles，但仅 AIC 生效（wave 路径的 AIV 不参与游标推进）。
 __aicore__ inline bool HandleWaveProblemWithoutWork(uint32_t problemTileCount, const BlockJobContext& blockJob,
                                                     uint32_t& startBlockIdx)
 {
     if constexpr (g_coreType == AIC) {
-        if (problemTileCount < blockJob.totalJobs) {
-            uint32_t firstOwnedTile =
-                (blockJob.jobIndex < startBlockIdx ? blockJob.jobIndex + blockJob.totalJobs : blockJob.jobIndex) -
-                startBlockIdx;
-            if (firstOwnedTile >= problemTileCount) {
-                startBlockIdx = (startBlockIdx + problemTileCount) % blockJob.totalJobs;
-                return true;
-            }
-        }
+        return SkipProblemWithoutWorkOnAllRoles(problemTileCount, blockJob, startBlockIdx);
     }
     return false;
+}
+
+// 按 (L1_TILE_M_256, L1_TILE_N) 分块的 GMM problem tile 总数。
+__aicore__ inline uint32_t GetGmmProblemTileCount(uint64_t mRows, uint64_t outputN)
+{
+    return GetMGroupCountForRows(mRows, L1_TILE_M_256) *
+           Ops::Base::CeilDiv(static_cast<uint32_t>(outputN), static_cast<uint32_t>(L1_TILE_N));
 }
 
 // 计算剩余分组预算允许当前 Wave 在本专家内推进到的结束行偏移。
