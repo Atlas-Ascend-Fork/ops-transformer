@@ -700,11 +700,11 @@ aclnnStatus aclnnSparseFlashMlaGrad(
 - 确定性计算：
 
     <!-- npu="A3,910b" id8 -->
-    - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：aclnnSparseFlashMlaGrad默认非确定性实现，不支持通过aclrtCtxSetSysParamOpt开启确定性。
+    - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：aclnnSparseFlashMlaGrad默认非确定性实现，不支持通过aclrtSetSysParamOpt开启确定性。
 
     <!-- end id8 -->
     <!-- npu="950" id9 -->
-    - <term>Ascend 950PR&950DT系列产品</term>：aclnnSparseFlashMlaGrad默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+    - <term>Ascend 950PR&950DT系列产品</term>：aclnnSparseFlashMlaGrad默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
     <!-- end id9 -->
 
 - 公共约束

@@ -559,7 +559,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
 ## 约束说明
 
 - 确定性计算：
-  - aclnnSparseFlashAttentionGrad默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnSparseFlashAttentionGrad默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 公共约束
     - 入参为空的场景处理：
         - query为空Tensor：直接返回。

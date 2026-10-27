@@ -232,7 +232,7 @@ aclnnStatus aclnnLightningIndexerKLLoss(
 ## 约束说明
 
 - 确定性计算：
-  - aclnnLightningIndexerKLLoss默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnLightningIndexerKLLoss默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 输入shape限制：
   - 支持 shape 为 (B, S, K) 或 (T, K)，B的取值范围为1\~512，最后一维 K 的取值范围为 1\~8192。
 - `eps` 必须大于 0。

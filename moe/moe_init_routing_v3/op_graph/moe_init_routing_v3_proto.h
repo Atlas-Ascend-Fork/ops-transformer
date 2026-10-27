@@ -54,9 +54,9 @@ namespace ge {
 Type is: Float32.
                       A 2D tensor when quant_mode in [2, 3, 16, 17]. Shape is: (B*S*K, M), in which M is
 CeilAlign(CeilDiv(H, 32), 2). Type is: Float8_E8M0. A 2D tensor when quant_mode in [4, 5, 14, 15]. Shape is: (B*S*K,
-CeilDiv(H, 128)). Type is: Float32. A 3D tensor when quant_mode in [11, 12] (FP8 PerBlock量化，BlockSize=128). Shape is:
-(B*S*K, M, 2), in which M is CeilAlign(CeilDiv(H, 256), 2). Type is: Float32 (FP32 Scale). A 3D tensor when quant_mode
-is -1 and dtype of input x equals FLOAT4_E2M1 or quant_mode is 9. Shape is: (B*S*K, M, 2), in which M is
+CeilDiv(H, 128)). Type is: Float32. A 3D tensor when quant_mode in [11, 12] (FP8 PerBlock量化，BlockSize=128).
+Shape is: (B*S*K, M, 2), in which M is CeilAlign(CeilDiv(H, 256), 2). Type is: Float32 (FP32 Scale). A 3D tensor when
+quant_mode is -1 and dtype of input x equals FLOAT4_E2M1 or quant_mode is 9. Shape is: (B*S*K, M, 2), in which M is
 CeilAlign(CeilDiv(H, 32), 2). Type is: Float8_E8M0. Format support ND.
 * @par Attributes:
 * @li active_num: Optional parameter. Type is:Int32. identify activate scenario. The value 0 indicates a non-active

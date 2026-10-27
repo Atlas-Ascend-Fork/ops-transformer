@@ -449,7 +449,7 @@ aclnnStatus aclnnFFNV3(
 ## 约束说明
 
 - 确定性计算：
-  - aclnnFFNV3默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnFFNV3默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 所有场景下需满足K1=N2, K1<65536, K2<65536, M轴在32Byte对齐后小于INT32的最大值。
 
 <!-- npu="910b" id6 -->

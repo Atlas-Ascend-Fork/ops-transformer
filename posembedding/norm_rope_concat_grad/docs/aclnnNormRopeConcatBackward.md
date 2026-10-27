@@ -635,7 +635,7 @@ aclnnStatus aclnnNormRopeConcatBackward(
 ## 约束说明
 
 - 确定性计算：
-  - aclnnNormRopeConcatBackward默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnNormRopeConcatBackward默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 
 ## 调用示例
 

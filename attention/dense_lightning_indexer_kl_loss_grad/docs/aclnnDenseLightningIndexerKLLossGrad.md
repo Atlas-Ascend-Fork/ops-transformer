@@ -464,7 +464,7 @@ aclnnStatus aclnnDenseLightningIndexerKLLossGrad(
 - 确定性计算：
 
     <!-- npu="950" id7 -->
-    - <term>Ascend 950PR&950DT系列产品</term>：aclnnDenseLightningIndexerKLLossGrad默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+    - <term>Ascend 950PR&950DT系列产品</term>：aclnnDenseLightningIndexerKLLossGrad默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 
     <!-- end id7 -->
 

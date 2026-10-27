@@ -480,7 +480,7 @@ aclnnStatus aclnnFlashAttentionScoreGrad(
 ## 约束说明
 
 - 确定性计算：
-  - aclnnFlashAttentionScoreGrad默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnFlashAttentionScoreGrad默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 该接口与PyTorch配合使用时，需要保证CANN相关包与PyTorch相关包的版本匹配。
 - 输入query、key、value、dy的B：batchsize必须相等。
 - 输入query、key、value的D：Head-Dim必须满足(qD == kD && kD >= vD)。

@@ -541,7 +541,7 @@ aclnnStatus aclnnSparseLightningIndexerGradKLLossV2(
 ## 约束说明
 
 - 确定性计算：
-  - aclnnSparseLightningIndexerGradKLLossV2默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnSparseLightningIndexerGradKLLossV2默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 公共约束
     - 参数query、key、queryIndex、keyIndex的数据类型应保持一致。
     - 参数weight不为float32时，参数query、key、queryIndex、keyIndex、weight的数据类型应保持一致。

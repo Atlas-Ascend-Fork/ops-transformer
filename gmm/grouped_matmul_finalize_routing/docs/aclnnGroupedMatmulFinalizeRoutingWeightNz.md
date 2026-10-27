@@ -355,7 +355,7 @@ aclnnStatus aclnnGroupedMatmulFinalizeRoutingWeightNz(
 
 - 确定性计算：
 
-  - aclnnGroupedMatmulFinalizeRoutingWeightNz默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnGroupedMatmulFinalizeRoutingWeightNz默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 输入和输出支持以下数据类型组合：
 
   | x1   | x2   | scale   | bias | pertokenScaleOptional | groupList | sharedInput | logit   | rowIndex | out   |

@@ -432,10 +432,10 @@ aclnnStatus aclnnGroupedMatmulFinalizeRoutingWeightNzV2(
 - 确定性计算：
 
   <!-- npu="A3,910b" id11 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：aclnnGroupedMatmulFinalizeRoutingWeightNzV2默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：aclnnGroupedMatmulFinalizeRoutingWeightNzV2默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
   <!-- end id11 -->
   <!-- npu="950" id12 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：aclnnGroupedMatmulFinalizeRoutingWeightNzV2默认非确定性实现，仅支持在输入x1和x2都是int8类型时，通过aclrtCtxSetSysParamOpt开启确定性。
+  - <term>Ascend 950PR&950DT系列产品</term>：aclnnGroupedMatmulFinalizeRoutingWeightNzV2默认非确定性实现，仅支持在输入x1和x2都是int8类型时，通过aclrtSetSysParamOpt开启确定性。
 
   <!-- end id12 -->
 

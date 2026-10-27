@@ -470,10 +470,10 @@ aclnnStatus aclnnGroupedMatmulFinalizeRoutingV3(
 - 确定性计算：
 
   <!-- npu="A3,910b" id11 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：aclnnGroupedMatmulFinalizeRoutingV3默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：aclnnGroupedMatmulFinalizeRoutingV3默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
   <!-- end id11 -->
   <!-- npu="950" id12 -->
-  - <term>Ascend 950PR&950DT系列产品</term> ：aclnnGroupedMatmulFinalizeRoutingV3默认非确定性实现，不支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - <term>Ascend 950PR&950DT系列产品</term> ：aclnnGroupedMatmulFinalizeRoutingV3默认非确定性实现，不支持通过aclrtSetSysParamOpt开启确定性。
 
   <!-- end id12 -->
 

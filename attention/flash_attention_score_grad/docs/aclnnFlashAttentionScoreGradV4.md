@@ -730,7 +730,7 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
 ## 约束说明<a name="1"></a>
 
 - 确定性计算：
-  - aclnnFlashAttentionScoreGradV4默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnFlashAttentionScoreGradV4默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 输入query、key、value、dy的约束如下：
   - B：batchsize必须相等。
   - inputLayout必须一致。

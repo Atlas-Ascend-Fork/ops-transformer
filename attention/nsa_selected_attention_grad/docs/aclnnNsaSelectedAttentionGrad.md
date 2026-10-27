@@ -418,7 +418,7 @@ aclnnStatus aclnnNsaSelectedAttentionGrad(
 ## 约束说明
 
 - 确定性计算：
-  - aclnnNsaSelectedAttentionGrad默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnNsaSelectedAttentionGrad默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 该接口与PyTorch配合使用时，需要保证CANN相关包与PyTorch相关包的版本匹配。
 - 输入query、key、value、attentionOut、attentionOutGrad的B（batchsize）必须相等。
 - 输入key、value的N（numHead）必须一致。

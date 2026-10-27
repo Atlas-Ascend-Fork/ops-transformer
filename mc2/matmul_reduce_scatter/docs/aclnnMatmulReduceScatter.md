@@ -326,12 +326,12 @@ aclnnStatus aclnnMatmulReduceScatter(
 - <term>Atlas A2系列产品</term>：
   - 支持2、4、8卡，并且仅支持hccs链路all mesh组网。
   - 一个模型中的通算融合MC2算子，仅支持相同通信域。
-  - aclnnMatmulReduceScatter默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnMatmulReduceScatter默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 <!-- end id10 -->
 <!-- npu="A3" id11 -->
 - <term>Atlas A3系列产品</term>：
   - 支持2、4、8、16、32卡，并且仅支持hccs链路double ring组网。
-  - aclnnMatmulReduceScatter默认非确定性实现，支持通过aclrtCtxSetSysParamOpt开启确定性。
+  - aclnnMatmulReduceScatter默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 <!-- end id11 -->
 <!-- npu="950" id12 -->
 - <term>Ascend 950PR&950DT系列产品</term>：支持2、4、8、16、32、64卡，并且仅支持hccs链路all mesh组网。
