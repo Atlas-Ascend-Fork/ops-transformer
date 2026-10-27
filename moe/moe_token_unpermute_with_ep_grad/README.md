@@ -125,7 +125,7 @@
     </tr>
     <tr>
       <td>probsGradOut</td>
-      <td>可选输出</td>
+      <td>输出</td>
       <td>输入probs的梯度，对应公式中的`probsGradOut`。</td>
       <td>FLOAT16、BFLOAT16、FLOAT32</td>
       <td>ND</td>
