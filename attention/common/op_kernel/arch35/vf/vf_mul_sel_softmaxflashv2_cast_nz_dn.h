@@ -1922,7 +1922,7 @@ __aicore__ inline void ProcessVec1DnCausal(
             x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, tmpExpSumUb, tmpMaxUb,
             indexesUb, 128, n, originN, scale, deScaleQK, minValue, keepProb, needAtten, dScale, blockStride,
             repeatStride, pScale, sinkValue);
-        uint32_t stride = 64 * n + n;
+        uint32_t stride = 64 * ubN + ubN;
         ProcessVec1DnCausalVF<T, T2, isUpdate, hasAtten, ubN, hasSink, hasInvalidLine>(
             x_exp + stride, input_x_local_UB + 64, exp_max_fp32, new_global_sum + 64, new_global_max + 64, maskUb + 16,
             tmpExpSumUb + 64, tmpMaxUb + 64, indexesUb, 128, n, originN, scale, deScaleQK, minValue, keepProb,
