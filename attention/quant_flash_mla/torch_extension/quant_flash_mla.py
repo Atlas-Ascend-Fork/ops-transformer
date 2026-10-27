@@ -173,11 +173,10 @@ def _check_metadata_parameters(
         max_seqlen_kv == -1 or max_seqlen_kv >= 1,
         lambda: f"max_seqlen_kv must be -1 or greater than 0, but got {max_seqlen_kv}",
     )
-    # max_seqlen_q 仅在 TND 下参与调度([1,16]); BSND/BNSD 的 s1 来自 q shape, 不校验上限
+    # max_seqlen_q 上限 16 对所有 layout 生效 (与主算子 SeqLenChecker/metadata aclnn 校验一致)
     torch._check(
-        max_seqlen_q == -1
-        or (max_seqlen_q >= 1 and (layout_q != "TND" or max_seqlen_q <= 16)),
-        lambda: f"max_seqlen_q must be -1 or greater than 0 (TND caps at 16), but got {max_seqlen_q}",
+        max_seqlen_q == -1 or (max_seqlen_q >= 1 and max_seqlen_q <= 16),
+        lambda: f"max_seqlen_q must be -1 or in range [1, 16], but got {max_seqlen_q}",
     )
     _check_int32_1d("cache_seqlens", cache_seqlens)
     batch_size = cache_seqlens.numel()
@@ -187,14 +186,16 @@ def _check_metadata_parameters(
             cu_seqlens_q.numel() == batch_size + 1,
             lambda: f"cu_seqlens_q shape must be (B+1,), but got {tuple(cu_seqlens_q.shape)} for B={batch_size}",
         )
-        torch._check(
-            seqused_q is not None or max_seqlen_q > 0,
-            lambda: "When layout_q is TND, at least one of seqused_q or max_seqlen_q must be provided",
-        )
+        # TND 由 cu_seqlens_q 提供精确 Q 长度, 不强制 seqused_q/max_seqlen_q
     else:
         torch._check(
             cu_seqlens_q is None,
             lambda: "cu_seqlens_q is only supported when layout_q is TND",
+        )
+        # 非 TND (BSND/BNSD): seqused_q 与 max_seqlen_q 至少传入其一
+        torch._check(
+            seqused_q is not None or max_seqlen_q > 0,
+            lambda: "When layout_q is not TND, at least one of seqused_q or max_seqlen_q must be provided",
         )
     if seqused_q is not None:
         _check_int32_1d("seqused_q", seqused_q)
@@ -290,9 +291,53 @@ class QuantFlashMlaOpBuilder(OpBuilder):
                 lambda: f"q must have at least 2 dimensions, but got {q.dim()}D",
             )
             torch._check(head_dim_v is not None, lambda: "head_dim_v must be provided")
-            t_size, n_size = q.size(0), q.size(1)
-            softmax_out_size = (n_size, t_size) if return_softmax_lse else (0,)
-            attention_out_size = (t_size, n_size, head_dim_v)
+            # 形状推导与 csrc/quant_flash_mla.cpp 运行时保持同一套 layout_q/layout_out 分支
+            layout_q_str = str(layout_q).upper() if layout_q else "TND"
+            layout_out_str = str(layout_out).upper() if layout_out else "TND"
+            # q/out 配对约束与 host 侧 CommonChecker::CheckLayoutPairConsistency 一致:
+            # 仅支持 BSND->BSND / BNSD->BNSD / TND->TND / TND->NTD (TND_NTD)
+            torch._check(
+                (layout_q_str == "TND" and layout_out_str in ("TND", "NTD"))
+                or (layout_q_str == "BSND" and layout_out_str == "BSND")
+                or (layout_q_str == "BNSD" and layout_out_str == "BNSD"),
+                lambda: (
+                    "layout_q and layout_out must be one of BSND->BSND, BNSD->BNSD, "
+                    f"TND->TND, TND->NTD (TND_NTD), but got {layout_q}->{layout_out}"
+                ),
+            )
+            if layout_q_str == "TND":
+                t_size, n_size = q.size(0), q.size(1)
+                if cu_seqlens_q is not None and cu_seqlens_q.dim() > 0:
+                    b_size = cu_seqlens_q.size(0) - 1
+                else:
+                    b_size = cache_seqlens.size(0) if cache_seqlens.dim() > 0 else 1
+                s_size = (
+                    max_seqlen_q if max_seqlen_q is not None and max_seqlen_q > 0 else 0
+                )
+            elif layout_q_str == "BSND":
+                b_size, s_size, n_size = q.size(0), q.size(1), q.size(2)
+                t_size = 0
+            else:  # BNSD
+                b_size, n_size, s_size = q.size(0), q.size(1), q.size(2)
+                t_size = 0
+            # lse: TND 输入为 (N, T), BSND/BNSD 输入为 (B, N, S)
+            if return_softmax_lse:
+                softmax_out_size = (
+                    (n_size, t_size)
+                    if layout_q_str == "TND"
+                    else (b_size, n_size, s_size)
+                )
+            else:
+                softmax_out_size = (0,)
+            # attn_out: BSND/BNSD 出 4D, TND/NTD 出 3D
+            if layout_out_str == "BSND":
+                attention_out_size = (b_size, s_size, n_size, head_dim_v)
+            elif layout_out_str == "BNSD":
+                attention_out_size = (b_size, n_size, s_size, head_dim_v)
+            elif layout_out_str == "TND":
+                attention_out_size = (t_size, n_size, head_dim_v)
+            else:  # NTD
+                attention_out_size = (n_size, t_size, head_dim_v)
 
             return (
                 torch.empty(attention_out_size, dtype=torch.bfloat16, device=q.device),

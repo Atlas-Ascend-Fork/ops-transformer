@@ -185,8 +185,8 @@ cann_ops_transformer.quant_flash_mla(
 | seqused_q | Tensor | 可选 | 指定每batch中实际使用的序列长度，截断冗余运算 | int32 | ND | (batch_size,) | × |
 | max_seqlen_q | int | 可选 | 指定查询q序列的长度上限 | int32 | - | - | - |
 | max_seqlen_kv | int | 可选 | 指定键k和值v序列的长度上限 | int32 | - | - | - |
-| head_dim_qk | int | 可选 | q/k的每个注意力头维度，默认值为576 | int32 | - | - | - |
-| head_dim_v | int | 可选 | v的每个注意力头维度，默认值为512 | int32 | - | - | - |
+| head_dim_qk | int | 可选 | q/k的每个注意力头维度，默认值为576，当前仅支持576 | int32 | - | - | - |
+| head_dim_v | int | 可选 | v的每个注意力头维度，默认值为512，当前仅支持512 | int32 | - | - | - |
 | mask_mode | int/MaskMode | 可选 | 掩码模式，支持传入枚举或对应 int 值，枚举定义见「mask_mode 枚举」 | int32 | - | - | - |
 | layout_q | string | 可选 | 定义输入q张量的布局格式 | string | - | - | - |
 
@@ -203,16 +203,16 @@ cann_ops_transformer.quant_flash_mla(
 | cu_seqlens_q | Tensor | 可选 | Q的累积序列长度，用于处理变长序列，第一个元素必须为0 | int32 | ND | (batch_size+1,) | × |
 | seqused_q | Tensor | 可选 | 指定每batch中实际使用的序列长度，截断冗余运算 | int32 | ND | (batch_size,) | × |
 | attn_mask | Tensor | 可选 | 掩码矩阵，仅在mask_mode为3（CAUSAL）时需要 | int8 | ND | (2048, 2048) | × |
-| metadata | Tensor | 可选 | `quant_flash_mla_metadata`生成的任务切分结果，传入后可优化调度 | int32 | ND | (2, max_schedule_size) | x |
+| metadata | Tensor | 可选 | `quant_flash_mla_metadata`生成的任务切分结果，传入后可优化调度 | int32 | ND | (2, max_schedule_size) | × |
 | quant_mode | int | 必选 | 量化模式，支持传入枚举或对应 int 值 | int32 | - | - | - |
 | head_dim_v | int | 可选 | v的每个注意力头维度，默认值为512，当前仅支持512 | int32 | - | - | - |
-| softmax_scale | float | 可选 | 可显式设置缩放因子。不传入时默认取 1/sqrt(headdim) | float32 | - | - | - |
+| softmax_scale | float | 可选 | 可显式设置缩放因子。不传入时默认取 1/sqrt(head_dim_qk) | float32 | - | - | - |
 | mask_mode | int/MaskMode | 可选 | 掩码模式，支持传入枚举或对应 int 值，枚举定义见「mask_mode 枚举」 | int32 | - | - | - |
 | max_seqlen_q | int | 可选 | 指定查询q序列的长度上限 | int32 | - | - | - |
 | max_seqlen_kv | int | 可选 | 指定键k和值v序列的长度上限 | int32 | - | - | - |
 | layout_q | string | 可选 | 定义输入q张量的布局格式 | string | - | - | - |
 | layout_kv | string | 可选 | 定义输入k_cache张量的布局格式 | string | - | - | - |
-| layout_out | string | 可选 | 定义输出attn_out张量的布局格式 | string | - | - | - |
+| layout_out | string | 可选 | 定义输出attn_out张量的布局格式；BSND/BNSD输入的输出必须同布局，TND输入可输出TND或NTD | string | - | - | - |
 | return_softmax_lse | bool | 可选 | 是否需要获取softmax的LSE结果 | BOOL | - | - | - |
 
 ## 返回值说明
@@ -221,7 +221,7 @@ cann_ops_transformer.quant_flash_mla(
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度 | 非连续Tensor |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| metadata | Tensor | 必选 | quant_flash_mla的任务切分数据 | int32 | ND | shape根据batch_size和num_heads_kv动态计算 | x |
+| metadata | Tensor | 必选 | quant_flash_mla的任务切分数据 | int32 | ND | shape根据batch_size和num_heads_kv动态计算 | × |
 
 ### quant_flash_mla
 
@@ -341,9 +341,9 @@ cann_ops_transformer.quant_flash_mla(
         </tr>
         <tr>
             <td>layout_q</td>
-            <td>支持BSND/BNSD/TND/TND_NTD</td>
+            <td>支持BSND/BNSD/TND</td>
             <td rowspan="3">当前不支持不传入，未传入将发出拦截报警</td>
-            <td rowspan="3">无</td>
+            <td rowspan="3">layout_q与layout_out的配对关系仅支持：BSND-&gt;BSND、BNSD-&gt;BNSD、TND-&gt;TND、TND-&gt;NTD</td>
             <td rowspan="3">无</td>
         </tr>
         <tr>
@@ -369,6 +369,14 @@ cann_ops_transformer.quant_flash_mla(
         </tr>
     </tbody>
     </table>
+
+- layout匹配关系表：
+
+    | layout_q | layout_kv | layout_out | layout_softmax_lse |
+    | :--- | :--- | :--- | :--- |
+    | BSND | PA_BBND、PA_BNBD、PA_NZ | BSND | (B, Q_N, Q_S) |
+    | BNSD | PA_BBND、PA_BNBD、PA_NZ | BNSD | (B, Q_N, Q_S) |
+    | TND | PA_BBND、PA_BNBD、PA_NZ | TND、NTD | (Q_N, Q_T) |
 
 #### 全量化参数组
 
@@ -589,7 +597,7 @@ mask_mode参数解释
             <td rowspan="4">无</td>
             <td>
                 <ul>
-                    <li>当layout_q为TND时，seqused_q与max_seqlen_q至少传入其中一个</li>
+                    <li>当layout_q不为TND时，seqused_q与max_seqlen_q至少传入其中一个</li>
                 </ul>
             </td>
         </tr>
@@ -615,13 +623,13 @@ mask_mode参数解释
             <td>
                 <ul>
                     <li>data_type支持int32</li>
-                    <li>值需 ≥ -1</li>
+                    <li>值需为-1，或[1,16]范围内的整数（传入时上限16对所有layout生效）</li>
                     <li>默认值为-1</li>
                 </ul>
             </td>
             <td>
                 <ul>
-                    <li>当layout_q为TND时与seqused_q至少传入其中一个</li>
+                    <li>当layout_q不为TND时与seqused_q至少传入其中一个</li>
                 </ul>
             </td>
         </tr>
@@ -678,8 +686,6 @@ mask_mode参数解释
             <td>
                 <ul>
                     <li>PA开启情况下，block_table必须不为空</li>
-                    <li>当layout_kv=PA_BNBD/PA_NZ时，k_cache仅支持0轴或0轴1轴非连续；当layout_kv=PA_BBND时，k_cache仅支持0轴非连续</li>
-                    <li>不支持v_cache传入</li>
                 </ul>
             </td>
         </tr>
@@ -716,6 +722,7 @@ mask_mode参数解释
                     <li>layout_kv=PA_BBND时，k_cache为(Bn, Bs, N, D)排布</li>
                     <li>layout_kv=PA_BNBD时，k_cache为(Bn, N, Bs, D)排布</li>
                     <li>layout_kv=PA_NZ时，k_cache为(Bn, N, D/32, Bs, 32)排布</li>
+                    <li>当layout_kv=PA_BNBD/PA_NZ时，k_cache仅支持0轴或0轴1轴非连续；当layout_kv=PA_BBND时，k_cache仅支持0轴非连续</li>
                 </ul>
             </td>
         </tr>

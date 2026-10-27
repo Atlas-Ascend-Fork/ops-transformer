@@ -37,7 +37,7 @@ private:
 
     // --- Feature: cu_seqlens_q 与 layout 关系 ---
     ge::graphStatus CheckCuSeqlensLayoutConsistency(const QfmlaTilingInfo& qfmlaInfo);
-    // --- Feature: TND 时 seqused_q 与 max_seqlen_q 至少传1个 ---
+    // --- Feature: 非 TND (BSND/BNSD) 时 seqused_q 与 max_seqlen_q 至少传1个 ---
     ge::graphStatus CheckSequsedMaxSeqlenAtLeastOne(const QfmlaTilingInfo& qfmlaInfo);
 };
 

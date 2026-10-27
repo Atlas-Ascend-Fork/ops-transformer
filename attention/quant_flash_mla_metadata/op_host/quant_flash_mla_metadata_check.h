@@ -47,8 +47,8 @@ private:
     // 校验 mask 参数组: maskMode 仅支持 0(NO_MASK)/3(CAUSAL)
     static inline aclnnStatus CheckMask(int64_t maskMode);
 
-    // 校验参数存在性: metadata/cache_seqlens必须传入; TND时必须传cu_seqlens_q且seqused_q与max_seqlen_q
-    // 至少提供其一; 非TND时不可传cu_seqlens_q
+    // 校验参数存在性: metadata/cache_seqlens必须传入; TND时必须传cu_seqlens_q; 非TND时不可传cu_seqlens_q
+    // 且seqused_q与max_seqlen_q至少提供其一
     static inline aclnnStatus CheckExistency(int64_t maxSeqlenQ, const char* layoutQ, const aclTensor* cacheSeqlens,
                                              const aclTensor* cuSeqlensQOptional, const aclTensor* sequsedQOptional,
                                              const aclTensor* metadata);
@@ -90,11 +90,10 @@ inline aclnnStatus QuantFlashMlaMetadataCheck::CheckBaseAttr(int64_t maxSeqlenQ,
     CHECK_COND(quantModeSet.count(quantMode) > 0, ACLNN_ERR_RUNTIME_ERROR,
                "quantMode only supports 1 (MLA_FP8_E4M3_FULLQUANT) or 0 (MLA_HIF8_FULLQUANT), but got %ld", quantMode);
 
-    // -1表示未传; 显式传入时序列长度必须大于0。Q侧当前最大支持16。
-    // 场景相关的存在性约束由 CheckExistency(特性交叉校验)负责: TND时与seqused_q至少传1个
-    const bool isTndLayout = (layoutQ != nullptr && strcmp(layoutQ, "TND") == 0);
-    CHECK_COND((maxSeqlenQ == -1 || (maxSeqlenQ >= 1 && (!isTndLayout || maxSeqlenQ <= 16))), ACLNN_ERR_RUNTIME_ERROR,
-               "maxSeqlenQ must be -1 or greater than 0 (TND caps at 16), but got %ld", maxSeqlenQ);
+    // -1表示未传; 显式传入时序列长度必须大于0, 上限16对所有layout生效。
+    // 场景相关的存在性约束由 CheckExistency(特性交叉校验)负责: 非TND时与seqused_q至少传1个
+    CHECK_COND((maxSeqlenQ == -1 || (maxSeqlenQ >= 1 && maxSeqlenQ <= 16)), ACLNN_ERR_RUNTIME_ERROR,
+               "maxSeqlenQ must be -1 or in range [1, 16], but got %ld", maxSeqlenQ);
     CHECK_COND((maxSeqlenKv == -1 || maxSeqlenKv >= 1), ACLNN_ERR_RUNTIME_ERROR,
                "maxSeqlenKv must be -1 or greater than 0, but got %ld", maxSeqlenKv);
 
@@ -148,15 +147,16 @@ inline aclnnStatus QuantFlashMlaMetadataCheck::CheckExistency(int64_t maxSeqlenQ
 
     if (strcmp(layoutQ, "TND") == 0) {
         // 文档约束: layout_q为TND时, cu_seqlens_q必须传入
+        // (TND由cu_seqlens_q提供精确Q长度, 不强制seqused_q/max_seqlen_q)
         CHECK_COND(IsTensorExist(cuSeqlensQOptional), ACLNN_ERR_RUNTIME_ERROR,
                    "When layoutQ is TND, cuSeqlensQOptional should be provided, but got null");
-        // 文档约束: layout_q为TND时, seqused_q与max_seqlen_q至少传入其中一个 (-1表示max_seqlen_q未传)
-        CHECK_COND(((maxSeqlenQ > 0) || IsTensorExist(sequsedQOptional)), ACLNN_ERR_RUNTIME_ERROR,
-                   "When layoutQ is TND, at least one of maxSeqlenQ or sequsedQOptional must be provided");
     } else {
         // 文档约束: layout_q不为TND时, cu_seqlens_q不支持传入
         CHECK_COND(!IsTensorExist(cuSeqlensQOptional), ACLNN_ERR_RUNTIME_ERROR,
                    "When layoutQ is not TND, cuSeqlensQOptional should not be provided, but got non-null");
+        // 文档约束: 非TND(BSND/BNSD)时, seqused_q与max_seqlen_q至少传入其中一个 (-1表示max_seqlen_q未传)
+        CHECK_COND(((maxSeqlenQ > 0) || IsTensorExist(sequsedQOptional)), ACLNN_ERR_RUNTIME_ERROR,
+                   "When layoutQ is not TND, at least one of maxSeqlenQ or sequsedQOptional must be provided");
     }
     return ACLNN_SUCCESS;
 }

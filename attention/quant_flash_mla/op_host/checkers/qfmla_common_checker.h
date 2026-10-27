@@ -50,6 +50,8 @@ private:
 
     // --- MultiPara: q/k_cache dtype 一致性 ---
     ge::graphStatus CheckDtypeConsistency(const QfmlaTilingInfo& qfmlaInfo);
+    // --- MultiPara: layout_q/layout_out 配对一致性 (仅支持 BSND->BSND/BNSD->BNSD/TND->TND/TND->NTD) ---
+    ge::graphStatus CheckLayoutPairConsistency(const QfmlaTilingInfo& qfmlaInfo);
 };
 
 } // namespace quant_flash_mla

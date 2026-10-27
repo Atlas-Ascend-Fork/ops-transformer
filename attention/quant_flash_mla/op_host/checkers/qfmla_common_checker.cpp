@@ -238,11 +238,11 @@ ge::graphStatus CommonChecker::CheckAxis(const QfmlaTilingInfo& qfmlaInfo)
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "q", std::to_string(qfmlaInfo.bSize).c_str(),
                                                       "Batch size must be >= 1"),
                 return ge::GRAPH_FAILED);
-    // Q_T 约束: >= 0
-    OP_CHECK_IF(qfmlaInfo.qTSize < 0,
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "q", std::to_string(qfmlaInfo.qTSize).c_str(),
-                                                      "Q_T must be >= 0"),
-                return ge::GRAPH_FAILED);
+    // Q_T 约束: > 0
+    OP_CHECK_IF(
+        qfmlaInfo.qTSize <= 0,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "q", std::to_string(qfmlaInfo.qTSize).c_str(), "Q_T must be > 0"),
+        return ge::GRAPH_FAILED);
     // k_cache D 维度校验: head_dim_qk=576
     const auto& kCacheShape = qfmlaInfo.opParamInfo.kCache.shape->GetStorageShape();
     int64_t kCacheD = 0;
@@ -364,7 +364,7 @@ ge::graphStatus CommonChecker::CheckFeature(const QfmlaTilingInfo& qfmlaInfo)
 }
 
 // ============================================================================
-// MultiPara — q/k_cache dtype 一致性
+// MultiPara — q/k_cache dtype 一致性、layout_q/layout_out 配对一致性
 // ============================================================================
 
 ge::graphStatus CommonChecker::CheckDtypeConsistency(const QfmlaTilingInfo& qfmlaInfo)
@@ -378,9 +378,28 @@ ge::graphStatus CommonChecker::CheckDtypeConsistency(const QfmlaTilingInfo& qfml
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus CommonChecker::CheckLayoutPairConsistency(const QfmlaTilingInfo& qfmlaInfo)
+{
+    const char* opName = qfmlaInfo.opName;
+    // layout_q 与 layout_out 配对一致性: 仅支持 4 种组合
+    // BSND->BSND / BNSD->BNSD / TND->TND / TND->NTD(即 TND_NTD, 下划线格式表示输入输出 layout)
+    const bool layoutPairValid =
+        (qfmlaInfo.layoutQ == QfmlaLayout::TND && qfmlaInfo.layoutOut == QfmlaOutLayout::TND) ||
+        (qfmlaInfo.layoutQ == QfmlaLayout::TND && qfmlaInfo.layoutOut == QfmlaOutLayout::NTD) ||
+        (qfmlaInfo.layoutQ == QfmlaLayout::BSND && qfmlaInfo.layoutOut == QfmlaOutLayout::BSND) ||
+        (qfmlaInfo.layoutQ == QfmlaLayout::BNSD && qfmlaInfo.layoutOut == QfmlaOutLayout::BNSD);
+    OP_CHECK_IF(!layoutPairValid,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    opName, "layout_out", "invalid",
+                    "layout_q and layout_out must be one of BSND->BSND, BNSD->BNSD, TND->TND, TND->NTD (TND_NTD)"),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus CommonChecker::CheckMultiPara(const QfmlaTilingInfo& qfmlaInfo)
 {
-    if (CheckDtypeConsistency(qfmlaInfo) != ge::GRAPH_SUCCESS) {
+    if (CheckDtypeConsistency(qfmlaInfo) != ge::GRAPH_SUCCESS ||
+        CheckLayoutPairConsistency(qfmlaInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;

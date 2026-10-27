@@ -53,9 +53,8 @@ ASCENDC_TPL_ARGS_DECL(QuantFlashMla,
 ASCENDC_TPL_SEL(
     // FP8
     ASCENDC_TPL_ARGS_SEL(
-        ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCENDC_TPL_UI_LIST, InOutLayoutType_TND_TND, InOutLayoutType_TND_BSND,
-                             InOutLayoutType_TND_BNSD, InOutLayoutType_TND_NTD, InOutLayoutType_BSND_BSND,
-                             InOutLayoutType_BNSD_BNSD),
+        ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCENDC_TPL_UI_LIST, InOutLayoutType_TND_TND, InOutLayoutType_TND_NTD,
+                             InOutLayoutType_BSND_BSND, InOutLayoutType_BNSD_BNSD),
         ASCENDC_TPL_UINT_SEL(Config, ASCENDC_TPL_UI_LIST, Config_S1Aligned64_S2Aligned256_DAligned576_DVAligned512),
         ASCENDC_TPL_UINT_SEL(QuantMode, ASCENDC_TPL_UI_LIST, QFMLA_MLA_FP8_E4M3_FULLQUANT, QFMLA_MLA_HIF8_FULLQUANT),
         ASCENDC_TPL_BOOL_SEL(HasAttenMask, false, true),

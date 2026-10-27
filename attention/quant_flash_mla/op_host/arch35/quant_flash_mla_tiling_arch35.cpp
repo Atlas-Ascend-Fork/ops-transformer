@@ -137,6 +137,7 @@ void QuantFlashMlaTilingFp8Impl::CalcNumBlocks(uint32_t aicNum)
 void QuantFlashMlaTilingFp8Impl::UpdateTilingKeyLayout()
 {
     // BSND/BNSD输入: 输出与输入同layout; TND输入: 输出layout由layout_out属性决定（kernel侧为编译期模板参数）
+    // 规格仅支持4种组合(BSND/BNSD/TND/TND_NTD), TND输入仅允许输出TND/NTD,
     if (qfmlaInfo_->layoutQ == QfmlaLayout::BSND) {
         tilingKeyInfo_.inputLayout = InOutLayoutType_BSND_BSND;
         return;
@@ -146,12 +147,6 @@ void QuantFlashMlaTilingFp8Impl::UpdateTilingKeyLayout()
         return;
     }
     switch (qfmlaInfo_->layoutOut) {
-        case QfmlaOutLayout::BSND:
-            tilingKeyInfo_.inputLayout = InOutLayoutType_TND_BSND;
-            break;
-        case QfmlaOutLayout::BNSD:
-            tilingKeyInfo_.inputLayout = InOutLayoutType_TND_BNSD;
-            break;
         case QfmlaOutLayout::NTD:
             tilingKeyInfo_.inputLayout = InOutLayoutType_TND_NTD;
             break;

@@ -135,12 +135,6 @@ void QuantFlashMlaTilingFp8Arch92Impl::UpdateTilingKeyLayout()
 {
     // MLA 输入固定TND layout, 输出layout由layout_out属性决定（kernel侧为编译期模板参数）
     switch (qfmlaInfo_->layoutOut) {
-        case QfmlaOutLayout::BSND:
-            tilingKeyInfo_.inputLayout = InOutLayoutType_TND_BSND;
-            break;
-        case QfmlaOutLayout::BNSD:
-            tilingKeyInfo_.inputLayout = InOutLayoutType_TND_BNSD;
-            break;
         case QfmlaOutLayout::NTD:
             tilingKeyInfo_.inputLayout = InOutLayoutType_TND_NTD;
             break;
