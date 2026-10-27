@@ -242,6 +242,46 @@ TEST_F(MhcPostBackwardOpapiUt, invalid_dtype_hRes)
     EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
 
+TEST_F(MhcPostBackwardOpapiUt, dtype_mismatch_gradOutput_x)
+{
+    // gradOutput is FP16 while x is BF16, should be rejected with 161002
+    auto tensorGradOutput = TensorDesc({1, 128, 4, 1024}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorX = TensorDesc({1, 128, 4, 1024}, ACL_BF16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorHRes = TensorDesc({1, 128, 4, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorHOut = TensorDesc({1, 128, 1024}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorHPost = TensorDesc({1, 128, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradX = TensorDesc({1, 128, 4, 1024}, ACL_BF16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradHRes = TensorDesc({1, 128, 4, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradHOut = TensorDesc({1, 128, 1024}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradHPost = TensorDesc({1, 128, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+
+    auto ut = OP_API_UT(aclnnMhcPostBackward, INPUT(tensorGradOutput, tensorX, tensorHRes, tensorHOut, tensorHPost),
+                        OUTPUT(tensorGradX, tensorGradHRes, tensorGradHOut, tensorGradHPost));
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(MhcPostBackwardOpapiUt, dtype_mismatch_gradOutput_hOut)
+{
+    // gradOutput is FP16 while hOut is BF16, should be rejected with 161002
+    auto tensorGradOutput = TensorDesc({1, 128, 4, 1024}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorX = TensorDesc({1, 128, 4, 1024}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorHRes = TensorDesc({1, 128, 4, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorHOut = TensorDesc({1, 128, 1024}, ACL_BF16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorHPost = TensorDesc({1, 128, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradX = TensorDesc({1, 128, 4, 1024}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradHRes = TensorDesc({1, 128, 4, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradHOut = TensorDesc({1, 128, 1024}, ACL_BF16, ACL_FORMAT_ND).ValueRange(-1, 1);
+    auto tensorGradHPost = TensorDesc({1, 128, 4}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(-1, 1);
+
+    auto ut = OP_API_UT(aclnnMhcPostBackward, INPUT(tensorGradOutput, tensorX, tensorHRes, tensorHOut, tensorHPost),
+                        OUTPUT(tensorGradX, tensorGradHRes, tensorGradHOut, tensorGradHPost));
+    uint64_t workspaceSize = 0;
+    aclnnStatus aclRet = ut.TestGetWorkspaceSize(&workspaceSize);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+}
+
 TEST_F(MhcPostBackwardOpapiUt, invalid_shape_gradOutput_dim0)
 {
     auto tensorGradOutput = TensorDesc({2, 128, 4, 1024}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-1, 1);

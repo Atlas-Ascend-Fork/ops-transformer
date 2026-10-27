@@ -88,13 +88,17 @@ static aclnnStatus CheckDtype(const MhcPostBackwardParams& params)
     OP_CHECK_DTYPE_NOT_SUPPORT(params.gradOutput, SupportDtypeList, return ACLNN_ERR_PARAM_INVALID);
     OP_CHECK_DTYPE_NOT_SUPPORT(params.x, SupportDtypeList, return ACLNN_ERR_PARAM_INVALID);
 
+    // x: must be same as gradOutput
+    OP_CHECK_DTYPE_NOT_SAME(params.gradOutput, params.x, return ACLNN_ERR_PARAM_INVALID);
+
     // hRes: FP32 only (optional, skip check when nullptr)
     if (params.hRes != nullptr) {
         OP_CHECK_DTYPE_NOT_MATCH(params.hRes, op::DataType::DT_FLOAT, return ACLNN_ERR_PARAM_INVALID);
     }
 
-    // hOut: FP16 or BF16
+    // hOut: FP16 or BF16, must be same as gradOutput
     OP_CHECK_DTYPE_NOT_SUPPORT(params.hOut, SupportDtypeList, return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK_DTYPE_NOT_SAME(params.gradOutput, params.hOut, return ACLNN_ERR_PARAM_INVALID);
 
     // hPost: FP32 only
     OP_CHECK_DTYPE_NOT_MATCH(params.hPost, op::DataType::DT_FLOAT, return ACLNN_ERR_PARAM_INVALID);
