@@ -533,3 +533,94 @@ TEST_F(l2_causal_conv1d_update_test, Ascend950_update_2d_varlen_non_contiguous)
     aclnnStatus ret = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
     EXPECT_EQ(ret, ACLNN_SUCCESS);
 }
+
+// weight、biasOptional、queryStartLocOptional、cacheIndicesOptional、numAcceptedTokensOptional
+// 等输入不支持非连续，传入非连续tensor时第一段接口应拦截并报错。
+TEST_F(l2_causal_conv1d_update_test, Ascend950_update_weight_non_contiguous)
+{
+    auto x = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto weight = TensorDesc({4, 512}, ACL_FLOAT16, ACL_FORMAT_ND, {1024, 1}).ValueRange(-10, 10);
+    auto convStates = TensorDesc({4, 4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto y = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND);
+    const char* activation = "silu";
+    auto ut = OP_API_UT(aclnnCausalConv1dUpdate,
+                        INPUT(x, weight, convStates, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, activation,
+                              (int64_t)0, (int64_t)-1),
+                        OUTPUT(y));
+    uint64_t workspaceSize = 0;
+    aclOpExecutor* executor = nullptr;
+    aclnnStatus ret = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
+    EXPECT_EQ(ret, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(l2_causal_conv1d_update_test, Ascend950_update_bias_non_contiguous)
+{
+    auto x = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto weight = TensorDesc({4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto convStates = TensorDesc({4, 4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto bias = TensorDesc({512}, ACL_FLOAT16, ACL_FORMAT_ND, {2}).ValueRange(-10, 10);
+    auto y = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND);
+    const char* activation = "silu";
+    auto ut = OP_API_UT(aclnnCausalConv1dUpdate,
+                        INPUT(x, weight, convStates, bias, nullptr, nullptr, nullptr, nullptr, nullptr, activation,
+                              (int64_t)0, (int64_t)-1),
+                        OUTPUT(y));
+    uint64_t workspaceSize = 0;
+    aclOpExecutor* executor = nullptr;
+    aclnnStatus ret = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
+    EXPECT_EQ(ret, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(l2_causal_conv1d_update_test, Ascend950_update_queryStartLoc_non_contiguous)
+{
+    auto x = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto weight = TensorDesc({4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto convStates = TensorDesc({4, 4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto queryStartLoc = TensorDesc({5}, ACL_INT32, ACL_FORMAT_ND, {2}).ValueRange(0, 4);
+    auto y = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND);
+    const char* activation = "silu";
+    auto ut = OP_API_UT(aclnnCausalConv1dUpdate,
+                        INPUT(x, weight, convStates, nullptr, queryStartLoc, nullptr, nullptr, nullptr, nullptr,
+                              activation, (int64_t)0, (int64_t)-1),
+                        OUTPUT(y));
+    uint64_t workspaceSize = 0;
+    aclOpExecutor* executor = nullptr;
+    aclnnStatus ret = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
+    EXPECT_EQ(ret, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(l2_causal_conv1d_update_test, Ascend950_update_cacheIndices_non_contiguous)
+{
+    auto x = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto weight = TensorDesc({4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto convStates = TensorDesc({4, 4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto cacheIndices = TensorDesc({4}, ACL_INT32, ACL_FORMAT_ND, {2}).ValueRange(0, 4);
+    auto y = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND);
+    const char* activation = "silu";
+    auto ut = OP_API_UT(aclnnCausalConv1dUpdate,
+                        INPUT(x, weight, convStates, nullptr, nullptr, cacheIndices, nullptr, nullptr, nullptr,
+                              activation, (int64_t)0, (int64_t)-1),
+                        OUTPUT(y));
+    uint64_t workspaceSize = 0;
+    aclOpExecutor* executor = nullptr;
+    aclnnStatus ret = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
+    EXPECT_EQ(ret, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(l2_causal_conv1d_update_test, Ascend950_update_numAcceptedTokens_non_contiguous)
+{
+    auto x = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto weight = TensorDesc({4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto convStates = TensorDesc({4, 4, 512}, ACL_FLOAT16, ACL_FORMAT_ND).ValueRange(-10, 10);
+    auto numAcceptedTokens = TensorDesc({4}, ACL_INT32, ACL_FORMAT_ND, {2}).ValueRange(0, 3);
+    auto y = TensorDesc({4, 1, 512}, ACL_FLOAT16, ACL_FORMAT_ND);
+    const char* activation = "silu";
+    auto ut = OP_API_UT(aclnnCausalConv1dUpdate,
+                        INPUT(x, weight, convStates, nullptr, nullptr, nullptr, numAcceptedTokens, nullptr, nullptr,
+                              activation, (int64_t)0, (int64_t)-1),
+                        OUTPUT(y));
+    uint64_t workspaceSize = 0;
+    aclOpExecutor* executor = nullptr;
+    aclnnStatus ret = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
+    EXPECT_EQ(ret, ACLNN_ERR_PARAM_INVALID);
+}

@@ -266,6 +266,32 @@ static bool CheckOutputShape(const aclTensor* x, const aclTensor* y)
     return true;
 }
 
+static bool CheckTensorContiguous(const aclTensor* tensor, const char* tensorName)
+{
+    if (tensor != nullptr && !IsContiguous(tensor)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "%s must be contiguous, but got shape %s and strides %s.", tensorName,
+                op::ToString(tensor->GetViewShape()).GetString(), op::ToString(tensor->GetViewStrides()).GetString());
+        return false;
+    }
+    return true;
+}
+
+static bool CheckContiguous(const aclTensor* weight, const aclTensor* biasOptional,
+                            const aclTensor* queryStartLocOptional, const aclTensor* cacheIndicesOptional,
+                            const aclTensor* numAcceptedTokensOptional,
+                            const aclTensor* blockIdxLastScheduledTokenOptional,
+                            const aclTensor* initialStateIdxOptional)
+{
+    CHECK_RET(CheckTensorContiguous(weight, "weight"), false);
+    CHECK_RET(CheckTensorContiguous(biasOptional, "biasOptional"), false);
+    CHECK_RET(CheckTensorContiguous(queryStartLocOptional, "queryStartLocOptional"), false);
+    CHECK_RET(CheckTensorContiguous(cacheIndicesOptional, "cacheIndicesOptional"), false);
+    CHECK_RET(CheckTensorContiguous(numAcceptedTokensOptional, "numAcceptedTokensOptional"), false);
+    CHECK_RET(CheckTensorContiguous(blockIdxLastScheduledTokenOptional, "blockIdxLastScheduledTokenOptional"), false);
+    CHECK_RET(CheckTensorContiguous(initialStateIdxOptional, "initialStateIdxOptional"), false);
+    return true;
+}
+
 static bool CheckShape(const aclTensor* x, const aclTensor* weight, const aclTensor* convStatesRef,
                        const aclTensor* queryStartLocOptional, const aclTensor* numAcceptedTokensOptional,
                        const aclTensor* y)
@@ -303,6 +329,10 @@ aclnnStatus CausalConv1dUpdateCommonProcess(const aclTensor* x, const aclTensor*
               ACLNN_ERR_PARAM_INVALID);
 
     CHECK_RET(CheckShape(x, weight, convStatesRef, queryStartLocOptional, numAcceptedTokensOptional, y),
+              ACLNN_ERR_PARAM_INVALID);
+
+    CHECK_RET(CheckContiguous(weight, biasOptional, queryStartLocOptional, cacheIndicesOptional,
+                              numAcceptedTokensOptional, blockIdxLastScheduledTokenOptional, initialStateIdxOptional),
               ACLNN_ERR_PARAM_INVALID);
 
     const aclTensor* xFinal = l0op::Contiguous(x, uniqueExecutor.get());
