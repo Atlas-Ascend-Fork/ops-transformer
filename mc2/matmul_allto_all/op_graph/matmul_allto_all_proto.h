@@ -10,7 +10,7 @@
 
 /*!
  * \file matmul_allto_all_proto.h
- * \brief 图模式原型定义
+ * \brief Graph mode prototype definition
  */
 #ifndef MATMUL_ALLTO_ALL_PROTO_H
 #define MATMUL_ALLTO_ALL_PROTO_H
@@ -38,13 +38,14 @@ namespace ge {
  * @li group: A string. Communication domain identifier.
  * @li world_size: An int.
  * @li all2all_axes: An ListInt. Indicate the data direction for All2All communication. Default: {-1, -2}.
- * @li y_dtype: An int. Declare the output dtype. Default: static_cast<int64_t>(ge::DT_UNDEFINED) 为28.
+ * @li y_dtype: An int. Declare the output dtype. Default: static_cast<int64_t>(ge::DT_UNDEFINED), which equals 28.
  * @li x1_quant_mode: An int. Quantization mode of x1, which support 0(non-quant), 3(pertoken-quant), 6(mx-quant).
  * Default: 0.
  * @li x2_quant_mode: An int. Quantization mode of x2, which support 0(non-quant), 2(perchannel-quant), 6(mx-quant).
  * Default: 0.
  * @li comm_quant_mode: An int. Quantitative types for communication. Default: 0.
- * @li comm_quant_dtype: An int. Communication accuracy. Default: static_cast<int64_t>(ge::DT_UNDEFINED) 为28.
+ * @li comm_quant_dtype: An int. Communication accuracy. Default: static_cast<int64_t>(ge::DT_UNDEFINED), which
+ * equals 28.
  * @li transpose_x1: A bool. Whether x1 is transposed. Default: false.
  * @li transpose_x2: A bool. Whether x2 is transposed. Default: false.
  * @li group_size: An int. Default: 0.
