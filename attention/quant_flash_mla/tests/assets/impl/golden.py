@@ -191,9 +191,15 @@ def _set_golden_globals(
             synthesis_seqused_q_vals = candidate
     if synthesis_seqused_q_vals is None:
         batch_for_synthesis = max(int(B), 1)
-        total_q = (
-            q_shape[0] if len(q_shape) == 3 and q_shape[0] > 0 else batch_for_synthesis
-        )
+        # 4D q 从 S 维推导 total_q: BSND=(B,S,N,D)取shape[1], BNSD=(B,N,S,D)取shape[2];
+        # 3D q 为 TND (T,N,D), total_q=T=shape[0] (与 inputs.py 同步)
+        if len(q_shape) == 4 and q_shape[0] > 0:
+            s_dim = q_shape[2] if str(layout_q).upper() == "BNSD" else q_shape[1]
+            total_q = batch_for_synthesis * s_dim if s_dim > 0 else batch_for_synthesis
+        elif len(q_shape) == 3 and q_shape[0] > 0:
+            total_q = q_shape[0]
+        else:
+            total_q = batch_for_synthesis
         base, extra = divmod(total_q, batch_for_synthesis)
         synthesis_seqused_q_vals = [
             base + (1 if i < extra else 0) for i in range(batch_for_synthesis)
@@ -553,6 +559,11 @@ def cpu_qfmla(
     )
 
     # ---- 3. Call CPU golden ----
+    golden_seqused = (
+        list(cfg["seqused_q_vals"])
+        if cfg["seqused_q_vals"]
+        else list(golden_mod.SEQUSED_Q)
+    )
     result_bnsd, lse_bnsd = golden_mod.cpu_fp8_fullquant_mla_golden(
         q_fp8,
         k_fp8,
@@ -561,7 +572,9 @@ def cpu_qfmla(
         deq_k,
         deq_v,
         p_scale_t,
-        list(cfg["seqused_q_vals"]),
+        # seqused_q 用原始值; CSV 未提供 (BSND/BNSD decode 场景 seqused_q_values=[])
+        # 时退回 synthesis 值 (q_lens 用于 padding mask, S=1 全有效行)
+        golden_seqused,
         list(cfg["cache_seqlens_vals"]),
         qr_bf16=qr_bf16,
         kr_bf16=kr_bf16,
@@ -581,7 +594,7 @@ def cpu_qfmla(
         q,
         cfg,
         kwargs,
-        cfg["seqused_q_vals"],
+        golden_seqused,
         return_softmax_lse,
         layout_q,
         to_bf16=True,
@@ -600,7 +613,7 @@ def cpu_qfmla(
         cfg,
         kwargs,
         q,
-        cfg["seqused_q_vals"],
+        golden_seqused,
         return_softmax_lse,
         layout_q,
         (q_fp8, k_fp8, v_fp8, deq_q, deq_k, deq_v),

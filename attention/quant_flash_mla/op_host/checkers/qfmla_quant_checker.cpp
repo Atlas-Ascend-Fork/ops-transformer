@@ -34,12 +34,9 @@ using namespace Ops::Base;
 
 ge::graphStatus QuantChecker::CheckSingleParaQuantMode(const QfmlaTilingInfo& qfmlaInfo)
 {
-    // quant_mode: 当前仅支持 1 (MLA_FP8_E4M3_FULLQUANT), 不支持 0 (HIF8)
-    OP_CHECK_IF(qfmlaInfo.quantMode != QfmlaQuantMode::MLA_FP8_E4M3_FULLQUANT,
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                    qfmlaInfo.opName, "quant_mode", std::to_string(static_cast<int64_t>(qfmlaInfo.quantMode)).c_str(),
-                    "quant_mode must be 1 (MLA_FP8_E4M3_FULLQUANT), HIF8 (quant_mode=0) is not supported"),
-                return ge::GRAPH_FAILED);
+    // quant_mode: 支持 1 (MLA_FP8_E4M3_FULLQUANT) 与 0 (MLA_HIF8_FULLQUANT)
+    // (取值合法性已在 parser 中校验, q/k dtype 匹配在 CommonChecker::CheckSingleParaDtype 中校验)
+    (void)qfmlaInfo;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -120,18 +117,48 @@ ge::graphStatus QuantChecker::CheckFeature(const QfmlaTilingInfo& qfmlaInfo)
 ge::graphStatus QuantChecker::CheckQDescaleShape(const QfmlaTilingInfo& qfmlaInfo)
 {
     const char* opName = qfmlaInfo.opName;
-    // TND 时 q_descale shape 为 (Q_T, Q_N)
+    // q_descale shape: TND->(Q_T, Q_N), BSND->(B, Q_S, Q_N), BNSD->(B, Q_N, Q_S)
     const auto& qDescaleShape = qfmlaInfo.opParamInfo.qDescale.shape->GetStorageShape();
-    OP_CHECK_IF(qDescaleShape.GetDimNum() != 2,
-                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(opName, Q_DESCALE_NAME,
-                                                         (std::to_string(qDescaleShape.GetDimNum()) + "D").c_str(),
-                                                         "The shape dim of q_descale must be 2D when layout_q is TND"),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF(static_cast<int64_t>(qDescaleShape.GetDim(0)) != qfmlaInfo.qTSize ||
-                    static_cast<int64_t>(qDescaleShape.GetDim(1)) != qfmlaInfo.n1Size,
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName, Q_DESCALE_NAME, ToString(qDescaleShape).c_str(),
-                                                      "The shape of q_descale must be (Q_T, Q_N) when layout_q is TND"),
-                return ge::GRAPH_FAILED);
+    if (qfmlaInfo.layoutQ == QfmlaLayout::BSND) {
+        OP_CHECK_IF(qDescaleShape.GetDimNum() != 3,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                        opName, Q_DESCALE_NAME, (std::to_string(qDescaleShape.GetDimNum()) + "D").c_str(),
+                        "The shape dim of q_descale must be 3D when layout_q is BSND"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            static_cast<int64_t>(qDescaleShape.GetDim(0)) != qfmlaInfo.bSize ||
+                static_cast<int64_t>(qDescaleShape.GetDim(1)) != qfmlaInfo.s1Size ||
+                static_cast<int64_t>(qDescaleShape.GetDim(2)) != qfmlaInfo.n1Size,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName, Q_DESCALE_NAME, ToString(qDescaleShape).c_str(),
+                                                  "The shape of q_descale must be (B, Q_S, Q_N) when layout_q is BSND"),
+            return ge::GRAPH_FAILED);
+    } else if (qfmlaInfo.layoutQ == QfmlaLayout::BNSD) {
+        OP_CHECK_IF(qDescaleShape.GetDimNum() != 3,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                        opName, Q_DESCALE_NAME, (std::to_string(qDescaleShape.GetDimNum()) + "D").c_str(),
+                        "The shape dim of q_descale must be 3D when layout_q is BNSD"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            static_cast<int64_t>(qDescaleShape.GetDim(0)) != qfmlaInfo.bSize ||
+                static_cast<int64_t>(qDescaleShape.GetDim(1)) != qfmlaInfo.n1Size ||
+                static_cast<int64_t>(qDescaleShape.GetDim(2)) != qfmlaInfo.s1Size,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName, Q_DESCALE_NAME, ToString(qDescaleShape).c_str(),
+                                                  "The shape of q_descale must be (B, Q_N, Q_S) when layout_q is BNSD"),
+            return ge::GRAPH_FAILED);
+    } else {
+        // TND 时 q_descale shape 为 (Q_T, Q_N)
+        OP_CHECK_IF(qDescaleShape.GetDimNum() != 2,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                        opName, Q_DESCALE_NAME, (std::to_string(qDescaleShape.GetDimNum()) + "D").c_str(),
+                        "The shape dim of q_descale must be 2D when layout_q is TND"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            static_cast<int64_t>(qDescaleShape.GetDim(0)) != qfmlaInfo.qTSize ||
+                static_cast<int64_t>(qDescaleShape.GetDim(1)) != qfmlaInfo.n1Size,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName, Q_DESCALE_NAME, ToString(qDescaleShape).c_str(),
+                                                  "The shape of q_descale must be (Q_T, Q_N) when layout_q is TND"),
+            return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 

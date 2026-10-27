@@ -199,7 +199,7 @@ cann_ops_transformer.quant_flash_mla(
 | q_descale | Tensor | 必选 | q的反量化scale，per-token-head动态量化 | float32 | ND | <ul><li>(B, Q_S, Q_N)</li><li>(B, Q_N, Q_S)</li><li>(Q_T, Q_N)</li></ul> | × |
 | k_descale | Tensor | 必选 | k的反量化scale，per-tensor静态量化 | float32 | ND | (1,) | × |
 | block_table | Tensor | 必选 | 用于分块注意力计算中的块索引映射 | int32 | ND | (B, Bn) | × |
-| cache_seqlens | Tensor | 必选 | 每个batch的KV序列长度。当layout_q为TND时，为各batch序列长度的累积序列长度 | int32 | ND | (batch_size,) | × |
+| cache_seqlens | Tensor | 必选 | 每个batch的KV序列长度 | int32 | ND | (batch_size,) | × |
 | cu_seqlens_q | Tensor | 可选 | Q的累积序列长度，用于处理变长序列，第一个元素必须为0 | int32 | ND | (batch_size+1,) | × |
 | seqused_q | Tensor | 可选 | 指定每batch中实际使用的序列长度，截断冗余运算 | int32 | ND | (batch_size,) | × |
 | attn_mask | Tensor | 可选 | 掩码矩阵，仅在mask_mode为3（CAUSAL）时需要 | int8 | ND | (2048, 2048) | × |
@@ -791,25 +791,26 @@ mask_mode参数解释
     KV_N = 1
     head_dim_qk = 576
     head_dim_v = 512
-    pa_block_size = 512
+    pa_block_size = 128
 
     # TND排布，Q_T为各batch序列长度累加和
     Q_T = B * Q_S
     num_blocks_per_seq = 1
     total_blocks = num_blocks_per_seq * B
 
-    q = torch.randn(Q_T, Q_N, head_dim_qk, dtype=dtype, device="npu")
-    k_cache = torch.randn(total_blocks, KV_N, pa_block_size, head_dim_qk, dtype=dtype, device="npu")
+    # NPU 不支持直接随机初始化 fp8 张量，先按 bf16 生成再转换为目标 dtype
+    q = torch.randn(Q_T, Q_N, head_dim_qk, dtype=torch.bfloat16, device="npu").to(dtype)
+    k_cache = torch.randn(total_blocks, KV_N, pa_block_size, head_dim_qk, dtype=torch.bfloat16, device="npu").to(dtype)
 
     # descale：q为per-token-head动态量化，k为per-tensor静态量化
-    q_descale = torch.randn(Q_T, Q_N, dtype=torch.float32, device="npu")
-    k_descale = torch.randn(1, dtype=torch.float32, device="npu")
+    q_descale = torch.rand(Q_T, Q_N, dtype=torch.float32, device="npu")
+    k_descale = torch.rand(1, dtype=torch.float32, device="npu")
 
     # block_table
     block_table = torch.arange(total_blocks, dtype=torch.int32, device="npu").reshape(B, num_blocks_per_seq)
 
-    # cache_seqlens：layout_q为TND时，为各batch序列长度的累积序列长度
-    cache_seqlens = torch.tensor([pa_block_size, pa_block_size * 2], dtype=torch.int32, device="npu")
+    # cache_seqlens：每个 batch 的 KV 序列长度
+    cache_seqlens = torch.tensor([pa_block_size, pa_block_size], dtype=torch.int32, device="npu")
 
     # 累计序列长度（带前导0）
     cu_seqlens_q = torch.tensor([0, Q_S, Q_S * 2], dtype=torch.int32, device="npu")
@@ -847,7 +848,7 @@ mask_mode参数解释
         return_softmax_lse=False,
     )
     torch_npu.npu.synchronize()
-    assert attn_out.shape == (Q_T, Q_N, head_dim_qk)
+    assert attn_out.shape == (Q_T, Q_N, head_dim_v)
     assert attn_out.dtype == out_dtype
     assert torch.isfinite(attn_out.float()).all().item()
     ```

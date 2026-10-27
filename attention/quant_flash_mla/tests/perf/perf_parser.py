@@ -14,7 +14,7 @@
 """op_summary CSV 解析(最小版, 抽取自 ops-transformer-testkit core/parser.py)。
 
 按 OP Type 过滤目标算子的 (start_time, duration) 条目;
-热启动统计: 丢弃第一次(预热), 其余取均值。
+默认对全部条目取均值, 可选丢弃第一次(预热)后取均值。
 """
 
 import csv
@@ -38,11 +38,9 @@ def parse_op_summary(csv_path, op_type: str = OP_TYPE) -> List[Tuple[float, floa
     return entries
 
 
-def compute_hot_avg(durations: List[float]) -> float:
-    """热启动: 丢弃第一次(预热), 其余取均值; 只有一条时直接返回。"""
+def compute_hot_avg(durations: List[float], discard_first: bool = False) -> float:
+    """取均值; discard_first=True 时丢弃第一次(预热), 其余取均值。"""
     if not durations:
         return -1.0
-    if len(durations) > 1:
-        keep = durations[1:]
-        return sum(keep) / len(keep)
-    return durations[0]
+    keep = durations[1:] if discard_first and len(durations) > 1 else durations
+    return sum(keep) / len(keep)

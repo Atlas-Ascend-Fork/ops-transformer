@@ -72,8 +72,10 @@ __aicore__ inline constexpr GmFormat GetQueryGmFormat()
 template <LayOutTypeEnum LAYOUT, bool useDn = false, bool isPerTokenHead = false, bool isMlaFullQuant = false>
 __aicore__ inline constexpr GmFormat GetQueryScaleGmFormat()
 {
-    if constexpr (LAYOUT == LayOutTypeEnum::LAYOUT_BSH || LAYOUT == LayOutTypeEnum::LAYOUT_BNSD) {
-        return GmFormat::BNGSD;
+    if constexpr (LAYOUT == LayOutTypeEnum::LAYOUT_BSH) {
+        return GmFormat::BSNGD; // BSND输入: descale[B,S,N1], S1G序
+    } else if constexpr (LAYOUT == LayOutTypeEnum::LAYOUT_BNSD) {
+        return GmFormat::BNGSD; // BNSD输入: descale[B,N1,S], GS1序
     } else if constexpr (LAYOUT == LayOutTypeEnum::LAYOUT_TND || LAYOUT == LayOutTypeEnum::LAYOUT_NTD) {
         if constexpr (isMlaFullQuant) {
             return GmFormat::TNG;

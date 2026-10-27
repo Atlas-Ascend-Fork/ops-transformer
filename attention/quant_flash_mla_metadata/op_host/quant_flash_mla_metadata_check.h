@@ -39,7 +39,7 @@ private:
 
     // 校验基础属性: maxSeqlen / numHeads / headDim / quantMode / layout
     // 文档约束: num_heads_kv仅支持1(MLA KV_N=1); head_dim_qk仅支持576; head_dim_v仅支持512;
-    // quantMode当前仅支持1(FP8_E4M3), layout_q仅支持TND
+    // quantMode支持1(FP8_E4M3)/0(HIFLOAT8); layout_q支持TND/BSND/BNSD(与主算子一致)
     static inline aclnnStatus CheckBaseAttr(int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ,
                                             int64_t numHeadsKv, int64_t headDimQk, int64_t headDimV, int64_t quantMode,
                                             const char* layoutQ);
@@ -85,13 +85,16 @@ inline aclnnStatus QuantFlashMlaMetadataCheck::CheckBaseAttr(int64_t maxSeqlenQ,
                                                              int64_t quantMode, const char* layoutQ)
 {
     constexpr int64_t MLA_FP8_E4M3_FULLQUANT = 1;
-    CHECK_COND(quantMode == MLA_FP8_E4M3_FULLQUANT, ACLNN_ERR_RUNTIME_ERROR,
-               "quantMode only supports 1 (MLA_FP8_E4M3_FULLQUANT), but got %ld", quantMode);
+    constexpr int64_t MLA_HIF8_FULLQUANT = 0;
+    static const std::unordered_set<int64_t> quantModeSet = {MLA_FP8_E4M3_FULLQUANT, MLA_HIF8_FULLQUANT};
+    CHECK_COND(quantModeSet.count(quantMode) > 0, ACLNN_ERR_RUNTIME_ERROR,
+               "quantMode only supports 1 (MLA_FP8_E4M3_FULLQUANT) or 0 (MLA_HIF8_FULLQUANT), but got %ld", quantMode);
 
     // -1表示未传; 显式传入时序列长度必须大于0。Q侧当前最大支持16。
     // 场景相关的存在性约束由 CheckExistency(特性交叉校验)负责: TND时与seqused_q至少传1个
-    CHECK_COND((maxSeqlenQ == -1 || (maxSeqlenQ >= 1 && maxSeqlenQ <= 16)), ACLNN_ERR_RUNTIME_ERROR,
-               "maxSeqlenQ must be -1 or in [1, 16], but got %ld", maxSeqlenQ);
+    const bool isTndLayout = (layoutQ != nullptr && strcmp(layoutQ, "TND") == 0);
+    CHECK_COND((maxSeqlenQ == -1 || (maxSeqlenQ >= 1 && (!isTndLayout || maxSeqlenQ <= 16))), ACLNN_ERR_RUNTIME_ERROR,
+               "maxSeqlenQ must be -1 or greater than 0 (TND caps at 16), but got %ld", maxSeqlenQ);
     CHECK_COND((maxSeqlenKv == -1 || maxSeqlenKv >= 1), ACLNN_ERR_RUNTIME_ERROR,
                "maxSeqlenKv must be -1 or greater than 0, but got %ld", maxSeqlenKv);
 
@@ -107,7 +110,9 @@ inline aclnnStatus QuantFlashMlaMetadataCheck::CheckBaseAttr(int64_t maxSeqlenQ,
     CHECK_COND(headDimV == 512, ACLNN_ERR_RUNTIME_ERROR, "headDimV only supports 512, but got %ld", headDimV);
 
     CHECK_COND(layoutQ != nullptr, ACLNN_ERR_RUNTIME_ERROR, "layoutQ must not be null");
-    CHECK_COND(strcmp(layoutQ, "TND") == 0, ACLNN_ERR_RUNTIME_ERROR, "layoutQ only supports TND, but got %s", layoutQ);
+    static const std::unordered_set<std::string> layoutQSet = {"TND", "BSND", "BNSD"};
+    CHECK_COND(layoutQSet.count(layoutQ) > 0, ACLNN_ERR_RUNTIME_ERROR,
+               "layoutQ only supports TND, BSND, BNSD, but got %s", layoutQ);
 
     return ACLNN_SUCCESS;
 }

@@ -175,6 +175,12 @@ public:
         if constexpr (GM_FORMAT == GmFormat::TNG) {
             ProcessS1G(dstTensor, srcTensor, gmCoord);
         }
+        if constexpr (GM_FORMAT == GmFormat::BSNGD) {
+            ProcessBSNGD(dstTensor, srcTensor, gmCoord);
+        }
+        if constexpr (GM_FORMAT == GmFormat::BNGSD) {
+            ProcessBNGSD(dstTensor, srcTensor, gmCoord);
+        }
     }
 
 private:
@@ -218,6 +224,77 @@ private:
 
         DataCopyPadExtParams<T> dataCopyPadParams;
         DataCopyPad(dstTensor.tensor, srcTensor.gmTensor[queryGmbaseOffset], dataCopyParams, dataCopyPadParams);
+    }
+
+    // BSNGD: descale[B,S,N1], UB为S1G序(m = s1*G + g), 走单次拷贝:
+    // d=1时g stride=1、s1 stride=G, 整个m区间在GM上连续; 跨s1行循环内UB偏移按元素
+    // 递增会产生非32B对齐的UB地址, 触发MTE对齐异常(errcode 80, QS>1的BSND小case崩设备)
+    template <typename FaGmTensorType>
+    __aicore__ inline void ProcessBSNGD(FaUbTensor<T>& dstTensor, FaGmTensorType& srcTensor, GmCoordGs1Merge& gmCoord)
+    {
+        auto& offsetCalculator = srcTensor.offsetCalculator;
+        uint64_t gSize = offsetCalculator.GetDimG();
+        uint32_t s1IdxStart = gmCoord.gS1Idx / gSize;
+        uint32_t gIdxStart = gmCoord.gS1Idx % gSize;
+        uint64_t gmOffset = offsetCalculator.GetOffset(gmCoord.bIdx, gmCoord.n2Idx, gIdxStart, s1IdxStart, 0);
+
+        DataCopyExtParams dataCopyParams;
+        dataCopyParams.blockCount = 1;
+        dataCopyParams.blockLen = static_cast<uint16_t>(gmCoord.gS1DealSize) * sizeof(T);
+        dataCopyParams.srcStride = 0;
+        dataCopyParams.dstStride = 0;
+
+        DataCopyPadExtParams<T> dataCopyPadParams;
+        DataCopyPad(dstTensor.tensor, srcTensor.gmTensor[gmOffset], dataCopyParams, dataCopyPadParams);
+    }
+
+    // BNGSD: descale[B,N1,S], UB为GS1序(m = g*actS1 + s1, actS1为批内实际seq长度), 按g行循环拷贝
+    template <typename FaGmTensorType>
+    __aicore__ inline void ProcessBNGSD(FaUbTensor<T>& dstTensor, FaGmTensorType& srcTensor, GmCoordGs1Merge& gmCoord)
+    {
+        auto& offsetCalculator = srcTensor.offsetCalculator;
+        uint32_t actS1Size = offsetCalculator.actualSeqLensQParser.GetActualSeqLength(gmCoord.bIdx);
+        uint32_t gIdxStart = gmCoord.gS1Idx / actS1Size;
+        uint32_t s1IdxStart = gmCoord.gS1Idx % actS1Size;
+        uint32_t remaining = gmCoord.gS1DealSize;
+        // 紧凑场景(actS1==s1Size, 单batch或等长batch): GM上g行间无空洞, 整个m区间连续, 单次拷贝;
+        // 跨g行循环内UB偏移按元素递增, actS1非8倍数时产生非32B对齐的UB地址, 触发MTE对齐异常
+        // (errcode 80, BNSD输入QS>1且非8倍数的小case崩设备); actS1==1仅当s1Size==1时才紧凑,
+        // actS1==1但s1Size>1时g行间有s1Size-1空洞, 连续读会取到g0行的s1 padding而非各g的
+        // 有效descale(padding为0时descale=0, scores全0, softmax退化为均匀注意力=mean(V)),
+        // 必须走下方标量逐元素拷贝。
+        if (actS1Size == offsetCalculator.GetDimS1()) {
+            uint64_t gmOffset = offsetCalculator.GetOffset(gmCoord.bIdx, gmCoord.n2Idx, gIdxStart, s1IdxStart, 0);
+            DataCopyExtParams dataCopyParams;
+            dataCopyParams.blockCount = 1;
+            dataCopyParams.blockLen = static_cast<uint16_t>(remaining) * sizeof(T);
+            dataCopyParams.srcStride = 0;
+            dataCopyParams.dstStride = 0;
+            DataCopyPadExtParams<T> dataCopyPadParams;
+            DataCopyPad(dstTensor.tensor, srcTensor.gmTensor[gmOffset], dataCopyParams, dataCopyPadParams);
+            return;
+        }
+        // 非紧凑场景(actS1<s1Size, 多batch不等长): GM的g行间有空洞(s1Size-actS1), 且UB行距actS1非8
+        // 倍数时MTE无法既保持m序又满足dst 32B对齐, 改用标量逐元素拷贝(无MTE地址对齐约束);
+        // 标量UB写按程序序先于调用方的SetFlag完成, 与后续V消费的同步语义不变。
+        // 必须用__ubuf__限定的volatile指针: SetValue/GetValue循环会被bisheng向量化为VAG
+        // gather/scatter, 非对齐的向量scatter写UB会静默错位(首行后数据全错); 而丢失地址空间的
+        // 通用volatile指针会被生成VEC向量store, 非对齐时触发errcode 264。__ubuf__ volatile
+        // 指针保留UB地址空间信息, 促使生成真正的标量LD/ST(无对齐约束)。
+        uint64_t ubBase = dstTensor.tensor.GetPhyAddr();
+        __ubuf__ volatile T* ubPtr = reinterpret_cast<__ubuf__ volatile T*>(ubBase);
+        const volatile __gm__ T* gmPtr = srcTensor.gmTensor.GetPhyAddr();
+        uint32_t curS1Idx = s1IdxStart;
+        uint32_t curGIdx = gIdxStart;
+        for (uint32_t i = 0; i < remaining; i++) {
+            uint64_t gmOffset = offsetCalculator.GetOffset(gmCoord.bIdx, gmCoord.n2Idx, curGIdx, curS1Idx, 0);
+            ubPtr[i] = gmPtr[gmOffset];
+            curS1Idx++;
+            if (curS1Idx >= actS1Size) {
+                curS1Idx = 0;
+                curGIdx++;
+            }
+        }
     }
 };
 

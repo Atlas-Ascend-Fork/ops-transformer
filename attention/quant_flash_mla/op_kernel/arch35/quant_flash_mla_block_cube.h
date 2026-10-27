@@ -87,12 +87,14 @@ public:
     using MM_T = T;
     using MLA_FULLQUANT_MM2_T = std::conditional_t<isInt8, int32_t, T>;
 
-    // Q: TND, cu_seq(含前导0)+seq_used, int32
-    using QSeqParserType = ActualSeqLensParser<ActualSeqLensMode::ACCUM, int32_t, true>;
+    // Q: TND用ACCUM(cu_seq含前导0+seq_used); BSND/BNSD用BY_BATCH(seqused_q)
+    static constexpr ActualSeqLensMode Q_MODE = GetQActSeqMode<layout>();
+    using QSeqParserType = ActualSeqLensParser<Q_MODE, int32_t, Q_MODE == ActualSeqLensMode::ACCUM>;
     // KV: PA, cache_seqlens按batch, int32
     using KvSeqParserType = ActualSeqLensParser<ActualSeqLensMode::BY_BATCH, int32_t>;
 
-    static constexpr bool Q_NEEDS_WZH = true;
+    // cu 表前导0只存在于TND布局; BSND/BNSD按BY_BATCH解析, 无需该标志
+    static constexpr bool Q_NEEDS_WZH = (GmLayoutParams<Q_FORMAT>::CATEGORY == FormatCategory::GM_Q_OUT_TND);
     using FaGmTensorQ = FaGmTensor<Q_T, Q_FORMAT, int32_t, Q_NEEDS_WZH>;
     using FaGmTensorKV = FaGmTensor<KV_T, KV_FORMAT, int32_t>;
 
@@ -108,6 +110,10 @@ public:
     static constexpr uint32_t CROSSCORE_L1P_0 = 4U; // L1 P slot 0 (AIV→AIC)
     static constexpr uint32_t CROSSCORE_L1P_1 = 5U;
     static constexpr uint32_t CROSSCORE_L1P_2 = 6U;
+    // L1 P slot反向同步(AIC→AIV): Mm2消费完P后通知AIV可覆写该slot, 独立ID避免与就绪标志混用
+    static constexpr uint32_t CROSSCORE_L1P_FREE_0 = 7U;
+    static constexpr uint32_t CROSSCORE_L1P_FREE_1 = 8U;
+    static constexpr uint32_t CROSSCORE_L1P_FREE_2 = 9U;
 
     // Cube internal Mutex IDs
     static constexpr uint32_t Q_L1_BUFFER_ID0 = 0U;
@@ -259,7 +265,13 @@ public:
                                        __gm__ uint8_t* gm)
     {
         qGmTensor.gmTensor.SetGlobalBuffer((__gm__ Q_T*)gm);
-        qGmTensor.offsetCalculator.Init(n2Size, gSize, headDim, *this->qSeqParserPtr_);
+        if constexpr (GmLayoutParams<Q_FORMAT>::CATEGORY == FormatCategory::GM_Q_OUT_TND) {
+            // TND: 按累积T索引
+            qGmTensor.offsetCalculator.Init(n2Size, gSize, headDim, *this->qSeqParserPtr_);
+        } else { // BSNGD/BNGSD: 按batch的s1维度
+            qGmTensor.offsetCalculator.Init(constInfo_.bSize, n2Size, gSize, constInfo_.s1Size, headDim,
+                                            *this->qSeqParserPtr_);
+        }
     }
 
     __aicore__ inline void InitKVBuffer(uint32_t n2Size, uint32_t kvCacheBlockSize, uint32_t headDim,
@@ -281,7 +293,17 @@ public:
         }
     }
 
-    __aicore__ inline void InitCrossCoreSync() {}
+    __aicore__ inline void InitCrossCoreSync()
+    {
+        // L1 P反向同步: 预置3个slot的"可覆写"标志(对AIV0/AIV1各一个),
+        // 供AIV Vec1首次写各slot前Wait通过; AIV首次Vec1受CC_MM门控晚于本Init, 无时序风险
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_0);
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_1);
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_2);
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_0 + AIV0_AIV1_OFFSET);
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_1 + AIV0_AIV1_OFFSET);
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_2 + AIV0_AIV1_OFFSET);
+    }
 
     __aicore__ inline void UnInitCrossCoreSync()
     {
@@ -524,6 +546,7 @@ public:
             CopyKeyTile(kL1Tensor, runInfo, s2CurSize);
             Mutex::Unlock<PIPE_MTE2>(KV_L1_BUFFER_ID0 + kvBufId);
         }
+        // K读前锁MTE1(预取与inline加载两路径均需): Mm1读K期间持有
         Mutex::Lock<PIPE_MTE1>(KV_L1_BUFFER_ID0 + kvBufId);
         {
             // MatMul: Q[64,576] @ K[576,256], K维含rope(方案A单次matmul)
@@ -540,7 +563,8 @@ public:
             Mutex::Unlock<PIPE_FIX>(L0C_BUFFER_ID0 + l0cBufId_);
             l0cBufId_ = (l0cBufId_ + 1) % L0C_BUFCNT;
         }
-        // 释放K的MTE1锁, 允许bmm2复用读取
+        // K的MTE1锁在此释放(性能实验: 恢复旧模式, Mm1读K后释放, Bmm2重抢)——
+        // 注意: 这会重新打开"Mm1释放与Mm2重抢之间K预取覆写V"的竞争窗口
         Mutex::Unlock<PIPE_MTE1>(KV_L1_BUFFER_ID0 + kvBufId);
 
         if (unlikely(runInfo.isLastS2Loop)) {
@@ -594,6 +618,7 @@ public:
         //    直接使用bmm1加载/预取时记录的buffer id, 不做轮转推算
         uint32_t kvReuseBufId = runInfo.kvL1BufId;
         LocalTensor<KV_T> vL1Tensor = l1KvBuffers_[kvReuseBufId * L1_KV_BUF_BYTES].template ReinterpretCast<KV_T>();
+        // V读前重抢K buffer的MTE1锁(性能实验: 旧模式, 配合下方e处Unlock)
         Mutex::Lock<PIPE_MTE1>(KV_L1_BUFFER_ID0 + kvReuseBufId);
 
         // d. L0C + Matmul
@@ -605,8 +630,14 @@ public:
         Mutex::Unlock<PIPE_M>(L0C_BUFFER_ID0 + l0cBufId_);
         Mutex::Lock<PIPE_FIX>(L0C_BUFFER_ID0 + l0cBufId_);
 
-        // e. 释放K的MTE1锁, 允许下一轮bmm1复用加载K
+        // e. V读已完成(MTE1 queue内LoadOperand先于此Unlock), 释放KV buffer token,
+        //    允许后续任务(L+3)的K预取覆写本buffer
         Mutex::Unlock<PIPE_MTE1>(KV_L1_BUFFER_ID0 + kvReuseBufId);
+
+        // e2. P读同样已完成(Mm2MatmulN的A operand LoadOperand先于本Set在MTE1 queue内),
+        //     反向通知AIV: 本slot的P已消费完毕, 允许Vec1(L+3)覆写该L1 P buffer
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_0 + pL1BufId);
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSSCORE_L1P_FREE_0 + pL1BufId + AIV0_AIV1_OFFSET);
 
         // f. Fixpipe: 写bmm2 result到UB对应slot
         LocalTensor<MLA_FULLQUANT_MM2_T> mm2ResUbTensor =

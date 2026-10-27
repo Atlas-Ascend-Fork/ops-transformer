@@ -29,11 +29,16 @@ namespace optiling {
 namespace quant_flash_mla {
 
 static const std::map<std::string, QfmlaLayout> QFMLA_LAYOUT_Q_MAP = {
+    {"BSND", QfmlaLayout::BSND},
+    {"BNSD", QfmlaLayout::BNSD},
     {"TND", QfmlaLayout::TND},
 };
 
 static const std::map<std::string, QfmlaOutLayout> QFMLA_LAYOUT_OUT_MAP = {
+    {"BSND", QfmlaOutLayout::BSND},
+    {"BNSD", QfmlaOutLayout::BNSD},
     {"TND", QfmlaOutLayout::TND},
+    {"NTD", QfmlaOutLayout::NTD},
 };
 
 static const std::map<std::string, QfmlaKvLayout> QFMLA_LAYOUT_KV_MAP = {
@@ -215,10 +220,12 @@ ge::graphStatus QfmlaInfoParser::GetQuantMode()
     OP_CHECK_IF(opParamInfo_.quantMode == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "quant_mode"),
                 return ge::GRAPH_FAILED);
     int64_t quantModeVal = *opParamInfo_.quantMode;
-    if (quantModeVal != static_cast<int64_t>(QfmlaQuantMode::MLA_FP8_E4M3_FULLQUANT)) {
+    if (quantModeVal != static_cast<int64_t>(QfmlaQuantMode::MLA_FP8_E4M3_FULLQUANT) &&
+        quantModeVal != static_cast<int64_t>(QfmlaQuantMode::MLA_HIF8_FULLQUANT)) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
             opName_, "quant_mode", std::to_string(quantModeVal).c_str(),
-            "quant_mode must be 1 (MLA_FP8_E4M3_FULLQUANT: Q/K/V FP8_E4M3, Q per-token-head, K per-tensor)");
+            "quant_mode must be 1 (MLA_FP8_E4M3_FULLQUANT: Q/K/V FP8_E4M3, Q per-token-head, K per-tensor) "
+            "or 0 (MLA_HIF8_FULLQUANT: Q/K/V HIFLOAT8, Q per-token-head, K per-tensor)");
         return ge::GRAPH_FAILED;
     }
     quantMode_ = static_cast<QfmlaQuantMode>(quantModeVal);

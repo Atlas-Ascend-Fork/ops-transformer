@@ -21,6 +21,10 @@ DEFAULT_CACHE_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "golden_cache"
 )
 
+# 落盘开关: QMLA_GOLDEN_CACHE_OFF=1 时跳过所有 save (all 模式数据全程在内存,
+# 落盘仅是副作用); 分阶段模式 (gen 与 npu,compare 分进程) 依赖缓存, 勿开此开关
+_CACHE_DISABLED = os.environ.get("QMLA_GOLDEN_CACHE_OFF") == "1"
+
 
 def _ensure_dir(path):
     os.makedirs(path, exist_ok=True)
@@ -53,6 +57,8 @@ def _load(path, device):
 
 
 def save_input(case_name, data_dict, cache_dir=None):
+    if _CACHE_DISABLED:
+        return
     path = _path(case_name, "input", cache_dir)
     torch.save(_to_device(data_dict, "cpu"), path)
     logger.info("[CACHE] save input → %s", path)
@@ -85,6 +91,8 @@ def has_input(case_name, cache_dir=None):
 
 
 def save_cpu_output(case_name, cpu_out, cpu_lse, cache_dir=None):
+    if _CACHE_DISABLED:
+        return
     path = _path(case_name, "cpu_output", cache_dir)
     torch.save(_to_device({"cpu_out": cpu_out, "cpu_lse": cpu_lse}, "cpu"), path)
     logger.info("[CACHE] save CPU output → %s", path)
@@ -104,6 +112,8 @@ def has_cpu_output(case_name, cache_dir=None):
 
 
 def save_npu_output(case_name, atten_out, lse_out, cache_dir=None):
+    if _CACHE_DISABLED:
+        return
     path = _path(case_name, "npu_output", cache_dir)
     torch.save(_to_device({"atten_out": atten_out, "lse_out": lse_out}, "cpu"), path)
     logger.info("[CACHE] save NPU output → %s", path)

@@ -54,6 +54,7 @@ enum class QfmlaKvLayout : int64_t {
 
 // MLA量化模式
 enum class QfmlaQuantMode : int64_t {
+    MLA_HIF8_FULLQUANT = 0,
     MLA_FP8_E4M3_FULLQUANT = 1,
 };
 

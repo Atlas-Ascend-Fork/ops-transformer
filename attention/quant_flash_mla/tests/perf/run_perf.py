@@ -15,15 +15,17 @@
 
 逐 case 独立 msprof 进程(one-by-one), 规避批跑下 profiler 条目归属歧义。
 链路: perf_cases(用例) -> perf_codegen(生成脚本) -> perf_profiler(msprof 采集)
-      -> perf_parser(过滤 OP Type=QuantFlashMla, 热启动均值) -> perf.csv
+      -> perf_parser(过滤 OP Type=QuantFlashMla, 热启动均值) -> MFU 估算 -> perf.csv
 
 用法:
     conda activate fzj
-    source /home/fanzijian/Ascend/ascend-toolkit/set_env.sh        # 基础 CANN 包
+    source /home/fanzijian/Ascend1008/cann-9.3.0/set_env.sh    # 基础 CANN 包(按实际安装路径)
     source /home/fanzijian/custom/vendors/custom_transformer/bin/set_env.bash  # custom 算子包
     python3 run_perf.py --runs 5
+    python3 run_perf.py --runs 1                      # 只测一次(含首次运行开销)
+    python3 run_perf.py --runs 5 --discard-first      # 丢弃预热后取平稳均值
     python3 run_perf.py --runs 5 --case-filter Decode,PA_NZ
-    python3 run_perf.py --runs 5 --pipe-timeline _000000   # 性能 + pipe 时间线
+    python3 run_perf.py --runs 5 --case-filter Decode,PA_NZ --pipe-timeline   # 性能 + pipe 时间线
     python3 run_perf.py --list
 """
 
@@ -45,11 +47,67 @@ from perf_codegen import build_script
 from perf_profiler import run_msprof, run_msopprof_pipe
 from perf_parser import parse_op_summary, compute_hot_avg
 
+# MFU 相关常量
+QK_HEAD_DIM = 576  # MLA: nope 512 + rope 64
+FP8_CUBE_FLOPS_PER_CYCLE = 2 * 16 * 16 * 32
+FP8_FREQ_GHZ = 1.6
+DEFAULT_CORE_NUM = 32
+
+
+def get_core_num():
+    """设备 cube 核数(纯 CPU 环境回退到 32)。"""
+    try:
+        import torch  # noqa: F401
+        import torch_npu  # noqa: F401
+
+        return int(torch.npu.get_device_properties(0).cube_core_num)
+    except Exception:
+        return DEFAULT_CORE_NUM
+
+
+def fp8_peak_tflops(core_num):
+    return FP8_CUBE_FLOPS_PER_CYCLE * FP8_FREQ_GHZ * core_num * 0.001
+
+
+def calc_compute_num(case):
+    """按 batch 逐条累加计算量。
+
+    sp0:            2*kvs*qs*qkd*2*qn
+    sp3 (qs<kvs):   2*(kvs-qs+1+kvs)*qs/2*qkd*2*qn
+    sp3 (qs>=kvs):  2*kvs*kvs/2*qkd*2*qn
+    """
+    qn = case["N_q"]
+    is_causal = case["sparse_mode"] == 3
+    total = 0.0
+    for qs, kvs in zip(case["seqused_q"], case["cache_seqlens"]):
+        if is_causal:
+            valid = (kvs - qs + 1 + kvs) * qs / 2 if qs < kvs else kvs * kvs / 2
+        else:
+            valid = kvs * qs
+        total += 2 * valid * QK_HEAD_DIM * 2 * qn
+    return total
+
+
+def calc_mfu(case, duration_us, peak_tflops):
+    """返回 MFU 百分比; duration 无效时返回 None。"""
+    if duration_us <= 0 or peak_tflops <= 0:
+        return None
+    flops = calc_compute_num(case) / (duration_us * 1e-6)
+    return flops * 1e-12 / peak_tflops * 100
+
 
 def main():
     ap = argparse.ArgumentParser(description="QuantFlashMla perf benchmark")
     ap.add_argument(
-        "--runs", type=int, default=5, help="每 case 迭代次数(第一条作预热丢弃)"
+        "--runs",
+        type=int,
+        default=5,
+        help="每 case 迭代次数(>=1); 默认对全部条目取均值",
+    )
+    ap.add_argument(
+        "--discard-first",
+        action="store_true",
+        help="丢弃第一条(预热)后取均值, 需 --runs >= 2",
     )
     ap.add_argument(
         "--case-filter", type=str, default=None, help="逗号分隔的用例名子串过滤"
@@ -59,18 +117,18 @@ def main():
     )
     ap.add_argument(
         "--pipe-timeline",
-        type=str,
-        default=None,
-        metavar="SUBSTR",
-        help="对命中的用例额外采集 PipeTimeline(逗号分隔子串, "
-        "如 '_000000'; 产物 visualize_data.bin 用 "
-        "MindStudio Insight 打开)",
+        action="store_true",
+        help="对 --case-filter 命中的全部用例额外采集 PipeTimeline"
+        "(产物 visualize_data.bin 用 MindStudio Insight 打开); "
+        "如需缩小范围请用 --case-filter 过滤",
     )
     ap.add_argument("--list", action="store_true", help="只列出用例名")
     args = ap.parse_args()
 
-    if args.runs < 2:
-        ap.error("--runs 需 >= 2 (第一条为预热, 丢弃)")
+    if args.runs < 1:
+        ap.error("--runs 需 >= 1")
+    if args.discard_first and args.runs < 2:
+        ap.error("--discard-first 需配合 --runs >= 2")
 
     cases = load_cases()
     if args.case_filter:
@@ -86,11 +144,12 @@ def main():
             print(name)
         return 0
 
-    print(f"[info] Loaded {len(cases)} cases, runs={args.runs}")
-    pipe_filters = None
+    print(
+        f"[info] Loaded {len(cases)} cases, runs={args.runs}, "
+        f"averaging={'discard 1st' if args.discard_first else 'keep all'}"
+    )
     if args.pipe_timeline:
-        pipe_filters = [f.strip() for f in args.pipe_timeline.split(",") if f.strip()]
-        print(f"[info] PipeTimeline enabled for substrings: {pipe_filters}")
+        print("[info] PipeTimeline enabled for all filtered cases")
     output_dir = (
         Path(args.output).resolve()
         if args.output
@@ -98,8 +157,11 @@ def main():
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[info] Output -> {output_dir}")
+    core_num = get_core_num()
+    peak_tflops = fp8_peak_tflops(core_num)
+    print(f"[info] cube_core_num={core_num}, fp8_peak={peak_tflops:.2f} TFLOPS")
 
-    results = {}  # name -> (avg_us, samples, status, message)
+    results = {}  # name -> (avg_us, mfu_percent, samples, status, message)
     pipe_bins = {}  # name -> visualize_data.bin 路径
     total = len(cases)
     for idx, (name, case) in enumerate(cases.items()):
@@ -118,12 +180,15 @@ def main():
                     f"check {case_dir / name}.msprof.log"
                 )
                 print(f"  => FAILED: {message}")
-                results[name] = (-1.0, len(entries), "MISSING", message)
+                results[name] = (-1.0, None, len(entries), "MISSING", message)
                 continue
-            avg = compute_hot_avg(durations)
-            results[name] = (avg, args.runs, "PASS", "")
-            print(f"  => {avg:.2f} us  ({args.runs} entries, discard 1st)")
-            if pipe_filters and any(f in name for f in pipe_filters):
+            avg = compute_hot_avg(durations, args.discard_first)
+            samples = len(durations) - (1 if args.discard_first else 0)
+            mfu = calc_mfu(case, avg, peak_tflops)
+            results[name] = (avg, mfu, samples, "PASS", "")
+            mode = "discard 1st" if args.discard_first else "keep all"
+            print(f"  => {avg:.2f} us  MFU={mfu:.2f}%  ({samples} samples, {mode})")
+            if args.pipe_timeline:
                 opprof_dir = run_msopprof_pipe(script, case_dir, label=name)
                 vis = list(opprof_dir.glob("visualize_data.bin")) or list(
                     opprof_dir.rglob("visualize_data.bin")
@@ -135,7 +200,7 @@ def main():
                     print(f"  [pipe] WARNING: no visualize_data.bin in {opprof_dir}")
         except Exception as e:
             print(f"  => FAILED: {e}")
-            results[name] = (-1.0, 0, "ERROR", str(e))
+            results[name] = (-1.0, None, 0, "ERROR", str(e))
 
     perf_csv = output_dir / "perf.csv"
     with open(perf_csv, "w", newline="") as f:
@@ -144,17 +209,19 @@ def main():
             [
                 "case_name",
                 "duration_us",
+                "mfu",
                 "samples",
                 "status",
                 "message",
                 "pipe_visualize_bin",
             ]
         )
-        for name, (avg, samples, status, message) in results.items():
+        for name, (avg, mfu, samples, status, message) in results.items():
             writer.writerow(
                 [
                     name,
                     f"{avg:.2f}" if avg > 0 else "",
+                    f"{mfu:.2f}" if mfu is not None else "",
                     samples,
                     status,
                     message,
@@ -162,13 +229,14 @@ def main():
                 ]
             )
 
-    n_failed = sum(1 for r in results.values() if r[2] != "PASS")
+    n_failed = sum(1 for r in results.values() if r[3] != "PASS")
     print(f"\n{'=' * 70}")
     print(f"[SUMMARY] {len(results)} cases, {n_failed} failed, results -> {perf_csv}")
     print(f"{'=' * 70}")
-    for name, (avg, samples, status, _msg) in results.items():
+    for name, (avg, mfu, _samples, status, _msg) in results.items():
         shown = f"{avg:.2f} us" if avg > 0 else f"FAILED({status})"
-        print(f"  [HOT] {name:<64s} {shown}")
+        mfu_shown = f"{mfu:.2f}%" if mfu is not None else "-"
+        print(f"  [HOT] {name:<64s} {shown:>12s}  MFU={mfu_shown}")
     return 1 if n_failed else 0
 
 

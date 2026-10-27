@@ -155,10 +155,11 @@ def generate_qfmla_inputs(
     else:
         B = max(1, int(kwargs["B"])) if kwargs.get("B") is not None else 1
 
-    # QMLA only supports TND.  Use TND and a positive block size for payload
-    # synthesis while preserving the raw layout_q/block_size in the actual
-    # operator arguments and tensor slots.
-    synthesis_input_layout = "TND"
+    # 数据合成布局跟随用例布局: BSND/BNSD 用 4D 合成 (与 CSV slot 形状一致,
+    # golden 的 generate_data/convert 链支持 4D), 其余布局用 TND 合成;
+    # 原 layout_q/layout_out 仍原样透传给 metadata/主算子。
+    _in_layout = str(layout_q).upper()
+    synthesis_input_layout = _in_layout if _in_layout in ("BSND", "BNSD") else "TND"
     synthesis_output_layout = "TND"
     synthesis_block_size = int(block_size)
     if synthesis_block_size <= 0:
@@ -231,9 +232,15 @@ def generate_qfmla_inputs(
     if synthesis_seqused_q_vals is None:
         q_shape = tuple(int(dim) for dim in q.shape) if hasattr(q, "shape") else ()
         batch_for_synthesis = max(int(B), 1)
-        total_q = (
-            q_shape[0] if len(q_shape) == 3 and q_shape[0] > 0 else batch_for_synthesis
-        )
+        # 4D q 从 S 维推导 total_q: BSND=(B,S,N,D)取shape[1], BNSD=(B,N,S,D)取shape[2];
+        # 3D q 为 TND (T,N,D), total_q=T=shape[0] (与 golden.py 同步)
+        if len(q_shape) == 4 and q_shape[0] > 0:
+            s_dim = q_shape[1] if _in_layout != "BNSD" else q_shape[2]
+            total_q = batch_for_synthesis * s_dim if s_dim > 0 else batch_for_synthesis
+        elif len(q_shape) == 3 and q_shape[0] > 0:
+            total_q = q_shape[0]
+        else:
+            total_q = batch_for_synthesis
         base, extra = divmod(total_q, batch_for_synthesis)
         synthesis_seqused_q_vals = [
             base + (1 if i < extra else 0) for i in range(batch_for_synthesis)

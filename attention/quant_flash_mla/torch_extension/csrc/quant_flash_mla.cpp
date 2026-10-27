@@ -20,12 +20,28 @@ namespace op_api {
 const int64_t DIM_THREE = 3;
 const int64_t DIM_FOUR = 4;
 const int64_t MAX_DIM_SIZE = 8;
+const int64_t QUANT_MODE_HIF8 = 0;
+const int64_t HIFLOAT8 = 34;
+
+// HIF8场景: torch侧以uint8承载hif8编码, 传给aclnn前需映射为ACL_HIFLOAT8
+inline TensorWrapper make_wrapper(const at::Tensor& tensor, const int64_t real_dtype)
+{
+    TensorWrapper wrapper = {tensor, ACL_DT_UNDEFINED};
+    if (kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(tensor.scalar_type())] == ACL_UINT8) {
+        if (real_dtype == HIFLOAT8) {
+            wrapper.dtype = ACL_HIFLOAT8;
+        }
+    } else {
+        wrapper.dtype = kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(tensor.scalar_type())];
+    }
+    return wrapper;
+}
 
 at::Tensor quant_flash_mla_metadata(const at::Tensor& cache_seqlens, int64_t num_heads_q, int64_t num_heads_kv,
-                                    int64_t quant_mode, const at::Tensor& cu_seqlens_q, const at::Tensor& seqused_q,
-                                    int64_t max_seqlen_q, int64_t max_seqlen_kv, int64_t head_dim_qk,
-                                    int64_t head_dim_v, int64_t mask_mode, std::string layout_q,
-                                    const at::Tensor& output)
+                                    int64_t quant_mode, const c10::optional<at::Tensor>& cu_seqlens_q,
+                                    const c10::optional<at::Tensor>& seqused_q, int64_t max_seqlen_q,
+                                    int64_t max_seqlen_kv, int64_t head_dim_qk, int64_t head_dim_v, int64_t mask_mode,
+                                    std::string layout_q, const at::Tensor& output)
 {
     ACLNN_CMD(aclnnQuantFlashMlaMetadata, cache_seqlens, num_heads_q, num_heads_kv, quant_mode, cu_seqlens_q, seqused_q,
               max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, mask_mode, layout_q, output);
@@ -90,6 +106,17 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_mla(
         attentionOutSize = {nSize, tSize, head_dim_v};
     }
     at::Tensor attentionOutput = at::empty(attentionOutSize, torch::dtype(at::kBFloat16).device(outputDevice));
+
+    if (quant_mode == QUANT_MODE_HIF8) {
+        // HIF8: q/k_cache为uint8承载的hif8编码, 映射为ACL_HIFLOAT8
+        TensorWrapper q_wrapper = make_wrapper(q, HIFLOAT8);
+        TensorWrapper k_cache_wrapper = make_wrapper(k_cache, HIFLOAT8);
+        ACLNN_CMD(aclnnQuantFlashMla, q_wrapper, k_cache_wrapper, q_descale, k_descale, block_table, cache_seqlens,
+                  cu_seqlens_q, seqused_q, attn_mask, metadata, quant_mode, softmax_scale, mask_mode, max_seqlen_q,
+                  max_seqlen_kv, head_dim_v, layout_q, layout_kv, layout_out, return_softmax_lse, attentionOutput,
+                  softmaxLse);
+        return std::tuple<at::Tensor, at::Tensor>(attentionOutput, softmaxLse);
+    }
 
     ACLNN_CMD(aclnnQuantFlashMla, q, k_cache, q_descale, k_descale, block_table, cache_seqlens, cu_seqlens_q, seqused_q,
               attn_mask, metadata, quant_mode, softmax_scale, mask_mode, max_seqlen_q, max_seqlen_kv, head_dim_v,

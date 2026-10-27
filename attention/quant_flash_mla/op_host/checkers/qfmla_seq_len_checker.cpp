@@ -86,11 +86,13 @@ ge::graphStatus SeqLenChecker::CheckSingleParaCuSeqlensQ(const QfmlaTilingInfo& 
 
 ge::graphStatus SeqLenChecker::CheckSingleParaMaxSeqlenQ(const QfmlaTilingInfo& qfmlaInfo)
 {
-    // MLA 当前单 batch Q 长度最大为 16；-1 表示未传入。
-    OP_CHECK_IF(qfmlaInfo.maxSeqQ < -1 || qfmlaInfo.maxSeqQ == 0 || qfmlaInfo.maxSeqQ > 16,
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfmlaInfo.opName, "max_seqlen_q",
-                                                      std::to_string(qfmlaInfo.maxSeqQ).c_str(),
-                                                      "max_seqlen_q must be -1 (not provided) or in [1, 16]"),
+    // max_seqlen_q: -1 (未传入) 或 >= 1; 0 无意义需拦截。TND 下单 batch Q 长度
+    // 上限 16; BSND/BNSD 的 s1 来自 q shape, max_seqlen_q 不参与调度不设上限。
+    OP_CHECK_IF(qfmlaInfo.maxSeqQ < -1 || qfmlaInfo.maxSeqQ == 0 ||
+                    (qfmlaInfo.layoutQ == QfmlaLayout::TND && qfmlaInfo.maxSeqQ > 16),
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    qfmlaInfo.opName, "max_seqlen_q", std::to_string(qfmlaInfo.maxSeqQ).c_str(),
+                    "max_seqlen_q must be -1 (not provided) or >= 1 (TND caps at 16)"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }

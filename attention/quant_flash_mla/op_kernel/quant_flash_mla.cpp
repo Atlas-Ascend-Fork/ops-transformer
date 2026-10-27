@@ -145,6 +145,9 @@ inline __aicore__ void quant_flash_mla_fp8(__gm__ uint8_t* query, __gm__ uint8_t
     constexpr DTemplateType dTemplateType = static_cast<DTemplateType>(ConfigValue[config].d);
     constexpr DTemplateType dVTemplateType = static_cast<DTemplateType>(ConfigValue[config].dv);
 
+    // 核级硬件状态初始化(mask归一化/ctrl默认位/AIC-AIV分离架构SPR等), 须在任何访存与向量
+    // 指令前调用: AIC/AIV分核各自执行, 清除同核上一算子残留状态, 保证指令行为确定
+    AscendC::InitSocState();
     using CubeBlock = BaseApi::QuantFlashMlaBlockCubeFp8<INPUT_T, float, inputLayoutType, s1TemplateType,
                                                          s2TemplateType, dTemplateType, dVTemplateType, KvLayoutType>;
     using VecFaBlock = BaseApi::QuantFlashMlaBlockVecFp8<INPUT_T, float, OUT_T, inputLayoutType, outputLayoutType,
@@ -198,6 +201,13 @@ __global__ __aicore__ void quant_flash_mla(__gm__ uint8_t* query, __gm__ uint8_t
 #if (ORIG_DTYPE_Q == DT_FLOAT8_E4M3FN)
     if constexpr (quantMode == QFMLA_MLA_FP8_E4M3_FULLQUANT) {
         quant_flash_mla_fp8<fp8_e4m3fn_t, bfloat16_t, inOutLayoutType, KvLayoutType, hasAttenMask, config, isFd>(
+            query, key, qDescale, kDescale, blockTable, cacheSeqLens, cuSeqLensQ, sequsedQ, attnMask, metadata, attnOut,
+            softmaxLse, workspace, tiling);
+    }
+#elif (ORIG_DTYPE_Q == DT_HIFLOAT8)
+    // MLA HIF8全量化: 复用fp8模板(hifloat8_t实例化), P矩阵cast在vec块内按INPUT_T分支
+    if constexpr (quantMode == QFMLA_MLA_HIF8_FULLQUANT) {
+        quant_flash_mla_fp8<hifloat8_t, bfloat16_t, inOutLayoutType, KvLayoutType, hasAttenMask, config, isFd>(
             query, key, qDescale, kDescale, blockTable, cacheSeqLens, cuSeqLensQ, sequsedQ, attnMask, metadata, attnOut,
             softmaxLse, workspace, tiling);
     }

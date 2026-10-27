@@ -45,10 +45,14 @@ bool QuantFlashMlaTilingFp8Impl::IsCapable()
     if (qfmlaInfo_ == nullptr) {
         return false;
     }
-    if (qfmlaInfo_->quantMode != QfmlaQuantMode::MLA_FP8_E4M3_FULLQUANT) {
+    if (qfmlaInfo_->quantMode != QfmlaQuantMode::MLA_FP8_E4M3_FULLQUANT &&
+        qfmlaInfo_->quantMode != QfmlaQuantMode::MLA_HIF8_FULLQUANT) {
         return false;
     }
-    if (qfmlaInfo_->qType != ge::DT_FLOAT8_E4M3FN) {
+    if (qfmlaInfo_->quantMode == QfmlaQuantMode::MLA_FP8_E4M3_FULLQUANT && qfmlaInfo_->qType != ge::DT_FLOAT8_E4M3FN) {
+        return false;
+    }
+    if (qfmlaInfo_->quantMode == QfmlaQuantMode::MLA_HIF8_FULLQUANT && qfmlaInfo_->qType != ge::DT_HIFLOAT8) {
         return false;
     }
     return true;
@@ -132,7 +136,15 @@ void QuantFlashMlaTilingFp8Impl::CalcNumBlocks(uint32_t aicNum)
 
 void QuantFlashMlaTilingFp8Impl::UpdateTilingKeyLayout()
 {
-    // MLA 输入固定TND layout, 输出layout由layout_out属性决定（kernel侧为编译期模板参数）
+    // BSND/BNSD输入: 输出与输入同layout; TND输入: 输出layout由layout_out属性决定（kernel侧为编译期模板参数）
+    if (qfmlaInfo_->layoutQ == QfmlaLayout::BSND) {
+        tilingKeyInfo_.inputLayout = InOutLayoutType_BSND_BSND;
+        return;
+    }
+    if (qfmlaInfo_->layoutQ == QfmlaLayout::BNSD) {
+        tilingKeyInfo_.inputLayout = InOutLayoutType_BNSD_BNSD;
+        return;
+    }
     switch (qfmlaInfo_->layoutOut) {
         case QfmlaOutLayout::BSND:
             tilingKeyInfo_.inputLayout = InOutLayoutType_TND_BSND;
@@ -169,7 +181,10 @@ void QuantFlashMlaTilingFp8Impl::UpdateTilingKeyKvLayout()
 
 void QuantFlashMlaTilingFp8Impl::UpdateTilingKeyQuantMode()
 {
-    tilingKeyInfo_.quantMode = QFMLA_MLA_FP8_E4M3_FULLQUANT;
+    // tiling key的QuantMode与quant_mode属性一致: 1=FP8_E4M3全量化, 0=HIF8全量化
+    tilingKeyInfo_.quantMode = (qfmlaInfo_->quantMode == QfmlaQuantMode::MLA_HIF8_FULLQUANT) ?
+                                   QFMLA_MLA_HIF8_FULLQUANT :
+                                   QFMLA_MLA_FP8_E4M3_FULLQUANT;
 }
 
 void QuantFlashMlaTilingFp8Impl::UpdateTilingKeyInfo()

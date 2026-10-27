@@ -53,14 +53,15 @@ def _resolve_tensor(tensor, kwargs, name):
     """把 cu_seqlens/seqused 位置参数归一成 None 或有效 tensor。
 
     直调 op 后, 这些位置参数可能是空 (0,) 张量 (CSV 空 slot 生成); 当对应的
-    ``*_values`` 属性也为 None (未填写) 时, 归一成 None 而非空张量——否则
-    metadata 算子会把空张量的 size(0)=0 误当 batch_size。
+    ``*_values`` 属性为 None 或空列表 (BSND/BNSD 用例 CSV 填 []) 时, 归一成
+    None 而非空张量——否则 metadata 算子会把空张量的 size(0)=0 误当 batch_size,
+    host 端 CheckSeqLens 报 "cuSeqLens shape must be (batchSize+1,), but got 0"。
     参考 quant_flash_attn/tests/assets/impl/npu_preprocess.py 的 _resolve_tensor。
     """
     if tensor is not None and int(torch.as_tensor(tensor).numel()) > 0:
         return tensor
     values = get_values(kwargs, name)
-    if values is None:
+    if not values:
         return None
     return torch.as_tensor(values, dtype=torch.int32)
 
@@ -108,6 +109,14 @@ def build_metadata_arguments(q, cu_seqlens_q, seqused_q, kwargs):
     cu_q = _resolve_tensor(cu_seqlens_q, kwargs, "cu_seqlens_q")
     seq_q = _resolve_tensor(seqused_q, kwargs, "seqused_q")
 
+    layout_q = str(get_attribute(kwargs, "layout_q", "TND"))
+    max_seqlen_q = _max_seqlen(kwargs, "q")
+    # 非 TND 且 cu/seqused 都未传时, metadata AICPU 侧无 Q 长度信息(querySeqSize=0),
+    # ParamsInit 报 "invalid seq size", 框架表现为 AICPU errcode 22007; 从 q 视图
+    # 形状推导 S 维补齐: BSND=(B,S,N,D)取shape[1], BNSD=(B,N,S,D)取shape[2]。
+    if layout_q != "TND" and cu_q is None and seq_q is None and max_seqlen_q < 0:
+        max_seqlen_q = int(q.shape[2] if layout_q == "BNSD" else q.shape[1])
+
     return {
         "num_heads_q": num_heads_q,
         "num_heads_kv": num_heads_kv,
@@ -115,11 +124,11 @@ def build_metadata_arguments(q, cu_seqlens_q, seqused_q, kwargs):
         "quant_mode": int(get_attribute(kwargs, "quant_mode", 1)),
         "cu_seqlens_q": cu_q,
         "seqused_q": seq_q,
-        "max_seqlen_q": _max_seqlen(kwargs, "q"),
+        "max_seqlen_q": max_seqlen_q,
         "max_seqlen_kv": _max_seqlen(kwargs, "kv"),
         "head_dim_v": get_attribute(kwargs, "head_dim_v"),
         "mask_mode": int(get_attribute(kwargs, "mask_mode", 0)),
-        "layout_q": str(get_attribute(kwargs, "layout_q", "TND")),
+        "layout_q": layout_q,
     }
 
 

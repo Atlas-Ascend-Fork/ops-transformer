@@ -130,20 +130,23 @@ __simd_vf__ inline void QfmlaOutputUpdate(__ubuf__ float* dst, __ubuf__ float* c
     }
 }
 
-template <bool FIRST, bool MASK>
-__simd_vf__ inline void QfmlaSoftmax256(__ubuf__ fp8_e4m3fn_t* out, __ubuf__ float* src, __ubuf__ float* qscale,
+template <typename INPUT_T, bool FIRST, bool MASK>
+__simd_vf__ inline void QfmlaSoftmax256(__ubuf__ INPUT_T* out, __ubuf__ float* src, __ubuf__ float* qscale,
                                         __ubuf__ float* oldMax, __ubuf__ float* newMax, __ubuf__ float* newSum,
                                         __ubuf__ uint8_t* maskData, __ubuf__ uint8_t* indices, uint16_t rows,
                                         uint32_t cols, float scale, float kscale)
 {
     using namespace AscendC::Reg;
+    // FP8: P乘以e4m3最大值448充分利用动态范围, vec2侧除回; HIF8: 变长尾数格式在[0,1]区间原生高精度, 无需预放大
+    constexpr bool IS_HIF8 = IsSameType<INPUT_T, hifloat8_t>::value;
+    constexpr float P_SCALE = IS_HIF8 ? 1.0f : 448.0f;
     MaskReg all = CreateMask<float, MaskPattern::ALL>();
     MaskReg bytes = CreateMask<uint8_t, MaskPattern::ALL>();
     uint32_t outCount = 128U;
-    MaskReg outMask = UpdateMask<fp8_e4m3fn_t>(outCount);
+    MaskReg outMask = UpdateMask<INPUT_T>(outCount);
     RegTensor<float> x0, x1, x2, x3, factor, maximum, tmp, minusInf;
     RegTensor<float> e0, e1, e2, e3, sum;
-    RegTensor<fp8_e4m3fn_t> c0, c1, packed, ordered;
+    RegTensor<INPUT_T> c0, c1, packed, ordered;
     RegTensor<uint8_t> idx;
     LoadAlign(idx, indices);
     Duplicate(minusInf, -3.402823466e38f);
@@ -227,24 +230,34 @@ __simd_vf__ inline void QfmlaSoftmax256(__ubuf__ fp8_e4m3fn_t* out, __ubuf__ flo
         Add(sum, sum, tmp, all);
         Reduce<ReduceType::SUM, float, float, MaskMergeMode::ZEROING>(sum, sum, all);
         StoreUnAlign<float, PostLiteral::POST_MODE_UPDATE>(sumWrite, sum, sumStore, 1);
-        Muls(e0, e0, 448.0f, all);
-        Muls(e1, e1, 448.0f, all);
-        Cast<fp8_e4m3fn_t, float, castTraitRintZero>(c0, e0, all);
-        Cast<fp8_e4m3fn_t, float, castTraitRintTwo>(c1, e1, all);
+        Muls(e0, e0, P_SCALE, all);
+        Muls(e1, e1, P_SCALE, all);
+        if constexpr (IS_HIF8) {
+            Cast<INPUT_T, float, castTraitZero>(c0, e0, all);
+            Cast<INPUT_T, float, castTraitTwo>(c1, e1, all);
+        } else {
+            Cast<INPUT_T, float, castTraitRintZero>(c0, e0, all);
+            Cast<INPUT_T, float, castTraitRintTwo>(c1, e1, all);
+        }
         Or((RegTensor<uint8_t>&)packed, (RegTensor<uint8_t>&)c0, (RegTensor<uint8_t>&)c1, bytes);
         Gather(ordered, packed, idx);
         auto out0 = out + i * 32U + 0U;
-        StoreAlign<fp8_e4m3fn_t, DataCopyMode::DATA_BLOCK_COPY, PostLiteral::POST_MODE_UPDATE>(out0, ordered, 33U, 1U,
-                                                                                               outMask);
-        Muls(e2, e2, 448.0f, all);
-        Muls(e3, e3, 448.0f, all);
-        Cast<fp8_e4m3fn_t, float, castTraitRintZero>(c0, e2, all);
-        Cast<fp8_e4m3fn_t, float, castTraitRintTwo>(c1, e3, all);
+        StoreAlign<INPUT_T, DataCopyMode::DATA_BLOCK_COPY, PostLiteral::POST_MODE_UPDATE>(out0, ordered, 33U, 1U,
+                                                                                          outMask);
+        Muls(e2, e2, P_SCALE, all);
+        Muls(e3, e3, P_SCALE, all);
+        if constexpr (IS_HIF8) {
+            Cast<INPUT_T, float, castTraitZero>(c0, e2, all);
+            Cast<INPUT_T, float, castTraitTwo>(c1, e3, all);
+        } else {
+            Cast<INPUT_T, float, castTraitRintZero>(c0, e2, all);
+            Cast<INPUT_T, float, castTraitRintTwo>(c1, e3, all);
+        }
         Or((RegTensor<uint8_t>&)packed, (RegTensor<uint8_t>&)c0, (RegTensor<uint8_t>&)c1, bytes);
         Gather(ordered, packed, idx);
         auto out1 = out + i * 32U + 4224U;
-        StoreAlign<fp8_e4m3fn_t, DataCopyMode::DATA_BLOCK_COPY, PostLiteral::POST_MODE_UPDATE>(out1, ordered, 33U, 1U,
-                                                                                               outMask);
+        StoreAlign<INPUT_T, DataCopyMode::DATA_BLOCK_COPY, PostLiteral::POST_MODE_UPDATE>(out1, ordered, 33U, 1U,
+                                                                                          outMask);
     }
     StoreUnAlignPost<float, PostLiteral::POST_MODE_UPDATE>(sumWrite, sumStore, 0);
 }
@@ -286,6 +299,9 @@ public:
     static constexpr bool IS_PER_TOKEN_HEAD = true;
     // MLA全量化: Q per-token-head descale, TND下[T, N1]排布(TNG)
     static constexpr GmFormat Q_SCALE_FORMAT = GetQueryScaleGmFormat<layout, USE_DN, IS_PER_TOKEN_HEAD, true>();
+    // cu 表前导0只存在于TND类布局(GM_ANTIQ_TN); BSND/BNSD按BY_BATCH解析, 无需该标志
+    static constexpr bool Q_SCALE_WITH_ZERO_HEAD =
+        (GmLayoutParams<Q_SCALE_FORMAT>::CATEGORY == FormatCategory::GM_ANTIQ_TN);
 
     static constexpr bool POST_QUANT = !IsSameType<OUTPUT_T, half>::value && !IsSameType<OUTPUT_T, bfloat16_t>::value &&
                                        !IsSameType<OUTPUT_T, float>::value;
@@ -301,8 +317,8 @@ public:
     using MM2_OUT_T = T;
     using OUT_T = OUTPUT_T;
 
-    // Q: TND, cu_seq(含前导0)+seq_used, int32
-    using QSeqParserType = ActualSeqLensParser<ActualSeqLensMode::ACCUM, int32_t, true>;
+    // Q: TND用ACCUM(cu_seq含前导0+seq_used); BSND/BNSD用BY_BATCH(seqused_q)——Q_MODE见L275
+    using QSeqParserType = ActualSeqLensParser<Q_MODE, int32_t, Q_MODE == ActualSeqLensMode::ACCUM>;
 
     /* =====================核间同步ID（与cube block一致）==================== */
     // Cross-core sync (CROSS_CORE_SYNC_MODE = 4)
@@ -314,6 +330,10 @@ public:
     static constexpr uint32_t CC_L1P_0 = 4U; // L1 P slot 0 (AIV→AIC)
     static constexpr uint32_t CC_L1P_1 = 5U;
     static constexpr uint32_t CC_L1P_2 = 6U;
+    // L1 P slot反向同步(AIC→AIC消费完成→AIV可覆写), 独立ID避免与就绪标志混用
+    static constexpr uint32_t CC_L1P_FREE_0 = 7U;
+    static constexpr uint32_t CC_L1P_FREE_1 = 8U;
+    static constexpr uint32_t CC_L1P_FREE_2 = 9U;
 
     // Vec internal Mutex/Event IDs
     // Mutex ID 和 SetFlag/WaitFlag Event ID 共享同一硬件池(0-27)
@@ -327,6 +347,15 @@ public:
     static constexpr uint32_t UB_IN_MASK_EVENT1 = 7;      // (Mutex)
     static constexpr uint32_t UB_IN_QSCALE_EVENT0 = 8;    // Q scale input MTE2↔V (SetFlag)
     static constexpr uint32_t UB_IN_QSCALE_EVENT1 = 9;    // (SetFlag)
+    // stage1Out(P)单buffer的MTE3→V拷贝完成通知: V(i+1)写stage1Out前必须等MTE3(i)拷贝完成(防V覆写未读)。
+    // E2 mutex不保证获取顺序, 硬件flag是V队列内的硬依赖。init时预置一次(arm), 此后每次copy后re-arm。
+    static constexpr uint32_t UB_STAGE1_COPIED_EVENT = 11; // (SetFlag: MTE3 → V)
+    // bug4("MTE3偷V"): E2/E0 mutex只保证互斥、不保证获取顺序 —— V队列积压而MTE3队列空闲时,
+    // MTE3的Lock可先于V的Lock执行, 拷贝读到V尚未写入的旧数据。增加V→MTE3方向数据就绪flag:
+    // V侧写完成后Set, MTE3侧读之前Wait。Wait必须置于Mutex Lock之前, 否则MTE3持锁等V、
+    // V的Lock被mutex阻塞 → 死锁。无需pre-arm: 每轮V先写MTE3后读, Set/Wait逐次配对。
+    static constexpr uint32_t UB_STAGE1_READY_EVENT = 12;   // stage1Out softmax写入就绪 (SetFlag: V → MTE3)
+    static constexpr uint32_t UB_VEC2_OUT_READY_EVENT = 13; // vec2输出Cast写入就绪 (SetFlag: V → MTE3)
 
     /* =====================Buffer尺寸常量==================== */
     // UB cross-core region (same as cube block)
@@ -367,7 +396,7 @@ public:
     GlobalTensor<float> deScaleQGm_;
     GlobalTensor<float> deScaleKGm_;
     GlobalTensor<float> deScaleVGm_;
-    FaGmTensor<float, Q_SCALE_FORMAT, int32_t, true> queryScaleGm_;
+    FaGmTensor<float, Q_SCALE_FORMAT, int32_t, Q_SCALE_WITH_ZERO_HEAD> queryScaleGm_;
     CopyQueryScaleGmToUb<float, Q_SCALE_FORMAT> copyQueryScaleGmToUb_;
     flashdecodeGmType accumOutGm_;
     flashdecodeGmType softmaxFDSumGm_;
@@ -462,14 +491,18 @@ public:
         }
     }
 
-    __aicore__ inline void InitQScaleBuffer(uint32_t batchSize, uint32_t n2Size, uint32_t gSize, uint32_t qSeqSize,
-                                            uint32_t headDim,
-                                            FaGmTensor<float, Q_SCALE_FORMAT, int32_t, true>& qScaleGmTensor,
-                                            __gm__ uint8_t* gm)
+    __aicore__ inline void InitQScaleBuffer(
+        uint32_t batchSize, uint32_t n2Size, uint32_t gSize, uint32_t qSeqSize, uint32_t headDim,
+        FaGmTensor<float, Q_SCALE_FORMAT, int32_t, Q_SCALE_WITH_ZERO_HEAD>& qScaleGmTensor, __gm__ uint8_t* gm)
     {
         qScaleGmTensor.gmTensor.SetGlobalBuffer((__gm__ float*)gm);
         if constexpr (GmLayoutParams<Q_SCALE_FORMAT>::CATEGORY == FormatCategory::GM_ANTIQ_TN) {
+            // TNG: descale[T, N1], 按累积T索引
             qScaleGmTensor.offsetCalculator.Init(n2Size, gSize, *qSeqParserPtr_);
+        } else { // BSNGD/BNGSD: descale按输入layout为[B,S,N1]/[B,N1,S], d维=1
+            // 必须传入已初始化的qSeqParserPtr_: BNGSD路径ProcessBNGSD依赖parser的
+            // GetActualSeqLength区分紧凑/非紧凑拷贝, 空parser会返回0导致除零崩设备
+            qScaleGmTensor.offsetCalculator.Init(batchSize, n2Size, gSize, qSeqSize, headDim, *qSeqParserPtr_);
         }
     }
 
@@ -511,7 +544,7 @@ public:
             uint8_t bmm2Res[UB_MM2_RES_BUFCNT][UB_MM2_RES_BUF_BYTES]; // 2 * 65536 = 131072
             /* Vec-specific region */
             uint8_t stage2Out[UB_STAGE2_OUT_BUF_BYTES];                       // 65536
-            uint8_t stage1Out[UB_STAGE1_OUT_BUFCNT][UB_STAGE1_OUT_BUF_BYTES]; // 2 * 4224 = 8448
+            uint8_t stage1Out[UB_STAGE1_OUT_BUFCNT][UB_STAGE1_OUT_BUF_BYTES]; // 1 * 8448
             uint8_t maskIn[UB_MASK_BUFCNT][UB_MASK_BUF_BYTES];                // 2 * 4096 = 8192
             uint8_t softmaxSum[UB_SOFTMAX_BUFCNT][UB_SOFTMAX_BUF_BYTES];      // 3 * 256 = 768
             uint8_t softmaxMax[UB_SOFTMAX_BUFCNT][UB_SOFTMAX_BUF_BYTES];      // 3 * 256 = 768
@@ -602,12 +635,16 @@ public:
         // Pre-arm: V→MTE2 for Q scale (initial state: V "done" so MTE2 can proceed)
         SetFlag<HardEvent::V_MTE2>(UB_IN_QSCALE_EVENT0);
         SetFlag<HardEvent::V_MTE2>(UB_IN_QSCALE_EVENT1);
+        // Pre-arm: MTE3→V for stage1Out copy-done (initial state: "copied" so首次softmax写不必等待)
+        SetFlag<HardEvent::MTE3_V>(UB_STAGE1_COPIED_EVENT);
     }
 
     __aicore__ inline void FreeEventID()
     {
         WaitFlag<HardEvent::V_MTE2>(UB_IN_QSCALE_EVENT0);
         WaitFlag<HardEvent::V_MTE2>(UB_IN_QSCALE_EVENT1);
+        // 消耗最后一次copy留下的re-arm, 保持flag配对平衡
+        WaitFlag<HardEvent::MTE3_V>(UB_STAGE1_COPIED_EVENT);
     }
 
     __aicore__ inline void InitCrossCoreSync()
@@ -790,21 +827,26 @@ public:
         auto stage1CastTensor =
             stage1OutBufs_[stage1Offset * UB_STAGE1_OUT_BUF_BYTES].template ReinterpretCast<INPUT_T>();
 
+        // bug4修复: 单buffer下V(i+1)写stage1Out前必须等MTE3(i)的P拷贝完成。
+        // Wait为V队列硬依赖, 先于softmax写; flag由MTE3侧copy后Set, init预arm, skip轮次两侧对称跳过。
+        if (likely(runInfo.actVecMSize != 0)) {
+            WaitFlag<HardEvent::MTE3_V>(UB_STAGE1_COPIED_EVENT);
+        }
         Mutex::Lock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + stage1Offset);
 
         uint32_t s2CalcSize = runInfo.actSingleLoopS2Size;
         auto idx = vselrIndexesBuf_[static_cast<int>(VselrIndexEnum::GT_64_AND_LTE_128_INDEX)].template Get<uint8_t>();
         auto tmp = apiTmpBuffer.template ReinterpretCast<float>();
         if (runInfo.isFirstS2Loop) {
-            QfmlaSoftmax256<true, HAS_MASK>(
-                (__ubuf__ fp8_e4m3fn_t*)stage1CastTensor.GetPhyAddr(), (__ubuf__ float*)mmRes.GetPhyAddr(),
+            QfmlaSoftmax256<INPUT_T, true, HAS_MASK>(
+                (__ubuf__ INPUT_T*)stage1CastTensor.GetPhyAddr(), (__ubuf__ float*)mmRes.GetPhyAddr(),
                 (__ubuf__ float*)queryScaleUb.GetPhyAddr(), (__ubuf__ float*)maxUb.GetPhyAddr(),
                 (__ubuf__ float*)maxUb.GetPhyAddr(), (__ubuf__ float*)sumUb.GetPhyAddr(),
                 (__ubuf__ uint8_t*)attenMaskUb.GetPhyAddr(), (__ubuf__ uint8_t*)idx.GetPhyAddr(), runInfo.actVecMSize,
                 s2CalcSize, constInfo_.scaleValue, deScaleKValue_);
         } else {
-            QfmlaSoftmax256<false, HAS_MASK>(
-                (__ubuf__ fp8_e4m3fn_t*)stage1CastTensor.GetPhyAddr(), (__ubuf__ float*)mmRes.GetPhyAddr(),
+            QfmlaSoftmax256<INPUT_T, false, HAS_MASK>(
+                (__ubuf__ INPUT_T*)stage1CastTensor.GetPhyAddr(), (__ubuf__ float*)mmRes.GetPhyAddr(),
                 (__ubuf__ float*)queryScaleUb.GetPhyAddr(), (__ubuf__ float*)maxUb.GetPhyAddr(),
                 (__ubuf__ float*)tmp[64].GetPhyAddr(), (__ubuf__ float*)tmp.GetPhyAddr(),
                 (__ubuf__ uint8_t*)attenMaskUb.GetPhyAddr(), (__ubuf__ uint8_t*)idx.GetPhyAddr(), runInfo.actVecMSize,
@@ -818,7 +860,21 @@ public:
 
         // ===================DataCopy to L1 ====================
         Mutex::Unlock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + stage1Offset);
+        // bug4修复("MTE3偷V"): V侧softmax写入完成通知, SetFlag入V队列, 严格晚于softmax完成才置位
+        SetFlag<HardEvent::V_MTE3>(UB_STAGE1_READY_EVENT);
+        // bug4修复("MTE3偷V"): MTE3读stage1Out前必须等V(i)softmax写入完成。
+        // E2 mutex只保证互斥不保证获取顺序: V队列积压而MTE3空闲时, MTE3的Lock可抢在V的Lock
+        // 之前执行, DataCopy读到上一轮旧P。WaitFlag是MTE3队列硬依赖, 且必须置于Lock之前 ——
+        // 若置于Lock之后, MTE3偷到mutex后持锁等V, 而V的Lock被mutex阻塞, 将死锁
+        WaitFlag<HardEvent::V_MTE3>(UB_STAGE1_READY_EVENT);
+        // bug4修复: 必须先获取E2再等L1P_FREE flag —— 若Wait插在V释放与MTE3获取之间,
+        // MTE3队列停顿期间E2无主, 下一任务Vec1的softmax(V侧Lock E2写stage1Out)会偷走mutex,
+        // 导致本任务P拷贝(d)读到下一任务的数据(stage1Out单buffer). 获取后持锁等flag,
+        // V(L+1)的Lock会阻塞到(e)释放, 恰为单buffer语义要求的正确串行化.
         Mutex::Lock<PIPE_MTE3>(UB_OUT_VEC1_RES_EVENT0 + stage1Offset);
+        // 等待AIC Mm2消费完本slot上一轮(loop-3)的P后才可覆写(AIC→AIV反向同步, bug3修复),
+        // Wait入MTE3队列排在P的DataCopy之前, 不阻塞V pipe的softmax计算
+        CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE3>(CC_L1P_FREE_0 + runInfo.loop % L1_P_BUFCNT);
 
         LocalTensor<INPUT_T> mm2AL1Tensor = pL1Tensor;
         if (likely(runInfo.actVecMSize != 0)) {
@@ -826,6 +882,9 @@ public:
             DataCopy(mm2AL1Tensor[dstOffset], stage1CastTensor,
                      {s2BaseSize / 32, (uint16_t)runInfo.actVecMSize, (uint16_t)(vec1Srcstride - runInfo.actVecMSize),
                       (uint16_t)(mBaseSize - runInfo.actVecMSize)});
+            // bug4修复: P拷贝入队后re-arm完成通知(MTE3队列内序于DataCopy之后),
+            // 与V侧softmax前的Wait配对, 保证单buffer读先于下一次写
+            SetFlag<HardEvent::MTE3_V>(UB_STAGE1_COPIED_EVENT);
         }
 
         Mutex::Unlock<PIPE_MTE3>(UB_OUT_VEC1_RES_EVENT0 + stage1Offset);
@@ -885,11 +944,28 @@ public:
         Mutex::Unlock<PIPE_V>(UB_OUT_LSE_OUT_EVENT0 + lseOutUbBufId_);
 
         Mutex::Lock<PIPE_MTE3>(UB_OUT_LSE_OUT_EVENT0 + lseOutUbBufId_);
-        // 新接口LSE输出统一为NT格式[N2*G, T]
-        uint32_t prefixBS1 = qSeqParserPtr_->GetTBase(runInfo.bIdx);
-        uint64_t bN2Offset = runInfo.realN2Idx * constInfo_.realGSize * constInfo_.t1Size + prefixBS1;
-        DataCopySoftmaxLseTNDtoNTArch35NoGS1Merge<T, ConstInfoX>(softmaxLseGm_, lseUb, bN2Offset, vecMIdx,
-                                                                 gmDealRowCount, constInfo_);
+        if constexpr (Q_MODE == ActualSeqLensMode::ACCUM) {
+            // TND输入: LSE输出为NT格式[N2*G, T]
+            uint32_t prefixBS1 = qSeqParserPtr_->GetTBase(runInfo.bIdx);
+            uint64_t bN2Offset = runInfo.realN2Idx * constInfo_.realGSize * constInfo_.t1Size + prefixBS1;
+            DataCopySoftmaxLseTNDtoNTArch35NoGS1Merge<T, ConstInfoX>(softmaxLseGm_, lseUb, bN2Offset, vecMIdx,
+                                                                     gmDealRowCount, constInfo_);
+        } else {
+            // BSND/BNSD输入: LSE输出为BNS[B,N1,S1]
+            uint64_t bN2Offset =
+                (uint64_t)runInfo.bIdx * constInfo_.realN2Size * constInfo_.realGSize * constInfo_.s1Size +
+                (uint64_t)runInfo.realN2Idx * constInfo_.realGSize * constInfo_.s1Size;
+            if constexpr (layout == LayOutTypeEnum::LAYOUT_BSH) {
+                // UB为S1G序(m = s1*G + g)
+                DataCopySoftmaxLseBSNDArch35<T, ConstInfoX>(softmaxLseGm_, lseUb, bN2Offset, vecMIdx, gmDealRowCount,
+                                                            constInfo_);
+            } else {
+                // BNSD输入: UB为GS1序(m = g*actS1 + s1)
+                DataCopySoftmaxLseBNSDArch35<T, ConstInfoX>(softmaxLseGm_, lseUb, bN2Offset, vecMIdx, gmDealRowCount,
+                                                            constInfo_,
+                                                            qSeqParserPtr_->GetActualSeqLength(runInfo.bIdx));
+            }
+        }
         Mutex::Unlock<PIPE_MTE3>(UB_OUT_LSE_OUT_EVENT0 + lseOutUbBufId_);
         lseOutUbBufId_ = (lseOutUbBufId_ + 1) % UB_LSE_OUT_BUFCNT;
     }
@@ -955,31 +1031,44 @@ public:
 
         auto exp = softmaxExpBuf_[(runInfo.loop % 3U) * UB_SOFTMAX_BUF_ELEMS];
         auto sum = softmaxSumBuf_[(runInfo.mloop % 3U) * UB_SOFTMAX_BUF_ELEMS];
+        // FP8: vec1侧P曾乘448预放大, 此处除回; HIF8: 未预放大, 直接用v descale
+        constexpr bool IS_HIF8 = IsSameType<INPUT_T, hifloat8_t>::value;
+        float deScaleV = IS_HIF8 ? deScaleVValue_ : deScaleVValue_ / 448.0f;
         Mutex::Lock<PIPE_V>(UB_OUT_VEC2_RES_EVENT0);
         if (runInfo.isFirstS2Loop) {
             if (runInfo.isLastS2Loop) {
                 QfmlaOutputUpdate<true, true>((__ubuf__ float*)vec2ResUb.GetPhyAddr(),
                                               (__ubuf__ float*)mmRes.GetPhyAddr(), (__ubuf__ float*)exp.GetPhyAddr(),
-                                              (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleVValue_ / 448.0f);
+                                              (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleV);
             } else {
                 QfmlaOutputUpdate<true, false>((__ubuf__ float*)vec2ResUb.GetPhyAddr(),
                                                (__ubuf__ float*)mmRes.GetPhyAddr(), (__ubuf__ float*)exp.GetPhyAddr(),
-                                               (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleVValue_ / 448.0f);
+                                               (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleV);
             }
         } else {
             if (runInfo.isLastS2Loop) {
                 QfmlaOutputUpdate<false, true>((__ubuf__ float*)vec2ResUb.GetPhyAddr(),
                                                (__ubuf__ float*)mmRes.GetPhyAddr(), (__ubuf__ float*)exp.GetPhyAddr(),
-                                               (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleVValue_ / 448.0f);
+                                               (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleV);
             } else {
                 QfmlaOutputUpdate<false, false>((__ubuf__ float*)vec2ResUb.GetPhyAddr(),
                                                 (__ubuf__ float*)mmRes.GetPhyAddr(), (__ubuf__ float*)exp.GetPhyAddr(),
-                                                (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleVValue_ / 448.0f);
+                                                (__ubuf__ float*)sum.GetPhyAddr(), vecMSize, deScaleV);
             }
         }
         Mutex::Unlock<PIPE_V>(UB_OUT_VEC2_RES_EVENT0);
         CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_V>(mmSyncIdx);
         if (runInfo.isLastS2Loop) {
+            if constexpr (FLASH_DECODE) {
+                if (runInfo.isS2SplitCore) {
+                    // bug5修复("MTE3偷V" FD路径): V侧QfmlaOutputUpdate(含last=true的Div(dst,sum))写入
+                    // 完成后, 才允许MTE3把vec2ResUb拷入accumOut workspace。E0 mutex只保证互斥不保证
+                    // 获取顺序(见Bmm2ResCastAndCopyOut bug4修复注释), MTE3空闲时其Lock可抢在V写入
+                    // 生效前执行, 把未完成Div的旧累计值当段输出写入workspace, FD combine加权后表现为
+                    // 加性精度噪声(时序相关, 与b23/BNSD 32B精度失败现象吻合)
+                    SetFlag<HardEvent::V_MTE3>(UB_VEC2_OUT_READY_EVENT);
+                }
+            }
             CopyOutAttentionOut(runInfo, vec2ResUb, 0, vecMSize);
         }
     }
@@ -1010,7 +1099,13 @@ public:
         RowInvalid(vec2ResUb, mStartVec, mDealSize, runInfo, dSizeAligned64);
         Cast(attenOut, vec2ResUb, RoundMode::CAST_ROUND, mDealSize * dSizeAligned64);
         Mutex::Unlock<PIPE_V>(UB_OUT_VEC2_RES_EVENT0);
+        // bug4修复("MTE3偷V"): V侧Cast写入完成通知, 与下方MTE3侧Wait配对
+        SetFlag<HardEvent::V_MTE3>(UB_VEC2_OUT_READY_EVENT);
 
+        // bug4修复("MTE3偷V"): MTE3拷出前必须等V侧Cast写入完成。E0 mutex不保证获取顺序,
+        // MTE3空闲时其Lock可抢在V的Cast之前执行, 把未Cast的累计值当最终输出拷出, 直接污染输出。
+        // Wait置于Lock之前, 避免MTE3持锁等V(V的Lock被mutex阻塞)死锁
+        WaitFlag<HardEvent::V_MTE3>(UB_VEC2_OUT_READY_EVENT);
         Mutex::Lock<PIPE_MTE3>(UB_OUT_VEC2_RES_EVENT0);
         Bmm2DataCopyOutTrans(runInfo, attenOut, mStartVec, mDealSize);
         Mutex::Unlock<PIPE_MTE3>(UB_OUT_VEC2_RES_EVENT0);
@@ -1077,6 +1172,10 @@ public:
         uint64_t gmOffset = runInfo.faTmpOutWsPos * mBaseSize * constInfo_.dSizeV +
                             (runInfo.vecMbaseIdx + mStartVec) * constInfo_.dSizeV;
 
+        // bug5修复("MTE3偷V" FD路径): MTE3拷出前必须等V侧QfmlaOutputUpdate写入完成,
+        // 与ProcessVec2OnUb的SetFlag<V_MTE3>配对(仅isS2SplitCore路径使用, 每任务Set/Wait各一次配平)。
+        // Wait置于Lock之前, 与Bmm2ResCastAndCopyOut bug4修复模式一致
+        WaitFlag<HardEvent::V_MTE3>(UB_VEC2_OUT_READY_EVENT);
         Mutex::Lock<PIPE_MTE3>(UB_OUT_VEC2_RES_EVENT0);
         DataCopyExtParams dataCopyParams;
         dataCopyParams.blockCount = mDealSize;
@@ -1129,10 +1228,20 @@ public:
             copyAttenOutUbToGm(outGmTensor, ubTensor, gmCoord);
         } else { // BNSD
             constexpr GmFormat OUT_FORMAT = GmFormat::BNGSD;
-            FaGmTensor<OUTPUT_T, OUT_FORMAT> outGmTensor;
+            // ACTLEN_T必须为int32_t以匹配qSeqParserPtr_(ActualSeqLensParser<BY_BATCH,int32_t>)类型
+            FaGmTensor<OUTPUT_T, OUT_FORMAT, int32_t> outGmTensor;
             outGmTensor.gmTensor = attentionOutGm_;
-            outGmTensor.offsetCalculator.Init(constInfo_.bSize, constInfo_.realN2Size, constInfo_.realGSize,
-                                              constInfo_.s1Size, constInfo_.dSizeV);
+            if constexpr (Q_MODE == ActualSeqLensMode::BY_BATCH) {
+                // BNSD输入: UB行序为GS1(m=g*actS1+s1), CopyAttenOutUbToGm<GS1>需按actualSeqLens分解m序,
+                // 不等长batch(actS1<s1Size)时若用padded s1Size分解会导致输出写回错位
+                outGmTensor.offsetCalculator.Init(constInfo_.bSize, constInfo_.realN2Size, constInfo_.realGSize,
+                                                  constInfo_.s1Size, constInfo_.dSizeV, *qSeqParserPtr_);
+            } else {
+                // TND输入(TND_BNSD组合): UB行序为S1G(m=s1*G+g), CopyAttenOutUbToGm<S1G>
+                // 不依赖parser分解, 5参Init即可; 且ACCUM parser与BNGSD的6参Init类型不匹配
+                outGmTensor.offsetCalculator.Init(constInfo_.bSize, constInfo_.realN2Size, constInfo_.realGSize,
+                                                  constInfo_.s1Size, constInfo_.dSizeV);
+            }
             CopyAttenOutUbToGm<OUTPUT_T, OUT_FORMAT, GetOutUbFormat<layout>()> copyAttenOutUbToGm;
             copyAttenOutUbToGm(outGmTensor, ubTensor, gmCoord);
         }

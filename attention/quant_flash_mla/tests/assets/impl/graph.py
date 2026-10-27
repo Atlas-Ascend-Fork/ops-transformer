@@ -158,5 +158,8 @@ class QuantMlaAclGraph(torch.nn.Module):
         )
 
         if not self.return_softmax_lse:
-            lse_out = None
+            # 未启用 lse 时返回 None 会被框架判 NO_OUTPUT(非 VALID), 导致跳过
+            # 插件 compare 回落内置三方判据(需 XPU third_party)。用空张量占位
+            # 保持输出槽 VALID, 由 compare 判该通道 N/A, 与 EAGER 行为一致。
+            lse_out = torch.empty(0, dtype=torch.float32, device=attn_out.device)
         return attn_out, lse_out

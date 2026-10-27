@@ -67,12 +67,24 @@ ge::graphStatus SoftmaxLSEChecker::CheckMultiPara(const QfmlaTilingInfo& qfmlaIn
                                                   "When return_softmax_lse is True, softmax_lse must not be empty"),
             return ge::GRAPH_FAILED);
         const auto& lseShape = qfmlaInfo.opParamInfo.softmaxLse.shape->GetStorageShape();
-        OP_CHECK_IF(lseShape.GetDimNum() != 2 || static_cast<int64_t>(lseShape.GetDim(0)) != qfmlaInfo.n1Size ||
-                        static_cast<int64_t>(lseShape.GetDim(1)) != qfmlaInfo.qTSize,
-                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                        opName, SOFTMAX_LSE_NAME, ToString(lseShape).c_str(),
-                        "When return_softmax_lse is True and layout_q is TND, softmax_lse shape must be (Q_N, Q_T)"),
-                    return ge::GRAPH_FAILED);
+        // TND: (Q_N, Q_T); BSND/BNSD: (B, Q_N, Q_S)
+        if (qfmlaInfo.layoutQ == QfmlaLayout::TND) {
+            OP_CHECK_IF(
+                lseShape.GetDimNum() != 2 || static_cast<int64_t>(lseShape.GetDim(0)) != qfmlaInfo.n1Size ||
+                    static_cast<int64_t>(lseShape.GetDim(1)) != qfmlaInfo.qTSize,
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    opName, SOFTMAX_LSE_NAME, ToString(lseShape).c_str(),
+                    "When return_softmax_lse is True and layout_q is TND, softmax_lse shape must be (Q_N, Q_T)"),
+                return ge::GRAPH_FAILED);
+        } else {
+            OP_CHECK_IF(lseShape.GetDimNum() != 3 || static_cast<int64_t>(lseShape.GetDim(0)) != qfmlaInfo.bSize ||
+                            static_cast<int64_t>(lseShape.GetDim(1)) != qfmlaInfo.n1Size ||
+                            static_cast<int64_t>(lseShape.GetDim(2)) != qfmlaInfo.s1Size,
+                        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(opName, SOFTMAX_LSE_NAME, ToString(lseShape).c_str(),
+                                                              "When return_softmax_lse is True and layout_q is "
+                                                              "BSND/BNSD, softmax_lse shape must be (B, Q_N, Q_S)"),
+                        return ge::GRAPH_FAILED);
+        }
     } else if (qfmlaInfo.opParamInfo.softmaxLse.shape != nullptr) {
         const auto& lseShape = qfmlaInfo.opParamInfo.softmaxLse.shape->GetStorageShape();
         OP_CHECK_IF(

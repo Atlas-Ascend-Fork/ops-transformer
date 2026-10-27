@@ -34,8 +34,10 @@ import torchair as tng
 
 if __package__:
     from . import result_compare_method
+    from . import generate_hifloat8_data as hif8_codec
 else:
     import result_compare_method
+    import generate_hifloat8_data as hif8_codec
 
 try:
     from cann_ops_transformer_qfmla.ops.attention.quant_flash_mla import (
@@ -131,7 +133,7 @@ P_SCALE = 1.0
 EPSILON = 1e-20
 
 Q_BLOCK_SIZE = 64
-KV_BLOCK_SIZE = 128
+KV_BLOCK_SIZE = 256
 
 # 物理 block 数量，0 表示使用默认值（等于 total_blocks）
 NUM_BLOCKS = 0
@@ -171,6 +173,70 @@ def quant_fp16_to_fp8(tensor, scale):
     result = tensor.float() * scale
     result = torch.clamp(result, -448.0, 448.0)
     return result.to(FP8_DTYPE).contiguous()
+
+
+# ==============================================================================
+# HIF8 量化 (quant_mode=0): torch 无原生 hifloat8 dtype, 以 uint8 承载 hif8 编码
+#   Q: per-token-head (整 576 维, 与 fp8 一致不降级), K/V: per-tensor
+#   scale 语义与 fp8 相同: 量化时乘 scale (scale = HIF8_MAX/row_max), 反量化乘 1/scale
+# ==============================================================================
+HIF8_MAX = 32768.0
+
+
+def _is_hif8_mode():
+    return QFMLA_QUANT_MODE == 0
+
+
+def get_hif8_per_token_head_quant_scale(tensor):
+    """hif8 per-token-head scale: shape (B, N, S, 1)"""
+    tensor = tensor.contiguous()
+    B, N, S, _ = tensor.shape
+    row_max = torch.abs(tensor.float()).max(dim=3, keepdim=True).values
+    row_max = torch.max(row_max, torch.tensor(1e-8, device=tensor.device))
+    scale = HIF8_MAX / row_max
+    return scale.view(B, N, S, 1).float().contiguous()
+
+
+def get_hif8_per_tensor_quant_scale(tensor):
+    """hif8 per-tensor scale: shape (1,)"""
+    tensor = tensor.contiguous()
+    tensor_max = torch.abs(tensor.float()).max()
+    tensor_max = torch.max(tensor_max, torch.tensor(1e-8, device=tensor.device))
+    scale = HIF8_MAX / tensor_max
+    return scale.reshape(1).float().contiguous()
+
+
+def quant_fp16_to_hif8(tensor, scale):
+    """fp16/bf16 → hif8 编码 uint8 (CPU 编码后移回原 device)"""
+    tensor = tensor.contiguous()
+    scale = scale.contiguous()
+    device = tensor.device
+    scaled = (tensor.cpu().float() * scale.cpu()).contiguous()
+    out = hif8_codec.trans_float_tensor_to_hifuint8(
+        scaled, round_mode="round", over_mode=True
+    )
+    return out.to(device).contiguous()
+
+
+def hif8_dequant_to_float(tensor_u8):
+    """hif8 编码 uint8 → float32 (CPU 解码后移回原 device)"""
+    device = tensor_u8.device
+    out = hif8_codec.trans_hifuint8_tensor_to_float(
+        tensor_u8.cpu().contiguous(), over_mode=True
+    )
+    return out.to(device).contiguous()
+
+
+def hif8_cast_p(p_tensor):
+    """模拟 NPU 的 P→HIF8 量化损失 (hif8 变长尾数在 [0,1] 区间原生高精度, 无预放大)"""
+    device = p_tensor.device
+    out = hif8_codec.trans_hifuint8_tensor_to_float(
+        hif8_codec.trans_float_tensor_to_hifuint8(
+            p_tensor.cpu().contiguous(), round_mode="round", over_mode=True
+        ),
+        over_mode=True,
+    )
+    return out.to(device).contiguous()
 
 
 # ==============================================================================
@@ -239,7 +305,7 @@ def bnsd_to_k_cache(
 
     out_cache = torch.zeros(
         (cache_blocks, N_dim, block_size, D_dim),
-        dtype=FP8_DTYPE,
+        dtype=k_fp8_bnsd.dtype,
         device=k_fp8_bnsd.device,
     ).contiguous()
 
@@ -271,7 +337,7 @@ def bnsd_to_v_cache(
     cache_blocks = num_blocks if num_blocks != 0 else total_blocks
 
     out_cache = torch.zeros(
-        (cache_blocks, heads, block_size, dim), dtype=FP8_DTYPE, device=device
+        (cache_blocks, heads, block_size, dim), dtype=tensor_bnsd.dtype, device=device
     ).contiguous()
 
     for b in range(batch):
@@ -376,16 +442,29 @@ def generate_data(device="npu"):
     ).contiguous()
 
     # 量化: Q per-token-head (整 D 维), K per-tensor (整 D 维)
-    quant_scale_q = get_fp8_per_token_head_quant_scale(q_fp16)
-    quant_scale_k = get_fp8_per_tensor_quant_scale(k_fp16)
+    # HIF8: 编码为 uint8 承载; FP8: torch.float8_e4m3fn
+    if _is_hif8_mode():
+        quant_scale_q = get_hif8_per_token_head_quant_scale(q_fp16)
+        quant_scale_k = get_hif8_per_tensor_quant_scale(k_fp16)
 
-    dequant_scale_q = (1.0 / quant_scale_q).contiguous()
-    dequant_scale_k = (1.0 / quant_scale_k).contiguous()
-    # MLA: V 与 K 共享 per-tensor scale
-    dequant_scale_v = dequant_scale_k.contiguous()
+        dequant_scale_q = (1.0 / quant_scale_q).contiguous()
+        dequant_scale_k = (1.0 / quant_scale_k).contiguous()
+        # MLA: V 与 K 共享 per-tensor scale
+        dequant_scale_v = dequant_scale_k.contiguous()
 
-    q_fp8 = quant_fp16_to_fp8(q_fp16, quant_scale_q)
-    k_fp8 = quant_fp16_to_fp8(k_fp16, quant_scale_k)
+        q_fp8 = quant_fp16_to_hif8(q_fp16, quant_scale_q)
+        k_fp8 = quant_fp16_to_hif8(k_fp16, quant_scale_k)
+    else:
+        quant_scale_q = get_fp8_per_token_head_quant_scale(q_fp16)
+        quant_scale_k = get_fp8_per_tensor_quant_scale(k_fp16)
+
+        dequant_scale_q = (1.0 / quant_scale_q).contiguous()
+        dequant_scale_k = (1.0 / quant_scale_k).contiguous()
+        # MLA: V 与 K 共享 per-tensor scale
+        dequant_scale_v = dequant_scale_k.contiguous()
+
+        q_fp8 = quant_fp16_to_fp8(q_fp16, quant_scale_q)
+        k_fp8 = quant_fp16_to_fp8(k_fp16, quant_scale_k)
     # MLA: V 使用 K 的前 D_V 维 (head_dim_v=D_V, 即 nope 段)
     v_fp8 = k_fp8[:, :, :, :D_V].contiguous()
 
@@ -552,8 +631,13 @@ def pa_cache_to_bnsd(
     """
     k_bnbd = _pa_layout_to_bnbd(k_pa, kv_layout, n_kv=n_kv)
     v_bnbd = _pa_layout_to_bnbd(v_pa, kv_layout, n_kv=n_kv)
-    k_data = k_bnbd[:, :, :block_size, :].contiguous().float()
-    v_data = v_bnbd[:, :, :block_size, :].contiguous().float()
+    if _is_hif8_mode():
+        # HIF8: uint8 承载 hif8 编码, 需解码还原 float (不能直接 .float())
+        k_data = hif8_dequant_to_float(k_bnbd[:, :, :block_size, :].contiguous())
+        v_data = hif8_dequant_to_float(v_bnbd[:, :, :block_size, :].contiguous())
+    else:
+        k_data = k_bnbd[:, :, :block_size, :].contiguous().float()
+        v_data = v_bnbd[:, :, :block_size, :].contiguous().float()
 
     k_bnsd = _bnbd_to_bnsd(k_data, block_table, cache_seqlens, block_size)
     v_bnsd = _bnbd_to_bnsd(v_data, block_table, cache_seqlens, block_size)
@@ -845,10 +929,14 @@ def _fp8_fullquant_mla_golden_sectioned(
                             sij == float("-inf"), torch.zeros_like(pij), pij
                         )
                         s_blk = torch.sum(pij, dim=-1, keepdims=True)
-                        # MLA: P 直接量化 by 448 (匹配 kernel QfmlaSoftmax256 行为)
-                        pij_scaled = (
-                            (pij * fp8_e4m3_max).to(FP8_DTYPE).to(torch.float32)
-                        )
+                        # MLA rescale: FP8 P 乘 fp8 max 量化 (无 rowmax_p 重标定);
+                        # HIF8 变长尾数在 [0,1] 区间原生高精度, 无预放大
+                        if _is_hif8_mode():
+                            pij_scaled = hif8_cast_p(pij)
+                        else:
+                            pij_scaled = (
+                                (pij * fp8_e4m3_max).to(FP8_DTYPE).to(torch.float32)
+                            )
                         bmm2_res = torch.matmul(pij_scaled, vj)
                         o = o * upd + bmm2_res
                         s = s * upd + s_blk
@@ -865,7 +953,11 @@ def _fp8_fullquant_mla_golden_sectioned(
 
                 all_masked = (m_g <= minValue).squeeze(-1)
                 denom = s_g + EPSILON
-                res_rows = o_g / denom / fp8_e4m3_max * deq_v_scalar
+                # HIF8: P 未预放大, 输出不除 fp8 max
+                if _is_hif8_mode():
+                    res_rows = o_g / denom * deq_v_scalar
+                else:
+                    res_rows = o_g / denom / fp8_e4m3_max * deq_v_scalar
                 res_rows = torch.where(
                     all_masked[:, None], torch.zeros_like(res_rows), res_rows
                 )
@@ -910,9 +1002,15 @@ def fp8_fullquant_mla_golden(
 
     device = torch.device(golden_device)
     logger.info("[Golden] compute device=%s", device)
-    q_tensor = q_fp8.to(device=device, dtype=torch.float32).contiguous()
-    k_tensor = k_fp8.to(device=device, dtype=torch.float32).contiguous()
-    v_tensor = v_fp8.to(device=device, dtype=torch.float32).contiguous()
+    if _is_hif8_mode():
+        # HIF8: uint8 承载 hif8 编码, 需解码还原 float32
+        q_tensor = hif8_dequant_to_float(q_fp8).to(device=device).contiguous()
+        k_tensor = hif8_dequant_to_float(k_fp8).to(device=device).contiguous()
+        v_tensor = hif8_dequant_to_float(v_fp8).to(device=device).contiguous()
+    else:
+        q_tensor = q_fp8.to(device=device, dtype=torch.float32).contiguous()
+        k_tensor = k_fp8.to(device=device, dtype=torch.float32).contiguous()
+        v_tensor = v_fp8.to(device=device, dtype=torch.float32).contiguous()
     deq_q = deq_q.to(device=device, dtype=torch.float32).contiguous()
     deq_k = deq_k.to(device=device, dtype=torch.float32).contiguous()
     deq_v = deq_v.to(device=device, dtype=torch.float32).contiguous()
@@ -1034,8 +1132,12 @@ def fp8_fullquant_mla_golden(
             pij = torch.where(sij == float("-inf"), torch.zeros_like(pij), pij)
             s_block = torch.sum(pij, dim=-1, keepdims=True)
 
-            # MLA: P 直接量化 by 448 (匹配 kernel QfmlaSoftmax256 行为)
-            pij_scaled = (pij * fp8_e4m3_max).to(FP8_DTYPE).to(torch.float32)
+            # MLA rescale: FP8 P 乘 fp8 max 量化 (无 rowmax_p 重标定, 与 NPU isMlaFullQuant=true 一致);
+            # HIF8 变长尾数在 [0,1] 区间原生高精度, 无预放大
+            if _is_hif8_mode():
+                pij_scaled = hif8_cast_p(pij)
+            else:
+                pij_scaled = (pij * fp8_e4m3_max).to(FP8_DTYPE).to(torch.float32)
 
             # bmm2: P_fp8 @ V (deq_v 在最终输出时统一乘)
             bmm2_res = torch.matmul(pij_scaled, vj)
@@ -1045,12 +1147,15 @@ def fp8_fullquant_mla_golden(
             s_blocks[i] = si * update_mul + s_block
             m_blocks[i] = mi_new
 
-    # 最终输出: O = O_flash / rowSum / 448 * deq_v
+    # 最终输出: O = O_flash / rowSum / 448 * deq_v (HIF8: P 未预放大, 不除 448)
     result = torch.cat(o_blocks, dim=2).contiguous()
     out_sum = torch.cat(s_blocks, dim=2).contiguous()
     out_max = torch.cat(m_blocks, dim=2).contiguous()
 
-    result = result / (out_sum + EPSILON) / fp8_e4m3_max * deq_v_scalar
+    if _is_hif8_mode():
+        result = result / (out_sum + EPSILON) * deq_v_scalar
+    else:
+        result = result / (out_sum + EPSILON) / fp8_e4m3_max * deq_v_scalar
 
     all_masked = out_max <= minValue.item()
     lse = torch.where(
@@ -1345,10 +1450,16 @@ def call_npu_fa_op(
     assert quant_flash_mla is not None, "cann_ops_transformer not installed"
     torch.npu.synchronize()
 
-    # ---- 1) q / k_cache 已是 nope+rope 合并后的 576 维 fp8, 直接使用 ----
-    q_576 = q.to(FP8_DTYPE).contiguous()
-    # k_cache 保持原 stride (非连续 view 不做 contiguous 拷贝), 由算子按 tiling stride 寻址
-    k_cache_576 = k if k.dtype == FP8_DTYPE else k.to(FP8_DTYPE)
+    # ---- 1) q / k_cache 已是 nope+rope 合并后的 576 维数据, 直接使用 ----
+    if _is_hif8_mode():
+        # HIF8: uint8 承载 hif8 编码 (torch python 层做 uint8->ACL_HIFLOAT8 映射), 不做 dtype 转换
+        q_576 = q.contiguous()
+        # k_cache 保持原 stride (非连续 view 不做 contiguous 拷贝), 由算子按 tiling stride 寻址
+        k_cache_576 = k
+    else:
+        q_576 = q.to(FP8_DTYPE).contiguous()
+        # k_cache 保持原 stride (非连续 view 不做 contiguous 拷贝), 由算子按 tiling stride 寻址
+        k_cache_576 = k if k.dtype == FP8_DTYPE else k.to(FP8_DTYPE)
 
     # ---- 2) per-token-head Q descale: TND/NTD_TND -> (T, N_q) 2D; BNSD/BSND -> 3D (B,N,S)/(B,S,N) ----
     deq_q_flat = dequant_scale_q.float().contiguous()
@@ -1517,8 +1628,13 @@ def fia_mla_torch_npu(
 
     # ---- 预处理（compile 区域外）----
     torch.npu.synchronize()
-    q_576 = q.to(FP8_DTYPE).contiguous()
-    k_cache_576 = k.to(FP8_DTYPE).contiguous()
+    if _is_hif8_mode():
+        # HIF8: uint8 承载 hif8 编码, 不做 dtype 转换
+        q_576 = q.contiguous()
+        k_cache_576 = k.contiguous()
+    else:
+        q_576 = q.to(FP8_DTYPE).contiguous()
+        k_cache_576 = k.to(FP8_DTYPE).contiguous()
 
     # Q descale: TND/NTD_TND -> (T, N_q) 2D; BNSD/BSND -> 3D (B,N,S)/(B,S,N)
     deq_q_flat = dequant_scale_q.float().contiguous()
@@ -1865,11 +1981,15 @@ def npu_fp8_full_quant_mla(
 
         if not IS_CONTIGUOUS:
             # torch.stack 不支持 fp8 dtype, 用同宽 uint8 视图 stack 构造非连续 parent 后还原
+            # (HIF8 本身即 uint8, view 为 no-op, 无需还原)
             kv_cache = torch.stack(
                 [k_pa.view(torch.uint8), k_pa.view(torch.uint8)], dim=1
             )
             kv_cache = kv_cache.npu()
-            k_pa = kv_cache[:, 0].view(FP8_DTYPE)
+            if _is_hif8_mode():
+                k_pa = kv_cache[:, 0]
+            else:
+                k_pa = kv_cache[:, 0].view(FP8_DTYPE)
             logger.info(f"[NPU] k_pa is_contiguous={k_pa.is_contiguous()}")
             logger.info(f"[NPU] k_pa strides={k_pa.stride()}")
 
@@ -2211,7 +2331,9 @@ if __name__ == "__main__":
             else:  # BSND
                 cpu_tnd_torch[_b, _sq:_max_sq, :, :] = 0
                 atten_out[_b, _sq:_max_sq, :, :] = 0
-    status, _, _ = result_compare_method.check_result_device(cpu_tnd_torch, atten_out)
+    status, _, _ = result_compare_method.check_result_device(
+        cpu_tnd_torch, atten_out, verbose=True
+    )
     if status != "Pass":
         raise AssertionError("Attention output comparison failed")
 
@@ -2238,7 +2360,7 @@ if __name__ == "__main__":
                 lse_out[_b, :, _sq:_max_sq] = 0
         cpu_lse_nt_torch = cpu_lse_tnd_torch.squeeze(-1).permute(1, 0).contiguous()
         status, _, _ = result_compare_method.check_result_device(
-            cpu_lse_nt_torch, lse_out
+            cpu_lse_nt_torch, lse_out, verbose=True
         )
         if status != "Pass":
             raise AssertionError("LSE comparison failed")

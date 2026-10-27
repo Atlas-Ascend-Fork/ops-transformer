@@ -40,6 +40,7 @@ PARAM_MAP = {
     "p_scale": "P_SCALE",
     "softmax_scale": "SCALE_VALUE",
     "scale_value": "SCALE_VALUE",
+    "quant_mode": "QFMLA_QUANT_MODE",
     "is_contiguous": "IS_CONTIGUOUS",
     "num_blocks": "NUM_BLOCKS",
     "graph_path": "GRAPH_PATH",
@@ -95,6 +96,15 @@ def apply_params(params):
     golden.ENABLE_PA = True
     golden.INPUT_LAYOUT = params.get("input_layout", "TND")
     golden.OUTPUT_LAYOUT = params.get("output_layout", "TND")
+    # layout 复合规格 ("输入_输出" 或单值) → 派生 INPUT_LAYOUT/OUTPUT_LAYOUT
+    if "layout" in params:
+        layout_val = str(params["layout"])
+        if "_" in layout_val:
+            in_l, out_l = layout_val.split("_", 1)
+        else:
+            in_l = out_l = layout_val
+        golden.INPUT_LAYOUT = in_l
+        golden.OUTPUT_LAYOUT = out_l
     golden.GRAPH_PATH = 0
     golden.NUM_BLOCKS = 0
 
@@ -240,11 +250,13 @@ def execute_test(params, mode, cdir=None):
 
     # ---- Step 4/5: 精度对比 ----
     # 非 TND 输入(BSND/BNSD)时算子输出 layout 与输入相同, 直接按输入 layout 对比;
-    # TND 输入(PA 或非 PA)按 TND 对比
+    # TND 输入按 OUTPUT_LAYOUT 对比(TND 或 TND_NTD 的 NTD 输出)
     if golden.INPUT_LAYOUT in ("BSND", "BNSD"):
         compare_layout = golden.INPUT_LAYOUT
+    elif golden.OUTPUT_LAYOUT in ("TND", "NTD"):
+        compare_layout = golden.OUTPUT_LAYOUT
     else:
-        compare_layout = "TND" if golden.ENABLE_PA else golden.INPUT_LAYOUT
+        compare_layout = "TND"
     cpu_cmp = golden.convert_q_bnsd_to_layout(cpu_out, golden.SEQUSED_Q, compare_layout)
     logger.info("========== Attn OUT 精度对比 ==========")
     logger.info("CPU shape: %s, NPU shape: %s", cpu_cmp.shape, npu_out.shape)
@@ -253,9 +265,8 @@ def execute_test(params, mode, cdir=None):
     lse_result = None
     if golden.ENABLE_LSE:
         # 算子输出 LSE 规格: BSND/BNSD输入 -> BNS(B,N,S); TND输入 -> NT(N,T)
-        lse_layout = (
-            "BNSD" if golden.INPUT_LAYOUT in ("BSND", "BNSD") else compare_layout
-        )
+        # LSE 布局与输出 layout 无关, TND 输入固定按 TND 转换后再转 NT
+        lse_layout = "BNSD" if golden.INPUT_LAYOUT in ("BSND", "BNSD") else "TND"
         lse_cmp = golden.convert_q_bnsd_to_layout(cpu_lse, golden.SEQUSED_Q, lse_layout)
         if lse_cmp.dim() == 4:
             # BSND/BNSD输入: cpu_lse (B,N,S,1) → squeeze → (B,N,S) 与 npu LSE 对比

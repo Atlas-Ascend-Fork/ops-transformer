@@ -27,6 +27,7 @@ class QuantMode(IntEnum):
     """quant_mode 枚举：对外字符串/int 经由本枚举映射为传给算子侧的 int。"""
 
     MLA_FP8_E4M3_FULLQUANT = 1
+    MLA_HIF8_FULLQUANT = 0
 
 
 class MaskMode(IntEnum):
@@ -64,6 +65,18 @@ def _resolve_mask_mode(mask_mode: Union[str, int, "MaskMode", None]) -> int:
     return int(mask_mode)
 
 
+def _normalize_optional_tensor(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """空 (0,) 张量归一成 None。
+
+    ttk 等 CSV 驱动框架对未填写的 optional 输入会以空 (0,) slot 张量传入;
+    host 端 CheckSeqLens 会把 size(0)=0 判为非法 shape ("cuSeqLens shape must
+    be (batchSize+1,), but got 0")。归一成 None 才能正确表达"未提供"语义。
+    """
+    if t is not None and t.numel() == 0:
+        return None
+    return t
+
+
 def _get_core_nums():
     """Return the core counts used by the metadata AICPU scheduler."""
     npu = getattr(torch, "npu", None)
@@ -86,6 +99,16 @@ def _calculate_max_schedule_size(batch_size, num_heads_kv):
 
 
 # 各 layout 期望的 tensor 维度数
+_LAYOUT_Q_EXPECTED_NDIM = {
+    "TND": 3,
+    "BSND": 4,
+    "BNSD": 4,
+}
+_LAYOUT_KV_EXPECTED_NDIM = {
+    "PA_NZ": 5,
+    "PA_BNBD": 4,
+    "PA_BBND": 4,
+}
 
 _SUPPORTED_NUM_HEADS_Q = (1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
 
@@ -117,11 +140,14 @@ def _check_metadata_parameters(
     layout_q,
 ) -> None:
     torch._check(
-        quant_mode == int(QuantMode.MLA_FP8_E4M3_FULLQUANT),
-        lambda: f"quant_mode only supports 1 (MLA_FP8_E4M3_FULLQUANT), but got {quant_mode}",
+        quant_mode
+        in (int(QuantMode.MLA_FP8_E4M3_FULLQUANT), int(QuantMode.MLA_HIF8_FULLQUANT)),
+        lambda: f"quant_mode only supports 1 (MLA_FP8_E4M3_FULLQUANT) or "
+        f"0 (MLA_HIF8_FULLQUANT), but got {quant_mode}",
     )
     torch._check(
-        layout_q == "TND", lambda: f"layout_q only supports 'TND', but got {layout_q!r}"
+        layout_q in ("TND", "BSND", "BNSD"),
+        lambda: f"layout_q only supports 'TND'/'BSND'/'BNSD', but got {layout_q!r}",
     )
     torch._check(
         num_heads_q in _SUPPORTED_NUM_HEADS_Q,
@@ -144,30 +170,38 @@ def _check_metadata_parameters(
         lambda: f"mask_mode only supports 0 or 3, but got {mask_mode}",
     )
     torch._check(
-        max_seqlen_q == -1 or 1 <= max_seqlen_q <= 16,
-        lambda: f"max_seqlen_q must be -1 or in [1, 16], but got {max_seqlen_q}",
-    )
-    torch._check(
         max_seqlen_kv == -1 or max_seqlen_kv >= 1,
         lambda: f"max_seqlen_kv must be -1 or greater than 0, but got {max_seqlen_kv}",
     )
-    _check_int32_1d("cache_seqlens", cache_seqlens)
-    _check_int32_1d("cu_seqlens_q", cu_seqlens_q)
-    batch_size = cache_seqlens.numel()
+    # max_seqlen_q 仅在 TND 下参与调度([1,16]); BSND/BNSD 的 s1 来自 q shape, 不校验上限
     torch._check(
-        cu_seqlens_q.numel() == batch_size + 1,
-        lambda: f"cu_seqlens_q shape must be (B+1,), but got {tuple(cu_seqlens_q.shape)} for B={batch_size}",
+        max_seqlen_q == -1
+        or (max_seqlen_q >= 1 and (layout_q != "TND" or max_seqlen_q <= 16)),
+        lambda: f"max_seqlen_q must be -1 or greater than 0 (TND caps at 16), but got {max_seqlen_q}",
     )
+    _check_int32_1d("cache_seqlens", cache_seqlens)
+    batch_size = cache_seqlens.numel()
+    if layout_q == "TND":
+        _check_int32_1d("cu_seqlens_q", cu_seqlens_q)
+        torch._check(
+            cu_seqlens_q.numel() == batch_size + 1,
+            lambda: f"cu_seqlens_q shape must be (B+1,), but got {tuple(cu_seqlens_q.shape)} for B={batch_size}",
+        )
+        torch._check(
+            seqused_q is not None or max_seqlen_q > 0,
+            lambda: "When layout_q is TND, at least one of seqused_q or max_seqlen_q must be provided",
+        )
+    else:
+        torch._check(
+            cu_seqlens_q is None,
+            lambda: "cu_seqlens_q is only supported when layout_q is TND",
+        )
     if seqused_q is not None:
         _check_int32_1d("seqused_q", seqused_q)
         torch._check(
             seqused_q.numel() == batch_size,
             lambda: f"seqused_q shape must be (B,), but got {tuple(seqused_q.shape)} for B={batch_size}",
         )
-    torch._check(
-        seqused_q is not None or max_seqlen_q > 0,
-        lambda: "When layout_q is TND, at least one of seqused_q or max_seqlen_q must be provided",
-    )
 
 
 class QuantFlashMlaOpBuilder(OpBuilder):
@@ -292,6 +326,16 @@ def quant_flash_mla_metadata(
     Dispatcher implementation: NPU.
     'PrivateUse1' is dispatch key for custom NPU backends.
     """
+    if quant_mode not in (0, 1):
+        raise ValueError(
+            f"The quant_mode of quant_flash_mla_metadata only supports "
+            f"1 (MLA_FP8_E4M3_FULLQUANT) or 0 (MLA_HIF8_FULLQUANT), but got {quant_mode}"
+        )
+    if num_heads_kv != 1:
+        raise ValueError(
+            f"The num_heads_kv of quant_flash_mla only supports 1 (MLA KV shared), "
+            f"but got {num_heads_kv}"
+        )
     max_seqlen_q = -1 if max_seqlen_q is None else max_seqlen_q
     max_seqlen_kv = -1 if max_seqlen_kv is None else max_seqlen_kv
     quant_mode = _resolve_quant_mode(quant_mode)
@@ -299,6 +343,8 @@ def quant_flash_mla_metadata(
     layout_q = "TND" if layout_q is None else layout_q
     head_dim_qk = MLA_HEAD_DIM_QK if head_dim_qk is None else head_dim_qk
     head_dim_v = MLA_HEAD_DIM_V if head_dim_v is None else head_dim_v
+    cu_seqlens_q = _normalize_optional_tensor(cu_seqlens_q)
+    seqused_q = _normalize_optional_tensor(seqused_q)
 
     _check_metadata_parameters(
         cache_seqlens,
@@ -398,10 +444,17 @@ def quant_flash_mla(
     dispatcher implementation for NPU.
     'PrivateUse1' is the combine key for custom NPU backends.
     """
+    if quant_mode not in (0, 1):
+        raise ValueError(
+            f"The quant_mode of quant_flash_mla only supports "
+            f"1 (MLA_FP8_E4M3_FULLQUANT) or 0 (MLA_HIF8_FULLQUANT), but got {quant_mode}"
+        )
     quant_mode = _resolve_quant_mode(quant_mode)
     mask_mode = _resolve_mask_mode(mask_mode)
     if head_dim_v is None:
         head_dim_v = MLA_HEAD_DIM_V
+    cu_seqlens_q = _normalize_optional_tensor(cu_seqlens_q)
+    seqused_q = _normalize_optional_tensor(seqused_q)
 
     # Prevent empty outputs from being short-circuited by the framework before
     # host tiling validation. QFA applies the same guard to output-related dims.
@@ -414,6 +467,45 @@ def quant_flash_mla(
                 f"but got q.shape={tuple(q.shape)}, head_dim_v={head_dim_v}"
             ),
         )
+    q_expected = _LAYOUT_Q_EXPECTED_NDIM.get(layout_q)
+    if q_expected is None:
+        raise ValueError(
+            f"Unsupported layout_q: {layout_q!r}, expected one of TND/BSND/BNSD"
+        )
+    if q.dim() != q_expected:
+        raise ValueError(
+            f"q with layout {layout_q} expects {q_expected} dims, but got {q.dim()} dims"
+        )
+    kv_expected = _LAYOUT_KV_EXPECTED_NDIM.get(layout_kv)
+    if kv_expected is None:
+        raise ValueError(
+            f"Unsupported layout_kv: {layout_kv!r}, expected one of PA_BBND/PA_BNBD/PA_NZ"
+        )
+    if k_cache.dim() != kv_expected:
+        raise ValueError(
+            f"k_cache with layout {layout_kv} expects {kv_expected} dims, but got {k_cache.dim()} dims"
+        )
+    if metadata is None:
+        raise ValueError("metadata should be provided by quant_flash_mla_metadata")
+    if quant_mode == int(QuantMode.MLA_FP8_E4M3_FULLQUANT):
+        if q.dtype != torch.float8_e4m3fn:
+            raise ValueError(
+                f"In FP8_E4M3 mode (quant_mode=1), q must be float8_e4m3fn, but got {q.dtype}"
+            )
+        if k_cache.dtype != torch.float8_e4m3fn:
+            raise ValueError(
+                f"In FP8_E4M3 mode (quant_mode=1), k_cache must be float8_e4m3fn, but got {k_cache.dtype}"
+            )
+    elif quant_mode == int(QuantMode.MLA_HIF8_FULLQUANT):
+        # HIF8: torch侧无原生hifloat8 dtype, 以uint8承载hif8编码, csrc侧映射为ACL_HIFLOAT8
+        if q.dtype != torch.uint8:
+            raise ValueError(
+                f"In HIF8 mode (quant_mode=0), q must be uint8 (hif8 encoded), but got {q.dtype}"
+            )
+        if k_cache.dtype != torch.uint8:
+            raise ValueError(
+                f"In HIF8 mode (quant_mode=0), k_cache must be uint8 (hif8 encoded), but got {k_cache.dtype}"
+            )
 
     # MLA 不支持 k_cache 的 stride 中含 0（仅 k_cache 支持 PA 非连续）
     for name, tensor in (("k_cache", k_cache),):

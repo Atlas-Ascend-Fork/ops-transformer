@@ -104,8 +104,8 @@ public:
     // fd metadata
     FDparamsX fdParams_;
 
-    // Q: TND, cu_seq(含前导0)+seq_used, int32（ACCUM模式）
-    using QSeqParserType = ActualSeqLensParser<ActualSeqLensMode::ACCUM, int32_t, true>;
+    // Q: TND用ACCUM(cu_seq含前导0+seq_used); BSND/BNSD用BY_BATCH(seqused_q, 缺省时按s1Size)
+    using QSeqParserType = ActualSeqLensParser<Q_MODE, int32_t, Q_MODE == ActualSeqLensMode::ACCUM>;
     QSeqParserType qCuSeqLensParser_;
     // KV: PA, cache_seqlens按batch, int32（BY_BATCH模式）
     using KvSeqParserType = ActualSeqLensParser<ActualSeqLensMode::BY_BATCH, int32_t>;
@@ -139,10 +139,14 @@ public:
                                    sizeof(uint32_t)),
             aivCoreNum_ * QFMLA_FD_METADATA_SIZE * sectionNum_);
 
-        // Q序列解析: cu_seqlens_q(B+1) + seqused_q(B)
+        // Q序列解析: TND(ACCUM): cu_seqlens_q(B+1) + seqused_q(B); BSND/BNSD(BY_BATCH): seqused_q(B), 缺省按s1Size
         // cuSeqLensQSize为tiling已算好的元素个数(B+1), 此处不得再+1:
         // 重复+1会使GetTSize()越界读cu_seqlens_q[B+1], 批跑时该位置残留前序case脏数据导致死循环
-        qCuSeqLensParser_.Init(cuSeqLensQ, constInfo_.cuSeqLensQSize, sequsedQ, constInfo_.seqUsedQSize);
+        if constexpr (Q_MODE == ActualSeqLensMode::ACCUM) {
+            qCuSeqLensParser_.Init(cuSeqLensQ, constInfo_.cuSeqLensQSize, sequsedQ, constInfo_.seqUsedQSize);
+        } else {
+            qCuSeqLensParser_.Init(sequsedQ, constInfo_.seqUsedQSize, constInfo_.s1Size);
+        }
         // KV序列解析: cache_seqlens(B)
         cacheSeqLensGm_.SetGlobalBuffer((__gm__ int32_t*)cacheSeqLens, constInfo_.kvSeqUsedSize);
         kvSeqUsedParser_.Init(cacheSeqLensGm_, constInfo_.kvSeqUsedSize, constInfo_.s2Size);

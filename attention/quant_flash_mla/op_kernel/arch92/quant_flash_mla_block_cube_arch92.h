@@ -92,7 +92,8 @@ public:
     // KV: PA, cache_seqlens按batch, int32
     using KvSeqParserType = ActualSeqLensParser<ActualSeqLensMode::BY_BATCH, int32_t>;
 
-    static constexpr bool Q_NEEDS_WZH = true;
+    // cu 表前导0只存在于TND布局; BSND/BNSD按BY_BATCH解析, 无需该标志
+    static constexpr bool Q_NEEDS_WZH = (GmLayoutParams<Q_FORMAT>::CATEGORY == FormatCategory::GM_Q_OUT_TND);
     using FaGmTensorQ = FaGmTensor<Q_T, Q_FORMAT, int32_t, Q_NEEDS_WZH>;
     using FaGmTensorKV = FaGmTensor<KV_T, KV_FORMAT, int32_t>;
 

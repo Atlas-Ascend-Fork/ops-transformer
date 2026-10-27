@@ -293,11 +293,12 @@ def check_result(expect, npu_result):
     return result, fulfill_percent, max_error
 
 
-def check_result_device(expect, actual, chunk_size=4 * 1024 * 1024):
+def check_result_device(expect, actual, chunk_size=4 * 1024 * 1024, verbose=False):
     """Compare in bounded chunks on actual.device; transfer only scalar statistics.
 
     Preserve QFMLA's existing BF16/FP32 tolerances, 99.5% pass rate and maximum
     error threshold. NaNs and mismatched infinities always fail.
+    verbose=True 时额外打印逐元素表格与统计汇总（单 golden 调试用）。
     """
     if expect.shape != actual.shape:
         logger.error(
@@ -312,6 +313,7 @@ def check_result_device(expect, actual, chunk_size=4 * 1024 * 1024):
     expected = expect.detach().reshape(-1)
     observed = actual.detach().reshape(-1)
     bad_count, max_error, invalid = 0, 0.0, False
+    err_head, err_tail = [], []
     for start in range(0, observed.numel(), chunk_size):
         real = observed[start : start + chunk_size].float()
         ref = expected[start : start + chunk_size].to(
@@ -336,9 +338,66 @@ def check_result_device(expect, actual, chunk_size=4 * 1024 * 1024):
         )
         errors = torch.where(bad & finite, (real - ref).abs() / denom, 0.0)
         max_error = max(max_error, float(errors.max().item()))
+        if verbose:
+            for local_idx in torch.nonzero(bad, as_tuple=False).flatten().tolist():
+                item = (
+                    start + local_idx,
+                    float(real[local_idx].item()),
+                    float(ref[local_idx].item()),
+                    float(errors[local_idx].item()),
+                )
+                if len(err_head) < 10:
+                    err_head.append(item)
+                else:
+                    err_tail = (err_tail + [item])[-10:]
     count = observed.numel()
     percent = 100.0 * (count - bad_count) / count if count else 100.0
     status = "Pass" if percent >= 99.5 and max_error < 10 and not invalid else "Failed"
+    if verbose:
+        if count:
+            display_output_torch(actual.reshape(-1), expect.reshape(-1), 0, count - 1)
+        logger.info(
+            "---------------------------------------------------------------------------------------"
+        )
+        logger.info("Rtol   \t Atol   \t PctThd   \t PctRlt   \t Result")
+        logger.info(
+            "---------------------------------------------------------------------------------------"
+        )
+        logger.info(
+            "%.4f    \t %.6f  \t %.2f%%   \t %.6f%%   \t %s",
+            rtol,
+            atol,
+            99.5,
+            percent,
+            status,
+        )
+        if status == "Failed":
+            if err_head:
+                logger.info(
+                    "Error Line-----------------------------------------------------------------------------"
+                )
+                logger.info("Loop \t ExpectOut \t RealOut \t FpDiff \t RateDiff")
+                for idx, real_value, expect_value, rel in err_head:
+                    logger.info(
+                        "%08d \t %.7f \t %.7f \t %.7f \t %.7f",
+                        idx,
+                        expect_value,
+                        real_value,
+                        abs(expect_value - real_value),
+                        rel,
+                    )
+                if bad_count > len(err_head) + len(err_tail):
+                    logger.info("...   \t   ...   \t   ...   \t   ...    \t   ...")
+                for idx, real_value, expect_value, rel in err_tail:
+                    logger.info(
+                        "%08d \t %.7f \t %.7f \t %.7f \t %.7f",
+                        idx,
+                        expect_value,
+                        real_value,
+                        abs(expect_value - real_value),
+                        rel,
+                    )
+            logger.info("Total error count: %d / %d", bad_count, count)
     logger.info(
         "[Compare] device=%s count=%d bad=%d pass=%.6f%% max_error=%g invalid=%s result=%s",
         actual.device,

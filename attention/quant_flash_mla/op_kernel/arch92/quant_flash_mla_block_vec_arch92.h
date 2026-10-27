@@ -287,6 +287,9 @@ public:
     static constexpr bool IS_PER_TOKEN_HEAD = true;
     // MLA全量化: Q per-token-head descale, TND下[T, N1]排布(TNG)
     static constexpr GmFormat Q_SCALE_FORMAT = GetQueryScaleGmFormat<layout, USE_DN, IS_PER_TOKEN_HEAD, true>();
+    // cu 表前导0只存在于TND类布局(GM_ANTIQ_TN); BSND/BNSD按BY_BATCH解析, 无需该标志
+    static constexpr bool Q_SCALE_WITH_ZERO_HEAD =
+        (GmLayoutParams<Q_SCALE_FORMAT>::CATEGORY == FormatCategory::GM_ANTIQ_TN);
 
     static constexpr bool POST_QUANT = !IsSameType<OUTPUT_T, half>::value && !IsSameType<OUTPUT_T, bfloat16_t>::value &&
                                        !IsSameType<OUTPUT_T, float>::value;
@@ -367,7 +370,7 @@ public:
     GlobalTensor<float> deScaleQGm_;
     GlobalTensor<float> deScaleKGm_;
     GlobalTensor<float> deScaleVGm_;
-    FaGmTensor<float, Q_SCALE_FORMAT, int32_t, true> queryScaleGm_;
+    FaGmTensor<float, Q_SCALE_FORMAT, int32_t, Q_SCALE_WITH_ZERO_HEAD> queryScaleGm_;
     CopyQueryScaleGmToUb<float, Q_SCALE_FORMAT> copyQueryScaleGmToUb_;
     flashdecodeGmType accumOutGm_;
     flashdecodeGmType softmaxFDSumGm_;
@@ -462,10 +465,9 @@ public:
         }
     }
 
-    __aicore__ inline void InitQScaleBuffer(uint32_t batchSize, uint32_t n2Size, uint32_t gSize, uint32_t qSeqSize,
-                                            uint32_t headDim,
-                                            FaGmTensor<float, Q_SCALE_FORMAT, int32_t, true>& qScaleGmTensor,
-                                            __gm__ uint8_t* gm)
+    __aicore__ inline void InitQScaleBuffer(
+        uint32_t batchSize, uint32_t n2Size, uint32_t gSize, uint32_t qSeqSize, uint32_t headDim,
+        FaGmTensor<float, Q_SCALE_FORMAT, int32_t, Q_SCALE_WITH_ZERO_HEAD>& qScaleGmTensor, __gm__ uint8_t* gm)
     {
         qScaleGmTensor.gmTensor.SetGlobalBuffer((__gm__ float*)gm);
         if constexpr (GmLayoutParams<Q_SCALE_FORMAT>::CATEGORY == FormatCategory::GM_ANTIQ_TN) {
