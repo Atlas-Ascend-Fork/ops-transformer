@@ -69,7 +69,7 @@ __aicore__ inline void LoadTokenUnpermuteWeights(const MoeStageCommonConfig& com
     }
 }
 
-// 将一个 MoE 专家的输入搬入 UB，并按 Combine 模式完成 Cast 或 MXFP8 反量化。
+// 将一个 MoE 专家的输入搬入 UB；Arch35 非量化输入由累加 VF 转换，量化输入先完成 MXFP8 反量化。
 template <uint8_t CombineMode>
 __aicore__ inline void LoadMoeExpertInput(const TokenUnpermuteConfig& context, const MoeStageCommonConfig& common,
                                           TokenUnpermuteScratch& scratch, __gm__ bfloat16_t* expandedX,
@@ -82,12 +82,11 @@ __aicore__ inline void LoadMoeExpertInput(const TokenUnpermuteConfig& context, c
                    (common.tokenHiddenDim) * sizeof(bfloat16_t));
         PipeNotify<PIPE_MTE2, PIPE_V>(event);
         PipeWait<PIPE_MTE2, PIPE_V>(event);
-        {
-            LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
-            LocalTensor<bfloat16_t> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInBf16),
-                                        common.tokenHiddenDim);
-            Cast(dst, src, RoundMode::CAST_NONE, common.tokenHiddenDim);
-        }
+#if defined(MEGA_MOE_ARCH92_DEVICE)
+        LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
+        LocalTensor<bfloat16_t> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInBf16), common.tokenHiddenDim);
+        Cast(dst, src, RoundMode::CAST_NONE, common.tokenHiddenDim);
+#endif
     } else {
         uint32_t quantTokenElementCount = context.quantTokenSizeBytes / sizeof(bfloat16_t);
         CopyGmToUb(dataInBf16, (expandedX + (expertInputIndex * quantTokenElementCount)),
@@ -100,6 +99,59 @@ __aicore__ inline void LoadMoeExpertInput(const TokenUnpermuteConfig& context, c
                                                  scratch.fp32ScaleTensor, nScale, common.tokenHiddenDim);
     }
 }
+
+#if !defined(MEGA_MOE_ARCH92_DEVICE)
+// 一次处理一个专家槽，转换和乘权结果留在寄存器；首项直接初始化，不读取旧累加值。
+template <bool InitAccum, bool ApplyWeight>
+__simd_vf__ inline void AccumulateBf16ExpertSlotVF(__ubuf__ float* accumUb, __ubuf__ bfloat16_t* inputUb,
+                                                   float expertScale, uint32_t elementCount)
+{
+    // Host 保证 H 按 64 对齐且不超过 8192，完整向量加载在输入槽内，循环次数最多 128。
+    constexpr uint32_t ELEMENTS_PER_VECTOR = static_cast<uint32_t>(asc_get_vf_len()) / sizeof(float);
+    const uint16_t repeatCount = static_cast<uint16_t>((elementCount + ELEMENTS_PER_VECTOR - 1U) / ELEMENTS_PER_VECTOR);
+    vector_bfloat16_t inputReg;
+    vector_float valueReg;
+    for (uint16_t i = 0U; i < repeatCount; ++i) {
+        const uint32_t offset = static_cast<uint32_t>(i) * ELEMENTS_PER_VECTOR;
+        vector_bool active = asc_update_mask_b32(elementCount);
+        // 64 个连续 BF16 放在偶数 b16 lane，转换后与 64 个 FP32 累加值逐项对应。
+        asc_loadalign_unpack(inputReg, inputUb + offset);
+        asc_bfloat162float(valueReg, inputReg, active, ASC_POSITION_EVEN);
+        if constexpr (ApplyWeight) {
+            // 保持独立 FP32 乘法和加法，不使用 FMA 或乘加后转半精度的接口。
+            asc_mul_scalar(valueReg, valueReg, expertScale, active);
+        }
+        if constexpr (!InitAccum) {
+            vector_float accumReg;
+            asc_loadalign(accumReg, accumUb + offset);
+            asc_add(valueReg, accumReg, valueReg, active);
+        }
+        asc_storealign(accumUb + offset, valueReg, active);
+    }
+}
+
+__aicore__ inline void AccumulateBf16ExpertSlotInput(const MoeStageCommonConfig& common, TokenUnpermuteScratch& scratch,
+                                                     __ubuf__ bfloat16_t* dataInBf16, int32_t localIdx,
+                                                     int32_t expertIdx, bool applyWeight, bool accumStarted)
+{
+    auto* accumUb = scratch.dataResFp32Tensor;
+    auto* inputUb = dataInBf16;
+    if (applyWeight) {
+        float expertScale = scratch.topKWeightsTensor[localIdx * common.topK + expertIdx];
+        if (accumStarted) {
+            AccumulateBf16ExpertSlotVF<false, true>(accumUb, inputUb, expertScale, common.tokenHiddenDim);
+        } else {
+            AccumulateBf16ExpertSlotVF<true, true>(accumUb, inputUb, expertScale, common.tokenHiddenDim);
+        }
+    } else {
+        if (accumStarted) {
+            AccumulateBf16ExpertSlotVF<false, false>(accumUb, inputUb, 0.0f, common.tokenHiddenDim);
+        } else {
+            AccumulateBf16ExpertSlotVF<true, false>(accumUb, inputUb, 0.0f, common.tokenHiddenDim);
+        }
+    }
+}
+#endif
 
 // 读回本 token 的 topK 目标卡号（专家→卡 = expertId / moeExpertPerRank）。
 // 结果放函数栈小数组（topK≤32 有 host 校验；unpermute UB 已满载，UB 化需动整段布局，暂保留栈存储）。
@@ -132,45 +184,27 @@ __aicore__ inline bool JudgeDedupCanonicalSlot(const int32_t (&expertRanks)[32],
 }
 
 // 把一个专家槽的输入累加进 dataResFp32Tensor（首槽直拷/乘权，后续槽乘权后加）。
-template <bool TopkWeightsPrefetch>
 __aicore__ inline void AccumulateExpertSlotInput(const MoeStageCommonConfig& common, TokenUnpermuteScratch& scratch,
                                                  __ubuf__ float* dataInFp32, int32_t localIdx, int32_t expertIdx,
-                                                 bool applyScale, bool accumStarted)
+                                                 bool applyWeight, bool accumStarted)
 {
-    if (!accumStarted) {
-        if constexpr (TopkWeightsPrefetch) {
-            CopyUbToUb(scratch.dataResFp32Tensor, dataInFp32, (common.tokenHiddenDim) * sizeof(float));
-        } else {
-            if (applyScale) {
-                float expertScale = scratch.topKWeightsTensor[localIdx * common.topK + expertIdx];
-                {
-                    LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.dataResFp32Tensor),
-                                           common.tokenHiddenDim);
-                    LocalTensor<float> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32),
-                                           common.tokenHiddenDim);
-                    Muls(dst, src, expertScale, common.tokenHiddenDim);
-                }
-            } else {
-                CopyUbToUb(scratch.dataResFp32Tensor, dataInFp32, (common.tokenHiddenDim) * sizeof(float));
-            }
+    auto* accum = scratch.dataResFp32Tensor;
+    if (applyWeight) {
+        float expertScale = scratch.topKWeightsTensor[localIdx * common.topK + expertIdx];
+        auto* dst = accumStarted ? dataInFp32 : accum;
+        LocalTensor<float> dstTensor(TPosition::VECCALC, reinterpret_cast<uint64_t>(dst), common.tokenHiddenDim);
+        LocalTensor<float> srcTensor(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
+        Muls(dstTensor, srcTensor, expertScale, common.tokenHiddenDim);
+    } else {
+        if (!accumStarted) {
+            CopyUbToUb(accum, dataInFp32, common.tokenHiddenDim * sizeof(float));
         }
-        return;
     }
-    if constexpr (!TopkWeightsPrefetch) {
-        if (applyScale) {
-            float expertScale = scratch.topKWeightsTensor[localIdx * common.topK + expertIdx];
-            {
-                LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32),
+    if (accumStarted) {
+        LocalTensor<float> accumTensor(TPosition::VECCALC, reinterpret_cast<uint64_t>(accum), common.tokenHiddenDim);
+        LocalTensor<float> inputTensor(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32),
                                        common.tokenHiddenDim);
-                Muls(dst, dst, expertScale, common.tokenHiddenDim);
-            }
-        }
-    }
-    {
-        LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.dataResFp32Tensor),
-                               common.tokenHiddenDim);
-        LocalTensor<float> rhs(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
-        Add(dst, dst, rhs, common.tokenHiddenDim);
+        Add(accumTensor, accumTensor, inputTensor, common.tokenHiddenDim);
     }
 }
 
@@ -201,17 +235,27 @@ __aicore__ inline void AccumulateMoeExpertsForToken(const TokenUnpermuteConfig& 
         TEventID event = static_cast<TEventID>(inputBufferIdx);
         __ubuf__ bfloat16_t* dataInBf16 =
             (scratch.dataResTensor + ((inputBufferIdx + 1) * bufferConfig.bf16SlotElementCount));
-        __ubuf__ float* dataInFp32 =
-            (scratch.dataResFp32Tensor + ((inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount));
+        __ubuf__ float* dataInFp32 = nullptr;
+#if !defined(MEGA_MOE_ARCH92_DEVICE)
+        if constexpr (CombineMode != COMBINE_NO_QUANT)
+#endif
+        {
+            dataInFp32 = scratch.dataResFp32Tensor + (inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount;
+        }
         uint64_t expertInputIndex = static_cast<uint64_t>(tokenIdx) * common.topK + expertIdx;
         LoadMoeExpertInput<CombineMode>(context, common, scratch, expandedX, expertInputIndex, event, dataInBf16,
                                         dataInFp32);
-        PipeNotify<PIPE_S, PIPE_V>(event);
-        PipeWait<PIPE_S, PIPE_V>(event);
-
-        const bool applyScale = !dedupCombineActive || sameRankCount == 1;
-        AccumulateExpertSlotInput<TopkWeightsPrefetch>(common, scratch, dataInFp32, localIdx, expertIdx, applyScale,
-                                                       accumStarted);
+        const bool applyWeight = !TopkWeightsPrefetch && (!dedupCombineActive || sameRankCount == 1);
+#if !defined(MEGA_MOE_ARCH92_DEVICE)
+        if constexpr (CombineMode == COMBINE_NO_QUANT) {
+            AccumulateBf16ExpertSlotInput(common, scratch, dataInBf16, localIdx, expertIdx, applyWeight, accumStarted);
+        } else
+#endif
+        {
+            PipeNotify<PIPE_S, PIPE_V>(event);
+            PipeWait<PIPE_S, PIPE_V>(event);
+            AccumulateExpertSlotInput(common, scratch, dataInFp32, localIdx, expertIdx, applyWeight, accumStarted);
+        }
         accumStarted = true;
         PipeNotify<PIPE_V, PIPE_MTE2>(event);
     }
@@ -243,8 +287,6 @@ __aicore__ inline void AccumulateSharedExpertForToken(const MoeStageCommonConfig
     TEventID event = static_cast<TEventID>(inputBufferIdx);
     __ubuf__ bfloat16_t* dataInBf16 =
         (scratch.dataResTensor + ((inputBufferIdx + 1) * bufferConfig.bf16SlotElementCount));
-    __ubuf__ float* dataInFp32 =
-        (scratch.dataResFp32Tensor + ((inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount));
     PipeWait<PIPE_V, PIPE_MTE2>(event);
     CopyGmToUb(dataInBf16,
                (sharedResult +
@@ -254,6 +296,8 @@ __aicore__ inline void AccumulateSharedExpertForToken(const MoeStageCommonConfig
     PipeWait<PIPE_MTE2, PIPE_V>(event);
     PipeNotify<PIPE_S, PIPE_V>(event);
     PipeWait<PIPE_S, PIPE_V>(event);
+#if defined(MEGA_MOE_ARCH92_DEVICE)
+    __ubuf__ float* dataInFp32 = scratch.dataResFp32Tensor + (inputBufferIdx + 1) * bufferConfig.fp32SlotElementCount;
     {
         LocalTensor<float> dst(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInFp32), common.tokenHiddenDim);
         LocalTensor<bfloat16_t> src(TPosition::VECCALC, reinterpret_cast<uint64_t>(dataInBf16), common.tokenHiddenDim);
@@ -267,6 +311,9 @@ __aicore__ inline void AccumulateSharedExpertForToken(const MoeStageCommonConfig
         Add(dst, dst, rhs, common.tokenHiddenDim);
     }
 
+#else
+    AccumulateBf16ExpertSlotVF<false, false>(scratch.dataResFp32Tensor, dataInBf16, 0.0f, common.tokenHiddenDim);
+#endif
     PipeNotify<PIPE_V, PIPE_MTE2>(event);
 }
 
@@ -316,7 +363,7 @@ __aicore__ inline void ProcessTokenUnpermuteBatch(const TokenUnpermuteConfig& co
  * 构造 Unpermute 使用的 UB 视图，并返回当前 AIV 对应的 buffer 配置（普通/wave/a8w4 编排共用）。
  * UB 从地址 0 起按下列顺序连续排布（N = inputBufferCount，每段起点=上一段末尾）：
  *   [dataRes    ] (N+1) 个 bf16 槽 × bf16SlotElementCount —— 累加结果 bf16 输出
- *   [dataResFp32] (N+1) 个 fp32 槽 × fp32SlotElementCount —— fp32 累加中间态
+ *   [dataResFp32] 1 个 fp32 累加槽；Arch92/量化 combine 另有 N 个 fp32 输入临时槽
  *   [topKWeights] topKWeightsBufferBytes —— 本批 token 的 topk 权重（fp32）
  *   [权重转换区 ] 仅 TopkWeightsType==bf16 时存在（topKWeightsConversionBufferBytes）
  *   [bf16Scale  ] 仅量化 combine 时存在，Align32(ceil(H/32)·2B·扩展系数)
@@ -347,6 +394,11 @@ __aicore__ inline MegaMoeUnpermuteBufferConfig CreateTokenUnpermuteBuffers(const
     uint32_t fp32SlotBytes = bufferConfig.fp32SlotElementCount * sizeof(float);
     uint32_t dataResBufBytes = (bufferConfig.inputBufferCount + 1) * bf16SlotBytes;
     uint32_t dataResFp32BufBytes = (bufferConfig.inputBufferCount + 1) * fp32SlotBytes;
+#if !defined(MEGA_MOE_ARCH92_DEVICE)
+    if constexpr (CombineQuantMode == COMBINE_NO_QUANT) {
+        dataResFp32BufBytes = fp32SlotBytes;
+    }
+#endif
     uint32_t dataResAddr = 0U;
     scratch.dataResTensor = reinterpret_cast<__ubuf__ bfloat16_t*>(dataResAddr);
     uint32_t dataResFp32Addr = dataResAddr + dataResBufBytes;

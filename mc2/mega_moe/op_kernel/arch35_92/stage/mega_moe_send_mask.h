@@ -79,6 +79,48 @@ __aicore__ inline void PrepareTopkIdsForCurrentBatch(SendMaskScratch<TopkIndexTy
     }
 }
 
+#if !defined(MEGA_MOE_ARCH92_DEVICE)
+// 调用方保证 validLen > 0；每个专家、每批只初始化一次压缩状态，比较结果直接用于筛选位置索引。
+// Host 将 batch 容量按 256 条对齐，两个输入均按完整 batch 分配，尾轮完整加载不会越界。
+template <typename TopkIndexType>
+__simd_vf__ inline void SelectExpertIndicesVF(__ubuf__ int32_t* idsUb, __ubuf__ TopkIndexType* indicesUb,
+                                              __ubuf__ TopkIndexType* selectedUb, int32_t expertId, uint32_t validLen)
+{
+    constexpr uint32_t IDS_PER_VECTOR = static_cast<uint32_t>(asc_get_vf_len()) / sizeof(int32_t);
+    constexpr uint32_t INDICES_PER_VECTOR = static_cast<uint32_t>(asc_get_vf_len()) / sizeof(TopkIndexType);
+    using IndexVector =
+        typename std::conditional<std::is_same_v<TopkIndexType, int16_t>, vector_int16_t, vector_int32_t>::type;
+    // int16 总路由量上限和 int32 的单核 UB 容量约束保证循环次数不超过 512。
+    const uint16_t repeatCount = static_cast<uint16_t>((validLen + INDICES_PER_VECTOR - 1U) / INDICES_PER_VECTOR);
+    vector_int32_t idsReg;
+    IndexVector indicesReg;
+    IndexVector packedReg;
+    vector_store_unalign storeState;
+    asc_clear_ar_spr();
+    for (uint16_t i = 0U; i < repeatCount; ++i) {
+        uint32_t offset = static_cast<uint32_t>(i) * INDICES_PER_VECTOR;
+        vector_bool active = asc_update_mask_b32(validLen);
+        vector_bool selectedMask;
+        asc_loadalign(idsReg, idsUb + offset);
+        asc_eq_scalar(selectedMask, idsReg, expertId, active);
+        if constexpr (std::is_same_v<TopkIndexType, int16_t>) {
+            vector_bool upperMask;
+            vector_bool discardedMask;
+            active = asc_update_mask_b32(validLen);
+            asc_loadalign(idsReg, idsUb + offset + IDS_PER_VECTOR);
+            asc_eq_scalar(upperMask, idsReg, expertId, active);
+            // 每个 b32 掩码元素取低 2 bit，依次拼接前后 64 项，转换为 128 项 b16 掩码。
+            asc_deintlv_b16(selectedMask, discardedMask, selectedMask, upperMask);
+        }
+        asc_loadalign(indicesReg, indicesUb + offset);
+        asc_squeeze_with_status(packedReg, indicesReg, selectedMask);
+        asc_storeunalign_postupdate(selectedUb, storeState, packedReg);
+    }
+    // 输出偏移由 AR 管理，所有迭代及收尾均使用同一基址和同一个非对齐存储状态。
+    asc_storeunalign_post(selectedUb, storeState);
+}
+#endif
+
 /**
  * 筛选当前批次中匹配专家号的 topkIds 下标，写入当前 ring 槽并返回命中数量。
  * 调用方须先等待该槽上次搬出完成；返回前完成 V_S，调用方可读取命中数量。
@@ -92,17 +134,18 @@ __aicore__ inline uint64_t SelectTopkIdsIndexByExpert(const SendMaskConfig& conf
     const MegaMoeSendMaskBufferConfig& bufferConfig = config.bufferConfig;
     const uint32_t compareMaskBytes = static_cast<uint32_t>(bufferConfig.routeItemsPerBatch) / BITS_PER_BYTE;
     uint32_t slotOffset = routeInfo.bufferIdx * bufferConfig.bufferBytes;
-    __ubuf__ uint8_t* compareMaskTensor = (scratch.routeRingTensor + (slotOffset));
+    // 保留原 bitmap 预留区和输出偏移，首版不调整 ring 的 Host tiling。
     // 保存 topkIdsTensor 中值等于当前专家号的元素所对应的下标位置。
     selectedTopkIdsIndexTensor =
         reinterpret_cast<__ubuf__ TopkIndexType*>((scratch.routeRingTensor + (slotOffset + compareMaskBytes)));
 
+#if defined(MEGA_MOE_ARCH92_DEVICE)
     uint64_t selectedTopkIdsIndexCount = 0U;
     if (validLen > 0) {
-        LocalTensor<uint8_t> mask(TPosition::VECCALC, reinterpret_cast<uint64_t>(compareMaskTensor), compareMaskBytes);
+        LocalTensor<uint8_t> mask(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.routeRingTensor + slotOffset),
+                                  compareMaskBytes);
         LocalTensor<int32_t> ids(TPosition::VECCALC, reinterpret_cast<uint64_t>(scratch.topkIdsTensor), validLen);
         CompareScalar(mask, ids, routeInfo.globalExpertId, AscendC::CMPMODE::EQ, validLen);
-
         using CompareMaskPatternType =
             typename std::conditional<sizeof(TopkIndexType) == sizeof(int16_t), uint16_t, uint32_t>::type;
         auto maskPattern = mask.template ReinterpretCast<CompareMaskPatternType>();
@@ -115,6 +158,19 @@ __aicore__ inline uint64_t SelectTopkIdsIndexByExpert(const SendMaskConfig& conf
     }
     PipeFence<PIPE_V, PIPE_S, SYNC_EVENT_ID2>();
     return selectedTopkIdsIndexCount;
+#else
+    if (validLen > 0) {
+        SelectExpertIndicesVF<TopkIndexType>(scratch.topkIdsTensor, scratch.topkIdsIndexTensor,
+                                             selectedTopkIdsIndexTensor, routeInfo.globalExpertId,
+                                             static_cast<uint32_t>(validLen));
+    }
+    PipeFence<PIPE_V, PIPE_S, SYNC_EVENT_ID2>();
+    // AR 累计压缩输出的字节数；零长度不发射 VF，也不读取上次调用遗留的 AR。
+    if (validLen > 0) {
+        return static_cast<uint64_t>(asc_get_squeeze_status()) / sizeof(TopkIndexType);
+    }
+    return 0U;
+#endif
 }
 
 // 将筛选出的下标追加到专家所在卡，按剩余容量更新累计发送量。

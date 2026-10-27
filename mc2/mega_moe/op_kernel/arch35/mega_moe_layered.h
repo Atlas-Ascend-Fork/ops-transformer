@@ -527,15 +527,15 @@ MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::MakeWaveProblemState(const Exper
     ExpertLoopState problem = state;
     uint64_t n = Get<N_VALUE>(state.problemShape);
     uint64_t k = Get<K_VALUE>(state.problemShape);
-    const uint64_t activationOutputCols = n / activationOutputDivisor_;
+    const uint64_t activationOutputWidth = n / activationOutputDivisor_;
     uint64_t scaleK = Ops::Base::CeilDiv(k, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
     uint64_t scaleN =
-        Ops::Base::CeilDiv(activationOutputCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
+        Ops::Base::CeilDiv(activationOutputWidth, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
     Get<M_VALUE>(problem.problemShape) = rowEnd - rowBegin;
     problem.expertBeforeCnt += rowBegin;
     Get<IDX_A_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * k / A_ELEMS_PER_BYTE;
     Get<IDX_A_SCALE_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * scaleK;
-    Get<IDX_C_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * activationOutputCols / C_ELEMS_PER_BYTE;
+    Get<IDX_C_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * activationOutputWidth / C_ELEMS_PER_BYTE;
     Get<IDX_C_SCALE_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * scaleN;
     Get<IDX_Y2_OFFSET>(problem.baseOffset) += static_cast<uint64_t>(rowBegin) * k;
     Get<IDX_M_OFFSET>(problem.baseOffset) += rowBegin;
@@ -685,21 +685,21 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::AdvanceEx
         uint64_t m = Get<M_VALUE>(state.problemShape);
         uint64_t n = Get<N_VALUE>(state.problemShape);
         uint64_t k = Get<K_VALUE>(state.problemShape);
-        const uint64_t activationOutputCols = n / activationOutputDivisor_;
+        const uint64_t activationOutputWidth = n / activationOutputDivisor_;
         state.expertBeforeCnt += m;
         Get<IDX_A_OFFSET>(state.baseOffset) += m * k / A_ELEMS_PER_BYTE;
         Get<IDX_B_OFFSET>(state.baseOffset) += n * k / B_ELEMS_PER_BYTE;
         auto scaleK = Ops::Base::CeilDiv(k, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
         Get<IDX_A_SCALE_OFFSET>(state.baseOffset) += m * scaleK;
         Get<IDX_B_SCALE_OFFSET>(state.baseOffset) += n * scaleK;
-        Get<IDX_C_OFFSET>(state.baseOffset) += m * activationOutputCols / C_ELEMS_PER_BYTE;
+        Get<IDX_C_OFFSET>(state.baseOffset) += m * activationOutputWidth / C_ELEMS_PER_BYTE;
         Get<IDX_C_SCALE_OFFSET>(state.baseOffset) +=
-            m * Ops::Base::CeilDiv(activationOutputCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
+            m * Ops::Base::CeilDiv(activationOutputWidth, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
             MXFP_MULTI_BASE_SIZE;
         Get<IDX_FLAG_OFFSET>(state.baseOffset) += 1;
-        Get<IDX_B2_OFFSET>(state.baseOffset) += k * activationOutputCols / B_ELEMS_PER_BYTE;
+        Get<IDX_B2_OFFSET>(state.baseOffset) += k * activationOutputWidth / B_ELEMS_PER_BYTE;
         Get<IDX_B2_SCALE_OFFSET>(state.baseOffset) +=
-            k * Ops::Base::CeilDiv(activationOutputCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
+            k * Ops::Base::CeilDiv(activationOutputWidth, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) *
             MXFP_MULTI_BASE_SIZE;
         Get<IDX_Y2_OFFSET>(state.baseOffset) += m * k;
         Get<IDX_M_OFFSET>(state.baseOffset) += m;

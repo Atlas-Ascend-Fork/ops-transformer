@@ -764,7 +764,7 @@ template <typename ActivationType, typename WeightType, typename ActivationOutTy
 __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
     const GmmExecutionConfig& gmmConfig, const MoeSyncWorkspaceLayout& syncLayout, const WorkspaceLayout& workspace,
     GM_ADDR workspaceBase, const ExpertWeightTensorListAddrs& weights, BlockEpilogue& epilogueOp,
-    GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state, uint32_t activationOutputCols,
+    GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state, uint32_t activationOutputWidth,
     uint32_t rowOffsetInExpert = 0U, uint32_t gmm1TilesPerMGroup = 0U)
 {
     if constexpr (g_coreType == AIV && !UseA8W4Gmm1) {
@@ -821,11 +821,11 @@ __aicore__ inline void UpdateMoeExpertGmm1GlobalBuffer(
             runsActivation = IsSubBlockIdx<1U>();
         }
         if (runsActivation) {
-            int64_t scaleN = Ops::Base::CeilDiv(static_cast<int64_t>(activationOutputCols),
+            int64_t scaleN = Ops::Base::CeilDiv(static_cast<int64_t>(activationOutputWidth),
                                                 static_cast<int64_t>(MXFP_DIVISOR_SIZE)) *
                              MXFP_MULTI_BASE_SIZE;
             AscendC::Coord<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t> vecBaseOffset{
-                static_cast<int64_t>(physicalTokenStartIndex) * activationOutputCols / outputElementsPerByte,
+                static_cast<int64_t>(physicalTokenStartIndex) * activationOutputWidth / outputElementsPerByte,
                 static_cast<int64_t>(physicalTokenStartIndex) * scaleN,
                 expertOffset * syncLayout.activationFlagSlotCountPerExpert / INT_CACHELINE + expertMGroupOffset,
                 0L,
