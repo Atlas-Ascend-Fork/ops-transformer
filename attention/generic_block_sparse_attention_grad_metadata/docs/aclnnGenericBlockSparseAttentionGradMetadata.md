@@ -188,7 +188,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGradMetadata(
         <td>maxQSeqlen</td>
         <td>输入</td>
         <td>所有batch中qSeqlen的最大值。</td>
-        <td>须≥0。BNSD/BSND场景须与query的S维一致。</td>
+        <td>须>0。BNSD/BSND场景须与query的S维一致。</td>
         <td>INT64</td>
         <td>-</td>
         <td>-</td>

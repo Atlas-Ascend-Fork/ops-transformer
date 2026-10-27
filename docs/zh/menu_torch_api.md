@@ -10,6 +10,7 @@
 - [block_attn_res_prepare](../../attention/block_attn_res_prepare/docs/torchapi_block_attn_res_prepare.md)
 - [block_attn_res_update](../../attention/block_attn_res_update/docs/torchapi_block_attn_res_update.md)
 - [block_sparse_attention](../../attention/block_sparse_attention/docs/torchapi_block_sparse_attention.md)
+- [block_sparse_attention_grad](../../attention/block_sparse_attention_grad/docs/torchapi_block_sparse_attention_grad.md)
 - [causal_conv1d_fn](../../mamba/causal_conv1d/docs/torchapi_causal_conv1d_fn.md)
 - [causal_conv1d_update](../../mamba/causal_conv1d/docs/torchapi_causal_conv1d_update.md)
 - [compressor](../../attention/compressor/docs/torchapi_compressor.md)

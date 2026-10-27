@@ -245,8 +245,8 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <td>attenMaskOptional（aclTensor*）</td>
     <td>输入</td>
     <td>注意力掩码，即公式中的atten_mask。用于屏蔽不应参与计算的特定token。</td>
-    <td>支持空Tensor。<br>当前不支持，应传入nullptr。</td>
-    <td>BOOL</td>
+    <td>支持空Tensor。<br>maskType=1 时必选，shape 必须严格为 [batch, headNum, maxBlockNum, 2]，dtype 为 INT32：<ul><li>maxBlockNum = max(ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY))。</li><li>[..., 0] 为 Q 方向 actualSizeX，[..., 1] 为 KV 方向 actualSizeY，需满足 0 ≤ actualSize ≤ 对应 blockShape。</li><li>块内 [0, actualSize) 有效参与计算，[actualSize, blockShape) 视为 padding，actualSize=0 表示该块不参与计算。</li></ul>maskType=0 时忽略此输入，应传入nullptr。</td>
+    <td>BOOL, INT32</td>
     <td>ND</td>
     <td>2</td>
     <td>×</td>
@@ -321,7 +321,7 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <td>maskType（int64_t）</td>
     <td>输入</td>
     <td>注意力计算中的掩码类型。指定采用何种预设规则的掩码逻辑。</td>
-    <td>当前只支持传 0：代表不加mask场景。</td>
+    <td>当前支持传0和1：<ul><li>0：不加mask场景，忽略attenMaskOptional。</li><li>1：PerBlockSizeMask场景，按块级变长掩码计算，需配置attenMaskOptional。</li></ul></td>
     <td>-</td>
     <td>-</td>
     <td>-</td>
@@ -409,6 +409,15 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     </tr>
 </tbody>
 </table>
+
+  <!-- npu="A3,910b" id10 -->
+  - <term>Atlas A3 训练系列产品/Atlas A3 推理系列产品</term>、<term>Atlas A2 训练系列产品/Atlas A2 推理系列产品</term>：
+    不支持FLOAT8_E5M2、FLOAT8_E4M3FN。
+   <!-- end id10 -->
+
+  <!-- npu="950" id9 -->
+  - <term>Ascend 950PR&950DT系列产品</term>：maskType不支持等于1；attenMaskOptional输入会被忽略，该输入应该传nullptr。
+  <!-- end id9 -->
 
 * **返回值**：
 
@@ -503,21 +512,8 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
 * softmaxLse的layout需要与query的layout保持一致。如果query的layout为"BSND"时，softmaxLse的layout应传入"BNS1"。
 * HeadDim必须等于128。
 * blockShapeOptional中的blockShapeX和blockShapeY分别表示Q方向和KV方向的稀疏粒度。两者均必须大于等于16且为16的整数倍，可以配置为不同值；BlockSparseMask的Q块数和KV块数应分别按照对应方向的稀疏粒度计算。
-* 根据算子支持的输入 Layout，query 张量 Shape 中对应的 head 维度大小记为 N1，key 和 value 张量 Shape 中对应的 head 维度大小记为 N2。必须满足N1 % N2 == 0。
-  - <term>Atlas A2训练系列产品</term>、<term>Atlas A3训练系列产品</term>：当前只支持MHA，即N1等于N2。
-
-  <!-- npu="950" id9 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：支持MQA、MHA、GQA场景。
-  <!-- end id9 -->
-
-* actualSeqLengthsOptional与actualSeqLengthsKvOptional相关约束：
-
-  - <term>Atlas A2训练系列产品</term>、<term>Atlas A3训练系列产品</term>：当 qInputLayout或kvInputLayout 为 "BNSD" 时，如配置该项，算子会按指定的有效长度处理，忽略 Padding 部分的数据，提升性能；如不配置（传nullptr），算子将默认把 query shape 中的 S 维度作为有效长度进行全量处理。
-
-  <!-- npu="950" id10 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：当qInputLayout或kvInputLayout 为非"TND"时，会忽略这两个入参。
-
-  <!-- end id10 -->
+* 根据算子支持的输入 Layout，query 张量 Shape 中对应的 head 维度大小记为 N1，key 和 value 张量 Shape 中对应的 head 维度大小记为 N2。必须满足N1 % N2 == 0。 支持MQA、MHA、GQA场景。
+* actualSeqLengthsOptional与actualSeqLengthsKvOptional相关约束：当qInputLayout或kvInputLayout 为非"TND"时，会忽略这两个入参。
 
 ## 调用示例
 

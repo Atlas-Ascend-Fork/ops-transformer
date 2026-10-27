@@ -35,6 +35,7 @@
 |[block_attn_res_update](../../attention/block_attn_res_update/docs/torchapi_block_attn_res_update.md)|将`delta`原地累加到`partial_block`，计算更新后`partial_block`的RMSNorm score，并与历史online softmax中间状态合并，返回当前层结果`h`。|-|默认确定性实现|
 |[block_attention_residuals](../../mhc/block_attention_residuals/docs/torchapi_block_attention_residuals.md)|将 `partial_block` 与 `block_res` 拼接后完成 RMS、投影打分与 Softmax 加权融合，输出 `hidden_states`。|默认支持确定性计算|默认支持确定性计算|
 |[block_sparse_attention](../../attention/block_sparse_attention/docs/torchapi_block_sparse_attention.md)|调用`BlockSparseAttention`完成块级稀疏注意力计算。|-|-|
+|[block_sparse_attention_grad](../../attention/block_sparse_attention_grad/docs/torchapi_block_sparse_attention_grad.md)|调用`BlockSparseAttentionGrad`完成块级稀疏注意力计算。|-|-|
 |[apply_rotary_pos_emb](../../posembedding/apply_rotary_pos_emb/docs/torchapi_apply_rotary_pos_emb.md)|融合query和key两路旋转位置编码计算，返回旋转位置编码后的query和key输出张量。|默认支持确定性计算|默认支持确定性计算|
 |[apply_rotary_pos_emb_grad](../../posembedding/apply_rotary_pos_emb_grad/docs/torchapi_apply_rotary_pos_emb_grad.md)|执行双路旋转位置编码的反向计算，将query和key两路梯度计算融合为一次kernel调用。|-|默认支持确定性计算|
 |[attention_to_ffn](../../mc2/attention_to_ffn_v2/docs/torchapi_attention_to_ffn.md)|将Attention节点上数据发往FFN节点。|-|默认支持确定性计算|

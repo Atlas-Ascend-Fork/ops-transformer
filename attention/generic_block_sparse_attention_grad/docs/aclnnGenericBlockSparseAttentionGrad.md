@@ -508,7 +508,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
         <tr>
           <td class="merged-cell" rowspan="2">ACLNN_ERR_PARAM_INVALID</td>
           <td class="merged-cell" rowspan="2">161002</td>
-          <td>输入、输出、属性的数据类型、数据格式或取值不在支持范围内；layoutQ与layoutKv不一致。</td>
+          <td>输入、输出、属性的数据类型、数据格式或取值不在支持范围内；layoutQ与layoutKv不一致；不支持确定性计算但进行确定性计算配置</td>
         </tr>
         <tr>
           <td>layoutSparsePattern、residualBlockMode、isConsistentTopk、winLeft/Right、blockShape不满足约束。</td>
@@ -565,7 +565,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
 - Grad与GradMetadata调用中的layoutSparsePattern、residualBlockMode、isConsistentTopk须保持一致；当前仅支持layoutSparsePattern=1、residualBlockMode=0。
 
 - 确定性计算：
-  - aclnnGenericBlockSparseAttentionGrad默认为非确定性实现，暂不支持确定性实现，确定性计算配置后不会生效。
+  - aclnnGenericBlockSparseAttentionGrad默认为非确定性实现，暂不支持确定性实现，若配置确定性计算会被拦截。
 - 须先调用[aclnnGenericBlockSparseAttentionGradMetadata](../../generic_block_sparse_attention_grad_metadata/docs/aclnnGenericBlockSparseAttentionGradMetadata.md)生成`metadataOptional`，再调用本接口。
 - 参数query、key、value、dout、out、dQuery、dKey、dValue的数据类型应保持一致，支持FLOAT16和BFLOAT16。
 - 参数lse的数据类型应为FLOAT32。
