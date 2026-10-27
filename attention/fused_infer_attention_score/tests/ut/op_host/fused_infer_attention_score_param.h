@@ -13,6 +13,7 @@
 
 #include <memory>
 #include <sstream>
+#include <stdexcept>
 #include "op_host_csv_case_loader.h"
 
 namespace FusedInferAttentionScoreUT {
@@ -115,6 +116,13 @@ struct FusedInferAttentionTilingUtParam : public FusedInferAttentionHostUtParamB
             int64_t val;
             while (iss >> val)
                 buf->push_back(val);
+            const int64_t expectedCount = desc.shape_.GetStorageShape().GetShapeSize();
+            if (expectedCount >= 0 && static_cast<int64_t>(buf->size()) != expectedCount) {
+                std::ostringstream errorMsg;
+                errorMsg << "Const tensor " << name << " has " << buf->size() << " data elements, but shape requires "
+                         << expectedCount;
+                throw std::invalid_argument(errorMsg.str());
+            }
             desc.isConst_ = true;
             desc.constValue_ = buf->data();
         }
