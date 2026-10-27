@@ -77,6 +77,11 @@ aclnnStatus aclnnBlockSparseAttention(
   - blockShapeX: Q方向块大小
   - blockShapeY: KV方向块大小
 
+- **innerPrecise**: 控制online softmax和rescale阶段计算使用的数据类型，取值范围受产品和输入数据类型限制，详见注意事项。
+  - 0：online softmax和rescale均采用FLOAT32计算。
+  - 1：online softmax和rescale均采用FLOAT16计算，仅支持FLOAT16输入。
+  - 4：online softmax采用FLOAT16/BFLOAT16计算，rescale采用FLOAT32计算。
+
 ### 输出参数
 
 - **attentionOut**: 注意力输出，shape与query相同
@@ -169,7 +174,7 @@ KV方向: ceil(1024/128)=8块 [0, 1, 2, 3, 4, 5, 6, 7]
 7. maskType当前只支持输入0，表示不加mask。
 8. actualSeqLengthsOptional在qInputLayout为“TND”时必选；actualSeqLengthsKvOptional在kvInputLayout为“TND”时必选。
 9. 当前不支持PagedAttention，blockTableOptional当前只支持传入nullptr。
-10. query输入为BFLOAT16时，innerPrecise只能配置为0。
+10. 在<term>Ascend 950PR&950DT系列产品</term>上，FLOAT16/BFLOAT16非量化输入支持innerPrecise配置为0或4，不支持1；在<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>上，FLOAT16输入支持配置为0或1，BFLOAT16输入仅支持配置为0。
 
 ## 编译说明
 
