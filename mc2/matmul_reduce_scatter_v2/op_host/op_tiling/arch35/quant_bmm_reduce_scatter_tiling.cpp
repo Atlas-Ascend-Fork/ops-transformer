@@ -26,6 +26,9 @@
 #include "../../../op_kernel/matmul_reduce_scatter_v2_apt_tiling_key.h"
 #include "reduce_scatter_fit_balance_tiling.h"
 #include "../reduce_scatter_formulaic_tiling.h"
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+#include "common/include/op_host/op_const_def_transformer.h"
+#endif
 
 using namespace Mc2Log;
 using namespace Mc2Tiling;
@@ -39,8 +42,10 @@ constexpr uint32_t DTYPE_ENUM_FLOAT = 0;
 constexpr uint32_t DTYPE_ENUM_FLOAT16 = 1;
 constexpr uint32_t DTYPE_ENUM_BF16 = 27;
 constexpr uint64_t PERBLOCK_SIZE = 128;
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
 constexpr uint64_t HIF4_GROUP_SIZE = 64;
 constexpr uint64_t HIF4_SCALE_LAST_DIM = 1;
+#endif
 constexpr uint64_t APACE_IMPL_MAX_RANK_DIM = 64;
 constexpr double APACE_RS_FP4_COMPUTE_PER_CYCLE_RATIO = 1.0;
 constexpr uint64_t APACE_RS_PER_RANK_BASE_M = 256;
@@ -83,8 +88,12 @@ constexpr uint32_t TRANSPOSEB_INDEX = 3;
 constexpr uint32_t COMMMODE_INDEX = 10;
 // DataType
 constexpr std::initializer_list<ge::DataType> HIF8FP8FP4DTYPE_SUPPORT_LIST = {
-    ge::DataType::DT_FLOAT8_E4M3FN, ge::DataType::DT_FLOAT8_E5M2, ge::DataType::DT_HIFLOAT8,
-    ge::DataType::DT_FLOAT4_E2M1, ge::DataType::DT_HIFLOAT4};
+    ge::DataType::DT_FLOAT8_E4M3FN, ge::DataType::DT_FLOAT8_E5M2,
+    ge::DataType::DT_HIFLOAT8,      ge::DataType::DT_FLOAT4_E2M1,
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+    Ops::Transformer::DT_HIFLOAT4,
+#endif
+};
 void ConfigureApaceFormulaModel(MMPlusReduceScatter& formulaTiling, bool isMxfp4)
 {
     // Keep all APACE calibration in the APACE caller.  The shared
@@ -169,6 +178,7 @@ ge::graphStatus QuantBmmReduceScatterTiling::CheckGroupSize() const
     uint64_t groupSizeK = static_cast<uint64_t>(*groupSizePtr) & GROUP_MNK_BIT_SIZE;
     uint64_t groupSizeN = (static_cast<uint64_t>(*groupSizePtr) >> GROUP_N_OFFSET) & GROUP_MNK_BIT_SIZE;
     uint64_t groupSizeM = (static_cast<uint64_t>(*groupSizePtr) >> GROUP_M_OFFSET) & GROUP_MNK_BIT_SIZE;
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
     if (isHiF4_) {
         // HiFP4 的固定分组在算子内部解析，不改变公共 MXFP 推导。
         groupSizeM = groupSizeM == 0 ? 1 : groupSizeM;
@@ -178,6 +188,7 @@ ge::graphStatus QuantBmmReduceScatterTiling::CheckGroupSize() const
                         OP_LOGE(opName_, "HiFP4 groupSize must be [1,1,64]"), return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
+#endif
     if (quantMode_ == mc2tiling::Mc2QuantMode::MXFP_MODE) {
         shapeInfo.isMxfp = true;
         OP_TILING_CHECK(!mc2tiling::Mc2TilingUtils::InferGroupSize(shapeInfo, groupSizeM, groupSizeN, groupSizeK),
@@ -369,9 +380,11 @@ bool QuantBmmReduceScatterTiling::PerblockSceneParamCheck(const gert::StorageSha
 bool QuantBmmReduceScatterTiling::MxfpSceneParamCheck(const gert::StorageShape* x1ScaleShape,
                                                       const gert::StorageShape* x2ScaleShape)
 {
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
     if (isHiF4_) {
         return HiF4SceneParamCheck(x1ScaleShape, x2ScaleShape);
     }
+#endif
     OP_TILING_CHECK(!mc2tiling::CheckDataTypeVaild(args_.geAType, MXDTYPE_SUPPORT_LIST) ||
                         !mc2tiling::CheckDataTypeVaild(args_.geBType, MXDTYPE_SUPPORT_LIST),
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
@@ -381,16 +394,9 @@ bool QuantBmmReduceScatterTiling::MxfpSceneParamCheck(const gert::StorageShape* 
                             .c_str(),
                         "The dtype of x1 and x2 must be float8_e4m3fn, float8_e5m2 or float4_e2m1"),
                     return false);
-    // MXFP4场景强制x1/x2类型相同
-    if (isMxfp4_) {
+    if (args_.geAType == ge::DT_FLOAT4_E2M1 || args_.geBType == ge::DT_FLOAT4_E2M1) {
         OP_TILING_CHECK(args_.geAType != args_.geBType,
-                        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-                            opName_, "x1/x2",
-                            (std::string(Ops::Base::ToString(args_.geAType).c_str()) + "/" +
-                             std::string(Ops::Base::ToString(args_.geBType).c_str()))
-                                .c_str(),
-                            "In MXFP4 quant mode, the dtype of x1 and x2 must be the same (DT_FLOAT4_E2M1)"),
-                        return false);
+                        OP_LOGE(opName_, "MXFP4 requires both inputs to be DT_FLOAT4_E2M1"), return false);
         OP_TILING_CHECK(args_.kValue % EVEN_ALIGN != 0,
                         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "kValue", std::to_string(args_.kValue).c_str(),
                                                               "In MXFP4 quant mode, kValue must be even"),
@@ -428,10 +434,11 @@ bool QuantBmmReduceScatterTiling::MxfpSceneParamCheck(const gert::StorageShape* 
     return true;
 }
 
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
 bool QuantBmmReduceScatterTiling::HiF4SceneParamCheck(const gert::StorageShape* x1ScaleShape,
                                                       const gert::StorageShape* x2ScaleShape) const
 {
-    OP_TILING_CHECK(args_.geAType != ge::DT_HIFLOAT4 || args_.geBType != ge::DT_HIFLOAT4,
+    OP_TILING_CHECK(args_.geAType != Ops::Transformer::DT_HIFLOAT4 || args_.geBType != Ops::Transformer::DT_HIFLOAT4,
                     OP_LOGE(opName_, "HiFP4 requires both x1 and x2 to be DT_HIFLOAT4"), return false);
     const auto* biasShape = context_->GetOptionalInputShape(BIAS_INDEX);
     bool hasNonEmptyBias = biasShape != nullptr;
@@ -469,6 +476,7 @@ bool QuantBmmReduceScatterTiling::HiF4SceneParamCheck(const gert::StorageShape* 
                     return false);
     return true;
 }
+#endif
 
 ge::graphStatus QuantBmmReduceScatterTiling::CheckScale() const
 {
@@ -491,14 +499,17 @@ ge::graphStatus QuantBmmReduceScatterTiling::CheckScale() const
     OP_TILING_CHECK(((x1ScaleDesc->GetDataType() != ge::DataType::DT_FLOAT) &&
                      (x2ScaleDesc->GetDataType() != ge::DataType::DT_FLOAT)) &&
                         ((x1ScaleDesc->GetDataType() != ge::DataType::DT_FLOAT8_E8M0) &&
-                         (x2ScaleDesc->GetDataType() != ge::DataType::DT_FLOAT8_E8M0)) &&
-                        (x1ScaleDesc->GetDataType() != ge::DT_HIFLOAT4_SCALE),
+                         (x2ScaleDesc->GetDataType() != ge::DataType::DT_FLOAT8_E8M0))
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+                        && (x1ScaleDesc->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE)
+#endif
+                        ,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "x1Scale/x2Scale",
                         (std::string(Ops::Base::ToString(x1ScaleDesc->GetDataType()).c_str()) + "/" +
                          std::string(Ops::Base::ToString(x2ScaleDesc->GetDataType()).c_str()))
                             .c_str(),
-                        "The dtype of x1Scale and x2Scale must be float32, float8_e8m0 or hifloat4_scale"),
+                        "The dtype of x1Scale and x2Scale is not supported"),
                     return ge::GRAPH_FAILED);
     OP_TILING_CHECK((x1ScaleDesc->GetDataType() != x2ScaleDesc->GetDataType()),
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
@@ -509,13 +520,23 @@ ge::graphStatus QuantBmmReduceScatterTiling::CheckScale() const
                         "The dtype of x1Scale and x2Scale must be the same"),
                     return ge::GRAPH_FAILED);
 
-    const bool hasHiF4Input = args_.geAType == ge::DT_HIFLOAT4 || args_.geBType == ge::DT_HIFLOAT4;
-    const bool hasHiF4Scale = x1ScaleDesc->GetDataType() == ge::DT_HIFLOAT4_SCALE;
+    const bool hasFp4Input = args_.geAType == ge::DT_FLOAT4_E2M1 || args_.geBType == ge::DT_FLOAT4_E2M1;
+    OP_TILING_CHECK(hasFp4Input && (x1ScaleDesc->GetDataType() != ge::DT_FLOAT8_E8M0 ||
+                                    x2ScaleDesc->GetDataType() != ge::DT_FLOAT8_E8M0 ||
+                                    x1ScaleShape->GetStorageShape().GetDimNum() != MX_SCALE_DIM ||
+                                    x2ScaleShape->GetStorageShape().GetDimNum() != MX_SCALE_DIM),
+                    OP_LOGE(opName_, "MXFP4 requires two 3-D FLOAT8_E8M0 scale tensors"), return ge::GRAPH_FAILED);
+
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+    const bool hasHiF4Input =
+        args_.geAType == Ops::Transformer::DT_HIFLOAT4 || args_.geBType == Ops::Transformer::DT_HIFLOAT4;
+    const bool hasHiF4Scale = x1ScaleDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE;
     OP_TILING_CHECK(hasHiF4Input != hasHiF4Scale,
                     OP_LOGE(opName_, "HiFP4 inputs and HiFP4_SCALE scales must be paired"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(hasHiF4Input && (x1ScaleShape->GetStorageShape().GetDimNum() != MX_SCALE_DIM ||
                                      x2ScaleShape->GetStorageShape().GetDimNum() != MX_SCALE_DIM),
                     OP_LOGE(opName_, "HiFP4 requires two 3-D scale tensors"), return ge::GRAPH_FAILED);
+#endif
     return ge::GRAPH_SUCCESS;
 }
 
@@ -628,11 +649,15 @@ void QuantBmmReduceScatterTiling::SetScene()
                         "PerBlock scenario: [x1Scale=2D, x2Scale=2D]; MXFP scenario: [x1Scale=3D, x2Scale=3D])"),
                     return);
 
-    if (x1ScaleDesc->GetDataType() == ge::DT_HIFLOAT4_SCALE && x2ScaleDesc->GetDataType() == ge::DT_HIFLOAT4_SCALE) {
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+    if (x1ScaleDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE &&
+        x2ScaleDesc->GetDataType() == Ops::Transformer::DT_HIFLOAT4_SCALE) {
         quantMode_ = mc2tiling::Mc2QuantMode::MXFP_MODE;
         isHiF4_ = true;
-    } else if ((x1ScaleShape->GetStorageShape().GetDimNum() == PERTENSOR_SCALE_DIM) &&
-               (x2ScaleShape->GetStorageShape().GetDimNum() == PERTENSOR_SCALE_DIM)) {
+    } else
+#endif
+        if ((x1ScaleShape->GetStorageShape().GetDimNum() == PERTENSOR_SCALE_DIM) &&
+            (x2ScaleShape->GetStorageShape().GetDimNum() == PERTENSOR_SCALE_DIM)) {
         quantMode_ = mc2tiling::Mc2QuantMode::PERTENSOR_MODE;
     } else if ((x1ScaleShape->GetStorageShape().GetDimNum() == MX_SCALE_DIM) &&
                (x2ScaleShape->GetStorageShape().GetDimNum() == MX_SCALE_DIM) &&
@@ -726,14 +751,20 @@ uint64_t QuantBmmReduceScatterTiling::GetTilingKey() const
     if ((x1ScaleDesc->GetDataType() == ge::DataType::DT_FLOAT8_E8M0) &&
         (x2ScaleDesc->GetDataType() == ge::DataType::DT_FLOAT8_E8M0)) {
         scaleType = static_cast<uint8_t>(1);
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
     } else if (isHiF4_) {
         scaleType = TPL_X1_X2_DTYPE_IS_HIF4_SCALE;
+#endif
     } else {
         scaleType = static_cast<uint8_t>(0);
     }
 
     // MXFP4场景设置inputType为INPUT_TYPE_IS_FP4
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
     uint8_t inputType = isHiF4_ ? INPUT_TYPE_IS_HIF4 : INPUT_TYPE_IS_FP8;
+#else
+    uint8_t inputType = INPUT_TYPE_IS_FP8;
+#endif
     if (isMxfp4_) {
         inputType = INPUT_TYPE_IS_FP4;
         OP_LOGD(opName_, "MXFP4 scene detected, setting inputType to INPUT_TYPE_IS_FP4 (2)");

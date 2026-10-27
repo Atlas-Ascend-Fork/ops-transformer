@@ -17,6 +17,15 @@
 #include "register/op_impl_registry.h"
 #include "mc2_hcom_topo_info.h"
 #include "op_host/mc2_common_infershape.h"
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ENABLE_MMRS_DT_HIFLOAT4
+#endif
+#endif
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+#include "common/include/op_host/op_const_def_transformer.h"
+#endif
 
 using namespace ge;
 namespace ops {
@@ -65,10 +74,12 @@ static ge::graphStatus InferDataTypeMatmulReduceScatterV2(gert::InferDataTypeCon
         }
         yDtype = static_cast<ge::DataType>(*yDtypePtr);
     }
-    if (x1Dtype == ge::DT_HIFLOAT4 && yDtype != ge::DT_FLOAT16 && yDtype != ge::DT_BF16) {
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+    if (x1Dtype == Ops::Transformer::DT_HIFLOAT4 && yDtype != ge::DT_FLOAT16 && yDtype != ge::DT_BF16) {
         OP_LOGE(context->GetNodeName(), "HiFP4 only supports float16 or bfloat16 output.");
         return ge::GRAPH_FAILED;
     }
+#endif
     context->SetOutputDataType(INDEX_OUT, yDtype);
     return GRAPH_SUCCESS;
 }

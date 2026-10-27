@@ -14,6 +14,15 @@
 #include "infer_datatype_context_faker.h"
 #include "op_tiling_parse_context_builder.h"
 #include "base/registry/op_impl_space_registry_v2.h"
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ENABLE_MMRS_DT_HIFLOAT4
+#endif
+#endif
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+#include "common/include/op_host/op_const_def_transformer.h"
+#endif
 
 namespace {
 
@@ -158,6 +167,48 @@ TEST_F(MatmulReduceScatterV2InferShapeTest, Perblock)
     Mc2ExecuteTestCase(infershapeContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectOutputShape);
 }
 
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+TEST_F(MatmulReduceScatterV2InferShapeTest, HiFp4Transpose)
+{
+    constexpr int64_t m = 512;
+    constexpr int64_t k = 258;
+    constexpr int64_t n = 128;
+    constexpr int64_t rankSize = 2;
+    constexpr int64_t scaleGroupSize = 64;
+    constexpr int64_t scaleK = (k + scaleGroupSize - 1) / scaleGroupSize;
+    for (const bool transB : {false, true}) {
+        SCOPED_TRACE(testing::Message() << "transB=" << transB);
+        gert::StorageShape x1Shape = {{m, k}, {}};
+        gert::StorageShape x2Shape = {{transB ? n : k, transB ? k : n}, {}};
+        gert::StorageShape x1ScaleShape = {{m, scaleK, 1}, {}};
+        gert::StorageShape x2ScaleShape = {{transB ? n : scaleK, transB ? scaleK : n, 1}, {}};
+        gert::InfershapeContextPara contextPara(
+            "MatmulReduceScatterV2",
+            {{x1Shape, Ops::Transformer::DT_HIFLOAT4, ge::FORMAT_ND},
+             {x2Shape, Ops::Transformer::DT_HIFLOAT4, ge::FORMAT_ND},
+             {{}, ge::DT_FLOAT, ge::FORMAT_ND},
+             {x1ScaleShape, Ops::Transformer::DT_HIFLOAT4_SCALE, ge::FORMAT_ND},
+             {x2ScaleShape, Ops::Transformer::DT_HIFLOAT4_SCALE, ge::FORMAT_ND},
+             {{}, ge::DT_FLOAT, ge::FORMAT_ND}},
+            {{{}, ge::DT_FLOAT16, ge::FORMAT_ND}, {{}, ge::DT_FLOAT, ge::FORMAT_ND}},
+            {{"group", Ops::Transformer::AnyValue::CreateFrom<std::string>("hcclCom")},
+             {"reduce_op", Ops::Transformer::AnyValue::CreateFrom<std::string>("sum")},
+             {"is_trans_a", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+             {"is_trans_b", Ops::Transformer::AnyValue::CreateFrom<bool>(transB)},
+             {"comm_turn", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"rank_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(rankSize)},
+             {"block_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"group_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"is_amax_out", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+             {"y_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(static_cast<int>(ge::DT_FLOAT16))},
+             {"comm_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("ai_cpu")}});
+        Mc2Hcom::MockValues topology{{"rankNum", rankSize}};
+        Mc2ExecuteTestCase(contextPara, topology, ge::GRAPH_SUCCESS, {{m / rankSize, n}, {0}});
+    }
+}
+
+#endif
+
 // inferDtype用例 ======================================================================================================
 class MatmulReduceScatterV2InferDTypeTest : public testing::Test {
 protected:
@@ -233,6 +284,53 @@ TEST_F(MatmulReduceScatterV2InferDTypeTest, AttrYDtype)
     ASSERT_EQ(inferDataTypeFunc(contextHolder.GetContext<gert::InferDataTypeContext>()), ge::GRAPH_SUCCESS);
     EXPECT_EQ(contextHolder.GetContext<gert::InferDataTypeContext>()->GetOutputDataType(0), attrYDtype);
 }
+
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+TEST_F(MatmulReduceScatterV2InferDTypeTest, HiFp4OutputTypes)
+{
+    struct DtypeCase {
+        ge::DataType yDtype;
+        ge::graphStatus expectResult;
+    };
+    const DtypeCase cases[] = {{ge::DT_FLOAT16, ge::GRAPH_SUCCESS},
+                               {ge::DT_BF16, ge::GRAPH_SUCCESS},
+                               {ge::DT_FLOAT, ge::GRAPH_FAILED},
+                               {ge::DT_UNDEFINED, ge::GRAPH_FAILED}};
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(spaceRegistry, nullptr);
+    auto opImpl = spaceRegistry->GetOpImpl("MatmulReduceScatterV2");
+    ASSERT_NE(opImpl, nullptr);
+    ASSERT_NE(opImpl->infer_datatype, nullptr);
+    for (const auto& testCase : cases) {
+        SCOPED_TRACE(testing::Message() << "yDtype=" << testCase.yDtype);
+        ge::DataType x1Type = Ops::Transformer::DT_HIFLOAT4;
+        auto contextHolder =
+            gert::InferDataTypeContextFaker()
+                .NodeIoNum(1, 2)
+                .InputDataTypes({&x1Type})
+                .NodeOutputTd(0, ge::FORMAT_ND, ge::FORMAT_ND)
+                .NodeOutputTd(1, ge::FORMAT_ND, ge::FORMAT_ND)
+                .NodeAttrs({{"group", Ops::Transformer::AnyValue::CreateFrom<std::string>("hcclCom")},
+                            {"reduce_op", Ops::Transformer::AnyValue::CreateFrom<std::string>("sum")},
+                            {"is_trans_a", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                            {"is_trans_b", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                            {"comm_turn", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                            {"rank_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+                            {"block_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                            {"group_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                            {"is_amax_out", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                            {"y_dtype",
+                             Ops::Transformer::AnyValue::CreateFrom<int64_t>(static_cast<int64_t>(testCase.yDtype))}})
+                .Build();
+        auto context = contextHolder.GetContext<gert::InferDataTypeContext>();
+        ASSERT_EQ(opImpl->infer_datatype(context), testCase.expectResult);
+        if (testCase.expectResult == ge::GRAPH_SUCCESS) {
+            EXPECT_EQ(context->GetOutputDataType(0), testCase.yDtype);
+        }
+    }
+}
+
+#endif
 
 // inferShape用例 - isAmaxOut=true
 TEST_F(MatmulReduceScatterV2InferShapeTest, AmaxOutEnabled)

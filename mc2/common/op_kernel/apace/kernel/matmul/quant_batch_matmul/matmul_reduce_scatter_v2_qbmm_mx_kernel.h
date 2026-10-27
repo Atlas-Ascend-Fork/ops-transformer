@@ -52,9 +52,14 @@ public:
     using LayoutB = typename BlockMmad::LayoutB;
     using LayoutC = typename BlockMmad::LayoutC;
 
+#if defined(MMRS_APACE_HIF4_DTYPE) && MMRS_APACE_HIF4_DTYPE
     static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
-    static_assert(!IS_HIF4 || !transA, "HiFP4 MMRS only supports non-transposed x1");
     using ScaleType = AscendC::Std::conditional_t<IS_HIF4, AscendC::hif4_scale, AscendC::fp8_e8m0_t>;
+#else
+    static constexpr bool IS_HIF4 = false;
+    using ScaleType = AscendC::fp8_e8m0_t;
+#endif
+    static_assert(!IS_HIF4 || !transA, "HiFP4 MMRS only supports non-transposed x1");
     static constexpr int64_t C0_SIZE = (IS_HIF4 || IsFp4<AType>()) ? C0_SIZE_B4 : C0_SIZE_B8;
     static constexpr int64_t CACHE_LINE_ALIGN_MASK = (IS_HIF4 || IsFp4<AType>()) ? 0xff : 0x7f;
     static constexpr int32_t SCALE_C0 = IS_HIF4 ? 1 : 2;

@@ -18,6 +18,15 @@
 #include "tiling_context_faker.h"
 #include "infer_shape_context_faker.h"
 #include "op_host_csv_case_loader.h"
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ENABLE_MMRS_DT_HIFLOAT4
+#endif
+#endif
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+#include "common/include/op_host/op_const_def_transformer.h"
+#endif
 
 namespace matmul_reduce_scatter_v2_ut {
 
@@ -80,7 +89,7 @@ struct MatmulReduceScatterV2TilingUtParam : public MatmulReduceScatterV2HostUtPa
     std::string soc;
     uint64_t coreNum;
     uint64_t ubsize;
-    uint64_t expectTilingKey;
+    uint64_t expectTilingKey{0};
     std::string expectTilingDataHash;
 
     MatmulReduceScatterV2TilingUtParam(const csv_map& csvMap)
@@ -99,6 +108,20 @@ struct MatmulReduceScatterV2TilingUtParam : public MatmulReduceScatterV2HostUtPa
             GetTensorGE(csvMap, "output_y_shape", "output_y_dtype", "output_y_format", y));
         this->outputInstance.emplace_back(
             GetTensorGE(csvMap, "amax_out_shape", "amax_out_dtype", "amax_out_format", amax_out));
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+        const auto setHiF4Type = [&csvMap](const char* key, gert::TilingContextPara::TensorDescription& tensor) {
+            const auto dtype = ReadMap(csvMap, key);
+            if (dtype == "HIFLOAT4") {
+                tensor.dtype_ = Ops::Transformer::DT_HIFLOAT4;
+            } else if (dtype == "HIFLOAT4_SCALE") {
+                tensor.dtype_ = Ops::Transformer::DT_HIFLOAT4_SCALE;
+            }
+        };
+        setHiF4Type("x1_dtype", x1);
+        setHiF4Type("x2_dtype", x2);
+        setHiF4Type("x1_scale_dtype", x1_scale);
+        setHiF4Type("x2_scale_dtype", x2_scale);
+#endif
         this->soc = ReadMap(csvMap, "soc");
         this->coreNum = stoull(ReadMap(csvMap, "core_num"));
         this->ubsize = stoull(ReadMap(csvMap, "ubsize"));
@@ -108,6 +131,7 @@ struct MatmulReduceScatterV2TilingUtParam : public MatmulReduceScatterV2HostUtPa
         }
     }
 };
+
 } // namespace matmul_reduce_scatter_v2_ut
 
-#endif // MATMUL_REDUCESCATTER_V2_HOST_UT_PARAM_H
+#endif // MATMUL_REDUCE_SCATTERV2_HOST_UT_PARAM_H

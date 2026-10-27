@@ -40,20 +40,25 @@ template <typename AType, typename BType, typename CType, bool BTrans, typename 
           AscendC::HcclServerType ServerType>
 class MatmulReduceScatterV2MxQuantHcommImpl {
 public:
+// 仅在 HiFP4 编译单元引用新类型，其他 960 通路不依赖这些类型。
+#if defined(MMRS_APACE_HIF4_DTYPE) && MMRS_APACE_HIF4_DTYPE
     static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
     static_assert(!(AscendC::IsSameType<AType, hifloat4x2_t>::value ||
                     AscendC::IsSameType<BType, hifloat4x2_t>::value) ||
                       AscendC::IsSameType<CType, half>::value || AscendC::IsSameType<CType, bfloat16_t>::value,
                   "HiFP4 MMRS only supports float16 or bfloat16 output");
+    // Reuse MXFP4's B4 scheduler geometry for HiFP4; MMAD keeps the real type.
+    using SchedulerAType = AscendC::Std::conditional_t<IS_HIF4, fp4x2_e2m1_t, AType>;
+#else
+    static constexpr bool IS_HIF4 = false;
+    using SchedulerAType = AType;
+#endif
     using LayoutA = AscendC::Te::NDExtLayoutPtn;
     using LayoutB = typename MatmulReduceScatterV2BLayout<BTrans>::Type;
     using LayoutC = AscendC::Te::NDExtLayoutPtn;
     using LayoutBias = AscendC::Te::NDExtLayoutPtn;
     using BiasType = float;
     using ProblemShape = AscendC::Te::Shape<int64_t, int64_t, int64_t, int64_t>;
-    // Reuse MXFP4's B4 scheduler geometry for HiFP4; MMAD keeps the real type.
-    using SchedulerAType =
-        AscendC::Std::conditional_t<AscendC::IsSameType<AType, hifloat4x2_t>::value, fp4x2_e2m1_t, AType>;
     using BlockScheduler =
         Blaze::Gemm::Block::BlockSchedulerQuantBatchMatmulV3<ProblemShape, 0, LayoutA, LayoutB, SchedulerAType>;
     using DispatchPolicy = Blaze::Gemm::MatmulWithScaleMx<0, false>;

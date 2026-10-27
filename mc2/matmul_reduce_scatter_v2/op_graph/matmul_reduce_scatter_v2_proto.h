@@ -16,6 +16,7 @@
 #define MATMUL_REDUCE_SCATTER_V2_PROTO_H_
 
 #include "graph/operator_reg.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace ge {
 
@@ -80,12 +81,12 @@ one element, for example (1,). The amax_out only supports nullptr in current ver
 */
 REG_OP(MatmulReduceScatterV2)
     .INPUT(x1, TensorType({DT_FLOAT16, DT_BF16, DT_FLOAT8_E4M3FN, DT_FLOAT8_E5M2, DT_HIFLOAT8, DT_FLOAT4_E2M1,
-                           DT_HIFLOAT4}))
+                           Ops::Transformer::DT_HIFLOAT4}))
     .INPUT(x2, TensorType({DT_FLOAT16, DT_BF16, DT_FLOAT8_E4M3FN, DT_FLOAT8_E5M2, DT_HIFLOAT8, DT_FLOAT4_E2M1,
-                           DT_HIFLOAT4}))
+                           Ops::Transformer::DT_HIFLOAT4}))
     .OPTIONAL_INPUT(bias, TensorType({DT_FLOAT16, DT_BF16, DT_FLOAT}))
-    .OPTIONAL_INPUT(x1_scale, TensorType({DT_FLOAT, DT_FLOAT_E8M0, DT_HIFLOAT4_SCALE}))
-    .OPTIONAL_INPUT(x2_scale, TensorType({DT_FLOAT, DT_FLOAT_E8M0, DT_HIFLOAT4_SCALE}))
+    .OPTIONAL_INPUT(x1_scale, TensorType({DT_FLOAT, DT_FLOAT_E8M0, Ops::Transformer::DT_HIFLOAT4_SCALE}))
+    .OPTIONAL_INPUT(x2_scale, TensorType({DT_FLOAT, DT_FLOAT_E8M0, Ops::Transformer::DT_HIFLOAT4_SCALE}))
     .OPTIONAL_INPUT(quant_scale, TensorType({DT_FLOAT}))
     .OUTPUT(y, TensorType({DT_FLOAT16, DT_BF16, DT_FLOAT}))
     .OUTPUT(amax_out, TensorType({DT_FLOAT}))

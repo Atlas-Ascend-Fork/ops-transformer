@@ -31,6 +31,9 @@
 #include "matmul_reduce_scatter_tiling_base_v2.h"
 #include "../../op_kernel/matmul_reduce_scatter_v2_apt_tiling_key.h"
 #include "util/math_util.h"
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
+#include "common/include/op_host/op_const_def_transformer.h"
+#endif
 
 using namespace AscendC;
 using namespace ge;
@@ -484,9 +487,14 @@ void MatmulReduceScatterTilingBase::SetReduceScatterTilingArgsDataType()
         biasType = context_->GetInputDesc(BIAS_INDEX)->GetDataType();
     }
 
+#ifdef ENABLE_MMRS_DT_HIFLOAT4
     // 性能模型只接受整数字节大小，HiFP4 用 B8 保守估算；实际 B4 数据和 scale 由 APACE 单独计算。
-    const auto tilingAType = aType == ge::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : aType;
-    const auto tilingBType = bType == ge::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : bType;
+    const auto tilingAType = aType == Ops::Transformer::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : aType;
+    const auto tilingBType = bType == Ops::Transformer::DT_HIFLOAT4 ? ge::DT_FLOAT8_E4M3FN : bType;
+#else
+    const auto tilingAType = aType;
+    const auto tilingBType = bType;
+#endif
     uint64_t inputDtypeSize = mc2tiling::GetDataTypeSize(opName_, tilingAType);
     uint64_t outputDtypeSize = mc2tiling::GetDataTypeSize(opName_, cType);
 
