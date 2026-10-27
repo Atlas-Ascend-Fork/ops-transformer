@@ -154,7 +154,7 @@ ge::graphStatus SparseCompressionChecker::CheckParaExistence(const CheckContext&
 
 ge::graphStatus SparseCompressionChecker::CheckFeature(const CheckContext& context) const
 {
-    if (context.topkValueMode == 2) {
+    if (context.topkValueMode == 2) { // 2：top-k
         OP_CHECK_IF(context.kvLayout != Layout::PA_BBND,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                         Op(context), "topk_value_mode", std::to_string(static_cast<uint32_t>(context.kvLayout)).c_str(),

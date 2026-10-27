@@ -422,8 +422,8 @@ private:
     ge::graphStatus CheckNotExists(const void* pointer, const std::string& name) const;
     ge::graphStatus CheckExistsByMap(const std::map<std::string, const void*>& paramMap) const;
     ge::graphStatus CheckNotExistsByMap(const std::map<std::string, const void*>& paramMap) const;
-    ge::graphStatus CheckExistenceByMap(std::map<std::string, const void*>& existMap,
-                                        std::map<std::string, const void*>& notExistMap) const;
+    ge::graphStatus CheckExistenceByMap(std::map<std::string, const void*>& sfaExistMap,
+                                        std::map<std::string, const void*>& sfaNotExistMap) const;
     template <typename T>
     ge::graphStatus CheckAttrValueByMap(std::map<std::string, std::pair<const T*, T>>& attrMap) const;
     ge::graphStatus CheckParaExistenceMlaNoquant() const;

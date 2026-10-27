@@ -781,7 +781,7 @@ __aicore__ inline void SmlaCsaBlockVector<TEMPLATE_ARGS>::InitVec1SoftmaxFromSin
     }
     int64_t sinksOffset = 0;
     if constexpr (!IS_SPLIT_G) {
-        sinksOffset = GetBlockIdx() % 2 == 0 ? 0 : smla35VecRunInfo.firstHalfMRealSize;
+        sinksOffset = GetBlockIdx() % 2 == 0 ? 0 : smla35VecRunInfo.firstHalfMRealSize; // 2：根据奇偶性确定索引偏移量
     } else {
         sinksOffset = smla35VecRunInfo.goIdx;
         if (smla35VecConstInfo.subBlockIdx == 1) {

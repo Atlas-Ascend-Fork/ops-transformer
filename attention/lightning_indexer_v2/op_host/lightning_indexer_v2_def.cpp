@@ -101,7 +101,7 @@ public:
         this->Attr("return_value").AttrType(OPTIONAL).Int(0);
         // candidate (two-level topk): -1=关闭(缺省), 有效值 (0,2048] 且 64 的倍数时开启 source 模式
         this->Attr("candidate_topk_blocks").AttrType(OPTIONAL).Int(-1);
-        this->Attr("candidate_block_size").AttrType(OPTIONAL).Int(8); // [2,64] 且为 2 的幂
+        this->Attr("candidate_block_size").AttrType(OPTIONAL).Int(8); // [2,64] 且为 2 的幂; 8：默认分块大小
         OpAICoreConfig aicore_config;
         aicore_config.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(true)

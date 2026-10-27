@@ -252,8 +252,8 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void SFAVectorService<TEMPLATE_ARGS>:
     DataCopyPad(kvInUb[startRow * dVTemplateTypeInput], keyGm[keyOffset * 512], sfaIntriParams,
                 padParams); // dVTemplateTypeInput: 局部Buffer行跨度
     if constexpr (HAS_ROPE) {
-        sfaIntriParams.blockLen = constInfo.sparseBlockSize * 64 * sizeof(KV_T);
-        sfaIntriParams.dstStride = 512 / BUFFER_SIZE_BYTE_32B; // 512: 模型特征维度(dSize)
+        sfaIntriParams.blockLen = constInfo.sparseBlockSize * 64 * sizeof(KV_T); // 64：RoPE索引数据的每token元素个数
+        sfaIntriParams.dstStride = 512 / BUFFER_SIZE_BYTE_32B;                   // 512: 模型特征维度(dSize)
         // 576: 局部Buffer行跨度 512: Key特征维度 64：RoPE索引数据每Token/块的行跨度（Stride）
         DataCopyPad(kvInUb[startRow * 576 + 512], keyRopeGm[keyOffset * 64], sfaIntriParams, padParams);
     }
@@ -270,10 +270,10 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t SFAVectorService<TEMPLATE_AR
     }
     int64_t blkTableSrcStride =
         ((keyOffset0 > keyOffset1 ? (keyOffset0 - keyOffset1) : (keyOffset1 - keyOffset0)) - constInfo.sparseBlockSize);
-    int64_t keySrcStride = blkTableSrcStride * 512 * sizeof(KV_T);
+    int64_t keySrcStride = blkTableSrcStride * 512 * sizeof(KV_T); // 512: Key特征维度
     int64_t keyRopeSrcStride = 0;
     if constexpr (HAS_ROPE) {
-        keyRopeSrcStride = blkTableSrcStride * 64 * sizeof(KV_T);
+        keyRopeSrcStride = blkTableSrcStride * 64 * sizeof(KV_T); // 64：RoPE索引数据的每token元素个数
     }
     if (unlikely(keyOffset1 < 0)) {
         CopyInSingleKv(kvInUb, startRow, keyOffset0, constInfo);
@@ -284,7 +284,7 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t SFAVectorService<TEMPLATE_AR
     } else {
         DataCopyExtParams intriParams;
         intriParams.blockCount = (keyOffset0 >= 0) + (keyOffset1 >= 0);
-        intriParams.blockLen = constInfo.sparseBlockSize * 512 * sizeof(KV_T);
+        intriParams.blockLen = constInfo.sparseBlockSize * 512 * sizeof(KV_T); // 512: Key特征维度
         DataCopyPadExtParams<KV_T> padParams;
 
         int64_t keyOffset = keyOffset0 > -1 ? keyOffset0 : keyOffset1;
@@ -297,15 +297,16 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t SFAVectorService<TEMPLATE_AR
             DataCopyPad(kvInUb[startRow * 576], keyGm[keyOffset * 512], // 576: 局部Buffer行跨度
                         intriParams, padParams);                        // combineDimAlign
 
-            intriParams.blockLen = constInfo.sparseBlockSize * 64 * sizeof(KV_T);
-            intriParams.dstStride = 512 * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
+            intriParams.blockLen = constInfo.sparseBlockSize * 64 * sizeof(KV_T); // 64：RoPE索引数据的每token元素个数
+            intriParams.dstStride = 512 * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B; // 512: Key特征维度
             intriParams.srcStride = keyRopeSrcStride;
+            // {576, 512, 64}：同上
             DataCopyPad(kvInUb[startRow * 576 + 512], keyRopeGm[keyOffset * 64], intriParams,
                         padParams); // combineDimAlign
         } else {
             intriParams.dstStride = 0;
             intriParams.srcStride = keySrcStride;
-            DataCopyPad(kvInUb[startRow * 512], keyGm[keyOffset * 512], intriParams, padParams);
+            DataCopyPad(kvInUb[startRow * 512], keyGm[keyOffset * 512], intriParams, padParams); // 512: Key特征维度
         }
     }
     return (keyOffset0 > -1) + (keyOffset1 > -1);

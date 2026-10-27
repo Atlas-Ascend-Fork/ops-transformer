@@ -1733,9 +1733,11 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaCmpRatio() const
 
     switch (smlaInfo_.perfMode) {
         case SMLATemplateMode::CSA_TEMPLATE_MODE:
+            // {2, 4}：压缩比倍数
             return checkRatio(cmpRatio_ == 1 || cmpRatio_ == 2 || cmpRatio_ == 4, "1, 2 or 4", "CSA",
                               "when cmp_sparse_indices is provided");
         case SMLATemplateMode::HCA_TEMPLATE_MODE:
+            // 128：压缩比倍数
             return checkRatio(cmpRatio_ == 128, "128", "HCA", "when cmp_sparse_indices is not provided");
         default:
             return ge::GRAPH_SUCCESS;

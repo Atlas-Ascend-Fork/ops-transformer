@@ -129,7 +129,7 @@ struct RunParamStr { // 分核与切块需要使用到参数
     bool isCmp; \
     bool isCrossCoreSplit = false; \
     int64_t s2SplitIdx = 0; \
-    bool isFirstS2SplitCore = true;
+    bool isFirstS2SplitCore = true
 
 struct RunInfo {
     QSMLA_RUN_INFO_FIELDS;

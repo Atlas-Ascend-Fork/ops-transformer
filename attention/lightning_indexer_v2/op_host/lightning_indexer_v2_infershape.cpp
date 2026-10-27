@@ -124,9 +124,8 @@ static ge::graphStatus InferDataTypeLightningIndexerV2(gert::InferDataTypeContex
     // attention_out, outidx:0
     context->SetOutputDataType(0, outputType);
     context->SetOutputDataType(1, ge::DT_FLOAT);
-    // candidate_block_indices:2 / candidate_block_length:3
-    context->SetOutputDataType(2, ge::DT_INT32);
-    context->SetOutputDataType(3, ge::DT_INT32);
+    context->SetOutputDataType(2, ge::DT_INT32); // candidate_block_indices:2
+    context->SetOutputDataType(3, ge::DT_INT32); // candidate_block_length:3
     OP_LOGI(context->GetNodeName(), "LightningIndexerV2 InferDataType end.");
     return GRAPH_SUCCESS;
 }

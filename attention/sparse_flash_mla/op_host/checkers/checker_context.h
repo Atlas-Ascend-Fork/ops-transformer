@@ -17,6 +17,7 @@
 #include "tiling/tiling_api.h"
 #include "exe_graph/runtime/tiling_context.h"
 #include "platform/platform_info.h"
+#include "platform/soc_spec.h"
 
 namespace optiling {
 namespace sparse_mla_checker {

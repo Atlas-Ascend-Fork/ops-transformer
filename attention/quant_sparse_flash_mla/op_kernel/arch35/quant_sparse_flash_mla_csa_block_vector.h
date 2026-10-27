@@ -936,7 +936,8 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::ProcessVec1(
             if (includeSink) {
                 int64_t sinksOffset = 0;
                 if constexpr (!IS_SPLIT_G) {
-                    sinksOffset = GetBlockIdx() % 2 == 0 ? 0 : qs35VecRunInfo.firstHalfMRealSize;
+                    sinksOffset =
+                        GetBlockIdx() % 2 == 0 ? 0 : qs35VecRunInfo.firstHalfMRealSize; // 2：根据奇偶性确定索引偏移量
                 } else {
                     sinksOffset = qs35VecRunInfo.goIdx;
                     if (qs35VecConstInfo.subBlockIdx == 1) {
@@ -1902,8 +1903,9 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::SoftmaxInitBuffer()
         tPipe->InitBuffer(softmaxFinalSumBuf[1], softmaxBufSize);
         tPipe->InitBuffer(softmaxFinalMaxBuf[0], softmaxBufSize);
         tPipe->InitBuffer(softmaxFinalMaxBuf[1], softmaxBufSize);
-        tPipe->InitBuffer(batchReduceTmpBuf, 768 * sizeof(float));
+        tPipe->InitBuffer(batchReduceTmpBuf, 768 * sizeof(float)); // 768：申请内存大小为768个float
     } else {
+        // 2：双缓冲；128：每个广播块的大小为128字节
         tPipe->InitBuffer(dequantScaleBuff, 2 * 128 * AttentionCommon::FD_BROADCAST_ELEMS_PER_ROW * sizeof(float));
     }
     tPipe->InitBuffer(softmaxExpBuf[0], softmaxBufSize);
@@ -1952,7 +1954,7 @@ __aicore__ inline void CSABlockVec<TEMPLATE_ARGS>::InitLocalBuffer(TPipe* pipe, 
     stageMte3ToVId = GetTPipePtr()->AllocEventID<HardEvent::MTE3_V>();
     vToMte3Id = GetTPipePtr()->AllocEventID<HardEvent::V_MTE3>();
     if constexpr (IS_BATCH_CONSISTENCY) {
-        for (uint32_t eventIdx = 0; eventIdx < 2; ++eventIdx) {
+        for (uint32_t eventIdx = 0; eventIdx < 2; ++eventIdx) { // 2：双缓冲机制
             intraLseMte3ToMte2Id[eventIdx] = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
             intraAttnOutMte3ToMte2Id[eventIdx] = GetTPipePtr()->AllocEventID<HardEvent::MTE3_MTE2>();
         }

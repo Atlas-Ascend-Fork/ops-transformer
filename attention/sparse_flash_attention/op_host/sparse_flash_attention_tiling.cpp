@@ -318,8 +318,8 @@ void SFAMlaTiling::GenTilingKey()
 
     tilingKey_ = GET_TPL_TILING_KEY(
         0U, pageAttention, layoutQuery, layoutKV, perfMode_ == SFAPerfMode::V_TEMPLATE_MODE,
-        static_cast<uint32_t>(sfaInfo_->gSize > 64),
-        static_cast<uint32_t>(sfaInfo_->ropeHeadDim != 0)); // N1 > 64时核间切G; rope 用独立 tiling key 避免污染原路径
+        static_cast<uint32_t>(sfaInfo_->gSize > 64), // N1 > 64时核间切G; rope 用独立 tiling key 避免污染原路径
+        static_cast<uint32_t>(sfaInfo_->ropeHeadDim != 0));
 
     OP_LOGI(sfaInfo_->opName, "SFA tilingKey_: %lu.", tilingKey_);
 }
