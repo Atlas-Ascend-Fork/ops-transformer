@@ -574,7 +574,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
 - layoutQ和layoutKv当前支持TND、BNSD、BSND，且必须保持一致。
 - 当layoutQ为TND时，需要传入cuSeqLengthsQOptional；当layoutKv为TND时，需要传入cuSeqLengthsKvOptional。
 - sequsedQOptional/sequsedKvOptional仅在TND时生效；BNSD/BSND须传nullptr，实际序列长度取自Q/K的S维。
-- HeadDim固定为128；N1/N2取值范围[1, 128]，且N1 > N2，N1 % N2 == 0。
+- HeadDim固定为128；N1/N2取值范围[1, 128]，且N1 % N2 == 0。
 - blockShape：blockShapeX仅支持1；blockShapeY须≥128且为64的倍数；layoutSparsePattern当前仅支持1；maskType当前仅支持1；softmaxPrecision当前仅支持0。
 - winLeft和winRight不使能时必须为-1；attenMaskOptional当前应传nullptr。
 - Softmax LSE的head/seq轴语义须与query布局一致。
