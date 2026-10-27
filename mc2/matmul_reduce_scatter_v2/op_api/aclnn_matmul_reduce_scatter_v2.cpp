@@ -204,6 +204,25 @@ static bool CheckAivModeDtypeValid(const aclTensor* x1, const aclTensor* x2, con
     return true;
 }
 
+// Reject unsupported reduction and communication-turn attributes before inner execution.
+static aclnnStatus CheckReduceOpAndCommTurn(const char* reduceOp, int64_t commTurn)
+{
+    if (reduceOp == nullptr) {
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "[aclnnMatmulReduceScatterV2GetWorkspaceSize] reduceOp must not be nullptr.");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (std::strcmp(reduceOp, "sum") != 0) {
+        OP_LOGE_FOR_INVALID_VALUE("aclnnMatmulReduceScatterV2GetWorkspaceSize", "reduceOp", reduceOp, "\"sum\"");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    if (commTurn != 0) {
+        OP_LOGE_FOR_INVALID_VALUE("aclnnMatmulReduceScatterV2GetWorkspaceSize", "commTurn",
+                                  std::to_string(commTurn).c_str(), "0");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    return ACLNN_SUCCESS;
+}
+
 // 检查传入的reduction数值是否在可选范围内
 static bool CheckAttr(int64_t streamMode)
 {
@@ -484,6 +503,8 @@ aclnnStatus matmulReduceScatterV2GetWorkSpaceSizeA5(const aclTensor* x1, const a
                                               "Does not match any available case, please check the input commMode.");
         return ACLNN_ERR_PARAM_INVALID;
     }
+    auto retReduceOp = CheckReduceOpAndCommTurn(reduceOp, commTurn);
+    CHECK_RET(retReduceOp == ACLNN_SUCCESS, retReduceOp);
     // 处理空tensor
     if (x1->IsEmpty() || x2->IsEmpty()) {
         OP_CHECK_DTYPE_NOT_SUPPORT(x1, INPUT_SUPPORT_TYPE_HIGH_ACCURACY, return ACLNN_ERR_PARAM_INVALID);
@@ -600,6 +621,8 @@ aclnnStatus matmulReduceScatterV2GetWorkSpaceSizeAivMode(
     OP_LOGD("aclnnMatmulReduceScatterV2GetWorkspaceSizeAivMode start");
     auto ret_param = CheckAivModeParams(x1, x2, bias, streamMode, output);
     CHECK_RET(ret_param == ACLNN_SUCCESS, ret_param);
+    auto retReduceOp = CheckReduceOpAndCommTurn(reduceOp, commTurn);
+    CHECK_RET(retReduceOp == ACLNN_SUCCESS, retReduceOp);
 
     bool transposeX1 = Ops::Transformer::IsTransposeLastTwoDims(x1);
     bool transposeX2 = Ops::Transformer::IsTransposeLastTwoDims(x2);
