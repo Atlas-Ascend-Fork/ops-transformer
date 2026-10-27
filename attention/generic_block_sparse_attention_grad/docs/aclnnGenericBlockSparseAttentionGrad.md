@@ -23,7 +23,7 @@
 
 ## 功能说明
 
-- 接口功能：aclnnGenericBlockSparseAttentionGrad是通用块稀疏注意力的反向计算算子。依据`sparseBlockIdx`/`sparseBlockCount`（稀疏块索引表）定义的索引，仅在被选中的KV块上计算和传播梯度，支持动态、可变长的分块稀疏模式。调用前须先通过`aclnnGenericBlockSparseAttentionGradMetadata`生成分核`metadataOptional`。
+- 接口功能：aclnnGenericBlockSparseAttentionGrad是通用块稀疏注意力的反向计算算子，支持`layoutSparsePattern=1`与`layoutSparsePattern=0`两种稀疏索引排布。`layoutSparsePattern=1`按KV块选择Q块/token，调用前须通过`aclnnGenericBlockSparseAttentionGradMetadata`生成`metadataOptional`；`layoutSparsePattern=0`按Q token选择KV块，不调用`aclnnGenericBlockSparseAttentionGradMetadata`接口，`metadataOptional`必须传nullptr。具体限制见下文“约束说明”。
 - 计算公式：
 
 $$
@@ -227,7 +227,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
                   </td>
                   <td>INT32</td>
                   <td>ND</td>
-                  <td>TND：(B,N2,ceilDiv(maxS2,blockShapeY),maxS1)；BNSD/BSND：(B,N2,ceilDiv(S2,blockShapeY),S1)</td>
+                  <td>layoutSparsePattern=0：(B,N2,maxQBlockCount,maxKvBlockCount)；=1：(B,N2,maxKvBlockCount,maxQBlockCount)</td>
                   <td>√</td>
               </tr>
               <tr>
@@ -237,7 +237,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
                   <td>详细参考<a href="#layout对应关系说明">layout对应关系说明</a>。不支持空Tensor。</td>
                   <td>INT32</td>
                   <td>ND</td>
-                  <td>(B,N2,ceilDiv(maxS2,blockShapeY))或(B,N2,ceilDiv(S2,blockShapeY))</td>
+                  <td>layoutSparsePattern=0：(B,N2,maxQBlockCount)；=1：(B,N2,maxKvBlockCount)</td>
                   <td>√</td>
               </tr>
               <tr>
@@ -508,7 +508,7 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
         <tr>
           <td class="merged-cell" rowspan="2">ACLNN_ERR_PARAM_INVALID</td>
           <td class="merged-cell" rowspan="2">161002</td>
-          <td>输入、输出、属性的数据类型、数据格式或取值不在支持范围内；layoutQ与layoutKv不一致；不支持确定性计算但进行确定性计算配置</td>
+          <td>输入、输出、属性的数据类型、数据格式或取值不在支持范围内；layoutQ与layoutKv不一致。</td>
         </tr>
         <tr>
           <td>layoutSparsePattern、residualBlockMode、isConsistentTopk、winLeft/Right、blockShape不满足约束。</td>
@@ -562,27 +562,31 @@ aclnnStatus aclnnGenericBlockSparseAttentionGrad(
 
 ## 约束说明
 
-- Grad与GradMetadata调用中的layoutSparsePattern、residualBlockMode、isConsistentTopk须保持一致；当前仅支持layoutSparsePattern=1、residualBlockMode=0。
-
 - 确定性计算：
-  - aclnnGenericBlockSparseAttentionGrad默认为非确定性实现，暂不支持确定性实现，若配置确定性计算会被拦截。
-- 须先调用[aclnnGenericBlockSparseAttentionGradMetadata](../../generic_block_sparse_attention_grad_metadata/docs/aclnnGenericBlockSparseAttentionGradMetadata.md)生成`metadataOptional`，再调用本接口。
-- 参数query、key、value、dout、out、dQuery、dKey、dValue的数据类型应保持一致，支持FLOAT16和BFLOAT16。
-- 参数lse的数据类型应为FLOAT32。
-- 参数sparseBlockIdx、sparseBlockCount、sequsedQOptional、sequsedKvOptional的数据类型应为INT32。
-- 参数cuSeqLengthsQOptional、cuSeqLengthsKvOptional的数据类型应为INT64；参数metadataOptional的数据类型应为INT32。
-- layoutQ和layoutKv当前支持TND、BNSD、BSND，且必须保持一致。
-- 当layoutQ为TND时，需要传入cuSeqLengthsQOptional；当layoutKv为TND时，需要传入cuSeqLengthsKvOptional。
-- sequsedQOptional/sequsedKvOptional仅在TND时生效；BNSD/BSND须传nullptr，实际序列长度取自Q/K的S维。
-- HeadDim固定为128；N1/N2取值范围[1, 128]，且N1 % N2 == 0。
-- blockShape：blockShapeX仅支持1；blockShapeY须≥128且为64的倍数；layoutSparsePattern当前仅支持1；maskType当前仅支持1；softmaxPrecision当前仅支持0。
-- winLeft和winRight不使能时必须为-1；attenMaskOptional当前应传nullptr。
-- Softmax LSE的head/seq轴语义须与query布局一致。
+  - aclnnGenericBlockSparseAttentionGrad默认为非确定性实现，暂不支持确定性实现，确定性计算配置后不会生效。
+- 参数query、key、value、dout、out、dQuery、dKey、dValue的数据类型应保持一致，支持FLOAT16和BFLOAT16；lse为FLOAT32，sparseBlockIdx、sparseBlockCount为INT32，cuSeqLengthsQOptional/cuSeqLengthsKvOptional为INT64，sequsedQOptional/sequsedKvOptional为INT32。
+- layoutQ和layoutKv须相同，支持TND、BNSD、BSND。TND布局须传入对应的INT64 `(B+1,)` cuSeqLengths；BNSD/BSND布局下seqused须传nullptr。
+- softmaxPrecision仅支持0；winLeft和winRight不使能时必须为-1；attenMaskOptional当前应传nullptr。Softmax LSE的head/seq轴语义须与query布局一致。
+
+**`layoutSparsePattern=1`：**
+
+- 要求`residualBlockMode=0`、`maskType=1`，须先调用[aclnnGenericBlockSparseAttentionGradMetadata](../../generic_block_sparse_attention_grad_metadata/docs/aclnnGenericBlockSparseAttentionGradMetadata.md)生成INT32的`metadataOptional`；两次调用的`layoutSparsePattern`、`residualBlockMode`、`isConsistentTopk`须保持一致。
+- HeadDim固定为128，N1/N2取值范围为[1,128]且N1≥N2、N1%N2=0；blockShapeX=1，blockShapeY≥128且为64的倍数。
 - `sparseBlockIdx`第4维maxS1应≥`sparseBlockCount`中所有元素的最大值。
+
+**`layoutSparsePattern=0`：**
+
+- 要求`residualBlockMode=1`、`maskType=0`（NONE）或`1`（CAUSAL）；`isConsistentTopk`支持false和true，两种取值均走通用计算路径。该排布不调用`aclnnGenericBlockSparseAttentionGradMetadata`接口，`metadataOptional`、`attenMaskOptional`须传nullptr。
+- TND布局可选传入INT32 `(B,)` sequsedQOptional/sequsedKvOptional；BNSD/BSND布局下cuSeqLengths须传nullptr。
+- 要求D在[1,256]，N1%N2=0、G=N1/N2≤256；blockShape=[1,Bs]，0<Bs≤baseKtile（G≤128时baseKtile为128，否则为64）。
+- `sparseBlockIdx`为`(B,N2,maxQBlockCount,maxKvBlockCount)`，`sparseBlockCount`为`(B,N2,maxQBlockCount)`；`maxQBlockCount`是Q方向的索引容量，BNSD/BSND布局下等于`S1`，TND布局下须≥`ceil(T1/B)`且不小于每个batch的实际Q长度。`maxKvBlockCount`是每个Q token可保存的完整KV块数容量，取值为[1,INT32_MAX]。
+- `sparseBlockCount`仅统计选中的完整可见KV块，不得超过`maxKvBlockCount`。当前Q token可见KV长度为`limit`：NONE时为实际KV长度，CAUSAL时为`max(0,min(klen,klen-qlen+q_index+1))`，其中`q_index`从0开始；有效块索引范围为`[0,floor(limit/blockShapeY))`。尾部不完整块不写入索引，由算子自动加入计算。
+- 要求B、N1、N2为正数；value与key同shape，dout、out、dQuery与query同shape，dKey、dValue与key同shape；lse的shape为query去掉末维，或将末维替换为1。必选张量不支持零维长度或负维度。
+- scaleValue须为有限值。cuSeqLengths、seqused、稀疏索引和计数的实际数值不在tiling阶段校验，调用方须保证符合上述语义。
 
 ### layout对应关系说明
 
-sparseBlockIdx、sparseBlockCount的shape由layoutSparsePattern决定，当前layoutSparsePattern值仅支持传1。layoutQ为TND、BNSD或BSND时，稀疏索引均保留batch维。
+sparseBlockIdx、sparseBlockCount的shape由layoutSparsePattern决定，当前layoutSparsePattern仅支持0和1。layoutQ为TND、BNSD或BSND时，稀疏索引均保留batch维。
 
 | layoutSparsePattern | sparseBlockIdx | sparseBlockCount | 描述 |
 | :--- | :--- | :--- | :--- |
@@ -595,11 +599,11 @@ sparseBlockIdx、sparseBlockCount的shape由layoutSparsePattern决定，当前la
 | 6 | [headNum, totalQBlocks, maxKvBlockCount] | [headNum, totalQBlocks] | 同一个Group中的qHead有独立的sparsePattern；表示每个Q块选择了哪些KV块 |
 | 7 | [headNum, totalKBlocks, maxQBlockCount] | [headNum, totalKBlocks] | 同一个Group中的qHead有独立的sparsePattern；表示每个KV块选择了哪些Q块 |
 
-其中，batch、headNum、numKeyValueHeads分别对应B、N1、N2；totalQBlocks、totalKBlocks分别为各batch按存储长度分块后的Q块、KV块总数。maxQBlockCount、maxKvBlockCount分别表示Q块、KV块维度的容量。当前layoutSparsePattern=1且blockShapeX=1时，maxQBlockCount对应maxS1（BNSD/BSND时为S1），须不小于sparseBlockCount中所有元素的最大值；maxKvBlockCount为ceilDiv(maxS2, blockShapeY)（BNSD/BSND时为ceilDiv(S2, blockShapeY)）。
+其中，batch、headNum、numKeyValueHeads分别对应B、N1、N2；totalQBlocks、totalKBlocks分别为各batch按存储长度分块后的Q块、KV块总数。`layoutSparsePattern=1`时，maxQBlockCount、maxKvBlockCount分别表示Q块、KV块维度的容量；blockShapeX=1时，maxQBlockCount对应maxS1（BNSD/BSND时为S1），须不小于sparseBlockCount中所有元素的最大值，maxKvBlockCount为ceilDiv(maxS2,blockShapeY)（BNSD/BSND时为ceilDiv(S2,blockShapeY)）。
 
 ## 调用示例
 
-示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
+以下示例演示`layoutSparsePattern=1`时的`aclnnGenericBlockSparseAttentionGradMetadata`与`aclnnGenericBlockSparseAttentionGrad`接口调用。`layoutSparsePattern=0`时不调用`aclnnGenericBlockSparseAttentionGradMetadata`接口，须按“约束说明”配置参数。具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
 ```c++
 #include <cmath>
@@ -754,7 +758,7 @@ int main()
     char qLayout[] = "BNSD";
     char kvLayout[] = "BNSD";
 
-    // 1) Metadata
+    // 1) aclnnGenericBlockSparseAttentionGradMetadata
     uint64_t metaWsSize = 0;
     aclOpExecutor *metaExecutor = nullptr;
     ret = aclnnGenericBlockSparseAttentionGradMetadataGetWorkspaceSize(
@@ -769,7 +773,7 @@ int main()
         CHECK_RET(ret == ACL_SUCCESS, return ret);
     }
     ret = aclnnGenericBlockSparseAttentionGradMetadata(metaWs, metaWsSize, metaExecutor, stream);
-    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("Metadata failed. ERROR: %d\n", ret); return ret);
+    CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnGenericBlockSparseAttentionGradMetadata failed. ERROR: %d\n", ret); return ret);
 
     // 2) Grad
     uint64_t workspaceSize = 0;

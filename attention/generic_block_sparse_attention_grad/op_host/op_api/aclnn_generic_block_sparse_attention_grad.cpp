@@ -15,6 +15,7 @@
 
 #include "aclnn_generic_block_sparse_attention_grad.h"
 #include "../qsag_validation.h"
+#include "../qsag_validation.h"
 #include "generic_block_sparse_attention_grad.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/common/op_error_check.h"
@@ -482,13 +483,25 @@ aclnnStatus ValidateQsag(const std::array<const aclTensor*, 17>& inputs, const a
                          const char* layoutQ, const char* layoutKv, double scale, int64_t mask, int64_t precision,
                          int64_t left, int64_t right, int64_t residual, bool consistent)
 {
+    static constexpr const char* inputNames[] = {"query",    "key",       "value",          "dout",
+                                                 "out",      "lse",       "sparseBlockIdx", "sparseBlockCount",
+                                                 "metadata", "attenMask", "cuSeqLengthsQ",  "cuSeqLengthsKv",
+                                                 "sequsedQ", "sequsedKv", "dQuery",         "dKey",
+                                                 "dValue"};
     for (size_t i : {0, 1, 2, 3, 4, 5, 6, 7, 14, 15, 16}) {
-        CHECK_RET(inputs[i] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+        if (inputs[i] == nullptr) {
+            OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "GenericBlockSparseAttentionGrad: required tensor %s is nullptr.",
+                    inputNames[i]);
+            return ACLNN_ERR_PARAM_NULLPTR;
+        }
     }
-    CHECK_RET(layoutQ != nullptr && layoutKv != nullptr && blockShape != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    if (!std::isfinite(scale) || std::abs(scale) > static_cast<double>(std::numeric_limits<float>::max())) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "GenericBlockSparseAttentionGrad QSAG: scale must be finite FP32.");
-        return ACLNN_ERR_PARAM_INVALID;
+    if (layoutQ == nullptr || layoutKv == nullptr) {
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "GenericBlockSparseAttentionGrad: layoutQ/layoutKv is nullptr.");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (blockShape == nullptr) {
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "GenericBlockSparseAttentionGrad: blockShape is nullptr.");
+        return ACLNN_ERR_PARAM_NULLPTR;
     }
     std::array<qsag::TensorInfo, 17> tensors;
     for (size_t i = 0; i < inputs.size(); ++i) {
@@ -519,10 +532,9 @@ aclnnStatus ValidateQsag(const std::array<const aclTensor*, 17>& inputs, const a
     qsag::ShapeInfo shape{};
     const auto error = qsag::Validate(tensors, cfg, ACL_FLOAT16, ACL_BF16, ACL_FLOAT, ACL_INT32, ACL_INT64, shape);
     if (!error.empty()) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "GenericBlockSparseAttentionGrad QSAG: %s", error.c_str());
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "GenericBlockSparseAttentionGrad: %s", error.c_str());
         return ACLNN_ERR_PARAM_INVALID;
     }
-    // Deterministic capability is checked by the selected architecture's tiling.
     return ACLNN_SUCCESS;
 }
 

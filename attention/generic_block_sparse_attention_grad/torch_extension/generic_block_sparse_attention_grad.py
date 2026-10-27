@@ -26,7 +26,10 @@ _OP_PREFIX = "GenericBlockSparseAttentionGrad"
 
 
 class MaskMode(IntEnum):
-    """mask_mode 枚举：对外 str/int/IntEnum 经由本枚举映射为传给算子侧的 int。"""
+    """mask_mode 枚举：对外 str/int/IntEnum 经由本枚举映射为传给算子侧的 int。
+
+    QSAG（layout_sparse_pattern==0）支持 mask_mode 0（无掩码）/ 1（CAUSAL）。
+    """
 
     NO_MASK = 0
     CAUSAL = 1
@@ -37,14 +40,14 @@ class ResidualBlockMode(IntEnum):
 
     MARKED_BY_SPARSE_BLK_IDX = 0  # 是否参与计算由 sparse_block_idx 决定。
     INCOMPLETE_BLK_KEPT_BUT_NOT_IN_SPARSE_BLK_IDX = (
-        1  # QSAG：必定参与计算但不在索引中。
+        1  # 必定参与计算但不在索引中；QSAG（layout_sparse_pattern=0）使用。
     )
 
 
 def _resolve_mask_mode(mask_mode: Union[str, int, MaskMode, None]) -> int:
     """对外 str/int/IntEnum/None mask_mode 统一为传给算子侧的 int。
 
-    None 视为默认 CAUSAL；QSAG 还支持 NO_MASK。
+    None 视为默认 CAUSAL。QSAG（layout_sparse_pattern==0）支持 0 (NO_MASK) / 1 (CAUSAL)。
     """
     if mask_mode is None:
         return int(MaskMode.CAUSAL)
@@ -61,8 +64,7 @@ def _resolve_mask_mode(mask_mode: Union[str, int, MaskMode, None]) -> int:
     except ValueError as exc:
         valid = ", ".join(f"{m.name}={m.value}" for m in MaskMode)
         raise ValueError(
-            f"{_OP_PREFIX}: only support mask_mode == {int(MaskMode.CAUSAL)} (CAUSAL), "
-            f"got {mask_mode!r}. Supported: [{valid}]"
+            f"{_OP_PREFIX}: only support mask_mode in [{valid}], got {mask_mode!r}"
         ) from exc
 
 
@@ -78,21 +80,35 @@ def _resolve_residual_block_mode(
         valid = ", ".join(f"{m.name}={m.value}" for m in ResidualBlockMode)
         raise ValueError(
             f"{_OP_PREFIX}: invalid residual_block_mode {residual_block_mode!r}; "
-            f"expected an enum name or value in [{valid}]. Only "
-            "mode 0 is supported by GBSAG; mode 1 is supported by QSAG."
+            f"expected an enum name or value in [{valid}]. Supported: "
+            "0 (MARKED_BY_SPARSE_BLK_IDX, GBSAG) / 1 "
+            "(INCOMPLETE_BLK_KEPT_BUT_NOT_IN_SPARSE_BLK_IDX, QSAG)."
         ) from exc
 
 
 def _check_sparse_attributes(
     layout_sparse_pattern: int, residual_block_mode: int
 ) -> None:
-    if layout_sparse_pattern != 1:
+    if layout_sparse_pattern not in (0, 1):
         raise ValueError(
-            f"{_OP_PREFIX}: layout_sparse_pattern currently only supports 1 (BNKQ), got {layout_sparse_pattern}"
+            f"{_OP_PREFIX}: layout_sparse_pattern currently only supports "
+            "0 (QSAG) or 1 (BNKQ/GBSAG), got {layout_sparse_pattern}"
         )
-    if residual_block_mode != ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX:
+    if layout_sparse_pattern == 0 and residual_block_mode != (
+        ResidualBlockMode.INCOMPLETE_BLK_KEPT_BUT_NOT_IN_SPARSE_BLK_IDX
+    ):
         raise ValueError(
-            f"{_OP_PREFIX}: residual_block_mode currently only supports "
+            f"{_OP_PREFIX}: layout_sparse_pattern==0 (QSAG) requires "
+            "residual_block_mode == "
+            "ResidualBlockMode.INCOMPLETE_BLK_KEPT_BUT_NOT_IN_SPARSE_BLK_IDX (1), "
+            f"got {residual_block_mode}"
+        )
+    if layout_sparse_pattern == 1 and residual_block_mode != (
+        ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX
+    ):
+        raise ValueError(
+            f"{_OP_PREFIX}: layout_sparse_pattern==1 (GBSAG) requires "
+            "residual_block_mode == "
             "ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX (0), "
             f"got {residual_block_mode}"
         )

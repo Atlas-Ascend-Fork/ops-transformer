@@ -45,5 +45,6 @@ if(NOT BUILD_OPS_RTY_KERNEL)
         ./arch35/generic_block_sparse_attention_grad_tiling_arch35.cpp
         ./arch35/qsag_tiling.cpp
         ./arch22/generic_block_sparse_attention_grad_tiling_arch22.cpp
+        ./arch22/qsag_tiling.cpp
     )
 endif()

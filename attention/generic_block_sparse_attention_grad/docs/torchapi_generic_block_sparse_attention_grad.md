@@ -10,13 +10,13 @@
 
 <!-- npu="A3" id2 -->
 
-- <term>Atlas A3系列产品</term>：不支持
+- <term>Atlas A3系列产品</term>：支持
 
 <!-- end id2 -->
 
 <!-- npu="910b" id3 -->
 
-- <term>Atlas A2系列产品</term>：不支持
+- <term>Atlas A2系列产品</term>：支持
 
 <!-- end id3 -->
 
@@ -42,9 +42,9 @@
 
 - **接口功能**：
 
-  `generic_block_sparse_attention_grad`是基于`TorchNPU`的`cann_ops_transformer`扩展接口，用于调用`GenericBlockSparseAttentionGrad`算子完成通用块稀疏注意力的反向梯度计算。通过`sparse_block_idx`指定每个KV块选择的Q块/token索引，`sparse_block_count`指定每个KV块实际保留的Q数量，仅在被选中的稀疏块上计算并回传`dq`/`dk`/`dv`。
+  `generic_block_sparse_attention_grad`是基于`TorchNPU`的`cann_ops_transformer`扩展接口，用于调用`GenericBlockSparseAttentionGrad`算子完成块稀疏注意力的反向梯度计算。`layout_sparse_pattern=1`时通过`sparse_block_idx`指定每个KV块选择的Q块/token；`layout_sparse_pattern=0`时通过该参数指定每个Q token选择的完整KV块。算子返回`dq`/`dk`/`dv`。
 
-  `generic_block_sparse_attention_grad_metadata`是`generic_block_sparse_attention_grad`的元数据生成接口，用于在主算子执行前生成`metadata`。`metadata`记录AICore任务切分与负载均衡结果，主算子须传入该`metadata`以优化调度。典型调用流程如下：
+  `layout_sparse_pattern=1`时使用`generic_block_sparse_attention_grad_metadata`生成AICore任务切分与负载均衡信息，再传入主算子。`layout_sparse_pattern=0`时不调用该接口，主算子的`metadata`须传`None`。`layout_sparse_pattern=1`的典型调用流程如下：
 
   1. 准备`q`、`k`、`v`、`dout`、`attn_out`、`softmax_lse`、`sparse_block_idx`、`sparse_block_count`、`cu_seqlens_q`、`cu_seqlens_kv`等输入。
   2. 调用`generic_block_sparse_attention_grad_metadata`生成`metadata`。
@@ -82,11 +82,11 @@
 > [!NOTE]
 > q、k、v数据排布格式支持从多种维度解读，其中B（Batch）表示输入样本批量大小、S（Seq-Length）表示输入样本序列长度、N（Head-Num）表示多头数、D（Head-Dim）表示隐藏层最小的单元尺寸headdim。
 > TND中的N为q的headNum时记为N1（Q_N），k/v的headNum记为N2（KV_N）。T1表示所有q Batch输入样本序列长度的累加和；T2表示所有kv Batch输入样本序列长度的累加和。
-> $J = \lceil max\_seqlen\_kv / blockShapeY \rceil$。与正向`generic_block_sparse_attention`不同，本反向接口的`sparse_block_idx`/`sparse_block_count`为**KV→Q**方向（每个KV块选择的Q token），而非正向的Q→KV方向。
+> $J = \lceil max\_seqlen\_kv / blockShapeY \rceil$。`layout_sparse_pattern=1`时的`sparse_block_idx`/`sparse_block_count`为**KV→Q**方向；`layout_sparse_pattern=0`时为**Q→KV**方向。
 
 ## 函数原型
 
-调用`generic_block_sparse_attention_grad`接口之前，请先调用前置接口`generic_block_sparse_attention_grad_metadata`，完成负载均衡与分核信息的计算。
+`layout_sparse_pattern=1`时调用`generic_block_sparse_attention_grad`前须先调用`generic_block_sparse_attention_grad_metadata`；`layout_sparse_pattern=0`时不调用`generic_block_sparse_attention_grad_metadata`接口。
 
 ```python
 cann_ops_transformer.generic_block_sparse_attention_grad_metadata(
@@ -148,25 +148,26 @@ cann_ops_transformer.generic_block_sparse_attention_grad(
 
 ## 枚举说明
 
-`MaskMode` 和 `ResidualBlockMode` 均为 `IntEnum`，定义于 `cann_ops_transformer.ops.generic_block_sparse_attention_grad`，Python 封装接口支持传入枚举、对应 int 值或枚举名字符串。
+`MaskMode`和`ResidualBlockMode`均为`IntEnum`，定义于`cann_ops_transformer.ops.generic_block_sparse_attention_grad`，Python封装接口支持传入枚举、对应int值或枚举名字符串。
 
-### mask_mode 枚举
+### mask_mode枚举
 
 | 枚举名     | 值 | 含义                              |
 | :--------- | :-: | :-------------------------------- |
-| `CAUSAL` | 1 | Causal 模式（当前默认且唯一支持） |
+| `CAUSAL` | 1 | Causal模式，默认值；两种模式均支持 |
+| `NO_MASK` | 0 | 无掩码；仅`layout_sparse_pattern=0`时支持 |
 
 > [!NOTE]
-> 枚举为 `IntEnum`，可直接作为 int 传入底层算子；接口支持传入枚举、对应 int 值或枚举名字符串。当前版本仅支持 `mask_mode = 1`（`CAUSAL`）。
+> 枚举为`IntEnum`，可直接作为int传入底层算子；接口支持传入枚举、对应int值或枚举名字符串。具体取值限制见“约束说明”。
 
-### residual_block_mode 枚举
+### residual_block_mode枚举
 
 | 枚举名 | 值 | 含义 |
 | :--- | :-: | :--- |
-| `ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX` | 0 | 尾部不完整 KV 块是否参与计算由 `sparse_block_idx` 决定，当前默认且唯一支持的模式 |
-| `ResidualBlockMode.INCOMPLETE_BLK_KEPT_BUT_NOT_IN_SPARSE_BLK_IDX` | 1 | 尾部不完整 KV 块必定参与计算，但不包含在 `sparse_block_idx` 中；当前不支持 |
+| `ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX` | 0 | 尾部不完整KV块是否参与计算由`sparse_block_idx`决定；`layout_sparse_pattern=1`时使用，默认值 |
+| `ResidualBlockMode.INCOMPLETE_BLK_KEPT_BUT_NOT_IN_SPARSE_BLK_IDX` | 1 | 尾部不完整KV块必定参与计算，但不包含在`sparse_block_idx`中；`layout_sparse_pattern=0`时使用 |
 
-主算子与 Metadata 的 Python 封装接口均默认使用 `ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX`，也支持整数 `0` 或枚举名字符串 `"MARKED_BY_SPARSE_BLK_IDX"`。字符串解析与 `mask_mode` 一致：忽略大小写及首尾空格。
+`generic_block_sparse_attention_grad`与`generic_block_sparse_attention_grad_metadata`接口均默认使用`ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX`。主算子按模式分别使用0或1；可传对应整数或枚举名字符串。字符串解析与`mask_mode`一致：忽略大小写及首尾空格。
 
 
 ## 参数说明
@@ -175,12 +176,12 @@ cann_ops_transformer.generic_block_sparse_attention_grad(
 
 | 参数名             | 参数类型     | 可选/必选 | 描述                                                                                                | 数据类型 | 数据格式 | 维度                                                      |
 | :----------------- | :----------- | :-------- | :-------------------------------------------------------------------------------------------------- | :------- | :------- | :-------------------------------------------------------- |
-| sparse_block_idx   | Tensor       | 必选      | 稀疏块索引数组，指定每个KV块选择的Q块/token索引                                                     | int32    | ND       | TND：`(B, N2, J, maxS1)`；BNSD/BSND：`(B, N2, J, S1)` |
-| sparse_block_count | Tensor       | 必选      | 指定每个KV块实际选择的Q数量                                                                         | int32    | ND       | `(B, N2, J)`                                            |
+| sparse_block_idx   | Tensor       | 必选      | 稀疏块索引数组，指定每个KV块选择的Q块/token索引 | int32    | ND       | TND：`(B,N2,J,maxS1)`；BNSD/BSND：`(B,N2,J,S1)` |
+| sparse_block_count | Tensor       | 必选      | 指定每个KV块实际选择的Q数量 | int32    | ND       | `(B,N2,J)` |
 | num_heads_q        | int          | 必选      | Query head数（N1）                                                                                  | int32    | -        | -                                                         |
 | num_heads_kv       | int          | 必选      | Key/Value head数（N2）                                                                              | int32    | -        | -                                                         |
-| head_dim           | int          | 必选      | 每个注意力头的维度，当前固定128                                                                     | int32    | -        | -                                                         |
-| block_shape        | list[int]    | 必选      | 稀疏块形状 [block_x, block_y]：block_x 仅支持 1；block_y 须 >=128 且为 64 的倍数                    | int64    | -        | 长度为2                                                   |
+| head_dim           | int          | 必选      | 每个注意力头的维度，当前固定128 | int32    | -        | -                                                         |
+| block_shape        | list[int]    | 必选      | 稀疏块形状[block_x,block_y]，分别为Q、KV方向的token数；block_x仅支持1；block_y须≥128且为64的倍数 | int64    | -        | 长度为2                                                   |
 | cu_seqlens_q       | Tensor       | 可选      | q累积序列长度，第一个元素必须为0                                                                    | int64    | ND       | `(B+1,)`                                                |
 | cu_seqlens_kv      | Tensor       | 可选      | k/value累积序列长度，第一个元素必须为0                                                              | int64    | ND       | `(B+1,)`                                                |
 | seqused_q          | Tensor       | 可选      | 各batch中q实际使用的序列长度                                                                        | int32    | ND       | `(B,)`                                                  |
@@ -189,13 +190,13 @@ cann_ops_transformer.generic_block_sparse_attention_grad(
 | max_seqlen_kv      | int          | 可选      | 所有batch中kv序列长度的最大值，用于计算$J$；省略时由扩展推断（优先`seqused_kv`/`cu_seqlens_kv`，否则取`J * block_y`）；显式传入须≥0 | int32    | -        | -                                                         |
 | layout_q           | string       | 可选      | q布局，支持`"TND"`/`"BNSD"`/`"BSND"`，默认`"TND"`                                           | string   | -        | -                                                         |
 | layout_kv          | string       | 可选      | k/value布局，须与`layout_q`一致，默认`"TND"`                                                    | string   | -        | -                                                         |
-| layout_sparse_pattern | int | 可选 | sparse_block_idx、sparse_block_count的数据排布；当前仅支持1（BNKQ），默认1 | int64 | - | - |
-| mask_mode          | int/MaskMode | 可选      | 掩码模式，支持传入枚举或对应 int 值，枚举定义见「mask_mode 枚举」。当前仅支持1（`CAUSAL`），默认1 | int32    | -        | -                                                         |
+| layout_sparse_pattern | int | 可选 | sparse_block_idx、sparse_block_count的数据排布；仅支持1（KV→Q），默认1 | int64 | - | - |
+| mask_mode          | int/MaskMode | 可选      | 掩码模式，1（CAUSAL）表示因果掩码，默认1；当前仅支持1 | int32    | -        | -                                                         |
 | softmax_precision  | int          | 可选      | Softmax精度级别，当前仅支持0，默认0                                                                   | int32    | -        | -                                                         |
 | win_left           | int          | 可选      | 滑窗向前包含token数，不使能时必须为-1，默认-1                                                       | int32    | -        | -                                                         |
 | win_right          | int          | 可选      | 滑窗向后包含token数，不使能时必须为-1，默认-1                                                       | int32    | -        | -                                                         |
-| residual_block_mode | int/ResidualBlockMode/str | 可选 | 尾部不完整KV块的处理模式；默认且仅支持模式0，可传枚举、整数0或枚举名字符串，由稀疏索引决定是否参与 | int64 | - | - |
-| is_consistent_topk | bool | 可选 | 前置稀疏选择中，同一batch同一head内每个Q块选择的KV块最大数量是否一致，默认False；两种值均走通用计算路径 | bool | - | - |
+| residual_block_mode | int/ResidualBlockMode/str | 可选 | 尾部不完整KV块的处理模式；默认0，由稀疏索引决定是否参与；当前仅支持0；可传枚举、对应整数或枚举名字符串 | int64 | - | - |
+| is_consistent_topk | bool | 可选 | 前置稀疏选择中，同一batch同一head内每个Q块选择的KV块最大数量是否一致，默认False；False代表不一致，True代表一致；两种值均走通用计算路径 | bool | - | - |
 
 ### generic_block_sparse_attention_grad
 
@@ -207,10 +208,10 @@ cann_ops_transformer.generic_block_sparse_attention_grad(
 | dout               | Tensor       | 必选      | 注意力输出梯度$dO$                                                                  | bfloat16/float16 | ND       | 与q一致                                                                  |
 | attn_out           | Tensor       | 必选      | 注意力正向输出$O$                                                                   | bfloat16/float16 | ND       | 与q一致                                                                  |
 | softmax_lse        | Tensor       | 必选      | 正向保存的softmax LSE                                                                 | float32          | ND       | TND：`(T1, N1, 1)`；BNSD：`(B, N1, S1, 1)`；BSND：`(B, S1, N1, 1)` |
-| sparse_block_idx   | Tensor       | 必选      | 稀疏块索引数组（KV→Q）                                                               | int32            | ND       | 与metadata接口一致                                                       |
-| sparse_block_count | Tensor       | 必选      | 每个KV块实际选择的Q数量                                                               | int32            | ND       | 与metadata接口一致                                                       |
-| metadata           | Tensor       | 可选      | `generic_block_sparse_attention_grad_metadata`生成的任务切分结果，传入后可优化调度；须通过关键字参数传入 | int32            | ND       | `(metaSize,)`，见返回值说明                                            |
-| block_shape        | list[int]    | 必选      | 稀疏块形状 [block_x, block_y]：block_x 仅支持 1；block_y 须 >=128 且为 64 的倍数      | int64            | -        | 长度为2                                                                  |
+| sparse_block_idx   | Tensor       | 必选      | 稀疏块索引数组：`layout_sparse_pattern=1`时指定每个KV块选择的Q块/token索引；=0时指定每个Q token选择的完整KV块索引 | int32 | ND | =1：TND为`(B,N2,J,maxS1)`，BNSD/BSND为`(B,N2,J,S1)`；=0：`(B,N2,maxQBlockCount,maxKvBlockCount)` |
+| sparse_block_count | Tensor       | 必选      | `layout_sparse_pattern=1`时指定每个KV块实际选择的Q数量；=0时指定每个Q token选中的完整可见KV块数，不包含自动计算的尾部不完整块 | int32 | ND | =1：`(B,N2,J)`；=0：`(B,N2,maxQBlockCount)` |
+| metadata           | Tensor       | 可选      | `generic_block_sparse_attention_grad_metadata`生成的任务切分结果，须通过关键字参数传入；layout_sparse_pattern=1时必传，=0时须为None | int32            | ND       | `(metaSize,)`，见返回值说明 |
+| block_shape        | list[int]    | 必选      | 稀疏块形状[block_x,block_y]，分别为Q、KV方向的token数；block_x仅支持1；=1时block_y须≥128且为64的倍数；=0时1≤block_y≤baseKtile，G=N1/N2≤128时baseKtile=128，否则为64 | int64            | -        | 长度为2 |
 | attn_mask          | Tensor       | 可选      | 掩码矩阵，当前暂不支持，应传`None`                                                  | bool             | ND       | -                                                                        |
 | cu_seqlens_q       | Tensor       | 可选      | q累积序列长度；`layout_q="TND"`时必传                                               | int64            | ND       | `(B+1,)`                                                               |
 | cu_seqlens_kv      | Tensor       | 可选      | kv累积序列长度；`layout_kv="TND"`时必传                                             | int64            | ND       | `(B+1,)`                                                               |
@@ -218,18 +219,18 @@ cann_ops_transformer.generic_block_sparse_attention_grad(
 | seqused_kv         | Tensor       | 可选      | 各batch中kv实际使用的序列长度                                                         | int32            | ND       | `(B,)`                                                                 |
 | layout_q           | string       | 可选      | q布局，支持`"TND"`/`"BNSD"`/`"BSND"`，默认`"TND"`                             | string           | -        | -                                                                        |
 | layout_kv          | string       | 可选      | k/value布局，须与`layout_q`一致，默认`"TND"`                                      | string           | -        | -                                                                        |
-| layout_sparse_pattern | int | 可选 | sparse_block_idx、sparse_block_count的数据排布；当前仅支持1（BNKQ），默认1 | int64 | - | - |
-| softmax_scale      | float        | 可选      | 缩放因子，建议值$1/\sqrt{D}$，默认1.0                                               | float32          | -        | -                                                                        |
-| mask_mode          | int/MaskMode | 可选      | 掩码模式，支持传入枚举或对应 int 值，枚举定义见「mask_mode 枚举」。当前仅支持1，默认1 | int32            | -        | -                                                                        |
+| layout_sparse_pattern | int | 可选 | sparse_block_idx、sparse_block_count的数据排布；1表示KV→Q，0表示Q→KV；同一KV head对应的Q head共享稀疏索引，默认1 | int64 | - | - |
+| softmax_scale      | float        | 可选      | 缩放因子，建议值$1/\sqrt{D}$，默认1.0 | float32 | - | - |
+| mask_mode          | int/MaskMode | 可选      | 掩码模式，1（CAUSAL）表示因果掩码，默认1；0（NO_MASK）表示无掩码，仅layout_sparse_pattern=0支持；支持枚举、对应整数或枚举名字符串 | int32 | - | - |
 | softmax_precision  | int          | 可选      | Softmax精度级别，当前仅支持0，默认0                                           | int32            | -        | -                                                                        |
 | win_left           | int          | 可选      | 滑窗向前包含token数，不使能时必须为-1，默认-1                                         | int32            | -        | -                                                                        |
 | win_right          | int          | 可选      | 滑窗向后包含token数，不使能时必须为-1，默认-1                                         | int32            | -        | -                                                                        |
-| residual_block_mode | int/ResidualBlockMode/str | 可选 | 尾部不完整KV块的处理模式；默认且仅支持模式0，可传枚举、整数0或枚举名字符串，由稀疏索引决定是否参与 | int64 | - | - |
-| is_consistent_topk | bool | 可选 | 前置稀疏选择中，同一batch同一head内每个Q块选择的KV块最大数量是否一致，默认False；两种值均走通用计算路径 | bool | - | - |
+| residual_block_mode | int/ResidualBlockMode/str | 可选 | 尾部不完整KV块的处理模式；默认0，由稀疏索引决定是否参与；=1时使用0；=0时必须使用1，尾部不完整块自动参与计算，且不包含在sparse_block_idx中；可传枚举、对应整数或枚举名字符串 | int64 | - | - |
+| is_consistent_topk | bool | 可选 | 前置稀疏选择中，同一batch同一head内每个Q块选择的KV块最大数量是否一致，默认False；False代表不一致，True代表一致；=0 时False和True均按每行实际索引和数量计算；=1 时须与generic_block_sparse_attention_grad_metadata接口的配置一致 | bool | - | - |
 
 ## 返回值说明
 
-### generic_block_sparse_attention_grad_metadata
+### generic_block_sparse_attention_grad_metadata（仅`layout_sparse_pattern=1`时）
 
 | 参数名   | 参数类型 | 可选/必选 | 描述                     | 数据类型 | 数据格式 | 维度            |
 | :------- | :------- | :-------- | :----------------------- | :------- | :------- | :-------------- |
@@ -252,19 +253,25 @@ $$
 **说明**
 
 - `dq`/`dk`/`dv`的dtype与对应输入`q`/`k`/`v`保持一致。
-- `metadata`长度须满足`shape[0] ≥ 80 + B × num_heads_q × J × 4`；任务数上界$B \times N1 \times J \le 1048576$。
 
 ## 约束说明
 
-- `layout_sparse_pattern`当前仅支持1（BNKQ）。
-- `residual_block_mode`当前仅支持 `ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX`（0），不支持隐式加入尾部不完整KV块。
-- `is_consistent_topk`支持False和True。
-
 - 确定性计算：`generic_block_sparse_attention_grad`默认为非确定性实现，暂不支持确定性实现，确定性计算配置后不会生效。
-- 参数`cu_seqlens_q`、`cu_seqlens_kv`、`seqused_q`、`seqused_kv`、`sparse_block_idx`、`sparse_block_count`属于tensor。由于算子在Tiling阶段无法获取tensor的具体数值，tiling侧不对值进行校验，正确性需要用户自行保证。若上述参数传入非法值，会触发未定义行为（精度问题、非法内存访问导致的程序崩溃等）。
-- `generic_block_sparse_attention_grad_metadata`和`generic_block_sparse_attention_grad`的入参在调用时应该保持一致。由于算子分为两个接口分段调用，算子无法自行校验，正确性需要由客户自行保证。若接口传入参数不一致，会发生未定义行为（精度问题、非法内存访问导致的程序崩溃等）。
-- 先成功调用`generic_block_sparse_attention_grad_metadata`生成`metadata`，再传入主算子；
-- Torch扩展中`max_seqlen_q`/`max_seqlen_kv`可省略：扩展在调用底层前推断出`≥0`的值再传入host；显式传入时须`≥0`，且仍须满足`J=ceilDiv(max_seqlen_kv, block_y)`与`maxS1≥max_seqlen_q`。
+
+**`layout_sparse_pattern=1`：**
+
+- 要求`residual_block_mode=0`、`mask_mode=1`，`is_consistent_topk`支持False和True。须先调用`generic_block_sparse_attention_grad_metadata`生成`metadata`，两次调用的`layout_sparse_pattern`、`residual_block_mode`、`is_consistent_topk`须保持一致。
+- `max_seqlen_q`/`max_seqlen_kv`可省略，由Torch扩展推断；显式传入时须≥0，且满足`J=ceilDiv(max_seqlen_kv, block_y)`与`maxS1≥max_seqlen_q`。
+
+**`layout_sparse_pattern=0`：**
+
+- 要求`residual_block_mode=1`、`mask_mode=0`（NO_MASK）或`1`（CAUSAL）；`is_consistent_topk`支持False和True，两种取值均走通用计算路径。该排布不调用`generic_block_sparse_attention_grad_metadata`接口，`metadata`和`attn_mask`须为`None`；尾部不完整KV块自动参与计算。
+- `q`、`k`、`v`、`dout`、`attn_out`及`dq`、`dk`、`dv`均为float16或bfloat16且类型一致；`v`与`k`同shape，`dout`、`attn_out`、`dq`与`q`同shape，`dk`、`dv`与`k`同shape；必选张量不支持零维长度或负维度。
+- 要求B、N1、N2为正数，N1%N2=0、G=N1/N2≤256，Q/K的D相同且位于[1,256]；`block_shape=[1,block_y]`，`1≤block_y≤baseKtile`（G≤128时为128，否则为64）。`softmax_scale`须为有限值，`softmax_precision=0`，`win_left=win_right=-1`。
+- `sparse_block_idx`在TND布局为`(B,N2,maxQBlockCount,maxKvBlockCount)`，在BNSD/BSND布局为`(B,N2,S1,maxKvBlockCount)`；`sparse_block_count`分别为`(B,N2,maxQBlockCount)`和`(B,N2,S1)`。`maxQBlockCount`是Q方向的索引容量；`maxKvBlockCount`是每个Q token可保存的完整KV块数容量，取值为[1,INT32_MAX]。
+- 同一`(B,N2)`下的Q head group共享索引。`sparse_block_count`只统计选中的完整可见KV块，不得超过`maxKvBlockCount`；NONE模式的可见长度`limit=klen`，CAUSAL模式为`max(0,min(klen,klen-qlen+q_index+1))`，`q_index`从0开始。有效块索引须在`[0,floor(limit/block_y))`内；尾部不完整块不写入索引，由算子自动加入计算。
+- TND布局要求`maxQBlockCount≥ceil(T1/B)`且不小于每个batch的实际Q长度；须传入INT64 `(B+1,)`的`cu_seqlens_q`和`cu_seqlens_kv`，`seqused_q`/`seqused_kv`可选，传入时须为INT32 `(B,)`。BNSD/BSND布局下这四个参数须为`None`。
+- `cu_seqlens_q`、`cu_seqlens_kv`、`seqused_q`、`seqused_kv`、`sparse_block_idx`、`sparse_block_count`的实际数值不在tiling阶段校验，调用方须保证其语义和范围合法。
 
 ### 特性参数组
 
@@ -318,9 +325,9 @@ $$
 | S2 / KV_S |                  输入key/value序列长度                  |
 |    T1    |             输入q所有batch序列长度的累加和             |
 |    T2    |             输入kv所有batch序列长度的累加和             |
-|     D     |                  headdim，当前固定128                  |
+|     D     |          `layout_sparse_pattern=1`固定128；`layout_sparse_pattern=0`时`1<=D<=256`          |
 |     J     | $\lceil max\_kv\_seqlen / blockShapeY \rceil$，KV块数 |
-|   maxS1   | `sparse_block_idx`最后一维容量，须≥`max_seqlen_q` |
+|   maxS1   | `layout_sparse_pattern=1`时为`sparse_block_idx`最后一维容量，须≥`max_seqlen_q` |
 
 ### 参数组约束
 
@@ -369,9 +376,8 @@ $$
         <td rowspan="5">
             轴校验：
             <ul>
-                <li>当前D仅支持128</li>
-                <li>N1、N2取值范围[1, 128]</li>
-                <li>N1 % N2 == 0</li>
+                <li>`layout_sparse_pattern=1`：D=128，N1、N2取值范围[1,128]，N1 % N2 == 0</li>
+                <li>`layout_sparse_pattern=0`：1≤D≤256，N1、N2为正数，N1 % N2 == 0，N1/N2≤256</li>
             </ul>
         </td>
     </tr>
@@ -460,21 +466,23 @@ $$
         <td>
             <ul>
                 <li>tensor_type仅支持int32</li>
-                <li>TND：(B, N2, J, maxS1)；BNSD/BSND：(B, N2, J, S1)</li>
+                <li>`layout_sparse_pattern=1`：TND为(B, N2, J, maxS1)，BNSD/BSND为(B, N2, J, S1)</li>
+                <li>`layout_sparse_pattern=0`：TND为(B, N2, maxQBlockCount, maxKvBlockCount)，BNSD/BSND为(B, N2, S1, maxKvBlockCount)</li>
             </ul>
         </td>
         <td rowspan="3">必须存在</td>
         <td rowspan="3">
             <ul>
-                <li>metadata接口与主算子须传入相同的sparse_block_idx、sparse_block_count、block_shape</li>
-                <li>J须等于ceilDiv(max_seqlen_kv, block_y)</li>
-                <li>maxS1 / S1须≥max_seqlen_q；且≥sparse_block_count中所有元素的最大值</li>
+                <li>`layout_sparse_pattern=1`：`generic_block_sparse_attention_grad_metadata`接口与主算子须传入相同的sparse_block_idx、sparse_block_count、block_shape</li>
+                <li>`layout_sparse_pattern=1`：J=ceilDiv(max_seqlen_kv, block_y)，maxS1 / S1须≥max_seqlen_q及sparse_block_count中的最大值</li>
+                <li>`layout_sparse_pattern=0`：sparse_block_count不得超过maxKvBlockCount</li>
             </ul>
         </td>
         <td rowspan="3">
             <ul>
-                <li>block_shape：block_x=1；block_y>=128 且为 64 的倍数</li>
-                <li>layout_sparse_pattern当前仅支持1（BNKQ）；residual_block_mode当前仅支持ResidualBlockMode.MARKED_BY_SPARSE_BLK_IDX（0）</li>
+                <li>`layout_sparse_pattern=1`：block_x=1，block_y>=128且为64的倍数</li>
+                <li>`layout_sparse_pattern=1`：layout_sparse_pattern=1，residual_block_mode=0</li>
+                <li>`layout_sparse_pattern=0`：block_x=1，1≤block_y≤baseKtile；layout_sparse_pattern=0，residual_block_mode=1</li>
             </ul>
         </td>
     </tr>
@@ -483,7 +491,8 @@ $$
         <td>
             <ul>
                 <li>tensor_type仅支持int32</li>
-                <li>shape为(B, N2, J)</li>
+                <li>`layout_sparse_pattern=1`：shape为(B, N2, J)</li>
+                <li>`layout_sparse_pattern=0`：TND为(B, N2, maxQBlockCount)，BNSD/BSND为(B, N2, S1)</li>
             </ul>
         </td>
     </tr>
@@ -521,13 +530,12 @@ $$
                 <td>metadata</td>
                 <td>
                     <ul>
-                        <li>tensor_type仅支持int32</li>
-                        <li>shape[0] ≥ 80 + B×N1×J×4</li>
+                        <li>`layout_sparse_pattern=1`：tensor_type仅支持int32，shape[0] ≥ 80 + B×N1×J×4</li>
                     </ul>
                 </td>
-                <td>必须存在</td>
-                <td>须为generic_block_sparse_attention_grad_metadata的输出</td>
-                <td>任务数上界B×N1×J ≤ 1048576</td>
+                <td>`layout_sparse_pattern=1`必须存在；`layout_sparse_pattern=0`须为None</td>
+                <td>`layout_sparse_pattern=1`须为generic_block_sparse_attention_grad_metadata的输出</td>
+                <td>`layout_sparse_pattern=1`任务数上界B×N1×J ≤ 1048576</td>
             </tr>
         </tbody>
     </table>
@@ -536,7 +544,8 @@ $$
 
 mask_mode参数解释：
 
-- `MaskMode.CAUSAL`（1）：当前默认且唯一支持
+- `MaskMode.CAUSAL`（1）：两种模式均支持，默认值。
+- `MaskMode.NO_MASK`（0）：仅`layout_sparse_pattern=0`时支持。
 - win_left / win_right：不使能时必须为-1；attn_mask当前应传`None`
 
 #### SeqLens参数组
@@ -551,7 +560,7 @@ mask_mode参数解释：
 
 ## 调用示例
 
-- generic_block_sparse_attention_grad_metadata + generic_block_sparse_attention_grad联合调用示例（BNSD）
+- 以下示例演示`layout_sparse_pattern=1`时`generic_block_sparse_attention_grad_metadata`接口与主算子的联合调用（BNSD）。`layout_sparse_pattern=0`时不调用`generic_block_sparse_attention_grad_metadata`接口，参数限制见“约束说明”。
 
   ```python
   import math

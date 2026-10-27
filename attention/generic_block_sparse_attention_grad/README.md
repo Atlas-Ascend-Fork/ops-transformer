@@ -13,7 +13,7 @@
 
 ## 功能说明
 
-+ 算子功能：GenericBlockSparseAttentionGrad是通用块稀疏注意力的反向计算算子。依据`sparseBlockIdx`/`sparseBlockCount`（稀疏块索引表）定义的索引，仅在被选中的KV块上计算和传播梯度，支持动态、可变长的分块稀疏模式。调用前须先通过`aclnnGenericBlockSparseAttentionGradMetadata`生成分核`metadataOptional`。
++ 算子功能：GenericBlockSparseAttentionGrad是通用块稀疏注意力的反向计算算子，支持两种稀疏索引排布。`layoutSparsePattern=1`按KV块选择Q块/token，调用前须通过`aclnnGenericBlockSparseAttentionGradMetadata`生成`metadataOptional`；`layoutSparsePattern=0`按Q token选择KV块，不调用Metadata接口。具体限制见下文“约束说明”。
 + 计算公式：
 
 $$
@@ -96,21 +96,21 @@ $$
   <tr>
     <td class="tg-0pky">sparseBlockIdx</td>
     <td class="tg-0pky">输入</td>
-    <td class="tg-0pky">稀疏块索引数组，指定每个KV块选择的Q块/token索引。</td>
+    <td class="tg-0pky">稀疏块索引数组，指定参与计算的块；具体排布见约束说明。</td>
     <td class="tg-0pky">INT32</td>
     <td class="tg-0pky">ND</td>
   </tr>
   <tr>
     <td class="tg-0pky">sparseBlockCount</td>
     <td class="tg-0pky">输入</td>
-    <td class="tg-0pky">指定每个KV块实际选择的Q数量。</td>
+    <td class="tg-0pky">每个稀疏索引列表中实际选中的数量。</td>
     <td class="tg-0pky">INT32</td>
     <td class="tg-0pky">ND</td>
   </tr>
   <tr>
     <td class="tg-0pky">metadataOptional</td>
     <td class="tg-0pky">可选输入</td>
-    <td class="tg-0pky">由GenericBlockSparseAttentionGradMetadata生成的分核信息，必须传入。</td>
+    <td class="tg-0pky">由GenericBlockSparseAttentionGradMetadata生成的分核信息；传入要求见约束说明。</td>
     <td class="tg-0pky">INT32</td>
     <td class="tg-0pky">ND</td>
   </tr>
@@ -152,7 +152,7 @@ $$
   <tr>
     <td class="tg-0pky">blockShape</td>
     <td class="tg-0pky">属性</td>
-    <td class="tg-0pky">稀疏块形状[blockShapeX, blockShapeY]；X仅支持1，Y须≥128且为64倍数。</td>
+    <td class="tg-0pky">稀疏块形状[blockShapeX, blockShapeY]；取值限制见约束说明。</td>
     <td class="tg-0pky">INT64</td>
     <td class="tg-0pky">-</td>
   </tr>
@@ -173,7 +173,7 @@ $$
   <tr>
     <td class="tg-0pky">layoutSparsePattern</td>
     <td class="tg-0pky">属性</td>
-    <td class="tg-0pky">sparseBlockIdx、sparseBlockCount的数据排布，当前仅支持1（BNKQ）。</td>
+    <td class="tg-0pky">sparseBlockIdx、sparseBlockCount的数据排布；取值限制见约束说明。</td>
     <td class="tg-0pky">INT64</td>
     <td class="tg-0pky">-</td>
   </tr>
@@ -187,7 +187,7 @@ $$
   <tr>
     <td class="tg-0pky">maskType</td>
     <td class="tg-0pky">属性</td>
-    <td class="tg-0pky">mask模式，当前仅支持1（CAUSAL）。</td>
+    <td class="tg-0pky">注意力掩码模式；取值限制见约束说明。</td>
     <td class="tg-0pky">INT64</td>
     <td class="tg-0pky">-</td>
   </tr>
@@ -215,14 +215,14 @@ $$
   <tr>
     <td class="tg-0pky">residualBlockMode</td>
     <td class="tg-0pky">属性</td>
-    <td class="tg-0pky">KV尾部不完整块处理模式，当前仅支持0，由稀疏索引决定是否参与计算。</td>
+    <td class="tg-0pky">KV尾部不完整块处理模式；取值限制见约束说明。</td>
     <td class="tg-0pky">INT64</td>
     <td class="tg-0pky">-</td>
   </tr>
   <tr>
     <td class="tg-0pky">isConsistentTopk</td>
     <td class="tg-0pky">属性</td>
-    <td class="tg-0pky">前置稀疏选择时，同一batch同一head内每个Q块选择的KV块最大数量是否一致。支持false/true，两种取值均使用通用计算路径。</td>
+    <td class="tg-0pky">具体语义、排布和取值限制见约束说明。</td>
     <td class="tg-0pky">BOOL</td>
     <td class="tg-0pky">-</td>
   </tr>
@@ -251,17 +251,18 @@ $$
 
 ## 约束说明
 
-* 支持FLOAT16、BFLOAT16的query/key/value/dout/out/dQuery/dKey/dValue，且数据类型保持一致；lse为FLOAT32。
-* 须先调用GenericBlockSparseAttentionGradMetadata生成metadata，再调用本算子。
-* layoutQ与layoutKv须相同，取值TND/BNSD/BSND；TND布局下须传入对应cuSeqLengths。
-* sequsedQOptional/sequsedKvOptional仅在TND时生效；BNSD/BSND须传nullptr，实际序列长度取自Q/K的S维。
-* HeadDim固定为128；N1/N2取值范围[1, 128]，且N1 % N2 == 0。
-* blockShape：blockShapeX仅支持1；blockShapeY须≥128且为64的倍数（Cube按baseN=128切分S2）；
-* layoutSparsePattern当前仅支持1；residualBlockMode当前仅支持0；
-* maskType当前仅支持1。
-* softmaxPrecision当前仅支持0；
-* winLeft/winRight不使能时必须为-1；attenMaskOptional当前应传nullptr。
-* 默认为非确定性实现，暂不支持确定性实现。
+- `layoutSparsePattern=0`的稀疏排布要求`residualBlockMode=1`，`isConsistentTopk`支持false和true（两种取值均按实际稀疏索引和数量计算）。无需Metadata，metadata须为空；D为[1,256]，N1%N2=0且G=N1/N2≤256；blockShape=[1,Bs]，G≤128时Bs≤128，否则Bs≤64；maskType支持0/1，尾部不完整块自动参与计算。详细shape限制见[接口约束说明](./docs/aclnnGenericBlockSparseAttentionGrad.md#约束说明)。
+
+- 支持FLOAT16、BFLOAT16的query/key/value/dout/out/dQuery/dKey/dValue，且数据类型保持一致；lse为FLOAT32。
+- `layoutSparsePattern=1`须先调用GenericBlockSparseAttentionGradMetadata生成metadata，再调用本算子。
+- layoutQ与layoutKv须相同，取值TND/BNSD/BSND；TND布局下须传入对应cuSeqLengths。
+- sequsedQOptional/sequsedKvOptional仅在TND时生效；BNSD/BSND须传nullptr，实际序列长度取自Q/K的S维。
+- `layoutSparsePattern=1`的HeadDim固定为128；N1/N2取值范围[1, 128]，且N1 % N2 == 0。
+- `layoutSparsePattern=1`的blockShape：blockShapeX仅支持1；blockShapeY须≥128且为64的倍数（Cube按baseN=128切分S2）；
+- `layoutSparsePattern=1`时，residualBlockMode仅支持0，maskType仅支持1。
+- softmaxPrecision当前仅支持0；
+- winLeft/winRight不使能时必须为-1；attenMaskOptional当前应传nullptr。
+- 使用非确定性计算路径；确定性计算配置后不会生效。
 
 ## 调用说明
 

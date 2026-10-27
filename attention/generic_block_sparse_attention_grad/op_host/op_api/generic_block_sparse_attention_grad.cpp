@@ -38,24 +38,29 @@ const std::array<const aclTensor*, 3> GenericBlockSparseAttentionGrad(
            safeKvLayout, layoutSparsePattern, scaleValue, maskType, softmaxPrecision, winLeft, winRight,
            residualBlockMode, isConsistentTopk);
 
+    // QSAG needs absent optionals to remain true null pointers.
+    const bool isQsag = layoutSparsePattern == 0;
     const aclTensor* metadataTensor =
-        (metadataOptional != nullptr) ? metadataOptional :
-                                        executor->AllocTensor(DataType::DT_INT32, Format::FORMAT_ND, Format::FORMAT_ND);
+        (metadataOptional != nullptr || isQsag) ?
+            metadataOptional :
+            executor->AllocTensor(DataType::DT_INT32, Format::FORMAT_ND, Format::FORMAT_ND);
     const aclTensor* attenMaskTensor =
-        (attenMaskOptional != nullptr) ? attenMaskOptional :
-                                         executor->AllocTensor(DataType::DT_BOOL, Format::FORMAT_ND, Format::FORMAT_ND);
-    const aclTensor* cuSeqTensor = (cuSeqLengthsQOptional != nullptr) ?
+        (attenMaskOptional != nullptr || isQsag) ?
+            attenMaskOptional :
+            executor->AllocTensor(DataType::DT_BOOL, Format::FORMAT_ND, Format::FORMAT_ND);
+    const aclTensor* cuSeqTensor = (cuSeqLengthsQOptional != nullptr || isQsag) ?
                                        cuSeqLengthsQOptional :
                                        executor->AllocTensor(DataType::DT_INT64, Format::FORMAT_ND, Format::FORMAT_ND);
     const aclTensor* cuSeqKvTensor =
-        (cuSeqLengthsKvOptional != nullptr) ?
+        (cuSeqLengthsKvOptional != nullptr || isQsag) ?
             cuSeqLengthsKvOptional :
             executor->AllocTensor(DataType::DT_INT64, Format::FORMAT_ND, Format::FORMAT_ND);
     const aclTensor* sequsedQTensor =
-        (sequsedQOptional != nullptr) ? sequsedQOptional :
-                                        executor->AllocTensor(DataType::DT_INT32, Format::FORMAT_ND, Format::FORMAT_ND);
+        (sequsedQOptional != nullptr || isQsag) ?
+            sequsedQOptional :
+            executor->AllocTensor(DataType::DT_INT32, Format::FORMAT_ND, Format::FORMAT_ND);
     const aclTensor* sequsedKvTensor =
-        (sequsedKvOptional != nullptr) ?
+        (sequsedKvOptional != nullptr || isQsag) ?
             sequsedKvOptional :
             executor->AllocTensor(DataType::DT_INT32, Format::FORMAT_ND, Format::FORMAT_ND);
 

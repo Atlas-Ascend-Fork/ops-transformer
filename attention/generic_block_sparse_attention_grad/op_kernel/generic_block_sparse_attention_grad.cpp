@@ -15,6 +15,7 @@
 #include "arc35/qsag_kernel.h"
 #else
 #include "arc22/generic_block_sparse_attention_grad_interface.h"
+#include "arc22/qsag_orchestrator.h"
 #endif
 
 // ============================================================================
@@ -89,6 +90,23 @@ extern "C" __global__ __aicore__ void generic_block_sparse_attention_grad(
                    cuSeqLengthsQ, cuSeqLengthsKv, sequsedQ, sequsedKv, dq, dk, dv, user, tilingDataPtr, &tPipe);
     }
 #else
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    // QSAG has its own packet. Dispatch before interpreting legacy fields.
+    if (TILING_KEY_IS(200)) {
+        GET_TILING_DATA_WITH_STRUCT(QsagTilingDataArch22, qsagData, tiling);
+        TPipe pipe;
+        QSAG::Kernel<bfloat16_t, QsagTilingDataArch22> op;
+        op.Run(query, key, value, dout, out, softmaxLse, sparseBlockIdx, sparseBlockCount, cuSeqLengthsQ,
+               cuSeqLengthsKv, sequsedQ, sequsedKv, dq, dk, dv, user, &qsagData, &pipe);
+        return;
+    } else if (TILING_KEY_IS(201)) {
+        GET_TILING_DATA_WITH_STRUCT(QsagTilingDataArch22, qsagData, tiling);
+        TPipe pipe;
+        QSAG::Kernel<half, QsagTilingDataArch22> op;
+        op.Run(query, key, value, dout, out, softmaxLse, sparseBlockIdx, sparseBlockCount, cuSeqLengthsQ,
+               cuSeqLengthsKv, sequsedQ, sequsedKv, dq, dk, dv, user, &qsagData, &pipe);
+        return;
+    }
     if (TILING_KEY_IS(100)) {
         GBSAG::GenericBlockSparseAttentionGradInfer<half, 0>(
             query, key, value, dout, out, softmaxLse, sparseBlockIdx, sparseBlockCount, metadata, attenMask,

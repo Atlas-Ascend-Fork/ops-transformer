@@ -56,6 +56,48 @@ END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttentionGrad_2000, QsagTilingDataArch35)
 REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttentionGrad_2001, QsagTilingDataArch35)
 
+BEGIN_TILING_DATA_DEF(QsagTilingDataArch22)
+TILING_DATA_FIELD_DEF(uint64_t, cubeCoreNum);
+TILING_DATA_FIELD_DEF(uint64_t, batchNum);
+TILING_DATA_FIELD_DEF(uint64_t, qSeqLen);
+TILING_DATA_FIELD_DEF(uint64_t, kvSeqLen);
+TILING_DATA_FIELD_DEF(uint64_t, qHeadNum);
+TILING_DATA_FIELD_DEF(uint64_t, kvHeadNum);
+TILING_DATA_FIELD_DEF(uint64_t, headDim);
+TILING_DATA_FIELD_DEF(uint64_t, headDimAlign);
+TILING_DATA_FIELD_DEF(uint64_t, qGroup);
+TILING_DATA_FIELD_DEF(uint64_t, qCapacity);
+TILING_DATA_FIELD_DEF(uint64_t, topK);
+TILING_DATA_FIELD_DEF(uint64_t, blockSize);
+TILING_DATA_FIELD_DEF(uint64_t, kTile);
+TILING_DATA_FIELD_DEF(uint64_t, dTile);
+TILING_DATA_FIELD_DEF(uint64_t, gCapacity);
+TILING_DATA_FIELD_DEF(uint64_t, qDoSlots);
+TILING_DATA_FIELD_DEF(uint64_t, inputLayout);
+TILING_DATA_FIELD_DEF(uint64_t, maskType);
+TILING_DATA_FIELD_DEF(uint64_t, selectedKOffset);
+TILING_DATA_FIELD_DEF(uint64_t, selectedVOffset);
+TILING_DATA_FIELD_DEF(uint64_t, diOffset);
+TILING_DATA_FIELD_DEF(uint64_t, dqOffset);
+TILING_DATA_FIELD_DEF(uint64_t, dkOffset);
+TILING_DATA_FIELD_DEF(uint64_t, dvOffset);
+TILING_DATA_FIELD_DEF(uint64_t, mm4Offset);
+TILING_DATA_FIELD_DEF(uint64_t, mm5Offset);
+TILING_DATA_FIELD_DEF(uint64_t, qPadOffset);
+TILING_DATA_FIELD_DEF(uint64_t, dOPadOffset);
+TILING_DATA_FIELD_DEF(uint64_t, scoreGmOffset);
+TILING_DATA_FIELD_DEF(uint64_t, gradGmOffset);
+TILING_DATA_FIELD_DEF(uint64_t, probabilityGmOffset);
+TILING_DATA_FIELD_DEF(uint64_t, dsProbabilityGmOffset);
+TILING_DATA_FIELD_DEF(uint64_t, filteredIndicesOffset);
+TILING_DATA_FIELD_DEF(uint64_t, filteredCountsOffset);
+TILING_DATA_FIELD_DEF(float, softmaxScale);
+TILING_DATA_FIELD_DEF(uint32_t, hasUsedQ);
+TILING_DATA_FIELD_DEF(uint32_t, hasUsedKv);
+END_TILING_DATA_DEF;
+REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttentionGrad_200, QsagTilingDataArch22)
+REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttentionGrad_201, QsagTilingDataArch22)
+
 BEGIN_TILING_DATA_DEF(GenericBlockSparseAttentionGradTilingDataArch35)
 TILING_DATA_FIELD_DEF(uint64_t, cubeCoreNum);
 TILING_DATA_FIELD_DEF(uint64_t, batchNum);
