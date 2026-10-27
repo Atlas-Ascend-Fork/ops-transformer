@@ -83,6 +83,7 @@ if(UT_TEST_ALL OR OP_API_UT)
           -Wl,--no-whole-archive
           ascendalog
           unified_dlog
+          error_manager
           )
 
   ## exec opapi ut exe
