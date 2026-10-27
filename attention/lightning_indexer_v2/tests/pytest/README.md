@@ -188,22 +188,10 @@ python3 batch/lightning_indexer_v2_pt_save.py excel/test_cases.xlsx pt_path
 python3 batch/lightning_indexer_v2_pt_save.py excel/test_cases.xlsx pt_path --sheet Sheet1  # 指定 Sheet 页
 ```
 
-2、替换测试脚本路径：
-
-``` bash
-python3 batch/replace_path.py test_lightning_indexer_v2_batch.py pt_path
-```
-
-3、执行测试：
+2、执行测试（pt目录默认读取 `./pt_path`，其他目录可通过 `LIV2_TESTCASE_DIR` 环境变量指定）：
 
 ``` bash
 python3 -m pytest -rA -s test_lightning_indexer_v2_batch.py -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
-```
-
-4、恢复测试脚本：
-
-``` bash
-cp test_lightning_indexer_v2_batch.py.bak test_lightning_indexer_v2_batch.py
 ```
 
 ##### 方式C：批量隔离执行（推荐用于性能采集）

@@ -30,9 +30,9 @@
     } while (0)
 
 // 参考 lightning_indexer_v2_metadata.h
-inline constexpr uint32_t AIC_CORE_MAX_NUM = 36;
-inline constexpr uint32_t AIV_CORE_MAX_NUM = 72;
-constexpr uint32_t LI_V2_METADATA_TOTAL_SIZE = 1024;
+inline constexpr uint32_t AIC_CORE_MAX_NUM = 80;
+inline constexpr uint32_t AIV_CORE_MAX_NUM = 80;
+constexpr uint32_t LI_V2_METADATA_TOTAL_SIZE = 2048;
 constexpr uint32_t LI_V2_METADATA_SIZE = 8;
 constexpr uint32_t LD_V2_METADATA_SIZE = 8;
 
@@ -211,8 +211,8 @@ aclnnStatus CreateArgs(const ArgScenario& scenario, ArgContext& context)
     context.numHeadsQ = 1;
     context.numHeadsK = 1;
     context.headDim = 128;
-    context.topk = 0;
-    ret = CreateTensor(aclDataType::ACL_INT32, {LI_V2_METADATA_TOTAL_SIZE}, context.metadata); // 1024: Fix size
+    context.topk = 1024;
+    ret = CreateTensor(aclDataType::ACL_INT32, {LI_V2_METADATA_TOTAL_SIZE}, context.metadata); // 2048: Fix size
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create meta failed. Error: %d", ret);
 
     context.maskMode = 0; // 0: no mask, 3: causal
@@ -236,6 +236,8 @@ aclnnStatus CreateArgs(const ArgScenario& scenario, ArgContext& context)
         CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create cuSeqlensQOptional failed. Error: %d", ret);
         ret = CreateTensor(aclDataType::ACL_INT32, {batchSize + 1}, context.cuSeqlensKOptional);
         CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create cuSeqlensKOptional failed. Error: %d", ret);
+        context.maxSeqlenQ = 1024;
+        context.maxSeqlenK = 1024;
     }
 
     if (scenario.hasSeqused) {
@@ -244,6 +246,10 @@ aclnnStatus CreateArgs(const ArgScenario& scenario, ArgContext& context)
         CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create sequsedQOptional failed. Error: %d", ret);
         ret = CreateTensor(aclDataType::ACL_INT32, {batchSize}, context.sequsedKOptional);
         CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create sequsedKOptional failed. Error: %d", ret);
+        if (context.maxSeqlenQ == 0) {
+            context.maxSeqlenQ = 1024;
+            context.maxSeqlenK = 1024;
+        }
     }
 
     argsGuard.Dismiss();

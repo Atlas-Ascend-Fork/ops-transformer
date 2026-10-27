@@ -25,7 +25,9 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 
 TEST_INPUT_PATH = "pt_path"
-pt_dir = TEST_INPUT_PATH
+# 支持通过环境变量 LIV2_TESTCASE_DIR 指定pt目录（batch模式由 test_run.sh 设置），
+# 未设置时回退为脚本内默认路径
+pt_dir = os.environ.get("LIV2_TESTCASE_DIR", "").strip() or TEST_INPUT_PATH
 result_path = Path("result.xlsx")  # 或使用传入的result_path
 result_path = Path("result.xlsx")
 device_id = 0
@@ -35,6 +37,10 @@ device_id = 0
 single_case_path = os.environ.get("LIV2_TESTCASE_PATH", "").strip()
 # flag：是否处于批量隔离模式（由 batch_isolated_run.sh 设置 LIV2_TESTCASE_PATH 触发）
 is_isolated_mode = bool(single_case_path)
+# 支持通过环境变量 LIV2_PT_FILE_LIST 传入逗号分隔的pt文件列表（batch_exec模式用，
+# 由 test_run.sh 调用 batch/list_pt_from_excel.py 按Excel的Testcase_Name筛选后传入），
+# 跳过pt生成步骤，仅执行列表内的用例
+pt_file_list_env = os.environ.get("LIV2_PT_FILE_LIST", "").strip()
 # flag：运行模式 eager / graph（通过环境变量 LIV2_RUN_MODE 或命令行参数设置，默认 eager）
 run_mode = os.environ.get("LIV2_RUN_MODE", "eager").strip().lower()
 # 生成所有的组合，并转换为字典列表
@@ -47,6 +53,20 @@ if single_case_path:
     else:
         print(f"单用例隔离模式, 仅执行: {single_case_path}")
         locals()["testcase_files"].append(single_case_path)
+elif pt_file_list_env:
+    pt_files = [f.strip() for f in pt_file_list_env.split(",") if f.strip()]
+    missing_files = [f for f in pt_files if not os.path.isfile(f)]
+    if missing_files:
+        print(
+            f"错误: LIV2_PT_FILE_LIST 中 {len(missing_files)} 个文件不存在: {missing_files}"
+        )
+    valid_files = [f for f in pt_files if os.path.isfile(f)]
+    if valid_files:
+        print(f"batch_exec模式, 按Excel筛选到 {len(valid_files)} 个测试用例文件")
+        for filepath in valid_files:
+            locals()["testcase_files"].append(filepath)
+    else:
+        print("错误: LIV2_PT_FILE_LIST 中没有可执行的.pt文件")
 elif os.path.isdir(pt_dir):
     pt_files = [f for f in os.listdir(pt_dir) if f.endswith(".pt")]
     if not pt_files:

@@ -338,27 +338,27 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLse(
     <tbody>
      <tr>
       <td>0</td>
-      <td>defaultMask模式，如果attenmask未传入则不做mask操作，忽略preTokens和nextTokens；如果传入，则需要传入完整的attenmask矩阵，表示preTokens和nextTokens之间的部分需要计算</td>
+      <td>defaultMask模式，不做mask操作，忽略preTokens和nextTokens</td>
       <td>不支持</td>
      </tr>
      <tr>
       <td>1</td>
-      <td>allMask，必须传入完整的attenmask矩阵</td>
+      <td>allMask</td>
       <td>不支持</td>
      </tr>
      <tr>
       <td>2</td>
-      <td>leftUpCausal模式的mask，需要传入优化后的attenmask矩阵</td>
+      <td>leftUpCausal模式的mask，对应以左顶点为划分的上三角场景</td>
       <td>不支持</td>
      </tr>
      <tr>
       <td>3</td>
-      <td>rightDownCausal模式的mask，对应以右顶点为划分的下三角场景，需要传入优化后的attenmask矩阵</td>
+      <td>rightDownCausal模式的mask，对应以右顶点为划分的下三角场景，mask由算子内部基于actualSeqLengths按rightDownCausal规则生成，无需传入attenmask</td>
       <td>支持</td>
     </tr>
     <tr>
       <td>4</td>
-      <td>band模式的mask，需要传入优化后的attenmask矩阵</td>
+      <td>band模式的mask</td>
       <td>不支持</td>
     </tr>
     <tr>
@@ -383,6 +383,8 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLse(
     </tr>
     </tbody>
     </table>
+
+    说明：本接口不接收attenmask输入张量，sparseMode仅决定算子内部mask的生成方式；当前仅支持sparseMode=3。
 
   - 规格约束
 
