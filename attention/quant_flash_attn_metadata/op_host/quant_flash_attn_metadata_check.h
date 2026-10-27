@@ -146,6 +146,26 @@ inline aclnnStatus QuantFlashAttnMetadataCheck::CheckBaseAttr(int64_t batchSize,
     CHECK_COND(layoutQDescaleSet.count(layoutQDescale) > 0, ACLNN_ERR_RUNTIME_ERROR,
                "layoutQDescale only supports BSND, TND, BNSD, N2TGD, NT, BN2SGD, but got %s", layoutQDescale);
 
+    // 一致性校验: MxFP8 场景下 layout_q_descale 与 layout_q 必须一一匹配, 否则 kernel 会按错误排布解析 scale
+    if (quantMode == A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) {
+        if (strcmp(layoutQDescale, "TND") == 0 || strcmp(layoutQDescale, "N2TGD") == 0) {
+            CHECK_COND(strcmp(layoutQ, "TND") == 0, ACLNN_ERR_RUNTIME_ERROR,
+                       "When quantMode is %ld (MxFP8) and layoutQDescale is %s, layoutQ must be TND, but got %s",
+                       quantMode, layoutQDescale, layoutQ);
+        } else if (strcmp(layoutQDescale, "BNSD") == 0) {
+            CHECK_COND(strcmp(layoutQ, "BNSD") == 0, ACLNN_ERR_RUNTIME_ERROR,
+                       "When quantMode is %ld (MxFP8) and layoutQDescale is %s, layoutQ must be BNSD, but got %s",
+                       quantMode, layoutQDescale, layoutQ);
+        } else if (strcmp(layoutQDescale, "BSND") == 0 || strcmp(layoutQDescale, "BN2SGD") == 0) {
+            CHECK_COND(strcmp(layoutQ, "BSND") == 0, ACLNN_ERR_RUNTIME_ERROR,
+                       "When quantMode is %ld (MxFP8) and layoutQDescale is %s, layoutQ must be BSND, but got %s",
+                       quantMode, layoutQDescale, layoutQ);
+        } else {
+            CHECK_COND(strcmp(layoutQDescale, "NT") != 0, ACLNN_ERR_RUNTIME_ERROR,
+                       "When quantMode is %ld (MxFP8), layoutQDescale %s is not supported", quantMode, layoutQDescale);
+        }
+    }
+
     static const std::unordered_set<std::string> layoutKvSet = {"BSND", "TND", "BNSD", "PA_BNBD", "PA_BBND", "PA_NZ"};
     CHECK_COND(layoutKvSet.count(layoutKv) > 0, ACLNN_ERR_RUNTIME_ERROR,
                "layoutKv only supports BSND, TND, BNSD, PA_BNBD, PA_BBND, PA_NZ, but got %s", layoutKv);

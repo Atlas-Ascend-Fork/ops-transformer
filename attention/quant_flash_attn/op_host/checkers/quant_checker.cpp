@@ -595,43 +595,39 @@ ge::graphStatus QuantChecker::CheckQDescaleShapeMxFp8(const QfaTilingInfo& qfaIn
         return CheckShapeEqual(*shape, expected, Q_DESCALE_NAME, qfaInfo.opName);
     }
 
-    if (dimNum == DIM_NUM_4) {
-        expected = {qfaInfo.qTSize, qfaInfo.n1Size, dPerGroup, 2};
-    } else if (dimNum == DIM_NUM_5) {
-        expected = {qfaInfo.n2Size, qfaInfo.qTSize, qfaInfo.gSize, dPerGroup, 2};
-    } else {
-        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(qfaInfo.opName, Q_DESCALE_NAME.c_str(),
-                                                 (std::to_string(dimNum) + "D").c_str(),
-                                                 "In MxFP8 scenario, the shape dim of q_descale must be 4D or 5D");
-        return ge::GRAPH_FAILED;
+    if (qfaInfo.qLayout == QfaLayout::TND) {
+        // TND: prefill 为 4D (Q_T, Q_N, D/64, 2) layout_q_descale=TND;
+        //      decode 为 5D (KV_N, Q_T, G, D/64, 2) layout_q_descale=N2TGD
+        OP_CHECK_IF(qfaInfo.layoutQDescale != QfaLayout::TND && qfaInfo.layoutQDescale != QfaLayout::N2TGD,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        qfaInfo.opName, "layout_q_descale", QfaLayoutToSerialString(qfaInfo.layoutQDescale).c_str(),
+                        ("When layout_q is TND, layout_q_descale must be TND(prefill) or N2TGD(decode), "
+                         "but got " +
+                         QfaLayoutToSerialString(qfaInfo.layoutQDescale))
+                            .c_str()),
+                    return ge::GRAPH_FAILED);
+        bool isDecode = (qfaInfo.layoutQDescale == QfaLayout::N2TGD);
+        if (!isDecode) {
+            OP_CHECK_IF(dimNum != DIM_NUM_4,
+                        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                            qfaInfo.opName, Q_DESCALE_NAME.c_str(), (std::to_string(dimNum) + "D").c_str(),
+                            "In MxFP8 prefill scenario, the shape dim of q_descale must be 4D when layout_q is TND"),
+                        return ge::GRAPH_FAILED);
+            expected = {qfaInfo.qTSize, qfaInfo.n1Size, dPerGroup, 2};
+        } else {
+            OP_CHECK_IF(dimNum != DIM_NUM_5,
+                        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                            qfaInfo.opName, Q_DESCALE_NAME.c_str(), (std::to_string(dimNum) + "D").c_str(),
+                            "In MxFP8 decode scenario, the shape dim of q_descale must be 5D when layout_q is TND"),
+                        return ge::GRAPH_FAILED);
+            expected = {qfaInfo.n2Size, qfaInfo.qTSize, qfaInfo.gSize, dPerGroup, 2};
+        }
+        return CheckShapeEqual(*shape, expected, Q_DESCALE_NAME, qfaInfo.opName);
     }
 
-    // 约束: MxFP8场景下 q_descale 两种 shape 对应不同使用场景
-    //   4D 为 prefill 场景，layout_q_descale 必须为 TND；5D 为 decode 场景，layout_q_descale 必须为 N2TGD
-    std::string shapeStr = Ops::Base::ToString(shape->GetStorageShape());
-    bool isDecode = (qfaInfo.layoutQDescale == QfaLayout::N2TGD);
-    if (dimNum == DIM_NUM_4) {
-        OP_CHECK_IF(isDecode,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfaInfo.opName, Q_DESCALE_NAME.c_str(),
-                                                          QfaLayoutToSerialString(qfaInfo.layoutQDescale).c_str(),
-                                                          ("q_descale shape " + shapeStr +
-                                                           " is for prefill scene, layout_q_descale must be TND, "
-                                                           "but got " +
-                                                           QfaLayoutToSerialString(qfaInfo.layoutQDescale))
-                                                              .c_str()),
-                    return ge::GRAPH_FAILED);
-    } else { // DIM_NUM_5, decode scene
-        OP_CHECK_IF(!isDecode,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfaInfo.opName, Q_DESCALE_NAME.c_str(),
-                                                          QfaLayoutToSerialString(qfaInfo.layoutQDescale).c_str(),
-                                                          ("q_descale shape " + shapeStr +
-                                                           " is for decode scene, layout_q_descale must be N2TGD, "
-                                                           "but got " +
-                                                           QfaLayoutToSerialString(qfaInfo.layoutQDescale))
-                                                              .c_str()),
-                    return ge::GRAPH_FAILED);
-    }
-    return CheckShapeEqual(*shape, expected, Q_DESCALE_NAME, qfaInfo.opName);
+    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfaInfo.opName, "layout_q", QfaLayoutToSerialString(qfaInfo.qLayout).c_str(),
+                                          "In MxFP8 scenario, layout_q must be TND, BNSD or BSND");
+    return ge::GRAPH_FAILED;
 }
 
 ge::graphStatus QuantChecker::CheckQDescaleShapeGqaFp8(const QfaTilingInfo& qfaInfo) const
@@ -1095,6 +1091,31 @@ ge::graphStatus QuantChecker::CheckLayoutConstraint(const QfaTilingInfo& qfaInfo
                                 .c_str()),
                         return ge::GRAPH_FAILED);
         }
+
+        // layout_q_descale 与 layout_q 一一对应, 防止错误声明导致 kernel 按错误排布解析 scale
+        bool descaleMatched = true;
+        switch (qfaInfo.layoutQDescale) {
+            case QfaLayout::TND:
+            case QfaLayout::N2TGD:
+                descaleMatched = (qfaInfo.qLayout == QfaLayout::TND);
+                break;
+            case QfaLayout::BNSD:
+                descaleMatched = (qfaInfo.qLayout == QfaLayout::BNSD);
+                break;
+            case QfaLayout::BSND:
+            case QfaLayout::BN2SGD:
+                descaleMatched = (qfaInfo.qLayout == QfaLayout::BSND);
+                break;
+            default:
+                break;
+        }
+        OP_CHECK_IF(!descaleMatched,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        qfaInfo.opName, "layout_q_descale", QfaLayoutToSerialString(qfaInfo.layoutQDescale).c_str(),
+                        ("In MxFP8 scenario, layout_q_descale must match layout_q(" + qLayoutStr +
+                         "): TND/N2TGD requires TND, BNSD requires BNSD, BSND/BN2SGD requires BSND")
+                            .c_str()),
+                    return ge::GRAPH_FAILED);
     }
 
     return ge::GRAPH_SUCCESS;
