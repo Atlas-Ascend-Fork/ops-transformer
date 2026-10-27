@@ -489,6 +489,14 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     statusDataSpaceGM_ = ctx_.GetStatusDataSpaceGm();
     uint32_t epRankIdHccl = ctx_.GetEpRankId();
     uint32_t epWorldSizeHccl = ctx_.GetEpWorldSize();
+#if defined(ASCENDC_OOM) && ASCENDC_OOM == 1
+    for (uint32_t rankId = 0; rankId < epWorldSizeHccl; ++rankId) {
+        OOMCheckAddrRange<uint8_t>(
+            reinterpret_cast<__gm__ uint8_t*>(ctx_.GetWindStateAddrByRankId(rankId, epRankIdHccl)), STATE_SIZE);
+        OOMCheckAddrRange<uint8_t>(reinterpret_cast<__gm__ uint8_t*>(ctx_.GetWindAddrByRankId(rankId, epRankIdHccl)),
+                                   totalWinSize_);
+    }
+#endif
     selfDataStatusGMTensor_.SetGlobalBuffer(
         (__gm__ uint32_t*)(statusDataSpaceGM_ + FLAG_FIELD_OFFSET + aivId_ * WIN_ADDR_ALIGN));
     TBuf<> dataStateBuf;
