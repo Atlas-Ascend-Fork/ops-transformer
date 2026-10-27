@@ -37,7 +37,7 @@ __aicore__ inline void CombineSendTokenToRemote(uint32_t batchStart, uint32_t cu
                                                 CommPolicy& comm, typename CommPolicy::BatchHandle& batchHandle)
 {
     const auto& peermem = params.communication.layout;
-    PipeFence<PIPE_MTE2, PIPE_S, SYNC_EVENT_ID3>();
+    // metadata 的 MTE2_S 由 CombineTokensInRange 在每批搬入后统一完成。
     // FP8 记录的 scale 位于 Align256(n) 之后；发送长度同时也是接收 GM 的 record stride。
     int64_t quantTokenSize = CalcCombineTokenBytes(n, sizeof(DataType), IsQuantized) / sizeof(DataType);
     uint32_t toRankId = metaInfoTensor[batchStart * META_INFO_SIZE + RANK_ID];
@@ -55,12 +55,11 @@ __aicore__ inline void CombineSendTokenToRemote(uint32_t batchStart, uint32_t cu
     gmLocalD = reinterpret_cast<__gm__ DataType*>(srcAddr);
     uint64_t dstBaseOffset =
         (static_cast<uint64_t>(tokenIdx) * params.tilingData->compute.topK + topkIdx) * quantTokenSize;
-    AscendC::DataCopyExtParams singleCopyParams{1, static_cast<uint32_t>(quantTokenSize * sizeof(DataType)), 0, 0, 0};
 
     if constexpr (!IsQuantized) {
         if (toRankId == rankId) {
             __gm__ DataType* gmm2OutGm = reinterpret_cast<__gm__ DataType*>(localSrcPtr);
-            PipeFence<PIPE_MTE3, PIPE_MTE2, SYNC_EVENT_ID3>();
+            // ubQuant 槽的复用由本 token 尾部的 MTE3_S 与 Group 尾的 MTE3_MTE2 交接保护。
             CopyGmToUb(ubQuant, gmm2OutGm, static_cast<uint32_t>(quantTokenSize * sizeof(DataType)));
             PipeFence<PIPE_MTE2, PIPE_MTE3, SYNC_EVENT_ID4>();
         }
@@ -124,17 +123,26 @@ __aicore__ inline void CombineSendTokenToRelay(uint32_t batchStart, uint32_t n, 
     }
 }
 
-// Layered 的逐 token 量化与发送；通信策略只接管请求构造和提交。
+// Layered 的逐 token 量化与发送；Group 自管本批 metadata 搬入与 UB 绑定，外层只给行范围和预算。
 template <uint8_t QuantMode, typename T, bool IsQuantized, typename CommPolicy>
 __aicore__ inline void CombineTokenGroup(uint32_t tokenStart, uint32_t tokenCount, uint32_t n, uint32_t groupIdx,
-                                         uint32_t rankId, GM_ADDR gmm2OutAddr, const Params& params,
-                                         __ubuf__ int32_t* metaInfoTensor, int64_t ubTensorSize, int64_t offset,
-                                         uint32_t quantTokenSizeBytes, CommPolicy& comm,
+                                         uint32_t rankId, GM_ADDR gmm2OutAddr, GM_ADDR metaInfoAddr,
+                                         int64_t ubTensorSize, const Params& params, CommPolicy& comm,
                                          LayeredCombineBatchState<CommPolicy>& batchState)
 {
+    // metadata 从 UB 512B 起，整 token 搬运缓冲紧随其后；布局与 InitCombineBuffers 的预算一致。
+    int64_t offset = ALIGN_512;
+    __ubuf__ int32_t* metaInfoTensor = reinterpret_cast<__ubuf__ int32_t*>(offset);
+    offset += tokenCount * META_INFO_SIZE * sizeof(int32_t);
+    __gm__ int32_t* metaInfoGm = reinterpret_cast<__gm__ int32_t*>(metaInfoAddr);
+    PipeFence<PIPE_S, PIPE_MTE2, SYNC_EVENT_ID1>();
+    CopyGmToUb(metaInfoTensor, metaInfoGm, (tokenCount * META_INFO_SIZE) * sizeof(int32_t));
+    // metadata 每批搬入后统一等待一次，随后逐 token 直接读取。
+    PipeFence<PIPE_MTE2, PIPE_S, SYNC_EVENT_ID3>();
     __ubuf__ T* combineUbTensor = reinterpret_cast<__ubuf__ T*>(offset);
     offset += ubTensorSize * sizeof(T);
 
+    uint32_t quantTokenSizeBytes = static_cast<uint32_t>(CalcCombineTokenBytes(n, sizeof(T), true));
     uint32_t nScale = Ops::Base::CeilDiv(n, uint32_t(MXFP_SCALE_GROUP_NUM));
     uint32_t mxScaleNum = Ops::Base::CeilAlign(nScale, 2U);
     uint32_t nAlign32 = Ops::Base::CeilAlign(n, static_cast<uint32_t>(ALIGN_32));

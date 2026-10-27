@@ -36,6 +36,19 @@ __aicore__ inline LayeredDequantScaleBufferBytes CalcLayeredDequantScaleBufferBy
     return {bf16Bytes, fp32Bytes};
 }
 
+/**
+ * 绑定 Combine 消费的 GMM2 输出与组同步计数地址。
+ */
+__aicore__ inline void UpdateCombineGlobalBuffer(GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state,
+                                                 const WorkspaceLayout& workspace, GM_ADDR workspaceBase,
+                                                 uint32_t combineSyncSlotCountPerExpert)
+{
+    UpdateMoeExpertCombineGlobalBuffer(workspace, workspaceBase, gmmAddrInfo, state);
+    gmmAddrInfo.gmm2CombineSyncCounter =
+        (__gm__ int32_t*)workspace.urma.sync.combineCounters.get_ptr(workspaceBase) +
+        static_cast<uint64_t>(state.expertIdx) * combineSyncSlotCountPerExpert * static_cast<uint64_t>(INT_CACHELINE);
+}
+
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitCombineBuffers()
 {
@@ -89,7 +102,6 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CombineTo
 
     uint32_t mExpert = Get<M_VALUE>(gmm2State.problemShape);
     uint32_t nTilesPerGroup = Ops::Base::CeilDiv(k_, L1_TILE_N);
-    uint32_t quantTokenSizeBytes = static_cast<uint32_t>(CalcCombineTokenBytes(k_, sizeof(bfloat16_t), true));
     GroupSyncSlotLayout slotLayout = CalcGroupSyncSlotLayout(mExpert, blockNum_);
     __gm__ int32_t* expertCounterBase = reinterpret_cast<__gm__ int32_t*>(gmmAddrInfo.gmm2CombineSyncCounter);
 
@@ -111,28 +123,18 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CombineTo
         uint32_t remainingTokens = rowRange.count - processedCount;
         batchCount = batchCount < remainingTokens ? batchCount : remainingTokens;
 
+        // 两种模式共用同一 metadata 基址；普通 Group 与去重 Group 都自行搬入 metadata 并绑定 UB。
+        GM_ADDR metaInfoAddr =
+            workspace.routing.receivedTokenMetadata.get_ptr(buffer) +
+            static_cast<uint64_t>(gmm2State.globalTokenStartIndex + currentRow) * META_INFO_SIZE * sizeof(int32_t);
         if constexpr (CombineServerDedup) {
-            GM_ADDR metaInfoAddr =
-                workspace.routing.receivedTokenMetadata.get_ptr(buffer) +
-                static_cast<uint64_t>(gmm2State.expertBeforeCnt + currentRow) * META_INFO_SIZE * sizeof(int32_t);
             CombineImpl::CombineServerDedupTokenGroup(currentRow, batchCount, k_, expertIdx, rankId_,
                                                       gmmAddrInfo.gmm2OutGlobal, metaInfoAddr, params_, comm_,
                                                       batchState);
         } else {
-            int64_t offset = ALIGN_512;
-            LocalTensor<int32_t> metaInfoTensor(TPosition::VECIN, offset, batchCount * META_INFO_SIZE);
-            offset += batchCount * META_INFO_SIZE * sizeof(int32_t);
-            __gm__ int32_t* metaInfoGm = nullptr;
-            metaInfoGm = reinterpret_cast<__gm__ int32_t*>(
-                workspace.routing.receivedTokenMetadata.get_ptr(buffer) +
-                static_cast<uint64_t>(gmm2State.expertBeforeCnt + currentRow) * META_INFO_SIZE * sizeof(int32_t));
-            PipeFence<PIPE_S, PIPE_MTE2, SYNC_EVENT_ID1>();
-            CopyGmToUb(reinterpret_cast<__ubuf__ int32_t*>((metaInfoTensor).GetPhyAddr()), metaInfoGm,
-                       (batchCount * META_INFO_SIZE) * sizeof(int32_t));
             CombineImpl::CombineTokenGroup<CombineQuantMode, bfloat16_t, IsQuantized>(
-                currentRow, batchCount, k_, expertIdx, rankId_, gmmAddrInfo.gmm2OutGlobal, params_,
-                reinterpret_cast<__ubuf__ int32_t*>(metaInfoTensor.GetPhyAddr()), combineUbTensorSize_, offset,
-                quantTokenSizeBytes, comm_, batchState);
+                currentRow, batchCount, k_, expertIdx, rankId_, gmmAddrInfo.gmm2OutGlobal, metaInfoAddr,
+                combineUbTensorSize_, params_, comm_, batchState);
         }
         processedCount += batchCount;
     }
@@ -208,16 +210,24 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCo
     for (uint32_t expertIdx = expertBegin; expertIdx < expertEnd; ++expertIdx) {
         const uint32_t rowBegin = expertIdx == expertBegin ? range.begin.tokenIndexInExpert : 0U;
         // 首专家从中间行继续时，waveBeginState 已保留该专家的完整形状及基址。
-        if (rowBegin == 0U && !UpdateGroupParams<AddrUpdateMode::GMM2>(combineState, expertIdx)) {
-            continue;
+        if (rowBegin == 0U) {
+            const BlockWorkspaceContext countWorkspace{blockIdx_, aicNum_};
+            const uint32_t expertTokenCount = GetExpertTokenCountFromWorkspace(
+                params_.workspace.layout.routing.recvCounts.get_ptr(params_.workspace.base), countWorkspace,
+                moeExpertPerRank_, expertIdx);
+            UpdateExpertLoopState(combineState, expertIdx, expertTokenCount);
+            if (expertTokenCount == 0U) {
+                continue;
+            }
         }
         const uint32_t expertRows = Get<M_VALUE>(combineState.problemShape);
         const uint32_t rowEnd = expertIdx == range.end.expertIdx ? range.end.tokenIndexInExpert : expertRows;
         if (rowBegin >= rowEnd) {
             continue;
         }
-        // 使用完整专家的 GM 基址和同步布局，行范围单独裁剪。
-        UpdateGlobalBuffer<AddrUpdateMode::GMM2>(combineAddrInfo, combineState);
+        // Combine 按消费范围绑定 GMM2 输出与组同步计数，地址由累计行数和专家序号直接计算。
+        UpdateCombineGlobalBuffer(combineAddrInfo, combineState, params_.workspace.layout, params_.workspace.base,
+                                  static_cast<uint32_t>(params_.tilingData->compute.combineSyncSlotCountPerExpert));
         CombineTokensOfExpert<CombineServerDedup>(combineAddrInfo, combineState, expertIdx,
                                                   WorkRange{rowBegin, rowEnd - rowBegin}, batchState);
     }
@@ -509,12 +519,14 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Unpermute
         LoadUnpermuteWeights(chunkStart, chunkTokenCnt);
         for (int32_t tokenIdx = chunkStart; tokenIdx < chunkEnd; tokenIdx++) {
             int32_t localIdx = tokenIdx - chunkStart;
-            PipeFence<PIPE_MTE3, PIPE_MTE2, SYNC_EVENT_ID2>();
             AccumulateUnpermuteExperts(expandedX, tokenIdx, localIdx);
             // 共享专家结果累加（直接加，不乘 topk_weight）
             if (sharedExpertNum_ > 0) {
                 UnpermuteSharedExpert(tokenIdx);
             }
+            // 输出区 [0,k) 在最终 Cast 处复用；复用等待放在 Cast 前，让输入搬入和 FP32 累加
+            // 与上一 token 的搬出重叠。
+            PipeFence<PIPE_MTE3, PIPE_V, SYNC_EVENT_ID2>();
             // fp32 -> bf16
 
             {
@@ -527,6 +539,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Unpermute
         }
         chunkStart = chunkEnd;
     }
+    // 出口显式等待最后一次输出搬出完成。
+    PipeFence<PIPE_MTE3, PIPE_S, SYNC_EVENT_ID3>();
     PipeWait<PIPE_V, PIPE_MTE2>(EVENT_ID0);
     PipeWait<PIPE_V, PIPE_MTE2>(EVENT_ID1);
 }

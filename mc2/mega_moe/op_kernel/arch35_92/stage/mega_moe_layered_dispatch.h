@@ -465,15 +465,9 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendMaskC
             }
         }
     }
-    // SendMask 使用 direct WriteNbi，不创建批量 handle。先让本 AIV 负责的所有远端通道
-    // 都拥有在途请求，再统一 Drain；锁继续保留给紧随其后的 CrossRankSync 复用。
-    for (uint32_t curRankId = aivCoreIdx_; curRankId < static_cast<uint32_t>(totalExperts); curRankId += blockAivNum_) {
-        if (curRankId == rankId_) {
-            continue;
-        }
-        Channel maskChannel = comm_.GetChannel(curRankId);
-        comm_.Drain(maskChannel);
-    }
+    // SendMask 使用 direct WriteNbi，不创建批量 handle；完成等待放在首次 CrossRankSync 的
+    // 通知发送之前（同一 AIV、同一通道集合），mask 传输与随后的本卡准备重叠，通道锁由紧随
+    // 其后的 CrossRankSync 复用。
 }
 
 // ======================================================================
@@ -1003,8 +997,13 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::LoadToken
 {
     const auto& peermem = params_.communication.layout;
     const auto& commBuffer = params_.communication.base;
-    GM_ADDR readyAddr = peermem.dispatchFlag.get_ptr(commBuffer) + RelayFlagOffset(srcServer, tokenIndex);
-    while (GmRead(reinterpret_cast<__gm__ uint64_t*>(readyAddr)) == 0U) {
+    // 本卡 token 的量化与 ready 写入都在进入 Wave 前的同步边界（CrossRankSyncInWorldSize 尾部
+    // PIPE_ALL + AllCoreBarrier）之前完成，因此 srcServer == serverId_ 的 token 可直接读取。
+    // 其他 Server 的一级发送在 Wave 开始后才提交，其数据到达由 ready 轮询确认。
+    // 直接读取依赖当前“同编号 rank 中继”路由与 Wave 前同步位置，调整这两者时需同步复核。
+    if (srcServer != serverId_) {
+        GM_ADDR readyAddr = peermem.dispatchFlag.get_ptr(commBuffer) + RelayFlagOffset(srcServer, tokenIndex);
+        WaitUntilGmFlagIsNonZero(reinterpret_cast<__gm__ uint64_t*>(readyAddr));
     }
 
     uint64_t remoteCopyOffset = RelayTokenOffset(srcServer, tokenIndex);
@@ -1327,9 +1326,10 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReceiveRe
         }
     }
     comm_.BatchCommit(batchHandle);
-    comm_.Drain(batchHandle);
 
     if constexpr (TopkWeightsPrefetch) {
+        // 预取路径提交后立即读取刚收回的权重，必须先等这批 token/scale/weight 读取完成。
+        comm_.Drain(batchHandle);
         for (uint32_t index = 0U; index < batchTokenCount; ++index) {
             __ubuf__ int32_t* record = (metaInfoTensor_ + (index * INT32_PER_256B));
             uint32_t dstRow = static_cast<uint32_t>(record[DISPATCH_BATCH_DST_ROW]);
@@ -1354,6 +1354,12 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReceiveRe
         segmentStart = segmentEnd;
     }
     PipeFence<PIPE_MTE3, PIPE_S, SYNC_EVENT_ID3>();
+
+    if constexpr (!TopkWeightsPrefetch) {
+        // 非预取时 metadata 由标量构造，与这批 token/scale 读取相互独立；搬出与通信等待重叠，
+        // 发布 ready 前汇合两者。
+        comm_.Drain(batchHandle);
+    }
 
     segmentStart = 0U;
     while (segmentStart < batchTokenCount) {

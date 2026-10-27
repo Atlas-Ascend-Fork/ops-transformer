@@ -427,8 +427,9 @@ __aicore__ inline uint32_t AdvanceExpertTokenPositionInWave(uint32_t expertToken
     return sliceTokenCount;
 }
 
-// 轮询 GM 中的 int32 ready flag，并在两次读取之间加入短暂退避。
-__aicore__ inline void WaitUntilGmFlagIsNonZero(__gm__ int32_t* flagAddr)
+// 轮询 GM 中的 ready flag，并在两次读取之间加入短暂退避。
+template <typename FlagType>
+__aicore__ inline void WaitUntilGmFlagIsNonZero(__gm__ FlagType* flagAddr)
 {
     while (GmRead(flagAddr) == 0) {
         int64_t startCycle = GetDeviceCycle();
