@@ -2840,6 +2840,7 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         dtype=ivg_io_d_type,
         target_memory=pl.MemorySpace.Vec,
         valid_shape=[-1, -1],
+        compact=0,
     )
 
     d_cmp_kv_fp32_tile_type = pl.TileType(
@@ -2848,6 +2849,7 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         target_memory=pl.MemorySpace.Vec,
         valid_shape=[-1, -1],
         pad=pl.TilePad.zero,
+        compact=0,
     )
 
     normel_tile_type = pl.TileType(
@@ -2899,6 +2901,7 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         target_memory=pl.MemorySpace.Vec,
         valid_shape=[-1, -1],
         pad=pl.TilePad.zero,
+        compact=0,
     )
 
     flat_tile_type = pl.TileType(
@@ -2907,6 +2910,7 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         target_memory=pl.MemorySpace.Vec,
         valid_shape=[-1, -1],
         pad=pl.TilePad.zero,
+        compact=0,
     )
 
     flat_cast_tile_type = pl.TileType(
@@ -2914,6 +2918,7 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         dtype=ivg_io_d_type,
         target_memory=pl.MemorySpace.Vec,
         valid_shape=[-1, -1],
+        compact=0,
     )
 
     temp_tile_type = pl.TileType(

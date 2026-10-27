@@ -340,7 +340,10 @@ def anti_quant_softmax_grad_front_cast_hif8_vf(
 def init_dq_workspace(const_info, tensor_info):
     if const_info.core_id_vec < const_info.sfmg_used_core_num:
         dq_tt = pl.TileType(
-            shape=[1, TS * TS], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, TS * TS],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         )
         dq_tile = pl.make_tile_group(type=dq_tt, addrs=VAQ_PRE, mutex_ids=[7])
         pl.expands(dq_tile.current(), 0)
@@ -401,7 +404,10 @@ def init_sfmg_workspace(const_info, tensor_info):
     with pl.section_vector():
         if const_info.core_id_vec < const_info.sfmg_used_core_num:
             zero_tt = pl.TileType(
-                shape=[1, TS * TS], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+                shape=[1, TS * TS],
+                dtype=pl.DT_FP32,
+                target_memory=pl.MemorySpace.Vec,
+                compact=0,
             )
             zero_tile = pl.make_tile_group(type=zero_tt, addrs=VAQ_PRE, mutex_ids=[7])
             pl.expands(zero_tile.current(), 0)
@@ -440,21 +446,30 @@ def presfmg_quant_tnd_used_hif8(const_info, tensor_info):
         deq_scale_do_value = const_info.deq_scale_do_value
         y_tile = pl.make_tile_group(
             type=pl.TileType(
-                shape=[TS, D_SIZE], dtype=pl.DT_BF16, target_memory=pl.MemorySpace.Vec
+                shape=[TS, D_SIZE],
+                dtype=pl.DT_BF16,
+                target_memory=pl.MemorySpace.Vec,
+                compact=0,
             ),
             addrs=VA0_PRE,
             mutex_ids=[0, 1],
         )
         dx_tile = pl.make_tile_group(
             type=pl.TileType(
-                shape=[TS, D_SIZE], dtype=pl.DT_HF8, target_memory=pl.MemorySpace.Vec
+                shape=[TS, D_SIZE],
+                dtype=pl.DT_HF8,
+                target_memory=pl.MemorySpace.Vec,
+                compact=0,
             ),
             addrs=VA1_PRE,
             mutex_ids=[2, 3],
         )
         out_tile = pl.make_tile_group(
             type=pl.TileType(
-                shape=[1, TS], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+                shape=[1, TS],
+                dtype=pl.DT_FP32,
+                target_memory=pl.MemorySpace.Vec,
+                compact=0,
             ),
             addrs=VA2_PRE,
             mutex_ids=[4, 5],
@@ -506,13 +521,22 @@ def presfmg_quant_inner_hif8(const_info, tensor_info):
 
         deq_scale_do_value = const_info.deq_scale_do_value
         y_tt = pl.TileType(
-            shape=[TS, D_SIZE], dtype=pl.DT_BF16, target_memory=pl.MemorySpace.Vec
+            shape=[TS, D_SIZE],
+            dtype=pl.DT_BF16,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         )
         dx_tt = pl.TileType(
-            shape=[TS, D_SIZE], dtype=pl.DT_HF8, target_memory=pl.MemorySpace.Vec
+            shape=[TS, D_SIZE],
+            dtype=pl.DT_HF8,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         )
         out_tt = pl.TileType(
-            shape=[1, TS], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, TS],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         )
 
         y_tile = pl.make_tile_group(type=y_tt, addrs=VA0_PRE, mutex_ids=[0, 1])
@@ -4404,42 +4428,60 @@ def quant_flash_attn_grad(
     )
     sp_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[TS, TS], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[TS, TS],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA0, VA0 + 256],
         mutex_ids=[0, 1],
     )
     sp_vec_bit8 = pl.make_tile_group(
         type=pl.TileType(
-            shape=[M_16, N_4096], dtype=pl.DT_INT8, target_memory=pl.MemorySpace.Vec
+            shape=[M_16, N_4096],
+            dtype=pl.DT_INT8,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA0, VA0 + 256],
         mutex_ids=[0, 1],
     )
     dpds_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[TS, TS], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[TS, TS],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA1, VA1 + 256],
         mutex_ids=[2, 3],
     )
     dpds_vec_bit8 = pl.make_tile_group(
         type=pl.TileType(
-            shape=[M_16, N_4096], dtype=pl.DT_INT8, target_memory=pl.MemorySpace.Vec
+            shape=[M_16, N_4096],
+            dtype=pl.DT_INT8,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA1, VA1 + 256],
         mutex_ids=[2, 3],
     )
     dkv_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[TS, TS], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[TS, TS],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA2, VA2 + 256],
         mutex_ids=[29, 30],
     )
     dq_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[TS, HALF_D_SIZE], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[TS, HALF_D_SIZE],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=VA3,
         mutex_ids=[31],
@@ -4447,35 +4489,50 @@ def quant_flash_attn_grad(
     lse_n = 128 if qk_s1_fuse() else 64
     lse_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, lse_n], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, lse_n],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA4, VA4 + 512, VA4 + 512 * 2, VA4 + 512 * 3],
         mutex_ids=[9, 10, 11, 12],
     )
     d_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, lse_n], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, lse_n],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA4 + 512 * 4, VA4 + 512 * 5, VA4 + 512 * 6, VA4 + 512 * 7],
         mutex_ids=[13, 14, 15, 16],
     )
     perm_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, 128], dtype=pl.DT_UINT16, target_memory=pl.MemorySpace.Vec
+            shape=[1, 128],
+            dtype=pl.DT_UINT16,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA4 + 512 * 8],
         mutex_ids=[17],
     )
     zero_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, 64], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, 64],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA4 + 512 * 9],
         mutex_ids=[18],
     )
     attn_mask_pool = pl.make_tile_group(
         type=pl.TileType(
-            shape=[128, 64], dtype=pl.DT_INT8, target_memory=pl.MemorySpace.Vec
+            shape=[128, 64],
+            dtype=pl.DT_INT8,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VA4 + 512 * 10, VA4 + 512 * 26, VA4 + 512 * 42],
         mutex_ids=[19, 21, 20],
@@ -4669,6 +4726,7 @@ def quant_flash_attn_grad(
             shape=[1, TS * TS],
             dtype=pl.DT_FP32,
             target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VAP_0, VAP_0 + TS * TS * 4],
         mutex_ids=[0, 1],
@@ -4678,6 +4736,7 @@ def quant_flash_attn_grad(
             shape=[1, TS * TS],
             dtype=output_dtype,
             target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=[VAP_1, VAP_1 + TS * TS * 2],
         mutex_ids=[2, 3],

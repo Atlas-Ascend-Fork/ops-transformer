@@ -860,7 +860,10 @@ def sparse_flash_mla_softmax_l1_norm(
     # common
     qk_vec_db = pl.make_tile_group(
         type=pl.TileType(
-            shape=[TG_HALF, TKV], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[TG_HALF, TKV],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=VA0,
         mutex_ids=[0, 1],
@@ -969,14 +972,20 @@ def sparse_flash_mla_softmax_l1_norm(
         )
         lse_vec_db = pl.make_tile_group(
             type=pl.TileType(
-                shape=[1, TG], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+                shape=[1, TG],
+                dtype=pl.DT_FP32,
+                target_memory=pl.MemorySpace.Vec,
+                compact=0,
             ),
             addrs=VA2,
             mutex_ids=[4, 5],
         )
         out_vec_db = pl.make_tile_group(
             type=pl.TileType(
-                shape=[1, TKV], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+                shape=[1, TKV],
+                dtype=pl.DT_FP32,
+                target_memory=pl.MemorySpace.Vec,
+                compact=0,
             ),
             addrs=VA3,
             mutex_ids=[6, 7],
@@ -1013,6 +1022,7 @@ def sparse_flash_mla_softmax_l1_norm(
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             pad=pl.TilePad.zero,
+            compact=0,
         )
         init_dst_tile_type = pl.TileType(
             shape=[1, init_per_loop_num],
@@ -1020,6 +1030,7 @@ def sparse_flash_mla_softmax_l1_norm(
             target_memory=pl.MemorySpace.Vec,
             valid_shape=[-1, -1],
             pad=pl.TilePad.zero,
+            compact=0,
         )
         init_ub_src = pl.make_tile_group(
             type=init_src_tile_type, addrs=VA1, mutex_ids=[2]

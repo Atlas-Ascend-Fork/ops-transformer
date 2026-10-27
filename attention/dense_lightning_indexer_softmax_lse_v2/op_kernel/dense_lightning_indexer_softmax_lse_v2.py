@@ -459,35 +459,50 @@ def dense_lightning_indexer_softmax_lse_v2_inner(
     # 【128，64】基本块用于qk的结果，这里UB开两块做db
     qk_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[TN, TKV_HALF], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[TN, TKV_HALF],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=VA0,
         mutex_ids=[0, 1],
     )
     weight_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, TN], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, TN],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=VA1,
         mutex_ids=[2, 3],
     )
     lse_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, 8], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, 8],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=VA2,
         mutex_ids=[4],
     )
     max_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, 8], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, 8],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=VA3,
         mutex_ids=[5],
     )
     reduce_sum_vec = pl.make_tile_group(
         type=pl.TileType(
-            shape=[1, KV_CACHE_NUM], dtype=pl.DT_FP32, target_memory=pl.MemorySpace.Vec
+            shape=[1, KV_CACHE_NUM],
+            dtype=pl.DT_FP32,
+            target_memory=pl.MemorySpace.Vec,
+            compact=0,
         ),
         addrs=VA4,
         mutex_ids=[6],
