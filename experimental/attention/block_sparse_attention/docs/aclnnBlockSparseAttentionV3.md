@@ -161,7 +161,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         <li>BSND: [batch, maxQSeqLength, headNum, headDim]。</li>
         </ul>
       </td>
-      <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT4_E2M1 </td>
+      <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT4_E2M1、HIFLOAT8 </td>
       <td>ND</td>
       <td>3/4</td>
       <td>×</td>
@@ -177,7 +177,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
           <li>BSND: [batch, maxKvSeqLength, numKeyValueHeads, headDim]。</li>
         </ul>
       </td>
-      <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT4_E2M1、 </td>
+      <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT4_E2M1、HIFLOAT8</td>
       <td>ND</td>
       <td>3/4</td>
       <td>×</td>
@@ -194,7 +194,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
           <li>BSND: [batch, maxKvSeqLength, numKeyValueHeads, headDim]。</li>
         </ul>
       </td>
-      <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT4_E2M1、</td>
+      <td>FLOAT16、BFLOAT16、FLOAT8_E4M3FN、FLOAT4_E2M1、HIFLOAT8</td>
       <td>ND</td>
       <td>3/4</td>
       <td>×</td>
@@ -220,10 +220,10 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>attenMaskOptional（aclTensor*）</td>
       <td>输入</td>
       <td>公式中的atten_mask。</td>
-      <td>atten_mask会与稀疏pattern叠加产生作用。当前不支持，必须传入nullptr。</td>
-      <td>INT8</td>
+      <td>可选块内有效行blockEffRows，与稀疏pattern共同作用；详见约束说明。HIF8模式下形状为[batch, qHeads, maxBlockNum, 2]。</td>
+      <td>INT32</td>
       <td>ND</td>
-      <td>2</td>
+      <td>4</td>
       <td>×</td>
     </tr>
     <tr>
@@ -299,6 +299,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         <ul>
           <li>当quantMode不为0时，此参数必须传入。</li>
           <li>当quantMode为0时，此参数应传入nullptr。</li>
+          <li>quantMode=5时必须为FLOAT32，shape为一维[1]。</li>
         </ul>
         当配置此输入时：
         <ul>
@@ -308,7 +309,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       </td>
       <td>FLOAT32、FLOAT8_E8M0</td>
       <td>ND</td>
-      <td>4/5</td>
+      <td>1/4/5</td>
       <td>×</td>
     </tr>
     <tr>
@@ -320,6 +321,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         <ul>
           <li>当quantMode不为0时，此参数必须传入。</li>
           <li>当quantMode为0时，此参数应传入nullptr。</li>
+          <li>quantMode=5时必须为FLOAT32，shape为一维[1]。</li>
         </ul>
         当配置此输入时：
         <ul>
@@ -329,7 +331,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       </td>
       <td>FLOAT32、FLOAT8_E8M0</td>
       <td>ND</td>
-      <td>4/5</td>
+      <td>1/4/5</td>
       <td>×</td>
     </tr>
     <tr>
@@ -341,6 +343,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         <ul>
           <li>当quantMode不为0时，此参数必须传入。</li>
           <li>当quantMode为0时，此参数应传入nullptr。</li>
+          <li>quantMode=5时必须为FLOAT32，shape为一维[1]。</li>
         </ul>
         当配置此输入时：
         <ul>
@@ -350,7 +353,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       </td>
       <td>FLOAT32、FLOAT8_E8M0</td>
       <td>ND</td>
-      <td>4/5</td>
+      <td>1/4/5</td>
       <td>×</td>
     </tr>
     <tr>
@@ -360,12 +363,12 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>
         可选输入：
         <ul>
-          <li> 预留参数, 暂不支持, 此参数应传入nullptr。</li>
+          <li> 仅quantMode=5支持：可传入FLOAT32、shape为[1]的张量；nullptr时默认使用16.0。其他模式必须为nullptr。</li>
         </ul>
       </td>
       <td>FLOAT32</td>
       <td>ND</td>
-      <td>-</td>
+      <td>1</td>
       <td>×</td>
     </tr>
     <tr>
@@ -428,7 +431,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>输入</td>
       <td>Softmax计算采取的精度级别。</td>
       <td>
-        控制online softmax阶段以及rescale阶段运算使用的数据类型。当前只支持传0或1或4，各产品支持的取值详见<a href="#constraint_rule">约束说明</a>。
+        控制online softmax阶段以及rescale阶段运算使用的数据类型。当前只支持传0或1或4，HIF8量化模式（quantMode=5）仅支持0，各产品支持的取值详见<a href="#constraint_rule">约束说明</a>。
         <ul>
           <li>0：表示online softmax和rescale全部采取fp32数据类型，适合追求计算精度的场景使用。</li>
           <li>1：仅支持输入的query、key、value均为fp16数据类型时配置，表示online softmax和rescale全部采取fp16数据类型，性能更好，但精度较低，且可能发生计算时的数值溢出，使用者需根据值域范围自行判断是否使用。</li>
@@ -491,13 +494,14 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>输入</td>
       <td>量化模式选择标志位。</td>
       <td>
-        当前只支持传0、1、2、3。
+        当前支持传0、1、2、3、5和20。
         <ul>
           <li>0：表示非量化。</li>
           <li>1：表示FP8量化。</li>
           <li>2：表示MXFP4 OCP量化(量化scale向下截断)。</li>
           <li>3：表示MXFP4 CX量化(自定义量化量程, 量化scale向上截断)。</li>
           <li>详见<a href="#constraint_rule">约束说明</a>。</li>
+          <li>5：表示HIF8 per-tensor量化，约束见下文。</li>
         </ul>
       </td>
       <td>INT64</td>
@@ -660,22 +664,22 @@ aclnnStatus aclnnBlockSparseAttentionV3(
 - qInputLayout当前仅支持"TND"和"BNSD"和"BSND"。
 - kvInputLayout当前仅支持"TND"和"BNSD"和"BSND"。
 - 当前query、key、value的InputLayout必须保持一致。
-- 输入query、key、value的数据类型必须一致，支持FLOAT16和BFLOAT16。
+- 输入query、key、value的数据类型必须一致：非量化模式（quantMode=0）支持FLOAT16和BFLOAT16；quantMode=1/20支持FLOAT8_E4M3FN；quantMode=2/3支持FLOAT4_E2M1；quantMode=5支持HIFLOAT8。量化模式仅Ascend 950PR&950DT系列产品支持。
 - query、key、value的D轴当前仅支持配置为64或128
 - blockShapeOptional如果传入，则必须包含两个元素[blockShapeX, blockShapeY]，且值必须大于0。blockShapeX/blockShapeY在不同产品上的倍数约束如下：
   <!-- npu="950" id7 -->
-  - 在<term>Ascend 950PR&950DT系列产品</term>上：blockShapeY须为16的倍数；MXFP4量化（quantMode=2/3）时，blockShapeX和blockShapeY均只支持64的倍数。
+  - 在<term>Ascend 950PR&950DT系列产品</term>上：blockShapeY须为16的倍数；MXFP4量化（quantMode=2/3）时，blockShapeX和blockShapeY均只支持64的倍数；HIF8量化（quantMode=5）时，blockShapeX和blockShapeY均须为16的倍数。
   <!-- end id7 -->
   <!-- npu="910b,A3" id8 -->
   - 在<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>上：blockShapeY须为128的倍数。
   <!-- end id8 -->
 - blockSparseMaskOptional当前必须传入，且shape为[batch, headNum, qBlockNum, kvBlockNum]。TND时，qBlockNum = ceilDiv(max(actualSeqLengths), blockShapeX)，kvBlockNum = ceilDiv(max(actualSeqLengthsKv), blockShapeY)。BNSD/BSND时，qBlockNum = ceilDiv(Q shape中的S, blockShapeX)，kvBlockNum = ceilDiv(K shape中的S, blockShapeY)；若传入actualSeqLengths和actualSeqLengthsKv，也可按实际长度计算：qBlockNum = ceilDiv(max(actualSeqLengths), blockShapeX)，kvBlockNum = ceilDiv(max(actualSeqLengthsKv), blockShapeY)。
-- attenMaskOptional当前只支持传入nullptr。
+- attenMaskOptional可选。HIF8量化（quantMode=5）支持INT32的blockEffRows，形状为[batch, qHeads, maxBlockNum, 2]；最后一维分别为Q/KV块的有效前缀行数，maxBlockNum不小于Q/KV块数的最大值。
 - actualSeqLengthsOptional在qInputLayout为“TND”时必选；actualSeqLengthsKvOptional在kvInputLayout为“TND”时必选。
 - actualSeqLengthsOptional与actualSeqLengthsKvOptional当前必须同时配置或同时不配置，仅配置其中之一的行为将被算子拦截。
 - blockTableOptional当前只支持传入nullptr，表示不开启PagedAttention特性。
 <!-- npu="950,A3,910b" id9 -->
-- innerPrecise必须为0或1或4，其中，<term>Ascend 950PR&950DT系列产品</term>仅支持配置为4，<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>仅支持配置为0或1。
+- innerPrecise必须为0或1或4，其中，<term>Ascend 950PR&950DT系列产品</term>上，FLOAT16/BFLOAT16输入支持0或4，FP8/MXFP4量化仅支持4，HIF8量化（quantMode=5）仅支持0；<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>仅支持配置为0或1。
 <!-- end id9 -->
 - softmaxLseFlag仅支持配置0或1，分别表示不开启/开启softmaxLse输出。
 - qSeqlen和kvSeqlen不需要被blockShape整除，支持非对齐场景，实际分块数通过向上取整计算。
@@ -707,7 +711,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
   - 量化缩放因子的数据类型必须为FLOAT32。
   - qDequantScale的shape必须为(Batch, HeadNum, CeilDiv(maxQSeqLength, 128), 1)。
   - kDequantScale和vDequantScale的shape必须一致，为(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 256), 1)或(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 512), 1)。
-  - 当query、key、value中任意一个数据类型不为FLOAT8_E4M3FN时，qDequantScale、kDequantScale、vDequantScale必须传入nullptr。
+  - 非量化模式（quantMode=0）时，qDequantScale、kDequantScale、vDequantScale必须传入nullptr。
   - blockShapeOptional必须传入。
   - q和kv的量化块大小必须与blockShapeOptional的两个元素大小分别保持一致。
 - **quantMode=2/3 (MXFP4量化模式)相关约束（新增）**
@@ -725,6 +729,21 @@ aclnnStatus aclnnBlockSparseAttentionV3(
     - **CX量化公式**
 
       $$ P_{\text{Scale}} = 2^{\lceil \log_2 \left( P_{\text{max}} / dstTypeMax \right) \rceil} = 2^{\lceil \log_2 P_{\text{max}} - \log_2 dstTypeMax \rceil} $$
+
+<!-- npu="950" id14 -->
+- **quantMode=5（HIF8 per-tensor量化模式）相关约束**：
+
+  - 仅<term>Ascend 950PR&950DT系列产品</term>支持。query、key、value必须均为HIFLOAT8，且HIFLOAT8输入必须使用quantMode=5。
+  - qInputLayout与kvInputLayout必须一致，支持TND、BNSD、BSND；D轴支持64或128。
+  - qDequantScaleOptional、kDequantScaleOptional、vDequantScaleOptional必须传入，均为FLOAT32类型，shape必须为一维[1]，每个输入张量共用一个反量化缩放因子，不支持per-token或per-channel缩放因子。
+  - pQuantScaleOptional可选；传入时必须为FLOAT32类型，shape为一维[1]，取值必须为有限正数，用于softmax结果P的量化；传入nullptr时默认使用16.0。
+  - qDequantScaleOptional、kDequantScaleOptional、vDequantScaleOptional及scaleValue必须为有限数；有效缩放因子qDequantScaleOptional × kDequantScaleOptional × scaleValue必须为有限非负数。上述数值约束由调用者保证，host侧仅校验缩放因子的类型和shape。
+  - innerPrecise必须为0，online softmax和rescale均采用FLOAT32计算。
+  - blockSparseMaskOptional必须传入；blockShapeX和blockShapeY必须为正数且均为16的倍数，省略blockShapeOptional时默认为[128,128]。Q/KV序列长度无需被稀疏块大小整除。
+  - maskType必须为0，blockTableOptional必须为nullptr；attenMaskOptional可为nullptr或上述blockEffRows，blockSize必须为0，preTokens和nextTokens必须为2147483647。
+  - attentionOut的shape与query一致，数据类型支持FLOAT16或BFLOAT16；softmaxLseFlag支持0或1，可选输出FLOAT32类型的softmaxLse。
+  - dstTypeMax在此模式下不参与计算，建议传入0.0。
+<!-- end id14 -->
 
 ## 调用示例
 

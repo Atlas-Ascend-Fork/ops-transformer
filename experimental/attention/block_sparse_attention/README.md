@@ -176,3 +176,7 @@ bash build.sh
 ## 版本历史
 
 - v1.0.0: 初始版本
+
+## HIF8 per-tensor 量化
+
+Ascend 950 支持 `quantMode=5`，Q/K/V 为 HIFLOAT8，输出为 FLOAT16/BFLOAT16，支持 TND/BNSD/BSND 及可选 LSE。完整约束见 [ACLNN V3](docs/aclnnBlockSparseAttentionV3.md) 和 [Torch HIF8](docs/torchapi_block_sparse_attention.md)。

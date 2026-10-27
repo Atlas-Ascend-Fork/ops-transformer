@@ -49,6 +49,8 @@ struct BlockMmadTla {
 #include "../../../attn_infra/gemm/block/experimental_bsa_block_mmad_pv_arch35_ABf16_C_to_UB.hpp"
 #include "../../../attn_infra/gemm/block/experimental_bsa_block_mmad_qk_arch35_ABf16_C_to_UB.hpp"
 #include "../../../attn_infra/gemm/block/experimental_block_mmad_k_qt_st_arch35.hpp"
+#include "../../../attn_infra/gemm/block/block_mmad_k_qt_st_arch35_fp8.hpp"
+#include "../../../attn_infra/gemm/block/block_mmad_pv_arch35_ABf16_C_to_UB_fp8.hpp"
 #include "../../../attn_infra/gemm/block/block_mmad_qk_arch35_mxfp4.hpp"
 #include "../../../attn_infra/gemm/block/block_mmad_pv_arch35_mxfp4.hpp"
 #include "../../../attn_infra/gemm/block/block_mmad_copy_global_max_l1_to_ub_arch35_mxfp4.hpp"

@@ -21,6 +21,7 @@ class QuantMode(IntEnum):
     FP8_QUANT = 1
     MXFP4_OCP_QUANT = 2
     MXFP4_CX_QUANT = 3
+    HIF8_QKVP_PERTENSOR_QUANT = 5
 
 
 class BlockSparseAttentionOpBuilder(OpBuilder):
