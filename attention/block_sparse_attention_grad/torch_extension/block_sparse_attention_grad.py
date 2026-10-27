@@ -95,7 +95,7 @@ def block_sparse_attention_grad(
     """block sparse attention backward（aclnnBlockSparseAttentionGrad 的 torch 扩展封装）。
 
     mask_type=0 → atten_mask 必须为 None（无 counts）；
-    mask_type=1 → atten_mask 必传（INT32 counts：1D 前缀计数 或 4D [B,N,>=maxBlocks,2]）。
+    mask_type=1 → atten_mask 必传（INT32 counts：4D [B,N,>=maxBlocks,2]）。
     返回 (dq, dk, dv)。
     """
     return _op_module.npu_block_sparse_attention_backward(
