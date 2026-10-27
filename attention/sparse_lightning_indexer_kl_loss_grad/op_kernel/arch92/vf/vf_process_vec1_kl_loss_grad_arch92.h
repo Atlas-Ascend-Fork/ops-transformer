@@ -36,85 +36,49 @@ constexpr static AscendC::Reg::CastTrait castTraitB162B32Even = {
 
 template <typename T, typename INPUT_T>
 __simd_vf__ inline void ProcessVec1BasicVF(__ubuf__ T* dstUb, __ubuf__ T* srcUb, __ubuf__ INPUT_T* weightUb,
-                                           const uint32_t m, const uint32_t nBaseSize)
+                                           const uint32_t m, const uint32_t nBaseSize, const uint32_t validSize)
 {
-    RegTensor<float> vreg_input_x1;
-    RegTensor<float> vreg_input_x2;
-    RegTensor<float> vreg_input_x3;
-    RegTensor<float> vreg_input_x4;
-    RegTensor<float> vreg_input_x1_new;
-    RegTensor<float> vreg_input_x2_new;
-    RegTensor<float> vreg_input_x3_new;
-    RegTensor<float> vreg_input_x4_new;
-    RegTensor<float> vreg_output_x1;
-    RegTensor<float> vreg_output_x2;
-    RegTensor<float> vreg_output_x3;
-    RegTensor<float> vreg_output_x4;
-    RegTensor<half> vreg_weight_half;
-    RegTensor<bfloat16_t> vreg_weight_bf;
-    RegTensor<float> vreg_weight;
-    RegTensor<float> vreg_zero;
-
-    MaskReg pregFullExeB16 = CreateMask<INPUT_T, MaskPattern::ALL>();
-    MaskReg preg_all_b32 = CreateMask<float, MaskPattern::ALL>();
-    MaskReg preg_relu;
-
-    Duplicate(vreg_output_x1, 0, preg_all_b32);
-    Duplicate(vreg_output_x2, 0, preg_all_b32);
-    Duplicate(vreg_output_x3, 0, preg_all_b32);
-    Duplicate(vreg_output_x4, 0, preg_all_b32);
-    Duplicate(vreg_zero, 0.0f);
-    for (uint16_t i = 0; i < m; ++i) {
-        if constexpr (IsSameType<INPUT_T, half>::value) {
-            LoadAlign<INPUT_T, Reg::LoadDist::DIST_BRC_B16>(vreg_weight_half, weightUb + i);
-            Cast<float, INPUT_T, castTraitB162B32Even>(vreg_weight, vreg_weight_half, pregFullExeB16);
-        } else if constexpr (IsSameType<INPUT_T, bfloat16_t>::value) {
-            LoadAlign<INPUT_T, Reg::LoadDist::DIST_BRC_B16>(vreg_weight_bf, weightUb + i);
-            Cast<float, INPUT_T, castTraitB162B32Even>(vreg_weight, vreg_weight_bf, pregFullExeB16);
-        } else if constexpr (IsSameType<INPUT_T, float>::value) {
-            LoadAlign<INPUT_T, Reg::LoadDist::DIST_BRC_B32>(vreg_weight, weightUb + i);
+    MaskReg full = CreateMask<float, MaskPattern::ALL>();
+    RegTensor<float> zero;
+    Duplicate(zero, 0.0f);
+    for (uint16_t col = 0; col < nBaseSize; col += floatRepSize) {
+        uint32_t remaining = validSize > col ? validSize - col : 0;
+        MaskReg valid = UpdateMask<float>(remaining);
+        RegTensor<float> sum;
+        Duplicate(sum, 0.0f);
+        for (uint16_t row = 0; row < m; ++row) {
+            RegTensor<float> weight;
+            RegTensor<float> value;
+            RegTensor<float> masked;
+            RegTensor<float> product;
+            RegTensor<INPUT_T> weight16;
+            if constexpr (IsSameType<INPUT_T, float>::value) {
+                LoadAlign<INPUT_T, Reg::LoadDist::DIST_BRC_B32>(weight, weightUb + row);
+            } else {
+                LoadAlign<INPUT_T, Reg::LoadDist::DIST_BRC_B16>(weight16, weightUb + row);
+                Cast<float, INPUT_T, castTraitB162B32Even>(weight, weight16, full);
+            }
+            LoadAlign(value, srcUb + row * nBaseSize + col);
+            Select(masked, value, zero, valid);
+            Max(masked, masked, zero, full);
+            Mul(product, masked, weight, full);
+            Add(sum, sum, product, full);
         }
-
-        LoadAlign(vreg_input_x1, srcUb + i * nBaseSize);
-        LoadAlign(vreg_input_x2, srcUb + i * nBaseSize + floatRepSize);
-        LoadAlign(vreg_input_x3, srcUb + i * nBaseSize + floatRepSize * 2);
-        LoadAlign(vreg_input_x4, srcUb + i * nBaseSize + floatRepSize * 3);
-        // SY ReLu计算
-        Compare<T, AscendC::CMPMODE::GT>(preg_relu, vreg_input_x1, vreg_zero, preg_all_b32);
-        Select(vreg_input_x1_new, vreg_input_x1, vreg_zero, preg_relu);
-        Compare<T, AscendC::CMPMODE::GT>(preg_relu, vreg_input_x2, vreg_zero, preg_all_b32);
-        Select(vreg_input_x2_new, vreg_input_x2, vreg_zero, preg_relu);
-        Compare<T, AscendC::CMPMODE::GT>(preg_relu, vreg_input_x3, vreg_zero, preg_all_b32);
-        Select(vreg_input_x3_new, vreg_input_x3, vreg_zero, preg_relu);
-        Compare<T, AscendC::CMPMODE::GT>(preg_relu, vreg_input_x4, vreg_zero, preg_all_b32);
-        Select(vreg_input_x4_new, vreg_input_x4, vreg_zero, preg_relu);
-        // SY 乘weights
-        Mul(vreg_input_x1, vreg_input_x1_new, vreg_weight, preg_all_b32);
-        Mul(vreg_input_x2, vreg_input_x2_new, vreg_weight, preg_all_b32);
-        Mul(vreg_input_x3, vreg_input_x3_new, vreg_weight, preg_all_b32);
-        Mul(vreg_input_x4, vreg_input_x4_new, vreg_weight, preg_all_b32);
-        // SY 累加和ReduceSum
-        Add(vreg_output_x1, vreg_output_x1, vreg_input_x1, preg_all_b32);
-        Add(vreg_output_x2, vreg_output_x2, vreg_input_x2, preg_all_b32);
-        Add(vreg_output_x3, vreg_output_x3, vreg_input_x3, preg_all_b32);
-        Add(vreg_output_x4, vreg_output_x4, vreg_input_x4, preg_all_b32);
+        __ubuf__ T* dst = dstUb + col;
+        StoreAlign(dst, sum, full);
     }
-    StoreAlign(((__ubuf__ T*&)dstUb), vreg_output_x1, preg_all_b32);
-    StoreAlign(((__ubuf__ T*&)dstUb + floatRepSize), vreg_output_x2, preg_all_b32);
-    StoreAlign(((__ubuf__ T*&)dstUb + floatRepSize * 2), vreg_output_x3, preg_all_b32);
-    StoreAlign(((__ubuf__ T*&)dstUb + floatRepSize * 3), vreg_output_x4, preg_all_b32);
 }
 
 template <typename T, typename INPUT_T>
 __aicore__ inline void ProcessVec1Vf(const LocalTensor<T>& dstTensor, const LocalTensor<T>& srcTensor,
                                      const LocalTensor<INPUT_T>& weightTensor, const uint32_t m,
-                                     const uint32_t nBaseSize)
+                                     const uint32_t nBaseSize, const uint32_t validSize)
 {
     __ubuf__ T* dstUb = (__ubuf__ T*)dstTensor.GetPhyAddr();
     __ubuf__ T* srcUb = (__ubuf__ T*)srcTensor.GetPhyAddr();
     __ubuf__ INPUT_T* weightUb = (__ubuf__ INPUT_T*)weightTensor.GetPhyAddr();
 
-    ProcessVec1BasicVF<T, INPUT_T>(dstUb, srcUb, weightUb, m, nBaseSize);
+    ProcessVec1BasicVF<T, INPUT_T>(dstUb, srcUb, weightUb, m, nBaseSize, validSize);
 }
 } // namespace AscendC
 

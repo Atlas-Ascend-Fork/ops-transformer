@@ -188,19 +188,19 @@ __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::InitGlobalBuffer(
 TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::InitBuffers(TPipe* pipe)
 {
-    pipe->InitBuffer(this->gatherTbuf, SLIGradConstInfo::BUFFER_SIZE_BYTE_9K * 2);
-    pipe->InitBuffer(this->gatherOutQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_9K * 2);
-    pipe->InitBuffer(this->reduceSumOutQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_32K);
-    pipe->InitBuffer(this->weightInQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_256);
-    pipe->InitBuffer(this->reluQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_32K);
-    pipe->InitBuffer(this->reluGradQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_16K);
-    pipe->InitBuffer(this->dwQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_256);
-    pipe->InitBuffer(this->dwOutQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_256);
+    pipe->InitBuffer(this->gatherTbuf, ARCH92_GATHER_SCRATCH_BYTES);
+    pipe->InitBuffer(this->gatherOutQue, 1, ARCH92_GATHER_NZ_BYTES);
+    pipe->InitBuffer(this->reduceSumOutQue, 1, ARCH92_SOFTMAX_BYTES);
+    pipe->InitBuffer(this->weightInQue, 1, 128 * sizeof(float));
+    pipe->InitBuffer(this->reluQue, 1, ARCH92_MAX_HEADS * VEC_P_BASESIZE * sizeof(T));
+    pipe->InitBuffer(this->reluGradQue, 1, ARCH92_MAX_HEADS * VEC_P_BASESIZE * sizeof(INPUT_T));
+    pipe->InitBuffer(this->dwQue, 1, 128 * sizeof(float));
+    pipe->InitBuffer(this->dwOutQue, 1, 128 * sizeof(float));
     pipe->InitBuffer(this->softmaxReduceSumOutQue, 1, SLIGradConstInfo::BUFFER_SIZE_BYTE_64);
     gatherKeyUb = gatherTbuf.Get<INPUT_T>();
     gatherKeyIndexUb = gatherKeyUb;
     auto dwUb = this->dwQue.template AllocTensor<T>();
-    Duplicate(dwUb, 0.0f, 64);
+    Duplicate(dwUb, 0.0f, 128);
     this->dwQue.template FreeTensor(dwUb);
 }
 
@@ -346,7 +346,10 @@ __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::GetRealS2Idx(int64_t s2GmOff
                                                                  SLIGradKRunInfo& kRunInfo)
 {
     int64_t topkGmIdx = (s2GmOffset + kRunInfo.s2Idx * runInfo.s2BaseSize);
-    realS2Idx = topKGm.GetValue(runInfo.topkGmBaseOffset + topkGmIdx);
+    realS2Idx = -1;
+    if (topkGmIdx >= 0 && topkGmIdx < runInfo.kRealSize) {
+        realS2Idx = topKGm.GetValue(runInfo.topkGmBaseOffset + topkGmIdx);
+    }
 }
 
 TEMPLATES_DEF_NO_DEFAULT
@@ -376,7 +379,10 @@ __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::MergeKv(
             mergeMte3Idx = 1 - mergeMte3Idx;
             break;
         }
-        GetRealS2Idx(s2GmOffsetArray + constInfo.sparseBlockSize, s2IdxArray1, runInfo, kRunInfo);
+        s2IdxArray1 = -1;
+        if (s2GmOffsetArray + constInfo.sparseBlockSize < s2GmLimit) {
+            GetRealS2Idx(s2GmOffsetArray + constInfo.sparseBlockSize, s2IdxArray1, runInfo, kRunInfo);
+        }
         CopyInKv(mte2Size, mte3Size, mergeMte3Idx, s2IdxArray0, s2IdxArray1, runInfo, kRunInfo, srcTensor);
         if ((mte2Size - mte3Size + 2 > UB_ROW_SIZE) || s2GmOffsetArray + 2 >= s2GmLimit) {
             CopyOutMrgeResult<IdStart, syGmEn>(mte2Size, mte3Size, s2GmStartOffset, mergeMte3Idx, runInfo, kRunInfo);
@@ -546,7 +552,7 @@ __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::ProcessVector1(
 
     LocalTensor<T> mmRes = bmm1ResBuf.template GetTensor<T>();
     ProcessVec1Vf<T, float>(reduceSumTensor[runInfo.s2CurSize], mmRes[kRunInfo.s2SingleCurSize], weightInUb,
-                            runInfo.nIndexSize, constInfo.syKBaseSize);
+                            runInfo.nIndexSize, constInfo.syKBaseSize, kRunInfo.s2RealBaseSize);
     if (kRunInfo.s2SingleIdx >= kRunInfo.s2SingleLoopTimes - 1) {
         CrossCoreSetFlag<MODE_NUM_2, PIPE_V>(SYNC_MM2_TO_V1_FLAG[kRunInfo.kTaskIdMod2]);
     }
@@ -592,6 +598,7 @@ __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::ProcessVector6(
     }
     auto reluUb = this->reluQue.template AllocTensor<T>();
     auto reluGradUb = this->reluGradQue.template AllocTensor<INPUT_T>();
+    Duplicate(reluGradUb, static_cast<INPUT_T>(0), ARCH92_MAX_HEADS * VEC_P_BASESIZE);
     LocalTensor<T> weightInUb = weightInQue.template AllocTensor<T>();
     auto reduceSumTensor = this->reduceSumOutQue.template AllocTensor<T>();
     auto dwTensor = this->dwQue.template AllocTensor<T>();
@@ -862,9 +869,9 @@ __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::DeterScatterAdd(
             }
             s2GmOffset = coreKOffset + kLoopIdx * kSplitSize + topKIdx * topKSplitSize;
             realS2Idx1 = topKGm.GetValue(runInfo.topkGmBaseOffset + s2GmOffset);
-            realS2Idx2 = topKGm.GetValue(runInfo.topkGmBaseOffset + s2GmOffset + 1);
-            if (topKProcessSize % topKSplitSize != 0) {
-                realS2Idx2 = -1;
+            realS2Idx2 = -1;
+            if (topKProcessSize == topKSplitSize) {
+                realS2Idx2 = topKGm.GetValue(runInfo.topkGmBaseOffset + s2GmOffset + 1);
             }
 
             int64_t s2IdLimit = runInfo.s2SparseLen;
@@ -939,7 +946,7 @@ __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::ReInitBuffers(TPipe* pipe)
 TEMPLATES_DEF_NO_DEFAULT
 __aicore__ inline void SligBlockVec<TEMPLATE_ARGS>::ProcessVector8()
 {
-    int64_t avgCost = CeilDiv(constInfo.totalCost, GetBlockNum() * GetTaskRation());
+    int64_t avgCost = CeilDiv(constInfo.totalCost, GetBlockNum());
     int32_t t2Start = Min(constInfo.aivIdx * avgCost, constInfo.totalCost);
     int32_t t2End = Min(t2Start + avgCost, constInfo.totalCost);
 

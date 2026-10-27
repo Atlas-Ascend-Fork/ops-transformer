@@ -33,7 +33,17 @@ enum class SLISparseMode {
 
 constexpr uint32_t L0_MAX_SIZE = 64 * 1024;
 constexpr uint32_t L1_MAX_SIZE = 512 * 1024;
-constexpr uint32_t SHARED_UB_MANAGER_SIZE = 192 * 1024;
+constexpr uint32_t ARCH92_UB_BYTES = 384 * 1024;
+constexpr uint32_t ARCH92_MAX_HEADS = 128;
+constexpr uint32_t ARCH92_SY_RESULT_BYTES = ARCH92_MAX_HEADS * VEC_SY_BASESIZE * sizeof(float);
+constexpr uint32_t SHARED_UB_MANAGER_SIZE = 2 * ARCH92_SY_RESULT_BYTES + 2 * 64 * 1024;
+constexpr uint32_t ARCH92_GATHER_SCRATCH_BYTES = 8 * 1024;
+constexpr uint32_t ARCH92_GATHER_NZ_BYTES = 2 * 8 * 128 * 2;
+constexpr uint32_t ARCH92_SOFTMAX_BYTES = 2048 * sizeof(float);
+constexpr uint32_t ARCH92_VECTOR_UB_BYTES =
+    ARCH92_GATHER_SCRATCH_BYTES + ARCH92_GATHER_NZ_BYTES + ARCH92_SOFTMAX_BYTES + (64 + 32) * 1024 + 3 * 512 + 64;
+static_assert(SHARED_UB_MANAGER_SIZE + ARCH92_VECTOR_UB_BYTES <= ARCH92_UB_BYTES,
+              "arch92 UB allocation exceeds 384 KiB");
 constexpr uint32_t L0C_MAX_SIZE = 256 * 1024;
 constexpr uint32_t CV_CORE_RATIO = 1;
 constexpr uint32_t MODE_NUM_2 = 2;

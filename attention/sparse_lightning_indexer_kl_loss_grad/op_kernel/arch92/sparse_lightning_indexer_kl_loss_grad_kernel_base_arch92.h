@@ -382,8 +382,10 @@ __aicore__ inline void SparseLightningIndexerKLLossGradKernelBase<CubeBlockType,
                 CrossCoreWaitFlag<2, PIPE_FIX>(SYNC_V7_TO_C3_FLAG[runInfo.taskIdMod2]);
                 CrossCoreSetFlag<2, PIPE_FIX>(SYNC_C3_TO_V7_FLAG[runInfo.taskIdMod2]);
             }
-            vecBlock.ProcessVector7Deter(runInfo, this->bmm3Buffer.Get());
-            CrossCoreSetFlag<2, PIPE_MTE3>(SYNC_V7_TO_C3_FLAG[runInfo.taskIdMod2]);
+            if ASCEND_IS_AIV {
+                vecBlock.ProcessVector7Deter(runInfo, this->bmm3Buffer.Get());
+                CrossCoreSetFlag<2, PIPE_MTE3>(SYNC_V7_TO_C3_FLAG[runInfo.taskIdMod2]);
+            }
             taskId++;
             continue;
         }
@@ -414,16 +416,17 @@ __aicore__ inline void SparseLightningIndexerKLLossGradKernelBase<CubeBlockType,
         taskId++;
     }
     if (processBS1ByCore < constInfo.formerCoreProcessNNum) {
+        const uint32_t extraSlot = taskId & 1;
         if ASCEND_IS_AIC {
-            CrossCoreWaitFlag<2, PIPE_FIX>(SYNC_V7_TO_C3_FLAG[runInfo.taskIdMod2]);
-            CrossCoreSetFlag<MODE_NUM_2, PIPE_FIX>(SYNC_C3_TO_V7_FLAG[taskId & 1]); // 额外空同步确保每个核处理+1轮
+            CrossCoreWaitFlag<2, PIPE_FIX>(SYNC_V7_TO_C3_FLAG[extraSlot]);
+            CrossCoreSetFlag<2, PIPE_FIX>(SYNC_C3_TO_V7_FLAG[extraSlot]);
         }
         if ASCEND_IS_AIV {
-            SLIGradRunInfo runInfoExtra;
+            SLIGradRunInfo runInfoExtra{};
             runInfoExtra.taskId = taskId;
-            runInfoExtra.taskIdMod2 = taskId & 1;
+            runInfoExtra.taskIdMod2 = extraSlot;
             vecBlock.ProcessVector7Deter(runInfoExtra, this->bmm3Buffer.Get());
-            CrossCoreSetFlag<2, PIPE_MTE3>(SYNC_V7_TO_C3_FLAG[runInfo.taskIdMod2]);
+            CrossCoreSetFlag<2, PIPE_MTE3>(SYNC_V7_TO_C3_FLAG[extraSlot]);
         }
     }
     SyncAll<false>();
@@ -599,8 +602,8 @@ __aicore__ inline void SparseLightningIndexerKLLossGradKernelBase<CubeBlockType,
     constInfo.pKBaseSize = 16384 / (constInfo.n2Size * constInfo.gSizeQueryIndex);
     constInfo.syKBaseSize = Min(1024, constInfo.syKBaseSize);
     constInfo.pKBaseSize = Min(1024, constInfo.pKBaseSize);
-    constInfo.pKBaseSize = 128;
-    constInfo.syKBaseSize = 128;
+    constInfo.pKBaseSize = VEC_P_BASESIZE;
+    constInfo.syKBaseSize = VEC_SY_BASESIZE;
     constInfo.pScaler = 1.0f / static_cast<float>(static_cast<int64_t>(constInfo.gSizeQuery));
     constInfo.totalNum = ((__gm__ uint32_t*)metadataGm)[0];
     constInfo.formerCoreProcessNNum = ((__gm__ uint32_t*)metadataGm)[1];
@@ -633,7 +636,7 @@ __aicore__ inline void SparseLightningIndexerKLLossGradKernelBase<CubeBlockType,
     sYL1Buf.Init(l1BufferManager, 128 * 256 * sizeof(INPUT_T));
     reluGradResL1Buf.Init(l1BufferManager, 64 * 256 * sizeof(INPUT_T));
     ubBufferManager.Init(pipe, SHARED_UB_MANAGER_SIZE);
-    bmm1Buffers.Init(ubBufferManager, 32 * 256 * sizeof(T));
+    bmm1Buffers.Init(ubBufferManager, ARCH92_SY_RESULT_BYTES);
     bmm3Buffer.Init(ubBufferManager, 128 * 128 * sizeof(T));
     if ASCEND_IS_AIV {
         CrossCoreSetFlag<2, PIPE_V>(SYNC_MM2_TO_V1_FLAG[0]);
@@ -709,7 +712,7 @@ __aicore__ inline void SparseLightningIndexerKLLossGradKernelBase<CubeBlockType,
 
     if ASCEND_IS_AIV {
         int64_t totalCost = constInfo.totalCost;
-        int64_t totalCoreNum = GetBlockNum() * GetTaskRation();
+        int64_t totalCoreNum = GetBlockNum() * CV_CORE_RATIO;
         int64_t coreNum_ = GetBlockNum();
         int64_t taskRation = GetTaskRation();
         int64_t avgCost = CeilDiv(totalCost, totalCoreNum);
@@ -738,9 +741,15 @@ __aicore__ inline void SparseLightningIndexerKLLossGradKernelBase<CubeBlockType,
         dweightOffset = (uint64_t)vBlockIdx * weightPreBlockFactor;
         initsoftMaxSize = vBlockIdx == softmaxOutPreBlockTotal - 1 ? softmaxOutPreBlockTail : softmaxOutPreBlockFactor;
         softMaxOffset = (uint64_t)vBlockIdx * softmaxOutPreBlockFactor;
-        InitOutput<float>(softmaxOutGm[softMaxOffset], initsoftMaxSize, 0);
-        InitOutput<float>(dWeightGm[dweightOffset], initdweightSize, 0);
-        InitOutput<OUT_T>(dqGm[dqOffset], initdqSize, 0);
+        if (vBlockIdx < softmaxOutPreBlockTotal) {
+            InitOutput<float>(softmaxOutGm[softMaxOffset], initsoftMaxSize, 0);
+        }
+        if (vBlockIdx < weightPreBlockTotal) {
+            InitOutput<float>(dWeightGm[dweightOffset], initdweightSize, 0);
+        }
+        if (vBlockIdx < qPreBlockTotal) {
+            InitOutput<OUT_T>(dqGm[dqOffset], initdqSize, 0);
+        }
     }
     SyncAll<false>();
 }

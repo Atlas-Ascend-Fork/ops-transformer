@@ -61,8 +61,11 @@ __aicore__ inline void CastDupVf(const LocalTensor<OUT_T>& dstTensor, const Loca
     __ubuf__ OUT_T* dstUb = (__ubuf__ OUT_T*)dstTensor.GetPhyAddr();
     __ubuf__ T* srcUb = (__ubuf__ T*)srcTensor.GetPhyAddr();
     uint32_t maskScaler = m;
-
-    CastDupBasicVF<T, OUT_T>(dstUb, srcUb, m, maskScaler);
+    uint32_t elementsPerRegister = 64;
+    for (uint32_t offset = 0; offset < m; offset += elementsPerRegister) {
+        uint32_t count = elementsPerRegister < maskScaler - offset ? elementsPerRegister : maskScaler - offset;
+        CastDupBasicVF<T, OUT_T>(dstUb + offset, srcUb + offset, count, count);
+    }
 }
 } // namespace AscendC
 

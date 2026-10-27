@@ -145,7 +145,7 @@ __aicore__ inline void ProcessVec6Vf(const LocalTensor<INPUT_T>& dstTensor, cons
     }
     uint32_t alignCnt = m >> 6;
     uint32_t tailSize = m - (m >> 6 << 6);
-    uint32_t s2BaseSize = (m + 63) >> 6 << 6;
+    constexpr uint32_t nzRegisterElements = 64;
     uint32_t repeatSize = 64;
     uint32_t blockStride = nIndexSize;
     __ubuf__ T* srcUb = (__ubuf__ T*)srcTensor.GetPhyAddr();
@@ -156,13 +156,14 @@ __aicore__ inline void ProcessVec6Vf(const LocalTensor<INPUT_T>& dstTensor, cons
     __ubuf__ T* dwUb = (__ubuf__ T*)dwTensor.GetPhyAddr();
 
     for (uint32_t regCnt = 0; regCnt < alignCnt; ++regCnt) {
-        __ubuf__ INPUT_T* dstUb = (__ubuf__ INPUT_T*)dstTensor.GetPhyAddr() + (regCnt * nIndexSize) * (s2BaseSize >> 1);
+        __ubuf__ INPUT_T* dstUb =
+            (__ubuf__ INPUT_T*)dstTensor.GetPhyAddr() + (regCnt * nIndexSize) * nzRegisterElements;
         ProcessVec6BasicVF<T, INPUT_T, true>(dstUb, dwUb, srcUb, softmaxReduceSumUb, weightUb, reduceSumUb, reluUb,
                                              regCnt, tailSize, nIndexSize, nBaseSize, repeatSize, blockStride);
     }
     if constexpr (!isAlign) {
         __ubuf__ INPUT_T* dstUb =
-            (__ubuf__ INPUT_T*)dstTensor.GetPhyAddr() + (alignCnt * nIndexSize) * (s2BaseSize >> 1);
+            (__ubuf__ INPUT_T*)dstTensor.GetPhyAddr() + (alignCnt * nIndexSize) * nzRegisterElements;
         ProcessVec6BasicVF<T, INPUT_T, false>(dstUb, dwUb, srcUb, softmaxReduceSumUb, weightUb, reduceSumUb, reluUb,
                                               alignCnt, tailSize, nIndexSize, nBaseSize, repeatSize, blockStride);
     }
