@@ -216,6 +216,10 @@ aclnnStatus aclnnGroupedMatmulV5(
   | workspaceSize（uint64_t *） | 输出 | 返回需要在Device侧申请的workspace大小（字节） | - | - | - | - | - |
   | executor（aclOpExecutor **） | 输出 | 返回op执行器，包含了算子计算流程 | - | - | - | - | - |
 
+  <!-- npu="950" id8 -->
+  - <term>Ascend 950PR&950DT系列产品</term>：
+    - weight格式仅支持ND格式，不支持FRACTAL_NZ格式。
+  <!-- end id8 -->
   <!-- npu="A3,910b" id11 -->
   - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
     - 上表数据类型列中的角标 <span title="Atlas A3/A2 不支持"><sup>2</sup></span> 代表该系列不支持的数据类型

@@ -509,7 +509,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2(
         <td rowspan="1">输出</td>
         <td>表示输出的量化结果，公式中的Q。</td>
         <td>-</td>
-        <td>INT8、FLOAT8_E4M3FN<sup>1</sup>、FLOAT4_E1M2<sup>1</sup>、FLOAT4_E2M1<sup>1</sup></td>
+        <td>INT8、FLOAT8_E4M3FN<sup>1</sup>、FLOAT4_E1M2<sup>1</sup>、FLOAT4_E2M1<sup>1</sup>、HIFLOAT8<sup>1</sup></td>
         <td>ND</td>
         <td>2</td>
         <td>√</td>
@@ -808,10 +808,57 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV2(
   - <term>Ascend 950PR&950DT系列产品</term>：
     - groupList第1维最大支持1024，即最多支持1024个group。
     - A8W8 Pertoken量化场景需满足以下约束条件：
-        - x、weight和output支持以下数据类型组合；xScale和outputScale的数据类型均为FLOAT：
-          - INT8：x、weight和output均为INT8，weightScale支持FLOAT、FLOAT16或BFLOAT16。
-          - HIFLOAT8：x、weight和output均为HIFLOAT8，weightScale支持FLOAT或BFLOAT16。
-          - FP8：x、weight支持FLOAT8_E4M3FN，weightScale支持FLOAT或BFLOAT16,output支持FLOAT8_E4M3FN和FLOAT_E5M2。
+        - 数据类型需要满足下表：
+          <table style="undefined;table-layout: fixed; width: 1134px"><colgroup>
+          <col style="width: 130px">
+          <col style="width: 130px">
+          <col style="width: 300px">
+          <col style="width: 300px">
+          <col style="width: 130px">
+          <col style="width: 130px">
+          <col style="width: 130px">
+          </colgroup>
+          <thead>
+            <tr>
+              <th>A8W8 Pertoken量化场景</th>
+              <th>x</th>
+              <th>weight</th>
+              <th>weightScale</th>
+              <th>xScale</th>
+              <th>output</th>
+              <th>outputScale</th>
+            </tr></thead>
+          <tbody>
+            <tr>
+              <td>INT8</td>
+              <td>INT8</td>
+              <td>INT8</td>
+              <td>FLOAT、FLOAT16、BFLOAT16</td>
+              <td>FLOAT</td>
+              <td>INT8</td>
+              <td>FLOAT</td>
+            </tr>
+            <tr>
+              <td>HIFLOAT8</td>
+              <td>HIFLOAT8</td>
+              <td>HIFLOAT8</td>
+              <td>FLOAT、BFLOAT16</td>
+              <td>FLOAT</td>
+              <td>HIFLOAT8</td>
+              <td>FLOAT</td>
+            </tr>
+            <tr>
+              <td>FP8</td>
+              <td>FLOAT8_E4M3FN</td>
+              <td>FLOAT8_E4M3FN</td>
+              <td>FLOAT、BFLOAT16</td>
+              <td>FLOAT</td>
+              <td>FLOAT8_E4M3FN、FLOAT_E5M2</td>
+              <td>FLOAT</td>
+            </tr>
+          </tbody>
+          </table>
+
         - x shape为(M, K)。weight支持非转置和转置，入口view shape统一为(E, K, N)：非转置使用连续stride，FRACTAL_NZ storage shape为(E, ceil(N/32), ceil(K/16), 16, 32)；转置使用stride (K * N, 1, K)，FRACTAL_NZ storage shape为(E, ceil(K/32), ceil(N/16), 16, 32)。
         - x仅支持非转置；weight转置输入时，算子内部`transposeWeight`属性为true，并使用ZN模板处理FRACTAL_NZ数据。
         - weightScale shape为(E, N)，xScale和outputScale shape为(M,)，output shape为(M, N/2)。

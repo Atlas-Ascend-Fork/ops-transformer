@@ -366,7 +366,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
         <td rowspan="1">输入</td>
         <td>表示左矩阵，对应公式中的X。</td>
         <td>-</td>
-        <td>FLOAT8_E4M3FN、FLOAT8_E5M2、FLOAT4_E2M1、INT8、INT4、INT32、HIFLOAT8</td>
+        <td>FLOAT8_E4M3FN<sup>1</sup>、FLOAT8_E5M2<sup>1</sup>、FLOAT4_E2M1<sup>1</sup>、INT8、INT4<sup>2</sup>、INT32<sup>2</sup>、HIFLOAT8<sup>1</sup></td>
         <td>ND</td>
         <td>2</td>
         <td>√</td>
@@ -376,7 +376,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
         <td rowspan="1">输入</td>
         <td>表示权重矩阵，对应公式中的W。</td>
         <td>-</td>
-        <td>FLOAT8_E4M3FN、FLOAT8_E5M2、FLOAT4_E2M1、INT8、INT4、INT32、HIFLOAT8</td>
+        <td>FLOAT8_E4M3FN<sup>1</sup>、FLOAT8_E5M2<sup>1</sup>、FLOAT4_E2M1<sup>1</sup>、INT8、INT4<sup>2</sup>、INT32<sup>2</sup>、HIFLOAT8<sup>1</sup></td>
         <td>ND、FRACTAL_NZ</td>
         <td>2、3、4、5</td>
         <td>√</td>
@@ -386,7 +386,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
         <td rowspan="1">输入</td>
         <td>表示右矩阵的量化因子，公式中的wScale。</td>
         <td>首轴长度需与weight的首轴维度相等，尾轴长度需要与weight还原为ND格式的尾轴相同。</td>
-        <td>FLOAT8_E8M0、UINT64、FLOAT、FLOAT16、BFLOAT16</td>
+        <td>FLOAT8_E8M0<sup>1</sup>、UINT64<sup>2</sup>、FLOAT、FLOAT16、BFLOAT16</td>
         <td>ND</td>
         <td>1、2、3、4</td>
         <td>√</td>
@@ -419,7 +419,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
         <td rowspan="1">输入</td>
         <td>表示左矩阵的量化因子，公式中的xScale。</td>
         <td>-</td>
-        <td>FLOAT8_E8M0、FLOAT</td>
+        <td>FLOAT8_E8M0<sup>1</sup>、FLOAT</td>
         <td>ND</td>
         <td>1、3</td>
         <td>√</td>
@@ -520,7 +520,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
         <td rowspan="1">输出</td>
         <td>表示输出的量化结果，公式中的Q。</td>
         <td>-</td>
-        <td>FLOAT8_E4M3FN、FLOAT8_E5M2、FLOAT4_E2M1、INT8、HIFLOAT8</td>
+        <td>FLOAT8_E4M3FN<sup>1</sup>、FLOAT8_E5M2<sup>1</sup>、FLOAT4_E2M1<sup>1</sup>、INT8、HIFLOAT8<sup>1</sup></td>
         <td>ND</td>
         <td>2</td>
         <td>√</td>
@@ -530,7 +530,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
         <td rowspan="1">输出</td>
         <td>表示输出的量化因子，公式中的QScale。</td>
         <td>-</td>
-        <td>FLOAT8_E8M0、FLOAT</td>
+        <td>FLOAT8_E8M0<sup>1</sup>、FLOAT</td>
         <td>ND</td>
         <td>1、3</td>
         <td>√</td>
@@ -560,6 +560,7 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
 
     <!-- npu="A3,910b" id10 -->
     - <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：
+      - 上表数据类型列中的角标“1”代表该系列不支持的数据类型
       - weight在A4W4下支持NZ输入转置，其他场景仅支持非转置。INT32为A8W4和A4W4场景下的适配用途，实际1个INT32会被解释为8个INT4数据，A8W8场景不支持ND数据格式。
       - 支持dequantMode参数：A8W4和A4W4场景支持取值0和1，A8W8场景仅支持取值0。
       - 不支持dequantDtype和quantMode参数。
@@ -569,7 +570,8 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
     <!-- end id10 -->
     <!-- npu="950" id11 -->
     - <term>Ascend 950PR&950DT系列产品</term>：
-      - weight支持转置，仅支持ND格式。
+      - 上表数据类型列中的角标“2”代表该系列不支持的数据类型
+      - weight支持转置，格式仅支持ND，不支持FRACTAL_NZ。
       - 支持dequantMode参数：MX量化场景支持取值2，Pertoken场景支持取值为0。
       - 支持dequantDtype参数：MX量化场景支持取值0，Pertoken场景支持取值为0、1、27。
       - 支持quantMode参数：MX量化场景支持取值2，Pertoken场景支持取值为0。

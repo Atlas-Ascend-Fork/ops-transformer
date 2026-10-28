@@ -513,7 +513,7 @@ protected:
                 if (!transposeWeight) {
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                         apiName_.c_str(), "transposeWeight", "false",
-                        "when the x-weight dtype is fp8-fp4, , the transposition of weight must be true");
+                        "when the x-weight dtype is fp8-fp4, the transposition of weight must be true");
                     return false;
                 }
             }
