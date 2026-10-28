@@ -76,7 +76,12 @@ __aicore__ inline void GmmWeightQuantTensorApiMxKernel(
         }
     }
 
-    typename BlockMmad::Params mmParams{xAddr, perTokenScale, scaleBAddr, biasAddr, yAddr};
+    typename BlockMmad::Params mmParams{};
+    mmParams.aGmAddr = xAddr;
+    mmParams.scaleAGmAddr = perTokenScale;
+    mmParams.scaleBGmAddr = scaleBAddr;
+    mmParams.biasGmAddr = biasAddr;
+    mmParams.cGmAddr = yAddr;
     typename BlockScheduler::Params schedulerParams{static_cast<uint64_t>(gmmBaseParams->mainBlockCount),
                                                     static_cast<uint64_t>(gmmBaseParams->mainBlockSize),
                                                     static_cast<uint64_t>(gmmBaseParams->firstTailBlockCount),
