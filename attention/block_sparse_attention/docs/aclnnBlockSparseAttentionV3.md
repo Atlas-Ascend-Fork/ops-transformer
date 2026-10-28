@@ -213,7 +213,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         <ul>
           <li>shape为[batch, headNum, qBlockNum, kvBlockNum]。TND时，qBlockNum = ceilDiv(max(actualSeqLengths), blockShapeX)，kvBlockNum = ceilDiv(max(actualSeqLengthsKv), blockShapeY)。BNSD/BSND时，qBlockNum = ceilDiv(Q shape中的S, blockShapeX)，kvBlockNum = ceilDiv(K shape中的S, blockShapeY)；若传入actualSeqLengths和actualSeqLengthsKv，也可按实际长度计算：qBlockNum = ceilDiv(max(actualSeqLengths), blockShapeX)，kvBlockNum = ceilDiv(max(actualSeqLengthsKv), blockShapeY)。</li>
           <li>表示按block划分后哪些block需要参与计算（为1），哪些block不参与计算（为0）。</li>
-          <li>如传入nullptr，则视为不开启块稀疏计算，即所有token之间的注意力分数都会被计算。</li>
+          <li>当前实现要求传入有效的blockSparseMaskOptional；传入nullptr会在tiling阶段被拒绝。</li>
         </ul>
       </td>
       <td>INT8</td>
