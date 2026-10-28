@@ -1756,7 +1756,17 @@
     <td>AI Core</td>
     <td>aclnnMoeTokenUnpermuteWithRoutingMap的反向传播。</td>
   </tr>
-    <tr>
+  <tr>
+    <td>mhc</td>
+    <td><a href="../../mhc/mega_mhc/README.md">mega_mhc</a></td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✓</td>
+    <td>✗</td>
+    <td>AI Core</td>
+    <td>融合rms_norm_0、MHC Post、可选rms_norm_mid、MHC Pre和rms_norm_1，计算下一层输入、新的混合系数及残差状态。</td>
+  </tr>
+  <tr>
     <td>mhc</td>
     <td><a href="../../mhc/mhc_sinkhorn/README.md">mhc_sinkhorn</a></td>
     <td>✓</td>

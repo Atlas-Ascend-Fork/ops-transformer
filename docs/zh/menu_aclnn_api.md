@@ -137,6 +137,7 @@
 - [aclnnMatmulAlltoAllV2](../../mc2/matmul_allto_all/docs/aclnnMatmulAlltoAllV2.md)
 - [aclnnMatmulReduceScatter](../../mc2/matmul_reduce_scatter/docs/aclnnMatmulReduceScatter.md)
 - [aclnnMatmulReduceScatterV2](../../mc2/matmul_reduce_scatter_v2/docs/aclnnMatmulReduceScatterV2.md)
+- [aclnnMegaMhc](../../mhc/mega_mhc/docs/aclnnMegaMhc.md)
 - [aclnnMhcPost](../../mhc/mhc_post/docs/aclnnMhcPost.md)
 - [aclnnMhcPostBackward](../../mhc/mhc_post_backward/docs/aclnnMhcPostBackward.md)
 - [aclnnMhcPre](../../mhc/mhc_pre/docs/aclnnMhcPre.md)
