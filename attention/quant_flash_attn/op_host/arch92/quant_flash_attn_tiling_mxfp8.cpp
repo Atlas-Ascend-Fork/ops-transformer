@@ -236,6 +236,7 @@ void QuantFlashAttnTilingArch92::UpdateTilingKeyInfo()
     tilingKeyInfo_.hasAttenMask = (qfaInfo_->maskMode != static_cast<int64_t>(MaskMode::NO_MASK));
     UpdateTilingKeyKvLayout();
     tilingKeyInfo_.isFd = flashDecodeFlag_;
+    tilingKeyInfo_.hasVTail = qfaInfo_->hasVTail;
 }
 
 void QuantFlashAttnTilingArch92::UpdateTilingKeyQuantMode()
@@ -248,14 +249,15 @@ void QuantFlashAttnTilingArch92::GenTilingKey()
 {
     UpdateTilingKeyInfo();
     tilingKey_ = GET_TPL_TILING_KEY(tilingKeyInfo_.inputLayout, tilingKeyInfo_.config, tilingKeyInfo_.quantMode,
-                                    tilingKeyInfo_.hasAttenMask, tilingKeyInfo_.kvLayoutType, tilingKeyInfo_.isFd);
+                                    tilingKeyInfo_.hasAttenMask, tilingKeyInfo_.kvLayoutType, tilingKeyInfo_.isFd,
+                                    tilingKeyInfo_.hasVTail);
 
     OP_LOGI(qfaInfo_->opName, "The tilingkey is %llu.", tilingKey_);
     OP_LOGI(qfaInfo_->opName,
             "The tilingkey param is inOutLayoutType: %llu, config: %llu, quantMode: %llu, "
-            "hasAttenMask: %u, kvLayoutType: %llu, isFd: %u.",
+            "hasAttenMask: %u, kvLayoutType: %llu, isFd: %u, hasVTail: %u.",
             tilingKeyInfo_.inputLayout, tilingKeyInfo_.config, tilingKeyInfo_.quantMode, tilingKeyInfo_.hasAttenMask,
-            tilingKeyInfo_.kvLayoutType, tilingKeyInfo_.isFd);
+            tilingKeyInfo_.kvLayoutType, tilingKeyInfo_.isFd, tilingKeyInfo_.hasVTail);
 }
 
 void QuantFlashAttnTilingArch92::CalcNumBlocks(uint32_t aicNum)
@@ -360,6 +362,18 @@ void QuantFlashAttnTilingArch92::SetQFATilingData()
         maxBlockNumPerBatch = qfaInfo_->maxBlockNumPerBatch;
     }
     tilingData_.baseTiling.quantFlashAttnPageAttentionParams.maxBlockNumPerBatch = maxBlockNumPerBatch;
+    tilingData_.baseTiling.quantFlashAttnVTailParams.hasVTail = qfaInfo_->hasVTail ? 1 : 0;
+    tilingData_.baseTiling.quantFlashAttnVTailParams.seqUsedKvTailSize =
+        qfaInfo_->hasVTail ? static_cast<uint32_t>(qfaInfo_->bSize) : 0;
+    tilingData_.baseTiling.quantFlashAttnVTailParams.tailMaxBlockNum =
+        qfaInfo_->hasVTail ? static_cast<uint32_t>(qfaInfo_->tailMaxBlockNum) : 0;
+    auto& vTailStrides = tilingData_.baseTiling.quantFlashAttnVTailParams.vTailStrides;
+    vTailStrides.bnStride = 0;
+    vTailStrides.n2Stride = 0;
+    if (qfaInfo_->hasVTail && qfaInfo_->vTailStrides != nullptr) {
+        vTailStrides.bnStride = qfaInfo_->vTailStrides->GetStride(0);
+        vTailStrides.n2Stride = qfaInfo_->vTailStrides->GetStride(1);
+    }
     if (qfaInfo_->hasStride) {
         tilingData_.baseTiling.quantFlashAttnPageAttentionParams.maxBlockNumPerBatch = maxBlockNumPerBatch;
         tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.bnStride = qfaInfo_->keyStrides->GetStride(0);

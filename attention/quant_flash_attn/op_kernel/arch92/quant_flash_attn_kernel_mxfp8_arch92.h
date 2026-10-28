@@ -70,6 +70,9 @@ public:
     using T = typename CubeBlockType::MM_T;
     using OUT_T = typename VecFaBlockType::OUT_T;
     using ConstInfoX = typename CubeBlockType::ConstInfoX;
+    static constexpr bool HAS_V_TAIL = CubeBlockType::HAS_V_TAIL;
+    using RunInfoX = typename CubeBlockType::RunInfoX;
+    using PLayout = QfaPBufferLayout<mBaseSize, s2BaseSize, HAS_V_TAIL>;
 
     // CV buffers
     BufferManager<BufferType::GM> gmBufferManager_;
@@ -78,12 +81,17 @@ public:
     BuffersPolicy3buff<BufferType::GM, SyncType::CROSS_CORE_SYNC_FORWARD> bmm2ResGmBuffers_;
     BuffersPolicyDB<BufferType::UB, SyncType::CROSS_CORE_SYNC_BOTH> bmm1Buffers_;
     BuffersPolicySingleBuffer<BufferType::UB, SyncType::CROSS_CORE_SYNC_BOTH> bmm2Buffers_;
-    BuffersPolicy3buff<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD> l1PBuffers_;
+    std::conditional_t<HAS_V_TAIL, BuffersPolicy4buff<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD>,
+                       BuffersPolicy3buff<BufferType::L1, SyncType::CROSS_CORE_SYNC_FORWARD>>
+        l1PBuffers_;
 
     GlobalTensor<int32_t> cuSeqLensGmQ_;
     GlobalTensor<int32_t> cuSeqLensGmKv_;
     GlobalTensor<int32_t> seqUsedGmQ_;
     GlobalTensor<int32_t> seqUsedGmKv_;
+    std::conditional_t<HAS_V_TAIL, GlobalTensor<int32_t>, int8_t> seqUsedVTailGm_;
+    uint32_t actTailLen_ = 0;
+    uint32_t tailSplitStep_ = 0;
     GlobalTensor<uint32_t> faMetaDataGm_;
     GlobalTensor<uint32_t> fdMetaDataGm_;
     GlobalTensor<float> softmaxLseGm_;
@@ -147,12 +155,16 @@ public:
                                 __gm__ uint8_t* dequantScaleQuery, __gm__ uint8_t* dequantScaleKey,
                                 __gm__ uint8_t* dequantScaleValue, __gm__ uint8_t* pScale, __gm__ uint8_t* softmaxLse,
                                 __gm__ uint8_t* attnOut, __gm__ uint8_t* workspace, __gm__ uint8_t* metadata,
-                                __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedKv,
+                                __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedKv, __gm__ uint8_t* vTail,
+                                __gm__ uint8_t* blockTableTail, __gm__ uint8_t* sequsedVTail,
                                 const QuantFlashAttnTilingData& tiling, TPipe* tPipe)
     {
         this->pipe_ = tPipe;
         InitConstInfo(tiling);
         constInfo_.needInitOutput = ((__gm__ uint32_t*)metadata)[QFA_HEAD_NEED_INIT_OUTPUT_INDEX] != 0;
+        if constexpr (HAS_V_TAIL) {
+            seqUsedVTailGm_.SetGlobalBuffer((__gm__ int32_t*)sequsedVTail, constInfo_.seqUsedKvTailSize);
+        }
         keyPtr_ = key;
         valuePtr_ = value;
         if constexpr (LAYOUT_Q == LayOutTypeEnum::LAYOUT_TND) {
@@ -200,6 +212,11 @@ public:
                                          dequantScaleKey, dequantScaleValue, qSeqUsedParser_, kvSeqUsedParser_);
             }
         }
+        if constexpr (HAS_V_TAIL) {
+            if ASCEND_IS_AIC {
+                cubeBlock_.InitVTailBuffer(vTail, blockTableTail);
+            }
+        }
         if constexpr (FLASH_DECODE) {
             if ASCEND_IS_AIV {
                 fdMetaDataGm_.SetGlobalBuffer(
@@ -228,7 +245,7 @@ public:
 
         uint32_t mm1ResultSize = mBaseSize / CV_RATIO * s2BaseSize * mm1OutDtype / 2;
         constexpr uint32_t mm2ResultSize = mBaseSize / CV_RATIO * dVBaseSize * sizeof(T);
-        constexpr uint32_t mm2LeftSize = mBaseSize * s2BaseSize * sizeof(INPUT_T) + mBaseSize * s2BaseSize / 32;
+        constexpr uint32_t mm2LeftSize = PLayout::SLOT_BYTES;
         l1BufferManager_.Init(pipe_, 524288); // 512 * 1024
         // 保存p结果的L1内存必须放在第一个L1 policy上，保证和vec申请的地址相同
         // TODO，共享buffer初始化放到block层
@@ -253,6 +270,13 @@ public:
         const auto& qfaPageAttentionParams = tiling.baseTiling.quantFlashAttnPageAttentionParams;
         const auto& qfaWorkspaceParams = tiling.baseTiling.quantFlashAttnWorkspaceParams;
 
+        if constexpr (HAS_V_TAIL) {
+            const auto& tail = tiling.baseTiling.quantFlashAttnVTailParams;
+            constInfo_.seqUsedKvTailSize = tail.seqUsedKvTailSize;
+            constInfo_.tailMaxBlockNum = tail.tailMaxBlockNum;
+            constInfo_.vTailStrides.bnStride = tail.vTailStrides.bnStride;
+            constInfo_.vTailStrides.n2Stride = tail.vTailStrides.n2Stride;
+        }
         constInfo_.bSize = qfaBaseParams.bSize;
         constInfo_.t1Size = qfaBaseParams.t1Size;
         constInfo_.t2Size = qfaBaseParams.t2Size;
@@ -369,6 +393,7 @@ public:
             return;
         }
 
+        tailSplitStep_ = 0;
         GetFASectionInfo(sectionIdx);
         RunInfoX taskRunInfo[PRELOAD_TASK_CACHE_SIZE] = {};
 
@@ -441,6 +466,14 @@ public:
                 actSeqLensQ_ = qSeqUsedParser_.GetActualSeqLength(bIdx);
             }
         }
+        if constexpr (HAS_V_TAIL) {
+            // 有尾窗特化的全部批次均保留三件套输入，包括尾长为 0 的批次。
+            int32_t suppliedTail = seqUsedVTailGm_.GetValue(bIdx);
+            uint32_t expectedTail = actSeqLensKv_ % QFA_VTAIL_SIZE;
+            actTailLen_ = (suppliedTail >= 0 && static_cast<uint32_t>(suppliedTail) == expectedTail) ?
+                              static_cast<uint32_t>(suppliedTail) :
+                              expectedTail;
+        }
         uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
         uint64_t gS1Size = actSeqLensQ_ * constInfo_.realGSize;
         uint64_t gS1LoopTimes = (gS1Size + mBaseSize - 1) / mBaseSize;
@@ -472,11 +505,28 @@ public:
             return TASK_DEAL_MODE::SKIP_REMAINING_S2;
         }
 
-        if (s2Cur == curS2Start_) {
+        if (s2Cur == curS2Start_ && tailSplitStep_ == 0) {
             mloop_++;
         }
 
         return TASK_DEAL_MODE::CREATE_TASK;
+    }
+
+    __aicore__ inline bool NeedSplitTailTask(uint32_t s2Cur)
+    {
+        if constexpr (!HAS_V_TAIL) {
+            return false;
+        } else {
+            if (this->actTailLen_ == 0) {
+                return false;
+            }
+            uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
+            if (s2Cur + 1 != s2LoopTimes) {
+                return false; // 非序列最后一块
+            }
+            uint32_t lastBlock = static_cast<uint32_t>(actSeqLensKv_) - s2Cur * s2BaseSize;
+            return lastBlock > this->actTailLen_; // 主段长度大于 0 才拆分，否则直接处理纯尾任务。
+        }
     }
 
     __aicore__ inline void GetPreNextTokenLeftUp(int64_t actSeqLensQ, int64_t actSeqLensKv, int64_t& preTokenLeftUp,
@@ -667,6 +717,19 @@ public:
         if (((s2Cur + 1) * s2BaseSize) > info.actS2Size) {
             info.actSingleLoopS2Size = info.actS2Size - s2Cur * s2BaseSize;
         }
+        bool splitCurBlock = false;
+        if constexpr (HAS_V_TAIL) {
+            info.kvTailLen = actTailLen_;
+            splitCurBlock = NeedSplitTailTask(s2Cur);
+            if (tailSplitStep_ == 1) {
+                info.s2Idx += info.actSingleLoopS2Size - actTailLen_;
+                info.actSingleLoopS2Size = actTailLen_;
+            } else if (splitCurBlock) {
+                info.actSingleLoopS2Size -= actTailLen_;
+            }
+            info.isVtailTask = actTailLen_ > 0 && info.actSingleLoopS2Size == actTailLen_ &&
+                               info.s2Idx + info.actSingleLoopS2Size == info.actS2Size;
+        }
         info.actSingleLoopS2SizeAlign = AttentionCommon::Align(
             (uint32_t)info.actSingleLoopS2Size, (uint32_t)(AttentionCommon::BYTE_BLOCK / sizeof(INPUT_T)));
 
@@ -682,6 +745,12 @@ public:
         info.isS2SplitCore = false;
         info.faTmpOutWsPos = coreFirstTmpOutWsPos_;
         info.isLastS2Loop = (s2Cur + 1 == curS2End_);
+        if constexpr (HAS_V_TAIL) {
+            info.isFirstS2Loop = info.isFirstS2Loop && tailSplitStep_ == 0;
+            info.isLastS2Loop = info.isLastS2Loop && !(splitCurBlock && tailSplitStep_ == 0);
+            // DN 实现读取此标记控制主段 Q 槽释放；尾任务按 ND 形式计算，非首任务复用已有 Q 槽。
+            info.isLastDnTask = (s2Cur + 1 == curS2End_) && tailSplitStep_ == 0;
+        }
 
         if constexpr (USE_DN) {
             info.actMSizeAlign32 = (info.actMSize + 31) >> 5 << 5;
@@ -710,6 +779,15 @@ public:
     __aicore__ inline void UpdateAxisInfo(TASK_DEAL_MODE taskDealMode, uint32_t& bN2Cur, uint32_t& gS1Cur,
                                           uint32_t& s2Cur)
     {
+        if constexpr (HAS_V_TAIL) {
+            if (taskDealMode == TASK_DEAL_MODE::CREATE_TASK) {
+                if (tailSplitStep_ == 0 && NeedSplitTailTask(s2Cur)) {
+                    tailSplitStep_ = 1;
+                    return;
+                }
+                tailSplitStep_ = 0;
+            }
+        }
         uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
         uint64_t gS1Size = actSeqLensQ_ * constInfo_.realGSize;
         uint64_t gS1LoopTimes = (gS1Size + mBaseSize - 1) / mBaseSize;

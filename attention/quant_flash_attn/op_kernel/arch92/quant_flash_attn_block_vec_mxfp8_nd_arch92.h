@@ -16,6 +16,7 @@
 #define QUANT_FLASH_ATTN_BLOCK_VEC_MXFP8_ND_ARCH92_H_
 
 #include "../../../common/op_kernel/vector_common.h"
+#include "../../../common/op_kernel/arch92/vf/vf_softmax_mxfp8_vtail_arch92.h"
 #include "../../../common/op_kernel/arch35/flash_attention_score_common_regbase_arch35.h"
 #include "../../../common/op_kernel/arch92/vf/vf_mul_sel_softmaxflashv2_cast_nz_mxfp8_arch92.h"
 #include "../../../common/op_kernel/arch92/vf/vf_mul_sel_softmaxflashv2_cast_nz_dn_mxfp8_arch92.h"
@@ -44,7 +45,7 @@ template <typename INPUT_T, typename T, typename OUTPUT_T, LayOutTypeEnum layout
           S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
           DTemplateType dTemplateType = DTemplateType::Aligned128,
           DTemplateType dVTemplateType = DTemplateType::Aligned128, bool hasAtten = false, uint8_t KvLayoutType = 0,
-          bool isFd = false, bool useDn = false, bool isDAligned = true>
+          bool isFd = false, bool useDn = false, bool isDAligned = true, bool hasVTail = false>
 class QuantFlashAttnBlockVecMxfp8Nd {
 public:
     /* =================编译期常量的基本块信息================= */
@@ -93,7 +94,9 @@ public:
     using flashdecodeGmType = typename std::conditional<FLASH_DECODE, GlobalTensor<float>, int8_t>::type;
     using quantGmType = typename std::conditional<(isFp8), GlobalTensor<float>, int8_t>::type;
 
-    using ConstInfoX = ConstInfo_t;
+    static constexpr bool HAS_V_TAIL = hasVTail;
+    using ConstInfoX = std::conditional_t<HAS_V_TAIL, ConstInfoVTail_t, ConstInfo_t>;
+    using RunInfoX = std::conditional_t<HAS_V_TAIL, RunInfoVTailX, ::RunInfoX>;
 
     using MM1_OUT_T = T;
     using MM2_OUT_T = T;
@@ -176,7 +179,7 @@ public:
     static constexpr uint16_t CROSS_CORE_SYNC_C1_V1[2] = {6, 8};
     static constexpr uint16_t CROSS_CORE_SYNC_V2_C2 = 5;
     static constexpr uint16_t CROSS_CORE_SYNC_C2_V2 = 4;
-    static constexpr uint16_t CROSS_CORE_SYNC_P_C2[3] = {1, 2, 3};
+    static constexpr uint16_t CROSS_CORE_SYNC_P_C2[4] = {1, 2, 3, 10};
 
     const ConstInfoX& constInfo_;
     T negativeFloatScalar_;
@@ -232,6 +235,12 @@ public:
     {
         if (unlikely(runInfo.actVecMSize == 0)) {
             return;
+        }
+        if constexpr (HAS_V_TAIL) {
+            if (runInfo.isVtailTask) {
+                ProcessVec1Tail(pTensor.template ReinterpretCast<bfloat16_t>(), mm1Res, runInfo);
+                return;
+            }
         }
         ProcessVec1Nd(pTensor, pScaleTensor, mm1Res, runInfo, subLoop);
     }
@@ -292,6 +301,90 @@ public:
     }
 
     // =================================Private Functions=================================
+
+    __aicore__ inline void CopyTailMask(LocalTensor<uint8_t>& maskUb, RunInfoX& runInfo)
+    {
+        MaskInfo info;
+        info.gs1StartIdx = runInfo.gS1Idx;
+        info.gs1dealNum = runInfo.actMSize;
+        info.s1Size = runInfo.actS1Size;
+        info.gSize = constInfo_.realGSize;
+        info.s2StartIdx = runInfo.s2Idx;
+        info.s2dealNum = runInfo.kvTailLen;
+        info.s2Size = runInfo.actS2Size;
+        info.nBaseSize = s2SplitSize;
+        info.preToken = constInfo_.preTokens;
+        info.nextToken = constInfo_.nextTokens;
+        info.sparseMode = static_cast<SparseMode>(constInfo_.sparseMode);
+        info.batchIdx = constInfo_.attenMaskBatch == 1 ? 0 : runInfo.bIdx;
+        info.attenMaskBatchStride = constInfo_.attenMaskS1Size * constInfo_.attenMaskS2Size;
+        info.attenMaskS1Stride = constInfo_.attenMaskS2Size;
+        info.maskValue = negativeIntScalar_;
+        info.maskFormat = MASK_LAYOUT;
+        info.attenMaskType = MASK_BOOL;
+        // 逐个逻辑查询行显式搬运；尤其是行跨度为 64 字节的 DN 路径，
+        // 不能使用原来按 128/256 字节行宽复制的 MaskUbCopyS1G 向量函数。
+        for (uint32_t row = 0; row < runInfo.actMSize; ++row) {
+            uint32_t s1 = (runInfo.gS1Idx + row) / constInfo_.realGSize;
+            uint64_t offset = ComputeAttenMaskOffset(info, s1, false);
+            DataCopyExtParams copy;
+            copy.blockCount = 1;
+            copy.blockLen = runInfo.kvTailLen;
+            copy.srcStride = 0;
+            copy.dstStride = 0;
+            // 掩码为 uint8_t：32U 按 32 字节补齐；四项为启用补值、左补 0 个、右补齐数量、补值 1（屏蔽）。
+            DataCopyPadExtParams<uint8_t> pad{
+                true, 0, static_cast<uint8_t>(AttentionCommon::Align(runInfo.kvTailLen, 32U) - runInfo.kvTailLen), 1U};
+            // ND 行跨度仍为 s2SplitSize（当前为 256 字节），只搬入 kvTailLen 个有效掩码字节。
+            DataCopyPad(maskUb[row * s2SplitSize], attenMaskGmInt_[offset], copy, pad);
+        }
+        event_t ready = static_cast<event_t>(EVENT_ID0);
+        SetFlag<HardEvent::MTE2_V>(ready);
+        WaitFlag<HardEvent::MTE2_V>(ready);
+    }
+
+    __aicore__ inline void ProcessVec1Tail(LocalTensor<bfloat16_t> tailPL1, LocalTensor<T> scores, RunInfoX runInfo)
+    {
+        // 2 为 BF16 每元素字节数；每个 16 列片在 UB 预留 M+1 行，64 为尾 P 对齐列数。
+        // 上限沿用既有 stage1OutSize 字节容量，M+1 中的额外一行用于此 UB 布局。
+        static_assert(2U * (mBaseSize + 1U) * QFA_VTAIL_SIZE <= stage1OutSize,
+                      "BF16 tail P must fit the original stage1 UB slot");
+        WaitFlag<HardEvent::MTE3_V>(MTE3_V_EVENT2);
+        LocalTensor<bfloat16_t> tailPUb = stage1OutQue.template ReinterpretCast<bfloat16_t>();
+        LocalTensor<uint8_t> maskUb = attenMaskUB;
+        if constexpr (HAS_MASK) {
+            WaitFlag<HardEvent::V_MTE2>(V_MTE2_EVENT0);
+            CopyTailMask(maskUb, runInfo);
+        }
+        // PRELOAD_N+1=3 是状态环深度；64U 是每槽 FP32 状态的元素跨度，不是尾长。
+        // sum/max 按输出块 mloop 复用，exp 按 S2 任务 loop 轮转，与四个 P 槽独立。
+        LocalTensor<float> sum = softmaxSumUB[runInfo.mloop % (PRELOAD_N + 1U) * 64U];
+        LocalTensor<float> max = softmaxMaxUB[runInfo.mloop % (PRELOAD_N + 1U) * 64U];
+        LocalTensor<float> exp = softmaxExpUB[runInfo.loop % (PRELOAD_N + 1U) * 64U];
+        if (runInfo.isFirstS2Loop) {
+            SoftmaxMxfp8VTail<mBaseSize, s2SplitSize, false, HAS_MASK>(
+                tailPUb, sum, max, scores, exp, maskUb, runInfo.actMSize, runInfo.kvTailLen, constInfo_.scaleValue,
+                negativeFloatScalar_, *reinterpret_cast<float*>(&minValue_), pScaleValue_);
+        } else {
+            SoftmaxMxfp8VTail<mBaseSize, s2SplitSize, true, HAS_MASK>(
+                tailPUb, sum, max, scores, exp, maskUb, runInfo.actMSize, runInfo.kvTailLen, constInfo_.scaleValue,
+                negativeFloatScalar_, *reinterpret_cast<float*>(&minValue_), pScaleValue_);
+        }
+        CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_V>(CROSS_CORE_SYNC_V1_C1[0]);
+        if constexpr (HAS_MASK) {
+            SetFlag<HardEvent::V_MTE2>(V_MTE2_EVENT0);
+        }
+        SetFlag<HardEvent::V_MTE3>(V_MTE3_EVENT2);
+        WaitFlag<HardEvent::V_MTE3>(V_MTE3_EVENT2);
+        // rows 已按 16 行对齐；64 列分 4 组，每组 16 个 BF16，即一个 32 字节块。
+        // 源/目的组跨度为 M+1/M，后两项减去 rows 后表示组间跳过的 32 字节块数。
+        uint16_t rows = runInfo.actMSizeAlign16;
+        DataCopy(tailPL1, tailPUb, {4U, rows, (uint16_t)(mBaseSize + 1U - rows), (uint16_t)(mBaseSize - rows)});
+        SetFlag<HardEvent::MTE3_V>(MTE3_V_EVENT2);
+        if (runInfo.isLastS2Loop) {
+            SoftmaxDataCopyOut(runInfo, sum, max);
+        }
+    }
 
     __aicore__ inline void SoftmaxDataCopyOut(RunInfoX runInfo, LocalTensor<float>& sumUb, LocalTensor<float>& maxUb)
     {
@@ -973,6 +1066,22 @@ public:
         } else {
             Duplicate(attenMaskUb, static_cast<uint8_t>(0U), maskInfo.gs1dealNum * s2SplitSize);
         }
+
+        if constexpr (HAS_V_TAIL) {
+            if (unlikely(runInfo.kvTailLen > 0U && s2RealSize < s2SplitSize)) {
+                // G 展开后的物理行宽仍为 s2SplitSize，拆出的尾窗不能再次进入主段 softmax。
+                // 主段长度为 64 的倍数，因此填充起点和长度均满足 32 字节对齐。
+                PipeBarrier<PIPE_V>();
+                LocalTensor<uint32_t> maskWords = attenMaskUb.template ReinterpretCast<uint32_t>();
+                uint64_t paddingWords = (s2SplitSize - s2RealSize) / sizeof(uint32_t);
+                // 0x01010101 使同一个 uint32_t 的四个掩码字节全为 1；长度和起点均换算为 uint32_t 元素数。
+                // 块步长 1 表示连续写，末项为每个查询行的 32 字节块数，按行屏蔽拆出的尾窗位置。
+                Duplicate(maskWords[s2RealSize / sizeof(uint32_t)], 0x01010101U, paddingWords,
+                          static_cast<uint8_t>(maskInfo.gs1dealNum), 1U,
+                          static_cast<uint8_t>(s2SplitSize / AttentionCommon::BYTE_BLOCK));
+                PipeBarrier<PIPE_V>();
+            }
+        }
     }
 };
 
@@ -981,13 +1090,15 @@ template <typename INPUT_T, typename T, typename OUTPUT_T, LayOutTypeEnum layout
           S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
           DTemplateType dTemplateType = DTemplateType::Aligned128,
           DTemplateType dVTemplateType = DTemplateType::Aligned128, bool hasAtten = false, uint8_t KvLayoutType = 0,
-          bool isFd = false, bool useDn = false>
+          bool isFd = false, bool useDn = false, bool hasVTail = false>
 class QuantFlashAttnBlockVecMxfp8NdDummy {
 public:
     static constexpr bool HAS_MASK = hasAtten;
     static constexpr bool FLASH_DECODE = isFd;
     using OUT_T = OUTPUT_T;
-    using ConstInfoX = ConstInfo_t;
+    static constexpr bool HAS_V_TAIL = hasVTail;
+    using ConstInfoX = std::conditional_t<HAS_V_TAIL, ConstInfoVTail_t, ConstInfo_t>;
+    using RunInfoX = std::conditional_t<HAS_V_TAIL, RunInfoVTailX, ::RunInfoX>;
     __aicore__ inline QuantFlashAttnBlockVecMxfp8NdDummy(ConstInfoX& constInfo){};
 };
 } // namespace BaseApi

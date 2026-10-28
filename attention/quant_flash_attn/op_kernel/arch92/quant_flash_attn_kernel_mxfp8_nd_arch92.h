@@ -65,18 +65,22 @@ public:
     static constexpr uint16_t CROSS_CORE_SYNC_C1_V1[2] = {6, 8};
     static constexpr uint16_t CROSS_CORE_SYNC_V2_C2 = 5;
     static constexpr uint16_t CROSS_CORE_SYNC_C2_V2 = 4;
-    static constexpr uint16_t CROSS_CORE_SYNC_P_C2[3] = {1, 2, 3};
+    static constexpr uint16_t CROSS_CORE_SYNC_P_C2[4] = {1, 2, 3, 10};
 
     using INPUT_T = typename CubeBlockType::Q_T;
     using T = typename CubeBlockType::MM_T;
     using OUT_T = typename VecFaBlockType::OUT_T;
     using ConstInfoX = typename CubeBlockType::ConstInfoX;
+    static constexpr bool HAS_V_TAIL = CubeBlockType::HAS_V_TAIL;
+    using RunInfoX = typename CubeBlockType::RunInfoX;
+    using PLayout = QfaPBufferLayout<mBaseSize, s2BaseSize, HAS_V_TAIL>;
+    using L1Layout = QfaNdL1Layout<mBaseSize, s2BaseSize, dBaseSize, dVBaseSize, HAS_V_TAIL>;
 
     using SCALE_T = fp8_e8m0_t;
 
     static constexpr uint32_t L1_P_SIZE = mBaseSize * s2BaseSize;
     static constexpr uint32_t L1_P_SCALE_SIZE = mBaseSize * s2BaseSize / 32;
-    static constexpr uint32_t L1_P_BUFCNT = 3;
+    static constexpr uint32_t L1_P_BUFCNT = PLayout::SLOT_COUNT;
     static constexpr uint32_t UB_MM1_SIZE = mBaseSize / CV_RATIO * s2SplitSize;
     static constexpr uint32_t UB_MM2_SIZE = mBaseSize / CV_RATIO * dVBaseSize;
     static constexpr uint32_t UB_MM1_BUFCNT = 2;
@@ -90,6 +94,9 @@ public:
     GlobalTensor<int32_t> cuSeqLensGmKv_;
     GlobalTensor<int32_t> seqUsedGmQ_;
     GlobalTensor<int32_t> seqUsedGmKv_;
+    std::conditional_t<HAS_V_TAIL, GlobalTensor<int32_t>, int8_t> seqUsedVTailGm_;
+    uint32_t actTailLen_ = 0;
+    uint32_t tailSplitStep_ = 0;
     GlobalTensor<uint32_t> faMetaDataGm_;
     GlobalTensor<uint32_t> fdMetaDataGm_;
     GlobalTensor<float> softmaxLseGm_;
@@ -152,11 +159,15 @@ public:
                                 __gm__ uint8_t* dequantScaleQuery, __gm__ uint8_t* dequantScaleKey,
                                 __gm__ uint8_t* dequantScaleValue, __gm__ uint8_t* pScale, __gm__ uint8_t* softmaxLse,
                                 __gm__ uint8_t* attnOut, __gm__ uint8_t* workspace, __gm__ uint8_t* metadata,
-                                __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedKv,
+                                __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedKv, __gm__ uint8_t* vTail,
+                                __gm__ uint8_t* blockTableTail, __gm__ uint8_t* sequsedVTail,
                                 const QuantFlashAttnTilingData& tiling)
     {
         InitConstInfo(tiling);
         constInfo_.needInitOutput = ((__gm__ uint32_t*)metadata)[QFA_HEAD_NEED_INIT_OUTPUT_INDEX] != 0;
+        if constexpr (HAS_V_TAIL) {
+            seqUsedVTailGm_.SetGlobalBuffer((__gm__ int32_t*)sequsedVTail, constInfo_.seqUsedKvTailSize);
+        }
         keyPtr_ = key;
         valuePtr_ = value;
         if constexpr (LAYOUT_Q == LayOutTypeEnum::LAYOUT_TND) {
@@ -204,6 +215,11 @@ public:
             }
         }
 
+        if constexpr (HAS_V_TAIL) {
+            if ASCEND_IS_AIC {
+                cubeBlock_.InitVTailBuffer(vTail, blockTableTail);
+            }
+        }
         if constexpr (FLASH_DECODE) {
             if ASCEND_IS_AIV {
                 fdMetaDataGm_.SetGlobalBuffer(
@@ -228,13 +244,11 @@ public:
 
     __aicore__ inline void InitMMResBuf(__gm__ uint8_t*& workspace)
     {
-        // L1
-        uint32_t addrL1Start = 0;
-        pL1Tensor = LocalTensor<INPUT_T>(TPosition::A1, addrL1Start, L1_P_SIZE * L1_P_BUFCNT); // 64 * 512 *3 -> 96K
-
-        addrL1Start += L1_P_SIZE * L1_P_BUFCNT * sizeof(fp8_e4m3fn_t);
+        // 有尾窗时，每个槽依次存放主段 P、主段量化系数和 BF16 尾 P。
+        // 无尾窗时，保留原有主段 P 数据与量化系数分别连续存放的布局。
+        pL1Tensor = LocalTensor<INPUT_T>(TPosition::A1, 0, L1Layout::P_BYTES);
         pScaleL1Tensor =
-            LocalTensor<SCALE_T>(TPosition::A1, addrL1Start, L1_P_SCALE_SIZE * L1_P_BUFCNT); // 64 * 512 / 32 * 3 -> 3k
+            LocalTensor<SCALE_T>(TPosition::A1, L1Layout::P_SCALE_BASE, L1Layout::P_BYTES - L1Layout::P_SCALE_BASE);
 
         // UB
         uint32_t addrUBStart = 0;
@@ -258,6 +272,13 @@ public:
         const auto& qfaPageAttentionParams = tiling.baseTiling.quantFlashAttnPageAttentionParams;
         const auto& qfaWorkspaceParams = tiling.baseTiling.quantFlashAttnWorkspaceParams;
 
+        if constexpr (HAS_V_TAIL) {
+            const auto& tail = tiling.baseTiling.quantFlashAttnVTailParams;
+            constInfo_.seqUsedKvTailSize = tail.seqUsedKvTailSize;
+            constInfo_.tailMaxBlockNum = tail.tailMaxBlockNum;
+            constInfo_.vTailStrides.bnStride = tail.vTailStrides.bnStride;
+            constInfo_.vTailStrides.n2Stride = tail.vTailStrides.n2Stride;
+        }
         constInfo_.bSize = qfaBaseParams.bSize;
         constInfo_.t1Size = qfaBaseParams.t1Size;
         constInfo_.t2Size = qfaBaseParams.t2Size;
@@ -368,6 +389,7 @@ public:
         if (constInfo_.aicIdx >= constInfo_.coreNum) {
             return;
         }
+        tailSplitStep_ = 0;
         GetFASectionInfo(sectionIdx);
         RunInfoX taskRunInfo[PRELOAD_TASK_CACHE_SIZE] = {};
 
@@ -440,6 +462,14 @@ public:
                 actSeqLensQ_ = qSeqUsedParser_.GetActualSeqLength(bIdx);
             }
         }
+        if constexpr (HAS_V_TAIL) {
+            // 有尾窗特化的全部批次均保留三件套输入，包括尾长为 0 的批次。
+            int32_t suppliedTail = seqUsedVTailGm_.GetValue(bIdx);
+            uint32_t expectedTail = actSeqLensKv_ % QFA_VTAIL_SIZE;
+            actTailLen_ = (suppliedTail >= 0 && static_cast<uint32_t>(suppliedTail) == expectedTail) ?
+                              static_cast<uint32_t>(suppliedTail) :
+                              expectedTail;
+        }
         uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
         uint64_t gS1Size = actSeqLensQ_ * constInfo_.realGSize;
         uint64_t gS1LoopTimes = (gS1Size + mBaseSize - 1) / mBaseSize;
@@ -471,11 +501,28 @@ public:
             return TASK_DEAL_MODE::SKIP_REMAINING_S2;
         }
 
-        if (s2Cur == curS2Start_) {
+        if (s2Cur == curS2Start_ && tailSplitStep_ == 0) {
             mloop_++;
         }
 
         return TASK_DEAL_MODE::CREATE_TASK;
+    }
+
+    __aicore__ inline bool NeedSplitTailTask(uint32_t s2Cur)
+    {
+        if constexpr (!HAS_V_TAIL) {
+            return false;
+        } else {
+            if (this->actTailLen_ == 0) {
+                return false;
+            }
+            uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
+            if (s2Cur + 1 != s2LoopTimes) {
+                return false; // 非序列最后一块
+            }
+            uint32_t lastBlock = static_cast<uint32_t>(actSeqLensKv_) - s2Cur * s2BaseSize;
+            return lastBlock > this->actTailLen_; // 主段长度大于 0 才拆分，否则直接处理纯尾任务。
+        }
     }
 
     __aicore__ inline void GetPreNextTokenLeftUp(int64_t actSeqLensQ, int64_t actSeqLensKv, int64_t& preTokenLeftUp,
@@ -593,13 +640,14 @@ public:
                     ComputeVec1(runInfo0, loop, subLoop);
                 }
             }
-            CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE3>(CROSS_CORE_SYNC_P_C2[loop % 3]);
+            CrossCoreSetFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE3>(CROSS_CORE_SYNC_P_C2[loop % L1_P_BUFCNT]);
         }
 
         if (loop >= PRELOAD_N) {
             if (runInfoNegN.isValid) {
                 if ASCEND_IS_AIC {
-                    CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(CROSS_CORE_SYNC_P_C2[(loop - 2) % 3]);
+                    CrossCoreWaitFlag<CROSS_CORE_SYNC_MODE, PIPE_MTE1>(
+                        CROSS_CORE_SYNC_P_C2[(loop - PRELOAD_N) % L1_P_BUFCNT]);
                     ComputeMm2(runInfoNegN, loop);
                 } else {
                     ComputeVec2(runInfoNegN);
@@ -616,13 +664,27 @@ public:
 
     __aicore__ inline void ComputeMm2(RunInfoX& runInfo, uint64_t loop)
     {
-        cubeBlock_.IterateBmm2(mm2ResTensor, pL1Tensor[((loop - 2) % 3) * L1_P_SIZE],
-                               pScaleL1Tensor[((loop - 2) % 3) * L1_P_SCALE_SIZE], runInfo);
+        uint32_t slot = (loop - PRELOAD_N) % L1_P_BUFCNT;
+        uint32_t dataOffset = slot * L1Layout::P_DATA_STRIDE;
+        if constexpr (HAS_V_TAIL) {
+            if (runInfo.isVtailTask) {
+                dataOffset += PLayout::TAIL_OFFSET;
+            }
+        }
+        cubeBlock_.IterateBmm2(mm2ResTensor, pL1Tensor[dataOffset], pScaleL1Tensor[slot * L1Layout::P_SCALE_STRIDE],
+                               runInfo);
     }
 
     __aicore__ inline void ComputeVec1(RunInfoX& runInfo, uint64_t loop, uint32_t subLoop)
     {
-        vecFaBlock_.ProcessVec1(pL1Tensor[(loop % 3) * L1_P_SIZE], pScaleL1Tensor[(loop % 3) * L1_P_SCALE_SIZE],
+        uint32_t slot = loop % L1_P_BUFCNT;
+        uint32_t dataOffset = slot * L1Layout::P_DATA_STRIDE;
+        if constexpr (HAS_V_TAIL) {
+            if (runInfo.isVtailTask) {
+                dataOffset += PLayout::TAIL_OFFSET;
+            }
+        }
+        vecFaBlock_.ProcessVec1(pL1Tensor[dataOffset], pScaleL1Tensor[slot * L1Layout::P_SCALE_STRIDE],
                                 mm1ResTensor[(bmm1_id % 2) * UB_MM1_SIZE], runInfo, subLoop);
     }
 
@@ -668,6 +730,19 @@ public:
         if (((s2Cur + 1) * s2BaseSize) > info.actS2Size) {
             info.actSingleLoopS2Size = info.actS2Size - s2Cur * s2BaseSize;
         }
+        bool splitCurBlock = false;
+        if constexpr (HAS_V_TAIL) {
+            info.kvTailLen = actTailLen_;
+            splitCurBlock = NeedSplitTailTask(s2Cur);
+            if (tailSplitStep_ == 1) {
+                info.s2Idx += info.actSingleLoopS2Size - actTailLen_;
+                info.actSingleLoopS2Size = actTailLen_;
+            } else if (splitCurBlock) {
+                info.actSingleLoopS2Size -= actTailLen_;
+            }
+            info.isVtailTask = actTailLen_ > 0 && info.actSingleLoopS2Size == actTailLen_ &&
+                               info.s2Idx + info.actSingleLoopS2Size == info.actS2Size;
+        }
         info.actSingleLoopS2SizeAlign = AttentionCommon::Align(
             (uint32_t)info.actSingleLoopS2Size, (uint32_t)(AttentionCommon::BYTE_BLOCK / sizeof(INPUT_T)));
 
@@ -683,6 +758,12 @@ public:
         info.isS2SplitCore = false;
         info.faTmpOutWsPos = coreFirstTmpOutWsPos_;
         info.isLastS2Loop = (s2Cur + 1 == curS2End_);
+        if constexpr (HAS_V_TAIL) {
+            info.isFirstS2Loop = info.isFirstS2Loop && tailSplitStep_ == 0;
+            info.isLastS2Loop = info.isLastS2Loop && !(splitCurBlock && tailSplitStep_ == 0);
+            // 该字段供 DN 使用，当前 ND 不读取；ND 的 Q 缓冲释放依据 isLastS2Loop。
+            info.isLastDnTask = (s2Cur + 1 == curS2End_) && tailSplitStep_ == 0;
+        }
 
         if constexpr (USE_DN) {
             info.actMSizeAlign32 = (info.actMSize + 31) >> 5 << 5;
@@ -711,6 +792,15 @@ public:
     __aicore__ inline void UpdateAxisInfo(TASK_DEAL_MODE taskDealMode, uint32_t& bN2Cur, uint32_t& gS1Cur,
                                           uint32_t& s2Cur)
     {
+        if constexpr (HAS_V_TAIL) {
+            if (taskDealMode == TASK_DEAL_MODE::CREATE_TASK) {
+                if (tailSplitStep_ == 0 && NeedSplitTailTask(s2Cur)) {
+                    tailSplitStep_ = 1;
+                    return;
+                }
+                tailSplitStep_ = 0;
+            }
+        }
         uint64_t s2LoopTimes = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
         uint64_t gS1Size = actSeqLensQ_ * constInfo_.realGSize;
         uint64_t gS1LoopTimes = (gS1Size + mBaseSize - 1) / mBaseSize;

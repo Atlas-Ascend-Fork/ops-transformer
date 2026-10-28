@@ -209,6 +209,66 @@ struct RunInfoX {
     uint64_t kvPaddingBeginOffset = 0;
 };
 
+// 普通 MXFP8 特化不包含尾任务状态。
+static constexpr uint32_t QFA_VTAIL_SIZE = 64U;
+static constexpr uint32_t QFA_MXFP_SCALE_GROUP_ELEMENTS = 32U;
+static constexpr uint32_t QFA_L1_ALIGNMENT_BYTES = BUFFER_SIZE_BYTE_32B;
+// BF16 使用 16 位存储；此头文件与主机侧共用，不能依赖内核的 bfloat16_t 类型。
+static constexpr uint32_t QFA_BF16_ELEMENT_BYTES = sizeof(uint16_t);
+struct RunInfoVTailX : RunInfoX {
+    uint32_t kvTailLen = 0;
+    bool isVtailTask = false;
+    bool isLastDnTask = false;
+};
+
+template <uint32_t M, uint32_t N, bool HasVTail>
+struct QfaPBufferLayout {
+    // 保留既有 P 环形槽深度；这些槽数不适用于 softmax 状态或输出累计缓冲。
+    static constexpr uint32_t NO_VTAIL_SLOT_COUNT = 3U;
+    static constexpr uint32_t VTAIL_SLOT_COUNT = 4U;
+    // 主段 P 及其 E8M0 量化系数均为每元素一字节。
+    static constexpr uint32_t MAIN_BYTES = M * N;
+    static constexpr uint32_t SCALE_BYTES = MAIN_BYTES / QFA_MXFP_SCALE_GROUP_ELEMENTS;
+    static constexpr uint32_t TAIL_OFFSET = MAIN_BYTES + SCALE_BYTES;
+    static constexpr uint32_t TAIL_BYTES = HasVTail ? M * QFA_VTAIL_SIZE * QFA_BF16_ELEMENT_BYTES : 0U;
+    static constexpr uint32_t SLOT_BYTES = TAIL_OFFSET + TAIL_BYTES;
+    static constexpr uint32_t SLOT_COUNT = HasVTail ? VTAIL_SLOT_COUNT : NO_VTAIL_SLOT_COUNT;
+    static_assert(TAIL_OFFSET % QFA_L1_ALIGNMENT_BYTES == 0U, "P tail must be block aligned");
+};
+
+// ND 的 L1 静态地址规划；无尾布局与原实现逐字节一致。
+template <uint32_t M, uint32_t N, uint32_t D, uint32_t DV, bool HasVTail>
+struct QfaNdL1Layout {
+    using P = QfaPBufferLayout<M, N, HasVTail>;
+    static constexpr uint32_t Q_SLOT_COUNT = 2U;       // Q 数据及量化系数使用同一双缓冲索引。
+    static constexpr uint32_t S2_SUB_BLOCK_COUNT = 2U; // ND 在内部将每个 S2 基本块拆成两半处理。
+    static constexpr uint32_t S2_SUB_BLOCK_SIZE = N / S2_SUB_BLOCK_COUNT;
+    static constexpr uint32_t D256_KV_SLOT_COUNT = 4U;
+    static constexpr uint32_t OTHER_KV_SLOT_COUNT = 6U;
+    static constexpr uint32_t P_BYTES = P::SLOT_COUNT * P::SLOT_BYTES;
+    static constexpr uint32_t P_DATA_STRIDE = HasVTail ? P::SLOT_BYTES : P::MAIN_BYTES;
+    static constexpr uint32_t P_SCALE_BASE = HasVTail ? P::MAIN_BYTES : P::SLOT_COUNT * P::MAIN_BYTES;
+    static constexpr uint32_t P_SCALE_STRIDE = HasVTail ? P::SLOT_BYTES : P::SCALE_BYTES;
+    static constexpr uint32_t Q_BASE = P_BYTES;
+    static constexpr uint32_t Q_SLOT_BYTES = M * D;
+    static constexpr uint32_t Q_SCALE_BASE = Q_BASE + Q_SLOT_COUNT * Q_SLOT_BYTES;
+    static constexpr uint32_t Q_SCALE_SLOT_BYTES = Q_SLOT_BYTES / QFA_MXFP_SCALE_GROUP_ELEMENTS;
+    static constexpr uint32_t KV_BASE = Q_SCALE_BASE + Q_SLOT_COUNT * Q_SCALE_SLOT_BYTES;
+    static constexpr uint32_t MX_KV_BYTES = S2_SUB_BLOCK_SIZE * D;
+    static constexpr uint32_t TAIL_V_BYTES = QFA_VTAIL_SIZE * DV * QFA_BF16_ELEMENT_BYTES;
+    static constexpr uint32_t KV_SLOT_BYTES = HasVTail && TAIL_V_BYTES > MX_KV_BYTES ? TAIL_V_BYTES : MX_KV_BYTES;
+    static constexpr uint32_t KV_SCALE_SLOT_BYTES = MX_KV_BYTES / QFA_MXFP_SCALE_GROUP_ELEMENTS;
+    // 保留既有 KV 轮转及事件配对：D=256 使用四槽，其他 D 档使用六槽。
+    static constexpr uint32_t KV_SLOTS =
+        D == static_cast<uint32_t>(inferDTemplateType::Aligned256) ? D256_KV_SLOT_COUNT : OTHER_KV_SLOT_COUNT;
+    static constexpr uint32_t KV_SCALE_BASE = KV_BASE + KV_SLOTS * KV_SLOT_BYTES;
+    static constexpr uint32_t TOTAL_BYTES = KV_SCALE_BASE + KV_SLOTS * KV_SCALE_SLOT_BYTES;
+    static_assert(Q_BASE % QFA_L1_ALIGNMENT_BYTES == 0U && Q_SCALE_BASE % QFA_L1_ALIGNMENT_BYTES == 0U &&
+                      KV_BASE % QFA_L1_ALIGNMENT_BYTES == 0U && KV_SCALE_BASE % QFA_L1_ALIGNMENT_BYTES == 0U,
+                  "ND L1 regions must be block aligned");
+    static_assert(!HasVTail || TAIL_V_BYTES <= KV_SLOT_BYTES, "BF16 V tail must fit a KV slot");
+};
+
 struct StridesConstInfo {
     uint64_t bnStride = 0;
     uint64_t n2Stride = 0;
@@ -273,5 +333,11 @@ struct SinkConstInfo {
 };
 
 struct ConstInfo_t : CommonConstInfo, PAConstInfo, LseConstInfo, SinkConstInfo {};
+
+struct ConstInfoVTail_t : ConstInfo_t {
+    uint32_t seqUsedKvTailSize = 0;
+    uint32_t tailMaxBlockNum = 0;
+    StridesConstInfo vTailStrides;
+};
 
 #endif // QUANT_FLASH_ATTN_COMMON_DEF_ARCH92_H_
