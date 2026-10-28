@@ -36,7 +36,9 @@ namespace ge {
  * Same type as x.
  * @li conv_states: State cache tensor. shape [num_cache_lines, state_len, dim]. Stores historical tokens for
  * each cache line. Updated in-place by this operator. Same type as x.
- * state_len should be >= kernel_width - 1 for prefill, >= kernel_width for decode.
+ * state_len should be >= kernel_width - 1 for both prefill and decode. In batch (non-varlen) speculative
+ * decode, state_len must additionally be >= (kernel_width - 1) + (seqlen - 1) when num_accepted_tokens is
+ * provided.
  * num_cache_lines must be >= batch, where batch is derived from x.shape[0] (3D batch mode) or
  * query_start_loc.size(0) - 1 (2D varlen mode).
  * @li bias: Optional. Convolution bias added after the weighted sum. shape [dim]. Same type as x.
