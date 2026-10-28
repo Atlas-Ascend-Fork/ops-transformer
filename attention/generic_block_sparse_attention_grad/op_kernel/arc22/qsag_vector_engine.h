@@ -15,7 +15,7 @@
 #ifndef ATTENTION_QSAG_VECTOR_ENGINE_ARCH22_H
 #define ATTENTION_QSAG_VECTOR_ENGINE_ARCH22_H
 
-#include "qsag_common.h"
+#include "qsag_common_arch22.h"
 #include "qsag_probability.h"
 
 namespace QSAG {

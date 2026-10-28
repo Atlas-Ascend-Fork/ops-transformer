@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file qsag_common.h
+ * \file qsag_common_arch22.h
  * \brief Shared constants, task descriptor and global-memory context for arch22 QSAG.
  */
 #ifndef ATTENTION_QSAG_COMMON_ARCH22_H

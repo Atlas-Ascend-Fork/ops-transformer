@@ -15,7 +15,7 @@
 #ifndef ATTENTION_QSAG_CUBE_ENGINE_ARCH22_H
 #define ATTENTION_QSAG_CUBE_ENGINE_ARCH22_H
 
-#include "qsag_common.h"
+#include "qsag_common_arch22.h"
 
 namespace QSAG {
 

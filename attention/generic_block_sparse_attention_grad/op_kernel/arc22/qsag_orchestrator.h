@@ -19,7 +19,7 @@
 #ifndef ATTENTION_QSAG_KERNEL_ARCH22_H
 #define ATTENTION_QSAG_KERNEL_ARCH22_H
 
-#include "qsag_common.h"
+#include "qsag_common_arch22.h"
 #ifdef __DAV_C220_CUBE__
 #include "qsag_cube_engine.h"
 #else
