@@ -562,8 +562,9 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantV2(
     - <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：
       - 上表数据类型列中的角标“1”代表该系列不支持的数据类型
       - weight在A4W4下支持NZ输入转置，其他场景仅支持非转置。INT32为A8W4和A4W4场景下的适配用途，实际1个INT32会被解释为8个INT4数据，A8W8场景不支持ND数据格式。
-      - 支持dequantMode参数：A8W4和A4W4场景支持取值0和1，A8W8场景仅支持取值0。
-      - 不支持dequantDtype和quantMode参数。
+      - 支持dequantMode参数：A8W4和A4W4场景支持取值0和1；A8W8场景下该参数不参与校验，传入非0取值会被忽略且不报错，固定按激活矩阵per-token、权重矩阵per-channel的反量化方式计算，建议传0。
+      - A8W4和A4W4场景不支持dequantDtype和quantMode参数；A8W8场景下dequantDtype不参与校验，传入任意取值会被忽略且不报错，建议传28（表示UNDEFINED）。
+      - A8W8场景下bias不参与校验，传入非空指针时会被忽略且不报错，偏移值不参与计算，需传空指针；A8W8场景下weightScale的数据格式不参与校验，算子内部按ND线性布局读取数据，需传入ND格式。
       - x和weight不支持空Tensor。
       - weight NZ转置输入时，仅支持单Tensor模式
       - weight、weightScale和weightAssistMatrix支持单Tensor场景（tensorlist长度为1）和多Tensor场景（tensorlist长度大于1）。
