@@ -92,6 +92,17 @@ END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(PartialRotaryMulQuant, QuantRopeRegbaseTilingData)
 
+BEGIN_TILING_DATA_DEF(PartialRotaryMulQuantNoRopeTilingData)
+TILING_DATA_FIELD_DEF(uint64_t, totalElements);
+TILING_DATA_FIELD_DEF(uint64_t, blockElements);
+TILING_DATA_FIELD_DEF(uint32_t, tileElements);
+TILING_DATA_FIELD_DEF(float, scale);
+TILING_DATA_FIELD_DEF(uint32_t, hasScale);
+END_TILING_DATA_DEF;
+
+REGISTER_TILING_DATA_CLASS(PartialRotaryMulQuant_30050, PartialRotaryMulQuantNoRopeTilingData)
+REGISTER_TILING_DATA_CLASS(PartialRotaryMulQuant_40050, PartialRotaryMulQuantNoRopeTilingData)
+
 ge::graphStatus Tiling4PartialRotaryMulQuant(gert::TilingContext* context);
 struct QuantRotaryPositionEmbeddingCompileInfo {
     int64_t blockDim;
@@ -216,6 +227,24 @@ protected:
     int64_t axis_{0};
     bool hybridRound_{false};
     uint32_t hasScale_{0};
+    bool noRope_{false};
+};
+
+class PartialRotaryMulQuantNoRopeTiling : public QuantRopeRegBaseTilingClass {
+public:
+    explicit PartialRotaryMulQuantNoRopeTiling(gert::TilingContext* context)
+        : QuantRopeRegBaseTilingClass(context)
+    {}
+
+    bool IsCapable() override;
+    ge::graphStatus DoOpTiling() override;
+    ge::graphStatus GetWorkspaceSize() override;
+    uint64_t GetTilingKey() const override;
+    ge::graphStatus PostTiling() override;
+
+private:
+    uint32_t blockNum_ = 0;
+    PartialRotaryMulQuantNoRopeTilingData tilingData_;
 };
 
 class QuantRopeRegBaseTilingClassAAndB : public QuantRopeRegBaseTilingClass {

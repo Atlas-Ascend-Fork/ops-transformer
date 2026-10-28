@@ -18,8 +18,8 @@ def _validate(x, cos, sin, scale, y_dtype, round_mode, rotary_mode, partial_slic
         raise ValueError("y_dtype only supports 0 (HiFloat8).")
     if rotary_mode not in (0, 1, 2, 3):
         raise ValueError("rotary_mode must be 0, 1, 2 or 3.")
-    if round_mode not in ("round", "hybird"):
-        raise ValueError("round_mode must be 'round' or 'hybird' (CANN spelling).")
+    if round_mode not in ("", "round", "hybrid"):
+        raise ValueError("round_mode must be empty, 'round' or 'hybrid'.")
     if x.dim() != 4 or cos.dim() != 4 or sin.dim() != 4:
         raise ValueError("x, cos and sin must be 4D tensors.")
     if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
@@ -28,23 +28,33 @@ def _validate(x, cos, sin, scale, y_dtype, round_mode, rotary_mode, partial_slic
         raise ValueError("x, cos and sin must have the same dtype.")
     if cos.shape != sin.shape:
         raise ValueError("cos and sin must have the same shape.")
-    for tensor in (x, cos, sin):
-        if any(size <= 0 for size in tensor.shape):
-            raise ValueError("x, cos and sin must have positive dimensions.")
-    if partial_slice is None or len(partial_slice) != 2:
-        raise ValueError("partial_slice must contain [start, end].")
-    start, end = partial_slice
+    if any(size <= 0 for size in x.shape):
+        raise ValueError("x must have positive dimensions.")
+    bounds = (
+        [0, 0] if partial_slice is None or len(partial_slice) == 0 else partial_slice
+    )
+    if len(bounds) != 2:
+        raise ValueError("partial_slice must be empty or contain [start, end].")
+    start, end = bounds
+    no_rope = start == end
     d = x.size(-1)
     divisor = 4 if rotary_mode == 2 else 2
-    if not (0 <= start < end == d) or d > 1024:
-        raise ValueError("partial_slice must satisfy 0 <= start < end == D <= 1024.")
-    if d % divisor != 0 or (end - start) % divisor != 0:
+    if not (0 <= start <= end <= d <= 1024) or (not no_rope and end != d):
+        raise ValueError(
+            "partial_slice must be empty within [0, D] or satisfy 0 <= start < end == D <= 1024."
+        )
+    if not no_rope and (d % divisor != 0 or (end - start) % divisor != 0):
         raise ValueError(f"D and rotary slice length must be divisible by {divisor}.")
-    if cos.size(-1) != end - start:
+    if not no_rope and cos.size(-1) != end - start:
         raise ValueError("cos/sin last dimension must equal the rotary slice length.")
-    for actual, expected in zip(cos.shape[:3], x.shape[:3]):
-        if actual != 1 and actual != expected:
-            raise ValueError("cos/sin leading dimensions must broadcast to x.")
+    if not no_rope:
+        if any(size <= 0 for size in cos.shape):
+            raise ValueError(
+                "cos and sin must have positive dimensions for a nonempty rotary slice."
+            )
+        for actual, expected in zip(cos.shape[:3], x.shape[:3]):
+            if actual != 1 and actual != expected:
+                raise ValueError("cos/sin leading dimensions must broadcast to x.")
     if scale is not None and (scale.dtype != torch.float32 or scale.numel() != 1):
         raise ValueError("scale must be a single-element FP32 tensor.")
 
@@ -106,8 +116,8 @@ def _partial_rotary_mul_quant(
     rotary_mode=0,
     partial_slice=None,
 ):
-    if partial_slice is None:
-        raise ValueError("partial_slice must contain [start, end].")
+    if partial_slice is None or len(partial_slice) == 0:
+        partial_slice = [0, 0]
     return partial_rotary_mul_quant_op_builder.load().partial_rotary_mul_quant(
         x,
         cos,
@@ -137,13 +147,15 @@ def partial_rotary_mul_quant(
     """Partial RoPE followed by HiFloat8 quantization on Ascend950.
 
     x/cos/sin use FP16, BF16 or FP32, with four dimensions. cos/sin broadcast
-    over x's leading dimensions and cover only [start, end). partial_slice is
-    required; end must equal D (<=1024). rotary_mode is 0 (half), 1 (interleave),
+    over x's leading dimensions and cover only [start, end). An omitted or empty
+    partial_slice uses [0, 0], skipping RoPE while still scaling and quantizing
+    the entire input. For a nonempty slice, end must equal D (<=1024).
+    rotary_mode is 0 (half), 1 (interleave),
     2 (quarter), or 3 (interleave-half). D and slice length must be multiples
     of 2, or 4 for quarter mode. scale optionally contains one FP32 value and
     multiplies the entire result, including the unrotated prefix.
 
-    y_dtype must be 0. round_mode accepts 'round' and 'hybird' (CANN spelling).
+    y_dtype must be 0. round_mode accepts 'round' and 'hybrid'.
     quant_mode and axis are retained for ACLNN compatibility and ignored.
     Returns HiFloat8 bytes as uint8 with x's shape and an empty FP32 y_scale
     of shape (0,). This inference operator does not implement backward.

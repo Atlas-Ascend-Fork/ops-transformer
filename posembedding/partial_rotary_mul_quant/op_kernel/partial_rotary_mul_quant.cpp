@@ -13,6 +13,7 @@
  * \brief
  */
 #include "kernel_operator.h"
+#include "arch35/partial_rotary_mul_quant_no_rope_hif8.h"
 #include "arch35/rotary_position_embedding_reg_ab_hif8.h"
 #include "arch35/rotary_position_embedding_reg_a_and_b_hif8.h"
 #include "arch35/rotary_position_embedding_reg_aba_and_ba_hif8.h"
@@ -30,6 +31,19 @@ extern "C" __global__ __aicore__ void partial_rotary_mul_quant(GM_ADDR x, GM_ADD
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_AIV_ONLY);
     TPipe pipe;
+    if (TILING_KEY_IS(30050)) {
+        GET_TILING_DATA_WITH_STRUCT(PartialRotaryMulQuantNoRopeTilingData, noRopeData, tiling);
+        PartialRotaryMulQuantHiF8::PartialRotaryMulQuantNoRope<DTYPE_X, RoundMode::CAST_ROUND> op;
+        op.Init(x, scale, y, &noRopeData, &pipe);
+        op.Process();
+        return;
+    } else if (TILING_KEY_IS(40050)) {
+        GET_TILING_DATA_WITH_STRUCT(PartialRotaryMulQuantNoRopeTilingData, noRopeData, tiling);
+        PartialRotaryMulQuantHiF8::PartialRotaryMulQuantNoRope<DTYPE_X, RoundMode::CAST_HYBRID> op;
+        op.Init(x, scale, y, &noRopeData, &pipe);
+        op.Process();
+        return;
+    }
     GET_TILING_DATA_WITH_STRUCT(QuantRopeRegbaseTilingData, tilingData, tiling);
     if (TILING_KEY_IS(30010)) {
         PartialRotaryMulQuantHiF8::RotaryPositionEmbeddingABAAndBA<DTYPE_X, false, RoundMode::CAST_ROUND> op;

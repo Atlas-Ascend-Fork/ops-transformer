@@ -47,7 +47,7 @@ if _TORCHAIR_AVAILABLE:
                 "round_mode": attr.Str(round_mode),
                 "axis": attr.Int(axis),
                 "rotary_mode": attr.Int(rotary_mode),
-                "partial_slice": attr.ListInt(partial_slice),
+                "partial_slice": attr.ListInt(partial_slice or [0, 0]),
             },
             outputs=["y", "y_scale"],
             ir=IrDef("PartialRotaryMulQuant")
@@ -83,8 +83,8 @@ if _TORCHAIR_AVAILABLE:
     ):
         if y_dtype != 0:
             raise ValueError("Ascend950 only supports y_dtype=0 (HiFloat8).")
-        if partial_slice is None or len(partial_slice) != 2:
-            raise ValueError("partial_slice must contain [start, end].")
+        if partial_slice is not None and len(partial_slice) not in (0, 2):
+            raise ValueError("partial_slice must be empty or contain [start, end].")
         y, y_scale = PartialRotaryMulQuant(
             x,
             cos,

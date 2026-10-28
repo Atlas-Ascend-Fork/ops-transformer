@@ -27,18 +27,34 @@ namespace ge {
  * @li sin: A tensor for rotary position embedding sin. Must be one of the following types: float16, float32, bfloat16.
  * @li scale: Optional. HiFloat8 multiplier: single-element float32 tensor; absent means 1.0.
  * @par Attributes:
- * @li y_dtype: Optional. 0: HiFloat8 (Ascend950), 1: HiFloat4 (Ascend960DT). Defaults to 0.
+ * @li y_dtype: Optional. 0: HiFloat8 (Ascend950). Defaults to 0.
  * @li quant_mode: Optional. Quantization mode. Defaults to 0.
- * @li round_mode: Optional. HiFloat8 supports "round" and "hybird" (CAST_HYBRID). Defaults to "round".
+ * @li round_mode: Optional. HiFloat8 supports "round" and "hybrid" (CAST_HYBRID). Defaults to "round".
  * @li axis: Optional. Axis for quantization. Ignored for HiFloat8. Defaults to -1.
  * @li rotary_mode: Optional. Rotary mode. 0-"half", 1-"interleave", 2-"quarter", 3-"deepseek_interleave". Defaults to
  * 0.
- * @li partial_slice: Optional. Slice range [start, end] for partial rotation. Defaults to [0, 0].
+ * @li partial_slice: Optional. Slice range [start, end) for partial rotation. Defaults to [0, 0].
+ * For HiFloat8, an omitted or empty slice skips RoPE and still scales and quantizes all of x.
  * @par Outputs:
- * @li y: A tensor of type hifloat8 or hifloat4, with the same shape as x.
- * @li y_scale: An empty float32 tensor with shape [0] for HiFloat8; hifloat4_scale for HiFloat4.
+ * @li y: A tensor of type hifloat8, with the same shape as x.
+ * @li y_scale: An empty float32 tensor with shape [0].
  * @attention Constraints:
- * @li Inputs must be 4D tensors.
+ * Let (B, S, N, D) represent the shape of x, partial_slice = [start, end], and L = end - start.
+ * @li x, cos, sin and y must be 4D tensors in ND format. All dimensions of x must be positive.
+ * @li x, cos and sin must have the same data type, and cos and sin must have identical shapes.
+ * @li D must satisfy 0 < D <= 1024.
+ * @li A non-empty partial_slice must contain two integers satisfying 0 <= start <= end <= D.
+ * When L > 0, end must equal D.
+ * @li When L > 0, the last dimension of cos and sin must equal L.
+ * @li Ascend 950PR&950DT products:
+ *  - y_dtype must be 0 (HiFloat8). rotary_mode supports 0 (half), 1 (interleave), 2 (quarter) and
+ *    3 (deepseek_interleave).
+ *  - When L > 0, both D and L must be multiples of 2 for rotary_mode 0, 1 or 3, and multiples of 4 for
+ *    rotary_mode 2.
+ *  - When L > 0, each of the first three dimensions of cos and sin must equal the corresponding dimension of x or 1.
+ *  - When start == end, RoPE is skipped and the entire x is scaled and quantized. The rotary-mode divisibility
+ *    and cos/sin broadcasting and last-dimension constraints do not apply.
+ *  - quant_mode and axis are ignored; rotation and quantization use the last dimension.
  */
 REG_OP(PartialRotaryMulQuant)
     .INPUT(x, TensorType({DT_FLOAT16, DT_FLOAT, DT_BFLOAT16}))

@@ -129,9 +129,9 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckShapeAllPositive() const
 {
     OP_CHECK_IF(CheckShapeAllPositive(X_INDEX) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context_->GetNodeName(), "x has non positive shape."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckShapeAllPositive(COS_INDEX) != ge::GRAPH_SUCCESS,
+    OP_CHECK_IF(!noRope_ && CheckShapeAllPositive(COS_INDEX) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context_->GetNodeName(), "cos has non positive shape."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(CheckShapeAllPositive(SIN_INDEX) != ge::GRAPH_SUCCESS,
+    OP_CHECK_IF(!noRope_ && CheckShapeAllPositive(SIN_INDEX) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context_->GetNodeName(), "sin has non positive shape."), return ge::GRAPH_FAILED);
     auto yShape = context_->GetOutputShape(Y_INDEX)->GetStorageShape();
     for (size_t i = 0; i < yShape.GetDimNum(); i++) {
@@ -268,6 +268,10 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckRotaryModeShapeRelation(const 
 {
     OP_CHECK_IF(d > D_LIMIT, OP_LOGE(context_->GetNodeName(), "D must be small than %ld, actual %ld.", D_LIMIT, d),
                 return ge::GRAPH_FAILED);
+    if (noRope_) {
+        dSplitCoef_ = 1;
+        return ge::GRAPH_SUCCESS;
+    }
     if (rotaryMode_ == RotaryPosEmbeddingMode::HALF || rotaryMode_ == RotaryPosEmbeddingMode::INTERLEAVE ||
         rotaryMode_ == RotaryPosEmbeddingMode::DEEPSEEK_INTERLEAVE) {
         OP_CHECK_IF(d % HALF_INTERLEAVE_MODE_COEF != 0,
@@ -292,11 +296,16 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckRotaryModeShapeRelation(const 
 ge::graphStatus QuantRopeRegBaseTilingClass::JudgeSliceInfo()
 {
     OP_LOGI(context_->GetNodeName(), "TEST LOG, sliceStart_ =  %ld. sliceEnd_ =  %ld", sliceStart_, sliceEnd_);
-    if (sliceStart_ < 0 || sliceEnd_ < 0 || sliceLength_ <= 0 || sliceEnd_ > d_) {
+    if (sliceStart_ < 0 || sliceEnd_ < 0 || sliceLength_ < 0 || sliceEnd_ > d_) {
         OP_LOGE(context_->GetNodeName(), "slice info fail, sliceStart_ =  %ld. sliceEnd_ =  %ld", sliceStart_,
                 sliceEnd_);
         return ge::GRAPH_FAILED;
     }
+    if (noRope_) {
+        return ge::GRAPH_SUCCESS;
+    }
+    OP_CHECK_IF(sliceLength_ == 0, OP_LOGE(context_->GetNodeName(), "HiFloat4 requires a nonempty rotary slice"),
+                return ge::GRAPH_FAILED);
     if (cosd_ != sind_ || cosd_ != sliceLength_) {
         OP_LOGE(context_->GetNodeName(), "slice info fail, sliceLength_ =  %ld. cosd_ =  %ld", sliceLength_, cosd_);
         return ge::GRAPH_FAILED;
@@ -354,6 +363,20 @@ ge::graphStatus QuantRopeRegBaseTilingClass::GetShapeAttrsInfo()
                 return ge::GRAPH_FAILED);
     rotaryMode_ = static_cast<RotaryPosEmbeddingMode>(modeValue);
 
+    const gert::ContinuousVector* sliceRangeListPtr = attrs->GetAttrPointer<gert::ContinuousVector>(ATTR_IDX_SLICE);
+    const bool omittedSlice = sliceRangeListPtr == nullptr || sliceRangeListPtr->GetSize() == 0;
+    sliceStart_ = 0;
+    sliceEnd_ = 0;
+    if (!omittedSlice) {
+        OP_CHECK_IF(sliceRangeListPtr->GetSize() != 2,
+                    OP_LOGE(context_->GetNodeName(), "partial_slice must contain two elements"),
+                    return ge::GRAPH_FAILED);
+        const int64_t* slice = reinterpret_cast<const int64_t*>(sliceRangeListPtr->GetData());
+        sliceStart_ = slice[0];
+        sliceEnd_ = slice[1];
+    }
+    noRope_ = yDtype_ == 0 && sliceStart_ == sliceEnd_;
+
     OP_CHECK_IF(CheckParam() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "check param fail."),
                 return ge::GRAPH_FAILED);
 
@@ -361,7 +384,11 @@ ge::graphStatus QuantRopeRegBaseTilingClass::GetShapeAttrsInfo()
     auto& xShape = context_->GetInputShape(X_INDEX)->GetStorageShape();
     auto& cosShape = context_->GetInputShape(COS_INDEX)->GetStorageShape();
     auto& sinShape = context_->GetInputShape(SIN_INDEX)->GetStorageShape();
-    OP_CHECK_IF(JudgeLayoutByShape(xShape, cosShape) != ge::GRAPH_SUCCESS,
+    if (noRope_) {
+        // cos/sin are unused; canonicalize the layout for shared shape parsing.
+        layout_ = RopeLayout::BROADCAST_BSN;
+    }
+    OP_CHECK_IF(!noRope_ && JudgeLayoutByShape(xShape, cosShape) != ge::GRAPH_SUCCESS,
                 OP_LOGE(context_->GetNodeName(), "JudgeLayoutByShape fail."), return ge::GRAPH_FAILED);
 
     d_ = xShape.GetDim(DIM_3);
@@ -390,18 +417,9 @@ ge::graphStatus QuantRopeRegBaseTilingClass::GetShapeAttrsInfo()
         n_ = xShape.GetDim(DIM_2);
     }
 
-    // 获取slice
-    const gert::ContinuousVector* sliceRangeListPtr = attrs->GetAttrPointer<gert::ContinuousVector>(ATTR_IDX_SLICE);
-    if (sliceRangeListPtr == nullptr || sliceRangeListPtr->GetSize() == 0) {
-        sliceStart_ = 0;
+    // Preserve the existing HiFloat4 default; HiFloat8 defaults to an empty slice.
+    if (omittedSlice && yDtype_ == 1) {
         sliceEnd_ = d_;
-    } else {
-        OP_CHECK_IF(sliceRangeListPtr->GetSize() != 2,
-                    OP_LOGE(context_->GetNodeName(), "partial_slice must contain two elements"),
-                    return ge::GRAPH_FAILED);
-        const int64_t* expertRangeList = reinterpret_cast<const int64_t*>(sliceRangeListPtr->GetData());
-        sliceStart_ = expertRangeList[0];
-        sliceEnd_ = expertRangeList[1];
     }
     sliceLength_ = sliceEnd_ - sliceStart_;
     OP_CHECK_IF(JudgeSliceInfo() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "JudgeSliceInfo fail."),
@@ -411,7 +429,6 @@ ge::graphStatus QuantRopeRegBaseTilingClass::GetShapeAttrsInfo()
                 OP_LOGE(context_->GetNodeName(), "quantization parameters are not supported"), return ge::GRAPH_FAILED);
 
     scaleAttr_ = 1.0f;
-
     return ge::GRAPH_SUCCESS;
 }
 
@@ -420,16 +437,16 @@ ge::graphStatus QuantRopeRegBaseTilingClass::CheckHiF8Support()
     auto platform = platform_ascendc::PlatformAscendC(context_->GetPlatformInfo());
     OP_CHECK_IF(platform.GetSocVersion() != platform_ascendc::SocVersion::ASCEND950,
                 OP_LOGE(context_->GetNodeName(), "HiFloat8 requires Ascend950"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(sliceEnd_ != d_, OP_LOGE(context_->GetNodeName(), "HiFloat8 requires sliceEnd == D"),
+    OP_CHECK_IF(!noRope_ && sliceEnd_ != d_, OP_LOGE(context_->GetNodeName(), "HiFloat8 requires sliceEnd == D"),
                 return ge::GRAPH_FAILED);
     int64_t divisor = rotaryMode_ == RotaryPosEmbeddingMode::QUARTER ? 4 : 2;
     OP_CHECK_IF(sliceLength_ % divisor != 0,
                 OP_LOGE(context_->GetNodeName(), "sliceLength is incompatible with rotary_mode"),
                 return ge::GRAPH_FAILED);
     const char* roundMode = context_->GetAttrs()->GetAttrPointer<char>(ATTR_IDX_ROUND_MODE);
-    hybridRound_ = roundMode != nullptr && std::strcmp(roundMode, "hybird") == 0;
-    OP_CHECK_IF(roundMode != nullptr && std::strcmp(roundMode, "round") != 0 && !hybridRound_,
-                OP_LOGE(context_->GetNodeName(), "HiFloat8 round_mode must be round or hybird"),
+    hybridRound_ = roundMode != nullptr && std::strcmp(roundMode, "hybrid") == 0;
+    OP_CHECK_IF(roundMode != nullptr && roundMode[0] != '\0' && std::strcmp(roundMode, "round") != 0 && !hybridRound_,
+                OP_LOGE(context_->GetNodeName(), "HiFloat8 round_mode must be empty, round or hybrid"),
                 return ge::GRAPH_FAILED);
     auto scaleDesc = context_->GetOptionalInputDesc(SCALE_INDEX);
     auto scaleShape = context_->GetOptionalInputShape(SCALE_INDEX);

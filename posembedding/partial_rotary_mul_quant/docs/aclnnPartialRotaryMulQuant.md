@@ -17,9 +17,11 @@
 
 计算使用 FLOAT32 中间结果。非旋转前缀 `[0, start)` 不参与 RoPE，但仍参与缩放和量化。输出 `yOut` 的 shape 与 `x` 完全一致，每个元素占用 1 字节；`yScaleOut` 为 shape 为 `[0]` 的空 FLOAT32 张量，不生成分组缩放因子。
 
+`partialSliceOptional` 不传时按 `[0, 0]` 处理。`start == end` 表示空旋转区间，此时跳过 RoPE，输出为完整输入的缩放和量化结果 `Cast_HiFloat8(scale * float32(x))`。cos/sin 不参与计算，无须满足广播关系或末维长度约束，但仍须提供同 shape、同输入类型的四维 Tensor。
+
 ### 计算公式
 
-记 `D = x.shape[3]`，`partialSliceOptional = [start, end]`，`L = end - start`。当前要求 `end = D`。以下计算先将 `x`、`cos`、`sin` 转为 FLOAT32，并记：
+记 `D = x.shape[3]`，`partialSliceOptional = [start, end]`，`L = end - start`。非空旋转区间要求 `end = D`。以下公式适用于 `L > 0`，计算先将 `x`、`cos`、`sin` 转为 FLOAT32，并记：
 
 $$
 v = x[..., start:end],\quad c = cos,\quad s = sin
@@ -85,7 +87,7 @@ yOut = Cast_{HiFloat8}(\alpha * t, roundModeOptional)
 $$
 
 - `roundModeOptional = "round"`：使用 `CAST_ROUND` 转换。
-- `roundModeOptional = "hybird"`：使用 `CAST_HYBRID` 混合舍入；其中包含随机舍入行为，相同输入的多次执行结果可能不同。字符串沿用接口拼写 `hybird`。
+- `roundModeOptional = "hybrid"`：使用 `CAST_HYBRID` 混合舍入；其中包含随机舍入行为，相同输入的多次执行结果可能不同。
 - `yScaleOut` 始终为空 FLOAT32 张量。
 
 ## 函数原型
@@ -132,10 +134,10 @@ aclnnStatus aclnnPartialRotaryMulQuant(
 | scaleOptional | 输入 | 可选的单元素缩放张量；传 `nullptr` 时缩放系数为 1。对包含非旋转前缀的完整结果相乘。 | FLOAT32 | ND | 元素总数必须为 1，推荐 `[1]` | 支持 |
 | yDtype | 输入 | 输出类型标识，ascend950 仅支持 `0`（HiFloat8）。 | INT64 | - | - | - |
 | quantMode | 输入 | 保留参数，HiFloat8 路径忽略该参数，建议传 `0`。 | INT64 | - | - | - |
-| roundModeOptional | 输入 | 支持 `"round"`、`"hybird"`。传 `nullptr` 时使用默认值 `"round"`。 | char* | - | - | - |
+| roundModeOptional | 输入 | 支持 `"round"`、`"hybrid"`。传 `nullptr` 时使用默认值 `"round"`。 | char* | - | - | - |
 | axis | 输入 | 保留参数，HiFloat8 路径忽略该参数；旋转和量化始终作用于最后一维，建议传 `-1`。 | INT64 | - | - | - |
 | rotaryMode | 输入 | 支持 `0`（half）、`1`（interleave）、`2`（quarter）、`3`（deepseek_interleave）。 | INT64 | - | - | - |
-| partialSliceOptional | 输入 | 指定最后一维的旋转区间 `[start, end)`。调用时建议显式传入两个元素 `[start, D]`，具体见 Slice 约束。 | aclIntArray，元素为 INT64 | - | 推荐长度为 2 | - |
+| partialSliceOptional | 输入 | 指定最后一维的旋转区间 `[start, end)`。传 `nullptr` 时默认 `[0, 0]`，仅执行整体缩放和量化。 | aclIntArray，元素为 INT64 | - | 非空指针时长度为 2 | - |
 | yOut | 输出 | HiFloat8 量化结果，shape 与 `x` 完全一致。须创建 `ACL_HIFLOAT8` 类型的输出描述，按每元素 1 字节分配 Device 内存。 | HIFLOAT8 | ND | 4 维 | 不支持 |
 | yScaleOut | 输出 | 空输出，须提供非空的 `aclTensor` 描述；其 shape 为 `[0]`，不需要分配数据内存。 | FLOAT32 | ND | 1 维，`[0]` | 不适用 |
 | workspaceSize | 输出 | 返回 Device 侧需要申请的 workspace 字节数。 | uint64_t* | - | - | - |
@@ -172,7 +174,7 @@ aclnnStatus aclnnPartialRotaryMulQuant(
 
 ### 维度和数据类型约束
 
-- `x`、`cos`、`sin`、`yOut` 均为 4 维张量，所有维度均大于 0。
+- `x`、`cos`、`sin`、`yOut` 均为 4 维张量。`x`、`yOut` 所有维度均大于 0；旋转区间非空时，cos/sin 所有维度也须大于 0。
 - `x`、`cos`、`sin` 数据类型完全一致，支持 FLOAT16、BFLOAT16、FLOAT32，不进行隐式类型提升。
 - `x.shape` 与 `yOut.shape` 完全一致，`cos.shape` 与 `sin.shape` 完全一致。
 - `yOut` 数据类型必须为 HIFLOAT8；ACLNN 描述的最后一维仍为 `D`，存储大小为 `x` 元素总数乘以 1 字节。
@@ -184,19 +186,18 @@ aclnnStatus aclnnPartialRotaryMulQuant(
 记 `D = x.shape[3]`，`L = end - start`：
 
 - `0 < D <= 1024`。
-- 非空的 `partialSliceOptional` 若包含元素，其长度必须为 2，取值满足 `0 <= start < end == D`。
-- `rotaryMode` 为 `0`、`1`、`3` 时，`D` 和 `L` 均须被 2 整除。
-- `rotaryMode` 为 `2` 时，`D` 和 `L` 均须被 4 整除。
-- `cos.shape[3] = sin.shape[3] = L`。
-- 当前不支持 `end < D`，因此旋转区间必须延伸到最后一维末尾。
+- `partialSliceOptional` 若包含元素，其长度必须为 2，取值满足 `0 <= start <= end <= D`。
+- `start == end` 时跳过 RoPE，对完整 `x` 缩放和量化，不要求 `D` 满足旋转模式的整除约束。
+- 非空旋转区间要求 `end == D`；`rotaryMode` 为 `0`、`1`、`3` 时，`D` 和 `L` 均须被 2 整除，为 `2` 时均须被 4 整除。
+- 非空旋转区间要求 `cos.shape[3] = sin.shape[3] = L`。
 
-tiling 在未提供切片信息或切片列表为空时按 `[0, D]` 处理，此时 `cos`、`sin` 的末维须为 `D`。算子定义中的属性默认值 `[0, 0]` 不是合法的非空旋转区间；为避免依赖可选属性的默认值处理，建议 ACLNN 调用显式创建 `[start, D]` 的 `aclIntArray`。
+未提供切片信息时按 `[0, 0]` 处理，与属性默认值一致。ACLNN 调用应传 `nullptr` 或含两个元素的 `aclIntArray`；Python 封装会将 `None` 或空列表转换成 `[0, 0]`。若需对完整最后一维执行 RoPE，应显式传入 `[0, D]`。
 
 例如，`D = 80` 时，half、interleave、deepseek_interleave 模式下 `[0, 80]`、`[16, 80]`、`[2, 80]` 均合法；quarter 模式下 `[0, 80]`、`[16, 80]` 合法，`[2, 80]` 因旋转区间长度不能被 4 整除而非法。`[0, 64]` 因 `end != D` 而非法。
 
 ### 广播和布局约束
 
-为避免混淆 BSND、BNSD、SBND 的轴含义，将 `x.shape` 的前三维统一记为 `(A, B, C)`，即 `x.shape = (A, B, C, D)`。`cos`、`sin` 可采用以下任一种形状：
+以下广播约束仅适用于非空旋转区间。为避免混淆 BSND、BNSD、SBND 的轴含义，将 `x.shape` 的前三维统一记为 `(A, B, C)`，即 `x.shape = (A, B, C, D)`。`cos`、`sin` 可采用以下任一种形状：
 
 | cos/sin shape | 广播方式 |
 | --- | --- |
@@ -217,7 +218,7 @@ tiling 在未提供切片信息或切片列表为空时按 `[0, D]` 处理，此
 | --- | --- |
 | yDtype | 必须为 `0`（HiFloat8）。 |
 | rotaryMode | 支持 `0`、`1`、`2`、`3`，具体公式见功能说明。 |
-| roundModeOptional | 支持 `"round"`、`"hybird"`；不支持其他非空字符串。 |
+| roundModeOptional | 支持 `"round"`、`"hybrid"`；不支持其他非空字符串。 |
 | quantMode | HiFloat8 路径忽略该值，建议传 `0`。 |
 | axis | HiFloat8 路径忽略该值，建议传 `-1`；不用于选择其他旋转轴。 |
 

@@ -16,7 +16,7 @@ Example:
       --mode all --device 1 --report results.json
 
 ROUND: <=1 HiFloat8 encoding step, with at most 0.1% invalid elements, matching
-the existing ACLNN Golden's requant criterion. HYBIRD: deterministic TA region
+the existing ACLNN Golden's requant criterion. HYBRID: deterministic TA region
 uses the same criterion; stochastic region checks enclosing HiFloat8 values
 (including exact-value carry). This verifies the rounding envelope, not the
 statistical distribution of stochastic rounding. Every execution is compared
@@ -86,7 +86,7 @@ def verify(outputs, reference, round_mode):
     )
     valid = delta <= 1
     decoded = actual.view(hifloat8).astype(np.float32)
-    if round_mode == "hybird":
+    if round_mode == "hybrid":
         magnitude = np.abs(reference)
         stochastic = (magnitude > 0) & ((magnitude < 0.125) | (magnitude >= 16))
         values = np.arange(256, dtype=np.uint8).view(hifloat8).astype(np.float32)
@@ -131,7 +131,7 @@ def cases():
     ]
     for dtype_index, dtype in enumerate((torch.float16, torch.bfloat16, torch.float32)):
         for rotary_mode in range(4):
-            for round_index, round_mode in enumerate(("round", "hybird")):
+            for round_index, round_mode in enumerate(("round", "hybrid")):
                 index = dtype_index * 8 + rotary_mode * 2 + round_index
                 d, start = [
                     (128, 0),
@@ -192,7 +192,7 @@ def validate_rejections(device):
             dict(y_dtype=1),
             dict(rotary_mode=4),
             dict(round_mode="invalid"),
-            dict(partial_slice=None),
+            dict(partial_slice=[0]),
             dict(partial_slice=[64, 120]),
             dict(partial_slice=[63, 128]),
             dict(scale=torch.empty((2,), dtype=torch.float32, device=target)),
