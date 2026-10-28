@@ -38,6 +38,7 @@ constexpr size_t INDEX_ATTR_Y_DTYPE = 6;
 
 constexpr int64_t MX_SCALE_BLOCK_SIZE = 64;
 constexpr int64_t SCALE_LAST_DIM = 2;
+constexpr size_t SCALE_DIM_NUM = 3;
 constexpr int64_t DIM_MINUS_ONE = -1;
 constexpr int64_t K_MIN_VAL = 256;
 constexpr int64_t K_MAX_VAL = 65535;
@@ -138,6 +139,11 @@ ge::graphStatus CheckOneScaleShape(const gert::InferShapeContext* context, const
                                    const char* paramName, int64_t dim0, int64_t expectedScaleK)
 {
     const auto nodeName = context->GetNodeName();
+    if (scaleShape->GetDimNum() != SCALE_DIM_NUM) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM(nodeName, paramName, (std::to_string(scaleShape->GetDimNum()) + "D").c_str(),
+                                     "3D");
+        return ge::GRAPH_FAILED;
+    }
     OPS_CHECK(IsDimMismatch(scaleShape->GetDim(0U), dim0) || IsDimMismatch(scaleShape->GetDim(1U), expectedScaleK) ||
                   IsDimMismatch(scaleShape->GetDim(2U), SCALE_LAST_DIM),
               OP_LOGE_FOR_INVALID_SHAPE(
