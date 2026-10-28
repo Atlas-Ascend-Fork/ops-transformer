@@ -227,10 +227,20 @@ stages:
         with:
           check_type: 'md_check'
           image_version: ${{ jobs.JOB_image.outputs.staticcheck }}
+      JOB_Pre_Compile:
+        name: Compile_pre
+        uses: .gitcode/workflows/compile_action.yml
+        if: env.TARGET_BRANCH != 'master'
+        with:
+          task_name: 'Pre_Compile'
+          image_version: ${{ jobs.JOB_image.outputs.Pre_Compile }}
+          arch: 'arm64'
+          spec: '2xlarge'
       # ============ distest: HOST 只编 host, 产物 custom_host_<soc>.run(不含 kernel bin) ============
       Pre_compile_host_910B:
         name: Pre_compile_host_910B
         uses: .gitcode/workflows/compile_action.yml
+        if: env.TARGET_BRANCH == 'master'
         with:
           task_name: 'Pre_Compile_host_910B'
           image_version: ${{ jobs.JOB_image.outputs.Pre_Compile }}
@@ -240,6 +250,7 @@ stages:
       Pre_compile_host_950:
         name: Pre_compile_host_950
         uses: .gitcode/workflows/compile_action.yml
+        if: env.TARGET_BRANCH == 'master'
         with:
           task_name: 'Pre_Compile_host_950'
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
@@ -250,6 +261,7 @@ stages:
       Pre_compile_kernel_910B:
         name: Pre_compile_kernel_910B
         uses: .gitcode/workflows/compile_action_dis.yml
+        if: env.TARGET_BRANCH == 'master'
         with:
           task_name: 'Pre_Compile_kernel_910B'
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
@@ -259,6 +271,7 @@ stages:
       Pre_compile_kernel_950:
         name: Pre_compile_kernel_950
         uses: .gitcode/workflows/compile_action_dis.yml
+        if: env.TARGET_BRANCH == 'master'
         with:
           task_name: 'Pre_Compile_kernel_950'
           image_version: ${{ jobs.JOB_image.outputs.Compile_Ascend_X86 }}
@@ -268,6 +281,7 @@ stages:
       # ============ repackage 下载 host/kernel 产物, 调用 repack 脚本合并成最终 custom 包 ============
       Pre_compile_package_910B:
         name: Pre_compile_package_910B
+        if: env.TARGET_BRANCH == 'master'
         needs:
           - Pre_compile_host_910B
           - Pre_compile_kernel_910B
@@ -325,6 +339,7 @@ stages:
               object-prefix: ${{ env.obs_path }}/
       Pre_compile_package_950:
         name: Pre_compile_package_950
+        if: env.TARGET_BRANCH == 'master'
         needs:
           - Pre_compile_host_950
           - Pre_compile_kernel_950

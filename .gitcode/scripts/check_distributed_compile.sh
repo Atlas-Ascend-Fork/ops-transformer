@@ -64,9 +64,9 @@ main() {
         exit 1
     fi
 
-    # 受影响算子以parse_compile_scope.py返回值为准（与PR_COMPILE实际编译范围一致）
+    # 受影响算子以cmake/scripts/parse_compile_scope.py返回值为准（与PR_COMPILE实际编译范围一致）
     local affected_ops
-    affected_ops=$(python3 "${REPO_ROOT}/parse_compile_scope.py" \
+    affected_ops=$(python3 "${REPO_ROOT}/cmake/scripts/parse_compile_scope.py" \
         -f "$pr_file" --soc "$soc") || exit 1
     echo "affected_ops: $affected_ops"
 	if [ -z "$affected_ops" ]; then

@@ -1691,7 +1691,7 @@ parse_changed_pr() {
     fi
     # 参数解析完成后, 若用户未显式指定 --soc, 则通过 lspci 设备 ID 自动探测 NPU 芯片型号
     detect_soc_from_lspci
-    ops_names=$(python3 "$CURRENT_DIR"/parse_compile_scope.py -f "$PR_CHANGED_FILES" --soc "$ASCEND_SOC_UNITS" ${experimental_flag})
+    ops_names=$(python3 "$CURRENT_DIR"/cmake/scripts/parse_compile_scope.py -f "$PR_CHANGED_FILES" --soc "$ASCEND_SOC_UNITS" ${experimental_flag})
     echo "Operators that need custom package compilation:$ops_names"
     if [ -z "${ops_names}" ]; then
         log "Info: No custom packages to build for this PR."
@@ -1914,7 +1914,7 @@ while [[ $# -gt 0 ]]; do
         if [[ "$ENABLE_EXPERIMENTAL" == "TRUE" ]]; then
             experimental_flag="--experimental"
         fi
-        ops_names=$(python3 "$CURRENT_DIR"/parse_compile_scope.py -f "$PR_CHANGED_FILES" --soc "$ASCEND_SOC_UNITS" ${experimental_flag})
+        ops_names=$(python3 "$CURRENT_DIR"/cmake/scripts/parse_compile_scope.py -f "$PR_CHANGED_FILES" --soc "$ASCEND_SOC_UNITS" ${experimental_flag})
         echo "Operators that need compile:$ops_names"
         if [ -z "${ops_names}" ]; then
             log "Info: No compile scope for this PR."

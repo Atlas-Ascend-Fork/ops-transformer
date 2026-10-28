@@ -52,7 +52,6 @@ jobs:
             ${{ env.obs_path }}/update_file_detail.txt
             ${{ env.obs_path }}/compile.sh
             ${{ env.obs_path }}/check_distributed_compile.sh
-            ${{ env.obs_path }}/parse_compile_scope.py
           path: ${{ steps.process_checkout.outputs.path }}
       -
         name: compile_acc
