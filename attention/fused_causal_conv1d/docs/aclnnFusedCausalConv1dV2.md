@@ -33,7 +33,7 @@
     weight: [K, dim], 其中K=3
     convStates: [-1, K-1, dim]
     queryStartLoc: [batch+1]
-    cacheIndices: 不开APC: [batch]或None, 开APC: [block, maxNumBlocks]
+    cacheIndices: 不开APC: [batch]或None, 开APC: [batch, maxNumBlocks]
     initialStateMode: [batch]
     bias: [dim] (暂不支持)
     numAcceptedTokens: [batch] (暂不支持)
@@ -59,7 +59,7 @@
     weight: [K, dim], 其中K=3
     convStates: [-1, K-1+m, dim]
     queryStartLoc: [batch+1]
-    cacheIndices: 不开APC: [batch]或None, 开APC: [block, maxNumBlocks]
+    cacheIndices: 不开APC: [batch]或None, 开APC: [batch, maxNumBlocks]
     initialStateMode: [batch]
     bias: [dim] (暂不支持)
     numAcceptedTokens: [batch]
@@ -86,7 +86,7 @@
     weight: [K, dim], 其中K=3
     convStates: [-1, K-1+m, dim]
     queryStartLoc: [batch+1]
-    cacheIndices: 不开APC: [batch]或None, 开APC: [block, maxNumBlocks]
+    cacheIndices: 不开APC: [batch]或None, 开APC: [batch, maxNumBlocks]
     initialStateMode: [batch]
     bias: [dim] (暂不支持)
     numAcceptedTokens: [batch]
@@ -113,7 +113,7 @@
     weight: [K, dim], 其中K=3
     convStates: [-1, K-1+m, dim]
     queryStartLoc: [batch+1]
-    cacheIndices: 不开APC: [batch]或None, 开APC: [block, maxNumBlocks]
+    cacheIndices: 不开APC: [batch]或None, 开APC: [batch, maxNumBlocks]
     initialStateMode: [batch]
     bias: [dim] (暂不支持)
     numAcceptedTokens: [batch]
