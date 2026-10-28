@@ -27,11 +27,19 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-import torch_npu
-from torchair.configs.compiler_config import CompilerConfig
-import torchair as tng
+
+try:
+    import torch_npu
+    from torchair.configs.compiler_config import CompilerConfig
+    import torchair as tng
+except ImportError:
+    # Data generation and the CPU reference do not require an NPU runtime.
+    torch_npu = None
+    CompilerConfig = None
+    tng = None
 
 import generate_hifloat8_data as hif8_codec
+
 
 try:
     from cann_ops_transformer_qfmla.ops.attention.quant_flash_mla import (
@@ -50,6 +58,17 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 logger = logging.getLogger(__name__)
+
+
+def _reference_zeros(*size, **kwargs):
+    """CPU FP8 has no fill kernel in some supported PyTorch versions."""
+    device = torch.device(kwargs.get("device", "cpu"))
+    if device.type == "cpu" and kwargs.get("dtype") == torch.float8_e4m3fn:
+        return torch.zeros(*size, **dict(kwargs, dtype=torch.uint8)).view(
+            torch.float8_e4m3fn
+        )
+    return torch.zeros(*size, **kwargs)
+
 
 # ==============================================================================
 # 配置区
@@ -78,6 +97,7 @@ QFMLA_V_HEAD_DIM = D_V  # 512
 
 SEQUSED_Q = [1] * B
 CACHE_SEQLENS = [1024] * B
+CU_SEQLENS_Q = None  # CSV 真实 cu (TND); None 时由 SEQUSED_Q 前缀和派生
 MAX_SEQLEN_Q = -1  # -1 means auto-derive from SEQUSED_Q
 MAX_SEQLEN_KV = -1  # -1 means auto-derive from CACHE_SEQLENS
 # Layout 选择 (TND: query 排布 (T, N_q, D); deq_q 用 TN (T, N_q) 第0维与 query 一致)
@@ -144,7 +164,8 @@ NUM_BLOCKS = 0
 # ==============================================================================
 def get_fp8_per_token_head_quant_scale(tensor):
     """per-token-head quant scale: shape (B, N, S, 1)"""
-    tensor = tensor.contiguous()
+    # Keep the scale floor/division in FP32, including fixed zero inputs.
+    tensor = tensor.float().contiguous()
     B, N, S, _ = tensor.shape
     fp8_e4m3_max = 448.0
     row_max = torch.abs(tensor).max(dim=3, keepdim=True).values
@@ -155,7 +176,8 @@ def get_fp8_per_token_head_quant_scale(tensor):
 
 def get_fp8_per_tensor_quant_scale(tensor):
     """per-tensor quant scale: shape (1,)"""
-    tensor = tensor.contiguous()
+    # Keep the scale floor/division in FP32, including fixed zero inputs.
+    tensor = tensor.float().contiguous()
     fp8_e4m3_max = 448.0
     tensor_max = torch.abs(tensor).max()
     tensor_max = torch.max(tensor_max, torch.tensor(1e-8, device=tensor.device))
@@ -169,7 +191,15 @@ def quant_fp16_to_fp8(tensor, scale):
     scale = scale.contiguous()
     result = tensor.float() * scale
     result = torch.clamp(result, -448.0, 448.0)
-    return result.to(FP8_DTYPE).contiguous()
+    return result.to(torch.float8_e4m3fn).contiguous()
+
+
+# ==============================================================================
+# HIF8 量化 (quant_mode=0): torch 无原生 hifloat8 dtype, 以 uint8 承载 hif8 编码
+#   Q: per-token-head (整 576 维, 与 fp8 一致不降级), K/V: per-tensor
+#   scale 语义与 fp8 相同: 量化时乘 scale (scale = HIF8_MAX/row_max), 反量化乘 1/scale
+# ==============================================================================
+HIF8_MAX = 32768.0
 
 
 # ==============================================================================
@@ -239,26 +269,34 @@ def hif8_cast_p(p_tensor):
 # ==============================================================================
 # Block table / PA cache 工具
 # ==============================================================================
-def create_block_table(cache_seqlens, block_size, seed=SEED_BLOCK_TABLE, num_blocks=0):
-    """创建 block table，num_blocks 控制物理块复用"""
+def create_block_table(
+    cache_seqlens, block_size, seed=SEED_BLOCK_TABLE, num_blocks=0, max_blocks=None
+):
+    """Generate page mappings within the requested physical pool and row width.
+
+    A supplied max_blocks is authoritative. Insufficient row width cannot be
+    materialized; report an input-generation error instead of growing the table.
+    """
+    if block_size <= 0 or any(int(length) < 0 for length in cache_seqlens):
+        raise ValueError(
+            "[INPUTS] cannot materialize pages with nonpositive block size or negative length"
+        )
     block_num_per_batch = [
-        math.ceil(int(seq_len) / block_size) for seq_len in cache_seqlens
+        math.ceil(int(length) / block_size) for length in cache_seqlens
     ]
     total_blocks = sum(block_num_per_batch)
-    max_blocks = max(block_num_per_batch)
+    need_blocks = max(block_num_per_batch, default=0)
+    max_blocks = need_blocks if max_blocks is None else int(max_blocks)
+    if max_blocks < need_blocks:
+        raise ValueError(
+            f"[INPUTS] block_table width {max_blocks} cannot hold {need_blocks} pages"
+        )
 
-    if num_blocks < total_blocks and num_blocks != 0:
-        block_idx_list = np.random.default_rng(seed).integers(
-            0, num_blocks, size=total_blocks, dtype=np.int32
-        )
-    elif num_blocks > total_blocks and num_blocks != 0:
-        block_idx_list = np.random.default_rng(seed).permutation(
-            np.arange(num_blocks, dtype=np.int32)
-        )
-    else:
-        block_idx_list = np.random.default_rng(seed).permutation(
-            np.arange(total_blocks, dtype=np.int32)
-        )
+    pool_size = num_blocks if num_blocks > 0 else total_blocks
+    pool = np.random.default_rng(seed).permutation(np.arange(pool_size, dtype=np.int32))
+    block_idx_list = np.array(
+        [pool[i % pool_size] for i in range(total_blocks)], dtype=np.int32
+    )
 
     block_table = np.full((len(cache_seqlens), max_blocks), -1, dtype=np.int32)
     idx = 0
@@ -300,7 +338,7 @@ def bnsd_to_k_cache(
     total_blocks = sum(block_num_per_seq)
     cache_blocks = num_blocks if num_blocks != 0 else total_blocks
 
-    out_cache = torch.zeros(
+    out_cache = _reference_zeros(
         (cache_blocks, N_dim, block_size, D_dim),
         dtype=k_fp8_bnsd.dtype,
         device=k_fp8_bnsd.device,
@@ -333,7 +371,7 @@ def bnsd_to_v_cache(
     total_blocks = sum(block_num_per_batch)
     cache_blocks = num_blocks if num_blocks != 0 else total_blocks
 
-    out_cache = torch.zeros(
+    out_cache = _reference_zeros(
         (cache_blocks, heads, block_size, dim), dtype=tensor_bnsd.dtype, device=device
     ).contiguous()
 
@@ -365,7 +403,7 @@ def _bnsd_to_pa_bf16(
     total_blocks = sum(block_num_per_batch)
     cache_blocks = num_blocks if num_blocks != 0 else total_blocks
 
-    out_cache = torch.zeros(
+    out_cache = _reference_zeros(
         (cache_blocks, heads, block_size, dim), dtype=tensor_bnsd.dtype, device=device
     ).contiguous()
 
@@ -386,26 +424,46 @@ def _bnsd_to_pa_bf16(
 # ==============================================================================
 # 数据生成
 # ==============================================================================
-def generate_data(device="npu"):
-    """生成 BNSD FP16 Q/K (单个 D 维, head_dim_qk=D) 并做 FP8 量化
+def generate_case_data(
+    *,
+    batch_size,
+    num_heads_q,
+    num_heads_kv,
+    head_dim_qk,
+    head_dim_v,
+    seqused_q,
+    cache_seqlens,
+    quant_mode,
+    q_data_range=(-1.0, 1.0),
+    k_data_range=(-1.0, 1.0),
+    seed_q=54,
+    seed_k=3,
+    p_scale=1.0,
+    device="cpu",
+):
+    """Generate one case from explicit parameters, independent of module state.
 
-    MLA 新接口 quant_flash_mla: q/k_cache 即单个 D 维 (nope 与 rope 已合并),
-    统一量化:
-      - Q: per-token-head 动态量化 (作用于整 D 维)
-      - K: per-tensor 静态量化 (作用于整 D 维)
-      - V = K 的前 D_V 维 (head_dim_v=D_V), 共享 K 的 per-tensor scale
+    MLA quantization remains Q per-token-head, K per-tensor, V=K[..., :D_V].
+    CPU sampling uses a local RNG and never changes NumPy's process RNG.
     """
     device = torch.device(device)
     logger.info("[Data] generation/quantization device=%s", device)
-    max_sq = max(SEQUSED_Q)
-    max_skv = max(CACHE_SEQLENS) if max(CACHE_SEQLENS) > 0 else 1
+    max_sq = max(seqused_q)
+    max_skv = max(cache_seqlens) if max(cache_seqlens) > 0 else 1
     logger.info("[INFO] max_sq=%d, max_skv=%d", max_sq, max_skv)
 
     def _generate_one(seed, data_range, shape, amp_shape):
         """用 base * amp 结构生成数据，最后线性映射到精确范围 [data_range[0], data_range[1]]"""
+        lo, hi = float(data_range[0]), float(data_range[1])
+        if hi < lo:
+            raise ValueError(
+                f"[INPUTS] range upper bound {hi} is less than lower bound {lo}"
+            )
+        if hi == lo:
+            return torch.full(shape, lo, dtype=torch.float16, device=device)
         if device.type == "npu":
             torch.npu.manual_seed(seed)
-            amp_hi = max(abs(data_range[0]), abs(data_range[1]))
+            amp_hi = max(abs(lo), abs(hi))
             amp_lo = max(amp_hi * 0.01, 1e-8)
             log_amps = torch.empty(amp_shape, dtype=torch.float32, device=device)
             log_amps.uniform_(math.log10(amp_lo), math.log10(amp_hi))
@@ -414,33 +472,37 @@ def generate_data(device="npu"):
             flat = data.view(-1)
             for start in range(0, flat.numel(), 4 * 1024 * 1024):
                 flat[start : start + 4 * 1024 * 1024].uniform_(-1.0, 1.0)
-            lo, hi = map(float, data_range)
             data.mul_(token_amps).add_(amp_hi).div_(2 * amp_hi).mul_(hi - lo).add_(lo)
             return data.to(torch.float16)
-        np.random.seed(seed)
-        amp_hi = max(abs(data_range[0]), abs(data_range[1]))
+        rng = np.random.RandomState(seed)
+        amp_hi = max(abs(lo), abs(hi))
         amp_lo = max(amp_hi * 0.01, 1e-8)
         token_amps = np.power(
-            10.0, np.random.uniform(np.log10(amp_lo), np.log10(amp_hi), size=amp_shape)
+            10.0, rng.uniform(np.log10(amp_lo), np.log10(amp_hi), size=amp_shape)
         ).astype(np.float32)
-        base = np.random.uniform(low=-1.0, high=1.0, size=shape).astype(np.float32)
+        base = rng.uniform(low=-1.0, high=1.0, size=shape).astype(np.float32)
         raw = base * token_amps
         normed = (raw + amp_hi) / (2.0 * amp_hi)
-        lo, hi = float(data_range[0]), float(data_range[1])
         data = lo + normed * (hi - lo)
         return torch.from_numpy(data.astype(np.float16))
 
     # 直接按单个 D (qkHeadDim) 生成 Q/K, 不再拆分 nope/rope 分别生成再拼接
     q_fp16 = _generate_one(
-        SEED_Q, Q_DATA_RANGE, (B, N_q, max_sq, D), (B, N_q, max_sq, 1)
+        seed_q,
+        q_data_range,
+        (batch_size, num_heads_q, max_sq, head_dim_qk),
+        (batch_size, num_heads_q, max_sq, 1),
     ).contiguous()
     k_fp16 = _generate_one(
-        SEED_K, K_DATA_RANGE, (B, N_kv, max_skv, D), (B, N_kv, max_skv, 1)
+        seed_k,
+        k_data_range,
+        (batch_size, num_heads_kv, max_skv, head_dim_qk),
+        (batch_size, num_heads_kv, max_skv, 1),
     ).contiguous()
 
     # 量化: Q per-token-head (整 D 维), K per-tensor (整 D 维)
     # HIF8: 编码为 uint8 承载; FP8: torch.float8_e4m3fn
-    if _is_hif8_mode():
+    if quant_mode == 0:
         quant_scale_q = get_hif8_per_token_head_quant_scale(q_fp16)
         quant_scale_k = get_hif8_per_tensor_quant_scale(k_fp16)
 
@@ -463,17 +525,17 @@ def generate_data(device="npu"):
         q_fp8 = quant_fp16_to_fp8(q_fp16, quant_scale_q)
         k_fp8 = quant_fp16_to_fp8(k_fp16, quant_scale_k)
     # MLA: V 使用 K 的前 D_V 维 (head_dim_v=D_V, 即 nope 段)
-    v_fp8 = k_fp8[:, :, :, :D_V].contiguous()
+    v_fp8 = k_fp8[:, :, :, :head_dim_v].contiguous()
 
-    if max(CACHE_SEQLENS) == 0:
-        real_skv = max(CACHE_SEQLENS)
+    if max(cache_seqlens) == 0:
+        real_skv = max(cache_seqlens)
         k_fp8 = k_fp8[:, :, :real_skv, :].contiguous()
         v_fp8 = v_fp8[:, :, :real_skv, :].contiguous()
 
     logger.info("[INFO] q_fp8 shape: %s, dtype: %s", q_fp8.shape, q_fp8.dtype)
     logger.info("[INFO] k_fp8 shape: %s, dtype: %s", k_fp8.shape, k_fp8.dtype)
     logger.info("[INFO] v_fp8 shape: %s, dtype: %s", v_fp8.shape, v_fp8.dtype)
-    logger.info("[INFO] QK head dim: %d", D)
+    logger.info("[INFO] QK head dim: %d", head_dim_qk)
     logger.info(
         "[INFO] deq_k (per-tensor) shape: %s, val: %s",
         dequant_scale_k.shape,
@@ -485,12 +547,12 @@ def generate_data(device="npu"):
         dequant_scale_v,
     )
 
-    p_scale = torch.tensor([P_SCALE], dtype=torch.float32, device=device).contiguous()
+    p_scale = torch.tensor([p_scale], dtype=torch.float32, device=device).contiguous()
 
     # Q/K 的 D_V 之后部分 (rope 段) bf16, 与上面的 fp8 数据同源 (同一次生成),
     # 供独立 rope PA cache 使用, 不再单独生成
-    qr_bf16 = q_fp16[..., D_V:].to(torch.bfloat16).contiguous()
-    kr_bf16 = k_fp16[..., D_V:].to(torch.bfloat16).contiguous()
+    qr_bf16 = q_fp16[..., head_dim_v:].to(torch.bfloat16).contiguous()
+    kr_bf16 = k_fp16[..., head_dim_v:].to(torch.bfloat16).contiguous()
 
     return (
         q_fp8,
@@ -505,6 +567,26 @@ def generate_data(device="npu"):
     )
 
 
+def generate_data(device="npu"):
+    """Backward-compatible standalone-script entry; TTK uses generate_case_data."""
+    return generate_case_data(
+        batch_size=B,
+        num_heads_q=N_q,
+        num_heads_kv=N_kv,
+        head_dim_qk=D,
+        head_dim_v=D_V,
+        seqused_q=SEQUSED_Q,
+        cache_seqlens=CACHE_SEQLENS,
+        quant_mode=QFMLA_QUANT_MODE,
+        q_data_range=Q_DATA_RANGE,
+        k_data_range=K_DATA_RANGE,
+        seed_q=SEED_Q,
+        seed_k=SEED_K,
+        p_scale=P_SCALE,
+        device=device,
+    )
+
+
 # ==============================================================================
 # NPU 排布 → BNSD 转换
 # ==============================================================================
@@ -512,7 +594,7 @@ def _ntd_to_bnsd(q_ntd, seqused_q, n_q):
     """NTD (N_q, T, D) → BNSD (B, N_q, max_Sq, D)"""
     b = len(seqused_q)
     max_sq = max(seqused_q)
-    q_bnsd = torch.zeros(
+    q_bnsd = _reference_zeros(
         (b, n_q, max_sq, q_ntd.shape[-1]), dtype=q_ntd.dtype, device=q_ntd.device
     )
     offset = 0
@@ -530,7 +612,7 @@ def _bnbd_to_bnsd(kv_bnbd, block_table, cache_seqlens, block_size):
     n_kv = kv_bnbd.shape[1]
     d_dim = kv_bnbd.shape[-1]
     max_skv = max(max(cache_seqlens), 1)
-    kv_bnsd = torch.zeros(
+    kv_bnsd = _reference_zeros(
         (b, n_kv, max_skv, d_dim), dtype=kv_bnbd.dtype, device=kv_bnbd.device
     )
 
@@ -554,7 +636,7 @@ def _nt_to_bns1(q_scale_nt, seqused_q, n_q):
     """NT (N_q, T) → BNS1 (B, N_q, max_Sq, 1)"""
     b = len(seqused_q)
     max_sq = max(seqused_q)
-    q_scale_bns1 = torch.zeros(
+    q_scale_bns1 = _reference_zeros(
         (b, n_q, max_sq, 1), dtype=torch.float32, device=q_scale_nt.device
     )
     offset = 0
@@ -571,7 +653,7 @@ def _bnb_to_bns1(k_scale_bnb, block_table, cache_seqlens, block_size):
     b = len(cache_seqlens)
     n_kv = k_scale_bnb.shape[1]
     max_skv = max(max(cache_seqlens), 1)
-    k_scale_bns1 = torch.zeros(
+    k_scale_bns1 = _reference_zeros(
         (b, n_kv, max_skv, 1), dtype=torch.float32, device=k_scale_bnb.device
     )
 
@@ -676,17 +758,18 @@ def torch_broadcast_kv(num_heads, num_kv_heads, tensor):
 _QFMLA_SECTION_CACHE = {}
 
 
-def get_qfmla_section_info(seqused_q, cache_seqlens):
+def get_qfmla_section_info(seqused_q, cache_seqlens, cu_seqlens_q=None):
     """调用 metadata 算子并解码 FA 分核分段信息, 返回 (m_base, s2_base, segments)
 
     segments[bn] = [ [(s2块起, s2块止), ...] 每个 m-block 的分段列表 ]
-    解码失败或未开启 ENABLE_SECTION_GOLDEN 时返回 None, golden 退化为全局量化语义。
+    未开启时返回None；显式开启后的生成/解码错误会报告失败，不切换数值语义。
     """
     if not ENABLE_SECTION_GOLDEN:
         return None
     key = (
         tuple(int(s) for s in seqused_q),
         tuple(int(s) for s in cache_seqlens),
+        tuple(int(v) for v in cu_seqlens_q) if cu_seqlens_q is not None else None,
         N_q,
         N_kv,
         MASK_MODE,
@@ -694,19 +777,16 @@ def get_qfmla_section_info(seqused_q, cache_seqlens):
     )
     if key in _QFMLA_SECTION_CACHE:
         return _QFMLA_SECTION_CACHE[key]
-    info = _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens)
+    info = _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens, cu_seqlens_q)
     _QFMLA_SECTION_CACHE[key] = info
     return info
 
 
-def _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens):
+def _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens, cu_seqlens_q=None):
     if quant_flash_mla_metadata is None:
-        logger.warning("[Section] metadata 算子不可用, golden 使用全局量化语义")
-        return None
-    # This NPU metadata call is only a golden optimization.  Deliberately
-    # invalid sequence values must not reach AICPU here: even when its error is
-    # caught below, the failed task poisons the stream and masks the real
-    # operator/preprocess validation with a later EE9999 synchronization error.
+        raise RuntimeError("[Section] requested metadata reference is unavailable")
+    # Legacy standalone path only. Current TTK decodes supplied metadata on CPU.
+    # Refuse unmaterializable lengths before this optional NPU task.
     cache_values = [int(value) for value in cache_seqlens]
     query_values = [int(value) for value in seqused_q]
     invalid_cache = (
@@ -720,27 +800,31 @@ def _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens):
         or (MAX_SEQLEN_Q > 0 and any(value > MAX_SEQLEN_Q for value in query_values))
     )
     if invalid_cache or invalid_query:
-        logger.warning(
-            "[Section] skip NPU metadata for invalid golden sequence values; "
-            "use full CPU attention instead"
+        raise ValueError(
+            "[Section] cannot materialize the requested reference from invalid lengths"
         )
-        return None
     try:
         cache_seqlens_t = torch.tensor(
             cache_seqlens, dtype=torch.int32, device="npu"
         ).contiguous()
         # 非 TND (BNSD/BSND) 时 op 不支持 cu_seqlens_q, 传 None
         if INPUT_LAYOUT == "TND":
-            cu_q = [0]
-            acc = 0
-            for s in seqused_q:
-                acc += int(s)
-                cu_q.append(acc)
-            cu_seqlens_q = torch.tensor(
+            # 优先使用 CSV 的真实 cu (padding 场景下 seqused 前缀和 != 物理布局);
+            # 仅未提供cu时按seqused构造紧凑偏移；显式非法cu报错。
+            valid_cu = _normalize_cu_seqlens(cu_seqlens_q, seqused_q)
+            if valid_cu is not None:
+                cu_q = valid_cu
+            else:
+                cu_q = [0]
+                acc = 0
+                for s in seqused_q:
+                    acc += int(s)
+                    cu_q.append(acc)
+            cu_seqlens_q_t = torch.tensor(
                 cu_q, dtype=torch.int32, device="npu"
             ).contiguous()
         else:
-            cu_seqlens_q = None
+            cu_seqlens_q_t = None
         seqused_q_t = torch.tensor(
             seqused_q, dtype=torch.int32, device="npu"
         ).contiguous()
@@ -751,7 +835,7 @@ def _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens):
             num_heads_q=N_q,
             num_heads_kv=N_kv,
             quant_mode=QFMLA_QUANT_MODE,
-            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_q=cu_seqlens_q_t,
             seqused_q=seqused_q_t,
             max_seqlen_q=max_sq,
             max_seqlen_kv=max_skv,
@@ -764,10 +848,7 @@ def _build_qfmla_section_info_by_meta(seqused_q, cache_seqlens):
         meta_flat = meta.contiguous().cpu().view(-1).tolist()
         return _decode_qfmla_sections(meta_flat, seqused_q, cache_seqlens)
     except Exception as exc:  # pylint: disable=broad-except
-        logger.warning(
-            "[Section] metadata 调用/解码失败(%s), golden 使用全局量化语义", exc
-        )
-        return None
+        raise RuntimeError("[Section] requested metadata reference failed") from exc
 
 
 def _decode_qfmla_sections(meta_flat, seqused_q, cache_seqlens):
@@ -874,7 +955,7 @@ def _fp8_fullquant_mla_golden_sectioned(
     deq_k_scalar = deq_k.reshape(-1)[0] if deq_k.numel() == 1 else deq_k
     deq_v_scalar = deq_v.reshape(-1)[0] if deq_v.numel() == 1 else deq_v
 
-    result = torch.zeros(
+    result = _reference_zeros(
         (batch, heads, q_seq, v_dim), dtype=torch.float32, device=q_tensor.device
     )
     lse = torch.full(
@@ -910,10 +991,10 @@ def _fp8_fullquant_mla_golden_sectioned(
                 dq_sel = deq_q[b, head_idx, s1_idx, 0]
                 dq_scaled = (dq_sel * softmax_scale)[:, None]
 
-                o_g = torch.zeros(
+                o_g = _reference_zeros(
                     (r1 - r0, v_dim), dtype=torch.float32, device=q_tensor.device
                 )
-                s_g = torch.zeros(
+                s_g = _reference_zeros(
                     (r1 - r0, 1), dtype=torch.float32, device=q_tensor.device
                 )
                 m_g = torch.full(
@@ -1011,6 +1092,7 @@ def fp8_fullquant_mla_golden(
     kr_bf16=None,
     *,
     golden_device="npu",
+    section_info=None,
 ):
     """Device-selectable golden reference - MLA flash attention with FP8 quantization
 
@@ -1041,7 +1123,7 @@ def fp8_fullquant_mla_golden(
 
     # 空 KV 场景
     if k_tensor.shape[2] == 0:
-        result = torch.zeros(
+        result = _reference_zeros(
             (batch, heads, q_seq, v_dim), dtype=torch.float32, device=device
         ).contiguous()
         lse = torch.full(
@@ -1050,7 +1132,8 @@ def fp8_fullquant_mla_golden(
         return result, lse
 
     # 对齐 kernel 分段量化语义: 解码 metadata 分核分段, 按 (bn, m-block) 分段模拟
-    section_info = get_qfmla_section_info(seqused_q, cache_seqlens)
+    if section_info is None:
+        section_info = get_qfmla_section_info(seqused_q, cache_seqlens, CU_SEQLENS_Q)
     if section_info is not None:
         return _fp8_fullquant_mla_golden_sectioned(
             q_tensor,
@@ -1064,10 +1147,10 @@ def fp8_fullquant_mla_golden(
             section_info,
         )
 
-    out = torch.zeros(
+    out = _reference_zeros(
         (batch, heads, q_seq, v_dim), dtype=torch.float32, device=q_tensor.device
     ).contiguous()
-    o_sum = torch.zeros(
+    o_sum = _reference_zeros(
         q_tensor.shape[:-1], dtype=torch.float32, device=q_tensor.device
     )[..., None].contiguous()
     minValue = torch.tensor(
@@ -1202,8 +1285,8 @@ def _fixed_block_section_info(seqused_q, cache_seqlens):
     """按 s2 基本块(256 列)固定切段, 与 kernel 分核分段解耦
 
     kernel 的一个段是若干连续基本块在分核后的并集, 所以按单块切段的分段粒度
-    最细、段数最多; 作为三方 third_party 时其量化噪声只会不小于 target, 判据
-    不会因参考过干净而虚高。返回 (m_base, s2_base, segments), segments[bn][mi]
+    最细、段数最多。这是独立的固定分块近似参考，不保证其误差大于或小于
+    target，也不等同于目标设备metadata调度。返回(m_base, s2_base, segments)，segments[bn][mi]
     为该 m-block 的 [(s2块起, s2块止), ...] 分段列表。
     """
     group = N_q // N_kv
@@ -1231,9 +1314,8 @@ def fp8_fullquant_mla_sectioned_golden(
 ):
     """分段量化 golden, 仅供三方 cross_check 作为 third_party 使用。
 
-    两方 golden 固定走全局量化语义(fp8_fullquant_mla_golden); 本函数复刻 kernel
-    每个 s2 分段独立 running max + P 量化的行为, 使 third_party 的噪声水平与
-    target 可比。分段固定按 s2 基本块(256 列)切, 不依赖 metadata 分核规划。
+    默认两方golden使用全局量化；本函数使用固定256列分块的running max和P量化。
+    它是独立数值近似，不复现目标设备metadata分核规划，也不保证误差大小关系。
     """
     device = torch.device(golden_device)
     if _is_hif8_mode():
@@ -1307,7 +1389,7 @@ def fp8_fullquant_mla_bench(
 
     # 空 KV 场景
     if k_t.shape[2] == 0:
-        result = torch.zeros(
+        result = _reference_zeros(
             (batch, heads, q_seq, v_dim), dtype=torch.float32, device=device
         )
         lse = torch.full(
@@ -1330,8 +1412,10 @@ def fp8_fullquant_mla_bench(
     if MASK_MODE == 3:
         mask = mask | (k_range > (q_range + (k_lens - q_lens)))
 
-    out = torch.zeros((batch, heads, Sq, v_dim), dtype=torch.float64, device=device)
-    o_sum = torch.zeros((batch, heads, Sq, 1), dtype=torch.float64, device=device)
+    out = _reference_zeros(
+        (batch, heads, Sq, v_dim), dtype=torch.float64, device=device
+    )
+    o_sum = _reference_zeros((batch, heads, Sq, 1), dtype=torch.float64, device=device)
     o_max = torch.full(
         (batch, heads, Sq, 1), float("-inf"), dtype=torch.float64, device=device
     )
@@ -1394,8 +1478,28 @@ def fp8_fullquant_mla_bench(
 # ==============================================================================
 # Layout 转换
 # ==============================================================================
-def convert_q_bnsd_to_layout(tensor_bnsd, seq_lens, layout):
-    """BNSD → 各种 layout"""
+def _normalize_cu_seqlens(cu_seqlens, seq_lens):
+    """Interpret explicit physical offsets; None alone selects compact layout."""
+    if cu_seqlens is None:
+        return None
+    cu = [int(value) for value in cu_seqlens]
+    if len(cu) != len(seq_lens) + 1 or cu[0] != 0:
+        raise ValueError("[INPUTS] explicit cu cannot describe the synthesis batches")
+    for idx, length in enumerate(seq_lens):
+        if length < 0 or cu[idx + 1] < cu[idx] or cu[idx] + length > cu[idx + 1]:
+            raise ValueError(
+                "[INPUTS] explicit cu cannot contain the requested synthesis rows"
+            )
+    return cu
+
+
+def convert_q_bnsd_to_layout(tensor_bnsd, seq_lens, layout, cu_seqlens=None):
+    """BNSD → 各种 layout
+
+    cu_seqlens: TND/NTD_TND 时用于按物理偏移放置, T=cu_seqlens[-1],
+                seq_lens[b] 之后到 cu 段末之间保持 0 (padding); 为 None 时
+                按 seq_lens 紧凑拼接 (T=sum(seq_lens))。
+    """
     tensor = (
         tensor_bnsd
         if isinstance(tensor_bnsd, torch.Tensor)
@@ -1417,8 +1521,24 @@ def convert_q_bnsd_to_layout(tensor_bnsd, seq_lens, layout):
             .contiguous()
         )
     elif layout == "TND":
+        cu = _normalize_cu_seqlens(cu_seqlens, seq_lens)
+        if cu is not None:
+            T = cu[-1]
+            result = _reference_zeros(
+                (T, n, d), dtype=tensor.dtype, device=tensor.device
+            )
+            for b_idx in range(b):
+                act_s = int(seq_lens[b_idx])
+                if act_s <= 0:
+                    continue
+                offset = cu[b_idx]
+                for n_idx in range(n):
+                    result[offset : offset + act_s, n_idx, :] = tensor[
+                        b_idx, n_idx, :act_s, :
+                    ]
+            return result.contiguous()
         T = sum(seq_lens)
-        result = torch.zeros((T, n, d), dtype=tensor.dtype, device=tensor.device)
+        result = _reference_zeros((T, n, d), dtype=tensor.dtype, device=tensor.device)
         t = 0
         for b_idx in range(b):
             act_s = seq_lens[b_idx]
@@ -1427,8 +1547,24 @@ def convert_q_bnsd_to_layout(tensor_bnsd, seq_lens, layout):
             t += act_s
         return result.contiguous()
     elif layout == "NTD_TND":
+        cu = _normalize_cu_seqlens(cu_seqlens, seq_lens)
+        if cu is not None:
+            T = cu[-1]
+            result = _reference_zeros(
+                (n, T, d), dtype=tensor.dtype, device=tensor.device
+            )
+            for b_idx in range(b):
+                act_s = int(seq_lens[b_idx])
+                if act_s <= 0:
+                    continue
+                offset = cu[b_idx]
+                for n_idx in range(n):
+                    result[n_idx, offset : offset + act_s, :] = tensor[
+                        b_idx, n_idx, :act_s, :
+                    ]
+            return result.contiguous()
         T = sum(seq_lens)
-        result = torch.zeros((n, T, d), dtype=tensor.dtype, device=tensor.device)
+        result = _reference_zeros((n, T, d), dtype=tensor.dtype, device=tensor.device)
         t = 0
         for b_idx in range(b):
             act_s = seq_lens[b_idx]
@@ -1440,36 +1576,47 @@ def convert_q_bnsd_to_layout(tensor_bnsd, seq_lens, layout):
         raise ValueError(f"Unsupported layout: {layout}")
 
 
-def convert_scale_to_layout(tensor, seq_lens, scale_type):
-    """Scale to layout"""
+def convert_scale_to_layout(
+    tensor, seq_lens, scale_type, cu_seqlens=None, *, input_layout=None
+):
+    """Scale to layout
+
+    cu_seqlens: TND 时按物理偏移放置, T=cu_seqlens[-1]; seq_lens[b] 之后到段末
+                之间保持 0 (padding)。为 None 时按 seq_lens 紧凑拼接。
+    """
     tensor = tensor.contiguous()
     if scale_type == "deq_q":
         b, n, _, _ = tensor.shape
-        T = sum(seq_lens)
+        cu = _normalize_cu_seqlens(cu_seqlens, seq_lens)
+        T = cu[-1] if cu is not None else sum(seq_lens)
         # Q scale layout 由 INPUT_LAYOUT 自动推导 (不暴露 Q_SCALE_LAYOUT 字段)
-        q_scale_layout = _Q_SCALE_LAYOUT_MAP.get(INPUT_LAYOUT, "BNS")
+        q_scale_layout = _Q_SCALE_LAYOUT_MAP.get(
+            INPUT_LAYOUT if input_layout is None else input_layout, "BNS"
+        )
         if q_scale_layout == "NT":
-            result = torch.zeros((n, T), dtype=torch.float32, device=tensor.device)
+            result = _reference_zeros((n, T), dtype=torch.float32, device=tensor.device)
             t = 0
             for b_idx in range(b):
                 act_s = seq_lens[b_idx]
+                off = cu[b_idx] if cu is not None else t
                 for n_idx in range(n):
-                    result[n_idx, t : t + act_s] = tensor[b_idx, n_idx, :act_s, 0]
+                    result[n_idx, off : off + act_s] = tensor[b_idx, n_idx, :act_s, 0]
                 t += act_s
             return result.contiguous()
         elif q_scale_layout == "TN":
-            result = torch.zeros((T, n), dtype=torch.float32, device=tensor.device)
+            result = _reference_zeros((T, n), dtype=torch.float32, device=tensor.device)
             t = 0
             for b_idx in range(b):
                 act_s = seq_lens[b_idx]
+                off = cu[b_idx] if cu is not None else t
                 for n_idx in range(n):
-                    result[t : t + act_s, n_idx] = tensor[b_idx, n_idx, :act_s, 0]
+                    result[off : off + act_s, n_idx] = tensor[b_idx, n_idx, :act_s, 0]
                 t += act_s
             return result.contiguous()
         elif q_scale_layout == "BNS":
             # BNSD→BNS: S 取自 tensor 第 2 维, 不依赖 seq_lens
             s_dim = tensor.shape[2]
-            result = torch.zeros(
+            result = _reference_zeros(
                 (b, n, s_dim), dtype=torch.float32, device=tensor.device
             )
             for b_idx in range(b):
@@ -1479,7 +1626,7 @@ def convert_scale_to_layout(tensor, seq_lens, scale_type):
             return result.contiguous()
         elif q_scale_layout == "BSN":
             s_dim = tensor.shape[2]
-            result = torch.zeros(
+            result = _reference_zeros(
                 (b, s_dim, n), dtype=torch.float32, device=tensor.device
             )
             for b_idx in range(b):

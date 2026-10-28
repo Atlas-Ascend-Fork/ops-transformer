@@ -9,164 +9,122 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""Populate the QuantFlashMla metadata slot before the main API call.
+"""Materialize only explicit metadata placeholders without repairing inputs.
 
-This module is intentionally independent from TTK.  The framework passes the
-main API arguments after H2D; this hook invokes the companion torch operator
-``quant_flash_mla_metadata`` and updates ``metadata`` in place.  Profiling and
-result handling remain in TTK, and the hook always returns ``None`` for static
-slots or ``{"metadata": generated}`` for dynamic slots (CSV -1 placeholder).
-
-The metadata construction was extracted from the two-phase golden
-implementations that previously called ``quant_flash_mla_metadata`` followed by
-``quant_flash_mla``; structure mirrors
-``quant_flash_attn/tests/assets/impl/npu_preprocess.py``.
+TTK calls this hook after H2D. Main-op tensors are authoritative; *_values
+are written by inputs.py, never reconstructed here. None / int32 (0,) / a
+zero-filled int32 (2, N) buffer request metadata generation in auto mode.
+Nonzero metadata and malformed shapes/dtypes are passed through unchanged.
 """
 
 import logging
-
 import torch
-
 
 logger = logging.getLogger(__name__)
 
 
 def get_attribute(kwargs, name, default=None):
-    """Resolve an attribute from ``kwargs`` with an optional ``pytest_`` alias."""
     value = kwargs.get(name)
     if value is None:
         value = kwargs.get(f"pytest_{name}")
     return default if value is None else value
 
 
-def get_values(kwargs, name):
-    """Read a ``*_values`` sidecar list, if present, into a python list."""
-    value = kwargs.get(f"{name}_values")
-    if value is None:
+def _dimension(tensor, axis):
+    if (
+        not torch.is_tensor(tensor)
+        or axis is None
+        or not -tensor.ndim <= axis < tensor.ndim
+    ):
         return None
-    if torch.is_tensor(value):
-        return value.detach().cpu().reshape(-1).tolist()
-    return [int(item) for item in value]
+    return tensor.shape[axis]
 
 
-def _resolve_tensor(tensor, kwargs, name):
-    """把 cu_seqlens/seqused 位置参数归一成 None 或有效 tensor。
-
-    直调 op 后, 这些位置参数可能是空 (0,) 张量 (CSV 空 slot 生成); 当对应的
-    ``*_values`` 属性为 None 或空列表 (BSND/BNSD 用例 CSV 填 []) 时, 归一成
-    None 而非空张量——否则 metadata 算子会把空张量的 size(0)=0 误当 batch_size,
-    host 端 CheckSeqLens 报 "cuSeqLens shape must be (batchSize+1,), but got 0"。
-    参考 quant_flash_attn/tests/assets/impl/npu_preprocess.py 的 _resolve_tensor。
-    """
-    if tensor is not None and int(torch.as_tensor(tensor).numel()) > 0:
-        return tensor
-    values = get_values(kwargs, name)
-    if not values:
-        return None
-    return torch.as_tensor(values, dtype=torch.int32)
-
-
-def _max_seqlen(kwargs, name):
-    """透传 CSV 的 max_seqlen_q/kv, 空则 -1。
-
-    metadata 的 max_seqlen_q/kv 必须与主算子 quant_flash_mla 拿到的值一致:
-    主算子由 ttk 按 CSV 属性直调 (空 → None → -1), 因此这里不能从 seqused/cu_seqlens
-    派生真实值, 否则 metadata 与主算子对序列边界的理解不一致, 导致 npu 输出错误。
-    参考 quant_flash_attn/tests/assets/impl/npu_preprocess.py 的 _max_seqlen。
-    """
-    explicit = get_attribute(kwargs, f"max_seqlen_{name}")
-    if explicit is not None:
-        return int(explicit)
-    return -1
-
-
-def build_metadata_arguments(q, cu_seqlens_q, seqused_q, kwargs):
-    """Derive ``quant_flash_mla_metadata`` arguments from the main invocation."""
-    # D 属性已统一为算子侧 QK 总 head dim (qkHeadDim, 576), 只有一个 D,
-    # metadata 所需的 head_dim_qk 即 D。仿照
-    # quant_flash_attn/tests/assets/impl/npu_preprocess.py 的 head_dim 解析:
-    #   ① 优先 head_dim_qk 显式属性 (异常用例可原样透传被算子拦截)
-    #   ② 退化到 Q 张量最后一维 (永远等于真实 head_dim_qk)
-    head_dim_qk = int(
-        get_attribute(
-            kwargs,
-            "head_dim_qk",
-            q.shape[-1],
-        )
+def _omitted_sequence(tensor):
+    # Match only the documented legacy int32 (0,) slot convention when
+    # deriving a dense scheduling length; preserve every actual main input.
+    return tensor is None or (
+        torch.is_tensor(tensor)
+        and tensor.dtype == torch.int32
+        and tuple(tensor.shape) == (0,)
     )
 
-    num_heads_q = int(
-        get_attribute(
+
+def build_metadata_arguments(q, cu_seqlens_q, seqused_q, kwargs, k_cache=None):
+    """Infer missing metadata attributes from real layouts, keeping overrides."""
+    layout_q = kwargs.get("layout_q", "TND")
+    layout_kv = kwargs.get("layout_kv", "PA_BNBD")
+    q_axis = {"TND": 1, "BNSD": 1, "BSND": 2}.get(layout_q)
+    kv_axis = {"PA_BNBD": 1, "PA_BBND": 2, "PA_NZ": 1}.get(layout_kv)
+    arguments = {
+        "num_heads_q": get_attribute(
+            kwargs, "num_heads_q", get_attribute(kwargs, "N_q", _dimension(q, q_axis))
+        ),
+        "num_heads_kv": get_attribute(
             kwargs,
-            "N_q",
-            get_attribute(kwargs, "num_heads_q", q.shape[1]),
-        )
-    )
-    num_heads_kv = int(get_attribute(kwargs, "N_kv", 1))
-
-    # 空 (0,) 张量归一成 None, 否则 metadata 算子重算 batch_size 时会把
-    # size(0)=0 误当 batch (参考 quant_flash_attn 资产的 _resolve_tensor)。
-    cu_q = _resolve_tensor(cu_seqlens_q, kwargs, "cu_seqlens_q")
-    seq_q = _resolve_tensor(seqused_q, kwargs, "seqused_q")
-
-    layout_q = str(get_attribute(kwargs, "layout_q", "TND"))
-    max_seqlen_q = _max_seqlen(kwargs, "q")
-    # 非 TND 且 cu/seqused 都未传时, metadata AICPU 侧无 Q 长度信息(querySeqSize=0),
-    # ParamsInit 报 "invalid seq size", 框架表现为 AICPU errcode 22007; 从 q 视图
-    # 形状推导 S 维补齐: BSND=(B,S,N,D)取shape[1], BNSD=(B,N,S,D)取shape[2]。
-    if layout_q != "TND" and cu_q is None and seq_q is None and max_seqlen_q < 0:
-        max_seqlen_q = int(q.shape[2] if layout_q == "BNSD" else q.shape[1])
-
-    return {
-        "num_heads_q": num_heads_q,
-        "num_heads_kv": num_heads_kv,
-        "head_dim_qk": head_dim_qk,
-        "quant_mode": int(get_attribute(kwargs, "quant_mode", 1)),
-        "cu_seqlens_q": cu_q,
-        "seqused_q": seq_q,
-        "max_seqlen_q": max_seqlen_q,
-        "max_seqlen_kv": _max_seqlen(kwargs, "kv"),
-        "head_dim_v": get_attribute(kwargs, "head_dim_v"),
-        "mask_mode": int(get_attribute(kwargs, "mask_mode", 0)),
+            "num_heads_kv",
+            get_attribute(kwargs, "N_kv", _dimension(k_cache, kv_axis)),
+        ),
+        "head_dim_qk": get_attribute(
+            kwargs, "head_dim_qk", get_attribute(kwargs, "D", _dimension(q, -1))
+        ),
+        "head_dim_v": kwargs.get("head_dim_v", 512),
+        "quant_mode": kwargs.get("quant_mode", 1),
+        "mask_mode": kwargs.get("mask_mode", 0),
         "layout_q": layout_q,
+        "cu_seqlens_q": cu_seqlens_q,
+        "seqused_q": seqused_q,
+        "max_seqlen_q": kwargs.get("max_seqlen_q", -1),
+        "max_seqlen_kv": kwargs.get("max_seqlen_kv", -1),
     }
-
-
-def move_to_device(value, target):
-    if value is None:
-        return None
-    if torch.is_tensor(value):
-        return value.to(device=target.device)
-    return torch.as_tensor(value, device=target.device)
+    # Dense Q with no length tensors means all S rows are used. Metadata has
+    # no q input, so give it that equivalent length; leave explicit bounds
+    # (including invalid negatives) and the main-op arguments untouched.
+    if (
+        layout_q in ("BSND", "BNSD")
+        and torch.is_tensor(q)
+        and q.ndim == 4
+        and _omitted_sequence(cu_seqlens_q)
+        and _omitted_sequence(seqused_q)
+        and arguments["max_seqlen_q"] in (None, -1)
+    ):
+        s_axis = 1 if layout_q == "BSND" else 2
+        arguments["seqused_q"] = torch.full(
+            (q.shape[0],), q.shape[s_axis], dtype=torch.int32, device=q.device
+        )
+    return arguments
 
 
 def run_metadata(arguments, cache_seqlens):
-    """Call quant_flash_mla_metadata using device-anchored tensors.
+    import cann_ops_transformer  # noqa: F401 (register actual Torch operator)
 
-    ``cache_seqlens`` is the main op's cache_seqlens input (already on device),
-    used both as the metadata op's required first positional input and as the
-    device anchor for tensors materialized from CSV ``*_values`` sidecars.
-    """
-    import cann_ops_transformer  # noqa: F401  (ensure op registration)
-
+    # Already prepared by TTK. Do not cast dtype, move to a default NPU,
+    # repair a sequence, or round a scalar before calling the real API.
     return torch.ops.cann_ops_transformer.quant_flash_mla_metadata(
-        cache_seqlens=cache_seqlens,
-        num_heads_q=int(arguments["num_heads_q"]),
-        num_heads_kv=int(arguments["num_heads_kv"]),
-        quant_mode=int(arguments["quant_mode"]),
-        cu_seqlens_q=move_to_device(arguments.get("cu_seqlens_q"), cache_seqlens),
-        seqused_q=move_to_device(arguments.get("seqused_q"), cache_seqlens),
-        max_seqlen_q=int(arguments["max_seqlen_q"]),
-        max_seqlen_kv=int(arguments["max_seqlen_kv"]),
-        head_dim_qk=int(arguments["head_dim_qk"]),
-        head_dim_v=(
-            None
-            if arguments.get("head_dim_v") is None
-            else int(arguments["head_dim_v"])
-        ),
-        mask_mode=int(arguments["mask_mode"]),
-        layout_q=str(arguments["layout_q"]),
+        cache_seqlens=cache_seqlens, **arguments
     )
+
+
+def _metadata_slot_kind(metadata):
+    if metadata is None:
+        return "dynamic"
+    if not torch.is_tensor(metadata) or metadata.dtype != torch.int32:
+        return "explicit"
+    if tuple(metadata.shape) == (0,):
+        return "legacy"
+    if metadata.ndim != 2 or metadata.shape[0] != 2 or metadata.shape[1] <= 0:
+        return "explicit"
+    return "buffer" if torch.count_nonzero(metadata).item() == 0 else "explicit"
+
+
+def _copy_metadata_payload(metadata, generated):
+    """Materialize an auto placeholder only when its shape matches the API output."""
+    if tuple(metadata.shape) != tuple(generated.shape):
+        raise ValueError(
+            f"[PREPROCESS] metadata placeholder {tuple(metadata.shape)} != generated {tuple(generated.shape)}; "
+            "use a dynamic slot, or metadata_policy=preserve for a raw metadata test"
+        )
+    metadata.copy_(generated)
 
 
 def run(
@@ -193,60 +151,40 @@ def run(
     return_softmax_lse=False,
     **kwargs,
 ):
-    """Materialize metadata after H2D, before timing and graph capture.
+    """Generate metadata only for recognized slots; never replace main inputs.
 
-    Signature mirrors ``torch.ops.cann_ops_transformer.quant_flash_mla`` so TTK
-    delivers the op-schema-ordered positional args; extra sidecar attributes
-    (N_q / N_kv / D / head_dim_v / *_values ...) arrive via kwargs.
-
-    动态槽位 (CSV tensor_view_shapes 含 -1, ttk 传 metadata=None): 按参数名返回
-    ``{"metadata": generated}``, 由 ttk 回填主算子 args/kwargs;
-    静态槽位 (旧 (0,) 占位或已有 Tensor): 原地 resize_/copy_ 回填并隐式返回 None。
+    metadata_policy=preserve bypasses generation even for None/zero slots,
+    for replay or metadata-negative tests. Default auto recognizes only the
+    placeholder forms described in the module docstring.
     """
-    if quant_mode is None:
-        quant_mode = get_attribute(kwargs, "quant_mode", 1)
-    # 位置标量参数桥接进 kwargs, 供 build_metadata_arguments 统一读取。
-    hook_kwargs = dict(kwargs)
-    hook_kwargs.setdefault("quant_mode", quant_mode)
-    hook_kwargs.setdefault("mask_mode", mask_mode)
-    hook_kwargs.setdefault("max_seqlen_q", max_seqlen_q)
-    hook_kwargs.setdefault("max_seqlen_kv", max_seqlen_kv)
-    hook_kwargs.setdefault("head_dim_v", head_dim_v)
-    hook_kwargs.setdefault("layout_q", layout_q)
-    testcase_name = hook_kwargs.get("testcase_name", "unknown")
-    logging.info(
-        "[%s] build QuantMla metadata (quant_mode=%s)", testcase_name, quant_mode
-    )
-
-    arguments = build_metadata_arguments(q, cu_seqlens_q, seqused_q, hook_kwargs)
-    cache_seqlens_t = cache_seqlens.npu()
-    # run_metadata 需要 device 锚点 tensor, 用 cache_seqlens (主算子必传输入)。
-    generated = run_metadata(arguments, cache_seqlens_t)
-    logging.info(
-        "[%s] metadata generated, shape=%s", testcase_name, tuple(generated.shape)
-    )
-
-    # 动态槽位 (CSV tensor_view_shapes 含 -1, ttk 传入 None): 按参数名物化并返回,
-    # 由 ttk 回填主算子调用;
-    # 静态槽位 (已有 Tensor): 原地 resize_/copy_ 回填并返回 None。
-    if metadata is None:
-        logging.info(
-            "[%s] materialize dynamic metadata slot: shape=%s",
-            testcase_name,
-            tuple(generated.shape),
+    policy = kwargs.get("metadata_policy", "auto")
+    if policy not in ("auto", "preserve"):
+        raise ValueError("metadata_policy must be 'auto' or 'preserve'")
+    kind = _metadata_slot_kind(metadata) if policy == "auto" else "explicit"
+    if kind == "explicit":
+        logger.info(
+            "[%s] keeping supplied metadata for main-op validation/execution",
+            kwargs.get("testcase_name", "unknown"),
         )
+        return None
+    # Bound schema arguments are authoritative over sidecar/pytest aliases.
+    attributes = dict(kwargs)
+    attributes.update(
+        quant_mode=quant_mode,
+        mask_mode=mask_mode,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_kv=max_seqlen_kv,
+        head_dim_v=head_dim_v,
+        layout_q=layout_q,
+        layout_kv=layout_kv,
+    )
+    arguments = build_metadata_arguments(
+        q, cu_seqlens_q, seqused_q, attributes, k_cache=k_cache
+    )
+    generated = run_metadata(arguments, cache_seqlens)
+    if kind == "dynamic":
         return {"metadata": generated}
-
-    # 与 quant_flash_attn/tests/assets/impl/npu_preprocess.py 对齐:
-    # 旧 (0,) 占位 -> resize 到 generated.shape;
-    # 其它 shape 不一致直接报错, 不 silently reshape——CSV 配错 metadata shape
-    # 必须被显式暴露, 不应被 plugin 掩盖。
-    if tuple(metadata.shape) == (0,):
+    if kind == "legacy":
         metadata.resize_(generated.shape)
-    if tuple(metadata.shape) != tuple(generated.shape):
-        raise ValueError(
-            "QuantMla metadata shape mismatch: "
-            f"placeholder={tuple(metadata.shape)}, generated={tuple(generated.shape)}"
-        )
-    metadata.copy_(generated.to(dtype=metadata.dtype, device=metadata.device))
+    _copy_metadata_payload(metadata, generated)
     return None

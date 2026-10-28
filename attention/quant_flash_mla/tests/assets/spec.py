@@ -83,6 +83,7 @@ class QuantMlaSpec:
                 bench_outputs=golden_impl.peek_bench(testcase_name),
                 third_party_outputs=golden_impl.peek_sectioned_ref(testcase_name),
                 spec_tolerance=impl.CROSS_CHECK_TOLERANCE,
+                cross_check_requested=True,
                 **kwargs,
             )
         return impl.compare(*outputs, **kwargs)
@@ -104,7 +105,11 @@ class QuantMlaSpec:
 class QuantMlaMetadataSpec:
     """quant_flash_mla_metadata spec (metadata-only op)."""
 
-    customize_inputs = staticmethod(lambda *a, **kw: None)
+    @staticmethod
+    def customize_inputs(*args, **kwargs):
+        return load_impl_module(
+            "metadata_inputs"
+        ).generate_quant_flash_mla_metadata_inputs(*args, **kwargs)
 
 
 __spec__ = {

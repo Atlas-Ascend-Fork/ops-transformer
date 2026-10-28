@@ -149,7 +149,7 @@ def _row(name, shapes, attrs, dtypes=_DTYPES):
         "",
         repr(attrs),
         "",
-        "",
+        "" if name == "Normal_baseline" else "disable",
         _DRANGE,
         _PRECISION,
         _ABS,

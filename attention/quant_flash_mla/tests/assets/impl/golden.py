@@ -13,28 +13,22 @@
 
 """TTK golden plugin for quant_flash_mla.
 
-Regenerates BNSD data via generate_data() (same seeds → same data as inputs),
-calls the CPU golden reference, converts output to target layout, and returns
+Recovers BNSD data from the actual TTK tensor slots, calls the CPU reference,
+converts output to the target layout, and returns
 (attention_out, lse_out) for comparison.
 """
 
 import importlib.util
 import logging
-import math
 import os
 import sys
 
-import numpy as np
 import torch
 
 _ASSETS_DIR = os.path.dirname(os.path.abspath(__file__))
 _GOLDEN_DIR = os.path.join(_ASSETS_DIR, "..")  # assets/
 if _GOLDEN_DIR not in sys.path:
     sys.path.insert(0, _GOLDEN_DIR)
-# golden 模块依赖 pytest/common/ 下的 result_compare_method
-_COMMON_DIR = os.path.join(_ASSETS_DIR, "..", "..", "pytest", "common")
-if _COMMON_DIR not in sys.path:
-    sys.path.insert(0, _COMMON_DIR)
 
 _GOLDEN_MODULE_NAME = "qfmla_assets_golden_reference"
 if _GOLDEN_MODULE_NAME in sys.modules:
@@ -50,239 +44,66 @@ else:
 
 logger = logging.getLogger(__name__)
 
-_KV_LAYOUT_REVERSE = {
-    "PA_BNBD": "BnNBsD",
-    "PA_BBND": "BnBsND",
-    "PA_NZ": "NZ",
-}
+
+def _load_local(stem):
+    name = f"qfmla_assets_impl_{stem}"
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(
+        name, os.path.join(_ASSETS_DIR, stem + ".py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
-def _set_golden_globals(
+def _configure_reference(
+    cfg,
     quant_mode,
     mask_mode,
-    layout_q,
-    layout_kv,
-    layout_out,
+    softmax_scale,
     max_seqlen_q,
     max_seqlen_kv,
-    head_dim_v,
     return_softmax_lse,
-    softmax_scale,
-    q=None,
-    k_cache=None,
-    cache_seqlens=None,
-    **kwargs,
+    kwargs,
 ):
-    """Set golden module globals from op params and sidecar kwargs.
-
-    generate_data 依赖全局量 (B/N_q/N_kv/D/D_V/SEQUSED_Q/CACHE_SEQLENS/
-    种子/数据范围) 决定数据 shape 与 RNG 消费流, 必须与 inputs.py 侧完全对齐,
-    否则 "同种子同数据" 失效, golden 再生数据与 NPU 输入数据错位。因此这里的
-    数据合成全局量推导逻辑与 inputs.generate_qfmla_inputs 逐条对应; 而 CPU
-    golden 计算仍使用原始 seqused_q_values/cache_seqlens_values。
-    """
-    # case 属性一律不硬编码兜底 (对齐 QFA tests/assets/impl/golden.py 形态):
-    # 属性缺失即缺失, 能由 slot 形状推导的就地推导, 不能推导的显式报错, 避免
-    # 静默补值掩盖测试脚本漏配参数。
-    B = kwargs.get("B")
-    N_q = kwargs.get("N_q")
-    N_kv = kwargs.get("N_kv")
-    D = kwargs.get("D")
-    D_V = kwargs.get("D_V")
-    if D_V is None:
-        D_V = head_dim_v
-    block_size = kwargs.get("block_size")
-    if block_size is None:
-        raise ValueError(
-            "[GOLDEN] attribute block_size is not provided by the case and cannot "
-            "be derived from slot shapes"
-        )
-    seqused_q_vals = kwargs.get("seqused_q_values")
-    if seqused_q_vals is not None:
-        seqused_q_vals = list(seqused_q_vals)
-    cache_seqlens_vals = kwargs.get("cache_seqlens_values")
-    if cache_seqlens_vals is not None:
-        cache_seqlens_vals = list(cache_seqlens_vals)
-    cu_seqlens_q_vals = kwargs.get("cu_seqlens_q_values")
-    if cu_seqlens_q_vals is not None:
-        cu_seqlens_q_vals = list(cu_seqlens_q_vals)
-    kv_cache_layout = kwargs.get("kv_cache_layout") or _KV_LAYOUT_REVERSE.get(
-        layout_kv, "BnNBsD"
+    # Match QFA's per-call numerical-reference configuration. Generation
+    # seeds/ranges belong to inputs.py and are neither read nor reset here.
+    # Cross-check uses the global reference; two-way uses NPU sections if available.
+    npu = getattr(torch, "npu", None)
+    golden_mod.ENABLE_SECTION_GOLDEN = (
+        not _bench_enabled() and npu is not None and npu.is_available()
     )
-    input_layout = kwargs.get("input_layout", layout_q)
-    output_layout = kwargs.get("output_layout", layout_out)
-
-    # ---- B: 与 inputs.py 一致, 优先从 cache_seqlens slot 首维推导 ----
-    cache_shape = (
-        tuple(int(dim) for dim in cache_seqlens.shape)
-        if (cache_seqlens is not None and hasattr(cache_seqlens, "shape"))
-        else ()
+    logger.info(
+        "[GOLDEN] NPU metadata section reference enabled: %s",
+        golden_mod.ENABLE_SECTION_GOLDEN,
     )
-    if len(cache_shape) == 1 and cache_shape[0] > 0:
-        B = cache_shape[0]
-    elif cache_seqlens_vals:
-        B = max(1, len(cache_seqlens_vals))
-    else:
-        B = max(1, int(B)) if B is not None else 1
-
-    # ---- 非法 N_q/N_kv/D 从 slot 形状推导 (与 inputs.py 一致) ----
-    def _positive_or_derive(name, value, slot, axis):
-        try:
-            ivalue = int(value)
-        except (TypeError, ValueError):
-            ivalue = 0
-        if ivalue > 0:
-            return ivalue
-        shape = (
-            tuple(int(dim) for dim in slot.shape)
-            if (slot is not None and hasattr(slot, "shape"))
-            else ()
-        )
-        idx = axis if axis >= 0 else len(shape) + axis
-        if not 0 <= idx < len(shape) or shape[idx] <= 0:
-            raise ValueError(
-                f"[GOLDEN] attribute {name}={value!r} invalid and cannot be "
-                f"derived from slot shape {shape}"
-            )
-        logger.warning(
-            "[GOLDEN] attribute %s=%r invalid - derive %s=%d from slot shape %s",
-            name,
-            value,
-            name,
-            shape[idx],
-            shape,
-        )
-        return shape[idx]
-
-    q_shape = (
-        tuple(int(dim) for dim in q.shape)
-        if (q is not None and hasattr(q, "shape"))
-        else ()
-    )
-    _q_head_axis = 2 if str(layout_q).upper() == "BSND" else 1
-    N_q = _positive_or_derive("N_q", N_q, q, _q_head_axis)
-    _k_head_axis = 2 if str(layout_kv).upper() == "PA_BBND" else 1
-    N_kv = _positive_or_derive("N_kv", N_kv, k_cache, _k_head_axis)
-
-    # D 是算子侧 QK 总 head dim (qkHeadDim, 如 576), 只有一个 D, 直接作为数据
-    # 合成宽度 (不再拆 nope/rope); 以 q slot 末维 (算子实际接收的 QK head_dim)
-    # 为准, 无槽位信息时用 case 属性, 不做任何兜底补值。
-    if D is None:
-        raise ValueError("[GOLDEN] attribute D is not provided by the case")
-    _q_last_dim = q_shape[-1] if q_shape else 0
-    D_total = _q_last_dim if _q_last_dim > 0 else int(D)
-
-    # ---- synthesis seqused: 与 inputs.py 一致, cu 差值优先, 否则按 slot 均分 ----
-    synthesis_seqused_q_vals = None
-    if (
-        cu_seqlens_q_vals is not None
-        and len(cu_seqlens_q_vals) == int(B) + 1
-        and cu_seqlens_q_vals
-        and cu_seqlens_q_vals[0] == 0
-        and all(
-            cu_seqlens_q_vals[i + 1] >= cu_seqlens_q_vals[i]
-            for i in range(len(cu_seqlens_q_vals) - 1)
-        )
-    ):
-        candidate = [
-            cu_seqlens_q_vals[i + 1] - cu_seqlens_q_vals[i] for i in range(int(B))
-        ]
-        if candidate and max(candidate) > 0:
-            synthesis_seqused_q_vals = candidate
-    if synthesis_seqused_q_vals is None:
-        batch_for_synthesis = max(int(B), 1)
-        # 4D q 从 S 维推导 total_q: BSND=(B,S,N,D)取shape[1], BNSD=(B,N,S,D)取shape[2];
-        # 3D q 为 TND (T,N,D), total_q=T=shape[0] (与 inputs.py 同步)
-        if len(q_shape) == 4 and q_shape[0] > 0:
-            s_dim = q_shape[2] if str(layout_q).upper() == "BNSD" else q_shape[1]
-            total_q = batch_for_synthesis * s_dim if s_dim > 0 else batch_for_synthesis
-        elif len(q_shape) == 3 and q_shape[0] > 0:
-            total_q = q_shape[0]
-        else:
-            total_q = batch_for_synthesis
-        base, extra = divmod(total_q, batch_for_synthesis)
-        synthesis_seqused_q_vals = [
-            base + (1 if i < extra else 0) for i in range(batch_for_synthesis)
-        ]
-        if max(synthesis_seqused_q_vals) <= 0:
-            synthesis_seqused_q_vals = [1] * batch_for_synthesis
-
-    synthesis_cache_seqlens_vals = cache_seqlens_vals
-    if (
-        not synthesis_cache_seqlens_vals
-        or len(synthesis_cache_seqlens_vals) != int(B)
-        or any(int(v) <= 0 for v in synthesis_cache_seqlens_vals)
-    ):
-        synthesis_cache_seqlens_vals = [1] * max(int(B), 1)
-
-    # case 未提供 per-batch 长度 (seqused_q_values/cache_seqlens_values 为 None)
-    # 时, CPU golden 与布局转换改用与 inputs.py 同源的 synthesis 推导值, 不再
-    # 硬编码 [1]/[1024]; 提供了原始值的用例原样透传。
-    if seqused_q_vals is None:
-        seqused_q_vals = list(synthesis_seqused_q_vals)
-    if cache_seqlens_vals is None:
-        cache_seqlens_vals = list(synthesis_cache_seqlens_vals)
-
-    golden_mod.B = B
-    golden_mod.N_q = N_q
-    golden_mod.N_kv = N_kv
-    golden_mod.D = D_total
-    golden_mod.D_V = D_V
-    golden_mod.QFMLA_QK_HEAD_DIM = D_total
-    golden_mod.QFMLA_V_HEAD_DIM = D_V
+    golden_mod.FP8_DTYPE = torch.float8_e4m3fn
+    golden_mod.P_SCALE = 1.0
+    golden_mod._csv_precision_tolerances = kwargs.get("precision_tolerances")
+    golden_mod._csv_absolute_precision = kwargs.get("absolute_precision")
+    for name in ("B", "N_q", "N_kv", "D", "D_V"):
+        setattr(golden_mod, name, cfg[name])
+    golden_mod.QFMLA_QK_HEAD_DIM = cfg["D"]
+    golden_mod.QFMLA_V_HEAD_DIM = cfg["D_V"]
     golden_mod.QFMLA_QUANT_MODE = quant_mode
-    # 数据合成用 synthesis 值 (与 inputs.py 一致); CPU golden 计算用原始值
-    golden_mod.SEQUSED_Q = list(synthesis_seqused_q_vals)
-    golden_mod.CACHE_SEQLENS = list(synthesis_cache_seqlens_vals)
+    golden_mod.SEQUSED_Q = list(cfg["seqused_q_vals"])
+    golden_mod.CACHE_SEQLENS = list(cfg["cache_seqlens_vals"])
+    golden_mod.CU_SEQLENS_Q = cfg["cu_seqlens_q_vals"]
     golden_mod.ENABLE_PA = True
     golden_mod.ENABLE_LSE = return_softmax_lse
     golden_mod.GOLDEN_MODE = True
-    golden_mod.BLOCK_SIZE = block_size
+    golden_mod.BLOCK_SIZE = cfg["block_size"]
     golden_mod.MASK_MODE = mask_mode
-    golden_mod.INPUT_LAYOUT = input_layout
-    golden_mod.OUTPUT_LAYOUT = output_layout
-    golden_mod.KV_CACHE_LAYOUT = kv_cache_layout
-    golden_mod.P_SCALE = float(kwargs.get("p_scale", 1.0))
-    golden_mod.GRAPH_PATH = kwargs.get("graph_path", 0)
-    golden_mod.NUM_BLOCKS = kwargs.get("num_blocks", 0)
+    golden_mod.INPUT_LAYOUT = cfg["input_layout"]
+    golden_mod.OUTPUT_LAYOUT = cfg["output_layout"]
+    golden_mod.KV_CACHE_LAYOUT = cfg["kv_cache_layout"]
     golden_mod.SCALE_VALUE = softmax_scale
     golden_mod.MAX_SEQLEN_Q = max_seqlen_q
     golden_mod.MAX_SEQLEN_KV = max_seqlen_kv
-    # 可选开关: 是否按 metadata 分核分段做 golden; 未提供时用 golden 模块默认值
-    if "enable_section_golden" in kwargs:
-        golden_mod.ENABLE_SECTION_GOLDEN = bool(kwargs["enable_section_golden"])
-
-    # csv precision_tolerances / absolute_precision 暂存到 golden_mod 供 compare
-    # 读取 (对齐 QFA golden.py 风格: ttk 框架不把 testcase 对象直接传给 custom
-    # compare, golden 插件在调用前把 csv 容差暂存到 golden 模块上)。
-    golden_mod._csv_precision_tolerances = kwargs.get("precision_tolerances")
-    golden_mod._csv_absolute_precision = kwargs.get("absolute_precision")
-
-    if kwargs.get("q_data_range"):
-        golden_mod.Q_DATA_RANGE = tuple(kwargs["q_data_range"])
-    if kwargs.get("k_data_range"):
-        golden_mod.K_DATA_RANGE = tuple(kwargs["k_data_range"])
-    if kwargs.get("v_data_range"):
-        golden_mod.V_DATA_RANGE = tuple(kwargs["v_data_range"])
-
-    for s in ("SEED_Q", "SEED_K", "SEED_V", "SEED_BLOCK_TABLE"):
-        key = s.lower()
-        if key in kwargs:
-            setattr(golden_mod, s, kwargs[key])
-
-    return {
-        "B": B,
-        "N_q": N_q,
-        "N_kv": N_kv,
-        "D": D_total,
-        "D_V": D_V,
-        "block_size": block_size,
-        "seqused_q_vals": seqused_q_vals,
-        "cache_seqlens_vals": cache_seqlens_vals,
-        "kv_cache_layout": kv_cache_layout,
-        "input_layout": input_layout,
-        "output_layout": output_layout,
-    }
+    # Only NPU two-way runs obtain metadata here. CPU-only and cross-check
+    # runs use the global reference, without a separate metadata-selection switch.
 
 
 def _bench_enabled():
@@ -306,7 +127,7 @@ def _bench_enabled():
 
 _BENCH_CACHE = {}
 _LAST_BENCH = None
-# 三方 third_party 专用: 分段量化参考 (复刻 kernel 每 s2 分段独立 P 量化)
+# Independent fixed-block approximation for the cross-check third-party slot.
 _REF_CACHE = {}
 
 
@@ -322,12 +143,13 @@ def peek_sectioned_ref(testcase_name=None):
     return _REF_CACHE.get(str(testcase_name))
 
 
-def _convert_tnd_full_rows(bnsd, seqused, cu_values, total_t, to_ntd=False):
+def _convert_tnd_full_rows(
+    bnsd, seqused, cu_values, total_t, to_ntd=False, fill_value=0.0
+):
     """TND/NTD输出按算子语义转换: T=全量T(q行数), 每批按cu偏移定位,
     有效行=seqused[b], 无效行attn补0/lse补inf (NPU实测: 无效行attn=0, lse=inf)。
     bnsd: attn为(B,N,S,Dv) / lse为(B,N,S,1)"""
-    is_lse = bnsd.dim() == 4 and bnsd.shape[-1] == 1
-    fill_val = float("inf") if is_lse else 0.0
+    fill_val = fill_value
     if to_ntd:
         out = torch.full(
             (bnsd.shape[1], total_t, bnsd.shape[3]), fill_val, dtype=bnsd.dtype
@@ -360,56 +182,42 @@ def _convert_outputs(
     layout_q,
     to_bf16=True,
 ):
-    """BNSD 结果转换到算子输出布局(golden 与 bench 共用)。
-
-    layout_q 是算子实际收到的 q 布局参数(决定输出是否全量 T), 与
-    input_layout 属性可能不同, 必须按 layout_q 判断。
-    to_bf16=True 用于 golden(对齐算子 bf16 输出); bench 保持 float32 以保留精度。
-    """
+    """Restore output layout; LSE layout follows query, not attention output."""
     output_layout = cfg["output_layout"]
-    cu_values = kwargs.get("cu_seqlens_q_values")
-
-    if output_layout in ("TND", "NTD") and layout_q == "TND" and cu_values:
-        # 算子TND输出语义: 全量T(cu偏移定位), 部分seqused时无效行补0/inf
-        result_final = _convert_tnd_full_rows(
-            result_bnsd,
-            golden_seqused,
-            cu_values,
-            int(q.shape[0]),
-            to_ntd=(output_layout == "NTD"),
-        )
+    cu = cfg["cu_seqlens_q_vals"]
+    if output_layout == "BNSD":
+        result = result_bnsd.contiguous()
+    elif output_layout == "BSND":
+        result = result_bnsd.permute(0, 2, 1, 3).contiguous()
+    elif output_layout in ("TND", "NTD"):
+        if layout_q == "TND":
+            result = _convert_tnd_full_rows(
+                result_bnsd,
+                golden_seqused,
+                cu,
+                int(q.shape[0]),
+                to_ntd=output_layout == "NTD",
+            )
+        else:
+            result = result_bnsd.permute(0, 2, 1, 3).flatten(0, 1).contiguous()
+            if output_layout == "NTD":
+                result = result.permute(1, 0, 2).contiguous()
     else:
-        result_final = golden_mod.convert_q_bnsd_to_layout(
-            result_bnsd, golden_seqused, output_layout
-        )
-
-    lse_final = None
+        raise ValueError(f"[GOLDEN] cannot represent layout_out={output_layout!r}")
+    lse = None
     if return_softmax_lse and lse_bnsd is not None:
-        if layout_q == "TND" and cu_values:
-            # TND输入: lse输出(N,T)全量T, 无效行补inf (与算子一致)
-            lse_final = _convert_tnd_full_rows(
+        if layout_q == "TND":
+            lse = _convert_tnd_full_rows(
                 lse_bnsd,
                 golden_seqused,
-                cu_values,
+                cu,
                 int(q.shape[0]),
                 to_ntd=True,
-            )
-            lse_final = lse_final.squeeze(-1)
+                fill_value=float("inf"),
+            ).squeeze(-1)
         else:
-            lse_layout = "BNSD" if output_layout in ("BSND", "BNSD") else output_layout
-            lse_final = golden_mod.convert_q_bnsd_to_layout(
-                lse_bnsd, golden_seqused, lse_layout
-            )
-            if output_layout == "TND":
-                # (T, N, 1) → (N, T)
-                lse_final = lse_final.permute(1, 0, 2).squeeze(-1).contiguous()
-            else:
-                # squeeze last dim: (B, N, S, 1) → (B, N, S)
-                lse_final = lse_final.squeeze(-1).contiguous()
-
-    if to_bf16:
-        result_final = result_final.to(torch.bfloat16)
-    return result_final, lse_final
+            lse = lse_bnsd.squeeze(-1).contiguous()
+    return (result.to(torch.bfloat16) if to_bf16 else result), lse
 
 
 def _cache_bench(
@@ -420,6 +228,7 @@ def _cache_bench(
     name = str(testcase_name)
     _BENCH_CACHE.pop(name, None)
     _LAST_BENCH = None
+    _REF_CACHE.pop(name, None)
     if not _bench_enabled():
         return
     q_fp8, k_fp8, v_fp8, deq_q, deq_k, deq_v = tensors
@@ -447,23 +256,18 @@ def _cache_bench(
     _LAST_BENCH = [bench_result, bench_lse]
     _BENCH_CACHE[name] = _LAST_BENCH
 
-    # 三方 third_party: 单独算一份分段量化参考, 使参考噪声水平与 kernel 可比;
-    # 两方 golden 保持全局量化语义不受影响。
-    _REF_CACHE.pop(name, None)
-    try:
-        ref = golden_mod.fp8_fullquant_mla_sectioned_golden(
-            q_fp8,
-            k_fp8,
-            v_fp8,
-            deq_q,
-            deq_k,
-            deq_v,
-            golden_seqused,
-            list(cfg["cache_seqlens_vals"]),
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.warning("[%s] sectioned reference failed: %s", name, exc)
-        ref = None
+    # Fixed-block third-party approximation; it is not the target metadata schedule.
+    # Its failure must remain visible when cross_check was explicitly requested.
+    ref = golden_mod.fp8_fullquant_mla_sectioned_golden(
+        q_fp8,
+        k_fp8,
+        v_fp8,
+        deq_q,
+        deq_k,
+        deq_v,
+        golden_seqused,
+        list(cfg["cache_seqlens_vals"]),
+    )
     if ref is not None:
         ref_result, ref_lse = _convert_outputs(
             ref[0],
@@ -479,7 +283,7 @@ def _cache_bench(
         _REF_CACHE[name] = [ref_result, ref_lse]
         logger.info("[%s] sectioned ref: result=%s", name, tuple(ref_result.shape))
     logger.info(
-        "[%s] bench(fp64): result=%s lse=%s",
+        "[%s] bench: result=%s lse=%s",
         name,
         tuple(bench_result.shape),
         None if bench_lse is None else tuple(bench_lse.shape),
@@ -510,113 +314,78 @@ def cpu_qfmla(
     return_softmax_lse=False,
     **kwargs,
 ):
-    """CPU golden reference for quant_flash_mla.
+    """Compute CPU golden, bench and reference from the same actual inputs.
 
-    Regenerates BNSD data with same seeds as inputs, computes CPU golden,
-    converts output to target layout, returns (attention_out, lse_out).
+    Negative cases without a meaningful numerical reference should select
+    TTK's golden_api=disable. Do not repair them here or return a fake PASS.
     """
-    testcase_name = kwargs.get("testcase_name", "unknown")
-    logger.info(
-        "[%s] golden: quant_mode=%s layout_q=%s layout_out=%s",
-        testcase_name,
-        quant_mode,
+    global _LAST_BENCH
+    testcase_name = str(kwargs.get("testcase_name", "unknown"))
+    _BENCH_CACHE.pop(testcase_name, None)
+    _REF_CACHE.pop(testcase_name, None)
+    _LAST_BENCH = None
+    cfg, tensors = _load_local("restore_inputs").restore_inputs(
+        q,
+        k_cache,
+        q_descale,
+        k_descale,
+        block_table,
+        cache_seqlens,
+        cu_seqlens_q,
+        seqused_q,
         layout_q,
+        layout_kv,
         layout_out,
+        512 if head_dim_v is None else head_dim_v,
+        quant_mode,
     )
-
-    # ---- 1. Set golden globals ----
-    # 数据合成全局量 (B/N_q/N_kv/D/SEQUSED_Q/CACHE_SEQLENS) 的推导在
-    # _set_golden_globals 内完成, 与 inputs.py 逐条对齐 (D_total 语义、
-    # cu 差值 synthesis seqused 等), 保证 "同种子同数据"。
-    cfg = _set_golden_globals(
-        quant_mode=quant_mode,
-        mask_mode=mask_mode,
-        layout_q=layout_q,
-        layout_kv=layout_kv,
-        layout_out=layout_out,
-        max_seqlen_q=max_seqlen_q,
-        max_seqlen_kv=max_seqlen_kv,
-        head_dim_v=head_dim_v,
-        return_softmax_lse=return_softmax_lse,
-        softmax_scale=softmax_scale,
-        q=q,
-        k_cache=k_cache,
-        cache_seqlens=cache_seqlens,
-        **kwargs,
+    _configure_reference(
+        cfg,
+        quant_mode,
+        mask_mode,
+        softmax_scale,
+        max_seqlen_q,
+        max_seqlen_kv,
+        return_softmax_lse,
+        kwargs,
     )
-
-    # ---- 2. Regenerate BNSD data (same seeds → same data) ----
-    (q_fp8, k_fp8, v_fp8, deq_q, deq_k, deq_v, p_scale_t, qr_bf16, kr_bf16) = (
-        golden_mod.generate_data(device="cpu")
-    )
-
-    logger.info(
-        "[%s] golden: regenerated q=%s k=%s deq_q=%s",
-        testcase_name,
-        tuple(q_fp8.shape),
-        tuple(k_fp8.shape),
-        tuple(deq_q.shape),
-    )
-
-    # ---- 3. Call CPU golden ----
-    golden_seqused = (
-        list(cfg["seqused_q_vals"])
-        if cfg["seqused_q_vals"]
-        else list(golden_mod.SEQUSED_Q)
-    )
+    q_data, k_data, v_data, deq_q, deq_k, deq_v = tensors
     result_bnsd, lse_bnsd = golden_mod.cpu_fp8_fullquant_mla_golden(
-        q_fp8,
-        k_fp8,
-        v_fp8,
+        q_data,
+        k_data,
+        v_data,
         deq_q,
         deq_k,
         deq_v,
-        p_scale_t,
-        # seqused_q 用原始值; CSV 未提供 (BSND/BNSD decode 场景 seqused_q_values=[])
-        # 时退回 synthesis 值 (q_lens 用于 padding mask, S=1 全有效行)
-        golden_seqused,
-        list(cfg["cache_seqlens_vals"]),
-        qr_bf16=qr_bf16,
-        kr_bf16=kr_bf16,
+        torch.ones(1, dtype=torch.float32),
+        cfg["seqused_q_vals"],
+        cfg["cache_seqlens_vals"],
     )
-
-    logger.info(
-        "[%s] golden: result=%s lse=%s",
-        testcase_name,
-        tuple(result_bnsd.shape) if result_bnsd is not None else None,
-        tuple(lse_bnsd.shape) if lse_bnsd is not None else None,
-    )
-
-    # ---- 4. Convert output to target layout (golden 与 bench 共用) ----
-    result_final, lse_final = _convert_outputs(
+    outputs = _convert_outputs(
         result_bnsd,
         lse_bnsd,
         q,
         cfg,
         kwargs,
-        golden_seqused,
+        cfg["seqused_q_vals"],
         return_softmax_lse,
         layout_q,
-        to_bf16=True,
     )
-
-    logger.info(
-        "[%s] golden: final result=%s lse=%s",
-        testcase_name,
-        tuple(result_final.shape),
-        tuple(lse_final.shape) if lse_final is not None else None,
-    )
-
-    # ---- 5. Cache fp64 bench for three-way (cross_check) comparison ----
     _cache_bench(
         testcase_name,
         cfg,
         kwargs,
         q,
-        golden_seqused,
+        cfg["seqused_q_vals"],
         return_softmax_lse,
         layout_q,
-        (q_fp8, k_fp8, v_fp8, deq_q, deq_k, deq_v),
+        tensors,
     )
-
-    return result_final, lse_final
+    logger.info(
+        "[%s] golden consumed actual slots: q=%s k=%s output=%s",
+        testcase_name,
+        tuple(q_data.shape),
+        tuple(k_data.shape),
+        tuple(outputs[0].shape),
+    )
+    return outputs

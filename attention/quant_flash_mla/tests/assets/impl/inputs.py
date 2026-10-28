@@ -13,7 +13,7 @@
 
 """TTK customize_inputs plugin for quant_flash_mla.
 
-Generates BNSD data via the golden module's generate_data(), converts
+Generates BNSD data with explicit per-case parameters, converts
 to target layout + PA cache, and writes in-place into TTK-allocated slots.
 """
 
@@ -30,10 +30,6 @@ _ASSETS_DIR = os.path.dirname(os.path.abspath(__file__))
 _GOLDEN_DIR = os.path.join(_ASSETS_DIR, "..")  # assets/
 if _GOLDEN_DIR not in sys.path:
     sys.path.insert(0, _GOLDEN_DIR)
-# golden 模块依赖 pytest/common/ 下的 result_compare_method
-_COMMON_DIR = os.path.join(_ASSETS_DIR, "..", "..", "pytest", "common")
-if _COMMON_DIR not in sys.path:
-    sys.path.insert(0, _COMMON_DIR)
 
 _GOLDEN_MODULE_NAME = "qfmla_assets_golden_reference"
 if _GOLDEN_MODULE_NAME in sys.modules:
@@ -83,191 +79,90 @@ def generate_qfmla_inputs(
 ):
     """Generate MLA FP8 input data and write into TTK tensor slots in-place.
 
-    Sidecar attributes via **kwargs:
-      B, N_q, N_kv, D, D_V,
-      seqused_q_values, cache_seqlens_values,
-      kv_cache_layout (golden-side name, e.g. "BnNBsD"),
-      block_size, input_layout, output_layout,
-      q_data_range, k_data_range, v_data_range,
-      seed_q, seed_k, seed_v,
-      p_scale, graph_path
+    Explicit *_values override vector contents; failed vector writes are errors.
+    Actual tensor slots determine core dimensions, physical pages and block size.
+    input_ranges takes precedence over legacy q_data_range/k_data_range.
+    seed_q/seed_k/seed_block_table affect synthesis only. Metadata sidecars are
+    forwarded separately by npu_preprocess and are not main-op shape arguments.
     """
-    # Match QFA's plugin/no-plugin layering for structural empty-tensor cases.
-    # With the plugin enabled, custom input generation cannot synthesize a
-    # meaningful payload for an empty core tensor, so fail in INPUT_GEN.  With
-    # the plugin disabled this hook is bypassed and the original CSV tensor is
-    # passed to the Torch/host validation path.  Value-only anomalies (for
-    # example negative cache_seqlens/seqused_q) are deliberately not rejected
-    # here; they still use safe synthesis data and reach metadata validation.
-    for name, tensor in (("q", q), ("k_cache", k_cache)):
-        shape = tuple(int(dim) for dim in tensor.shape)
-        if any(dim == 0 for dim in shape):
-            raise ValueError(
-                f"[INPUTS] {name} has an empty dimension in shape {shape}; "
-                "custom input generation does not support empty core tensors"
-            )
+    mismatch_policy = kwargs.get("input_mismatch_policy", "passthrough")
+    if mismatch_policy not in ("passthrough", "error"):
+        raise ValueError("input_mismatch_policy must be 'passthrough' or 'error'")
+    skipped_slots = []
 
-    # ---- 1. Read sidecar attributes ----
-    # 属性一律不硬编码兜底 (对齐 QFA tests/assets/impl/inputs.py 形态): 缺失即
-    # 缺失, 能由 slot 形状推导的就地推导, 不能推导的显式报错, 避免静默补值掩盖
-    # 测试脚本漏配参数。
-    N_q = kwargs.get("N_q")
-    N_kv = kwargs.get("N_kv")
-    D = kwargs.get("D")
-    D_V = kwargs.get("D_V")
-    if D_V is None:
-        D_V = head_dim_v
-    block_size = kwargs.get("block_size")
-    if block_size is None:
-        raise ValueError(
-            "[INPUTS] attribute block_size is not provided by the case and cannot "
-            "be derived from slot shapes"
-        )
-    # Keep the raw values for the final in-place write.  Negative/value-error
-    # cases must reach metadata unchanged, but those values cannot be used to
-    # allocate the CPU tensors that provide the otherwise-valid test payload.
+    # Shapes and explicitly supplied vectors describe the payload to synthesize.
+    # This generator does not invent safe replacements for malformed sequences.
+    # Pure validation cases that cannot be synthesized must supply raw/manual data.
     seqused_q_vals = kwargs.get("seqused_q_values")
-    if seqused_q_vals is not None:
-        seqused_q_vals = list(seqused_q_vals)
     cache_seqlens_vals = kwargs.get("cache_seqlens_values")
-    if cache_seqlens_vals is not None:
-        cache_seqlens_vals = list(cache_seqlens_vals)
     cu_seqlens_q_vals = kwargs.get("cu_seqlens_q_values")
-    if cu_seqlens_q_vals is not None:
-        cu_seqlens_q_vals = list(cu_seqlens_q_vals)
-    kv_cache_layout = kwargs.get("kv_cache_layout") or _KV_LAYOUT_REVERSE.get(
-        layout_kv, "BnNBsD"
-    )
-    input_layout = kwargs.get("input_layout", layout_q)
-    output_layout = kwargs.get("output_layout", layout_out)
-    p_scale_val = kwargs.get("p_scale", 1.0)
-    graph_path = kwargs.get("graph_path", 0)
 
-    # Only use the allocated cache_seqlens slot to choose the synthesis batch.
-    # Invalid cu_seqlens_q shapes/values must not change the otherwise-valid
-    # payload shape, otherwise input generation fails before metadata sees the
-    # malformed tensor.
-    cache_shape = tuple(int(dim) for dim in cache_seqlens.shape)
-    if len(cache_shape) == 1 and cache_shape[0] > 0:
-        B = cache_shape[0]
-    elif cache_seqlens_vals:
-        B = max(1, len(cache_seqlens_vals))
-    else:
-        B = max(1, int(kwargs["B"])) if kwargs.get("B") is not None else 1
+    def _values(slot, explicit):
+        if explicit is not None:
+            return list(explicit)
+        if slot is None:
+            return None
+        if isinstance(slot, torch.Tensor):
+            return slot.detach().cpu().tolist() if slot.numel() else None
+        arr = np.asarray(slot)
+        return arr.tolist() if arr.size else None
 
-    # 数据合成布局跟随用例布局: BSND/BNSD 用 4D 合成 (与 CSV slot 形状一致,
-    # golden 的 generate_data/convert 链支持 4D), 其余布局用 TND 合成;
-    # 原 layout_q/layout_out 仍原样透传给 metadata/主算子。
-    _in_layout = str(layout_q).upper()
-    synthesis_input_layout = _in_layout if _in_layout in ("BSND", "BNSD") else "TND"
-    synthesis_output_layout = "TND"
-    synthesis_block_size = int(block_size)
-    if synthesis_block_size <= 0:
-        synthesis_block_size = 128
-
-    # 异常用例容忍: N_q/N_kv/D 可能被注入非法值 (如 -1)。非法值不能用于数据合成
-    # (golden generate_data 会裸崩, 掩盖真正要验证的异常属性), 按 CSV slot 形状
-    # 推导回退值完成数据生成; 原始非法属性仍由 ttk 透传给 metadata/主算子, 由
-    # 算子 host 侧校验拦截并给出明确报错 (如 "numHeadsQ must be greater than 0")。
-    def _positive_or_derive(name, value, slot, axis):
-        try:
-            ivalue = int(value)
-        except (TypeError, ValueError):
-            ivalue = 0
-        if ivalue > 0:
-            return ivalue
-        shape = tuple(int(dim) for dim in slot.shape) if hasattr(slot, "shape") else ()
-        idx = axis if axis >= 0 else len(shape) + axis
-        if not 0 <= idx < len(shape) or shape[idx] <= 0:
-            raise ValueError(
-                f"[INPUTS] attribute {name}={value!r} invalid (must be positive "
-                f"integer) and cannot be derived from CSV slot shape {shape}"
-            )
-        logger.warning(
-            "[INPUTS] attribute %s=%r invalid (must be positive integer) - derive "
-            "%s=%d from CSV slot shape %s for data synthesis; the invalid value is "
-            "still passed through to the op for interception",
-            name,
-            value,
-            name,
-            shape[idx],
-            shape,
-        )
-        return shape[idx]
-
-    # q slot head axis: BSND → axis 2, TND → axis 1
-    _q_head_axis = 2 if str(layout_q).upper() == "BSND" else 1
-    # k_cache slot head axis: PA_BNBD/NZ → axis 1, PA_BBND → axis 2
-    _k_head_axis = 2 if str(layout_kv).upper() == "PA_BBND" else 1
-    N_q = _positive_or_derive("N_q", N_q, q, _q_head_axis)
-    N_kv = _positive_or_derive("N_kv", N_kv, k_cache, _k_head_axis)
-    # D 是算子侧 QK 总 head dim (qkHeadDim, 如 576), 只有一个 D, 直接作为数据
-    # 合成宽度 (不再拆 nope/rope); 以 q slot 末维 (算子实际接收的 QK head_dim)
-    # 为准, 无槽位信息时用 case 属性。CSV 的 D/D_V 属性原样由 ttk 透传给算子,
-    # 由 host 侧校验拦截, 这里不做任何兜底补值。
-    if D is None:
-        raise ValueError("[INPUTS] attribute D is not provided by the case")
-    _q_last_dim = int(q.shape[-1]) if (hasattr(q, "shape") and q.dim() > 0) else 0
-    D_total = _q_last_dim if _q_last_dim > 0 else int(D)
-
-    # Synthesis-only sequence lengths. Prefer a valid cumulative sequence from
-    # the case, otherwise derive a positive partition from the CSV q slot. The
-    # raw seqused_q/cu_seqlens_q values are still written below.
-    synthesis_seqused_q_vals = None
-    if (
-        cu_seqlens_q_vals is not None
-        and len(cu_seqlens_q_vals) == int(B) + 1
-        and cu_seqlens_q_vals
-        and cu_seqlens_q_vals[0] == 0
-        and all(
-            cu_seqlens_q_vals[i + 1] >= cu_seqlens_q_vals[i]
-            for i in range(len(cu_seqlens_q_vals) - 1)
-        )
+    cache_lengths = _values(cache_seqlens, cache_seqlens_vals)
+    cu_values = _values(cu_seqlens_q, cu_seqlens_q_vals)
+    seq_values = _values(seqused_q, seqused_q_vals)
+    if not cache_lengths or any(
+        not isinstance(x, (int, np.integer)) or x < 0 for x in cache_lengths
     ):
-        candidate = [
-            cu_seqlens_q_vals[i + 1] - cu_seqlens_q_vals[i] for i in range(int(B))
-        ]
-        if candidate and max(candidate) > 0:
-            synthesis_seqused_q_vals = candidate
-    if synthesis_seqused_q_vals is None:
-        q_shape = tuple(int(dim) for dim in q.shape) if hasattr(q, "shape") else ()
-        batch_for_synthesis = max(int(B), 1)
-        # 4D q 从 S 维推导 total_q: BSND=(B,S,N,D)取shape[1], BNSD=(B,N,S,D)取shape[2];
-        # 3D q 为 TND (T,N,D), total_q=T=shape[0] (与 golden.py 同步)
-        if len(q_shape) == 4 and q_shape[0] > 0:
-            s_dim = q_shape[1] if _in_layout != "BNSD" else q_shape[2]
-            total_q = batch_for_synthesis * s_dim if s_dim > 0 else batch_for_synthesis
-        elif len(q_shape) == 3 and q_shape[0] > 0:
-            total_q = q_shape[0]
+        raise ValueError(
+            "[INPUTS] cannot synthesize cache data without nonnegative batch lengths"
+        )
+    B = len(cache_lengths)
+    synthesis_cache_seqlens_vals = cache_lengths
+    synthesis_input_layout = layout_q
+    kv_cache_layout = _KV_LAYOUT_REVERSE.get(layout_kv)
+    if kv_cache_layout is None:
+        raise ValueError(
+            f"[INPUTS] cannot synthesize cache layout {layout_kv!r}; use raw inputs for layout negatives"
+        )
+    if layout_q not in ("TND", "BSND", "BNSD"):
+        raise ValueError(
+            f"[INPUTS] cannot synthesize query layout {layout_q!r}; use raw inputs for layout negatives"
+        )
+    q_shape = tuple(int(dim) for dim in q.shape)
+    k_shape = tuple(int(dim) for dim in k_cache.shape)
+    q_head_axis = 2 if layout_q == "BSND" else 1
+    k_head_axis = 2 if layout_kv == "PA_BBND" else 1
+    # Main-op dimensions come from its tensor slots. Metadata sidecar attributes
+    # remain untouched, but are not independent main-op dimension arguments.
+    N_q, N_kv, D_total = q_shape[q_head_axis], k_shape[k_head_axis], q_shape[-1]
+    D_V = 512 if head_dim_v is None else head_dim_v
+    block_axis = 3 if layout_kv == "PA_NZ" else (1 if layout_kv == "PA_BBND" else 2)
+    block_size = k_shape[block_axis]
+    synthesis_block_size = block_size
+    if block_size <= 0:
+        raise ValueError("[INPUTS] cannot synthesize pages with an empty block axis")
+    padding_cu = None
+    if layout_q == "TND":
+        if cu_values is not None:
+            if len(cu_values) != B + 1:
+                raise ValueError("[INPUTS] cu vector cannot describe the cache batches")
+            synthesis_seqused_q_vals = [b - a for a, b in zip(cu_values, cu_values[1:])]
+            padding_cu = cu_values
+        elif seq_values is not None:
+            synthesis_seqused_q_vals = seq_values
         else:
-            total_q = batch_for_synthesis
-        base, extra = divmod(total_q, batch_for_synthesis)
-        synthesis_seqused_q_vals = [
-            base + (1 if i < extra else 0) for i in range(batch_for_synthesis)
-        ]
-        if max(synthesis_seqused_q_vals) <= 0:
-            synthesis_seqused_q_vals = [1] * batch_for_synthesis
-
-    synthesis_cache_seqlens_vals = cache_seqlens_vals
-    if (
-        not synthesis_cache_seqlens_vals
-        or len(synthesis_cache_seqlens_vals) != int(B)
-        or any(int(v) <= 0 for v in synthesis_cache_seqlens_vals)
+            raise ValueError(
+                "[INPUTS] TND synthesis needs actual cu offsets or explicit query lengths"
+            )
+    else:
+        synthesis_seqused_q_vals = [q_shape[1 if layout_q == "BSND" else 2]] * B
+    if len(synthesis_seqused_q_vals) != B or any(
+        not isinstance(x, (int, np.integer)) or x < 0 for x in synthesis_seqused_q_vals
     ):
-        synthesis_cache_seqlens_vals = [1] * max(int(B), 1)
-
-    # case 未提供 per-batch 长度 (seqused_q_values/cache_seqlens_values 为 None)
-    # 时, 数据合成与 slot 写回改用与 golden.py 同源的 synthesis 推导值, 不再
-    # 硬编码 [1]/[1024]; 提供了原始值的用例原样透传。
-    if seqused_q_vals is None:
-        seqused_q_vals = list(synthesis_seqused_q_vals)
-    if cache_seqlens_vals is None:
-        cache_seqlens_vals = list(synthesis_cache_seqlens_vals)
-
-    # Invalid D/D_V values are operator attributes and/or reflected by the CSV
-    # slot shape and are passed through untouched; shape mismatches are
-    # deliberately skipped by _inplace_write below.
-
+        raise ValueError(
+            "[INPUTS] cannot allocate query data from the supplied lengths"
+        )
+    p_scale_val = 1.0
     logger.info(
         "[INPUTS] B=%s N_q=%s N_kv=%s D=%s D_V=%s layout_q=%s kv_layout=%s block_size=%s",
         B,
@@ -280,27 +175,28 @@ def generate_qfmla_inputs(
         block_size,
     )
 
-    # ---- 2. Set golden module globals ----
-    golden_mod.B = B
-    golden_mod.N_q = N_q
-    golden_mod.N_kv = N_kv
-    golden_mod.D = D_total
-    golden_mod.D_V = D_V
-    golden_mod.QFMLA_QK_HEAD_DIM = D_total
-    golden_mod.QFMLA_V_HEAD_DIM = D_V
-    golden_mod.QFMLA_QUANT_MODE = quant_mode
-    golden_mod.SEQUSED_Q = list(synthesis_seqused_q_vals)
-    golden_mod.CACHE_SEQLENS = list(synthesis_cache_seqlens_vals)
-    golden_mod.ENABLE_PA = True  # MLA always uses PA
-    golden_mod.ENABLE_LSE = return_softmax_lse
-    golden_mod.GOLDEN_MODE = True
-    golden_mod.BLOCK_SIZE = synthesis_block_size
-    golden_mod.MASK_MODE = mask_mode
-    golden_mod.INPUT_LAYOUT = synthesis_input_layout
-    golden_mod.OUTPUT_LAYOUT = synthesis_output_layout
-    golden_mod.KV_CACHE_LAYOUT = kv_cache_layout
-    golden_mod.P_SCALE = float(p_scale_val)
-    golden_mod.GRAPH_PATH = graph_path
+    # Resolve every generation setting in this call, like QFA inputs.py.
+    # input_ranges is supplied by TTK from CSV input_data_ranges; slot 2 is
+    # q_descale, not a separate V input.
+    input_ranges = kwargs.get("input_ranges")
+
+    def _range_of(index, legacy):
+        value = (
+            input_ranges[index]
+            if input_ranges is not None and index < len(input_ranges)
+            else None
+        )
+        if value is None:
+            value = kwargs.get(legacy)
+        return (-1.0, 1.0) if value is None else (float(value[0]), float(value[1]))
+
+    q_range = _range_of(0, "q_data_range")
+    k_range = _range_of(1, "k_data_range")
+    seed_q = 54 if kwargs.get("seed_q") is None else kwargs["seed_q"]
+    seed_k = 3 if kwargs.get("seed_k") is None else kwargs["seed_k"]
+    seed_block_table = (
+        1234 if kwargs.get("seed_block_table") is None else kwargs["seed_block_table"]
+    )
     # num_blocks: 从 k_cache slot 首维推导物理 block 数 (对齐 QFA inputs.py 的
     # `total_blocks = int(dequant_scale_k.shape[0])` 风格)。CSV 无 num_blocks 字段,
     # 用 kwargs.get("num_blocks", 0) 会恒为 0, 导致 create_block_table 生成空
@@ -311,33 +207,26 @@ def generate_qfmla_inputs(
         if (hasattr(k_cache, "shape") and k_cache.dim() >= 1)
         else 0
     )
-    num_blocks = (
-        int(kwargs.get("num_blocks", 0))
-        if int(kwargs.get("num_blocks", 0)) > 0
-        else k_slot_blocks
-    )
-    golden_mod.NUM_BLOCKS = num_blocks
-    golden_mod.SCALE_VALUE = softmax_scale
-    golden_mod.MAX_SEQLEN_Q = max_seqlen_q
-    golden_mod.MAX_SEQLEN_KV = max_seqlen_kv
-
-    # Data ranges
-    if kwargs.get("q_data_range"):
-        golden_mod.Q_DATA_RANGE = tuple(kwargs["q_data_range"])
-    if kwargs.get("k_data_range"):
-        golden_mod.K_DATA_RANGE = tuple(kwargs["k_data_range"])
-    if kwargs.get("v_data_range"):
-        golden_mod.V_DATA_RANGE = tuple(kwargs["v_data_range"])
-
-    # Seeds
-    for s in ("SEED_Q", "SEED_K", "SEED_V", "SEED_BLOCK_TABLE"):
-        key = s.lower()
-        if key in kwargs:
-            setattr(golden_mod, s, kwargs[key])
+    num_blocks = k_slot_blocks
 
     # ---- 3. Generate BNSD data ----
     (q_fp8, k_fp8, v_fp8, deq_q, deq_k, deq_v, p_scale_t, qr_bf16, kr_bf16) = (
-        golden_mod.generate_data(device="cpu")
+        golden_mod.generate_case_data(
+            batch_size=B,
+            num_heads_q=N_q,
+            num_heads_kv=N_kv,
+            head_dim_qk=D_total,
+            head_dim_v=D_V,
+            seqused_q=synthesis_seqused_q_vals,
+            cache_seqlens=synthesis_cache_seqlens_vals,
+            quant_mode=quant_mode,
+            q_data_range=q_range,
+            k_data_range=k_range,
+            seed_q=seed_q,
+            seed_k=seed_k,
+            p_scale=float(p_scale_val),
+            device="cpu",
+        )
     )
 
     logger.info(
@@ -350,14 +239,26 @@ def generate_qfmla_inputs(
 
     # ---- 4. Convert Q to target layout ----
     q_final = golden_mod.convert_q_bnsd_to_layout(
-        q_fp8, synthesis_seqused_q_vals, synthesis_input_layout
+        q_fp8,
+        synthesis_seqused_q_vals,
+        synthesis_input_layout,
+        cu_seqlens=padding_cu if synthesis_input_layout == "TND" else None,
     )
 
     # ---- 5. Convert K to PA cache ----
+    # 槽位宽度与 QFA 对齐: 取 CSV block_table 声明的第二维 (每 batch 最大块槽位),
+    # 与物理块数 NUM_BLOCKS 解耦, 支持 num_blocks > 第二维 的用例。
+    _bt_slot_shape = (
+        tuple(int(d) for d in block_table.shape)
+        if hasattr(block_table, "shape")
+        else ()
+    )
     block_table_t = golden_mod.create_block_table(
         synthesis_cache_seqlens_vals,
         synthesis_block_size,
-        num_blocks=golden_mod.NUM_BLOCKS,
+        num_blocks=num_blocks,
+        seed=seed_block_table,
+        max_blocks=_bt_slot_shape[1] if len(_bt_slot_shape) >= 2 else None,
     )
 
     k_pa = golden_mod.bnsd_to_k_cache(
@@ -365,36 +266,45 @@ def generate_qfmla_inputs(
         synthesis_cache_seqlens_vals,
         synthesis_block_size,
         block_table_t,
-        num_blocks=golden_mod.NUM_BLOCKS,
+        num_blocks=num_blocks,
         kv_layout=kv_cache_layout,
     )
 
     # ---- 6. Prepare descale ----
-    # q_descale: use golden's convert_scale_to_layout (reads INPUT_LAYOUT global)
+    # q_descale layout is explicit; do not depend on the reference module state.
     deq_q_final = golden_mod.convert_scale_to_layout(
-        deq_q, synthesis_seqused_q_vals, "deq_q"
+        deq_q,
+        synthesis_seqused_q_vals,
+        "deq_q",
+        input_layout=synthesis_input_layout,
+        cu_seqlens=padding_cu if synthesis_input_layout == "TND" else None,
     )
     # k_descale: scalar (1,)
     deq_k_final = deq_k.float().reshape(-1)[:1].contiguous()
 
     # ---- 7. Write to tensor slots in-place ----
-    def _inplace_write(slot, src, name):
-        """形状一致时原位 bit-exact copy_; 不一致时 WARN 并跳过写入。
+    def _inplace_write(slot, src, name, *, strict=False):
+        """Core slots may preserve a shape mismatch; explicit vectors never do.
 
-        异常用例的 CSV slot 形状常与按属性推导的计算结果不一致。裸 copy_ 的
-        broadcast 报错会掩盖真正注入的异常属性, 且无法定位。跳过写入让非法输入
-        按 CSV 声明的形状透传到算子, 由 host 侧 checker 给出明确拦截报错。
+        Core shape mismatches preserve the existing slot, like QFA. That does
+        not prove any requested sidecar value reached the operator. Explicit
+        vector/mask requests use strict writes and fail if they cannot be copied.
         注: ttk 在算子调用前会从 numpy 底层存储重建 runtime tensor, 插件侧
         resize_/set_ 改形状不会传导, 只有共享内存的原位数据写入有效。
         """
-        if slot is None:
+        if slot is None or src is None:
             return
         if not isinstance(src, torch.Tensor):
             src = torch.as_tensor(src)
         if isinstance(slot, torch.Tensor):
-            if slot.numel() == 0:
+            if slot.numel() == 0 and not strict:
                 return
             if tuple(slot.shape) != tuple(src.shape):
+                if strict or mismatch_policy == "error":
+                    raise ValueError(
+                        f"[INPUTS] {name} slot {tuple(slot.shape)} != generated {tuple(src.shape)}"
+                    )
+                skipped_slots.append(name)
                 logger.warning(
                     "[INPUTS] %s shape mismatch: CSV slot %s != computed %s - skip "
                     "in-place write (keep CSV slot data/shape), let op-side "
@@ -404,16 +314,27 @@ def generate_qfmla_inputs(
                     tuple(src.shape),
                 )
                 return
-            slot.copy_(src.to(slot.dtype))
+            if (
+                name in ("q", "k_cache")
+                and src.element_size() == slot.element_size() == 1
+            ):
+                slot.view(torch.uint8).copy_(src.view(torch.uint8))
+            else:
+                slot.copy_(src.to(slot.dtype))
         else:
             arr = np.asarray(slot)
-            if arr.size == 0:
+            if arr.size == 0 and not strict:
                 return
             if "float8" in str(src.dtype):
                 src_np = src.view(torch.uint8).cpu().numpy()
             else:
                 src_np = src.cpu().numpy()
             if tuple(arr.shape) != tuple(src_np.shape):
+                if strict or mismatch_policy == "error":
+                    raise ValueError(
+                        f"[INPUTS] {name} slot {tuple(arr.shape)} != generated {tuple(src_np.shape)}"
+                    )
+                skipped_slots.append(name)
                 logger.warning(
                     "[INPUTS] %s shape mismatch: CSV slot %s != computed %s - skip "
                     "in-place write (keep CSV slot data/shape), let op-side "
@@ -423,41 +344,39 @@ def generate_qfmla_inputs(
                     tuple(src_np.shape),
                 )
                 return
-            arr[...] = src_np
+            if (
+                name in ("q", "k_cache")
+                and src.element_size() == arr.dtype.itemsize == 1
+            ):
+                arr.view(np.uint8)[...] = src.view(torch.uint8).cpu().numpy()
+            else:
+                arr[...] = src_np
 
     _inplace_write(q, q_final, "q")
     _inplace_write(k_cache, k_pa, "k_cache")
     _inplace_write(q_descale, deq_q_final, "q_descale")
     _inplace_write(k_descale, deq_k_final, "k_descale")
     _inplace_write(block_table, block_table_t, "block_table")
-    _inplace_write(
-        cache_seqlens,
-        torch.tensor(cache_seqlens_vals, dtype=torch.int32),
-        "cache_seqlens",
-    )
+    # Only explicit vector overrides are written. A failed write is a generation
+    # error, never a claim that the requested negative value reached the operator.
+    for slot, values, name in (
+        (cache_seqlens, cache_seqlens_vals, "cache_seqlens"),
+        (seqused_q, seqused_q_vals, "seqused_q"),
+        (cu_seqlens_q, cu_seqlens_q_vals, "cu_seqlens_q"),
+    ):
+        if values is not None:
+            _inplace_write(slot, torch.as_tensor(values), name, strict=True)
 
-    # seqused_q slot (kw_only tensor)
-    _inplace_write(
-        seqused_q, torch.tensor(seqused_q_vals, dtype=torch.int32), "seqused_q"
-    )
-
-    # cu_seqlens_q slot (only for TND layout)
-    if cu_seqlens_q is not None and layout_q == "TND":
-        cu_vals = cu_seqlens_q_vals
-        if cu_vals is None:
-            cu_vals = [0]
-            for s in seqused_q_vals:
-                cu_vals.append(cu_vals[-1] + s)
-        _inplace_write(
-            cu_seqlens_q, torch.tensor(cu_vals, dtype=torch.int32), "cu_seqlens_q"
-        )
-
-    # attn_mask slot (only for causal mask_mode=3)
     if attn_mask is not None and mask_mode == 3:
-        mask_shape = (2048, 2048)
+        mask_shape = kwargs.get("attn_mask_shape")
+        mask_shape = (2048, 2048) if mask_shape is None else tuple(mask_shape)
         causal_mask = torch.triu(torch.ones(mask_shape, dtype=torch.int8), diagonal=1)
-        _inplace_write(attn_mask, causal_mask, "attn_mask")
+        _inplace_write(attn_mask, causal_mask, "attn_mask", strict=True)
 
+    if skipped_slots:
+        logger.warning(
+            "[INPUTS] kept original slots under passthrough policy: %s", skipped_slots
+        )
     logger.info(
         "[INPUTS] in-place writes complete: q=%s k_cache=%s bt=%s",
         tuple(q.shape) if hasattr(q, "shape") else "?",

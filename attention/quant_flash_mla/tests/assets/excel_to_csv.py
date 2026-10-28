@@ -9,60 +9,13 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""把 red.xlsx → ttk e2e 标准 csv（MLA FP8 quant_flash_mla）。
+"""Convert an MLA workbook to TTK CSV while retaining explicit fields.
 
-参照 quant_flash_attn/tests/assets/excel_to_csv.py 的架构，适配 MLA 的 tensor 顺序和
-算子参数差异。
-
-环境：无 openpyxl/pandas 依赖，xlsx 解析走 _xlsx_minireader（zipfile + minidom）。
-
-输入：red.xlsx（--xlsx 指定，默认同目录 red.xlsx）
-输出：1 个 csv 到同目录（metadata 在主算子调用前由 spec 的 npu_preprocess 生成并
-  回填 metadata slot，主算子直接由 ttk 调用）
-  - qfmla_excel.csv     api_name=torch.ops.cann_ops_transformer.quant_flash_mla
-
-空值契约：excel 空单元格 → csv attributes 省略该 key（不写 key:None）。
-
-tensor 顺序（共 10 个，对齐算子 schema 位置参数顺序）：
-  0  q               q_shape / q_dtype / q_datarange
-  1  k_cache          k_cache_shape / k_cache_dtype / k_cache_datarange
-  2  q_descale        q_descale_shape / q_descale_dtype / q_descale_datarange
-  3  k_descale        k_descale_shape / k_descale_dtype / k_descale_datarange
-  4  block_table      block_table_shape / block_table_dtype / block_table_datarange
-  5  cache_seqlens    cache_seqlens_shape / cache_seqlens_dtype / cache_seqlens_datarange
-  6  cu_seqlens_q     cu_seqlens_q_shape / cu_seqlens_q_dtype / cu_seqlens_q_datarange
-  7  seqused_q        seqused_q_shape / seqused_q_dtype / seqused_q_datarange
-  8  attn_mask        attn_mask_shape / attn_mask_dtype / attn_mask_datarange
-  9  metadata         metadata_shape / metadata_dtype / metadata_datarange
-
-  上述 shape 从 attributes 抽出成为 tensor 入参；无 shape（Excel 空）→ None（可选 tensor 省略）。
-  cu_seqlens_q、seqused_q 的真实 value 以 `*_values` 属性保留在 attributes
-  （不与算子 schema 的同名 Tensor 参数撞名，避免 ttk match_overload 的
-  scalar_cover 重复计数；npu_preprocess/inputs 用 `*_values` 覆盖随机 tensor），
-  因此 value 属性不能删，只删 shape。
-  datarange：q/k_cache 取 Excel 真实值；其余用 (0,1) 占位（不参与真实数据生成）。
-
-TND 约定（与原始 red.xlsx 一致）：
-  - T (padded) = B * Q_S  （tensor dim 0）
-  - cu_seqlens_q[i] = sum(seqused_q[:i]) for i < B  （实际 token 边界）
-  - cu_seqlens_q[B] = T  （padded tensor 大小）
-  - seqused_q[i] <= Q_S  （每 batch 有效 token 数）
-  对于非 TND 布局转 TND 的行（原 BSND/BNSD），自动生成：
-    seqused_q_value = [Q_S] * B（均匀分布）
-    cu_seqlens_q_value = [0, Q_S, 2*Q_S, ..., B*Q_S]
-
-metadata shape 透传（与 mxfp8 对齐）：
-  - Excel metadata_shape 列填 -1,-1 → CSV 写 (-1,-1)，ttk 识别为动态槽位，
-    给主算子传 metadata=None，由 npu_preprocess 调
-    quant_flash_mla_metadata 生成真实 tensor 并回填。
-  - Excel 填具体 shape（如 2,4096）→ 按静态槽位处理（npu_preprocess resize/copy 回填）。
-  - Excel 空 → 自动推导：MLA metadata op 输出 (2, align4096(...))，与 mxfp8 同公式。
-    MLA metadata op 参数: cache_seqlens, num_heads_q, num_heads_kv, quant_mode,
-      cu_seqlens_q, seqused_q, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v,
-      mask_mode, layout_q
-    输出 shape = (2, align4096(16 + (aic+aiv)*16*B*N_kv))
-
-空行处理：跳过 testcase_name 为空的整行。
+Explicit layouts, shapes, dtypes, zeros, negative bounds and sequence values
+are never normalized into valid inputs. Missing core shapes are inferred only
+where unambiguous; missing optional sequence tensors stay omitted. Missing
+metadata uses a dynamic (-1,-1) slot, materialized on the execution machine.
+This converter no longer forces legacy red.xlsx rows to TND.
 """
 
 import argparse
@@ -166,89 +119,6 @@ _KV_LAYOUT_MAP = {
 # metadata slot shape 推导（镜像 quant_flash_mla_metadata 的输出推导）
 # -----------------------------------------------------------------------------------------------------------
 _CORE_NUMS = None
-
-
-def _get_core_nums():
-    """有 NPU 时查询真实核数，无 NPU 默认 (36, 72)。"""
-    global _CORE_NUMS
-    if _CORE_NUMS is None:
-        try:
-            import os
-
-            os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
-            import torch
-            import torch_npu  # noqa: F401
-
-            if torch.npu.is_available():
-                props = torch.npu.get_device_properties()
-                _CORE_NUMS = (props.cube_core_num, props.vector_core_num)
-            else:
-                _CORE_NUMS = (36, 72)
-        except Exception:
-            _CORE_NUMS = (36, 72)
-    return _CORE_NUMS
-
-
-def _tensor_numel(shape):
-    if not shape:
-        return 0
-    numel = 1
-    for dim in shape:
-        numel *= dim
-    return numel
-
-
-def _metadata_batch_size(row, cols):
-    """推导 metadata 用的 batch_size，优先级：
-    seqused_q(value) → cu_seqlens_q(value)-1 → batch_size 列 → q_shape[0](BSND) → 0
-    """
-    seq_values = _str_to_int_list(row.get(cols.get("seqused_q_value")))
-    if seq_values:
-        return len(seq_values)
-    cu_values = _str_to_int_list(row.get(cols.get("cu_seqlens_q_value")))
-    if cu_values:
-        return max(len(cu_values) - 1, 0)
-    explicit = _str_to_int(row.get(cols.get("B")))
-    if explicit is not None and explicit > 0:
-        return explicit
-    return 0
-
-
-def _metadata_num_heads_kv(row, cols):
-    """num_heads_kv 列优先，空 → k_cache_shape[1]（PA_BNBD/PA_NZ）或 [2]（PA_BBND）。"""
-    n_kv = _str_to_int(row.get(cols.get("KV_N")))
-    if n_kv is not None:
-        return n_kv
-    layout_kv = _strip_or_none(row.get(cols.get("layout_kv")))
-    k_shape = _str_to_shape(row.get(cols.get("k_cache_shape")))
-    if k_shape is None:
-        return None
-    if layout_kv == "PA_BBND":
-        return k_shape[2] if len(k_shape) > 2 else None
-    return k_shape[1] if len(k_shape) > 1 else None
-
-
-def _calculate_max_schedule_size(batch_size, num_heads_kv, aic_num, aiv_num):
-    align_size = 4096
-    head_size = METADATA_STRIDE
-    batch_size = batch_size if batch_size and batch_size > 0 else 1
-    fa_size = aic_num * METADATA_STRIDE * batch_size * num_heads_kv
-    fd_size = aiv_num * METADATA_STRIDE * batch_size * num_heads_kv
-    schedule_size = head_size + fa_size + fd_size
-    return ((schedule_size + align_size - 1) // align_size) * align_size
-
-
-def _metadata_slot_shape(row, cols):
-    num_heads_kv = _metadata_num_heads_kv(row, cols)
-    if num_heads_kv is None:
-        name = _strip_or_none(row.get(cols.get("testcase_name"))) or "<unnamed>"
-        raise ValueError(f"[{name}] cannot derive num_heads_kv for metadata shape")
-    batch_size = _metadata_batch_size(row, cols)
-    aic_num, aiv_num = _get_core_nums()
-    return (
-        2,
-        _calculate_max_schedule_size(batch_size, num_heads_kv, aic_num, aiv_num),
-    )
 
 
 # -----------------------------------------------------------------------------------------------------------
@@ -400,49 +270,16 @@ def _map_dtype_or(s, default):
 
 
 # -----------------------------------------------------------------------------------------------------------
-# TND 转换：非 TND 行自动生成 seqused_q/cu_seqlens_q
+# Explicit sequence fields (no layout migration or sequence repair)
 # -----------------------------------------------------------------------------------------------------------
 def _ensure_tnd_fields(row, cols):
-    """确保 TND 布局所需的 seqused_q_value 和 cu_seqlens_q_value 存在。
-
-    对于原 BSND/BNSD 行（seqused_q 为空），自动生成：
-      seqused_q = [Q_S] * B（均匀分布）
-      cu_seqlens_q = [0, Q_S, 2*Q_S, ..., B*Q_S]
-    对于原 TND 行（已有 seqused_q），保持不变。
-
-    同时确保 layout_q = layout_out = TND。
-    """
-    layout_q = _strip_or_none(row.get(cols.get("layout_q")))
-    layout_out = _strip_or_none(row.get(cols.get("layout_out")))
-
-    B = _str_to_int(row.get(cols.get("B"))) or 1
-    Q_S = _str_to_int(row.get(cols.get("Q_S"))) or 1
-
-    # Generate seqused_q if missing
-    sq_values = _str_to_int_list(row.get(cols.get("seqused_q_value")))
-    if not sq_values:
-        sq_values = [Q_S] * B
-
-    # Generate cu_seqlens_q if missing or last element != B*Q_S (padded convention)
-    cu_values = _str_to_int_list(row.get(cols.get("cu_seqlens_q_value")))
-    if not cu_values or (cu_values and cu_values[-1] != B * Q_S):
-        cu_values = [0]
-        for s in sq_values:
-            cu_values.append(cu_values[-1] + s)
-        # Fix last element to T_padded = B * Q_S (padded convention)
-        cu_values[-1] = B * Q_S
-
-    return sq_values, cu_values, layout_q, layout_out
-
-
-def _calc_tnd_shapes(B, Q_S, Q_N, Q_D, V_D, has_lse, sq_values):
-    """计算 TND 布局下的 tensor shapes (使用 compact T = sum(seqused_q))。"""
-    T = sum(sq_values)
-    q_shape = (T, Q_N, Q_D)
-    attn_out_shape = (T, Q_N, V_D)
-    q_descale_shape = (T, Q_N)
-    lse_shape = (Q_N, T) if has_lse else None
-    return q_shape, attn_out_shape, q_descale_shape, lse_shape
+    """Read explicit sequence values and layouts without repairing them."""
+    return (
+        _str_to_int_list(row.get(cols.get("seqused_q_value"))),
+        _str_to_int_list(row.get(cols.get("cu_seqlens_q_value"))),
+        _strip_or_none(row.get(cols.get("layout_q"))),
+        _strip_or_none(row.get(cols.get("layout_out"))),
+    )
 
 
 def _calc_k_cache_shape(cache_seqlens, block_size, n_kv, d_dim, layout_kv):
@@ -468,202 +305,124 @@ def _calc_k_cache_shape(cache_seqlens, block_size, n_kv, d_dim, layout_kv):
 # 每行映射：excel row → csv record
 # -----------------------------------------------------------------------------------------------------------
 def _build_tensor_lists(row, cols, sq_values, cu_values):
-    """返回 (shapes, dtypes, data_ranges)，10 个 tensor slot。"""
+    """Preserve every explicit shape/dtype; infer only missing core storage."""
     import math
 
-    shapes = []
-    dtypes = []
-    data_ranges = []
+    def value(name, default):
+        parsed = _str_to_int(row.get(cols.get(name)))
+        return default if parsed is None else parsed
 
-    B = _str_to_int(row.get(cols.get("B"))) or 1
-    Q_S = _str_to_int(row.get(cols.get("Q_S"))) or 1
-    Q_N = _str_to_int(row.get(cols.get("Q_N"))) or 1
-    KV_N = _str_to_int(row.get(cols.get("KV_N"))) or 1
-    Q_D = _str_to_int(row.get(cols.get("Q_D"))) or 576
-    V_D = _str_to_int(row.get(cols.get("V_D"))) or 512
-    block_size = _str_to_int(row.get(cols.get("blocksize"))) or 128
-    has_lse = _bool_to_int(row.get(cols.get("return_softmax_lse"))) == 1
-    layout_kv = _strip_or_none(row.get(cols.get("layout_kv"))) or "PA_BNBD"
-
-    # Compute TND shapes (compact T = sum(seqused_q))
-    T = sum(sq_values)
-    q_shape = (T, Q_N, Q_D)
-    attn_out_shape = (T, Q_N, V_D)
-    q_descale_shape = (T, Q_N)
-    lse_shape = (Q_N, T) if has_lse else None
-
-    # K cache shape
-    cache_seqlens = _str_to_int_list(row.get(cols.get("cache_seqlens_value"))) or [1024]
-    k_cache_shape = _calc_k_cache_shape(cache_seqlens, block_size, KV_N, Q_D, layout_kv)
-
-    # block_table shape
-    blocks_per_batch = [math.ceil(s / block_size) for s in cache_seqlens]
-    max_blocks = max(blocks_per_batch)
-    block_table_shape = (B, max_blocks)
-
-    # attn_mask
-    mask_mode = _str_to_int(row.get(cols.get("mask_mode"))) or 0
-    has_mask = mask_mode == 3
-    attn_mask_shape = (2048, 2048) if has_mask else None
-
-    # Shape overrides for TND layout
-    shape_overrides = {
+    B, S = value("B", 1), value("Q_S", 1)
+    Nq, Nk, D, Dv = (
+        value("Q_N", 1),
+        value("KV_N", 1),
+        value("Q_D", 576),
+        value("V_D", 512),
+    )
+    block_size = value("blocksize", 128)
+    layout = _strip_or_none(row.get(cols.get("layout_q"))) or "TND"
+    kv_layout = _strip_or_none(row.get(cols.get("layout_kv"))) or "PA_BNBD"
+    if layout == "TND":
+        T = (
+            cu_values[-1]
+            if cu_values
+            else (sum(sq_values) if sq_values is not None else B * S)
+        )
+        q_shape = (T, Nq, D)
+    elif layout == "BSND":
+        q_shape = (B, S, Nq, D)
+    elif layout == "BNSD":
+        q_shape = (B, Nq, S, D)
+    else:
+        q_shape = (
+            None  # An unknown layout needs an explicit shape, not a replacement layout.
+        )
+    cache_values = _str_to_int_list(row.get(cols.get("cache_seqlens_value")))
+    inferred = {
         "q_shape": q_shape,
-        "k_cache_shape": k_cache_shape,
-        "q_descale_shape": q_descale_shape,
-        "block_table_shape": block_table_shape,
+        "q_descale_shape": None if q_shape is None else q_shape[:-1],
+        "k_descale_shape": (1,),
         "cache_seqlens_shape": (B,),
-        "cu_seqlens_q_shape": (B + 1,),
-        "seqused_q_shape": (B,),
-        "attn_mask_shape": attn_mask_shape,
+        "seqused_q_shape": None if sq_values is None else (len(sq_values),),
+        "cu_seqlens_q_shape": None if cu_values is None else (len(cu_values),),
+        "attn_mask_shape": (2048, 2048) if value("mask_mode", 0) == 3 else None,
+        # Dynamic output is resolved on the execution machine; no guessed core counts.
+        "metadata_shape": (-1, -1),
     }
-
-    for (
-        shape_col,
-        dtype_col,
-        drange_col,
-        default_dtype,
-        use_real_drange,
-    ) in _TENSOR_SPECS:
-        # Use computed shape if available, otherwise read from Excel
-        if shape_col in shape_overrides:
-            shape = shape_overrides[shape_col]
-        else:
-            shape = _str_to_shape(row.get(cols.get(shape_col)))
-
-        dtype = _map_dtype_or(row.get(cols.get(dtype_col)), default_dtype)
-        if use_real_drange:
-            drange = _str_to_datarange(row.get(cols.get(drange_col)))
-        else:
-            drange = None
-
-        # Optional tensors with None shape → None (省略)
+    # Capacity cannot be inferred from malformed lengths; explicit shapes remain usable.
+    if (
+        cache_values is not None
+        and block_size > 0
+        and kv_layout in _KV_LAYOUT_MAP
+        and all(length >= 0 for length in cache_values)
+    ):
+        inferred["k_cache_shape"] = _calc_k_cache_shape(
+            cache_values, block_size, Nk, D, kv_layout
+        )
+        inferred["block_table_shape"] = (
+            B,
+            max((math.ceil(x / block_size) for x in cache_values), default=0),
+        )
+    optional = {"cu_seqlens_q_shape", "seqused_q_shape", "attn_mask_shape"}
+    shapes, dtypes, ranges = [], [], []
+    for shape_col, dtype_col, range_col, default_dtype, use_range in _TENSOR_SPECS:
+        shape = _str_to_shape(row.get(cols.get(shape_col)))
         if shape is None:
-            shape = (
-                None
-                if shape_col
-                in (
-                    "cu_seqlens_q_shape",
-                    "seqused_q_shape",
-                    "attn_mask_shape",
-                )
-                else (0,)
+            shape = inferred.get(shape_col)
+        if shape is None and shape_col not in optional:
+            raise ValueError(
+                f"missing {shape_col}; cannot infer storage without changing the case"
             )
-
-        # metadata slot: 优先取 Excel metadata_shape 列原值（透传）。
-        # Excel 填 -1,-1 → CSV 写 (-1,-1)，ttk 识别为动态槽位后给主算子传
-        # metadata=None，由 npu_preprocess 调 quant_flash_mla_metadata
-        # 生成真实 tensor 并回填主算子。
-        # Excel 填具体 shape（如 2,4096）→ 按静态槽位处理（npu_preprocess resize/copy 回填）。
-        # Excel 空 / 0,0 → 默认 (2, 4096)（当前 NPU metadata op 实际输出）。
-        if shape_col == "metadata_shape":
-            excel_meta_shape = _str_to_shape(row.get(cols.get("metadata_shape")))
-            if excel_meta_shape is not None and excel_meta_shape != (0, 0):
-                shape = excel_meta_shape
-            else:
-                shape = _metadata_slot_shape(row, cols)
-            dtype = "int32"
-
-        # k_descale is per-tensor scalar (1,)
-        if shape_col == "k_descale_shape" and (shape is None or shape == (0,)):
-            shape = (1,)
-
-        if drange is None:
-            drange = _DRANGE_PLACEHOLDER
-
         shapes.append(shape)
-        dtypes.append(dtype)
-        data_ranges.append(drange)
-
-    return shapes, dtypes, data_ranges
+        dtypes.append(_map_dtype_or(row.get(cols.get(dtype_col)), default_dtype))
+        drange = _str_to_datarange(row.get(cols.get(range_col))) if use_range else None
+        ranges.append(_DRANGE_PLACEHOLDER if drange is None else drange)
+    return shapes, dtypes, ranges
 
 
 def _build_attributes(row, cols, sq_values, cu_values):
-    """构建 attributes dict。空单元格 → 省略 key。"""
+    """Emit explicit attributes, retaining zeros/negatives and omitted optionals."""
     attrs = {}
-
-    def _set(key, val):
-        if val is not None:
-            attrs[key] = val
-
-    def _set_force(key, val):
-        attrs[key] = val
-
-    B = _str_to_int(row.get(cols.get("B"))) or 1
-    Q_N = _str_to_int(row.get(cols.get("Q_N"))) or 1
-    KV_N = _str_to_int(row.get(cols.get("KV_N"))) or 1
-    Q_D = _str_to_int(row.get(cols.get("Q_D"))) or 576
-    V_D = _str_to_int(row.get(cols.get("V_D"))) or 512
-    block_size = _str_to_int(row.get(cols.get("blocksize"))) or 128
-    quant_mode = _str_to_int(row.get(cols.get("quant_mode"))) or 1
-    softmax_scale = (
-        _str_to_float(row.get(cols.get("softmax_scale"))) or 0.041666666666666664
-    )
-    mask_mode = _str_to_int(row.get(cols.get("mask_mode"))) or 0
-    max_seqlen_q = _str_to_int(row.get(cols.get("max_seqlen_q")))
-    max_seqlen_kv = _str_to_int(row.get(cols.get("max_seqlen_kv")))
-    head_dim_v = _str_to_int(row.get(cols.get("head_dim_v"))) or V_D
-    layout_q = _strip_or_none(row.get(cols.get("layout_q"))) or "TND"
-    layout_kv = _strip_or_none(row.get(cols.get("layout_kv"))) or "PA_BNBD"
-    layout_out = _strip_or_none(row.get(cols.get("layout_out"))) or "TND"
-    return_lse = _bool_to_int(row.get(cols.get("return_softmax_lse"))) or 0
-    # graph_path = _str_to_int(row.get(cols.get("graph_path"))) or 0
-
-    # Force TND layout
-    layout_q = "TND"
-    layout_out = "TND"
-
-    kv_cache_layout = _KV_LAYOUT_MAP.get(layout_kv, layout_kv)
-
-    cache_seqlens = _str_to_int_list(row.get(cols.get("cache_seqlens_value"))) or [1024]
-
-    # max_seqlen auto-derive
-    if max_seqlen_q is None or max_seqlen_q <= 0:
-        max_seqlen_q = max(sq_values) if sq_values else Q_S_value(B, Q_S)
-    if max_seqlen_kv is None or max_seqlen_kv <= 0:
-        max_seqlen_kv = max(cache_seqlens) if cache_seqlens else 1024
-
-    # Data ranges
-    q_range = _str_to_datarange(row.get(cols.get("q_datarange"))) or (-1.0, 1.0)
-    k_range = _str_to_datarange(row.get(cols.get("k_cache_datarange"))) or (-5.0, 5.0)
-    v_range = (-5.0, 5.0)
-
-    _set("precision_tolerances", _precision_tolerances(row, cols))
-    _set("absolute_precision", ABSOLUTE_PRECISION_DEFAULT)
-    _set("B", B)
-    _set("N_q", Q_N)
-    _set("N_kv", KV_N)
-    _set("D", Q_D)
-    _set("D_V", V_D)
-    _set("quant_mode", quant_mode)
-    _set("softmax_scale", softmax_scale)
-    _set_force("seqused_q_values", sq_values)
-    _set_force("cache_seqlens_values", cache_seqlens)
-    _set("kv_cache_layout", kv_cache_layout)
-    _set("block_size", block_size)
-    _set("mask_mode", mask_mode)
-    _set("enable_lse", return_lse)
-    _set("layout_q", layout_q)
-    _set("layout_kv", layout_kv)
-    _set("layout_out", layout_out)
-    _set("return_softmax_lse", return_lse)
-    # _set("graph_path", graph_path)
-    _set("q_data_range", list(q_range))
-    _set("k_data_range", list(k_range))
-    _set("v_data_range", list(v_range))
-    _set("p_scale", 1.0)
-    _set("input_layout", layout_q)
-    _set("output_layout", layout_out)
-    _set_force("max_seqlen_q", max_seqlen_q)
-    _set_force("max_seqlen_kv", max_seqlen_kv)
-    _set("head_dim_v", head_dim_v)
-    _set_force("cu_seqlens_q_values", cu_values)
-
+    integer_columns = {
+        "B": "B",
+        "N_q": "Q_N",
+        "N_kv": "KV_N",
+        "D": "Q_D",
+        "D_V": "V_D",
+        "block_size": "blocksize",
+        "quant_mode": "quant_mode",
+        "mask_mode": "mask_mode",
+        "max_seqlen_q": "max_seqlen_q",
+        "max_seqlen_kv": "max_seqlen_kv",
+        "head_dim_v": "head_dim_v",
+    }
+    for target, column in integer_columns.items():
+        parsed = _str_to_int(row.get(cols.get(column)))
+        if parsed is not None:
+            attrs[target] = parsed
+    for name in ("layout_q", "layout_kv", "layout_out"):
+        parsed = _strip_or_none(row.get(cols.get(name)))
+        if parsed is not None:
+            attrs[name] = parsed
+    scale = _str_to_float(row.get(cols.get("softmax_scale")))
+    if scale is not None:
+        attrs["softmax_scale"] = scale
+    enabled = _bool_to_int(row.get(cols.get("return_softmax_lse")))
+    if enabled is not None:
+        attrs["return_softmax_lse"] = bool(enabled)
+    for key, values in (
+        ("seqused_q_values", sq_values),
+        ("cu_seqlens_q_values", cu_values),
+        (
+            "cache_seqlens_values",
+            _str_to_int_list(row.get(cols.get("cache_seqlens_value"))),
+        ),
+    ):
+        if values is not None:
+            attrs[key] = values
+    attrs["precision_tolerances"] = _precision_tolerances(row, cols)
+    attrs["absolute_precision"] = ABSOLUTE_PRECISION_DEFAULT
     return attrs
-
-
-def Q_S_value(B, Q_S):
-    return Q_S
 
 
 def _precision_tolerances(row, cols):
@@ -683,7 +442,7 @@ def _row_to_csv(excel_row, api_name, testcase_suffix, cols):
         return None
     testcase_name = raw_name.lower() + testcase_suffix
 
-    # Ensure TND fields
+    # Read original sequence fields
     sq_values, cu_values, _, _ = _ensure_tnd_fields(excel_row, cols)
 
     shapes, dtypes, data_ranges = _build_tensor_lists(
@@ -717,7 +476,7 @@ def _parse_sheet_arg(s):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="red.xlsx → ttk 标准 CSV (MLA quant_flash_mla, TND layout)"
+        description="xlsx → ttk 标准 CSV (MLA quant_flash_mla, preserve explicit fields)"
     )
     parser.add_argument(
         "--sheet",
@@ -766,12 +525,7 @@ def main():
     if a_header != "testcase_name":
         raise RuntimeError(f"unexpected header A: {a_header!r}")
 
-    aic_num, aiv_num = _get_core_nums()
-    print(
-        f"[excel_to_csv] core nums: aic={aic_num}, aiv={aiv_num} "
-        "(metadata dim1 = align4096(16 + (aic+aiv)*16*B*N_kv))"
-    )
-    print(f"[excel_to_csv] {len(data_rows)} data rows, all forced to TND layout")
+    print(f"[excel_to_csv] {len(data_rows)} data rows; explicit fields preserved")
 
     for fname, api_name, suffix in CSV_PROFILES:
         out_path = args.out or os.path.join(_HERE, fname)

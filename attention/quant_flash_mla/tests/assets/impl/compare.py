@@ -17,6 +17,7 @@ Receives [npu_out(, npu_lse), golden_out(, golden_lse)] and checks
 precision with bf16 tolerance defaults.
 """
 
+import importlib.util
 import logging
 import os
 import sys
@@ -28,7 +29,15 @@ _ASSETS_DIR = os.path.dirname(os.path.abspath(__file__))
 _GOLDEN_DIR = os.path.join(_ASSETS_DIR, "..")  # assets/
 if _GOLDEN_DIR not in sys.path:
     sys.path.insert(0, _GOLDEN_DIR)
-import qfmla_golden as golden_mod
+_REFERENCE_NAME = "qfmla_assets_golden_reference"
+if _REFERENCE_NAME not in sys.modules:
+    _spec = importlib.util.spec_from_file_location(
+        _REFERENCE_NAME, os.path.join(_GOLDEN_DIR, "qfmla_golden.py")
+    )
+    _module = importlib.util.module_from_spec(_spec)
+    sys.modules[_REFERENCE_NAME] = _module
+    _spec.loader.exec_module(_module)
+golden_mod = sys.modules[_REFERENCE_NAME]
 
 try:
     from ttk.utilities.container_utils import get_global_storage
@@ -140,10 +149,10 @@ def check_result(
         else torch.as_tensor(expect).flatten()
     )
 
+    if tuple(npu_result.shape) != tuple(expect.shape):
+        return "Failed", 0.0, 0
     if real_data.numel() == 0:
         return "Pass", 100.0, 0
-    if real_data.numel() != expect_data.numel():
-        return "Failed", 0.0, 0
 
     split_count = real_data.numel()
     real_float = real_data.to(torch.float32)
@@ -222,7 +231,7 @@ def is_cross_check_available():
 
 def cross_check_enabled():
     """三方开关: 仅 CLI 显式 --compare cross_check 时开启, 默认走两方比较。"""
-    if not _CROSS_CHECK_AVAILABLE or get_global_storage is None:
+    if get_global_storage is None:
         return False
     try:
         method = getattr(get_global_storage(), "compare_method", None)
@@ -240,7 +249,7 @@ def _as_numpy(value):
 
 def _dtype_key(value):
     if isinstance(value, torch.Tensor):
-        return str(value.dtype).removeprefix("torch.")
+        return str(value.dtype).split(".")[-1]
     return str(np.asarray(value).dtype)
 
 
@@ -260,7 +269,7 @@ def _resolve_cross_check_params(spec_tolerance, dtype_str):
 
 
 def _run_cross_check(outputs, bench_outputs, spec_tolerance, third_party_outputs=None):
-    """三方比对: NPU 对 bench 的误差, 以 golden 对 bench 的误差为判据基准。"""
+    """Compare against the bench, preferring an optional fixed-block reference."""
     if len(outputs) < 2 or len(outputs) % 2 != 0:
         return {
             "pass": False,
@@ -277,8 +286,20 @@ def _run_cross_check(outputs, bench_outputs, spec_tolerance, third_party_outputs
         )
         label = "atten" if idx == 0 else f"out{idx}"
         if _is_empty_output(golden_out):
-            # golden 未提供该输出(如未开启 lse) → 不参与判定
-            results.append({"pass": True, "precision": "N/A"})
+            passed = _is_empty_output(npu_out)
+            if npu_out is not None and golden_out is not None:
+                passed = passed and tuple(npu_out.shape) == tuple(golden_out.shape)
+            elif idx != 1:
+                passed = False  # Only disabled LSE may use a None placeholder.
+            results.append(
+                {
+                    "pass": passed,
+                    "precision": "N/A" if passed else "MISSING_OUTPUT",
+                    "error_info": None
+                    if passed
+                    else f"{label}: missing or empty output differs",
+                }
+            )
             continue
         if _is_empty_output(npu_out):
             results.append(
@@ -301,16 +322,26 @@ def _run_cross_check(outputs, bench_outputs, spec_tolerance, third_party_outputs
 
         dtype_str = _dtype_key(golden_out)
         params = _resolve_cross_check_params(spec_tolerance, dtype_str)
-        # third_party 优先用分段量化参考: 与 target 同为逐段 P 量化, 噪声可比;
-        # 未提供时回退 golden slot 输出。
         third_party = golden_out
         if (
             third_party_outputs is not None
             and idx < len(third_party_outputs)
-            and third_party_outputs[idx] is not None
             and not _is_empty_output(third_party_outputs[idx])
         ):
             third_party = third_party_outputs[idx]
+        if any(
+            tuple(value.shape) != tuple(golden_out.shape)
+            for value in (npu_out, bench, third_party)
+        ):
+            results.append(
+                {
+                    "pass": False,
+                    "precision": "SHAPE_MISMATCH",
+                    "error_info": f"{label}: output shapes differ",
+                }
+            )
+            continue
+
         logger.info(
             "[CROSS_CHECK] %s: dtype=%s third_party=%s params=%s",
             label,
@@ -341,57 +372,59 @@ def _run_cross_check(outputs, bench_outputs, spec_tolerance, third_party_outputs
 
 
 def compare(*outputs, **kwargs):
-    """Compare NPU outputs vs golden outputs.
-
-    TTK passes [npu_out(, npu_lse), golden_out(, golden_lse)].
-    bench_outputs 存在时走 ttk 三方 cross_check; 否则按 CSV 容差做双方比较。
-    """
-    bench_outputs = kwargs.get("bench_outputs")
-    spec_tolerance = kwargs.get("spec_tolerance")
-    third_party_outputs = kwargs.get("third_party_outputs")
-    if (
-        bench_outputs is not None
-        and spec_tolerance is not None
-        and is_cross_check_available()
-    ):
+    """Compare fixed output pairs; never downgrade a requested cross-check."""
+    requested = kwargs.get("cross_check_requested", False) or cross_check_enabled()
+    if requested:
+        if not is_cross_check_available():
+            return {
+                "pass": False,
+                "precision": "NO_CROSS_CHECK",
+                "error_info": "requested cross_check is unavailable",
+            }
+        if kwargs.get("bench_outputs") is None or kwargs.get("spec_tolerance") is None:
+            return {
+                "pass": False,
+                "precision": "NO_BENCH",
+                "error_info": "requested cross_check has no bench/tolerance",
+            }
         return _run_cross_check(
-            outputs, bench_outputs, spec_tolerance, third_party_outputs
+            outputs,
+            kwargs["bench_outputs"],
+            kwargs["spec_tolerance"],
+            kwargs.get("third_party_outputs"),
         )
-    non_none = [o for o in outputs if o is not None]
-    if len(non_none) < 2:
+    if len(outputs) < 2 or len(outputs) % 2:
         return {
             "pass": False,
             "precision": "invalid",
-            "error_info": f"not enough valid outputs: {len(non_none)}",
+            "error_info": "expected paired NPU and golden outputs",
         }
-
-    valid = []
-    for o in non_none:
-        if hasattr(o, "size") and o.size == 0:
-            continue
-        if hasattr(o, "numel") and o.numel() == 0:
-            continue
-        valid.append(o)
-
-    if len(valid) < 2:
-        return {
-            "pass": True,
-            "precision": "100.0%",
-            "error_info": None,
-            "metrics": {"result": "Pass", "PctRlt": "100.0%", "MaxRE": 0.0},
-        }
-
-    half = len(valid) // 2
-    npu_outputs = valid[:half]
-    golden_outputs = valid[half:]
-
+    half = len(outputs) // 2
     results = []
-    for idx, (npu_out, golden_out) in enumerate(zip(npu_outputs, golden_outputs)):
-        label = "atten" if idx == 0 else f"out{idx}"
-        npu_torch = _to_torch(npu_out)
-        golden_torch = _to_torch(golden_out)
-
+    for idx, (actual, expected) in enumerate(zip(outputs[:half], outputs[half:])):
+        actual_empty, expected_empty = (
+            _is_empty_output(actual),
+            _is_empty_output(expected),
+        )
+        if actual_empty or expected_empty:
+            passed = actual_empty and expected_empty
+            if actual is not None and expected is not None:
+                passed = passed and tuple(actual.shape) == tuple(expected.shape)
+            elif idx != 1:
+                passed = False  # Attention output is required; LSE may be disabled.
+            results.append(
+                {
+                    "pass": passed,
+                    "precision": "N/A" if passed else "MISSING_OUTPUT",
+                    "error_info": None
+                    if passed
+                    else f"output {idx}: missing or empty output differs",
+                }
+            )
+            continue
+        npu_tensor, golden_tensor = _to_torch(actual), _to_torch(expected)
         rtol, atol, diff_thd, pct_thd, max_diff_hd = _resolve_csv_tolerance(idx)
+        label = "atten" if idx == 0 else f"out{idx}"
         logger.info(
             "[COMPARE] %s: csv rtol=%s atol=%s diff_thd=%s pct_thd=%s max_diff_hd=%s",
             label,
@@ -401,29 +434,20 @@ def compare(*outputs, **kwargs):
             pct_thd,
             max_diff_hd,
         )
-        result, pct, max_err = check_result(
-            golden_torch,
-            npu_torch,
-            rtol=rtol,
-            atol=atol,
-            diff_thd=diff_thd,
-            pct_thd=pct_thd,
-            max_diff_hd=max_diff_hd,
+        result, pct, error = check_result(
+            golden_tensor, npu_tensor, rtol, atol, diff_thd, pct_thd, max_diff_hd
         )
         results.append(
             {
                 "pass": result == "Pass",
                 "precision": pct,
-                "error_info": None if result == "Pass" else f"{label}: MaxRE={max_err}",
+                "error_info": None if result == "Pass" else f"{label}: MaxRE={error}",
                 "metrics": {
                     "label": label,
                     "result": result,
                     "PctRlt": pct,
-                    "MaxRE": max_err,
+                    "MaxRE": error,
                 },
             }
         )
-
-    if len(results) == 1:
-        return results[0]
-    return results
+    return results[0] if len(results) == 1 else results

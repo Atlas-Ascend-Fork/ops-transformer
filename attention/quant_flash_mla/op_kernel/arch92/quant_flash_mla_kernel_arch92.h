@@ -124,6 +124,8 @@ public:
                                 __gm__ uint8_t* workspace, const QuantFlashMlaTilingData& tiling)
     {
         InitConstInfo(tiling);
+        // Metadata observes actual sequence contents, including empty KV batches.
+        constInfo_.needInitOutput = ((__gm__ uint32_t*)metadata)[QFMLA_HEAD_NEED_INIT_OUTPUT_INDEX] != 0;
 
         // metadata header: [0]=sectionNum, [4]=aicNum, [5]=aivNum
         sectionNum_ = ((__gm__ uint32_t*)metadata)[QFMLA_HEAD_SECTION_NUM_INDEX];

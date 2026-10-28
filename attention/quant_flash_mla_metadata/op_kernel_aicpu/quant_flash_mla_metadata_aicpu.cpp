@@ -180,7 +180,7 @@ bool QuantFlashMlaMetadataCpuKernel::ParamsInit()
         baseInfo.actualQuerySeqSize.resize(batchSize_, baseInfo.querySeqSize);
         for (int64_t i = 0; i < batchSize_; ++i) {
             const int64_t seqLen = cuSeqlensQ[i + 1] - cuSeqlensQ[i];
-            if (seqLen < 0 || seqLen > 16 || (maxSeqlenQ_ > 0 && seqLen > maxSeqlenQ_)) {
+            if (seqLen < 0 || seqLen > 16) {
                 KERNEL_LOG_ERROR("cu_seqlens_q must be non-decreasing and each Q length must be in [0, 16], "
                                  "but batch %ld has length %ld",
                                  i, seqLen);

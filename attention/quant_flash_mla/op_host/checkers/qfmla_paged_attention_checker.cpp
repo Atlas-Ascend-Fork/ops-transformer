@@ -105,25 +105,10 @@ ge::graphStatus PagedAttentionChecker::CheckBlockSize(const QfmlaTilingInfo& qfm
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus PagedAttentionChecker::CheckMaxSeqlenKvCapacity(const QfmlaTilingInfo& qfmlaInfo)
-{
-    if (qfmlaInfo.maxSeqKv <= 0) {
-        return ge::GRAPH_SUCCESS;
-    }
-    const int64_t capacity = qfmlaInfo.maxBlockNumPerBatch * qfmlaInfo.blockSize;
-    OP_CHECK_IF(qfmlaInfo.maxSeqKv > capacity,
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                    qfmlaInfo.opName, "max_seqlen_kv", std::to_string(qfmlaInfo.maxSeqKv).c_str(),
-                    ("max_seqlen_kv must not exceed block_table capacity " + std::to_string(capacity)).c_str()),
-                return ge::GRAPH_FAILED);
-    return ge::GRAPH_SUCCESS;
-}
-
 ge::graphStatus PagedAttentionChecker::CheckSinglePara(const QfmlaTilingInfo& qfmlaInfo)
 {
     if (CheckSingleParaBlockTable(qfmlaInfo) != ge::GRAPH_SUCCESS ||
-        CheckSingleParaCacheSeqlens(qfmlaInfo) != ge::GRAPH_SUCCESS || CheckBlockSize(qfmlaInfo) != ge::GRAPH_SUCCESS ||
-        CheckMaxSeqlenKvCapacity(qfmlaInfo) != ge::GRAPH_SUCCESS) {
+        CheckSingleParaCacheSeqlens(qfmlaInfo) != ge::GRAPH_SUCCESS || CheckBlockSize(qfmlaInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
