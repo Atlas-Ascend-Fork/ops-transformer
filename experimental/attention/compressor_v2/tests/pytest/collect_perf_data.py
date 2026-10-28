@@ -26,7 +26,7 @@ def extract_compressor_row(prof_folder):
         return None
 
     df = pd.read_csv(csv_files[0])
-    target = df[df["Op Name"] == "Compressor"]
+    target = df[df["Op Name"] == "CompressorV2"]
     if target.empty:
         return None
 
@@ -144,7 +144,7 @@ def collect_all(
                 f"  [{prof_idx + 1}] {case_name} -> {prof} (Task Duration: {row_data['Task Duration(us)']}us)"
             )
         else:
-            print(f"  [{prof_idx + 1}] {case_name}: 未找到Compressor数据")
+            print(f"  [{prof_idx + 1}] {case_name}: 未找到CompressorV2数据")
 
         prof_idx += 1
 
