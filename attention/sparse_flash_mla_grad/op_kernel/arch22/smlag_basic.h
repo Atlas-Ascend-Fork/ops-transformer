@@ -685,8 +685,10 @@ __aicore__ inline void SparseFlashMlaGrad<SMLAGT>::GetActualSelCount(const int64
 
     if constexpr (MODE == SMLAG_CFA_MODE) {
         cmpDiagOffset = usedS3 * cmpRatio + residual - usedS1;
-        curMaxS3 = Max((cmpDiagOffset + s1Index + (curLoopS1Basic - 1) + 1) / cmpRatio, 0);
-        cmpSelectedCount = curMaxS3;
+        curMaxS3 = Max((cmpDiagOffset + s1Index + (curLoopS1Basic - 1) + 1) / cmpRatio, static_cast<int64_t>(0));
+        // 与 arch35 一致：因果长度再收到本 batch 的 usedS3，避免 ND2NZ 读过 cmp_kv
+        curMaxS3 = Min(curMaxS3, usedS3);
+        cmpSelectedCount = static_cast<int32_t>(curMaxS3);
     }
 
     oriS2Loop = CeilDiv(oriSelectedCount, selectedCountOffset);
