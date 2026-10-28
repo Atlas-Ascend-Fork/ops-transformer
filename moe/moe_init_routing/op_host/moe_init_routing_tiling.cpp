@@ -365,13 +365,15 @@ ge::graphStatus MoeInitRountingTilingBase::PostTiling()
 {
     context_->SetBlockDim(aivNum);
     size_t* currentWorkspace = context_->GetWorkspaceSizes(1);
+    OP_CHECK_NULL_WITH_CONTEXT(context_, currentWorkspace);
     currentWorkspace[0] = workspaceSize_;
     context_->SetLocalMemorySize(aicoreParams_.ubSize);
     // 涉及核间同步的算子必须设置schedule_mode为1，独占全核
     context_->SetScheduleMode(1);
-    moeInitRoutingTilingData.SaveToBuffer(context_->GetRawTilingData()->GetData(),
-                                          context_->GetRawTilingData()->GetCapacity());
-    context_->GetRawTilingData()->SetDataSize(moeInitRoutingTilingData.GetDataSize());
+    auto rawTilingData = context_->GetRawTilingData();
+    OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData);
+    moeInitRoutingTilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
+    rawTilingData->SetDataSize(moeInitRoutingTilingData.GetDataSize());
     return ge::GRAPH_SUCCESS;
 }
 void MoeInitRountingTilingBase::Tinlig4VBSOneCoreCompute(VBSComputeTilingData* tilingData)

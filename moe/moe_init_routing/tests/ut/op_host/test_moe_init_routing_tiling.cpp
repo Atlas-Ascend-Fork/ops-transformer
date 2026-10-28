@@ -13,6 +13,8 @@
 #include "../../../op_host/moe_init_routing_tiling.h"
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
+#include "base/registry/op_impl_space_registry_v2.h"
+#include "platform/platform_infos_def.h"
 
 using namespace std;
 
@@ -814,3 +816,78 @@ TEST_F(MoeInitRoutingTiling, moe_init_routing_tiling_27)
     std::vector<size_t> expectWorkspaces = {16781480};    // workspace
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
+
+enum class TilingOutputBufferCase {
+    Valid,
+    NullWorkspace,
+    EmptyWorkspace,
+    NullTilingData
+};
+
+class MoeInitRoutingTilingOutputBuffers : public MoeInitRoutingTiling,
+                                          public testing::WithParamInterface<TilingOutputBufferCase> {};
+
+TEST_P(MoeInitRoutingTilingOutputBuffers, CheckOutputBuffers)
+{
+    const auto bufferCase = GetParam();
+    auto makeTensor = [](const gert::StorageShape& shape, ge::DataType dtype) {
+        return gert::Tensor(shape, gert::StorageFormat(ge::FORMAT_ND, ge::FORMAT_ND, gert::ExpandDimsType()),
+                            gert::TensorPlacement::kOnHost, dtype, nullptr);
+    };
+    auto x = makeTensor({{2, 5}, {2, 5}}, ge::DT_FLOAT);
+    auto rowIdx = makeTensor({{2, 3}, {2, 3}}, ge::DT_INT32);
+    auto expertIdx = makeTensor({{2, 3}, {2, 3}}, ge::DT_INT32);
+    auto expandedX = makeTensor({{6, 5}, {6, 5}}, ge::DT_FLOAT);
+    auto expandedRowIdx = makeTensor({{6}, {6}}, ge::DT_INT32);
+    auto expandedExpertIdx = makeTensor({{6}, {6}}, ge::DT_INT32);
+    optiling::MoeInitRoutingCompileInfo compileInfo = {};
+    fe::PlatFormInfos platformInfo;
+    platformInfo.Init();
+    std::map<std::string, std::string> socInfo = {{"ai_core_cnt", "64"}, {"core_type_list", "AICore"}};
+    std::map<std::string, std::string> aicoreSpec = {{"ub_size", "262144"}};
+    std::map<std::string, std::string> version = {{"NpuArch", "2201"}, {"Short_SoC_version", "Ascend910B"}};
+    platformInfo.SetPlatformRes("SoCInfo", socInfo);
+    platformInfo.SetPlatformRes("AICoreSpec", aicoreSpec);
+    platformInfo.SetCoreNumByCoreType("AICore");
+    platformInfo.SetPlatformRes("version", version);
+    auto tilingData = gert::TilingData::CreateCap(4096);
+    auto workspaceHolder =
+        gert::ContinuousVector::Create<size_t>(bufferCase == TilingOutputBufferCase::EmptyWorkspace ? 0 : 1);
+    ASSERT_NE(tilingData, nullptr);
+    ASSERT_NE(workspaceHolder, nullptr);
+    auto workspace = reinterpret_cast<gert::ContinuousVector*>(workspaceHolder.get());
+    gert::TilingContextFaker contextFaker;
+    auto contextHolder =
+        contextFaker.SetOpType("MoeInitRouting")
+            .NodeIoNum(3, 3)
+            .InputTensors({&x, &rowIdx, &expertIdx})
+            .OutputTensors({&expandedX, &expandedRowIdx, &expandedExpertIdx})
+            .Attr("active_num", int64_t{6})
+            .CompileInfo(&compileInfo)
+            .PlatformInfo(&platformInfo)
+            .TilingData(bufferCase == TilingOutputBufferCase::NullTilingData ? nullptr : tilingData.get())
+            .Workspace(bufferCase == TilingOutputBufferCase::NullWorkspace ? nullptr : workspace)
+            .Build();
+    auto context = contextHolder.GetContext();
+    ASSERT_NE(context, nullptr);
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(spaceRegistry, nullptr);
+    auto opImpl = spaceRegistry->GetOpImpl("MoeInitRouting");
+    ASSERT_NE(opImpl, nullptr);
+    ASSERT_NE(opImpl->tiling, nullptr);
+    const auto result = opImpl->tiling(context);
+    if (bufferCase == TilingOutputBufferCase::Valid) {
+        ASSERT_EQ(result, ge::GRAPH_SUCCESS);
+        ASSERT_NE(context->GetWorkspaceSizes(1), nullptr);
+        EXPECT_EQ(context->GetWorkspaceSizes(1)[0], 16781480U);
+        EXPECT_EQ(context->GetTilingKey(), 0U);
+        EXPECT_GT(context->GetRawTilingData()->GetDataSize(), 0U);
+    } else {
+        EXPECT_EQ(result, ge::GRAPH_FAILED);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(OutputBuffers, MoeInitRoutingTilingOutputBuffers,
+                         testing::Values(TilingOutputBufferCase::Valid, TilingOutputBufferCase::NullWorkspace,
+                                         TilingOutputBufferCase::EmptyWorkspace,
+                                         TilingOutputBufferCase::NullTilingData));
