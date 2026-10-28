@@ -79,7 +79,13 @@ protected:
 
 private:
     ge::graphStatus DoApaceTiling();
-    void FillApaceMmTile(const Mc2MatMulV3TilingData& localTiling);
+    ge::graphStatus FillApaceMmTile(const Mc2MatMulV3TilingData& localTiling);
+    // apace kernel L1 半区布局为 A|B|bias（bmm_block_mmad_fragment.h 分区公式，约束 A+B+bias ≤ L1/2），
+    // 与 local tiling 自身的 A1/B1 双缓冲约束不等价，零余量档位叠加 bias 会导致 bias 槽越界/重叠。
+    // 超限仅降 stepK（不降 baseM/baseN：非 2 幂折半破坏 16 行分形对齐）；stepK=1 时用量由 L0 tile
+    // 硬约束（baseM·baseK·dtype ≤ L0A、baseN·baseK·dtype ≤ L0B）保证必然满足，仍超限即档位本身
+    // 病态，报错拒绝（同 3rd gmm_qbmm_tiling "L1 space overflow" 处置）
+    ge::graphStatus FitApaceMmTileToL1(uint32_t baseM, uint32_t baseN, uint32_t baseK, uint32_t& stepK) const;
 
     Mc2Tiling::AllGatherMatmulTilingDataV2 allGatherMatmulTilingDataV2Self_;
     Mc2Tiling::AllGatherMatmulTilingDataV2* allGatherMatmulTilingDataV2_;

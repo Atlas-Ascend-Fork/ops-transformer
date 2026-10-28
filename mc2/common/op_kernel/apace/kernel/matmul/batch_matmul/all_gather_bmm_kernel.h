@@ -525,9 +525,11 @@ __aicore__ inline void AllGatherBmmKernel<AType, BType, CType, CommPolicy, Trans
     const Params& params, uint32_t roundIdx)
 {
     const auto& fp = params.fragParams;
-    uint32_t delta = roundIdx - curMainRoundIdx_;
-    curRoundDataOff_ += static_cast<uint64_t>(delta) * tileMDataStride_;
-    curRoundCOff_ += static_cast<uint64_t>(delta) * tileMCStride_;
+    // 滑窗交换调度下同一核的 MAIN 轮次访问顺序不保证单调（可先高轮次后低轮次回退），
+    // 增量 delta = roundIdx - curMainRoundIdx_ 为无符号减法，回退时下溢得到野地址；
+    // 改为按 roundIdx 绝对计算偏移（与 BuildMainFragment 同口径），任意顺序均正确。
+    curRoundDataOff_ = static_cast<uint64_t>(roundIdx) * tileMDataStride_;
+    curRoundCOff_ = static_cast<uint64_t>(roundIdx) * tileMCStride_;
 
     uint32_t fragIdx = 0;
     for (uint32_t r = 0; r < fp.rankSize; ++r) {

@@ -45,6 +45,10 @@ using namespace Mc2Tiling;
 namespace optiling {
 static constexpr int64_t CMP_MAX_LEN = 7;
 static constexpr uint64_t APACE_KERNEL_ALIGN_M = 256;
+// fragment(L1-A nz / L0C nz 分形)行对齐粒度：tail 路径 paddedTailM 按 16 对齐（同 V3 M_TAIL_ALIGN，
+// 保证 L0C 拷出首地址 1024B 对齐）；head tileM 非 16 对齐时 256 行调度块会跨越 fragment 边界，
+// 产生分形中间起始的 L1/L0C 拷贝（MTE2/fixpipe 非法地址 → aicore error），须改走纯尾块路径
+static constexpr uint64_t APACE_KERNEL_FRACTAL_ALIGN_M = 16;
 static constexpr uint32_t APACE_STEPK_THRESHOLD = 4;
 static constexpr uint8_t APACE_L1_BUFFER_NUM = 2;
 
@@ -68,7 +72,53 @@ ge::graphStatus AllGatherMatmulTilingV2::SetRawTilingData()
     return ge::GRAPH_SUCCESS;
 }
 
-void AllGatherMatmulTilingV2::FillApaceMmTile(const Mc2MatMulV3TilingData& localTiling)
+ge::graphStatus AllGatherMatmulTilingV2::FitApaceMmTileToL1(uint32_t baseM, uint32_t baseN, uint32_t baseK,
+                                                            uint32_t& stepK) const
+{
+    uint64_t l1Size = 0UL;
+    auto platformInfo = context_->GetPlatformInfo();
+    if (platformInfo != nullptr) {
+        platform_ascendc::PlatformAscendC ascendcPlatform(platformInfo);
+        ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1Size);
+    }
+    if (l1Size == 0UL) {
+        l1Size = 512UL * 1024UL; // 兜底与 kernel 侧 TOTAL_L1_SIZE(arch35) 一致
+    }
+    // 半区预算与 mmTile.nBufferNum 同源（APACE_L1_BUFFER_NUM），避免缓冲数调整时公式静默失准
+    const uint64_t halfL1 = l1Size / APACE_L1_BUFFER_NUM;
+    const uint64_t c0Elems = 32UL / args_.inputDtypeSize;                     // fp16/bf16: 16 元素/分形
+    const uint64_t biasElemSize = args_.isBias ? args_.outputDtypeSize : 0UL; // BiasType = CType
+
+    auto l1Usage = [&](uint32_t curBaseM, uint32_t curBaseN, uint32_t curStepK) {
+        uint64_t kL1 = mc2tiling::AlignUp(static_cast<uint64_t>(curStepK) * baseK, c0Elems);
+        uint64_t aL1 = static_cast<uint64_t>(curBaseM) * kL1 * args_.inputDtypeSize;
+        uint64_t bL1 = static_cast<uint64_t>(curBaseN) * kL1 * args_.inputDtypeSize;
+        uint64_t biasL1 = static_cast<uint64_t>(curBaseN) * biasElemSize;
+        return aL1 + bL1 + biasL1;
+    };
+
+    const uint32_t oriStepK = stepK;
+    while ((stepK > 1UL) && (l1Usage(baseM, baseN, stepK) > halfL1)) {
+        stepK--;
+    }
+    // stepK=1 时 A+B+bias ≤ L0A+L0B+bias < L1/2（L0 tile 硬约束 baseM·baseK·dtype ≤ L0A、
+    // baseN·baseK·dtype ≤ L0B，v3 档位对自身 kernel 合法即满足），仍超限仅当借用档位违反
+    // L0 约束（不可达），报错拒绝（同 3rd gmm_qbmm_tiling "L1 space overflow" 处置）
+    OP_TILING_CHECK(
+        (l1Usage(baseM, baseN, stepK) > halfL1),
+        OP_LOGE(opName_,
+                "[APACE] L1 capacity overflow: baseM=%u, baseN=%u, baseK=%u, stepK=%u, usage=%lu, "
+                "halfL1=%lu, isBias=%d.",
+                baseM, baseN, baseK, stepK, l1Usage(baseM, baseN, stepK), halfL1, static_cast<int32_t>(args_.isBias)),
+        return ge::GRAPH_FAILED);
+    if (stepK != oriStepK) {
+        OP_LOGW(opName_, "[APACE] L1 capacity fit: stepK %u->%u (baseM=%u, baseN=%u, baseK=%u, isBias=%d, halfL1=%lu).",
+                oriStepK, stepK, baseM, baseN, baseK, static_cast<int32_t>(args_.isBias), halfL1);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus AllGatherMatmulTilingV2::FillApaceMmTile(const Mc2MatMulV3TilingData& localTiling)
 {
     auto& mmTile = hcommTilingDataSelf_.mmTile;
     const auto& tCube = localTiling.tCubeTiling;
@@ -89,9 +139,13 @@ void AllGatherMatmulTilingV2::FillApaceMmTile(const Mc2MatMulV3TilingData& local
     mmTile.usedCoreNum = tCube.usedCoreNum;
     uint32_t stepK = std::min(tCube.stepKa, tCube.stepKb);
     stepK = std::min(stepK, APACE_STEPK_THRESHOLD);
+    // apace L1 半区(A|B|bias)容量复核：零余量档位叠加 bias 时 bias 槽会越界/重叠，超限仅降 stepK
+    OP_TILING_CHECK((FitApaceMmTileToL1(mmTile.baseM, mmTile.baseN, mmTile.baseK, stepK) != ge::GRAPH_SUCCESS),
+                    OP_LOGE(opName_, "Fail to fit apace mm tile to L1."), return ge::GRAPH_FAILED);
     mmTile.stepK = static_cast<uint8_t>(stepK);
     mmTile.nBufferNum = APACE_L1_BUFFER_NUM;
     mmTile.dbL0c = static_cast<uint8_t>(tCube.dbL0C);
+    return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus AllGatherMatmulTilingV2::DoApaceTiling()
@@ -104,10 +158,20 @@ ge::graphStatus AllGatherMatmulTilingV2::DoApaceTiling()
     if ((apaceTileM != 0) && (args_.mValue != 0)) {
         uint64_t alignedTileM = mc2tiling::AlignUp(apaceTileM, APACE_KERNEL_ALIGN_M);
         if (alignedTileM >= args_.mValue) {
-            apaceTileM = args_.mValue;
-            apaceTileCnt = 1;
-            apaceTailM = 0;
-            apaceTailCnt = 0;
+            if (args_.mValue % APACE_KERNEL_FRACTAL_ALIGN_M == 0) {
+                apaceTileM = args_.mValue;
+                apaceTileCnt = 1;
+                apaceTailM = 0;
+                apaceTailCnt = 0;
+            } else {
+                // 整 M 单 head tile 且 M 非分形(16 行)对齐：改走纯尾块路径（tileCnt=0，kernel 跳过 head 提交）。
+                // tail fragment 按 paddedTailM=AlignUp(M,16) 对齐分布（realFragmentSize=M 抑制补齐行写 C），
+                // 使 256 行调度块跨界切片的 L1-A/L0C 侧偏移恒为 16 对齐，避免 aicore L1 error（rank>2 卡死根因）
+                apaceTileM = 0;
+                apaceTileCnt = 0;
+                apaceTailM = args_.mValue;
+                apaceTailCnt = 1;
+            }
         } else {
             apaceTileM = alignedTileM;
             apaceTileCnt = args_.mValue / alignedTileM;
@@ -123,7 +187,8 @@ ge::graphStatus AllGatherMatmulTilingV2::DoApaceTiling()
     commTile.splitAxisTailCnt = apaceTailCnt;
     commTile.nonSplitAxisSize = args_.kValue;
 
-    FillApaceMmTile(MutableMC2MatmulV3LocalTilingData());
+    OP_TILING_CHECK((FillApaceMmTile(MutableMC2MatmulV3LocalTilingData()) != ge::GRAPH_SUCCESS),
+                    OP_LOGE(opName_, "Fail to fill apace mm tile."), return ge::GRAPH_FAILED);
 
     hcommTilingDataSelf_.mc2InitTiling = allGatherMatmulTilingDataV2_->mc2InitTiling;
     hcommTilingDataSelf_.mc2CcTiling = allGatherMatmulTilingDataV2_->mc2CcTiling;
