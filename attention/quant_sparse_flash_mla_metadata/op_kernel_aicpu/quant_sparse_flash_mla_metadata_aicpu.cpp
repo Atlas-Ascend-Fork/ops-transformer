@@ -1397,7 +1397,6 @@ void QuantSparseFlashMlaMetadataCpuKernel::AssignBlocksToCore(const SplitContext
     result.gS1End[assignContext.curCoreIdx] = assignContext.curS1GIdx;
     result.s2End[assignContext.curCoreIdx] = assignContext.curS2Idx;
     result.maxCost = std::max(result.maxCost, assignContext.coreCache.cost);
-    result.maxBlockNum = std::max(result.maxBlockNum, assignContext.coreCache.block);
     assignContext.unassignedCost -= assignContext.coreCache.cost;
     result.maxS2LoopNum = std::max(assignContext.coreCache.s2Loop, result.maxS2LoopNum);
     // 对之前的归约信息进行记录并清理
@@ -1438,7 +1437,6 @@ void QuantSparseFlashMlaMetadataCpuKernel::CalcSplitPlan(int64_t costLimit, cons
         return;
     }
     result.maxCost = 0U;
-    result.maxBlockNum = 0U;
     result.usedCoreNum = 0U;
 
     AssignContext assignContext{};
@@ -1493,16 +1491,6 @@ void QuantSparseFlashMlaMetadataCpuKernel::SplitFD(SplitResult& splitRes)
     splitRes.fdRes.fdUsedVecNum = curCoreIndex;
 }
 
-bool QuantSparseFlashMlaMetadataCpuKernel::ShouldUseFd(const SplitResult& nonFdSplitRes,
-                                                       const SplitResult& fdSplitRes) const
-{
-    if (fdSplitRes.numOfFdHead == 0U) {
-        return false;
-    }
-    // FD收益至少为FA最重核的4个基本块。
-    return static_cast<int64_t>(nonFdSplitRes.maxBlockNum) - static_cast<int64_t>(fdSplitRes.maxBlockNum) >= 4;
-}
-
 bool QuantSparseFlashMlaMetadataCpuKernel::BalanceSchedule(SplitResult& splitRes)
 {
     SplitContext splitContext(batchSize_);
@@ -1523,31 +1511,10 @@ bool QuantSparseFlashMlaMetadataCpuKernel::BalanceSchedule(SplitResult& splitRes
     splitRes.maxCost = INT64_MAX;
     splitRes.usedCoreNum = 1U;
 
-    if (isBatchConsistency_) {
-        CalcSplitPlan(splitRes.maxCost, splitContext, splitRes);
-        if (splitRes.numOfFdHead > 0U) {
-            SplitFD(splitRes);
-        }
-    } else if (aicCoreNum_ <= 4U || batchSize_ > aicCoreNum_ - 4U) {
-        // Batch超过Cube核数减4时关闭FD，直接生成一次不开FD的方案。
-        supportFd_ = false;
-        CalcSplitPlan(splitRes.maxCost, splitContext, splitRes);
-    } else {
-        supportFd_ = false;
-        SplitResult nonFdSplitRes(aicCoreNum_, aivCoreNum_);
-        nonFdSplitRes.maxCost = INT64_MAX;
-        nonFdSplitRes.usedCoreNum = 1U;
-        CalcSplitPlan(nonFdSplitRes.maxCost, splitContext, nonFdSplitRes);
-        supportFd_ = true;
-        SplitResult fdSplitRes(aicCoreNum_, aivCoreNum_);
-        fdSplitRes.maxCost = INT64_MAX;
-        fdSplitRes.usedCoreNum = 1U;
-        CalcSplitPlan(fdSplitRes.maxCost, splitContext, fdSplitRes);
-        supportFd_ = ShouldUseFd(nonFdSplitRes, fdSplitRes);
-        splitRes = supportFd_ ? fdSplitRes : nonFdSplitRes;
-        if (supportFd_) {
-            SplitFD(splitRes);
-        }
+    CalcSplitPlan(splitRes.maxCost, splitContext, splitRes);
+    // 3、存在FD任务，对FD进行负载均衡分配
+    if (splitRes.numOfFdHead > 0U) {
+        SplitFD(splitRes);
     }
     splitRes.usedCoreNum = std::max(splitRes.usedCoreNum, 1U); // 至少使用1个core
     return true;
