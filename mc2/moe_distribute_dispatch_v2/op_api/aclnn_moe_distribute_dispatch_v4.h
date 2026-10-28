@@ -43,7 +43,7 @@ extern "C" {
  * @param [in] quantMode: 计算可选输入，int，量化模式。
  * @param [in] globalBs: 计算可选输入，int。EP域全局的batch size大小。
  * @param [in] expertTokenNumsType: 计算可选输入，int。输出expertTokenNums中的值语义类型。
- * @param [in] commAlg: 计算可选输入，str。 通信算法类型。预留参数，暂未使用。
+ * @param [in] commAlg: 计算可选输入，str。通信算法类型，支持的取值及约束请参见对应产品的接口文档。
  * @param [in] zeroExpertNum: 计算可选输入，int。 表示零专家的数量。
  * @param [in] copyExpertNum: 计算可选输入，int。 表示copy专家的数量。
  * @param [in] constExpertNum: 计算可选输入，int。 表示常量专家的数量。

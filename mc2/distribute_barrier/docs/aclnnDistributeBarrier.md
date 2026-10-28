@@ -145,7 +145,12 @@ aclnnStatus aclnnDistributeBarrier(
     <tr>
     <td>ACLNN_ERR_PARAM_NULLPTR</td>
     <td>161001</td>
-    <td>输入的必选参数Tensor是空指针。</td>
+    <td>传入的xRef或group是空指针。</td>
+    </tr>
+    <tr>
+    <td>ACLNN_ERR_PARAM_INVALID</td>
+    <td>161002</td>
+    <td>group为空字符串或长度大于等于HCCL_GROUP_NAME_MAX（128）。</td>
     </tr>
     <tr>
     <td>ACLNN_ERR_INNER_TILING_ERROR</td>

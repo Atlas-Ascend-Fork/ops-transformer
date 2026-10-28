@@ -188,12 +188,13 @@ aclnnStatus aclnnDistributeBarrierV2(
     <td>传入的xRef或group是空指针。</td>
     </tr>
     <tr>
-    <td rowspan="3" align="left">ACLNN_ERR_PARAM_INVALID</td>
-    <td rowspan="3" align="left">161002</td>
+    <td rowspan="4" align="left">ACLNN_ERR_PARAM_INVALID</td>
+    <td rowspan="4" align="left">161002</td>
     <td align="left">传入的xRef，timeOut，elasticInfo，group，worldSize的数据类型不在支持的范围内。</td>
     </tr>
     <tr><td align="left">传入的xRef，timeOut，elasticInfo，group，worldSize的数据格式不在支持的范围内。</td></tr>
     <tr><td align="left">传入的xRef，timeOut，elasticInfo，group，worldSize的shape不匹配。</td></tr>
+    <tr><td align="left">group为空字符串或长度大于等于HCCL_GROUP_NAME_MAX（128）。</td></tr>
     </tbody></table>
 
 ## aclnnDistributeBarrierV2

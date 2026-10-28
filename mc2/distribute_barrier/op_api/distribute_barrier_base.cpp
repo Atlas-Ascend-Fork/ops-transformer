@@ -70,7 +70,7 @@ aclnnStatus BarrierCheckParams(const aclTensor* xRef, const char* group)
     if ((groupStrnLen >= HCCL_GROUP_NAME_MAX) || (groupStrnLen == 0)) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("aclnnDistributeBarrier", "group", std::to_string(groupStrnLen).c_str(),
                                               "The value of group must be in the range (0, HCCL_GROUP_NAME_MAX)");
-        return false;
+        return ACLNN_ERR_PARAM_INVALID;
     }
     return ACLNN_SUCCESS;
 }

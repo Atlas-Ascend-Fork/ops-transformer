@@ -233,6 +233,13 @@ static ge::graphStatus GetAndCheckDispatchShapeV2(const char* nodeName, const ge
                                               "Each dim of x and expert_ids must be positive");
         return ge::GRAPH_FAILED;
     }
+    if (bs != bsTmp) {
+        std::string shapeStr = std::string("x[") + std::to_string(bs) + "," + std::to_string(h) + "]" +
+                               ", expert_ids[" + std::to_string(bsTmp) + "," + std::to_string(k) + "]";
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(nodeName, "x and expert_ids", shapeStr.c_str(),
+                                              "The batch dimensions of x and expert_ids must be equal");
+        return ge::GRAPH_FAILED;
+    }
     return ge::GRAPH_SUCCESS;
 }
 

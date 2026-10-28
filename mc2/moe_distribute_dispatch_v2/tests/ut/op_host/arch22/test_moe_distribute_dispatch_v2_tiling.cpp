@@ -868,7 +868,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommalgEmpty)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -914,7 +914,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommalgFullmesh)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -964,7 +964,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommalgHierarchy)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 128UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -1011,7 +1011,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommalgError)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
 
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues);
 }
 
@@ -1060,7 +1060,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommalgEmptyWithEnv)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -1106,7 +1106,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommalgFullmeshWithEnv)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -1152,7 +1152,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommalgFullmeshZeroComputeExpe
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -1422,7 +1422,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, VariableBsXActiveMaskSuccess)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, UINT64_MAX);
 }
 
@@ -3762,7 +3762,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2Quant2WithScalesSuccess)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, 16UL);
 }
 
@@ -3815,7 +3815,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommAlgEmptyPcieEnvHierarchy)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, 128UL);
 
     if (origPcie.empty()) {
@@ -3867,7 +3867,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2SmallHcclBuffFullmeshWarn)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}, {"cclBufferSize", 1024ULL}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}, {"cclBufferSize", 1024ULL}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, 0UL);
 }
 
@@ -3909,7 +3909,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadEpWorldSizeFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 9}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -3951,7 +3951,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadEpRankIdFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -3993,7 +3993,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadQuantModeFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4039,7 +4039,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadElasticInfoFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4081,7 +4081,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadHiddenSizeFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4124,7 +4124,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadScalesWithNonQuantFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4374,7 +4374,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadGroupEpEmptyFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4414,7 +4414,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadTpWorldSizeGe2Failed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4454,7 +4454,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadExpertTokenNumsTypeFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4494,7 +4494,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadConstExpertNumFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4534,7 +4534,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadMoeExpertNumIndivisibleFail
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4574,7 +4574,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadZeroExpertOverflowFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(200000000LL)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4616,7 +4616,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadXActiveMaskDim0Failed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4658,7 +4658,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadXActiveMaskDim1Failed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4704,7 +4704,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadPerformanceInfoShapeFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2SmallHcclBuffHierarchyWarn)
@@ -4747,7 +4747,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2SmallHcclBuffHierarchyWarn)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}, {"cclBufferSize", 1024ULL}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}, {"cclBufferSize", 1024ULL}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, 128UL);
 }
 
@@ -4959,7 +4959,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadXNot2DFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -4999,7 +4999,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadExpertIdsNot2DFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -5039,7 +5039,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadBatchSizeZeroFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
@@ -5079,7 +5079,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadKZeroFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2GlobalBsNonZeroSuccess)
@@ -5118,7 +5118,7 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2GlobalBsNonZeroSuccess)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, 0UL);
 }
 
@@ -5176,8 +5176,141 @@ TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2BadPerformanceInfoNot1DFailed)
          {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", 48, 196608);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
+}
+
+static void CheckA2CommAlg(const std::string& commAlg, int64_t epWorldSize, ge::graphStatus expectedStatus,
+                           uint64_t expectedTilingKey = 0UL, int64_t actualRankSize = -1)
+{
+    struct MoeDistributeDispatchV2CompileInfo {
+    } compileInfo;
+    const int64_t expandRows = 8 * 8 * epWorldSize;
+    const int64_t assistInfoSize = expandRows * 128;
+    const int64_t epRecvCount = epWorldSize * 8 + (8 * epWorldSize) * 2 * 8 * (epWorldSize / 8);
+    gert::TilingContextPara tilingContextPara(
+        "MoeDistributeDispatchV2",
+        {
+            {{{8, 7168}, {8, 7168}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{8, 8}, {8, 8}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{}, ge::DT_BOOL, ge::FORMAT_ND},
+            {{{8, 8}, {8, 8}}, ge::DT_FLOAT, ge::FORMAT_ND},
+        },
+        {
+            {{{expandRows, 7168}, {expandRows, 7168}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{expandRows}, {expandRows}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{assistInfoSize}, {assistInfoSize}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{8}, {8}}, ge::DT_INT64, ge::FORMAT_ND},
+            {{{epRecvCount}, {epRecvCount}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{0}, {0}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{expandRows}, {expandRows}}, ge::DT_FLOAT, ge::FORMAT_ND},
+        },
+        {{"group_ep", Ops::Transformer::AnyValue::CreateFrom<std::string>("ep_group")},
+         {"ep_world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(epWorldSize)},
+         {"ep_rank_id", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"moe_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(epWorldSize * 8)},
+         {"group_tp", Ops::Transformer::AnyValue::CreateFrom<std::string>("")},
+         {"tp_world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"tp_rank_id", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"expert_shard_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"shared_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"shared_expert_rank_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"comm_alg", Ops::Transformer::AnyValue::CreateFrom<std::string>(commAlg)},
+         {"zero_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
+        &compileInfo, "Ascend910B", 48, 196608);
+    const auto rankSize = static_cast<uint64_t>(actualRankSize < 0 ? epWorldSize : actualRankSize);
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", rankSize}};
+    Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, expectedStatus, expectedTilingKey);
+}
+
+TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommAlgRejectsUnsupportedValues)
+{
+    for (const std::string commAlg : {"bad", "fullmeshh", "0", "fullmesh_v1", "fullmesh_v2", "ccu"}) {
+        SCOPED_TRACE(commAlg);
+        for (int64_t epWorldSize : {2, 8, 16}) {
+            SCOPED_TRACE(epWorldSize);
+            CheckA2CommAlg(commAlg, epWorldSize, ge::GRAPH_FAILED);
+        }
+    }
+}
+
+TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommAlgHierarchyRejectsUnsupportedWorldSizes)
+{
+    for (int64_t epWorldSize : {2, 8, 24, 40, 48, 56, 128}) {
+        SCOPED_TRACE(epWorldSize);
+        CheckA2CommAlg("hierarchy", epWorldSize, ge::GRAPH_FAILED);
+    }
+}
+
+TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommAlgHierarchyAcceptsSupportedWorldSizes)
+{
+    for (int64_t epWorldSize : {16, 32, 64}) {
+        SCOPED_TRACE(epWorldSize);
+        CheckA2CommAlg("hierarchy", epWorldSize, ge::GRAPH_SUCCESS, 128UL);
+    }
+}
+
+TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommAlgFullmeshAcceptsSingleAndMultipleNodes)
+{
+    for (int64_t epWorldSize : {2, 8, 16, 32, 64}) {
+        SCOPED_TRACE(epWorldSize);
+        CheckA2CommAlg("fullmesh", epWorldSize, ge::GRAPH_SUCCESS);
+    }
+}
+
+TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2CommAlgEmptyPreservesEnvironmentFallback)
+{
+    const char* pcieEnv = getenv("HCCL_INTRA_PCIE_ENABLE");
+    const bool hadPcieEnv = pcieEnv != nullptr;
+    const std::string origPcie = hadPcieEnv ? pcieEnv : "";
+    const char* roceEnv = getenv("HCCL_INTRA_ROCE_ENABLE");
+    const bool hadRoceEnv = roceEnv != nullptr;
+    const std::string origRoce = hadRoceEnv ? roceEnv : "";
+
+    setenv("HCCL_INTRA_PCIE_ENABLE", "1", 1);
+    setenv("HCCL_INTRA_ROCE_ENABLE", "0", 1);
+    // 单机沿用默认fullmesh，多机按环境变量选择hierarchy。
+    CheckA2CommAlg("", 2, ge::GRAPH_SUCCESS);
+    CheckA2CommAlg("", 8, ge::GRAPH_SUCCESS);
+    CheckA2CommAlg("", 32, ge::GRAPH_SUCCESS, 128UL);
+    CheckA2CommAlg("", 24, ge::GRAPH_FAILED);
+    setenv("HCCL_INTRA_PCIE_ENABLE", "0", 1);
+    CheckA2CommAlg("", 32, ge::GRAPH_SUCCESS);
+
+    if (hadPcieEnv) {
+        setenv("HCCL_INTRA_PCIE_ENABLE", origPcie.c_str(), 1);
+    } else {
+        unsetenv("HCCL_INTRA_PCIE_ENABLE");
+    }
+    if (hadRoceEnv) {
+        setenv("HCCL_INTRA_ROCE_ENABLE", origRoce.c_str(), 1);
+    } else {
+        unsetenv("HCCL_INTRA_ROCE_ENABLE");
+    }
+}
+
+TEST_F(MoeDistributeDispatchV2Arch22TilingTest, A2EpWorldSizeTopologyMismatchDoesNotBlockTiling)
+{
+    struct RankSizeCase {
+        int64_t epWorldSize;
+        int64_t actualRankSize;
+        ge::graphStatus expected;
+    };
+    const RankSizeCase cases[] = {
+        {2, 2, ge::GRAPH_SUCCESS},  {8, 8, ge::GRAPH_SUCCESS},   {8, 2, ge::GRAPH_SUCCESS}, {8, 16, ge::GRAPH_SUCCESS},
+        {16, 8, ge::GRAPH_SUCCESS}, {16, 16, ge::GRAPH_SUCCESS}, {8, 0, ge::GRAPH_SUCCESS}, {8, 1, ge::GRAPH_SUCCESS},
+    };
+    for (const auto& testCase : cases) {
+        SCOPED_TRACE(testing::Message() << "epWorldSize=" << testCase.epWorldSize
+                                        << ", actualRankSize=" << testCase.actualRankSize);
+        CheckA2CommAlg("fullmesh", testCase.epWorldSize, testCase.expected, 0UL, testCase.actualRankSize);
+    }
 }
 
 } // namespace MoeDistributeDispatchV2UT

@@ -10,11 +10,14 @@
 
 #include <float.h>
 #include <array>
+#include <string>
 #include <vector>
 #include "gtest/gtest.h"
 #include <gmock/gmock.h>
 #include "../../../op_api/aclnn_distribute_barrier.h"
 #include "../../../op_api/aclnn_distribute_barrier_v2.h"
+#include "../../../op_api/distribute_barrier_base.h"
+#include "../../../../common/utils/op_mc2_def.h"
 #include "op_api_ut_common/tensor_desc.h"
 #include "op_api_ut_common/op_api_ut.h"
 #include "opdev/platform.h"
@@ -73,7 +76,7 @@ TEST_F(L2AclnnDistributeBarrierTest, TestAclnnDistributeBarrierFirstApiGroupMin)
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_NE(aclRet, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
 
 TEST_F(L2AclnnDistributeBarrierTest, TestAclnnDistributeBarrierV2FirstApi)
@@ -113,7 +116,37 @@ TEST_F(L2AclnnDistributeBarrierTest, TestAclnnDistributeBarrierV2FirstApiGroupMi
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
-    EXPECT_NE(aclRet, ACLNN_ERR_PARAM_INVALID);
+    EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(L2AclnnDistributeBarrierTest, TestAclnnDistributeBarrierGroupTooLong)
+{
+    TensorDesc xRefDesc = TensorDesc({3, 4}, ACL_FLOAT16, ACL_FORMAT_ND);
+    auto xRef = xRefDesc.ToAclType();
+
+    for (size_t groupLength : {HCCL_GROUP_NAME_MAX, HCCL_GROUP_NAME_MAX + 1}) {
+        SCOPED_TRACE(groupLength);
+        std::string group(groupLength, 'a');
+        uint64_t workspaceSize = 0;
+        aclOpExecutor* executor = nullptr;
+        EXPECT_EQ(aclnnDistributeBarrierGetWorkspaceSize(xRef.get(), group.c_str(), 16, &workspaceSize, &executor),
+                  ACLNN_ERR_PARAM_INVALID);
+        EXPECT_EQ(aclnnDistributeBarrierV2GetWorkspaceSize(xRef.get(), nullptr, nullptr, group.c_str(), 16,
+                                                           &workspaceSize, &executor),
+                  ACLNN_ERR_PARAM_INVALID);
+    }
+}
+
+TEST_F(L2AclnnDistributeBarrierTest, TestBarrierCheckParamsValidGroupLengthBoundaries)
+{
+    TensorDesc xRefDesc = TensorDesc({3, 4}, ACL_FLOAT16, ACL_FORMAT_ND);
+    auto xRef = xRefDesc.ToAclType();
+
+    for (size_t groupLength : {size_t{1}, HCCL_GROUP_NAME_MAX - 1}) {
+        SCOPED_TRACE(groupLength);
+        std::string group(groupLength, 'a');
+        EXPECT_EQ(BarrierCheckParams(xRef.get(), group.c_str()), ACLNN_SUCCESS);
+    }
 }
 
 TEST_F(L2AclnnDistributeBarrierTest, TestAclnnDistributeBarrierV2FirstApiTimeOut)

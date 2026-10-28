@@ -94,6 +94,15 @@ aclnnStatus DispatchCheckParams(const aclTensor* x, const aclTensor* expertIds, 
     CHECK_RET(DispatchCheckNotNull(x, expertIds, groupEp, groupTp, expandX, dynamicScales, assistInfoForCombine,
                                    expertTokensNums, epRecvCounts),
               ACLNN_ERR_PARAM_NULLPTR);
+    constexpr size_t inputDimNum = 2;
+    OP_CHECK_WRONG_DIMENSION(x, inputDimNum, return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK_WRONG_DIMENSION(expertIds, inputDimNum, return ACLNN_ERR_PARAM_INVALID);
+    if (x->GetViewShape().GetDim(0) != expertIds->GetViewShape().GetDim(0)) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                "x and expertIds must have the same batch size, but got x shape %s and expertIds shape %s.",
+                op::ToString(x->GetViewShape()).GetString(), op::ToString(expertIds->GetViewShape()).GetString());
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     // groupTp为预留参数(当前版本不支持TP域通信)，nullptr视同空串，避免后续strnlen空指针解引用
     if (groupTp == nullptr) {
         groupTp = "";
@@ -166,14 +175,14 @@ aclnnStatus aclnnMoeDistributeDispatchGetWorkspaceSizeBase(
     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     OP_LOGD("enter aclnnMoeDistributeDispatchGetWorkspaceSizeBase\n");
-    const static bool is910B = GetCurrentPlatformInfo().GetSocVersion() == SocVersion::ASCEND910B;
-    const static bool isArch22 = GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_2201;
-    const static bool isA5 = GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510;
-
     auto retParam =
         DispatchCheckParams(x, expertIds, scalesOptional, groupEp, groupTp, quantMode, expandXOut, dynamicScalesOut,
                             assistInfoForCombineOut, expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut);
     CHECK_RET(retParam == ACLNN_SUCCESS, retParam);
+
+    const static bool is910B = GetCurrentPlatformInfo().GetSocVersion() == SocVersion::ASCEND910B;
+    const static bool isArch22 = GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_2201;
+    const static bool isA5 = GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510;
 
     aclnnStatus getWorkspaceSizesRes = ACLNN_ERR_INNER;
 

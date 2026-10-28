@@ -41,7 +41,7 @@ extern "C" {
  * @param [in] quantMode: 计算可选输入，int，量化模式。
  * @param [in] globalBs: 计算可选输入，int。EP域全局的batch size大小。
  * @param [in] expertTokenNumsType: 计算可选输入，int。输出expertTokenNums中的值语义类型。
- * @param [in] commAlg: 计算可选输入，str。 通信算法类型。预留参数，暂未使用。
+ * @param [in] commAlg: 计算可选输入，str。通信算法类型，支持的取值及约束请参见对应产品的接口文档。
  * @param [out] expandXOut: 计算输出，Tensor，必选输出，数据类型支持float16, bfloat16,
  int8，仅支持2维，数据格式支持ND。根据 expertIdx进行扩展过的token特征。
  * @param [out] dynamicScalesOut:

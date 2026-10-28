@@ -1132,6 +1132,51 @@ TEST_F(MoeDistributeDispatchV2Infershape, InferShape_InvalidZeroBatch)
     Mc2ExecuteTestCase(infershapeContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
 }
 
+class MoeDistributeDispatchV2BatchInfershape : public testing::TestWithParam<int64_t> {};
+
+TEST_P(MoeDistributeDispatchV2BatchInfershape, InferShape_CheckExpertIdsBatch)
+{
+    SetupInfershapePlatform910B();
+    gert::StorageShape xShape = {{8, 512}, {}};
+    gert::StorageShape expertIdsShape = {{GetParam(), 1}, {}};
+    gert::InfershapeContextPara infershapeContextPara(
+        "MoeDistributeDispatchV2",
+        {{xShape, ge::DT_FLOAT16, ge::FORMAT_ND}, {expertIdsShape, ge::DT_INT32, ge::FORMAT_ND}},
+        {{{}, ge::DT_INT32, ge::FORMAT_ND},
+         {{}, ge::DT_INT32, ge::FORMAT_ND},
+         {{}, ge::DT_INT32, ge::FORMAT_ND},
+         {{}, ge::DT_INT32, ge::FORMAT_ND},
+         {{}, ge::DT_INT32, ge::FORMAT_ND},
+         {{}, ge::DT_INT32, ge::FORMAT_ND},
+         {{}, ge::DT_INT32, ge::FORMAT_ND}},
+        {{"group_ep", Ops::Transformer::AnyValue::CreateFrom<std::string>("ep_group")},
+         {"ep_world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+         {"ep_rank_id", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"moe_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+         {"group_tp", Ops::Transformer::AnyValue::CreateFrom<std::string>("")},
+         {"tp_world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+         {"tp_rank_id", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"expert_shard_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"shared_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"shared_expert_rank_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+         {"comm_alg", Ops::Transformer::AnyValue::CreateFrom<std::string>("fullmesh")},
+         {"zero_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"copy_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}});
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 2}};
+    if (GetParam() == 8) {
+        std::vector<std::vector<int64_t>> expectedOutputShape = {{16, 512}};
+        Mc2ExecuteTestCase(infershapeContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectedOutputShape);
+    } else {
+        Mc2ExecuteTestCase(infershapeContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(ExpertIdsBatch, MoeDistributeDispatchV2BatchInfershape, testing::Values(7, 8, 9));
+
 TEST_F(MoeDistributeDispatchV2Infershape, InferShape_A3_NoExpertScalesEpRecv)
 {
     SetRtSocSpecShortVersion("Ascend910_93");

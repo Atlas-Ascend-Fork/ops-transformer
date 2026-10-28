@@ -154,6 +154,12 @@ static ge::graphStatus GetAndCheckDispatchShapeV3(const char* nodeName, const ge
                                   (std::string("[") + std::to_string(bsTmp) + ", " + std::to_string(k) + "]").c_str(),
                                   "positive dimensions"),
         return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        bs != bsTmp,
+        OP_LOGE_FOR_INVALID_SHAPE(nodeName, "expertIds",
+                                  (std::string("[") + std::to_string(bsTmp) + ", " + std::to_string(k) + "]").c_str(),
+                                  (std::string("batch dimension equal to x: ") + std::to_string(bs)).c_str()),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 

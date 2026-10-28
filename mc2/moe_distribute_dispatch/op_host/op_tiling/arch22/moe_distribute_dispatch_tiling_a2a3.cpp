@@ -159,6 +159,16 @@ static ge::graphStatus MoeDistributeDispatchA2CheckAttrAndSetTiling(gert::Tiling
     OP_TILING_CHECK(expertTokenNumsTypePtr == nullptr || *expertTokenNumsTypePtr < 0 || *expertTokenNumsTypePtr > 1,
                     OP_LOGE_FOR_INVALID_VALUE(K_INNER_DEBUG, "expertTokenNumsType", "invalid", "0 or 1"),
                     return GRAPH_FAILED);
+    // 考虑在线编译场景，可能topoinfo获取不到，那么该接口拿到的可能是默认值而非有效值。
+    int64_t queriedEpWorldSize = 0;
+    if (!mc2tiling::GetRankSize(context->GetNodeName(), groupEpPtr, queriedEpWorldSize)) {
+        OP_LOGW(context->GetNodeName(), "Failed to query the rank size of groupEp. Continue with epWorldSize (%ld).",
+                *epWorldSizePtr);
+    } else if (*epWorldSizePtr != queriedEpWorldSize) {
+        OP_LOGW(context->GetNodeName(),
+                "epWorldSize (%ld) differs from the queried rank size of groupEp (%ld). Continue with epWorldSize.",
+                *epWorldSizePtr, queriedEpWorldSize);
+    }
     MoeDistributeDispatchA2SetTiling(context, info, isLayered, bs);
 
     return ge::GRAPH_SUCCESS;

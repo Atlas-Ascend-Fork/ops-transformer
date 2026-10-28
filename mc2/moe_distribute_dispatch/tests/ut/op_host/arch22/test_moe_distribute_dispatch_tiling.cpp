@@ -490,7 +490,7 @@ TEST_F(MoeDistributeDispatchArch22TilingTest, A2Quant0Layered)
          {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -528,7 +528,7 @@ TEST_F(MoeDistributeDispatchArch22TilingTest, A2Quant0)
          {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -569,7 +569,7 @@ TEST_F(MoeDistributeDispatchArch22TilingTest, A2GlobalBs)
          {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(512)},
          {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     uint64_t expectTilingKey = 0UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
@@ -609,7 +609,7 @@ TEST_F(MoeDistributeDispatchArch22TilingTest, A2ShapeAndEpRankId)
          {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues);
 }
 
@@ -649,7 +649,7 @@ TEST_F(MoeDistributeDispatchArch22TilingTest, A2MoeExpertNum)
          {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
          {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910B", coreNum, ubSize);
-    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues);
 }
 
@@ -1219,6 +1219,57 @@ TEST_F(MoeDistributeDispatchArch22TilingTest, A5GlobalBsNonZero)
         &compileInfo, "3510", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, kSkipTilingKeyCheck);
+}
+
+TEST_F(MoeDistributeDispatchArch22TilingTest, A2EpWorldSizeTopologyMismatchDoesNotBlockTiling)
+{
+    struct RankSizeCase {
+        int64_t epWorldSize;
+        uint64_t actualRankSize;
+        ge::graphStatus expected;
+    };
+    const RankSizeCase cases[] = {
+        {8, 8, ge::GRAPH_SUCCESS},   {8, 2, ge::GRAPH_SUCCESS}, {8, 16, ge::GRAPH_SUCCESS}, {16, 8, ge::GRAPH_SUCCESS},
+        {16, 16, ge::GRAPH_SUCCESS}, {8, 0, ge::GRAPH_SUCCESS}, {8, 1, ge::GRAPH_SUCCESS},
+    };
+    for (const auto& testCase : cases) {
+        SCOPED_TRACE(testing::Message() << "epWorldSize=" << testCase.epWorldSize
+                                        << ", actualRankSize=" << testCase.actualRankSize);
+        struct MoeDistributeDispatchCompileInfo {
+        } compileInfo;
+        const int64_t capacity = 8 * testCase.epWorldSize;
+        const int64_t epRecvCount = testCase.epWorldSize + capacity * 2 * testCase.epWorldSize / 8;
+        gert::TilingContextPara tilingContextPara(
+            "MoeDistributeDispatch",
+            {
+                {{{8, 512}, {8, 512}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                {{{8, 1}, {8, 1}}, ge::DT_INT32, ge::FORMAT_ND},
+            },
+            {
+                {{{capacity, 512}, {capacity, 512}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                {{{capacity}, {capacity}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                {{{8}, {8}}, ge::DT_INT32, ge::FORMAT_ND},
+                {{{1}, {1}}, ge::DT_INT64, ge::FORMAT_ND},
+                {{{epRecvCount}, {epRecvCount}}, ge::DT_INT32, ge::FORMAT_ND},
+                {{{0}, {0}}, ge::DT_INT32, ge::FORMAT_ND},
+            },
+            {{"group_ep", Ops::Transformer::AnyValue::CreateFrom<std::string>("ep_group")},
+             {"ep_world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(testCase.epWorldSize)},
+             {"ep_rank_id", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"moe_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(testCase.epWorldSize)},
+             {"group_tp", Ops::Transformer::AnyValue::CreateFrom<std::string>("")},
+             {"tp_world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"tp_rank_id", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"expert_shard_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"shared_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"shared_expert_rank_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"expert_token_nums_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
+            &compileInfo, "Ascend910B", 48, 196608);
+        Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", testCase.actualRankSize}};
+        Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, testCase.expected, kSkipTilingKeyCheck);
+    }
 }
 
 } // namespace MoeDistributeDispatchUT
