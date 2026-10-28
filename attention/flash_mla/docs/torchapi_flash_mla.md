@@ -32,8 +32,8 @@
   `flash_mla_metadata`是主算子的元数据生成接口，记录AICore/AIVCore任务切分结果。典型调用流程如下：
 
   1. 准备Query、分页KV缓存、块表和序列长度。
-  2. 调用`flash_mla_metadata`生成`metadata`。
-  3. 将`metadata`和对应输入传入`flash_mla`。
+  2. 如需预生成调度数据，可调用`flash_mla_metadata`生成`metadata`。
+  3. 调用`flash_mla`；如已生成`metadata`，可通过该可选参数传入。
 
 - **计算公式**：
 
@@ -65,7 +65,7 @@
 
 ## 函数原型
 
-调用flash_mla接口之前，请先调用前置接口flash_mla_metadata，完成负载均衡的计算。
+如需预生成负载均衡的调度数据，可在调用`flash_mla`之前调用`flash_mla_metadata`，并将结果传入可选参数`metadata`。
 
 ```python
 cann_ops_transformer.flash_mla_metadata(
@@ -143,7 +143,7 @@ cann_ops_transformer.flash_mla(
 | seqused_q | Tensor | 可选 | 各batch实际使用的Query长度 | int32 | ND | (B,) |
 | sinks | Tensor | 可选 | 每个 Q head 的 softmax sink logit；None 或形状(0,)表示关闭 | float32 | ND | (num_heads_q,) |
 | attn_mask | Tensor | 可选 | mask_mode=3或4时必传；mask_mode=0时不传 | int8 | ND | (2048, 2048) |
-| metadata | Tensor | 必选 | 配套metadata接口生成的调度数据 | int32 | ND | (max_schedule_size,) |
+| metadata | Tensor | 可选 | 配套metadata接口生成的调度数据，默认None | int32 | ND | (max_schedule_size,) |
 | head_dim_v | int | 可选 | Value头维，固定512，默认512 | int32 | - | - |
 | softmax_scale | float | 可选 | 注意力分数缩放系数，默认1.0 | float32 | - | - |
 | mask_mode | int | 可选 | 0无掩码、3右对齐因果、4右对齐滑动窗口，默认0 | int32 | - | - |
@@ -183,13 +183,14 @@ metadata的shape根据batch数和设备核数动态计算。
 - Q、k_cache 任一维度大小为0时，入口报错；不支持空 Q 或空 k_cache。
 
 - `block_table`、序列长度、`attn_mask`和`metadata`中的值由调用者保证正确。Tiling阶段不能全面校验设备Tensor内容，非法值可能导致精度错误或非法内存访问。
-- metadata接口和主算子的序列长度、头数、头维、掩码模式及Query布局必须一致。输入变化后应重新生成对应metadata。
+- 传入metadata时，metadata接口和主算子的序列长度、头数、头维、掩码模式及Query布局必须一致。输入变化后应重新生成对应metadata。
 
 ### 特性参数组
 
 | 特性参数组 | 参数字段名称 | 字段分组 | 字段类型 |
 | :--- | :--- | :--- | :--- |
-| 公共参数组 | q、k_cache、metadata | INPUT | Tensor |
+| 公共参数组 | q、k_cache | INPUT | Tensor |
+| | metadata | INPUT(OPTIONAL) | Tensor |
 | | head_dim_v | ATTR(OPTIONAL) | int |
 | | softmax_scale | ATTR(OPTIONAL) | float |
 | | layout_q、layout_kv、layout_out | ATTR(OPTIONAL) | string |
@@ -230,7 +231,7 @@ metadata的shape根据batch数和设备核数动态计算。
 | q | float16/bfloat16；BSND、BNSD、TND，shape见参数说明 | 必须存在 | 与k_cache、attn_out数据类型一致 | 0 < B < 65536；TND场景Q_T > 0；Q_N支持1～128；KV_N=1、D=576 |
 | k_cache | float16/bfloat16；PA_BBND：(num_blocks, block_size, KV_N, D)；PA_BNBD：(num_blocks, KV_N, block_size, D)；PA_NZ：(num_blocks, KV_N, D / D0, block_size, D0)；非连续Tensor：PA_BBND仅dim0支持，PA_BNBD/PA_NZ支持dim0或dim1 | 必须存在 | 逻辑D与q相同 | block_size在[1,1024]且16对齐（即16、32、…、1024）；D0=16 |
 | attn_out | float16/bfloat16；布局及shape见参数说明 | 必须存在 | Q_T、Q_N与q对应 | DV=head_dim_v=512 |
-| metadata | int32、一维、ND、非空；容量不小于当前设备和B所需容量 | 必须传入 | 必须对应本次调用参数 | 由配套metadata接口生成 |
+| metadata | 传入时须为int32、一维、ND、非空；容量不小于当前设备和B所需容量 | 可省略，默认None | 传入时必须对应本次调用参数 | 由配套metadata接口生成 |
 | head_dim_v | 仅512 | 可省略，默认512 | head_dim_v+64=576 | Value取缓存前512维 |
 | softmax_scale | float，默认1.0 | 可省略 | 无 | 不自动按D缩放 |
 

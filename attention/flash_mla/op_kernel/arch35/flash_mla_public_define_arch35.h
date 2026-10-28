@@ -42,9 +42,7 @@ enum class FLASH_MLA_LAYOUT : uint32_t {
 };
 
 enum class FlashMlaKernelType : uint8_t {
-    NO_QUANT = 0,
-    ANTI_QUANT,
-    FULL_QUANT
+    NO_QUANT = 0
 };
 
 struct FlashMlaFdParamsX {
@@ -61,36 +59,26 @@ struct FlashMlaRunInfoX {
     uint32_t loop = 0;
     uint32_t mloop = 0;
     bool isValid = false;
-    bool isChangeBatch = false;
     bool isFirstFdBlock = false;
     bool isFirstS2Loop = false;
     bool isLastS2Loop = false;
-    bool qPreloaded = false; // 本任务 Q 的 MTE2 已提前一轮发起（启动首任务/Q 块边界）
 
     uint32_t bIdx = 0;
     uint32_t n2Idx = 0;
     uint32_t gS1Idx = 0;
-    uint32_t gIdx = 0;
-    uint32_t s1Idx = 0;
     uint32_t s2Idx = 0;
-    uint32_t realN2Idx = 0;   // GS1合轴时为n2Idx，不合轴时为n1Idx
-    uint64_t actS1Size = 1;   // 当前处理head的S1轴实际大小
-    uint64_t actS2Size = 1;   // 当前处理head的S2轴实际大小
-    uint32_t actMSize = 0;    // GS1方向上的长度
-    uint32_t actMSizeAlign32; // GS1 方向上长度对齐
-    uint32_t actVecMSize;     // VEC 视角, 基本块GS1方向长度
-    uint32_t vecMbaseIdx;     // VEC 对应的M 轴起始位置,V0 为0， V1 为 V0的actVecMSize
+    uint64_t actS1Size = 1; // 当前处理head的S1轴实际大小
+    uint64_t actS2Size = 1; // 当前处理head的S2轴实际大小
+    uint32_t actMSize = 0;  // GS1方向上的长度
+    uint32_t actVecMSize;   // VEC 视角, 基本块GS1方向长度
+    uint32_t vecMbaseIdx;   // VEC 对应的M 轴起始位置,V0 为0， V1 为 V0的actVecMSize
 
     uint32_t actSingleLoopS2Size = 0; // S2方向长度
-    uint32_t actSingleLoopS2SizeAlign;
     bool isS2SplitCore = false;
     uint32_t faTmpOutWsPos = 0; // FA阶段，S2外切，需要写到workspace时，写出到第几块M*D的GM块
 
-    int64_t preTokensLeftUp = 0;
-    int64_t nextTokensLeftUp = 0;
-
-    uint64_t qPaddingBeginOffset = 0;
-    uint64_t kvPaddingBeginOffset = 0;
+    int64_t winLeftFromTopLeft = 0;
+    int64_t winRightFromTopLeft = 0;
 };
 
 struct StridesConstInfo {
@@ -102,10 +90,8 @@ struct CommonConstInfo {
     /* 轴长度（公共字段：b/t/d/g/n/s 系列） */
     uint32_t bSize;
     uint64_t t1Size;
-    uint64_t t2Size;
     uint32_t dSize;
     uint32_t dSizeV;
-    uint32_t dBasicBlock;
     uint32_t dSizeRope;
     uint32_t gSize; /* g轴的大小 */
     uint32_t n2Size;
@@ -128,9 +114,8 @@ struct CommonConstInfo {
     uint32_t attenMaskBatch;
     uint32_t attenMaskS1Size;
     uint32_t attenMaskS2Size;
-    int64_t preTokens;
-    int64_t nextTokens;
-    bool isExistRowInvalid;
+    int64_t winLeft;
+    int64_t winRight;
     float scaleValue;
 
     /* 核信息 */
@@ -142,26 +127,11 @@ struct CommonConstInfo {
     /* FA中间结果写出workspace信息 */
     uint32_t accumOutSize;
     uint32_t logSumExpSize;
-
-    /* 输出shape */
-    FLASH_MLA_LAYOUT outputLayout;
 };
 
-/* MLA 特有扩展层（MLA 独有的字段，如 rope/KV strides/S1 外切/无效行开关）；
- * 仅含 MLA 必需的字段，禁继承 mla 不需要的
- * Sink/Pse/PostQuant/LeftPadding/SysPrefix 等基础结构（避免内存布局与成员遮蔽语义漂移）。 */
 struct MlaExtConstInfo {
-    uint32_t realGSize;
-    uint32_t realN2Size;
-
-    /* strides（q/k_cache 576 宽单张量，nope+rope 分段 stride 分离） */
     StridesConstInfo keyStrides;
-    StridesConstInfo valueStrides;
-    StridesConstInfo kRopeStrides;
-    StridesConstInfo kScaleStrides;
-    StridesConstInfo vScaleStrides;
 
-    bool isRowInvalidOpen;
     bool l2CacheOffFlag;
 };
 
@@ -169,7 +139,6 @@ struct MlaExtConstInfo {
 struct PAConstInfo {
     uint32_t blockSize;
     uint32_t maxBlockNumPerBatch;
-    uint32_t paLayoutType;
 };
 
 struct LseConstInfo {
@@ -177,52 +146,11 @@ struct LseConstInfo {
     bool learnableSinkFlag = false;
 };
 
-struct SinkConstInfo {
-    bool learnableSinkFlag;
-};
-
-struct PseConstInfo {
-    uint32_t pseShiftByBatch;
-    int64_t pseS1Size;
-    int64_t pseS2Size;
-    uint32_t pseStride;
-};
-
-struct TensorListConstInfo {
-    bool isKvContinuous; /* 是否为tensorlist */
-};
-
-struct PostQuantConstInfo {
-    bool isPostQuantPerChnl;
-    bool isPostQuantBF16;
-    bool isPostQuantOffsetExist;
-    float postQuantScaleValue;
-    float postQuantOffsetValue;
-};
-
-struct LeftPaddingConstInfo {
-    bool isQHasLeftPadding;
-    bool isKVHasLeftPadding;
-    int64_t queryRightPaddingSize;
-    int64_t kvRightPaddingSize;
-};
-
-struct SysPrefixConstInfo {
-    bool isActualSharedPrefixLenNull;
-    int64_t actualKVPrefixSize; /* 保存prefix实际长度 */
-    int64_t kvPrefixSize;       /* 保存prefix shape完整长度 */
-    int64_t prefixLoopCount;    /* 保存prefix参与的S2方向循环次数 */
-};
-
 template <FlashMlaKernelType>
 struct ConstInfo_t;
 
 template <>
 struct ConstInfo_t<FlashMlaKernelType::NO_QUANT> : CommonConstInfo, MlaExtConstInfo, PAConstInfo, LseConstInfo {};
-
-template <>
-struct ConstInfo_t<FlashMlaKernelType::FULL_QUANT>
-    : CommonConstInfo, MlaExtConstInfo, PAConstInfo, LseConstInfo, TensorListConstInfo {};
 
 __aicore__ inline int64_t ClipSInnerToken(int64_t sInnerToken, int64_t minValue, int64_t maxValue)
 {

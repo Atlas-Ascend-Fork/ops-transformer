@@ -22,7 +22,7 @@
 #include "../../../common/op_kernel/arch35/infer_flash_attention_comm_arch35.h"
 #include "../arch35/flash_mla_public_define_arch35.h"
 
-namespace FlashAttnKernel {
+namespace FlashMlaKernel {
 
 template <FLASH_MLA_LAYOUT LAYOUT>
 __aicore__ inline constexpr GmFormat GetQueryGmFormat()
@@ -100,29 +100,12 @@ __aicore__ inline constexpr UbFormat GetOutUbFormat()
     }
 }
 
-template <typename INPUT_T, typename T, FLASH_MLA_LAYOUT LAYOUT = FLASH_MLA_LAYOUT::NONE,
-          S1TemplateType s1TemplateType = S1TemplateType::Aligned128,
-          S2TemplateType s2TemplateType = S2TemplateType::Aligned128,
-          DTemplateType dTemplateType = DTemplateType::Aligned128,
-          DTemplateType dVTemplateType = DTemplateType::Aligned128, uint8_t KvLayoutType = 0>
-struct FATypeCube {
-    using inputType = INPUT_T;
-    using mmType = T;
-    static constexpr FLASH_MLA_LAYOUT qLayout = LAYOUT;
-    static constexpr S1TemplateType mBaseSize = s1TemplateType;
-    static constexpr S2TemplateType s2BaseSize = s2TemplateType;
-    static constexpr DTemplateType dBaseSize = dTemplateType;
-    static constexpr DTemplateType dVBaseSize = dVTemplateType;
-    static constexpr uint8_t kvLayoutType = KvLayoutType;
-    static constexpr bool pageAttention = (KvLayoutType > 0);
-};
-
 template <
     typename INPUT_T, typename T, typename OUTPUT_T, FLASH_MLA_LAYOUT LAYOUT = FLASH_MLA_LAYOUT::NONE,
     FLASH_MLA_LAYOUT OUT_LAYOUT = FLASH_MLA_LAYOUT::NONE, S1TemplateType s1TemplateType = S1TemplateType::Aligned128,
     S2TemplateType s2TemplateType = S2TemplateType::Aligned128, DTemplateType dTemplateType = DTemplateType::Aligned128,
     DTemplateType dVTemplateType = DTemplateType::Aligned128, bool HAS_MASK = false, uint8_t KvLayoutType = 0>
-struct FATypeVec {
+struct FlashMlaType {
     using inputType = INPUT_T;
     using mmType = T;
     using outputType = OUTPUT_T;
@@ -138,61 +121,41 @@ struct FATypeVec {
     static constexpr bool flashDecode = true;
 };
 
-template <
-    typename INPUT_T, typename T, typename OUTPUT_T, FLASH_MLA_LAYOUT LAYOUT = FLASH_MLA_LAYOUT::NONE,
-    FLASH_MLA_LAYOUT OUT_LAYOUT = FLASH_MLA_LAYOUT::NONE, S1TemplateType s1TemplateType = S1TemplateType::Aligned128,
-    S2TemplateType s2TemplateType = S2TemplateType::Aligned128, DTemplateType dTemplateType = DTemplateType::Aligned128,
-    DTemplateType dVTemplateType = DTemplateType::Aligned128, bool HAS_MASK = false, uint8_t KvLayoutType = 0>
-struct FATypeFd {
-    using inputType = INPUT_T;
-    using mmType = T;
-    using outputType = OUTPUT_T;
-    static constexpr FLASH_MLA_LAYOUT qLayout = LAYOUT;
-    static constexpr FLASH_MLA_LAYOUT attnOutLayout = OUT_LAYOUT;
-    static constexpr S1TemplateType mBaseSize = s1TemplateType;
-    static constexpr S2TemplateType s2BaseSize = s2TemplateType;
-    static constexpr DTemplateType dBaseSize = dTemplateType;
-    static constexpr DTemplateType dVBaseSize = dVTemplateType;
-    static constexpr bool hasMask = HAS_MASK;
-    static constexpr uint8_t kvLayoutType = KvLayoutType;
-    static constexpr bool pageAttention = (KvLayoutType > 0);
-};
-
 template <ActualSeqLensMode Q_MODE, ActualSeqLensMode KV_MODE>
 class FlashMlaSeqLensTool {
 public:
     using SEQLEN_T = uint32_t;
 
-    GlobalTensor<SEQLEN_T> actualSeqLengthsGmQ;
-    GlobalTensor<SEQLEN_T> actualSeqLengthsGm;
+    GlobalTensor<SEQLEN_T> actualSeqLengthsGmQ_;
+    GlobalTensor<SEQLEN_T> actualSeqLengthsGm_;
 
     static constexpr bool Q_WITH_ZERO_HEAD = (Q_MODE == ActualSeqLensMode::ACCUM);
-    ActualSeqLensParser<Q_MODE, SEQLEN_T, Q_WITH_ZERO_HEAD> qActSeqLensParser;
-    ActualSeqLensParser<KV_MODE, SEQLEN_T, false> kvActSeqLensParser;
+    ActualSeqLensParser<Q_MODE, SEQLEN_T, Q_WITH_ZERO_HEAD> qActSeqLensParser_;
+    ActualSeqLensParser<KV_MODE, SEQLEN_T, false> kvActSeqLensParser_;
 
     __aicore__ inline void InitQ(__gm__ uint8_t* cuSeqlensQAddr, __gm__ uint8_t* sequsedQAddr,
                                  uint32_t actualSeqLenSize, uint64_t s1Size, uint32_t batchSize)
     {
-        actualSeqLengthsGmQ.SetGlobalBuffer((__gm__ SEQLEN_T*)cuSeqlensQAddr, actualSeqLenSize);
+        actualSeqLengthsGmQ_.SetGlobalBuffer((__gm__ SEQLEN_T*)cuSeqlensQAddr, actualSeqLenSize);
         if (sequsedQAddr == nullptr) {
-            qActSeqLensParser.Init(actualSeqLengthsGmQ, actualSeqLenSize, s1Size);
+            qActSeqLensParser_.Init(actualSeqLengthsGmQ_, actualSeqLenSize, s1Size);
         } else {
             if constexpr (Q_WITH_ZERO_HEAD) {
-                qActSeqLensParser.Init((__gm__ uint8_t*)cuSeqlensQAddr, actualSeqLenSize, (__gm__ uint8_t*)sequsedQAddr,
-                                       actualSeqLenSize - 1);
+                qActSeqLensParser_.Init((__gm__ uint8_t*)cuSeqlensQAddr, actualSeqLenSize,
+                                        (__gm__ uint8_t*)sequsedQAddr, actualSeqLenSize - 1);
             } else {
-                qActSeqLensParser.Init((__gm__ uint8_t*)sequsedQAddr, batchSize, s1Size);
+                qActSeqLensParser_.Init((__gm__ uint8_t*)sequsedQAddr, batchSize, s1Size);
             }
         }
     }
 
     __aicore__ inline void InitKv(__gm__ uint8_t* cacheSeqlensAddr, uint32_t actualSeqLenKVSize, uint64_t s2Size)
     {
-        actualSeqLengthsGm.SetGlobalBuffer((__gm__ SEQLEN_T*)cacheSeqlensAddr, actualSeqLenKVSize);
-        kvActSeqLensParser.Init(actualSeqLengthsGm, actualSeqLenKVSize, s2Size);
+        actualSeqLengthsGm_.SetGlobalBuffer((__gm__ SEQLEN_T*)cacheSeqlensAddr, actualSeqLenKVSize);
+        kvActSeqLensParser_.Init(actualSeqLengthsGm_, actualSeqLenKVSize, s2Size);
     }
 };
 
-} // namespace FlashAttnKernel
+} // namespace FlashMlaKernel
 
 #endif // FLASH_MLA_TYPE_H_

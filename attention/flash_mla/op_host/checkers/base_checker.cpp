@@ -21,11 +21,6 @@
 #include "log/log.h"
 namespace optiling {
 namespace flash_mla {
-using std::map;
-using std::pair;
-using std::string;
-using namespace ge;
-using namespace AscendC;
 using namespace arch35MLA;
 
 ge::graphStatus FlashMlaBaseChecker::CheckDtypeSupport(const gert::CompileTimeTensorDesc* desc,
@@ -79,9 +74,9 @@ std::string FlashMlaBaseChecker::DataTypeToSerialString(ge::DataType type) const
 
 uint32_t FlashMlaBaseChecker::GetTypeSize(ge::DataType dtype)
 {
-    constexpr uint32_t NUM_BYTES_FLOAT = 4;
-    constexpr uint32_t NUM_BYTES_FLOAT16 = 2;
-    constexpr uint32_t NUM_BYTES_INT8 = 1;
+    constexpr uint32_t NUM_BYTES_FLOAT = 4U;
+    constexpr uint32_t NUM_BYTES_FLOAT16 = 2U;
+    constexpr uint32_t NUM_BYTES_INT8 = 1U;
 
     switch (dtype) {
         case ge::DT_FLOAT:

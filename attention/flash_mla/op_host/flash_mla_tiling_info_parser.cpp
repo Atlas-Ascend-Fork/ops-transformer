@@ -14,6 +14,7 @@
  */
 
 #include <map>
+#include <tuple>
 #include <numeric>
 #include "log/log.h"
 #include "log/error_code.h"
@@ -21,9 +22,6 @@
 #include "flash_mla_tiling_info_parser.h"
 #include "flash_mla_tiling_utils.h"
 
-using std::map;
-using std::pair;
-using std::string;
 using namespace ge;
 using namespace Ops::Base;
 namespace optiling {
@@ -189,7 +187,6 @@ ge::graphStatus FlashMlaInfoParser::GetStrides()
         return ge::GRAPH_SUCCESS;
     }
     keyStrides_ = context_->GetInputStride(K_CACHE_INDEX);
-    valueStrides_ = keyStrides_;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -272,11 +269,6 @@ void FlashMlaInfoParser::GetQueryTSize()
     queryTSize_ = (queryShape_->HasShapeT()) ? static_cast<uint32_t>(queryShape_->GetShapeT()) : 0;
 }
 
-void FlashMlaInfoParser::GetKeyTSize()
-{
-    keyTSize_ = (keyShape_->HasShapeT()) ? static_cast<uint32_t>(keyShape_->GetShapeT()) : 0;
-}
-
 ge::graphStatus FlashMlaInfoParser::GetQkNopeHeadDim()
 {
     if (queryShape_->CheckHasShapeD(__func__) != ge::GRAPH_SUCCESS) {
@@ -314,9 +306,7 @@ void FlashMlaInfoParser::GetKvIsContiguous()
     }
 
     int32_t keyDimIdx = 0;
-    int32_t valDimIdx = 0;
     bool keyContig = false;
-    bool valContig = false;
     if (keyStrides_ != nullptr) {
         const gert::Shape& keyShape = opParamInfo_.kCache.shape->GetStorageShape();
         keyContig =
@@ -324,30 +314,15 @@ void FlashMlaInfoParser::GetKvIsContiguous()
         keyNonContigDim_ = keyContig ? -1 : keyDimIdx;
     }
 
-    if (valueStrides_ != nullptr) {
-        const gert::Shape& valueShape = opParamInfo_.kCache.shape->GetStorageShape();
-        valContig =
-            (CheckTensorContiguous(valueShape.GetDimNum(), valueShape, valueStrides_, valDimIdx) == ge::GRAPH_SUCCESS);
-        valueNonContigDim_ = valContig ? -1 : valDimIdx;
-    }
-
     if (layoutKV_ == FlashMlaLayout::PA_BBND) {
         if (keyStrides_ != nullptr) {
             keyBnStride_ = keyStrides_->GetStride(0);
             keyN2Stride_ = keyStrides_->GetStride(2);
         }
-        if (valueStrides_ != nullptr) {
-            valueBnStride_ = valueStrides_->GetStride(0);
-            valueN2Stride_ = valueStrides_->GetStride(2);
-        }
     } else if (layoutKV_ == FlashMlaLayout::PA_BNBD || layoutKV_ == FlashMlaLayout::PA_NZ) {
         if (keyStrides_ != nullptr) {
             keyBnStride_ = keyStrides_->GetStride(0);
             keyN2Stride_ = keyStrides_->GetStride(1);
-        }
-        if (valueStrides_ != nullptr) {
-            valueBnStride_ = valueStrides_->GetStride(0);
-            valueN2Stride_ = valueStrides_->GetStride(1);
         }
     }
 }
@@ -416,49 +391,33 @@ ge::graphStatus FlashMlaInfoParser::GetValueHeadDim()
 
 ge::graphStatus FlashMlaInfoParser::GetInAndOutLayout()
 {
-    auto itQ = layoutMap.find(opParamInfo_.layoutQ);
-    if (itQ == layoutMap.end()) {
-        std::string reason = "layout_q: " + std::string(opParamInfo_.layoutQ) + " is not supported.";
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "layout_q", opParamInfo_.layoutQ, reason.c_str());
-        return ge::GRAPH_FAILED;
-    }
-    layoutQ_ = itQ->second;
+    using LayoutNames = std::tuple<std::string, std::string, std::string>;
+    using LayoutTypes = std::tuple<FlashMlaLayout, FlashMlaLayout, FlashMlaLayout>;
+    static const std::map<LayoutNames, LayoutTypes> supportedLayouts = {
+        {{"BSND", "PA_BBND", "BSND"}, {FlashMlaLayout::BSND, FlashMlaLayout::PA_BBND, FlashMlaLayout::BSND}},
+        {{"BSND", "PA_BNBD", "BSND"}, {FlashMlaLayout::BSND, FlashMlaLayout::PA_BNBD, FlashMlaLayout::BSND}},
+        {{"BSND", "PA_NZ", "BSND"}, {FlashMlaLayout::BSND, FlashMlaLayout::PA_NZ, FlashMlaLayout::BSND}},
+        {{"BNSD", "PA_BBND", "BNSD"}, {FlashMlaLayout::BNSD, FlashMlaLayout::PA_BBND, FlashMlaLayout::BNSD}},
+        {{"BNSD", "PA_BNBD", "BNSD"}, {FlashMlaLayout::BNSD, FlashMlaLayout::PA_BNBD, FlashMlaLayout::BNSD}},
+        {{"BNSD", "PA_NZ", "BNSD"}, {FlashMlaLayout::BNSD, FlashMlaLayout::PA_NZ, FlashMlaLayout::BNSD}},
+        {{"TND", "PA_BBND", "TND"}, {FlashMlaLayout::TND, FlashMlaLayout::PA_BBND, FlashMlaLayout::TND}},
+        {{"TND", "PA_BBND", "NTD"}, {FlashMlaLayout::TND, FlashMlaLayout::PA_BBND, FlashMlaLayout::NTD}},
+        {{"TND", "PA_BNBD", "TND"}, {FlashMlaLayout::TND, FlashMlaLayout::PA_BNBD, FlashMlaLayout::TND}},
+        {{"TND", "PA_BNBD", "NTD"}, {FlashMlaLayout::TND, FlashMlaLayout::PA_BNBD, FlashMlaLayout::NTD}},
+        {{"TND", "PA_NZ", "TND"}, {FlashMlaLayout::TND, FlashMlaLayout::PA_NZ, FlashMlaLayout::TND}},
+        {{"TND", "PA_NZ", "NTD"}, {FlashMlaLayout::TND, FlashMlaLayout::PA_NZ, FlashMlaLayout::NTD}}};
 
-    auto itKV = layoutMap.find(opParamInfo_.layoutKV);
-    if (itKV == layoutMap.end()) {
-        std::string reason = "layout_kv: " + std::string(opParamInfo_.layoutKV) + " is not supported.";
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "layout_kv", opParamInfo_.layoutKV, reason.c_str());
+    const auto it = supportedLayouts.find({opParamInfo_.layoutQ, opParamInfo_.layoutKV, opParamInfo_.layoutOut});
+    if (it == supportedLayouts.end()) {
+        const std::string layouts =
+            std::string(opParamInfo_.layoutQ) + ", " + opParamInfo_.layoutKV + ", " + opParamInfo_.layoutOut;
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            opName_, "layout_q, layout_kv, layout_out", layouts.c_str(),
+            "Supported Q/output pairs are BSND/BSND, BNSD/BNSD, TND/TND and TND/NTD; "
+            "KV supports PA_BBND, PA_BNBD and PA_NZ. Layout names must be uppercase.");
         return ge::GRAPH_FAILED;
     }
-    layoutKV_ = itKV->second;
-
-    auto itOut = layoutMap.find(opParamInfo_.layoutOut);
-    if (itOut == layoutMap.end()) {
-        std::string reason = "layout_out: " + std::string(opParamInfo_.layoutOut) + " is not supported.";
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "layout_out", opParamInfo_.layoutOut, reason.c_str());
-        return ge::GRAPH_FAILED;
-    }
-    layoutOut_ = itOut->second;
-
-    if (layoutQ_ != FlashMlaLayout::TND && layoutQ_ != FlashMlaLayout::BNSD && layoutQ_ != FlashMlaLayout::BSND) {
-        std::string reason = "The value of layout_q must be TND/BNSD/BSND";
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "layout_q", opParamInfo_.layoutQ, reason.c_str());
-        return ge::GRAPH_FAILED;
-    }
-    if (layoutKV_ != FlashMlaLayout::PA_NZ && layoutKV_ != FlashMlaLayout::PA_BBND &&
-        layoutKV_ != FlashMlaLayout::PA_BNBD) {
-        std::string reason =
-            "The value of layout_kv must be PA_NZ/PA_BBND/PA_BNBD (paged KV only, continuous KV is not supported)";
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "layout_kv", opParamInfo_.layoutKV, reason.c_str());
-        return ge::GRAPH_FAILED;
-    }
-    const bool tndToNtd = (layoutQ_ == FlashMlaLayout::TND && layoutOut_ == FlashMlaLayout::NTD);
-    if (layoutOut_ != layoutQ_ && !tndToNtd) {
-        std::string reason =
-            "The value of layout_out must equal layout_q, or be NTD when layout_q is TND (TND→NTD transpose)";
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "layout_out", opParamInfo_.layoutOut, reason.c_str());
-        return ge::GRAPH_FAILED;
-    }
+    std::tie(layoutQ_, layoutKV_, layoutOut_) = it->second;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -532,19 +491,14 @@ void FlashMlaInfoParser::GenerateFeatureInfo(FlashMlaTilingInfo& faInfo)
 {
     faInfo.pageAttentionFlag = (kvStorageMode_ == KvStorageMode::PAGE_ATTENTION);
     faInfo.blockSize = blockSize_;
-    faInfo.blockTypeSize = sizeof(float);
 
     faInfo.maskMode = maskMode_;
     faInfo.sinkFlag = sinkFlag_;
-    faInfo.attenMaskFlag = (opParamInfo_.attnMask.tensor != nullptr) &&
-                           (opParamInfo_.attnMask.tensor->GetStorageShape().GetShapeSize() != 0);
     faInfo.winLeft = winLeft_;
     faInfo.winRight = winRight_;
 
     faInfo.returnSoftmaxLse = returnSoftmaxLse_;
     faInfo.softmaxLseFlag = softmaxLseFlag_;
-    faInfo.totalLseSize =
-        (opParamInfo_.lseOut.shape == nullptr) ? 0 : opParamInfo_.lseOut.shape->GetStorageShape().GetShapeSize();
 
     faInfo.seqUsedQSize = (opParamInfo_.sequsedQ.tensor == nullptr) ? 0 : opParamInfo_.sequsedQ.tensor->GetShapeSize();
     faInfo.cuSeqlensQSize = cuSeqlensQSize_;
@@ -559,23 +513,6 @@ void FlashMlaInfoParser::GenerateLayoutInfo(FlashMlaTilingInfo& faInfo)
     faInfo.qLayout = layoutQ_;
     faInfo.kvLayout = layoutKV_;
     faInfo.outLayout = layoutOut_;
-    switch (layoutOut_) {
-        case FlashMlaLayout::BSND:
-            faInfo.kernelOutputLayout = arch35MLA::KERNEL_LAYOUT_BSH;
-            break;
-        case FlashMlaLayout::BNSD:
-            faInfo.kernelOutputLayout = arch35MLA::KERNEL_LAYOUT_BNSD;
-            break;
-        case FlashMlaLayout::TND:
-            faInfo.kernelOutputLayout = arch35MLA::KERNEL_LAYOUT_TND;
-            break;
-        case FlashMlaLayout::NTD:
-            faInfo.kernelOutputLayout = arch35MLA::KERNEL_LAYOUT_NTD;
-            break;
-        default:
-            faInfo.kernelOutputLayout = arch35MLA::KERNEL_LAYOUT_NTD;
-            break;
-    }
 }
 
 void FlashMlaInfoParser::GenerateInfo(FlashMlaTilingInfo& faInfo)
@@ -585,23 +522,17 @@ void FlashMlaInfoParser::GenerateInfo(FlashMlaTilingInfo& faInfo)
     faInfo.opParamInfo = opParamInfo_;
     GenerateAxisInfo(faInfo);
     GenerateDtypeInfo(faInfo);
-    faInfo.batchContinuousFlag = (kvStorageMode_ == KvStorageMode::BATCH_CONTINUOUS);
-    faInfo.kvStorageMode = kvStorageMode_;
     faInfo.emptyTensorFlag = emptyTensorFlag_;
 
-    faInfo.totalOutputSize = opParamInfo_.attnOut.shape->GetStorageShape().GetShapeSize();
     faInfo.totalBlockNum = blockNum_;
     faInfo.softmaxScale = softmaxScale_;
     faInfo.maxBlockNumPerBatch = maxBlockNumPerBatch_;
 
     faInfo.keyBnStride = keyBnStride_;
     faInfo.keyN2Stride = keyN2Stride_;
-    faInfo.valueBnStride = valueBnStride_;
-    faInfo.valueN2Stride = valueN2Stride_;
 
     faInfo.hasViewStride = hasViewStride_;
     faInfo.keyNonContigDim = keyNonContigDim_;
-    faInfo.valueNonContigDim = valueNonContigDim_;
 
     GenerateFeatureInfo(faInfo);
     GenerateLayoutInfo(faInfo);
@@ -619,7 +550,6 @@ void FlashMlaInfoParser::GenerateAxisInfo(FlashMlaTilingInfo& faInfo)
     faInfo.vHeadDim = vHeadDim_;
     faInfo.ropeHeadDim = ropeHeadDim_;
     faInfo.qTSize = queryTSize_;
-    faInfo.kTSize = keyTSize_;
 }
 
 void FlashMlaInfoParser::GenerateDtypeInfo(FlashMlaTilingInfo& faInfo)
@@ -680,8 +610,6 @@ ge::graphStatus FlashMlaInfoParser::ParseAxisInfo()
     if (ge::GRAPH_SUCCESS != GetBatchSize() || ge::GRAPH_SUCCESS != GetS1Size()) {
         return ge::GRAPH_FAILED;
     }
-
-    GetKeyTSize();
 
     if (ge::GRAPH_SUCCESS != GetGSize() || ge::GRAPH_SUCCESS != GetS2Size()) {
         return ge::GRAPH_FAILED;

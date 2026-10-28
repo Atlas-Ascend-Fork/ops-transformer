@@ -14,6 +14,7 @@
  */
 
 #include "aclnn/aclnn_base.h"
+#include "aclnnInner_flash_mla.h"
 
 #include "opdev/common_types.h"
 #include "opdev/make_op_executor.h"
@@ -25,17 +26,6 @@ using namespace op;
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-extern aclnnStatus aclnnInnerFlashMlaGetWorkspaceSize(
-    const aclTensor* q, const aclTensor* kCache, const aclTensor* blockTableOptional,
-    const aclTensor* cacheSeqlensOptional, const aclTensor* cuSeqlensQOptional, const aclTensor* sequsedQOptional,
-    const aclTensor* sinksOptional, const aclTensor* attnMaskOptional, const aclTensor* metadataOptional,
-    int64_t headDimV, double softmaxScale, int64_t maskMode, int64_t winLeft, int64_t winRight, int64_t maxSeqlenQ,
-    int64_t maxSeqlenKV, const char* layoutQ, const char* layoutKv, const char* layoutOut, int64_t returnSoftmaxLse,
-    const aclTensor* attnOut, const aclTensor* softmaxLse, uint64_t* workspaceSize, aclOpExecutor** executor);
-
-extern aclnnStatus aclnnInnerFlashMla(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
-                                      const aclrtStream stream);
 
 namespace {
 
@@ -140,7 +130,8 @@ aclnnStatus aclnnFlashMlaGetWorkspaceSize(
     ret = aclnnInnerFlashMlaGetWorkspaceSize(
         q, kCache, blockTableOptional, cacheSeqlensOptional, cuSeqlensQOptional, sequsedQOptional, sinksOptional,
         attnMaskOptional, metadataOptional, headDimV, softmaxScale, maskMode, winLeft, winRight, maxSeqlenQ,
-        maxSeqlenKV, layoutQ, layoutKv, layoutOut, returnSoftmaxLse, attnOut, placeHolder, workspaceSize, executor);
+        maxSeqlenKV, const_cast<char*>(layoutQ), const_cast<char*>(layoutKv), const_cast<char*>(layoutOut),
+        returnSoftmaxLse, attnOut, placeHolder, workspaceSize, executor);
 
     if (returnSoftmaxLse == 0) {
         aclDestroyTensor(tempTensor);

@@ -24,11 +24,6 @@
 
 namespace optiling {
 namespace flash_mla {
-using std::map;
-using std::pair;
-using std::string;
-using namespace ge;
-using namespace AscendC;
 using namespace arch35MLA;
 
 ge::graphStatus PagedAttentionChecker::CheckSinglePara(const FlashMlaTilingInfo& faInfo)

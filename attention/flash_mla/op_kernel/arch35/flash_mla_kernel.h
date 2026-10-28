@@ -30,7 +30,7 @@
 
 #include "flash_mla_tiling_data.h"
 
-namespace FlashAttnKernel {
+namespace FlashMlaKernel {
 template <typename CubeBlockType, typename VecFaBlockType, typename VecFdBlockType>
 class FlashAttentionNoQuantMlaKernel {
 public:
@@ -40,8 +40,8 @@ public:
     static constexpr uint32_t dVBaseSize = CubeBlockType::dVBaseSize;
 
     static constexpr bool HAS_MASK = VecFaBlockType::HAS_MASK;
-    static constexpr uint32_t PRELOAD_N = 2;                            // C1 C1 C2（对齐 fia，bmm2 落后 1 轮）
-    static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N << 1; // 4 (power-of-2 for bitmask)
+    static constexpr uint32_t PRELOAD_N = 2U;                            // C1 C1 C2（对齐 fia，bmm2 落后 1 轮）
+    static constexpr uint32_t PRELOAD_TASK_CACHE_SIZE = PRELOAD_N << 1U; // 4 (power-of-2 for bitmask)
 
     static constexpr bool PAGE_ATTENTION = CubeBlockType::PAGE_ATTENTION;
     static constexpr bool FLASH_DECODE = VecFaBlockType::FLASH_DECODE;
@@ -97,16 +97,16 @@ public:
                                 __gm__ uint8_t* attentionOut, __gm__ uint8_t* workspace, __gm__ uint8_t* metadata,
                                 const optiling::FlashMlaNoQuantTilingArch35* __restrict tiling)
     {
-        this->tilingData_ = tiling;
+        tilingData_ = tiling;
 
         sectionNum_ = ((__gm__ uint32_t*)metadata)[0];
         enableFlashDecode_ = static_cast<bool>(((__gm__ uint32_t*)metadata)[1U]);
-        metaAicCoreNum_ = ((__gm__ uint32_t*)metadata)[FLASH_MLA_METADATA_AIC_NUM_INDEX];
-        metaAivCoreNum_ = ((__gm__ uint32_t*)metadata)[FLASH_MLA_METADATA_AIV_NUM_INDEX];
-        faMetaDataGm_.SetGlobalBuffer((__gm__ uint32_t*)(metadata + FA_METADATA_HEADER_OFFSET),
+        metaAicCoreNum_ = ((__gm__ uint32_t*)metadata)[optiling::FLASH_MLA_METADATA_AIC_NUM_INDEX];
+        metaAivCoreNum_ = ((__gm__ uint32_t*)metadata)[optiling::FLASH_MLA_METADATA_AIV_NUM_INDEX];
+        faMetaDataGm_.SetGlobalBuffer((__gm__ uint32_t*)(metadata + optiling::FA_METADATA_HEADER_OFFSET),
                                       metaAicCoreNum_ * FlashMlaCommon::FA_METADATA_STRIDE * sectionNum_);
         fdMetaDataGm_.SetGlobalBuffer(
-            (__gm__ uint32_t*)(metadata + FA_METADATA_HEADER_OFFSET +
+            (__gm__ uint32_t*)(metadata + optiling::FA_METADATA_HEADER_OFFSET +
                                FlashMlaCommon::FA_METADATA_STRIDE * metaAicCoreNum_ * sectionNum_ * sizeof(uint32_t)),
             metaAivCoreNum_ * FlashMlaCommon::FD_METADATA_STRIDE * sectionNum_);
 
@@ -128,8 +128,8 @@ public:
         if constexpr (FLASH_DECODE) {
             if ASCEND_IS_AIV {
                 vecFdBlock_.InitBlock(softmaxLse, attentionOut);
-                vecFdBlock_.InitGlobalTensor(this->vecFaBlock_.softmaxFDMaxGm, this->vecFaBlock_.softmaxFDSumGm,
-                                             this->vecFaBlock_.accumOutGm);
+                vecFdBlock_.InitGlobalTensor(vecFaBlock_.softmaxFDMaxGm_, vecFaBlock_.softmaxFDSumGm_,
+                                             vecFaBlock_.accumOutGm_);
             }
         }
     }
@@ -144,15 +144,13 @@ public:
             constInfo_.subBlockIdx = AscendC::GetSubBlockIdx();
         }
 
-        const auto& flashMlaBaseParams = this->tilingData_->flashMlaBaseParams;
-        const auto& flashMlaAttenMaskParams = this->tilingData_->flashMlaAttenMaskParams;
-        const auto& flashMlaPageAttentionParams = this->tilingData_->flashMlaPageAttentionParams;
-        const auto& flashMlaWorkspaceParams = this->tilingData_->flashMlaWorkspaceParams;
-        const auto& flashMlaEmptyTensorParams = this->tilingData_->flashMlaEmptyTensorParams;
+        const auto& flashMlaBaseParams = tilingData_->flashMlaBaseParams;
+        const auto& flashMlaAttenMaskParams = tilingData_->flashMlaAttenMaskParams;
+        const auto& flashMlaPageAttentionParams = tilingData_->flashMlaPageAttentionParams;
+        const auto& flashMlaWorkspaceParams = tilingData_->flashMlaWorkspaceParams;
 
         constInfo_.bSize = flashMlaBaseParams.bSize;
         constInfo_.t1Size = flashMlaBaseParams.t1Size;
-        constInfo_.t2Size = flashMlaBaseParams.t2Size;
         constInfo_.n2Size = flashMlaBaseParams.n2Size;
         constInfo_.gSize = flashMlaBaseParams.gSize;
         constInfo_.s1Size = flashMlaBaseParams.s1Size;
@@ -167,30 +165,21 @@ public:
 
         constInfo_.keyStrides.bnStride = flashMlaBaseParams.keyStrides.bnStride;
         constInfo_.keyStrides.n2Stride = flashMlaBaseParams.keyStrides.n2Stride;
-        constInfo_.valueStrides.bnStride = flashMlaBaseParams.valueStrides.bnStride;
-        constInfo_.valueStrides.n2Stride = flashMlaBaseParams.valueStrides.n2Stride;
 
         constInfo_.sparseMode = flashMlaAttenMaskParams.sparseMode;
-        constInfo_.preTokens = flashMlaAttenMaskParams.preTokens;
-        constInfo_.nextTokens = flashMlaAttenMaskParams.nextTokens;
+        constInfo_.winLeft = flashMlaAttenMaskParams.winLeft;
+        constInfo_.winRight = flashMlaAttenMaskParams.winRight;
         if constexpr (HAS_MASK) {
             constInfo_.attenMaskBatch = flashMlaAttenMaskParams.attenMaskBatch;
             constInfo_.attenMaskS1Size = flashMlaAttenMaskParams.attenMaskS1Size;
             constInfo_.attenMaskS2Size = flashMlaAttenMaskParams.attenMaskS2Size;
         }
         constInfo_.l2CacheOffFlag = flashMlaBaseParams.l2CacheOffFlag;
-        constInfo_.isRowInvalidOpen = flashMlaAttenMaskParams.isRowInvalidOpen;
-        constInfo_.isExistRowInvalid = flashMlaAttenMaskParams.isExistRowInvalid;
         constInfo_.accumOutSize = flashMlaWorkspaceParams.accumOutSize;
         constInfo_.logSumExpSize = flashMlaWorkspaceParams.logSumExpSize;
         constInfo_.maxBlockNumPerBatch = flashMlaPageAttentionParams.maxBlockNumPerBatch;
         constInfo_.blockSize = flashMlaPageAttentionParams.blockSize;
-        constInfo_.paLayoutType = flashMlaPageAttentionParams.paLayoutType;
         constInfo_.isSoftmaxLseEnable = flashMlaBaseParams.isSoftMaxLseEnable;
-
-        constInfo_.dBasicBlock = AttentionCommon::Align(constInfo_.dSizeV, 64U);
-        constInfo_.kRopeStrides.bnStride = flashMlaBaseParams.kRopeStrides.bnStride;
-        constInfo_.kRopeStrides.n2Stride = flashMlaBaseParams.kRopeStrides.n2Stride;
     }
 
     __aicore__ inline uint32_t GetFAMetaDataIndex(uint32_t coreIdx, uint32_t metaIdx, uint32_t sectionIdx)
@@ -207,38 +196,40 @@ public:
 
     __aicore__ inline void GetFASectionInfo(uint32_t sectionIdx)
     {
-        constInfo_.bN2Start =
-            faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_BN2_START_INDEX, sectionIdx));
-        constInfo_.gS1OStart =
-            faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_M_START_INDEX, sectionIdx));
-        constInfo_.s2OStart =
-            faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_S2_START_INDEX, sectionIdx));
-        constInfo_.bN2End =
-            faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_BN2_END_INDEX, sectionIdx));
+        constInfo_.bN2Start = faMetaDataGm_.GetValue(
+            GetFAMetaDataIndex(constInfo_.aicIdx, optiling::FLASH_ATTN_BN2_START_INDEX, sectionIdx));
+        constInfo_.gS1OStart = faMetaDataGm_.GetValue(
+            GetFAMetaDataIndex(constInfo_.aicIdx, optiling::FLASH_ATTN_M_START_INDEX, sectionIdx));
+        constInfo_.s2OStart = faMetaDataGm_.GetValue(
+            GetFAMetaDataIndex(constInfo_.aicIdx, optiling::FLASH_ATTN_S2_START_INDEX, sectionIdx));
+        constInfo_.bN2End = faMetaDataGm_.GetValue(
+            GetFAMetaDataIndex(constInfo_.aicIdx, optiling::FLASH_ATTN_BN2_END_INDEX, sectionIdx));
         constInfo_.gS1OEnd =
-            faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_M_END_INDEX, sectionIdx));
-        constInfo_.s2OEnd =
-            faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_S2_END_INDEX, sectionIdx));
+            faMetaDataGm_.GetValue(GetFAMetaDataIndex(constInfo_.aicIdx, optiling::FLASH_ATTN_M_END_INDEX, sectionIdx));
+        constInfo_.s2OEnd = faMetaDataGm_.GetValue(
+            GetFAMetaDataIndex(constInfo_.aicIdx, optiling::FLASH_ATTN_S2_END_INDEX, sectionIdx));
         constInfo_.coreFirstTmpOutWsPos = faMetaDataGm_.GetValue(
-            GetFAMetaDataIndex(constInfo_.aicIdx, FLASH_ATTN_FIRST_FD_DATA_WORKSPACE_IDX_INDEX, sectionIdx));
+            GetFAMetaDataIndex(constInfo_.aicIdx, optiling::FLASH_ATTN_FIRST_FD_DATA_WORKSPACE_IDX_INDEX, sectionIdx));
     }
 
     __aicore__ inline void GetFDSectionInfo(uint32_t sectionIdx)
     {
-        fdParams_.mLen = fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, FA_FD_M_NUM_INDEX, sectionIdx));
+        fdParams_.mLen =
+            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, optiling::FA_FD_M_NUM_INDEX, sectionIdx));
         fdParams_.fdCoreEnable = fdParams_.mLen > 0 ? 1U : 0U;
         if (!fdParams_.fdCoreEnable) {
             return;
         }
         fdParams_.fdBN2Idx =
-            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, FA_FD_BN2_IDX_INDEX, sectionIdx));
-        fdParams_.fdMIdx = fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, FA_FD_M_IDX_INDEX, sectionIdx));
-        fdParams_.fdWorkspaceIdx =
-            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, FA_FD_WORKSPACE_IDX_INDEX, sectionIdx));
-        fdParams_.fdS2SplitNum =
-            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, FA_FD_WORKSPACE_NUM_INDEX, sectionIdx));
+            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, optiling::FA_FD_BN2_IDX_INDEX, sectionIdx));
+        fdParams_.fdMIdx =
+            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, optiling::FA_FD_M_IDX_INDEX, sectionIdx));
+        fdParams_.fdWorkspaceIdx = fdMetaDataGm_.GetValue(
+            GetFDMetaDataIndex(constInfo_.aivIdx, optiling::FA_FD_WORKSPACE_IDX_INDEX, sectionIdx));
+        fdParams_.fdS2SplitNum = fdMetaDataGm_.GetValue(
+            GetFDMetaDataIndex(constInfo_.aivIdx, optiling::FA_FD_WORKSPACE_NUM_INDEX, sectionIdx));
         fdParams_.mStart =
-            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, FA_FD_M_START_INDEX, sectionIdx));
+            fdMetaDataGm_.GetValue(GetFDMetaDataIndex(constInfo_.aivIdx, optiling::FA_FD_M_START_INDEX, sectionIdx));
     }
 
     __aicore__ inline void FlashAttention(uint32_t sectionIdx)
@@ -315,8 +306,8 @@ public:
         uint32_t bIdx = bN2Cur / constInfo_.n2Size;
         if (isFirstTask || prevBIdx_ != bIdx) {
             prevBIdx_ = bIdx;
-            actSeqLensKv_ = seqLensTool_.kvActSeqLensParser.GetActualSeqLength(bIdx);
-            actSeqLensQ_ = seqLensTool_.qActSeqLensParser.GetActualSeqLength(bIdx);
+            actSeqLensKv_ = seqLensTool_.kvActSeqLensParser_.GetActualSeqLength(bIdx);
+            actSeqLensQ_ = seqLensTool_.qActSeqLensParser_.GetActualSeqLength(bIdx);
             cachedS2LoopTimes_ = (actSeqLensKv_ + s2BaseSize - 1) / s2BaseSize;
             uint64_t gS1Size = actSeqLensQ_ * constInfo_.gSize;
             cachedG1S1LoopTimes_ = (gS1Size + mBaseSize - 1) / mBaseSize;
@@ -358,22 +349,22 @@ public:
         return TASK_DEAL_MODE::CREATE_TASK;
     }
 
-    __aicore__ inline void GetPreNextTokenLeftUp(int64_t actSeqLensQ_, int64_t actSeqLensKv_, int64_t& preTokenLeftUp,
-                                                 int64_t& nextTokenLeftUp)
+    __aicore__ inline void GetWindowFromTopLeft(int64_t actSeqLensQ_, int64_t actSeqLensKv_,
+                                                int64_t& winLeftFromTopLeft, int64_t& winRightFromTopLeft)
     {
-        preTokenLeftUp = constInfo_.preTokens;
-        nextTokenLeftUp = constInfo_.nextTokens;
-        fa_base_vector::GetSafeActToken(actSeqLensQ_, actSeqLensKv_, preTokenLeftUp, nextTokenLeftUp,
+        winLeftFromTopLeft = constInfo_.winLeft;
+        winRightFromTopLeft = constInfo_.winRight;
+        fa_base_vector::GetSafeActToken(actSeqLensQ_, actSeqLensKv_, winLeftFromTopLeft, winRightFromTopLeft,
                                         constInfo_.sparseMode);
 
         if (constInfo_.sparseMode == fa_base_vector::BAND) {
-            preTokenLeftUp += static_cast<int64_t>(actSeqLensQ_) - static_cast<int64_t>(actSeqLensKv_);
+            winLeftFromTopLeft += static_cast<int64_t>(actSeqLensQ_) - static_cast<int64_t>(actSeqLensKv_);
         }
 
         if (constInfo_.sparseMode == fa_base_vector::RIGHT_DOWN_CAUSAL) {
-            nextTokenLeftUp = static_cast<int64_t>(actSeqLensKv_) - static_cast<int64_t>(actSeqLensQ_);
+            winRightFromTopLeft = static_cast<int64_t>(actSeqLensKv_) - static_cast<int64_t>(actSeqLensQ_);
         } else if (constInfo_.sparseMode == fa_base_vector::BAND) {
-            nextTokenLeftUp += static_cast<int64_t>(actSeqLensKv_) - static_cast<int64_t>(actSeqLensQ_);
+            winRightFromTopLeft += static_cast<int64_t>(actSeqLensKv_) - static_cast<int64_t>(actSeqLensQ_);
         }
     }
 
@@ -394,8 +385,8 @@ public:
 
     __aicore__ inline void CalcCurS2StartEndWithSparse(uint32_t bN2Cur, uint32_t gS1Cur)
     {
-        int64_t preTokenLeftUp = 0;
-        int64_t nextTokenLeftUp = 0;
+        int64_t winLeftFromTopLeft = 0;
+        int64_t winRightFromTopLeft = 0;
         int64_t s1FirstToken = 0;
         int64_t s1LastToken = 0;
 
@@ -418,9 +409,9 @@ public:
                 s1FirstToken = 0;
             }
         }
-        GetPreNextTokenLeftUp(actSeqLensQ_, actSeqLensKv_, preTokenLeftUp, nextTokenLeftUp);
-        int64_t s2FirstToken = s1FirstToken - preTokenLeftUp;
-        int64_t s2LastToken = s1LastToken + nextTokenLeftUp;
+        GetWindowFromTopLeft(actSeqLensQ_, actSeqLensKv_, winLeftFromTopLeft, winRightFromTopLeft);
+        int64_t s2FirstToken = s1FirstToken - winLeftFromTopLeft;
+        int64_t s2LastToken = s1LastToken + winRightFromTopLeft;
         if (s2FirstToken >= static_cast<int64_t>(actSeqLensKv_) || s2LastToken < 0 || s2LastToken < s2FirstToken) {
             curS2Start_ = 0U;
             curS2End_ = 0U;
@@ -452,37 +443,11 @@ public:
         FlashMlaRunInfoX& runInfoNext =
             taskRunInfo[(loop + 1) & (PRELOAD_TASK_CACHE_SIZE - 1)]; // 下一轮任务（仅用于提前搬运 KV）
 
-        if (runInfoNext.isValid) {
-            if ASCEND_IS_AIC {
-                ComputeBmm1Load(runInfoNext);
-            }
-        }
-        if (loop == 0) {
+        if ASCEND_IS_AIC {
+            ComputeMm1(runInfo0, runInfoNext, loop == 0U);
+        } else {
             if (runInfo0.isValid) {
-                if ASCEND_IS_AIC {
-                    // Q 的 MTE2 与首任务 KV 同拍发出，压缩启动期（仅首任务安全：Q 单槽 L1）
-                    if (runInfo0.isFirstS2Loop) {
-                        ComputeQPreload(runInfo0);
-                        runInfo0.qPreloaded = true;
-                    }
-                    ComputeBmm1Load(runInfo0);
-                }
-            }
-        }
-
-        if (runInfo0.isValid) {
-            if ASCEND_IS_AIC {
-                ComputeMm1(runInfo0, runInfo0.qPreloaded);
-            } else {
                 ComputeVec1(runInfo0);
-            }
-        }
-
-        // Q 单槽复用，预取必须在本轮 MTE1 读取结束后发起。
-        if (runInfo0.isValid && runInfoNext.isValid && runInfo0.isLastS2Loop && runInfoNext.isFirstS2Loop) {
-            if ASCEND_IS_AIC {
-                ComputeQPreload(runInfoNext);
-                runInfoNext.qPreloaded = true;
             }
         }
 
@@ -498,19 +463,12 @@ public:
         }
     }
 
-    __aicore__ inline void ComputeMm1(FlashMlaRunInfoX& runInfo, bool qPreloaded = false)
+    __aicore__ inline void ComputeMm1(FlashMlaRunInfoX& runInfo, FlashMlaRunInfoX& nextRunInfo, bool isFirstLoop)
     {
-        cubeBlock_.IterateBmm1(runInfo, qPreloaded);
-    }
-
-    __aicore__ inline void ComputeQPreload(FlashMlaRunInfoX& runInfo)
-    {
-        cubeBlock_.IterateQPreload(runInfo);
-    }
-
-    __aicore__ inline void ComputeBmm1Load(FlashMlaRunInfoX& runInfo)
-    {
-        cubeBlock_.IterateBmm1Load(runInfo);
+        cubeBlock_.PreloadMte2(runInfo, nextRunInfo, isFirstLoop);
+        if (runInfo.isValid) {
+            cubeBlock_.IterateBmm1(runInfo);
+        }
     }
 
     __aicore__ inline void ComputeMm2(FlashMlaRunInfoX& runInfo)
@@ -525,13 +483,12 @@ public:
 
     __aicore__ inline void ComputeVec2(FlashMlaRunInfoX& runInfo)
     {
-        this->vecFaBlock_.ProcessVec2(runInfo);
+        vecFaBlock_.ProcessVec2(runInfo);
     }
 
     __aicore__ inline void EnableTask(FlashMlaRunInfoX& runInfo)
     {
         runInfo.isValid = true;
-        runInfo.qPreloaded = false; // 槽位跨轮复用，必须重置
         validTaskNum_++;
     }
 
@@ -557,11 +514,6 @@ public:
         info.bIdx = bN2Cur / constInfo_.n2Size;
         info.n2Idx = bN2Cur % constInfo_.n2Size;
         info.gS1Idx = gS1Cur * mBaseSize;
-        if constexpr (LAYOUT_Q == FLASH_MLA_LAYOUT::BSH || LAYOUT_Q == FLASH_MLA_LAYOUT::TND) {
-            info.s1Idx = info.gS1Idx / constInfo_.gSize;
-        } else {
-            info.s1Idx = info.gS1Idx % actSeqLensQ_;
-        }
         info.s2Idx = s2Cur * s2BaseSize;
         info.actS1Size = actSeqLensQ_;
         info.actS2Size = actSeqLensKv_;
@@ -575,11 +527,8 @@ public:
         if (((s2Cur + 1) * s2BaseSize) > info.actS2Size) {
             info.actSingleLoopS2Size = info.actS2Size - s2Cur * s2BaseSize;
         }
-        info.actSingleLoopS2SizeAlign = AttentionCommon::Align((uint32_t)info.actSingleLoopS2Size,
-                                                               (uint32_t)(BaseApi::FA_BYTE_BLOCK / sizeof(INPUT_T)));
-        info.isChangeBatch = false;
 
-        GetPreNextTokenLeftUp(actSeqLensQ_, actSeqLensKv_, info.preTokensLeftUp, info.nextTokensLeftUp);
+        GetWindowFromTopLeft(actSeqLensQ_, actSeqLensKv_, info.winLeftFromTopLeft, info.winRightFromTopLeft);
 
         info.isFirstFdBlock = !(headS2Split_ && bN2Cur == constInfo_.bN2Start && gS1Cur == constInfo_.gS1OStart);
         info.isFirstS2Loop = ((loop == 0) || (s2Cur == curS2Start_));
@@ -618,8 +567,7 @@ public:
 
         s2Cur = 0;
 
-        uint64_t gS1LoopTimes = cachedG1S1LoopTimes_;
-        if (gS1Cur + 1 < gS1LoopTimes) {
+        if (gS1Cur + 1 < cachedG1S1LoopTimes_) {
             gS1Cur++;
             return;
         }
@@ -635,7 +583,7 @@ public:
             return;
         }
         GetFDSectionInfo(sectionIdx);
-        vecFdBlock_.InitBuffers();
+        vecFdBlock_.template InitBuffers<VecFaBlockType::GetFdBaseOffset()>();
         AscendC::ICachePreLoad(2);
         AscendC::SyncAll();
         vecFdBlock_.FlashDecode(fdParams_);
@@ -678,6 +626,6 @@ public:
     }
 }; // FlashAttentionNoQuantMlaKernel
 
-} // namespace FlashAttnKernel
+} // namespace FlashMlaKernel
 
 #endif // FLASH_MLA_KERNEL_H_

@@ -49,7 +49,7 @@ ASCENDC_TPL_SEL(
                                               KvLayoutType_PA_BNBD, KvLayoutType_PA_NZ),
                          ASCENDC_TPL_BOOL_SEL(HasAttenMask, FLASH_MLA_TPL_BOOL_FALSE, FLASH_MLA_TPL_BOOL_TRUE),
                          ASCENDC_TPL_UINT_SEL(Config, ASCENDC_TPL_UI_LIST,
-                                              Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512),
+                                              Config_S1Aligned96_S2Aligned112_DAligned576_DVAligned512),
                          ASCENDC_TPL_TILING_STRUCT_SEL(FlashMlaTilingData)), );
 
 #endif // FLASH_MLA_TEMPLATE_TILING_KEY_H_

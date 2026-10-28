@@ -27,53 +27,8 @@
 
 namespace optiling {
 namespace flash_mla {
-using std::map;
-using std::pair;
-using std::string;
-using namespace ge;
-using namespace AscendC;
 using namespace arch35MLA;
 using namespace Ops::Base;
-
-ge::graphStatus CommonChecker::CheckSingleParaLayout(const FlashMlaTilingInfo& faInfo)
-{
-    const std::vector<FlashMlaLayout> supportedQLayouts = {FlashMlaLayout::BSND, FlashMlaLayout::BNSD,
-                                                           FlashMlaLayout::TND};
-    const std::vector<FlashMlaLayout> supportedKvLayouts = {FlashMlaLayout::PA_NZ, FlashMlaLayout::PA_BBND,
-                                                            FlashMlaLayout::PA_BNBD};
-    const std::vector<FlashMlaLayout> supportedOutLayouts = {FlashMlaLayout::BSND, FlashMlaLayout::BNSD,
-                                                             FlashMlaLayout::TND, FlashMlaLayout::NTD};
-
-    if (std::find(supportedQLayouts.begin(), supportedQLayouts.end(), faInfo.qLayout) == supportedQLayouts.end()) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(faInfo.opName, "layout_q", LayoutToSerialString(faInfo.qLayout).c_str(),
-                                              "The value of layout_q must be BSND, BNSD or TND");
-        return ge::GRAPH_FAILED;
-    }
-
-    OP_CHECK_IF(
-        std::find(supportedKvLayouts.begin(), supportedKvLayouts.end(), faInfo.kvLayout) == supportedKvLayouts.end(),
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(faInfo.opName, "layout_kv", LayoutToSerialString(faInfo.kvLayout).c_str(),
-                                              "The value of layout_kv must be PA_NZ, PA_BBND or PA_BNBD"),
-        return ge::GRAPH_FAILED);
-
-    if (std::find(supportedOutLayouts.begin(), supportedOutLayouts.end(), faInfo.outLayout) ==
-        supportedOutLayouts.end()) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(faInfo.opName, "layout_out",
-                                              LayoutToSerialString(faInfo.outLayout).c_str(),
-                                              "The value of layout_out must be BSND, BNSD, TND or NTD");
-        return ge::GRAPH_FAILED;
-    }
-
-    return ge::GRAPH_SUCCESS;
-}
-
-ge::graphStatus CommonChecker::CheckSinglePara(const FlashMlaTilingInfo& faInfo)
-{
-    if (CheckSingleParaLayout(faInfo) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
-    return ge::GRAPH_SUCCESS;
-}
 
 ge::graphStatus CommonChecker::CheckParaExistence(const FlashMlaTilingInfo& faInfo)
 {
@@ -216,46 +171,6 @@ ge::graphStatus CommonChecker::CheckMlaGeometry(const FlashMlaTilingInfo& faInfo
     return ge::GRAPH_SUCCESS;
 }
 
-struct LayoutConstraintConfig {
-    std::vector<FlashMlaLayout> supportedKvLayouts;
-    std::vector<FlashMlaLayout> supportedOutLayouts;
-};
-
-static const std::map<FlashMlaLayout, LayoutConstraintConfig> LAYOUT_CONSTRAINT_TABLE = {
-    {FlashMlaLayout::BSND,
-     {{FlashMlaLayout::PA_NZ, FlashMlaLayout::PA_BBND, FlashMlaLayout::PA_BNBD}, {FlashMlaLayout::BSND}}},
-    {FlashMlaLayout::BNSD,
-     {{FlashMlaLayout::PA_NZ, FlashMlaLayout::PA_BBND, FlashMlaLayout::PA_BNBD}, {FlashMlaLayout::BNSD}}},
-    {FlashMlaLayout::TND,
-     {{FlashMlaLayout::PA_NZ, FlashMlaLayout::PA_BBND, FlashMlaLayout::PA_BNBD},
-      {FlashMlaLayout::TND, FlashMlaLayout::NTD}}},
-};
-
-ge::graphStatus CommonChecker::CheckMultiParaLayout(const FlashMlaTilingInfo& faInfo)
-{
-    auto it = LAYOUT_CONSTRAINT_TABLE.find(faInfo.qLayout);
-    OP_CHECK_IF(it == LAYOUT_CONSTRAINT_TABLE.end(),
-                OP_LOGE_FOR_INVALID_VALUE(faInfo.opName, "layout_q", LayoutToSerialString(faInfo.qLayout).c_str(),
-                                          "BSND, BNSD or TND"),
-                return ge::GRAPH_FAILED);
-
-    const auto& config = it->second;
-
-    OP_CHECK_IF(std::find(config.supportedKvLayouts.begin(), config.supportedKvLayouts.end(), faInfo.kvLayout) ==
-                    config.supportedKvLayouts.end(),
-                OP_LOGE_FOR_INVALID_VALUE(faInfo.opName, "layout_kv", LayoutToSerialString(faInfo.kvLayout).c_str(),
-                                          "PA_NZ, PA_BBND or PA_BNBD"),
-                return ge::GRAPH_FAILED);
-
-    OP_CHECK_IF(std::find(config.supportedOutLayouts.begin(), config.supportedOutLayouts.end(), faInfo.outLayout) ==
-                    config.supportedOutLayouts.end(),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                    faInfo.opName, "layout_out", LayoutToSerialString(faInfo.outLayout).c_str(),
-                    "layout_out must match layout_q; TND query also supports NTD output"),
-                return ge::GRAPH_FAILED);
-    return ge::GRAPH_SUCCESS;
-}
-
 void CommonChecker::SetFaShapeCompare(const FlashMlaTilingInfo& faInfo)
 {
     queryShapeCmp_ = std::make_shared<FlashMlaTilingShapeCompare>(faInfo.opParamInfo.query.shape->GetStorageShape(),
@@ -348,9 +263,6 @@ ge::graphStatus CommonChecker::CheckShapeConsistency(const FlashMlaTilingInfo& f
 
 ge::graphStatus CommonChecker::CheckMultiPara(const FlashMlaTilingInfo& faInfo)
 {
-    if (CheckMultiParaLayout(faInfo) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
     if (CheckNonQuantDataType(faInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }

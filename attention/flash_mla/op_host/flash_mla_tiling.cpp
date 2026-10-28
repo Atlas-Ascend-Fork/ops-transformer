@@ -24,10 +24,6 @@
 #include "checkers/flash_mla_checker.h"
 #include "../../common/op_host/fia_tiling_templates_registry.h"
 
-using namespace ge;
-using namespace AscendC;
-using namespace Ops::Transformer::OpTiling;
-
 namespace optiling {
 using namespace flash_mla;
 

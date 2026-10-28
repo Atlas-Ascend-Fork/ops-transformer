@@ -25,17 +25,17 @@
 #include "../../common/op_kernel/arch35/flash_attention_score_common_regbase_arch35.h"
 #include "adv_api/activation/softmax.h"
 #include "utils/flash_mla_type.h"
-using namespace optiling;
 #include "arch35/flash_mla_kernel.h"
 
 using namespace AscendC;
+using optiling::FlashMlaTilingData;
 
 template <uint8_t inOutLayoutType>
-__aicore__ inline constexpr FLASH_MLA_LAYOUT GetQueryLayoutMla()
+__aicore__ inline constexpr FLASH_MLA_LAYOUT GetQueryLayout()
 {
     static_assert((inOutLayoutType == InOutLayoutType_BSND) || (inOutLayoutType == InOutLayoutType_BNSD) ||
                       (inOutLayoutType == InOutLayoutType_TND) || (inOutLayoutType == InOutLayoutType_TND_NTD),
-                  "GetQueryLayoutMla fail, inOutLayoutType is incorrect");
+                  "GetQueryLayout fail, inOutLayoutType is incorrect");
     if constexpr (inOutLayoutType == InOutLayoutType_BSND) {
         return FLASH_MLA_LAYOUT::BSH;
     } else if constexpr (inOutLayoutType == InOutLayoutType_BNSD) {
@@ -46,30 +46,16 @@ __aicore__ inline constexpr FLASH_MLA_LAYOUT GetQueryLayoutMla()
 }
 
 template <uint8_t inOutLayoutType>
-__aicore__ inline constexpr FLASH_MLA_LAYOUT GetOutLayoutMla()
+__aicore__ inline constexpr FLASH_MLA_LAYOUT GetOutLayout()
 {
     static_assert((inOutLayoutType == InOutLayoutType_BSND) || (inOutLayoutType == InOutLayoutType_BNSD) ||
                       (inOutLayoutType == InOutLayoutType_TND) || (inOutLayoutType == InOutLayoutType_TND_NTD),
-                  "GetOutLayoutMla fail, inOutLayoutType is incorrect");
+                  "GetOutLayout fail, inOutLayoutType is incorrect");
     if constexpr (inOutLayoutType == InOutLayoutType_TND_NTD) {
         return FLASH_MLA_LAYOUT::NTD;
     } else {
-        return GetQueryLayoutMla<inOutLayoutType>();
+        return GetQueryLayout<inOutLayoutType>();
     }
-}
-
-template <uint8_t KvLayoutType>
-__aicore__ inline constexpr bool IsPageAttentionMla()
-{
-    static_assert(KvLayoutType <= KvLayoutType_PA_NZ, "IsPageAttentionMla fail, KvLayoutType is incorrect");
-    return (KvLayoutType != KvLayoutType_NO_PA);
-}
-
-template <uint8_t inOutLayoutType, uint8_t KvLayoutType>
-__aicore__ inline constexpr GmFormat GetKvLayoutMla()
-{
-    return FlashAttnKernel::GetKVGmFormat<GetQueryLayoutMla<inOutLayoutType>(), KvLayoutType,
-                                          IsPageAttentionMla<KvLayoutType>()>();
 }
 
 template <uint8_t inOutLayoutType, uint8_t KvLayoutType, bool hasAttenMask, uint8_t config>
@@ -91,12 +77,11 @@ __global__ __aicore__ void flash_mla(__gm__ uint8_t* query, __gm__ uint8_t* kCac
     using OUT_T = half;
 #endif
 
-    constexpr FLASH_MLA_LAYOUT qLayout = GetQueryLayoutMla<inOutLayoutType>();
-    constexpr FLASH_MLA_LAYOUT outLayout = GetOutLayoutMla<inOutLayoutType>();
-    constexpr GmFormat kvGmFormat = GetKvLayoutMla<inOutLayoutType, KvLayoutType>();
-    constexpr bool pageAttention = IsPageAttentionMla<KvLayoutType>();
-    constexpr S1TemplateType s1TemplateType = static_cast<S1TemplateType>(96);
-    constexpr S2TemplateType s2TemplateType = static_cast<S2TemplateType>(112);
+    constexpr FLASH_MLA_LAYOUT qLayout = GetQueryLayout<inOutLayoutType>();
+    constexpr FLASH_MLA_LAYOUT outLayout = GetOutLayout<inOutLayoutType>();
+    static_assert(KvLayoutType <= KvLayoutType_PA_NZ, "KvLayoutType is incorrect");
+    constexpr S1TemplateType s1TemplateType = static_cast<S1TemplateType>(ConfigValue[config].s1);
+    constexpr S2TemplateType s2TemplateType = static_cast<S2TemplateType>(ConfigValue[config].s2);
     constexpr DTemplateType dTemplateType = static_cast<DTemplateType>(ConfigValue[config].d);
     constexpr DTemplateType dVTemplateType = static_cast<DTemplateType>(ConfigValue[config].dv);
 
@@ -107,24 +92,19 @@ __global__ __aicore__ void flash_mla(__gm__ uint8_t* query, __gm__ uint8_t* kCac
     // 复位 SoC 状态，避免继承前序算子的原子累加和 Mask 设置。
     AscendC::InitSocState();
 
-    using FA_T_Cube = FlashAttnKernel::FATypeCube<INPUT_T, float, qLayout, s1TemplateType, s2TemplateType,
-                                                  dTemplateType, dVTemplateType, KvLayoutType>;
-    using FA_T_Vec =
-        FlashAttnKernel::FATypeVec<INPUT_T, float, OUT_T, qLayout, outLayout, s1TemplateType, s2TemplateType,
-                                   dTemplateType, dVTemplateType, hasAttenMask, KvLayoutType>;
-    using FA_T_Fd = FlashAttnKernel::FATypeFd<INPUT_T, float, OUT_T, qLayout, outLayout, s1TemplateType, s2TemplateType,
+    using FA_T = FlashMlaKernel::FlashMlaType<INPUT_T, float, OUT_T, qLayout, outLayout, s1TemplateType, s2TemplateType,
                                               dTemplateType, dVTemplateType, hasAttenMask, KvLayoutType>;
 
 #ifdef __DAV_C310_CUBE__
-    using CubeBlock = FlashAttnKernel::FlashMlaNoQuantMlaBlockCube<FA_T_Cube>;
-    using VecFaBlock = FlashAttnKernel::FlashMlaNoQuantMlaBlockVecDummy<FA_T_Vec>;
-    using VecFdBlock = FlashAttnKernel::FlashMlaNoQuantMlaBlockVecDummy<FA_T_Vec>;
+    using CubeBlock = FlashMlaKernel::FlashMlaNoQuantMlaBlockCube<FA_T>;
+    using VecFaBlock = FlashMlaKernel::FlashMlaNoQuantMlaBlockVecDummy<FA_T>;
+    using VecFdBlock = FlashMlaKernel::FlashMlaNoQuantMlaBlockVecDummy<FA_T>;
 #else
-    using CubeBlock = FlashAttnKernel::FlashMlaNoQuantMlaBlockCubeDummy<FA_T_Cube>;
-    using VecFaBlock = FlashAttnKernel::FlashMlaNoQuantMlaBlockVec<FA_T_Vec>;
-    using VecFdBlock = FlashAttnKernel::FlashMlaBlockVecFlashDecodeMla<FA_T_Fd>;
+    using CubeBlock = FlashMlaKernel::FlashMlaNoQuantMlaBlockCubeDummy<FA_T>;
+    using VecFaBlock = FlashMlaKernel::FlashMlaNoQuantMlaBlockVec<FA_T>;
+    using VecFdBlock = FlashMlaKernel::FlashMlaBlockVecFlashDecodeMla<FA_T>;
 #endif
-    using Kernel = FlashAttnKernel::FlashAttentionNoQuantMlaKernel<CubeBlock, VecFaBlock, VecFdBlock>;
+    using Kernel = FlashMlaKernel::FlashAttentionNoQuantMlaKernel<CubeBlock, VecFaBlock, VecFdBlock>;
 
     Kernel op;
     op.Init(query, kCache, sinks, attnMask, cuSeqlensQ, sequsedQ, cacheSeqlens, blockTable, softmaxLse, attnOut, user,

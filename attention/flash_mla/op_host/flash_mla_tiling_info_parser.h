@@ -47,7 +47,6 @@ public:
     void GetInOutDataType();
     ge::graphStatus GetBatchSize();
     void GetQueryTSize();
-    void GetKeyTSize();
     ge::graphStatus GetQkNopeHeadDim();
     ge::graphStatus GetS1Size();
     void GetKvStorageMode();
@@ -57,7 +56,6 @@ public:
     void SetFaShape();
     ge::graphStatus GetMaxActualSeq(const gert::Tensor* actualSeqLensTensor, FlashMlaLayout layout,
                                     int64_t& maxActualSeqLen);
-    ge::graphStatus GetS2SizeFromCuSeqLens();
     ge::graphStatus GetMaxBlockNumPerBatch();
     ge::graphStatus GetBlockSize();
     ge::graphStatus GetBlockNum();
@@ -100,21 +98,16 @@ public:
     int64_t vHeadDim_ = 0;
     int64_t ropeHeadDim_ = 0;
     int64_t queryTSize_ = 0;
-    int64_t keyTSize_ = 0;
     int64_t cuSeqlensQSize_ = 0;
     int64_t cacheSeqlensSize_ = 0;
     KvStorageMode kvStorageMode_ = KvStorageMode::BATCH_CONTINUOUS;
 
     const gert::Stride* keyStrides_ = nullptr;
-    const gert::Stride* valueStrides_ = nullptr;
     uint64_t keyBnStride_ = 0;
     uint64_t keyN2Stride_ = 0;
-    uint64_t valueBnStride_ = 0;
-    uint64_t valueN2Stride_ = 0;
 
     bool hasViewStride_ = true;
     int32_t keyNonContigDim_ = -1;
-    int32_t valueNonContigDim_ = -1;
 
     FlashMlaLayout layoutQ_ = FlashMlaLayout::BSND;
     FlashMlaLayout layoutKV_ = FlashMlaLayout::BSND;
@@ -140,10 +133,6 @@ public:
 
     float softmaxScale_ = 1.0;
 
-    int64_t seqLenQDims_ = 0;
-    int64_t seqLenKvDims_ = 0;
-    int64_t cuseqLenQDims_ = 0;
-    int64_t cuseqLenKvDims_ = 0;
     int64_t maxSeqQ_ = -1;
     int64_t maxSeqKv_ = -1;
 

@@ -29,8 +29,8 @@
 #define KvLayoutType_PA_BNBD 2
 #define KvLayoutType_PA_NZ 3
 
-#define Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512 0
-#define Config_MLA_DEFAULT Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512
+#define Config_S1Aligned96_S2Aligned112_DAligned576_DVAligned512 0
+#define Config_MLA_DEFAULT Config_S1Aligned96_S2Aligned112_DAligned576_DVAligned512
 
 enum class inferFaLayOutTypeEnum {
     None = 0,
@@ -46,6 +46,7 @@ enum class inferS1TemplateType {
     Aligned16 = 16,
     Aligned32 = 32,
     Aligned64 = 64,
+    Aligned96 = 96,
     Aligned128 = 128,
     Aligned256 = 256,
     NotAligned,
@@ -55,6 +56,7 @@ enum class inferS2TemplateType {
     Aligned16 = 16,
     Aligned32 = 32,
     Aligned64 = 64,
+    Aligned112 = 112,
     Aligned128 = 128,
     Aligned256 = 256,
     Aligned512 = 512,
@@ -85,9 +87,7 @@ struct ConfigParams {
     inferDTemplateType dv;
 };
 
-static constexpr ConfigParams ConfigValue[] = {
-    {inferS1TemplateType::Aligned64, inferS2TemplateType::Aligned128, inferDTemplateType::Aligned576,
-     inferDTemplateType::Aligned512} // config=0: MLA 默认（s1=64, s2=128, D=576, DV=512）
-};
+static constexpr ConfigParams ConfigValue[] = {{inferS1TemplateType::Aligned96, inferS2TemplateType::Aligned112,
+                                                inferDTemplateType::Aligned576, inferDTemplateType::Aligned512}};
 
 #endif // FLASH_MLA_COMMON_DEF_H_

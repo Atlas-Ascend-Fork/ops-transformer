@@ -23,7 +23,7 @@
 #include "flash_mla_public_define_arch35.h"
 #include "../utils/flash_mla_type.h"
 
-namespace FlashAttnKernel {
+namespace FlashMlaKernel {
 using ConstInfoX = AttentionCommon::ConstInfo_t<FlashMlaKernelType::NO_QUANT>;
 using ConstInfo_t = ConstInfoX;
 
@@ -43,7 +43,6 @@ public:
     static constexpr uint32_t s2BaseSize = (uint32_t)FA_T::s2BaseSize;
     static constexpr uint32_t dVBaseSize = (uint32_t)FA_T::dVBaseSize;
     static constexpr FLASH_MLA_LAYOUT LAYOUT_T = FA_T::qLayout;
-    static constexpr FLASH_MLA_LAYOUT LAYOUT_KV = FA_T::kvLayout;
     static constexpr FLASH_MLA_LAYOUT LAYOUT_OUT = FA_T::attnOutLayout;
     static constexpr bool PAGE_ATTENTION = FA_T::pageAttention;
     static constexpr bool HAS_MASK = FA_T::hasMask;
@@ -53,27 +52,22 @@ private:
     static constexpr int64_t BYTE_BLOCK = 32UL;
     static constexpr int64_t REPEAT_BLOCK_BYTE = 256U;
     // Mutex ID（核内静态旗标）：需与 vecFaBlock_（同 AIV 核、同 PIPE）所用 0..8 错开，故从 9 起编
-    static constexpr uint64_t SYNC_LSE_MAX_SUM_BUF1_FLAG = 9;
-    static constexpr uint64_t SYNC_LSE_MAX_SUM_BUF2_FLAG = 10;
-    static constexpr uint64_t SYNC_MM2RES_BUF1_FLAG = 11;
-    static constexpr uint64_t SYNC_MM2RES_BUF2_FLAG = 12;
-    static constexpr uint64_t SYNC_FDOUTPUT_BUF_FLAG = 13;
-    static constexpr uint64_t SYNC_LSEOUTPUT_BUF_FLAG = 14;
+    static constexpr uint64_t SYNC_LSE_MAX_SUM_BUF1_FLAG = 9ULL;
+    static constexpr uint64_t SYNC_MM2RES_BUF1_FLAG = 11ULL;
+    static constexpr uint64_t SYNC_FDOUTPUT_BUF_FLAG = 13ULL;
+    static constexpr uint64_t SYNC_LSEOUTPUT_BUF_FLAG = 14ULL;
 
-    static constexpr uint32_t BUFFER_SIZE_BYTE_32B = 32;
-    static constexpr uint32_t BUFFER_SIZE_BYTE_64B = 64;
-    static constexpr uint32_t BUFFER_SIZE_BYTE_256B = 256;
-    static constexpr uint32_t BUFFER_SIZE_BYTE_2K = 2048;
-    static constexpr uint32_t BUFFER_SIZE_BYTE_4K = 4096;
-    static constexpr uint32_t BUFFER_SIZE_BYTE_8K = 8192;
-    static constexpr uint32_t BUFFER_SIZE_BYTE_16K = 16384;
+    static constexpr uint32_t BUFFER_SIZE_BYTE_256B = 256U;
+    static constexpr uint32_t BUFFER_SIZE_BYTE_2K = 2048U;
+    static constexpr uint32_t BUFFER_SIZE_BYTE_4K = 4096U;
+    static constexpr uint32_t BUFFER_SIZE_BYTE_8K = 8192U;
+    static constexpr uint32_t BUFFER_SIZE_BYTE_16K = 16384U;
 
     static constexpr uint32_t BLOCK_ELEMENT_NUM = BYTE_BLOCK / sizeof(T); // 32/4=8
     static constexpr uint32_t FP32_BLOCK_ELEMENT_NUM = BYTE_BLOCK / sizeof(float);
     static constexpr uint32_t FP32_REPEAT_ELEMENT_NUM = REPEAT_BLOCK_BYTE / sizeof(float);
 
-    static constexpr float FLOAT_INF = 3e+99;
-    uint32_t preLoadNum_ = 2U;
+    static constexpr uint32_t PRE_LOAD_NUM = 2U;
     uint32_t dSizeV_Align_;
 
 protected:
@@ -82,9 +76,8 @@ protected:
     GlobalTensor<float> accumOutGm_;
     GlobalTensor<float> softmaxLseGm_;
 
-    static constexpr UbFormat UB_FORMAT = GetOutUbFormat<LAYOUT_T>();
-    int64_t preTokensPerBatch_ = 0;
-    int64_t nextTokensPerBatch_ = 0;
+    int64_t winLeftPerBatch_ = 0;
+    int64_t winRightPerBatch_ = 0;
 
     static constexpr T BOOL_ATTEN_MASK_SCALAR_VALUE = -1000000000000.0; // 用于mask为bool类型
     uint32_t negativeIntScalar_ = *((uint32_t*)&BOOL_ATTEN_MASK_SCALAR_VALUE);
@@ -152,11 +145,12 @@ public:
         this->accumOutGm_ = accumOutGm;
     }
 
+    template <uint32_t UB_FD_BASE_OFFSET>
     __aicore__ inline void InitBuffers()
     {
         if ASCEND_IS_AIV {
             // 跳过 bmm1/bmm2 CV 区后放置 FD 业务区，空间上避免跨 section 时 AIC 的 FA 写 mm2Res 与 FD 使用冲突。
-            constexpr uint32_t BASE = mBaseSize / 2U * (2U * 256U + 128U) * sizeof(T);
+            constexpr uint32_t BASE = UB_FD_BASE_OFFSET;
             constexpr uint32_t STRIDE_6K = BUFFER_SIZE_BYTE_4K + BUFFER_SIZE_BYTE_2K; // 6144
             fdSumBuf1_ = LocalTensor<uint8_t>(TPosition::VECIN, BASE, STRIDE_6K).template ReinterpretCast<T>();
             fdSumBuf2_ =
@@ -199,9 +193,9 @@ protected:
         outGmTensor.gmTensor.SetGlobalBuffer((__gm__ OUTPUT_T*)gm);
         if constexpr (GmLayoutParams<OUT_FORMAT>::CATEGORY == FormatCategory::GM_Q_OUT_BNGSD) {
             outGmTensor.offsetCalculator.Init(batchSize, n2Size, gSize, qSeqSize, headDim,
-                                              seqLensTool_.qActSeqLensParser);
+                                              seqLensTool_.qActSeqLensParser_);
         } else {
-            outGmTensor.offsetCalculator.Init(n2Size, gSize, headDim, seqLensTool_.qActSeqLensParser);
+            outGmTensor.offsetCalculator.Init(n2Size, gSize, headDim, seqLensTool_.qActSeqLensParser_);
         }
     }
 
@@ -249,11 +243,9 @@ protected:
         LocalTensor<T> lseMaxUb = (cntM & 1) == 0 ? fdLseMaxUbBuf1_ : fdLseMaxUbBuf2_;
 
         LocalTensor<T> sinkExpBuf;
-        LocalTensor<T> maxLseUb = fdLseUbBuf_;
-        bool learnableSinkFlag = false;
         ComputeScaleValue_VF_FD<T, T, SinkInjectStage::AT_FA_PROLOGUE>(
-            sinkExpBuf, lseMax, lseSum, lseExp, maxLseUb, lseMaxUb, dealRowCount, actualCombineLoopSize,
-            constInfo_.isSoftmaxLseEnable, learnableSinkFlag, -FLT_MAX_NEW);
+            sinkExpBuf, lseMax, lseSum, lseExp, fdLseUbBuf_, lseMaxUb, dealRowCount, actualCombineLoopSize,
+            constInfo_.isSoftmaxLseEnable, false, -FLT_MAX_NEW);
     }
 
     __aicore__ inline void Bmm2DataCopyOutTrans(LocalTensor<OUTPUT_T>& attenOutUb, uint32_t startRow,
@@ -275,8 +267,7 @@ protected:
     __aicore__ inline void ReduceFinalRes(LocalTensor<T>& reduceOut, LocalTensor<T>& mm2Res, LocalTensor<T>& lseLocal,
                                           uint32_t cntKV, uint32_t dealRowCount)
     {
-        uint64_t dSizeV_Align_ = (uint64_t)this->dSizeV_Align_;
-        ReduceFinalRes_VF<T>(reduceOut, lseLocal, mm2Res, dealRowCount, dSizeV_Align_, cntKV);
+        ReduceFinalRes_VF<T>(reduceOut, lseLocal, mm2Res, dealRowCount, static_cast<uint64_t>(dSizeV_Align_), cntKV);
     }
     __aicore__ inline void CopyFinalResOut(LocalTensor<T>& accumOutLocal, uint32_t startRow, uint32_t dealRowCount,
                                            uint32_t cntM)
@@ -300,26 +291,25 @@ protected:
         Bmm2DataCopyOutTrans(tmpBmm2ResCastTensor, startRow, dealRowCount, this->dSizeV_Align_);
         Mutex::Unlock<PIPE_MTE3>(SYNC_FDOUTPUT_BUF_FLAG);
     }
-    __aicore__ inline void CalcPreNextTokens()
+    __aicore__ inline void CalcWindowPerBatch()
     {
-        actSeqLensQ_ = seqLensTool_.qActSeqLensParser.GetActualSeqLength(taskInfo_.bIdx);
-        actSeqLensKv_ = seqLensTool_.kvActSeqLensParser.GetActualSeqLength(taskInfo_.bIdx);
+        actSeqLensQ_ = seqLensTool_.qActSeqLensParser_.GetActualSeqLength(taskInfo_.bIdx);
+        actSeqLensKv_ = seqLensTool_.kvActSeqLensParser_.GetActualSeqLength(taskInfo_.bIdx);
 
-        int64_t safePreToken = constInfo_.preTokens;
-        int64_t safeNextToken = constInfo_.nextTokens;
+        int64_t safeWinLeft = constInfo_.winLeft;
+        int64_t safeWinRight = constInfo_.winRight;
 
-        fa_base_vector::GetSafeActToken(actSeqLensQ_, actSeqLensKv_, safePreToken, safeNextToken,
-                                        constInfo_.sparseMode);
+        fa_base_vector::GetSafeActToken(actSeqLensQ_, actSeqLensKv_, safeWinLeft, safeWinRight, constInfo_.sparseMode);
 
         if (constInfo_.sparseMode == BAND) {
-            preTokensPerBatch_ = safePreToken;
-            nextTokensPerBatch_ = actSeqLensKv_ - actSeqLensQ_ + safeNextToken;
+            winLeftPerBatch_ = safeWinLeft;
+            winRightPerBatch_ = actSeqLensKv_ - actSeqLensQ_ + safeWinRight;
         } else if ((constInfo_.sparseMode == DEFAULT_MASK) && HAS_MASK) {
-            nextTokensPerBatch_ = safeNextToken;
-            preTokensPerBatch_ = actSeqLensKv_ - actSeqLensQ_ + safePreToken;
+            winRightPerBatch_ = safeWinRight;
+            winLeftPerBatch_ = actSeqLensKv_ - actSeqLensQ_ + safeWinLeft;
         } else {
-            nextTokensPerBatch_ = actSeqLensKv_ - actSeqLensQ_;
-            preTokensPerBatch_ = 0;
+            winRightPerBatch_ = actSeqLensKv_ - actSeqLensQ_;
+            winLeftPerBatch_ = 0;
         }
     }
 
@@ -341,8 +331,8 @@ protected:
             .gS1Idx = taskInfo_.gS1Idx + startRow,
             .dealRowCount = dealRowCount,
             .columnCount = columnCount,
-            .preTokensPerBatch = preTokensPerBatch_,
-            .nextTokensPerBatch = nextTokensPerBatch_,
+            .preTokensPerBatch = winLeftPerBatch_,
+            .nextTokensPerBatch = winRightPerBatch_,
         };
 
         fa_base_vector::InvalidRows<UBOUT_T, AttentionCommon::GeInputUbFormat<LAYOUT_T>()> invalidRows;
@@ -385,8 +375,7 @@ public:
         taskInfo_.n2Idx = fd.fdBN2Idx % constInfo_.n2Size;
         taskInfo_.gS1Idx = fd.fdMIdx * mBaseSize;
         taskInfo_.actualCombineLoopSize = fd.fdS2SplitNum; // 当前规约任务kv方向有几份
-        uint64_t combineTaskPrefixSum = fd.fdWorkspaceIdx;
-        uint64_t taskOffset = combineTaskPrefixSum * mBaseSize;
+        uint64_t taskOffset = static_cast<uint64_t>(fd.fdWorkspaceIdx) * mBaseSize;
 
         for (uint32_t fdS1gOuterMIdx = tmpFdS1gOuterMStart; fdS1gOuterMIdx <= tmpFdS1gOuterMEnd;
              fdS1gOuterMIdx++) { // 左闭右闭
@@ -401,7 +390,7 @@ public:
             Mutex::Lock<PIPE_MTE2>(SYNC_LSE_MAX_SUM_BUF1_FLAG + (reduceMLoop & 1));
             CopyLseIn(startRow, actualGSplitSize, taskOffset, reduceMLoop);
             Mutex::Unlock<PIPE_MTE2>(SYNC_LSE_MAX_SUM_BUF1_FLAG + (reduceMLoop & 1));
-            for (uint32_t preLoadIdx = 0; preLoadIdx < preLoadNum_; preLoadIdx++) {
+            for (uint32_t preLoadIdx = 0; preLoadIdx < PRE_LOAD_NUM; preLoadIdx++) {
                 LocalTensor<T> mm2Res = (((reduceGlobaLoop + preLoadIdx) & 1) == 0) ? fdMm2ResBuf1_ : fdMm2ResBuf2_;
                 Mutex::Lock<PIPE_MTE2>(SYNC_MM2RES_BUF1_FLAG + ((reduceGlobaLoop + preLoadIdx) & 1));
                 CopyAccumOutIn(mm2Res, preLoadIdx, taskOffset + startRow, actualGSplitSize);
@@ -412,13 +401,13 @@ public:
             ComputeScaleValue(lseExp, actualGSplitSize, taskInfo_.actualCombineLoopSize, reduceMLoop);
             Mutex::Unlock<PIPE_V>(SYNC_LSEOUTPUT_BUF_FLAG);
             Mutex::Unlock<PIPE_V>(SYNC_LSE_MAX_SUM_BUF1_FLAG + (reduceMLoop & 1));
-            CalcPreNextTokens();
+            CalcWindowPerBatch();
             if (constInfo_.isSoftmaxLseEnable) {
                 LocalTensor<T> maxLseUb = fdLseUbBuf_;
                 Mutex::Lock<PIPE_MTE3>(SYNC_LSEOUTPUT_BUF_FLAG);
                 uint32_t mOffset = taskInfo_.gS1Idx + startRow;
                 if constexpr (LAYOUT_T == FLASH_MLA_LAYOUT::TND) {
-                    uint32_t prefixBS1 = seqLensTool_.qActSeqLensParser.GetTBase(taskInfo_.bIdx);
+                    uint32_t prefixBS1 = seqLensTool_.qActSeqLensParser_.GetTBase(taskInfo_.bIdx);
                     uint64_t bN2Offset = taskInfo_.n2Idx * constInfo_.gSize * constInfo_.t1Size;
                     DataCopySoftmaxLseTNDtoNTArch35<T, ConstInfo_t>(softmaxLseGm_, maxLseUb, bN2Offset, mOffset,
                                                                     actualGSplitSize, prefixBS1, constInfo_);
@@ -430,7 +419,7 @@ public:
                 } else if constexpr (LAYOUT_T == FLASH_MLA_LAYOUT::BNSD) {
                     uint64_t bN2Offset = taskInfo_.bIdx * constInfo_.gSize * constInfo_.n2Size * constInfo_.s1Size +
                                          taskInfo_.n2Idx * constInfo_.gSize * constInfo_.s1Size;
-                    uint64_t qActSeqLens = seqLensTool_.qActSeqLensParser.GetActualSeqLength(taskInfo_.bIdx);
+                    uint64_t qActSeqLens = seqLensTool_.qActSeqLensParser_.GetActualSeqLength(taskInfo_.bIdx);
                     DataCopySoftmaxLseBNSDArch35<T, ConstInfo_t>(softmaxLseGm_, maxLseUb, bN2Offset, mOffset,
                                                                  actualGSplitSize, constInfo_, qActSeqLens);
                 }
@@ -439,7 +428,7 @@ public:
 
             for (uint32_t i = 0; i < taskInfo_.actualCombineLoopSize; i++) {
                 LocalTensor<T> mm2Res = (reduceGlobaLoop & 1) == 0 ? fdMm2ResBuf1_ : fdMm2ResBuf2_;
-                if (i >= preLoadNum_) {
+                if (i >= PRE_LOAD_NUM) {
                     Mutex::Lock<PIPE_MTE2>(SYNC_MM2RES_BUF1_FLAG + (reduceGlobaLoop & 1));
                     CopyAccumOutIn(mm2Res, i, taskOffset + startRow, actualGSplitSize);
                     Mutex::Unlock<PIPE_MTE2>(SYNC_MM2RES_BUF1_FLAG + (reduceGlobaLoop & 1));
@@ -455,5 +444,5 @@ public:
     }
 };
 
-} // namespace FlashAttnKernel
+} // namespace FlashMlaKernel
 #endif

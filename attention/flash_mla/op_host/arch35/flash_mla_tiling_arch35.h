@@ -33,7 +33,6 @@ struct FlashMlaTilingKeyInfo {
 };
 
 struct FlashMlaPlatFormInfo {
-    uint32_t coreNum = 0;
     uint32_t aicNum = 0;
     uint32_t aivNum = 0;
     uint32_t cvRatio = 0;
@@ -70,7 +69,7 @@ private:
     void UpdateTilingKeyLayout();
     void UpdateTilingKeyKvLayout();
     void UpdateTilingKeyInfo();
-    void SetFATilingData();
+    void FillBaseTilingData();
     void FillTiling();
     void PrintAllTilingData();
     void CalcScheduleMode();
@@ -81,8 +80,6 @@ private:
     FlashMlaTilingKeyInfo tilingKeyInfo_;
     FlashMlaPlatFormInfo platformInfo_;
     uint32_t sOuterFactor_ = 0;
-    uint32_t sInnerFactor_ = 0;
-    bool flashDecodeFlag_ = false;
     bool cuSeqLenQFlag_ = false;
     bool seqUsedQFlag_ = false;
     bool cacheSeqlensFlag_ = false;

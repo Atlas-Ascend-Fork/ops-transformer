@@ -22,13 +22,6 @@ enum MaskFormat {
     S1_EQUAL1,
 };
 
-enum MaskDataType : uint8_t {
-    MASK_BOOL,
-    MASK_INT8,
-    MASK_UINT8,
-    MASK_FP16,
-};
-
 enum SparseMode : uint8_t {
     DEFAULT_MASK = 0,
     ALL_MASK,
@@ -45,10 +38,9 @@ struct MaskInfo {
     uint32_t s2StartIdx;
     uint32_t s2dealNum;
     uint32_t s2Size;
-    uint32_t nBaseSize;
 
-    int64_t preToken = 0;
-    int64_t nextToken = 0;
+    int64_t winLeft = 0;
+    int64_t winRight = 0;
 
     uint32_t batchIdx;
     uint32_t attenMaskBatchStride;
@@ -56,9 +48,7 @@ struct MaskInfo {
     uint32_t attenMaskDstStride = 0;
 
     MaskFormat maskFormat;
-    MaskDataType attenMaskType;
     SparseMode sparseMode;
-    uint32_t maskValue;
 
     uint64_t s1LeftPaddingSize = 0;
     uint64_t s2LeftPaddingSize = 0;
@@ -87,7 +77,7 @@ template <typename T, uint32_t s2BaseSize>
 __simd_vf__ void MaskUbCopyS1GVF(__ubuf__ T* maskUb, uint16_t headGLoop, uint16_t midGLoop, uint16_t tailGLoop,
                                  uint16_t midS1Count)
 {
-    constexpr uint32_t repeatStride = s2BaseSize >> 5;
+    constexpr uint32_t repeatStride = s2BaseSize >> 5U;
 
     RegTensor<T> vreg_g_head;
     RegTensor<T> vreg_g_mid;
@@ -175,15 +165,14 @@ __aicore__ inline uint64_t ComputeAttenMaskOffsetNoCompress(MaskInfo& info, uint
 
 __aicore__ inline uint64_t ComputeAttenMaskOffsetCompress(MaskInfo& info, uint32_t s1StartIdx)
 {
-    int64_t nextToken = 0; // sparse2 本身原点就是左上角
+    int64_t winRight = 0; // sparse2 本身原点就是左上角
     if (info.sparseMode == RIGHT_DOWN_CAUSAL) {
-        nextToken =
-            static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size); // 统一以左上角为原点计算token
-    } else if (info.sparseMode == BAND) {                                          // 4
-        nextToken = info.nextToken + static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size);
+        winRight = static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size); // 统一以左上角为原点计算token
+    } else if (info.sparseMode == BAND) {                                                 // 4
+        winRight = info.winRight + static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size);
     }
     uint64_t offset = 0;
-    int64_t delta = nextToken + s1StartIdx - info.s2StartIdx;
+    int64_t delta = winRight + s1StartIdx - info.s2StartIdx;
     uint32_t attenMaskSizeAlign = AttentionCommon::Align(info.s2dealNum, 32U);
     if (delta < 0) {
         offset = (-delta) < static_cast<int64_t>(info.gs1dealNum) ? (-delta) : info.gs1dealNum; // min (-delta, s1Size)
@@ -196,9 +185,9 @@ __aicore__ inline uint64_t ComputeAttenMaskOffsetCompress(MaskInfo& info, uint32
 
 __aicore__ inline uint64_t ComputeAttenMaskOffsetCompressPre(MaskInfo& info, uint32_t s1StartIdx)
 {
-    int64_t preToken = info.preToken + static_cast<int64_t>(info.s1Size) -
-                       static_cast<int64_t>(info.s2Size); // 统一以左上角为原点计算token
-    int64_t delta = -preToken + static_cast<int64_t>(s1StartIdx) - static_cast<int64_t>(info.s2StartIdx) - 1;
+    int64_t winLeft = info.winLeft + static_cast<int64_t>(info.s1Size) -
+                      static_cast<int64_t>(info.s2Size); // 统一以左上角为原点计算token
+    int64_t delta = -winLeft + static_cast<int64_t>(s1StartIdx) - static_cast<int64_t>(info.s2StartIdx) - 1;
     uint64_t offset = 0;
     uint32_t attenMaskSizeAlign = AttentionCommon::Align(info.s2dealNum, 32U);
     if (delta < 0) {
@@ -236,12 +225,12 @@ __aicore__ inline bool IsSkipAttentionmaskForPre(MaskInfo& info)
         return false;
     }
 
-    int64_t preToken = info.preToken + static_cast<int64_t>(info.s1Size) -
-                       static_cast<int64_t>(info.s2Size); // 统一以左上角为原点计算Token
+    int64_t winLeft = info.winLeft + static_cast<int64_t>(info.s1Size) -
+                      static_cast<int64_t>(info.s2Size); // 统一以左上角为原点计算Token
     int32_t s1EndIdx = info.maskFormat == MaskFormat::GS ? s1StartIdx + info.gs1dealNum :
                                                            (info.gs1StartIdx + info.gs1dealNum) / info.gSize;
 
-    if (static_cast<int64_t>(info.s2StartIdx) + preToken >= static_cast<int64_t>(s1EndIdx)) {
+    if (static_cast<int64_t>(info.s2StartIdx) + winLeft >= static_cast<int64_t>(s1EndIdx)) {
         return true;
     }
     return false;
@@ -260,15 +249,14 @@ __aicore__ inline bool IsSkipAttentionmask(MaskInfo& info)
         return false;
     }
 
-    int64_t nextToken = 0; // sparse2 本身原点就在左上角
+    int64_t winRight = 0; // sparse2 本身原点就在左上角
     if (info.sparseMode == RIGHT_DOWN_CAUSAL) {
-        nextToken =
-            static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size); // 统一以左上角为原点计算Token
-    } else if (info.sparseMode == BAND) {                                          // 4
-        nextToken = info.nextToken + static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size);
+        winRight = static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size); // 统一以左上角为原点计算Token
+    } else if (info.sparseMode == BAND) {                                                 // 4
+        winRight = info.winRight + static_cast<int64_t>(info.s2Size) - static_cast<int64_t>(info.s1Size);
     }
 
-    if (static_cast<int64_t>(info.s2StartIdx + info.s2dealNum) <= static_cast<int64_t>(s1StartIdx) + nextToken) {
+    if (static_cast<int64_t>(info.s2StartIdx + info.s2dealNum) <= static_cast<int64_t>(s1StartIdx) + winRight) {
         return true;
     }
     return false;

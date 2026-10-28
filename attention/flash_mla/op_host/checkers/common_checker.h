@@ -30,8 +30,6 @@ public:
     CommonChecker() = default;
     ~CommonChecker() override = default;
 
-    ge::graphStatus CheckSinglePara(const FlashMlaTilingInfo& faInfo) override;
-
     ge::graphStatus CheckParaExistence(const FlashMlaTilingInfo& faInfo) override;
 
     ge::graphStatus CheckMultiPara(const FlashMlaTilingInfo& faInfo) override;
@@ -42,9 +40,6 @@ public:
     ge::graphStatus CheckAttnOutShape(const FlashMlaTilingInfo& faInfo) const;
 
 private:
-    ge::graphStatus CheckSingleParaLayout(const FlashMlaTilingInfo& faInfo);
-    ge::graphStatus CheckMultiParaLayout(const FlashMlaTilingInfo& faInfo);
-
     ge::graphStatus CheckNonQuantDataType(const FlashMlaTilingInfo& faInfo);
     ge::graphStatus CheckNonQuantHeadNum(const FlashMlaTilingInfo& faInfo);
     ge::graphStatus CheckDtypeConsistency(const FlashMlaTilingInfo& faInfo);

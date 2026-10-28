@@ -17,38 +17,27 @@
 #include <register/op_impl_registry.h>
 #include "log/log.h"
 
-using namespace ge;
-
 namespace ops {
 
-static constexpr size_t ATTR_IDX_HEAD_DIM_V = 0;
-static constexpr size_t ATTR_IDX_SOFTMAX_SCALE = 1;
-static constexpr size_t ATTR_IDX_MASK_MODE = 2;
-static constexpr size_t ATTR_IDX_MAX_SEQLEN_Q = 5;
-static constexpr size_t ATTR_IDX_MAX_SEQLEN_KV = 6;
-static constexpr size_t ATTR_IDX_LAYOUT_Q = 7;
-static constexpr size_t ATTR_IDX_LAYOUT_KV = 8;
-static constexpr size_t ATTR_IDX_LAYOUT_OUT = 9;
-static constexpr size_t ATTR_IDX_RETURN_SOFTMAX_LSE = 10;
+static constexpr size_t ATTR_IDX_HEAD_DIM_V = 0U;
+static constexpr size_t ATTR_IDX_LAYOUT_Q = 7U;
+static constexpr size_t ATTR_IDX_LAYOUT_KV = 8U;
+static constexpr size_t ATTR_IDX_LAYOUT_OUT = 9U;
+static constexpr size_t ATTR_IDX_RETURN_SOFTMAX_LSE = 10U;
 
-static constexpr size_t INPUT_IDX_Q = 0;
-static constexpr size_t INPUT_IDX_K_CACHE = 1;
-static constexpr size_t OUTPUT_IDX_ATTN_OUT = 0;
-static constexpr size_t OUTPUT_IDX_SOFTMAX_LSE = 1;
-
-static constexpr int64_t FLASH_MLA_ROPE_HEAD_DIM = 64;
+static constexpr size_t INPUT_IDX_Q = 0U;
+static constexpr size_t OUTPUT_IDX_ATTN_OUT = 0U;
+static constexpr size_t OUTPUT_IDX_SOFTMAX_LSE = 1U;
 
 ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
 {
-    OP_LOGI(context, "FlashMla InferShape start.");
     if (context == nullptr) {
         return ge::GRAPH_FAILED;
     }
+    OP_LOGI(context, "FlashMla InferShape start.");
 
     const gert::Shape* qShape = context->GetInputShape(INPUT_IDX_Q);
     OP_CHECK_NULL_WITH_CONTEXT(context, qShape);
-    const gert::Shape* kCacheShape = context->GetInputShape(INPUT_IDX_K_CACHE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kCacheShape);
 
     auto attrs = context->GetAttrs();
     OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
@@ -73,21 +62,10 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
                                               "The value of head_dim_v must be greater than 0");
         return ge::GRAPH_FAILED;
     }
-    int64_t expectedLastDim = headDimV + FLASH_MLA_ROPE_HEAD_DIM;
 
-    std::string layoutQStr = std::string(layoutQ);
-    std::string layoutKvStr = std::string(layoutKv);
-    std::string layoutOutStr = std::string(layoutOut);
-
-    for (auto& c : layoutQStr) {
-        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-    }
-    for (auto& c : layoutKvStr) {
-        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-    }
-    for (auto& c : layoutOutStr) {
-        c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
-    }
+    const std::string layoutQStr(layoutQ);
+    const std::string layoutKvStr(layoutKv);
+    const std::string layoutOutStr(layoutOut);
 
     OP_LOGI(context, "FlashMla InferShape: layoutQ=%s, layoutKv=%s, layoutOut=%s, headDimV=%ld, returnLSE=%ld.",
             layoutQStr.c_str(), layoutKvStr.c_str(), layoutOutStr.c_str(), headDimV, returnSoftmaxLse);
@@ -133,40 +111,17 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
         return ge::GRAPH_FAILED;
     }
 
-    if (layoutOutStr != layoutQStr) {
-        if (!(layoutQStr == "TND" && layoutOutStr == "NTD")) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layout_out", layoutOutStr.c_str(),
-                                                  "The value of layout_out must be equal to layout_q");
-            return ge::GRAPH_FAILED;
-        }
-    }
-
-    int64_t qLastDim = qShape->GetDim(qShape->GetDimNum() - 1);
-    if (qLastDim != -1 && qLastDim != expectedLastDim) {
-        std::string reason =
-            "The last dim of q must be equal to head_dim_v + rope(64) = " + std::to_string(expectedLastDim);
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "q", std::to_string(qLastDim).c_str(),
-                                              reason.c_str());
-        return ge::GRAPH_FAILED;
-    }
-    const bool isNz = layoutKvStr == "PA_NZ";
-    if (kCacheShape->GetDimNum() != (isNz ? 5 : 4)) {
-        OP_LOGE(context->GetNodeName(), "k_cache must be 5D for PA_NZ or 4D for PA_BBND/PA_BNBD.");
-        return ge::GRAPH_FAILED;
-    }
-    int64_t kCacheLastDim = kCacheShape->GetDim(kCacheShape->GetDimNum() - 1);
-    if (isNz) {
-        const int64_t dOuter = kCacheShape->GetDim(2);
-        kCacheLastDim = (dOuter == -1 || kCacheLastDim == -1) ? -1 : dOuter * kCacheLastDim;
-    }
-    if (kCacheLastDim != -1 && kCacheLastDim != expectedLastDim) {
-        std::string reason =
-            "The logical D of k_cache must be equal to head_dim_v + rope(64) = " + std::to_string(expectedLastDim);
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "k_cache", std::to_string(kCacheLastDim).c_str(),
-                                              reason.c_str());
+    if (layoutOutStr != layoutQStr && !(layoutQStr == "TND" && layoutOutStr == "NTD")) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layout_out", layoutOutStr.c_str(),
+                                              "layout_out must equal layout_q, or be NTD when layout_q is TND");
         return ge::GRAPH_FAILED;
     }
 
+    if (layoutKvStr != "PA_BBND" && layoutKvStr != "PA_BNBD" && layoutKvStr != "PA_NZ") {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layout_kv", layoutKvStr.c_str(),
+                                              "The value of layout_kv must be in PA_BBND/PA_BNBD/PA_NZ");
+        return ge::GRAPH_FAILED;
+    }
     gert::Shape* attnOutShape = context->GetOutputShape(OUTPUT_IDX_ATTN_OUT);
     OP_CHECK_NULL_WITH_CONTEXT(context, attnOutShape);
 
@@ -192,10 +147,6 @@ ge::graphStatus InferShapeFlashMla(gert::InferShapeContext* context)
         attnOutShape->SetDim(0, numHeadsQ);
         attnOutShape->SetDim(1, seqLenQ);
         attnOutShape->SetDim(2, headDimV);
-    } else {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layout_out", layoutOutStr.c_str(),
-                                              "The value of layout_out must be in BSND/BNSD/TND/NTD");
-        return ge::GRAPH_FAILED;
     }
 
     gert::Shape* lseShape = context->GetOutputShape(OUTPUT_IDX_SOFTMAX_LSE);

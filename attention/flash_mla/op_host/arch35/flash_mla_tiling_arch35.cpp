@@ -9,13 +9,13 @@
  */
 
 /*!
- * \file flash_mla_tiling.cpp
+ * \file flash_mla_tiling_arch35.cpp
  * \brief FlashMla arch35 tiling implementation.
  */
 
 #include "flash_mla_tiling_arch35.h"
 #include "../flash_mla_tiling.h"
-#include <cstring>
+#include <securec.h>
 #include <vector>
 #include <graph/utils/type_utils.h>
 #include "log/log.h"
@@ -23,12 +23,10 @@
 #include "../../op_kernel/arch35/flash_mla_template_tiling_key.h"
 #include "../../../common/op_host/fia_tiling_templates_registry.h"
 
-using namespace ge;
-using namespace AscendC;
 namespace optiling {
 namespace flash_mla {
 
-constexpr uint64_t PRE_LOAD_NUM_MLA_ARCH35 = 2;
+constexpr uint64_t PRE_LOAD_NUM_MLA_ARCH35 = 2ULL;
 
 void FlashMlaTilingImpl::InitTilingInfo(TilingInfo* tilingInfo)
 {
@@ -51,7 +49,9 @@ ge::graphStatus FlashMlaTilingImpl::DoOpTiling()
     OP_CHECK_IF(SetPlatMemoryInfo() != ge::GRAPH_SUCCESS, OP_LOGE(faInfo_->opName, "Set plat memory info fail."),
                 return ge::GRAPH_FAILED);
 
-    memset(&tilingData_, 0, sizeof(tilingData_));
+    const errno_t ret = memset_s(&tilingData_, sizeof(tilingData_), 0, sizeof(tilingData_));
+    OP_CHECK_IF(ret != EOK, OP_LOGE(faInfo_->opName, "Failed to clear tiling data, error: %d.", ret),
+                return ge::GRAPH_FAILED);
 
     InitImplParam();
     SplitPolicy();
@@ -78,7 +78,6 @@ ge::graphStatus FlashMlaTilingImpl::SetPlatMemoryInfo()
     platformInfo_.aivNum = ascendcPlatform.GetCoreNumAiv();
     platformInfo_.aicNum = ascendcPlatform.GetCoreNumAic();
     platformInfo_.cvRatio = platformInfo_.aivNum / platformInfo_.aicNum;
-    platformInfo_.coreNum = platformInfo_.aivNum;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, platformInfo_.ubSize);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, platformInfo_.l1Size);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, platformInfo_.l0cSize);
@@ -87,9 +86,11 @@ ge::graphStatus FlashMlaTilingImpl::SetPlatMemoryInfo()
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, platformInfo_.l2Size);
 
     platformInfo_.defaultSysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
-    OP_LOGI(faInfo_->opName, "AIV:%u AIC:%u L0A:%lu L0B:%lu L0C:%lu UB:%lu L1:%lu L2:%lu", platformInfo_.aivNum,
-            platformInfo_.aicNum, platformInfo_.l0aSize, platformInfo_.l0bSize, platformInfo_.l0cSize,
-            platformInfo_.ubSize, platformInfo_.l1Size, platformInfo_.l2Size);
+    OP_LOGI(
+        faInfo_->opName,
+        "AIV:%u cores AIC:%u cores L0A:%lu bytes L0B:%lu bytes L0C:%lu bytes UB:%lu bytes L1:%lu bytes L2:%lu bytes",
+        platformInfo_.aivNum, platformInfo_.aicNum, platformInfo_.l0aSize, platformInfo_.l0bSize, platformInfo_.l0cSize,
+        platformInfo_.ubSize, platformInfo_.l1Size, platformInfo_.l2Size);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -107,14 +108,12 @@ void FlashMlaTilingImpl::InitImplParam()
 void FlashMlaTilingImpl::SplitPolicy()
 {
     sOuterFactor_ = 48;
-    sInnerFactor_ = 112;
     CalcNumBlocks(platformInfo_.aicNum);
-    flashDecodeFlag_ = true;
 }
 
 void FlashMlaTilingImpl::UpdateTilingKeyConfig()
 {
-    tilingKeyInfo_.config = Config_S1Aligned64_S2Aligned128_DAligned576_DVAligned512;
+    tilingKeyInfo_.config = Config_S1Aligned96_S2Aligned112_DAligned576_DVAligned512;
 }
 
 void FlashMlaTilingImpl::UpdateTilingKeyLayout()
@@ -177,19 +176,16 @@ void FlashMlaTilingImpl::CalcWorkspaceSize()
 {
     const uint64_t mSize = static_cast<uint64_t>(sOuterFactor_) * platformInfo_.cvRatio;
     const uint64_t dSize = faInfo_->vHeadDim;
-    constexpr uint64_t lseSize = 8;
+    constexpr uint64_t lseSize = 8ULL;
 
     workspaceSize_ = platformInfo_.defaultSysWorkspaceSize;
 
-    if (flashDecodeFlag_) {
-        const uint64_t faTmpAttenGmSize =
-            static_cast<uint64_t>(numBlocks_) * PRE_LOAD_NUM_MLA_ARCH35 * mSize * dSize; // 每个核最多有2次写到workspace
-        const uint64_t faTmpResLseGmSize =
-            static_cast<uint64_t>(numBlocks_) * PRE_LOAD_NUM_MLA_ARCH35 * mSize * lseSize;
-        workspaceSize_ += (faTmpAttenGmSize + 2 * faTmpResLseGmSize) * sizeof(float); // ResLse有2份，sum和max
-        tilingData_.baseTiling.flashMlaWorkspaceParams.accumOutSize = static_cast<uint32_t>(faTmpAttenGmSize);
-        tilingData_.baseTiling.flashMlaWorkspaceParams.logSumExpSize = static_cast<uint32_t>(faTmpResLseGmSize);
-    }
+    const uint64_t faTmpAttenGmSize =
+        static_cast<uint64_t>(numBlocks_) * PRE_LOAD_NUM_MLA_ARCH35 * mSize * dSize; // 每个核最多有2次写到workspace
+    const uint64_t faTmpResLseGmSize = static_cast<uint64_t>(numBlocks_) * PRE_LOAD_NUM_MLA_ARCH35 * mSize * lseSize;
+    workspaceSize_ += (faTmpAttenGmSize + 2 * faTmpResLseGmSize) * sizeof(float); // ResLse有2份，sum和max
+    tilingData_.baseTiling.flashMlaWorkspaceParams.accumOutSize = static_cast<uint32_t>(faTmpAttenGmSize);
+    tilingData_.baseTiling.flashMlaWorkspaceParams.logSumExpSize = static_cast<uint32_t>(faTmpResLseGmSize);
 
     OP_LOGI(faInfo_->opName, "Workspaces: %lu", workspaceSize_);
 }
@@ -197,20 +193,20 @@ void FlashMlaTilingImpl::CalcWorkspaceSize()
 void FlashMlaTilingImpl::FillTiling()
 {
     ComputeTilingData();
-    SetFATilingData();
+    FillBaseTilingData();
 }
 
 void FlashMlaTilingImpl::ComputeTilingData()
 {
     auto& maskParams = tilingData_.baseTiling.flashMlaAttenMaskParams;
     maskParams.sparseMode = static_cast<uint8_t>(faInfo_->maskMode);
-    maskParams.preTokens = MASK_MODE_INT_MAX;
-    maskParams.nextTokens = MASK_MODE_INT_MAX;
+    maskParams.winLeft = MASK_MODE_INT_MAX;
+    maskParams.winRight = MASK_MODE_INT_MAX;
     if (faInfo_->maskMode == static_cast<int64_t>(MaskMode::CAUSAL)) {
-        maskParams.nextTokens = 0;
+        maskParams.winRight = 0;
     } else if (faInfo_->maskMode == static_cast<int64_t>(MaskMode::BAND)) {
-        maskParams.preTokens = static_cast<int32_t>(faInfo_->winLeft == -1 ? MASK_MODE_INT_MAX : faInfo_->winLeft);
-        maskParams.nextTokens = static_cast<int32_t>(faInfo_->winRight == -1 ? MASK_MODE_INT_MAX : faInfo_->winRight);
+        maskParams.winLeft = static_cast<int32_t>(faInfo_->winLeft == -1 ? MASK_MODE_INT_MAX : faInfo_->winLeft);
+        maskParams.winRight = static_cast<int32_t>(faInfo_->winRight == -1 ? MASK_MODE_INT_MAX : faInfo_->winRight);
     }
     tilingKeyInfo_.hasAttenMask = faInfo_->maskMode != static_cast<int64_t>(MaskMode::NO_MASK);
     if (tilingKeyInfo_.hasAttenMask) {
@@ -219,22 +215,12 @@ void FlashMlaTilingImpl::ComputeTilingData()
         maskParams.attenMaskS1Size = maskShape.GetDim(0);
         maskParams.attenMaskS2Size = maskShape.GetDim(1);
     }
-
-    auto& pageParams = tilingData_.baseTiling.flashMlaPageAttentionParams;
-    if (faInfo_->kvLayout == FlashMlaLayout::PA_BBND) {
-        pageParams.paLayoutType = 1;
-    } else if (faInfo_->kvLayout == FlashMlaLayout::PA_BNBD) {
-        pageParams.paLayoutType = 0;
-    } else if (faInfo_->kvLayout == FlashMlaLayout::PA_NZ) {
-        pageParams.paLayoutType = 2;
-    }
 }
 
-void FlashMlaTilingImpl::SetFATilingData()
+void FlashMlaTilingImpl::FillBaseTilingData()
 {
     tilingData_.baseTiling.flashMlaBaseParams.bSize = faInfo_->bSize;
     tilingData_.baseTiling.flashMlaBaseParams.t1Size = faInfo_->qTSize;
-    tilingData_.baseTiling.flashMlaBaseParams.t2Size = faInfo_->kTSize;
     tilingData_.baseTiling.flashMlaBaseParams.n2Size = faInfo_->n2Size;
     tilingData_.baseTiling.flashMlaBaseParams.gSize = faInfo_->gSize;
     tilingData_.baseTiling.flashMlaBaseParams.s1Size = faInfo_->s1Size;
@@ -247,10 +233,8 @@ void FlashMlaTilingImpl::SetFATilingData()
         cuSeqLenQFlag_ ? static_cast<uint32_t>(faInfo_->cuSeqlensQSize) : 0;
     tilingData_.baseTiling.flashMlaBaseParams.actualSeqLengthsKVSize =
         cacheSeqlensFlag_ ? static_cast<uint32_t>(faInfo_->cacheSeqlensSize) : 0;
-    tilingData_.baseTiling.flashMlaBaseParams.isKvContinuous = 0;
     tilingData_.baseTiling.flashMlaBaseParams.isSoftMaxLseEnable = faInfo_->softmaxLseFlag;
     tilingData_.baseTiling.flashMlaBaseParams.coreNum = numBlocks_;
-    tilingData_.baseTiling.flashMlaBaseParams.outputLayout = static_cast<uint32_t>(faInfo_->kernelOutputLayout);
     // 小任务关闭 L2 缓存，避免 KV 流式读取造成缓存填充和驱逐。
     tilingData_.baseTiling.flashMlaBaseParams.l2CacheOffFlag = (faInfo_->gSize * faInfo_->s1Size) <= 128 ? 1U : 0U;
 
@@ -258,24 +242,11 @@ void FlashMlaTilingImpl::SetFATilingData()
     uint32_t maxBlockNumPerBatch = faInfo_->opParamInfo.blockTable.tensor->GetStorageShape().GetDim(1);
     tilingData_.baseTiling.flashMlaPageAttentionParams.maxBlockNumPerBatch = maxBlockNumPerBatch;
 
-    tilingData_.baseTiling.flashMlaSystemPrefixParams.isActualSharedPrefixLenNull = 1;
-    tilingData_.baseTiling.flashMlaSystemPrefixParams.prefixSeqInnerSize = 0;
-
-    int64_t outSize = faInfo_->opParamInfo.attnOut.shape->GetStorageShape().GetShapeSize();
-    int64_t lseSize = faInfo_->softmaxLseFlag ? faInfo_->opParamInfo.lseOut.shape->GetStorageShape().GetShapeSize() : 0;
-    uint32_t singleCoreSize = (outSize + platformInfo_.aivNum - 1) / (platformInfo_.aivNum);
-    tilingData_.baseTiling.flashMlaEmptyTensorParams.singleCoreSize = singleCoreSize;
-    tilingData_.baseTiling.flashMlaEmptyTensorParams.totalOutputSize = outSize;
-    tilingData_.baseTiling.flashMlaEmptyTensorParams.totalSoftMaxLseOutputSize = lseSize;
     tilingData_.baseTiling.flashMlaEmptyTensorParams.needInit = CheckNeedInitOutput() ? 1 : 0;
 
     if (faInfo_->hasViewStride) {
         tilingData_.baseTiling.flashMlaBaseParams.keyStrides.bnStride = faInfo_->keyBnStride;
         tilingData_.baseTiling.flashMlaBaseParams.keyStrides.n2Stride = faInfo_->keyN2Stride;
-        tilingData_.baseTiling.flashMlaBaseParams.valueStrides.bnStride = faInfo_->valueBnStride;
-        tilingData_.baseTiling.flashMlaBaseParams.valueStrides.n2Stride = faInfo_->valueN2Stride;
-        tilingData_.baseTiling.flashMlaBaseParams.kRopeStrides.bnStride = faInfo_->keyBnStride;
-        tilingData_.baseTiling.flashMlaBaseParams.kRopeStrides.n2Stride = faInfo_->keyN2Stride;
     }
 }
 
@@ -307,13 +278,11 @@ void FlashMlaTilingImpl::PrintAllTilingData()
     const auto& output = tilingData_.baseTiling.flashMlaEmptyTensorParams;
     OP_LOGD(faInfo_->opName, "B:%u T:%u N2:%u G:%u S1:%u S2:%u D:%u DV:%u Rope:%u", base.bSize, base.t1Size,
             base.n2Size, base.gSize, base.s1Size, base.s2Size, base.dSize, base.dSizeV, base.dSizeRope);
-    OP_LOGD(faInfo_->opName, "QSeqDims:%u KVSeqDims:%u scale:%f LSE:%u cores:%u outputLayout:%u L2Off:%u",
-            base.actualSeqLengthsQSize, base.actualSeqLengthsKVSize, base.scaleValue, base.isSoftMaxLseEnable,
-            base.coreNum, base.outputLayout, base.l2CacheOffFlag);
-    OP_LOGD(faInfo_->opName, "maskMode:%u maskS1:%u maskS2:%u preTokens:%d nextTokens:%d", mask.sparseMode,
-            mask.attenMaskS1Size, mask.attenMaskS2Size, mask.preTokens, mask.nextTokens);
-    OP_LOGD(faInfo_->opName, "paLayout:%u blockSize:%u maxBlocks:%u", page.paLayoutType, page.blockSize,
-            page.maxBlockNumPerBatch);
+    OP_LOGD(faInfo_->opName, "QSeqDims:%u KVSeqDims:%u scale:%f LSE:%u cores:%u L2Off:%u", base.actualSeqLengthsQSize,
+            base.actualSeqLengthsKVSize, base.scaleValue, base.isSoftMaxLseEnable, base.coreNum, base.l2CacheOffFlag);
+    OP_LOGD(faInfo_->opName, "maskMode:%u maskS1:%u maskS2:%u winLeft:%d winRight:%d", mask.sparseMode,
+            mask.attenMaskS1Size, mask.attenMaskS2Size, mask.winLeft, mask.winRight);
+    OP_LOGD(faInfo_->opName, "blockSize:%u maxBlocks:%u", page.blockSize, page.maxBlockNumPerBatch);
     OP_LOGD(faInfo_->opName, "accumOutSize:%u logSumExpSize:%u needInit:%u", workspace.accumOutSize,
             workspace.logSumExpSize, output.needInit);
 }
