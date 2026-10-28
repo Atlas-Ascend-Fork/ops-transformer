@@ -61,20 +61,20 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::GetPlatformInfo()
         aicoreParams_.aicNum = compileInfo->aicNum_;
         aivNum_ = compileInfo->aivNum_;
         aicoreParams_.ubSize = compileInfo->ubSize_;
+        npuArch_ = static_cast<NpuArch>(compileInfo->npuArch_);
         if (IsHif4Input()) {
             aicoreParams_.l1Size = compileInfo->l1Size_;
             aicoreParams_.l0cSize = compileInfo->l0CSize_;
-            OP_CHECK_IF(aicoreParams_.l1Size == 0 || aicoreParams_.l0cSize == 0,
-                        OP_LOGE(context_->GetNodeName(), "HIF4 requires L1 and L0C platform memory information."),
-                        return ge::GRAPH_FAILED);
+        } else {
+            OP_LOGD(context_->GetNodeName(),
+                    "Platform memory information is unavailable; Tensor API tiling will fall back.");
         }
-        OP_LOGD(context_->GetNodeName(),
-                "Platform memory information is unavailable; Tensor API tiling will fall back.");
         return ge::GRAPH_SUCCESS;
     } else {
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
         aicoreParams_.aicNum = ascendcPlatform.GetCoreNumAic();
         aivNum_ = ascendcPlatform.GetCoreNumAiv();
+        npuArch_ = ascendcPlatform.GetCurNpuArch();
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, aicoreParams_.ubSize);
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, aicoreParams_.l1Size);
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_A, aicoreParams_.l0aSize);
@@ -91,7 +91,13 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::GetPlatformInfo()
 
 ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::GetShapeAttrsInfo()
 {
-    return GroupedQmmBasicApiTiling::GetShapeAttrsInfo();
+    inputParams_.Reset();
+    inputParams_.opName = context_->GetNodeName();
+    inputParams_.opType = GetOpType();
+    OP_CHECK_IF(!AnalyzeDtype() || !AnalyzeAttrs() || !AnalyzeInputs(),
+                OP_LOGE(inputParams_.opName, "Failed to analyze swiglu quant tiling inputs."), return ge::GRAPH_FAILED);
+    inputParams_.initFlag = true;
+    return ge::GRAPH_SUCCESS;
 }
 
 bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeDtype()
@@ -127,15 +133,13 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeDtype()
 
     auto biasShape = context_->GetOptionalInputShape(BIAS_INDEX);
     inputParams_.hasBias = biasShape != nullptr && biasShape->GetStorageShape().GetShapeSize() != 0;
-    OP_CHECK_IF(IsHif4Input() && inputParams_.hasBias,
-                OP_LOGE(context_->GetNodeName(), "HIF4 does not support non-empty bias."), return false);
     auto biasDesc = context_->GetOptionalInputDesc(BIAS_INDEX);
     OP_CHECK_IF(inputParams_.hasBias && biasDesc == nullptr,
                 OP_LOGE(context_->GetNodeName(), "Bias shape is present but bias desc is nullptr."), return false);
     if (biasDesc != nullptr) {
         inputParams_.biasDtype = biasDesc->GetDataType();
     }
-    return !IsHif4Input() || CheckHif4Dtype();
+    return true;
 }
 
 bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeAttrs()
@@ -162,6 +166,8 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeAttrs()
     const int64_t* groupListType = attrs->GetAttrPointer<int64_t>(ATTR_INDEX_GROUPLIST_TYPE);
     inputParams_.transA = false;
     inputParams_.transB = transposeWeight != nullptr ? *transposeWeight : false;
+    OP_CHECK_IF(IsHif4Input() && !inputParams_.transB,
+                OP_LOGE(context_->GetNodeName(), "HIF4 BasicAPI requires transpose_weight=true."), return false);
     inputParams_.groupListType = groupListType != nullptr ? static_cast<int8_t>(*groupListType) : 0;
     OP_CHECK_IF(inputParams_.groupListType != 0 && inputParams_.groupListType != 1,
                 OP_LOGE(context_->GetNodeName(), "group_list_type must be 0 or 1."), return false);
@@ -213,7 +219,7 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling::AnalyzeInputs()
                             "weight rank %zu, and weight expert count equal to groupNum=%lu.",
                             SHAPE_DIM_TWO, SHAPE_DIM_THREE, inputParams_.groupNum),
                     return false);
-        return CheckHif4CoreNum() && CheckScaleShapes() && CheckHif4Dims();
+        return CheckScaleShapes() && CheckHif4Dims();
     }
     inputParams_.isSingleX = true;
     inputParams_.isSingleW = GetDynamicInputCount(WEIGHT_INDEX) == 1U;
@@ -340,6 +346,9 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling::IsCapable()
 ge::graphStatus GroupedMatmulSwigluQuantV2BasicApiTiling::DoOpTiling()
 {
     if (IsHif4Input()) {
+        OP_CHECK_IF(aicoreParams_.l1Size == 0 || aicoreParams_.l0cSize == 0,
+                    OP_LOGE(context_->GetNodeName(), "HIF4 requires L1 and L0C platform memory information."),
+                    return ge::GRAPH_FAILED);
         auto* rawTiling = context_->GetRawTilingData();
         OP_CHECK_IF(rawTiling == nullptr || rawTiling->GetData() == nullptr ||
                         rawTiling->GetCapacity() < hif4TilingData_.GetDataSize(),
@@ -439,23 +448,6 @@ bool GroupedMatmulSwigluQuantV2BasicApiTiling::CheckHif4Dtype() const
                     inputParams_.outDataDtype != Ops::Transformer::DT_HIFLOAT4 ||
                     inputParams_.outScaleDtype != Ops::Transformer::DT_HIFLOAT4_SCALE,
                 OP_LOGE(inputParams_.opName, "HIF4 requires HIFLOAT4 output and HIFLOAT4_SCALE input/output scales."),
-                return false);
-    return true;
-}
-
-bool GroupedMatmulSwigluQuantV2BasicApiTiling::CheckHif4CoreNum() const
-{
-    const auto* compileInfo = context_->GetCompileInfo<GMMSwigluV2CompileInfo>();
-    OP_CHECK_IF(compileInfo == nullptr, OP_LOGE(context_->GetNodeName(), "Compile info is nullptr."), return false);
-    auto aicNum = compileInfo->aicNum_;
-    auto aivNum = compileInfo->aivNum_;
-    OP_CHECK_IF(aicNum == 0, OP_LOGE(inputParams_.opName, "aicNum should be positive integer, actual is %u.", aicNum),
-                return false);
-    const uint32_t coreRatio =
-        compileInfo->npuArch_ == static_cast<int32_t>(NpuArch::DAV_9201) ? 1U : GmmConstant::CORE_RATIO;
-    OP_CHECK_IF(aivNum != coreRatio * aicNum,
-                OP_LOGE(inputParams_.opName, "aicNum:aivNum should be 1:%u, actual aicNum: %u, aivNum: %u.", coreRatio,
-                        aicNum, aivNum),
                 return false);
     return true;
 }

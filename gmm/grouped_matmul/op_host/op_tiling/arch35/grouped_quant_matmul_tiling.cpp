@@ -1449,7 +1449,7 @@ ge::graphStatus GroupedQmmTiling::GetShapeAttrsInfo()
 {
     inputParams_.opName = context_->GetNodeName();
     inputParams_.opType = GetOpType();
-    OP_CHECK_IF(GroupedQmmTiling::GetPlatformInfo() != ge::GRAPH_SUCCESS,
+    OP_CHECK_IF(GetPlatformInfo() != ge::GRAPH_SUCCESS,
                 OP_LOGE(inputParams_.opName, "GetPlatformInfo failed before analyzing inputs."),
                 return ge::GRAPH_FAILED);
     if (inputParams_.initFlag) {
@@ -1616,11 +1616,7 @@ void GroupedQmmTiling::PrintQuantParams()
 
 void GroupedQmmTiling::ReSplitBaseN()
 {
-    auto compileInfoPtr = context_->GetCompileInfo<GMMCompileInfo>();
-    if (compileInfoPtr == nullptr) {
-        return;
-    }
-    if (compileInfoPtr->npuArch != NpuArch::DAV_9201) {
+    if (npuArch_ != NpuArch::DAV_9201) {
         return;
     }
 

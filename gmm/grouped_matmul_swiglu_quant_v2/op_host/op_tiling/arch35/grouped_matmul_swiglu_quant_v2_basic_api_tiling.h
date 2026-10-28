@@ -67,7 +67,6 @@ private:
     bool IsFp8(ge::DataType dtype) const;
     bool IsHif4Input() const;
     bool CheckHif4Dtype() const;
-    bool CheckHif4CoreNum() const;
     bool CheckHif4Dims() const;
     bool IsSupportedFormat(ge::Format format) const;
     size_t GetDynamicInputCount(uint32_t inputIndex) const;

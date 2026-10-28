@@ -1342,6 +1342,7 @@ ge::graphStatus GroupedMatmulSwigluQuantV2Tiling950::GetPlatformInfo()
     aicoreParams_.l1Size = compileInfo->l1Size_;
     aicoreParams_.l0cSize = compileInfo->l0CSize_;
     aivNum_ = compileInfo->aivNum_;
+    npuArch_ = static_cast<NpuArch>(compileInfo->npuArch_);
     return ge::GRAPH_SUCCESS;
 }
 
