@@ -1,5 +1,7 @@
 # aclnnAlltoAllAllGatherBatchMatMul
 
+**此接口后续版本会废弃，请勿使用该接口。**
+
 ## 产品支持情况
 
 <!-- npu="950" id1 -->

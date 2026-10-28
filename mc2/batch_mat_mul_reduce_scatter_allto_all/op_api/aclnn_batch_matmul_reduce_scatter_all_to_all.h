@@ -58,10 +58,14 @@ extern "C" {
  * C大于0，上限为算子device内存上限，当yShardType为1时，C是tp的整数倍；
  * 不支持跨超节点，只支持超节点内；
  */
-ACLNN_API aclnnStatus aclnnBatchMatMulReduceScatterAlltoAllGetWorkspaceSize(
-    const aclTensor* x, const aclTensor* weight, const aclTensor* biasOptional, const char* groupEp,
-    const char* groupTp, int64_t epWorldSize, int64_t tpWorldSize, int64_t yShardType, aclTensor* out,
-    uint64_t* workspaceSize, aclOpExecutor** executor);
+__attribute__((deprecated("aclnnBatchMatMulReduceScatterAlltoAllGetWorkspaceSize is scheduled to "
+                          "be deprecated in a post-December 2026 version update. "
+                          "We apologize for any inconvenience caused."))) ACLNN_API aclnnStatus
+aclnnBatchMatMulReduceScatterAlltoAllGetWorkspaceSize(const aclTensor* x, const aclTensor* weight,
+                                                      const aclTensor* biasOptional, const char* groupEp,
+                                                      const char* groupTp, int64_t epWorldSize, int64_t tpWorldSize,
+                                                      int64_t yShardType, aclTensor* out, uint64_t* workspaceSize,
+                                                      aclOpExecutor** executor);
 
 /**
  * @brief aclnnBatchMatMulReduceScatterAlltoAll的第二段接口，用于执行计算。
@@ -72,8 +76,11 @@ ACLNN_API aclnnStatus aclnnBatchMatMulReduceScatterAlltoAllGetWorkspaceSize(
  * @param [in] stream: acl stream流。
  * @return aclnnStatus: 返回状态码
  */
-ACLNN_API aclnnStatus aclnnBatchMatMulReduceScatterAlltoAll(void* workspace, uint64_t workspaceSize,
-                                                            aclOpExecutor* executor, aclrtStream stream);
+__attribute__((deprecated("aclnnBatchMatMulReduceScatterAlltoAll is scheduled to "
+                          "be deprecated in a post-December 2026 version update. "
+                          "We apologize for any inconvenience caused."))) ACLNN_API aclnnStatus
+aclnnBatchMatMulReduceScatterAlltoAll(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
+                                      aclrtStream stream);
 
 #ifdef __cplusplus
 }

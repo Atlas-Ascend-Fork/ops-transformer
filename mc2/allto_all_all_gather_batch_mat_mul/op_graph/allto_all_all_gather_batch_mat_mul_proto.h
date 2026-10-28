@@ -78,6 +78,7 @@ are similar to this one.
 * @li C must be greater than 0 and cannot exceed the upper limit of the operator's device memory. C is an integer
 multiple of tp when x_shard_type is 1.
 * @li Group_ep and group_tp can't be consistent. Ep and tp can only be 2, 4, 8, 16 or 32. Supernodes cannot be crossed.
+* Warning: THIS FUNCTION IS DEPRECATED. It will be removed in a future version.
 */
 REG_OP(AlltoAllAllGatherBatchMatMul)
     .INPUT(x, TensorType({DT_FLOAT16, DT_BF16}))

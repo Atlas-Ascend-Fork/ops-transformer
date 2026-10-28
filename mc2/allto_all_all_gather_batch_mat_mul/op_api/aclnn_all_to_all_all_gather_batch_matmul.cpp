@@ -10,6 +10,7 @@
 
 #include "aclnn_all_to_all_all_gather_batch_matmul.h"
 #include <algorithm>
+#include <atomic>
 #include "common/utils/op_mc2.h"
 #include "common/op_host/op_api/mc2_3rd_matmul_util.h"
 #include "common/utils/op_mc2_def.h"
@@ -20,6 +21,18 @@
 #include "aclnnInner_allto_all_all_gather_batch_mat_mul.h"
 
 using namespace op;
+
+#define DEPRECATED_API_WARN_ONCE(apiName) \
+    do { \
+        static std::atomic<bool> isFirstWarn = true; \
+        bool expected = true; \
+        if (isFirstWarn.compare_exchange_strong(expected, false, std::memory_order_relaxed, \
+                                                std::memory_order_relaxed)) { \
+            OP_LOGW("%s is scheduled to be deprecated in a post-December 2026 version update. " \
+                    "We apologize for any inconvenience caused.", \
+                    (apiName)); \
+        } \
+    } while (0)
 
 #ifdef __cplusplus
 extern "C" {
@@ -458,6 +471,7 @@ aclnnStatus aclnnAlltoAllAllGatherBatchMatMulGetWorkspaceSize(const aclTensor* x
                                                               aclTensor* y3OutOptional, uint64_t* workspaceSize,
                                                               aclOpExecutor** executor)
 {
+    DEPRECATED_API_WARN_ONCE("aclnnAlltoAllAllGatherBatchMatMulGetWorkspaceSize");
     auto ret_param = CheckParams(x, weight, biasOptional, groupEp, groupTp, epWorldSize, tpWorldSize, xShardType,
                                  actType, y1Out, y2OutOptional, y3OutOptional);
     CHECK_RET(ret_param == ACLNN_SUCCESS, ret_param);
@@ -491,6 +505,7 @@ aclnnStatus aclnnAlltoAllAllGatherBatchMatMulGetWorkspaceSize(const aclTensor* x
 aclnnStatus aclnnAlltoAllAllGatherBatchMatMul(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                               aclrtStream stream)
 {
+    DEPRECATED_API_WARN_ONCE("aclnnAlltoAllAllGatherBatchMatMul");
     aclnnStatus ret = aclnnInnerAlltoAllAllGatherBatchMatMul(workspace, workspaceSize, executor, stream);
     return ret;
 }

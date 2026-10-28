@@ -28,7 +28,6 @@
 | ----------- | ------------------- | ---------  | ---------  | --------- |
 |[aclnnAllGatherMatmul](../../mc2/all_gather_matmul/docs/aclnnAllGatherMatmul.md)|完成AllGather通信与MatMul计算融合。|默认确定性实现|默认确定性实现|默认确定性实现|
 |[aclnnAllGatherMatmulV2](../../mc2/all_gather_matmul_v2/docs/aclnnAllGatherMatmulV2.md)|aclnnAllGatherMatmulV2接口是对aclnnAllGatherMatmul接口的功能拓展。|默认确定性实现|默认确定性实现|默认确定性实现|
-|[aclnnAlltoAllAllGatherBatchMatMul](../../mc2/allto_all_all_gather_batch_mat_mul/docs/aclnnAlltoAllAllGatherBatchMatMul.md)|完成AllToAll、AllGather集合通信与BatchMatMul计算融合、并行。|-|默认确定性实现|-|
 |[aclnnAlltoAllMatmul](../../mc2/allto_all_matmul/docs/aclnnAlltoAllMatmul.md)|完成AlltoAll通信与MatMul计算融合。|默认确定性实现|默认确定性实现|默认确定性实现|
 |[aclnnAlltoAllMatmulV2](../../mc2/allto_all_matmul/docs/aclnnAlltoAllMatmulV2.md)|兼容[aclnnAlltoAllMatmul](../../mc2/allto_all_matmul/docs/aclnnAlltoAllMatmul.md)支持的功能，在此基础上新增commMode参数，供用户指定通信引擎参数。|默认确定性实现|默认确定性实现|默认确定性实现|
 |[aclnnAlltoAllQuantMatmul](../../mc2/allto_all_matmul/docs/aclnnAlltoAllQuantMatmul.md)|完成AlltoAll通信、量化计算、MatMul计算和反量化计算的融合。|默认确定性实现|-|默认确定性实现|
@@ -42,7 +41,6 @@
 |[aclnnApplyRotaryPosEmbV2](../../posembedding/apply_rotary_pos_emb/docs/aclnnApplyRotaryPosEmbV2.md)|兼容[aclnnApplyRotaryPosEmb](../../posembedding/apply_rotary_pos_emb/docs/aclnnApplyRotaryPosEmb.md)支持的功能，在此基础上新增rotaryMode参数，供用户指定旋转编码方式（支持"half"、"interleave"、"quarter"三种模式）。|默认确定性实现|默认确定性实现|默认确定性实现|
 |[aclnnAttentionUpdate](../../attention/attention_update/docs/aclnnAttentionUpdate.md)|将各SP域PA算子输出的中间结果lse，localOut两个局部变量结果更新成全局结果。|默认确定性实现|默认确定性实现|默认确定性实现|
 |[aclnnAttentionWorkerCombine](../../attention/attention_worker_combine/docs/aclnnAttentionWorkerCombine.md)|Attention和FFN分离部署场景下，Attention侧数据融合算子，将多个计算单元处理的注意力token数据进行融合，结合专家权重对结果进行加权，输出最终的注意力融合结果，并更新层ID。|默认确定性实现|默认确定性实现|默认确定性实现|
-|[aclnnBatchMatMulReduceScatterAlltoAll](../../mc2/batch_mat_mul_reduce_scatter_allto_all/docs/aclnnBatchMatMulReduceScatterAlltoAll.md)|BatchMatMulReduceScatterAllToAll是通算融合算子，实现BatchMatMul计算与ReduceScatter、AllToAll集合通信并行的算子。|-|默认确定性实现|-|
 |[aclnnBlockAttentionResiduals](../../mhc/block_attention_residuals/docs/aclnnBlockAttentionResiduals.md)|将 `partialBlock` 与 `blockRes` 拼接后完成 RMS、投影打分与 Softmax 加权融合，输出 `hiddenStates`。|默认确定性实现|默认确定性实现|默认确定性实现|
 |[aclnnBlockAttentionResidualsGrad](../../mhc/block_attention_residuals_grad/docs/aclnnBlockAttentionResidualsGrad.md)|aclnnBlockAttentionResidualsGrad 是 BlockAttentionResiduals（注意力残差）的反向传播算子，根据前向保存的inv_norm、probs和上游梯度grad_hidden_states，计算partial_block、block_res、proj_weight、norm_weight的梯度。|默认确定性实现|默认确定性实现|默认确定性实现|
 |[aclnnBlockAttnResPrepare](../../attention/block_attn_res_prepare/docs/aclnnBlockAttnResPrepare.md)|计算历史残差块与伪 Query 的块间注意力，输出 softmax 加权分子、logit 最大值和指数和，供后续阶段融合当前残差。|-|-|默认确定性实现|
@@ -308,3 +306,5 @@
 |[aclnnInplaceMatmulAllReduceAddRmsNorm](../../mc2/inplace_matmul_all_reduce_add_rms_norm/docs/aclnnInplaceMatmulAllReduceAddRmsNorm.md)|此接口后续版本会废弃，请替换为[aclnnMatmulAllReduce](../../mc2/matmul_all_reduce/docs/aclnnMatmulAllReduce.md)和[aclnnRmsNorm](https://atomgit.com/cann/ops-nn/blob/master/norm/add_rms_norm/docs/aclnnAddRmsNorm.md)。|
 |[aclnnInplaceQuantMatmulAllReduceAddRmsNorm](../../mc2/inplace_matmul_all_reduce_add_rms_norm/docs/aclnnInplaceQuantMatmulAllReduceAddRmsNorm.md)|此接口后续版本会废弃，请替换为[aclnnQuantMatmulAllReduceV2](../../mc2/matmul_all_reduce/docs/aclnnQuantMatmulAllReduceV2.md)和[aclnnRmsNorm](https://atomgit.com/cann/ops-nn/blob/master/norm/add_rms_norm/docs/aclnnAddRmsNorm.md)。|
 |[aclnnInplaceWeightQuantMatmulAllReduceAddRmsNorm](../../mc2/inplace_matmul_all_reduce_add_rms_norm/docs/aclnnInplaceWeightQuantMatmulAllReduceAddRmsNorm.md)|此接口后续版本会废弃，请替换为[aclnnWeightQuantMatmulAllReduce](../../mc2/matmul_all_reduce/docs/aclnnWeightQuantMatmulAllReduce.md)和[aclnnRmsNorm](https://atomgit.com/cann/ops-nn/blob/master/norm/add_rms_norm/docs/aclnnAddRmsNorm.md)。 |
+|[aclnnAlltoAllAllGatherBatchMatMul](../../mc2/allto_all_all_gather_batch_mat_mul/docs/aclnnAlltoAllAllGatherBatchMatMul.md)|此接口后续版本会废弃，请勿使用该接口。|
+|[aclnnBatchMatMulReduceScatterAlltoAll](../../mc2/batch_mat_mul_reduce_scatter_allto_all/docs/aclnnBatchMatMulReduceScatterAlltoAll.md)|此接口后续版本会废弃，请勿使用该接口。|

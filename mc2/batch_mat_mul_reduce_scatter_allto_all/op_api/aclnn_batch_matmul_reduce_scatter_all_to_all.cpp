@@ -9,14 +9,28 @@
  */
 
 #include "aclnn_batch_matmul_reduce_scatter_all_to_all.h"
+#include <atomic>
 #include "common/utils/op_mc2.h"
 #include "common/op_host/op_api/mc2_3rd_matmul_util.h"
 #include "common/utils/op_mc2_def.h"
 #include "aclnn_kernels/common/op_error_check.h"
+#include "opdev/op_log.h"
 #include "opdev/common_types.h"
 #include "aclnnInner_batch_mat_mul_reduce_scatter_allto_all.h"
 #include "mc2_log_compat.h"
 using namespace op;
+
+#define DEPRECATED_API_WARN_ONCE(apiName) \
+    do { \
+        static std::atomic<bool> isFirstWarn = true; \
+        bool expected = true; \
+        if (isFirstWarn.compare_exchange_strong(expected, false, std::memory_order_relaxed, \
+                                                std::memory_order_relaxed)) { \
+            OP_LOGW("%s is scheduled to be deprecated in a post-December 2026 version update. " \
+                    "We apologize for any inconvenience caused.", \
+                    (apiName)); \
+        } \
+    } while (0)
 
 static const char* BMM_ACLNN_OP_NAME = "aclnnBatchMatMulReduceScatterAlltoAll";
 
@@ -367,6 +381,7 @@ aclnnStatus aclnnBatchMatMulReduceScatterAlltoAllGetWorkspaceSize(const aclTenso
                                                                   aclTensor* out, uint64_t* workspaceSize,
                                                                   aclOpExecutor** executor)
 {
+    DEPRECATED_API_WARN_ONCE("aclnnBatchMatMulReduceScatterAlltoAllGetWorkspaceSize");
     auto ret_param = CheckParams(x, weight, biasOptional, groupEp, groupTp, epWorldSize, tpWorldSize, yShardType, out);
     CHECK_RET(ret_param == ACLNN_SUCCESS, ret_param);
 
@@ -392,6 +407,7 @@ aclnnStatus aclnnBatchMatMulReduceScatterAlltoAllGetWorkspaceSize(const aclTenso
 aclnnStatus aclnnBatchMatMulReduceScatterAlltoAll(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                                   aclrtStream stream)
 {
+    DEPRECATED_API_WARN_ONCE("aclnnBatchMatMulReduceScatterAlltoAll");
     aclnnStatus ret = aclnnInnerBatchMatMulReduceScatterAlltoAll(workspace, workspaceSize, executor, stream);
     return ret;
 }
