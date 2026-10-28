@@ -31,7 +31,7 @@ namespace optiling {
 static const uint64_t TILINGKEY_BASE = 100000;
 static const uint64_t TILINGKEY_WITH_FINISHED_BASE = 1;
 static const uint64_t TILINGKEY_NEED_PAD_BASE = 10;
-static const int64_t DEFAULT_WORKSPACE_SIZE = 16777216; // 预留16M空间
+static const int64_t DEFAULT_WORKSPACE_SIZE = 0;
 static const int64_t ONE_REPEAT_SORT_NUM = 32;
 static const int64_t MAX_EXPERT_NUM = 2048;
 static const int64_t BLOCK_BYTES = 32;

@@ -55,7 +55,7 @@ protected:
     platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::RESERVED_VERSION;
     static constexpr int64_t INDEX_UB_SIZE = 256;
     static constexpr int64_t DOUBLE_BUFFER = 2;
-    static constexpr size_t RESERVE_WORKSPACE_BYTE = static_cast<size_t>(16) * 1024 * 1024;
+    static constexpr size_t RESERVE_WORKSPACE_BYTE = 0;
     uint64_t tilingKey_ = {0};
     int64_t tokenSum_ = {0};
     int64_t tokenSize_ = {0};

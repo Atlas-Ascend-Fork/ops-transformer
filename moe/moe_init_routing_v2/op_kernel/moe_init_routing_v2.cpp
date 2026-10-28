@@ -41,7 +41,12 @@ extern "C" __global__ __aicore__ void moe_init_routing_v2(GM_ADDR x, GM_ADDR exp
         return;
     }
 
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+    // Regbase uses the original allocation without the system reservation.
+    GM_ADDR userWS = GetSysWorkSpacePtr();
+#else
     GM_ADDR userWS = GetUserWorkspace(workspace);
+#endif
     if (userWS == nullptr) {
         return;
     }

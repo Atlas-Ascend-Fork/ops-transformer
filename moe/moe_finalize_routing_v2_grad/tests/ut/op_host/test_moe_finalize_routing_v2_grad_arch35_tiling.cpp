@@ -53,7 +53,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_not
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 20011, "", expectWorkspaces);
 }
 
@@ -74,7 +74,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_not
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 20021, "", expectWorkspaces);
 }
 
@@ -94,7 +94,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_not
                                                   {{{5, 3}, {5, 3}}, ge::DT_BF16, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 20011, "", expectWorkspaces);
 }
 
@@ -114,7 +114,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_not
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 20011, "", expectWorkspaces);
 }
 
@@ -134,7 +134,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_not
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 20011, "", expectWorkspaces);
 }
 
@@ -155,7 +155,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_not
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 20021, "", expectWorkspaces);
 }
 
@@ -176,7 +176,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_not
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 20021, "", expectWorkspaces);
 }
 
@@ -196,7 +196,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_spl
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 20012, "", expectWorkspaces);
 }
 
@@ -217,7 +217,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_spl
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 20022, "", expectWorkspaces);
 }
 
@@ -237,7 +237,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_spl
                                                   {{{5, 3}, {5, 3}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 20012, "", expectWorkspaces);
 }
 
@@ -254,7 +254,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_wit
                                                   {{{5, 1}, {5, 1}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10001, "", expectWorkspaces);
 }
 
@@ -271,7 +271,7 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_wit
                                                   {{{5, 1}, {5, 1}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10002, "", expectWorkspaces);
 }
 
@@ -288,6 +288,6 @@ TEST_F(MoeFinalizeRoutingV2GradArch35Tiling, MoeFinalizeRoutingV2Grad_arch35_wit
                                                   {{{5, 1}, {5, 1}}, ge::DT_FLOAT, ge::FORMAT_ND},
                                               },
                                               DefaultGradAttrs(0), &compileInfo, "Ascend950", kA5SocInfo, 4096);
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 10001, "", expectWorkspaces);
 }

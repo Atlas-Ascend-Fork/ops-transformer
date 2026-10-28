@@ -43,7 +43,8 @@ extern "C" __global__ __aicore__ void moe_init_routing_quant_v2(
         return;
     }
 
-    GM_ADDR userWS = GetUserWorkspace(workspace);
+    // The host reserves no system prefix; workspace starts at operator scratch.
+    GM_ADDR userWS = GetSysWorkSpacePtr();
     if (userWS == nullptr) {
         return;
     }

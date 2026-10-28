@@ -12,6 +12,8 @@
  * \file moe_init_routing_v2_grad_tiling_base.cpp
  * \brief
  */
+#include "tiling/platform/platform_ascendc.h"
+#include "op_host/tiling_util.h"
 #include <cmath>
 #include "moe_init_routing_v2_grad_tiling.h"
 using namespace AscendC;
@@ -19,8 +21,8 @@ namespace optiling {
 const static size_t DIM_ONE = 1;
 const static size_t DIM_TWO = 2;
 const static size_t DIM_THREE = 3;
-const static int32_t SIZE_16 = 16;
-const static int32_t LENGTH_1024 = 1024;
+const static int32_t DEFAULT_WORKSPACE_SIZE = 0;
+const static int32_t LEGACY_DEFAULT_WORKSPACE_SIZE = 16 * 1024 * 1024;
 
 ge::graphStatus MoeInitRoutingV2GradTilingBaseClass::GetPlatformInfo()
 {
@@ -270,8 +272,9 @@ ge::graphStatus MoeInitRoutingV2GradTilingBaseClass::DoLibApiTiling()
 
 ge::graphStatus MoeInitRoutingV2GradTilingBaseClass::GetWorkspaceSize()
 {
-    // 计算workspace大小，无需workspace临时空间，不存在多核同步，预留固定大小即可
-    workspaceSize_ = SIZE_16 * LENGTH_1024 * LENGTH_1024;
+    // 无业务临时空间；Regbase 架构无需预留系统 workspace。
+    workspaceSize_ = (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ? DEFAULT_WORKSPACE_SIZE :
+                                                                                  LEGACY_DEFAULT_WORKSPACE_SIZE);
     return ge::GRAPH_SUCCESS;
 }
 

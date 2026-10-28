@@ -12,6 +12,7 @@
  * \file moe_init_routing_v2_tiling.cpp
  * \brief
  */
+#include "tiling/platform/platform_ascendc.h"
 #include "moe_init_routing_v2_tiling.h"
 #include "op_host/tiling_util.h"
 
@@ -28,8 +29,8 @@ const static size_t DROP_PAD = 1;
 const static size_t DIM_ONE = 1;
 const static size_t DIM_TWO = 2;
 const static size_t DIM_THREE = 3;
-const static int32_t SIZE_16 = 16;
-const static int32_t LENGTH_1024 = 1024;
+const static int32_t DEFAULT_WORKSPACE_SIZE = 0;
+const static int32_t LEGACY_DEFAULT_WORKSPACE_SIZE = 16 * 1024 * 1024;
 const static int64_t MAX_COLS_ONE_LOOP = 16376;
 const static int64_t ASSIST_NUM = 256;
 const static int64_t INDEX_INPUT_X = 0;
@@ -624,6 +625,9 @@ uint64_t MoeInitRoutingV2TilingBase::GetTilingKey() const
 
 ge::graphStatus MoeInitRoutingV2TilingBase::GetWorkspaceSize()
 {
+    const size_t systemWorkspaceSize = Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ?
+                                           DEFAULT_WORKSPACE_SIZE :
+                                           LEGACY_DEFAULT_WORKSPACE_SIZE;
     // 计算workspace大小
     size_t sortWorkspaceSize;
     size_t expertTokenFlagSize = static_cast<size_t>(aivNum) * 2U * sizeof(int32_t);
@@ -633,11 +637,10 @@ ge::graphStatus MoeInitRoutingV2TilingBase::GetWorkspaceSize()
                  static_cast<size_t>(totalLength * sizeof(float) * NUM_TWO * NUM_THREE);
     if (regBase) {
         size_t expertNumSize = expertNum * sizeof(int32_t);
-        workspaceSize_ = sortWorkspaceSize + scatterWorkspaceSize + expertTokenFlagSize + expertNumSize +
-                         SIZE_16 * LENGTH_1024 * LENGTH_1024;
-    } else {
         workspaceSize_ =
-            sortWorkspaceSize + scatterWorkspaceSize + expertTokenFlagSize + SIZE_16 * LENGTH_1024 * LENGTH_1024;
+            sortWorkspaceSize + scatterWorkspaceSize + expertTokenFlagSize + expertNumSize + systemWorkspaceSize;
+    } else {
+        workspaceSize_ = sortWorkspaceSize + scatterWorkspaceSize + expertTokenFlagSize + systemWorkspaceSize;
     }
     return ge::GRAPH_SUCCESS;
 }

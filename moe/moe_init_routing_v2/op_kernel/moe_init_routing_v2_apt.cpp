@@ -43,7 +43,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v2(GM_ADDR x, GM_ADDR exp
         return;
     }
 
-    GM_ADDR userWS = GetUserWorkspace(workspace);
+    GM_ADDR userWS = GetSysWorkSpacePtr();
     if (userWS == nullptr) {
         return;
     }

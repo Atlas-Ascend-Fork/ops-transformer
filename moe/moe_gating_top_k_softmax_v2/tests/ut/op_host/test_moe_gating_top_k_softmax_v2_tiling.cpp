@@ -419,7 +419,10 @@ TEST_F(MoeGatingTopKSoftmaxV2Tiling, moe_gating_top_k_softmax_v2_regbase_ascend9
         },
         &compileInfo, "Ascend950", 48ULL, 196608ULL);
     uint64_t expectTilingKey = 103020;
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
+    // A6 must use the same workspace layout as A5.
+    tilingContextPara.socVersion_ = "Ascend960DT";
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -443,7 +446,7 @@ TEST_F(MoeGatingTopKSoftmaxV2Tiling, moe_gating_top_k_softmax_v2_regbase_ascend9
         },
         &compileInfo, "Ascend950", 48ULL, 196608ULL);
     uint64_t expectTilingKey = 103120;
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -467,7 +470,7 @@ TEST_F(MoeGatingTopKSoftmaxV2Tiling, moe_gating_top_k_softmax_v2_regbase_ascend9
         },
         &compileInfo, "Ascend950", 48ULL, 196608ULL);
     uint64_t expectTilingKey = 103030;
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -491,6 +494,6 @@ TEST_F(MoeGatingTopKSoftmaxV2Tiling, moe_gating_top_k_softmax_v2_regbase_ascend9
         },
         &compileInfo, "Ascend950", 48ULL, 196608ULL);
     uint64_t expectTilingKey = 103010;
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }

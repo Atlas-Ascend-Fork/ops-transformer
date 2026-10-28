@@ -12,10 +12,13 @@
  * \file moe_finalize_routing_v2_grad_tiling.cpp
  * \brief
  */
+#include "tiling/platform/platform_ascendc.h"
+#include "op_host/tiling_util.h"
 #include "moe_finalize_routing_v2_grad_tiling.h"
 
 namespace optiling {
-constexpr size_t WORKSPACE_SIZE = 16 * 1024 * 1024;
+constexpr size_t WORKSPACE_SIZE = 0;
+constexpr size_t LEGACY_WORKSPACE_SIZE = 16 * 1024 * 1024;
 constexpr int64_t NUM_TWO = 2;
 constexpr int64_t NUM_THREE = 3;
 constexpr int64_t INPUT_0_IDX = 0;
@@ -658,7 +661,8 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetWorkspaceSize()
 {
     size_t* workSpaces = context_->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context_, workSpaces);
-    workSpaces[0] = WORKSPACE_SIZE;
+    workSpaces[0] =
+        (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ? WORKSPACE_SIZE : LEGACY_WORKSPACE_SIZE);
     return ge::GRAPH_SUCCESS;
 }
 

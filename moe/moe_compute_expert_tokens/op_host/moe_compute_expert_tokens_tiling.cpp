@@ -12,6 +12,8 @@
  * \file moe_compute_expert_tokens_tiling.cpp
  * \brief
  */
+#include "tiling/platform/platform_ascendc.h"
+#include "op_host/tiling_util.h"
 #include <cmath>
 #include "moe_compute_expert_tokens_tiling.h"
 
@@ -24,7 +26,8 @@ static const size_t SHAPE_SIZE = 1;
 static const int64_t ONCE_HANDLE_COUNT = 320;
 static const int64_t ONCE_RPG_MAX_COUNT = 255;
 static const int64_t MAX_CORE_NUM = 64;
-static const int64_t SYS_WORKSPACE = static_cast<int64_t>(16 * 1024 * 1024);
+static const int64_t SYS_WORKSPACE = 0;
+static const int64_t LEGACY_SYS_WORKSPACE = 16 * 1024 * 1024;
 
 static const int64_t E_BOUND_NUM = 256;
 static const int64_t BSK_BOUND_NUM = 12000;
@@ -407,7 +410,8 @@ static inline ge::graphStatus SetWorkspaceAndWorkLocal(gert::TilingContext* cont
     tilingData.set_workLocalNeedSize(workLocalNeedSize);
 
     size_t userSize = tilingData.get_numOfExpert() * tilingData.get_totalCoreNum() * sizeof(int32_t);
-    size_t sysWorkspaceSize = SYS_WORKSPACE;
+    size_t sysWorkspaceSize =
+        (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context) ? SYS_WORKSPACE : LEGACY_SYS_WORKSPACE);
     size_t* userWorkspaceSize = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, userWorkspaceSize);
     userWorkspaceSize[0] = userSize + sysWorkspaceSize;

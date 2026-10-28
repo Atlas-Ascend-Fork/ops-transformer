@@ -231,7 +231,7 @@ TEST_F(MoeFusedTopkTiling, test_tiling_ascend950_fp16_non_16_aligned_expert_num)
                                                   {{{41, 8}, {41, 8}}, ge::DT_INT32, ge::FORMAT_ND},
                                               },
                                               DefaultTopkAttrs(), &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16 * 1024 * 1024 + 40 * 136 * sizeof(float)};
+    std::vector<size_t> expectWorkspaces = {40 * 136 * sizeof(float)};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 0, "", expectWorkspaces);
 }
 

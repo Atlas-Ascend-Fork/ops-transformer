@@ -34,7 +34,8 @@ extern "C" __global__ __aicore__ void moe_fused_topk(GM_ADDR x, GM_ADDR addNum, 
         return;
     }
 
-    GM_ADDR userWsp = GetUserWorkspace(workspace);
+    // The host reserves no system prefix; workspace starts at operator scratch.
+    GM_ADDR userWsp = GetSysWorkSpacePtr();
     if (userWsp == nullptr) {
         return;
     }

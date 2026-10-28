@@ -74,7 +74,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_01)
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10010, "", expectWorkspaces);
 }
 
@@ -104,7 +104,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_02)
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -134,7 +134,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_03)
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -164,7 +164,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_04)
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10000, "", expectWorkspaces);
 }
 
@@ -194,7 +194,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_05_norm_ty
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10000, "", expectWorkspaces);
 }
 
@@ -224,7 +224,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_06_renorm_
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10000, "", expectWorkspaces);
 }
 
@@ -254,7 +254,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_07_group_s
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10000, "", expectWorkspaces);
 }
 
@@ -284,7 +284,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_08_fp16)
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10010, "", expectWorkspaces);
 }
 
@@ -314,7 +314,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_09_bf16)
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10010, "", expectWorkspaces);
 }
 
@@ -343,7 +343,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_10_no_bias
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10000, "", expectWorkspaces);
 }
 
@@ -373,7 +373,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_11_simplif
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -403,7 +403,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_12_simplif
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -433,7 +433,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_13_e_k_ful
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10010, "", expectWorkspaces);
 }
 
@@ -463,7 +463,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_14_e_k_ful
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10000, "", expectWorkspaces);
 }
 
@@ -493,7 +493,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_15_without
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -523,7 +523,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_16_without
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -553,7 +553,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_17_without
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -904,7 +904,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_hash_succ_01_in
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10001, "", expectWorkspaces);
 }
 
@@ -936,7 +936,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_hash_succ_02_in
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10002, "", expectWorkspaces);
 }
 
@@ -968,7 +968,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_hash_succ_03_in
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10003, "", expectWorkspaces);
 }
 
@@ -1000,7 +1000,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_hash_succ_04_in
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10004, "", expectWorkspaces);
 }
 
@@ -1032,7 +1032,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_hash_succ_05_gr
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(0)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10001, "", expectWorkspaces);
 }
 
@@ -1248,7 +1248,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_18_softmax
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -1278,7 +1278,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_19_without
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 
@@ -1308,7 +1308,7 @@ TEST_F(MoeGatingTopKTilingArch35, moe_gating_top_k_tiling_arch35_succ_20_without
             {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
         },
         &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 10005, "", expectWorkspaces);
 }
 

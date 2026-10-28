@@ -166,7 +166,8 @@ const int64_t ALIGN_NUM = 32;
 const int32_t BLOCK_B32_SIZE = 8;   // 一个BLOCK能容纳的元素数，其中一个元素4字节
 const int32_t REPEAT_B32_SIZE = 64; // 一次Repeat能处理的元素数，其中一个元素取4字节
 
-const int SYSTEM_WORKSPACE = 16 * 1024 * 1024;
+const int SYSTEM_WORKSPACE = 0;
+const int LEGACY_SYSTEM_WORKSPACE = 16 * 1024 * 1024;
 const int TOPK_SOFTMAX_TILING_KEY_BASE_ALL = 100000;
 const int TOPK_SOFTMAX_TILING_KEY_BASE_SCENE = 1000;
 const int TOPK_SOFTMAX_TILING_KEY_BASE_RENORM = 100;

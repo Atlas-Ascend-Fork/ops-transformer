@@ -53,7 +53,7 @@ static constexpr uint64_t DROPLESS_ROW_TILING_LEY = 20;
 static constexpr uint64_t DROPPAD_ROW_TILING_KEY = 30;
 static constexpr uint64_t FLOAT16_TILING_KEY = 1;
 static constexpr uint64_t BFLOAT16_TILING_KEY = 2;
-static constexpr size_t WORKSPACE_RESERVED = 16 * 1024 * 1024;
+static constexpr size_t WORKSPACE_RESERVED = 0;
 static constexpr size_t SIZEOF_B16 = 2;
 static constexpr uint64_t NUM_FP4_IN_BYTE = 2;
 static constexpr uint64_t HIF4_BLOCK_SIZE = 64;
@@ -88,6 +88,7 @@ protected:
     ge::graphStatus DoGetShapeAttrsInfo() override;
     ge::graphStatus CalcOpTiling() override;
     ge::graphStatus CalcTilingKey() override;
+    ge::graphStatus GetWorkspaceSize() override;
     void DoPostTiling() override;
     void PrintTilingData() override;
     bool IsCapable() override;
@@ -1317,6 +1318,12 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CalcTilingKey()
 
     tilingKey_ += scaleDtypeKey;
     OP_LOGI(context_->GetNodeName(), "MoeFinalizeRoutingV2 get tiling key: %lx", tilingKey_);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MoeFinalizeRoutingV2Regbase::GetWorkspaceSize()
+{
+    workspaceSize_ = WORKSPACE_RESERVED;
     return ge::GRAPH_SUCCESS;
 }
 

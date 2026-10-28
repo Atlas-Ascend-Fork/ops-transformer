@@ -12,6 +12,8 @@
  * \file moe_init_routing_tiling.cpp
  * \brief
  */
+#include "tiling/platform/platform_ascendc.h"
+#include "op_host/tiling_util.h"
 #include "moe_init_routing_tiling.h"
 
 namespace optiling {
@@ -28,9 +30,9 @@ const static int64_t MAX_SORT_REPEAT_TIMES = 255;
 const static int64_t MAX_SORT_LOOP_ELEMENT = SORT32_ALIGN_ELEMENT * MAX_SORT_REPEAT_TIMES;
 const static size_t DIM_ONE = 1;
 const static size_t DIM_TWO = 2;
-const static int32_t SIZE_16 = 16;
+const static int32_t DEFAULT_WORKSPACE_SIZE = 0;
+const static int32_t LEGACY_DEFAULT_WORKSPACE_SIZE = 16 * 1024 * 1024;
 const static int32_t SIZE_31 = 31;
-const static int32_t LENGTH_1024 = 1024;
 const static int64_t MAX_COLS_ONE_LOOP = 16376;
 const static int64_t ASSIST_NUM = 256;
 const static int64_t SPLIT_K_THRESHOLD = 512;
@@ -347,13 +349,15 @@ uint64_t MoeInitRountingTilingBase::GetTilingKey() const
 
 ge::graphStatus MoeInitRountingTilingBase::GetWorkspaceSize()
 {
+    const size_t systemWorkspaceSize = Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ?
+                                           DEFAULT_WORKSPACE_SIZE :
+                                           LEGACY_DEFAULT_WORKSPACE_SIZE;
     // 计算workspace大小
     size_t sortWorkspaceSize = sizeof(float) * static_cast<size_t>(totalLength * NUM_TWO * NUM_THREE); // 排序需要的空间
     size_t coreSyncWorkspaceSize =
         moeInitRoutingTilingData.get_coreNum() * SORT32_ALIGN_ELEMENT * NUM_TWO; // 多核同步需要的空间
     size_t scatterWorkspaceSize = sizeof(int32_t) * static_cast<size_t>(totalLength);
-    workspaceSize_ =
-        sortWorkspaceSize + coreSyncWorkspaceSize + scatterWorkspaceSize + SIZE_16 * LENGTH_1024 * LENGTH_1024;
+    workspaceSize_ = sortWorkspaceSize + coreSyncWorkspaceSize + scatterWorkspaceSize + systemWorkspaceSize;
     return ge::GRAPH_SUCCESS;
 }
 

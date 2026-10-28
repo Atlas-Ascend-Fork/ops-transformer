@@ -591,7 +591,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_dropl
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 400001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -611,7 +611,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_activ
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(40)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 400003;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -631,7 +631,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_drop_
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(40)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 400002;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -651,7 +651,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_fp32_
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 400001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -671,7 +671,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_large
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 400001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -692,7 +692,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_split
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 200001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -712,7 +712,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_split
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(5)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 200003;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -732,7 +732,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_split
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(16)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 200002;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -752,7 +752,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_split
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 200001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -772,7 +772,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_split
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 200001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -793,7 +793,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_full_
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 300001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -813,7 +813,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_full_
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(40)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 300003;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -833,7 +833,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_full_
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(40)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 300002;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -853,7 +853,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_full_
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 300001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 
@@ -873,7 +873,7 @@ TEST_F(MoeInitRoutingV2GradTiling, moe_init_routing_v2_grad_tiling_regbase_full_
                                                {"active_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 300001;
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, "", expectWorkspaces);
 }
 

@@ -12,6 +12,8 @@
  * \file moe_gating_top_k_softmax_v2_tiling_k_renorm.cpp
  * \brief
  */
+#include "tiling/platform/platform_ascendc.h"
+#include "op_host/tiling_util.h"
 #include "platform/platform_info.h"
 #include "register/op_def_registry.h"
 #include "op_host/tiling_templates_registry.h"
@@ -183,7 +185,8 @@ uint64_t MoeGatingTopKSoftmaxV2KRenormTiling::GetTilingKey() const
 
 ge::graphStatus MoeGatingTopKSoftmaxV2KRenormTiling::GetWorkspaceSize()
 {
-    workspaceSize_ = SYSTEM_WORKSPACE;
+    workspaceSize_ =
+        Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ? SYSTEM_WORKSPACE : LEGACY_SYSTEM_WORKSPACE;
     return ge::GRAPH_SUCCESS;
 }
 

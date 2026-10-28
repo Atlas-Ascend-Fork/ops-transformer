@@ -22,7 +22,12 @@ extern "C" __global__ __aicore__ void moe_compute_expert_tokens(GM_ADDR sortExpe
                                                                 GM_ADDR tiling)
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIV_1_0);
+#if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+    // Regbase uses the original allocation without the system reservation.
+    GM_ADDR userWS = GetSysWorkSpacePtr();
+#else
     GM_ADDR userWS = GetUserWorkspace(workspace);
+#endif
     if (userWS == nullptr) {
         return;
     }

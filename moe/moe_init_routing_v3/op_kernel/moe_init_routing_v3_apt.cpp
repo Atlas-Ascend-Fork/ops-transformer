@@ -199,17 +199,11 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
         return;
     }
 
-    if (workspace == nullptr) {
-        return;
-    }
-
     REGISTER_TILING_DEFAULT(MoeInitRoutingV3Arch35TilingData);
     GET_TILING_DATA_WITH_STRUCT(MoeInitRoutingV3Arch35TilingData, tilingData, tiling);
 
-    GM_ADDR userWS = GetUserWorkspace(workspace);
-    if (userWS == nullptr) {
-        return;
-    }
+    // The host reserves no system prefix; workspace starts at operator scratch.
+    GM_ADDR userWS = GetSysWorkSpacePtr();
 
 #if ((__NPU_ARCH__ == 3510) || (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     int64_t oriOverflowMode = GetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>();
@@ -238,9 +232,16 @@ extern "C" __global__ __aicore__ void moe_init_routing_v3(GM_ADDR x, GM_ADDR exp
                 static_cast<int32_t>(Align(expertCountElements, static_cast<int32_t>(sizeof(int64_t))) * 2));
             DataCopyExtParams dataCopyParams = {1, static_cast<uint32_t>(expertCountElements * sizeof(int64_t)), 0, 0,
                                                 0};
+            auto eventID = static_cast<event_t>(pipe.FetchEventID(HardEvent::V_MTE3));
+            SetFlag<HardEvent::V_MTE3>(eventID);
+            WaitFlag<HardEvent::V_MTE3>(eventID);
             DataCopyPad(expertTokensCountGm, zeroLocal, dataCopyParams);
             pipe.Destroy();
         }
+        return;
+    }
+
+    if (userWS == nullptr) {
         return;
     }
 

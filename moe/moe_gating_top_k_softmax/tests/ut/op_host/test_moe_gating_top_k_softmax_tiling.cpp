@@ -519,7 +519,7 @@ TEST_F(MoeGatingTopKSoftmaxTiling, moe_gating_top_k_softmax_tiling_regbase_succ_
                                                   {"k", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
                                               },
                                               &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 100000, "", expectWorkspaces);
 }
 
@@ -540,7 +540,7 @@ TEST_F(MoeGatingTopKSoftmaxTiling, moe_gating_top_k_softmax_tiling_regbase_succ_
                                                   {"k", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
                                               },
                                               &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 100001, "", expectWorkspaces);
 }
 
@@ -560,7 +560,7 @@ TEST_F(MoeGatingTopKSoftmaxTiling, moe_gating_top_k_softmax_tiling_regbase_succ_
                                                   {"k", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
                                               },
                                               &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 100010, "", expectWorkspaces);
 }
 
@@ -581,7 +581,7 @@ TEST_F(MoeGatingTopKSoftmaxTiling, moe_gating_top_k_softmax_tiling_regbase_succ_
                                                   {"k", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
                                               },
                                               &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 100011, "", expectWorkspaces);
 }
 
@@ -601,7 +601,7 @@ TEST_F(MoeGatingTopKSoftmaxTiling, moe_gating_top_k_softmax_tiling_regbase_succ_
                                                   {"k", Ops::Transformer::AnyValue::CreateFrom<int64_t>(16)},
                                               },
                                               &compileInfo, "Ascend950");
-    std::vector<size_t> expectWorkspaces = {16777216};
+    std::vector<size_t> expectWorkspaces = {0};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 100000, "", expectWorkspaces);
 }
 

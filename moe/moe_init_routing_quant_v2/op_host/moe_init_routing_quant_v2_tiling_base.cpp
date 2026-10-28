@@ -12,6 +12,7 @@
  * \file moe_init_routing_quant_v2_tiling_base.cpp
  * \brief
  */
+#include "tiling/platform/platform_ascendc.h"
 #include "moe_init_routing_quant_v2_tiling_base.h"
 #include "op_host/tiling_util.h"
 
@@ -36,8 +37,8 @@ const static int64_t ONE_BLOCK_BYTE = 32;
 const static size_t DIM_ONE = 1;
 const static size_t DIM_TWO = 2;
 const static size_t DIM_THREE = 3;
-const static int32_t SIZE_16 = 16;
-const static int32_t LENGTH_1024 = 1024;
+const static int32_t DEFAULT_WORKSPACE_SIZE = 0;
+const static int32_t LEGACY_DEFAULT_WORKSPACE_SIZE = 16 * 1024 * 1024;
 const static int64_t MAX_COLS_ONE_LOOP = 16376;
 const static int64_t ASSIST_NUM = 256;
 const static int64_t INDEX_INPUT_X = 0;
@@ -439,13 +440,16 @@ uint64_t InnerMoeInitRoutingV2TilingBase::GetTilingKey() const
 
 ge::graphStatus InnerMoeInitRoutingV2TilingBase::GetWorkspaceSize()
 {
+    const size_t systemWorkspaceSize = Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ?
+                                           DEFAULT_WORKSPACE_SIZE :
+                                           LEGACY_DEFAULT_WORKSPACE_SIZE;
     // 计算workspace大小
     size_t sortWorkspaceSize = sizeof(float) * static_cast<size_t>(totalLength * NUM_TWO * NUM_THREE); // 排序需要的空间
     size_t scatterWorkspaceSize = sizeof(int32_t) * static_cast<size_t>(totalLength * NUM_TWO);
     size_t expertTokenFlagSize = static_cast<size_t>(aivNum * 2) * sizeof(int32_t);
     size_t expertNumSize = static_cast<size_t>(expertNum) * sizeof(int32_t);
-    workspaceSize_ = sortWorkspaceSize + scatterWorkspaceSize + expertTokenFlagSize + expertNumSize +
-                     SIZE_16 * LENGTH_1024 * LENGTH_1024;
+    workspaceSize_ =
+        sortWorkspaceSize + scatterWorkspaceSize + expertTokenFlagSize + expertNumSize + systemWorkspaceSize;
     return ge::GRAPH_SUCCESS;
 }
 

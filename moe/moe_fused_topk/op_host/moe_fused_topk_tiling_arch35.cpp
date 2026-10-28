@@ -47,7 +47,7 @@ constexpr uint32_t ATTR_ENABLE_EXPERT_MAPPING_INDEX = 7;
 
 constexpr uint32_t RESERVED_UB = 16 * 1024;
 constexpr uint32_t SORT_UNIT = 32;
-constexpr uint32_t SYS_WORKSPACE_SIZE = 16 * 1024 * 1024;
+constexpr uint32_t SYS_WORKSPACE_SIZE = 0;
 
 constexpr bool TOPK_IS_REUSE_SOURCE = false;
 constexpr bool TOPK_IS_INIT_INDEX = false;

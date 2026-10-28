@@ -755,8 +755,11 @@ TEST_F(MoeInitRoutingTiling, moe_init_routing_tiling_25)
                                               &compileInfo, "Ascend950");
     int64_t expectTilingKey = 0;
     string expectTilingData = "64 2 5 3 1 6 1 6 6 6 1 6 6 6848 0 2048 6 0 1 0 0 0 1 1 1 0 0 0 1 1 0 0 3 6 2 1 1 1 2 2 "
-                              "2 1 1 1 2 2 5 1 ";      // tilingData
-    std::vector<size_t> expectWorkspaces = {16781480}; // workspace
+                              "2 1 1 1 2 2 5 1 ";  // tilingData
+    std::vector<size_t> expectWorkspaces = {4264}; // workspace
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
+    // A6 must use the same workspace layout as A5.
+    tilingContextPara.socVersion_ = "Ascend960DT";
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
 

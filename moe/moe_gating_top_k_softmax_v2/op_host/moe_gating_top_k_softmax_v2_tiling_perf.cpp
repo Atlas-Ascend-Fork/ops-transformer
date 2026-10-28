@@ -151,7 +151,8 @@ uint64_t MoeGatingTopKSoftmaxV2PerfTiling::GetTilingKey() const
 
 ge::graphStatus MoeGatingTopKSoftmaxV2PerfTiling::GetWorkspaceSize()
 {
-    workspaceSize_ = SYSTEM_WORKSPACE;
+    workspaceSize_ =
+        Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ? SYSTEM_WORKSPACE : LEGACY_SYSTEM_WORKSPACE;
     return ge::GRAPH_SUCCESS;
 }
 

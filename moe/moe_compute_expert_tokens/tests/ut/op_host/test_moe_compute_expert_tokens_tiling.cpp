@@ -224,3 +224,18 @@ TEST_F(MoeComputeExpertTokensTiling, MoeComputeExpertTokens_tiling_int32_5)
     std::vector<size_t> expectWorkspaces = {16779264};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
+
+TEST_F(MoeComputeExpertTokensTiling, MoeComputeExpertTokens_regbase_workspace)
+{
+    optiling::MoeComputeExpertTokensCompileInfo compileInfo = {40, 65536};
+    for (const auto* socVersion : {"Ascend950", "Ascend960DT"}) {
+        SCOPED_TRACE(socVersion);
+        gert::TilingContextPara tilingContextPara(
+            "MoeComputeExpertTokens", {{{{100}, {100}}, ge::DT_INT32, ge::FORMAT_ND}},
+            {{{{98}, {98}}, ge::DT_INT32, ge::FORMAT_ND}},
+            {{{"num_experts", Ops::Transformer::AnyValue::CreateFrom<int64_t>(98)}}}, &compileInfo, socVersion);
+        // Keep the per-core expert counts, without the legacy system reservation.
+        std::vector<size_t> expectWorkspaces = {64 * 98 * sizeof(int32_t)};
+        ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 1001, "", expectWorkspaces);
+    }
+}
