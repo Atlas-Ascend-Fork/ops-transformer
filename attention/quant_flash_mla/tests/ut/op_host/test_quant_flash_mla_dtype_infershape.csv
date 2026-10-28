@@ -1,0 +1,5 @@
+case_name,expectResult,q_dtype,k_cache_dtype,q_descale_dtype,k_descale_dtype,block_table_dtype,cache_seqlens_dtype,cu_seqlens_q_dtype,seqused_q_dtype,attn_mask_dtype,metadata_dtype,attn_out_dtype,softmax_lse_dtype,quant_compute_mode,softmax_scale,mask_mode,max_seqlen_q,max_seqlen_kv,head_dim_v,layout_q,layout_kv,layout_out,return_softmax_lse,case_annotation
+dtype_fp8_bsnd,SUCCESS,FLOAT8_E4M3FN,FLOAT8_E4M3FN,FLOAT,FLOAT,INT32,INT32,INT32,INT32,INT8,INT32,BF16,FLOAT,1,1.0,0,-1,-1,512,BSND,PA_BNBD,BSND,false,FP8 BSND 基础
+dtype_hif8_tnd,SUCCESS,HIFLOAT8,HIFLOAT8,FLOAT,FLOAT,INT32,INT32,INT32,INT32,INT8,INT32,BF16,FLOAT,0,1.0,3,-1,-1,512,TND,PA_NZ,TND,true,HIF8 TND 全量化
+dtype_fp8_tnd_all_optional,SUCCESS,FLOAT8_E4M3FN,FLOAT8_E4M3FN,FLOAT,FLOAT,INT32,INT32,INT32,INT32,INT8,INT32,BF16,FLOAT,1,1.0,3,-1,-1,512,TND,PA_BNBD,NTD,true,FP8 TND 全可选输入
+dtype_fp8_bnsd,SUCCESS,FLOAT8_E4M3FN,FLOAT8_E4M3FN,FLOAT,FLOAT,INT32,INT32,INT32,INT32,INT8,INT32,BF16,FLOAT,1,1.0,0,-1,-1,512,BNSD,PA_BBND,BNSD,false,FP8 BNSD
