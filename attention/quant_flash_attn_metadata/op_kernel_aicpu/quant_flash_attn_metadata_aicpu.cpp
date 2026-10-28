@@ -754,9 +754,7 @@ bool QuantFlashAttnMetadataCpuKernel::CalDeterSwizzleSchedule(std::vector<int64_
     }
 
     const bool sparse = maskMode_ == 3 || maskMode_ == 4;
-    const bool packed = layoutQ_ == "TND" && layoutKv_ == "TND";
-    const bool extendedSchedule = sparse || packed;
-    sparseData.assign(extendedSchedule ? optiling::QUANT_FAG_SPARSE_ARRAY_COUNT : 0, std::vector<int64_t>(bSize));
+    sparseData.assign(optiling::QUANT_FAG_SPARSE_ARRAY_COUNT, std::vector<int64_t>(bSize));
     roundPrefix.assign(bSize + 1, 0);
     s1OuterList.assign(bSize, 0);
     s2OuterList.assign(bSize, 0);
@@ -775,14 +773,6 @@ bool QuantFlashAttnMetadataCpuKernel::CalDeterSwizzleSchedule(std::vector<int64_
         }
         const int64_t m = CeilDiv<int64_t>(s1Len, static_cast<int64_t>(optiling::QUANT_FAG_CUBE_BASE_M));
         const int64_t n = CeilDiv<int64_t>(s2Len, static_cast<int64_t>(optiling::QUANT_FAG_CUBE_BASE_N));
-        // swizzle 一轮内同一 head 最多 min(k, n) 个核并发, 它们的 dQ 坐标为 (s2o + delta) % m,
-        // 要求互不重叠才能保证确定性累加顺序, 故 m >= min(k, n)。
-        if (!extendedSchedule && m < std::min(k, n)) {
-            KERNEL_LOG_ERROR("QuantFAG grad schedule: batch %ld s1Outer %ld < min(aicNum %ld, s2Outer %ld), "
-                             "deterministic swizzle schedule is unsafe (s1 %ld, s2 %ld)",
-                             bIdx, m, k, n, s1Len, s2Len);
-            return false;
-        }
         s1OuterList[bIdx] = m;
         s2OuterList[bIdx] = n;
         int64_t scheduleRows = m;
@@ -810,7 +800,7 @@ bool QuantFlashAttnMetadataCpuKernel::CalDeterSwizzleSchedule(std::vector<int64_
             sparseData[4][bIdx] = s1Token;
             sparseData[5][bIdx] = s2Token;
         }
-        if (packed && !sparse) {
+        if (!sparse) {
             // Keep a unique dQ row per active core even when Q is shorter than KV.
             scheduleRows = std::max(m, std::min(k, n));
             sparseData[0][bIdx] = 0;
@@ -894,8 +884,7 @@ bool QuantFlashAttnMetadataCpuKernel::GenQuantFagGradMetaData()
         gradMetaData.SetMetaData(static_cast<uint32_t>(s1OuterBase + bIdx), s1OuterList[bIdx]);
         gradMetaData.SetMetaData(static_cast<uint32_t>(s2OuterBase + bIdx), s2OuterList[bIdx]);
     }
-    gradMetaData.SetMetaData(optiling::QUANT_FAG_SCHEDULE_KIND_INDEX,
-                             sparseData.empty() ? 1 : optiling::QUANT_FAG_DENSE_SWIZZLE);
+    gradMetaData.SetMetaData(optiling::QUANT_FAG_SCHEDULE_KIND_INDEX, optiling::QUANT_FAG_DENSE_SWIZZLE);
     for (size_t field = 0; field < sparseData.size(); ++field) {
         const int64_t fieldBase = sparseBase + static_cast<int64_t>(field) * bSize;
         gradMetaData.SetMetaData(optiling::QUANT_FAG_ROW_BEGIN_OFFSET_INDEX + field, fieldBase);

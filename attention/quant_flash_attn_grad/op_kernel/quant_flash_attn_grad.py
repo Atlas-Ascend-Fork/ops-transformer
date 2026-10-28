@@ -1388,7 +1388,10 @@ def cal_dense_swizzle_deter_index(
     col_begin = 0
     s1_token = const_info.s1_token
     s2_token = const_info.s2_token
-    if sparse_type != 0 or layout == 2:
+    if (
+        meta_get(const_info, tensor_metadata, META_SCHEDULE_KIND_IDX)
+        == META_DENSE_SWIZZLE
+    ):
         row_begin = pl.getval(
             tensor_metadata,
             meta_base
