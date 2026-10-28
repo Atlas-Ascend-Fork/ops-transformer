@@ -49,9 +49,6 @@ __aicore__ constexpr uint16_t GetRealDealSize(uint16_t realSize)
 
 __aicore__ constexpr uint64_t AlignUp32(uint64_t size)
 {
-    if (ArchInfo::CV_RATIO == 1) {
-        return size;
-    }
     return (size + 31) >> 5 << 5; // 31 & 5 is Alignup 32
 }
 
