@@ -479,6 +479,12 @@ aclnnStatus ParamsCheckSli(const aclTensor* cuSeqlensQOptional, const aclTensor*
                            const aclTensor* metadata, uint32_t aicCoreNum, uint32_t aivCoreNum,
                            const std::string& socVersion)
 {
+    if (socVersion.find("Ascend910") != std::string::npos && numHeadsQ != 8 && numHeadsQ != 16 && numHeadsQ != 32 &&
+        numHeadsQ != 64) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(SLI_ACLNN_OP_NAME, "num_heads_q", std::to_string(numHeadsQ),
+                                              "num_heads_q must be one of {8, 16, 32, 64} on A2/A3");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     // A2/A3 校验
     const std::string ascend950 = "Ascend950";
     const std::string ascend960 = "Ascend960";
