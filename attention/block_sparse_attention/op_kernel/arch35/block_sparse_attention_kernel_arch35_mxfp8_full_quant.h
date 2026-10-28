@@ -663,16 +663,16 @@ public:
                                      qBaseTile_;
 
         // 从 sparse mask 计算 gatheredKvSeqlen
-        uint32_t gmOffsetSparseCount =
-            curBatch * qHeads_ * xBlockNumAligned_ + qHeadIdx * xBlockNumAligned_ + xBlockIdx;
+        uint64_t gmOffsetSparseCount = static_cast<uint64_t>(curBatch) * qHeads_ * xBlockNumAligned_ +
+                                       static_cast<uint64_t>(qHeadIdx) * xBlockNumAligned_ + xBlockIdx;
         uint32_t yBlockNumRsvd = gSparseCount.GetValue(gmOffsetSparseCount);
-        uint32_t gmOffsetSparseIdx = gmOffsetSparseCount * yBlockNumAligned_;
+        uint64_t gmOffsetSparseIdx = gmOffsetSparseCount * yBlockNumAligned_;
         uint32_t yBlockNumAval = static_cast<uint32_t>(CeilDiv(kvSeqlen, static_cast<int64_t>(blockShapeY_)));
         // 保留块数为 0 时没有最后一块，不能做 yBlockNumRsvd - 1（uint32 下溢）。
         // 空 KV：attentionOut 写 0，softmaxLse 写 -inf，taskTileNum 为 0，主循环跳过该 task。
         int64_t gatheredKvSeqlen = 0;
         if (yBlockNumRsvd != 0) {
-            uint32_t lastIdxOffset = gmOffsetSparseIdx + yBlockNumRsvd - 1;
+            uint64_t lastIdxOffset = gmOffsetSparseIdx + yBlockNumRsvd - 1;
             uint32_t lastSparseIdx = gSparseIdx.GetValue(lastIdxOffset);
             uint32_t lastYBlockSize = (lastSparseIdx == yBlockNumAval - 1) ?
                                           static_cast<uint32_t>(kvSeqlen - lastSparseIdx * blockShapeY_) :
