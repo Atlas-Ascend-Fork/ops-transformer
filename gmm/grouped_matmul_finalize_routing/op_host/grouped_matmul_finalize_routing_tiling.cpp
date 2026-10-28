@@ -67,6 +67,9 @@ static ge::graphStatus GroupedMatmulFinalizeRoutingTilingFunc(gert::TilingContex
         OP_LOGD("GroupedMatmulFinalizeRoutingTilingFunc", "Using the tiling strategy of A5");
         return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context, tilingRegisterList);
     } else if (compileInfoPtr->npuArch == NpuArch::DAV_9201) {
+        auto atomicRet = context->SetNeedAtomic(true);
+        OP_CHECK_IF(atomicRet != ge::GRAPH_SUCCESS,
+                    OPS_REPORT_CUBE_INNER_ERR(context->GetNodeName(), "SetNeedAtomic failed"), return ge::GRAPH_FAILED);
         OP_CHECK_NULL_WITH_CONTEXT(context, context);
         auto xDesc = context->GetDynamicInputDesc(X_INDEX, 0);
         OP_CHECK_NULL_WITH_CONTEXT(context, xDesc);

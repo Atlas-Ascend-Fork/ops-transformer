@@ -68,7 +68,7 @@ public:
     constexpr static MatmulShapeParams shapeParams =
         GetMatmulShapeParams<typename DispatchPolicy::SingleShape, L0Shape>();
     constexpr static MatmulConfig cfg = GetMMConfig<MatmulConfigMode::CONFIG_MDL>(
-        shapeParams, GetFuncParams(DispatchPolicy::enableInputDataLenCheck), GetBiasParams(false));
+        shapeParams, GetFuncParams(DispatchPolicy::enableInputDataLenCheck), GetBiasParams(true));
     constexpr static MatmulApiStaticTiling staticTiling =
         AscendC::GetMatmulApiTiling<AType, BType, CType, BiasType, typename DispatchPolicy::SingleShape, L1Shape,
                                     L0Shape>(cfg);

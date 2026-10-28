@@ -105,6 +105,7 @@ public:
     using BType = typename BlockMmadBuilder::BType;
     using CType = typename BlockMmadBuilder::CType;
     using BiasType = typename BlockMmadBuilder::BiasType;
+    using EpilogueProblemShape = typename BlockEpilogue::ProblemShape;
 #if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
     using ScaleAType =
         typename AscendC::Conditional<IsHif4Type<AType>(), AscendC::hif4_scale, AscendC::fp8_e8m0_t>::type;
@@ -316,7 +317,8 @@ public:
         int64_t n = Get<MNK_N>(problemShape_);
         int64_t k = Get<MNK_K>(problemShape_);
         bs.UpdateNextProblem(problemShape_);
-        epilogueOp_.UpdateNextProblem(problemShape_);
+        EpilogueProblemShape epilogueProblemShape{m, n, k};
+        epilogueOp_.UpdateNextProblem(epilogueProblemShape);
         UpdateGlobalBuffer(params);
         CoordClass coord(m, n, k, params.gmmParams.baseM, params.gmmParams.baseN, params.gmmParams.baseK);
         BlockCoord tileIdx;
