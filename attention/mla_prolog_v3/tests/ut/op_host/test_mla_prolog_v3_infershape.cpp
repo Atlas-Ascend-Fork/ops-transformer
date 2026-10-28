@@ -935,3 +935,58 @@ TEST_F(MlaPrologV3Proto, mla_prolog_v3_infershape_without_do_rope_attr)
         {8, 1, 32, 512}, {8, 1, 32, 64}, {16, 128, 1, 512}, {16, 128, 1, 64}, {0}, {0}, {0}};
     ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape);
 }
+
+// qk_rope_head_dim=0 时 queryRope 最后一维为 0；qk nope head dim D=256，query 最后一维仍为 Hckv=512
+TEST_F(MlaPrologV3Proto, mla_prolog_v3_infershape_qrope_dim0)
+{
+    gert::InfershapeContextPara infershapeContextPara(
+        "MlaPrologV3",
+        {
+            {{{8, 1, 1024}, {8, 1, 1024}}, ge::DT_BF16, ge::FORMAT_ND},               // token_x
+            {{{1024, 1536}, {1024, 1536}}, ge::DT_BF16, ge::FORMAT_FRACTAL_NZ},       // weight_dq
+            {{{1536, 8 * 256}, {1536, 8 * 256}}, ge::DT_BF16, ge::FORMAT_FRACTAL_NZ}, // weight_uq_qr N*D
+            {{{8, 256, 512}, {8, 256, 512}}, ge::DT_BF16, ge::FORMAT_ND},             // weight_uk N,D,Hckv
+            {{{1024, 512}, {1024, 512}}, ge::DT_BF16, ge::FORMAT_FRACTAL_NZ},         // weight_dkv_kr Hckv+Dr
+            {{{1536}, {1536}}, ge::DT_BF16, ge::FORMAT_ND},                           // rmsnorm_gamma_cq
+            {{{512}, {512}}, ge::DT_BF16, ge::FORMAT_ND},                             // rmsnorm_gamma_ckv
+            {{{8, 1, 0}, {8, 1, 0}}, ge::DT_BF16, ge::FORMAT_ND},                     // rope_sin Dr=0
+            {{{8, 1, 0}, {8, 1, 0}}, ge::DT_BF16, ge::FORMAT_ND},                     // rope_cos Dr=0
+            {{{4, 16, 1, 512}, {4, 16, 1, 512}}, ge::DT_BF16, ge::FORMAT_ND},         // kv_cache
+            {{{4, 16, 1, 0}, {4, 16, 1, 0}}, ge::DT_BF16, ge::FORMAT_ND},             // kr_cache
+            {{{8, 1}, {8, 1}}, ge::DT_INT64, ge::FORMAT_ND},                          // cache_index
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                  // dequant_scale_x
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                  // dequant_scale_w_dq
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                  // dequant_scale_w_uq_qr
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                  // dequant_scale_w_dkv_kr
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                  // quant_scale_ckv
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                  // quant_scale_ckr
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                  // smooth_scales_cq
+            {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},                                  // actual_seq_len
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND}                                   // k_nope_clip_alpha
+        },
+        {
+            {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND},  // query
+            {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND},  // query_rope
+            {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND},  // kv_cache
+            {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND},  // kr_cache
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND}, // dequant_scale_q_nope
+            {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND},  // query_norm
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND}  // dequant_scale_q_norm
+        },
+        {{"rmsnorm_epsilon_cq", Ops::Transformer::AnyValue::CreateFrom<float>(1e-05f)},
+         {"rmsnorm_epsilon_ckv", Ops::Transformer::AnyValue::CreateFrom<float>(1e-05f)},
+         {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("PA_BSND")},
+         {"query_norm_flag", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+         {"weight_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"kv_cache_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"query_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"ckvkr_repo_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"quant_scale_repo_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+         {"tile_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(128)},
+         {"qc_qr_scale", Ops::Transformer::AnyValue::CreateFrom<float>(1.0f)},
+         {"kc_scale", Ops::Transformer::AnyValue::CreateFrom<float>(1.0f)},
+         {"do_rope", Ops::Transformer::AnyValue::CreateFrom<bool>(true)}});
+    std::vector<std::vector<int64_t>> expectOutputShape = {
+        {8, 1, 8, 512}, {8, 1, 8, 0}, {4, 16, 1, 512}, {4, 16, 1, 0}, {0}, {0}, {0}};
+    ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape);
+}

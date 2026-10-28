@@ -411,6 +411,10 @@ ge::graphStatus MlaPrologTiling::SetAttrInfo()
     if (context_->doRope != nullptr) {
         enableRope_ = *(context_->doRope);
     }
+    // Dr=0 时 q rope 没有列，旋转是空操作，强制走 passthrough 并在 kernel 里跳过 0 长度搬运
+    if (baseShapeInfo_.drSize == 0U) {
+        enableRope_ = false;
+    }
     return ge::GRAPH_SUCCESS;
 }
 

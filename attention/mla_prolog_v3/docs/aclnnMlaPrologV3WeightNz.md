@@ -911,18 +911,18 @@ aclnnStatus aclnnMlaPrologV3WeightNz(
       </tr>
       <tr>
         <td>Hckv</td>
-        <td>kv低秩矩阵维度</td>
+        <td>kv低秩矩阵维度，也是queryOut最后一维</td>
         <td>取值固定为：512</td>
       </tr>
       <tr>
         <td>D</td>
-        <td>qk不含位置编码维度</td>
-        <td>取值固定为：128、192</td>
+        <td>qk nope head dim（不含位置编码）</td>
+        <td>Dr=64时取值固定为128、192；Dr=0时取值固定为256</td>
       </tr>
       <tr>
         <td>Dr</td>
-        <td>qk位置编码维度</td>
-        <td>取值固定为：64</td>
+        <td>qk rope head dim</td>
+        <td>取值固定为64；也可为0。Dr=0时D=256，queryRopeOut最后一维为0，queryOut最后一维仍为512</td>
       </tr>
       <tr>
         <td>Nkv</td>

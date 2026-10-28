@@ -75,13 +75,14 @@ ge::graphStatus GetMlaPrologV3ShapeDim(const gert::InferShapeContext* context, M
             doRope = *doRopePtr;
         }
     }
-    const bool ropeSinEmpty = (ropeSinShape->GetShapeSize() == 0);
     if (ValidateInputShapeDims(context, tokenXShape, weightUkShape, ropeSinShape, weightDqShape, kvCacheShape,
                                krCacheShape, doRope) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
 
-    if (doRope && !ropeSinEmpty) {
+    // 2D/3D rope 即使最后一维为 0（numel 为 0）也按传入的 Dr 推导，保证 queryRope 输出维与传入维一致
+    const bool ropeHasRank = (ropeSinShape->GetDimNum() == DIM_NUM_2) || (ropeSinShape->GetDimNum() == DIM_NUM_3);
+    if (doRope && ropeHasRank) {
         if (tokenXShape->GetDimNum() == DIM_NUM_3) { // BS
             shapeParam.Dr = ropeSinShape->GetDim(DIM_INDEX_2);
         } else { // T

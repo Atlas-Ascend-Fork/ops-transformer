@@ -5042,3 +5042,61 @@ TEST_F(MlaPrologV3, MlaPrologV3_tiling_960dt_max_seq_pages)
         &compileInfo, "9201", MlaPrologV3_tiling_960DtSocInfo, 4096);
     ExecuteTestCase(shortPara, ge::GRAPH_FAILED);
 }
+
+// W8A8 + kv C8 per-token-group，Dr=0、D=256。与 test8 同场景，ENABLE_ROPE 因 Dr=0 置 0。
+TEST_F(MlaPrologV3, MlaPrologV3_tiling_w8a8_c8_dr0)
+{
+    optiling::MlaPrologCompileInfo compileInfo = {48};
+    gert::TilingContextPara tilingContextPara(
+        "MlaPrologV3",
+        {
+            {{{8, 7168}, {8, 7168}}, ge::DT_INT8, ge::FORMAT_ND},                         // token_x
+            {{{7168, 1536}, {7168, 1536}}, ge::DT_INT8, ge::FORMAT_FRACTAL_NZ},           // weight_dq
+            {{{1536, 128 * 256}, {1536, 128 * 256}}, ge::DT_INT8, ge::FORMAT_FRACTAL_NZ}, // weight_uq_qr N*D
+            {{{128, 256, 512}, {128, 256, 512}}, ge::DT_BF16, ge::FORMAT_ND},             // weight_uk N,D,Hckv
+            {{{7168, 512}, {7168, 512}}, ge::DT_INT8, ge::FORMAT_FRACTAL_NZ},             // weight_dkv_kr Hckv+Dr
+            {{{1536}, {1536}}, ge::DT_BF16, ge::FORMAT_ND},                               // rmsnorm_gamma_cq
+            {{{512}, {512}}, ge::DT_BF16, ge::FORMAT_ND},                                 // rmsnorm_gamma_ckv
+            {{{8, 0}, {8, 0}}, ge::DT_BF16, ge::FORMAT_ND},                               // rope_sin Dr=0
+            {{{8, 0}, {8, 0}}, ge::DT_BF16, ge::FORMAT_ND},                               // rope_cos
+            {{{8, 1, 528}, {8, 1, 528}}, ge::DT_INT8, ge::FORMAT_ND},                     // kv_cache 512+16
+            {{{0}, {0}}, ge::DT_BF16, ge::FORMAT_ND},                                     // kr_cache empty
+            {{{}, {}}, ge::DT_INT64, ge::FORMAT_ND},                                      // cache_index
+            {{{8, 1}, {8, 1}}, ge::DT_FLOAT, ge::FORMAT_ND},                              // dequant_scale_x
+            {{{1, 1536}, {1, 1536}}, ge::DT_FLOAT, ge::FORMAT_ND},                        // dequant_scale_w_dq
+            {{{1, 128 * 256}, {1, 128 * 256}}, ge::DT_FLOAT, ge::FORMAT_ND},              // dequant_scale_w_uq_qr
+            {{{1, 512}, {1, 512}}, ge::DT_FLOAT, ge::FORMAT_ND},                          // dequant_scale_w_dkv_kr
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                      // quant_scale_ckv
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                      // quant_scale_ckr
+            {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},                                      // smooth_scales_cq
+            {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},                                      // actual_seq_len
+            {{{1}, {1}}, ge::DT_FLOAT, ge::FORMAT_ND},                                    // k_nope_clip_alpha
+        },
+        {
+            {{{8, 128, 512}, {8, 128, 512}}, ge::DT_BF16, ge::FORMAT_ND}, // query
+            {{{8, 128, 0}, {8, 128, 0}}, ge::DT_BF16, ge::FORMAT_ND},     // query_rope
+            {{{8, 1, 528}, {8, 1, 528}}, ge::DT_INT8, ge::FORMAT_ND},     // kv_cache
+            {{{0}, {0}}, ge::DT_BF16, ge::FORMAT_ND},                     // kr_cache
+            {{{0}, {0}}, ge::DT_FLOAT, ge::FORMAT_ND},                    // dequant_scale_q_nope
+            {{{0}, {0}}, ge::DT_INT8, ge::FORMAT_ND},                     // query_norm
+            {{{0}, {0}}, ge::DT_FLOAT, ge::FORMAT_ND},                    // dequant_scale_q_norm
+        },
+        {
+            {"rmsnorm_epsilon_cq", Ops::Transformer::AnyValue::CreateFrom<float>(1e-05f)},
+            {"rmsnorm_epsilon_ckv", Ops::Transformer::AnyValue::CreateFrom<float>(1e-05f)},
+            {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("TND")},
+            {"query_norm_flag", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+            {"weight_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+            {"kv_cache_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(3)},
+            {"query_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+            {"ckvkr_repo_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+            {"quant_scale_repo_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+            {"tile_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(128)},
+            {"qc_qr_scale", Ops::Transformer::AnyValue::CreateFrom<float>(1.0f)},
+            {"kc_scale", Ops::Transformer::AnyValue::CreateFrom<float>(1.0f)},
+        },
+        &compileInfo, "Ascend910B", MlaPrologV3_tiling_A2SocInfo, 4096);
+    // test8 key 3933600，ENABLE_ROPE 置 0
+    int64_t expectTilingKey = 3671456;
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey);
+}

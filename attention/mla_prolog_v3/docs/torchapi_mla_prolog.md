@@ -260,10 +260,10 @@ cann_ops_transformer.mla_prolog(
     | He | Head-Size（隐藏层大小） | 取值固定为：1024、2048、3072、4096、5120、6144、7168、7680、8192 |
     | Hcq | q 低秩矩阵维度 | 取值固定为：1536、2048 |
     | N | Head-Num（多头数） | 取值范围：1-128 |
-    | Hckv | kv 低秩矩阵维度 | 取值固定为：512 |
+    | Hckv | kv 低秩矩阵维度，也是 query 最后一维 | 取值固定为：512 |
     | Dtile | kv_cache 的 D 轴维度 | 取值固定为：pertoken-pergroup 场景（`kv_cache_quant_mode=3`）下为 656，非 pertoken-pergroup 场景下为 512 |
-    | D | qk 不含位置编码维度 | 取值固定为：128、192 |
-    | Dr | qk 位置编码维度 | 取值固定为：64 |
+    | D | qk nope head dim | Dr=64 时取值固定为 128、192；Dr=0 时取值固定为 256 |
+    | Dr | qk rope head dim | 取值固定为 64；也可为 0。Dr=0 时 D=256，query_rope 最后一维为 0，query 最后一维仍为 512 |
     | Nkv | kv 的 head 数 | 取值固定为：1 |
     | BlockNum | PagedAttention 场景下的块数 | 取值为计算 `B*Skv/BlockSize` 的结果后向上取整（Skv 表示 kv 的序列长度，允许取 0） |
     | BlockSize | PagedAttention 场景下的块大小 | 取值范围：16-1024，且为 16 的倍数 |

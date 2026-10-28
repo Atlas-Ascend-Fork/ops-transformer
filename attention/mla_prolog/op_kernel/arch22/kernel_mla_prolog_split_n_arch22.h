@@ -554,7 +554,10 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::VectorBufferInit()
 
     if constexpr (std::is_same<krCacheType, int8_t>::value) {
         uint64_t quantScaleCkrSize = baseParams_->dimHeadRope * sizeof(float);
-        pipe_->InitBuffer(quantScaleCkrBuffer_, baseParams_->dimHeadRope * sizeof(float)); // [1, 64]
+        if (quantScaleCkrSize == 0) {
+            quantScaleCkrSize = 32; // Dr=0 时不读取 quantScaleCkr
+        }
+        pipe_->InitBuffer(quantScaleCkrBuffer_, quantScaleCkrSize); // [1, Dr]
         usedBytes += quantScaleCkrSize;
         quantScaleCkrLocal_ = quantScaleCkrBuffer_.Get<float>();
     }
@@ -587,12 +590,14 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::VectorBufferInit()
         // 需要2倍的空间分别存储sin和cos
         sincosSize = sizeof(ropeComputType) * 2 * baseParams_->dimHeadRope *
                      ((baseParams_->stepBatchSize + cvRatio_ - 1) / cvRatio_);
-        pipe_->InitBuffer(sincosBuffer_, sincosSize);
     } else {
         // 需要2倍的空间分别存储sin和cos
         sincosSize = sizeof(ropeComputType) * 2 * baseParams_->dimHeadRope * curVecTokenMax_;
-        pipe_->InitBuffer(sincosBuffer_, sincosSize); // [2, 64] float
     }
+    if (sincosSize == 0) {
+        sincosSize = 32; // Dr=0 时不读取 sin/cos，避免 InitBuffer(0)
+    }
+    pipe_->InitBuffer(sincosBuffer_, sincosSize);
     usedBytes += sincosSize;
 
     if constexpr (!MLAPT::enableDequantOpt) {
@@ -1338,9 +1343,12 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::CopyGlobalParams()
 
     // quantScaleCkr
     if constexpr (std::is_same<krCacheType, int8_t>::value) {
-        DataCopyPadExtParams<float> quantPadParams{false, 0, 0, 0};
-        DataCopyExtParams quantCopyParams{1, static_cast<uint32_t>(baseParams_->dimHeadRope * sizeof(float)), 0, 0, 0};
-        DataCopyPad(quantScaleCkrLocal_, quantScaleCkrGm_, quantCopyParams, quantPadParams);
+        if (baseParams_->dimHeadRope > 0) {
+            DataCopyPadExtParams<float> quantPadParams{false, 0, 0, 0};
+            DataCopyExtParams quantCopyParams{1, static_cast<uint32_t>(baseParams_->dimHeadRope * sizeof(float)), 0, 0,
+                                              0};
+            DataCopyPad(quantScaleCkrLocal_, quantScaleCkrGm_, quantCopyParams, quantPadParams);
+        }
     }
 }
 
@@ -1644,6 +1652,10 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeAndScatterKr(LocalTensor<
                                                                     LocalTensor<ropeComputType>& sinLocalCkvKr,
                                                                     CkvkrParams ropeAndScatterKrParams)
 {
+    // Dr=0 时没有 kr 列，跳过 0 长度搬运
+    if (baseParams_->dimHeadRope == 0) {
+        return;
+    }
     // MatmulCkvKr ──> Rope(Ckv) ──> Scatter(Kr)
     int64_t stride = static_cast<int64_t>(baseParams_->headSizeCkv + baseParams_->headSizeKr); // 512 + 64
     LocalTensor<krCacheType> outputKrLocal = shareTmpUb.ReinterpretCast<krCacheType>();
@@ -1800,7 +1812,7 @@ template <typename MLAPT>
 __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQr(int64_t ropeQrOffset, int64_t ropeQrResOffset,
                                                           int64_t curVecToken, int64_t curBlockTokenOffset)
 {
-    if (blockIdx_ >= curVectorBlockNum_) {
+    if (baseParams_->dimHeadRope == 0 || blockIdx_ >= curVectorBlockNum_) {
         return;
     }
     uint64_t stride = static_cast<uint64_t>(baseParams_->dimHeadSizeQc + baseParams_->dimHeadRope);
@@ -1861,6 +1873,9 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQr(int64_t ropeQrOffset, 
 template <typename MLAPT>
 __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitNGroupCase(int64_t ropeQrOffset, int64_t ropeQrResOffset)
 {
+    if (baseParams_->dimHeadRope == 0) {
+        return;
+    }
     if (blockIdx_ < QC_CORE_NUM * cvRatio_ || blockIdx_ >= (QC_CORE_NUM + QR_CORE_NUM) * cvRatio_) {
         return;
     }
@@ -1924,6 +1939,9 @@ __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitNGroupCase(int64_t
 template <typename MLAPT>
 __aicore__ inline void MlaPrologVecS1CubS2<MLAPT>::RopeQrSplitN(const RopeQrSplitNParams& ropeQrSplitNParams)
 {
+    if (baseParams_->dimHeadRope == 0) {
+        return;
+    }
     uint32_t colQr = baseParams_->dimHeadRope;
     uint32_t ropeCnt = ropeQrSplitNParams.ropeCnt;
     uint32_t deQuantScaleCqOffset = ropeQrSplitNParams.deQuantScaleCqOffset;

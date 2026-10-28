@@ -249,10 +249,19 @@ ge::graphStatus MlaPrologTilingCheck::CheckDims() const
                 OP_LOGE_FOR_INVALID_VALUE(context_.opName, "Hckv", std::to_string(baseShapeInfo_.hckvSize),
                                           std::to_string(HCKV_SIZE)),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(baseShapeInfo_.drSize != DR_SIZE,
-                OP_LOGE_FOR_INVALID_VALUE(context_.opName, "Dr", std::to_string(baseShapeInfo_.drSize),
-                                          std::to_string(DR_SIZE)),
-                return ge::GRAPH_FAILED);
+    // A2/A3 的 MlaPrologV3：仅 W8A8（weightQuantMode=2）且 kv cache C8 per-token-group（kvCacheQuantMode=3）允许 Dr=0
+    const bool dr0W8A8C8 = std::strncmp(context_.opType, V3_OP_NAME, OP_NAME_LEN) == 0 &&
+                           GetCurNpuArch() == NpuArch::DAV_2201 && baseShapeInfo_.drSize == 0U &&
+                           context_.weightQuantMode != nullptr && context_.kvQuantMode != nullptr &&
+                           *context_.weightQuantMode == static_cast<int64_t>(WEIGHT_QUANT_MODE::FULL_QUANT) &&
+                           *context_.kvQuantMode == static_cast<int64_t>(KV_QUANT_MODE::PER_TILE);
+    if (!dr0W8A8C8) {
+        OP_CHECK_IF(baseShapeInfo_.drSize != DR_SIZE,
+                    OP_LOGE_FOR_INVALID_VALUE(
+                        context_.opName, "Dr", std::to_string(baseShapeInfo_.drSize),
+                        std::to_string(DR_SIZE) + ". Dr=0 requires weightQuantMode=2 and kvCacheQuantMode=3"),
+                    return ge::GRAPH_FAILED);
+    }
     OP_CHECK_IF(baseShapeInfo_.nkvSize != NKV_SIZE,
                 OP_LOGE_FOR_INVALID_VALUE(context_.opName, "Nkv", std::to_string(baseShapeInfo_.nkvSize),
                                           std::to_string(NKV_SIZE)),
@@ -322,11 +331,18 @@ ge::graphStatus MlaPrologTilingCheck::CheckHcqSize() const
 ge::graphStatus MlaPrologTilingCheck::CheckDSize() const
 {
     if (std::strncmp(context_.opType, V3_OP_NAME, OP_NAME_LEN) == 0) {
-        const std::set<uint32_t> supportedDSize{128U, 192U};
-        OP_CHECK_IF(supportedDSize.find(baseShapeInfo_.dSize) == supportedDSize.end(),
-                    OP_LOGE_FOR_INVALID_VALUE(context_.opName, "D", std::to_string(baseShapeInfo_.dSize),
-                                              ConvertContainerToStringV3(supportedDSize)),
-                    return ge::GRAPH_FAILED);
+        if (baseShapeInfo_.drSize == 0U) {
+            OP_CHECK_IF(baseShapeInfo_.dSize != D_SIZE_NO_ROPE,
+                        OP_LOGE_FOR_INVALID_VALUE(context_.opName, "D", std::to_string(baseShapeInfo_.dSize),
+                                                  std::to_string(D_SIZE_NO_ROPE) + " when Dr is 0"),
+                        return ge::GRAPH_FAILED);
+        } else {
+            const std::set<uint32_t> supportedDSize{128U, 192U};
+            OP_CHECK_IF(supportedDSize.find(baseShapeInfo_.dSize) == supportedDSize.end(),
+                        OP_LOGE_FOR_INVALID_VALUE(context_.opName, "D", std::to_string(baseShapeInfo_.dSize),
+                                                  ConvertContainerToStringV3(supportedDSize)),
+                        return ge::GRAPH_FAILED);
+        }
     } else {
         OP_CHECK_IF(baseShapeInfo_.dSize != D_SIZE,
                     OP_LOGE(context_.opName, "D allows only %u, got %u.", D_SIZE, baseShapeInfo_.dSize),

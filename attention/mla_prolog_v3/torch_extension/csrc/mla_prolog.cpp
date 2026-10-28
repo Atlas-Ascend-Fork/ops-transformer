@@ -32,8 +32,10 @@ constexpr int64_t FP8_E4M3_BLOCK_SIZE = 32;
 constexpr int64_t HE_SUPPORTED[] = {1024, 2048, 3072, 4096, 5120, 6144, 7168, 7680, 8192};
 constexpr int64_t HCQ_SUPPORTED[] = {1536, 2048};
 constexpr int64_t D_SUPPORTED[] = {128, 192};
+constexpr int64_t D_NO_ROPE = 256;
 constexpr int64_t HCKV = 512;
 constexpr int64_t DR = 64;
+constexpr int64_t DR_NONE = 0;
 constexpr int64_t NKV = 1;
 constexpr int64_t BLOCK_SIZE_MIN = 16;
 constexpr int64_t BLOCK_SIZE_MAX = 1024;
@@ -116,11 +118,27 @@ constexpr int64_t HE_SUPPORTED_SIZE = sizeof(HE_SUPPORTED) / sizeof(HE_SUPPORTED
 constexpr int64_t HCQ_SUPPORTED_SIZE = sizeof(HCQ_SUPPORTED) / sizeof(HCQ_SUPPORTED[0]);
 constexpr int64_t D_SUPPORTED_SIZE = sizeof(D_SUPPORTED) / sizeof(D_SUPPORTED[0]);
 
-// 校验 kv_cache 最后一维（Dtile）：pertoken-pergroup 场景（kv_cache_quant_mode=3）为 656，其余为 512。
-void _CheckDtile(const at::Tensor& kv_cache, int64_t kv_cache_quant_mode)
+// 校验 kv_cache 最后一维（Dtile）。
+// Dr=64：pertoken-pergroup（kv_cache_quant_mode=3）为 656，其余为 512。
+// Dr=0：Dtile 等于 Hckv，ckvkr/scale 合并存储时再叠加上对应尾巴。
+void _CheckDtile(const at::Tensor& kv_cache, int64_t kv_cache_quant_mode, int64_t hckv, int64_t rope_dim,
+                 int64_t ckvkr_repo_mode, int64_t quant_scale_repo_mode, int64_t tile_size)
 {
     const int64_t dtile = kv_cache.size(kv_cache.dim() - 1);
-    const int64_t expected_dtile = (kv_cache_quant_mode == MODE_3) ? DTILE_PTPG : DTILE_NON_PTPG;
+    int64_t expected_dtile = (kv_cache_quant_mode == MODE_3) ? DTILE_PTPG : DTILE_NON_PTPG;
+    if (rope_dim == DR_NONE) {
+        expected_dtile = hckv;
+        if (ckvkr_repo_mode == MODE_1) {
+            expected_dtile +=
+                rope_dim * (static_cast<int64_t>(sizeof(uint16_t)) / static_cast<int64_t>(sizeof(int8_t)));
+        }
+        if (quant_scale_repo_mode == MODE_1) {
+            TORCH_CHECK(tile_size > 0, "tile_size must be positive when quant_scale_repo_mode is 1, but got ",
+                        tile_size);
+            expected_dtile +=
+                (hckv / tile_size) * (static_cast<int64_t>(sizeof(float)) / static_cast<int64_t>(sizeof(int8_t)));
+        }
+    }
     TORCH_CHECK(dtile == expected_dtile, "kv_cache last dim (Dtile) must be ", expected_dtile,
                 " (kv_cache_quant_mode=", kv_cache_quant_mode, "), but the actual value is ", dtile);
 }
@@ -152,8 +170,9 @@ void CheckKrCacheLayout(const at::Tensor& kr_cache, int64_t rope_dim)
 
 // 校验 cache 张量（kv_cache/kr_cache）的 shape 格式字段约束。
 void CheckCacheShapes(const at::Tensor& kv_cache, const at::Tensor& kr_cache, const std::string& cache_mode,
-                      int64_t kv_cache_quant_mode, int64_t rope_dim, const c10::optional<at::Tensor>& cache_index,
-                      int64_t ckvkr_repo_mode)
+                      int64_t kv_cache_quant_mode, int64_t rope_dim, int64_t hckv,
+                      const c10::optional<at::Tensor>& cache_index, int64_t ckvkr_repo_mode,
+                      int64_t quant_scale_repo_mode, int64_t tile_size)
 {
     const bool is_merged_repo = (ckvkr_repo_mode == MODE_1);
     if (is_merged_repo) {
@@ -173,7 +192,7 @@ void CheckCacheShapes(const at::Tensor& kv_cache, const at::Tensor& kr_cache, co
         if (!is_merged_repo) {
             CheckKrCacheLayout(kr_cache, rope_dim);
         }
-        _CheckDtile(kv_cache, kv_cache_quant_mode);
+        _CheckDtile(kv_cache, kv_cache_quant_mode, hckv, rope_dim, ckvkr_repo_mode, quant_scale_repo_mode, tile_size);
         return;
     }
 
@@ -188,7 +207,7 @@ void CheckCacheShapes(const at::Tensor& kv_cache, const at::Tensor& kr_cache, co
     if (!is_merged_repo) {
         CheckKrCacheLayout(kr_cache, rope_dim);
     }
-    _CheckDtile(kv_cache, kv_cache_quant_mode);
+    _CheckDtile(kv_cache, kv_cache_quant_mode, hckv, rope_dim, ckvkr_repo_mode, quant_scale_repo_mode, tile_size);
 
     const bool is_pa =
         cache_mode == "PA_BSND" || cache_mode == "PA_NZ" || cache_mode == "PA_BLK_BSND" || cache_mode == "PA_BLK_NZ";
@@ -215,7 +234,8 @@ void CheckShapeConstraints(const at::Tensor& token_x, const at::Tensor& weight_d
                            const at::Tensor& kv_cache, const at::Tensor& kr_cache,
                            const c10::optional<at::Tensor>& rope_sin, const c10::optional<at::Tensor>& rope_cos,
                            const c10::optional<at::Tensor>& cache_index, const std::string& cache_mode,
-                           int64_t kv_cache_quant_mode, int64_t ckvkr_repo_mode)
+                           int64_t weight_quant_mode, int64_t kv_cache_quant_mode, int64_t ckvkr_repo_mode,
+                           int64_t quant_scale_repo_mode, int64_t tile_size)
 {
     const int64_t token_x_dim = token_x.dim();
     TORCH_CHECK(token_x_dim == DIM_2 || token_x_dim == DIM_3,
@@ -239,8 +259,19 @@ void CheckShapeConstraints(const at::Tensor& token_x, const at::Tensor& weight_d
     TORCH_CHECK(head_num >= HEAD_NUM_MIN && head_num <= HEAD_NUM_MAX,
                 "head num N (weight_uk.size(0)) must be an integer in [", HEAD_NUM_MIN, ", ", HEAD_NUM_MAX,
                 "], but the actual value is ", head_num);
-    TORCH_CHECK(IsInSupportedSet(qk_dim, D_SUPPORTED, D_SUPPORTED_SIZE),
-                "qk dim D (weight_uk.size(1)) must be one of 128/192, but the actual value is ", qk_dim);
+    const int64_t rope_dim_for_hckv = ResolveRopeDim(token_x, rope_sin, weight_uk, weight_dkv_kr);
+    if (rope_dim_for_hckv == DR_NONE) {
+        TORCH_CHECK(weight_quant_mode == MODE_2 && kv_cache_quant_mode == MODE_3,
+                    "Dr=0 is only supported for W8A8 with kv cache C8 per-token-group, "
+                    "weight_quant_mode=2 and kv_cache_quant_mode=3, but got weight_quant_mode=",
+                    weight_quant_mode, ", kv_cache_quant_mode=", kv_cache_quant_mode);
+        TORCH_CHECK(qk_dim == D_NO_ROPE,
+                    "when qk rope head dim Dr is 0, qk nope head dim D (weight_uk.size(1)) must be ", D_NO_ROPE,
+                    ", but the actual value is ", qk_dim);
+    } else {
+        TORCH_CHECK(IsInSupportedSet(qk_dim, D_SUPPORTED, D_SUPPORTED_SIZE),
+                    "qk nope head dim D (weight_uk.size(1)) must be one of 128/192, but the actual value is ", qk_dim);
+    }
     TORCH_CHECK(kv_lora_rank == HCKV, "kv lora rank Hckv (weight_uk.size(2)) must be ", HCKV,
                 ", but the actual value is ", kv_lora_rank);
 
@@ -252,8 +283,9 @@ void CheckShapeConstraints(const at::Tensor& token_x, const at::Tensor& weight_d
     TORCH_CHECK(IsInSupportedSet(hcq, HCQ_SUPPORTED, HCQ_SUPPORTED_SIZE),
                 "q lora rank Hcq (weight_dq.size(1)) must be one of 1536/2048, but the actual value is ", hcq);
 
-    const int64_t rope_dim = ResolveRopeDim(token_x, rope_sin, weight_uk, weight_dkv_kr);
-    TORCH_CHECK(rope_dim == DR, "qk rope dim Dr must be ", DR, ", but the actual value is ", rope_dim);
+    const int64_t rope_dim = rope_dim_for_hckv;
+    TORCH_CHECK(rope_dim == DR || rope_dim == DR_NONE, "qk rope dim Dr must be ", DR, " or ", DR_NONE,
+                ", but the actual value is ", rope_dim);
     if (HasDefinedTensor(rope_cos)) {
         TORCH_CHECK(rope_cos.value().size(rope_cos.value().dim() - 1) == rope_dim,
                     "rope_sin and rope_cos last dim must be equal, but rope_cos last dim is ",
@@ -281,7 +313,8 @@ void CheckShapeConstraints(const at::Tensor& token_x, const at::Tensor& weight_d
     TORCH_CHECK(rmsnorm_gamma_ckv.dim() == 1 && rmsnorm_gamma_ckv.size(0) == kv_lora_rank,
                 "rmsnorm_gamma_ckv must be 1D with shape [", kv_lora_rank, "], but got ", rmsnorm_gamma_ckv.sizes());
 
-    CheckCacheShapes(kv_cache, kr_cache, cache_mode, kv_cache_quant_mode, rope_dim, cache_index, ckvkr_repo_mode);
+    CheckCacheShapes(kv_cache, kr_cache, cache_mode, kv_cache_quant_mode, rope_dim, kv_lora_rank, cache_index,
+                     ckvkr_repo_mode, quant_scale_repo_mode, tile_size);
 }
 
 bool IsFullQuantKvScene(int64_t weight_quant_mode, int64_t kv_cache_quant_mode)
@@ -442,7 +475,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> mla_prolo
     TORCH_CHECK(weight_uk.dim() == DIM_3, "weight_uk dim num should be 3, but the actual value is ", weight_uk.dim());
     CheckShapeConstraints(token_x, weight_dq, weight_uq_qr, weight_uk, weight_dkv_kr, rmsnorm_gamma_cq,
                           rmsnorm_gamma_ckv, kv_cache, kr_cache, rope_sin, rope_cos, cache_index, cache_mode,
-                          kv_cache_quant_mode, ckvkr_repo_mode);
+                          weight_quant_mode, kv_cache_quant_mode, ckvkr_repo_mode, quant_scale_repo_mode, tile_size);
 
     const bool is_hifloat8 =
         IsHifloat8Scene(weight_quant_mode, token_x, weight_dq, weight_uq_qr, weight_dkv_kr, token_x_dtype,
