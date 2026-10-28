@@ -196,12 +196,10 @@ NpuOpsTransformerExt是一个轻量级，高性能的算子开发工程模板，
     set(NPU_EXT_OPERATOR_LIST "typhoon_mla;score_normalize;rope_matrix;select_attention_operators;my_ops")
     ```
 
-3. 在`npu_ops_transformer_ext/npu_ops_def.cpp`中添加TORCH_LIBRARY_IMPL定义
+3. 在 `npu_ops_transformer_ext/npu_ops_def.cpp` 的现有 `TORCH_LIBRARY(npu_ops_transformer_ext, m)` 定义中添加算子 schema
 
     ```c++
-    TORCH_LIBRARY_IMPL(npu_ops_transformer_ext, PrivateUse1, m) {
-        m.impl("my_ops", my_ops_npu);
-    }
+    m.def("my_ops(Tensor x, Tensor y) -> Tensor");
     ```
 
 4. (可选)在`npu_ops_transformer_ext/ops.py`中封装自定义接口
