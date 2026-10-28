@@ -3248,11 +3248,11 @@ void FlashAttentionScoreGradTilingUs1s2Bs2David::CalcleBandDeterParam()
     p = p > m ? m : p;
 
     // 负数场景变换
-    if (q < 0) {
+    if (q <= 0) {
         m = m + q;
         p = p + q;
         q = 1;
-    } else if (p < 0) {
+    } else if (p <= 0) {
         n = n + p;
         q = p + q;
         p = 1;

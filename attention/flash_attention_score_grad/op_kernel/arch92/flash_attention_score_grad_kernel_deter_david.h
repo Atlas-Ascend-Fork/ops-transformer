@@ -157,14 +157,14 @@ __aicore__ inline int64_t FlashAttentionScoreGradKernelDeter<CubeBlockType, VecB
 
         int64_t actualM, actualN, actualP, actualQ;
         int64_t mOffset, nOffset;
-        if (p < 0) {
+        if (p <= 0) {
             actualM = m;
             actualN = n + p;
             actualP = 1;
             actualQ = p + q;
             mOffset = 0;
             nOffset = -p;
-        } else if (q < 0) {
+        } else if (q <= 0) {
             actualM = m + q;
             actualN = n;
             actualP = p + q;

@@ -58,8 +58,8 @@ public:
     __aicore__ inline bool IsValid(FagRunInfo& runInfo, int64_t taskId, int64_t index);
     __aicore__ inline bool IsValidForDeter(FagRunInfo& runInfo, int64_t taskId, int64_t index);
     __aicore__ inline void UpdateToken(FagRunInfo& runInfo, int64_t bIdx);
-    __aicore__ inline bool CheckIsValidBlock(FagRunInfo& runInfo, int64_t baseIdx, int64_t s1oDimIdx,
-                                             int64_t s2oDimIdx);
+    __aicore__ inline bool CheckIsValidBlock(FagRunInfo& runInfo, int64_t baseIdx, int64_t s1oDimIdx, int64_t s2oDimIdx,
+                                             int64_t taskId);
     __aicore__ inline bool CheckIsValidBlockForDeter(FagRunInfo& runInfo, int64_t baseIdx, int64_t s1oDimIdx,
                                                      int64_t s2oDimIdx, int64_t taskId);
     __aicore__ inline int64_t GetNextValidIdx(FagRunInfo& runInfo, int64_t taskId, int64_t startIndex,
@@ -655,7 +655,7 @@ __aicore__ inline void FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockTy
 
 template <typename ChildClass, typename CubeBlockType, typename VecBlockType>
 __aicore__ inline bool FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockType, VecBlockType>::CheckIsValidBlock(
-    FagRunInfo& runInfo, int64_t baseIdx, int64_t s1oDimIdx, int64_t s2oDimIdx)
+    FagRunInfo& runInfo, int64_t baseIdx, int64_t s1oDimIdx, int64_t s2oDimIdx, int64_t taskId)
 {
     int64_t s2IdxLeft = s2oDimIdx * CUBE_BASEN;
     int64_t s2IdxRight = (s2oDimIdx + 1) * CUBE_BASEN;
@@ -672,6 +672,17 @@ __aicore__ inline bool FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockTy
         int64_t curBIdx = baseIdx / constInfo.n2GS1oS2o;
         s2EndLen = Min(Max(s2EndLen, ((__gm__ int64_t*)prefixNAddr)[curBIdx]),
                        static_cast<int64_t>(constInfo.commonConstInfo.s2Size));
+    } else {
+        if (constInfo.sparseMode == RIGHT_DOWN_CAUSAL) {
+            s2EndLen = Min(s2EndLen, constInfo.commonConstInfo.s2Size);
+        }
+    }
+    if constexpr (IS_BN2_MULTIBLK) {
+        multiBlkInfo.s2oDimIdx = s2oDimIdx;
+        multiBlkInfo.s2OuterTmp = 0;
+        multiBlkInfo.s2SparseLeft = 0;
+        multiBlkInfo.s2SparseRight = s2EndLen;
+        CheckS1RangeInBn2(taskId);
     }
     bool isValid = s2IdxLeft < s2EndLen;
     if (isValid) {
@@ -708,6 +719,13 @@ FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockType, VecBlockType>::Chec
         if (constInfo.sparseMode == RIGHT_DOWN_CAUSAL) {
             s2EndLen = Min(s2EndLen, constInfo.commonConstInfo.s2Size);
         }
+    }
+    if constexpr (IS_BN2_MULTIBLK) {
+        multiBlkInfo.s2oDimIdx = s2oDimIdx;
+        multiBlkInfo.s2OuterTmp = 0;
+        multiBlkInfo.s2SparseLeft = 0;
+        multiBlkInfo.s2SparseRight = s2EndLen;
+        CheckS1RangeInBn2(taskId);
     }
     bool isValid = s2IdxLeft < s2EndLen;
     if (isValid) {
@@ -1000,7 +1018,7 @@ __aicore__ inline bool FlashAttentionScoreGradKernelBase<ChildClass, CubeBlockTy
         if constexpr (IS_ATTEN_MASK) {
             if (constInfo.sparseMode == RIGHT_DOWN_CAUSAL || constInfo.sparseMode == PREFIX ||
                 constInfo.sparseMode == PREFIX_COMPRESS) {
-                return CheckIsValidBlock(runInfo, index, s1oDimIdx, s2oDimIdx);
+                return CheckIsValidBlock(runInfo, index, s1oDimIdx, s2oDimIdx, taskId);
             } else {
                 int64_t s2SparseLeft = Max(CUBE_BASEM * s1oDimIdx - constInfo.s1Token, 0);
                 s2SparseLeft = s2SparseLeft >> 6 << 6;

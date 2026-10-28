@@ -1277,13 +1277,13 @@ __aicore__ inline void UpdateMNPQ(int64_t actualCalcS1Token, int64_t actualCalcS
     q = q > n ? n : q;
 
     // 负数场景变换
-    if (p < 0) {
+    if (p <= 0) {
         coordinateInfo.mOffset = 0;
         coordinateInfo.nOffset = -p;
         n = n + p;
         q = p + q;
         p = 1;
-    } else if (q < 0) {
+    } else if (q <= 0) {
         coordinateInfo.mOffset = -q;
         coordinateInfo.nOffset = 0;
         m = m + q;
@@ -2099,7 +2099,7 @@ __aicore__ inline void CalGQABandIndex(const BandInfo& bandInfo, int64_t j, int6
         int64_t R1 = bandInfo.R1;
         int64_t R2 = bandInfo.R2;
         // 对称性好的情况特殊处理
-        if (NUM_TWO * b2 == k && L1 == L3) {
+        if (NUM_TWO * b2 == k && L1 == L3 && m > 1 && L1 > 0) {
             b_id = (j + 1) / NUM_TWO;
             if (L2 % NUM_TWO == 1) {
                 int64_t R0 = Max(NUM_TWO * p, m);
