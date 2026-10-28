@@ -19,7 +19,10 @@
 #include "kernel_operator.h"
 #endif
 #include "sparse_flash_attention_template_tiling_key.h"
-#if (__CCE_AICORE__ == 310)
+
+#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
+#include "arch92/sparse_flash_attention_kernel_mla_arch92.h"
+#elif (__CCE_AICORE__ == 310)
 #include "arch35/sparse_flash_attention_kernel_mla_arch35.h"
 #else
 #include "arch22/sparse_flash_attention_kernel_mla.h"
@@ -27,7 +30,7 @@
 
 using namespace AscendC;
 
-#if (__CCE_AICORE__ == 310)
+#if (__CCE_AICORE__ == 310) || (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202))
 #if defined(__DAV_C310_CUBE__)
 #define SFA_OP_IMPL(templateClass, tilingdataClass, ...) \
     do { \
@@ -80,12 +83,16 @@ __global__ __aicore__ void sparse_flash_attention(
     __gm__ uint8_t* queryRope, __gm__ uint8_t* keyRope, __gm__ uint8_t* sinks, __gm__ uint8_t* attentionOut,
     __gm__ uint8_t* softmaxMax, __gm__ uint8_t* softmaxSum, __gm__ uint8_t* workspace, __gm__ uint8_t* tiling)
 {
+#if (__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202)
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+#else
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+#endif
 
     TPipe tPipe;
     __gm__ uint8_t* user = GetUserWorkspace(workspace);
 
-#if (__CCE_AICORE__ == 310)
+#if (__CCE_AICORE__ == 310) || (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202))
     if constexpr (ORIG_DTYPE_QUERY == DT_BF16 && ORIG_DTYPE_KEY == DT_BF16 && ORIG_DTYPE_ATTENTION_OUT == DT_BF16) {
         SFA_OP_IMPL(BaseApi::SparseFlashAttentionKernelMla, SparseFlashAttentionTilingDataMla, bfloat16_t, bfloat16_t,
                     float, bfloat16_t, FLASH_DECODE, PAGE_ATTENTION, static_cast<SFA_LAYOUT>(LAYOUT_T),

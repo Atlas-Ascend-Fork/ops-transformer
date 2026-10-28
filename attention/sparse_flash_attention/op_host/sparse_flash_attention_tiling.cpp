@@ -497,7 +497,7 @@ void SFAMlaTiling::CalcFDWorkSpace(const uint32_t actCoreNum)
 void SFAMlaTiling::GetWorkspaceSize()
 {
     uint32_t actCoreNum = coreNum_;
-    if (sfaInfo_->isA5) {
+    if (sfaInfo_->isA5 || sfaInfo_->isA6) {
         workspaceSize_ = libapiSize_;
         constexpr uint32_t TRIPLE_BUFFER_NUM = 3;
         constexpr uint32_t S2_BASE_SIZE = 128; // S2轴基本块大小
@@ -548,7 +548,7 @@ void SFAMlaTiling::CalcBlockDim()
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(sfaInfo_->platformInfo);
     auto aicNum = usedCoreNum_;
-    auto aivNum = 2 * usedCoreNum_;
+    auto aivNum = sfaInfo_->isA6 ? usedCoreNum_ : 2 * usedCoreNum_;
 
     blockDim_ = ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum);
     OP_LOGI(sfaInfo_->opName, "SFA block dim: %u aiv Num: %u aic Num: %u.", blockDim_, aivNum, aicNum);
@@ -806,7 +806,8 @@ ge::graphStatus SFATilingCheck::CheckSingleParaSparseMode() const
 
 ge::graphStatus SFATilingCheck::CheckSingleParaSparseBlockSize() const
 {
-    OP_CHECK_IF((npuArch_ == NpuArch::DAV_3510 && *opParamInfo_.sparseBlockSize != 1),
+    OP_CHECK_IF(((npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) &&
+                 *opParamInfo_.sparseBlockSize != 1),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "sparse_block_size",
                                                       std::to_string(*opParamInfo_.sparseBlockSize).c_str(),
                                                       "Sparse_block_size only support 1"),
@@ -1483,7 +1484,7 @@ ge::graphStatus SFATilingCheck::CheckFeatureMlaNoQuantShape() const
                         std::to_string(n2Size_) + ")"),
                 return ge::GRAPH_FAILED);
 
-    if (isA5_) {
+    if (isA5_ || isA6_) {
         OP_CHECK_IF(gSize_ < 1 || gSize_ > 128,
                     OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
                         opName_, "query and key",
@@ -1528,7 +1529,7 @@ ge::graphStatus SFATilingCheck::CheckFeatureMlaNoQuantShape() const
                     return ge::GRAPH_FAILED);
     }
 
-    if (isA5_) {
+    if (isA5_ || isA6_) {
         OP_CHECK_IF(s1Size_ <= 0 && (qLayout_ == SFALayout::BSND),
                     OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
                         opName_, "query", SFAToStringRaw(sfaParams.query.shape->GetStorageShape()).c_str(),
@@ -1631,6 +1632,7 @@ void SFATilingCheck::Init()
     opParamInfo_ = sfaInfo_.opParamInfo;
     npuArch_ = sfaInfo_.npuArch;
     isA5_ = sfaInfo_.isA5;
+    isA6_ = sfaInfo_.isA6;
 
     bSize_ = sfaInfo_.bSize;
     n1Size_ = sfaInfo_.n1Size;
@@ -1840,7 +1842,9 @@ ge::graphStatus SFAInfoParser::GetNpuInfo()
 
     npuArch_ = sfaAscendcPlat.GetCurNpuArch();
     isA5_ = (npuArch_ == NpuArch::DAV_3510);
-    if (npuArch_ != NpuArch::DAV_2201 && npuArch_ != NpuArch::DAV_3510) {
+    isA6_ = (npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202);
+    if (npuArch_ != NpuArch::DAV_2201 && npuArch_ != NpuArch::DAV_3510 && npuArch_ != NpuArch::DAV_9201 &&
+        npuArch_ != NpuArch::DAV_9202) {
         OPS_REPORT_VECTOR_INNER_ERR(opName_, "Npu Arch Version[%d] is not support.", static_cast<int32_t>(npuArch_));
         return GRAPH_FAILED;
     }
@@ -2029,11 +2033,11 @@ ge::graphStatus SFAInfoParser::GetKvLayout()
         return ge::GRAPH_FAILED;
     }
     OP_CHECK_IF(
-        *opParamInfo_.returnSoftmaxLse && kvLayout_ == SFALayout::PA_BSND && !isA5_,
+        *opParamInfo_.returnSoftmaxLse && kvLayout_ == SFALayout::PA_BSND && !isA5_ && !isA6_,
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
             opName_, "layout_key", SFALayoutToSerialString(kvLayout_).c_str(),
             "When return_softmax_lse is true, layout_kv does not support PA_BSND, it is only supported on Ascend "
-            "950PR/Ascend 950DT"),
+            "950PR/Ascend 950DT/Ascend 960DT"),
         return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -2218,7 +2222,7 @@ ge::graphStatus SFAInfoParser::GetActualseqInfo()
 // 非PA_BSND时，所有轴都必须连续
 ge::graphStatus SFAInfoParser::CheckContiguous() const
 {
-    if (!isA5_) {
+    if (!isA5_ && !isA6_) {
         return ge::GRAPH_SUCCESS;
     }
 
@@ -2254,6 +2258,7 @@ void SFAInfoParser::GenerateInfo(SFATilingInfo& sfaInfo)
     sfaInfo.opParamInfo = opParamInfo_;
     sfaInfo.npuArch = npuArch_;
     sfaInfo.isA5 = isA5_;
+    sfaInfo.isA6 = isA6_;
 
     sfaInfo.bSize = bSize_;
     sfaInfo.n1Size = n1Size_;
@@ -2285,7 +2290,7 @@ void SFAInfoParser::GenerateInfo(SFATilingInfo& sfaInfo)
     sfaInfo.blockTypeSize = sizeof(float);
     sfaInfo.maxBlockNumPerBatch = maxBlockNumPerBatch_;
 
-    if (npuArch_ != NpuArch::DAV_3510) {
+    if (npuArch_ != NpuArch::DAV_3510 && npuArch_ != NpuArch::DAV_9201 && npuArch_ != NpuArch::DAV_9202) {
         sfaInfo.keyStride0 = 0; // 910无需使用stride
     } else {
         if ((keyStride0_ != 0) && (n2Size_ != 0) && (qkHeadDim_ != 0)) {

@@ -14,7 +14,7 @@ from cann_ops_transformer.op_builder import OpBuilder, get_as_library
 import torch_npu
 
 SFA_TOKENS_DEFAULT = 9223372036854775807
-SFA_SUPPORTED_SOC_NAME = "Ascend950"
+SFA_SUPPORTED_SOC_NAME = ["Ascend950", "Ascend960"]
 
 
 class SparseFlashAttentionOpBuilder(OpBuilder):
@@ -172,7 +172,7 @@ def sparse_flash_attention(
     return_softmax_lse: bool = False,
 ):
     current_device_name = torch_npu.npu.get_device_name()
-    if SFA_SUPPORTED_SOC_NAME not in current_device_name:
+    if not any(keyword in current_device_name for keyword in SFA_SUPPORTED_SOC_NAME):
         raise RuntimeError(
             f"The current device is {current_device_name}, "
             "cann_ops_transformer.sparse_flash_attention is not supported on this device. "

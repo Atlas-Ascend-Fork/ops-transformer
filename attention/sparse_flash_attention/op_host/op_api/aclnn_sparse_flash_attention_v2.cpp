@@ -53,9 +53,11 @@ aclnnStatus aclnnSparseFlashAttentionV2GetWorkspaceSize(
     bool returnSoftmaxLse, const aclTensor* attentionOut, const aclTensor* softmaxMax, const aclTensor* softmaxSum,
     uint64_t* workspaceSize, aclOpExecutor** executor)
 {
-    if (sinksOptional != nullptr && op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510) {
+    if (sinksOptional != nullptr && op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510 &&
+        op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_9201 &&
+        op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_9202) {
         OP_LOGE(ACLNN_ERR_RUNTIME_ERROR,
-                "The sinks input of aclnnSparseFlashAttentionV2 is only supported on Ascend950.");
+                "The sinks input of aclnnSparseFlashAttentionV2 is only supported on Ascend950 and Ascend960.");
         return ACLNN_ERR_RUNTIME_ERROR;
     }
     const aclTensor* valueTensor = (value == nullptr) ? key : value;
