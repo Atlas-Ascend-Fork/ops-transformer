@@ -193,6 +193,12 @@ bool SparseLightningIndexerKLLossGradTilingBase::AnalyzeAttrs()
             opName, "attributes", (std::string() + std::to_string(cmpRatio)).c_str(),
             (std::string() + "cmp_ratio must be in [1, 128], but got [" + std::to_string(cmpRatio) + "].").c_str()),
         return false);
+    auto cmpResidualK = context_->GetOptionalInputShape(CMP_RESIDUAL_KEY_INPUT_INDEX);
+    OP_CHECK_IF(
+        sparseMode == MASK_MODE_CAUSAL && cmpRatio != 1 && cmpResidualK == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            opName, "cmp_residual_k", "cmp_residual_k is required when mask_mode is 3 with cmp_ratio not equal to 1"),
+        return false);
     OP_LOGD(context_, "attrs: layout_q[%s], layout_k[%s], mask_mode[%d], cmp_ratio[%ld], deterministic[%d].",
             inputLayout, keyLayout, sparseMode, cmpRatio, deterministic);
     return true;

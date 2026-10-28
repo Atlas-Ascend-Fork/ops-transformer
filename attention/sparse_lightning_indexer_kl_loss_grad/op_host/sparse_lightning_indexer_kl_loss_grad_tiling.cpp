@@ -94,8 +94,7 @@ ge::graphStatus TilingSparseLightningIndexerKLLossGrad(gert::TilingContext* cont
     } else {
         OP_LOGW(context, "Current npu arch is not dav-3510.");
         SparseLightningIndexerKLLossGradTilingBase sligKLLossTiling(context);
-        sligKLLossTiling.DoTiling();
-        return ge::GRAPH_SUCCESS;
+        return sligKLLossTiling.DoTiling();
     }
 }
 
