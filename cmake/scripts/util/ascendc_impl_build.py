@@ -969,7 +969,10 @@ def write_scripts(
     for op_desc in op_descs:
         # pypto-pro binary-delivery ops (from --pypto-ops, matched by op_file): emit the pypto wrapper
         # variant (calls pypto_compile_op). Non-pypto ops keep the template compile_op wrapper.
-        op_desc.is_pypto = op_desc.op_file in pypto_ops
+        # pypto marker only for SOCs with a PyPTO backend mapping
+        op_desc.is_pypto = (
+            op_desc.op_file in pypto_ops and PYPTO_ARCH_MAP.get(ini_soc) is not None
+        )
         if op_desc.is_pypto:
             if not ini_soc:
                 raise RuntimeError(

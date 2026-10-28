@@ -26,7 +26,9 @@ try:
     import torch_npu  # noqa: F401
 
     _HAS_TORCH_NPU = True
-except ImportError:
+except ModuleNotFoundError:
+    # 只捕"模块不存在"：torch_npu 自身 import 链里的其它 ImportError 属环境
+    # 配置问题，静默吞掉会误报"无 NPU 环境"而跳过本应失败的用例
     _HAS_TORCH_NPU = False
 
 from cann_ops_transformer.ops.attention.compressor.compressor import _compressor_forward

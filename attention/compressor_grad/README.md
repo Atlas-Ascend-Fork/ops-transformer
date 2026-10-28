@@ -5,8 +5,8 @@
 | 产品                                                         | 是否支持 |
 | ------------------------------------------------------------ | :------: |
 |<term>Ascend 950PR&950DT系列产品</term>|      √     |
-|<term>Atlas A3系列产品</term>|      ×     |
-|<term>Atlas A2系列产品</term>|      ×     |
+|<term>Atlas A3系列产品</term>|      √     |
+|<term>Atlas A2系列产品</term>|      √     |
 |<term>Atlas 200I/500 A2推理产品</term>|      ×     |
 |<term>Atlas推理系列产品</term>|      ×     |
 |<term>Atlas训练系列产品</term>|      ×     |
@@ -75,6 +75,7 @@
 ## 约束说明
 
 - x参数维度含义：B（Batch Size）表示输入样本批量大小、S（Sequence Length）表示输入样本序列长度、H（Head Size）表示hidden层的大小、D（Head Dim）表示hidden层的最小单元大小、T表示所有Batch输入样本序列长度的累加和。
+- 支持布局：BSH（x为[B,S,H]）与TH（x为[T,H]变长序列）两种布局；Atlas A2系列与A3系列共用同一算子实现。
 - 输入shape限制：
     - wkv支持输入shape[coff* D,H]
     - wgate支持输入shape[coff* D,H]
@@ -91,15 +92,27 @@
     - 若x的维度不采用BS合轴，即x的输入shape为[B,S,H]
         - cu\_seqlens，参数必须为空。
         - seqused，支持输入shape[B,]，要求每个Batch的有效token数小于等于对应Sequence Length长度，即要求seqused[n] <= S，且不小于0。
+
+- 输入契约与违规行为（cu\_seqlens/seqused/start\_pos值域）：cu\_seqlens/seqused/start\_pos为设备侧张量，host在图编译期不可读取其值，因此上述值域要求（cu\_seqlens首元素为0、单调不减、末元素<=T；seqused落在各batch的[0, 序列长度]区间；start\_pos非负）不做拒绝式拦截，而是在kernel侧硬化为如下确定行为（安全降级，非报错）：
+    - TH布局（x为[T,H]）：
+        - 某batch的cu\_seqlens[b]/cu\_seqlens[b+1]出现负值、大于T或cu\_seqlens[b+1] < cu\_seqlens[b]（非单调）时，该batch跳过不参与计算，其对应输出（d\_x的[cu\_seqlens[b], cu\_seqlens[b+1])行段及其它输出的该batch贡献）全零；其余batch正常计算。
+        - cu\_seqlens[0] != 0时，[0, cu\_seqlens[0])的token不属于任何batch，这些行不参与计算，d\_x对应行输出全零；各batch仍在自身的[cu\_seqlens[b], cu\_seqlens[b+1])窗口内正常计算。
+        - seqused[b]超出[0, cu\_seqlens[b+1] - cu\_seqlens[b]]时按区间端点截断（负值按0、超上界按窗口长度参与计算）。
+        - start\_pos[b]为全局序列锚点，合法值可以大于本batch窗口长度（不做上界截断）；负值非法，按0处理（等同不传start\_pos）。
+    - BSH布局（x为[B,S,H]）：
+        - seqused[b]超出[0, S]时按区间端点截断（负值按0处理即该batch无完整压缩块、输出全零；超上界按S处理即等同不传seqused）。
+        - start\_pos[b]取模cmp\_ratio后的偏移参与块锚点计算，负值/垃圾值不会造成越界访问。
+    - 所有违规输入均保证不产生越界读写与数值下溢；调用方应按上述值域构造输入以获得正确梯度。
+    - 结构性错误（shape/dtype/维度不一致、d\_cmp\_kv行数不足、空Tensor等）仍由host侧直接拒绝报错。
 - 输入值域限制：
-  - 该接口支持B、S泛化，且存在如下场景限制：
-      - **不支持B、S、T为0的空Tensor**：与正向Compressor不同，CompressorGrad所有输入/输出均不支持空Tensor，shapeSize必须大于0。
-      - 部分长序列场景下，如果计算量过大可能会导致出现超过NPU内存的报错，注：这里计算量会受x输入shape的影响，值越大计算量越大。
+    - 该接口支持B、S泛化，且存在如下场景限制：
+        - **不支持B、S、T为0的空Tensor**：与正向Compressor不同，CompressorGrad所有输入/输出均不支持空Tensor，shapeSize必须大于0。
+        - 部分长序列场景下，如果计算量过大可能会导致出现超过NPU内存的报错，注：这里计算量会受x输入shape的影响，值越大计算量越大。
 - 输入属性限制：
-  - 支持D为128/512。
-  - 支持H为1K~10K，512对齐。
-  - 支持coff为1/2。
-  - 支持cmp\_ratio为2~128。
+    - 支持D为128/512。
+    - 支持H为1K~10K，512对齐。
+    - 支持coff为1/2。
+    - 支持cmp\_ratio为2~128。
 
 ## 调用说明
 

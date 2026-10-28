@@ -10,7 +10,8 @@
 
 /*!
  * \file test_aclnn_compressor_grad.cpp
- * \brief CompressorGrad 算子 aclnn 调用示例（A5 / ascend950）
+ * \brief CompressorGrad算子aclnn调用示例（Ascend 950PR&950DT系列、Atlas A3系列、
+ *        Atlas A2系列；BSH/TH布局均支持）
  *        场景：C4A（D=512, coff=2, cmp_ratio=4, BSH layout, BF16）
  */
 
@@ -116,7 +117,7 @@ void PrintF32Result(const std::vector<int64_t>& shape, void** deviceAddr)
 
 int main()
 {
-    // 1. device/stream 初始化
+    // 1. device/stream初始化
     int32_t deviceId = 0;
     aclrtContext context = nullptr;
     aclrtStream stream = nullptr;
@@ -134,7 +135,7 @@ int main()
     int64_t coffD = coff * headDim;
     int64_t Sr = (S + cmpRatio - 1) / cmpRatio;
 
-    // 2. 构造输入与输出 shape
+    // 2. 构造输入与输出shape
     std::vector<int64_t> xShape = {B, S, hiddenSize};
     std::vector<int64_t> wkvShape = {coffD, hiddenSize};
     std::vector<int64_t> wgateShape = {coffD, hiddenSize};
@@ -147,7 +148,7 @@ int main()
     std::vector<int64_t> dWgateShape = {coffD, hiddenSize};
     std::vector<int64_t> dApeShape = {cmpRatio, coffD};
 
-    // 3. 构造 host 数据
+    // 3. 构造host数据
     int64_t xSize = GetShapeSize(xShape);
     int64_t wkvSize = GetShapeSize(wkvShape);
     int64_t wgateSize = GetShapeSize(wgateShape);
@@ -171,7 +172,7 @@ int main()
     std::vector<bfloat16> dWgateHostData(dWgateSize, bfloat16(0.0f));
     std::vector<float_t> dApeHostData(dApeSize, 0.0f);
 
-    // 4. 创建 aclTensor
+    // 4. 创建aclTensor
     void* xDeviceAddr = nullptr;
     void* wkvDeviceAddr = nullptr;
     void* wgateDeviceAddr = nullptr;
@@ -220,7 +221,7 @@ int main()
     ret = CreateAclTensor(dApeHostData, dApeShape, &dApeDeviceAddr, aclDataType::ACL_FLOAT, &dApe);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
 
-    // 5. 调用 aclnnCompressorGradGetWorkspaceSize
+    // 5. 调用aclnnCompressorGradGetWorkspaceSize
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor = nullptr;
 
@@ -229,14 +230,14 @@ int main()
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnCompressorGradGetWorkspaceSize failed. ERROR: %d\n", ret);
               return ret);
 
-    // 6. 申请 workspace
+    // 6. 申请workspace
     void* workspaceAddr = nullptr;
     if (workspaceSize > 0) {
         ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
 
-    // 7. 调用 aclnnCompressorGrad
+    // 7. 调用aclnnCompressorGrad
     ret = aclnnCompressorGrad(workspaceAddr, workspaceSize, executor, stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnCompressorGrad failed. ERROR: %d\n", ret); return ret);
 

@@ -23,6 +23,16 @@
 
 using namespace ge;
 using namespace AscendC;
+
+// arch35(PyPTO) tiling 依赖 codegen 生成头（构建侧 force-include，见 op_host/CMakeLists.txt），
+// 仅在 ascend950 参与构建（COMPRESSOR_GRAD_HAS_ARCH35）时编译本实现；arch22 走
+// op_host/arch22/compressor_grad_tiling.cpp，入口注册见 compressor_grad_tiling_register.cpp。
+#ifdef COMPRESSOR_GRAD_HAS_ARCH35
+#ifdef ASCENDC_OP_TEST
+#define CMP_GRAD_EXTERN_C extern "C"
+#else
+#define CMP_GRAD_EXTERN_C
+#endif
 namespace optiling {
 namespace {
 
@@ -628,13 +638,13 @@ ge::graphStatus CompressorGradTilingImpl::CheckSingleParaCoff() const
 
 ge::graphStatus CompressorGradTilingImpl::CheckFeature() const
 {
-    if (ge::GRAPH_SUCCESS != CheckFeatureValueSupport(&baseParams_.headDim, HEAD_DIM, "headDim", context_->opName)) {
+    if (ge::GRAPH_SUCCESS != CheckFeatureValueSupport(&baseParams_.headDim, HEAD_DIM, "head_dim", context_->opName)) {
         return ge::GRAPH_FAILED;
     }
     OP_CHECK_IF(
         baseParams_.hiddenSize > MAX_HIDDEN_SIZE || baseParams_.hiddenSize < MIN_HIDDEN_SIZE ||
             baseParams_.hiddenSize % ALIGN_FACTOR_HIDDEN_SIZE != 0,
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->opName, "hiddenSize", std::to_string(baseParams_.hiddenSize),
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->opName, "hidden_size", std::to_string(baseParams_.hiddenSize),
                                               "should be within [" + std::to_string(MIN_HIDDEN_SIZE) + ", " +
                                                   std::to_string(MAX_HIDDEN_SIZE) + "] and be 512-aligned"),
         return ge::GRAPH_FAILED);
@@ -972,7 +982,7 @@ ge::graphStatus CompressorGradTilingImpl::RunBigKernelTiling()
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus TilingCompressorGrad(gert::TilingContext* context)
+CMP_GRAD_EXTERN_C ge::graphStatus TilingCompressorGradArch35(gert::TilingContext* context)
 {
     OP_CHECK_IF(context == nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("CompressorGrad", "context", "is nullptr"),
                 return ge::GRAPH_FAILED);
@@ -1003,13 +1013,6 @@ static ge::graphStatus TilingCompressorGrad(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus TilingParseForCompressorGrad(gert::TilingParseContext* const context)
-{
-    (void)context;
-    return ge::GRAPH_SUCCESS;
-}
-
-IMPL_OP_OPTILING(CompressorGrad)
-    .Tiling(TilingCompressorGrad)
-    .TilingParse<CompressorGradCompileInfo>(TilingParseForCompressorGrad);
+// tiling 注册见 compressor_grad_tiling_register.cpp（NpuArch 分发）
 } // namespace optiling
+#endif // COMPRESSOR_GRAD_HAS_ARCH35

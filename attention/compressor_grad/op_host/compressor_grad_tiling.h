@@ -82,14 +82,14 @@ constexpr uint32_t DB_RATIO = 2;      // workspace 双缓冲倍数
 constexpr uint32_t COFF_MAX = 2;      // coff 上限
 constexpr uint32_t WEIGHT_NUM = 2;    // dWkv / dWgate 权重矩阵数量
 
-static const std::string X_NAME = "query";
+static const std::string X_NAME = "x"; // 对齐 def 注册名（compressor_grad_def.cpp）
 static const std::string WKV_NAME = "wkv";
 static const std::string WGATE_NAME = "wgate";
 static const std::string D_CMP_KV_NAME = "d_cmp_kv";
 static const std::string SOFTMAX_SCORE_NAME = "softmax_score";
 static const std::string KV_NAME = "kv";
 static const std::string CU_SEQLENS_NAME = "cu_seqlens";
-static const std::string SEQUSED_NAME = "seq_used";
+static const std::string SEQUSED_NAME = "seqused";
 static const std::string START_POS_NAME = "start_pos";
 static const std::string CMP_RATIO_NAME = "cmp_ratio";
 static const std::string COFF_NAME = "coff";
@@ -306,6 +306,8 @@ struct CompressorGradCompileInfo {
 
 // 类名不可用 CompressorGradTiling，与 pypto codegen 生成的 tiling data 类重名，
 // C++ injected-class-name 会遮蔽外部同名类型，导致 tilingData 成员类型错误。
+// tilingData 为 pypto 生成类指针，仅在 arch35(ascend950) 构建（COMPRESSOR_GRAD_HAS_ARCH35）时可见，
+// 保证本头文件在无 pypto 生成头的 arch22-only 环境下可独立编译。
 class CompressorGradTilingImpl {
 public:
     explicit CompressorGradTilingImpl(CompressorGradContext* context)
@@ -315,7 +317,9 @@ public:
 
     static ge::graphStatus ConvertContext(gert::TilingContext& context, CompressorGradContext& compressorGradContext);
     ge::graphStatus RunBigKernelTiling();
+#ifdef COMPRESSOR_GRAD_HAS_ARCH35
     CompressorGradTiling* tilingData = nullptr;
+#endif
 
 private:
     static ge::graphStatus ConvertRequiredParams(gert::TilingContext& context,
