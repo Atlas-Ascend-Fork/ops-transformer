@@ -17,6 +17,12 @@
 #include "op_api_ut_common/tensor_desc.h"
 #include "op_api_ut_common/op_api_ut.h"
 #include "opdev/platform.h"
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ENABLE_MATMUL_ALLTO_ALL_DT_HIFLOAT4
+#endif
+#endif
 
 using namespace op;
 using namespace std;
@@ -5349,6 +5355,7 @@ TEST_F(TestAclnnQuantMatmulAlltoAllV2, MXQuant_v2_cases_params)
     }
 }
 
+#ifdef ENABLE_MATMUL_ALLTO_ALL_DT_HIFLOAT4
 // HiF4全量化(A6/ascend960dt): groupSize固定[1,1,64]=4295032896, 或传0由tiling层自动推导
 constexpr int64_t HIF4_GROUP_SIZE = 4295032896;
 
@@ -5818,3 +5825,4 @@ TEST_F(TestAclnnQuantMatmulAllToAllV2HIF4, HIF4Quant_v2_cases_params)
         }
     }
 }
+#endif // ENABLE_MATMUL_ALLTO_ALL_DT_HIFLOAT4

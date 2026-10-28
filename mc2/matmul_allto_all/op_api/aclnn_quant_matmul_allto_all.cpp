@@ -14,6 +14,7 @@
  */
 #include "aclnn_quant_matmul_allto_all.h"
 #include "quant_matmul_allto_all_base.h"
+#include "matmul_allto_all_util.h"
 #include "opdev/platform.h"
 #include "opdev/op_log.h"
 #include "op_host/util/op_const_def.h"
@@ -27,6 +28,17 @@ extern "C" aclnnStatus aclnnQuantMatmulAlltoAllGetWorkspaceSize(
     bool transposeX2, const aclTensor* output, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     OP_LOGD("aclnnQuantMatmulAlltoAllGetWorkspaceSize start");
+
+    using matmul_allto_all_check::QuantModeType;
+    // HiF4量化特性仅在V2接口开发, V1显式拦截, 避免进入未适配路径产生异常错误
+    if (static_cast<QuantModeType>(x1QuantMode) == QuantModeType::HIFLOAT4_QUANT &&
+        static_cast<QuantModeType>(x2QuantMode) == QuantModeType::HIFLOAT4_QUANT) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
+                "HiF4 quant mode is only supported by aclnnQuantMatmulAllToAllV2, x1QuantMode is %ld, x2QuantMode "
+                "is %ld, please use the V2 interface.",
+                x1QuantMode, x2QuantMode);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
 
     auto npuArch = op::GetCurrentPlatformInfo().GetCurNpuArch();
     auto socVersion = op::GetCurrentPlatformInfo().GetSocVersion();

@@ -12,6 +12,7 @@
 #define MATMUL_ALLTO_ALL_UTIL_TILING_H
 
 #include "op_host/op_tiling/mc2_tiling_utils.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace MC2Tiling {
 
@@ -32,7 +33,7 @@ const std::vector<uint32_t> NON_QUANT_X_DTYPE_LIST = {ge::DT_BF16, ge::DT_FLOAT1
 const std::vector<uint32_t> KC_QUANT_X_DTYPE_LIST = {ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2};
 const std::vector<uint32_t> KC_QUANT_Y_DTYPE_LIST = {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT};
 const std::vector<uint32_t> MX_QUANT_X_DTYPE_LIST = {ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2, ge::DT_FLOAT4_E2M1,
-                                                     ge::DT_HIFLOAT4};
+                                                     Ops::Transformer::DT_HIFLOAT4};
 const std::vector<uint32_t> MX_QUANT_Y_DTYPE_LIST = {ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT};
 // 维度范围
 constexpr uint32_t TWO_DIMS = 2;

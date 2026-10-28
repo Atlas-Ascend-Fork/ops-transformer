@@ -32,6 +32,7 @@
 #include "aclnn_kernels/transdata.h"
 #include "common/utils/hccl_util.h"
 #include "mc2_comm_utils.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace {
 
@@ -360,9 +361,10 @@ static bool CheckMXQuantDtypesValidA5(const aclTensor* x1, const aclTensor* x2, 
 }
 
 // 量化模式下X支持的HIF4数据类型（HIF4全量化）
-static const std::initializer_list<op::DataType> X_DTYPE_HIF4_SUPPORT_LIST_A5 = {op::DataType::DT_HIFLOAT4};
+static const std::initializer_list<op::DataType> X_DTYPE_HIF4_SUPPORT_LIST_A5 = {Ops::Transformer::DT_HIFLOAT4};
 // 量化模式下Scale支持的HIF4_SCALE数据类型（HIF4全量化）
-static const std::initializer_list<op::DataType> SCALE_DTYPE_HIF4_SUPPORT_LIST_A5 = {op::DataType::DT_HIFLOAT4_SCALE};
+static const std::initializer_list<op::DataType> SCALE_DTYPE_HIF4_SUPPORT_LIST_A5 = {
+    Ops::Transformer::DT_HIFLOAT4_SCALE};
 // HiF4 输出 y: 仅支持 FP16/BF16(不支持 FP32, 区别于 MX 的三档)
 static const std::initializer_list<op::DataType> OUTPUT_DTYPE_HIF4_SUPPORT_LIST_A5 = {op::DataType::DT_FLOAT16,
                                                                                       op::DataType::DT_BF16};

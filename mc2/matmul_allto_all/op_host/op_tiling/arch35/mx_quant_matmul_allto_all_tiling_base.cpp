@@ -250,12 +250,12 @@ ge::graphStatus MxQuantMatmulAllToAllTilingBase::CheckMxQuantTensorDataType(cons
     // HiF4 量化场景: x1/x2 必须均为 DT_HIFLOAT4; MX 量化场景不允许出现 hifloat4
     if (isHiF4_) {
         OP_TILING_CHECK(
-            (x1Dtype != ge::DT_HIFLOAT4),
+            (x1Dtype != Ops::Transformer::DT_HIFLOAT4),
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName, "x1", Ops::Base::ToString(x1Dtype).c_str(),
                                                   "The dtype of x1 must be hifloat4 in HIFLOAT4 quant mode"),
             return ge::GRAPH_FAILED);
         OP_TILING_CHECK(
-            (x2Dtype != ge::DT_HIFLOAT4),
+            (x2Dtype != Ops::Transformer::DT_HIFLOAT4),
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName, "x2", Ops::Base::ToString(x2Dtype).c_str(),
                                                   "The dtype of x2 must be hifloat4 in HIFLOAT4 quant mode"),
             return ge::GRAPH_FAILED);
@@ -323,7 +323,7 @@ ge::graphStatus MxQuantMatmulAllToAllTilingBase::CheckMxQuantScaleDataType(const
     OP_TILING_CHECK((x1ScaleTensorDesc == nullptr), OP_LOGE_WITH_INVALID_INPUT(opName, "x1Scale"),
                     return ge::GRAPH_FAILED);
     // MX: DT_FLOAT8_E8M0; HiF4: DT_HIFLOAT4_SCALE (4-byte hif4_scale per 64-element group)
-    const ge::DataType expectScaleDtype = isHiF4_ ? ge::DT_HIFLOAT4_SCALE : ge::DT_FLOAT8_E8M0;
+    const ge::DataType expectScaleDtype = isHiF4_ ? Ops::Transformer::DT_HIFLOAT4_SCALE : ge::DT_FLOAT8_E8M0;
     const char* expectScaleDtypeStr = isHiF4_ ? "HIFLOAT4_SCALE" : "FLOAT8_E8M0";
     ge::DataType x1scaleDtype = x1ScaleTensorDesc->GetDataType();
     OP_TILING_CHECK(
