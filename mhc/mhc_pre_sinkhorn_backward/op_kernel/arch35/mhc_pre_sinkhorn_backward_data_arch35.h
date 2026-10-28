@@ -8,56 +8,76 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-/*!
- * \file mhc_pre_sinkhorn_backward_data_arch35.h
- * \brief tiling data struct
- */
-
 #ifndef MHC_PRE_SINKHORN_BACKWARD_DATA_ARCH35_H
 #define MHC_PRE_SINKHORN_BACKWARD_DATA_ARCH35_H
 
 #include <cstdint>
 
-struct MhcPreSinkhornBackwardArch35TilingData {
-    int64_t batchSize = 0;
-    int64_t seqLength = 0;
-    int64_t c = 0;
-    int64_t n = 0;
-    int64_t c0 = 0;
-    int64_t c1 = 0;
-    int64_t cTail = 0;
-    int64_t aivNum = 0;
-    int64_t tileGradY = 0;
-    int64_t tileHHat2 = 0;
-    int64_t tileSize = 0;
-    int64_t skIterCount = 0;
-    int64_t ubSize = 0;
-    float eps = 0;
-    TCubeTiling mm1TilingData;
-    TCubeTiling mm2TilingData;
+// MM1/MM2分块与缓冲配置。
+struct MhcPreSinkhornBackwardMMConfig {
+    uint32_t baseN = 0;   // N方向分块大小
+    uint32_t l1K = 0;     // phi B1驻留宽度
+    uint32_t depthB1 = 0; // phi B1 L1乒乓深度（跨kTile预取）
+    uint32_t dbL0A = 0;   // L0A/B乒乓深度
+    uint32_t dbL0C = 0;   // L0C乒乓深度
 };
 
-struct MhcPreSinkhornBackwardArch35DeterminiticTilingData {
+// This is a private ABI shared only by the new Ascend950 host tiling and kernel.
+struct MhcPreSinkhornBackwardArch35TilingData {
     int64_t bs = 0;
-    int64_t c = 0;
     int64_t n = 0;
-    int64_t usedAivNum = 0;
-    int64_t aicNum = 0;
-    int64_t cLoopDataLen = 0;
-    int64_t bsLoopDataLen = 0;
-    int64_t skIterCount = 0;
-    int64_t bsTaskCount = 0;
-    int64_t tailBsTaskCount = 0;
-    // reset后
-    int64_t cBlockLoops = 0;         // B*S*N*C，切核，总循环次数
-    int64_t cBlockTailLoops = 0;     // B*S*N*C，切核，尾核循环次数
-    int64_t cBlockCount = 0;         // B*S*N*C，切核，普通核尾循环处理元素个数
-    int64_t cBlockTailCount = 0;     // B*S*N*C，切核，普通核尾核循环次数
-    int64_t cBlockTailTailCount = 0; // B*S*N*C，切核，尾核尾循环处理个数
-    int64_t finalUsedAivNum = 0;
-    float eps = 0;
-    TCubeTiling mm1TilingData;
-    TCubeTiling mm2TilingData;
+    int64_t c = 0;
+    int64_t k = 0;
+    int64_t hcMix = 0;
+    int64_t hcMixAlign = 0;
+    int64_t iterTimes = 0;
+
+    int64_t splitMode = 0;
+    int64_t deterministic = 0;
+    int64_t mBlockCount = 0;
+    int64_t kBlockCount = 0;
+    int64_t mBlockRows = 0;
+    int64_t kBlockSize = 0;
+
+    int64_t rowFactor = 0;
+    int64_t rowLoop = 0;
+    int64_t tailRowFactor = 0;
+    int64_t cFactor = 0;
+    int64_t cLoop = 0;
+    int64_t tailCFactor = 0;
+
+    int64_t kL1Size = 0;
+    int64_t mL1Size = 0;
+    int64_t mm1TileM = 0;
+    int64_t mm1TileK = 0;
+    int64_t mm1LoopK = 0;
+
+    int64_t usedPrepAiv = 0;
+    int64_t usedAic = 0;
+    int64_t gradPhiTileK = 0;
+    int64_t gradPhiLoopK = 0;
+    int64_t reduceOwnerCount = 0;
+    int64_t maxMWave = 0;
+
+    uint64_t offGQ = 0;
+    uint64_t offGR = 0;
+    uint64_t offRowPart = 0;
+    uint64_t offMm1Ring = 0;
+    uint64_t offGradPhiPart = 0;
+    uint64_t userWorkspaceBytes = 0;
+
+    // MM1(GQ@phi)与MM2(GQ^T@X)的Cube配置及缓存布局。
+    MhcPreSinkhornBackwardMMConfig mmConfigMm1;
+    MhcPreSinkhornBackwardMMConfig mmConfigMm2;
+    uint32_t l1BOffsetElems = 0;        // L1 phi B1乒乓区起始偏移（元素），其下方为GQ缓存波
+    uint32_t l1SingleBufferElems = 0;   // phi B1单槽元素数
+    uint32_t l0ABUsedBytes = 0;         // L0A/L0B乒乓池总用量（每侧MM1/MM2各一池）
+    uint32_t l0ABSingleBufferElems = 0; // L0A/B单槽元素数
+    uint32_t l0CUsedBytes = 0;          // L0C总用量（MM1乒乓槽+MM2累加槽）
+    uint32_t l0CSingleBufferElems = 0;  // L0C单槽元素数
+
+    float hcEps = 0.0f;
+    float normEps = 0.0f;
 };
 
 #endif // MHC_PRE_SINKHORN_BACKWARD_DATA_ARCH35_H

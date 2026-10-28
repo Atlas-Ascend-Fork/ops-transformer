@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------------------------------------
 
 """
-MhcPreSinkhornBackward 算子 Golden实现
+MhcPreSinkhornBackward golden 与 TestSpec。
 
 算子原型：MhcPreSinkhornBackward
 功能：MhcPreSinkhorn反向传播梯度计算
@@ -39,29 +39,23 @@ MhcPreSinkhornBackward 算子 Golden实现
     grad_alpha:     [3]                        (对alpha的梯度)
     grad_bias:      [N²+2N]                    (对bias的梯度)
 
-【关键理解】
-    1. phi形状：[N²+2N, N*D] = [24, 256]
-       - N²+2N = 16+8 = 24 (三路输出维度)
-       - N*D = 4*64 = 256 (输入特征维度)
-
-    2. phi作用：全局投影矩阵
-       - 正向：hc_before_norm = x_flat @ phi.T + bias
-       - x_flat: [T, N*D] = [16, 256]
-       - phi.T: [N*D, N²+2N] = [256, 24]
-       - 输出：[T, N²+2N] = [16, 24]
-
-    3. grad_phi计算公式（矩阵乘法反向）：
-       - grad_phi = grad_hc_before_norm.T @ x_flat
-       - grad_hc.T: [N²+2N, T] = [24, 16]
-       - x_flat: [T, N*D] = [16, 256]
-       - 结果：[N²+2N, N*D] = [24, 256] ✓
-
-================================================================================
+Kernel 与 ACLNN 通过 __spec__ 注册，共用 _compute。
+ml_dtypes 仅在 numpy bf16 转换时导入，供未安装该依赖的远端运行 third_party。
 """
 
 import numpy as np
 import torch
-from ml_dtypes import bfloat16 as np_bfloat16
+
+__spec__ = {
+    "mhc_pre_sinkhorn_backward": "MhcPreSinkhornBackwardTestSpec",
+    "aclnnMhcPreSinkhornBackward": "AclnnMhcPreSinkhornBackwardTestSpec",
+}
+
+
+def _np_bfloat16():
+    from ml_dtypes import bfloat16
+
+    return bfloat16
 
 
 def _torch_to_numpy(t):
@@ -69,25 +63,74 @@ def _torch_to_numpy(t):
     if t is None:
         return None
     if t.dtype == torch.bfloat16:
-        return t.view(torch.int16).numpy().view(np_bfloat16)
+        return t.view(torch.int16).numpy().view(_np_bfloat16())
     return t.numpy()
 
 
-def _numpy_to_torch(t, dtype=torch.float32):
-    """numpy.ndarray -> torch.Tensor，支持 bf16 输入（先 view int16 读出再转目标 dtype）"""
-    if t is None:
+def _is_fp64(a):
+    if isinstance(a, torch.Tensor):
+        return a.dtype == torch.float64
+    return isinstance(a, np.ndarray) and a.dtype == np.float64
+
+
+def _torch_dtype_of(a):
+    """输入对应的 torch dtype（numpy bf16 走 int16 桥接，其余按名映射）。"""
+    if isinstance(a, torch.Tensor):
+        return a.dtype
+    d = np.dtype(a.dtype)
+    return torch.bfloat16 if d == np.dtype(_np_bfloat16()) else getattr(torch, d.name)
+
+
+def _as_torch(a, dtype):
+    """转为指定 dtype 的 torch.Tensor，numpy bf16 通过 int16 桥接。"""
+    if a is None:
         return None
-    if isinstance(t, np.ndarray) and t.dtype == np_bfloat16:
-        return torch.from_numpy(t.view(np.int16).copy()).view(torch.bfloat16).to(dtype)
-    if hasattr(t, "numpy"):
-        return t.to(dtype)
-    return torch.from_numpy(t).to(dtype)
+    if isinstance(a, torch.Tensor):
+        return a.detach().to(dtype)
+    if isinstance(a, np.ndarray) and a.dtype == _np_bfloat16():
+        return torch.from_numpy(a.view(np.int16).copy()).view(torch.bfloat16).to(dtype)
+    return torch.from_numpy(np.asarray(a)).to(dtype)
 
 
-__golden__ = {
-    "kernel": {"mhc_pre_sinkhorn_backward": "mhc_pre_sinkhorn_backward_golden"},
-    "aclnn": {"aclnnMhcPreSinkhornBackward": "aclnn_mhc_pre_sinkhorn_backward_golden"},
-}
+def _to_output(value, template):
+    """按输出槽的 dtype/device 转换结果；无模板时原样返回。"""
+    if value is None:
+        return None
+    if isinstance(template, torch.Tensor):
+        return value.to(dtype=template.dtype, device=template.device)
+    if isinstance(template, np.ndarray):
+        return _torch_to_numpy(value).astype(template.dtype, copy=False)
+    return value
+
+
+def _numel(t):
+    """元素总数；兼容 numpy.ndarray 与 torch.Tensor。"""
+    return t.numel() if isinstance(t, torch.Tensor) else np.size(t)
+
+
+def _backward_inputs_empty(
+    grad_hin,
+    grad_h_post,
+    grad_h_res,
+    x,
+    h_pre,
+    hc_before_norm,
+    inv_rms,
+    sum_out,
+    norm_out,
+):
+    """检查数据输入是否为空；phi/alpha/bias 不参与判空。"""
+    return (
+        _numel(grad_hin) == 0
+        or _numel(grad_h_post) == 0
+        or _numel(grad_h_res) == 0
+        or _numel(x) == 0
+        or _numel(h_pre) == 0
+        or _numel(hc_before_norm) == 0
+        or _numel(inv_rms) == 0
+        or _numel(sum_out) == 0
+        or _numel(norm_out) == 0
+    )
 
 
 def _sigmoid_grad(z, dy):
@@ -106,8 +149,11 @@ def _exp_grad(x, y_grad):
     arange_idx = torch.arange(n, device=x.device)[None, :]
     is_max = idx == arange_idx
     y = (x - x_max).exp()
-    sum_all = (y * y_grad).sum(dim=-1, keepdim=True)
-    return y * y_grad - is_max * sum_all
+    weighted = y * y_grad
+    sum_all = weighted.sum(dim=-1, keepdim=True)
+    # Match arch35 Select: non-max lanes must not evaluate 0 * Inf/NaN.
+    correction = torch.where(is_max, sum_all, torch.zeros_like(sum_all))
+    return weighted - correction
 
 
 def _sinkhorn_grad(grad_h_res, sum_out, norm_out, hc_eps=1e-6):
@@ -133,48 +179,39 @@ def _sinkhorn_grad(grad_h_res, sum_out, norm_out, hc_eps=1e-6):
     return x_grad
 
 
-def mhc_pre_sinkhorn_backward_golden(
-    grad_hin,
-    grad_h_post,
-    grad_h_res,
-    x,
-    phi,
-    alpha,
-    bias,
-    h_pre,
-    hc_before_norm,
-    inv_rms,
-    sum_out,
-    norm_out,
+def _torch_backward(
+    grad_hin_t,
+    grad_h_post_t,
+    grad_h_res_t,
+    x_t,
+    phi_t,
+    alpha_t,
+    bias_t,
+    h_pre_t,
+    hc_before_norm_t,
+    inv_rms_t,
+    sum_out_t,
+    norm_out_t,
     hc_eps=1e-6,
-    **kwargs,
 ):
-    """
-    MhcPreSinkhornBackward 标杆函数。
-    所有输入均为 numpy.ndarray，返回 numpy.ndarray。
-    """
-
-    grad_hin_t = _numpy_to_torch(grad_hin)
-    grad_h_post_t = _numpy_to_torch(grad_h_post)
-    grad_h_res_t = _numpy_to_torch(grad_h_res)
-    x_t = _numpy_to_torch(x)
-    phi_t = _numpy_to_torch(phi)
-    alpha_t = _numpy_to_torch(alpha)
-    bias_t = _numpy_to_torch(bias)
-    h_pre_t = _numpy_to_torch(h_pre)
-    hc_before_norm_t = _numpy_to_torch(hc_before_norm)
-    inv_rms_t = _numpy_to_torch(inv_rms)
-    sum_out_t = _numpy_to_torch(sum_out)
-    norm_out_t = _numpy_to_torch(norm_out)
-
+    """Analytic backward preserving the promoted input precision."""
     is_3d = x_t.dim() == 3
-    is_empty = x_t.numel() == 0
-    if is_empty:
-        grad_x_np = np.zeros(x.shape, dtype=np.float32)
-        grad_phi_np = np.zeros(phi.shape, dtype=np.float32)
-        grad_alpha_np = np.zeros(alpha.shape, dtype=np.float32)
-        grad_bias_np = np.zeros(bias.shape, dtype=np.float32)
-        return grad_x_np, grad_phi_np, grad_alpha_np, grad_bias_np
+    if _backward_inputs_empty(
+        grad_hin_t,
+        grad_h_post_t,
+        grad_h_res_t,
+        x_t,
+        h_pre_t,
+        hc_before_norm_t,
+        inv_rms_t,
+        sum_out_t,
+        norm_out_t,
+    ):
+
+        def _zeros(t):
+            return torch.zeros(t.shape, dtype=torch.float32, device=t.device)
+
+        return _zeros(x_t), _zeros(phi_t), _zeros(alpha_t), _zeros(bias_t)
 
     if is_3d:
         x_t = x_t.unsqueeze(0)
@@ -215,9 +252,8 @@ def mhc_pre_sinkhorn_backward_golden(
     grad_alpha_pre = (norm_out_forward[..., :n] * grad_z_pre).sum()
     grad_alpha_post = (norm_out_forward[..., n : 2 * n] * grad_z_post).sum()
     grad_alpha_res = (norm_out_forward[..., 2 * n :] * grad_z_res).sum()
-    grad_alpha = torch.tensor(
-        [grad_alpha_pre, grad_alpha_post, grad_alpha_res], dtype=torch.float32
-    )
+    # torch.stack keeps the device (torch.tensor would force CPU on the XPU path).
+    grad_alpha = torch.stack([grad_alpha_pre, grad_alpha_post, grad_alpha_res])
 
     grad_norm_out = torch.cat(
         [grad_z_pre * alpha_t[0], grad_z_post * alpha_t[1], grad_z_res * alpha_t[2]],
@@ -242,16 +278,92 @@ def mhc_pre_sinkhorn_backward_golden(
     if is_3d:
         grad_x = grad_x.view(-1, n, d)
 
-    is_bf16 = isinstance(x, np.ndarray) and x.dtype == np_bfloat16
-    if is_bf16:
-        grad_x = grad_x.to(torch.bfloat16)
-        grad_x_np = _torch_to_numpy(grad_x)
-    else:
-        grad_x_np = grad_x.numpy()
-    grad_phi_np = grad_phi.numpy()
-    grad_alpha_np = grad_alpha.numpy()
-    grad_bias_np = grad_bias.numpy()
-    return grad_x_np, grad_phi_np, grad_alpha_np, grad_bias_np
+    return grad_x, grad_phi, grad_alpha, grad_bias
+
+
+def _compute(
+    grad_hin,
+    grad_h_post,
+    grad_h_res,
+    x,
+    phi,
+    alpha,
+    bias,
+    h_pre,
+    hc_before_norm,
+    inv_rms,
+    sum_out,
+    norm_out,
+    hc_eps=1e-6,
+):
+    """Kernel 与 ACLNN 共用的解析反向。
+
+    存在 fp64 输入时以 fp64 计算，否则使用 fp32。
+    grad_x 跟随 x 的 dtype，其余输出保留计算精度。
+    """
+    arrays = (
+        grad_hin,
+        grad_h_post,
+        grad_h_res,
+        x,
+        phi,
+        alpha,
+        bias,
+        h_pre,
+        hc_before_norm,
+        inv_rms,
+        sum_out,
+        norm_out,
+    )
+    # 统一混合精度输入，满足 matmul 的 dtype 要求。
+    compute = torch.float64 if any(_is_fp64(a) for a in arrays) else torch.float32
+    grad_x, grad_phi, grad_alpha, grad_bias = _torch_backward(
+        *(_as_torch(a, compute) for a in arrays),
+        hc_eps,
+    )
+    grad_x = grad_x.to(_torch_dtype_of(x))
+    return grad_x, grad_phi, grad_alpha, grad_bias
+
+
+def mhc_pre_sinkhorn_backward_golden(
+    grad_hin,
+    grad_h_post,
+    grad_h_res,
+    x,
+    phi,
+    alpha,
+    bias,
+    h_pre,
+    hc_before_norm,
+    inv_rms,
+    sum_out,
+    norm_out,
+    hc_eps=1e-6,
+    **kwargs,
+):
+    """Kernel golden（numpy 输入输出）。"""
+    del kwargs
+    grad_x, grad_phi, grad_alpha, grad_bias = _compute(
+        grad_hin,
+        grad_h_post,
+        grad_h_res,
+        x,
+        phi,
+        alpha,
+        bias,
+        h_pre,
+        hc_before_norm,
+        inv_rms,
+        sum_out,
+        norm_out,
+        hc_eps,
+    )
+    return (
+        _torch_to_numpy(grad_x),
+        grad_phi.numpy(),
+        grad_alpha.numpy(),
+        grad_bias.numpy(),
+    )
 
 
 def aclnn_mhc_pre_sinkhorn_backward_golden(
@@ -283,75 +395,344 @@ def aclnn_mhc_pre_sinkhorn_backward_golden(
     the Tensors in the parameters are all torch.Tensor.
     Conversely, when not, the Tensors in the parameters are all numpy.ndarray.
 
+    计算结果按各输出槽的 dtype/device 转换。
+
     Args:
         kwargs: tensor_{dtypes, formats}, scalar_dtypes, short_soc_version, testcase_name
 
     Returns:
         Output tensors: gradX, gradPhi, gradAlpha, gradBias
     """
+    del kwargs
 
-    if isinstance(x, torch.Tensor):
-        x_dtype = x.dtype
-    elif isinstance(x, np.ndarray) and x.dtype == np_bfloat16:
-        x_dtype = torch.bfloat16
-    elif isinstance(x, np.ndarray):
-        x_dtype = None
-    else:
-        x_dtype = None
-
-    grad_hin_np = (
-        _torch_to_numpy(gradHin) if isinstance(gradHin, torch.Tensor) else gradHin
-    )
-    grad_h_post_np = (
-        _torch_to_numpy(gradHPost) if isinstance(gradHPost, torch.Tensor) else gradHPost
-    )
-    grad_h_res_np = (
-        _torch_to_numpy(gradHRes) if isinstance(gradHRes, torch.Tensor) else gradHRes
-    )
-    x_np = _torch_to_numpy(x) if isinstance(x, torch.Tensor) else x
-    phi_np = _torch_to_numpy(phi) if isinstance(phi, torch.Tensor) else phi
-    alpha_np = _torch_to_numpy(alpha) if isinstance(alpha, torch.Tensor) else alpha
-    bias_np = _torch_to_numpy(bias) if isinstance(bias, torch.Tensor) else bias
-    h_pre_np = _torch_to_numpy(hPre) if isinstance(hPre, torch.Tensor) else hPre
-    hc_before_norm_np = (
-        _torch_to_numpy(hcBeforeNorm)
-        if isinstance(hcBeforeNorm, torch.Tensor)
-        else hcBeforeNorm
-    )
-    inv_rms_np = _torch_to_numpy(invRms) if isinstance(invRms, torch.Tensor) else invRms
-    sum_out_np = _torch_to_numpy(sumOut) if isinstance(sumOut, torch.Tensor) else sumOut
-    norm_out_np = (
-        _torch_to_numpy(normOut) if isinstance(normOut, torch.Tensor) else normOut
-    )
+    # 数据输入为空时保留输出槽原值。
+    if _backward_inputs_empty(
+        gradHin,
+        gradHPost,
+        gradHRes,
+        x,
+        hPre,
+        hcBeforeNorm,
+        invRms,
+        sumOut,
+        normOut,
+    ):
+        return gradX, gradPhi, gradAlpha, gradBias
 
     hc_eps_val = float(hcEps) if hcEps is not None else 1e-6
 
-    grad_x_np, grad_phi_np, grad_alpha_np, grad_bias_np = (
-        mhc_pre_sinkhorn_backward_golden(
-            grad_hin_np,
-            grad_h_post_np,
-            grad_h_res_np,
-            x_np,
-            phi_np,
-            alpha_np,
-            bias_np,
-            h_pre_np,
-            hc_before_norm_np,
-            inv_rms_np,
-            sum_out_np,
-            norm_out_np,
-            hc_eps=hc_eps_val,
-        )
+    result = _compute(
+        gradHin,
+        gradHPost,
+        gradHRes,
+        x,
+        phi,
+        alpha,
+        bias,
+        hPre,
+        hcBeforeNorm,
+        invRms,
+        sumOut,
+        normOut,
+        hc_eps_val,
+    )
+    templates = (gradX, gradPhi, gradAlpha, gradBias)
+    return tuple(
+        _to_output(value, template) for value, template in zip(result, templates)
     )
 
-    grad_x_tensor = _numpy_to_torch(grad_x_np)
-    grad_phi_tensor = _numpy_to_torch(grad_phi_np)
-    grad_alpha_tensor = _numpy_to_torch(grad_alpha_np)
-    grad_bias_tensor = _numpy_to_torch(grad_bias_np)
 
-    if x_dtype == torch.bfloat16:
-        grad_x_tensor = grad_x_tensor.to(torch.bfloat16)
-    elif x_dtype == torch.float16:
-        grad_x_tensor = grad_x_tensor.to(torch.float16)
+# ============================================================================
+# third_party torch reference
+# ============================================================================
 
-    return grad_x_tensor, grad_phi_tensor, grad_alpha_tensor, grad_bias_tensor
+
+def _ref_sigmoid_grad(z, dy):
+    """arch35 VFPrepareGates: Exp/Add/Div, then (sigma * gate) * dy."""
+    exp_neg = torch.exp(-z)
+    denom = exp_neg + 1.0
+    sigma = torch.ones_like(denom) / denom
+    gate = 1.0 - sigma
+    gz = sigma * gate
+    return gz * dy
+
+
+def _ref_exp_grad(x, y_grad):
+    """arch35 residual gate: first argmax and Select, not mask multiplication."""
+    x_max, idx = x.max(dim=-1, keepdim=True)
+    is_max = idx == torch.arange(x.size(-1), device=x.device)
+    exp_shifted = torch.exp(x - x_max)
+    weighted = exp_shifted * y_grad
+    weighted_sum = weighted.sum(dim=-1, keepdim=True)
+    correction = torch.where(is_max, weighted_sum, torch.zeros_like(weighted_sum))
+    return weighted - correction
+
+
+def _ref_sinkhorn_grad(grad_h_res, sum_out, norm_out, hc_eps=1e-6):
+    """VFSinkhornBackwardPass arithmetic order, including sequential n-term sums."""
+    bs, seq_len, n, _ = grad_h_res.shape
+    iters = sum_out.size(0) // 2
+    sums = sum_out.reshape(iters, 2, bs, seq_len, n)
+    norms = norm_out.reshape(iters, 2, bs, seq_len, n, n)
+    grad = grad_h_res
+    for i in reversed(range(iters)):
+        norm = norms[i, 0]
+        col_sum = sums[i, 1].unsqueeze(-2)
+        product = grad * norm
+        correction = torch.zeros_like(product[..., :1, :])
+        for k in range(n):
+            correction = correction + product[..., k : k + 1, :]
+        denom_squared = col_sum * col_sum
+        correction = correction / denom_squared
+        grad = grad / col_sum
+        grad = grad - correction
+
+        row_sum = sums[i, 0].unsqueeze(-1)
+        if i == 0:
+            norm = norm - hc_eps
+            row_sum = row_sum - hc_eps
+        product = grad * norm
+        correction = torch.zeros_like(product[..., :1])
+        for k in range(n):
+            correction = correction + product[..., k : k + 1]
+        grad = grad - correction
+        grad = grad / row_sum
+    return grad
+
+
+def _ref_rms_norm_grad(x, inv_rms, grad_inv_rms):
+    """arch35 computes the row coefficient before multiplying each x element."""
+    coefficient = inv_rms * inv_rms
+    coefficient = coefficient * inv_rms
+    coefficient = coefficient * grad_inv_rms
+    coefficient = coefficient * (-1.0 / float(x.size(-1)))
+    return x * coefficient
+
+
+def _ref_torch_backward(
+    grad_hin,
+    grad_h_post,
+    grad_h_res,
+    x,
+    phi,
+    alpha,
+    bias,
+    h_pre,
+    hc_before_norm,
+    inv_rms,
+    sum_out,
+    norm_out,
+    hc_eps=1e-6,
+):
+    """Independent fp32 reference following arch35's arithmetic order.
+
+    Arithmetic uses the Torch backend without bitwise emulation of Ascend.
+    """
+    is_3d = x.dim() == 3
+    if any(
+        t.numel() == 0
+        for t in (
+            grad_hin,
+            grad_h_post,
+            grad_h_res,
+            x,
+            h_pre,
+            hc_before_norm,
+            inv_rms,
+            sum_out,
+            norm_out,
+        )
+    ):
+        # 数据输入为空时返回未初始化的输出占位。
+        def _unwritten(t):
+            return torch.empty_like(t, dtype=torch.float32)
+
+        return _unwritten(x), _unwritten(phi), _unwritten(alpha), _unwritten(bias)
+
+    # Materialize non-contiguous inputs for subsequent view operations.
+    x = x.float().contiguous()
+    grad_hin = grad_hin.float().contiguous()
+    grad_h_post = grad_h_post.float().contiguous()
+    grad_h_res = grad_h_res.float().contiguous()
+    phi = phi.float().contiguous()
+    alpha = alpha.float().contiguous()
+    bias = bias.float().contiguous()
+    h_pre = h_pre.float().contiguous()
+    hc_before_norm = hc_before_norm.float().contiguous()
+    inv_rms = inv_rms.float().contiguous()
+    sum_out = sum_out.float().contiguous()
+    norm_out = norm_out.float().contiguous()
+
+    if is_3d:
+        x = x.unsqueeze(0)
+        grad_hin = grad_hin.unsqueeze(0)
+        grad_h_post = grad_h_post.unsqueeze(0)
+        grad_h_res = grad_h_res.unsqueeze(0)
+        h_pre = h_pre.unsqueeze(0)
+        hc_before_norm = hc_before_norm.unsqueeze(0)
+        inv_rms = inv_rms.unsqueeze(0)
+        sum_out = sum_out.unsqueeze(1)
+        norm_out = norm_out.unsqueeze(1)
+
+    b, s, n, d = x.shape
+
+    grad_x_from_hin = grad_hin[..., None, :] * h_pre[..., None]
+    grad_h_pre = (grad_hin[..., None, :] * x).sum(-1)
+
+    nf = hc_before_norm * inv_rms
+    z_pre = nf[..., :n] * alpha[0] + bias[:n]
+    z_post = nf[..., n : 2 * n] * alpha[1] + bias[n : 2 * n]
+    z_res = (nf[..., 2 * n :] * alpha[2] + bias[2 * n :]).reshape(b, s, n, n)
+
+    grad_z_pre = _ref_sigmoid_grad(z_pre, grad_h_pre)
+    grad_z_post = _ref_sigmoid_grad(z_post, grad_h_post)
+    grad_z_post = grad_z_post * 2.0
+    grad_h_res_4d = (
+        grad_h_res.reshape(b, s, n, n) if grad_h_res.dim() == 3 else grad_h_res
+    )
+    sk_grad = _ref_sinkhorn_grad(grad_h_res_4d, sum_out, norm_out, hc_eps)
+    grad_z_res = _ref_exp_grad(z_res, sk_grad).flatten(2)
+
+    grad_bias = torch.cat(
+        [grad_z_pre.sum((0, 1)), grad_z_post.sum((0, 1)), grad_z_res.sum((0, 1))]
+    )
+
+    grad_alpha = torch.stack(
+        [
+            (nf[..., :n] * grad_z_pre).sum(-1).sum(),
+            (nf[..., n : 2 * n] * grad_z_post).sum(-1).sum(),
+            (nf[..., 2 * n :] * grad_z_res).sum(-1).sum(),
+        ]
+    )
+
+    grad_norm_out = torch.cat(
+        [grad_z_pre * alpha[0], grad_z_post * alpha[1], grad_z_res * alpha[2]], dim=-1
+    )
+    grad_hc_before_norm = grad_norm_out * inv_rms
+    # arch35 reduces pre/post/res separately, adding each partial to a zero scalar.
+    products = hc_before_norm * grad_norm_out
+    grad_inv_rms = torch.zeros_like(inv_rms)
+    for begin, end in ((0, n), (n, 2 * n), (2 * n, n * n + 2 * n)):
+        partial = products[..., begin:end].sum(-1, keepdim=True)
+        grad_inv_rms = grad_inv_rms + partial
+
+    x_flat = x.flatten(2)
+    grad_x_from_rms = _ref_rms_norm_grad(x_flat, inv_rms, grad_inv_rms)
+    grad_x_from_matmul = grad_hc_before_norm @ phi
+    grad_phi = grad_hc_before_norm.flatten(0, 1).T @ x_flat.flatten(0, 1)
+
+    grad_x = (
+        grad_x_from_hin.view(x.shape)
+        + grad_x_from_rms.view(x.shape)
+        + grad_x_from_matmul.view(x.shape)
+    )
+    if is_3d:
+        grad_x = grad_x.view(-1, n, d)
+
+    return grad_x, grad_phi, grad_alpha, grad_bias
+
+
+class MhcPreSinkhornBackwardTorchImpl:
+    """Kernel cross_check reference; parameter names match the operator definition."""
+
+    def __call__(
+        self,
+        grad_hin,
+        grad_h_post,
+        grad_h_res,
+        x,
+        phi,
+        alpha,
+        bias,
+        h_pre,
+        hc_before_norm,
+        inv_rms,
+        sum_out,
+        norm_out,
+        hc_eps=1e-6,
+        **kwargs,
+    ):
+        del kwargs
+        grad_x, grad_phi, grad_alpha, grad_bias = _ref_torch_backward(
+            grad_hin,
+            grad_h_post,
+            grad_h_res,
+            x,
+            phi,
+            alpha,
+            bias,
+            h_pre,
+            hc_before_norm,
+            inv_rms,
+            sum_out,
+            norm_out,
+            float(hc_eps),
+        )
+        if x.dtype in (torch.bfloat16, torch.float16):
+            grad_x = grad_x.to(x.dtype)
+        return [grad_x, grad_phi, grad_alpha, grad_bias]
+
+
+class MhcPreSinkhornBackwardAclnnTorchImpl:
+    """ACLNN cross_check reference; camelCase names are required for input binding."""
+
+    def __call__(
+        self,
+        gradHin,
+        gradHPost,
+        gradHRes,
+        x,
+        phi,
+        alpha,
+        bias,
+        hPre,
+        hcBeforeNorm,
+        invRms,
+        sumOut,
+        normOut,
+        hcEps=1e-6,
+        **kwargs,
+    ):
+        return MhcPreSinkhornBackwardTorchImpl()(
+            gradHin,
+            gradHPost,
+            gradHRes,
+            x,
+            phi,
+            alpha,
+            bias,
+            hPre,
+            hcBeforeNorm,
+            invRms,
+            sumOut,
+            normOut,
+            hcEps,
+            **kwargs,
+        )
+
+
+# ============================================================================
+# TestSpec
+# ============================================================================
+
+_CROSS_CHECK_TOLERANCE = {
+    "bfloat16": {"standard": "cross_check"},
+    "float16": {"standard": "cross_check"},
+    "float32": {"standard": "cross_check"},
+}
+
+
+class MhcPreSinkhornBackwardTestSpec:
+    """Kernel-path test spec for MhcPreSinkhornBackward."""
+
+    golden = mhc_pre_sinkhorn_backward_golden
+    third_party = {"torch": MhcPreSinkhornBackwardTorchImpl}
+    tolerance = _CROSS_CHECK_TOLERANCE
+
+
+class AclnnMhcPreSinkhornBackwardTestSpec:
+    """ACLNN test spec using the input.py generator via __input__."""
+
+    golden = aclnn_mhc_pre_sinkhorn_backward_golden
+    third_party = {"torch": MhcPreSinkhornBackwardAclnnTorchImpl}
+    tolerance = _CROSS_CHECK_TOLERANCE

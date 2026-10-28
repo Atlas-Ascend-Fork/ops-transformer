@@ -9,11 +9,11 @@
  */
 
 /*!
- * \file mhc_pre_sinkhorn_backward_deterministic.h
+ * \file mhc_pre_sinkhorn_backward_deterministic_base.h
  * \brief
  */
-#ifndef MHC_PRE_SINKHORN_BACKWARD_DETERMINISTIC_SIMD_VF_H
-#define MHC_PRE_SINKHORN_BACKWARD_DETERMINISTIC_SIMD_VF_H
+#ifndef MHC_PRE_SINKHORN_BACKWARD_960_DETERMINISTIC_SIMD_VF_H
+#define MHC_PRE_SINKHORN_BACKWARD_960_DETERMINISTIC_SIMD_VF_H
 
 #include "kernel_operator.h"
 #include "op_kernel/platform_util.h"
@@ -306,4 +306,4 @@ __aicore__ inline void ComputeGradXFromRmsVF(const LocalTensor<T>& xFp32Local, c
     }
 }
 
-#endif //  MHC_PRE_SINKHORN_BACKWARD_DETERMINISTIC_SIMD_VF_H
+#endif //  MHC_PRE_SINKHORN_BACKWARD_960_DETERMINISTIC_SIMD_VF_H

@@ -9,29 +9,29 @@
  */
 
 /* !
- * \file mhc_pre_sinkhorn_backward_arch35_tiling_deterministic.h
+ * \file mhc_pre_sinkhorn_backward_arch92_tiling_deterministic.h
  * \brief
  */
 
-#ifndef MHC_PRE_SINKHORN_BACKWARD_ARCH35_TILING_DETERMINISTIC_H_
-#define MHC_PRE_SINKHORN_BACKWARD_ARCH35_TILING_DETERMINISTIC_H_
+#ifndef MHC_PRE_SINKHORN_BACKWARD_960_ARCH92_TILING_DETERMINISTIC_H_
+#define MHC_PRE_SINKHORN_BACKWARD_960_ARCH92_TILING_DETERMINISTIC_H_
 
 #include "op_host/tiling_base.h"
 #include "register/tilingdata_base.h"
 #include "tiling/tiling_api.h"
-#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch35/mhc_pre_sinkhorn_backward_data_arch35.h"
-#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch35/mhc_pre_sinkhorn_backward_key_arch35.h"
-#include "mhc_pre_sinkhorn_backward_arch35_tiling_base.h"
+#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch92/mhc_pre_sinkhorn_backward_data_arch92.h"
+#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch92/mhc_pre_sinkhorn_backward_key_arch92.h"
+#include "mhc_pre_sinkhorn_backward_arch92_tiling_base.h"
 #include "err/ops_err.h"
 #include "op_host/tiling_templates_registry.h"
 
 namespace optiling {
 using namespace Ops::Transformer::OpTiling;
 
-class MhcPreSinkhornBackwardArch35DeterminiticTiling : public MhcPreSinkhornBackwardArch35Tiling {
+class MhcPreSinkhornBackward960DeterminiticTiling : public MhcPreSinkhornBackward960Tiling {
 public:
-    explicit MhcPreSinkhornBackwardArch35DeterminiticTiling(gert::TilingContext* context)
-        : MhcPreSinkhornBackwardArch35Tiling(context)
+    explicit MhcPreSinkhornBackward960DeterminiticTiling(gert::TilingContext* context)
+        : MhcPreSinkhornBackward960Tiling(context)
     {}
 
 protected:
@@ -65,4 +65,4 @@ private:
 };
 
 } // namespace optiling
-#endif // MHC_PRE_SINKHORN_BACKWARD_ARCH35_TILING_DETERMINISTIC_H_
+#endif // MHC_PRE_SINKHORN_BACKWARD_960_ARCH92_TILING_DETERMINISTIC_H_

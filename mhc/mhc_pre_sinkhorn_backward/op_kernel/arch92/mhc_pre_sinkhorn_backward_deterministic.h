@@ -10,7 +10,7 @@
 
 /*!
  * \file mhc_pre_sinkhorn_backward_deterministic.h
- * \brief MhcPreSinkhornBackward 确定性路径 Kernel (arch35)
+ * \brief MhcPreSinkhornBackward 确定性路径 Kernel (arch92)
  *
  * 计算流程 (2 轮 BS 循环):
  *
@@ -44,8 +44,8 @@
  *     PhaseDMm1: gradHcBeforeNorm @ phi → gradXFromMatmulWs    WS (AIC 写)
  *     PhaseDMm2: gradHcBeforeNorm^T @ xFp32 → gradPhi          GM (AIC 写)
  */
-#ifndef MHC_PRE_SINKHORN_BACKWARD_DETERMINISTIC_H
-#define MHC_PRE_SINKHORN_BACKWARD_DETERMINISTIC_H
+#ifndef MHC_PRE_SINKHORN_BACKWARD_960_DETERMINISTIC_H
+#define MHC_PRE_SINKHORN_BACKWARD_960_DETERMINISTIC_H
 
 #include <algorithm>
 #include "kernel_operator.h"
@@ -95,7 +95,7 @@ public:
                                 GM_ADDR gradHRes, GM_ADDR alpha, GM_ADDR bias, GM_ADDR hcBeforeNorm, GM_ADDR invRms,
                                 GM_ADDR sumOut, GM_ADDR normOut, GM_ADDR gradX, GM_ADDR gradPhi, GM_ADDR gradAlpha,
                                 GM_ADDR gradBias, GM_ADDR workspace,
-                                const MhcPreSinkhornBackwardArch35DeterminiticTilingData* tilingData, TPipe* pipe);
+                                const MhcPreSinkhornBackward960DeterminiticTilingData* tilingData, TPipe* pipe);
 
 private:
     // Phase A: C 维循环
@@ -263,7 +263,7 @@ private:
     int64_t gradHinTypeSize_ = sizeof(GRADHIN_T);
     U alphaPre_, alphaPost_, alphaRes_;
     TPipe* pipe_ = nullptr;
-    const MhcPreSinkhornBackwardArch35DeterminiticTilingData* tilingData_ = nullptr;
+    const MhcPreSinkhornBackward960DeterminiticTilingData* tilingData_ = nullptr;
     constexpr static uint32_t V_REG_SIZE = Ops::Base::GetVRegSize();
     int64_t aicNum_ = 0;
     int64_t bsTaskCount_ = 0;
@@ -290,7 +290,7 @@ __aicore__ inline void MhcPreSinkhornBackwardDeterministic<X_T, GRADHIN_T, U>::I
     GM_ADDR x, GM_ADDR phi, GM_ADDR hPre, GM_ADDR gradHin, GM_ADDR gradHPost, GM_ADDR gradHRes, GM_ADDR alpha,
     GM_ADDR bias, GM_ADDR hcBeforeNorm, GM_ADDR invRms, GM_ADDR sumOut, GM_ADDR normOut, GM_ADDR gradX, GM_ADDR gradPhi,
     GM_ADDR gradAlpha, GM_ADDR gradBias, GM_ADDR workspace,
-    const MhcPreSinkhornBackwardArch35DeterminiticTilingData* tilingData, TPipe* pipe)
+    const MhcPreSinkhornBackward960DeterminiticTilingData* tilingData, TPipe* pipe)
 {
     tilingData_ = tilingData;
     pipe_ = pipe;
@@ -1546,4 +1546,4 @@ __aicore__ inline void MhcPreSinkhornBackwardDeterministic<X_T, GRADHIN_T, U>::P
     mm2_.End();
 }
 
-#endif //  MHC_PRE_SINKHORN_BACKWARD_DETERMINISTIC_H
+#endif //  MHC_PRE_SINKHORN_BACKWARD_960_DETERMINISTIC_H

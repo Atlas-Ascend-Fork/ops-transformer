@@ -16,7 +16,6 @@
 #include "register/op_def_registry.h"
 #include "tiling/tiling_api.h"
 #include "tiling/platform/platform_ascendc.h"
-#include "arch35/mhc_pre_sinkhorn_backward_arch35_tiling_base.h"
 #include "arch22/mhc_pre_sinkhorn_backward_arch22_tiling.h"
 #include "mhc_pre_sinkhorn_backward_tiling.h"
 #include "log/log.h"
@@ -34,9 +33,14 @@ static ge::graphStatus Tiling4MhcPreSinkhornBackward(gert::TilingContext* contex
                 return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
 
+    const auto npuArch = ascendcPlatform.GetCurNpuArch();
+    if (npuArch == NpuArch::DAV_9201 || npuArch == NpuArch::DAV_9202) {
+        return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context, {100, 110});
+    }
+
     if (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context)) {
         OP_LOGD(context->GetNodeName(), "Using arch35 tiling for ASCEND950");
-        return TilingRegistry::GetInstance().DoTilingImpl(context);
+        return Ops::Transformer::OpTiling::TilingRegistry::GetInstance().DoTilingImpl(context, {0});
     }
 
     return TilingMhcPreSinkhornBackwardArch22(context);

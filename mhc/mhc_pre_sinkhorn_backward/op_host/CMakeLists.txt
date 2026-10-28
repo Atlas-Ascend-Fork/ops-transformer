@@ -42,5 +42,6 @@ endif()
 
 if(NOT BUILD_OPS_RTY_KERNEL)
     add_op_to_compiled_list()
+    list(APPEND ARCH_DIRECTORY arch92)
     add_modules_sources(OPTYPE mhc_pre_sinkhorn_backward ACLNNTYPE aclnn_exclude)
 endif()

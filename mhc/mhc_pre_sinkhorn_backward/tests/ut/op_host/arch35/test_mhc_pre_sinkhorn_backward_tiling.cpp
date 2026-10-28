@@ -11,6 +11,7 @@
 #include <iostream>
 #include <gtest/gtest.h>
 #include "../../../../op_host/op_tiling/mhc_pre_sinkhorn_backward_tiling.h"
+#include "../../../../op_kernel/arch92/mhc_pre_sinkhorn_backward_data_arch92.h"
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
 
@@ -484,4 +485,72 @@ TEST_F(MhcPreSinkhornBackwardTiling, test_tiling_T64_N9_C128_3d_fail)
         &compileInfo, kSocVersion950);
 
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+namespace {
+void CheckPlatformRouting(const char* soc, int32_t deterministic, uint64_t expectedKey)
+{
+    int64_t B = 2;
+    int64_t S = 128;
+    int64_t N = 4;
+    int64_t C = 256;
+    int64_t skIterCount = 20;
+    float eps = 1e-6f;
+
+    int64_t hcMix = N * N + 2 * N;
+    int64_t phiDim0 = hcMix;
+    int64_t phiDim1 = N * C;
+
+    optiling::MhcPreSinkhornBackwardCompileInfo compileInfo = {};
+
+    gert::TilingContextPara tilingContextPara(
+        "MhcPreSinkhornBackward",
+        {
+            {{{B, S, C}, {B, S, C}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{B, S, N}, {B, S, N}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{B, S, N, N}, {B, S, N, N}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{B, S, N, C}, {B, S, N, C}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{phiDim0, phiDim1}, {phiDim0, phiDim1}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{3}, {3}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{hcMix}, {hcMix}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{B, S, N}, {B, S, N}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{B, S, hcMix}, {B, S, hcMix}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{B, S, 1}, {B, S, 1}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{skIterCount * 2, B, S, N}, {skIterCount * 2, B, S, N}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{skIterCount * 2, B, S, N, N}, {skIterCount * 2, B, S, N, N}}, ge::DT_FLOAT, ge::FORMAT_ND},
+        },
+        {
+            {{{B, S, N, C}, {B, S, N, C}}, ge::DT_BF16, ge::FORMAT_ND},
+            {{{phiDim0, phiDim1}, {phiDim0, phiDim1}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{3}, {3}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            {{{hcMix}, {hcMix}}, ge::DT_FLOAT, ge::FORMAT_ND},
+        },
+        {
+            {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(eps)},
+        },
+        &compileInfo, soc);
+
+    tilingContextPara.deterministicInfo_ = deterministic;
+    TilingInfo info;
+    ASSERT_TRUE(ExecuteTiling(tilingContextPara, info));
+    ASSERT_EQ(info.tilingKey, expectedKey);
+    if (expectedKey == 4001) {
+        ASSERT_GE(info.tilingDataSize, sizeof(MhcPreSinkhornBackward960DeterminiticTilingData));
+        const auto* data =
+            reinterpret_cast<const MhcPreSinkhornBackward960DeterminiticTilingData*>(info.tilingData.get());
+        EXPECT_EQ(data->n, N);
+        EXPECT_EQ(data->c, C);
+    }
+}
+} // namespace
+
+TEST_F(MhcPreSinkhornBackwardTiling, test_platform_routing_960_arch92)
+{
+    CheckPlatformRouting("Ascend960DT", 0, 4001);
+    CheckPlatformRouting("Ascend960DT", 3, 4001);
+}
+
+TEST_F(MhcPreSinkhornBackwardTiling, test_platform_routing_950_arch35)
+{
+    CheckPlatformRouting(kSocVersion950, 0, 3000);
 }

@@ -8,10 +8,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+import numpy as np
 import torch
 
 __input__ = {
     "aclnn": {"aclnnMhcPreSinkhornBackward": "mhc_pre_sinkhorn_backward_input"},
+    "kernel": {"mhc_pre_sinkhorn_backward": "mhc_pre_sinkhorn_backward_input_kernel"},
 }
 
 
@@ -214,3 +216,88 @@ def mhc_pre_sinkhorn_backward_input(
         grad_alpha_out,
         grad_bias_out,
     ]
+
+
+def mhc_pre_sinkhorn_backward_input_kernel(
+    grad_hin,
+    grad_h_post,
+    grad_h_res,
+    x,
+    phi,
+    alpha,
+    bias,
+    h_pre,
+    hc_before_norm,
+    inv_rms,
+    sum_out,
+    norm_out,
+    hc_eps=1e-6,
+    **kwargs,
+):
+    """生成 numpy 测试输入；中间量由前向计算得到，避免 Sinkhorn 反向发散。"""
+    del kwargs
+    rng = np.random.default_rng(0)
+    eps = float(hc_eps)
+    n = x.shape[-2]
+    c = x.shape[-1]
+    iters = sum_out.shape[0] // 2
+    hm = n * n + 2 * n
+
+    # 先按输入 dtype 取值，再据此计算前向中间量。
+    x[...] = rng.standard_normal(x.shape).astype(x.dtype)
+    phi[...] = rng.standard_normal(phi.shape).astype(phi.dtype)
+    alpha[...] = (rng.standard_normal(3) * 0.1).astype(alpha.dtype)
+    bias[...] = rng.standard_normal(hm).astype(bias.dtype)
+
+    x_f32 = x.astype(np.float32)
+    x_flat = x_f32.reshape(*x_f32.shape[:-2], n * c)
+    hcbn = x_flat @ phi.astype(np.float32).T + bias.astype(np.float32)
+    inv_rms_val = 1.0 / np.sqrt((x_flat**2).mean(axis=-1, keepdims=True) + eps)
+    nf = hcbn * inv_rms_val
+
+    z_pre = nf[..., :n] * alpha[0] + bias[:n]
+    z_res = nf[..., 2 * n :] * alpha[2] + bias[2 * n :]
+    h_pre_val = 1.0 / (1.0 + np.exp(-z_pre)) + eps
+
+    comb = z_res.reshape(*z_res.shape[:-1], n, n)
+    comb = np.exp(comb - comb.max(axis=-1, keepdims=True))
+
+    sum_out_list = []
+    norm_out_list = []
+    for it in range(iters):
+        row_sum = comb.sum(axis=-1, keepdims=True)
+        if it == 0:
+            comb = comb / row_sum + eps
+        else:
+            comb = comb / (row_sum + eps)
+        norm_out_list.append(comb)
+        sum_out_list.append(row_sum.squeeze(-1) + eps)
+        col_sum = comb.sum(axis=-2, keepdims=True)
+        comb = comb / (col_sum + eps)
+        sum_out_list.append(col_sum.squeeze(-2) + eps)
+        norm_out_list.append(comb)
+
+    h_pre[...] = h_pre_val.astype(h_pre.dtype)
+    hc_before_norm[...] = hcbn.astype(hc_before_norm.dtype)
+    inv_rms[...] = inv_rms_val.astype(inv_rms.dtype)
+    sum_out[...] = np.stack(sum_out_list, axis=0).astype(sum_out.dtype)
+    norm_out[...] = np.stack(norm_out_list, axis=0).astype(norm_out.dtype)
+
+    grad_hin[...] = rng.standard_normal(grad_hin.shape).astype(grad_hin.dtype)
+    grad_h_post[...] = rng.standard_normal(grad_h_post.shape).astype(grad_h_post.dtype)
+    grad_h_res[...] = rng.standard_normal(grad_h_res.shape).astype(grad_h_res.dtype)
+
+    return (
+        grad_hin,
+        grad_h_post,
+        grad_h_res,
+        x,
+        phi,
+        alpha,
+        bias,
+        h_pre,
+        hc_before_norm,
+        inv_rms,
+        sum_out,
+        norm_out,
+    )

@@ -9,14 +9,14 @@
  */
 
 /* !
- * \file mhc_pre_sinkhorn_backward_arch35_tiling_base.cpp
+ * \file mhc_pre_sinkhorn_backward_arch92_tiling_base.cpp
  * \brief
  */
 
 #include "register/op_def_registry.h"
 #include "tiling/tiling_api.h"
 #include "tiling/platform/platform_ascendc.h"
-#include "mhc_pre_sinkhorn_backward_arch35_tiling_base.h"
+#include "mhc_pre_sinkhorn_backward_arch92_tiling_base.h"
 #include "log/log.h"
 #include <initializer_list>
 
@@ -118,14 +118,14 @@ using namespace ge;
 using namespace std;
 using namespace AscendC;
 
-bool MhcPreSinkhornBackwardArch35Tiling::IsCapable()
+bool MhcPreSinkhornBackward960Tiling::IsCapable()
 {
     return true;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetPlatformInfo()
+ge::graphStatus MhcPreSinkhornBackward960Tiling::GetPlatformInfo()
 {
-    OP_LOGD(opName, "MhcPreSinkhornBackwardArch35Tiling GetPlatformInfo");
+    OP_LOGD(opName, "MhcPreSinkhornBackward960Tiling GetPlatformInfo");
     auto platformInfo = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
@@ -148,9 +148,9 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetPlatformInfo()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetShapeAttrsInfo()
+ge::graphStatus MhcPreSinkhornBackward960Tiling::GetShapeAttrsInfo()
 {
-    OP_LOGD(opName, "MhcPreSinkhornBackwardArch35Tiling GetShapeAttrsInfo");
+    OP_LOGD(opName, "MhcPreSinkhornBackward960Tiling GetShapeAttrsInfo");
     const auto xShapePtr = context_->GetInputShape(INPUT_X_IDX);
     if (xShapePtr == nullptr) {
         OP_LOGE(context_, "input x shape is nullptr");
@@ -197,8 +197,8 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetShapeAttrsInfo()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::CheckShapeBase(int64_t batchSize, int64_t seqLength, int64_t n,
-                                                                   int64_t c, bool is3D)
+ge::graphStatus MhcPreSinkhornBackward960Tiling::CheckShapeBase(int64_t batchSize, int64_t seqLength, int64_t n,
+                                                                int64_t c, bool is3D)
 {
     auto opName = context_->GetNodeName();
     int64_t bs = batchSize * seqLength;
@@ -357,8 +357,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::CheckShapeBase(int64_t batch
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::CheckShape(int64_t batchSize, int64_t seqLength, int64_t n,
-                                                               int64_t c)
+ge::graphStatus MhcPreSinkhornBackward960Tiling::CheckShape(int64_t batchSize, int64_t seqLength, int64_t n, int64_t c)
 {
     auto opName = context_->GetNodeName();
     OP_CHECK_IF(n != N_SIZE_4, OPS_REPORT_VECTOR_INNER_ERR(opName, "n must be 4, but got %lu", n),
@@ -366,10 +365,9 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::CheckShape(int64_t batchSize
     return CheckShapeBase(batchSize, seqLength, n, c);
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::SetTilingData()
+ge::graphStatus MhcPreSinkhornBackward960Tiling::SetTilingData()
 {
-    MhcPreSinkhornBackwardArch35TilingData* tilingData =
-        context_->GetTilingData<MhcPreSinkhornBackwardArch35TilingData>();
+    MhcPreSinkhornBackward960TilingData* tilingData = context_->GetTilingData<MhcPreSinkhornBackward960TilingData>();
     auto platformInfo = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
     auto ascendPlatformInfo = platform_ascendc::PlatformAscendC(platformInfo);
@@ -417,7 +415,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::SetTilingData()
     return ge::GRAPH_SUCCESS;
 }
 
-void MhcPreSinkhornBackwardArch35Tiling::DoUbTiling()
+void MhcPreSinkhornBackward960Tiling::DoUbTiling()
 {
     c0_ = C0_SIZE;
     c1_ = c_ / c0_;
@@ -436,19 +434,18 @@ void MhcPreSinkhornBackwardArch35Tiling::DoUbTiling()
     mm2N_ = n_ * c_;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::DoOpTiling()
+ge::graphStatus MhcPreSinkhornBackward960Tiling::DoOpTiling()
 {
     DoUbTiling();
     return SetTilingData();
 }
 
-uint64_t MhcPreSinkhornBackwardArch35Tiling::GetTilingKey() const
+uint64_t MhcPreSinkhornBackward960Tiling::GetTilingKey() const
 {
-    bool isDeterministic = false;
-    return GET_TPL_TILING_KEY(isDeterministic);
+    return MhcPreSinkhornBackward960Ns::TILING_KEY_ONE_STAGE;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::PostTiling()
+ge::graphStatus MhcPreSinkhornBackward960Tiling::PostTiling()
 {
     context_->SetDynUBufSize(ubSize_);
     context_->SetBlockDim(coreNumAic_);
@@ -457,7 +454,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::PostTiling()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetWorkspaceSize()
+ge::graphStatus MhcPreSinkhornBackward960Tiling::GetWorkspaceSize()
 {
     auto platformInfo = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
@@ -472,7 +469,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetWorkspaceSize()
     return ge::GRAPH_SUCCESS;
 }
 
-void MhcPreSinkhornBackwardArch35Tiling::DumpTilingInfo()
+void MhcPreSinkhornBackward960Tiling::DumpTilingInfo()
 {
     std::ostringstream info;
     info << "batchSize: " << batchSize_ << std::endl;
@@ -494,10 +491,10 @@ void MhcPreSinkhornBackwardArch35Tiling::DumpTilingInfo()
     OP_LOGI(opName, "Tiling info is: %s", info.str().c_str());
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::DoLibApiTiling()
+ge::graphStatus MhcPreSinkhornBackward960Tiling::DoLibApiTiling()
 {
     return ge::GRAPH_SUCCESS;
 }
 
-REGISTER_OPS_TILING_TEMPLATE(MhcPreSinkhornBackward, MhcPreSinkhornBackwardArch35Tiling, 10);
+REGISTER_OPS_TILING_TEMPLATE(MhcPreSinkhornBackward, MhcPreSinkhornBackward960Tiling, 110);
 } // namespace optiling

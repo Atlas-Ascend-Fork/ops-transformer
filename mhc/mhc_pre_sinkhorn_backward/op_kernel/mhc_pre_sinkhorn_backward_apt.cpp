@@ -8,65 +8,67 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-/*!
- * \file mhc_pre_sinkhorn_backward_apt.cpp
- * \brief
- */
+// Ascend960 uses dedicated tiling data and keys.
+#if defined(__DAV_920R1__) || defined(__DAV_920R2__) || \
+    (defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202)))
+#include "arch92/mhc_pre_sinkhorn_backward_entry_arch92.h"
+#else
 #include "kernel_operator.h"
-#include "lib/matmul_intf.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "arch35/mhc_pre_sinkhorn_backward_one_stage.h"
 #include "arch35/mhc_pre_sinkhorn_backward_data_arch35.h"
 #include "arch35/mhc_pre_sinkhorn_backward_key_arch35.h"
-#include "arch35/mhc_pre_sinkhorn_backward_deterministic.h"
+#include "arch35/mhc_pre_sinkhorn_backward_kernel_arch35.h"
 
 using namespace AscendC;
-using namespace Reg;
+using namespace MhcPreSinkhornBackwardNs;
 
-template <bool DETERMINISTIC>
-__global__ __aicore__ void mhc_pre_sinkhorn_backward(GM_ADDR grad_hin, GM_ADDR grad_h_post, GM_ADDR grad_h_res,
-                                                     GM_ADDR x, GM_ADDR phi, GM_ADDR alpha, GM_ADDR bias, GM_ADDR h_pre,
-                                                     GM_ADDR hc_before_norm, GM_ADDR inv_rms, GM_ADDR sum_out,
-                                                     GM_ADDR norm_out, GM_ADDR grad_x, GM_ADDR grad_phi,
-                                                     GM_ADDR grad_alpha, GM_ADDR grad_bias, GM_ADDR workspace,
-                                                     GM_ADDR tiling)
+// N由运行时tiling确定，多个N共用kernel实例。
+template <typename T, SplitMode MODE, bool DETERMINISTIC>
+__aicore__ inline void MhcPreSinkhornBackwardRun(GM_ADDR grad_hin, GM_ADDR grad_h_post, GM_ADDR grad_h_res, GM_ADDR x,
+                                                 GM_ADDR phi, GM_ADDR alpha, GM_ADDR bias, GM_ADDR h_pre,
+                                                 GM_ADDR hc_before_norm, GM_ADDR inv_rms, GM_ADDR sum_out,
+                                                 GM_ADDR norm_out, GM_ADDR grad_x, GM_ADDR grad_phi, GM_ADDR grad_alpha,
+                                                 GM_ADDR grad_bias, GM_ADDR userWorkspace,
+                                                 const MhcPreSinkhornBackwardArch35TilingData* tilingData, TPipe* pipe)
 {
-    if (workspace == nullptr) {
-        return;
-    }
-    GM_ADDR usrWorkspace = GetUserWorkspace(workspace);
-    if (usrWorkspace == nullptr) {
-        return;
-    }
+    MhcPreSinkhornBackwardKernel<T, MODE, DETERMINISTIC> op;
+    op.Init(grad_hin, grad_h_post, grad_h_res, x, phi, alpha, bias, h_pre, hc_before_norm, inv_rms, sum_out, norm_out,
+            grad_x, grad_phi, grad_alpha, grad_bias, userWorkspace, tilingData, pipe);
+    op.Process();
+}
 
-    REGISTER_TILING_DEFAULT(MhcPreSinkhornBackwardArch35TilingData);
-#if defined(__DAV_920R1__) || (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201))
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
-#else
+extern "C" __global__ __aicore__ void mhc_pre_sinkhorn_backward(
+    GM_ADDR grad_hin, GM_ADDR grad_h_post, GM_ADDR grad_h_res, GM_ADDR x, GM_ADDR phi, GM_ADDR alpha, GM_ADDR bias,
+    GM_ADDR h_pre, GM_ADDR hc_before_norm, GM_ADDR inv_rms, GM_ADDR sum_out, GM_ADDR norm_out, GM_ADDR grad_x,
+    GM_ADDR grad_phi, GM_ADDR grad_alpha, GM_ADDR grad_bias, GM_ADDR workspace, GM_ADDR tiling)
+{
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
-#endif
+    REGISTER_TILING_DEFAULT(MhcPreSinkhornBackwardArch35TilingData);
+    GET_TILING_DATA_WITH_STRUCT(MhcPreSinkhornBackwardArch35TilingData, tilingDataValue, tiling);
+    const MhcPreSinkhornBackwardArch35TilingData* tilingData = &tilingDataValue;
     TPipe pipe;
-    if constexpr (DETERMINISTIC) {
-        REGISTER_TILING_FOR_TILINGKEY("DETERMINISTIC == true", MhcPreSinkhornBackwardArch35DeterminiticTilingData);
-        GET_TILING_DATA_WITH_STRUCT(MhcPreSinkhornBackwardArch35DeterminiticTilingData, tilingData, tiling);
-        MhcPreSinkhornBackwardDeterministic<DTYPE_X, DTYPE_GRAD_HIN, float> op;
-        op.mm1_.SetSubBlockIdx(0);
-        op.mm1_.Init(&tilingData.mm1TilingData, &pipe);
-        op.mm2_.SetSubBlockIdx(0);
-        op.mm2_.Init(&tilingData.mm2TilingData, &pipe);
-        op.Init(x, phi, h_pre, grad_hin, grad_h_post, grad_h_res, alpha, bias, hc_before_norm, inv_rms, sum_out,
-                norm_out, grad_x, grad_phi, grad_alpha, grad_bias, usrWorkspace, &tilingData, &pipe);
-        op.Process();
-    } else {
-        REGISTER_TILING_FOR_TILINGKEY("DETERMINISTIC == false", MhcPreSinkhornBackwardArch35TilingData);
-        GET_TILING_DATA_WITH_STRUCT(MhcPreSinkhornBackwardArch35TilingData, tilingData, tiling);
-        MhcPreSinkhornBackwardOneStage<DTYPE_PHI, DTYPE_GRAD_HIN> op;
-        op.mm1_.SetSubBlockIdx(0);
-        op.mm1_.Init(&tilingData.mm1TilingData, &pipe);
-        op.mm2_.SetSubBlockIdx(0);
-        op.mm2_.Init(&tilingData.mm2TilingData, &pipe);
-        op.Init(x, phi, h_pre, grad_hin, grad_h_post, grad_h_res, alpha, bias, hc_before_norm, inv_rms, sum_out,
-                norm_out, grad_x, grad_phi, grad_alpha, grad_bias, usrWorkspace, &tilingData, &pipe);
-        op.Process();
+
+    if (TILING_KEY_IS(3000)) {
+        if (workspace == nullptr || tilingData->userWorkspaceBytes == 0) {
+            return;
+        }
+        GM_ADDR userWorkspace = GetUserWorkspace(workspace);
+        if (userWorkspace == nullptr) {
+            return;
+        }
+        MhcPreSinkhornBackwardRun<DTYPE_X, SplitMode::MK_SPLIT, false>(
+            grad_hin, grad_h_post, grad_h_res, x, phi, alpha, bias, h_pre, hc_before_norm, inv_rms, sum_out, norm_out,
+            grad_x, grad_phi, grad_alpha, grad_bias, userWorkspace, tilingData, &pipe);
+    } else if (TILING_KEY_IS(3001)) {
+        MhcPreSinkhornBackwardRun<DTYPE_X, SplitMode::M_SPLIT, false>(
+            grad_hin, grad_h_post, grad_h_res, x, phi, alpha, bias, h_pre, hc_before_norm, inv_rms, sum_out, norm_out,
+            grad_x, grad_phi, grad_alpha, grad_bias, nullptr, tilingData, &pipe);
+    } else if (TILING_KEY_IS(3003)) {
+        // 确定性分支共用M_SPLIT实例。
+        MhcPreSinkhornBackwardRun<DTYPE_X, SplitMode::M_SPLIT, false>(
+            grad_hin, grad_h_post, grad_h_res, x, phi, alpha, bias, h_pre, hc_before_norm, inv_rms, sum_out, norm_out,
+            grad_x, grad_phi, grad_alpha, grad_bias, nullptr, tilingData, &pipe);
     }
 }
+
+#endif

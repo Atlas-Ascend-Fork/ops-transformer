@@ -12,14 +12,14 @@
  * \brief mhc_pre_sinkhorn_backward
  */
 
-#ifndef MHC_PRE_SINKHORN_BACKWARD_ONE_STAGE_H
-#define MHC_PRE_SINKHORN_BACKWARD_ONE_STAGE_H
+#ifndef MHC_PRE_SINKHORN_BACKWARD_960_ONE_STAGE_H
+#define MHC_PRE_SINKHORN_BACKWARD_960_ONE_STAGE_H
 
 #include "kernel_operator.h"
 #include "lib/matmul_intf.h"
 #include "mhc_pre_sinkhorn_backward_simd_vf.h"
 #include "mhc_pre_sinkhorn_backward_simt_vf.h"
-#include "mhc_pre_sinkhorn_backward_data_arch35.h"
+#include "mhc_pre_sinkhorn_backward_data_arch92.h"
 
 using namespace AscendC;
 using namespace Reg;
@@ -52,7 +52,7 @@ public:
                                 GM_ADDR gradHRes, GM_ADDR alpha, GM_ADDR bias, GM_ADDR hcBeforeNorm, GM_ADDR invRms,
                                 GM_ADDR sumOut, GM_ADDR normOut, GM_ADDR gradX, GM_ADDR gradPhi, GM_ADDR gradAlpha,
                                 GM_ADDR gradBias, GM_ADDR workspace,
-                                const MhcPreSinkhornBackwardArch35TilingData* tilingData, TPipe* pipe)
+                                const MhcPreSinkhornBackward960TilingData* tilingData, TPipe* pipe)
     {
         pipe_ = pipe;
         blkIdx_ = GetBlockIdx();
@@ -121,7 +121,7 @@ protected:
     GlobalTensor<T> phiGlobal_;
 
 private:
-    __aicore__ inline void InitTiling(const MhcPreSinkhornBackwardArch35TilingData* tilingData)
+    __aicore__ inline void InitTiling(const MhcPreSinkhornBackward960TilingData* tilingData)
     {
         batchSize_ = tilingData->batchSize;
         seqLength_ = tilingData->seqLength;
@@ -561,4 +561,4 @@ __aicore__ inline void MhcPreSinkhornBackwardOneStage<T, U>::ProcessMatmul2(cons
     mm2_.End();
 }
 
-#endif // MHC_PRE_SINKHORN_BACKWARD_ONE_STAGE_H
+#endif // MHC_PRE_SINKHORN_BACKWARD_960_ONE_STAGE_H

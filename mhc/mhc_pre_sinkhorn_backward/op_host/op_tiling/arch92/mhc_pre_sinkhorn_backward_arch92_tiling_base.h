@@ -9,27 +9,27 @@
  */
 
 /* !
- * \file mhc_pre_sinkhorn_backward_arch35_tiling_base.h
+ * \file mhc_pre_sinkhorn_backward_arch92_tiling_base.h
  * \brief
  */
 
-#ifndef MHC_PRE_SINKHORN_BACKWARD_ARCH35_TILING_BASE_H_
-#define MHC_PRE_SINKHORN_BACKWARD_ARCH35_TILING_BASE_H_
+#ifndef MHC_PRE_SINKHORN_BACKWARD_960_ARCH92_TILING_BASE_H_
+#define MHC_PRE_SINKHORN_BACKWARD_960_ARCH92_TILING_BASE_H_
 
 #include "op_host/tiling_base.h"
 #include "register/tilingdata_base.h"
 #include "tiling/tiling_api.h"
-#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch35/mhc_pre_sinkhorn_backward_data_arch35.h"
-#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch35/mhc_pre_sinkhorn_backward_key_arch35.h"
+#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch92/mhc_pre_sinkhorn_backward_data_arch92.h"
+#include "mhc/mhc_pre_sinkhorn_backward/op_kernel/arch92/mhc_pre_sinkhorn_backward_key_arch92.h"
 #include "err/ops_err.h"
 #include "op_host/tiling_templates_registry.h"
 
 namespace optiling {
 using namespace Ops::Transformer::OpTiling;
 
-class MhcPreSinkhornBackwardArch35Tiling : public TilingBaseClass {
+class MhcPreSinkhornBackward960Tiling : public TilingBaseClass {
 public:
-    explicit MhcPreSinkhornBackwardArch35Tiling(gert::TilingContext* context)
+    explicit MhcPreSinkhornBackward960Tiling(gert::TilingContext* context)
         : TilingBaseClass(context)
     {}
 
@@ -80,4 +80,4 @@ protected:
 };
 
 } // namespace optiling
-#endif // MHC_PRE_SINKHORN_BACKWARD_ARCH35_TILING_BASE_H_
+#endif // MHC_PRE_SINKHORN_BACKWARD_960_ARCH92_TILING_BASE_H_

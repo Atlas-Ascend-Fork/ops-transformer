@@ -9,14 +9,14 @@
  */
 
 /* !
- * \file mhc_pre_sinkhorn_backward_arch35_tiling_base.cpp
+ * \file mhc_pre_sinkhorn_backward_arch92_tiling_deterministic.cpp
  * \brief
  */
 
 #include "register/op_def_registry.h"
 #include "tiling/tiling_api.h"
 #include "tiling/platform/platform_ascendc.h"
-#include "mhc_pre_sinkhorn_backward_arch35_tiling_deterministic.h"
+#include "mhc_pre_sinkhorn_backward_arch92_tiling_deterministic.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
 #include "util/math_util.h"
@@ -76,14 +76,14 @@ using namespace ge;
 using namespace std;
 using namespace AscendC;
 
-bool MhcPreSinkhornBackwardArch35DeterminiticTiling::IsCapable()
+bool MhcPreSinkhornBackward960DeterminiticTiling::IsCapable()
 {
     return true;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::GetShapeAttrsInfo()
+ge::graphStatus MhcPreSinkhornBackward960DeterminiticTiling::GetShapeAttrsInfo()
 {
-    OP_LOGD(opName, "MhcPreSinkhornBackwardArch35DeterministicTiling GetShapeAttrsInfo");
+    OP_LOGD(opName, "MhcPreSinkhornBackward960DeterministicTiling GetShapeAttrsInfo");
     const auto xShapePtr = context_->GetInputShape(INPUT_X_IDX);
     if (xShapePtr == nullptr) {
         OP_LOGE(context_, "input x shape is nullptr");
@@ -146,10 +146,10 @@ ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::GetShapeAttrsInf
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::SetTilingData()
+ge::graphStatus MhcPreSinkhornBackward960DeterminiticTiling::SetTilingData()
 {
-    MhcPreSinkhornBackwardArch35DeterminiticTilingData* tilingData =
-        context_->GetTilingData<MhcPreSinkhornBackwardArch35DeterminiticTilingData>();
+    MhcPreSinkhornBackward960DeterminiticTilingData* tilingData =
+        context_->GetTilingData<MhcPreSinkhornBackward960DeterminiticTilingData>();
     auto platformInfo = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
     auto ascendPlatformInfo = platform_ascendc::PlatformAscendC(platformInfo);
@@ -213,7 +213,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::SetTilingData()
     return ge::GRAPH_SUCCESS;
 }
 
-void MhcPreSinkhornBackwardArch35DeterminiticTiling::DoUbTiling()
+void MhcPreSinkhornBackward960DeterminiticTiling::DoUbTiling()
 {
     int64_t totalBs = bs_;
     bsTaskCount_ = Ops::Base::CeilDiv(totalBs, static_cast<int64_t>(coreNumAiv_));
@@ -288,19 +288,18 @@ void MhcPreSinkhornBackwardArch35DeterminiticTiling::DoUbTiling()
     cBlockTailTailCount_ = tailBsncTaskCount_ - cBlockCount_ * (cBlockTailLoops_ - 1);
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::DoOpTiling()
+ge::graphStatus MhcPreSinkhornBackward960DeterminiticTiling::DoOpTiling()
 {
     DoUbTiling();
     return SetTilingData();
 }
 
-uint64_t MhcPreSinkhornBackwardArch35DeterminiticTiling::GetTilingKey() const
+uint64_t MhcPreSinkhornBackward960DeterminiticTiling::GetTilingKey() const
 {
-    bool isDeterministic = true;
-    return GET_TPL_TILING_KEY(isDeterministic);
+    return MhcPreSinkhornBackward960Ns::TILING_KEY_DETERMINISTIC;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::PostTiling()
+ge::graphStatus MhcPreSinkhornBackward960DeterminiticTiling::PostTiling()
 {
     context_->SetBlockDim(coreNumAic_);
     context_->SetScheduleMode(1);
@@ -308,7 +307,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::PostTiling()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::GetWorkspaceSize()
+ge::graphStatus MhcPreSinkhornBackward960DeterminiticTiling::GetWorkspaceSize()
 {
     auto platformInfo = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
@@ -330,7 +329,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::GetWorkspaceSize
     return ge::GRAPH_SUCCESS;
 }
 
-void MhcPreSinkhornBackwardArch35DeterminiticTiling::DumpTilingInfo()
+void MhcPreSinkhornBackward960DeterminiticTiling::DumpTilingInfo()
 {
     std::ostringstream info;
     info << "bs: " << bs_ << std::endl;
@@ -359,10 +358,10 @@ void MhcPreSinkhornBackwardArch35DeterminiticTiling::DumpTilingInfo()
     OP_LOGI(opName, "Tiling info is: %s", info.str().c_str());
 }
 
-ge::graphStatus MhcPreSinkhornBackwardArch35DeterminiticTiling::DoLibApiTiling()
+ge::graphStatus MhcPreSinkhornBackward960DeterminiticTiling::DoLibApiTiling()
 {
     return ge::GRAPH_SUCCESS;
 }
 
-REGISTER_OPS_TILING_TEMPLATE(MhcPreSinkhornBackward, MhcPreSinkhornBackwardArch35DeterminiticTiling, 0);
+REGISTER_OPS_TILING_TEMPLATE(MhcPreSinkhornBackward, MhcPreSinkhornBackward960DeterminiticTiling, 100);
 } // namespace optiling
