@@ -13,8 +13,10 @@
  * \brief
  */
 #include <iostream>
+#include <map>
 #include <gtest/gtest.h>
 #include "../../../op_host/moe_init_routing_quant_tiling.h"
+#include "platform/platform_infos_def.h"
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
 #include "op_tiling_parse_context_builder.h"
@@ -600,3 +602,77 @@ TEST_F(MoeInitRoutingQuantTiling, MoeInitRoutingQuant_tiling_vbs_align_branch)
         &compileInfo);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 2, "", {});
 }
+
+enum class QuantTilingWorkspaceCase {
+    Valid,
+    NullWorkspace,
+    EmptyWorkspace
+};
+
+class MoeInitRoutingQuantTilingWorkspace : public MoeInitRoutingQuantTiling,
+                                           public testing::WithParamInterface<QuantTilingWorkspaceCase> {};
+
+TEST_P(MoeInitRoutingQuantTilingWorkspace, CheckWorkspace)
+{
+    const auto bufferCase = GetParam();
+    auto makeTensor = [](const gert::StorageShape& shape, ge::DataType dtype) {
+        return gert::Tensor(shape, gert::StorageFormat(ge::FORMAT_ND, ge::FORMAT_ND, gert::ExpandDimsType()),
+                            gert::TensorPlacement::kOnHost, dtype, nullptr);
+    };
+    auto x = makeTensor({{2, 5}, {2, 5}}, ge::DT_FLOAT);
+    auto rowIdx = makeTensor({{2, 3}, {2, 3}}, ge::DT_INT32);
+    auto expertIdx = makeTensor({{2, 3}, {2, 3}}, ge::DT_INT32);
+    auto expandedX = makeTensor({{6, 5}, {6, 5}}, ge::DT_INT8);
+    auto expandedRowIdx = makeTensor({{6}, {6}}, ge::DT_INT32);
+    auto expandedExpertIdx = makeTensor({{6}, {6}}, ge::DT_INT32);
+    optiling::MoeInitRoutingQuantCompileInfo compileInfo = {};
+    fe::PlatFormInfos platformInfo;
+    platformInfo.Init();
+    std::map<std::string, std::string> socInfo = {{"ai_core_cnt", "64"}, {"core_type_list", "AICore"}};
+    std::map<std::string, std::string> aicoreSpec = {{"ub_size", "262144"}};
+    std::map<std::string, std::string> version = {{"NpuArch", "2201"}, {"Short_SoC_version", "Ascend910B"}};
+    platformInfo.SetPlatformRes("SoCInfo", socInfo);
+    platformInfo.SetPlatformRes("AICoreSpec", aicoreSpec);
+    platformInfo.SetCoreNumByCoreType("AICore");
+    platformInfo.SetPlatformRes("version", version);
+    auto tilingData = gert::TilingData::CreateCap(4096);
+    auto workspaceHolder =
+        gert::ContinuousVector::Create<size_t>(bufferCase == QuantTilingWorkspaceCase::EmptyWorkspace ? 0 : 1);
+    ASSERT_NE(tilingData, nullptr);
+    ASSERT_NE(workspaceHolder, nullptr);
+    auto workspace = reinterpret_cast<gert::ContinuousVector*>(workspaceHolder.get());
+    gert::TilingContextFaker contextFaker;
+    auto contextHolder = contextFaker.SetOpType("MoeInitRoutingQuant")
+                             .NodeIoNum(3, 3)
+                             .InputTensors({&x, &rowIdx, &expertIdx})
+                             .OutputTensors({&expandedX, &expandedRowIdx, &expandedExpertIdx})
+                             .Attr("active_num", int64_t{6})
+                             .Attr("scale", float{1.0})
+                             .Attr("offset", float{0.0})
+                             .CompileInfo(&compileInfo)
+                             .PlatformInfo(&platformInfo)
+                             .TilingData(tilingData.get())
+                             .Workspace(bufferCase == QuantTilingWorkspaceCase::NullWorkspace ? nullptr : workspace)
+                             .Build();
+    auto context = contextHolder.GetContext();
+    ASSERT_NE(context, nullptr);
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(spaceRegistry, nullptr);
+    auto opImpl = spaceRegistry->GetOpImpl("MoeInitRoutingQuant");
+    ASSERT_NE(opImpl, nullptr);
+    ASSERT_NE(opImpl->tiling, nullptr);
+    const auto result = opImpl->tiling(context);
+    if (bufferCase == QuantTilingWorkspaceCase::Valid) {
+        ASSERT_EQ(result, ge::GRAPH_SUCCESS);
+        ASSERT_NE(context->GetWorkspaceSizes(1), nullptr);
+        EXPECT_EQ(context->GetWorkspaceSizes(1)[0], 16777448U);
+        EXPECT_EQ(context->GetTilingKey(), 1U);
+        EXPECT_GT(context->GetRawTilingData()->GetDataSize(), 0U);
+    } else {
+        EXPECT_EQ(result, ge::GRAPH_FAILED);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(OutputBuffers, MoeInitRoutingQuantTilingWorkspace,
+                         testing::Values(QuantTilingWorkspaceCase::Valid, QuantTilingWorkspaceCase::NullWorkspace,
+                                         QuantTilingWorkspaceCase::EmptyWorkspace));
