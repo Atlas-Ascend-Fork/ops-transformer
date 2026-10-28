@@ -251,6 +251,11 @@ public:
                 // Wait for partial writes before reusing the Vector UB.
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID3);
+                if constexpr (LSE_MODE == LseMode::OUT_ONLY) {
+                    if (isLastRowLoop) {
+                        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID4);
+                    }
+                }
             } else {
                 // *** go = castfp32to16(go)
                 if (std::is_same<ElementOutput, bfloat16_t>::value) {
