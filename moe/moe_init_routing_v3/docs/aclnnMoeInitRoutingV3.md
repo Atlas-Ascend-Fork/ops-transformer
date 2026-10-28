@@ -430,10 +430,11 @@ aclnnStatus aclnnMoeInitRoutingV3(
       <td>输出</td>
       <td>输出每个专家处理的token数量的统计结果或累加值</td>
       <td><ul>
-        <li>在expertTokensNumType为0时，表示activeExpertRangeOptional范围内expert在排序后处理token总数的前缀和。</li>
-        <li>在expertTokensNumType为1时，表示activeExpertRangeOptional范围内expert对应的处理token的总数。</li>
-        <li>在expertTokensNumType为2时，表示activeExpertRangeOptional范围内token总数为非0的expert，以及对应expert处理token的总数。</li>
-        <li>在expertTokensNumType为0或1时，输出shape为[expertEnd-expertStart]；在expertTokensNumType为2时，输出shape为[expertNum, 2]。</li>
+        <li>在expertTokensNumFlag为false时，不输出统计结果。</li>
+        <li>在expertTokensNumFlag为true且expertTokensNumType为0时，表示activeExpertRangeOptional范围内expert在排序后处理token总数的前缀和。</li>
+        <li>在expertTokensNumFlag为true且expertTokensNumType为1时，表示activeExpertRangeOptional范围内expert对应的处理token的总数。</li>
+        <li>在expertTokensNumFlag为true且expertTokensNumType为2时，表示activeExpertRangeOptional范围内token总数为非0的expert，以及对应expert处理token的总数。</li>
+        <li>在expertTokensNumFlag为true且expertTokensNumType为0或1时，输出shape为[expertEnd-expertStart]；在expertTokensNumType为2时，输出shape为[expertNum, 2]。</li>
       </ul></td>
       <td>INT64</td>
       <td>ND</td>
@@ -540,7 +541,6 @@ aclnnStatus aclnnMoeInitRoutingV3(
     - expertCapacity在Dropless场景下不使用该参数；在DropPad场景下必须校验且取值范围为(0, NUM_ROWS]。
     - dropPadMode支持取值为0和1，DropPad模式（dropPadMode=1）具有如下额外约束：<ul><li>rowIdxType仅支持取值为0（gather索引）。</li><li>activeExpertRangeOptional必须为[0, expertNum]。</li><li>expertTokensNumType仅支持取值为1（count模式）。</li><li>quantMode在DropPad模式下仅支持-1（非量化），且数据类型仅支持FLOAT16、BFLOAT16、FLOAT32、INT8、HIFLOAT8。</li><li>expandedXOut必须是3D Tensor，shape为[expertNum, expertCapacity, H]。</li></ul>
     - expertTokensNumType仅支持取值0、1、2。
-    - expertTokensNumFlag仅支持取值为true。
   <!-- end id9 -->
   <!-- npu="950" id10 -->
   - <term>Ascend 950PR&950DT系列产品</term>支持quantMode为13的INT4动态量化场景，需同时满足：

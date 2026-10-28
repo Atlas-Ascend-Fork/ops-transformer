@@ -423,7 +423,7 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
             "moe_init_routing(Tensor x, Tensor expert_idx, "
             "*, Tensor? scale=None, Tensor? offset=None, Tensor? topk_weight=None, "
             "SymInt active_num=-1, int expert_capacity=-1, int expert_num=-1, "
-            "int drop_pad_mode=0, int expert_tokens_num_type=0, bool expert_tokens_num_flag=False, "
+            "int drop_pad_mode=0, int expert_tokens_num_type=0, bool expert_tokens_num_flag=True, "
             "int quant_mode=-1, int[]? active_expert_range=None, int row_idx_type=0, "
             "int? x_dtype=None) "
             "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
@@ -442,7 +442,7 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
             expert_num=-1,
             drop_pad_mode=0,
             expert_tokens_num_type=0,
-            expert_tokens_num_flag=False,
+            expert_tokens_num_flag=True,
             quant_mode=-1,
             active_expert_range=None,
             row_idx_type=0,
@@ -501,7 +501,7 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
             expanded_row_idx_dim_list = [bs * k]
 
             if not expert_tokens_num_flag:
-                expert_token_cumsum_or_count_dim_list = []
+                expert_token_cumsum_or_count_dim_list = [0]
             elif expert_tokens_num_type < 2:
                 expert_token_cumsum_or_count_dim_list = [expert_range_length]
             else:
@@ -545,7 +545,7 @@ def _moe_init_routing(
     expert_num=-1,
     drop_pad_mode=0,
     expert_tokens_num_type=0,
-    expert_tokens_num_flag=False,
+    expert_tokens_num_flag=True,
     quant_mode=-1,
     active_expert_range=None,
     row_idx_type=0,
@@ -741,7 +741,7 @@ def moe_init_routing(
     expert_num: int = -1,
     drop_pad_mode: int = 0,
     expert_tokens_num_type: int = 0,
-    expert_tokens_num_flag: bool = False,
+    expert_tokens_num_flag: bool = True,
     quant_mode: int = -1,
     active_expert_range: Optional[List[int]] = None,
     row_idx_type: int = 0,
@@ -783,7 +783,7 @@ def moe_init_routing(
         drop_pad_mode (int): 0 for dropless, 1 for drop/pad mode. Default: 0.
         expert_tokens_num_type (int): Type of expert token count output.
             0=count, 1=cumsum, 2=key_value. Default: 0.
-        expert_tokens_num_flag (bool): Whether to produce expert_tokens_count output. Default: False.
+        expert_tokens_num_flag (bool): Whether to produce expert_tokens_count output. Default: True.
         quant_mode (int): Quantization mode. Default: -1.
             -1: no quantization; 0: static; 1: dynamic int8; 2: mxfp8_e5m2;
             3: mxfp8_e4m3fn; 4: fp8_group_e5m2; 5: fp8_group_e4m3fn;
@@ -806,7 +806,7 @@ def moe_init_routing(
                 - drop_pad_mode=1: shape (expert_num, expert_capacity, cols), dtype depends on quant_mode.
             - expanded_row_idx (Tensor): Row indices of shape (n*k,), dtype int32.
             - expert_tokens_count_or_cumsum (Tensor): Expert token counts.
-                - expert_tokens_num_flag=False: empty tensor, dtype int64.
+                - expert_tokens_num_flag=False: empty tensor with shape (0,), dtype int64.
                 - expert_tokens_num_type<2: shape (expert_range_length,), dtype int64.
                 - expert_tokens_num_type=2: shape (expert_num, 2), dtype int64.
             - expanded_scale (Tensor): Expanded scale tensor.

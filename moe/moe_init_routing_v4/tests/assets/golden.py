@@ -18,6 +18,7 @@ __input__ = {
 __spec__ = {
     "moe_init_routing_v4": "MoeInitRoutingV4KernelSpec",
     "aclnnMoeInitRoutingV4": "AclnnMoeInitRoutingV4Spec",
+    "torch.ops.cann_ops_transformer.moe_init_routing": "E2eMoeInitRoutingV4Spec",
 }
 
 import numpy
@@ -755,30 +756,13 @@ def _moe_init_routing_v4_numpy(
         expanded_x = numpy.rint((expanded_x * mul).astype(numpy.float32))
         expanded_x = numpy.clip(expanded_x, -8, 7).astype(numpy_int4())
 
-        if actual_expert_total_num < x_out_num:
-            expanded_x = numpy.concatenate(
-                [
-                    expanded_x,
-                    numpy.ones(
-                        (x_out_num - actual_expert_total_num, h), dtype=expanded_x.dtype
-                    ),
-                ],
-                axis=0,
-            )
-            expanded_scale = numpy.concatenate(
-                [
-                    expanded_scale.reshape(-1),
-                    numpy.ones(
-                        (x_out_num - actual_expert_total_num,),
-                        dtype=expanded_scale.dtype,
-                    ),
-                ]
-            )
-        else:
-            expanded_x = expanded_x[:x_out_num, :]
-            expanded_scale = expanded_scale.reshape(-1)[:x_out_num]
+        # Only the valid routed prefix is defined; do not compare unwritten tails.
+        expanded_x = expanded_x[:x_out_num, :]
+        expanded_scale = expanded_scale.reshape(-1)[:x_out_num]
 
-    if expert_tokens_num_type == 0:
+    if not expert_tokens_num_flag:
+        expert_tokens_count = numpy.empty((0,), dtype=numpy.int64)
+    elif expert_tokens_num_type == 0:
         counts = numpy.bincount(
             sorted_expert_idx[:actual_expert_total_num] - expert_start,
             minlength=expert_end - expert_start,
@@ -1998,3 +1982,55 @@ class AclnnMoeInitRoutingV4Spec(AclnnMoeInitRoutingBaseSpec):
             expandedTopkWeightOut,
         )
         return [_numpy_to_torch(arr, tpl) for arr, tpl in zip(results, templates)]
+
+
+class E2eMoeInitRoutingV4Spec(MoeInitRoutingV4KernelSpec):
+    """Torch V4 reference, including the optional topk-weight output."""
+
+    @staticmethod
+    def golden(
+        x,
+        expert_idx,
+        *,
+        scale=None,
+        offset=None,
+        topk_weight=None,
+        active_num=-1,
+        expert_capacity=-1,
+        expert_num=-1,
+        drop_pad_mode=0,
+        expert_tokens_num_type=0,
+        expert_tokens_num_flag=True,
+        quant_mode=-1,
+        active_expert_range=None,
+        row_idx_type=0,
+        x_dtype=None,
+        **kwargs,
+    ):
+        x_np = _torch_to_numpy(x)
+        expert_idx_np = _torch_to_numpy(expert_idx)
+        active_range = (
+            _to_list(active_expert_range)
+            if active_expert_range is not None
+            else [0, int(expert_num)]
+        )
+        return list(
+            _moe_init_routing_v4_numpy(
+                x_np,
+                expert_idx_np,
+                _torch_to_numpy(scale),
+                _torch_to_numpy(offset),
+                _torch_to_numpy(topk_weight),
+                _normalize_v4_active_num(
+                    active_num, int(x_np.shape[0]) * int(expert_idx_np.shape[-1])
+                ),
+                int(expert_capacity),
+                int(expert_num),
+                int(drop_pad_mode),
+                int(expert_tokens_num_type),
+                bool(expert_tokens_num_flag),
+                int(quant_mode),
+                active_range,
+                int(row_idx_type),
+            )
+        )

@@ -443,7 +443,7 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
     }
     sortPipe.Destroy();
 
-    // 2.TokensCount阶段，计算输出expertTokensCountOrCumsum
+    // 2.TokensCount阶段：按flag输出expertTokensCountOrCumsum；始终保留阶段3/4/5所需的总数或专家边界。
     if (!TILING_KEY_IS(MOE_INIT_ROUTING_V3_COUTSORT_CUTORIGIN_UNQUANTIZED_GATHER) &&
         !TILING_KEY_IS(MOE_INIT_ROUTING_V3_COUTSORT_CUTORIGIN_STATIC_QUANT_GATHER) &&
         !TILING_KEY_IS(MOE_INIT_ROUTING_V3_COUTSORT_CUTORIGIN_UNQUANTIZED_SCATTER) &&

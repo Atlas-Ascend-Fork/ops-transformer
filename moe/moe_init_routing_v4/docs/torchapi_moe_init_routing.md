@@ -151,7 +151,7 @@ cann_ops_transformer.moe_init_routing(
     expert_num: int = -1,
     drop_pad_mode: int = 0,
     expert_tokens_num_type: int = 0,
-    expert_tokens_num_flag: bool = False,
+    expert_tokens_num_flag: bool = True,
     quant_mode: int = -1,
     active_expert_range: Optional[List[int]] = None,
     row_idx_type: int = 0,
@@ -173,7 +173,7 @@ cann_ops_transformer.moe_init_routing(
 |  expert_num  |  int |  可选  |  表示专家数。默认值为-1，必须大于0。`expert_tokens_num_type`为key_value模式时，取值范围为[1, 5120]；其他模式取值范围为[1, 10240]。  |  -  | - |
 |  drop_pad_mode  |  int |  可选  |  表示是否为drop_pad场景。默认值为0，0表示Dropless场景，该场景下不校验`expert_capacity`；1表示Drop_Pad场景。  |  -  | - |
 |  expert_tokens_num_type  |  int |  可选  |  表示直方图的不同模式。默认值为0，取值为0、1和2。0表示cumsum模式；1表示count模式；2表示key_value模式。  |  -  | - |
-|  expert_tokens_num_flag  |  bool |  可选  |  表示是否输出`expert_token_cumsum_or_count`。默认值为False，仅支持取值为true。  |  -  | - |
+|  expert_tokens_num_flag  |  bool |  可选  |  表示是否输出`expert_token_cumsum_or_count`。默认值为True。为False时，返回shape为[0]、数据类型为int64的空Tensor。  |  -  | - |
 |  quant_mode  |  int |  可选  |  表示量化模式。默认值为-1，支持取值见下方说明。  |  -  | - |
 |  active_expert_range  |  List[int] |  可选  |  表示活跃expert的范围。默认值为None，长度为2，数组内的值为[expert_start, expert_end]，左闭右开，要求值大于等于0，并且expert_end不大于`expert_num`。Drop/Pad场景下，expert_start等于0，expert_end等于`expert_num`。传入None时，视为活跃的expert范围在0到`expert_num`之间。  |  -  | - |
 |  row_idx_type  |  int |  可选  |  表示输出`expanded_row_idx`使用的索引类型。默认值为0，取值为0和1。0表示gather类型的索引；1表示scatter类型的索引。DropPad场景下仅支持0。  |  -  | - |
@@ -255,7 +255,6 @@ cann_ops_transformer.moe_init_routing(
 - `topk_weight`不受`quant_mode`影响，`expanded_topk_weight`数据类型始终为`float32`。
 - `expert_num`必须大于0。
 - `drop_pad_mode=1`时，`row_idx_type`仅支持取值为0（gather索引），`quant_mode`仅支持-1（非量化），且`x`数据类型仅支持`float16`、`bfloat16`、`float32`、`int8`、`hifloat8`。
-- `expert_tokens_num_flag`仅支持取值为true。
 - `active_num`仅支持值等于NUM_ROWS*K。
 - quantMode为9或13的MXFP4/INT4动态量化场景，以及quantMode为-1且`x`数据类型为`float4_e2m1`（通过`x_dtype`指定）的非量化透传场景，`x`的最后一维H要求为偶数。quantMode为13的INT4动态量化场景还需满足：`x`数据类型为`float32`或`bfloat16`，`drop_pad_mode`为0，不支持输入`offset`。
 - 空tensor处理：NUM_ROWS=0或K=0时没有路由元素，进入空Tensor处理路径，专家计数为0；输出shape仍需满足相应模式的约束。NUM_ROWS*K>0且H=0时仍走正常路由流程，生成`expanded_row_idx`和`expert_token_cumsum_or_count`。

@@ -127,8 +127,10 @@ protected:
         MIRV3_CHECK_GE_RET(
             GetTensorShapeDtype<false>(expandedScaleShape_, expandedScaleDtype_, V4_OUTPUT_EXPANDED_SCALE_INDEX));
         auto expandedTopkWeightOutShapePtr = context_->GetOutputShape(V4_OUTPUT_EXPANDED_TOPK_WEIGHT_INDEX);
+        // A paired empty routing output has shape [0, 1]; the absent-output placeholder is [0].
         if (expandedTopkWeightOutShapePtr != nullptr &&
-            expandedTopkWeightOutShapePtr->GetStorageShape().GetShapeSize() > 0) {
+            (expandedTopkWeightOutShapePtr->GetStorageShape().GetShapeSize() > 0 ||
+             expandedTopkWeightOutShapePtr->GetStorageShape().GetDimNum() == RANK_TWO)) {
             isOutputExpandedTopkWeight_ = 1;
             MIRV3_CHECK_GE_RET(GetTensorShapeDtype<false>(expandedTopkWeightShape_, expandedTopkWeightDtype_,
                                                           V4_OUTPUT_EXPANDED_TOPK_WEIGHT_INDEX));

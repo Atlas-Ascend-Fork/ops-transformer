@@ -428,10 +428,10 @@ aclnnStatus aclnnMoeInitRoutingV4(
       <td>输出</td>
       <td>输出每个专家处理的token数量的统计结果或累加值</td>
       <td><ul>
-        <li>当expertTokensNumFlag为false时，输出为空tensor。</li>
-        <li>在expertTokensNumType为0时，表示activeExpertRangeOptional范围内expert在排序后处理token总数的前缀和，输出shape为[expertEnd-expertStart]。</li>
-        <li>在expertTokensNumType为1时，表示activeExpertRangeOptional范围内expert对应的处理token的总数，输出shape为[expertEnd-expertStart]。</li>
-        <li>在expertTokensNumType为2时，表示activeExpertRangeOptional范围内token总数为非0的expert，以及对应expert处理token的总数，输出shape为[expertNum, 2]。</li>
+        <li>当expertTokensNumFlag为false时，不输出统计结果。</li>
+        <li>expertTokensNumFlag为true且expertTokensNumType为0时，表示activeExpertRangeOptional范围内expert在排序后处理token总数的前缀和，输出shape为[expertEnd-expertStart]。</li>
+        <li>expertTokensNumFlag为true且expertTokensNumType为1时，表示activeExpertRangeOptional范围内expert对应的处理token的总数，输出shape为[expertEnd-expertStart]。</li>
+        <li>expertTokensNumFlag为true且expertTokensNumType为2时，表示activeExpertRangeOptional范围内token总数为非0的expert，以及对应expert处理token的总数，输出shape为[expertNum, 2]。</li>
       </ul></td>
       <td>INT64</td>
       <td>ND</td>

@@ -307,7 +307,9 @@ gert::TilingContextPara MakeArch35ExtendedTilingContextPara(
     ge::DataType expandedXDtype = GetExpandedXDtype(quantMode, xDataType, expandedXDtypeOverride);
     ExpandedScaleDesc expandedScale =
         GetExpandedScaleDesc(quantMode, totalLength, h, n, !scaleShape.empty(), xDataType, expandedXDtype);
-    std::vector<int64_t> expertTokensShape = GetExpertTokensShape(expertTokensNumType, expertNum, expertRange);
+    std::vector<int64_t> expertTokensShape = expertTokensNumFlag ?
+                                                 GetExpertTokensShape(expertTokensNumType, expertNum, expertRange) :
+                                                 std::vector<int64_t>{0};
     auto inputDesc = BuildArch35ExtendedInputs(n, h, k, xDataType, scaleShape, scaleDtype, offsetShape, offsetDtype);
     auto outputDesc = BuildArch35ExtendedOutputs(totalLength, h, expandedXDtype, expertTokensShape, expandedScale);
     auto attrs = BuildArch35ExtendedAttrs(activeNum, expertCapacity, expertNum, dropPadMode, expertTokensNumType,
@@ -448,12 +450,12 @@ void RunFailureTestcase(int64_t N, int64_t H, int64_t K, int64_t expertCapacity,
 
 void RunDropPadTilingTestcase(int64_t N, int64_t H, int64_t K, int64_t expertCapacity,
                               std::vector<int64_t> activeExpertRange, int64_t rowIdxType, ge::graphStatus result,
-                              int64_t expectTilingKey = UINT64_MAX)
+                              int64_t expectTilingKey = UINT64_MAX, bool expertTokensNumFlag = true)
 {
     optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
     int64_t activeNum = N * K;
     int64_t expertNum = EXPERT_NUM;
-    int64_t expertRange = activeExpertRange[1] - activeExpertRange[0];
+    int64_t expertRange = expertTokensNumFlag ? activeExpertRange[1] - activeExpertRange[0] : 0;
     gert::TilingContextPara tilingContextPara(
         "MoeInitRoutingV3",
         {
@@ -470,7 +472,7 @@ void RunDropPadTilingTestcase(int64_t N, int64_t H, int64_t K, int64_t expertCap
             {"expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(expertNum)},
             {"drop_pad_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
             {"expert_tokens_num_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
-            {"expert_tokens_num_flag", Ops::Transformer::AnyValue::CreateFrom<bool>(true)},
+            {"expert_tokens_num_flag", Ops::Transformer::AnyValue::CreateFrom<bool>(expertTokensNumFlag)},
             {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(QUANT_MODE_UNQUANT)},
             {"acive_expert_range", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>(activeExpertRange)},
             {"row_idx_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(rowIdxType)},
@@ -999,6 +1001,10 @@ TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_cols_zero_all_
                                       testcase.xDtype, {0, EXPERT_NUM}, rowIdxType, testcase.scaleShape,
                                       testcase.scaleDtype, testcase.offsetShape, ge::DT_FLOAT, kExpandedXDtypeAuto,
                                       ge::GRAPH_SUCCESS, expectedTilingKey);
+            RunArch35ExtendedTestcase(N, 0, K, 0, 0, EXPERT_TOKENS_TYPE_COUNT, false, testcase.quantMode,
+                                      testcase.xDtype, {0, EXPERT_NUM}, rowIdxType, testcase.scaleShape,
+                                      testcase.scaleDtype, testcase.offsetShape, ge::DT_FLOAT, kExpandedXDtypeAuto,
+                                      ge::GRAPH_SUCCESS, expectedTilingKey);
         }
     }
 }
@@ -1027,6 +1033,11 @@ TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_cols_zero_full
             ROW_IDX_TYPE_GATHER, testcase.scaleShape, ge::DT_FLOAT, testcase.offsetShape, ge::DT_FLOAT,
             testcase.expandedXDtype, &compileInfo);
         ExpectArch35ZeroWidthFullLoadCoreSplit(tilingContextPara, testcase.tilingKey);
+        auto falsePara = MakeArch35ExtendedTilingContextPara(
+            3, 0, 8, 0, 0, EXPERT_TOKENS_TYPE_COUNT, false, testcase.quantMode, testcase.xDtype, {0, EXPERT_NUM},
+            ROW_IDX_TYPE_GATHER, testcase.scaleShape, ge::DT_FLOAT, testcase.offsetShape, ge::DT_FLOAT,
+            testcase.expandedXDtype, &compileInfo);
+        ExpectArch35ZeroWidthFullLoadCoreSplit(falsePara, testcase.tilingKey);
     }
 }
 
@@ -1119,4 +1130,76 @@ TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_cs_cutorigin_n
     ASSERT_GE(tilingInfo.tilingDataSize, sizeof(MoeInitRoutingV3Arch35TilingData));
     const auto* tilingData = reinterpret_cast<const MoeInitRoutingV3Arch35TilingData*>(tilingInfo.tilingData.get());
     EXPECT_EQ(tilingData->countingSortParamsOp.countingSortMode, kCountingSortModeNone);
+}
+
+TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_false_routing_templates)
+{
+    struct RoutingCase {
+        int64_t n, h, k, type, rowIdxType;
+        std::vector<int64_t> activeRange;
+        uint64_t key;
+    };
+    const std::vector<RoutingCase> cases = {
+        {1, 83, 27, 0, ROW_IDX_TYPE_GATHER, {180, 192}, 200000},
+        {2048, 1024, 3, 1, ROW_IDX_TYPE_GATHER, {0, 64}, 10000000},
+        {257, 0, 64, 2, ROW_IDX_TYPE_SCATTER, {0, EXPERT_NUM}, 11001000},
+        {15, 40062, 3014, 1, ROW_IDX_TYPE_GATHER, {0, 10}, 10000010},
+        {7168, 2048, 8, 2, ROW_IDX_TYPE_GATHER, {0, 32}, 10000020},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.key);
+        optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+        auto para = MakeArch35ExtendedTilingContextPara(c.n, c.h, c.k, 0, 0, c.type, false, QUANT_MODE_UNQUANT,
+                                                        ge::DT_INT8, c.activeRange, c.rowIdxType, {}, ge::DT_FLOAT, {},
+                                                        ge::DT_FLOAT, kExpandedXDtypeAuto, &compileInfo);
+        TilingInfo info;
+        ASSERT_TRUE(ExecuteTiling(para, info));
+        EXPECT_EQ(info.tilingKey, c.key);
+        ASSERT_GE(info.tilingDataSize, sizeof(MoeInitRoutingV3Arch35TilingData));
+        const auto* data = reinterpret_cast<const MoeInitRoutingV3Arch35TilingData*>(info.tilingData.get());
+        EXPECT_EQ(data->expertTokensNumFlag, 0);
+    }
+}
+
+TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_false_empty_and_zero_width)
+{
+    for (const auto& shape : std::vector<std::vector<int64_t>>{{0, 128, 8}, {3, 128, 0}, {17, 0, 115}}) {
+        for (int64_t type : {0, 1, 2}) {
+            SCOPED_TRACE(type);
+            RunArch35ExtendedTestcase(shape[0], shape[1], shape[2], 0, 0, type, false, QUANT_MODE_UNQUANT,
+                                      ge::DT_FLOAT16, {0, EXPERT_NUM}, ROW_IDX_TYPE_GATHER, {}, ge::DT_FLOAT, {},
+                                      ge::DT_FLOAT, kExpandedXDtypeAuto, ge::GRAPH_SUCCESS);
+        }
+    }
+}
+
+TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_false_droppad)
+{
+    RunDropPadTilingTestcase(4, 0, 2, 2, {0, EXPERT_NUM}, ROW_IDX_TYPE_GATHER, ge::GRAPH_SUCCESS, 10000100, false);
+    RunDropPadTilingTestcase(8201, 16, 1, 1, {0, EXPERT_NUM}, ROW_IDX_TYPE_GATHER, ge::GRAPH_SUCCESS, 11000100, false);
+}
+
+TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_false_accepts_unused_count_shapes)
+{
+    for (const auto& shape : std::vector<std::vector<int64_t>>{{1}, {256}, {0, 2}}) {
+        optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+        auto inputs = BuildArch35ExtendedInputs(4, 16, 2, ge::DT_FLOAT16, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT);
+        auto outputs = BuildArch35ExtendedOutputs(8, 16, ge::DT_FLOAT16, shape, {{0}, ge::DT_FLOAT});
+        auto attrs = BuildArch35ExtendedAttrs(8, 0, EXPERT_NUM, 0, 1, false, -1, {0, EXPERT_NUM}, 0);
+        gert::TilingContextPara para("MoeInitRoutingV3", inputs, outputs, attrs, &compileInfo, "Ascend950", A5SocInfo,
+                                     4096);
+        ExecuteTestCase(para, ge::GRAPH_SUCCESS, 200000);
+    }
+}
+
+TEST_F(MoeInitRoutingV3Tiling, moe_init_routing_v3_tiling_regbase_false_skips_unused_count_dtype)
+{
+    optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+    auto inputs = BuildArch35ExtendedInputs(4, 16, 2, ge::DT_FLOAT16, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT);
+    auto outputs = BuildArch35ExtendedOutputs(8, 16, ge::DT_FLOAT16, {0}, {{0}, ge::DT_FLOAT});
+    outputs[2] = gert::TilingContextPara::TensorDescription(MakeStorageShape({0}), ge::DT_INT32, ge::FORMAT_ND);
+    auto attrs = BuildArch35ExtendedAttrs(8, 0, EXPERT_NUM, 0, 1, false, -1, {0, EXPERT_NUM}, 0);
+    gert::TilingContextPara para("MoeInitRoutingV3", inputs, outputs, attrs, &compileInfo, "Ascend950", A5SocInfo,
+                                 4096);
+    ExecuteTestCase(para, ge::GRAPH_SUCCESS, 200000);
 }

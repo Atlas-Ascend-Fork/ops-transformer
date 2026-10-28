@@ -1069,4 +1069,78 @@ TEST_F(MoeInitRoutingV4, moe_init_routing_v4_inferdatatype_int4_dynamic_bf16)
     RunSuccessTestcaseInferDataType(ge::DT_BF16, QUANT_MODE_INT4_DYNAMIC);
 }
 
-// ====== inferDataType 失败用例 ======
+// expert_tokens_num_flag=false
+
+TEST_F(MoeInitRoutingV4, moe_init_routing_v4_infer_shape_false_keeps_unused_count_shape)
+{
+    for (int64_t type : {0, 1, 2}) {
+        SCOPED_TRACE(type);
+        gert::InfershapeContextPara infershapeContextPara(
+            "MoeInitRoutingV4",
+            {
+                {{{8, 1024}, {8, 1024}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                {{{8, 512}, {8, 512}}, ge::DT_INT32, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_INT64, ge::FORMAT_ND},
+                {{{8, 512}, {8, 512}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            },
+            {
+                {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_INT64, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+            },
+            {
+                {"expert_capacity", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                {"expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(256)},
+                {"drop_pad_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                {"expert_tokens_num_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(type)},
+                {"expert_tokens_num_flag", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(-1)},
+                {"active_expert_range", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({1, 8})},
+                {"row_idx_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+            },
+            {1, 1, 0, 0, 0, 1}, // x, expert_idx, topk_weight present; scale/offset absent for unquant
+            {1, 1, 1, 1, 1});
+        // expanded_topk_weight: topkWeightOutNum = n*k = 8*512 = 4096, shape = {4096, 1}
+        std::vector<std::vector<int64_t>> expectOutputShape = {{8 * 512, 1024}, {8 * 512}, {}, {8 * 512}, {8 * 512, 1}};
+        ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape);
+    }
+}
+
+TEST_F(MoeInitRoutingV4, moe_init_routing_v4_infershape_range_false_keeps_unbounded_count_range)
+{
+    auto registry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    auto inferRange = registry->GetOpImpl("MoeInitRoutingV4")->infer_shape_range;
+    for (int64_t type : {0, 1, 2}) {
+        SCOPED_TRACE(type);
+        gert::Shape min0{}, max0{}, min1{}, max1{}, min2{}, max2{}, min3{}, max3{}, min4{}, max4{};
+        gert::Range<gert::Shape> range0(&min0, &max0), range1(&min1, &max1);
+        gert::Range<gert::Shape> range2(&min2, &max2), range3(&min3, &max3), range4(&min4, &max4);
+        auto holder = gert::InferShapeRangeContextFaker()
+                          .IrInputNum(2)
+                          .NodeIoNum(2, 5)
+                          .NodeInputTd(0, ge::DT_FLOAT16, ge::FORMAT_ND, ge::FORMAT_ND)
+                          .NodeInputTd(1, ge::DT_INT32, ge::FORMAT_ND, ge::FORMAT_ND)
+                          .OutputShapeRanges({&range0, &range1, &range2, &range3, &range4})
+                          .Attr("expert_capacity", static_cast<int64_t>(0))
+                          .Attr("expert_num", static_cast<int64_t>(256))
+                          .Attr("drop_pad_mode", static_cast<int64_t>(0))
+                          .Attr("expert_tokens_num_type", type)
+                          .Attr("expert_tokens_num_flag", false)
+                          .Attr("quant_mode", static_cast<int64_t>(-1))
+                          .Attr("active_expert_range", std::vector<int64_t>{1, 8})
+                          .Attr("row_idx_type", static_cast<int64_t>(0))
+                          .Build();
+        auto context = holder.GetContext<gert::InferShapeRangeContext>();
+        ASSERT_NE(context, nullptr);
+        ASSERT_EQ(inferRange(context), ge::GRAPH_SUCCESS);
+        const auto* countRange = context->GetOutputShapeRange(2);
+        ASSERT_EQ(countRange->GetMin()->GetDimNum(), 1U);
+        ASSERT_EQ(countRange->GetMax()->GetDimNum(), 1U);
+        EXPECT_EQ(countRange->GetMin()->GetDim(0), 0);
+        EXPECT_EQ(countRange->GetMax()->GetDim(0), -1);
+    }
+}

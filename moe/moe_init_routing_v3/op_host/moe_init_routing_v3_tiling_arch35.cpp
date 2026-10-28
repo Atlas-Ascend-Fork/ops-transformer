@@ -519,10 +519,6 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::CheckSetAttrs()
     MIRV3_CHECK_GE_RET(ValidateDropPadMode());
     MIRV3_CHECK_GE_RET(ValidateExpertCapacity());
 
-    OP_CHECK_IF(expertTokensNumFlag_ != true,
-                OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "expert_tokens_num_flag",
-                                          (expertTokensNumFlag_ ? "True" : "False"), "True"),
-                return ge::GRAPH_FAILED);
     tilingDataPtr_->expertTokensNumFlag = expertTokensNumFlag_;
 
     MIRV3_CHECK_GE_RET(ValidateQuantMode());
@@ -1036,6 +1032,10 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::CheckOutputExpertTokensCountOrCums
 {
     OP_LOGD(context_, "Entered MoeInitRoutingV3TilingArch35::CheckOutputExpertTokensCountOrCumsum()");
 
+    if (!expertTokensNumFlag_) {
+        return ge::GRAPH_SUCCESS;
+    }
+
     int64_t expectedRank{-1};
     int64_t expectedDim0{-1};
     int64_t expectedDim1{-1};
@@ -1441,6 +1441,7 @@ void MoeInitRoutingV3TilingArch35::Tiling4ExpertTokensCountCompute()
     OP_LOGD(context_, "Entered MoeInitRoutingV3TilingArch35::Tiling4ExpertTokensCountCompute()");
 
     auto* tokensCountTiling = &(tilingDataPtr_->expertTokensCountTilingDataOp);
+    *tokensCountTiling = {};
     int64_t totalElements = tilingDataPtr_->n * tilingDataPtr_->k;
     int64_t perCoreElements = Ops::Base::CeilDiv(totalElements, aivCoreNum_);
     int64_t needCoreNum = Ops::Base::CeilDiv(totalElements, perCoreElements);
@@ -1448,6 +1449,12 @@ void MoeInitRoutingV3TilingArch35::Tiling4ExpertTokensCountCompute()
     tokensCountTiling->needCoreNum = needCoreNum;
     tokensCountTiling->perCoreElements = perCoreElements;
     tokensCountTiling->lastCoreElements = lastCoreElements;
+
+    // Without the public statistics, the kernel only searches sorted expert boundaries.
+    if (!expertTokensNumFlag_) {
+        LogExpertTokensCountTilingData();
+        return;
+    }
 
     int64_t expertNumElement = (tilingDataPtr_->expertTokensNumType != EXPERT_TOKENS_TYPE_KEY_VALUE) ?
                                    tilingDataPtr_->actualExpertNum :

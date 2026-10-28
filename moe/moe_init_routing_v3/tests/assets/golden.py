@@ -742,7 +742,9 @@ def _moe_init_routing_v3_numpy(
         expanded_x = expanded_x[:valid_num, :]
         expanded_scale = expanded_scale.reshape(-1)[:valid_num]
 
-    if expert_tokens_num_type == 0:
+    if not expert_tokens_num_flag:
+        expert_tokens_count = numpy.empty((0,), dtype=numpy.int64)
+    elif expert_tokens_num_type == 0:
         counts = numpy.bincount(
             sorted_expert_idx[:actual_expert_total_num] - expert_start,
             minlength=expert_end - expert_start,

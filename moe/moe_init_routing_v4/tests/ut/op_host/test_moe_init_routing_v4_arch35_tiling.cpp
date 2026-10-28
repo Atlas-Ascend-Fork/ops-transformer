@@ -322,7 +322,9 @@ gert::TilingContextPara MakeV4TilingContextPara(
     ge::DataType expandedXDtype = GetExpandedXDtype(quantMode, xDataType, expandedXDtypeOverride);
     ExpandedScaleDesc expandedScale =
         GetExpandedScaleDesc(quantMode, totalLength, h, n, !scaleShape.empty(), xDataType, expandedXDtype);
-    std::vector<int64_t> expertTokensShape = GetExpertTokensShape(expertTokensNumType, expertNum, expertRange);
+    std::vector<int64_t> expertTokensShape = expertTokensNumFlag ?
+                                                 GetExpertTokensShape(expertTokensNumType, expertNum, expertRange) :
+                                                 std::vector<int64_t>{0};
     auto inputDesc = BuildV4Inputs(n, h, k, xDataType, scaleShape, scaleDtype, offsetShape, offsetDtype, hasActiveNum,
                                    activeNumVal, hasTopkWeight, totalLength);
     auto outputDesc = BuildV4Outputs(totalLength, h, expandedXDtype, expertTokensShape, expandedScale, hasTopkWeight, n,
@@ -368,12 +370,12 @@ struct V4TilingDataCase {
     int64_t expectedUseGatherCopy = -1;
 };
 
-void ExpectV4TilingData(const V4TilingDataCase& testCase)
+void ExpectV4TilingData(const V4TilingDataCase& testCase, bool expertTokensNumFlag = true)
 {
     optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
     gert::TilingContextPara tilingContextPara = MakeV4TilingContextPara(
         testCase.n, testCase.h, testCase.k, testCase.expertCapacity, testCase.dropPadMode, testCase.expertTokensNumType,
-        true, testCase.quantMode, testCase.xDataType, testCase.activeExpertRange, testCase.rowIdxType,
+        expertTokensNumFlag, testCase.quantMode, testCase.xDataType, testCase.activeExpertRange, testCase.rowIdxType,
         testCase.scaleShape, testCase.scaleDtype, testCase.offsetShape, testCase.offsetDtype, kExpandedXDtypeAuto,
         false, 0, testCase.hasTopkWeight, &compileInfo);
 
@@ -399,7 +401,7 @@ void ExpectV4TilingData(const V4TilingDataCase& testCase)
     EXPECT_EQ(tilingData->isInputOffset, testCase.offsetShape.empty() ? 0 : 1);
     EXPECT_EQ(tilingData->expertNum, EXPERT_NUM);
     EXPECT_EQ(tilingData->expertTokensNumType, testCase.expertTokensNumType);
-    EXPECT_EQ(tilingData->expertTokensNumFlag, 1);
+    EXPECT_EQ(tilingData->expertTokensNumFlag, expertTokensNumFlag ? 1 : 0);
     EXPECT_EQ(tilingData->activeNum, testCase.n * testCase.k);
     EXPECT_EQ(tilingData->dropPadMode, testCase.dropPadMode);
     EXPECT_EQ(tilingData->expertCapacity, testCase.expertCapacity);
@@ -955,4 +957,92 @@ TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_active_num_invalid_dty
     gert::TilingContextPara tilingContextPara("MoeInitRoutingV4", inputDesc, outputDesc, attrs, &compileInfo,
                                               "Ascend950", A5SocInfo, 4096);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_false_templates_keep_topkweight)
+{
+    const std::vector<V4TilingDataCase> cases = {
+        {1, 83, 27, 0, 0, {180, 192}, ROW_IDX_TYPE_GATHER, 200000},
+        {2048, 1024, 3, 0, 0, {0, 64}, ROW_IDX_TYPE_GATHER, 10000000},
+        {160, 96, 1450, 0, 0, {180, 192}, ROW_IDX_TYPE_SCATTER, 11001000},
+        {15, 40062, 3014, 0, 0, {0, 10}, ROW_IDX_TYPE_GATHER, 10000010},
+        {7168, 2048, 8, 0, 0, {0, 32}, ROW_IDX_TYPE_GATHER, 10000020},
+        {4, 0, 2, 2, 1, {0, EXPERT_NUM}, ROW_IDX_TYPE_GATHER, 10000100},
+        {8201, 16, 1, 1, 1, {0, EXPERT_NUM}, ROW_IDX_TYPE_GATHER, 11000100},
+        {257, 0, 64, 0, 0, {0, EXPERT_NUM}, ROW_IDX_TYPE_GATHER, 11000000},
+    };
+    for (auto testcase : cases) {
+        if (testcase.expectedTilingKey == 10000010) {
+            testcase.xDataType = ge::DT_INT8;
+        }
+        for (int64_t type : {0, 1, 2}) {
+            if (testcase.dropPadMode == 1 && type != EXPERT_TOKENS_TYPE_COUNT) {
+                continue; // DropPad requires expert_tokens_num_type=1 for either flag value.
+            }
+            SCOPED_TRACE(testcase.expectedTilingKey);
+            SCOPED_TRACE(type);
+            testcase.expertTokensNumType = type;
+            ExpectV4TilingData(testcase, false);
+        }
+    }
+}
+
+TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_false_empty_inputs)
+{
+    for (const auto& shape : std::vector<std::vector<int64_t>>{{0, 128, 8}, {3, 128, 0}, {3, 0, 8}}) {
+        for (bool hasTopkWeight : {false, true}) {
+            RunV4Testcase(shape[0], shape[1], shape[2], 0, 0, 1, false, QUANT_MODE_UNQUANT, ge::DT_FLOAT16,
+                          {0, EXPERT_NUM}, ROW_IDX_TYPE_GATHER, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT, kExpandedXDtypeAuto,
+                          false, 0, hasTopkWeight, ge::GRAPH_SUCCESS);
+        }
+    }
+}
+
+TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_false_accepts_unused_count_tensor)
+{
+    const std::vector<std::vector<int64_t>> shapes = {{1}, {256}, {0, 2}, {0}};
+    for (size_t index = 0; index < shapes.size(); ++index) {
+        SCOPED_TRACE(index);
+        optiling::MoeInitRoutingV3CompileInfo info = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+        auto inputs = BuildV4Inputs(4, 16, 2, ge::DT_FLOAT16, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT, false, 0, true, 8);
+        auto outputs =
+            BuildV4Outputs(8, 16, ge::DT_FLOAT16, shapes[index], {{8}, ge::DT_FLOAT}, true, 4, 2, 0, EXPERT_NUM, 0);
+        if (index == shapes.size() - 1) {
+            outputs[2] = gert::TilingContextPara::TensorDescription(MakeStorageShape({0}), ge::DT_INT32, ge::FORMAT_ND);
+        }
+        auto attrs = BuildV4Attrs(0, EXPERT_NUM, 0, 1, false, -1, {0, EXPERT_NUM}, 0);
+        gert::TilingContextPara para("MoeInitRoutingV4", inputs, outputs, attrs, &info, "Ascend950", A5SocInfo, 4096);
+        ExecuteTestCase(para, ge::GRAPH_SUCCESS, 200000);
+    }
+}
+
+TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_false_quantized_topkweight)
+{
+    for (bool hasTopkWeight : {false, true}) {
+        V4TilingDataCase fullDynamic{1, 83, 27, 0, 0, {180, 192}, ROW_IDX_TYPE_GATHER, 220000};
+        fullDynamic.quantMode = QUANT_MODE_DYNAMIC;
+        fullDynamic.hasTopkWeight = hasTopkWeight;
+        ExpectV4TilingData(fullDynamic, false);
+        V4TilingDataCase fullStatic{1, 83, 27, 0, 0, {180, 192}, ROW_IDX_TYPE_GATHER, 210000};
+        fullStatic.quantMode = QUANT_MODE_STATIC;
+        fullStatic.scaleShape = {1};
+        fullStatic.offsetShape = {1};
+        fullStatic.hasTopkWeight = hasTopkWeight;
+        ExpectV4TilingData(fullStatic, false);
+        V4TilingDataCase multiDynamic{160, 96, 1450, 0, 0, {180, 192}, ROW_IDX_TYPE_GATHER, 11020000};
+        multiDynamic.quantMode = QUANT_MODE_DYNAMIC;
+        multiDynamic.hasTopkWeight = hasTopkWeight;
+        ExpectV4TilingData(multiDynamic, false);
+    }
+}
+
+TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_false_empty_topkweight_rejects_wrong_second_dimension)
+{
+    optiling::MoeInitRoutingV3CompileInfo info = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+    auto inputs = BuildV4Inputs(0, 16, 2, ge::DT_FLOAT16, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT, false, 0, true, 0);
+    auto outputs = BuildV4Outputs(0, 16, ge::DT_FLOAT16, {0}, {{0}, ge::DT_FLOAT}, true, 0, 2, 0, EXPERT_NUM, 0);
+    outputs[4] = gert::TilingContextPara::TensorDescription(MakeStorageShape({0, 2}), ge::DT_FLOAT, ge::FORMAT_ND);
+    auto attrs = BuildV4Attrs(0, EXPERT_NUM, 0, 1, false, -1, {0, EXPERT_NUM}, 0);
+    gert::TilingContextPara para("MoeInitRoutingV4", inputs, outputs, attrs, &info, "Ascend950", A5SocInfo, 4096);
+    ExecuteTestCase(para, ge::GRAPH_FAILED);
 }

@@ -261,7 +261,6 @@
   - expertCapacity在Dropless场景下不使用该参数；在DropPad场景下必须校验且取值范围为(0, NUM_ROWS]。
   - dropPadMode支持取值为0和1，分别代表Dropless场景和DropPad场景。
   - expertTokensNumType当前只支持0、1 和2，分别代表cumsum模式、count模式和key\_value模式。
-  - expertTokensNumFlag只支持true，代表输出expertTokensCountOrCumsumOut。
   - quantMode:
     - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：支持1、0、-1，分别代表动态量化、静态量化和不量化场景。quantMode=-1时x仅支持FLOAT16、BFLOAT16、FLOAT32、INT8。
     - <term>Ascend 950PR&950DT系列产品</term>：

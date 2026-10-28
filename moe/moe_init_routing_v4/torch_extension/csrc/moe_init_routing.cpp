@@ -241,7 +241,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
         }
         int64_t expert_length = expert_range_end - expert_range_start;
 
-        if (expert_tokens_num_type < EXPERT_TOKENS_KEY_VALUE) {
+        if (!expert_tokens_num_flag) {
+            expert_tokens_count_or_cumsum = at::empty({0}, x.options().dtype(at::kLong));
+        } else if (expert_tokens_num_type < EXPERT_TOKENS_KEY_VALUE) {
             expert_tokens_count_or_cumsum = at::empty({expert_length}, x.options().dtype(at::kLong));
         } else {
             expert_tokens_count_or_cumsum = at::empty({expert_num, 2}, x.options().dtype(at::kLong));
@@ -313,6 +315,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
         expanded_x_wrapper.dtype = ACL_HIFLOAT8;
     } else if (IsQuantModeMXFP4(quant_mode)) {
         expanded_x_wrapper.dtype = ACL_FLOAT4_E2M1;
+    }
+
+    // A 1x1 byte carrier packs two values along the last axis. Disambiguate
+    // its strides so the ACL conversion preserves the single output row.
+    if (Is4BitDtype(expanded_x_wrapper.dtype) && expanded_x.dim() == DIM_X && expanded_x.size(0) == 1 &&
+        expanded_x.size(1) == 1) {
+        expanded_x = expanded_x.as_strided({1, 1}, {INT4_NUMS_IN_INT8, 1});
     }
 
     // ---- active_expert_range: std::vector -> at::IntArrayRef ----
