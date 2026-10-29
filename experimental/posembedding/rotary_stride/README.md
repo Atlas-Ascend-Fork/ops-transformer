@@ -64,7 +64,7 @@
     </tr>
 	<tr>
       <td>out</td>
-      <td>输入</td>
+      <td>输出</td>
       <td>公式中的输出张量y，shape为(B, S, N, stride)</td>
       <td>BFLOAT16/HALF</td>
       <td>ND</td>
@@ -80,10 +80,11 @@
 
 ## 约束说明
 
-- x/y仅支持BFLOAT16/HAFL类型。
+- x/y仅支持BFLOAT16/HALF类型。
 - stride >= head_dim。
 
 ## 调用说明
+
 ```
 torch.ops.npu_ops_transformer_ext.rotary_stride(blockDim, in, sin, cos, out, gbD)
 ```
