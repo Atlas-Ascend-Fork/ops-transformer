@@ -884,3 +884,53 @@ TEST_F(MoeGatingTopKTiling, moe_gating_top_k_tiling_regbase_fail_03)
         &compileInfo, "Ascend950");
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 10000, "", {});
 }
+
+TEST_F(MoeGatingTopKTiling, moe_gating_top_k_tiling_sigmoid_mode_support_a2_a3)
+{
+    const std::string socVersions[] = {"Ascend910B", "Ascend910_93"};
+    const int64_t normTypes[] = {1, 3};
+    const int64_t renormValues[] = {0, 1};
+    const int64_t groupCounts[] = {1, 8};
+    for (const auto& socVersion : socVersions) {
+        for (const auto normType : normTypes) {
+            for (const auto renorm : renormValues) {
+                for (const auto groupCount : groupCounts) {
+                    SCOPED_TRACE(testing::Message() << "soc=" << socVersion << ", norm_type=" << normType
+                                                    << ", renorm=" << renorm << ", group_count=" << groupCount);
+                    optiling::MoeGatingTopKCompileInfo compileInfo = {};
+                    gert::TilingContextPara tilingContextPara(
+                        "MoeGatingTopK",
+                        {
+                            {{{16, 512}, {16, 512}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                            {{{512}, {512}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                        },
+                        {
+                            {{{16, 10}, {16, 10}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                            {{{16, 10}, {16, 10}}, ge::DT_INT32, ge::FORMAT_ND},
+                            {{{16, 512}, {16, 512}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                        },
+                        {
+                            {"k", Ops::Transformer::AnyValue::CreateFrom<int64_t>(10)},
+                            {"k_group", Ops::Transformer::AnyValue::CreateFrom<int64_t>(groupCount == 1 ? 1 : 4)},
+                            {"group_count", Ops::Transformer::AnyValue::CreateFrom<int64_t>(groupCount)},
+                            {"group_select_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+                            {"renorm", Ops::Transformer::AnyValue::CreateFrom<int64_t>(renorm)},
+                            {"norm_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(normType)},
+                            {"out_flag", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                            {"routed_scaling_factor", Ops::Transformer::AnyValue::CreateFrom<float>(1.0f)},
+                            {"eps", Ops::Transformer::AnyValue::CreateFrom<float>(1e-20f)},
+                        },
+                        &compileInfo, socVersion);
+                    if (normType == 3) {
+                        ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 0, "", {});
+                    } else {
+                        // The legacy Sigmoid mode remains supported for both renorm values.
+                        std::vector<size_t> expectWorkspaces = {16777216};
+                        ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, groupCount == 1 ? 1 : 2, "",
+                                        expectWorkspaces);
+                    }
+                }
+            }
+        }
+    }
+}

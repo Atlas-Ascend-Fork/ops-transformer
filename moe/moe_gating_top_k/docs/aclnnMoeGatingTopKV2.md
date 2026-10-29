@@ -39,7 +39,7 @@
     normOut =
     \begin{cases}
         \text{SoftMax}(x),      & normType = 0 \\
-        \text{Sigmoid}(x),      & normType = 1 \\
+        \text{Sigmoid}(x),      & normType = 1,3 \\
         \sqrt{\text{Softplus}(x)},     & normType = 2
     \end{cases}
     $$
@@ -95,10 +95,10 @@
     gathered = normOut[\text{expertIdxOut}]
     $$
 
-    normType=1 or normType=2 时做归一化；normType=0 时，renorm参数生效，renorm=1 时做renorm：
+    normType=1或2时始终做归一化；normType=0或3时由renorm控制是否归一化：
 
     $$
-    if\ (normType = 1\ or\ normType = 2)\ or\ (normType = 0\ and\ renorm = 1):
+    if\ (normType = 1\ or\ normType = 2)\ or\ ((normType = 0\ or\ normType = 3)\ and\ renorm = 1):
     $$
 
     $$
@@ -129,7 +129,7 @@
     normOut =
     \begin{cases}
         SoftMax(x),      & normType = 0 \\
-        Sigmoid(x),      & normType = 1 \\
+        Sigmoid(x),      & normType = 1,3 \\
         \sqrt{Softplus(x)},     & normType = 2
     \end{cases}
     $$
@@ -152,10 +152,10 @@
     gathered = normOut[expertIdxOut]
     $$
 
-    normType=1 or normType=2 时做归一化；normType=0 时，renorm参数生效，renorm=1 时做renorm：
+    normType=1或2时始终做归一化；normType=0或3时由renorm控制是否归一化：
 
     $$
-    if\ (normType = 1\ or\ normType = 2)\ or\ (normType = 0\ and\ renorm = 1):
+    if\ (normType = 1\ or\ normType = 2)\ or\ ((normType = 0\ or\ normType = 3)\ and\ renorm = 1):
     $$
 
     $$
@@ -191,7 +191,7 @@ aclnnStatus aclnnMoeGatingTopKV2GetWorkspaceSize(
   double           eps,
   const aclTensor *yOut,
   const aclTensor *expertIdxOut,
-  const aclTensor *outOut,
+  const aclTensor *output,
   uint64_t        *workspaceSize,
   aclOpExecutor  **executor)
 ```
@@ -381,7 +381,7 @@ aclnnStatus aclnnMoeGatingTopKV2(
       <td>-</td>
     </tr>
     <tr>
-      <td>outOut</td>
+      <td>output</td>
       <td>输出</td>
       <td>norm计算的输出结果，对应公式中的normOut。</td>
       <td>shape要求与x保持一致。</td>
@@ -516,11 +516,13 @@ aclnnStatus aclnnMoeGatingTopKV2(
     * 要求groupCount > 0，x_shape[-1]能够被groupCount整除且整除后的结果大于groupSelectMode，并且整除的结果按照32个数对齐后乘groupCount的结果不大于2048。
 * 其他限制：
     * groupSelectMode取值0和1，0表示使用最大值对group进行排序, 1表示使用topk2的sum值对group进行排序。
-    * normType取值0、1和2，0表示使用Softmax函数，1表示使用Sigmoid函数，2表示使用SqrtSoftplus函数。
-    <!-- npu="A3,910b" id7 -->
-    * <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>: 参数normType取值为2时要求groupCount为1
-    <!-- end id7 -->
-    * normType取值为1或2时，renorm参数无效；normType取值为0时，renorm参数生效，renorm取值为0和1，0表示不做renorm，1表示做renorm。
+    * normType取值范围和含义：0表示使用Softmax函数，1表示使用Sigmoid函数并做renorm，2表示使用SqrtSoftplus函数并做renorm，3表示使用Sigmoid函数，且由renorm控制是否对选中专家的得分归一化（renorm=0表示不做renorm，renorm=1表示做renorm）。
+        <!-- npu="A3,910b" id7 -->
+        * <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：
+            * 不支持normType=3。
+            * 当normType=2时要求groupCount为1。
+        <!-- end id7 -->
+    * renorm参数与normType取值的关系：当normType为0时renorm参数生效，0表示不做renorm，1表示做renorm；normType取值为1或2时renorm参数无效，并始终做renorm。
     * outFlag取值true和false，true表示输出，false表示不输出。
 * **Hash模式限制**：
     * Hash模式需同时提供inputIdsOptional和tid2eidOptional，否则为TopK模式。

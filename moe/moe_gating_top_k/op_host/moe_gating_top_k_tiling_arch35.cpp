@@ -39,6 +39,7 @@ const static int64_t RENORM_L1 = 1;
 const static int64_t NORM_TYPE_SOFTMAX = 0;
 const static int64_t NORM_TYPE_SIGMOID = 1;
 const static int64_t NORM_TYPE_SOFTPLUS = 2;
+const static int64_t NORM_TYPE_SIGMOID_OPTIONAL_RENORM = 3;
 const static int64_t OUT_FLAG_FALSE = 0;
 const static int64_t OUT_FLAG_TRUE = 1;
 const static int64_t EK_FULLLOAD_EXPERT_COUNT = 256;
@@ -312,9 +313,12 @@ ge::graphStatus MoeGatingTopKTilingRegbase::CheckAttrMode()
                 OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "renorm", std::to_string(renorm_), "0 or 1"),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(normType_ != NORM_TYPE_SOFTMAX && normType_ != NORM_TYPE_SIGMOID && normType_ != NORM_TYPE_SOFTPLUS,
-                OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "norm_type", std::to_string(normType_), "0, 1 or 2"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        normType_ != NORM_TYPE_SOFTMAX && normType_ != NORM_TYPE_SIGMOID && normType_ != NORM_TYPE_SOFTPLUS &&
+            normType_ != NORM_TYPE_SIGMOID_OPTIONAL_RENORM,
+        OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "norm_type", std::to_string(normType_), "0, 1, 2 or 3"),
+        return ge::GRAPH_FAILED);
+
     return ge::GRAPH_SUCCESS;
 }
 

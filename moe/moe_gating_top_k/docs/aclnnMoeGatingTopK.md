@@ -26,91 +26,91 @@
 - 算子功能：MoE计算中，对输入x做Sigmoid、SoftMax或者SqrtSoftplus计算，对计算结果分组进行排序，最后根据分组排序的结果选取前k个专家。
 - 计算公式：
 
-  **Step 1: 归一化**
+    **Step 1: 归一化**
 
-  根据normType对输入x做归一化：
+    根据normType对输入x做归一化：
 
-$$
-normOut =
-\begin{cases}
-    \text{SoftMax}(x),      & normType = 0 \\
-    \text{Sigmoid}(x),      & normType = 1 \\
-    \sqrt{\text{Softplus}(x)},     & normType = 2
-\end{cases}
-$$
+    $$
+    normOut =
+    \begin{cases}
+        \text{SoftMax}(x),      & normType = 0 \\
+        \text{Sigmoid}(x),      & normType = 1,3 \\
+        \sqrt{\text{Softplus}(x)},     & normType = 2
+    \end{cases}
+    $$
 
-  **Step 2: 加偏置**
+    **Step 2: 加偏置**
 
-  若bias不为空，加偏置得到用于选择的值：
+    若bias不为空，加偏置得到用于选择的值：
 
-  $$
-  normValue = normOut + bias
-  $$
+    $$
+    normValue = normOut + bias
+    $$
 
-  否则 $normValue = normOut$。
+    否则 $normValue = normOut$。
 
-  **Step 3: 分组筛选**（仅groupCount > 1 时执行）
+    **Step 3: 分组筛选**（仅groupCount > 1 时执行）
 
-  将normValue按groupCount分组，根据groupSelectMode计算每组得分：
+    将normValue按groupCount分组，根据groupSelectMode计算每组得分：
 
-  $$
-  groupedValue = Reshape(normValue,\ [batch,\ groupCount,\ -1])
-  $$
+    $$
+    groupedValue = Reshape(normValue,\ [batch,\ groupCount,\ -1])
+    $$
 
-  $$
-  groupScore = \begin{cases}
+    $$
+    groupScore = \begin{cases}
       ReduceMax(groupedValue,\ dim=-1), & groupSelectMode = 0 \\
       ReduceSum(TopK(groupedValue,\ k=2,\ dim=-1),\ dim=-1), & groupSelectMode = 1
-  \end{cases}
-  $$
+    \end{cases}
+    $$
 
-  选取得分最高的kGroup个组，将未选中组的对应位置置为 $-\infty$：
+    选取得分最高的kGroup个组，将未选中组的对应位置置为 $-\infty$：
 
-  $$
-  groupIdx = TopK(groupScore,\ k=kGroup).indices
-  $$
+    $$
+    groupIdx = TopK(groupScore,\ k=kGroup).indices
+    $$
 
-  $$
-  normValue = Mask(groupedValue,\ groupIdx,\ fillValue=-\infty)
-  $$
+    $$
+    normValue = Mask(groupedValue,\ groupIdx,\ fillValue=-\infty)
+    $$
 
-  **Step 4: Top-K专家选择**
+    **Step 4: Top-K专家选择**
 
-  对normValue取Top-K得到专家索引，这里只需要expertIdxOut：
+    对normValue取Top-K得到专家索引，这里只需要expertIdxOut：
 
-  $$
-  y, expertIdxOut = TopK(normValue[groupIdx, :],\ k=k)
-  $$
+    $$
+    y, expertIdxOut = TopK(normValue[groupIdx, :],\ k=k)
+    $$
 
-  **Step 5: Renorm与缩放**
+    **Step 5: Renorm与缩放**
 
-  根据expertIdxOut从normOut中取出对应的k个专家得分：
+    根据expertIdxOut从normOut中取出对应的k个专家得分：
 
-  $$
-  gathered = normOut[\text{expertIdxOut}]
-  $$
+    $$
+    gathered = normOut[\text{expertIdxOut}]
+    $$
 
-  normType=1 or normType=2 时做归一化；normType=0 时，renorm参数生效，renorm=1 时做renorm：
+    normType=1或2时始终做归一化；normType=0或3时由renorm控制是否归一化：
 
-  $$
-  if\ (normType = 1\ or\ normType = 2)\ or\ (normType = 0\ and\ renorm = 1):
-  $$
+    $$
+    if\ (normType = 1\ or\ normType = 2)\ or\ ((normType = 0\ or\ normType = 3)\ and\ renorm = 1):
+    $$
 
-  $$
-  \quad yOut = \frac{gathered}{ReduceSum(gathered,\ dim=-1) + eps}
-  $$
+    $$
+    \quad yOut = \frac{gathered}{ReduceSum(gathered,\ dim=-1) + eps}
+    $$
 
-  否则 $yOut = gathered$
+    否则 $yOut = gathered$
 
-  最终输出：
+    最终输出：
 
-  $$
-  yOut = yOut \times routedScalingFactor
-  $$
+    $$
+    yOut = yOut \times routedScalingFactor
+    $$
 
-  **Step 6: 可选输出**
+    **Step 6: 可选输出**
 
-  若outFlag为True，第三个输出为normOut；否则为空。
+    若outFlag为True，第三个输出为normOut；否则为空。
 
 ## 函数原型
 
@@ -131,7 +131,7 @@ aclnnStatus aclnnMoeGatingTopKGetWorkspaceSize(
   double           eps,
   const aclTensor *yOut,
   const aclTensor *expertIdxOut,
-  const aclTensor *outOut,
+  const aclTensor *output,
   uint64_t        *workspaceSize,
   aclOpExecutor  **executor)
 ```
@@ -301,7 +301,7 @@ aclnnStatus aclnnMoeGatingTopK(
       <td>-</td>
     </tr>
     <tr>
-      <td>outOut</td>
+      <td>output</td>
       <td>输出</td>
       <td>norm计算的输出结果，对应公式中的`normOut`。</td>
       <td>shape要求与x保持一致。</td>
@@ -432,11 +432,13 @@ aclnnStatus aclnnMoeGatingTopK(
     * 要求groupCount > 0，x_shape[-1]能够被groupCount整除且整除后的结果大于groupSelectMode，并且整除的结果按照32个数对齐后乘groupCount的结果不大于2048。
 * 其他限制：
     * groupSelectMode取值0和1，0表示使用最大值对group进行排序， 1表示使用topk2的sum值对group进行排序。
-    * normType取值0、1和2，0表示使用Softmax函数，1表示使用Sigmoid函数，2表示使用SqrtSoftplus函数。
-    <!-- npu="A3,910b" id7 -->
-    * <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>: 参数normType取值为2时要求groupCount为1
-    <!-- end id7 -->
-    * normType取值为1或2时，renorm参数无效；normType取值为0时，renorm参数生效，renorm取值为0和1，0表示不做renorm，1表示做renorm。
+    * normType取值范围和含义：0表示使用Softmax函数，1表示使用Sigmoid函数并做renorm，2表示使用SqrtSoftplus函数并做renorm，3表示使用Sigmoid函数，且由renorm控制是否对选中专家的得分归一化（renorm=0表示不做renorm，renorm=1表示做renorm）。
+        <!-- npu="A3,910b" id7 -->
+        * <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：
+            * 不支持normType=3。
+            * 当normType=2时要求groupCount为1。
+        <!-- end id7 -->
+    * renorm参数与normType取值的关系：当normType为0时renorm参数生效，0表示不做renorm，1表示做renorm；normType取值为1或2时renorm参数无效，并始终做renorm。
     * outFlag取值true和false，true表示输出，false表示不输出。
     * 输入不支持空Tensor，不支持标量Tensor。
 
