@@ -1,0 +1,50 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+# -----------------------------------------------------------------------------------------------------------
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
+
+import os
+
+import pytest
+import torch_npu
+
+import flash_attention_grad_golden as golden
+import flash_attention_grad_process as process
+import result_compare_method
+import utils
+from flash_attention_grad_paramset import ENABLED_PARAMS
+
+result_path = os.getenv("FAG_RESULT_SAVE_PATH", "./result/fag_result.xlsx")
+
+
+@pytest.mark.ci
+@pytest.mark.parametrize("params", ENABLED_PARAMS)
+def test_flash_attention_grad(params):
+    torch_npu.npu.set_device(0)
+    case_name = params[6]
+
+    input_data = golden.gen_inputs(params)
+    dq, dk, dv = process.call_npu(input_data)
+
+    results = {
+        "dq": result_compare_method.check_result(
+            input_data["cpu_output"]["dq"], dq, "dq"
+        ),
+        "dk": result_compare_method.check_result(
+            input_data["cpu_output"]["dk"], dk, "dk"
+        ),
+        "dv": result_compare_method.check_result(
+            input_data["cpu_output"]["dv"], dv, "dv"
+        ),
+    }
+    utils.save_result(results, params, result_path)
+
+    failed = [name for name, r in results.items() if r[0] != "Pass"]
+    assert not failed, f"test case {case_name} failed on {failed}"
