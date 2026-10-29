@@ -39,21 +39,70 @@ class Mc2Context {
 public:
     static aclnnStatus GetMc2ContextTensor(const char* groupEp, const char* opName, uint64_t& hcclBuffSize,
                                            aclTensor*& mc2Context,
-                                           CommProtocol protocol = CommProtocol::COMM_PROTOCOL_UB_MEM);
+                                           CommProtocol protocol = CommProtocol::COMM_PROTOCOL_UB_MEM,
+                                           uint32_t* rankSizePerServer = nullptr);
     static aclnnStatus GetMc2RankSize(const char* groupEp, uint32_t& rankSize);
 
 private:
     struct TopologyInstance;
+    struct RankLinkInfo {
+        CommProtocol protocol;
+        uint32_t layer;
+    };
+    struct LayerRanks {
+        uint32_t layer;
+        std::vector<uint32_t> ranks;
+    };
+    struct RegisteredBuffer {
+        void* addr;
+        uint64_t size;
+        HcclMemHandle handle;
+    };
+    struct RegisteredWindows {
+        RegisteredBuffer ub;
+        RegisteredBuffer roce;
+    };
 
-    explicit Mc2Context();
+    const std::string GetLibPath();
+    template <typename T>
+    T GetHcclLibFunc(void* handle, const std::string& funcName);
+    Mc2Context();
     ~Mc2Context();
-
-    aclnnStatus LoadHcclSymbols();
+    aclnnStatus OpenHcclLibrary();
+    aclnnStatus LoadProtocolSymbols(CommProtocol protocol);
+    aclnnStatus LoadHcclSymbols(CommProtocol protocol);
     aclnnStatus LoadTopologySymbols();
     aclnnStatus GetCommHandle(const char* groupEp, HcclComm& hcclHandle);
-    aclnnStatus GetHcclCommLink(const HcclComm& hcclHandle, uint32_t netLayers, uint32_t srcRankId, uint32_t dstRankId,
+    aclnnStatus GetHcclCommLink(const HcclComm& hcclHandle, uint32_t netLayerId, uint32_t srcRankId, uint32_t dstRankId,
                                 const CommProtocol& protocol, CommLink*& links);
     aclnnStatus GetNetLayers(const HcclComm& hcclHandle, uint32_t*& netLayerList, uint32_t& netLayerNum);
+    aclnnStatus InitRegisteredChannel(const HcclComm& hcclHandle, uint32_t rankDim, uint32_t srcRankId,
+                                      const CommProtocol& protocol, uint32_t channelsPerPeer,
+                                      std::vector<HcclChannelDesc>& channelDesc);
+    aclnnStatus GetRegisteredCommChannels(const HcclComm& hcclHandle, uint32_t rankDim, uint32_t srcRankId,
+                                          const CommEngine& engine, const CommProtocol& protocol,
+                                          std::vector<ChannelHandle>& channels);
+    aclnnStatus InitRegisteredBuffer(const HcclComm& hcclHandle, const char* tag, RegisteredBuffer& buffer);
+    aclnnStatus GetConfiguredWindowSize(uint64_t& windowSize) const;
+    aclnnStatus CheckRegisteredWindowSize(const HcclComm& hcclHandle, uint64_t& hcclBuffSize);
+    aclnnStatus InitRegisteredWindows(const HcclComm& hcclHandle);
+    aclnnStatus GetRegisteredRemoteBuffer(const HcclComm& hcclHandle, ChannelHandle channel, const char* tag,
+                                          void*& buffer, uint64_t& bufferSize);
+    aclnnStatus CheckHcclBuffer(uint32_t srcRankId, uint32_t peer, const void* buffer, uint64_t bufferSize) const;
+    aclnnStatus SetHcclBufferAddress(uint32_t srcRankId, uint32_t peer, void* buffer, uint64_t bufferSize,
+                                     uint64_t& bufferAddr);
+    aclnnStatus SetRoceBufferAddress(uint32_t srcRankId, uint32_t peer, void* buffer, uint64_t bufferSize,
+                                     uint64_t& bufferAddr);
+    aclnnStatus GetHcclUbMemResource(const HcclComm& hcclHandle, const CommEngine& engine,
+                                     Mc2MoeContext* mc2ContextStruct);
+    aclnnStatus GetHcclRoceResource(const HcclComm& hcclHandle, const CommEngine& engine,
+                                    Mc2MoeContext* mc2ContextStruct);
+    aclnnStatus GetRegisteredCommResource(const HcclComm& hcclHandle, const CommEngine& engine,
+                                          Mc2MoeContext* mc2ContextStruct);
+    aclnnStatus CreateContextCache(const HcclComm& hcclHandle, const std::string& tag, void*& ctx,
+                                   void**& readyContext);
+    aclnnStatus GetRankId(const HcclComm& hcclHandle, uint32_t& rankId) const;
+    aclnnStatus GetRankSize(const HcclComm& hcclHandle, uint32_t& rankSize) const;
     aclnnStatus GetRankSizePerServer(const HcclComm& hcclHandle, uint32_t netLayers);
     aclnnStatus InitHcclChannel(const HcclComm& hcclHandle, uint32_t rankDim, uint32_t srcRankId,
                                 const CommProtocol& protocol, std::vector<HcclChannelDesc>& channelDesc);
@@ -62,43 +111,62 @@ private:
                                    std::vector<ChannelHandle>& channels, Mc2MoeContext* mc2ContextStruct);
     aclnnStatus GetHcclCommResource(const HcclComm& hcclHandle, const CommEngine& engine, const CommProtocol& protocol,
                                     Mc2MoeContext* mc2ContextStruct);
-    aclnnStatus CreatMc2Context(const HcclComm& hcclHandle, const std::string& mc2ContextTag, const CommEngine& engine,
-                                const CommProtocol& protocol, Mc2MoeContext* mc2ContextStruct, void*& ctx,
-                                uint64_t& hcclBuffSize);
-    aclnnStatus CreatMc2ContextTensor(void* ctx, aclTensor*& mc2Context);
-    aclnnStatus GetHcclBufferSize(const HcclComm& hcclHandle, uint64_t& hcclBuffSize);
-    aclnnStatus CheckProtocolSupport(const HcclComm& hcclHandle, uint32_t*& layerList, uint32_t& layerNum);
-    aclnnStatus GetCommProtocol(const HcclComm& hcclHandle, CommProtocol& protocol);
-    aclnnStatus ValidateContextTag(const std::string& mc2ContextTag);
-    aclnnStatus CheckLinks(uint32_t& netLinkNum, CommLink* linksList);
-    aclnnStatus CheckContextCache(const HcclComm& hcclHandle, const std::string& mc2ContextTag,
-                                  const CommEngine& engine, void*& ctx, uint64_t& hcclBuffSize);
-    aclnnStatus CheckGroupSendEnabled(const HcclComm& hcclHandle, uint32_t rankSize, uint32_t rank,
-                                      bool& enableGroupSend) const;
     aclnnStatus CheckGroupLinks(const HcclComm& hcclHandle, const TopologyInstance& instance, uint32_t rank,
                                 std::vector<bool>& mesh, std::vector<bool>& clos) const;
+    aclnnStatus GetTopologyEndpoints(const HcclComm& hcclHandle, uint32_t layer, uint32_t instance,
+                                     std::vector<EndpointDesc>& endpoints) const;
     aclnnStatus CheckGroupInstances(const HcclComm& hcclHandle, uint32_t layer, uint32_t rank, std::vector<bool>& mesh,
                                     std::vector<bool>& clos) const;
-    const std::string GetLibPath();
-    template <typename T>
-    T GetHcclLibFunc(void* handle, const std::string& funcName);
+    aclnnStatus CheckGroupLayer(const HcclComm& hcclHandle, uint32_t layer, uint32_t rank, std::vector<bool>& mesh,
+                                std::vector<bool>& clos) const;
+    aclnnStatus CheckGroupSendEnabled(const HcclComm& hcclHandle, uint32_t rankSize, uint32_t rank,
+                                      bool& enableGroupSend) const;
+    void InitGroupSend(const HcclComm& hcclHandle, CommProtocol protocol, Mc2MoeContext* mc2ContextStruct);
+    aclnnStatus CreatMc2Context(const HcclComm& hcclHandle, const std::string& mc2ContextTag, const CommEngine& engine,
+                                CommProtocol protocol, Mc2MoeContext* mc2ContextStruct, void*& ctx,
+                                uint64_t& hcclBuffSize);
+    aclnnStatus CreatMc2ContextTensor(void* ctx, aclTensor*& mc2Context);
+    aclnnStatus GetLayerRanks(const HcclComm& hcclHandle, uint32_t layerId, LayerRanks& layer) const;
+    static bool HasLinkWithProtocol(const CommLink* linksList, uint32_t netLinkNum, const CommProtocol& protocol);
+    bool SupportsProtocol(const HcclComm& hcclHandle, uint32_t layerId, uint32_t srcRankId, uint32_t dstRankId,
+                          const CommProtocol& protocol) const;
+    bool SupportsDomainProtocolWithAllRanks(const HcclComm& hcclHandle, const LayerRanks& layer,
+                                            const CommProtocol& domainProtocol, uint32_t srcRankId) const;
+    void RecordDomainLayerRanks(const CommProtocol& protocol, const LayerRanks& layer, uint32_t srcRankId);
+    bool FindUbDomain(const HcclComm& hcclHandle, const uint32_t* layerList, uint32_t layerNum,
+                      const CommProtocol& domainProtocol, uint32_t srcRankId, LayerRanks& ubDomain);
+    bool CheckCrossUbDomainProtocols(const HcclComm& hcclHandle, const uint32_t* layerList, uint32_t layerNum,
+                                     uint32_t srcRankId);
+    aclnnStatus ValidateRankLinkMap(uint32_t rankSize, uint32_t srcRankId) const;
+    aclnnStatus CheckRoceProtocolSupport(const HcclComm& hcclHandle, const uint32_t* layerList, uint32_t layerNum,
+                                         const CommProtocol& protocol);
+    aclnnStatus BuildRankLinkMap(const HcclComm& hcclHandle);
+    aclnnStatus ValidateContextTag(const std::string& mc2ContextTag);
+    aclnnStatus GetHcclBufferSize(const HcclComm& hcclHandle, uint64_t& hcclBuffSize);
+    aclnnStatus CheckContextCache(const HcclComm& hcclHandle, const std::string& mc2ContextTag,
+                                  const CommEngine& engine, CommProtocol protocol, void*& ctx, uint64_t& hcclBuffSize);
+    aclnnStatus CheckLinks(uint32_t& netLinkNum, CommLink* linksList);
+    aclnnStatus CheckProtocolSupport(const HcclComm& hcclHandle, uint32_t*& layerList, uint32_t& layerNum);
+    aclnnStatus GetCommProtocol(const HcclComm& hcclHandle, CommProtocol& protocol);
+    aclnnStatus PrepareContextTopology(const HcclComm& hcclHandle, CommProtocol& protocol);
 
     void* hcclLibHandle_ = nullptr;
-    uint64_t hcclBuffSize_ = 0;
-    uint32_t epRankSize_ = 0;
-    uint32_t rankSizePerServer_ = 0;
-    std::unordered_map<uint32_t, uint32_t> layerMap; // 记录本卡与其他卡的通信层数，key为其他卡的rankId，value为通信层数
+    RegisteredWindows* registeredWindows_ = nullptr; // Owned by the communication domain, shared across contexts.
+    std::unordered_map<uint32_t, RankLinkInfo> rankLinkMap_;
+    std::unordered_map<uint32_t, uint32_t> layerMap;
 
     HcclResult (*HcomGetCommHandleByGroup)(const char*, HcclComm*) = nullptr;
     HcclResult (*HcclRankGraphGetLinks)(HcclComm, uint32_t, uint32_t, uint32_t, CommLink**, uint32_t*) = nullptr;
     HcclResult (*HcclRankGraphGetLayers)(HcclComm, uint32_t**, uint32_t*) = nullptr;
     HcclResult (*HcclRankGraphGetRankSizeByLayer)(HcclComm, uint32_t, uint32_t*) = nullptr;
-    HcclResult (*HcclChannelAcquire)(HcclComm, CommEngine, HcclChannelDesc*, uint32_t, ChannelHandle*) = nullptr;
-    HcclResult (*HcclGetHcclBuffer)(HcclComm, void**, uint64_t*) = nullptr;
     HcclResult (*HcclChannelGetHcclBuffer)(HcclComm, ChannelHandle, void**, uint64_t*) = nullptr;
+    HcclResult (*HcclChannelAcquire)(HcclComm, CommEngine, const HcclChannelDesc*, uint32_t, ChannelHandle*) = nullptr;
+    HcclResult (*HcclGetHcclBuffer)(HcclComm, void**, uint64_t*) = nullptr;
+    HcclResult (*HcclCommMemReg)(HcclComm, const char*, const CommMem*, HcclMemHandle*) = nullptr;
+    HcclResult (*HcclChannelGetRemoteMems)(HcclComm, ChannelHandle, uint32_t*, CommMem**, char***) = nullptr;
     HcclResult (*HcclEngineCtxCreate)(HcclComm, const char*, CommEngine, uint64_t, void**) = nullptr;
     HcclResult (*HcclEngineCtxGet)(HcclComm, const char*, CommEngine, void**, uint64_t*) = nullptr;
-    HcclResult (*HcclEngineCtxCopy)(HcclComm, CommEngine, const char*, void*, uint64_t, uint64_t) = nullptr;
+    HcclResult (*HcclEngineCtxCopy)(HcclComm, CommEngine, const char*, const void*, uint64_t, uint64_t) = nullptr;
     HcclResult (*HcclGetRankId)(HcclComm, uint32_t*) = nullptr;
     HcclResult (*HcclGetRankSize)(HcclComm, uint32_t*) = nullptr;
     HcclResult (*HcclRankGraphGetRanksByLayer)(HcclComm, uint32_t, uint32_t**, uint32_t*) = nullptr;
@@ -108,6 +176,10 @@ private:
     HcclResult (*HcclRankGraphGetRanksByTopoInst)(HcclComm, uint32_t, uint32_t, uint32_t**, uint32_t*) = nullptr;
     HcclResult (*HcclRankGraphGetEndpointNum)(HcclComm, uint32_t, uint32_t, uint32_t*) = nullptr;
     HcclResult (*HcclRankGraphGetEndpointDesc)(HcclComm, uint32_t, uint32_t, uint32_t*, EndpointDesc*) = nullptr;
+    uint64_t hcclBuffSize_ = 0;   // Size of each registered window: 2 * HCCL_BUFFSIZE * 1024 * 1024 bytes.
+    uint64_t roceBufferSize_ = 0; // Registered RoCE size, identical on every peer.
+    uint32_t epRankSize_ = 0;
+    uint32_t rankSizePerServer_ = 0;
 };
 } // namespace Mc2Aclnn
 

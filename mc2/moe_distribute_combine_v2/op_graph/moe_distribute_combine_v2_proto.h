@@ -57,6 +57,7 @@ support format: ND.
 * @li comm_quant_mode: communication quantization mode, 1 for enable, 0 for disable, dtype: Int64.
 * @li group_list_type: type of input group_list, dtype: Int64.
 * @li comm_alg: Input comm alg type, dtype: String.
+* @li enable_pre_reduce: Enable local pre-reduction for RoCE, dtype: Bool. Default: true.
 
 * @par Outputs
 * One outputs, including:
@@ -100,6 +101,7 @@ REG_OP(MoeDistributeCombineV2)
     .ATTR(zero_expert_num, Int, 0)
     .ATTR(copy_expert_num, Int, 0)
     .ATTR(const_expert_num, Int, 0)
+    .ATTR(enable_pre_reduce, Bool, true)
     .OP_END_FACTORY_REG(MoeDistributeCombineV2)
 
 } // namespace ge

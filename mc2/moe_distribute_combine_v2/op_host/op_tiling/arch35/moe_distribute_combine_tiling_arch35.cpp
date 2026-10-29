@@ -829,11 +829,10 @@ ge::graphStatus MoeDistributeCombineV2TilingFuncA5::MoeDistributeCombineTilingFu
     // 检查 commAlg 参数合法性校验
     bool isNullOrEmpty = (commAlgPtr == nullptr) || (std::strlen(commAlgPtr) == 0);
     bool isCcu = (!isNullOrEmpty) && (std::strcmp(commAlgPtr, "ccu") == 0);
-    OP_TILING_CHECK(
-        !(isNullOrEmpty || isCcu),
-        OP_LOGE_FOR_INVALID_VALUE(nodeName, "commAlg", commAlgPtr != nullptr ? commAlgPtr : "null",
-                                  "only nullptr (or empty char*) or \"ccu\" is supported on this SoC version"),
-        return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(!(isNullOrEmpty || isCcu || config.isRoce),
+                    OP_LOGE_FOR_INVALID_VALUE(nodeName, "commAlg", commAlgPtr != nullptr ? commAlgPtr : "null",
+                                              "expected empty or ccu; hierarchy requires the A5 V3 Context entry"),
+                    return ge::GRAPH_FAILED);
     if (isCcu) {
         // CCU 调用 A5 tiling 实现
         return MoeDistributeCombineTilingImpl(context, OP_VERSION_2);

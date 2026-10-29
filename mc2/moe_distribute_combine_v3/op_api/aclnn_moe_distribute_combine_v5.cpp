@@ -44,8 +44,8 @@ aclnnStatus aclnnMoeDistributeCombineV5GetWorkspaceSize(
         sharedExpertXOptional, elasticInfoOptional, oriXOptional, constExpertAlpha1Optional, constExpertAlpha2Optional,
         constExpertVOptional, performanceInfoOptional, epWorldSize, epRankId, moeExpertNum, cclBufferSize, tpWorldSize,
         tpRankId, expertShardType, sharedExpertNum, sharedExpertRankNum, globalBs, outDtype, commQuantMode,
-        groupListType, const_cast<char*>(commAlg), zeroExpertNum, copyExpertNum, constExpertNum, xOut, workspaceSize,
-        executor);
+        groupListType, const_cast<char*>(commAlg), zeroExpertNum, copyExpertNum, constExpertNum, true, 0, xOut,
+        workspaceSize, executor);
     return getWorkspaceSizesRes;
 }
 

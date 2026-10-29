@@ -521,6 +521,7 @@ aclnn_moe_distribute_combine.h
 aclnn_moe_distribute_combine_v2.h
 aclnn_moe_distribute_combine_v3.h
 aclnn_moe_distribute_combine_v4.h
+aclnn_moe_distribute_combine_v6.h
 aclnn_moe_distribute_dispatch.h
 aclnn_moe_distribute_dispatch_v2.h
 aclnn_moe_distribute_dispatch_v3.h

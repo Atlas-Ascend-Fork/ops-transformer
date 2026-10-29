@@ -312,6 +312,16 @@
                 "name": "const_expert_num",
                 "dtype": "int",
                 "value": 0
+            },
+            {
+                "name": "enable_pre_reduce",
+                "dtype": "bool",
+                "value": true
+            },
+            {
+                "name": "rank_size_per_server",
+                "dtype": "int",
+                "value": 0
             }
             ]
         },
@@ -624,6 +634,16 @@
             },
             {
                 "name": "const_expert_num",
+                "dtype": "int",
+                "value": 0
+            },
+            {
+                "name": "enable_pre_reduce",
+                "dtype": "bool",
+                "value": true
+            },
+            {
+                "name": "rank_size_per_server",
                 "dtype": "int",
                 "value": 0
             }
@@ -940,6 +960,16 @@
                 "name": "const_expert_num",
                 "dtype": "int",
                 "value": 0
+            },
+            {
+                "name": "enable_pre_reduce",
+                "dtype": "bool",
+                "value": true
+            },
+            {
+                "name": "rank_size_per_server",
+                "dtype": "int",
+                "value": 0
             }
             ]
         },
@@ -1252,6 +1282,16 @@
             },
             {
                 "name": "const_expert_num",
+                "dtype": "int",
+                "value": 0
+            },
+            {
+                "name": "enable_pre_reduce",
+                "dtype": "bool",
+                "value": true
+            },
+            {
+                "name": "rank_size_per_server",
                 "dtype": "int",
                 "value": 0
             }

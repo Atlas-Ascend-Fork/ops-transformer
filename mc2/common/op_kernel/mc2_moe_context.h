@@ -19,14 +19,18 @@
 namespace Mc2Aclnn {
 constexpr uint32_t HCCL_MAX_RANK_SIZE = 1024;
 
+constexpr uint32_t ROCE_CHANNEL_PER_SERVER = 2;
+
 struct Mc2MoeContext {
     uint32_t epRankId;
     uint32_t rankSizePerServer;
-    uint64_t kfcContextAddr; // host kfc方案中，需要传递通信API所需的地址
-    uint64_t epHcclBuffer_[HCCL_MAX_RANK_SIZE];
-    uint64_t hcommHandle_[HCCL_MAX_RANK_SIZE]; // 支持ROCE或者URMA
+    uint64_t kfcContextAddr;                    // host kfc方案中，需要传递通信API所需的地址
+    uint64_t epHcclBuffer_[HCCL_MAX_RANK_SIZE]; // 地址含rank偏移；RoCE路径只填本server内的UB_MEM窗。
+    uint64_t hcommHandle_[HCCL_MAX_RANK_SIZE];  // 支持ROCE或者URMA
     uint32_t channelsPerRank;
     bool enableGroupSend;
+    uint64_t roceHcclBuffer_[HCCL_MAX_RANK_SIZE];
+    uint64_t roceBufferSize; // 本地与各对端注册窗容量一致。
 };
 
 struct MoeCommContext {

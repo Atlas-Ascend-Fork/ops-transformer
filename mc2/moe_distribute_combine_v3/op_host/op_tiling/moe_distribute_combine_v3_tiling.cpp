@@ -48,17 +48,18 @@ namespace optiling {
 ge::graphStatus MoeDistributeCombineV3TilingFuncBase::MoeDistributeCombineV3TilingFunc(gert::TilingContext* context)
 {
     CombineV2Config config;
-    config.contextIndex = 0;            // 0: 根据combineV2算子原型标志位初始化context索引
-    config.expandXIndex = 1;            // 1: 根据combineV2算子原型标志位初始化expandX索引
-    config.expertIdsIndex = 2;          // 2: 根据combineV2算子原型标志位初始化expertIds索引
-    config.assistInfoIndex = 3;         // 3: 根据combineV2算子原型标志位初始化assitInfo索引
-    config.epSendCountIndex = 4;        // 4: 根据combineV2算子原型标志位初始化epSendCount索引
-    config.expertScalesIndex = 5;       // 5: 根据combineV2算子原型标志位初始化expertScales索引
-    config.tpSendCountsIndex = 6;       // 根据combineV2算子原型标志位设置tpSendCounts索引
-    config.xActiveMaskIndex = 7;        // 根据combineV2算子原型标志位设置xActiveMask索引
-    config.activationScaleIndex = 8;    // 根据combineV2算子原型标志位设置activationScale索引
-    config.weightScaleIndex = 9;        // 根据combineV2算子原型标志位设置weightScale索引
-    config.groupListIndex = 10;         // 根据combineV2算子原型标志位设置groupList索引
+    config.contextIndex = 0;         // 0: 根据combineV2算子原型标志位初始化context索引
+    config.expandXIndex = 1;         // 1: 根据combineV2算子原型标志位初始化expandX索引
+    config.expertIdsIndex = 2;       // 2: 根据combineV2算子原型标志位初始化expertIds索引
+    config.assistInfoIndex = 3;      // 3: 根据combineV2算子原型标志位初始化assitInfo索引
+    config.epSendCountIndex = 4;     // 4: 根据combineV2算子原型标志位初始化epSendCount索引
+    config.expertScalesIndex = 5;    // 5: 根据combineV2算子原型标志位初始化expertScales索引
+    config.tpSendCountsIndex = 6;    // 根据combineV2算子原型标志位设置tpSendCounts索引
+    config.xActiveMaskIndex = 7;     // 根据combineV2算子原型标志位设置xActiveMask索引
+    config.activationScaleIndex = 8; // 根据combineV2算子原型标志位设置activationScale索引
+    config.weightScaleIndex = 9;     // 根据combineV2算子原型标志位设置weightScale索引
+    config.groupListIndex = 10;      // 根据combineV2算子原型标志位设置groupList索引
+    config.expandScalesIndex = 11;
     config.sharedExpertXIndex = 12;     // 根据combineV2算子原型标志位设置sharedExpertX索引
     config.elasticInfoIndex = 13;       // 根据combineV2算子原型标志位设置elasticInfo索引
     config.oriXIndex = 14;              // 根据combineV2算子原型标志位设置oriX索引
@@ -85,6 +86,8 @@ ge::graphStatus MoeDistributeCombineV3TilingFuncBase::MoeDistributeCombineV3Tili
     config.attrCopyExpertNumIndex = 15; // 根据combineV2算子原型标志位设置attrCopyExpertNum索引
     config.attrConstExpertNumIndex = 16; // 根据combineV2算子原型标志位设置attrConstExpertNum索引
     config.hasAddRmsNorm = false;
+    config.attrEnablePreReduceIndex = 17;
+    config.attrRankSizePerServerIndex = 18;
     config.isMc2Context = true;
 
     const char* nodeName = context->GetNodeName();

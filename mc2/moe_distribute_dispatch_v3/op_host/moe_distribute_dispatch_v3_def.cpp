@@ -176,6 +176,7 @@ private:
         this->Attr("copy_expert_num").AttrType(OPTIONAL).Int(0);
         this->Attr("const_expert_num").AttrType(OPTIONAL).Int(0);
         this->Attr("y_dtype").AttrType(OPTIONAL).Int(ge::DT_UNDEFINED);
+        this->Attr("rank_size_per_server").AttrType(OPTIONAL).Int(0);
     }
 };
 

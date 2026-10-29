@@ -11,7 +11,7 @@
 /*!
  * \file moe_distribute_combine_v3_apt.cpp
  * \brief A5 (arch35) kernel entry for MoeDistributeCombineV3.
- *        Reuses combine_v2's A5 data-as-flag MTE combine implementation.
+ *        Reuses combine_v2's A5 MTE and RoCE implementations.
  */
 #if ASC_DEVKIT_MAJOR >= 9
 #include "basic_api/kernel_basic_intf.h"
@@ -20,13 +20,14 @@
 #endif
 #include "lib/matmul_intf.h"
 #include "../../../moe_distribute_combine_v2/op_kernel/arch35/moe_distribute_combine_v2_a5_mte.h"
+#include "../../../moe_distribute_combine_v2/op_kernel/arch35/moe_distribute_combine_v2_a5_roce.h"
 #include "../../../moe_distribute_combine_v2/op_kernel/arch35/moe_distribute_combine_v2_apt_tiling_key.h"
 using namespace MoeDistributeCombineV2A5MteImpl;
 using namespace AscendC;
 using namespace Mc2Kernel;
 using namespace Mc2Tiling;
 
-template <uint8_t QuantMode, uint8_t LayeredMode, uint8_t ArchTag>
+template <uint8_t QuantMode, uint8_t CommMode, uint8_t ArchTag>
 __global__ __aicore__ void moe_distribute_combine_v3(GM_ADDR mc2Context, GM_ADDR expandX, GM_ADDR expertIds,
                                                      GM_ADDR assistInfoForCombine, GM_ADDR epSendCount, GM_ADDR scales,
                                                      GM_ADDR tpSendCount, GM_ADDR xActiveMask, GM_ADDR activationScale,
@@ -41,11 +42,21 @@ __global__ __aicore__ void moe_distribute_combine_v3(GM_ADDR mc2Context, GM_ADDR
     TPipe pipe;
 #if (ORIG_DTYPE_EXPAND_X == DT_BF16 || ORIG_DTYPE_EXPAND_X == DT_FLOAT16)
     if constexpr (ArchTag == TILINGKEY_TPL_A5) {
-        MoeDistributeCombineV2A5Mte<DTYPE_EXPAND_X, DTYPE_X, int32_t, QuantMode, false> op;
-        op.Init(mc2Context, expandX, expertIds, assistInfoForCombine, epSendCount, nullptr, nullptr, scales,
-                xActiveMask, sharedExpertX, elasticInfo, oriX, constExpertAlpha1, constExpertAlpha2, constExpertV,
-                performanceInfo, nullptr, nullptr, XOut, workspaceGM, &pipe, &tilingData);
-        op.Process();
+        if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
+            MoeDistributeCombineV2RoceImpl::MoeDistributeCombineV2Roce<DTYPE_EXPAND_X, DTYPE_X, int32_t, QuantMode,
+                                                                       false>
+                op;
+            op.Init(mc2Context, expandX, expertIds, assistInfoForCombine, epSendCount, nullptr, nullptr, scales,
+                    expandScales, xActiveMask, sharedExpertX, elasticInfo, oriX, constExpertAlpha1, constExpertAlpha2,
+                    constExpertV, performanceInfo, nullptr, nullptr, XOut, workspaceGM, &pipe, &tilingData);
+            op.Process();
+        } else {
+            MoeDistributeCombineV2A5Mte<DTYPE_EXPAND_X, DTYPE_X, int32_t, QuantMode, false> op;
+            op.Init(mc2Context, expandX, expertIds, assistInfoForCombine, epSendCount, nullptr, nullptr, scales,
+                    xActiveMask, sharedExpertX, elasticInfo, oriX, constExpertAlpha1, constExpertAlpha2, constExpertV,
+                    performanceInfo, nullptr, nullptr, XOut, workspaceGM, &pipe, &tilingData);
+            op.Process();
+        }
     }
 #endif
 }

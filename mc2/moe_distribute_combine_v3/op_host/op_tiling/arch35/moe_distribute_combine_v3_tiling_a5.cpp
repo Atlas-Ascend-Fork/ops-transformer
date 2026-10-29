@@ -14,6 +14,7 @@
  */
 
 #include "moe_distribute_combine_v3_tiling_a5.h"
+#include <cstring>
 #include "../../../../moe_distribute_combine_v2/op_host/op_tiling/arch35/moe_distribute_combine_tiling_arch35.h"
 #include "op_host/op_tiling/mc2_tiling_utils.h"
 #include "register/tilingdata_base.h"
@@ -29,7 +30,26 @@ ge::graphStatus MoeDistributeCombineV3TilingFuncA5::MoeDistributeCombineV2Tiling
                                                                                         const CombineV2Config& config)
 {
     MoeDistributeCombineV2TilingFuncA5 funcA5;
-    return funcA5.MoeDistributeCombineV2TilingFuncNew(context, config);
+    auto attrs = context->GetAttrs();
+    OP_TILING_CHECK(attrs == nullptr, OP_LOGE(context->GetNodeName(), "attrs is null"), return ge::GRAPH_FAILED);
+    auto commAlg = attrs->GetAttrPointer<char>(config.attrCommAlgIndex);
+    auto tilingConfig = config;
+    if (mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510 && commAlg != nullptr &&
+        std::strcmp(commAlg, "hierarchy") == 0) {
+        auto ranksPerServer = attrs->GetAttrPointer<int64_t>(config.attrRankSizePerServerIndex);
+        auto epWorldSize = attrs->GetAttrPointer<int64_t>(config.attrEpWorldSizeIndex);
+        OP_TILING_CHECK(ranksPerServer == nullptr || epWorldSize == nullptr || *ranksPerServer <= 0 ||
+                            *epWorldSize <= 0 || *epWorldSize % *ranksPerServer != 0,
+                        OP_LOGE(context->GetNodeName(), "ROCE requires rank_size_per_server to divide ep_world_size"),
+                        return ge::GRAPH_FAILED);
+        tilingConfig.isRoce = true;
+        tilingConfig.roceServerNum = static_cast<uint32_t>(*epWorldSize / *ranksPerServer);
+        OP_TILING_CHECK(tilingConfig.roceServerNum <= 1U,
+                        OP_LOGE(context->GetNodeName(), "ROCE requires multiple servers, got serverNum=%u",
+                                tilingConfig.roceServerNum),
+                        return ge::GRAPH_FAILED);
+    }
+    return funcA5.MoeDistributeCombineV2TilingFuncNew(context, tilingConfig);
 }
 
 struct MoeDistributeCombineV3CompileInfo {};

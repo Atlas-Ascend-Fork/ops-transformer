@@ -125,7 +125,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, SharedExpertX1)
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     // check ge::GRAPH_SUCCESS
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -175,7 +175,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, SharedExpertXThreeDims)
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     // check ge::GRAPH_SUCCESS
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -218,7 +218,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, Test0)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -448,7 +448,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, XActivateMask2dims)
         {
             {{{576, 7168}, {576, 7168}}, ge::DT_FLOAT16, ge::FORMAT_ND},
             {{{32, 8}, {32, 8}}, ge::DT_INT32, ge::FORMAT_ND},
-            {{{32 * 8}, {32 * 8}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{32 * 72 / 18 * 128}, {32 * 72 / 18 * 128}}, ge::DT_INT32, ge::FORMAT_ND},
             {{{288}, {288}}, ge::DT_INT32, ge::FORMAT_ND},
             {{{32, 8}, {32, 8}}, ge::DT_FLOAT, ge::FORMAT_ND},
             {{{2}, {2}}, ge::DT_INT32, ge::FORMAT_ND},
@@ -483,7 +483,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, XActivateMask2dims)
         &compileInfo, "Ascend910_93", coreNum, ubSize);
 
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -583,7 +583,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_ElasticInfoSuccess)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1293,7 +1293,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, ARN_BasicSuccess)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1353,7 +1353,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, ARN_Int8Quant)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 17UL;
+    uint64_t expectTilingKey = 65UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1397,7 +1397,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_Int8Quant)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 17UL;
+    uint64_t expectTilingKey = 65UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1440,7 +1440,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_MxFp8E5M2Quant)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "3510", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 18UL;
+    uint64_t expectTilingKey = 66UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1484,7 +1484,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_BF16)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1528,7 +1528,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_GlobalBsNonZero)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1771,7 +1771,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_xActiveMask1D)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1815,7 +1815,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_TP2Success)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1860,7 +1860,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_xActiveMask2D)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -1961,7 +1961,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3HierarchyVariableBsSuccess)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 32}};
-    uint64_t expectTilingKey = 28UL; // no quant + hierarchy + A3, ep=32 keeps hierarchy
+    uint64_t expectTilingKey = 76UL; // no quant + hierarchy + A3, ep=32 keeps hierarchy
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 
     if (originalEnv.empty()) {
@@ -2016,7 +2016,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3HierarchyDegradeToFullmeshSucce
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 16}};
     // epWorldSize=16(单超)时hierarchy自动退化为fullmesh, 不再依赖HCCL_BUFFSIZE分层窗口
-    uint64_t expectTilingKey = 16UL; // no quant + fullmesh + A3
+    uint64_t expectTilingKey = 64UL; // no quant + fullmesh + A3
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -2219,7 +2219,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_ConstExpertWithOptionalInputs)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 
@@ -2275,7 +2275,7 @@ TEST_F(MoeDistributeCombineV2Arch22TilingTest, A3_PerformanceInfo)
          {"const_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
         &compileInfo, "Ascend910_93", coreNum, ubSize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", 8}};
-    uint64_t expectTilingKey = 16UL;
+    uint64_t expectTilingKey = 64UL;
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_SUCCESS, expectTilingKey);
 }
 

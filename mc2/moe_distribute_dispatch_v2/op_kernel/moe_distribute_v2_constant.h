@@ -36,7 +36,12 @@ constexpr uint32_t UB_ALIGN = 32U;
 
 // dispatchv2所需常量段
 constexpr uint64_t DISPATCH_STATE_WIN_OFFSET = 768UL * 1024UL;
-constexpr uint8_t BUFFER_NUM = 2; // 多buf
+constexpr uint64_t CUMSUM_CAL_OFFSET = 868UL * 1024UL;  // 768 + 100
+constexpr uint64_t CUMSUM_FLAG_OFFSET = 876UL * 1024UL; // 868 + 8
+constexpr uint32_t SPLIT_BLOCK_DATA_SIZE = 480U;
+constexpr uint32_t SIZE_ALIGN_256 = 256U;
+constexpr uint8_t UB_ALIGN_DATA_COUNT = 8U; // 8 = UB_ALIGN / sizeof(float) = UB_ALIGN / sizeof(int32_t)
+constexpr uint8_t BUFFER_NUM = 2;           // 多buf
 constexpr uint8_t BUFFER_SINGLE = 1;
 constexpr uint32_t STATE_OFFSET = 32U; // 状态空间偏移地址
 constexpr uint8_t COMM_NUM = 1;        // 通信域大小

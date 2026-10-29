@@ -53,7 +53,9 @@ ACLNN_API aclnnStatus aclnnMoeDistributeCombineBaseGetWorkspaceSize(
     int64_t epWorldSize, int64_t epRankId, int64_t moeExpertNum, const char* groupTp, int64_t tpWorldSize,
     int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t globalBs,
     int64_t outDtype, int64_t commQuantMode, int64_t groupListType, const char* commAlg, int64_t zeroExpertNum,
-    int64_t copyExpertNum, int64_t constExpertNum, aclTensor* xOut, uint64_t* workspaceSize, aclOpExecutor** executor);
+    int64_t copyExpertNum, int64_t constExpertNum, bool enablePreReduce, aclTensor* xOut, uint64_t* workspaceSize,
+    aclOpExecutor** executor);
+
 #ifdef __cplusplus
 }
 #endif

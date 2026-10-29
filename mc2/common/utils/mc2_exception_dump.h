@@ -289,26 +289,21 @@ inline int ProcessArgsForA5(uint64_t argsAddr, std::vector<uint8_t>& winBuf, con
         }
         winAddr = reinterpret_cast<void*>(winContext->windowsIn[winContext->rankId]);
     } else if (context_type == "Mc2MoeContext") {
-        // V3分支
-        std::vector<uint8_t> hcclArgs(sizeof(Mc2Aclnn::Mc2MoeContext), 0);
-        ret = aclrtMemcpy(hcclArgs.data(), sizeof(Mc2Aclnn::Mc2MoeContext), (void*)argsAddr,
-                          sizeof(Mc2Aclnn::Mc2MoeContext), ACL_MEMCPY_DEVICE_TO_HOST);
+        // Torch Context 只有旧布局；这里只读取两种布局共有的窗口地址前缀。
+        CommContextForDump winContext{};
+        ret = aclrtMemcpy(&winContext, sizeof(winContext), (void*)argsAddr, sizeof(winContext),
+                          ACL_MEMCPY_DEVICE_TO_HOST);
         if (ret != ACL_SUCCESS) {
             OP_LOGE(OP_NAME, "aclrtMemcpy Mc2MoeContext from device to host failed. ret = %d", ret);
             return -1;
         }
-        Mc2Aclnn::Mc2MoeContext* winContext = reinterpret_cast<Mc2Aclnn::Mc2MoeContext*>(hcclArgs.data());
-        if (winContext == nullptr) {
-            OP_LOGE_WITH_INVALID_INPUT(OP_NAME, "winContext");
-            return -1;
-        }
-        OP_LOGD(OP_NAME, "Get winContext from args. rankId=%u", winContext->epRankId);
-        if (winContext->epRankId >= Mc2Aclnn::HCCL_MAX_RANK_SIZE) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(OP_NAME, "epRankId", std::to_string(winContext->epRankId).c_str(),
+        OP_LOGD(OP_NAME, "Get winContext from args. rankId=%u", winContext.epRankId);
+        if (winContext.epRankId >= Mc2Aclnn::HCCL_MAX_RANK_SIZE) {
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(OP_NAME, "epRankId", std::to_string(winContext.epRankId).c_str(),
                                                   "The value of epRankId must be less than HCCL_MAX_RANK_SIZE");
             return -1;
         }
-        winAddr = reinterpret_cast<void*>(winContext->epHcclBuffer_[winContext->epRankId]);
+        winAddr = reinterpret_cast<void*>(winContext.epHcclBufffer_[winContext.epRankId]);
     } else {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(OP_NAME, "context_type", context_type.c_str(),
                                               "The value of context_type must be within the supported range.");
@@ -388,19 +383,18 @@ inline void* GetPeermemBase(const char* socName, uint64_t argsAddr)
 {
     OP_LOGD(OP_NAME, "GetPeermemBase: argsAddr=0x%lx", argsAddr);
     if (std::strstr(socName, "Ascend950") != nullptr) {
-        std::vector<uint8_t> hcclArgs(sizeof(Mc2Aclnn::Mc2MoeContext), 0);
-        if (aclrtMemcpy(hcclArgs.data(), sizeof(Mc2Aclnn::Mc2MoeContext), reinterpret_cast<void*>(argsAddr),
-                        sizeof(Mc2Aclnn::Mc2MoeContext), ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) {
+        CommContextForDump ctx{};
+        if (aclrtMemcpy(&ctx, sizeof(ctx), reinterpret_cast<void*>(argsAddr), sizeof(ctx), ACL_MEMCPY_DEVICE_TO_HOST) !=
+            ACL_SUCCESS) {
             OP_LOGE(OP_NAME, "GetPeermemBase: aclrtMemcpy Mc2MoeContext failed");
             return nullptr;
         }
-        auto* ctx = reinterpret_cast<Mc2Aclnn::Mc2MoeContext*>(hcclArgs.data());
-        if (ctx->epRankId >= Mc2Aclnn::HCCL_MAX_RANK_SIZE) {
-            OP_LOGE(OP_NAME, "GetPeermemBase: invalid epRankId=%u", ctx->epRankId);
+        if (ctx.epRankId >= Mc2Aclnn::HCCL_MAX_RANK_SIZE) {
+            OP_LOGE(OP_NAME, "GetPeermemBase: invalid epRankId=%u", ctx.epRankId);
             return nullptr;
         }
-        void* winAddr = reinterpret_cast<void*>(ctx->epHcclBuffer_[ctx->epRankId]);
-        OP_LOGD(OP_NAME, "GetPeermemBase: epRankId=%u peermemBase=%p", ctx->epRankId, winAddr);
+        void* winAddr = reinterpret_cast<void*>(ctx.epHcclBufffer_[ctx.epRankId]);
+        OP_LOGD(OP_NAME, "GetPeermemBase: epRankId=%u peermemBase=%p", ctx.epRankId, winAddr);
         return winAddr;
     }
 

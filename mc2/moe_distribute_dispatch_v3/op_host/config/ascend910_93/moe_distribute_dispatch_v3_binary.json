@@ -257,6 +257,11 @@
                 "name": "y_dtype",
                 "dtype": "int",
                 "value": 28
+            },
+            {
+                "name": "rank_size_per_server",
+                "dtype": "int",
+                "value": 0
             }
             ]
         },
@@ -516,6 +521,11 @@
                 "name": "y_dtype",
                 "dtype": "int",
                 "value": 28
+            },
+            {
+                "name": "rank_size_per_server",
+                "dtype": "int",
+                "value": 0
             }
             ]
         },
@@ -775,6 +785,11 @@
                 "name": "y_dtype",
                 "dtype": "int",
                 "value": 28
+            },
+            {
+                "name": "rank_size_per_server",
+                "dtype": "int",
+                "value": 0
             }
             ]
         },
@@ -1034,6 +1049,11 @@
                 "name": "y_dtype",
                 "dtype": "int",
                 "value": 28
+            },
+            {
+                "name": "rank_size_per_server",
+                "dtype": "int",
+                "value": 0
             }
             ]
         }

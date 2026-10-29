@@ -65,7 +65,7 @@ aclnnStatus CallBaseGetWorkspaceSize(const char* groupTp, const char* commAlg)
         nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
         "test_moe_distribute_combine_ep", EP_WORLD_SIZE, EP_RANK_ID, MOE_EXPERT_NUM, groupTp, TP_WORLD_SIZE, TP_RANK_ID,
         EXPERT_SHARD_TYPE, SHARED_EXPERT_NUM, SHARED_EXPERT_RANK_NUM, GLOBAL_BS, OUT_DTYPE, COMM_QUANT_MODE,
-        GROUP_LIST_TYPE, commAlg, 0, 0, 0, xOut.get(), &workspaceSize, &executor);
+        GROUP_LIST_TYPE, commAlg, 0, 0, 0, true, xOut.get(), &workspaceSize, &executor);
 }
 } // namespace
 

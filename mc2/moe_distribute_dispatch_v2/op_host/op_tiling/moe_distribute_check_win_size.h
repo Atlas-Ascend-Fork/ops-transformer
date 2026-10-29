@@ -33,6 +33,59 @@ constexpr uint32_t EP_RANK_OFFSET_STEP = 1024;
 } // namespace
 
 namespace Mc2Tiling {
+inline uint64_t AlignRoceBytes(uint64_t bytes, uint64_t alignment = 32U)
+{
+    return (bytes + alignment - 1U) / alignment * alignment;
+}
+
+inline uint64_t GetRoceAssistInfoSize(uint64_t expertRows, uint64_t epWorldSize, uint64_t tokensPerRank)
+{
+    const uint64_t tripleBytes = expertRows * 3U * sizeof(int32_t);
+    const uint64_t serverInfoBytes = epWorldSize * (AlignRoceBytes(tokensPerRank, 16U) + 1U) * sizeof(uint16_t);
+    return AlignRoceBytes(tripleBytes + serverInfoBytes, sizeof(int32_t)) / sizeof(int32_t);
+}
+
+struct RoceWindowLayout {
+    uint64_t dispatchPacketBytes;
+    uint64_t serverPacketBytes;
+    uint64_t combineIntraBytes;
+    uint64_t dispatchIntraBytes;
+    uint64_t dispatchInterBytes;
+};
+
+template <typename TilingInfo>
+inline RoceWindowLayout GetRoceWindowLayout(const TilingInfo& info, uint64_t serverNum)
+{
+    const uint64_t tokensPerRank = info.globalBs / info.epWorldSize;
+    const uint64_t ranksPerServer = info.epWorldSize / serverNum;
+    const uint64_t expertsPerRank = info.moeExpertNum / (info.epWorldSize - info.sharedExpertRankNum);
+    const uint64_t sharedSlots = info.sharedExpertRankNum > 0U ? info.sharedExpertNum : 0U;
+    const uint64_t rawTokenBytes = AlignRoceBytes(static_cast<uint64_t>(info.h) * MAX_OUT_DTYPE_SIZE);
+    const uint64_t combinePacketBytes =
+        AlignRoceBytes(rawTokenBytes + sizeof(float), FULL_MESH_DATA_ALIGN) / FULL_MESH_DATA_ALIGN * WIN_ADDR_ALIGN;
+    const uint64_t dispatchPacketBytes =
+        AlignRoceBytes(rawTokenBytes + 2U * UB_ALIGN, FULL_MESH_DATA_ALIGN) / FULL_MESH_DATA_ALIGN * WIN_ADDR_ALIGN;
+    const uint64_t countPacketBytes =
+        AlignRoceBytes(expertsPerRank * ranksPerServer * sizeof(int32_t), FULL_MESH_DATA_ALIGN) / FULL_MESH_DATA_ALIGN *
+        WIN_ADDR_ALIGN;
+    // 框间 Dispatch 按 FP32 工作载荷上界预留，保证不依赖两算子各自的量化模式。
+    const uint64_t tokenBytes = AlignRoceBytes(static_cast<uint64_t>(info.h) * sizeof(float), WIN_ADDR_ALIGN);
+    const uint64_t expertIdsBytes = AlignRoceBytes(static_cast<uint64_t>(info.k) * sizeof(int32_t));
+    const uint64_t expertCountsBytes = AlignRoceBytes(static_cast<uint64_t>(info.k) * sizeof(int16_t));
+    const uint64_t expertScalesBytes = AlignRoceBytes(static_cast<uint64_t>(info.k) * sizeof(float));
+    const uint64_t serverRecordBytes = tokenBytes + UB_ALIGN + expertIdsBytes + expertCountsBytes + expertScalesBytes;
+    const uint64_t serverPacketBytes =
+        AlignRoceBytes(serverRecordBytes, FULL_MESH_DATA_ALIGN) / FULL_MESH_DATA_ALIGN * WIN_ADDR_ALIGN;
+    RoceWindowLayout layout;
+    layout.dispatchPacketBytes = dispatchPacketBytes;
+    layout.serverPacketBytes = serverPacketBytes;
+    layout.combineIntraBytes = serverNum * tokensPerRank * (info.k + sharedSlots) * combinePacketBytes;
+    layout.dispatchIntraBytes = info.epWorldSize * tokensPerRank * expertsPerRank * dispatchPacketBytes;
+    layout.dispatchInterBytes =
+        serverNum * (2U * WIN_ADDR_ALIGN + tokensPerRank * serverPacketBytes + 2U * countPacketBytes);
+    return layout;
+}
+
 struct CheckWinSizeData {
     uint32_t localMoeExpertNum;
     uint32_t sharedExpertNum;

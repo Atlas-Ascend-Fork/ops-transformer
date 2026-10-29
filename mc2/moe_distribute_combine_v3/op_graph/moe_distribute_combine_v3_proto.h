@@ -70,6 +70,8 @@ Default: 0.
 * @li copy_expert_num: Input copy expert num, dtype: int64. Support Range: [0, MAX_INT32)，MAX_INT32 = 2^31 - 1,
 Default: 0.
 * @li const_expert_num: Input const expert num, dtype: int64. Support: 0, Default: 0.
+* @li enable_pre_reduce: Enable local pre-reduction for RoCE, dtype: Bool. Default: true.
+* @li rank_size_per_server: Ranks per server supplied by the op_api Context, dtype: Int64. Default: 0 (unspecified).
 
 
 * @par Outputs
@@ -114,6 +116,8 @@ REG_OP(MoeDistributeCombineV3)
     .ATTR(zero_expert_num, Int, 0)
     .ATTR(copy_expert_num, Int, 0)
     .ATTR(const_expert_num, Int, 0)
+    .ATTR(enable_pre_reduce, Bool, true)
+    .ATTR(rank_size_per_server, Int, 0)
     .OP_END_FACTORY_REG(MoeDistributeCombineV3)
 
 } // namespace ge

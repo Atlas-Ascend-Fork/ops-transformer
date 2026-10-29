@@ -42,19 +42,20 @@ constexpr uint32_t TWO_DIMS = 2U;
 constexpr uint32_t ONE_DIM = 1U;
 
 struct CombineV2Config {
-    uint32_t contextIndex = 0;                 // 0: 根据combineV3算子原型标志位初始化x索引
-    uint32_t expandXIndex = 0;                 // 0: 根据combineV2算子原型标志位初始化expertX索引
-    uint32_t expertIdsIndex = 1;               // 1: 根据combineV2算子原型标志位初始化expertIds索引
-    uint32_t assistInfoIndex = 2;              // 2: 根据combineV2算子原型标志位初始化assistInfo索引
-    uint32_t epSendCountIndex = 3;             // 3: 根据combineV2算子原型标志位初始化epSendCount索引
-    uint32_t expertScalesIndex = 4;            // 4: 根据combineV2算子原型标志位初始化expertScales索引
-    uint32_t residualXIndex = 5;               // 根据combineARN算子原型标志位初始化residualX索引
-    uint32_t gammaIndex = 6;                   // 根据combineARN算子原型标志位初始化gamma索引
-    uint32_t tpSendCountsIndex = 5;            // 根据combineV2算子原型标志位初始化tpSendCounts索引
-    uint32_t xActiveMaskIndex = 6;             // 根据combineV2算子原型标志位初始化xActiveMask索引
-    uint32_t activationScaleIndex = 7;         // 根据combineV2算子原型标志位初始化activationScale索引
-    uint32_t weightScaleIndex = 8;             // 根据combineV2算子原型标志位初始化weightScale索引
-    uint32_t groupListIndex = 9;               // 根据combineV2算子原型标志位初始化groupList索引
+    uint32_t contextIndex = 0;         // 0: 根据combineV3算子原型标志位初始化x索引
+    uint32_t expandXIndex = 0;         // 0: 根据combineV2算子原型标志位初始化expertX索引
+    uint32_t expertIdsIndex = 1;       // 1: 根据combineV2算子原型标志位初始化expertIds索引
+    uint32_t assistInfoIndex = 2;      // 2: 根据combineV2算子原型标志位初始化assistInfo索引
+    uint32_t epSendCountIndex = 3;     // 3: 根据combineV2算子原型标志位初始化epSendCount索引
+    uint32_t expertScalesIndex = 4;    // 4: 根据combineV2算子原型标志位初始化expertScales索引
+    uint32_t residualXIndex = 5;       // 根据combineARN算子原型标志位初始化residualX索引
+    uint32_t gammaIndex = 6;           // 根据combineARN算子原型标志位初始化gamma索引
+    uint32_t tpSendCountsIndex = 5;    // 根据combineV2算子原型标志位初始化tpSendCounts索引
+    uint32_t xActiveMaskIndex = 6;     // 根据combineV2算子原型标志位初始化xActiveMask索引
+    uint32_t activationScaleIndex = 7; // 根据combineV2算子原型标志位初始化activationScale索引
+    uint32_t weightScaleIndex = 8;     // 根据combineV2算子原型标志位初始化weightScale索引
+    uint32_t groupListIndex = 9;       // 根据combineV2算子原型标志位初始化groupList索引
+    uint32_t expandScalesIndex = 10;
     uint32_t sharedExpertXIndex = 10;          // 根据combineV2算子原型标志位初始化sharedExpertX索引
     uint32_t elasticInfoIndex = 11;            // 根据combineV2算子原型标志位初始化elasticInfo索引
     uint32_t oriXIndex = 13;                   // 根据combineV2算子原型标志位初始化oriX索引
@@ -87,6 +88,10 @@ struct CombineV2Config {
     uint32_t attrConstExpertNumIndex = 17;     // 根据combineV2算子原型标志位初始化attrConstExpertNum索引
     bool hasAddRmsNorm = false;
     bool isMc2Context = false;
+    uint32_t attrEnablePreReduceIndex = 18;
+    uint32_t attrRankSizePerServerIndex = 18;
+    bool isRoce = false;
+    uint32_t roceServerNum = 0;
 };
 
 class MoeDistributeCombineTilingHelper {

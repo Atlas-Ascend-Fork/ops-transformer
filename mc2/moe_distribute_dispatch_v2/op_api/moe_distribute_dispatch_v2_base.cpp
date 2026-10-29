@@ -53,9 +53,10 @@ extern aclnnStatus aclnnInnerMoeDistributeDispatchV3GetWorkspaceSize(
     const aclTensor* performanceInfo, int64_t epWorldSize, int64_t epRankId, int64_t moeExpertNum,
     int64_t cclBufferSize, int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,
     int64_t shareExpertRankNum, int64_t quantMode, int64_t globalBs, int64_t expertTokenNumsType, const char* commAlg,
-    int64_t zeroExpertNum, int64_t copyExpertNum, int64_t constExpertNum, int64_t ydtype, aclTensor* expandX,
-    aclTensor* dynamicScales, aclTensor* assist_info_for_combine, aclTensor* expertTokensNums, aclTensor* epRecvCounts,
-    aclTensor* tpRecvCounts, aclTensor* expandScales, uint64_t* workspaceSize, aclOpExecutor** executor);
+    int64_t zeroExpertNum, int64_t copyExpertNum, int64_t constExpertNum, int64_t ydtype, int64_t rankSizePerServer,
+    aclTensor* expandX, aclTensor* dynamicScales, aclTensor* assist_info_for_combine, aclTensor* expertTokensNums,
+    aclTensor* epRecvCounts, aclTensor* tpRecvCounts, aclTensor* expandScales, uint64_t* workspaceSize,
+    aclOpExecutor** executor);
 
 extern aclnnStatus aclnnInnerMoeDistributeDispatchV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                                      aclrtStream stream);
@@ -163,6 +164,51 @@ static void SetCommArgs(const bool isDavid, const bool isA5, const bool is910B, 
     }
 }
 
+static aclnnStatus ResolveInnerWorkspaceSize(
+    const aclTensor* x, const aclTensor* expertIds, const aclTensor* scalesOptional,
+    const aclTensor* xActiveMaskOptional, const aclTensor* expertScalesOptional, const aclTensor* elasticInfoOptional,
+    const aclTensor* performanceInfoOptional, const char* groupEp, char* groupEpBuf, char* groupTpBuf,
+    const char* commAlg, char* commAlgBuf, bool isArch22, bool isA5, int64_t epWorldSize, int64_t epRankId,
+    int64_t moeExpertNum, int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,
+    int64_t sharedExpertRankNum, int64_t quantMode, int64_t globalBs, int64_t expertTokenNumsType,
+    int64_t zeroExpertNum, int64_t copyExpertNum, int64_t constExpertNum, aclTensor* expandXOut,
+    aclTensor* dynamicScalesOut, aclTensor* assistInfoForCombineOut, aclTensor* expertTokenNumsOut,
+    aclTensor* epRecvCountsOut, aclTensor* tpRecvCountsOut, aclTensor* expandScalesOut, uint64_t* workspaceSize,
+    aclOpExecutor** executor)
+{
+    aclnnStatus getWorkspaceSizesRes = ACLNN_ERR_INNER;
+    int64_t ydtype = expandXOut->GetDataType();
+    if (isArch22 || (isA5 && commAlg != nullptr && std::strcmp(commAlg, "ccu") == 0)) { // ccu暂时不支持mc2Context
+        getWorkspaceSizesRes = aclnnInnerMoeDistributeDispatchV2GetWorkspaceSize(
+            x, expertIds, scalesOptional, xActiveMaskOptional, expertScalesOptional, elasticInfoOptional,
+            performanceInfoOptional, groupEpBuf, epWorldSize, epRankId, moeExpertNum, groupTpBuf, tpWorldSize, tpRankId,
+            expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode, globalBs, expertTokenNumsType, commAlgBuf,
+            zeroExpertNum, copyExpertNum, constExpertNum, ydtype, expandXOut, dynamicScalesOut, assistInfoForCombineOut,
+            expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut, expandScalesOut, workspaceSize, executor);
+    } else {
+#if HCOMM_VERSION_NUM >= HCCL_CHANNEL_SUPPORT_VERSION
+        aclTensor* mc2Context = nullptr;
+        uint64_t hcclBuffSize = 0;
+        const char* opName = "moe_distribute_v2";
+        uint32_t rankSizePerServer = 0;
+        const auto protocol = isA5 && commAlg != nullptr && std::strcmp(commAlg, "hierarchy") == 0 ?
+                                  CommProtocol::COMM_PROTOCOL_ROCE :
+                                  CommProtocol::COMM_PROTOCOL_UB_MEM;
+        auto aclnnRet = Mc2Aclnn::Mc2Context::GetMc2ContextTensor(groupEp, opName, hcclBuffSize, mc2Context, protocol,
+                                                                  &rankSizePerServer);
+        CHECK_RET(aclnnRet == ACLNN_SUCCESS, aclnnRet);
+        getWorkspaceSizesRes = aclnnInnerMoeDistributeDispatchV3GetWorkspaceSize(
+            mc2Context, x, expertIds, scalesOptional, xActiveMaskOptional, expertScalesOptional, elasticInfoOptional,
+            performanceInfoOptional, epWorldSize, epRankId, moeExpertNum, hcclBuffSize, tpWorldSize, tpRankId,
+            expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode, globalBs, expertTokenNumsType, commAlgBuf,
+            zeroExpertNum, copyExpertNum, constExpertNum, ydtype, rankSizePerServer, expandXOut, dynamicScalesOut,
+            assistInfoForCombineOut, expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut, expandScalesOut,
+            workspaceSize, executor);
+#endif
+    }
+    return getWorkspaceSizesRes;
+}
+
 aclnnStatus aclnnMoeDistributeDispatchGetWorkspaceSizeBase(
     const aclTensor* x, const aclTensor* expertIds, const aclTensor* scalesOptional,
     const aclTensor* xActiveMaskOptional, const aclTensor* expertScalesOptional, const aclTensor* elasticInfoOptional,
@@ -184,7 +230,11 @@ aclnnStatus aclnnMoeDistributeDispatchGetWorkspaceSizeBase(
     const static bool isArch22 = GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_2201;
     const static bool isA5 = GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510;
 
-    aclnnStatus getWorkspaceSizesRes = ACLNN_ERR_INNER;
+    char groupEpBuf[HCCL_GROUP_NAME_MAX] = {0};
+    SafeCopyGroupBuf(groupEpBuf, HCCL_GROUP_NAME_MAX, groupEp, HCCL_GROUP_NAME_MAX - 1);
+    char groupTpBuf[HCCL_GROUP_NAME_MAX] = {0}; // TP group is unused.
+    char commAlgBuf[HCCL_GROUP_NAME_MAX] = {0};
+    SafeCopyGroupBuf(commAlgBuf, HCCL_GROUP_NAME_MAX, commAlg, HCCL_GROUP_NAME_MAX - 1);
 
     // ccu暂时不支持performanceInfo
     if (isA5 && commAlg != nullptr && std::strcmp(commAlg, "ccu") == 0) {
@@ -195,35 +245,14 @@ aclnnStatus aclnnMoeDistributeDispatchGetWorkspaceSizeBase(
         }
     }
 
-    char groupEpBuf[HCCL_GROUP_NAME_MAX] = {0};
-    SafeCopyGroupBuf(groupEpBuf, HCCL_GROUP_NAME_MAX, groupEp, HCCL_GROUP_NAME_MAX - 1);
-    char groupTpBuf[HCCL_GROUP_NAME_MAX] = {0}; // tp域不使用，因此不做拷贝
-    char commAlgBuf[HCCL_GROUP_NAME_MAX] = {0};
-    SafeCopyGroupBuf(commAlgBuf, HCCL_GROUP_NAME_MAX, commAlg, HCCL_GROUP_NAME_MAX - 1);
-
-    int64_t ydtype = expandXOut->GetDataType();
-    if (isArch22 || (isA5 && commAlg != nullptr && std::strcmp(commAlg, "ccu") == 0)) { // ccu暂时不支持mc2Context
-        getWorkspaceSizesRes = aclnnInnerMoeDistributeDispatchV2GetWorkspaceSize(
-            x, expertIds, scalesOptional, xActiveMaskOptional, expertScalesOptional, elasticInfoOptional,
-            performanceInfoOptional, groupEpBuf, epWorldSize, epRankId, moeExpertNum, groupTpBuf, tpWorldSize, tpRankId,
-            expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode, globalBs, expertTokenNumsType, commAlgBuf,
-            zeroExpertNum, copyExpertNum, constExpertNum, ydtype, expandXOut, dynamicScalesOut, assistInfoForCombineOut,
-            expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut, expandScalesOut, workspaceSize, executor);
-    } else {
-#if HCOMM_VERSION_NUM >= HCCL_CHANNEL_SUPPORT_VERSION
-        uint64_t hcclBuffSize = 0;
-        const char* opName = "moe_distribute_v2";
-        aclTensor* mc2Context = nullptr;
-        auto aclnnRet = Mc2Aclnn::Mc2Context::GetMc2ContextTensor(groupEp, opName, hcclBuffSize, mc2Context);
-        CHECK_RET(aclnnRet == ACLNN_SUCCESS, aclnnRet);
-        getWorkspaceSizesRes = aclnnInnerMoeDistributeDispatchV3GetWorkspaceSize(
-            mc2Context, x, expertIds, scalesOptional, xActiveMaskOptional, expertScalesOptional, elasticInfoOptional,
-            performanceInfoOptional, epWorldSize, epRankId, moeExpertNum, hcclBuffSize, tpWorldSize, tpRankId,
-            expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode, globalBs, expertTokenNumsType, commAlgBuf,
-            zeroExpertNum, copyExpertNum, constExpertNum, ydtype, expandXOut, dynamicScalesOut, assistInfoForCombineOut,
-            expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut, expandScalesOut, workspaceSize, executor);
-#endif
-    }
+    auto getWorkspaceSizesRes = ResolveInnerWorkspaceSize(
+        x, expertIds, scalesOptional, xActiveMaskOptional, expertScalesOptional, elasticInfoOptional,
+        performanceInfoOptional, groupEp, groupEpBuf, groupTpBuf, commAlg, commAlgBuf, isArch22, isA5, epWorldSize,
+        epRankId, moeExpertNum, tpWorldSize, tpRankId, expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode,
+        globalBs, expertTokenNumsType, zeroExpertNum, copyExpertNum, constExpertNum, expandXOut, dynamicScalesOut,
+        assistInfoForCombineOut, expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut, expandScalesOut, workspaceSize,
+        executor);
+    CHECK_RET(getWorkspaceSizesRes == ACLNN_SUCCESS, getWorkspaceSizesRes);
     SetCommArgs(!isArch22, isA5, is910B, commAlg, executor);
     return getWorkspaceSizesRes;
 }

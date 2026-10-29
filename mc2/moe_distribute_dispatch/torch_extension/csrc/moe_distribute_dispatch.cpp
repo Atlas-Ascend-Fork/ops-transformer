@@ -14,6 +14,7 @@
  */
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 #include <torch/extension.h>
@@ -117,18 +118,36 @@ bool IsAscend950()
     return soc_name != nullptr && std::strstr(soc_name, "Ascend950") != nullptr;
 }
 
+int64_t GetAssistInfoNumel(int64_t a, int64_t bs, int64_t k, int64_t globalBs, int64_t epWorldSize, bool isRoce)
+{
+    if (!isRoce) {
+        return std::max(bs * k, a * 128);
+    }
+    constexpr int64_t tripleElementsPerRow = 3;
+    constexpr int64_t bitmapTokenAlignment = 16;
+    constexpr int64_t uint16ElementsPerInt32 = sizeof(int32_t) / sizeof(uint16_t);
+    const int64_t maxTokensPerRank = globalBs / epWorldSize;
+    const int64_t alignedTokensPerRank =
+        (maxTokensPerRank + bitmapTokenAlignment - 1) / bitmapTokenAlignment * bitmapTokenAlignment;
+    constexpr int64_t sharedCountElementsPerServer = 1;
+    const int64_t assistTailUint16Elements = epWorldSize * (sharedCountElementsPerServer + alignedTokensPerRank);
+    const int64_t assistTailInt32Elements =
+        (assistTailUint16Elements + uint16ElementsPerInt32 - 1) / uint16ElementsPerInt32;
+    return a * tripleElementsPerRow + assistTailInt32Elements;
+}
+
 /**
  * @brief Warpper for moe_distribute_dispatch
  */
 tensor_list NpuMoeDistributeDispatch(
-    const at::Tensor& context, const at::Tensor& x, const at::Tensor& expertIds, int64_t epWorldSize, int64_t epRankId,
-    int64_t moeExpertNum, int64_t cclBufferSize, const c10::optional<at::Tensor>& scales,
+    const c10::optional<at::Tensor>& context, const at::Tensor& x, const at::Tensor& expertIds, int64_t epWorldSize,
+    int64_t epRankId, int64_t moeExpertNum, int64_t cclBufferSize, const c10::optional<at::Tensor>& scales,
     const c10::optional<at::Tensor>& xActiveMask, const c10::optional<at::Tensor>& expertScales,
     const c10::optional<at::Tensor>& elasticInfo, const c10::optional<at::Tensor>& performanceInfo, int64_t tpWorldSize,
     int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t quantMode,
     int64_t globalBs, int64_t expertTokenNumsType, std::string commAlg, int64_t zeroExpertNum, int64_t copyExpertNum,
     int64_t constExpertNum, c10::optional<int64_t> yDtype, c10::optional<int64_t> xDtype,
-    c10::optional<int64_t> scalesDtype)
+    c10::optional<int64_t> scalesDtype, std::string groupEp, std::string groupTp)
 {
     TORCH_CHECK((x.dim() == DIM_TWO) && (expertIds.dim() == DIM_TWO), "The x and expert_ids should be 2D");
     TORCH_CHECK((epWorldSize > 0), "The ep_world_sizes should be greater than 0, current is: ", epWorldSize);
@@ -239,7 +258,9 @@ tensor_list NpuMoeDistributeDispatch(
         }
         epRecvCounts = at::empty({epRecvCntNum}, x.options().dtype(at::kInt));
         tpRecvCounts = at::empty({tpWorldSize}, x.options().dtype(at::kInt));
-        assistInfoForcombine = at::empty({std::max(bs * k, a * 128)}, x.options().dtype(at::kInt));
+        const int64_t assistInfoNumel =
+            GetAssistInfoNumel(a, bs, k, globalBsReal, epWorldSize, IsAscend950() && commAlg == "hierarchy");
+        assistInfoForcombine = at::empty({assistInfoNumel}, x.options().dtype(at::kInt));
         expandScales = at::empty({hasExpertScales ? a : 0}, x.options().dtype(at::kFloat));
     }
 
@@ -258,11 +279,23 @@ tensor_list NpuMoeDistributeDispatch(
     TensorWrapper expandXWrapper = {expandX, outputAclDtype};
     TensorWrapper dynamicScalesWrapper = {dynamicScales, dynamicScalesAclDtype};
 
-    ACLNN_CMD(aclnnMoeDistributeDispatchV5, context, xWrapper, expertIds, scalesWrapper, xActiveMask, expertScales,
-              elasticInfo, performanceInfo, epWorldSize, epRankId, moeExpertNum, cclBufferSize, tpWorldSize, tpRankId,
-              expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode, globalBsReal, expertTokenNumsType,
-              commAlgPtr, zeroExpertNum, copyExpertNum, constExpertNum, expandXWrapper, dynamicScalesWrapper,
-              assistInfoForcombine, expertTokenNums, epRecvCounts, tpRecvCounts, expandScales);
+    if (context.has_value()) {
+        ACLNN_CMD(aclnnMoeDistributeDispatchV5, context, xWrapper, expertIds, scalesWrapper, xActiveMask, expertScales,
+                  elasticInfo, performanceInfo, epWorldSize, epRankId, moeExpertNum, cclBufferSize, tpWorldSize,
+                  tpRankId, expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode, globalBsReal,
+                  expertTokenNumsType, commAlgPtr, zeroExpertNum, copyExpertNum, constExpertNum, expandXWrapper,
+                  dynamicScalesWrapper, assistInfoForcombine, expertTokenNums, epRecvCounts, tpRecvCounts,
+                  expandScales);
+    } else {
+        const char* groupEpPtr = groupEp.c_str();
+        const char* groupTpPtr = groupTp.c_str();
+        ACLNN_CMD(aclnnMoeDistributeDispatchV4, xWrapper, expertIds, scalesWrapper, xActiveMask, expertScales,
+                  elasticInfo, performanceInfo, groupEpPtr, epWorldSize, epRankId, moeExpertNum, groupTpPtr,
+                  tpWorldSize, tpRankId, expertShardType, sharedExpertNum, sharedExpertRankNum, quantMode, globalBsReal,
+                  expertTokenNumsType, commAlgPtr, zeroExpertNum, copyExpertNum, constExpertNum, expandXWrapper,
+                  dynamicScalesWrapper, assistInfoForcombine, expertTokenNums, epRecvCounts, tpRecvCounts,
+                  expandScales);
+    }
 
     return std::tie(expandX, dynamicScales, assistInfoForcombine, expertTokenNums, epRecvCounts, tpRecvCounts,
                     expandScales);

@@ -55,8 +55,8 @@ extern aclnnStatus aclnnInnerMoeDistributeCombineV3GetWorkspaceSize(
     const aclTensor* performanceInfo, int64_t epWorldSize, int64_t epRankId, int64_t moeExpertNum,
     int64_t cclBufferSize, int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,
     int64_t sharedExpertRankNum, int64_t globalBs, int64_t outDtype, int64_t commQuantMode, int64_t groupListType,
-    const char* commAlg, int64_t zeroExpertNum, int64_t copyExpertNum, int64_t constExpertNum, aclTensor* x,
-    uint64_t* workspaceSize, aclOpExecutor** executor);
+    const char* commAlg, int64_t zeroExpertNum, int64_t copyExpertNum, int64_t constExpertNum, bool enablePreReduce,
+    int64_t rankSizePerServer, aclTensor* x, uint64_t* workspaceSize, aclOpExecutor** executor);
 
 extern aclnnStatus aclnnInnerMoeDistributeCombineV3(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                                     aclrtStream stream);
@@ -181,8 +181,8 @@ static aclnnStatus ResolveInnerWorkspaceSize(
     char* groupEpBuf, char* groupTpBuf, const char* commAlg, char* commAlgBuf, int64_t epWorldSize, int64_t epRankId,
     int64_t moeExpertNum, int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,
     int64_t sharedExpertRankNum, int64_t globalBs, int64_t outDtype, int64_t commQuantMode, int64_t groupListType,
-    int64_t zeroExpertNum, int64_t copyExpertNum, int64_t constExpertNum, bool is910B, bool isA5OrA6, aclTensor* xOut,
-    uint64_t* workspaceSize, aclOpExecutor** executor)
+    int64_t zeroExpertNum, int64_t copyExpertNum, int64_t constExpertNum, bool enablePreReduce, bool is910B,
+    bool isA5OrA6, aclTensor* xOut, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     aclnnStatus getWorkspaceSizesRes = ACLNN_ERR_INNER;
     // ccu暂时不支持mc2Context，回退到V2接口
@@ -194,13 +194,18 @@ static aclnnStatus ResolveInnerWorkspaceSize(
             constExpertAlpha2Optional, constExpertVOptional, performanceInfoOptional, groupEpBuf, epWorldSize, epRankId,
             moeExpertNum, groupTpBuf, tpWorldSize, tpRankId, expertShardType, sharedExpertNum, sharedExpertRankNum,
             globalBs, outDtype, commQuantMode, groupListType, commAlgBuf, zeroExpertNum, copyExpertNum, constExpertNum,
-            xOut, workspaceSize, executor);
+            enablePreReduce, xOut, workspaceSize, executor);
     } else {
 #if HCOMM_VERSION_NUM >= HCCL_CHANNEL_SUPPORT_VERSION
         aclTensor* mc2Context = nullptr;
         uint64_t hcclBuffSize = 0;
         const char* opName = "moe_distribute_v2";
-        auto aclnnRet = Mc2Aclnn::Mc2Context::GetMc2ContextTensor(groupEp, opName, hcclBuffSize, mc2Context);
+        uint32_t rankSizePerServer = 0;
+        const bool isRoce = GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510 && commAlg != nullptr &&
+                            std::strcmp(commAlg, "hierarchy") == 0;
+        auto aclnnRet = Mc2Aclnn::Mc2Context::GetMc2ContextTensor(
+            groupEp, opName, hcclBuffSize, mc2Context,
+            isRoce ? CommProtocol::COMM_PROTOCOL_ROCE : CommProtocol::COMM_PROTOCOL_UB_MEM, &rankSizePerServer);
         CHECK_RET(aclnnRet == ACLNN_SUCCESS, aclnnRet);
         getWorkspaceSizesRes = aclnnInnerMoeDistributeCombineV3GetWorkspaceSize(
             mc2Context, expandX, expertIds, assistInfoForCombine, epSendCounts, expertScales, tpSendCountsOptional,
@@ -209,9 +214,10 @@ static aclnnStatus ResolveInnerWorkspaceSize(
             constExpertAlpha2Optional, constExpertVOptional, performanceInfoOptional, epWorldSize, epRankId,
             moeExpertNum, hcclBuffSize, tpWorldSize, tpRankId, expertShardType, sharedExpertNum, sharedExpertRankNum,
             globalBs, outDtype, commQuantMode, groupListType, commAlgBuf, zeroExpertNum, copyExpertNum, constExpertNum,
-            xOut, workspaceSize, executor);
+            enablePreReduce, rankSizePerServer, xOut, workspaceSize, executor);
 #endif
     }
+    CHECK_RET(getWorkspaceSizesRes == ACLNN_SUCCESS, getWorkspaceSizesRes);
     SetCommArgs(executor, is910B, isA5OrA6, commAlg);
     return getWorkspaceSizesRes;
 }
@@ -227,7 +233,8 @@ aclnnStatus aclnnMoeDistributeCombineBaseGetWorkspaceSize(
     int64_t epWorldSize, int64_t epRankId, int64_t moeExpertNum, const char* groupTp, int64_t tpWorldSize,
     int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t globalBs,
     int64_t outDtype, int64_t commQuantMode, int64_t groupListType, const char* commAlg, int64_t zeroExpertNum,
-    int64_t copyExpertNum, int64_t constExpertNum, aclTensor* xOut, uint64_t* workspaceSize, aclOpExecutor** executor)
+    int64_t copyExpertNum, int64_t constExpertNum, bool enablePreReduce, aclTensor* xOut, uint64_t* workspaceSize,
+    aclOpExecutor** executor)
 {
     OP_LOGD("enter to the  aclnnMoeDistributeCombineBaseGetWorkspaceSize\n");
     auto npuArch = GetCurrentPlatformInfo().GetCurNpuArch();
@@ -237,6 +244,11 @@ aclnnStatus aclnnMoeDistributeCombineBaseGetWorkspaceSize(
     auto retParam = CombineCheckParams(expandX, expertIds, assistInfoForCombine, epSendCounts, expertScales, groupEp,
                                        groupTp, xOut);
     CHECK_RET(retParam == ACLNN_SUCCESS, retParam);
+    if (!enablePreReduce &&
+        (npuArch != Ops::Base::DAV_3510 || commAlg == nullptr || std::strcmp(commAlg, "hierarchy") != 0)) {
+        OP_LOGE_LIBOPAPI_REPORT("MoeDistributeCombineV2", "enablePreReduce=false requires A5 hierarchy");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     char groupEpBuf[HCCL_GROUP_NAME_MAX] = {0};
     char groupTpBuf[HCCL_GROUP_NAME_MAX] = {0};
     char commAlgBuf[HCCL_GROUP_NAME_MAX] = {0};
@@ -249,8 +261,8 @@ aclnnStatus aclnnMoeDistributeCombineBaseGetWorkspaceSize(
         elasticInfoOptional, oriXOptional, constExpertAlpha1Optional, constExpertAlpha2Optional, constExpertVOptional,
         performanceInfoOptional, groupEp, groupEpBuf, groupTpBuf, commAlg, commAlgBuf, epWorldSize, epRankId,
         moeExpertNum, tpWorldSize, tpRankId, expertShardType, sharedExpertNum, sharedExpertRankNum, globalBs, outDtype,
-        commQuantMode, groupListType, zeroExpertNum, copyExpertNum, constExpertNum, is910B, isA5OrA6, xOut,
-        workspaceSize, executor);
+        commQuantMode, groupListType, zeroExpertNum, copyExpertNum, constExpertNum, enablePreReduce, is910B, isA5OrA6,
+        xOut, workspaceSize, executor);
 }
 
 // aclnn二段式接口

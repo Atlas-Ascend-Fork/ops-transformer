@@ -58,6 +58,28 @@ public:
         return epWorldSize_;
     }
 
+    __aicore__ inline uint32_t GetRankNumPerUbDomain() const
+    {
+        return mc2Context_->rankSizePerServer;
+    }
+
+    __aicore__ inline uint64_t GetRoceHandleByServerId(uint32_t serverIndex, uint32_t localServer,
+                                                       uint32_t channel) const
+    {
+        const uint32_t peerIndex = serverIndex > localServer ? serverIndex - 1U : serverIndex;
+        return mc2Context_->hcommHandle_[peerIndex * Mc2Aclnn::ROCE_CHANNEL_PER_SERVER + channel];
+    }
+
+    __aicore__ inline uint64_t GetRoceBufferByServerId(uint32_t serverIndex) const
+    {
+        return mc2Context_->roceHcclBuffer_[serverIndex];
+    }
+
+    __aicore__ inline uint64_t GetRoceBufferSize() const
+    {
+        return mc2Context_->roceBufferSize;
+    }
+
     // 数据区基址在 epHcclBuffer 的 STATE_SIZE 之后；与 hccl helper 同语义。
     __aicore__ inline GM_ADDR GetWindAddrByRankId(int32_t rankId, int32_t /* curRankId */)
     {

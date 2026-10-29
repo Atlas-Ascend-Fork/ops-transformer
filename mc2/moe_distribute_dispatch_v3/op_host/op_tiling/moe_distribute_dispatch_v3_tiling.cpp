@@ -61,6 +61,7 @@ ge::graphStatus MoeDistributeDispatchV3TilingFuncBase::MoeDistributeDispatchV3Ti
     config.attrCopyExpertNumIndex = 14;  // 14: 根据dispatchV3算子原型标志位初始化copyExpertNumIndex索引
     config.attrConstExpertNumIndex = 15; // 15: 根据dispatchV3算子原型标志位初始化constExpertNumIndex索引
     config.isMc2Context = true;
+    config.attrRankSizePerServerIndex = 17;
 
     const char* nodeName = context->GetNodeName();
     OP_LOGD(nodeName, "Enter MoeDistributeDispatchV3 tiling");

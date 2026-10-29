@@ -38,13 +38,26 @@ class MoeDistributeCombineOpBuilder(OpBuilder):
             "int copy_expert_num=0, int const_expert_num=0) -> Tensor"
         )
 
-    def register_meta(self):
+    def group_schema(self) -> str:
+        return (
+            "npu_moe_distribute_combine_v2(Tensor expand_x, Tensor expert_ids, "
+            "Tensor assist_info_for_combine, Tensor ep_send_counts, Tensor expert_scales, "
+            "str group_ep, int ep_world_size, int ep_rank_id, int moe_expert_num, "
+            "*, Tensor? tp_send_counts=None, Tensor? x_active_mask=None, "
+            "Tensor? expand_scales=None, Tensor? shared_expert_x=None, Tensor? elastic_info=None, "
+            "Tensor? ori_x=None, Tensor? const_expert_alpha_1=None, Tensor? const_expert_alpha_2=None, "
+            'Tensor? const_expert_v=None, Tensor? performance_info=None, str group_tp="", int tp_world_size=0, '
+            "int tp_rank_id=0, int expert_shard_type=0, int shared_expert_num=1, int shared_expert_rank_num=0, "
+            'int global_bs=0, int comm_quant_mode=0, str comm_alg="", int zero_expert_num=0, '
+            "int copy_expert_num=0, int const_expert_num=0, bool enable_pre_reduce=True) -> Tensor"
+        )
+
+    def register_meta(self, use_group=False):
         """
         Registers the Meta implementation (Shape/Dtype inference).
         Essential for Autograd and FakeTensor support.
         """
 
-        @impl(get_as_library(), self.name, "Meta")
         def npu_moe_distribute_combine_meta(
             context,
             expand_x,
@@ -79,11 +92,67 @@ class MoeDistributeCombineOpBuilder(OpBuilder):
             const_expert_num=0,
         ):
             dim_tuple = (expert_ids.size(0), expand_x.size(1))
-            return expand_x.new_empty(dim_tuple)
+            output_dtype = (
+                torch.bfloat16 if expand_x.dtype == torch.int32 else expand_x.dtype
+            )
+            return expand_x.new_empty(dim_tuple, dtype=output_dtype)
+
+        def npu_moe_distribute_combine_v2_meta(
+            expand_x,
+            expert_ids,
+            assist_info_for_combine,
+            ep_send_counts,
+            expert_scales,
+            group_ep,
+            ep_world_size,
+            ep_rank_id,
+            moe_expert_num,
+            tp_send_counts=None,
+            x_active_mask=None,
+            expand_scales=None,
+            shared_expert_x=None,
+            elastic_info=None,
+            ori_x=None,
+            const_expert_alpha_1=None,
+            const_expert_alpha_2=None,
+            const_expert_v=None,
+            performance_info=None,
+            group_tp="",
+            tp_world_size=0,
+            tp_rank_id=0,
+            expert_shard_type=0,
+            shared_expert_num=1,
+            shared_expert_rank_num=0,
+            global_bs=0,
+            comm_quant_mode=0,
+            comm_alg="",
+            zero_expert_num=0,
+            copy_expert_num=0,
+            const_expert_num=0,
+            enable_pre_reduce=True,
+        ):
+            output_dtype = (
+                torch.bfloat16 if expand_x.dtype == torch.int32 else expand_x.dtype
+            )
+            return expand_x.new_empty(
+                (expert_ids.size(0), expand_x.size(1)), dtype=output_dtype
+            )
+
+        if use_group:
+            impl(get_as_library(), "npu_moe_distribute_combine_v2", "Meta")(
+                npu_moe_distribute_combine_v2_meta
+            )
+        else:
+            impl(get_as_library(), self.name, "Meta")(npu_moe_distribute_combine_meta)
 
 
 moe_distribute_combine_op_builder = MoeDistributeCombineOpBuilder()
 moe_distribute_combine_op_builder._ensure_initialized()
+if not hasattr(torch.ops.cann_ops_transformer, "npu_moe_distribute_combine_v2"):
+    moe_distribute_combine_op_builder.register_schema(
+        moe_distribute_combine_op_builder.group_schema()
+    )
+    moe_distribute_combine_op_builder.register_meta(use_group=True)
 
 
 @impl(get_as_library(), moe_distribute_combine_op_builder.name, "PrivateUse1")
@@ -153,4 +222,81 @@ def _npu_moe_distribute_combine(
         zero_expert_num,
         copy_expert_num,
         const_expert_num,
+        True,
+        "",
+        "",
+    )
+
+
+@impl(get_as_library(), "npu_moe_distribute_combine_v2", "PrivateUse1")
+def _npu_moe_distribute_combine_v2(
+    expand_x,
+    expert_ids,
+    assist_info_for_combine,
+    ep_send_counts,
+    expert_scales,
+    group_ep,
+    ep_world_size,
+    ep_rank_id,
+    moe_expert_num,
+    tp_send_counts=None,
+    x_active_mask=None,
+    expand_scales=None,
+    shared_expert_x=None,
+    elastic_info=None,
+    ori_x=None,
+    const_expert_alpha_1=None,
+    const_expert_alpha_2=None,
+    const_expert_v=None,
+    performance_info=None,
+    group_tp="",
+    tp_world_size=0,
+    tp_rank_id=0,
+    expert_shard_type=0,
+    shared_expert_num=1,
+    shared_expert_rank_num=0,
+    global_bs=0,
+    comm_quant_mode=0,
+    comm_alg="",
+    zero_expert_num=0,
+    copy_expert_num=0,
+    const_expert_num=0,
+    enable_pre_reduce=True,
+):
+    op_module = moe_distribute_combine_op_builder.load()
+    return op_module.npu_moe_distribute_combine(
+        None,
+        expand_x,
+        expert_ids,
+        assist_info_for_combine,
+        ep_send_counts,
+        expert_scales,
+        ep_world_size,
+        ep_rank_id,
+        moe_expert_num,
+        0,
+        tp_send_counts,
+        x_active_mask,
+        expand_scales,
+        shared_expert_x,
+        elastic_info,
+        ori_x,
+        const_expert_alpha_1,
+        const_expert_alpha_2,
+        const_expert_v,
+        performance_info,
+        tp_world_size,
+        tp_rank_id,
+        expert_shard_type,
+        shared_expert_num,
+        shared_expert_rank_num,
+        global_bs,
+        comm_quant_mode,
+        comm_alg,
+        zero_expert_num,
+        copy_expert_num,
+        const_expert_num,
+        enable_pre_reduce,
+        group_ep,
+        group_tp,
     )

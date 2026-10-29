@@ -50,6 +50,9 @@ struct MoeDistributeDispatchV2Info {
     uint32_t scalesTypeSize;
     uint64_t scalesCount;
     uint32_t cumsumTmpMinSize; // cumsum min tmp size, 0 means no cumsum
+    uint64_t roceDispatchOffset;
+    uint64_t roceExpertOffset;
+    uint64_t roceTokenMapOffset;
 };
 
 struct MoeDistributeDispatchV2TilingData {

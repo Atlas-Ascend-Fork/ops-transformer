@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include <algorithm>
 #include <queue>
 #include <vector>
 #include <dlfcn.h>
@@ -603,7 +604,7 @@ static ge::graphStatus CheckGroupAttrParams(const gert::TilingContext* context, 
     auto commAlgPtr = attrs->GetAttrPointer<char>(static_cast<int64_t>(config.attrCommAlgIndex));
     int64_t epWorldSize = *epWorldSizePtr;
     NpuArch npuArch = mc2tiling::GetNpuArch(context);
-    isLayered = (commAlgPtr != nullptr) && (strcmp(commAlgPtr, "hierarchy") == 0); // isLayered赋值
+    isLayered = !config.isRoce && (commAlgPtr != nullptr) && (strcmp(commAlgPtr, "hierarchy") == 0); // isLayered赋值
     std::string socVersion = mc2tiling::GetSocVersion(context);
     int64_t maxEpworldsize = 0;
     if (npuArch == Ops::Base::DAV_3510 || npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202) {
@@ -646,7 +647,7 @@ ge::graphStatus MoeDistributeDispatchV2TilingFuncBase::CheckOtherAttrParams(cons
     auto quantModePtr = attrs->GetAttrPointer<int64_t>(config.attrQuantModeIndex);
     auto expertTokenNumsTypePtr = attrs->GetAttrPointer<int64_t>(static_cast<int>(config.attrExpertTokenNumsTypeIndex));
     auto commAlgPtr = attrs->GetAttrPointer<char>(static_cast<int>(config.attrCommAlgIndex));
-    if (config.isMc2Context) {
+    if (config.isMc2Context && !config.isRoce) {
         if (commAlgPtr != nullptr && strcmp(commAlgPtr, "hierarchy") == 0) {
             std::string reason = "hierarchy does not support mc2 context mode";
             OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "comm_alg", commAlgPtr, reason.c_str());
@@ -671,8 +672,8 @@ ge::graphStatus MoeDistributeDispatchV2TilingFuncBase::CheckOtherAttrParams(cons
     }
 
     NpuArch npuArch = mc2tiling::GetNpuArch(context);
-    if ((npuArch == Ops::Base::DAV_2201) || (npuArch == Ops::Base::DAV_3510)) {
-        isSetFullMeshV2 = ((strcmp(commAlgPtr, "fullmesh_v2") == 0) ? true : false);
+    if (npuArch == Ops::Base::DAV_2201 || npuArch == Ops::Base::DAV_3510) {
+        isSetFullMeshV2 = commAlgPtr != nullptr && strcmp(commAlgPtr, "fullmesh_v2") == 0;
     } else {
         isSetFullMeshV2 = true;
     }
@@ -1309,12 +1310,17 @@ static ge::graphStatus CheckExpandXAndDynamicScalesTensorShape(const gert::Tilin
 
 static ge::graphStatus CheckAssistInfoAndExpertTokenNumsTensorShape(
     const gert::TilingContext* context, const char* nodeName, MoeDistributeDispatchV2TilingData& tilingData,
-    const uint32_t A, const int64_t localMoeExpertNum, const bool hasElasticInfo, const bool isSharedExpert)
+    const uint32_t A, const int64_t localMoeExpertNum, const bool hasElasticInfo, const bool isSharedExpert,
+    const DispatchV2Config& config)
 {
     // 校验assistInfo的维度
     const gert::StorageShape* assistInfoStorageShape = context->GetOutputShape(OUTPUT_ASSIST_INFO_INDEX);
     const int64_t assistInfoDim0 = assistInfoStorageShape->GetStorageShape().GetDim(0);
-    int64_t minAssistInfoDim0 = static_cast<int64_t>(A * ASSIST_NUM_PER_A);
+    int64_t minAssistInfoDim0 = static_cast<int64_t>(A) * ASSIST_NUM_PER_A;
+    if (config.isRoce) {
+        const auto& info = tilingData.moeDistributeDispatchV2Info;
+        minAssistInfoDim0 = GetRoceAssistInfoSize(A, info.epWorldSize, info.globalBs / info.epWorldSize);
+    }
     OP_TILING_CHECK(assistInfoDim0 < minAssistInfoDim0,
                     OP_LOGE(nodeName,
                             "assistInfoDim0 < minAssistInfoDim0,"
@@ -1441,9 +1447,10 @@ static ge::graphStatus CheckTensorShape(const gert::TilingContext* context, cons
                         ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "Check expandX or dynamicScales failed"), return ge::GRAPH_FAILED);
 
-    OP_TILING_CHECK(CheckAssistInfoAndExpertTokenNumsTensorShape(context, nodeName, tilingData, A, localMoeExpertNum,
-                                                                 hasElasticInfo, isSharedExpert) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "Check assistInfo or expertTokenNums failed"), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(
+        CheckAssistInfoAndExpertTokenNumsTensorShape(context, nodeName, tilingData, A, localMoeExpertNum,
+                                                     hasElasticInfo, isSharedExpert, config) != ge::GRAPH_SUCCESS,
+        OP_LOGE(nodeName, "Check assistInfo or expertTokenNums failed"), return ge::GRAPH_FAILED);
 
     OP_TILING_CHECK(CheckRecvCountTensorShape(context, nodeName, tilingData, isSharedExpert, localMoeExpertNum,
                                               hasElasticInfo, isLayered, expertIdsDim1) != ge::GRAPH_SUCCESS,
@@ -2067,8 +2074,8 @@ ge::graphStatus CheckSizeAndSetRelevantCfg(gert::TilingContext* context, MoeDist
     }
 
     // 校验win区大小
-    OP_TILING_CHECK(CheckAndCalWinSize(context, *tilingData, nodeName, isSetFullMeshV2, localMoeExpertNum, isLayered,
-                                       config) != ge::GRAPH_SUCCESS,
+    OP_TILING_CHECK(!config.isRoce && CheckAndCalWinSize(context, *tilingData, nodeName, isSetFullMeshV2,
+                                                         localMoeExpertNum, isLayered, config) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "Tiling check window size failed."), return ge::GRAPH_FAILED);
 
     OP_TILING_CHECK(SetWorkSpace(context, nodeName) != ge::GRAPH_SUCCESS,
@@ -2121,6 +2128,258 @@ static void SetCumsumTmpMinSize(MoeDistributeDispatchV2TilingData& tilingData, u
     tilingData.moeDistributeDispatchV2Info.cumsumTmpMinSize = cumsumMinTmp;
     OP_LOGI(nodeName, "MTE cumsumTmpMinSize=%u. Kernel falls back to scalar prefix sum if UB is insufficient.",
             cumsumMinTmp);
+}
+
+static uint64_t GetRoceFlagBufferBytes(uint64_t flagCount)
+{
+    const uint64_t compareBytes = AlignRoceBytes(flagCount * sizeof(uint64_t), 256U);
+    const uint64_t gatherBytes = AlignRoceBytes(flagCount * sizeof(uint32_t));
+    const uint64_t maskBytes = AlignRoceBytes(compareBytes / sizeof(uint64_t), 256U) / 8U;
+    return compareBytes + gatherBytes + maskBytes;
+}
+
+static uint64_t GetRoceExpertsPerServer(const MoeDistributeDispatchV2Info& info, uint64_t serverNum)
+{
+    const uint64_t ranksPerServer = info.epWorldSize / serverNum;
+    const uint64_t firstRank = info.epRankId / ranksPerServer * ranksPerServer;
+    const uint64_t sharedRanks =
+        firstRank < info.sharedExpertRankNum ? std::min(ranksPerServer, info.sharedExpertRankNum - firstRank) : 0U;
+    const uint64_t expertsPerRank = info.moeExpertNum / (info.epWorldSize - info.sharedExpertRankNum);
+    return sharedRanks + (ranksPerServer - sharedRanks) * expertsPerRank;
+}
+
+struct RoceDispatchUbLayout {
+    uint64_t inputBytes;
+    uint64_t serverPacketBytes;
+    uint64_t expertPacketBytes;
+    uint64_t scratchBytes;
+    uint64_t quantScratchBytes;
+    uint64_t flagBytes;
+};
+
+static RoceDispatchUbLayout GetRoceDispatchUbLayout(const gert::TilingContext* context,
+                                                    const MoeDistributeDispatchV2Info& info,
+                                                    const DispatchV2Config& config, bool isScales)
+{
+    const auto inputType = context->GetInputDesc(config.xIndex)->GetDataType();
+    const auto outputType = context->GetOutputDesc(OUTPUT_EXPAND_X_INDEX)->GetDataType();
+    const bool isInputFp4 = inputType == ge::DT_FLOAT4_E2M1 || inputType == ge::DT_FLOAT4_E1M2;
+    const auto isFp4 = outputType == ge::DT_FLOAT4_E2M1 || outputType == ge::DT_FLOAT4_E1M2;
+    // FP4 reports a bit-width encoding; QuantInit reserves H * sizeof(uint8_t) for its input queue.
+    const uint64_t inputSize = isInputFp4 ? sizeof(uint8_t) : std::max<int64_t>(ge::GetSizeByDataType(inputType), 1);
+    const uint64_t outputSize = std::max<int64_t>(ge::GetSizeByDataType(outputType), 1);
+    const uint64_t hidden = info.h;
+    const uint64_t mode = info.quantMode;
+    RoceDispatchUbLayout layout{};
+    layout.inputBytes = AlignRoceBytes(hidden * inputSize);
+    uint64_t outputBytes = AlignRoceBytes(isFp4 ? (hidden + 1U) / 2U : hidden * outputSize);
+    if (mode == 0U && isScales) {
+        layout.inputBytes += info.scalesCol * info.scalesTypeSize;
+        outputBytes += info.scalesCol * info.scalesTypeSize;
+    } else if (mode == 2U) {
+        outputBytes += sizeof(float);
+    } else if (mode >= 3U) {
+        layout.inputBytes = AlignRoceBytes(hidden, 128U) * inputSize;
+        outputBytes = mode == 3U ? AlignRoceBytes(hidden, 128U) * outputSize + (hidden + 127U) / 128U * sizeof(float) :
+                                   (isFp4 ? AlignRoceBytes((hidden + 1U) / 2U, 256U) :
+                                            AlignRoceBytes(hidden, 256U) * outputSize) +
+                                       AlignRoceBytes((hidden + 31U) / 32U, 2U);
+    }
+    outputBytes = AlignRoceBytes(outputBytes);
+    layout.expertPacketBytes =
+        AlignRoceBytes(outputBytes + 2U * UB_ALIGN, SPLIT_BLOCK_DATA_SIZE) / SPLIT_BLOCK_DATA_SIZE * SPLIT_BLOCK_SIZE;
+    const uint64_t serverDataBytes = mode > 0U && isScales ? layout.inputBytes : outputBytes;
+    const uint64_t idsBytes = AlignRoceBytes(static_cast<uint64_t>(info.k) * sizeof(int32_t));
+    const uint64_t countsBytes = AlignRoceBytes(static_cast<uint64_t>(info.k) * sizeof(int16_t));
+    layout.serverPacketBytes =
+        AlignRoceBytes(serverDataBytes + UB_ALIGN + 2U * idsBytes + countsBytes, SPLIT_BLOCK_DATA_SIZE) /
+        SPLIT_BLOCK_DATA_SIZE * SPLIT_BLOCK_SIZE;
+    const uint64_t idsCount = static_cast<uint64_t>(info.bs) * info.k;
+    const uint64_t floatBytes = (mode == 3U && isScales ? AlignRoceBytes(hidden, 128U) : hidden) * sizeof(float);
+    layout.scratchBytes = AlignRoceBytes(
+        std::max({floatBytes, AlignRoceBytes(idsCount * sizeof(int32_t)),
+                  info.bs * AlignRoceBytes(info.k) * sizeof(uint16_t),
+                  AlignRoceBytes(idsCount * sizeof(uint16_t), 256U) / 2U,
+                  AlignRoceBytes(static_cast<uint64_t>(info.moeExpertNum) * sizeof(int32_t), SPLIT_BLOCK_DATA_SIZE),
+                  info.bs * countsBytes, GetRoceFlagBufferBytes(info.aivNum - 2U)}),
+        256U);
+    layout.quantScratchBytes = mode > 0U || inputType != outputType ? 2U * layout.scratchBytes : 0U;
+    const uint64_t expertCountBytes = static_cast<uint64_t>(info.moeExpertNum) /
+                                      (info.epWorldSize - info.sharedExpertRankNum) *
+                                      (info.epWorldSize / config.roceServerNum) * sizeof(int32_t);
+    const uint64_t maxBlocks =
+        std::max({layout.serverPacketBytes / SPLIT_BLOCK_SIZE, layout.expertPacketBytes / SPLIT_BLOCK_SIZE,
+                  (expertCountBytes + SPLIT_BLOCK_DATA_SIZE - 1U) / SPLIT_BLOCK_DATA_SIZE});
+    layout.flagBytes = AlignRoceBytes(maxBlocks * UB_ALIGN, 256U);
+    return layout;
+}
+
+static uint64_t GetRocePreprocessUbBytes(const MoeDistributeDispatchV2Info& info, const DispatchV2Config& config,
+                                         const RoceDispatchUbLayout& layout)
+{
+    constexpr uint64_t hcommBytes = 512U;
+    // HcclCommSend reserves five WQEBBs plus one WQEBB for alignment.
+    constexpr uint64_t batchBytes = (5U + 1U) * 64U;
+    const uint64_t idsCount = static_cast<uint64_t>(info.bs) * info.k;
+    const uint64_t maskBytes = info.isExpertMask ? AlignRoceBytes(idsCount) : 0U;
+    const uint64_t baseBytes = 3U * layout.scratchBytes + maskBytes + UB_ALIGN +
+                               AlignRoceBytes(static_cast<uint64_t>(config.roceServerNum) * sizeof(uint32_t));
+    const uint64_t expertBlocks =
+        (static_cast<uint64_t>(info.moeExpertNum) / (info.epWorldSize - info.sharedExpertRankNum) *
+             (info.epWorldSize / config.roceServerNum) * sizeof(int32_t) +
+         SPLIT_BLOCK_DATA_SIZE - 1U) /
+        SPLIT_BLOCK_DATA_SIZE;
+    const uint64_t countSendBytes =
+        AlignRoceBytes(expertBlocks * UB_ALIGN, 256U) + hcommBytes + expertBlocks * SPLIT_BLOCK_SIZE;
+    const uint64_t countReceiveBytes =
+        std::max(expertBlocks * SPLIT_BLOCK_DATA_SIZE, GetRoceFlagBufferBytes(expertBlocks));
+    const uint64_t statusBytes =
+        AlignRoceBytes(GetRoceExpertsPerServer(info, config.roceServerNum) * config.roceServerNum, 8U) * UB_ALIGN;
+    const uint64_t cumsumBytes = countSendBytes + countReceiveBytes + statusBytes;
+    const uint64_t tokensPerRank = info.globalBs / info.epWorldSize;
+    const uint64_t mapBytes = AlignRoceBytes(AlignRoceBytes(tokensPerRank * sizeof(uint32_t)) / sizeof(uint32_t));
+    const uint64_t indexBytes = AlignRoceBytes(idsCount * sizeof(uint16_t));
+    // Each sending core owns one server; its routing buffers survive until the pool is reset.
+    const uint64_t routingBytes = indexBytes + 256U + mapBytes + AlignRoceBytes(idsCount * sizeof(int32_t), 256U);
+    const uint64_t sendBytes = routingBytes + SPLIT_BLOCK_SIZE + hcommBytes + batchBytes +
+                               GetRoceFlagBufferBytes(layout.serverPacketBytes / SPLIT_BLOCK_SIZE);
+    // Cumsum and token sending run on different cores, but both retain the initial pool buffers.
+    return baseBytes + std::max(cumsumBytes, sendBytes);
+}
+
+static uint64_t GetRoceCumsumUbBytes(const MoeDistributeDispatchV2Info& info)
+{
+    const uint64_t expertsPerRank = info.moeExpertNum / (info.epWorldSize - info.sharedExpertRankNum);
+    const uint64_t receiveSlots =
+        info.epRankId < info.sharedExpertRankNum ? info.epWorldSize : info.epWorldSize * expertsPerRank;
+    const uint64_t slotsPerCore = (receiveSlots + 1U) / 2U;
+    const uint64_t waitBytes =
+        std::max(AlignRoceBytes(slotsPerCore * UB_ALIGN, 256U), GetRoceFlagBufferBytes(slotsPerCore));
+    const uint64_t countsBytes =
+        AlignRoceBytes(std::max(slotsPerCore, info.epWorldSize * expertsPerRank) * sizeof(float));
+    const uint64_t coreSumBytes = AlignRoceBytes(static_cast<uint64_t>(info.aivNum) * sizeof(float));
+    const uint64_t localSumBytes = std::max(info.aivNum * UB_ALIGN, GetRoceFlagBufferBytes(2U));
+    const uint64_t statusBytes = receiveSlots * UB_ALIGN;
+    const uint64_t tokenCountsBytes = AlignRoceBytes(expertsPerRank * sizeof(int64_t));
+    const uint64_t workBytes = AlignRoceBytes(static_cast<uint64_t>(info.epWorldSize) * sizeof(float));
+    return waitBytes + countsBytes + info.aivNum * UB_ALIGN + localSumBytes + coreSumBytes + 3U * UB_ALIGN +
+           statusBytes + tokenCountsBytes + workBytes;
+}
+
+static bool CheckRoceDispatchUb(const gert::TilingContext* context, const MoeDistributeDispatchV2Info& info,
+                                const DispatchV2Config& config, bool isScales)
+{
+    constexpr uint64_t poolBytes = 192U * 1024U;
+    constexpr uint64_t kernelUbBytes = 248U * 1024U;
+    const auto layout = GetRoceDispatchUbLayout(context, info, config, isScales);
+    const auto window = GetRoceWindowLayout(info, config.roceServerNum);
+    OP_TILING_CHECK(
+        layout.expertPacketBytes > window.dispatchPacketBytes || layout.serverPacketBytes > window.serverPacketBytes,
+        OP_LOGE(context->GetNodeName(), "ROCE token and scales exceed the shared window record capacity"),
+        return false);
+    const uint64_t tokensPerRank = info.globalBs / info.epWorldSize;
+    const uint64_t idsBytes = AlignRoceBytes(static_cast<uint64_t>(info.bs) * info.k * sizeof(int32_t));
+    const uint64_t offsetsBytes = info.bs * AlignRoceBytes(static_cast<uint64_t>(info.k) * sizeof(int16_t));
+    const uint64_t mapBytes = AlignRoceBytes(tokensPerRank * sizeof(uint32_t));
+    const uint64_t bitmapBytes = AlignRoceBytes(tokensPerRank * sizeof(uint16_t));
+    const uint64_t residentBytes =
+        idsBytes + AlignRoceBytes(mapBytes / sizeof(uint32_t)) + offsetsBytes + layout.flagBytes;
+    const uint64_t preprocessBytes = GetRocePreprocessUbBytes(info, config, layout);
+    const uint64_t scatterQueueBytes = layout.inputBytes + 2U * layout.serverPacketBytes;
+    const uint64_t scatterBuffers = 2U * scatterQueueBytes + 2U * layout.scratchBytes > poolBytes ? 1U : 2U;
+    const uint64_t scatterBytes = scatterBuffers * scatterQueueBytes + layout.quantScratchBytes;
+    const uint64_t serverFlagBytes = GetRoceFlagBufferBytes(layout.serverPacketBytes / SPLIT_BLOCK_SIZE);
+    const uint64_t receiveFlagBytes = std::max(serverFlagBytes, layout.serverPacketBytes / SPLIT_BLOCK_SIZE * UB_ALIGN);
+    const uint64_t gatherFixedBytes = layout.flagBytes + 512U * sizeof(uint32_t) + receiveFlagBytes + mapBytes +
+                                      bitmapBytes + GetRoceFlagBufferBytes(1U);
+    const uint64_t gatherQueueBytes = layout.serverPacketBytes + std::max(layout.inputBytes, layout.expertPacketBytes) +
+                                      2U * layout.expertPacketBytes;
+    const uint64_t gatherBuffers =
+        2U * gatherQueueBytes + 2U * layout.scratchBytes + gatherFixedBytes > kernelUbBytes ? 1U : 2U;
+    const uint64_t perTokenScaleBytes = info.quantMode == 2U ? UB_ALIGN : 0U;
+    const uint64_t gatherBytes =
+        gatherBuffers * gatherQueueBytes + layout.quantScratchBytes + gatherFixedBytes + perTokenScaleBytes;
+    OP_TILING_CHECK(std::max(preprocessBytes, scatterBytes) > poolBytes ||
+                        poolBytes + residentBytes + perTokenScaleBytes > info.totalUbSize ||
+                        std::max(gatherBytes, GetRoceCumsumUbBytes(info)) > std::min(info.totalUbSize, kernelUbBytes),
+                    OP_LOGE(context->GetNodeName(),
+                            "ROCE UB insufficient: pool=%lu, resident=%lu, preprocess=%lu, scatter=%lu, gather=%lu",
+                            poolBytes, residentBytes, preprocessBytes, scatterBytes, gatherBytes),
+                    return false);
+    return true;
+}
+
+static ge::graphStatus CheckRoceDispatchInputs(const gert::TilingContext* context,
+                                               const MoeDistributeDispatchV2Info& info, const DispatchV2Config& config)
+{
+    auto nodeName = context->GetNodeName();
+    OP_TILING_CHECK(
+        info.aivNum < config.roceServerNum + 4U,
+        OP_LOGE(nodeName, "ROCE requires two cumsum cores, one sender per server, and Scatter/Gather cores"),
+        return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(info.globalBs / info.epWorldSize > BS_UPPER_BOUND,
+                    OP_LOGE(nodeName, "ROCE global_bs / ep_world_size must not exceed 512"), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(info.sharedExpertRankNum != 0U && info.sharedExpertRankNum != info.sharedExpertNum,
+                    OP_LOGE(nodeName, "ROCE requires one dedicated rank per shared expert"), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(info.hasElasticInfo || info.isPerformance,
+                    OP_LOGE(nodeName, "ROCE does not support elastic_info or performance_info"),
+                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(!info.hasExpertScales, OP_LOGE(nodeName, "ROCE Dispatch requires expert_scales for route weights"),
+                    return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus SetRoceDispatchWindow(gert::TilingContext* context, MoeDistributeDispatchV2Info& info,
+                                             const DispatchV2Config& config)
+{
+    auto cclBytes = context->GetAttrs()->GetAttrPointer<int64_t>(config.attrCclBufferSizeIndex);
+    const auto layout = GetRoceWindowLayout(info, config.roceServerNum);
+    const uint64_t reservedBytes = MB_SIZE + static_cast<uint64_t>(info.epWorldSize) * EP_RANK_OFFSET_STEP;
+    const uint64_t intraBytes = reservedBytes + 2U * (layout.combineIntraBytes + layout.dispatchIntraBytes);
+    OP_TILING_CHECK(
+        cclBytes == nullptr || *cclBytes < 0 || static_cast<uint64_t>(*cclBytes) < intraBytes ||
+            static_cast<uint64_t>(*cclBytes) / 2U < layout.dispatchInterBytes,
+        OP_LOGE(context->GetNodeName(), "ROCE CCL window requires intra=%lu B, inter Dispatch=%lu B per bank",
+                intraBytes, layout.dispatchInterBytes),
+        return ge::GRAPH_FAILED);
+    info.totalWinSizeEp = static_cast<uint64_t>(*cclBytes) - reservedBytes;
+    OP_TILING_CHECK(info.totalWinSizeEp % 1024U != 0U,
+                    OP_LOGE(context->GetNodeName(), "ROCE requires 512-byte-aligned window banks"),
+                    return ge::GRAPH_FAILED);
+    info.roceDispatchOffset = layout.combineIntraBytes;
+    return ge::GRAPH_SUCCESS;
+}
+
+static void SetRoceDispatchWorkspace(gert::TilingContext* context, MoeDistributeDispatchV2Info& info,
+                                     const DispatchV2Config& config)
+{
+    const uint64_t expertsPerServer = GetRoceExpertsPerServer(info, config.roceServerNum);
+    const uint64_t expertsPerRank = info.moeExpertNum / (info.epWorldSize - info.sharedExpertRankNum);
+    const uint64_t countRows =
+        info.epRankId < info.sharedExpertRankNum ? info.epWorldSize : info.epWorldSize * expertsPerRank;
+    const uint64_t statusBytes = info.epWorldSize * expertsPerServer * UB_ALIGN;
+    const uint64_t receiveCountsBytes = AlignRoceBytes(info.aivNum * countRows * sizeof(int32_t));
+    const uint64_t expertOffsetsBytes =
+        (info.aivNum - 2U) * AlignRoceBytes(static_cast<uint64_t>(info.bs) * info.k * sizeof(uint16_t));
+    const uint64_t readyFlagsBytes = AlignRoceBytes((info.aivNum - 2U) * sizeof(uint64_t));
+    info.roceExpertOffset = statusBytes + receiveCountsBytes;
+    info.roceTokenMapOffset = info.roceExpertOffset + expertOffsetsBytes + readyFlagsBytes;
+    const uint64_t tokenMapBytes =
+        AlignRoceBytes(static_cast<uint64_t>(info.globalBs / info.epWorldSize) * sizeof(int32_t));
+    context->GetWorkspaceSizes(1)[0] = SYSTEM_NEED_WORKSPACE + info.roceTokenMapOffset + tokenMapBytes;
+}
+
+static ge::graphStatus CheckRoceDispatchTiling(gert::TilingContext* context, MoeDistributeDispatchV2Info& info,
+                                               const DispatchV2Config& config, bool isScales)
+{
+    OP_TILING_CHECK(CheckRoceDispatchInputs(context, info, config) != ge::GRAPH_SUCCESS,
+                    OP_LOGE(context->GetNodeName(), "ROCE input check failed"), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(!CheckRoceDispatchUb(context, info, config, isScales),
+                    OP_LOGE(context->GetNodeName(), "ROCE UB check failed"), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(SetRoceDispatchWindow(context, info, config) != ge::GRAPH_SUCCESS,
+                    OP_LOGE(context->GetNodeName(), "ROCE window check failed"), return ge::GRAPH_FAILED);
+    SetRoceDispatchWorkspace(context, info, config);
+    return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus FinalizeDispatchTiling(gert::TilingContext* context,
@@ -2198,9 +2457,16 @@ ge::graphStatus MoeDistributeDispatchV2TilingFuncBase::MoeDistributeDispatchA3Ti
                     OP_LOGE(nodeName, "Check UB/window size or set workspace/hcomm cfg failed."),
                     return ge::GRAPH_FAILED);
 
-    uint64_t tilingKey = CalTilingKey(isScales, quantMode, isSetFullMeshV2, isLayered);
-    return FinalizeDispatchTiling(context, *tilingData, tilingKey, isLayered, nodeName, config.isMc2Context,
-                                  localMoeExpertNum);
+    uint64_t tilingKey = config.isRoce ? GET_TPL_TILING_KEY(quantMode, isScales, TILINGKEY_ENABLE_HIERARCHY,
+                                                            TILINGKEY_TPL_ROCE, TILINGKEY_TPL_A5) :
+                                         CalTilingKey(isScales, quantMode, isSetFullMeshV2, isLayered);
+    OP_TILING_CHECK(FinalizeDispatchTiling(context, *tilingData, tilingKey, isLayered, nodeName, config.isMc2Context,
+                                           localMoeExpertNum) != ge::GRAPH_SUCCESS,
+                    OP_LOGE(nodeName, "Finalize dispatch tiling failed"), return ge::GRAPH_FAILED);
+    if (config.isRoce) {
+        return CheckRoceDispatchTiling(context, tilingData->moeDistributeDispatchV2Info, config, isScales);
+    }
+    return ge::GRAPH_SUCCESS;
 }
 
 #if RUNTIME_VERSION_NUM >= EXCEPTION_DUMP_SUPPORT_VERSION && METADEF_VERSION_NUM >= EXCEPTION_DUMP_SUPPORT_VERSION

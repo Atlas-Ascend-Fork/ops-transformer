@@ -92,6 +92,8 @@ private:
         this->Attr("zero_expert_num").AttrType(OPTIONAL).Int(0);
         this->Attr("copy_expert_num").AttrType(OPTIONAL).Int(0);
         this->Attr("const_expert_num").AttrType(OPTIONAL).Int(0);
+        this->Attr("enable_pre_reduce").AttrType(OPTIONAL).Bool(true);
+        this->Attr("rank_size_per_server").AttrType(OPTIONAL).Int(0);
     }
 };
 

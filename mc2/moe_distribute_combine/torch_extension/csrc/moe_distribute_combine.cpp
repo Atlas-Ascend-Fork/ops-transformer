@@ -49,7 +49,7 @@ static at::Tensor CreateOutputTensor(const at::Tensor& expandX, int64_t bs, int6
  * @brief Warpper for moe_distribute_combine
  */
 at::Tensor NpuMoeDistributeCombine(
-    const at::Tensor& context, const at::Tensor& expandX, const at::Tensor& expertIds,
+    const c10::optional<at::Tensor>& context, const at::Tensor& expandX, const at::Tensor& expertIds,
     const at::Tensor& assistInfoForCombine, const at::Tensor& epSendCounts, const at::Tensor& expertScales,
     int64_t epWorldSize, int64_t epRankId, int64_t moeExpertNum, int64_t cclBufferSize,
     const c10::optional<at::Tensor>& tpSendCounts, const c10::optional<at::Tensor>& xActiveMask,
@@ -59,7 +59,7 @@ at::Tensor NpuMoeDistributeCombine(
     const c10::optional<at::Tensor>& constExpertV, const c10::optional<at::Tensor>& performanceInfo,
     int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,
     int64_t sharedExpertRankNum, int64_t globalBs, int64_t commQuantMode, std::string commAlg, int64_t zeroExpertNum,
-    int64_t copyExpertNum, int64_t constExpertNum)
+    int64_t copyExpertNum, int64_t constExpertNum, bool enablePreReduce, std::string groupEp, std::string groupTp)
 {
     CheckInputShapeAndDtype(expandX, expertIds);
     int64_t bs = expertIds.size(0);
@@ -74,15 +74,27 @@ at::Tensor NpuMoeDistributeCombine(
     std::string commAlgStr = std::string(commAlg);
     char* commAlgPtr = const_cast<char*>(commAlgStr.c_str());
 
-    ACLNN_CMD(aclnnMoeDistributeCombineV5, context, expandX, expertIds, assistInfoForCombine, epSendCounts,
-              expertScales, tpSendCounts, xActiveMask, nulltensor, nulltensor, nulltensor, expandScales, sharedExpertX,
-              elasticInfo, oriX, constExpertAlpha1, constExpertAlpha2, constExpertV, performanceInfo, epWorldSize,
-              epRankId, moeExpertNum, cclBufferSize, tpWorldSize, tpRankId, expertShardType, sharedExpertNum,
-              sharedExpertRankNum, globalBsReal, outDtype, commQuantMode, groupListType, commAlgPtr, zeroExpertNum,
-              copyExpertNum, constExpertNum, output);
+    if (context.has_value()) {
+        ACLNN_CMD(aclnnMoeDistributeCombineV5, context, expandX, expertIds, assistInfoForCombine, epSendCounts,
+                  expertScales, tpSendCounts, xActiveMask, nulltensor, nulltensor, nulltensor, expandScales,
+                  sharedExpertX, elasticInfo, oriX, constExpertAlpha1, constExpertAlpha2, constExpertV, performanceInfo,
+                  epWorldSize, epRankId, moeExpertNum, cclBufferSize, tpWorldSize, tpRankId, expertShardType,
+                  sharedExpertNum, sharedExpertRankNum, globalBsReal, outDtype, commQuantMode, groupListType,
+                  commAlgPtr, zeroExpertNum, copyExpertNum, constExpertNum, output);
+    } else {
+        const char* groupEpPtr = groupEp.c_str();
+        const char* groupTpPtr = groupTp.c_str();
+        ACLNN_CMD(aclnnMoeDistributeCombineV6, expandX, expertIds, assistInfoForCombine, epSendCounts, expertScales,
+                  tpSendCounts, xActiveMask, nulltensor, nulltensor, nulltensor, expandScales, sharedExpertX,
+                  elasticInfo, oriX, constExpertAlpha1, constExpertAlpha2, constExpertV, performanceInfo, groupEpPtr,
+                  epWorldSize, epRankId, moeExpertNum, groupTpPtr, tpWorldSize, tpRankId, expertShardType,
+                  sharedExpertNum, sharedExpertRankNum, globalBsReal, outDtype, commQuantMode, groupListType,
+                  commAlgPtr, zeroExpertNum, copyExpertNum, constExpertNum, enablePreReduce, output);
+    }
 
     return output;
 }
+
 // Bind the C++ function to Python module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {

@@ -45,12 +45,13 @@ struct MoeDistributeCombineV2Info {
     bool isPerformance;    // whether performance or not
     bool isMc2Context;
     bool hasExpertScales; // has expertScales or not
-    bool reserved1;
+    bool enablePreReduce;
     uint64_t totalUbSize;
     uint64_t totalWinSizeEp;
     float armAvgFactor;
     float epsilon;
     uint32_t bufferNum;
+    uint64_t roceCombineOffset;
 };
 struct MoeDistributeCombineV2TilingData {
     Mc2InitTiling mc2InitTiling;

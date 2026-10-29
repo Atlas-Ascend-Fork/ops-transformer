@@ -25,11 +25,17 @@ def _get_hccl_comm_name(group, rank_id):
 
 
 class MoeDistributeBuffer:
-    def __init__(self, group, ccl_buffer_size: int = 0, comm_alg: int = 0):
+    def __init__(self, group, ccl_buffer_size: int = 0, comm_alg: str = ""):
         self.group = group
         self.rank_id = torch.distributed.get_rank(group)
         self.world_size = torch.distributed.get_world_size(group)
         self.group_name = _get_hccl_comm_name(group, self.rank_id)
+        self._is_a5 = "Ascend950" in torch_npu.npu.get_device_name()
+        self._ctx_manager = None
+        self.context = None
+        self.ccl_buffer_size = ccl_buffer_size
+        if self._is_a5 and comm_alg == "hierarchy":
+            return
         self._ctx_manager = CommContextManager(
             self.group_name,
             self.world_size,
@@ -41,8 +47,6 @@ class MoeDistributeBuffer:
             customCclBufferSize=ccl_buffer_size,
         )
         self.context = self._ctx_manager.create_context()
-        self.ccl_buffer_size = self._ctx_manager.ccl_buffer_size
-
         self.ccl_buffer_size = self._ctx_manager.ccl_buffer_size
 
     @staticmethod
@@ -192,8 +196,9 @@ class MoeDistributeBuffer:
                 f"{ops_error(ErrCode.VALUE)}."
             ),
         )
-        self._ctx_manager.update_group(self.group_name, self.context)
-        self.ccl_buffer_size = self._ctx_manager.ccl_buffer_size
+        if self._ctx_manager is not None:
+            self._ctx_manager.update_group(self.group_name, self.context)
+            self.ccl_buffer_size = self._ctx_manager.ccl_buffer_size
         return True
 
     def low_latency_dispatch(
@@ -220,22 +225,12 @@ class MoeDistributeBuffer:
         x_dtype=None,
         x_smooth_scales_dtype=None,
     ):
-        (
-            expand_x,
-            dynamic_scales,
-            expand_idx,
-            expert_token_nums,
-            ep_recv_counts,
-            tp_recv_counts,
-            expand_scales,
-        ) = torch.ops.cann_ops_transformer.npu_moe_distribute_dispatch(
-            context=self.context,
+        dispatch_kwargs = dict(
             x=x,
             expert_ids=topk_idx,
             ep_world_size=self.world_size,
             ep_rank_id=self.rank_id,
             moe_expert_num=num_experts,
-            ccl_buffer_size=self.ccl_buffer_size,
             scales=x_smooth_scale,
             x_active_mask=x_active_mask,
             expert_scales=topk_weights,
@@ -255,6 +250,29 @@ class MoeDistributeBuffer:
             x_dtype=x_dtype,
             x_smooth_scales_dtype=x_smooth_scales_dtype,
         )
+        if self._is_a5 and comm_alg == "hierarchy":
+            outputs = torch.ops.cann_ops_transformer.npu_moe_distribute_dispatch_v2(
+                group_ep=self.group_name, **dispatch_kwargs
+            )
+        else:
+            if self._ctx_manager is None:
+                raise ValueError(
+                    'An A5 hierarchy buffer requires comm_alg="hierarchy" for dispatch.'
+                )
+            outputs = torch.ops.cann_ops_transformer.npu_moe_distribute_dispatch(
+                context=self.context,
+                ccl_buffer_size=self.ccl_buffer_size,
+                **dispatch_kwargs,
+            )
+        (
+            expand_x,
+            dynamic_scales,
+            expand_idx,
+            expert_token_nums,
+            ep_recv_counts,
+            _,
+            expand_scales,
+        ) = outputs
         return (
             expand_x,
             dynamic_scales,
@@ -290,6 +308,7 @@ class MoeDistributeBuffer:
         shared_expert_num=1,
         shared_expert_rank_num=0,
         num_max_dispatch_tokens_per_rank=0,
+        enable_pre_reduce=None,
     ):
         if assist_info_for_combine is None:
             raise ValueError("assist_info_for_combine must be provided.")
@@ -298,8 +317,7 @@ class MoeDistributeBuffer:
         topk_weights = (
             _empty_topk_weights_like(x) if topk_weights is None else topk_weights
         )
-        return torch.ops.cann_ops_transformer.npu_moe_distribute_combine(
-            context=self.context,
+        combine_kwargs = dict(
             expand_x=x,
             expert_ids=topk_idx,
             assist_info_for_combine=assist_info_for_combine,
@@ -308,7 +326,6 @@ class MoeDistributeBuffer:
             ep_world_size=self.world_size,
             ep_rank_id=self.rank_id,
             moe_expert_num=num_experts,
-            ccl_buffer_size=self.ccl_buffer_size,
             tp_send_counts=None,
             x_active_mask=x_active_mask,
             expand_scales=expand_scales,
@@ -328,4 +345,21 @@ class MoeDistributeBuffer:
             comm_alg=comm_alg,
             comm_quant_mode=comm_quant_mode,
             global_bs=num_max_dispatch_tokens_per_rank * self.world_size,
+        )
+        if self._ctx_manager is None and comm_alg != "hierarchy":
+            raise ValueError(
+                'An A5 hierarchy buffer requires comm_alg="hierarchy" for combine.'
+            )
+        if self._is_a5 and comm_alg == "hierarchy":
+            return torch.ops.cann_ops_transformer.npu_moe_distribute_combine_v2(
+                group_ep=self.group_name,
+                enable_pre_reduce=True
+                if enable_pre_reduce is None
+                else enable_pre_reduce,
+                **combine_kwargs,
+            )
+        if enable_pre_reduce is not None and not enable_pre_reduce:
+            raise ValueError("enable_pre_reduce=False requires A5 hierarchy.")
+        return torch.ops.cann_ops_transformer.npu_moe_distribute_combine(
+            context=self.context, ccl_buffer_size=self.ccl_buffer_size, **combine_kwargs
         )
