@@ -1462,7 +1462,7 @@ static uint32_t CalA(MoeDistributeCombineV2TilingData& tilingData, const bool is
 
 static bool CheckSendCountTensorShape(const gert::TilingContext* context, MoeDistributeCombineV2TilingData& tilingData,
                                       const char* nodeName, const bool isShared, const uint32_t localMoeExpertNum,
-                                      const bool hasElasticInfo, const bool expertIdsDim1,
+                                      const bool hasElasticInfo, const int64_t expertIdsDim1,
                                       const CombineV2Config& config, const bool isLayered)
 {
     // 校验epSendCount的维度

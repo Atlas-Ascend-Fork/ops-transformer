@@ -615,7 +615,7 @@ static bool CheckTensorShape(gert::TilingContext* context, MoeDistributeCombineV
                                                   ("should be in the range [" + std::to_string(H_LOWER_BOUND_V2) +
                                                    ", " + std::to_string(H_UPPER_BOUND_V2) + "]")
                                                       .c_str()),
-                        return ge::GRAPH_FAILED);
+                        return false);
     }
     tilingData.moeDistributeCombineV2Info.h = static_cast<uint32_t>(expandXDim1);
 
