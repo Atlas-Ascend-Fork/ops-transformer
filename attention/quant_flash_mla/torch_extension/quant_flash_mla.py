@@ -113,6 +113,64 @@ _LAYOUT_KV_EXPECTED_NDIM = {
 _SUPPORTED_NUM_HEADS_Q = (1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128)
 
 
+def _check_mla_layout_pair(layout_q, layout_out) -> None:
+    # Reject unsupported pairs before allocating an empty output (for example,
+    # TND -> BSND leaves the C++ output sequence dimension at zero).
+    torch._check(
+        (layout_q == "TND" and layout_out in ("TND", "NTD"))
+        or (layout_q == "BSND" and layout_out == "BSND")
+        or (layout_q == "BNSD" and layout_out == "BNSD"),
+        lambda: (
+            "layout_q and layout_out must be one of BSND->BSND, BNSD->BNSD, "
+            f"TND->TND, TND->NTD (TND_NTD), but got {layout_q}->{layout_out}"
+        ),
+    )
+
+
+def _check_required_mla_parameters(
+    q,
+    k_cache,
+    q_descale,
+    k_descale,
+    block_table,
+    cache_seqlens,
+    quant_mode,
+    cu_seqlens_q,
+    attn_mask,
+    metadata,
+    mask_mode,
+    layout_q,
+    layout_kv,
+    layout_out,
+) -> None:
+    # Keep Eager and FakeTensor presence checks consistent with the Torch API
+    # contract. Check existence only; tensor values remain the caller's concern.
+    for name, value in (
+        ("q", q),
+        ("k_cache", k_cache),
+        ("q_descale", q_descale),
+        ("k_descale", k_descale),
+        ("block_table", block_table),
+        ("cache_seqlens", cache_seqlens),
+        ("quant_mode", quant_mode),
+        ("layout_q", layout_q),
+        ("layout_kv", layout_kv),
+        ("layout_out", layout_out),
+        ("metadata", metadata),
+    ):
+        torch._check(value is not None, lambda name=name: f"{name} must be provided")
+    if layout_q == "TND":
+        torch._check(
+            cu_seqlens_q is not None,
+            lambda: "cu_seqlens_q must be provided when layout_q is TND",
+        )
+    if mask_mode == 3:
+        torch._check(
+            attn_mask is not None,
+            lambda: "attn_mask must be provided when mask_mode is CAUSAL (3)",
+        )
+
+
 def _check_int32_1d(name: str, tensor: torch.Tensor) -> None:
     torch._check(tensor is not None, lambda: f"{name} must be provided")
     torch._check(
@@ -283,28 +341,30 @@ class QuantFlashMlaOpBuilder(OpBuilder):
             layout_out: Optional[str] = "TND",
             return_softmax_lse: Optional[bool] = False,
         ):
-            # FakeTensor only needs enough structure to infer output shapes.
-            # Contract validation belongs to the C++ host checker.
-            torch._check(q is not None, lambda: "q must be provided")
+            _check_required_mla_parameters(
+                q,
+                k_cache,
+                q_descale,
+                k_descale,
+                block_table,
+                cache_seqlens,
+                quant_mode,
+                cu_seqlens_q,
+                attn_mask,
+                metadata,
+                mask_mode,
+                layout_q,
+                layout_kv,
+                layout_out,
+            )
             torch._check(
                 q.dim() >= 2,
                 lambda: f"q must have at least 2 dimensions, but got {q.dim()}D",
             )
-            torch._check(head_dim_v is not None, lambda: "head_dim_v must be provided")
             # 形状推导与 csrc/quant_flash_mla.cpp 运行时保持同一套 layout_q/layout_out 分支
             layout_q_str = str(layout_q).upper() if layout_q else "TND"
             layout_out_str = str(layout_out).upper() if layout_out else "TND"
-            # q/out 配对约束与 host 侧 CommonChecker::CheckLayoutPairConsistency 一致:
-            # 仅支持 BSND->BSND / BNSD->BNSD / TND->TND / TND->NTD (TND_NTD)
-            torch._check(
-                (layout_q_str == "TND" and layout_out_str in ("TND", "NTD"))
-                or (layout_q_str == "BSND" and layout_out_str == "BSND")
-                or (layout_q_str == "BNSD" and layout_out_str == "BNSD"),
-                lambda: (
-                    "layout_q and layout_out must be one of BSND->BSND, BNSD->BNSD, "
-                    f"TND->TND, TND->NTD (TND_NTD), but got {layout_q}->{layout_out}"
-                ),
-            )
+            _check_mla_layout_pair(layout_q_str, layout_out_str)
             if layout_q_str == "TND":
                 t_size, n_size = q.size(0), q.size(1)
                 if cu_seqlens_q is not None and cu_seqlens_q.dim() > 0:
@@ -489,6 +549,22 @@ def quant_flash_mla(
     dispatcher implementation for NPU.
     'PrivateUse1' is the combine key for custom NPU backends.
     """
+    _check_required_mla_parameters(
+        q,
+        k_cache,
+        q_descale,
+        k_descale,
+        block_table,
+        cache_seqlens,
+        quant_mode,
+        cu_seqlens_q,
+        attn_mask,
+        metadata,
+        mask_mode,
+        layout_q,
+        layout_kv,
+        layout_out,
+    )
     if quant_mode not in (0, 1):
         raise ValueError(
             f"The quant_mode of quant_flash_mla only supports "
@@ -530,8 +606,6 @@ def quant_flash_mla(
         raise ValueError(
             f"k_cache with layout {layout_kv} expects {kv_expected} dims, but got {k_cache.dim()} dims"
         )
-    if metadata is None:
-        raise ValueError("metadata should be provided by quant_flash_mla_metadata")
     if quant_mode == int(QuantMode.MLA_FP8_E4M3_FULLQUANT):
         if q.dtype != torch.float8_e4m3fn:
             raise ValueError(
@@ -559,6 +633,8 @@ def quant_flash_mla(
                 f"quant_flash_mla does not support {name} with stride containing 0, "
                 f"got {name}.stride() = {tensor.stride()}"
             )
+
+    _check_mla_layout_pair(layout_q, layout_out)
 
     op_module = quant_flash_mla_op_builder.load()
     return op_module.quant_flash_mla(
