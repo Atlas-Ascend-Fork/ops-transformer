@@ -216,11 +216,11 @@ function help_info() {
                 echo "    --onnxplugin           Build onnxplugin library"
                 echo "    -j[n]                  Compile thread nums, default is 8, eg: -j8"
                 echo "    -O[n]                  Compile optimization options, support [O0 O1 O2 O3], eg:-O3"
-                echo "    --debug                Build with debug mode"
+                echo "    --build-type=<Type>    Specify build-type (Type options: Release/Debug), Default:Release"
                 echo $dotted_line
                 echo "Examples:"
                 echo "    bash build.sh --onnxplugin -j16 -O3"
-                echo "    bash build.sh --onnxplugin --debug"
+                echo "    bash build.sh --onnxplugin --build-type=Debug"
                 return
                 ;;
             opkernel)
