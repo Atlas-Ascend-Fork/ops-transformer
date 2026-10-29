@@ -1,4 +1,4 @@
-# Transformer类接口
+# Transformer类torch接口
 
 - [all_gather_quant_matmul](../../mc2/all_gather_matmul_v3/docs/torchapi_all_gather_quant_matmul.md)
 - [all_to_all_quant_matmul](../../mc2/allto_all_matmul_v2/docs/torchapi_all_to_all_quant_matmul.md)
