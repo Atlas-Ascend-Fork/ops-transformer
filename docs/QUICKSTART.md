@@ -2,7 +2,7 @@
 
 ## 使用须知
 
-本指南旨在帮助开发者快速上手CANN和`ops-transformer`算子仓的使用。为方便快速了解算子开发全流程，以**AddExample**算子为实践对象，算子源码位于`ops-transformer/examples/add_example`，操作流程如下：
+本指南旨在帮助开发者快速上手CANN和`ops-transformer`算子仓。为方便快速了解算子开发全流程，以**AddExample**算子为实践对象，算子源码位于`ops-transformer/examples/add_example`，操作流程如下：
 
 1. **[前提条件](../README.md)**：参考项目README完成环境准备和源码下载，此处不再赘述。快速入门场景**推荐CANNLab或Docker部署**，操作简单。
 
@@ -36,7 +36,7 @@
   git clone -b ${tag_version} https://atomgit.com/cann/ops-transformer.git && cd ops-transformer
   ```
 
-> 说明：如需切换源码分支版本，请参考如下指导。
+> 说明：如需切换源码分支版本，请参见如下指导。
 >
 > 1. 在源码目录执行`git branch`，查询当前源码版本。
 > 2. 在源码目录执行`git checkout ${tag_version}`，切换到目标分支源码，注意满足源码与CANN版本配套关系。若源码已存在，执行`git pull`拉取最新源码。
@@ -83,7 +83,7 @@ Self-extractable archive "cann-ops-transformer-custom_linux.${arch}.run" success
 
 `AddExample`安装在```${ASCEND_HOME_PATH}/opp/vendors```路径中，```${ASCEND_HOME_PATH}```表示CANN软件安装目录。
 
-> 安装后执行 `grep load_priority ${ASCEND_HOME_PATH}/opp/vendors/config.ini` 校验，预期输出含本 vendor。若无输出，通常是 `${ASCEND_HOME_PATH}/opp/vendors` 属主或权限不对，请排查后重新安装。
+> 安装后执行 `grep load_priority ${ASCEND_HOME_PATH}/opp/vendors/config.ini` 校验，预期输出含本vendor。若无输出，通常是 `${ASCEND_HOME_PATH}/opp/vendors` 属主或权限不对，请排查后重新安装。
 
 ### 4. 配置环境变量
 
@@ -105,10 +105,10 @@ bash build.sh --run_example add_example eager cust --vendor_name=custom --soc=${
 
 > **注意**：运行样例时需确保`--soc`参数与编译算子包时使用的`--soc`取值一致，否则可能报`error 161001`（如`aclnnXxxGetWorkspaceSize failed`）。如遇此错误，请回到[第2节](#2-编译addexample算子)核对`--soc`取值后重新编译安装。
 
-- <算子名>:add_example
+- <算子名>：add_example
 - <运行模式>：eager
-- <包模式>:cust
-- --vendor_name(可选)：vendorname表示构建的自定义算子包名，默认名为custom.
+- <包模式>：cust
+- --vendor_name(可选)：vendorname表示构建的自定义算子包名，默认名为custom
 
 预期输出：打印算子`AddExample`的加法计算结果，表明算子已成功部署并正确执行。
 
@@ -126,7 +126,7 @@ add_example first input[7] is: 1.000000, second input[7] is: 1.000000, result[7]
 
 ## 二、算子开发
 
-本阶段目的是对已成功运行的AddExample算子尝试**修改核函数代码**。
+本阶段目的是对已成功运行的AddExample算子尝试**修改Kernel代码**。
 
 ### 1. 修改Kernel实现
 
@@ -190,13 +190,13 @@ __aicore__ inline void AddExample<T>::Compute(int32_t progress)
 
 本阶段以AddExample为例，在算子中添加打印并采集算子性能数据，以便后续问题分析定位。
 
-### 1. 打印
+### 1. 算子打印
 
 算子如果出现执行失败、精度异常等问题，添加打印进行问题分析和定位。
 
-请在`examples/add_example/op_kernel/add_example.h`中进行代码修改。
+请在`ops-transformer/examples/add_example/op_kernel/add_example.h`中进行代码修改。
 
-- **printf**
+- **PRINTF**
 
   该接口支持打印Scalar类型数据，如整数、字符型、布尔型等，详细介绍请参见[《Ascend C API》](https://hiascend.com/document/redirect/CannCommunityAscendCApi)中“Ascend C算子开发接口 > SIMD API > 基础API > 调试接口 > 上板打印 > printf”。
 
@@ -221,7 +221,7 @@ __aicore__ inline void AddExample<T>::Compute(int32_t progress)
 
 当算子功能验证正确后，可通过`msprof op`命令采集算子级性能数据。
 
-- **生成可执行文件**
+1. **生成可执行文件**
 
     调用AddExample算子的example样例，生成可执行文件（test_aclnn_add_example），该文件位于项目`ops-transformer/build`目录。
 
@@ -229,7 +229,7 @@ __aicore__ inline void AddExample<T>::Compute(int32_t progress)
     bash build.sh --run_example add_example eager cust --vendor_name=custom --soc=${soc_version}
     ```
 
-- **采集性能数据**
+2. **采集性能数据**
 
     进入AddExample算子可执行文件目录`ops-transformer/build/`，执行如下命令：
 
