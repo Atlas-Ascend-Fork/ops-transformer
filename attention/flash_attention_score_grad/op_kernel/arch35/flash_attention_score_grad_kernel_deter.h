@@ -422,28 +422,24 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
         } else if ((this->constInfo.sparseMode == NO_MASK || this->constInfo.sparseMode == LEFT_UP_CAUSAL) && n > m) {
             n = m;
         }
-        if constexpr (BaseClass::IS_N_EQUAL) {
-            if constexpr (IS_SWIZZLE) {
-                if (this->constInfo.sparseMode == LEFT_UP_CAUSAL || this->constInfo.sparseMode == NO_MASK) {
-                    CalLeftUpCausalSwizzleIndex(k, m, n, b, j, r, coordinateInfo);
-                } else {
-                    CalCausalSwizzleIndex(k, m, n, b, j, r, coordinateInfo);
-                }
+        if constexpr (BaseClass::IS_N_EQUAL && IS_SWIZZLE) {
+            if (this->constInfo.sparseMode == LEFT_UP_CAUSAL || this->constInfo.sparseMode == NO_MASK) {
+                CalLeftUpCausalSwizzleIndex(k, m, n, b, j, r, coordinateInfo);
             } else {
-                CalCausalIndex(k, m, n, b, j, r, coordinateInfo);
+                CalCausalSwizzleIndex(k, m, n, b, j, r, coordinateInfo);
+            }
+        } else if constexpr (BaseClass::IS_N_EQUAL) {
+            CalCausalIndex(k, m, n, b, j, r, coordinateInfo);
+        } else if constexpr (IS_SWIZZLE) {
+            CalGQACausalGroupedIndex(k, m, n, b, j, r, this->constInfo.commonConstInfo.gSize,
+                                     this->tilingData->s1s2BNGS1S2BaseParams.deterGqaCausalGroups,
+                                     this->tilingData->baseDeterParam.deterGqaCausalRoundsPerGroup,
+                                     this->tilingData->baseDeterParam.deterMaxRound, coordinateInfo);
+            if (coordinateInfo.batchId < 1) {
+                return -1;
             }
         } else {
-            uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterGqaCausalScheduleMode;
-            if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterGqaCausalScheduleMode::BATCH_MAJOR)) {
-                CalGQACausalBatchMajorIndex(k, m, n, b, j, r, this->constInfo.commonConstInfo.gSize,
-                                            this->tilingData->baseDeterParam.deterGqaCausalRoundsPerBatch,
-                                            coordinateInfo);
-                if (coordinateInfo.batchId < 1) {
-                    return -1;
-                }
-            } else {
-                CalGQACausalIndex(k, m, n, b, j, r, this->constInfo.commonConstInfo.gSize, coordinateInfo);
-            }
+            CalGQACausalIndex(k, m, n, b, j, r, this->constInfo.commonConstInfo.gSize, coordinateInfo);
         }
     } else {
         TransDeterRound<BaseClass::DETER_TILING_SPLIT_MODE>(r, useEven, deterLoopMax / NUM_TWO);
@@ -606,7 +602,10 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
                 uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterBandScheduleMode;
                 const bool upperCausal =
                     scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL_UPPER);
-                if (upperCausal || scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL)) {
+                if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::GROUPED)) {
+                    CalGroupedBandIndex(this->tilingData->deterGqaBandSchedule, j, r, coordinateInfo);
+                } else if (upperCausal ||
+                           scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL)) {
                     CalBandCausalIndex(this->bandInfo, j, r, upperCausal, coordinateInfo);
                 } else if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::DENSE)) {
                     CalDenseSwizzleIndex(k, m, n, b, j, r, coordinateInfo);
@@ -800,6 +799,15 @@ FlashAttentionScoreGradKernelDeter<CubeBlockType, VecBlockType, OwnerSchedule>::
         if constexpr (BaseClass::IS_N_EQUAL) {
             if constexpr (IS_SWIZZLE) {
                 uint8_t scheduleMode = this->tilingData->s1s2BNGS1S2BaseParams.deterBandScheduleMode;
+                if constexpr (!BaseClass::IS_TND) {
+                    if (scheduleMode == static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::GROUPED)) {
+                        InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
+                                           this->coordinateInfos[0]);
+                        InitCoordinateInfo(this->constInfo.s1Outer, this->constInfo.s2Outer, mOffset, nOffset,
+                                           this->coordinateInfos[1]);
+                        return this->tilingData->deterGqaBandSchedule.totalRounds;
+                    }
+                }
                 // The mode remains authoritative within the compile-time swizzle branch.
                 bool isHybridSchedule =
                     scheduleMode >= static_cast<uint8_t>(optiling::fag::DeterBandScheduleMode::CAUSAL) &&

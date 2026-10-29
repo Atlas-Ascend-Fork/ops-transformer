@@ -176,6 +176,45 @@ __aicore__ inline void CalDenseIndex(int64_t k, int64_t m, int64_t n, int64_t b,
     return;
 }
 
+// Group consecutive physical heads, rotating the active core subset between chunks.
+// Coordinates remain one-based; CalBandDeterIndex restores the physical window origin.
+__aicore__ inline void CalGroupedBandIndex(const __gm__ optiling::fag::GqaBandSchedule& plan, int64_t j, int64_t r,
+                                           CoordinateInfo& coordinate)
+{
+    coordinate.batchId = -1;
+    const int64_t groups = plan.groupsPerChunk;
+    const int64_t m = plan.phases[0].m;
+    const int64_t n = plan.phases[0].n;
+    if (plan.k <= 0 || plan.b <= 0 || plan.g != 1 || groups <= 0 || groups > plan.b || m <= 0 || n <= 0 ||
+        plan.fullRounds <= 0 || r < 1 || r > plan.totalRounds || j < 1 || j > plan.k) {
+        return;
+    }
+
+    const int64_t zeroBasedRound = r - 1;
+    const int64_t fullChunks = plan.b / groups;
+    const int64_t fullEnd = fullChunks * plan.fullRounds;
+    const bool isTail = zeroBasedRound >= fullEnd;
+    const int64_t chunk = isTail ? fullChunks : zeroBasedRound / plan.fullRounds;
+    const int64_t localRound = isTail ? zeroBasedRound - fullEnd : zeroBasedRound % plan.fullRounds;
+    const int64_t headBase = chunk * groups;
+    const int64_t groupSize = Min(groups, plan.b - headBase);
+    const int64_t chunkRounds = isTail ? plan.tailRounds : plan.fullRounds;
+    if (groupSize <= 0 || localRound >= chunkRounds) {
+        return;
+    }
+
+    const int64_t logicalCore = (j - 1 + headBase) % plan.k;
+    const int64_t activeK = Min(plan.k, groupSize * m);
+    // Rotate over all physical cores before filtering, so inactive cores cannot duplicate an owner.
+    if (logicalCore >= activeK) {
+        return;
+    }
+    CalDenseIndex(activeK, m, n, groupSize, logicalCore + 1, localRound + 1, coordinate);
+    if (coordinate.batchId > 0) {
+        coordinate.batchId += headBase;
+    }
+}
+
 __aicore__ inline void CalDenseIndexForSingleN(int64_t k, int64_t m, int64_t b, int64_t j, int64_t r, int64_t R,
                                                CoordinateInfo& coordinate)
 {
@@ -1009,28 +1048,44 @@ __aicore__ inline void CalGQACausalIndex(int64_t k, int64_t m, int64_t n, int64_
     return;
 }
 
-// Keep the single-batch GQA column schedule and serialize the flattened (B, N2) batches.
-// j, r and the returned coordinates are 1-based; roundsPerBatch includes all g query heads.
-__aicore__ inline void CalGQACausalBatchMajorIndex(int64_t k, int64_t m, int64_t n, int64_t b, int64_t j, int64_t r,
-                                                   int64_t g, int64_t roundsPerBatch, CoordinateInfo& coordinate)
+// Restrict the existing column schedule to a contiguous group of flattened (B, N2).
+// Global pipeline rounds and task IDs are unchanged; only these coordinates are local.
+// j, r and output coordinates are 1-based. totalRounds includes the exact tail group.
+__aicore__ inline void CalGQACausalGroupedIndex(int64_t k, int64_t m, int64_t n, int64_t b, int64_t j, int64_t r,
+                                                int64_t g, int64_t groups, int64_t roundsPerGroup, int64_t totalRounds,
+                                                CoordinateInfo& coordinate)
 {
     coordinate.batchId = -1;
-    if (k <= 0 || n <= 0 || m < n || b <= 0 || g <= 0 || j < 1 || j > k || r <= 0 || roundsPerBatch <= 0) {
+    if (k <= 0 || n <= 0 || m < n || b <= 0 || g <= 0 || j < 1 || j > k || groups <= 0 || groups > b || r <= 0 ||
+        r > totalRounds || roundsPerGroup <= 0) {
         return;
     }
-    int64_t batchIdx = (r - 1) / roundsPerBatch;
-    if (batchIdx >= b) {
-        return;
+    const int64_t fullGroupCount = b / groups;
+    const int64_t fullRoundEnd = fullGroupCount * roundsPerGroup;
+    int64_t groupIdx;
+    int64_t localGroups;
+    int64_t localRound;
+    if (r <= fullRoundEnd) {
+        groupIdx = (r - 1) / roundsPerGroup;
+        localGroups = groups;
+        localRound = (r - 1) % roundsPerGroup + 1;
+    } else {
+        groupIdx = fullGroupCount;
+        localGroups = b % groups;
+        localRound = r - fullRoundEnd;
+        if (localGroups == 0) {
+            return;
+        }
     }
-    int64_t localRound = (r - 1) % roundsPerBatch + 1;
-    CalGQACausalIndex(k, m, n, 1, j, localRound, g, coordinate, true);
-    // Never offset the invalid-slot sentinel into a valid flattened head index.
-    if (coordinate.batchId < 1 || coordinate.batchId > g || coordinate.s2Idx < 1 || coordinate.s2Idx > n ||
-        coordinate.s1Idx < coordinate.s2Idx || coordinate.s1Idx > m) {
+    CalGQACausalIndex(k, m, n, localGroups, j, localRound, g, coordinate, true);
+    // Never offset an invalid slot into a valid flattened head. Partial physical
+    // tiles still use the existing CalCausalDeterIndex and IsValidForDeter checks.
+    if (coordinate.batchId < 1 || coordinate.batchId > localGroups * g || coordinate.s2Idx < 1 ||
+        coordinate.s2Idx > n || coordinate.s1Idx < coordinate.s2Idx || coordinate.s1Idx > m) {
         coordinate.batchId = -1;
         return;
     }
-    coordinate.batchId += batchIdx * g;
+    coordinate.batchId += groupIdx * groups * g;
 }
 
 struct BandInfo {

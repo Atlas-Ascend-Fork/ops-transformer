@@ -9,6 +9,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # ======================================================================================================================
 
+import os
+import sys
 import torch
 import numpy as np
 from dataclasses import dataclass, field
@@ -74,3 +76,12 @@ def print_log(data=None):
         data,
     )
     log(log_info)
+
+
+def getOutDtype(out_dtype):
+    if out_dtype == "fp16":
+        return torch.float16
+    elif out_dtype == "bf16":
+        return torch.bfloat16
+    elif out_dtype == "fp32":
+        return torch.float32

@@ -23,6 +23,7 @@ from common import (
     EPSILON,
     log,
     print_log,
+    getOutDtype,
 )
 
 PHILOX_M4_32 = [0xD2511F53, 0xCD9E8D57]
@@ -37,6 +38,10 @@ MASK_32 = 0xFFFFFFFF
 
 
 def attentionScoreWithGrad(ctx: CalculationContext):
+    if ctx.input_case["input_layout"].upper() == "TND":
+        # TND (varlen) cases are handled by run_unpad; the residual TND branch
+        # below predates that split and cannot work with TND-shaped inputs.
+        return run_unpad(ctx)
     B = ctx.input_case["B"]
     Nq = ctx.input_case["N1"]
     Nkv = ctx.input_case["N2"]
@@ -1548,17 +1553,12 @@ def get_atten_mask_tnd(
         atten_mask = (atten_mask_u + atten_mask_l).to(dtype)
         atten_mask_npu = torch.triu(torch.ones([2048, 2048]), diagonal=1).to(dtype)
 
-    elif sparse_mode == 5:  # prefix,shape只能是BNSS或者B1SS
-        atten_mask = (torch.triu(torch.ones(shape), diagonal=S2 - S1 + 1)).to(dtype)
-        prefix = get_prefix_tnd(
-            seqlens_list_q=seqlens_list_q, seqlens_list_k=seqlens_list_k
+    elif sparse_mode == 5:
+        # sparse_mode=5 (prefix, uncompressed) is documented as unsupported in
+        # varlen scenarios, see docs/zh/context/sparse_mode_introduction.md.
+        raise RuntimeError(
+            "sparse_mode=5 (prefix) is not supported with the TND (varlen) input layout"
         )
-        for i in range(0, B):
-            if len(shape) > 2:
-                atten_mask[:, :, :, 0 : prefix[i]] = 0
-            else:
-                atten_mask[:, 0 : prefix[i]] = 0
-        atten_mask_npu = atten_mask
 
     elif sparse_mode == 6:
         atten_mask = torch.triu(torch.ones(shape), diagonal=S2 - S1 + 1)
@@ -2449,6 +2449,29 @@ def skip_zero_row(b, n2, g, s1, x_max, x_sum, softmax_res):
                         x_max[i, j, k, l, :] = torch.finfo(torch.float).min
                         x_sum[i, j, k, l, :] = torch.finfo(torch.float).max
     return softmax_res, x_max, x_sum
+
+
+def skip_zero_row_tnd(b, n, s1, x_max, x_sum, softmax_res):
+    for i in range(b):
+        for j in range(n):
+            for l in range(s1):
+                if x_max[i, j, l, :] == -40000.0:
+                    softmax_res[i, j, l, :] = 0
+                    x_max[i, j, l, :] = torch.finfo(torch.float).min
+                    x_sum[i, j, l, :] = torch.finfo(torch.float).max
+    return softmax_res, x_max, x_sum
+
+
+def get_prefix(B, S1, S2):
+    rng = random.Random(1024)
+    return [rng.randint(1, int(S2)) for _ in range(int(B))]
+
+
+def get_prefix_tnd(seqlens_list_q=None, seqlens_list_k=None):
+    rng = random.Random(1024)
+    return [
+        rng.randint(1, int(kv)) if int(kv) > 0 else 0 for kv in list(seqlens_list_k)
+    ]
 
 
 def gen_dropmask_uint8(rounds, counter, key, uint8_count, keep_prob):

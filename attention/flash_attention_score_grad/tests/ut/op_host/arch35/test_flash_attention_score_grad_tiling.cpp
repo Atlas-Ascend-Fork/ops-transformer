@@ -84,17 +84,19 @@ protected:
     }
 };
 
-TEST_F(FlashAttentionScoreGradTiling, DeterGqaCausalBatchMajorPreservesTilingLayout)
+TEST_F(FlashAttentionScoreGradTiling, DeterGqaCausalGroupedPreservesTilingLayout)
 {
     using namespace optiling::fag;
-    // Both fields occupy former padding; unrelated serialized tiling fields must not move.
+    // All group fields occupy former padding; unrelated serialized tiling fields must not move.
     static_assert(sizeof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase) == 200,
                   "Base tiling size must remain unchanged");
-    static_assert(offsetof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase, deterGqaCausalScheduleMode) == 193,
-                  "GQA mode must occupy the first former padding byte");
+    static_assert(offsetof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase, reservedGqaCausal) == 193,
+                  "Reserved CAUSAL byte must retain its original offset");
+    static_assert(offsetof(FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase, deterGqaCausalGroups) == 195,
+                  "GQA group count must occupy the final former padding byte");
     static_assert(sizeof(BaseDeterParamRegbase) == 32 + 2 * MAX_CORE_NUM * sizeof(uint64_t),
                   "Deterministic tiling size must remain unchanged");
-    static_assert(offsetof(BaseDeterParamRegbase, deterGqaCausalRoundsPerBatch) == sizeof(uint32_t),
+    static_assert(offsetof(BaseDeterParamRegbase, deterGqaCausalRoundsPerGroup) == sizeof(uint32_t),
                   "GQA rounds must occupy the former reserved uint32 field");
     static_assert(offsetof(BaseDeterParamRegbase, deterMaxRound) == sizeof(uint64_t),
                   "Maximum round offset must remain unchanged");
@@ -103,13 +105,14 @@ TEST_F(FlashAttentionScoreGradTiling, DeterGqaCausalBatchMajorPreservesTilingLay
 
     FlashAttentionScoreGradS1S2BNGS1S2BaseParamsRegbase baseParams{};
     BaseDeterParamRegbase deterParams{};
-    EXPECT_EQ(baseParams.get_deterGqaCausalScheduleMode(), static_cast<uint8_t>(DeterGqaCausalScheduleMode::ORIGINAL));
-    EXPECT_EQ(deterParams.get_deterGqaCausalRoundsPerBatch(), 0);
-    baseParams.set_deterGqaCausalScheduleMode(static_cast<uint8_t>(DeterGqaCausalScheduleMode::BATCH_MAJOR));
-    deterParams.set_deterGqaCausalRoundsPerBatch(1040);
-    EXPECT_EQ(baseParams.get_deterGqaCausalScheduleMode(),
-              static_cast<uint8_t>(DeterGqaCausalScheduleMode::BATCH_MAJOR));
-    EXPECT_EQ(deterParams.get_deterGqaCausalRoundsPerBatch(), 1040);
+    EXPECT_EQ(baseParams.reservedGqaCausal, 0);
+    EXPECT_EQ(deterParams.get_deterGqaCausalRoundsPerGroup(), 0);
+    EXPECT_EQ(baseParams.get_deterGqaCausalGroups(), 0);
+    deterParams.set_deterGqaCausalRoundsPerGroup(1040);
+    baseParams.set_deterGqaCausalGroups(2);
+    EXPECT_EQ(baseParams.reservedGqaCausal, 0);
+    EXPECT_EQ(deterParams.get_deterGqaCausalRoundsPerGroup(), 1040);
+    EXPECT_EQ(baseParams.get_deterGqaCausalGroups(), 2);
 }
 
 // Complete-domain owner oracle adapter. Keep every serialized owner kind explicit;

@@ -15,7 +15,7 @@ import numpy as np
 import math
 import ml_dtypes
 from einops import rearrange
-from common import CalculationContext, DEVICE_ID, pta_mode, log
+from common import CalculationContext, DEVICE_ID, pta_mode, log, getOutDtype
 
 
 def PTAtest(ctx: CalculationContext):
@@ -441,12 +441,3 @@ def getOutDtypeZeroOrOne(out_dtype):
         return 0
     elif out_dtype == "bf16":
         return 1
-
-
-def getOutDtype(out_dtype):
-    if out_dtype == "fp16":
-        return torch.float16
-    elif out_dtype == "bf16":
-        return torch.bfloat16
-    elif out_dtype == "fp32":
-        return torch.float32

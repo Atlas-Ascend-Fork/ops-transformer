@@ -13,6 +13,8 @@
  * \brief
  */
 #include "flash_attention_score_grad_tiling_normal_regbase.h"
+#include <array>
+#include <limits>
 #include "op_host/tiling_templates_registry.h"
 #include "op_host/tiling_type.h"
 #include "err/ops_err.h"
@@ -31,6 +33,7 @@ struct DeterBandScheduleResult {
     int64_t n = 0;
     int64_t p = 0;
     int64_t q = 0;
+    GqaBandSchedule groupedSchedule{};
 };
 
 struct BlockScheduleResult {
@@ -353,6 +356,429 @@ DeterBandScheduleResult SelectDeterBandSchedule(int64_t k, int64_t m, int64_t n,
     return result;
 }
 
+using BandCoreLoads = std::array<int64_t, MAX_CORE_NUM>;
+
+// Bound host selection work, not sequence dimensions or device geometry. One candidate
+// visits H*N column owners; evaluating every H costs N*K*(K+1)/2 visits at most.
+constexpr int64_t MHA_BAND_MAX_COLUMN_EVALUATIONS = 1'000'000;
+
+struct BandPhysicalWindow {
+    int64_t s1;
+    int64_t s2;
+    int64_t pre;
+    int64_t next;
+    int64_t rowOffset;
+    int64_t colOffset;
+};
+
+struct BandCacheFootprint {
+    uint64_t perHeadBytes = 0;
+    uint64_t sharedBytes = 0;
+    uint64_t l2Bytes = 0;
+};
+
+uint64_t SaturatingBandAdd(uint64_t lhs, uint64_t rhs)
+{
+    const uint64_t limit = std::numeric_limits<uint64_t>::max();
+    return lhs > limit - rhs ? limit : lhs + rhs;
+}
+
+uint64_t SaturatingBandMultiply(uint64_t lhs, uint64_t rhs)
+{
+    const uint64_t limit = std::numeric_limits<uint64_t>::max();
+    return rhs != 0 && lhs > limit / rhs ? limit : lhs * rhs;
+}
+
+BandCacheFootprint CalcBandCacheFootprint(int64_t k, int64_t s1, int64_t s2, int64_t d, int64_t dv, uint64_t inputBytes,
+                                          uint64_t outputBytes, bool enablePreSfmg, uint64_t maskBytes,
+                                          uint64_t l2Bytes)
+{
+    BandCacheFootprint result;
+    if (k <= 0 || s1 <= 0 || s2 <= 0 || d <= 0 || dv <= 0 || l2Bytes == 0 || inputBytes != FP16_BYTES ||
+        (outputBytes != FP16_BYTES && outputBytes != FP32_BYTES)) {
+        return result;
+    }
+    const uint64_t align = FP16_C0_SIZE;
+    const uint64_t dAligned = SaturatingBandMultiply(SaturatingBandAdd(d, align - 1) / align, align);
+    const uint64_t dvAligned = SaturatingBandMultiply(SaturatingBandAdd(dv, align - 1) / align, align);
+    const uint64_t readRowBytes = SaturatingBandMultiply(SaturatingBandAdd(d, dv), inputBytes);
+    // Max and sum each occupy one 32-byte vector; pre-SFMG stores one float per Q row.
+    const uint64_t statisticsBytes = NUM_TWO * static_cast<uint64_t>(ConstAxisTemplateNum::NUM32);
+    const uint64_t sfmgBytes = enablePreSfmg ? FP32_BYTES : SaturatingBandMultiply(dv, outputBytes);
+    const uint64_t queryRowBytes =
+        SaturatingBandAdd(SaturatingBandAdd(readRowBytes, SaturatingBandMultiply(dAligned, FP32_BYTES)),
+                          SaturatingBandAdd(statisticsBytes, sfmgBytes));
+    const uint64_t kvRowBytes =
+        SaturatingBandAdd(readRowBytes, SaturatingBandMultiply(SaturatingBandAdd(dAligned, dvAligned), FP32_BYTES));
+    result.perHeadBytes =
+        SaturatingBandAdd(SaturatingBandMultiply(s1, queryRowBytes), SaturatingBandMultiply(s2, kvRowBytes));
+    // At a group transition each core can retain one retiring task and prefetch Q/dY.
+    // This is logical GM payload, not a claim that these bytes all reside in L2.
+    const uint64_t tileRows = static_cast<uint64_t>(ConstAxisTemplateNum::NUM128);
+    const uint64_t transitionBytes = SaturatingBandMultiply(
+        k, SaturatingBandAdd(
+               SaturatingBandMultiply(std::min<uint64_t>(s1, tileRows), SaturatingBandAdd(queryRowBytes, readRowBytes)),
+               SaturatingBandMultiply(std::min<uint64_t>(s2, tileRows), kvRowBytes)));
+    result.sharedBytes = SaturatingBandAdd(maskBytes, transitionBytes);
+    const uint64_t limit = std::numeric_limits<uint64_t>::max();
+    if (dAligned == limit || dvAligned == limit || result.perHeadBytes == limit || result.sharedBytes == limit) {
+        return {};
+    }
+    result.l2Bytes = l2Bytes;
+    return result;
+}
+
+uint64_t CalcBandSpillBytes(int64_t b, int64_t heads, const BandCacheFootprint& cache)
+{
+    const uint64_t limit = std::numeric_limits<uint64_t>::max();
+    const uint64_t fullBytes = SaturatingBandAdd(SaturatingBandMultiply(heads, cache.perHeadBytes), cache.sharedBytes);
+    const int64_t tailHeads = b % heads;
+    const uint64_t tailBytes =
+        tailHeads == 0 ? 0 :
+                         SaturatingBandAdd(SaturatingBandMultiply(tailHeads, cache.perHeadBytes), cache.sharedBytes);
+    if (fullBytes == limit || tailBytes == limit) {
+        return limit;
+    }
+    const uint64_t fullSpill = fullBytes > cache.l2Bytes ? fullBytes - cache.l2Bytes : 0;
+    const uint64_t tailSpill = tailBytes > cache.l2Bytes ? tailBytes - cache.l2Bytes : 0;
+    return SaturatingBandAdd(SaturatingBandMultiply(b / heads, fullSpill), tailSpill);
+}
+
+struct BandRoundActivity {
+    int64_t rounds = 0;
+    int64_t activeRounds = 0;
+    int64_t activeRuns = 0;
+    bool firstActive = false;
+    bool lastActive = false;
+};
+
+BandRoundActivity CalcBandGroupActivity(int64_t k, int64_t m, int64_t heads, const std::vector<int64_t>& firstRows,
+                                        const std::vector<int64_t>& heights)
+{
+    BandRoundActivity result;
+    if (heads == 0) {
+        return result;
+    }
+    const int64_t n = heights.size();
+    const int64_t activeCores = std::min(k, heads * m);
+    const int64_t waves = PositiveCeilDiv(heads * n, activeCores);
+    result.rounds = waves * m;
+    std::vector<std::pair<int64_t, int64_t>> intervals;
+    intervals.reserve(NUM_TWO * k);
+    for (int64_t wave = 0; wave < waves; ++wave) {
+        intervals.clear();
+        const int64_t packedBegin = wave * activeCores;
+        const int64_t packedEnd = std::min(packedBegin + activeCores, heads * n);
+        // Repeated heads at one column contribute the same circular row interval.
+        for (int64_t col = packedBegin / heads; col <= (packedEnd - 1) / heads; ++col) {
+            if (heights[col] == 0) {
+                continue;
+            }
+            if (heights[col] == m) {
+                intervals = {{0, m}};
+                break;
+            }
+            int64_t start = (firstRows[col] - col) % m;
+            if (start < 0) {
+                start += m;
+            }
+            const int64_t end = start + heights[col];
+            intervals.emplace_back(start, std::min(end, m));
+            if (end > m) {
+                intervals.emplace_back(0, end - m);
+            }
+        }
+        std::sort(intervals.begin(), intervals.end());
+        int64_t unionLength = 0;
+        int64_t unionRuns = 0;
+        int64_t end = -1;
+        for (const auto& interval : intervals) {
+            if (interval.first > end) {
+                unionLength += interval.second - interval.first;
+                ++unionRuns;
+                end = interval.second;
+            } else if (interval.second > end) {
+                unionLength += interval.second - end;
+                end = interval.second;
+            }
+        }
+        const bool first = !intervals.empty() && intervals.front().first == 0;
+        result.activeRounds += unionLength;
+        result.activeRuns += unionRuns - static_cast<int64_t>(result.lastActive && first);
+        if (wave == 0) {
+            result.firstActive = first;
+        }
+        result.lastActive = end == m;
+    }
+    return result;
+}
+
+BandRoundActivity AccumulateBandActivity(const BandRoundActivity& full, int64_t fullCount,
+                                         const BandRoundActivity& tail)
+{
+    BandRoundActivity result;
+    result.rounds = fullCount * full.rounds + tail.rounds;
+    result.activeRounds = fullCount * full.activeRounds + tail.activeRounds;
+    result.activeRuns = fullCount * full.activeRuns + tail.activeRuns;
+    if (fullCount > 1 && full.firstActive && full.lastActive) {
+        result.activeRuns -= fullCount - 1;
+    }
+    if (fullCount > 0 && tail.rounds > 0 && full.lastActive && tail.firstActive) {
+        --result.activeRuns;
+    }
+    result.firstActive = fullCount > 0 ? full.firstActive : tail.firstActive;
+    result.lastActive = tail.rounds > 0 ? tail.lastActive : full.lastActive;
+    return result;
+}
+
+int64_t FloorDivideSigned(int64_t value, int64_t divisor)
+{
+    return value / divisor - static_cast<int64_t>(value % divisor < 0);
+}
+
+std::vector<int64_t> CalcBandPhysicalColumnHeights(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t b,
+                                                   const BandPhysicalWindow& window,
+                                                   std::vector<int64_t>* firstRows = nullptr)
+{
+    if (k <= 0 || k > MAX_CORE_NUM || b <= 1 || m <= 0 || n <= 0 || p <= 0 || q <= 0 || window.s1 <= 0 ||
+        window.s2 <= 0 || window.pre < INT32_MIN || window.pre > INT32_MAX || window.next < INT32_MIN ||
+        window.next > INT32_MAX || window.rowOffset < 0 || window.colOffset < 0) {
+        return {};
+    }
+    const int64_t maxHeads = std::min(k, b - 1);
+    const int64_t ownerVisits = maxHeads * (maxHeads + 1) / NUM_TWO;
+    if (n > MHA_BAND_MAX_COLUMN_EVALUATIONS / ownerVisits) {
+        return {};
+    }
+    constexpr int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
+    constexpr int64_t sparseAlign = static_cast<int64_t>(ConstAxisTemplateNum::NUM64);
+    const int64_t physicalRows = PositiveCeilDiv(window.s1, cubeBase);
+    const int64_t physicalCols = PositiveCeilDiv(window.s2, cubeBase);
+    if (physicalRows >= std::numeric_limits<uint32_t>::max() || physicalCols >= std::numeric_limits<uint32_t>::max() ||
+        window.rowOffset > physicalRows || window.colOffset > physicalCols || m > physicalRows - window.rowOffset ||
+        n > physicalCols - window.colOffset) {
+        return {};
+    }
+    std::vector<int64_t> heights(n, 0);
+    if (firstRows != nullptr) {
+        firstRows->assign(n, 0);
+    }
+    p = std::min(p, m);
+    q = std::min(q, n);
+    for (int64_t col = 0; col < n; ++col) {
+        const int64_t colLeft = (col + window.colOffset) * cubeBase;
+        const int64_t colRight = std::min(colLeft + cubeBase, window.s2);
+        if (colLeft >= window.s2 || window.s1 + window.next <= colLeft) {
+            continue;
+        }
+        const int64_t alignedRight = PositiveCeilDiv(colRight, sparseAlign) * sparseAlign;
+        // Exact IsValidForDeter BAND inequalities, including real Q/KV tails:
+        // rowEnd + next > colLeft; rowStart - pre < alignUp(colRight, 64).
+        // colLeft is 128-aligned, so its comparison cancels the other AlignTo64.
+        const int64_t firstRow = std::max(window.rowOffset, FloorDivideSigned(colLeft - window.next, cubeBase));
+        const int64_t lastRow = std::min({window.rowOffset + m - 1, PositiveCeilDiv(window.s1, cubeBase) - 1,
+                                          FloorDivideSigned(window.pre + alignedRight - 1, cubeBase)});
+        if (lastRow < firstRow) {
+            continue;
+        }
+        // The original scalar mapping must cover every actual task counted here.
+        // Otherwise neither its cost nor a change in coverage is an optimization baseline.
+        const int64_t firstGeometricRow = std::max<int64_t>(0, col - q + 1) + window.rowOffset;
+        const int64_t endGeometricRow = std::min(m, col + p) + window.rowOffset;
+        if (firstRow < firstGeometricRow || lastRow >= endGeometricRow) {
+            return {};
+        }
+        heights[col] = lastRow - firstRow + 1;
+        if (firstRows != nullptr) {
+            (*firstRows)[col] = firstRow - window.rowOffset;
+        }
+    }
+    return heights;
+}
+
+BandCoreLoads CalcBandGroupCoreLoads(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t heads,
+                                     const std::vector<int64_t>& columnHeights = {})
+{
+    BandCoreLoads loads{};
+    if (heads == 0) {
+        return loads;
+    }
+    const int64_t activeCores = std::min(k, heads * m);
+    for (int64_t column = 0; column < n; ++column) {
+        const int64_t firstRow = std::max<int64_t>(0, column - q + 1);
+        const int64_t endRow = std::min(m, column + p);
+        const int64_t height = columnHeights.empty() ? std::max<int64_t>(0, endRow - firstRow) : columnHeights[column];
+        for (int64_t head = 0; head < heads; ++head) {
+            loads[(column * heads + head) % activeCores] += height;
+        }
+    }
+    return loads;
+}
+
+BandCoreLoads AccumulateRotatedBandGroups(const BandCoreLoads& groupLoads, int64_t k, int64_t heads, int64_t groupCount)
+{
+    BandCoreLoads loads{};
+    const int64_t orbitCount = PositiveGcd(k, heads);
+    const int64_t period = k / orbitCount;
+    const int64_t fullPeriods = groupCount / period;
+    const int64_t remainder = groupCount % period;
+    // Each orbit is a circular window of group rotations. Its length is at most K,
+    // even for very large B*N2; selection never enumerates batches or tile rows.
+    for (int64_t root = 0; root < orbitCount; ++root) {
+        int64_t orbitSum = 0;
+        int64_t window = 0;
+        for (int64_t i = 0; i < period; ++i) {
+            const int64_t core = (root + i * heads) % k;
+            orbitSum += groupLoads[core];
+            if (i < remainder) {
+                window += groupLoads[core];
+            }
+        }
+        for (int64_t i = 0; i < period; ++i) {
+            const int64_t core = (root + i * heads) % k;
+            loads[core] = fullPeriods * orbitSum + window;
+            if (remainder != 0) {
+                window -= groupLoads[core];
+                window += groupLoads[(root + (i + remainder) * heads) % k];
+            }
+        }
+    }
+    return loads;
+}
+
+DeterBandScheduleResult SelectGroupedDeterBandSchedule(int64_t k, int64_t m, int64_t n, int64_t p, int64_t q, int64_t b,
+                                                       int64_t hostMaxRound,
+                                                       const std::vector<int64_t>& columnHeights = {},
+                                                       const std::vector<int64_t>& firstRows = {},
+                                                       const BandCacheFootprint& cache = {})
+{
+    DeterBandScheduleResult result;
+    if (k <= 0 || k > MAX_CORE_NUM || m <= 0 || n <= 0 || b <= 1 || p <= 0 || q <= 0 ||
+        m >= std::numeric_limits<uint32_t>::max() || n >= std::numeric_limits<uint32_t>::max()) {
+        return result;
+    }
+    if (columnHeights.size() != static_cast<size_t>(n) || firstRows.size() != columnHeights.size() ||
+        cache.l2Bytes == 0 || cache.perHeadBytes == 0) {
+        return result;
+    }
+    for (int64_t col = 0; col < n; ++col) {
+        if (firstRows[col] < 0 || columnHeights[col] < 0 || firstRows[col] > m ||
+            columnHeights[col] > m - firstRows[col]) {
+            return result;
+        }
+    }
+    p = std::min(p, m);
+    q = std::min(q, n);
+    // For wide bands, the legacy complete K-head chunks have equal valid work,
+    // and their remainder uses CalDenseIndex. Narrow-band tails use a different
+    // mapping; retain that path until its complete cost is modeled.
+    if (p + q <= m || m > std::numeric_limits<int64_t>::max() / n ||
+        b > std::numeric_limits<int64_t>::max() / (m * n)) {
+        return result;
+    }
+    const int64_t legacyRound = CalcLegacyDeterBandMaxRound(k, m, n, p, q, b, hostMaxRound);
+    if (legacyRound <= 0 || legacyRound >= std::numeric_limits<uint32_t>::max()) {
+        return result;
+    }
+    const int64_t maxHeads = std::min(k, b - 1);
+    const int64_t searchOwners = maxHeads * (maxHeads + 1) / NUM_TWO;
+    if (n > MHA_BAND_MAX_COLUMN_EVALUATIONS / searchOwners) {
+        return result;
+    }
+
+    const BandCoreLoads single = CalcBandGroupCoreLoads(k, m, n, p, q, 1, columnHeights);
+    int64_t validBlocks = 0;
+    for (int64_t core = 0; core < k; ++core) {
+        validBlocks += single[core];
+    }
+    const BandCoreLoads legacyTail = CalcBandGroupCoreLoads(k, m, n, p, q, b % k, columnHeights);
+    int64_t legacyMaxLoad = 0;
+    for (int64_t core = 0; core < k; ++core) {
+        legacyMaxLoad = std::max(legacyMaxLoad, (b / k) * validBlocks + legacyTail[core]);
+    }
+
+    // Every candidate uses M-row waves and at most min(K, B*M) owners.
+    // Per-group ceilings cannot beat this whole-operator wave lower bound.
+    const int64_t roundLowerBound = PositiveCeilDiv(n * b, std::min(k, b * m)) * m;
+    const int64_t loadLowerBound = PositiveCeilDiv(validBlocks * b, k);
+    int64_t bestMaxLoad = std::numeric_limits<int64_t>::max();
+    // Lexicographic cost: rounds, busiest core, spill, nonempty rounds, pipeline drain, H.
+    std::array<uint64_t, 6> bestCost;
+    bestCost.fill(std::numeric_limits<uint64_t>::max());
+    for (int64_t heads = 1; heads <= maxHeads; ++heads) {
+        const int64_t fullCount = b / heads;
+        const int64_t tailHeads = b % heads;
+        const int64_t activeCores = std::min(k, heads * m);
+        const int64_t fullRound = PositiveCeilDiv(n * heads, activeCores) * m;
+        const int64_t tailRound = tailHeads == 0 ? 0 : PositiveCeilDiv(n * tailHeads, std::min(k, tailHeads * m)) * m;
+        // The complete operator bound includes the independently drained tail group.
+        // Requiring a shorter group span gives a real locality improvement, without
+        // a shape whitelist or a fixed-D/cache-capacity threshold.
+        if (tailRound > legacyRound || fullRound > (legacyRound - tailRound) / fullCount || fullRound >= validBlocks) {
+            continue;
+        }
+        const int64_t totalRound = fullCount * fullRound + tailRound;
+        const uint64_t spillBytes = CalcBandSpillBytes(b, heads, cache);
+        if (spillBytes == std::numeric_limits<uint64_t>::max() ||
+            (result.mode != DeterBandScheduleMode::DISABLED &&
+             (totalRound > result.maxRound ||
+              (totalRound == result.maxRound && bestMaxLoad == loadLowerBound && spillBytes > bestCost[2])))) {
+            continue;
+        }
+        const BandCoreLoads fullLoads = CalcBandGroupCoreLoads(k, m, n, p, q, heads, columnHeights);
+        BandCoreLoads loads = AccumulateRotatedBandGroups(fullLoads, k, heads, fullCount);
+        const BandCoreLoads tailLoads = CalcBandGroupCoreLoads(k, m, n, p, q, tailHeads, columnHeights);
+        int64_t maxLoad = 0;
+        for (int64_t core = 0; core < k; ++core) {
+            loads[core] += tailLoads[(core + fullCount * heads) % k];
+            maxLoad = std::max(maxLoad, loads[core]);
+        }
+        if (maxLoad > legacyMaxLoad) {
+            continue;
+        }
+        const auto activity =
+            AccumulateBandActivity(CalcBandGroupActivity(k, m, heads, firstRows, columnHeights), fullCount,
+                                   CalcBandGroupActivity(k, m, tailHeads, firstRows, columnHeights));
+        // Invalid rounds still synchronize; count rounds carrying real work and the one-round drain.
+        const std::array<uint64_t, 6> cost{static_cast<uint64_t>(totalRound),
+                                           static_cast<uint64_t>(maxLoad),
+                                           spillBytes,
+                                           static_cast<uint64_t>(activity.activeRounds),
+                                           static_cast<uint64_t>(activity.activeRounds + activity.activeRuns),
+                                           static_cast<uint64_t>(heads)};
+        if (cost >= bestCost) {
+            continue;
+        }
+        bestCost = cost;
+        result.mode = DeterBandScheduleMode::GROUPED;
+        result.maxRound = totalRound;
+        result.m = m;
+        result.n = n;
+        result.p = p;
+        result.q = q;
+        bestMaxLoad = maxLoad;
+        auto& plan = result.groupedSchedule;
+        plan = {};
+        plan.phaseCount = 1;
+        plan.phases[0].m = m;
+        plan.phases[0].n = n;
+        plan.k = k;
+        plan.b = b;
+        plan.g = 1;
+        plan.groupsPerChunk = heads;
+        plan.fullRounds = fullRound;
+        plan.tailRounds = tailRound;
+        plan.totalRounds = totalRound;
+        // Two bounds alone cannot stop the search: a later H may reduce active rounds.
+        // Stop only when every cost has reached its absolute lower bound.
+        if (totalRound == roundLowerBound && maxLoad == loadLowerBound && spillBytes == 0 &&
+            activity.activeRounds == loadLowerBound && activity.activeRuns == 1) {
+            break;
+        }
+    }
+    return result;
+}
+
 BlockScheduleResult SelectBlockSchedule(const FuzzyBaseInfoParamsRegbase& params)
 {
     BlockScheduleResult result;
@@ -365,9 +791,10 @@ BlockScheduleResult SelectBlockSchedule(const FuzzyBaseInfoParamsRegbase& params
         return result;
     }
 
-    if (params.g > 1 && params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND)) {
+    if (params.g > 1 && (params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND) ||
+                         params.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL))) {
         const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
-        // The common swizzle gate controls every GQA BAND candidate. Candidate
+        // The common swizzle gate controls every GQA BAND/CAUSAL candidate. Candidate
         // admission remains a later decision and can retain the original mapping.
         result.isSwizzle = canSwizzle && params.aicNum > 0 && params.aicNum <= MAX_CORE_NUM &&
                            params.coreNum == params.aicNum * NUM_TWO && params.b > params.tailZeroCount &&
@@ -412,6 +839,31 @@ BlockScheduleResult SelectBlockSchedule(const FuzzyBaseInfoParamsRegbase& params
     result.deterBandSchedule =
         SelectDeterBandSchedule(static_cast<int64_t>(params.aicNum), scheduleParams.m, scheduleParams.n,
                                 scheduleParams.p, scheduleParams.q, actualBatch, params.deterMaxRound);
+    if (result.deterBandSchedule.mode == DeterBandScheduleMode::DISABLED &&
+        params.sparseMode == static_cast<uint32_t>(SparseMode::BAND) && params.attenMaskOptional != EMPTY_TENSOR &&
+        cubeBase == static_cast<int64_t>(ConstAxisTemplateNum::NUM128) &&
+        (params.queryType == ge::DT_FLOAT16 || params.queryType == ge::DT_BF16) && params.keepProb == 1.0F &&
+        params.pseOptional == EMPTY_TENSOR && !params.hasRope) {
+        // Preserve accepted hybrid schedules. Model the actual masked column heights
+        // before comparing a new grouping against the complete legacy path.
+        const int64_t rowOffset = q < 0 ? -q : 0;
+        const int64_t colOffset = p < 0 ? -p : 0;
+        const BandPhysicalWindow window{params.s1,         params.s2, serializedS1Token,
+                                        serializedS2Token, rowOffset, colOffset};
+        std::vector<int64_t> firstRows;
+        const auto cache =
+            CalcBandCacheFootprint(static_cast<int64_t>(params.aicNum), params.s1, params.s2, params.d, params.d1,
+                                   FP16_BYTES, params.outDtype == DtypeEnum::FLOAT32 ? FP32_BYTES : FP16_BYTES,
+                                   params.enablePreSfmg, COMPRESS_ATTEN_MASK_SIZE, params.l2CacheSize);
+        const auto heights =
+            CalcBandPhysicalColumnHeights(static_cast<int64_t>(params.aicNum), scheduleParams.m, scheduleParams.n,
+                                          scheduleParams.p, scheduleParams.q, actualBatch, window, &firstRows);
+        if (!heights.empty()) {
+            result.deterBandSchedule = SelectGroupedDeterBandSchedule(
+                static_cast<int64_t>(params.aicNum), scheduleParams.m, scheduleParams.n, scheduleParams.p,
+                scheduleParams.q, actualBatch, params.deterMaxRound, heights, firstRows, cache);
+        }
+    }
     if (result.deterBandSchedule.mode != DeterBandScheduleMode::DISABLED) {
         result.isSwizzle = true;
     }
@@ -934,7 +1386,13 @@ void FlashAttentionScoreGradTilingNormalRegbase::DetermineBlockSchedule()
     const bool isGqaBand = fBaseParams.isDeterministic && fBaseParams.layoutType != INPUT_FORMAT_TND &&
                            fBaseParams.g > 1 &&
                            fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND);
-    if (isGqaBand) {
+    const bool isGqaCausal = fBaseParams.isDeterministic && fBaseParams.layoutType != INPUT_FORMAT_TND &&
+                             fBaseParams.g > 1 &&
+                             fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL);
+    const bool resetGroupedMha = fBaseParams.isDeterministic && fBaseParams.layoutType != INPUT_FORMAT_TND &&
+                                 fBaseParams.g == 1 &&
+                                 fBaseParams.deterBandScheduleMode == DeterBandScheduleMode::GROUPED;
+    if (isGqaBand || isGqaCausal || resetGroupedMha) {
         // Restore the legacy plan and round bound before applying the master gate,
         // including when this host object previously selected an optimized plan.
         // This retains the existing split-mode and effective-batch normalization.
@@ -945,17 +1403,32 @@ void FlashAttentionScoreGradTilingNormalRegbase::DetermineBlockSchedule()
         fBaseParams.isSwizzle = result.isSwizzle;
     }
     fBaseParams.deterBandScheduleMode = result.deterBandSchedule.mode;
-    if (isGqaBand && fBaseParams.isSwizzle) {
+    if ((isGqaBand || isGqaCausal) && fBaseParams.isSwizzle) {
         const int64_t cubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
         const bool originalSquareBase = fBaseParams.s1Inner * fBaseParams.s1CvRatio == cubeBase &&
                                         fBaseParams.s2Inner * fBaseParams.s2CvRatio == cubeBase;
         const auto originalBatch = fBaseParams.b;
         fBaseParams.b -= fBaseParams.tailZeroCount;
-        SelectGqaBandSchedule(fBaseParams, originalSquareBase);
+        if (isGqaCausal) {
+            // For GQA CAUSAL the template bit denotes the final selected mapping.
+            fBaseParams.isSwizzle = CalcleCausalDeterParam(fBaseParams, originalSquareBase);
+        } else {
+            SelectGqaBandSchedule(fBaseParams, originalSquareBase);
+        }
         fBaseParams.b = originalBatch;
+    }
+    if (isGqaCausal) {
+        OP_LOGI(context_,
+                "Select deterministic GQA CAUSAL schedule, isSwizzle=[%d], groups=[%u], "
+                "roundsPerGroup=[%ld], maxRound=[%ld], l2Bytes=[%lu]",
+                static_cast<int>(fBaseParams.isSwizzle), static_cast<uint32_t>(fBaseParams.deterGqaCausalGroups),
+                fBaseParams.deterGqaCausalRoundsPerGroup, fBaseParams.deterMaxRound, fBaseParams.l2CacheSize);
     }
     if (result.deterBandSchedule.mode != DeterBandScheduleMode::DISABLED) {
         fBaseParams.deterMaxRound = result.deterBandSchedule.maxRound;
+        if (result.deterBandSchedule.mode == DeterBandScheduleMode::GROUPED) {
+            fBaseParams.deterGqaBandSchedule = result.deterBandSchedule.groupedSchedule;
+        }
         const int64_t actualBatch = (fBaseParams.b - fBaseParams.tailZeroCount) * fBaseParams.n2;
         OP_LOGI(context_,
                 "Select deterministic BAND schedule, mode=[%u], maxRound=[%ld], k=[%lu], b=[%ld], "
@@ -1377,8 +1850,8 @@ uint8_t FlashAttentionScoreGradTilingNormalRegbase::GetSparseType()
 
 void FlashAttentionScoreGradTilingNormalRegbase::CalcleDeterParam()
 {
-    fBaseParams.deterGqaCausalScheduleMode = DeterGqaCausalScheduleMode::ORIGINAL;
-    fBaseParams.deterGqaCausalRoundsPerBatch = 0;
+    fBaseParams.deterGqaCausalRoundsPerGroup = 0;
+    fBaseParams.deterGqaCausalGroups = 0;
     fBaseParams.deterGqaBandScheduleMode = DeterGqaBandScheduleMode::ORIGINAL;
     fBaseParams.deterGqaBandGroups = 0;
     fBaseParams.deterGqaBandSchedule = GqaBandSchedule{};
@@ -1420,16 +1893,8 @@ void FlashAttentionScoreGradTilingNormalRegbase::CalcleDeterParam()
     }
     if (fBaseParams.layoutType != INPUT_FORMAT_TND &&
         fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_CAUSAL)) {
-        // Use the original basic-block shape, before the temporary split-mode normalization above.
-        const int64_t causalCubeBase = static_cast<int64_t>(ConstAxisTemplateNum::NUM128);
-        const bool enableBatchMajor = cubebaseM == causalCubeBase && cubebaseN == causalCubeBase;
-        CalcleCausalDeterParam(fBaseParams, enableBatchMajor);
-        if (fBaseParams.g > 1) {
-            OP_LOGI(context_,
-                    "Select deterministic GQA CAUSAL schedule, mode=[%u], roundsPerBatch=[%ld], maxRound=[%ld]",
-                    static_cast<uint32_t>(fBaseParams.deterGqaCausalScheduleMode),
-                    fBaseParams.deterGqaCausalRoundsPerBatch, fBaseParams.deterMaxRound);
-        }
+        // Calculate original rounds here. Grouped selection runs only after the swizzle gate is known.
+        CalcleCausalDeterParam(fBaseParams);
     } else if (fBaseParams.layoutType != INPUT_FORMAT_TND &&
                fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND)) {
         // GQA BAND optimization is selected only after the swizzle gate is known.
@@ -2434,11 +2899,10 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::SaveToTilingData()
     // Keep the old ABI byte reserved; bit 53 of tilingKey now selects the compiled schedule.
     s1s2BNGS1S2BaseParams_->set_isSplitByBlockIdx(0);
     s1s2BNGS1S2BaseParams_->set_deterBandScheduleMode(static_cast<uint8_t>(fBaseParams.deterBandScheduleMode));
-    s1s2BNGS1S2BaseParams_->set_deterGqaCausalScheduleMode(
-        static_cast<uint8_t>(fBaseParams.deterGqaCausalScheduleMode));
+    s1s2BNGS1S2BaseParams_->reservedGqaCausal = 0;
     s1s2BNGS1S2BaseParams_->set_deterGqaBandScheduleMode(static_cast<uint8_t>(fBaseParams.deterGqaBandScheduleMode));
     s1s2BNGS1S2BaseParams_->set_deterGqaBandGroups(fBaseParams.deterGqaBandGroups);
-    s1s2BNGS1S2BaseParams_->set_reservedPad();
+    s1s2BNGS1S2BaseParams_->set_deterGqaCausalGroups(fBaseParams.deterGqaCausalGroups);
     s1s2BNGS1S2BaseParams_->set_totalPerBatchNum(0);
     if (fBaseParams.layoutType != INPUT_FORMAT_TND && fBaseParams.isSwizzle) {
         s1s2BNGS1S2BaseParams_->set_totalPerBatchNum(GetTotalPerBatchNum(fBaseParams, fBaseParams.sparseType));
@@ -2462,8 +2926,8 @@ ge::graphStatus FlashAttentionScoreGradTilingNormalRegbase::SaveToTilingData()
     if (fBaseParams.isDeterministic) {
         baseDeterParam_->set_noNeedDeter(fBaseParams.noNeedDeter);
         baseDeterParam_->set_deterMaxRound(fBaseParams.deterMaxRound);
-        baseDeterParam_->set_deterGqaCausalRoundsPerBatch(
-            static_cast<uint32_t>(fBaseParams.deterGqaCausalRoundsPerBatch));
+        baseDeterParam_->set_deterGqaCausalRoundsPerGroup(
+            static_cast<uint32_t>(fBaseParams.deterGqaCausalRoundsPerGroup));
         if ((fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_BAND) ||
              fBaseParams.deterSparseType == static_cast<uint32_t>(DeterSparseType::DETER_DENSE)) &&
             fBaseParams.layoutType == INPUT_FORMAT_TND) {

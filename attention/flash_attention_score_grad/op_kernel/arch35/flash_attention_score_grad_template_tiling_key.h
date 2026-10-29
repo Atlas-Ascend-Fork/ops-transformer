@@ -130,7 +130,7 @@ ASCENDC_TPL_ARGS_DECL(FlashAttentionScoreGrad, // 算子唯一标识，可以opT
                       ASCENDC_TPL_BOOL_DECL(IsRegbase, 0, 1), );
 
 // Non-TND swizzle requires BN2GS1S2 with square basic blocks. NO_DETER supports all G.
-// IsSwizzle also gates deterministic GQA BAND optimization for 128x128 basic blocks;
+// IsSwizzle also gates deterministic GQA BAND/CAUSAL optimization for 128x128 basic blocks;
 // its runtime schedule mode selects an admitted plan or the original mapping.
 // Non-TND selectors retain the original non-TND tiling structs.
 ASCENDC_TPL_SEL(
@@ -253,7 +253,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 0), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
         ASCENDC_TPL_TILING_STRUCT_SEL(FagTilingWithTemplateTFFF)),
-    // Swizzle-gated GQA BAND plans and their original-mapping fallback share the BAND layout.
+    // Swizzle-gated GQA CAUSAL/BAND plans retain their original tiling layouts.
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_BOOL_SEL(IsEmptyTensor, 0), ASCENDC_TPL_UINT_SEL(SplitAxis, ASCENDC_TPL_UI_LIST, 0),
         ASCENDC_TPL_UINT_SEL(InputDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsTnd, 0),
@@ -261,7 +261,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(S1TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(S2TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(DTemplateNum, ASCENDC_TPL_UI_LIST, 64, 192, 256, 768),
-        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
+        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 3, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
         ASCENDC_TPL_BOOL_SEL(IsBn2MultiBlk, 0), ASCENDC_TPL_BOOL_SEL(IsDNoEqual, 0, 1), ASCENDC_TPL_BOOL_SEL(IsRope, 0),
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 1), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
@@ -317,7 +317,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0, 1),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 0), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
         ASCENDC_TPL_TILING_STRUCT_SEL(FagTilingWithTemplateTFFF)),
-    // Swizzle-gated GQA BAND plans and their original-mapping fallback share the BAND layout.
+    // Swizzle-gated GQA CAUSAL/BAND plans retain their original tiling layouts.
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_BOOL_SEL(IsEmptyTensor, 0), ASCENDC_TPL_UINT_SEL(SplitAxis, ASCENDC_TPL_UI_LIST, 0),
         ASCENDC_TPL_UINT_SEL(InputDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsTnd, 0),
@@ -325,7 +325,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(S1TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(S2TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(DTemplateNum, ASCENDC_TPL_UI_LIST, 128),
-        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
+        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 3, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
         ASCENDC_TPL_BOOL_SEL(IsBn2MultiBlk, 0), ASCENDC_TPL_BOOL_SEL(IsDNoEqual, 0, 1), ASCENDC_TPL_BOOL_SEL(IsRope, 0),
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0, 1),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 1), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
@@ -588,7 +588,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 0), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
         ASCENDC_TPL_TILING_STRUCT_SEL(FagTilingWithTemplateTFFF)),
-    // Swizzle-gated GQA BAND plans and their original-mapping fallback share the BAND layout.
+    // Swizzle-gated GQA CAUSAL/BAND plans retain their original tiling layouts.
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_BOOL_SEL(IsEmptyTensor, 0), ASCENDC_TPL_UINT_SEL(SplitAxis, ASCENDC_TPL_UI_LIST, 0),
         ASCENDC_TPL_UINT_SEL(InputDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsTnd, 0),
@@ -596,7 +596,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(S1TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(S2TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(DTemplateNum, ASCENDC_TPL_UI_LIST, 192),
-        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
+        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 3, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
         ASCENDC_TPL_BOOL_SEL(IsBn2MultiBlk, 0), ASCENDC_TPL_BOOL_SEL(IsDNoEqual, 1), ASCENDC_TPL_BOOL_SEL(IsRope, 1),
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 3), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 1), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
@@ -902,7 +902,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 0), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
         ASCENDC_TPL_TILING_STRUCT_SEL(FagTilingWithTemplateTFFF)),
-    // Swizzle-gated GQA BAND plans and their original-mapping fallback share the BAND layout.
+    // Swizzle-gated GQA CAUSAL/BAND plans retain their original tiling layouts.
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_BOOL_SEL(IsEmptyTensor, 0), ASCENDC_TPL_UINT_SEL(SplitAxis, ASCENDC_TPL_UI_LIST, 0),
         ASCENDC_TPL_UINT_SEL(InputDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsTnd, 0),
@@ -910,7 +910,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(S1TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(S2TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(DTemplateNum, ASCENDC_TPL_UI_LIST, 64, 192, 256, 768),
-        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
+        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 3, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
         ASCENDC_TPL_BOOL_SEL(IsBn2MultiBlk, 0), ASCENDC_TPL_BOOL_SEL(IsDNoEqual, 0, 1), ASCENDC_TPL_BOOL_SEL(IsRope, 0),
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 1), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
@@ -966,7 +966,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0, 1),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 0), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
         ASCENDC_TPL_TILING_STRUCT_SEL(FagTilingWithTemplateTFFF)),
-    // Swizzle-gated GQA BAND plans and their original-mapping fallback share the BAND layout.
+    // Swizzle-gated GQA CAUSAL/BAND plans retain their original tiling layouts.
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_BOOL_SEL(IsEmptyTensor, 0), ASCENDC_TPL_UINT_SEL(SplitAxis, ASCENDC_TPL_UI_LIST, 0),
         ASCENDC_TPL_UINT_SEL(InputDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsTnd, 0),
@@ -974,7 +974,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(S1TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(S2TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(DTemplateNum, ASCENDC_TPL_UI_LIST, 128),
-        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
+        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 3, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
         ASCENDC_TPL_BOOL_SEL(IsBn2MultiBlk, 0), ASCENDC_TPL_BOOL_SEL(IsDNoEqual, 0, 1), ASCENDC_TPL_BOOL_SEL(IsRope, 0),
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0, 1),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 1), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
@@ -1237,7 +1237,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 0), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
         ASCENDC_TPL_TILING_STRUCT_SEL(FagTilingWithTemplateTFFF)),
-    // Swizzle-gated GQA BAND plans and their original-mapping fallback share the BAND layout.
+    // Swizzle-gated GQA CAUSAL/BAND plans retain their original tiling layouts.
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_BOOL_SEL(IsEmptyTensor, 0), ASCENDC_TPL_UINT_SEL(SplitAxis, ASCENDC_TPL_UI_LIST, 0),
         ASCENDC_TPL_UINT_SEL(InputDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsTnd, 0),
@@ -1245,7 +1245,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(S1TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(S2TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(DTemplateNum, ASCENDC_TPL_UI_LIST, 192),
-        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
+        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 3, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
         ASCENDC_TPL_BOOL_SEL(IsBn2MultiBlk, 0), ASCENDC_TPL_BOOL_SEL(IsDNoEqual, 1), ASCENDC_TPL_BOOL_SEL(IsRope, 1),
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 2), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 1), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
@@ -1526,7 +1526,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 1), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 0), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),
         ASCENDC_TPL_TILING_STRUCT_SEL(FagTilingWithTemplateTFFF)),
-    // Swizzle-gated GQA BAND plans and their original-mapping fallback share the BAND layout.
+    // Swizzle-gated GQA CAUSAL/BAND plans retain their original tiling layouts.
     ASCENDC_TPL_ARGS_SEL(
         ASCENDC_TPL_BOOL_SEL(IsEmptyTensor, 0), ASCENDC_TPL_UINT_SEL(SplitAxis, ASCENDC_TPL_UI_LIST, 0),
         ASCENDC_TPL_UINT_SEL(InputDType, ASCENDC_TPL_UI_LIST, 1), ASCENDC_TPL_BOOL_SEL(IsTnd, 0),
@@ -1534,7 +1534,7 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_UINT_SEL(S1TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(S2TemplateNum, ASCENDC_TPL_UI_LIST, 128),
         ASCENDC_TPL_UINT_SEL(DTemplateNum, ASCENDC_TPL_UI_LIST, 64, 128, 192, 256),
-        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
+        ASCENDC_TPL_UINT_SEL(DeterType, ASCENDC_TPL_UI_LIST, 3, 4, 5, 6, 7, 8, 9), ASCENDC_TPL_BOOL_SEL(IsNEqual, 0),
         ASCENDC_TPL_BOOL_SEL(IsBn2MultiBlk, 0), ASCENDC_TPL_BOOL_SEL(IsDNoEqual, 0, 1), ASCENDC_TPL_BOOL_SEL(IsRope, 0),
         ASCENDC_TPL_UINT_SEL(OutDType, ASCENDC_TPL_UI_LIST, 1), ASCENDC_TPL_BOOL_SEL(IsNzOut, 0),
         ASCENDC_TPL_BOOL_SEL(IsSwizzle, 1), ASCENDC_TPL_BOOL_SEL(IsRegbase, 1),

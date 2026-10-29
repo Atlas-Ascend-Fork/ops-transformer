@@ -31,12 +31,8 @@ enum class DeterBandScheduleMode : uint8_t {
     CAUSAL = 1,
     DENSE = 2,
     BAND = 3,
-    CAUSAL_UPPER = 4
-};
-
-enum class DeterGqaCausalScheduleMode : uint8_t {
-    ORIGINAL = 0,
-    BATCH_MAJOR = 1
+    CAUSAL_UPPER = 4,
+    GROUPED = 5
 };
 
 enum class DeterGqaBandScheduleMode : uint8_t {
@@ -252,9 +248,9 @@ public:
     uint64_t s1SinkOuter;
     uint64_t s2SinkOuter;
     uint8_t deterBandScheduleMode;
-    uint8_t deterGqaCausalScheduleMode;
+    uint8_t reservedGqaCausal; // Former CAUSAL mode byte; keep zero and preserve the tiling ABI.
     uint8_t deterGqaBandScheduleMode;
-    uint8_t reservedPad[1]; // Keep the existing 200-byte layout by using reserved bytes.
+    uint8_t deterGqaCausalGroups; // Reuse the final padding byte; keep the 200-byte layout.
     uint32_t deterGqaBandGroups;
 
     int64_t get_coreNum() const
@@ -388,10 +384,6 @@ public:
     uint8_t get_deterBandScheduleMode() const
     {
         return deterBandScheduleMode;
-    }
-    uint8_t get_deterGqaCausalScheduleMode() const
-    {
-        return deterGqaCausalScheduleMode;
     }
     uint8_t get_deterGqaBandScheduleMode() const
     {
@@ -546,10 +538,6 @@ public:
     {
         this->deterBandScheduleMode = deterBandScheduleModeParam;
     }
-    void set_deterGqaCausalScheduleMode(uint8_t deterGqaCausalScheduleModeParam)
-    {
-        this->deterGqaCausalScheduleMode = deterGqaCausalScheduleModeParam;
-    }
     void set_deterGqaBandScheduleMode(uint8_t value)
     {
         deterGqaBandScheduleMode = value;
@@ -558,11 +546,13 @@ public:
     {
         deterGqaBandGroups = value;
     }
-    void set_reservedPad(uint8_t reservedPadVal = 0)
+    uint8_t get_deterGqaCausalGroups() const
     {
-        for (uint32_t i = 0; i < sizeof(reservedPad); ++i) {
-            reservedPad[i] = reservedPadVal;
-        }
+        return deterGqaCausalGroups;
+    }
+    void set_deterGqaCausalGroups(uint8_t value)
+    {
+        deterGqaCausalGroups = value;
     }
 };
 
@@ -1269,7 +1259,7 @@ public:
 class BaseDeterParamRegbase {
 public:
     uint32_t noNeedDeter;
-    uint32_t deterGqaCausalRoundsPerBatch;
+    uint32_t deterGqaCausalRoundsPerGroup;
     int64_t deterMaxRound;
     uint64_t deterGmOffset;
     uint64_t deterWorkSpaceOffset;
@@ -1284,9 +1274,9 @@ public:
     {
         return deterMaxRound;
     }
-    uint32_t get_deterGqaCausalRoundsPerBatch() const
+    uint32_t get_deterGqaCausalRoundsPerGroup() const
     {
-        return deterGqaCausalRoundsPerBatch;
+        return deterGqaCausalRoundsPerGroup;
     }
     uint64_t get_deterGmOffset() const
     {
@@ -1321,9 +1311,9 @@ public:
     {
         deterMaxRound = value;
     }
-    void set_deterGqaCausalRoundsPerBatch(uint32_t value)
+    void set_deterGqaCausalRoundsPerGroup(uint32_t value)
     {
-        deterGqaCausalRoundsPerBatch = value;
+        deterGqaCausalRoundsPerGroup = value;
     }
     void set_deterGmOffset(uint64_t value)
     {

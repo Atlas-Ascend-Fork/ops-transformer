@@ -143,9 +143,6 @@ constexpr int64_t GQA_DENSE_MAX_ROUND_GROWTH_PERCENT = 3;
 constexpr int64_t GQA_DENSE_MAX_INVALID_PERCENT = 4;
 constexpr int64_t GQA_DENSE_PERCENT_BASE = 100;
 
-constexpr int64_t GQA_CAUSAL_BATCH_MAJOR_MAX_ROUND_GROWTH_PERCENT = 0;
-constexpr int64_t GQA_CAUSAL_BATCH_MAJOR_PERCENT_BASE = 100;
-
 constexpr int64_t TND_DETER_SWIZZLE_MIN_SLOT_UTILIZATION_PERCENT = 90;
 constexpr int64_t TND_DETER_SWIZZLE_MAX_ROUND_GROWTH_PERCENT = 3;
 constexpr int64_t TND_DETER_SWIZZLE_PERCENT_BASE = 100;
@@ -479,8 +476,8 @@ struct FuzzyBaseInfoParamsRegbase { // 频繁使用的基础参数
     // 核 c 独占线性任务号区间 (deterColStart[c], deterColStart[c + 1]]
     int64_t deterColStart[CORE_LIST_NUM + 1] = {0};
     int64_t deterMaxRound = 0;
-    DeterGqaCausalScheduleMode deterGqaCausalScheduleMode = DeterGqaCausalScheduleMode::ORIGINAL;
-    int64_t deterGqaCausalRoundsPerBatch = 0;
+    int64_t deterGqaCausalRoundsPerGroup = 0;
+    uint8_t deterGqaCausalGroups = 0;
     DeterGqaBandScheduleMode deterGqaBandScheduleMode = DeterGqaBandScheduleMode::ORIGINAL;
     uint32_t deterGqaBandGroups = 0;
     GqaBandSchedule deterGqaBandSchedule{};
@@ -618,7 +615,8 @@ bool CheckPrefixNExist(FuzzyBaseInfoParamsRegbase& fBaseParams, const int64_t bI
 void CalcleBandDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams);
 void SelectGqaBandSchedule(FuzzyBaseInfoParamsRegbase& params, bool originalSquareBase);
 int64_t CalcCausalDeterRound(int64_t k, int64_t m, int64_t n, int64_t b, int64_t g);
-void CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams, bool enableBatchMajor = false);
+// Returns whether a grouped schedule was selected; otherwise retains the original round bound.
+bool CalcleCausalDeterParam(FuzzyBaseInfoParamsRegbase& fBaseParams, bool enableGrouped = false);
 void SetSparsePrefixBlockInterval(const FuzzyBaseInfoParamsRegbase& fBaseParams, int64_t bIdx, int64_t nIdx,
                                   std::vector<std::vector<std::pair<int64_t, int64_t>>>& s1ValidIdx,
                                   int64_t (&blockStarts)[CORE_LIST_NUM], int64_t (&blockEnds)[CORE_LIST_NUM],
