@@ -12,6 +12,9 @@
  * \file lightning_indexer_grad_tiling.cpp
  * \brief
  */
+#include <string>
+#include "base/err_msg.h"
+#include "log/log.h"
 #include "../op_kernel/lightning_indexer_grad_tiling.h"
 #include "lightning_indexer_grad_tiling_data.h"
 #include "../op_kernel/lightning_indexer_grad_template_tiling_key.h"
@@ -88,16 +91,27 @@ ge::graphStatus LightningIndexerGradTiling::DoTiling()
 {
     opName_ = context_->GetNodeName();
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        platformInfo_ == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"LightningIndexerGrad", "GetPlatformInfo is nullptr."})),
+        return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
     uint32_t blockDim = ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum);
-    OP_CHECK_IF(blockDim <= 0, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "blockDim must be greater than 0."),
+    OP_CHECK_IF(blockDim <= 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"LightningIndexerGrad", "blockDim must be greater than 0."})),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(blockDim > LIG_MAX_CORE_NUM,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "blockDim must not exceed %u, but got %u.",
-                                            LIG_MAX_CORE_NUM, blockDim),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"LightningIndexerGrad", (std::string("blockDim must not exceed ") +
+                                                                       std::to_string(LIG_MAX_CORE_NUM) + ", but got " +
+                                                                       std::to_string(blockDim) + ".")
+                                                                          .c_str()})),
                 return ge::GRAPH_FAILED);
 
     uint64_t workspaceOffset = ascendcPlatform.GetLibApiWorkSpaceSize();
@@ -143,15 +157,19 @@ ge::graphStatus LightningIndexerGradTiling::DoTiling()
         seqlenK = static_cast<uint32_t>(opParamInfo.key.shape->GetStorageShape().GetDim(DIM_IDX_TWO));
         headNumK = static_cast<uint32_t>(opParamInfo.key.shape->GetStorageShape().GetDim(DIM_IDX_THREE));
         topK = static_cast<uint32_t>(opParamInfo.dy.shape->GetStorageShape().GetDim(dyShapeDim - 1));
-        OP_CHECK_IF((batch <= 0) || (seqlenQ <= 0) || (seqlenK <= 0) || (headNumQ <= 0) || (headNumK <= 0) ||
-                        (topK <= 0) || (topK > MAX_TOPK),
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        context_->GetNodeName(),
-                        "invalid shape: batch, seqlenQ, seqlenK, headNumQ, headNumK and topK must be > 0, "
-                        "and topK must be <= %lu, but got "
-                        "batch=%u, seqlenQ=%u, seqlenK=%u, headNumQ=%u, headNumK=%u, topK=%u",
-                        MAX_TOPK, batch, seqlenQ, seqlenK, headNumQ, headNumK, topK),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            (batch <= 0) || (seqlenQ <= 0) || (seqlenK <= 0) || (headNumQ <= 0) || (headNumK <= 0) || (topK <= 0) ||
+                (topK > MAX_TOPK),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "LightningIndexerGrad", "query,key,dy",
+                (std::string("batch=") + std::to_string(batch) + ",seqlen_q=" + std::to_string(seqlenQ) +
+                 ",seqlen_k=" + std::to_string(seqlenK) + ",head_num_q=" + std::to_string(headNumQ) +
+                 ",head_num_k=" + std::to_string(headNumK) + ",topk=" + std::to_string(topK))
+                    .c_str(),
+                (std::string("Batch, sequence lengths, head counts and topk must be positive; topk must not exceed ") +
+                 std::to_string(MAX_TOPK))
+                    .c_str()),
+            return ge::GRAPH_FAILED);
         groupNum = headNumQ / headNumK;
         dkSize = batch * seqlenK * headNumK * headDim;
         inputLayout = LAYOUT_BSND;
@@ -161,10 +179,9 @@ ge::graphStatus LightningIndexerGradTiling::DoTiling()
         opParamInfo.actualSeqLengthsK.tensor = context_->GetOptionalInputTensor(ACTUAL_SEQ_K_INDEX);
         opParamInfo.actualSeqLengthsK.desc = context_->GetOptionalInputDesc(ACTUAL_SEQ_K_INDEX);
         OP_CHECK_IF(opParamInfo.actualSeqLengthsQ.tensor == nullptr || opParamInfo.actualSeqLengthsK.tensor == nullptr,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        context_->GetNodeName(),
-                        "TND layout requires actual_seq_lengths_query and actual_seq_lengths_key to be provided, "
-                        "but got null."),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("LightningIndexerGrad",
+                                                             "actual_seq_lengths_query,actual_seq_lengths_key",
+                                                             "Both inputs are required when layout is TND."),
                     return ge::GRAPH_FAILED);
 
         batch = static_cast<uint32_t>(opParamInfo.actualSeqLengthsQ.tensor->GetShapeSize());
@@ -174,37 +191,46 @@ ge::graphStatus LightningIndexerGradTiling::DoTiling()
         seqlenK = static_cast<uint32_t>(opParamInfo.key.shape->GetStorageShape().GetDim(DIM_IDX_ONE));
         headNumK = static_cast<uint32_t>(opParamInfo.key.shape->GetStorageShape().GetDim(DIM_IDX_TWO));
         topK = static_cast<uint32_t>(opParamInfo.dy.shape->GetStorageShape().GetDim(dyShapeDim - 1));
-        OP_CHECK_IF((batch <= 0) || (seqlenQ <= 0) || (seqlenK <= 0) || (headNumQ <= 0) || (headNumK <= 0) ||
-                        (topK <= 0) || (topK > MAX_TOPK),
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        context_->GetNodeName(),
-                        "invalid shape: batch, seqlenQ, seqlenK, headNumQ, headNumK and topK must be > 0, "
-                        "and topK must be <= %lu, but got "
-                        "batch=%u, seqlenQ=%u, seqlenK=%u, headNumQ=%u, headNumK=%u, topK=%u",
-                        MAX_TOPK, batch, seqlenQ, seqlenK, headNumQ, headNumK, topK),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            (batch <= 0) || (seqlenQ <= 0) || (seqlenK <= 0) || (headNumQ <= 0) || (headNumK <= 0) || (topK <= 0) ||
+                (topK > MAX_TOPK),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "LightningIndexerGrad", "query,key,dy",
+                (std::string("batch=") + std::to_string(batch) + ",seqlen_q=" + std::to_string(seqlenQ) +
+                 ",seqlen_k=" + std::to_string(seqlenK) + ",head_num_q=" + std::to_string(headNumQ) +
+                 ",head_num_k=" + std::to_string(headNumK) + ",topk=" + std::to_string(topK))
+                    .c_str(),
+                (std::string("Batch, sequence lengths, head counts and topk must be positive; topk must not exceed ") +
+                 std::to_string(MAX_TOPK))
+                    .c_str()),
+            return ge::GRAPH_FAILED);
         groupNum = headNumQ / headNumK;
         dkSize = seqlenK * headNumK * headDim;
         inputLayout = LAYOUT_TND;
     } else {
-        OP_LOGE(context_, "only support layout is BSND and TND, but got %s.\n", opParamInfo.layout);
+        OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON("LightningIndexerGrad", "layout", opParamInfo.layout,
+                                               "Supported layouts are BSND and TND.");
         return ge::GRAPH_FAILED;
     }
 
     uint32_t dkCoreSize = seqlenK * headDim;
     // check headDim, groupNum, headNumK
-    OP_CHECK_IF(
-        (headDim != MAX_HEADIM) || (groupNum <= 0) || (groupNum > MAX_GROUPNUM) || (headNumK != LIMIT_HEADNUMK),
-        OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(),
-                                    "only support headDim is %lu, groupNum is in range [1, %lu], headNumK is %lu, "
-                                    "but current headDim is %lu, groupNum is %lu, headNumK is %lu",
-                                    MAX_HEADIM, MAX_GROUPNUM, LIMIT_HEADNUMK, static_cast<uint64_t>(headDim),
-                                    static_cast<uint64_t>(groupNum), static_cast<uint64_t>(headNumK)),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF((headDim != MAX_HEADIM) || (groupNum <= 0) || (groupNum > MAX_GROUPNUM) || (headNumK != LIMIT_HEADNUMK),
+                OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                    "LightningIndexerGrad", "query,key",
+                    (std::string("query.D=") + std::to_string(headDim) +
+                     ",query_heads/key_heads=" + std::to_string(groupNum) + ",key.heads=" + std::to_string(headNumK))
+                        .c_str(),
+                    (std::string("head_dim must equal ") + std::to_string(MAX_HEADIM) + "; group_num must be in [1," +
+                     std::to_string(MAX_GROUPNUM) + "]; head_num_k must equal " + std::to_string(LIMIT_HEADNUMK))
+                        .c_str()),
+                return ge::GRAPH_FAILED);
 
     // check sparseMode
     OP_CHECK_IF((opParamInfo.sparseMode != 0) && (opParamInfo.sparseMode != 3),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "sparseMode only support value is 0 or 3"),
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("LightningIndexerGrad", "sparseMode",
+                                                      std::to_string(opParamInfo.sparseMode).c_str(),
+                                                      "Supported sparseMode values are 0 and 3."),
                 return ge::GRAPH_FAILED);
 
     uint32_t usedAicNum = blockDim;
@@ -213,7 +239,9 @@ ge::graphStatus LightningIndexerGradTiling::DoTiling()
         // The non-deterministic kernel ends with SyncAll, so all used cores
         // must be launched together in batch schedule mode.
         OP_CHECK_IF(context_->SetScheduleMode(1) != ge::GRAPH_SUCCESS,
-                    OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "failed to set batch schedule mode."),
+                    REPORT_PREDEFINED_ERR_MSG(
+                        "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                        (std::vector<const char*>{"LightningIndexerGrad", "failed to set batch schedule mode."})),
                     return ge::GRAPH_FAILED);
 
         // Build one global B*S1/T1 work domain. Each S1 is weighted by the real
@@ -300,8 +328,11 @@ static ge::graphStatus TilingPrepareForLightningIndexerGrad(gert::TilingParseCon
 
 extern "C" ge::graphStatus TilingForLightningIndexerGrad(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("LightningIndexerGrad", "Tiling context is null."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"LightningIndexerGrad", "Tiling context is null."})),
+        return ge::GRAPH_FAILED);
     LightningIndexerGradTiling LIGTiling(context);
     return LIGTiling.DoTiling();
 }

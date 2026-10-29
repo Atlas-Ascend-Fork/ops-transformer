@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
 #include <string.h>
 #include <vector>
 #include "graph/types.h"
@@ -75,20 +76,21 @@ aclnnStatus aclnnLightningIndexerGetWorkspaceSize(
     const aclTensor* sparseValuesOut, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     if (query == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Query pointer is null, cannot get data type!");
+        OP_LOGE_WITH_INVALID_INPUT("aclnnLightningIndexerGetWorkspaceSize", "query");
         return ge::GRAPH_FAILED;
     }
     DataType queryDataType = query->GetDataType();
     aclDataType queryAclDataType = ToAclDataType(queryDataType);
     if (returnValues) {
         if (sparseValuesOut == nullptr) {
-            OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "sparseValuesOut cannot be nullptr.");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnLightningIndexerGetWorkspaceSize", "sparseValuesOut",
+                                                     "sparseValuesOut must be provided when returnValues is true.");
             return ge::GRAPH_FAILED;
         }
     }
     auto sparseValuesOutHolder = LightningIndexerOutputHolder(sparseValuesOut, queryAclDataType);
     if (sparseValuesOut == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor sparseValuesOut!");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_NULLPTR, "aclCreateTensor failed for the sparseValuesOut holder.");
         return ge::GRAPH_FAILED;
     }
 

@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include <string>
+#include "log/log.h"
 #include "aclnn_lightning_indexer_grad.h"
 #include "lightning_indexer_grad.h"
 #include "acl/acl.h"
@@ -132,14 +134,20 @@ static bool CheckDataType(const aclTensor* query, const aclTensor* key, const ac
 
     auto iter = validKvType.find(qDtype);
     if (iter == validKvType.end()) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Unsupported query datatype %d.", static_cast<int>(qDtype));
+        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON("aclnnLightningIndexerGrad", "query", op::ToString(qDtype).GetString(),
+                                              "Supported dtypes are FLOAT16 and BF16.");
         return false;
     }
 
     if (std::find(iter->second.begin(), iter->second.end(), kDtype) == iter->second.end() ||
         std::find(iter->second.begin(), iter->second.end(), dyDtype) == iter->second.end() ||
         std::find(iter->second.begin(), iter->second.end(), weightsDtype) == iter->second.end()) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Key/Dy/Weights datatype mismatch with query.");
+        OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
+            "aclnnLightningIndexerGrad", "query,key,dy,weights",
+            (std::string(op::ToString(qDtype).GetString()) + "," + op::ToString(kDtype).GetString() + "," +
+             op::ToString(dyDtype).GetString() + "," + op::ToString(weightsDtype).GetString())
+                .c_str(),
+            "The dtypes of key, dy and weights must match query.");
         return false;
     }
 

@@ -13,6 +13,9 @@
  * \brief
  */
 
+#include "base/err_msg.h"
+#include "log/log.h"
+#include <vector>
 #include "runtime_util.h"
 using namespace ge;
 namespace ops {
@@ -23,11 +26,25 @@ static constexpr int64_t Y_OUTPUT_IDX = 0;
 static ge::graphStatus QuantMatmulDequantInferShape(gert::InferShapeContext* context)
 {
     const gert::Shape* xShape = context->GetInputShape(X_INPUT_IDX);
-    OPS_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(xShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "x"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* weightScaleShape = context->GetInputShape(WEIGHT_SCALE_INPUT_IDX);
-    OPS_CHECK_NULL_WITH_CONTEXT(context, weightScaleShape);
+    OP_CHECK_IF(
+        weightScaleShape == nullptr,
+        OP_LOGE_WITH_INVALID_INPUT(
+            (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "weight_scale"),
+        return ge::GRAPH_FAILED);
     gert::Shape* yShape = context->GetOutputShape(Y_OUTPUT_IDX);
-    OPS_CHECK_NULL_WITH_CONTEXT(context, yShape);
+    OP_CHECK_IF(yShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "InferShape framework object yShape is unavailable; check the operator registration and "
+                        "context construction."})),
+                return ge::GRAPH_FAILED);
     auto M = xShape->GetDim(0);
     auto weightScaleDimNum = weightScaleShape->GetDimNum();
     auto N = weightScaleShape->GetDim(weightScaleDimNum - 1);

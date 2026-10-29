@@ -12,6 +12,10 @@
  * \file lightning_indexer_v2_infershape.cpp
  * \brief
  */
+#include "base/err_msg.h"
+#include "log/log.h"
+#include <vector>
+#include <string>
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -30,31 +34,95 @@ constexpr int64_t CANDIDATE_TOPK_BLOCKS_OFF = -1;
 
 static ge::graphStatus InferShapeLightningIndexerV2(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("LightningIndexerV2", "InferShapeContext is nullptr!"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"LightningIndexerV2", "InferShape/InferDataType context is unavailable; check "
+                                                            "the operator registration and context construction."})),
+        return ge::GRAPH_FAILED);
     const gert::Shape* queryShape = context->GetInputShape(QUERY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()), "q"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* keyShape = context->GetInputShape(KEY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()), "k"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* sparseIndicesShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sparseIndicesShape);
+    OP_CHECK_IF(sparseIndicesShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()),
+                        "InferShape framework object sparseIndicesShape is unavailable; check the operator "
+                        "registration and context construction."})),
+                return ge::GRAPH_FAILED);
     gert::Shape* sparseValuesShape = context->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sparseValuesShape);
+    OP_CHECK_IF(sparseValuesShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()),
+                        "InferShape framework object sparseValuesShape is unavailable; check the operator registration "
+                        "and context construction."})),
+                return ge::GRAPH_FAILED);
     // candidate (two-level topk)：source 输出 + 预留 block_length（恒空）
     gert::Shape* candidateBlockIndicesShape = context->GetOutputShape(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, candidateBlockIndicesShape);
+    OP_CHECK_IF(candidateBlockIndicesShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()),
+                        "InferShape framework object candidateBlockIndicesShape is unavailable; check the operator "
+                        "registration and context construction."})),
+                return ge::GRAPH_FAILED);
     gert::Shape* candidateBlockLengthShape = context->GetOutputShape(3);
-    OP_CHECK_NULL_WITH_CONTEXT(context, candidateBlockLengthShape);
+    OP_CHECK_IF(candidateBlockLengthShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()),
+                        "InferShape framework object candidateBlockLengthShape is unavailable; check the operator "
+                        "registration and context construction."})),
+                return ge::GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()),
+                        "InferShape framework object attrs is unavailable; check the operator registration and context "
+                        "construction."})),
+                return ge::GRAPH_FAILED);
     const char* inputLayoutQueryPtr = attrs->GetAttrPointer<char>(ATTR_QUERY_LAYOUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutQueryPtr);
+    OP_CHECK_IF(inputLayoutQueryPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()),
+                        "InferShape: registered optional attribute layout_q is unavailable; check context construction "
+                        "and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
     const char* inputLayoutKeyPtr = attrs->GetAttrPointer<char>(ATTR_KEY_LAYOUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutKeyPtr);
+    OP_CHECK_IF(inputLayoutKeyPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()),
+                        "InferShape: registered optional attribute layout_k is unavailable; check context construction "
+                        "and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
     const int64_t* seleced_count = attrs->GetInt(ATTR_TOPK_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, seleced_count);
+    OP_CHECK_IF(seleced_count == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    (context->GetNodeName() == nullptr ? "LightningIndexerV2" : context->GetNodeName()), "topk",
+                    "Required attribute topk is unavailable."),
+                return ge::GRAPH_FAILED);
     std::string inputLayoutQueryPtrStr = std::string(inputLayoutQueryPtr);
     std::string inputLayoutKeyPtrStr = std::string(inputLayoutKeyPtr);
     OP_CHECK_IF(
@@ -116,8 +184,13 @@ static ge::graphStatus InferShapeLightningIndexerV2(gert::InferShapeContext* con
 
 static ge::graphStatus InferDataTypeLightningIndexerV2(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("LightningIndexerV2", "InferDataTypeContext is nullptr!"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"LightningIndexerV2", "InferShape/InferDataType context is unavailable; check "
+                                                            "the operator registration and context construction."})),
+        return ge::GRAPH_FAILED);
     OP_LOGI(context->GetNodeName(), "Enter LightningIndexerV2 InferDataType impl.");
     // default set q's dtype as fia's output type
     ge::DataType outputType = ge::DT_INT32;

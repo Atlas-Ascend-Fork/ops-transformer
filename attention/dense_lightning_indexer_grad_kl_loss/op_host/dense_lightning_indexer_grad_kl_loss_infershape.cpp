@@ -13,6 +13,9 @@
  * \brief
  */
 
+#include "base/err_msg.h"
+#include "log/log.h"
+#include <vector>
 #include <graph/utils/type_utils.h>
 #include "register/op_impl_registry.h"
 #include "err/ops_err.h"
@@ -46,7 +49,11 @@ enum OutputIdx {
 ge::graphStatus InferShapeDenseLightningIndexerGradKLLoss(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("DenseLightningIndexerGradKLLoss", "context is nullptr!");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                      "InferShape/InferDataType context is unavailable; check the "
+                                      "operator registration and context construction."}));
         return ge::GRAPH_FAILED;
     }
 
@@ -54,25 +61,73 @@ ge::graphStatus InferShapeDenseLightningIndexerGradKLLoss(gert::InferShapeContex
 
     // get input shapes
     const gert::Shape* queryShape = context->GetInputShape(queryEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(
+        queryShape == nullptr,
+        OP_LOGE_WITH_INVALID_INPUT(
+            (context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" : context->GetNodeName()), "query"),
+        return ge::GRAPH_FAILED);
     const gert::Shape* keyShape = context->GetInputShape(keyEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(
+        keyShape == nullptr,
+        OP_LOGE_WITH_INVALID_INPUT(
+            (context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" : context->GetNodeName()), "key"),
+        return ge::GRAPH_FAILED);
     const gert::Shape* weightShape = context->GetInputShape(weightEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, weightShape);
+    OP_CHECK_IF(
+        weightShape == nullptr,
+        OP_LOGE_WITH_INVALID_INPUT(
+            (context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" : context->GetNodeName()), "weight"),
+        return ge::GRAPH_FAILED);
     const gert::Shape* queryIndexShape = context->GetInputShape(queryIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryIndexShape);
+    OP_CHECK_IF(queryIndexShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" : context->GetNodeName()),
+                    "query_index"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* keyIndexShape = context->GetInputShape(keyIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyIndexShape);
+    OP_CHECK_IF(keyIndexShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" : context->GetNodeName()),
+                    "key_index"),
+                return ge::GRAPH_FAILED);
 
     // get output shapes
     gert::Shape* dQIndexShape = context->GetOutputShape(dQueryIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dQIndexShape);
+    OP_CHECK_IF(dQIndexShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{(context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" :
+                                                                                   context->GetNodeName()),
+                                              "InferShape framework object dQIndexShape is unavailable; check the "
+                                              "operator registration and context construction."})),
+                return ge::GRAPH_FAILED);
     gert::Shape* dKIndexShape = context->GetOutputShape(dKeyIndexEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dKIndexShape);
+    OP_CHECK_IF(dKIndexShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{(context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" :
+                                                                                   context->GetNodeName()),
+                                              "InferShape framework object dKIndexShape is unavailable; check the "
+                                              "operator registration and context construction."})),
+                return ge::GRAPH_FAILED);
     gert::Shape* dWeightShape = context->GetOutputShape(dWeightEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dWeightShape);
+    OP_CHECK_IF(dWeightShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{(context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" :
+                                                                                   context->GetNodeName()),
+                                              "InferShape framework object dWeightShape is unavailable; check the "
+                                              "operator registration and context construction."})),
+                return ge::GRAPH_FAILED);
     gert::Shape* lossShape = context->GetOutputShape(lossEnum);
-    OP_CHECK_NULL_WITH_CONTEXT(context, lossShape);
+    OP_CHECK_IF(lossShape == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{(context->GetNodeName() == nullptr ? "DenseLightningIndexerGradKLLoss" :
+                                                                                   context->GetNodeName()),
+                                              "InferShape framework object lossShape is unavailable; check the "
+                                              "operator registration and context construction."})),
+                return ge::GRAPH_FAILED);
 
     // 填充输出shape大小
     *dWeightShape = *weightShape;
@@ -88,7 +143,11 @@ ge::graphStatus InferShapeDenseLightningIndexerGradKLLoss(gert::InferShapeContex
 ge::graphStatus InferDataTypeDenseLightningIndexerGradKLLoss(gert::InferDataTypeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("DenseLightningIndexerGradKLLoss", "context is nullptr!");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                      "InferShape/InferDataType context is unavailable; check the "
+                                      "operator registration and context construction."}));
         return ge::GRAPH_FAILED;
     }
 

@@ -13,6 +13,11 @@
  * \brief
  */
 
+#include "util/shape_util.h"
+#include <string>
+#include <vector>
+#include "base/err_msg.h"
+#include "log/log.h"
 #include "quant_lightning_indexer_tiling.h"
 
 #include "../op_kernel/quant_lightning_indexer_template_tiling_key.h"
@@ -67,7 +72,7 @@ static std::string QLIDataTypeToSerialString(ge::DataType type)
     if (qliIt != DATATYPE_TO_STRING_MAP.end()) {
         return qliIt->second;
     } else {
-        OP_LOGE("QuantLightningIndexer", "datatype %d not support", type);
+        OP_LOGE_WITHOUT_REPORT("QuantLightningIndexer", "datatype %d not support", type);
         return "UNDEFINED";
     }
 }
@@ -189,7 +194,9 @@ ge::graphStatus QLIInfoParser::CheckQliRequiredParameters() const
 ge::graphStatus QLIInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "opName got from TilingContext is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"QuantLightningIndexer", "opName got from TilingContext is nullptr"}));
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -199,22 +206,41 @@ ge::graphStatus QLIInfoParser::GetOpName()
 ge::graphStatus QLIInfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        platformInfo_ == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"QuantLightningIndexer", "GetPlatformInfo is nullptr"})),
+        return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
-    OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
+    OP_CHECK_IF(
+        aicNum == 0 || aivNum == 0,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"QuantLightningIndexer", "num of core obtained is 0."})),
+        return GRAPH_FAILED);
 
     npuArch_ = ascendcPlatform.GetCurNpuArch();
     if (npuArch_ != NpuArch::DAV_2201 && npuArch_ != NpuArch::DAV_3510) {
-        OP_LOGE(opName_, "Npu Arch Version[%d] is not support.", static_cast<int32_t>(npuArch_));
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+            (std::vector<const char*>{"QuantLightningIndexer", "AiCore",
+                                      (std::string("Npu Arch Version[") +
+                                       std::to_string(static_cast<int32_t>(npuArch_)) + "] is not support.")
+                                          .c_str()}));
         return GRAPH_FAILED;
     }
-    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr, OP_LOGE(opName_, "workSpaceSize got from ge is nullptr"),
+    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"QuantLightningIndexer", "workSpaceSize got from ge is nullptr"})),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
-                OP_LOGE(opName_, "RawTilingData got from GE context is nullptr"), return ge::GRAPH_FAILED);
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"QuantLightningIndexer",
+                                                                    "RawTilingData got from GE context is nullptr"})),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -253,7 +279,11 @@ void QLIInfoParser::GetOutputParaInfo()
 ge::graphStatus QLIInfoParser::GetAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OP_LOGE(opName_, "attrs got from GE is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        attrs == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"QuantLightningIndexer", "attrs got from GE is nullptr"})),
+        return ge::GRAPH_FAILED);
 
     OP_LOGI(context_->GetNodeName(), "GetAttrParaInfo start");
     qliParams_.layOutQuery = attrs->GetStr(ATTR_QUERY_LAYOUT_INDEX);
@@ -713,7 +743,9 @@ static ge::graphStatus QliGetHeadDim(const TilingRequiredParaInfo& qliQuery, Dat
             qliDIndex = DIM_IDX_THREE;
             break;
         default:
-            OP_LOGE(qliOpName, "unsupported layout for getting head dim.");
+            OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON("QuantLightningIndexer", "layout_query",
+                                                   std::to_string(static_cast<int>(qliQLayout)).c_str(),
+                                                   "Supported query layouts are BSND and TND.");
             return ge::GRAPH_FAILED;
     }
     qliHeadDim = qliQuery.shape->GetStorageShape().GetDim(qliDIndex);
@@ -1260,7 +1292,10 @@ ge::graphStatus QuantLightningIndexerTiling::DoTiling(QLITilingInfo* tilingInfo)
 // --------------------------Tiling函数定义---------------------------
 ge::graphStatus TilingForQuantLightningIndexer(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("QuantLightningIndexer", "Tilingcontext is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"QuantLightningIndexer", "Tilingcontext is null"})),
+                return ge::GRAPH_FAILED);
     QLITilingInfo QLIInfo;
     QLIInfoParser QLIInfoParser(context);
     if (QLIInfoParser.ParseAndCheck(QLIInfo) != ge::GRAPH_SUCCESS) {

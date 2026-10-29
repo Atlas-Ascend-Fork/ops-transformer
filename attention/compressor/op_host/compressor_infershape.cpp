@@ -8,6 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "base/err_msg.h"
+#include <vector>
+#include <string>
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include <cstdint>
@@ -70,7 +73,14 @@ struct CompressorProtoShapeParam {
 static ge::graphStatus GetCompressorAttrs(const gert::InferShapeContext* context, int64_t& cmpRatio, int64_t& coff)
 {
     auto attr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attr);
+    OP_CHECK_IF(
+        attr == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{(context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()),
+                                      "InferShape framework object attr is unavailable; check the operator "
+                                      "registration and context construction."})),
+        return ge::GRAPH_FAILED);
     const int64_t* cmpRatioPtr = attr->GetAttrPointer<int64_t>(CMP_RATIO_ATTR_INDEX);
     OP_CHECK_IF((cmpRatioPtr == nullptr),
                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "cmp_ratio", "attr is required"),
@@ -131,9 +141,15 @@ static ge::graphStatus GetCompressorThShape(const gert::InferShapeContext* conte
 ge::graphStatus GetCompressorShapeDim(const gert::InferShapeContext* context, CompressorProtoShapeParam& shapeParam)
 {
     auto xShape = context->GetRequiredInputShape(TOKEN_X_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(
+        xShape == nullptr,
+        OP_LOGE_WITH_INVALID_INPUT((context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()), "x"),
+        return ge::GRAPH_FAILED);
     auto wkvShape = context->GetRequiredInputShape(WEIGHT_KV_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, wkvShape);
+    OP_CHECK_IF(
+        wkvShape == nullptr,
+        OP_LOGE_WITH_INVALID_INPUT((context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()), "wkv"),
+        return ge::GRAPH_FAILED);
 
     auto xDim = xShape->GetDimNum();
     OP_CHECK_IF((xDim != DIM_NUM_2 && xDim != DIM_NUM_3),
@@ -163,7 +179,14 @@ ge::graphStatus GetCompressorShapeDim(const gert::InferShapeContext* context, Co
 ge::graphStatus SetCompressorShapeDim(const CompressorProtoShapeParam& shapeParam, gert::InferShapeContext* context)
 {
     auto cmpKvShape = context->GetOutputShape(CMP_KV_OUTPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, cmpKvShape);
+    OP_CHECK_IF(
+        cmpKvShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{(context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()),
+                                      "InferShape framework object cmpKvShape is unavailable; check the operator "
+                                      "registration and context construction."})),
+        return ge::GRAPH_FAILED);
 
     if (!shapeParam.isBsMerge) {
         cmpKvShape->SetDimNum(DIM_NUM_3);
@@ -172,7 +195,14 @@ ge::graphStatus SetCompressorShapeDim(const CompressorProtoShapeParam& shapePara
         cmpKvShape->SetDim(DIM_INDEX_2, shapeParam.D);
 
         auto softmaxScoreShape = context->GetOutputShape(SOFTMAX_SCORE_OUTPUT_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context, softmaxScoreShape);
+        OP_CHECK_IF(
+            softmaxScoreShape == nullptr,
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                (std::vector<const char*>{(context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()),
+                                          "InferShape framework object softmaxScoreShape is unavailable; check the "
+                                          "operator registration and context construction."})),
+            return ge::GRAPH_FAILED);
         softmaxScoreShape->SetDimNum(DIM_NUM_4);
         softmaxScoreShape->SetDim(DIM_INDEX_0, shapeParam.B);
         softmaxScoreShape->SetDim(DIM_INDEX_1, shapeParam.Sr);
@@ -180,7 +210,14 @@ ge::graphStatus SetCompressorShapeDim(const CompressorProtoShapeParam& shapePara
         softmaxScoreShape->SetDim(DIM_INDEX_3, shapeParam.D);
 
         auto kvShape = context->GetOutputShape(KV_OUTPUT_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context, kvShape);
+        OP_CHECK_IF(
+            kvShape == nullptr,
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                (std::vector<const char*>{(context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()),
+                                          "InferShape framework object kvShape is unavailable; check the operator "
+                                          "registration and context construction."})),
+            return ge::GRAPH_FAILED);
         kvShape->SetDimNum(DIM_NUM_4);
         kvShape->SetDim(DIM_INDEX_0, shapeParam.B);
         kvShape->SetDim(DIM_INDEX_1, shapeParam.Sr);
@@ -192,14 +229,28 @@ ge::graphStatus SetCompressorShapeDim(const CompressorProtoShapeParam& shapePara
         cmpKvShape->SetDim(DIM_INDEX_1, shapeParam.D);
 
         auto softmaxScoreShape = context->GetOutputShape(SOFTMAX_SCORE_OUTPUT_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context, softmaxScoreShape);
+        OP_CHECK_IF(
+            softmaxScoreShape == nullptr,
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                (std::vector<const char*>{(context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()),
+                                          "InferShape framework object softmaxScoreShape is unavailable; check the "
+                                          "operator registration and context construction."})),
+            return ge::GRAPH_FAILED);
         softmaxScoreShape->SetDimNum(DIM_NUM_3);
         softmaxScoreShape->SetDim(DIM_INDEX_0, shapeParam.Sr);
         softmaxScoreShape->SetDim(DIM_INDEX_1, shapeParam.compressDim);
         softmaxScoreShape->SetDim(DIM_INDEX_2, shapeParam.D);
 
         auto kvShape = context->GetOutputShape(KV_OUTPUT_INDEX);
-        OP_CHECK_NULL_WITH_CONTEXT(context, kvShape);
+        OP_CHECK_IF(
+            kvShape == nullptr,
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                (std::vector<const char*>{(context->GetNodeName() == nullptr ? "Compressor" : context->GetNodeName()),
+                                          "InferShape framework object kvShape is unavailable; check the operator "
+                                          "registration and context construction."})),
+            return ge::GRAPH_FAILED);
         kvShape->SetDimNum(DIM_NUM_3);
         kvShape->SetDim(DIM_INDEX_0, shapeParam.Sr);
         kvShape->SetDim(DIM_INDEX_1, shapeParam.compressDim);
@@ -228,12 +279,12 @@ ge::graphStatus InferShapeCompressor(gert::InferShapeContext* context)
     CompressorProtoShapeParam shapeParam{};
     auto apiRet = GetCompressorShapeDim(context, shapeParam);
     OP_CHECK_IF((apiRet != GRAPH_SUCCESS),
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "context", "get input shape failed"),
+                OP_LOGE_WITHOUT_REPORT("Compressor", "GetCompressorShapeDim failed; retain its first error."),
                 return ge::GRAPH_FAILED);
 
     apiRet = SetCompressorShapeDim(shapeParam, context);
     OP_CHECK_IF((apiRet != GRAPH_SUCCESS),
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "context", "set output shape failed"),
+                OP_LOGE_WITHOUT_REPORT("Compressor", "SetCompressorShapeDim failed; retain its first error."),
                 return ge::GRAPH_FAILED);
     return GRAPH_SUCCESS;
 }

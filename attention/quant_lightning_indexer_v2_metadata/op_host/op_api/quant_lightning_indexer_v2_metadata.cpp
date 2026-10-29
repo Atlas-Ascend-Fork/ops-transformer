@@ -49,9 +49,10 @@ const aclTensor* QuantLightningIndexerV2Metadata(
         OP_ATTR(numHeadsQ, numHeadsK, headDim, topk, quantMode, batchSize, maxSeqlenQ, maxSeqlenK, layoutQOptional,
                 layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion));
 
-    OP_CHECK(ret == ACL_SUCCESS,
-             OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "QuantLightningIndexerV2Metadata ADD_TO_LAUNCHER_LIST_AICPU failed."),
-             return nullptr);
+    OP_CHECK(
+        ret == ACL_SUCCESS,
+        OP_LOGE_WITHOUT_REPORT(ret, "QuantLightningIndexerV2Metadata ADD_TO_LAUNCHER_LIST_AICPU failed, ret=%d.", ret),
+        return nullptr);
     return metadata;
 }
 } // namespace l0op

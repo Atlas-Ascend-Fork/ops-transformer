@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include <vector>
+#include "base/err_msg.h"
 #include "log/log.h"
 #include "util/math_util.h"
 #include "op_host/tiling_util.h"
@@ -34,8 +36,13 @@ static ge::graphStatus TilingParseForDenseLightningIndexerGradKLLoss([[maybe_unu
 {
     OP_LOGD(context->GetNodeName(), "Start parsing tiling for DenseLightningIndexerGradKLLoss.");
     auto compileInfoPtr = context->GetCompiledInfo<DenseLightningIndexerGradKLLossCompileInfo>();
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context->GetNodeName(), "compileInfoPtr is null"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        compileInfoPtr == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                                            "compileInfoPtr is unavailable during TilingParse; check "
+                                                            "the SoC-specific OPP package and its loading logs."})),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }

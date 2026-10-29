@@ -12,6 +12,9 @@
  * \file quant_lightning_indexer_proto.cpp
  * \brief
  */
+#include "base/err_msg.h"
+#include <vector>
+#include <string>
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 
@@ -32,23 +35,61 @@ constexpr uint32_t DIM_NUM_4 = 4;
 static ge::graphStatus InferShapeQuantLightningIndexer(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "context is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"QuantLightningIndexer",
+                                      "InferShape/InferDataType context is unavailable; check the "
+                                      "operator registration and context construction."}));
         return ge::GRAPH_FAILED;
     }
     const gert::Shape* queryShape = context->GetInputShape(QUERY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "QuantLightningIndexer" : context->GetNodeName()), "query"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* keyShape = context->GetInputShape(KEY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "QuantLightningIndexer" : context->GetNodeName()), "key"),
+                return ge::GRAPH_FAILED);
     gert::Shape* outShape = context->GetOutputShape(0);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantLightningIndexer" : context->GetNodeName()),
+                        "InferShape framework object attrs is unavailable; check the operator registration and context "
+                        "construction."})),
+                return ge::GRAPH_FAILED);
     const char* inputLayoutQueryPtr = attrs->GetAttrPointer<char>(ATTR_QUERY_LAYOUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutQueryPtr);
+    OP_CHECK_IF(inputLayoutQueryPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantLightningIndexer" : context->GetNodeName()),
+                        "InferShape: registered optional attribute layout_query is unavailable; check context "
+                        "construction and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
     const char* inputLayoutKeyPtr = attrs->GetAttrPointer<char>(ATTR_KV_LAYOUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutKeyPtr);
+    OP_CHECK_IF(inputLayoutKeyPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantLightningIndexer" : context->GetNodeName()),
+                        "InferShape: registered optional attribute layout_key is unavailable; check context "
+                        "construction and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
     const int64_t* qliSparseCount = attrs->GetInt(ATTR_SPARSE_COUNT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, qliSparseCount);
+    OP_CHECK_IF(qliSparseCount == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantLightningIndexer" : context->GetNodeName()),
+                        "InferShape: registered optional attribute sparse_count is unavailable; check context "
+                        "construction and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
 
     std::string inputLayoutQueryPtrStr = std::string(inputLayoutQueryPtr);
     std::string inputLayoutKeyPtrStr = std::string(inputLayoutKeyPtr);
@@ -79,7 +120,11 @@ static ge::graphStatus InferShapeQuantLightningIndexer(gert::InferShapeContext* 
 static ge::graphStatus InferDataTypeQuantLightningIndexer(gert::InferDataTypeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("QuantLightningIndexer", "InferDataTypeContext context is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"QuantLightningIndexer",
+                                      "InferShape/InferDataType context is unavailable; check the "
+                                      "operator registration and context construction."}));
         return ge::GRAPH_FAILED;
     }
     OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexer InferDataType impl.");

@@ -51,7 +51,7 @@ const aclTensor* LightningIndexerV2Metadata(const aclTensor* cuSeqlensQOptional,
                 layoutKOptional, maskMode, cmpRatio, aicCoreNum, aivCoreNum, socVersion));
 
     OP_CHECK(ret == ACL_SUCCESS,
-             OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "LightningIndexerV2Metadata ADD_TO_LAUNCHER_LIST_AICPU failed."),
+             OP_LOGE_WITHOUT_REPORT(ret, "LightningIndexerV2Metadata ADD_TO_LAUNCHER_LIST_AICPU failed, ret=%d.", ret),
              return nullptr);
     return metadata;
 }

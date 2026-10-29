@@ -12,6 +12,12 @@
  * \file dense_lightning_indexer_grad_kl_loss_tiling.cpp
  * \brief
  */
+#include "util/shape_util.h"
+#include "graph/utils/type_utils.h"
+#include <string>
+#include <vector>
+#include "base/err_msg.h"
+#include "log/log.h"
 #include "dense_lightning_indexer_grad_kl_loss_tiling.h"
 #include <limits>
 #include <tiling/tiling_api.h>
@@ -22,41 +28,111 @@ namespace optiling {
 ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::CheckContext()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        "DenseLightningIndexerGradKLLoss",
+                        "Tiling framework object attrs is unavailable; check context construction and OPP metadata."})),
+                return ge::GRAPH_FAILED);
     size_t idx = 0;
     // 输入属性参数验证
     auto scaleValuePtr = attrs->GetAttrPointer<float>(idx++);
     auto inputLayoutPtr = attrs->GetAttrPointer<char>(idx++);
     auto sparseModePtr = attrs->GetAttrPointer<int64_t>(idx++);
     size_t* workspaces = context_->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, scaleValuePtr);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, inputLayoutPtr);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, sparseModePtr);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+    OP_CHECK_IF(scaleValuePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("DenseLightningIndexerGradKLLoss", "scale_value",
+                                                         "Required attribute scale_value is unavailable."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(inputLayoutPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                              "Tiling: registered optional attribute layout is unavailable; check "
+                                              "context construction and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(sparseModePtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                              "Tiling: registered optional attribute sparse_mode is unavailable; check "
+                                              "context construction and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        workspaces == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{
+                "DenseLightningIndexerGradKLLoss",
+                "Tiling framework object workspaces is unavailable; check context construction and OPP metadata."})),
+        return ge::GRAPH_FAILED);
 
     // 输入shape验证
     auto queryShape = context_->GetInputShape(0);
     auto keyShape = context_->GetInputShape(1);
     auto queryIndexShape = context_->GetInputShape(2);
     auto keyIndexShape = context_->GetInputShape(3);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, queryShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, keyShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, queryIndexShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, keyIndexShape);
+    OP_CHECK_IF(queryShape == nullptr, OP_LOGE_WITH_INVALID_INPUT("DenseLightningIndexerGradKLLoss", "query"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyShape == nullptr, OP_LOGE_WITH_INVALID_INPUT("DenseLightningIndexerGradKLLoss", "key"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(queryIndexShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT("DenseLightningIndexerGradKLLoss", "query_index"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(keyIndexShape == nullptr, OP_LOGE_WITH_INVALID_INPUT("DenseLightningIndexerGradKLLoss", "key_index"),
+                return ge::GRAPH_FAILED);
 
     // 输出shape验证
     auto dQueryIndexShape = context_->GetOutputShape(D_QUERY_INDEX_OUTPUT_INDEX);
     auto dkeyIndexShape = context_->GetOutputShape(D_KEY_INDEX_OUTPUT_INDEX);
     auto dWeightsShape = context_->GetOutputShape(D_WEIGHTS_OUTPUT_INDEX);
     auto lossShape = context_->GetOutputShape(LOSS_OUTPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, dQueryIndexShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, dkeyIndexShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, dWeightsShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, lossShape);
+    OP_CHECK_IF(
+        dQueryIndexShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                                            "Tiling framework object dQueryIndexShape is unavailable; "
+                                                            "check context construction and OPP metadata."})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        dkeyIndexShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                                            "Tiling framework object dkeyIndexShape is unavailable; "
+                                                            "check context construction and OPP metadata."})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        dWeightsShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{
+                "DenseLightningIndexerGradKLLoss",
+                "Tiling framework object dWeightsShape is unavailable; check context construction and OPP metadata."})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        lossShape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{
+                "DenseLightningIndexerGradKLLoss",
+                "Tiling framework object lossShape is unavailable; check context construction and OPP metadata."})),
+        return ge::GRAPH_FAILED);
 
     // RawTilingData验证
-    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetRawTilingData());
-    OP_CHECK_NULL_WITH_CONTEXT(context_, context_->GetRawTilingData()->GetData());
+    OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                              "Tiling framework object context_->GetRawTilingData() is unavailable; "
+                                              "check context construction and OPP metadata."})),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context_->GetRawTilingData()->GetData() == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                              "Tiling framework object context_->GetRawTilingData()->GetData() is "
+                                              "unavailable; check context construction and OPP metadata."})),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -92,7 +168,15 @@ bool DenseLightningIndexerGradKLLossTilingBase::AnalyzeDtype()
                keyIndexDtype == ge::DT_BF16 && (weightsDtype == ge::DT_BF16 || weightsDtype == ge::DT_FLOAT)) {
         OP_LOGD(opName, "q/k/weight inputDtype is bf16.");
     } else {
-        OP_LOGE(opName, "q/k/weight inputDtype is not same.");
+        OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
+            "DenseLightningIndexerGradKLLoss", "query,key,query_index,key_index,weight",
+            (ge::TypeUtils::DataTypeToSerialString(queryDtype) + "," + ge::TypeUtils::DataTypeToSerialString(keyDtype) +
+             "," + ge::TypeUtils::DataTypeToSerialString(queryIndexDtype) + "," +
+             ge::TypeUtils::DataTypeToSerialString(keyIndexDtype) + "," +
+             ge::TypeUtils::DataTypeToSerialString(weightsDtype))
+                .c_str(),
+            "query, key, query_index and key_index must all be FLOAT16 or all BF16; weight must match them or be "
+            "FLOAT.");
         return false;
     }
 
@@ -105,7 +189,14 @@ bool DenseLightningIndexerGradKLLossTilingBase::AnalyzeDtype()
         softmaxSumIndexDtype == ge::DT_FLOAT) {
         OP_LOGD(opName, "softmax inputDtype is fp32.");
     } else {
-        OP_LOGE(opName, "softmax inputDtype is not same.");
+        OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON("DenseLightningIndexerGradKLLoss",
+                                               "softmax_max,softmax_sum,softmax_max_index,softmax_sum_index",
+                                               (ge::TypeUtils::DataTypeToSerialString(softmaxMaxDtype) + "," +
+                                                ge::TypeUtils::DataTypeToSerialString(softmaxSumDtype) + "," +
+                                                ge::TypeUtils::DataTypeToSerialString(softmaxMaxIndexDtype) + "," +
+                                                ge::TypeUtils::DataTypeToSerialString(softmaxSumIndexDtype))
+                                                   .c_str(),
+                                               "All four softmax tensors must have dtype FLOAT.");
         return false;
     }
 
@@ -124,7 +215,10 @@ bool DenseLightningIndexerGradKLLossTilingBase::AnalyzeLayout()
     auto keyRope = context_->GetOptionalInputShape(KEY_ROPE_INPUT_INDEX);
     bool hasKeyRope = keyRope != nullptr && keyRope->GetStorageShape().GetDimNum() != 0;
     if (hasQueryRope ^ hasKeyRope) {
-        OP_LOGE(opName, "query_rope and key_rope should be present or absent at the same time, check this.");
+        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+            "DenseLightningIndexerGradKLLoss", "query_rope,key_rope",
+            (std::to_string(hasQueryRope) + "," + std::to_string(hasKeyRope)).c_str(),
+            "query_rope and key_rope must be provided together or both omitted.");
         return false;
     }
     // TND和BSND的dim位置不同来赋值
@@ -136,16 +230,39 @@ bool DenseLightningIndexerGradKLLossTilingBase::AnalyzeLayout()
     size_t layoutLen = strlen(inputLayout);
     OP_CHECK_IF(queryShape.GetDimNum() != layoutLen || keyShape.GetDimNum() != layoutLen ||
                     queryIndexShape.GetDimNum() != layoutLen || keyIndexShape.GetDimNum() != layoutLen,
-                OP_LOGE(opName, "Invalid layout[%s].", inputLayout), return false);
+                OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "layout", inputLayout,
+                    "The ranks of query, key, query_index and key_index must match layout length."),
+                return false);
     OP_CHECK_IF(!CrossShapeVerify(queryRopeShape, keyRopeShape),
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "Dense train CrossShapeVerify Failed"), return false);
+                OP_LOGE_WITHOUT_REPORT(opName, "Dense train CrossShapeVerify Failed"), return false);
     OP_CHECK_IF(!Analyze3DimLayout(queryShape, keyShape, queryIndexShape, keyIndexShape, layoutLen, queryRopeShape,
                                    keyRopeShape),
-                OP_LOGE(opName, "Layout: %s, Run Failed", inputLayout), return false);
-    OP_CHECK_IF(gSizeQuery == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "gSizeQuery is zero"), return false);
-    OP_CHECK_IF(n2Size == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "n2Size is zero"), return false);
-    OP_CHECK_IF(n2IndexSize == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "n2IndexSize is zero"), return false);
-    OP_CHECK_IF(dSizeQuery <= 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "dSizeQuery  is not support <= 0"), return false);
+                OP_LOGE_WITHOUT_REPORT(opName, "Layout: %s, Run Failed", inputLayout), return false);
+    OP_CHECK_IF(gSizeQuery == 0,
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "query,key",
+                    (Ops::Base::ToString(queryShape) + "," + Ops::Base::ToString(keyShape)).c_str(),
+                    (std::string("The integer quotient of the query head count divided by the key head count must be "
+                                 "greater than zero.") +
+                     " Current layout=" + inputLayout)
+                        .c_str()),
+                return false);
+    OP_CHECK_IF(n2Size == 0,
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "key", std::to_string(n2Size).c_str(),
+                    "The corresponding head count or head dimension must be greater than zero."),
+                return false);
+    OP_CHECK_IF(n2IndexSize == 0,
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "key_index", std::to_string(n2IndexSize).c_str(),
+                    "The corresponding head count or head dimension must be greater than zero."),
+                return false);
+    OP_CHECK_IF(dSizeQuery <= 0,
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "query", std::to_string(dSizeQuery).c_str(),
+                    "The corresponding head count or head dimension must be greater than zero."),
+                return false);
     return true;
 }
 
@@ -172,138 +289,164 @@ bool DenseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sha
         int64_t n2IndexLen = keyIndexShape[1];
 
         // 数值验证N1 是否在支持的范围内
-        OP_CHECK_IF(n1Len != NQUERY_SIZE_32 && n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of query must be one of the {32, 64, "
-                                                "128}, but the value of query[1] is (%ld)",
-                                                n1Len),
-                    return false);
-        // 数值验证N2=N1
         OP_CHECK_IF(
-            n2Len != n1Len,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, N2 must be same with N1, but the value of key[1] is (%ld).", n2Len),
+            n1Len != NQUERY_SIZE_32 && n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                (std::string("Query head count N must be one of 32, 64 or 128.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
-        // 数值验证N1_Index 是否在支持的范围内
-        OP_CHECK_IF(n1IndexLen != NQUERYINDEX_SIZE_8 && n1IndexLen != NQUERYINDEX_SIZE_16 &&
-                        n1IndexLen != NQUERYINDEX_SIZE_32 && n1IndexLen != NQUERYINDEX_SIZE_64,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of query_index must be one of the "
-                                                "{8, 16, 32, 64}, but the value of query_index[1] is (%ld).",
-                                                n1IndexLen),
+        // 数值验证N2=N1
+        OP_CHECK_IF(n2Len != n1Len,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query,key",
+                        (Ops::Base::ToString(queryShape) + "," + Ops::Base::ToString(keyShape)).c_str(),
+                        (std::string("The head counts of query and key must match.") + " Current layout=" + inputLayout)
+                            .c_str()),
                     return false);
+        // 数值验证N1_Index 是否在支持的范围内
+        OP_CHECK_IF(
+            n1IndexLen != NQUERYINDEX_SIZE_8 && n1IndexLen != NQUERYINDEX_SIZE_16 &&
+                n1IndexLen != NQUERYINDEX_SIZE_32 && n1IndexLen != NQUERYINDEX_SIZE_64,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query_index", (Ops::Base::ToString(queryIndexShape)).c_str(),
+                (std::string("query_index head count must be one of 8, 16, 32 or 64.") +
+                 " Current layout=" + inputLayout)
+                    .c_str()),
+            return false);
         // 数值验证N2_INDEX=1
         OP_CHECK_IF(n2IndexLen != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2_IDX must be 1, but the value of key_index[1] is (%ld).",
-                        n2IndexLen),
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "key_index", (Ops::Base::ToString(keyIndexShape)).c_str(),
+                        (std::string("key_index head count must equal 1.") + " Current layout=" + inputLayout).c_str()),
                     return false);
         // 数值验证D 是否在支持的范围内
         OP_CHECK_IF(
             queryShape[2] != D_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, shape D of query must be 128, but the value of query[2] is (%ld)",
-                queryShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                (std::string("query head dimension D must equal 128.") + " Current layout=" + inputLayout).c_str()),
             return false);
         OP_CHECK_IF(
             queryIndexShape[2] != D_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify failed, shape D of query_index must be 128, but the value of query_index[2] is (%ld)",
-                queryIndexShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query_index", (Ops::Base::ToString(queryIndexShape)).c_str(),
+                (std::string("query_index head dimension D must equal 128.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
 
         // 交叉验证T1
         OP_CHECK_IF(
             queryIndexShape[0] != t1Len || weightsShape[0] != t1Len || softmaxMaxShape[1] != t1Len ||
                 softmaxSumShape[1] != t1Len || softmaxMaxIndexShape[1] != t1Len || softmaxSumIndexShape[1] != t1Len,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify T1 is failed, the value of query[0], query_index[0], weights[0], softmax_max[1] \
-                softmax_sum[1], softmax_max_index[1] and softmax_sum_index[1] are respectively (%ld), (%ld), (%ld), (%ld), (%ld). Their values should be equal.",
-                queryShape[0], queryIndexShape[0], weightsShape[0], softmaxMaxShape[1], softmaxSumShape[1],
-                softmaxMaxIndexShape[1], softmaxSumIndexShape[1]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss",
+                "query,query_index,weight,softmax_max,softmax_sum,softmax_max_index,softmax_sum_index",
+                (Ops::Base::ToString(queryShape) + "," + Ops::Base::ToString(queryIndexShape) + "," +
+                 Ops::Base::ToString(weightsShape) + "," + Ops::Base::ToString(softmaxMaxShape) + "," +
+                 Ops::Base::ToString(softmaxSumShape) + "," + Ops::Base::ToString(softmaxMaxIndexShape) + "," +
+                 Ops::Base::ToString(softmaxSumIndexShape))
+                    .c_str(),
+                (std::string("T of query, query_index and weight must match dimension 1 of all four softmax tensors.") +
+                 " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         // 交叉验证T2
-        OP_CHECK_IF(keyIndexShape[0] != t2Len,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify T2 is failed, the value of key[0] and key_index[0] "
-                                                "are respectively (%ld), (%ld). Their values should be equal.",
-                                                t2Len, keyIndexShape[0]),
-                    return false);
-        // 交叉验证N1_Index
         OP_CHECK_IF(
-            weightsShape[1] != n1IndexLen,
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify N index is failed, the value of query_index[1] and "
-                                        "weights[1] are respectively (%ld), (%ld). Their values should be equal.",
-                                        n1IndexLen, weightsShape[1]),
+            keyIndexShape[0] != t2Len,
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "key,key_index",
+                (Ops::Base::ToString(keyShape) + "," + Ops::Base::ToString(keyIndexShape)).c_str(),
+                (std::string("The T dimensions of key and key_index must match.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
+        // 交叉验证N1_Index
+        OP_CHECK_IF(weightsShape[1] != n1IndexLen,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query_index,weight",
+                        (Ops::Base::ToString(queryIndexShape) + "," + Ops::Base::ToString(weightsShape)).c_str(),
+                        (std::string("The head counts of query_index and weight must match.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
+                    return false);
         // 交叉验证N2
         OP_CHECK_IF(softmaxMaxShape[0] != n2Len || softmaxSumShape[0] != n2Len,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName,
-                        "CrossShapeVerify failed, the value of key[1], softmax_max[0] and softmax_sum[0] are "
-                        "respectively (%ld), (%ld), (%ld). Their values should be equal.",
-                        n2Len, softmaxMaxShape[0], softmaxSumShape[0]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "key,softmax_max,softmax_sum",
+                        (Ops::Base::ToString(keyShape) + "," + Ops::Base::ToString(softmaxMaxShape) + "," +
+                         Ops::Base::ToString(softmaxSumShape))
+                            .c_str(),
+                        (std::string("The key head count must match dimension 0 of softmax_max and softmax_sum.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
                     return false);
         // 交叉验证N2_INDEX
-        OP_CHECK_IF(softmaxMaxIndexShape[0] != n2IndexLen || softmaxSumIndexShape[0] != n2IndexLen,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName,
-                        "CrossShapeVerify N2_INDEX is failed, the value of key_index[1], softmax_max_index[0] and "
-                        "softmax_sum_index[0] are respectively (%ld), (%ld), (%ld). Their values should be equal.",
-                        n2IndexLen, softmaxMaxIndexShape[0], softmaxSumIndexShape[0]),
-                    return false);
+        OP_CHECK_IF(
+            softmaxMaxIndexShape[0] != n2IndexLen || softmaxSumIndexShape[0] != n2IndexLen,
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "key_index,softmax_max_index,softmax_sum_index",
+                (Ops::Base::ToString(keyIndexShape) + "," + Ops::Base::ToString(softmaxMaxIndexShape) + "," +
+                 Ops::Base::ToString(softmaxSumIndexShape))
+                    .c_str(),
+                (std::string(
+                     "The key_index head count must match dimension 0 of softmax_max_index and softmax_sum_index.") +
+                 " Current layout=" + inputLayout)
+                    .c_str()),
+            return false);
         // 交叉验证D
         OP_CHECK_IF(
             keyShape[2] != queryShape[2],
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify query-key shape D is failed, the value of query[2] and "
-                                        "key[2] are respectively (%ld), (%ld). Their values should be equal.",
-                                        queryShape[2], keyShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query,key",
+                (Ops::Base::ToString(queryShape) + "," + Ops::Base::ToString(keyShape)).c_str(),
+                (std::string("The head dimensions D of query and key must match.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         OP_CHECK_IF(queryIndexShape[2] != keyIndexShape[2],
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName,
-                        "CrossShapeVerify query-key_index shape D is failed, the value of query_index[2] and "
-                        "key_index[2] are respectively (%ld), (%ld). Their values should be equal.",
-                        queryIndexShape[2], keyIndexShape[2]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query_index,key_index",
+                        (Ops::Base::ToString(queryIndexShape) + "," + Ops::Base::ToString(keyIndexShape)).c_str(),
+                        (std::string("The head dimensions D of query_index and key_index must match.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
                     return false);
 
         // 验证ROPE
         if (hasRope) {
             // 验证queryrope
-            OP_CHECK_IF(
-                queryRopeShape[0] != t1Len || queryRopeShape[1] != n1Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify query_rope is failed, the value of query_rope[0] is (%ld), it should be equal to tlSize(%ld). \
-                    the value of query_rope[1] is (%ld), it should be equal to nQuerySize(%ld).",
-                    queryRopeShape[0], t1Len, queryRopeShape[1], n1Len),
-                return false);
-            // 验证keyrope
-            OP_CHECK_IF(
-                keyRopeShape[0] != t2Len || keyRopeShape[1] != n2Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify key_rope is failed, the value of key_rope[0] is (%ld), it should be equal to t2Size(%ld). \
-                    the value of key_rope[1] is (%ld), it should be equal to n2Size(%ld)",
-                    keyRopeShape[0], t2Len, keyRopeShape[1], n2Len),
-                return false);
-            // 验证rope D 数字是否正确
-            OP_CHECK_IF(queryRopeShape[2] != DROPE_SIZE_64,
-                        OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                    "CrossShapeVerify failed, shape D of query_rope must be 64, but "
-                                                    "the value of query_rope[2] is (%ld).",
-                                                    queryRopeShape[2]),
+            OP_CHECK_IF(queryRopeShape[0] != t1Len || queryRopeShape[1] != n1Len,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "query_rope,query",
+                            (Ops::Base::ToString(queryRopeShape) + "," + Ops::Base::ToString(queryShape)).c_str(),
+                            (std::string("The T and N dimensions of query_rope must match query.") +
+                             " Current layout=" + inputLayout)
+                                .c_str()),
                         return false);
+            // 验证keyrope
+            OP_CHECK_IF(keyRopeShape[0] != t2Len || keyRopeShape[1] != n2Len,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "key_rope,key",
+                            (Ops::Base::ToString(keyRopeShape) + "," + Ops::Base::ToString(keyShape)).c_str(),
+                            (std::string("The T and N dimensions of key_rope must match key.") +
+                             " Current layout=" + inputLayout)
+                                .c_str()),
+                        return false);
+            // 验证rope D 数字是否正确
+            OP_CHECK_IF(
+                queryRopeShape[2] != DROPE_SIZE_64,
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "query_rope", (Ops::Base::ToString(queryRopeShape)).c_str(),
+                    (std::string("query_rope head dimension D must equal 64.") + " Current layout=" + inputLayout)
+                        .c_str()),
+                return false);
             // 验证rope D
             OP_CHECK_IF(queryRopeShape[2] != keyRopeShape[2],
-                        OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                    "CrossShapeVerify query_rope D is not equal to key_rope D, the "
-                                                    "value of query_rope[2] and key_rope[2] is (%ld), (%ld).",
-                                                    queryRopeShape[2], keyRopeShape[2]),
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "query_rope,key_rope",
+                            (Ops::Base::ToString(queryRopeShape) + "," + Ops::Base::ToString(keyRopeShape)).c_str(),
+                            (std::string("The head dimensions D of query_rope and key_rope must match.") +
+                             " Current layout=" + inputLayout)
+                                .c_str()),
                         return false);
         }
     } else if (inputLayout[0] == 'B' && inputLayout[1] == 'S' && inputLayout[2] == 'N' && inputLayout[3] == 'D') {
@@ -316,31 +459,36 @@ bool DenseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sha
         int64_t n2IndexLen = keyIndexShape[2];
 
         // 数值验证N1 是否在支持的范围内
-        OP_CHECK_IF(n1Len != NQUERY_SIZE_32 && n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of query must be one of the {32, 64, "
-                                                "128}, but the value of query[2] is (%ld)",
-                                                n1Len),
-                    return false);
+        OP_CHECK_IF(
+            n1Len != NQUERY_SIZE_32 && n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                (std::string("Query head count N must be one of 32, 64 or 128.") + " Current layout=" + inputLayout)
+                    .c_str()),
+            return false);
         // 数值验证N2=N1
         OP_CHECK_IF(n2Len != n1Len,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2 must be same with N1, but N2 is (%ld), N1 is (%ld).",
-                        n2Len, n1Len),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query,key",
+                        (Ops::Base::ToString(queryShape) + "," + Ops::Base::ToString(keyShape)).c_str(),
+                        (std::string("The head counts of query and key must match.") + " Current layout=" + inputLayout)
+                            .c_str()),
                     return false);
         // 数值验证N1_Index 是否在支持的范围内
-        OP_CHECK_IF(n1IndexLen != NQUERYINDEX_SIZE_8 && n1IndexLen != NQUERYINDEX_SIZE_16 &&
-                        n1IndexLen != NQUERYINDEX_SIZE_32 && n1IndexLen != NQUERYINDEX_SIZE_64,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                "CrossShapeVerify failed, shape N of query_index must be one of the "
-                                                "{8, 16, 32, 64}, but the value of query_index[2] is (%ld).",
-                                                n1IndexLen),
-                    return false);
+        OP_CHECK_IF(
+            n1IndexLen != NQUERYINDEX_SIZE_8 && n1IndexLen != NQUERYINDEX_SIZE_16 &&
+                n1IndexLen != NQUERYINDEX_SIZE_32 && n1IndexLen != NQUERYINDEX_SIZE_64,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query_index", (Ops::Base::ToString(queryIndexShape)).c_str(),
+                (std::string("query_index head count must be one of 8, 16, 32 or 64.") +
+                 " Current layout=" + inputLayout)
+                    .c_str()),
+            return false);
         // 数值验证N2_INDEX=1
         OP_CHECK_IF(n2IndexLen != N2_SIZE_1,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, N2_IDX must be 1, but the value of key_index[2] is (%ld).",
-                        n2IndexLen),
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "key_index", (Ops::Base::ToString(keyIndexShape)).c_str(),
+                        (std::string("key_index head count must equal 1.") + " Current layout=" + inputLayout).c_str()),
                     return false);
 
         // 交叉验证B
@@ -348,122 +496,143 @@ bool DenseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sha
             queryIndexShape[0] != bLen || weightsShape[0] != bLen || softmaxMaxShape[0] != bLen ||
                 softmaxSumShape[0] != bLen || keyShape[0] != bLen || keyIndexShape[0] != bLen ||
                 softmaxMaxIndexShape[0] != bLen || softmaxSumIndexShape[0] != bLen,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify shape B is failed, the value of query[0], key[0], query_index[0], key_index[0], weights[0], softmax_max[0], softmax_sum[0], softmax_max_index[0] and softmax_sum_index[0] are respectively (%ld), (%ld), (%ld), (%ld), (%ld), (%ld), (%ld), (%ld), (%ld).\
-                Their values should be equal.",
-                queryShape[0], keyShape[0], queryIndexShape[0], keyIndexShape[0], weightsShape[0], softmaxMaxShape[0],
-                softmaxSumShape[0], softmaxMaxIndexShape[0], softmaxSumIndexShape[0]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss",
+                "query,key,query_index,key_index,weight,softmax_max,softmax_sum,softmax_max_index,softmax_sum_index",
+                (Ops::Base::ToString(queryShape) + "," + Ops::Base::ToString(keyShape) + "," +
+                 Ops::Base::ToString(queryIndexShape) + "," + Ops::Base::ToString(keyIndexShape) + "," +
+                 Ops::Base::ToString(weightsShape) + "," + Ops::Base::ToString(softmaxMaxShape) + "," +
+                 Ops::Base::ToString(softmaxSumShape) + "," + Ops::Base::ToString(softmaxMaxIndexShape) + "," +
+                 Ops::Base::ToString(softmaxSumIndexShape))
+                    .c_str(),
+                (std::string("Batch dimension B must match across all nine tensors.") +
+                 " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         // 交叉验证s1
         OP_CHECK_IF(
             queryIndexShape[1] != s1Len || weightsShape[1] != s1Len || softmaxMaxShape[2] != s1Len ||
                 softmaxSumShape[2] != s1Len || softmaxMaxIndexShape[2] != s1Len || softmaxSumIndexShape[2] != s1Len,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify S1 is failed, the value of query[1], query_index[1], weights[1], softmax_max[2],  softmax_sum[2], softmax_max_index[2]\
-                and softmax_sum_index[2] are respectively (%ld), (%ld), (%ld), (%ld), (%ld), (%ld), (%ld). Their values should be equal.",
-                queryShape[1], queryIndexShape[1], weightsShape[1], softmaxMaxShape[2], softmaxSumShape[2],
-                softmaxMaxIndexShape[2], softmaxSumIndexShape[2]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss",
+                "query,query_index,weight,softmax_max,softmax_sum,softmax_max_index,softmax_sum_index",
+                (Ops::Base::ToString(queryShape) + "," + Ops::Base::ToString(queryIndexShape) + "," +
+                 Ops::Base::ToString(weightsShape) + "," + Ops::Base::ToString(softmaxMaxShape) + "," +
+                 Ops::Base::ToString(softmaxSumShape) + "," + Ops::Base::ToString(softmaxMaxIndexShape) + "," +
+                 Ops::Base::ToString(softmaxSumIndexShape))
+                    .c_str(),
+                (std::string(
+                     "S1 of query, query_index and weight must match dimension 2 of all four softmax tensors.") +
+                 " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         // 交叉验证s2
         OP_CHECK_IF(
             keyIndexShape[1] != s2Len,
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify shape S2 is failed, the value of key[1] and key_index[1] are "
-                                        "respectively (%ld), (%ld). Their values should be equal.",
-                                        keyShape[1], keyIndexShape[1]),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "key,key_index",
+                (Ops::Base::ToString(keyShape) + "," + Ops::Base::ToString(keyIndexShape)).c_str(),
+                (std::string("The S2 dimensions of key and key_index must match.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         // 交叉验证N1_Index
-        OP_CHECK_IF(
-            queryIndexShape[2] != weightsShape[2],
-            OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                        "CrossShapeVerify N index is failed, the value of query_index[2] and "
-                                        "weights[2] are respectively (%ld), (%ld). Their values should be equal.",
-                                        queryIndexShape[2], weightsShape[2]),
-            return false);
+        OP_CHECK_IF(queryIndexShape[2] != weightsShape[2],
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query_index,weight",
+                        (Ops::Base::ToString(queryIndexShape) + "," + Ops::Base::ToString(weightsShape)).c_str(),
+                        (std::string("The head counts of query_index and weight must match.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
+                    return false);
         // 交叉验证N2
         OP_CHECK_IF(softmaxMaxShape[1] != n2Len || softmaxSumShape[1] != n2Len,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName,
-                        "CrossShapeVerify N2 is failed, the value of key[2], softmax_max[1] and softmax_sum[1] are "
-                        "respectively (%ld), (%ld), (%ld). Their values should be equal.",
-                        keyShape[2], softmaxMaxShape[1], softmaxSumShape[1]),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "key,softmax_max,softmax_sum",
+                        (Ops::Base::ToString(keyShape) + "," + Ops::Base::ToString(softmaxMaxShape) + "," +
+                         Ops::Base::ToString(softmaxSumShape))
+                            .c_str(),
+                        (std::string("The key head count must match dimension 1 of softmax_max and softmax_sum.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
                     return false);
         // 交叉验证N2IDX=1
         OP_CHECK_IF(
             softmaxMaxIndexShape[1] != N2_SIZE_1,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, N2_INDEX must be 1, but the value of softmax_max_index[2] is (%ld).",
-                softmaxMaxIndexShape[1]),
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "softmax_max_index",
+                (Ops::Base::ToString(softmaxMaxIndexShape)).c_str(),
+                (std::string("Dimension 1 of softmax_max_index must equal 1.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         OP_CHECK_IF(
             softmaxSumIndexShape[1] != N2_SIZE_1,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, N2_INDEX must be 1, but the value of softmax_sum_index[2] is (%ld).",
-                softmaxSumIndexShape[1]),
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "softmax_sum_index",
+                (Ops::Base::ToString(softmaxSumIndexShape)).c_str(),
+                (std::string("Dimension 1 of softmax_sum_index must equal 1.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         // 交叉验证D=128
         OP_CHECK_IF(
             queryShape[3] != D_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName, "CrossShapeVerify failed, shape D of query must be 128, but the value of query[3] is (%ld)",
-                queryShape[3]),
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                (std::string("query head dimension D must equal 128.") + " Current layout=" + inputLayout).c_str()),
             return false);
-        OP_CHECK_IF(keyShape[3] != D_SIZE_128,
-                    OPS_REPORT_VECTOR_INNER_ERR(
-                        opName, "CrossShapeVerify failed, shape D of key must be 128, but the value of key[3] is (%ld)",
-                        keyShape[3]),
-                    return false);
+        OP_CHECK_IF(
+            keyShape[3] != D_SIZE_128,
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "key", (Ops::Base::ToString(keyShape)).c_str(),
+                (std::string("key head dimension D must equal 128.") + " Current layout=" + inputLayout).c_str()),
+            return false);
         OP_CHECK_IF(
             queryIndexShape[3] != D_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify failed, shape D of query_index must be 128, but the value of query_index[3] is (%ld)",
-                queryIndexShape[3]),
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "query_index", (Ops::Base::ToString(queryIndexShape)).c_str(),
+                (std::string("query_index head dimension D must equal 128.") + " Current layout=" + inputLayout)
+                    .c_str()),
             return false);
         OP_CHECK_IF(
             keyIndexShape[3] != D_SIZE_128,
-            OPS_REPORT_VECTOR_INNER_ERR(
-                opName,
-                "CrossShapeVerify failed, shape D of key_index must be 128, but the value of key_index[3] is (%ld)",
-                keyIndexShape[3]),
+            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                "DenseLightningIndexerGradKLLoss", "key_index", (Ops::Base::ToString(keyIndexShape)).c_str(),
+                (std::string("key_index head dimension D must equal 128.") + " Current layout=" + inputLayout).c_str()),
             return false);
 
         // 验证ROPE相关参数
         if (hasRope) {
             // 验证queryrope
-            OP_CHECK_IF(
-                queryRopeShape[0] != bLen || queryRopeShape[1] != s1Len || queryRopeShape[2] != n1Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify query_rope is failed, the value of query_rope[0] is (%ld), it should be equal to bSize(%ld). \
-                    the value of query_rope[1] is (%ld), it should be equal to s1Size(%ld), the value of query_rope[2] is (%ld), it should be equal to nQuerySize(%ld).",
-                    queryRopeShape[0], bLen, queryRopeShape[1], s1Len, queryRopeShape[2], n1Len),
-                return false);
-            // 验证keyrope
-            OP_CHECK_IF(
-                keyRopeShape[0] != bLen || keyRopeShape[1] != s2Len || keyRopeShape[2] != n2Len,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify key_rope is failed, the value of key_rope[0] is (%ld), it should be equal to bSize(%ld), the value of key_rope[1] is (%ld), it should be equal to s2Size(%ld). \
-                    the value of key_rope[2] is (%ld), it should be equal to n2Size(%ld)",
-                    keyRopeShape[0], bLen, keyRopeShape[1], s2Len, keyRopeShape[2], n2Len),
-                return false);
-            // 验证rope D 数字是否正确
-            OP_CHECK_IF(queryRopeShape[3] != DROPE_SIZE_64,
-                        OPS_REPORT_VECTOR_INNER_ERR(opName,
-                                                    "CrossShapeVerify failed, shape D of query_rope  must be 64, but "
-                                                    "the value of query_rope[3] is (%ld).",
-                                                    queryRopeShape[3]),
+            OP_CHECK_IF(queryRopeShape[0] != bLen || queryRopeShape[1] != s1Len || queryRopeShape[2] != n1Len,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "query_rope,query",
+                            (Ops::Base::ToString(queryRopeShape) + "," + Ops::Base::ToString(queryShape)).c_str(),
+                            (std::string("The B, S1 and N dimensions of query_rope must match query.") +
+                             " Current layout=" + inputLayout)
+                                .c_str()),
                         return false);
+            // 验证keyrope
+            OP_CHECK_IF(keyRopeShape[0] != bLen || keyRopeShape[1] != s2Len || keyRopeShape[2] != n2Len,
+                        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "key_rope,key",
+                            (Ops::Base::ToString(keyRopeShape) + "," + Ops::Base::ToString(keyShape)).c_str(),
+                            (std::string("The B, S2 and N dimensions of key_rope must match key.") +
+                             " Current layout=" + inputLayout)
+                                .c_str()),
+                        return false);
+            // 验证rope D 数字是否正确
             OP_CHECK_IF(
-                keyRopeShape[3] != DROPE_SIZE_64,
-                OPS_REPORT_VECTOR_INNER_ERR(
-                    opName,
-                    "CrossShapeVerify failed, shape D of key_rope must be 64, but the value of key_rope[3] is (%ld).",
-                    keyRopeShape[3]),
+                queryRopeShape[3] != DROPE_SIZE_64,
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "query_rope", (Ops::Base::ToString(queryRopeShape)).c_str(),
+                    (std::string("query_rope head dimension D must equal 64.") + " Current layout=" + inputLayout)
+                        .c_str()),
                 return false);
+            OP_CHECK_IF(keyRopeShape[3] != DROPE_SIZE_64,
+                        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "key_rope", (Ops::Base::ToString(keyRopeShape)).c_str(),
+                            (std::string("key_rope head dimension D must equal 64.") + " Current layout=" + inputLayout)
+                                .c_str()),
+                        return false);
         }
     }
     return true;
@@ -487,16 +656,22 @@ bool DenseLightningIndexerGradKLLossTilingBase::Analyze3DimLayout(const gert::Sh
             std::fill(actualSeqLenKData.begin(), actualSeqLenKData.end(), 0);
             GetActualSeqLenData(ACTUAL_SEQ_LENGTHS_QUERY_INPUT_INDEX, actualSeqLenData, actualSeqQLen);
             GetActualSeqLenData(ACTUAL_SEQ_LENGTHS_KEY_INPUT_INDEX, actualSeqLenKData, actualSeqKLen);
-            OP_CHECK_IF(actualSeqQLen != actualSeqKLen, OP_LOGE(opName, "VarLen scene, q is not equal k."),
+            OP_CHECK_IF(actualSeqQLen != actualSeqKLen,
+                        OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "actual_seq_lengths_query,actual_seq_lengths_key",
+                            (std::to_string(actualSeqQLen) + "," + std::to_string(actualSeqKLen)).c_str(),
+                            "The two sequence-length arrays must have the same element count."),
                         return false);
             // 校验actualQ 对应每一个元素是否大于 actualK ，大于则拦截
             for (int i = 0; i < actualSeqQLen; i++) {
                 OP_CHECK_IF(
                     actualSeqLenData[i] > actualSeqLenKData[i],
-                    OP_LOGE(opName,
-                            "Every element of actualSeqLenData must be less than every element of actualSeqLenKData,\
-                        but actualSeqLenData[%d]:[%d] is larger than actualSeqLenKData[%d]:[%d].",
-                            i, actualSeqLenData[i], i, actualSeqLenKData[i]),
+                    OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "actual_seq_lengths_query,actual_seq_lengths_key",
+                        (std::to_string(actualSeqLenData[i]) + "," + std::to_string(actualSeqLenKData[i])).c_str(),
+                        (std::string("At index ") + std::to_string(i) +
+                         ", the query sequence length must be less than or equal to the key sequence length.")
+                            .c_str()),
                     return false);
             }
             bSize = actualSeqQLen;
@@ -507,22 +682,35 @@ bool DenseLightningIndexerGradKLLossTilingBase::Analyze3DimLayout(const gert::Sh
             padT1Size = t1Size;
             padT2Size = t2Size;
 
-            OP_CHECK_IF(s1Size > s2Size || t1Size > t2Size || accumS1 > accumS2,
-                        OP_LOGE(opName,
-                                "Query s1Size(%ld), t1Size(%ld) and the sum of seqQLen(%ld) must be small than Key "
-                                "s2Size(%ld), t2Size(%ld) and seqkLen(%ld), respectively.",
-                                s1Size, t1Size, accumS1, s2Size, t2Size, accumS2),
-                        return false);
+            OP_CHECK_IF(
+                s1Size > s2Size || t1Size > t2Size || accumS1 > accumS2,
+                OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "query,key,actual_seq_lengths_query,actual_seq_lengths_key",
+                    (std::string("query:S=") + std::to_string(s1Size) + ",T=" + std::to_string(t1Size) +
+                     ",sum=" + std::to_string(accumS1) + ";key:S=" + std::to_string(s2Size) +
+                     ",T=" + std::to_string(t2Size) + ",sum=" + std::to_string(accumS2))
+                        .c_str(),
+                    "Query S, T and summed sequence lengths must each be less than or equal to the corresponding key "
+                    "value."),
+                return false);
             maxS1Val = *std::max_element(actualSeqLenData.begin(), actualSeqLenData.end());
             maxS2Val = *std::max_element(actualSeqLenKData.begin(), actualSeqLenKData.end());
-            OP_CHECK_IF(!CheckSeqLenLimit(maxS1Val, maxS2Val), OP_LOGE(opName, "TND sequence length check failed."),
-                        return false);
+            OP_CHECK_IF(!CheckSeqLenLimit(maxS1Val, maxS2Val),
+                        OP_LOGE_WITHOUT_REPORT(opName, "TND sequence length check failed."), return false);
             s1Size = maxS1Val;
             s2Size = maxS2Val;
             n2Size = keyShape.GetDim(1);
             n2IndexSize = keyIndexShape.GetDim(1);
-            OP_CHECK_IF(n2Size == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "N2 is zero."), return false);
-            OP_CHECK_IF(n2IndexSize == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "N2Index is zero."), return false);
+            OP_CHECK_IF(n2Size == 0,
+                        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "key", std::to_string(n2Size).c_str(),
+                            "The corresponding head count or head dimension must be greater than zero."),
+                        return false);
+            OP_CHECK_IF(n2IndexSize == 0,
+                        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "key_index", std::to_string(n2IndexSize).c_str(),
+                            "The corresponding head count or head dimension must be greater than zero."),
+                        return false);
             gSizeQuery = queryShape.GetDim(1) / n2Size;
             gSizeQueryIndex = queryIndexShape.GetDim(1) / n2IndexSize;
             dSizeQuery = queryShape.GetDim(2);
@@ -537,17 +725,29 @@ bool DenseLightningIndexerGradKLLossTilingBase::Analyze3DimLayout(const gert::Sh
     } else if (layoutLen == 4UL) {
         if (inputLayout[0] == 'B' && inputLayout[1] == 'S' && inputLayout[2] == 'N' && inputLayout[3] == 'D') {
             OP_CHECK_IF(!CheckSeqLenLimit(queryShape.GetDim(1), keyShape.GetDim(1)),
-                        OP_LOGE(opName, "BSND sequence length check failed."), return false);
+                        OP_LOGE_WITHOUT_REPORT(opName, "BSND sequence length check failed."), return false);
             bSize = queryShape.GetDim(0);
             s1Size = queryShape.GetDim(1);
             s2Size = keyShape.GetDim(1);
             n2Size = keyShape.GetDim(2);
             n2IndexSize = keyIndexShape.GetDim(2);
-            OP_CHECK_IF(s1Size > s2Size,
-                        OP_LOGE(opName, "Query s1Size(%ld) must be small than Key s2Size(%ld).", s1Size, s2Size),
+            OP_CHECK_IF(
+                s1Size > s2Size,
+                OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "query,key",
+                    (std::to_string(s1Size) + "," + std::to_string(s2Size)).c_str(),
+                    "The query sequence dimension S must be less than or equal to the key sequence dimension S."),
+                return false);
+            OP_CHECK_IF(n2Size == 0,
+                        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "key", std::to_string(n2Size).c_str(),
+                            "The corresponding head count or head dimension must be greater than zero."),
                         return false);
-            OP_CHECK_IF(n2Size == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "N2 is zero."), return false);
-            OP_CHECK_IF(n2IndexSize == 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "N2Index is zero."), return false);
+            OP_CHECK_IF(n2IndexSize == 0,
+                        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                            "DenseLightningIndexerGradKLLoss", "key_index", std::to_string(n2IndexSize).c_str(),
+                            "The corresponding head count or head dimension must be greater than zero."),
+                        return false);
             gSizeQuery = queryShape.GetDim(2) / n2Size;
             gSizeQueryIndex = queryIndexShape.GetDim(2) / n2IndexSize;
             dSizeQuery = queryShape.GetDim(3);
@@ -560,6 +760,8 @@ bool DenseLightningIndexerGradKLLossTilingBase::Analyze3DimLayout(const gert::Sh
             tilingKeyLayout = LayoutType::LAYOUT_BSND;
         }
     } else {
+        OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON("DenseLightningIndexerGradKLLoss", "layout", inputLayout,
+                                               "Supported layouts are TND and BSND.");
         return false;
     }
 
@@ -569,12 +771,14 @@ bool DenseLightningIndexerGradKLLossTilingBase::Analyze3DimLayout(const gert::Sh
 bool DenseLightningIndexerGradKLLossTilingBase::CheckSeqLenLimit(int64_t querySeqLength, int64_t keySeqLength) const
 {
     OP_CHECK_IF(querySeqLength < 0 || querySeqLength > MAX_SEQ_LENGTH,
-                OP_LOGE(opName, "Query sequence length[%ld] exceeds max supported sequence length[%ld].",
-                        querySeqLength, MAX_SEQ_LENGTH),
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "query", std::to_string(querySeqLength).c_str(),
+                    (std::string("Sequence length must be in [0,") + std::to_string(MAX_SEQ_LENGTH) + "].").c_str()),
                 return false);
     OP_CHECK_IF(keySeqLength < 0 || keySeqLength > MAX_SEQ_LENGTH,
-                OP_LOGE(opName, "Key sequence length[%ld] exceeds max supported sequence length[%ld].", keySeqLength,
-                        MAX_SEQ_LENGTH),
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    "DenseLightningIndexerGradKLLoss", "key", std::to_string(keySeqLength).c_str(),
+                    (std::string("Sequence length must be in [0,") + std::to_string(MAX_SEQ_LENGTH) + "].").c_str()),
                 return false);
     return true;
 }
@@ -625,8 +829,12 @@ int64_t DenseLightningIndexerGradKLLossTilingBase::GetS2RealSize(int32_t sparseM
 
 bool DenseLightningIndexerGradKLLossTilingBase::InitSparseValidArray(std::vector<int64_t>& sparseValidArray)
 {
-    OP_CHECK_IF(sparseValidArray.size() == 0,
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "Sparse valid array size should be larger than 0."), return false);
+    OP_CHECK_IF(
+        sparseValidArray.size() == 0,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                                            "Sparse valid array size should be larger than 0."})),
+        return false);
 
     uint32_t sparseMode = dliGradkllossBaseParams_->get_sparseMode();
     if (tilingKeyLayout == LayoutType::LAYOUT_TND) {
@@ -767,10 +975,18 @@ bool DenseLightningIndexerGradKLLossTilingBase::SetSparseStartIdx(const std::vec
     int64_t* sparseStartIdx = dliGradkllossMultiCoreParams_->get_bS1Ptr();
     int64_t splitFactorSize = dliGradkllossMultiCoreParams_->get_splitFactorSize();
 
-    OP_CHECK_IF(totalSize <= 0, OPS_REPORT_VECTOR_INNER_ERR(opName, "totalSize should be larger than 0."),
+    OP_CHECK_IF(totalSize <= 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                                                    "totalSize should be larger than 0."})),
                 return false);
     OP_CHECK_IF(validAicNum <= 0 || validAicNum > static_cast<int64_t>(MAX_CORE_NUM),
-                OPS_REPORT_VECTOR_INNER_ERR(opName, "validAicNum[%ld] is invalid.", validAicNum), return false);
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        "DenseLightningIndexerGradKLLoss",
+                        (std::string("validAicNum[") + std::to_string(validAicNum) + "] is invalid.").c_str()})),
+                return false);
     if (tilingKeyLayout == LayoutType::LAYOUT_TND) {
         // initLoad: 使用均分策略, 保证后续不会比均分差
         std::vector<int64_t> localSparseStartIdx(validAicNum, totalSize);
@@ -1034,10 +1250,11 @@ ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::GetShapeAttrsInfo()
     opName = context_->GetNodeName();
     OP_LOGD(opName, "TilingContext: %s.", GetTilingContextDebugStr().c_str());
 
-    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE(opName, "invalid context."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(opName, "invalid context."),
+                return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(!AnalyzeAttrs() || !AnalyzeDtype() || !AnalyzeLayout(),
-                OP_LOGE(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
     // 将基本输入参数传给tilingdata
     dliGradkllossBaseParams_->set_bSize(bSize);
     dliGradkllossBaseParams_->set_n2Size(n2Size);
@@ -1065,7 +1282,11 @@ ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::GetPlatformInfo()
     if (platformInfoPtr == nullptr) {
         auto compileInfoPtr =
             reinterpret_cast<const DenseLightningIndexerGradKLLossCompileInfo*>(context_->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(opName, "compileInfoPtr is null."), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(compileInfoPtr == nullptr,
+                    REPORT_PREDEFINED_ERR_MSG(
+                        "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                        (std::vector<const char*>{"DenseLightningIndexerGradKLLoss", "compileInfoPtr is null."})),
+                    return ge::GRAPH_FAILED);
         aivNum = compileInfoPtr->aivNum;
         aicNum = compileInfoPtr->aicNum;
         aicoreParams_.ubSize = compileInfoPtr->ubSize;
@@ -1082,7 +1303,12 @@ ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::GetPlatformInfo()
         ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2CacheSize);
     }
     OP_CHECK_IF(aicNum == 0 || aivNum == 0,
-                OP_LOGE(opName, "invalid core count, aicNum[%u], aivNum[%u].", aicNum, aivNum),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"DenseLightningIndexerGradKLLoss",
+                                              (std::string("invalid core count, aicNum[") + std::to_string(aicNum) +
+                                               "], aivNum[" + std::to_string(aivNum) + "].")
+                                                  .c_str()})),
                 return ge::GRAPH_FAILED);
     OP_LOGD(opName, "get platform from compileInfo.aivNum(%u) aicNum(%u) ubSize(%lu) l1Size(%lu) l0cSize(%lu).", aivNum,
             aicNum, aicoreParams_.ubSize, aicoreParams_.l1Size, aicoreParams_.l0cSize);
@@ -1096,13 +1322,16 @@ ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::DoOpTiling()
     // 无多余操作，分核，目前只实现TND场景分核
     int64_t totalSize = CalcTotalSize();
     SetMultiCoreParamsRegbase(totalSize, static_cast<int64_t>(aicNum));
-    OP_CHECK_IF(dliGradkllossMultiCoreParams_->get_coreNum() == 0, OP_LOGE(opName, "no valid AIC task is available."),
+    OP_CHECK_IF(dliGradkllossMultiCoreParams_->get_coreNum() == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"DenseLightningIndexerGradKLLoss", "no valid AIC task is available."})),
                 return ge::GRAPH_FAILED);
     context_->SetBlockDim(dliGradkllossMultiCoreParams_->get_coreNum()); // 使用的核数确定
     context_->SetScheduleMode(SCHEDULE_MODE_ALL_CORE);
 
-    OP_CHECK_IF(!SetSparseParamsRegbase(), OP_LOGE(opName, "failed to set sparse multi-core parameters."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!SetSparseParamsRegbase(),
+                OP_LOGE_WITHOUT_REPORT(opName, "failed to set sparse multi-core parameters."), return ge::GRAPH_FAILED);
     InitOutputSplit(); // output分核
     // 确定性场景需要计算最大轮次
     CalcMaxLoop();
@@ -1113,7 +1342,14 @@ ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::DoOpTiling()
 ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::GetWorkspaceSize()
 {
     size_t* workspaces = context_->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+    OP_CHECK_IF(
+        workspaces == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{
+                "DenseLightningIndexerGradKLLoss",
+                "Tiling framework object workspaces is unavailable; check context construction and OPP metadata."})),
+        return ge::GRAPH_FAILED);
     uint64_t bmm1Size = static_cast<uint64_t>(n2Size) * S1_BASE_STEP * S2_BASE_STEP * sizeof(float);
     uint64_t bmm2Size = static_cast<uint64_t>(gSizeQueryIndex) * S1_BASE_STEP * S2_BASE_STEP * sizeof(float);
     uint64_t reluGradSize = static_cast<uint64_t>(gSizeQueryIndex) * S1_BASE_STEP * S2_BASE_STEP * sizeof(float);
@@ -1149,7 +1385,16 @@ ge::graphStatus DenseLightningIndexerGradKLLossTilingBase::GetWorkspaceSize()
     uint64_t multicoreTotalSize = singlecoreTotalSize * dliGradkllossMultiCoreParams_->get_coreNum() + dKeyIndexGmSize +
                                   dKeyIndexDeterGmSize + lossDeterGmSize + coreRuninfoDeterGmSize;
     OP_CHECK_IF(multicoreTotalSize > std::numeric_limits<size_t>::max() - WORK_SPACE_RESERVE_SIZE,
-                OP_LOGE(opName, "workspace size overflow."), return ge::GRAPH_FAILED);
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        "DenseLightningIndexerGradKLLoss",
+                        (std::string("Computed workspace bytes overflow after reserve; computed=") +
+                         std::to_string(multicoreTotalSize) + ", reserve=" + std::to_string(WORK_SPACE_RESERVE_SIZE) +
+                         ", size_t maximum=" + std::to_string(std::numeric_limits<size_t>::max()) +
+                         "; check the tiling workspace calculation.")
+                            .c_str()})),
+                return ge::GRAPH_FAILED);
     workspaces[0] = static_cast<size_t>(multicoreTotalSize + WORK_SPACE_RESERVE_SIZE);
     OP_LOGW(context_, "workspace size:[%zu], multicoreTotalSize:[%lu]", workspaces[0], multicoreTotalSize);
     return ge::GRAPH_SUCCESS;

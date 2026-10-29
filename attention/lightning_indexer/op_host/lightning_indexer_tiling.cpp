@@ -13,6 +13,11 @@
  * \brief
  */
 
+#include "util/shape_util.h"
+#include <string>
+#include <vector>
+#include "base/err_msg.h"
+#include "log/log.h"
 #include "lightning_indexer_tiling.h"
 #include "../op_kernel/lightning_indexer_template_tiling_key.h"
 
@@ -66,7 +71,7 @@ static std::string LIDataTypeToSerialString(ge::DataType type)
     if (liIt != DATATYPE_TO_STRING_MAP.end()) {
         return liIt->second;
     } else {
-        OP_LOGE("LightningIndexer", "datatype %d not support", type);
+        OP_LOGE_WITHOUT_REPORT("LightningIndexer", "datatype %d not support", type);
         return "UNDEFINED";
     }
 }
@@ -178,7 +183,9 @@ ge::graphStatus LIInfoParser::CheckLiRequiredParameters() const
 ge::graphStatus LIInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("LightningIndexer", "opName got from TilingContext is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"LightningIndexer", "opName got from TilingContext is nullptr"}));
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -188,23 +195,40 @@ ge::graphStatus LIInfoParser::GetOpName()
 ge::graphStatus LIInfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfo_ == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"LightningIndexer", "GetPlatformInfo is nullptr"})),
+                return ge::GRAPH_FAILED);
 
     auto liAscendcPlatform = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t aivNum = liAscendcPlatform.GetCoreNumAiv();
     uint32_t aicNum = liAscendcPlatform.GetCoreNumAic();
-    OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
+    OP_CHECK_IF(aicNum == 0 || aivNum == 0,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"LightningIndexer", "num of core obtained is 0."})),
+                return GRAPH_FAILED);
 
     socVersion_ = liAscendcPlatform.GetSocVersion();
     npuArch_ = liAscendcPlatform.GetCurNpuArch();
     if ((npuArch_ != NpuArch::DAV_2201) && (npuArch_ != NpuArch::DAV_3510)) {
-        OP_LOGE(opName_, "NpuArch[%d] is not support.", static_cast<int32_t>(npuArch_));
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+            (std::vector<const char*>{
+                "LightningIndexer", "AiCore",
+                (std::string("NpuArch[") + std::to_string(static_cast<int32_t>(npuArch_)) + "] is not support.")
+                    .c_str()}));
         return GRAPH_FAILED;
     }
-    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr, OP_LOGE(opName_, "workSpaceSize got from ge is nullptr"),
+    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"LightningIndexer", "workSpaceSize got from ge is nullptr"})),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
-                OP_LOGE(opName_, "RawTilingData got from GE context is nullptr"), return ge::GRAPH_FAILED);
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"LightningIndexer", "RawTilingData got from GE context is nullptr"})),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -241,8 +265,11 @@ void LIInfoParser::GetOutputParaInfo()
 ge::graphStatus LIInfoParser::GetAndCheckAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "attrs got from GE is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        attrs == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"LightningIndexer", "attrs got from GE is nullptr"})),
+        return ge::GRAPH_FAILED);
     OP_LOGI(context_->GetNodeName(), "GetAndCheckAttrParaInfo start");
     liParams_.layOut = attrs->GetStr(ATTR_QUERY_LAYOUT_INDEX);
     liParams_.layOutKey = attrs->GetStr(ATTR_KEY_LAYOUT_INDEX);
@@ -654,7 +681,9 @@ static ge::graphStatus LiGetHeadDim(const TilingRequiredParaInfo& liQuery, DataL
             liDIndex = DIM_IDX_THREE;
             break;
         default:
-            OP_LOGE(liOpName, "unsupported layout for getting head dim.");
+            OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON("LightningIndexer", "layout_query",
+                                                   std::to_string(static_cast<int>(liQLayout)).c_str(),
+                                                   "Supported query layouts are BSND and TND.");
             return ge::GRAPH_FAILED;
     }
     liHeadDim = liQuery.shape->GetStorageShape().GetDim(liDIndex);
@@ -1210,7 +1239,9 @@ ge::graphStatus LightningIndexerTiling::DoTiling(LITilingInfo* tilingInfo)
 // --------------------------Tiling函数定义---------------------------
 ge::graphStatus TilingForLightningIndexer(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("LightningIndexer", "Tiling context is null."),
+    OP_CHECK_IF(context == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"LightningIndexer", "Tiling context is null."})),
                 return ge::GRAPH_FAILED);
     LITilingInfo liInfo;
     LIInfoParser LIInfoParser(context);

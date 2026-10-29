@@ -13,6 +13,11 @@
  * \brief
  */
 
+#include "util/shape_util.h"
+#include <string>
+#include <vector>
+#include "base/err_msg.h"
+#include "graph/utils/type_utils.h"
 #include "log/log.h"
 #include "dense_lightning_indexer_softmax_lse_tiling.h"
 #include "../op_kernel/dense_lightning_indexer_softmax_lse_tiling_key.h"
@@ -28,36 +33,59 @@ struct DenseLightningIndexerSoftmaxLseCompileInfo {};
 // --------------------------DenseLISoftmaxLseInfoParser类成员函数定义-------------------------------------
 ge::graphStatus DenseLISoftmaxLseInfoParser::CheckRequiredInOutExistence() const
 {
-    OP_CHECK_IF(opParamInfo_.query.shape == nullptr, OP_LOGE(opName_, "Shape of tensor query is nullptr"),
+    OP_CHECK_IF(opParamInfo_.query.shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "query_index"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.query.desc == nullptr, OP_LOGE(opName_, "Desc of tensor query is nullptr"),
+    OP_CHECK_IF(opParamInfo_.query.desc == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "query_index"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.key.shape == nullptr, OP_LOGE(opName_, "Shape of tensor k is nullptr"),
+    OP_CHECK_IF(opParamInfo_.key.shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "key_index"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.key.desc == nullptr, OP_LOGE(opName_, "Desc of tensor k is nullptr"),
+    OP_CHECK_IF(opParamInfo_.key.desc == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "key_index"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.weights.shape == nullptr, OP_LOGE(opName_, "Shape of tensor weights is nullptr"),
+    OP_CHECK_IF(opParamInfo_.weights.shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "weight"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.weights.desc == nullptr, OP_LOGE(opName_, "Desc of tensor weights is nullptr"),
+    OP_CHECK_IF(opParamInfo_.weights.desc == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "weight"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.softmaxMaxOut.shape == nullptr,
-                OP_LOGE(opName_, "Shape of tensor output softmaxMax is nullptr"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.softmaxMaxOut.desc == nullptr,
-                OP_LOGE(opName_, "Desc of tensor output softmaxMax is nullptr"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.softmaxSumOut.shape == nullptr,
-                OP_LOGE(opName_, "Shape of tensor output softmaxSum is nullptr"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(opParamInfo_.softmaxSumOut.desc == nullptr,
-                OP_LOGE(opName_, "Desc of tensor output softmaxSum is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        opParamInfo_.softmaxMaxOut.shape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{opName_, "Shape of tensor output softmaxMax is nullptr"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        opParamInfo_.softmaxMaxOut.desc == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{opName_, "Desc of tensor output softmaxMax is nullptr"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        opParamInfo_.softmaxSumOut.shape == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{opName_, "Shape of tensor output softmaxSum is nullptr"})),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        opParamInfo_.softmaxSumOut.desc == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{opName_, "Desc of tensor output softmaxSum is nullptr"})),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus DenseLISoftmaxLseInfoParser::CheckRequiredAttrExistence() const
 {
-    OP_CHECK_IF(opParamInfo_.layOut == nullptr, OP_LOGE(opName_, "attr layout is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        opParamInfo_.layOut == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{opName_, "Tiling: registered optional attribute layout is unavailable; check "
+                                               "context construction and default-attribute materialization."})),
+        return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(opParamInfo_.sparseMode == nullptr, OP_LOGE(opName_, "attr sparse_mode is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        opParamInfo_.sparseMode == nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{opName_, "Tiling: registered optional attribute sparse_mode is unavailable; "
+                                               "check context construction and default-attribute materialization."})),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -74,7 +102,9 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::CheckRequiredParaExistence() const
 ge::graphStatus DenseLISoftmaxLseInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("DenseLightningIndexerSoftmaxLse", "opName got from TilingContext is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"DenseLightningIndexerSoftmaxLse", "opName got from TilingContext is nullptr"}));
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -84,25 +114,42 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetOpName()
 ge::graphStatus DenseLISoftmaxLseInfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfo_ == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName_, "GetPlatformInfo is nullptr."})),
+                return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
-    OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
+    OP_CHECK_IF(aicNum == 0 || aivNum == 0,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{opName_, (std::string("Platform core counts must be nonzero; AIC=") +
+                                                        std::to_string(aicNum) + ", AIV=" + std::to_string(aivNum))
+                                                           .c_str()})),
+                return GRAPH_FAILED);
 
     socVersion_ = ascendcPlatform.GetSocVersion();
     if ((socVersion_ != platform_ascendc::SocVersion::ASCEND910B) &&
         (socVersion_ != platform_ascendc::SocVersion::ASCEND910_93) &&
         (!Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_))) {
-        OP_LOGE(opName_, "SOC Version[%d] is not support.", (int32_t)socVersion_);
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+            (std::vector<const char*>{
+                "DenseLightningIndexerSoftmaxLse", "AiCore",
+                (std::string("SOC Version[") + std::to_string((int32_t)socVersion_) + "] is not support.").c_str()}));
         return GRAPH_FAILED;
     }
-    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr, OP_LOGE(opName_, "workSpaceSize got from ge is nullptr"),
+    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName_, "workSpaceSize got from ge is nullptr"})),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
-                OP_LOGE(context_->GetNodeName(), "RawTilingData got from GE context is nullptr."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context_->GetRawTilingData() == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{opName_, "RawTilingData got from GE context is nullptr."})),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -137,7 +184,9 @@ void DenseLISoftmaxLseInfoParser::GetOutputParaInfo()
 ge::graphStatus DenseLISoftmaxLseInfoParser::GetAndCheckAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "attrs got from ge is nullptr"),
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{opName_, "attrs got from ge is nullptr"})),
                 return ge::GRAPH_FAILED);
     OP_LOGI(context_->GetNodeName(), "GetAndCheckAttrParaInfo start");
     opParamInfo_.layOut = attrs->GetStr(ATTR_LAYOUT_INDEX);
@@ -158,11 +207,17 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetAndCheckAttrParaInfo()
     }
     OP_LOGI(context_->GetNodeName(), "GetAndCheckAttrParaInfo end");
     OP_CHECK_IF(*opParamInfo_.sparseMode != SPARSE_MODE_LOWER,
-                OP_LOGE(opName_, "input attr sparse_mode only supported 3."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_VALUE(opName_, "sparse_mode", std::to_string(*opParamInfo_.sparseMode).c_str(),
+                                          std::to_string(SPARSE_MODE_LOWER).c_str()),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(*opParamInfo_.preTokens != INT64_MAX,
-                OP_LOGE(opName_, "input attr pre_tokens only supported INT64_MAX."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_VALUE(opName_, "pre_tokens", std::to_string(*opParamInfo_.preTokens).c_str(),
+                                          std::to_string(INT64_MAX).c_str()),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(*opParamInfo_.nextTokens != INT64_MAX,
-                OP_LOGE(opName_, "input attr nextTokens only supported INT64_MAX."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_VALUE(opName_, "next_tokens", std::to_string(*opParamInfo_.nextTokens).c_str(),
+                                          std::to_string(INT64_MAX).c_str()),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -185,17 +240,31 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetAndCheckInOutDataType()
     softmaxSumOutType_ = opParamInfo_.softmaxSumOut.desc->GetDataType();
 
     bool inDTypeAllEqual = inputQType_ == inputKType_;
-    OP_CHECK_IF(!inDTypeAllEqual, OP_LOGE(opName_, "The data types of the input query and key must be the same."),
+    OP_CHECK_IF(!inDTypeAllEqual,
+                OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "query_index,key_index",
+                                                       (ge::TypeUtils::DataTypeToSerialString(inputQType_) + "," +
+                                                        ge::TypeUtils::DataTypeToSerialString(inputKType_))
+                                                           .c_str(),
+                                                       "query_index and key_index must have the same dtype."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(((inputQType_ != ge::DT_FLOAT16) && (inputQType_ != ge::DT_BF16)),
-                OP_LOGE(opName_, "The data types of the input query, key, and weights must be float16 or bfloat16."),
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "query_index",
+                                                      (ge::TypeUtils::DataTypeToSerialString(inputQType_)).c_str(),
+                                                      "Supported dtypes are FLOAT16 and BF16."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(softmaxMaxOutType_ != ge::DT_FLOAT,
-                OP_LOGE(opName_, "The data types of the output softmax max must be float."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                    opName_, "softmax_max", (ge::TypeUtils::DataTypeToSerialString(softmaxMaxOutType_)).c_str(),
+                    "The output dtype must be FLOAT."),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(softmaxSumOutType_ != softmaxMaxOutType_,
-                OP_LOGE(opName_, "The data types of the output softmax sum must be same as softmax max datatype."),
+                OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "softmax_max,softmax_sum",
+                                                       (ge::TypeUtils::DataTypeToSerialString(softmaxMaxOutType_) +
+                                                        "," + ge::TypeUtils::DataTypeToSerialString(softmaxSumOutType_))
+                                                           .c_str(),
+                                                       "The two output dtypes must match."),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -218,20 +287,29 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetAndCheckOptionalInput()
 {
     if (layout_ == DataLayout::TND) {
         OP_CHECK_IF(opParamInfo_.actualSeqLengthsQ.tensor == nullptr,
-                    OP_LOGE(opName_, "when layout_query is TND, input actual_seq_lengths_query must not be null"),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "actual_seq_lengths_query",
+                                                             "This input must be provided when layout is TND."),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF(opParamInfo_.actualSeqLengths.tensor == nullptr,
-                    OP_LOGE(opName_, "when layout_key is TND, input actual_seq_lengths_key must not be null"),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "actual_seq_lengths_key",
+                                                             "This input must be provided when layout is TND."),
                     return ge::GRAPH_FAILED);
     }
     OP_CHECK_IF(opParamInfo_.actualSeqLengthsQ.tensor != nullptr &&
                     opParamInfo_.actualSeqLengthsQ.desc->GetDataType() != ge::DT_INT64,
-                OP_LOGE(opName_, "input actual_seq_lengths_query data type only support int64"),
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                    opName_, "actual_seq_lengths_query",
+                    (ge::TypeUtils::DataTypeToSerialString(opParamInfo_.actualSeqLengthsQ.desc->GetDataType())).c_str(),
+                    "The dtype must be INT64."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(opParamInfo_.actualSeqLengths.tensor != nullptr &&
                     opParamInfo_.actualSeqLengths.desc->GetDataType() != ge::DT_INT64,
-                OP_LOGE(opName_, "input actual_seq_lengths_key data type only support int64"), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+                    opName_, "actual_seq_lengths_key",
+                    (ge::TypeUtils::DataTypeToSerialString(opParamInfo_.actualSeqLengths.desc->GetDataType())).c_str(),
+                    "The dtype must be INT64."),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -252,23 +330,24 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::CheckShapeDim()
     }
 
     OP_CHECK_IF(kShapeDim != kExpectShapeDim,
-                OP_LOGE(opName_, "the dim num of key's shape should be %u, but now is %u", kExpectShapeDim, kShapeDim),
+                OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "key_index", std::to_string(kShapeDim).c_str(),
+                                             std::to_string(kExpectShapeDim).c_str()),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(
-        qShapeDim != qExpectShapeDim,
-        OP_LOGE(opName_, "the dim num of query's shape should be %u, but now is %u", qExpectShapeDim, qShapeDim),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(qShapeDim != qExpectShapeDim,
+                OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "query_index", std::to_string(qShapeDim).c_str(),
+                                             std::to_string(qExpectShapeDim).c_str()),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(softmaxMaxOutShapeDim != qExpectShapeDim - DIM_NUM_ONE,
-                OP_LOGE(opName_, "the dim num of softmaxMax's shape should be %u, but now is %u",
-                        qExpectShapeDim - DIM_NUM_ONE, softmaxMaxOutShapeDim),
+                OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "softmax_max", std::to_string(softmaxMaxOutShapeDim).c_str(),
+                                             std::to_string(qExpectShapeDim - DIM_NUM_ONE).c_str()),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(softmaxSumOutShapeDim != qExpectShapeDim - DIM_NUM_ONE,
-                OP_LOGE(opName_, "the dim num of softmaxSum's shape should be %u, but now is %u",
-                        qExpectShapeDim - DIM_NUM_ONE, softmaxSumOutShapeDim),
+                OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "softmax_sum", std::to_string(softmaxSumOutShapeDim).c_str(),
+                                             std::to_string(qExpectShapeDim - DIM_NUM_ONE).c_str()),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(!(weightsShapeDim == qExpectShapeDim - DIM_NUM_ONE),
-                OP_LOGE(opName_, "the dim num of weights's shape should be %u, but now is %u", qExpectShapeDim - 1,
-                        weightsShapeDim),
+                OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "weight", std::to_string(weightsShapeDim).c_str(),
+                                             std::to_string(qExpectShapeDim - DIM_NUM_ONE).c_str()),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -291,7 +370,8 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetActualSeqLenSize(uint32_t& size,
 {
     size = static_cast<uint32_t>(tensor->GetShapeSize());
     if (size <= DIM_NUM_ZERO) {
-        OP_LOGE(opName_, "%s's shape size is %u, it should be greater than 0.", actualSeqLenName.c_str(), size);
+        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(opName_, actualSeqLenName.c_str(), std::to_string(size).c_str(),
+                                                  "The element count must be greater than zero.");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -302,7 +382,9 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetAndCheckN2Size()
     uint32_t n2Index = (layout_ == DataLayout::TND) ? DIM_IDX_ONE : DIM_IDX_TWO;
     n2Size_ = static_cast<uint32_t>(opParamInfo_.key.shape->GetStorageShape().GetDim(n2Index));
     OP_LOGI(context_->GetNodeName(), "n2Size_ is %d", n2Size_);
-    OP_CHECK_IF(n2Size_ != N2_SIZE_LIMIT, OP_LOGE(opName_, "key shape[%u] is numhead, only support 1.", n2Index),
+    OP_CHECK_IF(n2Size_ != N2_SIZE_LIMIT,
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(opName_, "key_index", std::to_string(n2Size_).c_str(),
+                                                          "The head count must equal 1."),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -310,7 +392,9 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetAndCheckN2Size()
 ge::graphStatus DenseLISoftmaxLseInfoParser::GetGSize()
 {
     if (n1Size_ % n2Size_ != 0) {
-        OP_LOGE(opName_, "input query's head_num %u can not be a multiple of key's head_num %u.", n1Size_, n2Size_);
+        OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+            opName_, "query_index,key_index", (std::to_string(n1Size_) + "," + std::to_string(n2Size_)).c_str(),
+            "The query_index head count must be a multiple of the key_index head count.");
         return ge::GRAPH_FAILED;
     }
     gSize_ = n1Size_ / n2Size_;
@@ -346,11 +430,14 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetHeadDim()
             dIndex = DIM_IDX_THREE;
             break;
         default:
-            OP_LOGE(opName_, "unsupported layout for getting head dim.");
+            OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(opName_, "layout", opParamInfo_.layOut,
+                                                   "Supported layouts are TND and BSND.");
             return ge::GRAPH_FAILED;
     }
     headDim_ = opParamInfo_.query.shape->GetStorageShape().GetDim(dIndex);
-    OP_CHECK_IF(headDim_ != HEAD_DIM_LIMIT, OP_LOGE(opName_, "input query's last dim head_dim only support 128."),
+    OP_CHECK_IF(headDim_ != HEAD_DIM_LIMIT,
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(opName_, "query_index", std::to_string(headDim_).c_str(),
+                                                          "The last dimension must equal 128."),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -378,12 +465,18 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetS2Size()
 
 ge::graphStatus DenseLISoftmaxLseInfoParser::CheckSeqLenLimit()
 {
-    OP_CHECK_IF((s1Size_ > MAX_SEQ_LENGTH),
-                OP_LOGE(opName_, "qSeqLen [%lu] exceeds max supported seqLen [%u].", s1Size_, MAX_SEQ_LENGTH),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF((s2Size_ > MAX_SEQ_LENGTH),
-                OP_LOGE(opName_, "kvSeqLen [%lu] exceeds max supported seqLen [%u].", s2Size_, MAX_SEQ_LENGTH),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (s1Size_ > MAX_SEQ_LENGTH),
+        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+            opName_, "query_index", std::to_string(s1Size_).c_str(),
+            (std::string("The sequence length must not exceed ") + std::to_string(MAX_SEQ_LENGTH) + ".").c_str()),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (s2Size_ > MAX_SEQ_LENGTH),
+        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+            opName_, "key_index", std::to_string(s2Size_).c_str(),
+            (std::string("The sequence length must not exceed ") + std::to_string(MAX_SEQ_LENGTH) + ".").c_str()),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -407,7 +500,8 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::GetMaxSeqLenFromTensor(const gert::
     }
     const int64_t* data = tensor->GetData<int64_t>();
     if (data == nullptr) {
-        OP_LOGE(opName_, "actualSeqLengths tensor data is nullptr.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{opName_, "actualSeqLengths tensor data is nullptr."}));
         return ge::GRAPH_FAILED;
     }
     auto shapeSize = tensor->GetShapeSize();
@@ -436,23 +530,27 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::ValidateInputShapesMatchTnd()
 {
     // -----------------------check BatchSize-------------------
     // bSize_ 来源于act_seq_q
-    OP_CHECK_IF((opParamInfo_.actualSeqLengths.tensor->GetShapeSize() != bSize_),
-                OP_LOGE(opName_,
-                        "TND case input actual_seq_lengths_query, actual_seq_lengths_key are "
-                        "%u, %ld respectively, they must be same.",
-                        bSize_, opParamInfo_.actualSeqLengths.tensor->GetShapeSize()),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (opParamInfo_.actualSeqLengths.tensor->GetShapeSize() != bSize_),
+        OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+            opName_, "actual_seq_lengths_query,actual_seq_lengths_key",
+            (std::to_string(bSize_) + "," + std::to_string(opParamInfo_.actualSeqLengths.tensor->GetShapeSize()))
+                .c_str(),
+            "The sequence-length arrays must have the same element count for TND."),
+        return ge::GRAPH_FAILED);
     // -----------------------check T-------------------
     uint32_t qTsize = opParamInfo_.query.shape->GetStorageShape().GetDim(DIM_IDX_ZERO);
     OP_CHECK_IF((opParamInfo_.weights.shape->GetStorageShape().GetDim(DIM_IDX_ZERO) != qTsize) ||
                     (opParamInfo_.softmaxMaxOut.shape->GetStorageShape().GetDim(DIM_IDX_ONE) != qTsize) ||
                     (opParamInfo_.softmaxSumOut.shape->GetStorageShape().GetDim(DIM_IDX_ONE) != qTsize),
-                OP_LOGE(opName_,
-                        "TND case input query, weights, output softmaxMax, "
-                        "softmaxSum dim 1 are %u, %ld, %ld, %ld respectively, they must be same.",
-                        qTsize, opParamInfo_.weights.shape->GetStorageShape().GetDim(DIM_IDX_ZERO),
-                        opParamInfo_.softmaxMaxOut.shape->GetStorageShape().GetDim(DIM_IDX_ONE),
-                        opParamInfo_.softmaxSumOut.shape->GetStorageShape().GetDim(DIM_IDX_ONE)),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName_, "query_index,weight,softmax_max,softmax_sum",
+                    (Ops::Base::ToString(opParamInfo_.query.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.weights.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.softmaxMaxOut.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.softmaxSumOut.shape->GetStorageShape()))
+                        .c_str(),
+                    "For TND, query_index and weight dimension 0 must match dimension 1 of both softmax outputs."),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -461,44 +559,56 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::ValidateInputShapesMatchBsnd()
 {
     // -----------------------check BatchSize-------------------
     // bSize_ 来源于query
-    OP_CHECK_IF(opParamInfo_.key.shape->GetStorageShape().GetDim(DIM_IDX_ZERO) != bSize_,
-                OP_LOGE(opName_, "BSND case input query, key dim 0 are %u, %ld respectively, they must be same.",
-                        bSize_, opParamInfo_.key.shape->GetStorageShape().GetDim(DIM_IDX_ZERO)),
-                return ge::GRAPH_FAILED);
-    OP_CHECK_IF((opParamInfo_.actualSeqLengths.tensor != nullptr) &&
-                    (opParamInfo_.actualSeqLengths.tensor->GetShapeSize() != bSize_),
-                OP_LOGE(opName_,
-                        "BSND case input query, actual_seq_lengths_key dim 0 are "
-                        "%u, %ld respectively, they must be same.",
-                        bSize_, opParamInfo_.actualSeqLengths.tensor->GetShapeSize()),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        opParamInfo_.key.shape->GetStorageShape().GetDim(DIM_IDX_ZERO) != bSize_,
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName_, "query_index,key_index",
+                                               (Ops::Base::ToString(opParamInfo_.query.shape->GetStorageShape()) + "," +
+                                                Ops::Base::ToString(opParamInfo_.key.shape->GetStorageShape()))
+                                                   .c_str(),
+                                               "For BSND, query_index and key_index batch dimensions must match."),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (opParamInfo_.actualSeqLengths.tensor != nullptr) &&
+            (opParamInfo_.actualSeqLengths.tensor->GetShapeSize() != bSize_),
+        OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+            opName_, "query_index,actual_seq_lengths_key",
+            (std::to_string(bSize_) + "," + std::to_string(opParamInfo_.actualSeqLengths.tensor->GetShapeSize()))
+                .c_str(),
+            "For BSND, the query_index batch dimension must equal the sequence-length array element count."),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF((opParamInfo_.weights.shape->GetStorageShape().GetDim(DIM_IDX_ZERO) != bSize_) ||
                     (opParamInfo_.softmaxMaxOut.shape->GetStorageShape().GetDim(DIM_IDX_ZERO) != bSize_) ||
                     (opParamInfo_.softmaxSumOut.shape->GetStorageShape().GetDim(DIM_IDX_ZERO) != bSize_),
-                OP_LOGE(opName_,
-                        "BSND case input query, weight, output softmaxMax, "
-                        "softmaxSumOut dim 0 are %u, %ld, %ld, %ld respectively, they must be same.",
-                        bSize_, opParamInfo_.weights.shape->GetStorageShape().GetDim(DIM_IDX_ZERO),
-                        opParamInfo_.softmaxMaxOut.shape->GetStorageShape().GetDim(DIM_IDX_ZERO),
-                        opParamInfo_.softmaxSumOut.shape->GetStorageShape().GetDim(DIM_IDX_ZERO)),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName_, "query_index,weight,softmax_max,softmax_sum",
+                    (Ops::Base::ToString(opParamInfo_.query.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.weights.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.softmaxMaxOut.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.softmaxSumOut.shape->GetStorageShape()))
+                        .c_str(),
+                    "For BSND, the batch dimensions of these tensors must match."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF((opParamInfo_.actualSeqLengthsQ.tensor != nullptr) &&
-                    (opParamInfo_.actualSeqLengthsQ.tensor->GetShapeSize() != bSize_),
-                OP_LOGE(opName_,
-                        "BSND case input query, actual_seq_lengths_query dim 0 are %u, %ld "
-                        "respectively, they must be same",
-                        bSize_, opParamInfo_.actualSeqLengthsQ.tensor->GetShapeSize()),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (opParamInfo_.actualSeqLengthsQ.tensor != nullptr) &&
+            (opParamInfo_.actualSeqLengthsQ.tensor->GetShapeSize() != bSize_),
+        OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+            opName_, "query_index,actual_seq_lengths_query",
+            (std::to_string(bSize_) + "," + std::to_string(opParamInfo_.actualSeqLengthsQ.tensor->GetShapeSize()))
+                .c_str(),
+            "For BSND, the query_index batch dimension must equal the sequence-length array element count."),
+        return ge::GRAPH_FAILED);
     // -----------------------check S1-------------------
     OP_CHECK_IF((opParamInfo_.weights.shape->GetStorageShape().GetDim(DIM_IDX_ONE) != s1Size_) ||
                     (opParamInfo_.softmaxMaxOut.shape->GetStorageShape().GetDim(DIM_IDX_TWO) != s1Size_) ||
                     (opParamInfo_.softmaxSumOut.shape->GetStorageShape().GetDim(DIM_IDX_TWO) != s1Size_),
-                OP_LOGE(opName_,
-                        "BSND case input query, weight, output softmaxMax, softmaxSum dim 2 "
-                        "are %u, %ld, %ld, %ld, they must be same.",
-                        s1Size_, opParamInfo_.weights.shape->GetStorageShape().GetDim(DIM_IDX_ONE),
-                        opParamInfo_.softmaxMaxOut.shape->GetStorageShape().GetDim(DIM_IDX_TWO),
-                        opParamInfo_.softmaxSumOut.shape->GetStorageShape().GetDim(DIM_IDX_TWO)),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                    opName_, "query_index,weight,softmax_max,softmax_sum",
+                    (Ops::Base::ToString(opParamInfo_.query.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.weights.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.softmaxMaxOut.shape->GetStorageShape()) + "," +
+                     Ops::Base::ToString(opParamInfo_.softmaxSumOut.shape->GetStorageShape()))
+                        .c_str(),
+                    "For BSND, query_index and weight dimension 1 must match dimension 2 of both softmax outputs."),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -517,12 +627,24 @@ ge::graphStatus DenseLISoftmaxLseInfoParser::ValidateInputShapesMatch()
         queryWeightsN1Dim = DIM_IDX_TWO;
     }
     // -----------------------check N1-------------------
-    OP_CHECK_IF((opParamInfo_.weights.shape->GetStorageShape().GetDim(queryWeightsN1Dim) != n1Size_),
-                OP_LOGE(opName_, "input query, weight shape dim N1 must be same."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (opParamInfo_.weights.shape->GetStorageShape().GetDim(queryWeightsN1Dim) != n1Size_),
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName_, "query_index,weight",
+                                               (Ops::Base::ToString(opParamInfo_.query.shape->GetStorageShape()) + "," +
+                                                Ops::Base::ToString(opParamInfo_.weights.shape->GetStorageShape()))
+                                                   .c_str(),
+                                               "The query_index and weight head counts must match."),
+        return ge::GRAPH_FAILED);
     // -----------------------check D-------------------
     uint32_t keyDDim = layout_ == DataLayout::TND ? DIM_IDX_TWO : DIM_IDX_THREE;
-    OP_CHECK_IF((opParamInfo_.key.shape->GetStorageShape().GetDim(keyDDim) != headDim_),
-                OP_LOGE(opName_, "input query, key shape last dim must be same."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (opParamInfo_.key.shape->GetStorageShape().GetDim(keyDDim) != headDim_),
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName_, "query_index,key_index",
+                                               (Ops::Base::ToString(opParamInfo_.query.shape->GetStorageShape()) + "," +
+                                                Ops::Base::ToString(opParamInfo_.key.shape->GetStorageShape()))
+                                                   .c_str(),
+                                               "The query_index and key_index last dimensions must match."),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -625,7 +747,9 @@ ge::graphStatus DenseLightningIndexerSoftmaxLseTiling::DoTiling(DenseLISoftmaxLs
 static ge::graphStatus DenseLightningIndexerSoftmaxLseTilingFunc(gert::TilingContext* context)
 {
     OP_CHECK_IF(context == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR("DenseLightningIndexerSoftmaxLse", "Tiling context is null."),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"DenseLightningIndexerSoftmaxLse", "Tiling context is null."})),
                 return ge::GRAPH_FAILED);
     DenseLISoftmaxLseTilingInfo denseLISoftmaxTilingInfo;
     DenseLISoftmaxLseInfoParser DenseLISoftmaxLseInfoParser(context);

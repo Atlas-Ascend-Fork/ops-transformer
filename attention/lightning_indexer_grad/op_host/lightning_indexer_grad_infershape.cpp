@@ -12,6 +12,9 @@
  * \file lightning_indexer_grad_infershape.cpp
  * \brief
  */
+#include "base/err_msg.h"
+#include <vector>
+#include <string>
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "log/log.h"
@@ -39,37 +42,73 @@ static ge::graphStatus InferShapeLightningIndexerGrad(gert::InferShapeContext* c
         return ge::GRAPH_FAILED;
     }
     const gert::Shape* queryShape = context->GetInputShape(QUERY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(queryShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()), "query"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* keyShape = context->GetInputShape(KEY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(keyShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()), "key"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* weightShape = context->GetInputShape(WEIGHTS_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, weightShape);
+    OP_CHECK_IF(weightShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()), "weights"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* dqShape = context->GetOutputShape(0);
     gert::Shape* dkShape = context->GetOutputShape(1);
     gert::Shape* dweightShape = context->GetOutputShape(2);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()),
+                        "InferShape framework object attrs is unavailable; check the operator registration and context "
+                        "construction."})),
+                return ge::GRAPH_FAILED);
     const char* inputLayouPtr = attrs->GetStr(ATTR_QUERY_LAYOUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayouPtr);
+    OP_CHECK_IF(inputLayouPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()),
+                        "InferShape: registered optional attribute layout is unavailable; check context construction "
+                        "and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
     const int64_t* sparse_mode = attrs->GetInt(ATTR_SPARSE_MODE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sparse_mode);
+    OP_CHECK_IF(sparse_mode == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1014", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()),
+                        "InferShape: registered optional attribute sparseMode is unavailable; check context "
+                        "construction and default-attribute materialization."})),
+                return ge::GRAPH_FAILED);
     std::string inputLayoutPtrStr = std::string(inputLayouPtr);
 
     if ((std::string(inputLayoutPtrStr) != "TND") && (std::string(inputLayoutPtrStr) != "BSND")) {
-        OP_LOGE(context, "The attr layout_query should be TND or BSND, but got %s.", inputLayoutPtrStr.c_str());
+        OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+            (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()), "layout",
+            inputLayoutPtrStr.c_str(), "Supported layouts are TND and BSND.");
         return ge::GRAPH_FAILED;
     }
 
     if (inputLayoutPtrStr == "BSND") {
         if (queryShape->GetDimNum() != 4) {
-            OP_LOGE(context, "Layout BSND, queryDims (%zu) must be 4!", queryShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()), "query",
+                std::to_string(queryShape->GetDimNum()).c_str(), "When layout is BSND, query must have rank 4.");
             return ge::GRAPH_FAILED;
         }
     } else {
         if (queryShape->GetDimNum() != 3) {
-            OP_LOGE(context, "Layout TND, queryDims (%zu) must be 3!", queryShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                (context->GetNodeName() == nullptr ? "LightningIndexerGrad" : context->GetNodeName()), "query",
+                std::to_string(queryShape->GetDimNum()).c_str(), "When layout is TND, query must have rank 3.");
             return ge::GRAPH_FAILED;
         }
     }

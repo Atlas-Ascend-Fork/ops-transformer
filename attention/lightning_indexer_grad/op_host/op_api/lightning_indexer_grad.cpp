@@ -53,7 +53,7 @@ const std::array<const aclTensor*, LIGHTNING_INDEXER_GRAD_OUTPUT_CNT> LightningI
                     OP_OUTPUT(dqOut, dkOut, dweightsOut),
                     OP_ATTR(headNum, inputLayout, sparseMode, preTokens, nextTokens, deterministic));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "LightningIndexerGrad InferShape failed.");
+        OP_LOGE_WITHOUT_REPORT(ret, "LightningIndexerGrad InferShape failed, ret=%d.", ret);
         return {nullptr, nullptr, nullptr};
     }
 
@@ -63,7 +63,7 @@ const std::array<const aclTensor*, LIGHTNING_INDEXER_GRAD_OUTPUT_CNT> LightningI
         OP_OUTPUT(dqOut, dkOut, dweightsOut),
         OP_ATTR(headNum, inputLayout, sparseMode, preTokens, nextTokens, deterministic));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "LightningIndexerGrad launch kernel failed.");
+        OP_LOGE_WITHOUT_REPORT(ret, "LightningIndexerGrad task-list construction failed, ret=%d.", ret);
         return {nullptr, nullptr, nullptr};
     }
     return {dqOut, dkOut, dweightsOut};

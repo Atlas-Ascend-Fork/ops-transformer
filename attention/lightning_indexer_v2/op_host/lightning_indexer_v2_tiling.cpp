@@ -13,6 +13,11 @@
  * \brief
  */
 
+#include "util/shape_util.h"
+#include <string>
+#include <vector>
+#include "base/err_msg.h"
+#include "log/log.h"
 #include "lightning_indexer_v2_tiling.h"
 #include "../op_kernel/lightning_indexer_v2_template_tiling_key.h"
 #include "lightning_indexer_v2_tiling_info_parser.h"
@@ -66,7 +71,7 @@ std::string LIV2DataTypeToSerialString(ge::DataType type)
     if (it != DATATYPE_TO_STRING_MAP.end()) {
         return it->second;
     } else {
-        OP_LOGE("LIV2DataTypeToSerialString ", "datatype %d not support", type);
+        OP_LOGE_WITHOUT_REPORT("LIV2DataTypeToSerialString ", "datatype %d not support", type);
         return "UNDEFINED";
     }
 }
@@ -149,7 +154,9 @@ ge::graphStatus LIV2InfoParser::CheckLiv2RequiredParameters() const
 ge::graphStatus LIV2InfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("LightningIndexerV2", "opName got from TilingContext is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"LightningIndexerV2", "opName got from TilingContext is nullptr"}));
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -159,23 +166,41 @@ ge::graphStatus LIV2InfoParser::GetOpName()
 ge::graphStatus LIV2InfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        platformInfo_ == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"LightningIndexerV2", "GetPlatformInfo is nullptr."})),
+        return ge::GRAPH_FAILED);
 
     auto liV2AscendcPlatform = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t aivNum = liV2AscendcPlatform.GetCoreNumAiv();
     uint32_t aicNum = liV2AscendcPlatform.GetCoreNumAic();
-    OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
+    OP_CHECK_IF(
+        aicNum == 0 || aivNum == 0,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"LightningIndexerV2", "num of core obtained is 0."})),
+        return GRAPH_FAILED);
 
     socVersion_ = liV2AscendcPlatform.GetSocVersion();
     npuArch_ = liV2AscendcPlatform.GetCurNpuArch();
     if ((npuArch_ != NpuArch::DAV_2201) && (npuArch_ != NpuArch::DAV_3510) && (npuArch_ != NpuArch::DAV_9201)) {
-        OP_LOGE(opName_, "NpuArch[%d] is not support.", static_cast<int32_t>(npuArch_));
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+            (std::vector<const char*>{
+                "LightningIndexerV2", "AiCore",
+                (std::string("NpuArch[") + std::to_string(static_cast<int32_t>(npuArch_)) + "] is not support.")
+                    .c_str()}));
         return GRAPH_FAILED;
     }
-    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr, OP_LOGE(opName_, "workSpaceSize got from GE is nullptr"),
+    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"LightningIndexerV2", "workSpaceSize got from GE is nullptr"})),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
-                OP_LOGE(context_->GetNodeName(), "RawTilingData got from GE context is nullptr."),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"LightningIndexerV2", "RawTilingData got from GE context is nullptr."})),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -223,8 +248,11 @@ void LIV2InfoParser::GetOutputParaInfo()
 ge::graphStatus LIV2InfoParser::GetAndCheckAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "attrs got from ge is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        attrs == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"LightningIndexerV2", "attrs got from ge is nullptr"})),
+        return ge::GRAPH_FAILED);
     OP_LOGI(context_->GetNodeName(), "GetAndCheckAttrParaInfo start");
     liV2Params_.maxSeqlenQ = attrs->GetAttrPointer<int32_t>(ATTR_MAX_SEQLEN_Q_INDEX);
     liV2Params_.layOut = attrs->GetStr(ATTR_QUERY_LAYOUT_INDEX);
@@ -792,7 +820,9 @@ ge::graphStatus LIV2InfoParser::GetHeadDim()
             liV2DIndex = DIM_IDX_THREE;
             break;
         default:
-            OP_LOGE(opName_, "unsupported layout for getting head dim.");
+            OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON("LightningIndexerV2", "layout_q",
+                                                   std::to_string(static_cast<int>(qLayout_)).c_str(),
+                                                   "Supported q layouts are BSND and TND.");
             return ge::GRAPH_FAILED;
     }
     headDim_ = liV2Params_.query.shape->GetStorageShape().GetDim(liV2DIndex);
@@ -1276,11 +1306,16 @@ ge::graphStatus LightningIndexerV2Tiling::DoTiling(LIV2TilingInfo* tilingInfo)
 // --------------------------Tiling函数定义---------------------------
 ge::graphStatus TilingForLightningIndexerV2(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("LightningIndexerV2", "Tiling context is null."),
+    OP_CHECK_IF(context == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"LightningIndexerV2", "Tiling context is null."})),
                 return ge::GRAPH_FAILED);
     LIV2TilingInfo liV2Info;
     auto platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfoPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"LightningIndexerV2", "platformInfoPtr is null"})),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     const auto* candAttrs = context->GetAttrs();
     if (candAttrs != nullptr) {
@@ -1288,10 +1323,13 @@ ge::graphStatus TilingForLightningIndexerV2(gert::TilingContext* context)
         if (candTopkBlocks != nullptr && *candTopkBlocks != CANDIDATE_TOPK_BLOCKS_OFF &&
             (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510 ||
              ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201)) {
-            OP_LOGE(context->GetNodeName(),
-                    "candidate_topk_blocks[%lld] is only supported on ascend910b/ascend910_93; "
-                    "enabling candidate mode on ascend950/960 is rejected.",
-                    *candTopkBlocks);
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+                (std::vector<const char*>{"LightningIndexerV2", "AiCore",
+                                          (std::string("candidate_topk_blocks[") + std::to_string(*candTopkBlocks) +
+                                           "] is only supported on ascend910b/ascend910_93; enabling candidate mode on "
+                                           "ascend950/960 is rejected.")
+                                              .c_str()}));
             return ge::GRAPH_FAILED;
         }
     }

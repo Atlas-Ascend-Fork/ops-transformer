@@ -13,6 +13,9 @@
  * \brief
  */
 
+#include "util/shape_util.h"
+#include <string>
+#include "base/err_msg.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -30,7 +33,14 @@
 bool AddWorkspace(gert::TilingContext* context, const size_t workspace)
 {
     size_t* workspace_size = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, workspace_size);
+    OP_CHECK_IF(workspace_size == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "Tiling framework object workspace_size is unavailable; check context construction and OPP "
+                        "metadata."})),
+                return ge::GRAPH_FAILED);
     *workspace_size = workspace;
     return true;
 }
@@ -41,10 +51,15 @@ bool QuantMatmulDequantTiling::CheckInOutShapes(gert::TilingContext* context)
 {
     uint32_t idx = 0;
     auto x = context->GetInputShape(idx++);
-    OP_CHECK_NULL_WITH_CONTEXT(context, x);
+    OP_CHECK_IF(x == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "x"),
+                return ge::GRAPH_FAILED);
     auto shape = x->GetStorageShape();
     OP_CHECK_IF(shape.GetDimNum() != NUMBER_2,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get x shape ndim is not 2, please check."),
+                OP_LOGE_FOR_INVALID_SHAPEDIM(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "x",
+                    std::to_string(shape.GetDimNum()).c_str(), "2"),
                 return false);
     _Params.originM = (uint64_t)shape.GetDim(0);
     _Params.originK = (uint64_t)shape.GetDim(1);
@@ -52,39 +67,58 @@ bool QuantMatmulDequantTiling::CheckInOutShapes(gert::TilingContext* context)
 
     if (isGrouped) {
         auto quantized_weight = context->GetInputShape(idx++);
-        OP_CHECK_NULL_WITH_CONTEXT(context, quantized_weight);
+        OP_CHECK_IF(quantized_weight == nullptr,
+                    OP_LOGE_WITH_INVALID_INPUT(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "quantized_weight"),
+                    return ge::GRAPH_FAILED);
         shape = quantized_weight->GetStorageShape();
         OP_CHECK_IF(shape.GetDimNum() != NUMBER_5,
-                    OP_LOGE(context->GetNodeName(),
-                            "QuantMatmulDequant get quantized_weight shape ndim is not 5, please check."),
+                    OP_LOGE_FOR_INVALID_SHAPEDIM(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "quantized_weight", std::to_string(shape.GetDimNum()).c_str(), "5"),
                     return false);
         _Params.originE = (uint64_t)shape.GetDim(0);
         _Params.fracN = (uint64_t)shape.GetDim(NUMBER_2);
-        OP_CHECK_IF(
-            (uint64_t)shape.GetDim(1) != _Params.fracK || shape.GetDim(NUMBER_3) != NM_FRACTAL_INT8 ||
-                shape.GetDim(NUMBER_4) != K_FRACTAL_INT8,
-            OP_LOGE(context->GetNodeName(),
-                    "QuantMatmulDequant get quantized_weight shape not (G, K//32, N//16, 16, 32), please check."),
-            return false);
+        OP_CHECK_IF((uint64_t)shape.GetDim(1) != _Params.fracK || shape.GetDim(NUMBER_3) != NM_FRACTAL_INT8 ||
+                        shape.GetDim(NUMBER_4) != K_FRACTAL_INT8,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "quantized_weight", Ops::Base::ToString(shape).c_str(),
+                        (std::string("Grouped weight must have shape (G,ceil(K/32),Nfrac,16,32); ceil(K/32)=") +
+                         std::to_string(_Params.fracK) + ".")
+                            .c_str()),
+                    return false);
 
         auto weight_scale = context->GetInputShape(idx++);
-        OP_CHECK_NULL_WITH_CONTEXT(context, weight_scale);
+        OP_CHECK_IF(weight_scale == nullptr,
+                    OP_LOGE_WITH_INVALID_INPUT(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "weight_scale"),
+                    return ge::GRAPH_FAILED);
         shape = weight_scale->GetStorageShape();
-        OP_CHECK_IF(
-            shape.GetDimNum() != NUMBER_2,
-            OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get weight_scale shape ndim is not 2, please check."),
-            return false);
-        OP_CHECK_IF(
-            _Params.originE != (uint64_t)shape.GetDim(0),
-            OP_LOGE(context->GetNodeName(),
-                    "QuantMatmulDequant weight_scale shape[0] and quantized_weight shape[0] not equal please check."),
-            return false);
+        OP_CHECK_IF(shape.GetDimNum() != NUMBER_2,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "weight_scale", std::to_string(shape.GetDimNum()).c_str(), "2"),
+                    return false);
+        OP_CHECK_IF(_Params.originE != (uint64_t)shape.GetDim(0),
+                    OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "weight_scale", std::to_string(shape.GetDim(0)).c_str(),
+                        (std::string("Dimension 0 must equal quantized_weight dimension 0, which is ") +
+                         std::to_string(_Params.originE) + ".")
+                            .c_str()),
+                    return false);
         _Params.originN = shape.GetDim(1);
-        OP_CHECK_IF(
-            (_Params.originN + NM_FRACTAL_INT8 - 1) / NM_FRACTAL_INT8 != _Params.fracN,
-            OP_LOGE(context->GetNodeName(),
-                    "QuantMatmulDequant get n-dim of weight_scale and quantized_weight not match, please check."),
-            return false);
+        OP_CHECK_IF((_Params.originN + NM_FRACTAL_INT8 - 1) / NM_FRACTAL_INT8 != _Params.fracN,
+                    OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "weight_scale", std::to_string(_Params.originN).c_str(),
+                        (std::string("ceil(N/16) must equal the quantized_weight N-block count, which is ") +
+                         std::to_string(_Params.fracN) + ".")
+                            .c_str()),
+                    return false);
         auto scale_desc = context->GetInputDesc(idx - 1);
         _Params.scaleIsInt64 = false;
         if (scale_desc != nullptr) {
@@ -92,41 +126,65 @@ bool QuantMatmulDequantTiling::CheckInOutShapes(gert::TilingContext* context)
         }
 
         auto group_list = context->GetInputShape(idx++);
-        OP_CHECK_NULL_WITH_CONTEXT(context, group_list);
+        OP_CHECK_IF(group_list == nullptr,
+                    OP_LOGE_WITH_INVALID_INPUT(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "group_list"),
+                    return ge::GRAPH_FAILED);
         shape = group_list->GetStorageShape();
-        OP_CHECK_IF(
-            shape.GetDimNum() != 1 || (uint64_t)shape.GetDim(0) != _Params.originE,
-            OP_LOGE(context->GetNodeName(),
-                    "QuantMatmulDequant group_list shape[0] and quantized_weight shape[0] not equal please check."),
-            return false);
+        OP_CHECK_IF(shape.GetDimNum() != 1 || (uint64_t)shape.GetDim(0) != _Params.originE,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "group_list", Ops::Base::ToString(shape).c_str(),
+                        (std::string("The shape must be [G], where quantized_weight dimension G=") +
+                         std::to_string(_Params.originE) + ".")
+                            .c_str()),
+                    return false);
     } else {
         auto quantized_weight = context->GetInputShape(idx++);
-        OP_CHECK_NULL_WITH_CONTEXT(context, quantized_weight);
+        OP_CHECK_IF(quantized_weight == nullptr,
+                    OP_LOGE_WITH_INVALID_INPUT(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "quantized_weight"),
+                    return ge::GRAPH_FAILED);
         shape = quantized_weight->GetStorageShape();
         OP_CHECK_IF(shape.GetDimNum() != NUMBER_4,
-                    OP_LOGE(context->GetNodeName(),
-                            "QuantMatmulDequant get quantized_weight shape ndim is not 4, please check."),
+                    OP_LOGE_FOR_INVALID_SHAPEDIM(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "quantized_weight", std::to_string(shape.GetDimNum()).c_str(), "4"),
                     return false);
         _Params.fracN = (uint64_t)shape.GetDim(1);
         OP_CHECK_IF((uint64_t)shape.GetDim(0) != _Params.fracK || shape.GetDim(NUMBER_2) != NM_FRACTAL_INT8 ||
                         shape.GetDim(NUMBER_3) != K_FRACTAL_INT8,
-                    OP_LOGE(context->GetNodeName(),
-                            "QuantMatmulDequant get quantized_weight shape not (K//32, N//16, 16, 32), please check."),
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "quantized_weight", Ops::Base::ToString(shape).c_str(),
+                        (std::string("Weight must have shape (ceil(K/32),Nfrac,16,32); ceil(K/32)=") +
+                         std::to_string(_Params.fracK) + ".")
+                            .c_str()),
                     return false);
 
         auto weight_scale = context->GetInputShape(idx++);
-        OP_CHECK_NULL_WITH_CONTEXT(context, weight_scale);
+        OP_CHECK_IF(weight_scale == nullptr,
+                    OP_LOGE_WITH_INVALID_INPUT(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "weight_scale"),
+                    return ge::GRAPH_FAILED);
         shape = weight_scale->GetStorageShape();
-        OP_CHECK_IF(
-            shape.GetDimNum() != 1,
-            OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get weight_scale shape ndim is not 1, please check."),
-            return false);
+        OP_CHECK_IF(shape.GetDimNum() != 1,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "weight_scale", std::to_string(shape.GetDimNum()).c_str(), "1"),
+                    return false);
         _Params.originN = (uint64_t)shape.GetDim(0);
-        OP_CHECK_IF(
-            (_Params.originN + NM_FRACTAL_INT8 - 1) / NM_FRACTAL_INT8 != _Params.fracN,
-            OP_LOGE(context->GetNodeName(),
-                    "QuantMatmulDequant get n-dim of weight_scale and quantized_weight not match, please check."),
-            return false);
+        OP_CHECK_IF((_Params.originN + NM_FRACTAL_INT8 - 1) / NM_FRACTAL_INT8 != _Params.fracN,
+                    OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "weight_scale", std::to_string(_Params.originN).c_str(),
+                        (std::string("ceil(N/16) must equal the quantized_weight N-block count, which is ") +
+                         std::to_string(_Params.fracN) + ".")
+                            .c_str()),
+                    return false);
         _Params.originE = 1;
         auto scale_desc = context->GetInputDesc(idx - 1);
         _Params.scaleIsInt64 = false;
@@ -137,37 +195,54 @@ bool QuantMatmulDequantTiling::CheckInOutShapes(gert::TilingContext* context)
 
     auto bias = context->GetOptionalInputShape(idx++);
     OP_CHECK_IF(bias != nullptr,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant not support bias for now, please check."),
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+                    (std::vector<const char*>{"QuantGroupedMatmulDequant", "AiCore",
+                                              "This implementation does not support bias; omit this optional input."})),
                 return false);
 
     auto x_scale = context->GetOptionalInputShape(idx++);
     _Params.isXScaleHalf = 0;
     if (x_scale == nullptr) {
-        OP_CHECK_IF(_Params.perToken != true,
-                    OP_LOGE(context->GetNodeName(),
-                            "QuantMatmulDequant only support pertoken in dynamic quant mode, please check."),
-                    return false);
+        OP_CHECK_IF(
+            _Params.perToken != true,
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "x_scale",
+                "x_scale must be provided for x_quant_mode=pertensor; omitting it is supported only for pertoken "
+                "dynamic "
+                "quantization."),
+            return false);
         _Params.dynamicQuant = true;
     } else {
         shape = x_scale->GetStorageShape();
         if (_Params.perToken) {
-            OP_CHECK_IF(
-                shape.GetDimNum() != 1,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get x_scale shape ndim is not 1, please check."),
-                return false);
+            OP_CHECK_IF(shape.GetDimNum() != 1,
+                        OP_LOGE_FOR_INVALID_SHAPEDIM(
+                            (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                            "x_scale", std::to_string(shape.GetDimNum()).c_str(), "1"),
+                        return false);
             OP_CHECK_IF(_Params.originM != (uint64_t)shape.GetDim(0),
-                        OP_LOGE(context->GetNodeName(),
-                                "QuantMatmulDequant get m-dim of x_scale and x not match, please check."),
+                        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                            (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                            "x_scale", std::to_string(shape.GetDim(0)).c_str(),
+                            (std::string("For pertoken, dimension 0 must equal x dimension M, which is ") +
+                             std::to_string(_Params.originM) + ".")
+                                .c_str()),
                         return false);
         } else {
-            OP_CHECK_IF(shape.GetDimNum() != 1 && shape.GetDimNum() != 0,
-                        OP_LOGE(context->GetNodeName(),
-                                "QuantMatmulDequant get x_scale shape ndim is not 1 or 0, please check."),
-                        return false);
+            OP_CHECK_IF(
+                shape.GetDimNum() != 1 && shape.GetDimNum() != 0,
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                    "x_scale", std::to_string(shape.GetDimNum()).c_str(), "For pertensor, the rank must be 0 or 1."),
+                return false);
             if (shape.GetDimNum() == 1) {
                 OP_CHECK_IF(
                     1 != (uint64_t)shape.GetDim(0),
-                    OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get x_scale shape not [1], please check."),
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "x_scale", Ops::Base::ToString(shape).c_str(),
+                        "For pertensor, a rank-1 x_scale must have shape [1]."),
                     return false);
             }
         }
@@ -179,56 +254,89 @@ bool QuantMatmulDequantTiling::CheckInOutShapes(gert::TilingContext* context)
             if (x_scale_dtype == ge::DT_FLOAT16) {
                 _Params.isXScaleHalf = 1;
             }
-            OP_CHECK_IF(
-                x_scale_dtype == ge::DT_FLOAT16 && _Params.perToken,
-                OP_LOGE(
-                    context->GetNodeName(),
-                    "QuantMatmulDequant x_scale_dtype == ge::DT_FLOAT16 only support pertensor mode, please check."),
-                return false);
+            OP_CHECK_IF(x_scale_dtype == ge::DT_FLOAT16 && _Params.perToken,
+                        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                            (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                            "x_scale,x_quant_mode", "FLOAT16,pertoken",
+                            "FLOAT16 x_scale is supported only with x_quant_mode=pertensor."),
+                        return false);
         }
     }
 
     auto x_offset = context->GetOptionalInputShape(idx++);
-    OP_CHECK_IF(x_offset != nullptr,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant not support x_offset for now, please check."),
-                return false);
+    OP_CHECK_IF(
+        x_offset != nullptr,
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+            (std::vector<const char*>{"QuantGroupedMatmulDequant", "AiCore",
+                                      "This implementation does not support x_offset; omit this optional input."})),
+        return false);
 
     auto smooth_scale = context->GetOptionalInputShape(idx++);
     if (smooth_scale == nullptr) {
         _Params.smoothScale = false;
     } else {
         shape = smooth_scale->GetStorageShape();
-        OP_CHECK_IF(
-            shape.GetDimNum() != 1,
-            OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get smooth_scale shape ndim is not 1, please check."),
-            return false);
-        OP_CHECK_IF(_Params.originK != (uint64_t)shape.GetDim(0),
-                    OP_LOGE(context->GetNodeName(),
-                            "QuantMatmulDequant get k-dim of smooth_scale and x not match, please check."),
+        OP_CHECK_IF(shape.GetDimNum() != 1,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM(
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "smooth_scale", std::to_string(shape.GetDimNum()).c_str(), "1"),
                     return false);
+        OP_CHECK_IF(
+            _Params.originK != (uint64_t)shape.GetDim(0),
+            OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                "smooth_scale", std::to_string(shape.GetDim(0)).c_str(),
+                (std::string("Dimension 0 must equal x dimension K, which is ") + std::to_string(_Params.originK) + ".")
+                    .c_str()),
+            return false);
         _Params.smoothScale = true;
     }
 
     auto y = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, y);
+    OP_CHECK_IF(y == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "Tiling framework object y is unavailable; check context construction and OPP metadata."})),
+                return ge::GRAPH_FAILED);
     shape = y->GetStorageShape();
     OP_CHECK_IF(shape.GetDimNum() != NUMBER_2,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get y shape ndim is not 2, please check."),
-                return false);
-    OP_CHECK_IF(_Params.originM != (uint64_t)shape.GetDim(0),
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get m-dim of y and x not match, please check."),
+                OP_LOGE_FOR_INVALID_SHAPEDIM(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "y",
+                    std::to_string(shape.GetDimNum()).c_str(), "2"),
                 return false);
     OP_CHECK_IF(
-        _Params.originN != (uint64_t)shape.GetDim(1),
-        OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get n-dim of y and weight_scale not match, please check."),
+        _Params.originM != (uint64_t)shape.GetDim(0),
+        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+            (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "y",
+            std::to_string(shape.GetDim(0)).c_str(),
+            (std::string("Dimension 0 must equal x dimension M, which is ") + std::to_string(_Params.originM) + ".")
+                .c_str()),
         return false);
+    OP_CHECK_IF(_Params.originN != (uint64_t)shape.GetDim(1),
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "y",
+                    std::to_string(shape.GetDim(1)).c_str(),
+                    (std::string("Dimension 1 must equal the weight_scale N dimension, which is ") +
+                     std::to_string(_Params.originN) + ".")
+                        .c_str()),
+                return false);
     return true;
 }
 
 bool QuantMatmulDequantTiling::GetPlatformInfo(gert::TilingContext* context)
 {
     auto compileInfoPtr = reinterpret_cast<const QuantMatmulDequantCompileInfo*>(context->GetCompileInfo());
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfoPtr);
+    OP_CHECK_IF(compileInfoPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "Tiling framework object compileInfoPtr is unavailable; check context construction and OPP "
+                        "metadata."})),
+                return ge::GRAPH_FAILED);
     _Params.CoreNum = compileInfoPtr->coreNum;
     _Params.UBSize = compileInfoPtr->ubSize;
     _Params.L1Size = compileInfoPtr->l1Size;
@@ -500,13 +608,20 @@ bool QuantMatmulDequantTiling::GetTilingData(gert::TilingContext* context)
         }
     }
     OP_CHECK_IF(_Params.originK % FLOAT16_PERBLOCK != 0,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get k-dim not align to 16, please check."),
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "x",
+                    std::to_string(_Params.originK).c_str(), "The K dimension must be divisible by 16."),
                 return false);
-    OP_CHECK_IF(_Params.originN % FLOAT16_PERBLOCK != 0,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get n-dim not align to 16, please check."),
-                return false);
+    OP_CHECK_IF(
+        _Params.originN % FLOAT16_PERBLOCK != 0,
+        OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+            (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "weight_scale",
+            std::to_string(_Params.originN).c_str(), "The N dimension must be divisible by 16."),
+        return false);
     OP_CHECK_IF(_Params.originM == 0,
-                OP_LOGE(context->GetNodeName(), "QuantMatmulDequant get m-dim should not be 0, please check."),
+                OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()), "x",
+                    std::to_string(_Params.originM).c_str(), "The M dimension must be greater than zero."),
                 return false);
 
     if (isGrouped && (SWIFT_M_MIN <= _Params.originM && _Params.originM <= SWIFT_M_MAX) &&
@@ -553,6 +668,15 @@ bool QuantMatmulDequantTiling::GetTilingData(gert::TilingContext* context)
             float MDivN = (float)singleCoreM / (float)singleCoreN;
             float tmp = std::sqrt(MNPieces / MDivN);
             if (tmp == 0) {
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        (std::string("Swift tiling split calculation produced zero; singleCoreM=") +
+                         std::to_string(singleCoreM) + ", singleCoreN=" + std::to_string(singleCoreN) +
+                         ", L0C fractals=" + std::to_string(l0CMNFractal) +
+                         "; check the tiling strategy and platform resource limits.")
+                            .c_str()}));
                 return false;
             }
             baseM = static_cast<uint32_t>(floor((float)singleCoreM / (MDivN * tmp)));
@@ -776,7 +900,15 @@ bool QuantMatmulDequantTiling::GetTilingData(gert::TilingContext* context)
     }
 
     OP_CHECK_IF(!GetOptimizedPertokenDynamicTilingData(context),
-                OP_LOGE(context->GetNodeName(), "get optimized tiling data fail."), return false);
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        (std::string("GetOptimizedPertokenDynamicTilingData failed; M=") +
+                         std::to_string(_Params.originM) + ", N=" + std::to_string(_Params.originN) +
+                         ", K=" + std::to_string(_Params.originK) + "; check tiling and platform resource constraints.")
+                            .c_str()})),
+                return false);
 
     return true;
 }
@@ -889,20 +1021,27 @@ bool QuantMatmulDequantTiling::SetLaunchInfo(gert::TilingContext* context)
 bool QuantMatmulDequantTiling::GetCheckAttr(gert::TilingContext* context)
 {
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "Tiling framework object attrs is unavailable; check context construction and OPP metadata."})),
+                return ge::GRAPH_FAILED);
     //  optional
     const std::string x_quant_mode = static_cast<std::string>(attrs->GetStr(0));
     const bool* transpose_weight = attrs->GetAttrPointer<bool>(1);
 
-    OP_CHECK_IF(
-        x_quant_mode != "pertoken" && x_quant_mode != "pertensor",
-        OP_LOGE(context->GetNodeName(),
-                "QuantMatmulDequant attr x_quant_mode only support \"pertoken\" or \"pertensor\", please check."),
-        return false);
-    OP_CHECK_IF(
-        *transpose_weight == false,
-        OP_LOGE(context->GetNodeName(), "QuantMatmulDequant attr transpose_weight only support true, please check."),
-        return false);
+    OP_CHECK_IF(x_quant_mode != "pertoken" && x_quant_mode != "pertensor",
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                    "x_quant_mode", x_quant_mode.c_str(), "Supported values are pertoken and pertensor."),
+                return false);
+    OP_CHECK_IF(*transpose_weight == false,
+                OP_LOGE_FOR_INVALID_VALUE(
+                    (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                    "transpose_weight", (*transpose_weight ? "true" : "false"), "true"),
+                return false);
 
     _Params.perToken = x_quant_mode == "pertoken" ? true : false;
     return true;
@@ -913,23 +1052,24 @@ ge::graphStatus QuantMatmulDequantTiling::runTiling(gert::TilingContext* context
     isGrouped = is_grouped;
     _Params = QuantMatmulDequantParam{};
     // 310P AscendC platformINFO
-    OP_CHECK_IF(!GetPlatformInfo(context), OP_LOGE(context->GetNodeName(), "get platforminfo fail."),
+    OP_CHECK_IF(!GetPlatformInfo(context), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "get platforminfo fail."),
                 return ge::GRAPH_FAILED);
     // attr
-    OP_CHECK_IF(!GetCheckAttr(context), OP_LOGE(context->GetNodeName(), "check attr fail."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!GetCheckAttr(context), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "check attr fail."),
+                return ge::GRAPH_FAILED);
     // shape
-    OP_CHECK_IF(!CheckInOutShapes(context), OP_LOGE(context->GetNodeName(), "check shape fail."),
+    OP_CHECK_IF(!CheckInOutShapes(context), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "check shape fail."),
                 return ge::GRAPH_FAILED);
     // calculate tilingdata
-    OP_CHECK_IF(!GetTilingData(context), OP_LOGE(context->GetNodeName(), "get tiling data fail."),
+    OP_CHECK_IF(!GetTilingData(context), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "get tiling data fail."),
                 return ge::GRAPH_FAILED);
 
     // tilingdata
-    OP_CHECK_IF(!SetTilingData(context), OP_LOGE(context->GetNodeName(), "set tiling data fail."),
+    OP_CHECK_IF(!SetTilingData(context), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "set tiling data fail."),
                 return ge::GRAPH_FAILED);
 
     // launchinfo: tilingkey, workspace, blockdim
-    OP_CHECK_IF(!SetLaunchInfo(context), OP_LOGE(context->GetNodeName(), "set launchinfo fail."),
+    OP_CHECK_IF(!SetLaunchInfo(context), OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "set launchinfo fail."),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -945,14 +1085,36 @@ ge::graphStatus TilingForQuantGroupedMatmulDequant(gert::TilingContext* context)
 ge::graphStatus TilingPrepareForQuantGroupedMatmulDequant(gert::TilingParseContext* context)
 {
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfoPtr);
+    OP_CHECK_IF(platformInfoPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "Tiling framework object platformInfoPtr is unavailable; check context construction and OPP "
+                        "metadata."})),
+                return ge::GRAPH_FAILED);
     auto compileInfoPtr = context->GetCompiledInfo<QuantMatmulDequantCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfoPtr);
+    OP_CHECK_IF(compileInfoPtr == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{
+                        (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                        "Tiling framework object compileInfoPtr is unavailable; check context construction and OPP "
+                        "metadata."})),
+                return ge::GRAPH_FAILED);
 
     std::string val;
     platformInfoPtr->GetPlatformRes("AICoreintrinsicDtypeMap", "Intrinsic_fix_pipe_l0c2out", val);
-    OP_CHECK_IF(!val.empty(), OP_LOGE(context->GetNodeName(), "QuantMatmulDequant support only ASCEND310P for now"),
-                return false);
+    OP_CHECK_IF(
+        !val.empty(),
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+            (std::vector<const char*>{
+                "QuantGroupedMatmulDequant", "AiCore",
+                (std::string("This implementation supports only ASCEND310P; platform Intrinsic_fix_pipe_l0c2out=") +
+                 val + ".")
+                    .c_str()})),
+        return false);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     platformInfoPtr->GetPlatformRes("version", "SoC_version", compileInfoPtr->socVersionStr);
@@ -964,13 +1126,19 @@ ge::graphStatus TilingPrepareForQuantGroupedMatmulDequant(gert::TilingParseConte
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L0_C, compileInfoPtr->l0CSize);
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, compileInfoPtr->l2Size);
 
-    OP_CHECK_IF((compileInfoPtr->coreNum == 0 || compileInfoPtr->ubSize == 0 || compileInfoPtr->l1Size == 0 ||
-                 compileInfoPtr->l0CSize == 0 || compileInfoPtr->l0ASize == 0 || compileInfoPtr->l0BSize == 0),
-                OP_LOGE(context->GetNodeName(),
-                        "platform invalid, coreNum=%u, ubSize=%lu, l1Size=%lu, l0CSize=%lu, l0ASize=%lu, l0BSize=%lu",
-                        compileInfoPtr->coreNum, compileInfoPtr->ubSize, compileInfoPtr->l1Size,
-                        compileInfoPtr->l0CSize, compileInfoPtr->l0ASize, compileInfoPtr->l0BSize),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (compileInfoPtr->coreNum == 0 || compileInfoPtr->ubSize == 0 || compileInfoPtr->l1Size == 0 ||
+         compileInfoPtr->l0CSize == 0 || compileInfoPtr->l0ASize == 0 || compileInfoPtr->l0BSize == 0),
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{
+                (context->GetNodeName() == nullptr ? "QuantGroupedMatmulDequant" : context->GetNodeName()),
+                (std::string("platform invalid, coreNum=") + std::to_string(compileInfoPtr->coreNum) + ", ubSize=" +
+                 std::to_string(compileInfoPtr->ubSize) + ", l1Size=" + std::to_string(compileInfoPtr->l1Size) +
+                 ", l0CSize=" + std::to_string(compileInfoPtr->l0CSize) + ", l0ASize=" +
+                 std::to_string(compileInfoPtr->l0ASize) + ", l0BSize=" + std::to_string(compileInfoPtr->l0BSize))
+                    .c_str()})),
+        return ge::GRAPH_FAILED);
 
     OP_LOGI(context->GetNodeName(), "Parse compile info success, soc: %d",
             static_cast<int>(compileInfoPtr->socVersion));

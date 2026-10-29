@@ -41,7 +41,7 @@ const aclTensor* QuantGroupedMatmulDequant(const aclTensor* x, const aclTensor* 
         QuantGroupedMatmulDequant, OP_INPUT(x, weight, weightScale, groupList, bias, xScale, xOffset, smoothScale),
         OP_OUTPUT(out), OP_ATTR(xQuantMode, transposeWeight));
     OP_CHECK(ret == ACLNN_SUCCESS,
-             OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "QuantGroupedMatmulDequantAiCore ADD_TO_LAUNCHER_LIST_AICORE failed."),
+             OP_LOGE_WITHOUT_REPORT(ret, "QuantGroupedMatmulDequantAiCore task-list construction failed, ret=%d.", ret),
              return nullptr);
     return out;
 }

@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
 */
 
+#include <string>
+#include "log/log.h"
 #include <string.h>
 #include "graph/types.h"
 #include "aclnn_quant_lightning_indexer.h"
@@ -54,7 +56,7 @@ aclnnStatus aclnnQuantLightningIndexerGetWorkspaceSize(
     int64_t preTokens, int64_t nextTokens, const aclTensor* out, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     if (query == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Query pointer is null, cannot get data type!");
+        OP_LOGE_WITH_INVALID_INPUT("aclnnQuantLightningIndexerGetWorkspaceSize", "query");
         return ge::GRAPH_FAILED;
     }
 
@@ -69,10 +71,13 @@ aclnnStatus aclnnQuantLightningIndexerGetWorkspaceSize(
             int64_t expected = 1;
             for (int64_t i = 3; i >= static_cast<int64_t>(checkStartIdx); --i) {
                 if (keyStride[i] != expected) {
-                    OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                            "Key only supports non-contiguous tensor on the 0-axis in PA scenarios. "
-                            "axis[%ld] stride=%ld, expected=%ld",
-                            i, static_cast<long>(keyStride[i]), static_cast<long>(expected));
+                    OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+                        "aclnnQuantLightningIndexerGetWorkspaceSize", "key",
+                        (std::string("axis=") + std::to_string(i) + ", stride=" + std::to_string(keyStride[i])).c_str(),
+                        (std::string("Only axis 0 may be non-contiguous in PA_BSND; this axis requires stride=") +
+                         std::to_string(expected) +
+                         ", layout_key=" + (layoutKeyOptional == nullptr ? "null" : layoutKeyOptional))
+                            .c_str());
                     return ACLNN_ERR_PARAM_INVALID;
                 }
                 expected *= keyShape.GetDim(i);
@@ -89,10 +94,14 @@ aclnnStatus aclnnQuantLightningIndexerGetWorkspaceSize(
             int64_t expected = 1;
             for (int64_t i = 2; i >= static_cast<int64_t>(checkStartIdx); --i) {
                 if (scaleStride[i] != expected) {
-                    OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                            "Key_dequant_scale only supports non-contiguous tensor on the 0-axis in PA scenarios. "
-                            "axis[%ld] stride=%ld, expected=%ld",
-                            i, static_cast<long>(scaleStride[i]), static_cast<long>(expected));
+                    OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+                        "aclnnQuantLightningIndexerGetWorkspaceSize", "key_dequant_scale",
+                        (std::string("axis=") + std::to_string(i) + ", stride=" + std::to_string(scaleStride[i]))
+                            .c_str(),
+                        (std::string("Only axis 0 may be non-contiguous in PA_BSND; this axis requires stride=") +
+                         std::to_string(expected) +
+                         ", layout_key=" + (layoutKeyOptional == nullptr ? "null" : layoutKeyOptional))
+                            .c_str());
                     return ACLNN_ERR_PARAM_INVALID;
                 }
                 expected *= scaleShape.GetDim(i);

@@ -43,11 +43,13 @@ aclnnStatus aclnnLightningIndexerV2MetadataGetWorkspaceSize(
     aclOpExecutor** executor)
 {
     if (workspaceSize == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "workspaceSize is nullptr");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnLightningIndexerV2MetadataGetWorkspaceSize", "workspaceSize",
+                                                 "Pass the address of a writable uint64_t workspace-size output.");
         return ACLNN_ERR_INNER_NULLPTR;
     }
     if (executor == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "executor is nullptr");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnLightningIndexerV2MetadataGetWorkspaceSize", "executor",
+                                                 "Pass the address of a writable aclOpExecutor pointer output.");
         return ACLNN_ERR_INNER_NULLPTR;
     }
     L2_DFX_PHASE_1(aclnnLightningIndexerV2Metadata,
@@ -80,7 +82,7 @@ aclnnStatus aclnnLightningIndexerV2MetadataGetWorkspaceSize(
     if (cuSeqlensQOptional != nullptr) {
         cuSeqlensQOptionalContiguous = l0op::Contiguous(cuSeqlensQOptional, uniqueExecutor.get());
         if (cuSeqlensQOptionalContiguous == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "cu_seqlens_q contiguous is null");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "cu_seqlens_q contiguous is null");
             return ACLNN_ERR_INNER_NULLPTR;
         }
     }
@@ -88,7 +90,7 @@ aclnnStatus aclnnLightningIndexerV2MetadataGetWorkspaceSize(
     if (cuSeqlensKOptional != nullptr) {
         cuSeqlensKOptionalContiguous = l0op::Contiguous(cuSeqlensKOptional, uniqueExecutor.get());
         if (cuSeqlensKOptionalContiguous == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "cu_seqlens_k contiguous is null");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "cu_seqlens_k contiguous is null");
             return ACLNN_ERR_INNER_NULLPTR;
         }
     }
@@ -96,7 +98,7 @@ aclnnStatus aclnnLightningIndexerV2MetadataGetWorkspaceSize(
     if (sequsedQOptional != nullptr) {
         sequsedQOptionalContiguous = l0op::Contiguous(sequsedQOptional, uniqueExecutor.get());
         if (sequsedQOptionalContiguous == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "seqused_q contiguous is null");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "seqused_q contiguous is null");
             return ACLNN_ERR_INNER_NULLPTR;
         }
     }
@@ -104,7 +106,7 @@ aclnnStatus aclnnLightningIndexerV2MetadataGetWorkspaceSize(
     if (sequsedKOptional != nullptr) {
         sequsedKOptionalContiguous = l0op::Contiguous(sequsedKOptional, uniqueExecutor.get());
         if (sequsedKOptionalContiguous == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "seqused_k contiguous is null");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "seqused_k contiguous is null");
             return ACLNN_ERR_INNER_NULLPTR;
         }
     }
@@ -112,7 +114,7 @@ aclnnStatus aclnnLightningIndexerV2MetadataGetWorkspaceSize(
     if (cmpResidualKOptional != nullptr) {
         cmpResidualLKOptionalContiguous = l0op::Contiguous(cmpResidualKOptional, uniqueExecutor.get());
         if (cmpResidualLKOptionalContiguous == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "cmp_residual_k contiguous is null");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "cmp_residual_k contiguous is null");
             return ACLNN_ERR_INNER_NULLPTR;
         }
     }

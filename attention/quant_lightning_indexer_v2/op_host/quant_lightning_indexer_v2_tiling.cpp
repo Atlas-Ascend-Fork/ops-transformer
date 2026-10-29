@@ -12,6 +12,11 @@
  * \file quant_lightning_indexer_v2_tiling.cpp
  * \brief
  */
+#include "util/shape_util.h"
+#include <string>
+#include <vector>
+#include "base/err_msg.h"
+#include "log/log.h"
 #include "quant_lightning_indexer_v2_tiling.h"
 
 #include "../op_kernel/quant_lightning_indexer_v2_template_tiling_key.h"
@@ -88,7 +93,7 @@ std::string QLIV2DataTypeToSerialString(ge::DataType type)
     if (it != DATATYPE_TO_STRING_MAP.end()) {
         return it->second;
     } else {
-        OP_LOGE("QLIV2DataTypeToSerialString ", "datatype %d not support", type);
+        OP_LOGE_WITHOUT_REPORT("QLIV2DataTypeToSerialString ", "datatype %d not support", type);
         return "UNDEFINED";
     }
 }
@@ -191,7 +196,9 @@ ge::graphStatus QLIV2InfoParser::CheckQliv2RequiredParameters() const
 ge::graphStatus QLIV2InfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("QuantLightningIndexerV2", "opName got from TilingContext is nullptr");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+            (std::vector<const char*>{"QuantLightningIndexerV2", "opName got from TilingContext is nullptr"}));
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -201,25 +208,43 @@ ge::graphStatus QLIV2InfoParser::GetOpName()
 ge::graphStatus QLIV2InfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        platformInfo_ == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"QuantLightningIndexerV2", "GetPlatformInfo is nullptr."})),
+        return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
-    OP_CHECK_IF(aicNum == 0 || aivNum == 0, OP_LOGE(opName_, "num of core obtained is 0."), return GRAPH_FAILED);
+    OP_CHECK_IF(
+        aicNum == 0 || aivNum == 0,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"QuantLightningIndexerV2", "num of core obtained is 0."})),
+        return GRAPH_FAILED);
 
     socVersion_ = ascendcPlatform.GetSocVersion();
     npuArch_ = ascendcPlatform.GetCurNpuArch();
     // DAV_9201：Ascend960DT；DAV_9202：Ascend960PR
     if ((npuArch_ != NpuArch::DAV_2201) && (npuArch_ != NpuArch::DAV_3510) && (npuArch_ != NpuArch::DAV_9201) &&
         (npuArch_ != NpuArch::DAV_9202)) {
-        OP_LOGE(opName_, "NpuArch[%d] is not support.", static_cast<int32_t>(npuArch_));
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ3002", (std::vector<const char*>{"optype", "opskernel", "reason"}),
+            (std::vector<const char*>{
+                "QuantLightningIndexerV2", "AiCore",
+                (std::string("NpuArch[") + std::to_string(static_cast<int32_t>(npuArch_)) + "] is not support.")
+                    .c_str()}));
         return GRAPH_FAILED;
     }
-    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr, OP_LOGE(opName_, "workSpaceSize got from ge is nullptr"),
+    OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"QuantLightningIndexerV2", "workSpaceSize got from ge is nullptr"})),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
-                OP_LOGE(context_->GetNodeName(), "RawTilingData got from GE context is nullptr."),
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{"QuantLightningIndexerV2",
+                                                                    "RawTilingData got from GE context is nullptr."})),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -271,7 +296,10 @@ void QLIV2InfoParser::GetOutputParaInfo()
 ge::graphStatus QLIV2InfoParser::GetAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs got from ge is nullptr"),
+    OP_CHECK_IF(attrs == nullptr,
+                REPORT_PREDEFINED_ERR_MSG(
+                    "EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                    (std::vector<const char*>{"QuantLightningIndexerV2", "attrs got from ge is nullptr"})),
                 return ge::GRAPH_FAILED);
 
     OP_LOGI(context_->GetNodeName(), "GetAttrParaInfo start");
@@ -333,10 +361,8 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
 
     if (npuArch_ == NpuArch::DAV_2201) {
         OP_CHECK_IF((std::string(qliV2Params_.layOutKey) != "PA_BBND"),
-                    OP_LOGE(opName_,
-                            "input attr layout_key only supported PA_BBND,"
-                            "but now layout_key is %s.",
-                            layout_key.c_str()),
+                    OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(opName_, "layout_k", layout_key.c_str(),
+                                                           "This SoC requires PA_BBND."),
                     return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
         OP_CHECK_IF(
@@ -349,16 +375,16 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
 
     if (npuArch_ == NpuArch::DAV_2201) {
         OP_CHECK_IF(!((*qliV2Params_.sparseCount > 0) && (*qliV2Params_.sparseCount <= SPARSE_LIMIT)),
-                    OP_LOGE(opName_, "input attr sparse_count must > 0 and <= %d, but now sparse_count is %d",
-                            SPARSE_LIMIT, *qliV2Params_.sparseCount),
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        opName_, "topk", std::to_string(*qliV2Params_.sparseCount).c_str(),
+                        (std::string("Expected 0 < topk <= ") + std::to_string(SPARSE_LIMIT)).c_str()),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF((*qliV2Params_.cmpRatio <= 0) || (*qliV2Params_.cmpRatio > 128) ||
-                        ((*qliV2Params_.cmpRatio & (*qliV2Params_.cmpRatio - 1)) != 0),
-                    OP_LOGE(opName_,
-                            "input attr cmpRatio must > 0 and <= 128 and should be powers of 2,"
-                            " but now cmpRatio is %lld.",
-                            *qliV2Params_.cmpRatio),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            (*qliV2Params_.cmpRatio <= 0) || (*qliV2Params_.cmpRatio > 128) ||
+                ((*qliV2Params_.cmpRatio & (*qliV2Params_.cmpRatio - 1)) != 0),
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "cmp_ratio", std::to_string(*qliV2Params_.cmpRatio).c_str(),
+                                                  "cmp_ratio must be a power of two in [1, 128]."),
+            return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
         OP_CHECK_IF(
             !((*qliV2Params_.sparseCount > 0) && (*qliV2Params_.sparseCount <= SPARSE_LIMIT_8K)),
@@ -388,7 +414,10 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
                                               "Sparse_mode only supports 0 or 3"),
         return ge::GRAPH_FAILED);
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(*qliV2Params_.quantMode != 2, OP_LOGE(opName_, "input attr quant_mode only supported 2."),
+        OP_CHECK_IF(*qliV2Params_.quantMode != 2,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "quant_mode",
+                                                          std::to_string(*qliV2Params_.quantMode).c_str(),
+                                                          "This SoC requires quant_mode=2."),
                     return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510) {
         OP_CHECK_IF((*qliV2Params_.quantMode != QUANT_MODE_FP8) && (*qliV2Params_.quantMode != QUANT_MODE_INT8) &&
@@ -410,7 +439,10 @@ ge::graphStatus QLIV2InfoParser::CheckAttrParaInfo()
     }
 
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(*qliV2Params_.returnValue, OP_LOGE(opName_, "input attr returnValue only supported False."),
+        OP_CHECK_IF(*qliV2Params_.returnValue,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "return_value",
+                                                          std::to_string(*qliV2Params_.returnValue).c_str(),
+                                                          "This SoC requires return_value=false."),
                     return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
         OP_CHECK_IF((*qliV2Params_.returnValue != 0) && (*qliV2Params_.returnValue != 1),
@@ -465,13 +497,20 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckInOutDataType()
                                                        "The dtype of q_descale and k_descale must be same"),
                 return ge::GRAPH_FAILED);
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(inputQType_ != Ops::Transformer::DT_INT8,
-                    OP_LOGE(opName_, "The data types of the input query and key must be int8."),
-                    return ge::GRAPH_FAILED);
         OP_CHECK_IF(
-            inputQueryScaleType_ != Ops::Transformer::DT_FLOAT16,
-            OP_LOGE(opName_, "The data types of the input query_dequant_scale and key_dequant_scale must be float16."),
+            inputQType_ != Ops::Transformer::DT_INT8,
+            OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
+                opName_, "q,k",
+                (QLIV2DataTypeToSerialString(inputQType_) + "," + QLIV2DataTypeToSerialString(inputKType_)).c_str(),
+                "Both q and k must have dtype INT8."),
             return ge::GRAPH_FAILED);
+        OP_CHECK_IF(inputQueryScaleType_ != Ops::Transformer::DT_FLOAT16,
+                    OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "q_descale,k_descale",
+                                                           (QLIV2DataTypeToSerialString(inputQueryScaleType_) + "," +
+                                                            QLIV2DataTypeToSerialString(inputKeyScaleType_))
+                                                               .c_str(),
+                                                           "Both q_descale and k_descale must have dtype FLOAT16."),
+                    return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510) {
         ge::DataType expectQType = ge::DT_FLOAT8_E4M3FN;
         ge::DataType expectScaleType = Ops::Transformer::DT_FLOAT;
@@ -531,8 +570,11 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckInOutDataType()
     }
 
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(weightsType_ != Ops::Transformer::DT_FLOAT16,
-                    OP_LOGE(opName_, "The data types of the input weights must be float16."), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            weightsType_ != Ops::Transformer::DT_FLOAT16,
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "w", QLIV2DataTypeToSerialString(weightsType_).c_str(),
+                                                  "This SoC requires w dtype FLOAT16."),
+            return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
         if (inputQType_ == Ops::Transformer::DT_INT8) {
             OP_CHECK_IF(weightsType_ != Ops::Transformer::DT_FLOAT16,
@@ -901,7 +943,9 @@ ge::graphStatus QLIV2InfoParser::GetGSize()
                     return ge::GRAPH_FAILED);
     } else {
         OP_CHECK_IF(gSize_ != G_SIZE_LIMIT,
-                    OP_LOGE(opName_, "N1 is %u, N2 is %u, N1 divided by N2 must equal 64.", n1Size_, n2Size_),
+                    OP_LOGE_FOR_INVALID_SHAPESIZES_WITH_REASON(
+                        opName_, "q,k", (std::to_string(n1Size_) + "," + std::to_string(n2Size_)).c_str(),
+                        "query_head_num divided by key_head_num must equal 64."),
                     return ge::GRAPH_FAILED);
     }
 
@@ -969,7 +1013,9 @@ ge::graphStatus QLIV2InfoParser::GetHeadDim()
             qliV2DIndex = DIM_IDX_THREE;
             break;
         default:
-            OP_LOGE(opName_, "unsupported layout for getting head dim.");
+            OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON("QuantLightningIndexerV2", "layout_q",
+                                                   std::to_string(static_cast<int>(qLayout_)).c_str(),
+                                                   "Supported q layouts are BSND and TND.");
             return ge::GRAPH_FAILED;
     }
     headDim_ = qliV2Params_.query.shape->GetStorageShape().GetDim(qliV2DIndex);
@@ -1777,11 +1823,18 @@ ge::graphStatus QuantLightningIndexerV2Tiling::DoTiling(QLIV2TilingInfo* tilingI
 // --------------------------Tiling函数定义---------------------------
 ge::graphStatus TilingForQuantLightningIndexerV2(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("QuantLightningIndexerV2", "Tiling context is null."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"QuantLightningIndexerV2", "Tiling context is null."})),
+        return ge::GRAPH_FAILED);
     QLIV2TilingInfo QLIV2Info;
     auto platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        platformInfoPtr == nullptr,
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{"QuantLightningIndexerV2", "platformInfoPtr is null"})),
+        return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     const bool useArch35Checker = ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510;
     QLIV2InfoParser qliV2InfoParser(context);

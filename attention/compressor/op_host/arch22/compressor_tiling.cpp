@@ -14,6 +14,7 @@
  * \brief
  */
 
+#include <string>
 #include <functional>
 #include <algorithm>
 #include <unordered_map>
@@ -123,11 +124,12 @@ ge::graphStatus CompressorTiling::ConvertContext(gert::TilingContext& context, C
             for (int64_t i = static_cast<int64_t>(stateCacheShape.GetDimNum()) - 1; i >= 1; --i) {
                 uint64_t actualStride = static_cast<uint64_t>(stateCacheStride->GetStride(static_cast<size_t>(i)));
                 if (actualStride != expectedStride) {
-                    OP_LOGE(context.GetNodeName(),
-                            "state_cache must be contiguous on axis 1 and 2, "
-                            "only axis 0 non-contiguous is supported. "
-                            "axis %ld: actual stride=%lu, expected=%lu.",
-                            i, actualStride, expectedStride);
+                    OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+                        (context.GetNodeName() == nullptr ? "Compressor" : context.GetNodeName()), "state_cache",
+                        (std::string("axis=") + std::to_string(i) + ", stride=" + std::to_string(actualStride)).c_str(),
+                        (std::string("Only axis 0 may be non-contiguous; this axis requires stride=") +
+                         std::to_string(expectedStride))
+                            .c_str());
                     return ge::GRAPH_FAILED;
                 }
                 expectedStride *= static_cast<uint64_t>(stateCacheShape.GetDim(static_cast<size_t>(i)));
@@ -1024,8 +1026,7 @@ CMP_EXTERN_C ge::graphStatus TilingCompressorArch22(gert::TilingContext* context
 
     CompressorContext compressorContext{};
     if (CompressorTiling::ConvertContext(*context, compressorContext) != ge::GRAPH_SUCCESS) {
-        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "context",
-                                                 "error occurred while converting tilingContext to Compressor context");
+        OP_LOGE_WITHOUT_REPORT("Compressor", "ConvertContext failed; retain its first error.");
         return ge::GRAPH_FAILED;
     }
     CompressorTiling compressorTiling(&compressorContext);

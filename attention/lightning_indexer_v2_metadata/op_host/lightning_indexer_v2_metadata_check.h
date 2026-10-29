@@ -377,8 +377,9 @@ aclnnStatus CheckConsistencyLiV2(int64_t batchSize, const aclTensor* cuSeqlensQO
         }
         // 校验 metadata 元素数
         if (metadata->GetViewShape().GetDim(0) != optiling::LI_V2_METADATA_TOTAL_SIZE) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The element num of metadata must be %u, but got %lld",
-                    optiling::LI_V2_METADATA_TOTAL_SIZE, metadata->GetViewShape().GetDim(0));
+            OP_LOGE_FOR_INVALID_SHAPESIZE(LI_V2_ACLNN_OP_NAME, "metadata",
+                                          std::to_string(metadata->GetViewShape().GetDim(0)).c_str(),
+                                          std::to_string(optiling::LI_V2_METADATA_TOTAL_SIZE).c_str());
             return ACLNN_ERR_PARAM_INVALID;
         }
     }
