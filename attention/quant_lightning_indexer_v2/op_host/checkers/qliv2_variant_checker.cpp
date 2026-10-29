@@ -12,7 +12,7 @@
  * \file qliv2_variant_checker.cpp
  * \brief Implements variant-specific checks for Quant Lightning Indexer V2.
  */
-
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "qliv2_variant_checker.h"
 
 #include "log/log.h"
@@ -45,27 +45,27 @@ ge::graphStatus QLIV2VariantChecker::CheckSinglePara(const LightningIndexerV2Che
         return ge::GRAPH_FAILED;
     }
 
-    ge::DataType inputType = ge::DT_FLOAT8_E4M3FN;
-    ge::DataType scaleType = ge::DT_FLOAT;
-    ge::DataType weightType = ge::DT_FLOAT;
+    ge::DataType inputType = Ops::Transformer::DT_FLOAT8_E4M3FN;
+    ge::DataType scaleType = Ops::Transformer::DT_FLOAT;
+    ge::DataType weightType = Ops::Transformer::DT_FLOAT;
     if (info.quantMode == QUANT_MODE_INT8) {
-        inputType = ge::DT_INT8;
-        scaleType = ge::DT_FLOAT16;
-        weightType = ge::DT_FLOAT16;
+        inputType = Ops::Transformer::DT_INT8;
+        scaleType = Ops::Transformer::DT_FLOAT16;
+        weightType = Ops::Transformer::DT_FLOAT16;
     } else if (info.quantMode == QUANT_MODE_MXFP8) {
-        scaleType = ge::DT_FLOAT8_E8M0;
+        scaleType = Ops::Transformer::DT_FLOAT8_E8M0;
     } else if (info.quantMode == QUANT_MODE_HIFLOAT8) {
-        inputType = ge::DT_HIFLOAT8;
+        inputType = Ops::Transformer::DT_HIFLOAT8;
     } else if (info.quantMode == QUANT_MODE_MXFP4) {
-        inputType = ge::DT_FLOAT4_E2M1;
-        scaleType = ge::DT_FLOAT8_E8M0;
+        inputType = Ops::Transformer::DT_FLOAT4_E2M1;
+        scaleType = Ops::Transformer::DT_FLOAT8_E8M0;
     }
     if (CheckDtype(info, info.query, "q", {inputType}) != ge::GRAPH_SUCCESS ||
         CheckDtype(info, info.key, "k", {inputType}) != ge::GRAPH_SUCCESS ||
         CheckDtype(info, info.queryDescale, "q_descale", {scaleType}) != ge::GRAPH_SUCCESS ||
         CheckDtype(info, info.keyDescale, "k_descale", {scaleType}) != ge::GRAPH_SUCCESS ||
         CheckDtype(info, info.weights, "w", {weightType}) != ge::GRAPH_SUCCESS ||
-        CheckDtype(info, info.sparseValues, "sparse_values", {ge::DT_BF16}) != ge::GRAPH_SUCCESS) {
+        CheckDtype(info, info.sparseValues, "sparse_values", {Ops::Transformer::DT_BF16}) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;

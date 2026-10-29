@@ -12,6 +12,7 @@
  * \file quant_lightning_indexer_v2_infershape.cpp
  * \brief
  */
+#include "common/include/op_host/op_const_def_transformer.h"
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 
@@ -95,7 +96,7 @@ static ge::graphStatus InferDataTypeQuantLightningIndexerV2(gert::InferDataTypeC
     }
     OP_LOGD(context->GetNodeName(), "Enter QuantLightningIndexerV2 InferDataType impl.");
     // default index data type is int32
-    ge::DataType outputType = ge::DT_INT32;
+    ge::DataType outputType = Ops::Transformer::DT_INT32;
     context->SetOutputDataType(0, outputType);
     OP_LOGD(context->GetNodeName(), "QuantLightningIndexerV2 InferDataType end.");
     return GRAPH_SUCCESS;

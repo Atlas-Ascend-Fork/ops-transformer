@@ -12,7 +12,6 @@
  * \file quant_lightning_indexer_v2_tiling.cpp
  * \brief
  */
-
 #include "quant_lightning_indexer_v2_tiling.h"
 
 #include "../op_kernel/quant_lightning_indexer_v2_template_tiling_key.h"
@@ -25,63 +24,63 @@ using std::string;
 namespace optiling {
 
 static const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {
-    {ge::DT_COMPLEX128, "DT_COMPLEX128"}, // complex128 type
-    {ge::DT_QINT8, "DT_QINT8"},           // qint8 type
-    {ge::DT_QINT16, "DT_QINT16"},         // qint16 type
-    {ge::DT_QINT32, "DT_QINT32"},         // qint32 type
-    {ge::DT_QUINT8, "DT_QUINT8"},         // quint8 type
-    {ge::DT_QUINT16, "DT_QUINT16"},       // quint16 type
-    {ge::DT_RESOURCE, "DT_RESOURCE"},     // resource type
-    {ge::DT_STRING_REF, "DT_STRING_REF"}, // string ref type
-    {ge::DT_STRING, "DT_STRING"},         // string type
-    {ge::DT_VARIANT, "DT_VARIANT"},       // dt_variant type
-    {ge::DT_BF16, "DT_BFLOAT16"},         // dt_bfloat16 type
-    {ge::DT_INT4, "DT_INT4"},             // dt_variant type
-    {ge::DT_UINT1, "DT_UINT1"},           // dt_variant type
-    {ge::DT_INT2, "DT_INT2"},             // dt_variant type
-    {ge::DT_UINT2, "DT_UINT2"},           // dt_variant type
-    {ge::DT_HIFLOAT8, "DT_HIFLOAT8"},
-    {ge::DT_FLOAT8_E4M3FN, "DT_FLOAT8_E4M3FN"},
-    {ge::DT_FLOAT8_E8M0, "DT_FLOAT8_E8M0"},
-    {ge::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"},
-    {ge::DT_UNDEFINED, "DT_UNDEFINED"},           // Used to indicate a DataType field has not been set.
-    {ge::DT_FLOAT, "DT_FLOAT"},                   // float type
-    {ge::DT_FLOAT16, "DT_FLOAT16"},               // fp16 type
-    {ge::DT_INT8, "DT_INT8"},                     // int8 type
-    {ge::DT_INT16, "DT_INT16"},                   // int16 type
-    {ge::DT_UINT16, "DT_UINT16"},                 // uint16 type
-    {ge::DT_UINT8, "DT_UINT8"},                   // uint8 type
-    {ge::DT_INT32, "DT_INT32"},                   // uint32 type
-    {ge::DT_INT64, "DT_INT64"},                   // int64 type
-    {ge::DT_UINT32, "DT_UINT32"},                 // unsigned int32
-    {ge::DT_UINT64, "DT_UINT64"},                 // unsigned int64
-    {ge::DT_BOOL, "DT_BOOL"},                     // bool type
-    {ge::DT_DOUBLE, "DT_DOUBLE"},                 // double type
-    {ge::DT_DUAL, "DT_DUAL"},                     // dual output type
-    {ge::DT_DUAL_SUB_INT8, "DT_DUAL_SUB_INT8"},   // dual output int8 type
-    {ge::DT_DUAL_SUB_UINT8, "DT_DUAL_SUB_UINT8"}, // dual output uint8 type
-    {ge::DT_COMPLEX32, "DT_COMPLEX32"},           // complex32 type
-    {ge::DT_COMPLEX64, "DT_COMPLEX64"},           // complex64 type
-    {ge::DT_COMPLEX128, "DT_COMPLEX128"},         // complex128 type
-    {ge::DT_QINT8, "DT_QINT8"},                   // qint8 type
-    {ge::DT_QINT16, "DT_QINT16"},                 // qint16 type
-    {ge::DT_QINT32, "DT_QINT32"},                 // qint32 type
-    {ge::DT_QUINT8, "DT_QUINT8"},                 // quint8 type
-    {ge::DT_QUINT16, "DT_QUINT16"},               // quint16 type
-    {ge::DT_RESOURCE, "DT_RESOURCE"},             // resource type
-    {ge::DT_STRING_REF, "DT_STRING_REF"},         // string ref type
-    {ge::DT_STRING, "DT_STRING"},                 // string type
-    {ge::DT_VARIANT, "DT_VARIANT"},               // dt_variant type
-    {ge::DT_BF16, "DT_BFLOAT16"},                 // dt_bfloat16 type
-    {ge::DT_INT4, "DT_INT4"},                     // dt_variant type
-    {ge::DT_UINT1, "DT_UINT1"},                   // dt_variant type
-    {ge::DT_INT2, "DT_INT2"},                     // dt_variant type
-    {ge::DT_UINT2, "DT_UINT2"},                   // dt_variant type
-    {ge::DT_HIFLOAT8, "DT_HIFLOAT8"},
-    {ge::DT_FLOAT8_E4M3FN, "DT_FLOAT8_E4M3FN"},
-    {ge::DT_FLOAT8_E8M0, "DT_FLOAT8_E8M0"},
-    {ge::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"},
-    {ge::DT_HIFLOAT4, "DT_HIFLOAT4"}};
+    {Ops::Transformer::DT_COMPLEX128, "DT_COMPLEX128"}, // complex128 type
+    {Ops::Transformer::DT_QINT8, "DT_QINT8"},           // qint8 type
+    {Ops::Transformer::DT_QINT16, "DT_QINT16"},         // qint16 type
+    {Ops::Transformer::DT_QINT32, "DT_QINT32"},         // qint32 type
+    {Ops::Transformer::DT_QUINT8, "DT_QUINT8"},         // quint8 type
+    {Ops::Transformer::DT_QUINT16, "DT_QUINT16"},       // quint16 type
+    {Ops::Transformer::DT_RESOURCE, "DT_RESOURCE"},     // resource type
+    {Ops::Transformer::DT_STRING_REF, "DT_STRING_REF"}, // string ref type
+    {Ops::Transformer::DT_STRING, "DT_STRING"},         // string type
+    {Ops::Transformer::DT_VARIANT, "DT_VARIANT"},       // dt_variant type
+    {Ops::Transformer::DT_BF16, "DT_BFLOAT16"},         // dt_bfloat16 type
+    {Ops::Transformer::DT_INT4, "DT_INT4"},             // dt_variant type
+    {Ops::Transformer::DT_UINT1, "DT_UINT1"},           // dt_variant type
+    {Ops::Transformer::DT_INT2, "DT_INT2"},             // dt_variant type
+    {Ops::Transformer::DT_UINT2, "DT_UINT2"},           // dt_variant type
+    {Ops::Transformer::DT_HIFLOAT8, "DT_HIFLOAT8"},
+    {Ops::Transformer::DT_FLOAT8_E4M3FN, "DT_FLOAT8_E4M3FN"},
+    {Ops::Transformer::DT_FLOAT8_E8M0, "DT_FLOAT8_E8M0"},
+    {Ops::Transformer::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"},
+    {Ops::Transformer::DT_UNDEFINED, "DT_UNDEFINED"},           // Used to indicate a DataType field has not been set.
+    {Ops::Transformer::DT_FLOAT, "DT_FLOAT"},                   // float type
+    {Ops::Transformer::DT_FLOAT16, "DT_FLOAT16"},               // fp16 type
+    {Ops::Transformer::DT_INT8, "DT_INT8"},                     // int8 type
+    {Ops::Transformer::DT_INT16, "DT_INT16"},                   // int16 type
+    {Ops::Transformer::DT_UINT16, "DT_UINT16"},                 // uint16 type
+    {Ops::Transformer::DT_UINT8, "DT_UINT8"},                   // uint8 type
+    {Ops::Transformer::DT_INT32, "DT_INT32"},                   // uint32 type
+    {Ops::Transformer::DT_INT64, "DT_INT64"},                   // int64 type
+    {Ops::Transformer::DT_UINT32, "DT_UINT32"},                 // unsigned int32
+    {Ops::Transformer::DT_UINT64, "DT_UINT64"},                 // unsigned int64
+    {Ops::Transformer::DT_BOOL, "DT_BOOL"},                     // bool type
+    {Ops::Transformer::DT_DOUBLE, "DT_DOUBLE"},                 // double type
+    {Ops::Transformer::DT_DUAL, "DT_DUAL"},                     // dual output type
+    {Ops::Transformer::DT_DUAL_SUB_INT8, "DT_DUAL_SUB_INT8"},   // dual output int8 type
+    {Ops::Transformer::DT_DUAL_SUB_UINT8, "DT_DUAL_SUB_UINT8"}, // dual output uint8 type
+    {Ops::Transformer::DT_COMPLEX32, "DT_COMPLEX32"},           // complex32 type
+    {Ops::Transformer::DT_COMPLEX64, "DT_COMPLEX64"},           // complex64 type
+    {Ops::Transformer::DT_COMPLEX128, "DT_COMPLEX128"},         // complex128 type
+    {Ops::Transformer::DT_QINT8, "DT_QINT8"},                   // qint8 type
+    {Ops::Transformer::DT_QINT16, "DT_QINT16"},                 // qint16 type
+    {Ops::Transformer::DT_QINT32, "DT_QINT32"},                 // qint32 type
+    {Ops::Transformer::DT_QUINT8, "DT_QUINT8"},                 // quint8 type
+    {Ops::Transformer::DT_QUINT16, "DT_QUINT16"},               // quint16 type
+    {Ops::Transformer::DT_RESOURCE, "DT_RESOURCE"},             // resource type
+    {Ops::Transformer::DT_STRING_REF, "DT_STRING_REF"},         // string ref type
+    {Ops::Transformer::DT_STRING, "DT_STRING"},                 // string type
+    {Ops::Transformer::DT_VARIANT, "DT_VARIANT"},               // dt_variant type
+    {Ops::Transformer::DT_BF16, "DT_BFLOAT16"},                 // dt_bfloat16 type
+    {Ops::Transformer::DT_INT4, "DT_INT4"},                     // dt_variant type
+    {Ops::Transformer::DT_UINT1, "DT_UINT1"},                   // dt_variant type
+    {Ops::Transformer::DT_INT2, "DT_INT2"},                     // dt_variant type
+    {Ops::Transformer::DT_UINT2, "DT_UINT2"},                   // dt_variant type
+    {Ops::Transformer::DT_HIFLOAT8, "DT_HIFLOAT8"},
+    {Ops::Transformer::DT_FLOAT8_E4M3FN, "DT_FLOAT8_E4M3FN"},
+    {Ops::Transformer::DT_FLOAT8_E8M0, "DT_FLOAT8_E8M0"},
+    {Ops::Transformer::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"},
+    {Ops::Transformer::DT_HIFLOAT4, "DT_HIFLOAT4"}};
 
 std::string QLIV2DataTypeToSerialString(ge::DataType type)
 {
@@ -466,28 +465,55 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckInOutDataType()
                                                        "The dtype of q_descale and k_descale must be same"),
                 return ge::GRAPH_FAILED);
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(inputQType_ != ge::DT_INT8,
+        OP_CHECK_IF(inputQType_ != Ops::Transformer::DT_INT8,
                     OP_LOGE(opName_, "The data types of the input query and key must be int8."),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF(
-            inputQueryScaleType_ != ge::DT_FLOAT16,
+            inputQueryScaleType_ != Ops::Transformer::DT_FLOAT16,
             OP_LOGE(opName_, "The data types of the input query_dequant_scale and key_dequant_scale must be float16."),
             return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510) {
         ge::DataType expectQType = ge::DT_FLOAT8_E4M3FN;
-        ge::DataType expectScaleType = ge::DT_FLOAT;
+        ge::DataType expectScaleType = Ops::Transformer::DT_FLOAT;
         if (*qliV2Params_.quantMode == QUANT_MODE_MXFP8) {
-            expectScaleType = ge::DT_FLOAT8_E8M0;
+            expectScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
         } else if (*qliV2Params_.quantMode == QUANT_MODE_HIFLOAT8) {
-            expectQType = ge::DT_HIFLOAT8;
+            expectQType = Ops::Transformer::DT_HIFLOAT8;
         } else if (*qliV2Params_.quantMode == QUANT_MODE_MXFP4) {
-            expectQType = ge::DT_FLOAT4_E2M1;
-            expectScaleType = ge::DT_FLOAT8_E8M0;
+            expectQType = Ops::Transformer::DT_FLOAT4_E2M1;
+            expectScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
         } else if (*qliV2Params_.quantMode == QUANT_MODE_INT8) {
-            expectQType = ge::DT_INT8;
-            expectScaleType = ge::DT_FLOAT16;
+            expectQType = Ops::Transformer::DT_INT8;
+            expectScaleType = Ops::Transformer::DT_FLOAT16;
+        }
+        OP_CHECK_IF(inputQType_ != expectQType,
+                    OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
+                        opName_, "q and k",
+                        QLIV2DataTypeToSerialString(inputQType_) + " and " + QLIV2DataTypeToSerialString(inputKType_),
+                        "The dtype of q and k must match quant_mode"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            inputQueryScaleType_ != expectScaleType,
+            OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "q_descale and k_descale",
+                                                   QLIV2DataTypeToSerialString(inputQueryScaleType_) + " and " +
+                                                       QLIV2DataTypeToSerialString(inputKeyScaleType_),
+                                                   "The dtype of q_descale and k_descale must match quant_mode"),
+            return ge::GRAPH_FAILED);
+    } else if (npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
+        ge::DataType expectQType = ge::DT_FLOAT8_E4M3FN;
+        ge::DataType expectScaleType = Ops::Transformer::DT_FLOAT;
+        if (*qliV2Params_.quantMode == QUANT_MODE_MXFP8) {
+            expectScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+        } else if (*qliV2Params_.quantMode == QUANT_MODE_HIFLOAT8) {
+            expectQType = Ops::Transformer::DT_HIFLOAT8;
+        } else if (*qliV2Params_.quantMode == QUANT_MODE_MXFP4) {
+            expectQType = Ops::Transformer::DT_FLOAT4_E2M1;
+            expectScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+        } else if (*qliV2Params_.quantMode == QUANT_MODE_INT8) {
+            expectQType = Ops::Transformer::DT_INT8;
+            expectScaleType = Ops::Transformer::DT_FLOAT16;
         } else if (*qliV2Params_.quantMode == QUANT_MODE_HIFLOAT4) {
-            expectQType = ge::DT_HIFLOAT4;
+            expectQType = Ops::Transformer::DT_HIFLOAT4;
         }
         OP_CHECK_IF(inputQType_ != expectQType,
                     OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
@@ -505,17 +531,17 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckInOutDataType()
     }
 
     if (npuArch_ == NpuArch::DAV_2201) {
-        OP_CHECK_IF(weightsType_ != ge::DT_FLOAT16,
+        OP_CHECK_IF(weightsType_ != Ops::Transformer::DT_FLOAT16,
                     OP_LOGE(opName_, "The data types of the input weights must be float16."), return ge::GRAPH_FAILED);
     } else if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
-        if (inputQType_ == ge::DT_INT8) {
-            OP_CHECK_IF(weightsType_ != ge::DT_FLOAT16,
+        if (inputQType_ == Ops::Transformer::DT_INT8) {
+            OP_CHECK_IF(weightsType_ != Ops::Transformer::DT_FLOAT16,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "w", QLIV2DataTypeToSerialString(weightsType_).c_str(),
                             "When the dtype of query is int8, the dtype of w must be float16"),
                         return ge::GRAPH_FAILED);
         } else {
-            OP_CHECK_IF(weightsType_ != ge::DT_FLOAT,
+            OP_CHECK_IF(weightsType_ != Ops::Transformer::DT_FLOAT,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "w", QLIV2DataTypeToSerialString(weightsType_).c_str(),
                             "When the dtype of query is not int8, the dtype of w must be float"),
@@ -523,12 +549,12 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckInOutDataType()
         }
     }
 
-    OP_CHECK_IF(outputType_ != ge::DT_INT32,
+    OP_CHECK_IF(outputType_ != Ops::Transformer::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "sparse_indices",
                                                       QLIV2DataTypeToSerialString(outputType_).c_str(),
                                                       "The dtype of sparse_indices must be int32"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(valuesOutType_ != ge::DT_BF16,
+    OP_CHECK_IF(valuesOutType_ != Ops::Transformer::DT_BF16,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "sparse_values",
                                                       QLIV2DataTypeToSerialString(valuesOutType_).c_str(),
                                                       "The dtype of sparse_values must be bfloat16"),
@@ -578,14 +604,14 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                     OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
                         opName_, "cu_seqlens_k", "When layout_k is PA_BBND, cu_seqlens_k must not be provided"),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(qliV2Params_.blockTable.desc->GetDataType() != ge::DT_INT32,
+        OP_CHECK_IF(qliV2Params_.blockTable.desc->GetDataType() != Ops::Transformer::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "block_table",
                         QLIV2DataTypeToSerialString(qliV2Params_.blockTable.desc->GetDataType()).c_str(),
                         "The dtype of block_table only supports int32"),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF(
-            qliV2Params_.sequsedK.desc->GetDataType() != ge::DT_INT32,
+            qliV2Params_.sequsedK.desc->GetDataType() != Ops::Transformer::DT_INT32,
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                 opName_, "seqused_k", QLIV2DataTypeToSerialString(qliV2Params_.sequsedK.desc->GetDataType()).c_str(),
                 "The dtype of seqused_k only supports int32"),
@@ -596,7 +622,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                     OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "cu_seqlens_k",
                                                              "When layout_k is TND, cu_seqlens_k must not be null"),
                     return ge::GRAPH_FAILED);
-        OP_CHECK_IF(qliV2Params_.cuSeqLensK.desc->GetDataType() != ge::DT_INT32,
+        OP_CHECK_IF(qliV2Params_.cuSeqLensK.desc->GetDataType() != Ops::Transformer::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "cu_seqlens_k",
                         QLIV2DataTypeToSerialString(qliV2Params_.cuSeqLensK.desc->GetDataType()).c_str(),
@@ -604,7 +630,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                     return ge::GRAPH_FAILED);
         // seqused_k 可选 - 仅校验数据类型
         if (qliV2Params_.sequsedK.tensor != nullptr) {
-            OP_CHECK_IF(qliV2Params_.sequsedK.desc->GetDataType() != ge::DT_INT32,
+            OP_CHECK_IF(qliV2Params_.sequsedK.desc->GetDataType() != Ops::Transformer::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_k",
                             QLIV2DataTypeToSerialString(qliV2Params_.sequsedK.desc->GetDataType()).c_str(),
@@ -618,7 +644,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                                                              "When layout_k is BSND, cu_seqlens_k must not be null"),
                     return ge::GRAPH_FAILED);
         if (qliV2Params_.sequsedK.tensor != nullptr) {
-            OP_CHECK_IF(qliV2Params_.sequsedK.desc->GetDataType() != ge::DT_INT32,
+            OP_CHECK_IF(qliV2Params_.sequsedK.desc->GetDataType() != Ops::Transformer::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_k",
                             QLIV2DataTypeToSerialString(qliV2Params_.sequsedK.desc->GetDataType()).c_str(),
@@ -671,7 +697,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
     }
     // cmpResidualK 传入时校验数据类型
     if (qliV2Params_.cmpResidualK.tensor != nullptr) {
-        OP_CHECK_IF(qliV2Params_.cmpResidualK.desc->GetDataType() != ge::DT_INT32,
+        OP_CHECK_IF(qliV2Params_.cmpResidualK.desc->GetDataType() != Ops::Transformer::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "cmp_residual_k",
                         QLIV2DataTypeToSerialString(qliV2Params_.cmpResidualK.desc->GetDataType()).c_str(),
@@ -708,7 +734,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                             "the shape of cu_seqlens_q must equal the shape of cu_seqlens_k"),
                         return ge::GRAPH_FAILED);
         }
-        OP_CHECK_IF(qliV2Params_.cuSeqLensQ.desc->GetDataType() != ge::DT_INT32,
+        OP_CHECK_IF(qliV2Params_.cuSeqLensQ.desc->GetDataType() != Ops::Transformer::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "cu_seqlens_q",
                         QLIV2DataTypeToSerialString(qliV2Params_.cuSeqLensK.desc->GetDataType()).c_str(),
@@ -716,7 +742,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                     return ge::GRAPH_FAILED);
         // seqused_q 可选 - 仅校验数据类型
         if (qliV2Params_.sequsedQ.tensor != nullptr) {
-            OP_CHECK_IF(qliV2Params_.sequsedQ.desc->GetDataType() != ge::DT_INT32,
+            OP_CHECK_IF(qliV2Params_.sequsedQ.desc->GetDataType() != Ops::Transformer::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_q",
                             QLIV2DataTypeToSerialString(qliV2Params_.sequsedQ.desc->GetDataType()).c_str(),
@@ -730,7 +756,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
                         opName_, "cu_seqlens_q", "When layout_q is BSND, cu_seqlens_q must not be provided"),
                     return ge::GRAPH_FAILED);
         if (qliV2Params_.sequsedQ.tensor != nullptr) {
-            OP_CHECK_IF(qliV2Params_.sequsedQ.desc->GetDataType() != ge::DT_INT32,
+            OP_CHECK_IF(qliV2Params_.sequsedQ.desc->GetDataType() != Ops::Transformer::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_q",
                             QLIV2DataTypeToSerialString(qliV2Params_.sequsedQ.desc->GetDataType()).c_str(),
@@ -740,7 +766,7 @@ ge::graphStatus QLIV2InfoParser::GetAndCheckOptionalInput()
     }
     if (npuArch_ == NpuArch::DAV_3510 || npuArch_ == NpuArch::DAV_9201 || npuArch_ == NpuArch::DAV_9202) {
         if (qliV2Params_.outputIdxOffset.tensor != nullptr) {
-            OP_CHECK_IF(qliV2Params_.outputIdxOffset.desc->GetDataType() != ge::DT_INT32,
+            OP_CHECK_IF(qliV2Params_.outputIdxOffset.desc->GetDataType() != Ops::Transformer::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "output_idx_offset",
                             QLIV2DataTypeToSerialString(qliV2Params_.sequsedQ.desc->GetDataType()).c_str(),

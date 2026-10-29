@@ -574,7 +574,7 @@ def generate_li_v2_inputs(
     INPUT_ADAPTER.load_metadata_protocol().save_metadata_inputs(
         "lightning_indexer_v2", testcase_name, data.get("metadata_input")
     )
-    return data
+    return None
 
 
 def zero_metadata(metadata):

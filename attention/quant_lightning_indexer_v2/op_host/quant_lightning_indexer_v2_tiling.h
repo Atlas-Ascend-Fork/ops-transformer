@@ -16,6 +16,7 @@
 #ifndef QUANT_LIGHTNING_INDEXER_V2_TILING_H
 #define QUANT_LIGHTNING_INDEXER_V2_TILING_H
 
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "err/ops_err.h"
 #include "exe_graph/runtime/tiling_context.h"
 #include "platform/platform_info.h"
@@ -189,9 +190,9 @@ public:
     std::vector<uint32_t> keyDequantScaleStridesVec;
     int32_t maxSeqlenQ = -1;
     // DType
-    ge::DataType inputQType = ge::DT_FLOAT16;
-    ge::DataType inputKType = ge::DT_FLOAT16;
-    ge::DataType outputType = ge::DT_INT32;
+    ge::DataType inputQType = Ops::Transformer::DT_FLOAT16;
+    ge::DataType inputKType = Ops::Transformer::DT_FLOAT16;
+    ge::DataType outputType = Ops::Transformer::DT_INT32;
     // Layout
     DataLayout inputQLayout = DataLayout::BSND;
     DataLayout inputKLayout = DataLayout::PA_BBND;
@@ -262,15 +263,15 @@ public:
     int64_t blockSize_ = 0;
     platform_ascendc::SocVersion socVersion_ = platform_ascendc::SocVersion::ASCEND910B;
     NpuArch npuArch_ = NpuArch::DAV_2201;
-    ge::DataType inputQType_ = ge::DT_FLOAT16;
-    ge::DataType inputKType_ = ge::DT_FLOAT16;
-    ge::DataType weightsType_ = ge::DT_FLOAT16;
-    ge::DataType inputQueryScaleType_ = ge::DT_FLOAT16;
-    ge::DataType inputKeyScaleType_ = ge::DT_FLOAT16;
-    ge::DataType blockTableType_ = ge::DT_FLOAT16;
-    ge::DataType inputKRopeType_ = ge::DT_FLOAT16;
-    ge::DataType outputType_ = ge::DT_FLOAT16;
-    ge::DataType valuesOutType_ = ge::DT_BF16;
+    ge::DataType inputQType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType inputKType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType weightsType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType inputQueryScaleType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType inputKeyScaleType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType blockTableType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType inputKRopeType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType outputType_ = Ops::Transformer::DT_FLOAT16;
+    ge::DataType valuesOutType_ = Ops::Transformer::DT_BF16;
     std::vector<uint32_t> keyStridesVec_;
     std::vector<uint32_t> keyDequantScaleStridesVec_;
 };

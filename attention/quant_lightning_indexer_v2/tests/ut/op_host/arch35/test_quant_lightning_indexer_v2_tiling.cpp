@@ -9,6 +9,7 @@
  */
 #include <iostream>
 #include <gtest/gtest.h>
+#include "common/include/op_host/op_const_def_transformer.h"
 #include "../test_quant_lightning_indexer_v2_utils.h"
 
 // DAV_3510 (Ascend950) tiling cases for QuantLightningIndexerV2
@@ -1000,4 +1001,591 @@ TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_950_tiling_m
                                   {"return_value", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
                                  &compileInfo, "Ascend950", 56, 262144, 16384);
     ExecuteTestCase(para, ge::GRAPH_SUCCESS, qliv2_ut::SKIP_TILING_KEY);
+}
+
+// Ascend960: mock DAV_9201 to exercise the shared DAV_9201 || DAV_9202 legacy parser branch.
+namespace {
+qliv2_ut::CaseParam Make960TndPaFp8()
+{
+    qliv2_ut::CaseParam p;
+    p.soc = "Ascend960DT";
+    p.coreNum = 56;
+    p.qShape = {78, 64, 128};
+    p.kShape = {2, 16, 1, 128};
+    p.wShape = {78, 64};
+    p.qScaleShape = {78, 64};
+    p.kScaleShape = {2, 16, 1};
+    p.outShape = {78, 1, 2048};
+    p.qType = ge::DT_FLOAT8_E4M3FN;
+    p.kType = ge::DT_FLOAT8_E4M3FN;
+    p.wType = ge::DT_FLOAT;
+    p.qScaleType = ge::DT_FLOAT;
+    p.kScaleType = ge::DT_FLOAT;
+    p.cuSeqQ = {3};
+    p.layoutQ = "TND";
+    p.layoutK = "PA_BBND";
+    p.quantMode = 1;
+    p.maxSeqlenQ = 64;
+    p.maskMode = 3;
+    return p;
+}
+
+qliv2_ut::CaseParam Make960TndPaMxFp8()
+{
+    auto p = Make960TndPaFp8();
+    p.quantMode = 3;
+    p.qScaleShape = {78, 64, 2, 2};
+    p.kScaleShape = {2, 16, 1, 2, 2};
+    p.qScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+    p.kScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+    return p;
+}
+
+qliv2_ut::CaseParam Make960TndPaMxFp4()
+{
+    auto p = Make960TndPaMxFp8();
+    p.quantMode = 5;
+    p.qType = Ops::Transformer::DT_FLOAT4_E2M1;
+    p.kType = Ops::Transformer::DT_FLOAT4_E2M1;
+    return p;
+}
+
+qliv2_ut::CaseParam Make960TndPaHiFloat4()
+{
+    auto p = Make960TndPaFp8();
+    p.quantMode = 6;
+    p.qType = Ops::Transformer::DT_HIFLOAT4;
+    p.kType = Ops::Transformer::DT_HIFLOAT4;
+    p.qScaleShape = {78, 64, 2};
+    p.kScaleShape = {2, 16, 1, 2};
+    return p;
+}
+} // namespace
+
+// Ascend960 tiling cases.
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_tnd_pa_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_tnd_pa_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp4_tnd_pa_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp4();
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_tnd_pa_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_tnd_pa_return_value_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.returnValue = 1;
+    p.valuesShape = p.outShape;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_bsnd_pa_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.qShape = {2, 39, 64, 128};
+    p.wShape = {2, 39, 64};
+    p.outShape = {2, 39, 1, 2048};
+    p.layoutQ = "BSND";
+    p.cuSeqQ = {};
+    p.maxSeqlenQ = -1;
+    p.qScaleShape = {2, 39, 64};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_bsnd_pa_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.qShape = {2, 39, 64, 128};
+    p.wShape = {2, 39, 64};
+    p.outShape = {2, 39, 1, 2048};
+    p.layoutQ = "BSND";
+    p.cuSeqQ = {};
+    p.maxSeqlenQ = -1;
+    p.qScaleShape = {2, 39, 64, 2};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_bsnd_bsnd_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.qShape = {2, 39, 64, 128};
+    p.wShape = {2, 39, 64};
+    p.outShape = {2, 39, 1, 2048};
+    p.layoutQ = "BSND";
+    p.cuSeqQ = {};
+    p.maxSeqlenQ = -1;
+    p.qScaleShape = {2, 39, 64, 2};
+    p.layoutK = "BSND";
+    p.blockTable = {};
+    p.sequsedK = {};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_bsnd_bsnd_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.qShape = {2, 39, 64, 128};
+    p.wShape = {2, 39, 64};
+    p.outShape = {2, 39, 1, 2048};
+    p.layoutQ = "BSND";
+    p.cuSeqQ = {};
+    p.maxSeqlenQ = -1;
+    p.qScaleShape = {2, 39, 64, 2, 2};
+    p.layoutK = "BSND";
+    p.blockTable = {};
+    p.sequsedK = {};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_topk_1_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.topk = 1;
+    p.outShape.back() = 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_topk_8192_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.topk = 8192;
+    p.outShape.back() = 8192;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_topk_0_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.topk = 0;
+    p.outShape.back() = 0;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_topk_8193_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.topk = 8193;
+    p.outShape.back() = 8193;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_cmp_ratio_3_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.cmpRatio = 3;
+    p.maskMode = 3;
+    p.cmpResidual = {2};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_cmp_ratio_128_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.cmpRatio = 128;
+    p.maskMode = 3;
+    p.cmpResidual = {2};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_cmp_ratio_0_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.cmpRatio = 0;
+    p.maskMode = 3;
+    p.cmpResidual = {2};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_cmp_ratio_129_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.cmpRatio = 129;
+    p.maskMode = 3;
+    p.cmpResidual = {2};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_quant_mode_0_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.quantMode = 0;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_quant_mode_2_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.quantMode = 2;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_quant_mode_4_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.quantMode = 4;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_quant_mode_7_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.quantMode = 7;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_return_value_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.returnValue = 2;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_max_seqlen_q_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.maxSeqlenQ = -2;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_qk_dtype_mismatch_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.kType = Ops::Transformer::DT_INT8;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_qk_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.qType = Ops::Transformer::DT_INT8;
+    p.kType = Ops::Transformer::DT_INT8;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_scale_dtype_mismatch_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.kScaleType = Ops::Transformer::DT_FLOAT16;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_scale_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.qScaleType = Ops::Transformer::DT_FLOAT16;
+    p.kScaleType = Ops::Transformer::DT_FLOAT16;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_w_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.wType = Ops::Transformer::DT_FLOAT16;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_out_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.outType = Ops::Transformer::DT_FLOAT;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_values_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.valuesType = Ops::Transformer::DT_FLOAT16;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_qk_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.qType = Ops::Transformer::DT_FLOAT4_E2M1;
+    p.kType = Ops::Transformer::DT_FLOAT4_E2M1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_scale_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.qScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+    p.kScaleType = Ops::Transformer::DT_FLOAT8_E8M0;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_qscale_rank_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.qScaleShape.push_back(1);
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_qscale_prefix_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.qScaleShape.front() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_kscale_rank_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.kScaleShape.push_back(1);
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_kscale_prefix_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.kScaleShape.front() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_qscale_rank_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.qScaleShape.push_back(1);
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_qscale_prefix_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.qScaleShape.front() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_qscale_tail_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.qScaleShape.back() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_kscale_rank_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.kScaleShape.push_back(1);
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_kscale_prefix_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.kScaleShape.front() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_kscale_tail_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.kScaleShape.back() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_qscale_rank_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.qScaleShape.push_back(1);
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_qscale_prefix_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.qScaleShape.front() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_qscale_tail_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.qScaleShape.back() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_kscale_rank_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kScaleShape.push_back(1);
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_kscale_prefix_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kScaleShape.front() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_kscale_tail_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kScaleShape.back() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_pa_padded_stride_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kStride = {4096, 128, 128, 1};
+    p.kScaleStride = {64, 2, 2, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_pa_k_stride0_zero_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kStride = {0, 128, 128, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_pa_k_stride0_odd_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kStride = {2049, 128, 128, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_pa_k_inner_stride_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kStride = {2048, 129, 128, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_pa_kscale_inner_stride_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.kScaleStride = {32, 3, 2, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp4_pa_padded_stride_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp4();
+    p.kStride = {4096, 128, 128, 1};
+    p.kScaleStride = {128, 4, 4, 2, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp4_pa_k_stride0_odd_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp4();
+    p.kStride = {2049, 128, 128, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_pa_kscale_stride0_zero_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.kScaleStride = {0, 4, 4, 2, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_mxfp8_pa_kscale_stride0_odd_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaMxFp8();
+    p.kScaleStride = {65, 4, 4, 2, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_pa_k_stride0_zero_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.kStride = {0, 128, 128, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_values_rank_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.returnValue = 1;
+    p.valuesShape = p.outShape;
+    p.valuesShape.pop_back();
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_values_topk_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.returnValue = 1;
+    p.valuesShape = p.outShape;
+    p.valuesShape.back() += 1;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_hif4_values_heads_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaHiFloat4();
+    p.returnValue = 1;
+    p.valuesShape = p.outShape;
+    p.valuesShape[1] = 2;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_fp8_cmp_residual_idx_offset_success)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.cmpRatio = 4;
+    p.cmpResidual = {2};
+    p.idxOffset = {78, 1};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_idx_offset_dtype_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.idxOffset = {78, 1};
+    p.idxOffsetType = Ops::Transformer::DT_FLOAT;
+    p.sequsedQ = {2};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_cmp_residual_missing_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.cmpRatio = 4;
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_metadata_missing_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.metadata = {};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_metadata_size_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.metadata = {1024};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
+}
+
+TEST_F(QuantLightningIndexerV2TilingArch35, QuantLightningIndexerV2_960_tiling_gsize_over_limit_failed)
+{
+    qliv2_ut::CaseParam p = Make960TndPaFp8();
+    p.qShape = {78, 65, 128};
+    p.wShape = {78, 65};
+    p.qScaleShape = {78, 65};
+    qliv2_ut::RunTilingCase(p, ge::GRAPH_FAILED);
 }

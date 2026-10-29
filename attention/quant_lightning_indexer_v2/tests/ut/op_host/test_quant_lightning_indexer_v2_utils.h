@@ -42,6 +42,8 @@ struct CaseParam {
     std::vector<int64_t> blockTable = {2, 2};
     std::vector<int64_t> idxOffset;
     std::vector<int64_t> metadata = {2048};
+    std::vector<int64_t> kStride;
+    std::vector<int64_t> kScaleStride;
     ge::DataType qType = ge::DT_INT8;
     ge::DataType kType = ge::DT_INT8;
     ge::DataType wType = ge::DT_FLOAT16;
@@ -86,6 +88,18 @@ inline gert::TilingContextPara::TensorDescription Desc(const std::vector<int64_t
     return gert::TilingContextPara::TensorDescription(ToStorageShape(dims), dtype, ge::FORMAT_ND);
 }
 
+inline void SetStride(gert::TilingContextPara::TensorDescription& desc, const std::vector<int64_t>& strides)
+{
+    if (strides.empty()) {
+        return;
+    }
+    desc.hasStride_ = true;
+    desc.stride_.SetDimNum(static_cast<uint32_t>(strides.size()));
+    for (size_t i = 0; i < strides.size(); ++i) {
+        desc.stride_.SetStride(static_cast<uint32_t>(i), strides[i]);
+    }
+}
+
 inline void RunTilingCase(const CaseParam& p, ge::graphStatus expect)
 {
     struct QLIV2CompileInfo {
@@ -106,6 +120,8 @@ inline void RunTilingCase(const CaseParam& p, ge::graphStatus expect)
          {"cmp_ratio", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.cmpRatio)},
          {"return_value", Ops::Transformer::AnyValue::CreateFrom<int64_t>(p.returnValue)}},
         &compileInfo, p.soc, p.coreNum, p.ubSize, p.l2Size);
+    SetStride(para.inputTensorDesc_[1], p.kStride);
+    SetStride(para.inputTensorDesc_[4], p.kScaleStride);
     ExecuteTestCase(para, expect, SKIP_TILING_KEY);
 }
 

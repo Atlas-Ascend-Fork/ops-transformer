@@ -961,7 +961,7 @@ def generate_qli_v2_inputs(
     INPUT_ADAPTER.load_metadata_protocol().save_metadata_inputs(
         "quant_lightning_indexer_v2", testcase_name, data.get("metadata_input")
     )
-    return data
+    return None
 
 
 def generate_aclnn_qli_v2_inputs(
