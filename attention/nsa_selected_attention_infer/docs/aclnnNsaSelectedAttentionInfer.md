@@ -200,22 +200,31 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td>输入</td>
           <td>表示query的S轴实际长度。</td>
           <td>
-            必选参数，不可传入nullptr。
+            <ul style="list-style-type: circle; margin: 0; padding-left: 20px;">
+              <li>必选参数，不可传入nullptr。</li>
+              <li>layoutOptional为BSH/BSND时，长度必须等于query的第0维（B），即每个batch单独给出一个长度，不支持只传入1个元素。</li>
+              <li>layoutOptional为TND时，B由本数组长度决定，且长度必须与actualKvSeqLenOptional相同。</li>
+            </ul>
           </td>
           <td>INT64</td>
           <td>ND</td>
-          <td>-</td>
+          <td>(B,)</td>
           <td>-</td>
         </tr>
         <tr>
           <td>actualKvSeqLenOptional</td>
           <td>输入</td>
           <td>表示算子处理的key和value的S轴实际长度。</td>
-          <td>必选参数，不可传入nullptr。
+          <td>
+            <ul style="list-style-type: circle; margin: 0; padding-left: 20px;">
+              <li>必选参数，不可传入nullptr。</li>
+              <li>layoutOptional为BSH/BSND时，长度必须等于query的第0维（B），即每个batch单独给出一个长度，不支持只传入1个元素。</li>
+              <li>layoutOptional为TND时，长度必须与actualQSeqLenOptional相同。</li>
+            </ul>
           </td>
           <td>INT64</td>
           <td>ND</td>
-          <td>-</td>
+          <td>(B,)</td>
           <td>-</td>
         </tr>
         <tr>
@@ -447,6 +456,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
 - 确定性计算：
   - aclnnNsaSelectedAttentionInfer默认确定性实现。
 - 支持B轴小于等于3072。
+- actualQSeqLenOptional与actualKvSeqLenOptional的长度必须等于query的第0维B（layoutOptional为BSH/BSND时），仅传入1个元素不合法；layoutOptional为TND时两者长度必须一致。
 - 仅支持paged attention。
 - 多token推理场景下，仅支持query的S轴最大等于4，并且此时要求每个batch单独的actualQSeqLen <= actualSelKvSeqLen。
 

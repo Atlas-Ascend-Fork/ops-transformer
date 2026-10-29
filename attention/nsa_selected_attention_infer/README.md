@@ -96,6 +96,7 @@
 - 参数query中的D和key的D(H/numKeyValueHeads)值相等，value的D(H/numKeyValueHeads)和output的D值相等。
 - query，key，value输入，功能使用限制如下：
   - 支持B轴小于等于3072。
+  - actualQSeqLenOptional与actualKvSeqLenOptional的长度必须等于query的第0维B（layout为BSH/BSND时），仅传入1个元素不合法；layout为TND时两者长度必须一致。
   - 支持key/value的N轴小于等于256。
   - 支持query的N轴与key/value的N轴（H/D）的比值（即GQA中的group大小）小于等于16。
   - 支持query与Key的D轴等于192。
