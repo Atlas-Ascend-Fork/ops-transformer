@@ -16,6 +16,7 @@
 #ifndef GROUPED_MATMUL_SWIGLU_QUANT_V2_MXQUANT_H
 #define GROUPED_MATMUL_SWIGLU_QUANT_V2_MXQUANT_H
 
+#include "../grouped_matmul_swiglu_quant_v2_utils_kernel.h"
 #include "cgmct/kernel/kernel_gmm_swiglu_mxquant.h"
 #include "cgmct/block/block_mx_mm_aic_to_aiv_builder.h"
 #include "cgmct/block/block_scheduler_gmm_aswt_with_tail_split.h"
@@ -82,6 +83,14 @@ __aicore__ inline void GmmSwigluAswt(GM_ADDR x, GM_ADDR weight, GM_ADDR weightSc
         epilogueArgs.gluBias = swigluParams_.gluBias;
         epilogueArgs.scaleAlg = swigluParams_.scaleAlg;
         epilogueArgs.dstTypeMax = swigluParams_.dstTypeMax;
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        if constexpr (AscendC::IsSameType<CType, fp8_e4m3fn_t>::value) {
+            GroupedMatmulDequantSwigluQuant::ClearUnprocessedMxScaleRows(
+                groupList, yScale, mmTilingData_.M,
+                mmTilingData_.N / GroupedMatmulDequantSwigluQuant::SWIGLU_REDUCE_FACTOR, gmmSwigluQuantParams_.groupNum,
+                gmmSwigluQuantParams_.groupListType, swigluParams_.swigluMode);
+        }
+#endif
     }
     Params params = {// template shape, gmm shape can not get now
                      {1, 1, 1, 1},

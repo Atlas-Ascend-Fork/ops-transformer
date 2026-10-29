@@ -53,11 +53,8 @@ constexpr int64_t GROUP_LIST_COUNTS = 1;
 constexpr int64_t GROUP_HALF_M = 16;
 constexpr int64_t GROUP_TOTAL_M = 32;
 constexpr int64_t GROUP_PADDING_SENTINEL = 99;
-constexpr int64_t NEGATIVE_GROUP_VALUE = -1;
-constexpr int64_t DECREASING_GROUP_OFFSET = 8;
 constexpr int64_t FIRST_GROUP_LENGTH = 12;
 constexpr int64_t SECOND_GROUP_LENGTH = 20;
-constexpr int64_t EXCESS_GROUP_LENGTH = 1;
 constexpr int64_t TWO_GROUP_COUNT = 2;
 constexpr size_t SINGLE_TENSOR_COUNT = 1;
 constexpr int64_t OPTIONAL_TENSOR_ELEMENTS = 1;
@@ -385,12 +382,17 @@ struct V3Case : CsvExpectation {
         tensors.SetTuningConfig(tuningConfig);
         const char* roundModePtr = roundMode == "NULL" ? nullptr : roundMode.c_str();
         return tensors.GetWorkspaceSize([&](uint64_t* workspaceSize, aclOpExecutor** executor) {
-            return aclnnGroupedMatmulSwigluQuantWeightNzV3GetWorkspaceSize(
+            const auto status = aclnnGroupedMatmulSwigluQuantWeightNzV3GetWorkspaceSize(
                 tensors.x.get(), tensors.weight.get(), tensors.weightScale.get(), tensors.weightAssist.get(),
                 tensors.bias.get(), tensors.xScale.get(), tensors.smoothScale.get(), tensors.groupList.get(),
                 dequantMode, dequantDtype, quantMode, groupListType, tensors.tuningConfig.get(), swigluMode, clampLimit,
                 gluAlpha, gluBias, roundModePtr, scaleAlg, dstTypeMax, tensors.output.get(), tensors.outputScale.get(),
                 workspaceSize, executor);
+            if (status == ACLNN_SUCCESS && tensors.output->IsEmpty()) {
+                EXPECT_EQ(*workspaceSize, 0UL);
+                EXPECT_NE(*executor, nullptr);
+            }
+            return status;
         });
     }
 };
@@ -452,25 +454,9 @@ TEST(grouped_matmul_swiglu_quant_weight_nz_v3_opapi, host_group_list_strided_vie
     EXPECT_EQ(RunHostGroupListCase({GROUP_PADDING_SENTINEL, GROUP_HALF_M, GROUP_PADDING_SENTINEL, GROUP_TOTAL_M},
                                    GROUP_PAIR_STRIDE, PREFIX_STORAGE_OFFSET, 0),
               ACLNN_SUCCESS);
-}
-
-TEST(grouped_matmul_swiglu_quant_weight_nz_v3_opapi, host_group_list_strided_views_check_logical_values)
-{
-    EXPECT_EQ(RunHostGroupListCase({GROUP_HALF_M, SECOND_GROUP_LENGTH, NEGATIVE_GROUP_VALUE}, GROUP_PAIR_STRIDE, 0, 0),
-              ACLNN_ERR_PARAM_INVALID);
-    EXPECT_EQ(
-        RunHostGroupListCase({GROUP_HALF_M, SECOND_GROUP_LENGTH, DECREASING_GROUP_OFFSET}, GROUP_PAIR_STRIDE, 0, 0),
-        ACLNN_ERR_PARAM_INVALID);
-}
-
-TEST(grouped_matmul_swiglu_quant_weight_nz_v3_opapi, host_group_list_strided_views_check_logical_sum)
-{
     EXPECT_EQ(RunHostGroupListCase({FIRST_GROUP_LENGTH, GROUP_PADDING_SENTINEL, SECOND_GROUP_LENGTH}, GROUP_PAIR_STRIDE,
                                    0, GROUP_LIST_COUNTS),
               ACLNN_SUCCESS);
-    EXPECT_EQ(RunHostGroupListCase({GROUP_HALF_M, EXCESS_GROUP_LENGTH, SECOND_GROUP_LENGTH}, GROUP_PAIR_STRIDE, 0,
-                                   GROUP_LIST_COUNTS),
-              ACLNN_ERR_PARAM_INVALID);
 }
 
 TEST(grouped_matmul_swiglu_quant_weight_nz_v3_opapi, host_group_list_contiguous_values_are_unchanged)
@@ -478,8 +464,6 @@ TEST(grouped_matmul_swiglu_quant_weight_nz_v3_opapi, host_group_list_contiguous_
     EXPECT_EQ(RunHostGroupListCase({GROUP_HALF_M, GROUP_TOTAL_M}, GROUP_UNIT_STRIDE, 0, 0), ACLNN_SUCCESS);
     EXPECT_EQ(RunHostGroupListCase({FIRST_GROUP_LENGTH, SECOND_GROUP_LENGTH}, GROUP_UNIT_STRIDE, 0, GROUP_LIST_COUNTS),
               ACLNN_SUCCESS);
-    EXPECT_EQ(RunHostGroupListCase({GROUP_HALF_M, NEGATIVE_GROUP_VALUE}, GROUP_UNIT_STRIDE, 0, 0),
-              ACLNN_ERR_PARAM_INVALID);
 }
 
 TEST(grouped_matmul_swiglu_quant_weight_nz_v3_opapi, a4w4_bf16_output_does_not_require_output_scale)

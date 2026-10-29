@@ -123,16 +123,16 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV3(
 
 - **参数说明：**
 
-  | 参数名 | 输入/输出 | 描述 | 使用说明 | 数据类型 | 数据格式 | 维度(shape) | 非连续的Tensor |
+  | 参数名 | 输入/输出 | 描述 | 使用说明 | 数据类型 | 数据格式 | 维度 | 非连续的Tensor |
   | --- | --- | --- | --- | --- | --- | --- | --- |
-  | x（aclTensor *） | 输入 | 激活矩阵。 | MXFP8输入；当前仅支持FLOAT8_E4M3FN。 | FLOAT8_E4M3FN | ND | 2维，(M, K) | √ |
-  | weight（aclTensorList *） | 输入 | 分组权重矩阵。 | 支持非转置和转置输入，具体view和storage shape见约束说明。 | FLOAT8_E4M3FN | FRACTAL_NZ | 3维，(E, K, N) | 仅支持约束说明中的转置weight view |
-  | weightScale（aclTensorList *） | 输入 | 权重量化因子。 | 与weight对应，具体view和storage shape见约束说明。 | FLOAT8_E8M0 | ND | 4维，(E, ceil(K / 64), N, 2) | √ |
+  | x（aclTensor *） | 输入 | 激活矩阵。 | MXFP8输入；当前仅支持FLOAT8_E4M3FN。 | FLOAT8_E4M3FN | ND | 2 | √ |
+  | weight（aclTensorList *） | 输入 | 分组权重矩阵。 | 支持非转置和转置输入，具体view和storage shape见约束说明。 | FLOAT8_E4M3FN | FRACTAL_NZ | 3 | 仅支持约束说明中的转置weight view |
+  | weightScale（aclTensorList *） | 输入 | 权重量化因子。 | 与weight对应，具体view和storage shape见约束说明。 | FLOAT8_E8M0 | ND | 4 | √ |
   | weightAssistMatrix（aclTensorList *） | 输入 | 权重辅助矩阵。 | 当前不支持有效数据；可传nullptr、长度为0的TensorList，或长度为1且唯一元素为nullptr/shape (0)的TensorList。 | - | - | - | - |
   | bias（aclTensor *） | 输入 | 矩阵乘偏置。 | 当前不支持，必须传nullptr。 | - | - | - | - |
-  | xScale（aclTensor *） | 输入 | 激活量化因子。 | 按K方向每64个元素对应两个E8M0 scale。 | FLOAT8_E8M0 | ND | 3维，(M, ceil(K / 64), 2) | √ |
+  | xScale（aclTensor *） | 输入 | 激活量化因子。 | 按K方向每64个元素对应两个E8M0 scale。 | FLOAT8_E8M0 | ND | 3 | √ |
   | smoothScale（aclTensor *） | 输入 | 平滑量化因子。 | 当前不支持，必须传nullptr。 | - | - | - | - |
-  | groupList（aclTensor *） | 输入 | 分组信息。 | 长度必须为E；其语义由groupListType决定。 | INT64 | ND | 1维，(E) | √ |
+  | groupList（aclTensor *） | 输入 | 分组信息。 | 其语义由groupListType决定。 | INT64 | ND | (E) | √ |
   | dequantMode（int64_t） | 输入 | 反量化模式。 | 当前仅支持2，表示MX量化反量化。 | - | - | - | - |
   | dequantDtype（int64_t） | 输入 | GroupedMatmul中间结果类型。 | 当前仅支持ACL_FLOAT（枚举值为0）。 | - | - | - | - |
   | quantMode（int64_t） | 输入 | 输出量化模式。 | 当前仅支持2，表示MX量化。 | - | - | - | - |
@@ -145,8 +145,8 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV3(
   | roundMode（const char *） | 输入 | MX量化舍入模式。 | 传入nullptr或空字符串时按`"rint"`处理；当前仅支持`"rint"`。 | - | - | - | - |
   | scaleAlg（int64_t） | 输入 | MX量化scale算法。 | 当前接口支持0（OCP）和1（cuBLAS）；其他值会报错。 | - | - | - | - |
   | dstTypeMax（double） | 输入 | MX量化目标类型最大值。 | 当前MXFP8输出仅支持0.0。 | - | - | - | - |
-  | output（aclTensor *） | 输出 | MXFP8量化结果。 | 调用方创建并传入，当前仅支持FLOAT8_E4M3FN。 | FLOAT8_E4M3FN | ND | 2维，(M, N / 2) | √ |
-  | outputScale（aclTensor *） | 输出 | MXFP8输出scale。 | 调用方创建并传入。 | FLOAT8_E8M0 | ND | 3维，(M, ceil((N / 2) / 64), 2) | √ |
+  | output（aclTensor *） | 输出 | MXFP8量化结果。 | 调用方创建并传入，当前仅支持FLOAT8_E4M3FN。 | FLOAT8_E4M3FN | ND | 2 | √ |
+  | outputScale（aclTensor *） | 输出 | MXFP8输出scale。 | 调用方创建并传入。 | FLOAT8_E8M0 | ND | 3 | √ |
   | workspaceSize（uint64_t *） | 输出 | Device侧workspace大小。 | 返回值。 | - | - | - | - |
   | executor（aclOpExecutor **） | 输出 | 算子执行器。 | 返回值，传给第二段接口。 | - | - | - | - |
 
@@ -282,10 +282,10 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV3(
             <tr>
               <td>MXFP8</td>
               <td>(M, K)</td>
-              <td>转置时view：(E, K, N)，storage：(E, ceil(K / 32), ceil(N / 16), 16, 32)<br>
-              非转置view：(E, K, N)，storage：(E, ceil(N / 32), ceil(K / 16), 16, 32)</td>
-              <td>转置时view：(E, ceil(K / 64), N, 2)，storage：(E, N, ceil(K / 64), 2)<br>
-              非转置view：(E, ceil(K / 64), N, 2)，storage：(E, ceil(K / 64), N, 2)</td>
+              <td>转置时view：(E, K, N)，stride：(K * N, 1, K)，storage：(E, ceil(K / 32), ceil(N / 16), 16, 32)<br>
+              非转置时view：(E, K, N)，stride：(K * N, N, 1)，storage：(E, ceil(N / 32), ceil(K / 16), 16, 32)</td>
+              <td>转置时view：(E, ceil(K / 64), N, 2)，stride：(N * ceil(K / 64) * 2, 2, ceil(K / 64) * 2, 1)，storage：(E, N, ceil(K / 64), 2)<br>
+              非转置时view：(E, ceil(K / 64), N, 2)，stride：(ceil(K / 64) * N * 2, N * 2, 2, 1)，storage：(E, ceil(K / 64), N, 2)</td>
               <td>(M, ceil(K / 64), 2)</td>
               <td>(M, N / 2)</td>
               <td>(M, ceil((N / 2) / 64), 2)</td>
@@ -293,21 +293,19 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNzV3(
           </tbody>
           </table>
 
-        - 各维度的取值约束如下，与PyTorch接口一致：
-
-          | 维度 | 含义 | 取值约束 |
-          | --- | --- | --- |
-          | `E` | expert数量。 | 整数，取值范围为`[1, 1024]`。 |
-          | `M` | `x`的行数，即总token数。 | 正整数，不支持`M=0`的空Tensor。 |
-          | `K` | `x`与逻辑weight的矩阵乘归约维度，即输入特征数。 | 正整数，无额外的64或128对齐要求。 |
-          | `N` | GroupedMatmul结果的列数，即SwiGLU拆分前的宽度。 | 正整数，且为64的整数倍；不是要求128对齐。SwiGLU输出宽度为`N / 2`，因此输出宽度为32的整数倍。 |
+        - 转置和非转置的weight、weightScale具有相同的view shape，但view stride和storage布局不同，转置属性通过view stride区分。
+        - `E`表示expert数量，取值为`[1, 1024]`范围内的整数。
+        - `M`表示x的行数，必须为非负整数。
+        - `K`表示矩阵乘归约维度，必须为正整数。
+        - `N`表示GroupedMatmul结果的列数，必须为正整数且为64的整数倍。
+        - `M=0`且其他参数合法时返回空输出，workspace大小为0。
 
         - weight约束：TensorList长度必须为1，唯一Tensor的首维为E，承载全部expert，不支持按expert拆成多个Tensor。仅支持上表列出的非转置或转置布局，不支持任意非连续权重view。
         - weightScale约束：TensorList长度必须为1，与weight的唯一Tensor对应；最后一维固定为2，转置属性必须与weight一致。
         - groupList约束：长度为E，`groupListType`仅支持0或1。
             - `groupListType=0`：groupList须为非负单调非递减数列（累积和），最后一个值不大于x中tensor的第一维。
             - `groupListType=1`：groupList须为非负数列（各组大小），数值总和不大于x中tensor的第一维。
-            - groupList未指定的输出区域不会被更新。
+            - groupList未指定的output区域不参与计算，对应的outputScale填充编码0。
   <!-- end id7 -->
 
 ## 调用示例

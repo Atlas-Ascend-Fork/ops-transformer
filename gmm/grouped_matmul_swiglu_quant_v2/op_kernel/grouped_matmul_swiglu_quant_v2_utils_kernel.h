@@ -16,6 +16,10 @@
 #ifndef OP_KERNEL_GROUPED_MATMUL_DEQUANT_SWIGLU_QUANT_V2_UTILS_H
 #define OP_KERNEL_GROUPED_MATMUL_DEQUANT_SWIGLU_QUANT_V2_UTILS_H
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+#include "adv_api/utils/init_global_memory.h"
+#endif
+
 // A8W4 MSD场景
 #if defined(ORIG_DTYPE_X) && defined(DT_INT8) && ORIG_DTYPE_X == DT_INT8 && defined(ORIG_DTYPE_WEIGHT) && \
     defined(DT_INT4) && ORIG_DTYPE_WEIGHT == DT_INT4
@@ -59,6 +63,48 @@ constexpr int64_t DOUBLE_ROW = 2;
 constexpr int64_t SIZE_OF_HALF_2 = 2;
 constexpr uint8_t NUM_8 = 8;
 constexpr float QUANT_SCALE_INT8 = 127.0f;
+
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+// V3 permits group_list to cover fewer than M rows. Those rows have no
+// epilogue invocation, so preserve their zero scale codes inside this kernel
+// rather than launching a separate Torch InplaceZero for the entire output.
+__aicore__ inline void ClearUnprocessedMxScaleRows(GM_ADDR groupList, GM_ADDR yScale, int64_t m, int64_t outputN,
+                                                   uint32_t groupNum, uint8_t groupListType, uint32_t swigluMode)
+{
+    if ASCEND_IS_AIC {
+        return;
+    }
+    constexpr uint32_t splitClampSwigluMode = 2;
+    if (swigluMode != splitClampSwigluMode || GetBlockIdx() != 0 || GetSubBlockIdx() != 0 || groupNum == 0 || m <= 0 ||
+        outputN <= 0) {
+        return;
+    }
+    GlobalTensor<int64_t> groups;
+    groups.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(groupList));
+    int64_t processedRows = 0;
+    if (groupListType == 0) {
+        processedRows = groups.GetValue(groupNum - 1);
+    } else {
+        for (uint32_t group = 0; group < groupNum; ++group) {
+            const int64_t rows = groups.GetValue(group);
+            if (rows < 0 || rows > m - processedRows) {
+                return;
+            }
+            processedRows += rows;
+        }
+    }
+    if (processedRows < 0 || processedRows >= m) {
+        return;
+    }
+    // Each public row contains ceil(outputN / 64) pairs of one-byte E8M0
+    // codes. Use uint16_t so every row starts at a naturally aligned pair.
+    constexpr int64_t mxGroupSize = 64;
+    const uint64_t pairsPerRow = static_cast<uint64_t>((outputN + mxGroupSize - 1) / mxGroupSize);
+    GlobalTensor<uint16_t> tailScale;
+    tailScale.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t*>(yScale) + processedRows * pairsPerRow);
+    InitGlobalMemory(tailScale, static_cast<uint64_t>(m - processedRows) * pairsPerRow, static_cast<uint16_t>(0));
+}
+#endif
 
 constexpr MatmulConfig matmulCFGUnitFlag{false, false, true, 0, 0, 0, false, false, false, false,
                                          false, 0,     0,    0, 0, 0, 0,     0,     false};

@@ -28,6 +28,7 @@ constexpr int64_t kMxQuantMode = 2;
 constexpr int64_t kDim0 = 0;
 constexpr int64_t kDim2 = 2;
 constexpr int64_t kMxGroupSize = 64;
+constexpr int64_t kMaxGroupNum = 1024;
 constexpr int64_t kGeDtypeFloat8E4M3Fn = 36;
 constexpr int64_t kGeDtypeFloat8E8M0 = 37;
 constexpr int64_t kAclDtypeOffset = 256;
@@ -102,6 +103,14 @@ int64_t InferLogicalN(const at::Tensor& weightScale)
     return weightScale.size(kDim2);
 }
 
+void CheckGroupListMetadata(const at::Tensor& groupList, int64_t groupListType)
+{
+    TORCH_CHECK(groupList.defined() && groupList.dim() == 1 && groupList.scalar_type() == at::ScalarType::Long,
+                "group_list must be a 1D torch.int64 tensor.");
+    TORCH_CHECK(groupListType == 0 || groupListType == 1, "group_list_type must be 0 or 1.");
+    TORCH_CHECK(groupList.numel() >= 1 && groupList.numel() <= kMaxGroupNum, "group_list length must be in [1, 1024].");
+}
+
 } // namespace
 
 std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
@@ -121,6 +130,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     const double gluBiasValue = gluBias.value_or(kDefaultGluBias);
     CheckListForIndexing(weight, "weight");
     CheckListForIndexing(weightScale, "weight_scale");
+    TORCH_CHECK(weight[0].dim() == 3, "weight[0] must be 3D, but got ", weight[0].dim(), ".");
     TORCH_CHECK(x.defined() && x.dim() > kDim0, "x must be defined and have a dimension for output shape inference.");
     TORCH_CHECK(swigluMode.has_value(), "swiglu_mode must be specified; use torch_npu for legacy V2 calls.");
     // The Torch schema has a TensorList bias, while ACLNN takes one Tensor.
@@ -136,8 +146,9 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
 
     const int64_t m = x.size(kDim0);
     const int64_t n = InferLogicalN(weightScale[0]);
-    TORCH_CHECK(n > 0 && n % kSwigluSplitFactor == 0, "The logical N dimension must be positive and even, but got ", n,
-                ".");
+    TORCH_CHECK(n >= 0 && n % kSwigluSplitFactor == 0,
+                "The logical N dimension must be non-negative and even, but got ", n, ".");
+    CheckGroupListMetadata(groupList, groupListType.value_or(0));
     const aclDataType xAclDtype = GetTensorAclDtype(xDtype, x, "x");
     const aclDataType weightAclDtype = GetTensorAclDtype(weightDtype, weight[0], "weight");
     const aclDataType weightScaleAclDtype = GetMxScaleAclDtype(weightScaleDtype, weightScale[0], "weight_scale");
@@ -148,12 +159,9 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_swiglu_quant(
     {
         const c10::OptionalDeviceGuard deviceGuard(c10::Device(x.device()));
         output = at::empty({m, n / kSwigluSplitFactor}, x.options().dtype(at::ScalarType::Float8_e4m3fn));
-        // The MX scale writer can leave padding/empty lanes untouched. Clear
-        // the output tensor first so every externally visible lane is
-        // deterministic.
-        // ZerosLike does not support float8_e8m0fnu. Allocate byte storage,
-        // initialize it, then reinterpret the one-byte elements as E8M0.
-        outputScale = at::zeros({m, CeilDiv(n / kSwigluSplitFactor, kMxGroupSize), kMxScalePairSize},
+        // The kernel writes valid scales and N padding, and clears scale rows
+        // not covered by group_list. No separate InplaceZero task is needed.
+        outputScale = at::empty({m, CeilDiv(n / kSwigluSplitFactor, kMxGroupSize), kMxScalePairSize},
                                 x.options().dtype(at::ScalarType::Byte))
                           .view(at::ScalarType::Float8_e8m0fnu);
     }

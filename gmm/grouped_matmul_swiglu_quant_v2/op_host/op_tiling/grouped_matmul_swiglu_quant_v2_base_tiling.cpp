@@ -15,6 +15,7 @@
 #include "grouped_matmul_swiglu_quant_v2_base_tiling.h"
 #include "util/math_util.h"
 #include "err/ops_err.h"
+#include "log/log.h"
 
 using namespace matmul_tiling;
 
@@ -159,9 +160,12 @@ int64_t GroupedMatmulSwigluQuantV2BaseTiling::CalMaxRowInUb(const uint64_t ubSiz
                      (n * INT32_DTYPE_SIZE + n / SWIGLU_REDUCE_FACTOR + FP32_DTYPE_SIZE) / DOUBLE_BUFFER;
     }
     if (maxRowInUb < 1) {
-        // when n > (ubSize - 72) / 19 = 10330, maxRowInUb < 1
-        OP_LOGE(context_->GetNodeName(), "GMM_SWIGLU_QUANT TILING: n should not be greater than 10240, now is %lu\n",
-                n);
+        // The bound depends on the actual UB capacity and aligned buffers;
+        // failure to fit a row does not imply a fixed upper bound on N.
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            context_->GetNodeName(), "N", std::to_string(n),
+            "the UB cannot fit one row with double buffering; UB bytes=" + std::to_string(ubSize) +
+                ", remaining UB bytes=" + std::to_string(remainUbSize));
     }
     return maxRowInUb;
 }
