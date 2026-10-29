@@ -87,12 +87,12 @@ class QuantReduceScatterOpBuilder(OpBuilder):
         ):
             torch._check(
                 x is not None,
-                lambda: "x cannot be None, please input some value"
+                lambda: "x cannot be None, please input a tensor"
                 + ops_error(ErrCode.TYPE),
             )
             torch._check(
                 scales is not None,
-                lambda: "scales cannot be None, please input some value"
+                lambda: "scales cannot be None, please input a tensor"
                 + ops_error(ErrCode.TYPE),
             )
 
@@ -170,11 +170,11 @@ def quant_reduce_scatter(
 ):
     if x is None:
         raise TypeError(
-            "x cannot be None, please input some value" + ops_error(ErrCode.TYPE)
+            "x cannot be None, please input a tensor" + ops_error(ErrCode.TYPE)
         )
     if scales is None:
         raise TypeError(
-            "scales cannot be None, please input some value" + ops_error(ErrCode.TYPE)
+            "scales cannot be None, please input a tensor" + ops_error(ErrCode.TYPE)
         )
     # world_size 校验必须前置：MTE 通信上下文构建（get_context）要求通信域 rank 数 >= 2，
     # 非法 world_size 若不在建上下文前拦截，会先触发底层 HCCL 地址表构建失败。
