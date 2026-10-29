@@ -9,6 +9,12 @@
 # -----------------------------------------------------------------------------------------------------------
 add_op_to_compiled_list()
 
+# kirin 平台 kernel 源码使用 arch31 目录（全局映射 kirinx90/kirin9030 为 arch31，此处按算子追加）
+set(fused_infer_attention_score_kirinx90_arch_directory arch31 CACHE INTERNAL
+    "fused_infer_attention_score kirinx90 arch")
+set(fused_infer_attention_score_kirin9030_arch_directory arch31 CACHE INTERNAL
+    "fused_infer_attention_score kirin9030 arch")
+
 set(CONDITION_UNIT ${ASCEND_COMPUTE_UNIT})
 if (BUILD_OPEN_PROJECT)
     set(fused_infer_attention_score_apt_depends attention/incre_flash_attention attention/prompt_flash_attention attention/common CACHE INTERNAL "Dependencies for fused_infer_attention_score")
@@ -80,5 +86,8 @@ if(NOT BUILD_OPS_RTY_KERNEL)
     ../op_host/arch22/fused_infer_attention_score_tiling_check_feature.cpp
     ../op_host/arch22/fused_infer_attention_score_tiling_check_existence.cpp
     ../op_host/arch22/fused_infer_attention_score_tiling_check_single_para.cpp
+    ../op_host/arch31/fia_tiling_nonquant_arch31.cpp
+    ../op_host/arch31/fused_infer_attention_score_tiling_arch31.cpp
+    ../op_host/arch31/fused_infer_attention_score_tiling_check_arch31.cpp
     )
 endif()

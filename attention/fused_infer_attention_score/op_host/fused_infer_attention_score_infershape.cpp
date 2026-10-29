@@ -16,6 +16,7 @@
 #include <register/op_impl_registry.h>
 #include "log/log.h"
 #include "log/error_code.h"
+#include "runtime/rt_external_base.h"
 
 using namespace ge;
 
@@ -58,6 +59,18 @@ static constexpr uint32_t FIA_INPUT_KV_PADDING_SIZE_INDEX = 16;
 static constexpr uint32_t FIA_INPUT_ACTUAL_SHARED_PREFIX_LEN_INDEX = 23;
 static constexpr uint32_t FIA_QUERY_ROPE_INDEX = 24;
 static constexpr uint32_t FIA_OUT_DTYPE_INDEX = 15;
+static constexpr uint32_t FIA_VERSION_SIZE = 64;
+
+static bool IsKirinPlatform(const std::string& nodeName)
+{
+    char versionVal[FIA_VERSION_SIZE] = {0};
+    if (rtGetSocSpec("version", "Short_SoC_version", versionVal, FIA_VERSION_SIZE) != RT_ERROR_NONE) {
+        OP_LOGW(nodeName, "Cannot get Short_SoC_version in infershape, assuming non-Kirin.");
+        return false;
+    }
+    std::string socVersion(versionVal);
+    return (socVersion == "KirinX90" || socVersion == "Kirin9030");
+}
 
 static const std::map<int64_t, ge::DataType> TORCH_DTYPE_ENUM_VALUE_TO_GE_DTYPE_MAP = {
     {5, ge::DT_FLOAT16}, {15, ge::DT_BF16}, {24, ge::DT_FLOAT8_E4M3FN}, {290, ge::DT_HIFLOAT8}};
@@ -362,6 +375,9 @@ static ge::graphStatus InferShapeFusedInferAttentionScore(gert::InferShapeContex
             ge::GRAPH_SUCCESS) {
             return ge::GRAPH_FAILED;
         }
+    } else if (IsKirinPlatform(context->GetNodeName())) {
+        softmaxLseShape->SetDimNum(FIA_LAYOUT_DIM_NUMS_1);
+        (*softmaxLseShape)[FIA_LAYOUT_DIM0] = NUM_1;
     } else {
         softmaxLseShape->SetDimNum(FIA_LAYOUT_DIM_NUMS_1);
         (*softmaxLseShape)[FIA_LAYOUT_DIM0] = NUM_0;

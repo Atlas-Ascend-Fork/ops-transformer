@@ -79,6 +79,19 @@ REGISTER_TILING_DATA_CLASS(FusedInferAttentionMaskParamsOp, FusedInferAttentionM
 BEGIN_TILING_DATA_DEF(FusedInferAttentionInnerSplitParams)
 TILING_DATA_FIELD_DEF(uint32_t, mBaseSize)
 TILING_DATA_FIELD_DEF(uint32_t, s2BaseSize)
+// arch31 专属切D 分档字段
+//   dTile:     不切D=D / 切D=D/2（attn V N 维分块步长）
+//   kTileQK:   QK^T K 维分块步长 = dTile/2（不切 2 块累加 / 切D 4 块累加）
+//   nTileV:    attn V N 维分块步长 = dTile（不切 1 块 / 切D 2 块外层循环）
+//   mBaseDeal: 实际 m（切D 后 mBaseSplit / 不切D mBaseUnsplit，m 8->16 翻倍仅 D=512 DAV_3113）
+//   needSplitD: 0/1，是否切D（D>=512 && mBaseSplit>mBaseUnsplit）
+//   kTileV:    attn V K 维（S2）切片 = l0bSize/(nTileV*sizeof(half)*2)
+TILING_DATA_FIELD_DEF(uint32_t, dTile)
+TILING_DATA_FIELD_DEF(uint32_t, kTileQK)
+TILING_DATA_FIELD_DEF(uint32_t, nTileV)
+TILING_DATA_FIELD_DEF(uint32_t, mBaseDeal)
+TILING_DATA_FIELD_DEF(uint32_t, needSplitD)
+TILING_DATA_FIELD_DEF(uint32_t, kTileV)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(FusedInferAttentionInnerSplitParamsOp, FusedInferAttentionInnerSplitParams)
 

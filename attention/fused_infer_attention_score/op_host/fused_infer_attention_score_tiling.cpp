@@ -31,6 +31,7 @@
 #include "../../incre_flash_attention/op_host/incre_flash_attention_tiling_impl.h"
 #include "arch35/fused_infer_attention_score_tiling_v4.h"
 #include "arch38/fused_infer_attention_score_tiling_arch38.h"
+#include "arch31/fused_infer_attention_score_tiling_arch31.h"
 
 using namespace ge;
 using namespace AscendC;
@@ -2565,6 +2566,9 @@ FIA_EXTERN_C ge::graphStatus DoOpTilingFusedInferAttentionScore(gert::TilingCont
                                         "Non-contiguous key/value/keyRope cache is not supported by the arch38 route."),
             return ge::GRAPH_FAILED);
         return TilingFusedInferAttentionScoreArch38(context);
+    } else if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3003 ||
+               ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3113) {
+        return TilingFusedInferAttentionScoreArch31(context);
     }
     if (ascendcPlatform.GetCurNpuArch() != Ops::Base::DAV_2201 ||
         FusedInferAttentionScoreTilingCache::IsCacheDisabled()) {

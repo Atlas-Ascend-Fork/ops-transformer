@@ -160,15 +160,14 @@
     map<string, string> versions; \
     string version = tilingContextPara.socVersion_; \
     if (isNpuArchString(version)) { \
-        map<string, string> archToSoc = {{"3510", "Ascend950"}, {"9201", "Ascend960DT"}}; \
+        map<string, string> archToSoc = { \
+            {"3510", "Ascend950"}, {"9201", "Ascend960DT"}, {"3003", "KirinX90"}, {"3113", "Kirin9030"}}; \
         versions = {{"NpuArch", tilingContextPara.socVersion_}, \
                     {"Short_SoC_version", archToSoc[tilingContextPara.socVersion_]}}; \
     } else { \
-        map<string, string> socToArch = {{"Ascend310P", "2002"}, \
-                                         {"Ascend910B", "2201"}, \
-                                         {"Ascend910_93", "2201"}, \
-                                         {"Ascend950", "3510"}, \
-                                         {"Ascend960DT", "9201"}}; \
+        map<string, string> socToArch = {{"Ascend310P", "2002"}, {"Ascend910B", "2201"},  {"Ascend910_93", "2201"}, \
+                                         {"Ascend950", "3510"},  {"Ascend960DT", "9201"}, {"KirinX90", "3003"}, \
+                                         {"Kirin9030", "3113"}}; \
         versions = {{"NpuArch", socToArch[tilingContextPara.socVersion_]}, \
                     {"Short_SoC_version", tilingContextPara.socVersion_}}; \
     } \

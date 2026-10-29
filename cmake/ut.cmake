@@ -319,7 +319,11 @@ if(UT_TEST_ALL
       # if "--soc" not include current soc, jump over
       list(FIND ARCH_DIRECTORY ${ARCH_NAME} INDEX)
       if(INDEX EQUAL -1)
-        return()
+        # arch31 (kirinx90/kirin9030) 随 arch22 构建一起编译：kirin 平台全局映射为 arch22，
+        # 算子级（如 fused_infer_attention_score）覆盖为 arch31，UT 侧需同步放行
+        if(NOT (${ARCH_NAME} STREQUAL "arch31" AND ARCH_DIRECTORY MATCHES "arch22"))
+          return()
+        endif()
       endif()
 
       if("${MODULE_UT_NAME}" STREQUAL "${OP_TILING_MODULE_NAME}")

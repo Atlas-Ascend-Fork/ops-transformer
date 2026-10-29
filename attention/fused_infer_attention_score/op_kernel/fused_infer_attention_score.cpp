@@ -12,18 +12,22 @@
  * \file fused_infer_attention_score.cpp
  * \brief
  */
-#if ASC_DEVKIT_MAJOR >= 9
+#if ASC_DEVKIT_MAJOR >= 9 && !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
 #include "kernel_vec_intf.h"
 #include "kernel_cube_intf.h"
 #else
 #include "kernel_operator.h"
 #endif
+#if !(defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
 #include "adv_api/quantization/ascend_quant.h"
+#endif
 #include "kernel_operator_list_tensor_intf.h"
 // ifa must include before pfa
 #define FIA_ENABLE_MLA
 
-#if (__NPU_ARCH__ == 5102)
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+#include "arch31/fused_infer_attention_score_arch31.cpp"
+#elif (__NPU_ARCH__ == 5102)
 #ifdef NOT_DYNAMIC_COMPILE
 #include "../../prompt_flash_attention/op_kernel/arch38/prompt_flash_attention_entry_regbase.h"
 #include "../../incre_flash_attention/op_kernel/incre_flash_attention.cpp"
@@ -62,7 +66,15 @@ extern "C" __global__ __aicore__ void fused_infer_attention_score(
     __gm__ uint8_t* qStartIdx, __gm__ uint8_t* kvStartIdx, __gm__ uint8_t* attentionOut, __gm__ uint8_t* softmaxLse,
     __gm__ uint8_t* workspace, __gm__ uint8_t* tiling)
 {
-#if (__NPU_ARCH__ == 5102)
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3003 || __NPU_ARCH__ == 3113))
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+    fused_infer_attention_arch31(
+        query, key, value, pse_shift, attenMask, actualSeqLengths, actualSeqLengthsKV, deq_scale1, quant_scale1,
+        deq_scale2, quant_scale2, quant_offset2, antiquantScale, antiquantOffset, blocktable, queryPaddingSize,
+        kvPaddingSize, keyAntiquantScale, keyAntiquantOffset, valueAntiquantScale, valueAntiquantOffset,
+        keySharedPrefix, valueSharedPrefix, actualSharedPrefixLen, queryRope, keyRope, keyRopeAntiquantScale,
+        dequantScaleQuery, learnableSink, qStartIdx, kvStartIdx, attentionOut, softmaxLse, workspace, tiling);
+#elif (__NPU_ARCH__ == 5102)
     prompt_flash_attention_FIAS_regbase(
         query, key, value, pse_shift, attenMask, actualSeqLengths, actualSeqLengthsKV, deq_scale1, quant_scale1,
         deq_scale2, quant_scale2, quant_offset2, antiquantScale, antiquantOffset, blocktable, queryPaddingSize,

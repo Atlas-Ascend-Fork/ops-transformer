@@ -10,6 +10,8 @@
 |<term>Atlas 200I/500 A2推理产品</term>|      ×     |
 |<term>Atlas推理系列产品</term>|      ×     |
 |<term>Atlas训练系列产品</term>|      ×     |
+|<term>Kirin X90处理器系列产品</term>|      √     |
+|<term>Kirin 9030处理器系列产品</term>|      √     |
 
 ## 功能说明
 
@@ -165,6 +167,14 @@
     - key、value输入类型为INT4（INT32）时，D轴需要64对齐（INT32仅支持D 8对齐）。
 
 - query、key、value数据排布格式支持从多种维度解读，其中B（Batch）表示输入样本批量大小、S（Seq-Length）表示输入样本序列长度、H（Head-Size）表示隐藏层的大小、N（Head-Num）表示多头数、D（Head-Dim）表示隐藏层最小的单元尺寸，且满足D=H/N、T表示所有Batch输入样本序列长度的累加和。
+- Kirin X90/Kirin 9030系列增加以下约束：
+    - 仅支持GQA。
+    - query、key、value、attentionOut仅支持FLOAT16数据类型，D轴需要大于等于16并对齐到16。
+    - input_layout仅支持BNSD、BSH、BSND、TND，其中TND仅支持sparse_mode为0（NoMask）和9（TreeMask）。
+    - sparse_mode不支持4、5。
+    - attention_massk仅支持3D[1, S1, S2]或4D[1, 1, S1, S2] / [1, 1, maxS, maxS]，数据类型为UINT8、INT8、BOOL。
+    - BNSD/BSH/BSND不支持actual_seq_lenths。
+
 
 ## 调用说明
 
