@@ -20,6 +20,7 @@
 #include "register/op_def_registry.h"
 #include "log/log.h"
 #include "util/math_util.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 using namespace ge;
 namespace ops {
@@ -42,6 +43,7 @@ static constexpr int64_t MOE_INIT_ROUTING_V4_ATTR_EXPERT_TOKEN_NUM_FLAG = 4;
 static constexpr int64_t MOE_INIT_ROUTING_V4_ATTR_QUANT_MODE = 5;
 static constexpr int64_t MOE_INIT_ROUTING_V4_ATTR_ACTIVE_EXPERT_RANGE = 6;
 static constexpr int64_t MOE_INIT_ROUTING_V4_ATTR_ROW_IDX_TYPE = 7;
+static constexpr int64_t MOE_INIT_ROUTING_V4_ATTR_SCALE_ALG = 8;
 static constexpr int64_t MOE_INIT_ROUTING_V4_OUTPUT_EXPANDED_X = 0;
 static constexpr int64_t MOE_INIT_ROUTING_V4_OUTPUT_EXPANDED_ROW_IDX = 1;
 static constexpr int64_t MOE_INIT_ROUTING_V4_OUTPUT_EXPERT_TOKEN_CUMSUM_OR_COUNT = 2;
@@ -55,6 +57,7 @@ static constexpr int64_t SCALE_THIRD_DIM_SIZE = 2;
 static constexpr int64_t NUM_TWO = 2LL;
 static constexpr int64_t FP8_PERBLOCK_BLOCK_SIZE = 128LL;
 static constexpr int64_t FP8_GROUP_SIZE = 128LL;
+static constexpr int64_t HIF4_QUANT_BLOCK_SIZE = 64LL;
 
 enum DropPadMode : int8_t {
     DROP_LESS = 0,
@@ -73,6 +76,7 @@ enum QuantMode : int8_t {
     HIF8_PERTENSOR = 7,
     HIF8_PERTOKEN = 8,
     MXQUANT_FP4_E2M1 = 9,
+    HIF4_QUANT = 10,
     FP8_PERBLOCK_E5M2 = 11,
     FP8_PERBLOCK_E4M3FN = 12,
     INT4_DYNAMIC_QUANT = 13,
@@ -93,6 +97,7 @@ const std::set<int64_t> validQuantModes = {QuantMode::NON_QUANT,
                                            QuantMode::HIF8_PERTENSOR,
                                            QuantMode::HIF8_PERTOKEN,
                                            QuantMode::MXQUANT_FP4_E2M1,
+                                           QuantMode::HIF4_QUANT,
                                            QuantMode::FP8_PERBLOCK_E5M2,
                                            QuantMode::FP8_PERBLOCK_E4M3FN,
                                            QuantMode::INT4_DYNAMIC_QUANT,
@@ -261,7 +266,7 @@ static ge::graphStatus GetAndCheckAttrQuantMode(const gert::RuntimeAttrs* attrs,
     quantMode = *quantModePtr;
     if (validQuantModes.count(quantMode) == 0) {
         OP_LOGE_WITH_INVALID_ATTR(context->GetNodeName(), "quant_mode", std::to_string(quantMode),
-                                  "-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16 or 17");
+                                  "-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 or 17");
         return ge::GRAPH_FAILED;
     }
     OP_LOGD(context, "End to do GetAndCheckQuantMode.");
@@ -441,17 +446,17 @@ static ge::graphStatus CheckInputScaleShape(const gert::InferShapeContext* conte
         (nullptr == scaleShape && (QuantMode::STATIC_QUANT == quantMode || QuantMode::HIF8_PERTENSOR == quantMode)),
         OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "scale"), return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(
-        (nullptr == scaleShape &&
-         (QuantMode::NON_QUANT == quantMode || QuantMode::DYNAMIC_QUANT == quantMode ||
-          QuantMode::MXQUANT_FP8_E5M2 == quantMode || QuantMode::MXQUANT_FP8_E4M3FN == quantMode ||
-          QuantMode::FP8_GROUP_E5M2 == quantMode || QuantMode::FP8_GROUP_E4M3FN == quantMode ||
-          QuantMode::MXFP8_ROUNDSCALE_AMAX_E5M2 == quantMode || QuantMode::MXFP8_ROUNDSCALE_AMAX_E4M3FN == quantMode ||
-          QuantMode::HIF8_CAST == quantMode || QuantMode::HIF8_PERTOKEN == quantMode ||
-          QuantMode::MXQUANT_FP4_E2M1 == quantMode || QuantMode::FP8_PERBLOCK_E5M2 == quantMode ||
-          QuantMode::FP8_PERBLOCK_E4M3FN == quantMode || QuantMode::INT4_DYNAMIC_QUANT == quantMode ||
-          QuantMode::FP8_GROUP_AMAX_E5M2 == quantMode || QuantMode::FP8_GROUP_AMAX_E4M3FN == quantMode)),
-        OP_LOGI(context, "When quant_mode is %ld , scale can be none.", quantMode), return ge::GRAPH_SUCCESS);
+    OP_CHECK_IF((nullptr == scaleShape &&
+                 (QuantMode::NON_QUANT == quantMode || QuantMode::DYNAMIC_QUANT == quantMode ||
+                  QuantMode::MXQUANT_FP8_E5M2 == quantMode || QuantMode::MXQUANT_FP8_E4M3FN == quantMode ||
+                  QuantMode::FP8_GROUP_E5M2 == quantMode || QuantMode::FP8_GROUP_E4M3FN == quantMode ||
+                  QuantMode::MXFP8_ROUNDSCALE_AMAX_E5M2 == quantMode ||
+                  QuantMode::MXFP8_ROUNDSCALE_AMAX_E4M3FN == quantMode || QuantMode::HIF8_CAST == quantMode ||
+                  QuantMode::HIF8_PERTOKEN == quantMode || QuantMode::HIF4_QUANT == quantMode ||
+                  QuantMode::MXQUANT_FP4_E2M1 == quantMode || QuantMode::FP8_PERBLOCK_E5M2 == quantMode ||
+                  QuantMode::FP8_PERBLOCK_E4M3FN == quantMode || QuantMode::INT4_DYNAMIC_QUANT == quantMode ||
+                  QuantMode::FP8_GROUP_AMAX_E5M2 == quantMode || QuantMode::FP8_GROUP_AMAX_E4M3FN == quantMode)),
+                OP_LOGI(context, "When quant_mode is %ld , scale can be none.", quantMode), return ge::GRAPH_SUCCESS);
 
     if (QuantMode::NON_QUANT == quantMode) {
         return CheckScaleShapeForNonQuant(context, xShape, scaleShape);
@@ -624,6 +629,17 @@ static ge::graphStatus GetAndValidateAttrs(const gert::InferShapeContext* contex
     if (GetAndCheckAttrQuantMode(attrs, context, quantMode) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
+    const int64_t* scaleAlgPtr = attrs->GetAttrPointer<int64_t>(MOE_INIT_ROUTING_V4_ATTR_SCALE_ALG);
+    const int64_t scaleAlg = scaleAlgPtr == nullptr ? 0 : *scaleAlgPtr;
+    if (scaleAlg != 0 && scaleAlg != 1) {
+        OP_LOGE_WITH_INVALID_ATTR(context->GetNodeName(), "scale_alg", std::to_string(scaleAlg), "0 or 1");
+        return ge::GRAPH_FAILED;
+    }
+    if (scaleAlg == 1 && quantMode != QuantMode::HIF4_QUANT) {
+        OP_LOGE_WITH_INVALID_ATTR(context->GetNodeName(), "scale_alg", std::to_string(scaleAlg),
+                                  "1 is only supported when quant_mode is 10");
+        return ge::GRAPH_FAILED;
+    }
     if (GetAndCheckAttrRowIdxType(attrs, context, rowIdxType, dropPadMode) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
@@ -721,6 +737,11 @@ static void SetExpandedScaleShape(gert::Shape* expandedScaleShape, const gert::S
             (cols == NEG_ONE) ? NEG_ONE : Ops::Base::CeilDiv<int64_t>(cols, FP8_PERBLOCK_BLOCK_SIZE * NUM_TWO);
         expandedScaleShape->SetDim(1U, colsAligned);
         expandedScaleShape->SetDim(DIM_TWO, SCALE_THIRD_DIM_SIZE);
+    } else if (QuantMode::HIF4_QUANT == quantMode) {
+        expandedScaleShape->SetDimNum(DIM_TWO);
+        expandedScaleShape->SetDim(0U, outNum);
+        int64_t dim1 = (cols == NEG_ONE) ? NEG_ONE : Ops::Base::CeilDiv<int64_t>(cols, HIF4_QUANT_BLOCK_SIZE);
+        expandedScaleShape->SetDim(1U, dim1);
     }
 }
 
@@ -826,6 +847,11 @@ static ge::graphStatus ValidateInputDtype(const gert::InferDataTypeContext* cont
                                       "DT_FLOAT or DT_BF16");
             return ge::GRAPH_FAILED;
         }
+    } else if (QuantMode::HIF4_QUANT == quantMode) {
+        if (xDtype != ge::DT_BF16) {
+            OP_LOGE_FOR_INVALID_DTYPE(context->GetNodeName(), "xDtype", Ops::Base::ToString(xDtype), "DT_BF16");
+            return ge::GRAPH_FAILED;
+        }
     } else if (QuantMode::MXQUANT_FP8_E5M2 == quantMode || QuantMode::MXQUANT_FP8_E4M3FN == quantMode ||
                QuantMode::MXFP8_ROUNDSCALE_AMAX_E5M2 == quantMode ||
                QuantMode::MXFP8_ROUNDSCALE_AMAX_E4M3FN == quantMode || QuantMode::HIF8_CAST == quantMode ||
@@ -888,6 +914,9 @@ static ge::DataType DetermineOutputDtypes(const gert::InferDataTypeContext* cont
     } else if (QuantMode::MXQUANT_FP4_E2M1 == quantMode) {
         expandedXDtype = ge::DT_FLOAT4_E2M1;
         expandedScaleDtype = ge::DT_FLOAT8_E8M0;
+    } else if (QuantMode::HIF4_QUANT == quantMode) {
+        expandedXDtype = Ops::Transformer::DT_HIFLOAT4;
+        expandedScaleDtype = ge::DT_FLOAT;
     } else if (QuantMode::FP8_PERBLOCK_E5M2 == quantMode) {
         expandedXDtype = ge::DT_FLOAT8_E5M2;
         expandedScaleDtype = ge::DT_FLOAT;
@@ -948,7 +977,8 @@ static void SetExpandedScaleShapeRanges(gert::InferShapeRangeContext* context, i
             dimNum = DIM_THREE;
         } else if (quantMode == QuantMode::MXQUANT_FP8_E5M2 || quantMode == QuantMode::MXQUANT_FP8_E4M3FN ||
                    quantMode == QuantMode::FP8_GROUP_E5M2 || quantMode == QuantMode::FP8_GROUP_E4M3FN ||
-                   quantMode == QuantMode::FP8_GROUP_AMAX_E5M2 || quantMode == QuantMode::FP8_GROUP_AMAX_E4M3FN ||
+                   quantMode == QuantMode::HIF4_QUANT || quantMode == QuantMode::FP8_GROUP_AMAX_E5M2 ||
+                   quantMode == QuantMode::FP8_GROUP_AMAX_E4M3FN ||
                    quantMode == QuantMode::MXFP8_ROUNDSCALE_AMAX_E5M2 ||
                    quantMode == QuantMode::MXFP8_ROUNDSCALE_AMAX_E4M3FN) {
             dimNum = DIM_TWO;

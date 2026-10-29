@@ -145,6 +145,8 @@ struct MoeInitRoutingV3Arch35TilingData {
     MoeV3Arch35GatherOutComputeTilingData gatherOutComputeParamsOp;
     MoeV3Arch35SrcToDstCapacityComputeTilingData srcToDstDropPadParamsOp; // 新增：DropPad SrcToDst TilingData
     MoeV3Arch35CountingSortTilingData countingSortParamsOp;               // 新增：CountingSort 性能模板
+    // HIF4 scale_alg: 0=有偏，1=无偏
+    int64_t scaleAlg{0};
 };
 
 #endif // __MOE_INIT_ROUTING_V3_ARCH35_TILING_DEF_H__

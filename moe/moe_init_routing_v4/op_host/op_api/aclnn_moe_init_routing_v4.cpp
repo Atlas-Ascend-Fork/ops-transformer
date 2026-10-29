@@ -174,7 +174,7 @@ ACLNN_API aclnnStatus aclnnMoeInitRoutingV4GetWorkspaceSize(
     routingResult = l0op::MoeInitRoutingV4(
         xContiguous, expertIdxContiguous, scaleContiguous, offsetContiguous, activeNumContiguous, topkWeightContiguous,
         expertCapacity, expertNum, dropPadMode, expertTokensNumType, expertTokensNumFlag, quantMode,
-        activeExpertRangeOptional, rowIdxType, expandedXOut, expandedRowIdxOut, expertTokensCountOrCumsumOut,
+        activeExpertRangeOptional, rowIdxType, 0, expandedXOut, expandedRowIdxOut, expertTokensCountOrCumsumOut,
         expandedScaleOut, expandedTopkWeightOut, uniqueExecutor.get());
     auto [expandedXOut_, expandedRowIdxOut_, expertTokensCountOrCumsumOut_, expandedScaleOut_, expandedTopkWeightOut_] =
         routingResult;

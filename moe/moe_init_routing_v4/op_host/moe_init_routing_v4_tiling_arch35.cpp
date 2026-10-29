@@ -29,9 +29,22 @@ public:
     ~MoeInitRoutingV4TilingArch35() override = default;
 
 protected:
+    // HIF4（quant_mode=10）仅在 Ascend960（DAV_9201/DAV_9202）注册，A5 上不支持；
+    // 这里提前拦截，避免走到 kernel/bin 匹配阶段才报难以定位的错误。
+    bool SupportsHif4Quant() const override
+    {
+        auto* platformInfo = context_->GetPlatformInfo();
+        if (platformInfo == nullptr) {
+            // 拿不到平台信息时不在此拦截，由算子注册与 aclnn 层兜底
+            return true;
+        }
+        auto npuArch = platform_ascendc::PlatformAscendC(platformInfo).GetCurNpuArch();
+        return npuArch == NpuArch::DAV_9201 || npuArch == NpuArch::DAV_9202;
+    }
+
     bool IsCapable() override
     {
-        // V4 仅在 def.cpp 注册了 ascend950 配置，框架保证只有 950 才会匹配到此算子，无需再校验 SoC 版本。
+        // V4 支持的 SoC 和类型组合由 def.cpp 注册配置约束。
         return true;
     }
 
@@ -72,6 +85,19 @@ protected:
         OP_LOGD(context_, "Extracted input attrs expertStart = %ld, expertEnd = %ld.", expertStart_, expertEnd_);
         MIRV3_CHECK_GE_RET(GetInputAttr<int64_t>(rowIdxType_, attrsPtr, V4_ATTR_ROW_IDX_TYPE_INDEX));
         OP_LOGD(context_, "Get input attr rowIdxType = %ld.", rowIdxType_);
+
+        int64_t scaleAlg = 0;
+        if (attrsPtr->GetAttrPointer<int64_t>(V4_ATTR_SCALE_ALG_INDEX) != nullptr) {
+            MIRV3_CHECK_GE_RET(GetInputAttr<int64_t>(scaleAlg, attrsPtr, V4_ATTR_SCALE_ALG_INDEX));
+        }
+        OP_CHECK_IF(scaleAlg != 0 && scaleAlg != 1,
+                    OP_LOGE_WITH_INVALID_ATTR(context_->GetNodeName(), "scale_alg", std::to_string(scaleAlg), "0 or 1"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(scaleAlg == 1 && quantMode_ != QUANT_MODE_HIF4,
+                    OP_LOGE_WITH_INVALID_ATTR(context_->GetNodeName(), "scale_alg", std::to_string(scaleAlg),
+                                              "1 is only supported when quant_mode is 10"),
+                    return ge::GRAPH_FAILED);
+        tilingDataPtr_->scaleAlg = scaleAlg;
 
         return ge::GRAPH_SUCCESS;
     }

@@ -19,6 +19,9 @@ ALIGN_BASE = 64
 THREE_DIM_NUM = 3
 MXFPX_SCALE_THIRD_DIM_SIZE = 2
 INT4_IN_UINT8 = 2
+HIF4_ELEMENTS_PER_BYTE = 2
+HIF4_QUANT_MODE = 10
+SCALE_ALG_UNBIASED = 1
 MXQUANT_BLOCK_SIZE = 32
 PAD_TO_EVEN_FACTOR = 2
 FP8_QUANT_BLOCK_SIZE = 128
@@ -36,46 +39,62 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
         if is_fp8_or_fp4_dtype:
             torch._check(
                 scale_dim == THREE_DIM_NUM,
-                lambda: f"the scale shape support only 3D in no quant mode and x type is "
-                f"float8_e5m2, float8_e4m3fn or float4_e2m1.{ops_error(ErrCode.VALUE)}",
+                lambda: (
+                    f"the scale shape support only 3D in no quant mode and x type is "
+                    f"float8_e5m2, float8_e4m3fn or float4_e2m1.{ops_error(ErrCode.VALUE)}"
+                ),
             )
             torch._check(
                 x.size(0) == scale.size(0),
-                lambda: f"the first dim of scale and the first dim of x "
-                f"should be the same.{ops_error(ErrCode.VALUE)}",
+                lambda: (
+                    f"the first dim of scale and the first dim of x "
+                    f"should be the same.{ops_error(ErrCode.VALUE)}"
+                ),
             )
             if is_float4_case:
                 torch._check(
                     (x.size(1) * 2 + ALIGN_BASE - 1) // ALIGN_BASE == scale.size(1),
-                    lambda: f"the scale and x must have compatible second dimensions "
-                    f"(x aligned to 64).{ops_error(ErrCode.VALUE)}",
+                    lambda: (
+                        f"the scale and x must have compatible second dimensions "
+                        f"(x aligned to 64).{ops_error(ErrCode.VALUE)}"
+                    ),
                 )
             else:
                 torch._check(
                     (x.size(1) + ALIGN_BASE - 1) // ALIGN_BASE == scale.size(1),
-                    lambda: f"the scale and x must have compatible second dimensions "
-                    f"(x aligned to 64).{ops_error(ErrCode.VALUE)}",
+                    lambda: (
+                        f"the scale and x must have compatible second dimensions "
+                        f"(x aligned to 64).{ops_error(ErrCode.VALUE)}"
+                    ),
                 )
             torch._check(
                 MXFPX_SCALE_THIRD_DIM_SIZE == scale.size(2),
-                lambda: f"the third dim of scale should be 2.{ops_error(ErrCode.VALUE)}",
+                lambda: (
+                    f"the third dim of scale should be 2.{ops_error(ErrCode.VALUE)}"
+                ),
             )
         else:
             torch._check(
                 scale_dim == 1,
-                lambda: f"the scale shape support only 1D in no quant mode.{ops_error(ErrCode.VALUE)}",
+                lambda: (
+                    f"the scale shape support only 1D in no quant mode.{ops_error(ErrCode.VALUE)}"
+                ),
             )
             torch._check(
                 x.size(0) == scale.size(0),
-                lambda: f"the first dim of scale and the first dim of x "
-                f"should be the same.{ops_error(ErrCode.VALUE)}",
+                lambda: (
+                    f"the first dim of scale and the first dim of x "
+                    f"should be the same.{ops_error(ErrCode.VALUE)}"
+                ),
             )
 
     @staticmethod
     def _validate_scale_static_quant(scale, offset):
         torch._check(
             scale.dim() == 1,
-            lambda: f"the scale shape support only 1D in static quant mode.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the scale shape support only 1D in static quant mode.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             scale.size(0) == 1,
@@ -88,98 +107,134 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
             )
             torch._check(
                 scale.size(0) == offset.size(0),
-                lambda: f"the 1st dim of offset and the 1st dim of scale "
-                f"should be the same.{ops_error(ErrCode.VALUE)}",
+                lambda: (
+                    f"the 1st dim of offset and the 1st dim of scale "
+                    f"should be the same.{ops_error(ErrCode.VALUE)}"
+                ),
             )
 
     @staticmethod
     def _validate_scale_dynamic_quant(x, scale, expert_range_length):
         torch._check(
             scale.dim() == 2,
-            lambda: f"the scale shape support only 2D in dynamic quant mode.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the scale shape support only 2D in dynamic quant mode.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             scale.size(0) in [expert_range_length, 1],
-            lambda: f"the first dim of scale must be in "
-            f"[expert_range_length, 1].{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the first dim of scale must be in "
+                f"[expert_range_length, 1].{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             x.size(1) == scale.size(1),
-            lambda: f"the 2nd dim of scale should be the same "
-            f"with the 2nd dim of x.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the 2nd dim of scale should be the same "
+                f"with the 2nd dim of x.{ops_error(ErrCode.VALUE)}"
+            ),
         )
 
     @staticmethod
     def _validate_scale_int4_dynamic_quant(x, scale):
         torch._check(
             scale.dim() == 2,
-            lambda: f"the scale shape support only 2D in "
-            f"INT4 dynamic quant mode.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the scale shape support only 2D in "
+                f"INT4 dynamic quant mode.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             scale.size(0) == 1,
-            lambda: f"the first dim of scale must be 1 in "
-            f"INT4 dynamic quant mode.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the first dim of scale must be 1 in "
+                f"INT4 dynamic quant mode.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             scale.dtype == torch.float32,
-            lambda: f"the scale dtype must be float32 in "
-            f"INT4 dynamic quant mode.{ops_error(ErrCode.TYPE)}",
+            lambda: (
+                f"the scale dtype must be float32 in "
+                f"INT4 dynamic quant mode.{ops_error(ErrCode.TYPE)}"
+            ),
         )
         torch._check(
             x.size(1) == scale.size(1),
-            lambda: f"the 2nd dim of scale should be the same "
-            f"with the 2nd dim of x.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the 2nd dim of scale should be the same "
+                f"with the 2nd dim of x.{ops_error(ErrCode.VALUE)}"
+            ),
         )
 
     @staticmethod
     def _validate_scale_hif8_pertensor(scale):
         torch._check(
             scale.dim() == 1,
-            lambda: f"the scale shape support only 1D in "
-            f"HIF8 pertensor quant mode.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the scale shape support only 1D in "
+                f"HIF8 pertensor quant mode.{ops_error(ErrCode.VALUE)}"
+            ),
         )
 
     @staticmethod
     def _validate_int4_dynamic_quant(x, offset, drop_pad_mode, x_dtype):
         torch._check(
             drop_pad_mode == 0,
-            lambda: f"INT4 dynamic quantization only supports drop_pad_mode=0.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"INT4 dynamic quantization only supports drop_pad_mode=0.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             x.dtype in [torch.float32, torch.bfloat16],
-            lambda: f"INT4 dynamic quantization only supports float32 or bfloat16 x.{ops_error(ErrCode.TYPE)}",
+            lambda: (
+                f"INT4 dynamic quantization only supports float32 or bfloat16 x.{ops_error(ErrCode.TYPE)}"
+            ),
         )
         torch._check(
             offset is None,
-            lambda: f"INT4 dynamic quantization does not support offset.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"INT4 dynamic quantization does not support offset.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             x.size(1) % INT4_IN_UINT8 == 0,
-            lambda: f"INT4 dynamic quantization requires x.size(1) to be even.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"INT4 dynamic quantization requires x.size(1) to be even.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             x_dtype is None or x_dtype == torch_npu.int4,
-            lambda: f"x_dtype must be torch_npu.int4 or None when quant_mode=13.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"x_dtype must be torch_npu.int4 or None when quant_mode=13.{ops_error(ErrCode.VALUE)}"
+            ),
         )
 
     @staticmethod
     def _validate_topk_weight(topk_weight, x, expert_idx):
         torch._check(
             topk_weight.dtype == torch.float32,
-            lambda: f"topk_weight only supports float32, but got {topk_weight.dtype}.{ops_error(ErrCode.TYPE)}",
+            lambda: (
+                f"topk_weight only supports float32, but got {topk_weight.dtype}.{ops_error(ErrCode.TYPE)}"
+            ),
         )
         torch._check(
             topk_weight.dim() == 2,
-            lambda: f"topk_weight must be 2D, but got {topk_weight.dim()}D.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"topk_weight must be 2D, but got {topk_weight.dim()}D.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             topk_weight.size(0) == x.size(0),
-            lambda: f"topk_weight.size(0) must equal x.size(0).{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"topk_weight.size(0) must equal x.size(0).{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             topk_weight.size(1) == expert_idx.size(1),
-            lambda: f"topk_weight.size(1) must equal expert_idx.size(1).{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"topk_weight.size(1) must equal expert_idx.size(1).{ops_error(ErrCode.VALUE)}"
+            ),
         )
 
     @staticmethod
@@ -188,15 +243,21 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
             return expert_num
         torch._check(
             isinstance(active_expert_range, list) and len(active_expert_range) == 2,
-            lambda: f"active_expert_range must be a list of 2 ints.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"active_expert_range must be a list of 2 ints.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             active_expert_range[1] > active_expert_range[0],
-            lambda: f"active_expert_range must be increasing.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"active_expert_range must be increasing.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             active_expert_range[0] >= 0 and active_expert_range[1] <= 10240,
-            lambda: f"active_expert_range must be within [0, 10240].{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"active_expert_range must be within [0, 10240].{ops_error(ErrCode.VALUE)}"
+            ),
         )
         return active_expert_range[1] - active_expert_range[0]
 
@@ -216,6 +277,7 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
         row_idx_type,
         x_dtype,
         topk_weight,
+        scale_alg,
     ):
         torch._check(
             x.dim() == 2,
@@ -223,11 +285,15 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
         )
         torch._check(
             expert_idx.dim() == 2,
-            lambda: f"expert_idx must be 2D, but got {expert_idx.dim()}D.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"expert_idx must be 2D, but got {expert_idx.dim()}D.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             x.size(0) == expert_idx.size(0),
-            lambda: f"the first dim of expert_idx and x should be the same.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"the first dim of expert_idx and x should be the same.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             expert_num > 0,
@@ -243,18 +309,59 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
         if drop_pad_mode == 1:
             torch._check(
                 expert_capacity > 0,
-                lambda: f"expert_capacity must be greater than 0 when drop_pad_mode=1.{ops_error(ErrCode.VALUE)}",
+                lambda: (
+                    f"expert_capacity must be greater than 0 when drop_pad_mode=1.{ops_error(ErrCode.VALUE)}"
+                ),
             )
         torch._check(
             expert_tokens_num_type in [0, 1, 2],
-            lambda: f"expert_tokens_num_type must be 0, 1 or 2.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"expert_tokens_num_type must be 0, 1 or 2.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         torch._check(
             quant_mode
-            in [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17],
-            lambda: f"quant_mode must be in [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, "
-            f"14, 15, 16, 17].{ops_error(ErrCode.VALUE)}",
+            in [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+            lambda: (
+                f"quant_mode must be in [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, "
+                f"12, 13, 14, 15, 16, 17].{ops_error(ErrCode.VALUE)}"
+            ),
         )
+        torch._check(
+            scale_alg in [0, SCALE_ALG_UNBIASED],
+            lambda: f"scale_alg must be 0 or 1.{ops_error(ErrCode.VALUE)}",
+        )
+        if scale_alg == SCALE_ALG_UNBIASED:
+            torch._check(
+                quant_mode == HIF4_QUANT_MODE,
+                lambda: (
+                    f"scale_alg=1 is only valid when quant_mode=10 (HIF4), "
+                    f"current quant_mode is {quant_mode}.{ops_error(ErrCode.VALUE)}"
+                ),
+            )
+        if quant_mode == HIF4_QUANT_MODE:
+            torch._check(
+                x.dtype == torch.bfloat16,
+                lambda: (
+                    f"x dtype must be bfloat16 when quant_mode=10 (HIF4), "
+                    f"current dtype is {x.dtype}.{ops_error(ErrCode.DTYPE)}"
+                ),
+            )
+            torch._check(
+                x.size(1) % ALIGN_BASE == 0,
+                lambda: (
+                    f"the second dim of x must be a multiple of {ALIGN_BASE} "
+                    f"when quant_mode=10 (HIF4), current is {x.size(1)}."
+                    f"{ops_error(ErrCode.VALUE)}"
+                ),
+            )
+            torch._check(
+                drop_pad_mode == 0,
+                lambda: (
+                    f"quant_mode=10 (HIF4) is not supported when "
+                    f"drop_pad_mode=1.{ops_error(ErrCode.VALUE)}"
+                ),
+            )
         torch._check(
             row_idx_type in [0, 1],
             lambda: f"row_idx_type must be 0 or 1.{ops_error(ErrCode.VALUE)}",
@@ -270,8 +377,10 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
         is_dynamic_int4_output = quant_mode == 13
         torch._check(
             not (quant_mode == 1 and x_dtype == torch_npu.int4),
-            lambda: f"INT4 dynamic quantization uses quant_mode=13. "
-            f"quant_mode=1 only supports INT8 dynamic quantization.{ops_error(ErrCode.VALUE)}",
+            lambda: (
+                f"INT4 dynamic quantization uses quant_mode=13. "
+                f"quant_mode=1 only supports INT8 dynamic quantization.{ops_error(ErrCode.VALUE)}"
+            ),
         )
         if is_dynamic_int4_output:
             _MoeInitRoutingOpBuilder._validate_int4_dynamic_quant(
@@ -346,6 +455,9 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
         elif quant_mode == 9:
             expanded_x_dtype = torch.uint8
             expanded_scale_dtype = torch.float8_e8m0fnu
+        elif quant_mode == HIF4_QUANT_MODE:
+            # HIF4 输出为 4bit 打包，PyTorch 侧用 uint8 承载（aclnn dtype 为 HIFLOAT4）
+            expanded_x_dtype = torch.uint8
         elif quant_mode in [4, 11, 14]:
             expanded_x_dtype = torch.float8_e5m2
         elif quant_mode in [5, 12, 15]:
@@ -392,6 +504,15 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
                 expanded_scale_dim_list = [num_expanded_rows]
             elif quant_mode in [-1, 1, 8]:
                 expanded_scale_dim_list = [num_expanded_rows]
+            elif quant_mode == HIF4_QUANT_MODE:
+                expanded_x_dim_list = [
+                    num_expanded_rows,
+                    x.size(1) // HIF4_ELEMENTS_PER_BYTE,
+                ]
+                expanded_scale_dim_list = [
+                    num_expanded_rows,
+                    math.ceil(h / ALIGN_BASE),
+                ]
             elif quant_mode == 9:
                 expanded_x_dim_list = [num_expanded_rows, x.size(1) // 2]
                 scale_cols = math.ceil(h / ALIGN_BASE)
@@ -425,7 +546,7 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
             "SymInt active_num=-1, int expert_capacity=-1, int expert_num=-1, "
             "int drop_pad_mode=0, int expert_tokens_num_type=0, bool expert_tokens_num_flag=True, "
             "int quant_mode=-1, int[]? active_expert_range=None, int row_idx_type=0, "
-            "int? x_dtype=None) "
+            "int? x_dtype=None, int scale_alg=0) "
             "-> (Tensor, Tensor, Tensor, Tensor, Tensor)"
         )
 
@@ -447,6 +568,7 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
             active_expert_range=None,
             row_idx_type=0,
             x_dtype=None,
+            scale_alg=0,
         ):
             (
                 is_float4_case,
@@ -468,6 +590,7 @@ class _MoeInitRoutingOpBuilder(OpBuilder):
                 row_idx_type,
                 x_dtype,
                 topk_weight,
+                scale_alg,
             )
             bs = x.size(0)
             h = x.size(1)
@@ -550,6 +673,7 @@ def _moe_init_routing(
     active_expert_range=None,
     row_idx_type=0,
     x_dtype=None,
+    scale_alg=0,
 ):
     op_module = _moe_init_routing_op_builder.load()
     return op_module.moe_init_routing(
@@ -568,6 +692,7 @@ def _moe_init_routing(
         active_expert_range,
         row_idx_type,
         x_dtype,
+        scale_alg,
     )
 
 
@@ -579,7 +704,7 @@ def _has_value(t):
     return True
 
 
-_NUM_FORWARD_INPUTS = 15
+_NUM_FORWARD_INPUTS = 16
 
 
 def _check_backward_supported(ctx):
@@ -639,6 +764,7 @@ class MoeInitRoutingFn(torch.autograd.Function):
         active_expert_range,
         row_idx_type,
         x_dtype,
+        scale_alg,
     ):
         ctx.drop_pad_mode = drop_pad_mode if drop_pad_mode is not None else 0
         ctx.k = expert_idx.size(1)
@@ -673,6 +799,7 @@ class MoeInitRoutingFn(torch.autograd.Function):
             active_expert_range=active_expert_range,
             row_idx_type=row_idx_type,
             x_dtype=x_dtype,
+            scale_alg=scale_alg,
         )
         ctx.save_for_backward(expanded_row_idx)
         return (
@@ -727,6 +854,7 @@ class MoeInitRoutingFn(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -746,6 +874,7 @@ def moe_init_routing(
     active_expert_range: Optional[List[int]] = None,
     row_idx_type: int = 0,
     x_dtype: Optional[int] = None,
+    scale_alg: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """moe_init_routing operator.
 
@@ -788,7 +917,10 @@ def moe_init_routing(
             -1: no quantization; 0: static; 1: dynamic int8; 2: mxfp8_e5m2;
             3: mxfp8_e4m3fn; 4: fp8_group_e5m2; 5: fp8_group_e4m3fn;
             6: hif8_cast; 7: hif8_pertensor; 8: hif8_per_token_dim;
-            9: mxfp4_e2m1; 11: fp8_perblock_e5m2; 12: fp8_perblock_e4m3fn;
+            9: mxfp4_e2m1;
+            10: hif4 (Ascend960 only, x must be bfloat16,
+            cols must be a multiple of 64, drop_pad_mode must be 0);
+            11: fp8_perblock_e5m2; 12: fp8_perblock_e4m3fn;
             13: int4_dynamic; 14: fp8_group_amax_e5m2; 15: fp8_group_amax_e4m3fn;
             16: mxfp8_roundscale_amax_e5m2; 17: mxfp8_roundscale_amax_e4m3fn.
         active_expert_range (list[int], optional): Range of active experts [start, end].
@@ -798,12 +930,19 @@ def moe_init_routing(
         x_dtype (int, optional): Override for actual data type of x when x is stored as uint8
             but represents a different type. Use torch_npu.float4_e2m1fn_x2,
             torch_npu.hifloat8, or torch_npu.int4. Default: None.
+        scale_alg (int): Scale algorithm selector for HIF4, only valid when
+            quant_mode=10; must be 0 or 1.
+            0: biased thresholds (E1_8 >= 4, E1_16 >= 2);
+            1: unbiased thresholds (E1_8 >= 3.75, E1_16 >= 1.875).
+            Default: 0.
 
     Returns:
         Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
             - expanded_x (Tensor): Expanded input tensor.
                 - drop_pad_mode=0: shape (active_num, cols), dtype depends on quant_mode.
                 - drop_pad_mode=1: shape (expert_num, expert_capacity, cols), dtype depends on quant_mode.
+                - quant_mode=10 (HIF4): shape (active_num, cols // 2), dtype uint8
+                  (two 4bit elements packed per byte).
             - expanded_row_idx (Tensor): Row indices of shape (n*k,), dtype int32.
             - expert_tokens_count_or_cumsum (Tensor): Expert token counts.
                 - expert_tokens_num_flag=False: empty tensor with shape (0,), dtype int64.
@@ -812,6 +951,9 @@ def moe_init_routing(
             - expanded_scale (Tensor): Expanded scale tensor.
                 - Shape and dtype depend on quant_mode (see scale for details).
                 - quant_mode=0/6/7: empty tensor.
+                - quant_mode=10 (HIF4): shape (active_num, ceil(cols / 64)), dtype float32.
+                  Each float32 packs the 4 scale bytes of one 64-element group: the E6M2
+                  scale code, the 8-bit E1_8 bitmap and the 16-bit E1_16 bitmap.
             - expanded_topk_weight (Tensor): Expanded topk weights.
                 - topk_weight provided: shape (active_num, 1) or (expert_num*expert_capacity, 1), dtype float32.
                 - topk_weight not provided: shape (0,), dtype float32.
@@ -836,6 +978,7 @@ def moe_init_routing(
             active_expert_range,
             row_idx_type,
             x_dtype,
+            scale_alg,
         )
     return torch.ops.cann_ops_transformer.moe_init_routing(
         x,
@@ -853,4 +996,5 @@ def moe_init_routing(
         active_expert_range=active_expert_range,
         row_idx_type=row_idx_type,
         x_dtype=x_dtype,
+        scale_alg=scale_alg,
     )

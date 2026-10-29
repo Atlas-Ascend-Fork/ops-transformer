@@ -236,6 +236,11 @@ protected:
     virtual ge::graphStatus GetInputTensorsInfo();
     virtual ge::graphStatus GetOutputTensorsInfo();
     virtual ge::graphStatus GetInputAttrsInfo();
+    // HIF4（quant_mode=10）量化组合的支持开关，V4 覆盖为 true
+    virtual bool SupportsHif4Quant() const
+    {
+        return false;
+    }
 
     // 辅助工具函数（V4 子类需要使用）
     template <bool IS_INPUT_TENSOR = true, bool IS_OPTIONAL_INPUT = false>

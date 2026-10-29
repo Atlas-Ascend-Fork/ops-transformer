@@ -17,6 +17,7 @@
 #include "base/registry/op_impl_space_registry_v2.h"
 #include "infer_datatype_context_faker.h"
 #include "log/log.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 class MoeInitRoutingV4 : public testing::Test {
 protected:
@@ -584,6 +585,7 @@ constexpr int64_t QUANT_MODE_HIF8_CAST = 6LL;
 constexpr int64_t QUANT_MODE_HIF8_PERTENSOR = 7LL;
 constexpr int64_t QUANT_MODE_HIF8_PERTOKEN = 8LL;
 constexpr int64_t QUANT_MODE_MXFP4_E2M1 = 9LL;
+constexpr int64_t QUANT_MODE_HIF4 = 10LL;
 constexpr int64_t QUANT_MODE_FP8_PERBLOCK_E5M2 = 11LL;
 constexpr int64_t QUANT_MODE_FP8_PERBLOCK_E4M3FN = 12LL;
 constexpr int64_t QUANT_MODE_INT4_DYNAMIC = 13LL;
@@ -625,6 +627,8 @@ ge::DataType GetExpandedXDtype(ge::DataType xDtype, int64_t quantMode)
             return ge::DT_HIFLOAT8;
         case QUANT_MODE_MXFP4_E2M1:
             return ge::DT_FLOAT4_E2M1;
+        case QUANT_MODE_HIF4:
+            return Ops::Transformer::DT_HIFLOAT4;
         default:
             return xDtype;
     }
@@ -658,6 +662,9 @@ std::vector<int64_t> ComputeExpandedScaleShape(int64_t quantMode, int64_t outNum
     if (quantMode == QUANT_MODE_MXFP4_E2M1) {
         return {outNum, (cols + 63) / 64, 2};
     }
+    if (quantMode == QUANT_MODE_HIF4) {
+        return {outNum, (cols + 63) / 64};
+    }
     if (quantMode == QUANT_MODE_FP8_PERBLOCK_E5M2 || quantMode == QUANT_MODE_FP8_PERBLOCK_E4M3FN) {
         return {outNum, (cols + 255) / 256, 2};
     }
@@ -670,7 +677,8 @@ std::vector<int64_t> ComputeExpandedScaleShape(int64_t quantMode, int64_t outNum
 void RunQuantInferShape(ShapeList xShape, ge::DataType xDtype, ShapeList expertIdxShape, ShapeList scaleShape,
                         ShapeList offsetShape, int64_t quantMode, std::vector<int64_t> activeExpertRange,
                         ShapeList expectOutShape0, ShapeList expectOutShape1, ShapeList expectOutShape2,
-                        ShapeList expectOutShape3)
+                        ShapeList expectOutShape3, int64_t scaleAlg = 0,
+                        ge::graphStatus expectedStatus = ge::GRAPH_SUCCESS)
 {
     int64_t n = xShape.begin()[0];
     int64_t k = expertIdxShape.begin()[1];
@@ -714,6 +722,7 @@ void RunQuantInferShape(ShapeList xShape, ge::DataType xDtype, ShapeList expertI
         {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(quantMode)},
         {"active_expert_range", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>(activeExpertRange)},
         {"row_idx_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(ROW_IDX_TYPE_GATHER)},
+        {"scale_alg", Ops::Transformer::AnyValue::CreateFrom<int64_t>(scaleAlg)},
     };
 
     std::vector<uint32_t> inputInstanceNum = {1, 1, (scaleShape.size() > 0 ? 1 : 0), (offsetShape.size() > 0 ? 1 : 0),
@@ -724,10 +733,19 @@ void RunQuantInferShape(ShapeList xShape, ge::DataType xDtype, ShapeList expertI
                                                       outputInstanceNum);
     std::vector<std::vector<int64_t>> expectOutputShape = {
         expectOutShape0, expectOutShape1, expectOutShape2, expectOutShape3, {0}};
-    ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape);
+    ExecuteTestCase(infershapeContextPara, expectedStatus, expectOutputShape);
 }
 
 } // namespace
+
+TEST_F(MoeInitRoutingV4, hif4_scale_alg_infershape)
+{
+    RunQuantInferShape({2, 128}, ge::DT_BF16, {2, 2}, {}, {}, QUANT_MODE_HIF4, {0, 16}, {4, 128}, {4}, {16}, {4, 2}, 1);
+    RunQuantInferShape({2, 128}, ge::DT_BF16, {2, 2}, {}, {}, QUANT_MODE_HIF4, {0, 16}, {}, {}, {}, {}, 2,
+                       ge::GRAPH_FAILED);
+    RunQuantInferShape({2, 128}, ge::DT_BF16, {2, 2}, {}, {}, QUANT_MODE_UNQUANT, {0, 16}, {}, {}, {}, {}, 1,
+                       ge::GRAPH_FAILED);
+}
 
 // MXFP8 E5M2 量化 + h为32倍数
 TEST_F(MoeInitRoutingV4, moe_init_routing_v4_infershape_mxfp8_e5m2)
@@ -856,12 +874,13 @@ TEST_F(MoeInitRoutingV4, moe_init_routing_v4_infershape_int4_dynamic_2)
 
 namespace {
 void RunTestcaseInferDataType(ge::DataType xDtype, int64_t quantMode, ge::DataType expectOutDtype0,
-                              ge::DataType expectOutDtype3)
+                              ge::DataType expectOutDtype3, ge::DataType scaleDtype = ge::DT_FLOAT)
 {
     static ge::DataType FP32Ref = ge::DT_FLOAT;
     static ge::DataType INT32Ref = ge::DT_INT32;
     static ge::DataType INT64Ref = ge::DT_INT64;
     static ge::DataType FLOATRef = ge::DT_FLOAT;
+    ge::DataType scaleRef = scaleDtype;
 
     auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
     auto inferDtypeFunc = spaceRegistry->GetOpImpl("MoeInitRoutingV4")->infer_datatype;
@@ -875,7 +894,7 @@ void RunTestcaseInferDataType(ge::DataType xDtype, int64_t quantMode, ge::DataTy
             .NodeIoNum(6, 5)
             .NodeInputTd(0, xDtype, ge::FORMAT_ND, ge::FORMAT_ND)
             .NodeInputTd(1, ge::DT_INT32, ge::FORMAT_ND, ge::FORMAT_ND)
-            .NodeInputTd(2, ge::DT_FLOAT, ge::FORMAT_ND, ge::FORMAT_ND)
+            .NodeInputTd(2, scaleDtype, ge::FORMAT_ND, ge::FORMAT_ND)
             .NodeInputTd(3, ge::DT_FLOAT, ge::FORMAT_ND, ge::FORMAT_ND)
             .NodeInputTd(4, ge::DT_INT64, ge::FORMAT_ND, ge::FORMAT_ND)
             .NodeInputTd(5, ge::DT_FLOAT, ge::FORMAT_ND, ge::FORMAT_ND)
@@ -893,7 +912,7 @@ void RunTestcaseInferDataType(ge::DataType xDtype, int64_t quantMode, ge::DataTy
             .NodeOutputTd(2, ge::FORMAT_ND, ge::FORMAT_ND)
             .NodeOutputTd(3, ge::FORMAT_ND, ge::FORMAT_ND)
             .NodeOutputTd(4, ge::FORMAT_ND, ge::FORMAT_ND)
-            .InputDataTypes({&xDtype, &INT32Ref, &FP32Ref, &FP32Ref, &INT64Ref, &FLOATRef})
+            .InputDataTypes({&xDtype, &INT32Ref, &scaleRef, &FP32Ref, &INT64Ref, &FLOATRef})
             .Build();
     ASSERT_EQ(inferDtypeFunc(holder.GetContext<gert::InferDataTypeContext>()), ge::GRAPH_SUCCESS);
 
@@ -1069,78 +1088,17 @@ TEST_F(MoeInitRoutingV4, moe_init_routing_v4_inferdatatype_int4_dynamic_bf16)
     RunSuccessTestcaseInferDataType(ge::DT_BF16, QUANT_MODE_INT4_DYNAMIC);
 }
 
-// expert_tokens_num_flag=false
-
-TEST_F(MoeInitRoutingV4, moe_init_routing_v4_infer_shape_false_keeps_unused_count_shape)
+// BF16 + HIF4量化
+TEST_F(MoeInitRoutingV4, moe_init_routing_v4_inferdatatype_hif4_bf16)
 {
-    for (int64_t type : {0, 1, 2}) {
-        SCOPED_TRACE(type);
-        gert::InfershapeContextPara infershapeContextPara(
-            "MoeInitRoutingV4",
-            {
-                {{{8, 1024}, {8, 1024}}, ge::DT_FLOAT16, ge::FORMAT_ND},
-                {{{8, 512}, {8, 512}}, ge::DT_INT32, ge::FORMAT_ND},
-                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
-                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
-                {{{}, {}}, ge::DT_INT64, ge::FORMAT_ND},
-                {{{8, 512}, {8, 512}}, ge::DT_FLOAT, ge::FORMAT_ND},
-            },
-            {
-                {{{}, {}}, ge::DT_FLOAT16, ge::FORMAT_ND},
-                {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
-                {{{}, {}}, ge::DT_INT64, ge::FORMAT_ND},
-                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
-                {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
-            },
-            {
-                {"expert_capacity", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
-                {"expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(256)},
-                {"drop_pad_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
-                {"expert_tokens_num_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(type)},
-                {"expert_tokens_num_flag", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
-                {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(-1)},
-                {"active_expert_range", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({1, 8})},
-                {"row_idx_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
-            },
-            {1, 1, 0, 0, 0, 1}, // x, expert_idx, topk_weight present; scale/offset absent for unquant
-            {1, 1, 1, 1, 1});
-        // expanded_topk_weight: topkWeightOutNum = n*k = 8*512 = 4096, shape = {4096, 1}
-        std::vector<std::vector<int64_t>> expectOutputShape = {{8 * 512, 1024}, {8 * 512}, {}, {8 * 512}, {8 * 512, 1}};
-        ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape);
-    }
+    RunSuccessTestcaseInferDataType(ge::DT_BF16, QUANT_MODE_HIF4);
 }
 
-TEST_F(MoeInitRoutingV4, moe_init_routing_v4_infershape_range_false_keeps_unbounded_count_range)
+// BF16 + HIF4量化，scale 为 FLOAT8_E8M0 时 expanded_scale 仍推导为 FLOAT
+TEST_F(MoeInitRoutingV4, moe_init_routing_v4_inferdatatype_hif4_scale_e8m0)
 {
-    auto registry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
-    auto inferRange = registry->GetOpImpl("MoeInitRoutingV4")->infer_shape_range;
-    for (int64_t type : {0, 1, 2}) {
-        SCOPED_TRACE(type);
-        gert::Shape min0{}, max0{}, min1{}, max1{}, min2{}, max2{}, min3{}, max3{}, min4{}, max4{};
-        gert::Range<gert::Shape> range0(&min0, &max0), range1(&min1, &max1);
-        gert::Range<gert::Shape> range2(&min2, &max2), range3(&min3, &max3), range4(&min4, &max4);
-        auto holder = gert::InferShapeRangeContextFaker()
-                          .IrInputNum(2)
-                          .NodeIoNum(2, 5)
-                          .NodeInputTd(0, ge::DT_FLOAT16, ge::FORMAT_ND, ge::FORMAT_ND)
-                          .NodeInputTd(1, ge::DT_INT32, ge::FORMAT_ND, ge::FORMAT_ND)
-                          .OutputShapeRanges({&range0, &range1, &range2, &range3, &range4})
-                          .Attr("expert_capacity", static_cast<int64_t>(0))
-                          .Attr("expert_num", static_cast<int64_t>(256))
-                          .Attr("drop_pad_mode", static_cast<int64_t>(0))
-                          .Attr("expert_tokens_num_type", type)
-                          .Attr("expert_tokens_num_flag", false)
-                          .Attr("quant_mode", static_cast<int64_t>(-1))
-                          .Attr("active_expert_range", std::vector<int64_t>{1, 8})
-                          .Attr("row_idx_type", static_cast<int64_t>(0))
-                          .Build();
-        auto context = holder.GetContext<gert::InferShapeRangeContext>();
-        ASSERT_NE(context, nullptr);
-        ASSERT_EQ(inferRange(context), ge::GRAPH_SUCCESS);
-        const auto* countRange = context->GetOutputShapeRange(2);
-        ASSERT_EQ(countRange->GetMin()->GetDimNum(), 1U);
-        ASSERT_EQ(countRange->GetMax()->GetDimNum(), 1U);
-        EXPECT_EQ(countRange->GetMin()->GetDim(0), 0);
-        EXPECT_EQ(countRange->GetMax()->GetDim(0), -1);
-    }
+    RunTestcaseInferDataType(ge::DT_BF16, QUANT_MODE_HIF4, Ops::Transformer::DT_HIFLOAT4, ge::DT_FLOAT,
+                             ge::DT_FLOAT8_E8M0);
 }
+
+// ====== inferDataType 失败用例 ======

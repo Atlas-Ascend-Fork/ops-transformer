@@ -2291,12 +2291,12 @@ TEST_F(MoeInitRoutingV3, moe_init_routing_v3_infershape_fail_token_num_type)
     RunFailureInferShape(MakeBaseInferShapeInputs(), attrs);
 }
 
-// attr 校验失败：quant_mode 非法（10 已随 HIF4_QUANT 合法化，改取合法上界 17 的越界值 18）
+// attr 校验失败：quant_mode 非法
 TEST_F(MoeInitRoutingV3, moe_init_routing_v3_infershape_fail_quant_mode)
 {
     auto attrs = MakeBaseInferShapeAttrs();
     int idx = 6;
-    attrs[idx] = {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(18LL)};
+    attrs[idx] = {"quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(10LL)};
     RunFailureInferShape(MakeBaseInferShapeInputs(), attrs);
 }
 

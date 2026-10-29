@@ -16,6 +16,7 @@
 #define OPS_OP_PROTO_INC_MOE_INIT_ROUTING_V4_OPS_H_
 
 #include "graph/operator_reg.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace ge {
 /**
@@ -42,6 +43,7 @@ namespace ge {
                   When quant_mode in [3, 5, 15], type is FLOAT8_E4M3FN.
                   When quant_mode in [6, 7, 8], type is Hif8.
                   When quant_mode is 9, type is FLOAT4_E2M1.
+                  When quant_mode is 10, type is HIFLOAT4.
                   When quant_mode in [11, 12], type is [FLOAT8_E5M2, FLOAT8_E4M3FN].
                   When quant_mode is 13, type is Int4.
                   When quant_mode in [16, 17], type is [FLOAT8_E5M2, FLOAT8_E4M3FN].
@@ -52,6 +54,8 @@ namespace ge {
                                        Type is:Int64. shape is (expert_end - expert_start, ). Format support ND.
 * @li expanded_scale: A 1D tensor when quant_mode in [-1, 0, 1, 13]. Shape is: (B*S*K).
                       Type is:Float32. The data type must be the same as that of scale.
+                      A 2D tensor when quant_mode is 10. Shape is: (B*S*K, H/64), in which H is a multiple of 64.
+                      Type is: Float32.
                       A 2D tensor when quant_mode in [2, 3, 16, 17]. Shape is: (B*S*K, M),
                       in which M is CeilAlign(CeilDiv(H, 32), 2). Type is: Float8_E8M0.
                       A 2D tensor when quant_mode in [4, 5, 14, 15]. Shape is: (B*S*K, CeilDiv(H, 128)).
@@ -76,13 +80,15 @@ namespace ge {
                               false(do not compute tokens), which in dropPad scenario. Default: false.
 * @li quant_mode: Optional parameter. Type is:Int. Valid values: -1(unquant), 0(static), 1(dynamic), 2(fp8_e5m2),
                   3(fp8_e4m3fn), 4(fp8_group_e5m2), 5(fp8_group_e4m3fn), 6(hif8 cast), 7(hif8_pertensor),
-                  8(hif8_pertoken), 9(fp4_e2m1), 11(fp8_perblock_e5m2), 12(fp8_perblock_e4m3fn), 13(int4_dynamic),
-                  14(fp8_group_amax_e5m2), 15(fp8_group_amax_e4m3fn),
+                  8(hif8_pertoken), 9(fp4_e2m1), 10(hif4), 11(fp8_perblock_e5m2), 12(fp8_perblock_e4m3fn),
+                  13(int4_dynamic), 14(fp8_group_amax_e5m2), 15(fp8_group_amax_e4m3fn),
                   16(mxfp8_roundscale_amax_e5m2), 17(mxfp8_roundscale_amax_e4m3fn). Default: -1.
 * @li active_expert_range: Optional parameter. Type is:ListInt. Like [expert_start, expert_end].
                            expert_start must be greater than or equal to 0, expert_end must be less than or equal to
                            10240, expert_start must be less than expert_end. Default: [].
 * @li row_idx_type: Optional parameter. Type is:Int. The value is 0(gather) or 1(scatter). Default: 0.
+* @li scale_alg: Optional parameter for HIF4 quantization (quant_mode=10). 0 uses thresholds (4, 2);
+*                1 uses thresholds (3.75, 1.875). Default: 0.
 */
 REG_OP(MoeInitRoutingV4)
     .INPUT(x, TensorType({DT_INT8, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_HIFLOAT8, DT_FLOAT8_E5M2, DT_FLOAT8_E4M3FN,
@@ -93,7 +99,7 @@ REG_OP(MoeInitRoutingV4)
     .OPTIONAL_INPUT(active_num, TensorType({DT_INT64}))
     .OPTIONAL_INPUT(topk_weight, TensorType({DT_FLOAT}))
     .OUTPUT(expanded_x, TensorType({DT_INT8, DT_FLOAT16, DT_FLOAT, DT_BF16, DT_FLOAT8_E5M2, DT_FLOAT8_E4M3FN,
-                                    DT_HIFLOAT8, DT_FLOAT4_E2M1, DT_INT4}))
+                                    DT_HIFLOAT8, DT_FLOAT4_E2M1, DT_INT4, Ops::Transformer::DT_HIFLOAT4}))
     .OUTPUT(expanded_row_idx, TensorType({DT_INT32}))
     .OUTPUT(expert_tokens_count_or_cumsum, TensorType({DT_INT64}))
     .OUTPUT(expanded_scale, TensorType({DT_FLOAT, DT_FLOAT8_E8M0}))
@@ -106,6 +112,7 @@ REG_OP(MoeInitRoutingV4)
     .ATTR(quant_mode, Int, -1)
     .ATTR(active_expert_range, ListInt, {})
     .ATTR(row_idx_type, Int, 0)
+    .ATTR(scale_alg, Int, 0)
     .OP_END_FACTORY_REG(MoeInitRoutingV4)
 } // namespace ge
 

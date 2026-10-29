@@ -31,6 +31,10 @@
 #include MOE_V3_INC(moe_v3_gather_hif8_pertensor_quant.h)
 #include MOE_V3_INC(moe_v3_gather_hif8_pertoken_quant.h)
 #include MOE_V3_INC(moe_v3_gather_hif8_quant.h)
+// hif4（hifloat4）量化仅 960（9201/9202）工具链支持，其余平台（如 950/3510）不编译
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202))
+#include "arch35/moe_v4_gather_hif4_quant.h"
+#endif
 #include MOE_V3_INC(moe_v3_gather_out_mxfp8.h)
 #include MOE_V3_INC(moe_v3_gather_out_mxfp4.h)
 #include MOE_V3_INC(moe_v3_gather_mxfp4_quant.h)
@@ -134,6 +138,14 @@
 #define MOE_INIT_ROUTING_V3_SORTONECORE_MXFP4QUANT_SCATTER 10101000   // 单核排序、MXFP4量化、SCATTER索引
 #define MOE_INIT_ROUTING_V3_SORTMULTICORE_MXFP4QUANT_GATHER 11100000  // 多核排序、MXFP4量化、GATHER索引
 #define MOE_INIT_ROUTING_V3_SORTMULTICORE_MXFP4QUANT_SCATTER 11101000 // 多核排序、MXFP4量化、SCATTER索引
+
+/*
+ * HIF4量化
+ */
+#define MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER 10110000    // 单核排序、HIF4量化、GATHER索引
+#define MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_SCATTER 10111000   // 单核排序、HIF4量化、SCATTER索引
+#define MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER 11110000  // 多核排序、HIF4量化、GATHER索引
+#define MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_SCATTER 11111000 // 多核排序、HIF4量化、SCATTER索引
 
 /*
  * FP8 PerBlock量化
@@ -404,7 +416,9 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_SCATTER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_GATHER) ||
-        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_SCATTER)) {
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_SCATTER) ||
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER) ||
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_SCATTER)) {
         // 单核排序
         MoeSortOneCore op;
         op.Init(expertIdx, expandedRowIdx, userWS, t, &sortPipe);
@@ -435,7 +449,9 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_GATHER) ||
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_SCATTER) ||
                TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8GROUP_AMAX_QUANT_GATHER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8GROUP_AMAX_QUANT_SCATTER)) {
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8GROUP_AMAX_QUANT_SCATTER) ||
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER) ||
+               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_SCATTER)) {
         // 多核排序
         MoeSortMultiCore op;
         op.Init(expertIdx, expandedRowIdx, userWS, t, &sortPipe);
@@ -479,6 +495,8 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF8_PERTOKEN_QUANT_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_MXFP4QUANT_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_MXFP4QUANT_GATHER) ||
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER) ||
+        TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_GATHER) ||
         TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8GROUP_AMAX_QUANT_GATHER) ||
@@ -708,10 +726,32 @@ extern "C" __global__ __aicore__ void moe_init_routing_v4(GM_ADDR x, GM_ADDR exp
             gatherMxfp4QuantOp.Process();
             gatherPipe.Destroy();
         }
-    } else if (TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_SCATTER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_GATHER) ||
-               TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_SCATTER)) {
+    }
+#if (defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202))
+    else if (TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_HIF4QUANT_SCATTER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_HIF4QUANT_SCATTER)) {
+        // HIF4量化
+        if constexpr (IsSameType<DTYPE_X, bfloat16_t>::value && IsSameType<DTYPE_EXPANDED_X, hifloat4x2_t>::value) {
+            TPipe gatherPipe;
+            if (t->scaleAlg == 0) {
+                MoeGatherOutHif4Quant<DTYPE_X, 0> gatherHif4QuantOp;
+                gatherHif4QuantOp.Init(x, scale, userWS, expandedRowIdx, expandedX, expandedScale, t, &gatherPipe);
+                gatherHif4QuantOp.Process();
+            } else {
+                MoeGatherOutHif4Quant<DTYPE_X, 1> gatherHif4QuantOp;
+                gatherHif4QuantOp.Init(x, scale, userWS, expandedRowIdx, expandedX, expandedScale, t, &gatherPipe);
+                gatherHif4QuantOp.Process();
+            }
+            gatherPipe.Destroy();
+        }
+    }
+#endif
+    else if (TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTONECORE_FP8PERBLOCK_QUANT_SCATTER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_GATHER) ||
+             TILING_KEY_IS(MOE_INIT_ROUTING_V3_SORTMULTICORE_FP8PERBLOCK_QUANT_SCATTER)) {
         // FP8 PerBlock量化
         if constexpr ((IsSameType<DTYPE_X, bfloat16_t>::value || IsSameType<DTYPE_X, half>::value) &&
                       (IsSameType<DTYPE_EXPANDED_X, fp8_e4m3fn_t>::value ||

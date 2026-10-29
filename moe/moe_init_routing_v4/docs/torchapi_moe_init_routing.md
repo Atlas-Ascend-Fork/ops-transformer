@@ -156,6 +156,7 @@ cann_ops_transformer.moe_init_routing(
     active_expert_range: Optional[List[int]] = None,
     row_idx_type: int = 0,
     x_dtype: Optional[int] = None,
+    scale_alg: int = 0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
 ```
 
@@ -178,6 +179,7 @@ cann_ops_transformer.moe_init_routing(
 |  active_expert_range  |  List[int] |  可选  |  表示活跃expert的范围。默认值为None，长度为2，数组内的值为[expert_start, expert_end]，左闭右开，要求值大于等于0，并且expert_end不大于`expert_num`。Drop/Pad场景下，expert_start等于0，expert_end等于`expert_num`。传入None时，视为活跃的expert范围在0到`expert_num`之间。  |  -  | - |
 |  row_idx_type  |  int |  可选  |  表示输出`expanded_row_idx`使用的索引类型。默认值为0，取值为0和1。0表示gather类型的索引；1表示scatter类型的索引。DropPad场景下仅支持0。  |  -  | - |
 |  x_dtype  |  int |  可选  |  用于指定`x`的非原生数据类型（PyTorch原生dtype无法表达、以`torch.uint8`等原生dtype存储的类型），取值为`torch_npu`的dtype枚举。默认值为None，支持的全部枚举值为：`torch_npu.hifloat8`、`torch_npu.float4_e2m1fn_x2`、`torch_npu.int4`。不同quant_mode下的取值约束见下方说明。  |  -  | - |
+|  scale_alg  |  int |  可选  |  表示量化时scale算法的选择。默认值为0，取值为0和1：0表示默认算法（结果与不传该参数时一致），1表示另一组scale阈值，仅在受支持的量化场景生效，其他场景必须为0。  |  -  | - |
 
 **scale参数不同场景下的输入要求：**
 
@@ -257,8 +259,9 @@ cann_ops_transformer.moe_init_routing(
 - `drop_pad_mode=1`时，`row_idx_type`仅支持取值为0（gather索引），`quant_mode`仅支持-1（非量化），且`x`数据类型仅支持`float16`、`bfloat16`、`float32`、`int8`、`hifloat8`。
 - `active_num`仅支持值等于NUM_ROWS*K。
 - quantMode为9或13的MXFP4/INT4动态量化场景，以及quantMode为-1且`x`数据类型为`float4_e2m1`（通过`x_dtype`指定）的非量化透传场景，`x`的最后一维H要求为偶数。quantMode为13的INT4动态量化场景还需满足：`x`数据类型为`float32`或`bfloat16`，`drop_pad_mode`为0，不支持输入`offset`。
+- `scale_alg`取值为0或1；`scale_alg`为1仅对受支持的量化场景生效，其他场景必须为0，否则抛出异常。
 - 空tensor处理：NUM_ROWS=0或K=0时没有路由元素，进入空Tensor处理路径，专家计数为0；输出shape仍需满足相应模式的约束。NUM_ROWS*K>0且H=0时仍走正常路由流程，生成`expanded_row_idx`和`expert_token_cumsum_or_count`。
-- **自动反向（autograd）约束**：自动反向仅在正向退化为aclnnMoeInitRoutingV2场景时支持，即不使用aclnnMoeInitRoutingV4特有特性。具体要求：`scale`不传入、`offset`不传入、`topk_weight`不传入、`quant_mode=-1`（非量化）、`row_idx_type=0`（gather索引）、`x_dtype`为None、`drop_pad_mode`为0或1。当使用了aclnnMoeInitRoutingV4特有特性（量化、`scale`、`offset`、`topk_weight`、`x_dtype`、`row_idx_type`非0等）时，调用自动反向会抛出`NotImplementedError`。`active_expert_range`不影响反向，不视为aclnnMoeInitRoutingV4特有特性。
+- **自动反向（autograd）约束**：自动反向仅在正向退化为aclnnMoeInitRoutingV2场景时支持，即不使用aclnnMoeInitRoutingV4特有特性。具体要求：`scale`不传入、`offset`不传入、`topk_weight`不传入、`quant_mode=-1`（非量化）、`row_idx_type=0`（gather索引）、`x_dtype`为None、`drop_pad_mode`为0或1。当使用了aclnnMoeInitRoutingV4特有特性（量化、`scale`、`offset`、`topk_weight`、`x_dtype`、`row_idx_type`非0、`scale_alg`非0等）时，调用自动反向会抛出`NotImplementedError`。`active_expert_range`不影响反向，不视为aclnnMoeInitRoutingV4特有特性。
 - 自动反向仅对`x`求梯度，`expert_idx`为整数索引张量无梯度，`expanded_row_idx`及其他整数/统计输出无梯度。
 
 ## 确定性计算
@@ -332,7 +335,7 @@ cann_ops_transformer.moe_init_routing(
       def forward(self, x, expert_idx, *, topk_weight=None, scale=None, offset=None,
                   active_num=-1, expert_capacity=-1, expert_num=-1, drop_pad_mode=0,
                   expert_tokens_num_type=0, expert_tokens_num_flag=False, quant_mode=-1,
-                  active_expert_range=None, row_idx_type=0):
+                  active_expert_range=None, row_idx_type=0, scale_alg=0):
           return cann_ops_transformer.moe_init_routing(x, expert_idx, topk_weight=topk_weight,
                                                         scale=scale, offset=offset, active_num=active_num,
                                                         expert_capacity=expert_capacity, expert_num=expert_num,
@@ -341,7 +344,8 @@ cann_ops_transformer.moe_init_routing(
                                                         expert_tokens_num_flag=expert_tokens_num_flag,
                                                         quant_mode=quant_mode,
                                                         active_expert_range=active_expert_range,
-                                                        row_idx_type=row_idx_type)
+                                                        row_idx_type=row_idx_type,
+                                                        scale_alg=scale_alg)
 
   def main():
       n = 3
@@ -363,7 +367,8 @@ cann_ops_transformer.moe_init_routing(
                 active_num=-1, expert_capacity=-1, expert_num=expert_num,
                 drop_pad_mode=0, expert_tokens_num_type=1,
                 expert_tokens_num_flag=True, quant_mode=0,
-                active_expert_range=active_expert_range, row_idx_type=1)
+                active_expert_range=active_expert_range, row_idx_type=1,
+                scale_alg=0)
 
   if __name__ == '__main__':
       main()

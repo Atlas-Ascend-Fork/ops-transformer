@@ -9,13 +9,14 @@
  */
 
 /*!
- * \file moe_v3_gather_hif4_quant.h
- * \brief
+ * \file moe_v4_gather_hif4_quant.h
+ * \brief MoeInitRoutingV4 的 HIF4（quant_mode=10）gather + 动态量化 kernel；
+ *        复用 arch35 公共的 moe_v3_common.h 与 MoeInitRoutingV3Arch35TilingData。
  */
-#ifndef MOE_V3_GATHER_HIF4_QUANT_H_REGBASE
-#define MOE_V3_GATHER_HIF4_QUANT_H_REGBASE
+#ifndef MOE_V4_GATHER_HIF4_QUANT_H_REGBASE
+#define MOE_V4_GATHER_HIF4_QUANT_H_REGBASE
 
-#include "moe_v3_common.h"
+#include "../../../moe_init_routing_v3/op_kernel/arch35/moe_v3_common.h"
 #include "op_kernel/platform_util.h"
 #include "op_kernel/math_util.h"
 
@@ -45,7 +46,7 @@ constexpr int64_t DIGIT_TWO = 2;
 constexpr int64_t DIGIT_FOUR = 4;
 constexpr int64_t DIGIT_EIGHT = 8;
 
-template <typename T, typename U>
+template <typename T, int64_t SCALE_ALG = 0>
 class MoeGatherOutHif4Quant {
 public:
     __aicore__ inline MoeGatherOutHif4Quant(){};
@@ -143,12 +144,10 @@ private:
                                                                 RoundMode::CAST_RINT};
 };
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::Init(GM_ADDR xAddr, GM_ADDR unused_ScaleAddr,
-                                                         GM_ADDR sortedExpertIdxAddr, GM_ADDR expandedRowIdxAddr,
-                                                         GM_ADDR expandedXAddr, GM_ADDR expandedScaleAddr,
-                                                         const MoeInitRoutingV3Arch35TilingData* tilingData,
-                                                         TPipe* tPipe)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::Init(
+    GM_ADDR xAddr, GM_ADDR unused_ScaleAddr, GM_ADDR sortedExpertIdxAddr, GM_ADDR expandedRowIdxAddr,
+    GM_ADDR expandedXAddr, GM_ADDR expandedScaleAddr, const MoeInitRoutingV3Arch35TilingData* tilingData, TPipe* tPipe)
 {
     pipe_ = tPipe;
     blockIdx_ = GetBlockIdx();
@@ -199,9 +198,9 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::Init(GM_ADDR xAddr, GM_ADDR 
     gmCopyTmpBufOtherStep_ = vRegSize_;
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::InitKernelTiling(GM_ADDR sortedExpertIdxAddr,
-                                                                     const MoeInitRoutingV3Arch35TilingData* tilingData)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::InitKernelTiling(
+    GM_ADDR sortedExpertIdxAddr, const MoeInitRoutingV3Arch35TilingData* tilingData)
 {
     gatherOutTilingData_ = &(tilingData->gatherOutComputeParamsOp);
     cols_ = tilingData->cols;
@@ -247,9 +246,9 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::InitKernelTiling(GM_ADDR sor
 }
 
 // __ubuf__ 类型表示用于矢量计算的Local Memory（Unified Buffer），是LocalTensor实际存储的物理位置
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::Compute(int64_t regLoop, int64_t maxPer8RegLoop,
-                                                            int64_t scaleRegLoop, int64_t outRegLoop)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::Compute(int64_t regLoop, int64_t maxPer8RegLoop,
+                                                                    int64_t scaleRegLoop, int64_t outRegLoop)
 {
     LocalTensor<T> xLocal = xInQueue_.template DeQue<T>();
     LocalTensor<uint8_t> xQuantLocal = xQuantOutQueue_.template AllocTensor<uint8_t>();
@@ -296,9 +295,9 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::Compute(int64_t regLoop, int
     xInQueue_.template FreeTensor(xLocal);
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeMaxPer4(uint16_t regLoop, __ubuf__ float* xAddr1,
-                                                                   __ubuf__ uint16_t* maxPer4BufAddr)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::ComputeMaxPer4(uint16_t regLoop, __ubuf__ float* xAddr1,
+                                                                           __ubuf__ uint16_t* maxPer4BufAddr)
 {
     __VEC_SCOPE__
     {
@@ -332,11 +331,11 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeMaxPer4(uint16_t regL
     }
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeMaxPer8(uint16_t maxPer8RegLoop,
-                                                                   __ubuf__ uint16_t* maxPer4BufReadAddr,
-                                                                   __ubuf__ uint16_t* e8BufAddr,
-                                                                   __ubuf__ uint16_t* maxPer8BufAddr)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::ComputeMaxPer8(uint16_t maxPer8RegLoop,
+                                                                           __ubuf__ uint16_t* maxPer4BufReadAddr,
+                                                                           __ubuf__ uint16_t* e8BufAddr,
+                                                                           __ubuf__ uint16_t* maxPer8BufAddr)
 {
     __VEC_SCOPE__
     {
@@ -382,14 +381,16 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeMaxPer8(uint16_t maxP
     }
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeTmpScale(
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::ComputeTmpScale(
     uint16_t regLoop, __ubuf__ uint16_t* maxPer4BufRead2Addr, __ubuf__ uint16_t* maxPer8BufReadAddr,
     __ubuf__ uint16_t* e8BufRead1Addr, __ubuf__ uint32_t* e1p8BufAddr, __ubuf__ uint8_t* e1p16BufAddr,
     __ubuf__ uint16_t* tmpScaleAddr)
 {
     __VEC_SCOPE__
     {
+        constexpr float E1_8_THRESHOLD = SCALE_ALG == 0 ? 4.0f : 3.75f;
+        constexpr float E1_16_THRESHOLD = SCALE_ALG == 0 ? 2.0f : 1.875f;
         Reg::RegTensor<bfloat16_t> vreg0Maxper4;
         Reg::RegTensor<bfloat16_t> vreg0Maxper8;
         Reg::RegTensor<bfloat16_t> vreg0Maxper64;
@@ -423,11 +424,11 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeTmpScale(
                 (Reg::RegTensor<bfloat16_t>&)vb16_Ea_rec_bf16, (Reg::RegTensor<fp8_e6m2_t>&)vreg0Maxper64, maskAll);
 
             Reg::Mul(vreg0Maxper8, vreg0Maxper8, vb16_Ea_rec_bf16, maskAll);
-            Reg::Compares<bfloat16_t, CMPMODE::GE>(vb1E8Comp, vreg0Maxper8, 4, maskAll);
+            Reg::Compares<bfloat16_t, CMPMODE::GE>(vb1E8Comp, vreg0Maxper8, E1_8_THRESHOLD, maskAll);
             Reg::Select(vreg0Maxper8, vregNumhalf, vregNum1, vb1E8Comp);
             Reg::Mul(vreg0Maxper4, vreg0Maxper4, vb16_Ea_rec_bf16, maskAll);
             Reg::Mul(vreg0Maxper4, vreg0Maxper4, vreg0Maxper8, maskAll);
-            Reg::Compares<bfloat16_t, CMPMODE::GE>(vb1E16Comp, vreg0Maxper4, 2, maskAll);
+            Reg::Compares<bfloat16_t, CMPMODE::GE>(vb1E16Comp, vreg0Maxper4, E1_16_THRESHOLD, maskAll);
             Reg::Select(vreg0Maxper4, vregNumhalf, vregNum1, vb1E16Comp);
             Reg::Mul(vreg0Maxper4, vreg0Maxper4, vreg0Maxper8, maskAll);
             Reg::Mul(vregTmpScale, vreg0Maxper4, vb16_Ea_rec_bf16, maskAll);
@@ -444,12 +445,12 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeTmpScale(
     }
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeScale(uint16_t scaleRegLoop,
-                                                                 __ubuf__ uint8_t* e8BufRead2Addr,
-                                                                 __ubuf__ uint8_t* e1p8BufReadAddr,
-                                                                 __ubuf__ uint8_t* e1p16BufReadAddr,
-                                                                 __ubuf__ uint16_t* scaleAddr)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::ComputeScale(uint16_t scaleRegLoop,
+                                                                         __ubuf__ uint8_t* e8BufRead2Addr,
+                                                                         __ubuf__ uint8_t* e1p8BufReadAddr,
+                                                                         __ubuf__ uint8_t* e1p16BufReadAddr,
+                                                                         __ubuf__ uint16_t* scaleAddr)
 {
     __VEC_SCOPE__
     {
@@ -480,10 +481,10 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeScale(uint16_t scaleR
     }
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeOut(uint16_t outRegLoop, __ubuf__ T* xAddr2,
-                                                               __ubuf__ uint16_t* tmpScaleReadAddr,
-                                                               __ubuf__ int32_t* yAddr)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::ComputeOut(uint16_t outRegLoop, __ubuf__ T* xAddr2,
+                                                                       __ubuf__ uint16_t* tmpScaleReadAddr,
+                                                                       __ubuf__ int32_t* yAddr)
 {
     __VEC_SCOPE__
     {
@@ -506,8 +507,8 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::ComputeOut(uint16_t outRegLo
     }
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::Process()
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::Process()
 {
     if (blockIdx_ < needCoreNum_) {
         currentLoopRows_ = perLoopRows_;
@@ -522,8 +523,8 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::Process()
     }
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyInExpandedExpertIdx(int64_t progress)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::CopyInExpandedExpertIdx(int64_t progress)
 {
     indicesOffset_ = progress * perLoopRows_;
     LocalTensor<int32_t> indicesLocal = sortedRowIdxInQueue_.AllocTensor<int32_t>();
@@ -533,8 +534,8 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyInExpandedExpertIdx(int6
     sortedRowIdxInQueue_.EnQue<int32_t>(indicesLocal);
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyExpandedXAndHif4Quant(int64_t progress)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::CopyExpandedXAndHif4Quant(int64_t progress)
 {
     LocalTensor<int32_t> indicesLocal = sortedRowIdxInQueue_.DeQue<int32_t>();
     SetWaitFlag<HardEvent::MTE2_S>(HardEvent::MTE2_S);
@@ -545,7 +546,6 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyExpandedXAndHif4Quant(in
             // 每行切分成cols，按cols读入-计算量化-拷出
             int64_t loopCols = (j == colLoops_ - 1) ? lastLoopCols_ : perLoopCols_;
             int64_t loopScaleCols = (j == colLoops_ - 1) ? lastLoopScaleCols_ : perLoopScaleCols_;
-            ;
             CopyIn(srcIdx / k_, j, loopCols);
             Compute(Ops::Base::CeilDiv<int64_t>(groupNum_, HIFP4_OUTPUT_REG_ONELOOP_GROUP_NUM),
                     Ops::Base::CeilDiv<int64_t>(groupNum_, HIFP4_MAXPER8_REG_ONELOOP),
@@ -557,8 +557,8 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyExpandedXAndHif4Quant(in
     sortedRowIdxInQueue_.FreeTensor(indicesLocal);
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyIn(int64_t srcIdx, int64_t colIdx, int64_t loopCols)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::CopyIn(int64_t srcIdx, int64_t colIdx, int64_t loopCols)
 {
     LocalTensor<T> inLocal = xInQueue_.AllocTensor<T>();
     DataCopyExtParams copyInParam = {1, static_cast<uint32_t>(loopCols * sizeof(T)), 0, 0, 0};
@@ -567,9 +567,9 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyIn(int64_t srcIdx, int64
     xInQueue_.EnQue(inLocal);
 }
 
-template <typename T, typename U>
-__aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyOut(int64_t dstIdx, int64_t colIdx, int64_t loopCols,
-                                                            int64_t loopScaleCols)
+template <typename T, int64_t SCALE_ALG>
+__aicore__ inline void MoeGatherOutHif4Quant<T, SCALE_ALG>::CopyOut(int64_t dstIdx, int64_t colIdx, int64_t loopCols,
+                                                                    int64_t loopScaleCols)
 {
     LocalTensor<float> mxScaleLocal = mxScaleOutQueue_.DeQue<float>();
     LocalTensor<uint8_t> outLocal = xQuantOutQueue_.DeQue<uint8_t>();
@@ -579,7 +579,8 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyOut(int64_t dstIdx, int6
     DataCopyPad<uint8_t>(expandedXOutGm_[(dstIdx * cols_ + colIdx * perLoopCols_) / 2], outLocal, copyOutParams);
 
     DataCopyExtParams copyScaleParams = {1, static_cast<uint32_t>(loopScaleCols * sizeof(float)), 0, 0, 0};
-    DataCopyPad<float>(expandedScaleOutGm_[dstIdx * scaleCols_ + colIdx * loopScaleCols], mxScaleLocal,
+    // 行内偏移用固定的 perLoopScaleCols_：末轮 loopScaleCols 更小，用它会把最后一块 scale 写错位
+    DataCopyPad<float>(expandedScaleOutGm_[dstIdx * scaleCols_ + colIdx * perLoopScaleCols_], mxScaleLocal,
                        copyScaleParams);
 
     xQuantOutQueue_.FreeTensor(outLocal);
@@ -587,4 +588,4 @@ __aicore__ inline void MoeGatherOutHif4Quant<T, U>::CopyOut(int64_t dstIdx, int6
 }
 
 } // namespace MoeInitRoutingV3
-#endif // MOE_V3_GATHER_HIF4_QUANT_H_REGBASE
+#endif // MOE_V4_GATHER_HIF4_QUANT_H_REGBASE

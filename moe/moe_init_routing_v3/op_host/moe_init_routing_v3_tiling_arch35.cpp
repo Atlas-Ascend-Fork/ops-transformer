@@ -13,6 +13,7 @@
  * \brief
  */
 #include "moe_init_routing_v3_tiling_arch35.h"
+#include "common/include/op_host/op_const_def_transformer.h"
 
 namespace optiling {
 constexpr int64_t DIM_VALUE_ONE = 1LL;
@@ -481,14 +482,16 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::ValidateQuantMode()
                     quantMode_ != QUANT_MODE_MXFP8_E4M3FN && quantMode_ != QUANT_MODE_FP8_GROUP_E5M2 &&
                     quantMode_ != QUANT_MODE_FP8_GROUP_E4M3FN && quantMode_ != QUANT_MODE_HIF8_CAST &&
                     quantMode_ != QUANT_MODE_HIF8_PERTENSOR && quantMode_ != QUANT_MODE_HIF8_PERTOKEN &&
-                    quantMode_ != QUANT_MODE_MXFP4_E2M1 && quantMode_ != QUANT_MODE_HIF4 &&
-                    quantMode_ != QUANT_MODE_FP8_PERBLOCK_E5M2 && quantMode_ != QUANT_MODE_FP8_PERBLOCK_E4M3FN &&
-                    quantMode_ != QUANT_MODE_INT4_DYNAMIC && quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E5M2 &&
-                    quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E4M3FN &&
+                    quantMode_ != QUANT_MODE_MXFP4_E2M1 && quantMode_ != QUANT_MODE_FP8_PERBLOCK_E5M2 &&
+                    quantMode_ != QUANT_MODE_FP8_PERBLOCK_E4M3FN && quantMode_ != QUANT_MODE_INT4_DYNAMIC &&
+                    quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E5M2 && quantMode_ != QUANT_MODE_FP8_GROUP_AMAX_E4M3FN &&
                     quantMode_ != QUANT_MODE_MXFP8_ROUNDSCALE_AMAX_E5M2 &&
-                    quantMode_ != QUANT_MODE_MXFP8_ROUNDSCALE_AMAX_E4M3FN,
+                    quantMode_ != QUANT_MODE_MXFP8_ROUNDSCALE_AMAX_E4M3FN &&
+                    !(SupportsHif4Quant() && quantMode_ == QUANT_MODE_HIF4),
                 OP_LOGE_FOR_INVALID_VALUE(context_->GetNodeName(), "quant_mode", std::to_string(quantMode_),
-                                          "-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 or 17"),
+                                          SupportsHif4Quant() ?
+                                              "-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 or 17" :
+                                              "-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16 or 17"),
                 return ge::GRAPH_FAILED);
     tilingDataPtr_->quantMode = quantMode_;
     return ge::GRAPH_SUCCESS;
@@ -579,6 +582,9 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::CheckInputX()
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "shape of x", std::to_string(xDim1),
                                                   "The dim1 of input x should be multiple of 64 when quant mode is 10"),
             return ge::GRAPH_FAILED);
+        OP_CHECK_IF(xDtype_ != ge::DT_BF16,
+                    OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "x", Ops::Base::ToString(xDtype_), "DT_BF16"),
+                    return ge::GRAPH_FAILED);
     }
     // dtype
     using ge::DataType;
@@ -977,6 +983,9 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::ValidateExpandedXDtype()
         case QUANT_MODE_MXFP4_E2M1:
             expectedDtype = DataType::DT_FLOAT4_E2M1;
             break;
+        case QUANT_MODE_HIF4:
+            expectedDtype = Ops::Transformer::DT_HIFLOAT4;
+            break;
         case QUANT_MODE_INT4_DYNAMIC:
             expectedDtype = DataType::DT_INT4;
             break;
@@ -1099,6 +1108,10 @@ void MoeInitRoutingV3TilingArch35::CalculateExpectedScaleShape(int64_t& expected
         expectedRank = RANK_TWO;
         expectedDim0 = totalLength_;
         expectedDim1 = Ops::Base::CeilDiv<int64_t>(cols_, FP8_GROUP_SIZE);
+    } else if (quantMode_ == QUANT_MODE_HIF4) {
+        expectedRank = RANK_TWO;
+        expectedDim0 = totalLength_;
+        expectedDim1 = cols_ / HIFP4_GROUP_ELE_NUM;
     } else if (quantMode_ == QUANT_MODE_MXFP4_E2M1 || quantMode_ == QUANT_MODE_FP8_PERBLOCK_E5M2 ||
                quantMode_ == QUANT_MODE_FP8_PERBLOCK_E4M3FN) {
         expectedRank = RANK_THREE;
@@ -1149,6 +1162,13 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::ValidateScaleShape(int64_t expecte
 ge::graphStatus MoeInitRoutingV3TilingArch35::CheckOutputExpandedScale()
 {
     OP_LOGD(context_, "Entered MoeInitRoutingV3TilingArch35::CheckOutputExpandedScale()");
+
+    if (quantMode_ == QUANT_MODE_HIF4) {
+        OP_CHECK_IF(expandedScaleDtype_ != ge::DT_FLOAT,
+                    OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "expanded_scale",
+                                              Ops::Base::ToString(expandedScaleDtype_), "DT_FLOAT"),
+                    return ge::GRAPH_FAILED);
+    }
 
     if (quantMode_ == QUANT_MODE_STATIC || quantMode_ == QUANT_MODE_HIF8_CAST ||
         quantMode_ == QUANT_MODE_HIF8_PERTENSOR) {

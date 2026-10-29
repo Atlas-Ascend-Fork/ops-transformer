@@ -28,12 +28,12 @@ std::tuple<aclTensor*, aclTensor*, aclTensor*, aclTensor*, aclTensor*> MoeInitRo
     const aclTensor* x, const aclTensor* expertIdx, const aclTensor* scale, const aclTensor* offset,
     const aclTensor* activeNum, const aclTensor* topkWeight, int64_t expertCapacity, int64_t expertNum,
     int64_t dropPadMode, int64_t expertTokensNumType, bool expertTokensNumFlag, int64_t quantMode,
-    const aclIntArray* activeExpertRange, int64_t rowIdxType, const aclTensor* expandedX,
+    const aclIntArray* activeExpertRange, int64_t rowIdxType, int64_t scaleAlg, const aclTensor* expandedX,
     const aclTensor* expandedRowIdx, const aclTensor* expertTokensCountOrCumsum, const aclTensor* expandedScale,
     const aclTensor* expandedTopkWeight, aclOpExecutor* executor)
 {
     L0_DFX(MoeInitRoutingV4, x, expertIdx, scale, offset, activeNum, topkWeight, expertCapacity, expertNum, dropPadMode,
-           expertTokensNumType, expertTokensNumFlag, quantMode, activeExpertRange, rowIdxType, expandedX,
+           expertTokensNumType, expertTokensNumFlag, quantMode, activeExpertRange, rowIdxType, scaleAlg, expandedX,
            expandedRowIdx, expertTokensCountOrCumsum, expandedScale, expandedTopkWeight);
 
     auto expandedXOut = executor->AllocTensor(expandedX->GetViewShape(), expandedX->GetDataType(), Format::FORMAT_ND);
@@ -68,7 +68,7 @@ std::tuple<aclTensor*, aclTensor*, aclTensor*, aclTensor*, aclTensor*> MoeInitRo
                                 OP_OUTPUT(expandedXOut, expandedRowIdxOut, expertTokensCountOrCumsumOut,
                                           expandedScaleOut, expandedTopkWeightOut),
                                 OP_ATTR(expertCapacity, expertNum, dropPadMode, expertTokensNumType,
-                                        expertTokensNumFlag, quantMode, activeExpertRange, rowIdxType));
+                                        expertTokensNumFlag, quantMode, activeExpertRange, rowIdxType, scaleAlg));
     return std::tuple<aclTensor*, aclTensor*, aclTensor*, aclTensor*, aclTensor*>(
         expandedXOut, expandedRowIdxOut, expertTokensCountOrCumsumOut, expandedScaleOut, expandedTopkWeightOut);
 }

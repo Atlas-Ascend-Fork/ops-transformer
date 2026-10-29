@@ -10,9 +10,10 @@
 
 /*!
  * \file moe_init_routing.cpp
- * \brief MoE init routing operator, bridging PyTorch to aclnnMoeInitRoutingV4.
+ * \brief MoE init routing operator, bridging PyTorch to aclnnMoeInitRoutingV5.
  *        Structure mirrors op-plugin MoeInitRoutingV2KernelNpuOpApi.cpp for maintainability,
- *        with V4 additions (topk_weight / expanded_topk_weight).
+ *        with V4 additions (topk_weight / expanded_topk_weight) and V5 HIF4 support
+ *        (quant_mode=10, optional scale_alg).
  */
 
 #include <torch/extension.h>
@@ -28,6 +29,7 @@ constexpr int64_t FP8_QUANT_BLOCK_SIZE = 128;
 constexpr int64_t PAD_TO_EVEN_FACTOR = 2;
 constexpr int64_t INT4_NUMS_IN_INT8 = 2;
 constexpr int64_t SCALE_BLOCK_SIZE = 64;
+constexpr int64_t HIF4_NUMS_IN_UINT8 = 2;
 constexpr int64_t SCALE_THIRD_DIM_SIZE = 2;
 constexpr int64_t EXPERT_TOKENS_KEY_VALUE = 2;
 constexpr int64_t ACTIVE_EXPERT_RANGE_SIZE = 2;
@@ -45,6 +47,7 @@ enum MoeQuantMode {
     QUANT_MODE_HIF8_PERTENSOR = 7,
     QUANT_MODE_HIF8_PER_TOKEN_DIM = 8,
     QUANT_MODE_MXFP4_E2M1 = 9,
+    QUANT_MODE_HIF4 = 10,
     QUANT_MODE_FP8_PERBLOCK_E5M2 = 11,
     QUANT_MODE_FP8_PERBLOCK_E4M3FN = 12,
     QUANT_MODE_INT4_DYNAMIC = 13,
@@ -58,6 +61,11 @@ enum MoeQuantMode {
 inline bool IsQuantModeMXFP4(int64_t quantMode)
 {
     return quantMode == QUANT_MODE_MXFP4_E2M1;
+}
+
+inline bool IsQuantModeHIF4(int64_t quantMode)
+{
+    return quantMode == QUANT_MODE_HIF4;
 }
 
 inline bool IsQuantModeMXFP8(int64_t quantMode)
@@ -109,7 +117,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
     const c10::optional<at::Tensor>& offset, const c10::optional<at::Tensor>& topk_weight, int64_t active_num,
     int64_t expert_capacity, int64_t expert_num, int64_t drop_pad_mode, int64_t expert_tokens_num_type,
     bool expert_tokens_num_flag, int64_t quant_mode, const c10::optional<std::vector<int64_t>>& active_expert_range,
-    int64_t row_idx_type, const c10::optional<int64_t>& x_dtype)
+    int64_t row_idx_type, const c10::optional<int64_t>& x_dtype, int64_t scale_alg)
 {
     // ---- Input validation ----
     TORCH_CHECK(x.dim() == DIM_X, "x must be 2D, but got ", x.dim(), "D.");
@@ -120,6 +128,21 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
     TORCH_CHECK((expert_tokens_num_type >= 0 && expert_tokens_num_type <= EXPERT_TOKENS_KEY_VALUE),
                 "expert_tokens_num_type must be 0, 1 or 2, current is: ", expert_tokens_num_type);
     TORCH_CHECK((row_idx_type == 0 || row_idx_type == 1), "row_idx_type must be 0 or 1, current is: ", row_idx_type);
+    TORCH_CHECK((scale_alg == 0 || scale_alg == 1), "scale_alg must be 0 or 1, current is: ", scale_alg);
+    if (scale_alg == 1) {
+        TORCH_CHECK(quant_mode == QUANT_MODE_HIF4,
+                    "scale_alg=1 is only valid when quant_mode=10 (HIF4), current quant_mode is: ", quant_mode);
+    }
+    if (IsQuantModeHIF4(quant_mode)) {
+        TORCH_CHECK(x.scalar_type() == at::kBFloat16,
+                    "x dtype must be bfloat16 when quant_mode=10 (HIF4), current is: ", x.scalar_type());
+        TORCH_CHECK(x.size(1) % SCALE_BLOCK_SIZE == 0, "the second dim of x must be a multiple of ", SCALE_BLOCK_SIZE,
+                    " when quant_mode=10 (HIF4), current is: ", x.size(1));
+        TORCH_CHECK(drop_pad_mode == 0,
+                    "quant_mode=10 (HIF4) is not supported when drop_pad_mode=1, "
+                    "current drop_pad_mode is: ",
+                    drop_pad_mode);
+    }
     if (drop_pad_mode == 1) {
         TORCH_CHECK(expert_capacity > 0,
                     "expert_capacity must be greater than 0 when drop_pad_mode=1, current is: ", expert_capacity);
@@ -213,6 +236,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
                 case QUANT_MODE_HIF8_PER_TOKEN_DIM:
                     expanded_x = at::empty({expanded_scale_len, h}, x.options().dtype(at::kByte));
                     break;
+                // HIF4: 4bit 量化，每 uint8 打包 2 个元素
+                case QUANT_MODE_HIF4:
+                    expanded_x = at::empty({expanded_scale_len, h / HIF4_NUMS_IN_UINT8}, x.options().dtype(at::kByte));
+                    break;
                 case QUANT_MODE_FP8_PERBLOCK_E5M2:
                 case QUANT_MODE_FP8_GROUP_E5M2:
                 case QUANT_MODE_FP8_GROUP_AMAX_E5M2:
@@ -260,6 +287,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
         } else if (IsQuantModeFP8Group(quant_mode)) {
             expanded_scale =
                 at::empty({expanded_scale_len, CeilDiv(h, FP8_QUANT_BLOCK_SIZE)}, x.options().dtype(at::kFloat));
+        } else if (IsQuantModeHIF4(quant_mode)) {
+            // HIF4 的 expanded_scale 为 float32，每 64 个元素一组，每组 4 字节打包在一个 float32 槽内
+            expanded_scale =
+                at::empty({expanded_scale_len, CeilDiv(h, SCALE_BLOCK_SIZE)}, x.options().dtype(at::kFloat));
         } else if (quant_mode == QUANT_MODE_UNQUANT && has_scale &&
                    (x.scalar_type() == at::kFloat8_e5m2 || x.scalar_type() == at::kFloat8_e4m3fn ||
                     x_acl_type == aclDataType::ACL_FLOAT4_E2M1)) {
@@ -315,6 +346,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
         expanded_x_wrapper.dtype = ACL_HIFLOAT8;
     } else if (IsQuantModeMXFP4(quant_mode)) {
         expanded_x_wrapper.dtype = ACL_FLOAT4_E2M1;
+    } else if (IsQuantModeHIF4(quant_mode)) {
+        expanded_x_wrapper.dtype = ACL_HIFLOAT4;
     }
 
     // A 1x1 byte carrier packs two values along the last axis. Disambiguate
@@ -336,10 +369,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor> moe_init_
         active_num_tensor_opt = at::full({}, active_num, at::TensorOptions().dtype(at::kLong).device(x.device()));
     }
 
-    // ---- Call aclnnMoeInitRoutingV4 ----
-    ACLNN_CMD(aclnnMoeInitRoutingV4, x_wrapper, expert_idx, scale_wrapper, p_offset, active_num_tensor_opt, topk_weight,
+    // ---- Call aclnnMoeInitRoutingV5 ----
+    // scale_alg 仅对 quant_mode=10 生效（0=有偏阈值, 1=无偏阈值），其余模式必须为 0
+    ACLNN_CMD(aclnnMoeInitRoutingV5, x_wrapper, expert_idx, scale_wrapper, p_offset, active_num_tensor_opt, topk_weight,
               expert_capacity, expert_num, drop_pad_mode, expert_tokens_num_type, expert_tokens_num_flag, quant_mode,
-              active_expert_range_opt, row_idx_type, expanded_x_wrapper, expanded_row_idx,
+              active_expert_range_opt, row_idx_type, scale_alg, expanded_x_wrapper, expanded_row_idx,
               expert_tokens_count_or_cumsum, expanded_scale_wrapper, expanded_topk_weight_opt);
 
     return std::tie(expanded_x, expanded_row_idx, expert_tokens_count_or_cumsum, expanded_scale, expanded_topk_weight);

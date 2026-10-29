@@ -34,6 +34,7 @@ constexpr int64_t QUANT_MODE_MXFP4_E2M1 = 9;
 constexpr int64_t QUANT_MODE_FP8_PERBLOCK_E5M2 = 11;
 constexpr int64_t QUANT_MODE_FP8_PERBLOCK_E4M3FN = 12;
 constexpr int64_t QUANT_MODE_INT4_DYNAMIC = 13;
+constexpr int64_t QUANT_MODE_HIF4 = 10;
 constexpr int64_t QUANT_MODE_FP8_GROUP_AMAX_E5M2 = 14;
 constexpr int64_t QUANT_MODE_FP8_GROUP_AMAX_E4M3FN = 15;
 constexpr int64_t QUANT_MODE_MXFP8_ROUNDSCALE_AMAX_E5M2 = 16;
@@ -233,6 +234,27 @@ static std::string A5SocInfo = "{\n"
                                "    \"L0C_SIZE\": 262144,\n"
                                "    \"CORE_NUM\": 32,\n"
                                "    \"socVersion\": \"Ascend910_95\"\n"
+                               "  }\n"
+                               "}";
+
+// 960 的硬件描述：arch 由 TilingContextPara 的 socVersion 字符串决定（框架内 Ascend960DT -> NpuArch 9201），
+// 这里的 JSON 只提供 UB/L2/L0/CORE_NUM 等容量参数
+static std::string A6SocInfo = "{\n"
+                               "  \"hardware_info\": {\n"
+                               "    \"BT_SIZE\": 0,\n"
+                               "    \"load3d_constraints\": \"1\",\n"
+                               "    \"Intrinsic_fix_pipe_l0c2out\": false,\n"
+                               "    \"Intrinsic_data_move_l12ub\": true,\n"
+                               "    \"Intrinsic_data_move_l0c2ub\": true,\n"
+                               "    \"Intrinsic_data_move_out2l1_nd2nz\": false,\n"
+                               "    \"UB_SIZE\": 262144,\n"
+                               "    \"L2_SIZE\": 134217728,\n"
+                               "    \"L1_SIZE\": 524288,\n"
+                               "    \"L0A_SIZE\": 65536,\n"
+                               "    \"L0B_SIZE\": 65536,\n"
+                               "    \"L0C_SIZE\": 262144,\n"
+                               "    \"CORE_NUM\": 32,\n"
+                               "    \"socVersion\": \"Ascend960DT\"\n"
                                "  }\n"
                                "}";
 
@@ -957,6 +979,71 @@ TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_active_num_invalid_dty
     gert::TilingContextPara tilingContextPara("MoeInitRoutingV4", inputDesc, outputDesc, attrs, &compileInfo,
                                               "Ascend950", A5SocInfo, 4096);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+// HIF4 仅 Ascend960 注册，A5（Ascend950）上应在 tiling 阶段被拒绝
+// HIF4 仅在 Ascend960 注册：960 上下文下 quant_mode=10 应通过 tiling，且 scale_alg 原样写入 tiling data
+TEST_F(MoeInitRoutingV4Tiling, hif4_tiling_scale_alg_on_ascend960dt)
+{
+    constexpr int64_t n = 2;
+    constexpr int64_t h = 128;
+    constexpr int64_t k = 2;
+    constexpr int64_t rows = n * k;
+    // CompileInfo 的 socVersion 字段本算子 tiling 未使用，平台由 TilingContextPara 的 socVersion 字符串决定
+    optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+    auto inputDesc = BuildV4Inputs(n, h, k, ge::DT_BF16, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT, false, 0, false, rows);
+    auto outputDesc =
+        BuildV4Outputs(rows, h, ge::DT_HIFLOAT4, {16}, {{rows, h / 64}, ge::DT_FLOAT}, false, n, k, 0, EXPERT_NUM, -1);
+    for (int64_t scaleAlg : {int64_t{0}, int64_t{1}}) {
+        auto attrs = BuildV4Attrs(-1, EXPERT_NUM, 0, EXPERT_TOKENS_TYPE_COUNT, true, QUANT_MODE_HIF4, {0, 16},
+                                  ROW_IDX_TYPE_GATHER);
+        attrs.push_back({"scale_alg", Ops::Transformer::AnyValue::CreateFrom<int64_t>(scaleAlg)});
+        gert::TilingContextPara tilingContextPara("MoeInitRoutingV4", inputDesc, outputDesc, attrs, &compileInfo,
+                                                  "Ascend960DT", A6SocInfo, 4096);
+        TilingInfo tilingInfo;
+        ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo)) << "scale_alg=" << scaleAlg;
+        ASSERT_GE(tilingInfo.tilingDataSize, sizeof(MoeInitRoutingV3Arch35TilingData));
+        const auto* tilingData = reinterpret_cast<const MoeInitRoutingV3Arch35TilingData*>(tilingInfo.tilingData.get());
+        EXPECT_EQ(tilingData->quantMode, QUANT_MODE_HIF4);
+        EXPECT_EQ(tilingData->scaleAlg, scaleAlg);
+        EXPECT_EQ(tilingData->cols, h);
+    }
+}
+
+TEST_F(MoeInitRoutingV4Tiling, hif4_rejected_on_a5)
+{
+    constexpr int64_t n = 2;
+    constexpr int64_t h = 128;
+    constexpr int64_t k = 2;
+    optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+    auto inputDesc = BuildV4Inputs(n, h, k, ge::DT_BF16, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT, false, 0, false, n * k);
+    auto outputDesc = BuildV4Outputs(n * k, h, ge::DT_HIFLOAT4, {16}, {{n * k, h / 64}, ge::DT_FLOAT}, false, n, k, 0,
+                                     EXPERT_NUM, -1);
+    auto attrs =
+        BuildV4Attrs(-1, EXPERT_NUM, 0, EXPERT_TOKENS_TYPE_COUNT, true, QUANT_MODE_HIF4, {0, 16}, ROW_IDX_TYPE_GATHER);
+    attrs.push_back({"scale_alg", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)});
+    gert::TilingContextPara tilingContextPara("MoeInitRoutingV4", inputDesc, outputDesc, attrs, &compileInfo,
+                                              "Ascend950", A5SocInfo, 4096);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(MoeInitRoutingV4Tiling, scale_alg_rejects_invalid_values_and_other_modes)
+{
+    constexpr int64_t n = 2;
+    constexpr int64_t h = 128;
+    constexpr int64_t k = 2;
+    optiling::MoeInitRoutingV3CompileInfo compileInfo = {40, 262144, platform_ascendc::SocVersion::ASCEND950};
+    auto inputDesc = BuildV4Inputs(n, h, k, ge::DT_FLOAT16, {}, ge::DT_FLOAT, {}, ge::DT_FLOAT, false, 0, false, n * k);
+    auto outputDesc =
+        BuildV4Outputs(n * k, h, ge::DT_FLOAT16, {16}, MakePerTokenScaleDesc(n * k), false, n, k, 0, EXPERT_NUM, -1);
+    for (int64_t scaleAlg : {int64_t{-1}, int64_t{1}, int64_t{2}}) {
+        auto attrs = BuildV4Attrs(-1, EXPERT_NUM, 0, EXPERT_TOKENS_TYPE_COUNT, true, QUANT_MODE_UNQUANT, {0, 16},
+                                  ROW_IDX_TYPE_GATHER);
+        attrs.push_back({"scale_alg", Ops::Transformer::AnyValue::CreateFrom<int64_t>(scaleAlg)});
+        gert::TilingContextPara tilingContextPara("MoeInitRoutingV4", inputDesc, outputDesc, attrs, &compileInfo,
+                                                  "Ascend950", A5SocInfo, 4096);
+        ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+    }
 }
 
 TEST_F(MoeInitRoutingV4Tiling, moe_init_routing_v4_tiling_false_templates_keep_topkweight)
