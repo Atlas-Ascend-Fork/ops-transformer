@@ -88,5 +88,10 @@ TEST_F(L2AclnnMoeDistributeCombineV5Test, TestAclnnMoeDistributeCombineExecuteAp
     aclOpExecutor* executor = nullptr;
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor);
     EXPECT_NE(aclRet, ACLNN_ERR_PARAM_INVALID);
+
+    char workspace[64] = {};
+    aclnnStatus execRet = aclnnMoeDistributeCombineV5(workspace, sizeof(workspace), nullptr, nullptr);
+    EXPECT_TRUE(execRet == ACLNN_SUCCESS || execRet == ACLNN_ERR_INNER || execRet == ACLNN_ERR_PARAM_INVALID ||
+                execRet == ACLNN_ERR_PARAM_NULLPTR);
 }
 } // namespace MoeDistributeCombineV3

@@ -1915,19 +1915,53 @@ static MoeDistributeCombineSetupTestParam g_testCases[] = {
      {16777216},
      0},
     {"test_aclnn_moe_distribute_combine_setup_invalid_A_with_moe_and_bs_32",
-     {512, 4096},
+     {64, 4096},
      ge::DT_BF16,
      ge::FORMAT_ND,
      {16, 6},
      ge::DT_INT32,
      ge::FORMAT_ND,
-     {24576},
+     {8192},
      ge::DT_INT32,
      ge::FORMAT_ND,
-     {192, 6144},
+     {64, 6144},
      ge::DT_INT8,
      ge::FORMAT_ND,
-     {3104},
+     {1120},
+     ge::DT_INT32,
+     ge::FORMAT_ND,
+     "group_ep",
+     2,
+     0,
+     32,
+     0,
+     0,
+     0,
+     32,
+     0,
+     2,
+     "",
+     "3510",
+     ge::GRAPH_FAILED,
+     0UL,
+     "",
+     {16777216},
+     0},
+    // A < globalBs * min(localMoe,K)=32*6=192 → hit CheckTensorShapeSizeAInMoeRank fail branch
+    {"test_aclnn_moe_distribute_combine_setup_invalid_A_moe_globalbs_too_small",
+     {128, 4096},
+     ge::DT_BF16,
+     ge::FORMAT_ND,
+     {16, 6},
+     ge::DT_INT32,
+     ge::FORMAT_ND,
+     {16384},
+     ge::DT_INT32,
+     ge::FORMAT_ND,
+     {128, 6144},
+     ge::DT_INT8,
+     ge::FORMAT_ND,
+     {2176},
      ge::DT_INT32,
      ge::FORMAT_ND,
      "group_ep",
@@ -2157,6 +2191,37 @@ TEST_F(MoeDistributeCombineSetupArch35TilingTest, TestTilingParse)
     ASSERT_NE(tilingParseFunc, nullptr);
     auto ret = tilingParseFunc(nullptr);
     ASSERT_EQ(ret, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(MoeDistributeCombineSetupArch35TilingTest, ContextDescNull)
+{
+    // 省略 context 输入（空 shape → instance 0），命中 contextDesc == nullptr
+    MoeDistributeCombineSetupTestParam param = g_testCases[0];
+    std::vector<gert::TilingContextPara::TensorDescription> inputTensorDesc_(
+        {{make_shape({}), ge::DT_INT32, ge::FORMAT_ND},
+         {make_shape(param.expandXShape), param.expandXDtype, param.expandXFormat},
+         {make_shape(param.expertIdsShape), param.expertIdsDtype, param.expertIdsFormat},
+         {make_shape(param.assistInfoShape), param.assistInfoDtype, param.assistInfoFormat}});
+    std::vector<gert::TilingContextPara::TensorDescription> outputTensorDesc_(
+        {{make_shape(param.quantExpandXShape), param.quantExpandXDtype, param.quantExpandXFormat},
+         {make_shape(param.commCmdInfoShape), param.commCmdInfoDtype, param.commCmdInfoFormat}});
+    std::vector<gert::TilingContextPara::OpAttr> attrs_(
+        {{"ep_world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.epWorldSize)},
+         {"ep_rank_id", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.epRankId)},
+         {"moe_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.moeExpertNum)},
+         {"ccl_buffer_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(DEFAULT_CCL_BUFFER_SIZE)},
+         {"expert_shard_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.expertShardType)},
+         {"shared_expert_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.sharedExpertNum)},
+         {"shared_expert_rank_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.sharedExpertRankNum)},
+         {"global_bs", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.globalBs)},
+         {"comm_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.commQuantMode)},
+         {"comm_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(param.commType)},
+         {"comm_alg", Ops::Transformer::AnyValue::CreateFrom<std::string>(param.commAlgAttr)}});
+    gert::TilingContextPara tilingContextPara(OP_NAME, inputTensorDesc_, outputTensorDesc_, attrs_, &compileInfo,
+                                              param.socVersion, CORE_NUM, UB_SIZE);
+    Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", param.epWorldSize},
+                                               {"HCCL_BUFFSIZE", 8000UL * 1024UL * 1024UL}};
+    Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, ge::GRAPH_FAILED, 0UL, "", {}, 0);
 }
 
 } // namespace MoeDistributeCombineSetupUT

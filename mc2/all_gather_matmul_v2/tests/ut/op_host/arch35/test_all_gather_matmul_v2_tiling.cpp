@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include "../all_gather_matmul_v2_host_ut_param.h"
 #include "mc2_tiling_case_executor.h"
+#include "base/registry/op_impl_space_registry_v2.h"
 
 namespace all_gather_matmul_v2_ut {
 
@@ -90,5 +91,16 @@ INSTANTIATE_TEST_SUITE_P(
     AllGatherMatmulV2, AllGatherMatmulV2Arch35TilingTest,
     testing::ValuesIn(GetCasesFromCsv<AllGatherMatmulV2TilingUtParam>(ReplaceFileExtension2Csv(__FILE__))),
     GetCaseInfoString<AllGatherMatmulV2TilingUtParam>);
+
+TEST(AllGatherMatmulV2Arch35TilingParseTest, TestTilingParse)
+{
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(spaceRegistry, nullptr);
+    auto opImpl = spaceRegistry->GetOpImpl("AllGatherMatmulV2");
+    ASSERT_NE(opImpl, nullptr);
+    auto tilingParseFunc = opImpl->tiling_parse;
+    ASSERT_NE(tilingParseFunc, nullptr);
+    ASSERT_EQ(tilingParseFunc(nullptr), ge::GRAPH_SUCCESS);
+}
 
 } // namespace all_gather_matmul_v2_ut
