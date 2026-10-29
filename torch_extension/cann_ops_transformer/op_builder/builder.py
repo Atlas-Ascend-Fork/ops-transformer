@@ -9,6 +9,8 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import fcntl
+import glob
+import hashlib
 import logging
 import os
 import shutil
@@ -188,6 +190,10 @@ class OpBuilder(ABC):
         )
         os.makedirs(ext_dir, exist_ok=True)
         lock_path = os.path.join(ext_dir, "%s.compile.lock" % self.name)
+        fprint_path = os.path.join(ext_dir, "%s.compile.fprint" % self.name)
+
+        # Lazy import avoids pulling arg_check into every builder import path.
+        from cann_ops_transformer.utils.arg_check import wrap_op_module
 
         with open(lock_path, "w") as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
@@ -196,8 +202,9 @@ class OpBuilder(ABC):
 
             self._remove_stale_torch_lock()
 
-            # Lazy import avoids pulling arg_check into every builder import path.
-            from cann_ops_transformer.utils.arg_check import wrap_op_module
+            op_module = self._try_load_cached(wrap_op_module, fprint_path)
+            if op_module is not None:
+                return op_module
 
             op_module = load(
                 name=self.name,
@@ -210,7 +217,90 @@ class OpBuilder(ABC):
             # Arg type-check proxy; ops can call through load() unchanged.
             op_module = wrap_op_module(op_module)
             OpBuilder._loaded_ops[self.name] = op_module
+            self._record_sources_fingerprint(fprint_path)
             return op_module
+
+    def _try_load_cached(self, wrap_op_module, fprint_path):
+        """Reuse a freshly built extension instead of re-running the build back end.
+
+        Called while holding the per-op compile lock. torch's build back end
+        checks staleness by re-running ninja even when nothing changed; with
+        many processes (e.g. the ranks of a distributed job) those no-op runs
+        are serialised one after another, which dominates startup time. When
+        the fingerprint recorded by the process that actually built these
+        sources matches, importing the built extension is equivalent to the
+        no-op rebuild and avoids the serialised checks.
+
+        Only the op's source files are fingerprinted; header-only changes are
+        not captured by design (set CANN_OP_BUILDER_NO_FPRINT_CACHE=1 to force
+        the full build path in such cases). Any mismatch or lookup failure
+        falls back to the full build path.
+        """
+        if os.environ.get("CANN_OP_BUILDER_NO_FPRINT_CACHE"):
+            return None
+        try:
+            from torch.utils.cpp_extension import (
+                _get_build_directory,
+                _import_module_from_library,
+            )
+
+            fingerprint = self._compute_sources_fingerprint()
+            if not fingerprint:
+                return None
+            with open(fprint_path) as f:
+                if f.read().strip() != fingerprint:
+                    return None
+            build_dir = _get_build_directory(self.name, False)
+            so_path = os.path.join(build_dir, "%s.so" % self.name)
+            if not os.path.isfile(so_path):
+                return None
+            op_module = _import_module_from_library(self.name, build_dir, True)
+            op_module = wrap_op_module(op_module)
+            OpBuilder._loaded_ops[self.name] = op_module
+            return op_module
+        except Exception:
+            return None
+
+    def _compute_sources_fingerprint(self):
+        """SHA1 over the resolved source file contents.
+
+        Returns None when a source cannot be resolved or read, so callers
+        never skip a build they cannot fingerprint.
+        """
+        digest = hashlib.sha1()
+        for src in self.get_absolute_paths(self.sources()):
+            if not isinstance(src, str):
+                return None
+            candidates = []
+            if os.path.isfile(src):
+                candidates = [src]
+            elif any(ch in src for ch in "*?["):
+                candidates = sorted(glob.glob(src))
+            if not candidates:
+                return None
+            for path in candidates:
+                try:
+                    with open(path, "rb") as f:
+                        digest.update(os.path.realpath(path).encode())
+                        digest.update(b"\0")
+                        digest.update(f.read())
+                except OSError:
+                    return None
+        return digest.hexdigest()
+
+    def _record_sources_fingerprint(self, fprint_path):
+        fingerprint = self._compute_sources_fingerprint()
+        if not fingerprint:
+            return
+        try:
+            with open(fprint_path, "w") as f:
+                f.write(fingerprint)
+        except OSError:
+            logger.warning(
+                "Failed to record source fingerprint %s: build cache reuse "
+                "will be skipped",
+                fprint_path,
+            )
 
     def _remove_stale_torch_lock(self):
         """Drop torch's FileBaton lock left by a killed JIT compile process.
