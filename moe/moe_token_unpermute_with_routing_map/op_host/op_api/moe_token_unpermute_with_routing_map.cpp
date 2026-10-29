@@ -12,6 +12,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include "moe_token_unpermute_with_routing_map.h"
 #include "opdev/op_executor.h"
 #include "opdev/op_dfx.h"
@@ -62,7 +64,9 @@ const std::tuple<aclTensor*, aclTensor*, aclTensor*, aclTensor*> MoeTokenUnpermu
         num_tokens = probsOptional->GetViewShape().GetDim(0);
     }
     if (num_tokens == -1) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Cannot get num_tokens which is needed to use, failed.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenUnpermuteWithRoutingMap",
+                                                 "probsOptional, restoreShapeOptional",
+                                                 "Cannot get num_tokens which is needed to use, failed.");
         return std::tuple<aclTensor*, aclTensor*, aclTensor*, aclTensor*>(nullptr, nullptr, nullptr, nullptr);
     }
 

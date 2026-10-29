@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include "moe_token_permute_with_ep_grad_tiling.h"
 
 namespace optiling {
@@ -28,9 +30,14 @@ const static int64_t RANGE_SIZE = 2;
 static inline ge::graphStatus GetTopKAttr(const gert::TilingContext* context, int64_t& topK)
 {
     auto attrPtr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
+    OP_CHECK_IF(attrPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrPtr",
+                    "Required attrPtr metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* topKPtr = attrPtr->GetAttrPointer<int64_t>(UNPERMUTE_WITH_EP_ARRT_TOPK);
-    OP_CHECK_NULL_WITH_CONTEXT(context, topKPtr);
+    OP_CHECK_IF(topKPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "num_topk"),
+                return ge::GRAPH_FAILED);
     topK = *topKPtr;
     return ge::GRAPH_SUCCESS;
 }
@@ -116,30 +123,50 @@ static inline ge::graphStatus MoeTokenUnpermuteWithEpInputParamCheck(const gert:
         return ge::GRAPH_FAILED;
     }
 
-    OP_CHECK_IF(inputTopK < 1, OP_LOGE(nodeName, "input num TopK cannot less than 1."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tokensShape == nullptr || indicesShape == nullptr || dataTensor0 == nullptr || dataTensor1 == nullptr,
-                OP_LOGE(nodeName, "permutedTokens or sortedIndices is nullptr."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tokensShape->GetStorageShape().GetDimNum() != 2, OP_LOGE(nodeName, "permutedTokens's shape is not 2D."),
+    OP_CHECK_IF(inputTopK < 1,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "num_topk", "input num TopK cannot less than 1."),
                 return ge::GRAPH_FAILED);
+    OP_CHECK_IF(tokensShape == nullptr || indicesShape == nullptr || dataTensor0 == nullptr || dataTensor1 == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(nodeName),
+                                                         "tokensShape, indicesShape, dataTensor0, dataTensor1",
+                                                         "permutedTokens or sortedIndices is nullptr."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        tokensShape->GetStorageShape().GetDimNum() != 2,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "permuted_tokens", "permutedTokens's shape is not 2D."),
+        return ge::GRAPH_FAILED);
 
     if (probsShape != nullptr) {
         int64_t probsDimNum = probsShape->GetStorageShape().GetDimNum();
         if (isUnpermute) {
-            OP_CHECK_IF(probsDimNum != 2, OP_LOGE(nodeName, "probs's shape(%ld) is not 2D.", probsDimNum),
+            OP_CHECK_IF(probsDimNum != 2,
+                        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                            nodeName, "probs", std::to_string(probsDimNum),
+                            "probs's shape(" + std::to_string(probsDimNum) + ") is not 2D."),
                         return ge::GRAPH_FAILED);
 
             int64_t tokensNum = probsShape->GetStorageShape().GetDim(0);
             int64_t topK = probsShape->GetStorageShape().GetDim(1);
             int64_t totalLength = indicesShape->GetStorageShape().GetDim(0);
 
-            OP_CHECK_IF(topK != inputTopK, OP_LOGE(nodeName, "input topK(%d) can not match probs' dim(1).", inputTopK),
+            OP_CHECK_IF(topK != inputTopK,
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                            nodeName, "num_topk, probs",
+                            "input topK(" + std::to_string(inputTopK) + ") can not match probs' dim(1)."),
                         return ge::GRAPH_FAILED);
             OP_CHECK_IF(totalLength != tokensNum * topK,
-                        OP_LOGE(nodeName, "permutedTokens's dim(0) is not equal to probs's dim(0) * probs's dim(1)."),
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                            nodeName, "permuted_tokens, probs",
+                            "permutedTokens's dim(0) is not equal to probs's dim(0) * probs's dim(1)."),
                         return ge::GRAPH_FAILED);
-            OP_CHECK_IF(topK > 512, OP_LOGE(nodeName, "topK can not larger than 512."), return ge::GRAPH_FAILED);
+            OP_CHECK_IF(topK > 512,
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "num_topk", "topK can not larger than 512."),
+                        return ge::GRAPH_FAILED);
         } else {
-            OP_CHECK_IF(probsDimNum != 1, OP_LOGE(nodeName, "permutedProbsGrad's shape(%ld) is not 1D.", probsDimNum),
+            OP_CHECK_IF(probsDimNum != 1,
+                        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                            nodeName, "probs_grad", std::to_string(probsDimNum),
+                            "permutedProbsGrad's shape(" + std::to_string(probsDimNum) + ") is not 1D."),
                         return ge::GRAPH_FAILED);
         }
     }
@@ -173,7 +200,9 @@ static inline ge::graphStatus Init(const gert::TilingContext* context, const int
     auto rangePtr = attrPtr->GetAttrPointer<gert::ContinuousVector>(UNPERMUTE_WITH_EP_ARRT_RANGE);
     if (rangePtr != nullptr) {
         OP_CHECK_IF(rangePtr->GetSize() != RANGE_SIZE,
-                    OP_LOGE(context->GetNodeName(), "the size of range only support 2"), return ge::GRAPH_FAILED);
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "range",
+                                                             "the size of range only support 2"),
+                    return ge::GRAPH_FAILED);
         const int64_t* rangeList = reinterpret_cast<const int64_t*>(rangePtr->GetData());
         param.input.start = rangeList[0];
         param.input.end = rangeList[1];
@@ -294,7 +323,8 @@ static inline void SetTilingKey(const gert::TilingContext* context, const bool i
             } else if (dataTensor2Type == ge::DT_BF16) {
                 param.core.tilingKey = TILINGKEY_BF16;
             } else {
-                OP_LOGE(context->GetNodeName(), "the data type of probs is incorrect");
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "probs",
+                                                         "the data type of probs is incorrect");
             }
         } else {
             // 在permute的条件下
@@ -389,7 +419,11 @@ ge::graphStatus PermuteWithEpGradTilingCompute(gert::TilingContext* context, con
     // 框架要求必须无条件分配系统 workspace(库内部原子操作等使用), 否则运行时 kernel 启动缺参会触发 VEC_ERROR
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     size_t* workSpaces = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, workSpaces);
+    OP_CHECK_IF(workSpaces == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "workSpaces",
+                    "Required workSpaces metadata is null; context->GetWorkspaceSizes(1) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     workSpaces[0] = ascendcPlatform.GetLibApiWorkSpaceSize();
     OP_LOGD(context->GetNodeName(), "system workspace size is %zu", workSpaces[0]);
 

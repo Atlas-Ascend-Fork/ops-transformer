@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include "sparse_flash_mla_metadata.h"
 #include "opdev/aicpu/aicpu_task.h"
 #include "opdev/make_op_executor.h"
@@ -61,9 +63,10 @@ const aclTensor* SparseFlashMlaMetadata(const aclTensor* cuSeqlensQOptional, con
         OP_ATTR(numHeadsQ, numHeadsKv, headDim, batchSize, maxSeqlenQ, maxSeqlenOriKv, maxSeqlenCmpKv, oriTopk, cmpTopk,
                 cmpRatio, oriMaskMode, cmpMaskMode, oriWinLeft, oriWinRight, layoutQOptional, layoutKvOptional,
                 hasOriKv, hasCmpKv, socVersion, aicCoreNum, aivCoreNum, isBatchConsistency));
-    OP_CHECK(ret == ACL_SUCCESS,
-             OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "SparseFlashMlaMetadata ADD_TO_LAUNCHER_LIST_AICPU failed."),
-             return nullptr);
+    OP_CHECK(
+        ret == ACL_SUCCESS,
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "SparseFlashMlaMetadata ADD_TO_LAUNCHER_LIST_AICPU failed."),
+        return nullptr);
     return metaData;
 }
 

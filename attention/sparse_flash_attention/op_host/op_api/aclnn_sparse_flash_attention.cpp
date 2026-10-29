@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -85,8 +87,9 @@ aclnnStatus aclnnSparseFlashAttentionGetWorkspaceSize(
     std::unique_ptr<SparseFlashAttentionOutputHolder> softmaxSumHolder;
     if (returnSoftmaxLse) {
         if (softmaxMax == nullptr || softmaxSum == nullptr) {
-            OP_LOGE(ACLNN_ERR_PARAM_NULLPTR,
-                    "when returnSoftmaxLse is true, softmaxMax and softmaxSum cannot be nullptr.");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                "SparseFlashAttention", "softmaxMax, softmaxSum",
+                "when returnSoftmaxLse is true, softmaxMax and softmaxSum cannot be nullptr.");
             return ACLNN_ERR_PARAM_NULLPTR;
         }
     } else {
@@ -94,11 +97,11 @@ aclnnStatus aclnnSparseFlashAttentionGetWorkspaceSize(
             softmaxMaxHolder = std::make_unique<SparseFlashAttentionOutputHolder>(softmaxMax, aclDataType::ACL_FLOAT);
             softmaxSumHolder = std::make_unique<SparseFlashAttentionOutputHolder>(softmaxSum, aclDataType::ACL_FLOAT);
             if (softmaxMax == nullptr) {
-                OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor softmaxMax!");
+                OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor softmaxMax!");
                 return ge::GRAPH_FAILED;
             }
             if (softmaxSum == nullptr) {
-                OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor softmaxSum!");
+                OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor softmaxSum!");
                 return ge::GRAPH_FAILED;
             }
         }

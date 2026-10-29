@@ -12,6 +12,8 @@
  * \file moe_finalize_routing_v2_ops.cc
  * \brief
  */
+#include <string>
+#include <vector>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -153,7 +155,8 @@ static ge::graphStatus CheckExpandedXShape(const gert::InferShapeContext* contex
 {
     earlyReturn = false;
     const gert::Shape* expandedXShape = context->GetInputShape(INDEX_IN_EXPANDED_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedXShape);
+    OP_CHECK_IF(expandedXShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "expanded_x"),
+                return ge::GRAPH_FAILED);
     if (IsUnknownRank(expandedXShape)) {
         SetUnknownRank(outShape);
         earlyReturn = true;
@@ -188,7 +191,8 @@ static ge::graphStatus CheckExpandedRowIdxShape(const gert::InferShapeContext* c
 {
     earlyReturn = false;
     const gert::Shape* expandedRowIdxShape = context->GetInputShape(INDEX_IN_EXPANDED_ROW_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedRowIdxShape);
+    OP_CHECK_IF(expandedRowIdxShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "expanded_row_idx"),
+                return ge::GRAPH_FAILED);
     if (IsUnknownRank(expandedRowIdxShape)) {
         SetUnknownRank(outShape);
         earlyReturn = true;
@@ -305,9 +309,14 @@ static ge::graphStatus MoeCopyShapeInput2OutputWithIdx(gert::InferShapeContext* 
 static ge::graphStatus Infershape4MoeFinalizeRoutingV2(gert::InferShapeContext* context)
 {
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* dropPadModePtr = attrs->GetAttrPointer<int64_t>(ATTR_DROP_PAD_MODE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, dropPadModePtr);
+    OP_CHECK_IF(dropPadModePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "drop_pad_mode"),
+                return ge::GRAPH_FAILED);
     const int64_t dropPadMode = *dropPadModePtr;
 
     auto outShape = context->GetOutputShape(INDEX_OUT);
@@ -355,7 +364,7 @@ static ge::graphStatus Infershape4MoeFinalizeRoutingV2(gert::InferShapeContext* 
     }
 
     const int64_t* kPtr = attrs->GetAttrPointer<int64_t>(ATTR_K);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kPtr);
+    OP_CHECK_IF(kPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "k"), return ge::GRAPH_FAILED);
     int64_t k = *kPtr;
     if (scalesInputShape != nullptr && !IsUnknownRank(scalesInputShape)) {
         int64_t scalesDim1 = scalesInputShape->GetDim(1);

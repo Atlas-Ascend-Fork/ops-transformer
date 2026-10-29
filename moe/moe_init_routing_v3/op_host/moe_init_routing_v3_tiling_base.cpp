@@ -12,6 +12,7 @@
  * \file moe_init_routing_v3_tiling_base.cpp
  * \brief
  */
+#include <string>
 #include "moe_init_routing_v3_tiling.h"
 #include "register/op_def_registry.h"
 #include "log/log.h"
@@ -29,9 +30,18 @@ static ge::graphStatus TilingPrepareForMoeInitRountingV3(gert::TilingParseContex
     OP_LOGD(context, "TilingPrepareForMoeInitRoutingV3 enter.");
 
     auto compileInfo = context->GetCompiledInfo<MoeInitRoutingV3CompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "compileInfo",
+                    "Required compileInfo metadata is null; "
+                    "context->GetCompiledInfo<MoeInitRoutingV3CompileInfo>() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     compileInfo->aivNum = ascendcPlatform.GetCoreNumAiv();
     OP_CHECK_IF((compileInfo->aivNum <= 0),

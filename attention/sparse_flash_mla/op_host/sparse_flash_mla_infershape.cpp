@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -27,7 +29,9 @@ constexpr uint32_t LAYOUT_KV_ATTR_INDEX = 7;
 
 ge::graphStatus InferShapeSparseFlashMla(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashMla", "InferShapeContext is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashMla", "context", "InferShapeContext is nullptr"),
+                return ge::GRAPH_FAILED);
     return optiling::SMLAInferShape(context, "SparseFlashMla", RETURN_SOFTMAX_INDEX, LAYOUT_Q_ATTR_INDEX,
                                     LAYOUT_KV_ATTR_INDEX);
 }

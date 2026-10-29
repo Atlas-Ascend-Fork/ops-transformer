@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include <string>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -26,9 +27,14 @@ static ge::graphStatus InferShapeForInplacePartialRotaryMul(gert::InferShapeCont
 {
     OP_LOGD(context, "Begin to do InferShapeForInplacePartialRotaryMul.");
     const gert::Shape* xShape = context->GetInputShape(INPUT_X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(xShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
     gert::Shape* yShape = context->GetOutputShape(OUTPUT_X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
+    OP_CHECK_IF(yShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "yShape",
+                    "Required yShape metadata is null; context->GetOutputShape(OUTPUT_X_INDEX) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     *yShape = *xShape;
 

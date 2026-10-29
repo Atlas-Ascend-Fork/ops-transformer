@@ -7,6 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+#include "log/log.h"
+#include <string>
 #include "opdev/common_types.h"
 #include "opdev/data_type_utils.h"
 #include "opdev/format_utils.h"
@@ -105,8 +107,9 @@ static inline bool CheckNotNull(const aclTensor* permuteTokens, const aclTensor*
     OP_CHECK_NULL(permuteTokens, return false);
     OP_CHECK_NULL(sortedIndices, return false);
     if (probsOptional == nullptr && restoreShapeOptional == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "The probsOptional and restoreShapeOptional should not be nullptr at the same time.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "MoeTokenUnpermuteWithRoutingMap", "probsOptional, restoreShapeOptional",
+            "The probsOptional and restoreShapeOptional should not be nullptr at the same time.");
         return false;
     }
     return true;
@@ -165,20 +168,24 @@ static bool CheckShapeValid(const aclTensor* permuteTokens, const aclTensor* sor
 {
     auto permuteTokenspDimNum = permuteTokens->GetViewShape().GetDimNum();
     OP_CHECK(permuteTokenspDimNum == TRANSPOSE_SHAPE_SIZE,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimension of permuteTokens should be two, but got %lu.",
-                     permuteTokenspDimNum),
+             OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                 "MoeTokenUnpermuteWithRoutingMap", "permuteTokens", std::to_string(permuteTokenspDimNum),
+                 "The dimension of permuteTokens should be two, but got " + std::to_string(permuteTokenspDimNum) + "."),
              return false);
 
     auto sortedIndicesDimNum = sortedIndices->GetViewShape().GetDimNum();
     OP_CHECK(sortedIndicesDimNum == INDEX_SHAPE,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimension of sortedIndices should be one, but got %lu.",
-                     sortedIndicesDimNum),
+             OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                 "MoeTokenUnpermuteWithRoutingMap", "sorted_indices", std::to_string(sortedIndicesDimNum),
+                 "The dimension of sortedIndices should be one, but got " + std::to_string(sortedIndicesDimNum) + "."),
              return false);
 
     auto unpermutedTokensDimNum = unpermutedTokens->GetViewShape().GetDimNum();
     OP_CHECK(unpermutedTokensDimNum == TRANSPOSE_SHAPE_SIZE,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimension of unpermutedTokensDimNum should be two, but got %lu.",
-                     unpermutedTokensDimNum),
+             OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                 "MoeTokenUnpermuteWithRoutingMap", "unpermuted_tokens", std::to_string(unpermutedTokensDimNum),
+                 "The dimension of unpermutedTokensDimNum should be two, but got " +
+                     std::to_string(unpermutedTokensDimNum) + "."),
              return false);
 
     if (routingMapOptional != nullptr) {
@@ -232,7 +239,7 @@ static aclnnStatus CheckParams(const aclTensor* permuteTokens, const aclTensor* 
 static void ViewDataType(const aclTensor* input, const op::DataType dtype)
 {
     if (input == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "view data type error! it is null.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "view data type error! it is null.");
         return;
     }
     auto tmpTensor = const_cast<aclTensor*>(input);

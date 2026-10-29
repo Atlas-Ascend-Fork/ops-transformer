@@ -12,6 +12,7 @@
  * \file moe_init_routing_v2_grad_infershape.cpp
  * \brief
  */
+#include <string>
 #include "log/log.h"
 #include "register/op_impl_registry.h"
 
@@ -112,17 +113,28 @@ static ge::graphStatus InferShape4MoeInitRoutingV2Grad(gert::InferShapeContext* 
     OP_LOGD(context->GetNodeName(), "Begin to do MoeInitRountingGradInfershape.");
     // 获取输入shape
     const gert::Shape* gradExpandedXShape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, gradExpandedXShape);
+    OP_CHECK_IF(gradExpandedXShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "grad_expanded_x"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* expandedRowIdxShape = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedRowIdxShape);
+    OP_CHECK_IF(expandedRowIdxShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "expanded_row_idx"),
+                return ge::GRAPH_FAILED);
     gert::Shape* gradXShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, gradXShape);
+    OP_CHECK_IF(gradXShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "gradXShape",
+                    "Required gradXShape metadata is null; context->GetOutputShape(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     // 获取attr
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* topKPtr = attrs->GetAttrPointer<int64_t>(0); // 0: top_k attr
-    OP_CHECK_NULL_WITH_CONTEXT(context, topKPtr);
+    OP_CHECK_IF(topKPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "top_k"),
+                return ge::GRAPH_FAILED);
     const int64_t topK = *topKPtr;
     const int64_t* dropPadModePtr = attrs->GetAttrPointer<int64_t>(1); // 1: drop_pad_mode attr
     const int64_t dropPadMode = (dropPadModePtr == nullptr) ? 0 : *dropPadModePtr;

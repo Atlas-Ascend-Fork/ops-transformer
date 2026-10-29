@@ -11,6 +11,8 @@
 #ifndef MOE_FINALIZE_ROUTING_COMMON_H
 #define MOE_FINALIZE_ROUTING_COMMON_H
 
+#include "log/log.h"
+#include <string>
 #include "aclnn_kernels/common/op_error_check.h"
 #include "external/aclnn_kernels/aclnn_platform.h"
 
@@ -148,8 +150,11 @@ static inline bool CheckFormatValid(const aclTensor* expandedX, const aclTensor*
         // aclnn converts the format of 3D tensors to NCL
         bool isSupportedFormat = format == op::Format::FORMAT_ND || (expandedXIs3D && format == op::Format::FORMAT_NCL);
         if (!isSupportedFormat) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "expandedX format is %s, only ND%s is supported.",
-                    op::ToString(format).GetString(), expandedXIs3D ? " and NCL" : "");
+            OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+                "MoeFinalizeRoutingV2", "expanded_x",
+                std::string(op::ToString(format).GetString()) + ", " + std::string(expandedXIs3D ? " and NCL" : ""),
+                "expandedX format is " + std::string(op::ToString(format).GetString()) + ", only ND" +
+                    std::string(expandedXIs3D ? " and NCL" : "") + " is supported.");
             return false;
         }
     }
@@ -161,8 +166,13 @@ static inline bool CheckFormatValid(const aclTensor* expandedX, const aclTensor*
     for (size_t i = 0; i < tensors.size(); ++i) {
         if (tensors[i] != nullptr && tensors[i]->GetViewShape().GetShapeSize() != 0) {
             if (tensors[i]->GetStorageFormat() != op::Format::FORMAT_ND) {
-                OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Tensor %s format is %s, only ND format is supported.",
-                        names[i].c_str(), op::ToString(tensors[i]->GetStorageFormat()).GetString());
+                OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+                    "MoeFinalizeRoutingV2", names[i],
+                    std::string(names[i].c_str()) + ", " +
+                        std::string(op::ToString(tensors[i]->GetStorageFormat()).GetString()),
+                    "Tensor " + std::string(names[i].c_str()) + " format is " +
+                        std::string(op::ToString(tensors[i]->GetStorageFormat()).GetString()) +
+                        ", only ND format is supported.");
                 return false;
             }
         }
@@ -180,20 +190,26 @@ static inline bool CheckShapeValid(const aclTensor* expandedX, const aclTensor* 
     size_t expandedXDimNum = expandedX->GetViewShape().GetDimNum();
     if (IsExpandedX3D(dropPadMode)) {
         if (expandedXDimNum != 3) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "expandedX should be 3D when dropPadMode is %ld, but got %zuD.",
-                    dropPadMode, expandedXDimNum);
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeFinalizeRoutingV2", "expanded_x, drop_pad_mode",
+                                                     "expandedX should be 3D when dropPadMode is " +
+                                                         std::to_string(dropPadMode) + ", but got " +
+                                                         std::to_string(expandedXDimNum) + "D.");
             return false;
         }
     } else {
         if (expandedXDimNum != 2) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "expandedX should be 2D when dropPadMode is %ld, but got %zuD.",
-                    dropPadMode, expandedXDimNum);
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeFinalizeRoutingV2", "expanded_x, drop_pad_mode",
+                                                     "expandedX should be 2D when dropPadMode is " +
+                                                         std::to_string(dropPadMode) + ", but got " +
+                                                         std::to_string(expandedXDimNum) + "D.");
             return false;
         }
     }
     if (expandedRowIdx->GetViewShape().GetDimNum() != 1) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "expandedRowIdx should be 1D, but got %zuD.",
-                expandedRowIdx->GetViewShape().GetDimNum());
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON("MoeFinalizeRoutingV2", "expanded_row_idx",
+                                                 std::to_string(expandedRowIdx->GetViewShape().GetDimNum()),
+                                                 "expandedRowIdx should be 1D, but got " +
+                                                     std::to_string(expandedRowIdx->GetViewShape().GetDimNum()) + "D.");
         return false;
     }
     std::vector<std::pair<const aclTensor*, std::string>> optional2D = {{x1Optional, "x1"},
@@ -208,14 +224,18 @@ static inline bool CheckShapeValid(const aclTensor* expandedX, const aclTensor* 
     for (const auto& item : optional2D) {
         if (item.first != nullptr && item.first->GetViewShape().GetShapeSize() != 0) {
             if (item.first->GetViewShape().GetDimNum() != 2) {
-                OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Tensor %s should be 2D, but got %zuD.", item.second.c_str(),
-                        item.first->GetViewShape().GetDimNum());
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                    "MoeFinalizeRoutingV2", item.second, std::to_string(item.first->GetViewShape().GetDimNum()),
+                    "Tensor " + std::string(item.second.c_str()) + " should be 2D, but got " +
+                        std::to_string(item.first->GetViewShape().GetDimNum()) + "D.");
                 return false;
             }
         }
     }
     if (out->GetViewShape().GetDimNum() != 2) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "out should be 2D, but got %zuD.", out->GetViewShape().GetDimNum());
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            "MoeFinalizeRoutingV2", "out", std::to_string(out->GetViewShape().GetDimNum()),
+            "out should be 2D, but got " + std::to_string(out->GetViewShape().GetDimNum()) + "D.");
         return false;
     }
     return true;

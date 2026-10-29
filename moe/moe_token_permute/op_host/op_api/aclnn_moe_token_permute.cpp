@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "aclnn_moe_token_permute.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -65,7 +67,6 @@ static inline bool CheckDtypeValidRegbase(const aclTensor* tokens, const aclTens
     }
     return true;
 }
-
 static inline bool CheckDtypeValidInt8Regbase(const aclTensor* tokens, const aclTensor* indices,
                                               const aclTensor* permuteTokensOut, const aclTensor* sortedIndicesOut)
 {
@@ -84,7 +85,6 @@ static inline bool CheckDtypeValidInt8Regbase(const aclTensor* tokens, const acl
     }
     return true;
 }
-
 static aclnnStatus CheckParamsRegbase(const aclTensor* tokens, const aclTensor* indices,
                                       const aclTensor* permuteTokensOut, const aclTensor* sortedIndicesOut)
 {
@@ -92,7 +92,6 @@ static aclnnStatus CheckParamsRegbase(const aclTensor* tokens, const aclTensor* 
     CHECK_RET(CheckDtypeValidRegbase(tokens, indices, permuteTokensOut, sortedIndicesOut), ACLNN_ERR_PARAM_INVALID);
     return ACLNN_SUCCESS;
 }
-
 } // namespace MoeTokenPermuteCheck
 
 static aclnnStatus BuildMoeInitRoutingV3Executor(const aclTensor* tokens, const aclTensor* indices,
@@ -198,7 +197,8 @@ aclnnStatus aclnnMoeTokenPermuteGetWorkspaceSize(const aclTensor* tokens, const 
                                                          sortedIndicesOut, workspaceSize, executor);
     }
     if (paddedMode) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "paddedMode only supports false currently, but got true.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermute", "padded_mode",
+                                                 "paddedMode only supports false currently, but got true.");
         return ACLNN_ERR_PARAM_INVALID;
     }
 
@@ -210,7 +210,6 @@ aclnnStatus aclnnMoeTokenPermuteGetWorkspaceSize(const aclTensor* tokens, const 
         return BuildMoeInitRoutingV3Executor(tokens, indices, permuteTokensOut, sortedIndicesOut, workspaceSize,
                                              executor);
     }
-
     aclnnStatus ret = MoeTokenPermuteCheck::CheckParamsRegbase(tokens, indices, permuteTokensOut, sortedIndicesOut);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
 
@@ -251,7 +250,6 @@ aclnnStatus aclnnMoeTokenPermute(void* workspace, uint64_t workspaceSize, aclOpE
     if (!useMoeInitRoutingV2) {
         return aclnnInnerMoeTokenPermute(workspace, workspaceSize, executor, stream);
     }
-
     L2_DFX_PHASE_2(aclnnMoeTokenPermute);
     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }

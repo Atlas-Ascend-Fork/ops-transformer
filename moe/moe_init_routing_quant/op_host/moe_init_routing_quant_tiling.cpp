@@ -12,6 +12,9 @@
  * \file moe_init_routing_quant_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <vector>
+#include <string>
 #include "moe_init_routing_quant_tiling.h"
 
 namespace optiling {
@@ -109,7 +112,10 @@ void MoeInitRoutingQuantTilingBase::Reset()
 ge::graphStatus MoeInitRoutingQuantTilingBase::GetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(opName), "platformInfo",
+                                                         "fail to get platform info"),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     if (context_->GetInputTensor(1)->GetShapeSize() <= SORT32_ALIGN_ELEMENT) {
         aivNum = 1;
@@ -139,37 +145,47 @@ ge::graphStatus MoeInitRoutingQuantTilingBase::CheckOutShape()
 
     size_t expandedXDimNnum = expandedXShape.GetDimNum();
     if (expandedXDimNnum != DIM_TWO) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of expanded_x should be 2.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expanded_x",
+                                                 "The dim number of expanded_x should be 2.");
         return ge::GRAPH_FAILED;
     }
 
     size_t expandedRowIdxDimNnum = expandedRowIdxShape.GetDimNum();
     if (expandedRowIdxDimNnum != DIM_ONE) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of expanded_row_idx should be 1.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expanded_row_idx",
+                                                 "The dim number of expanded_row_idx should be 1.");
         return ge::GRAPH_FAILED;
     }
 
     if (expandedRowIdxShape != expandedExpertIdxShape) {
-        OP_LOGE(context_->GetNodeName(), "The shape of expanded_row_idx and expanded_expert_idx should be same.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "expanded_row_idx, expanded_expert_idx",
+            "The shape of expanded_row_idx and expanded_expert_idx should be same.");
         return ge::GRAPH_FAILED;
     }
 
     if (expandedXShape.GetDim(0) !=
         std::min(moeInitRoutingTilingData.get_n(), activateNum) * moeInitRoutingTilingData.get_k()) {
-        OP_LOGE(context_->GetNodeName(), "The first dim of expanded_x should be %ld.",
-                std::min(moeInitRoutingTilingData.get_n(), activateNum) * moeInitRoutingTilingData.get_k());
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "expanded_x",
+            "The first dim of expanded_x should be " +
+                std::to_string(std::min(moeInitRoutingTilingData.get_n(), activateNum) *
+                               moeInitRoutingTilingData.get_k()) +
+                ".");
         return ge::GRAPH_FAILED;
     }
 
     if (expandedXShape.GetDim(1) != moeInitRoutingTilingData.get_cols()) {
-        OP_LOGE(context_->GetNodeName(), "The second dim of expanded_x should be %ld.",
-                moeInitRoutingTilingData.get_cols());
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "expanded_x",
+            "The second dim of expanded_x should be " + std::to_string(moeInitRoutingTilingData.get_cols()) + ".");
         return ge::GRAPH_FAILED;
     }
 
     if (expandedRowIdxShape.GetDim(0) != totalLength) {
-        OP_LOGE(context_->GetNodeName(), "The first dim of expanded_row_idx and expanded_expert_idx should be %ld.",
-                totalLength);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "expanded_row_idx, expanded_expert_idx",
+            "The first dim of expanded_row_idx and expanded_expert_idx should be " + std::to_string(totalLength) + ".");
         return ge::GRAPH_FAILED;
     }
 
@@ -187,35 +203,40 @@ ge::graphStatus MoeInitRoutingQuantTilingBase::GetShapeAttrsInfo()
 
     auto attrs = context_->GetAttrs();
     const int64_t* activateNumPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, activateNumPtr);
+    OP_CHECK_IF(activateNumPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "active_num"),
+                return ge::GRAPH_FAILED);
     activateNum = *activateNumPtr;
     OP_LOGI(context_->GetNodeName(), "activateNum is: %ld", activateNum);
 
     // 参数校验
     size_t xDimNnum = xShape.GetDimNum();
     if (xDimNnum != DIM_TWO) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of x should be 2.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "x", "The dim number of x should be 2.");
         return ge::GRAPH_FAILED;
     }
 
     size_t rowIdxDimNum = rowIdxShape.GetDimNum();
     if (rowIdxDimNum != DIM_TWO) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of row_idx should be 2.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "row_idx",
+                                                 "The dim number of row_idx should be 2.");
         return ge::GRAPH_FAILED;
     }
 
     if (rowIdxShape != expertIdxShape) {
-        OP_LOGE(context_->GetNodeName(), "The shape of row_idx and expert_idx should be same.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "row_idx, expert_idx",
+                                                 "The shape of row_idx and expert_idx should be same.");
         return ge::GRAPH_FAILED;
     }
 
     if (xShape.GetDim(0) != expertIdxShape.GetDim(0)) {
-        OP_LOGE(context_->GetNodeName(), "Input rows should be same.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "x, row_idx, expert_idx",
+                                                 "Input rows should be same.");
         return ge::GRAPH_FAILED;
     }
 
     if (activateNum < 0) {
-        OP_LOGE(context_->GetNodeName(), "active_num must be a non-negative number.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "active_num",
+                                                 "active_num must be a non-negative number.");
         return ge::GRAPH_FAILED;
     }
 
@@ -343,7 +364,12 @@ ge::graphStatus MoeInitRoutingQuantTilingBase::PostTiling()
     OP_CHECK_NULL_WITH_CONTEXT(context_, currentWorkspace);
     currentWorkspace[0] = workspaceSize_;
     auto rawTilingData = context_->GetRawTilingData();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData);
+    OP_CHECK_IF(
+        rawTilingData == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "rawTilingData",
+            "Required rawTilingData metadata is null; context_->GetRawTilingData() must provide a valid object."),
+        return ge::GRAPH_FAILED);
     moeInitRoutingTilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
     rawTilingData->SetDataSize(moeInitRoutingTilingData.GetDataSize());
     return ge::GRAPH_SUCCESS;
@@ -402,7 +428,11 @@ void MoeInitRoutingQuantTilingBase::Tinlig4VBSMultiCoreCompute(QuantVBSComputeTi
                                                      tilingData->get_lastCorePerLoopElements());
         perCoreElements -= SORT32_ALIGN_ELEMENT;
     } while (tilingData->get_lastCoreLastLoopElements() <= 0 && perCoreElements > 0);
-    OP_CHECK_IF(tilingData->get_lastCoreLastLoopElements() <= 0, OP_LOGE(opName, "vbs tiling failed"), ;);
+    if (tilingData->get_lastCoreLastLoopElements() <= 0) {
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName), "%s", "vbs tiling failed");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({Ops::Base::GetOpInfo(opName), "vbs tiling failed"}));
+    }
 }
 
 void MoeInitRoutingQuantTilingBase::Tiling4VBSCompute()

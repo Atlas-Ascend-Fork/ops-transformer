@@ -12,6 +12,7 @@
  * \file moe_init_routing_infershape.cpp
  * \brief
  */
+#include <string>
 #include "log/log.h"
 #include "register/op_impl_registry.h"
 
@@ -158,22 +159,44 @@ static ge::graphStatus InferShape4MoeInitRouting(gert::InferShapeContext* contex
     OP_LOGD(context->GetNodeName(), "Begin to do MoeInitRoutingInfershape.");
     // 获取输入shape
     const gert::Shape* xShape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(xShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
     const gert::Shape* rowIdxShape = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, rowIdxShape);
+    OP_CHECK_IF(rowIdxShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "row_idx"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* expertIdxShape = context->GetInputShape(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expertIdxShape);
+    OP_CHECK_IF(expertIdxShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "expert_idx"),
+                return ge::GRAPH_FAILED);
     gert::Shape* expandedXShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedXShape);
+    OP_CHECK_IF(
+        expandedXShape == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "expandedXShape",
+            "Required expandedXShape metadata is null; context->GetOutputShape(0) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     gert::Shape* expandedRowIdx = context->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedRowIdx);
+    OP_CHECK_IF(
+        expandedRowIdx == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "expandedRowIdx",
+            "Required expandedRowIdx metadata is null; context->GetOutputShape(1) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     gert::Shape* expandedExpertIdxShape = context->GetOutputShape(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedExpertIdxShape);
+    OP_CHECK_IF(expandedExpertIdxShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "expandedExpertIdxShape",
+                    "Required expandedExpertIdxShape metadata is null; context->GetOutputShape(2) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
     // 获取attr
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* activeNumPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, activeNumPtr);
+    OP_CHECK_IF(activeNumPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "active_num"),
+                return ge::GRAPH_FAILED);
     const int64_t activeNum = *activeNumPtr;
     ShowInputShapeInfo(context, xShape, rowIdxShape, expertIdxShape, activeNum);
 

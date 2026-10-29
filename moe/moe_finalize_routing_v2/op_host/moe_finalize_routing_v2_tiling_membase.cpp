@@ -12,6 +12,8 @@
  * \file moe_finalize_routing_v2_tiling_membase.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_finalize_routing_v2_tiling.h"
 #include "op_host/tiling_util.h"
 using namespace std;
@@ -129,7 +131,11 @@ inline static int64_t AlignFastPathParam(const int64_t value)
 ge::graphStatus MoeFinalizeRoutingV2Membase::DoGetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context_->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     totalCoreNum_ = ascendcPlatform.GetCoreNumAiv();
     uint64_t ubSize;
@@ -148,7 +154,8 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::SetParamInfo()
 
     // 获取skip1的输入数据类型
     auto expandedXInputDesc = context_->GetInputDesc(INDEX_IN_EXPAND_PERMUTED_ROWS_V2);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXInputDesc);
+    OP_CHECK_IF(expandedXInputDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_x"),
+                return ge::GRAPH_FAILED);
     dataType_ = expandedXInputDesc->GetDataType();
     inputDataTypeSize_ = ge::GetSizeByDataType(dataType_);
 
@@ -175,11 +182,13 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::DoGetShapeAttrsInfo()
 {
     offset_ = 0;
     auto expandedXShapePtr = context_->GetInputShape(INDEX_IN_EXPAND_PERMUTED_ROWS_V2);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXShapePtr);
+    OP_CHECK_IF(expandedXShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_x"),
+                return ge::GRAPH_FAILED);
     auto expandedXShape = expandedXShapePtr->GetStorageShape();
 
     auto expandedRowIdxShapePtr = context_->GetInputShape(INDEX_IN_EXPANDED_SRC_TO_DST_ROW_V2);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedRowIdxShapePtr);
+    OP_CHECK_IF(expandedRowIdxShapePtr == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_row_idx"), return ge::GRAPH_FAILED);
     auto expandedRowIdxShape = expandedRowIdxShapePtr->GetStorageShape();
 
     auto x1Shape = context_->GetOptionalInputShape(INDEX_IN_SKIP1_V2);
@@ -193,11 +202,19 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::DoGetShapeAttrsInfo()
     auto expandedExpertIdxShape = context_->GetOptionalInputShape(INDEX_IN_EXPERT_FOR_SOURCE_ROW_V2);
 
     auto yShapePtr = context_->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, yShapePtr);
+    OP_CHECK_IF(yShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "yShapePtr",
+                    "Required yShapePtr metadata is null; context_->GetOutputShape(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto yShape = yShapePtr->GetStorageShape();
 
     auto attrsPtr = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrsPtr);
+    OP_CHECK_IF(attrsPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrsPtr",
+                    "Required attrsPtr metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     dropPadMode_ = *(attrsPtr->GetAttrPointer<int64_t>(0));
 
     params.expandedXShape = expandedXShapePtr;
@@ -219,7 +236,7 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::DoGetShapeAttrsInfo()
                 return ge::GRAPH_FAILED);
     int64_t nk = expandedRowIdxShape.GetDim(DIM_INDEX_0);
     const int64_t* attrKPtr = attrsPtr->GetAttrPointer<int64_t>(ATTR_K_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrKPtr);
+    OP_CHECK_IF(attrKPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "k"), return ge::GRAPH_FAILED);
     int64_t attrK = *attrKPtr;
     k_ = attrK;
     if (scalesShape != nullptr) {
@@ -367,9 +384,15 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::DoGetShapeAttrsInfo()
         OP_LOGE_FOR_INVALID_SHAPEDIM(context_->GetNodeName(), "y", std::to_string(yShape.GetDimNum()).c_str(), "2D"),
         return ge::GRAPH_FAILED);
     auto outputDesc = context_->GetOutputDesc(INDEX_OUT);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, outputDesc);
+    OP_CHECK_IF(outputDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "outputDesc",
+                    "Required outputDesc metadata is null; context_->GetOutputDesc(INDEX_OUT) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto expandedXInputDesc = context_->GetInputDesc(INDEX_IN_EXPAND_PERMUTED_ROWS_V2);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXInputDesc);
+    OP_CHECK_IF(expandedXInputDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_x"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(expandedXInputDesc->GetDataType() != outputDesc->GetDataType(),
                 OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(context_->GetNodeName(), "y and expanded_x", "invalid",
                                                        "the dtype of y should be same with expanded_x."),
@@ -1015,7 +1038,11 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::Check310pParams()
         return ge::GRAPH_FAILED);
 
     auto attrsPtr = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrsPtr);
+    OP_CHECK_IF(attrsPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrsPtr",
+                    "Required attrsPtr metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     int64_t dropPadMode = *(attrsPtr->GetAttrPointer<int64_t>(0));
     OP_CHECK_IF(
         dropPadMode != DROP_MODE_VALUE_2,
@@ -1037,7 +1064,8 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::Check310pParams()
     auto expandedXInputDesc = context_->GetInputDesc(INDEX_IN_EXPAND_PERMUTED_ROWS_V2);
     auto expandedXDtype = expandedXInputDesc->GetDataType();
     auto scaleInputDesc = context_->GetOptionalInputDesc(INDEX_IN_SCALES_V2);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, scaleInputDesc);
+    OP_CHECK_IF(scaleInputDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scales"),
+                return ge::GRAPH_FAILED);
     auto scaleDtype = scaleInputDesc->GetDataType();
     OP_CHECK_IF(
         scaleDtype != expandedXDtype,

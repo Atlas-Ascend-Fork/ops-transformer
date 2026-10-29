@@ -7,6 +7,8 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+#include "log/log.h"
+#include <string>
 #include "fallback/fallback.h"
 #include "fallback/fallback_comm.h"
 
@@ -23,23 +25,33 @@ static graphStatus MoeComputeHostExecuteFunc(OpExecuteContext* host_api_ctx)
 {
     OP_LOGD("aclnnFallback", "MoeComputeExpertTokens fallback begin");
 
-    OP_CHECK_IF(host_api_ctx == nullptr, OP_LOGE("aclnnfallback", "host_api_ctx is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(host_api_ctx == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "host_api_ctx", "host_api_ctx is null"),
+                return GRAPH_FAILED);
 
     auto sortedExperts = host_api_ctx->GetInputTensor(SORTED_EXPERTS_INDEXQ);
-    OP_CHECK_IF(sortedExperts == nullptr, OP_LOGE("aclnnfallback", "sortedExperts is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(sortedExperts == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "sortedExperts", "sortedExperts is null"),
+                return GRAPH_FAILED);
 
     auto attrs = host_api_ctx->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OP_LOGE("aclnnfallback", "attrs is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "attrs", "attrs is null"),
+                return GRAPH_FAILED);
     const int32_t* num_experts = attrs->GetAttrPointer<int32_t>(0);
-    OP_CHECK_IF(*num_experts < 1, OP_LOGE("aclnnfallback", "num_experts can not be smaller than 1"),
+    OP_CHECK_IF(*num_experts < 1,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "num_experts",
+                                                         "num_experts can not be smaller than 1"),
                 return GRAPH_FAILED);
 
     auto output = host_api_ctx->GetOutputTensor(0);
-    OP_CHECK_IF(output == nullptr, OP_LOGE("aclnnfallback", "output is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(output == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "output", "output is null"),
+                return GRAPH_FAILED);
 
     // execute opapi
     auto api_ret = EXEC_OPAPI_CMD(aclnnMoeComputeExpertTokens, sortedExperts, *num_experts, output);
-    OP_CHECK_IF(api_ret != GRAPH_SUCCESS, OP_LOGE("aclnnfallback", "api_ret faild:%u", api_ret), return GRAPH_FAILED);
+    OP_CHECK_IF(api_ret != GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT("aclnnfallback", "api_ret faild:%u", api_ret),
+                return GRAPH_FAILED);
 
     return GRAPH_SUCCESS;
 }

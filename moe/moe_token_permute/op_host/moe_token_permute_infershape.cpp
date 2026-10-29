@@ -12,6 +12,7 @@
  * \file moe_token_permute_infershape.cpp
  * \brief
  */
+#include <string>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -28,18 +29,32 @@ static ge::graphStatus InferShape4MoeTokenPermute(gert::InferShapeContext* conte
     OP_LOGD(context->GetNodeName(), "Begin to do MoeTokenPermuteInfershape.");
     // 获取输入shape
     const gert::Shape* xShape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(xShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "tokens"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* indicesShape = context->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, indicesShape);
+    OP_CHECK_IF(indicesShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "indices"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* permuteXShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, permuteXShape);
+    OP_CHECK_IF(permuteXShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "permuteXShape",
+                    "Required permuteXShape metadata is null; context->GetOutputShape(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* sortedIndices = context->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sortedIndices);
+    OP_CHECK_IF(sortedIndices == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "sortedIndices",
+                    "Required sortedIndices metadata is null; context->GetOutputShape(1) must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     // 获取attr
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* numOutTokensPtr = attrs->GetAttrPointer<int64_t>(0);
 
     int64_t sortedIndicesLen = NEG_ONE;
@@ -49,7 +64,9 @@ static ge::graphStatus InferShape4MoeTokenPermute(gert::InferShapeContext* conte
     } else {
         int64_t IndicesDimNnum = indicesShape->GetDimNum();
         if (IndicesDimNnum != DIM_TWO && IndicesDimNnum != DIM_ONE) {
-            OP_LOGE(context->GetNodeName(), "The dim of indices should 1 or 2,but got %ld.", IndicesDimNnum);
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                context->GetNodeName(), "indices",
+                "The dim of indices should 1 or 2,but got " + std::to_string(IndicesDimNnum) + ".");
             return ge::GRAPH_FAILED;
         }
         int64_t topK = (IndicesDimNnum == 1) ? 1 : indicesShape->GetDim(1);

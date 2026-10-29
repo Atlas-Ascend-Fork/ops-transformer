@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include "moe_token_permute_with_routing_map.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
@@ -57,7 +59,7 @@ const std::array<const aclTensor*, 3> MoeTokenPermuteWithRoutingMap(const aclTen
         probsOut = executor->AllocTensor(zeroShape, tokens->GetDataType(), op::Format::FORMAT_ND);
     }
     if (probsOut == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "alloc probsOut tensor failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "alloc probsOut tensor failed.");
         return {nullptr, nullptr, nullptr};
     }
     op::Shape permuteTokensOutShape;
@@ -74,12 +76,12 @@ const std::array<const aclTensor*, 3> MoeTokenPermuteWithRoutingMap(const aclTen
 
     auto permuteTokensOut = executor->AllocTensor(permuteTokensOutShape, tokens->GetDataType(), op::Format::FORMAT_ND);
     if (permuteTokensOut == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "alloc probsOut tensor failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "alloc probsOut tensor failed.");
         return {nullptr, nullptr, nullptr};
     }
     auto sortedIndicesOut = executor->AllocTensor(probsOutShape, op::DataType::DT_INT32, op::Format::FORMAT_ND);
     if (sortedIndicesOut == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "alloc sortedIndicesOut tensor failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "alloc sortedIndicesOut tensor failed.");
         return {nullptr, nullptr, nullptr};
     }
 

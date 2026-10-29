@@ -11,6 +11,8 @@
  * \file moe_token_unpermute_with_routing_map.cc
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_token_unpermute_with_routing_map_tiling.h"
 
 namespace optiling {
@@ -218,24 +220,33 @@ static inline ge::graphStatus InputParamCheck(const gert::TilingContext* context
     auto nodeName = context->GetNodeName();
 
     OP_CHECK_IF(tokensShape == nullptr || indicesShape == nullptr || dataTensor0 == nullptr || dataTensor1 == nullptr,
-                OP_LOGE(nodeName, "[MoeTokenUnpermuteWithRoutingMap] permutedTokens or sortedIndices is nullptr."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    Ops::Base::GetOpInfo(nodeName), "tokensShape, indicesShape, dataTensor0, dataTensor1",
+                    "[MoeTokenUnpermuteWithRoutingMap] permutedTokens or sortedIndices is nullptr."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tokensShape->GetStorageShape().GetDimNum() != 2,
-                OP_LOGE(nodeName, "[MoeTokenUnpermuteWithRoutingMap] permutedTokens's shape is not 2D."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        tokensShape->GetStorageShape().GetDimNum() != 2,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "permuted_tokens, routing_map",
+                                                 "[MoeTokenUnpermuteWithRoutingMap] permutedTokens's shape is not 2D."),
+        return ge::GRAPH_FAILED);
 
     if (probsShape == nullptr) {
         int64_t topK = tokensShape->GetStorageShape().GetDim(0) / restore_shape;
-        OP_CHECK_IF(topK > 512, OP_LOGE(nodeName, "[MoeTokenUnpermuteWithRoutingMap] topK can not larger than 512."),
+        OP_CHECK_IF(topK > 512,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        nodeName, "routing_map", "[MoeTokenUnpermuteWithRoutingMap] topK can not larger than 512."),
                     return ge::GRAPH_FAILED);
     } else {
         OP_CHECK_IF(probsShape->GetStorageShape().GetDimNum() != 2,
-                    OP_LOGE(nodeName, "[MoeTokenUnpermuteWithRoutingMap] probs's shape is not 2D."),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        nodeName, "routing_map, probs", "[MoeTokenUnpermuteWithRoutingMap] probs's shape is not 2D."),
                     return ge::GRAPH_FAILED);
 
         int64_t topK = tokensShape->GetStorageShape().GetDim(0) / probsShape->GetStorageShape().GetDim(0);
 
-        OP_CHECK_IF(topK > 512, OP_LOGE(nodeName, "[MoeTokenUnpermuteWithRoutingMap] topK can not larger than 512."),
+        OP_CHECK_IF(topK > 512,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        nodeName, "routing_map", "[MoeTokenUnpermuteWithRoutingMap] topK can not larger than 512."),
                     return ge::GRAPH_FAILED);
 
         if (topK > probsShape->GetStorageShape().GetDim(1)) {
@@ -582,9 +593,14 @@ static ge::graphStatus TilingMoeTokenUnpermuteWithRoutingMap(gert::TilingContext
 {
     MoeTokenUnpermuteWithRoutingMapParam param;
     auto attrPtr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
+    OP_CHECK_IF(attrPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrPtr",
+                    "Required attrPtr metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const bool* pPadded_mode = attrPtr->GetAttrPointer<bool>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, pPadded_mode);
+    OP_CHECK_IF(pPadded_mode == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "drop_and_pad"),
+                return ge::GRAPH_FAILED);
     auto padded_mode = *pPadded_mode;
     if (padded_mode == false) {
         Init(context, param);

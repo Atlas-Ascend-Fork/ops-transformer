@@ -12,6 +12,8 @@
  * \file moe_token_unpermute_with_ep_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_token_unpermute_with_ep_tiling.h"
 
 namespace optiling {
@@ -103,34 +105,58 @@ static inline ge::graphStatus MoeTokenUnpermuteWithEpInputParamCheck(const gert:
     const int64_t* tmpTopK = context->GetAttrs()->GetAttrPointer<int64_t>(0);
     int inputTopK = *tmpTopK;
 
-    OP_CHECK_IF(inputTopK < 1, OP_LOGE(nodeName, "input num TopK cannot less than 1."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tokensShape == nullptr || indicesShape == nullptr || dataTensor0 == nullptr || dataTensor1 == nullptr,
-                OP_LOGE(nodeName, "permutedTokens or sortedIndices is nullptr."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(tokensShape->GetStorageShape().GetDimNum() != 2, OP_LOGE(nodeName, "permutedTokens's shape is not 2D."),
+    OP_CHECK_IF(inputTopK < 1,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "num_topk", "input num TopK cannot less than 1."),
                 return ge::GRAPH_FAILED);
+    OP_CHECK_IF(tokensShape == nullptr || indicesShape == nullptr || dataTensor0 == nullptr || dataTensor1 == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(nodeName),
+                                                         "tokensShape, indicesShape, dataTensor0, dataTensor1",
+                                                         "permutedTokens or sortedIndices is nullptr."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        tokensShape->GetStorageShape().GetDimNum() != 2,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "permuted_tokens", "permutedTokens's shape is not 2D."),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF(tokensShape->GetStorageShape().GetDim(0) == 0 || tokensShape->GetStorageShape().GetDim(1) == 0,
-                OP_LOGE(nodeName, "permutedTokens does not support empty tensor."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "permuted_tokens",
+                                                         "permutedTokens does not support empty tensor."),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(indicesShape->GetStorageShape().GetDim(0) == 0,
-                OP_LOGE(nodeName, "sortedIndices does not support empty tensor."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "sorted_indices",
+                                                         "sortedIndices does not support empty tensor."),
+                return ge::GRAPH_FAILED);
 
     if (probsShape != nullptr) {
         int64_t probsDimNum = probsShape->GetStorageShape().GetDimNum();
         if (isUnpermute) {
-            OP_CHECK_IF(probsDimNum != 2, OP_LOGE(nodeName, "probs's shape(%ld) is not 2D.", probsDimNum),
+            OP_CHECK_IF(probsDimNum != 2,
+                        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                            nodeName, "probs", std::to_string(probsDimNum),
+                            "probs's shape(" + std::to_string(probsDimNum) + ") is not 2D."),
                         return ge::GRAPH_FAILED);
 
             int64_t tokensNum = probsShape->GetStorageShape().GetDim(0);
             int64_t topK = probsShape->GetStorageShape().GetDim(1);
             int64_t totalLength = indicesShape->GetStorageShape().GetDim(0);
 
-            OP_CHECK_IF(topK != inputTopK, OP_LOGE(nodeName, "input topK(%d) can not match probs' dim(1).", inputTopK),
-                        return ge::GRAPH_FAILED);
+            OP_CHECK_IF(
+                topK != inputTopK,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    nodeName, "probs", "input topK(" + std::to_string(inputTopK) + ") can not match probs' dim(1)."),
+                return ge::GRAPH_FAILED);
             OP_CHECK_IF(totalLength != tokensNum * topK,
-                        OP_LOGE(nodeName, "permutedTokens's dim(0) is not equal to probs's dim(0) * probs's dim(1)."),
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                            nodeName, "permuted_tokens, probs",
+                            "permutedTokens's dim(0) is not equal to probs's dim(0) * probs's dim(1)."),
                         return ge::GRAPH_FAILED);
-            OP_CHECK_IF(topK > 512, OP_LOGE(nodeName, "topK can not larger than 512."), return ge::GRAPH_FAILED);
+            OP_CHECK_IF(topK > 512,
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(nodeName, "num_topk", "topK can not larger than 512."),
+                        return ge::GRAPH_FAILED);
         } else {
-            OP_CHECK_IF(probsDimNum != 1, OP_LOGE(nodeName, "permutedProbsGrad's shape(%ld) is not 1D.", probsDimNum),
+            OP_CHECK_IF(probsDimNum != 1,
+                        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                            nodeName, "probs", std::to_string(probsDimNum),
+                            "permutedProbsGrad's shape(" + std::to_string(probsDimNum) + ") is not 1D."),
                         return ge::GRAPH_FAILED);
         }
     }
@@ -162,7 +188,9 @@ static inline void Init(const gert::TilingContext* context, const int64_t topK, 
     auto rangePtr = attrPtr->GetAttrPointer<gert::ContinuousVector>(UNPERMUTE_WITH_EP_ARRT_RANGE);
     if (rangePtr != nullptr) {
         OP_CHECK_IF(rangePtr->GetSize() != RANGE_SIZE,
-                    OP_LOGE(context->GetNodeName(), "the size of range only support 2"), return);
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "range",
+                                                             "the size of range only support 2"),
+                    return);
         const int64_t* rangeList = reinterpret_cast<const int64_t*>(rangePtr->GetData());
         param.input.start = rangeList[0];
         param.input.end = rangeList[1];
@@ -285,7 +313,8 @@ static inline void SetTilingKey(const gert::TilingContext* context, const bool i
             } else if (dataTensor2Type == ge::DT_BF16) {
                 param.core.tilingKey = TILINGKEY_BF16;
             } else {
-                OP_LOGE(context->GetNodeName(), "the data type of probs is incorrect");
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "probs",
+                                                         "the data type of probs is incorrect");
             }
         } else {
             // 在permute的条件下

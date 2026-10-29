@@ -12,6 +12,8 @@
  * \file moe_compute_expert_tokens_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "tiling/platform/platform_ascendc.h"
 #include "op_host/tiling_util.h"
 #include <cmath>
@@ -90,15 +92,21 @@ inline static ge::graphStatus MoeComputeExpertTokensSetTilingData(gert::TilingCo
 static bool CheckParamsShape(const gert::TilingContext* context)
 {
     auto sortedExpertShapePtr = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sortedExpertShapePtr);
+    OP_CHECK_IF(sortedExpertShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "sorted_experts"),
+                return ge::GRAPH_FAILED);
     auto sortedExpertShape = sortedExpertShapePtr->GetStorageShape();
 
     auto outShapePtr = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outShapePtr);
+    OP_CHECK_IF(outShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "outShapePtr",
+                    "Required outShapePtr metadata is null; context->GetOutputShape(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto outShape = outShapePtr->GetStorageShape();
 
     auto sortedExpertTypePtr = context->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sortedExpertTypePtr);
+    OP_CHECK_IF(sortedExpertTypePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "sorted_experts"),
+                return ge::GRAPH_FAILED);
     auto sortedExpertType = sortedExpertTypePtr->GetDataType();
     int32_t dtypeSize = ge::GetSizeByDataType(sortedExpertType);
 
@@ -302,7 +310,11 @@ static inline ge::graphStatus InitPlatformTilingData(gert::TilingContext* contex
                                                      MoeComputeExpertTokensTilingData& tilingData)
 {
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     const int64_t totalCoreNum = ascendcPlatform.GetCoreNumAiv();
     const int64_t effectiveCoreNum = min(totalCoreNum, MAX_CORE_NUM);
@@ -330,7 +342,8 @@ static inline ge::graphStatus InitInputTilingData(gert::TilingContext* context,
                                                   MoeComputeExpertTokensTilingData& tilingData)
 {
     auto sortedExpertInput = context->GetInputTensor(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sortedExpertInput);
+    OP_CHECK_IF(sortedExpertInput == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "sorted_experts"),
+                return ge::GRAPH_FAILED);
     auto sortedExpertInputShape = sortedExpertInput->GetStorageShape();
     std::string sortedExpertInputDimNum = std::to_string(sortedExpertInputShape.GetDimNum());
     OP_CHECK_IF(
@@ -346,9 +359,14 @@ static inline ge::graphStatus InitInputTilingData(gert::TilingContext* context,
                 return ge::GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* numOfExpertPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, numOfExpertPtr);
+    OP_CHECK_IF(numOfExpertPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "num_experts"),
+                return ge::GRAPH_FAILED);
     const int64_t numOfExpert = *numOfExpertPtr;
     tilingData.set_numOfExpert(numOfExpert);
     std::string numOfExpertStr = std::to_string(tilingData.get_numOfExpert());
@@ -413,7 +431,12 @@ static inline ge::graphStatus SetWorkspaceAndWorkLocal(gert::TilingContext* cont
     size_t sysWorkspaceSize =
         (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context) ? SYS_WORKSPACE : LEGACY_SYS_WORKSPACE);
     size_t* userWorkspaceSize = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, userWorkspaceSize);
+    OP_CHECK_IF(userWorkspaceSize == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "userWorkspaceSize",
+                    "Required userWorkspaceSize metadata is null; context->GetWorkspaceSizes(1) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
     userWorkspaceSize[0] = userSize + sysWorkspaceSize;
     tilingData.set_userWorkspaceSize(userWorkspaceSize[0]);
     return ge::GRAPH_SUCCESS;

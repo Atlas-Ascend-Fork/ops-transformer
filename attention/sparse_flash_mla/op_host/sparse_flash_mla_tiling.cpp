@@ -13,6 +13,9 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
+#include <vector>
 #include "sparse_flash_mla_tiling.h"
 #include "checkers/checker_adapter.h"
 #include "checkers/sparse_flash_mla_checker.h"
@@ -94,7 +97,6 @@ static bool IsA5Arch(NpuArch npuArch)
 {
     return npuArch == NpuArch::DAV_3510;
 }
-
 static bool IsA6Arch(NpuArch npuArch)
 {
     return npuArch == NpuArch::DAV_9201 || npuArch == NpuArch::DAV_9202;
@@ -347,7 +349,8 @@ static std::string SMLADataTypeToSerialString(ge::DataType type)
     if (it != DATATYPE_TO_STRING_MAP.end()) {
         return it->second;
     } else {
-        OP_LOGE("sparseFlashMla", "datatype %d not support", type);
+        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON("sparseFlashMla", "data_type", std::to_string(type),
+                                              "datatype " + std::to_string(type) + " not support");
         return "UNDEFINED";
     }
 }
@@ -403,7 +406,8 @@ ge::graphStatus SMLAInfoParser::CheckUnrequiredParaExistence() const
 ge::graphStatus SMLAInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("SparseFlashMla", "opName got from TilingContext is nullptr");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashMla", "TilingContext",
+                                                 "opName got from TilingContext is nullptr");
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -413,12 +417,21 @@ ge::graphStatus SMLAInfoParser::GetOpName()
 ge::graphStatus SMLAInfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfo_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(opName_), "platformInfo_",
+                                                         "GetPlatformInfo is nullptr."),
+                return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo_);
     aivNum_ = ascendcPlatform.GetCoreNumAiv();
     aicNum_ = ascendcPlatform.GetCoreNumAic();
-    OP_CHECK_IF(aicNum_ == 0 || aivNum_ == 0, OP_LOGE(opName_, "num of core obtained is 0."), return ge::GRAPH_FAILED);
+    if (aicNum_ == 0 || aivNum_ == 0) {
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", "num of core obtained is 0.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({Ops::Base::GetOpInfo(opName_), "num of core obtained is 0."}));
+        return ge::GRAPH_FAILED;
+    }
 
     npuArch_ = ascendcPlatform.GetCurNpuArch();
     if (npuArch_ != NpuArch::DAV_2201 && npuArch_ != NpuArch::DAV_3510 && npuArch_ != NpuArch::DAV_9201 &&
@@ -471,8 +484,10 @@ void SMLAInfoParser::GetOutputParaInfo()
 ge::graphStatus SMLAInfoParser::GetAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "attrs got from ge is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        attrs == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "attrs", "attrs got from ge is nullptr"),
+        return ge::GRAPH_FAILED);
     OP_LOGI(context_->GetNodeName(), "GetAttrParaInfo start");
     opParamInfo_.softmaxScale = attrs->GetAttrPointer<float>(ATTR_SOFTMAX_SCALE_INDEX);
     opParamInfo_.cmpRatio = attrs->GetAttrPointer<uint32_t>(ATTR_CMP_RATIO_INDEX);
@@ -576,8 +591,13 @@ ge::graphStatus SMLAInfoParser::GetSMLATemplateMode()
                 } else {
                     // DSpark: oriMaskMode=0 + ori_sparse_indices on SWA kernel path.
                     if (opParamInfo_.oriMaskMode == nullptr || *opParamInfo_.oriMaskMode != 0U) {
-                        OP_LOGE(opName_, "SWA ori sparse (DSpark) requires oriMaskMode 0, but got %u.",
-                                opParamInfo_.oriMaskMode != nullptr ? *opParamInfo_.oriMaskMode : UINT32_MAX);
+                        const std::string errorReason =
+                            ("SWA ori sparse (DSpark) requires oriMaskMode 0, but got " +
+                             std::to_string(opParamInfo_.oriMaskMode != nullptr ? *opParamInfo_.oriMaskMode :
+                                                                                  UINT32_MAX) +
+                             ".");
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(opName_),
+                                                                 "ori_sparse_indices, ori_mask_mode", errorReason);
                         return ge::GRAPH_FAILED;
                     }
                     perfMode_ = SMLATemplateMode::SWA_TEMPLATE_MODE;
@@ -959,13 +979,16 @@ ge::graphStatus SMLAInfoParser::SmlaGetMagicPM()
         return ge::GRAPH_SUCCESS;
     }
     if (oriBlockSize_ <= 0) {
-        OP_LOGE(opName_, "ori block size(%d) must be greater than 0.", oriBlockSize_);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            opName_, "ori_block_size", "ori block size(" + std::to_string(oriBlockSize_) + ") must be greater than 0.");
         return ge::GRAPH_FAILED;
     }
     CalcMagicP(static_cast<uint32_t>(oriBlockSize_), oriP_, oriMLow_, oriMHigh_);
     if (opParamInfo_.cmpKv.tensor != nullptr) {
         if (cmpBlockSize_ <= 0) {
-            OP_LOGE(opName_, "cmp block size(%d) must be greater than 0.", cmpBlockSize_);
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                opName_, "cmp_block_size",
+                "cmp block size(" + std::to_string(cmpBlockSize_) + ") must be greater than 0.");
             return ge::GRAPH_FAILED;
         }
         CalcMagicP(static_cast<uint32_t>(cmpBlockSize_), cmpP_, cmpMLow_, cmpMHigh_);
@@ -1086,8 +1109,10 @@ ge::graphStatus SMLAInfoParser::GetActualseqInfo()
         }
     }
     if (!IsA5Arch(npuArch_) && !IsA6Arch(npuArch_) && IsNonEmptyOptionalTensor(opParamInfo_.cmpTopkLength.tensor)) {
-        OP_LOGE(opName_, "cmp_topk_length is reserved and does not support non-empty tensor on %s.",
-                A2_A3_PLATFORM_LOG.c_str());
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            opName_, "cmp_topk_length",
+            "cmp_topk_length is reserved and does not support non-empty tensor on " +
+                std::string(A2_A3_PLATFORM_LOG.c_str()) + ".");
         return ge::GRAPH_FAILED;
     }
     if (kvLayout_ == SMLALayout::PA_BBND) {
@@ -1215,7 +1240,7 @@ void SMLAInfoParser::GenerateInfo(SMLATilingInfo& smlaInfo)
 ge::graphStatus SMLAInfoParser::Parse(SMLATilingInfo& smlaInfo)
 {
     if (context_ == nullptr) {
-        OP_LOGE("SparseFlashAttention", "tiling context is nullptr!");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashAttention", "context_", "tiling context is nullptr!");
         return ge::GRAPH_FAILED;
     }
 
@@ -1304,9 +1329,13 @@ ge::graphStatus SMLATilingCheck::CheckDtypeSupport(const gert::CompileTimeTensor
 {
     if (desc != nullptr) {
         const auto& it = DTYPE_SUPPORT_MAP.find(name);
-        OP_CHECK_IF(it == DTYPE_SUPPORT_MAP.end(),
-                    OP_LOGE(opName_, "%s datatype support list should be specify in DTYPE_SUPPORT_MAP", name.c_str()),
-                    return ge::GRAPH_FAILED);
+        if (it == DTYPE_SUPPORT_MAP.end()) {
+            const std::string errorReason = (name + " datatype support list should be specify in DTYPE_SUPPORT_MAP");
+            OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", errorReason.c_str());
+            REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                      std::vector<const char*>({Ops::Base::GetOpInfo(opName_), errorReason.c_str()}));
+            return ge::GRAPH_FAILED;
+        }
         auto& expectDtypeList = it->second;
         OP_CHECK_IF(
             std::find(expectDtypeList.begin(), expectDtypeList.end(), desc->GetDataType()) == expectDtypeList.end(),
@@ -1332,9 +1361,13 @@ void SMLATilingCheck::LogErrorLayoutSupport(const std::vector<SMLALayout>& expec
 ge::graphStatus SMLATilingCheck::CheckLayoutSupport(const SMLALayout& actualLayout, const std::string& name) const
 {
     const auto& it = LAYOUT_SUPPORT_MAP.find(name);
-    OP_CHECK_IF(it == LAYOUT_SUPPORT_MAP.end(),
-                OP_LOGE(opName_, "%s layout support list should be specify in LAYOUT_SUPPORT_MAP", name.c_str()),
-                return ge::GRAPH_FAILED);
+    if (it == LAYOUT_SUPPORT_MAP.end()) {
+        const std::string errorReason = (name + " layout support list should be specify in LAYOUT_SUPPORT_MAP");
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", errorReason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({Ops::Base::GetOpInfo(opName_), errorReason.c_str()}));
+        return ge::GRAPH_FAILED;
+    }
     auto& expectLayoutList = it->second;
     OP_CHECK_IF(std::find(expectLayoutList.begin(), expectLayoutList.end(), actualLayout) == expectLayoutList.end(),
                 LogErrorLayoutSupport(expectLayoutList, actualLayout, name), return ge::GRAPH_FAILED);
@@ -1353,8 +1386,9 @@ void SMLATilingCheck::LogErrorNumberSupport(const std::vector<T>& expectNumberLi
             oss << ", ";
         }
     }
-    OP_LOGE(opName_, "%s %s only supports %s, but got %s", name.c_str(), subName.c_str(), oss.str().c_str(),
-            std::to_string(actualValue).c_str());
+    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, name,
+                                             name + " " + std::string(subName.c_str()) + " only supports " + oss.str() +
+                                                 ", but got " + std::string(std::to_string(actualValue).c_str()));
 }
 
 template <typename T>
@@ -1535,9 +1569,12 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaOriSparseIndices() const
     }
     if (!IsA5Arch(npuArch_) && !IsA6Arch(npuArch_)) {
         OP_CHECK_IF(smlaInfo_.perfMode != SMLATemplateMode::SWA_TEMPLATE_MODE,
-                    OP_LOGE(opName_, "ori_sparse_indices is only supported in SWA mode."), return ge::GRAPH_FAILED);
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "ori_sparse_indices",
+                                                             "ori_sparse_indices is only supported in SWA mode."),
+                    return ge::GRAPH_FAILED);
         OP_CHECK_IF(opParamInfo_.oriMaskMode == nullptr || *opParamInfo_.oriMaskMode != 0U,
-                    OP_LOGE(opName_, "ori_sparse_indices SWA (DSpark) requires oriMaskMode 0."),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "ori_sparse_indices, ori_mask_mode",
+                                                             "ori_sparse_indices SWA (DSpark) requires oriMaskMode 0."),
                     return ge::GRAPH_FAILED);
     }
     OP_CHECK_IF(opParamInfo_.oriSparseIndices.tensor->GetStorageShape().GetShapeSize() == 0,
@@ -1589,8 +1626,10 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaCmpSparseIndices() const
         const auto& indicesShape = opParamInfo_.cmpSparseIndices.tensor->GetStorageShape();
         const int64_t topk = indicesShape.GetDim(indicesShape.GetDimNum() - 1);
         OP_CHECK_IF(npuArch_ == NpuArch::DAV_2201 && (topk < 1 || topk > TOPK_LIMIT),
-                    OP_LOGE(opName_, "cmp_sparse_indices last dimension must be in [1, %u], but got %lld.", TOPK_LIMIT,
-                            static_cast<long long>(topk)),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "cmp_sparse_indices",
+                                                             "cmp_sparse_indices last dimension must be in [1, " +
+                                                                 std::to_string(TOPK_LIMIT) + "], but got " +
+                                                                 std::to_string(static_cast<long long>(topk)) + "."),
                     return ge::GRAPH_FAILED);
         if (cmpSparseIndicesLayout_ == SMLALayout::BSND) {
             OP_CHECK_IF(
@@ -1725,8 +1764,11 @@ ge::graphStatus SMLATilingCheck::CheckSingleParaCmpRatio() const
     const auto checkRatio = [this](bool isSupported, const char* expectedRatios, const char* modeName,
                                    const char* modeReason) {
         OP_CHECK_IF(!isSupported,
-                    OP_LOGE(opName_, "cmpRatio should be %s in %s on %s %s, but got %ld.", expectedRatios, modeName,
-                            A2_A3_PLATFORM_LOG.c_str(), modeReason, cmpRatio_),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        opName_, "cmp_ratio",
+                        "cmpRatio should be " + std::string(expectedRatios) + " in " + std::string(modeName) + " on " +
+                            std::string(A2_A3_PLATFORM_LOG.c_str()) + " " + std::string(modeReason) + ", but got " +
+                            std::to_string(cmpRatio_) + "."),
                     return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     };
@@ -2014,8 +2056,10 @@ ge::graphStatus SMLATilingCheck::CheckFeatureShape() const
             return ge::GRAPH_FAILED);
     } else {
         OP_CHECK_IF(!IsPowerOfTwoInRange(n1Size_, 1, 128),
-                    OP_LOGE(opName_, "q_head_num should be power of two in [1, 128] on %s, but got %u",
-                            A2_A3_PLATFORM_LOG.c_str(), n1Size_),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "query",
+                                                             "q_head_num should be power of two in [1, 128] on " +
+                                                                 std::string(A2_A3_PLATFORM_LOG.c_str()) +
+                                                                 ", but got " + std::to_string(n1Size_)),
                     return ge::GRAPH_FAILED);
     }
 
@@ -2079,8 +2123,10 @@ ge::graphStatus SMLATilingCheck::CheckFeatureShape() const
         }
     } else {
         OP_CHECK_IF(!IsPowerOfTwoInRange(gSize_, 1, 128),
-                    OP_LOGE(opName_, "group num should be power of two in [1, 128] on %s, but got %u",
-                            A2_A3_PLATFORM_LOG.c_str(), gSize_),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "query, key",
+                                                             "group num should be power of two in [1, 128] on " +
+                                                                 std::string(A2_A3_PLATFORM_LOG.c_str()) +
+                                                                 ", but got " + std::to_string(gSize_)),
                     return ge::GRAPH_FAILED);
     }
 
@@ -2150,32 +2196,45 @@ ge::graphStatus SMLATilingCheck::CheckFeatureShape() const
         if (smlaInfo_.perfMode == SMLATemplateMode::CSA_TEMPLATE_MODE ||
             smlaInfo_.perfMode == SMLATemplateMode::HCA_TEMPLATE_MODE) {
             OP_CHECK_IF(*opParamInfo_.cmpMaskMode != 3,
-                        OP_LOGE(opName_, "cmpMaskMode should be 3 on %s, but got %u", A2_A3_PLATFORM_LOG.c_str(),
-                                *opParamInfo_.cmpMaskMode),
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                            opName_, "cmp_mask_mode",
+                            "cmpMaskMode should be 3 on " + std::string(A2_A3_PLATFORM_LOG.c_str()) + ", but got " +
+                                std::to_string(*opParamInfo_.cmpMaskMode)),
                         return ge::GRAPH_FAILED);
         }
         if (hasOriSparseIndices_) {
-            OP_CHECK_IF(*opParamInfo_.oriMaskMode != 0U,
-                        OP_LOGE(opName_, "oriMaskMode must be 0 for SWA ori sparse (DSpark) on %s, but got %u.",
-                                A2_A3_PLATFORM_LOG.c_str(), *opParamInfo_.oriMaskMode),
-                        return ge::GRAPH_FAILED);
+            OP_CHECK_IF(
+                *opParamInfo_.oriMaskMode != 0U,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "ori_mask_mode",
+                                                         "oriMaskMode must be 0 for SWA ori sparse (DSpark) on " +
+                                                             std::string(A2_A3_PLATFORM_LOG.c_str()) + ", but got " +
+                                                             std::to_string(*opParamInfo_.oriMaskMode) + "."),
+                return ge::GRAPH_FAILED);
             OP_CHECK_IF(oriWinLeft_ < 0 || oriWinRight_ < 0,
-                        OP_LOGE(opName_, "ori_win_left/right should be non-negative for ori sparse SWA on %s.",
-                                A2_A3_PLATFORM_LOG.c_str()),
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                            opName_, "ori_win_left",
+                            "ori_win_left/right should be non-negative for ori sparse SWA on " +
+                                std::string(A2_A3_PLATFORM_LOG.c_str()) + "."),
                         return ge::GRAPH_FAILED);
         } else {
-            OP_CHECK_IF(*opParamInfo_.oriMaskMode != 4U,
-                        OP_LOGE(opName_, "oriMaskMode should be 4 on %s when ori_sparse_indices is empty, but got %u",
-                                A2_A3_PLATFORM_LOG.c_str(), *opParamInfo_.oriMaskMode),
-                        return ge::GRAPH_FAILED);
             OP_CHECK_IF(
-                oriWinLeft_ != 127,
-                OP_LOGE(opName_, "oriWinLeft_ should be 127 on %s when ori_sparse_indices is empty, but got %ld",
-                        A2_A3_PLATFORM_LOG.c_str(), oriWinLeft_),
+                *opParamInfo_.oriMaskMode != 4U,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    opName_, "ori_sparse_indices, ori_mask_mode",
+                    "oriMaskMode should be 4 on " + std::string(A2_A3_PLATFORM_LOG.c_str()) +
+                        " when ori_sparse_indices is empty, but got " + std::to_string(*opParamInfo_.oriMaskMode)),
                 return ge::GRAPH_FAILED);
+            OP_CHECK_IF(oriWinLeft_ != 127,
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                            opName_, "ori_sparse_indices, ori_win_left",
+                            "oriWinLeft_ should be 127 on " + std::string(A2_A3_PLATFORM_LOG.c_str()) +
+                                " when ori_sparse_indices is empty, but got " + std::to_string(oriWinLeft_)),
+                        return ge::GRAPH_FAILED);
             OP_CHECK_IF(oriWinRight_ != 0,
-                        OP_LOGE(opName_, "oriWinRight_ should be 0 on %s when ori_sparse_indices is empty, but got %ld",
-                                A2_A3_PLATFORM_LOG.c_str(), oriWinRight_),
+                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                            opName_, "ori_sparse_indices, ori_win_right",
+                            "oriWinRight_ should be 0 on " + std::string(A2_A3_PLATFORM_LOG.c_str()) +
+                                " when ori_sparse_indices is empty, but got " + std::to_string(oriWinRight_)),
                         return ge::GRAPH_FAILED);
         }
     }
@@ -2591,7 +2650,8 @@ static ge::graphStatus TilingPrepareForSparseFlashMla(gert::TilingParseContext* 
 // --------------------------Tiling函数定义---------------------------
 ge::graphStatus TilingForSparseFlashMla(gert::TilingContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OPS_REPORT_VECTOR_INNER_ERR("SparseFlashMla", "Tiling context is null."),
+    OP_CHECK_IF(context == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashMla", "context", "Tiling context is null."),
                 return ge::GRAPH_FAILED);
 
     SMLATilingInfo smlaInfo;

@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include <map>
 #include <vector>
 #include <numeric>
@@ -195,7 +197,8 @@ static std::string SFADataTypeToSerialString(ge::DataType type)
     if (sfaIt != DATATYPE_TO_STRING_MAP.end()) {
         return sfaIt->second;
     } else {
-        OP_LOGE("SparseFlashAttention", "datatype %d not support", type);
+        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON("SparseFlashAttention", "data_type", std::to_string(type),
+                                              "datatype " + std::to_string(type) + " not support");
         return "UNDEFINED";
     }
 }
@@ -269,7 +272,9 @@ ge::graphStatus SFAMlaTiling::SetTilingKey(uint64_t tilingKey) const
 ge::graphStatus SFAMlaTiling::SetWorkspaceSize(uint64_t workspaceSize) const
 {
     OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "workSpaceSize got from ge is nullptr"),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "workspace_sizes",
+                    "Failed to obtain workspace_sizes from GE context: GetWorkspaceSizes(1) returned nullptr."),
                 return ge::GRAPH_FAILED);
     size_t* workSpaces = context_->GetWorkspaceSizes(1);
     workSpaces[0] = workspaceSize;
@@ -279,7 +284,8 @@ ge::graphStatus SFAMlaTiling::SetWorkspaceSize(uint64_t workspaceSize) const
 ge::graphStatus SFAMlaTiling::SetTilingData(TilingDef& tilingData) const
 {
     OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "RawTilingData got from GE context is nullptr."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "raw_tiling_data",
+                                                         "RawTilingData got from GE context is nullptr."),
                 return ge::GRAPH_FAILED);
 
     tilingData.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
@@ -291,15 +297,22 @@ ge::graphStatus SFAMlaTiling::SetTilingData(TilingDef& tilingData) const
 ge::graphStatus SFAMlaTiling::GetPlatformInfo()
 {
     OP_CHECK_IF(sfaInfo_->platformInfo == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(sfaInfo_->opName, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(sfaInfo_->opName), "platformInfo",
+                                                         "GetPlatformInfo is nullptr."),
+                return ge::GRAPH_FAILED);
 
     auto sfaAscendcPlatform = platform_ascendc::PlatformAscendC(sfaInfo_->platformInfo);
     libapiSize_ = sfaAscendcPlatform.GetLibApiWorkSpaceSize();
     aivNum_ = sfaAscendcPlatform.GetCoreNumAiv();
     aicNum_ = sfaAscendcPlatform.GetCoreNumAic();
 
-    OP_CHECK_IF(aicNum_ == 0 || aivNum_ == 0,
-                OPS_REPORT_VECTOR_INNER_ERR(sfaInfo_->opName, "num of core obtained is 0."), return GRAPH_FAILED);
+    if (aicNum_ == 0 || aivNum_ == 0) {
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(sfaInfo_->opName), "%s", "num of core obtained is 0.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({Ops::Base::GetOpInfo(sfaInfo_->opName), "num of core obtained is 0."}));
+        return GRAPH_FAILED;
+    }
 
     return ge::GRAPH_SUCCESS;
 }
@@ -612,7 +625,8 @@ ge::graphStatus SFATilingCheck::GetExpectedShape(gert::Shape& shapeExpected, con
     } else if (layout == SFALayout::NTG) {
         shapeExpected = gert::Shape({param.N, param.T, param.G});
     } else {
-        OP_LOGE(opName_, "layout %s is unsupported", SFALayoutToSerialString(layout).c_str());
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "layout",
+                                                 "layout " + SFALayoutToSerialString(layout) + " is unsupported");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -663,9 +677,13 @@ ge::graphStatus SFATilingCheck::CheckDtypeSupport(const gert::CompileTimeTensorD
 {
     if (sfaDesc != nullptr) {
         const auto& sfaIt = DTYPE_SUPPORT_MAP.find(name);
-        OP_CHECK_IF(sfaIt == DTYPE_SUPPORT_MAP.end(),
-                    OP_LOGE(opName_, "%s datatype support list should be specify in DTYPE_SUPPORT_MAP", name.c_str()),
-                    return ge::GRAPH_FAILED);
+        if (sfaIt == DTYPE_SUPPORT_MAP.end()) {
+            const std::string errorReason = (name + " datatype support list should be specify in DTYPE_SUPPORT_MAP");
+            OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", errorReason.c_str());
+            REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                      std::vector<const char*>({Ops::Base::GetOpInfo(opName_), errorReason.c_str()}));
+            return ge::GRAPH_FAILED;
+        }
         auto& sfaExpectDtypeList = sfaIt->second;
         OP_CHECK_IF(std::find(sfaExpectDtypeList.begin(), sfaExpectDtypeList.end(), sfaDesc->GetDataType()) ==
                         sfaExpectDtypeList.end(),
@@ -749,9 +767,13 @@ void SFATilingCheck::LogErrorLayoutSupport(const std::vector<SFALayout>& expectL
 ge::graphStatus SFATilingCheck::CheckLayoutSupport(const SFALayout& actualLayout, const std::string& name) const
 {
     const auto& sfaItLayout = LAYOUT_SUPPORT_MAP.find(name);
-    OP_CHECK_IF(sfaItLayout == LAYOUT_SUPPORT_MAP.end(),
-                OP_LOGE(opName_, "%s layout support list should be specify in LAYOUT_SUPPORT_MAP", name.c_str()),
-                return ge::GRAPH_FAILED);
+    if (sfaItLayout == LAYOUT_SUPPORT_MAP.end()) {
+        const std::string errorReason = (name + " layout support list should be specify in LAYOUT_SUPPORT_MAP");
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", errorReason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({Ops::Base::GetOpInfo(opName_), errorReason.c_str()}));
+        return ge::GRAPH_FAILED;
+    }
     auto& sfaExpectLayoutList = sfaItLayout->second;
     OP_CHECK_IF(
         std::find(sfaExpectLayoutList.begin(), sfaExpectLayoutList.end(), actualLayout) == sfaExpectLayoutList.end(),
@@ -812,7 +834,6 @@ ge::graphStatus SFATilingCheck::CheckSingleParaSparseBlockSize() const
                                                       std::to_string(*opParamInfo_.sparseBlockSize).c_str(),
                                                       "Sparse_block_size only support 1"),
                 return ge::GRAPH_FAILED);
-
     OP_CHECK_IF((*opParamInfo_.sparseBlockSize <= 0 || *opParamInfo_.sparseBlockSize > 128 ||
                  (static_cast<uint64_t>(*opParamInfo_.sparseBlockSize) &
                   static_cast<uint64_t>(*opParamInfo_.sparseBlockSize - 1L)) != 0UL),
@@ -910,7 +931,8 @@ ge::graphStatus SFATilingCheck::CheckExists(const void* pointer, const std::stri
 
 ge::graphStatus SFATilingCheck::CheckNotExists(const void* pointer, const std::string& name) const
 {
-    OP_CHECK_IF(pointer != nullptr, OP_LOGE(opName_, "%s should be null", name.c_str()), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(pointer != nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, name, name + " should be null"),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1821,7 +1843,8 @@ ge::graphStatus SFAInfoParser::GetActualSeqLenQSize(int64_t& size)
 ge::graphStatus SFAInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("SparseFlashAttention", "opName got from TilingContext is nullptr");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashAttention", "TilingContext",
+                                                 "opName got from TilingContext is nullptr");
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -1831,14 +1854,21 @@ ge::graphStatus SFAInfoParser::GetOpName()
 ge::graphStatus SFAInfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OPS_REPORT_VECTOR_INNER_ERR(opName_, "GetPlatformInfo is nullptr."),
+    OP_CHECK_IF(platformInfo_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(opName_), "platformInfo_",
+                                                         "GetPlatformInfo is nullptr."),
                 return ge::GRAPH_FAILED);
 
     auto sfaAscendcPlat = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t sfaAivNum = sfaAscendcPlat.GetCoreNumAiv();
     uint32_t sfaAicNum = sfaAscendcPlat.GetCoreNumAic();
-    OP_CHECK_IF(sfaAicNum == 0 || sfaAivNum == 0, OPS_REPORT_VECTOR_INNER_ERR(opName_, "num of core obtained is 0."),
-                return GRAPH_FAILED);
+    if (sfaAicNum == 0 || sfaAivNum == 0) {
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", "num of core obtained is 0.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({Ops::Base::GetOpInfo(opName_), "num of core obtained is 0."}));
+        return GRAPH_FAILED;
+    }
 
     npuArch_ = sfaAscendcPlat.GetCurNpuArch();
     isA5_ = (npuArch_ == NpuArch::DAV_3510);
@@ -1848,7 +1878,6 @@ ge::graphStatus SFAInfoParser::GetNpuInfo()
         OPS_REPORT_VECTOR_INNER_ERR(opName_, "Npu Arch Version[%d] is not support.", static_cast<int32_t>(npuArch_));
         return GRAPH_FAILED;
     }
-
     sfaAscendcPlat.GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2CacheSize_);
 
     return ge::GRAPH_SUCCESS;
@@ -1896,8 +1925,10 @@ void SFAInfoParser::GetOutputParaInfo()
 ge::graphStatus SFAInfoParser::GetAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "attrs got from GE is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        attrs == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "attrs", "attrs got from GE is nullptr"),
+        return ge::GRAPH_FAILED);
 
     opParamInfo_.layoutQuery = attrs->GetStr(LAYOUT_QUERY_ATTR_INDEX);
     opParamInfo_.layoutKV = attrs->GetStr(LAYOUT_KV_ATTR_INDEX);
@@ -2333,7 +2364,7 @@ void SFAInfoParser::FillTilingInfoAttrsAndLayouts(SFATilingInfo& sfaInfo)
 ge::graphStatus SFAInfoParser::Parse(SFATilingInfo& sfaInfo)
 {
     if (context_ == nullptr) {
-        OP_LOGE("SparseFlashAttention", "SFATilingInfo is nullptr");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashAttention", "context_", "SFATilingInfo is nullptr");
         return ge::GRAPH_FAILED;
     }
 

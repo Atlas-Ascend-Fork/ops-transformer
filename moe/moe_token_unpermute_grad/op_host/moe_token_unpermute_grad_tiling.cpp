@@ -12,8 +12,10 @@
  * \file moe_token_unpermute_grad_tiling.cpp
  * \brief
  */
+#include <string>
 #include <iostream>
 #include "log/log.h"
+#include <vector>
 #include "register/op_impl_registry.h"
 #include "op_host/tiling_base.h"
 #include "moe_token_unpermute_grad_tiling.h"
@@ -265,7 +267,9 @@ static ge::graphStatus MoeTokenUnpermuteGradCoreSplitInfo(const gert::TilingCont
     auto rowIdMapDtype = context->GetOptionalInputDesc(INPUT_ROWIDMAP_IDX)->GetDataType();
     uint32_t rowIdMapTypeLength = GetLengthByType(rowIdMapDtype); // sizeof(int32)
     OP_CHECK_IF(tokensTypeLength == 0 || rowIdMapTypeLength == 0 || probTypeLength == 0,
-                OP_LOGE(context->GetNodeName(), "[MoeTokenUnpermuteGrad] input or rowIdMap GetLengthByType is: 0."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "unpermuted_tokens_grad, sorted_indices, probs",
+                    "[MoeTokenUnpermuteGrad] input or rowIdMap GetLengthByType is: 0."),
                 return ge::GRAPH_FAILED);
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -273,15 +277,29 @@ static ge::graphStatus MoeTokenUnpermuteGradCoreSplitInfo(const gert::TilingCont
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, totalUbSize);
 
     if (probTensor == nullptr) { // prob为None
-        OP_CHECK_IF(!CoreSplitInfoProbIsNone(tiling, tokensTypeLength, rowIdMapTypeLength, totalUbSize),
-                    OP_LOGE(context->GetNodeName(),
-                            "[MoeTokenUnpermuteGrad] In this case prob is None, split in core operation illegal."),
-                    return ge::GRAPH_FAILED);
+        if (!CoreSplitInfoProbIsNone(tiling, tokensTypeLength, rowIdMapTypeLength, totalUbSize)) {
+            OP_LOGE_LIBOPAPI_REPORT(
+                context->GetNodeName(), "%s",
+                "[MoeTokenUnpermuteGrad] In this case prob is None, split in core operation illegal.");
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1008", std::vector<const char*>({"opName", "reason"}),
+                std::vector<const char*>(
+                    {context->GetNodeName(),
+                     "[MoeTokenUnpermuteGrad] In this case prob is None, split in core operation illegal."}));
+            return ge::GRAPH_FAILED;
+        }
     } else { // prob非None
-        OP_CHECK_IF(!CoreSplitInfoProbIsNotNone(tiling, tokensTypeLength, probTypeLength, totalUbSize),
-                    OP_LOGE(context->GetNodeName(),
-                            "[MoeTokenUnpermuteGrad] In this case prob is not None, split in core operation illegal."),
-                    return ge::GRAPH_FAILED);
+        if (!CoreSplitInfoProbIsNotNone(tiling, tokensTypeLength, probTypeLength, totalUbSize)) {
+            OP_LOGE_LIBOPAPI_REPORT(
+                context->GetNodeName(), "%s",
+                "[MoeTokenUnpermuteGrad] In this case prob is not None, split in core operation illegal.");
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1008", std::vector<const char*>({"opName", "reason"}),
+                std::vector<const char*>(
+                    {context->GetNodeName(),
+                     "[MoeTokenUnpermuteGrad] In this case prob is not None, split in core operation illegal."}));
+            return ge::GRAPH_FAILED;
+        }
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -291,7 +309,8 @@ static ge::graphStatus Tiling4MoeTokenUnpermuteGrad(gert::TilingContext* context
     OP_LOGD("MoeTokenUnpermuteGradTiling tiling start");
     MoeTokenUnpermuteGradTilingData tiling;
     const gert::StorageShape* unpermutedOutputDShape = context->GetOptionalInputShape(INPUT_UNPERMUTEDOUTPUTD_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, unpermutedOutputDShape);
+    OP_CHECK_IF(unpermutedOutputDShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "unpermuted_tokens_grad"), return ge::GRAPH_FAILED);
 
     auto probTensor = context->GetOptionalInputTensor(INPUT_PROB_IDX);
     const gert::StorageShape* probShape =
@@ -301,17 +320,23 @@ static ge::graphStatus Tiling4MoeTokenUnpermuteGrad(gert::TilingContext* context
     int64_t hiddenSize = unpermutedOutputDShape->GetStorageShape().GetDim(DIM_1);
     int64_t topK = (probShape == nullptr) ? 1 : probShape->GetStorageShape().GetDim(DIM_1);
     const gert::StorageShape* sortedIndicesShape = context->GetOptionalInputShape(INPUT_ROWIDMAP_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sortedIndicesShape);
+    OP_CHECK_IF(sortedIndicesShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "sorted_indices"),
+                return ge::GRAPH_FAILED);
     int64_t numOutTokens = sortedIndicesShape->GetStorageShape().GetDim(DIM_0);
     tiling.set_tokensNum(tokensNum);
     tiling.set_topK(topK);
     tiling.set_hiddenSize(hiddenSize);
     tiling.set_numOutTokens(numOutTokens);
     OP_CHECK_IF(tokensNum == 0 || topK == 0 || hiddenSize == 0 || numOutTokens == 0,
-                OP_LOGE(context->GetNodeName(), "[MoeTokenUnpermuteGrad] input shape has 0."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(topK > 512,
-                OP_LOGE(context->GetNodeName(), "[MoeTokenUnpermuteGrad] topK only support no greater than 512."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(),
+                                                         "unpermuted_tokens_grad, probs, permuted_tokens",
+                                                         "[MoeTokenUnpermuteGrad] input shape has 0."),
                 return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        topK > 512,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "num_topk",
+                                                 "[MoeTokenUnpermuteGrad] topK only support no greater than 512."),
+        return ge::GRAPH_FAILED);
 
     MoeTokenUnpermuteGradInitSplitInfo(context, tiling); // 核间切分
     OP_LOGD("MoeTokenUnpermuteGradTiling MoeTokenUnpermuteGradInitSplitInfo finished");
@@ -329,9 +354,14 @@ static ge::graphStatus Tiling4MoeTokenUnpermuteGrad(gert::TilingContext* context
     currentWorkspace[0] = sysWorkspaceSize;
 
     auto attrPtr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
+    OP_CHECK_IF(attrPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrPtr",
+                    "Required attrPtr metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const bool* paddedModePtr = attrPtr->GetAttrPointer<bool>(ATTR_PADDEDMODE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, paddedModePtr);
+    OP_CHECK_IF(paddedModePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "padded_mode"),
+                return ge::GRAPH_FAILED);
     bool paddedMode = *paddedModePtr;
     OP_LOGD(context->GetNodeName(), ">>> [MoeTokenUnpermuteGradTiling] paddedMode: %d", paddedMode);
     uint32_t paddedModeKey = 0;

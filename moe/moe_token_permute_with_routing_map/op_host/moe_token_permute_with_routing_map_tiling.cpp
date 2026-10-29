@@ -12,6 +12,9 @@
  * \file moe_token_permute_with_routing_map_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <vector>
+#include <string>
 #include "op_host/tiling_util.h"
 #include "moe_token_permute_with_routing_map_tiling.h"
 
@@ -302,7 +305,7 @@ void MoeTokenPermuteWithRoutingMapTilingBase::Reset()
 ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::GetPlatformInfo()
 {
     auto indicesPtr = context_->GetInputTensor(1);
-    OP_CHECK_IF(indicesPtr == nullptr, OP_LOGE(opName, "fail to get input [indices]"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(indicesPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName, "indices"), return ge::GRAPH_FAILED);
 
     auto compileInfo = reinterpret_cast<const MoeTokenPermuteWithRoutingMapCompileInfo*>(context_->GetCompileInfo());
 
@@ -311,7 +314,10 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::GetPlatformInfo()
     regBase = Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_);
     if (platformInfo == nullptr) {
         aivNumLocal = compileInfo->aivNum; // Vector核数量
-        OP_CHECK_IF(compileInfo == nullptr, OP_LOGE(context_, "compile info is null"), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            compileInfo == nullptr,
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "compileInfo", "compile info is null"),
+            return ge::GRAPH_FAILED);
         aicoreParams_.ubSize = FloorAlign(compileInfo->ubSize, ONE_BLOCK_BYTE);
     } else {
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
@@ -337,16 +343,27 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::CheckOutShape()
 {
     // 获取输入shape
     const auto tokenOutput = context_->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, tokenOutput);
+    OP_CHECK_IF(tokenOutput == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "tokenOutput",
+                    "Required tokenOutput metadata is null; context_->GetOutputShape(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const gert::Shape tokensShape = tokenOutput->GetStorageShape();
     const auto indicesOutput = context_->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, indicesOutput);
+    OP_CHECK_IF(
+        indicesOutput == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "indicesOutput",
+            "Required indicesOutput metadata is null; context_->GetOutputShape(1) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     const gert::Shape IndicesShape = indicesOutput->GetStorageShape();
 
     size_t tokensDimNnum = tokensShape.GetDimNum();
     if (tokensDimNnum < DIM_TWO) {
-        OP_LOGE(context_->GetNodeName(),
-                "The dim number of Output permute_tokens should be greater than 1 but got [%lu].", tokensDimNnum);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context_->GetNodeName(), "permute_tokens", std::to_string(tokensDimNnum),
+            "The dim number of Output permute_tokens should be greater than 1 but got [" +
+                std::to_string(tokensDimNnum) + "].");
         return ge::GRAPH_FAILED;
     }
 
@@ -357,19 +374,25 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::CheckOutShape()
 
     size_t IndicesDimNnum = IndicesShape.GetDimNum();
     if (IndicesDimNnum != DIM_ONE) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of Output sort_indices should be 1.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "sorted_indices",
+                                                 "The dim number of Output sort_indices should be 1.");
         return ge::GRAPH_FAILED;
     }
 
     if (cols != moeTokenPermuteWithRoutingMapTilingData.get_cols() && !paddedMode) {
-        OP_LOGE(context_->GetNodeName(), "The hidden_size of output permuteTokens should be %ld but got %ld.",
-                moeTokenPermuteWithRoutingMapTilingData.get_cols(), cols);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "routing_map, permute_tokens",
+            "The hidden_size of output permuteTokens should be " +
+                std::to_string(moeTokenPermuteWithRoutingMapTilingData.get_cols()) + " but got " +
+                std::to_string(cols) + ".");
         return ge::GRAPH_FAILED;
     }
 
     if (tokensShape.GetDim(0) != numOutTokens && !paddedMode) {
-        OP_LOGE(context_->GetNodeName(), "The dim 0 of output permuteTokens should be %ld but got %ld.", numOutTokens,
-                tokensShape.GetDim(0));
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "permute_tokens, num_out_tokens",
+                                                 "The dim 0 of output permuteTokens should be " +
+                                                     std::to_string(numOutTokens) + " but got " +
+                                                     std::to_string(tokensShape.GetDim(0)) + ".");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -388,7 +411,11 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::InitShapeAttrsInfo()
     moeTokenPermuteWithRoutingMapTilingData.set_hasProb(hasProb);
 
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     int64_t id = 0;
     const int64_t* numOutTokensPtr = attrs->GetAttrPointer<int64_t>(id++);
     const bool* paddedModePtr = attrs->GetAttrPointer<bool>(id);
@@ -397,7 +424,9 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::InitShapeAttrsInfo()
     numTokens = tokensShape.GetDim(0);
     numExperts = IndicesShape.GetDim(0);
     if (numExperts < 0) {
-        OP_LOGE(context_->GetNodeName(), "Input attr's num_out_tokens [%ld] should be larger than 0.", numTokens);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "num_out_tokens",
+            "Input attr's num_out_tokens [" + std::to_string(numTokens) + "] should be larger than 0.");
         return ge::GRAPH_FAILED;
     }
 
@@ -410,13 +439,17 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::InitShapeAttrsInfo()
 
     size_t indicesDimNum = IndicesShape.GetDimNum();
     if (indicesDimNum != DIM_TWO && indicesDimNum != DIM_ONE) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of indices should be 2 or 1 but got [%lu].", indicesDimNum);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context_->GetNodeName(), "indices", std::to_string(indicesDimNum),
+            "The dim number of indices should be 2 or 1 but got [" + std::to_string(indicesDimNum) + "].");
         return ge::GRAPH_FAILED;
     }
 
     if (tokensShape.GetDim(0) != IndicesShape.GetDim(1)) {
-        OP_LOGE(context_->GetNodeName(), "Input token's dim 0 [%ld] should be same with routingmap's tokennum [%ld].",
-                tokensShape.GetDim(0), IndicesShape.GetDim(1));
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "tokens, routing_map",
+                                                 "Input token's dim 0 [" + std::to_string(tokensShape.GetDim(0)) +
+                                                     "] should be same with routingmap's tokennum [" +
+                                                     std::to_string(IndicesShape.GetDim(1)) + "].");
         return ge::GRAPH_FAILED;
     }
 
@@ -436,19 +469,23 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::GetShapeAttrsInfo()
 {
     ge::graphStatus status = InitShapeAttrsInfo();
     if (status != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context_->GetNodeName(), "Init Shape Attrs Info failed.");
+        OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "Init Shape Attrs Info failed.");
         return ge::GRAPH_FAILED;
     }
     if (numTokens <= 0) {
-        OP_LOGE(context_->GetNodeName(), "Input attr's num_out_tokens [%ld] should be larger than max 0.", numTokens);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "num_out_tokens",
+            "Input attr's num_out_tokens [" + std::to_string(numTokens) + "] should be larger than max 0.");
         return ge::GRAPH_FAILED;
     }
 
     int64_t topK = numOutTokens / numTokens;
 
     if (paddedMode == false && topK > MAX_INDICES_NUM) {
-        OP_LOGE(context_->GetNodeName(), "numOutTokens / numTokens [%ld] should not be larger than max topK[%ld].",
-                topK, MAX_INDICES_NUM);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "num_out_tokens",
+                                                 "numOutTokens / numTokens [" + std::to_string(topK) +
+                                                     "] should not be larger than max topK[" +
+                                                     std::to_string(MAX_INDICES_NUM) + "].");
         return ge::GRAPH_FAILED;
     }
 
@@ -466,8 +503,10 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::GetShapeAttrsInfo()
     moeTokenPermuteWithRoutingMapTilingData.set_capacity(capacity);
 
     if (totalLength >= SORT_LIMIT_LENGTH) {
-        OP_LOGE(context_->GetNodeName(), "The elements num of indices [%ld] should be less than [%ld].", totalLength,
-                SORT_LIMIT_LENGTH);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "indices",
+                                                 "The elements num of indices [" + std::to_string(totalLength) +
+                                                     "] should be less than [" + std::to_string(SORT_LIMIT_LENGTH) +
+                                                     "].");
         return ge::GRAPH_FAILED;
     }
 
@@ -650,7 +689,6 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::DoOpTiling()
         innerSize_ = cols;
         aicoreParams_.ubSize = aicoreParams_.ubSize - SIMT_UB_SIZE_BYTE;
     }
-
     sortLoopMaxElement = (aicoreParams_.ubSize - aivNum * ONE_BLOCK_BYTE) / (NUM_FOUR * NUM_TWO * NUM_FOUR) /
                          SORT32_ALIGN_ELEMENT * SORT32_ALIGN_ELEMENT;
     if (paddedMode == false) {
@@ -709,10 +747,20 @@ ge::graphStatus MoeTokenPermuteWithRoutingMapTilingBase::PostTiling()
     // 涉及核间同步的算子必须设置schedule_mode为1，独占全核
     context_->SetScheduleMode(1);
     size_t* currentWorkspace = context_->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, currentWorkspace);
+    OP_CHECK_IF(currentWorkspace == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "currentWorkspace",
+                    "Required currentWorkspace metadata is null; context_->GetWorkspaceSizes(1) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
     currentWorkspace[0] = workspaceSize_;
     auto rawTilingData = context_->GetRawTilingData();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData);
+    OP_CHECK_IF(
+        rawTilingData == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "rawTilingData",
+            "Required rawTilingData metadata is null; context_->GetRawTilingData() must provide a valid object."),
+        return ge::GRAPH_FAILED);
     moeTokenPermuteWithRoutingMapTilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
     rawTilingData->SetDataSize(moeTokenPermuteWithRoutingMapTilingData.GetDataSize());
     return ge::GRAPH_SUCCESS;
@@ -913,7 +961,12 @@ void MoeTokenPermuteWithRoutingMapTilingBase::Tiling4MaskedSelect()
 
     uint64_t numBlocks = 0;
     uint64_t ubLength = CalcMaskedSelectUb();
-    OP_CHECK_IF(ubLength == 0, OP_LOGE(opName, "Ub length is zero."), return);
+    if (ubLength == 0) {
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName), "%s", "Ub length is zero.");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({Ops::Base::GetOpInfo(opName), "Ub length is zero."}));
+        return;
+    }
 
     // 运行核数
     numBlocks = (numExperts > static_cast<int64_t>(aivUseNum)) ? aivUseNum : numExperts;
@@ -1071,11 +1124,21 @@ static ge::graphStatus TilingPrepareForMoeTokenPermuteWithRoutingMap(gert::Tilin
 {
     OP_LOGD(context->GetNodeName(), "TilingPrepareForMoeTokenPermuteWithRoutingMap start.");
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     auto compileInfo = context->GetCompiledInfo<MoeTokenPermuteWithRoutingMapCompileInfo>();
 
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(
+        compileInfo == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "compileInfo",
+            "Required compileInfo metadata is null; "
+            "context->GetCompiledInfo<MoeTokenPermuteWithRoutingMapCompileInfo>() must provide a valid object."),
+        return ge::GRAPH_FAILED);
 
     compileInfo->aivNum = ascendcPlatform.GetCoreNumAiv();
     OP_LOGD(context->GetNodeName(), "compileInfo->aivNum is %lu.", compileInfo->aivNum);

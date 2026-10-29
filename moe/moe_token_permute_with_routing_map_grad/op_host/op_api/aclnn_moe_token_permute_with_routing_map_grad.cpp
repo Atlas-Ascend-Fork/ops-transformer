@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "moe_token_permute_with_routing_map_grad.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
@@ -112,8 +114,9 @@ static inline bool CheckNotNull(const aclTensor* permutedTokenOutputGrad,
     OP_CHECK_NULL(tokensGradOut, return false);
 
     if (routingMapOptional == nullptr && permutedProbsOutputGradOptional != nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "when routingMapOptional is nullptr, permutedProbsOutputGradOptional should be nullptr.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "MoeTokenPermuteWithRoutingMapGrad", "routingMapOptional, permutedProbsOutputGradOptional",
+            "when routingMapOptional is nullptr, permutedProbsOutputGradOptional should be nullptr.");
         return false;
     }
     (void)probsGradOutOptional;
@@ -157,24 +160,28 @@ static bool CheckShapeValid(const aclTensor* permutedTokenOutputGrad, const aclT
 {
     if (permutedTokenOutputGrad != nullptr) {
         auto permutedTokenOutputGradDimNum = permutedTokenOutputGrad->GetViewShape().GetDimNum();
-        OP_CHECK(
-            permutedTokenOutputGradDimNum == TRANSPOSE_SHAPE_SIZE,
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimensions of permutedTokenOutputGrad should be two, but got %lu.",
-                    permutedTokenOutputGradDimNum),
-            return false);
+        OP_CHECK(permutedTokenOutputGradDimNum == TRANSPOSE_SHAPE_SIZE,
+                 OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                     "MoeTokenPermuteWithRoutingMapGrad", "permuted_token_output_grad",
+                     std::to_string(permutedTokenOutputGradDimNum),
+                     "The dimensions of permutedTokenOutputGrad should be two, but got " +
+                         std::to_string(permutedTokenOutputGradDimNum) + "."),
+                 return false);
     }
     if (routingMap != nullptr) {
         auto routingMapDimNum = routingMap->GetViewShape().GetDimNum();
         OP_CHECK(routingMapDimNum == TRANSPOSE_SHAPE_SIZE,
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimensions of routingMap should be two, but got %lu.",
-                         routingMapDimNum),
+                 OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                     "MoeTokenPermuteWithRoutingMapGrad", "routingMap", std::to_string(routingMapDimNum),
+                     "The dimensions of routingMap should be two, but got " + std::to_string(routingMapDimNum) + "."),
                  return false);
     }
     if (probsOptional != nullptr) {
         auto probsDimNum = probsOptional->GetViewShape().GetDimNum();
         OP_CHECK(probsDimNum == INDEX_SHAPE_1,
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimensions of probsOptional should be one, but got %lu.",
-                         probsDimNum),
+                 OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                     "MoeTokenPermuteWithRoutingMapGrad", "probsOptional", std::to_string(probsDimNum),
+                     "The dimensions of probsOptional should be one, but got " + std::to_string(probsDimNum) + "."),
                  return false);
     }
     return true;
@@ -220,11 +227,15 @@ static void CheckFormatValid(const aclTensor* permutedTokenOutputGrad, const acl
 static bool checkAttrValid(int64_t numExperts, int64_t tokensNum)
 {
     if (numExperts <= 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "numExperts should be larger than 0, but current is %ld", numExperts);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "MoeTokenPermuteWithRoutingMapGrad", "num_experts",
+            "numExperts should be larger than 0, but current is " + std::to_string(numExperts));
         return false;
     }
     if (tokensNum <= 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "tokensNum should be larger than 0, but current is %ld", tokensNum);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "MoeTokenPermuteWithRoutingMapGrad", "tokens_num",
+            "tokensNum should be larger than 0, but current is " + std::to_string(tokensNum));
         return false;
     }
     return true;
@@ -257,7 +268,7 @@ static aclnnStatus CheckParams(const aclTensor* permutedTokenOutputGrad,
 static void ViewDataType(const aclTensor* input, const op::DataType dtype)
 {
     if (input == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "view data type error! it is null.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "view data type error! it is null.");
         return;
     }
     auto tmpTensor = const_cast<aclTensor*>(input);

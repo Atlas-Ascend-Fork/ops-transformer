@@ -13,6 +13,9 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
+#include <vector>
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -71,31 +74,56 @@ static int64_t GetKvHeadNum(const gert::Shape* kvShape, const std::string& layou
 
 ge::graphStatus InferShapeSparseFlashAttention(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttention", "InferShapeContext is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashAttention", "context", "InferShapeContext is nullptr"),
+        return ge::GRAPH_FAILED);
     const gert::Shape* queryShape = context->GetInputShape(QUERY_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(queryShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "query"),
+                return ge::GRAPH_FAILED);
 
     const gert::Shape* keyShape = context->GetInputShape(KEY_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyShape);
+    OP_CHECK_IF(keyShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* attentionOutShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attentionOutShape);
+    OP_CHECK_IF(
+        attentionOutShape == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "attentionOutShape",
+            "Required attentionOutShape metadata is null; context->GetOutputShape(0) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     *attentionOutShape = *queryShape;
 
     gert::Shape* softmaxMaxShape = context->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, softmaxMaxShape);
+    OP_CHECK_IF(
+        softmaxMaxShape == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "softmaxMaxShape",
+            "Required softmaxMaxShape metadata is null; context->GetOutputShape(1) must provide a valid object."),
+        return ge::GRAPH_FAILED);
 
     gert::Shape* softmaxSumShape = context->GetOutputShape(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, softmaxSumShape);
+    OP_CHECK_IF(
+        softmaxSumShape == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "softmaxSumShape",
+            "Required softmaxSumShape metadata is null; context->GetOutputShape(2) must provide a valid object."),
+        return ge::GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const char* inputLayoutKeyPtr = attrs->GetAttrPointer<char>(LAYOUT_KEY_ATTR_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutKeyPtr);
+    OP_CHECK_IF(inputLayoutKeyPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "layout_kv"),
+                return ge::GRAPH_FAILED);
     std::string inputLayoutKeyPtrStr = std::string(inputLayoutKeyPtr);
     const bool* lse_flag = attrs->GetAttrPointer<bool>(RETURN_SOFTMAX_LSE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, lse_flag);
+    OP_CHECK_IF(lse_flag == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "return_softmax_lse"),
+                return ge::GRAPH_FAILED);
     bool return_softmax_lse = (lse_flag != nullptr) ? *lse_flag : false;
 
     int64_t kvHeadNum = GetKvHeadNum(keyShape, inputLayoutKeyPtrStr);
@@ -140,8 +168,10 @@ ge::graphStatus InferShapeSparseFlashAttention(gert::InferShapeContext* context)
 
 ge::graphStatus InferDataTypeSparseFlashAttention(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("SparseFlashAttention", "InferShapeContext is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        context == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("SparseFlashAttention", "context", "InferShapeContext is nullptr"),
+        return ge::GRAPH_FAILED);
     const auto inputDataType = context->GetInputDataType(QUERY_INPUT_INDEX);
     context->SetOutputDataType(OUTPUT_INDEX_0, inputDataType);
     context->SetOutputDataType(OUTPUT_INDEX_1, ge::DT_FLOAT);

@@ -12,6 +12,8 @@
  * \file moe_init_routing_v2_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "tiling/platform/platform_ascendc.h"
 #include "moe_init_routing_v2_tiling.h"
 #include "op_host/tiling_util.h"
@@ -196,7 +198,6 @@ ge::graphStatus MoeInitRoutingV2TilingBase::ValidateExpandedXShape(const gert::S
 
     return ge::GRAPH_SUCCESS;
 }
-
 ge::graphStatus MoeInitRoutingV2TilingBase::CheckOutShape(bool isRegbase)
 {
     auto expandedXShapePtr = context_->GetOutputShape(OUTOUT_EXPANDED_X);
@@ -240,7 +241,6 @@ ge::graphStatus MoeInitRoutingV2TilingBase::CheckOutShape(bool isRegbase)
     }
     return ge::GRAPH_SUCCESS;
 }
-
 ge::graphStatus MoeInitRoutingV2TilingBase::GetInputShapes(gert::Shape& xShape, gert::Shape& expertIdxShape)
 {
     opName = context_->GetNodeName();
@@ -265,7 +265,11 @@ ge::graphStatus MoeInitRoutingV2TilingBase::GetInputShapes(gert::Shape& xShape, 
 ge::graphStatus MoeInitRoutingV2TilingBase::GetAttrsParams()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     const int64_t* activateNumPtr = attrs->GetAttrPointer<int64_t>(ATTR_ACTIVE_ROWS);
     if (activateNumPtr != nullptr) {
@@ -1035,9 +1039,18 @@ ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForMoeInitRoutingV2(gert::TilingPa
     OP_LOGD(context, "TilingPrepareForMoeInitRountingV2 enter.");
 
     auto compileInfo = context->GetCompiledInfo<MoeInitRoutingV2CompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "compileInfo",
+                    "Required compileInfo metadata is null; "
+                    "context->GetCompiledInfo<MoeInitRoutingV2CompileInfo>() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     compileInfo->aivNum = ascendcPlatform.GetCoreNumAiv();
     OP_CHECK_IF(

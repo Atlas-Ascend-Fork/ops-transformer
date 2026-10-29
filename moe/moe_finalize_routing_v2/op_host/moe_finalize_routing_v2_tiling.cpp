@@ -12,6 +12,8 @@
  * \file moe_finalize_routing_v2_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_finalize_routing_v2_tiling.h"
 
 using namespace std;
@@ -24,7 +26,11 @@ static constexpr size_t WORKSPACE_RESERVED = static_cast<int64_t>(16 * 1024 * 10
 ge::graphStatus MoeFinalizeRoutingTilingV2::GetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context_->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     socVersion_ = ascendcPlatform.GetSocVersion();
     return DoGetPlatformInfo();
@@ -53,7 +59,12 @@ ge::graphStatus MoeFinalizeRoutingTilingV2::PostTiling()
     context_->SetTilingKey(tilingKey);
     context_->SetBlockDim(usedCoreNum_);
     size_t* workspaces = context_->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, workspaces);
+    OP_CHECK_IF(
+        workspaces == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "workspaces",
+            "Required workspaces metadata is null; context_->GetWorkspaceSizes(1) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     workspaces[0] = workspaceSize_;
     return ge::GRAPH_SUCCESS;
 }
@@ -89,9 +100,18 @@ ge::graphStatus TilingPrepareForMoeFinalizeRoutingV2(gert::TilingParseContext* c
     OP_LOGD(context, "TilingPrepareForMoeFinalizeRoutingV2 enter.");
 
     auto compileInfo = context->GetCompiledInfo<MoeFinalizeRoutingCompileInfoV2>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "compileInfo",
+                    "Required compileInfo metadata is null; "
+                    "context->GetCompiledInfo<MoeFinalizeRoutingCompileInfoV2>() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     compileInfo->aivNum = ascendcPlatform.GetCoreNumAiv();
     OP_CHECK_IF((compileInfo->aivNum <= 0),

@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include "rope_with_sin_cos_cache.h"
 #include "opdev/aicpu/aicpu_task.h"
 #include "opdev/op_log.h"
@@ -44,7 +46,8 @@ const std::tuple<aclTensor*, aclTensor*> RoepWithSinCosCacheAICore(const aclTens
         RopeWithSinCosCache, OP_INPUT(positions, queryIn, keyIn, cosSinCache), OP_OUTPUT(queryOut, keyOut),
         OP_ATTR(numQHeads, numKHeads, headSize, mropeSection, qStride, kStride, isNeoxStyle, cacheMode));
     if (retAicore != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "RoepWithSinCosCacheAICore ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR,
+                               "RoepWithSinCosCacheAICore ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return std::tuple<aclTensor*, aclTensor*>(nullptr, nullptr);
     }
     return std::tie(queryOut, keyOut);

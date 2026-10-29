@@ -12,6 +12,7 @@
  * \file moe_init_routing_v2_proto.cpp
  * \brief
  */
+#include <string>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -244,7 +245,11 @@ static ge::graphStatus InferShape4MoeInitRoutingV2(gert::InferShapeContext* cont
     OP_LOGD(context->GetNodeName(), "Begin to do MoeInitRountingV2Infershape.");
     // 获取attr
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* activeNumPtr = attrs->GetAttrPointer<int64_t>(ATTR_ACTIVE_ROWS);
     const int64_t activeNum = (activeNumPtr == nullptr) ? 0 : *activeNumPtr;
     const int64_t* expertCapacityPtr = attrs->GetAttrPointer<int64_t>(ATTR_EXPERT_CAPACITY);
@@ -264,20 +269,41 @@ static ge::graphStatus InferShape4MoeInitRoutingV2(gert::InferShapeContext* cont
 
     // 获取输入shape
     const gert::Shape* xShape = context->GetInputShape(INDEX_INPUT_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(xShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
     const gert::Shape* expertIdxShape = context->GetInputShape(INDEX_INPUT_EXPERT_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expertIdxShape);
+    OP_CHECK_IF(expertIdxShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "expert_idx"),
+                return ge::GRAPH_FAILED);
     gert::Shape* expandedXShape = context->GetOutputShape(OUTOUT_EXPANDED_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedXShape);
+    OP_CHECK_IF(expandedXShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "expandedXShape",
+                    "Required expandedXShape metadata is null; "
+                    "context->GetOutputShape(OUTOUT_EXPANDED_X) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* expandedRowIdx = context->GetOutputShape(OUTOUT_EXPANDED_ROW_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, expandedRowIdx);
+    OP_CHECK_IF(expandedRowIdx == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "expandedRowIdx",
+                    "Required expandedRowIdx metadata is null; "
+                    "context->GetOutputShape(OUTOUT_EXPANDED_ROW_IDX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* expertTokensCountOrCumsumShape = context->GetOutputShape(OUTOUT_EXPERT_TOKENS_COUNT_OR_CUMSUM);
     if (dropPadMode == 0 && expertTokensCountOrCumsumFlag > 0) {
-        OP_CHECK_NULL_WITH_CONTEXT(context, expertTokensCountOrCumsumShape);
+        OP_CHECK_IF(expertTokensCountOrCumsumShape == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        context->GetNodeName(), "expertTokensCountOrCumsumShape",
+                        "Required expertTokensCountOrCumsumShape metadata is null; "
+                        "context->GetOutputShape(OUTOUT_EXPERT_TOKENS_COUNT_OR_CUMSUM) must provide a valid object."),
+                    return ge::GRAPH_FAILED);
     }
     gert::Shape* expertTokensBeforeCapacityShape = context->GetOutputShape(OUTOUT_EXPERT_TOKENS_BEFORE_CAPACITY);
     if (dropPadMode == 1 && expertTokensBeforeCapacityFlag) {
-        OP_CHECK_NULL_WITH_CONTEXT(context, expertTokensBeforeCapacityShape);
+        OP_CHECK_IF(expertTokensBeforeCapacityShape == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        context->GetNodeName(), "expertTokensBeforeCapacityShape",
+                        "Required expertTokensBeforeCapacityShape metadata is null; "
+                        "context->GetOutputShape(OUTOUT_EXPERT_TOKENS_BEFORE_CAPACITY) must provide a valid object."),
+                    return ge::GRAPH_FAILED);
     }
 
     if (CheckInputShape(context, xShape, expertIdxShape) != ge::GRAPH_SUCCESS) {

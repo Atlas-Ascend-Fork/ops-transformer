@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include <string>
 #include "log/log.h"
 #include "register/op_impl_registry.h"
 
@@ -30,7 +31,8 @@ namespace ops {
 static ge::graphStatus InferShapeForRopeWithSinCosCache(gert::InferShapeContext* context)
 {
     if (context == nullptr) {
-        OP_LOGE("InferShape4RopeWithSinCosCache", "Context is nullptr, check failed.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("InferShape4RopeWithSinCosCache", "context",
+                                                 "Context is nullptr, check failed.");
         return GRAPH_FAILED;
     }
     if (context->GetComputeNodeInputNum() != INPUT_NODE_NUM || context->GetComputeNodeOutputNum() != OUTPUT_NODE_NUM) {
@@ -38,14 +40,26 @@ static ge::graphStatus InferShapeForRopeWithSinCosCache(gert::InferShapeContext*
     }
 
     const gert::Shape* query_in_shape = context->GetInputShape(INDEX_INPUT_QUERY_IN);
-    OP_CHECK_NULL_WITH_CONTEXT(context, query_in_shape);
+    OP_CHECK_IF(query_in_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "queryIn"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* key_in_shape = context->GetInputShape(INDEX_INPUT_KEY_IN);
-    OP_CHECK_NULL_WITH_CONTEXT(context, key_in_shape);
+    OP_CHECK_IF(key_in_shape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "keyIn"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* query_out_shape = context->GetOutputShape(INDEX_OUTPUT_QUERY_OUT);
-    OP_CHECK_NULL_WITH_CONTEXT(context, query_out_shape);
+    OP_CHECK_IF(query_out_shape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "query_out_shape",
+                    "Required query_out_shape metadata is null; "
+                    "context->GetOutputShape(INDEX_OUTPUT_QUERY_OUT) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* key_out_shape = context->GetOutputShape(INDEX_OUTPUT_KEY_OUT);
-    OP_CHECK_NULL_WITH_CONTEXT(context, key_out_shape);
+    OP_CHECK_IF(key_out_shape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "key_out_shape",
+                    "Required key_out_shape metadata is null; "
+                    "context->GetOutputShape(INDEX_OUTPUT_KEY_OUT) must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     *query_out_shape = *query_in_shape;
     *key_out_shape = *key_in_shape;

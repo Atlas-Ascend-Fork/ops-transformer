@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include <graph/utils/type_utils.h>
 #include <register/op_impl_registry.h>
 #include "err/ops_err.h"
@@ -35,16 +37,29 @@ constexpr uint32_t DIM_NUM_4 = 4;
 
 ge::graphStatus InferShapeKvQuantSparseFlashAttention(gert::InferShapeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("KvQuantSparseFlashAttention", "InferShapeContext is nullptr"),
+    OP_CHECK_IF(context == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("KvQuantSparseFlashAttention", "context",
+                                                         "InferShapeContext is nullptr"),
                 return ge::GRAPH_FAILED);
     const gert::Shape* queryShape = context->GetInputShape(QUERY_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, queryShape);
+    OP_CHECK_IF(queryShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "query"),
+                return ge::GRAPH_FAILED);
     gert::Shape* attentionOutShape = context->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attentionOutShape);
+    OP_CHECK_IF(
+        attentionOutShape == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "attentionOutShape",
+            "Required attentionOutShape metadata is null; context->GetOutputShape(0) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const char* inputLayoutQueryPtr = attrs->GetAttrPointer<char>(LAYOUT_QUERY_ATTR_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutQueryPtr);
+    OP_CHECK_IF(inputLayoutQueryPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "layout_query"),
+                return ge::GRAPH_FAILED);
     std::string inputLayoutQueryPtrStr = std::string(inputLayoutQueryPtr);
     const int64_t ropeHeadDim = *attrs->GetAttrPointer<int64_t>(ROPE_HEAD_DIM_ATTR_INDEX);
 
@@ -70,7 +85,9 @@ ge::graphStatus InferShapeKvQuantSparseFlashAttention(gert::InferShapeContext* c
 
 ge::graphStatus InferDataTypeKvQuantSparseFlashAttention(gert::InferDataTypeContext* context)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE("KvQuantSparseFlashAttention", "InferShapeContext is nullptr"),
+    OP_CHECK_IF(context == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("KvQuantSparseFlashAttention", "context",
+                                                         "InferShapeContext is nullptr"),
                 return ge::GRAPH_FAILED);
     const auto inputDataType = context->GetInputDataType(QUERY_INPUT_INDEX);
     context->SetOutputDataType(0, inputDataType);

@@ -13,6 +13,7 @@
  * \brief
  */
 
+#include <string>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -28,9 +29,14 @@ static constexpr size_t INDEX_OUT_Y = 0;
 static graphStatus InferShapeGroupedMatmulAdd(gert::InferShapeContext* context)
 {
     auto yShape = context->GetInputShape(INDEX_IN_Y);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yShape);
+    OP_CHECK_IF(yShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "y"), return ge::GRAPH_FAILED);
     auto yRefShape = context->GetOutputShape(INDEX_OUT_Y);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yRefShape);
+    OP_CHECK_IF(yRefShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "yRefShape",
+                    "Required yRefShape metadata is null; context->GetOutputShape(INDEX_OUT_Y) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     *yRefShape = *yShape;
     return GRAPH_SUCCESS;
@@ -41,7 +47,12 @@ static graphStatus InferDataTypeGroupedMatmulAdd(gert::InferDataTypeContext* con
     auto xDtype = context->GetInputDataType(INDEX_IN_X);
     auto wDtype = context->GetInputDataType(INDEX_IN_WEIGHT);
 
-    OP_CHECK_IF(xDtype != wDtype, OP_LOGE(context->GetNodeName(), "xDtype must equal to wDtype"), return GRAPH_FAILED);
+    OP_CHECK_IF(xDtype != wDtype,
+                OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(context->GetNodeName(), "x, weight",
+                                                       Ops::Base::ToString(static_cast<ge::DataType>(xDtype)) + ", " +
+                                                           Ops::Base::ToString(static_cast<ge::DataType>(wDtype)),
+                                                       "xDtype must equal to wDtype"),
+                return GRAPH_FAILED);
 
     context->SetOutputDataType(INDEX_OUT_Y, ge::DataType::DT_FLOAT);
 

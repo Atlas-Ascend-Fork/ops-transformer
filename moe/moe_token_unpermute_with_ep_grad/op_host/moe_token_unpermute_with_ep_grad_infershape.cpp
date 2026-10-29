@@ -12,6 +12,7 @@
  * \file moe_token_unpermute_with_ep_grad_infershape.cc
  * \brief
  */
+#include <string>
 #include "log/log.h"
 #include "register/op_impl_registry.h"
 #include "util/math_util.h"
@@ -36,17 +37,30 @@ static graphStatus MoeTokenUnpermuteWithEpGrad(gert::InferShapeContext* context)
     constexpr int64_t UNKNOWN_RANK_DIM_VALUE_EP = -2;
     OP_LOGD(context->GetNodeName(), "Begin to do MoeTokenUnpermuteWithEpGrad");
     const gert::Shape* permutedTokensShape = context->GetInputShape(INPUT_PERMUTED_TOKENS_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, permutedTokensShape);
+    OP_CHECK_IF(permutedTokensShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "permuted_tokens"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* unpermutedOutputDShape = context->GetInputShape(INPUT_UNPERMUTEDOUTPUTD_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, unpermutedOutputDShape);
+    OP_CHECK_IF(unpermutedOutputDShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "unpermuted_tokens_grad"), return ge::GRAPH_FAILED);
     const gert::Shape* rowIdMapShape = context->GetInputShape(INPUT_ROWIDMAP_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, rowIdMapShape);
+    OP_CHECK_IF(rowIdMapShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "sorted_indices"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* probShape = context->GetOptionalInputShape(INPUT_PROB_IDX);
 
     gert::Shape* permutedTokensGradShape = context->GetOutputShape(OUTPUT_PERMUTEDTOKENSGRAD_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, permutedTokensGradShape);
+    OP_CHECK_IF(permutedTokensGradShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "permutedTokensGradShape",
+                    "Required permutedTokensGradShape metadata is null; "
+                    "context->GetOutputShape(OUTPUT_PERMUTEDTOKENSGRAD_IDX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* probGradShape = context->GetOutputShape(OUTPUT_PROBGRAD_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, probGradShape);
+    OP_CHECK_IF(probGradShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "probGradShape",
+                    "Required probGradShape metadata is null; "
+                    "context->GetOutputShape(OUTPUT_PROBGRAD_IDX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     // permutedTokensGrad
     if (Ops::Base::IsUnknownRank(*permutedTokensShape)) { // [-2]输入
@@ -55,9 +69,11 @@ static graphStatus MoeTokenUnpermuteWithEpGrad(gert::InferShapeContext* context)
     } else {
         if (permutedTokensShape->GetDimNum() != DIM_NUM_TWO || unpermutedOutputDShape->GetDimNum() != DIM_NUM_TWO ||
             rowIdMapShape->GetDimNum() != DIM_NUM_ONE) {
-            OP_LOGE(context->GetNodeName(),
-                    "The dim number of input must be 2, indices must be 1, but got: input %zu, indices %zu",
-                    permutedTokensShape->GetDimNum(), rowIdMapShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                context->GetNodeName(), "permuted_tokens", std::to_string(rowIdMapShape->GetDimNum()),
+                "The dim number of input must be 2, indices must be 1, but got: input " +
+                    std::to_string(permutedTokensShape->GetDimNum()) + ", indices " +
+                    std::to_string(rowIdMapShape->GetDimNum()));
             return ge::GRAPH_FAILED;
         }
         uint32_t inputGradDim0 = rowIdMapShape->GetDim(DIM_0);

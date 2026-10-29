@@ -13,6 +13,9 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
+#include <vector>
 #include "rope_with_sin_cos_cache.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
@@ -91,7 +94,11 @@ static bool CheckDtypeValid(const aclTensor* positions, const aclTensor* queryIn
     auto socVersion = GetCurrentPlatformInfo().GetSocVersion();
     const auto& supportList = GetSupportDtypeList();
     if (supportList.size() == 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "support for %s is not implemented", ToString(socVersion).GetString());
+        const std::string errorReason =
+            ("support for " + std::string(ToString(socVersion).GetString()) + " is not implemented");
+        OP_LOGE_LIBOPAPI_REPORT("RopeWithSinCosCache", "%s", errorReason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1009", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({"RopeWithSinCosCache", errorReason.c_str()}));
     }
     OP_CHECK_DTYPE_NOT_SUPPORT(positions, positions_dtype_list, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(queryIn, supportList, return false);
@@ -109,40 +116,43 @@ static bool CheckShape(const aclTensor* positions, const aclTensor* queryIn, con
 {
     // 检查输入的所有shape是不是2维；
     if (queryIn->GetViewShape().GetDimNum() != DIM_NUM) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "Expected queryIn to be a vector of size 2, "
-                "but got queryIn of shape %s.",
-                op::ToString(queryIn->GetViewShape()).GetString());
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON("RopeWithSinCosCache", "queryIn",
+                                              op::ToString(queryIn->GetViewShape()).GetString(),
+                                              "Expected queryIn to be a vector of size 2, but got queryIn of shape " +
+                                                  std::string(op::ToString(queryIn->GetViewShape()).GetString()) + ".");
         return false;
     }
 
     if (keyIn->GetViewShape().GetDimNum() != DIM_NUM) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "Expected keyIn to be a vector of size 2, "
-                "but got keyIn of shape %s.",
-                op::ToString(keyIn->GetViewShape()).GetString());
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON("RopeWithSinCosCache", "keyIn",
+                                              op::ToString(keyIn->GetViewShape()).GetString(),
+                                              "Expected keyIn to be a vector of size 2, but got keyIn of shape " +
+                                                  std::string(op::ToString(keyIn->GetViewShape()).GetString()) + ".");
         return false;
     }
 
     if (cosSinCache->GetViewShape().GetDimNum() != DIM_NUM) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "Expected cosSinCache to be a vector of size 2, "
-                "but got cosSinCache of shape %s.",
-                op::ToString(cosSinCache->GetViewShape()).GetString());
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+            "RopeWithSinCosCache", "cosSinCache", op::ToString(cosSinCache->GetViewShape()).GetString(),
+            "Expected cosSinCache to be a vector of size 2, but got cosSinCache of shape " +
+                std::string(op::ToString(cosSinCache->GetViewShape()).GetString()) + ".");
         return false;
     }
 
     // 检查是否有维度为0
     if (queryIn->IsEmpty() || keyIn->IsEmpty() || cosSinCache->IsEmpty() || positions->IsEmpty()) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "RopeWithSinCosCache not support to process empty tensor currently",
-                op::ToString(positions->GetViewShape()).GetString());
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "RopeWithSinCosCache", "queryIn, keyIn, cosSinCache, positions",
+            "RopeWithSinCosCache does not support empty tensors; positions shape: " +
+                std::string(op::ToString(positions->GetViewShape()).GetString()) + ".");
         return false;
     }
 
     // 检查keyIn的1维度是不是等于queryIn的一维
     OP_CHECK(keyIn->GetViewShape()[0] == queryIn->GetViewShape()[0],
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                     "Expected keyIn.shape[0] == queryIn->GetViewShape()[0] to be true, but got false."),
+             OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                 "RopeWithSinCosCache", "queryIn, keyIn",
+                 "Expected keyIn.shape[0] == queryIn->GetViewShape()[0] to be true, but got false."),
              return false);
     // 检查输入和输出的shape 是否相同
     OP_CHECK_SHAPE_NOT_EQUAL(queryOut, queryIn, return false);
@@ -158,18 +168,25 @@ static bool CheckPositionsShape(const aclTensor* positions, const aclTensor* que
     int64_t numTokens = queryIn->GetViewShape()[DIM_ZERO];
     if (!isMrope) {
         OP_CHECK(positionsShape.GetDimNum() == DIM_ONE && positionsShape[DIM_ZERO] == numTokens,
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Expected positions shape to be [%ld] in rope mode, but got %s.",
-                         numTokens, op::ToString(positionsShape).GetString()),
+                 OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                     "RopeWithSinCosCache", "positions",
+                     std::to_string(numTokens) + ", " + std::string(op::ToString(positionsShape).GetString()),
+                     "Expected positions shape to be [" + std::to_string(numTokens) + "] in rope mode, but got " +
+                         std::string(op::ToString(positionsShape).GetString()) + "."),
                  return false);
         return true;
     }
 
-    OP_CHECK(positionsShape.GetDimNum() == DIM_NUM &&
-                 positionsShape[DIM_ZERO] == static_cast<int64_t>(mropeSectionSize) &&
-                 positionsShape[DIM_ONE] == numTokens,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Expected positions shape to be [%lu, %ld] in mrope mode, but got %s.",
-                     mropeSectionSize, numTokens, op::ToString(positionsShape).GetString()),
-             return false);
+    OP_CHECK(
+        positionsShape.GetDimNum() == DIM_NUM && positionsShape[DIM_ZERO] == static_cast<int64_t>(mropeSectionSize) &&
+            positionsShape[DIM_ONE] == numTokens,
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON("RopeWithSinCosCache", "positions, mropeSection",
+                                               std::to_string(mropeSectionSize) + ", " + std::to_string(numTokens) +
+                                                   ", " + std::string(op::ToString(positionsShape).GetString()),
+                                               "Expected positions shape to be [" + std::to_string(mropeSectionSize) +
+                                                   ", " + std::to_string(numTokens) + "] in mrope mode, but got " +
+                                                   std::string(op::ToString(positionsShape).GetString()) + "."),
+        return false);
     return true;
 }
 
@@ -215,20 +232,20 @@ static aclnnStatus CheckParams(const aclTensor* positions, const aclTensor* quer
     uint64_t mropeSectionSize = 0U;
     aclGetIntArraySize(mropeSection, &mropeSectionSize);
     OP_CHECK((mropeSectionSize == 3 || mropeSectionSize == 4),
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                     "[aclnnRopeWithSinCosCache] Expected mropeSectionSize is 3 or 4, "
-                     "but got %ld.",
-                     mropeSectionSize),
+             OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                 "RopeWithSinCosCache", "mropeSection",
+                 "[aclnnRopeWithSinCosCache] Expected mropeSectionSize is 3 or 4, but got " +
+                     std::to_string(mropeSectionSize) + "."),
              return ACLNN_ERR_PARAM_INVALID);
     std::vector<int64_t> mropeSectionIn;
     int64_t mropeSectionSum = 0;
     mropeSectionIn.reserve(mropeSectionSize);
     for (size_t i = 0; i < mropeSectionSize; ++i) {
         OP_CHECK(static_cast<int64_t>((*mropeSection)[i]) >= 0,
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                         "[aclnnRopeWithSinCosCache] The value of mropeSection must be non-negative, "
-                         "but got %ld.",
-                         static_cast<int64_t>((*mropeSection)[i])),
+                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                     "RopeWithSinCosCache", "mropeSection",
+                     "[aclnnRopeWithSinCosCache] The value of mropeSection must be non-negative, but got " +
+                         std::to_string(static_cast<int64_t>((*mropeSection)[i])) + "."),
                  return ACLNN_ERR_PARAM_INVALID);
         int64_t val = static_cast<int64_t>((*mropeSection)[i]);
         mropeSectionIn.push_back(val);
@@ -239,14 +256,15 @@ static aclnnStatus CheckParams(const aclTensor* positions, const aclTensor* quer
     if (mropeSectionIn[0] > 0) {
         CHECK_RET(CheckPositionsShape(positions, queryIn, true, mropeSectionSize), ACLNN_ERR_PARAM_INVALID);
         OP_CHECK(mropeSectionSum * 2 == rotary_dim,
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                         "[aclnnRopeWithSinCosCache] The accumulated value of mropeSection"
-                         "should be equal to rotaryDim/2, but got %ld.",
-                         mropeSectionSum),
+                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("RopeWithSinCosCache", "mropeSection",
+                                                          "[aclnnRopeWithSinCosCache] The accumulated value of "
+                                                          "mropeSectionshould be equal to rotaryDim/2, but got " +
+                                                              std::to_string(mropeSectionSum) + "."),
                  return ACLNN_ERR_PARAM_INVALID);
         OP_CHECK(CheckMropeSection(mropeSectionIn, mropeSupportList),
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "[aclnnRopeWithSinCosCache] The input mropeSection "
-                                                  "must be in the supported list."),
+                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                     "RopeWithSinCosCache", "mropeSection",
+                     "[aclnnRopeWithSinCosCache] The input mropeSection must be in the supported list."),
                  return ACLNN_ERR_PARAM_INVALID);
     } else {
         CHECK_RET(CheckPositionsShape(positions, queryIn, false, 0), ACLNN_ERR_PARAM_INVALID);
@@ -350,8 +368,9 @@ aclnnStatus aclnnRopeWithSinCosCacheV2GetWorkspaceSize(const aclTensor* position
                    DFX_OUT(queryOut, keyOut));
 
     OP_CHECK(CheckCacheMode(cacheMode, cacheModeSupportList),
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "[aclnnRopeWithSinCosCache] cacheMode only support 0 or 1, but got %ld",
-                     cacheMode),
+             OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                 "RopeWithSinCosCache", "cacheMode",
+                 "[aclnnRopeWithSinCosCache] cacheMode only support 0 or 1, but got " + std::to_string(cacheMode)),
              return ACLNN_ERR_PARAM_INVALID);
 
     return aclnnRopeWithSinCosCacheGetWorkspaceSizeCommon(positions, queryIn, keyIn, cosSinCache, mropeSection,

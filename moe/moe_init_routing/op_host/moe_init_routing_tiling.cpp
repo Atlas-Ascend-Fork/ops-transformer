@@ -12,6 +12,9 @@
  * \file moe_init_routing_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include "err/ops_err.h"
+#include <string>
 #include "tiling/platform/platform_ascendc.h"
 #include "op_host/tiling_util.h"
 #include "moe_init_routing_tiling.h"
@@ -207,9 +210,14 @@ ge::graphStatus MoeInitRountingTilingBase::GetShapeAttrsInfo()
     const gert::Shape expertIdxShape = context_->GetInputShape(2)->GetStorageShape();
 
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* activateNumPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, activateNumPtr);
+    OP_CHECK_IF(activateNumPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "active_num"),
+                return ge::GRAPH_FAILED);
     activateNum = *activateNumPtr;
     OP_LOGI(context_->GetNodeName(), "activateNum is: %ld", activateNum);
 

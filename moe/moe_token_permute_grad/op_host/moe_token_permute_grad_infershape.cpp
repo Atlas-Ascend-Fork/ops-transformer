@@ -28,7 +28,7 @@ static ge::graphStatus InferShapeForMoeTokenPermuteGrad(gert::InferShapeContext*
     int64_t topk = *top_k;
     if (topk <= 0) {
         std::string topkStr = std::to_string(topk);
-        OP_LOGE_WITH_INVALID_ATTR(context->GetNodeName(), "num_topk", topkStr.c_str(), "greater than 0");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "num_topk", topkStr, "must be greater than 0");
         return GRAPH_FAILED;
     }
     int64_t tokens_num = permuted_inputs_shape->GetDim(0) / topk;

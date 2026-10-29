@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "aclnn_moe_token_permute_grad.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -81,7 +83,8 @@ aclnnStatus aclnnMoeTokenPermuteGradGetWorkspaceSize(const aclTensor* permutedOu
                                                              out, workspaceSize, executor);
     }
     if (paddedMode) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "paddedMode only supports false currently, but got true.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermuteGrad", "padded_mode",
+                                                 "paddedMode only supports false currently, but got true.");
         return ACLNN_ERR_PARAM_INVALID;
     }
 
@@ -125,7 +128,6 @@ aclnnStatus aclnnMoeTokenPermuteGrad(void* workspace, uint64_t workspaceSize, ac
     if (!useMoeInitRoutingV2Grad) {
         return aclnnInnerMoeTokenPermuteGrad(workspace, workspaceSize, executor, stream);
     }
-
     L2_DFX_PHASE_2(aclnnMoeTokenPermuteGrad);
     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }

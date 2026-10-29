@@ -8,6 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
+#include <vector>
 #include "fallback/fallback.h"
 #include "fallback/fallback_comm.h"
 
@@ -49,7 +52,10 @@ static aclIntArray* CreateExpertRange(const std::vector<int64_t>& range)
         return nullptr;
     }
     static const auto aclCreateIntArray = reinterpret_cast<CreateIntArrayFunc>(GetOpApiFuncAddr("aclCreateIntArray"));
-    OP_CHECK_IF(aclCreateIntArray == nullptr, OP_LOGE("aclnnfallback", "aclCreateIntArray is null"), return nullptr);
+    OP_CHECK_IF(
+        aclCreateIntArray == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "aclCreateIntArray", "aclCreateIntArray is null"),
+        return nullptr);
     return aclCreateIntArray(range.data(), range.size());
 }
 
@@ -66,7 +72,10 @@ public:
         }
         static const auto aclDestroyIntArray =
             reinterpret_cast<DestroyIntArrayFunc>(GetOpApiFuncAddr("aclDestroyIntArray"));
-        OP_CHECK_IF(aclDestroyIntArray == nullptr, OP_LOGE("aclnnfallback", "aclDestroyIntArray is null"), return);
+        OP_CHECK_IF(aclDestroyIntArray == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "aclDestroyIntArray",
+                                                             "aclDestroyIntArray is null"),
+                    return);
         aclDestroyIntArray(range_);
     }
 
@@ -83,14 +92,20 @@ static graphStatus MoeFinalizeRoutingV2HostExecuteFunc(OpExecuteContext* host_ap
 {
     OP_LOGD("aclnnFallback", "MoeFinalizeRoutingV2 fallback begin");
 
-    OP_CHECK_IF(host_api_ctx == nullptr, OP_LOGE("aclnnfallback", "host_api_ctx is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(host_api_ctx == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "host_api_ctx", "host_api_ctx is null"),
+                return GRAPH_FAILED);
 
     auto expanded_permuted_rows = host_api_ctx->GetInputTensor(EXPANDED_PERMUTED_ROWS_INDEX);
-    OP_CHECK_IF(expanded_permuted_rows == nullptr, OP_LOGE("aclnnfallback", "expanded_permuted_rows is null"),
+    OP_CHECK_IF(expanded_permuted_rows == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "expanded_permuted_rows",
+                                                         "expanded_permuted_rows is null"),
                 return GRAPH_FAILED);
 
     auto expanded_src_to_dst_row = host_api_ctx->GetInputTensor(EXPANDED_SRC_TO_DST_ROW_INDEX);
-    OP_CHECK_IF(expanded_src_to_dst_row == nullptr, OP_LOGE("aclnnfallback", "expanded_src_to_dst_row is null"),
+    OP_CHECK_IF(expanded_src_to_dst_row == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "expanded_src_to_dst_row",
+                                                         "expanded_src_to_dst_row is null"),
                 return GRAPH_FAILED);
 
     auto skip1 = host_api_ctx->GetOptionalInputTensor(SKIP1_INDEX);
@@ -112,7 +127,8 @@ static graphStatus MoeFinalizeRoutingV2HostExecuteFunc(OpExecuteContext* host_ap
     auto v = host_api_ctx->GetOptionalInputTensor(V_INDEX);
 
     auto attrs = host_api_ctx->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OP_LOGE("aclnnfallback", "attrs is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "attrs", "attrs is null"),
+                return GRAPH_FAILED);
     const int64_t* mode = attrs->GetAttrPointer<int64_t>(0);
     const gert::ContinuousVector* zero_expert_range_ptr = attrs->GetAttrPointer<gert::ContinuousVector>(1);
     const gert::ContinuousVector* copy_expert_range_ptr = attrs->GetAttrPointer<gert::ContinuousVector>(2);
@@ -130,14 +146,16 @@ static graphStatus MoeFinalizeRoutingV2HostExecuteFunc(OpExecuteContext* host_ap
     aclIntArray* constantExpertRange = constantExpertRangeAcl.Get();
 
     auto output = host_api_ctx->GetOutputTensor(0);
-    OP_CHECK_IF(output == nullptr, OP_LOGE("aclnnfallback", "output is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(output == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "output", "output is null"),
+                return GRAPH_FAILED);
 
     // execute opapi
     auto api_ret = EXEC_OPAPI_CMD(aclnnMoeFinalizeRoutingV4, expanded_permuted_rows, expanded_src_to_dst_row, skip1,
                                   skip2_optional, bias, scales, expert_for_source_row, x, alpha1, alpha2, v, *mode,
                                   zeroExpertRange, copyExpertRange, constantExpertRange, *k, output);
-    OP_CHECK_IF(api_ret != GRAPH_SUCCESS, OP_LOGE(host_api_ctx->GetNodeName(), "api_ret faild:%u", api_ret),
-                return GRAPH_FAILED);
+    OP_CHECK_IF(api_ret != GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(host_api_ctx->GetNodeName(), "api_ret faild:%u", api_ret), return GRAPH_FAILED);
 
     return GRAPH_SUCCESS;
 }

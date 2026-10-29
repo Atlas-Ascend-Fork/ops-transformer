@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "opdev/op_log.h"
 #include "opdev/op_dfx.h"
 #include "opdev/make_op_executor.h"
@@ -26,13 +28,13 @@ aclTensor* GroupedMatmulAdd(const aclTensor* x1, const aclTensor* x2, const aclT
     auto ret = INFER_SHAPE(GroupedMatmulAdd, OP_INPUT(x1, x2, groupList, yRef), OP_OUTPUT(yRef),
                            OP_ATTR(transposeX, transposeWeight, groupType, groupListType));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "InferShape failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_INVALID, "InferShape failed.");
         return nullptr;
     }
     ret = ADD_TO_LAUNCHER_LIST_AICORE(GroupedMatmulAdd, OP_INPUT(x1, x2, groupList, yRef), OP_OUTPUT(yRef),
                                       OP_ATTR(transposeX, transposeWeight, groupType, groupListType));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return nullptr;
     }
     return yRef;

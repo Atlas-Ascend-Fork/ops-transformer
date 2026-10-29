@@ -7,6 +7,7 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+#include <string>
 #include "aclnn_grouped_matmul_add.h"
 #include "aclnn_grouped_matmul_add_v2.h"
 
@@ -190,11 +191,13 @@ static aclnnStatus CheckDtype(gmm_add_advanced::GroupedMatmulAddParams params, c
                "In op [%s], when non-quant, the data type of [%s] is not supported, got [%s].", opName, "groupList",
                op::ToString(params.groupList->GetDataType()).GetString());
     if ((xDtype != DataType::DT_FLOAT16 && xDtype != DataType::DT_BF16) || (xDtype != weightDtype)) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], when non-quant, the data types of [%s...] are mismatched, the reason is: [x dtype "
-                "%s and weight dtype %s are not supported. This operator supports x/weight dtype FLOAT16 or BF16 "
-                "only].",
-                opName, "x, weight", op::ToString(xDtype).GetString(), op::ToString(weightDtype).GetString());
+        OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
+            "GroupedMatmulAdd", "x, weight",
+            std::string(op::ToString(xDtype).GetString()) + ", " + std::string(op::ToString(weightDtype).GetString()),
+            "In op [" + std::string(opName) + "], when non-quant, the data types of [" + std::string("x, weight") +
+                "...] are mismatched, the reason is: [x dtype " + std::string(op::ToString(xDtype).GetString()) +
+                " and weight dtype " + std::string(op::ToString(weightDtype).GetString()) +
+                " are not supported. This operator supports x/weight dtype FLOAT16 or BF16 only].");
         return ACLNN_ERR_PARAM_INVALID;
     }
     return ACLNN_SUCCESS;

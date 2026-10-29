@@ -12,6 +12,9 @@
  * \file moe_token_unpermute_with_ep_grad_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <vector>
+#include <string>
 #include <iostream>
 #include "moe_token_unpermute_with_ep_grad_tiling.h"
 #include "op_host/tiling_util.h"
@@ -297,27 +300,40 @@ static ge::graphStatus MoeTokenUnpermuteWithEpGradCoreSplitInfo(const gert::Tili
 
     auto rowIdMapDtype = context->GetInputDesc(INPUT_ROWIDMAP_IDX)->GetDataType();
     uint32_t rowIdMapTypeLength = GetLengthByType(rowIdMapDtype); // sizeof(int32)
-    OP_CHECK_IF(
-        tokensTypeLength == 0 || rowIdMapTypeLength == 0 || probTypeLength == 0,
-        OP_LOGE(context->GetNodeName(), "[MoeTokenUnpermuteWithEpGrad] input or rowIdMap GetLengthByType is: 0."),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(tokensTypeLength == 0 || rowIdMapTypeLength == 0 || probTypeLength == 0,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "unpermuted_tokens_grad, sorted_indices, probs",
+                    "[MoeTokenUnpermuteWithEpGrad] input or rowIdMap GetLengthByType is: 0."),
+                return ge::GRAPH_FAILED);
 
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint64_t totalUbSize;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, totalUbSize);
 
     if (probTensor == nullptr) { // prob为None
-        OP_CHECK_IF(
-            !CoreSplitInfoProbIsNone(tiling, tokensTypeLength, rowIdMapTypeLength, totalUbSize),
-            OP_LOGE(context->GetNodeName(),
-                    "[MoeTokenUnpermuteWithEpGrad] In this case prob is None, split in core operation illegal."),
-            return ge::GRAPH_FAILED);
+        if (!CoreSplitInfoProbIsNone(tiling, tokensTypeLength, rowIdMapTypeLength, totalUbSize)) {
+            OP_LOGE_LIBOPAPI_REPORT(
+                context->GetNodeName(), "%s",
+                "[MoeTokenUnpermuteWithEpGrad] In this case prob is None, split in core operation illegal.");
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1008", std::vector<const char*>({"opName", "reason"}),
+                std::vector<const char*>(
+                    {context->GetNodeName(),
+                     "[MoeTokenUnpermuteWithEpGrad] In this case prob is None, split in core operation illegal."}));
+            return ge::GRAPH_FAILED;
+        }
     } else { // prob非None
-        OP_CHECK_IF(
-            !CoreSplitInfoProbIsNotNone(tiling, tokensTypeLength, probTypeLength, totalUbSize),
-            OP_LOGE(context->GetNodeName(),
-                    "[MoeTokenUnpermuteWithEpGrad] In this case prob is not None, split in core operation illegal."),
-            return ge::GRAPH_FAILED);
+        if (!CoreSplitInfoProbIsNotNone(tiling, tokensTypeLength, probTypeLength, totalUbSize)) {
+            OP_LOGE_LIBOPAPI_REPORT(
+                context->GetNodeName(), "%s",
+                "[MoeTokenUnpermuteWithEpGrad] In this case prob is not None, split in core operation illegal.");
+            REPORT_PREDEFINED_ERR_MSG(
+                "EZ1008", std::vector<const char*>({"opName", "reason"}),
+                std::vector<const char*>(
+                    {context->GetNodeName(),
+                     "[MoeTokenUnpermuteWithEpGrad] In this case prob is not None, split in core operation illegal."}));
+            return ge::GRAPH_FAILED;
+        }
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -328,15 +344,25 @@ static ge::graphStatus SetInfoForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tiling
     auto rawTilingData = context->GetRawTilingData();
     auto attrPtr = context->GetAttrs();
     auto probTensor = context->GetOptionalInputTensor(INPUT_PROB_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, rawTilingData);
+    OP_CHECK_IF(
+        rawTilingData == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "rawTilingData",
+            "Required rawTilingData metadata is null; context->GetRawTilingData() must provide a valid object."),
+        return ge::GRAPH_FAILED);
     tiling.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
     rawTilingData->SetDataSize(tiling.GetDataSize());
     size_t sysWorkspaceSize = 16 * 1024 * 1024;
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
     currentWorkspace[0] = sysWorkspaceSize;
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
+    OP_CHECK_IF(attrPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrPtr",
+                    "Required attrPtr metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const bool* paddedModePtr = attrPtr->GetAttrPointer<bool>(ATTR_PADDEDMODE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, paddedModePtr);
+    OP_CHECK_IF(paddedModePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "padded_mode"),
+                return ge::GRAPH_FAILED);
     bool paddedMode = *paddedModePtr;
     MoeTokenUnpermuteWithEpGradPrintParam(context, tiling);
     OP_LOGD(context->GetNodeName(), ">>> [MoeTokenUnpermuteWithEpGradTiling] paddedMode: %d", paddedMode);
@@ -379,7 +405,9 @@ static bool SetStartEndInfoForTiling4MoeTokenUnpermuteWithEpGrad(gert::TilingCon
     int64_t end = totalNum;
     if (epRangePtr != nullptr) {
         OP_CHECK_IF(epRangePtr->GetSize() != EP_RANGE_SIZE,
-                    OP_LOGE(context->GetNodeName(), "the size of range only support 2"), return ge::GRAPH_FAILED);
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "range",
+                                                             "the size of range only support 2"),
+                    return ge::GRAPH_FAILED);
         const int64_t* epRangeList = static_cast<const int64_t*>(epRangePtr->GetData());
         const bool isRangeNone = isRegbase && (epRangeList[0] == -1 && epRangeList[1] == -1);
         if (!isRangeNone) {
@@ -420,7 +448,11 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
     const bool isRegbase = Ops::Transformer::OpTiling::IsRegbaseSocVersion(context);
 
     auto attrPtr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
+    OP_CHECK_IF(attrPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrPtr",
+                    "Required attrPtr metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     int64_t tokensNum = 0;
     int64_t hiddenSize = 0;
     int64_t topK = 1;
@@ -521,7 +553,8 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
         const gert::StorageShape* rowMap = context->GetInputShape(INPUT_ROWIDMAP_IDX);
         size_t rowMapDimNnum = rowMap->GetStorageShape().GetDimNum();
         if (rowMapDimNnum != DIM_1) {
-            OP_LOGE(context->GetNodeName(), "The dim number of sort_indices should be 1.");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "sorted_indices",
+                                                     "The dim number of sort_indices should be 1.");
             return ge::GRAPH_FAILED;
         }
         topK = (probShape == nullptr) ? topK : probShape->GetStorageShape().GetDim(DIM_1);
@@ -544,14 +577,19 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
         return ge::GRAPH_SUCCESS;
     }
     OP_CHECK_IF(tokensNum == 0 || topK == 0 || hiddenSize == 0 || numOutTokens == 0,
-                OP_LOGE(context->GetNodeName(), "[MoeTokenUnpermuteWithEpGrad] input shape has 0."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(),
+                                                         "unpermuted_tokens_grad, probs, permuted_tokens",
+                                                         "[MoeTokenUnpermuteWithEpGrad] input shape has 0."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(topK > MAX_TOPK,
-                OP_LOGE(context->GetNodeName(), "[MoeTokenUnpermuteWithEpGrad] topK only support no greater than 512."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        topK > MAX_TOPK,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "num_topk", "[MoeTokenUnpermuteWithEpGrad] topK only support no greater than 512."),
+        return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(!SetStartEndInfoForTiling4MoeTokenUnpermuteWithEpGrad(context, tiling, totalNum, numOutTokens),
-                OP_LOGE(context->GetNodeName(), "rangeOptional[1] should not less than rangeOptional[0]"),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "range",
+                                                         "rangeOptional[1] should not less than rangeOptional[0]"),
                 return ge::GRAPH_FAILED);
 
     return SetInfoForTiling4MoeTokenUnpermuteWithEpGrad(context, tiling);
@@ -564,13 +602,15 @@ static ge::graphStatus Tiling4MoeTokenUnpermuteWithEpGrad(gert::TilingContext* c
     auto permutedTokensDesc = context->GetOptionalInputDesc(INPUT_PERMUTED_TOKENS_IDX);
     auto unpermutedOutputDDesc = context->GetInputDesc(INPUT_UNPERMUTEDOUTPUTD_IDX);
     if (permutedTokensDesc != nullptr) {
-        OP_CHECK_IF(
-            permutedTokensDesc->GetDataType() != unpermutedOutputDDesc->GetDataType(),
-            OP_LOGE(context->GetNodeName(), "input permutedTokens 's dtype should be same with unpermutedTokensGrad"),
-            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(permutedTokensDesc->GetDataType() != unpermutedOutputDDesc->GetDataType(),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        context->GetNodeName(), "unpermuted_tokens_grad",
+                        "input permutedTokens 's dtype should be same with unpermutedTokensGrad"),
+                    return ge::GRAPH_FAILED);
     }
 
-    OP_CHECK_NULL_WITH_CONTEXT(context, unpermutedOutputDShape);
+    OP_CHECK_IF(unpermutedOutputDShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "unpermuted_tokens_grad"), return ge::GRAPH_FAILED);
 
     return SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(context, unpermutedOutputDShape);
 }

@@ -13,12 +13,14 @@
  * \brief
  */
 
+#include <string>
 #include "grouped_matmul_add_tiling.h"
 #include <climits>
 #include "tiling/tiling_api.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "register/op_def_registry.h"
 #include "log/log.h"
+#include <vector>
 
 #include "arch35/grouped_matmul_add_compile_info.h"
 #include "arch35/grouped_matmul_add_no_quant_tiling.h"
@@ -87,14 +89,21 @@ static ge::graphStatus CalTCubeTiling(const gert::TilingContext* context, Groupe
 
     mm.SetBufferSpace(l1Size, l0_cSize, ubSize);
     if (mm.GetTiling(tiling.mmTilingData) == -1) {
-        OP_LOGE(nodeName, "GroupedMatmulAdd GetTiling error");
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(nodeName), "%s", "GroupedMatmulAdd GetTiling error");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({Ops::Base::GetOpInfo(nodeName), "GroupedMatmulAdd GetTiling error"}));
         return ge::GRAPH_FAILED;
     }
     uint64_t productMK = static_cast<uint64_t>(baseM) * static_cast<uint64_t>(baseK);
     uint64_t productNK = static_cast<uint64_t>(baseN) * static_cast<uint64_t>(baseK);
     if (productMK > UINT32_MAX || productNK > UINT32_MAX) {
-        OP_LOGE(nodeName, "productMK or productNK > uint32_t max value, productMK:%lu, productNK:%lu", productMK,
-                productNK);
+        const std::string errorReason =
+            ("productMK or productNK > uint32_t max value, productMK:" + std::to_string(productMK) +
+             ", productNK:" + std::to_string(productNK));
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(nodeName), "%s", errorReason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({Ops::Base::GetOpInfo(nodeName), errorReason.c_str()}));
         return ge::GRAPH_FAILED;
     }
     uint32_t mmStepKa =
@@ -163,11 +172,12 @@ static ge::graphStatus CalMmTiling(gert::TilingContext* context, GroupedMatmulAd
     } else if (xType == ge::DataType::DT_BF16) {
         context->SetTilingKey(TILING_KEY_DEFAULT_BF16);
     } else {
-        OP_LOGE(context->GetNodeName(), "GroupedMatmulAdd GetTiling error : type not support");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "x",
+                                                 "GroupedMatmulAdd GetTiling error : type not support");
     }
     auto ret = CalTCubeTiling(context, tiling, m, k, n, baseM, baseN, baseK);
-    OP_CHECK_IF(ge::GRAPH_SUCCESS != ret, OP_LOGE(context->GetNodeName(), "GroupedMatmulAdd CalTCubeTiling error"),
-                return ret);
+    OP_CHECK_IF(ge::GRAPH_SUCCESS != ret,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "GroupedMatmulAdd CalTCubeTiling error"), return ret);
     tiling.mmTilingData.set_shareMode(0);
     tiling.mmTilingData.set_baseM(baseM); // set precomputed baseM
     tiling.mmTilingData.set_baseN(baseN); // set precomputed baseN
@@ -220,10 +230,12 @@ static ge::graphStatus TilingCheck4GroupedMatmulAdd(const gert::TilingContext* c
     auto yRefShape = context->GetInputShape(INDEX_IN_YREF);
 
     // check nullptr
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, wShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, groupListShape);
-    OP_CHECK_NULL_WITH_CONTEXT(context, yRefShape);
+    OP_CHECK_IF(xShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(wShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "weight"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(groupListShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "group_list"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(yRefShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "y"), return ge::GRAPH_FAILED);
 
     auto xOrgShape = xShape->GetOriginShape();
     auto wOrgShape = wShape->GetOriginShape();
@@ -232,12 +244,18 @@ static ge::graphStatus TilingCheck4GroupedMatmulAdd(const gert::TilingContext* c
     size_t groupListDimNum = groupListShape->GetOriginShape().GetDimNum();
     size_t yRefDimNum = yRefShape->GetOriginShape().GetDimNum();
     // 检查输入dim是否符合预期
-    OP_CHECK_IF(DIMNUM_2D != xDimNum, OP_LOGE(context->GetNodeName(), "xShape error xShape.GetDimNum():%lu", xDimNum),
+    OP_CHECK_IF(DIMNUM_2D != xDimNum,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "x",
+                                                         "xShape error xShape.GetDimNum():" + std::to_string(xDimNum)),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(DIMNUM_2D != wDimNum, OP_LOGE(context->GetNodeName(), "wShape error wShape.GetDimNum():%lu", wDimNum),
+    OP_CHECK_IF(DIMNUM_2D != wDimNum,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "weight",
+                                                         "wShape error wShape.GetDimNum():" + std::to_string(wDimNum)),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(DIMNUM_1D != groupListDimNum,
-                OP_LOGE(context->GetNodeName(), "groupListShape error groupListShape.GetDimNum():%lu", groupListDimNum),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "group_list",
+                    "groupListShape error groupListShape.GetDimNum():" + std::to_string(groupListDimNum)),
                 return ge::GRAPH_FAILED);
     if (DIMNUM_3D != yRefDimNum) {
         OP_LOGW(context->GetNodeName(), "yRefShape error yRefShape.GetDimNum():%lu", yRefDimNum);
@@ -246,8 +264,11 @@ static ge::graphStatus TilingCheck4GroupedMatmulAdd(const gert::TilingContext* c
     // 检查shape是否可以对应
     auto xk = xOrgShape.GetDim(DIM0);
     auto wk = wOrgShape.GetDim(DIM0);
-    OP_CHECK_IF(xk != wk, OP_LOGE(context->GetNodeName(), "shape Error xk:%ld wk:%ld", xk, wk),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        xk != wk,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "x, weight",
+                                                 "shape Error xk:" + std::to_string(xk) + " wk:" + std::to_string(wk)),
+        return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -263,7 +284,7 @@ static ge::graphStatus Tiling4GroupedMatmulAdd(gert::TilingContext* context)
     GroupedMatmulAddTilingData tiling;
 
     OP_CHECK_IF(ge::GRAPH_SUCCESS != TilingCheck4GroupedMatmulAdd(context),
-                OP_LOGE(context->GetNodeName(), "GroupedMatmulAdd TilingCheck4GroupedMatmulAdd error"),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "GroupedMatmulAdd TilingCheck4GroupedMatmulAdd error"),
                 return ge::GRAPH_FAILED);
 
     // input shapes was checked in TilingCheck4GroupedMatmulAdd. Fix: refactering to avoid repeated cal.
@@ -285,15 +306,19 @@ static ge::graphStatus Tiling4GroupedMatmulAdd(gert::TilingContext* context)
     tiling.gmmBaseParams.set_groupType(INDEX_GROUP_LIST);
     // set groupListType attr.
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* groupListTypePtr = attrs->GetAttrPointer<int64_t>(ATTR_GROUP_LIST_TYPE_INDEX_3);
     int64_t groupListType = groupListTypePtr != nullptr ? *groupListTypePtr : GROUP_LIST_TYPE_CUMSUM_0;
     tiling.gmmBaseParams.set_groupListType(groupListType);
 
     // 设置其余
     auto ret = CalMmTiling(context, tiling, m, k, n);
-    OP_CHECK_IF(ge::GRAPH_SUCCESS != ret, OP_LOGE(context->GetNodeName(), "GroupedMatmulAdd CalMmTiling error"),
-                return ret);
+    OP_CHECK_IF(ge::GRAPH_SUCCESS != ret,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "GroupedMatmulAdd CalMmTiling error"), return ret);
     context->SetBlockDim(aicNum);
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());

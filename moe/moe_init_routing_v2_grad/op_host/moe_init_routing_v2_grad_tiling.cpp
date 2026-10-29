@@ -12,6 +12,8 @@
  * \file moe_init_routing_v2_grad_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_init_routing_v2_grad_tiling.h"
 #include "op_host/tiling_util.h"
 
@@ -131,7 +133,11 @@ ge::graphStatus MoeInitRoutingV2GradTilingBase::PostTiling()
     OP_CHECK_NULL_WITH_CONTEXT(context_, currentWorkspace);
     currentWorkspace[0] = workspaceSize_;
     auto tilingData = context_->GetRawTilingData();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, tilingData);
+    OP_CHECK_IF(tilingData == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "tilingData",
+                    "Required tilingData metadata is null; context_->GetRawTilingData() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     moeInitRoutingV2GradTilingData.SaveToBuffer(tilingData->GetData(), tilingData->GetCapacity());
     tilingData->SetDataSize(moeInitRoutingV2GradTilingData.GetDataSize());
     return ge::GRAPH_SUCCESS;

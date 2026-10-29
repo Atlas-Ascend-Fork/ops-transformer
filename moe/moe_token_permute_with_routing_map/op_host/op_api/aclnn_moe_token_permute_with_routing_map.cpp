@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "moe_token_permute_with_routing_map.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
@@ -97,25 +99,35 @@ static bool CheckShapeValid(const aclTensor* routingMap, const aclTensor* probsO
 {
     auto routingMapDimNum = routingMap->GetViewShape().GetDimNum();
     OP_CHECK(routingMapDimNum == TRANSPOSE_SHAPE_SIZE,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimensions of routingMap should be two, but got %ld.",
-                     static_cast<int64_t>(routingMapDimNum)),
+             OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON("MoeTokenPermuteWithRoutingMap", "routing_map",
+                                                      std::to_string(static_cast<int64_t>(routingMapDimNum)),
+                                                      "The dimensions of routingMap should be two, but got " +
+                                                          std::to_string(static_cast<int64_t>(routingMapDimNum)) + "."),
              return false);
     if (probsOptional != nullptr) {
         auto probsDimNum = probsOptional->GetViewShape().GetDimNum();
         OP_CHECK(probsDimNum == TRANSPOSE_SHAPE_SIZE,
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimensions of probs should be two, but got %ld.",
-                         static_cast<int64_t>(probsDimNum)),
+                 OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON("MoeTokenPermuteWithRoutingMap", "probs",
+                                                          std::to_string(static_cast<int64_t>(probsDimNum)),
+                                                          "The dimensions of probs should be two, but got " +
+                                                              std::to_string(static_cast<int64_t>(probsDimNum)) + "."),
                  return false);
-        OP_CHECK(probsOptional->GetViewShape().GetDim(1) == routingMap->GetViewShape().GetDim(1),
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dim 1 of probs %ld should be same with routingMap's dim 0 %ld.",
-                         static_cast<int64_t>(probsOptional->GetViewShape().GetDim(1)),
-                         static_cast<int64_t>(routingMap->GetViewShape().GetDim(1))),
-                 return false);
-        OP_CHECK(probsOptional->GetViewShape().GetDim(0) == routingMap->GetViewShape().GetDim(0),
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dim 0 of probs %ld should be same with routingMap's dim 0 %ld.",
-                         static_cast<int64_t>(probsOptional->GetViewShape().GetDim(0)),
-                         static_cast<int64_t>(routingMap->GetViewShape().GetDim(0))),
-                 return false);
+        OP_CHECK(
+            probsOptional->GetViewShape().GetDim(1) == routingMap->GetViewShape().GetDim(1),
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                "MoeTokenPermuteWithRoutingMap", "routing_map, probs",
+                "The dim 1 of probs " + std::to_string(static_cast<int64_t>(probsOptional->GetViewShape().GetDim(1))) +
+                    " should be same with routingMap's dim 0 " +
+                    std::to_string(static_cast<int64_t>(routingMap->GetViewShape().GetDim(1))) + "."),
+            return false);
+        OP_CHECK(
+            probsOptional->GetViewShape().GetDim(0) == routingMap->GetViewShape().GetDim(0),
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                "MoeTokenPermuteWithRoutingMap", "routing_map, probs",
+                "The dim 0 of probs " + std::to_string(static_cast<int64_t>(probsOptional->GetViewShape().GetDim(0))) +
+                    " should be same with routingMap's dim 0 " +
+                    std::to_string(static_cast<int64_t>(routingMap->GetViewShape().GetDim(0))) + "."),
+            return false);
     }
 
     return true;
@@ -125,8 +137,10 @@ static bool CheckTokensValid(const aclTensor* tokens)
 {
     auto tokensDimNum = tokens->GetViewShape().GetDimNum();
     OP_CHECK(tokensDimNum == TOKENS_SHAPE_SIZE,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimensions of tokens should be two, but got %ld.",
-                     static_cast<int64_t>(tokensDimNum)),
+             OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON("MoeTokenPermuteWithRoutingMap", "tokens",
+                                                      std::to_string(static_cast<int64_t>(tokensDimNum)),
+                                                      "The dimensions of tokens should be two, but got " +
+                                                          std::to_string(static_cast<int64_t>(tokensDimNum)) + "."),
              return false);
     return true;
 }
@@ -151,33 +165,45 @@ static aclnnStatus CheckParams(const aclTensor* tokens, const aclTensor* routing
     int64_t alignNum = (dropAndPad == true) ? expertNum : tokenNum;
     alignNum = (alignNum == 0) ? 1 : alignNum;
     CHECK_RET(CheckTokensValid(tokens), ACLNN_ERR_PARAM_INVALID);
-    OP_CHECK(numOutTokens >= 0,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "numOutTokens should be greater than %ld, but got %ld.", int64_t(0),
-                     numOutTokens),
-             return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK(
+        numOutTokens >= 0,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermuteWithRoutingMap", "num_out_tokens",
+                                                 "numOutTokens should be greater than " + std::to_string(int64_t(0)) +
+                                                     ", but got " + std::to_string(numOutTokens) + "."),
+        return ACLNN_ERR_PARAM_INVALID);
     OP_CHECK(numOutTokens <= tokenNum * expertNum,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "numOutTokens should not be greater than %ld, but got %ld.",
-                     tokenNum * expertNum, numOutTokens),
+             OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermuteWithRoutingMap", "num_out_tokens",
+                                                      "numOutTokens should not be greater than " +
+                                                          std::to_string(tokenNum * expertNum) + ", but got " +
+                                                          std::to_string(numOutTokens) + "."),
              return ACLNN_ERR_PARAM_INVALID);
     int64_t numOutTokensAlign = numOutTokens / alignNum * alignNum;
     int64_t permuteOutD = permuteTokensOut->GetViewShape().GetDim(0);
     OP_CHECK(
         tokenNum < SORT_LIMIT_LENGTH,
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "tokenNum should be less than %ld, but got %ld.", SORT_LIMIT_LENGTH, tokenNum),
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermuteWithRoutingMap", "tokens",
+                                                 "tokenNum should be less than " + std::to_string(SORT_LIMIT_LENGTH) +
+                                                     ", but got " + std::to_string(tokenNum) + "."),
         return ACLNN_ERR_PARAM_INVALID);
-    OP_CHECK(expertNum < SORT_LIMIT_LENGTH,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "expertNum should be less than %ld, but got %ld.", SORT_LIMIT_LENGTH,
-                     expertNum),
-             return ACLNN_ERR_PARAM_INVALID);
-    OP_CHECK(numOutTokensAlign == permuteOutD,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Out token's dim 0' should be %ld, but got %ld.", numOutTokensAlign,
-                     permuteOutD),
-             return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK(
+        expertNum < SORT_LIMIT_LENGTH,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermuteWithRoutingMap", "routingMap",
+                                                 "expertNum should be less than " + std::to_string(SORT_LIMIT_LENGTH) +
+                                                     ", but got " + std::to_string(expertNum) + "."),
+        return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK(
+        numOutTokensAlign == permuteOutD,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermuteWithRoutingMap", "num_out_tokens",
+                                                 "Out token's dim 0' should be " + std::to_string(numOutTokensAlign) +
+                                                     ", but got " + std::to_string(permuteOutD) + "."),
+        return ACLNN_ERR_PARAM_INVALID);
     if (permuteProbsOutOptional != nullptr) {
         int64_t permuteProbOutD = permuteProbsOutOptional->GetViewShape().GetDim(0);
         OP_CHECK(numOutTokensAlign == permuteProbOutD,
-                 OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Out permuteTokensOut's dim 0' should be %ld, but got %ld.", alignNum,
-                         permuteProbOutD),
+                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermuteWithRoutingMap", "permute_tokens",
+                                                          "Out permuteTokensOut's dim 0' should be " +
+                                                              std::to_string(alignNum) + ", but got " +
+                                                              std::to_string(permuteProbOutD) + "."),
                  return ACLNN_ERR_PARAM_INVALID);
     }
     return ACLNN_SUCCESS;

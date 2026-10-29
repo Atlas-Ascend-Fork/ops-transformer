@@ -7,6 +7,7 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+#include "log/log.h"
 #include <dlfcn.h>
 #include <vector>
 #include <new>
@@ -104,7 +105,9 @@ static bool CheckNotNull(const aclTensor* x, const aclTensor* weight, const aclT
                 "if inputting bias with values other than 0.",
                 opName);
     } else if (x->GetDataType() == DataType::DT_INT8 && weight->GetDataType() == DataType::DT_INT4 && bias == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "In op [%s], when A8W4, [%s] must not be nullptr.", opName, "bias");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "bias",
+            "In op [" + std::string(opName) + "], when A8W4, [" + std::string("bias") + "] must not be nullptr.");
         return false;
     }
     if (offset != nullptr) {
@@ -170,9 +173,11 @@ static bool CheckInputOutShape_A8W8(const aclTensor* x, const aclTensor* weight,
     int64_t n = weightScale->GetViewShape().GetDim(1);
     int64_t e = weight->GetViewShape().GetDim(0);
     if (n % SPLIT != 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], when A8W8, the shape of [%s] is not supported, got [N %ld]. Constraint:[%s]", opName,
-                "weightScale", n, "N must be even when A8W8.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("GroupedMatmulSwigluQuant", "weight_scale",
+                                                 "In op [" + std::string(opName) + "], when A8W8, the shape of [" +
+                                                     std::string("weightScale") + "] is not supported, got [N " +
+                                                     std::to_string(n) + "]. Constraint:[" +
+                                                     std::string("N must be even when A8W8.") + "]");
         return false;
     }
     int64_t nAfterHalve = static_cast<int64_t>(n / SPLIT);
@@ -206,21 +211,27 @@ static bool CheckInputOutShape_A8W8(const aclTensor* x, const aclTensor* weight,
     // groupList的长度应小于等于weight的专家数
     int64_t groupListLen = groupList->GetViewShape().GetDim(0);
     if (groupListLen > e) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], the shape of [%s] is not supported, got [length %ld]. Constraint:[%s length should be "
-                "in range of [1, %ld] when A8W8]",
-                opName, "groupList", groupListLen, "groupList", e);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "group_list",
+            "In op [" + std::string(opName) + "], the shape of [" + std::string("groupList") +
+                "] is not supported, got [length " + std::to_string(groupListLen) + "]. Constraint:[" +
+                std::string("groupList") + " length should be in range of [1, " + std::to_string(e) + "] when A8W8]");
         return false;
     }
     if (n > N_LIMIT) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "In op [%s], the shape of [%s] is not supported, got [N %ld]. Constraint:[%s]",
-                opName, "weightScale", n, "N must be less than or equal to 10240 when A8W8.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "weight_scale",
+            "In op [" + std::string(opName) + "], the shape of [" + std::string("weightScale") +
+                "] is not supported, got [N " + std::to_string(n) + "]. Constraint:[" +
+                std::string("N must be less than or equal to 10240 when A8W8.") + "]");
         return false;
     }
     if (k >= K_LIMIT_A8W8) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], the shape of [%s] is not supported, got [tail axis dimension %ld]. Constraint:[%s]",
-                opName, "x", k, "tail axis dimension must be lower than 65536 when A8W8.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "x",
+            "In op [" + std::string(opName) + "], the shape of [" + std::string("x") +
+                "] is not supported, got [tail axis dimension " + std::to_string(k) + "]. Constraint:[" +
+                std::string("tail axis dimension must be lower than 65536 when A8W8.") + "]");
         return false;
     }
     return true;
@@ -250,17 +261,20 @@ static bool CheckInputOutShape_A8W4(const aclTensor* x, const aclTensor* weight,
         weightScaleExpectShape = {e, KGroupCount, n};
     }
     if (KGroupCount == 0 || k % KGroupCount != 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], when A8W4, the number of groups along the k-axis is %ld, and the length of the "
-                "k-axis is %ld. The number of groups must be greater than 0, and k-axis length %% number of "
-                "groups == 0 must be true.",
-                opName, KGroupCount, k);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "weight_scale, x",
+            "In op [" + std::string(opName) + "], when A8W4, the number of groups along the k-axis is " +
+                std::to_string(KGroupCount) + ", and the length of the k-axis is " + std::to_string(k) +
+                ". The number of groups must be greater than 0, and k-axis length " + "%" +
+                " number of groups == 0 must be true.");
         return false;
     }
     if (n % SPLIT != 0) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], when A8W4, the shape of [%s] is not supported, got [N %ld]. Constraint:[%s]", opName,
-                "weightScale", n, "N must be even when A8W4.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("GroupedMatmulSwigluQuant", "weight_scale",
+                                                 "In op [" + std::string(opName) + "], when A8W4, the shape of [" +
+                                                     std::string("weightScale") + "] is not supported, got [N " +
+                                                     std::to_string(n) + "]. Constraint:[" +
+                                                     std::string("N must be even when A8W4.") + "]");
         return false;
     }
     int64_t nAfterHalve = static_cast<int64_t>(n / SPLIT);
@@ -293,21 +307,27 @@ static bool CheckInputOutShape_A8W4(const aclTensor* x, const aclTensor* weight,
     // groupList的长度应小于等于weight的专家数
     int64_t groupListLen = groupList->GetViewShape().GetDim(0);
     if (groupListLen > e) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], the shape of [%s] is not supported, got [length %ld]. Constraint:[%s length should be "
-                "in range of [1, %ld] when A8W4]",
-                opName, "groupList", groupListLen, "groupList", e);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "group_list",
+            "In op [" + std::string(opName) + "], the shape of [" + std::string("groupList") +
+                "] is not supported, got [length " + std::to_string(groupListLen) + "]. Constraint:[" +
+                std::string("groupList") + " length should be in range of [1, " + std::to_string(e) + "] when A8W4]");
         return false;
     }
     if (n > N_LIMIT) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "In op [%s], the shape of [%s] is not supported, got [N %ld]. Constraint:[%s]",
-                opName, "weightScale", n, "N must be less than or equal to 10240 when A8W4.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "weight_scale",
+            "In op [" + std::string(opName) + "], the shape of [" + std::string("weightScale") +
+                "] is not supported, got [N " + std::to_string(n) + "]. Constraint:[" +
+                std::string("N must be less than or equal to 10240 when A8W4.") + "]");
         return false;
     }
     if (k >= K_LIMIT_A8W4) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "In op [%s], the shape of [%s] is not supported, got [tail axis dimension %ld]. Constraint:[%s]",
-                opName, "x", k, "tail axis dimension must be lower than 20000 when A8W4.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "x",
+            "In op [" + std::string(opName) + "], the shape of [" + std::string("x") +
+                "] is not supported, got [tail axis dimension " + std::to_string(k) + "]. Constraint:[" +
+                std::string("tail axis dimension must be lower than 20000 when A8W4.") + "]");
         return false;
     }
     (void)KGroupSize;
@@ -342,18 +362,28 @@ static bool CheckFormat(const aclTensor* x, const aclTensor* weight, const aclTe
     std::string scenario = GetSwigluQuantScenarioName(x->GetDataType(), weight->GetDataType());
     if ((x->GetDataType() == DataType::DT_INT8 && weight->GetDataType() == DataType::DT_INT8) && !isNZ) {
         // fp16 in fp32 out that is split k template, not precision-advanced now
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "In op [%s], when A8W8, the format of [%s] is not supported, got [%s].",
-                opName, "weight", op::ToString(weight->GetStorageFormat()).GetString());
+        OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "weight", op::ToString(weight->GetStorageFormat()).GetString(),
+            "In op [" + std::string(opName) + "], when A8W8, the format of [" + std::string("weight") +
+                "] is not supported, got [" + std::string(op::ToString(weight->GetStorageFormat()).GetString()) + "].");
         return false;
     }
     if (IsPrivateFormat(x->GetStorageFormat())) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "In op [%s], when %s, the format of [%s] is not supported, got [%s].", opName,
-                scenario.c_str(), "x", op::ToString(x->GetStorageFormat()).GetString());
+        OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "x",
+            std::string(scenario.c_str()) + ", " + std::string(op::ToString(x->GetStorageFormat()).GetString()),
+            "In op [" + std::string(opName) + "], when " + std::string(scenario.c_str()) + ", the format of [" +
+                std::string("x") + "] is not supported, got [" +
+                std::string(op::ToString(x->GetStorageFormat()).GetString()) + "].");
         return false;
     }
     if (IsPrivateFormat(output->GetStorageFormat())) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "In op [%s], when %s, the format of [%s] is not supported, got [%s].", opName,
-                scenario.c_str(), "output", op::ToString(output->GetStorageFormat()).GetString());
+        OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
+            "GroupedMatmulSwigluQuant", "output",
+            std::string(scenario.c_str()) + ", " + std::string(op::ToString(output->GetStorageFormat()).GetString()),
+            "In op [" + std::string(opName) + "], when " + std::string(scenario.c_str()) + ", the format of [" +
+                std::string("output") + "] is not supported, got [" +
+                std::string(op::ToString(output->GetStorageFormat()).GetString()) + "].");
         return false;
     }
     return true;

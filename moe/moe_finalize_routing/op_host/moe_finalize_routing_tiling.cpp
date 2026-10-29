@@ -12,6 +12,9 @@
  * \file moe_finalize_routing_tiling.cc
  * \brief
  */
+#include "log/log.h"
+#include <string>
+#include <vector>
 #include "moe_finalize_routing_tiling.h"
 
 using namespace std;
@@ -56,24 +59,27 @@ ge::graphStatus MoeFinalizeRoutingTiling::Init(gert::TilingContext* context)
 {
     context_ = context;
     OP_CHECK_IF(CheckParamsShape() != ge::GRAPH_SUCCESS,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "MoeFinalizeRoutingTiling check shape fail."),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MoeFinalizeRoutingTiling check shape fail."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(SetPlatformInfo() != ge::GRAPH_SUCCESS,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "MoeFinalizeRoutingTiling get platform info fail."),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MoeFinalizeRoutingTiling get platform info fail."),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(
-        SetParamInfo() != ge::GRAPH_SUCCESS,
-        OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "MoeFinalizeRoutingTiling get input param info fail."),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(SetParamInfo() != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MoeFinalizeRoutingTiling get input param info fail."),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus MoeFinalizeRoutingTiling::SetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context_->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     totalCoreNum_ = ascendcPlatform.GetCoreNumAiv();
     uint64_t ubSize;
@@ -86,26 +92,30 @@ ge::graphStatus MoeFinalizeRoutingTiling::SetParamInfo()
 {
     // 获取bias的Shape
     auto biasInput = context_->GetInputShape(INDEX_IN_BIAS - offset_);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, biasInput);
+    OP_CHECK_IF(biasInput == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "bias"),
+                return ge::GRAPH_FAILED);
     auto biasInputShape = biasInput->GetStorageShape();
     biasRowNum_ = biasInputShape.GetDim(0);
 
     // 获取scales的Shape
     auto scalesInput = context_->GetInputShape(INDEX_IN_SCALES - offset_);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, scalesInput);
+    OP_CHECK_IF(scalesInput == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scales"),
+                return ge::GRAPH_FAILED);
     auto scalesInputShape = scalesInput->GetStorageShape();
     k_ = scalesInputShape.GetDim(1);
 
     // 获取skip1的Shape
     auto skip1Input = context_->GetInputShape(INDEX_IN_SKIP1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, skip1Input);
+    OP_CHECK_IF(skip1Input == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "x1"),
+                return ge::GRAPH_FAILED);
     auto skip1InputShape = skip1Input->GetStorageShape();
     totalRowNum_ = skip1InputShape.GetDim(0);
     h_ = skip1InputShape.GetDim(1);
 
     // 获取skip1的输入数据类型
     auto skip1InputDesc = context_->GetInputDesc(INDEX_IN_SKIP1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, skip1InputDesc);
+    OP_CHECK_IF(skip1InputDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "x1"),
+                return ge::GRAPH_FAILED);
     dataType_ = skip1InputDesc->GetDataType();
     inputDataTypeSize_ = ge::GetSizeByDataType(dataType_);
 
@@ -118,99 +128,120 @@ ge::graphStatus MoeFinalizeRoutingTiling::SetParamInfo()
 ge::graphStatus MoeFinalizeRoutingTiling::CheckParamsShape()
 {
     auto expandedXShapePtr = context_->GetInputShape(INDEX_IN_EXPAND_PERMUTED_ROWS);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXShapePtr);
+    OP_CHECK_IF(expandedXShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_x"),
+                return ge::GRAPH_FAILED);
     auto expandedXShape = expandedXShapePtr->GetStorageShape();
 
     auto x1ShapePtr = context_->GetInputShape(INDEX_IN_SKIP1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, x1ShapePtr);
+    OP_CHECK_IF(x1ShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "x1"),
+                return ge::GRAPH_FAILED);
     auto x1Shape = x1ShapePtr->GetStorageShape();
 
     auto x2Shape = context_->GetOptionalInputShape(INDEX_IN_SKIP2);
     offset_ = (context_->GetComputeNodeInputNum() == INPUT_NUM) ? 0 : 1;
     auto biasShapePtr = context_->GetInputShape(INDEX_IN_BIAS - offset_);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, biasShapePtr);
+    OP_CHECK_IF(biasShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "bias"),
+                return ge::GRAPH_FAILED);
     auto biasShape = biasShapePtr->GetStorageShape();
 
     auto scalesShapePtr = context_->GetInputShape(INDEX_IN_SCALES - offset_);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, scalesShapePtr);
+    OP_CHECK_IF(scalesShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scales"),
+                return ge::GRAPH_FAILED);
     auto scalesShape = scalesShapePtr->GetStorageShape();
 
     auto expandedRowIdxShapePtr = context_->GetInputShape(INDEX_IN_EXPANDED_SRC_TO_DST_ROW - offset_);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedRowIdxShapePtr);
+    OP_CHECK_IF(expandedRowIdxShapePtr == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_row_idx"), return ge::GRAPH_FAILED);
     auto expandedRowIdxShape = expandedRowIdxShapePtr->GetStorageShape();
 
     auto expandedExpertIdxShapePtr = context_->GetInputShape(INDEX_IN_EXPERT_FOR_SOURCE_ROW - offset_);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedExpertIdxShapePtr);
+    OP_CHECK_IF(expandedExpertIdxShapePtr == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_expert_idx"), return ge::GRAPH_FAILED);
     auto expandedExpertIdxShape = expandedExpertIdxShapePtr->GetStorageShape();
 
     auto yShapePtr = context_->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, yShapePtr);
+    OP_CHECK_IF(yShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "yShapePtr",
+                    "Required yShapePtr metadata is null; context_->GetOutputShape(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto yShape = yShapePtr->GetStorageShape();
 
     // check dim num
     OP_CHECK_IF(expandedXShape.GetDimNum() != SHAPE_SIZE,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The expanded_x of input should be 2D tensor."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expanded_x",
+                                                         "The expanded_x of input should be 2D tensor."),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(x1Shape.GetDimNum() != SHAPE_SIZE,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The x1 of input should be 2D tensor."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        x1Shape.GetDimNum() != SHAPE_SIZE,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "x1", "The x1 of input should be 2D tensor."),
+        return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(x2Shape != nullptr && x2Shape->GetStorageShape().GetDimNum() != SHAPE_SIZE,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The x2 of input should be 2D tensor."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        x2Shape != nullptr && x2Shape->GetStorageShape().GetDimNum() != SHAPE_SIZE,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "x2", "The x2 of input should be 2D tensor."),
+        return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(biasShape.GetDimNum() != SHAPE_SIZE,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The bias of input should be 2D tensor."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "bias",
+                                                         "The bias of input should be 2D tensor."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(scalesShape.GetDimNum() != SHAPE_SIZE,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The scales of input should be 2D tensor."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "scales",
+                                                         "The scales of input should be 2D tensor."),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(
-        expandedRowIdxShape.GetDimNum() != 1,
-        OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The expanded_row_idx of input should be 1D tensor."),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(expandedRowIdxShape.GetDimNum() != 1,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expanded_row_idx",
+                                                         "The expanded_row_idx of input should be 1D tensor."),
+                return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(
-        expandedExpertIdxShape.GetDimNum() != SHAPE_SIZE,
-        OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The expanded_expert_idx of input should be 2D tensor."),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(expandedExpertIdxShape.GetDimNum() != SHAPE_SIZE,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expanded_expert_idx",
+                                                         "The expanded_expert_idx of input should be 2D tensor."),
+                return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(yShape.GetDimNum() != SHAPE_SIZE,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The y should be 2D tensor."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "y", "The y should be 2D tensor."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(x1Shape.GetDim(0) != scalesShape.GetDim(0) || x1Shape.GetDim(0) != expandedExpertIdxShape.GetDim(0) ||
                     x1Shape.GetDim(0) != yShape.GetDim(0) ||
                     (x2Shape != nullptr && x1Shape.GetDim(0) != x2Shape->GetStorageShape().GetDim(0)),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The dim 0 of x1, x2, scales,"
-                                                                     " expanded_expert_idx and out should be same."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "x1, x2, scales, expanded_expert_idx",
+                    "The dim 0 of x1, x2, scales, expanded_expert_idx and out should be same."),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(x1Shape.GetDim(1) != expandedXShape.GetDim(1) || x1Shape.GetDim(1) != biasShape.GetDim(1) ||
-                    x1Shape.GetDim(1) != yShape.GetDim(1) ||
-                    (x2Shape != nullptr && x1Shape.GetDim(1) != x2Shape->GetStorageShape().GetDim(1)),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The dim 1 of expanded_x,"
-                                                                     " x1, x2, bias and out should be same."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        x1Shape.GetDim(1) != expandedXShape.GetDim(1) || x1Shape.GetDim(1) != biasShape.GetDim(1) ||
+            x1Shape.GetDim(1) != yShape.GetDim(1) ||
+            (x2Shape != nullptr && x1Shape.GetDim(1) != x2Shape->GetStorageShape().GetDim(1)),
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expanded_x, x1, x2, bias",
+                                                 "The dim 1 of expanded_x, x1, x2, bias and out should be same."),
+        return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(scalesShape.GetDim(1) != expandedExpertIdxShape.GetDim(1),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(),
-                                            "the dim 1 of scales and expanded_expert_idx should be same."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "scales, expanded_expert_idx",
+                                                         "the dim 1 of scales and expanded_expert_idx should be same."),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(expandedRowIdxShape.GetDim(0) != expandedXShape.GetDim(0),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "The dim 0 of expanded_x and"
-                                                                     " expanded_row_idx should be same."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        expandedRowIdxShape.GetDim(0) != expandedXShape.GetDim(0),
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expanded_x, expanded_row_idx",
+                                                 "The dim 0 of expanded_x and expanded_row_idx should be same."),
+        return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(biasShape.GetDim(0) == 0, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "E can not be 0."),
+    OP_CHECK_IF(biasShape.GetDim(0) == 0,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "bias", "E can not be 0."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF((scalesShape.GetDim(1) == 0) || (expandedExpertIdxShape.GetDim(1) == 0),
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "K can not be 0."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "scales, expanded_expert_idx",
+                                                         "K can not be 0."),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -560,6 +591,13 @@ inline static ge::graphStatus MoeFinalizeRoutingSetTilingData(gert::TilingContex
                                                               MoeFinalizeRoutingTilingData& tilingData)
 {
     if (tilingData.GetDataSize() > context->GetRawTilingData()->GetCapacity()) {
+        const std::string opName = context->GetNodeName();
+        const std::string reason = "Tiling data size " + std::to_string(tilingData.GetDataSize()) +
+                                   " exceeds buffer capacity " +
+                                   std::to_string(context->GetRawTilingData()->GetCapacity()) + ".";
+        OP_LOGE_LIBOPAPI_REPORT(opName.c_str(), "%s", reason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({opName.c_str(), reason.c_str()}));
         return ge::GRAPH_FAILED;
     }
     tilingData.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
@@ -597,21 +635,24 @@ ge::graphStatus Tiling4MoeFinalizeRouting(gert::TilingContext* context)
     OP_LOGD(context->GetNodeName(), "[MoeFinalizeRouting] Tiling4MoeFinalizeRouting running begin");
     MoeFinalizeRoutingTiling tilingOp;
     OP_CHECK_IF(tilingOp.Init(context) != ge::GRAPH_SUCCESS,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "MoeFinalizeRoutingTiling init fail."),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MoeFinalizeRoutingTiling init fail."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(tilingOp.CalcTilingData() != ge::GRAPH_SUCCESS,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "MoeFinalizeRoutingTiling calc tilingData fail."),
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MoeFinalizeRoutingTiling calc tilingData fail."),
                 return ge::GRAPH_FAILED);
     MoeFinalizeRoutingTilingData tilingData;
     tilingOp.GetTilingData(tilingData);
-    OP_CHECK_IF(
-        MoeFinalizeRoutingSetTilingData(context, tilingData) != ge::GRAPH_SUCCESS,
-        OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "MoeFinalizeRoutingSetTilingData set tiling data fail."),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(MoeFinalizeRoutingSetTilingData(context, tilingData) != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MoeFinalizeRoutingSetTilingData set tiling data fail."),
+                return ge::GRAPH_FAILED);
     context->SetBlockDim(tilingData.get_usedCoreNum());
     context->SetTilingKey(tilingOp.GetTilingKey());
     size_t* workspaces = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, workspaces);
+    OP_CHECK_IF(workspaces == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "workspaces",
+                    "Required workspaces metadata is null; context->GetWorkspaceSizes(1) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     workspaces[0] = WORKSPACE_SIZE;
 
     PrintTilingData(tilingData);

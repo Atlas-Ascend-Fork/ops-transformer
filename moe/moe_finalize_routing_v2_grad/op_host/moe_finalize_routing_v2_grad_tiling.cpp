@@ -12,6 +12,8 @@
  * \file moe_finalize_routing_v2_grad_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "tiling/platform/platform_ascendc.h"
 #include "op_host/tiling_util.h"
 #include "moe_finalize_routing_v2_grad_tiling.h"
@@ -37,7 +39,11 @@ constexpr int64_t ATTR_3_IDX = 3;
 ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context_->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
 
     auto compileInfoPtr = reinterpret_cast<const MoeFinalizeRoutingV2GradCompileInfo*>(context_->GetCompileInfo());
@@ -68,31 +74,55 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetPlatformInfo()
 ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetRequiredTensorInfo()
 {
     auto gradYShapePtr = context_->GetInputShape(INPUT_0_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradYShapePtr);
+    OP_CHECK_IF(gradYShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "grad_y"),
+                return ge::GRAPH_FAILED);
     gradYShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(gradYShapePtr->GetOriginShape());
     auto gradYDescPtr = context_->GetInputDesc(INPUT_0_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradYDescPtr);
+    OP_CHECK_IF(gradYDescPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "grad_y"),
+                return ge::GRAPH_FAILED);
     gradYType_ = gradYDescPtr->GetDataType();
 
     auto expandedRowIdxShapePtr = context_->GetInputShape(INPUT_1_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedRowIdxShapePtr);
+    OP_CHECK_IF(expandedRowIdxShapePtr == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_row_idx"), return ge::GRAPH_FAILED);
     expandedRowIdxShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(expandedRowIdxShapePtr->GetOriginShape());
     auto expandedRowIdxDescPtr = context_->GetInputDesc(INPUT_1_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedRowIdxDescPtr);
+    OP_CHECK_IF(expandedRowIdxDescPtr == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_row_idx"), return ge::GRAPH_FAILED);
     expandedRowIdxType_ = expandedRowIdxDescPtr->GetDataType();
 
     auto gradExpandedXShapePtr = context_->GetOutputShape(OUTPUT_0_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradExpandedXShapePtr);
+    OP_CHECK_IF(
+        gradExpandedXShapePtr == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "gradExpandedXShapePtr",
+                                                 "Required gradExpandedXShapePtr metadata is null; "
+                                                 "context_->GetOutputShape(OUTPUT_0_IDX) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     gradExpandedXShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(gradExpandedXShapePtr->GetOriginShape());
     auto gradExpandedXDescPtr = context_->GetOutputDesc(OUTPUT_0_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradExpandedXDescPtr);
+    OP_CHECK_IF(
+        gradExpandedXDescPtr == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "gradExpandedXDescPtr",
+                                                 "Required gradExpandedXDescPtr metadata is null; "
+                                                 "context_->GetOutputDesc(OUTPUT_0_IDX) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     gradExpandedXType_ = gradExpandedXDescPtr->GetDataType();
 
     auto gradScalesShapePtr = context_->GetOutputShape(OUTPUT_1_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradScalesShapePtr);
+    OP_CHECK_IF(
+        gradScalesShapePtr == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "gradScalesShapePtr",
+                                                 "Required gradScalesShapePtr metadata is null; "
+                                                 "context_->GetOutputShape(OUTPUT_1_IDX) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     gradScalesShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(gradScalesShapePtr->GetOriginShape());
     auto gradScalesDescPtr = context_->GetOutputDesc(OUTPUT_1_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradScalesDescPtr);
+    OP_CHECK_IF(
+        gradScalesDescPtr == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "gradScalesDescPtr",
+                                                 "Required gradScalesDescPtr metadata is null; "
+                                                 "context_->GetOutputDesc(OUTPUT_1_IDX) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     gradScalesType_ = gradScalesDescPtr->GetDataType();
 
     return ge::GRAPH_SUCCESS;
@@ -107,7 +137,8 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetOptionalTensorInfo()
         isScalesExist_ = true;
         scalesShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(scalesInputShape->GetOriginShape());
         auto scalesDesc = context_->GetOptionalInputDesc(INPUT_3_IDX);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, scalesDesc);
+        OP_CHECK_IF(scalesDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scales"),
+                    return ge::GRAPH_FAILED);
         scalesType_ = scalesDesc->GetDataType();
 
         auto expandedXInputShape = context_->GetOptionalInputShape(INPUT_2_IDX);
@@ -117,7 +148,8 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetOptionalTensorInfo()
                     return ge::GRAPH_FAILED);
         expandedXShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(expandedXInputShape->GetOriginShape());
         auto expandedXDesc = context_->GetOptionalInputDesc(INPUT_2_IDX);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXDesc);
+        OP_CHECK_IF(expandedXDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_x"),
+                    return ge::GRAPH_FAILED);
         expandedXType_ = expandedXDesc->GetDataType();
 
         auto biasInputShape = context_->GetOptionalInputShape(INPUT_5_IDX);
@@ -127,7 +159,8 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetOptionalTensorInfo()
             isBiasExist_ = true;
             biasShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(biasInputShape->GetOriginShape());
             auto biasDesc = context_->GetOptionalInputDesc(INPUT_5_IDX);
-            OP_CHECK_NULL_WITH_CONTEXT(context_, biasDesc);
+            OP_CHECK_IF(biasDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "bias"),
+                        return ge::GRAPH_FAILED);
             biasType_ = biasDesc->GetDataType();
 
             auto expertIdxInputShape = context_->GetOptionalInputShape(INPUT_4_IDX);
@@ -137,7 +170,8 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetOptionalTensorInfo()
                         return ge::GRAPH_FAILED);
             expertIdxShape_ = Ops::Transformer::OpTiling::EnsureNotScalar(expertIdxInputShape->GetOriginShape());
             auto expertIdxDesc = context_->GetOptionalInputDesc(INPUT_4_IDX);
-            OP_CHECK_NULL_WITH_CONTEXT(context_, expertIdxDesc);
+            OP_CHECK_IF(expertIdxDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_idx"),
+                        return ge::GRAPH_FAILED);
             expertIdxType_ = expertIdxDesc->GetDataType();
         }
     }
@@ -148,7 +182,11 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetOptionalTensorInfo()
 ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetAttrInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     if (attrs->GetAttrNum() > ATTR_0_IDX) {
         dropPadMode_ = *(attrs->GetAttrPointer<int64_t>(ATTR_0_IDX));
@@ -660,7 +698,12 @@ ge::graphStatus MoeFinalizeRoutingV2GradTiling::DoLibApiTiling()
 ge::graphStatus MoeFinalizeRoutingV2GradTiling::GetWorkspaceSize()
 {
     size_t* workSpaces = context_->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, workSpaces);
+    OP_CHECK_IF(
+        workSpaces == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "workSpaces",
+            "Required workSpaces metadata is null; context_->GetWorkspaceSizes(1) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     workSpaces[0] =
         (Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_) ? WORKSPACE_SIZE : LEGACY_WORKSPACE_SIZE);
     return ge::GRAPH_SUCCESS;
@@ -676,9 +719,18 @@ static ge::graphStatus TilingPrepare4MoeFinalizeRoutingV2Grad(gert::TilingParseC
     OP_LOGD(context, "TilingPrepareForMoeFinalizeRoutingV2Grad enter.");
 
     auto compileInfo = context->GetCompiledInfo<MoeFinalizeRoutingV2GradCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "compileInfo",
+                    "Required compileInfo metadata is null; "
+                    "context->GetCompiledInfo<MoeFinalizeRoutingV2GradCompileInfo>() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     compileInfo->aivNum = ascendcPlatform.GetCoreNumAiv();
     OP_CHECK_IF((compileInfo->aivNum <= 0),

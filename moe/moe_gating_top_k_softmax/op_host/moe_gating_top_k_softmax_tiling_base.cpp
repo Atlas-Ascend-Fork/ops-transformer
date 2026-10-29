@@ -12,6 +12,7 @@
  * \file moe_gating_top_k_softmax_tiling_base.cpp
  * \brief
  */
+#include <string>
 #include "moe_gating_top_k_softmax_tiling_base.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -71,7 +72,7 @@ ge::graphStatus MoeGatingTopKSoftmaxBaseTiling::CheckOutShape(const gert::Shape&
 ge::graphStatus MoeGatingTopKSoftmaxBaseTiling::GetShapeAttrsInfo()
 {
     auto gating = context_->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gating);
+    OP_CHECK_IF(gating == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "x"), return ge::GRAPH_FAILED);
     dtype = gating->GetDataType();
     auto gatingShape = context_->GetInputShape(0)->GetStorageShape();
     OP_CHECK_IF((gatingShape.GetDimNum() != 2U && gatingShape.GetDimNum() != 3U),
@@ -139,9 +140,13 @@ ge::graphStatus MoeGatingTopKSoftmaxBaseTiling::GetShapeAttrsInfo()
     }
 
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* kPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, kPtr);
+    OP_CHECK_IF(kPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "k"), return ge::GRAPH_FAILED);
     k = *kPtr;
     OP_CHECK_IF((k <= 0 || k > col),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(

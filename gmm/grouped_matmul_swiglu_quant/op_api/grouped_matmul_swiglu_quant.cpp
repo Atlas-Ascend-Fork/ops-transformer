@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "opdev/op_log.h"
 #include "opdev/op_dfx.h"
 #include "opdev/make_op_executor.h"
@@ -26,7 +28,7 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuant(
     L0_DFX(GroupedMatmulSwigluQuant, x, weight, perChannelScale, perTokenScale, weightAssistanceMatrix, groupList,
            isEnableWeightAssistanceMatrix, dequantMode);
     if (x == nullptr) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "x is nullptr.");
+        OP_LOGE_WITH_INVALID_INPUT("GroupedMatmulSwigluQuant", "x");
         return std::tuple(nullptr, nullptr);
     }
     int64_t m = perTokenScale->GetViewShape().GetDim(0);
@@ -40,7 +42,7 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuant(
                            OP_INPUT(x, weight, perChannelScale, perTokenScale, weightAssistanceMatrix, groupList),
                            OP_OUTPUT(out, scaleOut), OP_ATTR(isEnableWeightAssistanceMatrix, dequantMode));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "InferShape failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_INVALID, "InferShape failed.");
         return std::tuple(nullptr, nullptr);
     }
     ret = ADD_TO_LAUNCHER_LIST_AICORE(
@@ -48,7 +50,7 @@ const std::tuple<aclTensor*, aclTensor*> GroupedMatmulSwigluQuant(
         OP_INPUT(x, weight, perChannelScale, perTokenScale, weightAssistanceMatrix, groupList),
         OP_OUTPUT(out, scaleOut), OP_ATTR(isEnableWeightAssistanceMatrix, dequantMode));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return std::tuple(nullptr, nullptr);
     }
     return std::tie(out, scaleOut);

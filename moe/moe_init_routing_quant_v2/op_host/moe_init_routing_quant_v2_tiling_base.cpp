@@ -12,6 +12,8 @@
  * \file moe_init_routing_quant_v2_tiling_base.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "tiling/platform/platform_ascendc.h"
 #include "moe_init_routing_quant_v2_tiling_base.h"
 #include "op_host/tiling_util.h"
@@ -110,10 +112,20 @@ ge::graphStatus InnerMoeInitRoutingV2TilingBase::GetPlatformInfo()
 ge::graphStatus InnerMoeInitRoutingV2TilingBase::CheckTokenCount(int64_t num, const char* tag)
 {
     auto expertTokensShapePtr = context_->GetOutputShape(num);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertTokensShapePtr);
+    OP_CHECK_IF(expertTokensShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expertTokensShapePtr",
+                    "Required expertTokensShapePtr metadata is null; context_->GetOutputShape(num) "
+                    "must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     auto expertTokensDesc = context_->GetOutputDesc(num);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertTokensDesc);
+    OP_CHECK_IF(expertTokensDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expertTokensDesc",
+                    "Required expertTokensDesc metadata is null; context_->GetOutputDesc(num) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto dt = expertTokensDesc->GetDataType();
     CHECK_FAIL(context_, dt != ge::DT_INT32,
                OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), tag, Ops::Base::ToString(dt).c_str(), "INT32"));
@@ -134,11 +146,21 @@ ge::graphStatus InnerMoeInitRoutingV2TilingBase::CheckOutShape()
 {
     // 获取输出shape
     auto expandedXShapePtr = context_->GetOutputShape(OUTOUT_EXPANDED_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXShapePtr);
+    OP_CHECK_IF(expandedXShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expandedXShapePtr",
+                    "Required expandedXShapePtr metadata is null; "
+                    "context_->GetOutputShape(OUTOUT_EXPANDED_X) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const gert::Shape expandedXShape = expandedXShapePtr->GetStorageShape();
 
     auto expandedRowIdxShapePtr = context_->GetOutputShape(OUTOUT_EXPANDED_ROW_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedRowIdxShapePtr);
+    OP_CHECK_IF(expandedRowIdxShapePtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expandedRowIdxShapePtr",
+                    "Required expandedRowIdxShapePtr metadata is null; "
+                    "context_->GetOutputShape(OUTOUT_EXPANDED_ROW_IDX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const gert::Shape expandedRowIdxShape = expandedRowIdxShapePtr->GetStorageShape();
 
     size_t expandedXDimNum = expandedXShape.GetDimNum();
@@ -204,14 +226,20 @@ ge::graphStatus InnerMoeInitRoutingV2TilingBase::GetShapeAttrsInfo()
 
     // 获取输入shape
     auto xShapePtr = context_->GetInputShape(INDEX_INPUT_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xShapePtr);
+    OP_CHECK_IF(xShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "x"),
+                return ge::GRAPH_FAILED);
     const gert::Shape xShape = xShapePtr->GetStorageShape();
     auto expertIdxShapePtr = context_->GetInputShape(INDEX_INPUT_EXPERT_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertIdxShapePtr);
+    OP_CHECK_IF(expertIdxShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_idx"),
+                return ge::GRAPH_FAILED);
     const gert::Shape expertIdxShape = expertIdxShapePtr->GetStorageShape();
 
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* activateNumPtr = attrs->GetAttrPointer<int64_t>(ATTR_ACTIVE_ROWS);
     if (activateNumPtr != nullptr) {
         activateNum = *activateNumPtr;

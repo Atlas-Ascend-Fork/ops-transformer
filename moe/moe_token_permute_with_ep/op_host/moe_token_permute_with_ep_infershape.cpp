@@ -12,6 +12,7 @@
  * \file moe_token_permute_with_ep_infershape.cpp
  * \brief
  */
+#include <string>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -36,20 +37,41 @@ static ge::graphStatus InferShape4MoeTokenPermuteWithEp(gert::InferShapeContext*
     OP_LOGD(context->GetNodeName(), "Begin to do MoeTokenPermuteWithEpInfershape.");
     // 获取输入shape
     const gert::Shape* xShape = context->GetInputShape(PERMUTE_WITH_EP_INPUT_TOKENS);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xShape);
+    OP_CHECK_IF(xShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "tokens"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* indicesShape = context->GetInputShape(PERMUTE_WITH_EP_INPUT_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, indicesShape);
+    OP_CHECK_IF(indicesShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "indices"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* permuteXShape = context->GetOutputShape(PERMUTE_WITH_EP_OUTPUT_TOKENS);
-    OP_CHECK_NULL_WITH_CONTEXT(context, permuteXShape);
+    OP_CHECK_IF(permuteXShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "permuteXShape",
+                    "Required permuteXShape metadata is null; "
+                    "context->GetOutputShape(PERMUTE_WITH_EP_OUTPUT_TOKENS) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* sortedIndices = context->GetOutputShape(PERMUTE_WITH_EP_OUTPUT_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, sortedIndices);
+    OP_CHECK_IF(sortedIndices == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "sortedIndices",
+                    "Required sortedIndices metadata is null; "
+                    "context->GetOutputShape(PERMUTE_WITH_EP_OUTPUT_IDX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* permuteProbsShape = context->GetOutputShape(PERMUTE_WITH_EP_OUTPUT_PROBS);
-    OP_CHECK_NULL_WITH_CONTEXT(context, permuteProbsShape);
+    OP_CHECK_IF(permuteProbsShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "permuteProbsShape",
+                    "Required permuteProbsShape metadata is null; "
+                    "context->GetOutputShape(PERMUTE_WITH_EP_OUTPUT_PROBS) must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     // 获取attr
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto rangePtr = attrs->GetAttrPointer<gert::ContinuousVector>(PERMUTE_WITH_EP_ARRT_RANGE);
     const int64_t* numOutTokensPtr = attrs->GetAttrPointer<int64_t>(PERMUTE_WITH_EP_ARRT_NUM_OUT_TOKENS);
 
@@ -60,7 +82,9 @@ static ge::graphStatus InferShape4MoeTokenPermuteWithEp(gert::InferShapeContext*
     } else {
         int64_t IndicesDimNnum = indicesShape->GetDimNum();
         if (IndicesDimNnum != DIM_TWO && IndicesDimNnum != DIM_ONE) {
-            OP_LOGE(context->GetNodeName(), "The dim of indices should be 1 or 2, but got %ld.", IndicesDimNnum);
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                context->GetNodeName(), "indices",
+                "The dim of indices should be 1 or 2, but got " + std::to_string(IndicesDimNnum) + ".");
             return ge::GRAPH_FAILED;
         }
         int64_t topK = (IndicesDimNnum == 1) ? 1 : indicesShape->GetDim(1);
@@ -73,7 +97,8 @@ static ge::graphStatus InferShape4MoeTokenPermuteWithEp(gert::InferShapeContext*
     int64_t end;
     if (rangePtr != nullptr) {
         if (rangePtr->GetSize() != DIM_TWO) {
-            OP_LOGE(context->GetNodeName(), "the size of range only support 2");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "range",
+                                                     "the size of range only support 2");
             return ge::GRAPH_FAILED;
         }
         const int64_t* RangeList = reinterpret_cast<const int64_t*>(rangePtr->GetData());

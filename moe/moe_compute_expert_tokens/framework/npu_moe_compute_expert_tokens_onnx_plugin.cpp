@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "onnx_common.h"
 #include "nlohmann/json.hpp"
 
@@ -32,7 +34,7 @@ static Status ParseParamsMoeComputeExpertTokens(const ge::Operator& op_src, ge::
     }
 
     if (attrCount != REQ_ATTR_NNUM) {
-        OP_LOGE(GetOpName(op_dest).c_str(), "Node must have attr num_experts.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(GetOpName(op_dest), "num_experts", "Node must have attr num_experts.");
         return FAILED;
     }
 

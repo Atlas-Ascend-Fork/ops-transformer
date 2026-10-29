@@ -12,6 +12,7 @@
  * \file moe_token_unpermute_grad_infershape.cpp
  * \brief
  */
+#include <string>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 
@@ -40,15 +41,27 @@ static graphStatus InferShape4MoeTokenUnpermuteGrad(gert::InferShapeContext* con
     OP_LOGD(context->GetNodeName(), "Begin to do InferShape4MoeTokenUnpermuteGrad");
     const gert::Shape* permutedTokensShape = context->GetOptionalInputShape(INPUT_PERMUTED_TOKENS_IDX);
     const gert::Shape* unpermutedOutputDShape = context->GetOptionalInputShape(INPUT_UNPERMUTEDOUTPUTD_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, unpermutedOutputDShape);
+    OP_CHECK_IF(unpermutedOutputDShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "unpermuted_tokens_grad"), return ge::GRAPH_FAILED);
     const gert::Shape* rowIdMapShape = context->GetOptionalInputShape(INPUT_ROWIDMAP_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, rowIdMapShape);
+    OP_CHECK_IF(rowIdMapShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "sorted_indices"),
+                return ge::GRAPH_FAILED);
     const gert::Shape* probShape = context->GetOptionalInputShape(INPUT_PROB_IDX);
 
     gert::Shape* permutedTokensGradShape = context->GetOutputShape(OUTPUT_PERMUTEDTOKENSGRAD_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, permutedTokensGradShape);
+    OP_CHECK_IF(permutedTokensGradShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "permutedTokensGradShape",
+                    "Required permutedTokensGradShape metadata is null; "
+                    "context->GetOutputShape(OUTPUT_PERMUTEDTOKENSGRAD_IDX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     gert::Shape* probGradShape = context->GetOutputShape(OUTPUT_PROBGRAD_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, probGradShape);
+    OP_CHECK_IF(probGradShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "probGradShape",
+                    "Required probGradShape metadata is null; "
+                    "context->GetOutputShape(OUTPUT_PROBGRAD_IDX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     // permutedTokensGrad
     if (permutedTokensShape != nullptr && IsUnknownRank(permutedTokensShape)) {
@@ -56,14 +69,18 @@ static graphStatus InferShape4MoeTokenUnpermuteGrad(gert::InferShapeContext* con
         permutedTokensGradShape->SetDim(DIM_0, UNKNOWN_RANK_DIM_VALUE_);
     } else {
         if (unpermutedOutputDShape->GetDimNum() != DIM_NUM_TWO || rowIdMapShape->GetDimNum() != DIM_NUM_ONE) {
-            OP_LOGE(context->GetNodeName(),
-                    "The dim number of input must be 2, indices must be 1, but got: input %zu, indices %zu",
-                    unpermutedOutputDShape->GetDimNum(), rowIdMapShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                context->GetNodeName(), "unpermuted_tokens_grad, sorted_indices",
+                "The dim number of input must be 2, indices must be 1, but got: input " +
+                    std::to_string(unpermutedOutputDShape->GetDimNum()) + ", indices " +
+                    std::to_string(rowIdMapShape->GetDimNum()));
             return ge::GRAPH_FAILED;
         }
         if (permutedTokensShape != nullptr && permutedTokensShape->GetDimNum() != DIM_NUM_TWO) {
-            OP_LOGE(context->GetNodeName(), "The dim number of permuted_tokens must be 2, but got: %zu",
-                    permutedTokensShape->GetDimNum());
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "permuted_tokens",
+                                                     std::to_string(permutedTokensShape->GetDimNum()),
+                                                     "The dim number of permuted_tokens must be 2, but got: " +
+                                                         std::to_string(permutedTokensShape->GetDimNum()));
             return ge::GRAPH_FAILED;
         }
         uint32_t inputGradDim0 = rowIdMapShape->GetDim(DIM_0);

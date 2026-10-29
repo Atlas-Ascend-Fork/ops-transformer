@@ -12,6 +12,8 @@
  * \file moe_token_permute_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_token_permute_tiling.h"
 
 namespace {
@@ -203,11 +205,14 @@ void MoeTokenPermuteTilingBase::Reset()
 ge::graphStatus MoeTokenPermuteTilingBase::GetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(opName, "fail to get platform info"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(opName), "platformInfo",
+                                                         "fail to get platform info"),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
 
     auto indicesPtr = context_->GetInputTensor(1);
-    OP_CHECK_IF(indicesPtr == nullptr, OP_LOGE(opName, "fail to get input [indices]"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(indicesPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName, "indices"), return ge::GRAPH_FAILED);
     if (indicesPtr->GetShapeSize() <= SORT32_ALIGN_ELEMENT) {
         aivNum = 1;
     } else {
@@ -226,16 +231,27 @@ ge::graphStatus MoeTokenPermuteTilingBase::CheckOutShape()
 {
     // 获取输入shape
     const auto tokenOutput = context_->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, tokenOutput);
+    OP_CHECK_IF(tokenOutput == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "tokenOutput",
+                    "Required tokenOutput metadata is null; context_->GetOutputShape(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const gert::Shape tokensShape = tokenOutput->GetStorageShape();
     const auto indicesOutput = context_->GetOutputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, indicesOutput);
+    OP_CHECK_IF(
+        indicesOutput == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "indicesOutput",
+            "Required indicesOutput metadata is null; context_->GetOutputShape(1) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     const gert::Shape IndicesShape = indicesOutput->GetStorageShape();
 
     size_t tokensDimNnum = tokensShape.GetDimNum();
     if (tokensDimNnum < DIM_TWO) {
-        OP_LOGE(context_->GetNodeName(),
-                "The dim number of Output permute_tokens should be greater than 1 but got [%lu].", tokensDimNnum);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context_->GetNodeName(), "permute_tokens", std::to_string(tokensDimNnum),
+            "The dim number of Output permute_tokens should be greater than 1 but got [" +
+                std::to_string(tokensDimNnum) + "].");
         return ge::GRAPH_FAILED;
     }
 
@@ -246,24 +262,31 @@ ge::graphStatus MoeTokenPermuteTilingBase::CheckOutShape()
 
     size_t IndicesDimNnum = IndicesShape.GetDimNum();
     if (IndicesDimNnum != DIM_ONE) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of Output sort_indices should be 1.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "indices",
+                                                 "The dim number of Output sort_indices should be 1.");
         return ge::GRAPH_FAILED;
     }
 
     if (IndicesShape.GetDim(0) != totalLength) {
-        OP_LOGE(context_->GetNodeName(), "The size of Output sort_indices should be [%ld].", totalLength);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "indices",
+            "The size of Output sort_indices should be [" + std::to_string(totalLength) + "].");
         return ge::GRAPH_FAILED;
     }
 
     if (cols != moeTokenPermuteTilingData.get_cols()) {
-        OP_LOGE(context_->GetNodeName(), "The hidden_size of output permuteTokens should be %ld but got %ld.",
-                moeTokenPermuteTilingData.get_cols(), cols);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "permute_tokens",
+                                                 "The hidden_size of output permuteTokens should be " +
+                                                     std::to_string(moeTokenPermuteTilingData.get_cols()) +
+                                                     " but got " + std::to_string(cols) + ".");
         return ge::GRAPH_FAILED;
     }
 
     if (tokensShape.GetDim(0) != numOutTokens) {
-        OP_LOGE(context_->GetNodeName(), "The dim 0 of output permuteTokens should be %ld but got %ld.", numOutTokens,
-                tokensShape.GetDim(0));
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "permute_tokens, num_out_tokens",
+                                                 "The dim 0 of output permuteTokens should be " +
+                                                     std::to_string(numOutTokens) + " but got " +
+                                                     std::to_string(tokensShape.GetDim(0)) + ".");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -278,7 +301,11 @@ ge::graphStatus MoeTokenPermuteTilingBase::GetShapeAttrsInfo()
     const gert::Shape tokensShape = context_->GetInputShape(0)->GetStorageShape();
     const gert::Shape IndicesShape = context_->GetInputShape(1)->GetStorageShape();
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     int64_t id = 0;
     const int64_t* numOutTokensPtr = attrs->GetAttrPointer<int64_t>(id++);
     const bool* paddedModePtr = attrs->GetAttrPointer<bool>(id);
@@ -286,7 +313,8 @@ ge::graphStatus MoeTokenPermuteTilingBase::GetShapeAttrsInfo()
     paddedMode = *paddedModePtr;
 
     if (paddedMode == true) {
-        OP_LOGE(context_->GetNodeName(), "Currently only support padded_mode is false");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "padded_mode",
+                                                 "Currently only support padded_mode is false");
         return ge::GRAPH_FAILED;
     }
 
@@ -299,13 +327,17 @@ ge::graphStatus MoeTokenPermuteTilingBase::GetShapeAttrsInfo()
 
     size_t indicesDimNum = IndicesShape.GetDimNum();
     if (indicesDimNum != DIM_TWO && indicesDimNum != DIM_ONE) {
-        OP_LOGE(context_->GetNodeName(), "The dim number of indices should be 2 or 1 but got [%lu].", indicesDimNum);
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context_->GetNodeName(), "indices", std::to_string(indicesDimNum),
+            "The dim number of indices should be 2 or 1 but got [" + std::to_string(indicesDimNum) + "].");
         return ge::GRAPH_FAILED;
     }
 
     if (tokensShape.GetDim(0) != IndicesShape.GetDim(0)) {
-        OP_LOGE(context_->GetNodeName(), "Input token's dim 0 [%ld] should be same with indices' dim 0 [%ld].",
-                tokensShape.GetDim(0), IndicesShape.GetDim(0));
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "tokens, indices",
+                                                 "Input token's dim 0 [" + std::to_string(tokensShape.GetDim(0)) +
+                                                     "] should be same with indices' dim 0 [" +
+                                                     std::to_string(IndicesShape.GetDim(0)) + "].");
         return ge::GRAPH_FAILED;
     }
 
@@ -320,16 +352,20 @@ ge::graphStatus MoeTokenPermuteTilingBase::GetShapeAttrsInfo()
 
     int64_t topK = (indicesDimNum == 1) ? 1 : IndicesShape.GetDim(1);
     if (topK > MAX_INDICES_NUM) {
-        OP_LOGE(context_->GetNodeName(), "Input indices's dim 1 [%ld] should not large than max topK[%ld].", topK,
-                MAX_INDICES_NUM);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "indices",
+                                                 "Input indices's dim 1 [" + std::to_string(topK) +
+                                                     "] should not large than max topK[" +
+                                                     std::to_string(MAX_INDICES_NUM) + "].");
         return ge::GRAPH_FAILED;
     }
 
     moeTokenPermuteTilingData.set_topK(topK);
     totalLength = moeTokenPermuteTilingData.get_n() * moeTokenPermuteTilingData.get_topK();
     if (totalLength >= SORT_LIMIT_LENGTH) {
-        OP_LOGE(context_->GetNodeName(), "The elements num of indices [%ld] should be less than [%ld].", totalLength,
-                SORT_LIMIT_LENGTH);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "indices",
+                                                 "The elements num of indices [" + std::to_string(totalLength) +
+                                                     "] should be less than [" + std::to_string(SORT_LIMIT_LENGTH) +
+                                                     "].");
         return ge::GRAPH_FAILED;
     }
 
@@ -436,10 +472,20 @@ ge::graphStatus MoeTokenPermuteTilingBase::PostTiling()
 {
     context_->SetBlockDim(aivNum);
     size_t* currentWorkspace = context_->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, currentWorkspace);
+    OP_CHECK_IF(currentWorkspace == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "currentWorkspace",
+                    "Required currentWorkspace metadata is null; context_->GetWorkspaceSizes(1) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
     currentWorkspace[0] = workspaceSize_;
     auto rawTilingData = context_->GetRawTilingData();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData);
+    OP_CHECK_IF(
+        rawTilingData == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "rawTilingData",
+            "Required rawTilingData metadata is null; context_->GetRawTilingData() must provide a valid object."),
+        return ge::GRAPH_FAILED);
     // 涉及核间同步的算子必须设置schedule_mode为1，独占全核
     context_->SetScheduleMode(1);
     moeTokenPermuteTilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());

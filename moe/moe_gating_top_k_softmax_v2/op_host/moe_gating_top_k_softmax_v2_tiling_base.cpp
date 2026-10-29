@@ -12,6 +12,7 @@
  * \file moe_gating_top_k_softmax_v2_tiling_base.cpp
  * \brief
  */
+#include <string>
 #include "moe_gating_top_k_softmax_v2_tiling.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -169,7 +170,7 @@ ge::graphStatus MoeGatingTopKSoftmaxV2BaseTiling::CheckOptionalAttr(gert::Shape&
 ge::graphStatus MoeGatingTopKSoftmaxV2BaseTiling::GetShapeAttrsInfo()
 {
     auto gating = context_->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gating);
+    OP_CHECK_IF(gating == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "x"), return ge::GRAPH_FAILED);
     dtype = gating->GetDataType();
     OP_CHECK_IF(
         (dtype != ge::DataType::DT_FLOAT && dtype != ge::DataType::DT_FLOAT16 && dtype != ge::DataType::DT_BF16),
@@ -191,9 +192,13 @@ ge::graphStatus MoeGatingTopKSoftmaxV2BaseTiling::GetShapeAttrsInfo()
     }
 
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* kPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, kPtr);
+    OP_CHECK_IF(kPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "k"), return ge::GRAPH_FAILED);
     k = *kPtr;
     OP_CHECK_IF((k <= 0 || k > int(col)),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
@@ -209,7 +214,11 @@ ge::graphStatus MoeGatingTopKSoftmaxV2BaseTiling::GetShapeAttrsInfo()
                 return ge::GRAPH_FAILED);
 
     auto yDesc = context_->GetOutputDesc(OUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, yDesc);
+    OP_CHECK_IF(yDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "yDesc",
+                    "Required yDesc metadata is null; context_->GetOutputDesc(OUT_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto yDtype = yDesc->GetDataType();
     OP_CHECK_IF((yDtype != dtype),
                 OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(
@@ -228,7 +237,12 @@ ge::graphStatus MoeGatingTopKSoftmaxV2BaseTiling::GetShapeAttrsInfo()
     }
 
     auto expertIdxDesc = context_->GetOutputDesc(INDICES_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertIdxDesc);
+    OP_CHECK_IF(expertIdxDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expertIdxDesc",
+                    "Required expertIdxDesc metadata is null; context_->GetOutputDesc(INDICES_INDEX) "
+                    "must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto expertIdxDtype = expertIdxDesc->GetDataType();
     OP_CHECK_IF((expertIdxDtype != ge::DataType::DT_INT32),
                 OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "expertIdx",

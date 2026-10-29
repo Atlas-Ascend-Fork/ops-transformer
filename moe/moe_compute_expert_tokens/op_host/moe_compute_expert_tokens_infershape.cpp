@@ -12,6 +12,7 @@
  * \file moe_compute_expert_tokens_infer.cpp
  * \brief
  */
+#include <string>
 #include "log/log.h"
 #include "register/op_impl_registry.h"
 
@@ -27,11 +28,16 @@ static ge::graphStatus InfershapeForMoeComputeExpertTokens(gert::InferShapeConte
     OP_LOGD(context->GetNodeName(), "Begin to do MoeComputeExpertTokensInfershape.");
     // 获取输入值shape
     const gert::Shape* inputShape = context->GetInputShape(INDEX_IN_SORTED_EXPERTS_X1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputShape);
+    OP_CHECK_IF(inputShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "sorted_experts"),
+                return ge::GRAPH_FAILED);
 
     // 获取属性值
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     int64_t numExperts = *(attrs->GetInt(numExpertsAttrIdx));
     std::string numExpertsStr = std::to_string(numExperts);
     OP_CHECK_IF(numExperts <= 0 || numExperts > 2048,
@@ -41,7 +47,12 @@ static ge::graphStatus InfershapeForMoeComputeExpertTokens(gert::InferShapeConte
 
     // 获取输出值shape
     gert::Shape* output_y_shape = context->GetOutputShape(INDEX_out);
-    OP_CHECK_NULL_WITH_CONTEXT(context, output_y_shape);
+    OP_CHECK_IF(output_y_shape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "output_y_shape",
+                    "Required output_y_shape metadata is null; context->GetOutputShape(INDEX_out) must "
+                    "provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     const size_t input_dim_num = 1;
     output_y_shape->SetDimNum(input_dim_num);

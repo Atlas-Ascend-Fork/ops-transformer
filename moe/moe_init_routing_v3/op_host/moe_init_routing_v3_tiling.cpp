@@ -12,6 +12,8 @@
  * \file moe_init_routing_v3_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_init_routing_v3_tiling.h"
 #include "register/op_def_registry.h"
 
@@ -694,10 +696,12 @@ ge::graphStatus MoeInitRountingV3TilingBase::GetShapeAttrsInfo()
 
     // 获取输入shape
     xShapePtr_ = context_->GetInputShape(INPUT_X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xShapePtr_);
+    OP_CHECK_IF(xShapePtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "x"),
+                return ge::GRAPH_FAILED);
 
     expertIdxShapePtr_ = context_->GetInputShape(INPUT_EXPERT_IDX_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertIdxShapePtr_);
+    OP_CHECK_IF(expertIdxShapePtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_idx"),
+                return ge::GRAPH_FAILED);
 
     // 可选输入scale
     scaleShapePtr_ = context_->GetOptionalInputShape(INPUT_SCALE_INDEX);
@@ -719,35 +723,68 @@ ge::graphStatus MoeInitRountingV3TilingBase::GetShapeAttrsInfo()
 
     // 获取输出shape
     expandedXShapePtr_ = context_->GetOutputShape(OUTPUT_EXPANDED_X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXShapePtr_);
+    OP_CHECK_IF(expandedXShapePtr_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expandedXShapePtr_",
+                    "Required expandedXShapePtr_ metadata is null; "
+                    "context_->GetOutputShape(OUTPUT_EXPANDED_X_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     expandedRowIdxShapePtr_ = context_->GetOutputShape(OUTPUT_EXPANDED_ROW_IDX_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedRowIdxShapePtr_);
+    OP_CHECK_IF(expandedRowIdxShapePtr_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expandedRowIdxShapePtr_",
+                    "Required expandedRowIdxShapePtr_ metadata is null; "
+                    "context_->GetOutputShape(OUTPUT_EXPANDED_ROW_IDX_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     expertTokensCountOrCumsumShapePtr_ = context_->GetOutputShape(OUTPUT_EXPERT_TOKENS_COUNT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertTokensCountOrCumsumShapePtr_);
+    OP_CHECK_IF(expertTokensCountOrCumsumShapePtr_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expertTokensCountOrCumsumShapePtr_",
+                    "Required expertTokensCountOrCumsumShapePtr_ metadata is null; "
+                    "context_->GetOutputShape(OUTPUT_EXPERT_TOKENS_COUNT_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     expandedScaleShapePtr_ = context_->GetOutputShape(OUTPUT_EXPANDED_SCALE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedScaleShapePtr_);
+    OP_CHECK_IF(expandedScaleShapePtr_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expandedScaleShapePtr_",
+                    "Required expandedScaleShapePtr_ metadata is null; "
+                    "context_->GetOutputShape(OUTPUT_EXPANDED_SCALE_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     // 获取属性
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     activeNumPtr_ = attrs->GetAttrPointer<int64_t>(ATTR_ACTIVE_NUM_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, activeNumPtr_);
+    OP_CHECK_IF(activeNumPtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "active_num"),
+                return ge::GRAPH_FAILED);
     expertCapacityPtr_ = attrs->GetAttrPointer<int64_t>(ATTR_EXPERT_CAPACITY_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertCapacityPtr_);
+    OP_CHECK_IF(expertCapacityPtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_capacity"),
+                return ge::GRAPH_FAILED);
     expertNumPtr_ = attrs->GetAttrPointer<int64_t>(ATTR_EXPERT_NUM_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertNumPtr_);
+    OP_CHECK_IF(expertNumPtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_num"),
+                return ge::GRAPH_FAILED);
     dropPadModePtr_ = attrs->GetAttrPointer<int64_t>(ATTR_DROP_PAD_MODE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, dropPadModePtr_);
+    OP_CHECK_IF(dropPadModePtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "drop_pad_mode"),
+                return ge::GRAPH_FAILED);
     expertTokensNumTypePtr_ = attrs->GetAttrPointer<int64_t>(ATTR_EXPERT_TOKEN_NUM_TYPE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertTokensNumTypePtr_);
+    OP_CHECK_IF(expertTokensNumTypePtr_ == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_tokens_num_type"), return ge::GRAPH_FAILED);
     expertTokensNumFlagPtr_ = attrs->GetAttrPointer<bool>(ATTR_EXPERT_TOKEN_NUM_FLAG_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertTokensNumFlagPtr_);
+    OP_CHECK_IF(expertTokensNumFlagPtr_ == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_tokens_num_flag"), return ge::GRAPH_FAILED);
     quantModePtr_ = attrs->GetAttrPointer<int64_t>(ATTR_QUANT_MODE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, quantModePtr_);
+    OP_CHECK_IF(quantModePtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "quant_mode"),
+                return ge::GRAPH_FAILED);
     activeExpertRangeListPtr_ = attrs->GetAttrPointer<gert::ContinuousVector>(ATTR_EXPERT_RANGE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, activeExpertRangeListPtr_);
+    OP_CHECK_IF(activeExpertRangeListPtr_ == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "active_expert_range"), return ge::GRAPH_FAILED);
     rowIdxTypePtr_ = attrs->GetAttrPointer<int64_t>(ATTR_ROW_IDX_TYPE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, rowIdxTypePtr_);
+    OP_CHECK_IF(rowIdxTypePtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "row_idx_type"),
+                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1016,8 +1053,14 @@ bool MoeInitRountingV3TilingBase::IsPerformanceMode_X_1_7168_EXPERT_IDX_1_8_SCAL
     const gert::Shape performExpertIdxShape_X_1_7168 = gert::Shape({1, 8});
     const gert::Shape performScaleShape_X_1_7168 = gert::Shape({256, 7168});
 
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xShapePtr_);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expertIdxShapePtr_);
+    OP_CHECK_IF(xShapePtr_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "xShapePtr_",
+                    "Required xShapePtr_ metadata is null; context_->GetOutputShape(OUTPUT_EXPANDED_ROW_IDX_INDEX) "
+                    "must provide a valid object."),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(expertIdxShapePtr_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expert_idx"),
+                return ge::GRAPH_FAILED);
     if (nullptr == scaleShapePtr_) {
         result = false;
     } else if (xShapePtr_->GetStorageShape() == performXShape_X_1_7168 &&

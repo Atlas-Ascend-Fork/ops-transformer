@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include <initializer_list>
 #include <tuple>
 
@@ -79,19 +81,22 @@ static inline bool CheckDtypeValidRegbase(const aclTensor* tokens, const aclTens
     }
     return true;
 }
-
 static inline bool CheckShapeValid(const aclTensor* tokens, const aclTensor* indices)
 {
     auto tokensDimNum = tokens->GetViewShape().GetDimNum();
-    OP_CHECK(tokensDimNum == TOKENS_REQUIRED_DIM,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimension of tokens should be 2, but got %ld.",
-                     static_cast<int64_t>(tokensDimNum)),
-             return false);
+    OP_CHECK(
+        tokensDimNum == TOKENS_REQUIRED_DIM,
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            "MoeTokenPermute", "tokens", std::to_string(static_cast<int64_t>(tokensDimNum)),
+            "The dimension of tokens should be 2, but got " + std::to_string(static_cast<int64_t>(tokensDimNum)) + "."),
+        return false);
 
     auto indicesDimNum = indices->GetViewShape().GetDimNum();
     OP_CHECK(indicesDimNum == INDICES_MIN_DIM || indicesDimNum == INDICES_MAX_DIM,
-             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "The dimension of indices should be 1 or 2, but got %ld.",
-                     static_cast<int64_t>(indicesDimNum)),
+             OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON("MoeTokenPermute", "indices",
+                                                      std::to_string(static_cast<int64_t>(indicesDimNum)),
+                                                      "The dimension of indices should be 1 or 2, but got " +
+                                                          std::to_string(static_cast<int64_t>(indicesDimNum)) + "."),
              return false);
     return true;
 }
@@ -129,7 +134,6 @@ static inline bool CheckDtypeValidV2Regbase(const aclTensor* tokens, const aclTe
     OP_CHECK_DTYPE_NOT_MATCH(expandedScaleOut, DataType::DT_FLOAT8_E8M0, return false);
     return true;
 }
-
 static aclnnStatus CheckParamsV2Regbase(const aclTensor* tokens, const aclTensor* indices, int64_t quantMode,
                                         const aclTensor* permuteTokensOut, const aclTensor* sortedIndicesOut,
                                         const aclTensor* expandedScaleOut)
@@ -141,7 +145,6 @@ static aclnnStatus CheckParamsV2Regbase(const aclTensor* tokens, const aclTensor
         ACLNN_ERR_PARAM_INVALID);
     return ACLNN_SUCCESS;
 }
-
 static aclnnStatus CheckParamsV2Fallback(const aclTensor* tokens, const aclTensor* indices,
                                          const aclTensor* permuteTokensOut, const aclTensor* sortedIndicesOut,
                                          const aclTensor* expandedScaleOut)
@@ -308,7 +311,8 @@ aclnnStatus aclnnMoeTokenPermuteV2GetWorkspaceSize(const aclTensor* tokens, cons
                                                          sortedIndicesOut, workspaceSize, executor);
     }
     if (paddedMode) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "paddedMode only supports false currently, but got true.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenPermute", "padded_mode",
+                                                 "paddedMode only supports false currently, but got true.");
         return ACLNN_ERR_PARAM_INVALID;
     }
 
@@ -319,7 +323,6 @@ aclnnStatus aclnnMoeTokenPermuteV2GetWorkspaceSize(const aclTensor* tokens, cons
         return BuildMoeInitRoutingV2Executor(tokens, indices, numOutTokens, permuteTokensOut, sortedIndicesOut,
                                              workspaceSize, executor);
     }
-
     CHECK_RET(MoeTokenPermuteV2Check::CheckParamsV2Regbase(tokens, indices, quantMode, permuteTokensOut,
                                                            sortedIndicesOut, expandedScaleOut) == ACLNN_SUCCESS,
               ACLNN_ERR_PARAM_INVALID);

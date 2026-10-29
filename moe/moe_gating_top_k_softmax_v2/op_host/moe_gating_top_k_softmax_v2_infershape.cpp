@@ -12,6 +12,7 @@
  * \file moe_gating_top_k_softmax_v2_infer.cpp
  * \brief
  */
+#include <string>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
 #include "platform/platform_info.h"
@@ -63,7 +64,8 @@ static void setOutShape(const gert::Shape* gatingShape, gert::Shape* outShape, g
 static ge::graphStatus InferShapeMoeGatingTopKSoftmaxV2(gert::InferShapeContext* context)
 {
     const gert::Shape* gatingShape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, gatingShape);
+    OP_CHECK_IF(gatingShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"),
+                return ge::GRAPH_FAILED);
 
     gert::Shape* outShape = context->GetOutputShape(0);
     gert::Shape* indicesShape = context->GetOutputShape(1);
@@ -84,10 +86,14 @@ static ge::graphStatus InferShapeMoeGatingTopKSoftmaxV2(gert::InferShapeContext*
     }
 
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     const int64_t* kPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kPtr);
+    OP_CHECK_IF(kPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "k"), return ge::GRAPH_FAILED);
     const int64_t k = *kPtr;
 
     if (k <= 0 || k > MAX_K || (!IsUnknownShape(gatingShape) && k > gatingShape->GetDim(gatingDimNum - 1))) {

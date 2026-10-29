@@ -12,6 +12,7 @@
  * \file moe_token_permute_with_routing_map_grad.cpp
  * \brief moe_token_permute_with_routing_map_grad.cpp
  */
+#include <string>
 #include "log/log.h"
 #include "moe_token_permute_with_routing_map_grad_tiling.h"
 
@@ -278,16 +279,24 @@ ge::graphStatus TilingCompute(gert::TilingContext* context, const int64_t topK)
 ge::graphStatus TilingComputeDropPad(gert::TilingContext* context)
 {
     auto attrPtr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
+    OP_CHECK_IF(attrPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrPtr",
+                    "Required attrPtr metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* ptokenNum = attrPtr->GetAttrPointer<int64_t>(1);
     int64_t tokenNum = *ptokenNum;
     const int64_t* pExpertsNum = attrPtr->GetAttrPointer<int64_t>(0);
     int64_t expertsNum = *pExpertsNum;
     const gert::StorageShape* tokensShape = context->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, tokensShape);
+    OP_CHECK_IF(tokensShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "permuted_token_output_grad"),
+                return ge::GRAPH_FAILED);
     int64_t capacity = safeDiv(tokensShape->GetStorageShape().GetDim(0), expertsNum);
     auto permuted_tokens = context->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, permuted_tokens);
+    OP_CHECK_IF(permuted_tokens == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "permuted_token_output_grad"),
+                return ge::GRAPH_FAILED);
 
     MoeTokenPermuteWithRoutingMapGradTilingData tilingData;
     // 设置核数
@@ -324,20 +333,29 @@ ge::graphStatus TilingComputeDropPad(gert::TilingContext* context)
 static inline ge::graphStatus Tiling4MoeTokenPermuteWithRoutingMapGrad(gert::TilingContext* context)
 {
     auto attrPtr = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrPtr);
+    OP_CHECK_IF(attrPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrPtr",
+                    "Required attrPtr metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const bool* pPadded_mode = attrPtr->GetAttrPointer<bool>(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, pPadded_mode);
+    OP_CHECK_IF(pPadded_mode == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "padded_mode"),
+                return ge::GRAPH_FAILED);
     auto padded_mode = *pPadded_mode;
     if (padded_mode == false) {
         const gert::StorageShape* tokensShape = context->GetInputShape(0);
-        OP_CHECK_NULL_WITH_CONTEXT(context, tokensShape);
+        OP_CHECK_IF(tokensShape == nullptr,
+                    OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "permuted_token_output_grad"),
+                    return ge::GRAPH_FAILED);
 
         const int64_t* ptokenNum = attrPtr->GetAttrPointer<int64_t>(1);
         int64_t tokenNum = *ptokenNum;
         int64_t topk = safeDiv(tokensShape->GetStorageShape().GetDim(0), tokenNum);
         if (topk > MAX_TOPK_NUM) {
-            OP_LOGE(context->GetNodeName(), "numOutTokens / numTokens [%ld] should not be larger than max topk[%d].",
-                    topk, MAX_TOPK_NUM);
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "tokens_num",
+                                                     "numOutTokens / numTokens [" + std::to_string(topk) +
+                                                         "] should not be larger than max topk[" +
+                                                         std::to_string(MAX_TOPK_NUM) + "].");
             return ge::GRAPH_FAILED;
         }
         return permute_with_routing_map_grad::TilingCompute(context, topk);

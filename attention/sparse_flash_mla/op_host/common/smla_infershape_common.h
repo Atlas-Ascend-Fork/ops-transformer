@@ -112,15 +112,30 @@ inline ge::graphStatus SMLAGetInferShapeBase(gert::InferShapeContext* context, u
                                              SMLAInferShapeBase& base)
 {
     base.queryShape = context->GetInputShape(SMLA_QUERY_INPUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, base.queryShape);
+    OP_CHECK_IF((base.queryShape) == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "q"),
+                return ge::GRAPH_FAILED);
     base.attentionOutShape = context->GetOutputShape(ATTN_OUT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, base.attentionOutShape);
+    OP_CHECK_IF((base.attentionOutShape) == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "base.attentionOutShape",
+                    "Required base.attentionOutShape metadata is null; "
+                    "context->GetOutputShape(ATTN_OUT_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     *base.attentionOutShape = *base.queryShape;
 
     base.softmaxLseShape = context->GetOutputShape(SOFTMAX_LSE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, base.softmaxLseShape);
+    OP_CHECK_IF((base.softmaxLseShape) == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "base.softmaxLseShape",
+                    "Required base.softmaxLseShape metadata is null; "
+                    "context->GetOutputShape(SOFTMAX_LSE_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     base.attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, base.attrs);
+    OP_CHECK_IF((base.attrs) == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "base.attrs",
+                    "Required base.attrs metadata is null; context->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     base.returnSoftmaxLsePtr = base.attrs->GetAttrPointer<bool>(returnSoftmaxLseAttrIdx);
     return ge::GRAPH_SUCCESS;
 }
@@ -137,7 +152,12 @@ inline ge::graphStatus SMLAInferShape(gert::InferShapeContext* context, const ch
     const gert::Shape* oriKvShape = context->GetOptionalInputShape(SMLA_ORI_KV_INPUT_INDEX);
     const gert::Shape* cmpKvShape = context->GetOptionalInputShape(SMLA_CMP_KV_INPUT_INDEX);
     base.kvShape = (oriKvShape != nullptr) ? oriKvShape : cmpKvShape;
-    OP_CHECK_NULL_WITH_CONTEXT(context, base.kvShape);
+    OP_CHECK_IF((base.kvShape) == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "base.kvShape",
+                    "Required base.kvShape metadata is null; (oriKvShape != nullptr) ? oriKvShape : "
+                    "cmpKvShape must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     const char* layoutQ = base.attrs->GetStr(layoutQAttrIdx);
     const char* layoutKv = base.attrs->GetStr(layoutKvAttrIdx);
@@ -155,7 +175,10 @@ inline ge::graphStatus SMLAInferShape(gert::InferShapeContext* context, const ch
 // sparse_flash_mla / mixed_quant_sparse_flash_mla 的 InferDataType（输出 dtype 跟随 query 输入）
 inline ge::graphStatus SMLAInferDataTypeByInput(gert::InferDataTypeContext* context, const char* opName)
 {
-    OP_CHECK_IF(context == nullptr, OP_LOGE(opName, "InferShapeContext is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(context == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(opName), "context",
+                                                         "InferShapeContext is nullptr"),
+                return ge::GRAPH_FAILED);
     const auto inputDataType = context->GetInputDataType(SMLA_QUERY_INPUT_INDEX);
     context->SetOutputDataType(ATTN_OUT_INDEX, inputDataType);
     context->SetOutputDataType(SOFTMAX_LSE_INDEX, ge::DT_FLOAT);

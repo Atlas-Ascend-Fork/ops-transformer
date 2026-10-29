@@ -13,6 +13,9 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <vector>
+#include <string>
 #include "inplace_partial_rotary_mul_tiling.h"
 #include <graph/utils/type_utils.h>
 
@@ -232,21 +235,37 @@ ge::graphStatus InplacePartialRotaryMulTiling::CalTilingData()
 }
 ge::graphStatus InplacePartialRotaryMulTiling::Init()
 {
+    OP_CHECK_IF(
+        context_ == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("InplacePartialRotaryMul", "context_", "Tiling context is null"),
+        return ge::GRAPH_FAILED);
     OP_LOGI(context_->GetNodeName(), "Tiling4InplacePartialRotaryMul Init running.");
-    OP_CHECK_IF(context_ == nullptr, OP_LOGE(context_, "Tiling context is null"), return ge::GRAPH_FAILED);
     auto platformInfo = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo == nullptr, OP_LOGE(context_, "Tiling platformInfo is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "platformInfo",
+                                                         "Tiling platformInfo is null"),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
 
     coreNum_ = ascendcPlatform.GetCoreNumAiv();
-    OP_CHECK_IF(coreNum_ <= 0, OP_LOGE(context_->GetNodeName(), "coreNum must be greater than 0."),
-                return ge::GRAPH_FAILED);
+    if (coreNum_ <= 0) {
+        OP_LOGE_LIBOPAPI_REPORT(context_->GetNodeName(), "%s", "coreNum must be greater than 0.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({context_->GetNodeName(), "coreNum must be greater than 0."}));
+        return ge::GRAPH_FAILED;
+    }
 
     uint64_t ubSizePlatForm;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSizePlatForm);
     ubSize_ = static_cast<int64_t>(ubSizePlatForm);
-    OP_CHECK_IF(ubSize_ <= 0, OP_LOGE(context_->GetNodeName(), "ubSize must be greater than 0."),
-                return ge::GRAPH_FAILED);
+    if (ubSize_ <= 0) {
+        OP_LOGE_LIBOPAPI_REPORT(context_->GetNodeName(), "%s", "ubSize must be greater than 0.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({context_->GetNodeName(), "ubSize must be greater than 0."}));
+        return ge::GRAPH_FAILED;
+    }
     OP_LOGI(context_->GetNodeName(), "coreNum_ is %ld, ubSize_ %ld ", coreNum_, ubSize_);
     return ge::GRAPH_SUCCESS;
 }
@@ -256,34 +275,54 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
     auto inputR1 = context_->GetInputShape(1);
     auto inputR2 = context_->GetInputShape(2);
     OP_CHECK_IF(xInput == nullptr || inputR1 == nullptr || inputR2 == nullptr,
-                OP_LOGE(context_->GetNodeName(), "get input nullptr."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "xInput, inputR1, inputR2",
+                                                         "get input nullptr."),
+                return ge::GRAPH_FAILED);
     auto yOutput = context_->GetOutputShape(0);
-    OP_CHECK_IF(yOutput == nullptr, OP_LOGE(context_->GetNodeName(), "get output nullptr."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(yOutput == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "yOutput", "get output nullptr."),
+                return ge::GRAPH_FAILED);
     auto xDesc = context_->GetInputDesc(0);
     auto cosDesc = context_->GetInputDesc(1);
     auto sinDesc = context_->GetInputDesc(2);
     auto yDesc = context_->GetOutputDesc(0);
     OP_CHECK_IF(xDesc == nullptr || cosDesc == nullptr || sinDesc == nullptr || yDesc == nullptr,
-                OP_LOGE(context_->GetNodeName(), "get input or output desc nullptr."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "xDesc, cosDesc, sinDesc, yDesc",
+                                                         "get input or output desc nullptr."),
+                return ge::GRAPH_FAILED);
     xDtype_ = xDesc->GetDataType();
     cosDtype_ = cosDesc->GetDataType();
     auto sinDtype = sinDesc->GetDataType();
     auto yDtype = yDesc->GetDataType();
     OP_CHECK_IF(!(xDtype_ == ge::DT_FLOAT16 || xDtype_ == ge::DT_BF16 || xDtype_ == ge::DT_FLOAT),
-                OP_LOGE(context_->GetNodeName(), "x dtype only support float16, bfloat16 or float32."),
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "x",
+                                                      Ops::Base::ToString(static_cast<ge::DataType>(xDtype_)),
+                                                      "x dtype only support float16, bfloat16 or float32."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(cosDtype_ != sinDtype, OP_LOGE(context_->GetNodeName(), "cos and sin dtype must be same."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        cosDtype_ != sinDtype,
+        OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(context_->GetNodeName(), "cos, sin",
+                                               Ops::Base::ToString(static_cast<ge::DataType>(cosDtype_)) + ", " +
+                                                   Ops::Base::ToString(static_cast<ge::DataType>(sinDtype)),
+                                               "cos and sin dtype must be same."),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF(!(cosDtype_ == ge::DT_FLOAT16 || cosDtype_ == ge::DT_BF16 || cosDtype_ == ge::DT_FLOAT),
-                OP_LOGE(context_->GetNodeName(), "cos/sin dtype only support float16, bfloat16 or float32."),
+                OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(context_->GetNodeName(), "cos, sin",
+                                                       Ops::Base::ToString(static_cast<ge::DataType>(cosDtype_)),
+                                                       "cos/sin dtype only support float16, bfloat16 or float32."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(yDtype != xDtype_, OP_LOGE(context_->GetNodeName(), "y dtype must be same as x dtype."),
+    OP_CHECK_IF(yDtype != xDtype_,
+                OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(context_->GetNodeName(), "x, y",
+                                                       Ops::Base::ToString(static_cast<ge::DataType>(yDtype)) + ", " +
+                                                           Ops::Base::ToString(static_cast<ge::DataType>(xDtype_)),
+                                                       "y dtype must be same as x dtype."),
                 return ge::GRAPH_FAILED);
     bool isSamePrecision = xDtype_ == cosDtype_;
     isMixedPrecision_ = (xDtype_ == ge::DT_FLOAT16 || xDtype_ == ge::DT_BF16) && cosDtype_ == ge::DT_FLOAT;
     OP_CHECK_IF(!isSamePrecision && !isMixedPrecision_,
-                OP_LOGE(context_->GetNodeName(),
-                        "dtype only supports same precision or x/y float16/bfloat16 with cos/sin float32."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "cos, sin",
+                    "dtype only supports same precision or x/y float16/bfloat16 with cos/sin float32."),
                 return ge::GRAPH_FAILED);
     if (xDtype_ == ge::DT_FLOAT16 || xDtype_ == ge::DT_BF16) {
         dtypeSize_ = FP16_BF16_DTYPE_SIZE;
@@ -323,13 +362,16 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
     xdim2_ = xShape.GetDim(2);
     allHeadDim_ = xShape.GetDim(dimNum - 1);
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs is nullptr"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "attrs", "attrs is nullptr"),
+                return ge::GRAPH_FAILED);
     const int64_t* modePtr = attrs->GetAttrPointer<int64_t>(0);
     int64_t mode = (modePtr == nullptr) ? 0 : *modePtr;
-    OP_CHECK_IF(
-        mode != 1,
-        OP_LOGE(context_->GetNodeName(), "mode = %ld is not supported, only mode = 1 (interleave) is supported", mode),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(mode != 1,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "rotary_mode",
+                    "mode = " + std::to_string(mode) + " is not supported, only mode = 1 (interleave) is supported"),
+                return ge::GRAPH_FAILED);
     // 获取slice范围：空属性时默认 [0, 0]，与A5行为一致
     auto sliceListAttr = attrs->GetAttrPointer<gert::ContinuousVector>(1);
     if (sliceListAttr == nullptr || sliceListAttr->GetSize() == 0) {
@@ -338,8 +380,9 @@ ge::graphStatus InplacePartialRotaryMulTiling::CheckInput()
     } else {
         auto sliceData = static_cast<const int64_t*>(sliceListAttr->GetData());
         OP_CHECK_IF(sliceListAttr->GetSize() != 2,
-                    OP_LOGE(context_->GetNodeName(), "slice_attr must have exactly 2 elements, got %zu",
-                            sliceListAttr->GetSize()),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        context_->GetNodeName(), "partial_slice",
+                        "slice_attr must have exactly 2 elements, got " + std::to_string(sliceListAttr->GetSize())),
                     return ge::GRAPH_FAILED);
         start_ = sliceData[0];
         end_ = sliceData[1];
@@ -483,7 +526,7 @@ ge::graphStatus InplacePartialRotaryMulTiling::TilingSplitB(int64_t batchSize, i
     int64_t ubCalcBTail{0};
     if (ubSize < tBufferSize || bufferSize < totalBatch1Size) {
         OP_CHECK_IF(TilingSplitN(numHeads, headDimAlign, ubSize, xDtype_) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "TilingSplitN fail."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitN fail."), return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
 
@@ -535,12 +578,12 @@ ge::graphStatus InplacePartialRotaryMulTiling::TilingSplitS()
     }
     if (tBufferSize >= ubSize_) {
         OP_CHECK_IF(TilingSplitN(numHeads, headDimAlign, ubSize_, xDtype_) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "TilingSplitN fail."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitN fail."), return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
     if (ubSize_ < tBufferSize || bufferSize < totalSeq1Size) {
         OP_CHECK_IF(TilingSplitB(batchSize, numHeads, headDimAlign, ubSize_, xDtype_) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "TilingSplitB fail."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitB fail."), return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
     context_->SetTilingKey(tilingKey_);
@@ -593,10 +636,10 @@ ge::graphStatus InplacePartialRotaryMulTiling::TilingSplit()
     int64_t seqLenOut{1};
     int64_t numHeadsOut{1};
     OP_CHECK_IF(InitSplitTilingData(batchSizeOut, seqLenOut, numHeadsOut) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context_->GetNodeName(), "InitSplitTilingData fail."), return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "InitSplitTilingData fail."), return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(TilingSplitS() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "TilingSplitS fail."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(TilingSplitS() != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitS fail."), return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
@@ -632,7 +675,8 @@ ge::graphStatus InplacePartialRotaryMulTiling::InitSplitTilingData(int64_t& batc
         return ge::GRAPH_FAILED;
     }
     if (batchSizeOut != 1) {
-        OP_LOGE(context_->GetNodeName(), "batchSizeOut must be 1, got %ld", batchSizeOut);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "x, cos, sin",
+                                                 "batchSizeOut must be 1, got " + std::to_string(batchSizeOut));
         return ge::GRAPH_FAILED;
     }
     tilingData_.set_batchSize(batchSizeOut);
@@ -650,10 +694,11 @@ ge::graphStatus InplacePartialRotaryMulTiling::TilingSplitNMixed(int64_t numHead
     int64_t ubCalcNNum{1};
     int64_t ubCalcNLoop{numHeads};
     int64_t ubCalcNTail{0};
-    OP_CHECK_IF(
-        bufferSize < totalHeadNum1Size,
-        OP_LOGE(context_->GetNodeName(), "The D dimension of the input shape is too large for mixed precision."),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(bufferSize < totalHeadNum1Size,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "x, cos, sin",
+                    "The D dimension of the input shape is too large for mixed precision."),
+                return ge::GRAPH_FAILED);
     ubCalcNNum = GetDiv(bufferSize, totalHeadNum1Size);
     ubCalcNLoop = GetCeilInt(numHeads, ubCalcNNum);
     ubCalcNTail = GetDivRem(numHeads, ubCalcNNum) != 0 ? numHeads - (ubCalcNLoop - 1) * ubCalcNNum : 0;
@@ -677,7 +722,8 @@ ge::graphStatus InplacePartialRotaryMulTiling::TilingSplitBMixed(int64_t batchSi
     int64_t ubCalcBTail{0};
     if (ubSize < gatherOffsetSize || bufferSize < totalBatch1Size) {
         OP_CHECK_IF(TilingSplitNMixed(numHeads, headDimAlign, ubSize) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "TilingSplitNMixed fail."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitNMixed fail."),
+                    return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
 
@@ -726,12 +772,14 @@ ge::graphStatus InplacePartialRotaryMulTiling::TilingSplitSMixed()
     int64_t ioUbSize = coreCalcNum * totalSeq1Size;
     if (gatherOffsetSize >= ubSize_) {
         OP_CHECK_IF(TilingSplitNMixed(numHeads, headDimAlign, ubSize_) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "TilingSplitNMixed fail."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitNMixed fail."),
+                    return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
     if (ubSize_ < gatherOffsetSize || bufferSize < totalSeq1Size) {
         OP_CHECK_IF(TilingSplitBMixed(batchSize, numHeads, headDimAlign, ubSize_) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(context_->GetNodeName(), "TilingSplitBMixed fail."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitBMixed fail."),
+                    return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
 
@@ -786,15 +834,15 @@ ge::graphStatus InplacePartialRotaryMulTiling::TilingSplitMixed()
     int64_t seqLenOut{1};
     int64_t numHeadsOut{1};
     OP_CHECK_IF(InitSplitTilingData(batchSizeOut, seqLenOut, numHeadsOut) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context_->GetNodeName(), "InitSplitTilingData fail."), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(TilingSplitSMixed() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "TilingSplitSMixed fail."),
-                return ge::GRAPH_FAILED);
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "InitSplitTilingData fail."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(TilingSplitSMixed() != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitSMixed fail."), return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 ge::graphStatus InplacePartialRotaryMulTiling::DoTiling()
 {
     OP_LOGI(context_->GetNodeName(), "Enter InplacePartialRotaryMulTiling DoTiling");
-    OP_CHECK_IF(CheckInput() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "CheckInput failed"),
+    OP_CHECK_IF(CheckInput() != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "CheckInput failed"),
                 return ge::GRAPH_FAILED);
     // No-op: empty slice (sliceStart==sliceEnd), nothing to compute
     if (headDim_ == 0) {
@@ -820,8 +868,8 @@ ge::graphStatus InplacePartialRotaryMulTiling::DoTilingMixedPrecision()
     tilingKey_ = BASE_KEY + GetMixedTilingKeyOffset();
     tilingData_.set_allHeadDim(allHeadDim_);
     tilingData_.set_start(start_);
-    OP_CHECK_IF(TilingSplitMixed() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "TilingSplitMixed fail."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(TilingSplitMixed() != ge::GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplitMixed fail."), return ge::GRAPH_FAILED);
     OP_LOGI(context_->GetNodeName(), "[mixed tilingKey]: %ld", tilingKey_);
     tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
@@ -859,8 +907,8 @@ ge::graphStatus InplacePartialRotaryMulTiling::DoTilingRegular()
         }
         tilingData_.set_allHeadDim(allHeadDim_);
         tilingData_.set_start(start_);
-        OP_CHECK_IF(TilingSplit() != ge::GRAPH_SUCCESS, OP_LOGE(context_->GetNodeName(), "TilingSplit fail."),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(TilingSplit() != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "TilingSplit fail."), return ge::GRAPH_FAILED);
 
         OP_LOGI(context_->GetNodeName(), "[tilingKey]: %ld", tilingKey_);
         tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
@@ -878,11 +926,11 @@ ge::graphStatus Tiling4InplacePartialRotaryMul(gert::TilingContext* context)
 {
     InplacePartialRotaryMulTiling tilingImpl = InplacePartialRotaryMulTiling(context);
     if (tilingImpl.Init() != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "Tiling4InplacePartialRotaryMul init failed.");
+        OP_LOGE_WITHOUT_REPORT(context, "Tiling4InplacePartialRotaryMul init failed.");
         return ge::GRAPH_FAILED;
     }
     if (tilingImpl.DoTiling() != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "Tiling4InplacePartialRotaryMul do tiling failed.");
+        OP_LOGE_WITHOUT_REPORT(context, "Tiling4InplacePartialRotaryMul do tiling failed.");
         return ge::GRAPH_FAILED;
     }
     OP_LOGI(context->GetNodeName(), "end Tiling4InplacePartialRotaryMul");

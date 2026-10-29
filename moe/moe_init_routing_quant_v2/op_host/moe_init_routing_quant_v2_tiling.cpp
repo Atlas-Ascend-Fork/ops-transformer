@@ -12,6 +12,8 @@
  * \file moe_init_routing_quant_v2_tiling.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "moe_init_routing_quant_v2_tiling.h"
 
 namespace optiling {
@@ -130,10 +132,20 @@ ge::graphStatus MoeInitRoutingQuantV2TilingBase::CheckOutShape()
 
     if (quantMode != 0) {
         auto dynamicShapePtr = context_->GetOutputShape(OUTOUT_DYNAMIC_QUANT_SCALE);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, dynamicShapePtr);
+        OP_CHECK_IF(dynamicShapePtr == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        context_->GetNodeName(), "dynamicShapePtr",
+                        "Required dynamicShapePtr metadata is null; "
+                        "context_->GetOutputShape(OUTOUT_DYNAMIC_QUANT_SCALE) must provide a valid object."),
+                    return ge::GRAPH_FAILED);
 
         auto dynamicQuantScaleDesc = context_->GetOutputDesc(OUTOUT_DYNAMIC_QUANT_SCALE);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, dynamicQuantScaleDesc);
+        OP_CHECK_IF(dynamicQuantScaleDesc == nullptr,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        context_->GetNodeName(), "dynamicQuantScaleDesc",
+                        "Required dynamicQuantScaleDesc metadata is null; "
+                        "context_->GetOutputDesc(OUTOUT_DYNAMIC_QUANT_SCALE) must provide a valid object."),
+                    return ge::GRAPH_FAILED);
         auto dt = dynamicQuantScaleDesc->GetDataType();
         CHECK_FAIL(context_, dt != ge::DT_FLOAT,
                    OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "dynamicQuantScale",
@@ -167,7 +179,12 @@ ge::graphStatus MoeInitRoutingQuantV2TilingBase::CheckOutShape()
 ge::graphStatus MoeInitRoutingQuantV2TilingBase::CheckInt4Info()
 {
     auto expandedXDesc = context_->GetOutputDesc(OUTOUT_EXPANDED_X);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedXDesc);
+    OP_CHECK_IF(expandedXDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "expandedXDesc",
+                    "Required expandedXDesc metadata is null; "
+                    "context_->GetOutputDesc(OUTOUT_EXPANDED_X) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto expandedXType = expandedXDesc->GetDataType();
     isInt4 = expandedXType == ge::DT_INT4;
     if (isInt4) {
@@ -187,7 +204,8 @@ ge::graphStatus MoeInitRoutingQuantV2TilingBase::CheckInt4Info()
         auto scaleShapePtr = context_->GetOptionalInputShape(INDEX_SCALE);
         if (scaleShapePtr != nullptr) {
             auto scaleDesc = context_->GetOptionalInputDesc(INDEX_SCALE);
-            OP_CHECK_NULL_WITH_CONTEXT(context_, scaleDesc);
+            OP_CHECK_IF(scaleDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scale"),
+                        return ge::GRAPH_FAILED);
             auto smoothShape = scaleShapePtr->GetStorageShape();
             size_t smoothDimNum = smoothShape.GetDimNum();
             std::string smoothDimStr = std::to_string(smoothDimNum) + "D";
@@ -218,18 +236,22 @@ ge::graphStatus MoeInitRoutingQuantV2TilingBase::GetShapeAttrsInfo()
     }
     auto scaleShapePtr = context_->GetOptionalInputShape(INDEX_SCALE);
     if (quantMode == 0) {
-        OP_CHECK_NULL_WITH_CONTEXT(context_, scaleShapePtr);
+        OP_CHECK_IF(scaleShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scale"),
+                    return ge::GRAPH_FAILED);
         auto scaleDesc = context_->GetOptionalInputDesc(INDEX_SCALE);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, scaleDesc);
+        OP_CHECK_IF(scaleDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scale"),
+                    return ge::GRAPH_FAILED);
         auto dt_scale = scaleDesc->GetDataType();
         CHECK_FAIL(context_, dt_scale != ge::DT_FLOAT,
                    OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "scale", Ops::Base::ToString(dt_scale).c_str(),
                                              "FLOAT"));
 
         auto offsetShapePtr = context_->GetOptionalInputShape(INDEX_OFFSET);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, offsetShapePtr);
+        OP_CHECK_IF(offsetShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "offset"),
+                    return ge::GRAPH_FAILED);
         auto offsetDesc = context_->GetOptionalInputDesc(INDEX_OFFSET);
-        OP_CHECK_NULL_WITH_CONTEXT(context_, offsetDesc);
+        OP_CHECK_IF(offsetDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "offset"),
+                    return ge::GRAPH_FAILED);
         auto dt_offset = offsetDesc->GetDataType();
         CHECK_FAIL(context_, dt_offset != ge::DT_FLOAT,
                    OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "offset", Ops::Base::ToString(dt_offset).c_str(),
@@ -254,7 +276,8 @@ ge::graphStatus MoeInitRoutingQuantV2TilingBase::GetShapeAttrsInfo()
     } else {
         if (scaleShapePtr != nullptr) {
             auto scaleDesc = context_->GetOptionalInputDesc(INDEX_SCALE);
-            OP_CHECK_NULL_WITH_CONTEXT(context_, scaleDesc);
+            OP_CHECK_IF(scaleDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "scale"),
+                        return ge::GRAPH_FAILED);
             auto dt = scaleDesc->GetDataType();
             CHECK_FAIL(
                 context_, dt != ge::DT_FLOAT,
@@ -602,7 +625,12 @@ ge::graphStatus MoeInitRoutingQuantV2TilingBase::PostTiling()
     currentWorkspace[0] = workspaceSize_;
     context_->SetLocalMemorySize(aicoreParams_.ubSize);
     auto rawTilingData = context_->GetRawTilingData();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, rawTilingData);
+    OP_CHECK_IF(
+        rawTilingData == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "rawTilingData",
+            "Required rawTilingData metadata is null; context_->GetRawTilingData() must provide a valid object."),
+        return ge::GRAPH_FAILED);
     quantTilingData.SaveToBuffer(rawTilingData->GetData(), rawTilingData->GetCapacity());
     rawTilingData->SetDataSize(quantTilingData.GetDataSize());
     return ge::GRAPH_SUCCESS;

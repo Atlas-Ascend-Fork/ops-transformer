@@ -12,6 +12,9 @@
  * \file moe_init_routing_v2_grad_tiling_base.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
+#include <vector>
 #include "tiling/platform/platform_ascendc.h"
 #include "op_host/tiling_util.h"
 #include <cmath>
@@ -52,13 +55,19 @@ ge::graphStatus MoeInitRoutingV2GradTilingBaseClass::CheckDtypeValidity()
                                                          ge::DataType::DT_BF16};
     // 获取输入dtype
     auto gradExpandedXDesc = context_->GetInputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradExpandedXDesc);
+    OP_CHECK_IF(gradExpandedXDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "grad_expanded_x"),
+                return ge::GRAPH_FAILED);
     inDtype = gradExpandedXDesc->GetDataType();
     auto expandedRowIdxDesc = context_->GetInputDesc(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, expandedRowIdxDesc);
+    OP_CHECK_IF(expandedRowIdxDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_row_idx"),
+                return ge::GRAPH_FAILED);
     auto rowIdxDtype = expandedRowIdxDesc->GetDataType();
     auto gradXDesc = context_->GetOutputDesc(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradXDesc);
+    OP_CHECK_IF(gradXDesc == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "gradXDesc",
+                    "Required gradXDesc metadata is null; context_->GetOutputDesc(0) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto outDtype = gradXDesc->GetDataType();
     if (inDtype != outDtype) {
         std::string dtypeMsg = Ops::Base::ToString(inDtype) + " and " + Ops::Base::ToString(outDtype);
@@ -212,20 +221,32 @@ ge::graphStatus MoeInitRoutingV2GradTilingBaseClass::GetShapeAttrsInfo()
 
     // 获取输入shape
     auto xShapePtr = context_->GetInputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, xShapePtr);
+    OP_CHECK_IF(xShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "grad_expanded_x"),
+                return ge::GRAPH_FAILED);
     const gert::Shape xShape = xShapePtr->GetStorageShape();
     auto rowIdxShapePtr = context_->GetInputShape(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, rowIdxShapePtr);
+    OP_CHECK_IF(rowIdxShapePtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "expanded_row_idx"),
+                return ge::GRAPH_FAILED);
     const gert::Shape rowIdxShape = rowIdxShapePtr->GetStorageShape();
     auto gradXShapePtr = context_->GetOutputShape(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, gradXShapePtr);
+    OP_CHECK_IF(
+        gradXShapePtr == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context_->GetNodeName(), "gradXShapePtr",
+            "Required gradXShapePtr metadata is null; context_->GetOutputShape(0) must provide a valid object."),
+        return ge::GRAPH_FAILED);
     const gert::Shape gradXShape = gradXShapePtr->GetStorageShape();
 
     // 获取输入属性
     auto attrs = context_->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
+    OP_CHECK_IF(attrs == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "attrs",
+                    "Required attrs metadata is null; context_->GetAttrs() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     const int64_t* topKPtr = attrs->GetAttrPointer<int64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context_, topKPtr);
+    OP_CHECK_IF(topKPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "top_k"),
+                return ge::GRAPH_FAILED);
     topK = *topKPtr;
     const int64_t* dropPadModePtr = attrs->GetAttrPointer<int64_t>(1); // 1: drop_pad_mode attr
     dropPadMode = (dropPadModePtr == nullptr) ? 0 : *dropPadModePtr;
@@ -288,9 +309,18 @@ ge::graphStatus TilingPrepareForMoeInitRoutingV2Grad(gert::TilingParseContext* c
     OP_LOGD(context, "TilingPrepareForMoeInitRountingV2Grad enter.");
 
     auto compileInfo = context->GetCompiledInfo<MoeInitRoutingV2GradCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfo);
+    OP_CHECK_IF(compileInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "compileInfo",
+                    "Required compileInfo metadata is null; "
+                    "context->GetCompiledInfo<MoeInitRoutingV2GradCompileInfo>() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto platformInfo = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
+    OP_CHECK_IF(platformInfo == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "platformInfo",
+                    "Required platformInfo metadata is null; context->GetPlatformInfo() must provide a valid object."),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     compileInfo->aivNum = ascendcPlatform.GetCoreNumAiv();
     if (compileInfo->aivNum <= 0) {

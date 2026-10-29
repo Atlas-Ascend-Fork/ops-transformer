@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
   */
 
+#include "log/log.h"
+#include <string>
 #include <cstring>
 #include "graph/types.h"
 #include "aclnn_sparse_flash_attention_v2.h"
@@ -63,18 +65,21 @@ aclnnStatus aclnnSparseFlashAttentionV2GetWorkspaceSize(
     const aclTensor* valueTensor = (value == nullptr) ? key : value;
     if (returnSoftmaxLse) {
         if (softmaxMax == nullptr || softmaxSum == nullptr) {
-            OP_LOGE(ACLNN_ERR_PARAM_NULLPTR,
-                    "when returnSoftmaxLse is true, softmaxMax and softmaxSum cannot be nullptr.");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                "SparseFlashAttention", "softmaxMax, softmaxSum",
+                "when returnSoftmaxLse is true, softmaxMax and softmaxSum cannot be nullptr.");
             return ACLNN_ERR_PARAM_NULLPTR;
         }
     } else {
         if (softmaxMax == nullptr && softmaxSum == nullptr) {
             if (softmaxMax == nullptr) {
-                OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor softmaxMax!");
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    "SparseFlashAttentionV2", "softmaxMax, softmaxSum",
+                    "Both softmax output tensors are null; valid output tensor objects are required by this path.");
                 return ge::GRAPH_FAILED;
             }
             if (softmaxSum == nullptr) {
-                OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor softmaxSum!");
+                OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_PARAM_NULLPTR, "Failed to create the holder of tensor softmaxSum!");
                 return ge::GRAPH_FAILED;
             }
         }

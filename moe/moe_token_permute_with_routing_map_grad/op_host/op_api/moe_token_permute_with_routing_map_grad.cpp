@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "moe_token_permute_with_routing_map_grad.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_def.h"
@@ -43,12 +45,12 @@ const std::array<const aclTensor*, 2> MoeTokenPermuteWithRoutingMapGrad(
         }
         auto permuteTokensGrad = executor->AllocTensor(permuteTokensGradShape, tokenDtype, op::Format::FORMAT_ND);
         if (permuteTokensGrad == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "alloc permuteTokensGrad tensor failed.");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "alloc permuteTokensGrad tensor failed.");
             return std::array<const aclTensor*, 2>{nullptr, nullptr};
         }
         auto tokensOutGrad = executor->AllocTensor(permuteTokensGradShape, tokenDtype, op::Format::FORMAT_ND);
         if (tokensOutGrad == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "alloc tokensOutGrad tensor failed.");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "alloc tokensOutGrad tensor failed.");
             return std::array<const aclTensor*, 2>{nullptr, nullptr};
         }
         ADD_TO_LAUNCHER_LIST_AICORE(

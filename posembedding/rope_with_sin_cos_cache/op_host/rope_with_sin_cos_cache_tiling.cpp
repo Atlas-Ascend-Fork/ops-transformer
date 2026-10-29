@@ -12,6 +12,8 @@
  * \file rope_with_sin_cos_cache.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include <iostream>
 #include <log/log.h>
 #include <cstdio>
@@ -230,16 +232,24 @@ static ge::graphStatus TilingCompute(gert::TilingContext* context, TilingParams&
 
     int32_t qDtype = context->GetInputDesc(INPUT_QUERY_IN_INDEX)->GetDataType();
     uint32_t queryInTypeLength = GetLengthByType(qDtype);
-    OP_CHECK_IF((queryInTypeLength == 0), OP_LOGE(context->GetNodeName(), "queryInTypeLength can't be 0."),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (queryInTypeLength == 0),
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "queryIn", "queryInTypeLength can't be 0."),
+        return ge::GRAPH_FAILED);
 
     OP_CHECK_IF((headSize % (HAlignSize / queryInTypeLength) != 0),
-                OP_LOGE(context->GetNodeName(), "headSize must be 64-byte aligned."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "headSize",
+                                                         "headSize must be 64-byte aligned."),
+                return ge::GRAPH_FAILED);
 
     OP_CHECK_IF((rotaryDim % (HAlignSize / queryInTypeLength) != 0),
-                OP_LOGE(context->GetNodeName(), "rotaryDim must be 64-byte aligned."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "mrope_section",
+                                                         "rotaryDim must be 64-byte aligned."),
+                return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF((headSize < rotaryDim), OP_LOGE(context->GetNodeName(), "headSize can't be smaller than rotaryDim."),
+    OP_CHECK_IF((headSize < rotaryDim),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "headSize",
+                                                         "headSize can't be smaller than rotaryDim."),
                 return ge::GRAPH_FAILED);
 
     auto platformInfo = context->GetPlatformInfo();
@@ -344,19 +354,23 @@ static ge::graphStatus TilingRopeWithSinCosCache(gert::TilingContext* context)
     auto* attrs = context->GetAttrs();
 
     const uint64_t* attrNumQHeads = attrs->GetAttrPointer<uint64_t>(0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrNumQHeads);
+    OP_CHECK_IF(attrNumQHeads == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "numQHeads"),
+                return ge::GRAPH_FAILED);
     params.num_q_heads = static_cast<uint64_t>(*attrNumQHeads);
 
     const uint64_t* attrNumKVHeads = attrs->GetAttrPointer<uint64_t>(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrNumKVHeads);
+    OP_CHECK_IF(attrNumKVHeads == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "numKHeads"),
+                return ge::GRAPH_FAILED);
     params.num_kv_heads = static_cast<uint64_t>(*attrNumKVHeads);
 
     const uint64_t* attrHeadSize = attrs->GetAttrPointer<uint64_t>(2);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrHeadSize);
+    OP_CHECK_IF(attrHeadSize == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "headSize"),
+                return ge::GRAPH_FAILED);
     params.head_size = static_cast<uint64_t>(*attrHeadSize);
 
     const auto attrMRopeSection = attrs->GetAttrPointer<gert::ContinuousVector>(3);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrMRopeSection);
+    OP_CHECK_IF(attrMRopeSection == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "mropeSection"),
+                return ge::GRAPH_FAILED);
     const size_t mropeSectionSize = attrMRopeSection->GetSize();
     if (mropeSectionSize > 0) {
         const uint64_t* attrMRopeSectionData = reinterpret_cast<const uint64_t*>(attrMRopeSection->GetData());
@@ -367,24 +381,33 @@ static ge::graphStatus TilingRopeWithSinCosCache(gert::TilingContext* context)
     }
 
     const uint64_t* attrQStride = attrs->GetAttrPointer<uint64_t>(4);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrQStride);
+    OP_CHECK_IF(attrQStride == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "qStride"),
+                return ge::GRAPH_FAILED);
     params.q_leading_dimension = static_cast<uint64_t>(*attrQStride);
 
     const uint64_t* attrKStride = attrs->GetAttrPointer<uint64_t>(5);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrKStride);
+    OP_CHECK_IF(attrKStride == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "kStride"),
+                return ge::GRAPH_FAILED);
     params.k_leading_dimension = static_cast<uint64_t>(*attrKStride);
 
     const bool* attrIsNeoxStyle = attrs->GetAttrPointer<bool>(6);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrIsNeoxStyle);
+    OP_CHECK_IF(attrIsNeoxStyle == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "isNeoxStyle"),
+                return ge::GRAPH_FAILED);
     params.isNeoxStyle = static_cast<bool>(*attrIsNeoxStyle);
 
     const uint64_t* attrCacheMode = attrs->GetAttrPointer<uint64_t>(INPUT_CACHE_MODE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrCacheMode);
+    OP_CHECK_IF(attrCacheMode == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "attrCacheMode",
+                    "Required attrCacheMode metadata is null; "
+                    "attrs->GetAttrPointer<uint64_t>(INPUT_CACHE_MODE_INDEX) must provide a valid object."),
+                return ge::GRAPH_FAILED);
     params.cacheMode = static_cast<uint64_t>(*attrCacheMode);
     OP_CHECK_IF((attrMRopeSection->GetSize() == MRopeSectionMaxSize) && (params.cacheMode != 0),
-                OP_LOGE(context->GetNodeName(),
-                        "cacheMode is only support to be 0 but got %lu when the size of mRopeSection equals %u.",
-                        params.cacheMode, MRopeSectionMaxSize),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "mropeSection",
+                    "cacheMode is only support to be 0 but got " + std::to_string(params.cacheMode) +
+                        " when the size of mRopeSection equals " + std::to_string(MRopeSectionMaxSize) + "."),
                 return ge::GRAPH_FAILED);
 
     TilingKeyChose(context, params);

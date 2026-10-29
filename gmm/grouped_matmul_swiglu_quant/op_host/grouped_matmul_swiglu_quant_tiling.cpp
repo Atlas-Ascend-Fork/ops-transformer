@@ -12,10 +12,12 @@
  * \file grouped_matmul_swiglu_quant_tiling.cpp
  * \brief
  */
+#include <string>
 #include <climits>
 #include <graph/utils/type_utils.h>
 #include "register/op_impl_registry.h"
 #include "log/log.h"
+#include <vector>
 #include "err/ops_err.h"
 #include "op_host/tiling_base.h"
 #include "grouped_matmul_swiglu_quant_tiling.h"
@@ -72,8 +74,11 @@ static int64_t CalMaxRowInUb_A8W4(const gert::TilingContext* context, const uint
     }
 
     if (maxRowEstimate < MIN_ROW_THRESHOLD) {
-        OP_LOGE(context->GetNodeName(), "GMM_SWIGLU_QUANT TILING: No valid row found for n = %lu, ubSize = %lu\n", n,
-                ubSize);
+        const std::string errorReason = ("GMM_SWIGLU_QUANT TILING: No valid row found for n = " + std::to_string(n) +
+                                         ", ubSize = " + std::to_string(ubSize) + "\n");
+        OP_LOGE_LIBOPAPI_REPORT(context->GetNodeName(), "%s", errorReason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({context->GetNodeName(), errorReason.c_str()}));
         return 0;
     }
     return maxRowEstimate;
@@ -98,7 +103,9 @@ static int64_t CalMaxRowInUb(const gert::TilingContext* context, const uint64_t 
     }
     if (maxRowInUb < 1) {
         // when n > (ubSize - 72) / 19 = 10330, maxRowInUb < 1
-        OP_LOGE(context->GetNodeName(), "GMM_SWIGLU_QUANT TILING: n should not be greater than 10240, now is %lu\n", n);
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "weight_scale",
+            "GMM_SWIGLU_QUANT TILING: n should not be greater than 10240, now is " + std::to_string(n) + "\n");
     }
     return maxRowInUb;
 }
@@ -122,20 +129,22 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context)
     // set info
     OP_LOGD(context->GetNodeName(), "Begin Run GMM Swiglu Tiling .");
     auto xDesc = context->GetInputDesc(X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xDesc);
+    OP_CHECK_IF(xDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
     auto weightDesc = context->GetInputDesc(WEIGHT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, weightDesc);
+    OP_CHECK_IF(weightDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "weight"),
+                return ge::GRAPH_FAILED);
     ge::DataType xDType = xDesc->GetDataType();
     ge::DataType weightDType = weightDesc->GetDataType();
 
     bool isA8W4MSD = (xDType == ge::DataType::DT_INT8 && weightDType == ge::DataType::DT_INT4);
     auto compileInfoPtr = context->GetCompileInfo<GMMSwigluCompileInfo>();
     auto xTensor = context->GetInputTensor(X_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, xTensor);
+    OP_CHECK_IF(xTensor == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "x"), return ge::GRAPH_FAILED);
     const int64_t m = xTensor->GetStorageShape().GetDim(0);
     const int64_t k = xTensor->GetStorageShape().GetDim(1);
     auto wTensor = context->GetInputTensor(WEIGHT_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, wTensor);
+    OP_CHECK_IF(wTensor == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "weight"),
+                return ge::GRAPH_FAILED);
     int64_t n = 0;
     if (wTensor->GetStorageShape().GetDimNum() == ND_WEIGHT_DIM_LIMIT) { // ND
         n = wTensor->GetStorageShape().GetDim(DIM_2);
@@ -143,7 +152,8 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context)
         n = wTensor->GetStorageShape().GetDim(DIM_1) * wTensor->GetStorageShape().GetDim(DIM_4);
     }
     auto wScaleTensor = context->GetInputTensor(WEIGHT_SCALE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, wScaleTensor);
+    OP_CHECK_IF(wScaleTensor == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "weight_scale"),
+                return ge::GRAPH_FAILED);
     int64_t quantGroupNum = 0;
     if (wScaleTensor->GetStorageShape().GetDimNum() == PERCHANNEL_WSCALE_DIM_LIMIT) { // perChannel
         quantGroupNum = 1;
@@ -151,7 +161,8 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context)
         quantGroupNum = wScaleTensor->GetStorageShape().GetDim(1);
     }
     auto groupListTensor = context->GetDynamicInputTensor(GROUPLIST_INDEX, 0);
-    OP_CHECK_NULL_WITH_CONTEXT(context, groupListTensor);
+    OP_CHECK_IF(groupListTensor == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "group_list"),
+                return ge::GRAPH_FAILED);
     const int64_t groupNum = groupListTensor->GetStorageShape().GetDim(0);
     GMMSwigluQuantTilingData tilingData;
     int64_t row = 0;
@@ -186,10 +197,13 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context)
     tiling.SetFixSplit(A8W4_BASEM, A8W4_BASEN, A8W4_BASEK);
     tiling.SetOrgShape(m, n, k);
     tiling.SetBufferSpace(-1, -1, -1);
-    OP_CHECK_IF(
-        tiling.GetTiling(tilingData.mmTilingData) == -1,
-        OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "grouped_matmul_swiglu_quant_tiling, get tiling failed"),
-        return GRAPH_FAILED);
+    if (tiling.GetTiling(tilingData.mmTilingData) == -1) {
+        OP_LOGE_LIBOPAPI_REPORT(context->GetNodeName(), "%s", "grouped_matmul_swiglu_quant_tiling, get tiling failed");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({context->GetNodeName(),
+                                                            "grouped_matmul_swiglu_quant_tiling, get tiling failed"}));
+        return GRAPH_FAILED;
+    }
     if (isA8W4MSD) {
         tilingData.mmTilingData.set_baseM(A8W4_BASEM);
         tilingData.mmTilingData.set_baseN(A8W4_BASEN);
@@ -210,9 +224,13 @@ ASCENDC_EXTERN_C graphStatus TilingGMMSwigluQuant(gert::TilingContext* context)
     } else {
         mLimit = ((usrWorkspaceLimit / DOUBLE_WORKSPACE_SPLIT) / INT32_DTYPE_SIZE) / n;
     }
-    OP_CHECK_IF(mLimit <= 0,
-                OPS_REPORT_VECTOR_INNER_ERR(context->GetNodeName(), "mLimit is %ld, must be greater than 0.", mLimit),
-                return GRAPH_FAILED);
+    if (mLimit <= 0) {
+        const std::string errorReason = ("mLimit is " + std::to_string(mLimit) + ", must be greater than 0.");
+        OP_LOGE_LIBOPAPI_REPORT(context->GetNodeName(), "%s", errorReason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({context->GetNodeName(), errorReason.c_str()}));
+        return GRAPH_FAILED;
+    }
     tilingData.gmmSwigluBaseParams.set_mLimit(mLimit);
     if (isA8W4MSD) {
         int workSpaceMTemp = mLimit * DOUBLE_WORKSPACE_SPLIT;
@@ -260,9 +278,19 @@ ASCENDC_EXTERN_C graphStatus TilingPrepareForGMMSwigluQuant(gert::TilingParseCon
 {
     // get info
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfoPtr);
+    OP_CHECK_IF(
+        platformInfoPtr == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            context->GetNodeName(), "platformInfoPtr",
+            "Required platformInfoPtr metadata is null; context->GetPlatformInfo() must provide a valid object."),
+        return ge::GRAPH_FAILED);
     auto compileInfoPtr = context->GetCompiledInfo<GMMSwigluCompileInfo>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, compileInfoPtr);
+    OP_CHECK_IF(compileInfoPtr == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context->GetNodeName(), "compileInfoPtr",
+                    "Required compileInfoPtr metadata is null; "
+                    "context->GetCompiledInfo<GMMSwigluCompileInfo>() must provide a valid object."),
+                return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     compileInfoPtr->aicNum_ = ascendcPlatform.GetCoreNumAic();

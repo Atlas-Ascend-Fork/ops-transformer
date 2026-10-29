@@ -13,6 +13,8 @@
  * \brief
  */
 
+#include "log/log.h"
+#include <string>
 #include <map>
 #include <vector>
 #include <numeric>
@@ -161,7 +163,8 @@ static std::string QSFADataTypeToSerialString(ge::DataType type)
     if (qsfaIt != DATATYPE_TO_STRING_MAP.end()) {
         return qsfaIt->second;
     } else {
-        OP_LOGE("SparseFlashAttention", "datatype %d not support", type);
+        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON("SparseFlashAttention", "data_type", std::to_string(type),
+                                              "datatype " + std::to_string(type) + " not support");
         return "UNDEFINED";
     }
 }
@@ -247,7 +250,9 @@ ge::graphStatus QSFAMlaTiling::SetTilingKey(uint64_t tilingKey) const
 ge::graphStatus QSFAMlaTiling::SetWorkspaceSize(uint64_t workspaceSize) const
 {
     OP_CHECK_IF(context_->GetWorkspaceSizes(1) == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "workSpaceSize got from ge is nullptr"),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                    context_->GetNodeName(), "workspace_sizes",
+                    "Failed to obtain workspace_sizes from GE context: GetWorkspaceSizes(1) returned nullptr."),
                 return ge::GRAPH_FAILED);
     size_t* workSpaces = context_->GetWorkspaceSizes(1);
     workSpaces[0] = workspaceSize;
@@ -257,7 +262,8 @@ ge::graphStatus QSFAMlaTiling::SetWorkspaceSize(uint64_t workspaceSize) const
 ge::graphStatus QSFAMlaTiling::SetTilingData(TilingDef& tilingData) const
 {
     OP_CHECK_IF(context_->GetRawTilingData() == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "RawTilingData got from GE context is nullptr."),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "raw_tiling_data",
+                                                         "RawTilingData got from GE context is nullptr."),
                 return ge::GRAPH_FAILED);
 
     tilingData.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
@@ -269,15 +275,22 @@ ge::graphStatus QSFAMlaTiling::SetTilingData(TilingDef& tilingData) const
 ge::graphStatus QSFAMlaTiling::GetPlatformInfo()
 {
     OP_CHECK_IF(qsfaInfo_->platformInfo == nullptr,
-                OPS_REPORT_VECTOR_INNER_ERR(qsfaInfo_->opName, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(qsfaInfo_->opName), "platformInfo",
+                                                         "GetPlatformInfo is nullptr."),
+                return ge::GRAPH_FAILED);
 
     auto qsfaAscendcPlatform = platform_ascendc::PlatformAscendC(qsfaInfo_->platformInfo);
     libapiSize_ = qsfaAscendcPlatform.GetLibApiWorkSpaceSize();
     aivNum_ = qsfaAscendcPlatform.GetCoreNumAiv();
     aicNum_ = qsfaAscendcPlatform.GetCoreNumAic();
 
-    OP_CHECK_IF(aicNum_ == 0 || aivNum_ == 0,
-                OPS_REPORT_VECTOR_INNER_ERR(qsfaInfo_->opName, "num of core obtained is 0."), return GRAPH_FAILED);
+    if (aicNum_ == 0 || aivNum_ == 0) {
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(qsfaInfo_->opName), "%s", "num of core obtained is 0.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({Ops::Base::GetOpInfo(qsfaInfo_->opName), "num of core obtained is 0."}));
+        return GRAPH_FAILED;
+    }
 
     return ge::GRAPH_SUCCESS;
 }
@@ -620,7 +633,8 @@ ge::graphStatus QSFATilingCheck::GetExpectedShape(gert::Shape& shapeExpected, co
     } else if (layout == QSFALayout::PA_BSND) {
         shapeExpected = gert::Shape({param.Bn, param.Bs, param.N, param.D});
     } else {
-        OP_LOGE(opName_, "layout %s is unsupported", QSFALayoutToSerialString(layout).c_str());
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "layout",
+                                                 "layout " + QSFALayoutToSerialString(layout) + " is unsupported");
         return ge::GRAPH_FAILED;
     }
     return ge::GRAPH_SUCCESS;
@@ -672,9 +686,13 @@ ge::graphStatus QSFATilingCheck::CheckDtypeSupport(const gert::CompileTimeTensor
 {
     if (qsfaDesc != nullptr) {
         const auto& qsfaIt = DTYPE_SUPPORT_MAP.find(name);
-        OP_CHECK_IF(qsfaIt == DTYPE_SUPPORT_MAP.end(),
-                    OP_LOGE(opName_, "%s datatype support list should be specify in DTYPE_SUPPORT_MAP", name.c_str()),
-                    return ge::GRAPH_FAILED);
+        if (qsfaIt == DTYPE_SUPPORT_MAP.end()) {
+            const std::string errorReason = (name + " datatype support list should be specify in DTYPE_SUPPORT_MAP");
+            OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", errorReason.c_str());
+            REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                      std::vector<const char*>({Ops::Base::GetOpInfo(opName_), errorReason.c_str()}));
+            return ge::GRAPH_FAILED;
+        }
         auto& qsfaExpectDtypeList = qsfaIt->second;
         OP_CHECK_IF(std::find(qsfaExpectDtypeList.begin(), qsfaExpectDtypeList.end(), qsfaDesc->GetDataType()) ==
                         qsfaExpectDtypeList.end(),
@@ -758,9 +776,13 @@ void QSFATilingCheck::LogErrorLayoutSupport(const std::vector<QSFALayout>& expec
 ge::graphStatus QSFATilingCheck::CheckLayoutSupport(const QSFALayout& actualLayout, const std::string& name) const
 {
     const auto& qsfaItLayout = LAYOUT_SUPPORT_MAP.find(name);
-    OP_CHECK_IF(qsfaItLayout == LAYOUT_SUPPORT_MAP.end(),
-                OP_LOGE(opName_, "%s layout support list should be specify in LAYOUT_SUPPORT_MAP", name.c_str()),
-                return ge::GRAPH_FAILED);
+    if (qsfaItLayout == LAYOUT_SUPPORT_MAP.end()) {
+        const std::string errorReason = (name + " layout support list should be specify in LAYOUT_SUPPORT_MAP");
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", errorReason.c_str());
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", std::vector<const char*>({"opName", "reason"}),
+                                  std::vector<const char*>({Ops::Base::GetOpInfo(opName_), errorReason.c_str()}));
+        return ge::GRAPH_FAILED;
+    }
     auto& qsfaExpectLayoutList = qsfaItLayout->second;
     OP_CHECK_IF(
         std::find(qsfaExpectLayoutList.begin(), qsfaExpectLayoutList.end(), actualLayout) == qsfaExpectLayoutList.end(),
@@ -935,8 +957,9 @@ ge::graphStatus QSFATilingCheck::CheckAttrValueByMap(std::map<std::string, std::
             qsfaOssExpect << std::to_string(qsfaPointerValuePair.second);
             std::ostringstream qsfaOssActual;
             qsfaOssActual << std::to_string(*(qsfaPointerValuePair.first));
-            OP_LOGE(opName_, "%s value should be %s, but got %s", qsfaAttrName.c_str(), qsfaOssExpect.str().c_str(),
-                    qsfaOssActual.str().c_str());
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                opName_, "value",
+                qsfaAttrName + " value should be " + qsfaOssExpect.str() + ", but got " + qsfaOssActual.str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -1450,7 +1473,6 @@ ge::graphStatus QSFATilingCheck::CheckFeatureMlaAntiquantAttr() const
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "key_quant_mode", std::to_string(keyQuantMode_).c_str(),
                                                       "TQ4 is supported on Atlas A2/A3 only, but not on Ascend 950"),
                 return ge::GRAPH_FAILED);
-
     OP_CHECK_IF(quantScaleRepoMode_ != 1, // 1:combine
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "quant_scale_repo_mode",
                                                       std::to_string(quantScaleRepoMode_).c_str(),
@@ -1734,7 +1756,8 @@ ge::graphStatus QSFAInfoParser::GetActualSeqLenQSize(int64_t& size)
 ge::graphStatus QSFAInfoParser::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
-        OP_LOGE("KvQuantSparseFlashAttention", "opName got from TilingContext is nullptr");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("KvQuantSparseFlashAttention", "TilingContext",
+                                                 "opName got from TilingContext is nullptr");
         return ge::GRAPH_FAILED;
     }
     opName_ = context_->GetNodeName();
@@ -1748,14 +1771,21 @@ ge::graphStatus QSFAInfoParser::GetOpName()
 ge::graphStatus QSFAInfoParser::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfo_ == nullptr, OPS_REPORT_VECTOR_INNER_ERR(opName_, "GetPlatformInfo is nullptr."),
+    OP_CHECK_IF(platformInfo_ == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(Ops::Base::GetOpInfo(opName_), "platformInfo_",
+                                                         "GetPlatformInfo is nullptr."),
                 return ge::GRAPH_FAILED);
 
     auto qsfaAscendcPlat = platform_ascendc::PlatformAscendC(platformInfo_);
     uint32_t qsfaAivNum = qsfaAscendcPlat.GetCoreNumAiv();
     uint32_t qsfaAicNum = qsfaAscendcPlat.GetCoreNumAic();
-    OP_CHECK_IF(qsfaAicNum == 0 || qsfaAivNum == 0, OPS_REPORT_VECTOR_INNER_ERR(opName_, "num of core obtained is 0."),
-                return GRAPH_FAILED);
+    if (qsfaAicNum == 0 || qsfaAivNum == 0) {
+        OP_LOGE_LIBOPAPI_REPORT(Ops::Base::GetOpInfo(opName_), "%s", "num of core obtained is 0.");
+        REPORT_PREDEFINED_ERR_MSG(
+            "EZ1008", std::vector<const char*>({"opName", "reason"}),
+            std::vector<const char*>({Ops::Base::GetOpInfo(opName_), "num of core obtained is 0."}));
+        return GRAPH_FAILED;
+    }
 
     npuArch_ = qsfaAscendcPlat.GetCurNpuArch();
     isA5_ = (npuArch_ == NpuArch::DAV_3510);
@@ -1765,7 +1795,6 @@ ge::graphStatus QSFAInfoParser::GetNpuInfo()
         OPS_REPORT_VECTOR_INNER_ERR(opName_, "Npu Arch Version[%d] is not support.", static_cast<int32_t>(npuArch_));
         return GRAPH_FAILED;
     }
-
     qsfaAscendcPlat.GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2CacheSize_);
 
     return ge::GRAPH_SUCCESS;
@@ -1816,8 +1845,10 @@ void QSFAInfoParser::GetOutputParaInfo()
 ge::graphStatus QSFAInfoParser::GetAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, OPS_REPORT_VECTOR_INNER_ERR(context_->GetNodeName(), "attrs got from GE is nullptr"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        attrs == nullptr,
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "attrs", "attrs got from GE is nullptr"),
+        return ge::GRAPH_FAILED);
 
     opParamInfo_.layoutQuery = attrs->GetStr(LAYOUT_QUERY_ATTR_INDEX);
     opParamInfo_.layoutKV = attrs->GetStr(LAYOUT_KV_ATTR_INDEX);
@@ -2122,7 +2153,6 @@ ge::graphStatus QSFAInfoParser::CheckContiguous() const
     if (!(isA5_ || isA6_)) {
         return ge::GRAPH_SUCCESS;
     }
-
     bool keyNonContiguous = false;
     if (keyStride0_ != 0 && keyShape_.GetDimNum() > 0) {
         uint64_t totalElements = 0;
@@ -2247,7 +2277,8 @@ void QSFAInfoParser::FillTilingInfoAttrsAndLayouts(QSFATilingInfo& qsfaInfo)
 ge::graphStatus QSFAInfoParser::Parse(QSFATilingInfo& qsfaInfo)
 {
     if (context_ == nullptr) {
-        OP_LOGE("KvQuantSparseFlashAttention", "tiling context is nullptr");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("KvQuantSparseFlashAttention", "context_",
+                                                 "tiling context is nullptr");
         return ge::GRAPH_FAILED;
     }
     if (ge::GRAPH_SUCCESS != GetOpName() || ge::GRAPH_SUCCESS != GetNpuInfo() || ge::GRAPH_SUCCESS != GetOpParaInfo() ||

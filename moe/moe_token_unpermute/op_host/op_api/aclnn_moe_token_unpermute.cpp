@@ -12,6 +12,8 @@
  * \file aclnn_moe_token_unpermute.cpp
  * \brief
  */
+#include "log/log.h"
+#include <string>
 #include "aclnn_moe_token_unpermute.h"
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -91,7 +93,8 @@ aclnnStatus aclnnMoeTokenUnpermuteGetWorkspaceSize(const aclTensor* permutedToke
                                                            restoreShapeOptional, out, workspaceSize, executor);
     }
     if (paddedMode) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "paddedMode only supports false currently, but got true.");
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("MoeTokenUnpermute", "padded_mode",
+                                                 "paddedMode only supports false currently, but got true.");
         return ACLNN_ERR_PARAM_INVALID;
     }
 
@@ -131,7 +134,6 @@ aclnnStatus aclnnMoeTokenUnpermute(void* workspace, uint64_t workspaceSize, aclO
     if (!useMoeFinalizeRoutingV2) {
         return aclnnInnerMoeTokenUnpermute(workspace, workspaceSize, executor, stream);
     }
-
     L2_DFX_PHASE_2(aclnnMoeTokenUnpermute);
     return CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
 }

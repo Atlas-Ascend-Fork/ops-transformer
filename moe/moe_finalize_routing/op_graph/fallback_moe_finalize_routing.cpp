@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "log/log.h"
+#include <string>
 #include "fallback/fallback.h"
 #include "fallback/fallback_comm.h"
 
@@ -31,40 +33,54 @@ static graphStatus MoeFinalizeRoutingHostExecuteFunc(OpExecuteContext* host_api_
 {
     OP_LOGD("aclnnFallback", "MoeFinalizeRouting fallback begin");
 
-    OP_CHECK_IF(host_api_ctx == nullptr, OP_LOGE("aclnnfallback", "host_api_ctx is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(host_api_ctx == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "host_api_ctx", "host_api_ctx is null"),
+                return GRAPH_FAILED);
 
     auto expanded_permuted_rows = host_api_ctx->GetInputTensor(EXPANDED_PERMUTED_ROWS_INDEX);
-    OP_CHECK_IF(expanded_permuted_rows == nullptr, OP_LOGE("aclnnfallback", "expanded_permuted_rows is null"),
+    OP_CHECK_IF(expanded_permuted_rows == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "expanded_permuted_rows",
+                                                         "expanded_permuted_rows is null"),
                 return GRAPH_FAILED);
 
     auto skip1 = host_api_ctx->GetInputTensor(SKIP1_INDEX);
-    OP_CHECK_IF(skip1 == nullptr, OP_LOGE("aclnnfallback", "skip1 is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(skip1 == nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "skip1", "skip1 is null"),
+                return GRAPH_FAILED);
 
     auto skip2_optional = host_api_ctx->GetOptionalInputTensor(SKIP2_OPTIONAL_INDEX);
 
     size_t offset = (host_api_ctx->GetComputeNodeInputNum() == INPUT_NUM) ? 0 : 1;
     auto bias = host_api_ctx->GetInputTensor(BIASE_INDEX - offset);
-    OP_CHECK_IF(bias == nullptr, OP_LOGE("aclnnfallback", "bias is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(bias == nullptr, OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "bias", "bias is null"),
+                return GRAPH_FAILED);
 
     auto scales = host_api_ctx->GetInputTensor(SCALES_INDEX - offset);
-    OP_CHECK_IF(scales == nullptr, OP_LOGE("aclnnfallback", "scales is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(scales == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "scales", "scales is null"),
+                return GRAPH_FAILED);
 
     auto expanded_src_to_dst_row = host_api_ctx->GetInputTensor(EXPANDED_SRC_TO_DST_ROW_INDEX - offset);
-    OP_CHECK_IF(expanded_src_to_dst_row == nullptr, OP_LOGE("aclnnfallback", "expanded_src_to_dst_row is null"),
+    OP_CHECK_IF(expanded_src_to_dst_row == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "expanded_src_to_dst_row",
+                                                         "expanded_src_to_dst_row is null"),
                 return GRAPH_FAILED);
 
     auto expert_for_source_row = host_api_ctx->GetInputTensor(EXPERT_FOR_SOURCE_ROW_INDEX - offset);
-    OP_CHECK_IF(expert_for_source_row == nullptr, OP_LOGE("aclnnfallback", "expert_for_source_row is null"),
+    OP_CHECK_IF(expert_for_source_row == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "expert_for_source_row",
+                                                         "expert_for_source_row is null"),
                 return GRAPH_FAILED);
 
     auto output = host_api_ctx->GetOutputTensor(0);
-    OP_CHECK_IF(output == nullptr, OP_LOGE("aclnnfallback", "output is null"), return GRAPH_FAILED);
+    OP_CHECK_IF(output == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnfallback", "output", "output is null"),
+                return GRAPH_FAILED);
 
     // execute opapi
     auto api_ret = EXEC_OPAPI_CMD(aclnnMoeFinalizeRouting, expanded_permuted_rows, skip1, skip2_optional, bias, scales,
                                   expanded_src_to_dst_row, expert_for_source_row, output);
-    OP_CHECK_IF(api_ret != GRAPH_SUCCESS, OP_LOGE(host_api_ctx->GetNodeName(), "api_ret faild:%u", api_ret),
-                return GRAPH_FAILED);
+    OP_CHECK_IF(api_ret != GRAPH_SUCCESS,
+                OP_LOGE_WITHOUT_REPORT(host_api_ctx->GetNodeName(), "api_ret faild:%u", api_ret), return GRAPH_FAILED);
 
     return GRAPH_SUCCESS;
 }
