@@ -15,6 +15,29 @@
 #include "op_api_ut_common/op_api_ut.h"
 #include "opdev/platform.h"
 #include "platform/platform_info.h"
+#include "acl/acl.h"
+
+// 与 def.cpp 的 ENABLE_ALL_GATHER_MATMUL_DT_HIFLOAT4 同款 devkit 版本守卫: devkit < 9.3
+// 的平台层不支持 Ascend960DT(9201), hif4 用例在该环境必然失败; op_api 侧按此宏将
+// hif4 用例块(含对 loader 头与 SocVersion::ASCEND960DT 的引用)编译期排除
+#if defined(ASC_DEVKIT_MAJOR)
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED 1
+#endif
+#elif defined(__has_include)
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED 1
+#endif
+#endif
+#endif
+#ifndef ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED
+#define ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED 0
+#endif
+#if ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED
+#include "op_api_csv_case_loader.h"
+#endif
 
 using namespace op;
 using namespace std;
@@ -1742,5 +1765,109 @@ TEST_F(AllGatherMatmulV2AclnnTest, TestQuantScaleNot1DRejected)
     aclOpExecutor* executor = nullptr;
     EXPECT_EQ(ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor), ACLNN_ERR_PARAM_INVALID);
 }
+// HiF4全量化(A6/ascend960dt) UT用例: CSV驱动(对齐alltoallmatmul的test_aclnn_allto_all_quant_matmul思路),
+// dtype经op_api_csv_case_loader.h的ACL_DTYPE映射为仓内常量(HIFLOAT4=42/HIFLOAT4_SCALE=43), 不依赖devkit枚举
+// groupSize固定[1,1,64]=4295032896, y仅支持fp16/bf16, 不支持bias, commMode仅支持ai_cpu
+// 整块以 devkit 版本守卫编译期排除: devkit < 9.3 的 SocVersion/平台层不支持 Ascend960DT,
+// 本块代码(含 SocVersion::ASCEND960DT 引用)在该环境不参与编译
+#if ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED
+struct AllGatherMatmulV2ApiUtParam {
+    std::string case_name;
+    TensorDesc x1;
+    TensorDesc x2;
+    TensorDesc bias;
+    TensorDesc x1Scale;
+    TensorDesc x2Scale;
+    TensorDesc quantScale;
+    TensorDesc output;
+    TensorDesc gatherOut;
+    TensorDesc amaxOut;
+    std::string group;
+    int64_t blockSize;
+    int64_t gatherIndex;
+    int64_t commTurn;
+    int64_t streamMode;
+    int64_t groupSize;
+    std::string commMode;
+    bool x2Trans;
+    op::SocVersion soc;
+    aclnnStatus expectResult;
+
+    explicit AllGatherMatmulV2ApiUtParam(const csv_map& csvMap)
+    {
+        this->case_name = ReadMap(csvMap, "case_name");
+        this->x1 = GetTensorACL(csvMap, "x1_shape", "x1_dtype", "x1_format");
+        this->x2 = GetTensorACL(csvMap, "x2_shape", "x2_dtype", "x2_format");
+        this->bias = GetTensorACL(csvMap, "bias_shape", "bias_dtype", "bias_format");
+        this->x1Scale = GetTensorACL(csvMap, "x1_scale_shape", "x1_scale_dtype", "x1_scale_format");
+        this->x2Scale = GetTensorACL(csvMap, "x2_scale_shape", "x2_scale_dtype", "x2_scale_format");
+        this->quantScale = GetTensorACL(csvMap, "quant_scale_shape", "quant_scale_dtype", "quant_scale_format");
+        this->output = GetTensorACL(csvMap, "output_shape", "output_dtype", "output_format");
+        this->gatherOut = GetTensorACL(csvMap, "gather_out_shape", "gather_out_dtype", "gather_out_format");
+        this->amaxOut = GetTensorACL(csvMap, "amax_out_shape", "amax_out_dtype", "amax_out_format");
+        this->group = ReadMap(csvMap, "group");
+        this->blockSize = stoll(ReadMap(csvMap, "block_size", "0"));
+        this->gatherIndex = stoll(ReadMap(csvMap, "gather_index", "0"));
+        this->commTurn = stoll(ReadMap(csvMap, "comm_turn", "8"));
+        this->streamMode = stoll(ReadMap(csvMap, "stream_mode", "1"));
+        this->groupSize = stoll(ReadMap(csvMap, "group_size", "0"));
+        this->commMode = ReadMap(csvMap, "comm_mode");
+        this->x2Trans = stoi(ReadMap(csvMap, "x2_trans", "0")) != 0;
+        this->soc = GetCaseSocVersion(csvMap, "soc");
+        this->expectResult = GetAclnnRet(csvMap, "expect_result");
+    }
+};
+
+inline std::ostream& operator<<(std::ostream& os, const AllGatherMatmulV2ApiUtParam& param)
+{
+    return os << param.case_name;
+}
+
+class AclnnAllGatherMatmulV2Hif4Test : public testing::TestWithParam<AllGatherMatmulV2ApiUtParam> {};
+
+TEST_P(AclnnAllGatherMatmulV2Hif4Test, param)
+{
+    auto param = GetParam();
+    op::SetPlatformSocVersion(param.soc);
+    aclTensor* x1 = param.x1.ToAclTypeRawPtr();
+    aclTensor* x2 = param.x2.ToAclTypeRawPtr();
+    if (param.x2Trans) {
+        // aclnn无转置入参, trans_b需以非连续视图表达: 存储[N,K]连续, 视图[K,N]且strides转置,
+        // op_api层经IsTransposeLastTwoDims识别后由TransX2Tensor还原为[N,K]并携带transposeX2
+        aclDataType dtype = ACL_DT_UNDEFINED;
+        (void)aclGetDataType(x2, &dtype);
+        const std::vector<int64_t>& storageDims = param.x2.GetViewDims();
+        std::vector<int64_t> viewDims = {storageDims[1], storageDims[0]};
+        std::vector<int64_t> viewStrides = {1, storageDims[1]};
+        x2 = aclCreateTensor(viewDims.data(), viewDims.size(), dtype, viewStrides.data(), 0, ACL_FORMAT_ND,
+                             storageDims.data(), storageDims.size(), nullptr);
+    }
+    aclTensor* bias = param.bias.GetViewDims().empty() ? nullptr : param.bias.ToAclTypeRawPtr();
+    aclTensor* x1Scale = param.x1Scale.GetViewDims().empty() ? nullptr : param.x1Scale.ToAclTypeRawPtr();
+    aclTensor* x2Scale = param.x2Scale.GetViewDims().empty() ? nullptr : param.x2Scale.ToAclTypeRawPtr();
+    aclTensor* quantScale = param.quantScale.GetViewDims().empty() ? nullptr : param.quantScale.ToAclTypeRawPtr();
+    aclTensor* output = param.output.ToAclTypeRawPtr();
+    aclTensor* gatherOut = param.gatherOut.GetViewDims().empty() ? nullptr : param.gatherOut.ToAclTypeRawPtr();
+    aclTensor* amaxOut = param.amaxOut.GetViewDims().empty() ? nullptr : param.amaxOut.ToAclTypeRawPtr();
+    auto ut =
+        OP_API_UT(aclnnAllGatherMatmulV2,
+                  INPUT(x1, x2, bias, x1Scale, x2Scale, quantScale, param.blockSize, param.group.c_str(),
+                        param.gatherIndex, param.commTurn, param.streamMode, param.groupSize, param.commMode.c_str()),
+                  OUTPUT(output, gatherOut, amaxOut));
+    uint64_t workspaceSize = 0;
+    aclOpExecutor* executor = nullptr;
+    auto aclnnRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
+    if (param.expectResult == ACLNN_SUCCESS) {
+        EXPECT_NE(ACLNN_ERR_PARAM_INVALID, aclnnRet);
+    } else {
+        EXPECT_EQ(param.expectResult, aclnnRet);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    AllGatherMatmulV2Hif4, AclnnAllGatherMatmulV2Hif4Test,
+    testing::ValuesIn(GetCasesFromCsv<AllGatherMatmulV2ApiUtParam>(ReplaceFileExtension2Csv(__FILE__))),
+    PrintCaseInfoString<AllGatherMatmulV2ApiUtParam>);
+#endif // ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED
 
 } // namespace

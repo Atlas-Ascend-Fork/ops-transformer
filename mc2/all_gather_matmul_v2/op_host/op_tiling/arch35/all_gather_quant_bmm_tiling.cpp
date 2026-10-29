@@ -235,6 +235,12 @@ ge::graphStatus AllGatherQuantBmmTiling::HiF4SceneParamCheck(const gert::Storage
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "bias", std::to_string(args_.isBias).c_str(),
                                                           "HiFP4 does not support bias"),
                     return ge::GRAPH_FAILED);
+    // HiFP4 输出仅支持 fp16/bf16（与 apt_tiling_key.h 中 HiF4 模板组合的 OUTPUT_TYPE_IS_FP16_BF16 一致）
+    const uint64_t yDtype = *context_->GetAttrs()->GetAttrPointer<uint64_t>(YDTYPE_INDEX);
+    OP_TILING_CHECK(yDtype != DTYPE_ENUM_FLOAT16 && yDtype != DTYPE_ENUM_BF16,
+                    OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "y", std::to_string(yDtype).c_str(),
+                                                          "HiFP4 output only supports fp16/bf16"),
+                    return ge::GRAPH_FAILED);
     scale1kSpaceSize_ = args_.rankDim * args_.orgMValue * scaleK * sizeof(uint32_t);
     return ge::GRAPH_SUCCESS;
 }

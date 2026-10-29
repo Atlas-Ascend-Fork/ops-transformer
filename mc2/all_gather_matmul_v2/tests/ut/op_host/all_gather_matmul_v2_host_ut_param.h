@@ -19,6 +19,26 @@
 #include "infer_shape_context_faker.h"
 #include "op_host_csv_case_loader.h"
 
+// 与 def.cpp 的 ENABLE_ALL_GATHER_MATMUL_DT_HIFLOAT4 / apt_tiling_key.h 的
+// ALL_GATHER_MATMUL_V2_HIF4_SUPPORTED 同款 devkit 版本守卫: devkit < 9.3 的平台层
+// 不支持 Ascend960DT(9201), ut_hif4 用例(soc=9201)在该环境必然于 tiling 分发处失败,
+// 由测试体按此宏 GTEST_SKIP 跳过
+#if defined(ASC_DEVKIT_MAJOR)
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED 1
+#endif
+#elif defined(__has_include)
+#if __has_include("version/asc_devkit_version.h")
+#include "version/asc_devkit_version.h"
+#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
+#define ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED 1
+#endif
+#endif
+#endif
+#ifndef ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED
+#define ALL_GATHER_MATMUL_V2_UT_HIF4_SUPPORTED 0
+#endif
+
 namespace all_gather_matmul_v2_ut {
 
 struct AllGatherMatmulV2HostUtParamBase {
@@ -108,7 +128,15 @@ struct AllGatherMatmulV2TilingUtParam : public AllGatherMatmulV2HostUtParamBase 
         this->coreNum = stoull(ReadMap(csvMap, "core_num"));
         this->ubsize = stoull(ReadMap(csvMap, "ubsize"));
         if (this->expectResult == ge::GRAPH_SUCCESS) {
-            this->expectTilingKey = stoull(ReadMap(csvMap, "expectTilingKey"));
+            // key 留空 = 跳过 tiling key 断言（对齐框架 SKIP_TILING_KEY_VALIDATION 语义，
+            // 与 allto_all_matmul 的 hif4 用例适配一致；hif4 正例已推导并维护真实 key，
+            // 仅暂无法推导 key 的版本守卫场景才留空）
+            std::string tilingKeyStr = ReadMap(csvMap, "expectTilingKey");
+            if (!tilingKeyStr.empty()) {
+                this->expectTilingKey = stoull(tilingKeyStr);
+            } else {
+                this->expectTilingKey = UINT64_MAX; // Skip validation marker
+            }
             this->expectTilingDataHash = ReadMap(csvMap, "expectTilingDataHash");
         }
     }
