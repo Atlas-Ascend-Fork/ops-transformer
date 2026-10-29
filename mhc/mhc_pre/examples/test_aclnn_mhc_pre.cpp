@@ -131,7 +131,7 @@ int CreateAclTensorFloat16(const std::vector<float>& host_data, const std::vecto
     int64_t size = GetShapeSize(shape);
     std::vector<aclFloat16> host_data_fp16(size);
     for (int64_t i = 0; i < size; ++i) {
-        host_data_fp16[i] = aclFloat16(host_data[i]);
+        host_data_fp16[i] = aclFloatToFloat16(host_data[i]);
     }
 
     int64_t byte_size = size * sizeof(aclFloat16);

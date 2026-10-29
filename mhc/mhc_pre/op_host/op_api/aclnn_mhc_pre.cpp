@@ -30,6 +30,7 @@
 #include "aclnn_kernels/transpose.h"
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
+#include "level0/zero_op.h"
 
 using namespace op;
 
@@ -430,9 +431,9 @@ static bool CheckParamShapesA2(const MhcParamsBase& params, int64_t n, int64_t d
                     expectedPhiRows_pow, expectedPhiRows_factorial, phiShape_dim0);
             return false;
         }
-        if (biasShape.GetDim(0) != expectedPhiRows_pow && biasShape.GetDim(0) != expectedPhiRows_factorial) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Bias tensor dim must be %ld or %ld, but got %ld", expectedPhiRows_pow,
-                    expectedPhiRows_factorial, biasShape.GetDim(0));
+        if (biasShape.GetDim(0) != phiShape_dim0) {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Bias tensor dim must be %ld, but got %ld", phiShape_dim0,
+                    biasShape.GetDim(0));
             return false;
         }
     }
@@ -485,6 +486,12 @@ static bool CheckOutputShape4DA2(const MhcParamsBase& params, int64_t b, int64_t
         !CheckTensorShape(params.hRes, {b, s, Factorial(n)}, "hRes")) {
         return false;
     }
+    if (params.invRmsOptional == nullptr) {
+        return true;
+    }
+    if (!CheckTensorShape(params.invRmsOptional, {b, s}, "invRmsOptional")) {
+        return false;
+    }
     if (alphaSize == ALPHA_DIM_SIZE_3 && phiShape_dim0 == expectedPhiRows_pow &&
         !CheckTensorShape(params.hMixOptional, {b, s, expectedPhiRows_pow}, "hMixOptional")) {
         return false;
@@ -493,10 +500,7 @@ static bool CheckOutputShape4DA2(const MhcParamsBase& params, int64_t b, int64_t
         !CheckTensorShape(params.hMixOptional, {b, s, expectedPhiRows_factorial}, "hMixOptional")) {
         return false;
     }
-    if (params.invRmsOptional == nullptr) {
-        return true;
-    }
-    if (!CheckTensorShape(params.invRmsOptional, {b, s}, "invRmsOptional")) {
+    if (alphaSize == ALPHA_DIM_SIZE_2 && !CheckTensorShape(params.hMixOptional, {b, s, 2 * n}, "hMixOptional")) {
         return false;
     }
     if (!CheckTensorShape(params.hPreOptional, {b, s, n}, "hPreOptional")) {
@@ -541,7 +545,12 @@ static bool CheckOutputShape3DA2(const MhcParamsBase& params, int64_t t, int64_t
         !CheckTensorShape(params.hRes, {t, Factorial(n)}, "hRes")) {
         return false;
     }
-
+    if (params.invRmsOptional == nullptr) {
+        return true;
+    }
+    if (!CheckTensorShape(params.invRmsOptional, {t}, "invRmsOptional")) {
+        return false;
+    }
     if (alphaSize == ALPHA_DIM_SIZE_3 && phiShape_dim0 == expectedPhiRows_pow &&
         !CheckTensorShape(params.hMixOptional, {t, expectedPhiRows_pow}, "hMixOptional")) {
         return false;
@@ -553,14 +562,6 @@ static bool CheckOutputShape3DA2(const MhcParamsBase& params, int64_t t, int64_t
     if (alphaSize == ALPHA_DIM_SIZE_2 && !CheckTensorShape(params.hMixOptional, {t, 2 * n}, "hMixOptional")) {
         return false;
     }
-    if (params.invRmsOptional == nullptr) {
-        return true;
-    }
-
-    if (!CheckTensorShape(params.invRmsOptional, {t}, "invRmsOptional")) {
-        return false;
-    }
-
     if (!CheckTensorShape(params.hPreOptional, {t, n}, "hPreOptional")) {
         return false;
     }
@@ -918,6 +919,11 @@ static aclnnStatus CopyRequiredOutputs(const aclTensor* hInOut, const aclTensor*
     CHECK_RET(ret1 != nullptr, ACLNN_ERR_INNER_NULLPTR);
     if (params.hasResi && params.hRes != nullptr) {
         auto ret2 = l0op::ViewCopy(hResOut, params.hRes, executor);
+        CHECK_RET(ret2 != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    } else if (params.hRes != nullptr) {
+        auto hResZero = l0op::ZerosLike(params.hRes, executor);
+        CHECK_RET(hResZero != nullptr, ACLNN_ERR_INNER_NULLPTR);
+        auto ret2 = l0op::ViewCopy(hResZero, params.hRes, executor);
         CHECK_RET(ret2 != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
     return ACLNN_SUCCESS;

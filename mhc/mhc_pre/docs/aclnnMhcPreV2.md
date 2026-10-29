@@ -42,7 +42,7 @@
   \end{cases}\\
   hMix &= xGamma @ phi^{T}\\
   w &= hMix \odot invRms\\
-  [pPre, pPost, pRes] &= \begin{cases}
+  [pPre, pPost, p_{Res}] &= \begin{cases}
       split(w, [n, n, n^{2}]), & alpha.shape=[3] \\
       [split(w, [n, n]), 0], & alpha.shape=[2]
   \end{cases}\\
@@ -52,7 +52,7 @@
       2\sigma(pPost \odot alpha1 + bias1) + hcEps, & alpha.shape=[2]
   \end{cases}\\
   hRes &= \begin{cases}
-      pRes \odot alpha2 + bias2, & alpha.shape=[3] \\
+      p_{Res} \odot alpha2 + bias2, & alpha.shape=[3] \\
       0, & alpha.shape=[2]
   \end{cases}\\
   hIn_{d} &= \sum_{i=0}^{n-1} hPre_{i} x_{i,d}
@@ -134,7 +134,7 @@ aclnnStatus aclnnMhcPreV2(
       <td>不能为空Tensor。</td>
       <td>FLOAT32</td>
       <td>ND</td>
-      <td>[n^2+2n, nD]或[2n, nD]</td>
+      <td>[n^2+2n, n×D]或[2n, n×D]</td>
       <td>√</td>
   </tr>
   <tr>
@@ -304,7 +304,7 @@ aclnnStatus aclnnMhcPreV2(
     <tr>
     <td> ACLNN_ERR_PARAM_NULLPTR </td>
     <td> 161001 </td>
-    <td>x、phi、alpha、bias、hIn、hPost、hRes存在空指针。</td>
+    <td>x、phi、alpha、bias、hIn、hPost存在空指针，或alpha=(3)时hRes存在空指针。</td>
     </tr>
     <tr>
     <td rowspan="3"> ACLNN_ERR_PARAM_INVALID </td>
@@ -379,7 +379,7 @@ aclnnStatus aclnnMhcPreV2(
 - 规格约束：
   - n目前支持4、6、8。
   - D支持1~16384范围以内，需满足D为16对齐。
-  - 当alpha=[3]时，支持hRes输出，必须满足以下条件：输入phi=[n^2+2n, nD],bias=[n^2+2n]，输出hMixOptional=[B,S,n^2+2n] 或 [T,n^2+2n]；当alpha=[2]时，hRes输出为0，必须满足以下条件：输入phi=[2n, nD],bias=[2n]，输出hMixOptional=[B,S,2n] 或 [T,2n]。
+  - 当alpha=[3]时，支持hRes输出，必须满足以下条件：输入phi=[n^2+2n, n×D],bias=[n^2+2n]，输出hMixOptional=[B,S,n^2+2n] 或 [T,n^2+2n]；当alpha=[2]时，hRes输出为0，必须满足以下条件：输入phi=[2n, n×D],bias=[2n]，输出hMixOptional=[B,S,2n] 或 [T,2n]。
   - 可选输出 invRmsOptional、hMixOptional、hPreOptional 为互存关系，需同时输出或全部不输出，不支持仅返回其中部分，输出条件：invRmsOptional!=nullptr && hMixOptional!=nullptr && hPreOptional!=nullptr。
 
 ## 调用示例
@@ -505,7 +505,7 @@ int CreateAclTensorFloat16(const std::vector<float> &host_data, const std::vecto
     int64_t size = GetShapeSize(shape);
     std::vector<aclFloat16> host_data_fp16(size);
     for (int64_t i = 0; i < size; ++i) {
-        host_data_fp16[i] = aclFloat16(host_data[i]);
+        host_data_fp16[i] = aclFloatToFloat16(host_data[i]);
     }
 
     int64_t byte_size = size * sizeof(aclFloat16);
