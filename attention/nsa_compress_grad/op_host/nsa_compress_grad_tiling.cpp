@@ -16,6 +16,7 @@
 #include <queue>
 #include <cmath>
 #include <cfloat>
+#include <cstring>
 #include "log/log.h"
 #include "err/ops_err.h"
 #include <register/op_impl_registry.h>
@@ -105,11 +106,12 @@ ge::graphStatus NsaCompressGradTiling::DoOpTiling()
     auto headToProcessPerCore = static_cast<uint64_t>(tSeqLen_) * nHeads / aivNum_;
     auto headRemainder = (static_cast<uint64_t>(tSeqLen_) * nHeads) % aivNum_;
 
-    auto batchSize = 1;
-    const auto& actSeqLenShape = context_->GetOptionalInputShape(INDEXTHREE);
-    if (actSeqLenShape != nullptr) {
-        batchSize = static_cast<uint32_t>(actSeqLenShape->GetStorageShape().GetDim(INDEXZERO));
-    }
+    const auto* actSeqLenShape = context_->GetOptionalInputShape(INDEXTHREE);
+    OP_CHECK_IF(actSeqLenShape == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "actSeqLenOptional",
+                                                         "actSeqLenOptional must not be nullptr"),
+                return ge::GRAPH_FAILED);
+    auto batchSize = static_cast<uint32_t>(actSeqLenShape->GetStorageShape().GetDim(INDEXZERO));
 
     auto attrs = context_->GetAttrs();
 
@@ -119,6 +121,12 @@ ge::graphStatus NsaCompressGradTiling::DoOpTiling()
                                   (std::vector<const char*>{context_->GetNodeName(),
                                                             "attrs is unavailable during shape inference or tiling"})),
         return ge::GRAPH_FAILED);
+
+    const char* layout = attrs->GetAttrPointer<char>(INDEXTHREE);
+    OP_CHECK_IF(layout != nullptr && std::strcmp(layout, "TND") != 0,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "layoutOptional", layout,
+                                                      "layoutOptional only supports TND"),
+                return ge::GRAPH_FAILED);
 
     const auto* blockSizePtr = attrs->GetAttrPointer<uint32_t>(INDEXZERO);
     OP_CHECK_IF(blockSizePtr == nullptr,
@@ -134,12 +142,16 @@ ge::graphStatus NsaCompressGradTiling::DoOpTiling()
                 return ge::GRAPH_FAILED);
     uint32_t blockStride = *blockStridePtr;
 
-    const auto* seqLenTypePtr = attrs->GetAttrPointer<uint32_t>(INDEXTWO);
+    const auto* seqLenTypePtr = attrs->GetAttrPointer<int64_t>(INDEXTWO);
     OP_CHECK_IF(seqLenTypePtr == nullptr,
                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "actSeqLenType",
                                                          "required parameter metadata is missing"),
                 return ge::GRAPH_FAILED);
-    uint32_t seqLenType = *seqLenTypePtr;
+    const int64_t seqLenTypeAttr = *seqLenTypePtr;
+    if (seqLenTypeAttr != 0 && seqLenTypeAttr != 1) {
+        OP_LOGW(context_, "actSeqLenType is %lld; expected 0 or 1.", static_cast<long long>(seqLenTypeAttr));
+    }
+    uint32_t seqLenType = static_cast<uint32_t>(seqLenTypeAttr);
 
     tilingData_.set_batchSize(batchSize);
     tilingData_.set_numOfBlock(nBlocks);

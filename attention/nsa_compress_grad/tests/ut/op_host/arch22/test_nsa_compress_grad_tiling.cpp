@@ -101,7 +101,7 @@ TEST_F(NsaCompressGradTiling, NsaCompressGrad_910b_tiling_A2_bf16)
     ExecuteTestCase(para, ge::GRAPH_SUCCESS, kTilingKey);
 }
 
-// A3: without actSeqLenOptional (batchSize defaults to 1)
+// A3: a missing actSeqLenOptional must fail before launching the kernel.
 TEST_F(NsaCompressGradTiling, NsaCompressGrad_910b_tiling_A3_no_act_seq_len)
 {
     auto compileInfo = MakeCompileInfo();
@@ -123,7 +123,7 @@ TEST_F(NsaCompressGradTiling, NsaCompressGrad_910b_tiling_A3_no_act_seq_len)
                                  },
                                  kInputIrInstanceNoActSeq, kOutputIrInstance, &compileInfo, "Ascend910B", kUtCoreNum,
                                  kUbSize, kTilingDataSize);
-    ExecuteTestCase(para, ge::GRAPH_SUCCESS, kTilingKey);
+    ExecuteTestCase(para, ge::GRAPH_FAILED);
 }
 
 // E1: headDim not aligned to 16

@@ -125,7 +125,7 @@ aclnnStatus aclnnNsaCompressGrad(
       <tr>
         <td>actSeqLenOptionalOptional</td>
         <td>输入</td>
-        <td>描述每个Batch对应的S大小，各batch长度不等时需要输入。</td>
+        <td>描述每个Batch对应的S大小。当前必须显式传入非nullptr参数，单batch长度为S时传入[S]。</td>
         <td>-</td>
         <td>INT64</td>
         <td>ND</td>
@@ -155,7 +155,7 @@ aclnnStatus aclnnNsaCompressGrad(
       <tr>
         <td>actSeqLenType</td>
         <td>输入</td>
-        <td>取值0或1，当前仅支持0。</td>
+        <td>序列长度的表示方式，取值为0或1。0表示actSeqLenOptionalOptional为各batch序列长度的累积和，1表示各batch的独立序列长度，当前建议使用0。例如batch长度为64、80时，取值0对应[64, 144]，取值1对应[64, 80]。</td>
         <td>-</td>
         <td>INT64</td>
         <td>-</td>
@@ -165,7 +165,7 @@ aclnnStatus aclnnNsaCompressGrad(
       <tr>
         <td>layoutOptionalOptional</td>
         <td>输入</td>
-        <td>代表输入input的数据排布格式，支持TND。</td>
+        <td>代表输入input的数据排布格式，仅支持"TND"。传入nullptr时使用默认值"TND"。</td>
         <td>-</td>
         <td>string</td>
         <td>-</td>
@@ -240,15 +240,20 @@ aclnnStatus aclnnNsaCompressGrad(
       <td>传入的input、weight、outputGrad、inputGradOut或weightGradOut是空指针。</td>
     </tr>
     <tr>
-      <td rowspan="3">ACLNN_ERR_PARAM_INVALID</td>
-      <td rowspan="3">161002</td>
+      <td rowspan="2">ACLNN_ERR_PARAM_INVALID</td>
+      <td rowspan="2">161002</td>
       <td>input和weight的数据类型不在支持的范围之内。</td>
     </tr>
     <tr>
       <td>input和weight的shape无法做broadcast。</td>
     </tr>
     <tr>
-      <td>layoutOptionalOptional不合法。</td>
+      <td rowspan="2">ACLNN_ERR_INNER_TILING_ERROR</td>
+      <td rowspan="2">561002</td>
+      <td>layoutOptionalOptional显式传入非"TND"字符串（包括空字符串），tiling校验失败。</td>
+    </tr>
+    <tr>
+      <td>actSeqLenOptionalOptional传入nullptr，tiling校验失败。</td>
     </tr>
   </tbody>
   </table>
@@ -301,7 +306,7 @@ aclnnStatus aclnnNsaCompressGrad(
 - 确定性计算：
   - aclnnNsaCompressGrad默认确定性实现。
 - 本接口不支持非连续输出。
-- compressBlockSize和compressStride必须是16的整数倍，且compressBlockSize > compressStride
+- compressBlockSize和compressStride必须是16的整数倍，且compressBlockSize >= compressStride
 
 ## 调用示例
 

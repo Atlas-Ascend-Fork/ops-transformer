@@ -62,12 +62,23 @@ __aicore__ inline void NsaCompressGradND<T>::InitTilingData(const NsaCompressGra
 
     ubCalcSize_ = ubMaxSize_ - UB_PRESERVE * ONE_KILO;
     maxHeadNumInUb_ = ubCalcSize_ / headDim_ / static_cast<uint32_t>(sizeof(float)) / 3 / BLOCK_16 * BLOCK_16;
-    // 预留，当前都按1行来处理
-    nRowsOnce_ = maxHeadNumInUb_ >= headNum_ ? maxHeadNumInUb_ / headNum_ : 1;
-    if (nRowsOnce_ > blockSize_) {
-        nRowsOnce_ = blockSize_;
+    // A reduction instruction processes at most 255 head rows. Splitting
+    // heads requires one input row per iteration to keep each copy contiguous.
+    constexpr uint32_t MAX_REDUCE_REPEAT = 255;
+    nHeadOnce_ = headNum_ < maxHeadNumInUb_ ? headNum_ : maxHeadNumInUb_;
+    if (nHeadOnce_ > MAX_REDUCE_REPEAT) {
+        nHeadOnce_ = MAX_REDUCE_REPEAT;
     }
-    nHeadOnce_ = maxHeadNumInUb_ >= headNum_ ? headNum_ : (headNum_ / CeilDiv(headNum_, maxHeadNumInUb_));
+    nRowsOnce_ = 1;
+    if (nHeadOnce_ == headNum_) {
+        nRowsOnce_ = maxHeadNumInUb_ / headNum_;
+        if (nRowsOnce_ > blockSize_) {
+            nRowsOnce_ = blockSize_;
+        }
+        if (nRowsOnce_ > MAX_REDUCE_REPEAT / headNum_) {
+            nRowsOnce_ = MAX_REDUCE_REPEAT / headNum_;
+        }
+    }
     // 有overlap时计算inputGrad需要累加，用fp32的workspace累加完再拷贝到inputGradGm
     isOverLap_ = blockSize_ > blockStride_;
 
@@ -98,7 +109,7 @@ __aicore__ inline void NsaCompressGradND<T>::InitWorkspace(GM_ADDR workspace)
 {
     wtGradAtomicWs_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(workspace));
 
-    if (isOverLap_) {
+    if (isOverLap_ && !deterministicFlag_) {
         // overLap场景需要使用workspace累加
         uint64_t inputGradOffset = static_cast<uint64_t>(blockSize_) * headNum_ * coreNum_ * sizeof(float);
         inputGradAtomicWs_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(workspace + inputGradOffset));
@@ -139,8 +150,10 @@ __aicore__ inline void NsaCompressGradND<T>::InitBuffers()
     halfTransInputGradPong_ = ubTBuf.GetWithOffset<T>(maxInputNum, maxInputNum * sizeof(float) * 2);
 
     if (deterministicFlag_) {
-        transDeterministicWtGrad_ = ubTBuf.GetWithOffset<float>(headNum_ * coreNum_ * (blockSize_ / coreNum_ + 1), 0);
-        halfTransDeterministicWtGrad_ = ubTBuf.GetWithOffset<T>(headNum_ * coreNum_ * (blockSize_ / coreNum_ + 1), 0);
+        // Match the 16-element partition used by DeterministicComputeSumWtGrad.
+        uint32_t wtGradCapacity = CeilDiv(blockSize_ * headNum_ / 16, coreNum_) * 16 * coreNum_;
+        transDeterministicWtGrad_ = ubTBuf.GetWithOffset<float>(wtGradCapacity, 0);
+        halfTransDeterministicWtGrad_ = ubTBuf.GetWithOffset<T>(wtGradCapacity, 0);
     } else {
         transWtGrad_ = ubTBuf.GetWithOffset<float>(headNum_ * blockSize_, 0);
         halfTransWtGrad_ = ubTBuf.GetWithOffset<T>(headNum_ * blockSize_, 0);
@@ -199,8 +212,8 @@ __aicore__ inline void NsaCompressGradND<T>::SetWsToZero()
     DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(wtGradNum * sizeof(float)), 0, 0, 0};
     DataCopyPad(wtGradAtomicWs_[coreId_ * wtGradNum], cmpGrad, dataCopyParams);
 
-    // 清零inputGradAtomicWs_
-    if (isOverLap_) {
+    // The deterministic owner writes every input-gradient row directly.
+    if (isOverLap_ && !deterministicFlag_) {
         Duplicate<float>(transInputGradPing_, ZERO_FLOAT, maxHeadNumInUb_ * headDim_);
 
         SetFlag<HardEvent::V_MTE3>(EVENT_ID3);
@@ -217,7 +230,7 @@ __aicore__ inline void NsaCompressGradND<T>::SetWsToZero()
             DataCopyExtParams dataCopyParams{1, static_cast<uint32_t>(processNumCur * sizeof(float)), 0, 0, 0};
             DataCopyPad(inputGradAtomicWs_[inputGradOffset], transInputGradPing_, dataCopyParams);
         }
-    } else {
+    } else if (!isOverLap_) {
         AscendC::InitOutput<T>(inputGradGm_[headOffsetCurCore_ * headDim_], headToProcess_ * headDim_, 0);
     }
 
@@ -252,7 +265,7 @@ __aicore__ inline void NsaCompressGradND<T>::Process()
     // iterate blocks
     for (auto blcId = startBlcIdx_g; blcId < startBlcIdx_g + nBlockCurCore_; blcId++) {
         // 判断是否进入下一个batch
-        if (blcId >= blcStartIdxCurBch + nBlcCurBch) {
+        while (curBIdx + 1 < batchSize_ && blcId >= blcStartIdxCurBch + nBlcCurBch) {
             // 更新循环参数
             curBIdx += 1;
             blcStartIdxCurBch += nBlcCurBch;
@@ -281,15 +294,18 @@ __aicore__ inline void NsaCompressGradND<T>::Process()
                 // 拷贝inputKV
                 CopyInInput(inputOffset, headToProcess * headDim_ * rowsToProcess);
                 // 拷贝weight
-                CopyInWt(weightOffset, headToProcess * rowsToProcess);
+                if (!isOverLap_ || !deterministicFlag_) {
+                    CopyInWt(weightOffset, headToProcess * rowsToProcess);
+                }
                 // 计算WtGrad
                 ComputeWtGrad(headToProcess * headDim_ * rowsToProcess);
                 // 拷贝wtGrad计算结果
                 CopyOutWtGrad(weightOffset, headToProcess * rowsToProcess);
                 // 计算kvGrad
-                ComputeInputGrad(headToProcess * headDim_ * rowsToProcess);
-                // 拷贝kvGrad计算结果
-                CopyOutInputGrad(inputOffset, headToProcess * headDim_ * rowsToProcess);
+                if (!isOverLap_ || !deterministicFlag_) {
+                    ComputeInputGrad(headToProcess * headDim_ * rowsToProcess);
+                    CopyOutInputGrad(inputOffset, headToProcess * headDim_ * rowsToProcess);
+                }
             }
             SetFlag<HardEvent::V_MTE2>(EVENT_ID6);
         }
@@ -436,7 +452,11 @@ __aicore__ inline void NsaCompressGradND<T>::MoveResult()
     }
 
     if (isOverLap_) {
-        MoveInputGrad();
+        if (deterministicFlag_) {
+            ComputeOwnedInputGrad();
+        } else {
+            MoveInputGrad();
+        }
     }
 }
 
@@ -572,6 +592,72 @@ __aicore__ inline void NsaCompressGradND<T>::MoveInputGrad()
 
     WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
+}
+
+// Each (token, head) row has one writer. Its covering blocks are accumulated
+// in increasing order, independently of how the other vector cores progress.
+template <typename T>
+__aicore__ inline void NsaCompressGradND<T>::ComputeOwnedInputGrad()
+{
+    // Weight-gradient output may still be reading these shared UB buffers.
+    SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+    uint64_t batchHeadBase = 0;
+    uint64_t batchBlockBase = 0;
+    uint64_t ownerBegin = headOffsetCurCore_;
+    uint64_t ownerEnd = ownerBegin + headToProcess_;
+    for (uint32_t batch = 0; batch < batchSize_; ++batch) {
+        uint32_t seqLen = GetSeqLenTarBch(batch);
+        uint32_t blockCount = CompressBlkNum(seqLen, blockSize_, blockStride_);
+        uint64_t batchEnd = batchHeadBase + static_cast<uint64_t>(seqLen) * headNum_;
+        uint64_t begin = ownerBegin > batchHeadBase ? ownerBegin : batchHeadBase;
+        uint64_t end = ownerEnd < batchEnd ? ownerEnd : batchEnd;
+        for (uint64_t row = begin; row < end; ++row) {
+            uint32_t token = (row - batchHeadBase) / headNum_;
+            uint32_t head = (row - batchHeadBase) % headNum_;
+            Duplicate<float>(inputFp32Ub_, ZERO_FLOAT, headDim_);
+            PipeBarrier<PIPE_V>();
+            uint32_t firstBlock =
+                token < blockSize_ ? 0 : static_cast<uint32_t>(CeilDiv(token - blockSize_ + 1, blockStride_));
+            uint32_t blockEnd = token / blockStride_ + 1;
+            if (blockEnd > blockCount) {
+                blockEnd = blockCount;
+            }
+            for (uint32_t block = firstBlock; block < blockEnd; ++block) {
+                uint64_t gradOffset = ((batchBlockBase + block) * headNum_ + head) * headDim_;
+                uint64_t weightOffset = static_cast<uint64_t>(token - block * blockStride_) * headNum_ + head;
+                SetFlag<HardEvent::V_MTE2>(EVENT_ID0);
+                WaitFlag<HardEvent::V_MTE2>(EVENT_ID0);
+                DataCopyExtParams gradCopy{1, static_cast<uint32_t>(headDim_ * sizeof(T)), 0, 0, 0};
+                DataCopyExtParams weightCopy{1, static_cast<uint32_t>(sizeof(T)), 0, 0, 0};
+                DataCopyPadExtParams<T> noPad{false, 0, 0, 0};
+                DataCopyPad(cmpGradHf, outputGradGm_[gradOffset], gradCopy, noPad);
+                DataCopyPad(weightHf, weightGm_[weightOffset], weightCopy, noPad);
+                SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
+                WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+                Cast(cmpGrad, cmpGradHf, RoundMode::CAST_NONE, headDim_);
+                Cast(weightFp32, weightHf, RoundMode::CAST_NONE, 1);
+                PipeBarrier<PIPE_V>();
+                uint32_t srcShape[2] = {1, 1};
+                uint32_t dstShape[2] = {1, headDim_};
+                AscendC::BroadCast<float, 2, 1>(weightBrdc, weightFp32, dstShape, srcShape, tmpBuffer);
+                PipeBarrier<PIPE_V>();
+                Mul(weightBrdc, weightBrdc, cmpGrad, headDim_);
+                PipeBarrier<PIPE_V>();
+                Add(inputFp32Ub_, inputFp32Ub_, weightBrdc, headDim_);
+                PipeBarrier<PIPE_V>();
+            }
+            CastByCondition(inputGradHf, inputFp32Ub_, headDim_, true);
+            SetFlag<HardEvent::V_MTE3>(EVENT_ID0);
+            WaitFlag<HardEvent::V_MTE3>(EVENT_ID0);
+            DataCopyExtParams outputCopy{1, static_cast<uint32_t>(headDim_ * sizeof(T)), 0, 0, 0};
+            DataCopyPad(inputGradGm_[row * headDim_], inputGradHf, outputCopy);
+            SetFlag<HardEvent::MTE3_V>(EVENT_ID0);
+            WaitFlag<HardEvent::MTE3_V>(EVENT_ID0);
+        }
+        batchHeadBase = batchEnd;
+        batchBlockBase += blockCount;
+    }
 }
 
 } // namespace NsaCompressGrad

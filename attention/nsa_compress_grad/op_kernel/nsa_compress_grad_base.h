@@ -51,6 +51,7 @@ private:
     __aicore__ inline void CastByCondition(LocalTensor<T> dstTensor, LocalTensor<float> srcTensor, uint32_t castSize,
                                            bool condition);
     __aicore__ inline void MoveInputGrad();
+    __aicore__ inline void ComputeOwnedInputGrad();
     __aicore__ inline void MoveWtGrad();
     __aicore__ inline void PresetFlag();
     __aicore__ inline void ClearPresetFlag();
