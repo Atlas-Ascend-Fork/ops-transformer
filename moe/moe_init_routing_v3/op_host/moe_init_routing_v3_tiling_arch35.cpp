@@ -233,7 +233,7 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::GetCountingSortWorkspaceSize()
         coutSortWorkspace = (pairsBase + filterNeedCoreNum * pairsPerCore + filterNeedCoreNum * expertCountStride) *
                             static_cast<int64_t>(sizeof(int32_t));
     }
-    coutSortWorkspace += DEFAULT_WORKSPACE_SIZE;
+    coutSortWorkspace += SIZE_16 * LENGTH_1024 * LENGTH_1024;
     workspaceSize_ = static_cast<uint32_t>(coutSortWorkspace);
     OP_LOGD(context_, "CountingSort workspace size = %u bytes (pairsPerCore=%ld, stride=%ld)", workspaceSize_,
             pairsPerCore, expertCountStride);
@@ -281,8 +281,8 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::GetNormalWorkspaceSize()
         workspaceSize_ += quantTempWorkspaceSize;
     }
     // STATIC_QUANT: expandedRowIdxIndexGm_ 复用 expertTotalCountGm_ 之后的空间
-    // 业务 workspace 与框架预留分别计算，框架预留为 DEFAULT_WORKSPACE_SIZE。
-    int64_t frameworkOverhead = DEFAULT_WORKSPACE_SIZE;
+    // 这里workspaceSize_除了计算必要的，还会加上16M的AscendC框架用大小
+    int64_t frameworkOverhead = SIZE_16 * LENGTH_1024 * LENGTH_1024;
     workspaceSize_ += frameworkOverhead;
 
     OP_LOGD(context_, "Computed workspace size to allocate is %u bytes", workspaceSize_);
@@ -296,7 +296,7 @@ ge::graphStatus MoeInitRoutingV3TilingArch35::GetNormalWorkspaceSize()
 ge::graphStatus MoeInitRoutingV3TilingArch35::GetEmptyTensorWorkspaceSize()
 {
     OP_LOGD(context_, "Entered MoeInitRoutingV3TilingArch35::GetEmptyTensorWorkspaceSize()");
-    workspaceSize_ = DEFAULT_WORKSPACE_SIZE;
+    workspaceSize_ = SIZE_16 * LENGTH_1024 * LENGTH_1024;
     auto* workspacePtr = context_->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context_, workspacePtr);
     workspacePtr[0] = workspaceSize_;
