@@ -18,7 +18,7 @@
 #include "../common_def.h"
 
 // HiF4 uses the same MatmulWithScaleMx APACE block, with native scale metadata.
-#if defined(ENABLE_MMRS_DT_HIFLOAT4) && defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201) && defined(DT_HIFLOAT4) && \
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201) && defined(DT_HIFLOAT4) && \
     ((ORIG_DTYPE_X1 == ORIG_DTYPE_X2) && (ORIG_DTYPE_X1 == DT_HIFLOAT4))
 #define MMRS_APACE_HIF4_DTYPE 1
 #else

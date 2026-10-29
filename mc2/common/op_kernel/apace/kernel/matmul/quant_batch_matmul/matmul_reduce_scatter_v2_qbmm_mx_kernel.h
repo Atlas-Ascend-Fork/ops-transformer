@@ -52,7 +52,7 @@ public:
     using LayoutB = typename BlockMmad::LayoutB;
     using LayoutC = typename BlockMmad::LayoutC;
 
-#if defined(MMRS_APACE_HIF4_DTYPE) && MMRS_APACE_HIF4_DTYPE
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ != 2201 && __NPU_ARCH__ != 3510
     static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
     using ScaleType = AscendC::Std::conditional_t<IS_HIF4, AscendC::hif4_scale, AscendC::fp8_e8m0_t>;
 #else

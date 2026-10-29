@@ -40,8 +40,7 @@ template <typename AType, typename BType, typename CType, bool BTrans, typename 
           AscendC::HcclServerType ServerType>
 class MatmulReduceScatterV2MxQuantHcommImpl {
 public:
-// 仅在 HiFP4 编译单元引用新类型，其他 960 通路不依赖这些类型。
-#if defined(MMRS_APACE_HIF4_DTYPE) && MMRS_APACE_HIF4_DTYPE
+#if defined(__NPU_ARCH__) && __NPU_ARCH__ != 2201 && __NPU_ARCH__ != 3510
     static constexpr bool IS_HIF4 = AscendC::IsSameType<AType, hifloat4x2_t>::value;
     static_assert(!(AscendC::IsSameType<AType, hifloat4x2_t>::value ||
                     AscendC::IsSameType<BType, hifloat4x2_t>::value) ||

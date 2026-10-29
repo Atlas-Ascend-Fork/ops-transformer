@@ -12,18 +12,12 @@
  * \file matmul_reduce_scatter_v2.cpp
  * \brief
  */
-#include <initializer_list>
 #include <vector>
 #include "register/op_def_registry.h"
 #if __has_include("version/asc_devkit_version.h")
 #include "version/asc_devkit_version.h"
-#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
-#define ENABLE_MMRS_DT_HIFLOAT4
 #endif
-#endif
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
 #include "common/include/op_host/op_const_def_transformer.h"
-#endif
 
 namespace ops {
 namespace {
@@ -61,9 +55,9 @@ public:
     explicit MatmulReduceScatterV2(const char *name)
         : OpDef(name)
     {
-        DefineRequiredInputs(*this);
-        DefineOptionalInputs(*this);
-        DefineOutputs(*this);
+        DefineRequiredInputs();
+        DefineOptionalInputs();
+        DefineOutputs();
         DefineAttributes();
 
         OpAICoreConfig aicore_config;
@@ -78,11 +72,10 @@ public:
             .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel")
             .ExtendCfgInfo("opFile.value", "matmul_reduce_scatter_v2_apt");
         this->AICore().AddConfig("ascend950", aicore_config);
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
+#if defined(ASC_DEVKIT_MAJOR) && defined(ASC_DEVKIT_MINOR) && \
+    (ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3))
         OpAICoreConfig aicore_config_960dt;
-        DefineRequiredInputs(aicore_config_960dt, true);
-        DefineOptionalInputs(aicore_config_960dt, true);
-        DefineOutputs(aicore_config_960dt, true);
+        DefineAicoreConfig960dt(aicore_config_960dt);
         aicore_config_960dt.DynamicCompileStaticFlag(true)
             .DynamicFormatFlag(true)
             .DynamicRankSupportFlag(true)
@@ -94,7 +87,6 @@ public:
             .ExtendCfgInfo("multiKernelSupportDynamicGraph.value", "multi_kernel")
             .ExtendCfgInfo("opFile.value", "matmul_reduce_scatter_v2_apt");
         this->AICore().AddConfig("ascend960dt", aicore_config_960dt);
-        this->MC2().HcclGroup("group");
         this->MC2().HcclServerType(HcclServerType::AICPU, "ascend960dt");
 #endif
 
@@ -118,97 +110,64 @@ public:
     }
 
 private:
-    // 保留主线的类型组合，仅为 A6 追加 HiFP4 的 FP16/BF16 两列。
-    static std::vector<ge::DataType> WithHiF4Types(std::vector<ge::DataType> types, bool enableHiF4,
-                                                 std::initializer_list<ge::DataType> extra)
+    void DefineRequiredInputs()
     {
-        if (enableHiF4) {
-            types.insert(types.end(), extra.begin(), extra.end());
-        }
-        return types;
-    }
-
-    template <typename Config>
-    void DefineRequiredInputs(Config &config, bool enableHiF4 = false)
-    {
-        config.Input("x1")
+        this->Input("x1")
             .ParamType(REQUIRED)
-            .DataType(WithHiF4Types({ge::DT_BF16,          ge::DT_FLOAT16,       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
+            .DataType({ge::DT_BF16,          ge::DT_FLOAT16,       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
                        ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
                        ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
                        ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_HIFLOAT8,      ge::DT_HIFLOAT8,
                        ge::DT_HIFLOAT8,      ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
                        ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E4M3FN,
                        ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
-                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1},
-                enableHiF4, {
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
-                    Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4
-#endif
-                }))
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1})
             .FormatList({ge::FORMAT_ND});
-        config.Input("x2")
+        this->Input("x2")
             .ParamType(REQUIRED)
-            .DataType(WithHiF4Types({ge::DT_BF16,          ge::DT_FLOAT16,       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
+            .DataType({ge::DT_BF16,          ge::DT_FLOAT16,       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
                        ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
                        ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,
                        ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_HIFLOAT8,      ge::DT_HIFLOAT8,
                        ge::DT_HIFLOAT8,      ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
                        ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,
                        ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
-                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1},
-                enableHiF4, {
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
-                    Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4
-#endif
-                }))
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1})
             .FormatList({ge::FORMAT_ND})
             .IgnoreContiguous();
     }
 
-    template <typename Config>
-    void DefineOptionalInputs(Config &config, bool enableHiF4 = false)
+    void DefineOptionalInputs()
     {
-        config.Input("bias")
+        this->Input("bias")
             .ParamType(OPTIONAL)
-            .DataType(WithHiF4Types({ge::DT_BF16,  ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
+            .DataType({ge::DT_BF16,  ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
                        ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
                        ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
                        ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
                        ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
-                       ge::DT_FLOAT, ge::DT_FLOAT},
-                enableHiF4, {ge::DT_FLOAT, ge::DT_FLOAT}))
+                       ge::DT_FLOAT, ge::DT_FLOAT})
             .FormatList({ge::FORMAT_ND});
 
-        config.Input("x1_scale").ParamType(OPTIONAL).DataType(WithHiF4Types(scaleDtypes950, enableHiF4, {
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
-            Ops::Transformer::DT_HIFLOAT4_SCALE, Ops::Transformer::DT_HIFLOAT4_SCALE
-#endif
-        })).FormatList({ge::FORMAT_ND});
+        this->Input("x1_scale").ParamType(OPTIONAL).DataType(scaleDtypes950).FormatList({ge::FORMAT_ND});
 
-        config.Input("x2_scale").ParamType(OPTIONAL).DataType(WithHiF4Types(scaleDtypes950, enableHiF4, {
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
-            Ops::Transformer::DT_HIFLOAT4_SCALE, Ops::Transformer::DT_HIFLOAT4_SCALE
-#endif
-        })).FormatList({ge::FORMAT_ND});
-        config.Input("quant_scale").ParamType(OPTIONAL).DataTypeList({ge::DT_FLOAT}).FormatList({ge::FORMAT_ND});
+        this->Input("x2_scale").ParamType(OPTIONAL).DataType(scaleDtypes950).FormatList({ge::FORMAT_ND});
+        this->Input("quant_scale").ParamType(OPTIONAL).DataTypeList({ge::DT_FLOAT}).FormatList({ge::FORMAT_ND});
     }
 
-    template <typename Config>
-    void DefineOutputs(Config &config, bool enableHiF4 = false)
+    void DefineOutputs()
     {
-        config.Output("y")
+        this->Output("y")
             .ParamType(REQUIRED)
-            .DataType(WithHiF4Types({ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
+            .DataType({ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
                        ge::DT_FLOAT16, ge::DT_FLOAT,   ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
                        ge::DT_FLOAT16, ge::DT_FLOAT,   ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT16,
                        ge::DT_BF16,    ge::DT_FLOAT,   ge::DT_FLOAT16, ge::DT_BF16,    ge::DT_FLOAT, ge::DT_FLOAT16,
                        ge::DT_BF16,    ge::DT_FLOAT,   ge::DT_FLOAT16, ge::DT_BF16,    ge::DT_FLOAT, ge::DT_FLOAT16,
-                       ge::DT_BF16,    ge::DT_FLOAT},
-                enableHiF4, {ge::DT_FLOAT16, ge::DT_BF16}))
+                       ge::DT_BF16,    ge::DT_FLOAT})
             .FormatList({ge::FORMAT_ND});
 
-        config.Output("amax_out").ParamType(OPTIONAL).DataTypeList({ge::DT_FLOAT}).FormatList({ge::FORMAT_ND});
+        this->Output("amax_out").ParamType(OPTIONAL).DataTypeList({ge::DT_FLOAT}).FormatList({ge::FORMAT_ND});
     }
 
     void DefineAttributes()
@@ -290,6 +249,70 @@ private:
             .DataType(floatDtypes910b)
             .FormatList({ge::FORMAT_ND})
             .UnknownShapeFormat(ndFormats910b);
+    }
+
+    void DefineAicoreConfig960dt(OpAICoreConfig &aicore_config_960dt) const
+    {
+        aicore_config_960dt.Input("x1")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16,          ge::DT_FLOAT16,       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
+                       ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
+                       ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_HIFLOAT8,      ge::DT_HIFLOAT8,
+                       ge::DT_HIFLOAT8,      ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
+                       ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E4M3FN,
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,
+                       Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4})
+            .FormatList({ge::FORMAT_ND});
+        aicore_config_960dt.Input("x2")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16,          ge::DT_FLOAT16,       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,
+                       ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_HIFLOAT8,      ge::DT_HIFLOAT8,
+                       ge::DT_HIFLOAT8,      ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2,
+                       ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E5M2,   ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN,
+                       ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,   ge::DT_FLOAT4_E2M1,
+                       Ops::Transformer::DT_HIFLOAT4, Ops::Transformer::DT_HIFLOAT4})
+            .FormatList({ge::FORMAT_ND})
+            .IgnoreContiguous();
+        aicore_config_960dt.Input("bias")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_BF16,  ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
+                       ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
+                       ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
+                       ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
+                       ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT,
+                       ge::DT_FLOAT, ge::DT_FLOAT,   ge::DT_FLOAT, ge::DT_FLOAT})
+            .FormatList({ge::FORMAT_ND});
+        const std::vector<ge::DataType> scaleDtypes960dt = {
+            ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,
+            ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,
+            ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT,
+            ge::DT_FLOAT,       ge::DT_FLOAT,       ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0,
+            ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0,
+            ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0,
+            ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0,
+            Ops::Transformer::DT_HIFLOAT4_SCALE, Ops::Transformer::DT_HIFLOAT4_SCALE};
+        aicore_config_960dt.Input("x1_scale")
+            .ParamType(OPTIONAL)
+            .DataType(scaleDtypes960dt)
+            .FormatList({ge::FORMAT_ND});
+        aicore_config_960dt.Input("x2_scale")
+            .ParamType(OPTIONAL)
+            .DataType(scaleDtypes960dt)
+            .FormatList({ge::FORMAT_ND});
+        aicore_config_960dt.Output("y")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
+                       ge::DT_FLOAT16, ge::DT_FLOAT,   ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_BF16,
+                       ge::DT_FLOAT16, ge::DT_FLOAT,   ge::DT_BF16,    ge::DT_FLOAT16, ge::DT_FLOAT, ge::DT_FLOAT16,
+                       ge::DT_BF16,    ge::DT_FLOAT,   ge::DT_FLOAT16, ge::DT_BF16,    ge::DT_FLOAT, ge::DT_FLOAT16,
+                       ge::DT_BF16,    ge::DT_FLOAT,   ge::DT_FLOAT16, ge::DT_BF16,    ge::DT_FLOAT, ge::DT_FLOAT16,
+                       ge::DT_BF16,    ge::DT_FLOAT,   ge::DT_FLOAT16, ge::DT_BF16})
+            .FormatList({ge::FORMAT_ND});
     }
 };
 

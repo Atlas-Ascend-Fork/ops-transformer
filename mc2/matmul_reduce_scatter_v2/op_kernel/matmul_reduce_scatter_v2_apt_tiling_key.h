@@ -19,9 +19,6 @@
 #include "ascendc/host_api/tiling/template_argument.h"
 #if __has_include("version/asc_devkit_version.h")
 #include "version/asc_devkit_version.h"
-#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
-#define ENABLE_MMRS_DT_HIFLOAT4
-#endif
 #endif
 
 #if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 9201)
@@ -36,9 +33,7 @@ namespace Mc2Tiling {
 #define INPUT_TYPE_IS_FP8 0
 #define INPUT_TYPE_IS_FP16_BF16 1
 #define INPUT_TYPE_IS_FP4 2
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
 #define INPUT_TYPE_IS_HIF4 3
-#endif
 
 // TPL_OUTPUTDTYPE uint8_t
 #define OUTPUT_TYPE_IS_FP16_BF16 0
@@ -48,9 +43,7 @@ namespace Mc2Tiling {
 // TPL_SCALETYPE uint8_t
 #define TPL_X1_X2_DTYPE_IS_OTHER 0
 #define TPL_X1_X2_DTYPE_IS_FP8E8M0 1
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
 #define TPL_X1_X2_DTYPE_IS_HIF4_SCALE 2
-#endif
 
 // TPL_COMMALG uint8_t
 #define TPL_CCU_REDUCESUM 0
@@ -66,21 +59,12 @@ ASCENDC_TPL_ARGS_DECL(Mc2MatmulReduceScatterV2, // 算子OpType
                       ASCENDC_TPL_BOOL_DECL(TPL_ISPERBLOCK, 0, 1), ASCENDC_TPL_BOOL_DECL(TPL_TRANSA, 0, 1),
                       ASCENDC_TPL_BOOL_DECL(TPL_TRANSB, 0, 1),
                       ASCENDC_TPL_UINT_DECL(TPL_INPUT, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_LIST, INPUT_TYPE_IS_FP8,
-                                            INPUT_TYPE_IS_FP16_BF16, INPUT_TYPE_IS_FP4
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
-                                            ,
-                                            INPUT_TYPE_IS_HIF4
-#endif
-                                            ),
+                                            INPUT_TYPE_IS_FP16_BF16, INPUT_TYPE_IS_FP4, INPUT_TYPE_IS_HIF4),
                       ASCENDC_TPL_UINT_DECL(TPL_OUTPUTDTYPE, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_LIST,
                                             OUTPUT_TYPE_IS_FP16_BF16, OUTPUT_TYPE_IS_FP8, OUTPUT_TYPE_IS_FLOAT),
                       ASCENDC_TPL_UINT_DECL(TPL_SCALETYPE, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_LIST,
-                                            TPL_X1_X2_DTYPE_IS_OTHER, TPL_X1_X2_DTYPE_IS_FP8E8M0
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
-                                            ,
-                                            TPL_X1_X2_DTYPE_IS_HIF4_SCALE
-#endif
-                                            ),
+                                            TPL_X1_X2_DTYPE_IS_OTHER, TPL_X1_X2_DTYPE_IS_FP8E8M0,
+                                            TPL_X1_X2_DTYPE_IS_HIF4_SCALE),
                       ASCENDC_TPL_UINT_DECL(TPL_COMMALG, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_LIST, TPL_CCU_REDUCESUM,
                                             TPL_CCU_ALL2ALL_VEC_REDUCE, TPL_CCU_REDUCESUM_PEER_ONLY),
                       ASCENDC_TPL_UINT_DECL(TPL_COMM_MODE, ASCENDC_TPL_1_BW, ASCENDC_TPL_UI_LIST, TPL_CCU_COMM_MODE,
@@ -163,7 +147,8 @@ ASCENDC_TPL_SEL(
                          ASCENDC_TPL_UINT_SEL(TPL_COMMALG, ASCENDC_TPL_UI_LIST, TPL_CCU_REDUCESUM),
                          ASCENDC_TPL_UINT_SEL(TPL_COMM_MODE, ASCENDC_TPL_UI_LIST, TPL_AICPU_COMM_MODE),
                          ASCENDC_TPL_BOOL_SEL(TPL_USING_APACE, 1), ),
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
+// Host 需要完整的整数 TilingKey 组合；Device 排除不支持 HiFP4 的架构。
+#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 2201 && __NPU_ARCH__ != 3510)
     ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_KERNEL_TYPE_SEL(ASCENDC_TPL_AIC_ONLY), ASCENDC_TPL_BOOL_SEL(TPL_ISPERBLOCK, 0),
                          ASCENDC_TPL_BOOL_SEL(TPL_TRANSA, 0), ASCENDC_TPL_BOOL_SEL(TPL_TRANSB, 0, 1),
                          ASCENDC_TPL_UINT_SEL(TPL_INPUT, ASCENDC_TPL_UI_LIST, INPUT_TYPE_IS_HIF4),

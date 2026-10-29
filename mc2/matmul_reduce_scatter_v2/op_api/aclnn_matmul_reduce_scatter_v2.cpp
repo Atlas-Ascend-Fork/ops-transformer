@@ -27,15 +27,7 @@
 #include "opdev/op_log.h"
 #include "opdev/platform.h"
 #include "op_host/util/op_const_def.h"
-#if __has_include("version/asc_devkit_version.h")
-#include "version/asc_devkit_version.h"
-#if ASC_DEVKIT_MAJOR > 9 || (ASC_DEVKIT_MAJOR == 9 && ASC_DEVKIT_MINOR >= 3)
-#define ENABLE_MMRS_DT_HIFLOAT4
-#endif
-#endif
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
 #include "common/include/op_host/op_const_def_transformer.h"
-#endif
 #include "mc2_log_compat.h"
 #include "common/op_api/mc2_context.h"
 #include "common/op_host/op_api/mc2_3rd_matmul_util.h"
@@ -138,20 +130,15 @@ enum class CaseOption {
 static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST = {
     op::DataType::DT_BF16,         op::DataType::DT_FLOAT16,  op::DataType::DT_FLOAT8_E4M3FN,
     op::DataType::DT_FLOAT8_E5M2,  op::DataType::DT_HIFLOAT8, op::DataType::DT_FLOAT4_E2M1,
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
     Ops::Transformer::DT_HIFLOAT4,
-#endif
 };
 static const std::initializer_list<op::DataType> BIAS_OUTPUT_SUPPORT_TYPE = {
     op::DataType::DT_BF16, op::DataType::DT_FLOAT16, op::DataType::DT_FLOAT};
 static const std::initializer_list<op::DataType> INPUT_SUPPORT_TYPE_HIGH_ACCURACY = {op::DataType::DT_FLOAT16,
                                                                                      op::DataType::DT_BF16};
 static const std::initializer_list<op::DataType> INPUT_SUPPORT_TYPE_LOW_ACCURACY = {
-    op::DataType::DT_FLOAT8_E5M2,  op::DataType::DT_FLOAT8_E4M3FN,
-    op::DataType::DT_HIFLOAT8,     op::DataType::DT_FLOAT4_E2M1,
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
-    Ops::Transformer::DT_HIFLOAT4,
-#endif
+    op::DataType::DT_FLOAT8_E5M2, op::DataType::DT_FLOAT8_E4M3FN, op::DataType::DT_HIFLOAT8,
+    op::DataType::DT_FLOAT4_E2M1, Ops::Transformer::DT_HIFLOAT4,
 };
 
 static bool CheckDtypeValid(const aclTensor* x1, const aclTensor* x2, const aclTensor* bias, const aclTensor* output)
@@ -160,10 +147,10 @@ static bool CheckDtypeValid(const aclTensor* x1, const aclTensor* x2, const aclT
     OP_CHECK_DTYPE_NOT_SUPPORT(x1, DTYPE_SUPPORT_LIST, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(x2, DTYPE_SUPPORT_LIST, return false);
     OP_CHECK_DTYPE_NOT_SUPPORT(output, BIAS_OUTPUT_SUPPORT_TYPE, return false);
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
     if (x1->GetDataType() == Ops::Transformer::DT_HIFLOAT4 || x2->GetDataType() == Ops::Transformer::DT_HIFLOAT4) {
-        OP_API_CHECK(op::GetCurrentPlatformInfo().GetCurNpuArch() != Ops::Base::DAV_9201, {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "HiFP4 only supports ascend960dt.");
+        const auto npuArch = op::GetCurrentPlatformInfo().GetCurNpuArch();
+        OP_API_CHECK(npuArch == Ops::Base::DAV_2201 || npuArch == Ops::Base::DAV_3510, {
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "HiFP4 is not supported on DAV_2201 or DAV_3510.");
             return false;
         });
         OP_CHECK_DTYPE_NOT_SAME(x1, x2, return false);
@@ -178,7 +165,6 @@ static bool CheckDtypeValid(const aclTensor* x1, const aclTensor* x2, const aclT
                 return false;
             });
     }
-#endif
     // 检查bias的数据类型是否在算子的支持列表内
     if (bias != nullptr) {
         OP_CHECK_DTYPE_NOT_SUPPORT(bias, BIAS_OUTPUT_SUPPORT_TYPE, return false);
@@ -352,9 +338,7 @@ static bool CheckShape(const aclTensor* x1, const aclTensor* x2, bool isTransA, 
         return false;
     });
     bool isFp4 = x1->GetDataType() == op::DataType::DT_FLOAT4_E2M1;
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
     isFp4 = isFp4 || x1->GetDataType() == Ops::Transformer::DT_HIFLOAT4;
-#endif
     if (isFp4) {
         const int64_t nVal = x2->GetViewShape().GetDim(1);
         OP_API_CHECK(kVal1 % FP4_ELEMENTS_PER_BYTE != 0 || (!isTransB && nVal % FP4_ELEMENTS_PER_BYTE != 0), {
@@ -424,7 +408,6 @@ static enum CaseOption CheckLowAccuracyCase(const aclTensor* x1, const aclTensor
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "MXFP4 requires two 3-D FLOAT8_E8M0 scale tensors.");
         return CaseOption::INVALID;
     }
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
     if (x1->GetDataType() == Ops::Transformer::DT_HIFLOAT4 || x2->GetDataType() == Ops::Transformer::DT_HIFLOAT4) {
         OP_CHECK_DTYPE_NOT_SAME(x1, x2, return CaseOption::INVALID);
         if (x1Scale->GetDataType() != Ops::Transformer::DT_HIFLOAT4_SCALE ||
@@ -436,7 +419,6 @@ static enum CaseOption CheckLowAccuracyCase(const aclTensor* x1, const aclTensor
         }
         return CaseOption::LOW_ACCURACY_PER_TENSOR_WITHOUT_QUANT_AMAX;
     }
-#endif
     if ((x1Scale->GetViewShape().GetDimNum() == DIM_NUM_ONE) ||
         ((x1Scale->GetViewShape().GetDimNum() == DIM_NUM_THREE) && (x1Scale->GetDataType() == ge::DT_FLOAT8_E8M0))) {
         return CaseOption::LOW_ACCURACY_PER_TENSOR_WITH_QUANT_AMAX;
@@ -593,13 +575,11 @@ aclnnStatus matmulReduceScatterV2GetWorkSpaceSizeA5(const aclTensor* x1, const a
     aclnnStatus ret = ACLNN_SUCCESS;
     auto transX2Scale = x2Scale;
     bool transposeX2Scale = (x2Scale != nullptr) && MC2Aclnn::IsNeedScaleTrans(x2Scale);
-#ifdef ENABLE_MMRS_DT_HIFLOAT4
     // HiFP4 的数据和 scale 必须采用同一布局；NN 的连续 [scaleK,N,1] 不做转置。
     OP_API_CHECK(x1->GetDataType() == Ops::Transformer::DT_HIFLOAT4 && !transposeX2 && transposeX2Scale, {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "HiFP4 requires non-transposed x2Scale when x2 is non-transposed.");
         return ACLNN_ERR_PARAM_INVALID;
     });
-#endif
     ret = CheckOutputShape(x1, x2, group, output);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     if (transposeX2Scale) {
