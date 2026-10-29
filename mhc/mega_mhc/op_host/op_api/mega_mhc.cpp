@@ -17,7 +17,7 @@
 #include "log/log.h"
 #include <string>
 using namespace op;
-namespace MegaMhcl0op {
+namespace l0op {
 OP_TYPE_REGISTER(MegaMhc);
 /** Pack inputs, outputs and attributes in OpDef order. */
 bool MegaMhc(const aclTensor* x, const aclTensor* residual, const aclTensor* postMix, const aclTensor* fn,
@@ -50,4 +50,4 @@ bool MegaMhc(const aclTensor* x, const aclTensor* residual, const aclTensor* pos
     }
     return true;
 }
-} // namespace MegaMhcl0op
+} // namespace l0op

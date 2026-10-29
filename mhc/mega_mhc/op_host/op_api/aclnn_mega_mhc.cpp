@@ -220,7 +220,7 @@ aclnnStatus BuildExecution(Inputs inputs, const Outputs& outputs, double normEps
             owner->AllocTensor(op::Shape{0}, reservedTypes[i], op::Format::FORMAT_ND);
         CHECK_RET(contiguousOutputs[RESERVED_OUTPUTS[i]] != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
-    const bool launched = MegaMhcl0op::MegaMhc(
+    const bool launched = l0op::MegaMhc(
         inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5], inputs[6], inputs[7], inputs[8], inputs[9],
         inputs[10], normEps, mhcPreNormEps, hcEps, mode, hcMult, hcPostScale, sinkhornEps, numSinkhornIters,
         rmsNormScale, outputMode, contiguousOutputs[0], contiguousOutputs[1], contiguousOutputs[2],

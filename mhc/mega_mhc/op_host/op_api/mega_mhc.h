@@ -11,7 +11,7 @@
 #define MEGA_MHC_L0OP_H_
 #include <cstdint>
 #include "opdev/op_executor.h"
-namespace MegaMhcl0op {
+namespace l0op {
 /** Launch RMS0 -> Post -> optional Mid -> Pre -> RMS1 with contiguous output views. */
 bool MegaMhc(const aclTensor* x, const aclTensor* residual, const aclTensor* postMix, const aclTensor* fn,
              const aclTensor* mixScales, const aclTensor* mixBases, const aclTensor* rmsNorm1Weight,
@@ -22,5 +22,5 @@ bool MegaMhc(const aclTensor* x, const aclTensor* residual, const aclTensor* pos
              const aclTensor* newResidualOut, const aclTensor* newPostMixOut, const aclTensor* newCombResMixOut,
              const aclTensor* newPrevMixOut, const aclTensor* yOut, const aclTensor* yQuantOut,
              const aclTensor* yScaleOut, aclOpExecutor* executor);
-} // namespace MegaMhcl0op
+} // namespace l0op
 #endif
