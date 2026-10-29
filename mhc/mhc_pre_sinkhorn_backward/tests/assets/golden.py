@@ -135,7 +135,7 @@ def _backward_inputs_empty(
 
 def _sigmoid_grad(z, dy):
     sigma = torch.sigmoid(z)
-    return dy * sigma * (1 - sigma)
+    return dy * sigma * torch.sigmoid(-z)
 
 
 def _rms_norm_grad(x, inv_rms, grad_inv_rms):
@@ -452,7 +452,7 @@ def _ref_sigmoid_grad(z, dy):
     exp_neg = torch.exp(-z)
     denom = exp_neg + 1.0
     sigma = torch.ones_like(denom) / denom
-    gate = 1.0 - sigma
+    gate = torch.ones_like(z) / (torch.exp(z) + 1.0)
     gz = sigma * gate
     return gz * dy
 

@@ -658,7 +658,9 @@ __aicore__ inline void VFPrepareGqAndPartials(const MhcBwdShape& shape, const Lo
             Exp(expReg, negReg, maskN);
             Adds(expReg, expReg, 1.0f, maskN);
             Div(sigmoidReg, oneReg, expReg, maskN);
-            Sub(gateReg, oneReg, sigmoidReg, maskN);
+            Exp(gateReg, zReg, maskN);
+            Adds(gateReg, gateReg, 1.0f, maskN);
+            Div(gateReg, oneReg, gateReg, maskN);
             Mul(gzReg, sigmoidReg, gateReg, maskN);
             LoadAlign(upstreamReg, stateBase + batchRow * smallState + stateGhPre);
             Mul(gzReg, gzReg, upstreamReg, maskN);
@@ -674,7 +676,9 @@ __aicore__ inline void VFPrepareGqAndPartials(const MhcBwdShape& shape, const Lo
             Exp(expReg, negReg, maskN);
             Adds(expReg, expReg, 1.0f, maskN);
             Div(sigmoidReg, oneReg, expReg, maskN);
-            Sub(gateReg, oneReg, sigmoidReg, maskN);
+            Exp(gateReg, zReg, maskN);
+            Adds(gateReg, gateReg, 1.0f, maskN);
+            Div(gateReg, oneReg, gateReg, maskN);
             Mul(gzReg, sigmoidReg, gateReg, maskN);
             LoadAlign(upstreamReg, stateBase + batchRow * smallState + stateGradPost);
             Mul(gzReg, gzReg, upstreamReg, maskN);
