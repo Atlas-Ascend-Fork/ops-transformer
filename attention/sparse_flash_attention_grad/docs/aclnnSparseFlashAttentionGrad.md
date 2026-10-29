@@ -153,6 +153,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输入</td>
             <td>attention结构的输入Q。</td>
             <td>
+            不支持空Tensor。<br>
             query、key、value、sparseIndices、dOut、out、softmaxMax、softmaxSum的Shape维度保持一致。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -167,7 +168,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>key</td>
             <td>输入</td>
             <td>attention结构的输入K。</td>
-            <td>-</td>
+            <td>不支持空Tensor。</td>
             <td>BFLOAT16、FLOAT16</td>
             <td>ND</td>
             <td>(B,S2,N2,D)、(T2,N2,D)<br>
@@ -180,6 +181,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输入</td>
             <td>attention结构的输入v。</td>
             <td>
+            不支持空Tensor。<br>
             可选项。传入空指针时启用KV merge，内部按value=key处理；此时要求dValueOut也传入空指针，dKeyOut返回dK+dV的合并结果。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -193,7 +195,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输入</td>
             <td>稀疏场景下选择的权重较高的注意力索引。</td>
             <td>
-            -
+            不支持空Tensor。
             </td>
             <td>INT32</td>
             <td>ND</td>
@@ -207,7 +209,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输入</td>
             <td>注意力输出矩阵的梯度。</td>
             <td>
-            -
+            不支持空Tensor。
             </td>
             <td>BFLOAT16、FLOAT16</td>
             <td>ND</td>
@@ -220,7 +222,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输入</td>
             <td>注意力输出矩阵。</td>
             <td>
-            -
+            不支持空Tensor。
             </td>
             <td>BFLOAT16、FLOAT16</td>
             <td>ND</td>
@@ -232,7 +234,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>softmaxMax</td>
             <td>输入</td>
             <td>注意力正向计算的中间输出。</td>
-            <td>-</td>
+            <td>不支持空Tensor。</td>
             <td>FLOAT32</td>
             <td>ND</td>
             <td>(B,N2,S1,G)、(N2,T1,G)<br>
@@ -244,7 +246,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>softmaxSum</td>
             <td>输入</td>
             <td>注意力正向计算的中间输出。</td>
-            <td>-</td>
+            <td>不支持空Tensor。</td>
             <td>FLOAT32</td>
             <td>ND</td>
             <td>(B,N2,S1,G)、(N2,T1,G)
@@ -257,6 +259,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>每个Batch中，Query的有效token数。</td>
             <td>
             <ul>
+                <li>不支持空Tensor。</li>
                 <li>可选项：当layout为TND，该变量存在。</li>
                 <li>长度与B保持一致。</li>
                 <li>累加和与T1保持一致(EOD场景下累加和可以小于T1)。</li>
@@ -274,6 +277,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>每个Batch中，Key、value的有效token数。</td>
             <td>
             <ul>
+                <li>不支持空Tensor。</li>
                 <li>可选项：当layout为TND，该变量存在。</li>
                 <li>长度与B保持一致。</li>
                 <li>累加和与T2保持一致(EOD场景下累加和可以小于T2)。</li>
@@ -289,6 +293,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输入</td>
             <td>MLA rope部分：Query位置编码的输出。</td>
             <td>
+            不支持空Tensor。<br>
             可选项。queryRopeOptional和keyRopeOptional必须同时传入或同时为空指针。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -303,6 +308,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输入</td>
             <td>MLA rope部分：Key位置编码的输出。</td>
             <td>
+            不支持空Tensor。<br>
             可选项。queryRopeOptional和keyRopeOptional必须同时传入或同时为空指针。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -408,6 +414,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输出</td>
             <td>表示query的梯度。</td>
             <td>
+            不支持空Tensor。<br>
             与输入query的Shape维度保持一致。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -421,6 +428,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输出</td>
             <td>表示key的梯度。</td>
             <td>
+            不支持空Tensor。<br>
             KV merge场景下表示key和value的合并梯度，即dK+dV。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -434,6 +442,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输出</td>
             <td>表示value的梯度。</td>
             <td>
+            不支持空Tensor。<br>
             可选项。普通场景下与输入value的Shape维度保持一致；KV merge场景下需传入空指针，dValue不单独输出，其梯度合入dKey。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -446,6 +455,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输出</td>
             <td>表示queryRope的梯度。</td>
             <td>
+            不支持空Tensor。<br>
             <ul>
                 <li>当输入queryRope存在，此变量才会输出。</li>
                 <li>与输入query的Shape维度保持一致。</li>
@@ -462,6 +472,7 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
             <td>输出</td>
             <td>表示keyRope的梯度。</td>
             <td>
+            不支持空Tensor。<br>
             当输入keyRope存在，此变量才会输出。
             </td>
             <td>BFLOAT16、FLOAT16</td>
@@ -561,8 +572,6 @@ aclnnStatus aclnnSparseFlashAttentionGrad(
 - 确定性计算：
   - aclnnSparseFlashAttentionGrad默认非确定性实现，支持通过aclrtSetSysParamOpt开启确定性。
 - 公共约束
-    - 入参为空的场景处理：
-        - query为空Tensor：直接返回。
     - 当前只支持value和key完全一致的场景。
     - KV merge场景下，value和dValueOut需传入空指针，dKeyOut返回dK+dV，不再单独返回dValue。
 
