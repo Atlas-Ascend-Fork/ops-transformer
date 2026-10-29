@@ -88,6 +88,13 @@
       & \text{已配置 linear\_beta}.
       \end{cases}
       $$
+    - `gelu`：逐元素激活，不做gate/up拆分，直接作用于Linear1的完整输出 $\mathbf{Z}$，也不受截断值 $c$ 影响。采用tanh近似：
+      $$
+      \mathbf{A}=\operatorname{GELU}(\mathbf{Z})
+      =\frac{1}{2}\mathbf{Z}\left(1+\tanh\!\left(\sqrt{\tfrac{2}{\pi}}\left(\mathbf{Z}+0.044715\,\mathbf{Z}^{3}\right)\right)\right)
+      =\mathbf{Z}\odot\sigma\!\left(\sqrt{\tfrac{8}{\pi}}\left(\mathbf{Z}+0.044715\,\mathbf{Z}^{3}\right)\right).
+      $$
+      其中 $\mathbf{Z}$ 为 Linear1 的完整输出。l1_weights 的 Linear1 输出宽度恒为 2 × intermediate_hidden，与 activation 无关：门控激活把它按 gate、up 各分一半，激活输出宽度为 intermediate_hidden；"gelu" 不拆分、整段参与激活，激活输出宽度即 2 × intermediate_hidden。因此本文其余位置出现的「$W_1$ 沿列方向分为两半」「激活输出维度 $N/2$」，以及用 intermediate_hidden 表示激活输出宽度、l2_weights 输入维、l2_weights_sf 末维的表述，均以门控激活为前提，activation = "gelu" 时相应位置为 2 × intermediate_hidden；而 2 × intermediate_hidden 形式的 l1_weights 侧表述对两种激活同时适用。
     <!-- end id25 -->
 
 - 计算说明：
@@ -710,7 +717,7 @@ sym_buffer.update_group(group) -> None
         <td>intermediate_hidden</td>
         <td>int</td>
         <td>必选</td>
-        <td>激活后的中间特征维度。Linear1同时生成gate和up两个分支，因此Linear1的完整输出宽度为2 × intermediate_hidden。当前暂未使用，不参与通信缓冲区大小计算。</td>
+        <td>激活后的中间特征维度。l1_weights的Linear1输出宽度恒为2 × intermediate_hidden，与activation无关：门控激活下Linear1同时生成gate和up两个分支、各占intermediate_hidden；"gelu"为逐元素激活、不拆分，激活输出宽度即2 × intermediate_hidden。该值参与通信缓冲区大小计算，必须与l1_weights、l2_weights的实际shape一致，取值偏小会使申请的缓冲区不足并在tiling阶段报错。</td>
     </tr>
     <tr>
         <td>max_recv_token_num</td>
@@ -728,7 +735,7 @@ sym_buffer.update_group(group) -> None
         <td>dispatch_quant_out_dtype</td>
         <td>torch.dtype 或 int</td>
         <td>可选</td>
-        <td>dispatch量化后输出的数据类型。支持torch.int8、torch.float8_e5m2、torch.float8_e4m3fn、torch_npu.float4_e2m1fn_x2。其中FLOAT4_E2M1只能传类型枚举torch_npu.float4_e2m1fn_x2（int，取值296），不能传torch.dtype。dispatch_quant_mode为4时该参数表示算子内量化的输出类型；预量化直通场景（dispatch_quant_mode为0且该参数为float8_e5m2、float8_e4m3fn或torch_npu.float4_e2m1fn_x2）下表示预量化x的逻辑类型，此时必须与x的实际数据类型一致。各产品支持的取值见约束说明。默认值为None。</td>
+        <td>dispatch量化后输出的数据类型。<term>Ascend 950PR&950DT系列产品</term>上该参数必须显式指定，保持默认值None会在创建`sym_buffer`时直接报错。支持torch.int8、torch.float8_e5m2、torch.float8_e4m3fn、torch_npu.float4_e2m1fn_x2。其中FLOAT4_E2M1只能传类型枚举torch_npu.float4_e2m1fn_x2（int，取值296），不能传torch.dtype。dispatch_quant_mode为4时该参数表示算子内量化的输出类型；预量化直通场景（dispatch_quant_mode为0且该参数为float8_e5m2、float8_e4m3fn或torch_npu.float4_e2m1fn_x2）下表示预量化x的逻辑类型，此时必须与x的实际数据类型一致。各产品支持的取值见约束说明。默认值为None。</td>
     </tr>
     <tr>
         <td>combine_quant_mode</td>
@@ -974,7 +981,7 @@ sym_buffer.update_group(group) -> None
         <td>activation</td>
         <td>str</td>
         <td>可选</td>
-        <td>激活函数类型，默认值为"swiglu"。可选值为"swiglu"、"swiglustep"、"swigluoai"和"situglu"。</td>
+        <td>激活函数类型，默认值为"swiglu"。可选值为"swiglu"、"swiglustep"、"swigluoai"、"situglu"和"gelu"。</td>
         <td>str</td>
         <td>不涉及</td>
         <td>不涉及</td>
@@ -983,7 +990,7 @@ sym_buffer.update_group(group) -> None
         <td>activation_clamp</td>
         <td>float</td>
         <td>可选</td>
-        <td>"swiglu"、"swiglustep"和"swigluoai"的截断值，未配置时使用float最大值。"situglu"忽略该值。值需≥0且不能为NaN。</td>
+        <td>"swiglu"、"swiglustep"和"swigluoai"的截断值，未配置时使用float最大值。"situglu"忽略该值；"gelu"不支持该参数，显式配置时接口直接报错。值需≥0且不能为NaN。</td>
         <td>float</td>
         <td>不涉及</td>
         <td>不涉及</td>
@@ -992,7 +999,7 @@ sym_buffer.update_group(group) -> None
         <td>activation_params</td>
         <td>dict[str, float]</td>
         <td>可选</td>
-        <td>激活函数参数字典，默认值为None。"swiglu"和"swiglustep"无需设置；"swigluoai"支持"alpha"和"beta"，默认值分别为1.702和1.0；"situglu"支持"beta"和"linear_beta"，"beta"默认值为1.0，"linear_beta"未配置时保持up分支不变。各产品上实际使用的"beta"以及已配置的"linear_beta"均需为大于0的有限值。</td>
+        <td>激活函数参数字典，默认值为None。"swiglu"和"swiglustep"无需设置；"swigluoai"支持"alpha"和"beta"，默认值分别为1.702和1.0；"situglu"支持"beta"和"linear_beta"，"beta"默认值为1.0，"linear_beta"未配置时保持up分支不变。各产品上实际使用的"beta"以及已配置的"linear_beta"均需为大于0的有限值。"gelu"不接受任何参数键，配置任意键都会报错。</td>
         <td>float</td>
         <td>不涉及</td>
         <td>不涉及</td>
@@ -1293,7 +1300,7 @@ sym_buffer.update_group(group) -> None
 
 - **参数一致性约束**：
   - mega_moe接口的所有输入参数及其对应的张量维度，必须与get_symm_buffer_for_mega_moe的同名参数（例如 `num_experts`、`hidden`、`intermediate_hidden` 等）保持一致。
-  - 调用算子过程中使用的`num_experts`、`max_recv_token_num`、`dispatch_quant_mode`、`dispatch_quant_out_dtype`、`num_max_tokens_per_rank`、`topk_weights_type`、`combine_comm_mode`等参数取值，所有卡需保持一致，网络中不同层中也需保持一致。其中`topk_weights_type`与`combine_comm_mode`决定通信记录的布局，跨卡取值不一致会导致读写错位。
+  - 调用算子过程中使用的`num_experts`、`max_recv_token_num`、`dispatch_quant_mode`、`dispatch_quant_out_dtype`、`num_max_tokens_per_rank`、`topk_weights_type`、`combine_comm_mode`等参数取值，所有卡需保持一致，网络中不同层中也需保持一致。其中`topk_weights_type`、`combine_comm_mode`与`dispatch_quant_out_dtype`决定通信记录的布局与通信缓冲区大小，跨卡取值不一致会导致读写错位。
 
 - **通信域约束**：
     - 所有卡的`ep_world_size`参数取值需保持一致。
@@ -1362,7 +1369,7 @@ sym_buffer.update_group(group) -> None
   - <term>Atlas A3系列产品</term>：多机通信域要求在一个超节点内，不支持双机直连组网和跨超节点组网。
   <!-- end id15 -->
   <!-- npu="950" id16 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：仅支持UB Memory通信协议。
+  - <term>Ascend 950PR&950DT系列产品</term>：topo_type = 0、1时仅使用UB Memory通信协议；topo_type = 2（URMA与RoCE混合拓扑）下UB域内使用UB Memory通信协议、UB域之间使用RoCE。
   <!-- end id16 -->
 
 - **参数约束**：
@@ -1455,36 +1462,36 @@ sym_buffer.update_group(group) -> None
   <!-- end id26 -->
   <!-- npu="950" id18 -->
   - **Ascend 950PR&950DT系列产品：**
-    - `activation`支持"swiglu"、"swiglustep"、"swigluoai"和"situglu"。`activation_clamp`用于配置前三种激活的截断值；`activation_params`用于配置"swigluoai"的`alpha`、`beta`以及"situglu"的`beta`、`linear_beta`。
+    - `activation`支持"swiglu"、"swiglustep"、"swigluoai"、"situglu"和"gelu"。`activation_clamp`用于配置前三种激活的截断值，"situglu"忽略该值、"gelu"不支持该参数；`activation_params`用于配置"swigluoai"的`alpha`、`beta`以及"situglu"的`beta`、`linear_beta`，"gelu"不接受任何参数键。
     - num_tokens（x.dim0）范围[1, +∞)，每次调用必须不大于创建`sym_buffer`时配置的`num_max_tokens_per_rank`。不同Rank的实际num_tokens可以不同，同一个`sym_buffer`也可以用于多次不同num_tokens的调用。
-    - `num_max_tokens_per_rank`必须大于等于1，所有Rank取值必须一致，建议设置为`sym_buffer`复用期间所有Rank可能出现的最大单卡token数。超过原上界时需使用更大的上界重新创建`sym_buffer`。
-    - hidden为逻辑隐藏维，范围[1024, 8192]；topo_type = 0（MTE拓扑）下各量化场景均要求hidden为64的倍数，topo_type = 1或2（Layered拓扑）要求hidden为1024的倍数。非打包类型下hidden = x.dim1，float4_e2m1以uint8打包传入时x.dim1 = hidden / 2。A4W4-FP场景仅支持l1_weights为FRACTAL_NZ格式。
+    - `num_max_tokens_per_rank`取值范围[1, UINT32_MAX]，所有Rank取值必须一致，建议设置为`sym_buffer`复用期间所有Rank可能出现的最大单卡token数。超过原上界时需使用更大的上界重新创建`sym_buffer`。
+    - hidden为逻辑隐藏维，范围[1024, 8192]，且各量化场景、各通信拓扑均要求hidden为64的倍数（topo_type = 0的MTE拓扑与topo_type = 1、2的Layered拓扑口径一致）。非打包类型下hidden = x.dim1，float4_e2m1以uint8打包传入时x.dim1 = hidden / 2。A4W4-FP场景仅支持l1_weights为FRACTAL_NZ格式。
     - num_topk（topk_ids.dim1）支持[1, 32]。
     - local_moe_expert_num（= num_experts / ep_world_size）范围 [1, 1024]；shared_expert_num_per_rank 另按 [0, 4] 单独约束，不计入该上限。
-    - intermediate_hidden表示激活后的中间特征维度，范围[256, 4096]且128对齐；Linear1的完整输出宽度为2 × intermediate_hidden。
+    - intermediate_hidden为l1_weights的Linear1输出宽度的一半，范围[256, 4096]且128对齐（即该输出宽度为2 × intermediate_hidden，范围[512, 8192]且256对齐），取值范围与`activation`无关。门控激活将该宽度按gate、up各分一半，激活输出宽度为intermediate_hidden；"gelu"为逐元素激活、不拆分，激活输出宽度即2 × intermediate_hidden。
     - ep_world_size范围 [2, 1024]。
     - num_experts范围 [ep_world_size, 2048]，且num_experts % ep_world_size == 0。
-    - max_recv_token_num范围 [0, num_max_tokens_per_rank × ep_world_size × min(num_topk, local_moe_expert_num)]；建议保持默认值0，由接口自动计算接收容量。
+    - max_recv_token_num范围 [0, num_max_tokens_per_rank × ep_world_size × min(num_topk, local_moe_expert_num)]；建议保持默认值0，由接口自动计算接收容量。实际生效的接收行数（取默认值0时为自动计算结果）必须不超过UINT32_MAX，超出时算子在tiling阶段报错，不做静默截断。
     - dispatch_quant_out_dtype仅支持torch.float8_e5m2、torch.float8_e4m3fn或torch_npu.float4_e2m1fn_x2（该值是整型枚举，取值296；FLOAT4_E2M1只能以该整型枚举传入，不能传torch.dtype）。
     - dispatch_quant_mode取值为0或4。4表示算子内部对bfloat16的x做MX逐组量化（group size = 32，量化缩放因子类型为FLOAT8_E8M0），对应A8W8-FP、A8W4-FP、A4W4-FP场景；0表示预量化直通，即x已经是量化后的数据、算子内部不再量化，缩放因子由scales入参给出。
-    - 预量化直通（dispatch_quant_mode = 0）的约束：x的数据类型必须与dispatch_quant_out_dtype指定的逻辑类型一致；scales为必选；仅支持topo_type = 0（MTE拓扑），跨超URMA拓扑不支持；shared_expert_quant_out_dtype只能取None或与dispatch_quant_out_dtype相同。
+    - 预量化直通（dispatch_quant_mode = 0）的约束：x的数据类型必须与dispatch_quant_out_dtype指定的逻辑类型一致；scales为必选；仅支持topo_type = 0（MTE拓扑），Layered拓扑（topo_type = 1或2）均不支持；shared_expert_quant_out_dtype只能取None或与dispatch_quant_out_dtype相同。
     - x_active_mask当前版本必须传入None，不支持非空输入。
     - scales仅在预量化直通（dispatch_quant_mode = 0且dispatch_quant_out_dtype为float8_e5m2、float8_e4m3fn或torch_npu.float4_e2m1fn_x2）场景为必选，数据类型为FLOAT8_E8M0，shape为(num_tokens, CeilDiv(hidden, 32))；其余场景必须传入None。
     - combine_quant_mode当前支持0（非量化），3（MX模式float8_e5m2类型），4（MX模式float8_e4m3类型）。
     - comm_alg为预留参数，保持默认空字符串""即可。
     - y的数据类型固定为bfloat16。
     - **通信去重约束**：
-        - combine_comm_mode取值为0、1或2：0表示关闭combine阶段通信去重，1表示MTE卡内去重，2表示URMA或URMA+RoCE混合拓扑的Server内归约及域间二级回传。模式2要求combine_quant_mode=0。是否开启完全由调用方决定，算子内部不做收益裁决。适用场景：num_topk较大、同一token命中同卡多个专家的比例较高、性能瓶颈在通信的形状，开启后收益明显；专家数多且瓶颈在计算的形状可能没有收益甚至变慢，建议按实际形状实测后再决定。
+        - combine_comm_mode取值为0、1或2：0表示关闭combine阶段通信去重，1表示MTE卡内去重，2表示URMA或URMA+RoCE混合拓扑的Server内归约及域间二级回传。两种开启方式按拓扑分流：MTE拓扑只接受0或1，Layered拓扑只接受0或2，配错一律在tiling阶段报错。模式2要求combine_quant_mode=0，且y与模式0不逐位相同。是否开启完全由调用方决定，算子内部不做收益裁决。适用场景：num_topk较大、同一token命中同卡多个专家的比例较高、性能瓶颈在通信的形状，开启后收益明显；专家数多且瓶颈在计算的形状可能没有收益甚至变慢，建议按实际形状实测后再决定。
         - combine_comm_mode在`get_symm_buffer_for_mega_moe`处设置，`mega_moe`调用时从`sym_buffer`继承，无需重复传入；同一通信域内所有Rank必须配置相同取值，否则跨卡的通信记录布局不一致会导致读写错位。
         - combine_comm_mode = 1时的能力约束（不满足时算子在tiling阶段直接报错并提示改回0，不做静默回退）：仅支持topo_type = 0（MTE拓扑）；combine_quant_mode必须为0（combine不量化）；topk_weights_type = 0时不支持预量化x；num_max_tokens_per_rank需满足 num_max_tokens_per_rank ≤ 128 × min(512, ⌊4608 / num_topk⌋)（例如num_topk = 32时上限为18432，num_topk ≤ 9时上限为65536）。
         - combine_comm_mode = 1时，同一token在同一张卡上的多个专家输出改为在该卡按float32累加后一次转bfloat16发送，累加顺序与中间取整次数与关闭态不同，因此y与combine_comm_mode = 0的结果不逐位相同。偏差来源是bfloat16累加顺序与中间取整次数的差异，在存在数值抵消的元素上相对偏差可能明显放大；需要与关闭态逐位一致时请使用combine_comm_mode = 0，切换该开关后请按目标形状重新做精度验证。
-    - l1_weights的Linear1输出维必须等于2 × intermediate_hidden，l2_weights的输入维必须等于intermediate_hidden。
+    - 门控激活下l1_weights的Linear1输出维等于2 × intermediate_hidden、l2_weights的输入维等于intermediate_hidden；"gelu"下l1_weights的Linear1输出维等于2 × intermediate_hidden、l2_weights的输入维等于2 × intermediate_hidden。不满足时算子在tiling阶段报错。
     - l1_weights_sf和l2_weights_sf不可为空指针。
     - local_moe_expert_num = num_experts / ep_world_size；启用共享专家时，shared_expert_num_per_rank = shared_l1_weights.dim0；num_experts_per_rank = shared_expert_num_per_rank + local_moe_expert_num，未启用共享专家时 shared_expert_num_per_rank = 0。
     - shared_expert_num_per_rank范围 [0, 4]。
     - topo_type由通信域上下文自动推导。0表示MTE拓扑，1表示URMA跨超拓扑，2表示域内URMA、域间RoCE的混合拓扑。
-    - URMA+RoCE混合拓扑要求UB域等宽且域内group rank连续，rank_num_per_server表示每个UB域的rank数；域内使用UB_CTP，域间使用RoCE，由extension查询RankGraph决定，不按物理主机数推断。支持combine_comm_mode=0（普通回传）或2（Server内归约及域间二级回传）；模式2要求combine_quant_mode=0，域内贡献通过URMA WriteWithNotifyNbi发送，域间聚合结果通过RoCE batch WriteNbi回传。
-    - Layered拓扑（topo_type为1或2）下，`activation`不支持"swiglustep"和"swigluoai"。
+    - URMA+RoCE混合拓扑要求UB域等宽且域内group rank连续，rank_num_per_server表示每个UB域的rank数，取值范围[1, ep_world_size]且必须整除ep_world_size（该校验对topo_type = 1与2同时生效），不满足时算子在tiling阶段报错；域内使用UB_CTP，域间使用RoCE，由extension查询RankGraph决定，不按物理主机数推断。支持combine_comm_mode=0（普通回传）或2（Server内归约及域间二级回传）；模式2要求combine_quant_mode=0，域内贡献通过URMA WriteWithNotifyNbi发送，域间聚合结果通过RoCE batch WriteNbi回传。
+    - Layered拓扑（topo_type为1或2）下，`activation`仅支持"swiglu"、"situglu"和"gelu"，不支持"swiglustep"和"swigluoai"。
     - topk_weights_type取值为0或1，0表示关闭topkWeights前移，1表示开启。
     - 通信buffer由`get_symm_buffer_for_mega_moe`自动计算并申请，用户无需自行计算或设置`ccl_buffer_size`。
     - l1_weights和l2_weights的数据类型必须一致，且仅支持FLOAT8_E5M2、FLOAT8_E4M3FN、FLOAT4_E2M1。
@@ -1716,8 +1723,9 @@ sym_buffer.update_group(group) -> None
                 torch_npu.float4_e2m1fn_x2 if scene == "A4W4" else
                 torch.float8_e4m3fn if scene == "A8W4" else torch.float8_e5m2
             ),
-            # combine通信去重开关：0关闭，1开启。开启要求combine_quant_mode=0、MTE拓扑，
-            # 且所有Rank取值一致；是否开启按实际形状决定，约束见约束说明。
+            # combine通信去重开关：0关闭，1为MTE拓扑的卡内去重，2为Layered拓扑的Server内归约。
+            # 1与2均要求combine_quant_mode=0且所有Rank取值一致，并按拓扑分流（MTE只收0或1、
+            # Layered只收0或2）；是否开启按实际形状决定，约束见约束说明。
             combine_comm_mode=0,
         )
         # 步骤2：运行mega_moe，传入上一步构造的sym_buffer
@@ -1797,7 +1805,6 @@ sym_buffer.update_group(group) -> None
         expert_idx_shape = [num_tokens, topK]
         weight_shape = [E, N, H]
         weight_scale_shape = [E, N, ceil(H, 64), 2]
-        output_shape = [num_tokens, N//2]
         weight2_shape = [E, H, N//2]
         weight2_scale_shape = [E, H, ceil(N//2, 64), 2]
         expert_scales_shape = [num_tokens, topK]

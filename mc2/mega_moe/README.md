@@ -72,6 +72,13 @@
       & \text{已配置 linear\_beta}.
       \end{cases}
       $$
+    - `gelu`：逐元素激活，不做gate/up拆分，直接作用于Linear1的完整输出 $\mathbf{Z}$，也不受截断值 $c$ 影响。采用tanh近似：
+      $$
+      \mathbf{A}=\operatorname{GELU}(\mathbf{Z})
+      =\frac{1}{2}\mathbf{Z}\left(1+\tanh\!\left(\sqrt{\tfrac{2}{\pi}}\left(\mathbf{Z}+0.044715\,\mathbf{Z}^{3}\right)\right)\right)
+      =\mathbf{Z}\odot\sigma\!\left(\sqrt{\tfrac{8}{\pi}}\left(\mathbf{Z}+0.044715\,\mathbf{Z}^{3}\right)\right).
+      $$
+      其中 $\mathbf{Z}$ 为 Linear1 的完整输出。`weight1` 的 Linear1 输出宽度恒为 2 × `intermediateHidden`，与 `activation` 无关：门控激活把它按 gate、up 各分一半，激活输出宽度为 `intermediateHidden`；`gelu` 不拆分、整段参与激活，激活输出宽度即 2 × `intermediateHidden`。因此本文其余位置出现的「$W_1$ 沿列方向分为两半」「激活输出维度 $N/2$」，以及用 `intermediateHidden` 表示激活输出宽度、`weight2` 输入维、`weightScales2` 末维的表述，均以门控激活为前提，`activation` = "gelu" 时相应位置为 2 × `intermediateHidden`；而 2 × `intermediateHidden` 形式的 `weight1` 侧表述对两种激活同时适用。
 - 计算过程
 
     各产品支持的**Linear计算时**的激活矩阵A和权重矩阵W的数据类型如下：
@@ -813,14 +820,14 @@
   <tr>
    <td>activation</td>
    <td>可选属性</td>
-   <td>激活函数类型。默认值为"swiglu"。可选值为"swiglu"、"swiglustep"、"swigluoai"和"situglu"。</td>
+   <td>激活函数类型。默认值为"swiglu"。可选值为"swiglu"、"swiglustep"、"swigluoai"、"situglu"和"gelu"。其中"gelu"仅<term>Ascend 950PR&950DT系列产品</term>支持，各产品支持的取值详见约束说明。</td>
    <td>STRING</td>
    <td></td>
   </tr>
   <tr>
    <td>activation_params</td>
    <td>可选属性</td>
-   <td>激活函数参数列表，默认值为[]。参数顺序和数量由activation决定："swiglu"和"swiglustep"支持[]或[clamp]；"swigluoai"支持[]或[clamp, alpha, beta]；"situglu"支持[]、[beta]或[beta, linear_beta]。使用空列表时，clamp默认为float最大值，alpha默认为1.702，swigluoai的beta默认为1.0。clamp需≥0且不能为NaN；alpha和swigluoai的beta需为有限值；situglu实际使用的beta以及显式配置的linear_beta均需为大于0的有限值。各产品对"situglu"参数列表的支持差异详见约束说明。</td>
+   <td>激活函数参数列表，默认值为[]。参数顺序和数量由activation决定："swiglu"和"swiglustep"支持[]或[clamp]；"swigluoai"支持[]或[clamp, alpha, beta]；"situglu"支持[]、[beta]或[beta, linear_beta]；"gelu"不支持配置截断值，必须传入长度为1且元素为float最大值的列表（仅作占位，不参与截断计算），不支持空列表。使用空列表时，clamp默认为float最大值，alpha默认为1.702，swigluoai的beta默认为1.0。clamp需≥0且不能为NaN；alpha和swigluoai的beta需为有限值；situglu实际使用的beta以及显式配置的linear_beta均需为大于0的有限值。各产品对"situglu"参数列表的支持差异详见约束说明。</td>
    <td>LIST_FLOAT</td>
    <td></td>
   </tr>
@@ -855,14 +862,14 @@
   <tr>
    <td>topoType</td>
    <td>可选属性</td>
-   <td>通信拓扑类型，由通信域上下文自动推导。0表示MTE拓扑，1表示URMA跨超拓扑。默认值为0。</td>
+   <td>通信拓扑类型，由通信域上下文自动推导。0表示MTE拓扑，1表示URMA跨超拓扑，2表示域内URMA、域间RoCE的混合拓扑。默认值为0。</td>
    <td>INT64</td>
    <td></td>
   </tr>
   <tr>
    <td>rankNumPerServer</td>
    <td>可选属性</td>
-   <td>每台server上的rank数量，最少为2。默认值为2。该属性在部分产品的部分通信拓扑下不生效，详见约束说明。</td>
+   <td>每个通信域的rank数量，按EP通信域内的rank序号等宽连续划分，不按物理server推断。默认值为2。该属性在部分产品的部分通信拓扑下不生效，详见约束说明。</td>
    <td>INT64</td>
    <td></td>
   </tr>
@@ -876,7 +883,7 @@
   <tr>
    <td>combineCommMode</td>
    <td>可选属性</td>
-   <td>combine阶段通信去重开关。0表示关闭，1表示开启（同一token在本卡命中的多个专家，其combine结果先在本卡合并为一行再发回源卡，combine阶段通信量从组内行数降为1）。取值仅支持0或1，是否开启完全由调用方按形状决定，算子内部不做收益裁决。开启会改变通信记录布局，所有Rank必须配置相同取值。默认值为0。各产品与通信拓扑对该开关的支持范围详见约束说明。</td>
+   <td>combine阶段通信去重开关。0表示关闭，1表示开启（同一token在本卡命中的多个专家，其combine结果先在本卡合并为一行再发回源卡，combine阶段通信量从组内行数降为1）。取值支持0、1或2：1为MTE拓扑下的卡内去重，2为Layered拓扑（topoType = 1或2）下的Server内归约及域间二级回传，两者按拓扑分流、不可互换。是否开启完全由调用方按形状决定，算子内部不做收益裁决。开启会改变通信记录布局，所有Rank必须配置相同取值。默认值为0。各产品与通信拓扑对该开关的支持范围详见约束说明。</td>
    <td>INT64</td>
    <td></td>
   </tr>
@@ -903,17 +910,17 @@
   - 参数表格中的部分参数、部分数据类型暂未对外提供，为预留或内部实现使用。接口参数的介绍及其约束在接口文档[MegaMoE算子接口文档](../../mc2/mega_moe/docs/torchapi_mega_moe.md)中详细说明。
 
 - **参数一致性约束**：
-  - 调用算子过程中使用的`moeExpertNum`、`maxRecvTokenNum`、`dispatchQuantMode`、`dispatchQuantOutDtype`、`numMaxTokensPerRank`、`topkWeightsType`、`combineCommMode`等参数取值，所有卡需保持一致，网络中不同层中也需保持一致。其中`topkWeightsType`与`combineCommMode`决定通信记录的布局，跨卡取值不一致会导致读写错位。
+  - 调用算子过程中使用的`moeExpertNum`、`maxRecvTokenNum`、`dispatchQuantMode`、`dispatchQuantOutDtype`、`numMaxTokensPerRank`、`topkWeightsType`、`combineCommMode`等参数取值，所有卡需保持一致，网络中不同层中也需保持一致。其中`topkWeightsType`、`combineCommMode`与`dispatchQuantOutDtype`决定通信记录的布局与通信buffer大小，跨卡取值不一致会导致读写错位。
 
 - **通信域约束**：
   - 所有卡的`epWorldSize`、`cclBufferSize`参数取值需保持一致。
   - 通信域各节点的驱动版本应当相同。
-  - <term>Ascend 950PR&950DT系列产品</term>：Torch接口通过`get_symm_buffer_for_mega_moe`自动计算并申请通信buffer，用户无需自行计算或设置`cclBufferSize`。
+  - <term>Ascend 950PR&950DT系列产品</term>：Torch接口通过`get_symm_buffer_for_mega_moe`自动计算并申请`cclBufferSize`，同时覆盖通信窗口与算子中间计算数据区，用户无需自行计算或设置；框架workspace仅保留系统空间、不再承载业务数据。`numMaxTokensPerRank`、`intermediateHidden`、`dispatchQuantOutDtype`、`combineCommMode`均会影响所需容量，直接调用aclnn接口自行设置时取值不足，算子在tiling阶段直接报错并给出所需的最小字节数，不做静默截断。
 
 - **组网约束**：
   - <term>Atlas A2系列产品</term>：多机通信域要求交换机组网，不支持双机直连组网。
   - <term>Atlas A3系列产品</term>：多机通信域要求在一个超节点内，不支持双机直连组网和跨超节点组网。
-  - <term>Ascend 950PR&950DT系列产品</term>：仅支持UB Memory通信协议。
+  - <term>Ascend 950PR&950DT系列产品</term>：`topoType` = 0、1时仅使用UB Memory通信协议；`topoType` = 2（URMA与RoCE混合拓扑）下UB域内使用UB Memory通信协议、UB域之间使用RoCE。
 
 - **参数约束**：
   - **<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>**：
@@ -932,32 +939,35 @@
     - `y`的数据类型与`x`一致。
 
   - **<term>Ascend 950PR&950DT系列产品</term>**：
-    - `activation`支持"swiglu"、"swiglustep"、"swigluoai"和"situglu"；其中"situglu"的`activation_params`必须显式给出，仅支持[beta]或[beta, linear_beta]，不支持空列表。其余激活的参数配套关系见参数说明。
+    - `activation`支持"swiglu"、"swiglustep"、"swigluoai"、"situglu"和"gelu"；其中"situglu"的`activation_params`必须显式给出，仅支持[beta]或[beta, linear_beta]，不支持空列表；"gelu"的`activation_params`也必须显式给出，仅支持长度为1且元素为float最大值的占位列表，不支持空列表，也不支持配置截断值。其余激活的参数配套关系见参数说明。
     - `BS`为本Rank本次调用的`x`.dim0，支持[1, +∞)，且不得超过创建`sym_buffer`时设置的`numMaxTokensPerRank`。不同Rank的实际`BS`可以不同，同一`sym_buffer`可以复用于多次不同`BS`的调用。
-    - `numMaxTokensPerRank`必须大于等于1且所有Rank配置一致，建议设置为`sym_buffer`复用期间所有Rank可能出现的最大单卡`BS`。设置越大，内部申请的通信内存越多。
-    - `H`（`x`.dim1）范围[1024, 8192]。`topoType` = 0（MTE拓扑）下各量化场景均要求`H`为64的倍数；`topoType` = 1（URMA跨超拓扑）要求`H`为1024的倍数。A4W4-FP场景仅支持`weight1`为FRACTAL_NZ格式。
+    - `numMaxTokensPerRank`取值范围[1, UINT32_MAX]且所有Rank配置一致，建议设置为`sym_buffer`复用期间所有Rank可能出现的最大单卡`BS`。设置越大，内部申请的通信内存越多。
+    - `H`（`x`.dim1）范围[1024, 8192]，且各量化场景、各通信拓扑均要求`H`为64的倍数（`topoType` = 0的MTE拓扑与`topoType` = 1、2的Layered拓扑口径一致）。A4W4-FP场景仅支持`weight1`为FRACTAL_NZ格式。
     - `topK`（`topkIds`.dim1）支持[1, 32]。
     - `localMoeExpertNum`（= `moeExpertNum` / `epWorldSize`）范围 [1, 1024]；共享专家数`sharedExpertNumPerRank`另按 [0, 4] 单独约束，不计入该上限。
-    - `intermediateHidden`表示激活后的中间特征维度，范围[256, 4096]且128对齐；`weight1`的完整输出宽度为2 × `intermediateHidden`。
+    - `intermediateHidden`为`weight1`的Linear1输出宽度的一半，范围[256, 4096]且128对齐（即该输出宽度为 2 × `intermediateHidden`，范围[512, 8192]且256对齐），取值范围与`activation`无关。门控激活（"swiglu"、"swiglustep"、"swigluoai"、"situglu"）将该宽度按gate、up各分一半，激活输出宽度为`intermediateHidden`；"gelu"为逐元素激活、不拆分，激活输出宽度即 2 × `intermediateHidden`。
     - `epWorldSize`范围 [2, 1024]。
     - `moeExpertNum`范围 [`epWorldSize`, 2048]，且`moeExpertNum` % `epWorldSize` == 0。
-    - `maxRecvTokenNum`范围 [0, `numMaxTokensPerRank` × `epWorldSize` × min(`topK`, `localMoeExpertNum`)]，建议保持默认值0，由接口自动计算接收容量。
+    - `maxRecvTokenNum`范围 [0, `numMaxTokensPerRank` × `epWorldSize` × min(`topK`, `localMoeExpertNum`)]，建议保持默认值0，由接口自动计算接收容量。实际生效的接收行数（取默认值0时为自动计算结果）必须不超过UINT32_MAX，超出时算子在tiling阶段报错，不做静默截断。
     - `dispatchQuantOutDtype`仅支持23（FLOAT8_E5M2）或24（FLOAT8_E4M3FN）或296（FLOAT4_E2M1）。
     - `dispatchQuantMode`取值为0或4。4表示算子内部对BF16的`x`做MX逐组量化（group size = 32，量化缩放因子类型为FLOAT8_E8M0），对应A8W8-FP、A8W4-FP、A4W4-FP场景；0表示预量化直通，即`x`已经是量化后的数据、算子内部不再量化，缩放因子由`scales`入参给出。
     - 预量化直通（`dispatchQuantMode` = 0）的约束：`x`的数据类型必须与`dispatchQuantOutDtype`指定的逻辑类型一致；`scales`为必选；仅支持`topoType` = 0（MTE拓扑）；`sharedExpertQuantOutDtype`只能取DT_UNDEFINED或与`dispatchQuantOutDtype`相同。
     - `combineQuantMode`取值为0、3、4，0表示非量化，3表示MXFP float8_e5m2类型，4表示MXFP float8_e4m3类型
     - `commAlg`为预留参数，请保持默认空字符串""。
     - `y`的数据类型固定为BF16。
-    - `weight1`的Linear1输出维必须等于2 × `intermediateHidden`，`weight2`的输入维必须等于`intermediateHidden`。
+    - 门控激活下`weight1`的Linear1输出维等于 2 × `intermediateHidden`、`weight2`的输入维等于`intermediateHidden`；"gelu"下`weight1`的Linear1输出维等于 2 × `intermediateHidden`、`weight2`的输入维等于 2 × `intermediateHidden`。不满足时算子在tiling阶段报错。
     - `localMoeExpertNum` = `moeExpertNum` / `epWorldSize`；`sharedExpertNumPerRank` = `sharedWeight1`.dim0（未启用共享专家时为0）；`expertPerRank` = `sharedExpertNumPerRank` + `localMoeExpertNum`。
     - `sharedExpertNumPerRank`范围 [0, 4]。
-    - `topoType`由通信域上下文自动推导。0表示MTE拓扑，1表示URMA跨超拓扑。
+    - `topoType`由通信域上下文自动推导。0表示MTE拓扑，1表示URMA跨超拓扑，2表示域内URMA、域间RoCE的混合拓扑；1与2统称Layered拓扑，本节中针对URMA拓扑的约束对两者同时生效。
+    - URMA与RoCE混合拓扑（`topoType` = 2）要求各UB域等宽且域内的group rank连续，`rankNumPerServer`表示每个UB域的rank数；域内走UB Memory通道、域间走RoCE，由通信域上下文查询拓扑信息决定，不按物理主机数推断。
+    - Layered拓扑（`topoType` = 1或2）下`rankNumPerServer`取值范围[1, `epWorldSize`]且必须整除`epWorldSize`，不满足时算子在tiling阶段报错。
     - MTE拓扑（`topoType` = 0）下`rankNumPerServer`不生效，算子内部按`epWorldSize`处理。
-    - URMA拓扑下，`activation`不支持`swiglustep`和`swigluoai`。
+    - Layered拓扑（`topoType` = 1或2）下，`activation`仅支持"swiglu"、"situglu"和"gelu"，不支持"swiglustep"和"swigluoai"。
     - `topkWeightsType`取值为0或1，0表示关闭topkWeights前移，1表示开启。
-    - `combineCommMode`取值为0或1，0表示关闭combine阶段通信去重，1表示开启。是否开启完全由调用方决定，算子内部不做收益裁决；所有Rank必须配置相同取值，否则跨卡的通信记录布局不一致会导致读写错位。适用场景：`topK`较大、同一token命中同卡多个专家的比例较高、性能瓶颈在通信的形状，开启后收益明显；专家数多且瓶颈在计算的形状可能没有收益甚至变慢，建议按实际形状实测后再决定。
+    - `combineCommMode`取值为0、1或2，0表示关闭combine阶段通信去重，1表示开启MTE拓扑下的卡内去重，2表示开启Layered拓扑下的Server内归约及域间二级回传。两种开启方式按拓扑分流：MTE拓扑只接受0或1，Layered拓扑只接受0或2，配错一律在tiling阶段报错。是否开启完全由调用方决定，算子内部不做收益裁决；所有Rank必须配置相同取值，否则跨卡的通信记录布局不一致会导致读写错位。适用场景：`topK`较大、同一token命中同卡多个专家的比例较高、性能瓶颈在通信的形状，开启后收益明显；专家数多且瓶颈在计算的形状可能没有收益甚至变慢，建议按实际形状实测后再决定。
     - `combineCommMode` = 1时的能力约束（不满足时算子在tiling阶段直接报错并提示改回0，不做静默回退）：仅支持`topoType` = 0（MTE拓扑）；`combineQuantMode`必须为0（combine不量化）；`topkWeightsType` = 0时不支持预量化`x`；`numMaxTokensPerRank`需满足 `numMaxTokensPerRank` ≤ 128 × min(512, ⌊4608 / `topK`⌋)（例如`topK` = 32时上限为18432，`topK` ≤ 9时上限为65536）。
     - `combineCommMode` = 1时，同一token在同一张卡上的多个专家输出改为在该卡按FP32累加后一次转BF16发送，累加顺序与中间取整次数与关闭态不同，因此`y`与`combineCommMode` = 0的结果不逐位相同，差异属BF16累加顺序不同带来的正常误差；需要与关闭态逐位一致时请使用`combineCommMode` = 0。
+    - `combineCommMode` = 2时的能力约束（不满足时算子在tiling阶段直接报错，不做静默回退）：仅支持Layered拓扑（`topoType` = 1或2）；`combineQuantMode`必须为0（combine不量化）。该模式下同一域内各Rank的贡献先发往本域中继Rank归约，再由域间同编号中继回传聚合结果，累加路径与`combineCommMode` = 0不同，因此`y`与关闭态不逐位相同。
     - `weightScales1`和`weightScales2`为必选输入，数据类型必须为FLOAT8_E8M0。
     - `weight1`和`weight2`的数据类型必须一致，且仅支持FLOAT8_E5M2、FLOAT8_E4M3FN、FLOAT4_E2M1。此处的「一致」指同一专家组内部一致，MoE专家与共享专家之间可以采用不同的权重类型与量化类型。
     - MoE专家与共享专家的量化配置不同时，仅`topoType` = 0（MTE拓扑）支持。
