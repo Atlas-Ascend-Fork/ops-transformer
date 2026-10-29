@@ -174,7 +174,7 @@ aclnnStatus aclnnMoeTokenUnpermuteGrad(
       <td>与permutedTokens一致。</td>
       <td>ND</td>
       <td>(tokens_num * topK_num, hidden_size)</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>probsGradOut（aclTensor）</td>
@@ -184,7 +184,7 @@ aclnnStatus aclnnMoeTokenUnpermuteGrad(
       <td>与probsOptional一致。</td>
       <td>ND</td>
       <td>(tokens_num, topK_num)</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>workspaceSize（uint64_t）</td>

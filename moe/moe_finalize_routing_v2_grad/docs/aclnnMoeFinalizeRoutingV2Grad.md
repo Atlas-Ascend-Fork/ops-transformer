@@ -226,7 +226,7 @@ aclnnStatus aclnnMoeFinalizeRoutingV2Grad(
       <td>与gradY一致。</td>
       <td>ND</td>
       <td>与expandedXOptional一致。</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>gradScalesOut（aclTensor）</td>
@@ -236,7 +236,7 @@ aclnnStatus aclnnMoeFinalizeRoutingV2Grad(
       <td>与scalesOptional一致。</td>
       <td>ND</td>
       <td>(R, K)</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>workspaceSize（uint64_t）</td>

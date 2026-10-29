@@ -175,7 +175,7 @@ aclnnStatus aclnnMoeFinalizeRoutingV2(
     <td>与expandedX一致。</td>
     <td>ND</td>
     <td>(NUM_ROWS, H)</td>
-    <td>×</td>
+    <td>√</td>
   </tr>
   <tr>
     <td>workspaceSize(uint64_t)</td>
