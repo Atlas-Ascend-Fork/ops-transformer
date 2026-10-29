@@ -171,7 +171,7 @@ def mixed_quant_sparse_flash_mla_metadata(
     has_cmp_kv: bool = True,
 ):
     """Generate the core task table through the net wheel DSL host interface."""
-    from ops.mixed_quant_sparse_flash_mla import (
+    from ops.mixed_quant_sparse_flash_mla_metadata import (
         mixed_quant_sparse_flash_mla_metadata as dsl_metadata,
     )
 
