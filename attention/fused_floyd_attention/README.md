@@ -125,7 +125,7 @@
 - key2与value2 shape需相同。
 - softmaxMax与softmaxSum shape需相同。
 - D只支持32/64/128。
-- attenMaskOptional当前版本必须传入，不支持空指针；未传入时tiling返回失败。
+- attenMaskOptional当前版本必须传入，不支持空指针；未传入（空指针）时第一段接口返回561002。
 
 ## 调用说明
 

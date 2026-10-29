@@ -75,7 +75,7 @@ static ge::graphStatus CheckParams(gert::TilingContext* context)
         context->GetInputShape(VALUE1_INPUT_INDEX) != nullptr && context->GetInputShape(KEY2_INPUT_INDEX) != nullptr &&
         context->GetInputShape(VALUE2_INPUT_INDEX) && context->GetAttrs() != nullptr) {
         if (CheckBaseInput(context) == ge::GRAPH_FAILED) {
-            OP_LOGW(context, "fail to get shape or attr from context");
+            OP_LOGE(context, "CheckBaseInput failed, atten_mask or other inputs are invalid.");
             return ge::GRAPH_FAILED;
         }
     }

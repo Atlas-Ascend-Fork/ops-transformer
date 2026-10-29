@@ -667,6 +667,10 @@ bool FusedFloydAttentionTilingBase::Analyze4DimLayout(const gert::Shape& querySh
 bool FusedFloydAttentionTilingBase::AnalyzeOptionalInput()
 {
     auto attenMaskShape = context_->GetOptionalInputShape(ATTENTION_MASK_INPUT_INDEX);
+    if (attenMaskShape == nullptr) {
+        OP_LOGE(context_, "FusedFloydAttention does not support a null atten_mask.");
+        return false;
+    }
     attenMaskExistFlag = 1;
     tilingData.inputParams.set_attenMaskDataType(1);
     AttenMaskShapeType attenMaskShapeType = ATTEN_B_N2_G_S1_S2;

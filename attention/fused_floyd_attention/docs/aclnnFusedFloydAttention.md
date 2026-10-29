@@ -145,7 +145,7 @@ aclnnStatus aclnnFusedFloydAttention(
         <tr>
           <td>attenMaskOptional</td>
           <td>输入</td>
-          <td>公式中的attenMask。当前版本必须传入，不支持空指针。</td>
+          <td>公式中的attenMask。当前版本必须传入，不支持空指针；空指针时第一段接口返回561002。</td>
           <td>取值为1代表该位不参与计算，为0代表该位参与计算。</td>
           <td>BOOL、UINT8</td>
           <td>ND</td>
@@ -170,7 +170,7 @@ aclnnStatus aclnnFusedFloydAttention(
           <td>FLOAT</td>
           <td>ND</td>
           <td>[B,H,N,M,8]</td>
-          <td>√</td>
+          <td>×</td>
         </tr>
         <tr>
           <td>softmaxSumOut</td>
@@ -180,7 +180,7 @@ aclnnStatus aclnnFusedFloydAttention(
           <td>FLOAT</td>
           <td>ND</td>
           <td>[B,H,N,M,8]</td>
-          <td>√</td>
+          <td>×</td>
         </tr>
         <tr>
           <td>attentionOutOut</td>
@@ -190,7 +190,7 @@ aclnnStatus aclnnFusedFloydAttention(
           <td>FLOAT16、BFLOAT16</td>
           <td>ND</td>
           <td>[B,H,N,M,D]</td>
-          <td>√</td>
+          <td>×</td>
         </tr>
         <tr>
           <td>workspaceSize</td>
@@ -241,12 +241,12 @@ aclnnStatus aclnnFusedFloydAttention(
     <tr>
         <td>ACLNN_ERR_PARAM_INVALID</td>
         <td>161002</td>
-        <td>query、key1、value1、key2、value2、attenMaskOptional、softmaxMaxOut、softmaxSumOut、attentionOutOut的数据类型和数据格式不在支持的范围内。</td>
+        <td>query、key1、value1、key2、value2、attenMaskOptional、softmaxMaxOut、softmaxSumOut、attentionOutOut的数据类型和数据格式不在支持的范围内；或softmaxMaxOut、softmaxSumOut、attentionOutOut为非连续Tensor。</td>
     </tr>
      <tr>
       <td rowspan="1">ACLNN_ERR_INNER_TILING_ERROR</td>
       <td rowspan="1">561002</td>
-      <td>tiling发生异常，query、key1、value1、key2、value2、attenMaskOptional不符合约束说明。</td>
+      <td>tiling发生异常，query、key1、value1、key2、value2、attenMaskOptional不符合约束说明；或attenMaskOptional为空指针。</td>
     </tr>
     </tbody>
     </table>
@@ -311,7 +311,7 @@ aclnnStatus aclnnFusedFloydAttention(
 - key2与value2 shape需相同。
 - softmaxMax与softmaxSum shape需相同。
 - D只支持32/64/128。
-- attenMaskOptional当前版本必须传入，不支持空指针；未传入时tiling返回失败。
+- attenMaskOptional当前版本必须传入，不支持空指针；未传入（空指针）时第一段接口返回561002。
 - 由于底层指令限制，当M\*D>=65536或者K\*D>=65536时，会出现明显性能下降。同时，K的长度较大时，算子运行可能会超时。以上两种情况建议使用小算子拼接替换实现。
 
 ## 调用示例

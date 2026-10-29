@@ -74,6 +74,30 @@ TEST_F(FusedFloydAttentionTiling, fused_floyd_attention_bf16_has_mask)
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
 
+TEST_F(FusedFloydAttentionTiling, fused_floyd_attention_null_atten_mask)
+{
+    Ops::Transformer::OpTiling::FlashAttentionScoreGradCompileInfo compileInfo = {
+        48, 24, 196608, 524288, 65536, 65536, 131072, 201326592, 24, platform_ascendc::SocVersion::ASCEND910B};
+    gert::TilingContextPara tilingContextPara(
+        "FusedFloydAttention",
+        {
+            {{{1, 1, 16, 128, 64}, {1, 1, 16, 128, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},   // q
+            {{{1, 1, 16, 256, 64}, {1, 1, 16, 256, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},   // k1
+            {{{1, 1, 16, 256, 64}, {1, 1, 16, 256, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},   // v1
+            {{{1, 1, 256, 128, 64}, {1, 1, 256, 128, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND}, // k2
+            {{{1, 1, 256, 128, 64}, {1, 1, 256, 128, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND}, // v2
+            {{{}, {}}, ge::DT_BOOL, ge::FORMAT_ND},                                        // atten_mask nullptr
+        },
+        {
+            {{{1, 1, 16, 128, 8}, {1, 1, 16, 128, 8}}, ge::DT_FLOAT, ge::FORMAT_ND},    // softmax_max
+            {{{1, 1, 16, 128, 8}, {1, 1, 16, 128, 8}}, ge::DT_FLOAT, ge::FORMAT_ND},    // softmax_sum
+            {{{1, 1, 16, 128, 64}, {1, 1, 16, 128, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND} // attention_out
+        },
+        {{"scale_value", Ops::Transformer::AnyValue::CreateFrom<float>(1.0)}}, &compileInfo, "Ascend910B", 48, 196608,
+        8192);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
 TEST_F(FusedFloydAttentionTiling, fused_floyd_attention_fp16_has_mask)
 {
     Ops::Transformer::OpTiling::FlashAttentionScoreGradCompileInfo compileInfo = {
