@@ -440,7 +440,7 @@ aclnnStatus aclnnMoeGatingTopK(
         <!-- end id7 -->
     * renorm参数与normType取值的关系：当normType为0时renorm参数生效，0表示不做renorm，1表示做renorm；normType取值为1或2时renorm参数无效，并始终做renorm。
     * outFlag取值true和false，true表示输出，false表示不输出。
-    * 输入不支持空Tensor，不支持标量Tensor。
+    * 不支持标量Tensor。
 
 ## 调用示例
 
