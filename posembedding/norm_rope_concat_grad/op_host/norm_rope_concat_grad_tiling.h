@@ -125,6 +125,31 @@ static constexpr TensorType BACKWARD_INPUT_TYPE[MAX_BACKWARD_INPUT_NUM] = {
     TensorType::ROPE_TENSOR,          // rope_cos
 };
 
+// 与 BACKWARD_INPUT_TYPE 一一对应，用于错误码上报中引用算子原型里的稳定参数名
+static constexpr const char* BACKWARD_INPUT_NAME[MAX_BACKWARD_INPUT_NUM] = {
+    "grad_query_output",       // grad_query_output
+    "grad_key_output",         // grad_key_output
+    "grad_value_output",       // grad_value_output
+    "query",                   // query
+    "key",                     // key
+    "encoder_query",           // encoder_query
+    "encoder_key",             // encoder_key
+    "norm_query_weight",       // norm_query_weight
+    "norm_query_mean",         // norm_query_mean
+    "norm_query_rstd",         // norm_query_rstd
+    "norm_key_weight",         // norm_key_weight
+    "norm_key_mean",           // norm_key_mean
+    "norm_key_rstd",           // norm_key_rstd
+    "norm_added_query_weight", // norm_added_query_weight
+    "norm_added_query_mean",   // norm_added_query_mean
+    "norm_added_query_rstd",   // norm_added_query_rstd
+    "norm_added_key_weight",   // norm_added_key_weight
+    "norm_added_key_mean",     // norm_added_key_mean
+    "norm_added_key_rstd",     // norm_added_key_rstd
+    "rope_sin",                // rope_sin
+    "rope_cos",                // rope_cos
+};
+
 // tiling key
 constexpr int64_t IS_TRAINING_TILING_KEY = 1;
 constexpr int64_t CONCAT_ORDER_TILING_KEY = 10;

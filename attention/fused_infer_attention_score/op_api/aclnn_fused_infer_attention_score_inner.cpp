@@ -276,7 +276,7 @@ aclnnStatus FakeArray(const aclIntArray* inArray, aclTensor*& outTensor)
         outTensor = aclCreateTensor(shape.data(), shape.size(), aclDataType::ACL_INT64, nullptr, 0, ACL_FORMAT_ND,
                                     shape.data(), shape.size(), nullptr);
         if (outTensor == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc tensor failed");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc tensor failed");
             return ACLNN_ERR_INNER_NULLPTR;
         }
     }
@@ -292,7 +292,7 @@ aclnnStatus FusedInferAttentionScoreProcessSoftmaxLse(bool softmaxLseFlag, const
         tempTensor = aclCreateTensor(shape.data(), shape.size(), aclDataType::ACL_FLOAT, shape.data(), 0, ACL_FORMAT_ND,
                                      shape.data(), shape.size(), nullptr);
         if (tempTensor == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Create placeholder tensor for softmaxLse failed.");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Create placeholder tensor for softmaxLse failed.");
             return ACLNN_ERR_INNER_NULLPTR;
         }
         placeHolder = tempTensor;
@@ -614,7 +614,7 @@ aclnnStatus MakeTensorListContiguous(const aclTensorList*& tensorList, const cha
         }
         auto contiguousTensor = l0op::Contiguous(tensor, executor);
         if (contiguousTensor == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try make %s[%lu] contiguous failed.", name, i);
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try make %s[%lu] contiguous failed.", name, i);
             return ACLNN_ERR_INNER_NULLPTR;
         }
         tensors.emplace_back(contiguousTensor);
@@ -622,7 +622,7 @@ aclnnStatus MakeTensorListContiguous(const aclTensorList*& tensorList, const cha
 
     auto contiguousList = executor->AllocTensorList(tensors.data(), tensors.size());
     if (contiguousList == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc contiguous %s tensorList failed.", name);
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc contiguous %s tensorList failed.", name);
         return ACLNN_ERR_INNER_NULLPTR;
     }
     tensorList = contiguousList;
@@ -645,7 +645,7 @@ aclnnStatus MakeTensorContiguous(const aclTensor*& tensor, const char* name, acl
 
     tensor = l0op::Contiguous(tensor, executor);
     if (tensor == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try make %s contiguous failed.", name);
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try make %s contiguous failed.", name);
         return ACLNN_ERR_INNER_NULLPTR;
     }
     SetTensorFormatToND(tensor);
@@ -662,7 +662,7 @@ const aclTensor* CreateStrideAwareView(const aclTensor* tensor, const char* name
     auto strideView = executor->CreateView(tensor, tensor->GetViewShape(), tensor->GetStorageShape(),
                                            tensor->GetViewStrides(), tensor->GetViewOffset());
     if (strideView == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try create stride view for %s failed.", name);
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try create stride view for %s failed.", name);
         return nullptr;
     }
     const_cast<aclTensor*>(strideView)->SetStorageShape(tensor->GetViewShape());
@@ -692,7 +692,8 @@ aclnnStatus NormalizeDim0CacheTensorList(const aclTensorList*& tensorList, const
             // Keep the original storage extent when a stride view will validate the offset.
             auto contiguousTensor = completeStrideMetadata ? tensor : l0op::Contiguous(tensor, executor);
             if (contiguousTensor == nullptr) {
-                OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try normalize contiguous %s failed.", itemName.c_str());
+                OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try normalize contiguous %s failed.",
+                                       itemName.c_str());
                 return ACLNN_ERR_INNER_NULLPTR;
             }
             normalizedTensor = completeStrideMetadata ?
@@ -703,7 +704,7 @@ aclnnStatus NormalizeDim0CacheTensorList(const aclTensorList*& tensorList, const
         } else {
             auto contiguousTensor = l0op::Contiguous(tensor, executor);
             if (contiguousTensor == nullptr) {
-                OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try make %s contiguous failed.", itemName.c_str());
+                OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try make %s contiguous failed.", itemName.c_str());
                 return ACLNN_ERR_INNER_NULLPTR;
             }
             normalizedTensor = completeStrideMetadata ?
@@ -719,7 +720,7 @@ aclnnStatus NormalizeDim0CacheTensorList(const aclTensorList*& tensorList, const
 
     auto normalizedList = executor->AllocTensorList(tensors.data(), tensors.size());
     if (normalizedList == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try alloc normalized %s tensorList failed.", name);
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try alloc normalized %s tensorList failed.", name);
         return ACLNN_ERR_INNER_NULLPTR;
     }
     tensorList = normalizedList;
@@ -745,7 +746,7 @@ aclnnStatus NormalizeDim0CacheTensor(const aclTensor*& tensor, const char* name,
         }
     }
     if (normalizedTensor == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "Try normalize %s failed.", name);
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Try normalize %s failed.", name);
         return ACLNN_ERR_INNER_NULLPTR;
     }
     SetTensorFormatToND(normalizedTensor);
@@ -833,7 +834,6 @@ static aclnnStatus InnerFusedInferAttentionScoreGetWorkspaceSizeImpl(
     bool enableArch22MlaDim0Stride)
 {
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
     OP_CHECK_NULL(query, return ACLNN_ERR_PARAM_NULLPTR);
     OP_CHECK_NULL(key, return ACLNN_ERR_PARAM_NULLPTR);

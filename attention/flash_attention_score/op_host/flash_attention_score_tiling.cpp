@@ -16,6 +16,8 @@
 #include <queue>
 #include <cmath>
 #include <cfloat>
+#include <string>
+#include <vector>
 #include <register/op_impl_registry.h>
 #include "log/log.h"
 #include "op_common/log/log.h"
@@ -31,6 +33,16 @@ using namespace AscendC;
 using namespace Ops::Transformer::OpTiling;
 
 namespace optiling {
+
+// Report a tiling failure caused by internal computation/registration errors under legal inputs with the
+// registered formal code EZ1008, instead of an illegal internal code (EZ9999/E89999).
+inline void ReportTilingFailure(const char* opName, const char* reason)
+{
+    OP_LOGE_WITHOUT_REPORT(opName, "%s\n", reason);
+    const std::vector<const char*> msgKey = {"op_name", "reason"};
+    const std::vector<const char*> msgvalue = {opName, reason};
+    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
+}
 
 constexpr size_t QUERY_INPUT_INDEX = 0;
 constexpr size_t KEY_INPUT_INDEX = 1;
@@ -290,7 +302,8 @@ static bool IsEmptyInputRegbase(gert::TilingContext* context)
         FlashAttentionScoreEmptyInputTilingDataRegbase* regbaseEmptyInputTiling =
             context->GetTilingData<FlashAttentionScoreEmptyInputTilingDataRegbase>();
         auto compileInfoPtr = reinterpret_cast<const FlashAttentionScoreCompileInfo*>(context->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context, "compileInfoPtr is null"), return false);
+        OP_CHECK_IF(compileInfoPtr == nullptr, ReportTilingFailure(context->GetNodeName(), "compileInfoPtr is null"),
+                    return false);
 
         EmptyArgs emptyArgs;
         if (!GetEmptyArgs(emptyArgs, context, compileInfoPtr->aivNum, attentionOutShapeSize, softmaxSumShapeSize)) {
@@ -354,7 +367,8 @@ static bool IsEmptyInput(gert::TilingContext* context)
         FlashAttentionScoreTilingData* emptyInputTiling = context->GetTilingData<FlashAttentionScoreTilingData>();
         emptyInputTiling->reset();
         auto compileInfoPtr = reinterpret_cast<const FlashAttentionScoreCompileInfo*>(context->GetCompileInfo());
-        OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context, "compileInfoPtr is null"), return false);
+        OP_CHECK_IF(compileInfoPtr == nullptr, ReportTilingFailure(context->GetNodeName(), "compileInfoPtr is null"),
+                    return false);
         EmptyArgs emptyArgs;
         if (!GetEmptyArgs(emptyArgs, context, compileInfoPtr->aivNum, attentionOutShapeSize, softmaxSumShapeSize)) {
             return false;
@@ -373,7 +387,8 @@ static bool IsEmptyInput(gert::TilingContext* context)
         emptyInputTiling->emptyInputTilingData.set_attentionOutLastCoreIndex(emptyArgs.attentionOutLastCoreIndex);
         context->SetTilingKey(FA_EMPTY_TILING_KEY);
         auto platformInfoPtr = context->GetPlatformInfo();
-        OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return false);
+        OP_CHECK_IF(platformInfoPtr == nullptr, ReportTilingFailure(context->GetNodeName(), "platformInfoPtr is null"),
+                    return false);
         auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
         context->SetBlockDim(ascendcPlatform.CalcTschBlockDim(emptyArgs.aivActualNum, 0, compileInfoPtr->aivNum));
         size_t* workspaces = context->GetWorkspaceSizes(1);
@@ -392,7 +407,8 @@ ASCENDC_EXTERN_C ge::graphStatus TilingFlashAttentionScore(gert::TilingContext* 
     }
 
     auto platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfoPtr == nullptr, ReportTilingFailure(context->GetNodeName(), "platformInfoPtr is null"),
+                return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510 || ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201) {
@@ -414,9 +430,11 @@ ASCENDC_EXTERN_C ge::graphStatus TilingFlashAttentionScore(gert::TilingContext* 
 ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForFlashAttentionScore(gert::TilingParseContext* context)
 {
     auto platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE(context, "platformInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(platformInfoPtr == nullptr, ReportTilingFailure(context->GetNodeName(), "platformInfoPtr is null"),
+                return ge::GRAPH_FAILED);
     auto compileInfoPtr = context->GetCompiledInfo<FlashAttentionScoreCompileInfo>();
-    OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context, "compileInfoPtr is null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(compileInfoPtr == nullptr, ReportTilingFailure(context->GetNodeName(), "compileInfoPtr is null"),
+                return ge::GRAPH_FAILED);
 
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     compileInfoPtr->aivNum = ascendcPlatform.GetCoreNumAiv();

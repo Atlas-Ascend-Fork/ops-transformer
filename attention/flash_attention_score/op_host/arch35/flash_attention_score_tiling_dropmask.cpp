@@ -22,7 +22,7 @@ public:
         // manually initialize tiling data in hostapi scenario
         OP_CHECK_IF(memset_s(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity(), 0,
                              context_->GetRawTilingData()->GetCapacity()) != EOK,
-                    OPS_REPORT_VECTOR_INNER_ERR(opName, "Fail to memset tiling data"), return;);
+                    ReportTilingFailure(context_->GetNodeName(), "Fail to memset tiling data"), return;);
     }
     ~FlashAttentionScoreTilingDropMaskRegbase() override = default;
 
