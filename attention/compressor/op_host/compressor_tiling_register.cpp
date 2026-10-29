@@ -45,7 +45,8 @@ CMP_EXTERN_C ge::graphStatus TilingCompressor(gert::TilingContext* context)
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_3510) {
         return TilingCompressorArch35(context);
-    } else if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201) {
+    } else if (ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9201 ||
+               ascendcPlatform.GetCurNpuArch() == NpuArch::DAV_9202) {
         return TilingCompressorArch92(context);
     } else {
         return TilingCompressorArch22(context);

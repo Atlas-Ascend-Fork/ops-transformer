@@ -212,12 +212,9 @@ ge::graphStatus CompressorTiling::SetTemplateId()
     if (context_->templateId == TemplateId::EMPTY_X) {
         return ge::GRAPH_SUCCESS;
     }
-    if (GetCurNpuArch() == NpuArch::DAV_9201) {
-        // 设置高性能模板
-        if (context_->layout == LayoutType::LAYOUT_BSH && baseParams_->seqSize <= 4 && baseParams_->tokenSize <= 512) {
-            context_->templateId = TemplateId::FULL_LOAD;
-        }
-        return ge::GRAPH_SUCCESS;
+    // 设置高性能模板
+    if (context_->layout == LayoutType::LAYOUT_BSH && baseParams_->seqSize <= 4 && baseParams_->tokenSize <= 512) {
+        context_->templateId = TemplateId::FULL_LOAD;
     }
     return ge::GRAPH_SUCCESS;
 }
