@@ -634,6 +634,8 @@ aclnnStatus aclnnMhcPreSinkhornBackward(
 
   - C：大于0、小于100000且可以被128整除。
   - sk_iter_count：Sinkhorn迭代次数当前仅支持20。
+  - 输入phi的数据范围限定在$\pm \frac{1}{\sqrt{nc}}$范围内，hcEps限定在1e-6，此范围内具有较好的数值稳定性。
+  - hPre、hcBeforeNorm、invRms、sumOut、normOut须与前向参数x、phi、alpha、bias、hcEps保持正确的前向推导关系，以获得正确反向结果和稳定数值输出。
 
 - **数据类型与shape约束**
 
