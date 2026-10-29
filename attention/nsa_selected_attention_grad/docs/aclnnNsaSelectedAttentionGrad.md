@@ -288,8 +288,8 @@ aclnnStatus aclnnNsaSelectedAttentionGrad(
       <td>dqOut</td>
       <td>输出</td>
       <td>公式中的dQ，表示query的梯度。</td>
-      <td>-</td>
-      <td>FLOAT16、BFLOAT16、FLOAT32</td>
+      <td>数据类型需要与query一致。</td>
+      <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>[BNSD]、[BSND]、[BSH]、[SBH]</td>
       <td>√</td>
@@ -298,8 +298,8 @@ aclnnStatus aclnnNsaSelectedAttentionGrad(
       <td>dkOut</td>
       <td>输出</td>
       <td>公式中的dK，表示keyIn的梯度。</td>
-      <td>-</td>
-      <td>FLOAT16、BFLOAT16、FLOAT32</td>
+      <td>数据类型需要与query一致。</td>
+      <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>[BNSD]、[BSND]、[BSH]、[SBH]</td>
       <td>√</td>
@@ -308,8 +308,8 @@ aclnnStatus aclnnNsaSelectedAttentionGrad(
       <td>dvOut</td>
       <td>输出</td>
       <td>公式中的dV，表示value的梯度。</td>
-      <td>-</td>
-      <td>FLOAT16、BFLOAT16、FLOAT32</td>
+      <td>数据类型需要与query一致。</td>
+      <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>[BNSD]、[BSND]、[BSH]、[SBH]</td>
       <td>√</td>
@@ -362,12 +362,15 @@ aclnnStatus aclnnNsaSelectedAttentionGrad(
       <td>传入参数是必选输入，输出或者必选属性，且是空指针。</td>
     </tr>
     <tr>
-      <td rowspan="2">ACLNN_ERR_PARAM_INVALID</td>
-      <td rowspan="2">161002</td>
+      <td rowspan="3">ACLNN_ERR_PARAM_INVALID</td>
+      <td rowspan="3">161002</td>
       <td>query、key、value、attentionOut、attentionOutGrad、softmaxMax、softmaxSum、topkIndices、attenMaskOptional、actualSeqQLenOptional、actualSeqKvLenOptional、dqOut、dkOut、dvOut的数据类型不在支持的范围内。</td>
     </tr>
     <tr>
       <td>query、key、value、attentionOut、attentionOutGrad、softmaxMax、softmaxSum、topkIndices、attenMaskOptional、actualSeqQLenOptional、actualSeqKvLenOptional、dqOut、dkOut、dvOut的数据格式不在支持的范围内。</td>
+    </tr>
+    <tr>
+      <td>属性取值或张量形状不满足约束：inputLayout不是TND、sparseMode不在{0, 2}内、selectedBlockSize不在[16, 128]内或不是16的整数倍、selectedBlockCount不在[1, 128]内、headNum与query的N1不一致、D不在{128, 192}内、N1不是N2的整数倍、topkIndices末维不等于selectedBlockCount、softmaxMax/softmaxSum形状不是[T1, N1, 8]等。</td>
     </tr>
   </tbody>
   </table>

@@ -15,6 +15,8 @@
 
 #include "aclnn_nsa_selected_attention_grad.h"
 #include "nsa_selected_attention_grad.h"
+#include <cctype>
+#include <string>
 #include "acl/acl.h"
 #include "aclnn/aclnn_base.h"
 #include "aclnn_kernels/common/op_error_check.h"
@@ -31,6 +33,28 @@
 #include "aclnn_kernels/contiguous.h"
 
 using namespace op;
+
+namespace {
+constexpr size_t DIM_NUM_2 = 2;
+constexpr size_t DIM_NUM_3 = 3;
+constexpr int64_t SOFTMAX_TAIL_DIM = 8;
+constexpr int64_t HEAD_DIM_128 = 128;
+constexpr int64_t HEAD_DIM_192 = 192;
+constexpr int64_t SELECTED_BLOCK_SIZE_MIN = 16;
+constexpr int64_t SELECTED_BLOCK_SIZE_MAX = 128;
+constexpr int64_t SELECTED_BLOCK_SIZE_ALIGN = 16;
+constexpr int64_t SELECTED_BLOCK_COUNT_MIN = 1;
+constexpr int64_t SELECTED_BLOCK_COUNT_MAX = 128;
+
+std::string GetUpperInputLayout(const char* inputLayout)
+{
+    std::string inputLayoutStr = std::string(inputLayout);
+    for (auto& c : inputLayoutStr) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    return inputLayoutStr;
+}
+} // namespace
 
 #ifdef __cplusplus
 extern "C" {
@@ -58,6 +82,103 @@ struct NsaSelectedAttentionGradParams {
     const aclTensor* dkOut = nullptr;
     const aclTensor* dvOut = nullptr;
 };
+
+static aclnnStatus CheckDim3(const aclTensor* tensor, const char* name)
+{
+    const size_t dimNum = tensor->GetViewShape().GetDimNum();
+    CHECK_COND(dimNum == DIM_NUM_3, ACLNN_ERR_PARAM_INVALID, "%s must be 3-dimensional in TND layout, but got [%zu].",
+               name, dimNum);
+    return ACLNN_SUCCESS;
+}
+
+static aclnnStatus CheckShapeAndAttr(const NsaSelectedAttentionGradParams& params)
+{
+    CHECK_COND(params.inputLayout != nullptr, ACLNN_ERR_PARAM_NULLPTR, "inputLayout must not be nullptr.");
+    const std::string inputLayoutStr = GetUpperInputLayout(params.inputLayout);
+    CHECK_COND(inputLayoutStr == "TND", ACLNN_ERR_PARAM_INVALID, "inputLayout only supports TND, but got [%s].",
+               inputLayoutStr.c_str());
+    CHECK_COND(params.sparseMode == 0 || params.sparseMode == 2, ACLNN_ERR_PARAM_INVALID,
+               "sparseMode only supports 0 or 2, but got [%ld].", params.sparseMode);
+    CHECK_COND(
+        params.selectedBlockSize >= SELECTED_BLOCK_SIZE_MIN && params.selectedBlockSize <= SELECTED_BLOCK_SIZE_MAX &&
+            params.selectedBlockSize % SELECTED_BLOCK_SIZE_ALIGN == 0,
+        ACLNN_ERR_PARAM_INVALID, "selectedBlockSize must be in range [16, 128] and a multiple of 16, but got [%ld].",
+        params.selectedBlockSize);
+    CHECK_COND(
+        params.selectedBlockCount >= SELECTED_BLOCK_COUNT_MIN && params.selectedBlockCount <= SELECTED_BLOCK_COUNT_MAX,
+        ACLNN_ERR_PARAM_INVALID, "selectedBlockCount must be in range [1, 128], but got [%ld].",
+        params.selectedBlockCount);
+
+    // TND layout: query/dq are [T1, N1, D], key/value/dk are [T2, N2, D], topkIndices is [T1, N2, selectedBlockCount]
+    CHECK_RET_CODE(CheckDim3(params.query, "query"), "query dim num check failed.");
+    CHECK_RET_CODE(CheckDim3(params.key, "key"), "key dim num check failed.");
+    CHECK_RET_CODE(CheckDim3(params.value, "value"), "value dim num check failed.");
+    CHECK_RET_CODE(CheckDim3(params.attentionOut, "attentionOut"), "attentionOut dim num check failed.");
+    CHECK_RET_CODE(CheckDim3(params.attentionOutGrad, "attentionOutGrad"), "attentionOutGrad dim num check failed.");
+    CHECK_RET_CODE(CheckDim3(params.softmaxMax, "softmaxMax"), "softmaxMax dim num check failed.");
+    CHECK_RET_CODE(CheckDim3(params.softmaxSum, "softmaxSum"), "softmaxSum dim num check failed.");
+    CHECK_RET_CODE(CheckDim3(params.topkIndices, "topkIndices"), "topkIndices dim num check failed.");
+    if (params.attenMaskOptional != nullptr) {
+        const size_t maskDimNum = params.attenMaskOptional->GetViewShape().GetDimNum();
+        CHECK_COND(maskDimNum == DIM_NUM_2, ACLNN_ERR_PARAM_INVALID,
+                   "attenMaskOptional must be 2-dimensional, but got [%zu].", maskDimNum);
+    }
+
+    const auto& queryShape = params.query->GetViewShape();
+    const auto& keyShape = params.key->GetViewShape();
+    const auto& valueShape = params.value->GetViewShape();
+    const auto& attentionOutShape = params.attentionOut->GetViewShape();
+    const auto& attentionOutGradShape = params.attentionOutGrad->GetViewShape();
+    const auto& softmaxMaxShape = params.softmaxMax->GetViewShape();
+    const auto& softmaxSumShape = params.softmaxSum->GetViewShape();
+    const auto& topkIndicesShape = params.topkIndices->GetViewShape();
+
+    const int64_t t1 = queryShape.GetDim(0);
+    const int64_t n1 = queryShape.GetDim(1);
+    const int64_t headDimQ = queryShape.GetDim(DIM_NUM_2);
+    const int64_t n2 = keyShape.GetDim(1);
+    const int64_t headDimK = keyShape.GetDim(DIM_NUM_2);
+    const int64_t headDimV = valueShape.GetDim(DIM_NUM_2);
+
+    CHECK_COND(params.headNum == n1, ACLNN_ERR_PARAM_INVALID,
+               "headNum[%ld] must be equal to the head num of query[%ld].", params.headNum, n1);
+    CHECK_COND(n2 > 0 && n1 % n2 == 0, ACLNN_ERR_PARAM_INVALID,
+               "The head num of query[%ld] must be a positive multiple of the head num of key[%ld].", n1, n2);
+    CHECK_COND(headDimQ == HEAD_DIM_128 || headDimQ == HEAD_DIM_192, ACLNN_ERR_PARAM_INVALID,
+               "The head dim of query must be 128 or 192, but got [%ld].", headDimQ);
+    CHECK_COND(headDimK == headDimQ, ACLNN_ERR_PARAM_INVALID, "The head dim of query[%ld] and key[%ld] must be equal.",
+               headDimQ, headDimK);
+    CHECK_COND(headDimV == HEAD_DIM_128 || headDimV == HEAD_DIM_192, ACLNN_ERR_PARAM_INVALID,
+               "The head dim of value must be 128 or 192, but got [%ld].", headDimV);
+    CHECK_COND(headDimV <= headDimQ, ACLNN_ERR_PARAM_INVALID,
+               "The head dim of value[%ld] must not be greater than the head dim of query[%ld].", headDimV, headDimQ);
+    CHECK_COND(keyShape.GetDim(0) == valueShape.GetDim(0), ACLNN_ERR_PARAM_INVALID,
+               "The T dim of key[%ld] and value[%ld] must be equal.", keyShape.GetDim(0), valueShape.GetDim(0));
+
+    CHECK_COND(softmaxMaxShape.GetDim(0) == t1 && softmaxMaxShape.GetDim(1) == n1 &&
+                   softmaxMaxShape.GetDim(DIM_NUM_2) == SOFTMAX_TAIL_DIM,
+               ACLNN_ERR_PARAM_INVALID, "softmaxMax shape must be [T1, N1, 8], but got [%s].",
+               op::ToString(softmaxMaxShape).GetString());
+    CHECK_COND(softmaxSumShape.GetDim(0) == t1 && softmaxSumShape.GetDim(1) == n1 &&
+                   softmaxSumShape.GetDim(DIM_NUM_2) == SOFTMAX_TAIL_DIM,
+               ACLNN_ERR_PARAM_INVALID, "softmaxSum shape must be [T1, N1, 8], but got [%s].",
+               op::ToString(softmaxSumShape).GetString());
+    CHECK_COND(attentionOutShape.GetDim(0) == t1 && attentionOutShape.GetDim(1) == n1 &&
+                   attentionOutShape.GetDim(DIM_NUM_2) == headDimV,
+               ACLNN_ERR_PARAM_INVALID, "attentionOut shape must be [T1, N1, D2], but got [%s].",
+               op::ToString(attentionOutShape).GetString());
+    CHECK_COND(attentionOutGradShape == attentionOutShape, ACLNN_ERR_PARAM_INVALID,
+               "attentionOutGrad shape[%s] must be equal to attentionOut shape[%s].",
+               op::ToString(attentionOutGradShape).GetString(), op::ToString(attentionOutShape).GetString());
+    CHECK_COND(topkIndicesShape.GetDim(0) == t1 && topkIndicesShape.GetDim(1) == n2, ACLNN_ERR_PARAM_INVALID,
+               "The first two dims of topkIndices must be [T1, N2] = [%ld, %ld], but got [%s].", t1, n2,
+               op::ToString(topkIndicesShape).GetString());
+    CHECK_COND(topkIndicesShape.GetDim(DIM_NUM_2) == params.selectedBlockCount, ACLNN_ERR_PARAM_INVALID,
+               "The last dim of topkIndices[%ld] must be equal to selectedBlockCount[%ld].",
+               topkIndicesShape.GetDim(DIM_NUM_2), params.selectedBlockCount);
+
+    return ACLNN_SUCCESS;
+}
 
 static aclnnStatus CheckParams(const NsaSelectedAttentionGradParams& params)
 {
@@ -91,8 +212,14 @@ static aclnnStatus CheckParams(const NsaSelectedAttentionGradParams& params)
     CHECK_COND(softmaxMax_dtype == ACL_FLOAT, ACLNN_ERR_PARAM_INVALID, "softmaxMax dtype error.");
     CHECK_COND(softmaxSum_dtype == ACL_FLOAT, ACLNN_ERR_PARAM_INVALID, "softmaxSum dtype error.");
     CHECK_COND(topkIndices_dtype == ACL_INT32, ACLNN_ERR_PARAM_INVALID, "topkIndices dtype error.");
+    if (params.attenMaskOptional != nullptr) {
+        auto attenMask_dtype = params.attenMaskOptional->GetDataType();
+        CHECK_COND(attenMask_dtype == ACL_BOOL || attenMask_dtype == ACL_UINT8, ACLNN_ERR_PARAM_INVALID,
+                   "The dtype of attenMaskOptional must be BOOL or UINT8, but got [%s].",
+                   op::ToString(DataType(attenMask_dtype)).GetString());
+    }
 
-    return ACLNN_SUCCESS;
+    return CheckShapeAndAttr(params);
 }
 
 static bool CheckViewShape(const aclTensor* input1, const aclTensor* input2)
@@ -226,8 +353,7 @@ aclnnStatus ContiguousAndNsaSelectedAttentionGrad(const NsaSelectedAttentionGrad
         attenMaskOptionalContiguous = l0op::Contiguous(params.attenMaskOptional, executor);
         CHECK_RET(attenMaskOptionalContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
-    string inputLayoutStr = op::ToString(params.inputLayout).GetString();
-    CHECK_RET(inputLayoutStr == "TND", ACLNN_ERR_INNER_NULLPTR);
+    string inputLayoutStr = GetUpperInputLayout(params.inputLayout);
 
     // call l0 interface
     auto result = l0op::NsaSelectedAttentionGrad(
