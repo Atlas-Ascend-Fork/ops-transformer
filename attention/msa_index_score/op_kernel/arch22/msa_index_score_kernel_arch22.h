@@ -88,11 +88,11 @@ public:
         } else {
             gKeyFp_.SetGlobalBuffer(reinterpret_cast<__gm__ ElementQ*>(key));
         }
-        if (IS_QUANT_V || tiling_->keyLayout == MSA_KEY_LAYOUT_TND) {
+        if (IS_QUANT_V || MsaIsSeqKeyLayout(tiling_->keyLayout)) {
             gKeyScratch_.SetGlobalBuffer(reinterpret_cast<__gm__ ElementQ*>(reinterpret_cast<__gm__ float*>(workspace) +
                                                                             tiling_->kScratchOffsetElems));
         }
-        if (tiling_->keyLayout != MSA_KEY_LAYOUT_TND) {
+        if (MsaIsPaKeyLayout(tiling_->keyLayout)) {
             gBlockTable_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(blockTable));
         }
         gScale_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(scale));
@@ -104,7 +104,8 @@ public:
 
         scheduler_.Init(tiling_->batch, tiling_->numQHeads, tiling_->maxBlocksPerBatch, tiling_->scoreBlockStride,
                         tiling_->sparseMode, tiling_->initBlocks, tiling_->localBlocks, tiling_->keyLayout,
-                        tiling_->kvChunks, gActualSeqQlen_, gActualSeqKlen_, gStartLoc_, true);
+                        tiling_->kvChunks, gActualSeqQlen_, gActualSeqKlen_, gStartLoc_, true, tiling_->qMaxSeq,
+                        tiling_->kMaxSeq, tiling_->tableWidth);
     }
 
     __aicore__ inline void Process()
@@ -198,7 +199,7 @@ private:
         if constexpr (IS_QUANT_V) {
             return true;
         }
-        if (tiling_->keyLayout != MSA_KEY_LAYOUT_TND) {
+        if (!MsaIsSeqKeyLayout(tiling_->keyLayout)) {
             return false;
         }
         // TND fp16：完整 128-token 页与 BBND 一样直接从 packed GM mmad。
@@ -223,10 +224,10 @@ private:
 
     __aicore__ inline uint32_t KeyBlockValidTokens(const MsaTask& task, uint32_t blk) const
     {
-        if (tiling_->keyLayout != MSA_KEY_LAYOUT_TND) {
+        if (!MsaIsSeqKeyLayout(tiling_->keyLayout)) {
             return MSA_BLOCK_SIZE;
         }
-        const uint32_t seqTok = blk * tiling_->blockSize;
+        const uint32_t seqTok = blk * tiling_->poolBlockSize;
         if (task.kvLen <= 0 || seqTok >= static_cast<uint32_t>(task.kvLen)) {
             return 0;
         }
@@ -252,10 +253,9 @@ private:
 
     __aicore__ inline uint64_t KeyBlockGmOffset(const MsaTask& task, uint32_t blk) const
     {
-        if (tiling_->keyLayout == MSA_KEY_LAYOUT_TND) {
-            const uint32_t tokenStart = task.cuKStart + blk * tiling_->blockSize;
-            const uint32_t tokStride = tiling_->numKvHeads * tiling_->headDim;
-            return static_cast<uint64_t>(tokenStart) * tokStride;
+        if (MsaIsSeqKeyLayout(tiling_->keyLayout)) {
+            return MsaSeqKeyBlockElem(tiling_->keyLayout, task.batchIdx, task.cuKStart, blk * tiling_->poolBlockSize,
+                                      tiling_->numKvHeads, tiling_->headDim, tiling_->kMaxSeq);
         }
         const int32_t page = gBlockTable_.GetValue(task.batchIdx * tiling_->maxBlocksPerBatch + blk);
         return static_cast<uint64_t>(page) * tiling_->strideKvBlock;
@@ -316,7 +316,7 @@ private:
 
             uint32_t copyN = nElem;
             if (tiling_->keyLayout == MSA_KEY_LAYOUT_TND) {
-                const uint32_t tokenStart = task.cuKStart + blk * tiling_->blockSize;
+                const uint32_t tokenStart = task.cuKStart + blk * tiling_->poolBlockSize;
                 const uint32_t packedEnd = tokenStart + MSA_BLOCK_SIZE;
                 if (tiling_->totalK > 0 && packedEnd > tiling_->totalK) {
                     copyN = nValid;
@@ -449,7 +449,8 @@ private:
         const LayoutK layoutKGm(headDim, MSA_BLOCK_SIZE, tiling_->strideKvToken);
         const LayoutS layoutS(mActual, MSA_BLOCK_SIZE, STILE_WIDTH);
         const Catlass::GemmCoord shape{mActual, MSA_BLOCK_SIZE, headDim};
-        const uint64_t qOffset = static_cast<uint64_t>(task.globalRowBase) * tiling_->strideQn;
+        const uint64_t qOffset = MsaQueryTileElem(tiling_->queryLayout, task.batchIdx, task.cuQStart, task.mStart,
+                                                  tiling_->numQHeads, headDim, tiling_->qMaxSeq, tiling_->strideQn);
         const uint32_t pageStride = MSA_BLOCK_SIZE * MSA_K_TILE;
         // headDim<=128 时一页 K 正好一块 L1。先把本 stile 的页号收齐，再让最多 3 页 MTE2 在飞，
         // GetValue 不再卡在每一页的 WaitFlag(MTE2) 前面。
@@ -605,7 +606,7 @@ private:
     }
 
     const MsaIndexScoreTilingData* __restrict tiling_ = nullptr;
-    MsaTaskScheduler scheduler_;
+    MsaTaskScheduler<MSA_BLOCK_SIZE> scheduler_;
 
     AscendC::GlobalTensor<ElementQ> gQuery_;
     AscendC::GlobalTensor<ElementQ> gKeyFp_;

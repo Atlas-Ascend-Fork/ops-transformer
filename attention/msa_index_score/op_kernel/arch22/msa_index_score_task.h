@@ -49,6 +49,11 @@ __aicore__ inline uint32_t MsaMinU32(uint32_t a, uint32_t b)
     return a < b ? a : b;
 }
 
+__aicore__ inline uint32_t MsaMaxU32(uint32_t a, uint32_t b)
+{
+    return a > b ? a : b;
+}
+
 __aicore__ inline int32_t MsaClampI32(int32_t v, int32_t lo, int32_t hi)
 {
     if (v < lo) {
@@ -58,6 +63,24 @@ __aicore__ inline int32_t MsaClampI32(int32_t v, int32_t lo, int32_t hi)
         return hi;
     }
     return v;
+}
+
+/// C2UB 按行把 M-tile 分给两个 AIV。GROUP 为行分组粒度：
+/// 128 路径取 1（沿用 MsaC2UbHalfSplit 的偶数对半），BSND 取 numQHeads，
+/// 保证同一 token 的全部 head 落在同一个 AIV 上，head 间 maxpool 不跨核。
+/// Fixpipe 与 epilogue 必须用同一个切分，否则两侧对不上。
+__aicore__ inline void MsaC2UbGroupSplit(uint32_t mActual, uint32_t group, uint32_t& m0, uint32_t& m1)
+{
+    if (group <= 1U) {
+        MsaC2UbHalfSplit(mActual, m0, m1);
+        return;
+    }
+    const uint32_t groups = mActual / group;
+    m0 = ((groups + 1U) / 2U) * group;
+    if (m0 > mActual) {
+        m0 = mActual;
+    }
+    m1 = mActual - m0;
 }
 
 /// 一个任务 = 一个请求内的一个 M-tile，可选再沿 KV stile 切开（950 短 decode）。
@@ -88,6 +111,10 @@ struct MsaTask {
     bool writeTailFill;        // 本 M-tile 的最后 chunk 负责 [visible, stride) 填 -inf
 };
 
+/// BLOCK_SIZE 为逻辑 block 的 token 数，编译期常量。
+/// 128 路径（TND / BBND / BNBD）实例化 <MSA_BLOCK_SIZE>，除法仍折叠成移位，
+/// 与模板化之前的代码等价；BSND 实例化 <MSA_BLOCK16_SIZE>。
+template <uint32_t BLOCK_SIZE = MSA_BLOCK_SIZE>
 class MsaTaskScheduler {
 public:
     __aicore__ inline MsaTaskScheduler() {}
@@ -99,7 +126,9 @@ public:
                                 uint32_t localBlocks, uint32_t keyLayout, uint32_t kvChunks,
                                 const AscendC::GlobalTensor<int32_t>& actualSeqQlen,
                                 const AscendC::GlobalTensor<int32_t>& actualSeqKlen,
-                                const AscendC::GlobalTensor<int32_t>& startLoc, bool rotateChunk = false)
+                                const AscendC::GlobalTensor<int32_t>& startLoc, bool rotateChunk = false,
+                                uint32_t qMaxSeq = 0U, uint32_t kMaxSeq = 0U, uint32_t tableWidth = 0U,
+                                uint32_t chunkBudget = 0U)
     {
         batch_ = batch;
         numQHeads_ = numQHeads;
@@ -111,9 +140,20 @@ public:
         keyLayout_ = keyLayout;
         kvChunks_ = (kvChunks < 1U) ? 1U : kvChunks;
         rotateChunk_ = rotateChunk;
+        qMaxSeq_ = qMaxSeq;
+        kMaxSeq_ = kMaxSeq;
+        tableWidth_ = tableWidth;
         gActualSeqQlen_ = actualSeqQlen;
         gActualSeqKlen_ = actualSeqKlen;
         gStartLoc_ = startLoc;
+
+        // 950 块长 16：host 下发的是核预算，kernel 按真实长度定每个任务的 stile 数。
+        // 关键路径是最慢的核，不是任务个数。等长请求切到任务数刚好等于核数，最慢核的 stile
+        // 数并不变，只多了访存争用；长短不一时按长度比例分，才能把最长的那条摊开。
+        stilesPerTask_ = 0;
+        if (chunkBudget > 1U) {
+            PlanChunks(chunkBudget);
+        }
 
         totalTasks_ = 0;
         for (uint32_t b = 0; b < batch_; ++b) {
@@ -199,8 +239,18 @@ private:
         }
         const uint32_t tHi = (mStart + mActual - 1U) / numQHeads_;
         const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tHi));
-        uint32_t visibleEndBlk = MsaCeilDiv(static_cast<uint32_t>(visibleKeyEndHi), MSA_BLOCK_SIZE);
-        return MsaMinU32(visibleEndBlk, maxBlocksPerBatch_);
+        uint32_t visibleEndBlk = MsaCeilDiv(static_cast<uint32_t>(visibleKeyEndHi), BLOCK_SIZE);
+        return MsaMinU32(visibleEndBlk, BlockCap());
+    }
+
+    /// 分页（BBND/BNBD）的逻辑块数是页表宽度；非分页没有页表，上界是 score 末维。
+    /// score 末维是 16 对齐后的输出宽度，分页时只作写入上界，避免写出分配的 score。
+    __aicore__ inline uint32_t BlockCap() const
+    {
+        if (MsaIsPaKeyLayout(keyLayout_) && tableWidth_ > 0U) {
+            return MsaMinU32(tableWidth_, maxBlocksPerBatch_);
+        }
+        return maxBlocksPerBatch_;
     }
 
     __aicore__ inline uint32_t KvChunksOf(uint32_t visibleEndBlk) const
@@ -212,7 +262,63 @@ private:
         if (nStiles <= 1U) {
             return 1U;
         }
-        return MsaMinU32(kvChunks_, nStiles);
+        return MsaMinU32(ChunksForStiles(nStiles), nStiles);
+    }
+
+    /// 预算路径：份数由 stile 数除以目标值定，长的请求自然分到更多份。
+    /// 非预算路径（A2/A3、块长 128）沿用 host 下发的统一份数。
+    __aicore__ inline uint32_t ChunksForStiles(uint32_t nStiles) const
+    {
+        if (stilesPerTask_ == 0U) {
+            return kvChunks_;
+        }
+        const uint32_t chunks = nStiles / stilesPerTask_;
+        return (chunks < 1U) ? 1U : chunks;
+    }
+
+    /// 当前这条请求可见的 stile 数，取最后一个 M-tile（causal 下它看得最远）。
+    __aicore__ inline uint32_t BatchStiles() const
+    {
+        const uint32_t mTiles = MsaCeilDiv(curRows_, MSA_ROW_TILE_M);
+        if (mTiles == 0U) {
+            return 0U;
+        }
+        uint32_t mStart = 0;
+        uint32_t mActual = 0;
+        GetMTile(mTiles - 1U, mStart, mActual);
+        return MsaCeilDiv(VisibleEndBlkOf(mStart, mActual), MSA_BLOCKS_PER_STILE);
+    }
+
+    /// 预扫一遍所有请求，把总 stile 数按核预算摊成每任务的目标值。
+    /// 摊完每条请求都只够一份时退回不切分的快路径，省掉 Decode 里按 M-tile 的扫描。
+    __aicore__ inline void PlanChunks(uint32_t chunkBudget)
+    {
+        const uint32_t savedChunks = kvChunks_;
+        kvChunks_ = 1U; // 让 CountBatchTasks 直接返回 M-tile 数
+        uint64_t work = 0;
+        for (uint32_t b = 0; b < batch_; ++b) {
+            LoadBatch(b);
+            work += static_cast<uint64_t>(curTasks_) * static_cast<uint64_t>(BatchStiles());
+        }
+        kvChunks_ = savedChunks;
+        if (work == 0U) {
+            return;
+        }
+        const uint64_t target = work / static_cast<uint64_t>(chunkBudget);
+        stilesPerTask_ = (target < 1U) ? 1U : static_cast<uint32_t>(target);
+
+        uint32_t maxChunks = 1;
+        for (uint32_t b = 0; b < batch_; ++b) {
+            LoadBatch(b);
+            const uint32_t nStiles = BatchStiles();
+            if (nStiles > 1U) {
+                maxChunks = MsaMaxU32(maxChunks, MsaMinU32(ChunksForStiles(nStiles), nStiles));
+            }
+        }
+        if (maxChunks <= 1U) {
+            stilesPerTask_ = 0;
+        }
+        kvChunks_ = maxChunks;
     }
 
     __aicore__ inline void AssignSRange(uint32_t visibleEndBlk, uint32_t sChunkIdx, uint32_t sChunks,
@@ -269,8 +375,8 @@ private:
         const int32_t visibleKeyEndLo = VisibleKeyEndOf(static_cast<int32_t>(tLo));
         uint32_t visibleEndBlk = VisibleEndBlkOf(mStart, mActual);
 
-        const uint32_t causalFull = static_cast<uint32_t>(visibleKeyEndLo) / MSA_BLOCK_SIZE;
-        const uint32_t seqFull = (kvLen_ < 0 ? 0U : static_cast<uint32_t>(kvLen_)) / MSA_BLOCK_SIZE;
+        const uint32_t causalFull = static_cast<uint32_t>(visibleKeyEndLo) / BLOCK_SIZE;
+        const uint32_t seqFull = (kvLen_ < 0 ? 0U : static_cast<uint32_t>(kvLen_)) / BLOCK_SIZE;
         uint32_t fullEndBlk = MsaMinU32(causalFull, seqFull);
 
         task.visibleEndBlk = visibleEndBlk;
@@ -315,12 +421,19 @@ private:
         if (qLen_ < 0) {
             qLen_ = 0;
         }
+        if (qMaxSeq_ > 0U && qLen_ > static_cast<int32_t>(qMaxSeq_)) {
+            qLen_ = static_cast<int32_t>(qMaxSeq_);
+        }
         curRows_ = static_cast<uint32_t>(qLen_) * numQHeads_;
-        if (keyLayout_ == MSA_KEY_LAYOUT_TND) {
+        if (MsaIsSeqKeyLayout(keyLayout_)) {
             cuKStart_ = static_cast<uint32_t>(gActualSeqKlen_.GetValue(b));
             kvLen_ = static_cast<int32_t>(gActualSeqKlen_.GetValue(b + 1)) - static_cast<int32_t>(cuKStart_);
             if (kvLen_ < 0) {
                 kvLen_ = 0;
+            }
+            // BSND/BNSD 的 S 是定长槽。长度超过 S 时截断，避免读进下一个 batch。
+            if (kMaxSeq_ > 0U && kvLen_ > static_cast<int32_t>(kMaxSeq_)) {
+                kvLen_ = static_cast<int32_t>(kMaxSeq_);
             }
         } else {
             cuKStart_ = 0;
@@ -343,7 +456,11 @@ private:
     uint32_t localBlocks_ = MSA_DEFAULT_LOCAL_BLOCKS;
     uint32_t keyLayout_ = MSA_KEY_LAYOUT_BBND;
     uint32_t kvChunks_ = 1;
+    uint32_t stilesPerTask_ = 0;
     bool rotateChunk_ = false;
+    uint32_t qMaxSeq_ = 0;
+    uint32_t kMaxSeq_ = 0;
+    uint32_t tableWidth_ = 0;
 
     uint32_t totalTasks_ = 0;
     uint32_t curBatch_ = 0;

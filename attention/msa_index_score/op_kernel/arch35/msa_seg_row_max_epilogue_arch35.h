@@ -31,7 +31,9 @@
 
 namespace MsaIndexScoreNs {
 
-template <bool IS_QUANT>
+/// IS_BLOCK16：M3 Index Branch。逻辑 block 长 MSA_BLOCK16_SIZE，一个 128 列窗 = 8 个逻辑 block；
+/// 归约在 block 内 maxpool 之前先做 head 间 maxpool，输出对一个 token 的全部 head 取同一个值。
+template <bool IS_QUANT, bool IS_BLOCK16 = false>
 class MsaSegRowMaxEpilogue {
 public:
     using ArchTag = Catlass::Arch::AtlasA5;
@@ -97,7 +99,8 @@ public:
     __aicore__ inline MsaSegRowMaxEpilogue() {}
 
     __aicore__ inline void Init(Catlass::Arch::Resource<ArchTag>& resource, uint32_t numQHeads, uint32_t strideOutHead,
-                                uint32_t strideOutToken, uint32_t maxBlocksPerBatch, uint32_t strideScalePage,
+                                uint32_t strideOutToken, uint32_t maxBlocksPerBatch, uint32_t tableWidth,
+                                uint32_t poolBlockSize, uint32_t pageSize, uint32_t strideScalePage,
                                 uint32_t strideScaleHead, bool isQuant, uint32_t keyLayout, uint32_t totalK,
                                 const AscendC::GlobalTensor<float>& gScore, const AscendC::GlobalTensor<float>& gScale,
                                 const AscendC::GlobalTensor<int32_t>& gBlockTable)
@@ -106,6 +109,9 @@ public:
         strideOutHead_ = strideOutHead;
         strideOutToken_ = strideOutToken;
         maxBlocksPerBatch_ = maxBlocksPerBatch;
+        tableWidth_ = tableWidth;
+        poolBlockSize_ = poolBlockSize;
+        pageSize_ = pageSize;
         strideScalePage_ = strideScalePage;
         strideScaleHead_ = strideScaleHead;
         isQuant_ = isQuant;
@@ -144,7 +150,9 @@ public:
         if constexpr (MSA_A5_USE_C2UB && !IS_QUANT) {
             uint32_t m0 = 0;
             uint32_t m1 = 0;
-            MsaC2UbHalfSplit(task.mActual, m0, m1);
+            // blocksize=16 按 token（numQHeads 行）整组切，head 间 maxpool 不跨核；
+            // 其余路径 group=1，退化为原来的偶数对半。必须与 Fixpipe 的切分一致。
+            MsaC2UbGroupSplit(task.mActual, IS_BLOCK16 ? numQHeads_ : 1U, m0, m1);
             if (subIdx == 0U) {
                 mOff_ = 0;
                 mSub_ = MsaMinU32(m0, task.mActual);
@@ -153,8 +161,12 @@ public:
                 mSub_ = (task.mActual > m0) ? (task.mActual - m0) : 0U;
             }
         }
-        // 暂存区按半个 M-tile 静态分配；若 subcore 数变化导致行数超出则退回逐 pass 直写。
-        stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS);
+        // blocksize=16 的 stage 一行是一个 token（写回时复制到全部 head）；其余路径一行就是一行。
+        tokensSub_ = IS_BLOCK16 ? (mSub_ / numQHeads_) : mSub_;
+        stageRows_ = IS_BLOCK16 ? tokensSub_ : mSub_;
+        // 容量按 stage 行数判断。blocksize=16 时 N1=128 会让某个 AIV 拿到 128 个 head 行，
+        // 但 stage 里只有 1 个 token 行，仍放得下。按 mSub_ 判断会关掉 stage，分数无法写回。
+        stageOn_ = (stageRows_ > 0U) && (stageRows_ <= MSA_STAGE_ROWS);
         stageBlkBase_ = 0;
         stageBlkEnd_ = 0;
         rowInReqBase_ = task.mStart + mOff_;
@@ -166,7 +178,7 @@ public:
             // UB 一次最多攒 MSA_STAGE_BLOCKS 列；block_table 宽 >256 时 score 末维
             // RoundUp(width,16) 会超过该容量，必须按窗口 flush，不能关掉 stage
             // （关掉后 C2UB 没有逐 block 直写，GM 保持 at::empty 垃圾值）。
-            stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS);
+            stageOn_ = (stageRows_ > 0U) && (stageRows_ <= MSA_STAGE_ROWS);
             if (stageOn_) {
                 OpenStageWindow(0);
             }
@@ -293,7 +305,95 @@ public:
         }
     }
 
+    /// 一次 128 列窗 = MSA_BLOCKS_PER_STILE 个 16-token 逻辑 block。
+    /// UB 上是 packed [mSub,128] fp16，行 = (token, head)，head 为低位。
+    /// 顺序：head 折叠 → 掩码 → 每 token 一条 16 宽 WholeReduceMax。
+    /// max 可交换，先折 head 再折 block 与先折 block 再折 head 等价；
+    /// 掩码按列且对同 token 的所有 head 相同，放在折叠之后结果不变、代价小 numQHeads 倍。
+    __aicore__ inline void ProcessWindowUb(uint32_t ping, const MsaTask& task, uint32_t win)
+    {
+        if (mSub_ == 0U) {
+            return;
+        }
+        const uint32_t blkBase = win * MSA_BLOCKS_PER_STILE;
+        AdvanceStageWindow(blkBase);
+        auto ubPageH = ubSPing_[ping].template ReinterpretCast<half>();
+        const uint32_t rowStride = numQHeads_ * MSA_BLOCK_SIZE;
+
+        if (blkBase >= task.visibleEndBlk) {
+            AscendC::Duplicate(ubRowMax_, MSA_FILL_VALUE, stageRows_ * MSA_BLOCKS_PER_STILE);
+            AscendC::PipeBarrier<PIPE_V>();
+            ApplyLocalMaskUb(task, blkBase, stageRows_);
+            StageScore(blkBase, 0, stageRows_);
+            return;
+        }
+
+        FoldHeads(ubPageH, rowStride);
+        ApplyMaskWindowHalf(task, blkBase, ubPageH, rowStride);
+
+        // 每 token 一条 WholeReduceMax：mask=16 → 每 repeat 归约一个逻辑 block，
+        // 8 个 repeat 以 dstRepStride=1 密排写出，正好是 StageScore 要的 [token][block]。
+        constexpr int32_t RED_MASK = static_cast<int32_t>(MSA_BLOCK16_SIZE);
+        for (uint32_t t = 0; t < tokensSub_; ++t) {
+            AscendC::WholeReduceMax<half>(ubRed16_[t * MSA_BLOCKS_PER_STILE], ubPageH[t * rowStride], RED_MASK,
+                                          static_cast<int32_t>(MSA_BLOCKS_PER_STILE), 1, 1, 1,
+                                          AscendC::ReduceOrder::ORDER_ONLY_VALUE);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Cast(ubRowMax_, ubRed16_, AscendC::RoundMode::CAST_NONE, stageRows_ * MSA_BLOCKS_PER_STILE);
+        AscendC::PipeBarrier<PIPE_V>();
+        // fp16 域的 -inf 填充抬回 fp32 的 MSA_FILL_VALUE，与其他路径一致。
+        AscendC::Maxs<float>(ubRowMax_, ubRowMax_, MSA_FILL_VALUE,
+                             static_cast<int32_t>(stageRows_ * MSA_BLOCKS_PER_STILE));
+        AscendC::PipeBarrier<PIPE_V>();
+        ApplyLocalMaskUb(task, blkBase, stageRows_);
+        StageScore(blkBase, 0, stageRows_);
+    }
+
 private:
+    /// 把每个 token 的 numQHeads 行逐元素 max 成 1 行，结果落在该 token 的首行。
+    /// host 已校验 MSA_ROW_TILE_M % numQHeads == 0，故 numQHeads 必为 2 的幂，可对半折叠。
+    __aicore__ inline void FoldHeads(const AscendC::LocalTensor<half>& ubPageH, uint32_t rowStride)
+    {
+        if (numQHeads_ <= 1U) {
+            return;
+        }
+        for (uint32_t half = numQHeads_ >> 1; half > 0U; half >>= 1) {
+            const uint32_t count = half * MSA_BLOCK_SIZE;
+            for (uint32_t t = 0; t < tokensSub_; ++t) {
+                const uint32_t base = t * rowStride;
+                AscendC::Max(ubPageH[base], ubPageH[base], ubPageH[base + count], static_cast<int32_t>(count));
+            }
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+    }
+
+    /// 掩码：窗内第 c 列对应 key token winTok + c，超出 visibleKeyEnd 的列置 -inf。
+    /// 只作用在折叠后的首行，每 token 一条 128 位掩码 Duplicate。
+    __aicore__ inline void ApplyMaskWindowHalf(const MsaTask& task, uint32_t blkBase,
+                                               const AscendC::LocalTensor<half>& ubPageH, uint32_t rowStride)
+    {
+        const int32_t winTok = static_cast<int32_t>(blkBase) * static_cast<int32_t>(MSA_BLOCK16_SIZE);
+        bool touched = false;
+        for (uint32_t t = 0; t < tokensSub_; ++t) {
+            const uint32_t rowInReq = task.mStart + mOff_ + t * numQHeads_;
+            const uint32_t tOff = rowInReq / numQHeads_;
+            const int32_t visibleKeyEnd = VisibleKeyEnd(task, static_cast<int32_t>(tOff));
+            int32_t validCount = visibleKeyEnd - winTok;
+            if (validCount < 0) {
+                validCount = 0;
+            }
+            if (validCount >= static_cast<int32_t>(MSA_BLOCK_SIZE)) {
+                continue;
+            }
+            FillBlockTailFp16At(ubPageH, t * rowStride, static_cast<uint32_t>(validCount));
+            touched = true;
+        }
+        if (touched) {
+            AscendC::PipeBarrier<PIPE_V>();
+        }
+    }
+
     /// 非量化乒乓：把本 pass 的 S 搬进 ubS16Ping_[stage]，不阻塞 Vector。
     __aicore__ inline void IssueS16(const AscendC::GlobalTensor<ElementS>& gS, uint32_t rowOff, uint32_t rows,
                                     uint32_t stage)
@@ -407,7 +507,7 @@ private:
     {
         stageBlkBase_ = base;
         stageBlkEnd_ = MsaMinU32(base + MSA_STAGE_BLOCKS, strideOutToken_);
-        AscendC::Duplicate(ubStage_, MSA_FILL_VALUE, mSub_ * MSA_STAGE_BLOCKS);
+        AscendC::Duplicate(ubStage_, MSA_FILL_VALUE, stageRows_ * MSA_STAGE_BLOCKS);
         AscendC::PipeBarrier<PIPE_V>();
     }
 
@@ -454,12 +554,24 @@ private:
         uint32_t tOff = rowInReqBase_ / numQHeads_;
         uint32_t h = rowInReqBase_ - tOff * numQHeads_;
         uint64_t tokenBase = static_cast<uint64_t>(tokenBase0_ + tOff) * strideOutToken_ + lo;
-        for (uint32_t r = 0; r < mSub_; ++r) {
-            AscendC::DataCopy(gScore_[tokenBase + static_cast<uint64_t>(h) * strideOutHead_],
-                              ubStage_[r * MSA_STAGE_BLOCKS + ubOff], count);
-            if (++h == numQHeads_) {
-                h = 0;
+        if constexpr (IS_BLOCK16) {
+            // head 间 maxpool 后一个 token 只有一个分数，复制到该 token 的全部 head。
+            // mOff_ 与 task.mStart 都是 numQHeads 的整数倍，故 h 恒为 0。
+            for (uint32_t r = 0; r < stageRows_; ++r) {
+                for (uint32_t hh = 0; hh < numQHeads_; ++hh) {
+                    AscendC::DataCopy(gScore_[tokenBase + static_cast<uint64_t>(hh) * strideOutHead_],
+                                      ubStage_[r * MSA_STAGE_BLOCKS + ubOff], count);
+                }
                 tokenBase += strideOutToken_;
+            }
+        } else {
+            for (uint32_t r = 0; r < mSub_; ++r) {
+                AscendC::DataCopy(gScore_[tokenBase + static_cast<uint64_t>(h) * strideOutHead_],
+                                  ubStage_[r * MSA_STAGE_BLOCKS + ubOff], count);
+                if (++h == numQHeads_) {
+                    h = 0;
+                    tokenBase += strideOutToken_;
+                }
             }
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
@@ -532,9 +644,11 @@ private:
 
         uint64_t initBits = 0;
         uint64_t localBits = 0;
+        // 高分上限是本 M-tile 最后一行的 visibleEndBlk。块长 16 与 128 相同。
+        const int32_t blkLimit = static_cast<int32_t>(task.visibleEndBlk);
         for (uint32_t j = 0; j < MSA_BLOCKS_PER_STILE; ++j) {
             const int32_t blk = static_cast<int32_t>(blkBase + j);
-            if (blk < 0 || blk >= static_cast<int32_t>(task.visibleEndBlk)) {
+            if (blk < 0 || blk >= blkLimit) {
                 continue;
             }
             if (static_cast<uint32_t>(blk) < task.initBlocks) {
@@ -626,8 +740,8 @@ private:
                     }
                 }
             } else {
-                const int32_t page = gBlockTable_.GetValue(task.batchIdx * maxBlocksPerBatch_ + blk);
-                scaleOff = static_cast<uint64_t>(page) * strideScalePage_;
+                const int32_t page = PaPageId(task, blk);
+                scaleOff = static_cast<uint64_t>(static_cast<uint32_t>(page)) * strideScalePage_;
             }
             // 上一轮 Mul 占用 ubDeqScale_，必须等 V 完成后再 MTE2 覆盖。
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
@@ -892,8 +1006,8 @@ private:
                 }
             }
         } else {
-            const int32_t page = gBlockTable_.GetValue(task.batchIdx * maxBlocksPerBatch_ + blk);
-            scaleOff = static_cast<uint64_t>(page) * strideScalePage_;
+            const int32_t page = PaPageId(task, blk);
+            scaleOff = static_cast<uint64_t>(static_cast<uint32_t>(page)) * strideScalePage_;
         }
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
@@ -971,6 +1085,8 @@ private:
     // 当前任务内本 subcore 的行区间与 score 暂存窗口。
     uint32_t mOff_ = 0;
     uint32_t mSub_ = 0;
+    uint32_t tokensSub_ = 0; // BSND：本 subcore 的 token 数 = mSub_ / numQHeads_
+    uint32_t stageRows_ = 0; // stage 的有效行数（BSND 为 token 数，其余等于 mSub_）
     uint32_t rowInReqBase_ = 0;
     uint32_t tokenBase0_ = 0;
     uint32_t stageBlkBase_ = 0;
@@ -982,7 +1098,25 @@ private:
     uint32_t numQHeads_ = 1;
     uint32_t strideOutHead_ = 0;
     uint32_t strideOutToken_ = 0;
+    /// PA 页表按存储页宽排布，不是 score 末维（那个会 RoundUp 到 16）。
+    /// 用 score 末维当行距时，batch>0 会读到页表分配块外面的脏页号，scale 的 MTE 地址非法。
+    __aicore__ inline int32_t PaPageId(const MsaTask& task, uint32_t blk) const
+    {
+        uint32_t pageIdx = blk;
+        if (pageSize_ != 0U) {
+            pageIdx = static_cast<uint32_t>((static_cast<uint64_t>(blk) * poolBlockSize_) / pageSize_);
+        }
+        const uint32_t width = tableWidth_ > 0U ? tableWidth_ : 1U;
+        if (pageIdx >= width) {
+            pageIdx = width - 1U;
+        }
+        return gBlockTable_.GetValue(static_cast<uint64_t>(task.batchIdx) * width + pageIdx);
+    }
+
     uint32_t maxBlocksPerBatch_ = 0;
+    uint32_t tableWidth_ = 0;
+    uint32_t poolBlockSize_ = 0;
+    uint32_t pageSize_ = 0;
     uint32_t strideScalePage_ = 0;
     uint32_t strideScaleHead_ = 1;
     uint32_t keyLayout_ = MSA_KEY_LAYOUT_BBND;

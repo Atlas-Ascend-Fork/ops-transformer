@@ -11,7 +11,7 @@
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
-    target_sources(op_host_aclnn PRIVATE
+    target_sources(op_host_aclnnInner PRIVATE
     msa_index_score_def.cpp
     )
 endif()
@@ -33,5 +33,10 @@ add_ops_compile_options(
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
-    add_modules_sources(OPTYPE msa_index_score ACLNNTYPE aclnn)
+    add_modules_sources_with_soc(
+        OP_API_INDEPENDENT ON
+        OP_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../op_api
+        OPTYPE msa_index_score
+        ACLNNTYPE aclnn_inner
+    )
 endif()

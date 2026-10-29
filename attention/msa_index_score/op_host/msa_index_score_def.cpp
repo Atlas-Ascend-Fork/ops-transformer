@@ -81,13 +81,17 @@ public:
             .DataType({ge::DT_FLOAT, ge::DT_FLOAT, ge::DT_FLOAT})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND, ge::FORMAT_ND});
 
-        // key 布局：TND / BBND / BNBD。aclnn 参数名为 layoutKeyOptional。
+        // key 布局：TND / BSND / BNSD / BBND / BNBD。aclnn 参数名为 layoutKeyOptional。
         this->Attr("layout_key").AttrType(OPTIONAL).String("BBND");
         // 0: defaultMask；3: rightDownCausal
         this->Attr("sparse_mode").AttrType(OPTIONAL).Int(3);
         // local_mask：强制选中 block 数（对齐 Triton prepare / HF；对比 raw score 时可置 0）
         this->Attr("init_blocks").AttrType(OPTIONAL).Int(0);
         this->Attr("local_blocks").AttrType(OPTIONAL).Int(1);
+        // query 布局：TND / BSND / BNSD。非分页 key 必须与 query 相同。默认 TND。
+        this->Attr("layout_query").AttrType(OPTIONAL).String("TND");
+        // 打分池化块长：每个 score 归约的 token 数，只允许 128 或 16。
+        this->Attr("pool_block_size").AttrType(OPTIONAL).Int(128);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)

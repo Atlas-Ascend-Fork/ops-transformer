@@ -45,7 +45,7 @@ class MsaIndexScoreGoldenInputs:
     actual_seq_klen: np.ndarray
     start_loc: np.ndarray
     sparse_mode: int = SPARSE_MODE_RIGHT_DOWN
-    block_size: int = DEFAULT_BLOCK_SIZE
+    pool_block_size: int = DEFAULT_BLOCK_SIZE
     scale: Optional[np.ndarray] = None
     init_blocks: int = DEFAULT_INIT_BLOCKS
     local_blocks: int = DEFAULT_LOCAL_BLOCKS
@@ -82,7 +82,7 @@ def msa_index_score_golden(inputs):
     actual_seq_klen = inputs.actual_seq_klen
     start_loc = inputs.start_loc
     sparse_mode = inputs.sparse_mode
-    block_size = inputs.block_size
+    pool_block_size = inputs.pool_block_size
     scale = inputs.scale
     init_blocks = inputs.init_blocks
     local_blocks = inputs.local_blocks
@@ -94,7 +94,7 @@ def msa_index_score_golden(inputs):
         max_blocks = 0
         for b in range(batch):
             kv = int(actual_seq_klen[b + 1]) - int(actual_seq_klen[b])
-            blocks = (kv + block_size - 1) // block_size
+            blocks = (kv + pool_block_size - 1) // pool_block_size
             if blocks > max_blocks:
                 max_blocks = blocks
         num_kv_heads = key.shape[1]
@@ -102,7 +102,7 @@ def msa_index_score_golden(inputs):
     else:
         batch = len(actual_seq_klen)
         max_blocks = block_table.shape[1]
-        is_bnbd = key.shape[2] == block_size and key.shape[1] != block_size
+        is_bnbd = key.shape[2] == pool_block_size and key.shape[1] != pool_block_size
         num_kv_heads = key.shape[1] if is_bnbd else key.shape[2]
         if is_bnbd:
             k = key.astype(np.float32)[:, 0, :, :]
@@ -137,7 +137,7 @@ def msa_index_score_golden(inputs):
         else:
             cu_k = 0
             kv = int(actual_seq_klen[b])
-        num_blocks = (kv + block_size - 1) // block_size
+        num_blocks = (kv + pool_block_size - 1) // pool_block_size
         q_block = int(start_loc[b])
         local_start = max(0, q_block + 1 - int(local_blocks))
 
@@ -145,8 +145,8 @@ def msa_index_score_golden(inputs):
             t_off = t - q_begin
             visible_key_end = _visible_key_end(sparse_mode, kv, q_len, t_off)
             for blk in range(num_blocks):
-                key_lo = blk * block_size
-                valid = min(visible_key_end - key_lo, block_size)
+                key_lo = blk * pool_block_size
+                valid = min(visible_key_end - key_lo, pool_block_size)
                 if valid <= 0:
                     continue
                 if is_tnd:

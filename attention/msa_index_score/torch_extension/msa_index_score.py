@@ -51,8 +51,8 @@ class MsaIndexScoreOpBuilder(OpBuilder):
         # cann_ops_transformer.__init__ re-exports torch.ops once the schema exists.
         return (
             "msa_index_score(Tensor query, Tensor key, Tensor start_loc, "
-            "Tensor? block_table, Tensor? scale, Tensor? atten_mask, "
-            'Tensor? actual_seq_qlen, Tensor? actual_seq_klen, *, str layout_key="BBND", '
+            "Tensor? block_table=None, Tensor? scale=None, Tensor? atten_mask=None, "
+            'Tensor? actual_seq_qlen=None, Tensor? actual_seq_klen=None, *, str layout_key="BBND", '
             "int sparse_mode=3, int init_blocks=0, int local_blocks=1) -> Tensor"
         )
 

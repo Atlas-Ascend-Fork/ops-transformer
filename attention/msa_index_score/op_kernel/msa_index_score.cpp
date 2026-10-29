@@ -35,6 +35,14 @@ using namespace MsaIndexScoreNs;
         op.Process(); \
     } while (0)
 
+// BSND（M3）走独立实例化，128 路径的 MsaIndexScoreKernel<ElementQ, IsQuant> 保持原样。
+#define MSA_INVOKE_KERNEL_BLK16(ElementQ) \
+    do { \
+        MsaIndexScoreKernel<ElementQ, false, true> op; \
+        op.Init(query, key, blockTable, scale, actualSeqQlen, actualSeqKlen, startLoc, score, userWs, tilingData); \
+        op.Process(); \
+    } while (0)
+
 extern "C" __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key, GM_ADDR blockTable, GM_ADDR scale,
                                                       GM_ADDR attenMask, GM_ADDR actualSeqQlen, GM_ADDR actualSeqKlen,
                                                       GM_ADDR startLoc, GM_ADDR score, GM_ADDR workspace,
@@ -63,6 +71,10 @@ extern "C" __global__ __aicore__ void msa_index_score(GM_ADDR query, GM_ADDR key
         MSA_INVOKE_KERNEL(fp8_e5m2_t, false);
     } else if (TILING_KEY_IS(MSA_TILING_KEY_HIFLOAT8)) {
         MSA_INVOKE_KERNEL(hifloat8_t, false);
+    } else if (TILING_KEY_IS(MSA_TILING_KEY_BF16_BLK16)) {
+        MSA_INVOKE_KERNEL_BLK16(bfloat16_t);
+    } else if (TILING_KEY_IS(MSA_TILING_KEY_FP16_BLK16)) {
+        MSA_INVOKE_KERNEL_BLK16(half);
 #endif
     }
 }

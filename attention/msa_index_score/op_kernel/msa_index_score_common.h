@@ -116,10 +116,40 @@ constexpr uint32_t MSA_SPARSE_MODE_RIGHT_DOWN = 3;
 constexpr uint32_t MSA_DEFAULT_INIT_BLOCKS = 0;
 constexpr uint32_t MSA_DEFAULT_LOCAL_BLOCKS = 1;
 
-// key 数据排布。BBND / BNBD 为 PageAttention；TND 为 packed varlen，无 block_table。
+// key 数据排布。BBND / BNBD 为 PageAttention。
+// TND / BSND / BNSD 为非分页序列，无 block_table，且必须与 query 布局相同。
 constexpr uint32_t MSA_KEY_LAYOUT_BBND = 0; // [block_num, block_size, N2, D]
 constexpr uint32_t MSA_KEY_LAYOUT_BNBD = 1; // [block_num, N2, block_size, D]
 constexpr uint32_t MSA_KEY_LAYOUT_TND = 2;  // [T2, N2, D]
+constexpr uint32_t MSA_KEY_LAYOUT_BSND = 3; // [B, S, N2, D]
+constexpr uint32_t MSA_KEY_LAYOUT_BNSD = 4; // [B, N2, S, D]
+
+// query 布局。TND 为打包变长；BSND / BNSD 为定长 batch，实际长度仍由 actual_seq_qlen 给出。
+constexpr uint32_t MSA_QUERY_LAYOUT_TND = 0;  // [T1, N1, D]
+constexpr uint32_t MSA_QUERY_LAYOUT_BSND = 1; // [B, S, N1, D]
+constexpr uint32_t MSA_QUERY_LAYOUT_BNSD = 2; // [B, N1, S, D]
+
+#ifdef __CCE_AICORE__
+#define MSA_FN __aicore__ inline
+#else
+#define MSA_FN inline
+#endif
+
+MSA_FN bool MsaIsPaKeyLayout(uint32_t keyLayout)
+{
+    return keyLayout == MSA_KEY_LAYOUT_BBND || keyLayout == MSA_KEY_LAYOUT_BNBD;
+}
+
+MSA_FN bool MsaIsSeqKeyLayout(uint32_t keyLayout)
+{
+    return keyLayout == MSA_KEY_LAYOUT_TND || keyLayout == MSA_KEY_LAYOUT_BSND || keyLayout == MSA_KEY_LAYOUT_BNSD;
+}
+
+// BBND/BNBD 页长 16。MSA_BLOCK_SIZE 仍是 Cube 的 N：一次 GEMM 的 128 列
+// 恰好是 MSA_BLOCKS_PER_STILE 个逻辑 page。
+constexpr uint32_t MSA_BLOCK16_SIZE = 16;
+static_assert(MSA_BLOCK16_SIZE * MSA_BLOCKS_PER_STILE == MSA_BLOCK_SIZE,
+              "16-token pages must pack into one Cube N tile");
 
 // atten_mask 压缩下三角模板边长（sparse_mode=3 时校验）。
 constexpr uint32_t MSA_ATTEN_MASK_SIZE = 2048;
@@ -140,6 +170,31 @@ constexpr uint16_t MSA_A5_FLAG_CV = 0; // Cube→Vector：S 已在 GM/UB
 constexpr uint16_t MSA_A5_FLAG_VC = 2; // Vector→Cube：UB slot 可覆盖
 constexpr uint16_t MSA_A5_FLAG_K = 4;  // Vector→Cube：K scratch 就绪
 
+// TND 保持打包行：globalRow * D。BSND 在 batch 内同样是 (token, head) 连续行。
+MSA_FN uint64_t MsaQueryTileElem(uint32_t queryLayout, uint32_t batchIdx, uint32_t cuQStart, uint32_t mStart,
+                                 uint32_t numQHeads, uint32_t headDim, uint32_t qMaxSeq, uint32_t strideQn)
+{
+    if (queryLayout == MSA_QUERY_LAYOUT_BSND) {
+        return static_cast<uint64_t>(batchIdx) * qMaxSeq * numQHeads * headDim +
+               static_cast<uint64_t>(mStart) * headDim;
+    }
+    return static_cast<uint64_t>(cuQStart * numQHeads + mStart) * strideQn;
+}
+
+// 非分页 key 上一个逻辑 block 的起始元素。N2=1 时 BSND 与 BNSD 的 head0 都是连续 token。
+MSA_FN uint64_t MsaSeqKeyBlockElem(uint32_t keyLayout, uint32_t batchIdx, uint32_t cuKStart, uint32_t localTok,
+                                   uint32_t numKvHeads, uint32_t headDim, uint32_t kMaxSeq)
+{
+    if (keyLayout == MSA_KEY_LAYOUT_BSND) {
+        return (static_cast<uint64_t>(batchIdx) * kMaxSeq * numKvHeads + static_cast<uint64_t>(localTok) * numKvHeads) *
+               headDim;
+    }
+    if (keyLayout == MSA_KEY_LAYOUT_BNSD) {
+        return (static_cast<uint64_t>(batchIdx) * numKvHeads * kMaxSeq + localTok) * headDim;
+    }
+    return static_cast<uint64_t>(cuKStart + localTok) * numKvHeads * headDim;
+}
+
 } // namespace MsaIndexScoreNs
 
 // TilingKey：按 query dtype × key 是否 int8 分支。
@@ -151,5 +206,8 @@ constexpr uint16_t MSA_A5_FLAG_K = 4;  // Vector→Cube：K scratch 就绪
 #define MSA_TILING_KEY_HIFLOAT8 4
 #define MSA_TILING_KEY_FP8_E5M2 5
 #define MSA_TILING_KEY_FP8_E4M3FN 6
+// 块长 16（BSND/BNSD，或 BBND/BNBD 页长 16）：独立 TilingKey，128 路径保持原样。
+#define MSA_TILING_KEY_BF16_BLK16 7
+#define MSA_TILING_KEY_FP16_BLK16 8
 
 #endif // MSA_INDEX_SCORE_COMMON_H

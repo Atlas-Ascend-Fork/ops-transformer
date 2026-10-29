@@ -38,6 +38,8 @@ constexpr uint32_t MSA_ATTR_LAYOUT_KEY = 0;
 constexpr uint32_t MSA_ATTR_SPARSE_MODE = 1;
 constexpr uint32_t MSA_ATTR_INIT_BLOCKS = 2;
 constexpr uint32_t MSA_ATTR_LOCAL_BLOCKS = 3;
+constexpr uint32_t MSA_ATTR_LAYOUT_QUERY = 4;
+constexpr uint32_t MSA_ATTR_POOL_BLOCK_SIZE = 5;
 
 BEGIN_TILING_DATA_DEF(MsaIndexScoreTilingData)
 TILING_DATA_FIELD_DEF(uint32_t, batch)
@@ -46,7 +48,9 @@ TILING_DATA_FIELD_DEF(uint32_t, numQHeads)
 TILING_DATA_FIELD_DEF(uint32_t, numKvHeads)
 TILING_DATA_FIELD_DEF(uint32_t, gqaGroup)
 TILING_DATA_FIELD_DEF(uint32_t, headDim)
-TILING_DATA_FIELD_DEF(uint32_t, blockSize)
+TILING_DATA_FIELD_DEF(uint32_t, poolBlockSize)
+TILING_DATA_FIELD_DEF(uint32_t, pageSize)
+TILING_DATA_FIELD_DEF(uint32_t, tableWidth)
 TILING_DATA_FIELD_DEF(uint32_t, maxBlocksPerBatch)
 TILING_DATA_FIELD_DEF(uint32_t, scoreBlockStride)
 TILING_DATA_FIELD_DEF(uint32_t, usedCoreNum)
@@ -68,6 +72,12 @@ TILING_DATA_FIELD_DEF(uint32_t, keyLayout) // MSA_KEY_LAYOUT_BBND / BNBD / TND
 TILING_DATA_FIELD_DEF(uint32_t, totalK)    // TND：key 第 0 维 T2； PA：0
 // 950 短 M 长 S：每个 M-tile 沿 KV page 切的 chunk 数（stile 对齐）。A2/A3 为 1。
 TILING_DATA_FIELD_DEF(uint32_t, kvChunks)
+// 950 块长 16：可用核数。kernel 逐条读到真实长度后按这个预算重算 kvChunks。0 表示沿用 kvChunks。
+TILING_DATA_FIELD_DEF(uint32_t, chunkBudget)
+TILING_DATA_FIELD_DEF(uint32_t, queryLayout) // TND / BSND / BNSD
+TILING_DATA_FIELD_DEF(uint32_t, qMaxSeq)     // BSND/BNSD 的 S；TND 为 0
+TILING_DATA_FIELD_DEF(uint32_t, kMaxSeq)     // 非分页 BSND/BNSD 的 S；其余为 0
+TILING_DATA_FIELD_DEF(uint32_t, qScratchElems)
 END_TILING_DATA_DEF
 REGISTER_TILING_DATA_CLASS(MsaIndexScore, MsaIndexScoreTilingData)
 
@@ -80,14 +90,19 @@ struct MsaIndexScoreInfo {
     uint32_t numQHeads = 0;
     uint32_t numKvHeads = 0;
     uint32_t headDim = 0;
-    uint32_t blockSize = 0;
+    uint32_t poolBlockSize = 0;
     uint32_t maxBlocksPerBatch = 0;
     uint32_t numPages = 0;
     uint32_t sparseMode = 3;
     uint32_t initBlocks = 0;
     uint32_t localBlocks = 1;
     uint32_t keyLayout = 0;
+    uint32_t queryLayout = 0;
+    uint32_t qMaxSeq = 0;
+    uint32_t kMaxSeq = 0;
     uint32_t totalK = 0;
+    uint32_t pageSize = 0;   // PA 存储页长（key 的页维度）；顺序布局与 poolBlockSize 相同
+    uint32_t tableWidth = 0; // PA 页表宽度（存储页粒度）；顺序布局为 0
     bool isQuant = false;
     bool isAscend950 = false;
     ge::DataType queryDtype = ge::DT_BF16;

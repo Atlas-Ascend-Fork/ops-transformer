@@ -276,13 +276,16 @@ public:
     }
 
     /// L0C → 配对 AIV UB（dualDstCtl=1，按 M 对半）。ubC 已是 pingpong slot 起点。
+    /// splitGroup 为两个 AIV 之间的行分组粒度：默认 1 即原有的偶数对半；
+    /// epilogue 必须用同一粒度调 MsaC2UbGroupSplit，否则两侧对不上。
     __aicore__ inline void ComputeToUb(const AscendC::GlobalTensor<ElementA>& gmA, const LayoutA& layoutA,
                                        const AscendC::GlobalTensor<ElementB>& gmB, const LayoutB& layoutB,
                                        const AscendC::LocalTensor<float>& ubC, const Catlass::GemmCoord& actualShape,
-                                       bool needLoadL1)
+                                       bool needLoadL1, uint32_t splitGroup = 1U)
     {
         storeToUb_ = true;
         ubC_ = ubC;
+        splitGroup_ = splitGroup;
         AscendC::GlobalTensor<ElementC> dummyGm;
         const LayoutC dummyLayout(actualShape.m(), actualShape.n(), actualShape.n());
         operator()(gmA, layoutA, gmB, layoutB, dummyGm, dummyLayout, actualShape, needLoadL1);
@@ -304,7 +307,7 @@ private:
         if constexpr (sizeof(ElementC) == 2) {
             uint32_t m0 = 0;
             uint32_t m1 = 0;
-            MsaC2UbHalfSplit(actualShape.m(), m0, m1);
+            MsaC2UbGroupSplit(actualShape.m(), splitGroup_, m0, m1);
             auto ubH = ubC_.template ReinterpretCast<half>();
             AscendC::FixpipeParamsC310<AscendC::CO2Layout::ROW_MAJOR> fp;
             fp.srcStride = mRound;
@@ -372,6 +375,7 @@ private:
     CopyL1ToL0B copyL1ToL0B_;
     CopyL0CToGm copyL0CToGm_;
     bool storeToUb_{false};
+    uint32_t splitGroup_{1U};
     AscendC::LocalTensor<float> ubC_;
 };
 
