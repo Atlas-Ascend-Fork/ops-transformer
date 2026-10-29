@@ -19,7 +19,10 @@
 #include "../../../moe_distribute_dispatch_v2/op_kernel/moe_distribute_dispatch_v2.h"
 #include "../../../moe_distribute_dispatch_v2/op_kernel/arch35/moe_distribute_dispatch_v2_a5_full_mesh.h"
 #include "../../../moe_distribute_dispatch_v2/op_kernel/arch35/moe_distribute_dispatch_v2_apt_tiling_key.h"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+// The Hcomm RoCE implementation used here is only available on Ascend 950.
 #include "../../../moe_distribute_dispatch_v2/op_kernel/arch35/moe_distribute_dispatch_v2_a5_roce.h"
+#endif
 using namespace MoeDistributeDispatchV2A5FullMeshImpl;
 using namespace Mc2Kernel;
 using namespace Mc2Tiling;
@@ -58,7 +61,9 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
                         epSendCountsOut, workspaceGM, &pipe, &tilingData);
                 op.Process();
             }
-        } else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
+        }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
             if constexpr (FullMesh == TILINGKEY_ENABLE_HIERARCHY) {
                 Mc2Kernel::MoeDistributeDispatchV2Roce<Mc2Kernel::Mc2MoeContextHolder, DTYPE_X, DTYPE_EXPAND_X,
                                                        Mc2Kernel::UNQUANT, false>
@@ -69,6 +74,7 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
                 op.Process();
             }
         }
+#endif
     }
 #elif ((ORIG_DTYPE_X == DT_FLOAT8_E5M2) && (ORIG_DTYPE_EXPAND_X == DT_FLOAT8_E5M2)) || \
     ((ORIG_DTYPE_X == DT_FLOAT8_E4M3FN) && (ORIG_DTYPE_EXPAND_X == DT_FLOAT8_E4M3FN)) || \
@@ -94,7 +100,9 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
                         epSendCountsOut, workspaceGM, &pipe, &tilingData);
                 op.Process();
             }
-        } else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
+        }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
             if constexpr (FullMesh == TILINGKEY_ENABLE_HIERARCHY) {
                 Mc2Kernel::MoeDistributeDispatchV2Roce<Mc2Kernel::Mc2MoeContextHolder, DTYPE_X, DTYPE_EXPAND_X,
                                                        Mc2Kernel::UNQUANT, true>
@@ -105,6 +113,7 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
                 op.Process();
             }
         }
+#endif
     }
 #elif ((ORIG_DTYPE_EXPAND_X == DT_INT8) || (ORIG_DTYPE_EXPAND_X == DT_FLOAT8_E5M2) || \
        (ORIG_DTYPE_EXPAND_X == DT_FLOAT8_E4M3FN) || (ORIG_DTYPE_EXPAND_X == DT_FLOAT4_E2M1) || \
@@ -130,7 +139,9 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
 
                     op.Process();
                 }
-            } else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
+            }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+            else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
                 if constexpr (FullMesh == TILINGKEY_ENABLE_HIERARCHY) {
                     Mc2Kernel::MoeDistributeDispatchV2Roce<Mc2Kernel::Mc2MoeContextHolder, DTYPE_X, DTYPE_EXPAND_X,
                                                            QuantMode, ScaleMode>
@@ -141,6 +152,7 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
                     op.Process();
                 }
             }
+#endif
         }
     }
 #elif ((ORIG_DTYPE_X == DT_BF16) && (ORIG_DTYPE_EXPAND_X == DT_HIFLOAT8)) || \
@@ -163,7 +175,9 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
                         epSendCountsOut, workspaceGM, &pipe, &tilingData);
                 op.Process();
             }
-        } else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
+        }
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+        else if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
             if constexpr (FullMesh == TILINGKEY_ENABLE_HIERARCHY) {
                 Mc2Kernel::MoeDistributeDispatchV2Roce<Mc2Kernel::Mc2MoeContextHolder, DTYPE_X, DTYPE_EXPAND_X,
                                                        QuantMode, ScaleMode>
@@ -174,6 +188,7 @@ __global__ __aicore__ void moe_distribute_dispatch_v3(GM_ADDR mc2Context, GM_ADD
                 op.Process();
             }
         }
+#endif
     }
 #endif
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(oriOverflowMode);

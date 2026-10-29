@@ -15,6 +15,8 @@
 #ifndef MOE_DISTRIBUTE_COMBINE_V2_A5_ROCE_H
 #define MOE_DISTRIBUTE_COMBINE_V2_A5_ROCE_H
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+// This RoCE implementation requires the Ascend 950 Hcomm APIs.
 #include <cstdint>
 #if ASC_DEVKIT_MAJOR >= 9
 #include "basic_api/kernel_basic_intf.h"
@@ -1675,4 +1677,5 @@ __aicore__ inline void MoeDistributeCombineV2Roce<RoceCombineTypeFunc>::Process(
 
 } // namespace MoeDistributeCombineV2RoceImpl
 
+#endif // defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 #endif

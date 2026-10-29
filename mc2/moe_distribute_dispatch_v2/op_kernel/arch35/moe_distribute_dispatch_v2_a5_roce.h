@@ -15,6 +15,8 @@
 #ifndef MOE_DISTRIBUTE_DISPATCH_V2_A5_ROCE_H
 #define MOE_DISTRIBUTE_DISPATCH_V2_A5_ROCE_H
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+// This RoCE implementation requires the Ascend 950 Hcomm APIs.
 #if ASC_DEVKIT_MAJOR >= 9
 #include "basic_api/kernel_basic_intf.h"
 #else
@@ -569,7 +571,7 @@ __aicore__ inline void MoeDistributeDispatchV2Roce<RoceDispatchTypeFunc>::InitSe
     GlobalTensor<XOutType> winDouble;
     winDouble.SetGlobalBuffer(reinterpret_cast<__gm__ XOutType*>(windowGM_));
     winDouble.SetL2CacheHint(CacheMode::CACHE_MODE_DISABLE);
-    OOMCheckAddrRange<XOutType>(reinterpret_cast<__gm__ XOutType*>(winDouble.GetPhyAddr()), totalWinSizeEp_);
+    OOMCheckAddrRange<XOutType>((__gm__ XOutType*)(winDouble.GetPhyAddr()), totalWinSizeEp_);
 #endif
     windowInstatusFp32Tensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(statusSpaceGm_));
 }
@@ -2424,4 +2426,5 @@ __aicore__ inline void MoeDistributeDispatchV2Roce<RoceDispatchTypeFunc>::Proces
     }
 }
 } // namespace Mc2Kernel
+#endif // defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 #endif // MOE_DISTRIBUTE_DISPATCH_V2_A5_ROCE_H

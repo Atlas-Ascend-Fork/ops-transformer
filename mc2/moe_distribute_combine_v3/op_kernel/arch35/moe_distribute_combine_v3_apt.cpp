@@ -20,7 +20,10 @@
 #endif
 #include "lib/matmul_intf.h"
 #include "../../../moe_distribute_combine_v2/op_kernel/arch35/moe_distribute_combine_v2_a5_mte.h"
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+// The Hcomm RoCE implementation used here is only available on Ascend 950.
 #include "../../../moe_distribute_combine_v2/op_kernel/arch35/moe_distribute_combine_v2_a5_roce.h"
+#endif
 #include "../../../moe_distribute_combine_v2/op_kernel/arch35/moe_distribute_combine_v2_apt_tiling_key.h"
 using namespace MoeDistributeCombineV2A5MteImpl;
 using namespace AscendC;
@@ -43,6 +46,7 @@ __global__ __aicore__ void moe_distribute_combine_v3(GM_ADDR mc2Context, GM_ADDR
 #if (ORIG_DTYPE_EXPAND_X == DT_BF16 || ORIG_DTYPE_EXPAND_X == DT_FLOAT16)
     if constexpr (ArchTag == TILINGKEY_TPL_A5) {
         if constexpr (CommMode == TILINGKEY_TPL_ROCE) {
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
             MoeDistributeCombineV2RoceImpl::MoeDistributeCombineV2Roce<DTYPE_EXPAND_X, DTYPE_X, int32_t, QuantMode,
                                                                        false>
                 op;
@@ -50,6 +54,7 @@ __global__ __aicore__ void moe_distribute_combine_v3(GM_ADDR mc2Context, GM_ADDR
                     expandScales, xActiveMask, sharedExpertX, elasticInfo, oriX, constExpertAlpha1, constExpertAlpha2,
                     constExpertV, performanceInfo, nullptr, nullptr, XOut, workspaceGM, &pipe, &tilingData);
             op.Process();
+#endif
         } else {
             MoeDistributeCombineV2A5Mte<DTYPE_EXPAND_X, DTYPE_X, int32_t, QuantMode, false> op;
             op.Init(mc2Context, expandX, expertIds, assistInfoForCombine, epSendCount, nullptr, nullptr, scales,
