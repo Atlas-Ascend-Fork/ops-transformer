@@ -322,8 +322,8 @@ void QSFAMlaTiling::GenTilingKey()
 
     tilingKey_ =
         GET_TPL_TILING_KEY(0U, pageAttention, layoutQuery, layoutKV, perfMode_ == QSFAPerfMode::V_TEMPLATE_MODE,
-                           static_cast<uint32_t>(qsfaInfo_->gSize > 64), vectorizeFlag_,
-                           static_cast<uint32_t>(qsfaInfo_->ropeHeadDim == 0)); // G大于64时核间切G
+                           static_cast<uint32_t>(qsfaInfo_->gSize > 64), vectorizeFlag_, // G大于64时核间切G
+                           static_cast<uint32_t>(qsfaInfo_->ropeHeadDim == 0));
     OP_LOGI(qsfaInfo_->opName, "QSFA tilingKey_: %lu.", tilingKey_);
 }
 

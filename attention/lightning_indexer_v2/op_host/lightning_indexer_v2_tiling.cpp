@@ -494,8 +494,8 @@ ge::graphStatus LIV2InfoParser::GetAndCheckOptionalInput()
     } else {
         // BSND: cu_seqlens_k 不传, seqused_k 可选
         OP_CHECK_IF(liV2Params_.cuSeqlensK.tensor != nullptr,
-                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "cu_seqlens_k",
-                                                             "When layout_k is BSND, cu_seqlens_k must not be null"),
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                        opName_, "cu_seqlens_k", "When layout_k is BSND, cu_seqlens_k must not be provided"),
                     return ge::GRAPH_FAILED);
         if (liV2Params_.sequsedK.tensor != nullptr) {
             OP_CHECK_IF(

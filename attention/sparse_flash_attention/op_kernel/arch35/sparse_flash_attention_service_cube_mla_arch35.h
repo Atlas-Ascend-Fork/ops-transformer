@@ -308,8 +308,8 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline void SFAMatmulService<TEMPLATE_ARGS>:
         uint32_t s1Coord = runInfo.s1oIdx * runInfo.qSNumInOneBlock;
         uint64_t queryGmOffset =
             this->queryGm.offsetCalculator.GetOffset(runInfo.boIdx, runInfo.n2oIdx, runInfo.goIdx, s1Coord, 0);
-        CopyToL1Nd2Nz<Q_T>(inputLeftTensor, this->queryGm.gmTensor[queryGmOffset], runInfo.mRealSize, 512,
-                           512); // 512: Query主维度
+        // 512: Query主维度
+        CopyToL1Nd2Nz<Q_T>(inputLeftTensor, this->queryGm.gmTensor[queryGmOffset], runInfo.mRealSize, 512, 512);
         if constexpr (HAS_ROPE) {
             uint64_t queryRopeGmOffset =
                 this->queryRopeGm.offsetCalculator.GetOffset(runInfo.boIdx, runInfo.n2oIdx, runInfo.goIdx, s1Coord, 0);

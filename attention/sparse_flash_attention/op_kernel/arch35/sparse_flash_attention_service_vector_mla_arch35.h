@@ -292,9 +292,9 @@ TEMPLATES_DEF_NO_DEFAULT __aicore__ inline uint32_t SFAVectorService<TEMPLATE_AR
             keyOffset = keyOffset1;
         }
         if constexpr (HAS_ROPE) {
-            intriParams.dstStride = 64 * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B;
+            intriParams.dstStride = 64 * sizeof(KV_T) / BUFFER_SIZE_BYTE_32B; // 64：RoPE索引数据的每token元素个数
             intriParams.srcStride = keySrcStride;
-            DataCopyPad(kvInUb[startRow * 576], keyGm[keyOffset * 512], // 576: 局部Buffer行跨度
+            DataCopyPad(kvInUb[startRow * 576], keyGm[keyOffset * 512], // 576: 局部Buffer行跨度；512: Key特征维度
                         intriParams, padParams);                        // combineDimAlign
 
             intriParams.blockLen = constInfo.sparseBlockSize * 64 * sizeof(KV_T); // 64：RoPE索引数据的每token元素个数

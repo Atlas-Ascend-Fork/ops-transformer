@@ -17,7 +17,7 @@
 
 #include "tiling/tiling_api.h"
 #include "../../sparse_flash_mla/op_host/common/smla_host_common_defs.h"
-#include "graph/ge_error_codes.h"
+#include "platform/soc_spec.h"
 
 namespace optiling {
 

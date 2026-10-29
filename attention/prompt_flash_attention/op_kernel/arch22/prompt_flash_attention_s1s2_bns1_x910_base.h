@@ -1445,9 +1445,8 @@ protected:
     __aicore__ inline void ComputeAttenMaskOffset(int64_t sInnerOffsetDataSize)
     {
         int64_t delta;
-        if (attentionMaskType == 2 || attentionMaskType == 3 ||
-            attentionMaskType ==
-                4) { // 2:leftUp mode of sparseMode, 3:rightdown mode of sparseMode, 4:band mode of sparseMode
+        // 2:leftUp mode of sparseMode, 3:rightdown mode of sparseMode, 4:band mode of sparseMode
+        if (attentionMaskType == 2 || attentionMaskType == 3 || attentionMaskType == 4) {
             if (attentionMaskType == 2) {
                 delta = this->tailParams->sOuterOffset - sInnerOffsetDataSize +
                         tilingData->promptAttentionBaseParams.nextTokens;
