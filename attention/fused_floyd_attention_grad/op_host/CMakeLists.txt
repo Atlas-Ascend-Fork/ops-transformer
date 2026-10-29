@@ -10,7 +10,7 @@
 add_op_to_compiled_list()
 
 if (BUILD_OPEN_PROJECT)
-    target_sources(op_host_aclnn PRIVATE
+    target_sources(op_host_aclnnInner PRIVATE
         fused_floyd_attention_grad_def.cpp
     )
 endif()
@@ -30,5 +30,9 @@ else()
                     -Wno-deprecated-declarations
                     -Werror
     )
-    add_modules_sources(OPTYPE fused_floyd_attention_grad ACLNNTYPE aclnn)
+    add_modules_sources(
+        OP_API_INDEPENDENT ON
+        OP_API_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../op_api
+        OPTYPE fused_floyd_attention_grad ACLNNTYPE aclnn_inner
+    )
 endif()

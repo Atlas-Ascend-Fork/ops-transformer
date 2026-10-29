@@ -69,9 +69,9 @@ aclnnStatus aclnnFusedFloydAttentionGradGetWorkspaceSize(
   const aclTensor   *value2,
   const aclTensor   *dy,
   const aclTensor   *attenMaskOptional,
-  const aclTensor   *softmaxMax,
-  const aclTensor   *softmaxSum,
-  const aclTensor   *attentionIn,
+  const aclTensor   *softmaxMaxOptional,
+  const aclTensor   *softmaxSumOptional,
+  const aclTensor   *attentionInOptional,
   double             scaleValue,
   const aclTensor   *dqOut,
   const aclTensor   *dk1Out,
@@ -187,7 +187,7 @@ aclnnStatus aclnnFusedFloydAttentionGrad(
           <td>√</td>
         </tr>
         <tr>
-          <td>softmaxMax（aclTensor）</td>
+          <td>softmaxMaxOptional（aclTensor）</td>
           <td>输入</td>
           <td>注意力正向计算的中间输出。</td>
           <td>输出的shape类型为[B,H,N,M,8]。</td>
@@ -197,7 +197,7 @@ aclnnStatus aclnnFusedFloydAttentionGrad(
           <td>√</td>
         </tr>
         <tr>
-          <td>softmaxSum（aclTensor）</td>
+          <td>softmaxSumOptional（aclTensor）</td>
           <td>输入</td>
           <td>注意力正向计算的中间输出。</td>
           <td>输出的shape类型为[B,H,N,M,8]。</td>
@@ -207,7 +207,7 @@ aclnnStatus aclnnFusedFloydAttentionGrad(
           <td>√</td>
         </tr>
         <tr>
-          <td>attentionIn（aclTensor）</td>
+          <td>attentionInOptional（aclTensor）</td>
           <td>输入</td>
           <td>注意力正向计算的最终输出。</td>
           <td>数据类型和shape类型与query保持一致。</td>
@@ -325,12 +325,12 @@ aclnnStatus aclnnFusedFloydAttentionGrad(
     <tr>
       <td rowspan="1">ACLNN_ERR_PARAM_INVALID</td>
       <td rowspan="1">161002</td>
-      <td>query、key1、value1、key2、value2、dy、attenMaskOptional、softmaxMax、softmaxSum、attentionIn、dqOut、dk1Out、dv1Out、dk2Out、dv2Out的数据类型或数据格式不在支持的范围内。</td>
+      <td>query、key1、value1、key2、value2、dy、attenMaskOptional、softmaxMaxOptional、softmaxSumOptional、attentionInOptional、dqOut、dk1Out、dv1Out、dk2Out、dv2Out的数据类型或数据格式不在支持的范围内。</td>
     </tr>
     <tr>
       <td rowspan="1">ACLNN_ERR_INNER_TILING_ERROR</td>
       <td rowspan="1">561002</td>
-      <td>tiling发生异常，query、key1、value1、key2、value2、dy、attenMaskOptional、softmaxMax、softmaxSum、attentionIn不符合约束说明。</td>
+      <td>tiling发生异常，query、key1、value1、key2、value2、dy、attenMaskOptional、softmaxMaxOptional、softmaxSumOptional、attentionInOptional不符合约束说明。</td>
     </tr>
   </tbody>
   </table>
@@ -394,8 +394,8 @@ aclnnStatus aclnnFusedFloydAttentionGrad(
 - query与key1的第0/2/4轴需相同。
 - key1与value1 shape需相同。
 - key2与value2 shape需相同。
-- query与dy/attentionIn shape需相同。
-- softmaxMax与softmaxSum shape需相同。
+- query与dy/attentionInOptional shape需相同。
+- softmaxMaxOptional与softmaxSumOptional shape需相同。
 - D只支持32/64/128。
 - attenMaskOptional当前版本必须传入，不支持空指针；未传入时tiling返回失败。
 - 由于底层指令限制，当M\*D>=65536或者K\*D>=65536时，会出现明显性能下降，此时建议使用小算子拼接替换实现。
@@ -534,9 +534,9 @@ int main() {
   aclTensor* v2 = nullptr;
   aclTensor* dx = nullptr;
   aclTensor* attenmask = nullptr;
-  aclTensor* softmaxMax = nullptr;
-  aclTensor* softmaxSum = nullptr;
-  aclTensor* attentionIn = nullptr;
+  aclTensor* softmaxMaxOptional = nullptr;
+  aclTensor* softmaxSumOptional = nullptr;
+  aclTensor* attentionInOptional = nullptr;
   aclTensor* dq = nullptr;
   aclTensor* dk1 = nullptr;
   aclTensor* dv1 = nullptr;
@@ -573,11 +573,11 @@ int main() {
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(attenmaskHostData, attenmaskShape, &attenmaskDeviceAddr, aclDataType::ACL_UINT8, &attenmask);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  ret = CreateAclTensor(softmaxMaxHostData, softmaxMaxShape, &softmaxMaxDeviceAddr, aclDataType::ACL_FLOAT, &softmaxMax);
+  ret = CreateAclTensor(softmaxMaxHostData, softmaxMaxShape, &softmaxMaxDeviceAddr, aclDataType::ACL_FLOAT, &softmaxMaxOptional);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  ret = CreateAclTensor(softmaxSumHostData, softmaxSumShape, &softmaxSumDeviceAddr, aclDataType::ACL_FLOAT, &softmaxSum);
+  ret = CreateAclTensor(softmaxSumHostData, softmaxSumShape, &softmaxSumDeviceAddr, aclDataType::ACL_FLOAT, &softmaxSumOptional);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  ret = CreateAclTensor(attentionInHostData, attentionInShape, &attentionInDeviceAddr, aclDataType::ACL_FLOAT16, &attentionIn);
+  ret = CreateAclTensor(attentionInHostData, attentionInShape, &attentionInDeviceAddr, aclDataType::ACL_FLOAT16, &attentionInOptional);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(dqHostData, dqShape, &dqDeviceAddr, aclDataType::ACL_FLOAT16, &dq);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
@@ -597,8 +597,8 @@ int main() {
   aclOpExecutor* executor;
 
   // 调用aclnnFusedFloydAttentionGrad第一段接口
-  ret = aclnnFusedFloydAttentionGradGetWorkspaceSize(q, k1, v1, k2, v2, dx, attenmask, softmaxMax, softmaxSum,
-        attentionIn, scaleValue, dq, dk1, dv1, dk2, dv2, &workspaceSize, &executor);
+  ret = aclnnFusedFloydAttentionGradGetWorkspaceSize(q, k1, v1, k2, v2, dx, attenmask, softmaxMaxOptional, softmaxSumOptional,
+        attentionInOptional, scaleValue, dq, dk1, dv1, dk2, dv2, &workspaceSize, &executor);
   CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnFusedFloydAttentionGradGetWorkspaceSize failed. ERROR: %d\n", ret); return ret);
 
   // 根据第一段接口计算出的workspaceSize申请device内存
@@ -629,9 +629,9 @@ int main() {
   aclDestroyTensor(v2);
   aclDestroyTensor(dx);
   aclDestroyTensor(attenmask);
-  aclDestroyTensor(softmaxMax);
-  aclDestroyTensor(softmaxSum);
-  aclDestroyTensor(attentionIn);
+  aclDestroyTensor(softmaxMaxOptional);
+  aclDestroyTensor(softmaxSumOptional);
+  aclDestroyTensor(attentionInOptional);
   aclDestroyTensor(dq);
   aclDestroyTensor(dk1);
   aclDestroyTensor(dv1);

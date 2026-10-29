@@ -183,6 +183,33 @@ static ge::graphStatus CheckBaseInput(gert::TilingContext* context)
     return ge::SUCCESS;
 }
 
+static ge::graphStatus CheckOutputShapes(gert::TilingContext* context)
+{
+    constexpr uint32_t inputIndices[] = {QUERY_INPUT_INDEX, KEY1_INPUT_INDEX, VALUE1_INPUT_INDEX, KEY2_INPUT_INDEX,
+                                         VALUE2_INPUT_INDEX};
+    const char* inputNames[] = {"query", "key1", "value1", "key2", "value2"};
+    const char* outputNames[] = {"dq", "dk1", "dv1", "dk2", "dv2"};
+    for (uint32_t i = 0; i < sizeof(inputIndices) / sizeof(inputIndices[0]); ++i) {
+        const auto* input = context->GetInputShape(inputIndices[i]);
+        const auto* output = context->GetOutputShape(i);
+        OP_CHECK_NULL_WITH_CONTEXT(context, input);
+        OP_CHECK_NULL_WITH_CONTEXT(context, output);
+        const auto& expected = input->GetStorageShape();
+        const auto& actual = output->GetStorageShape();
+        OP_CHECK_IF(actual.GetDimNum() != expected.GetDimNum(),
+                    OP_LOGE(context, "%s rank is invalid: got %zu, expected %zu to match %s.", outputNames[i],
+                            actual.GetDimNum(), expected.GetDimNum(), inputNames[i]),
+                    return ge::GRAPH_FAILED);
+        for (uint64_t dim = 0; dim < expected.GetDimNum(); ++dim) {
+            OP_CHECK_IF(actual.GetDim(dim) != expected.GetDim(dim),
+                        OP_LOGE(context, "%s shape is invalid at dimension %zu: got %ld, expected %ld to match %s.",
+                                outputNames[i], dim, actual.GetDim(dim), expected.GetDim(dim), inputNames[i]),
+                        return ge::GRAPH_FAILED);
+        }
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
 static ge::graphStatus CheckParams(gert::TilingContext* context)
 {
     OP_CHECK_IF(
@@ -198,6 +225,9 @@ static ge::graphStatus CheckParams(gert::TilingContext* context)
         context->GetOptionalInputShape(SOFTMAX_MAX) != nullptr &&
         context->GetOptionalInputShape(SOFTMAX_SUM) != nullptr &&
         context->GetOptionalInputShape(ATTENTION_IN) != nullptr) {
+        if (CheckOutputShapes(context) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
         if (CheckBaseInput(context) == ge::GRAPH_SUCCESS) {
             return ge::SUCCESS;
         }
