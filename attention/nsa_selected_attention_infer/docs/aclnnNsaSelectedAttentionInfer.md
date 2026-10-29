@@ -160,7 +160,12 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td style="white-space: nowrap;">topkIndices</td>
           <td>输入</td>
           <td>公式里的topK索引。</td>
-          <td>-
+          <td>
+            <ul style="list-style-type: circle; margin: 0; padding-left: 20px;">
+              <li>shape与layoutOptional绑定：layoutOptional为BSH或BSND时为4维[B, S, numKeyValueHeads, selectBlockCount]；layoutOptional为TND时为3维[T, numKeyValueHeads, selectBlockCount]。</li>
+              <li>layoutOptional为BSH时，query、key、value为3维，topkIndices仍需传入4维。</li>
+              <li>最后一维与selectBlockCount取值相等。</li>
+            </ul>
           </td>
           <td>INT32</td>
           <td>ND</td>

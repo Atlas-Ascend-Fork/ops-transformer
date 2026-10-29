@@ -361,6 +361,14 @@ TEST_F(RainFusionAttentionTiling, rain_fusion_attention_embedding_size_invalid)
     RunCase(c, ge::GRAPH_FAILED);
 }
 
+// issue 6677：headDim=32 非法（仅支持 64/128）
+TEST_F(RainFusionAttentionTiling, rain_fusion_attention_embedding_size_32_invalid)
+{
+    RfaTilingCase c;
+    c.d = 32;
+    RunCase(c, ge::GRAPH_FAILED);
+}
+
 // 对应 ValidateConfiguration：OP_LOGE_FOR_INVALID_VALUES_WITH_REASON("blockShape", 必须大于0)
 TEST_F(RainFusionAttentionTiling, rain_fusion_attention_blockshape_nonpositive)
 {
@@ -375,6 +383,26 @@ TEST_F(RainFusionAttentionTiling, rain_fusion_attention_blockshape_not_divisible
     RfaTilingCase c;
     c.blockShape = {128, 100};
     RunCase(c, ge::GRAPH_FAILED);
+}
+
+// issue 6677：blockShapeY=64 不能被 128 整除
+TEST_F(RainFusionAttentionTiling, rain_fusion_attention_blockshape_y64_not_divisible)
+{
+    RfaTilingCase c;
+    c.blockShape = {128, 64};
+    RunCase(c, ge::GRAPH_FAILED);
+}
+
+// 对应 ProcessBlockShape：OP_LOGE_FOR_INVALID_LISTSIZE_WITH_REASON("blockShape", 元素数少于2)
+TEST_F(RainFusionAttentionTiling, rain_fusion_attention_blockshape_elem_num_invalid)
+{
+    RfaTilingCase c;
+    optiling::RainFusionAttentionCompileInfo compileInfo;
+    auto para = BuildPara(c, compileInfo);
+    // 手工改blockShape为单元素，图模式下首段校验不生效，tiling需自行拦截
+    para.inputTensorDesc_[5] = gert::TilingContextPara::TensorDescription({{1}, {1}}, ge::DT_INT64, ge::FORMAT_ND, true,
+                                                                          (void*)c.blockShape.data());
+    ExecuteTestCase(para, ge::GRAPH_FAILED, SKIP_TILING_KEY_CHECK);
 }
 
 // 对应 ValidateConfiguration：OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("innerPrecise", BF16时必须为0)

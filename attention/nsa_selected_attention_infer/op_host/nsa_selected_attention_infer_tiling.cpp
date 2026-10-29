@@ -99,6 +99,13 @@ ge::graphStatus NsaSelectTiling::QKVPreProcess()
     outputType_ = context_->attenOut.desc->GetDataType();
     std::string layout(context_->layOut);
     // B S1 N2 K
+    const size_t topkDimNum = context_->topkIndices.shape->GetStorageShape().GetDimNum();
+    const size_t topkDimNumExpected = (layout == "TND") ? DIM_TOPK_TND : DIM_TOPK_BSH_BSND;
+    OP_CHECK_IF(topkDimNum != topkDimNumExpected,
+                OP_LOGE(context_->opName, "When input layout is %s, the dim of topkIndices should be %zu, but got %zu",
+                        layout.c_str(), topkDimNumExpected, topkDimNum),
+                return ge::GRAPH_FAILED);
+
     uint32_t selectedBlockCountShapeRange = 0;
     if (layout == "TND") {
         batchSizeQ_ = batchSize_ = context_->actualQSeqLengths.tensor->GetShapeSize();

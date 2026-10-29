@@ -116,7 +116,12 @@ aclnnStatus aclnnRainFusionAttention(
       <td>query</td>
       <td>输入</td>
       <td>公式中的query。</td>
-      <td>按qInputLayout选择：TND为[T, N, D]；BNSD为[B, N, S, D]。</td>
+      <td>
+        <ul>
+          <li>按qInputLayout选择：TND为[T, N, D]；BNSD为[B, N, S, D]。</li>
+          <li>D（embeddingSize）当前仅支持64或128。</li>
+        </ul>
+      </td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>3（TND）/ 4（BNSD）</td>
@@ -181,7 +186,7 @@ aclnnStatus aclnnRainFusionAttention(
         <ul>
           <li>必须包含至少两个元素[blockShapeX, blockShapeY]。</li>
           <li>blockShapeX: Q方向块大小。</li>
-          <li>blockShapeY: KV方向块大小。</li>
+          <li>blockShapeY: KV方向块大小，当前仅支持128的整数倍。</li>
         </ul>
       </td>
       <td>INT64</td>
@@ -385,7 +390,7 @@ aclnnStatus aclnnRainFusionAttention(
       <td>qInputLayout或kvInputLayout不合法。</td>
     </tr>
     <tr>
-      <td>blockShape不合法（元素数量少于2或值小于等于0）。</td>
+      <td>blockShape不合法（元素数量少于2、值小于等于0，或blockShapeY不是128的整数倍）。</td>
     </tr>
     <tr>
       <td>innerPrecise不合法（必须为0或1）。</td>
@@ -444,7 +449,8 @@ aclnnStatus aclnnRainFusionAttention(
 - qInputLayout当前仅支持"TND"和"BNSD"。
 - kvInputLayout当前仅支持"TND"和"BNSD"。
 - 输入query、key、value的数据类型必须一致，支持FLOAT16和BFLOAT16。
-- blockShape必须包含至少两个元素[blockShapeX, blockShapeY]，且值必须大于0。
+- blockShape必须包含至少两个元素[blockShapeX, blockShapeY]，且值必须大于0，其中blockShapeY必须是128的整数倍。
+- 输入query的D（embeddingSize）当前仅支持64或128。
 - selectIdx的shape必须为[T, headNum, maxKvBlockNum]，其中T为所有batch中Q方向切块的总数。
 - selectNumIdx的shape必须为[T, headNum]。
 - innerPrecise必须为0（float32 softmax）或1（fp16 softmax），query输入为BFLOAT16时，只能配置为0。

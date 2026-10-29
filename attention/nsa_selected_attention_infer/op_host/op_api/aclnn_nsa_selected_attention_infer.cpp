@@ -163,12 +163,27 @@ aclnnStatus DtypeCheck(const aclTensor* query, const aclTensor* key, const aclTe
     return ACLNN_SUCCESS;
 }
 
+// topkIndices: BSH/BSND为[B, S, numKeyValueHeads, selectBlockCount]，TND为[T, numKeyValueHeads, selectBlockCount]
+aclnnStatus TopkIndicesShapeCheck(const aclTensor* topkIndices, const char* inputLayout)
+{
+    std::string inputLayoutStr = op::ToString(inputLayout).GetString();
+    uint64_t dimNumExpected = (inputLayoutStr == "TND") ? DIM_NUM_3 : DIM_NUM_4;
+    uint64_t dimNum = topkIndices->GetViewShape().GetDimNum();
+    if (dimNum != dimNumExpected) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "topkIndices should be %lu dims when input_layout is %s, but got %lu dims",
+                dimNumExpected, inputLayout, dimNum);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+    return ACLNN_SUCCESS;
+}
+
 aclnnStatus AnalysisInputNsa(const aclTensor* query, const aclTensor* key, const aclTensor* value,
                              const aclTensor* topkIndices, char* inputLayout, NSAShapeInfo& shapeInfo,
                              const aclIntArray* actualQSeqLenOptional = nullptr,
                              const aclIntArray* actualSeqKvLenOptional = nullptr)
 {
     CHECK_RET(DtypeCheck(query, key, value, topkIndices) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(TopkIndicesShapeCheck(topkIndices, inputLayout) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(AnalysisAxisShape(query, key, value, inputLayout, shapeInfo) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
 
     if (shapeInfo.axes.d != HEAD_DIM_MAX) {
@@ -326,8 +341,8 @@ aclnnStatus aclnnNsaSelectedAttentionInferGetWorkspaceSize(
     NSAShapeInfo shapeInfo;
     shapeInfo.axes.n1 = numHeads;
     shapeInfo.axes.n2 = numKeyValueHeads;
-    CHECK_RET(!(numHeads == 0 || numKeyValueHeads == 0 || numHeads % numKeyValueHeads != 0), ACLNN_ERR_INNER_NULLPTR);
-    CHECK_RET(shapeInfo.axes.n1 / shapeInfo.axes.n2 <= GROUP_LIMITS, ACLNN_ERR_INNER_NULLPTR);
+    CHECK_RET(!(numHeads == 0 || numKeyValueHeads == 0 || numHeads % numKeyValueHeads != 0), ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(shapeInfo.axes.n1 / shapeInfo.axes.n2 <= GROUP_LIMITS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(AnalysisInputNsa(query, key, value, topkIndices, layoutOptional, shapeInfo, actualQSeqLenOptional,
                                actualKvSeqLenOptional) == ACLNN_SUCCESS,
               ACLNN_ERR_PARAM_INVALID);

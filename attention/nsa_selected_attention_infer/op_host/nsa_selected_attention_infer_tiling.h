@@ -194,6 +194,9 @@ constexpr uint32_t DIM_BNSD = 4;
 constexpr uint32_t DIM_BNSD_OR_BNSD = 4;
 constexpr uint32_t DIM_BSH = 3;
 constexpr uint32_t DIM_TND = 3;
+// topkIndices: BSH/BSND为4维，TND为3维
+constexpr size_t DIM_TOPK_TND = 3;
+constexpr size_t DIM_TOPK_BSH_BSND = 4;
 constexpr uint64_t s1BasicBlock = 1;
 
 class NsaSelectTiling {

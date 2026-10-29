@@ -31,6 +31,13 @@ extern "C" {
 
 namespace {
 
+// 与tiling侧的约束保持一致，避免非法值放行到次段才在tiling阶段失败
+constexpr int64_t VALID_EMBEDDING_SIZE_64 = 64;
+constexpr int64_t VALID_EMBEDDING_SIZE_128 = 128;
+constexpr int64_t BASIC_BLOCK_SIZE = 128;
+constexpr uint64_t TND_DIM_NUM = 3;
+constexpr uint64_t BNSD_DIM_NUM = 4;
+
 static bool CheckDataType(const aclTensor* query, const aclTensor* key, const aclTensor* value)
 {
     const DataType qDtype = query->GetDataType();
@@ -92,6 +99,33 @@ static aclnnStatus ParseBlockShape(const aclIntArray* blockShape)
         return ACLNN_ERR_PARAM_INVALID;
     }
 
+    if (data[1] % BASIC_BLOCK_SIZE != 0) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "blockShapeY must be divisible by %ld, got %ld.", BASIC_BLOCK_SIZE, data[1]);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+
+    return ACLNN_SUCCESS;
+}
+
+// D由query的最后一维给出：TND为[T, N, D]，BNSD为[B, N, S, D]
+static aclnnStatus CheckEmbeddingSize(const aclTensor* query, const std::string& qLayout)
+{
+    const op::Shape qShape = query->GetViewShape();
+    uint64_t dimNumExpected = (qLayout == "BNSD") ? BNSD_DIM_NUM : TND_DIM_NUM;
+    uint64_t dimNum = qShape.GetDimNum();
+    if (dimNum != dimNumExpected) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "query should be %lu dims when qInputLayout is %s, but got %lu dims.",
+                dimNumExpected, qLayout.c_str(), dimNum);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+
+    int64_t embeddingSize = qShape.GetDim(dimNumExpected - 1);
+    if (embeddingSize != VALID_EMBEDDING_SIZE_64 && embeddingSize != VALID_EMBEDDING_SIZE_128) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "embeddingSize (D dimension of query) must be %ld or %ld, got %ld.",
+                VALID_EMBEDDING_SIZE_64, VALID_EMBEDDING_SIZE_128, embeddingSize);
+        return ACLNN_ERR_PARAM_INVALID;
+    }
+
     return ACLNN_SUCCESS;
 }
 
@@ -134,6 +168,11 @@ static aclnnStatus ValidateParams(const aclTensor* query, const aclTensor* key, 
                 "Q layout: %s, KV layout: %s",
                 qLayout.c_str(), kvLayout.c_str());
         return ACLNN_ERR_PARAM_INVALID;
+    }
+
+    aclnnStatus ret = CheckEmbeddingSize(query, qLayout);
+    if (ret != ACLNN_SUCCESS) {
+        return ret;
     }
 
     return ParseBlockShape(blockShape);

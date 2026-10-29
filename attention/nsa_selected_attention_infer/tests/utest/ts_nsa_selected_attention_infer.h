@@ -22,3 +22,4 @@ using NsaSelectAttentionInferCase = ops::adv::tests::NsaSelectedAttentionInfer::
 class Ts_NsaSelectAttentionInfer_WithParam : public Ts_WithParam<NsaSelectAttentionInferCase> {};
 class Ts_NsaSelectAttentionInfer_WithParam_Ascend910B1 : public Ts_WithParam_Ascend910B1<NsaSelectAttentionInferCase> {
 };
+class Ts_NsaSelectAttentionInfer_Ascend910B1 : public Ts_Ascend910B1<NsaSelectAttentionInferCase> {};

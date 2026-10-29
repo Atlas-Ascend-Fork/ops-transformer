@@ -62,6 +62,7 @@ constexpr int BLOCK_SIZE_INDEX = 6;
 
 constexpr int VALID_EMBEDDING_SIZE_64 = 64;
 constexpr int VALID_EMBEDDING_SIZE_128 = 128;
+constexpr int64_t BLOCK_SHAPE_ELEM_NUM = 2;
 
 namespace optiling {
 
@@ -619,6 +620,13 @@ ge::graphStatus RFATiling::ProcessBlockShape(gert::TilingContext* rfaContext)
     auto blockShape = rfaContext->GetInputTensor(BLOCK_SHAPE_INDEX);
     if (blockShape == nullptr) {
         OP_LOGE_WITHOUT_REPORT(rfaContext->GetNodeName(), "Block shape tensor is null");
+        return ge::GRAPH_FAILED;
+    }
+
+    if (blockShape->GetShapeSize() < BLOCK_SHAPE_ELEM_NUM) {
+        OP_LOGE_FOR_INVALID_LISTSIZE_WITH_REASON(rfaContext->GetNodeName(), "blockShape",
+                                                 std::to_string(blockShape->GetShapeSize()).c_str(),
+                                                 "blockShape must contain at least two elements [x, y]");
         return ge::GRAPH_FAILED;
     }
 
