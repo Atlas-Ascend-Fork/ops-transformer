@@ -174,7 +174,7 @@ aclnnStatus aclnnAlltoAllvGroupedMatMul(
         <td>epWorldSize（int64_t）</td>
         <td>输入</td>
         <td>ep通信域的大小。</td>
-        <td><br><term>Atlas A3系列产品</term>支持8、16、32、64、128；<br><term>Ascend 950DT系列产品</term>支持2、4、8、16、32、64。</td>
+        <td>支持2、4、8、16、32、64、128、256。</td>
         <td>INT64</td>
         <td>-</td>
         <td>-</td>
@@ -365,6 +365,16 @@ aclnnStatus aclnnAlltoAllvGroupedMatMul(
   - <term>Ascend 950DT系列产品</term>：支持AI CPU通信。
 
   <!-- end id8 -->
+
+- epWorldSize约束：
+
+  <!-- npu="A3" id11 -->
+  - <term>Atlas A3系列产品</term>：支持8、16、32、64、128。
+  <!-- end id11 -->
+  <!-- npu="950" id12 -->
+  - <term>Ascend 950DT系列产品</term>：支持2、4、8、16、32、64、128、256。
+
+  <!-- end id12 -->
 
 - 确定性计算：
   - aclnnAlltoAllvGroupedMatMul默认确定性实现。

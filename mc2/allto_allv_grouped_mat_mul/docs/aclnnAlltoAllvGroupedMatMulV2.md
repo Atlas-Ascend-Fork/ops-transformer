@@ -200,7 +200,7 @@ aclnnStatus aclnnAlltoAllvGroupedMatMulV2(
         <td>epWorldSize（int64_t）</td>
         <td>输入</td>
         <td>ep通信域的大小。</td>
-        <td><term>Atlas A2系列产品</term>在commMode为"aiv"时支持2、4、8；<br><term>Atlas A3系列产品</term>支持2、4、8、16、32、64、128；<br><term>Ascend 950DT系列产品</term>支持2、4、8、16、32、64。</td>
+        <td>支持2、4、8、16、32、64、128、256。</td>
         <td>INT64</td>
         <td>-</td>
         <td>-</td>
@@ -385,7 +385,7 @@ aclnnStatus aclnnAlltoAllvGroupedMatMulV2(
 - 通信引擎约束：
 
   <!-- npu="910b" id14 -->
-  - <term>Atlas A2系列产品</term>：支持AIV通信；AIV模式的epWorldSize支持2、4、8。
+  - <term>Atlas A2系列产品</term>：支持AIV通信。
   <!-- end id14 -->
   <!-- npu="A3" id8 -->
   - <term>Atlas A3系列产品</term>：支持AIV和AICPU通信。
@@ -394,6 +394,19 @@ aclnnStatus aclnnAlltoAllvGroupedMatMulV2(
   - <term>Ascend 950DT系列产品</term>：支持 CCU 通信和 AICPU 通信，CCU 仅支持单机UB域内互联，AI CPU 可支持跨机 UB 域内互联。
 
   <!-- end id9 -->
+
+- epWorldSize约束：
+
+  <!-- npu="910b" id15 -->
+  - <term>Atlas A2系列产品</term>：支持2、4、8。
+  <!-- end id15 -->
+  <!-- npu="A3" id16 -->
+  - <term>Atlas A3系列产品</term>：支持2、4、8、16、32、64、128。
+  <!-- end id16 -->
+  <!-- npu="950" id17 -->
+  - <term>Ascend 950DT系列产品</term>：支持2、4、8、16、32、64、128、256。
+
+  <!-- end id17 -->
 
 - 确定性计算：
   - aclnnAlltoAllvGroupedMatMulV2默认确定性实现。

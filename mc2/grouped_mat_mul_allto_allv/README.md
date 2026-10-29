@@ -100,7 +100,7 @@
   <tr>
    <td>epWorldSize</td>
    <td>输入</td>
-   <td>ep通信域size：<br><term>Atlas A2系列产品</term>支持2、4、8；<br><term>Atlas A3系列产品</term>支持8、16、32、64、128；<br><term>Ascend 950DT系列产品</term>支持2、4、8、16、32、64。</td>
+   <td>ep通信域size：<br><term>Atlas A2系列产品</term>支持2、4、8；<br><term>Atlas A3系列产品</term>支持8、16、32、64、128；<br><term>Ascend 950DT系列产品</term>支持2、4、8、16、32、64、128、256。</td>
    <td>INT64</td>
    <td>ND</td>
   </tr>

@@ -203,7 +203,7 @@ aclnnStatus aclnnGroupedMatMulAlltoAllvV2(
     <td>epWorldSize（int64_t）</td>
     <td>输入</td>
     <td>ep通信域size。</td>
-    <td><ul><li><term>Atlas A2系列产品</term>支持2、4、8。</li><li><term>Atlas A3系列产品</term>支持8、16、32、64、128。</li><li><term>Ascend 950DT系列产品</term>支持2、4、8、16、32、64。</li></ul></td>
+    <td>支持2、4、8、16、32、64、128、256。</td>
     <td>INT64</td>
     <td>-</td>
     <td>-</td>
@@ -379,6 +379,19 @@ aclnnStatus aclnnGroupedMatMulAlltoAllvV2(
   - Ascend 950DT系列产品：支持 CCU 通信和 AI CPU 通信，CCU 仅支持单机 UB 域内互联，AI CPU 可支持跨机 UB 域内互联。
 
   <!-- end id12 -->
+
+- epWorldSize约束：
+
+  <!-- npu="910b" id16 -->
+  - <term>Atlas A2系列产品</term>：支持2、4、8。
+  <!-- end id16 -->
+  <!-- npu="A3" id17 -->
+  - <term>Atlas A3系列产品</term>：支持8、16、32、64、128。
+  <!-- end id17 -->
+  <!-- npu="950" id18 -->
+  - <term>Ascend 950DT系列产品</term>：支持2、4、8、16、32、64、128、256。
+
+  <!-- end id18 -->
 
 - 参数说明里shape使用的变量：
   - BSK：本卡接收的token数，是recvCounts参数累加之和，取值范围(0, 52428800)。
