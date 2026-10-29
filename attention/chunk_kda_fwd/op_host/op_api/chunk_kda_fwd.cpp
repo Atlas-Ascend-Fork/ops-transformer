@@ -36,6 +36,10 @@ KdaCoreOutputs KdaChunkForward(const aclTensor* q, const aclTensor* k, const acl
     const aclTensor* actualCuSeqlens = nullptr;
     if (cuSeqlensOptional != nullptr) {
         actualCuSeqlens = executor->ConvertToTensor(cuSeqlensOptional, DataType::DT_INT64);
+        if (actualCuSeqlens == nullptr) {
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "failed to convert cuSeqlens metadata to tensor.");
+            return {};
+        }
         const_cast<aclTensor*>(actualCuSeqlens)->SetStorageFormat(Format::FORMAT_ND);
         const_cast<aclTensor*>(actualCuSeqlens)->SetViewFormat(Format::FORMAT_ND);
         const_cast<aclTensor*>(actualCuSeqlens)->SetOriginalFormat(Format::FORMAT_ND);
@@ -45,7 +49,7 @@ KdaCoreOutputs KdaChunkForward(const aclTensor* q, const aclTensor* k, const acl
     if (chunkIndicesOptional != nullptr) {
         actualChunkIndices = executor->ConvertToTensor(chunkIndicesOptional, DataType::DT_INT64);
         if (actualChunkIndices == nullptr) {
-            OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "failed to convert chunk metadata to tensor.");
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "failed to convert chunk metadata to tensor.");
             return {};
         }
         const_cast<aclTensor*>(actualChunkIndices)->SetStorageFormat(Format::FORMAT_ND);
@@ -61,7 +65,7 @@ KdaCoreOutputs KdaChunkForward(const aclTensor* q, const aclTensor* k, const acl
         OP_ATTR(inputSequenceMajor ? "BSND" : "BNSD", scale, chunkSize, safeGate, static_cast<float>(lowerBound),
                 useGateInKernel, false));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwd failed.");
+        OP_LOGE_WITHOUT_REPORT(ret, "ADD_TO_LAUNCHER_LIST_AICORE ChunkKdaFwd failed, ret=%d.", ret);
         return {};
     }
     return {attnOut, finalStateOut, gkOut, aqkOut, akkOut, wOut, uOut, qgOut, kgOut, vNewOut, hOut};

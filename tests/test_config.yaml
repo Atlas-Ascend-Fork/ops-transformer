@@ -778,6 +778,22 @@ attention:
     options:
       - kda_input_proj
 
+  chunk_kda_fwd:
+    module: True
+    src:
+      - attention/chunk_kda_fwd
+    exclude:
+      - attention/chunk_kda_fwd/docs
+      - attention/chunk_kda_fwd/README.md
+    ut_cov_exclude:
+      - attention/chunk_kda_fwd/tests
+      - attention/chunk_kda_fwd/op_kernel
+    test:
+      examples: False
+      ut: True
+    options:
+      - chunk_kda_fwd
+
   kv_quant_sparse_flash_attention_v2:
     module: True
     src:

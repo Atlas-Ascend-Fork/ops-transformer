@@ -8,6 +8,12 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 add_op_to_compiled_list()
+if(UT_TEST_ALL OR OP_API_UT)
+    set_source_files_properties(
+        ${CMAKE_CURRENT_SOURCE_DIR}/op_api/chunk_kda_fwd.cpp
+        PROPERTIES COMPILE_OPTIONS
+        "-include${PROJECT_SOURCE_DIR}/attention/chunk_kda_fwd/tests/ut/op_api/stub/chunk_kda_make_op_executor.h")
+endif()
 if (BUILD_OPEN_PROJECT)
     target_sources(op_host_aclnnExc PRIVATE
         chunk_kda_fwd_def.cpp
