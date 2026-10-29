@@ -53,13 +53,15 @@
     bash build.sh --pkg --soc=${soc_version} [--vendor_name=${vendor_name}] [--ops=${op_list}] [--opkernel_aicpu] [--kernel_template_input=${kernel_template_input}]
     # 以FlashAttentionScore算子编译为例
     # bash build.sh --pkg --soc=ascend910b --ops=flash_attention_score
+    # A6 PR：编译已注册 ascend960pr 配置的算子
+    # bash build.sh --pkg --soc=ascend960pr --ops=flash_attention_score_grad
     # 编译experimental贡献目录下的算子
     # bash build.sh --pkg --experimental --soc=ascend910b --ops=${experimental_op}
     # 指定tilingKey模板，仅编译模板参数匹配的kernel变体（以add_example为例，仅编译float变体）
     # bash build.sh --pkg --soc=ascend910b --ops=add_example --kernel_template_input="schMode=0"
     ```
 
-    - --soc：\$\{soc\_version\}表示NPU型号。Atlas A2系列产品使用"ascend910b"（默认），Atlas A3系列产品使用"ascend910_93"，Ascend 950PR&950DT系列产品使用"ascend950"。
+    - --soc：\$\{soc\_version\}表示NPU型号。Atlas A2系列产品使用"ascend910b"（默认），Atlas A3系列产品使用"ascend910_93"，Ascend 950PR&950DT系列产品使用"ascend950"，A6 DT使用"ascend960dt"，A6 PR使用"ascend960pr"（对应Ascend960PR_969A1）。A6编译需要安装支持相应型号的CANN工具链，算子支持范围以其SoC注册配置为准。
     - --vendor_name（可选）：\$\{vendor\_name\}表示构建的自定义算子包名，默认名为custom。
     - --ops（可选）：\$\{op\_list\}表示待编译算子，不指定时默认编译所有算子。格式形如"apply_rotary_pos_emb,rope_quant_kvcache,..."，多算子之间用英文逗号","分隔。
     - --experimental（可选）：表示编译experimental贡献目录下的算子，${experimental_op}为新贡献算子目录名。
@@ -109,6 +111,10 @@
     ```bash
     # 编译除experimental贡献目录外的所有算子
     bash build.sh --pkg --soc=${soc_version}
+    # A6 PR
+    # bash build.sh --pkg --soc=ascend960pr
+    # 同时构建A6 DT和PR
+    # bash build.sh --pkg --soc=ascend960dt,ascend960pr
     # 指定打包类型（run/rpm/deb/all），默认 run
     # bash build.sh --pkg --pkg-type=deb --soc=${soc_version}
     # 编译experimental贡献目录下的所有算子

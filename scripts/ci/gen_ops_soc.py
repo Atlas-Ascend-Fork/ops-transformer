@@ -62,6 +62,10 @@ group_op_dict = {
         "fused_infer_attention_score": 20,
         "flash_attention_score_grad": 5,
     },
+    "ascend960pr": {
+        "fused_infer_attention_score": 20,
+        "flash_attention_score_grad": 5,
+    },
 }
 
 
