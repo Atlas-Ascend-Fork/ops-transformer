@@ -116,6 +116,36 @@ static const uint64_t DIM_NUM_1 = 1;
 
 char defaultSoftmaxInLayout[] = "";
 
+static void WarnIfInputFormatIsNotNd(const aclTensor* query, const aclTensor* key, const aclTensor* value,
+                                     const aclTensor* dy)
+{
+    auto warnIfNotNd = [](const char* name, const aclTensor* tensor) {
+        auto format = tensor->GetStorageFormat();
+        if (format != ge::FORMAT_ND) {
+            OP_LOGW("Format of %s gets private format [%s], should not use this constructor.", name,
+                    op::ToString(format).GetString());
+        }
+    };
+    warnIfNotNd("query", query);
+    warnIfNotNd("keyIn", key);
+    warnIfNotNd("value", value);
+    warnIfNotNd("dy", dy);
+}
+
+static aclnnStatus CheckSparseModeAttenMask(const aclTensor* attenMaskOptional, int64_t sparseMode)
+{
+    constexpr int64_t RIGHT_DOWN_CAUSAL_BAND = 7;
+    constexpr int64_t BAND_LEFT_UP_CAUSAL = 8;
+    if ((sparseMode == RIGHT_DOWN_CAUSAL_BAND || sparseMode == BAND_LEFT_UP_CAUSAL) &&
+        (attenMaskOptional == nullptr || attenMaskOptional->GetViewShape().GetDimNum() == 0)) {
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+            "FlashAttentionScoreGrad", "attenMaskOptional",
+            "attenMaskOptional must be provided and non-empty when sparseMode is 7 or 8");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    return ACLNN_SUCCESS;
+}
+
 static bool StrideLimited()
 {
     NpuArch npuArch = GetCurrentPlatformInfo().GetCurNpuArch();
@@ -1362,6 +1392,12 @@ static aclnnStatus TransposeSoftMaxTensor(const aclTensor** softmax, const aclTe
                                           FagInShapeInfo fagShape, aclOpExecutor* executor)
 {
     if (fagShape.inputLayoutStr == "TND") {
+        if (softmax == nullptr || softmaxSum == nullptr || *softmax == nullptr || *softmaxSum == nullptr) {
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
+                "FlashAttentionScoreGrad", "softmaxMaxOptional, softmaxSumOptional",
+                "softmaxMaxOptional and softmaxSumOptional must be provided when softmaxInLayout is same_as_input");
+            return ACLNN_ERR_PARAM_NULLPTR;
+        }
         FVector<int64_t> transposeDim = {1, 0, 2};
         auto perm = executor->AllocIntArray(transposeDim.data(), transposeDim.size());
         *softmax = l0op::Transpose(*softmax, perm, executor);
@@ -1620,6 +1656,7 @@ static aclnnStatus InputOutputDtypeAndShapeCheck(const aclTensor* query, const a
 {
     auto ret = InputDtypeCheck(query, key, value, dy);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
+    WarnIfInputFormatIsNotNd(query, key, value, dy);
     ret = InputOutputShapeCheck(query, queryRope, key, keyRope, value, dy, attentionIn, dq, dqRope, dk, dkRope, dv,
                                 sinkIn, dsinkOut, inputLayout);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
@@ -1839,9 +1876,11 @@ static aclnnStatus FlashAttentionScoreGradGetWorkspace(
     const aclTensor* dpseOut, char* softmaxInLayout, const uint64_t* workspaceSize, aclOpExecutor* executor)
 {
     (void)workspaceSize;
+    auto ret = CheckSparseModeAttenMask(attenMaskOptional, sparseMode);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
     // 检查tensor维度是否大于2
-    auto ret = InvalidTensorDimCheck(query, nullptr, key, nullptr, value, dy, attentionInOptional, dqOut, nullptr,
-                                     dkOut, nullptr, dvOut, nullptr, nullptr);
+    ret = InvalidTensorDimCheck(query, nullptr, key, nullptr, value, dy, attentionInOptional, dqOut, nullptr, dkOut,
+                                nullptr, dvOut, nullptr, nullptr);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     // 获取基本参数
     FagInShapeInfo fagShape;
@@ -2098,9 +2137,11 @@ static aclnnStatus FlashAttentionScoreGradV2GetWorkspace(
     const uint64_t* workspaceSize, aclOpExecutor* executor)
 {
     (void)workspaceSize;
+    auto ret = CheckSparseModeAttenMask(attenMaskOptional, sparseMode);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
     // 检查tensor维度是否大于2
-    auto ret = InvalidTensorDimCheck(query, nullptr, key, nullptr, value, dy, attentionInOptional, dqOut, nullptr,
-                                     dkOut, nullptr, dvOut, nullptr, nullptr);
+    ret = InvalidTensorDimCheck(query, nullptr, key, nullptr, value, dy, attentionInOptional, dqOut, nullptr, dkOut,
+                                nullptr, dvOut, nullptr, nullptr);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     // 获取基本参数
     FagInShapeInfo fagShape;
@@ -2356,9 +2397,11 @@ static aclnnStatus FlashAttentionScoreGradV3GetWorkspace(
     const aclTensor* dvOut, const aclTensor* dpseOut, const uint64_t* workspaceSize, aclOpExecutor* executor)
 {
     (void)workspaceSize;
+    auto ret = CheckSparseModeAttenMask(attenMaskOptional, sparseMode);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
     // 检查tensor维度是否大于2
-    auto ret = InvalidTensorDimCheck(query, queryRope, key, keyRope, value, dy, attentionInOptional, dqOut, dqRopeOut,
-                                     dkOut, dkRopeOut, dvOut, nullptr, nullptr);
+    ret = InvalidTensorDimCheck(query, queryRope, key, keyRope, value, dy, attentionInOptional, dqOut, dqRopeOut, dkOut,
+                                dkRopeOut, dvOut, nullptr, nullptr);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     // 获取基本参数
     FagInShapeInfo fagShape;
@@ -2633,9 +2676,15 @@ static aclnnStatus FlashAttentionScoreGradV5GetWorkspace(
 {
     (void)workspaceSize;
 
+    auto ret = ACLNN_SUCCESS;
+    if (!isMaxWorkspace) {
+        ret = CheckSparseModeAttenMask(attenMaskOptional, sparseMode);
+        CHECK_RET(ret == ACLNN_SUCCESS, ret);
+    }
+
     // 检查除sink外tensor维度是否大于2且sink维度为1
-    auto ret = InvalidTensorDimCheck(query, queryRope, key, keyRope, value, dy, attentionInOptional, dqOut, dqRopeOut,
-                                     dkOut, dkRopeOut, dvOut, sinkInOptional, dsinkOut);
+    ret = InvalidTensorDimCheck(query, queryRope, key, keyRope, value, dy, attentionInOptional, dqOut, dqRopeOut, dkOut,
+                                dkRopeOut, dvOut, sinkInOptional, dsinkOut);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     if (sinkInOptional != nullptr) {
         auto queryDtype = query->GetDataType();
@@ -3108,9 +3157,11 @@ static aclnnStatus FlashAttentionScoreGradV4GetWorkspace(
 {
     // 获取基本参数
     FagInShapeInfo fagShape;
+    auto ret = CheckSparseModeAttenMask(attenMaskOptional, sparseMode);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
     // 检查tensor维度是否大于2
-    auto ret = InvalidTensorDimCheck(query, queryRopeOptional, key, keyRopeOptional, value, dy, attentionInOptional,
-                                     dqOut, dqRopeOut, dkOut, dkRopeOut, dvOut, sinkInOptional, dsinkOut);
+    ret = InvalidTensorDimCheck(query, queryRopeOptional, key, keyRopeOptional, value, dy, attentionInOptional, dqOut,
+                                dqRopeOut, dkOut, dkRopeOut, dvOut, sinkInOptional, dsinkOut);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     ret = GetInputShapeInfo(query, key, value, headNum, inputLayout, fagShape, actualSeqQLenOptional,
                             actualSeqKvLenOptional, keepProb);
