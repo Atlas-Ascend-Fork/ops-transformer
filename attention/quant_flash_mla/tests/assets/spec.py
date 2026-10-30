@@ -78,10 +78,25 @@ class QuantMlaSpec:
         if impl.cross_check_enabled():
             testcase_name = getattr(compare_context, "testcase_name", None)
             golden_impl = load_impl_module("golden")
+            bench = golden_impl.peek_bench(testcase_name)
+            reference = golden_impl.peek_sectioned_ref(testcase_name)
+            if bench is None:
+                try:
+                    restored = load_impl_module("offline_cross_check").load(
+                        compare_context
+                    )
+                except (ValueError, OSError, KeyError) as exc:
+                    return {
+                        "pass": False,
+                        "precision": "NO_BENCH",
+                        "error_info": str(exc),
+                    }
+                if restored is not None:
+                    bench, reference = restored
             return impl.compare(
                 *outputs,
-                bench_outputs=golden_impl.peek_bench(testcase_name),
-                third_party_outputs=golden_impl.peek_sectioned_ref(testcase_name),
+                bench_outputs=bench,
+                third_party_outputs=reference,
                 spec_tolerance=impl.CROSS_CHECK_TOLERANCE,
                 cross_check_requested=True,
                 **kwargs,

@@ -381,6 +381,35 @@ def cpu_qfmla(
         layout_q,
         tensors,
     )
+    if _bench_enabled():
+        _load_local("offline_cross_check").save(
+            testcase_name,
+            [
+                q,
+                k_cache,
+                q_descale,
+                k_descale,
+                block_table,
+                cache_seqlens,
+                cu_seqlens_q,
+                seqused_q,
+                attn_mask,
+            ],
+            {
+                "quant_mode": quant_mode,
+                "softmax_scale": softmax_scale,
+                "mask_mode": mask_mode,
+                "max_seqlen_q": max_seqlen_q,
+                "max_seqlen_kv": max_seqlen_kv,
+                "head_dim_v": head_dim_v,
+                "layout_q": layout_q,
+                "layout_kv": layout_kv,
+                "layout_out": layout_out,
+                "return_softmax_lse": return_softmax_lse,
+            },
+            peek_bench(testcase_name),
+            peek_sectioned_ref(testcase_name),
+        )
     logger.info(
         "[%s] golden consumed actual slots: q=%s k=%s output=%s",
         testcase_name,

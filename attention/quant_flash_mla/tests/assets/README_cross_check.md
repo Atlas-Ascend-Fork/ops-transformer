@@ -84,3 +84,24 @@ metadata 分核版本（`get_qfmla_section_info`）保留在 `qfmla_golden.py` �
 | float16 | `2^-10` | `2^-16` | 2 |
 | bfloat16 | `2^-10` | `2^-16` | 2 |
 | float32（lse） | `2^-14` | `2^-30` | 2 |
+
+
+## CPU 离线生成与 NPU 回放
+
+使用同一版本的 assets，在 CPU 端以 `--no-prof --dump in,golden
+--compare cross_check --manual-data-dirs DATA_ROOT` 生成数据。生成阶段会在
+`DATA_ROOT/_qfmla_cross_check/` 保存每个 case 的 bench 和固定块参考（NPZ，
+不使用 pickle）；输入及普通 golden 仍由 TTK 按原有 bin/npy/pt 格式保存。
+
+将 **整个 DATA_ROOT** 复制到 NPU 机器，包含 `_qfmla_cross_check` 子目录；
+NPU 端继续使用 `--manual-data-dirs DATA_ROOT --compare cross_check --plugin ASSETS`。
+插件在内存中没有 bench 时加载离线参考，不需要在 NPU 机器重新计算 CPU reference。
+新增文件是 plugin 的辅助数据，放在 TTK case 目录外，避免 TTK 写入时清理或读取时拒绝。
+
+参考文件校验 case 名、协议版本、九个实际数据输入的 shape/字节内容及主要算子属性。
+metadata 会由目标机器生成，不参与输入摘要。输入、布局、mask 或 scale 等属性变化后
+必须重新生成数据；缺失、不匹配或损坏的参考会使比较失败，不降级两方。
+同名数据重新准备时会覆盖该 case 的参考。
+
+旧版生成的数据没有这些离线参考，需更新 assets 后在 CPU 端重新生成。
+默认不启用 cross_check、或未执行离线 golden dump 时，不写这些辅助文件。
