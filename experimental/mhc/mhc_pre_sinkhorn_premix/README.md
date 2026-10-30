@@ -99,7 +99,7 @@
       <tr>
         <td>premix</td>
         <td>可选输入</td>
-        <td>premix加权系数（通常填上一轮输出的hPre），shape为x.shape[:-1]。仅Ascend 950PR&950DT系列产品支持。</td>
+        <td>premix加权系数（通常填上一轮输出的hPre），shape为x.shape[:-1]，即(bs, seq_len, n)或(t, n)。</td>
         <td>FLOAT32</td>
         <td>ND</td>
       </tr>
@@ -209,12 +209,11 @@
 - n目前支持4。
 - numIters目前仅支持20。
 
-- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
-  - 输入x仅支持4维BSND格式，shape为(bs, seq_len, n, c)。
-  - 输入x的最后一维c需满足128对齐，且取值范围为[1, 100000]。
-- <term>Ascend 950PR&950DT系列产品</term>：
+- <term>Ascend 950PR&950DT系列产品</term>、<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
   - 输入x支持4维BSND格式和3维TND格式，shape分别为(bs, seq_len, n, c)和(t, n, c)。
   - TND格式下，t表示所有Batch序列长度的累加和。
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：输入x的最后一维c需满足128对齐，且取值范围为[1, 100000]。
+- <term>Ascend 950PR&950DT系列产品</term>：
   - 输入x的最后一维c仅支持4096、7168。
   - 支持可选输入premix，shape为(bs, seq_len, n)或(t, n)。
   - 输入phi的数据范围限定在$\pm \frac{1}{\sqrt{nc}}$范围内，eps限定在1e-6，此范围内具有较好的数值稳定性。

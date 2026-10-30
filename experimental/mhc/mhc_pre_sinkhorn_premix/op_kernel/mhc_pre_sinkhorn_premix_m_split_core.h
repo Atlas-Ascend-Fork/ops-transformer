@@ -511,7 +511,7 @@ public:
                     CopyOut(reduceLocal, sumOutGm[sumOutBaseOffset], curRowFactor, tilingData->hcMult);
                     MTE3ToVSync();
                 }
-                Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMult);
+                Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMultAlign);
                 PipeBarrier<PIPE_V>();
                 DivABABrcInline(combFragLocal, mxies02ReduceLocal, reduceLocal, curRowFactor, tilingData->hcMult,
                                 tilingData->hcMult);
@@ -561,7 +561,7 @@ public:
                     }
                     auto reduceLocal3 = reduceQue.AllocTensor<float>();
                     ReduceSumARAPerf(reduceLocal3, combFragLocal, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                    Adds(reduceLocal3, reduceLocal3, tilingData->hcEps, curRowFactor * tilingData->hcMult);
+                    Adds(reduceLocal3, reduceLocal3, tilingData->hcEps, curRowFactor * tilingData->hcMultAlign);
                     PipeBarrier<PIPE_V>();
 
                     if (needGrad_) {

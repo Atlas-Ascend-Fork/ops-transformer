@@ -38,6 +38,12 @@
   \end{aligned}
   $$
 
+  当传入可选输入premix时，$h_{in}$ 的加权系数使用 $\mathbf{premix}$ 替换 $\mathbf{H^{pre}_l}$（$\mathbf{premix}$ 通常填上一轮输出的hPre；其余公式不变，needBackward为true时 $H^{pre}_l$ 等中间变量仍正常计算输出）：
+
+  $$
+  h_{in} =\vec{x_{l}}\mathbf{premix}_{l}
+  $$
+
   - 将$\mathbf{H^{res}_l}$作为输入，Sinkhorn变换共执行$\mathbf{numIters}$次迭代，迭代过程中生成中间归一化结果$\mathbf{normOut}[k]$和求和结果$\mathbf{sumOut}[k]$，最终输出最后一次迭代的$\mathbf{normOut}$作为变换结果。
 
     第一次迭代（初始化）：
@@ -188,7 +194,7 @@ aclnnStatus aclnnMhcPreSinkhornPremix(
       <tr>
         <td>premix（aclTensor*）</td>
         <td>输入</td>
-        <td>可选输入， premix加权系数（通常填上一轮输出的hPre）。传入时hin使用premix而非本轮内部计算的hPre进行加权求和；needBackward为true时hPre等中间变量仍正常输出。仅Ascend 950PR&950DT系列产品支持。</td>
+        <td>可选输入， premix加权系数（通常填上一轮输出的hPre）。传入时hin使用premix而非本轮内部计算的hPre进行加权求和；needBackward为true时hPre等中间变量仍正常输出。</td>
         <td>可为nullptr（不传）。</td>
         <td>FLOAT32</td>
         <td>ND</td>
@@ -458,18 +464,19 @@ aclnnStatus aclnnMhcPreSinkhornPremix(
   | numIters      | 20   | 目前只支持20。                        |
   | n             | 4    | 目前只支持4。                         |
 
-  <!-- npu="A3,910b" id9 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
-    - 输入x仅支持4维BSND格式，shape为(bs, seq_len, n, c)。
-    - 尾轴c需为128的倍数且取值范围为[1, 100000]。
-  <!-- end id9 -->
-  <!-- npu="950" id10 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：
+  <!-- npu="950,A3,910b" id9 -->
+  - <term>Ascend 950PR&950DT系列产品</term>、<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
     - 输入x支持4维BSND格式和3维TND格式，shape分别为(bs, seq_len, n, c)和(t, n, c)。
     - TND格式下，t表示所有Batch序列长度的累加和；对应输出shape按参数说明中的t轴展开。
+  <!-- end id9 -->
+  <!-- npu="A3,910b" id10 -->
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：尾轴c需为128的倍数且取值范围为[1, 100000]。
+  <!-- end id10 -->
+  <!-- npu="950" id11 -->
+  - <term>Ascend 950PR&950DT系列产品</term>：
     - 尾轴c仅支持4096、7168。
     - 输入phi的数据范围限定在$\pm \frac{1}{\sqrt{nc}}$范围内，eps限定在1e-6，此范围内具有较好的数值稳定性。
-  <!-- end id10 -->
+  <!-- end id11 -->
 
 ## 调用示例
 

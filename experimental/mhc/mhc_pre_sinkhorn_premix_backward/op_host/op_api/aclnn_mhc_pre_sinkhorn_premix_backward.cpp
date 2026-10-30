@@ -211,10 +211,6 @@ static bool CheckInputDims(const AclnnMhcPreSinkhornPremixBackwardParams& params
 {
     bool is3D = params.x->GetViewShape().GetDimNum() == DIM_NUM_3D;
     if (is3D) {
-        if (!Ops::Transformer::AclnnUtil::IsRegbase()) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "3D (TND) input format is only supported on Ascend 950");
-            return false;
-        }
         return CheckDimNum(params.gradHin, DIM_NUM_2D, "gradHin") &&
                CheckDimNum(params.gradHPost, DIM_NUM_2D, "gradHPost") &&
                CheckDimNum(params.gradHRes, DIM_NUM_3D, "gradHRes", true, DIM_NUM_2D) &&
@@ -243,10 +239,6 @@ static bool CheckInputDims(const AclnnMhcPreSinkhornPremixBackwardParams& params
 static bool CheckOutputDims(const AclnnMhcPreSinkhornPremixBackwardParams& params)
 {
     bool is3D = params.x->GetViewShape().GetDimNum() == DIM_NUM_3D;
-    if (is3D && !Ops::Transformer::AclnnUtil::IsRegbase()) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "3D (TND) input format is only supported on Ascend 950");
-        return false;
-    }
     size_t gradXExpected = is3D ? DIM_NUM_3D : DIM_NUM_4D;
     size_t gradPreMixExpected = is3D ? DIM_NUM_2D : DIM_NUM_3D;
     return CheckDimNum(params.gradX, gradXExpected, "gradX") && CheckDimNum(params.gradPhi, DIM_NUM_2D, "gradPhi") &&
@@ -407,10 +399,6 @@ static bool CheckShape(const AclnnMhcPreSinkhornPremixBackwardParams& params)
 {
     auto& xShape = params.x->GetViewShape();
     if (xShape.GetDimNum() == 3) {
-        if (!Ops::Transformer::AclnnUtil::IsRegbase()) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "3D (TND) input format is only supported on Ascend 950");
-            return false;
-        }
         return CheckShape3D(params);
     }
 
@@ -572,6 +560,13 @@ static bool CheckDtype(const aclTensor* tensor, DataType expected, const char* n
 
 static bool CheckInputDtype(const AclnnMhcPreSinkhornPremixBackwardParams& params)
 {
+    // x 与 gradHin 必须同数据类型, 否则 kernel 无对应 dtype 组合的二进制
+    if (params.x->GetDataType() != params.gradHin->GetDataType()) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "x tensor dtype must match gradHin. x is [%s], gradHin is [%s].",
+                op::ToString(params.x->GetDataType()).GetString(),
+                op::ToString(params.gradHin->GetDataType()).GetString());
+        return false;
+    }
     return CheckDtype(params.gradHin, DataType::DT_FLOAT16, "gradHin", true) &&
            CheckDtype(params.gradHPost, DataType::DT_FLOAT, "gradHPost") &&
            CheckDtype(params.gradHRes, DataType::DT_FLOAT, "gradHRes") &&
@@ -654,9 +649,6 @@ static aclnnStatus CheckParams(const AclnnMhcPreSinkhornPremixBackwardParams& pa
                 "together. Passing only one of preMix/gradPre is not supported.");
         return ACLNN_ERR_PARAM_INVALID;
     }
-
-    // 7.1 arch35 tiling/kernel 已实现 preMix/gradPre 路径(含 hasPreMix/hasGradPre 检测),
-    //     原"A5 不支持"门控移除;合法组合仍限定同传/同缺省(与 arch22 对齐,见上)
 
     return ACLNN_SUCCESS;
 }

@@ -166,8 +166,7 @@
 
 - **维度格式约束**
 
-  - <term>Ascend 950PR&950DT系列产品</term>：输入支持两种维度格式：BSND（4维）和TND（3维）。其中T = B × S，表示所有Batch序列长度的累加和。所有带B/S维度的输入需保持维度格式一致（同为4维BSND或同为3维TND）。
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：输入仅支持BSND（4维）格式。
+  - <term>Ascend 950PR&950DT系列产品</term>、<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：输入支持两种维度格式：BSND（4维）和TND（3维）。其中T = B × S，表示所有Batch序列长度的累加和。所有带B/S维度的输入需保持维度格式一致（同为4维BSND或同为3维TND）。
 
   各输入/输出在两种格式下的shape对应关系如下：
 

@@ -1026,7 +1026,7 @@ private:
                         tilingData->hcMult);
                 MTE3ToVSync();
             }
-            Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMult);
+            Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMultAlign);
             PipeBarrier<PIPE_V>();
             DivABABrcInline(combFragLocal, mixes02ReduceLocal, reduceLocal, curRowFactor, tilingData->hcMult,
                             tilingData->hcMult);
@@ -1065,7 +1065,7 @@ private:
                 }
 
                 ReduceSumARAPerf(reduceLocal, combFragLocal, curRowFactor, tilingData->hcMult, tilingData->hcMult);
-                Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMult);
+                Adds(reduceLocal, reduceLocal, tilingData->hcEps, curRowFactor * tilingData->hcMultAlign);
 
                 if (needGrad_) {
                     int64_t sumOutBaseOffset =

@@ -61,20 +61,43 @@
 
     - **输出组合梯度计算**：
 
-        - **正向计算公式**：其中 $\mathbf{x}$ 为输入参数（前向输入x），$\mathbf{hPre}$ 为输入参数（前向保存的中间结果h_pre），$N$ 为输入Tensor中N维度的大小。
+        - **正向计算公式**：其中 $\mathbf{x}$ 为输入参数（前向输入x），$N$ 为输入Tensor中N维度的大小。按可选输入preMix是否传入分为两套：
 
-        $$
-        \mathbf{HIn} = \sum_{i=1}^{N} \mathbf{x}[B, S, i, :] \cdot \mathbf{hPre}[B, S, i]
-        $$
+          - **preMix未传入**：加权系数使用前向保存的中间结果h_pre（$\mathbf{hPre}$ 为输入参数）：
 
-        - **反向计算公式**：
+            $$
+            \mathbf{HIn} = \sum_{i=1}^{N} \mathbf{x}[B, S, i, :] \cdot \mathbf{hPre}[B, S, i]
+            $$
 
-        $$
-        \begin{aligned}
-        \mathbf{HPreGrad} &= \text{Reduce}\left(\mathbf{gradHin}.\text{unsqueeze}(-2) \odot \mathbf{x}, \text{dim}=-1\right) \quad ([B,S,N]) \\
-        \mathbf{xGradVec3} &= \mathbf{gradHin} \times \mathbf{hPre} \quad ([B,S,N,C])
-        \end{aligned}
-        $$
+          - **preMix传入**：加权系数使用可选输入preMix（$\mathbf{preMix}$ 为输入参数，通常填上一轮输出的hPre），$\mathbf{hPre}$ 等中间变量仍按前向公式正常计算输出：
+
+            $$
+            \mathbf{HIn} = \sum_{i=1}^{N} \mathbf{x}[B, S, i, :] \cdot \mathbf{preMix}[B, S, i]
+            $$
+
+        - **反向计算公式**：按 preMix 是否传入分为两套：
+
+          - **preMix未传入**：$\mathbf{HPreGrad}$ 即pre分支的梯度 $\mathbf{dPre}$：
+
+            $$
+            \begin{aligned}
+            \mathbf{HPreGrad} &= \text{Reduce}\left(\mathbf{gradHin}.\text{unsqueeze}(-2) \odot \mathbf{x}, \text{dim}=-1\right) \quad ([B,S,N]) \\
+            \mathbf{dPre} &= \mathbf{HPreGrad} \\
+            \mathbf{xGradVec3} &= \mathbf{gradHin} \times \mathbf{hPre} \quad ([B,S,N,C])
+            \end{aligned}
+            $$
+
+          - **preMix传入**：$\mathbf{dPre}$ 改由可选输入 $\mathbf{gradPre}$ 提供，$\mathbf{HPreGrad}$ 的计算结果作为可选输出 $\mathbf{gradPreMix}$（preMix的梯度）：
+
+            $$
+            \begin{aligned}
+            \mathbf{gradPreMix} &= \text{Reduce}\left(\mathbf{gradHin}.\text{unsqueeze}(-2) \odot \mathbf{x}, \text{dim}=-1\right) \quad ([B,S,N]) \\
+            \mathbf{dPre} &= \mathbf{gradPre} \\
+            \mathbf{xGradVec3} &= \mathbf{gradHin} \times \mathbf{preMix} \quad ([B,S,N,C])
+            \end{aligned}
+            $$
+
+          其中 $\mathbf{dPre}$ 进入后续sigmoid反传链。
 
     - **门控激活层梯度计算**：
 
@@ -93,7 +116,7 @@
             $$
             \begin{aligned}
             \mathbf{s} &= \mathbf{hPre} - \mathbf{hcEps} \\
-            \mathbf{HPre2Grad} &= \mathbf{HPreGrad} \odot \mathbf{s} \odot (1 - \mathbf{s}) \\
+            \mathbf{HPre2Grad} &= \mathbf{dPre} \odot \mathbf{s} \odot (1 - \mathbf{s}) \\
             \mathbf{HPre1Grad} &= \mathbf{HPre2Grad} \cdot \mathbf{alphaPre} \\
             \mathbf{alphaPreGrad} &= \sum_{b,s,n}^{B,S,N} \left(\mathbf{HPre2Grad} \cdot \mathbf{hPre1}\right) \\
             \mathbf{biasPreGrad} &= \sum_{b,s}^{B,S} \mathbf{HPre2Grad} \quad ([N])
@@ -251,10 +274,14 @@
       | $\mathbf{alpha}$ | 前向参数alpha（输入参数，包含3个元素分别对应H_pre、H_post、H_res的缩放系数） |
       | $\mathbf{bias}$ | 前向参数bias（输入参数，包含2N+N^2个元素） |
       | $\mathbf{hcEps}$ | 数值稳定性参数（输入参数） |
-      | $B, S, N, C$ | 分别为batch size、sequence length、专家数、特征维度 |
+      | $B, S, N, C$ | 分别为batch size、sequence length、专家数、特征维度；TND（3维）格式下 B×S 合并为一维 T |
       | $\cdot$ | 点积（内积）或逐元素乘法 |
       | $\odot$ | 逐元素乘法 |
       | $\sum_{\dim=d,\text{keepdim}=\text{True}}$ | 在指定维度上求和并保持维度 |
+      | $\mathbf{preMix}$ | 可选输入，premix加权系数（通常填上一轮输出的hPre） |
+      | $\mathbf{gradPre}$ | 可选输入，反向链路上pre的梯度 |
+      | $\mathbf{gradPreMix}$ | 可选输出，preMix的梯度 |
+      | $\mathbf{dPre}$ | pre分支的梯度（中间变量），v1下为$\mathbf{HPreGrad}$，v2下为$\mathbf{gradPre}$ |
 
 ## 函数原型
 
@@ -274,11 +301,14 @@ aclnnStatus aclnnMhcPreSinkhornPremixBackwardGetWorkspaceSize(
     const aclTensor  *invRms,
     const aclTensor  *sumOut,
     const aclTensor  *normOut,
+    const aclTensor  *preMix,
+    const aclTensor  *gradPre,
     double            hcEps,
     const aclTensor  *gradX,
     const aclTensor  *gradPhi,
     const aclTensor  *gradAlpha,
     const aclTensor  *gradBias,
+    const aclTensor  *gradPreMix,
     uint64_t         *workspaceSize,
     aclOpExecutor   **executor)
 ```
@@ -439,6 +469,26 @@ aclnnStatus aclnnMhcPreSinkhornPremixBackward(
         <td>√</td>
     </tr>
     <tr>
+        <td>preMix(aclTensor *)</td>
+        <td>输入</td>
+        <td>可选输入，premix加权系数（通常填上一轮输出的hPre）。传入时反向计算合并premix梯度分支。</td>
+        <td>可为nullptr（不传），与gradPre必须同时传入或同时缺省。</td>
+        <td>FLOAT32 </td>
+        <td>ND</td>
+        <td>(B,S,N)或(T,N)</td>
+        <td>√</td>
+    </tr>
+    <tr>
+        <td>gradPre(aclTensor *)</td>
+        <td>输入</td>
+        <td>可选输入，反向链路上pre的梯度grad_pre。</td>
+        <td>可为nullptr（不传），与preMix必须同时传入或同时缺省。</td>
+        <td>FLOAT32 </td>
+        <td>ND</td>
+        <td>(B,S,N)或(T,N)</td>
+        <td>√</td>
+    </tr>
+    <tr>
         <td>hcEps(double)</td>
         <td>输入</td>
         <td>数值稳定性参数。</td>
@@ -486,6 +536,16 @@ aclnnStatus aclnnMhcPreSinkhornPremixBackward(
         <td>FLOAT32</td>
         <td>ND</td>
         <td>(2N+N^2)</td>
+        <td>-</td>
+    </tr>
+    <tr>
+        <td>gradPreMix(aclTensor *)</td>
+        <td>输出</td>
+        <td>可选输出，preMix的梯度，为$\Sigma_c(\mathbf{gradHin} \cdot \mathbf{x})$。</td>
+        <td>仅preMix与gradPre同时传入时为真实值，否则无效。</td>
+        <td>FLOAT32</td>
+        <td>ND</td>
+        <td>(B,S,N)或(T,N)</td>
         <td>-</td>
     </tr>
     <tr>
@@ -605,13 +665,9 @@ aclnnStatus aclnnMhcPreSinkhornPremixBackward(
 
 - **维度格式约束**
 
-  <!-- npu="950" id9 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：输入支持两种维度格式：BSND（4维）和TND（3维）。其中T = B × S，表示所有Batch序列长度的累加和。所有带B/S维度的输入需保持维度格式一致（同为4维BSND或同为3维TND）。
+  <!-- npu="950,A3,910b" id9 -->
+  - <term>Ascend 950PR&950DT系列产品</term>、<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：输入支持两种维度格式：BSND（4维）和TND（3维）。其中T = B × S，表示所有Batch序列长度的累加和。所有带B/S维度的输入需保持维度格式一致（同为4维BSND或同为3维TND）。
   <!-- end id9 -->
-
-  <!-- npu="A3,910b" id10 -->
-  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：输入仅支持BSND（4维）格式。
-  <!-- end id10 -->
 
 - **规格约束**
 
