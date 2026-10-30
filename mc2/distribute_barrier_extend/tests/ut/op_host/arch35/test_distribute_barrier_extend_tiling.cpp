@@ -14,6 +14,7 @@
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
 #include "kernel_tiling/kernel_tiling.h"
+#include "base/registry/op_impl_space_registry_v2.h"
 
 using namespace std;
 
@@ -197,6 +198,18 @@ TEST_F(DistributeBarrierExtendArch35TilingTest, TestTilingTimeOutElasticInfo)
         ToString<uint32_t>(tilingInfo.tilingData.get() + g_mc2TilingDataReservedLen,
                            tilingInfo.tilingDataSize - g_mc2TilingDataReservedLen, g_barrierTilingDataMask);
     EXPECT_EQ(expectTilingData, tilingDataResult);
+}
+
+TEST_F(DistributeBarrierExtendArch35TilingTest, TestTilingParse)
+{
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(spaceRegistry, nullptr);
+    auto opImpl = spaceRegistry->GetOpImpl("DistributeBarrierExtend");
+    ASSERT_NE(opImpl, nullptr);
+    auto tilingParseFunc = opImpl->tiling_parse;
+    ASSERT_NE(tilingParseFunc, nullptr);
+    auto ret = tilingParseFunc(nullptr);
+    ASSERT_EQ(ret, ge::GRAPH_SUCCESS);
 }
 
 } // namespace DistributeBarrierExtendUT

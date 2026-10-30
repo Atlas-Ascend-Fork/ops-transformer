@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <iostream>
 #include "mc2_tiling_case_executor.h"
+#include "base/registry/op_impl_space_registry_v2.h"
 #include "../../../../op_host/op_tiling/arch22/quant_matmul_all_reduce_add_rms_norm_tiling.h"
 #include "../../../../op_host/op_tiling/arch22/matmul_all_reduce_add_rms_norm_tiling.h"
 #include "../../../../op_host/op_tiling/arch22/weight_quant_matmul_all_reduce_add_rms_norm_tiling.h"
@@ -232,6 +233,8 @@ static TestParam g_casesParamsQuant[] = {
     // 非量化
     {"MODEL0_group_sum_4_4096_11008_1_0_0_0_32_0_0_0_32_0.1_BF16_BF16_BF16_BF16", 8, 256UL},
     {"MODEL0_group_sum_9471_18_379_1_0_0_0_32_0_0_0_32_0.1_BF16_BF16_BF16_BF16", 8, 256UL},
+    // n>12288 触发 CommonAddResNormTiling K_SPLIT_D
+    {"MODEL0_group_sum_4_4096_16384_1_0_0_0_32_0_0_0_32_0.1_BF16_BF16_BF16_BF16", 8, UINT64_MAX},
 
 };
 static TestParam g_inValidCheckcasesParamsQuant[] = {
@@ -264,4 +267,16 @@ INSTANTIATE_TEST_CASE_P(MatMulAllReduceAddResNormal, MatmulAllReduceAddRmsNormAr
 
 INSTANTIATE_TEST_CASE_P(MatMulAllReduceAddResNormal2, MatmulAllReduceAddRmsNormArch22TilingTest,
                         testing::ValuesIn(g_inValidCheckcasesParamsQuant));
+
+TEST_F(MatmulAllReduceAddRmsNormArch22TilingTest, TestTilingParse)
+{
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(spaceRegistry, nullptr);
+    auto opImpl = spaceRegistry->GetOpImpl("MatmulAllReduceAddRmsNorm");
+    ASSERT_NE(opImpl, nullptr);
+    auto tilingParseFunc = opImpl->tiling_parse;
+    ASSERT_NE(tilingParseFunc, nullptr);
+    auto ret = tilingParseFunc(nullptr);
+    ASSERT_EQ(ret, ge::GRAPH_SUCCESS);
+}
 } // namespace MatmulAllReduceAddRmsNormUT

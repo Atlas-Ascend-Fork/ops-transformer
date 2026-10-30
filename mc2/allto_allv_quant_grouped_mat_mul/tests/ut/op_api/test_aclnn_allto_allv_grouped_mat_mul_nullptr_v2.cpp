@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include "op_api_ut_common/op_api_ut.h"
 #include "op_api_csv_case_loader.h"
+#include "opdev/platform.h"
 #include "../../../op_api/aclnn_allto_allv_quant_grouped_mat_mul_v2.h"
 
 namespace AlltoAllvQuantGroupedMatMulV2UT {
@@ -429,6 +430,313 @@ TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, aclnnAlltoAllvQuantGrouped
                   OUTPUT(gmmY, mmYOptional, permuteOutOptional));
     EXPECT_EQ(ACLNN_ERR_PARAM_INVALID,
               ut_quant_mode_not_vaild.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+// Non-contiguous gmmWeight on A5 → TransGmmWeightTensor (+ pertensor scale early path)
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, NonContiguousGmmWeightArch35)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND, {29360128, 1, 7168}};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    const char* group = "group";
+    const char* commMode = "ccu";
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, group, commMode, 0,
+                              sendCounts, recvCounts, 0, 0, 0, 0),
+                        OUTPUT(gmmY, mmYOptional, nullptr));
+    EXPECT_NE(ACLNN_ERR_PARAM_NULLPTR, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, NonContiguousMmWeightArch35)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND, {1, 7168}};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    const char* group = "group";
+    const char* commMode = "ccu";
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, group, commMode, 0,
+                              sendCounts, recvCounts, 0, 0, 0, 0),
+                        OUTPUT(gmmY, mmYOptional, nullptr));
+    EXPECT_NE(ACLNN_ERR_PARAM_NULLPTR, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, MxQuantNonContiguousArch35)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_FLOAT8_E5M2, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_FLOAT8_E5M2, ACL_FORMAT_ND, {29360128, 1, 7168}};
+    TensorDesc gmmXScale = {{8192, 112, 2}, ACL_FLOAT8_E8M0, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{4, 112, 4096, 2}, ACL_FLOAT8_E8M0, ACL_FORMAT_ND, {917504, 2, 8192, 1}};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_FLOAT8_E5M2, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_FLOAT8_E5M2, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{4096, 112, 2}, ACL_FLOAT8_E8M0, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{112, 4096, 2}, ACL_FLOAT8_E8M0, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    const char* group = "group";
+    const char* commMode = "ccu";
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 6, 6, 6, 6, group, commMode, 0,
+                              sendCounts, recvCounts, 0, 0, 0, 0),
+                        OUTPUT(gmmY, mmYOptional, nullptr));
+    EXPECT_NE(ACLNN_ERR_PARAM_NULLPTR, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, MxQuantMmNonContiguousArch35)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_FLOAT8_E5M2, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_FLOAT8_E5M2, ACL_FORMAT_ND, {1, 7168}};
+    TensorDesc mmXScaleOptional = {{4096, 112, 2}, ACL_FLOAT8_E8M0, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{112, 4096, 2}, ACL_FLOAT8_E8M0, ACL_FORMAT_ND, {2, 8192, 1}};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    const char* group = "group";
+    const char* commMode = "ccu";
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 6, 6, group, commMode, 0,
+                              sendCounts, recvCounts, 0, 0, 0, 0),
+                        OUTPUT(gmmY, mmYOptional, nullptr));
+    EXPECT_NE(ACLNN_ERR_PARAM_NULLPTR, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, TransGmmWeightNotContiguousFail)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND, {29360128, 1, 7168}};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc permuteOutOptional = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    const char* group = "group";
+    const char* commMode = "ccu";
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, group, commMode, 0,
+                              sendCounts, recvCounts, 1, 0, 0, 1),
+                        OUTPUT(gmmY, mmYOptional, permuteOutOptional));
+    EXPECT_EQ(ACLNN_ERR_PARAM_INVALID, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, AiCpuCommMode)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc permuteOutOptional = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, "group", "ai_cpu",
+                              0, sendCounts, recvCounts, 0, 0, 0, 1),
+                        OUTPUT(gmmY, mmYOptional, permuteOutOptional));
+    EXPECT_NE(ACLNN_ERR_PARAM_NULLPTR, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, A6RejectCcu)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc permuteOutOptional = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_9201);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, "group", "ccu", 0,
+                              sendCounts, recvCounts, 0, 0, 0, 1),
+                        OUTPUT(gmmY, mmYOptional, permuteOutOptional));
+    EXPECT_EQ(ACLNN_ERR_PARAM_INVALID, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, NullCommMode)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc permuteOutOptional = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, "group", nullptr,
+                              0, sendCounts, recvCounts, 0, 0, 0, 1),
+                        OUTPUT(gmmY, mmYOptional, permuteOutOptional));
+    EXPECT_EQ(ACLNN_ERR_PARAM_INVALID, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, InvalidCommModeString)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{4, 7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc permuteOutOptional = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, "group",
+                              "bad_mode", 0, sendCounts, recvCounts, 0, 0, 0, 1),
+                        OUTPUT(gmmY, mmYOptional, permuteOutOptional));
+    EXPECT_EQ(ACLNN_ERR_PARAM_INVALID, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, GmmWeightWrongDim)
+{
+    TensorDesc gmmX = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc gmmWeight = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND}; // 2D invalid
+    TensorDesc gmmXScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc gmmWeightScale = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmXOptional = {{4096, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmWeightOptional = {{7168, 4096}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    TensorDesc mmXScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc mmWeightScaleOptional = {{1}, ACL_FLOAT, ACL_FORMAT_ND};
+    std::vector<int64_t> sendCountsList(8, 1024);
+    std::vector<int64_t> recvCountsList(8, 1024);
+    aclIntArray* sendCounts = aclCreateIntArray(sendCountsList.data(), sendCountsList.size());
+    aclIntArray* recvCounts = aclCreateIntArray(recvCountsList.data(), recvCountsList.size());
+    TensorDesc gmmY = {{8192, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc mmYOptional = {{4096, 4096}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc permuteOutOptional = {{8192, 7168}, ACL_HIFLOAT8, ACL_FORMAT_ND};
+    uint64_t workspace_size = 0;
+    aclOpExecutor* executor = nullptr;
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+
+    auto ut = OP_API_UT(aclnnAlltoAllvQuantGroupedMatMulV2,
+                        INPUT(gmmX, gmmWeight, gmmXScale, gmmWeightScale, nullptr, nullptr, mmXOptional,
+                              mmWeightOptional, mmXScaleOptional, mmWeightScaleOptional, 1, 1, 1, 1, "group", "ccu", 0,
+                              sendCounts, recvCounts, 0, 0, 0, 1),
+                        OUTPUT(gmmY, mmYOptional, permuteOutOptional));
+    auto ret = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor);
+    EXPECT_TRUE(ret == ACLNN_ERR_PARAM_INVALID || ret == ACLNN_ERR_PARAM_NULLPTR);
+}
+
+TEST_F(AclnnAlltoAllvQuantGroupedMatMulV2NullptrTest, ExecuteEntry)
+{
+    op::SetPlatformNpuArch(Ops::Base::DAV_3510);
+    char workspace[64] = {};
+    aclnnStatus ret = aclnnAlltoAllvQuantGroupedMatMulV2(workspace, sizeof(workspace), nullptr, nullptr);
+    EXPECT_TRUE(ret == ACLNN_SUCCESS || ret == ACLNN_ERR_INNER || ret == ACLNN_ERR_PARAM_INVALID ||
+                ret == ACLNN_ERR_PARAM_NULLPTR);
 }
 
 } // namespace AlltoAllvQuantGroupedMatMulV2UT

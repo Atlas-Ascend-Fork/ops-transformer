@@ -285,6 +285,34 @@ TEST_F(MatmulReduceScatterV2InferDTypeTest, AttrYDtype)
     EXPECT_EQ(contextHolder.GetContext<gert::InferDataTypeContext>()->GetOutputDataType(0), attrYDtype);
 }
 
+TEST_F(MatmulReduceScatterV2InferDTypeTest, AttrYDtypeUndefinedFail)
+{
+    ge::DataType x1Type = ge::DT_FLOAT8_E4M3FN;
+
+    auto contextHolder =
+        gert::InferDataTypeContextFaker()
+            .NodeIoNum(1, 2)
+            .InputDataTypes({&x1Type})
+            .NodeOutputTd(0, ge::FORMAT_ND, ge::FORMAT_ND)
+            .NodeOutputTd(1, ge::FORMAT_ND, ge::FORMAT_ND)
+            .NodeAttrs(
+                {{"group", Ops::Transformer::AnyValue::CreateFrom<std::string>("hcclCom")},
+                 {"reduce_op", Ops::Transformer::AnyValue::CreateFrom<std::string>("sum")},
+                 {"is_trans_a", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                 {"is_trans_b", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                 {"comm_turn", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                 {"rank_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
+                 {"block_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                 {"group_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                 {"is_amax_out", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                 {"y_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(static_cast<int>(ge::DT_UNDEFINED))}})
+            .Build();
+
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    auto inferDataTypeFunc = spaceRegistry->GetOpImpl("MatmulReduceScatterV2")->infer_datatype;
+    ASSERT_EQ(inferDataTypeFunc(contextHolder.GetContext<gert::InferDataTypeContext>()), ge::GRAPH_FAILED);
+}
+
 #ifdef ENABLE_MMRS_DT_HIFLOAT4
 TEST_F(MatmulReduceScatterV2InferDTypeTest, HiFp4OutputTypes)
 {
@@ -330,6 +358,32 @@ TEST_F(MatmulReduceScatterV2InferDTypeTest, HiFp4OutputTypes)
     }
 }
 
+TEST_F(MatmulReduceScatterV2InferDTypeTest, HiF4InvalidYDtypeFail)
+{
+    ge::DataType x1Type = Ops::Transformer::DT_HIFLOAT4;
+
+    auto contextHolder =
+        gert::InferDataTypeContextFaker()
+            .NodeIoNum(1, 2)
+            .InputDataTypes({&x1Type})
+            .NodeOutputTd(0, ge::FORMAT_ND, ge::FORMAT_ND)
+            .NodeOutputTd(1, ge::FORMAT_ND, ge::FORMAT_ND)
+            .NodeAttrs({{"group", Ops::Transformer::AnyValue::CreateFrom<std::string>("hcclCom")},
+                        {"reduce_op", Ops::Transformer::AnyValue::CreateFrom<std::string>("sum")},
+                        {"is_trans_a", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                        {"is_trans_b", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                        {"comm_turn", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                        {"rank_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
+                        {"block_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                        {"group_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+                        {"is_amax_out", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                        {"y_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(static_cast<int>(ge::DT_FLOAT))}})
+            .Build();
+
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    auto inferDataTypeFunc = spaceRegistry->GetOpImpl("MatmulReduceScatterV2")->infer_datatype;
+    ASSERT_EQ(inferDataTypeFunc(contextHolder.GetContext<gert::InferDataTypeContext>()), ge::GRAPH_FAILED);
+}
 #endif
 
 // inferShape用例 - isAmaxOut=true

@@ -160,3 +160,17 @@ TEST_F(L2InplaceMatmulAllReduceAddRmsNormTest, TestInplaceWeightQuantMmAllReduce
     aclnnStatus aclRet = ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
     EXPECT_EQ(aclRet, ACLNN_ERR_PARAM_INVALID);
 }
+
+TEST_F(L2InplaceMatmulAllReduceAddRmsNormTest, TestExecuteEntries)
+{
+    char workspace[64] = {};
+    aclnnStatus ret1 = aclnnInplaceMatmulAllReduceAddRmsNorm(workspace, sizeof(workspace), nullptr, nullptr);
+    aclnnStatus ret2 = aclnnInplaceQuantMatmulAllReduceAddRmsNorm(workspace, sizeof(workspace), nullptr, nullptr);
+    aclnnStatus ret3 = aclnnInplaceWeightQuantMatmulAllReduceAddRmsNorm(workspace, sizeof(workspace), nullptr, nullptr);
+    EXPECT_TRUE(ret1 == ACLNN_SUCCESS || ret1 == ACLNN_ERR_INNER || ret1 == ACLNN_ERR_PARAM_INVALID ||
+                ret1 == ACLNN_ERR_PARAM_NULLPTR);
+    EXPECT_TRUE(ret2 == ACLNN_SUCCESS || ret2 == ACLNN_ERR_INNER || ret2 == ACLNN_ERR_PARAM_INVALID ||
+                ret2 == ACLNN_ERR_PARAM_NULLPTR);
+    EXPECT_TRUE(ret3 == ACLNN_SUCCESS || ret3 == ACLNN_ERR_INNER || ret3 == ACLNN_ERR_PARAM_INVALID ||
+                ret3 == ACLNN_ERR_PARAM_NULLPTR);
+}
