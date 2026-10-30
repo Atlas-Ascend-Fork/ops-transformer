@@ -2338,6 +2338,11 @@ mhc:
     ut_cov_exclude:
       - mhc/mhc_sinkhorn/examples
       - mhc/mhc_sinkhorn/tests
+    test:
+      examples: True
+      ut: False
+    options:
+      - mhc_sinkhorn
   mhc_sinkhorn_backward:
     module: True
     src:
@@ -2365,6 +2370,8 @@ mhc:
     test:
       examples: True
       ut: False
+    options:
+      - mhc_post
   mhc_pre:
     module: True
     src:
@@ -2434,6 +2441,8 @@ mhc:
     test:
       examples: True
       ut: False
+    options:
+      - mhc_post_backward
   block_attention_residuals_grad:
     module: True
     src:
@@ -2447,6 +2456,8 @@ mhc:
     test:
       examples: True
       ut: False
+    options:
+      - block_attention_residuals_grad
   block_attention_residuals:
     module: True
     src:
