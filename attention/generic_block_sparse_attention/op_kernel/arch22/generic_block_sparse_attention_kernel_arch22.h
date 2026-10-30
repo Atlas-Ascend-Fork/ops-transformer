@@ -16,6 +16,7 @@
 #include "../generic_block_sparse_attention_fd_utils.h"
 #include "../gbsa_sparse_kv_geometry.hpp"
 #include "kernel_utils.hpp"
+#include "gbsa_arch22_layout_utils.hpp"
 #include "generic_block_sparse_attention_fd_combine_arch22.h"
 
 using namespace NpuArch;
@@ -61,6 +62,12 @@ public:
                                     params.tiling);
         const GenericBlockSparseAttn::GenericBlockSparseAttentionTilingData* tilingData = &tilingDataLocal;
         FetchTilingData(tilingData, params.metaData);
+        const uint32_t qLayout = tilingData->qLayout, kvLayout = tilingData->kvLayout;
+        const uint32_t qCapacity = tilingData->qSeqCapacity, kvCapacity = tilingData->kvSeqCapacity;
+        if ((qLayout == 0U && params.cuSeqLengths == nullptr) ||
+            (!isPaged && kvLayout == 0U && params.cuSeqLengthsKv == nullptr)) {
+            return;
+        }
         __gm__ const GbsaMetadata::Metadata* meta =
             reinterpret_cast<__gm__ const GbsaMetadata::Metadata*>(params.metaData);
         const uint32_t physicalAicNum = AscendC::GetBlockNum();
@@ -82,14 +89,12 @@ public:
         if constexpr (isPaged) {
             gBlockTable.SetGlobalBuffer((__gm__ int32_t*)params.blockTable);
         }
-        AscendC::GlobalTensor<int64_t> gCuSeqLengthsKv;
-        if constexpr (!isPaged) {
-            gCuSeqLengthsKv.SetGlobalBuffer((__gm__ int64_t*)params.cuSeqLengthsKv);
-        }
+        StoragePrefix gCuSeqLengthsKv;
+        gCuSeqLengthsKv.Init(params.cuSeqLengthsKv, kvCapacity);
         AscendC::GlobalTensor<int32_t> gSparseBlockCount;
         gSparseBlockCount.SetGlobalBuffer((__gm__ int32_t*)params.sparseBlockCount);
-        AscendC::GlobalTensor<int64_t> gCuSeqLengths;
-        gCuSeqLengths.SetGlobalBuffer((__gm__ int64_t*)params.cuSeqLengths);
+        StoragePrefix gCuSeqLengths;
+        gCuSeqLengths.Init(params.cuSeqLengths, qCapacity);
         AscendC::GlobalTensor<int32_t> gSequsedQ;
         const bool hasSequsedQ = (params.sequsedQ != nullptr);
         if (hasSequsedQ) {
@@ -185,6 +190,8 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID2);
         EpilogueOnlineSoftmax epilogueOnlineSoftmax(resource, scaleValue_);
         EpilogueRescaleO epilogueRescaleO(resource);
+        epilogueRescaleO.SetHeadStrides(qLayout == 2U ? static_cast<uint64_t>(qCapacity) * embed_ : embed_,
+                                        qLayout == 0U ? 1U : qCapacity);
 
         coreIdx = AscendC::GetBlockIdx() / AscendC::GetSubBlockNum();
 #endif
@@ -195,7 +202,7 @@ public:
 
         uint32_t groupSize = groupSize_;
         int64_t strideQO = qHeads_ * embed_;
-        int64_t strideKVRow = kvHeads_ * embed_;
+        int64_t strideKVRow = (kvLayout == 2U || kvLayout == 3U) ? embed_ : kvHeads_ * embed_;
         uint32_t embedRound = RoundUp(embed_, 16);
         uint32_t rowNumRound = RoundUp(groupSize, 16);
 
@@ -218,8 +225,10 @@ public:
                         }
                         const uint64_t qStorageToken = static_cast<uint64_t>(storageStart + token);
                         const uint32_t qHeadStart = kvHeadIdx * groupSize;
-                        const uint64_t gmOffsetO = (qStorageToken * qHeads_ + qHeadStart) * embed_;
-                        const uint64_t gmOffsetLse = qStorageToken * qHeads_ + qHeadStart;
+                        const uint64_t gmOffsetO = TensorOffset(qLayout, batchIdx, token, qStorageToken, qHeadStart,
+                                                                qHeads_, embed_, qCapacity);
+                        const uint64_t gmOffsetLse =
+                            LseOffset(qLayout, batchIdx, token, qStorageToken, qHeadStart, qHeads_, qCapacity);
                         epilogueRescaleO.WriteEmptyOutput(gO[gmOffsetO], gLse[gmOffsetLse], groupSize, embed_);
                     }
                 }
@@ -249,9 +258,10 @@ public:
                                             qStorageToken, qTokenInBatch, batchIdx, kvHeadIdx)) {
                     continue;
                 }
-                const uint64_t gmOffsetO =
-                    (static_cast<uint64_t>(qStorageToken) * qHeads_ + kvHeadIdx * groupSize) * embed_;
-                const uint64_t gmOffsetLse = static_cast<uint64_t>(qStorageToken) * qHeads_ + kvHeadIdx * groupSize;
+                const uint64_t gmOffsetO = TensorOffset(qLayout, batchIdx, qTokenInBatch, qStorageToken,
+                                                        kvHeadIdx * groupSize, qHeads_, embed_, qCapacity);
+                const uint64_t gmOffsetLse = LseOffset(qLayout, batchIdx, qTokenInBatch, qStorageToken,
+                                                       kvHeadIdx * groupSize, qHeads_, qCapacity);
                 epilogueRescaleO.WriteEmptyOutput(gO[gmOffsetO], gLse[gmOffsetLse], groupSize, embed_);
             }
         }
@@ -315,9 +325,10 @@ public:
             uint32_t qSeqlen =
                 hasSequsedQ ? static_cast<uint32_t>(gSequsedQ.GetValue(static_cast<int64_t>(batchIdx))) : qStorageLen;
             int64_t gmOffsetQ =
-                static_cast<int64_t>(qStorageToken) * strideQO + static_cast<int64_t>(qHeadStart) * embed_;
+                TensorOffset(qLayout, batchIdx, qTokenInBatch, qStorageToken, qHeadStart, qHeads_, embed_, qCapacity);
             int64_t gmOffsetO = gmOffsetQ;
-            const int64_t gmOffsetLse = static_cast<int64_t>(qStorageToken) * qHeads_ + qHeadStart;
+            const int64_t gmOffsetLse =
+                LseOffset(qLayout, batchIdx, qTokenInBatch, qStorageToken, qHeadStart, qHeads_, qCapacity);
 
             const bool isCausalMask = (tilingData->maskType == 1U);
             if (qSeqlen == 0U || kvSeqlen == 0U || (isCausalMask && kvSeqlen < qSeqlen)) {
@@ -376,7 +387,9 @@ public:
             auto gTaskSparseBlockIdx = gSparseBlockIdxBase[explicitBegin];
             uint32_t kvSLoopNum = (validKvTokens + kvBaseTile_ - 1U) / kvBaseTile_;
             uint32_t yBlockNum = (visibleKvEnd + blockShapeY_ - 1U) / blockShapeY_;
-            int64_t gmOffsetKvBase = kvStorageStart * strideKVRow + static_cast<int64_t>(kvHeadIdx) * embed_;
+            int64_t gmOffsetKvBase = kvLayout == 3U ? static_cast<int64_t>(kvHeadIdx) * blockSize_ * embed_ :
+                                                      TensorOffset(kvLayout, batchIdx, 0U, kvStorageStart, kvHeadIdx,
+                                                                   kvHeads_, embed_, kvCapacity);
             if (kvSLoopNum == 0U) {
 #ifdef __DAV_C220_VEC__
                 if (isFdPartial) {
@@ -403,7 +416,7 @@ public:
 
 #ifdef __DAV_C220_CUBE__
             // Load Q into L1 once per task
-            LayoutQ gmQLayout(rowNum, embed_);
+            LayoutQ gmQLayout(rowNum, embed_, qLayout == 2U ? static_cast<uint64_t>(qCapacity) * embed_ : embed_);
             blockMmadQK.loadQGM(gQ[gmOffsetQ], gmQLayout, rowNum, groupSize, embed_);
 #endif
 
@@ -613,7 +626,7 @@ private:
     uint32_t totalTaskNum_;
     float scaleValue_;
     uint32_t groupSize_;
-    // PA_BBND page base strides (elements); may exceed blockSize*Nkv*D when dim0 is strided.
+    // Paged KV base strides (elements); may exceed blockSize*Nkv*D when dim0 is strided.
     uint64_t kStride0_;
     uint64_t vStride0_;
     uint32_t residualBlockMode_;

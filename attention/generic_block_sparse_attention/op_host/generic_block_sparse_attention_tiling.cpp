@@ -343,18 +343,6 @@ ge::graphStatus GBSATiling::GetInputLayout(gert::TilingContext* context)
                                                "the same layout");
         return ge::GRAPH_FAILED;
     }
-    // PA_BNBD is supported by the non-quant arch35 kernels for all supported Q layouts.
-    if (isPaBnbd_ && socVer_ != SOC_VER_950_CODE) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "kv_input_layout", layoutKv_.c_str(),
-                                              "PA_BNBD KV is only supported on chip 950");
-        return ge::GRAPH_FAILED;
-    }
-    if (layoutQ_ != "TND" && socVer_ != SOC_VER_950_CODE) {
-        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "q_input_layout and kv_input_layout",
-                                               ("layout_q=" + layoutQ_ + ", layout_kv=" + layoutKv_).c_str(),
-                                               "BSND/BNSD Q layouts are only supported on chip 950");
-        return ge::GRAPH_FAILED;
-    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1139,9 +1127,9 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
             blockShapeY_ >= 1U && blockShapeY_ <= 128U && (blockShapeY_ & (blockShapeY_ - 1U)) == 0U;
         const bool supportedArch22PagedY =
             blockShapeY_ >= 1U && blockShapeY_ <= 128U && (blockShapeY_ & (blockShapeY_ - 1U)) == 0U;
-        const bool arch22DenseNonQuant = arch22NonQuant && !isPaged_ && layoutKv_ == "TND" && supportedArch22DenseY;
-        const bool arch22PagedNonQuant = arch22NonQuant && isPaged_ && layoutKv_ == "PA_BBND" && blockSize_ == 128U &&
-                                         supportedArch22PagedY && (128U % blockShapeY_) == 0U;
+        const bool arch22DenseNonQuant = arch22NonQuant && !isPaged_ && supportedArch22DenseY;
+        const bool arch22PagedNonQuant =
+            arch22NonQuant && isPaged_ && blockSize_ == 128U && supportedArch22PagedY && (128U % blockShapeY_) == 0U;
         if (!arch35NonQuant && !arch22DenseNonQuant && !arch22PagedNonQuant) {
             OP_LOGE(context->GetNodeName(),
                     "Generalized blockShapeY=%u requires arch35 FP16/BF16 quantType=0, or arch22 "
@@ -1194,12 +1182,15 @@ uint64_t GBSATiling::GenerateTilingKey()
         }
     }
 
-    // Encode layout and storage mode independently. The paging flag is derived from blockTable.
-    tilingKey += layoutKv_ == "PA_BBND" ? 70000000ULL :
-                 layoutKv_ == "PA_BNBD" ? 80000000ULL :
-                 layoutKv_ == "BNSD"    ? 10000000ULL :
-                 layoutKv_ == "BSND"    ? 20000000ULL :
-                                          30000000ULL;
+    // Arch22 shares its existing dense/paged dispatch across layouts. Layout strides
+    // are carried in tiling data, including when static compilation folds the data.
+    // Arch35 retains its layout-specific template dispatch.
+    tilingKey += socVer_ != SOC_VER_950_CODE ? (isPaged_ ? 70000000ULL : 30000000ULL) :
+                 layoutKv_ == "PA_BBND"      ? 70000000ULL :
+                 layoutKv_ == "PA_BNBD"      ? 80000000ULL :
+                 layoutKv_ == "BNSD"         ? 10000000ULL :
+                 layoutKv_ == "BSND"         ? 20000000ULL :
+                                               30000000ULL;
     if (isPaged_) {
         tilingKey += 1000000ULL;
     }
@@ -1213,7 +1204,7 @@ uint64_t GBSATiling::GenerateTilingKey()
     tilingKey += static_cast<uint64_t>(maskType_) * 1000ULL;
 
     // Q layout: TND = 2, BNSD = 3, BSND = 4.
-    tilingKey += layoutQ_ == "BNSD" ? 3ULL : layoutQ_ == "BSND" ? 4ULL : 2ULL;
+    tilingKey += socVer_ != SOC_VER_950_CODE ? 2ULL : layoutQ_ == "BNSD" ? 3ULL : layoutQ_ == "BSND" ? 4ULL : 2ULL;
 
     if (returnSoftmaxlse_) {
         tilingKey += GBSA_LSE_OUT_OFFSET;
@@ -1335,6 +1326,8 @@ ge::graphStatus GBSATiling::FillTilingData(gert::TilingContext* context)
     tilingData_->set_isConsistentTopk(static_cast<uint32_t>(isConsistentTopk_ ? 1 : 0));
     tilingData_->set_qSeqCapacity(qSeqCapacity_);
     tilingData_->set_kvSeqCapacity(kvSeqCapacity_);
+    tilingData_->set_qLayout(layoutQ_ == "TND" ? 0U : layoutQ_ == "BSND" ? 1U : 2U);
+    tilingData_->set_kvLayout(isPaBnbd_ ? 3U : layoutKv_ == "BNSD" ? 2U : layoutKv_ == "BSND" ? 1U : 0U);
     tilingData_->set_totalQTokens(totalQTokens_);
     tilingData_->set_totalKvTokens(totalKvTokens_);
     tilingData_->set_maskType(static_cast<uint32_t>(maskType_));

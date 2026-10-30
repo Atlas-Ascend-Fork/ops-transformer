@@ -110,8 +110,17 @@ public:
 
         LayoutAInL1 layoutAInL1 = LayoutAInL1::template MakeLayout<ElementA>(rowNum, embed);
 
-        copyGmToL1A(l1ATensor, gA, layoutAInL1, layoutSingleANd, tokenNumPerGroup, qStride, tokenNumPerGroup,
-                    BLOCK_SIZE, rowNumRound);
+        if (layoutA.stride(0) < 65536U) {
+            copyGmToL1A(l1ATensor, gA, layoutAInL1, layoutSingleANd, tokenNumPerGroup, qStride, tokenNumPerGroup,
+                        BLOCK_SIZE, rowNumRound);
+        } else {
+            auto rowLayout = layoutA.GetTileLayout(MakeCoord(1U, embed));
+            for (uint32_t row = 0; row < rowNum; ++row) {
+                copyGmToL1A(l1ATensor[layoutAInL1.GetOffset(MakeCoord(row, 0U))],
+                            gA[static_cast<uint64_t>(row) * layoutA.stride(0)], layoutAInL1, rowLayout, 1U, 0U, 1U,
+                            BLOCK_SIZE, rowNumRound);
+            }
+        }
 
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(EVENT_ID3);

@@ -16,6 +16,7 @@
 #include "adv_api/pad/broadcast.h"
 #include "adv_api/reduce/reduce.h"
 #include "../generic_block_sparse_attention_fd_utils.h"
+#include "gbsa_arch22_layout_utils.hpp"
 
 namespace GbsaKernelArch22 {
 
@@ -116,11 +117,15 @@ public:
                                           hasSeqUsedQ, qStorageToken, qTokenInBatch, batchIdx, kvHead)) {
                 continue;
             }
-            const uint64_t baseOutputOffset =
-                (static_cast<uint64_t>(qStorageToken) * tilingData->numHeads + kvHead * groupSize + groupRowStart) *
-                headDim_;
+            const uint64_t baseOutputOffset = TensorOffset(tilingData->qLayout, batchIdx, qTokenInBatch, qStorageToken,
+                                                           kvHead * groupSize + groupRowStart, tilingData->numHeads,
+                                                           headDim_, tilingData->qSeqCapacity);
             const uint64_t lseOutputOffset =
-                static_cast<uint64_t>(qStorageToken) * tilingData->numHeads + kvHead * groupSize + groupRowStart;
+                LseOffset(tilingData->qLayout, batchIdx, qTokenInBatch, qStorageToken,
+                          kvHead * groupSize + groupRowStart, tilingData->numHeads, tilingData->qSeqCapacity);
+            const uint64_t outputHeadStride =
+                tilingData->qLayout == 2U ? static_cast<uint64_t>(tilingData->qSeqCapacity) * headDim_ : headDim_;
+            const uint64_t lseHeadStride = tilingData->qLayout == 0U ? 1U : tilingData->qSeqCapacity;
             const uint32_t tileElems = rowCount * partialOStride;
             AscendC::Duplicate(oAccUb_, 0.0f, tileElems);
             AscendC::PipeBarrier<PIPE_V>();
@@ -155,17 +160,32 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
             for (uint32_t row = 0; row < rowCount; ++row) {
-                AscendC::DataCopyPad(gO[baseOutputOffset + static_cast<uint64_t>(row) * headDim_],
+                AscendC::DataCopyPad(gO[baseOutputOffset + static_cast<uint64_t>(row) * outputHeadStride],
                                      oOutUb_[row * partialOStride],
                                      AscendC::DataCopyExtParams(1, headDim_ * sizeof(ElementO), 0, 0, 0));
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             if constexpr (OUTPUT_LSE) {
+                // Expand scalar LSE values to aligned UB rows before strided GM writes.
+                if (lseHeadStride != 1U) {
+                    AscendC::Brcb(broadcastUb_.template ReinterpretCast<uint32_t>(),
+                                  globalLseUb_.template ReinterpretCast<uint32_t>(),
+                                  CeilDiv(rowCount, FLOATS_PER_BLOCK), AscendC::BrcbRepeatParams(1, 8));
+                    AscendC::PipeBarrier<PIPE_V>();
+                }
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID1);
-                AscendC::DataCopyPad(gLse[lseOutputOffset], globalLseUb_,
-                                     AscendC::DataCopyExtParams(1, rowCount * sizeof(float), 0, 0, 0));
+                if (lseHeadStride == 1U) {
+                    AscendC::DataCopyPad(gLse[lseOutputOffset], globalLseUb_,
+                                         AscendC::DataCopyExtParams(1, rowCount * sizeof(float), 0, 0, 0));
+                } else {
+                    for (uint32_t row = 0; row < rowCount; ++row) {
+                        AscendC::DataCopyPad(gLse[lseOutputOffset + row * lseHeadStride],
+                                             broadcastUb_[row * FLOATS_PER_BLOCK],
+                                             AscendC::DataCopyExtParams(1, sizeof(float), 0, 0, 0));
+                    }
+                }
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID1);
             }

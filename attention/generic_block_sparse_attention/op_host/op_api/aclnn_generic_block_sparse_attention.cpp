@@ -339,9 +339,9 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
             OP_LOGE(ACLNN_ERR_PARAM_INVALID, "BSND/BNSD query requires sequsedQ and sequsedKv.");
             return ACLNN_ERR_PARAM_INVALID;
         }
-        if (op::GetCurrentPlatformInfo().GetCurNpuArch() != NpuArch::DAV_3510 || quantType != 0 ||
+        if (quantType != 0 ||
             (query->GetDataType() != DataType::DT_FLOAT16 && query->GetDataType() != DataType::DT_BF16)) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "BSND/BNSD query requires A5 FP16/BF16 non-quantization.");
+            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "BSND/BNSD query requires FP16/BF16 non-quantization.");
             return ACLNN_ERR_PARAM_INVALID;
         }
     }

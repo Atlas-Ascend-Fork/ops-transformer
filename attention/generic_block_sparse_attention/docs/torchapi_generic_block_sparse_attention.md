@@ -245,7 +245,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | attention_out | Tensor | 必选 | generic_block_sparse_attention的计算输出 | bfloat16/float16 | ND | TND: (Q_T,Q_N,D)；BSND: (B,Sq,Q_N,D)；BNSD: (B,Q_N,Sq,D) |
-| softmax_lse | Tensor | 可选 | softmax的LSE结果 | float32 | ND | (Q_T, Q_N, 1) 或空 |
+| softmax_lse | Tensor | 可选 | softmax的LSE结果 | float32 | ND | TND: (Q_T,Q_N,1)；BSND/BNSD: (B,Q_N,Sq,1)；或空 |
 
 **说明**
 
@@ -263,7 +263,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 - <term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16场景：`head_dim`支持1～256的任意值；`layout_q/layout_kv`支持`TND/PA_BBND`、`TND/PA_BNBD`、`TND/TND`、`BSND/BSND`、`BNSD/BNSD`、`BSND/PA_BBND`、`BNSD/PA_BBND`、`BSND/PA_BNBD`和`BNSD/PA_BNBD`，不支持其他组合；`mask_mode`支持0（非因果）和1（causal）；`residual_block_mode`支持0或1。
 <!-- end id7 -->
 <!-- npu="A3,910b" id8 -->
-- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>非量化FLOAT16/BFLOAT16场景：`head_dim`支持1～256的任意值；`layout_q/layout_kv`支持`TND/PA_BBND`和`TND/TND`；`block_shape=[1,Y]`，Y支持1、2、4、8、16、32、64、128；`mask_mode`支持0（非因果）和1（causal）；`residual_block_mode`支持0或1。TND KV须传入`cu_seqlens_kv`，Q/K/V按连续TND存储；causal模式下各batch须满足实际KV长度不小于实际Q长度。
+- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>非量化FLOAT16/BFLOAT16场景：`head_dim`支持1～256的任意值；`layout_q/layout_kv`支持`TND/PA_BBND`、`TND/PA_BNBD`、`TND/TND`、`BSND/BSND`、`BNSD/BNSD`、`BSND/PA_BBND`、`BNSD/PA_BBND`、`BSND/PA_BNBD`和`BNSD/PA_BNBD`；`block_shape=[1,Y]`，Y支持1、2、4、8、16、32、64、128；`mask_mode`支持0（非因果）和1（causal）；`residual_block_mode`支持0或1。TND KV须传入`cu_seqlens_kv`，dense Q/K/V按对应布局连续存储；causal模式下各batch须满足实际KV长度不小于实际Q长度。
 <!-- end id8 -->
 <!-- npu="950" id9 -->
 - <term>Ascend 950PR&950DT系列产品</term> FP8量化场景：`head_dim`仅支持128，`layout_q/layout_kv`仅支持`TND/PA_BBND`，`mask_mode=1`、`residual_block_mode=0`、`block_shape=[1,128]`。
@@ -278,7 +278,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 - `softmax_precision`：<term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16场景支持0或1，FP8量化场景仅支持1；<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>上FLOAT16支持0或1，BFLOAT16仅支持0。
 <!-- end id12 -->
 <!-- npu="A3,910b" id13 -->
-- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>支持在`layout_q=TND`、`layout_kv=PA_BBND`或`TND`、`residual_block_mode=0`或1时输出LSE。FP8量化场景不支持输出LSE。
+- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>非量化场景支持在上述布局组合及`residual_block_mode=0`或1时输出LSE。FP8量化场景不支持输出LSE。
 <!-- end id13 -->
 - 每组有效稀疏索引须非负、严格升序且不重复，位于前`sparse_block_count`个位置；随机升序即可，不要求等步长或物理页连续。
 <!-- npu="A3,910b" id14 -->

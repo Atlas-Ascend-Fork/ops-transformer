@@ -469,12 +469,9 @@ aclnnStatus CheckGbsaMetadataParams(const aclTensor* sparseBlockIdx, const aclTe
     if (status != ACLNN_SUCCESS) {
         return status;
     }
-    if (((!GbsaIsLayout(kvInputLayout, "PA_BBND") || !GbsaIsLayout(qInputLayout, "TND")) &&
-         quantType != GBSA_QUANT_TYPE_NONE) ||
-        (!isArch35 && (!GbsaIsLayout(qInputLayout, "TND") ||
-                       (!GbsaIsLayout(kvInputLayout, "TND") && !GbsaIsLayout(kvInputLayout, "PA_BBND"))))) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID,
-                "Dense non-paged KV requires quantType=0; arch22 requires TND Q and TND/PA_BBND KV.");
+    if ((!GbsaIsLayout(kvInputLayout, "PA_BBND") || !GbsaIsLayout(qInputLayout, "TND")) &&
+        quantType != GBSA_QUANT_TYPE_NONE) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Batched Q and dense/PA_BNBD KV require quantType=0.");
         return ACLNN_ERR_PARAM_INVALID;
     }
     status = CheckGbsaMaxSeqLenAttrs(maxQSeqLen, maxKvSeqLen);
@@ -485,11 +482,12 @@ aclnnStatus CheckGbsaMetadataParams(const aclTensor* sparseBlockIdx, const aclTe
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "BSND/BNSD require maxQSeqLen=Sq > 0 within INT32.");
         return ACLNN_ERR_PARAM_INVALID;
     }
-    status =
-        CheckGbsaScalarAttrs(numQHeads, numKvHeads, headDim, blockShapeX, blockShapeY, layoutSparsePattern, isArch35,
-                             isArch35 && quantType == GBSA_QUANT_TYPE_NONE,
-                             !isArch35 && quantType == GBSA_QUANT_TYPE_NONE && GbsaIsLayout(kvInputLayout, "TND"),
-                             !isArch35 && quantType == GBSA_QUANT_TYPE_NONE && GbsaIsLayout(kvInputLayout, "PA_BBND"));
+    status = CheckGbsaScalarAttrs(
+        numQHeads, numKvHeads, headDim, blockShapeX, blockShapeY, layoutSparsePattern, isArch35,
+        isArch35 && quantType == GBSA_QUANT_TYPE_NONE,
+        !isArch35 && quantType == GBSA_QUANT_TYPE_NONE && GbsaIsLayout(kvInputLayout, qInputLayout),
+        !isArch35 && quantType == GBSA_QUANT_TYPE_NONE &&
+            (GbsaIsLayout(kvInputLayout, "PA_BBND") || GbsaIsLayout(kvInputLayout, "PA_BNBD")));
     if (status != ACLNN_SUCCESS) {
         return status;
     }

@@ -516,7 +516,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
 - <term>Ascend 950PR&950DT系列产品</term>非量化支持1≤blockShapeY≤128的任意整数；量化场景仅支持128。
 <!-- end id8 -->
 <!-- npu="A3,910b" id9 -->
-- returnSoftmaxlse：非量化场景支持0或1；<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>在layoutQ=TND、layoutKv=PA_BBND或TND、residualBlockMode=0或1时支持1；FP8路径仅支持0。
+- returnSoftmaxlse：非量化场景支持0或1；FP8路径仅支持0。
 <!-- end id9 -->
 
 
@@ -608,7 +608,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
 - <term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16场景：`headDim`支持1～256的任意值；`layoutQ/layoutKv`支持`TND/PA_BBND`、`TND/PA_BNBD`、`TND/TND`、`BSND/BSND`、`BNSD/BNSD`、`BSND/PA_BBND`、`BNSD/PA_BBND`、`BSND/PA_BNBD`和`BNSD/PA_BNBD`，不支持其他组合；`maskType`支持0（非因果）和1（causal）；`residualBlockMode`支持0或1。
 <!-- end id10 -->
 <!-- npu="A3,910b" id11 -->
-- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>非量化FLOAT16/BFLOAT16场景：`headDim`支持1～256的任意值；`layoutQ/layoutKv`支持`TND/PA_BBND`和`TND/TND`；`blockShape=[1,Y]`，Y支持1、2、4、8、16、32、64、128；`maskType`支持0（非因果）和1（causal）；`residualBlockMode`支持0或1。TND KV须传入`cuSeqLengthsKvOptional`，Q/K/V按连续TND存储；causal模式下各batch须满足实际KV长度不小于实际Q长度。
+- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>非量化FLOAT16/BFLOAT16场景：`headDim`支持1～256的任意值；`layoutQ/layoutKv`支持`TND/PA_BBND`、`TND/PA_BNBD`、`TND/TND`、`BSND/BSND`、`BNSD/BNSD`、`BSND/PA_BBND`、`BNSD/PA_BBND`、`BSND/PA_BNBD`和`BNSD/PA_BNBD`；`blockShape=[1,Y]`，Y支持1、2、4、8、16、32、64、128；`maskType`支持0（非因果）和1（causal）；`residualBlockMode`支持0或1。TND KV须传入`cuSeqLengthsKvOptional`，dense Q/K/V按对应布局连续存储；causal模式下各batch须满足实际KV长度不小于实际Q长度。
 <!-- end id11 -->
 <!-- npu="950" id12 -->
 - <term>Ascend 950PR&950DT系列产品</term> FP8量化场景：`headDim`仅支持128，`layoutQ/layoutKv`仅支持`TND/PA_BBND`，`maskType=1`、`residualBlockMode=0`、`blockShape=[1,128]`。
@@ -623,7 +623,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
 - `softmaxPrecision`：<term>Ascend 950PR&950DT系列产品</term>非量化FLOAT16/BFLOAT16场景支持0或1，FP8量化场景仅支持1；<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>上FLOAT16支持0或1，BFLOAT16仅支持0。
 <!-- end id15 -->
 <!-- npu="A3,910b" id16 -->
-- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>支持在`layoutQ=TND`、`layoutKv=PA_BBND`或`TND`、`residualBlockMode=0`或1时输出LSE。
+- <term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term>非量化场景支持在上述布局组合及`residualBlockMode=0`或1时输出LSE。
 <!-- end id16 -->
 
 ### 基准说明

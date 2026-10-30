@@ -101,9 +101,7 @@ __global__ __aicore__ void GbsaInferIntfRegularArch22(GM_ADDR q, GM_ADDR k, GM_A
                                                       GM_ADDR blockTable, GM_ADDR o, GM_ADDR softmaxLse,
                                                       GM_ADDR workspace, GM_ADDR tiling)
 {
-    if (tiling == nullptr) {
-        return;
-    }
+    // Static kernels embed tiling data and pass nullptr for the GM tiling argument.
     GET_TILING_DATA_WITH_STRUCT(GenericBlockSparseAttn::GenericBlockSparseAttentionTilingData, tilingDataLocal, tiling);
     const auto* data = &tilingDataLocal;
     const bool wideSmallM = data->embeddingSize > 0U && data->embeddingSize <= 256U && data->groupSize > 0U &&

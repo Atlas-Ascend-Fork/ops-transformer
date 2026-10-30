@@ -91,6 +91,9 @@ TILING_DATA_FIELD_DEF(uint32_t, qSeqCapacity);
 TILING_DATA_FIELD_DEF(uint32_t, kvSeqCapacity);
 // Mask mode consumed by arch22: 0 = none, 1 = built-in causal.
 TILING_DATA_FIELD_DEF(uint32_t, maskType);
+// Arch22 layout strides: 0=TND/PA_BBND, 1=BSND, 2=BNSD, 3=PA_BNBD.
+TILING_DATA_FIELD_DEF(uint32_t, qLayout);
+TILING_DATA_FIELD_DEF(uint32_t, kvLayout);
 END_TILING_DATA_DEF;
 REGISTER_TILING_DATA_CLASS(GenericBlockSparseAttention, GenericBlockSparseAttentionTilingData)
 

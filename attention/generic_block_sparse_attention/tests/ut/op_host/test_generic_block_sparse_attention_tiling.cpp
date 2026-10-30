@@ -776,6 +776,87 @@ TEST_F(generic_block_sparse_attention_tiling_ut, batched_layouts_arch35)
     }
 }
 
+TEST_F(generic_block_sparse_attention_tiling_ut, layout_matrix_arch22)
+{
+    for (const std::string layout : {"TND", "BSND", "BNSD"}) {
+        for (int storage = 0; storage < 3; ++storage) {
+            for (int precisionMode = 0; precisionMode < 3; ++precisionMode) {
+                const auto dtype = precisionMode == 2 ? ge::DT_BF16 : ge::DT_FLOAT16;
+                const int64_t precision = precisionMode == 1 ? 1 : 0;
+                for (int flags = 0; flags < 16; ++flags) {
+                    SCOPED_TRACE(layout + "/" + std::to_string(storage) + "/" + std::to_string(precisionMode) + "/" +
+                                 std::to_string(flags));
+                    const bool paged = storage != 0;
+                    const int64_t mask = flags & 1;
+                    const int64_t lse = (flags >> 1) & 1;
+                    const int64_t residual = (flags >> 2) & 1;
+                    const int64_t y = (flags & 8) ? 16 : 128;
+                    auto inputs = MakeInputs(dtype, 65, 6, 2);
+                    inputs[0] =
+                        layout == "TND" ?
+                            gert::TilingContextPara::TensorDescription{{{6, 6, 65}, {6, 6, 65}}, dtype, ge::FORMAT_ND} :
+                        layout == "BSND" ?
+                            gert::TilingContextPara::TensorDescription{
+                                {{2, 3, 6, 65}, {2, 3, 6, 65}}, dtype, ge::FORMAT_ND} :
+                            gert::TilingContextPara::TensorDescription{
+                                {{2, 6, 3, 65}, {2, 6, 3, 65}}, dtype, ge::FORMAT_ND};
+                    inputs[1] = layout == "TND" ?
+                                    gert::TilingContextPara::TensorDescription{
+                                        {{514, 2, 65}, {514, 2, 65}}, dtype, ge::FORMAT_ND} :
+                                layout == "BSND" ?
+                                    gert::TilingContextPara::TensorDescription{
+                                        {{2, 257, 2, 65}, {2, 257, 2, 65}}, dtype, ge::FORMAT_ND} :
+                                    gert::TilingContextPara::TensorDescription{
+                                        {{2, 2, 257, 65}, {2, 2, 257, 65}}, dtype, ge::FORMAT_ND};
+                    if (paged) {
+                        inputs[1] = storage == 1 ?
+                                        gert::TilingContextPara::TensorDescription{
+                                            {{8, 128, 2, 65}, {8, 128, 2, 65}}, dtype, ge::FORMAT_ND} :
+                                        gert::TilingContextPara::TensorDescription{
+                                            {{8, 2, 128, 65}, {8, 2, 128, 65}}, dtype, ge::FORMAT_ND};
+                    }
+                    inputs[2] = inputs[1];
+                    inputs[3] = {{{2, 6, 12}, {2, 6, 12}}, ge::DT_INT32, ge::FORMAT_ND};
+                    inputs[4] = {{{2, 6}, {2, 6}}, ge::DT_INT32, ge::FORMAT_ND};
+                    for (int index = 11; index < 16; ++index) {
+                        inputs[index] = {{}, ge::DT_UNDEFINED, ge::FORMAT_ND};
+                    }
+                    if (layout == "TND") {
+                        inputs[11] = {{{3}, {3}}, ge::DT_INT64, ge::FORMAT_ND};
+                        if (!paged) {
+                            inputs[12] = inputs[11];
+                        }
+                    }
+                    inputs[13] = {{{2}, {2}}, ge::DT_INT32, ge::FORMAT_ND};
+                    inputs[14] = inputs[13];
+                    if (paged) {
+                        inputs[15] = {{{2, 4}, {2, 4}}, ge::DT_INT32, ge::FORMAT_ND};
+                    }
+                    auto outputs = MakeOutputs(dtype, lse != 0);
+                    outputs[0] = inputs[0];
+                    if (lse != 0) {
+                        outputs[1] = layout == "TND" ?
+                                         gert::TilingContextPara::TensorDescription{
+                                             {{6, 6, 1}, {6, 6, 1}}, ge::DT_FLOAT, ge::FORMAT_ND} :
+                                         gert::TilingContextPara::TensorDescription{
+                                             {{2, 6, 3, 1}, {2, 6, 3, 1}}, ge::DT_FLOAT, ge::FORMAT_ND};
+                    }
+                    const uint64_t key = 9200000000000000ULL + (paged ? 71000000ULL : 30000000ULL) + 2ULL +
+                                         (dtype == ge::DT_BF16 ? 22220ULL : 0ULL) + mask * 1000ULL +
+                                         precision * 100000ULL + lse * 100000000ULL + residual * 1000000000ULL;
+                    GenericBlockSparseAttentionCompileInfo compileInfo;
+                    gert::TilingContextPara ctx(
+                        "GenericBlockSparseAttention", inputs, outputs,
+                        MakeAttrs(mask, 0, precision, lse, 0.0f, -1, -1, 4, layout,
+                                  paged ? (storage == 2 ? "PA_BNBD" : "PA_BBND") : layout, residual, false, {1, y}),
+                        &compileInfo, "Ascend910B", 40, 196608);
+                    ExecuteTestCase(ctx, ge::GRAPH_SUCCESS, key);
+                }
+            }
+        }
+    }
+}
+
 TEST_F(generic_block_sparse_attention_tiling_ut, batched_layout_rejects_invalid_shapes_and_mixed_layouts)
 {
     for (int invalid = 0; invalid < 7; ++invalid) {
@@ -802,6 +883,9 @@ TEST_F(generic_block_sparse_attention_tiling_ut, batched_layout_rejects_invalid_
             inputs[13] = {{{1}, {1}}, ge::DT_INT32, ge::FORMAT_ND};
         } else if (invalid == 2) {
             inputs[3] = {{{2, 3, 4}, {2, 3, 4}}, ge::DT_INT32, ge::FORMAT_ND};
+        } else if (invalid == 4) {
+            // Arch22 now supports BNSD; retain negative coverage with an invalid KV length vector.
+            inputs[14] = {{{1}, {1}}, ge::DT_INT32, ge::FORMAT_ND};
         }
         GenericBlockSparseAttentionCompileInfo compileInfo;
         gert::TilingContextPara ctx("GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_FLOAT16, false),
