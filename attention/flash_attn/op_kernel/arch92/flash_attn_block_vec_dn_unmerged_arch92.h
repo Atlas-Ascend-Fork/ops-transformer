@@ -239,16 +239,15 @@ public:
         constexpr uint32_t softmaxBufElementCount = UB_SOFTMAX_SUM_BUF_BYTES / sizeof(T);
         LocalTensor<T> sumUb = softmaxSumBuf_[slotIdx * softmaxBufElementCount];
         LocalTensor<T> maxUb = softmaxMaxBuf_[slotIdx * softmaxBufElementCount];
+        T sumInitValue = static_cast<T>(0);
+        T maxInitValue = static_cast<T>(-std::numeric_limits<float>::infinity());
         if (constInfo_.learnableSinkFlag && runInfo.isFirstFdBlock) {
             // S1-only: 本 M 块属单一 head(n2Idx, gIdx), sink 为单值标量广播
             // (sum=1, max=sink, 虚拟 sink token value=0)
-            float sinkValue = sinkGm_.GetValue(runInfo.n2Idx * constInfo_.gSize + runInfo.gIdx);
-            FaVectorApi::ResetSoftmaxBuffer<T, softmaxBufElementCount>(sumUb, maxUb, static_cast<T>(1),
-                                                                       static_cast<T>(sinkValue));
-        } else {
-            FaVectorApi::ResetSoftmaxBuffer<T, softmaxBufElementCount>(
-                sumUb, maxUb, static_cast<T>(0), static_cast<T>(-std::numeric_limits<float>::infinity()));
+            sumInitValue = static_cast<T>(1);
+            maxInitValue = sinkGm_.GetValue(runInfo.n2Idx * constInfo_.gSize + runInfo.gIdx);
         }
+        FaVectorApi::ResetSoftmaxBuffer<T, softmaxBufElementCount>(sumUb, maxUb, sumInitValue, maxInitValue);
     }
 
     __aicore__ inline void InitCrossCoreSync()

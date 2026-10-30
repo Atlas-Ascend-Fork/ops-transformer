@@ -265,8 +265,8 @@ public:
                 LocalTensor<float> sinkTmpUb =
                     ubVec1ResBuffers_[vec1ResUbBufId_ * UB_VEC1_RES_BUF_BYTES].template ReinterpretCast<float>();
 
-                AttentionCommon::SinkExpandMaxVf<T, float, true>(maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize,
-                                                                 runInfo.actS1Size, constInfo_.gSize);
+                AttentionCommon::SinkExpandMaxVf<T, float, true, mBaseSize / CV_RATIO>(
+                    maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize, runInfo.actS1Size, constInfo_.gSize);
             }
             Mutex::Unlock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
         } else {

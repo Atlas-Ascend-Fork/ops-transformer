@@ -272,11 +272,11 @@ public:
                     ubVec1ResBuffers_[vec1ResUbBufId_ * UB_VEC1_RES_BUF_BYTES].template ReinterpretCast<float>();
 
                 if constexpr (LAYOUT_T == FA_LAYOUT::BNSD) {
-                    AttentionCommon::SinkExpandMaxVf<T, float, true>(maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize,
-                                                                     runInfo.actS1Size, constInfo_.gSize);
+                    AttentionCommon::SinkExpandMaxVf<T, float, true, mBaseSize / CV_RATIO>(
+                        maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize, runInfo.actS1Size, constInfo_.gSize);
                 } else {
-                    AttentionCommon::SinkExpandMaxVf<T, float, false>(maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize,
-                                                                      runInfo.actS1Size, constInfo_.gSize);
+                    AttentionCommon::SinkExpandMaxVf<T, float, false, mBaseSize / CV_RATIO>(
+                        maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize, runInfo.actS1Size, constInfo_.gSize);
                 }
             }
             Mutex::Unlock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);

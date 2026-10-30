@@ -505,11 +505,11 @@ public:
         CopySinkIn(runInfo);
         LocalTensor<float> sinkInput = sinkBuf.template ReinterpretCast<float>();
         if constexpr (layout == LayOutTypeEnum::LAYOUT_BNSD) {
-            AttentionCommon::SinkExpandMaxVf<float, float, true>(maxUb, sinkInput, runInfo.gS1Idx + runInfo.vecMbaseIdx,
-                                                                 runInfo.actVecMSize, runInfo.actS1Size,
-                                                                 constInfo.gSize);
+            AttentionCommon::SinkExpandMaxVf<float, float, true, static_cast<uint32_t>(SOFTMAX_BUF_BYTES / sizeof(T))>(
+                maxUb, sinkInput, runInfo.gS1Idx + runInfo.vecMbaseIdx, runInfo.actVecMSize, runInfo.actS1Size,
+                constInfo.gSize);
         } else {
-            AttentionCommon::SinkExpandMaxVf<float, float, false>(
+            AttentionCommon::SinkExpandMaxVf<float, float, false, static_cast<uint32_t>(SOFTMAX_BUF_BYTES / sizeof(T))>(
                 maxUb, sinkInput, runInfo.gS1Idx + runInfo.vecMbaseIdx, runInfo.actVecMSize, runInfo.actS1Size,
                 constInfo.gSize);
         }

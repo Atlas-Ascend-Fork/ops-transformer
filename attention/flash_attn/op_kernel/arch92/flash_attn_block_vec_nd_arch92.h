@@ -27,7 +27,7 @@
 #include "../../../common/op_kernel/vector_common.h"
 #include "../../../common/op_kernel/init_output.h"
 #include "../memory_copy_arch35.h"
-#include "../utils/attn_sink_arch92.h"
+#include "../../../common/op_kernel/attn_sink_gs1.h"
 #include "../../../common/op_kernel/arch_info.h"
 
 using namespace AscendC;
@@ -251,25 +251,26 @@ public:
         LocalTensor<T> sumUb = softmaxSumBuf_[slotIdx * softmaxBufElementCount];
         LocalTensor<T> maxUb = softmaxMaxBuf_[slotIdx * softmaxBufElementCount];
         if (constInfo_.learnableSinkFlag && runInfo.isFirstFdBlock) {
-            // sink 参与归一分母: sum 初始化为 1, max 由 sink 值展开写入
             Duplicate<T>(sumUb, static_cast<T>(1), softmaxBufElementCount);
 
             uint32_t gs1Start = runInfo.gS1Idx + runInfo.vecMbaseIdx;
-            constexpr bool IS_GS1_LAYOUT = (LAYOUT_T == FA_LAYOUT::BNSD);
 
             Mutex::Lock<PIPE_MTE2>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
             {
                 LocalTensor<float> sinkTmpUb =
                     ubVec1ResBuffers_[vec1ResUbBufId_ * UB_VEC1_RES_BUF_BYTES].template ReinterpretCast<float>();
-                if constexpr (IS_GS1_LAYOUT) {
+                if constexpr (LAYOUT_T == FA_LAYOUT::BSND || LAYOUT_T == FA_LAYOUT::TND) {
+                    AttentionCommon::SinkCopyInS1G(sinkTmpUb, sinkGm_, gs1Start, runInfo.actVecMSize,
+                                                   static_cast<uint32_t>(runInfo.actS1Size), runInfo.n2Idx,
+                                                   constInfo_.gSize);
+                } else if constexpr (LAYOUT_T == FA_LAYOUT::BNSD) {
                     AttentionCommon::SinkCopyInGS1(sinkTmpUb, sinkGm_, gs1Start, runInfo.actVecMSize,
                                                    static_cast<uint32_t>(runInfo.actS1Size), runInfo.n2Idx,
                                                    constInfo_.gSize);
                 } else {
-                    // BSND/TND: S1G 布局
-                    AttentionCommon::SinkCopyInS1G(sinkTmpUb, sinkGm_, gs1Start, runInfo.actVecMSize,
-                                                   static_cast<uint32_t>(runInfo.actS1Size), runInfo.n2Idx,
-                                                   constInfo_.gSize);
+                    static_assert(
+                        LAYOUT_T == FA_LAYOUT::BSND || LAYOUT_T == FA_LAYOUT::TND || LAYOUT_T == FA_LAYOUT::BNSD,
+                        "sink injection only supports BNSD/BSND/TND layout");
                 }
             }
             Mutex::Unlock<PIPE_MTE2>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
@@ -278,9 +279,20 @@ public:
             {
                 LocalTensor<float> sinkTmpUb =
                     ubVec1ResBuffers_[vec1ResUbBufId_ * UB_VEC1_RES_BUF_BYTES].template ReinterpretCast<float>();
-                AttentionCommon::SinkExpandMaxVf<T, float, IS_GS1_LAYOUT, mBaseSize>(
-                    maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize, static_cast<uint32_t>(runInfo.actS1Size),
-                    constInfo_.gSize);
+
+                if constexpr (LAYOUT_T == FA_LAYOUT::BNSD) {
+                    AttentionCommon::SinkExpandMaxVf<T, float, true, mBaseSize>(
+                        maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize, static_cast<uint32_t>(runInfo.actS1Size),
+                        constInfo_.gSize);
+                } else if constexpr (LAYOUT_T == FA_LAYOUT::BSND || LAYOUT_T == FA_LAYOUT::TND) {
+                    AttentionCommon::SinkExpandMaxVf<T, float, false, mBaseSize>(
+                        maxUb, sinkTmpUb, gs1Start, runInfo.actVecMSize, static_cast<uint32_t>(runInfo.actS1Size),
+                        constInfo_.gSize);
+                } else {
+                    static_assert(
+                        LAYOUT_T == FA_LAYOUT::BSND || LAYOUT_T == FA_LAYOUT::TND || LAYOUT_T == FA_LAYOUT::BNSD,
+                        "sink injection only supports BNSD/BSND/TND layout");
+                }
             }
             Mutex::Unlock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
         } else {

@@ -15,7 +15,6 @@
 
 #include <map>
 #include <numeric>
-#include <graph/utils/type_utils.h>
 #include "log/log.h"
 #include "log/error_code.h"
 #include "register/op_def_registry.h"
@@ -33,27 +32,36 @@ using namespace arch35FA;
 
 ge::graphStatus SinksChecker::CheckSinglePara(const FaTilingInfo& faInfo)
 {
-    if (faInfo.sinksFlag) {
-        if (faInfo.opParamInfo.sinks.tensor == nullptr || faInfo.opParamInfo.sinks.desc == nullptr) {
-            OP_LOGE(faInfo.opName, "sinks tensor or desc is null.");
-            return ge::GRAPH_FAILED;
-        }
-        auto dtype = faInfo.opParamInfo.sinks.desc->GetDataType();
-        if (dtype != ge::DT_FLOAT) {
-            OP_LOGE(faInfo.opName, "sinks dtype must be FLOAT32, but got %s.",
-                    ge::TypeUtils::DataTypeToSerialString(dtype).c_str());
-            return ge::GRAPH_FAILED;
-        }
-        auto& shape = faInfo.opParamInfo.sinks.tensor->GetStorageShape();
-        if (shape.GetDimNum() != 1) {
-            OP_LOGE(faInfo.opName, "sinks shape must be 1D (Q_N,), but got %lu dims.", shape.GetDimNum());
-            return ge::GRAPH_FAILED;
-        }
-        if (static_cast<uint64_t>(shape.GetDim(0)) != static_cast<uint64_t>(faInfo.n1Size)) {
-            OP_LOGE(faInfo.opName, "sinks shape[0] must equal Q_N (%ld), but got %ld.", faInfo.n1Size, shape.GetDim(0));
-            return ge::GRAPH_FAILED;
-        }
+    if (!faInfo.sinksFlag) {
+        return ge::GRAPH_SUCCESS;
     }
+
+    auto& sinksTensor = faInfo.opParamInfo.sinks.tensor;
+    OP_CHECK_IF(sinksTensor == nullptr, OP_LOGE_WITH_INVALID_INPUT(faInfo.opName, "sinks"), return ge::GRAPH_FAILED);
+
+    const gert::CompileTimeTensorDesc* sinksDesc = faInfo.opParamInfo.sinks.desc;
+    OP_CHECK_IF(sinksDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(faInfo.opName, "TensorDesc of sinks"),
+                return ge::GRAPH_FAILED);
+
+    auto dtype = sinksDesc->GetDataType();
+    OP_CHECK_IF(dtype != ge::DT_FLOAT,
+                OP_LOGE_FOR_INVALID_DTYPE(faInfo.opName, "sinks", Ops::Base::ToString(dtype).c_str(), "FLOAT32"),
+                return ge::GRAPH_FAILED);
+
+    auto& shape = sinksTensor->GetStorageShape();
+    uint32_t dimNum = shape.GetDimNum();
+    OP_CHECK_IF(dimNum != 1,
+                OP_LOGE_FOR_INVALID_SHAPEDIM(faInfo.opName, "sinks", (std::to_string(dimNum) + "D").c_str(), "1D"),
+                return ge::GRAPH_FAILED);
+
+    if (shape.GetDim(0) != faInfo.n1Size) {
+        std::string shapeStr = Ops::Base::ToString(shape);
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+            faInfo.opName, "sinks", shapeStr.c_str(),
+            ("The first dim of sinks must be equal to Q_N " + std::to_string(faInfo.n1Size)).c_str());
+        return ge::GRAPH_FAILED;
+    }
+
     return ge::GRAPH_SUCCESS;
 }
 

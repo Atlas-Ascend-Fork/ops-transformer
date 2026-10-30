@@ -22,8 +22,11 @@ def generate_cpu_mask(
         mask = torch.triu(torch.ones(s1, s2), diagonal=s2 - s1 + 1).bool()
     elif mask_mode == 4:
         # -1 means infinity (no mask on that side)
-        effective_win_right = s2 if win_right == -1 else win_right
-        effective_win_left = s1 if win_left == -1 else win_left
+        # NOTE: must be truly unlimited (>= s1+s2), not s1/s2; otherwise when
+        # s2 > s1 (e.g. varlen/decode) a large part of valid keys gets masked.
+        _unlimited = s1 + s2 + 1
+        effective_win_right = _unlimited if win_right == -1 else win_right
+        effective_win_left = _unlimited if win_left == -1 else win_left
         atten_mask_u = torch.triu(
             torch.ones(s1, s2), diagonal=effective_win_right + 1 + s2 - s1
         )
