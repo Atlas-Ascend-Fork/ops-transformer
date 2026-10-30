@@ -409,15 +409,28 @@ __aicore__ inline void ProcessVec1DnNoUpdate(const LocalTensor<T2>& dstTensor, c
         deScaleQK, minValue, keepProb, needAtten, dScale, blockStride, repeatStride, pScale, sinkValue);
 }
 
+// Read only real Key columns: mask UB padding is intentionally not materialized.
+template <typename T>
+__simd_callee__ inline void ApplyDnMaskAndReduceMax(__ubuf__ float* score, __ubuf__ uint8_t* mask, const T scale,
+                                                    RegTensor<float>& src, RegTensor<float>& maxValue,
+                                                    RegTensor<float>& minValue, MaskReg& active)
+{
+    MaskReg keep;
+    LoadAlign(src, score);
+    Muls(src, src, scale, active);
+    LoadAlign<uint8_t, Reg::MaskDist::DIST_DS>(keep, mask);
+    Select(src, src, minValue, keep);
+    StoreAlign<T, Reg::StoreDist::DIST_NORM_B32>(score, src, active);
+    Max(maxValue, maxValue, src, active);
+}
+
 template <typename T, typename T2, bool hasAtten = false, uint16_t ubN = 128, bool hasSink = false>
-__simd_vf__ inline void ProcessVec1DnUpdateVF(__ubuf__ T2* x_exp, __ubuf__ float* input_x_local_UB,
-                                              __ubuf__ float* exp_max_fp32, __ubuf__ float* new_global_sum,
-                                              __ubuf__ float* new_global_max, __ubuf__ uint32_t* maskUb,
-                                              __ubuf__ uint8_t* indexesUb, const uint32_t m, const uint32_t n,
-                                              const uint32_t originN, const T scale, float deScaleQK, const T minValue,
-                                              float keepProb, bool needAtten, const float dScale,
-                                              const uint32_t blockStride, const uint32_t repeatStride,
-                                              const float pScale = 1.0f, const float sinkValue = 0.0f)
+__simd_vf__ inline void ProcessVec1DnUpdateVF(
+    __ubuf__ T2* x_exp, __ubuf__ float* input_x_local_UB, __ubuf__ float* exp_max_fp32, __ubuf__ float* new_global_sum,
+    __ubuf__ float* new_global_max, __ubuf__ uint32_t* maskUb, __ubuf__ uint8_t* indexesUb, const uint32_t m,
+    const uint32_t n, const uint32_t originN, const T scale, float deScaleQK, const T minValue, float keepProb,
+    bool needAtten, const float dScale, const uint32_t blockStride, const uint32_t repeatStride,
+    const float pScale = 1.0f, const float sinkValue = 0.0f, const uint32_t maskStride = 0)
 {
     RegTensor<float> vreg_x_sum_0;
     RegTensor<float> vreg_x_sum_1;
@@ -521,9 +534,37 @@ __simd_vf__ inline void ProcessVec1DnUpdateVF(__ubuf__ T2* x_exp, __ubuf__ float
     }
     mem_bar(VST_VLD);
 
-    if constexpr ((IsSameType<T2, fp8_e5m2_t>::value || IsSameType<T2, fp8_e4m3fn_t>::value ||
-                   IsSameType<T2, hifloat8_t>::value) &&
-                  hasAtten) {
+    if constexpr (hasAtten && (IsSameType<T2, half>::value || IsSameType<T2, bfloat16_t>::value)) {
+        // arch92 mask layout: contiguous Query predicates for each Key column.
+        __ubuf__ uint8_t* maskBytes = reinterpret_cast<__ubuf__ uint8_t*>(maskUb);
+        const uint16_t groups = originN / 4;
+        for (uint16_t iter = 0; iter < groups; ++iter) {
+            ApplyDnMaskAndReduceMax<T>(src_ub0 + iter * m * 4, maskBytes + (iter * 4) * maskStride, scale, src0, max0,
+                                       vreg_min, paddingMask);
+            ApplyDnMaskAndReduceMax<T>(src_ub1 + iter * m * 4, maskBytes + (iter * 4 + 1) * maskStride, scale, src1,
+                                       max1, vreg_min, paddingMask);
+            ApplyDnMaskAndReduceMax<T>(src_ub2 + iter * m * 4, maskBytes + (iter * 4 + 2) * maskStride, scale, src2,
+                                       max2, vreg_min, paddingMask);
+            ApplyDnMaskAndReduceMax<T>(src_ub3 + iter * m * 4, maskBytes + (iter * 4 + 3) * maskStride, scale, src3,
+                                       max3, vreg_min, paddingMask);
+        }
+        const uint16_t remain = originN % 4;
+        if (remain > 0) {
+            ApplyDnMaskAndReduceMax<T>(src_ub0 + groups * m * 4, maskBytes + (groups * 4) * maskStride, scale, src0,
+                                       max0, vreg_min, paddingMask);
+        }
+        if (remain > 1) {
+            ApplyDnMaskAndReduceMax<T>(src_ub1 + groups * m * 4, maskBytes + (groups * 4 + 1) * maskStride, scale, src1,
+                                       max1, vreg_min, paddingMask);
+        }
+        if (remain > 2) {
+            ApplyDnMaskAndReduceMax<T>(src_ub2 + groups * m * 4, maskBytes + (groups * 4 + 2) * maskStride, scale, src2,
+                                       max2, vreg_min, paddingMask);
+        }
+        mem_bar(VST_VLD);
+    } else if constexpr ((IsSameType<T2, fp8_e5m2_t>::value || IsSameType<T2, fp8_e4m3fn_t>::value ||
+                          IsSameType<T2, hifloat8_t>::value) &&
+                         hasAtten) {
         if (needAtten) {
             for (uint16_t iter_m = 0; iter_m < uint16_t(ubN / 4); ++iter_m) {
                 LoadAlign(src0, src_ub0 + iter_m * m * 4);
@@ -773,7 +814,7 @@ __aicore__ inline void ProcessVec1DnUpdate(const LocalTensor<T2>& dstTensor, con
                                            const LocalTensor<uint8_t>& maskTensor, const uint32_t m, const uint32_t n,
                                            const uint32_t originN, const T scale, float deScaleQK, const T minValue,
                                            float keepProb, bool needAtten, const float pScale = 1.0f,
-                                           const float sinkValue = 0.0f)
+                                           const float sinkValue = 0.0f, const uint32_t maskStride = 0)
 {
     __ubuf__ T2* x_exp = (__ubuf__ T2*)dstTensor.GetPhyAddr();
     __ubuf__ float* input_x_local_UB = (__ubuf__ T*)srcTensor.GetPhyAddr();
@@ -797,9 +838,22 @@ __aicore__ inline void ProcessVec1DnUpdate(const LocalTensor<T2>& dstTensor, con
         repeatStride = 1;
     }
 
-    ProcessVec1DnUpdateVF<T, T2, hasAtten, ubN, hasSink>(
-        x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, indexesUb, m, n, originN, scale,
-        deScaleQK, minValue, keepProb, needAtten, dScale, blockStride, repeatStride, pScale, sinkValue);
+    if constexpr (hasAtten && (IsSameType<T2, half>::value || IsSameType<T2, bfloat16_t>::value)) {
+        if (needAtten) {
+            ProcessVec1DnUpdateVF<T, T2, hasAtten, ubN, hasSink>(
+                x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, indexesUb, m, n, originN,
+                scale, deScaleQK, minValue, keepProb, needAtten, 1.0f, blockStride, repeatStride, pScale, sinkValue,
+                maskStride);
+        } else {
+            ProcessVec1DnUpdateVF<T, T2, false, ubN, hasSink>(
+                x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, indexesUb, m, n, originN,
+                scale, deScaleQK, minValue, keepProb, needAtten, dScale, blockStride, repeatStride, pScale, sinkValue);
+        }
+    } else {
+        ProcessVec1DnUpdateVF<T, T2, hasAtten, ubN, hasSink>(
+            x_exp, input_x_local_UB, exp_max_fp32, new_global_sum, new_global_max, maskUb, indexesUb, m, n, originN,
+            scale, deScaleQK, minValue, keepProb, needAtten, dScale, blockStride, repeatStride, pScale, sinkValue);
+    }
 }
 
 template <typename T, typename T2, bool hasAtten = false, uint16_t ubN = 128>
@@ -2358,7 +2412,7 @@ __aicore__ inline void ProcessVec1VfDn(const LocalTensor<T2>& dstTensor, const L
                                        const LocalTensor<uint8_t>& maskTensor, const uint32_t m, const uint32_t n,
                                        const uint32_t originN, const T scale, float deScaleQK, const T minValue,
                                        float keepProb, bool needAtten, const float pScale = 1.0f,
-                                       const float sinkValue = 0.0f)
+                                       const float sinkValue = 0.0f, const uint32_t maskStride = 0)
 {
     if constexpr (!isUpdate) {
         // 索引序列，用于在VF代码中量化cast后的gather指令
@@ -2377,9 +2431,9 @@ __aicore__ inline void ProcessVec1VfDn(const LocalTensor<T2>& dstTensor, const L
                       IsSameType<T2, hifloat8_t>::value) {
             indexesTensor = vselrIndexesBuf[static_cast<int>(VselrIndexEnum::DN_INDEX)].template Get<uint8_t>();
         }
-        ProcessVec1DnUpdate<T, T2, hasAtten, ubN, hasSink>(dstTensor, expSumTensor, maxTensor, srcTensor, expMaxTensor,
-                                                           indexesTensor, maskTensor, m, n, originN, scale, deScaleQK,
-                                                           minValue, keepProb, needAtten, pScale, sinkValue);
+        ProcessVec1DnUpdate<T, T2, hasAtten, ubN, hasSink>(
+            dstTensor, expSumTensor, maxTensor, srcTensor, expMaxTensor, indexesTensor, maskTensor, m, n, originN,
+            scale, deScaleQK, minValue, keepProb, needAtten, pScale, sinkValue, maskStride);
     }
 }
 template <typename T, typename T2, bool isUpdate = false, bool hasAtten = false, uint32_t s1BaseSize,

@@ -134,7 +134,7 @@ static constexpr inferPFALayoutTypeEnum InOutLayoutPFATypeValue[5][2] = {
 // templateId
 #define FA_Template_ND 0
 #define FA_Template_DN 1
-#define FA_Template_DN_Unmerged 2 // 不合轴 DN(预埋, 路由入口默认关闭)
+#define FA_Template_DN_Unmerged 2 // 不合轴 DN
 
 struct ConfigParams {
     inferS1TemplateType s1;

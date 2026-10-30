@@ -131,9 +131,11 @@ void FlashAttnTilingImpl::SplitPolicy()
                                           static_cast<uint32_t>(faInfo_->gSize), faInfo_->maxSeqQ, faInfo_->maxSeqKv,
                                           static_cast<int32_t>(faInfo_->maskMode), winLeft, winRight,
                                           static_cast<uint32_t>(faInfo_->qLayout), sOuterFactor_, sInnerFactor_);
-    // 不合轴 DN(预埋): 模板判定需在 CalcWorkspaceSize 之前完成(templateId 影响 workspace 分配),
-    // 判定仅依赖 D/DV 维度; 开关关闭时不执行, 保持原行为不变
-    if (fa_tiling_util::DN_UNMERGED_ROUTE_ENABLED) {
+    // 不合轴 DN: 模板判定需在 CalcWorkspaceSize 之前完成(templateId 影响 workspace 分配),
+    // Route by maxSeqQ, maskMode and qkHeadDim; preserve the existing path when disabled.
+    if (fa_tiling_util::DN_UNMERGED_ROUTE_ENABLED &&
+        fa_tiling_util::GetFlashAttnTemplateId(faInfo_->maxSeqQ, faInfo_->maskMode, faInfo_->qkHeadDim) ==
+            fa_tiling_util::FA_TEMPLATE_DN_UNMERGED) {
         UpdateTilingKeyTemplateId();
     }
     uint32_t maxUsedAicCores = fa_tiling_util::GetMaxUsedAicCores(platformInfo_.aicNum, faInfo_->bSize, faInfo_->n2Size,
@@ -199,11 +201,12 @@ void FlashAttnTilingImpl::UpdateTilingKeyKvLayout()
 
 void FlashAttnTilingImpl::UpdateTilingKeyTemplateId()
 {
-    if (fa_tiling_util::DN_UNMERGED_ROUTE_ENABLED) {
-        // 不合轴 DN(预埋): 全量路由, 判定与 flash_attn_metadata(AICPU) 共享
-        // fa_tiling_util::GetFlashAttnTemplateId, 两侧严格一致; dnFlag_ 仍表示旧合轴 DN 模板
-        tilingKeyInfo_.templateId = fa_tiling_util::GetFlashAttnTemplateId(static_cast<uint32_t>(faInfo_->qkHeadDim),
-                                                                           static_cast<uint32_t>(faInfo_->vHeadDim));
+    if (fa_tiling_util::DN_UNMERGED_ROUTE_ENABLED &&
+        fa_tiling_util::GetFlashAttnTemplateId(faInfo_->maxSeqQ, faInfo_->maskMode, faInfo_->qkHeadDim) ==
+            fa_tiling_util::FA_TEMPLATE_DN_UNMERGED) {
+        // 不合轴 DN: 条件路由(maxActualQ >= 256, maskMode=0/3, D!=256), 判定与 flash_attn_metadata(AICPU)
+        // 共享 fa_tiling_util::GetFlashAttnTemplateId, 两侧严格一致; dnFlag_ 仍表示旧合轴 DN 模板
+        tilingKeyInfo_.templateId = fa_tiling_util::FA_TEMPLATE_DN_UNMERGED;
         dnFlag_ = false;
         return;
     }

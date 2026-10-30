@@ -141,8 +141,9 @@ __global__ __aicore__ void flash_attn(__gm__ uint8_t* query, __gm__ uint8_t* key
                                          cfg.l1PBufcnt, cfg.l1QBufcnt, cfg.l1KvBufcnt>;
 
     if constexpr (templateId == FA_Template_DN_Unmerged) {
-        // 不合轴 DN(预埋): BN1_S1 分核, 独立文件(*_dn_unmerged.h), 全部注册维度/有无 mask 实例化;
-        // 路由入口 DN_UNMERGED_ROUTE_ENABLED 默认关闭, 打开后由 host tiling 产生 templateId=2
+        // 不合轴 DN: BN1_S1 分核, 独立文件(*_dn_unmerged.h), 全部注册维度/有无 mask 实例化;
+        // 路由开关 DN_UNMERGED_ROUTE_ENABLED 打开后由 host tiling 产生 templateId=2
+        // Q >= 256, maskMode in {0, 3}, and QK head dim != 256.
         using CubeBlock = FlashAttnKernel::FANoQuantGqaBlockCubeDnUnmerged<FA_T>;
         using VecFaBlock = FlashAttnKernel::FANoQuantGqaBlockVecDnUnmerged<FA_T>;
         using VecFdBlock = FlashAttnKernel::FiaBlockVecFlashDecode<FA_T, true>;

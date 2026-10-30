@@ -7,11 +7,12 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-"""DN 全量路由覆盖矩阵: 维度注册表 x 布局 x mask(0/3/4) x GQA x S1边界 x M64 x varlen x PA x FD x sink x scale.
+"""DN 路由覆盖矩阵: 维度注册表 x 布局 x mask(0/3/4) x GQA x S1边界 x M64 x varlen x PA x FD x sink x scale.
 
-DN 路由条件(与 host/metadata 共享判定一致): 全量路由, 所有 case 均走 DN 模板,
-维度注册表(等维 64/72/128/256 或 192/128)仅作未注册维度的防御性回退。
-历史版本曾有 maxSeqQ<mBase 短Q回退 ND(用例名中 _NDFB 后缀为当时对照标记, 现同样路由 DN)。
+DN route: maxActualQ >= 256, maskMode in (0, 3), and QK head dim != 256.
+All remaining cases, including unspecified max_seqlen_q and D=256, use ND.
+注: 本矩阵原按全量路由(所有 case 走 DN)设计, 用例名/注释中的 DN/NDFB 标记为当时预期;
+D=256, maxSeqQ < 256 or mask=4 use ND; DN coverage comes from the other long-Q cases.
 """
 
 DIMS = ((64, 64), (72, 72), (128, 128), (192, 128), (256, 256))
@@ -195,7 +196,7 @@ for layout in ("BSND", "BNSD"):
                 enable_learnable_sink=[True],
             )
 
-# K. scale 特殊值 x mask (S1=145 -> DN; 零/负 scale 走先缩放后 padding 路径)
+# K. Existing scale edge cases use the short-Q ND fallback.
 for scale in (0.0, -0.125, 2.0):
     for mode in (0, 3, 4):
         add(
@@ -234,3 +235,68 @@ add("FULL_M_EMPTY_BAND", s1=257, s2=129, mask=4, win_left=[17], win_right=[9])
 for mode in (0, 3):
     for b in (3, 5):
         add(f"FULL_M_B{b}_M{mode}", s1=145, s2=257, b=b, mask=mode)
+
+
+# N. DN causal mask: full tiles, tails, positive scales, sink and GQA.
+for seq in (256, 257, 300, 384, 1024):
+    add(
+        f"FULL_N_CAUSAL_REGISTER_S{seq}",
+        s1=seq,
+        s2=seq,
+        layout="BNSD",
+        n1=8,
+        n2=8,
+        mask=3,
+    )
+for scale in (0.125, 1e-12, 2e-38, 2.0):
+    add(
+        f"FULL_N_CAUSAL_REGISTER_SCALE{scale}",
+        s1=256,
+        s2=256,
+        layout="BNSD",
+        mask=3,
+        scale=[scale],
+    )
+add("FULL_N_CAUSAL_REGISTER_RECT", s1=256, s2=384, layout="BNSD", mask=3)
+add(
+    "FULL_N_CAUSAL_REGISTER_SINK",
+    s1=256,
+    s2=256,
+    layout="BNSD",
+    mask=3,
+    enable_learnable_sink=[True],
+)
+add("FULL_N_CAUSAL_REGISTER_GQA", s1=384, s2=384, layout="BNSD", n1=8, n2=2, mask=3)
+add(
+    "FULL_N_CAUSAL_REGISTER_SINGLE_HEAD",
+    s1=256,
+    s2=256,
+    layout="BNSD",
+    n1=1,
+    n2=1,
+    mask=3,
+)
+
+
+# P. Empty DN causal KV partitions must stay finite before the FD merge.
+add(
+    "FULL_P_FD_EMPTY_PARTITION_M3",
+    s1=256,
+    s2=2049,
+    layout="BNSD",
+    n1=1,
+    n2=1,
+    mask=3,
+)
+
+# Q. A short KV tile must not read stale mask padding into fully masked Query rows.
+for sk in (1, 31):
+    add(
+        f"FULL_Q_CAUSAL_SHORT_KV_{sk}",
+        s1=399,
+        s2=sk,
+        layout="BNSD",
+        n1=4,
+        n2=1,
+        mask=3,
+    )

@@ -37,38 +37,6 @@ using namespace AscendC::Impl::Detail;
 namespace FlashAttnKernel {
 using ArchInfo::CV_RATIO;
 
-// QK 在 UB 中为 [S2, S1], 而 bool mask 在 UB 中为 [S1, S2];
-// 逐 QK 行(s2)按列 gather 对应 mask 字节, 同时天然处理 M 尾块 padding。
-// mask 字节语义: 0=可见(保留 score), 非0=掩蔽(置 -1e12); score 预乘 scale 后 softmax 走 scale=1。
-template <uint32_t S2_BASE>
-__simd_vf__ inline void ApplyDnMaskVF(__ubuf__ float* scores, __ubuf__ uint32_t* mask, uint32_t rows, uint32_t pitch,
-                                      uint32_t cols, float scale)
-{
-    Reg::RegTensor<int32_t> indices;
-    Reg::RegTensor<uint32_t> words, bytes, byteMask;
-    Reg::RegTensor<float> values, minimum;
-    Reg::MaskReg active = Reg::UpdateMask<float>(rows);
-    Reg::MaskReg keep;
-    Reg::Arange(indices, 0);
-    Reg::Muls(indices, indices, static_cast<int32_t>(S2_BASE / 4U), active);
-    Reg::Duplicate(minimum, -1000000000000.0F);
-    Reg::Duplicate(byteMask, 255U);
-    for (uint16_t col = 0; col < cols; col += 4) {
-        Reg::Gather(words, mask + col / 4U, reinterpret_cast<Reg::RegTensor<uint32_t>&>(indices), active);
-#pragma unroll
-        for (uint16_t byte = 0; byte < 4; ++byte) {
-            // softmax VF 使用前会重置 [cols, S2_BASE) 的 padding 区, 此处越界字节不影响结果
-            Reg::ShiftRights(bytes, words, static_cast<int16_t>(byte * 8U), active);
-            Reg::And(bytes, bytes, byteMask, active);
-            Reg::Compares<uint32_t, CMPMODE::EQ>(keep, bytes, 0U, active);
-            Reg::LoadAlign(values, scores + (col + byte) * pitch);
-            Reg::Muls(values, values, scale, active);
-            Reg::Select(values, values, minimum, keep);
-            Reg::StoreAlign(scores + (col + byte) * pitch, values, active);
-        }
-    }
-}
-
 template <typename FA_T>
 class FANoQuantGqaBlockVecDnUnmerged {
 public:
@@ -158,10 +126,10 @@ public:
     LocalTensor<uint8_t> ubLseOutBuffers_;
     uint32_t lseOutUbBufId_ = 0;
 
+    // arch92 DN mask layout: [Key, Query], adapted to one AIV's half-M tile.
+    static constexpr uint32_t MASK_M_BASE = AttentionCommon::Align(mBaseSize / CV_RATIO, 32U);
     static constexpr uint32_t UB_MASK_BUFCNT = 2U;
-    // 32 字节错峰, 避免整列 mask 从同一 UB bank 连续 gather 造成 bank 冲突
-    static constexpr uint32_t MASK_PITCH = s2BaseSize + 32U;
-    static constexpr uint32_t UB_MASK_BUF_BYTES = mBaseSize / CV_RATIO * MASK_PITCH;
+    static constexpr uint32_t UB_MASK_BUF_BYTES = MASK_M_BASE * s2BaseSize;
     LocalTensor<uint8_t> ubMaskBuffers_;
 
     const ConstInfo_t& constInfo_;
@@ -185,11 +153,8 @@ public:
     GlobalTensor<float> sinkGm_;
 
     T negativeFloatScalar_;
-    // DN 每个任务只处理一个 G 头, M 轴为该头的连续 S1; mask 按单 G 的 GS 形态搬入,
-    // BSND/TND 不能沿用 ND 的 S1G 展开, 否则会把相邻 G 的 mask 行搬进当前 M 块。
-    static constexpr MaskFormat MASK_LAYOUT = MaskFormat::GS;
-    static constexpr T BOOL_ATTEN_MASK_SCALAR_VALUE = -1000000000000.0;
-    uint32_t negativeIntScalar_ = *((uint32_t*)&BOOL_ATTEN_MASK_SCALAR_VALUE);
+    // DN byte masks use the standard softmax max sentinel for empty rows.
+    static constexpr uint32_t negativeIntScalar_ = NEGATIVE_MIN_VALUE_FP32;
 
     // ==================== Functions ======================
     __aicore__ inline FANoQuantGqaBlockVecDnUnmerged(ConstInfo_t& constInfo,
@@ -450,46 +415,33 @@ public:
         LocalTensor<T> expUb =
             softmaxExpBuf_[(runInfo.loop % UB_SOFTMAX_EXP_BUFCNT) * (UB_SOFTMAX_EXP_BUF_BYTES / sizeof(T))];
 
-        // 块级粗筛: 本 S2 块可能存在被掩蔽的列才搬 mask; 全可见块直接跳过
-        const uint32_t maskBufId = runInfo.loop & (DB - 1);
-        bool needMask = false;
+        bool isSkipMask = true;
+        const uint32_t maskBufId = runInfo.loop % UB_MASK_BUFCNT;
         if constexpr (HAS_MASK) {
-            const int64_t firstQ = runInfo.s1Idx + runInfo.vecMbaseIdx;
-            const int64_t lastQ = firstQ + runInfo.actVecMSize - 1;
-            const int64_t lastKv = runInfo.s2Idx + runInfo.actSingleLoopS2Size - 1;
-            if (constInfo_.scaleValue <= 0 || firstQ + runInfo.nextTokensLeftUp < lastKv ||
-                lastQ - runInfo.preTokensLeftUp > runInfo.s2Idx) {
-                attenMaskUb = ubMaskBuffers_[maskBufId * UB_MASK_BUF_BYTES];
-                needMask = AttenMaskCopyIn(attenMaskUb, runInfo);
-                if (needMask) {
-                    Mutex::Lock<PIPE_V>(UB_IN_MASK_EVENT0 + maskBufId);
-                }
-            }
+            attenMaskUb = ubMaskBuffers_[maskBufId * UB_MASK_BUF_BYTES];
+            Mutex::Lock<PIPE_MTE2>(UB_IN_MASK_EVENT0 + maskBufId);
+            AttenMaskCopyInDn(attenMaskUb, 0, runInfo.actVecMSize, isSkipMask, runInfo);
+            Mutex::Unlock<PIPE_MTE2>(UB_IN_MASK_EVENT0 + maskBufId);
         }
 
         Mutex::Lock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
-
-        float descaleQK = 1.0;
-
         LocalTensor<INPUT_T> stage1CastTensor =
             ubVec1ResBuffers_[vec1ResUbBufId_ * UB_VEC1_RES_BUF_BYTES].template ReinterpretCast<INPUT_T>();
-        if (needMask) {
-            // mask 预施加: 真实 score 乘 scale, 掩蔽位置 -1e12; softmax VF 改走 scale=1
-            ApplyDnMaskVF<MASK_PITCH>((__ubuf__ float*)mm1ResUbTensor.GetPhyAddr(),
-                                      (__ubuf__ uint32_t*)attenMaskUb.GetPhyAddr(), runInfo.actVecMSize,
-                                      runInfo.actMSizeAlign32 / CV_RATIO, runInfo.actSingleLoopS2Size,
-                                      static_cast<float>(constInfo_.scaleValue));
-            AscendC::PipeBarrier<PIPE_V>();
+        if constexpr (HAS_MASK) {
+            if (!isSkipMask) {
+                Mutex::Lock<PIPE_V>(UB_IN_MASK_EVENT0 + maskBufId);
+            }
         }
-        FaVectorApi::ProcessVec1VfDn<T, INPUT_T, true, false, s2BaseSize>(
+        FaVectorApi::ProcessVec1VfDn<T, INPUT_T, true, HAS_MASK, s2BaseSize>(
             stage1CastTensor, sumUb, maxUb, mm1ResUbTensor, expUb, nullptr, attenMaskUb, runInfo.actMSizeAlign32 >> 1,
-            runInfo.actSingleLoopS2SizeAlign, runInfo.actSingleLoopS2Size,
-            needMask ? 1.0F : static_cast<T>(constInfo_.scaleValue), descaleQK, negativeFloatScalar_, 0.0F, false);
+            runInfo.actSingleLoopS2SizeAlign, runInfo.actSingleLoopS2Size, static_cast<T>(constInfo_.scaleValue), 1.0f,
+            negativeFloatScalar_, 0.0F, !isSkipMask, 1.0f, 0.0f, MASK_M_BASE);
 
-        if (needMask) {
-            Mutex::Unlock<PIPE_V>(UB_IN_MASK_EVENT0 + maskBufId);
+        if constexpr (HAS_MASK) {
+            if (!isSkipMask) {
+                Mutex::Unlock<PIPE_V>(UB_IN_MASK_EVENT0 + maskBufId);
+            }
         }
-
         Mutex::Unlock<PIPE_V>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
         Mutex::Lock<PIPE_MTE3>(UB_OUT_VEC1_RES_EVENT0 + vec1ResUbBufId_);
         LocalTensor<INPUT_T> mm2AL1Tensor = pL1Tensor;
@@ -515,66 +467,34 @@ public:
         vec1ResUbBufId_ = (vec1ResUbBufId_ + 1U) % UB_VEC1_RES_BUFCNT;
     }
 
-    __aicore__ inline bool AttenMaskCopyIn(LocalTensor<uint8_t> attenMaskUb, RunInfo& runInfo)
+    __aicore__ inline void AttenMaskCopyInDn(LocalTensor<uint8_t> attenMaskUb, uint32_t vecMIdx, uint32_t mDealSize,
+                                             bool& isSkipMask, RunInfo& runInfo)
     {
-        MaskInfo<MASK_LAYOUT> maskInfo;
-        // mask 工具按单 G 的 GS 线性坐标搬入, G 已在 BN1 轴展开; gs1StartIdx 即本头纯 s1 起始
-        const uint32_t maskS1Start = runInfo.s1Idx + runInfo.vecMbaseIdx;
-        maskInfo.gs1StartIdx = maskS1Start;
-        maskInfo.gs1dealNum = runInfo.actVecMSize;
-        maskInfo.s1Size = runInfo.actS1Size;
-        maskInfo.gSize = constInfo_.gSize;
-        maskInfo.s2StartIdx = runInfo.s2Idx;
-        maskInfo.s2dealNum = runInfo.actSingleLoopS2Size;
-        maskInfo.s2Size = runInfo.actS2Size;
-        maskInfo.nBaseSize = s2BaseSize;
-        maskInfo.preToken = constInfo_.preTokens;
-        maskInfo.nextToken = constInfo_.nextTokens;
-        maskInfo.sparseMode = static_cast<SparseMode>(constInfo_.sparseMode);
-        maskInfo.batchIdx = (constInfo_.attenMaskBatch == 1) ? 0 : runInfo.bIdx;
-        maskInfo.attenMaskBatchStride = constInfo_.attenMaskS1Size * constInfo_.attenMaskS2Size;
-        maskInfo.attenMaskS1Stride = constInfo_.attenMaskS2Size;
-        maskInfo.attenMaskDstStride = (MASK_PITCH - AttentionCommon::Align(maskInfo.s2dealNum, 32U)) / 32;
-        maskInfo.maskValue = negativeIntScalar_;
-        maskInfo.s1LeftPaddingSize = 0;
-        maskInfo.s2LeftPaddingSize = 0;
-        maskInfo.attenMaskType = MASK_BOOL;
+        MaskInfo<MaskFormat::S1_ONLY> info;
+        info.s1StartIdx = runInfo.s1Idx + runInfo.vecMbaseIdx + vecMIdx;
+        info.s1dealNum = MASK_M_BASE;
+        info.s1Size = runInfo.actS1Size;
+        info.gSize = constInfo_.gSize;
+        info.s2StartIdx = runInfo.s2Idx;
+        info.s2dealNum = runInfo.actSingleLoopS2Size;
+        info.s2Size = runInfo.actS2Size;
+        info.nBaseSize = s2BaseSize;
+        info.preToken = constInfo_.preTokens;
+        info.nextToken = constInfo_.nextTokens;
+        info.sparseMode = static_cast<SparseMode>(constInfo_.sparseMode);
+        info.batchIdx = (constInfo_.attenMaskBatch == 1) ? 0 : runInfo.bIdx;
+        info.attenMaskBatchStride = constInfo_.attenMaskS1Size * constInfo_.attenMaskS2Size;
+        info.attenMaskS1Stride = constInfo_.attenMaskS2Size;
+        info.attenMaskDstStride = 0;
+        info.maskValue = negativeIntScalar_;
+        info.s1LeftPaddingSize = runInfo.qPaddingBeginOffset;
+        info.s2LeftPaddingSize = runInfo.kvPaddingBeginOffset;
+        info.attenMaskType = MASK_BOOL;
 
-        const uint32_t bufIdx = runInfo.loop & (DB - 1);
-        const bool skipMask = IsSkipAttentionmask(maskInfo);
-        const bool skipMaskForPre = IsSkipAttentionmaskForPre(maskInfo);
-        if (skipMask && skipMaskForPre) {
-            if (constInfo_.scaleValue > 0) {
-                return false;
-            }
-            // 零/负 scale 必须先于 softmax VF 的负 padding 哨兵写入施加, 否则 padding 被乘为 0/正数污染分母
-            Mutex::Lock<PIPE_V>(UB_IN_MASK_EVENT0 + bufIdx);
-            Duplicate(attenMaskUb, static_cast<uint8_t>(0U), maskInfo.gs1dealNum * MASK_PITCH);
-            Mutex::Unlock<PIPE_V>(UB_IN_MASK_EVENT0 + bufIdx);
-            return true;
+        isSkipMask = IsSkipAttentionmask(info);
+        if (!isSkipMask) {
+            AttentionmaskCopyInDn<uint8_t, true, s2BaseSize>(attenMaskUb, attenMaskGmInt_, info);
         }
-        if (!skipMask) {
-            AttentionmaskCopyIn<uint8_t, MASK_LAYOUT, true, s2BaseSize>(attenMaskUb, attenMaskGmInt_, maskInfo, false,
-                                                                        UB_IN_MASK_EVENT0 + bufIdx);
-        } else {
-            Mutex::Lock<PIPE_V>(UB_IN_MASK_EVENT0 + bufIdx);
-            Duplicate(attenMaskUb, static_cast<uint8_t>(0U), maskInfo.gs1dealNum * MASK_PITCH);
-            Mutex::Unlock<PIPE_V>(UB_IN_MASK_EVENT0 + bufIdx);
-        }
-        if (!skipMaskForPre) {
-            // BAND 窗口: pre 半带与 next 半带分别拷入后按位合并, 可见 = next | !pre
-            const uint32_t preBufId = bufIdx ^ 1U;
-            LocalTensor<uint8_t> attenMaskUbPre = ubMaskBuffers_[preBufId * UB_MASK_BUF_BYTES];
-            AttentionmaskCopyIn<uint8_t, MASK_LAYOUT, true, s2BaseSize>(attenMaskUbPre, attenMaskGmInt_, maskInfo, true,
-                                                                        UB_IN_MASK_EVENT0 + preBufId);
-            Mutex::Lock<PIPE_V>(UB_IN_MASK_EVENT0 + preBufId);
-            Mutex::Lock<PIPE_V>(UB_IN_MASK_EVENT0 + bufIdx);
-            MergeBand(attenMaskUb.GetPhyAddr(), attenMaskUbPre.GetPhyAddr(),
-                      (maskInfo.gs1dealNum * MASK_PITCH + 255U) / 256U);
-            Mutex::Unlock<PIPE_V>(UB_IN_MASK_EVENT0 + bufIdx);
-            Mutex::Unlock<PIPE_V>(UB_IN_MASK_EVENT0 + preBufId);
-        }
-        return true;
     }
 
     __aicore__ inline void Vec1PostProcess(RunInfo runInfo)
