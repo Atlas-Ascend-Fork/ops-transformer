@@ -150,8 +150,8 @@ aclnnStatus aclnnMoeTokenPermuteWithEp(
     <tr>
       <td>numOutTokens</td>
       <td>输入</td>
-      <td>有效输出token数。</td>
-      <td>值范围为任意整数；0表示不会删除任何token，大于0时会按照numOutTokens对按照专家排序好的token进行切片，保留前numOutTokens个token，小于0时按负的切片索引进行处理。</td>
+      <td>输出token数量相关参数。</td>
+      <td>rangeOptional为空时，该参数暂不生效。需要指定输出范围时，请使用rangeOptional。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>

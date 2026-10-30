@@ -91,7 +91,7 @@
   <tr>
    <td>numOutTokens</td>
    <td>属性</td>
-   <td>有效输出token数，在rangeOptional为空时生效。</td>
+   <td>输出token数量相关参数。rangeOptional为空时，该参数暂不生效。需要指定输出范围时，请使用rangeOptional。</td>
    <td>INT64</td>
    <td>-</td>
   </tr>
