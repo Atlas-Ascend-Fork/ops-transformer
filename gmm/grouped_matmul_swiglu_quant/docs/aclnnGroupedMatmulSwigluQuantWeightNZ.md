@@ -3,7 +3,7 @@
 ## 产品支持情况
 
 <!-- npu="950" id1 -->
-- <term>Ascend 950PR&950DT系列产品</term>：不支持
+- <term>Ascend 950PR&950DT系列产品</term>：支持
 <!-- end id1 -->
 <!-- npu="A3" id2 -->
 - <term>Atlas A3系列产品</term>：支持
@@ -414,18 +414,31 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZ(
 
 ## 约束说明
 
-- 确定性计算：
-  - aclnnGroupedMatmulSwigluQuantWeightNZ默认确定性实现。
+  - 确定性计算：
+      - aclnnGroupedMatmulSwigluQuantWeightNZ默认确定性实现。
 
-- A8W8场景（`A`指激活矩阵（左矩阵），`W`指权重矩阵（右矩阵），`8`指数据类型为`INT8`）
-
-  - 1.x的尾轴长度不能大于等于65536。
-  - 2.N轴长度不能超过10240。
-
-- A8W4场景（`A`指激活矩阵（左矩阵），`W`指权重矩阵（右矩阵），`4`指数据类型为`INT4`）
-
-  - 1.x的尾轴长度不能大于等于20000。
-  - 2.N轴长度不能超过10240。
+  <!-- npu="A3,910b" id7 -->
+  - <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：
+    - A8W8场景（`A`指激活矩阵（左矩阵），`W`指权重矩阵（右矩阵），`8`指数据类型为`INT8`）
+        - 1.x的尾轴长度不能大于等于65536。
+        - 2.N轴长度不能超过10240。
+    - A8W4场景（`A`指激活矩阵（左矩阵），`W`指权重矩阵（右矩阵），`4`指数据类型为`INT4`）
+        - 1.x的尾轴长度不能大于等于20000。
+        - 2.N轴长度不能超过10240。
+  <!-- end id7 -->
+  <!-- npu="950" id8 -->
+  - <term>Ascend 950PR&950DT系列产品</term>：
+    - groupList第1维最大支持1024，即最多支持1024个group。
+    - A8W8 Pertoken量化场景需满足以下约束条件：
+        - 仅支持INT8组合：x、weight和output均为INT8，weightScale支持FLOAT、FLOAT16或BFLOAT16；xScale和outputScale的数据类型均为FLOAT。
+        - x shape为(M, K)。weight支持非转置和转置，入口view shape统一为(E, K, N)：非转置使用连续stride，FRACTAL_NZ storage shape为(E, ceil(N/32), ceil(K/16), 16, 32)；转置使用stride (K * N, 1, K)，FRACTAL_NZ storage shape为(E, ceil(K/32), ceil(N/16), 16, 32)。
+        - x仅支持非转置；weight转置输入时，算子内部`transposeWeight`属性为true，并使用ZN模板处理FRACTAL_NZ数据。
+        - weightScale shape为(E, N)，xScale和outputScale shape为(M,)，output shape为(M, N/2)。
+        - N必须大于0且为64的整数倍。
+        - groupList为INT64一维累积计数（cumsum），长度等于专家数E。
+        - bias和offset必须为nullptr，即使tensor的值全为0也不支持非空参数。outputOffset为预留输出，可传nullptr或原有占位Tensor；950路径忽略该参数，不校验、不写入且不传给V2。
+        - 调用方仍依次调用`aclnnGroupedMatmulSwigluQuantWeightNZGetWorkspaceSize`和`aclnnGroupedMatmulSwigluQuantWeightNZ`；第一阶段内部转发至`aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize`，第二阶段在950上内部转发至`aclnnGroupedMatmulSwigluQuantWeightNzV2`执行；转发失败直接返回，不回退。
+  <!-- end id8 -->
 
 ## 调用示例
 

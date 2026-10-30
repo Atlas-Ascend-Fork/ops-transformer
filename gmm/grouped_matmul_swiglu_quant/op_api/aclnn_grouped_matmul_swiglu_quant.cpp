@@ -30,6 +30,7 @@
 #include "aclnn_grouped_matmul_swiglu_quant_weight_nz.h"
 #include "aclnn_grouped_matmul_swiglu_quant.h"
 #include "../../grouped_matmul/op_api/grouped_matmul_util.h"
+#include "../../grouped_matmul_swiglu_quant_v2/op_api/aclnn_grouped_matmul_swiglu_quant_weight_nz_v2.h"
 
 using namespace op;
 
@@ -509,6 +510,12 @@ static aclnnStatus aclnnGroupedMatmulSwigluQuantGetWorkspaceSizeCommon(
     return ACLNN_SUCCESS;
 }
 
+static bool ShouldRouteToSwigluQuantV2(const aclTensor* x, const aclTensor* weight)
+{
+    return x != nullptr && weight != nullptr && GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510 &&
+           x->GetDataType() == DataType::DT_INT8 && weight->GetDataType() == DataType::DT_INT8;
+}
+
 aclnnStatus aclnnGroupedMatmulSwigluQuantGetWorkspaceSize(const aclTensor* x, const aclTensor* weight,
                                                           const aclTensor* bias, const aclTensor* offset,
                                                           const aclTensor* weightScale, const aclTensor* xScale,
@@ -526,6 +533,34 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantGetWorkspaceSize(const aclTensor* x, co
                                                                executor, opName);
 }
 
+static aclnnStatus RouteToSwigluQuantWeightNzV2GetWorkspaceSize(const aclTensor* x, const aclTensor* weight,
+                                                                const aclTensor* bias, const aclTensor* offset,
+                                                                const aclTensor* weightScale, const aclTensor* xScale,
+                                                                const aclTensor* groupList, aclTensor* output,
+                                                                aclTensor* outputScale, aclTensor* outputOffset,
+                                                                uint64_t* workspaceSize, aclOpExecutor** executor)
+{
+    // V2 has no offset input, so validate it here and delegate all other parameter checks to V2.
+    CHECK_COND(offset == nullptr, ACLNN_ERR_PARAM_INVALID,
+               "In op [%s], A5 A8W8 pertoken/perchannel requires offset to be nullptr.",
+               "aclnnGroupedMatmulSwigluQuantWeightNZ");
+    // Reject null elements before constructing TensorLists.
+    CHECK_RET(weightScale != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    const aclTensor* weights[] = {weight};
+    const aclTensor* scales[] = {weightScale};
+    // Executor-owned list wrappers must not take ownership of the caller's tensors.
+    auto listExecutor = CREATE_EXECUTOR();
+    CHECK_RET(listExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
+    auto weightList = listExecutor->AllocTensorList(weights, 1);
+    CHECK_RET(weightList != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    auto scaleList = listExecutor->AllocTensorList(scales, 1);
+    CHECK_RET(scaleList != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    // Preserve the legacy pertoken/perchannel semantics and delegate validation to V2.
+    return aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize(x, weightList, scaleList, nullptr, bias, xScale,
+                                                                   nullptr, groupList, 0, 0, 0, 0, nullptr, output,
+                                                                   outputScale, workspaceSize, executor);
+}
+
 aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZGetWorkspaceSize(const aclTensor* x, const aclTensor* weight,
                                                                   const aclTensor* bias, const aclTensor* offset,
                                                                   const aclTensor* weightScale, const aclTensor* xScale,
@@ -538,6 +573,13 @@ aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZGetWorkspaceSize(const aclTenso
     L2_DFX_PHASE_1(aclnnGroupedMatmulSwigluQuantWeightNZ,
                    DFX_IN(x, weight, bias, offset, weightScale, xScale, groupList),
                    DFX_OUT(output, outputScale, outputOffset));
+    // Route before the legacy NZ format mutation and parameter checks.
+    if (ShouldRouteToSwigluQuantV2(x, weight)) {
+        OP_LOGI("A5 A8W8 routes aclnnGroupedMatmulSwigluQuantWeightNZGetWorkspaceSize to "
+                "aclnnGroupedMatmulSwigluQuantWeightNzV2GetWorkspaceSize.");
+        return RouteToSwigluQuantWeightNzV2GetWorkspaceSize(x, weight, bias, offset, weightScale, xScale, groupList,
+                                                            output, outputScale, outputOffset, workspaceSize, executor);
+    }
     // weight在该场景下强制绑定StorageFormat 和 ViewFormat 为NZ
     CHECK_RET(weight != nullptr, ACLNN_ERR_PARAM_NULLPTR);
     auto storgeShape = weight->GetStorageShape();
@@ -574,6 +616,10 @@ aclnnStatus aclnnGroupedMatmulSwigluQuant(void* workspace, uint64_t workspaceSiz
 aclnnStatus aclnnGroupedMatmulSwigluQuantWeightNZ(void* workspace, uint64_t workspaceSize, aclOpExecutor* executor,
                                                   aclrtStream stream)
 {
+    // Keep the public legacy API pair while forwarding execution on Ascend 950.
+    if (GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510) {
+        return aclnnGroupedMatmulSwigluQuantWeightNzV2(workspace, workspaceSize, executor, stream);
+    }
     L2_DFX_PHASE_2(aclnnGroupedMatmulSwigluQuantWeightNZ);
     CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS, ACLNN_ERR_INNER,
                "This is an error in GroupedMatmulSwigluQuantWeightNZ launch aicore");

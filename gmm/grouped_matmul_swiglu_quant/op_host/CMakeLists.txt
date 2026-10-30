@@ -9,6 +9,11 @@
 # -----------------------------------------------------------------------------------------------------------
 
 if (BUILD_OPEN_PROJECT)
+    # Include V2 and its grouped_matmul tiling implementation for single-operator builds.
+    set(grouped_matmul_swiglu_quant_depends gmm/grouped_matmul_swiglu_quant_v2 gmm/grouped_matmul
+        CACHE INTERNAL "Dependencies for grouped_matmul_swiglu_quant")
+    set(grouped_matmul_swiglu_quant_apt_depends gmm/grouped_matmul_swiglu_quant_v2 gmm/grouped_matmul
+        CACHE INTERNAL "Dependencies for grouped_matmul_swiglu_quant_apt")
     target_sources(op_host_aclnnExc PRIVATE
         grouped_matmul_swiglu_quant_def.cpp
     )
