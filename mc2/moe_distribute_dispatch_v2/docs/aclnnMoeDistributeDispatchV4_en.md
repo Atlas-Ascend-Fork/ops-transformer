@@ -523,7 +523,7 @@ aclnnStatus aclnnMoeDistributeDispatchV4(
     <summary><term>Ascend 950PR&950DT products</term>:</summary>
 
     - dynamicScalesOut has output when quantMode is 2, 3, 4, or 5. It also has output when quantMode is 0 and the data type of `x` is `HIFLOAT8`, `FLOAT8_E5M2`, `FLOAT8_E4M3FN`, `FLOAT4_E2M1`, or `FLOAT4_E1M2`.
-    - commAlg supports "", "fullmesh_v1", "fullmesh_v2", and "hierarchy". "hierarchy" uses intra-server UB Memory and inter-server RoCE communication.
+    - commAlg supports "", "fullmesh_v1", "fullmesh_v2", and "hierarchy". "" is the default and enables the fullmesh_v1 template. "hierarchy" uses intra-server UB Memory and inter-server RoCE communication.
     - xActiveMaskOptional must be a 1D or 2D tensor (1D: shape (BS, ); 2D: shape (BS, K)). For a 1D tensor, true values must be placed before false values. For a 2D tensor, if all K values of a token are false, the token does not participate in communication.
     - expertScalesOptional can be set to a valid tensor or a null pointer. If a valid tensor is passed, the expertScales expert weight feature is enabled. The valid tensor is a 2D tensor with shape (BS, K). If a null pointer is passed, the expertScales expert weight feature is disabled. Empty tensors are not supported.
     - epWorldSize: value range [2, 1024].
@@ -746,10 +746,10 @@ aclnnStatus aclnnMoeDistributeDispatchV4(
       <!-- end id17 -->
       <!-- npu="950" id18 -->
       - <term>Ascend 950PR&950DT products</term>:
-        - When commAlg is "fullmesh_v1" or an empty string or a null pointer: The required value must satisfy ≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* Align512(2 \* H)).
-        - When commAlg is set to "fullmesh_v2": the value must satisfy ≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* 480Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* Align512(2 \* H)).
-        - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, and `Align32(x) = ((x + 32 - 1) / 32) * 32`.
-
+        - When `commAlg` is "fullmesh_v1", an empty string, or a null pointer, set `HCCL_BUFFSIZE` to satisfy `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`.
+        - When `commAlg` is "fullmesh_v2", set `HCCL_BUFFSIZE` to satisfy `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * 480Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`.
+        - In the formulas, `D = Align32(2 * H) + max(64, Align32(S) + 32)`. When `quantMode` is 0 and `scalesOptional` is provided, `S` is the number of scale bytes per token. Otherwise, `S = 0`.
+        - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, `Align32(x) = ((x + 32 - 1) / 32) * 32`, `1MB = 1024 * 1024B`. Use the number of local experts on the MoE expert card for `localExpertNum`. `HCCL_BUFFSIZE` must be at least 2.
       <!-- end id18 -->
 
   - **HCCL_INTRA_PCIE_ENABLE** and **HCCL_INTRA_ROCE_ENABLE**:

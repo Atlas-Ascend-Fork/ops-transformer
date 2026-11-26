@@ -44,8 +44,8 @@ constexpr uint32_t SIZE_ALIGN_256 = 256U;
 constexpr uint32_t CUMSUM_MAX_CORE_NUM = 8U;
 constexpr uint32_t ALL_TO_ALL_MAX_CORE_NUM = 40U;
 constexpr uint32_t PERGROUP_SMOOTH_MAX_CORE_NUM = 48U;
-// 按32核上限预留前缀和数据区（32*32*32=32KB）
-constexpr uint64_t CUMSUM_WS_FLAG_OFFSET = 32UL * 1024UL;
+constexpr uint64_t CUMSUM_WIN_OFFSET = 868UL * 1024UL;
+constexpr uint64_t CUMSUM_WIN_FLAG_OFFSET = 8UL * 1024UL;
 constexpr uint32_t RUNPOS_CALCUMSUM = 2U;
 constexpr uint32_t RUNPOS_CUMSUMFLAG = 3U;
 constexpr uint32_t RUNPOS_ARRIVECNT = 4U;
@@ -222,8 +222,7 @@ private:
     GlobalTensor<int32_t> expandIdxGMTensor_;
     GlobalTensor<int32_t> elasticInfoGMTensor_;
     GlobalTensor<int32_t> performanceInfoGMTensor_;
-    GlobalTensor<float> selfRankWinInGMTensor_;
-    GlobalTensor<float> cumsumWsGMTensor_;
+    GlobalTensor<float> cumsumWinGMTensor_;
     GlobalTensor<uint32_t> selfDataStatusGMTensor_;
 
     LocalTensor<int32_t> statusTensor_;
@@ -523,6 +522,10 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
         expertScaleAlign_ = tokenQuantAlign_ + EXPAND_IDX_INFO;
     }
     blockCntPerToken_ = Ceil(hOutSizeAlign_, SPLIT_BLOCK_DATA_SIZE);
+    // 非量化透传时从inQueue读取完整的480B数据块。
+    if constexpr (Std::IsSame<ExpandXOutType, XType>::value) {
+        hAlignSize_ = (QuantMode == UNQUANT) ? blockCntPerToken_ * SPLIT_BLOCK_DATA_SIZE : hAlignSize_ + UB_ALIGN;
+    }
     hCommuSize_ = blockCntPerToken_ * SPLIT_BLOCK_SIZE;
     axisHCommu_ = hCommuSize_ / sizeof(XOutType);
     dataSectionSize_ = axisMaxBS_ * hCommuSize_;
@@ -583,12 +586,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
         fixedNoIds +=
             Ceil((ELASTIC_INFO_OFFSET + RANK_LIST_NUM * epWorldSizeOriginal_) * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
     }
-    uint32_t inQueueBytes = hAlignSize_;
-    if constexpr (Std::IsSame<ExpandXOutType, XType>::value) {
-        inQueueBytes += UB_ALIGN;
-    }
-
-    fixedNoIds += static_cast<uint64_t>(SEND_IN_DEPTH) * inQueueBytes;
+    fixedNoIds += static_cast<uint64_t>(SEND_IN_DEPTH) * hAlignSize_;
     if (needMaskCalFlag) {
         fixedNoIds += gatherMaskBufSize;
     }
@@ -742,9 +740,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     recvCntWorkspaceGM_ = AscendC::GetUserWorkspace(workspaceGM);
     statusSpaceGM_ = GetWindStateAddrByRankId(epRankIdOriginal_);
     windowInstatusFp32Tensor_.SetGlobalBuffer((__gm__ float*)(statusSpaceGM_));
-    selfRankWinInGMTensor_.SetGlobalBuffer((__gm__ float*)(statusDataSpaceGM_));
-    uint64_t cumsumWsBaseOffset = static_cast<uint64_t>(WORKSPACE_ELEMENT_OFFSET) * aivNum_ * aivNum_;
-    cumsumWsGMTensor_.SetGlobalBuffer((__gm__ float*)((__gm__ uint8_t*)(recvCntWorkspaceGM_) + cumsumWsBaseOffset));
+    cumsumWinGMTensor_.SetGlobalBuffer((__gm__ float*)(statusDataSpaceGM_ + CUMSUM_WIN_OFFSET));
     windowGM_ = GetWindAddrByRankId(epRankIdOriginal_);
     hCopyParams_ = {1U, static_cast<uint32_t>(copyInAxisH_ * sizeof(XInType)), 0U, 0U};
     dataStateParams_ = {1U, sizeof(uint32_t), 0U, 0U};
@@ -1480,12 +1476,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     TBuf<> tempBuf, inQueueCleanBuf, calTempBuf, sendGroupIndexBuf;
     TBuf<> smoothScalesBuf, receiveDataCastFloatBuf, absScratchBuf;
     expertIdsBufSize_ = Ceil(expertIdsCnt_ * sizeof(int32_t), SIZE_ALIGN_256) * SIZE_ALIGN_256; // 支持compareScalar
-    uint32_t tokenInBufferSize = hAlignSize_;
-    // 透传时需要在搬入张量末尾填入三元组
-    // 传输expert scales时还需填入对应expert scale
-    if constexpr (Std::IsSame<ExpandXOutType, XType>::value) {
-        tokenInBufferSize += UB_ALIGN;
-    }
+    const uint32_t tokenInBufferSize = hAlignSize_;
 
     tpipe_->InitBufPool(tbufPool0, SEND_IN_DEPTH * tokenInBufferSize);
     tpipe_->InitBufPool(tbufPool1, BUFFER_NUM * tokenInBufferSize, tbufPool0);
@@ -2081,7 +2072,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
 
     DataCopyParams sumIntriParams{static_cast<uint16_t>(aivUsedCumSum_), 1, 0, 0};
     SyncFunc<AscendC::HardEvent::V_MTE3>();
-    DataCopy(cumsumWsGMTensor_[(newAivId * aivUsedCumSum_ * UB_ALIGN) / sizeof(float)], sumCoreFP32Tensor,
+    DataCopy(cumsumWinGMTensor_[(newAivId * aivUsedCumSum_ * UB_ALIGN) / sizeof(float)], sumCoreFP32Tensor,
              sumIntriParams);
     SyncFunc<AscendC::HardEvent::MTE3_V>();
 }
@@ -2108,7 +2099,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
 
     // 获取状态区中每个核的recvCnt
     while (true) {
-        DataCopy(sumLocalTensor, cumsumWsGMTensor_[(newAivId * UB_ALIGN) / sizeof(float)], sumIntriParams);
+        DataCopy(sumLocalTensor, cumsumWinGMTensor_[(newAivId * UB_ALIGN) / sizeof(float)], sumIntriParams);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
 
         GatherMask(sumContinueTensor, sumLocalTensor, gatherSumPattern, true, mask,
@@ -2133,7 +2124,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     DataCopyParams cleanParams{static_cast<uint16_t>(aivUsedCumSum_), 1, 0, static_cast<uint16_t>(aivUsedCumSum_ - 1)};
     SyncFunc<AscendC::HardEvent::V_MTE3>();
 
-    DataCopy(cumsumWsGMTensor_[(newAivId * UB_ALIGN) / sizeof(float)], sumCoreFp32Tensor, cleanParams);
+    DataCopy(cumsumWinGMTensor_[(newAivId * UB_ALIGN) / sizeof(float)], sumCoreFp32Tensor, cleanParams);
 }
 
 template <TemplateMC2A5FullMeshTypeClass>
@@ -2249,8 +2240,10 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     }
     LocalTensor<float> sumCoreTensor = sumCoreBuf_.Get<float>();
     sumCoreTensor.ReinterpretCast<int32_t>().SetValue(0, coreSum);
+    // Serial records must leave the nonserial ready flag cleared.
+    sumCoreTensor.ReinterpretCast<int32_t>().SetValue(1, 0);
     SyncFunc<AscendC::HardEvent::S_MTE3>();
-    DataCopy(cumsumWsGMTensor_[aivId_ * UB_ALIGN_DATA_COUNT], sumCoreTensor, UB_ALIGN_DATA_COUNT);
+    DataCopy(cumsumWinGMTensor_[aivId_ * UB_ALIGN_DATA_COUNT], sumCoreTensor, UB_ALIGN_DATA_COUNT);
     SyncFunc<AscendC::HardEvent::MTE3_S>();
     // 等待所有核完成状态读取和清理，确保计数不会再变化
     SyncAll<true>();
@@ -2315,7 +2308,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     Duplicate<int32_t>(syncOnCoreTensor, static_cast<int32_t>(1), SIZE_ALIGN_256 / sizeof(int32_t), repeatTimes, 1, 8);
     SyncFunc<AscendC::HardEvent::V_MTE3>();
     PipeBarrier<PIPE_MTE3>();
-    DataCopy(cumsumWsGMTensor_[(CUMSUM_WS_FLAG_OFFSET + newAivId * UB_ALIGN) / sizeof(float)], syncOnCoreFP32Tensor,
+    DataCopy(cumsumWinGMTensor_[(CUMSUM_WIN_FLAG_OFFSET + newAivId * UB_ALIGN) / sizeof(float)], syncOnCoreFP32Tensor,
              sumIntriParams); // 软同步
 }
 
@@ -2419,13 +2412,13 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     // Check cumsum is finished
     int32_t cumSumFlag = 0;
     int32_t targetFlag = aivUsedCumSum_ * UB_ALIGN_DATA_COUNT;
-    uint32_t cumSumFlagOffset = (CUMSUM_WS_FLAG_OFFSET + aivId_ * aivUsedCumSum_ * UB_ALIGN) / sizeof(float);
+    uint32_t cumSumFlagOffset = (CUMSUM_WIN_FLAG_OFFSET + aivId_ * aivUsedCumSum_ * UB_ALIGN) / sizeof(float);
     uint32_t innerSumParams = aivUsedCumSum_ * UB_ALIGN / sizeof(float);
     SumParams sumFlagParams{1, innerSumParams, aivUsedCumSum_ * UB_ALIGN_DATA_COUNT};
     LocalTensor<float> statusSumOutTensor = scalarBuf_.Get<float>();
 
     while (true) {
-        DataCopy(statusFp32Tensor_, cumsumWsGMTensor_[cumSumFlagOffset], aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
+        DataCopy(statusFp32Tensor_, cumsumWinGMTensor_[cumSumFlagOffset], aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
         Sum(statusSumOutTensor, statusFp32Tensor_, sumFlagParams);
         SyncFunc<AscendC::HardEvent::V_S>();
@@ -2439,7 +2432,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     Duplicate<float>(statusCleanFp32Tensor_, static_cast<float>(0), aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
     SyncFunc<AscendC::HardEvent::S_MTE3>();
     SyncFunc<AscendC::HardEvent::V_MTE3>();
-    DataCopy(cumsumWsGMTensor_[cumSumFlagOffset], statusCleanFp32Tensor_, aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
+    DataCopy(cumsumWinGMTensor_[cumSumFlagOffset], statusCleanFp32Tensor_, aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
 }
 
 template <TemplateMC2A5FullMeshTypeClass>
@@ -3023,7 +3016,7 @@ __aicore__ inline void MoeDistributeDispatchV2A5FullMesh<TemplateMC2A5FullMeshTy
     LocalTensor<float> sumLocalTensor = sumLocalBuf_.Get<float>();
     if (aivId_ > 0U) {
         DataCopyParams sumCopyParams{static_cast<uint16_t>(aivId_), 1, 0, 0};
-        DataCopy(sumLocalTensor, cumsumWsGMTensor_, sumCopyParams);
+        DataCopy(sumLocalTensor, cumsumWinGMTensor_, sumCopyParams);
     }
     SetValidExpertInfoSerial(validNum);
     SetExpertTokenNumsSerial();

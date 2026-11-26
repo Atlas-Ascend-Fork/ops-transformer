@@ -34,7 +34,8 @@ protected:
             return;
         }
         const auto& param = GetParam();
-        if (param.comm_alg != "fullmesh_v1" && param.comm_alg != "fullmesh_v2") {
+        const bool isA5DefaultFullMesh = param.soc == "3510" && param.comm_alg.empty();
+        if (!isA5DefaultFullMesh && param.comm_alg != "fullmesh_v1" && param.comm_alg != "fullmesh_v2") {
             return;
         }
         const char* value = getenv("HCCL_BUFFSIZE");

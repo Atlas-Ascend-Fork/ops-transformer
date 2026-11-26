@@ -522,7 +522,7 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
     <summary><term>Ascend 950DT系列产品</term>：</summary>
 
     - dynamicScalesOut quantMode取值为2、3、4、5时有输出；quantMode取值为0且`x`的数据类型为`HIFLOAT8`、`FLOAT8_E5M2`、`FLOAT8_E4M3FN`、`FLOAT4_E2M1`、`FLOAT4_E1M2`时也有输出。
-    - commAlg支持""、"fullmesh_v1"、"fullmesh_v2"和"hierarchy"；"hierarchy"使用域内 UB Memory、域间 RoCE 通信。
+    - commAlg支持""、"fullmesh_v1"、"fullmesh_v2"和"hierarchy"。""为默认值，开启fullmesh_v1模板。"hierarchy"使用域内 UB Memory、域间 RoCE 通信。
     - xActiveMaskOptional要求为1D或2D Tensor（1D时shape为(BS, )，2D时shape为(BS, K)）；1D时true需排在false前，2D时token对应K个值全为false则不参与通信。
     - expertScalesOptional可传有效Tensor或空指针。传有效Tensor时使能expertScales专家权重功能，有效Tensor为2D Tensor，shape为(BS, K)；传空指针时不使能expertScales专家权重功能。不支持空Tensor。
     - epWorldSize取值范围[2, 1024]。
@@ -770,10 +770,10 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
 
       <!-- npu="950" id35 -->
       - <term>Ascend 950DT系列产品</term>：
-          - 当commAlg为"fullmesh_v1"或空字符串或空指针时：设置大小要求取值满足 ≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* 480Align512(2 \* H))。
-          - 当commAlg为"fullmesh_v2"时：设置大小要求取值满足 ≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* 480Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* 480Align512(2 \* H))。
-          - 其中`480Align512(x) = ((x + 480 - 1) / 480) * 512`，`Align512(x) = ((x + 512 - 1) / 512) * 512`，`Align32(x) = ((x + 32 - 1) / 32) * 32`。
-          - 当`quantMode`为0（非量化）且`scalesOptional`非空时，式中每个token的长度取`max(Align32(2 * H) + 64, Align32(Align32(2 * H) + 4 * H) + 16)`，再按上述规则对齐。
+          - 当`commAlg`为"fullmesh_v1"、空字符串或空指针时，设置大小要求取值满足 `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`。
+          - 当`commAlg`为"fullmesh_v2"时，设置大小要求取值满足 `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * 480Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`。
+          - 式中`D = Align32(2 * H) + max(64, Align32(S) + 32)`。当`quantMode`为0且`scalesOptional`非空时，`S`为单个token的scale字节数，其余场景`S = 0`。
+          - 其中`480Align512(x) = ((x + 480 - 1) / 480) * 512`，`Align512(x) = ((x + 512 - 1) / 512) * 512`，`Align32(x) = ((x + 32 - 1) / 32) * 32`，`1MB = 1024 * 1024B`。`localExpertNum`需使用MoE专家卡的本卡专家数。`HCCL_BUFFSIZE`取值不小于2。
       <!-- end id35 -->
 
   - **HCCL_INTRA_PCIE_ENABLE**和**HCCL_INTRA_ROCE_ENABLE**：

@@ -419,7 +419,10 @@ $$
         - `BS`：表示batch sequence size，即本卡最终输出的token数量。
             - `commAlg` = "fullmesh_v2"或"hierarchy"：取值范围(0, 256]。
             - `commAlg` = "fullmesh_v1"或""：取值范围(0, 512]。
-    - `HCCL_BUFFSIZE`：调用本算子前需检查`HCCL_BUFFSIZE`环境变量取值是否合理，该环境变量表示单个通信域占用内存大小，单位MB，不配置时默认为200MB。要求 >= 2且满足>= 2 *(`localExpertNum`* `maxBS` *`epWorldSize`* Align512(Align32(2 *`H`) + 64) + (`K` + `sharedExpertNum`)* `maxBS` *Align512(2* `H`))，`localExpertNum`需使用MoE专家卡的本卡专家数，其中Align512(x) = ((x + 512 - 1) / 512) *512，Align32(x) = ((x + 32 - 1) / 32)* 32。
+    - `HCCL_BUFFSIZE`：调用本算子前需检查`HCCL_BUFFSIZE`环境变量取值是否合理，该环境变量表示单个通信域占用内存大小，单位MB，不配置时默认为200MB。
+        - 当`commAlg`为"fullmesh_v1"或""时，设置大小要求取值满足 `HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(Align32(2 * H) + 64) + (K + sharedExpertNum) * maxBS * Align512(2 * H)) * 1B`。
+        - 当`commAlg`为"fullmesh_v2"时，设置大小要求取值满足 `HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * 480Align512(Align32(2 * H) + 64) + (K + sharedExpertNum) * maxBS * Align512(2 * H)) * 1B`。
+        - 其中`480Align512(x) = ((x + 480 - 1) / 480) * 512`，`Align512(x) = ((x + 512 - 1) / 512) * 512`，`Align32(x) = ((x + 32 - 1) / 32) * 32`，`1MB = 1024 * 1024B`。`localExpertNum`需使用MoE专家卡的本卡专家数。`HCCL_BUFFSIZE`取值不小于2。对齐公式中的`/`表示整除。
 
 - <term>Ascend 950DT系列产品</term>：
     - 参数约束：
@@ -430,7 +433,7 @@ $$
         - `commAlg`：当前版本仅支持""，"fullmesh_v1"，"fullmesh_v2"三种输入方式。
             - ""：默认值，开启fullmesh_v1模板。
             - "fullmesh_v1"：开启fullmesh_v1模板。
-            - "fullmesh_v2"：开启fullmesh_v2模板，不支持在各卡`BS`不一致、输入xActiveMask和特殊专家场景下开启。
+            - "fullmesh_v2"：开启fullmesh_v2模板。
         - `epRecvCountsOut`：要求shape为(`epWorldSize` * `localExpertNum`,)。
         - `performanceInfoOptional`：预留参数，当前版本不支持，传空指针即可。
         - `expertShardType`当前仅支持传0，表示共享专家卡排在MoE专家卡前面。
@@ -438,11 +441,11 @@ $$
     - 参数说明里shape格式说明：
         - `H`：表示hidden size隐藏层大小，取值范围[1024, 8192]。
         - `BS`：表示batch sequence size，即本卡最终输出的token数量，取值范围(0, 512]。
-    - `HCCL_BUFFSIZE`：调用本算子前需检查`HCCL_BUFFSIZE`环境变量取值是否合理，该环境变量表示单个通信域占用内存大小，单位MB，不配置时默认为200MB。要求 >= 2且满足：
-        - `commAlg` = "fullmesh_v1"或""：>= 2 * (`localExpertNum` * `maxBS` * `epWorldSize` * Align512(Align32(2 * `H`) + 64) + (`K` + `sharedExpertNum`) * `maxBS` * 480Align512(2 * `H`))。
-        - `commAlg` = "fullmesh_v2"：>= 2 * (`localExpertNum` * `maxBS` * `epWorldSize` * 480Align512(Align32(2 * `H`) + 64) + (`K` + `sharedExpertNum`) * `maxBS` * 480Align512(2 * `H`))。
-        - 其中`480Align512(x) = ((x + 480 - 1) / 480) * 512`，`Align512(x) = ((x + 512 - 1) / 512) * 512`，`Align32(x) = ((x + 32 - 1) / 32) * 32`。
-        - 对于<term>Ascend 950DT系列产品</term>，当`quantMode`为0（非量化）且`scalesOptional`非空时，式中每个token的长度取`max(Align32(2 * H) + 64, Align32(Align32(2 * H) + 4 * H) + 16)`，再按fullmesh_v1的512B或fullmesh_v2的480B对齐。
+    - `HCCL_BUFFSIZE`：调用本算子前需检查`HCCL_BUFFSIZE`环境变量取值是否合理，该环境变量表示单个通信域占用内存大小，单位MB，不配置时默认为200MB。
+        - 当`commAlg`为"fullmesh_v1"或""时，设置大小要求取值满足 `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`。
+        - 当`commAlg`为"fullmesh_v2"时，设置大小要求取值满足 `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * 480Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`。
+        - 式中`D = Align32(2 * H) + max(64, Align32(S) + 32)`。当`quantMode`为0且`scalesOptional`非空时，`S`为单个token的scale字节数，其余场景`S = 0`。
+        - 其中`480Align512(x) = ((x + 480 - 1) / 480) * 512`，`Align512(x) = ((x + 512 - 1) / 512) * 512`，`Align32(x) = ((x + 32 - 1) / 32) * 32`，`1MB = 1024 * 1024B`。`localExpertNum`需使用MoE专家卡的本卡专家数。`HCCL_BUFFSIZE`取值不小于2。对齐公式中的`/`表示整除。
 
 ## 调用说明
 
