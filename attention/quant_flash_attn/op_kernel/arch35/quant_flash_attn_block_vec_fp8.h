@@ -114,6 +114,11 @@ public:
     static constexpr bool USE_DN = useDn;
     static constexpr UbFormat OUT_UB_FORMAT = USE_DN ? UbFormat::S1_ONLY : GetOutUbFormat<layout>();
     using OutGmCoord = std::conditional_t<USE_DN, GmCoordS1Only, GmCoordGs1Merge>;
+    // LSE 与 attentionOut 同为 M 轴行序, 复用同一套 UB 格式与坐标类型
+    static constexpr UbFormat LSE_UB_FORMAT = OUT_UB_FORMAT;
+    using LseGmCoord = OutGmCoord;
+    static constexpr GmFormat LSE_FORMAT = GmFormat::LSE_N2GT;
+    FaGmTensor<float, LSE_FORMAT, int32_t, true> lseGmTensor_;
     static constexpr bool IS_PER_TOEKN_HEAD = true;
     static constexpr bool PAGE_ATTENTION = (KvLayoutType > 0);
 
@@ -220,6 +225,11 @@ public:
 
         InitVecInput(actualSeqQlenAddr, actualSeqKvlenAddr, pScale, sinks, blockTable, deqScaleQ, deqScaleK, deqScaleV,
                      softmaxLse, attentionOut, workspace);
+
+        if (constInfo_.isSoftmaxLseEnable) {
+            lseGmTensor_.gmTensor = softmaxLseGm_;
+            lseGmTensor_.offsetCalculator.Init(constInfo_.t1Size, constInfo_.realN2Size, constInfo_.realGSize, qParser);
+        }
     }
 
     __aicore__ inline void InitVecInput(__gm__ uint8_t* actualSeqQlenAddr, __gm__ uint8_t* actualSeqKvlenAddr,
@@ -665,10 +675,26 @@ public:
         Mutex::Unlock<PIPE_V>(UB_OUT_LSE_OUT_ID);
 
         Mutex::Lock<PIPE_MTE3>(UB_OUT_LSE_OUT_ID);
-        uint32_t prefixBS1 = qActSeqLensParser_->GetTBase(runInfo.bIdx);
-        uint64_t bN2Offset = runInfo.realN2Idx * constInfo_.realGSize * constInfo_.t1Size + prefixBS1;
-        DataCopySoftmaxLseTNDtoNTArch35NoGS1Merge<T, ConstInfoX>(softmaxLseGm_, softmaxLseBuf_, bN2Offset, vecMIdx,
-                                                                 runInfo.actVecMSize, constInfo_);
+        // LSE 输出 N-major [N2*G, T]; DN 范式走 S1_ONLY 整段搬出
+        LseGmCoord lseGmCoord{};
+        if constexpr (USE_DN) {
+            lseGmCoord = GmCoordS1Only{.bIdx = runInfo.bIdx,
+                                       .n2Idx = runInfo.realN2Idx,
+                                       .gIdx = 0,
+                                       .s1Idx = vecMIdx,
+                                       .dIdx = 0,
+                                       .s1DealSize = runInfo.actVecMSize,
+                                       .dDealSize = 0};
+        } else {
+            lseGmCoord = GmCoordGs1Merge{.bIdx = runInfo.bIdx,
+                                         .n2Idx = runInfo.realN2Idx,
+                                         .gS1Idx = vecMIdx,
+                                         .dIdx = 0,
+                                         .gS1DealSize = runInfo.actVecMSize,
+                                         .dDealSize = 0};
+        }
+        CopyLseOutUbToGm<float, LSE_FORMAT, LSE_UB_FORMAT> copyLseOutUbToGm;
+        copyLseOutUbToGm(lseGmTensor_, softmaxLseBuf_, lseGmCoord);
         Mutex::Unlock<PIPE_MTE3>(UB_OUT_LSE_OUT_ID);
     }
 

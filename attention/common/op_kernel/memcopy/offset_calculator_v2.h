@@ -1437,6 +1437,12 @@ struct OffsetCalculatorImpl<FORMAT, FormatCategory::GM_LSE_TN2G, ACTLEN_T, WITH_
         gmLayout.MakeLayout(actualSeqLensQParser.GetTSize(), n2, g);
     }
 
+    __aicore__ inline void Init(uint32_t t, uint32_t n2, uint32_t g, const SeqLensQParserType& parser)
+    {
+        actualSeqLensQParser = parser;
+        gmLayout.MakeLayout(t, n2, g);
+    }
+
     __aicore__ inline uint64_t GetOffset(uint32_t bIdx, uint32_t n2Idx, uint32_t gIdx, uint32_t s1Idx)
     {
         uint64_t tIdx = actualSeqLensQParser.GetTBase(bIdx) + s1Idx;
@@ -1459,6 +1465,12 @@ struct OffsetCalculatorImpl<FORMAT, FormatCategory::GM_LSE_TN2G, ACTLEN_T, WITH_
     {
         return AscendC::Std::get<2>(gmLayout.stride);
     } // 2: 轴的索引
+
+    // T 维即 S1 维(TND/NTD 下 t = bIdx 前缀和 + s1)
+    __aicore__ inline uint64_t GetStrideS1()
+    {
+        return GetStrideT();
+    }
 
     // Get Dim
     __aicore__ inline uint64_t GetDimT()

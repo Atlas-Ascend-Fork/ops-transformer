@@ -133,6 +133,13 @@ protected:
     GlobalTensor<float> softmaxLseGm_;
 
     static constexpr UbFormat UB_FORMAT = GetOutUbFormat<layout>();
+    // LSE 的 M 轴行序与 attentionOut 一致
+    static constexpr UbFormat LSE_UB_FORMAT = useDn ? UbFormat::S1_ONLY : GetOutUbFormat<layout>();
+    using LseGmCoord = std::conditional_t<useDn, GmCoordS1Only, GmCoordGs1Merge>;
+    static constexpr bool LSE_WITH_ZERO_HEAD =
+        (layout == LayOutTypeEnum::LAYOUT_TND || layout == LayOutTypeEnum::LAYOUT_NTD);
+    static constexpr GmFormat LSE_FORMAT = LSE_WITH_ZERO_HEAD ? GmFormat::LSE_N2GT : GmFormat::LSE_BN2GS1;
+    FaGmTensor<float, LSE_FORMAT, int32_t, LSE_WITH_ZERO_HEAD> lseGmTensor_;
     static constexpr bool isPa = KvLayoutType > 0;
 
     static constexpr ActualSeqLensMode Q_MODE = GetQActSeqMode<layout>();
@@ -202,6 +209,16 @@ public:
     {
         this->qActSeqLensParser_ = &qParser;
         this->kvActSeqLensParser_ = &kvParser;
+        if (constInfo_.isSoftmaxLseEnable) {
+            lseGmTensor_.gmTensor = softmaxLseGm_;
+            if constexpr (layout == LayOutTypeEnum::LAYOUT_TND || layout == LayOutTypeEnum::LAYOUT_NTD) {
+                lseGmTensor_.offsetCalculator.Init(constInfo_.t1Size, constInfo_.realN2Size, constInfo_.realGSize,
+                                                   qParser);
+            } else {
+                lseGmTensor_.offsetCalculator.Init(constInfo_.bSize, constInfo_.realN2Size, constInfo_.realGSize,
+                                                   constInfo_.s1Size, qParser);
+            }
+        }
     }
 
     __aicore__ inline void InitSoftmaxLseGm(GlobalTensor<float> softmaxLseGm)
@@ -579,49 +596,26 @@ public:
                 LocalTensor<T> maxLseUb = fdLseUbBuf_;
                 Mutex::Lock<PIPE_MTE3>(SYNC_LSEOUTPUT_BUF_FLAG);
                 uint32_t mOffset = taskInfo_.gS1Idx + startRow;
-                if constexpr (layout == LayOutTypeEnum::LAYOUT_NTD) {
-                    // NTD(TND-decode) 为 [T, N2*G] 排布, 不涉及 DN 范式, 保持逐 s1 搬出
-                    uint32_t prefixBS1 = qActSeqLensParser_->GetTBase(taskInfo_.bIdx);
-                    uint32_t s1Size = qActSeqLensParser_->GetActualSeqLength(taskInfo_.bIdx);
-                    uint64_t bN2Offset = prefixBS1 * constInfo_.realGSize * constInfo_.realN2Size +
-                                         taskInfo_.n2Idx * constInfo_.realGSize;
-                    DataCopySoftmaxLseNTDArch35<T, ConstInfoX>(softmaxLseGm_, maxLseUb, bN2Offset, mOffset,
-                                                               actualGSplitSize, constInfo_, s1Size);
-                } else if constexpr (useDn) {
-                    // DN 范式下任务按 head 分解(realGSize=1), 同一头的 s1 在 UB/GM 均连续, 整块搬出
-                    uint64_t bN2Offset;
-                    if constexpr (layout == LayOutTypeEnum::LAYOUT_TND) {
-                        // LSE 输出为 N-major 排布 [N2*G, T]
-                        uint32_t prefixBS1 = qActSeqLensParser_->GetTBase(taskInfo_.bIdx);
-                        bN2Offset = taskInfo_.n2Idx * constInfo_.realGSize * constInfo_.t1Size + prefixBS1;
-                    } else { // BSH / BNSD: LSE 输出为 [B, N2*G, S1] 排布
-                        bN2Offset = taskInfo_.bIdx * constInfo_.realGSize * constInfo_.realN2Size * constInfo_.s1Size +
-                                    taskInfo_.n2Idx * constInfo_.realGSize * constInfo_.s1Size;
-                    }
-                    DataCopySoftmaxLseS1OnlyArch35<T>(softmaxLseGm_, maxLseUb, bN2Offset, mOffset, actualGSplitSize);
-                } else if constexpr (layout == LayOutTypeEnum::LAYOUT_TND) {
-                    // LSE 输出改为 N-major 排布 [N2*G, T]: N 在外, T 在内
-                    uint32_t prefixBS1 = qActSeqLensParser_->GetTBase(taskInfo_.bIdx);
-                    uint64_t bN2Offset = taskInfo_.n2Idx * constInfo_.realGSize * constInfo_.t1Size + prefixBS1;
-                    DataCopySoftmaxLseTNDtoNTArch35<T, ConstInfoX>(softmaxLseGm_, maxLseUb, bN2Offset, mOffset,
-                                                                   actualGSplitSize, constInfo_);
-                } else if constexpr (layout == LayOutTypeEnum::LAYOUT_BSH) {
-                    uint64_t bN2Offset =
-                        taskInfo_.bIdx * constInfo_.realGSize * constInfo_.realN2Size * constInfo_.s1Size +
-                        taskInfo_.n2Idx * constInfo_.realGSize * constInfo_.s1Size;
-                    uint64_t s1LeftPaddingSize = 0;
-                    DataCopySoftmaxLseBSNDArch35<T, ConstInfoX>(softmaxLseGm_, maxLseUb, bN2Offset, mOffset,
-                                                                actualGSplitSize, constInfo_, s1LeftPaddingSize);
-                } else { // BNSD
-                    uint64_t bN2Offset =
-                        taskInfo_.bIdx * constInfo_.realGSize * constInfo_.realN2Size * constInfo_.s1Size +
-                        taskInfo_.n2Idx * constInfo_.realGSize * constInfo_.s1Size;
-                    uint64_t qActSeqLens = qActSeqLensParser_->GetActualSeqLength(taskInfo_.bIdx);
-                    uint64_t s1LeftPaddingSize = 0;
-                    DataCopySoftmaxLseBNSDArch35<T, ConstInfoX>(softmaxLseGm_, maxLseUb, bN2Offset, mOffset,
-                                                                actualGSplitSize, constInfo_, qActSeqLens,
-                                                                s1LeftPaddingSize);
+                // DN 范式走 S1_ONLY 整段搬出, 非 DN 按合轴行序分段搬出
+                LseGmCoord lseGmCoord{};
+                if constexpr (useDn) {
+                    lseGmCoord = GmCoordS1Only{.bIdx = taskInfo_.bIdx,
+                                               .n2Idx = taskInfo_.n2Idx,
+                                               .gIdx = 0,
+                                               .s1Idx = mOffset,
+                                               .dIdx = 0,
+                                               .s1DealSize = actualGSplitSize,
+                                               .dDealSize = 0};
+                } else {
+                    lseGmCoord = GmCoordGs1Merge{.bIdx = taskInfo_.bIdx,
+                                                 .n2Idx = taskInfo_.n2Idx,
+                                                 .gS1Idx = mOffset,
+                                                 .dIdx = 0,
+                                                 .gS1DealSize = actualGSplitSize,
+                                                 .dDealSize = 0};
                 }
+                CopyLseOutUbToGm<float, LSE_FORMAT, LSE_UB_FORMAT> copyLseOutUbToGm;
+                copyLseOutUbToGm(lseGmTensor_, maxLseUb, lseGmCoord);
                 Mutex::Unlock<PIPE_MTE3>(SYNC_LSEOUTPUT_BUF_FLAG);
             }
 
