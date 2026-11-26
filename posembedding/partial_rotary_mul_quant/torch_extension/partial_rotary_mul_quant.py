@@ -13,11 +13,17 @@ from torch.library import impl
 from cann_ops_transformer.op_builder import OpBuilder, get_as_library
 
 
+_HIFLOAT4_BLOCK_SIZE = 64
+_HIFLOAT4_PER_BYTE = 2
+
+
 def _validate(x, cos, sin, scale, y_dtype, round_mode, rotary_mode, partial_slice):
-    if y_dtype != 0:
-        raise ValueError("y_dtype only supports 0 (HiFloat8).")
+    if y_dtype not in (0, 1):
+        raise ValueError("y_dtype must be 0 (HiFloat8) or 1 (HiFloat4).")
     if rotary_mode not in (0, 1, 2, 3):
         raise ValueError("rotary_mode must be 0, 1, 2 or 3.")
+    if y_dtype == 1 and rotary_mode not in (0, 1):
+        raise ValueError("HiFloat4 requires rotary_mode=0 (half) or 1 (interleave).")
     if round_mode not in ("", "round", "hybrid"):
         raise ValueError("round_mode must be empty, 'round' or 'hybrid'.")
     if x.dim() != 4 or cos.dim() != 4 or sin.dim() != 4:
@@ -30,18 +36,22 @@ def _validate(x, cos, sin, scale, y_dtype, round_mode, rotary_mode, partial_slic
         raise ValueError("cos and sin must have the same shape.")
     if any(size <= 0 for size in x.shape):
         raise ValueError("x must have positive dimensions.")
-    bounds = (
-        [0, 0] if partial_slice is None or len(partial_slice) == 0 else partial_slice
-    )
+    d = x.size(-1)
+    bounds = partial_slice or (0, d if y_dtype == 1 else 0)
     if len(bounds) != 2:
         raise ValueError("partial_slice must be empty or contain [start, end].")
     start, end = bounds
     no_rope = start == end
-    d = x.size(-1)
     divisor = 4 if rotary_mode == 2 else 2
     if not (0 <= start <= end <= d <= 1024) or (not no_rope and end != d):
         raise ValueError(
             "partial_slice must be empty within [0, D] or satisfy 0 <= start < end == D <= 1024."
+        )
+    if y_dtype == 1 and (
+        no_rope or d % _HIFLOAT4_BLOCK_SIZE or start % _HIFLOAT4_BLOCK_SIZE
+    ):
+        raise ValueError(
+            "HiFloat4 requires a nonempty rotary slice and D and slice start divisible by 64."
         )
     if not no_rope and (d % divisor != 0 or (end - start) % divisor != 0):
         raise ValueError(f"D and rotary slice length must be divisible by {divisor}.")
@@ -55,6 +65,13 @@ def _validate(x, cos, sin, scale, y_dtype, round_mode, rotary_mode, partial_slic
         for actual, expected in zip(cos.shape[:3], x.shape[:3]):
             if actual != 1 and actual != expected:
                 raise ValueError("cos/sin leading dimensions must broadcast to x.")
+    if y_dtype == 1:
+        if cos.shape[:3] not in (x.shape[:3], (1, 1, 1)) and (
+            cos.size(0) != x.size(0) or cos.size(2) != 1
+        ):
+            raise ValueError(
+                "HiFloat4 requires cos/sin in BSND, 111D, B11D or BS1D layout."
+            )
     if scale is not None and (scale.dtype != torch.float32 or scale.numel() != 1):
         raise ValueError("scale must be a single-element FP32 tensor.")
 
@@ -91,6 +108,15 @@ class PartialRotaryMulQuantOpBuilder(OpBuilder):
             _validate(
                 x, cos, sin, scale, y_dtype, round_mode, rotary_mode, partial_slice
             )
+            if y_dtype == 1:
+                leading = x.shape[:-1]
+                d = x.size(-1)
+                return (
+                    x.new_empty((*leading, d // _HIFLOAT4_PER_BYTE), dtype=torch.uint8),
+                    x.new_empty(
+                        (*leading, d // _HIFLOAT4_BLOCK_SIZE, 1), dtype=torch.float32
+                    ),
+                )
             return (
                 x.new_empty(x.shape, dtype=torch.uint8),
                 x.new_empty((0,), dtype=torch.float32),
@@ -116,8 +142,6 @@ def _partial_rotary_mul_quant(
     rotary_mode=0,
     partial_slice=None,
 ):
-    if partial_slice is None or len(partial_slice) == 0:
-        partial_slice = [0, 0]
     return partial_rotary_mul_quant_op_builder.load().partial_rotary_mul_quant(
         x,
         cos,
@@ -128,7 +152,7 @@ def _partial_rotary_mul_quant(
         round_mode,
         axis,
         rotary_mode,
-        partial_slice,
+        partial_slice or [],
     )
 
 
@@ -144,21 +168,31 @@ def partial_rotary_mul_quant(
     rotary_mode: int = 0,
     partial_slice: Optional[List[int]] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Partial RoPE followed by HiFloat8 quantization on Ascend950.
+    """Apply partial RoPE and quantize the full result to HiFloat8 or HiFloat4.
 
-    x/cos/sin use FP16, BF16 or FP32, with four dimensions. cos/sin broadcast
-    over x's leading dimensions and cover only [start, end). An omitted or empty
-    partial_slice uses [0, 0], skipping RoPE while still scaling and quantizing
-    the entire input. For a nonempty slice, end must equal D (<=1024).
-    rotary_mode is 0 (half), 1 (interleave),
-    2 (quarter), or 3 (interleave-half). D and slice length must be multiples
-    of 2, or 4 for quarter mode. scale optionally contains one FP32 value and
-    multiplies the entire result, including the unrotated prefix.
+    x, cos and sin are 4D FP16, BF16 or FP32 tensors with matching dtypes.
+    For a nonempty [start, end) slice, end equals D (x's last dimension,
+    at most 1024), and the last dimension of cos and sin equals end - start.
 
-    y_dtype must be 0. round_mode accepts 'round' and 'hybrid'.
-    quant_mode and axis are retained for ACLNN compatibility and ignored.
-    Returns HiFloat8 bytes as uint8 with x's shape and an empty FP32 y_scale
-    of shape (0,). This inference operator does not implement backward.
+    y_dtype=0 selects HiFloat8 on Ascend950. An omitted or empty partial_slice
+    skips RoPE, as does any [start, start] slice. For other slices, cos and sin
+    broadcast over the leading dimensions of x. rotary_mode supports 0 (half),
+    1 (interleave), 2 (quarter) and 3 (interleave-half). D and the slice length
+    must be multiples of 2, or 4 for quarter mode. A supplied single-element
+    FP32 scale multiplies the entire result. round_mode accepts an empty string,
+    'round' or 'hybrid'. Outputs are uint8 with shape x.shape and an empty FP32
+    tensor with shape (0,).
+
+    y_dtype=1 selects HiFloat4 on Ascend960DT/Ascend960PR. An omitted or empty
+    partial_slice uses [0, D]. Explicit slices must be nonempty, with D and
+    start divisible by 64. rotary_mode supports 0 and 1. For BSND x, cos and
+    sin support BSND, 111D, B11D and BS1D leading layouts. Outputs are packed
+    uint8 of shape (*x.shape[:-1], D // 2) and HiFloat4 scale storage carried
+    as FP32 of shape (*x.shape[:-1], D // 64, 1). The HiFloat4 kernel ignores
+    the optional input scale and round_mode.
+
+    quant_mode and axis are retained for ACLNN compatibility. This inference
+    operator does not implement backward.
     """
     return torch.ops.cann_ops_transformer.partial_rotary_mul_quant(
         x,

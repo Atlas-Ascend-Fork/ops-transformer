@@ -11,6 +11,9 @@
 #include "aclnn_common.h"
 
 namespace op_api {
+constexpr int64_t kHiFloat4BlockSize = 64;
+constexpr int64_t kHiFloat4PerByte = 2;
+
 std::tuple<at::Tensor, at::Tensor> PartialRotaryMulQuant(const at::Tensor& x, const at::Tensor& cos,
                                                          const at::Tensor& sin, const c10::optional<at::Tensor>& scale,
                                                          int64_t yDtype, int64_t quantMode,
@@ -19,8 +22,10 @@ std::tuple<at::Tensor, at::Tensor> PartialRotaryMulQuant(const at::Tensor& x, co
 {
     TORCH_CHECK(x.device().type() == c10::DeviceType::PrivateUse1, "x must be an NPU tensor");
     const c10::OptionalDeviceGuard deviceGuard(x.device());
-    TORCH_CHECK(yDtype == 0, "y_dtype only supports 0 (HiFloat8)");
+    TORCH_CHECK(yDtype == 0 || yDtype == 1, "y_dtype must be 0 (HiFloat8) or 1 (HiFloat4)");
+    const bool hiFloat4 = yDtype == 1;
     TORCH_CHECK(rotaryMode >= 0 && rotaryMode <= 3, "rotary_mode must be 0, 1, 2 or 3");
+    TORCH_CHECK(!hiFloat4 || rotaryMode <= 1, "HiFloat4 requires rotary_mode=0 (half) or 1 (interleave)");
     TORCH_CHECK(roundMode.empty() || roundMode == "round" || roundMode == "hybrid",
                 "round_mode must be empty, round or hybrid");
     TORCH_CHECK(x.dim() == 4 && cos.dim() == 4 && sin.dim() == 4, "x, cos and sin must be 4D");
@@ -33,13 +38,17 @@ std::tuple<at::Tensor, at::Tensor> PartialRotaryMulQuant(const at::Tensor& x, co
     TORCH_CHECK(cos.sizes() == sin.sizes(), "cos and sin must have the same shape");
     TORCH_CHECK(partialSlice.empty() || partialSlice.size() == 2,
                 "partial_slice must be empty or contain [start, end]");
-    int64_t d = x.size(3);
-    int64_t start = partialSlice.empty() ? 0 : partialSlice[0];
-    int64_t end = partialSlice.empty() ? 0 : partialSlice[1];
-    bool noRope = start == end;
+    const int64_t d = x.size(3);
+    const int64_t defaultSlice[] = {0, hiFloat4 ? d : 0};
+    const at::IntArrayRef slice = partialSlice.empty() ? at::IntArrayRef(defaultSlice, 2) : partialSlice;
+    const int64_t start = slice[0];
+    const int64_t end = slice[1];
+    const bool noRope = start == end;
     int64_t divisor = rotaryMode == 2 ? 4 : 2;
     TORCH_CHECK(0 <= start && start <= end && end <= d && d <= 1024 && (noRope || end == d),
                 "partial_slice must be empty within [0, D] or satisfy 0 <= start < end == D <= 1024");
+    TORCH_CHECK(!hiFloat4 || (!noRope && d % kHiFloat4BlockSize == 0 && start % kHiFloat4BlockSize == 0),
+                "HiFloat4 requires a nonempty rotary slice and D and slice start divisible by 64");
     TORCH_CHECK(noRope || (d % divisor == 0 && (end - start) % divisor == 0),
                 "D and rotary slice length must be divisible by ", divisor);
     TORCH_CHECK(noRope || cos.size(3) == end - start, "cos/sin last dimension must equal rotary slice length");
@@ -49,26 +58,36 @@ std::tuple<at::Tensor, at::Tensor> PartialRotaryMulQuant(const at::Tensor& x, co
             TORCH_CHECK(cos.size(i) == 1 || cos.size(i) == x.size(i), "cos/sin leading dimensions must broadcast to x");
         }
     }
+    if (hiFloat4) {
+        const auto cosLeading = cos.sizes().slice(0, 3);
+        TORCH_CHECK(cosLeading == x.sizes().slice(0, 3) ||
+                        (cos.size(2) == 1 && (cos.size(0) == x.size(0) || (cos.size(0) == 1 && cos.size(1) == 1))),
+                    "HiFloat4 requires cos/sin in BSND, 111D, B11D or BS1D layout");
+    }
     if (scale.has_value()) {
         TORCH_CHECK(scale->device() == x.device(), "scale must be on the same NPU device as x");
         TORCH_CHECK(scale->scalar_type() == at::kFloat && scale->numel() == 1,
                     "scale must be a single-element FP32 tensor");
     }
-    // PyTorch stores HiFloat8 as bytes; pass its real dtype to ACLNN.
-    at::Tensor y = at::empty(x.sizes(), x.options().dtype(at::kByte));
-    at::Tensor yScale = at::empty({0}, x.options().dtype(at::kFloat));
-    TensorWrapper yWrapper{y, ACL_HIFLOAT8};
+    auto yShape = x.sizes().vec();
+    std::vector<int64_t> scaleShape{0};
+    if (hiFloat4) {
+        yShape.back() = d / kHiFloat4PerByte;
+        scaleShape = {x.size(0), x.size(1), x.size(2), d / kHiFloat4BlockSize, 1};
+    }
+    at::Tensor y = at::empty(yShape, x.options().dtype(at::kByte));
+    at::Tensor yScale = at::empty(scaleShape, x.options().dtype(at::kFloat));
+    // TensorWrapper restores the logical HiFloat4 shape and passes the native ACL dtypes.
+    TensorWrapper yWrapper{y, hiFloat4 ? cann_ops_transformer::ACL_HIFLOAT4 : ACL_HIFLOAT8};
+    TensorWrapper yScaleWrapper{yScale, hiFloat4 ? cann_ops_transformer::ACL_HIFLOAT4_SCALE : ACL_FLOAT};
     const char* roundModePtr = roundMode.c_str();
-    // The generated ACLNN API requires two elements for a non-null list attribute.
-    const int64_t emptySlice[] = {0, 0};
-    const at::IntArrayRef slice = partialSlice.empty() ? at::IntArrayRef(emptySlice, 2) : partialSlice;
     ACLNN_CMD(aclnnPartialRotaryMulQuant, x, cos, sin, scale, yDtype, quantMode, roundModePtr, axis, rotaryMode, slice,
-              yWrapper, yScale);
+              yWrapper, yScaleWrapper);
     return std::make_tuple(y, yScale);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("partial_rotary_mul_quant", &PartialRotaryMulQuant, "Partial RoPE and HiFloat8 quantization");
+    m.def("partial_rotary_mul_quant", &PartialRotaryMulQuant, "Partial RoPE and HiFloat8 or HiFloat4 quantization");
 }
 } // namespace op_api

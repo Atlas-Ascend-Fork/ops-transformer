@@ -183,13 +183,16 @@ def make_inputs(case, seed, device, replay):
 
 
 def validate_rejections(device):
-    """Check actual dispatcher and Meta reject HiF4 and malformed parameters."""
+    """Check eager and Meta reject malformed parameters."""
     count = 0
     for target in (device, "meta"):
         x = torch.empty((2, 3, 4, 128), dtype=torch.float16, device=target)
         c = torch.empty((1, 1, 1, 64), dtype=x.dtype, device=target)
         bad_options = [
-            dict(y_dtype=1),
+            dict(y_dtype=2),
+            dict(y_dtype=1, rotary_mode=2),
+            dict(y_dtype=1, partial_slice=[0, 0]),
+            dict(y_dtype=1, partial_slice=[32, 128]),
             dict(rotary_mode=4),
             dict(round_mode="invalid"),
             dict(partial_slice=[0]),
@@ -212,6 +215,22 @@ def validate_rejections(device):
     return count
 
 
+def validate_hif4_meta(public_op):
+    x = torch.empty((2, 3, 4, 128), dtype=torch.float16, device="meta")
+    for partial_slice, rotary_mode, cos_shape in (
+        (None, 0, (1, 1, 1, 128)),
+        ([], 1, (2, 3, 1, 128)),
+        ([64, 128], 0, (2, 1, 1, 64)),
+        ([64, 128], 1, (2, 3, 4, 64)),
+    ):
+        c = x.new_empty(cos_shape)
+        y, y_scale = public_op(
+            x, c, c, y_dtype=1, rotary_mode=rotary_mode, partial_slice=partial_slice
+        )
+        assert y.shape == (2, 3, 4, 64) and y.dtype == torch.uint8
+        assert y_scale.shape == (2, 3, 4, 2, 1) and y_scale.dtype == torch.float32
+
+
 def run(args, report):
     package = importlib.import_module(args.package)
     public_op = package.ops.partial_rotary_mul_quant
@@ -230,6 +249,7 @@ def run(args, report):
         }
     )
     report["rejection_checks"] = validate_rejections(device)
+    validate_hif4_meta(public_op)
     modes = ("eager", "ge", "aclgraph") if args.mode == "all" else (args.mode,)
     for mode in modes:
         for index, case in enumerate(cases()):
