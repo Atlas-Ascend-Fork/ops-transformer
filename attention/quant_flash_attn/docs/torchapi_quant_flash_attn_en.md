@@ -60,7 +60,7 @@
   <!-- end id7 -->
 
   <!-- npu="A3,910b" id8 -->
-  <term>Atlas A2 products</term> and <term>Atlas A3 products</term> support fully quantized INT8 MHA/GQA prefill and paged decode with INT8 Q, K, and V inputs and BF16 output.
+  <term>Atlas A2 products</term> and <term>Atlas A3 products</term> support fully quantized INT8 MHA/GQA with INT8 Q, K, and V inputs and BF16 output.
   <!-- end id8 -->
 
 - **Formula**:
@@ -175,7 +175,7 @@ The Python API supports passing the `IntEnum` enumeration or the corresponding i
 | `A8C8_QKV_HIF8_PER_TENSOR_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32` |  0  | HIF8 use case. |
 | `A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32`           |  1  | MxFP8 use case. |
 | `A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32` |  6  | FP8 use case. |
-| `A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16` | 12 | INT8 prefill. |
+| `A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16` | 12 | Fully quantized INT8 with non-paged or paged KV. |
 
 ### mask_mode Enumeration
 
@@ -1211,18 +1211,27 @@ Paged Attention is enabled when block_table is not empty.
 <!-- npu="A3,910b" id18 -->
 ### Atlas A2/A3 INT8 Constraints
 
-- Supports fully quantized INT8 MHA/GQA prefill without a KV cache. Pass `12` or `QuantMode.A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16` as `quant_mode`.
-- Q, K, and V must be contiguous INT8 tensors. The output is BF16. Pass `q_descale`, `k_descale`, `v_descale`, and `p_scale` as contiguous FP32 tensors on the same NPU as Q, K, and V. Q and K use per-token, per-head scales with the same shape as the respective input with the D axis removed. V uses per-head scales of shape `(KV_N,)` shared across batches. The static quantization scale `p_scale` for the softmax weights has shape `(1,)`. Its value must be positive and finite before and after conversion to FP16.
-- Q, K, and V must not be `None`. The caller is responsible for device tensor values; the interface does not add host value checks or D2H copies for these contents. `q_descale`, `k_descale`, and `v_descale` must be finite; NaN and positive or negative infinity are unsupported. `p_scale` must meet the value constraints above. TND cumulative lengths must be nonnegative and satisfy the constraints below. `max_seqlen_q` and `max_seqlen_kv` are upper bounds on the actual maximum lengths and need not equal them. Device bounds guards do not constitute complete parameter validation; invalid tensor values may produce undefined output.
-- Q, K, and V must share the same D in the range 1 to 256. `Q_N` must be divisible by `KV_N`.
-- `layout_q`, `layout_kv`, and `layout_out` support BNSD, BSND, and TND. The operator reads `q_descale` using the Q layout, so you can omit `layout_q_descale` in this mode. BNSD and BSND may be mixed. Q and KV must have the same batch size. Omit `cu_seqlens_q` and `cu_seqlens_kv` for these layouts.
-- With TND, use TND for Q, KV, and the output. Pass contiguous INT32 cumulative lengths `cu_seqlens_q` and `cu_seqlens_kv` of shape `(B+1,)`. Each must start at 0, be nondecreasing, and end at the corresponding total token count. Individual Q sequences may have length 0. Each nonempty Q sequence requires a nonempty KV sequence. If passed, `max_seqlen_q` and `max_seqlen_kv` must cover the corresponding actual maximum lengths. Output for a sequence that exceeds either bound may be left unwritten.
-- `win_left` and `win_right` specify distances relative to the bottom-right-aligned position. Use `-1` for an unbounded side or a nonnegative value up to `INT32_MAX`. The visible range is the intersection of the window and the mask. Fully masked rows yield zero output and an LSE of `-inf`.
-- Call `quant_flash_attn` directly with `metadata=None`.
-- `softmax_scale` must be finite and positive. Pass `None` for `block_table`, `seqused_q`, `seqused_kv`, `sinks`, `attn_mask`, `v_tail`, `block_table_tail`, and `seqused_v_tail`.
-**Paged decode:**
+Atlas A2/A3 products support fully quantized INT8 MHA/GQA. Pass `12` or `QuantMode.A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16` as `quant_mode`.
 
-- INT8 paged decode uses `quant_mode=12`: Q and output use TND; Q descale uses NT; KV supports PA_BNBD, PA_BBND, and PA_NZ. Pass `block_table`, `cu_seqlens_q`, and `seqused_kv`, and set `metadata` to `None`. No mask and causal mask are supported. A paged KV layout together with `block_table` selects decode; calls without a cache use prefill.
+| `layout_kv` | `block_table` | `metadata` |
+| --- | --- | --- |
+| `BNSD`, `BSND`, `TND` | Pass `None`. | Call `quant_flash_attn_metadata` first and pass its result to `quant_flash_attn`. |
+| `PA_BNBD`, `PA_BBND`, `PA_NZ` | Pass a nonempty block table. | Call `quant_flash_attn_metadata` first and pass its result to `quant_flash_attn`. |
+
+- Q, K, and V are INT8, and the output is BF16. Q, K, and V have the same head dimension in the range 1 to 256. The number of Q heads must be divisible by the number of KV heads.
+- `mask_mode` supports `0` (no mask) and `3` (causal).
+- `quant_flash_attn_metadata` returns a contiguous INT32 tensor of shape `(2, max_schedule_size)`.
+
+| Parameter group | Non-paged KV | Paged KV |
+| --- | --- | --- |
+| Layout | Q, KV, and the output can use a mix of `BNSD` and `BSND`. When using `TND`, all three use `TND`. | Use `PA_BNBD`, `PA_BBND`, or `PA_NZ` for KV. Use `TND` for Q and the output, and set `layout_q_descale` to `NT`. |
+| Sequence lengths | For `BNSD` and `BSND`, pass `batch_size`, `max_seqlen_q`, and `max_seqlen_kv` when generating metadata. For `TND`, pass `cu_seqlens_q` and `cu_seqlens_kv`. | Pass `cu_seqlens_q` and `seqused_kv`. The actual KV lengths must fit within the block table capacity. |
+
+For non-paged KV, Q, K, V, and the quantization and dequantization scales must be contiguous. The shapes of `q_descale` and `k_descale` match Q and K, respectively, with the D axis removed. The shape of `v_descale` is `(KV_N,)`, and the shape of `p_scale` is `(1,)`. The dequantization scales must be finite. The value of `p_scale` must be finite and positive before and after conversion to FP16.
+
+For non-paged `TND`, both cumulative sequence length tensors must be contiguous INT32 tensors of shape `(B+1,)`. Each starts at 0, is nondecreasing, and ends at the corresponding total token count. The specified sequence length bounds must cover the actual maximum lengths.
+
+For non-paged KV, `win_left` and `win_right` are relative to the bottom-right alignment position. Use `-1` for an unbounded side or a value in `[0, INT32_MAX]`. The visible range is the intersection of the window and the mask. Fully masked rows produce an output of 0 and an LSE of `-inf`.
 <!-- end id18 -->
 
 ## Example
@@ -1400,12 +1409,12 @@ Paged Attention is enabled when block_table is not empty.
 <!-- end id19 -->
 
 <!-- npu="A3,910b" id20 -->
-### Atlas A2/A3 INT8 Prefill Example (TND)
+### Atlas A2/A3 INT8 Non-Paged KV Example (TND)
 
 ```python
 import torch
 import torch_npu
-from cann_ops_transformer.ops import quant_flash_attn
+from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
 
 torch.npu.set_device(0)
 q_heads, kv_heads, head_dim = 4, 2, 64
@@ -1425,20 +1434,21 @@ options = dict(
     cu_seqlens_q=cu, cu_seqlens_kv=cu,
     max_seqlen_q=length, max_seqlen_kv=length,
 )
+metadata = quant_flash_attn_metadata(q_heads, kv_heads, head_dim, **options)
 attn_out, softmax_lse = quant_flash_attn(
     q, k, v, q_descale, k_descale, v_descale,
-    p_scale=p_scale, metadata=None, softmax_scale=head_dim ** -0.5, **options,
+    block_table=None, p_scale=p_scale, metadata=metadata, softmax_scale=head_dim ** -0.5, **options,
 )
 ```
 <!-- end id20 -->
 
 <!-- npu="A3,910b" id22 -->
-### Atlas A2/A3 INT8 Paged Example
+### Atlas A2/A3 INT8 Paged KV Example
 
 ```python
 import torch
 import torch_npu
-from cann_ops_transformer.ops import quant_flash_attn
+from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
 
 q_heads, kv_heads, head_dim, page_size = 8, 1, 128, 128
 q = torch.randint(-127, 128, (1, q_heads, head_dim), device="npu", dtype=torch.int8)
@@ -1452,11 +1462,18 @@ block_table = torch.tensor([[0, 1]], device="npu", dtype=torch.int32)
 cu_seqlens_q = torch.tensor([0, 1], device="npu", dtype=torch.int32)
 seqused_kv = torch.tensor([2 * page_size], device="npu", dtype=torch.int32)
 
+metadata = quant_flash_attn_metadata(
+    q_heads, kv_heads, head_dim, 12,
+    cu_seqlens_q=cu_seqlens_q, seqused_kv=seqused_kv,
+    max_seqlen_kv=2 * page_size,
+    layout_q="TND", layout_q_descale="NT", layout_kv="PA_BNBD", layout_out="TND",
+)
+
 attn_out, softmax_lse = quant_flash_attn(
     q, k, v, q_descale, k_descale, v_descale, quant_mode=12,
     block_table=block_table, cu_seqlens_q=cu_seqlens_q, seqused_kv=seqused_kv,
-    p_scale=p_scale, softmax_scale=head_dim ** -0.5, mask_mode=0,
-    max_seqlen_q=1, max_seqlen_kv=2 * page_size,
+    p_scale=p_scale, metadata=metadata, softmax_scale=head_dim ** -0.5, mask_mode=0,
+    max_seqlen_kv=2 * page_size,
     layout_q="TND", layout_q_descale="NT", layout_kv="PA_BNBD", layout_out="TND",
     return_softmax_lse=True,
 )

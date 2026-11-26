@@ -106,8 +106,6 @@ at::Tensor quant_flash_attn_metadata(const c10::optional<at::Tensor>& cu_seqlens
                                      std::string layout_q_descale, std::string layout_kv, std::string layout_out,
                                      bool is_grad_enabled, const at::Tensor& output)
 {
-    TORCH_CHECK(quant_mode != QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16,
-                "quant_flash_attn_metadata does not support A2/A3 INT8 Prefill");
     ACLNN_CMD(aclnnQuantFlashAttnMetadata, cu_seqlens_q, cu_seqlens_kv, seqused_q, seqused_kv, batch_size, max_seqlen_q,
               max_seqlen_kv, num_heads_q, num_heads_kv, head_dim, head_dim_v, quant_mode, mask_mode, win_left,
               win_right, layout_q, layout_q_descale, layout_kv, layout_out, is_grad_enabled, output);
@@ -154,7 +152,6 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_attn_impl(
     const bool pagedInt8 =
         quant_mode == QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16 &&
         (layout_kv == "PA_BNBD" || layout_kv == "PA_BBND" || layout_kv == "PA_NZ");
-    TORCH_CHECK(!pagedInt8 || !metadata, "A2/A3 paged INT8 QFA does not support metadata");
     if (quant_mode == QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16 &&
         !pagedInt8) {
         CheckInt8Window(mask_mode, win_left, win_right);

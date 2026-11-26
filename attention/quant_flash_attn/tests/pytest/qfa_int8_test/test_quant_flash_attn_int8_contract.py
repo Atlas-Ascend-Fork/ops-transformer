@@ -157,8 +157,8 @@ def test_int8_metadata_generation_unsupported():
     qfa = runner.load_qfa()
     module = importlib.import_module(qfa.__module__)
     with pytest.raises(
-        (RuntimeError, ValueError),
-        match="quant_flash_attn_metadata does not support A2/A3 INT8 Prefill",
+        RuntimeError,
+        match="call aclnnQuantFlashAttnMetadata failed",
     ):
         module.quant_flash_attn_metadata(
             num_heads_q=4,

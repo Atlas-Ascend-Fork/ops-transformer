@@ -57,6 +57,11 @@ public:
     uint32_t shortQRoute = 0U;
     uint32_t smallDQtile = 0U;
     uint32_t kvTile = 512U;
+    uint32_t coreCap = 0U;
+    uint32_t partialCap = 0U;
+    uint32_t reservedMetadata = 0U;
+    uint32_t metadataPlanKind = 0U;
+    uint32_t pageQCheck = 0U;
 
     uint32_t get_batchSize() const
     {
@@ -116,15 +121,20 @@ public:
     }
 };
 
-struct QfaHostPlanTilingPayload {
+constexpr uint32_t QFA_HAS_MAX_Q = 1U;
+constexpr uint32_t QFA_HAS_MAX_KV = 2U;
+
+struct QfaLaunchTilingPayload {
     QuantFlashAttnA8C8TilingData config;
-    QfaHostPlanData plan;
+    QfaLaunchConfig launch;
+    uint32_t lengthFlags;
 };
-static_assert(std::is_standard_layout<QfaHostPlanTilingPayload>::value &&
-                  std::is_trivially_copyable<QfaHostPlanTilingPayload>::value,
+static_assert(sizeof(QfaLaunchTilingPayload) == 280U, "Unexpected paged INT8 tiling size");
+static_assert(std::is_standard_layout<QfaLaunchTilingPayload>::value &&
+                  std::is_trivially_copyable<QfaLaunchTilingPayload>::value,
               "Paged INT8 tiling must have a stable binary layout");
-static_assert(offsetof(QfaHostPlanTilingPayload, plan) == sizeof(QuantFlashAttnA8C8TilingData),
-              "Paged INT8 plan must immediately follow its configuration");
+static_assert(offsetof(QfaLaunchTilingPayload, launch) == sizeof(QuantFlashAttnA8C8TilingData),
+              "Paged INT8 launch fields must immediately follow the configuration");
 
 constexpr uint32_t QFA_A8C8_KV_LAYOUT_PA_BBND = 0U;
 constexpr uint32_t QFA_A8C8_KV_LAYOUT_PA_BNBD = 1U;

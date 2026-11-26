@@ -21,6 +21,8 @@
 #include <cmath>
 #include "quant_flash_attn_metadata_aicpu.h"
 #include "../../quant_flash_attn/op_host/qfa_adjust_sinner_souter.h"
+#include "../../quant_flash_attn/op_host/arch22/quant_flash_attn_tiling_a8c8.h"
+#include "../../quant_flash_attn/op_kernel/arch22/quant_flash_attn_metadata_paged.h"
 
 #define KERNEL_STATUS_OK 0
 #define KERNEL_STATUS_PARAM_INVALID 1
@@ -31,6 +33,9 @@ uint32_t QuantFlashAttnMetadataCpuKernel::Compute(CpuKernelContext& ctx)
     bool success = Prepare(ctx);
     if (!success) {
         return KERNEL_STATUS_PARAM_INVALID;
+    }
+    if (IsPagedInt8()) {
+        return GenPagedInt8MetaData() ? KERNEL_STATUS_OK : KERNEL_STATUS_PARAM_INVALID;
     }
     SectionStreamKResult splitRes;
     success = BalanceSchedule(splitRes) && GenMetaData(splitRes);
@@ -91,7 +96,169 @@ bool QuantFlashAttnMetadataCpuKernel::Prepare(CpuKernelContext& ctx)
     GetAttrValueOpt(ctx, "head_dim_v", headDimV_);
     GetAttrValueOpt(ctx, "metadata_dim_num", metadataDimNum_);
     GetAttrValueOpt(ctx, "metadata_row_size", metadataRowSize_);
-    return ParamsInit();
+    return IsPagedInt8() || ParamsInit();
+}
+
+bool QuantFlashAttnMetadataCpuKernel::IsPagedInt8() const
+{
+    return quantMode_ == QFA_INT8_QUANT_MODE &&
+           (layoutKv_ == "PA_BNBD" || layoutKv_ == "PA_BBND" || layoutKv_ == "PA_NZ");
+}
+
+bool QuantFlashAttnMetadataCpuKernel::GenPagedInt8MetaData()
+{
+    namespace a8c8_plan = optiling::quant_flash_attn::a8c8_plan;
+    using QfaBaseInfo = optiling::BaseInfo;
+    if (numHeadsQ_ <= 0 || numHeadsKv_ <= 0 || numHeadsQ_ % numHeadsKv_ != 0 || headDim_ <= 0 ||
+        headDim_ > BaseApi::Int8GqaTnd::QFA_MAX_HEAD_DIM || (maxSeqlenKv_ < -1 || maxSeqlenKv_ == 0) ||
+        aicCoreNum_ <= 0 || metaData_ == nullptr || metaData_->GetData() == nullptr || cuSeqlensQ_ == nullptr ||
+        sequsedKv_ == nullptr ||
+        (maskMode_ != BaseApi::Int8GqaTnd::QFA_MASK_NONE && maskMode_ != BaseApi::Int8GqaTnd::QFA_MASK_CAUSAL_ATTR)) {
+        KERNEL_LOG_ERROR("Paged metadata invalid base params: hq %d hkv %d d %d maxKv %d aic %d", numHeadsQ_,
+                         numHeadsKv_, headDim_, maxSeqlenKv_, aicCoreNum_);
+        return false;
+    }
+    constexpr uint64_t metadataRows = 2U;
+    const uint64_t outputBytes = metaData_->GetDataSize();
+    if (metadataDimNum_ != 2 || metadataRowSize_ < static_cast<int64_t>(QFA_PAGED_METADATA_WORDS) ||
+        (outputBytes != 0U &&
+         outputBytes / (metadataRows * sizeof(int32_t)) < static_cast<uint64_t>(metadataRowSize_))) {
+        KERNEL_LOG_ERROR("Paged metadata invalid output capacity: dims %ld row %ld bytes %lu", metadataDimNum_,
+                         metadataRowSize_, outputBytes);
+        return false;
+    }
+
+    auto cuQShape = cuSeqlensQ_->GetTensorShape();
+    if (cuQShape == nullptr || cuQShape->GetDims() != 1 || cuQShape->GetDimSize(0) <= 1) {
+        KERNEL_LOG_ERROR("Paged metadata invalid cu_seqlens_q shape");
+        return false;
+    }
+    const int64_t cuQSize = cuQShape->GetDimSize(0);
+    std::vector<int64_t> cuQ = GetTensorDataAsInt64(cuSeqlensQ_, static_cast<size_t>(cuQSize));
+    if (cuQ.size() < 2U) {
+        KERNEL_LOG_ERROR("Paged metadata cu_seqlens_q read failed: size %zu", cuQ.size());
+        return false;
+    }
+    if (batchSize_ == 0)
+        batchSize_ = static_cast<int32_t>(cuQ.size() - 1U);
+    if (batchSize_ <= 0 || static_cast<size_t>(batchSize_ + 1) != cuQ.size() || cuQ[0] != 0) {
+        KERNEL_LOG_ERROR("Paged metadata invalid batch/cu_seqlens_q: batch %d cuSize %zu first %ld", batchSize_,
+                         cuQ.size(), cuQ[0]);
+        return false;
+    }
+    if (static_cast<uint32_t>(batchSize_) > QFA_PLAN_MAX_BATCH ||
+        static_cast<uint32_t>(aicCoreNum_) > QFA_PLAN_MAX_CORES) {
+        KERNEL_LOG_ERROR("Paged metadata host-plan capacity exceeded: batch %d aic %d", batchSize_, aicCoreNum_);
+        return false;
+    }
+    std::vector<int64_t> usedQ;
+    if (sequsedQ_ != nullptr) {
+        auto usedQShape = sequsedQ_->GetTensorShape();
+        if (usedQShape == nullptr || usedQShape->GetDims() != 1 || usedQShape->GetDimSize(0) <= 0) {
+            KERNEL_LOG_ERROR("Paged metadata invalid seqused_q shape");
+            return false;
+        }
+        usedQ = GetTensorDataAsInt64(sequsedQ_, static_cast<size_t>(usedQShape->GetDimSize(0)));
+    }
+    auto usedKvShape = sequsedKv_->GetTensorShape();
+    if (usedKvShape == nullptr || usedKvShape->GetDims() != 1 || usedKvShape->GetDimSize(0) <= 0) {
+        KERNEL_LOG_ERROR("Paged metadata invalid seqused_kv shape");
+        return false;
+    }
+    std::vector<int64_t> usedKv = GetTensorDataAsInt64(sequsedKv_, static_cast<size_t>(usedKvShape->GetDimSize(0)));
+    if (usedKv.size() != static_cast<size_t>(batchSize_) ||
+        (!usedQ.empty() && usedQ.size() != static_cast<size_t>(batchSize_))) {
+        KERNEL_LOG_ERROR("Paged metadata length count mismatch: batch %d usedQ %zu usedKv %zu", batchSize_,
+                         usedQ.size(), usedKv.size());
+        return false;
+    }
+
+    const int64_t qCapacity = cuQ.back();
+    if (qCapacity <= 0) {
+        KERNEL_LOG_ERROR("Paged metadata invalid Q capacity: %ld", qCapacity);
+        return false;
+    }
+    const int64_t maxQ = std::max<int64_t>(0, maxSeqlenQ_);
+    const int64_t maxKv = std::max<int64_t>(0, maxSeqlenKv_);
+    if (static_cast<uint64_t>(maxQ) > std::numeric_limits<uint32_t>::max() ||
+        static_cast<uint64_t>(maxKv) > std::numeric_limits<uint32_t>::max()) {
+        KERNEL_LOG_ERROR("Paged metadata invalid max bounds: q %ld kv %ld", maxQ, maxKv);
+        return false;
+    }
+
+    const uint32_t layoutCode = layoutKv_ == "PA_BBND" ? 0U : layoutKv_ == "PA_BNBD" ? 1U : 2U;
+    QfaBaseInfo staticBase;
+    staticBase.bSize = static_cast<uint32_t>(batchSize_);
+    staticBase.n2Size = static_cast<uint32_t>(numHeadsKv_);
+    staticBase.gSize = static_cast<uint32_t>(numHeadsQ_ / numHeadsKv_);
+    staticBase.s1Size = static_cast<uint32_t>(maxQ);
+    staticBase.s2Size = static_cast<uint32_t>(maxKv);
+    QfaBaseInfo actualBase = staticBase;
+    actualBase.actualSeqS1Size.reserve(batchSize_);
+    actualBase.actualSeqS2Size.reserve(batchSize_);
+    uint32_t actualMaxQ = 0U, actualMaxKv = 0U;
+    for (int32_t b = 0; b < batchSize_; ++b) {
+        int64_t q = cuQ[static_cast<size_t>(b) + 1U] - cuQ[static_cast<size_t>(b)];
+        if (!usedQ.empty())
+            q = std::min(q, usedQ[static_cast<size_t>(b)]);
+        const int64_t kv = usedKv[static_cast<size_t>(b)];
+        if (cuQ[b] < 0 || cuQ[b + 1U] < cuQ[b] || q < 0 || (maxQ > 0 && q > maxQ) ||
+            static_cast<uint64_t>(q) * staticBase.gSize > std::numeric_limits<uint32_t>::max() || kv < 0 ||
+            (maxKv > 0 && kv > maxKv) || (q > 0 && kv == 0)) {
+            KERNEL_LOG_ERROR("Paged metadata invalid actual length at batch %d: q %ld kv %ld maxQ %ld maxKv %ld", b, q,
+                             kv, maxQ, maxKv);
+            return false;
+        }
+        actualMaxQ = std::max(actualMaxQ, static_cast<uint32_t>(q));
+        actualMaxKv = std::max(actualMaxKv, static_cast<uint32_t>(kv));
+        actualBase.actualSeqS1Size.push_back(q);
+        actualBase.actualSeqS2Size.push_back(kv);
+    }
+
+    // The V6 plan occupies the beginning of row 0. Row 1 is reserved.
+    auto* output = reinterpret_cast<QfaPagedMetaDataV6*>(metaData_->GetData());
+    auto& header = output->header;
+    header = {};
+    header.magic = QFA_PAGED_METADATA_MAGIC;
+    header.version = QFA_PAGED_METADATA_VERSION;
+    header.quantMode = QFA_INT8_QUANT_MODE;
+    header.maskMode = static_cast<uint32_t>(maskMode_);
+    header.kvLayout = layoutCode;
+    header.batchSize = static_cast<uint32_t>(batchSize_);
+    header.qHeadNum = static_cast<uint32_t>(numHeadsQ_);
+    header.kvHeadNum = static_cast<uint32_t>(numHeadsKv_);
+    header.headDim = static_cast<uint32_t>(headDim_);
+    header.maxSeqQ = static_cast<uint32_t>(maxQ);
+    header.maxSeqKv = static_cast<uint32_t>(maxKv);
+    header.planWords = static_cast<uint32_t>(sizeof(QfaPagedMetaPlan) / sizeof(uint32_t));
+
+    header.actualMaxQ = actualMaxQ;
+    header.actualMaxKv = actualMaxKv;
+    const uint32_t d = header.headDim;
+    const uint32_t aicNum = static_cast<uint32_t>(aicCoreNum_);
+    const auto build = [&](uint32_t slot, uint32_t heads) {
+        a8c8_plan::QfaPlanRecipe recipe;
+        if (!a8c8_plan::QfaMakeRecipe(staticBase, d, layoutCode, aicNum, heads, recipe)) {
+            return false;
+        }
+        auto& entry = output->plans[slot];
+        entry = {};
+        entry.coreCap = recipe.budget;
+        entry.partialCap = 2U * heads * recipe.budget;
+        return a8c8_plan::QfaMaterializeDirect(actualBase, recipe, d, entry.plan) &&
+               entry.plan.cores <= entry.coreCap && entry.plan.partials <= entry.partialCap;
+    };
+    if (!build(QFA_PAGED_PLAN_GENERAL, 1U)) {
+        return false;
+    }
+    std::fill_n(header.planIndex, QFA_PAGED_PLAN_COUNT, QFA_PAGED_PLAN_GENERAL);
+    if (a8c8_plan::QfaUsePairedHeads(staticBase, d, layoutCode)) {
+        if (!build(QFA_PAGED_PLAN_PAGE_128_ALLOW_PAIRED, 2U)) {
+            return false;
+        }
+        header.planIndex[QFA_PAGED_PLAN_PAGE_128_ALLOW_PAIRED] = QFA_PAGED_PLAN_PAGE_128_ALLOW_PAIRED;
+    }
+    return true;
 }
 
 std::vector<int64_t> QuantFlashAttnMetadataCpuKernel::GetTensorDataAsInt64(Tensor* tensor, size_t size)

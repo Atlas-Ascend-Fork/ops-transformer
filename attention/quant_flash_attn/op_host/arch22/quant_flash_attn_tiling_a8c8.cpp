@@ -8,12 +8,16 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include "quant_flash_attn_tiling_a8c8_host.h"
 #include "quant_flash_attn_tiling_a8c8.h"
+#include "../qfa_tiling_info.h"
+#include "../quant_flash_attn_tiling.h"
 #include "log/log.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "quant_flash_attn_tiling_data_a8c8.h"
 #include "ascendc/host_api/tiling/template_argument.h"
 #include "../../op_kernel/arch22/quant_flash_attn_tiling_data_int8.h"
+#include "../../op_kernel/arch22/quant_flash_attn_metadata_paged.h"
 
 #include "../../../common/op_host/split_core.h"
 #include <algorithm>
@@ -38,7 +42,45 @@ namespace quant_flash_attn {
 
 namespace {
 
-ge::graphStatus ValidateA8C8(const gert::TilingContext* context, const QfaTilingInfo& qfaInfo)
+ge::graphStatus CheckPagedBlockSize(const gert::TilingContext* context, const QfaTilingInfo& qfaInfo,
+                                    uint32_t& pageQCheck)
+{
+    // SplitFuse accepts 16-aligned pages up to 512. Retain FIA GQA's larger-page rules.
+    const auto page = qfaInfo.blockSize;
+    const auto dim = qfaInfo.qkHeadDim;
+    const bool needsMultiQ = page > 512 && dim != 64 && dim != 128;
+    OP_CHECK_IF(page < 16 || page > 1024 || page % 16 != 0 || (needsMultiQ && page % 128 != 0),
+                OP_LOGE(context, "Unsupported FIA GQA block_size: %ld", static_cast<long>(page)),
+                return ge::GRAPH_FAILED);
+    pageQCheck = needsMultiQ ? QFA_PAGE_Q_GT1_ONLY : QFA_PAGE_ANY_Q;
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus CheckPagedMetadata(const gert::TilingContext* context, const QfaTilingInfo& qfaInfo)
+{
+    const auto& metadata = qfaInfo.opParamInfo.metadata;
+    const auto* inputShape = context->GetOptionalInputShape(METADATA_INDEX);
+    OP_CHECK_IF(inputShape == nullptr || metadata.desc == nullptr,
+                OP_LOGE(context, "A2/A3 paged QFA requires metadata from QuantFlashAttnMetadata"),
+                return ge::GRAPH_FAILED);
+    constexpr int64_t metadataRows = 2;
+    const auto& shape = inputShape->GetOriginShape();
+    const auto& storageShape = inputShape->GetStorageShape();
+    const int64_t rowWords = shape.GetDimNum() == 2U ? shape.GetDim(1) : 0;
+    const auto* strides = context->GetInputStride(METADATA_INDEX);
+    const bool nonContiguous =
+        strides != nullptr && strides->GetDimNum() != 0U &&
+        (strides->GetDimNum() != 2U || strides->GetStride(0) != rowWords || strides->GetStride(1) != 1);
+    OP_CHECK_IF(metadata.desc->GetDataType() != ge::DT_INT32 || shape.GetDimNum() != 2U ||
+                    shape.GetDim(0) != metadataRows || rowWords < optiling::QFA_PAGED_METADATA_WORDS ||
+                    storageShape.GetShapeSize() / metadataRows < rowWords || nonContiguous,
+                OP_LOGE(context, "A2/A3 paged metadata requires contiguous INT32 (2, S) with S >= %u",
+                        optiling::QFA_PAGED_METADATA_WORDS),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus ValidateA8C8(const gert::TilingContext* context, const QfaTilingInfo& qfaInfo, uint32_t& pageQCheck)
 {
     OP_CHECK_IF(qfaInfo.quantMode != QfaQuantMode::A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR,
                 OP_LOGE(context, "A2/A3 QFA only supports A8C8 INT8 quantization"), return ge::GRAPH_FAILED);
@@ -61,10 +103,26 @@ ge::graphStatus ValidateA8C8(const gert::TilingContext* context, const QfaTiling
                 OP_LOGE(context, "A3 QFA requires FP32 descale tensors"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(qfaInfo.qkHeadDim <= 0 || qfaInfo.qkHeadDim > 256,
                 OP_LOGE(context, "A3 QFA head_dim must be in [1,256]"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(qfaInfo.pageAttentionFlag == false || qfaInfo.blockSize <= 0 || qfaInfo.maxBlockNumPerBatch <= 0,
-                OP_LOGE(context, "A3 QFA requires paged KV cache and block_table"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(qfaInfo.opParamInfo.metadata.tensor != nullptr,
-                OP_LOGE(context, "A2/A3 paged INT8 QFA does not support metadata"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!qfaInfo.pageAttentionFlag || qfaInfo.maxBlockNumPerBatch <= 0,
+                OP_LOGE(context, "A2/A3 QFA requires a non-empty block_table"), return ge::GRAPH_FAILED);
+    if (CheckPagedBlockSize(context, qfaInfo, pageQCheck) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    if (CheckPagedMetadata(context, qfaInfo) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    OP_CHECK_IF(qfaInfo.maxSeqQ < -1, OP_LOGE(context, "A2/A3 paged QFA requires max_seqlen_q >= -1"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(qfaInfo.maxSeqKv < -1 || qfaInfo.maxSeqKv == 0,
+                OP_LOGE(context, "A2/A3 paged metadata requires -1 or a positive max_seqlen_kv"),
+                return ge::GRAPH_FAILED);
+    const auto* usedKvShape = context->GetOptionalInputShape(SEQUSED_KV_INDEX);
+    const auto* usedKvDesc = qfaInfo.opParamInfo.sequsedKv.desc;
+    OP_CHECK_IF(usedKvShape == nullptr || usedKvDesc == nullptr || usedKvDesc->GetDataType() != ge::DT_INT32 ||
+                    usedKvShape->GetStorageShape().GetDimNum() != 1U ||
+                    usedKvShape->GetStorageShape().GetDim(0) != qfaInfo.bSize,
+                OP_LOGE(context, "A2/A3 paged QFA requires seqused_kv with dtype INT32 and shape [B]"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(qfaInfo.opParamInfo.pScale.tensor == nullptr || qfaInfo.opParamInfo.pScale.tensor->GetShapeSize() != 1,
                 OP_LOGE(context, "A3 QFA requires scalar p_scale"), return ge::GRAPH_FAILED);
     OP_CHECK_IF(qfaInfo.maskMode != 0 && qfaInfo.maskMode != 3, OP_LOGE(context, "A3 QFA supports mask_mode 0 and 3"),
@@ -97,37 +155,30 @@ uint32_t KvLayoutCode(QfaLayout layout)
     return QFA_A8C8_KV_LAYOUT_PA_NZ;
 }
 
-ge::graphStatus MakeHostPlan(const gert::TilingContext* context, const QfaTilingInfo& info, uint32_t aicNum,
-                             QfaHostPlanData& plan, bool& useOptimizedVectorService, bool allowPairedHeads)
+ge::graphStatus MakeLaunchConfig(const gert::TilingContext* context, const QfaTilingInfo& info, uint32_t aicNum,
+                                 QfaLaunchConfig& plan, bool& useOptimizedVectorService, bool allowPairedHeads,
+                                 uint32_t& staticMaxQ, uint32_t& staticMaxKv)
 {
     BaseInfo base;
     base.bSize = info.bSize;
     base.n2Size = info.n2Size;
     base.gSize = info.gSize;
-    base.s1Size = info.maxSeqQ;
-    base.s2Size = info.maxSeqKv;
-    base.preToken = std::numeric_limits<int32_t>::max();
-    base.isS1G = true;
-    base.actualLenQDims = base.bSize;
-    base.actualLenKvDims = base.bSize;
-    const auto hostPtr = [](const QfaOptionalParaInfo& p) -> const int32_t* {
-        if (p.tensor == nullptr ||
-            (p.tensor->GetPlacement() != gert::kOnHost && p.tensor->GetPlacement() != gert::kFollowing)) {
-            return nullptr;
-        }
-        return p.tensor->GetData<int32_t>();
-    };
-    const auto* cu = hostPtr(info.opParamInfo.cuSeqlensQ);
-    const auto* uq = hostPtr(info.opParamInfo.sequsedQ);
-    const auto* uk = hostPtr(info.opParamInfo.sequsedKv);
-    for (uint32_t b = 0; b < base.bSize; ++b) {
-        int64_t q = cu == nullptr ? base.s1Size : cu[b + 1U] - cu[b];
-        if (uq != nullptr)
-            q = std::min(q, static_cast<int64_t>(uq[b]));
-        const int64_t k = uk == nullptr ? base.s2Size : uk[b];
-        base.actualSeqS1Size.push_back(std::max(int64_t{0}, q));
-        base.actualSeqS2Size.push_back(std::max(int64_t{0}, k));
-    }
+    const int64_t qCapacity = info.qTSize;
+    const int64_t kvCapacity = info.s2Size;
+    const int64_t maxQ = info.maxSeqQ > 0 ? info.maxSeqQ : qCapacity;
+    const int64_t maxKv = info.maxSeqKv > 0 ? info.maxSeqKv : kvCapacity;
+    OP_CHECK_IF(maxQ <= 0 || qCapacity <= 0 || maxKv <= 0 || maxKv > kvCapacity ||
+                    maxQ > std::numeric_limits<uint32_t>::max() || qCapacity > std::numeric_limits<uint32_t>::max() ||
+                    maxKv > std::numeric_limits<uint32_t>::max(),
+                OP_LOGE(context,
+                        "A2/A3 QFA invalid static bounds or capacity: maxQ=%ld qCapacity=%ld maxKv=%ld "
+                        "kvCapacity=%ld",
+                        maxQ, qCapacity, maxKv, kvCapacity),
+                return ge::GRAPH_FAILED);
+    staticMaxQ = static_cast<uint32_t>(maxQ);
+    staticMaxKv = static_cast<uint32_t>(maxKv);
+    base.s1Size = info.maxSeqQ > 0 ? staticMaxQ : 0U;
+    base.s2Size = info.maxSeqKv > 0 ? staticMaxKv : 0U;
     const auto scratchBytes = [](uint32_t rows, uint32_t floor) {
         uint32_t bytes = floor;
         for (uint32_t r = 1U; r <= rows; ++r) {
@@ -137,9 +188,10 @@ ge::graphStatus MakeHostPlan(const gert::TilingContext* context, const QfaTiling
         }
         return bytes;
     };
-    const bool valid = a8c8_plan::QfaBuildPlan(base, info.qkHeadDim, KvLayoutCode(info.kvLayout), info.blockSize,
-                                               aicNum, plan, useOptimizedVectorService, allowPairedHeads, scratchBytes);
-    OP_CHECK_IF(!valid, OP_LOGE(context, "No valid QFA N512 plan"), return ge::GRAPH_FAILED);
+    const bool valid =
+        a8c8_plan::QfaBuildLaunchConfig(base, info.qkHeadDim, KvLayoutCode(info.kvLayout), info.blockSize, aicNum, plan,
+                                        useOptimizedVectorService, allowPairedHeads, scratchBytes);
+    OP_CHECK_IF(!valid, OP_LOGE(context, "No valid QFA launch configuration"), return ge::GRAPH_FAILED);
     plan.returnSoftmaxLse = info.softmaxLseFlag;
     return ge::GRAPH_SUCCESS;
 }
@@ -148,7 +200,8 @@ ge::graphStatus MakeHostPlan(const gert::TilingContext* context, const QfaTiling
 
 ge::graphStatus TilingQuantFlashAttnA8C8(gert::TilingContext* context, const QfaTilingInfo& qfaInfo)
 {
-    auto status = ValidateA8C8(context, qfaInfo);
+    uint32_t pageQCheck = QFA_PAGE_ANY_Q;
+    auto status = ValidateA8C8(context, qfaInfo, pageQCheck);
     if (status != ge::GRAPH_SUCCESS) {
         return status;
     }
@@ -168,8 +221,7 @@ ge::graphStatus TilingQuantFlashAttnA8C8(gert::TilingContext* context, const Qfa
     tilingData.headDim = (static_cast<uint32_t>(qfaInfo.qkHeadDim));
     tilingData.blockSize = (static_cast<uint32_t>(qfaInfo.blockSize));
     tilingData.maxBlockNum = (static_cast<uint32_t>(qfaInfo.maxBlockNumPerBatch));
-    tilingData.maxSeqQ = (static_cast<uint32_t>(qfaInfo.maxSeqQ));
-    tilingData.maxSeqKv = (static_cast<uint32_t>(qfaInfo.maxSeqKv));
+    tilingData.pageQCheck = pageQCheck;
     OP_CHECK_IF(qfaInfo.bSize > QFA_PLAN_MAX_BATCH || aicNum > QFA_PLAN_MAX_CORES,
                 OP_LOGE(context, "A2/A3 QFA host-plan capacity exceeded"), return ge::GRAPH_FAILED);
     constexpr uint32_t kvTile = 512U;
@@ -280,33 +332,45 @@ ge::graphStatus TilingQuantFlashAttnA8C8(gert::TilingContext* context, const Qfa
     tilingData.kScaleDenseOffset = (0ULL);
     tilingData.shortQRoute = (1U);
 
-    QfaHostPlanData plan{};
+    QfaLaunchConfig plan{};
     bool useOptimizedVectorService = false;
     size_t plannedWorkspace = 0U;
+    uint32_t staticMaxQ = 0U;
+    uint32_t staticMaxKv = 0U;
     {
         const bool allowPairedHeads = keyHead == dim && valueHead == dim && keySlot == kvHeads * dim &&
                                       valueSlot == kvHeads * dim && keyDim == 1U && valueDim == 1U;
-        const auto result = MakeHostPlan(context, qfaInfo, aicNum, plan, useOptimizedVectorService, allowPairedHeads);
+        const auto result = MakeLaunchConfig(context, qfaInfo, aicNum, plan, useOptimizedVectorService,
+                                             allowPairedHeads, staticMaxQ, staticMaxKv);
         if (result != ge::GRAPH_SUCCESS)
             return result;
+        tilingData.metadataPlanKind =
+            plan.headGroupSize == 2U ? QFA_PAGED_PLAN_PAGE_128_ALLOW_PAIRED : QFA_PAGED_PLAN_GENERAL;
+        tilingData.maxSeqQ = staticMaxQ;
+        tilingData.maxSeqKv = staticMaxKv;
         tilingData.reservedNativeContext = (plan.m);
         tilingData.coreNum = (plan.cores);
         tilingData.smallDQtile = (plan.m > 64U ? 1U : 0U);
         const uint64_t rows = std::max(64U, plan.m * plan.headGroupSize);
-        const uint64_t stride = QFA_A8C8_CUBE_SEQ_Q_BYTES + rows * 512ULL * 12ULL + rows * 256ULL * 20ULL + rows * 8ULL;
-        plannedWorkspace = stride * std::max(plan.cores, plan.partials);
+        const uint64_t coreStride =
+            QFA_A8C8_CUBE_SEQ_Q_BYTES + rows * 512ULL * 12ULL + rows * 256ULL * 20ULL + rows * 8ULL;
+        const uint32_t coreCap = plan.cores;
+        const uint32_t partialCap = 2U * plan.headGroupSize * coreCap;
+        tilingData.coreCap = coreCap;
+        tilingData.partialCap = partialCap;
+        plannedWorkspace = coreStride * partialCap;
     }
 
     auto* rawTilingData = context->GetRawTilingData();
     OP_CHECK_IF(rawTilingData == nullptr || rawTilingData->GetData() == nullptr,
                 OP_LOGE(context, "raw tiling data is nullptr"), return ge::GRAPH_FAILED);
-    OP_CHECK_IF(rawTilingData->GetCapacity() < sizeof(QfaHostPlanTilingPayload),
+    OP_CHECK_IF(rawTilingData->GetCapacity() < sizeof(QfaLaunchTilingPayload),
                 OP_LOGE(context, "raw tiling capacity=%zu, required=%zu", rawTilingData->GetCapacity(),
-                        sizeof(QfaHostPlanTilingPayload)),
+                        sizeof(QfaLaunchTilingPayload)),
                 return ge::GRAPH_FAILED);
-    QfaHostPlanTilingPayload payload{};
-    payload.config = tilingData;
-    payload.plan = plan;
+    const uint32_t lengthFlags =
+        (qfaInfo.maxSeqQ > 0 ? QFA_HAS_MAX_Q : 0U) | (qfaInfo.maxSeqKv > 0 ? QFA_HAS_MAX_KV : 0U);
+    const QfaLaunchTilingPayload payload{tilingData, plan, lengthFlags};
     std::memcpy(rawTilingData->GetData(), &payload, sizeof(payload));
     rawTilingData->SetDataSize(sizeof(payload));
 

@@ -58,7 +58,7 @@
   <!-- end id7 -->
 
   <!-- npu="A3,910b" id8 -->
-  <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>支持 INT8 全量化 MHA/GQA Prefill 和分页 Decode，输入 Q/K/V 为 INT8，输出为 BF16。
+  <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>支持 INT8 全量化 MHA/GQA，输入 Q/K/V 为 INT8，输出为 BF16。
   <!-- end id8 -->
 
 - **计算公式**：
@@ -1462,18 +1462,27 @@ mask_mode参数解释：
 <!-- npu="A3,910b" id18 -->
 ### Atlas A2/A3 INT8 约束
 
-- 仅支持无 KV cache 的 INT8 全量化 MHA/GQA Prefill。`quant_mode` 传整数 `12` 或枚举 `QuantMode.A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16`。
-- Q、K、V 为连续的 INT8 Tensor，输出为 BF16。`q_descale`、`k_descale`、`v_descale` 和 `p_scale` 必传，均为与 Q、K、V 位于同一 NPU 的连续 FP32 Tensor。Q、K 的反量化系数按 token 和 head 提供，形状为对应输入去掉 D 轴；V 的反量化系数按 head 提供，形状为 `(KV_N,)`，各 batch 共用；Softmax 权重的静态量化系数 `p_scale` 形状为 `(1,)`，其值转换为 FP16 前后均须为有限正数。
-- Q、K、V 不得为 `None`。设备 Tensor 的数值内容由调用方保证正确，接口不为这些内容增加 Host 值检查或 D2H 拷贝：`q_descale`、`k_descale`、`v_descale` 须为有限值，不支持 NaN、+Inf 或 -Inf；`p_scale` 须满足上述数值约束；TND 的累积长度须非负并满足下述约束。`max_seqlen_q`、`max_seqlen_kv` 是实际最大长度的上界，不要求与实际值相等。设备侧越界保护不等同于完整参数校验，违反这些数值约束可能产生未定义输出。
-- Q、K、V 的 D 相同，取值为 1～256，`Q_N` 必须能被 `KV_N` 整除。
-- `layout_q`、`layout_kv` 和 `layout_out` 仅支持 BNSD、BSND、TND。算子按 Q 的布局读取 `q_descale`，`layout_q_descale` 在此模式下可省略。BNSD 和 BSND 可混用，Q 和 KV 的 batch 大小须一致，`cu_seqlens_q` 和 `cu_seqlens_kv` 均省略。
-- TND 要求 Q、KV 和输出均为 TND。须传形状为 `(B+1,)` 的连续 INT32 累积序列长度 `cu_seqlens_q`、`cu_seqlens_kv`，从 0 开始、非递减，末元素等于对应的总 token 数。允许部分 batch 的 Q 长度为 0。非空 Q 序列须有非空 KV 序列。传入的 `max_seqlen_q`、`max_seqlen_kv` 须覆盖对应的实际最大长度，否则超出上界的序列可能不写入输出。
-- `win_left` 和 `win_right` 设置相对右下对齐位置的窗口距离，`-1` 表示该侧无界，非负值最大为 `INT32_MAX`。窗口和 mask 的可见范围取交集。完全被遮蔽的行输出 0，LSE 为 `-inf`。
-- 直接调用 `quant_flash_attn`，`metadata` 传 `None`。
-- `softmax_scale` 须为有限正数。`block_table`、`seqused_q`、`seqused_kv`、`sinks`、`attn_mask`、`v_tail`、`block_table_tail`、`seqused_v_tail` 均传 `None`。
-**分页 Decode：**
+支持 INT8 全量化 MHA/GQA。`quant_mode` 传整数 `12` 或枚举 `QuantMode.A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16`。
 
-- INT8 分页 Decode 使用 `quant_mode=12`：Q 和输出为 TND，Q descale 为 NT，KV 支持 PA_BNBD、PA_BBND、PA_NZ；须传 `block_table`、`cu_seqlens_q`、`seqused_kv`，`metadata` 须传 `None`，支持无 mask 和 causal。有分页 KV 布局和 `block_table` 时进入 Decode 路径，否则按无 cache 的 Prefill 路径处理。
+| `layout_kv` | `block_table` | `metadata` |
+| --- | --- | --- |
+| `BNSD`、`BSND`、`TND` | 传 `None` | 先调用 `quant_flash_attn_metadata`，将返回值传给 `quant_flash_attn` |
+| `PA_BNBD`、`PA_BBND`、`PA_NZ` | 传非空块表 | 先调用 `quant_flash_attn_metadata`，将返回值传给 `quant_flash_attn` |
+
+- Q、K、V 为 INT8，输出为 BF16。Q、K、V 的头维度相同，取值为 1～256，Q 头数须能被 KV 头数整除。
+- `mask_mode` 支持 `0`（无 mask）和 `3`（causal）。
+- `quant_flash_attn_metadata` 返回形状为 `(2, max_schedule_size)` 的连续 INT32 张量。
+
+| 参数组 | 非分页 KV | 分页 KV |
+| --- | --- | --- |
+| 布局 | Q、KV 和输出可混用 `BNSD`、`BSND`。使用 `TND` 时，三者均为 `TND`。 | KV 使用 `PA_BNBD`、`PA_BBND` 或 `PA_NZ`。Q 和输出为 `TND`，`layout_q_descale` 传 `NT`。 |
+| 序列长度 | `BNSD`、`BSND` 生成 metadata 时须传 `batch_size`、`max_seqlen_q`、`max_seqlen_kv`。`TND` 须传 `cu_seqlens_q`、`cu_seqlens_kv`。 | 须传 `cu_seqlens_q`、`seqused_kv`。实际 KV 长度须在块表容量内。 |
+
+非分页 KV 的 Q、K、V 和量化系数须连续。`q_descale`、`k_descale` 的形状分别为 Q、K 去掉 D 轴，`v_descale` 为 `(KV_N,)`，`p_scale` 为 `(1,)`。反量化系数须为有限值，`p_scale` 转换为 FP16 前后均须为有限正数。
+
+非分页 `TND` 的两个累积长度张量均为形状 `(B+1,)` 的连续 INT32 张量，首元素为 0，元素非递减，末元素等于对应的总 token 数。传入的最大长度须覆盖实际最大长度。
+
+非分页 KV 的 `win_left` 和 `win_right` 以右下对齐位置为基准，取值为 `-1`（该侧无界）或 `[0, INT32_MAX]`。窗口和 mask 的可见范围取交集，完全遮蔽的行输出 0，LSE 为 `-inf`。
 <!-- end id18 -->
 
 ## 调用示例
@@ -1765,12 +1774,12 @@ mask_mode参数解释：
 <!-- end id19 -->
 
 <!-- npu="A3,910b" id20 -->
-### Atlas A2/A3 INT8 Prefill 示例（TND）
+### Atlas A2/A3 INT8 非分页 KV 示例（TND）
 
 ```python
 import torch
 import torch_npu
-from cann_ops_transformer.ops import quant_flash_attn
+from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
 
 torch.npu.set_device(0)
 q_heads, kv_heads, head_dim = 4, 2, 64
@@ -1790,20 +1799,21 @@ options = dict(
     cu_seqlens_q=cu, cu_seqlens_kv=cu,
     max_seqlen_q=length, max_seqlen_kv=length,
 )
+metadata = quant_flash_attn_metadata(q_heads, kv_heads, head_dim, **options)
 attn_out, softmax_lse = quant_flash_attn(
     q, k, v, q_descale, k_descale, v_descale,
-    p_scale=p_scale, metadata=None, softmax_scale=head_dim ** -0.5, **options,
+    block_table=None, p_scale=p_scale, metadata=metadata, softmax_scale=head_dim ** -0.5, **options,
 )
 ```
 <!-- end id20 -->
 
 <!-- npu="A3,910b" id22 -->
-### Atlas A2/A3 INT8 分页 示例
+### Atlas A2/A3 INT8 分页 KV 示例
 
 ```python
 import torch
 import torch_npu
-from cann_ops_transformer.ops import quant_flash_attn
+from cann_ops_transformer.ops import quant_flash_attn, quant_flash_attn_metadata
 
 q_heads, kv_heads, head_dim, page_size = 8, 1, 128, 128
 q = torch.randint(-127, 128, (1, q_heads, head_dim), device="npu", dtype=torch.int8)
@@ -1817,11 +1827,18 @@ block_table = torch.tensor([[0, 1]], device="npu", dtype=torch.int32)
 cu_seqlens_q = torch.tensor([0, 1], device="npu", dtype=torch.int32)
 seqused_kv = torch.tensor([2 * page_size], device="npu", dtype=torch.int32)
 
+metadata = quant_flash_attn_metadata(
+    q_heads, kv_heads, head_dim, 12,
+    cu_seqlens_q=cu_seqlens_q, seqused_kv=seqused_kv,
+    max_seqlen_kv=2 * page_size,
+    layout_q="TND", layout_q_descale="NT", layout_kv="PA_BNBD", layout_out="TND",
+)
+
 attn_out, softmax_lse = quant_flash_attn(
     q, k, v, q_descale, k_descale, v_descale, quant_mode=12,
     block_table=block_table, cu_seqlens_q=cu_seqlens_q, seqused_kv=seqused_kv,
-    p_scale=p_scale, softmax_scale=head_dim ** -0.5, mask_mode=0,
-    max_seqlen_q=1, max_seqlen_kv=2 * page_size,
+    p_scale=p_scale, metadata=metadata, softmax_scale=head_dim ** -0.5, mask_mode=0,
+    max_seqlen_kv=2 * page_size,
     layout_q="TND", layout_q_descale="NT", layout_kv="PA_BNBD", layout_out="TND",
     return_softmax_lse=True,
 )
