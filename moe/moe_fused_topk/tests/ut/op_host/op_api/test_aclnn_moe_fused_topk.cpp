@@ -447,3 +447,21 @@ TEST_F(l2_moe_fused_topk_test, ascend910B2_test_moe_fused_topk_empty_x)
     EXPECT_EQ(aclRet, ACLNN_SUCCESS);
     EXPECT_EQ(workspace_size, 0U);
 }
+
+TEST_F(l2_moe_fused_topk_test, rejects_unsupported_activation_type)
+{
+    constexpr uint32_t activateType = 9U;
+    for (int64_t numTokens : {0, 16}) {
+        SCOPED_TRACE(numTokens);
+        auto x = TensorDesc({numTokens, 32}, ACL_FLOAT, ACL_FORMAT_ND);
+        auto addNum = TensorDesc({32}, ACL_FLOAT, ACL_FORMAT_ND);
+        auto y = TensorDesc({numTokens, 4}, ACL_FLOAT, ACL_FORMAT_ND);
+        auto indices = TensorDesc({numTokens, 4}, ACL_INT32, ACL_FORMAT_ND);
+
+        auto ut = OP_API_UT(aclnnMoeFusedTopk,
+                            INPUT(x, addNum, nullptr, nullptr, 2U, 2U, 2U, 4U, activateType, false, 1.0f, false),
+                            OUTPUT(y, indices));
+        uint64_t workspaceSize = 0;
+        EXPECT_EQ(ut.TestGetWorkspaceSize(&workspaceSize), ACLNN_ERR_PARAM_INVALID);
+    }
+}
