@@ -105,7 +105,7 @@
 Before calling the quant_flash_attn API, call the prerequisite API quant_flash_attn_metadata to complete the load balancing computation for quant_flash_attn.
 
 ```python
-cann_ops_transformer.quant_flash_attn_metadata(
+cann_ops_transformer.ops.quant_flash_attn_metadata(
     num_heads_q,
     num_heads_kv,
     head_dim,
@@ -132,7 +132,7 @@ cann_ops_transformer.quant_flash_attn_metadata(
 <!-- end id9 -->
 
 ```python
-cann_ops_transformer.quant_flash_attn(
+cann_ops_transformer.ops.quant_flash_attn(
     q,
     k,
     v,
@@ -413,7 +413,7 @@ The tables list the combined support across products. Use values that satisfy th
                 <li>FP8 use case supports NTD.</li>
             </ul>
         </td>
-        <td rowspan="4">Currently, this parameter must be passed. An interception alarm is triggered if it is not passed.</td>
+        <td rowspan="4">Optional attribute. If it is not passed, the default value BSND is used.</td>
         <td rowspan="4">None</td>
         <td rowspan="4">None</td>
     </tr>
@@ -506,7 +506,7 @@ Explanation of the quant_mode parameter:
             <td>q_descale</td>
             <td>                <ul>
                     <li>tensor_type supports float8_e8m0 and float32.</li>
-                    <li>shape dim: 4 or 5 for the MxFP8 use case; 2 for the FP8 use case; 1 for the HIF8 use case.</li>
+                    <li>shape dim: 4, 5, or 6 for the MxFP8 use case; 2 for the FP8 use case; 1 for the HIF8 use case.</li>
                 </ul>
             </td>
             <td rowspan="3">Must exist</td>
@@ -793,7 +793,7 @@ k_descale/v_descale shape matching relationship table:
 
 > [!NOTE]
 >
-> In the MxFP8 use case, for v_descale in TND (non-Paged Attention) use cases, the first dimension KV_T/64 in the shape is not a simple integer division but the cumulative sum of the actual KV sequence lengths of all batches, each rounded up to a multiple of 64, that is, Σ ceil(cu_seqlens_kv[b+1] - cu_seqlens_kv[b], 64), where cu_seqlens_kv is the cumulative sequence length. Therefore, the KV sequence lengths of batches do not need to be strictly aligned to 64.
+> In the MxFP8 use case, for v_descale in TND (non-Paged Attention) use cases, the first dimension KV_T/64 in the shape is not a simple integer division but the cumulative sum of the actual KV sequence lengths of all batches, each rounded up to a multiple of 64, that is, `Σ ceil((cu_seqlens_kv[b+1] - cu_seqlens_kv[b]) / 64)`, where cu_seqlens_kv is the cumulative sequence length. Therefore, the KV sequence lengths of batches do not need to be strictly aligned to 64.
 
 q/k/v/attn_out shape matching relationship table:<a name="qkv_attn_out_shape-matching-relationship-table"></a>
 
@@ -1103,7 +1103,7 @@ Paged Attention is enabled when block_table is not empty.
             <td>                <ul>
                     <li>tensor_type supports only int32.</li>
                     <li>tensor_shape is (B, Bn).</li>
-                    <li>The value must be a positive integer.</li>
+                    <li>Values only support non-negative integers.</li>
                 </ul>
             </td>
             <td>Optional parameter</td>
