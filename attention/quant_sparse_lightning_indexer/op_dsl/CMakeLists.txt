@@ -5,3 +5,7 @@
 # THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
+
+if(BUILD_OPEN_PROJECT)
+    enable_cannbotdsl_kernel(quant_sparse_lightning_indexer "${CMAKE_CURRENT_LIST_DIR}")
+endif()
