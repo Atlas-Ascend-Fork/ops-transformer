@@ -2716,6 +2716,28 @@ TEST_PARAMS = {
         "p_scale": [256.0],
         "graph_path": [0],
     },
+    # attention sink + LSE: causal 且 q > kv, 前 (q-kv) 行没有任何有效 key
+    # (整块被调度跳过 与 块内被 mask 全遮 两条路径都会出现), LSE 必须等于
+    # sink[head], 且不随基本块是否被跳过而变化。
+    "B1_G4_Nq4_Nkv1_D128_SM3_LSE1_Q300_KV128_SINK": {
+        "B": [1],
+        "N_q": [4],
+        "N_kv": [1],
+        "D": [128],
+        "cu_seqlens_q": [[0, 300]],
+        "seqused_q": [[300]],
+        "max_seqlen_q": [300],
+        "cu_seqlens_kv": [None],
+        "seqused_kv": [[128]],
+        "max_seqlen_kv": [128],
+        "enable_pa": [True],
+        "enable_lse": [True],
+        "block_size": [128],
+        "mask_mode": [3],
+        "p_scale": [1.0],
+        "sinks": [[-2.0, 0.5, -0.5, 1.0]],
+        "graph_path": [0],
+    },
 }
 
 CASES = expand_paramset_to_cases(TEST_PARAMS)

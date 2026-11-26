@@ -365,6 +365,13 @@ def fill_tnd_padding(tensor_tnd, seq_lens, cu_seqlens, fill_value=float("inf")):
     """
     if cu_seqlens is None:
         return tensor_tnd
+    if torch.is_tensor(fill_value):
+        # sink 场景: padding 行 LSE 按 head 填 sink[head], 与 kernel LSE 初值一致
+        fill_value = (
+            fill_value.detach()
+            .to(torch.float32)
+            .reshape((1, -1) + (1,) * (tensor_tnd.ndim - 2))
+        )
     B = len(seq_lens)
     for b in range(B):
         act_s = seq_lens[b]
@@ -1554,6 +1561,11 @@ def _cpu_mxfp8_golden_sectioned(
 
     out = torch.zeros([b, n, s, dv], dtype=torch.float32)
     lse = torch.full([b, n, s, 1], float("inf"), dtype=torch.float32)
+    if SINKS is not None:
+        # 未被任何分段覆盖的行(kv 长度为 0 / 调度跳过)与 kernel 的 LSE 初值一致:
+        # 开 sink 时预置 sink[head], 不随基本块是否被跳过而变化。
+        sink_all = _sink_values_for(torch.arange(n)).to(torch.float32)
+        lse = sink_all.view(1, n, 1, 1).expand_as(lse).clone()
 
     for bi in range(b):
         q_len = int(actual_seq_q[bi])
@@ -1753,14 +1765,16 @@ def _cpu_mxfp8_golden_sectioned(
                     res_rows = res_rows.masked_fill(causal_bound < 0, 0.0)
                 out[bi, head_idx, s1_idx, :] = res_rows
                 no_valid_score = m_valid_g <= mask_fill
-                # 无有效 key 的行(padding / causal 空范围)统一返回 +inf, 与 kernel
-                # 哨兵语义一致; sink 只参与有有效 key 行的 softmax, 不改变该判定。
-                blocked = (m_g <= minValue).squeeze(-1) | no_valid_score
-                lse_rows = torch.where(
-                    blocked,
-                    torch.full_like(m_valid_g, float("inf")),
-                    (m_g + torch.log(s_g)).squeeze(-1),
-                )
+                # 无有效 key 的行(padding / causal 空范围): 未开 sink 时返回 +inf 哨兵;
+                # 开 sink 时 sink 已计入初值 (m0, sum0), LSE = m + log(sum) 自然等于
+                # sink[head], 与 kernel 的 LSE 初值/prologue 一致。
+                lse_rows = (m_g + torch.log(s_g)).squeeze(-1)
+                if SINKS is None:
+                    lse_rows = torch.where(
+                        (m_g <= minValue).squeeze(-1) | no_valid_score,
+                        torch.full_like(m_valid_g, float("inf")),
+                        lse_rows,
+                    )
                 lse[bi, head_idx, s1_idx, 0] = lse_rows
     return out.contiguous(), lse.contiguous()
 
@@ -2117,16 +2131,15 @@ def cpu_mxfp8_golden(
     out = out / (out_sum + EPSILON)
 
     o_max = torch.cat(m_BLOCKS, dim=2)
-    # 无有效 key 的行(padding / causal 空范围)统一输出 +inf, 与 kernel 哨兵语义一致;
-    # sink 只参与有有效 key 行的 softmax, 不改变该判定。
+    # 无有效 key 的行(padding / causal 空范围): 未开 sink 时输出 +inf 哨兵;
+    # 开 sink 时 sink 已计入初值 (m0, sum0), LSE = max + log(sum) 自然等于
+    # sink[head], 与 kernel 的 LSE 初值/prologue 一致。
     no_valid_rows = mask_global.all(dim=-1).unsqueeze(-1)
     all_masked = (o_max <= minValue.item()) | no_valid_rows
     out_sum_raw = torch.cat(s_BLOCKS_raw, dim=2)
-    lse = torch.where(
-        all_masked,
-        torch.full_like(o_max, float("inf")),
-        o_max + torch.log(out_sum_raw + EPSILON),
-    )
+    lse = o_max + torch.log(out_sum_raw + EPSILON)
+    if SINKS is None:
+        lse = torch.where(all_masked, torch.full_like(o_max, float("inf")), lse)
     out = torch.where(all_masked, torch.zeros_like(out), out)
     logger.info("[CPU Golden] output=%s", out.shape)
     return out, lse
@@ -3147,12 +3160,17 @@ if __name__ == "__main__":
         cpu_lse_tnd_torch = convert_q_bnsd_to_layout(
             cpu_lse, _get_seqused_q(), "TND", cu_seqlens=CU_SEQLENS_Q
         )
-        # TND padding 位置填 inf 以匹配 NPU 行为：NPU 对超出实际序列长度的 Q 位置输出 inf LSE
+        # padding 行按 NPU LSE 初值: 开 sink 时为 sink[head], 否则 inf
+        lse_pad = (
+            torch.as_tensor(SINKS, dtype=torch.float32).reshape(-1)
+            if SINKS is not None
+            else float("inf")
+        )
         cpu_lse_tnd_torch = fill_tnd_padding(
             cpu_lse_tnd_torch,
             _get_seqused_q(),
             CU_SEQLENS_Q,
-            fill_value=float("inf"),
+            fill_value=lse_pad,
         )
         # NPU LSE 输出已改为 N-major 排布 (N, T): N 在外, T 在内
         # CPU golden 经 convert 后是 [T, N, 1] (T-major), 需转成 [N, T] 对齐

@@ -407,8 +407,21 @@ def _sinks_to_fp32(sinks_t):
     return sinks_t.detach().to(torch.float32).reshape(-1).cpu()
 
 
-def _pad_seq_dim_to(t, target, dim, fill):
-    """把序列维补齐到 CSV slot 长度（padding 行按无效行填充：out=0 / lse=inf）。"""
+def _lse_pad_fill(sinks_t):
+    """TND padding 行 LSE 填充值: 开 sink 时为 per-head 的 sink[head], 否则 inf。
+
+    kernel 的 LSE 初值按 head 写 sink[head] 且覆盖整块 GM(含 padding 行),
+    padding 行不会被计算路径改写, 故 golden 侧同样填 sink[head]。
+    """
+    sink = _sinks_to_fp32(sinks_t)
+    return float("inf") if sink is None else sink
+
+
+def _pad_seq_dim_to(t, target, dim, fill, fill_axis=None):
+    """把序列维补齐到 CSV slot 长度（padding 行按无效行填充：out=0 / lse 为 sink[head] 或 inf）。
+
+    fill 可为标量或 per-head tensor; 后者按 fill_axis 广播到 pad 区间。
+    """
     if t is None or dim >= t.ndim:
         return t
     target = int(target)
@@ -416,7 +429,13 @@ def _pad_seq_dim_to(t, target, dim, fill):
         return t
     pad_shape = list(t.shape)
     pad_shape[dim] = target - int(t.shape[dim])
-    return torch.cat([t, torch.full(pad_shape, fill, dtype=t.dtype)], dim=dim)
+    if torch.is_tensor(fill):
+        shape = [1] * t.ndim
+        shape[t.ndim - 1 if fill_axis is None else fill_axis] = -1
+        pad = fill.detach().to(t.dtype).reshape(shape).expand(pad_shape).contiguous()
+    else:
+        pad = torch.full(pad_shape, fill, dtype=t.dtype)
+    return torch.cat([t, pad], dim=dim)
 
 
 def _apply_golden_globals(attrs, quant_mode=1):
@@ -965,13 +984,13 @@ def cpu_qfa_mxfp8(
                 "TND",
                 cu_seqlens=cu_seqlens_q_list,
             )
-            # TND padding 位置填 inf 以匹配 NPU 行为：NPU 对超出实际序列长度的 Q 位置输出 inf LSE
+            # TND padding 位置按 NPU 初值填充：无 sink 时为 inf；开 sink 时为 sink[head]
             if cu_seqlens_q_list is not None:
                 cpu_lse_aligned = mxfp8_golden_mod.fill_tnd_padding(
                     cpu_lse_aligned,
                     actual_seq_q,
                     cu_seqlens_q_list,
-                    fill_value=float("inf"),
+                    fill_value=_lse_pad_fill(sinks_t),
                 )
             if cpu_lse_aligned.ndim == 3 and cpu_lse_aligned.shape[-1] == 1:
                 cpu_lse_aligned = cpu_lse_aligned.squeeze(-1).contiguous()
@@ -1201,13 +1220,13 @@ def cpu_qfa_gqa_fp8(
             "TND",
             cu_seqlens=cu_seqlens_q_list,
         )
-        # TND padding 位置填 inf 以匹配 NPU 行为
+        # TND padding 位置按 NPU 初值填充：无 sink 时为 inf；开 sink 时为 sink[head]
         if cu_seqlens_q_list is not None:
             cpu_lse_aligned = fp8_golden_mod.fill_tnd_padding(
                 cpu_lse_aligned,
                 actual_seq_q,
                 cu_seqlens_q_list,
-                fill_value=float("inf"),
+                fill_value=_lse_pad_fill(sinks_t),
             )
         if cpu_lse_aligned.ndim == 3 and cpu_lse_aligned.shape[-1] == 1:
             cpu_lse_aligned = cpu_lse_aligned.squeeze(-1).contiguous()
@@ -1550,7 +1569,8 @@ def cpu_qfa_hif8(
         compare_layout,
         cu_seqlens=cu_q_for_convert,
     )
-    # CSV slot 可能包含 seqused 之后的 padding 行（kernel 对无效 Q 行输出 0/inf）
+    # CSV slot 可能包含 seqused 之后的 padding 行（kernel 对无效 Q 行输出 O=0,
+    # LSE 为 sink[head](开 sink) 或 inf(未开 sink)）
     _lay = str(compare_layout).upper()
     if _lay in ("TND", "BSND", "BNSD"):
         _dim = {"TND": 0, "BSND": 1, "BNSD": 2}[_lay]
@@ -1570,13 +1590,13 @@ def cpu_qfa_hif8(
             lse_compare_layout,
             cu_seqlens=lse_cu_q,
         )
-        # TND padding 位置填 inf 以匹配 NPU 行为：NPU 对超出实际序列长度的 Q 位置输出 inf LSE
+        # TND padding 位置按 NPU 初值填充：无 sink 时为 inf；开 sink 时为 sink[head]
         if lse_compare_layout == "TND" and lse_cu_q is not None:
             cpu_lse_aligned = hif8_golden_mod.fill_tnd_padding(
                 cpu_lse_aligned,
                 actual_seq_q,
                 list(lse_cu_q),
-                fill_value=float("inf"),
+                fill_value=_lse_pad_fill(sinks_t),
             )
         if compare_layout == "TND":
             # TND: golden LSE 转 TND 后为 (T,N,1), 剥附加尾维得 (T,N),
@@ -1590,15 +1610,16 @@ def cpu_qfa_hif8(
             # S=1 时保留 (B,N,1) 与 NPU infershape 输出一致
             if cpu_lse_aligned.ndim > 1 and cpu_lse_aligned.shape[-1] == 1:
                 cpu_lse_aligned = cpu_lse_aligned.squeeze(-1).contiguous()
-        # padding 行 LSE 补 inf（NPU 无效 Q 行输出 inf）
+        # padding 行 LSE 按 NPU 初值补: 无 sink 为 inf, 开 sink 为 sink[head]
+        # (TND 已翻转为 (N,T), head 在轴 0; BNSD/BSND 为 (B,N,S), head 在轴 1)
         if _lay == "TND" and cpu_lse_aligned.ndim == 2:
             cpu_lse_aligned = _pad_seq_dim_to(
-                cpu_lse_aligned, int(q.shape[0]), 1, float("inf")
+                cpu_lse_aligned, int(q.shape[0]), 1, _lse_pad_fill(sinks_t), fill_axis=0
             )
         elif _lay in ("BSND", "BNSD") and cpu_lse_aligned.ndim == 3:
             _lse_target = int(q.shape[1]) if _lay == "BSND" else int(q.shape[2])
             cpu_lse_aligned = _pad_seq_dim_to(
-                cpu_lse_aligned, _lse_target, 2, float("inf")
+                cpu_lse_aligned, _lse_target, 2, _lse_pad_fill(sinks_t), fill_axis=1
             )
         result = [cpu_out_aligned, cpu_lse_aligned]
     else:

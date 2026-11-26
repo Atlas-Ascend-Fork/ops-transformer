@@ -224,10 +224,17 @@ def convert_kv_bnsd_to_layout(tensor_bnsd, seq_lens, layout, cu_seqlens=None):
 
 def fill_tnd_padding(tensor_tnd, seq_lens, cu_seqlens, fill_value=float("inf")):
     """TND layout 中 cu_seqlens padding 区域（seqused[b] ~ cu_diff[b]）填充指定值
-    用于 LSE: padding 位置填 inf 以匹配 NPU 行为
+    用于 LSE: padding 位置填 inf 以匹配 NPU 行为; 开 sink 时逐 head 填 sink[head]
     """
     if cu_seqlens is None:
         return tensor_tnd
+    if torch.is_tensor(fill_value):
+        # sink 场景: padding 行 LSE 按 head 填 sink[head], 与 kernel LSE 初值一致
+        fill_value = (
+            fill_value.detach()
+            .to(torch.float32)
+            .reshape((1, -1) + (1,) * (tensor_tnd.ndim - 2))
+        )
     B = len(seq_lens)
     for b in range(B):
         act_s = seq_lens[b]
@@ -1245,6 +1252,11 @@ def _cpu_mxfp8_golden_sectioned(
 
     out = torch.zeros([b, n, s, dv], dtype=torch.float32)
     lse = torch.full([b, n, s, 1], float("inf"), dtype=torch.float32)
+    if SINKS is not None:
+        # 未被任何分段覆盖的行(kv 长度为 0 / 调度跳过)与 kernel 的 LSE 初值一致:
+        # 开 sink 时预置 sink[head], 不随基本块是否被跳过而变化。
+        sink_all = _sink_values_for(torch.arange(n)).to(torch.float32)
+        lse = sink_all.view(1, n, 1, 1).expand_as(lse).clone()
 
     for bi in range(b):
         q_len = int(actual_seq_q[bi])
@@ -1430,11 +1442,15 @@ def _cpu_mxfp8_golden_sectioned(
                     res_rows = res_rows.masked_fill(causal_bound < 0, 0.0)
                 out[bi, head_idx, s1_idx, :] = res_rows
                 no_valid_score = m_valid_g <= mask_fill
-                lse_rows = torch.where(
-                    (m_g <= minValue).squeeze(-1) | no_valid_score,
-                    torch.full_like(m_valid_g, float("inf")),
-                    (m_g + torch.log(s_g)).squeeze(-1),
-                )
+                # 未开 sink 时全遮蔽行保持 +inf 哨兵; 开 sink 时 sink 已计入初值,
+                # LSE = m + log(sum) 自然等于 sink[head]。
+                lse_rows = (m_g + torch.log(s_g)).squeeze(-1)
+                if SINKS is None:
+                    lse_rows = torch.where(
+                        (m_g <= minValue).squeeze(-1) | no_valid_score,
+                        torch.full_like(m_valid_g, float("inf")),
+                        lse_rows,
+                    )
                 lse[bi, head_idx, s1_idx, 0] = lse_rows
     return out.contiguous(), lse.contiguous()
 
@@ -1743,11 +1759,11 @@ def cpu_mxfp8_golden(
     # 除"无有效列"外还包括"有效列全为 -inf 溢出"行 (后者 NPU: lse=-inf, out=NaN),
     # 旧的 o_max<=minValue 判定会把二者混为 all_masked(lse=+inf, out=0)。
     row_valid = (~mask_global).any(dim=-1)[..., None]
-    lse = torch.where(
-        row_valid,
-        o_max + torch.log(out_sum),
-        torch.full_like(o_max, float("inf")),
-    )
+    # 未开 sink 时全遮蔽行保持 +inf 哨兵; 开 sink 时 sink 已计入初值,
+    # LSE = max + log(sum) 自然等于 sink[head]。
+    lse = o_max + torch.log(out_sum)
+    if SINKS is None:
+        lse = torch.where(row_valid, lse, torch.full_like(o_max, float("inf")))
     out = torch.where(row_valid, out, torch.zeros_like(out))
     # [极端值对齐] 删除 nan_to_num(NaN→-inf): NPU 极端值行为是自然传播 —
     # m 对齐舍入使 exp 参数>0 → P=+inf → s=+inf → lse=+inf, O/s=NaN;

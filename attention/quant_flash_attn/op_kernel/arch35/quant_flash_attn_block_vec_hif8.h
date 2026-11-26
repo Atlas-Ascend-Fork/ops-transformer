@@ -361,11 +361,24 @@ public:
         }
         int64_t totalOutputSize = tSize * constInfo_.realN2Size * constInfo_.realGSize;
         uint32_t vecCoreNum = CV_RATIO * constInfo_.coreNum; // 2 means c:v = 1:2
-        static constexpr float LSE_INIT_VAL = 3e+99;
         static constexpr uint32_t LSE_POP_BUF_START_ADDR = 32768U;
         static constexpr uint32_t LSE_POP_BUF_ELE_SIZE = 32768U / sizeof(float);
-        AttentionCommon::InitOutput<float, UB_OUT_LSE_OUT_ID, LSE_POP_BUF_START_ADDR, LSE_POP_BUF_ELE_SIZE, false>(
-            softmaxLseGm_, totalOutputSize, vecCoreNum, LSE_INIT_VAL);
+        if constexpr (HAS_SINK) {
+            // sink 场景: 未被任何 task 写到的行(整个 S2 基本块被跳过)的 LSE 也应为 sink[head]。
+            // 计算路径的 prologue 初值 (max0=sink-ln(pScale), sum0=pScale) 在数学上同样得到
+            // sink, 因此预置 sink[head] 可保证 LSE 不随基本块是否被跳过而变化。
+            // LSE 布局: TND 为 (Q_N, Q_T), BSND/BNSD 为 (B, Q_N, Q_S)。
+            constexpr bool isNT = (layout == LayOutTypeEnum::LAYOUT_TND || layout == LayOutTypeEnum::LAYOUT_NTD ||
+                                   layout == LayOutTypeEnum::LAYOUT_NTD_TND);
+            int64_t lsePerHead = isNT ? tSize : static_cast<int64_t>(constInfo_.s1Size);
+            AttentionCommon::InitOutputPerHead<float, UB_OUT_LSE_OUT_ID, LSE_POP_BUF_START_ADDR, LSE_POP_BUF_ELE_SIZE>(
+                softmaxLseGm_, sinkGm_, totalOutputSize, lsePerHead,
+                static_cast<uint64_t>(constInfo_.realN2Size) * constInfo_.realGSize, vecCoreNum);
+        } else {
+            static constexpr float LSE_INIT_VAL = 3e+99;
+            AttentionCommon::InitOutput<float, UB_OUT_LSE_OUT_ID, LSE_POP_BUF_START_ADDR, LSE_POP_BUF_ELE_SIZE, false>(
+                softmaxLseGm_, totalOutputSize, vecCoreNum, LSE_INIT_VAL);
+        }
     }
 
     // =================================Private Functions=================================
@@ -406,45 +419,6 @@ public:
     __aicore__ inline uint32_t GetSinkM(const RunInfoX& runInfo) const
     {
         return ((runInfo.actMSizeAlign32 >> 1) + 63) >> 6 << 6;
-    }
-
-    // sink 场景下, 无有效 key 的行会拿到 sink 初值, 直接算 LSE 会得到有限值,
-    // 而 golden 该行为 inf 哨兵。判据与 RowInvalid 完全一致: 把这些行的 max 槽位置为
-    // minValue_(HIF8 的 LSE/RowInvalid 都按该值判据), Vec2 的 RowInvalidUpdateVF
-    // 会把 O 清 0。
-    __aicore__ inline void MarkInvalidRowMaxForSink(LocalTensor<float>& maxUb, const RunInfoX& runInfo, uint32_t rows)
-    {
-        if constexpr (HAS_SINK && HAS_MASK) {
-            if (rows == 0 || runInfo.actS1Size == 0) {
-                return;
-            }
-            int64_t s1FirstValidToken =
-                AttentionCommon::Min(AttentionCommon::Max(-runInfo.nextTokensLeftUp, 0), runInfo.actS1Size);
-            int64_t s1LastValidToken = AttentionCommon::Min(
-                AttentionCommon::Max(runInfo.preTokensLeftUp + runInfo.actS2Size, 0), runInfo.actS1Size);
-            s1LastValidToken = AttentionCommon::Max(s1LastValidToken - 1, 0);
-            if (s1FirstValidToken <= 0 && s1LastValidToken >= static_cast<int64_t>(runInfo.actS1Size) - 1) {
-                return; // 全有效: 热路径不付出代价
-            }
-            // DN 下 realGSize == 1, 行号即 s1 坐标; s1 随 r 单调, 只需比较区间两端点
-            // 即可判定本块是否含无效行(O(1), 与 MXFP8 的端点预判同构), 不必逐行扫描。
-            const uint32_t s1Start = runInfo.gS1Idx + runInfo.vecMbaseIdx;
-            const int64_t s1StartI64 = static_cast<int64_t>(s1Start);
-            const int64_t s1EndI64 = s1StartI64 + static_cast<int64_t>(rows) - 1;
-            if (s1StartI64 >= s1FirstValidToken && s1EndI64 <= s1LastValidToken) {
-                return; // 整块有效
-            }
-            // 向量标记: 标量先算好行区间阈值, 向量侧只做 Arange/Compares/Select,
-            // 不含 Div/Mod; DN 下 realGSize==1, 行号即 s1 坐标。
-            // 与 softmax VF 的 store / 后续 LSE VF 的 load 构成 V 流水 RAW 依赖,
-            // 用 V 屏障保证可见性(与 MXFP8 路径一致, 避免全流水屏障)。
-            const int32_t loThrI32 = AttentionCommon::SinkClampToI32(s1FirstValidToken - s1StartI64);
-            const int32_t hiThrI32 = AttentionCommon::SinkClampToI32((s1LastValidToken + 1) - s1StartI64);
-            PipeBarrier<PIPE_V>();
-            AttentionCommon::MarkInvalidRowMaxS1GVF<float, mBaseSize / CV_RATIO>(
-                (__ubuf__ float*)maxUb.GetPhyAddr(), rows, loThrI32, hiThrI32, *((float*)&minValue_));
-            PipeBarrier<PIPE_V>();
-        }
     }
 
     __aicore__ inline void ProcessVec1Dn(LocalTensor<INPUT_T>& mm2AL1Tensor, LocalTensor<T>& mmRes, RunInfoX runInfo,
@@ -561,7 +535,8 @@ public:
         uint32_t vecMIdx = runInfo.gS1Idx + runInfo.vecMbaseIdx;
         LocalTensor<float> lseUb = this->softmaxLseBuf_;
         WaitFlag<HardEvent::MTE3_V>(MTE3_V_EVENT1);
-        MarkInvalidRowMaxForSink(softmaxMaxTmp, runInfo, vecMSize);
+        // sink 场景下无有效 key 的行保持 prologue 初值 (max0=sink-ln(pScale), sum0=pScale),
+        // LSE 自然输出 sink[head], O 由分子为 0 自然清 0, 不再改成 inf 哨兵。
         ComputeLseOutputVF(lseUb, softmaxSumTmp, softmaxMaxTmp, vecMSize, minValue_);
         SetFlag<HardEvent::V_MTE3>(V_MTE3_EVENT1);
         WaitFlag<HardEvent::V_MTE3>(V_MTE3_EVENT1);
@@ -801,9 +776,8 @@ public:
         }
         int64_t calculateSize = runInfo.actVecMSize * fp32BaseSize;
         int64_t gmOffset = runInfo.faTmpOutWsPos * mBaseSize * fp32BaseSize + runInfo.vecMbaseIdx * fp32BaseSize;
-        // FD 拆片同样要打无效行哨兵: 合并侧只在合并 max == minValue_ 时把 LSE 置 inf;
-        // 标记后该分片 partial max 恰为哨兵, 合并时 exp(max_i-M)=0, 分子分母贡献均为 0。
-        MarkInvalidRowMaxForSink(maxUb, runInfo, runInfo.actVecMSize);
+        // sink 场景下无效行保持 prologue 初值: owner 分片 (m0, pScale), 非 owner (m0, 0),
+        // 合并后 LSE = m0 + ln(pScale) = sink[head], 与未拆片的计算路径一致。
         BroadCastAndCopyOut(runInfo, sumUb, maxUb, gmOffset, calculateSize);
     }
 

@@ -1834,5 +1834,47 @@ for _layout, _count in (("TND", 17), ("BSND", 17), ("BNSD", 16)):
     for _local_index in range(_count):
         _add_small_correctness_case(len(TEST_PARAMS) - 50, _layout, _local_index)
 
+# attention sink + LSE: causal 且 q > kv 时前 (q-kv) 行没有任何有效 key
+# (整块被调度跳过 与 块内被 mask 全遮 两条路径都会出现), LSE 必须等于 sink[head],
+# 且不随基本块是否被跳过而变化。
+TEST_PARAMS["TND_B1_QS300_KVS128_Nq2_Nkv1_D128_SP3_SINK_LSE"] = {
+    "B": [1],
+    "N_q": [2],
+    "N_kv": [1],
+    "D": [128],
+    "cu_seqlens_q": [[0, 300]],
+    "cu_seqlens_kv": [[0, 128]],
+    "seqused_q": [[300]],
+    "seqused_kv": [[128]],
+    "max_seqlen_q": [300],
+    "max_seqlen_kv": [128],
+    "mask_mode": [3],
+    "q_scale_layout": ["BSND"],
+    "p_scale": [1.0],
+    "enable_lse": [True],
+    "sinks": [[-2.0, 0.5]],
+}
+
+# attention sink + TND padding: cu_seqlens_q 空洞使 token 300..319 属于 padding 行,
+# 这些行不会被调度/计算, 只保留 kernel 的 LSE 初值 —— 开 sink 时应为 sink[head]
+# (golden 侧 fill_tnd_padding 同样按 sink 填充), 而非 inf。
+TEST_PARAMS["TND_B1_QS300_CU320_KVS128_Nq2_Nkv1_D128_SP3_SINK_LSE_PAD"] = {
+    "B": [1],
+    "N_q": [2],
+    "N_kv": [1],
+    "D": [128],
+    "cu_seqlens_q": [[0, 320]],
+    "cu_seqlens_kv": [[0, 128]],
+    "seqused_q": [[300]],
+    "seqused_kv": [[128]],
+    "max_seqlen_q": [300],
+    "max_seqlen_kv": [128],
+    "mask_mode": [3],
+    "q_scale_layout": ["BSND"],
+    "p_scale": [1.0],
+    "enable_lse": [True],
+    "sinks": [[-2.0, 0.5]],
+}
+
 CASES = expand_paramset_to_cases(TEST_PARAMS)
 SKIP_CASES = set()

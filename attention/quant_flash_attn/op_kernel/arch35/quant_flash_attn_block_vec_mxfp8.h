@@ -597,11 +597,26 @@ public:
         }
         int64_t totalOutputSize = tSize * constInfo_.realN2Size * constInfo_.realGSize;
         uint32_t vecCoreNum = CV_RATIO * constInfo_.coreNum; // 2 means c:v = 1:2
-        static constexpr float LSE_INIT_VAL = 3e+99;
         static constexpr uint32_t LSE_POP_BUF_START_ADDR = 32768U;
         static constexpr uint32_t LSE_POP_BUF_ELE_SIZE = 32768U / sizeof(float);
-        AttentionCommon::InitOutput<float, MTE3_V_EVENT1, LSE_POP_BUF_START_ADDR, LSE_POP_BUF_ELE_SIZE, false>(
-            softmaxLseGm_, totalOutputSize, vecCoreNum, LSE_INIT_VAL);
+        if constexpr (HAS_SINK) {
+            // sink 场景: 未被任何 task 写到的行(整个 S2 基本块被跳过)的 LSE 也应为 sink[head]。
+            // 计算路径的 prologue 初值 (m0, sum0) 在数学上同样得到 sink, 因此预置 sink[head]
+            // 可保证 LSE 不随基本块是否被跳过而变化。
+            // LSE 布局: TND 为 (Q_N, Q_T); BSND/BNSD 为 (B, Q_N, Q_S)。
+            // NTD([T, N2*G], head 最快变化)不在 MXFP8 注册的 tiling key 内, 此处不支持。
+            static_assert(layout != LayOutTypeEnum::LAYOUT_NTD && layout != LayOutTypeEnum::LAYOUT_NTD_TND,
+                          "MXFP8 sink LSE init does not support NTD output layout");
+            constexpr bool isNT = (layout == LayOutTypeEnum::LAYOUT_TND);
+            int64_t lsePerHead = isNT ? tSize : static_cast<int64_t>(constInfo_.s1Size);
+            AttentionCommon::InitOutputPerHead<float, MTE3_V_EVENT1, LSE_POP_BUF_START_ADDR, LSE_POP_BUF_ELE_SIZE>(
+                softmaxLseGm_, sinkGm_, totalOutputSize, lsePerHead,
+                static_cast<uint64_t>(constInfo_.realN2Size) * constInfo_.realGSize, vecCoreNum);
+        } else {
+            static constexpr float LSE_INIT_VAL = 3e+99;
+            AttentionCommon::InitOutput<float, MTE3_V_EVENT1, LSE_POP_BUF_START_ADDR, LSE_POP_BUF_ELE_SIZE, false>(
+                softmaxLseGm_, totalOutputSize, vecCoreNum, LSE_INIT_VAL);
+        }
     }
 
     // =================================Private Functions=================================
@@ -870,81 +885,6 @@ public:
         minValue_ = static_cast<uint32_t>(*reinterpret_cast<int32_t*>(&min));
     }
 
-    // sink 场景下, 无有效 key 的行(如 LU-causal 下 q 侧前段超出 kv 的行)在本 tile 内
-    // 同样会拿到 sink 初值 (m0, sum0), 直接算 LSE 会得到有限值, 而 golden 该行为 inf 哨兵。
-    // 判据与 RowInvalid 完全一致: 把这些行的 max 槽位置为 minValue_, 使
-    // ComputeLseOutputVF 走 inf 分支; Vec2 的 RowInvalidUpdateVF 按 max==minValue_
-    // 判据读同一缓冲区, 因此 O 也会被正确清 0。
-    // 无效行只可能由 mask 产生, 故与 Vec2 的 RowInvalid 一致按 HAS_MASK 编译期门控,
-    // 无 mask 时不进入该路径(对齐 FP8/HIF8 实现)。
-    __aicore__ inline void MarkInvalidRowMaxForSink(LocalTensor<float>& maxUb, const RunInfoX& runInfo, uint32_t rows)
-    {
-        if constexpr (HAS_SINK && HAS_MASK) {
-            if (rows == 0 || runInfo.actS1Size == 0) {
-                return;
-            }
-            int64_t s1FirstValidToken =
-                AttentionCommon::Min(AttentionCommon::Max(-runInfo.nextTokensLeftUp, 0), runInfo.actS1Size);
-            int64_t s1LastValidToken = AttentionCommon::Min(
-                AttentionCommon::Max(runInfo.preTokensLeftUp + runInfo.actS2Size, 0), runInfo.actS1Size);
-            s1LastValidToken = AttentionCommon::Max(s1LastValidToken - 1, 0);
-            if (s1FirstValidToken <= 0 && s1LastValidToken >= static_cast<int64_t>(runInfo.actS1Size) - 1) {
-                return; // 全有效: 热路径不付出代价
-            }
-            // 行 -> s1 映射与 CalcBlockNeedRowInvalid 保持一致:
-            //   S1G 行序为 s1*realGSize+g, GS1 行序为 s1 在 G 内循环(s1 = gs1 % actS1Size)。
-            const uint32_t gs1Start = runInfo.gS1Idx + runInfo.vecMbaseIdx;
-            const uint32_t realGSize = constInfo_.realGSize == 0 ? 1U : constInfo_.realGSize;
-            // O(1) 块级预判(与 flash_mla CalcBlockNeedRowInvalid 同构): 只看区间端点即可
-            // 判定本块是否可能含无效行, 整块有效时直接跳过下面的向量标记与两次 V 屏障。
-            // 端点不越界 => 块内所有行都有效(不跨 G 时行 -> s1 单调); 跨 G 时端点判断
-            // 不充分, 交给向量侧按取模逐行标记。
-            {
-                const uint32_t gs1Last = gs1Start + rows - 1U;
-                if constexpr (IS_GS1) {
-                    if (gs1Start / runInfo.actS1Size == gs1Last / runInfo.actS1Size) {
-                        // 本块不跨 G: s1 区间为两端点取模
-                        const int64_t s1Begin = static_cast<int64_t>(gs1Start % runInfo.actS1Size);
-                        const int64_t s1End = static_cast<int64_t>(gs1Last % runInfo.actS1Size);
-                        if (s1Begin >= s1FirstValidToken && s1End <= s1LastValidToken) {
-                            return;
-                        }
-                    }
-                } else {
-                    const int64_t s1Begin = static_cast<int64_t>(gs1Start / realGSize);
-                    const int64_t s1End = static_cast<int64_t>(gs1Last / realGSize);
-                    if (s1Begin >= s1FirstValidToken && s1End <= s1LastValidToken) {
-                        return;
-                    }
-                }
-            }
-            // 向量标记: 标量先算好行区间阈值, 向量侧只做 Arange/Div/Compare/Select,
-            // 只占 V 流水, 不占标量流水。
-            // 与 softmax VF 的 store / 后续 LSE VF 的 load 之间存在 UB store->load RAW 依赖,
-            // 按本类既有约定用 V 屏障(而非原来的 PIPE_ALL)保证可见性。
-            PipeBarrier<PIPE_V>();
-            if constexpr (IS_GS1) {
-                // GS1 行序为 g 外层、s1 内层, 一个 vector 块可跨多个 G 组, 行 -> s1 必须
-                // 按取模计算(不能假设至多一次回绕), 具体见 MarkInvalidRowMaxGs1VF。
-                const int32_t base = static_cast<int32_t>(gs1Start % runInfo.actS1Size);
-                AttentionCommon::MarkInvalidRowMaxGs1VF<float, mBaseSize / CV_RATIO>(
-                    (__ubuf__ float*)maxUb.GetPhyAddr(), rows, base, static_cast<int32_t>(runInfo.actS1Size),
-                    static_cast<int32_t>(s1FirstValidToken), static_cast<int32_t>(s1LastValidToken),
-                    *((float*)&minValue_));
-            } else {
-                const int64_t loThr =
-                    s1FirstValidToken * static_cast<int64_t>(realGSize) - static_cast<int64_t>(gs1Start);
-                const int64_t hiThr =
-                    (s1LastValidToken + 1) * static_cast<int64_t>(realGSize) - static_cast<int64_t>(gs1Start);
-                const int32_t loThrI32 = AttentionCommon::SinkClampToI32(loThr);
-                const int32_t hiThrI32 = AttentionCommon::SinkClampToI32(hiThr);
-                AttentionCommon::MarkInvalidRowMaxS1GVF<float, mBaseSize / CV_RATIO>(
-                    (__ubuf__ float*)maxUb.GetPhyAddr(), rows, loThrI32, hiThrI32, *((float*)&minValue_));
-            }
-            PipeBarrier<PIPE_V>();
-        }
-    }
-
     __aicore__ inline void SoftmaxLseCopyOut(LocalTensor<float>& softmaxSumTmp, LocalTensor<float>& softmaxMaxTmp,
                                              RunInfoX& runInfo)
     {
@@ -972,7 +912,8 @@ public:
         uint32_t vecMIdx = runInfo.gS1Idx + runInfo.vecMbaseIdx;
         LocalTensor<float> lseUb = this->softmaxLseBuf_;
         WaitFlag<HardEvent::MTE3_V>(MTE3_V_EVENT4);
-        MarkInvalidRowMaxForSink(softmaxMaxTmp, runInfo, vecMSize);
+        // sink 场景下无有效 key 的行保持 prologue 初值 (m0, sum0), LSE 自然输出 sink[head],
+        // O 由分子为 0 自然清 0, 不再改成 inf 哨兵。
         ComputeLseOutputVF(lseUb, softmaxSumTmp, softmaxMaxTmp, vecMSize, minValue_);
         SetFlag<HardEvent::V_MTE3>(V_MTE3_EVENT4);
         WaitFlag<HardEvent::V_MTE3>(V_MTE3_EVENT4);
@@ -1640,12 +1581,9 @@ public:
         if (gmDealRowCount == 0) {
             return;
         }
-        // FD 拆片同样要打无效行哨兵: 合并侧只在"合并 max == minValue_"时把 LSE 置 inf,
-        // 而 owner 分片的 sink 网格 max m0 恒非哨兵; 不标记则全无效行的 LSE 会输出 sink 值。
-        // 标记后该分片 partial max 恰为哨兵, 合并时 exp(max_i-M)=0 -> 分子分母贡献均为 0,
-        // 全部分片都无效时合并 max 即为哨兵 -> LSE=inf; O 由分母 SUM_FLOOR 兜底保持 0。
-        const uint32_t vecMSize = USE_DN ? runInfo.actVecMSize : (runInfo.actMSizeAlign32 >> 1);
-        MarkInvalidRowMaxForSink(maxUb, runInfo, vecMSize);
+        // sink 场景下无效行保持 prologue 初值: owner 分片 (m0, sum0), 非 owner (m0, 0),
+        // 合并后 LSE = m0 + ln(sum0) = sink[head], 与未拆片的计算路径一致;
+        // O 由分母 SUM_FLOOR 兜底保持 0。
         int64_t gmOffset = runInfo.faTmpOutWsPos * mBaseSize * fp32BaseSize + runInfo.vecMbaseIdx * fp32BaseSize;
         // Copy sum to gm
         BroadCastAndCopyOut(sumUb, maxUb, gmOffset, gmDealRowCount);

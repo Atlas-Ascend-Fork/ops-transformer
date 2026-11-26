@@ -8620,3 +8620,35 @@ TEST_PARAMS.update(_D192_MIRROR)
 SKIP_CASES |= {n.replace("D128", "D192", 1) for n in SKIP_CASES if "D128" in n}
 
 CASES = expand_paramset_to_cases(TEST_PARAMS)
+
+# FD + sink + LSE 回归: q 很小而 KV 很长, metadata 会把同一 task 的 S2 拆到多个核
+# (fdLeastBlock=3 / fdTolerance=10 下 64 个 S2 基本块必然触发切分)。
+# sink 取 +50/-50: 正 sink 远大于 16384 个 score 的 exp 和, 各分片 P 全部下溢,
+# 分母只剩 owner 分片的 sum0=pScale, 直接验证 sink 项在 FD 合并中的记账;
+# LEFT_UP_CAUSAL 下最后一个 S2 分片对前 q-1 行全遮蔽, 该非 owner 分片 partial 为
+# (m0, sum0=0), 合并后 LSE = m0 + ln(pScale + 0) = sink[head], 用于覆盖 FD 分片
+# 不再打 invalid-row 哨兵后, 全遮分片仍能正确并入 sink 分母项的路径。
+for _case in list(CASES):
+    if _case["name"] == "BSND_B2_QS1_KVS8192_Nq2_Nkv1_D128_SP0_Decode":
+        _fd_sink_lse_case = dict(_case)
+        _fd_sink_lse_case.update(
+            {
+                "name": "TND_B1_QS8_KVS16384_Nq2_Nkv1_D128_SP3_FD_SINK_LSE",
+                "B": 1,
+                "cu_seqlens_q": [0, 8],
+                "cu_seqlens_kv": [0, 16384],
+                "seqused_q": [8],
+                "seqused_kv": [16384],
+                "max_seqlen_q": 8,
+                "max_seqlen_kv": 16384,
+                "kv_cache_layout": "TND",
+                "input_layout": "TND",
+                "mask_mode": 3,
+                "q_scale_layout": "TND",
+                "p_scale": 1.0,
+                "enable_lse": True,
+                "sinks": [50.0, -50.0],
+            }
+        )
+        CASES.append(_fd_sink_lse_case)
+        break

@@ -191,9 +191,14 @@ def execute_test(params, mode, cdir=None):
     def _lse_to_cmp(lse_bnsd):
         lse_cmp = _to_cmp(lse_bnsd)
         if compare_layout == "TND":
-            # TND padding 位置填 inf 以匹配 NPU 行为：NPU 对超出实际序列长度的 Q 位置输出 inf LSE
+            # padding 行按 NPU LSE 初值: 开 sink 时为 sink[head], 否则 inf
+            lse_pad = (
+                torch.as_tensor(golden.SINKS, dtype=torch.float32).reshape(-1)
+                if golden.SINKS is not None
+                else float("inf")
+            )
             golden.fill_tnd_padding(
-                lse_cmp, act_seqused_q, golden.CU_SEQLENS_Q, fill_value=float("inf")
+                lse_cmp, act_seqused_q, golden.CU_SEQLENS_Q, fill_value=lse_pad
             )
             # NPU LSE 输出为 N-major 排布 (N, T): golden 经 convert 后是 [T, N, 1] (T-major)
             lse_cmp = lse_cmp.squeeze(-1).permute(1, 0).contiguous()

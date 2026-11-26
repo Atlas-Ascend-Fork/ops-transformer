@@ -185,3 +185,16 @@ for _case in CASES:
         _sink_case["sinks"] = [0.5]
         CASES.append(_sink_case)
         break
+
+# sink + LSE + causal q > kv 回归: 前 (q-kv) 行没有任何有效 key
+# (整块被调度跳过 与 块内被 mask 全遮 两条路径都会出现), LSE 必须等于 sink[head],
+# 且不随基本块是否被跳过而变化。
+for _case in list(CASES):
+    if _case["name"] == "BSND_B2_QS64_KVS256_Nq2_Nkv1_D64_SP3":
+        _sink_lse_case = dict(_case)
+        _sink_lse_case["name"] = "BSND_B2_QS320_KVS256_Nq2_Nkv1_D64_SP3_SINK_LSE"
+        _sink_lse_case["seqused_q"] = [320, 64]
+        _sink_lse_case["max_seqlen_q"] = 320
+        _sink_lse_case["sinks"] = [0.5, -1.0]
+        CASES.append(_sink_lse_case)
+        break
