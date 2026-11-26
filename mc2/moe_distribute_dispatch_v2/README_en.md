@@ -421,7 +421,10 @@ For details, see the following parameter description.
         - `BS`: Batch sequence size, that is, the number of tokens finally output by the current device.
             - `commAlg` = "fullmesh_v2" or "hierarchy": The value range is (0, 256].
             - `commAlg` = "fullmesh_v1" or "": The value range is (0, 512].
-    - `HCCL_BUFFSIZE`: Before calling this operator, check whether the value of the `HCCL_BUFFSIZE` environment variable is reasonable. This environment variable indicates the memory size occupied by a single communicator, in MB. If it is not configured, the default value is 200MB. The value must be >= 2 and satisfy >= 2 *(`localExpertNum`* `maxBS` *`epWorldSize`* Align512(Align32(2 *`H`) + 64) + (`K` + `sharedExpertNum`)* `maxBS` *Align512(2* `H`)). For `localExpertNum`, use the number of experts on the current MoE expert device, where Align512(x) = ((x + 512 - 1) / 512) *512 and Align32(x) = ((x + 32 - 1) / 32)* 32.
+    - `HCCL_BUFFSIZE`: Before calling this operator, check whether the value of the `HCCL_BUFFSIZE` environment variable is reasonable. This environment variable indicates the memory size occupied by a single communicator, in MB. If it is not configured, the default value is 200MB.
+        - When `commAlg` is "fullmesh_v1" or "", set `HCCL_BUFFSIZE` to satisfy `HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(Align32(2 * H) + 64) + (K + sharedExpertNum) * maxBS * Align512(2 * H)) * 1B`.
+        - When `commAlg` is "fullmesh_v2", set `HCCL_BUFFSIZE` to satisfy `HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * 480Align512(Align32(2 * H) + 64) + (K + sharedExpertNum) * maxBS * Align512(2 * H)) * 1B`.
+        - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, `Align32(x) = ((x + 32 - 1) / 32) * 32`, `1MB = 1024 * 1024B`. Use the number of local experts on the MoE expert card for `localExpertNum`. `HCCL_BUFFSIZE` must be at least 2. In the alignment formulas, `/` denotes integer division.
 
 - <term>Ascend 950DT products</term>:
     - Parameter constraints:
@@ -432,7 +435,7 @@ For details, see the following parameter description.
         - `commAlg`: The current version supports three input methods: "", "fullmesh_v1", and "fullmesh_v2".
             - "": Default value. Enables the fullmesh_v1 template.
             - "fullmesh_v1": Enables the fullmesh_v1 template.
-            - "fullmesh_v2": Enables the fullmesh_v2 template, which cannot be enabled when `BS` values differ across devices, when xActiveMask is used as input, or in special expert scenarios.
+            - "fullmesh_v2": Enables the fullmesh_v2 template.
         - `epRecvCountsOut`: The shape must be (`epWorldSize` * `localExpertNum`,).
         - `performanceInfoOptional`: Reserved parameter, not supported in the current version. Pass a null pointer.
         - Currently only 0 is supported for `expertShardType`, indicating that shared expert devices are placed before MoE expert devices.
@@ -440,11 +443,11 @@ For details, see the following parameter description.
     - Shape format description in the parameter description:
         - `H`: Hidden size. The value range is [1024, 8192].
         - `BS`: Batch sequence size, that is, the number of tokens finally output by the current device. The value range is (0, 512].
-    - `HCCL_BUFFSIZE`: Before calling this operator, check whether the value of the `HCCL_BUFFSIZE` environment variable is reasonable. This environment variable indicates the memory size occupied by a single communicator, in MB. If it is not configured, the default value is 200MB. The value must be >= 2 and satisfy:
-        - `commAlg` = "fullmesh_v1" or "": >= 2 * (`localExpertNum` * `maxBS` * `epWorldSize` * Align512(Align32(2 * `H`) + 64) + (`K` + `sharedExpertNum`) * `maxBS` * 480Align512(2 * `H`)).
-        - `commAlg` = "fullmesh_v2": >= 2 * (`localExpertNum` * `maxBS` * `epWorldSize` * 480Align512(Align32(2 * `H`) + 64) + (`K` + `sharedExpertNum`) * `maxBS` * 480Align512(2 * `H`)).
-        - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, and `Align32(x) = ((x + 32 - 1) / 32) * 32`.
-        - For <term>Ascend 950DT products</term>, when `quantMode` is 0 (non-quantization) and `scalesOptional` is not empty, the length of each token in the formula is `max(Align32(2 * H) + 64, Align32(Align32(2 * H) + 4 * H) + 16)`, and the result is aligned to 512B for fullmesh_v1 or 480B for fullmesh_v2.
+    - `HCCL_BUFFSIZE`: Before calling this operator, check whether the value of the `HCCL_BUFFSIZE` environment variable is reasonable. This environment variable indicates the memory size occupied by a single communicator, in MB. If it is not configured, the default value is 200MB.
+        - When `commAlg` is "fullmesh_v1" or "", set `HCCL_BUFFSIZE` to satisfy `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`.
+        - When `commAlg` is "fullmesh_v2", set `HCCL_BUFFSIZE` to satisfy `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * 480Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`.
+        - In the formulas, `D = Align32(2 * H) + max(64, Align32(S) + 32)`. When `quantMode` is 0 and `scalesOptional` is provided, `S` is the number of scale bytes per token. Otherwise, `S = 0`.
+        - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, `Align32(x) = ((x + 32 - 1) / 32) * 32`, `1MB = 1024 * 1024B`. Use the number of local experts on the MoE expert card for `localExpertNum`. `HCCL_BUFFSIZE` must be at least 2. In the alignment formulas, `/` denotes integer division.
 
 ## Invocation Instructions
 

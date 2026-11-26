@@ -87,9 +87,6 @@ constexpr int64_t FULLMESH_K_MAX_A5 = 32;
 constexpr int64_t FULLMESH_K_MAX_A3 = 12;
 constexpr size_t SYSTEM_NEED_WORKSPACE = 16UL * 1024UL * 1024UL;
 constexpr uint32_t WORKSPACE_ELEMENT_OFFSET = 512;
-// A5前缀和临时区位于recvCnt工作区之后，分为数据区和同步标记区
-constexpr uint64_t A5_CUMSUM_WS_FLAG_OFFSET = 32UL * 1024UL; // 32*32*32=32KB
-constexpr uint64_t A5_CUMSUM_WORKSPACE_MAX_CORE_NUM = 32U;
 constexpr uint32_t A5_CUMSUM_MAX_CORE_NUM = 8U;
 constexpr uint32_t SERIAL_MODE_BS_THRESHOLD = 32U;
 constexpr uint32_t SERIAL_MODE_EP_WORLD_SIZE_THRESHOLD = 16U;
@@ -1815,7 +1812,8 @@ static uint32_t AllToAllBasicUsedBuffer(const gert::TilingContext* context,
 
 static uint32_t CalculateAllToAllInputBuffer(const gert::TilingContext* context,
                                              const MoeDistributeDispatchV2TilingData& tilingData, uint32_t quantMode,
-                                             uint32_t hSize, const char* nodeName, const DispatchV2Config& config)
+                                             uint32_t hSize, uint32_t hOutSizeAlign, const char* nodeName,
+                                             const DispatchV2Config& config)
 {
     const bool isArch22 = mc2tiling::GetNpuArch(context) == Ops::Base::DAV_2201;
     const bool isArch35 = mc2tiling::GetNpuArch(context) == Ops::Base::DAV_3510;
@@ -1840,8 +1838,10 @@ static uint32_t CalculateAllToAllInputBuffer(const gert::TilingContext* context,
         const auto& info = tilingData.moeDistributeDispatchV2Info;
         hAlignSize = CeilAlign(hAlignSize + info.scalesCol * info.scalesTypeSize, UB_ALIGN, nodeName);
     }
-    if (xDesc->GetDataType() == expandXDesc->GetDataType()) {
-        hAlignSize += UB_ALIGN;
+    if (inputType == expandXDesc->GetDataType()) {
+        hAlignSize = isArch35 && quantMode == static_cast<uint32_t>(QuantModeA5::NON_QUANT) ?
+                         CeilAlign(hOutSizeAlign, SPLIT_BLOCK_DATA_SIZE, nodeName) :
+                         hAlignSize + UB_ALIGN;
     }
     return hAlignSize * BUFFER_NUM;
 }
@@ -1902,8 +1902,8 @@ static uint32_t AllToAllBasicUsedBuffer(const gert::TilingContext* context,
         uint32_t elasticInfoSizeAlign = CeilAlign(elasticInfoSize, UB_ALIGN, nodeName);
         UbForBasic = UbForBasic + elasticInfoSizeAlign; // elasticInfoBuf_
     }
-    UbForBasic += CalculateAllToAllInputBuffer(context, tilingData, quantMode, hSize, nodeName, config);
     UbForBasic += CalculateAllToAllOutputBuffer(context, tilingData, quantMode, hSize, hOutSizeAlign, nodeName, config);
+    UbForBasic += CalculateAllToAllInputBuffer(context, tilingData, quantMode, hSize, hOutSizeAlign, nodeName, config);
     expertIdsBufSize = CeilAlign(expertIdsCnt * sizeof(int32_t), SIZE_ALIGN_256, nodeName);
     UbForBasic = UbForBasic + expertIdsBufSize; // expertIdsBuf_
     return UbForBasic;
@@ -2806,13 +2806,8 @@ static ge::graphStatus SetWorkSpace(gert::TilingContext* context, const char* no
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + static_cast<size_t>(WORKSPACE_ELEMENT_OFFSET * aivNum * aivNum);
     NpuArch npuArch = mc2tiling::GetNpuArch(context);
-    if (npuArch == Ops::Base::DAV_3510 || npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202) {
-        // A5为前缀和同步标记预留空间
-        workSpaces[0] +=
-            A5_CUMSUM_WS_FLAG_OFFSET + static_cast<uint64_t>(aivNum) * A5_CUMSUM_WORKSPACE_MAX_CORE_NUM * UB_ALIGN_VAL;
-        if (npuArch == Ops::Base::DAV_3510) {
-            workSpaces[0] += FULLMESH_BS_SLICE_WS_BYTES;
-        }
+    if (npuArch == Ops::Base::DAV_3510) {
+        workSpaces[0] += FULLMESH_BS_SLICE_WS_BYTES;
     }
     return ge::GRAPH_SUCCESS;
 }

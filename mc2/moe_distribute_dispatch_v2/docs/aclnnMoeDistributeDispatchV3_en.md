@@ -524,7 +524,7 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
     <summary><term>Ascend 950PR&950DT products</term>:</summary>
 
     - dynamicScalesOut has output when quantMode is 2, 3, 4, or 5. It also has output when quantMode is 0 and the data type of `x` is `HIFLOAT8`, `FLOAT8_E5M2`, `FLOAT8_E4M3FN`, `FLOAT4_E2M1`, or `FLOAT4_E1M2`.
-    - commAlg supports "", "fullmesh_v1", "fullmesh_v2", and "hierarchy". "hierarchy" uses intra-server UB Memory and inter-server RoCE communication.
+    - commAlg supports "", "fullmesh_v1", "fullmesh_v2", and "hierarchy". "" is the default and enables the fullmesh_v1 template. "hierarchy" uses intra-server UB Memory and inter-server RoCE communication.
     - xActiveMaskOptional must be a 1D or 2D Tensor (1D: shape (BS, ); 2D: shape (BS, K)). For 1D, true must be placed before false. For 2D, a token does not participate in communication if all its K values are false.
     - expertScalesOptional can be a valid Tensor or a null pointer. If a valid Tensor is passed, the expertScales expert weight feature is enabled. The valid Tensor is a 2D Tensor with shape (BS, K). If a null pointer is passed, the expertScales expert weight feature is disabled. Empty Tensors are not supported.
     - epWorldSize: value range [2, 1024].
@@ -738,13 +738,21 @@ aclnnStatus aclnnMoeDistributeDispatchV3(
           - commAlg is set to "fullmesh": when the data type of `x` is `INT32`, the set size must be >= 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* (H \* sizeof(int32) + 32B) + 2MB); for other data types, the set size must be >= 2 \* (BS \* epWorldSize \* min(localExpertNum, K) \* H \* sizeof(uint16) + 2MB).
           - commAlg configured as "hierarchy": Set size requirement to ≥ (`moeExpertNum` + `epWorldSize` / 4) \* Align512(`maxBS` \* (`H` \* 2 + 16 \* Align8(`K`))) \* 1B + 8MB, where Align8(x) = ((x + 8 - 1) / 8) \* 8, Align512(x) = ((x + 512 - 1) / 512) \* 512.
       <!-- end id16 -->
-      <!-- npu="950,A3" id17 -->
-      - <term>Atlas A3 products</term>, Ascend 950PR&950DT products:
+      <!-- npu="A3" id17 -->
+      - <term>Atlas A3 products</term>:
           - Within the EP communication domain, when commAlg is "fullmesh_v1" or an empty string or a null pointer: Set size requirement to a value that satisfies ≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* Align512(2 \* H)).
           - Within the ep communicator, when commAlg is "fullmesh_v2": the set size must be ≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* 480Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* Align512(2 \* H)).
           - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, and `Align32(x) = ((x + 32 - 1) / 32) * 32`.
 
       <!-- end id17 -->
+
+      <!-- npu="950" id35 -->
+      - <term>Ascend 950PR&950DT products</term>:
+          - When `commAlg` is "fullmesh_v1", an empty string, or a null pointer, set `HCCL_BUFFSIZE` to satisfy `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`.
+          - When `commAlg` is "fullmesh_v2", set `HCCL_BUFFSIZE` to satisfy `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * 480Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`.
+          - In the formulas, `D = Align32(2 * H) + max(64, Align32(S) + 32)`. When `quantMode` is 0 and `scalesOptional` is provided, `S` is the number of scale bytes per token. Otherwise, `S = 0`.
+          - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, `Align32(x) = ((x + 32 - 1) / 32) * 32`, `1MB = 1024 * 1024B`. Use the number of local experts on the MoE expert card for `localExpertNum`. `HCCL_BUFFSIZE` must be at least 2.
+      <!-- end id35 -->
 
   - **HCCL_INTRA_PCIE_ENABLE** and **HCCL_INTRA_ROCE_ENABLE**:
 

@@ -733,10 +733,9 @@ aclnnStatus aclnnMoeDistributeDispatchV2(
           <!-- end id17 -->
           <!-- npu="950" id18 -->
           - <term>Ascend 950DT系列产品</term>：
-              - 当commAlg为"fullmesh_v1"或空字符串或空指针时：设置大小要求(≥ 2)且满足(≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* 480Align512(2 \* H)))（`localExpertNum`需使用MoE专家卡的本卡专家数；`Align512(x) = ((x + 512 - 1) / 512) * 512`；`Align32(x) = ((x + 32 - 1) / 32) * 32`）。不支持TP通信域。
-              - 当commAlg为"fullmesh_v2"时：设置大小要求(≥ 2)且满足(≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* 480Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* 480Align512(2 \* H)))（`localExpertNum`需使用MoE专家卡的本卡专家数；`Align32(x) = ((x + 32 - 1) / 32) * 32`）。不支持TP通信域。
-              - 其中`480Align512(x) = ((x + 480 - 1) / 480) * 512`，`Align512(x) = ((x + 512 - 1) / 512) * 512`，`Align32(x) = ((x + 32 - 1) / 32) * 32`。
-              - 当`quantMode`为0（非量化）且`scalesOptional`非空时，式中每个token的长度取`max(Align32(2 * H) + 64, Align32(Align32(2 * H) + 4 * H) + 16)`，再按上述规则对齐。
+              - EP通信域内，`HCCL_BUFFSIZE`取值不小于2，且满足 `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`。
+              - 式中`D = Align32(2 * H) + max(64, Align32(S) + 32)`。当`quantMode`为0且`scalesOptional`非空时，`S`为单个token的scale字节数，其余场景`S = 0`。
+              - 其中`480Align512(x) = ((x + 480 - 1) / 480) * 512`，`Align512(x) = ((x + 512 - 1) / 512) * 512`，`Align32(x) = ((x + 32 - 1) / 32) * 32`，`1MB = 1024 * 1024B`。`localExpertNum`需使用MoE专家卡的本卡专家数。不支持TP通信域。
 
           <!-- end id18 -->
 

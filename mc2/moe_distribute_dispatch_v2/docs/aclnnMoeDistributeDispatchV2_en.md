@@ -711,7 +711,10 @@ aclnnStatus: return status code. For details, see [aclnn Return Codes](../../../
               - In the ep communication domain: the size requirement is (≥ 2) and must satisfy (≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* Align512(Align32(2 \* H) + 64) + (K +   sharedExpertNum) \* maxBS \* Align512(2 \* H))) (`localExpertNum` must use the number of local experts on the MoE expert card; `Align512(x) = ((x + 512 - 1) /   512) * 512`; `Align32(x) = ((x + 32 - 1) / 32) * 32`). Currently, the TP communication domain is not supported.
           <!-- end id17 -->
           <!-- npu="950" id18 -->
-          - <term>Ascend 950PR&950DT products</term>: The size set for the ep communication domain must be ≥ 2 and satisfy (≥ 2 \* (localExpertNum \* maxBS \* epWorldSize \* Align512(Align32(2 \* H) + 64) + (K + sharedExpertNum) \* maxBS \* Align512(2 \* H))) (`localExpertNum` must be the number of local experts on each MoE expert card; `Align512(x) = ((x + 512 - 1) / 512) * 512`; `Align32(x) = ((x + 32 - 1) / 32) * 32`). TP communication domain is not supported.
+          - <term>Ascend 950PR&950DT products</term>:
+              - In the EP communication domain, set `HCCL_BUFFSIZE` to at least 2 and satisfy `2 * HCCL_BUFFSIZE * 1MB >= 2 * (localExpertNum * maxBS * epWorldSize * Align512(D) + (K + sharedExpertNum) * maxBS * 480Align512(2 * H)) * 1B + 1MB + epWorldSize * 1024B`.
+              - In the formula, `D = Align32(2 * H) + max(64, Align32(S) + 32)`. When `quantMode` is 0 and `scalesOptional` is provided, `S` is the number of scale bytes per token. Otherwise, `S = 0`.
+              - Where `480Align512(x) = ((x + 480 - 1) / 480) * 512`, `Align512(x) = ((x + 512 - 1) / 512) * 512`, `Align32(x) = ((x + 32 - 1) / 32) * 32`, and `1MB = 1024 * 1024B`. Use the number of local experts on the MoE expert card for `localExpertNum`. The TP communication domain is not supported.
 
           <!-- end id18 -->
 
