@@ -104,7 +104,7 @@
 
 ```python
 
-cann_ops_transformer.quant_flash_attn_metadata(
+cann_ops_transformer.ops.quant_flash_attn_metadata(
     num_heads_q,
     num_heads_kv,
     head_dim,
@@ -131,7 +131,7 @@ cann_ops_transformer.quant_flash_attn_metadata(
 <!-- end id9 -->
 
 ```python
-cann_ops_transformer.quant_flash_attn(
+cann_ops_transformer.ops.quant_flash_attn(
     q,
     k,
     v,
@@ -302,7 +302,14 @@ cann_ops_transformer.quant_flash_attn(
 
 ### 版本配套要求
 
-底层沿用`aclnnQuantFlashAttnGetWorkspaceSize`和`aclnnQuantFlashAttn`接口名称，其中工作空间查询接口在`metadata`后新增三个尾块参数。该签名与引入高精尾块前的接口不具备二进制兼容性。
+底层沿用`aclnnQuantFlashAttnGetWorkspaceSize`和`aclnnQuantFlashAttn`接口名称，其中工作空间查询接口在`metadata`后新增三个尾块参数。该签名与引入高精尾块前的接口不具备二进制兼容性，变更前后对比如下：
+
+```cpp
+// 变更前
+aclnnQuantFlashAttnGetWorkspaceSize(..., attn_mask, metadata, quant_mode, ...);
+// 变更后（metadata后依次新增v_tail、block_table_tail、seqused_v_tail）
+aclnnQuantFlashAttnGetWorkspaceSize(..., attn_mask, metadata, v_tail, block_table_tail, seqused_v_tail, quant_mode, ...);
+```
 
 升级时须配套编译、安装custom包和`cann_ops_transformer` Torch扩展，并在新Python进程中加载。确认`ASCEND_CUSTOM_OPP_PATH`、`LD_LIBRARY_PATH`和扩展构建缓存对应的实际加载产物均为目标版本。
 
@@ -438,7 +445,7 @@ cann_ops_transformer.quant_flash_attn(
                 <li>FP8场景支持NTD</li>
             </ul>
         </td>
-        <td rowspan="4">当前不支持不传入，未传入将发出拦截报警</td>
+        <td rowspan="4">可选属性，不传入时使用默认值BSND</td>
         <td rowspan="4">无</td>
         <td rowspan="4">无</td>
     </tr>
@@ -871,7 +878,7 @@ k_descale/v_descale shape匹配关系表：
 
 > [!NOTE]
 >
-> MxFP8场景下，v_descale在TND（非Paged Attention）场景下，shape中第一维KV_T/64并非简单整数除法，而是各batch实际KV序列长度按64向上取整后的累加和，即 Σ ceil(cu_seqlens_kv[b+1] - cu_seqlens_kv[b], 64)，其中cu_seqlens_kv为累积序列长度。因此各batch的KV序列长度无需严格64对齐。
+> MxFP8场景下，v_descale在TND（非Paged Attention）场景下，shape中第一维KV_T/64并非简单整数除法，而是各batch实际KV序列长度按64向上取整后的累加和，即 `Σ ceil((cu_seqlens_kv[b+1] - cu_seqlens_kv[b]) / 64)`，其中cu_seqlens_kv为累积序列长度。因此各batch的KV序列长度无需严格64对齐。
 
 q/k/v/attn_out shape匹配关系表：<a name="qkv_attn_out_shape匹配关系表"></a>
 
@@ -1237,7 +1244,7 @@ mask_mode参数解释：
                 <ul>
                     <li>tensor_type仅支持int32</li>
                     <li>tensor_shape为(B, Bn)</li>
-                    <li>值只能为正整数</li>
+                    <li>值仅支持非负整数</li>
                 </ul>
             </td>
             <td>可选参数</td>
@@ -1717,7 +1724,7 @@ mask_mode参数解释：
   KV_N = 8
   D = 128
 
-  # BSND排布: q为(B, Q_S, Q_N, D), k/v为(B, KV_S, KV_N, D)
+  # BSND排布：q为(B, Q_S, Q_N, D), k/v为(B, KV_S, KV_N, D)
   q = torch.randn(B, Q_S, Q_N, D, dtype=dtype, device="npu")
   k = torch.randn(B, KV_S, KV_N, D, dtype=dtype, device="npu")
   v = torch.randn(B, KV_S, KV_N, D, dtype=dtype, device="npu")
@@ -1727,7 +1734,7 @@ mask_mode参数解释：
   k_descale = torch.randn(B, KV_S, KV_N, D // 64, 2, dtype=torch.float8_e8m0, device="npu")
   v_descale = torch.randn(B, KV_S // 64, KV_N, D, 2, dtype=torch.float8_e8m0, device="npu")
 
-  # BSND排布不支持cu_seqlens, 需传入seqused_q/seqused_kv
+  # BSND排布不支持cu_seqlens，需传入seqused_q/seqused_kv
   seqused_q = torch.full((B,), Q_S, dtype=torch.int32, device="npu")
   seqused_kv = torch.full((B,), KV_S, dtype=torch.int32, device="npu")
 
