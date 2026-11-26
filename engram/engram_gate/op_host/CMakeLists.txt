@@ -44,4 +44,8 @@ endif()
 if(NOT BUILD_OPS_RTY_KERNEL)
     add_op_to_compiled_list()
     add_modules_sources(OPTYPE engram_gate ACLNNTYPE aclnn)
+    if(TARGET ${OPHOST_NAME}_infer_obj)
+        target_sources(${OPHOST_NAME}_infer_obj PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/../op_graph/engram_gate_graph_infer.cpp)
+    endif()
 endif()
