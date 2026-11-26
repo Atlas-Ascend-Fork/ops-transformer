@@ -79,6 +79,98 @@ def _moe_gating_top_k_backward_torch(
     return grad_x.to(grad_y.dtype)
 
 
+def _pre_compare_normalize_zeros(*arrays):
+    """±0 符号差异归一（入参约定：前半 NPU 输出、后半 golden，见 ttk invoke_pre_compare）。
+
+    -0.0 与 +0.0 在 IEEE754 下数值相等，其符号由 scatter 的加/写语义与零的
+    乘法链传播决定（如 (+0)+(-0)=+0、(-0)*(-0)=+0），不构成精度差异；
+    binary_equal 按字节比较会误拦，故比对前把两侧数值为零（含 -0.0）的
+    位置统一为 +0.0。参考 moe_finalize_routing_v2_grad 的 pre_compare 先例。
+    """
+    half = len(arrays) // 2
+    for arr in list(arrays[:half]) + list(arrays[half:]):
+        if arr is None:
+            continue
+        try:
+            mask = arr == 0
+            if mask.any():
+                arr[mask] = 0
+        except Exception:
+            continue
+
+
+# 浮点输出走生态标准 mix_tolerance：
+# 1) renorm/normType=1 路径含除法与 K 项归约，kernel lane 树状求和与 golden 顺序
+#    求和在 K>2 时存在 1 ULP 级合法编排差异，binary_equal 不可达且数据相关；
+# 2) softmax 反传在远离 top-k 位置的输出是数学上近零的舍入残留，双实现各自舍入后
+#    相对误差呈 O(1)，相对类判据(stat_rel_err)在近零处误拦，mix_tolerance 的
+#    atol 兜底可正确覆盖（|ac-gc|≈1e-9 << atol(fp32)=2^-16）；
+# 3) ±0.0 符号差异由 pre_compare 归一，isclose 语义下亦天然等价。
+_TOLERANCE = {
+    "float32": {"standard": "mix_tolerance"},
+    "float16": {"standard": "mix_tolerance"},
+    "bfloat16": {"standard": "mix_tolerance"},
+}
+
+
+# XPU 三方参考（cross_check）：本算子无原生三方 API，按正向 moe_gating_top_k 的
+# 先例用类形式包装 torch 组合实现，服务端在 XPU（GPU/CPU）上按名收输入执行。
+# 三通路参数名分别对齐 kernel golden / aclnn API / torch_npu API。
+class _KernelTorchImpl:
+    def __call__(
+        self,
+        x_norm,
+        grad_y,
+        expert_idx,
+        renorm=0,
+        norm_type=0,
+        routed_scaling_factor=1.0,
+        eps=1e-20,
+        **kwargs,
+    ):
+        grad_x = _moe_gating_top_k_backward_torch(
+            x_norm, grad_y, expert_idx, renorm, norm_type, routed_scaling_factor, eps
+        )
+        return [grad_x]
+
+
+class _AclnnTorchImpl:
+    def __call__(
+        self,
+        xNorm,
+        gradY,
+        expertIdx,
+        renorm=0,
+        normType=0,
+        routedScalingFactor=1.0,
+        eps=1e-20,
+        out=None,
+        **kwargs,
+    ):
+        grad_x = _moe_gating_top_k_backward_torch(
+            xNorm, gradY, expertIdx, renorm, normType, routedScalingFactor, eps
+        )
+        return [grad_x]
+
+
+class _E2eTorchImpl:
+    def __call__(
+        self,
+        x_norm,
+        grad_y,
+        expertIdx,
+        renorm=0,
+        norm_type=0,
+        routed_scaling_factor=1.0,
+        eps=1e-20,
+        **kwargs,
+    ):
+        grad_x = _moe_gating_top_k_backward_torch(
+            x_norm, grad_y, expertIdx, renorm, norm_type, routed_scaling_factor, eps
+        )
+        return [grad_x]
+
+
 class MoeGatingTopKBackwardKernelSpec:
     """Kernel / GEIR 流程 — golden 收到 numpy.ndarray，third_party 收到 torch.Tensor"""
 
@@ -111,8 +203,9 @@ class MoeGatingTopKBackwardKernelSpec:
         # 所以必须在最外层用原始 numpy 的 grad_y.dtype 转回 bf16/fp16
         return [out.numpy().astype(grad_y.dtype)]
 
-    third_party = {"torch": "torch.moe_gating_top_k_backward"}
-    tolerance = {"float32": {"standard": "binary_equal"}}
+    third_party = {"torch": _KernelTorchImpl}
+    tolerance = _TOLERANCE
+    pre_compare = _pre_compare_normalize_zeros
 
 
 class MoeGatingTopKBackwardAclnnSpec:
@@ -141,8 +234,9 @@ class MoeGatingTopKBackwardAclnnSpec:
         )
         return [grad_x]
 
-    third_party = {"torch": "torch.moe_gating_top_k_backward"}
-    tolerance = {"float32": {"standard": "binary_equal"}}
+    third_party = {"torch": _AclnnTorchImpl}
+    tolerance = _TOLERANCE
+    pre_compare = _pre_compare_normalize_zeros
 
 
 class MoeGatingTopKBackwardTorchSpec:
@@ -170,8 +264,9 @@ class MoeGatingTopKBackwardTorchSpec:
         )
         return [grad_x]
 
-    third_party = {"torch": "torch.moe_gating_top_k_backward"}
-    tolerance = {"float32": {"standard": "binary_equal"}}
+    third_party = {"torch": _E2eTorchImpl}
+    tolerance = _TOLERANCE
+    pre_compare = _pre_compare_normalize_zeros
 
 
 __spec__ = {
