@@ -298,10 +298,38 @@ __aicore__ inline void ReduceMaxSmall(const LocalTensor<float>& dstLocal, const 
         PipeBarrier<PIPE_V>();
     }
     if (unlikely(tailNum != 0)) {
-        WholeReduceMax(workLocal[repeat], srcLocal[count - tailNum], tailNum, 1, 1, 1, VEC_LEN_ONCE_REPEAT_BLOCK,
-                       ReduceOrder::ORDER_ONLY_VALUE);
-        PipeBarrier<PIPE_V>();
-        repeat += 1;
+        // tailNum 非 16 倍数时 WholeReduceMax 的 mask/块粒度会纳入口界外未初始化数据,
+        // 且 final 归约读"标量写入的 workLocal[repeat]"存在流水可见性问题(实测非确定虚大/NaN)。
+        // 结构性规避:主归约结果 workLocal[0..repeat) 由向量写,尾块与最终合并全部走标量,
+        // 向量指令不再读任何标量写/未初始化的内存
+        if ((tailNum & (ALIGN_16_ELE - 1)) == 0) {
+            WholeReduceMax(workLocal[repeat], srcLocal[count - tailNum], tailNum, 1, 1, 1, VEC_LEN_ONCE_REPEAT_BLOCK,
+                           ReduceOrder::ORDER_ONLY_VALUE);
+            PipeBarrier<PIPE_V>();
+            WholeReduceMax(dstLocal, workLocal, repeat + 1, 1, 1, 1, VEC_LEN_ONCE_REPEAT_BLOCK,
+                           ReduceOrder::ORDER_ONLY_VALUE);
+        } else {
+            // 等 V 流水(主 WholeReduceMax 与上游 Abs)写完成后再标量读取
+            GmmsqSetWaitFlag<HardEvent::V_S>();
+            // repeat==0 时 workLocal 尚无任何向量写出,以尾块首元素作初值,避免读未初始化 UB
+            float maxVal = (repeat > 0) ? workLocal.GetValue(0) : srcLocal.GetValue(count - tailNum);
+            for (uint32_t i = 1; i < repeat; i++) {
+                float val = workLocal.GetValue(i);
+                if (val > maxVal) {
+                    maxVal = val;
+                }
+            }
+            for (uint32_t i = (repeat > 0) ? 0 : 1; i < tailNum; i++) {
+                float val = srcLocal.GetValue(count - tailNum + i);
+                if (val > maxVal) {
+                    maxVal = val;
+                }
+            }
+            dstLocal.SetValue(0, maxVal);
+            // 标量写 dst 后,后续向量指令(如 ReduceMaxTemplate 的 Max 合并)读取前需 S->V 同步
+            GmmsqSetWaitFlag<HardEvent::S_V>();
+        }
+        return;
     }
     WholeReduceMax(dstLocal, workLocal, repeat, 1, 1, 1, VEC_LEN_ONCE_REPEAT_BLOCK, ReduceOrder::ORDER_ONLY_VALUE);
 }
@@ -342,9 +370,28 @@ __aicore__ inline void CastFp32ToInt8Template(LocalTensor<int8_t>& dstLocal, Loc
 {
     Cast(srcLocal[srcOffset].ReinterpretCast<half>(), srcLocal[srcOffset], RoundMode::CAST_RINT, count);
     PipeBarrier<PIPE_V>();
-    if ((dstOffset & MOD_32_MASK) == 0) {
+    if ((count & MOD_16_MASK) != 0 || (dstOffset & MOD_16_MASK) != 0) {
+        // count 非 16 倍或 dstOffset 非 16 对齐(N 偶数但非 32 倍时 loopIdx*tokenLen/2 可为 8 对齐)时,
+        // Cast 直写 int8 目标不可靠(实测 N%32!=0 时零带/错值),全量分块经 oneBlockWorkspace
+        // 标量写入兜底,覆盖 count 内全部元素。
+        // 注意:分块源必须在 half 视图上按 done(half 元素数)前进,在 float 视图上加 done 会前进
+        // 2*done 个 half,导致第二块起读错地址
+        LocalTensor<half> srcHalf = srcLocal[srcOffset].ReinterpretCast<half>();
+        for (int32_t done = 0; done < count; done += ALIGN_16_ELE) {
+            int32_t segLen = (count - done < static_cast<int32_t>(ALIGN_16_ELE)) ? (count - done) :
+                                                                                   static_cast<int32_t>(ALIGN_16_ELE);
+            Cast(oneBlockWorkspace, srcHalf[done], RoundMode::CAST_RINT, segLen);
+            PipeBarrier<PIPE_ALL>();
+            for (int32_t i = 0; i < segLen; i++) {
+                int8_t temp = oneBlockWorkspace.GetValue(i);
+                dstLocal.SetValue(dstOffset + done + i, temp);
+            }
+            PipeBarrier<PIPE_ALL>();
+        }
+    } else if ((dstOffset & MOD_32_MASK) == 0) {
         Cast(dstLocal[dstOffset], srcLocal[srcOffset].ReinterpretCast<half>(), RoundMode::CAST_RINT, count);
-    } else if ((dstOffset & MOD_16_MASK) == 0) {
+    } else {
+        // dstOffset 16 对齐但非 32 对齐: 首 16 元素经 workspace 标量写入,其余可直写
         Cast(dstLocal[dstOffset + ALIGN_16_ELE], srcLocal[srcOffset + ALIGN_8_ELE].ReinterpretCast<half>(),
              RoundMode::CAST_RINT, count - ALIGN_16_ELE);
         PipeBarrier<PIPE_V>();

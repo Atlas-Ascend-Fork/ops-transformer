@@ -90,6 +90,15 @@ ge::graphStatus GroupedMatmulSwigluQuantV2FusionTiling::ParseInputAndAttr()
         ubFactorDimx_ = 1;
     }
 
+    // kernel 向量通路按 32 元素块粒度处理 N,非 32 倍 N 会错值。出于兼容性考虑不拦截,
+    // 但必须显式告警用户输出不可信,建议将 N 对齐到 32 的倍数
+    if (n_ % SWIGLU_N_ALIGN_LIMIT != 0) {
+        OP_LOGW(context_->GetNodeName(),
+                "GMM_SWIGLU_QUANT V2 FUSION TILING: n is not a multiple of 32 (now n = %lld). The output may be "
+                "unreliable in this case. It is recommended to align n to a multiple of 32.",
+                static_cast<long long>(n_));
+    }
+
     auto platformInfo = context_->GetPlatformInfo();
     if (platformInfo == nullptr) {
         auto compileInfoPtr = context_->GetCompileInfo<GMMSwigluV2CompileInfo>();

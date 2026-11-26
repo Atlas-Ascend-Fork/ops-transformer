@@ -283,6 +283,16 @@ ge::graphStatus GroupedMatmulSwigluQuantV2BaseTiling::ParseInputAndAttr()
 
     groupNum_ = groupListShape->GetStorageShape().GetDim(0);
 
+    // kernel 向量通路(quant/scale 计算/搬运)按 32 元素块粒度处理 tokenLen=N,
+    // N 非 32 倍时输出会错值/NaN(实测 N=2064/2104/2128/1072)。出于兼容性考虑不拦截,
+    // 但必须显式告警用户输出不可信,建议将 N 对齐到 32 的倍数
+    if (n_ % SWIGLU_N_ALIGN_LIMIT != 0) {
+        OP_LOGW(context_->GetNodeName(),
+                "GMM_SWIGLU_QUANT V2 TILING: n is not a multiple of 32 (now n = %lld). The output may be "
+                "unreliable in this case. It is recommended to align n to a multiple of 32.",
+                static_cast<long long>(n_));
+    }
+
     if (isA4W4_) {
         maxProcessRowNum_ = CalMaxRowInUbA4W4(compileInfoPtr->ubSize_, n_);
     } else if (isA8W4MSD_) {

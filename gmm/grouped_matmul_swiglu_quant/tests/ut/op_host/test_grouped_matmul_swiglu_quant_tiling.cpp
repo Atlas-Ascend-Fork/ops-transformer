@@ -125,3 +125,28 @@ TEST_F(GroupedMatmulSwigluQuantTiling_TEST, grouped_matmul_swiglu_quant_tiling_s
     std::vector<size_t> expectWorkspaces = {83885056};
     ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
 }
+
+// N 非 32 倍时 host 侧不拦截(兼容性考虑),告警放行,tiling 正常执行返回 GRAPH_SUCCESS
+TEST_F(GroupedMatmulSwigluQuantTiling_TEST, grouped_matmul_swiglu_quant_tiling_n_not_multiple_of_32_pass_01)
+{
+    GMMSwigluCompileInfo_ compileInfo;
+    // ND weight [E, K, N] 取 dim2 作 N, N = 2064 非 32 倍(2064 % 32 = 16), 告警后应放行
+    gert::TilingContextPara tilingContextPara(
+        "GroupedMatmulSwigluQuant",
+        {
+            {{{1024, 256}, {16, 256}}, ge::DT_INT8, ge::FORMAT_ND},           // x
+            {{{16, 256, 2064}, {16, 256, 2064}}, ge::DT_INT8, ge::FORMAT_ND}, // weight
+            {{{16, 1032}, {16, 1032}}, ge::DT_FLOAT, ge::FORMAT_ND},          // weightScale
+            {{{1024}, {1024}}, ge::DT_FLOAT, ge::FORMAT_ND},                  // xscale
+            {{{16, 4096}, {16, 4096}}, ge::DT_FLOAT, ge::FORMAT_ND},          // weightAssistMatrix
+            {{{16}, {16}}, ge::DT_FLOAT, ge::FORMAT_ND},                      // groupList
+        },
+        {
+            {{{1024, 2064}, {1024, 2064}}, ge::DT_INT8, ge::FORMAT_ND}, // y
+            {{{1024}, {1024}}, ge::DT_FLOAT, ge::FORMAT_ND}             // yscale
+        },
+        {{"is_enable_weight_assistance_matri", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+         {"dequant_mod", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
+        &compileInfo);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS);
+}
