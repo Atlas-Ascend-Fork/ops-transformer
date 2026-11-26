@@ -159,9 +159,9 @@ struct ScheduleContext {
     ControlArea control;
     AttentionArea attention;
     FfnArea ffn;
-    int8_t reserve6[384]; // Padding to 1024 bytes.
+    int8_t reserve6[384]; // Padding to 1KB.
 };
-static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1024 bytes");
+static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1KB");
 #pragma pack(pop)
 
 int main()
@@ -183,23 +183,23 @@ int main()
     scheduleContext.ffn.polling_index = 0;
 
     // 属性参数
-    int64_t expertNum = 8;                                  // 每层专家数 × layer_num
-    int64_t A = scheduleContext.common.session_num;         // Attention worker数量
-    int64_t BS = scheduleContext.common.micro_batch_size;   // micro batch size
-    int64_t K = scheduleContext.common.selected_expert_num; // topK + 1
-    int64_t H = 4096;                                       // hidden size
+    int64_t expertNum = 8;                                       // 每层专家数 × layer_num
+    int64_t A = scheduleContext.common.session_num;              // Attention worker数量
+    int64_t BS = scheduleContext.common.micro_batch_size;        // micro batch size
+    int64_t KPlus1 = scheduleContext.common.selected_expert_num; // topK + 1
+    int64_t H = 4096;                                            // hidden size
     scheduleContext.common.attn_to_ffn_token_size = H * sizeof(int16_t);
     scheduleContext.common.ffn_to_attn_token_size = H * sizeof(int16_t);
     scheduleContext.ffn.out_num = A;
-    int64_t Y = A * BS * K;
-    std::vector<int64_t> maxOutShapeValue = {A, BS, K, H};
+    int64_t Y = A * BS * KPlus1;
+    std::vector<int64_t> maxOutShapeValue = {A, BS, KPlus1, H};
     int64_t tokenDtype = 0;   // FP16
     int64_t needSchedule = 0; // 仅做batching
     int64_t layerNum = 1;
 
     // 初始化Ffn token_info_buf
     uint64_t flagAndLayerIdSize = sizeof(FfnDataDesc);
-    uint64_t tokenInfoSize = (sizeof(int32_t) * static_cast<uint64_t>(K) * BS + flagAndLayerIdSize) *
+    uint64_t tokenInfoSize = (sizeof(int32_t) * static_cast<uint64_t>(KPlus1) * BS + flagAndLayerIdSize) *
                              static_cast<uint64_t>(scheduleContext.common.micro_batch_num) *
                              static_cast<uint64_t>(scheduleContext.common.session_num);
     scheduleContext.ffn.token_info_buf_size = tokenInfoSize;
@@ -215,7 +215,7 @@ int main()
         for (uint32_t m = 0; m < scheduleContext.common.micro_batch_num; ++m) {
             *pInt++ = 1; // flag
             *pInt++ = 0; // layer_id
-            for (uint32_t i = 0; i < BS * K; ++i) {
+            for (uint32_t i = 0; i < BS * KPlus1; ++i) {
                 *pInt++ = static_cast<int32_t>(i % scheduleContext.common.expert_num); // expert_id
             }
         }
