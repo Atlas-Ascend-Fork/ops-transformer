@@ -6,12 +6,98 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-"""KDA input generation and explicit invalid-input fixtures for TTK."""
+"""Unified KDA input generation and invalid-input fixtures for arch35/arch92."""
 
 import json
 import re
 
 import torch
+
+from .arch_config import arch_profile, architecture, get_ttk_switches
+
+INPUT_DISTRIBUTIONS = ("uniform", "normal")
+
+
+def _resolve_seed(attributes):
+    switches = get_ttk_switches()
+    cli_seed = getattr(switches, "random_seed", None) if switches is not None else None
+    if cli_seed is not None:
+        return int(cli_seed)
+    return int(attributes.get("seed", 101))
+
+
+def _resolve_input_dist(attributes):
+    switches = get_ttk_switches()
+    cli_dist = (
+        getattr(switches, "input_distribution", None) if switches is not None else None
+    )
+    raw = cli_dist if cli_dist is not None else attributes.get("input_dist", "uniform")
+    dist = str(raw).strip().lower()
+    if dist not in INPUT_DISTRIBUTIONS:
+        raise ValueError(
+            f"FlashKDA: unsupported input_dist {raw!r}; expected one of {INPUT_DISTRIBUTIONS}"
+        )
+    return dist
+
+
+def _capacity(config, cores):
+    batch, length, heads = (config[k] for k in ("batch_size", "seqlens", "nheads_v"))
+    chunks = (length + 63) // 64
+    entries = chunks + batch - 1 if config["layout"] == "TND" else batch * chunks
+    return max(12 + (15 + 4 * cores) * entries, 11 + cores + 6 * batch * heads + batch)
+
+
+def fwd_capacity(config, arch=None):
+    """Forward-only native metadata capacity for the active architecture."""
+    return _capacity(config, arch_profile(arch)[2])
+
+
+def capacity(config, arch=None):
+    """Public metadata capacity for the active architecture (includes backward suffix when enable_grad=True)."""
+    extra = (
+        (8 + config["batch_size"] * config["nheads_v"] * 7)
+        if config.get("enable_grad", not config["inference"])
+        else 0
+    )
+    return fwd_capacity(config, arch=arch) + extra
+
+
+def transport_capacity(config):
+    """CSV transport reserves the 64-core upper bound on both architectures."""
+    extra = (
+        (8 + config["batch_size"] * config["nheads_v"] * 7)
+        if config.get("enable_grad", not config["inference"])
+        else 0
+    )
+    return _capacity(config, 64) + extra
+
+
+def is_placeholder_metadata(value):
+    """Return True when metadata is absent or an unpopulated zero placeholder."""
+    if value is None:
+        return True
+    if (
+        not isinstance(value, torch.Tensor)
+        or value.dtype != torch.int32
+        or value.ndim != 1
+    ):
+        return False
+    if value.numel() == 0 or getattr(value, "is_meta", False):
+        return True
+    return not bool(torch.any(value != 0).item())
+
+
+def validate_metadata(value, arch=None):
+    """Validate metadata header against the active architecture ABI when populated."""
+    if is_placeholder_metadata(value):
+        return
+    if value.dtype != torch.int32 or value.ndim != 1 or value.numel() < 11:
+        raise ValueError("metadata must be an INT32 ABI header")
+    selected = arch or architecture(metadata=value)
+    expected = arch_profile(selected)[:2]
+    if tuple(value[:2].tolist()) != expected:
+        raise ValueError(f"{selected} metadata ABI mismatch")
+
 
 INPUT_NAMES = (
     "q",
@@ -40,40 +126,69 @@ OPERATOR_DEFAULTS = {
 }
 
 
+def _derive_tnd_batch(state, cu_seqlens, attributes):
+    if state is not None:
+        return int(state.shape[0])
+    if cu_seqlens is not None:
+        return int(cu_seqlens.shape[0]) - 1
+    cu_val = attributes.get("cu_seqlens_value")
+    if cu_val is not None:
+        return len(cu_val) - 1
+    valid_lengths = attributes.get("valid_lengths")
+    if valid_lengths is not None:
+        return len(valid_lengths)
+    raise ValueError(
+        "cannot derive TND batch_size when initial_state and cu_seqlens are None"
+    )
+
+
 def configuration(inputs, attributes):
     """Use TTK's supplied tensors/attributes; never reopen a CSV or inspect its ID."""
     q, _, v, g, beta, _, state = inputs[:7]
+    cu_seqlens = inputs[9] if len(inputs) > 9 else None
+    dt_bias = inputs[8] if len(inputs) > 8 else None
     layout = attributes.get("layout", "TND")
     packed = layout == "TND"
-    batch = state.shape[0] if packed else q.shape[0]
-    length = q.shape[0] if packed else q.shape[2 if layout == "BNSD" else 1]
+    batch = (
+        _derive_tnd_batch(state, cu_seqlens, attributes) if packed else int(q.shape[0])
+    )
+    length = int(q.shape[0] if packed else q.shape[2 if layout == "BNSD" else 1])
     head_axis = 1 if layout in ("BNSD", "TND") else 2
     test = json.loads(attributes.get("test_config", "{}"))
     kind = test.get("kind", "accuracy")
-    omitted = set(attributes.get("omitted_attributes", "").split(","))
+    omitted = set(filter(None, attributes.get("omitted_attributes", "").split(",")))
     operator = {
         key: attributes.get(key, default)
         for key, default in OPERATOR_DEFAULTS.items()
         if key not in omitted
     }
+    inference = bool(attributes.get("inference", False))
+    raw_enable_grad = attributes.get("enable_grad")
+    enable_grad = (not inference) if raw_enable_grad is None else raw_enable_grad
     c = dict(
         id=attributes.get("testcase_name", ""),
         layout=layout,
         omit_layout="layout" in omitted,
         batch_size=batch,
-        nheads_qk=q.shape[head_axis],
-        nheads_v=v.shape[head_axis],
+        nheads_qk=int(q.shape[head_axis]),
+        nheads_v=int(v.shape[head_axis]),
         seqlens=length,
         g_dtype=str(g.dtype).removeprefix("torch."),
         beta_dtype=str(beta.dtype).removeprefix("torch."),
         kwargs=operator,
-        inference=attributes.get("inference", False),
+        inference=inference,
+        enable_grad=enable_grad,
         no_grad=attributes.get("no_grad", False),
         initial_state_mode=attributes.get("initial_state_mode", "none"),
         dt_bias_mode=attributes.get("dt_bias_mode", "none"),
-        dt_bias_flat=inputs[8].dim() == 1,
-        seed=attributes.get("seed", 101),
+        dt_bias_flat=(
+            dt_bias.dim() == 1
+            if dt_bias is not None
+            else bool(attributes.get("dt_bias_flat", False))
+        ),
+        seed=_resolve_seed(attributes),
         distribution=attributes.get("distribution", 1.0),
+        input_dist=_resolve_input_dist(attributes),
         cu_seqlens_value=attributes.get("cu_seqlens_value"),
         seqused_value=attributes.get("seqused_value"),
         valid_lengths=list(attributes.get("valid_lengths") or [length] * batch),
@@ -128,25 +243,84 @@ def sequences(x, c, *, norm=False):
             yield y[b : b + 1, :, :n]
 
 
-def make(c, input_ranges=()):
+def materialize_optional_inputs(inputs, c, *, arch=None):
+    """Fill None optional tensor slots with canonical zero/default CPU tensors."""
+    out = list(inputs)
+    b, nv = c["batch_size"], c["nheads_v"]
+    lengths = c["valid_lengths"]
+    if out[5] is None:
+        out[5] = _offline_metadata(c, arch=arch)
+    if out[6] is None:
+        out[6] = torch.zeros((b, nv, 128, 128), dtype=torch.float32)
+    if out[7] is None:
+        out[7] = torch.linspace(-0.25, 0.25, nv, dtype=torch.float32)
+    if out[8] is None:
+        bias = torch.zeros((nv, 128), dtype=torch.float32)
+        out[8] = bias.reshape(-1) if c.get("dt_bias_flat", False) else bias
+    if out[9] is None:
+        cu = c["cu_seqlens_value"] or [0] + list(
+            torch.tensor(lengths).cumsum(0).tolist()
+        )
+        out[9] = torch.tensor(cu, dtype=torch.int32)
+    if out[10] is None:
+        used = c["seqused_value"] or lengths
+        out[10] = torch.tensor(used, dtype=torch.int32)
+    return out
+
+
+def _offline_metadata(c, arch=None):
+    words = encode_metadata(*metadata_baseline(c, arch_profile(arch)[2], arch=arch))
+    size = max(capacity(c, arch=arch), len(words))
+    md = torch.zeros(size, dtype=torch.int32)
+    md[: len(words)] = torch.tensor(words, dtype=torch.int32)
+    return md
+
+
+def make(c, input_ranges=(), *, include_metadata=True, arch=None):
     ranges = dict(zip(INPUT_NAMES, input_ranges or ()))
     b, nq, nv = c["batch_size"], c["nheads_qk"], c["nheads_v"]
     lengths = c["valid_lengths"]
     s = max(lengths) if c["layout"] == "TND" else c["seqlens"]
     gen = torch.Generator().manual_seed(c["seed"])
+    input_dist = str(c.get("input_dist", "uniform")).strip().lower()
+    if input_dist not in INPUT_DISTRIBUTIONS:
+        raise ValueError(
+            f"FlashKDA: unsupported input_dist {input_dist!r}; expected one of {INPUT_DISTRIBUTIONS}"
+        )
+
+    def _draw_normal(shape, low, high):
+        low_f, high_f = float(low), float(high)
+        if low_f > high_f:
+            low_f, high_f = high_f, low_f
+        if low_f == high_f:
+            return torch.full(shape, low_f, dtype=torch.float32)
+        mean = (low_f + high_f) / 2.0
+        sigma = (high_f - mean) / 3.0
+        return (
+            torch.empty(shape, dtype=torch.float32)
+            .normal_(mean, sigma, generator=gen)
+            .clamp_(low_f, high_f)
+        )
 
     def sample(name, shape, default):
         bounds = ranges.get(name)
         if bounds is not None and None not in bounds:
+            if input_dist == "normal":
+                return _draw_normal(shape, *bounds)
             return torch.empty(shape, dtype=torch.float32).uniform_(
                 *bounds, generator=gen
             )
         return default(shape)
 
     def rand(shape):
+        if input_dist == "normal":
+            scale = abs(float(c["distribution"]))
+            return _draw_normal(shape, -scale, scale)
         return (torch.rand(shape, generator=gen) * 2 - 1) * c["distribution"]
 
     def small_rand(shape):
+        if input_dist == "normal":
+            return _draw_normal(shape, -0.1, 0.1)
         return torch.rand(shape, generator=gen) * 0.2 - 0.1
 
     q, k = [sample(name, (b, nq, s, 128), rand).bfloat16() for name in ("q", "k")]
@@ -220,12 +394,26 @@ def make(c, input_ranges=()):
         torch.tensor(cu, dtype=torch.int32),
         torch.tensor(used, dtype=torch.int32),
     ]
-    # Generate the same ABI4 tensor used by a real caller, before DUT execution.
-    from arch35.kda_ttk_ops import mode, produce
-
-    with mode(c):
-        inputs[5] = produce(inputs, c).cpu()
+    if include_metadata:
+        inputs[5] = _offline_metadata(c, arch=arch)
     return inputs
+
+
+def _copy_generated_inputs(inputs, values):
+    for name, target, value in zip(INPUT_NAMES, inputs, values):
+        if target is None or value is None:
+            continue
+        if name == "metadata":
+            value = transport_metadata(value, target)
+        if target.shape != value.shape or target.dtype != value.dtype:
+            raise ValueError(
+                f"{name}: CSV {target.shape}/{target.dtype} differs from input generator {value.shape}/{value.dtype}"
+            )
+        if target.is_inference() and not torch.is_inference_mode_enabled():
+            with torch.inference_mode(True):
+                target.copy_(value)
+        else:
+            target.copy_(value)
 
 
 def customize_inputs(
@@ -235,13 +423,16 @@ def customize_inputs(
     g,
     beta,
     metadata,
-    initial_state,
-    A_log,
-    dt_bias,
-    cu_seqlens,
-    seqused,
+    initial_state=None,
+    A_log=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    seqused=None,
     **kwargs,
 ):
+    if cu_seqlens_cpu is not None:
+        kwargs = dict(kwargs, cu_seqlens_cpu=cu_seqlens_cpu)
     inputs = [
         q,
         k,
@@ -256,16 +447,136 @@ def customize_inputs(
         seqused,
     ]
     c = configuration(inputs, kwargs)
-    values = make(c, kwargs.get("input_ranges"))
-    for name, target, value in zip(INPUT_NAMES, inputs, values):
-        if name == "metadata":
-            value = transport_metadata(value, target)
-        if target.shape != value.shape or target.dtype != value.dtype:
-            raise ValueError(
-                f"{name}: CSV {target.shape}/{target.dtype} differs from input generator {value.shape}/{value.dtype}"
-            )
-        target.copy_(value)
+    values = make(
+        c,
+        kwargs.get("input_ranges"),
+        include_metadata=metadata is not None,
+    )
+    _copy_generated_inputs(inputs, values)
     return tuple(inputs)
+
+
+def extract_op_inputs_and_config(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    metadata=None,
+    initial_state=None,
+    A_log=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    seqused=None,
+    *,
+    scale=128 ** (-0.5),
+    output_final_state=False,
+    return_intermediate_states=False,
+    use_qk_l2norm_in_kernel=True,
+    use_gate_in_kernel=True,
+    use_beta_sigmoid_in_kernel=True,
+    allow_neg_eigval=False,
+    disable_recompute=False,
+    lower_bound=None,
+    layout="TND",
+    extra_kwargs=None,
+    resolve_arch=True,
+):
+    """Unpack direct ``torch.ops.cann_ops_transformer.flash_kda`` hook arguments."""
+    from .npu_preprocess import build_hook_attributes
+
+    arch = architecture(metadata=metadata) if resolve_arch else None
+    inputs = [
+        q,
+        k,
+        v,
+        g,
+        beta,
+        metadata,
+        initial_state,
+        A_log,
+        dt_bias,
+        cu_seqlens,
+        seqused,
+    ]
+    attrs = build_hook_attributes(
+        scale=scale,
+        output_final_state=output_final_state,
+        return_intermediate_states=return_intermediate_states,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
+        disable_recompute=disable_recompute,
+        lower_bound=lower_bound,
+        layout=layout,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        extra_kwargs=extra_kwargs or {},
+    )
+    config = configuration(inputs, attrs)
+    return arch, attrs, inputs, config
+
+
+def customize_op_inputs(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    metadata=None,
+    initial_state=None,
+    A_log=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    seqused=None,
+    *,
+    scale=128 ** (-0.5),
+    output_final_state=False,
+    return_intermediate_states=False,
+    use_qk_l2norm_in_kernel=True,
+    use_gate_in_kernel=True,
+    use_beta_sigmoid_in_kernel=True,
+    allow_neg_eigval=False,
+    disable_recompute=False,
+    lower_bound=None,
+    layout="TND",
+    **kwargs,
+):
+    """Populate FlashKDA CPU inputs in-place; metadata is deferred to ``npu_preprocess``."""
+    from .npu_preprocess import reset_mode
+
+    reset_mode()
+    _, attrs, inputs, config = extract_op_inputs_and_config(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        metadata,
+        initial_state,
+        A_log,
+        dt_bias,
+        cu_seqlens,
+        cu_seqlens_cpu,
+        seqused,
+        scale=scale,
+        output_final_state=output_final_state,
+        return_intermediate_states=return_intermediate_states,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
+        disable_recompute=disable_recompute,
+        lower_bound=lower_bound,
+        layout=layout,
+        extra_kwargs=kwargs,
+        resolve_arch=False,
+    )
+    values = make(config, attrs.get("input_ranges"), include_metadata=False)
+    _copy_generated_inputs(inputs, values)
+    return None
 
 
 def noncontiguous(x):
@@ -299,9 +610,9 @@ def mutate(kw, c):
         "rank": ["rank", "dimension", "维"],
         "dtype": ["dtype", "type", "BF16", "类型"],
         "axis": ["shape", "dimension", "head", "维", "形状"],
-        "shape": ["shape", "rank", "header", "short", "维", "形状"],
+        "shape": ["shape", "rank", "header", "short", "size", "维", "形状"],
         "noncontiguous": ["contiguous", "stride", "连续"],
-        "all_cpu": ["device", "NPU", "设备"],
+        "all_cpu": ["device", "NPU", "设备", "CPU", "backend", "PrivateUse1"],
         "empty": ["positive", "head", "size", "length", "正", "尺寸"],
         "gqa": ["head", "GQA", "divis", "头"],
         "unsqueeze": ["rank", "dimension", "维"],
@@ -382,7 +693,7 @@ def mutate(kw, c):
     if op in ("empty", "gqa"):
         objects = ["batch", "head", "Nqk", "Nv", "length", "size", "storage", "GQA"]
     if op == "all_cpu":
-        objects = ["device", "NPU"]
+        objects = ["device", "NPU", "CPU", "PrivateUse1"]
     objects = test.get("error_objects", objects)
     return kw, objects, test.get("error_patterns", reasons[op])
 
@@ -401,20 +712,21 @@ HEADER_FIELDS = (
     "template",
     "reserved",
 )
-CORE_SLOTS = 32
 
 
-def rebuild_record(record, heads):
+def rebuild_record(record, heads, core_slots=None):
+    slots = core_slots if core_slots is not None else arch_profile()[2]
     for stage in (1, 2):
         increments = record["count"] if stage == 1 else record["splits"]
         prefix = [0]
         for count in increments:
             prefix.append(prefix[-1] + count * heads)
         record[f"p{stage}"] = prefix
-        record[f"r{stage}"] = [0, prefix[-1]] + [0] * (2 * CORE_SLOTS - 2)
+        record[f"r{stage}"] = [0, prefix[-1]] + [0] * (2 * slots - 2)
 
 
-def metadata_baseline(c, cores):
+def metadata_baseline(c, cores, arch=None):
+    prof = arch_profile(arch)
     lengths = c["valid_lengths"]
     packed = c["layout"] == "TND"
     chunks = [(n + 63) // 64 for n in lengths]
@@ -433,11 +745,11 @@ def metadata_baseline(c, cores):
             count=[1 if multi_round else chunks[b] for b in batches],
             splits=[1] * len(batches),
         )
-        rebuild_record(r, c["nheads_v"])
+        rebuild_record(r, c["nheads_v"], core_slots=prof[2])
         records.append(r)
     header = [
-        0x4B444132,
-        4,
+        prof[0],
+        prof[1],
         0,
         cores,
         len(records),
@@ -468,8 +780,8 @@ def encode_metadata(header, records):
     return header + offsets + data
 
 
-def mutate_metadata(c, cores):
-    header, records = metadata_baseline(c, cores)
+def mutate_metadata(c, cores, arch=None):
+    header, records = metadata_baseline(c, cores, arch=arch)
     test = c["test"]
     change = test["change"]
     record = records[test.get("round", 0)]
@@ -515,7 +827,7 @@ def mutate_metadata(c, cores):
                 )
             ranges[2:4] = [0, 1]
         elif error == "inactive":
-            if cores >= CORE_SLOTS:
+            if cores >= arch_profile(arch)[2]:
                 raise RuntimeError(
                     "NOT_APPLICABLE: no inactive core slot on this device"
                 )

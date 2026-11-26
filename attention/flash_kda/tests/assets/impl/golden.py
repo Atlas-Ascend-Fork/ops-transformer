@@ -6,29 +6,33 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-
-"""CPU 高精度参考，以及 CPU 低精度模拟或 FLA GPU 三方精度比较配置。"""
+"""A5/A6 共用高精度参考（支持 CPU / GPU(CUDA) / NPU 三设备运行与落盘），以及按 --plat/架构切换的低精度模拟与 FLA 三方参考。"""
 
 import dataclasses
+import os
 
 import torch
 import torch.nn.functional as F
-from arch35.kda_ttk_ops import load_asset
+
+from . import fla_adapter as fla_mod
+from . import inputs as inputs_mod
+from . import output_contract
+from .arch_config import architecture
 
 
 def effective(c):
-    return load_asset("inputs").effective(c)
+    return inputs_mod.effective(c)
 
 
 def sequences(*args, **kwargs):
-    return load_asset("inputs").sequences(*args, **kwargs)
+    return inputs_mod.sequences(*args, **kwargs)
 
 
 CHUNK_SIZE = 64
 REFERENCE_BLOCK_SIZE = 16
 LOW_DTYPE = torch.bfloat16
 SUPPORTED_HEAD_DIM = 128
-PERSISTENT_TEMPLATE_ID = 2  # metadata ABI 4
+PERSISTENT_TEMPLATE_ID = 2
 
 
 @dataclasses.dataclass
@@ -190,8 +194,81 @@ def _npu_neumann_inverse_from_negative_t(negative_t: torch.Tensor) -> torch.Tens
     return _to_bf16_to_fp32(inverse)
 
 
+def _invert_unit_lower_triangular_fp32(strict_lower: torch.Tensor) -> torch.Tensor:
+    """Exact FP32 inverse of ``I + T`` for 64x64 strictly lower-triangular ``T``.
+
+    Uses ``(I - T)(I + T^2)(I + T^4)(I + T^8)(I + T^16)(I + T^32)`` (exact since
+    ``T^64 = 0``), relying purely on batched FP32 matmul so NPU execution never
+    depends on ``torch.linalg.solve_triangular``.
+    """
+    identity = torch.eye(CHUNK_SIZE, dtype=torch.float32, device=strict_lower.device)
+    inv = identity - strict_lower
+    power = strict_lower @ strict_lower
+    for _ in range(5):
+        inv = inv @ (identity + power)
+        power = power @ power
+    return inv
+
+
+def resolve_golden_device(device_mode=None, *, backend=None, tensor=None):
+    """Resolve execution device for golden reference across CPU, GPU (CUDA), and NPU.
+
+    Priority:
+    1. Explicit ``device_mode`` argument or ``KDA_GOLDEN_DEVICE`` env var
+       (``cpu``, ``gpu``/``cuda``/``cuda:N``, ``npu``/``npu:N``, ``auto``).
+    2. Input tensor device when already on CUDA or NPU.
+    3. TTK ``backend`` hint (``cuda``/``gpu`` -> CUDA, ``npu`` -> NPU, ``cpu`` -> CPU).
+    4. Default ``cpu``.
+    """
+    raw = (
+        device_mode if device_mode is not None else os.environ.get("KDA_GOLDEN_DEVICE")
+    )
+    if raw is not None:
+        mode = str(raw).strip().lower()
+        if mode in ("", "auto"):
+            if torch.cuda.is_available():
+                return torch.device("cuda", torch.cuda.current_device())
+            npu = getattr(torch, "npu", None)
+            if npu is not None and npu.is_available():
+                return torch.device("npu", npu.current_device())
+            return torch.device("cpu")
+        if mode == "cpu":
+            return torch.device("cpu")
+        if mode == "gpu" or mode == "cuda" or mode.startswith("cuda:"):
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    f"FlashKDA golden requested device {raw!r}, but CUDA is unavailable"
+                )
+            return torch.device("cuda" if mode == "gpu" else mode)
+        if mode == "npu" or mode.startswith("npu:"):
+            npu = getattr(torch, "npu", None)
+            if npu is None or not npu.is_available():
+                raise RuntimeError(
+                    f"FlashKDA golden requested device {raw!r}, but torch.npu is unavailable"
+                )
+            return torch.device(mode)
+        raise ValueError(
+            f"Unsupported FlashKDA golden device_mode {raw!r}; "
+            "expected cpu, gpu/cuda, npu, or auto"
+        )
+
+    if tensor is not None and hasattr(tensor, "device"):
+        dev_type = tensor.device.type
+        if dev_type in ("cuda", "npu", "privateuseone"):
+            return tensor.device
+
+    hint = str(backend or "").strip().lower()
+    if hint in ("gpu", "cuda") and torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    if hint == "npu":
+        npu = getattr(torch, "npu", None)
+        if npu is not None and npu.is_available():
+            return torch.device("npu", npu.current_device())
+    return torch.device("cpu")
+
+
 def _stage1_cpu(K, V, Q, beta_brc, g, *, scale_value) -> _StageOneGolden:
-    """Stage1 CPU 公式（全 fp32）：生成不依赖状态的 chunk 工作区。"""
+    """Stage1 高精度公式（全 fp32，支持 CPU / GPU(CUDA) / NPU）：生成不依赖状态的 chunk 工作区。"""
     if V.shape[1] != K.shape[1]:  # GQA repeat 到 Nv
         repeat = V.shape[1] // K.shape[1]
         K = K.repeat_interleave(repeat, dim=1)
@@ -210,10 +287,13 @@ def _stage1_cpu(K, V, Q, beta_brc, g, *, scale_value) -> _StageOneGolden:
 
     T = _reference_lower_matmul(beta * K_i, K_i, cumulative_decay, diagonal=-1)
 
-    identity = torch.eye(CHUNK_SIZE, dtype=torch.float32, device=K.device)
-    inverse = torch.linalg.solve_triangular(
-        identity + T, identity.expand_as(T), upper=False, unitriangular=True
-    )
+    if K.device.type in ("npu", "privateuseone"):
+        inverse = _invert_unit_lower_triangular_fp32(T)
+    else:
+        identity = torch.eye(CHUNK_SIZE, dtype=torch.float32, device=K.device)
+        inverse = torch.linalg.solve_triangular(
+            identity + T, identity.expand_as(T), upper=False, unitriangular=True
+        )
     M = inverse * beta.transpose(-1, -2)
     U_pre = M @ V_i
     W = M @ K_decayed
@@ -481,14 +561,27 @@ def empty():
     return torch.empty(0, dtype=torch.float32)
 
 
-def reference(inputs, c, kind):
+@torch.no_grad()
+def reference(inputs, c, kind, *, arch=None, device_mode=None, backend=None):
+    raw_metadata = inputs[5] if len(inputs) > 5 else None
+    selected_arch = arch or architecture(metadata=raw_metadata)
+    if raw_metadata is not None:
+        inputs_mod.validate_metadata(raw_metadata, arch=selected_arch)
+    full_inputs = inputs_mod.materialize_optional_inputs(inputs, c, arch=selected_arch)
     f = effective(c)
     direct_u = False
-    if kind == "npu_chunk":
-        template_word = load_asset("inputs").HEADER_FIELDS.index("template")
-        direct_u = inputs[5][template_word].item() == PERSISTENT_TEMPLATE_ID
-    q, k, v, g, beta = [x.detach().cpu() for x in inputs[:5]]
-    state, a, bias = [x.detach().cpu() for x in inputs[6:9]]
+    if kind == "npu_chunk" and selected_arch == "arch35":
+        template_word = inputs_mod.HEADER_FIELDS.index("template")
+        if (
+            not inputs_mod.is_placeholder_metadata(raw_metadata)
+            and raw_metadata.numel() > template_word
+        ):
+            direct_u = raw_metadata[template_word].item() == PERSISTENT_TEMPLATE_ID
+    device = resolve_golden_device(
+        device_mode=device_mode, backend=backend, tensor=full_inputs[0]
+    )
+    q, k, v, g, beta = [x.detach().to(device=device) for x in full_inputs[:5]]
+    state, a, bias = [x.detach().to(device=device) for x in full_inputs[6:9]]
     # 一维与二维偏置具有相同的头、通道顺序。
     bias = bias.reshape(c["nheads_v"], q.shape[-1])
     # Raw input values/dtypes are preserved. Only npu_chunk models device casts.
@@ -616,20 +709,101 @@ def reference(inputs, c, kind):
                 result[j].append(x.flatten())
         if not c["inference"] and f["use_beta_sigmoid_in_kernel"]:
             result[15].append(beta_activation.flatten())
-    outputs = [torch.cat(parts) if parts else empty() for parts in result]
+    outputs = [
+        torch.cat(parts).detach().cpu() if parts else empty() for parts in result
+    ]
     if kind == "npu_chunk":
         # 模拟计算保留 FP32 累加；返回时按公开接口保存前三项（包括空槽位）。
         # out 和 chunk_states 已完成 BF16 舍入，此处不改变其有限数值。
         # CPU 高精度参考保持 FP32，避免对比较基准额外舍入。
-        for slot, dtype in enumerate(load_asset("compare").PUBLIC_OUTPUT_DTYPES):
+        for slot, dtype in enumerate(output_contract.PUBLIC_OUTPUT_DTYPES):
             outputs[slot] = outputs[slot].to(dtype=dtype)
     return outputs
 
 
 def select_reference(outputs, c, *, forward=False):
     """Select by the requested contract, never by the DUT's observed arity."""
-    slots = load_asset("compare").numerical_slots(c, forward=forward)
+    slots = output_contract.numerical_slots(c, forward=forward)
     return [outputs[slot] for slot in slots]
+
+
+def materialize_public_outputs(flat_outputs, config):
+    """Reconstruct exact ``flash_kda`` schema outputs ``(out, final_state, chunk_states)``.
+
+    Matches ``torch.ops.cann_ops_transformer.flash_kda`` shapes, layouts, and dtypes:
+    - ``out``: ``(S, Nv, 128)`` (TND) or ``(B, S, Nv, 128)`` (BSND/BNSD), ``bfloat16``
+    - ``final_state``: ``(B, Nv, 128, 128)`` ``float32`` if ``output_final_state`` else ``None``
+    - ``chunk_states``: ``(J, Nv, 128, 128)`` (TND) or ``(B, J, Nv, 128, 128)`` (BSND/BNSD),
+      ``bfloat16`` if enabled else ``None``
+    """
+    f = effective(config)
+    b, nv, s = config["batch_size"], config["nheads_v"], config["seqlens"]
+    packed = config["layout"] == "TND"
+    device = flat_outputs[0].device
+
+    if packed:
+        out = torch.zeros((s, nv, 128), dtype=torch.bfloat16, device=device)
+        pos = 0
+        offset = 0
+        for n in config["valid_lengths"]:
+            numel = nv * n * 128
+            seq_val = (
+                flat_outputs[0][offset : offset + numel]
+                .reshape(nv, n, 128)
+                .transpose(0, 1)
+            )
+            out[pos : pos + n] = seq_val.to(dtype=torch.bfloat16, device=device)
+            pos += n
+            offset += numel
+    else:
+        out = torch.zeros((b, s, nv, 128), dtype=torch.bfloat16, device=device)
+        offset = 0
+        for bi, n in enumerate(config["valid_lengths"]):
+            numel = nv * n * 128
+            seq_val = (
+                flat_outputs[0][offset : offset + numel]
+                .reshape(nv, n, 128)
+                .transpose(0, 1)
+            )
+            out[bi, :n] = seq_val.to(dtype=torch.bfloat16, device=device)
+            offset += numel
+
+    final_state = (
+        flat_outputs[1]
+        .reshape(b, nv, 128, 128)
+        .to(dtype=torch.float32, device=device)
+        .contiguous()
+        if f["output_final_state"]
+        else None
+    )
+
+    expect_chunks = (config["inference"] and f["return_intermediate_states"]) or (
+        not config["inference"] and f["disable_recompute"]
+    )
+    chunk_states = None
+    if expect_chunks:
+        j = (s + 63) // 64 + (b if packed else 0)
+        cshape = (j, nv, 128, 128) if packed else (b, j, nv, 128, 128)
+        chunk_states = torch.zeros(cshape, dtype=torch.bfloat16, device=device)
+        start = 0
+        offset = 0
+        for bi, n in enumerate(config["valid_lengths"]):
+            count = (n + 63) // 64
+            numel = count * nv * 128 * 128
+            val = (
+                flat_outputs[2][offset : offset + numel]
+                .reshape(count, nv, 128, 128)
+                .to(dtype=torch.bfloat16, device=device)
+            )
+            if packed:
+                base = start // 64 + bi
+                chunk_states[base : base + count] = val
+            else:
+                chunk_states[bi, :count] = val
+            start += n
+            offset += numel
+
+    return (out, final_state, chunk_states)
 
 
 def golden(
@@ -638,14 +812,17 @@ def golden(
     v,
     g,
     beta,
-    metadata,
-    initial_state,
-    A_log,
-    dt_bias,
-    cu_seqlens,
-    seqused,
+    metadata=None,
+    initial_state=None,
+    A_log=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    seqused=None,
     **kwargs,
 ):
+    if cu_seqlens_cpu is not None:
+        kwargs = dict(kwargs, cu_seqlens_cpu=cu_seqlens_cpu)
     inputs = [
         q,
         k,
@@ -659,7 +836,7 @@ def golden(
         cu_seqlens,
         seqused,
     ]
-    c = load_asset("inputs").configuration(inputs, kwargs)
+    c = inputs_mod.configuration(inputs, kwargs)
     if c["pending"]:
         raise RuntimeError(c["pending"])
     if c["suite"] in (
@@ -671,22 +848,23 @@ def golden(
         "whitebox",
     ):
         return [torch.ones(1, dtype=torch.bool)]
-    if c["suite"] == "performance":
-        raise RuntimeError(
-            "Performance CSV requires golden_api=disable; no long CPU golden"
+    device_mode = kwargs.get("device_mode")
+    backend = kwargs.get("backend")
+    if fla_mod.enabled():
+        fla_mod.check_case(c)
+        return select_reference(
+            reference(inputs, c, "cpu_chunk", device_mode=device_mode, backend=backend),
+            c,
         )
-    if load_asset("fla_adapter").enabled():
-        load_asset("fla_adapter").check_case(c)
-        # FLA 模式比较公开三项，chunk 状态的启用条件和 BF16 舍入沿用当前 golden。
-        return select_reference(reference(inputs, c, "cpu_chunk"), c)
-    # TTK compares forward results; the bool also requires unified-entry L2 and consistency.
-    return select_reference(reference(inputs, c, "cpu_chunk"), c, forward=True) + [
-        torch.ones(1, dtype=torch.bool)
-    ]
+    return select_reference(
+        reference(inputs, c, "cpu_chunk", device_mode=device_mode, backend=backend),
+        c,
+        forward=True,
+    ) + [torch.ones(1, dtype=torch.bool)]
 
 
 class CpuSimulation:
-    """在 CPU 上模拟 NPU 低精度计算，作为 cross_check 的三方基准。"""
+    """在 CPU/GPU/NPU 上模拟 NPU 低精度计算，作为适配器入口 cross_check 的三方基准。"""
 
     def __call__(
         self,
@@ -695,14 +873,17 @@ class CpuSimulation:
         v,
         g,
         beta,
-        metadata,
-        initial_state,
-        A_log,
-        dt_bias,
-        cu_seqlens,
-        seqused,
+        metadata=None,
+        initial_state=None,
+        A_log=None,
+        dt_bias=None,
+        cu_seqlens=None,
+        cu_seqlens_cpu=None,
+        seqused=None,
         **kwargs,
     ):
+        if cu_seqlens_cpu is not None:
+            kwargs = dict(kwargs, cu_seqlens_cpu=cu_seqlens_cpu)
         inputs = [
             q,
             k,
@@ -716,35 +897,239 @@ class CpuSimulation:
             cu_seqlens,
             seqused,
         ]
-        c = load_asset("inputs").configuration(inputs, kwargs)
+        c = inputs_mod.configuration(inputs, kwargs)
         if c["suite"] != "accuracy":
-            return golden(*inputs, **kwargs)
-        return select_reference(reference(inputs, c, "npu_chunk"), c, forward=True) + [
-            torch.ones(1, dtype=torch.bool)
-        ]
+            return golden(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                metadata=metadata,
+                initial_state=initial_state,
+                A_log=A_log,
+                dt_bias=dt_bias,
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                seqused=seqused,
+                **kwargs,
+            )
+        return select_reference(
+            reference(
+                inputs,
+                c,
+                "npu_chunk",
+                device_mode=kwargs.get("device_mode"),
+                backend=kwargs.get("backend"),
+            ),
+            c,
+            forward=True,
+        ) + [torch.ones(1, dtype=torch.bool)]
 
 
-class FlashKdaTestSpec:
-    """Native TestSpec, independent of TTK internal APIs."""
+def op_golden(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    metadata=None,
+    initial_state=None,
+    A_log=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    seqused=None,
+    *,
+    scale=128 ** (-0.5),
+    output_final_state=False,
+    return_intermediate_states=False,
+    use_qk_l2norm_in_kernel=True,
+    use_gate_in_kernel=True,
+    use_beta_sigmoid_in_kernel=True,
+    allow_neg_eigval=False,
+    disable_recompute=False,
+    lower_bound=None,
+    layout="TND",
+    **kwargs,
+):
+    """High-precision reference for ``torch.ops.cann_ops_transformer.flash_kda``."""
+    from .npu_preprocess import reset_mode, set_active_case
 
-    golden = staticmethod(golden)
-    # 默认使用 CPU 低精度模拟；显式选择 fla 时使用 GPU 三方实现。
-    third_party = {
-        "torch": (
-            load_asset("fla_adapter").FLAThirdParty
-            if load_asset("fla_adapter").enabled()
-            else CpuSimulation
+    reset_mode()
+    arch, _, inputs, config = inputs_mod.extract_op_inputs_and_config(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        metadata,
+        initial_state,
+        A_log,
+        dt_bias,
+        cu_seqlens,
+        cu_seqlens_cpu,
+        seqused,
+        scale=scale,
+        output_final_state=output_final_state,
+        return_intermediate_states=return_intermediate_states,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
+        disable_recompute=disable_recompute,
+        lower_bound=lower_bound,
+        layout=layout,
+        extra_kwargs=kwargs,
+    )
+    set_active_case(arch, config)
+    if config["pending"]:
+        raise RuntimeError(config["pending"])
+    flat_ref = reference(
+        inputs,
+        config,
+        "cpu_chunk",
+        arch=arch,
+        device_mode=kwargs.get("device_mode"),
+        backend=kwargs.get("backend"),
+    )
+    return materialize_public_outputs(flat_ref, config)
+
+
+def op_third_party(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    metadata=None,
+    initial_state=None,
+    A_log=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    seqused=None,
+    *,
+    scale=128 ** (-0.5),
+    output_final_state=False,
+    return_intermediate_states=False,
+    use_qk_l2norm_in_kernel=True,
+    use_gate_in_kernel=True,
+    use_beta_sigmoid_in_kernel=True,
+    allow_neg_eigval=False,
+    disable_recompute=False,
+    lower_bound=None,
+    layout="TND",
+    **kwargs,
+):
+    """Three-output third-party peer for ``torch.ops.cann_ops_transformer.flash_kda``."""
+    arch, _, inputs, config = inputs_mod.extract_op_inputs_and_config(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        metadata,
+        initial_state,
+        A_log,
+        dt_bias,
+        cu_seqlens,
+        cu_seqlens_cpu,
+        seqused,
+        scale=scale,
+        output_final_state=output_final_state,
+        return_intermediate_states=return_intermediate_states,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        use_gate_in_kernel=use_gate_in_kernel,
+        use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+        allow_neg_eigval=allow_neg_eigval,
+        disable_recompute=disable_recompute,
+        lower_bound=lower_bound,
+        layout=layout,
+        extra_kwargs=kwargs,
+    )
+    if fla_mod.enabled():
+        fla_outputs = fla_mod.FLAThirdParty()(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            metadata,
+            initial_state=initial_state,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            seqused=seqused,
+            scale=scale,
+            output_final_state=output_final_state,
+            return_intermediate_states=return_intermediate_states,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            use_gate_in_kernel=use_gate_in_kernel,
+            use_beta_sigmoid_in_kernel=use_beta_sigmoid_in_kernel,
+            allow_neg_eigval=allow_neg_eigval,
+            disable_recompute=disable_recompute,
+            lower_bound=lower_bound,
+            layout=layout,
+            **kwargs,
         )
-    }
-    tolerance = {
-        "bfloat16": {"standard": "cross_check", "level": "L2"},
-        "float32": {"standard": "cross_check", "level": "L2"},
-        "bool": {"standard": "binary_equal"},
-    }
+        return materialize_public_outputs(fla_outputs, config)
+    flat_ref = reference(
+        inputs,
+        config,
+        "npu_chunk",
+        arch=arch,
+        device_mode=kwargs.get("device_mode"),
+        backend=kwargs.get("backend"),
+    )
+    return materialize_public_outputs(flat_ref, config)
 
-    @staticmethod
-    def customize_inputs(*args, **kwargs):
-        return load_asset("inputs").customize_inputs(*args, **kwargs)
 
-
-__spec__ = {"kda_ttk_ops.flash_kda": "FlashKdaTestSpec"}
+def adapter_third_party(
+    q,
+    k,
+    v,
+    g,
+    beta,
+    metadata=None,
+    initial_state=None,
+    A_log=None,
+    dt_bias=None,
+    cu_seqlens=None,
+    cu_seqlens_cpu=None,
+    seqused=None,
+    **kwargs,
+):
+    """Unified third-party peer for ``spec.flash_kda``."""
+    if fla_mod.enabled():
+        return fla_mod.FLAThirdParty()(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            metadata,
+            initial_state=initial_state,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            cu_seqlens=cu_seqlens,
+            cu_seqlens_cpu=cu_seqlens_cpu,
+            seqused=seqused,
+            **kwargs,
+        )
+    return CpuSimulation()(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        metadata,
+        initial_state=initial_state,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        cu_seqlens=cu_seqlens,
+        cu_seqlens_cpu=cu_seqlens_cpu,
+        seqused=seqused,
+        **kwargs,
+    )

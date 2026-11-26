@@ -93,6 +93,6 @@ See the [PyTorch extension guide](../../torch_extension/README_en.md) for build 
 
 ## References
 
-- [Test cases](tests/ttk/kda_cases.py)
-- [Performance measurement guide](tests/ttk/PERFORMANCE_en.md)
+- [Test cases](tests/assets/impl/kda_cases.py)
+- [Performance measurement guide](tests/perf/PERFORMANCE_en.md)
 - [FlashKDAGrad backward operator](../flash_kda_grad/README_en.md)

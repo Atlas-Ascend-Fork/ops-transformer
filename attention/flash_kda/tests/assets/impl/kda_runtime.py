@@ -12,17 +12,21 @@ import argparse
 from functools import lru_cache
 import hashlib
 import importlib
-import importlib.util
 from importlib.machinery import ModuleSpec
+import importlib.util
 import json
 import logging
-import time
 import os
 from pathlib import Path
 import pkgutil
 import sys
+import time
 
-from kda_cases import architecture
+if __package__:
+    from .arch_config import architecture
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from kda_cases import architecture
 
 
 _loaded = None
@@ -38,7 +42,7 @@ def selection():
         architecture(),
         str(
             Path(
-                os.environ.get("KDA_SOURCE_ROOT", Path(__file__).resolve().parents[4])
+                os.environ.get("KDA_SOURCE_ROOT", Path(__file__).resolve().parents[5])
             ).resolve()
         ),
     )
@@ -85,6 +89,7 @@ def load():
             )
         return _loaded
     kind, arch, root = identity
+    os.environ.setdefault("FLASH_KDA_ARCH", arch)
     if kind == "package":
         if any(n.startswith("attention.flash_kda.op_dsl.") for n in sys.modules):
             raise RuntimeError(
@@ -135,7 +140,8 @@ def load():
             raise RuntimeError(
                 "installed DUT already imported; run source tests in a fresh process"
             )
-        sys.path.insert(0, root)
+        if root not in sys.path:
+            sys.path.insert(0, root)
         # Load the real builder without auto-discovering unrelated operators.
         if "cann_ops_transformer" not in sys.modules:
             parent = ModuleSpec("cann_ops_transformer", loader=None, is_package=True)
@@ -144,13 +150,20 @@ def load():
             ]
             sys.modules[parent.name] = importlib.util.module_from_spec(parent)
         package = "attention.flash_kda"
-        importlib.import_module(package)
-        name = package + "._ttk_public"
-        path = Path(root) / "attention/flash_kda/torch_extension/flash_kda.py"
-        spec = importlib.util.spec_from_file_location(name, path)
-        public = importlib.util.module_from_spec(spec)
-        sys.modules[name] = public
-        spec.loader.exec_module(public)
+        public = importlib.import_module(f"{package}.torch_extension.flash_kda")
+        if (
+            Path(public.__file__).resolve()
+            != Path(root) / "attention/flash_kda/torch_extension/flash_kda.py"
+        ):
+            raise RuntimeError(
+                f"DUT public API imported from another checkout: {public.__file__}"
+            )
+        # The public training metadata combines forward and backward schedules.
+        try:
+            importlib.import_module("attention.flash_kda_grad.torch_extension")
+        except ModuleNotFoundError as exc:
+            if exc.name != "torch_npu":
+                raise
     modules = tuple(
         importlib.import_module(f"{package}.op_dsl.{arch}.{name}")
         for name in ("flash_kda", "flash_kda_metadata", "flash_kda_validation")
@@ -210,7 +223,7 @@ def describe():
         digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
     return dict(
         dut=selection()[0],
-        arch=architecture(),
+        arch=selection()[1],
         public_path=public.__file__,
         implementation_path=internal[0].__file__,
         native_mode=os.environ.get("CANNBOTDSL_NATIVE_BINARY_MODE"),

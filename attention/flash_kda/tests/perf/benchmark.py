@@ -12,13 +12,12 @@ import argparse
 import ast
 import csv
 import hashlib
-import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import statistics
 import subprocess
-import sys
 
 
 def read_cases(path, selected=None):
@@ -26,7 +25,7 @@ def read_cases(path, selected=None):
         rows = [
             r
             for r in csv.DictReader(stream)
-            if r["is_enabled"].lower() == "true"
+            if (r.get("is_enabled") or "true").lower() == "true"
             and json.loads(ast.literal_eval(r["attributes"])["test_config"])["kind"]
             == "performance"
         ]
@@ -69,11 +68,15 @@ def prepare(adapter, row, torch):
     config, cpu = adapter.prepare(row)
     hashes = {}
     for name, value in zip(adapter.load_asset("inputs").INPUT_NAMES, cpu):
-        if name != "metadata":
+        if name != "metadata" and value is not None:
             hashes[name] = hashlib.sha256(
                 value.contiguous().view(torch.uint8).numpy()
             ).hexdigest()
-    return config, [value.npu() for value in cpu], hashes
+    return (
+        config,
+        [value.npu() if value is not None else None for value in cpu],
+        hashes,
+    )
 
 
 def measure(adapter, config, inputs, template, folder, args, torch, torch_npu):
@@ -116,8 +119,6 @@ def measure(adapter, config, inputs, template, folder, args, torch, torch_npu):
                 )
                 trace.step()
         values, names, export = kernel_samples(folder, actual, args.samples)
-        # A separate, unprofiled pass. Each sample includes the producer and
-        # allocations inside the forward, and finishes on the same NPU stream.
         for _ in range(args.warmup):
             out = None
             out, _ = common.sample(
@@ -149,6 +150,7 @@ def measure(adapter, config, inputs, template, folder, args, torch, torch_npu):
         template=actual,
         layout=config["layout"],
         inference=config["inference"],
+        enable_grad=config["enable_grad"],
         kwargs=config["kwargs"],
         dut_path=main.__file__,
         core_num=schedule["core_num"],
@@ -165,7 +167,7 @@ def measure(adapter, config, inputs, template, folder, args, torch, torch_npu):
         from types import SimpleNamespace
 
         short_group = (
-            not config["inference"]
+            bool(config["enable_grad"])
             and config["layout"] == "BNSD"
             and config["batch_size"] == 1
             and config["nheads_qk"] == config["nheads_v"] == producer.SHORT_TRAIN_HEADS
@@ -242,6 +244,7 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[4]
+    assets_dir = Path(__file__).resolve().parents[1] / "assets"
     output = args.output.resolve()
     if root == output or root in output.parents or output.exists():
         parser.error("output must be a new directory outside the source checkout")
@@ -251,18 +254,21 @@ def main():
         parser.error("templates must be distinct")
     os.environ["FLASH_KDA_ARCH"] = args.arch
     os.environ.setdefault("KDA_DUT", "installed")
-    folder = Path(__file__).resolve().parent
     os.environ["KDA_SOURCE_ROOT"] = str(root)
     output.mkdir(parents=True)
     os.environ["KDA_EVIDENCE_DIR"] = str(output / "evidence")
     os.environ.pop("CANNBOTDSL_NATIVE_BINARY_REPORT", None)
-    sys.path.insert(0, str(folder))
+    import cannbotdsl
     import torch
     import torch_npu
-    import cannbotdsl
 
     torch.npu.set_device(args.device)
-    adapter = importlib.import_module("kda_ttk_ops").get_adapter()
+    spec_def = importlib.util.spec_from_file_location(
+        "_flash_kda_assets_spec", assets_dir / "spec.py"
+    )
+    spec_mod = importlib.util.module_from_spec(spec_def)
+    spec_def.loader.exec_module(spec_mod)
+    adapter = spec_mod._load_impl("kda_ttk_ops")
     dut, _, _ = adapter.dut_modules()
     expected = Path(dut.__file__).resolve()
     revision = subprocess.check_output(
@@ -296,7 +302,8 @@ def main():
         json.dumps(environment, indent=2), encoding="utf-8"
     )
     records = []
-    for index, row in enumerate(read_cases(folder / "cases/ttk_cases.csv", args.cases)):
+    profiling_csv = assets_dir / "cases/flash_kda_perf_profiling.csv"
+    for index, row in enumerate(read_cases(profiling_csv, args.cases)):
         config, inputs, hashes = prepare(adapter, row, torch)
         for repeat in range(args.rounds):
             templates = (

@@ -63,9 +63,10 @@ def execute(adapter, inputs, config, cache):
     timing, template = options()
     key = (
         inputs[0].device,
-        tuple(x.data_ptr() for x in inputs),
+        tuple(x.data_ptr() if x is not None else 0 for x in inputs),
         repr(config["kwargs"]),
         config["inference"],
+        config["enable_grad"],
         timing,
         template,
     )
