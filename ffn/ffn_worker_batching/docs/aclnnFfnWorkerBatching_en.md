@@ -354,7 +354,7 @@ aclnnStatus aclnnFfnWorkerBatching(
 ## Constraints
 
 - Parameter A (number of Attention workers): ≤ 1024.
-- Parameter M (number of micro batches): ≤ 64.
+- micro_batch_num in the scheduling context (number of micro batches): ≤ 64.
 - Parameter K+1 (topK plus the number of shared experts): ≤ 64.
 - Parameters BS (micro batch size) and Y support generalization with no hard upper limit (limited by memory).
 - Parameter H (hidden size) supports generalization.
@@ -364,6 +364,8 @@ aclnnStatus aclnnFfnWorkerBatching(
 ## Example
 
 The following is the sample code for reference only. For details about compilation and execution, see [Compile and Run Samples](../../../docs/en/context/compile_and_run_sample.md).
+
+In the example, `selected_expert_num` is topK plus the number of shared experts (9 here), and `needSchedule=0` means batching only.
 
 ```Cpp
 #include <iostream>
@@ -519,9 +521,9 @@ struct ScheduleContext {
     ControlArea control;
     AttentionArea attention;
     FfnArea ffn;
-    int8_t reserve6[384]; // Padding to 1024 bytes.
+    int8_t reserve6[384]; // Padding to 1KB.
 };
-static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1024 bytes");
+static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1KB");
 #pragma pack(pop)
 
 int main()
@@ -536,7 +538,7 @@ int main()
     scheduleContext.common.session_num = 1;
     scheduleContext.common.micro_batch_num = 1;
     scheduleContext.common.micro_batch_size = 8;
-    scheduleContext.common.selected_expert_num = 9; // topK + 1
+    scheduleContext.common.selected_expert_num = 9;
     scheduleContext.common.expert_num = 8;
     scheduleContext.common.attn_to_ffn_token_size = 512;
     scheduleContext.common.ffn_to_attn_token_size = 512;
@@ -548,17 +550,17 @@ int main()
     int64_t expertNum = 8;                                  // Number of experts per layer × layer_num
     int64_t A = scheduleContext.common.session_num;         // Number of Attention workers
     int64_t BS = scheduleContext.common.micro_batch_size;   // micro batch size
-    int64_t K = scheduleContext.common.selected_expert_num; // topK + 1
+    int64_t KPlus1 = scheduleContext.common.selected_expert_num;
     int64_t H = 4096;                                       // hidden size
-    int64_t Y = A * BS * K;
-    std::vector<int64_t> maxOutShapeValue = {A, BS, K, H};
-    int64_t tokenDtype = 0;   // FP16
-    int64_t needSchedule = 0; // Only batching is performed.
+    int64_t Y = A * BS * KPlus1;
+    std::vector<int64_t> maxOutShapeValue = {A, BS, KPlus1, H};
+    int64_t tokenDtype = 0; // FP16
+    int64_t needSchedule = 0;
     int64_t layerNum = 1;
 
     // Initialize the Ffn token_info_buf.
     uint64_t flagAndLayerIdSize = sizeof(FfnDataDesc);
-    uint64_t tokenInfoSize = (sizeof(int32_t) * static_cast<uint64_t>(K) * BS + flagAndLayerIdSize) *
+    uint64_t tokenInfoSize = (sizeof(int32_t) * static_cast<uint64_t>(KPlus1) * BS + flagAndLayerIdSize) *
                              static_cast<uint64_t>(scheduleContext.common.micro_batch_num) *
                              static_cast<uint64_t>(scheduleContext.common.session_num);
     scheduleContext.ffn.token_info_buf_size = tokenInfoSize;
@@ -574,7 +576,7 @@ int main()
         for (uint32_t m = 0; m < scheduleContext.common.micro_batch_num; ++m) {
             *pInt++ = 1; // flag
             *pInt++ = 0; // layer_id
-            for (uint32_t i = 0; i < BS * K; ++i) {
+            for (uint32_t i = 0; i < BS * KPlus1; ++i) {
                 *pInt++ = static_cast<int32_t>(i % scheduleContext.common.expert_num); // expert_id
             }
         }
