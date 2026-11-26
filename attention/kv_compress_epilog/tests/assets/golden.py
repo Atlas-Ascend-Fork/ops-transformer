@@ -660,7 +660,10 @@ def _V2_encode_mxfp8_row(x_f32_row, d, fp8_dt, fp8_max, round_scale, group=_V2_G
         data[gi * group : gi * group + blk.shape[0]] = (
             np.asarray(q, np.float32).astype(fp8_dt).view(np.uint8)
         )
-        scales[gi] = np.float32(s).astype(_V2_BF16).view(np.uint16)
+        if np.isnan(s):
+            scales[gi] = np.uint16(0x7FFF)
+        else:
+            scales[gi] = np.float32(s).astype(_V2_BF16).view(np.uint16)
     return data, scales
 
 
