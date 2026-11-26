@@ -765,10 +765,16 @@ ge::graphStatus QuantSparseFlashMlaTiling::DoOpTiling(QSMLATilingInfo* tilingInf
     uint32_t outputType = static_cast<uint32_t>(tilingInfo->outputType);
     uint32_t qLayout = static_cast<uint32_t>(tilingInfo->qLayout);
     uint32_t inputKvLayout = static_cast<uint32_t>(tilingInfo->kvLayout);
-    uint64_t tilingKey = GET_TPL_TILING_KEY(0U, qLayout, inputKvLayout, static_cast<uint32_t>(perfMode_),
-                                            static_cast<uint32_t>(tilingInfo->gSize > 64), DTYPE_HIF8, vectorizeFlag,
-                                            static_cast<uint32_t>(tilingInfo->batchConsistency),
-                                            static_cast<uint32_t>(tilingInfo->topkValueMode));
+    uint64_t tilingKey = 0;
+    if (IsA6Arch(tilingInfo->npuArch)) {
+        tilingKey = GET_TPL_TILING_KEY(0U, qLayout, inputKvLayout, static_cast<uint32_t>(perfMode_),
+                                       static_cast<uint32_t>(tilingInfo->gSize > M_BASE_SIZE), DTYPE_HIF8);
+    } else {
+        tilingKey = GET_TPL_TILING_KEY(0U, qLayout, inputKvLayout, static_cast<uint32_t>(perfMode_),
+                                       static_cast<uint32_t>(tilingInfo->gSize > M_BASE_SIZE), DTYPE_HIF8,
+                                       vectorizeFlag, static_cast<uint32_t>(tilingInfo->batchConsistency),
+                                       static_cast<uint32_t>(tilingInfo->topkValueMode));
+    }
     context_->SetTilingKey(tilingKey);
     context_->SetScheduleMode(1);
 
