@@ -79,7 +79,8 @@
 - `hidden_states`必须为3维Tensor，`kv`和`weight_fused`必须为2维Tensor。
 - T大于等于0，H固定为4，D必须为64的正整数倍。T为0时支持空Tensor；H不等于4或D不满足约束时返回错误。
 - `hidden_states`、`kv`和`output`的数据类型必须一致，只支持FLOAT16和BFLOAT16；`weight_fused`及4个中间结果输出的数据类型必须为FLOAT32。
-- aclnn接口支持非连续输入，框架执行前会将输入转为连续Tensor；PyTorch接口要求3个输入均为连续Tensor。
+- aclnn接口支持非连续输入，框架执行前会将输入转为连续Tensor；aclnn接口的输出必须为连续Tensor。
+- PyTorch Eager和TorchAir图模式均支持非连续输入，由框架执行前转为连续Tensor。
 - 不支持输入与输出使用同一块Device内存，不支持原地更新。
 - 算子内部使用FLOAT32进行乘法、归约和门控计算，`output`转换为输入数据类型。
 - 确定性计算：aclnnEngramGate默认确定性实现，不使用跨核归约或原子累加。
@@ -89,6 +90,7 @@
 | 调用方式 | 样例代码 | 说明 |
 | :--- | :--- | :--- |
 | aclnn接口 | [test_aclnn_engram_gate.cpp](./examples/test_aclnn_engram_gate.cpp) | 通过[aclnnEngramGate](./docs/aclnnEngramGate.md)调用算子。 |
-| GE图模式 | [test_geir_engram_gate.cpp](./examples/test_geir_engram_gate.cpp) | 通过EngramGate GE IR原型构图并执行。 |
+| GE图模式 | [test_geir_engram_gate.cpp](./examples/test_geir_engram_gate.cpp) | 通过[EngramGate GE IR原型](./op_graph/engram_gate_proto.h)构图并执行。 |
+| PyTorch API | - | 通过[engram_gate](./docs/torchapi_engram_gate.md)调用算子。 |
 
 样例的编译与运行方式见[EngramGate调用示例](./examples/README.md)。

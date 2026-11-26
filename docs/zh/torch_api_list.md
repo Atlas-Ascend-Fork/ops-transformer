@@ -49,6 +49,7 @@
 |[compressor](../../attention/compressor/docs/torchapi_compressor.md)| 将每cmp_ratio个token的KV cache压缩成一个，然后每个token与这些压缩的KV cache进行DSA计算。| 默认支持确定性计算 | 默认支持确定性计算  |
 |[compressor_v2](../../attention/compressor/docs/torchapi_compressor_v2.md)| 将每cmp_ratio个token的KV cache压缩成一个，然后每个token与这些压缩的KV cache进行DSA计算，支持不传ape。| 默认支持确定性计算 | 默认支持确定性计算  |
 |[engram_fused_weight](../../engram/engram_fused_weight/docs/torchapi_engram_fused_weight.md)| 实现 Engram 门控的权重融合。 | - | 默认支持确定性计算 |
+|[engram_gate](../../engram/engram_gate/docs/torchapi_engram_gate.md)| 执行 Engram 残差门控前向计算。 | - | 默认支持确定性计算 |
 |[engram_hash](../../engram/engram_hash/docs/torchapi_engram_hash.md)| 实现 Engram 门控的 n-gram 哈希索引计算 | - | 默认支持确定性计算 |
 |[ElasticBuffer](../../mc2/common/docs/torchapi_ElasticBuffer.md)|统一的分布式Engram存储与MoE dispatch/combine通信buffer管理；配套get_engram_storage_size_hint、engram_fetch/engram_fetch_grad等接口。|-|-|
 |[dense_lightning_indexer_softmax_lse_metadata](../../attention/dense_lightning_indexer_softmax_lse_v2/docs/torchapi_dense_lightning_indexer_softmax_lse.md)| dense场景DenseLightningIndexerGradKlLoss算子计算Softmax输入的一个分支算子。支持压缩注意力（Compressed Attention），并支持通过metadata前置算子进行分核负载均衡。需与`dense_lightning_indexer_softmax_lse_metadata`配套使用。|-|默认支持确定性计算|

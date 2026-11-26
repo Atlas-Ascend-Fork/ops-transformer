@@ -10,7 +10,7 @@
 
 /*!
  * \file engram_gate_infershape.cpp
- * \brief EngramGate shape/dtype 推导
+ * \brief EngramGate shape 推导
  */
 #include "util/shape_util.h"
 #include <register/op_impl_registry.h>
@@ -76,16 +76,5 @@ graphStatus InferShape4EngramGate(gert::InferShapeContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
-graphStatus InferDtype4EngramGate(gert::InferDataTypeContext* context)
-{
-    // 主输出沿用输入类型，中间结果固定为 FP32。
-    context->SetOutputDataType(0, context->GetInputDataType(0));
-    context->SetOutputDataType(1, ge::DT_FLOAT);
-    context->SetOutputDataType(2, ge::DT_FLOAT);
-    context->SetOutputDataType(3, ge::DT_FLOAT);
-    context->SetOutputDataType(4, ge::DT_FLOAT);
-    return GRAPH_SUCCESS;
-}
-
-IMPL_OP_INFERSHAPE(EngramGate).InferShape(InferShape4EngramGate).InferDataType(InferDtype4EngramGate);
+IMPL_OP_INFERSHAPE(EngramGate).InferShape(InferShape4EngramGate);
 } // namespace ops

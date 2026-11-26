@@ -75,7 +75,8 @@ The `dot` output contains `raw_dot`, before normalization.
 - `hidden_states` must be three-dimensional; `kv` and `weight_fused` must be two-dimensional.
 - T is nonnegative, H is fixed at 4, and D must be a positive multiple of 64. An empty tensor is supported when T is 0; other H or D values are rejected.
 - `hidden_states`, `kv`, and `output` must have the same dtype, either FLOAT16 or BFLOAT16. `weight_fused` and the four intermediate outputs are FLOAT32.
-- The aclnn interface accepts noncontiguous inputs and converts them to contiguous tensors before execution. The PyTorch interface requires all three inputs to be contiguous.
+- The aclnn interface accepts noncontiguous inputs and converts them to contiguous tensors before execution. Its outputs must be contiguous tensors.
+- Both PyTorch eager and TorchAir graph modes accept noncontiguous inputs and convert them to contiguous tensors before execution.
 - Input and output cannot alias the same device memory; in-place updates are unsupported.
 - Multiplication, reduction, and gating use FLOAT32 internally; `output` is cast back to the input dtype.
 - `aclnnEngramGate` uses deterministic computation without cross-core reductions or atomic accumulation.
@@ -85,6 +86,7 @@ The `dot` output contains `raw_dot`, before normalization.
 | Method | Sample | Description |
 | :--- | :--- | :--- |
 | aclnn API | [test_aclnn_engram_gate.cpp](./examples/test_aclnn_engram_gate.cpp) | Calls the operator through [aclnnEngramGate](./docs/aclnnEngramGate.md). |
-| GE graph | [test_geir_engram_gate.cpp](./examples/test_geir_engram_gate.cpp) | Builds and executes a graph with the EngramGate GE IR prototype. |
+| GE graph | [test_geir_engram_gate.cpp](./examples/test_geir_engram_gate.cpp) | Builds and executes a graph with the [EngramGate GE IR prototype](./op_graph/engram_gate_proto.h). |
+| PyTorch API | - | Calls the operator through [engram_gate](./docs/torchapi_engram_gate.md). |
 
 See [EngramGate invocation samples](./examples/README_en.md) for build and run instructions.

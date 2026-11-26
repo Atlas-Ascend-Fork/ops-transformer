@@ -36,7 +36,7 @@ EngramGate(const at::Tensor& hiddenStates, const at::Tensor& kv, const at::Tenso
            double clampValue, bool saveForBackward)
 {
     // 仅校验维度 (推导输出 shape 所需); dtype/shape 链 (kv/weight 与 hidden_states 的一致性)
-    // 由 tiling 侧统一校验, 连续性由当前封装校验。
+    // 由 tiling 侧统一校验。Eager 路径通过 aclnn 调用，非连续输入由 AutoContiguous 处理。
     TORCH_CHECK(hiddenStates.dim() == HIDDEN_STATES_DIM_NUM,
                 "hidden_states must have shape (num_tokens, num_heads, head_dim), but got ", hiddenStates.dim(), "-D.");
     TORCH_CHECK(kv.dim() == KV_DIM_NUM, "kv must have shape (num_tokens, (num_heads + 1) * head_dim), but got ",
@@ -50,8 +50,6 @@ EngramGate(const at::Tensor& hiddenStates, const at::Tensor& kv, const at::Tenso
     TORCH_CHECK(hcMult == SUPPORTED_HEADS, "EngramGate requires H == ", SUPPORTED_HEADS, ", but got ", hcMult, ".");
     TORCH_CHECK(headDim > 0 && headDim % VECTOR_LANES == 0, "EngramGate requires D to be a positive multiple of ",
                 VECTOR_LANES, ", but got ", headDim, ".");
-    TORCH_CHECK(hiddenStates.is_contiguous() && kv.is_contiguous() && weightFused.is_contiguous(),
-                "EngramGate requires contiguous tensors");
     auto output = at::empty(hiddenStates.sizes(), hiddenStates.options());
     // save_for_backward 映射到同名属性：false 时中间结果输出为空 Tensor，kernel 跳过写出。
     auto statsOptions = hiddenStates.options().dtype(at::kFloat);

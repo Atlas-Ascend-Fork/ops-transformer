@@ -30,8 +30,9 @@ uint64_t AlignDownToVectorLanes(uint64_t value)
 bool CheckShape(gert::TilingContext* ctx, const char* name, const gert::Shape& got, const gert::Shape& expected)
 {
     if (got != expected) {
-        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), name, "mismatch",
-                                              "shape differs from EngramGate contract");
+        const auto reason = "shape must be " + Ops::Base::ToString(expected);
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), name, Ops::Base::ToString(got).c_str(),
+                                              reason.c_str());
         return false;
     }
     return true;
@@ -50,6 +51,7 @@ bool CheckDtype(gert::TilingContext* ctx, const char* name, ge::DataType got, ge
 ge::graphStatus CheckDtypesAndStats(gert::TilingContext* ctx, EngramGateTilingData& data, int64_t tokens, int64_t heads,
                                     ge::DataType dtype)
 {
+    constexpr const char* STAT_NAMES[] = {"dot", "gate_score", "rstd_x", "rstd_k"};
     auto kvDesc = ctx->GetInputDesc(1);
     auto wDesc = ctx->GetInputDesc(2);
     auto yDesc = ctx->GetOutputDesc(0);
@@ -67,11 +69,18 @@ ge::graphStatus CheckDtypesAndStats(gert::TilingContext* ctx, EngramGateTilingDa
         if (data.saveStats == 0 && stat == nullptr) {
             continue;
         }
-        OP_CHECK_NULL_WITH_CONTEXT(ctx, stat);
-        OP_CHECK_NULL_WITH_CONTEXT(ctx, desc);
+        const char* statName = STAT_NAMES[i - 1];
+        OP_CHECK_IF(stat == nullptr,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(ctx->GetNodeName(), statName, "nullptr",
+                                                          "must be provided when save_for_backward is true"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(desc == nullptr,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(ctx->GetNodeName(), statName, "missing descriptor",
+                                                          "output descriptor must be provided"),
+                    return ge::GRAPH_FAILED);
         const gert::Shape expected = data.saveStats != 0 ? gert::Shape{tokens, heads} : gert::Shape{0};
-        if (!CheckShape(ctx, "statistics", stat->GetStorageShape(), expected) ||
-            !CheckDtype(ctx, "statistics", desc->GetDataType(), ge::DT_FLOAT)) {
+        if (!CheckShape(ctx, statName, stat->GetStorageShape(), expected) ||
+            !CheckDtype(ctx, statName, desc->GetDataType(), ge::DT_FLOAT)) {
             return ge::GRAPH_FAILED;
         }
     }
@@ -80,22 +89,25 @@ ge::graphStatus CheckDtypesAndStats(gert::TilingContext* ctx, EngramGateTilingDa
 
 ge::graphStatus CheckDimensions(gert::TilingContext* ctx, int64_t tokens, int64_t heads, int64_t dim)
 {
+    const auto actualShape =
+        "[" + std::to_string(tokens) + ", " + std::to_string(heads) + ", " + std::to_string(dim) + "]";
     OP_CHECK_IF(tokens < 0,
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", "dimensions",
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", actualShape.c_str(),
                                                       "T must be non-negative"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(heads != SUPPORTED_HEADS,
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", "H", "H must be 4"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        heads != SUPPORTED_HEADS,
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", actualShape.c_str(), "H must be 4"),
+        return ge::GRAPH_FAILED);
     OP_CHECK_IF(dim <= 0 || dim % static_cast<int64_t>(VECTOR_LANES) != 0,
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", "D",
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", actualShape.c_str(),
                                                       "D must be a positive multiple of 64"),
                 return ge::GRAPH_FAILED);
     constexpr int64_t maxBytes = std::numeric_limits<int64_t>::max();
     // Check factors separately before forming any products, including H+1.
     OP_CHECK_IF(heads >= maxBytes / sizeof(float) || dim > maxBytes / sizeof(float) / (heads + 1) ||
                     tokens > maxBytes / sizeof(float) / ((heads + 1) * dim),
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "inputs", "byte size",
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", actualShape.c_str(),
                                                       "int64 address range exceeded"),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
@@ -113,7 +125,8 @@ ge::graphStatus CheckInputs(gert::TilingContext* ctx, EngramGateTilingData& data
     OP_CHECK_NULL_WITH_CONTEXT(ctx, y);
     const auto& shape = x->GetStorageShape();
     OP_CHECK_IF(shape.GetDimNum() != 3,
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states", "rank", "expected [T,H,D]"),
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(ctx->GetNodeName(), "hidden_states",
+                                                      Ops::Base::ToString(shape).c_str(), "expected [T,H,D]"),
                 return ge::GRAPH_FAILED);
     const int64_t tokens = shape.GetDim(0), heads = shape.GetDim(1), dim = shape.GetDim(2);
     if (CheckDimensions(ctx, tokens, heads, dim) != ge::GRAPH_SUCCESS) {

@@ -71,6 +71,24 @@ def _forward(
 def engram_gate(
     hidden_states, kv, weight_fused, eps=1e-6, clamp_value=1e-6, save_for_backward=True
 ):
+    """执行Engram残差门控前向计算。
+
+    Args:
+        hidden_states: FLOAT16或BFLOAT16 Tensor，shape为``(T, 4, D)``。
+        kv: 与``hidden_states``数据类型相同的Tensor，shape为``(T, 5 * D)``。
+        weight_fused: FLOAT32 Tensor，shape为``(4, D)``。
+        eps: RMS计算使用的有限正数，默认值为``1e-6``。
+        clamp_value: 带符号开方前的有限正数下限，默认值为``1e-6``。
+        save_for_backward: 是否返回四个FP32中间结果，默认值为``True``。
+
+    Returns:
+        五元素tuple。第一项为与``hidden_states``同shape、同数据类型的输出；
+        ``save_for_backward=True``时，其余四项为shape ``(T, 4)``的FP32 Tensor，
+        否则均为``None``。
+
+    Note:
+        Eager和TorchAir图模式均支持非连续输入，由框架自动转为连续Tensor。
+    """
     return torch.ops.cann_ops_transformer.engram_gate(
         hidden_states, kv, weight_fused, eps, clamp_value, save_for_backward
     )
