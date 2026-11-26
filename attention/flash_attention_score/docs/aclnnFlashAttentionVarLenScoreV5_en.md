@@ -210,7 +210,7 @@ aclnnStatus aclnnFlashAttentionVarLenScoreV5(
         <td>attenMaskOptional</td>
         <td>Optional input</td>
         <td>atten_mask in the formula.</td>
-        <td>The value 1 indicates that the bit does not participate in the computation, and 0 indicates that the bit participates in the computation.</td>
+        <td>The value 1 indicates that the bit does not participate in the computation, and 0 indicates that the bit participates in the computation. When queryRope and keyRope are passed, this input becomes mandatory and must not be empty.</td>
         <td>BOOL, UINT8</td>
         <td>ND</td>
         <td>[B,N,Sq,Skv], [B,1,Sq,Skv], [1,1,Sq,Skv], [Sq,Skv] </td>
@@ -563,6 +563,7 @@ aclnnStatus aclnnFlashAttentionVarLenScoreV5(
 - In the prefixOptional sparse computation scenario (sparseMode=6), when Sq > Skv, the N value of prefix ranges from [0, Skv]; when Sq <= Skv, the N value of prefix ranges from [Skv-Sq, Skv].
 - In the band scenario, preTokens and nextTokens must have an intersection.
 - The attenMaskOptional input does not support padding, meaning that attenMaskOptional cannot contain any row where all values are 1.
+- When queryRope and keyRope are passed, attenMaskOptional must not be empty; otherwise the API returns a parameter error (ACLNN_ERR_PARAM_INVALID).
 - The actualSeqQLenOptional input supports an S length of 0 for a certain batch. In this case, the optional input realShiftOptional is not supported. For example, if the actual S lengths are [2, 2, 0, 2, 2], the actualSeqQLenOptional passed in should be [2, 4, 4, 6, 8].
 - softmaxOutLayout supports the following input values: an empty string or "same_as_input".
 

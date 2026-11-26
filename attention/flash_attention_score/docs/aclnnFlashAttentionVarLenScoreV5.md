@@ -208,7 +208,7 @@ aclnnStatus aclnnFlashAttentionVarLenScoreV5(
         <td>attenMaskOptional</td>
         <td>可选输入</td>
         <td>公式中的atten_mask。</td>
-        <td>取值为1代表该位不参与计算，为0代表该位参与计算。</td>
+        <td>取值为1代表该位不参与计算，为0代表该位参与计算。传入queryRope、keyRope时，该输入变为必选，不能为空。</td>
         <td>BOOL、UINT8</td>
         <td>ND</td>
         <td>[B,N,Sq,Skv]、[B,1,Sq,Skv]、[1,1,Sq,Skv]、[Sq,Skv] </td>
@@ -561,6 +561,7 @@ aclnnStatus aclnnFlashAttentionVarLenScoreV5(
 - prefixOptional稀疏计算场景即sparseMode=6，当Sq > Skv时，prefix的N值取值范围\[0, Skv\]，当Sq <= Skv时，prefix的N值取值范围\[Skv-Sq, Skv\]。
 - band场景，preTokens和nextTokens之间必须要有交集。
 - attenMaskOptional输入不支持补pad，即attenMaskOptional中不能存在某一行全1的场景。
+- 传入queryRope、keyRope时，attenMaskOptional不能为空，否则接口返回参数错误（ACLNN_ERR_PARAM_INVALID）。
 - actualSeqQLenOptional输入支持某个Batch上的S长度为0，此时不支持可选输入realShiftOptional，假设真实的S长度为\[2,2,0,2,2\]，则传入的actualSeqQLenOptional为\[2,4,4,6,8\]。
 - softmaxOutLayout支持传入：空字符串、"same_as_input"。其他取值按空字符串处理（NTD 排布），并输出告警日志。
 
