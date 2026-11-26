@@ -25,6 +25,8 @@
 
 - 接口功能：aclnnMoeTokenUnpermuteWithEp的反向传播。
 - 计算公式：
+  公式中的rangeOptional表示归一化、裁剪后的有效区间；未设置时为[0, N)，其中N为sortedIndices的长度。
+
   - probs非None计算公式如下，其中$i \in {0, 1, 2, ..., num\_tokens - 1}$：
     - 首先计算unpermutedTokens：
       - 当rangeOptional[0] <= sortedIndices[i] < rangeOptional[1]时：
@@ -56,7 +58,7 @@
     - 最后，当rangeOptional[0] <= sortedIndices[i] < rangeOptional[1]时：
 
       $$
-      permutedTokensGradOut[sortedIndices[i]] = ((unpermutedTokensGrad.unsqueeze(1) * probs.unsqueeze(-1)).reshape(-1, hiddenSize))[i]
+      permutedTokensGradOut[sortedIndices[i]-rangeOptional[0]] = ((unpermutedTokensGrad.unsqueeze(1) * probs.unsqueeze(-1)).reshape(-1, hiddenSize))[i]
       $$
 
   - probs为None计算公式如下，其中$i \in {0, 1, 2, ..., num\_tokens - 1}$：
@@ -135,7 +137,7 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
       <td>sortedIndices（aclTensor）</td>
       <td>输入</td>
       <td>公式中的sortedIndices。</td>
-      <td>索引取值范围[0, tokens_num * topK - 1]，设置rangeOptional时仅处理range范围内元素。</td>
+      <td>索引取值范围[0, tokens_num * topK - 1]，设置rangeOptional时仅处理range范围内元素。device侧索引值由调用侧保证合法，接口入参校验不涉及其具体取值。</td>
       <td>INT32</td>
       <td>ND</td>
       <td>(tokens_num * topK)</td>
@@ -195,7 +197,7 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
       <td>topkNum（int64_t）</td>
       <td>输入</td>
       <td>公式中的topkNum，每个token被选中的专家个数。</td>
-      <td>probsOptional不传入时作为有效topK；probsOptional传入时调用侧应保证topkNum与probsOptional第2维语义一致。有效topK取值范围为[1, 512]。</td>
+      <td>probsOptional不传入时作为有效topK；probsOptional传入时调用侧应保证topkNum与probsOptional第2维语义一致，有效topK以该维度为准。有效topK取值范围为[1, 512]。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -248,7 +250,7 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
 
   aclnnStatus：返回状态码，具体参见[aclnn返回码](../../../docs/zh/context/aclnn_return_code.md)。
 
-  第一段接口完成入参校验，出现以下场景时报错：
+  第一段接口在参数校验或Tiling阶段出现以下场景时返回对应错误码：
 
   <table style="undefined;table-layout: fixed; width: 1155px"><colgroup>
   <col style="width: 320px">
@@ -276,10 +278,10 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
     <tr>
       <td rowspan="3"> ACLNN_ERR_INNER_TILING_ERROR </td>
       <td rowspan="3"> 561002 </td>
-      <td>topkNum > 512。</td>
+      <td>有效topK不在[1, 512]范围内。</td>
     </tr>
     <tr>
-      <td>输入和输出的shape不符合要求。</td>
+      <td>输入和输出（包括probsOptional）的shape不符合要求。</td>
     </tr>
     <tr>
       <td>rangeOptional[1] < rangeOptional[0]。</td>
@@ -333,9 +335,9 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
 
 - 确定性说明：aclnnMoeTokenUnpermuteWithEpGrad默认确定性实现。
 
-- Shape匹配约束：不支持broadcast，各输入、输出shape需显式匹配。permutedTokensOptional传入时其第0维需等于sortedIndices第0维、第1维需等于unpermutedTokensGrad第1维（hidden_size）；probsOptional传入时其第0维需等于unpermutedTokensGrad第0维（tokens_num）；permutedTokensGradOut第0维需等于sortedIndices第0维、第1维需等于hidden_size；probsOptional传入时probsGradOut需与probsOptional一致。
+- Shape匹配约束：不支持broadcast。默认使用全量布局(N, hidden_size)，N为sortedIndices长度。设置rangeOptional时，允许permutedTokensOptional与permutedTokensGradOut同时使用局部布局(L, hidden_size)，L为归一化区间长度且L>0；两者行数必须相同，不支持全量/局部混搭。数据按sortedIndices[i]-start存放。permutedTokensOptional不传入时输出仍须为全量布局。probsOptional第0维等于tokens_num，probsGradOut的shape与probsOptional一致。参数表列出的是全量布局。
 
-- 有效topK约束：probsOptional传入时有效topK为probsOptional第2维，probsOptional不传入时有效topK为topkNum（默认1），有效topK取值范围为[1, 512]。
+- 有效topK约束：probsOptional传入时有效topK为probsOptional第2维，probsOptional不传入时有效topK为topkNum（默认1），有效topK取值范围为[1, 512]。topkNum超出[1, 512]时记录WARNING，后续处理以有效topK及shape约束为准。
 
 - rangeOptional约束：支持nullptr（不生效，全程处理）或长度为2的aclIntArray。传入时支持负值（按tokens_num \* topK归一化），会被裁剪到[0, tokens_num * topK]范围内，表示左闭右开区间[start, end)，要求归一化后start <= end，且仅该范围内sortedIndices元素参与写入。
 

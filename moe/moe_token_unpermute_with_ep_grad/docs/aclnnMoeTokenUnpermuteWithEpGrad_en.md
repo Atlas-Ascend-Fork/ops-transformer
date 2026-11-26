@@ -27,6 +27,8 @@
 
 - Description: Backward propagation of aclnnMoeTokenUnpermuteWithEp.
 - Formula:
+  In the formulas, rangeOptional denotes the normalized and clipped effective range. If not specified, the range is [0, N), where N is the length of sortedIndices.
+
   - When probs is not None, the formula is as follows, where $i \in {0, 1, 2, ..., num\_tokens - 1}$:
     - First, calculate unpermutedTokens:
       - When rangeOptional[0] <= sortedIndices[i] < rangeOptional[1]:
@@ -58,7 +60,7 @@
     - Finally, when rangeOptional[0] <= sortedIndices[i] < rangeOptional[1]:
 
       $$
-      permutedTokensGradOut[sortedIndices[i]] = ((unpermutedTokensGrad.unsqueeze(1) * probs.unsqueeze(-1)).reshape(-1, hiddenSize))[i]
+      permutedTokensGradOut[sortedIndices[i]-rangeOptional[0]] = ((unpermutedTokensGrad.unsqueeze(1) * probs.unsqueeze(-1)).reshape(-1, hiddenSize))[i]
       $$
 
   - When probs is None, the formula is as follows, where $i \in {0, 1, 2, ..., num\_tokens - 1}$:
@@ -137,7 +139,7 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
       <td>sortedIndices (aclTensor)</td>
       <td>Input</td>
       <td>sortedIndices in the formula.</td>
-      <td>Index value range: [0, tokens_num * topK - 1]. When rangeOptional is set, only elements in the range are processed.</td>
+      <td>Index value range: [0, tokens_num * topK - 1]. When rangeOptional is set, only elements in the range are processed. The caller is responsible for valid device-side index values; their contents are outside the scope of API parameter validation.</td>
       <td>INT32</td>
       <td>ND</td>
       <td>(tokens_num * topK)</td>
@@ -197,7 +199,7 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
       <td>topkNum (int64_t)</td>
       <td>Input</td>
       <td>topkNum in the formula. Number of experts selected for each token.</td>
-      <td>Serves as the valid topK when probsOptional is not passed in; when probsOptional is passed in, the caller must ensure that topkNum is semantically consistent with the second dimension of probsOptional. The value range of valid topK is [1, 512].</td>
+      <td>Defines effective topK when probsOptional is absent. When probsOptional is present, the caller should keep topkNum semantically consistent with its second dimension, which determines effective topK. Effective topK must be in [1, 512].</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -250,7 +252,7 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
 
   aclnnStatus: return status code. For details, see [aclnn Return Codes](../../../docs/en/context/aclnn_return_code.md).
 
-  The first-phase API performs input parameter validation and returns an error in the following scenarios:
+  The first-phase API returns the corresponding error code for the following scenarios during parameter validation or tiling:
 
   <table style="undefined;table-layout: fixed; width: 1155px"><colgroup>
   <col style="width: 320px">
@@ -278,10 +280,10 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
     <tr>
       <td rowspan="3"> ACLNN_ERR_INNER_TILING_ERROR </td>
       <td rowspan="3"> 561002 </td>
-      <td>topkNum > 512.</td>
+      <td>Effective topK is outside [1, 512].</td>
     </tr>
     <tr>
-      <td>The shape of the input or output does not meet the requirements.</td>
+      <td>The shape of an input or output, including probsOptional, does not meet the requirements.</td>
     </tr>
     <tr>
       <td>rangeOptional[1] < rangeOptional[0].</td>
@@ -335,9 +337,9 @@ aclnnStatus aclnnMoeTokenUnpermuteWithEpGrad(
 
 - Determinism: aclnnMoeTokenUnpermuteWithEpGrad defaults to a deterministic implementation.
 
-- Shape matching constraints: broadcast is not supported, and the shapes of all inputs and outputs must match explicitly. When permutedTokensOptional is passed in, its 0th dimension must equal the 0th dimension of sortedIndices, and its 1st dimension must equal the 1st dimension of unpermutedTokensGrad (hidden_size); when probsOptional is passed in, its 0th dimension must equal the 0th dimension of unpermutedTokensGrad (tokens_num); the 0th dimension of permutedTokensGradOut must equal the 0th dimension of sortedIndices, and its 1st dimension must equal hidden_size; when probsOptional is passed in, probsGradOut must be consistent with probsOptional.
+- Shape matching constraints: broadcast is not supported. The default full layout is (N, hidden_size), where N is the length of sortedIndices. With rangeOptional, permutedTokensOptional and permutedTokensGradOut may both use (L, hidden_size), where L is the normalized range length and L>0. Their row counts must match; full/local mixing is not supported. Data is addressed by sortedIndices[i]-start. If permutedTokensOptional is absent, the output must use the full layout. probsOptional must have tokens_num rows, and probsGradOut must have the same shape as probsOptional. Parameter tables describe the full layout.
 
-- Effective topK constraint: when probsOptional is passed in, the effective topK is the 2nd dimension of probsOptional; when probsOptional is not passed in, the effective topK is topkNum (default 1). The effective topK is in the range of [1, 512].
+- Effective topK constraint: when probsOptional is passed in, the effective topK is the 2nd dimension of probsOptional; when probsOptional is not passed in, the effective topK is topkNum (default 1). The effective topK is in the range of [1, 512]. A WARNING is logged when topkNum is outside [1, 512]; subsequent processing follows the effective topK and shape constraints.
 
 - rangeOptional constraint: nullptr (no effect, but processed throughout) or an aclIntArray of length 2 is supported. When passed in, negative values are supported (normalized by tokens_num * topK) and are clipped to the range [0, tokens_num* topK], which represents a left-closed and right-open interval [start, end). After normalization, start <= end is required, and only sortedIndices elements within this range participate in the write.
 

@@ -15,6 +15,7 @@
 #include <iostream>
 #include <map>
 #include <vector>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -768,4 +769,88 @@ TEST_F(MoeTokenUnpermuteWithEpGradTiling, test_tiling_parse)
 
     auto ret = opImpl->tiling_parse(reinterpret_cast<gert::KernelContext*>(parseContext));
     EXPECT_EQ(ret, ge::GRAPH_SUCCESS);
+}
+
+namespace {
+struct EpShapeCase {
+    const char* name;
+    int64_t inputRows;
+    int64_t outputRows;
+    vector<int64_t> range;
+    int64_t topK = 3;
+    int64_t outputHidden = 64;
+    int64_t probsOutputK = 3;
+    bool success = true;
+};
+
+void CheckEpShapeCase(const EpShapeCase& test, bool hasProbs, const string& soc)
+{
+    SCOPED_TRACE(test.name);
+    SCOPED_TRACE(soc);
+    SCOPED_TRACE(hasProbs);
+    gert::StorageShape grad = {{10, 64}, {10, 64}};
+    gert::StorageShape indices = {{30}, {30}};
+    gert::StorageShape tokens = {{test.inputRows, 64}, {test.inputRows, 64}};
+    gert::StorageShape probs = {{10, 3}, {10, 3}};
+    gert::StorageShape out = {{test.outputRows, test.outputHidden}, {test.outputRows, test.outputHidden}};
+    gert::StorageShape probOut = {{10, test.probsOutputK}, {10, test.probsOutputK}};
+    vector<gert::TilingContextPara::TensorDescription> inputs = {{grad, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                                                 {indices, ge::DT_INT32, ge::FORMAT_ND},
+                                                                 {tokens, ge::DT_FLOAT16, ge::FORMAT_ND}};
+    if (hasProbs) {
+        inputs.emplace_back(probs, ge::DT_FLOAT16, ge::FORMAT_ND);
+    }
+    struct MoeTokenUnpermuteWithEpGradCompileInfo {
+    } compileInfo;
+    gert::TilingContextPara para("MoeTokenUnpermuteWithEpGrad", inputs,
+                                 {{out, ge::DT_FLOAT16, ge::FORMAT_ND}, {probOut, ge::DT_FLOAT16, ge::FORMAT_ND}},
+                                 {{"padded_mode", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                  {"restore_shape", Ops::Transformer::AnyValue::CreateFrom<vector<int64_t>>({1, 1})},
+                                  {"range", Ops::Transformer::AnyValue::CreateFrom<vector<int64_t>>(test.range)},
+                                  {"topk_num", Ops::Transformer::AnyValue::CreateFrom<int64_t>(test.topK)}},
+                                 &compileInfo, soc);
+    ExecuteTestCase(para, test.success ? ge::GRAPH_SUCCESS : ge::GRAPH_FAILED, hasProbs ? 1 : 0);
+}
+} // namespace
+
+TEST_F(MoeTokenUnpermuteWithEpGradTiling, ep_buffer_layouts)
+{
+    const vector<EpShapeCase> cases = {{"full", 30, 30, {0, 30}},
+                                       {"local", 12, 12, {5, 17}},
+                                       {"full_input_local_output", 30, 12, {5, 17}, 3, 64, 3, false},
+                                       {"local_input_full_output", 12, 30, {5, 17}, 3, 64, 3, false},
+                                       {"start_zero", 12, 12, {0, 12}},
+                                       {"negative_range", 12, 12, {-25, -13}},
+                                       {"clipped_range", 25, 25, {5, 100}},
+                                       {"empty_local_buffer", 0, 0, {5, 5}, 3, 64, 3, false},
+                                       {"empty_range_full_buffer", 30, 30, {5, 5}},
+                                       {"full_buffers_ep", 30, 30, {5, 17}},
+                                       {"output_too_small", 12, 11, {5, 17}, 3, 64, 3, false},
+                                       {"output_too_large", 12, 31, {5, 17}, 3, 64, 3, false},
+                                       {"output_hidden", 12, 12, {5, 17}, 3, 32, 3, false},
+                                       {"input_too_small", 11, 12, {5, 17}, 3, 64, 3, false},
+                                       {"input_too_large", 31, 12, {5, 17}, 3, 64, 3, false},
+                                       {"reversed_range", 30, 30, {17, 5}, 3, 64, 3, false},
+                                       {"range_wrong_length", 30, 30, {0}, 3, 64, 3, false}};
+    for (const string soc : {"Ascend910B", "Ascend950"}) {
+        for (bool hasProbs : {false, true}) {
+            for (const auto& test : cases) {
+                CheckEpShapeCase(test, hasProbs, soc);
+            }
+        }
+    }
+}
+
+TEST_F(MoeTokenUnpermuteWithEpGradTiling, effective_topk_compatibility)
+{
+    for (const string soc : {"Ascend910B", "Ascend950"}) {
+        for (const int64_t scalar : {std::numeric_limits<int64_t>::min(), int64_t{-1}, int64_t{0}, int64_t{1},
+                                     int64_t{513}, std::numeric_limits<int64_t>::max()}) {
+            CheckEpShapeCase({"probs_defines_topk", 12, 12, {5, 17}, scalar}, true, soc);
+            if (scalar < 1 || scalar > 512) {
+                CheckEpShapeCase({"invalid_scalar_without_probs", 12, 12, {5, 17}, scalar, 64, 3, false}, false, soc);
+            }
+        }
+        CheckEpShapeCase({"probs_output_mismatch", 12, 12, {5, 17}, 3, 64, 2, false}, true, soc);
+    }
 }

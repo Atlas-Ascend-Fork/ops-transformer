@@ -16,6 +16,7 @@
 #include <vector>
 #include <string>
 #include <iostream>
+#include <limits>
 #include "moe_token_unpermute_with_ep_grad_tiling.h"
 #include "op_host/tiling_util.h"
 
@@ -407,7 +408,7 @@ static bool SetStartEndInfoForTiling4MoeTokenUnpermuteWithEpGrad(gert::TilingCon
         OP_CHECK_IF(epRangePtr->GetSize() != EP_RANGE_SIZE,
                     OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "range",
                                                              "the size of range only support 2"),
-                    return ge::GRAPH_FAILED);
+                    return false);
         const int64_t* epRangeList = static_cast<const int64_t*>(epRangePtr->GetData());
         const bool isRangeNone = isRegbase && (epRangeList[0] == -1 && epRangeList[1] == -1);
         if (!isRangeNone) {
@@ -424,6 +425,11 @@ static bool SetStartEndInfoForTiling4MoeTokenUnpermuteWithEpGrad(gert::TilingCon
             }
         }
     }
+    // Keep full buffers compatible; only admit matching EP-local buffers as an extension.
+    OP_CHECK_IF(numOutTokens != totalNum && numOutTokens != end - start,
+                OP_LOGE(context->GetNodeName(), "permutedTokens rows must equal full rows (%ld) or EP rows (%ld).",
+                        totalNum, end - start),
+                return false);
     if (start != 0) {
         numOutTokens = end;
     }
@@ -461,6 +467,9 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
         OP_LOGW(context->GetNodeName(), "[MoeTokenUnpermuteWithEpGrad] topkNum should be in [1, 512], but got %ld.",
                 topK);
     }
+    OP_CHECK_IF(probShape == nullptr && (topK < 1 || topK > MAX_TOPK),
+                OP_LOGE(context->GetNodeName(), "topkNum should be in [1, 512], but got %ld.", topK),
+                return ge::GRAPH_FAILED);
     int64_t totalNum = 0;
     int64_t numOutTokens = 0;
 
@@ -516,7 +525,7 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
         totalNum = rowMapStorageShape.GetDim(DIM_0);
         if (shouldCheckTotalNum) {
             OP_CHECK_IF(
-                totalNum != tokensNum * topK,
+                tokensNum < 0 || tokensNum > std::numeric_limits<int64_t>::max() / topK || totalNum != tokensNum * topK,
                 OP_LOGE(context->GetNodeName(),
                         "[MoeTokenUnpermuteWithEpGrad] sortedIndices dim0 should equal tokensNum * topK, but got "
                         "%ld, %ld and %ld.",
@@ -532,13 +541,6 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
                                 "[MoeTokenUnpermuteWithEpGrad] permutedTokens dim number should be 2, but got %zu.",
                                 permutedTokensStorageShape.GetDimNum()),
                         return ge::GRAPH_FAILED);
-            OP_CHECK_IF(
-                permutedTokensStorageShape.GetDim(DIM_0) != totalNum,
-                OP_LOGE(context->GetNodeName(),
-                        "[MoeTokenUnpermuteWithEpGrad] permutedTokens dim0 should equal sortedIndices dim0, but "
-                        "got %ld and %ld.",
-                        permutedTokensStorageShape.GetDim(DIM_0), totalNum),
-                return ge::GRAPH_FAILED);
             OP_CHECK_IF(
                 permutedTokensStorageShape.GetDim(DIM_1) != hiddenSize,
                 OP_LOGE(context->GetNodeName(),
@@ -568,6 +570,29 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
                                                            permutedTokensShape->GetStorageShape().GetDim(DIM_0);
     }
 
+    if (permutedTokensShape != nullptr) {
+        const auto& shape = permutedTokensShape->GetStorageShape();
+        OP_CHECK_IF(shape.GetDimNum() != DIM_NUM_TWO || shape.GetDim(DIM_1) != hiddenSize,
+                    OP_LOGE(context->GetNodeName(), "permutedTokens must have rank 2 and hidden_size columns."),
+                    return ge::GRAPH_FAILED);
+    }
+    // Output rows follow the supplied buffer; full/local input-output mixing is not supported.
+    const auto* tokensGradShape = context->GetOutputShape(0);
+    OP_CHECK_NULL_WITH_CONTEXT(context, tokensGradShape);
+    const auto& tokensGrad = tokensGradShape->GetStorageShape();
+    OP_CHECK_IF(
+        numOutTokens < 0 || (numOutTokens == 0 && totalNum != 0) || tokensGrad.GetDimNum() != DIM_NUM_TWO ||
+            tokensGrad.GetDim(DIM_0) != numOutTokens || tokensGrad.GetDim(DIM_1) != hiddenSize,
+        OP_LOGE(context->GetNodeName(), "permutedTokensGradOut shape must be (%ld, %ld).", numOutTokens, hiddenSize),
+        return ge::GRAPH_FAILED);
+    if (probShape != nullptr) {
+        const auto* probsGradShape = context->GetOutputShape(1);
+        OP_CHECK_NULL_WITH_CONTEXT(context, probsGradShape);
+        OP_CHECK_IF(probsGradShape->GetStorageShape() != probShape->GetStorageShape(),
+                    OP_LOGE(context->GetNodeName(), "probsGradOut shape must match probsOptional."),
+                    return ge::GRAPH_FAILED);
+    }
+
     tiling.set_tokensNum(tokensNum);
     tiling.set_topK(topK);
     tiling.set_hiddenSize(hiddenSize);
@@ -587,7 +612,7 @@ static ge::graphStatus SetTilingForTiling4MoeTokenUnpermuteWithEpGrad(gert::Tili
                                                          "[MoeTokenUnpermuteWithEpGrad] input shape has 0."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(
-        topK > MAX_TOPK,
+        topK < 1 || topK > MAX_TOPK,
         OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
             context->GetNodeName(), "num_topk", "[MoeTokenUnpermuteWithEpGrad] topK only support no greater than 512."),
         return ge::GRAPH_FAILED);
