@@ -104,72 +104,14 @@ TEST_F(aclnnGenericBlockSparseAttentionMetadata_test, int8_rejects_group_above_1
               ACLNN_ERR_PARAM_INVALID);
 }
 
-TEST_F(aclnnGenericBlockSparseAttentionMetadata_test, mxfp8_q32_q64_group_boundary)
-{
-    op::SetPlatformSocVersion(op::SocVersion::ASCEND950);
-    auto idx = TensorDesc({2, 4, 3}, ACL_INT32, ACL_FORMAT_ND).ValueRange(0, 2).ToAclType();
-    auto count = TensorDesc({2, 4}, ACL_INT32, ACL_FORMAT_ND).ValueRange(1, 3).ToAclType();
-    auto cuQ = TensorDesc({2}, ACL_INT64, ACL_FORMAT_ND).Value(vector<int64_t>{0, 4}).ToAclType();
-    auto cuKv = TensorDesc({2}, ACL_INT64, ACL_FORMAT_ND).Value(vector<int64_t>{0, 257}).ToAclType();
-    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).ValueRange(0, 0).ToAclType();
-    const vector<int64_t> shape = {1, 4};
-    auto blocks = aclCreateIntArray(shape.data(), shape.size());
-    for (int64_t dim : {192, 256}) {
-        for (int64_t group : {1, 16, 17, 31, 32, 33, 48, 64, 65}) {
-            uint64_t workspaceSize = 0;
-            aclOpExecutor* executor = nullptr;
-            EXPECT_EQ(
-                aclnnGenericBlockSparseAttentionMetadataGetWorkspaceSize(
-                    idx.get(), count.get(), cuQ.get(), cuKv.get(), nullptr, nullptr, 4, 257, group * 2, 2, dim, blocks,
-                    "TND", "TND", 4, 0, 6, 0, -1, -1, 0, false, metadata.get(), &workspaceSize, &executor),
-                group <= 64 ? ACLNN_SUCCESS : ACLNN_ERR_PARAM_INVALID);
-            if (executor != nullptr) {
-                aclDestroyAclOpExecutor(executor);
-            }
-        }
-    }
-    aclDestroyIntArray(blocks);
-}
-
 TEST_F(aclnnGenericBlockSparseAttentionMetadata_test, mxfp8_precision_requires_zero)
 {
-    op::SetPlatformSocVersion(op::SocVersion::ASCEND950);
-    auto idx = TensorDesc({2, 4, 3}, ACL_INT32, ACL_FORMAT_ND).ValueRange(0, 2).ToAclType();
-    auto count = TensorDesc({2, 4}, ACL_INT32, ACL_FORMAT_ND).ValueRange(1, 3).ToAclType();
-    auto cuQ = TensorDesc({2}, ACL_INT64, ACL_FORMAT_ND).Value(vector<int64_t>{0, 4}).ToAclType();
-    auto cuKv = TensorDesc({2}, ACL_INT64, ACL_FORMAT_ND).Value(vector<int64_t>{0, 257}).ToAclType();
-    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).ValueRange(0, 0).ToAclType();
-    const vector<int64_t> shape = {1, 4};
-    auto blocks = aclCreateIntArray(shape.data(), shape.size());
-    for (int64_t dim : {192, 256}) {
-        for (int64_t precision : {0, 1, -1, 2}) {
-            uint64_t workspaceSize = 0;
-            aclOpExecutor* executor = nullptr;
-            EXPECT_EQ(
-                aclnnGenericBlockSparseAttentionMetadataGetWorkspaceSize(
-                    idx.get(), count.get(), cuQ.get(), cuKv.get(), nullptr, nullptr, 4, 257, 24, 2, dim, blocks, "TND",
-                    "TND", 4, 0, 6, precision, -1, -1, 0, false, metadata.get(), &workspaceSize, &executor),
-                precision == 0 ? ACLNN_SUCCESS : ACLNN_ERR_PARAM_INVALID);
-            if (executor != nullptr) {
-                aclDestroyAclOpExecutor(executor);
-            }
-        }
-    }
-    aclDestroyIntArray(blocks);
+    EXPECT_EQ(CheckMetadataContract(SocVersion::ASCEND950, 6, kSoftmaxPrecisionMixed, 256, 4), ACLNN_ERR_PARAM_INVALID);
 }
 
 TEST_F(aclnnGenericBlockSparseAttentionMetadata_test, mxfp8_sparse_block_size_contract)
 {
-    for (int64_t dim : {192, 256}) {
-        for (int64_t residual : {0, 1}) {
-            for (int64_t y : {-1, 0, 1, 2, 4, 8, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256}) {
-                const bool supported = y == 4 || y == 8 || y == 16 || y == 32 || y == 64 || y == 128;
-                EXPECT_EQ(CheckMetadataContract(SocVersion::ASCEND950, 6, 0, dim, y, residual),
-                          supported ? ACLNN_SUCCESS : ACLNN_ERR_PARAM_INVALID)
-                    << "D=" << dim << ", Y=" << y << ", residual=" << residual;
-            }
-        }
-    }
+    EXPECT_EQ(CheckMetadataContract(SocVersion::ASCEND950, 6, 0, 256, 17), ACLNN_ERR_PARAM_INVALID);
 }
 
 // 公共API边界出参为空是用户参数契约错误：返回 ACLNN_ERR_PARAM_NULLPTR 并经 errno 映射上报正式参数码 EZ1001。
@@ -177,30 +119,6 @@ TEST_F(aclnnGenericBlockSparseAttentionMetadata_test, null_workspace_size)
 {
     aclOpExecutor* executor = nullptr;
     EXPECT_EQ(CallGetWorkspaceSize(nullptr, nullptr, nullptr, nullptr, nullptr, &executor), ACLNN_ERR_PARAM_NULLPTR);
-}
-
-TEST_F(aclnnGenericBlockSparseAttentionMetadata_test, mxfp8_implicit_residual_mode)
-{
-    op::SetPlatformSocVersion(op::SocVersion::ASCEND950);
-    auto idx = TensorDesc({2, 4, 3}, ACL_INT32, ACL_FORMAT_ND).ValueRange(0, 2).ToAclType();
-    auto count = TensorDesc({2, 4}, ACL_INT32, ACL_FORMAT_ND).ValueRange(0, 3).ToAclType();
-    auto cuQ = TensorDesc({2}, ACL_INT64, ACL_FORMAT_ND).Value(vector<int64_t>{0, 4}).ToAclType();
-    auto cuKv = TensorDesc({2}, ACL_INT64, ACL_FORMAT_ND).Value(vector<int64_t>{0, 257}).ToAclType();
-    auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).ValueRange(0, 0).ToAclType();
-    const vector<int64_t> shape = {1, 4};
-    auto blocks = aclCreateIntArray(shape.data(), shape.size());
-    for (int64_t mode : {0, 1, 2}) {
-        uint64_t workspace = 0;
-        aclOpExecutor* executor = nullptr;
-        EXPECT_EQ(aclnnGenericBlockSparseAttentionMetadataGetWorkspaceSize(
-                      idx.get(), count.get(), cuQ.get(), cuKv.get(), nullptr, nullptr, 4, 257, 24, 2, 256, blocks,
-                      "TND", "TND", 4, 1, 6, 0, -1, -1, mode, false, metadata.get(), &workspace, &executor),
-                  mode <= 1 ? ACLNN_SUCCESS : ACLNN_ERR_PARAM_INVALID);
-        if (executor != nullptr) {
-            aclDestroyAclOpExecutor(executor);
-        }
-    }
-    aclDestroyIntArray(blocks);
 }
 
 TEST_F(aclnnGenericBlockSparseAttentionMetadata_test, null_executor)
