@@ -225,12 +225,23 @@ void QfaInfoParser::GetInputParaInfo()
     opParamInfo_.vDescale.shape = context_->GetInputShape(V_DESCALE_INDEX);
 
     if (npuArch_ != NpuArch::DAV_2201) {
+        // 各输入分别判断是否为 view，仅对 view 输入读取 stride，
+        // 避免 key 为 view 而其余输入非 view 时出现空指针或紧凑 stride 越界
         if (context_->InputIsView(KEY_INDEX) == true) {
-            hasStride_ = true;
             keyStrides_ = context_->GetInputStride(KEY_INDEX);
+            hasStride_ = true;
+        }
+        if (context_->InputIsView(VALUE_INDEX) == true) {
             valueStrides_ = context_->GetInputStride(VALUE_INDEX);
+            hasStride_ = true;
+        }
+        if (context_->InputIsView(K_DESCALE_INDEX) == true) {
             kDescaleStrides_ = context_->GetInputStride(K_DESCALE_INDEX);
+            hasStride_ = true;
+        }
+        if (context_->InputIsView(V_DESCALE_INDEX) == true) {
             vDescaleStrides_ = context_->GetInputStride(V_DESCALE_INDEX);
+            hasStride_ = true;
         }
     } else {
         if (context_->InputIsView(KEY_INDEX) == true) {

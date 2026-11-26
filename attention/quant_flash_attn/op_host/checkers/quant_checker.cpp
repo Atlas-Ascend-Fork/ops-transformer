@@ -1262,6 +1262,20 @@ ge::graphStatus QuantChecker::CheckFeature(const QfaTilingInfo& qfaInfo)
                                                           "HIF8 only supports head_dim_v = 128"),
                     return ge::GRAPH_FAILED);
     }
+    if (qfaInfo.quantMode ==
+        QfaQuantMode::A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) {
+        constexpr int64_t GQA_FP8_HEAD_DIM = 128;
+        OP_CHECK_IF(
+            qfaInfo.qkHeadDim != GQA_FP8_HEAD_DIM,
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfaInfo.opName, "head_dim", std::to_string(qfaInfo.qkHeadDim).c_str(),
+                                                  "GQA FP8 fullquant only supports head_dim = 128"),
+            return ge::GRAPH_FAILED);
+        OP_CHECK_IF(qfaInfo.vHeadDim != GQA_FP8_HEAD_DIM,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(qfaInfo.opName, "head_dim_v",
+                                                          std::to_string(qfaInfo.vHeadDim).c_str(),
+                                                          "GQA FP8 fullquant only supports head_dim_v = 128"),
+                    return ge::GRAPH_FAILED);
+    }
     if (CheckShapeMatch(qfaInfo) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
