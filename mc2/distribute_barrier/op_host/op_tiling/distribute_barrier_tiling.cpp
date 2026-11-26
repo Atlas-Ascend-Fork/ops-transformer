@@ -50,6 +50,7 @@ constexpr uint32_t BARRIER_UB_ALIGN = 32U;
 constexpr uint32_t BARRIER_STATE_OFFSET = 512U;
 constexpr uint64_t BARRIER_WIN_STATE_OFFSET = 512UL * 1024UL;
 constexpr uint64_t BARRIER_STATE_WIN_OFFSET = 900UL * 1024UL;
+constexpr int64_t CONTEXT_LAYOUT_PARITY_BASE = 2;
 
 static void PrintTilingDataInfo(DistributeBarrierTilingData& tilingData)
 {
@@ -136,7 +137,7 @@ static int64_t GetMaxWorldSize(const gert::TilingContext* context, const Distrib
 {
     const auto* shape = config.isMc2Context ? context->GetInputShape(config.contextIndex) : nullptr;
     isAuto = shape != nullptr && shape->GetStorageShape().GetDimNum() == ONE_DIM &&
-             shape->GetStorageShape().GetDim(0) % 2 != 0;
+             shape->GetStorageShape().GetDim(0) % CONTEXT_LAYOUT_PARITY_BASE != 0;
     NpuArch npuArch = mc2tiling::GetNpuArch(context);
     if (npuArch == Ops::Base::DAV_3510 || npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202) {
         return isAuto ? Mc2Barrier::MAX_RANKS : MAX_WORLD_SIZE_A5;
@@ -288,7 +289,7 @@ constexpr uint64_t CalcDistributeBarrierWinSize(uint32_t aivNum)
            static_cast<uint64_t>(aivNum) * BARRIER_UB_ALIGN * sizeof(float) * 2UL;
 }
 
-static ge::graphStatus SetContextBufferSize(gert::TilingContext* context, DistributeBarrierTilingData* tilingData,
+static ge::graphStatus SetContextBufferSize(const gert::TilingContext* context, DistributeBarrierTilingData* tilingData,
                                             uint32_t numBlocks)
 {
     auto& info = tilingData->distributeBarrierInfo;
