@@ -379,7 +379,7 @@ aclnnStatus aclnnMhcPreV2(
 - 规格约束：
   - n目前支持4、6、8。
   - D支持16~16384范围以内，需满足D为16对齐。
-  - 当alpha=[3]时，支持hRes输出，必须满足以下条件：输入phi=[n^2+2n, n×D],bias=[n^2+2n]，输出hMixOptional=[B,S,n^2+2n] 或 [T,n^2+2n]；当alpha=[2]时，hRes输出为0，必须满足以下条件：输入phi=[2n, n×D],bias=[2n]，输出hMixOptional=[B,S,2n] 或 [T,2n]。
+  - 当alpha=[3]时，支持hRes输出，必须满足以下条件：输入phi=[n^2+2n, n×D]、bias=[n^2+2n]，输出hMixOptional=[B,S,n^2+2n] 或 [T,n^2+2n]；当alpha=[2]时，hRes输出为0，必须满足以下条件：输入phi=[2n, n×D]、bias=[2n]，输出hMixOptional=[B,S,2n] 或 [T,2n]。
   - 可选输出invRmsOptional、hMixOptional、hPreOptional为互存关系，需同时输出或全部不输出，不支持仅返回其中部分，输出条件：invRmsOptional!=nullptr && hMixOptional!=nullptr && hPreOptional!=nullptr。
 
 ## 调用示例
@@ -575,7 +575,7 @@ int CreateInputTensors(const std::vector<int64_t> &x_shape, const std::vector<in
 {
     std::vector<float> x_host_data(GetShapeSize(x_shape), 1.0f);
     std::vector<float> phi_host_data(GetShapeSize(phi_shape), 1.0f);
-    std::vector<float> alpha_host_data(3, 1.0f);
+    std::vector<float> alpha_host_data(GetShapeSize(alpha_shape), 1.0f);
     std::vector<float> bias_host_data(GetShapeSize(bias_shape), 1.0f);
     std::vector<float> gamma_host_data(GetShapeSize(gamma_shape), 1.0f);
 

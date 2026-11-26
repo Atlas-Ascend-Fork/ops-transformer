@@ -577,7 +577,7 @@ int CreateInputTensors(const std::vector<int64_t> &x_shape, const std::vector<in
 {
     std::vector<float> x_host_data(GetShapeSize(x_shape), 1.0f);
     std::vector<float> phi_host_data(GetShapeSize(phi_shape), 1.0f);
-    std::vector<float> alpha_host_data(3, 1.0f);
+    std::vector<float> alpha_host_data(GetShapeSize(alpha_shape), 1.0f);
     std::vector<float> bias_host_data(GetShapeSize(bias_shape), 1.0f);
     std::vector<float> gamma_host_data(GetShapeSize(gamma_shape), 1.0f);
 

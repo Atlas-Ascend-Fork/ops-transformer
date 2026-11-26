@@ -25,7 +25,7 @@
 
 ## Function
 
-- Description: MhcPreBackward is the backward operator of MhcPre. Through a series of computations, the MhcPre operator obtains the $H^{res}$ and $H^{post}$ projection matrices in the mHC (Manifold-Constrained Hyper-Connections) architecture and the layer input matrix $h^{in}$ of the Atten or MLP layer.
+- Description: MhcPreBackward is the backward operator of MhcPre. Through a series of computations, the MhcPre operator obtains the $H^{res}$ and $H^{post}$ projection matrices in the mHC (Manifold-Constrained Hyper-Connections) architecture and the layer input matrix $h^{in}$ of the Attention or MLP layer.
 
 - Compared with [aclnnMhcPreBackward](aclnnMhcPreBackward_en.md), this API adds the `opImplMode` parameter to specify the computation mode of the MhcPreBackward operator:
   - `opImplMode=0`: FP32 mode computation in the Cube.
@@ -38,7 +38,7 @@
     - Forward formula:
 
       $$
-      H\_in = \sum_{i=1}^{N} x[{B,S,i,:}] · H\_pre_n[B,S,i]
+      H\_in = \sum_{i=1}^{N} x[{B,S,i,:}] · H\_pre[B,S,i]
       $$
 
     - Backward computation:
@@ -91,7 +91,7 @@
     - Forward formula:
 
       $$
-      H\_res = \alpha\_res * H\_res\_1 + bias\_res
+      H\_res = \alpha\_res * \text{Reshape}(H\_res\_1, [B,S,N,N]) + bias\_res
       $$
 
     - Backward computation:
@@ -99,7 +99,7 @@
       $$
       \begin{aligned}
       H\_res\_2\_grad &= H\_res\_grad \cdot \alpha_{res} \quad ([B,S,N,N]) \\
-      \alpha\_res\_grad &= \sum_{b,s,i,j}^{B,S,N,N} \left(H\_res\_grad \cdot H\_res\_2\right) \\
+      \alpha\_res\_grad &= \sum_{b,s,i,j}^{B,S,N,N} \left(H\_res\_grad \odot \text{Reshape}(H\_res\_1, [B,S,N,N])\right) \\
       bias\_res\_grad &= \sum_{b,s}^{B,S} H\_res\_grad \quad ([N,N]) \\
       H\_res\_1\_grad &= \text{Reshape}(H\_res\_2\_grad) \quad ([B,S,N^2])
       \end{aligned}
@@ -273,7 +273,7 @@ aclnnStatus aclnnMhcPreBackwardV2(
         <tr>
             <td>alpha (aclTensor*)</td>
             <td>Input</td>
-            <td>Scaling parameter alpha of mHC.</td>
+            <td>Scaling coefficients of mHC, ordered as alpha_pre, alpha_post, and alpha_res.</td>
             <td><ul><li>Does not support null Tensor.</li><li>Shape is (3).</li></ul></td>
             <td>FLOAT32</td>
             <td>ND</td>
@@ -283,7 +283,7 @@ aclnnStatus aclnnMhcPreBackwardV2(
         <tr>
             <td>gradHIn (aclTensor*)</td>
             <td>Input</td>
-            <td>hIn serves as the layer input of the Atten/MLP layer. Gradient corresponding to the forward output hIn.</td>
+            <td>hIn serves as the layer input of the Attention/MLP layer. Gradient corresponding to the forward output hIn.</td>
             <td><ul><li>Does not support null tensors.</li><li>The shape is (B, S, D) or (T, D), where B remains consistent with B of `x`; S remains consistent with S of `x`; T=B*S; D remains consistent with D of `x`.</li></ul></td>
             <td>BFLOAT16, FLOAT16</td>
             <td>ND</td>
@@ -833,7 +833,7 @@ int main()
     int64_t opImplMode = 1;
 
     // 3. Call the CANN operator library API. Replace the API name with the actual one.
-    uint64_t workspaceSize = 80 * 1024 * 1024;
+    uint64_t workspaceSize = 0;
     aclOpExecutor *executor;
 
     // Call the aclnnMhcPreBackwardV2 first-phase API.
