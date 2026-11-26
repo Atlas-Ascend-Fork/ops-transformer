@@ -383,8 +383,12 @@ private:
                 scaleKvStart = 0U;
                 scaleKvTokens = tiling.kvSeqCapacity;
             }
-            const bool reuseKScale =
-                !fullPage && !fdEnabled && queryLength > 1U && rounds > 0U && taskStep % tiling.kvHeads == 0U;
+            // Single-query PA tasks reuse one head's Kscale cache as well.
+            constexpr uint32_t SINGLE_QUERY_KSCALE_CACHE_MAX_KV_LENGTH = 4096U;
+            const bool cacheSingleQueryKScale =
+                isPaged && queryLength == 1U && kvLength <= SINGLE_QUERY_KSCALE_CACHE_MAX_KV_LENGTH;
+            const bool reuseKScale = !fullPage && !fdEnabled && (queryLength > 1U || cacheSingleQueryKScale) &&
+                                     rounds > 0U && taskStep % tiling.kvHeads == 0U;
             const bool useKScaleCache = !fullPage && softmax.template PrepareHeadKScaleCache<isPaged>(
                                                          taskKScale, source, batch, tiling.kvHeads, head, kvLength,
                                                          scaleKvStart, scaleKvTokens, tiling.blockShapeY, reuseKScale);
