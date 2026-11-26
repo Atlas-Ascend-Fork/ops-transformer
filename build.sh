@@ -905,7 +905,11 @@ build_lib() {
     mkdir -p "${BUILD_PATH}"
   fi
 
-  cd "${BUILD_PATH}" && cmake .. ${CUSTOM_OPTION} -DENABLE_BUILT_IN=ON
+  local kernel_options=()
+  if [[ "$OP_HOST" == "TRUE" && "${#BUILD_LIBS[@]}" == "1" ]]; then
+    kernel_options=(-DENABLE_OPS_KERNEL=OFF)
+  fi
+  cd "${BUILD_PATH}" && cmake .. ${CUSTOM_OPTION} -DENABLE_BUILT_IN=ON "${kernel_options[@]}"
 
   for lib in "${BUILD_LIBS[@]}"; do
     echo "Building target ${lib}"
@@ -2320,6 +2324,14 @@ set_env
 if [[ "${INCREMENTAL_BUILD}" == "TRUE" ]]; then
     log "Info: incremental build enabled, keep existing build/output directories."
     ensure_build_dirs
+    # An up-to-date DSL target does not run its timing writer.
+    for timing_dir in "${BUILD_DIR}"/binary/*/gen; do
+        if [[ -d "${timing_dir}" ]]; then
+            find "${timing_dir}" -maxdepth 1 -type f \( -name '*_cannbotdsl-[0-9]*.txt' \
+                -o -name '*_cannbotdsl_prepare-[0-9]*.txt' -o -name '*_cannbotdsl_host-[0-9]*.txt' \) -delete
+        fi
+    done
+    find "${BUILD_DIR}" -maxdepth 1 -type f -name 'ops_cost_*.csv' -delete
 else
     clean
 fi
@@ -2575,7 +2587,7 @@ elif [[ "$ENABLE_STATIC" == "TRUE" ]]; then
     done
 elif [[ "$ENABLE_OPKERNEL" == "TRUE" ]]; then
     set_compute_unit_option
-    cmake_config -DENABLE_HOST_TILING=ON
+    cmake_config "-DENABLE_OPS_KERNEL=ON -DENABLE_HOST_TILING=ON"
     build_kernel
 elif [[ "$ENABLE_AICPU_KERNEL" == "TRUE" && "$ENABLE_BUILD_PKG" != "TRUE" && "$ENABLE_BUILT_CUSTOM" != "TRUE" ]]; then
     set_compute_unit_option

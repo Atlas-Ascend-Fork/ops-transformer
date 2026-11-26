@@ -92,6 +92,13 @@ group_op_dict = {
 }
 
 
+# Fixed DSL group counts for the default build. Each operator must have at
+# least this many Device variants for its active deployment profiles.
+dsl_group_op_dict = {
+    "ascend950": {},
+}
+
+
 def get_sh_files(gen_dir):
     """获取目录中所有 .sh 文件名（不包含路径）"""
     sh_files = []
@@ -192,7 +199,10 @@ def grouped_back(gen_path, soc, group_size, dsl_ops=()):
     result: list[list[str]] = [[] for _ in range(group_size)]
     sh_files = get_sh_files(gen_path) if os.path.isdir(gen_path) else []
     op_counts = count_opnames(sh_files)
-    remaining_dsl_ops = set(dsl_ops)
+    dsl_ops = set(dsl_ops)
+    remaining_dsl_ops = dsl_ops.copy()
+    dsl_groups = dsl_group_op_dict.get(soc, {})
+    asc_groups = group_op_dict.get(soc, {})
 
     added_op_levels = set()
     special_task_parts = []
@@ -223,6 +233,11 @@ def grouped_back(gen_path, soc, group_size, dsl_ops=()):
                 added_op_levels.add(op_name_real)
                 special_task_parts_barrier.append(str(op_name_real))
             continue
+        if op_name_real in dsl_ops and (
+            op_name_real in asc_groups or op_name_real in dsl_groups
+        ):
+            # An ASC task owns this name; only split ASC if it has its own count.
+            count = min(count, asc_groups.get(op_name_real, 1))
         if count >= group_size:
             for i in range(group_size):
                 row_string = f"{op_name_real},{group_size}-{i}"
@@ -246,9 +261,12 @@ def grouped_back(gen_path, soc, group_size, dsl_ops=()):
         special_task_barrier = ",".join(special_task_parts_barrier)
         result[current_group_index].append(special_task_barrier)
 
-    # OpKit schedules its own variants. Keep each DSL-only task in one group.
     for op_name in sorted(remaining_dsl_ops.difference(black_list)):
-        result[current_group_index].append(op_name)
+        count = min(dsl_groups.get(op_name, 1), group_size)
+        for index in range(count):
+            group = (current_group_index + index) % group_size
+            task = f"{op_name},{count}-{index}" if count > 1 else op_name
+            result[group].append(task)
         current_group_index = (current_group_index + 1) % group_size
 
     return result
@@ -509,15 +527,14 @@ def extract_ai_core_configs(file_path):
         return []
 
 
-def get_dsl_ops(repository_path, soc):
-    repository = Path(repository_path)
-    cmake_file = repository / "CMakeLists.txt"
+def get_dsl_default_soc(repository):
+    cmake_file = Path(repository) / "CMakeLists.txt"
     if not cmake_file.is_file():
         logger.warning(
             "Root CMakeLists.txt not found at %s; skipping DSL ops",
             cmake_file,
         )
-        return set()
+        return None
 
     # Match the repository's DSL default even when the declaration spans lines.
     cmake = re.sub(r"(?m)#.*$", "", cmake_file.read_text(encoding="utf-8"))
@@ -531,8 +548,24 @@ def get_dsl_ops(repository_path, soc):
             "CANNBOTDSL_COMPUTE_UNIT default not found in %s; skipping DSL ops",
             cmake_file,
         )
+        return None
+    return default_soc[1] or default_soc[2]
+
+
+def has_dsl_registration(op_dir):
+    entry = op_dir / "op_dsl" / "CMakeLists.txt"
+    name = re.escape(op_dir.name)
+    registration = rf'^\s*enable_cannbotdsl_kernel\s*\(\s*(?:{name}|"{name}")\s'
+    return entry.is_file() and bool(
+        re.search(registration, entry.read_text(encoding="utf-8"), re.MULTILINE)
+    )
+
+
+def get_dsl_ops(repository_path, soc):
+    repository = Path(repository_path)
+    dsl_soc = get_dsl_default_soc(repository)
+    if dsl_soc is None:
         return set()
-    dsl_soc = default_soc[1] or default_soc[2]
     if soc != dsl_soc:
         logger.info("Skipping DSL ops for %s; repository DSL SoC is %s", soc, dsl_soc)
         return set()
@@ -551,11 +584,7 @@ def get_dsl_ops(repository_path, soc):
         # Either build path can own an op for this SoC. The grouping code
         # filters out DSL ops already covered by ASC entries.
         entry = op_dir / "op_dsl" / "CMakeLists.txt"
-        name = re.escape(op_dir.name)
-        registration = rf'^\s*enable_cannbotdsl_kernel\s*\(\s*(?:{name}|"{name}")\s'
-        if entry.is_file() and re.search(
-            registration, entry.read_text(encoding="utf-8"), re.MULTILINE
-        ):
+        if has_dsl_registration(op_dir):
             ops.add(op_dir.name)
         else:
             logger.warning(
