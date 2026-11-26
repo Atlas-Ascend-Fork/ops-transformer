@@ -1042,7 +1042,14 @@ inline void ApplyDeterministicConfig()
                         "fallback to ACL_OPT_DETERMINISTIC binary switch, deterministic_level will be ignored.");
         }
     }
-    aclError ret = aclrtCtxSetSysParamOpt(aclSysParamOpt::ACL_OPT_DETERMINISTIC, deterministicAlgorithmsStatus ? 1 : 0);
+    const int64_t deterministicValue = deterministicAlgorithmsStatus ? 1 : 0;
+    aclError procRet = aclrtSetSysParamOpt(aclSysParamOpt::ACL_OPT_DETERMINISTIC, deterministicValue);
+    if (procRet != ACL_SUCCESS) {
+        ASCEND_LOGW("aclrtSetSysParamOpt(ACL_OPT_DETERMINISTIC) failed, ret=%d, "
+                    "deterministic config may be incorrect.",
+                    static_cast<int>(procRet));
+    }
+    aclError ret = aclrtCtxSetSysParamOpt(aclSysParamOpt::ACL_OPT_DETERMINISTIC, deterministicValue);
     if (ret != ACL_SUCCESS) {
         ASCEND_LOGW("aclrtCtxSetSysParamOpt(ACL_OPT_DETERMINISTIC) failed, ret=%d, "
                     "deterministic config may be incorrect.",
