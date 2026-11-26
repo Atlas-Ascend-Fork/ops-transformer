@@ -272,7 +272,7 @@ aclnnStatus aclnnQuantSparseLightningIndexer(
     <tr>
       <td>candidateBlockLengthOptional</td>
       <td>可选输入</td>
-      <td>预留接口。</td>
+      <td>每行实际有效候选块数。</td>
       <td>-</td>
       <td>INT32</td>
       <td>ND</td>
@@ -517,7 +517,6 @@ aclnnStatus aclnnQuantSparseLightningIndexer(
 - `layout_q`支持`BSND`与`TND`；为`TND`时必须传入`cuSeqlensQOptional`，且`layout_k`必须为`PA_BBND`。
 - `candidateBlockIndices`为必传输入，数据类型为INT32；末维为候选块个数（当前仅支持 2048），元素个数必须为B*S1*N2*末维（BSND）或T1*N2*末维（TND），否则报错。
 - `candidateBlockSize`当前仅支持8。
-- `candidateBlockLengthOptional`为预留接口，仅接受空 tensor，shape 为 (0,)；传入非空 tensor 会在 tiling 报错。
 - `metadataOptional`必传，不能为空，需由`aclnnQuantSparseLightningIndexerMetadata`生成且与本次调用的query/key形状匹配。
 - 不支持`returnValue`为1，`sparseValuesOut`恒为shape (0,)。
 - 当传入的`layoutQOptional`为TND时，若同时传入`sequsedQOptional`，应保证由`sequsedQOptional`传入的各个batch的query长度不超过根据`cuSeqlensQOptional`计算出的各个batch的q序列长度；此时会启用TND Padding功能，将该batch的无效部分的`sparseIndicesOut`和`sparseValuesOut`置为无效值。部分长序列场景下，如果需要填充的无效数据过多，由于硬件限制可能会导致aicore执行超时，可以通过(seqlen2 - seqlen1) * topk来计算需要填充的数据量，建议将这个数据量控制在4亿以内。

@@ -138,7 +138,6 @@ b表示batch数量，q_s、k_s分别表示Query和Key的序列长度，q_t、k_t
   - 当`layout_k`为PA_BBND时，必须传入`seqused_k`和非空的`block_table`，不支持传入`cu_seqlens_k`。
   - 非分页布局不支持传入`block_table`。
   - 当`layout_k`为TND或BSND时，`key`和`key_dequant_scale`必须连续。当`layout_k`为PA_BBND时，`key`仅支持0轴非连续，0轴stride不得小于单页容量。
-  - `candidate_block_length`必须传入且连续，每个元素表示对应行的实际有效候选数。对应行前`candidate_block_length`个候选块索引必须合法且互不重复，不能以候选容量代替实际有效候选数。
   - `return_value`支持0、1；输出索引不保证按分数排序，返回分数与索引逐项对应。
   - 仅在`mask_mode`为3且`cmp_ratio`不为1时传入`cmp_residual_k`，其余情况不传入。
   - 取得第一级的候选索引和实际有效候选数后，需生成本级metadata，再调用计算接口。候选有效长度或序列信息变化后，必须重新生成metadata。
@@ -151,7 +150,6 @@ b表示batch数量，q_s、k_s分别表示Query和Key的序列长度，q_t、k_t
   - Query的head数仅支持32、64；`topk`仅支持[1,2048]。
   - `layout_k`仅支持PA_BBND，`key`的shape为(block_num,block_size,1,128)，`block_size`为16的整数倍。`block_table`和`seqused_k`必须传入。
   - `key`和`key_dequant_scale`支持第0轴带padding的非连续Tensor，其余轴必须连续。
-  - `candidate_block_length`为预留参数，应保持默认值None或传入空Tensor，不支持非空Tensor。
   - `cmp_ratio`仅支持1、2、4、8、16、32、64、128。
   - 候选块索引使用-1标识无效项，无效或越界候选不参与计算。
   - `return_value`仅支持0；输出的有效索引按对应分数降序排列。

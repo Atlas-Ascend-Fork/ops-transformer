@@ -91,7 +91,6 @@
   - 当`layout_k`为PA_BBND时，必须传入`seqused_k`和非空的`block_table`。
   - `q`、`w`、`q_descale`、`candidate_block_indices`和`candidate_block_length`必须连续。当`layout_k`为TND或BSND时，`k`和`k_descale`必须连续。当`layout_k`为PA_BBND时，`k`仅支持0轴非连续，0轴stride不得小于单页容量。
   - `candidate_block_size`仅支持8。`candidate_block_indices`的shape为`(T,1,2048)`或`(B,S1,1,2048)`。
-  - `candidate_block_length`必须传入，shape为`(T,1)`或`(B,S1,1)`，每个元素表示对应行的实际有效候选数，取值范围为[0,2048]。对应行前`candidate_block_length`个候选块索引必须合法且互不重复，不能以候选容量代替实际有效候选数。
   - `return_value`支持0、1。为0时，`sparse_values`为空Tensor；为1时，`sparse_values`的数据类型为BFLOAT16，shape与`sparse_indices`相同，分数与索引逐项对应，输出索引不保证有序。
   - 有效位置数小于`topk`时，`sparse_indices`的剩余位置填-1，`sparse_values`的对应位置填负无穷。`output_idx_offset`仅叠加到有效索引，无效索引保持-1。
   - `mask_mode`支持0、3，`cmp_ratio`支持[1,128]内的整数。当`mask_mode`为3且`cmp_ratio`不为1时，必须传入`cmp_residual_k`，其余情况不传入。
@@ -109,7 +108,6 @@
   - `topk`支持[1, 2048]。
   - `layout_k`仅支持`PA_BBND`，因此`block_table`与`seqused_k`必传，`cu_seqlens_k`不能传入。
   - `layout_q`支持`BSND`与`TND`；为`TND`时必须传入`cu_seqlens_q`，且`layout_k`必须为`PA_BBND`。
-  - `candidate_block_length`为预留接口（本期不消费），仅接受空 tensor；传入非空 tensor 会在 tiling 报错。
   - q_descale的shape与w一致，k_descale的shape为k去掉最后一维。
   - cmp_ratio仅支持1、2、4、8、16、32、64、128。
   - 逻辑head_dim为128。PA_BBND布局下，k的shape为(block_num,block_size,1,128)，block_size为16的倍数；k和k_descale支持第0轴带padding，其余轴必须连续。`quant_mode`为7时该shape仍按逻辑元素描述（128个INT4元素打包为64字节），PA页内每行物理占64字节。

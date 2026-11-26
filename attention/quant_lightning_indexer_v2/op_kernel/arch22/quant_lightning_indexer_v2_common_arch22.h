@@ -172,6 +172,9 @@ struct LdSplitCoreInfo {
     uint32_t mStart = 0U;
     uint32_t mNum = 0U;
     uint32_t actS2Size = 0U; // 当前归约行的压缩后有效 K 长度，用于计算 candidate_block_length
+    // mode=1 输出"每行有效候选块数"需要本 batch 的可见长度参数（LD 归约侧原本没有这些量）
+    uint32_t actS1Size = 0U;
+    uint32_t actS2SizeOrig = 0U;       // 压缩前的有效 K 长度
     uint64_t indiceOutCoreOffset = 0U; // 最终输出索引搬出Topk的初始偏移地址
     // candidate（两级 TopK source 模式）: 块级候选输出的初始偏移地址。
     // s2 被切给多核时没有核能独占整行, 改由各分段核落工作区、LD 核归并后按本偏移直出。

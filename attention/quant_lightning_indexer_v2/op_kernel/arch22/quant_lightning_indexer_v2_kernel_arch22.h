@@ -382,11 +382,12 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetS2BaseBlockNumOnMask(uint32_
         validS2Len = Max(validS2Len, 1U); // 保持“至少 1 块”的既有不变量
         return (validS2Len + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
     }
-    int32_t validS2LenBase =
-        static_cast<int32_t>(actS2SizeOrig) - static_cast<int32_t>(actS1Size); // 压缩前的validS2LenBase
-    validS2Len = (static_cast<int32_t>(s1Offset) + validS2LenBase + static_cast<int32_t>(constInfo.s1BaseSize)) /
-                 static_cast<int32_t>(constInfo.cmpRatio);
-    validS2Len = Min(validS2Len, static_cast<int32_t>(actS2SizeOrig) / constInfo.cmpRatio);
+    // causal 可见长度：先用 64 位计算未压缩的 exclusive 上界（避免 int32 溢出与负数截断），
+    // 再按压缩率整除，最后 clamp 到压缩后的 S2 长度。
+    int64_t causalLimit = static_cast<int64_t>(s1Offset) + static_cast<int64_t>(actS2SizeOrig) -
+                          static_cast<int64_t>(actS1Size) + static_cast<int64_t>(constInfo.s1BaseSize);
+    uint32_t visible = causalLimit > 0 ? (static_cast<uint32_t>(causalLimit) / constInfo.cmpRatio) : 0U;
+    validS2Len = Min(visible, actS2Size);
     validS2Len = Max(validS2Len, 1);
     return (validS2Len + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
 }
@@ -458,10 +459,8 @@ __aicore__ void inline QLIV2Preload<QLIV2T>::SplitCore()
         ldInfo.bn2Idx = metadataGm.GetValue(ldBn2IdxIndex);
         ldInfo.bIdx = ldInfo.bn2Idx / constInfo.kHeadNum;
         ldInfo.n2Idx = ldInfo.bn2Idx % constInfo.kHeadNum;
-        ldInfo.actS2Size = GetActualSeqLenKey(ldInfo.bIdx, constInfo.actualLenDims, constInfo.cmpResiduaKLenDims,
-                                              constInfo.isAccumSeqS2, actualSeqLengthsGm, cmpResidualKGm,
-                                              constInfo.kSeqSize, constInfo.cmpRatio) /
-                           constInfo.cmpRatio;
+        // 归约核写 candidate_block_length 需要本 batch 的可见长度参数（S1 与压缩前后 S2）
+        GetS1S2ActualSeqLen(ldInfo.bIdx, ldInfo.actS1Size, ldInfo.actS2Size, ldInfo.actS2SizeOrig);
         ldInfo.mIdx = metadataGm.GetValue(ldMIdxIndex);
         ldInfo.workspaceIdx = metadataGm.GetValue(ldWorkspaceIdxIndex);
         ldInfo.workspaceNum = metadataGm.GetValue(ldWorkspaceNumINDEX);

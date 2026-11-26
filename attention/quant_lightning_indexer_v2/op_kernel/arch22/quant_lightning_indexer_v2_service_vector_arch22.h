@@ -1191,7 +1191,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
             srcList.src4 = curValueIdxUb[3 * topkPairWidth_];
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, topkPairWidth_);
+            QLIV2ServiceVec::VecCopyExact(curValueIdxUb, tmpUb, topkPairWidth_);
             PipeBarrier<PIPE_V>();
         }
 
@@ -1232,7 +1232,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLD()
             PipeBarrier<PIPE_V>();
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, topkPairWidth_);
+            QLIV2ServiceVec::VecCopyExact(curValueIdxUb, tmpUb, topkPairWidth_);
             PipeBarrier<PIPE_V>();
         }
 
@@ -1329,7 +1329,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLDCand()
             srcList.src4 = curValueIdxUb[3 * candPairWidth_];
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, candPairWidth_);
+            QLIV2ServiceVec::VecCopyExact(curValueIdxUb, tmpUb, candPairWidth_);
             PipeBarrier<PIPE_V>();
         }
 
@@ -1369,7 +1369,7 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessLDCand()
             PipeBarrier<PIPE_V>();
             MrgSort(tmpUb, srcList, params);
             PipeBarrier<PIPE_V>();
-            DataCopy(curValueIdxUb, tmpUb, candPairWidth_);
+            QLIV2ServiceVec::VecCopyExact(curValueIdxUb, tmpUb, candPairWidth_);
             PipeBarrier<PIPE_V>();
         }
 

@@ -57,6 +57,7 @@ bool QuantSparseLightningIndexerMetadataCpuKernel::Prepare(CpuKernelContext& ctx
     GetAttrValueOpt(ctx, "mask_mode", maskMode_);
     GetAttrValueOpt(ctx, "cmp_ratio", cmpRatio_);
     GetAttrValueOpt(ctx, "candidate_block_size", candidateBlockSize_);
+    GetAttrValueOpt(ctx, "quant_mode", quantMode_);
 
     return (ParamsCheck() && ParamsInit());
 }
@@ -72,7 +73,7 @@ bool QuantSparseLightningIndexerMetadataCpuKernel::ParamsCheck()
     }
     const int32_t batchSize = GetQueryBatchSize();
     return CheckCuSeqlensQ(batchSize) && CheckCuSeqlensK(batchSize) && CheckSequsedQ(batchSize) &&
-           CheckSequsedK(batchSize) && CheckCmpResidualK(batchSize);
+           CheckSequsedK(batchSize) && CheckCmpResidualK(batchSize) && CheckCandidateBlockLength();
 }
 
 bool QuantSparseLightningIndexerMetadataCpuKernel::CheckCuSeqlensQ(int32_t batchSize) const
@@ -200,6 +201,110 @@ bool QuantSparseLightningIndexerMetadataCpuKernel::CheckCmpResidualK(int32_t bat
     return true;
 }
 
+// candidate_block_length 的校验与统计：每行有效候选块数，取值 [0, 2048]。
+// 未传或为空时保持旧行为（按全量 S2 分核）；传入非空张量时按候选 token 量分核。
+bool QuantSparseLightningIndexerMetadataCpuKernel::CheckCandidateBlockLength()
+{
+    if (!HasCandidateLen()) {
+        return true;
+    }
+    if (candidateBlockLength_->GetDataType() != DT_INT32) {
+        KERNEL_LOG_ERROR("candidate_block_length should be int32, but got %d",
+                         static_cast<int32_t>(candidateBlockLength_->GetDataType()));
+        return false;
+    }
+    constexpr int32_t MAX_CANDIDATE_BLOCKS = 2048; // 与主算子候选块长度上界一致
+    int64_t numel = 1;
+    for (const int64_t dimSize : candidateBlockLength_->GetTensorShape()->GetDimSizes()) {
+        numel *= dimSize;
+    }
+    candLenNumel_ = numel;
+    // 行数一致性：TND 的行数是 cu_seqlens_q[batch]，BSND 是 batch × max_seqlen_q。
+    // 元素数不足会在行映射时越界读，必须在入口拦截。
+    int64_t expectedRows = 0;
+    if (layoutQ_ == "TND" && cuSeqlensQ_ != nullptr && cuSeqlensQ_->GetData() != nullptr) {
+        const int32_t* cuSeqlensQPtr = static_cast<const int32_t*>(cuSeqlensQ_->GetData());
+        expectedRows = cuSeqlensQPtr[batchSize_];
+    } else if (maxSeqlenQ_ > 0) {
+        expectedRows = static_cast<int64_t>(batchSize_) * static_cast<int64_t>(maxSeqlenQ_);
+    }
+    if (expectedRows > 0 && numel < expectedRows) {
+        KERNEL_LOG_ERROR("candidate_block_length element num (%ld) is less than query rows (%ld)",
+                         static_cast<long>(numel), static_cast<long>(expectedRows));
+        return false;
+    }
+    const int32_t* lenPtr = static_cast<const int32_t*>(candidateBlockLength_->GetData());
+    for (int64_t i = 0; i < numel; ++i) {
+        const int32_t len = lenPtr[i];
+        if (len < 0) {
+            KERNEL_LOG_ERROR("candidate_block_length[%ld] = %d should be >= 0", static_cast<long>(i), len);
+            return false;
+        }
+        if (len > MAX_CANDIDATE_BLOCKS) {
+            KERNEL_LOG_ERROR("candidate_block_length[%ld] = %d should be <= %d", static_cast<long>(i), len,
+                             MAX_CANDIDATE_BLOCKS);
+            return false;
+        }
+        candLenMax_ = (len > candLenMax_) ? len : candLenMax_;
+        candLenSum_ += len;
+    }
+    return true;
+}
+
+// 候选长度的行映射：TND 用 cu_seqlens_q 前缀，BSND 用 bIdx × max_seqlen_q
+uint64_t QuantSparseLightningIndexerMetadataCpuKernel::CandidateRowPrefix(uint32_t bIdx)
+{
+    if (layoutQ_ == "TND") {
+        if (cuSeqlensQ_ != nullptr && cuSeqlensQ_->GetData() != nullptr) {
+            const int32_t* cuSeqlensQPtr = static_cast<const int32_t*>(cuSeqlensQ_->GetData());
+            return static_cast<uint64_t>(cuSeqlensQPtr[bIdx]);
+        }
+        return 0ULL;
+    }
+    return static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(maxSeqlenQ_);
+}
+
+// 本 batch 的候选工作量：行内最大候选块数 × 8 token（与 DSL 的候选块语义一致）
+int64_t QuantSparseLightningIndexerMetadataCpuKernel::CandidateTokensForBatch(uint32_t bIdx)
+{
+    const int32_t* lenPtr = static_cast<const int32_t*>(candidateBlockLength_->GetData());
+    const uint64_t prefix = CandidateRowPrefix(bIdx);
+    const uint32_t s1Size = GetS1SeqSize(bIdx);
+    // 越界保护：前缀 + 行数不得超过候选长度张量的元素数
+    const int64_t avail = candLenNumel_ - static_cast<int64_t>(prefix);
+    const uint32_t validRows = (avail <= 0) ? 0U : static_cast<uint32_t>(avail);
+    const uint32_t rowNum = (s1Size < validRows) ? s1Size : validRows;
+    int64_t maxL = 0;
+    for (uint32_t i = 0; i < rowNum; i++) {
+        const int32_t len = lenPtr[prefix + i];
+        if (len > maxL) {
+            maxL = len;
+        }
+    }
+    return maxL * candidateBlockSize_;
+}
+
+// 本行块（一个 s1G 分组）的候选工作量：组内行最大候选块数 × candidate_block_size token
+int64_t QuantSparseLightningIndexerMetadataCpuKernel::CandidateTokensForS1G(uint32_t bIdx, uint32_t s1GIdx)
+{
+    const int32_t* lenPtr = static_cast<const int32_t*>(candidateBlockLength_->GetData());
+    const uint64_t prefix = CandidateRowPrefix(bIdx);
+    const uint32_t rowsPerBlock = static_cast<uint32_t>(mBaseSize_ / groupSize_);
+    const uint32_t s1Size = GetS1SeqSize(bIdx);
+    const uint32_t base = s1GIdx * rowsPerBlock;
+    const int64_t avail = candLenNumel_ - static_cast<int64_t>(prefix) - static_cast<int64_t>(base);
+    const uint32_t validRows = (avail <= 0) ? 0U : static_cast<uint32_t>(avail);
+    const uint32_t rowNum = (rowsPerBlock < validRows) ? rowsPerBlock : validRows;
+    int64_t maxL = 0;
+    for (uint32_t i = 0; i < rowNum && base + i < s1Size; i++) {
+        const int32_t len = lenPtr[prefix + base + i];
+        if (len > maxL) {
+            maxL = len;
+        }
+    }
+    return maxL * candidateBlockSize_;
+}
+
 int32_t QuantSparseLightningIndexerMetadataCpuKernel::GetQueryBatchSize()
 {
     // 1. 如果sequsedQ_传了，使用sequsedQ_获取BatchSize
@@ -315,29 +420,33 @@ void QuantSparseLightningIndexerMetadataCpuKernel::CalcSplitInfo(SplitContext& s
 {
     // 计算每个batch的切分，统计是否为空batch，记录最后有效batch（每个batch的每个N2切分是一样的）
     SplitInfo& splitInfo = splitContext.splitInfo;
+    // 候选模式：工作量 = 本 batch 行内 max(L)×8 token，切分单位 = 512 token（64 候选块 × 8）
+    // 全量扫模式（未传 candidate_block_length）：保持原有 S2 token 与 s2BaseSize 口径
+    const bool candMode = HasCandidateLen();
+    const uint32_t splitUnit = candMode ? CandidateTileTokens() : s2BaseSize_;
     for (uint32_t bIdx = 0; bIdx < static_cast<uint32_t>(batchSize_); bIdx++) {
         uint32_t s1Size = GetS1SeqSize(bIdx);
-        uint32_t s2Size = GetS2SeqSize(bIdx);
+        uint32_t s2Size = candMode ? static_cast<uint32_t>(CandidateTokensForBatch(bIdx)) : GetS2SeqSize(bIdx);
         maxS2Size_ = std::max(maxS2Size_, s2Size);
         splitInfo.s1GBaseNum[bIdx] = (static_cast<uint64_t>(s1Size) * groupSize_ + (mBaseSize_ - 1U)) / mBaseSize_;
         splitInfo.s1GTailSize[bIdx] = (static_cast<uint64_t>(s1Size) * groupSize_) % mBaseSize_;
-        splitInfo.s2BaseNum[bIdx] = (s2Size + s2BaseSize_ - 1U) / s2BaseSize_;
-        splitInfo.s2TailSize[bIdx] = s2Size % s2BaseSize_;
+        splitInfo.s2BaseNum[bIdx] = (s2Size + splitUnit - 1U) / splitUnit;
+        splitInfo.s2TailSize[bIdx] = s2Size % splitUnit;
         if (splitInfo.s1GBaseNum[bIdx] != 0U && splitInfo.s2BaseNum[bIdx] != 0U) {
             splitInfo.isKvSeqAllZero = false;
         }
     }
     // FD (LD 跨核归约) 启用条件：所有平台统一，仅按形状判定
-    //   - 有效 S2 必须不小于 topk（候选/归约容量覆盖得住）
-    //   - 有效 S2 超过 fdToleranceRatio × s2Base，才有足够的分段收益
-    // s2Base 按平台取值（A2/A3 = 2048，Ascend950 = 128），阈值随之不同。
+    //   - 有效工作量必须不小于 topk（候选/归约容量覆盖得住）
+    //   - 有效工作量超过 fdToleranceRatio × 切分单位，才有足够的分段收益
+    // 切分单位：候选模式 = 512 token；全量扫 = s2BaseSize（A2/A3 = 2048，Ascend950 = 128）。
     if (maxS2Size_ < static_cast<uint32_t>(topk_)) {
         supportFd_ = false;
         return;
     }
-    if (maxS2Size_ > fdToleranceRatio * s2BaseSize_) {
-        supportFd_ = true;
-    }
+    // 候选模式不设"行数饱和就不切"的门槛：分片的负载再平衡收益 > 溢写/归约/暖机开销
+    // （vllm 侧交替背靠背实测 case C 开 FD 反而 −2.3%~−3.2%，见 RESULT_candidate_driven.md §27）。
+    supportFd_ = (maxS2Size_ > fdToleranceRatio * splitUnit);
 }
 
 int64_t QuantSparseLightningIndexerMetadataCpuKernel::CalcPreTokenLeftUp(uint32_t s1Size, uint64_t s2Size) const
@@ -452,22 +561,30 @@ void QuantSparseLightningIndexerMetadataCpuKernel::CalcS1GCache(uint32_t s1GIdx,
         return;
     }
 
-    auto s2TokenRange = CalcS2TokenRange(s1GIdx, batchCache);
-    int64_t s2FirstToken = s2TokenRange.first;
-    int64_t s2LastToken = s2TokenRange.second;
-    // get valid range
-    s2FirstToken = Clip(s2FirstToken, static_cast<int64_t>(0), static_cast<int64_t>(batchCache.revertS2Size - 1U));
-    s2LastToken = Clip(s2LastToken, static_cast<int64_t>(0), static_cast<int64_t>(batchCache.revertS2Size - 1U));
-
-    // get block start & end
-    int64_t s2CmpLength = (s2LastToken - s2FirstToken + 1) / cmpRatio_;
+    // 候选模式：工作量 = 本行块内 max(L)×8 token，切分单位 = 512 token；
+    // 不走 causal 区间（可见性由主算子的候选掩码保证）。全量扫模式保持原 S2 区间口径。
+    const bool candMode = HasCandidateLen();
+    const uint32_t s2BlockTokens = candMode ? CandidateTileTokens() : s2BaseSize_;
+    int64_t s2CmpLength = 0;
+    if (candMode) {
+        s2CmpLength = CandidateTokensForS1G(batchCache.bIdx, s1GIdx);
+    } else {
+        auto s2TokenRange = CalcS2TokenRange(s1GIdx, batchCache);
+        int64_t s2FirstToken = s2TokenRange.first;
+        int64_t s2LastToken = s2TokenRange.second;
+        // get valid range
+        s2FirstToken = Clip(s2FirstToken, static_cast<int64_t>(0), static_cast<int64_t>(batchCache.revertS2Size - 1U));
+        s2LastToken = Clip(s2LastToken, static_cast<int64_t>(0), static_cast<int64_t>(batchCache.revertS2Size - 1U));
+        // get block start & end
+        s2CmpLength = (s2LastToken - s2FirstToken + 1) / cmpRatio_;
+    }
     if (s2CmpLength <= 0) {
         s1GCache.s2Start = 0U;
         s1GCache.s2End = 0U;
     } else {
         s1GCache.s2Start = 0U;
         // end of block index, Right-open interval
-        s1GCache.s2End = (static_cast<uint32_t>(s2CmpLength) + s2BaseSize_ - 1) / s2BaseSize_;
+        s1GCache.s2End = (static_cast<uint32_t>(s2CmpLength) + s2BlockTokens - 1) / s2BlockTokens;
     }
 
     if (s1GCache.s2Start >= s1GCache.s2End) {
@@ -478,7 +595,7 @@ void QuantSparseLightningIndexerMetadataCpuKernel::CalcS1GCache(uint32_t s1GIdx,
         return;
     }
 
-    uint32_t s2TailSize = static_cast<uint32_t>(s2CmpLength) % s2BaseSize_;
+    uint32_t s2TailSize = static_cast<uint32_t>(s2CmpLength) % s2BlockTokens;
 
     // 计算S2方向满块、尾块数量
     s1GCache.s1GBlock = s1GCache.s2End - s1GCache.s2Start;
@@ -486,7 +603,7 @@ void QuantSparseLightningIndexerMetadataCpuKernel::CalcS1GCache(uint32_t s1GIdx,
     uint32_t curNormalS2Num = s1GCache.s1GBlock - curTailS2Num;
 
     BlockCost<int64_t> typeCost =
-        CalcCostTable(mBaseSize_, s2BaseSize_, splitInfo.s1GTailSize[batchCache.bIdx], s2TailSize);
+        CalcCostTable(mBaseSize_, s2BlockTokens, splitInfo.s1GTailSize[batchCache.bIdx], s2TailSize);
 
     if (s1GIdx == (splitInfo.s1GBaseNum[batchCache.bIdx] - 1U) && splitInfo.s1GTailSize[batchCache.bIdx] != 0U) {
         s1GCache.s1GCost =
@@ -919,6 +1036,14 @@ bool QuantSparseLightningIndexerMetadataCpuKernel::BalanceSchedule(SplitResult& 
 bool QuantSparseLightningIndexerMetadataCpuKernel::GenMetadata(SplitResult& splitRes)
 {
     optiling::detail::QliV2Metadata* metadataPtr = static_cast<optiling::detail::QliV2Metadata*>(metadata_->GetData());
+    // 输出契约为 int32[1024]，但 QliV2Metadata 容器只覆盖 36 条 LI + 72 条 LD = 864 个 int32，
+    // 尾部保留区（行 108..127）不在结构体内，必须显式清零；否则返回的是未初始化显存
+    // （实测两次调用结果不一致，见 vllm 侧 ABI 探针）。
+    constexpr size_t QLI_V2_METADATA_INT32_NUM = 1024;
+    int32_t* rawMetadata = static_cast<int32_t*>(metadata_->GetData());
+    for (size_t i = 0; i < QLI_V2_METADATA_INT32_NUM; ++i) {
+        rawMetadata[i] = 0;
+    }
     *metadataPtr = {};
     // LI Metadata Generate
     for (size_t i = 0; i < aicCoreNum_; ++i) {

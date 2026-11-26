@@ -91,7 +91,6 @@ The **second stage** operator (consumer, candidate-consuming) of the two-level T
   - When `layout_k` is PA_BBND, `seqused_k` and a non-empty `block_table` must be passed.
   - `q`, `w`, `q_descale`, `candidate_block_indices`, and `candidate_block_length` must be contiguous. When `layout_k` is TND or BSND, `k` and `k_descale` must be contiguous. When `layout_k` is PA_BBND, non-contiguity is supported only on axis 0 of `k`, and the axis-0 stride must be at least the size of one page.
   - `candidate_block_size` supports only 8. The shape of `candidate_block_indices` is `(T,1,2048)` or `(B,S1,1,2048)`.
-  - `candidate_block_length` is required, with shape `(T,1)` or `(B,S1,1)`. Each element is the actual valid candidate count for the corresponding row, in [0,2048]. The first `candidate_block_length` entries in that row must be valid, unique block indices. Do not substitute the candidate capacity for the actual valid count.
   - `return_value` supports 0 and 1. With 0, `sparse_values` is empty. With 1, `sparse_values` has BFLOAT16 dtype and the same shape as `sparse_indices`. Scores correspond to indices element by element; output indices are not guaranteed to be sorted.
   - If the number of valid positions is less than `topk`, remaining indices are filled with -1 and corresponding scores with negative infinity. `output_idx_offset` applies only to valid indices; invalid indices remain -1.
   - `mask_mode` supports 0 and 3. `cmp_ratio` is an integer in [1,128]. Pass `cmp_residual_k` only when `mask_mode` is 3 and `cmp_ratio` is not 1; it is required in that case.
@@ -109,7 +108,6 @@ The **second stage** operator (consumer, candidate-consuming) of the two-level T
   - `topk` supports [1, 2048].
   - `layout_k` supports only `PA_BBND`, so `block_table` and `seqused_k` are required and `cu_seqlens_k` must not be passed.
   - `layout_q` supports `BSND` and `TND`; with `TND`, `cu_seqlens_q` is required and `layout_k` must be `PA_BBND`.
-  - `candidate_block_length` is a reserved interface (not consumed in this release) and only accepts an empty tensor; passing a non-empty tensor makes tiling fail.
   - q_descale has the same shape as w; k_descale has the shape of k with its last axis removed.
   - cmp_ratio supports only 1, 2, 4, 8, 16, 32, 64 and 128.
   - The logical head dimension is 128. For PA_BBND, k has shape (block_num,block_size,1,128), with block_size a multiple of 16. k and k_descale support padding on axis 0; all inner axes must be contiguous. When `quant_mode` is 7, this shape still describes logical elements (128 INT4 elements are packed into 64 bytes), and each PA page row occupies 64 physical bytes.

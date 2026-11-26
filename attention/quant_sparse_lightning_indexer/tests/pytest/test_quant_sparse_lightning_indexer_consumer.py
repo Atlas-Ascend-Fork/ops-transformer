@@ -50,6 +50,34 @@ from quant_sparse_lightning_indexer_golden import (
     topk_golden,
 )
 
+
+def _load_source_api():
+    """加载 QLI source 的 candidate 四输出接口，且必须先于旧 V2 两输出包装。"""
+    try:
+        return importlib.import_module(
+            "cann_ops_transformer_dcp.ops.attention.quant_lightning_indexer_v2.quant_lightning_indexer"
+        )
+    except ModuleNotFoundError:
+        source_py = (
+            Path(__file__).resolve().parents[3]
+            / "quant_lightning_indexer_v2"
+            / "torch_extension"
+            / "quant_lightning_indexer.py"
+        )
+        spec = importlib.util.spec_from_file_location("qsli_test_qli_source", source_py)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        source_cpp = source_py.parent / "csrc" / "quant_lightning_indexer.cpp"
+
+        def _op_builder_sources():
+            return [str(source_cpp)]
+
+        module.quant_lightning_indexer_op_builder.sources = _op_builder_sources
+        return module
+
+
+_QLI_SOURCE_API = _load_source_api()
+
 from cann_ops_transformer.ops.attention.quant_sparse_lightning_indexer import (  # noqa: E402
     quant_sparse_lightning_indexer,
     quant_sparse_lightning_indexer_metadata,
@@ -93,7 +121,7 @@ def gen_case_inputs(case):
     """生成 NPU 输入 (int8/int4-packed/PA) 与 golden 所需的稠密表示; 支持 layout=TND 与 pa_gap (key 0 轴非连续)。
     quant_mode=7 (W4A4): 稠密 q/k 值域 [-8,7] (inputs["q"]/["k_dense"], golden 零改动复用);
     另生成打包 uint8 inputs["q_packed"]/["k_phys_packed"] (低 nibble 在前, 物理末维 D//2) 仅供 NPU 入口 —
-    torch_extension 的 FixQLIV2AclDtypes 将其描述为 ACL_INT4, aclnn 层自动折算回逻辑 nibble shape。"""
+    torch_extension 的 FixQSLIAclDtypes 将其描述为 ACL_INT4, aclnn 层自动折算回逻辑 nibble shape。"""
     b = case["batch"]
     s1 = case["q_seq"]
     g = case["g"]
@@ -171,7 +199,9 @@ def gen_case_inputs(case):
         cmp_res_t = (
             torch.tensor(res, dtype=torch.int32).npu() if res is not None else None
         )
-        metadata = quant_sparse_lightning_indexer_metadata(
+        # metadata 需要每行真实候选有效长度（按 max(L)×8 的候选 tile 分核），
+        # 而候选索引在 gen_cand_input 里才生成 —— 这里只保存入参，等候选生成后统一构建。
+        md_args = dict(
             num_heads_q=g,
             num_heads_k=1,
             head_dim=HEAD_DIM,
@@ -204,7 +234,7 @@ def gen_case_inputs(case):
             "cu_q_t": cu_q_t,
             "cu_k_t": None,
             "cmp_res_t": cmp_res_t,
-            "metadata": metadata,
+            "md_args": md_args,
             "output_idx_offset_t": None,
             "output_idx_offsets": None,
             "k_pool_blocks": None,
@@ -362,8 +392,9 @@ def gen_case_inputs(case):
             .npu()
         )
 
-    # metadata: 负载均衡分核
-    metadata = quant_sparse_lightning_indexer_metadata(
+    # metadata 需要每行真实候选有效长度（按 max(L)×8 的候选 tile 分核），
+    # 而候选索引在 gen_cand_input 里才生成 —— 这里只保存入参，等候选生成后统一构建。
+    md_args = dict(
         num_heads_q=g,
         num_heads_k=1,
         head_dim=HEAD_DIM,
@@ -395,7 +426,7 @@ def gen_case_inputs(case):
         "cu_q_t": None,
         "cu_k_t": None,
         "cmp_res_t": cmp_res_t,
-        "metadata": metadata,
+        "md_args": md_args,
         "output_idx_offset_t": output_idx_offset_t,
         "output_idx_offsets": output_idx_offsets,
         "s2max": s2max,
@@ -404,6 +435,67 @@ def gen_case_inputs(case):
         "k_pool_blocks": total_blocks,
         "table": None,
     }
+
+
+def cand_lengths_from_indices(cand_npu, case):
+    """由候选索引张量推导每行有效候选块数（gen_cand_input 用 -1 填充尾部）。
+
+    主算子与 metadata 的 candidate_block_length 行数与 query 行数一致：
+      - TND: 拼接后的总 token 数（candidate 张量 reshape 后逐行）；
+      - BSND: [B, S1, 1]，S1 与 query 的 q_seq 相同（本文件 BSND 用例 actS1 == q_seq）。
+    """
+    flat = cand_npu.reshape(-1, cand_npu.shape[-1])
+    lens = (flat != -1).sum(-1).to(torch.int32)
+    if case.get("layout") == "TND":
+        return lens.reshape(-1, 1).npu()
+    s1 = case["q_seq"]
+    return lens.reshape(case["batch"], s1, 1).npu()
+
+
+def build_metadata(inputs, cand_len_t):
+    args = dict(inputs["md_args"])
+    args["candidate_block_length"] = cand_len_t
+    return quant_sparse_lightning_indexer_metadata(**args)
+
+
+def gen_source_cand_input(case, inputs):
+    """由 QLI source 生成有序唯一候选及真实长度，满足 v15 行级早退契约。"""
+    args = dict(inputs["md_args"])
+    source_metadata = _QLI_SOURCE_API.quant_lightning_indexer_metadata(
+        **args, candidate_topk_blocks=CAND_BLOCKS, candidate_block_size=CAND_BS
+    )
+    source = _QLI_SOURCE_API.quant_lightning_indexer(
+        inputs["q"],
+        inputs["k_phys"],
+        inputs["w"],
+        inputs["q_scale"],
+        inputs["k_scale_phys"],
+        case["topk"],
+        2,
+        cu_seqlens_q=inputs["cu_q_t"],
+        cu_seqlens_k=inputs["cu_k_t"],
+        seqused_k=inputs["seqused_k_t"],
+        cmp_residual_k=inputs["cmp_res_t"],
+        block_table=inputs["block_table"],
+        output_idx_offset=inputs.get("output_idx_offset_t"),
+        metadata=source_metadata,
+        max_seqlen_q=args["max_seqlen_q"],
+        layout_q=args["layout_q"],
+        layout_k=args["layout_k"],
+        mask_mode=args["mask_mode"],
+        cmp_ratio=args["cmp_ratio"],
+        return_value=0,
+        candidate_topk_blocks=CAND_BLOCKS,
+        candidate_block_size=CAND_BS,
+    )
+    torch.npu.synchronize()
+    candidate, candidate_length = source[2].clone(), source[3].clone()
+    if case.get("cand_valid") is not None:
+        # 保留 source 已按块分排序的前缀，覆盖候选数小于 topk；不能把无序子集填回去。
+        valid = min(int(case["cand_valid"]), CAND_BLOCKS)
+        candidate[..., valid:] = -1
+        candidate_length.clamp_max_(valid)
+    return candidate, candidate.cpu(), candidate_length
 
 
 def npu_run(inputs, case, cand_in_npu=None):
@@ -445,6 +537,7 @@ def npu_run(inputs, case, cand_in_npu=None):
         inputs["q_scale"],
         inputs["k_scale_phys"],
         candidate_block_indices=cand_in_npu,
+        candidate_block_length=inputs["cand_len_t"],
         candidate_block_size=CAND_BS,
         **common,
     )
@@ -556,7 +649,7 @@ def _e2e_check(inputs, case, seqs_q, s2max, topk):
 
 def gen_cand_input(case, kind, inputs):
     """mode=2 的候选输入: self=参考选择(自洽) / rand=随机子集; 返回 npu tensor 与 golden 块列表。
-    大 shape (行数 > 4096) 的 rand 改用向量化 randint (含重复块, golden 展开幂等; self 不可用)"""
+    大 shape (行数 > 4096) 的 rand 用全局随机排列 + 逐行块号平移生成唯一候选（接口禁止重复块号）。"""
     b = case["batch"]
     seqs_q = case.get("seqs_q") or [case["q_seq"]] * b
     seqused_k = case["seqused_k"]
@@ -567,39 +660,36 @@ def gen_cand_input(case, kind, inputs):
     total_rows = sum(seqs_q)
     nb_max = (max(seqused_k) + CAND_BS - 1) // CAND_BS
     if total_rows > 4096:
-        assert kind != "self", "大 shape 仅支持 randint 候选"
-        # 期望 shape: TND [T, 1, cb] (拼接总行) / BSND [B, S1, 1, cb]; 变长 seqs_q 逐批生成
-        if case.get("layout") == "TND":
-            gen_dev = torch.Generator(device="npu").manual_seed(case.get("seed", 7) + 1)
-            parts = [
-                torch.randint(
-                    0,
-                    nb_max,
-                    (sq, 1, cb),
-                    dtype=torch.int32,
-                    device="npu",
-                    generator=gen_dev,
-                )
-                for sq in seqs_q
-            ]
-            rows_npu = torch.cat(parts, dim=0)
-            cand_golden = rows_npu.reshape(-1, cb).cpu()
-            return rows_npu, cand_golden
+        assert kind != "self", "大 shape 仅支持 rand 唯一候选"
+        assert nb_max >= cb, (
+            "大 shape 候选容量不能超过物理块数，否则无法生成互不重复候选"
+        )
         gen_dev = torch.Generator(device="npu").manual_seed(case.get("seed", 7) + 1)
-        parts = [
-            torch.randint(
-                0,
-                nb_max,
-                (sq, 1, cb),
-                dtype=torch.int32,
-                device="npu",
-                generator=gen_dev,
-            )
-            for sq in seqs_q
-        ]
-        rows_npu = torch.stack(
-            parts, dim=0
-        )  # [B, S1, 1, cb] (要求各批同长; 变长走下方逐行分支)
+        base = torch.randperm(nb_max, device="npu", generator=gen_dev)[:cb].to(
+            torch.int32
+        )
+
+        def make_rows(row_count, row_begin):
+            # 同一底表按全局行号平移：每行仍是 nb_max 个不同块号中的 cb 个唯一值，
+            # 避免逐行 randperm 的 host 开销，也避免 randint 产生接口禁止的重复块。
+            offsets = torch.arange(
+                row_begin, row_begin + row_count, dtype=torch.int32, device="npu"
+            ).reshape(-1, 1)
+            return (base.unsqueeze(0) + offsets) % nb_max
+
+        # 期望 shape: TND [T, 1, cb] (拼接总行) / BSND [B, S1, 1, cb]; 变长 seqs_q 逐批生成
+        parts = []
+        row_begin = 0
+        for sq in seqs_q:
+            rows = make_rows(sq, row_begin)
+            parts.append(rows.unsqueeze(1))
+            row_begin += sq
+        if case.get("layout") == "TND":
+            rows_npu = torch.cat(parts, dim=0)
+        else:
+            rows_npu = torch.stack(
+                parts, dim=0
+            )  # [B, S1, 1, cb] (要求各批同长; 变长走 TND)
         cand_golden = rows_npu.reshape(-1, cb).cpu()
         return rows_npu, cand_golden
     gen = torch.Generator().manual_seed(case.get("seed", 7) + 1)
@@ -1550,7 +1640,7 @@ NEW_CASES = [
         None,
     ),
     # ---- W4A4 (quant_mode=7, int4b_t): decode/prefill x BSND/TND/PA-gap —— golden 零改动复用
-    # (量化折叠进 scale, 稠密值域 [-8,7] 代入); packed uint8 低 nibble 在前经 FixQLIV2AclDtypes
+    # (量化折叠进 scale, 稠密值域 [-8,7] 代入); packed uint8 低 nibble 在前经 FixQSLIAclDtypes
     # 描述为 ACL_INT4, aclnn 层折算回逻辑 nibble shape ----
     (
         "int4_bsnd_m2",
@@ -2510,7 +2600,20 @@ def test_qli_cand(t):
     cand_golden_npu, cand_golden = (None, None)
     if case["cand_mode"] == 2:
         kind = "self" if "self" in case["name"] else "rand"
-        cand_golden_npu, cand_golden = gen_cand_input(case, kind, inputs)
+        if kind == "rand":
+            # v15 要求 source 的块分降序候选；第 4 个输出直接提供真实 candidate_block_length。
+            cand_golden_npu, cand_golden, cand_len_npu = gen_source_cand_input(
+                case, inputs
+            )
+        else:
+            cand_golden_npu, cand_golden = gen_cand_input(case, kind, inputs)
+            cand_len_npu = cand_lengths_from_indices(cand_golden_npu, case)
+        # QSLI_CAND_LEN_EMPTY=1 时传空张量，覆盖「空 candidate_block_length → 全量扫回退」路径。
+        if os.environ.get("QSLI_CAND_LEN_EMPTY") == "1":
+            inputs["cand_len_t"] = torch.empty(0, dtype=torch.int32, device="npu")
+        else:
+            inputs["cand_len_t"] = cand_len_npu
+        inputs["metadata"] = build_metadata(inputs, inputs["cand_len_t"])
     idx_npu, _, cand_npu = npu_run(inputs, case, cand_golden_npu)
     torch.npu.synchronize()
     seqs_q = case.get("seqs_q") or [case["q_seq"]] * case["batch"]

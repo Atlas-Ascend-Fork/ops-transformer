@@ -46,6 +46,11 @@ inline constexpr int64_t QLI_V2_A5_TOPK_UPPER_BOUND = 8192;
 inline constexpr int64_t QLI_V2_A3_TOPK_UPPER_BOUND = 2048;
 // 候选块大小：与第二级算子 QuantSparseLightningIndexer 的 candidate_block_size 保持一致，当前仅支持 8
 inline constexpr int64_t QLI_V2_CANDIDATE_BLOCK_SIZE_DEFAULT = 8;
+// candidate_block_length 允许的形状维度：1-D (q_t,)、2-D (q_t,1)、3-D (b,q_s,1)
+inline constexpr size_t QLI_V2_CAND_LEN_DIM_NUM_MIN = 1;
+inline constexpr size_t QLI_V2_CAND_LEN_DIM_NUM_MAX = 3;
+// 2-D/3-D 形状需要额外校验最后一维为 1
+inline constexpr size_t QLI_V2_CAND_LEN_DIM_NUM_MIN_WITH_LAST_DIM = 2;
 
 inline bool IsTensorExistQliV2(const aclTensor* tensor)
 {
@@ -513,7 +518,8 @@ aclnnStatus CheckConsistencyQsliMetadata(int64_t batchSize, const aclTensor* cuS
     return ACLNN_SUCCESS;
 }
 
-// 候选相关参数校验：candidate_block_length 为预留接口（仅接受空 tensor），
+// 候选相关参数校验：candidate_block_length 支持空 tensor（旧行为）或每行有效候选块数
+// （int32；TND 为 (q_t,1)，BSND 为 (b,q_s,1)；1 维 (q_t,) 亦接受），
 // candidate_block_size 当前仅支持 8，均与第二级算子 QuantSparseLightningIndexer 的契约一致。
 aclnnStatus CheckCandidateParamsQliV2(const aclTensor* candidateBlockLengthOptional, int64_t candidateBlockSize)
 {
@@ -521,11 +527,21 @@ aclnnStatus CheckCandidateParamsQliV2(const aclTensor* candidateBlockLengthOptio
         aclDataType dataType = GetDataTypeQsliMetadata(candidateBlockLengthOptional);
         CHECK_COND(dataType == aclDataType::ACL_INT32, ACLNN_ERR_PARAM_INVALID,
                    "candidate_block_length only supports int32, but got %d", static_cast<int>(dataType));
-        int64_t shapeSize = candidateBlockLengthOptional->GetViewShape().GetShapeSize();
-        CHECK_COND(shapeSize == 0, ACLNN_ERR_PARAM_INVALID,
-                   "candidate_block_length is a reserved interface and only accepts an empty tensor, "
-                   "but got shape size %ld",
-                   shapeSize);
+        const auto& shape = candidateBlockLengthOptional->GetViewShape();
+        const int64_t shapeSize = shape.GetShapeSize();
+        if (shapeSize > 0) {
+            const size_t dimNum = shape.GetDimNum();
+            CHECK_COND(dimNum >= QLI_V2_CAND_LEN_DIM_NUM_MIN && dimNum <= QLI_V2_CAND_LEN_DIM_NUM_MAX,
+                       ACLNN_ERR_PARAM_INVALID,
+                       "candidate_block_length should be 1-D (q_t,), 2-D (q_t,1) or 3-D (b,q_s,1), "
+                       "but got dim num %zu",
+                       dimNum);
+            if (dimNum >= QLI_V2_CAND_LEN_DIM_NUM_MIN_WITH_LAST_DIM) {
+                CHECK_COND(shape.GetDim(dimNum - 1) == 1, ACLNN_ERR_PARAM_INVALID,
+                           "candidate_block_length last dim should be 1, but got %ld",
+                           static_cast<long>(shape.GetDim(dimNum - 1)));
+            }
+        }
     }
     CHECK_COND(candidateBlockSize == QLI_V2_CANDIDATE_BLOCK_SIZE_DEFAULT, ACLNN_ERR_PARAM_INVALID,
                "candidate_block_size only supports %ld, but got %ld", QLI_V2_CANDIDATE_BLOCK_SIZE_DEFAULT,
