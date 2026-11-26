@@ -17,13 +17,15 @@
 namespace {
 using Ops::Transformer::AnyValue;
 
-gert::InfershapeContextPara MakeContext(const gert::StorageShape& query, const std::string& layout)
+gert::InfershapeContextPara MakeContext(const gert::StorageShape& query, const std::string& layout,
+                                        int64_t kvHeadNums = 2, int64_t selectBlockCount = 4,
+                                        const gert::StorageShape& valueShape = {{16, 128, 128}, {16, 128, 128}})
 {
     return gert::InfershapeContextPara("NsaCompressAttentionInfer",
                                        {
                                            {query, ge::DT_FLOAT16, ge::FORMAT_ND},
                                            {{{16, 128, 256}, {16, 128, 256}}, ge::DT_FLOAT16, ge::FORMAT_ND},
-                                           {{{16, 128, 128}, {16, 128, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                           {valueShape, ge::DT_FLOAT16, ge::FORMAT_ND},
                                        },
                                        {
                                            {query, ge::DT_FLOAT16, ge::FORMAT_ND},
@@ -31,9 +33,9 @@ gert::InfershapeContextPara MakeContext(const gert::StorageShape& query, const s
                                        },
                                        {
                                            {"numHeads", AnyValue::CreateFrom<int64_t>(16)},
-                                           {"numKeyValueHeads", AnyValue::CreateFrom<int64_t>(2)},
+                                           {"numKeyValueHeads", AnyValue::CreateFrom<int64_t>(kvHeadNums)},
                                            {"selectBlockSize", AnyValue::CreateFrom<int64_t>(64)},
-                                           {"selectBlockCount", AnyValue::CreateFrom<int64_t>(4)},
+                                           {"selectBlockCount", AnyValue::CreateFrom<int64_t>(selectBlockCount)},
                                            {"compressBlockSize", AnyValue::CreateFrom<int64_t>(32)},
                                            {"compressStride", AnyValue::CreateFrom<int64_t>(16)},
                                            {"scaleValue", AnyValue::CreateFrom<float>(1.0F)},
@@ -67,5 +69,29 @@ TEST(NsaCompressAttentionInferShapeTest, RejectsUnsupportedLayout)
     EXPECT_NE(errors.front().error_message.find("layoutOptional"), std::string::npos);
     EXPECT_NE(errors.front().error_message.find("BNSD"), std::string::npos);
     EXPECT_NE(errors.front().error_message.find("Only TND and BSND are supported"), std::string::npos);
+}
+
+TEST(NsaCompressAttentionInferShapeTest, RejectsNonPositiveKvHeadNums)
+{
+    auto para = MakeContext({{8, 16, 128}, {8, 16, 128}}, "TND", 0);
+    ExecuteTestCase(para, ge::GRAPH_FAILED);
+}
+
+TEST(NsaCompressAttentionInferShapeTest, RejectsLowRankQueryForBsnd)
+{
+    auto para = MakeContext({{8, 16, 128}, {8, 16, 128}}, "BSND");
+    ExecuteTestCase(para, ge::GRAPH_FAILED);
+}
+
+TEST(NsaCompressAttentionInferShapeTest, RejectsNonPositiveSelectBlockCount)
+{
+    auto para = MakeContext({{8, 16, 128}, {8, 16, 128}}, "TND", 2, -1);
+    ExecuteTestCase(para, ge::GRAPH_FAILED);
+}
+
+TEST(NsaCompressAttentionInferShapeTest, KeepsUnknownValueHeadDimForTnd)
+{
+    auto para = MakeContext({{8, 16, 128}, {8, 16, 128}}, "TND", 2, 4, {{16, 128, -1}, {16, 128, -1}});
+    ExecuteTestCase(para, ge::GRAPH_SUCCESS, {{8, 16, -1}, {8, 2, 4}});
 }
 } // namespace

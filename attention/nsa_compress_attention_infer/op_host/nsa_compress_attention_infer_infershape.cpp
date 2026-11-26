@@ -32,6 +32,7 @@ constexpr uint32_t LAYOUT_ATTR_INDEX = 7;
 static const uint64_t DIM_NUM_1 = 1;
 static const uint64_t DIM_NUM_2 = 2;
 static const uint64_t DIM_NUM_3 = 3;
+static const uint64_t DIM_NUM_4 = 4;
 
 static void ReportInferShapeFailure(const char* reason)
 {
@@ -41,24 +42,29 @@ static void ReportInferShapeFailure(const char* reason)
 
 static ge::graphStatus InferShapeNsaCompressAttentionInfer(gert::InferShapeContext* context)
 {
-    if (context == nullptr) {
-        return ge::GRAPH_FAILED;
-    }
+    OP_CHECK_IF(context == nullptr, ReportInferShapeFailure("InferShape context is null."), return ge::GRAPH_FAILED);
     const gert::Shape* queryShape = context->GetInputShape(QUERY_INPUT_INDEX);
+    OP_CHECK_IF(queryShape == nullptr, ReportInferShapeFailure("query input shape is null."), return GRAPH_FAILED);
     gert::Shape* outShape = context->GetOutputShape(ATTEN_OUTPUT_INDEX);
+    OP_CHECK_IF(outShape == nullptr, ReportInferShapeFailure("attention output shape is null."), return GRAPH_FAILED);
     const gert::Shape* valueShape = context->GetInputShape(VALUE_INPUT_INDEX);
+    OP_CHECK_IF(valueShape == nullptr, ReportInferShapeFailure("value input shape is null."), return GRAPH_FAILED);
 
     auto attrs = context->GetAttrs();
     OP_CHECK_IF(attrs == nullptr, ReportInferShapeFailure("InferShape context attributes are null."),
                 return GRAPH_FAILED);
     const int64_t* kvHeadNumsPtr = attrs->GetAttrPointer<int64_t>(KV_NUM_HEADS_ATTR_INDEX);
+    OP_CHECK_IF(kvHeadNumsPtr == nullptr, ReportInferShapeFailure("numKeyValueHeads attribute is null."),
+                return GRAPH_FAILED);
     const int64_t* selectBlockCountPtr = attrs->GetAttrPointer<int64_t>(SELECT_BLOCK_ATTR_INDEX);
+    OP_CHECK_IF(selectBlockCountPtr == nullptr, ReportInferShapeFailure("selectBlockCount attribute is null."),
+                return GRAPH_FAILED);
     const char* layOutPtr = attrs->GetAttrPointer<char>(LAYOUT_ATTR_INDEX);
     OP_CHECK_IF(layOutPtr == nullptr, ReportInferShapeFailure("InferShape context layoutOptional is null."),
                 return GRAPH_FAILED);
 
-    auto kvHeadNums = *kvHeadNumsPtr;
-    auto selectBlockCount = *selectBlockCountPtr;
+    const int64_t kvHeadNums = *kvHeadNumsPtr;
+    const int64_t selectBlockCount = *selectBlockCountPtr;
     std::string layOutStr = std::string(layOutPtr);
     if (layOutStr != "TND" && layOutStr != "BSND") {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("NsaCompressAttentionInfer", "layoutOptional", layOutStr,
@@ -66,7 +72,32 @@ static ge::graphStatus InferShapeNsaCompressAttentionInfer(gert::InferShapeConte
         return GRAPH_FAILED;
     }
 
-    auto shapeD2 = valueShape->GetDim(DIM_NUM_2);
+    OP_CHECK_IF(
+        kvHeadNums <= 0,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("NsaCompressAttentionInfer", "numKeyValueHeads",
+                                              std::to_string(kvHeadNums), "numKeyValueHeads must be greater than 0."),
+        return GRAPH_FAILED);
+    OP_CHECK_IF(selectBlockCount <= 0,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON("NsaCompressAttentionInfer", "selectBlockCount",
+                                                      std::to_string(selectBlockCount),
+                                                      "selectBlockCount must be greater than 0."),
+                return GRAPH_FAILED);
+    const bool isTndLayout = (layOutStr == "TND");
+    const uint64_t expectedQueryDimNum = isTndLayout ? DIM_NUM_3 : DIM_NUM_4;
+    OP_CHECK_IF(queryShape->GetDimNum() != expectedQueryDimNum,
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                    "NsaCompressAttentionInfer", "query", std::to_string(queryShape->GetDimNum()),
+                    layOutStr + " layout requires " + std::to_string(expectedQueryDimNum) + " dimensions."),
+                return GRAPH_FAILED);
+    OP_CHECK_IF(valueShape->GetDimNum() < DIM_NUM_3,
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON("NsaCompressAttentionInfer", "value",
+                                                         std::to_string(valueShape->GetDimNum()),
+                                                         "value must have at least 3 dimensions."),
+                return GRAPH_FAILED);
+
+    const int64_t shapeD2 = valueShape->GetDim(DIM_NUM_2);
+    // 动态维（-1）不参与整除，保持未知，避免 -1 / N 被截断为 0
+    const int64_t valueHeadDim = shapeD2 < 0 ? shapeD2 : shapeD2 / kvHeadNums;
     *outShape = *queryShape;
 
     gert::Shape* topkIndicesOutShape = context->GetOutputShape(TOPK_OUTPUT_INDEX);
@@ -74,12 +105,12 @@ static ge::graphStatus InferShapeNsaCompressAttentionInfer(gert::InferShapeConte
                 return GRAPH_FAILED);
     *topkIndicesOutShape = *queryShape;
 
-    if (layOutStr == "TND") {
-        outShape->SetDim(DIM_NUM_2, shapeD2 / kvHeadNums);
+    if (isTndLayout) {
+        outShape->SetDim(DIM_NUM_2, valueHeadDim);
         topkIndicesOutShape->SetDim(DIM_NUM_1, kvHeadNums);
         topkIndicesOutShape->SetDim(DIM_NUM_2, selectBlockCount);
     } else if (layOutStr == "BSND") {
-        outShape->SetDim(DIM_NUM_3, shapeD2 / kvHeadNums);
+        outShape->SetDim(DIM_NUM_3, valueHeadDim);
         topkIndicesOutShape->SetDim(DIM_NUM_2, kvHeadNums);
         topkIndicesOutShape->SetDim(DIM_NUM_3, selectBlockCount);
     }
@@ -88,6 +119,7 @@ static ge::graphStatus InferShapeNsaCompressAttentionInfer(gert::InferShapeConte
 
 static ge::graphStatus InferDataTypeNsaCompressAttentionInfer(gert::InferDataTypeContext* context)
 {
+    OP_CHECK_IF(context == nullptr, ReportInferShapeFailure("InferDataType context is null."), return ge::GRAPH_FAILED);
     const auto inputDataType = context->GetInputDataType(0);
     context->SetOutputDataType(0, inputDataType);
     context->SetOutputDataType(1, ge::DataType::DT_INT32);

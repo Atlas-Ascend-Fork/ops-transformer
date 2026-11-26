@@ -22,6 +22,7 @@ using namespace ge;
 namespace ops {
 static const uint64_t DIM_NUM_3 = 3;
 static const uint64_t DIM_NUM_2 = 2;
+static const uint64_t DIM_NUM_4 = 4;
 constexpr size_t QUERY_INPUT_INDEX = 0;
 constexpr size_t KEY_INPUT_INDEX = 1;
 constexpr size_t VALUE_INPUT_INDEX = 2;
@@ -81,9 +82,17 @@ ge::graphStatus InferShapeNsaSelectAttentionInfer(gert::InferShapeContext* conte
                 return ge::GRAPH_FAILED);
     *attentionOutShape = *queryShape;
     if (inputLayoutStr == "BSND") {
+        OP_CHECK_IF(queryShape->GetDimNum() != DIM_NUM_4,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(opName, "query", std::to_string(queryShape->GetDimNum()),
+                                                             "BSND layout requires 4 dimensions."),
+                    return ge::GRAPH_FAILED);
         auto shapeD2 = valueShape->GetDim(DIM_NUM_3);
         attentionOutShape->SetDim(DIM_NUM_3, shapeD2);
     } else if (inputLayoutStr == "BSH") {
+        OP_CHECK_IF(queryShape->GetDimNum() != DIM_NUM_3,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(opName, "query", std::to_string(queryShape->GetDimNum()),
+                                                             "BSH layout requires 3 dimensions."),
+                    return ge::GRAPH_FAILED);
         if (keyShape->GetDim(DIM_NUM_2) == 0) {
             OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(opName, "key.shape[2]", "0",
                                                       "The BSH hidden size of key must be nonzero");
@@ -100,6 +109,10 @@ ge::graphStatus InferShapeNsaSelectAttentionInfer(gert::InferShapeContext* conte
         auto shapeD2 = valueShape->GetDim(DIM_NUM_2) * group;
         attentionOutShape->SetDim(DIM_NUM_2, shapeD2);
     } else if (inputLayoutStr == "TND") {
+        OP_CHECK_IF(queryShape->GetDimNum() != DIM_NUM_3,
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(opName, "query", std::to_string(queryShape->GetDimNum()),
+                                                             "TND layout requires 3 dimensions."),
+                    return ge::GRAPH_FAILED);
         attentionOutShape->SetDim(DIM_NUM_2, HEAD_DIM_V_MAX);
     }
 
