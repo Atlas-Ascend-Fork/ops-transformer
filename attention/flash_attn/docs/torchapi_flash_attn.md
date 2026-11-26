@@ -159,8 +159,8 @@ cann_ops_transformer.flash_attn(
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | num_heads_q | int | 必选 | Query head数 | int32 | - | - |
 | num_heads_kv | int | 必选 | Key/Value head数 | int32 | - | - |
-| head_dim | int | 必选 | Query/Key 每个注意力头的维度 | int32 | - | - |
-| head_dim_v | int | 可选 | Value 每个注意力头的维度。缺省 None（内部传 -1）表示等于 head_dim；QK 与 V 维度不同（如 QK 192 / V 128）时必须传入，且需与后续 flash_attn 调用中 value 的 head_dim 一致（连续布局为 value 末维；PA_NZ 布局 value 形状为 (blocks, N2, D/16, block_size, 16)，head_dim = dim2 × dim4） | int32 | - | - |
+| head_dim | int | 必选 | Query/Key每个注意力头的维度 | int32 | - | - |
+| head_dim_v | int | 可选 | Value每个注意力头的维度。缺省None（内部传 -1）表示等于head_dim；QK与V维度不同（如QK 192 / V 128）时必须传入，且需与后续flash_attn调用中value的head_dim一致（连续布局为value末维；PA_NZ布局value形状为 (blocks, N2, D/16, block_size, 16)，head_dim = dim2 × dim4） | int32 | - | - |
 | cu_seqlens_q | Tensor | 可选 | 累积序列长度，用于处理变长序列，第一个元素必须为0 | int32 | ND | (B+1,)|
 | cu_seqlens_kv | Tensor | 可选 | 累积序列长度，用于处理变长序列，第一个元素必须为0 | int32 | ND | (B+1,)|
 | seqused_q | Tensor | 可选 | 指定每batch中实际使用的序列长度，截断冗余运算 | int32 | ND | (B,)|
@@ -177,11 +177,11 @@ cann_ops_transformer.flash_attn(
 | is_grad_enabled | bool | 可选 | 是否生成反向梯度所需的metadata。默认值为False。当为True时，metadata将包含反向所需的flash_attn_grad信息 | bool | - | - |
 | dropout_p | float | 可选 | 表示丢弃概率，默认值为0.0；取值范围为[0, 1) | double | - | - |
 
-**关于 `head_dim_v`**：`flash_attn_metadata` 无 q/k/v 张量输入，无法从张量 shape 推导 V 的 head_dim，因此通过标量参数 `head_dim_v` 显式声明：
+**关于`head_dim_v`**：`flash_attn_metadata`无q/k/v张量输入，无法从张量shape推导V的head_dim，因此通过标量参数`head_dim_v`显式声明：
 
-- 缺省 None（内部传 -1）表示 **V 的 head_dim 等于 `head_dim`**（QK 维），与 qk==v 的常规场景行为一致。
-- QK 与 V 维度不同（如 QK 192 / V 128，MLA 非吸收形态）时**必须传入**，且必须与后续 `flash_attn` 调用中 value 的 head_dim 一致——连续布局（BSND/BNSD/TND）即 value 末维；PA_NZ 布局 value 形状为 (blocks, N2, D/16, block_size, 16)，head_dim = dim2 × dim4。不一致时负载均衡切分与主算子不一致，可能导致结果错误。
-- 主算子 `flash_attn` 无对应参数：其 V 的 head_dim 直接取自 value 张量末维。当前支持的 (QK D, V DV) 组合以 `flash_attn` 的校验为准：(64,64)、(72,72)、(128,128)、(256,256)、(192,128)。
+- 缺省None（内部传 -1）表示 **V的head_dim等于`head_dim`**（QK维），与qk==v的常规场景行为一致。
+- QK与V维度不同（如QK 192 / V 128，MLA非吸收形态）时**必须传入**，且必须与后续`flash_attn`调用中value的head_dim一致——连续布局（BSND/BNSD/TND）即value末维；PA_NZ布局value形状为 (blocks, N2, D/16, block_size, 16)，head_dim = dim2 × dim4。不一致时负载均衡切分与主算子不一致，可能导致结果错误。
+- 主算子`flash_attn`无对应参数：其V的head_dim直接取自value张量末维。当前支持的 (QK D, V DV) 组合以`flash_attn`的校验为准：(64,64)、(72,72)、(128,128)、(256,256)、(192,128)。
 
 ### flash_attn
 
@@ -232,11 +232,27 @@ cann_ops_transformer.flash_attn(
 - attn_out：限制：该输出参数的D维度与value的D保持一致，其余维度需要与入参query的shape保持一致。
 - softmax_lse：return_softmax_lse为True时，一般情况下，输出shape为(B, Q_N, Q_S)的Tensor，当layout_q为TND时，输出shape为(Q_N, Q_T)的Tensor；return_softmax_lse为False时，则输出shape为[1]的值为0的Tensor。
 
+## 自动微分（训练）
+
+`flash_attn`支持torch autograd（NPU训练态）：输入`q/k/v/sinks`
+打开`requires_grad`且处于grad模式时，前向自动出图，反向经独立算子`flash_attn_grad`计算
+`dq/dk/dv/dsink`。
+
+**使用约束**
+
+- 训练态`metadata`必须由`flash_attn_metadata(..., is_grad_enabled=True)`生成
+  （携带FAG分核段），且`max_seqlen_q` / `max_seqlen_kv`需显式给出（≥ 0）；
+  使用非训练metadata进行反向，结果未定义。
+- 可微输入：`q`、`k`、`v`、`sinks`（其余输入不产生梯度，梯度返回为None）。
+- `softmax_lse`为**非可微辅助输出**：若loss依赖lse并对其反向，会显式抛出`NotImplementedError`；训练态下`softmax_lse`会被内部强制计算（反向必需），用户未开启`return_softmax_lse`时对外仍返回其占位输出（接口行为不变）。
+- 反向覆盖范围由`flash_attn_grad`算子决定，未覆盖的布局/场景由反向算子拦截报错。
+- `flash_attn_grad`为NPU（Ascend 950系列）算子，需随custom包一并编译安装。
+
 ## 约束说明
 
 - 参数cu_seqlens_q、cu_seqlens_kv、seqused_q、seqused_kv、block_table及attn_mask属于tensor。由于算子在Tiling阶段无法获取tensor的具体数值，tiling侧不对值进行校验，正确性需要用户自行保证。若上述参数传入非法值，会触发未定义行为（精度问题、非法内存访问导致的程序崩溃等）。
 - flash_attn_metadata和flash_attn的入参在调用时应该保持一致。由于算子分为两个接口分段调用，算子无法自行校验，正确性需要由客户自行保证。若接口传入参数不一致，会发生未定义行为（精度问题、非法内存访问导致的程序崩溃等）。
-- **最佳性能约束**：为保证性能最优，调用 `flash_attn_metadata` 和 `flash_attn` 时均需同时传入 `max_seqlen_q` 和 `max_seqlen_kv`，未同时传入这两个参数时，无法保证性能最优。
+- **最佳性能约束**：为保证性能最优，调用`flash_attn_metadata`和`flash_attn`时均需同时传入`max_seqlen_q`和`max_seqlen_kv`，未同时传入这两个参数时，无法保证性能最优。
 
 ### 特性参数组
 
@@ -718,9 +734,9 @@ layout_q、layout_kv与SeqLens参数的组合关系：
 - 当layout_q不为TND时，seqused_q与max_seqlen_q二选一传入，不支持传入cu_seqlens_q；当layout_q为TND时，cu_seqlens_q必须传入，seqused_q与max_seqlen_q均为可选参数。
 - 当layout_kv不为TND且不为PA时，seqused_kv与max_seqlen_kv二选一传入，不支持传入cu_seqlens_kv；当layout_kv为PA时，seqused_kv必须传入，max_seqlen_kv为可选参数；当layout_kv为TND时，cu_seqlens_kv必须传入，seqused_kv与max_seqlen_kv均为可选参数。
 
-- 当 Q 或 KV 使用 TND 布局时，对应的 `cu_seqlens` 相邻差值是每个 batch 的物理长度，`seqused` 的对应元素是有效长度。传入 `seqused` 时，每个 batch b 的有效长度不得超过物理长度。
-  - Q 为 TND 且传入 `seqused_q` 时，`cu_seqlens_q[b+1] - cu_seqlens_q[b] >= seqused_q[b]`。
-  - KV 为 TND 且传入 `seqused_kv` 时，`cu_seqlens_kv[b+1] - cu_seqlens_kv[b] >= seqused_kv[b]`。
+- 当Q或KV使用TND布局时，对应的`cu_seqlens`相邻差值是每个batch的物理长度，`seqused`的对应元素是有效长度。传入`seqused`时，每个batch b的有效长度不得超过物理长度。
+  - Q为TND且传入`seqused_q`时，`cu_seqlens_q[b+1] - cu_seqlens_q[b] >= seqused_q[b]`。
+  - KV为TND且传入`seqused_kv`时，`cu_seqlens_kv[b+1] - cu_seqlens_kv[b] >= seqused_kv[b]`。
 
 #### Sinks参数组
 

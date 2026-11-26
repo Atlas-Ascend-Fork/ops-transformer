@@ -209,6 +209,7 @@ Case definitions: `tests/ut/op_host/arch35/test_flash_attn_tiling.csv`. Addition
 - **LSE (Log-Sum-Exp)**: when `return_softmax_lse=True`, outputs the log denominator of the softmax for each row: lse = log(Σ e^{s-m}) + m, where m is the max value within the row.
 - Output shape: BSND/BNSD → (B, Q_N, Q_S); TND → (Q_T, Q_N); the dtype is FLOAT32.
 - Typical uses: cross-batch KV cache concatenation (such as probability fusion in speculative decoding) and softmax state reconstruction when training resumes from a checkpoint.
+- During training, the operator computes LSE internally for backward. See [Automatic Differentiation (Training)](docs/torchapi_flash_attn_en.md#automatic-differentiation-training).
 
 #### 1.7 Row invalid (RowInvalid)
 
@@ -241,7 +242,7 @@ The operator consists of four parts from the call entry to the execution engine:
 
 | File | Key content |
 |---|---|
-| `torch_extension/flash_attn.py` | PyTorch operator schema (the `flash_attn_metadata` and `flash_attn` interfaces), the FakeTensor meta implementation (shape/dtype inference), and the NPU implementation of `PrivateUse1` dispatch; contains the metadata size formula `((36+72)*B*KV_N+1)*16` (4096B aligned) and batch inference |
+| `torch_extension/flash_attn.py` | PyTorch operator schema (the `flash_attn_metadata` and `flash_attn` interfaces), the FakeTensor meta implementation (shape/dtype inference), the NPU implementation of `PrivateUse1` dispatch, and autograd registration for training (`_flash_attn_forward` and `_flash_attn_backward` with `register_autograd`, using `flash_attn_grad` for backward). Contains the metadata size formula `((36+72)*B*KV_N+1)*16` (4096B aligned) and batch inference |
 | `torch_extension/graph_convert_flash_attn.py` | Dispatch conversion for the torchair graph mode |
 | `torch_extension/csrc/` | C++ binding layer, hosting `OpBuilder` compilation and underlying calls |
 

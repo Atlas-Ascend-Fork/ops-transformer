@@ -7,7 +7,7 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
-from typing import Optional
+from typing import Optional, Tuple
 import torch
 from torch.library import impl
 from cann_ops_transformer.op_builder import OpBuilder, get_as_library
@@ -44,6 +44,75 @@ def _validate_layout_dims(q, k, v, layout_q, layout_kv):
     _check_layout_dims(q, "q", layout_q)
     _check_layout_dims(k, "k", layout_kv)
     _check_layout_dims(v, "v", layout_kv)
+
+
+def _validate_kv_stride(k, v):
+    # FA 不支持 k/v 的 stride 中含 0
+    for name, tensor in (("k", k), ("v", v)):
+        if 0 in tensor.stride():
+            raise ValueError(
+                f"flash_attn does not support {name} with stride containing 0, "
+                f"got {name}.stride() = {tensor.stride()}"
+            )
+
+
+def _flash_attn_out_sizes(
+    q, k, v, layout_q, layout_kv, layout_out, return_softmax_lse=False
+):
+    """_flash_attn_forward 的输出 shape 推导(与 C++/aclnn 行为一致)。
+
+    softmax_lse: 关闭时为空 tensor {0}, 开启时 TND 为 (N, T)、其余为 (B, N, S)。
+    """
+    _validate_layout_dims(q, k, v, layout_q, layout_kv)
+    if layout_q == "TND":
+        t_size = q.size(0)
+        n_size = q.size(1)
+    elif layout_q == "BSND":
+        b_size = q.size(0)
+        s_size = q.size(1)
+        n_size = q.size(2)
+    else:
+        b_size = q.size(0)
+        n_size = q.size(1)
+        s_size = q.size(2)
+
+    if layout_kv == "PA_NZ":
+        d_size = v.size(-3) * v.size(-1)
+    else:
+        d_size = v.size(-1)
+
+    if layout_out == "TND":
+        torch._check(
+            layout_q == "TND",
+            lambda: (
+                f"When the layout of output is TND, the layout of query must be TND, but got {layout_q}"
+            ),
+        )
+        attention_out_size = (t_size, n_size, d_size)
+    elif layout_out == "BNSD":
+        torch._check(
+            layout_q == "BNSD",
+            lambda: (
+                f"When the layout of output is BNSD, the layout of query must be BNSD, but got {layout_q}"
+            ),
+        )
+        attention_out_size = (b_size, n_size, s_size, d_size)
+    else:
+        torch._check(
+            layout_q != "TND",
+            lambda: (
+                f"When the layout of output is BSND, the layout of query must be BNSD or BSND, but got {layout_q}"
+            ),
+        )
+        attention_out_size = (b_size, s_size, n_size, d_size)
+
+    if not return_softmax_lse:
+        softmax_lse_size = (0,)
+    elif layout_q == "TND":
+        softmax_lse_size = (n_size, t_size)
+    else:
+        softmax_lse_size = (b_size, n_size, s_size)
+    return attention_out_size, softmax_lse_size
 
 
 def _get_npu_core_nums():
@@ -247,6 +316,358 @@ flash_attn_op_builder = FlashAttenOpBuilder()
 flash_attn_op_builder._ensure_initialized()
 
 
+# ===========================================================================
+# AutoGrad 接线(compressor/compressor_grad 范式)
+#   - 内部 _flash_attn_forward: autograd 载体, 返回 backward 所需中间量
+#     (softmax_lse 训练态由公开 wrapper 强制开启);
+#   - 内部 _flash_attn_backward: 调用独立反向算子 flash_attn_grad(懒加载);
+#   - 芯片无关(wrapper 不感知 arch); 反向不支持的方向(如 TND 未覆盖场景)
+#     由反向算子自身拦截;
+#   - softmax_lse 为非可微辅助输出, 对其反向显式报错。
+# ===========================================================================
+@torch.library.custom_op(
+    "cann_ops_transformer::_flash_attn_forward", mutates_args=(), device_types="npu"
+)
+def _flash_attn_forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_table: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_kv: Optional[torch.Tensor] = None,
+    seqused_q: Optional[torch.Tensor] = None,
+    seqused_kv: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+    attn_mask: Optional[torch.Tensor] = None,
+    metadata: Optional[torch.Tensor] = None,
+    softmax_scale: float = 1.0,
+    mask_mode: int = 0,
+    win_left: int = -1,
+    win_right: int = -1,
+    max_seqlen_q: int = -1,
+    max_seqlen_kv: int = -1,
+    layout_q: str = "BSND",
+    layout_kv: str = "BSND",
+    layout_out: str = "BSND",
+    return_softmax_lse: bool = False,
+    dropout_p: float = 0.0,
+    seed: Optional[torch.Tensor] = None,
+    offset: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    op_module = flash_attn_op_builder.load()
+    return op_module.flash_attn(
+        q,
+        k,
+        v,
+        block_table,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqused_q,
+        seqused_kv,
+        sinks,
+        attn_mask,
+        metadata,
+        softmax_scale,
+        mask_mode,
+        win_left,
+        win_right,
+        max_seqlen_q,
+        max_seqlen_kv,
+        layout_q,
+        layout_kv,
+        layout_out,
+        return_softmax_lse,
+        dropout_p,
+        seed,
+        offset,
+    )
+
+
+@torch.library.register_fake("cann_ops_transformer::_flash_attn_forward")
+def _flash_attn_forward_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    block_table: Optional[torch.Tensor] = None,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_kv: Optional[torch.Tensor] = None,
+    seqused_q: Optional[torch.Tensor] = None,
+    seqused_kv: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+    attn_mask: Optional[torch.Tensor] = None,
+    metadata: Optional[torch.Tensor] = None,
+    softmax_scale: float = 1.0,
+    mask_mode: int = 0,
+    win_left: int = -1,
+    win_right: int = -1,
+    max_seqlen_q: int = -1,
+    max_seqlen_kv: int = -1,
+    layout_q: str = "BSND",
+    layout_kv: str = "BSND",
+    layout_out: str = "BSND",
+    return_softmax_lse: bool = False,
+    dropout_p: float = 0.0,
+    seed: Optional[torch.Tensor] = None,
+    offset: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    attention_out_size, lse_size = _flash_attn_out_sizes(
+        q, k, v, layout_q, layout_kv, layout_out, return_softmax_lse
+    )
+    return (
+        torch.empty(attention_out_size, dtype=q.dtype, device=q.device),
+        torch.empty(lse_size, dtype=torch.float, device=q.device),
+    )
+
+
+@torch.library.custom_op(
+    "cann_ops_transformer::_flash_attn_backward", mutates_args=(), device_types="npu"
+)
+def _flash_attn_backward(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_kv: Optional[torch.Tensor] = None,
+    seqused_q: Optional[torch.Tensor] = None,
+    seqused_kv: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+    attn_mask: Optional[torch.Tensor] = None,
+    metadata: Optional[torch.Tensor] = None,
+    softmax_scale: float = 1.0,
+    mask_mode: int = 0,
+    win_left: int = -1,
+    win_right: int = -1,
+    max_seqlen_q: int = -1,
+    max_seqlen_kv: int = -1,
+    layout_q: str = "BSND",
+    layout_kv: str = "BSND",
+    layout_out: str = "BSND",
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    # 反向为独立算子, 懒加载
+    from ..flash_attn_grad import flash_attn_grad
+
+    return flash_attn_grad(
+        q,
+        k,
+        v,
+        dout,
+        attn_out,
+        softmax_lse,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqused_q,
+        seqused_kv,
+        sinks,
+        attn_mask,
+        metadata,
+        softmax_scale,
+        mask_mode,
+        win_left,
+        win_right,
+        max_seqlen_q,
+        max_seqlen_kv,
+        layout_q,
+        layout_kv,
+        layout_out,
+    )
+
+
+@torch.library.register_fake("cann_ops_transformer::_flash_attn_backward")
+def _flash_attn_backward_fake(
+    dout: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    attn_out: torch.Tensor,
+    softmax_lse: torch.Tensor,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cu_seqlens_kv: Optional[torch.Tensor] = None,
+    seqused_q: Optional[torch.Tensor] = None,
+    seqused_kv: Optional[torch.Tensor] = None,
+    sinks: Optional[torch.Tensor] = None,
+    attn_mask: Optional[torch.Tensor] = None,
+    metadata: Optional[torch.Tensor] = None,
+    softmax_scale: float = 1.0,
+    mask_mode: int = 0,
+    win_left: int = -1,
+    win_right: int = -1,
+    max_seqlen_q: int = -1,
+    max_seqlen_kv: int = -1,
+    layout_q: str = "BSND",
+    layout_kv: str = "BSND",
+    layout_out: str = "BSND",
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    dq = torch.empty_like(q)
+    dk = torch.empty_like(k)
+    dv = torch.empty_like(v)
+    n_q = q.size(1) if layout_q in ("TND", "BNSD") else q.size(2)
+    dsink = torch.empty((n_q,), dtype=torch.float32, device=q.device)
+    return (dq, dk, dv, dsink)
+
+
+def _flash_attn_autograd_setup_context(ctx, inputs, output):
+    ctx.set_materialize_grads(False)
+    (
+        q,
+        k,
+        v,
+        block_table,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqused_q,
+        seqused_kv,
+        sinks,
+        attn_mask,
+        metadata,
+        softmax_scale,
+        mask_mode,
+        win_left,
+        win_right,
+        max_seqlen_q,
+        max_seqlen_kv,
+        layout_q,
+        layout_kv,
+        layout_out,
+        _return_softmax_lse,
+        _dropout_p,
+        _seed,
+        _offset,
+    ) = inputs
+    attn_out, softmax_lse = output
+    ctx.save_for_backward(
+        q,
+        k,
+        v,
+        attn_out,
+        softmax_lse,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqused_q,
+        seqused_kv,
+        sinks,
+        attn_mask,
+        metadata,
+    )
+    ctx.flash_attn_attrs = (
+        softmax_scale,
+        mask_mode,
+        win_left,
+        win_right,
+        max_seqlen_q,
+        max_seqlen_kv,
+        layout_q,
+        layout_kv,
+        layout_out,
+    )
+
+
+def _flash_attn_autograd_backward(ctx, dout, *grads):
+    # grads对应LSE；仅公开attn_out参与求导。
+    # 非可微辅助输出: 当前反向算子无 dLSE 入口, 显式报错
+    if any(g is not None for g in grads):
+        raise NotImplementedError(
+            "flash_attn: gradient w.r.t. softmax_lse is not supported; "
+            "only attn_out is differentiable (dq/dk/dv/dsink)."
+        )
+    (
+        q,
+        k,
+        v,
+        attn_out,
+        softmax_lse,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqused_q,
+        seqused_kv,
+        sinks,
+        attn_mask,
+        metadata,
+    ) = ctx.saved_tensors
+    (
+        softmax_scale,
+        mask_mode,
+        win_left,
+        win_right,
+        max_seqlen_q,
+        max_seqlen_kv,
+        layout_q,
+        layout_kv,
+        layout_out,
+    ) = ctx.flash_attn_attrs
+    dq, dk, dv, dsink = _flash_attn_backward(
+        dout,
+        q,
+        k,
+        v,
+        attn_out,
+        softmax_lse,
+        cu_seqlens_q,
+        cu_seqlens_kv,
+        seqused_q,
+        seqused_kv,
+        sinks,
+        attn_mask,
+        metadata,
+        softmax_scale,
+        mask_mode,
+        win_left,
+        win_right,
+        max_seqlen_q,
+        max_seqlen_kv,
+        layout_q,
+        layout_kv,
+        layout_out,
+    )
+    d_sinks = dsink if sinks is not None else None
+    # 梯度按 _flash_attn_forward 的输入序返回
+    return (
+        dq,
+        dk,
+        dv,  # q, k, v
+        None,  # block_table
+        None,
+        None,
+        None,
+        None,  # cu_seqlens_q/kv, seqused_q/kv
+        d_sinks,  # sinks
+        None,
+        None,  # attn_mask, metadata
+        None,
+        None,
+        None,
+        None,  # softmax_scale, mask_mode, win_left, win_right
+        None,
+        None,  # max_seqlen_q, max_seqlen_kv
+        None,
+        None,
+        None,  # layout_q, layout_kv, layout_out
+        None,
+        None,
+        None,
+        None,  # return_softmax_lse, dropout_p, seed, offset
+    )
+
+
+_flash_attn_forward.register_autograd(
+    _flash_attn_autograd_backward, setup_context=_flash_attn_autograd_setup_context
+)
+
+
+def _flash_attn_is_grad_enabled(q, k, v, sinks) -> bool:
+    """训练态判定: grad 模式开启且存在需要梯度的输入(q/k/v/sinks)。"""
+    if not torch.is_grad_enabled():
+        return False
+    return bool(
+        q.requires_grad
+        or k.requires_grad
+        or v.requires_grad
+        or (sinks is not None and sinks.requires_grad)
+    )
+
+
 @impl(get_as_library(), FA_METADATA_OP_NAME, "PrivateUse1")
 def flash_attn_metadata(
     num_heads_q: int,
@@ -365,6 +786,7 @@ def flash_attn_metadata_fallback(
 
 
 @impl(get_as_library(), flash_attn_op_builder.name, "PrivateUse1")
+@impl(get_as_library(), flash_attn_op_builder.name, "Autograd")
 def flash_attn(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -393,18 +815,14 @@ def flash_attn(
 ):
     """
     dispatcher implementation for NPU.
-    'PrivateUse1' is the combine key for custom NPU backends.
+    'PrivateUse1' / 'Autograd' 同一实现: 训练态(输入需要梯度)经 _flash_attn_forward 出图,
+    反向由 _flash_attn_backward -> flash_attn_grad 计算 dq/dk/dv/dsink。
     """
     _validate_layout_dims(q, k, v, layout_q, layout_kv)
-    # FA 不支持 k/v 的 stride 中含 0
-    for name, tensor in (("k", k), ("v", v)):
-        if 0 in tensor.stride():
-            raise ValueError(
-                f"flash_attn does not support {name} with stride containing 0, "
-                f"got {name}.stride() = {tensor.stride()}"
-            )
-    op_module = flash_attn_op_builder.load()
-    return op_module.flash_attn(
+    _validate_kv_stride(k, v)
+    grad_enabled = _flash_attn_is_grad_enabled(q, k, v, sinks)
+    # 训练态强制 softmax_lse 开启(反向必需); 用户未请求时对外仍返回 {0} 占位
+    attn_out, softmax_lse = _flash_attn_forward(
         q,
         k,
         v,
@@ -425,11 +843,14 @@ def flash_attn(
         layout_q,
         layout_kv,
         layout_out,
-        return_softmax_lse,
+        bool(return_softmax_lse) or grad_enabled,
         dropout_p,
         seed,
         offset,
     )
+    if grad_enabled and not return_softmax_lse:
+        softmax_lse = torch.empty((0,), dtype=torch.float32, device=q.device)
+    return attn_out, softmax_lse
 
 
 flash_attn = torch.ops.cann_ops_transformer.flash_attn

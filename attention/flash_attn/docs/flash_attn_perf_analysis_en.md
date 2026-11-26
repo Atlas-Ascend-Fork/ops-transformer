@@ -7,7 +7,7 @@
 Flash Attention on Ascend consists of multiple engine pipelines:
 
 - **Cube (Mmad)**: the two matrix multiplications bmm1 (Q·Kᵀ) and bmm2 (P·V);
-- **MTE**: transferring Q/K/V from GM into L1, and the fractal transfers from L1 to L0A/L0B;
+- **MTE**: transferring Q/K/V from GM into L1 and performing fractal transfers from L1 to L0A/L0B;
 - **Fixpipe**: moving bmm results from L0C out to UB;
 - **Vector**: softmax (row max/exp/sum) and online accumulation of the output.
 

@@ -1,6 +1,6 @@
 # Performance Test Scripts
 
-This directory holds the scripts used to generate, run, collect and plot performance data for
+This directory holds the scripts used to generate, run, collect, and plot performance data for
 flash_attn. All commands below are expected to be executed from
 `attention/flash_attn/tests/pytests`.
 
