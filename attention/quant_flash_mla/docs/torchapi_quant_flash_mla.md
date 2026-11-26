@@ -676,6 +676,8 @@ mask_mode参数解释
 > 1. TND 场景下，若未传入 `seqused_q`，`cu_seqlens_q` 的相邻元素差值等价于每个 batch 的 `seqused_q`，即 `seqused_q[i] = cu_seqlens_q[i + 1] - cu_seqlens_q[i]`，用户需自行保证 `max(seqused_q) <= max_seqlen_q`。
 > 2. 非 TND 场景下，若未传入 `seqused_q`，使用 q 的物理序列长度 `Q_S` 作为每个 batch 的 `seqused_q`，即 `seqused_q[i] = Q_S`，用户需自行保证 `max(seqused_q) <= max_seqlen_q`。
 >
+> 算子不校验 `seqused_q`与 `cu_seqlens_q`之间的对应关系。`layout_q` 为 `TND` 时，若同时传入 `seqused_q` 与 `cu_seqlens_q`，用户需自行保证每个 batch 的 `seqused_q` 不超过其在 `cu_seqlens_q` 上对应区间的长度，即 `seqused_q[i] <= cu_seqlens_q[i + 1] - cu_seqlens_q[i]`。
+>
 > 算子不校验 `cache_seqlens` 中的最大值是否与 `max_seqlen_kv` 一致，用户需自行保证 `max(cache_seqlens) <= max_seqlen_kv`。
 
 
