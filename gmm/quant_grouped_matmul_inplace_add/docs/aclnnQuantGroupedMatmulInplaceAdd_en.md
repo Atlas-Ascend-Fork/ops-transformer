@@ -284,7 +284,7 @@ aclnnStatus aclnnQuantGroupedMatmulInplaceAdd(
         | Parameter | Shape Constraint |
         |:---------:| :------ |
         |scale1Optional| 2D tensor or 1D tensor, with shape (g, 1) or (g,)|
-        |scale2| pertensor use case: 2D tensor or 1D tensor, with shape (g, 1) or (g,); perchannel use case: 2D tensor, with shape (g, N).|
+        |scale2| per-tensor use case: 2D tensor or 1D tensor, with shape (g, 1) or (g,); per-channel use case: 2D tensor, with shape (g, N).|
 
     - Data types supported in the dynamic quantization (MX quantization) scenario:
       - The data type combinations must meet the following table:
@@ -428,7 +428,6 @@ int aclnnQuantGroupedMatmulInplaceAddTest(int32_t deviceId, aclrtStream &stream)
     aclTensor* scale2 = nullptr;
     aclTensor* yRef = nullptr;
     aclTensor* scale1 = nullptr;
-    aclTensor* out = nullptr;
     int64_t groupListType = 0;
     int64_t groupSize = 0;
     std::vector<uint8_t> xData(GetShapeSize(x1Shape), 0X10); // hifloat8 2.0 converted to hexadecimal 0X10

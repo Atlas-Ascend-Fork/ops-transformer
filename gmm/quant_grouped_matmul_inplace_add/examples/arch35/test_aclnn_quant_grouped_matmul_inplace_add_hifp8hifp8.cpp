@@ -137,7 +137,6 @@ int aclnnQuantGroupedMatmulInplaceAddTest(int32_t deviceId, aclrtStream& stream)
     aclTensor* scale2 = nullptr;
     aclTensor* yRef = nullptr;
     aclTensor* scale1 = nullptr;
-    aclTensor* out = nullptr;
     int64_t groupListType = 0;
     int64_t groupSize = 0;
     std::vector<uint8_t> xData(GetShapeSize(x1Shape), 0X10); // hifloat8 2.0 转16进制 0X10

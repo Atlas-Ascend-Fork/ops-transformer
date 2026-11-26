@@ -291,7 +291,7 @@ aclnnStatus aclnnQuantGroupedMatmulInplaceAdd(
         | 参数 | shape限制 |
         |:---------:| :------ |
         |scale1Optional| 2维tensor或1维tensor，shape为(g, 1)或(g,)|
-        |scale2| pertensor场景：2维tensor或1维tensor，shape为(g, 1)或(g,)；perchannel场景：2维tensor，shape为(g, N)|
+        |scale2| per-tensor场景：2维tensor或1维tensor，shape为(g, 1)或(g,)；per-channel场景：2维tensor，shape为(g, N)|
 
     - 动态量化（mx量化）场景支持的数据类型为：
       - 数据类型组合要满足下表：
@@ -435,7 +435,6 @@ int aclnnQuantGroupedMatmulInplaceAddTest(int32_t deviceId, aclrtStream &stream)
     aclTensor* scale2 = nullptr;
     aclTensor* yRef = nullptr;
     aclTensor* scale1 = nullptr;
-    aclTensor* out = nullptr;
     int64_t groupListType = 0;
     int64_t groupSize = 0;
     std::vector<uint8_t> xData(GetShapeSize(x1Shape), 0X10); // hifloat8 2.0转16进制0X10
