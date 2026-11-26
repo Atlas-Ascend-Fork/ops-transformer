@@ -506,6 +506,20 @@ protected:
         // Empty views have no storage traversal; their strides cannot reliably identify a transpose.
         const bool allowEmptyMx = !gmmDsqParams_.isMxA8W4 && !gmmDsqParams_.isMxA8Hif4 && !hif4Weight;
         if (allowEmptyMx && (*gmmDsqParams_.weight)[0]->IsEmpty()) {
+            const auto* weight = (*gmmDsqParams_.weight)[0];
+            const auto& weightShape = weight->GetViewShape();
+            const auto k = gmmDsqParams_.x->GetViewShape().GetDim(1);
+            // Empty public views can look transposed from strides alone. Match
+            // logical [E,K,0] weight and [E,ceil(K/64),0,2] scale instead.
+            if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510 &&
+                !op::IsPrivateFormat(weight->GetStorageFormat()) && IsFp8Dtype(weight->GetDataType()) &&
+                IsFp8Dtype(gmmDsqParams_.x->GetDataType()) && weightShape.GetDimNum() == MX_WEIGHT_DIM &&
+                weightShape.GetDim(1) == k && weightShape.GetDim(2) == 0 &&
+                (*gmmDsqParams_.weightScale)[0]->GetViewShape() == op::Shape{weightShape.GetDim(0),
+                                                                             Ops::Base::CeilDiv(k, SWIGLU_SPLIT_SIZE),
+                                                                             0, SWIGLU_SPLIT_FACTOR}) {
+                transposeWeight = false;
+            }
             transposeWeightScale = transposeWeight;
         }
         if (allowEmptyMx && gmmDsqParams_.x->IsEmpty()) {
