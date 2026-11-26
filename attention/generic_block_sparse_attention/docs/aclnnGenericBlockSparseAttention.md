@@ -1495,7 +1495,10 @@ Q/K scale保持对应数据的前缀轴，将逻辑D轴替换为[D/64,2]；V sca
 
 V scale的最后一维2对应相邻两个32-token组。同一有效序列、KV head和channel在所有token及物理页上的V scale必须一致，调用者须按表中格式重复存储。
 TND V scale按每个batch的KV存储长度分别向上对齐后拼接，不能对总长度一次对齐，也不能按较短的实际有效长度重新确定batch起点。
-K/V和对应scale使用同一blockTable的物理页编号，允许物理页编号不连续或乱序，不使用独立scale页表。ACLNN将输入整理为连续存储。
+K/V和对应scale使用同一blockTable的物理页编号，允许物理页编号不连续或乱序，不使用独立scale页表。
+PA_BBND、PA_BNBD下，K、V、K scale、V scale分别支持独立的首轴（物理页轴）步长，页内各轴须连续。
+K/V首轴stride按逻辑FP4元素计，须至少覆盖一页并按Nkv×D对齐；K scale、V scale首轴stride按E8M0字节计，须至少覆盖各自一页，分别按Nkv×D/32、Nkv×D×2对齐。
+符合上述要求的分页输入由ACLNN保留原步长，不进行连续化拷贝。Q及非分页输入仍按连续张量处理。
 
 `pQuantScaleOptional` 必须为nullptr，P在算子内部动态量化。令x为缩放后的logits，组指数为
 `c=ceil(max(x)/ln(2)-log2(CX))`，P由 `exp(x-c*ln(2)-ln(1.5))` 转换为FP4，P scale同步补偿运行基准。

@@ -317,7 +317,7 @@ static const aclTensor* NormalizeDim0KvTensor(const aclTensor* tensor, const cha
 // GetInputShape may return storage unless Contiguous/CreateView normalizes the descriptor).
 // Keep Contiguous even when OpDef has AutoContiguous.
 // Do NOT Contiguous key/value here — dim0-strided KV is handled by NormalizeDim0KvTensor
-// (CreateView + SetStorageShape(viewShape)). Reuse this view for paged A8C4 K/V scales.
+// (CreateView + SetStorageShape(viewShape)). A8C4 and MXFP4 also use this view for paged K/V scales.
 static aclnnStatus MakeContiguous(const aclTensor*& query, const aclTensor*& sparseBlockIdx,
                                   const aclTensor*& sparseBlockCount, const aclTensor*& metadataOptional,
                                   const aclTensor*& attenMaskOptional, const aclTensor*& qDequantScaleOptional,
@@ -325,7 +325,7 @@ static aclnnStatus MakeContiguous(const aclTensor*& query, const aclTensor*& spa
                                   const aclTensor*& pQuantScaleOptional, const aclTensor*& cuSeqLengthsQOptional,
                                   const aclTensor*& cuSeqLengthsKvOptional, const aclTensor*& sequsedQOptional,
                                   const aclTensor*& sequsedKvOptional, const aclTensor*& blockTableOptional,
-                                  bool keepPagedA8C4ScaleStride, aclOpExecutor* executor)
+                                  bool keepPagedKvScaleStride, aclOpExecutor* executor)
 {
     query = l0op::Contiguous(query, executor);
     CHECK_RET(query != nullptr, ACLNN_ERR_PARAM_NULLPTR);
@@ -345,13 +345,13 @@ static aclnnStatus MakeContiguous(const aclTensor*& query, const aclTensor*& spa
         CHECK_RET(qDequantScaleOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
     if (kDequantScaleOptional != nullptr) {
-        kDequantScaleOptional = keepPagedA8C4ScaleStride ?
+        kDequantScaleOptional = keepPagedKvScaleStride ?
                                     NormalizeDim0KvTensor(kDequantScaleOptional, "kDequantScale", executor) :
                                     l0op::Contiguous(kDequantScaleOptional, executor);
         CHECK_RET(kDequantScaleOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
     if (vDequantScaleOptional != nullptr) {
-        vDequantScaleOptional = keepPagedA8C4ScaleStride ?
+        vDequantScaleOptional = keepPagedKvScaleStride ?
                                     NormalizeDim0KvTensor(vDequantScaleOptional, "vDequantScale", executor) :
                                     l0op::Contiguous(vDequantScaleOptional, executor);
         CHECK_RET(vDequantScaleOptional != nullptr, ACLNN_ERR_INNER_NULLPTR);
@@ -598,10 +598,12 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
     auto* executorImpl = uniqueExecutor.get();
 
+    const bool keepPagedKvScaleStride =
+        isPaged && (quantType == GBSA_QUANT_TYPE_A8C4 || quantType == GBSA_QUANT_TYPE_A4C4);
     ret = MakeContiguous(query, sparseBlockIdx, sparseBlockCount, metadataOptional, attenMaskOptional,
                          qDequantScaleOptional, kDequantScaleOptional, vDequantScaleOptional, pQuantScaleOptional,
                          cuSeqLengthsQOptional, cuSeqLengthsKvOptional, sequsedQOptional, sequsedKvOptional,
-                         blockTableOptional, isPaged && quantType == GBSA_QUANT_TYPE_A8C4, executorImpl);
+                         blockTableOptional, keepPagedKvScaleStride, executorImpl);
     if (ret != ACLNN_SUCCESS) {
         return ret;
     }
@@ -612,12 +614,11 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
     // MXFP8 shares the physical page geometry of contiguous K/V and KScale.
     // Preserve the existing dim0-hole support for the other quantization modes.
     const bool isMxfp8 = quantType == MXFP8_QUANT_TYPE;
-    const bool contiguousKv = isMxfp8 || quantType == GBSA_QUANT_TYPE_A4C4;
-    const aclTensor* keyFinal = isPaged && !contiguousKv ? NormalizeDim0KvTensor(key, "key", executorImpl) :
-                                                           l0op::Contiguous(key, executorImpl);
+    const aclTensor* keyFinal =
+        isPaged && !isMxfp8 ? NormalizeDim0KvTensor(key, "key", executorImpl) : l0op::Contiguous(key, executorImpl);
     CHECK_RET(keyFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
-    const aclTensor* valueFinal = isPaged && !contiguousKv ? NormalizeDim0KvTensor(value, "value", executorImpl) :
-                                                             l0op::Contiguous(value, executorImpl);
+    const aclTensor* valueFinal = isPaged && !isMxfp8 ? NormalizeDim0KvTensor(value, "value", executorImpl) :
+                                                        l0op::Contiguous(value, executorImpl);
     CHECK_RET(valueFinal != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
     auto outputs = l0op::GenericBlockSparseAttention(

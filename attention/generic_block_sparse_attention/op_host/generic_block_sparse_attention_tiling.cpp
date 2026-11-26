@@ -577,6 +577,20 @@ ge::graphStatus GBSATiling::ParseKvCacheStride0(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
 
+    // Packed MXFP4 keeps independent physical page pitches. Validate the
+    // supplied stride descriptor before the shared parser supplies defaults.
+    if (IsMxfp4()) {
+        for (const int index : {KEY_INDEX, VALUE_INDEX}) {
+            const auto* stride = context->GetRequiredInputStride(index);
+            const auto& shape = context->GetInputShape(index)->GetOriginShape();
+            if (stride != nullptr && stride->GetDimNum() != 0 &&
+                (stride->GetDimNum() != shape.GetDimNum() || (shape.GetDim(0) > 1 && stride->GetStride(0) <= 0))) {
+                OP_LOGE(context->GetNodeName(),
+                        "MXFP4 PA K/V require a matching stride rank and positive page stride.");
+                return ge::GRAPH_FAILED;
+            }
+        }
+    }
     if (ValidatePagedDim0OnlyNonContig(context, context->GetRequiredInputStride(KEY_INDEX), keyShape->GetOriginShape(),
                                        "key") != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
@@ -623,9 +637,16 @@ ge::graphStatus GBSATiling::ParseKvCacheStride0(gert::TilingContext* context)
             "the dim0 stride of value is invalid for paged KV: it must be >= pageElems and aligned to Nkv*D");
         return ge::GRAPH_FAILED;
     }
-    if (IsMxfp4() && (kStride0_ != pageElems || vStride0_ != pageElems)) {
-        OP_LOGE(context->GetNodeName(), "MXFP4 requires contiguous PA pages and matching contiguous KScale.");
-        return ge::GRAPH_FAILED;
+    // Compact PA keeps the original shared record table. For strided PA,
+    // publish all four pitches, including the dense pitches of compact inputs.
+    if (IsMxfp4() &&
+        (kStride0_ != pageElems || vStride0_ != pageElems || kScaleStride0_ != 0U || vScaleStride0_ != 0U)) {
+        if (kScaleStride0_ == 0U) {
+            kScaleStride0_ = pageElems / 32U;
+        }
+        if (vScaleStride0_ == 0U) {
+            vScaleStride0_ = pageElems / 32U;
+        }
     }
     return ge::GRAPH_SUCCESS;
 }
@@ -1039,8 +1060,8 @@ ge::graphStatus GBSATiling::CalculateWorkSpace(gert::TilingContext* context)
         const uint64_t copyBlocks = isPaged_ ? std::min<uint64_t>(descriptorRows, sparseBlocks * 2U) : sparseBlocks;
         const uint64_t recordWords = 4U;
         const uint64_t groupBytes = AlignUp(64U + copyBlocks * recordWords * sizeof(uint64_t), 64U);
-        const uint64_t tileWords =
-            ((kvBaseTile_ + descriptorRows - 1U) / descriptorRows) * groupBytes / sizeof(uint64_t);
+        const uint64_t tileWords = ((kvBaseTile_ + descriptorRows - 1U) / descriptorRows) * groupBytes /
+                                   sizeof(uint64_t) * (isMxfp4 && isPaged_ && kScaleStride0_ != 0U ? 2U : 1U);
         const uint64_t offsetBytes = static_cast<uint64_t>(blockDim_) * historySlots * tileWords * sizeof(uint64_t);
         const uint64_t offset = AlignUp(pipelineWorkspaceSize, GSA_FD_WORKSPACE_ALIGNMENT);
         if (tileWords > std::numeric_limits<uint32_t>::max() ||
@@ -1531,13 +1552,16 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
     for (const int scaleIndex : {Q_DEQUANT_SCALE_INDEX, K_DEQUANT_SCALE_INDEX}) {
         const auto* desc = context->GetOptionalInputDesc(scaleIndex);
         const auto* scaleShape = context->GetOptionalInputShape(scaleIndex);
-        const auto& dataShape =
-            context->GetInputShape(scaleIndex == Q_DEQUANT_SCALE_INDEX ? QUERY_INDEX : KEY_INDEX)->GetStorageShape();
+        const bool isQueryScale = scaleIndex == Q_DEQUANT_SCALE_INDEX;
+        const auto* inputShape = context->GetInputShape(isQueryScale ? QUERY_INDEX : KEY_INDEX);
+        // Paged views keep their backing storage extent for memory diagnostics.
+        const bool useLogicalShape = isPaged_ && !isQueryScale;
+        const auto& dataShape = useLogicalShape ? inputShape->GetOriginShape() : inputShape->GetStorageShape();
         if (desc == nullptr || scaleShape == nullptr || desc->GetDataType() != ge::DT_FLOAT8_E8M0) {
             OP_LOGE(context->GetNodeName(), "MXFP4 requires E8M0 QScale and KScale.");
             return ge::GRAPH_FAILED;
         }
-        const auto& shape = scaleShape->GetStorageShape();
+        const auto& shape = useLogicalShape ? scaleShape->GetOriginShape() : scaleShape->GetStorageShape();
         const size_t rank = dataShape.GetDimNum();
         if (shape.GetDimNum() != rank + 1U || shape.GetDim(rank - 1U) != embeddingSize_ / 64U ||
             shape.GetDim(rank) != 2) {
@@ -1563,8 +1587,9 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
         OP_LOGE(context->GetNodeName(), "MXFP4 requires E8M0 VScale in the KV storage layout.");
         return ge::GRAPH_FAILED;
     }
-    const auto& scale = vShape->GetStorageShape();
-    const auto& value = context->GetInputShape(VALUE_INDEX)->GetStorageShape();
+    const auto* valueShape = context->GetInputShape(VALUE_INDEX);
+    const auto& scale = isPaged_ ? vShape->GetOriginShape() : vShape->GetStorageShape();
+    const auto& value = isPaged_ ? valueShape->GetOriginShape() : valueShape->GetStorageShape();
     const bool tnd = layoutKv_ == "TND";
     const size_t rank = tnd ? 4U : 5U;
     const size_t headAxis = layoutKv_ == "BNSD" || isPaBnbd_ ? 1U : (tnd ? 1U : 2U);
@@ -1588,6 +1613,39 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
                 "MXFP4 VScale must replace the KV S axis by ceil(S/64) and append 2; "
                 "TND concatenates independently aligned batch segments. PA uses physical cache pages.");
         return ge::GRAPH_FAILED;
+    }
+    if (isPaged_) {
+        for (const int index : {K_DEQUANT_SCALE_INDEX, V_DEQUANT_SCALE_INDEX}) {
+            const bool isKeyScale = index == K_DEQUANT_SCALE_INDEX;
+            const auto& shape = context->GetOptionalInputShape(index)->GetOriginShape();
+            const auto* stride = context->GetOptionalInputStride(index);
+            // E8M0 elements are bytes. K/V tiling pitches remain logical FP4
+            // elements and are converted to packed bytes only by the kernel.
+            const uint64_t rowBytes =
+                static_cast<uint64_t>(kvHeads_) * (isKeyScale ? embeddingSize_ / 32U : embeddingSize_ * 2U);
+            const uint64_t pageBytes = rowBytes * (isKeyScale ? blockSize_ : blockSize_ / 64U);
+            uint64_t pageStride = pageBytes;
+            if (stride != nullptr && stride->GetDimNum() != 0) {
+                if (stride->GetDimNum() != shape.GetDimNum() ||
+                    ValidatePagedDim0OnlyNonContig(
+                        context, stride, shape, isKeyScale ? "kDequantScale" : "vDequantScale") != ge::GRAPH_SUCCESS) {
+                    OP_LOGE(context->GetNodeName(),
+                            "MXFP4 PA scale strides must match their rank and be dense inside a page.");
+                    return ge::GRAPH_FAILED;
+                }
+                if (shape.GetDim(0) > 1) {
+                    const int64_t stride0 = stride->GetStride(0);
+                    if (stride0 <= 0 || static_cast<uint64_t>(stride0) < pageBytes ||
+                        static_cast<uint64_t>(stride0) % rowBytes != 0U) {
+                        OP_LOGE(context->GetNodeName(),
+                                "MXFP4 PA scale page stride must cover a page and align to its scale row.");
+                        return ge::GRAPH_FAILED;
+                    }
+                    pageStride = static_cast<uint64_t>(stride0);
+                }
+            }
+            (isKeyScale ? kScaleStride0_ : vScaleStride0_) = pageStride == pageBytes ? 0U : pageStride;
+        }
     }
     fdStaticEnabled_ = topK_ >= 12U;
     if (groupSize_ <= 16U && (embeddingSize_ == 128U || embeddingSize_ == 256U) &&
@@ -2035,7 +2093,9 @@ uint64_t GBSATiling::GenerateTilingKey()
                                           GbsaTilingKeyEncoding::KV_TND_FIELD;
 
     if (isPaged_) {
-        tilingKey += GbsaTilingKeyEncoding::PAGED_FIELD;
+        // Paged field 1 selects compact pages; mode 4 uses field 2 when any page pitch differs.
+        const bool stridedPages = IsMxfp4() && kScaleStride0_ != 0U;
+        tilingKey += (stridedPages ? 2U : 1U) * GbsaTilingKeyEncoding::PAGED_FIELD;
     }
 
     // Softmax precision: 0=FP32 softmax, 1=FP16/BF16 softmax.

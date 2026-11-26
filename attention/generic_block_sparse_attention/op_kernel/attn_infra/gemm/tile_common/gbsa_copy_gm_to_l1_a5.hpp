@@ -209,15 +209,15 @@ __aicore__ inline void PreloadMxfp4DescriptorHeader(const AscendC::GlobalTensor<
     AscendC::DataCachePreload(descriptor[8], static_cast<int64_t>(0));
 }
 
-template <bool Paged = false, bool HeaderReady = false>
+template <bool Paged = false, bool HeaderReady = false, uint32_t RecordWords = 2U>
 __aicore__ inline void RefreshMxfp4Descriptor(const AscendC::GlobalTensor<uint64_t>& descriptor, uint32_t groupWords)
 {
     if constexpr (!HeaderReady) {
         PreloadMxfp4DescriptorHeader(descriptor);
     }
     const __gm__ uint64_t* records = descriptor.GetPhyAddr();
-    // MXFP4 dense and PA both store [offset, meta]; reserved slot spans stay unchanged.
-    const uint32_t end = min(groupWords, 8U + static_cast<uint32_t>(records[0]) * 2U);
+    // Strided PA uses four words per K/V pair; compact formats use two.
+    const uint32_t end = min(groupWords, 8U + static_cast<uint32_t>(records[0]) * RecordWords);
     for (uint32_t word = 16; word < end; word += 8) {
         AscendC::DataCacheCleanAndInvalid<uint64_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                                           AscendC::DcciDst::CACHELINE_OUT>(descriptor[word]);
@@ -273,7 +273,7 @@ struct CopyQueryScaleGmToL1Mxfp4 {
     }
 };
 
-template <bool Paged>
+template <bool Paged, bool SeparateKv = false>
 struct CopySparsePackedGmToL1Mxfp4 {
     uint32_t D, KV_ROWS, GroupRows;
     __aicore__ CopySparsePackedGmToL1Mxfp4(const GbsaKernelArch35::Mxfp4::L1TileHelper& l1Info,
@@ -315,7 +315,7 @@ private:
                                 const AscendC::LocalTensor<uint8_t>& dstScale,
                                 const AscendC::GlobalTensor<uint8_t>& srcScale, uint32_t firstToken = 0U) const
     {
-        constexpr uint32_t recordWords = 2;
+        constexpr uint32_t recordWords = SeparateKv ? 4U : 2U;
         // Fix the logical position before the descriptor loop, as in the
         // non-quantized Block. DataCopy can then select L1 at compile time.
         const AscendC::LocalTensor<uint8_t> l1Base(AscendC::TPosition::A1, 0, Arch::AtlasA5::L1_SIZE);
@@ -333,7 +333,7 @@ private:
             if constexpr (!Value) {
                 // Start this group's DMA before refreshing the next group.
                 // PV reuses the immutable descriptor until it releases the slot.
-                RefreshMxfp4Descriptor<Paged, HeaderReady>(descriptor, groupWords);
+                RefreshMxfp4Descriptor<Paged, HeaderReady, recordWords>(descriptor, groupWords);
             }
             const __gm__ uint64_t* records = descriptor.GetPhyAddr();
             const uint32_t count = records[0];
@@ -344,7 +344,7 @@ private:
                     copyScale(dstScale, srcScale[records[8] / 16], 0, dstRow, GroupRows, D);
                 }
             }
-            const __gm__ uint64_t* record = records + 8;
+            const __gm__ uint64_t* record = records + 8U + (SeparateKv && Value ? 2U : 0U);
             for (uint32_t index = 0; index < count; ++index, record += recordWords) {
                 const uint64_t offset = record[0];
                 const uint64_t meta = record[1];

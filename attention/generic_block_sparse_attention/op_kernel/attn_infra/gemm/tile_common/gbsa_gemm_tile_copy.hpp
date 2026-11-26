@@ -171,14 +171,14 @@ struct PackedTileCopyTlaToUB : public PackedTileCopyTla<ArchTag, ElementA_, Layo
     (ORIG_DTYPE_QUERY == DT_FLOAT4_E2M1) && (ORIG_DTYPE_KEY == DT_FLOAT4_E2M1)
 namespace NpuArch::Gemm::Tile {
 
-template <bool Paged, bool IsPV>
+template <bool Paged, bool IsPV, bool SeparateKv = false>
 struct PackedTileCopyMxfp4 {
     using ElementAccumulator = float;
     using LayoutTagL1A = layout::zN;
     using LayoutTagL1B = layout::zN;
     using LayoutTagL0A = layout::zZ;
     using LayoutTagL0B = layout::nZ;
-    using CopyGmToL1B = CopySparsePackedGmToL1Mxfp4<Paged>;
+    using CopyGmToL1B = CopySparsePackedGmToL1Mxfp4<Paged, SeparateKv>;
     using CopyGmToL1Scale = CopyQueryScaleGmToL1Mxfp4;
     using CopyL1ToL0A = CopyL1ToL0Mxfp4;
     using CopyL1ToL0B = std::conditional_t<IsPV, CopyL1ToL0VMxfp4, CopyL1ToL0Mxfp4>;
