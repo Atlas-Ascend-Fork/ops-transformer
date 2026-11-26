@@ -17,10 +17,20 @@ if(OP_GRAPH_COMMON_SRCS)
         ${ASCEND_DIR}/include ${ASCEND_DIR}/include/external ${ASCEND_DIR}/include/op_common
         ${ASCEND_DIR}/${SYSTEM_PREFIX}/include ${ASCEND_DIR}/${SYSTEM_PREFIX}/include/external
         ${ASCEND_DIR}/${SYSTEM_PREFIX}/include/op_common)
-    # 编译 ascend950/ascend960dt/ascend960pr 时注入平台宏，桩注册内容才编入
-    if("ascend950" IN_LIST ASCEND_COMPUTE_UNIT OR "ascend960dt" IN_LIST ASCEND_COMPUTE_UNIT
-       OR "ascend960pr" IN_LIST ASCEND_COMPUTE_UNIT)
-        set_source_files_properties(${OP_GRAPH_COMMON_SRCS} PROPERTIES COMPILE_DEFINITIONS OP_GRAPH_TRANSFORMER_ASCEND950=1)
+    # 编译 legacy 平台（ascend950/ascend350/ascend960dt/ascend960pr）时注入平台宏，桩注册内容才编入
+    # ascend350 与 ascend950 同属 dav_3510，OPP 白名单按 arch 3510 生效，需一并覆盖
+    set(OP_GRAPH_LEGACY_SOCS "ascend950" "ascend350" "ascend960dt" "ascend960pr")
+    set(_inject_legacy_stub FALSE)
+    foreach(_soc IN LISTS ASCEND_COMPUTE_UNIT)
+        if(_soc IN_LIST OP_GRAPH_LEGACY_SOCS)
+            set(_inject_legacy_stub TRUE)
+            break()
+        endif()
+    endforeach()
+    if(_inject_legacy_stub)
+        set_source_files_properties(${OP_GRAPH_COMMON_SRCS} PROPERTIES
+            COMPILE_DEFINITIONS OP_GRAPH_TRANSFORMER_LEGACY=1
+        )
     endif()
     target_sources(${GRAPH_PLUGIN_NAME}_obj PRIVATE ${OP_GRAPH_COMMON_SRCS})
 endif()
