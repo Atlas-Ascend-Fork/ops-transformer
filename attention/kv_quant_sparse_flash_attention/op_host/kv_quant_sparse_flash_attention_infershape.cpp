@@ -61,7 +61,10 @@ ge::graphStatus InferShapeKvQuantSparseFlashAttention(gert::InferShapeContext* c
     OP_CHECK_IF(inputLayoutQueryPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "layout_query"),
                 return ge::GRAPH_FAILED);
     std::string inputLayoutQueryPtrStr = std::string(inputLayoutQueryPtr);
-    const int64_t ropeHeadDim = *attrs->GetAttrPointer<int64_t>(ROPE_HEAD_DIM_ATTR_INDEX);
+    const int64_t* ropeHeadDimPtr = attrs->GetAttrPointer<int64_t>(ROPE_HEAD_DIM_ATTR_INDEX);
+    OP_CHECK_IF(ropeHeadDimPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "rope_head_dim"),
+                return ge::GRAPH_FAILED);
+    const int64_t ropeHeadDim = *ropeHeadDimPtr;
 
     *attentionOutShape = *queryShape;
     if (inputLayoutQueryPtrStr == "BSND") {
