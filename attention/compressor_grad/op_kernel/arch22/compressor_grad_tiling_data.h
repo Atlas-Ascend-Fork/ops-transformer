@@ -51,6 +51,8 @@ struct CompressorGradTilingDataA3 {
     int64_t dnScWsOff = 0;     // dn_sc fp16, dnPlanes * tPad * C elements
     int64_t apePartWsOff = 0;  // d_ape per-core partials f32, apePartElems elements
     int64_t apePartElems = 0;  // scatterCoreNum * cmpRatio * totalHeadDim
+    int64_t scaleWsOff = 0;    // bf16 范围探测 partials f32, 6 * castCoreNum elements
+    int64_t dnZeroSkip = 0;    // 1 = dn 工作区可跳过预清零（全部 (token,column) 均被 scatter 覆盖）
     int64_t layout = 0;        // 0: BSH (x [B,S,H]), 1: TH (x [T,H] + cu_seqlens)
 };
 } // namespace optiling

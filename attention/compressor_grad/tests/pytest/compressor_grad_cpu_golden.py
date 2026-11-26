@@ -11,7 +11,7 @@
 
 
 import torch
-from typing import Optional, List, Tuple
+from typing import Optional, Tuple
 
 
 def _compensated_d_score(
@@ -35,6 +35,10 @@ def _compensated_d_score(
     # Dekker 12-bit split constant for fp32(2^12 + 1).
     # For fp32 with 24-bit mantissa, a 12-bit split gives exact hi/lo decomposition.
     split = torch.tensor(4097.0, dtype=compute_dtype, device=sm.device)
+    _KV_SCALE = 2.0**-13  # kv 拆分缩放回退，避免 4097*kv 溢出
+    _KV_UNSCALE = 2.0**13
+    _FLT_MAX = 3.4028234663852886e38
+    _MASK_SCALE = 2.0**-120  # 溢出选路斜坡：仅 |t|=Inf 饱和到 1
     N, hd = sm.shape
 
     w = torch.zeros(hd, dtype=compute_dtype, device=sm.device)
@@ -47,10 +51,24 @@ def _compensated_d_score(
         sm_u = sm_t - sm_i
         sm_hi = sm_t - sm_u
         sm_lo = sm_i - sm_hi
-        # Dekker split: kv = kv_hi + kv_lo
+        # kv 的 Dekker 拆分：逐元素条件。t = kv*split 未溢出走未缩放 Veltkamp
+        # （与 A5 一致，保留小量级/次正规低位；固定 2^-13 缩放会在 |kv|≈2^-114
+        #  时丢掉 2^-137 这类低位，被大 dC 放大成非零梯度）；仅 t 溢出元素用
+        #  缩放回退（该元素 hi_u = Inf-Inf = NaN，用 isnan 选出缩放高频项）。
         kv_t = kv_i * split
-        kv_u = kv_t - kv_i
-        kv_hi = kv_t - kv_u
+        kv_tc = torch.clamp(kv_t, min=-_FLT_MAX, max=_FLT_MAX)
+        kv_u = kv_tc - kv_i
+        kv_hi_u = kv_tc - kv_u
+        kv_s = kv_i * _KV_SCALE
+        kv_t2 = kv_s * split
+        kv_u2 = kv_t2 - kv_s
+        kv_hi_s = (kv_t2 - kv_u2) * _KV_UNSCALE
+        # 选路用算术混合（不做 NaN 比较）：mask01 = min(1, |t| * 2^-120)。
+        # 仅溢出（|t|=Inf）mask=1，用缩放高频项；有限 t 时 |t|*2^-120 只在
+        # |t|>=2^120 饱和，而该域 hi_s 与 hi_u 尺度不变且逐位相等，混合恒等于
+        # hi_u；小量级元素 mask≈0，保留未缩放低位。
+        kv_mask = torch.clamp(kv_t.abs() * _MASK_SCALE, max=1.0)
+        kv_hi = kv_hi_u + (kv_hi_s - kv_hi_u) * kv_mask
         kv_lo = kv_i - kv_hi
         # Dekker double-product: p_hi = fl(sm * kv), p_lo = sm * kv - p_hi(exact)
         p_hi = sm_i * kv_i
@@ -68,8 +86,9 @@ def _compensated_d_score(
         c = t - w
         c = c - y
         w = t
-        wcomp = c + p_lo
+        wcomp = c - p_lo  # y = p_hi - wcomp 的约定：p_lo 以减号注入
 
+    # 未缩放域：w 直接使用
     w_expanded = w.unsqueeze(0)  # (1, hd)
     s = kv - w_expanded  # (N, hd)  — rounded difference
     z = s - kv  # (N, hd)  — z ≈ -w (with rounding)
@@ -301,9 +320,17 @@ def compressor_grad_golden(
             # "high" 口径：简单算术（float64 精度足够，作为 ground truth）
 
             if matmul_mode == "same":
-                d_score_block = _compensated_d_score(
-                    saved_softmax, saved_kv, d_compressed_kv, compute_dtype
-                )
+                # "same" 口径 = 镜像 arch22 kernel 的实际算法：朴素 fp32 列和
+                # （4 路 MulAddDst 的数学等价形式）+ dn 量化到 fp16 后 fp32 matmul。
+                # （_compensated_d_score 为 A5/arch35 的补偿仿真，arch22 已不使用，
+                #   保留供 arch35/arch92 后续同步时参考。）
+                d_score_weighted = d_compressed_kv_2d * saved_kv  # (N,hd)
+                softmax_backward_sum = (saved_softmax * d_score_weighted).sum(
+                    dim=0, keepdim=True
+                )  # (1,hd)
+                d_score_block = saved_softmax * (
+                    d_score_weighted - softmax_backward_sum
+                )  # (N,hd)
             else:
                 d_score_weighted = d_compressed_kv_2d * saved_kv  # (N,hd)
                 softmax_backward_sum = (saved_softmax * d_score_weighted).sum(
@@ -344,9 +371,6 @@ def compressor_grad_golden(
             if batch_start == block_seq_start:
                 current_tokens_from_cache = batch_start % cmp_ratio
 
-            block_row_start = current_overlap_id * cmp_ratio + current_tokens_from_cache
-            block_row_end = current_overlap_id * cmp_ratio + cmp_ratio
-
             # d_kv_block[rows, :] → d_new_kv[tokens, cols]   (N,hd)子块 → (T,C)子块
             d_new_kv[
                 flat_offset_start:flat_offset_end,
@@ -380,8 +404,6 @@ def compressor_grad_golden(
 
                 prev_dim_start = 0
                 prev_dim_end = head_dim
-                block_row_start = prev_tokens_from_cache
-                block_row_end = cmp_ratio
 
                 prev_flat_offset_start = flat_offset_start - (
                     cmp_ratio - prev_tokens_from_cache
@@ -427,7 +449,10 @@ def compressor_grad_golden(
     x_flat = (
         x_f32 if is_th_layout else x_f32.reshape(total_tokens, x.shape[-1])
     )  # (T, H)
-    iodtype = x.dtype
+    # arch22 kernel 的 dn 工作区固定 fp16 单平面落盘（与 io dtype 无关，见
+    # compressor_grad_cast_scatter.h 的 dnKvGM_/dnScGM_），"same" 口径按此仿真；
+    # high 口径不做量化。
+    iodtype = torch.float16 if matmul_mode == "same" else x.dtype
     if matmul_mode == "same":
         # 两方口径（现状）：d_new_kv 量化到 iodtype 后提升回 compute_dtype（模拟 kernel
         # 中间量 FP16/BF16 存储）；wkv/wgate/x 已提升 compute_dtype → FP32 matmul

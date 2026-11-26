@@ -39,7 +39,20 @@ __global__ __aicore__ void compressor_grad(__gm__ uint8_t* x, __gm__ uint8_t* wk
     // D_TYPE tiling key 编码与 arch35 保持一致: 0 = BF16, 1 = FP16
     using ioT = typename AscendC::Conditional<(D_TYPE == 1), half, bfloat16_t>::type;
 
+    // bf16-io 才有全域缩放（fp16-io 输入域 <= 65504，路径与 master 逐位一致），
+    // 探测/缩放还原两个相位与对应屏障在 fp16 编译期整体裁掉，零额外开销。
+    constexpr bool kRangeScale = std::is_same_v<ioT, bfloat16_t>;
+
     if ASCEND_IS_AIV {
+        if constexpr (kRangeScale) {
+            // Phase -1：bf16-io 范围探测（x/wkv/wgate/d_cmp_kv/sm/kv 最大绝对值）
+            {
+                TPipe pipe;
+                CompressorGradProbeKernel<ioT> probeKernel;
+                probeKernel.Init(x, wkv, wgate, dCmpKv, softmaxScore, kv, userWs, tilingData, &pipe);
+                probeKernel.Process();
+            }
+        }
         {
             TPipe pipe;
             CompressorGradCastKernel<ioT> castKernel;
@@ -59,19 +72,26 @@ __global__ __aicore__ void compressor_grad(__gm__ uint8_t* x, __gm__ uint8_t* wk
         // d_ape 确定性归约：AIV 归并与 AIC gemm 并行（d_ape 不参与 gemm）
         {
             TPipe pipe;
-            CompressorGradApeReduceKernel reduceKernel;
-            reduceKernel.Init(dApe, userWs, tilingData, &pipe);
+            CompressorGradApeReduceKernel<ioT> reduceKernel;
+            reduceKernel.Init(dApe, dX, dWkv, dWgate, userWs, tilingData, &pipe);
             reduceKernel.Process();
         }
+        // 缩放还原已并入 d_ape 归约相位（含相位屏障），此处不再单独建相位
     }
     if ASCEND_IS_AIC {
-        // 与 AIV 侧等次数的屏障调用，保证 ffts flag 计数对齐
+        // 与 AIV 侧等次数的屏障调用，保证 ffts flag 计数对齐（cast 相位内部的
+        // x/w 判定屏障在两种 dtype 下都存在，必须无条件参与）
+        AscendC::SyncAll<false>();
         AscendC::SyncAll<false>();
         AscendC::SyncAll<false>();
         TPipe pipe;
         CompressorGradGemmKernel<ioT> gemmKernel;
         gemmKernel.Init(dX, dWkv, dWgate, userWs, tilingData, &pipe);
         gemmKernel.Process();
+        if constexpr (kRangeScale) {
+            // 相位屏障 3：gemm 输出对 AIV 的缩放还原可见
+            AscendC::SyncAll<false>();
+        }
     }
 }
 #endif

@@ -128,6 +128,8 @@ private:
     int64_t dnKvWsOff_ = 0;
     int64_t dnScWsOff_ = 0;
     int64_t apePartWsOff_ = 0;
+    int64_t scaleWsOff_ = 0;
+    int64_t dnZeroSkip_ = 0;
     int64_t apePartElems_ = 0;
 
     CompressorGradBaseParams baseParams_;

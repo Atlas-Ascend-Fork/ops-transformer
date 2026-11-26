@@ -789,7 +789,9 @@ TEST_F(CompressorGradTilingArch22Test, seqused_value_nblk)
 // seqused 值 + dCmpKv 欠配（nblkIn=1 < 实际 2 块）：kernel-only tiling 不读值，
 // 无法在 tiling 期判欠配 → 成功（nblk_ = min(3,1) = 1），kernel 只处理前缀块
 // （欠配属调用方契约违约；A5 BSH 同样不校验 dim1）
-TEST_F(CompressorGradTilingArch22Test, seqused_value_underalloc_prefix)
+// BSH + seqused：d_cmp_kv 块维少于文档形状 ceil(S/cr)=2 -> 拒绝
+// （与 A5 host 同口径；原实现接受并静默降级到前缀，按检视裁定改为拒绝）
+TEST_F(CompressorGradTilingArch22Test, err_bsh_nblk_short_with_seqused)
 {
     optiling::CompressorGradCompileInfo compileInfo = {};
     int32_t seqUsed[2] = {8, 5};
@@ -816,8 +818,7 @@ TEST_F(CompressorGradTilingArch22Test, seqused_value_underalloc_prefix)
                                                   {"coff", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
                                               },
                                               &compileInfo, "Ascend910_93", CompressorGrad_tiling_A3SocInfo, 4096);
-    ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, 0);
-    CheckNblkFields(tilingContextPara, 1, 1, 0);
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, 0);
 }
 
 // seqused 值越界（> S）：kernel-only tiling 不读值 → 成功（nblk_ = min(3,2) = 2），

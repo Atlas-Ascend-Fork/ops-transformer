@@ -32,6 +32,178 @@
 using namespace AscendC;
 
 // =========================================================================
+// Phase -1 (AIV): bf16-io 范围探测（见 common header 的缩放说明）
+//   对 x / wkv / wgate / d_cmp_kv / softmax_score / kv 求全张量最大绝对值，按核
+//   分片写入 userWs 的 scale 区（每核 6 个 f32）。下游相位用同一数组、同一归并
+//   顺序得到一致的全局指数；fp16-io 恒写 0（不启用缩放）。
+// =========================================================================
+template <typename ioT>
+class CompressorGradProbeKernel {
+public:
+    __aicore__ inline CompressorGradProbeKernel() {}
+
+    __aicore__ inline void Init(GM_ADDR x, GM_ADDR wkv, GM_ADDR wgate, GM_ADDR dCmpKv, GM_ADDR smScore, GM_ADDR kvIn,
+                                GM_ADDR userWs, const optiling::CompressorGradTilingDataA3* tilingData, TPipe* pipe)
+    {
+        xGM_.SetGlobalBuffer(reinterpret_cast<__gm__ ioT*>(x));
+        wkvGM_.SetGlobalBuffer(reinterpret_cast<__gm__ ioT*>(wkv));
+        wgateGM_.SetGlobalBuffer(reinterpret_cast<__gm__ ioT*>(wgate));
+        dCkGM_.SetGlobalBuffer(reinterpret_cast<__gm__ ioT*>(dCmpKv));
+        smGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(smScore));
+        kvGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(kvIn));
+        scaleGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(userWs + tilingData->scaleWsOff));
+        coreNum_ = static_cast<uint32_t>(tilingData->castCoreNum);
+        tLen_ = static_cast<uint32_t>(tilingData->tLen);
+        hSize_ = static_cast<uint32_t>(tilingData->hiddenSize);
+        dSize_ = static_cast<uint32_t>(tilingData->headDim);
+        cSize_ = static_cast<uint32_t>(tilingData->totalHeadDim);
+        bSize_ = static_cast<uint32_t>(tilingData->batchSize);
+        nRows_ = static_cast<uint32_t>(tilingData->cmpRowCnt);
+        nblkIn_ = static_cast<uint32_t>(tilingData->nblkIn);
+        crSize_ = static_cast<uint32_t>(tilingData->cmpRatio);
+        isTh_ = (tilingData->layout == 1);
+        pipe->InitBuffer(ioQue_, 2U, CG_PROBE_VEC * sizeof(ioT));
+        pipe->InitBuffer(f32Que_, 2U, CG_PROBE_VEC * sizeof(float));
+        pipe->InitBuffer(f32Buf_, 2U * CG_PROBE_VEC * sizeof(float));
+    }
+
+    __aicore__ inline void Process()
+    {
+        const uint32_t cid = GetBlockIdx();
+        if (cid >= coreNum_) {
+            return;
+        }
+        float out[CG_SCALE_SLOTS] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+            // 块行数：d_cmp_kv = dim0（BSH: B*nblk；TH: dim0）；sm/kv 的 dim0 在
+            // TH 下是 min(T, T//cr+B)（<= d_cmp_kv 行数），分开取以免越界读。
+            const uint64_t bshRows = static_cast<uint64_t>(bSize_) * static_cast<uint64_t>(nblkIn_);
+            const uint64_t dcRows = isTh_ ? static_cast<uint64_t>(nblkIn_) : bshRows;
+            const uint64_t smRows = isTh_ ? MinU64(static_cast<uint64_t>(tLen_) / crSize_ + bSize_, tLen_) : bshRows;
+            // x/wkv/wgate 的最大值由 cast 相位在搬入 tile 时顺带统计（免二次读大张量），
+            // 本相位只读较小的 d_cmp_kv / softmax_score / kv。
+            out[0] = 0.0f;
+            out[1] = 0.0f;
+            out[2] = 0.0f;
+            out[3] = MaxAbsIo(dCkGM_, dcRows * dSize_, cid);
+            out[4] = MaxAbsF(smGM_, smRows * nRows_ * dSize_, cid);
+            out[5] = MaxAbsF(kvGM_, smRows * nRows_ * dSize_, cid);
+        }
+        // 本核 8 槽一次 32B MTE3 写出（标量 GM 写跨核不可见，统一走数据通路）
+        LocalTensor<float> ub = f32Buf_.Get<float>();
+        SetWaitFlag<HardEvent::V_S>();
+        Duplicate(ub, 0.0f, static_cast<int32_t>(CG_SCALE_STRIDE));
+        for (uint32_t k = 0; k < CG_SCALE_SLOTS; k++) {
+            ub.SetValue(k, out[k]);
+        }
+        SetWaitFlag<HardEvent::V_MTE3>();
+        DataCopyExtParams cpOut{1, CG_SCALE_STRIDE * static_cast<uint32_t>(sizeof(float)), 0, 0, 0};
+        DataCopyPad(scaleGM_[cid * CG_SCALE_STRIDE], ub, cpOut);
+        SetWaitFlag<HardEvent::MTE3_V>();
+    }
+
+private:
+    // 本核分片（CG_PROBE_VEC 对齐起点）内的张量最大绝对值
+    __aicore__ inline uint64_t SliceLo(uint64_t total, uint32_t cid) const
+    {
+        const uint64_t per = ((total + coreNum_ - 1U) / coreNum_ + CG_PROBE_VEC - 1U) / CG_PROBE_VEC * CG_PROBE_VEC;
+        return static_cast<uint64_t>(cid) * per;
+    }
+
+    __aicore__ inline float MaxAbsIo(const GlobalTensor<ioT>& src, uint64_t total, uint32_t cid)
+    {
+        if (total == 0U) {
+            return 0.0f;
+        }
+        const uint64_t per = ((total + coreNum_ - 1U) / coreNum_ + CG_PROBE_VEC - 1U) / CG_PROBE_VEC * CG_PROBE_VEC;
+        const uint64_t lo = SliceLo(total, cid);
+        const uint64_t hi = MinU64(lo + per, total);
+        if (lo >= hi) {
+            return 0.0f;
+        }
+        LocalTensor<float> acc = f32Buf_.Get<float>();
+        LocalTensor<float> tmp = f32Buf_.Get<float>()[CG_PROBE_VEC];
+        Duplicate(acc, 0.0f, static_cast<int32_t>(CG_PROBE_VEC));
+        for (uint64_t off = lo; off < hi; off += CG_PROBE_VEC) {
+            const uint32_t cnt = static_cast<uint32_t>(MinU64(CG_PROBE_VEC, hi - off));
+            LocalTensor<ioT> in = ioQue_.AllocTensor<ioT>();
+            DataCopyExtParams cp{1, cnt * static_cast<uint32_t>(sizeof(ioT)), 0, 0, 0};
+            DataCopyPadExtParams<ioT> pp{false, 0, 0, static_cast<ioT>(0)};
+            DataCopyPad(in, src[off], cp, pp);
+            ioQue_.EnQue(in);
+            in = ioQue_.DeQue<ioT>();
+            Cast(tmp, in, RoundMode::CAST_NONE, static_cast<int32_t>(cnt));
+            ioQue_.FreeTensor(in);
+            Abs(tmp, tmp, static_cast<int32_t>(cnt));
+            Max(acc, acc, tmp, static_cast<int32_t>(cnt));
+        }
+        // 向量树归约到 8 lane，再标量归并（避免 8192 次 UB 标量读）
+        uint32_t n = CG_PROBE_VEC;
+        while (n > 8U) {
+            n >>= 1;
+            Max(acc, acc, acc[n], static_cast<int32_t>(n));
+        }
+        SetWaitFlag<HardEvent::V_S>();
+        float m = 0.0f;
+        for (uint32_t i = 0; i < n; i++) {
+            const float v = acc.GetValue(i);
+            m = (v > m) ? v : m;
+        }
+        return m;
+    }
+
+    __aicore__ inline float MaxAbsF(const GlobalTensor<float>& src, uint64_t total, uint32_t cid)
+    {
+        if (total == 0U) {
+            return 0.0f;
+        }
+        const uint64_t per = ((total + coreNum_ - 1U) / coreNum_ + CG_PROBE_VEC - 1U) / CG_PROBE_VEC * CG_PROBE_VEC;
+        const uint64_t lo = SliceLo(total, cid);
+        const uint64_t hi = MinU64(lo + per, total);
+        if (lo >= hi) {
+            return 0.0f;
+        }
+        LocalTensor<float> acc = f32Buf_.Get<float>();
+        LocalTensor<float> tmp = f32Buf_.Get<float>()[CG_PROBE_VEC];
+        Duplicate(acc, 0.0f, static_cast<int32_t>(CG_PROBE_VEC));
+        for (uint64_t off = lo; off < hi; off += CG_PROBE_VEC) {
+            const uint32_t cnt = static_cast<uint32_t>(MinU64(CG_PROBE_VEC, hi - off));
+            LocalTensor<float> in = f32Que_.AllocTensor<float>();
+            DataCopyExtParams cp{1, cnt * static_cast<uint32_t>(sizeof(float)), 0, 0, 0};
+            DataCopyPadExtParams<float> pp{false, 0, 0, 0.0f};
+            DataCopyPad(in, src[off], cp, pp);
+            f32Que_.EnQue(in);
+            in = f32Que_.DeQue<float>();
+            Abs(tmp, in, static_cast<int32_t>(cnt));
+            f32Que_.FreeTensor(in);
+            Max(acc, acc, tmp, static_cast<int32_t>(cnt));
+        }
+        // 向量树归约到 8 lane，再标量归并（避免 8192 次 UB 标量读）
+        uint32_t n = CG_PROBE_VEC;
+        while (n > 8U) {
+            n >>= 1;
+            Max(acc, acc, acc[n], static_cast<int32_t>(n));
+        }
+        SetWaitFlag<HardEvent::V_S>();
+        float m = 0.0f;
+        for (uint32_t i = 0; i < n; i++) {
+            const float v = acc.GetValue(i);
+            m = (v > m) ? v : m;
+        }
+        return m;
+    }
+
+    GlobalTensor<ioT> xGM_, wkvGM_, wgateGM_, dCkGM_;
+    GlobalTensor<float> smGM_, kvGM_, scaleGM_;
+    uint32_t coreNum_ = 0, tLen_ = 0, hSize_ = 0, dSize_ = 0, cSize_ = 0, bSize_ = 0, nRows_ = 0, nblkIn_ = 0,
+             crSize_ = 0;
+    bool isTh_ = false;
+    TQue<TPosition::VECIN, 2> ioQue_;
+    TQue<TPosition::VECIN, 2> f32Que_;
+    TBuf<TPosition::VECCALC> f32Buf_;
+};
+
+// =========================================================================
 // Phase 0 (AIV): cast + zero fill
 //   x(T,H) -> f16 blocked-NZ：tile (kb,nb) 于 GM 索引 nb*tTiles+kb，
 //     128*128 元素连续，tile 内 (c/16)*2048 + r*16 + c%16（Nd2Nz L1 镜像）
@@ -40,6 +212,7 @@ using namespace AscendC;
 // ========================================================================
 constexpr uint32_t CG_CAST_VEC = 2048; // elements per vector chunk
 constexpr uint32_t CG_X_TILE = 128;    // blocked-NZ tile edge (rows and cols)
+constexpr uint32_t MAX_ACC = 8192;     // x/w 最大绝对值累加器元素数 (CG_X_TILE^2 % MAX_ACC == 0)
 
 template <typename ioT>
 class CompressorGradCastKernel {
@@ -57,33 +230,90 @@ public:
         wgateF16GM_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(userWs + tilingData->wgateF16WsOff));
         dnKvGM_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(userWs + tilingData->dnKvWsOff));
         dnScGM_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(userWs + tilingData->dnScWsOff));
+        scalePartGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(userWs + tilingData->scaleWsOff));
         dApeGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(dApe));
         tLen_ = static_cast<uint32_t>(tilingData->tLen);
         hSize_ = static_cast<uint32_t>(tilingData->hiddenSize);
         cSize_ = static_cast<uint32_t>(tilingData->totalHeadDim);
         crSize_ = static_cast<uint32_t>(tilingData->cmpRatio);
         tPad_ = static_cast<uint32_t>(tilingData->tPad);
+        nRows_ = static_cast<uint32_t>(tilingData->cmpRowCnt);
         coreNum_ = static_cast<uint32_t>(tilingData->castCoreNum);
+        zeroSkip_ = static_cast<uint32_t>(tilingData->dnZeroSkip);
         // dnPlanes 是 host 侧记录的 dn 平面真值；必须与 dtype 模板推导的平面数
         // （fp16 HiLo = 2，bf16 = 1）一致，否则 ZeroDn 的平面寻址会错写 GM。
         assert(tilingData->dnPlanes == (std::is_same_v<ioT, half> ? 2 : 1), "dnPlanes != dtype-derived plane count");
         pipe->InitBuffer(inBuf_, CG_X_TILE * CG_X_TILE * sizeof(ioT));
         pipe->InitBuffer(f32Buf_, CG_X_TILE * CG_X_TILE * sizeof(float));
         pipe->InitBuffer(f16Buf_, CG_X_TILE * CG_X_TILE * sizeof(half));
+        pipe->InitBuffer(maxBuf_, MAX_ACC * sizeof(float));
     }
 
     __aicore__ inline void Process()
     {
         uint32_t cid = GetBlockIdx();
+        // 先按未缩放写出 x/w（普通数据下即为最终值），同时统计本核 x/w 最大绝对值
+        if (cid < coreNum_) {
+            if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+                Duplicate(maxBuf_.Get<float>(), 0.0f, static_cast<int32_t>(MAX_ACC));
+            }
+            CastXNz(cid);
+            CastWeightNz(cid);
+            ZeroDn(cid);
+            if (cid == 0) {
+                ZeroApe();
+            }
+            if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+                PublishXwMax(cid);
+            }
+        }
+        // 内部屏障：全核 x/w 最大值 partials 可见后才能判定是否重做
+        AscendC::SyncAll<false>();
         if (cid >= coreNum_) {
             return;
         }
-        CastXNz(cid);
-        CastWeightNz(cid);
-        ZeroDn(cid);
-        if (cid == 0) {
-            ZeroApe();
+        if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+            // 全局指数：dn（probe partials）与 x/w（本相位统计）一并归并并发布
+            float scaleDn = 1.0f;
+            float scaleXw = 1.0f;
+            int32_t expA = 0;
+            int32_t expB = 0;
+            CgProbeScales(scalePartGM_, coreNum_, f32Buf_.Get<float>(), nRows_, scaleDn, scaleXw, expA, expB);
+            if (cid == 0) {
+                CgPublishScales(scalePartGM_, coreNum_, f32Buf_.Get<float>(), scaleDn, scaleXw, expA + expB);
+            }
+            if (expB == 0) {
+                return; // 普通数据（<= 2^15）：一次写定，逐位等于原实现
+            }
+            // 超 fp16 范围：按全局指数重写 x/w（仅大值数据走到这里）
+            scaleXw_ = scaleXw;
+            CastXNz(cid);
+            CastWeightNz(cid);
         }
+    }
+
+    // 本核 x/w 最大绝对值写入 scale 区第 cid 槽（32B 一次 MTE3）
+    __aicore__ inline void PublishXwMax(uint32_t cid)
+    {
+        LocalTensor<float> acc = maxBuf_.Get<float>();
+        LocalTensor<float> pub = f32Buf_.Get<float>();
+        uint32_t n = MAX_ACC;
+        while (n > 8U) {
+            n >>= 1;
+            Max(acc, acc, acc[n], static_cast<int32_t>(n));
+        }
+        SetWaitFlag<HardEvent::V_S>();
+        float m = 0.0f;
+        for (uint32_t i = 0; i < n; i++) {
+            const float v = acc.GetValue(i);
+            m = (v > m) ? v : m;
+        }
+        Duplicate(pub, 0.0f, static_cast<int32_t>(CG_SCALE_STRIDE));
+        pub.SetValue(0, m);
+        SetWaitFlag<HardEvent::V_MTE3>();
+        DataCopyExtParams cp{1, CG_SCALE_STRIDE * static_cast<uint32_t>(sizeof(float)), 0, 0, 0};
+        DataCopyPad(scalePartGM_[cid * CG_SCALE_STRIDE], pub, cp);
+        SetWaitFlag<HardEvent::MTE3_V>();
     }
 
 private:
@@ -121,11 +351,24 @@ private:
             SetWaitFlag<HardEvent::MTE2_V>();
             SetWaitFlag<HardEvent::MTE3_V>(); // prior tile's GM write of nzLocal drained
             Cast(f32Local, inLocal, RoundMode::CAST_NONE, static_cast<int32_t>(CG_X_TILE * CG_X_TILE));
+            // bf16-io 超范围输入：f16 落盘前先按全局指数缩放（2 的幂，无舍入；
+            // 普通数据 scaleXw_ == 1.0 时跳过，逐位不变）
+            if (scaleXw_ != 1.0f) {
+                Muls(f32Local, f32Local, scaleXw_, static_cast<int32_t>(CG_X_TILE * CG_X_TILE));
+            }
             // f32 tile (row-major 128x128) -> NZ slots: group g (cols 16g..)
             // lands at g*2048 with its 128 rows packed contiguously.
             UnaryRepeatParams gather{1, 1, 1, static_cast<uint8_t>(CG_X_TILE / 8)};
             for (uint32_t g = 0; g < CG_X_TILE / 16; g++) {
                 Cast(nzLocal[g * CG_X_TILE * 16], f32Local[g * 16], RoundMode::CAST_NONE, 16, CG_X_TILE, gather);
+            }
+            // 顺带统计 |x| 最大值（tile 数据已在 UB；仅缩放判定用，不参与写出）
+            if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+                LocalTensor<float> acc = maxBuf_.Get<float>();
+                Abs(f32Local, f32Local, static_cast<int32_t>(CG_X_TILE * CG_X_TILE));
+                for (uint32_t k = 0; k < CG_X_TILE * CG_X_TILE / MAX_ACC; k++) {
+                    Max(acc, acc, f32Local[k * MAX_ACC], static_cast<int32_t>(MAX_ACC));
+                }
             }
             SetWaitFlag<HardEvent::V_MTE3>();
             DataCopy(xF16GM_[static_cast<uint64_t>(t) * CG_X_TILE * CG_X_TILE], nzLocal,
@@ -166,9 +409,21 @@ private:
             SetWaitFlag<HardEvent::MTE2_V>();
             SetWaitFlag<HardEvent::MTE3_V>(); // prior tile's GM write of nzLocal drained
             Cast(f32Local, inLocal, RoundMode::CAST_NONE, static_cast<int32_t>(CG_X_TILE * CG_X_TILE));
+            // bf16-io 超范围输入：f16 落盘前先按全局指数缩放（2 的幂，无舍入；
+            // 普通数据 scaleXw_ == 1.0 时跳过，逐位不变）
+            if (scaleXw_ != 1.0f) {
+                Muls(f32Local, f32Local, scaleXw_, static_cast<int32_t>(CG_X_TILE * CG_X_TILE));
+            }
             UnaryRepeatParams gather{1, 1, 1, static_cast<uint8_t>(CG_X_TILE / 8)};
             for (uint32_t g = 0; g < CG_X_TILE / 16; g++) {
                 Cast(nzLocal[g * CG_X_TILE * 16], f32Local[g * 16], RoundMode::CAST_NONE, 16, CG_X_TILE, gather);
+            }
+            if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+                LocalTensor<float> acc = maxBuf_.Get<float>();
+                Abs(f32Local, f32Local, static_cast<int32_t>(CG_X_TILE * CG_X_TILE));
+                for (uint32_t k = 0; k < CG_X_TILE * CG_X_TILE / MAX_ACC; k++) {
+                    Max(acc, acc, f32Local[k * MAX_ACC], static_cast<int32_t>(MAX_ACC));
+                }
             }
             SetWaitFlag<HardEvent::V_MTE3>();
             DataCopy(dst[static_cast<uint64_t>(tIn) * CG_X_TILE * CG_X_TILE], nzLocal,
@@ -180,6 +435,10 @@ private:
 
     __aicore__ inline void ZeroDn(uint32_t cid)
     {
+        // 全覆盖形态（tiling dnZeroSkip=1）无需预清零：scatter 写满全部 (token, column)
+        if (zeroSkip_ != 0) {
+            return;
+        }
         // dn workspaces are HiLo dual-plane for fp16 inputs (dn = hi + lo);
         // bf16 keeps the single-plane layout. All planes must start zeroed.
         constexpr uint32_t planes = std::is_same_v<ioT, half> ? 2U : 1U;
@@ -227,10 +486,13 @@ private:
     GlobalTensor<ioT> xGM_, wkvGM_, wgateGM_;
     GlobalTensor<half> xF16GM_, wkvF16GM_, wgateF16GM_, dnKvGM_, dnScGM_;
     GlobalTensor<float> dApeGM_;
-    uint32_t tLen_, hSize_, cSize_, crSize_, tPad_, coreNum_;
+    GlobalTensor<float> scalePartGM_;
+    uint32_t tLen_, hSize_, cSize_, crSize_, tPad_, coreNum_, nRows_, zeroSkip_ = 0;
+    float scaleXw_ = 1.0f;
     TBuf<TPosition::VECCALC> inBuf_;
     TBuf<TPosition::VECCALC> f32Buf_;
     TBuf<TPosition::VECCALC> f16Buf_;
+    TBuf<TPosition::VECCALC> maxBuf_;
 };
 
 // =========================================================================
@@ -255,6 +517,8 @@ public:
         dnKvGM_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(userWs + tilingData->dnKvWsOff));
         dnScGM_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(userWs + tilingData->dnScWsOff));
         apePartGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(userWs + tilingData->apePartWsOff));
+        scalePartGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(userWs + tilingData->scaleWsOff));
+        castCoreNum_ = static_cast<uint32_t>(tilingData->castCoreNum);
         bSize_ = static_cast<uint32_t>(tilingData->batchSize);
         sSize_ = static_cast<uint32_t>(tilingData->seqSize);
         tLen_ = static_cast<uint32_t>(tilingData->tLen);
@@ -349,6 +613,13 @@ public:
         uint32_t cid = GetBlockIdx();
         if (cid >= scatterCoreNum_) {
             return;
+        }
+        // bf16-io：dn 缩放倍率（cast 相位归并 probe 与 x/w 统计后发布，[+0] = 2^-expA）
+        if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+            float scaleXwPub = 1.0f;
+            float scaleOutPub = 1.0f;
+            int32_t expTotal = 0;
+            CgReadPubScales(scalePartGM_, castCoreNum_, buf_.Get<float>(), scaleDn_, scaleXwPub, scaleOutPub, expTotal);
         }
         if (isTh_) {
             LoadBatchMeta();
@@ -543,6 +814,10 @@ private:
                 Mul(dkvBlk_[r0 * seg], sm_[r0 * seg], dC32_, seg, reps, bcast);
             }
         }
+        // bf16-io 超范围：dn 落盘前按全局指数缩放（2 的幂，无舍入；普通数据跳过）
+        if (scaleDn_ != 1.0f) {
+            Muls(dkvBlk_, dkvBlk_, scaleDn_, static_cast<int32_t>(n * seg));
+        }
         StageTiles(dkvBlk_);
         FlushDn(dnKvGM_, dnBase, tokOff, d0, fc, pfc, hasPrev);
         // colsum finalize + pass 2 block math overlap the dn_kv flush
@@ -583,6 +858,10 @@ private:
             }
         }
         SetWaitFlag<HardEvent::MTE3_V>(); // dn_kv flush drained (staging free for pass 2)
+        // d_ape 已吃未缩放的 d_score；dn_sc 落盘前按同一全局指数缩放
+        if (scaleDn_ != 1.0f) {
+            Muls(kvBlk_, kvBlk_, scaleDn_, static_cast<int32_t>(n * seg));
+        }
         StageTiles(kvBlk_);
         FlushDn(dnScGM_, dnBase, tokOff, d0, fc, pfc, hasPrev);
         // no trailing MTE3_V: the dn_sc flush drains under the next block's
@@ -610,6 +889,10 @@ private:
                 for (uint32_t g = 0; g < seg / 16; g++) {
                     Cast(hBTile_[g * 16], stageHiCur_[g * crSize_ * 16], RoundMode::CAST_NONE, 16, crSize_, roundtrip);
                 }
+                // |dn|>65504 时 hi=±Inf，回读后先钳到 ±65504 再求 lo，避免
+                // Inf-Inf=NaN（hi+lo 仍为 ±Inf，与 golden/A5 单平面 cast 一致）
+                Mins(hBTile_, hBTile_, 65504.0f, static_cast<int32_t>(crSize_ * seg));
+                Maxs(hBTile_, hBTile_, -65504.0f, static_cast<int32_t>(crSize_ * seg));
                 Sub(hBTile_, blk, hBTile_, static_cast<int32_t>(crSize_ * seg));
                 for (uint32_t g = 0; g < seg / 16; g++) {
                     Cast(stageLoCur_[g * crSize_ * 16], hBTile_[g * 16], RoundMode::CAST_NONE, 16, crSize_, gather);
@@ -625,6 +908,8 @@ private:
                 for (uint32_t g = 0; g < seg / 16; g++) {
                     Cast(hBTile_[g * 16], stageHiCur_[g * crSize_ * 16], RoundMode::CAST_NONE, 16, crSize_, roundtrip);
                 }
+                Mins(hBTile_, hBTile_, 65504.0f, static_cast<int32_t>(crSize_ * seg));
+                Maxs(hBTile_, hBTile_, -65504.0f, static_cast<int32_t>(crSize_ * seg));
                 Sub(hBTile_, blk[seg], hBTile_, seg, crSize_, subPrm);
                 for (uint32_t g = 0; g < seg / 16; g++) {
                     Cast(stageLoCur_[g * crSize_ * 16], hBTile_[g * 16], RoundMode::CAST_NONE, 16, crSize_, gather);
@@ -632,6 +917,8 @@ private:
                 for (uint32_t g = 0; g < seg / 16; g++) {
                     Cast(hBTile_[g * 16], stageHiPrev_[g * crSize_ * 16], RoundMode::CAST_NONE, 16, crSize_, roundtrip);
                 }
+                Mins(hBTile_, hBTile_, 65504.0f, static_cast<int32_t>(crSize_ * seg));
+                Maxs(hBTile_, hBTile_, -65504.0f, static_cast<int32_t>(crSize_ * seg));
                 Sub(hBTile_, blk, hBTile_, seg, crSize_, subPrm);
                 for (uint32_t g = 0; g < seg / 16; g++) {
                     Cast(stageLoPrev_[g * crSize_ * 16], hBTile_[g * 16], RoundMode::CAST_NONE, 16, crSize_, gather);
@@ -706,10 +993,12 @@ private:
 
     GlobalTensor<ioT> dCkGM_;
     GlobalTensor<float> smGM_, kvGM_, apePartGM_;
+    GlobalTensor<float> scalePartGM_;
     GlobalTensor<int32_t> cuGm_, sqGm_, spGm_;
     GlobalTensor<half> dnKvGM_, dnScGM_;
     uint32_t bSize_, sSize_, tLen_, dSize_, crSize_, coff_, nblk_, nblkIn_, nRows_, cSize_, segLen_;
-    uint32_t blocksPerCore_, scatterCoreNum_, dnTilesT_;
+    uint32_t blocksPerCore_, scatterCoreNum_, dnTilesT_, castCoreNum_;
+    float scaleDn_ = 1.0f;
     bool isTh_ = false;
     bool hasSq_ = false;
     bool hasSp_ = false;
@@ -731,14 +1020,28 @@ private:
 constexpr uint32_t CG_APE_REDUCE_VEC = 4096;       // element cap per UB chunk
 constexpr uint32_t CG_APE_REDUCE_UB = 48U * 1024U; // acc + comp + x buffers
 
+template <typename ioT>
 class CompressorGradApeReduceKernel {
 public:
     __aicore__ inline CompressorGradApeReduceKernel() {}
 
-    __aicore__ inline void Init(GM_ADDR dApe, GM_ADDR userWs, const optiling::CompressorGradTilingDataA3* tilingData,
-                                TPipe* pipe)
+    __aicore__ inline void Init(GM_ADDR dApe, GM_ADDR dX, GM_ADDR dWkv, GM_ADDR dWgate, GM_ADDR userWs,
+                                const optiling::CompressorGradTilingDataA3* tilingData, TPipe* pipe)
     {
         partGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(userWs + tilingData->apePartWsOff));
+        // 输出缩放还原（仅 bf16-io）：并入本相位，省一次相位建立与 TPipe
+        if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+            dXGM_.SetGlobalBuffer(reinterpret_cast<__gm__ ioT*>(dX));
+            dWkvGM_.SetGlobalBuffer(reinterpret_cast<__gm__ ioT*>(dWkv));
+            dWgateGM_.SetGlobalBuffer(reinterpret_cast<__gm__ ioT*>(dWgate));
+            scalePartGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(userWs + tilingData->scaleWsOff));
+            outCoreNum_ = static_cast<uint32_t>(tilingData->castCoreNum);
+            outTLen_ = static_cast<uint32_t>(tilingData->tLen);
+            outHSize_ = static_cast<uint32_t>(tilingData->hiddenSize);
+            outCSize_ = static_cast<uint32_t>(tilingData->totalHeadDim);
+            pipe->InitBuffer(rescF_, CG_PROBE_VEC * sizeof(float));
+            pipe->InitBuffer(rescIo_, CG_PROBE_VEC * sizeof(ioT));
+        }
         dApeGM_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(dApe));
         crSize_ = static_cast<uint32_t>(tilingData->cmpRatio);
         cSize_ = static_cast<uint32_t>(tilingData->totalHeadDim);
@@ -758,9 +1061,58 @@ public:
     __aicore__ inline void Process()
     {
         const uint32_t cid = GetBlockIdx();
-        if (cid >= coreNum_) {
+        if (cid < coreNum_) {
+            ApeReduceBody(cid);
+        }
+        if constexpr (std::is_same_v<ioT, bfloat16_t>) {
+            // 相位屏障：等 AIC 的 gemm 输出落盘后做缩放还原（普通数据整段空跑）
+            AscendC::SyncAll<false>();
+            float scaleDnUnused = 1.0f;
+            float scaleXwUnused = 1.0f;
+            float s = 1.0f;
+            int32_t expTotal = 0;
+            CgReadPubScales(scalePartGM_, outCoreNum_, rescF_.Get<float>(), scaleDnUnused, scaleXwUnused, s, expTotal);
+            if (s != 1.0f && cid < outCoreNum_) {
+                ScaleOut(dXGM_, static_cast<uint64_t>(outTLen_) * outHSize_, cid, s);
+                ScaleOut(dWkvGM_, static_cast<uint64_t>(outCSize_) * outHSize_, cid, s);
+                ScaleOut(dWgateGM_, static_cast<uint64_t>(outCSize_) * outHSize_, cid, s);
+            }
+        }
+    }
+
+    __aicore__ inline void ScaleOut(const GlobalTensor<ioT>& g, uint64_t total, uint32_t cid, float s)
+    {
+        if (total == 0U) {
             return;
         }
+        const uint64_t per =
+            ((total + outCoreNum_ - 1U) / outCoreNum_ + CG_PROBE_VEC - 1U) / CG_PROBE_VEC * CG_PROBE_VEC;
+        const uint64_t lo = static_cast<uint64_t>(cid) * per;
+        const uint64_t hi = MinU64(lo + per, total);
+        if (lo >= hi) {
+            return;
+        }
+        LocalTensor<ioT> io = rescIo_.Get<ioT>();
+        LocalTensor<float> tmp = rescF_.Get<float>();
+        for (uint64_t off = lo; off < hi; off += CG_PROBE_VEC) {
+            const uint32_t cnt = static_cast<uint32_t>(MinU64(CG_PROBE_VEC, hi - off));
+            SetWaitFlag<HardEvent::V_MTE2>();
+            DataCopyExtParams cp{1, cnt * static_cast<uint32_t>(sizeof(ioT)), 0, 0, 0};
+            DataCopyPadExtParams<ioT> pp{false, 0, 0, static_cast<ioT>(0)};
+            DataCopyPad(io, g[off], cp, pp);
+            SetWaitFlag<HardEvent::MTE2_V>();
+            Cast(tmp, io, RoundMode::CAST_NONE, static_cast<int32_t>(cnt));
+            Muls(tmp, tmp, s, static_cast<int32_t>(cnt));
+            Cast(io, tmp, CastF32ToIoRoundMode<ioT>(), static_cast<int32_t>(cnt));
+            SetWaitFlag<HardEvent::V_MTE3>();
+            DataCopyPad(g[off], io, cp);
+            SetWaitFlag<HardEvent::MTE3_V>();
+        }
+    }
+
+private:
+    __aicore__ inline void ApeReduceBody(uint32_t cid)
+    {
         const uint64_t total = static_cast<uint64_t>(crSize_) * cSize_;
         // contiguous [e0, e1) per core, remainder to the leading cores; the
         // split is done in 8-element units so every range stays 32B-aligned
@@ -801,6 +1153,11 @@ private:
     uint32_t crSize_ = 0, cSize_ = 0, coreNum_ = 0, chunkLen_ = 0;
     TBuf<TPosition::VECCALC> buf_;
     LocalTensor<float> acc_, comp_, xbuf_;
+    GlobalTensor<ioT> dXGM_, dWkvGM_, dWgateGM_;
+    GlobalTensor<float> scalePartGM_;
+    uint32_t outCoreNum_ = 0, outTLen_ = 0, outHSize_ = 0, outCSize_ = 0;
+    TBuf<TPosition::VECCALC> rescF_;
+    TBuf<TPosition::VECCALC> rescIo_;
 };
 
 #endif // COMPRESSOR_GRAD_CAST_SCATTER_H

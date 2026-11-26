@@ -511,15 +511,32 @@ ge::graphStatus CompressorGradTilingA3::CalcWorkSpace()
     apePartElems_ = scatterCoreNum_ * baseParams_.cmpRatio * cSize;
     constexpr int64_t wsAlign = 512;
     apePartWsOff_ = (dnScWsOff_ + dnBytes + wsAlign - 1) / wsAlign * wsAlign;
-    const int64_t userWsBytes = apePartWsOff_ + apePartElems_ * static_cast<int64_t>(sizeof(float));
+    // bf16-io 范围探测 partials（fp32）：每 cast 核 6 个全张量最大绝对值
+    // （x / wkv / wgate / d_cmp_kv / softmax_score / kv），供全部相位归并出
+    // 全局 2 的幂缩放指数。fp16-io 恒写 0（不启用缩放）。
+    // 每 cast 核 8 个槽（32B 对齐）+ 末尾发布槽（cast 相位写最终倍率）。
+    constexpr int64_t scaleStride = 8;
+    const int64_t scaleElems = scaleStride * castCoreNum_ + 16;
+    scaleWsOff_ =
+        (apePartWsOff_ + apePartElems_ * static_cast<int64_t>(sizeof(float)) + wsAlign - 1) / wsAlign * wsAlign;
+    // dn 预清零可跳过：BSH、无 seqused/start_pos、T 无 padding、S 为 cr 整数倍时，
+    // scatter 覆盖全部 (token, column)，预清零纯属冗余写。
+    dnZeroSkip_ =
+        (context_->layout != LayoutType::LAYOUT_TH && coff_ == 1 && seqUsedValid_ == 0 && startPosValid_ == 0 &&
+         tPad_ == baseParams_.tokenSize && (baseParams_.seqSize % baseParams_.cmpRatio) == 0) ?
+            1 :
+            0;
+    const int64_t userWsBytes = scaleWsOff_ + scaleElems * static_cast<int64_t>(sizeof(float));
 
     workspaceSize_ = libapiSize_ + static_cast<size_t>(userWsBytes);
     if (context_->workSpaces) {
         context_->workSpaces[0] = workspaceSize_;
     }
 
-    OP_LOGI(context_->opName, "[TILING][arch22] workspaceSize = %zu (x=%ld w=2x%ld dn=2x%ld planes=%ld apePart=%ld)",
-            workspaceSize_, xBytes, wBytes, dnBytes, dnPlanes_, apePartElems_ * static_cast<int64_t>(sizeof(float)));
+    OP_LOGI(context_->opName,
+            "[TILING][arch22] workspaceSize = %zu (x=%ld w=2x%ld dn=2x%ld planes=%ld apePart=%ld scale=%ld)",
+            workspaceSize_, xBytes, wBytes, dnBytes, dnPlanes_, apePartElems_ * static_cast<int64_t>(sizeof(float)),
+            scaleElems * static_cast<int64_t>(sizeof(float)));
     return ge::GRAPH_SUCCESS;
 }
 
@@ -553,6 +570,8 @@ ge::graphStatus CompressorGradTilingA3::SetTilingData()
     tilingData_->dnScWsOff = dnScWsOff_;
     tilingData_->apePartWsOff = apePartWsOff_;
     tilingData_->apePartElems = apePartElems_;
+    tilingData_->scaleWsOff = scaleWsOff_;
+    tilingData_->dnZeroSkip = dnZeroSkip_;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -936,7 +955,20 @@ ge::graphStatus CompressorGradTilingA3::CheckBlockDimConstrain() const
 
 ge::graphStatus CompressorGradTilingA3::CheckA3Constraints() const
 {
+    // 文档形状（与 A5 host 同口径）：d_cmp_kv 块维必须覆盖 BSH ceil(S/cmp_ratio)、
+    // TH min(T, T//cmp_ratio+B)。A3 允许额外 padding 行（kernel 不读取），但不允许
+    // 少于文档形状——否则会静默丢弃尾部块（A5 直接拒绝）。
+    const int64_t cmpRatio = baseParams_.cmpRatio;
     if (context_->layout == LayoutType::LAYOUT_TH) {
+        const int64_t requiredRows =
+            baseParams_.batchSize >= 1 ?
+                std::min<int64_t>(baseParams_.tokenSize, baseParams_.tokenSize / cmpRatio + baseParams_.batchSize) :
+                0;
+        OP_CHECK_IF(nblkIn_ < requiredRows,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        context_->opName, D_CMP_KV_NAME, "dim0=" + std::to_string(nblkIn_),
+                        "TH requires d_cmp_kv rows >= min(T,T//cmp_ratio+B)=" + std::to_string(requiredRows)),
+                    return ge::GRAPH_FAILED);
         // TH：块数由 cu_seqlens/seqused 值决定（kernel 运行时判定），合法 0 块
         // （全 batch 不足一个完整块时 dn 全零、gemm 输出全 0，与 A5/golden 一致）；
         // 静态只要求 d_cmp_kv 行数（有效块上界）>= 1
@@ -959,6 +991,12 @@ ge::graphStatus CompressorGradTilingA3::CheckA3Constraints() const
     // 四输出全零，与 A5 _zero_outputs / golden 空循环一致；tiling/kernel 均已防护
     // （CalcSchedule 的 scatter 核数下限、scatter 块循环直接跳过）。nblk_ 源自
     // 无符号除法/min，恒 >= 0，无需再查负。
+    const int64_t requiredBlocks = (baseParams_.seqSize + cmpRatio - 1) / cmpRatio;
+    OP_CHECK_IF(nblkIn_ < requiredBlocks,
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    context_->opName, D_CMP_KV_NAME, "dim1=" + std::to_string(nblkIn_),
+                    "BSH requires d_cmp_kv blocks >= ceil(S/cmp_ratio)=" + std::to_string(requiredBlocks)),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(
         nblkIn_ < nblk_,
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->opName, D_CMP_KV_NAME, "dim1=" + std::to_string(nblkIn_),
