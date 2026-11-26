@@ -126,6 +126,7 @@
 - softmaxMax与softmaxSum shape需相同。
 - D只支持32/64/128。
 - attenMaskOptional当前版本必须传入，不支持空指针；未传入（空指针）时第一段接口返回561002。
+- query/key1/value1/key2/value2/attentionOut仅支持BFLOAT16、FLOAT16，不支持FLOAT32；传入FLOAT32时第一段接口返回161002。
 
 ## 调用说明
 
