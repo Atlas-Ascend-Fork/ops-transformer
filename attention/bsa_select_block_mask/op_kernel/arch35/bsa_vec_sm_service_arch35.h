@@ -58,8 +58,8 @@ static constexpr uint32_t FP16OUT_UB_OFFSET = 154 * 1024;
 static constexpr uint32_t VMASK_TABLE_OFFSET = GLOBAL_STATE_UB_OFFSET + 2 * Q_CHUNK_SIZE * sizeof(float);
 static constexpr uint32_t VMASK_NEGINF_OFFSET = VMASK_TABLE_OFFSET + 8 * 8 * sizeof(float);
 static constexpr uint32_t PENDING_UB_OFFSET = VMASK_NEGINF_OFFSET + 8 * 8 * sizeof(float);
-static constexpr uint32_t PENDING_WIN_MAX = 2;
-static constexpr uint32_t PENDING_GRP_MAX = 256;
+static constexpr uint32_t PENDING_WIN_MAX = 4;
+static constexpr uint32_t PENDING_GRP_MAX = 2048;
 
 template <typename BSAT>
 class BSAVecSmService {
@@ -137,7 +137,7 @@ private:
                                                   uint32_t qChunkStartFx);
     __aicore__ inline void FinalizeBatchScaleCast(const PostRowSlice* slices, uint32_t sliceNum, uint32_t k,
                                                   uint32_t nUnits, uint32_t qChunkStart, uint32_t validXBlocks,
-                                                  bool invRowsUniform);
+                                                  bool invRowsUniform, uint32_t tailG, float tailFactor);
     __aicore__ inline void FinalizeBatchWriteOut(const PostRowSlice* slices, uint32_t sliceNum, uint32_t qChunkStart,
                                                  uint32_t k, uint32_t t0, uint32_t groupsValid, uint32_t validXBlocksBx,
                                                  uint32_t nUnitsFx, uint64_t pooledHeadOffset, uint32_t pooledRowStride,
@@ -868,15 +868,16 @@ __aicore__ inline void BSAVecSmService<BSAT>::FinalizeBatchFoldUnits(const PostR
 template <typename BSAT>
 __aicore__ inline void BSAVecSmService<BSAT>::FinalizeBatchScaleCast(const PostRowSlice* slices, uint32_t sliceNum,
                                                                      uint32_t k, uint32_t nUnits, uint32_t qChunkStart,
-                                                                     uint32_t validXBlocks, bool invRowsUniform)
+                                                                     uint32_t validXBlocks, bool invRowsUniform,
+                                                                     uint32_t tailG, float tailFactor)
 {
     uint32_t unitRows = constInfo_.postBlockShapeX;
     LocalTensor<T> rs = postPoolOP_.GetReduceTemp();
     LocalTensor<OUT_T> fp16Row = rs[BF_FP16_ROW_OFF].ReinterpretCast<OUT_T>();
-    LocalTensor<T> invCols = rs[BF_INV_COLS_OFF];
     LocalTensor<T> unitRes = scoreUb_[BATCH * 2048];
     if (invRowsUniform) {
-        AscendC::Muls(unitRes, unitRes, 1.0f / static_cast<float>(static_cast<int32_t>(unitRows)), k * nUnits * 32);
+        AscendC::Muls(unitRes, unitRes, 1.0f / (static_cast<float>(static_cast<int32_t>(unitRows)) * 16.0f),
+                      k * nUnits * 32);
     } else {
         for (uint32_t s = 0; s < sliceNum; s++) {
             const PostRowSlice& sl = slices[s];
@@ -893,22 +894,26 @@ __aicore__ inline void BSAVecSmService<BSAT>::FinalizeBatchScaleCast(const PostR
                 for (uint32_t b = 0; b < k; b++) {
                     int32_t rowsInPxI = static_cast<int32_t>(rowsInPx);
                     AscendC::Muls(unitRes[(u * k + b) * 32], unitRes[(u * k + b) * 32],
-                                  1.0f / static_cast<float>(rowsInPxI), 32);
+                                  1.0f / (static_cast<float>(rowsInPxI) * 16.0f), 32);
                 }
                 uo += cnt;
             }
         }
     }
-    AscendC::PipeBarrier<PIPE_V>();
-    AscendC::BinaryRepeatParams bpCols;
-    bpCols.dstBlkStride = 1;
-    bpCols.src0BlkStride = 1;
-    bpCols.src1BlkStride = 1;
-    bpCols.dstRepStride = 4;
-    bpCols.src0RepStride = 4;
-    bpCols.src1RepStride = 0;
-    AscendC::Mul<T, false>(unitRes, unitRes, invCols, static_cast<uint64_t>(32), static_cast<uint8_t>(k * nUnits),
-                           bpCols);
+    if (tailG != 0xFFFFFFFFu) {
+        LocalTensor<T> corr32 = scoreUb_[BATCH * 2048 + 4096];
+        LocalTensor<T> corrAll = scoreUb_[BATCH * 2048 + 4096 + 32];
+        AscendC::Duplicate(corr32, 1.0f, 32);
+        AscendC::PipeBarrier<PIPE_V>();
+        VToSSync();
+        corr32.SetValue(tailG, tailFactor);
+        SToVSync();
+        for (uint32_t r = 0; r < k * nUnits; r++) {
+            AscendC::DataCopy(corrAll[r * 32], corr32, 32);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Mul(unitRes, unitRes, corrAll, k * nUnits * 32);
+    }
     AscendC::PipeBarrier<PIPE_V>();
     AscendC::Cast(fp16Row, unitRes, AscendC::RoundMode::CAST_ROUND, k * nUnits * 32);
     AscendC::PipeBarrier<PIPE_V>();
@@ -980,8 +985,6 @@ __aicore__ inline void BSAVecSmService<BSAT>::SoftmaxFinalizeBatch(const PostRow
     uint32_t pooledRowStride = validPostYCur;
     uint64_t pooledHeadOffset = 0;
     uint32_t unitRows = constInfo_.postBlockShapeX;
-    LocalTensor<T> rs = postPoolOP_.GetReduceTemp();
-    LocalTensor<T> invCols = rs[BF_INV_COLS_OFF];
 
     uint32_t ownRows = slices[sliceNum - 1].localRowStart + slices[sliceNum - 1].rowCount;
     uint32_t firstPx = (qChunkStart + slices[0].chunkRowStart) / unitRows;
@@ -989,23 +992,20 @@ __aicore__ inline void BSAVecSmService<BSAT>::SoftmaxFinalizeBatch(const PostRow
         (qChunkStart + slices[sliceNum - 1].chunkRowStart + (slices[sliceNum - 1].rowCount - 1)) / unitRows;
     uint32_t nUnits = lastPx - firstPx + 1;
     bool invRowsUniform = (validXBlocks % unitRows == 0);
+    uint32_t tailG = 0xFFFFFFFFu;
+    float tailFactor = 1.0f;
 
     FinalizeBatchReadParts(slices, sliceNum, k, t0);
 
     if (boundary) {
         uint32_t py0 = t0 * (K_TILE_COLS / 16);
-        AscendC::Duplicate(invCols, 1.0f / 16.0f, 32);
-        AscendC::PipeBarrier<PIPE_V>();
         uint32_t validGroups = (validYBlocks > py0 * 16) ? (validYBlocks - py0 * 16 + 15) / 16 : 0;
         if (validGroups > 0) {
             uint32_t lastG = BSAMin(validGroups, uint32_t(32)) - 1;
             uint32_t lastCols = BSAMin(uint32_t(16), validYBlocks - (py0 + lastG) * 16);
             if (lastCols != 16) {
-                VToSSync();
-                float v = invCols.GetValue(lastG);
-                float lastColsF = static_cast<float>(static_cast<int32_t>(lastCols));
-                invCols.SetValue(lastG, v * 16.0f / lastColsF);
-                SToVSync();
+                tailG = lastG;
+                tailFactor = 16.0f / static_cast<float>(static_cast<int32_t>(lastCols));
             }
         }
     }
@@ -1015,7 +1015,7 @@ __aicore__ inline void BSAVecSmService<BSAT>::SoftmaxFinalizeBatch(const PostRow
         FinalizeBatchFoldUnits(slices, sliceNum, b, k, qChunkStart);
     }
 
-    FinalizeBatchScaleCast(slices, sliceNum, k, nUnits, qChunkStart, validXBlocks, invRowsUniform);
+    FinalizeBatchScaleCast(slices, sliceNum, k, nUnits, qChunkStart, validXBlocks, invRowsUniform, tailG, tailFactor);
 
     FinalizeBatchWriteOut(slices, sliceNum, qChunkStart, k, t0, groupsValid, validXBlocks, nUnits, pooledHeadOffset,
                           pooledRowStride, attnScoreGmTensor);
@@ -1037,11 +1037,6 @@ __aicore__ inline void BSAVecSmService<BSAT>::SoftmaxFinalize(uint32_t qChunkSta
     if (sliceNum == 0) {
         return;
     }
-
-    LocalTensor<T> rs0 = postPoolOP_.GetReduceTemp();
-    LocalTensor<T> invCols = rs0[1536];
-    AscendC::Duplicate(invCols, float(1.0f / 16.0f), 32);
-    AscendC::PipeBarrier<PIPE_V>();
 
     uint32_t lastFull = validYBlocks / K_TILE_COLS;
     uint32_t ktilesBatch = (validYBlocks + K_TILE_COLS - 1) / K_TILE_COLS;
