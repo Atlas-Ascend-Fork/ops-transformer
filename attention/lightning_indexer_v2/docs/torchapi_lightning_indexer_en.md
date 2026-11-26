@@ -133,7 +133,7 @@ cann_ops_transformer.lightning_indexer(
 | cmp_residual_k | Tensor | Optional | Remainder of dividing the number of k tokens before compression by cmp_ratio. Required when mask_mode is 3 and cmp_ratio is not 1. Data format: ND. | int32 | (b,) |
 | block_table | Tensor | Optional | Block mapping table used for KV storage in PagedAttention. Empty tensors are not supported. Data format: ND. | int32 | (b, k_s_max/block_size) |
 | output_idx_offset | Tensor | Optional | Offset to add to the output indices of the topK result. The value must be greater than or equal to 0, and the topK index plus the offset must not exceed the maximum value of int32. Data format: ND. | int32 | (b,q_s,k_n) when layout_q is BSND; (q_t,k_n) when layout_q is TND |
-| metadata | Tensor | Optional | Core splitting information obtained from lightning_indexer_metadata, including the number of used cores, block size, and the start point of the data processed by each core. Empty tensors are not supported. Data format: ND. | int32 | (1024,) |
+| metadata | Tensor | Optional | Core splitting information obtained from lightning_indexer_metadata, including the number of used cores, block size, and the start point of the data processed by each core. Empty tensors are not supported. Data format: ND. | int32 | (length,) |
 | max_seqlen_q | int | Optional | Maximum sequence length of q. -1 indicates any possible length. Default value: -1. | int64 | - |
 | layout_q | str | Optional | Data layout format of input q. Supports BSND and TND. Default value: BSND. | string | - |
 | layout_k | str | Optional | Data layout format of input k. Supports BSND, TND, and PA_BBND. Default value: BSND. | string | - |
@@ -147,7 +147,7 @@ cann_ops_transformer.lightning_indexer(
 
 | Name | Type | Required/Optional | Description | Data type | Dimension (Shape) |
 |--------|----------|-----------|------|----------|-------------|
-| metadata | Tensor | Required | Indices of batch, head, and chunks of Q and K in the Attention computing task on each AI Core. The data format is ND. Non-contiguous tensors are not supported. | int32 | (1024,) |
+| metadata | Tensor | Required | Indices of batch, head, and chunks of Q and K in the Attention computing task on each AI Core. The data format is ND. Non-contiguous tensors are not supported. | int32 | (length,) |
 
 ### lightning_indexer
 
@@ -189,7 +189,7 @@ cann_ops_transformer.lightning_indexer(
   - cmp_ratio supports [1, 128].
   - When output_idx_offset is passed in, index offset values greater than or equal to 0 are supported; in addition, the following constraint must be met: after the passed index offset value is added, the obtained sparseIndice value must not exceed the maximum value of INT32.
   - When layout_q is TND, cu_seqlens_q must be passed in. If seqused_q is also passed in, ensure that the q length of each batch passed in through seqused_q does not exceed the q sequence length of each batch calculated based on cu_seqlens_q. When the q sequence length seqlen1 of a batch passed in through seqused_q is less than the q length seqlen2 calculated based on cu_seqlens_q, the TND Padding function is enabled, and the sparse_indices and sparse_values of the q output for the difference between seqlen2 and seqlen1 of the batch are all set to invalid values. In some long-sequence use cases, if too much invalid data needs to be padded, aicore execution may time out due to hardware limitations. Calculate the amount of data to be padded by (seqlen2 - seqlen1) * topk. It is recommended that this amount be less than 400 million.
-  - The metadata parameter must be passed in, and its shape is (1024,).
+  - The metadata parameter must be passed in. Its shape is (length,), where length is 8 * (aic_num + aiv_num) rounded up to a multiple of 1024. aic_num and aiv_num are the current device's AIC and AIV core counts.
 <!-- end id8 -->
 
 ### Feature Parameter Group

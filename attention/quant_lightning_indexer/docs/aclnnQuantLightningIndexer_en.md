@@ -583,8 +583,8 @@ int InitializeTensors(TensorResources& resources) {
     int64_t blockTableShapeSize = GetShapeSize(blockTableShape);
     int64_t outShapeSize = GetShapeSize(outShape);
 
-    std::vector<int8_t> queryHostData(queryShapeSize, 1);
-    std::vector<int8_t> keyHostData(keyShapeSize, 1);
+    std::vector<uint8_t> queryHostData(queryShapeSize, 0x38);
+    std::vector<uint8_t> keyHostData(keyShapeSize, 0x38);
     std::vector<uint16_t> weightsHostData(weightsShapeSize, 0x3F00);
     std::vector<float> queryDequantScaleHostData(queryDequantScaleShapeSize, 1.0f);
     std::vector<float> keyDequantScaleHostData(keyDequantScaleShapeSize, 1.0f);

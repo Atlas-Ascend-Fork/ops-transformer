@@ -115,11 +115,11 @@ int InitializeTensors(TensorResources& resources)
     int64_t sparseIndicesShapeSize = GetShapeSize(sparseIndicesShape);
     int64_t sparseValuesShapeSize = GetShapeSize(sparseValuesShape);
 
-    std::vector<float> queryHostData(queryShapeSize, 1);
-    std::vector<float> keyHostData(keyShapeSize, 1);
-    std::vector<float> weightsHostData(weightsShapeSize, 1);
+    std::vector<uint16_t> queryHostData(queryShapeSize, 0x3C00); // FP16 1.0
+    std::vector<uint16_t> keyHostData(keyShapeSize, 0x3C00);
+    std::vector<uint16_t> weightsHostData(weightsShapeSize, 0x3C00);
     std::vector<int32_t> sparseIndicesHostData(sparseIndicesShapeSize, 1);
-    std::vector<float> sparseValuesHostData(sparseValuesShapeSize, 1);
+    std::vector<uint16_t> sparseValuesHostData(sparseValuesShapeSize, 0x3C00);
 
     int ret = CreateAclTensor(queryHostData, queryShape, &resources.queryDeviceAddr, aclDataType::ACL_FLOAT16,
                               &resources.queryTensor);

@@ -255,7 +255,7 @@ aclnnStatus aclnnLightningIndexerV2Metadata(
       <td>metadata（aclTensor*）</td>
       <td>输出</td>
       <td>表示负载均衡结果输出。</td>
-      <td>shape固定为(2048, )。</td>
+      <td>shape为(length,)，length为将8 * (aic_num + aiv_num)向上对齐至1024的整数倍所得的元素数，核数取自当前设备。AIC记录在前，AIV记录紧随其后，每条记录包含8个int32元素。</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1维</td>
@@ -419,9 +419,9 @@ aclnnStatus aclnnLightningIndexerV2Metadata(
     } while (0)
 
 // 参考 lightning_indexer_v2_metadata.h
-inline constexpr uint32_t AIC_CORE_MAX_NUM = 80;
-inline constexpr uint32_t AIV_CORE_MAX_NUM = 80;
-constexpr uint32_t LI_V2_METADATA_TOTAL_SIZE = 2048;
+uint32_t aicCoreNum = 0;
+uint32_t aivCoreNum = 0;
+uint32_t metadataSize = 0;
 constexpr uint32_t LI_V2_METADATA_SIZE = 8;
 constexpr uint32_t LD_V2_METADATA_SIZE = 8;
 
@@ -443,11 +443,6 @@ constexpr uint32_t LD_V2_WORKSPACE_IDX_INDEX = 3;
 constexpr uint32_t LD_V2_WORKSPACE_NUM_INDEX = 4;
 constexpr uint32_t LD_V2_M_START_INDEX = 5;
 constexpr uint32_t LD_V2_M_NUM_INDEX = 6;
-
-struct LiV2Metadata {
-    uint32_t faData[AIC_CORE_MAX_NUM][LI_V2_METADATA_SIZE];
-    uint32_t fdData[AIV_CORE_MAX_NUM][LD_V2_METADATA_SIZE];
-};
 
 struct ScopeGuard
 {
@@ -600,7 +595,14 @@ aclnnStatus CreateArgs(const ArgScenario &scenario, ArgContext &context)
     context.numHeadsK = 1;
     context.headDim = 128;
     context.topk = 1024;
-    ret = CreateTensor(aclDataType::ACL_INT32, { LI_V2_METADATA_TOTAL_SIZE }, context.metadata);     // 2048: Fix size
+    ret = aclrtGetResInCurrentThread(ACL_RT_DEV_RES_CUBE_CORE, &aicCoreNum);
+    CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Failed to query AIC count\n");
+    ret = aclrtGetResInCurrentThread(ACL_RT_DEV_RES_VECTOR_CORE, &aivCoreNum);
+    CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Failed to query AIV count\n");
+    constexpr uint32_t alignment = 1024U;
+    const uint32_t usedSize = aicCoreNum * LI_V2_METADATA_SIZE + aivCoreNum * LD_V2_METADATA_SIZE;
+    metadataSize = (usedSize + alignment - 1) / alignment * alignment;
+    ret = CreateTensor(aclDataType::ACL_INT32, {metadataSize}, context.metadata);
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create meta failed. Error: %d", ret);
 
     context.maskMode = 0;                   // 0: no mask, 3: causal
@@ -696,30 +698,39 @@ int main() {
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "aclrtSynchronizeStream failed. ERROR: %d\n", ret);
 
     // 5. 打印输出
-    LiV2Metadata result {};
-    ret = aclrtMemcpy(&result, sizeof(result), context.metadata.deviceAddr, sizeof(result), ACL_MEMCPY_DEVICE_TO_HOST);
+    std::vector<uint32_t> result(metadataSize);
+    ret = aclrtMemcpy(result.data(), result.size() * sizeof(uint32_t), context.metadata.deviceAddr,
+                      result.size() * sizeof(uint32_t), ACL_MEMCPY_DEVICE_TO_HOST);
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "aclrtMemcpy failed. ERROR: %d\n", ret);
 
-    for (uint32_t i = 0; i < AIC_CORE_MAX_NUM; ++i) {
+    for (uint32_t i = 0; i < aicCoreNum; ++i) {
         printf("AIC Core%u\n", i);
-        printf("    Core Enable : %u\n", result.faData[i][LI_V2_CORE_ENABLE_INDEX]);
-        printf("    Start BN2   : %u\n", result.faData[i][LI_V2_BN2_START_INDEX]);
-        printf("    Start M     : %u\n", result.faData[i][LI_V2_M_START_INDEX]);
-        printf("    Start S2    : %u\n", result.faData[i][LI_V2_S2_START_INDEX]);
-        printf("    End BN2     : %u\n", result.faData[i][LI_V2_BN2_END_INDEX]);
-        printf("    End M       : %u\n", result.faData[i][LI_V2_M_END_INDEX]);
-        printf("    End S2      : %u\n", result.faData[i][LI_V2_S2_END_INDEX]);
-        printf("    First Workspace Index : %u\n", result.faData[i][LI_V2_FIRST_LD_V2_DATA_WORKSPACE_IDX_INDEX]);
+        printf("    Core Enable : %u\n", result[i * LI_V2_METADATA_SIZE + LI_V2_CORE_ENABLE_INDEX]);
+        printf("    Start BN2   : %u\n", result[i * LI_V2_METADATA_SIZE + LI_V2_BN2_START_INDEX]);
+        printf("    Start M     : %u\n", result[i * LI_V2_METADATA_SIZE + LI_V2_M_START_INDEX]);
+        printf("    Start S2    : %u\n", result[i * LI_V2_METADATA_SIZE + LI_V2_S2_START_INDEX]);
+        printf("    End BN2     : %u\n", result[i * LI_V2_METADATA_SIZE + LI_V2_BN2_END_INDEX]);
+        printf("    End M       : %u\n", result[i * LI_V2_METADATA_SIZE + LI_V2_M_END_INDEX]);
+        printf("    End S2      : %u\n", result[i * LI_V2_METADATA_SIZE + LI_V2_S2_END_INDEX]);
+        printf("    First Workspace Index : %u\n",
+               result[i * LI_V2_METADATA_SIZE + LI_V2_FIRST_LD_V2_DATA_WORKSPACE_IDX_INDEX]);
     }
-    for (uint32_t i = 0; i < AIV_CORE_MAX_NUM; ++i) {
+    for (uint32_t i = 0; i < aivCoreNum; ++i) {
         printf("AIV Core%u\n", i);
-        printf("    Core Enable             : %u\n", result.fdData[i][LD_V2_CORE_ENABLE_INDEX]);
-        printf("    FD Task BN2 Idx         : %u\n", result.fdData[i][LD_V2_BN2_IDX_INDEX]);
-        printf("    FD Task M Idx           : %u\n", result.fdData[i][LD_V2_M_IDX_INDEX]);
-        printf("    FD Task Workspace Idx   : %u\n", result.fdData[i][LD_V2_WORKSPACE_IDX_INDEX]);
-        printf("    FD Task Workspace Num   : %u\n", result.fdData[i][LD_V2_WORKSPACE_NUM_INDEX]);
-        printf("    FD Subtask M Start      : %u\n", result.fdData[i][LD_V2_M_START_INDEX]);
-        printf("    FD Subtask M Num        : %u\n", result.fdData[i][LD_V2_M_NUM_INDEX]);
+        printf("    Core Enable             : %u\n",
+               result[aicCoreNum * LI_V2_METADATA_SIZE + i * LD_V2_METADATA_SIZE + LD_V2_CORE_ENABLE_INDEX]);
+        printf("    FD Task BN2 Idx         : %u\n",
+               result[aicCoreNum * LI_V2_METADATA_SIZE + i * LD_V2_METADATA_SIZE + LD_V2_BN2_IDX_INDEX]);
+        printf("    FD Task M Idx           : %u\n",
+               result[aicCoreNum * LI_V2_METADATA_SIZE + i * LD_V2_METADATA_SIZE + LD_V2_M_IDX_INDEX]);
+        printf("    FD Task Workspace Idx   : %u\n",
+               result[aicCoreNum * LI_V2_METADATA_SIZE + i * LD_V2_METADATA_SIZE + LD_V2_WORKSPACE_IDX_INDEX]);
+        printf("    FD Task Workspace Num   : %u\n",
+               result[aicCoreNum * LI_V2_METADATA_SIZE + i * LD_V2_METADATA_SIZE + LD_V2_WORKSPACE_NUM_INDEX]);
+        printf("    FD Subtask M Start      : %u\n",
+               result[aicCoreNum * LI_V2_METADATA_SIZE + i * LD_V2_METADATA_SIZE + LD_V2_M_START_INDEX]);
+        printf("    FD Subtask M Num        : %u\n",
+               result[aicCoreNum * LI_V2_METADATA_SIZE + i * LD_V2_METADATA_SIZE + LD_V2_M_NUM_INDEX]);
     }
 
     return 0;

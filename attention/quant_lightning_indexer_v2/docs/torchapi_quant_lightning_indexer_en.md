@@ -125,7 +125,15 @@ cann_ops_transformer.quant_lightning_indexer(
 - Only `(-1, -1)` and `(2048, 8)` are accepted; other combinations raise an error. When candidate is enabled,
   `g = N1/N2` may be 64 or 32 (64 is required when disabled); `layout_q` supports BSND/TND (TND requires
   `cu_seqlens_q`); candidate outputs are not offset by `output_idx_offset`.
-- candidate is supported only on Ascend910B/910_93; enabling it on Ascend950/960 raises an error.
+
+### Candidate mode (Ascend 950PR and 950DT)
+
+Pass `candidate_topk_blocks=2048` and `candidate_block_size=8` to both Python functions to enable
+two-level TopK candidate selection. This mode requires `quant_mode=5`, supports 1 to 32 query heads
+and `topk` in [1, 8192], and returns metadata of shape `(1024,)`.
+`quant_lightning_indexer` returns four tensors. The last two are `candidate_block_indices` and
+`candidate_block_length`, the number of valid candidate blocks per row. Unused candidate indices are
+filled with `-1`. When both candidate parameters are omitted, it returns two tensors.
 
 ## Parameters
 
@@ -589,7 +597,7 @@ Deterministic computation is supported by default.
 
   B = 2
   S1 = 64
-  N1 = 64
+  N1 = 32
   N2 = 1
   D = 128
   blockNum = 128
@@ -597,13 +605,14 @@ Deterministic computation is supported by default.
   topk = 32
 
   # Construct the inputs.
-  query = torch.randn(B, S1, N1, D).to(torch.float8_e4m3fn).npu()
-  key = torch.randn(blockNum, blockSize, N2, D).to(torch.float8_e4m3fn).npu()
-  weights = torch.randn(B, S1, N1).npu()
-  query_dequant_scale = torch.randn(B, S1, N1).npu()
-  key_dequant_scale = torch.randn(blockNum, blockSize, N2).npu()
+  query = torch.randint(0, 256, (B * S1, N1, D // 2), dtype=torch.uint8).npu()
+  key = torch.randint(0, 256, (blockNum, blockSize, N2, D // 2), dtype=torch.uint8).npu()
+  weights = torch.randn(B * S1, N1).npu()
+  query_dequant_scale = torch.full((B * S1, N1, 2, 2), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu).npu()
+  key_dequant_scale = torch.full((blockNum, blockSize, N2, 2, 2), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu).npu()
   block_table = torch.arange(blockNum, dtype=torch.int32).expand(B, -1).npu()
   seqused_k = torch.full((B,), blockNum * blockSize, dtype=torch.int32).npu()
+  cu_seqlens_q = torch.arange(0, (B + 1) * S1, S1, dtype=torch.int32).npu()
 
   # Generate metadata.
   metadata = quant_lightning_indexer_metadata(
@@ -611,34 +620,42 @@ Deterministic computation is supported by default.
       num_heads_k=N2,
       head_dim=D,
       topk=topk,
-      quant_mode=1,
+      quant_mode=5,
+      cu_seqlens_q=cu_seqlens_q,
       seqused_k=seqused_k,
       batch_size=B,
       max_seqlen_q=S1,
       max_seqlen_k=blockNum * blockSize,
-      layout_q="BSND",
-      layout_k="PA_BBND",
-      mask_mode=0,
-      cmp_ratio=1
-  )
-
-  # Execute quant_lightning_indexer.
-  sparse_indices, sparse_values = quant_lightning_indexer(
-      query, key, weights, query_dequant_scale, key_dequant_scale,
-      topk=topk,
-      quant_mode=1,
-      block_table=block_table,
-      metadata=metadata,
-      seqused_k=seqused_k,
-      max_seqlen_q=-1,
-      layout_q="BSND",
+      layout_q="TND",
       layout_k="PA_BBND",
       mask_mode=0,
       cmp_ratio=1,
-      return_value=1
+      candidate_topk_blocks=2048,
+      candidate_block_size=8
+  )
+
+  # Run quant_lightning_indexer.
+  sparse_indices, sparse_values, candidate_block_indices, candidate_block_length = quant_lightning_indexer(
+      query, key, weights, query_dequant_scale, key_dequant_scale,
+      topk=topk,
+      quant_mode=5,
+      block_table=block_table,
+      metadata=metadata,
+      cu_seqlens_q=cu_seqlens_q,
+      seqused_k=seqused_k,
+      max_seqlen_q=-1,
+      layout_q="TND",
+      layout_k="PA_BBND",
+      mask_mode=0,
+      cmp_ratio=1,
+      return_value=1,
+      candidate_topk_blocks=2048,
+      candidate_block_size=8
   )
   print(f"sparse_indices shape: {sparse_indices.shape}")
   print(f"sparse_values shape: {sparse_values.shape}")
+  print(f"candidate_block_indices shape: {candidate_block_indices.shape}")
+  print(f"candidate_block_length shape: {candidate_block_length.shape}")
   ```
 
 - aclgraph graph mode call:
@@ -652,48 +669,58 @@ Deterministic computation is supported by default.
   B = 2
   S1 = 64
   S2 = 128
-  N1 = 64
+  N1 = 32
   N2 = 1
   D = 128
   topk = 32
 
-  query = torch.randn(B, S1, N1, D).to(torch.float8_e4m3fn).npu()
-  key = torch.randn(B, S2, N2, D).to(torch.float8_e4m3fn).npu()
-  weights = torch.randn(B, S1, N1).npu()
-  query_dequant_scale = torch.randn(B, S1, N1).npu()
-  key_dequant_scale = torch.randn(B, S2, N2).npu()
+  query = torch.randint(0, 256, (B * S1, N1, D // 2), dtype=torch.uint8).npu()
+  key = torch.randint(0, 256, (B * S2, N2, D // 2), dtype=torch.uint8).npu()
+  weights = torch.randn(B * S1, N1).npu()
+  query_dequant_scale = torch.full((B * S1, N1, 2, 2), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu).npu()
+  key_dequant_scale = torch.full((B * S2, N2, 2, 2), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu).npu()
+  cu_seqlens_q = torch.arange(0, (B + 1) * S1, S1, dtype=torch.int32).npu()
+  cu_seqlens_k = torch.arange(0, (B + 1) * S2, S2, dtype=torch.int32).npu()
 
   class QuantLightningIndexerNetwork(torch.nn.Module):
       def __init__(self):
           super(QuantLightningIndexerNetwork, self).__init__()
 
-      def forward(self, query, key, weights, query_dequant_scale, key_dequant_scale):
+      def forward(self, query, key, weights, query_dequant_scale, key_dequant_scale, cu_seqlens_q, cu_seqlens_k):
           metadata = torch.ops.cann_ops_transformer.quant_lightning_indexer_metadata(
               num_heads_q=N1,
               num_heads_k=N2,
               head_dim=D,
               topk=topk,
-              quant_mode=1,
-              batch_size=B,
+              quant_mode=5,
+              cu_seqlens_q=cu_seqlens_q,
+              cu_seqlens_k=cu_seqlens_k,
+              batch_size=None,
               max_seqlen_q=S1,
               max_seqlen_k=S2,
-              layout_q="BSND",
-              layout_k="BSND",
+              layout_q="TND",
+              layout_k="TND",
               mask_mode=0,
-              cmp_ratio=1
+              cmp_ratio=1,
+              candidate_topk_blocks=2048,
+              candidate_block_size=8
           )
 
           return torch.ops.cann_ops_transformer.quant_lightning_indexer(
               query, key, weights, query_dequant_scale, key_dequant_scale,
               topk=topk,
-              quant_mode=1,
+              quant_mode=5,
+              cu_seqlens_q=cu_seqlens_q,
+              cu_seqlens_k=cu_seqlens_k,
               metadata=metadata,
               max_seqlen_q=-1,
-              layout_q="BSND",
-              layout_k="BSND",
+              layout_q="TND",
+              layout_k="TND",
               mask_mode=0,
               cmp_ratio=1,
-              return_value=1
+              return_value=1,
+              candidate_topk_blocks=2048,
+              candidate_block_size=8
           )
 
   from torchair.configs.compiler_config import CompilerConfig
@@ -702,7 +729,9 @@ Deterministic computation is supported by default.
   npu_backend = torchair.get_npu_backend(compiler_config=config)
   torch._dynamo.reset()
   npu_mode = torch.compile(QuantLightningIndexerNetwork(), fullgraph=True, backend=npu_backend, dynamic=False)
-  sparse_indices, sparse_values = npu_mode(query, key, weights, query_dequant_scale, key_dequant_scale)
+  sparse_indices, sparse_values, candidate_block_indices, candidate_block_length = npu_mode(query, key, weights, query_dequant_scale, key_dequant_scale, cu_seqlens_q, cu_seqlens_k)
   print(f"sparse_indices shape: {sparse_indices.shape}")
   print(f"sparse_values shape: {sparse_values.shape}")
+  print(f"candidate_block_indices shape: {candidate_block_indices.shape}")
+  print(f"candidate_block_length shape: {candidate_block_length.shape}")
   ```

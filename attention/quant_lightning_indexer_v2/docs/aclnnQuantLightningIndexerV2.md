@@ -290,12 +290,12 @@ aclnnStatus aclnnQuantLightningIndexerV2(
       <td>
           <ul>
                 <li>包含使用核数、分块大小以及每个核处理数据的起始点等内容。</li>
-                <li>shape大小为[8 * (1 + aic_num + aiv_num) + 256]，aic_num和aiv_num从当前设备获取，当前不支持传空。</li>
+                <li>长度至少为8 * (aic_num + aiv_num)向上对齐到1024个元素的整数倍后的值。aic_num和aiv_num从当前设备获取，当前不支持传空。</li>
           </ul>
       </td>
       <td>INT32</td>
       <td>ND</td>
-      <td>(8 * (1 + aic_num + aiv_num) + 256,)</td>
+      <td>(ceil(8 * (aic_num + aiv_num) / 1024) * 1024,)</td>
       <td>x</td>
     </tr>
     <tr>
@@ -710,7 +710,10 @@ int InitializeTensors(TensorResources& resources) {
         LOG_PRINT("Failed to query AIV count\n");
         return ACL_ERROR_INVALID_PARAM;
     }
-    std::vector<int64_t> metadataShape = {8LL * (1 + aicCoreNum + aivCoreNum) + 256LL};
+    constexpr int64_t METADATA_ALIGNMENT = 1024;
+    const int64_t metadataCoreSize = 8LL * (aicCoreNum + aivCoreNum);
+    std::vector<int64_t> metadataShape = {(metadataCoreSize + METADATA_ALIGNMENT - 1) / METADATA_ALIGNMENT *
+                                          METADATA_ALIGNMENT};
     std::vector<int64_t> sparseIndicesShape = {B, S1, N2, topk};
     std::vector<int64_t> sparseValuesShape = {B, S1, N2, topk};
 
