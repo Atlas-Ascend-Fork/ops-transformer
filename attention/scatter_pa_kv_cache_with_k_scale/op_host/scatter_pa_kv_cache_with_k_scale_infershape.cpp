@@ -28,23 +28,31 @@ static ge::graphStatus InferShapeScatterPaKvCacheWithKScale(gert::InferShapeCont
     // inferShape key_cache
     OP_LOGD(context, "Begin to do InferShapeScatterPaKvCacheWithKScale");
     auto inputKeyCacheShape = context->GetInputShape(INPUT_KEY_CACHE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputKeyCacheShape);
+    OP_CHECK_IF(inputKeyCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache"),
+                return ge::GRAPH_FAILED);
     auto outputKeyCacheShape = context->GetOutputShape(OUTPUT_KEY_CACHE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputKeyCacheShape);
+    OP_CHECK_IF(outputKeyCacheShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache output shape"), return ge::GRAPH_FAILED);
     *outputKeyCacheShape = *inputKeyCacheShape;
 
     // inferShape value_cache
     auto inputValueCacheShape = context->GetInputShape(INPUT_VALUE_CACHE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputValueCacheShape);
+    OP_CHECK_IF(inputValueCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_cache"),
+                return ge::GRAPH_FAILED);
     auto outputValueCacheShape = context->GetOutputShape(OUTPUT_VALUE_CACHE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputValueCacheShape);
+    OP_CHECK_IF(outputValueCacheShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "value_cache output shape"),
+                return ge::GRAPH_FAILED);
     *outputValueCacheShape = *inputValueCacheShape;
 
     // inferShape key_scale_cache
     const gert::Shape* kscShape = context->GetInputShape(INPUT_KEY_SCALE_CACHE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kscShape);
+    OP_CHECK_IF(kscShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_scale_cache"),
+                return ge::GRAPH_FAILED);
     gert::Shape* outKscShape = context->GetOutputShape(OUTPUT_KEY_SCALE_CACHE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outKscShape);
+    OP_CHECK_IF(outKscShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_scale_cache output shape"),
+                return ge::GRAPH_FAILED);
     *outKscShape = *kscShape;
     OP_LOGD(context, "End to do InferShapeScatterPaKvCacheWithKScale");
 

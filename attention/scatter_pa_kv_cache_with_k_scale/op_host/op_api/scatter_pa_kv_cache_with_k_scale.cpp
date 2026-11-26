@@ -33,7 +33,7 @@ std::tuple<const aclTensor*, const aclTensor*, const aclTensor*> ScatterPaKvCach
         OP_INPUT(key, value, keyCacheRef, valueCacheRef, slotMapping, keyScale, keyScaleCacheRef),
         OP_OUTPUT(keyCacheRef, valueCacheRef, keyScaleCacheRef), OP_ATTR(cacheLayoutOptional));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        OP_LOGE_WITHOUT_REPORT(ret, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return {nullptr, nullptr, nullptr};
     }
     return std::tuple<const aclTensor*, const aclTensor*, const aclTensor*>(keyCacheRef, valueCacheRef,

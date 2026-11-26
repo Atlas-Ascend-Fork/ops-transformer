@@ -64,14 +64,32 @@ static aclnnStatus CheckNullptr(const aclTensor* key, const aclTensor* keyCacheR
                                 const aclTensor* value, const aclTensor* valueCacheRef, const uint64_t* workspaceSize,
                                 aclOpExecutor** executor)
 {
-    CHECK_RET(key != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(keyCacheRef != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(slotMapping != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(workspaceSize != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(executor != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    if (key == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "key");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (keyCacheRef == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "keyCacheRef");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (slotMapping == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "slotMapping");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (workspaceSize == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "workspaceSize");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (executor == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "executor");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
 
     if (value != nullptr) {
-        CHECK_RET(valueCacheRef != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+        if (valueCacheRef == nullptr) {
+            OP_LOGE_WITH_INVALID_INPUT(kOpName, "valueCacheRef");
+            return ACLNN_ERR_PARAM_NULLPTR;
+        }
     }
 
     return ACLNN_SUCCESS;
@@ -298,8 +316,16 @@ static bool IsSupportNonContiguousCache(const aclTensor* key, const aclTensor* k
 
     bool keyAndValueContiguous = keyContiguous && valueContiguous;
     bool cacheNonContiguous = keyCacheNonContiguous || valueCacheNonContiguous;
+    if (!keyAndValueContiguous || !cacheNonContiguous) {
+        return false;
+    }
 
-    return keyAndValueContiguous && cacheNonContiguous;
+    // 非连续模板要求两侧cache尾轴均连续，混合布局（如一侧尾轴stride=2）需回退Contiguous+ViewCopy
+    bool allCacheLastAxisContiguous = IsLastAxisContiguous(keyCacheRef);
+    if (value != nullptr) {
+        allCacheLastAxisContiguous = allCacheLastAxisContiguous && IsLastAxisContiguous(valueCacheRef);
+    }
+    return allCacheLastAxisContiguous;
 }
 
 static bool IsSupportNonContiguousKeyAndCache(const aclTensor* key, const aclTensor* keyCacheRef,
@@ -496,7 +522,6 @@ aclnnStatus aclnnScatterPaKvCacheGetWorkspaceSize(const aclTensor* key, aclTenso
     if (keyEmpty && (value == nullptr || valueEmpty)) {
         *workspaceSize = 0;
         auto uniqueExecutor = CREATE_EXECUTOR();
-        CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
         uniqueExecutor.ReleaseTo(executor);
         return ACLNN_SUCCESS;
     }
@@ -508,7 +533,6 @@ aclnnStatus aclnnScatterPaKvCacheGetWorkspaceSize(const aclTensor* key, aclTenso
               ACLNN_ERR_PARAM_INVALID);
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
     bool isKey3Dim = (key->GetViewShape().GetDimNum() == 3);
     bool isScatterModeEmpty = (scatterModeOptional == nullptr || strlen(scatterModeOptional) == 0 ||
