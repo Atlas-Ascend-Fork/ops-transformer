@@ -128,6 +128,7 @@ English | [简体中文](./README.md)
 - softmaxMax and softmaxSum must have the same shape.
 - D supports only 32/64/128.
 - In the current version, attenMaskOptional must be passed in, and null pointers are not supported. If it is not passed in (a null pointer is passed in), the first-stage API returns 561002.
+- query/key1/value1/key2/value2/attentionOut support only BFLOAT16 and FLOAT16. FLOAT32 is not supported; passing FLOAT32 returns 161002 from the first-stage API.
 
 ## Calling Instructions
 

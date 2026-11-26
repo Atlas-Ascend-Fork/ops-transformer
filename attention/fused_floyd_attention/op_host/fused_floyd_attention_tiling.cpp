@@ -42,22 +42,25 @@ public:
 
     void FusedFloydAttentionSetEmptyInputTilingData(gert::TilingContext* context,
                                                     FusedFloydAttentionTilingData& faTilingData);
-    void GetTilingKeyAttentionScore4EmptyInput(uint32_t& tilingKey, const gert::TilingContext* context);
+    ge::graphStatus GetTilingKeyAttentionScore4EmptyInput(uint32_t& tilingKey, const gert::TilingContext* context);
 };
 
-void FusedFloydAttentionEmptyInputTiling::GetTilingKeyAttentionScore4EmptyInput(uint32_t& tilingKey,
-                                                                                const gert::TilingContext* context)
+ge::graphStatus FusedFloydAttentionEmptyInputTiling::GetTilingKeyAttentionScore4EmptyInput(
+    uint32_t& tilingKey, const gert::TilingContext* context)
 {
     OP_CHECK_IF(context->GetInputDesc(KEY1_INPUT_INDEX) == nullptr,
-                OP_LOGE(context, "GetTilingKeyAttentionScore4EmptyInput occurs nullptr!"), return);
+                OP_LOGE(context, "GetTilingKeyAttentionScore4EmptyInput occurs nullptr!"), return ge::GRAPH_FAILED);
     auto kernelType = context->GetInputDesc(KEY1_INPUT_INDEX)->GetDataType();
     if (kernelType == ge::DT_FLOAT16) {
         tilingKey = TILING_KEY_FP16;
-    } else if (kernelType == ge::DT_FLOAT) {
-        tilingKey = TILING_KEY_FP32;
-    } else {
+    } else if (kernelType == ge::DT_BF16) {
         tilingKey = TILING_KEY_BF16;
+    } else {
+        OP_LOGE(context, "Empty-input path only supports FLOAT16/BFLOAT16, got dtype %d",
+                static_cast<int32_t>(kernelType));
+        return ge::GRAPH_FAILED;
     }
+    return ge::GRAPH_SUCCESS;
 }
 
 void FusedFloydAttentionEmptyInputTiling::FusedFloydAttentionSetEmptyInputTilingData(
@@ -122,7 +125,7 @@ static bool IsEmptyInput(gert::TilingContext* context)
         OP_CHECK_IF(compileInfoPtr == nullptr, OP_LOGE(context, "compileInfoPtr is null"), return false);
         uint32_t coreNum = compileInfoPtr->aivNum;
         OP_CHECK_IF((coreNum <= 0), OP_LOGE(context, "platform info is invalid, coreNum=%u.", coreNum), return false);
-        OP_CHECK_IF((kernelType != ge::DT_FLOAT16 && kernelType != ge::DT_FLOAT && kernelType != ge::DT_BF16),
+        OP_CHECK_IF((kernelType != ge::DT_FLOAT16 && kernelType != ge::DT_BF16),
                     OP_LOGE(context, "kernelType is invalid, kernelType is %d", kernelType), return false);
         uint32_t attentionOutFormerNum;          // attentionOut的主核
         uint32_t attentionOutTailNum;            // attentionOut的尾核
@@ -224,7 +227,9 @@ static bool IsEmptyInput(gert::TilingContext* context)
         emptyInputTiling.tilingData.emptyInputTilingData.set_attentionOutLastCoreDataSize(attentionOutLastCoreDataSize);
         emptyInputTiling.tilingData.emptyInputTilingData.set_attentionOutLastCoreIndex(attentionOutLastCoreIndex);
         emptyInputTiling.FusedFloydAttentionSetEmptyInputTilingData(context, emptyInputTiling.tilingData);
-        emptyInputTiling.GetTilingKeyAttentionScore4EmptyInput(tilingKey, context);
+        if (emptyInputTiling.GetTilingKeyAttentionScore4EmptyInput(tilingKey, context) != ge::GRAPH_SUCCESS) {
+            return false;
+        }
         context->SetTilingKey(tilingKey);
         uint32_t aivActualNum =
             std::max((attentionOutFormerNum + attentionOutTailNum), (softmaxMaxFormerNum + softmaxMaxTailNum));

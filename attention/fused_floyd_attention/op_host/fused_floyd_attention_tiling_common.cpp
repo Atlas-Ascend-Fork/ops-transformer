@@ -125,14 +125,37 @@ ge::graphStatus CheckBaseInput(gert::TilingContext* context)
 {
     auto& queryShape = context->GetInputShape(QUERY_INPUT_INDEX)->GetStorageShape();
     auto& keyShape = context->GetInputShape(KEY1_INPUT_INDEX)->GetStorageShape();
+    auto& key2Shape = context->GetInputShape(KEY2_INPUT_INDEX)->GetStorageShape();
     int64_t b = queryShape.GetDim(0);
     int64_t n = queryShape.GetDim(1);
     int64_t s1 = queryShape.GetDim(2);
     int64_t s2 = queryShape.GetDim(3);
     int64_t d = queryShape.GetDim(4);
     int64_t s3 = keyShape.GetDim(3);
-    OP_CHECK_IF((b != keyShape.GetDim(0) || n != keyShape.GetDim(1) || d != keyShape.GetDim(4)),
-                OP_LOGE(context, "query or key1 shape is invalid"), return ge::GRAPH_FAILED);
+    // query [B,H,N,M,D], key1 [B,H,N,K,D]: B/H/N/D must match
+    OP_CHECK_IF(
+        (b != keyShape.GetDim(0) || n != keyShape.GetDim(1) || s1 != keyShape.GetDim(2) || d != keyShape.GetDim(4)),
+        OP_LOGE(context, "query or key1 shape is invalid"), return ge::GRAPH_FAILED);
+
+    // key2 [B,H,K,M,D]: B/H/D with query; K with key1; M with query
+    OP_CHECK_IF((b != key2Shape.GetDim(0) || n != key2Shape.GetDim(1) || d != key2Shape.GetDim(4) ||
+                 s3 != key2Shape.GetDim(2) || s2 != key2Shape.GetDim(3)),
+                OP_LOGE(context,
+                        "query or key2 shape is invalid, query=(%ld,%ld,%ld,%ld,%ld), key1.K=%ld, "
+                        "key2=(%ld,%ld,%ld,%ld,%ld), expect key2=(%ld,%ld,%ld,%ld,%ld)",
+                        b, n, s1, s2, d, s3, key2Shape.GetDim(0), key2Shape.GetDim(1), key2Shape.GetDim(2),
+                        key2Shape.GetDim(3), key2Shape.GetDim(4), b, n, s3, s2, d),
+                return ge::GRAPH_FAILED);
+
+    // key2 [B,H,K,M,D]: B/H/D with query; K with key1; M with query
+    OP_CHECK_IF((b != key2Shape.GetDim(0) || n != key2Shape.GetDim(1) || d != key2Shape.GetDim(4) ||
+                 s3 != key2Shape.GetDim(2) || s2 != key2Shape.GetDim(3)),
+                OP_LOGE(context,
+                        "query or key2 shape is invalid, query=(%ld,%ld,%ld,%ld,%ld), key1.K=%ld, "
+                        "key2=(%ld,%ld,%ld,%ld,%ld), expect key2=(%ld,%ld,%ld,%ld,%ld)",
+                        b, n, s1, s2, d, s3, key2Shape.GetDim(0), key2Shape.GetDim(1), key2Shape.GetDim(2),
+                        key2Shape.GetDim(3), key2Shape.GetDim(4), b, n, s3, s2, d),
+                return ge::GRAPH_FAILED);
 
     OP_CHECK_IF((s1 % ALIGNED_NUM_16 != 0 || s2 % ALIGNED_NUM_128 != 0),
                 OP_LOGE(context, "The third dimension of the query only supports 16-byte alignment, and the fourth "

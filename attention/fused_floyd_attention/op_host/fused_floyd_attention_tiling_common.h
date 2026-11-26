@@ -35,7 +35,6 @@ constexpr uint32_t SOFTMAXSUM_OUTPUT_INDEX = 1;
 constexpr uint32_t ATTENTIONOUT_OUTPUT_INDEX = 2;
 constexpr uint32_t MIN_COPY_UINT_SIZE = 32;
 constexpr uint32_t TILING_KEY_FP16 = 90;
-constexpr uint32_t TILING_KEY_FP32 = 92;
 constexpr uint32_t TILING_KEY_BF16 = 94;
 constexpr uint32_t SUPPORT_DIM_NUM = 5;
 constexpr uint32_t ALIGNED_NUM_16 = 16;

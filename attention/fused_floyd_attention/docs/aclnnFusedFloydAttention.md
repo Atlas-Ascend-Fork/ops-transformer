@@ -299,19 +299,21 @@ aclnnStatus aclnnFusedFloydAttention(
 - 该接口与PyTorch配合使用时，需要保证CANN相关包与PyTorch相关包的版本匹配。
 - 该接口不支持非连续输出。
 - 关于数据shape的约束，其中：
-  - B：取值范围为1\~2k。
+  - B：取值范围为1\~2K。
   - H：取值范围为1\~256。
   - N：取值范围为16\~1M且N%16==0。
   - M：取值范围为128\~1M且M%128==0。
   - K：取值范围为128\~1M且K%128==0。
   - D：取值范围为32/64/128。
 
-- query与key1的第0/2/4轴需相同。
+- query与key1的第0/1/2/4轴（B/H/N/D）需相同，仅第3轴不同（query的M与key1的K）。
+- key2与query的第0/1/4轴（B/H/D）需相同；key2的第2轴（K）需与key1的第3轴相同；key2的第3轴（M）需与query的第3轴相同。
 - key1与value1 shape需相同。
 - key2与value2 shape需相同。
 - softmaxMax与softmaxSum shape需相同。
 - D只支持32/64/128。
 - attenMaskOptional当前版本必须传入，不支持空指针；未传入（空指针）时第一段接口返回561002。
+- query/key1/value1/key2/value2/attentionOutOut仅支持FLOAT16、BFLOAT16，不支持FLOAT32；传入FLOAT32时第一段接口返回161002。
 - 由于底层指令限制，当M\*D>=65536或者K\*D>=65536时，会出现明显性能下降。同时，K的长度较大时，算子运行可能会超时。以上两种情况建议使用小算子拼接替换实现。
 
 ## 调用示例

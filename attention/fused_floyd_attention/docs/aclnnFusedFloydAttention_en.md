@@ -307,11 +307,13 @@ aclnnStatus aclnnFusedFloydAttention(
   - K: value range is 128 to 1M, and K%128==0.
   - D: value range is 32/64/128.
 
-- Axis 0/2/4 of query and key1 must be the same.
+- Axes 0/1/2/4 (B/H/N/D) of query and key1 must be the same; only axis 3 differs (M for query and K for key1).
+- Axes 0/1/4 (B/H/D) of key2 and query must be the same; axis 2 (K) of key2 must match axis 3 of key1; axis 3 (M) of key2 must match axis 3 of query.
 - key1 and value1 must have the same shape.
 - key2 and value2 must have the same shape.
 - softmaxMax and softmaxSum must have the same shape.
 - D only supports 32, 64, or 128.
+- query/key1/value1/key2/value2/attentionOutOut support only FLOAT16 and BFLOAT16. FLOAT32 is not supported; passing FLOAT32 returns 161002 from the first-phase API.
 - Due to the underlying instruction limitations, the performance degrades significantly when M\*D>=65536 or K\*D>=65536. In addition, the operator execution may time out when K is large. In either case, it is recommended to use concatenated small operators instead.
 
 ## Example

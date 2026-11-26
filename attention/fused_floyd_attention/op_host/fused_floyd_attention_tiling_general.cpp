@@ -588,13 +588,6 @@ bool FusedFloydAttentionTilingBase::AnalyzeDtype()
             tilingKeyDType = isHighPercision ? DtypeEnum::FLOAT16_PRECISION : DtypeEnum::FLOAT16;
             calcTypeSize = isHighPercision ? ge::GetSizeByDataType(ge::DT_FLOAT) : ge::GetSizeByDataType(inputDtype);
             break;
-        case ge::DT_FLOAT:
-            bmmDtype = matmul_tiling::DataType::DT_FLOAT;
-            bmm1OutDtype = matmul_tiling::DataType::DT_FLOAT;
-            tilingKeyDType = DtypeEnum::FLOAT32;
-            isHighPercision = false;
-            calcTypeSize = ge::GetSizeByDataType(inputDtype);
-            break;
         case ge::DT_BF16:
             bmmDtype = matmul_tiling::DataType::DT_BF16;
             bmm1OutDtype = matmul_tiling::DataType::DT_FLOAT;
