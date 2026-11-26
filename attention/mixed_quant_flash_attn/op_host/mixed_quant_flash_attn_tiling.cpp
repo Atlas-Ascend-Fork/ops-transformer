@@ -44,21 +44,9 @@ static ge::graphStatus TilingEmptyInput(gert::TilingContext* context, const FaTi
 
     MixedQuantFlashAttnTilingData tilingData{};
     auto& baseParams = tilingData.baseTiling.mixedQuantFlashAttnBaseParams;
-    baseParams.bSize = static_cast<uint32_t>(faInfo.bSize);
-    baseParams.t1Size = static_cast<uint32_t>(faInfo.qTSize);
-    baseParams.n2Size = static_cast<uint32_t>(faInfo.n1Size);
-    baseParams.gSize = 1;
-    baseParams.s1Size = static_cast<uint32_t>(faInfo.s1Size);
-    baseParams.seqUsedQSize = static_cast<uint32_t>(faInfo.seqUsedQSize);
-    baseParams.seqUsedKvSize = static_cast<uint32_t>(faInfo.seqUsedKvSize);
-    baseParams.cuSeqLensQSize = static_cast<uint32_t>(faInfo.cuSeqLensQSize);
     baseParams.isSoftMaxLseEnable = faInfo.softmaxLseFlag;
     baseParams.coreNum = blockDim;
-    baseParams.outputLayout =
-        faInfo.qLayout == FaLayout::TND ? static_cast<uint32_t>(FA_LAYOUT::TND) : static_cast<uint32_t>(faInfo.qLayout);
-    baseParams.needInitOutput = true;
     baseParams.emptyTensor = true;
-    baseParams.hasSink = faInfo.sinksFlag;
     baseParams.totalOutputSize = faInfo.totalOutputSize;
     baseParams.totalLseSize = faInfo.totalLseSize;
 

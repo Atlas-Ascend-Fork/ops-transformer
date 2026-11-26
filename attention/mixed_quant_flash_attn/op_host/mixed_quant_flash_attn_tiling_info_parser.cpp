@@ -89,10 +89,6 @@ ge::graphStatus FaInfoParser::GetEmptyTensorFlag()
 {
     const auto& queryShape = opParamInfo_.query.shape->GetStorageShape();
     const auto& attnOutShape = opParamInfo_.attnOut.shape->GetStorageShape();
-    const auto& keyShape = opParamInfo_.key.shape->GetStorageShape();
-    const auto& valueShape = opParamInfo_.value.shape->GetStorageShape();
-    const auto& kDescaleShape = opParamInfo_.kDescale.shape->GetStorageShape();
-    const auto& vDescaleShape = opParamInfo_.vDescale.shape->GetStorageShape();
 
     const bool queryEmpty = IsEmptyShape(opParamInfo_.query.shape, layoutQ_);
     const bool attnOutEmpty = IsEmptyShape(opParamInfo_.attnOut.shape, layoutOut_);
@@ -125,11 +121,6 @@ ge::graphStatus FaInfoParser::GetEmptyTensorFlag()
                     "q and attn_out must have identical logical B/T, N and S axes"),
                 return ge::GRAPH_FAILED);
 
-    n2Size_ = qN;
-    qkHeadDim_ = qD;
-    vHeadDim_ = outD;
-    blockSize_ = 0;
-    blockNum_ = 0;
     emptyTensorFlag_ = true;
     OP_LOGI(opName_, "Valid empty tensor input detected: queryEmpty=%d, kvEmpty=%d.", queryEmpty, keyEmpty);
     return ge::GRAPH_SUCCESS;
@@ -721,37 +712,14 @@ ge::graphStatus FaInfoParser::Parse(FaTilingInfo& faInfo)
             (layoutQ_ != FaLayout::TND && ge::GRAPH_SUCCESS != GetS1Size())) {
             return ge::GRAPH_FAILED;
         }
-        GetQueryTSize();
-        GetActualSeqInfo();
         softmaxLseFlag_ = opParamInfo_.returnSoftMaxLse != nullptr && *opParamInfo_.returnSoftMaxLse;
 
         faInfo.opName = opName_;
-        faInfo.platformInfo = platformInfo_;
-        faInfo.opParamInfo = opParamInfo_;
         faInfo.emptyTensorFlag = true;
-        faInfo.sinksFlag = sinksFlag_;
         faInfo.softmaxLseFlag = softmaxLseFlag_;
-        faInfo.bSize = bSize_;
-        faInfo.n1Size = n1Size_;
-        faInfo.n2Size = n2Size_;
-        faInfo.s1Size = s1Size_;
-        faInfo.qkHeadDim = qkHeadDim_;
-        faInfo.vHeadDim = vHeadDim_;
-        faInfo.qTSize = queryTSize_;
-        faInfo.pageAttentionFlag = (kvStorageMode_ == KvStorageMode::PAGE_ATTENTION);
-        faInfo.batchContinuousFlag = (kvStorageMode_ == KvStorageMode::BATCH_CONTINUOUS);
-        faInfo.blockSize = blockSize_;
-        faInfo.totalBlockNum = blockNum_;
-        faInfo.quantComputeMode = quantMode_;
-        faInfo.faQuantMode = faQuantMode_;
-        faInfo.seqUsedQSize = seqUsedQSize_;
-        faInfo.seqUsedKvSize = seqUsedKvSize_;
-        faInfo.cuSeqLensQSize = cuSeqLensQSize_;
         faInfo.totalOutputSize = opParamInfo_.attnOut.shape->GetStorageShape().GetShapeSize();
         faInfo.totalLseSize =
             opParamInfo_.lseOut.shape == nullptr ? 0 : opParamInfo_.lseOut.shape->GetStorageShape().GetShapeSize();
-        GenerateDtypeInfo(faInfo);
-        GenerateLayoutInfo(faInfo);
         return ge::GRAPH_SUCCESS;
     }
     if (ge::GRAPH_SUCCESS != ParseAxisInfo()) {
