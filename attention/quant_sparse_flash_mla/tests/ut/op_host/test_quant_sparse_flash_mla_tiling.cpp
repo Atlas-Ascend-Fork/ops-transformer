@@ -16,7 +16,7 @@
 
 using namespace std;
 
-// Ascend950 tiling cases for QuantSparseFlashMla
+// Tiling cases for QuantSparseFlashMla
 class QuantSparseFlashMlaTiling : public testing::Test {
 protected:
     static void SetUpTestCase()
@@ -38,6 +38,7 @@ constexpr int64_t kNumHeadsKv = 1;
 constexpr int64_t kMetadataSize = optiling::GetSmlaMetadataSize(80, 80);
 
 struct QSmlaCase {
+    std::string socVersion = "Ascend950";
     std::vector<int64_t> qShape = {512, 64, 512};
     std::vector<int64_t> oriKvShape = {128, 128, 1, 512};
     std::vector<int64_t> cmpKvShape = {};
@@ -146,7 +147,7 @@ void RunQSmlaTilingCase(const QSmlaCase& c, ge::graphStatus expect, uint64_t exp
          {"layout_kv", Ops::Transformer::AnyValue::CreateFrom<std::string>(c.layoutKv)},
          {"topk_value_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(c.topkValueMode)},
          {"return_softmax_lse", Ops::Transformer::AnyValue::CreateFrom<bool>(false)}},
-        &compileInfo, "Ascend950", 56, 262144);
+        &compileInfo, c.socVersion, 56, 262144);
     ExecuteTestCase(tilingContextPara, expect, expectTilingKey);
 }
 } // namespace
@@ -155,6 +156,13 @@ void RunQSmlaTilingCase(const QSmlaCase& c, ge::graphStatus expect, uint64_t exp
 TEST_F(QuantSparseFlashMlaTiling, test_tiling_swa_only_ori_kv_tnd_pa_nd_success)
 {
     QSmlaCase c;
+    RunQSmlaTilingCase(c, ge::GRAPH_SUCCESS);
+}
+
+TEST_F(QuantSparseFlashMlaTiling, test_tiling_960_swa_only_ori_kv_tnd_pa_nd_success)
+{
+    QSmlaCase c;
+    c.socVersion = "Ascend960DT";
     RunQSmlaTilingCase(c, ge::GRAPH_SUCCESS);
 }
 
