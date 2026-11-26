@@ -167,7 +167,7 @@ qInputLayout and kvInputLayout must be the same. Supported layouts by product:
     <td>softmaxLse (aclTensor*)</td>
     <td>Input</td>
     <td>Log-sum-exp intermediate result of the Softmax computation. It is used for the logarithm and exponential back-derivation of gradients in the backward computation.</td>
-    <td>Empty tensors are not supported.<br>Supported shapes: <ul><li>TND: [totalQTokens, headNum, 1].</li><li>BNSD: [batch, headNum, maxQSeqLength, 1].</li></ul></td>
+    <td>For TND queries, use [totalQTokens, headNum, 1]. For BNSD and BSND queries, use [batch, headNum, maxQSeqLength, 1].</td>
     <td>FLOAT</td>
     <td>ND</td>
     <td>3-4</td>
@@ -177,8 +177,8 @@ qInputLayout and kvInputLayout must be the same. Supported layouts by product:
     <td>blockSparseMaskOptional (aclTensor*)</td>
     <td>Input</td>
     <td>Block sparse mask, indicating the actual sparsity pattern. Determines which blocks actually participate in the attention computation.</td>
-    <td>Empty tensors are not supported.<br>Optional input (required in the current version): <ul><li>The shape is [batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY)].</li><li>Indicates which blocks participate in the computation (value 1) and which blocks do not (value 0) after the data is divided by blocks.</li><li>If nullptr is passed in, block sparse computation is considered disabled, that is, the attention scores between all tokens are computed.</li></ul></td>
-    <td>BOOL</td>
+    <td>Required. Shape: [batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY)], where headNum counts query heads. For TND, use the longest individual sample on each side. A value of 1 selects the block and 0 skips it. Pass an all-ones mask to select all blocks, including partial tail blocks.</td>
+    <td>BOOL, UINT8</td>
     <td>ND</td>
     <td>4</td>
     <td>×</td>
@@ -187,10 +187,10 @@ qInputLayout and kvInputLayout must be the same. Supported layouts by product:
     <td>attenMaskOptional (aclTensor*)</td>
     <td>Input</td>
     <td>Attention mask, that is, atten_mask in the formula. It is used to mask out specific tokens that should not participate in the computation.</td>
-    <td>Empty tensors are supported.<br>Required when maskType=1. The shape must be exactly [batch, headNum, maxBlockNum, 2], and the dtype must be INT32: <ul><li>maxBlockNum = max(ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY)).</li><li>[..., 0] is actualSizeX along the Q direction, and [..., 1] is actualSizeY along the KV direction. The constraint 0 ≤ actualSize ≤ corresponding blockShape must be satisfied.</li><li>Within a block, [0, actualSize) validly participates in the computation, and [actualSize, blockShape) is considered padding. actualSize=0 indicates that the block does not participate in the computation.</li></ul>When maskType=0, this input is ignored, and nullptr must be passed in.</td>
-    <td>BOOL, INT32</td>
+    <td>For maskType=0, pass nullptr. For maskType=1 (Atlas A2/A3 training products), pass INT32 counts of shape [batch, headNum, M, 2]. Choose M from max(qBlockNum, kvBlockNum) through UINT32_MAX, where the block counts are the last two dimensions of blockSparseMaskOptional. At index i, the two counts give the valid prefix lengths of Q block i and KV block i, respectively. Each ranges from zero through its block size. Zero skips the corresponding block.<br>A field for a nonexistent block on its side is ignored. Set unused fields to zero for clarity. For example, with two Q blocks, three KV blocks, M=4 and 16 valid tokens in each block, use [[16,16], [16,16], [0,16], [0,0]] for one sample and head.</td>
+    <td>INT32</td>
     <td>ND</td>
-    <td>2</td>
+    <td>4</td>
     <td>×</td>
     </tr>
     <tr>
@@ -206,8 +206,8 @@ qInputLayout and kvInputLayout must be the same. Supported layouts by product:
     <tr>
     <td>actualSeqLengthsOptional (aclIntArray*)</td>
     <td>Input</td>
-    <td>Array of actual query sequence lengths.<br>It describes the number of actually valid query tokens in each batch in variable-length sequence scenarios (that is, scenarios containing Padding data).</td>
-    <td> Variable-length sequence scenario (when qInputLayout is "TND"): this input must be configured. Because the TND format is a one-dimensional contiguous layout, the operator relies on this array to accurately split and delimit the real boundaries of each sequence.</td>
+    <td>Q sequence boundaries for TND queries.</td>
+    <td>Required for TND, with one entry per sample. For two samples with 64 and 96 tokens, pass [64, 96] on Atlas A2/A3 and cumulative end offsets [64, 160] on Ascend 950. On Ascend 950, supply exactly B end offsets, without a leading zero. The last offset must equal the T dimension of query.</td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -216,8 +216,8 @@ qInputLayout and kvInputLayout must be the same. Supported layouts by product:
     <tr>
     <td>actualSeqLengthsKvOptional (aclIntArray*)</td>
     <td>Input</td>
-    <td>Array of actual key/value sequence lengths.<br>It describes the number of actually valid key/value tokens in each batch in variable-length sequence scenarios (that is, scenarios containing Padding data).</td>
-    <td> Variable-length sequence scenario (when kvInputLayout is "TND"): this input must be configured. Because the TND format is a one-dimensional contiguous layout, the operator relies on this array to accurately split and delimit the real boundaries of each sequence.</td>
+    <td>KV sequence boundaries for TND queries.</td>
+    <td>Required for TND, with one entry per sample. For two samples with 64 and 96 tokens, pass [64, 96] on Atlas A2/A3 and cumulative end offsets [64, 160] on Ascend 950. On Ascend 950, supply exactly B end offsets, without a leading zero. The last offset must equal the T dimension of key.</td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -257,7 +257,7 @@ qInputLayout and kvInputLayout must be the same. Supported layouts by product:
     <td>maskType (int64_t)</td>
     <td>Input</td>
     <td>Mask type in the attention computation. It specifies which preset mask logic is used.</td>
-    <td>Currently 0 and 1 are supported: <ul><li>0: No mask is applied. attenMaskOptional is ignored.</li><li>1: PerBlockSizeMask scenario. The computation is performed based on the block-level variable-length mask, and attenMaskOptional must be configured.</li></ul></td>
+    <td>Currently 0 and 1 are supported: <ul><li>0: Use the block sparse mask only. Pass nullptr for attenMaskOptional.</li><li>1: PerBlockSizeMask scenario. The computation is performed based on the block-level variable-length mask, and attenMaskOptional must be configured.</li></ul></td>
     <td>-</td>
     <td>-</td>
     <td>-</td>
@@ -353,14 +353,14 @@ FLOAT8_E5M2 and FLOAT8_E4M3FN are not supported.
 
 <ul>
 - <term>Ascend 950PR&950DT products</term>:
-maskType does not support the value 1; the attenMaskOptional input is ignored, and nullptr should be passed in for this input.
+Only maskType=0 is supported. Pass nullptr for attenMaskOptional.
 </ul>
 
 ## Constraints
 
 * When this API is used together with PyTorch, ensure that the versions of the CANN packages match those of the PyTorch packages.
 * actualSeqLengthsOptional is required when qInputLayout is "TND"; actualSeqLengthsKvOptional is required when kvInputLayout is "TND".
-* The layout of softmaxLse must be consistent with the layout of query. If the layout of query is "BSND", the layout "BNS1" should be passed in for softmaxLse.
+* On Ascend 950, Q, K and V must have equal sequence lengths for BNSD/BSND and equal total token counts for TND.
 * HeadDim must be 128 on Ascend 950.
 * According to the input layouts supported by the operator, the size of the corresponding head dimension in the query tensor shape is denoted as N1, and the size of the corresponding head dimension in the key and value tensor shapes is denoted as N2. N1 % N2 == 0 must be satisfied. MQA, MHA, and GQA scenarios are supported.
 * Constraints related to actualSeqLengthsOptional and actualSeqLengthsKvOptional: when qInputLayout or kvInputLayout is not "TND", these two input parameters are ignored.

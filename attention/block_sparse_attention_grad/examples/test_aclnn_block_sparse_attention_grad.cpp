@@ -134,7 +134,7 @@ int main()
     // 3. 构建张量 Shape
     std::vector<int64_t> qShape = {batch, numHeads, qSeqlen, headDim};
     std::vector<int64_t> kvShape = {batch, numKvHeads, kvSeqlen, headDim};
-    std::vector<int64_t> lseShape = {batch, numHeads, qSeqlen}; // LSE 通常没有尾部 1 维，防止 GE squeeze
+    std::vector<int64_t> lseShape = {batch, numHeads, qSeqlen, 1};
     std::vector<int64_t> maskShape = {batch, numHeads, ceilQ, ceilKv};
 
     // 4. 分配并初始化 Host 数据
@@ -150,8 +150,11 @@ int main()
     std::vector<op::fp16_t> doutData(qSize, 0.01f);
     std::vector<op::fp16_t> outData(qSize, 0.1f);
 
-    // LSE 给一个合理的正数，比如 5.0f，这样 exp(S - LSE) 就是一个非常安全的负指数，绝对不会溢出
-    std::vector<float> lseData(GetShapeSize(lseShape), 5.0f);
+    // 所有块均参与计算，且每个 key 与 query 的点积分数相同。
+    const double scaleValue = 1.0 / std::sqrt(static_cast<double>(headDim));
+    const double score = static_cast<float>(qData[0]) * static_cast<float>(kData[0]) * headDim * scaleValue;
+    const float lse = static_cast<float>(score + std::log(static_cast<double>(kvSeqlen)));
+    std::vector<float> lseData(GetShapeSize(lseShape), lse);
     std::vector<uint8_t> maskData(GetShapeSize(maskShape), 1);
 
     // 创建所有的前向输入/输出 aclTensor
@@ -170,7 +173,7 @@ int main()
     CreateAclTensor(outData, qShape, &outAddr, aclDataType::ACL_FLOAT16, &outTensor);
 
     CreateAclTensor(lseData, lseShape, &lseAddr, aclDataType::ACL_FLOAT, &lseTensor);     // 严格使用 FP32
-    CreateAclTensor(maskData, maskShape, &maskAddr, aclDataType::ACL_UINT8, &maskTensor); // 严格使用 UINT8
+    CreateAclTensor(maskData, maskShape, &maskAddr, aclDataType::ACL_UINT8, &maskTensor); // 本例使用 UINT8
 
     // 5. 创建反向输出梯度 (dq, dk, dv)
     std::vector<op::fp16_t> dqData(qSize, 0.0f);
@@ -197,7 +200,6 @@ int main()
     char qLayoutBuffer[16] = "BNSD";
     char kvLayoutBuffer[16] = "BNSD";
     int64_t maskType = 0;
-    double scaleValue = 1.0 / std::sqrt(static_cast<double>(headDim));
     // 强制规定滑动窗口极大值
     int64_t preTokens = 2147483647;
     int64_t nextTokens = 2147483647;

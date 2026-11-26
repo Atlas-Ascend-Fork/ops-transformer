@@ -36,13 +36,13 @@
   已知正向计算公式为：
 
   $$
-  attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
+  attentionOut = Softmax(S) \cdot value_{sparse}
   $$
 
-  为方便表达，以变量$S$和$P$表示计算公式：
+  $\mathcal{V}$ 为块稀疏掩码选中的有效 token 对。mask_type=1 时，Q 和 KV 的位置还须分别落在 atten_mask 指定的块内有效前缀中。令：
 
   $$
-  S = scale \cdot query \cdot key_{sparse}^T + atten\_mask
+  S_{ij} = \begin{cases}scale \cdot Q_i K_j^T & (i,j) \in \mathcal{V} \\ -\infty & (i,j) \notin \mathcal{V}\end{cases}
   $$
 
   $$
@@ -121,20 +121,20 @@ cann_ops_transformer.block_sparse_attention_grad(
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | d_out | Tensor | 必选 | 公式中的dOut，即最终输出对正向attentionOut的梯度。<br>支持的shape：<ul><li>TND: [Tq, Nq, D]</li><li>BNSD: [B, Nq, Sq, D]</li></ul> | float16/bfloat16 | ND | 3~4 | × |
 | query | Tensor | 必选 | 公式中的query。<br>支持的shape：<ul><li>TND: [Tq, Nq, D]</li><li>BNSD: [B, Nq, Sq, D]</li></ul> | float16/bfloat16 | ND | 3~4 | × |
-| key | Tensor | 必选 | 公式中的key。<br>支持的shape：<ul><li>TND: [Tq, Nq, D]</li><li>BNSD: [B, Nq, Sq, D]</li></ul> | float16/bfloat16 | ND | 3~4 | × |
-| value | Tensor | 必选 | 公式中的value。<br>支持的shape：<ul><li>TND: [Tq, Nq, D]</li><li>BNSD: [B, Nq, Sq, D]</li></ul> | float16/bfloat16 | ND | 3~4 | × |
+| key | Tensor | 必选 | 公式中的key。<br>支持的shape：<ul><li>TND: [Tkv, Nkv, D]</li><li>BNSD: [B, Nkv, Skv, D]</li></ul> | float16/bfloat16 | ND | 3~4 | × |
+| value | Tensor | 必选 | 公式中的value。<br>支持的shape：<ul><li>TND: [Tkv, Nkv, D]</li><li>BNSD: [B, Nkv, Skv, D]</li></ul> | float16/bfloat16 | ND | 3~4 | × |
 | attention_out | Tensor | 必选 | 正向BlockSparseAttention的输出，即公式中的attentionOut。<br>支持的shape：<ul><li>TND: [Tq, Nq, D]</li><li>BNSD: [B, Nq, Sq, D]</li></ul> | float16/bfloat16 | ND | 3~4 | × |
 | softmax_lse | Tensor | 必选 | Softmax计算的log-sum-exp中间结果，用于反向计算时对数和指数的逆推。<br>支持的shape：<ul><li>TND: [Tq, Nq, 1]</li><li>BNSD: [B, Nq, Sq, 1]</li></ul> | float32 | ND | 3~4 | × |
 | block_sparse_mask | Tensor | 必选 | 块级稀疏mask，1表示保留该块参与计算，0表示跳过该块，决定哪些block实际参与注意力计算。<br>支持的shape：[B, Nq, ceil(Sq/block_x), ceil(Skv/block_y)] | uint8/bool | ND | 4 | × |
-| block_shape | list[int] | 可选 | 稀疏块形状，必须包含两个元素[block_x, block_y]，分别表示Q方向和KV方向的稀疏粒度；不传入时按[128, 128]处理 | int64 | - | 长度为2 | - |
+| block_shape | list[int] | 可选 | 使用前两个元素 [block_x, block_y] 作为 Q、KV 块大小。省略或元素不足两个时，Torch 包装层使用 [128, 128]。 | int64 | - | 一维数组 | - |
 | q_input_layout | string | 可选 | 输入query张量的数据排布格式，默认"BNSD" | string | - | - | - |
 | kv_input_layout | string | 可选 | 输入key/value张量的数据排布格式，默认"BNSD" | string | - | - | - |
 | num_key_value_heads | int | 可选 | key/value的head个数，默认1，用于支持GQA（分组查询注意力）机制下的头数比例映射 | int64 | - | - | - |
 | scale_value | float | 可选 | 公式中的scale，默认1.0，一般设置为D^-0.5 | double | - | - | - |
 | actual_seq_lengths | list[int] | TND时必选/其余可选 | 每个batch对应的query实际序列长度 | int64 | - | 长度为B | - |
 | actual_seq_lengths_kv | list[int] | TND时必选/其余可选 | 每个batch对应的key/value实际序列长度 | int64 | - | 长度为B | - |
-| atten_mask | Tensor | 可选 | 公式中的atten_mask。<ul><li>`mask_type=1`时必选，为块级变长掩码（INT32 counts）<br>支持的shape：[B, Nq, maxBlockNum, 2]，其中 $maxBlockNum=\max(\lceil Sq/block\_x\rceil, \lceil Skv/block\_y\rceil)$；</li><li>`mask_type=0`时必须为None。</li></ul> | int32 | ND | 4 | × |
-| mask_type | int | 可选 | 注意力计算中的掩码类型，默认0。<ul><li>当mask_type=0，即为不加mask场景（默认值），忽略`atten_mask`，按`block_sparse_mask`给定的块级稀疏模式计算；</li><li>当mask_type=1，即为块级变长掩码场景，按块级变长掩码计算，需配置`atten_mask`（INT32 counts）</li></ul> | int64 | - | - | - |
+| atten_mask | Tensor | 条件必选 | mask_type=1 时传块内有效前缀长度，shape 为 [B, Nq, M, 2]，M 的取值见约束说明。mask_type=0 时必须为 None。 | int32 | ND | 4 | × |
+| mask_type | int | 可选 | 注意力计算中的掩码类型，默认0。<ul><li>当mask_type=0，即为不加mask场景（默认值），atten_mask 必须为 None，按`block_sparse_mask`给定的块级稀疏模式计算；</li><li>当mask_type=1，即为块级变长掩码场景，按块级变长掩码计算，需配置`atten_mask`（INT32 counts）</li></ul> | int64 | - | - | - |
 
 ## 返回值说明
 
@@ -151,19 +151,20 @@ cann_ops_transformer.block_sparse_attention_grad(
 - softmax_lse的数据类型必须为float32，且其layout需要与query的layout保持一致。
 - query、key、value的D轴（HeadDim）必须等于128。
 - query的头数N1（由query的shape推断，接口不显式传入）与num_key_value_heads（N2）需满足 N1 >= N2 && N1 % N2 == 0。
-- block_shape为可选参数，传入时必须包含两个元素[block_x, block_y]，元素要求如下：
+- block_shape 的取值规则如下：
   - block_x 和 block_y 分别为 Q、KV 方向的稀疏块大小，两者均须大于 0。Ascend 950 另要求两者均为 16 的整数倍。
-  - 不传入时，算子kernel接口按[128, 128]处理。
+  - 显式指定尺寸时至少传两个元素；省略或不足两个元素时，Torch 包装层补入 [128, 128]。
 - block_sparse_mask当前必须传入，且shape为[B, Nq, qBlockNum, kvBlockNum]，其中qBlockNum = ceilDiv(Sq, block_x)、kvBlockNum = ceilDiv(Skv, block_y)，其数据类型支持uint8或bool：
   - 为1表示该block参与计算，为0表示该block不参与计算；
-  - BNSD传入actual_seq_lengths和actual_seq_lengths_kv时，后两维可按实际长度最大值或Q/K shape中的S计算，分别用block_x和block_y向上取整。
+  - BNSD 使用 Q、K 张量的 S 轴确定块数；TND 分别使用 Q、KV 的最大单样本长度。
 - qSeqlen和kvSeqlen不需要被block_shape整除，支持非对齐场景，实际分块数通过向上取整计算；当序列长度不能被对应方向的blockShape整除时，最后一个逻辑块覆盖该方向剩余的有效token。
-- actual_seq_lengths在q_input_layout为"TND"时必选；actual_seq_lengths_kv在kv_input_layout为"TND"时必选。两者必须同时配置或同时不配置，仅配置其中之一将被拦截。
+- TND 布局必须同时传入 actual_seq_lengths 和 actual_seq_lengths_kv。BNSD 布局可省略两者。
 - TND布局下query、key、value、attention_out、d_out为3维；BNSD布局下为4维，且block_sparse_mask为4维。
 - mask_type仅支持0或1：
-  - `mask_type=0`：不加mask场景，忽略atten_mask，此时atten_mask必须为None。
+  - `mask_type=0`：不加mask场景，此时atten_mask必须为None。
   - `mask_type=1`：PerBlockSizeMask场景，按块级变长掩码计算，此时atten_mask必选，且必须为int32、shape为[B, Nq, M, 2]：
-    - $M$ 为块级变长掩码的最大块数，取 $M=\max(\lceil Sq/block\_x\rceil, \lceil Skv/block\_y\rceil)$；
+    - 第三维可预留容量，满足 $\max(\lceil Sq/block\_x\rceil,\lceil Skv/block\_y\rceil)\le M\le 2^{32}-1$。
+    - 某一侧没有对应块时，该侧字段不参与计算，建议填 0。例：Q 有 2 块、KV 有 3 块，M=4，若各块有效长度均为 16，则一个样本的一个头可填 [[16,16], [16,16], [0,16], [0,0]]。
     - 第0维B必须与query的batch一致；当q_input_layout为"TND"时，B等于actual_seq_lengths的长度；
     - 第1维Nq必须等于query的head个数；
     - [..., 0]为Q方向actualSizeX，[..., 1]为KV方向actualSizeY，需满足 0 ≤ actualSize ≤ 对应blockShape；

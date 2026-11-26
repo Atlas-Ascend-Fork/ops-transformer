@@ -27,21 +27,21 @@ extern "C" {
  * @param [in] value: Value tensor输入
  * @param [in] attentionOut: attention out tensor输入
  * @param [in] softmaxLse: softmax tensor输入
- * @param [in] blockSparseMaskOptional: 稀疏块索引 [T, headNum, maxKvBlockNum]
+ * @param [in] blockSparseMaskOptional: 必传的 0/1 块掩码 [batch, queryHeads, qBlockNum, kvBlockNum]
  * @param [in] attenMaskOptional: maskType=1 PerBlockSizeMask 块级变长掩码；maskType=0 时传 nullptr
  * @param [in] blockShapeOptional: 稀疏块形状数组 [blockShapeX, blockShapeY]
  * @param [in] actualSeqLengthsOptional: 实际序列长度Q (在qInputLayout为“TND”时必选)
  * @param [in] actualSeqLengthsKvOptional: 实际序列长度KV (在kvInputLayout为“TND”时必选)
- * @param [in] qInputLayout: Query输入layout ("TND", "BNSD")
- * @param [in] kvInputLayout: KV输入layout ("TND", "BNSD")
+ * @param [in] qInputLayout: Query输入layout （TND、BNSD，Ascend 950 另支持 BSND）
+ * @param [in] kvInputLayout: KV输入layout （TND、BNSD，Ascend 950 另支持 BSND）
  * @param [in] numKeyValueHeads: KV头数
  * @param [in] maskType: Mask类型
  * @param [in] scaleValue: 缩放因子 (double类型)
  * @param [in] preTokens: 滑动窗口大小
  * @param [in] nextTokens: 滑动窗口大小
- * @param [out] dq: Attention输出tensor
- * @param [out] dk: Attention输出tensor
- * @param [out] dv: Attention输出tensor
+ * @param [out] dq: query 的梯度
+ * @param [out] dk: key 的梯度
+ * @param [out] dv: value 的梯度
  * @param [out] workspaceSize: 返回计算所需workspace大小
  * @param [out] executor: 返回op执行器
  * @return aclnnStatus: 返回状态码

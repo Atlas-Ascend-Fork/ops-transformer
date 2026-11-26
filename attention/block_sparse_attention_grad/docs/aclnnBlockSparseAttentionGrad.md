@@ -222,7 +222,7 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <td>softmaxLse（aclTensor*）</td>
     <td>输入</td>
     <td>Softmax计算的log-sum-exp中间结果。用于反向计算梯度的对数和指数逆推。</td>
-    <td>不支持空Tensor。<br>支持的shape为：<ul><li>TND: [totalQTokens, headNum, 1]。</li><li>BNSD: [batch, headNum, maxQSeqLength, 1]。</li><li>BNS1: [batch, maxQSeqLength, headNum, 1]。</li></ul></td>
+    <td>TND 查询传 [totalQTokens, headNum, 1]。BNSD 和 BSND 查询均传 [batch, headNum, maxQSeqLength, 1]。</td>
     <td>FLOAT</td>
     <td>ND</td>
     <td>3-4</td>
@@ -232,8 +232,8 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <td>blockSparseMaskOptional（aclTensor*）</td>
     <td>输入</td>
     <td>块状稀疏掩码，表示实际的稀疏pattern。决定哪些block实际参与注意力计算。</td>
-    <td>不支持空Tensor。<br>可选输入（当前版本为必选）：<ul><li>shape为[batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY)]。其中第3维按Q方向粒度blockShapeX独立计算，第4维按KV方向粒度blockShapeY独立计算，两者可以不相等。</li><li>表示按block划分后哪些block需要参与计算（为1），哪些block不参与计算（为0）。</li><li>当序列长度不能被对应方向的blockShape整除时，最后一个逻辑块覆盖该方向剩余的有效token。</li><li>如传入nullptr，则视为不开启块稀疏计算，即所有token之间的注意力分数都会被计算。</li></ul></td>
-    <td>UINT8</td>
+    <td>必传。shape 为 [batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY)]，headNum 为 Q 头数。TND 的两个最大长度分别取 Q 和 KV 侧最长样本的长度。1 表示保留该块，0 表示跳过；所有块参与时传全 1 掩码，尾块覆盖剩余 token。</td>
+    <td>BOOL, UINT8</td>
     <td>ND</td>
     <td>4</td>
     <td>×</td>
@@ -242,7 +242,7 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <td>attenMaskOptional（aclTensor*）</td>
     <td>输入</td>
     <td>注意力掩码，即公式中的atten_mask。用于屏蔽不应参与计算的特定token。</td>
-    <td>支持空Tensor。<br>maskType=1 时必选，shape 必须严格为 [batch, headNum, maxBlockNum, 2]，dtype 为 INT32：<ul><li>maxBlockNum = max(ceilDiv(maxQSeqLength, blockShapeX), ceilDiv(maxKvSeqLength, blockShapeY))。</li><li>[..., 0] 为 Q 方向 actualSizeX，[..., 1] 为 KV 方向 actualSizeY，需满足 0 ≤ actualSize ≤ 对应 blockShape。</li><li>块内 [0, actualSize) 有效参与计算，[actualSize, blockShape) 视为 padding，actualSize=0 表示该块不参与计算。</li></ul>maskType=0 时忽略此输入，应传入nullptr。</td>
+    <td>maskType=0 时必须传 nullptr。maskType=1 时（Atlas A2/A3 训练系列产品）必须传 INT32 张量，shape 为 [batch, headNum, M, 2]。M 的范围为 max(qBlockNum, kvBlockNum) 至 UINT32_MAX，qBlockNum 和 kvBlockNum 是 blockSparseMaskOptional 的后两维。在索引 i 处，最后一维的两个值依次为第 i 个 Q 块和第 i 个 KV 块的有效前缀长度，范围是 0 至对应块大小。取 0 时跳过对应块。<br>某一侧没有对应块时，该侧字段不参与计算，建议填 0。例：Q 有 2 块、KV 有 3 块，M=4，若各块有效长度均为 16，则一个样本的一个头可填 [[16,16], [16,16], [0,16], [0,0]]。</td>
     <td>INT32</td>
     <td>ND</td>
     <td>4</td>
@@ -261,8 +261,8 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <tr>
     <td>actualSeqLengthsOptional（aclIntArray*）</td>
     <td>输入</td>
-    <td>query的实际序列长度数组。<br>用于描述变长序列场景下（即含有 Padding 填充数据的场景），每个 Batch 中实际有效的 query token 数量。</td>
-    <td> 变长序列场景（当 qInputLayout 为 "TND" 时）：该项输入必须配置。因为 TND 格式为一维连续排布，算子需要依赖该数组来准确切分界定各个序列的真实边界。</td>
+    <td>TND 布局下的 Q 序列边界。</td>
+    <td>TND 布局必传，每个样本对应一个元素。例如，两批长度分别为 64、96 时，Atlas A2/A3 传逐样本长度 [64, 96]，Ascend 950 传累计结束位置 [64, 160]。950 的数组恰有 B 个结束位置，省略起始偏移 0，末项必须等于 query 的 T 轴长度。</td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -271,8 +271,8 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <tr>
     <td>actualSeqLengthsKvOptional（aclIntArray*）</td>
     <td>输入</td>
-    <td>key/value的实际序列长度数组。<br>用于描述变长序列场景下（即含有 Padding 填充数据的场景），每个 Batch 中实际有效的 key/value token 数量。</td>
-    <td> 变长序列场景（当 kvInputLayout 为 "TND" 时）：该项输入必须配置。因为 TND 格式为一维连续排布，算子需要依赖该数组来准确切分界定各个序列的真实边界。</td>
+    <td>TND 布局下的 KV 序列边界。</td>
+    <td>TND 布局必传，每个样本对应一个元素。例如，两批长度分别为 64、96 时，Atlas A2/A3 传逐样本长度 [64, 96]，Ascend 950 传累计结束位置 [64, 160]。950 的数组恰有 B 个结束位置，省略起始偏移 0，末项必须等于 key 的 T 轴长度。</td>
     <td>INT64</td>
     <td>-</td>
     <td>1</td>
@@ -312,7 +312,7 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
     <td>maskType（int64_t）</td>
     <td>输入</td>
     <td>注意力计算中的掩码类型。指定采用何种预设规则的掩码逻辑。</td>
-    <td>当前支持传0和1：<ul><li>0：不加mask场景，忽略attenMaskOptional。</li><li>1：PerBlockSizeMask场景，按块级变长掩码计算，需配置attenMaskOptional。</li></ul></td>
+    <td>当前支持传0和1：<ul><li>0：仅使用块稀疏掩码，attenMaskOptional 必须传 nullptr。</li><li>1：PerBlockSizeMask场景，按块级变长掩码计算，需配置attenMaskOptional。</li></ul></td>
     <td>-</td>
     <td>-</td>
     <td>-</td>
@@ -407,7 +407,7 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
    <!-- end id10 -->
 
   <!-- npu="950" id9 -->
-  - <term>Ascend 950PR&950DT系列产品</term>：maskType不支持等于1；attenMaskOptional输入会被忽略，该输入应该传nullptr。
+  - <term>Ascend 950PR&950DT系列产品</term>：maskType 仅支持 0，attenMaskOptional 必须传 nullptr。
   <!-- end id9 -->
 
 - **返回值**：
@@ -497,7 +497,7 @@ aclnnStatus aclnnBlockSparseAttentionGrad(
 
 - 该接口与PyTorch配合使用时，需要保证CANN相关包与PyTorch相关包的版本匹配。
 - actualSeqLengthsOptional在qInputLayout为“TND”时必选；actualSeqLengthsKvOptional在kvInputLayout为“TND”时必选。
-- softmaxLse的layout需要与query的layout保持一致。如果query的layout为“BSND”时，softmaxLse的layout应传入“BNS1”。
+- Ascend 950 上，BNSD/BSND 布局要求 Q、K、V 的序列长度相等，TND 布局要求三者的总 token 数相等。
 - Ascend 950 产品要求 HeadDim 等于 128。
 - blockShapeOptional中的blockShapeX和blockShapeY分别表示Q方向和KV方向的稀疏粒度。两者均须大于 0，可以配置为不同值。Ascend 950 要求两者均为 16 的整数倍。BlockSparseMask的Q块数和KV块数应分别按照对应方向的稀疏粒度计算。
 - 根据算子支持的输入 Layout，query 张量 Shape 中对应的 head 维度大小记为 N1，key 和 value 张量 Shape 中对应的 head 维度大小记为 N2。必须满足N1 % N2 == 0。支持MQA、MHA、GQA场景。
@@ -626,7 +626,7 @@ int main() {
     // 3. 构建张量Shape
     std::vector<int64_t> qShape = {batch, numHeads, qSeqlen, headDim};
     std::vector<int64_t> kvShape = {batch, numKvHeads, kvSeqlen, headDim};
-    std::vector<int64_t> lseShape = {batch, numHeads, qSeqlen}; // LSE通常没有尾部1维，防止GE squeeze
+    std::vector<int64_t> lseShape = {batch, numHeads, qSeqlen, 1};
     std::vector<int64_t> maskShape = {batch, numHeads, ceilQ, ceilKv};
 
     // 4. 分配并初始化Host数据
@@ -642,8 +642,11 @@ int main() {
     std::vector<op::fp16_t> doutData(qSize, 0.01f);
     std::vector<op::fp16_t> outData(qSize, 0.1f);
 
-    // LSE给一个合理的正数，比如5.0f，这样exp(S - LSE)就是一个非常安全的负指数，绝对不会溢出
-    std::vector<float> lseData(GetShapeSize(lseShape), 5.0f);
+    // 所有块均参与计算，且每个 key 与 query 的点积分数相同。
+    const double scaleValue = 1.0 / std::sqrt(static_cast<double>(headDim));
+    const double score = static_cast<float>(qData[0]) * static_cast<float>(kData[0]) * headDim * scaleValue;
+    const float lse = static_cast<float>(score + std::log(static_cast<double>(kvSeqlen)));
+    std::vector<float> lseData(GetShapeSize(lseShape), lse);
     std::vector<uint8_t> maskData(GetShapeSize(maskShape), 1);
 
     // 创建所有的前向输入/输出aclTensor
@@ -662,7 +665,7 @@ int main() {
     CreateAclTensor(outData, qShape, &outAddr, aclDataType::ACL_FLOAT16, &outTensor);
 
     CreateAclTensor(lseData, lseShape, &lseAddr, aclDataType::ACL_FLOAT, &lseTensor);     // 严格使用FP32
-    CreateAclTensor(maskData, maskShape, &maskAddr, aclDataType::ACL_UINT8, &maskTensor); // 严格使用UINT8
+    CreateAclTensor(maskData, maskShape, &maskAddr, aclDataType::ACL_UINT8, &maskTensor); // 本例使用UINT8
 
     // 5. 创建反向输出梯度(dq, dk, dv)
     std::vector<op::fp16_t> dqData(qSize, 0.0f);
@@ -689,7 +692,6 @@ int main() {
     char qLayoutBuffer[16] = "BNSD";
     char kvLayoutBuffer[16] = "BNSD";
     int64_t maskType = 0;
-    double scaleValue = 1.0 / std::sqrt(static_cast<double>(headDim));
     // 强制规定滑动窗口极大值
     int64_t preTokens = 2147483647;
     int64_t nextTokens = 2147483647;

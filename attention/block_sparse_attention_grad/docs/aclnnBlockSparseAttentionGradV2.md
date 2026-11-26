@@ -232,7 +232,7 @@ aclnnStatus aclnnBlockSparseAttentionGradV2(
         <td>attenMaskOptional（aclTensor*）</td>
         <td>输入</td>
         <td>每个逻辑块的有效前缀长度，与 blockSparseMaskOptional 一起确定参与计算的 token。</td>
-        <td>maskType 为 0 时必须传入 <code>nullptr</code>。maskType 为 1 时必须传入 [batch, headNum, M, 2]，其中 M ≥ max(qBlockNum, kvBlockNum)。<code>[b, n, i, 0]</code> 和 <code>[b, n, i, 1]</code> 分别为第 i 个 Q 块和第 i 个 KV 块的有效前缀长度，取值范围为 0 到对应方向的块大小。尾块仅计算有效 token，前缀长度为 0 的块跳过。</td>
+        <td>maskType 为 0 时必须传入 <code>nullptr</code>。maskType 为 1 时必须传入 [batch, headNum, M, 2]，其中 M ≥ max(qBlockNum, kvBlockNum)。<code>[b, n, i, 0]</code> 和 <code>[b, n, i, 1]</code> 分别为第 i 个 Q 块和第 i 个 KV 块的有效前缀长度，取值范围为 0 到对应方向的块大小。尾块仅计算有效 token，前缀长度为 0 的块跳过。<br>某一侧没有对应块时，该侧字段不参与计算，建议填 0。例：Q 有 2 块、KV 有 3 块，M=4，若各块有效长度均为 16，则一个样本的一个头可填 [[16,16], [16,16], [0,16], [0,0]]。</td>
         <td>INT32</td>
         <td>ND</td>
         <td>4</td>
@@ -552,7 +552,7 @@ aclnnStatus aclnnBlockSparseAttentionGradV2(
 - Ascend 950 产品要求 headDim 取 128。query 的头数必须为 KV 头数的正整数倍。dq、dk、dv 由调用方按 query、key、value 的 shape 分别分配。
 - attentionOut 和 softmaxLse 须来自同一次前向计算。反向使用相同的 Q、K、V、缩放系数和掩码设置。
 - 在 <term>Ascend 950PR&950DT系列产品</term>上，BNSD/BSND 的 Q、K、V 序列长度须相等，TND 的 Q、K、V 总 token 数须相等。
-- TND 布局时，两个长度数组均须包含 batch 个元素，各样本按 batch 顺序沿 token 轴拼接。例如，某一侧的两个样本分别有 64、96 个 token，Atlas A2/A3 训练系列产品传 [64, 96]，Ascend 950PR&950DT 系列产品传 [64, 160]。BNSD/BSND 布局直接使用 shape 中的 S 轴长度。
+- TND 布局时，两个长度数组均须包含 batch 个元素，各样本按 batch 顺序沿 token 轴拼接。例如，某一侧的两个样本分别有 64、96 个 token，Atlas A2/A3 训练系列产品传 [64, 96]，Ascend 950PR&950DT 系列产品传 [64, 160]。950 的数组恰好包含 B 个累计结束位置，省略起始偏移 0；Q、KV 数组的末项分别须等于 query、key 的 T 轴长度。BNSD/BSND 布局直接使用 shape 中的 S 轴长度。
 - 块稀疏掩码的 qBlockNum = ceilDiv(maxQSeqLength, blockShapeX)，kvBlockNum = ceilDiv(maxKvSeqLength, blockShapeY)。BNSD/BSND 取各自 shape 的 S 轴作为最大序列长度，TND 取对应方向的最大单样本长度，累计长度须先差分。序列长度无需整除块大小，尾块只覆盖剩余 token。
 
 - 原接口与 V2 的块稀疏 mask 的 shape、0/1 语义及 Q 头维一致；HiF8 不要求更换 mask 规格。原接口与 V2 均只接受 BOOL、UINT8，不接受 INT8；BOOL 输入在 Host 调度中转换为 UINT8，底层算子注册类型保持 UINT8。
@@ -686,7 +686,7 @@ int main() {
     // 3. 构建张量Shape
     std::vector<int64_t> qShape = {batch, numHeads, qSeqlen, headDim};
     std::vector<int64_t> kvShape = {batch, numKvHeads, kvSeqlen, headDim};
-    std::vector<int64_t> lseShape = {batch, numHeads, qSeqlen}; // BNSD 的 LSE 按 [B, N, S] 排布
+    std::vector<int64_t> lseShape = {batch, numHeads, qSeqlen, 1};
     std::vector<int64_t> maskShape = {batch, numHeads, ceilQ, ceilKv};
 
     // 4. 分配并初始化Host数据
@@ -702,8 +702,11 @@ int main() {
     std::vector<op::fp16_t> doutData(qSize, 0.01f);
     std::vector<op::fp16_t> outData(qSize, 0.1f);
 
-    // 构造演示用 LSE。实际调用使用对应的前向输出。
-    std::vector<float> lseData(GetShapeSize(lseShape), 5.0f);
+    // 所有块均参与计算，且每个 key 与 query 的点积分数相同。
+    const double scaleValue = 1.0 / std::sqrt(static_cast<double>(headDim));
+    const double score = static_cast<float>(qData[0]) * static_cast<float>(kData[0]) * headDim * scaleValue;
+    const float lse = static_cast<float>(score + std::log(static_cast<double>(kvSeqlen)));
+    std::vector<float> lseData(GetShapeSize(lseShape), lse);
     std::vector<uint8_t> maskData(GetShapeSize(maskShape), 1);
 
     // 创建所有的前向输入/输出aclTensor
@@ -744,7 +747,6 @@ int main() {
     char qLayoutBuffer[16] = "BNSD";
     char kvLayoutBuffer[16] = "BNSD";
     int64_t maskType = 0;
-    double scaleValue = 1.0 / std::sqrt(static_cast<double>(headDim));
     // 强制规定滑动窗口极大值
     int64_t preTokens = 2147483647;
     int64_t nextTokens = 2147483647;
