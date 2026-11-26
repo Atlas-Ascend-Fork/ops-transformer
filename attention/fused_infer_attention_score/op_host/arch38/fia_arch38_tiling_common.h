@@ -10,7 +10,13 @@
 
 /*!
  * \file fia_arch38_tiling_common.h
- * \brief FIA arch38 本地化的 tiling 常量/枚举/中间数据结构（从 PFA 解耦，自持定义，不共用 common 头）
+ * \brief FIA arch38 的 tiling 数据序列化契约定义 + 基础类型/精度常量与 InputLayout/TilingMod/SplitCoreMode 枚举
+ *
+ * 本头文件承载算子 tiling 数据的序列化契约：通过 BEGIN_TILING_DATA_DEF/TILING_DATA_FIELD_DEF 宏
+ * 声明的 FiaArch38AttentionBaseParams / FiaArch38FlashAttentionTilingData 等结构，是 host 与 kernel
+ * 之间传递切分参数的唯一 schema（参与序列化，字段顺序不能随意变动）。
+ * 其余内容（类型 size 常量、维度常量、精度枚举、InputLayout/TilingMod/SplitCoreMode）为该 schema 的
+ * 基础支撑定义。从 PFA 解耦自持，不共用通用 common 头。
  */
 
 #ifndef FIA_ARCH38_TILING_COMMON_H
@@ -26,13 +32,13 @@
 namespace optiling {
 namespace arch38 {
 
-constexpr uint32_t INT8SIZE = 1;
-constexpr uint32_t UINT8SIZE = 1;
-constexpr uint32_t FLOAT16SIZE = 2;
-constexpr uint32_t FLOAT8SIZE = 1;
-constexpr uint32_t BFLOAT16SIZE = 2;
-constexpr uint32_t FLOAT32SIZE = 4;
-constexpr uint32_t BOOLSIZE = 1;
+constexpr uint32_t INT8_SIZE = 1;
+constexpr uint32_t UINT8_SIZE = 1;
+constexpr uint32_t FLOAT16_SIZE = 2;
+constexpr uint32_t FLOAT8_SIZE = 1;
+constexpr uint32_t BFLOAT16_SIZE = 2;
+constexpr uint32_t FLOAT32_SIZE = 4;
+constexpr uint32_t BOOL_SIZE = 1;
 
 constexpr uint32_t NUM_16 = 16;
 constexpr uint32_t NUM_32 = 32;
@@ -171,7 +177,6 @@ TILING_DATA_FIELD_DEF(uint32_t, gOfMla);
 END_TILING_DATA_DEF;
 
 BEGIN_TILING_DATA_DEF(FiaArch38AttentionSeqParams)
-// Temporary reuse
 TILING_DATA_FIELD_DEF_ARR(uint32_t, 64, CoreHeadNumTail);       // coreNStart
 TILING_DATA_FIELD_DEF_ARR(uint32_t, 64, actualS1);              // coreNEnd
 TILING_DATA_FIELD_DEF_ARR(uint32_t, 64, actualCoreNums);        // coreSidStart

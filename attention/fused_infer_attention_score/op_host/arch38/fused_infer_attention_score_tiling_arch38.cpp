@@ -8,13 +8,9 @@
  * See LICENSE in the root of the software repository for the full text of the License.
   */
 
-/* !
- * \file fused_infer_attention_score_tiling_arch38.cpp
- * \brief
- */
-
 #include "op_host/util/op_const_def.h"
 #include "fused_infer_attention_score_tiling_arch38.h"
+#include "fia_arch38_context_convert.h"
 #include "fia_arch38_prompt_tiling.h"
 #include "../fused_infer_attention_score_tiling_index.h"
 #include "log/log.h"
@@ -52,657 +48,339 @@ REGISTER_TILING_DATA_CLASS(FusedInferAttentionScore_1002312000100001012, FlashAt
 REGISTER_TILING_DATA_CLASS(FusedInferAttentionScore_1003113000100001012, FlashAttentionScoreSimplifiedTilingData)
 REGISTER_TILING_DATA_CLASS(FusedInferAttentionScore_1001311000100001012, FlashAttentionScoreSimplifiedTilingData)
 
-// Inputs Index
-constexpr uint32_t QUERY_DIM_0 = 0;
-constexpr uint32_t QUERY_DIM_1 = 1;
-constexpr uint32_t QUERY_DIM_2 = 2;
-constexpr uint32_t QUERY_DIM_3 = 3;
-constexpr uint32_t QUERY_DIM_4 = 4;
-constexpr uint32_t VALUE_DIM_2 = 2;
-constexpr uint32_t VALUE_DIM_3 = 3;
-constexpr uint32_t KV_DIM_0 = 0;
-constexpr uint32_t KV_DIM_2 = 2;
-constexpr uint32_t KV_DIM_3 = 3;
-constexpr uint32_t OUT_DIM_1 = 1;
-constexpr uint32_t OUT_DIM_2 = 2;
-constexpr uint32_t OUT_DIM_3 = 3;
-// Output Index
-constexpr uint32_t DLIMIT = 512;
-constexpr uint32_t BLIMIT = 65536;
-
-constexpr uint32_t QK_D_PFA_MLA = 192;
-constexpr uint32_t V_D_PFA_MLA = 128;
-
-constexpr uint32_t SHAPE_INDEX_TWO = 2;
-
-// 合法输入下 Tiling 失败时，按 EZ1008 正式错误码首报（Arglist: op_name, reason），并输出 PLOG 上下文
-inline void ReportTilingFailure(const gert::TilingContext* context, const char* reason)
+static ge::graphStatus CheckQueryOutShapeNSD(gert::TilingContext* context, const QKVShapeCheckCtx& ctx,
+                                             uint32_t& queryD, uint32_t& valueD)
 {
-    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "%s\n", reason);
-    const std::vector<const char*> msgKey = {"op_name", "reason"};
-    const std::vector<const char*> msgvalue = {context->GetNodeName(), reason};
-    REPORT_PREDEFINED_ERR_MSG("EZ1008", msgKey, msgvalue);
-}
-
-static bool CheckEmptyTensorList(FiaArch38ContextParams& contextKeyParams, int64_t validBatchOfK)
-{
-    for (int64_t tmpIdx = 0; tmpIdx < validBatchOfK; ++tmpIdx) {
-        if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetShapeSize() != 0) {
-            return false;
-        }
-        if (contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetShapeSize() != 0) {
-            return false;
-        }
-    }
-    contextKeyParams.emptyTensor = 1;
-    return true;
-}
-
-static bool GetKeyRopeSeqLenAndCheckBatch(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
-                                          int64_t validBatchOfK, int64_t keyRopeSDimIdx, int64_t& keyRopeS)
-{
-    keyRopeS = 0;
-    if (contextKeyParams.keyRopeInputShape != nullptr) {
-        keyRopeS = contextKeyParams.keyRopeInputShape->GetStorageShape().GetDim(keyRopeSDimIdx);
-        OP_CHECK_IF(contextKeyParams.keyRopeInputShape->GetStorageShape().GetDim(0) != validBatchOfK,
-                    OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                        context->GetNodeName(), "key,key_rope",
-                        std::to_string(validBatchOfK) + ", " +
-                            std::to_string(contextKeyParams.keyRopeInputShape->GetStorageShape().GetDim(0)),
-                        "Batch of Key does NOT equal to Batch of KeyRope under tensorlist mode!"),
-                    return false);
-    }
-    return true;
-}
-
-static bool CheckNormalTensorListBSH(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
-                                     int64_t validBatchOfK)
-{
-    auto standardKH = contextKeyParams.kTensorList[0]->GetStorageShape().GetDim(KV_DIM_2);
-    auto standardVH = contextKeyParams.vTensorList[0]->GetStorageShape().GetDim(KV_DIM_2);
-    int64_t keyRopeS = 0;
-    if (!GetKeyRopeSeqLenAndCheckBatch(context, contextKeyParams, validBatchOfK, 1, keyRopeS)) {
-        return false;
-    }
-
-    for (int64_t tmpIdx = 0; tmpIdx < validBatchOfK; ++tmpIdx) {
-        if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2) != standardKH) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                context->GetNodeName(), "key",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)) +
-                    " (first batch: " + std::to_string(standardKH) + ")",
-                "H of Key in the current batch is different from H of Key in the first batch under tensorlist mode!");
-            return false;
-        }
-        if (contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2) != standardVH) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                context->GetNodeName(), "value",
-                std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)) +
-                    " (first batch: " + std::to_string(standardVH) + ")",
-                "H of Value in the current batch is different from H of Value in the first batch under tensorlist "
-                "mode!");
-            return false;
-        }
-        if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1) !=
-            contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(1)) {
-            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                context->GetNodeName(), "key,value",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1)) + ", " +
-                    std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(1)),
-                "S for Key and Value does NOT equal!");
-            return false;
-        }
-        if (contextKeyParams.keyRopeInputShape != nullptr) {
-            if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1) != keyRopeS) {
-                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                    context->GetNodeName(), "key,key_rope",
-                    std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1)) + ", " +
-                        std::to_string(keyRopeS),
-                    "S for Key and keyRope does NOT equal but they should!");
-                return false;
-            }
-        }
-        contextKeyParams.maxKVs = std::max(contextKeyParams.maxKVs,
-                                           uint32_t(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1)));
-    }
-    return true;
-}
-
-static bool CheckNormalTensorListBNSD(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
-                                      int64_t validBatchOfK)
-{
-    auto standardN = contextKeyParams.kTensorList[0]->GetStorageShape().GetDim(1);
-    auto standardKD = contextKeyParams.kTensorList[0]->GetStorageShape().GetDim(KV_DIM_3);
-    auto standardVD = contextKeyParams.vTensorList[0]->GetStorageShape().GetDim(KV_DIM_3);
-    int64_t tmpNKv =
-        (*contextKeyParams.numKeyValueHeads != 0) ? *contextKeyParams.numKeyValueHeads : *contextKeyParams.headsNumber;
-    int64_t keyRopeS = 0;
-    if (!GetKeyRopeSeqLenAndCheckBatch(context, contextKeyParams, validBatchOfK, SHAPE_INDEX_TWO, keyRopeS)) {
-        return false;
-    }
-
-    if (tmpNKv != standardN) {
-        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "key,num_key_value_heads",
-                                               std::to_string(standardN) + ", " + std::to_string(tmpNKv),
-                                               "N of Key in the first batch is different from num_key_value_heads!");
-        return false;
-    }
-
-    for (int64_t tmpIdx = 0; tmpIdx < validBatchOfK; ++tmpIdx) {
-        if ((contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1) != standardN) ||
-            (contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(1) != standardN)) {
-            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                context->GetNodeName(), "key,value,num_key_value_heads",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1)) + ", " +
-                    std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(1)) + ", " +
-                    std::to_string(standardN),
-                "N of Key and Value in the current batch is different from num_key_value_heads under tensorlist mode!");
-            return false;
-        }
-        if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3) != standardKD) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                context->GetNodeName(), "key",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3)) +
-                    " (first batch: " + std::to_string(standardKD) + ")",
-                "D of Key in the current batch is different from D of Key in the first batch under tensorlist mode!");
-            return false;
-        }
-        if (contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3) != standardVD) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                context->GetNodeName(), "value",
-                std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3)) +
-                    " (first batch: " + std::to_string(standardVD) + ")",
-                "D of Value in the current batch is different from D of Value in the first batch under tensorlist "
-                "mode!");
-            return false;
-        }
-        if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2) !=
-            contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)) {
-            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                context->GetNodeName(), "key,value",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)) + ", " +
-                    std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)),
-                "S from Key and Value does NOT equal but they should!");
-            return false;
-        }
-        if (contextKeyParams.keyRopeInputShape != nullptr) {
-            if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2) != keyRopeS) {
-                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                    context->GetNodeName(), "key,key_rope",
-                    std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)) + ", " +
-                        std::to_string(keyRopeS),
-                    "S for Key and keyRope does NOT equal but they should!");
-                return false;
-            }
-        }
-        contextKeyParams.maxKVs =
-            std::max(contextKeyParams.maxKVs,
-                     uint32_t(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)));
-    }
-    return true;
-}
-
-static bool CheckNormalTensorListBSND(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
-                                      int64_t validBatchOfK)
-{
-    auto standardN = contextKeyParams.kTensorList[0]->GetStorageShape().GetDim(KV_DIM_2);
-    auto standardKD = contextKeyParams.kTensorList[0]->GetStorageShape().GetDim(KV_DIM_3);
-    auto standardVD = contextKeyParams.vTensorList[0]->GetStorageShape().GetDim(KV_DIM_3);
-    int64_t tmpNKv =
-        (*contextKeyParams.numKeyValueHeads != 0) ? *contextKeyParams.numKeyValueHeads : *contextKeyParams.headsNumber;
-    int64_t keyRopeS = 0;
-    if (!GetKeyRopeSeqLenAndCheckBatch(context, contextKeyParams, validBatchOfK, 1, keyRopeS)) {
-        return false;
-    }
-
-    if (tmpNKv != standardN) {
-        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context->GetNodeName(), "key,num_key_value_heads",
-                                               std::to_string(standardN) + ", " + std::to_string(tmpNKv),
-                                               "N of Key in the first batch is different from num_key_value_heads!");
-        return false;
-    }
-
-    for (int64_t tmpIdx = 0; tmpIdx < validBatchOfK; ++tmpIdx) {
-        if ((contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2) != standardN) ||
-            (contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2) != standardN)) {
-            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                context->GetNodeName(), "key,value,num_key_value_heads",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)) + ", " +
-                    std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_2)) + ", " +
-                    std::to_string(standardN),
-                "N of Key and Value in the current batch is different from num_key_value_heads under tensorlist mode!");
-            return false;
-        }
-        if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3) != standardKD) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                context->GetNodeName(), "key",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3)) +
-                    " (first batch: " + std::to_string(standardKD) + ")",
-                "D of Key in the current batch is different from D of Key in the first batch under tensorlist mode!");
-            return false;
-        }
-        if (contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3) != standardVD) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                context->GetNodeName(), "value",
-                std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(KV_DIM_3)) +
-                    " (first batch: " + std::to_string(standardVD) + ")",
-                "D of Value in the current batch is different from D of Value in the first batch under tensorlist "
-                "mode!");
-            return false;
-        }
-        if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1) !=
-            contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(1)) {
-            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                context->GetNodeName(), "key,value",
-                std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1)) + ", " +
-                    std::to_string(contextKeyParams.vTensorList[tmpIdx]->GetStorageShape().GetDim(1)),
-                "S from Key and Value does NOT equal but they should!");
-            return false;
-        }
-        if (contextKeyParams.keyRopeInputShape != nullptr) {
-            if (contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1) != keyRopeS) {
-                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                    context->GetNodeName(), "key,key_rope",
-                    std::to_string(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1)) + ", " +
-                        std::to_string(keyRopeS),
-                    "S for Key and keyRope does NOT equal but they should!");
-                return false;
-            }
-        }
-        contextKeyParams.maxKVs = std::max(contextKeyParams.maxKVs,
-                                           uint32_t(contextKeyParams.kTensorList[tmpIdx]->GetStorageShape().GetDim(1)));
-    }
-    return true;
-}
-
-static bool CheckNormalTensorList(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
-                                  const string layoutStr, int64_t validBatchOfK)
-{
-    bool ret = false;
-    if (layoutStr == "BSH") {
-        ret = CheckNormalTensorListBSH(context, contextKeyParams, validBatchOfK);
-    } else if (layoutStr == "BNSD" || layoutStr == "BNSD_BSND") {
-        ret = CheckNormalTensorListBNSD(context, contextKeyParams, validBatchOfK);
-    } else {
-        ret = CheckNormalTensorListBSND(context, contextKeyParams, validBatchOfK);
-    }
-    if (ret) {
-        contextKeyParams.isKvContinuous = 0;
-    }
-    return ret;
-}
-
-static bool CheckTensorList(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
-                            const string layoutStr, int64_t batchOfQ)
-{
-    int64_t validBatchOfK = 0;
-    int64_t validBatchOfV = 0;
-    contextKeyParams.kTensorList.resize(batchOfQ);
-    contextKeyParams.vTensorList.resize(batchOfQ);
-    while (context->GetDynamicInputShape(KEY_INDEX, validBatchOfK) != nullptr) {
-        contextKeyParams.kTensorList[validBatchOfK] = context->GetDynamicInputShape(KEY_INDEX, validBatchOfK);
-        validBatchOfK++;
-    }
-
-    while (context->GetDynamicInputShape(VALUE_INDEX, validBatchOfV) != nullptr) {
-        contextKeyParams.vTensorList[validBatchOfV] = context->GetDynamicInputShape(VALUE_INDEX, validBatchOfV);
-        validBatchOfV++;
-    }
-
+    OP_CHECK_IF((ctx.tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query",
+                                                         std::to_string(ctx.tempQ->GetStorageShape().GetDimNum()),
+                                                         "input shape dim should be 3!"),
+                return ge::GRAPH_FAILED);
+    queryD = ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2);
+    valueD = ctx.tempV->GetStorageShape().GetDim(VALUE_DIM_2);
     OP_CHECK_IF(
-        (batchOfQ != validBatchOfK) || (validBatchOfK != validBatchOfV),
-        OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-            context->GetNodeName(), "query,key,value",
-            std::to_string(batchOfQ) + ", " + std::to_string(validBatchOfK) + ", " + std::to_string(validBatchOfV),
-            "Batch of Query does NOT equal to Batch of Key and Value under tensorlist mode!"),
-        return false);
-
-    OP_CHECK_IF(
-        (batchOfQ > BLIMIT),
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "query", std::to_string(batchOfQ),
-                                              "Batch of Query must NOT be larger than 65535 under tensorlist mode!"),
-        return false);
-
-    if (CheckEmptyTensorList(contextKeyParams, validBatchOfK)) {
-        return true;
-    }
-
-    for (int i = 0; i < validBatchOfK; i++) {
-        OP_CHECK_IF(contextKeyParams.kTensorList[i]->GetStorageShape().GetDim(0) != 1,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                        context->GetNodeName(), "key",
-                        std::to_string(contextKeyParams.kTensorList[i]->GetStorageShape().GetDim(0)),
-                        "Batch value of Key is NOT 1 but should be 1 under tensorlist mode!"),
-                    return false);
-    }
-
-    for (int i = 0; i < validBatchOfV; i++) {
-        OP_CHECK_IF(contextKeyParams.vTensorList[i]->GetStorageShape().GetDim(0) != 1,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                        context->GetNodeName(), "value",
-                        std::to_string(contextKeyParams.vTensorList[i]->GetStorageShape().GetDim(0)),
-                        "Batch value of Value is NOT 1 but should be 1 under tensorlist mode!"),
-                    return false);
-    }
-
-    if (!CheckNormalTensorList(context, contextKeyParams, layoutStr, validBatchOfK)) {
-        return false;
-    }
-    return true;
-}
-
-static bool CheckKVPaddingCrossover(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams)
-{
-    OP_CHECK_IF(((contextKeyParams.queryPaddingSize != nullptr) &&
-                 (contextKeyParams.queryPaddingSize->GetStorageShape().GetShapeSize() != 1 ||
-                  contextKeyParams.queryPaddingSize->GetStorageShape().GetDimNum() != 1)),
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                    context->GetNodeName(), "query_padding_size",
-                    std::to_string(contextKeyParams.queryPaddingSize->GetStorageShape().GetShapeSize()) + " dim " +
-                        std::to_string(contextKeyParams.queryPaddingSize->GetStorageShape().GetDimNum()),
-                    "Query PaddingSize input is invalid, the shape size of query paddingsize is not 1 or dim number of "
-                    "query padding size is not 1!"),
-                return false);
-    OP_CHECK_IF(((contextKeyParams.kvPaddingSize != nullptr) &&
-                 (contextKeyParams.kvPaddingSize->GetStorageShape().GetShapeSize() != 1 ||
-                  contextKeyParams.kvPaddingSize->GetStorageShape().GetDimNum() != 1)),
-                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                    context->GetNodeName(), "kv_padding_size",
-                    std::to_string(contextKeyParams.kvPaddingSize->GetStorageShape().GetShapeSize()) + " dim " +
-                        std::to_string(contextKeyParams.kvPaddingSize->GetStorageShape().GetDimNum()),
-                    "KV PaddingSize input is invalid, the shape size of kv padding size is not 1 or dim number of kv "
-                    "padding size is not 1!"),
-                return false);
-    OP_CHECK_IF(((contextKeyParams.blockTable != nullptr) &&
-                 ((contextKeyParams.queryPaddingSize != nullptr) || (contextKeyParams.kvPaddingSize != nullptr))),
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(),
-                                                         "block_table and query_padding_size and kv_padding_size",
-                                                         "When page attention is used, left padding is not supported!"),
-                return false);
-    OP_CHECK_IF(((contextKeyParams.queryPaddingSize != nullptr) && (contextKeyParams.actualSequenceLengthQ == nullptr)),
-                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "actual_seq_lengths"), return false);
-    OP_CHECK_IF(((contextKeyParams.kvPaddingSize != nullptr) && (contextKeyParams.actualSequenceLengthKV == nullptr)),
-                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "actual_seq_lengths_kv"), return false);
-    return true;
-}
-
-// 0 不转置; 1 BNSD_BSND; 2 BSND_BNSD; 3 BSH_BNSD; 4 BNSD_NBSD; 5 BSND_NBSD; 6 BSH_NBSD; 7 NTD_TND; 8 TND_NTD
-static uint32_t GetTransposeLayout(const std::string& layout)
-{
-    const std::map<std::string, uint32_t> transposeLayoutMp = {{"BNSD_BSND", 1}, {"BSND_BNSD", 2}, {"BSH_BNSD", 3},
-                                                               {"BNSD_NBSD", 4}, {"BSND_NBSD", 5}, {"BSH_NBSD", 6},
-                                                               {"NTD_TND", 7},   {"TND_NTD", 8}};
-    if (transposeLayoutMp.find(layout) != transposeLayoutMp.end()) {
-        return transposeLayoutMp.at(layout);
-    }
-    return 0;
-}
-
-static ge::graphStatus ConvertQuantOptionalInputs(const gert::TilingContext* context,
-                                                  FiaArch38ContextParams& contextKeyParams)
-{
-    contextKeyParams.deqScale1Shape = context->GetOptionalInputShape(DEQUANT_SCALE1_INDEX);
-    contextKeyParams.scale1Shape = context->GetOptionalInputShape(QUANT_SCALE1_INDEX);
-    contextKeyParams.deqScale2Shape = context->GetOptionalInputShape(DEQUANT_SCALE2_INDEX);
-    contextKeyParams.scale2Shape = context->GetOptionalInputShape(QUANT_SCALE2_INDEX);
-    contextKeyParams.offset2Shape = context->GetOptionalInputShape(QUANT_OFFSET2_INDEX);
-    contextKeyParams.antiquantScaleShape = context->GetOptionalInputShape(ANTIQUANT_SCALE_INDEX);
-    contextKeyParams.antiquantOffsetShape = context->GetOptionalInputShape(ANTIQUANT_OFFSET_INDEX);
-
-    contextKeyParams.quantScale2Type = (context->GetOptionalInputDesc(QUANT_SCALE2_INDEX) != nullptr) ?
-                                           context->GetOptionalInputDesc(QUANT_SCALE2_INDEX)->GetDataType() :
-                                           ge::DT_FLOAT;
-    contextKeyParams.quantOffset2Type = (context->GetOptionalInputDesc(QUANT_OFFSET2_INDEX) != nullptr) ?
-                                            context->GetOptionalInputDesc(QUANT_OFFSET2_INDEX)->GetDataType() :
-                                            ge::DT_FLOAT;
-    contextKeyParams.dequantScaleQueryShape = context->GetOptionalInputShape(DEQUANT_SCALE_QUERY_INDEX);
-    contextKeyParams.keyAntiquantScaleShape = context->GetOptionalInputShape(KEY_ANTIQUANT_SCALE_INDEX);
-    contextKeyParams.keyAntiquantOffsetShape = context->GetOptionalInputShape(KEY_ANTIQUANT_OFFSET_INDEX);
-    contextKeyParams.valueAntiquantScaleShape = context->GetOptionalInputShape(VALUE_ANTIQUANT_SCALE_INDEX);
-    contextKeyParams.valueAntiquantOffsetShape = context->GetOptionalInputShape(VALUE_ANTIQUANT_OFFSET_INDEX);
-
-    contextKeyParams.dequantScaleQueryType =
-        (context->GetOptionalInputDesc(DEQUANT_SCALE_QUERY_INDEX) != nullptr) ?
-            context->GetOptionalInputDesc(DEQUANT_SCALE_QUERY_INDEX)->GetDataType() :
-            ge::DT_FLOAT;
-    contextKeyParams.keyAntiquantScaleType =
-        (context->GetOptionalInputDesc(KEY_ANTIQUANT_SCALE_INDEX) != nullptr) ?
-            context->GetOptionalInputDesc(KEY_ANTIQUANT_SCALE_INDEX)->GetDataType() :
-            ge::DT_FLOAT16;
-    contextKeyParams.valueAntiquantScaleType =
-        (context->GetOptionalInputDesc(VALUE_ANTIQUANT_SCALE_INDEX) != nullptr) ?
-            context->GetOptionalInputDesc(VALUE_ANTIQUANT_SCALE_INDEX)->GetDataType() :
-            ge::DT_FLOAT16;
-
-    contextKeyParams.dequantScaleQuery = context->GetOptionalInputTensor(DEQUANT_SCALE_QUERY_INDEX);
-    contextKeyParams.keyAntiquantScale = context->GetOptionalInputTensor(KEY_ANTIQUANT_SCALE_INDEX);
-    contextKeyParams.valueAntiquantScale = context->GetOptionalInputTensor(VALUE_ANTIQUANT_SCALE_INDEX);
+        ((queryD == valueD) && (ctx.tempQ->GetStorageShape() != ctx.tempOut->GetStorageShape())),
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            context->GetNodeName(), "query,attention_out",
+            GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+            "Layout is NSD and Query shape does NOT match Attention Out shape"),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus ConvertContextToParamsPFA(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
-                                                 bool isMaxWorkspace)
+static ge::graphStatus CheckQueryOutShapeTND(gert::TilingContext* context, const QKVShapeCheckCtx& ctx,
+                                             uint32_t& queryD, uint32_t& valueD)
 {
-    contextKeyParams.opName = context->GetNodeName();
-
-    contextKeyParams.isKvContinuous = 1;
-    contextKeyParams.emptyTensor = 0;
-    contextKeyParams.fromFused = FROM_FUSED_FLAG;
-    contextKeyParams.maxKVs = 0;
-    contextKeyParams.pseShift = context->GetOptionalInputTensor(PSE_SHIFT_INDEX);
-    contextKeyParams.attentionMask = context->GetOptionalInputTensor(ATTEN_MASK_INDEX);
-    OP_CHECK_IF((contextKeyParams.attentionMask != nullptr) &&
-                    (context->GetOptionalInputDesc(ATTEN_MASK_INDEX)->GetDataType() != ge::DT_BOOL) &&
-                    (context->GetOptionalInputDesc(ATTEN_MASK_INDEX)->GetDataType() != ge::DT_INT8) &&
-                    (context->GetOptionalInputDesc(ATTEN_MASK_INDEX)->GetDataType() != ge::DT_UINT8),
-                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-                    context->GetNodeName(), "atten_mask",
-                    arch38::GetPfaDataTypeStr(context->GetOptionalInputDesc(ATTEN_MASK_INDEX)->GetDataType()),
-                    "Invalid attention mask dtype! Only support BOOL, INT8 and UINT8"),
-                return ge::GRAPH_FAILED);
-    contextKeyParams.actualSequenceLengthQ = context->GetOptionalInputTensor(ACTUAL_SEQ_Q_INDEX);
-    contextKeyParams.actualSequenceLengthKV = context->GetOptionalInputTensor(ACTUAL_SEQ_KV_INDEX);
-    contextKeyParams.antiquantScale = context->GetOptionalInputTensor(ANTIQUANT_SCALE_INDEX);
-    contextKeyParams.antiquantOffset = context->GetOptionalInputTensor(ANTIQUANT_OFFSET_INDEX);
-    contextKeyParams.queryPaddingSize = context->GetOptionalInputTensor(QUERY_PADDING_SIZE_INDEX);
-    contextKeyParams.kvPaddingSize = context->GetOptionalInputTensor(KV_PADDING_SIZE_INDEX);
-    contextKeyParams.blockTable = context->GetOptionalInputTensor(BLOCK_TABLE_INDEX);
-    contextKeyParams.keySharedPrefix = context->GetOptionalInputTensor(KEY_SHARED_PREFIX_INDEX);
-    contextKeyParams.valueSharedPrefix = context->GetOptionalInputTensor(VALUE_SHARED_PREFIX_INDEX);
-    contextKeyParams.actualSharedPrefixLen = context->GetOptionalInputTensor(ACTUAL_SHARED_PREFIX_LEN_INDEX);
-    contextKeyParams.learnableSink = context->GetOptionalInputTensor(LEARNABLE_SINK_INDEX);
-    contextKeyParams.learnableSinkShape = context->GetOptionalInputShape(LEARNABLE_SINK_INDEX);
-    contextKeyParams.hasLearnableSink =
-        ((contextKeyParams.learnableSink != nullptr) && (contextKeyParams.learnableSinkShape != nullptr) &&
-         (contextKeyParams.learnableSinkShape->GetStorageShape().GetShapeSize() != 0)) ?
-            true :
-            false;
-    contextKeyParams.inputDataType = context->GetInputDesc(QUERY_INDEX)->GetDataType();
-    contextKeyParams.kDataType = context->GetInputDesc(KEY_INDEX)->GetDataType();
-    contextKeyParams.vDataType = context->GetInputDesc(VALUE_INDEX)->GetDataType();
-    contextKeyParams.pseShiftDataType = (contextKeyParams.pseShift != nullptr) ?
-                                            context->GetOptionalInputDesc(PSE_SHIFT_INDEX)->GetDataType() :
-                                            contextKeyParams.inputDataType;
-    contextKeyParams.maskDataType = (contextKeyParams.attentionMask != nullptr) ?
-                                        context->GetOptionalInputDesc(ATTEN_MASK_INDEX)->GetDataType() :
-                                        contextKeyParams.inputDataType;
-    contextKeyParams.blockTableType = (context->GetOptionalInputDesc(BLOCK_TABLE_INDEX) != nullptr) ?
-                                          context->GetOptionalInputDesc(BLOCK_TABLE_INDEX)->GetDataType() :
-                                          ge::DT_INT32;
-    contextKeyParams.outputDataType = context->GetOutputDesc(ATTENTION_OUT_INDEX)->GetDataType();
-    contextKeyParams.queryInputShape = context->GetInputShape(QUERY_INDEX);
-    contextKeyParams.keyInputShape = context->GetDynamicInputShape(KEY_INDEX, 0);
-    contextKeyParams.valueInputShape = context->GetDynamicInputShape(VALUE_INDEX, 0);
-    contextKeyParams.pseShiftShape = context->GetOptionalInputShape(PSE_SHIFT_INDEX);
-    contextKeyParams.attentionMaskShape = context->GetOptionalInputShape(ATTEN_MASK_INDEX);
-    contextKeyParams.blockTableShape = context->GetOptionalInputShape(BLOCK_TABLE_INDEX);
-    contextKeyParams.outputShape = context->GetOutputShape(ATTENTION_OUT_INDEX);
-    contextKeyParams.lseoutputShape = context->GetOutputShape(SOFTMAX_LSE_INDEX);
-    contextKeyParams.keySharedPrefixDataType =
-        (contextKeyParams.keySharedPrefix != nullptr) ?
-            context->GetOptionalInputDesc(KEY_SHARED_PREFIX_INDEX)->GetDataType() :
-            contextKeyParams.inputDataType;
-    contextKeyParams.valueSharedPrefixDataType =
-        (contextKeyParams.valueSharedPrefix != nullptr) ?
-            context->GetOptionalInputDesc(VALUE_SHARED_PREFIX_INDEX)->GetDataType() :
-            contextKeyParams.inputDataType;
-    contextKeyParams.learnableSinkDataType = (contextKeyParams.learnableSink != nullptr) ?
-                                                 context->GetOptionalInputDesc(LEARNABLE_SINK_INDEX)->GetDataType() :
-                                                 contextKeyParams.inputDataType;
-
-    auto convertQuantRet = ConvertQuantOptionalInputs(context, contextKeyParams);
-    if (convertQuantRet != ge::GRAPH_SUCCESS) {
-        OP_LOGE_WITHOUT_REPORT(context->GetNodeName(),
-                               "Error occurred while converting quant related tilingContext to PFA context!");
-        return convertQuantRet;
-    }
-
-    auto attrs = context->GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, ReportTilingFailure(context, "Attributes returned from context is a nullptr"),
-                return ge::GRAPH_FAILED);
-    contextKeyParams.queryQuantMode = attrs->GetAttrPointer<int64_t>(ATTR_QUERY_QUANT_MODE_INDEX);
-    contextKeyParams.keyAntiquantMode = attrs->GetAttrPointer<int64_t>(ATTR_KEY_ANTIQUANT_MODE_INDEX);
-    contextKeyParams.valueAntiquantMode = attrs->GetAttrPointer<int64_t>(ATTR_VALUE_ANTIQUANT_MODE_INDEX);
-    contextKeyParams.innerPrecisePtr = attrs->GetAttrPointer<int64_t>(ATTR_INNER_PRECISE_INDEX);
-    contextKeyParams.headsNumber = attrs->GetAttrPointer<int64_t>(ATTR_N_INDEX);
-    contextKeyParams.sparseMode = attrs->GetAttrPointer<int32_t>(ATTR_SPARSE_MODE_INDEX);
-    contextKeyParams.preToken = attrs->GetAttrPointer<int64_t>(ATTR_PRE_TOKEN_INDEX);
-    contextKeyParams.nextToken = attrs->GetAttrPointer<int64_t>(ATTR_NEXT_TOKEN_INDEX);
-    contextKeyParams.scaleValue = attrs->GetAttrPointer<float>(ATTR_SCALE_INDEX);
-    contextKeyParams.layout = attrs->GetAttrPointer<char>(ATTR_INPUT_LAYOUT_INDEX);
-    contextKeyParams.numKeyValueHeads = attrs->GetAttrPointer<int64_t>(ATTR_NUM_KV_HEADS_INDEX);
-    contextKeyParams.blockSize = attrs->GetAttrPointer<int32_t>(ATTR_BLOCK_SIZE_INDEX);
-    contextKeyParams.workspaceSize = context->GetWorkspaceSizes(1);
-    contextKeyParams.isBSNDOut = (string(contextKeyParams.layout) == "BNSD_BSND") ? 1 : 0;
-    contextKeyParams.transposeLayout = GetTransposeLayout(string(contextKeyParams.layout));
-    contextKeyParams.softmaxLseFlag = attrs->GetAttrPointer<bool>(ATTR_SOFTMAX_LSE_FLAG_INDEX);
-    contextKeyParams.isSoftMaxLseEnable =
-        (contextKeyParams.softmaxLseFlag == nullptr) ? false : *contextKeyParams.softmaxLseFlag;
-    contextKeyParams.queryRopeInputShape = context->GetOptionalInputShape(QUERY_ROPE_INDEX);
-    contextKeyParams.qRopeDataType = (contextKeyParams.queryRopeInputShape != nullptr) ?
-                                         context->GetOptionalInputDesc(QUERY_ROPE_INDEX)->GetDataType() :
-                                         contextKeyParams.inputDataType;
-    contextKeyParams.keyRopeInputShape = context->GetOptionalInputShape(KEY_ROPE_INDEX);
-    contextKeyParams.kRopeDataType = (contextKeyParams.keyRopeInputShape != nullptr) ?
-                                         context->GetOptionalInputDesc(KEY_ROPE_INDEX)->GetDataType() :
-                                         contextKeyParams.kDataType;
-    contextKeyParams.qStartIdx = context->GetOptionalInputTensor(Q_START_IDX_INDEX);
-    contextKeyParams.kvStartIdx = context->GetOptionalInputTensor(KV_START_IDX_INDEX);
-    contextKeyParams.pseType = attrs->GetAttrPointer<int64_t>(ATTR_PSE_TYPE_INDEX);
-
-    const string layoutStr = string(contextKeyParams.layout);
-    int64_t batchOfQ = 1;
-    if (layoutStr != "NSD") {
-        if (layoutStr != "TND" && layoutStr != "NTD" && layoutStr != "NTD_NTD" && layoutStr != "TND_NTD") {
-            batchOfQ = contextKeyParams.queryInputShape->GetStorageShape().GetDim(QUERY_DIM_0);
-        } else {
-            if (!isMaxWorkspace) {
-                const gert::Tensor* actSeqLenData = contextKeyParams.actualSequenceLengthQ;
-                int64_t actSeqLenDims = (actSeqLenData != nullptr) ? actSeqLenData->GetShapeSize() : 0;
-                OP_CHECK_IF(((actSeqLenData == nullptr) || (actSeqLenDims == 0) ||
-                             (actSeqLenData->GetData<int64_t>() == nullptr)),
-                            OP_LOGE_WITH_INVALID_INPUT(contextKeyParams.opName, "actual_seq_lengths"),
-                            return ge::GRAPH_FAILED);
-                const gert::Tensor* actSeqLenDataKV = contextKeyParams.actualSequenceLengthKV;
-                int64_t actSeqLenKVDims = (actSeqLenDataKV != nullptr) ? actSeqLenDataKV->GetShapeSize() : 0;
-                OP_CHECK_IF(((actSeqLenDataKV == nullptr) || (actSeqLenKVDims == 0) ||
-                             (actSeqLenDataKV->GetData<int64_t>() == nullptr)),
-                            OP_LOGE_WITH_INVALID_INPUT(contextKeyParams.opName, "actual_seq_lengths_kv"),
-                            return ge::GRAPH_FAILED);
-                batchOfQ = actSeqLenDims;
-            }
-        }
-    }
-    // Obtain the actual number of K input elements and determine whether they belong to the tensorlist scene
-    int64_t validBatchOfK = 0;
-    while (context->GetDynamicInputShape(KEY_INDEX, validBatchOfK) != nullptr) {
-        validBatchOfK++;
-        // If there are more than 1, break. When the input is large, it saves time.
-        // The tensorlist scene also needs to verify separately whether it is 1
-        if (validBatchOfK > 1) {
-            break;
-        }
-    }
-    if (validBatchOfK > 1) { // k tensor 超过一个, 认为是tensorlist场景
-        // PA和TND格式, 与tensorlist本身的定义有冲突, 在判定tensorlist输入后先做校验, 之后再校验tensorlist信息正确性
+    OP_CHECK_IF(
+        (ctx.tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "query",
+            std::to_string(ctx.tempQ->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", input query shape dim should be 3!"),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (ctx.tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "attention_out",
+            std::to_string(ctx.tempOut->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", attention out shape dim should be 3!"),
+        return ge::GRAPH_FAILED);
+    queryD = ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2);
+    valueD = ctx.tempV->GetStorageShape().GetDim(VALUE_DIM_2);
+    if (ctx.inputLayoutStr == "TND") {
         OP_CHECK_IF(
-            (contextKeyParams.blockTable != nullptr),
-            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "block_table and key and value",
-                                                     "When tensorlist is used, page attention is not supported!"),
+            ((queryD == valueD) && (ctx.tempQ->GetStorageShape() != ctx.tempOut->GetStorageShape())),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context->GetNodeName(), "query,attention_out",
+                                                   GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                                                       GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                                                   "Layout is TND and Query shape does NOT match Attention Out shape"),
             return ge::GRAPH_FAILED);
-        OP_CHECK_IF((layoutStr == "TND" || layoutStr == "NTD" || layoutStr == "NTD_TND" || layoutStr == "TND_NTD"),
-                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
-                        context->GetNodeName(), "key and value and input_layout",
-                        "When tensorlist is used, layout TND/NTD/TND_NTD/NTD_TND is not supported!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF((!CheckTensorList(context, contextKeyParams, layoutStr, batchOfQ)),
-                    OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Check Tensorlist failed!"),
+    } else {
+        OP_CHECK_IF(((queryD == valueD) &&
+                     ((ctx.tempQ->GetStorageShape().GetDim(0) != ctx.tempOut->GetStorageShape().GetDim(1)) ||
+                      (ctx.tempQ->GetStorageShape().GetDim(1) != ctx.tempOut->GetStorageShape().GetDim(0)) ||
+                      (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2) !=
+                       ctx.tempOut->GetStorageShape().GetDim(QUERY_DIM_2)))),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context->GetNodeName(), "query,attention_out",
+                        GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                            GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                        "Layout is TND_NTD and Query shape does NOT match Attention Out shape"),
                     return ge::GRAPH_FAILED);
     }
-    OP_CHECK_IF(((contextKeyParams.isKvContinuous == 0) &&
-                 ((context->GetOptionalInputDesc(QUERY_PADDING_SIZE_INDEX) != nullptr) ||
-                  (context->GetOptionalInputDesc(KV_PADDING_SIZE_INDEX) != nullptr))),
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(),
-                                                         "key and value and query_padding_size and kv_padding_size",
-                                                         "When tensorlist is used, left padding is not supported!"),
-                return ge::GRAPH_FAILED);
-
-    OP_CHECK_IF(!CheckKVPaddingCrossover(context, contextKeyParams),
-                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Check KV PaddingSize failed!"),
-                return ge::GRAPH_FAILED);
-
-    OP_CHECK_IF(contextKeyParams.workspaceSize == nullptr, ReportTilingFailure(context, "WorkSpaceSize is nullptr"),
-                return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus ConvertContextToParamsIFA(gert::TilingContext& context, FiaArch38IncreContext& ifaContext)
+static ge::graphStatus CheckQueryOutShapeNTD(gert::TilingContext* context, const QKVShapeCheckCtx& ctx,
+                                             uint32_t& queryD, uint32_t& valueD)
 {
-    if (context.GetNodeName() == nullptr) {
-        OP_LOGE_WITHOUT_REPORT("FusedInferAttentionScore", "opName got from TilingContext is nullptr");
-        return ge::GRAPH_FAILED;
+    OP_CHECK_IF(
+        (ctx.tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "query",
+            std::to_string(ctx.tempQ->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", input query shape dim should be 3!"),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (ctx.tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "attention_out",
+            std::to_string(ctx.tempOut->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", attention out shape dim should be 3!"),
+        return ge::GRAPH_FAILED);
+    queryD = ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2);
+    valueD = ctx.tempV->GetStorageShape().GetDim(VALUE_DIM_2);
+    if (ctx.inputLayoutStr == "NTD") {
+        OP_CHECK_IF(
+            ((queryD == valueD) && (ctx.tempQ->GetStorageShape() != ctx.tempOut->GetStorageShape())),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context->GetNodeName(), "query,attention_out",
+                                                   GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                                                       GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                                                   "Layout is NTD and Query shape does NOT match Attention Out shape"),
+            return ge::GRAPH_FAILED);
+    } else if (ctx.inputLayoutStr == "NTD_TND") {
+        OP_CHECK_IF(
+            ((queryD == valueD) &&
+             ((ctx.tempQ->GetStorageShape().GetDim(0) != ctx.tempOut->GetStorageShape().GetDim(1)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(1) != ctx.tempOut->GetStorageShape().GetDim(0)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_2)))),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "query,attention_out",
+                GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                    GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                "Layout is NTD_TND and Query shape does NOT match Attention Out shape"),
+            return ge::GRAPH_FAILED);
     }
-    ifaContext.query.desc = context.GetInputDesc(QUERY_INDEX);
-    ifaContext.query.shape = context.GetInputShape(QUERY_INDEX);
-    ifaContext.key.desc = context.GetInputDesc(KEY_INDEX);
-    ifaContext.key.shape = context.GetInputShape(KEY_INDEX);
-    OP_CHECK_IF((ifaContext.query.shape == nullptr) || (ifaContext.key.shape == nullptr),
-                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context.GetNodeName(), "query,key", "nullptr",
-                                                       "shape of query or shape of key is null."),
-                return ge::GRAPH_FAILED);
-
-    ifaContext.value.desc = context.GetInputDesc(VALUE_INDEX);
-    ifaContext.value.shape = context.GetInputShape(VALUE_INDEX);
-    ifaContext.attenMask.desc = context.GetOptionalInputDesc(ATTEN_MASK_INDEX);
-    ifaContext.attenMask.tensor = context.GetOptionalInputTensor(ATTEN_MASK_INDEX);
-    ifaContext.attenOut.desc = context.GetOutputDesc(ATTENTION_OUT_INDEX);
-    ifaContext.attenOut.shape = context.GetOutputShape(ATTENTION_OUT_INDEX);
-    ifaContext.blockTable.tensor = context.GetOptionalInputTensor(BLOCK_TABLE_INDEX);
-
-    auto attrs = context.GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, ReportTilingFailure(&context, "attrs got from ge is nullptr"),
-                return ge::GRAPH_FAILED);
-
-    ifaContext.numHeads = attrs->GetAttrPointer<uint32_t>(ATTR_N_INDEX);
-    ifaContext.layOut = attrs->GetStr(ATTR_INPUT_LAYOUT_INDEX);
-    ifaContext.kvHeadNums = attrs->GetAttrPointer<uint32_t>(ATTR_NUM_KV_HEADS_INDEX);
-
-    // IFA（伪量化）模板当前不支持 learnable sink 输入特性
-    OP_CHECK_IF(context.GetOptionalInputTensor(LEARNABLE_SINK_INDEX) != nullptr,
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context.GetNodeName(), "learnable_sink",
-                                                         "Learnable sink only supports no-quantized GQA mode."),
-                return ge::GRAPH_FAILED);
-
     return ge::GRAPH_SUCCESS;
 }
 
-static bool GetMaxWorkspaceFlag(gert::TilingContext& context)
+static ge::graphStatus CheckQueryOutShapeBSH(gert::TilingContext* context, const QKVShapeCheckCtx& ctx,
+                                             uint32_t& queryD, uint32_t& valueD)
 {
-    bool res = (context.GetOptionalInputTensor(ACTUAL_SEQ_Q_INDEX) != nullptr &&
-                context.GetOptionalInputTensor(ACTUAL_SEQ_Q_INDEX)->GetData<int64_t>() == nullptr) ||
-               (context.GetOptionalInputTensor(ACTUAL_SEQ_KV_INDEX) != nullptr &&
-                context.GetOptionalInputTensor(ACTUAL_SEQ_KV_INDEX)->GetData<int64_t>() == nullptr);
-    return res;
+    OP_CHECK_IF(
+        (ctx.tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "query",
+            std::to_string(ctx.tempQ->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", input query shape dim should be 3!"),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (ctx.tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "attention_out",
+            std::to_string(ctx.tempOut->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", attention out shape dim should be 3!"),
+        return ge::GRAPH_FAILED);
+    queryD = ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2) / ctx.tempN;
+    valueD = ctx.tempV->GetStorageShape().GetDim(VALUE_DIM_2) / ctx.tempKVN;
+    OP_CHECK_IF(
+        ((queryD == valueD) && (ctx.tempQ->GetStorageShape() != ctx.tempOut->GetStorageShape())),
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            context->GetNodeName(), "query,attention_out",
+            GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+            "Layout is BSH and Query shape does NOT match Attention Out shape"),
+        return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckQueryOutShapeBNSD(gert::TilingContext* context, const QKVShapeCheckCtx& ctx,
+                                              uint32_t& queryD, uint32_t& valueD)
+{
+    OP_CHECK_IF(
+        (ctx.tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_4),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "query",
+            std::to_string(ctx.tempQ->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", input query shape dim should be 4!"),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (ctx.tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_4),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "attention_out",
+            std::to_string(ctx.tempOut->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", attention out shape dim should be 4!"),
+        return ge::GRAPH_FAILED);
+    queryD = ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_3);
+    valueD = ctx.tempV->GetStorageShape().GetDim(VALUE_DIM_3);
+    if (ctx.inputLayoutStr == "BNSD_BSND" || ctx.inputLayoutStr == "BSND_BNSD") {
+        OP_CHECK_IF(
+            ((queryD == valueD) &&
+             ((ctx.tempQ->GetStorageShape().GetDim(0) != ctx.tempOut->GetStorageShape().GetDim(0)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(1) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != ctx.tempOut->GetStorageShape().GetDim(1)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_3) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_3)))),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "query,attention_out",
+                GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                    GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                "Layout is " + ctx.inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
+            return ge::GRAPH_FAILED);
+    } else if (ctx.inputLayoutStr == "BNSD") {
+        OP_CHECK_IF(
+            ((queryD == valueD) && (ctx.tempQ->GetStorageShape() != ctx.tempOut->GetStorageShape())),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context->GetNodeName(), "query,attention_out",
+                                                   GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                                                       GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                                                   "Layout is BNSD and Query shape does NOT match Attention Out shape"),
+            return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckQueryOutShapeBSHBNSD(gert::TilingContext* context, const QKVShapeCheckCtx& ctx,
+                                                 uint32_t& queryD, uint32_t& valueD)
+{
+    OP_CHECK_IF(
+        (ctx.tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "query",
+            std::to_string(ctx.tempQ->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", input query shape dim should be 3!"),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (ctx.tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_4),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "attention_out",
+            std::to_string(ctx.tempOut->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", attention out shape dim should be 4!"),
+        return ge::GRAPH_FAILED);
+    queryD = ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2) / ctx.tempN;
+    valueD = ctx.tempV->GetStorageShape().GetDim(VALUE_DIM_2) / ctx.tempKVN;
+    if (ctx.inputLayoutStr == "BSH_BNSD") {
+        OP_CHECK_IF(((queryD == valueD) && ((ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_0) !=
+                                             ctx.tempOut->GetStorageShape().GetDim(0)) ||
+                                            (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_1) !=
+                                             ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
+                                            queryD != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_3)) ||
+                     ctx.tempN != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_1)),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context->GetNodeName(), "query,attention_out",
+                        GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                            GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                        "Layout is " + ctx.inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
+                    return ge::GRAPH_FAILED);
+    } else if (ctx.inputLayoutStr == "BSH_NBSD") {
+        OP_CHECK_IF(((queryD == valueD) && ((ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_0) !=
+                                             ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_1)) ||
+                                            (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_1) !=
+                                             ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
+                                            queryD != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_3)) ||
+                     ctx.tempN != ctx.tempOut->GetStorageShape().GetDim(0)),
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context->GetNodeName(), "query,attention_out",
+                        GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                            GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                        "Layout is " + ctx.inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
+                    return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckQueryOutShapeBSNDNBSD(gert::TilingContext* context, const QKVShapeCheckCtx& ctx,
+                                                  uint32_t& queryD, uint32_t& valueD)
+{
+    OP_CHECK_IF(
+        (ctx.tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_4),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "query",
+            std::to_string(ctx.tempQ->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", input query shape dim should be 4!"),
+        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        (ctx.tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_4),
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+            context->GetNodeName(), "attention_out",
+            std::to_string(ctx.tempOut->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+            "The current layout is " + ctx.inputLayoutStr + ", attention out shape dim should be 4!"),
+        return ge::GRAPH_FAILED);
+    queryD = ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_3);
+    valueD = ctx.tempV->GetStorageShape().GetDim(VALUE_DIM_3);
+    if (ctx.inputLayoutStr == "BSND_NBSD") {
+        OP_CHECK_IF(
+            ((queryD == valueD) &&
+             ((ctx.tempQ->GetStorageShape().GetDim(0) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_1)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_1) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != ctx.tempOut->GetStorageShape().GetDim(0)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_3) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_3)))),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "query,attention_out",
+                GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                    GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                "Layout is " + ctx.inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
+            return ge::GRAPH_FAILED);
+    } else if (ctx.inputLayoutStr == "BNSD_NBSD") {
+        OP_CHECK_IF(
+            ((queryD == valueD) &&
+             ((ctx.tempQ->GetStorageShape().GetDim(0) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_1)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_1) != ctx.tempOut->GetStorageShape().GetDim(0)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
+              (ctx.tempQ->GetStorageShape().GetDim(QUERY_DIM_3) != ctx.tempOut->GetStorageShape().GetDim(OUT_DIM_3)))),
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), "query,attention_out",
+                GetShapeDebugStr(ctx.tempQ->GetStorageShape()) + " vs " +
+                    GetShapeDebugStr(ctx.tempOut->GetStorageShape()),
+                "Layout is " + ctx.inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
+            return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckSoftmaxLseShape(gert::TilingContext* context, const LseShapeCheckCtx& ctx)
+{
+    if (ctx.inputLayoutStr == "TND" || ctx.inputLayoutStr == "TND_NTD") {
+        OP_CHECK_IF(((ctx.tempLse->GetStorageShape().GetDimNum() != QUERY_DIM_3)), // 3：lse shape TN1
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "softmax_lse",
+                                                             std::to_string(ctx.tempLse->GetStorageShape().GetDimNum()),
+                                                             "Layout is TND/TND_NTD SoftmaxLse shape dim should be 3"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF((((ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_0) != ctx.t) ||
+                      (ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_1) !=
+                       ctx.tempN) || // 0: the first dimension 1: the second dimension
+                      (ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_2) != 1))), // 2: the third dimension
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context->GetNodeName(), "softmax_lse",
+                        GetShapeDebugStr(ctx.tempLse->GetStorageShape()) + " vs TN1[" + std::to_string(ctx.t) + ", " +
+                            std::to_string(ctx.tempN) + ", 1]",
+                        "Layout is TND SoftmaxLse shape does not match TN1"), // 2: the third dimension
+                    return ge::GRAPH_FAILED);
+    } else if (ctx.inputLayoutStr == "NTD" || ctx.inputLayoutStr == "NTD_TND") {
+        OP_CHECK_IF(((ctx.tempLse->GetStorageShape().GetDimNum() != QUERY_DIM_3)), // 3：lse shape TN1
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "softmax_lse",
+                                                             std::to_string(ctx.tempLse->GetStorageShape().GetDimNum()),
+                                                             "Layout is NTD/NTD_TND SoftmaxLse shape dim should be 3"),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF((((ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_1) != ctx.tempN) ||
+                      (ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_0) !=
+                       ctx.t) || // 0: the first dimension 1: the second dimension
+                      (ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_2) != 1))), // 2: the third dimension
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context->GetNodeName(), "softmax_lse",
+                        GetShapeDebugStr(ctx.tempLse->GetStorageShape()) + " vs TN1[" + std::to_string(ctx.t) + ", " +
+                            std::to_string(ctx.tempN) + ", 1]",
+                        "Layout is NTD SoftmaxLse shape does not match TN1"), // 2: the third dimension
+                    return ge::GRAPH_FAILED);
+    } else {
+        OP_CHECK_IF(
+            ((ctx.tempLse->GetStorageShape().GetDimNum() != QUERY_DIM_4)), // 4：lse shape BNS1
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                context->GetNodeName(), "softmax_lse",
+                std::to_string(ctx.tempLse->GetStorageShape().GetDimNum()) + " (layout is " + ctx.inputLayoutStr + ")",
+                "Layout is " + ctx.inputLayoutStr + ", SoftmaxLse shape dim should be 4"),
+            return ge::GRAPH_FAILED);
+        OP_CHECK_IF((((ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_0) != ctx.b) ||
+                      (ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_1) !=
+                       ctx.tempN) || // 0: the first dimension 1: the second dimension
+                      (ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_2) != ctx.s) ||
+                      (ctx.tempLse->GetStorageShape().GetDim(QUERY_DIM_3) !=
+                       1))), // 2: the third dimension 3: the fourth dimension
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                        context->GetNodeName(), "softmax_lse",
+                        GetShapeDebugStr(ctx.tempLse->GetStorageShape()) + " vs BNS1[" + std::to_string(ctx.b) + ", " +
+                            std::to_string(ctx.tempN) + ", " + std::to_string(ctx.s) + ", 1]",
+                        "SoftmaxLse shape does not match BNS1"), // 2: the third dimension 3: the fourth dimension
+                    return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
 }
 
 ge::graphStatus TilingFusedInferAttentionScoreArch38(gert::TilingContext* context)
@@ -752,23 +430,30 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
                                                       std::to_string(tempQ->GetStorageShape().GetShapeSize()),
                                                       "Get the shape size of Query failed!"),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(attrs == nullptr, ReportTilingFailure(context_, "Attributes returned from GetAttrs() is a nullptr!"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(attrs == nullptr, ReportNullPointer(context_, __func__, "attrs"), return ge::GRAPH_FAILED);
 
-    uint32_t tempN = *attrs->GetAttrPointer<uint32_t>(ATTR_N_INDEX);
-    uint32_t tempKVN = *attrs->GetAttrPointer<uint32_t>(ATTR_NUM_KV_HEADS_INDEX);
+    const int64_t* numHeadsAttrPtr = attrs->GetAttrPointer<int64_t>(ATTR_N_INDEX);
+    const int64_t* numKvHeadsAttrPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_KV_HEADS_INDEX);
+    const char* inputLayoutAttrPtr = attrs->GetAttrPointer<char>(ATTR_INPUT_LAYOUT_INDEX);
+    const bool* lseFlagAttrPtr = attrs->GetAttrPointer<bool>(ATTR_SOFTMAX_LSE_FLAG_INDEX);
+    OP_CHECK_IF(((numHeadsAttrPtr == nullptr) || (numKvHeadsAttrPtr == nullptr) || (inputLayoutAttrPtr == nullptr) ||
+                 (lseFlagAttrPtr == nullptr)),
+                ReportNullPointer(context_, __func__, "num_heads/num_key_value_heads/input_layout/softmax_lse_flag"),
+                return ge::GRAPH_FAILED);
+    int64_t tempN = *numHeadsAttrPtr;
+    int64_t tempKVN = *numKvHeadsAttrPtr;
     OP_CHECK_IF(tempN == 0,
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "num_heads", std::to_string(tempN),
                                                       "Q numhead is 0!"),
                 return ge::GRAPH_FAILED);
-    if (tempKVN == 0U) {
+    if (tempKVN == 0) {
         tempKVN = tempN;
     }
-    const string inputLayoutStr = string(attrs->GetAttrPointer<char>(ATTR_INPUT_LAYOUT_INDEX));
+    const string inputLayoutStr = string(inputLayoutAttrPtr);
     int64_t s = 0;
     int64_t b = tempQ->GetStorageShape().GetDim(QUERY_DIM_0);
     int64_t t = 0;
-    bool lseFlag = *attrs->GetAttrPointer<bool>(ATTR_SOFTMAX_LSE_FLAG_INDEX);
+    bool lseFlag = *lseFlagAttrPtr;
     if (inputLayoutStr == "BNSD" || inputLayoutStr == "BNSD_BSND") {
         s = tempQ->GetStorageShape().GetDim(QUERY_DIM_2);
     } else if (inputLayoutStr == "TND" || inputLayoutStr == "TND_NTD") {
@@ -777,16 +462,18 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
             s = tempQ->GetStorageShape().GetDim(QUERY_DIM_0);
         } else {
             const gert::Tensor* actualSeqLength = context_->GetOptionalInputTensor(ACTUAL_SEQ_Q_INDEX);
-            int64_t actSeqLenDims = (actualSeqLength != nullptr) ? actualSeqLength->GetShapeSize() : 0;
+            const gert::StorageShape* actualSeqLengthShape = context_->GetOptionalInputShape(ACTUAL_SEQ_Q_INDEX);
+            int64_t actSeqLenDims =
+                (actualSeqLengthShape != nullptr) ? actualSeqLengthShape->GetStorageShape().GetShapeSize() : 0;
             OP_CHECK_IF(((actualSeqLength == nullptr) || (actSeqLenDims == 0) ||
                          (actualSeqLength->GetData<int64_t>() == nullptr)),
                         OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "actual_seq_lengths"),
                         return ge::GRAPH_FAILED);
             s = actualSeqLength->GetData<int64_t>()[0];
-            for (int i = 1; i < actualSeqLength->GetShapeSize(); ++i) {
+            for (int i = 1; i < actSeqLenDims; ++i) {
                 s = std::max(s, actualSeqLength->GetData<int64_t>()[i] - actualSeqLength->GetData<int64_t>()[i - 1]);
             }
-            t = actualSeqLength->GetData<int64_t>()[actualSeqLength->GetShapeSize() - 1];
+            t = actualSeqLength->GetData<int64_t>()[actSeqLenDims - 1];
         }
     } else if (inputLayoutStr == "NTD" || inputLayoutStr == "NTD_TND") {
         if (isMaxWorkspace) {
@@ -794,244 +481,58 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
             s = tempQ->GetStorageShape().GetDim(QUERY_DIM_1);
         } else {
             const gert::Tensor* actualSeqLength = context_->GetOptionalInputTensor(ACTUAL_SEQ_Q_INDEX);
-            int64_t actSeqLenDims = (actualSeqLength != nullptr) ? actualSeqLength->GetShapeSize() : 0;
+            const gert::StorageShape* actualSeqLengthShape = context_->GetOptionalInputShape(ACTUAL_SEQ_Q_INDEX);
+            int64_t actSeqLenDims =
+                (actualSeqLengthShape != nullptr) ? actualSeqLengthShape->GetStorageShape().GetShapeSize() : 0;
             OP_CHECK_IF(((actualSeqLength == nullptr) || (actSeqLenDims == 0) ||
                          (actualSeqLength->GetData<int64_t>() == nullptr)),
                         OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "actual_seq_lengths"),
                         return ge::GRAPH_FAILED);
             s = actualSeqLength->GetData<int64_t>()[0];
-            for (int i = 1; i < actualSeqLength->GetShapeSize(); ++i) {
+            for (int i = 1; i < actSeqLenDims; ++i) {
                 s = std::max(s, actualSeqLength->GetData<int64_t>()[i] - actualSeqLength->GetData<int64_t>()[i - 1]);
             }
-            t = actualSeqLength->GetData<int64_t>()[actualSeqLength->GetShapeSize() - 1];
+            t = actualSeqLength->GetData<int64_t>()[actSeqLenDims - 1];
         }
     } else {
         s = tempQ->GetStorageShape().GetDim(1);
     }
+    QKVShapeCheckCtx qkvCtx;
+    qkvCtx.tempQ = tempQ;
+    qkvCtx.tempV = tempV;
+    qkvCtx.tempOut = tempOut;
+    qkvCtx.tempN = tempN;
+    qkvCtx.tempKVN = tempKVN;
+    qkvCtx.inputLayoutStr = inputLayoutStr;
     if (inputLayoutStr == "NSD") { // 当前已没有NSD, 回主线后在FIA tiling Arch38内删除
         b = 1;
-        OP_CHECK_IF((tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "query",
-                                                             std::to_string(tempQ->GetStorageShape().GetDimNum()),
-                                                             "input shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        queryD = tempQ->GetStorageShape().GetDim(QUERY_DIM_2);
-        valueD = tempV->GetStorageShape().GetDim(VALUE_DIM_2);
-        OP_CHECK_IF(
-            ((queryD == valueD) && (tempQ->GetStorageShape() != tempOut->GetStorageShape())),
-            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                context_->GetNodeName(), "query,attention_out",
-                GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                "Layout is NSD and Query shape does NOT match Attention Out shape"),
-            return ge::GRAPH_FAILED);
+        if (CheckQueryOutShapeNSD(context_, qkvCtx, queryD, valueD) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
     } else if (inputLayoutStr == "TND" || inputLayoutStr == "TND_NTD") {
-        OP_CHECK_IF((tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "query",
-                        std::to_string(tempQ->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", input query shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF((tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "attention_out",
-                        std::to_string(tempOut->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", attention out shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        queryD = tempQ->GetStorageShape().GetDim(QUERY_DIM_2);
-        valueD = tempV->GetStorageShape().GetDim(VALUE_DIM_2);
-        if (inputLayoutStr == "TND") {
-            OP_CHECK_IF(
-                ((queryD == valueD) && (tempQ->GetStorageShape() != tempOut->GetStorageShape())),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is TND and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
-        } else {
-            OP_CHECK_IF(
-                ((queryD == valueD) &&
-                 ((tempQ->GetStorageShape().GetDim(0) != tempOut->GetStorageShape().GetDim(1)) ||
-                  (tempQ->GetStorageShape().GetDim(1) != tempOut->GetStorageShape().GetDim(0)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != tempOut->GetStorageShape().GetDim(QUERY_DIM_2)))),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is TND_NTD and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
+        if (CheckQueryOutShapeTND(context_, qkvCtx, queryD, valueD) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
         }
     } else if (inputLayoutStr == "NTD" || inputLayoutStr == "NTD_TND") {
-        OP_CHECK_IF((tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "query",
-                        std::to_string(tempQ->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", input query shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF((tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "attention_out",
-                        std::to_string(tempOut->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", attention out shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        queryD = tempQ->GetStorageShape().GetDim(QUERY_DIM_2);
-        valueD = tempV->GetStorageShape().GetDim(VALUE_DIM_2);
-        if (inputLayoutStr == "NTD") {
-            OP_CHECK_IF(
-                ((queryD == valueD) && (tempQ->GetStorageShape() != tempOut->GetStorageShape())),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is NTD and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
-        } else if (inputLayoutStr == "NTD_TND") {
-            OP_CHECK_IF(
-                ((queryD == valueD) &&
-                 ((tempQ->GetStorageShape().GetDim(0) != tempOut->GetStorageShape().GetDim(1)) ||
-                  (tempQ->GetStorageShape().GetDim(1) != tempOut->GetStorageShape().GetDim(0)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != tempOut->GetStorageShape().GetDim(OUT_DIM_2)))),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is NTD_TND and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
+        if (CheckQueryOutShapeNTD(context_, qkvCtx, queryD, valueD) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
         }
     } else if (inputLayoutStr == "BSH") {
-        OP_CHECK_IF((tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "query",
-                        std::to_string(tempQ->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", input query shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF((tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "attention_out",
-                        std::to_string(tempOut->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", attention out shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        queryD = tempQ->GetStorageShape().GetDim(QUERY_DIM_2) / tempN;
-        valueD = tempV->GetStorageShape().GetDim(VALUE_DIM_2) / tempKVN;
-        OP_CHECK_IF(
-            ((queryD == valueD) && (tempQ->GetStorageShape() != tempOut->GetStorageShape())),
-            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                context_->GetNodeName(), "query,attention_out",
-                GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                "Layout is BSH and Query shape does NOT match Attention Out shape"),
-            return ge::GRAPH_FAILED);
+        if (CheckQueryOutShapeBSH(context_, qkvCtx, queryD, valueD) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
     } else if (inputLayoutStr == "BNSD_BSND" || inputLayoutStr == "BNSD" || inputLayoutStr == "BSND" ||
                inputLayoutStr == "BSND_BNSD") {
-        OP_CHECK_IF((tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_4),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "query",
-                        std::to_string(tempQ->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", input query shape dim should be 4!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF((tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_4),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "attention_out",
-                        std::to_string(tempOut->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", attention out shape dim should be 4!"),
-                    return ge::GRAPH_FAILED);
-        queryD = tempQ->GetStorageShape().GetDim(QUERY_DIM_3);
-        valueD = tempV->GetStorageShape().GetDim(VALUE_DIM_3);
-        if (inputLayoutStr == "BNSD_BSND" || inputLayoutStr == "BSND_BNSD") {
-            OP_CHECK_IF(
-                ((queryD == valueD) &&
-                 ((tempQ->GetStorageShape().GetDim(0) != tempOut->GetStorageShape().GetDim(0)) ||
-                  (tempQ->GetStorageShape().GetDim(1) != tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != tempOut->GetStorageShape().GetDim(1)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_3) != tempOut->GetStorageShape().GetDim(OUT_DIM_3)))),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is " + inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
-        } else if (inputLayoutStr == "BNSD") {
-            OP_CHECK_IF(
-                ((queryD == valueD) && (tempQ->GetStorageShape() != tempOut->GetStorageShape())),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is BNSD and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
+        if (CheckQueryOutShapeBNSD(context_, qkvCtx, queryD, valueD) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
         }
     } else if (inputLayoutStr == "BSH_BNSD" || inputLayoutStr == "BSH_NBSD") {
-        OP_CHECK_IF((tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_3),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "query",
-                        std::to_string(tempQ->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", input query shape dim should be 3!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF((tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_4),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "attention_out",
-                        std::to_string(tempOut->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", attention out shape dim should be 4!"),
-                    return ge::GRAPH_FAILED);
-        queryD = tempQ->GetStorageShape().GetDim(QUERY_DIM_2) / tempN;
-        valueD = tempV->GetStorageShape().GetDim(VALUE_DIM_2) / tempKVN;
-        if (inputLayoutStr == "BSH_BNSD") {
-            OP_CHECK_IF(
-                ((queryD == valueD) &&
-                     ((tempQ->GetStorageShape().GetDim(QUERY_DIM_0) != tempOut->GetStorageShape().GetDim(0)) ||
-                      (tempQ->GetStorageShape().GetDim(QUERY_DIM_1) != tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
-                      queryD != tempOut->GetStorageShape().GetDim(OUT_DIM_3)) ||
-                 tempN != tempOut->GetStorageShape().GetDim(OUT_DIM_1)),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is " + inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
-        } else if (inputLayoutStr == "BSH_NBSD") {
-            OP_CHECK_IF(
-                ((queryD == valueD) &&
-                     ((tempQ->GetStorageShape().GetDim(QUERY_DIM_0) != tempOut->GetStorageShape().GetDim(OUT_DIM_1)) ||
-                      (tempQ->GetStorageShape().GetDim(QUERY_DIM_1) != tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
-                      queryD != tempOut->GetStorageShape().GetDim(OUT_DIM_3)) ||
-                 tempN != tempOut->GetStorageShape().GetDim(0)),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is " + inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
+        if (CheckQueryOutShapeBSHBNSD(context_, qkvCtx, queryD, valueD) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
         }
     } else if (inputLayoutStr == "BSND_NBSD" || inputLayoutStr == "BNSD_NBSD") {
-        OP_CHECK_IF((tempQ->GetStorageShape().GetDimNum() != QUERY_DIM_4),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "query",
-                        std::to_string(tempQ->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", input query shape dim should be 4!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF((tempOut->GetStorageShape().GetDimNum() != QUERY_DIM_4),
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "attention_out",
-                        std::to_string(tempOut->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "The current layout is " + inputLayoutStr + ", attention out shape dim should be 4!"),
-                    return ge::GRAPH_FAILED);
-        queryD = tempQ->GetStorageShape().GetDim(QUERY_DIM_3);
-        valueD = tempV->GetStorageShape().GetDim(VALUE_DIM_3);
-        if (inputLayoutStr == "BSND_NBSD") {
-            OP_CHECK_IF(
-                ((queryD == valueD) &&
-                 ((tempQ->GetStorageShape().GetDim(0) != tempOut->GetStorageShape().GetDim(OUT_DIM_1)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_1) != tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != tempOut->GetStorageShape().GetDim(0)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_3) != tempOut->GetStorageShape().GetDim(OUT_DIM_3)))),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is " + inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
-        } else if (inputLayoutStr == "BNSD_NBSD") {
-            OP_CHECK_IF(
-                ((queryD == valueD) &&
-                 ((tempQ->GetStorageShape().GetDim(0) != tempOut->GetStorageShape().GetDim(OUT_DIM_1)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_1) != tempOut->GetStorageShape().GetDim(0)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_2) != tempOut->GetStorageShape().GetDim(OUT_DIM_2)) ||
-                  (tempQ->GetStorageShape().GetDim(QUERY_DIM_3) != tempOut->GetStorageShape().GetDim(OUT_DIM_3)))),
-                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                    context_->GetNodeName(), "query,attention_out",
-                    GetShapeDebugStr(tempQ->GetStorageShape()) + " vs " + GetShapeDebugStr(tempOut->GetStorageShape()),
-                    "Layout is " + inputLayoutStr + " and Query shape does NOT match Attention Out shape"),
-                return ge::GRAPH_FAILED);
+        if (CheckQueryOutShapeBSNDNBSD(context_, qkvCtx, queryD, valueD) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
         }
     } else {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
@@ -1082,7 +583,7 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
     constexpr int64_t D_ALIGN_16 = 16;
 
     FiaArch38FlashAttentionTilingData pfaTilingData;
-    FiaArch38PromptTiling pfa_tiling(context_);
+    FiaArch38PromptTiling pfaTiling(context_);
     FiaArch38ContextParams contextParamsForPFATiling;
     FiaArch38CompileInfo tempCompileInfoPtr;
 
@@ -1095,7 +596,7 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
                 return ge::GRAPH_FAILED);
 
     auto platformInfoPtr = context_->GetPlatformInfo();
-    OP_CHECK_IF(platformInfoPtr == nullptr, ReportTilingFailure(context_, "platformInfoPtr is null!"),
+    OP_CHECK_IF(platformInfoPtr == nullptr, ReportNullPointer(context_, __func__, "platformInfoPtr"),
                 return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     tempCompileInfoPtr.aivNum = ascendcPlatform.GetCoreNumAiv();
@@ -1116,69 +617,23 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
         return ret;
     }
     if (lseFlag != false) {
-        if (!pfa_tiling.CheckNonEmptyShapeExceptions(contextParamsForPFATiling,
-                                                     contextParamsForPFATiling.lseoutputShape, "softmaxLse")) {
+        if (!pfaTiling.CheckNonEmptyShapeExceptions(contextParamsForPFATiling, contextParamsForPFATiling.lseoutputShape,
+                                                    "softmaxLse")) {
             return ge::GRAPH_FAILED;
         }
         OP_CHECK_IF(((tempLse == nullptr)), OP_LOGE_WITH_INVALID_INPUT(context_->GetNodeName(), "softmax_lse"),
                     return ge::GRAPH_FAILED);
 
         if (!qOutEmptyTensor) { // q、out为空时，lse为空则不输出，不为空则输出inf，跳过lse形状校验
-            if (inputLayoutStr == "TND" || inputLayoutStr == "TND_NTD") {
-                OP_CHECK_IF(
-                    ((tempLse->GetStorageShape().GetDimNum() != QUERY_DIM_3)), // 3：lse shape TN1
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "softmax_lse",
-                                                             std::to_string(tempLse->GetStorageShape().GetDimNum()),
-                                                             "Layout is TND/TND_NTD SoftmaxLse shape dim should be 3"),
-                    return ge::GRAPH_FAILED);
-                OP_CHECK_IF((((tempLse->GetStorageShape().GetDim(QUERY_DIM_0) != t) ||
-                              (tempLse->GetStorageShape().GetDim(QUERY_DIM_1) !=
-                               tempN) || // 0: the first dimension 1: the second dimension
-                              (tempLse->GetStorageShape().GetDim(QUERY_DIM_2) != 1))), // 2: the third dimension
-                            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                                context_->GetNodeName(), "softmax_lse",
-                                GetShapeDebugStr(tempLse->GetStorageShape()) + " vs TN1[" + std::to_string(t) + ", " +
-                                    std::to_string(tempN) + ", 1]",
-                                "Layout is TND SoftmaxLse shape does not match TN1"), // 2: the third dimension
-                            return ge::GRAPH_FAILED);
-            } else if (inputLayoutStr == "NTD" || inputLayoutStr == "NTD_TND") {
-                OP_CHECK_IF(
-                    ((tempLse->GetStorageShape().GetDimNum() != QUERY_DIM_3)), // 3：lse shape TN1
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "softmax_lse",
-                                                             std::to_string(tempLse->GetStorageShape().GetDimNum()),
-                                                             "Layout is NTD/NTD_TND SoftmaxLse shape dim should be 3"),
-                    return ge::GRAPH_FAILED);
-                OP_CHECK_IF((((tempLse->GetStorageShape().GetDim(QUERY_DIM_1) != tempN) ||
-                              (tempLse->GetStorageShape().GetDim(QUERY_DIM_0) !=
-                               t) || // 0: the first dimension 1: the second dimension
-                              (tempLse->GetStorageShape().GetDim(QUERY_DIM_2) != 1))), // 2: the third dimension
-                            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                                context_->GetNodeName(), "softmax_lse",
-                                GetShapeDebugStr(tempLse->GetStorageShape()) + " vs TN1[" + std::to_string(t) + ", " +
-                                    std::to_string(tempN) + ", 1]",
-                                "Layout is NTD SoftmaxLse shape does not match TN1"), // 2: the third dimension
-                            return ge::GRAPH_FAILED);
-            } else {
-                OP_CHECK_IF(
-                    ((tempLse->GetStorageShape().GetDimNum() != QUERY_DIM_4)), // 4：lse shape BNS1
-                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
-                        context_->GetNodeName(), "softmax_lse",
-                        std::to_string(tempLse->GetStorageShape().GetDimNum()) + " (layout is " + inputLayoutStr + ")",
-                        "Layout is " + inputLayoutStr + ", SoftmaxLse shape dim should be 4"),
-                    return ge::GRAPH_FAILED);
-                OP_CHECK_IF(
-                    (((tempLse->GetStorageShape().GetDim(QUERY_DIM_0) != b) ||
-                      (tempLse->GetStorageShape().GetDim(QUERY_DIM_1) !=
-                       tempN) || // 0: the first dimension 1: the second dimension
-                      (tempLse->GetStorageShape().GetDim(QUERY_DIM_2) != s) ||
-                      (tempLse->GetStorageShape().GetDim(QUERY_DIM_3) !=
-                       1))), // 2: the third dimension 3: the fourth dimension
-                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-                        context_->GetNodeName(), "softmax_lse",
-                        GetShapeDebugStr(tempLse->GetStorageShape()) + " vs BNS1[" + std::to_string(b) + ", " +
-                            std::to_string(tempN) + ", " + std::to_string(s) + ", 1]",
-                        "SoftmaxLse shape does not match BNS1"), // 2: the third dimension 3: the fourth dimension
-                    return ge::GRAPH_FAILED);
+            LseShapeCheckCtx lseCtx;
+            lseCtx.tempLse = tempLse;
+            lseCtx.inputLayoutStr = inputLayoutStr;
+            lseCtx.tempN = tempN;
+            lseCtx.b = b;
+            lseCtx.s = s;
+            lseCtx.t = t;
+            if (CheckSoftmaxLseShape(context_, lseCtx) != ge::GRAPH_SUCCESS) {
+                return ge::GRAPH_FAILED;
             }
         }
     }
@@ -1197,7 +652,7 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
                                                   "D should be 16 elements aligned when FLOAT16/BFLOAT16 dtype!"),
             return ge::GRAPH_FAILED);
     }
-    ret = pfa_tiling.DoSubOpTiling(pfaTilingData, contextParamsForPFATiling);
+    ret = pfaTiling.DoSubOpTiling(pfaTilingData, contextParamsForPFATiling);
     OP_CHECK_IF(ret == ge::GRAPH_FAILED, OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "failed in FIA DoSubOpTiling"),
                 return ge::GRAPH_FAILED);
     return ret;

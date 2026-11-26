@@ -8,22 +8,27 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+/*!
+ * \file fia_arch38_tiling_data.h
+ * \brief FIA arch38 的 kernel regbase 输入序列化契约定义（PFATilingDataconvert 的最终输出）
+ *
+ * 本头文件声明 kernel 直调（`<<<>>>`）接收的 regbase 输入参数序列化结构：
+ * InputParamsRegbase / MultiCoreParamsRegbase / DropmaskParamsRegbase / InitOutputParams，
+ * 以及由它们组合成的 FlashAttentionScoreSimplifiedTilingData（即 faTilingAdapter 的类型）。
+ * host 侧先在 fia_arch38_tiling_common.h 的 FiaArch38AttentionBaseParams 等中间态上计算，
+ * 再经 PFATilingDataconvert 转换写入本文件的 InputParamsRegbase 等最终态，最后落盘到 tiling context。
+ * 注意：这些结构参与序列化，字段顺序不能随意变动。
+ */
+
 #ifndef FIA_ARCH38_TILING_DATA_H
 #define FIA_ARCH38_TILING_DATA_H
 
 #include "register/tilingdata_base.h"
 
 namespace optiling {
+namespace arch38 {
 
-struct PFAShapeInfo {
-    uint32_t b = 0;
-    uint64_t n = 0;
-    uint64_t s = 0;
-    uint32_t d = 0;
-    uint64_t h = 0;
-    uint32_t t = 0;
-};
-
+// kernel 直调的输入参数（regbase）：由 PFATilingDataconvert 从 host 中间态转换而来
 BEGIN_TILING_DATA_DEF(InputParamsRegbase)
 TILING_DATA_FIELD_DEF(int64_t, bSize);
 TILING_DATA_FIELD_DEF(int64_t, n2Size);
@@ -109,6 +114,7 @@ TILING_DATA_FIELD_DEF(uint16_t, antiquantPerHeadFlag);
 TILING_DATA_FIELD_DEF(uint32_t, antiquantParaSeqSize);
 END_TILING_DATA_DEF;
 
+// 多核切分参数（各 core 的 s1 切分区间与负载）
 BEGIN_TILING_DATA_DEF(MultiCoreParamsRegbase)
 TILING_DATA_FIELD_DEF(int32_t, coreNum);
 TILING_DATA_FIELD_DEF(int64_t, totalSize);
@@ -119,6 +125,7 @@ TILING_DATA_FIELD_DEF_ARR(uint32_t, 48, bnStartIdx);
 TILING_DATA_FIELD_DEF_ARR(int64_t, 48, sparseStartIdx);
 END_TILING_DATA_DEF;
 
+// dropmask 场景的切分/UB 计算参数
 BEGIN_TILING_DATA_DEF(DropmaskParamsRegbase)
 TILING_DATA_FIELD_DEF(int32_t, multiCoreFactorSize);
 TILING_DATA_FIELD_DEF(int32_t, baseUbCalSize);
@@ -126,6 +133,7 @@ TILING_DATA_FIELD_DEF(int64_t, multiCoreTotalSize);
 TILING_DATA_FIELD_DEF(int64_t, shapeTotalSize);
 END_TILING_DATA_DEF;
 
+// InitOutput 分支（needInit 路径）的输出尺寸参数
 BEGIN_TILING_DATA_DEF(InitOutputParams)
 TILING_DATA_FIELD_DEF(uint32_t, singleCoreSize);
 TILING_DATA_FIELD_DEF(uint8_t, needInit);
@@ -135,11 +143,13 @@ TILING_DATA_FIELD_DEF(int64_t, totalOutputSize);
 TILING_DATA_FIELD_DEF(int64_t, totalSoftMaxLseOutputSize);
 END_TILING_DATA_DEF;
 
+// 注册 regbase 序列化类（供 tiling framework 反射/序列化）
 REGISTER_TILING_DATA_CLASS(InputParamsRegbaseOp, InputParamsRegbase)
 REGISTER_TILING_DATA_CLASS(MultiCoreParamsRegbaseOp, MultiCoreParamsRegbase)
 REGISTER_TILING_DATA_CLASS(DropmaskParamsRegbaseOp, DropmaskParamsRegbase)
 REGISTER_TILING_DATA_CLASS(InitOutputParamsOp, InitOutputParams)
 
+// kernel 直调输入参数的聚合体（faTilingAdapter 的类型），组合上述四个 regbase struct
 BEGIN_TILING_DATA_DEF(FlashAttentionScoreSimplifiedTilingData)
 TILING_DATA_FIELD_DEF_STRUCT(InputParamsRegbase, inputParamsRegbase);
 TILING_DATA_FIELD_DEF_STRUCT(MultiCoreParamsRegbase, multiCoreParamsRegbase);
@@ -147,6 +157,7 @@ TILING_DATA_FIELD_DEF_STRUCT(DropmaskParamsRegbase, dropmaskParamsRegbase);
 TILING_DATA_FIELD_DEF_STRUCT(InitOutputParams, initOutputParams);
 END_TILING_DATA_DEF;
 
+} // namespace arch38
 } // namespace optiling
 
 #endif // FIA_ARCH38_TILING_DATA_H

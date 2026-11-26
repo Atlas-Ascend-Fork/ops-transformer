@@ -8,6 +8,19 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+/*!
+ * \file fia_arch38_context.h
+ * \brief FIA arch38 算子输入上下文聚合结构定义（输入解析层，不参与序列化）
+ *
+ * 本头文件声明 host 侧解析算子输入时使用的上下文结构，把 gert 侧的 Tensor/StorageShape/DataType
+ * 指针统一聚合为便于 tiling 逻辑访问的纯结构体：
+ *   - FiaArch38CompileInfo：编译期信息（各核数、UB/L1/L0 空间、SoC 版本）；
+ *   - FiaArch38ContextParams：算子全部可选/必选输入的指针与标量聚合，是 tiling 各校验的入参基座；
+ *   - FiaArch38RequiredParaInfo / FiaArch38OptionalParaInfo：必选/可选参数描述；
+ *   - FiaArch38IncreContext：IFA 增量（复用 PFA 模板）场景的输入描述。
+ * 这些结构仅用于 host 侧数据交换，不参与算子 tiling 数据的序列化。
+ */
+
 #ifndef FIA_ARCH38_CONTEXT_H
 #define FIA_ARCH38_CONTEXT_H
 
@@ -19,7 +32,9 @@
 #include "register/op_def_registry.h"
 
 namespace optiling {
+namespace arch38 {
 
+// 编译期硬件信息：各核数量、片上/UB/L1/L0 空间与 SoC 版本，供 tiling 切分与 workspace 估算使用
 struct FiaArch38CompileInfo {
     uint32_t aivNum;
     uint32_t aicNum;
@@ -32,6 +47,7 @@ struct FiaArch38CompileInfo {
     platform_ascendc::SocVersion socShortName;
 };
 
+// 算子输入上下文聚合：把 gert 侧的 tensor/shape/dtype 指针与标量统一收纳，作为各校验函数的入参基座
 struct FiaArch38ContextParams {
     const gert::Tensor* pseShift = nullptr;
     const gert::Tensor* attentionMask = nullptr;
@@ -103,11 +119,11 @@ struct FiaArch38ContextParams {
 
     const int64_t* innerPrecisePtr = nullptr;
     const int64_t* headsNumber = nullptr;
-    const int32_t* sparseMode = nullptr;
+    const int64_t* sparseMode = nullptr;
     const int64_t* preToken = nullptr;
     const int64_t* nextToken = nullptr;
     const float* scaleValue = nullptr;
-    const int32_t* blockSize = nullptr;
+    const int64_t* blockSize = nullptr;
     const char* layout = nullptr;
     const int64_t* numKeyValueHeads = nullptr;
     size_t* workspaceSize = nullptr;
@@ -140,16 +156,19 @@ struct FiaArch38ContextParams {
     bool isBaseApiTilingKey = false;
 };
 
+// 必选参数描述：编译期 tensor 描述 + 形状
 struct FiaArch38RequiredParaInfo {
     const gert::CompileTimeTensorDesc* desc;
     const gert::StorageShape* shape;
 };
 
+// 可选参数描述：编译期 tensor 描述 + tensor（可能为 null）
 struct FiaArch38OptionalParaInfo {
     const gert::CompileTimeTensorDesc* desc;
     const gert::Tensor* tensor;
 };
 
+// IFA 增量（复用 PFA 模板）场景的输入描述，供 IsArch38IncreScenarioSupported 做增量边界校验
 struct FiaArch38IncreContext {
     FiaArch38RequiredParaInfo query = {nullptr, nullptr};
     FiaArch38RequiredParaInfo key = {nullptr, nullptr};
@@ -161,11 +180,11 @@ struct FiaArch38IncreContext {
 
     FiaArch38RequiredParaInfo attenOut = {nullptr, nullptr};
 
-    const uint32_t* numHeads = nullptr;
-    const uint32_t* kvHeadNums = nullptr;
-    const char* layOut = nullptr;
+    const int64_t* numHeads = nullptr;
+    const int64_t* kvHeadNums = nullptr;
 };
 
+} // namespace arch38
 } // namespace optiling
 
 #endif // FIA_ARCH38_CONTEXT_H

@@ -8,17 +8,14 @@
  * See LICENSE in the root of the software repository for the full text of the License.
   */
 
-/* !
- * \file fused_infer_attention_score_tiling_arch38.h
- * \brief
- */
-
 #ifndef AIR_CXX_RUNTIME_V2_OP_IMPL_FUSEDINFERATTENTIONSCORE_ARCH38_H_
 #define AIR_CXX_RUNTIME_V2_OP_IMPL_FUSEDINFERATTENTIONSCORE_ARCH38_H_
 #include "register/tilingdata_base.h"
 #include "../../../common/op_host/fia_tiling_base.h"
+#include "fia_arch38_tiling_utils.h"
 
 namespace optiling {
+
 ge::graphStatus TilingFusedInferAttentionScoreArch38(gert::TilingContext* context);
 class FusedInferAttentionScoreTilingArch38 : public FiaTilingBase {
 public:

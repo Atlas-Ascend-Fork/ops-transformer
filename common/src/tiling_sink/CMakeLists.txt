@@ -49,6 +49,14 @@ set(src_files
   ${ARCH35_CHECKER_SRC_FILES}
   ${ATTENTION_SRC}/prompt_flash_attention/op_host/prompt_flash_attention_tiling.cpp
   ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_prompt_tiling.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_context_convert.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_dataconvert.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_quant_check.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_pa_check.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_mask_sparse_check.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_feature_check.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_shape_check.cpp
+  ${ATTENTION_SRC}/fused_infer_attention_score/op_host/arch38/fia_arch38_tiling_compute.cpp
   ${ATTENTION_SRC}/incre_flash_attention/op_host/incre_flash_attention_tiling.cpp
   ${ATTENTION_SRC}/incre_flash_attention/op_host/incre_flash_attention_tiling_check.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/tiling_sink_registry.cpp
