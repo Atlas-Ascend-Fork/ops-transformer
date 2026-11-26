@@ -467,7 +467,12 @@ aclnnStatus aclnnSparseFlashAttention(
             <tr>
                 <td>ACLNN_ERR_PARAM_INVALID</td>
                 <td>161002</td>
-                <td>query、key、value、sparseIndices、blockTableOptional、actualSeqLengthsQueryOptional、actualSeqLengthsKvOptional、queryRopeOptional、keyRopeOptional、scaleValue、sparseBlockSizeOptional、layoutQueryOptional、layoutKvOptional、sparseMode、attentionMode、returnSoftmaxLse、attentionOut、softmaxMax、softmaxSum的数据类型和数据格式不在支持的范围内。</td>
+                <td>query、key、value、sparseIndices、blockTableOptional、actualSeqLengthsQueryOptional、actualSeqLengthsKvOptional、queryRopeOptional、keyRopeOptional、scaleValue、sparseBlockSizeOptional、returnSoftmaxLse、attentionOut、softmaxMax、softmaxSum的数据类型和数据格式不在支持的范围内。</td>
+            </tr>
+            <tr>
+                <td>ACLNN_ERR_INNER_TILING_ERROR</td>
+                <td>561002</td>
+                <td>layoutQueryOptional、layoutKvOptional、sparseMode、attentionMode或preTokens的取值不在支持范围内，且在Tiling阶段校验失败。</td>
             </tr>
         </tbody>
     </table>
