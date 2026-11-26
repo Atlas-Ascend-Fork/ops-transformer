@@ -190,6 +190,125 @@ public:
         }
     }
 
+    // 读对端 recvCount/rdispl 并折算本流水线接收量，返回本流水线 GM 基址（行偏移）
+    __aicore__ inline int64_t LoadRecvPipelineBase(uint32_t srcRank, uint32_t pipelineIdx, uint32_t& pipelineRecvCount)
+    {
+        GlobalTensor<int32_t> rSlotGM;
+        rSlotGM.SetGlobalBuffer((__gm__ int32_t*)(config_.recvCountsGM + srcRank * sizeof(int32_t)));
+        DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(rSlotGM);
+        int32_t recvCount = rSlotGM.GetValue(0);
+
+        GlobalTensor<int64_t> rDisplSlotGM;
+        rDisplSlotGM.SetGlobalBuffer((__gm__ int64_t*)(config_.rdisplsGM + srcRank * ALLTOALLV_UB_ALIGN));
+        DataCacheCleanAndInvalid<int64_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(rDisplSlotGM);
+        int64_t rdispl = rDisplSlotGM.GetValue(0);
+
+        int32_t baseShare = recvCount / static_cast<int32_t>(pipelinesPerRank_);
+        pipelineRecvCount = (pipelineIdx == pipelinesPerRank_ - 1U) ?
+                                static_cast<uint32_t>(recvCount - static_cast<int32_t>(pipelineIdx) * baseShare) :
+                                static_cast<uint32_t>(baseShare);
+        return rdispl + static_cast<int64_t>(pipelineIdx) * baseShare;
+    }
+
+    // 无空隙大批量拷贝：连续 batchSlots 个槽一次拷到 recvGrad
+    __aicore__ inline __attribute__((always_inline)) void CopySlotsNoSlack(uint64_t slotAreaBase, int64_t pipelineBase,
+                                                                           uint32_t pipelineReceived,
+                                                                           uint32_t localReadCnt, uint32_t pipelineIdx,
+                                                                           uint32_t slotsPerSender, uint32_t batchSlots,
+                                                                           uint32_t& slotsRead, uint32_t& tokensRead)
+    {
+        // 无间隙，且批量处理的槽数据没超过还剩余部分，可以一次性copy处理
+        uint32_t totalTokens = batchSlots * maxTokensPerSlot_;
+        uint32_t firstSegIdx = localReadCnt % slotsPerSender;
+        uint32_t firstSlotIdx = pipelineIdx * slotsPerSender + firstSegIdx;
+        uint64_t firstSlotOffset = slotAreaBase + static_cast<uint64_t>(firstSlotIdx) * tokenSlotSize_;
+
+        LocalCopy(config_.dstGM + static_cast<uint64_t>(pipelineBase + pipelineReceived) * config_.rowBytes,
+                  localWinBase_ + firstSlotOffset,
+                  static_cast<uint64_t>(totalTokens) * config_.rowBytes); // 读槽数据到recvGrad
+        slotsRead = batchSlots;
+        tokensRead = totalTokens;
+    }
+
+    // 逐槽拷贝（槽间存在脏数据空隙）
+    __aicore__ inline __attribute__((always_inline)) void CopySlotsPerSlot(uint64_t slotAreaBase, int64_t pipelineBase,
+                                                                           uint32_t pipelineReceived,
+                                                                           uint32_t localReadCnt, uint32_t pipelineIdx,
+                                                                           uint32_t slotsPerSender, uint32_t batchSlots,
+                                                                           uint32_t remaining, uint32_t& slotsRead,
+                                                                           uint32_t& tokensRead)
+    {
+        while (slotsRead < batchSlots) {
+            uint32_t segIdx = (localReadCnt + slotsRead) % slotsPerSender;
+            uint32_t slotGlobalIdx = pipelineIdx * slotsPerSender + segIdx;
+            uint64_t slotOffset = slotAreaBase + static_cast<uint64_t>(slotGlobalIdx) * tokenSlotSize_;
+
+            uint32_t thisTokens = maxTokensPerSlot_;
+            if (tokensRead + thisTokens > remaining) {
+                thisTokens = remaining - tokensRead;
+            }
+
+            LocalCopy(
+                config_.dstGM + static_cast<uint64_t>(pipelineBase + pipelineReceived + tokensRead) * config_.rowBytes,
+                localWinBase_ + slotOffset, static_cast<uint64_t>(thisTokens) * config_.rowBytes);
+
+            tokensRead += thisTokens;
+            slotsRead++; // 一个一个slot挨着处理
+        }
+    }
+
+    // 单发送者对端流水线收包：等对端写槽数够批后按批/逐槽拷贝，并回写消费 credit
+    __aicore__ inline void DrainSenderSlots(uint32_t srcRank, uint32_t pipelineIdx, int64_t pipelineBase,
+                                            uint32_t pipelineRecvCount)
+    {
+        uint32_t slotsPerSender = config_.numSlots / pipelinesPerRank_;
+        uint64_t slotAreaBase = tokenDataOffset_ + static_cast<uint64_t>(srcRank) * config_.numSlots * tokenSlotSize_;
+
+        uint32_t pipelineReceived = 0;
+        uint32_t localReadCnt = 0;
+        // 没收完就一直while收
+        while (pipelineReceived < pipelineRecvCount) {
+            int32_t remoteWriteCnt = ReadLocalCounter(tokenWriteOffset_, srcRank, pipelineIdx); // 对端写的槽数
+            // 如果对端写的槽数不够我读，就while等待新槽到达
+            while (remoteWriteCnt <= 0 || static_cast<uint32_t>(remoteWriteCnt) <= localReadCnt) {
+                remoteWriteCnt = ReadLocalCounter(tokenWriteOffset_, srcRank, pipelineIdx);
+            }
+
+            uint32_t availSlots = static_cast<uint32_t>(remoteWriteCnt) - localReadCnt;
+            uint32_t remaining = pipelineRecvCount - pipelineReceived;
+            uint32_t remainingChunks = (remaining + maxTokensPerSlot_ - 1U) / maxTokensPerSlot_;
+            uint32_t localSlotIdx = localReadCnt % slotsPerSender;
+            uint32_t maxBatchFromHere = slotsPerSender - localSlotIdx; // 从当前槽到本流水线槽组末尾的槽数
+            // 算这一批能连续读几个槽batchSlots
+            uint32_t batchSlots = availSlots;
+            if (batchSlots > remainingChunks) {
+                batchSlots = remainingChunks;
+            }
+            if (batchSlots > maxBatchFromHere) {
+                batchSlots = maxBatchFromHere;
+            }
+
+            uint32_t slotsRead = 0;
+            uint32_t tokensRead = 0;
+
+            // 接受的slot数据无空隙时大批量拷贝, 否则逐槽（因为存在脏数据）
+            bool noSlotSlack = (tokenSlotSize_ == static_cast<uint64_t>(maxTokensPerSlot_) * config_.rowBytes);
+            if (noSlotSlack && batchSlots < remainingChunks) {
+                CopySlotsNoSlack(slotAreaBase, pipelineBase, pipelineReceived, localReadCnt, pipelineIdx,
+                                 slotsPerSender, batchSlots, slotsRead, tokensRead);
+            } else {
+                CopySlotsPerSlot(slotAreaBase, pipelineBase, pipelineReceived, localReadCnt, pipelineIdx,
+                                 slotsPerSender, batchSlots, remaining, slotsRead, tokensRead);
+            }
+
+            localReadCnt += slotsRead; // recv消费值更新
+            pipelineReceived += tokensRead;
+            WriteLocalCounter(
+                tokenReadOffset_, srcRank, pipelineIdx,
+                static_cast<int32_t>(localReadCnt)); // 记录recv消费值到本rank窗口的credit位置，便于发送卡读
+        }
+    }
+
     __aicore__ inline void RecvPhase()
     {
         if (jobIndex_ < sendJobCnt_ || jobIndex_ >= sendJobCnt_ + recvJobCnt_) {
@@ -202,98 +321,12 @@ public:
             uint32_t srcRank = (adjustedSrcRank >= config_.rankId) ? (adjustedSrcRank + 1U) : adjustedSrcRank;
             uint32_t pipelineIdx = wIdx % pipelinesPerRank_;
 
-            GlobalTensor<int32_t> rSlotGM;
-            rSlotGM.SetGlobalBuffer((__gm__ int32_t*)(config_.recvCountsGM + srcRank * sizeof(int32_t)));
-            DataCacheCleanAndInvalid<int32_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(rSlotGM);
-            int32_t recvCount = rSlotGM.GetValue(0);
-
-            GlobalTensor<int64_t> rDisplSlotGM;
-            rDisplSlotGM.SetGlobalBuffer((__gm__ int64_t*)(config_.rdisplsGM + srcRank * ALLTOALLV_UB_ALIGN));
-            DataCacheCleanAndInvalid<int64_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(rDisplSlotGM);
-            int64_t rdispl = rDisplSlotGM.GetValue(0);
-
-            int32_t baseShare = recvCount / static_cast<int32_t>(pipelinesPerRank_);
-            uint32_t pipelineRecvCount =
-                (pipelineIdx == pipelinesPerRank_ - 1U) ?
-                    static_cast<uint32_t>(recvCount - static_cast<int32_t>(pipelineIdx) * baseShare) :
-                    static_cast<uint32_t>(baseShare);
+            uint32_t pipelineRecvCount = 0;
+            int64_t pipelineBase = LoadRecvPipelineBase(srcRank, pipelineIdx, pipelineRecvCount);
             if (pipelineRecvCount == 0U) {
                 continue;
             }
-
-            int64_t pipelineBase = rdispl + static_cast<int64_t>(pipelineIdx) * baseShare;
-            uint32_t slotsPerSender = config_.numSlots / pipelinesPerRank_;
-            uint64_t slotAreaBase =
-                tokenDataOffset_ + static_cast<uint64_t>(srcRank) * config_.numSlots * tokenSlotSize_;
-
-            uint32_t pipelineReceived = 0;
-            uint32_t localReadCnt = 0;
-            // 没收完就一直while收
-            while (pipelineReceived < pipelineRecvCount) {
-                int32_t remoteWriteCnt = ReadLocalCounter(tokenWriteOffset_, srcRank, pipelineIdx); // 对端写的槽数
-                // 如果对端写的槽数不够我读，就while等待新槽到达
-                while (remoteWriteCnt <= 0 || static_cast<uint32_t>(remoteWriteCnt) <= localReadCnt) {
-                    remoteWriteCnt = ReadLocalCounter(tokenWriteOffset_, srcRank, pipelineIdx);
-                }
-
-                uint32_t availSlots = static_cast<uint32_t>(remoteWriteCnt) - localReadCnt;
-                uint32_t remaining = pipelineRecvCount - pipelineReceived;
-                uint32_t remainingChunks = (remaining + maxTokensPerSlot_ - 1U) / maxTokensPerSlot_;
-                uint32_t localSlotIdx = localReadCnt % slotsPerSender;
-                uint32_t maxBatchFromHere = slotsPerSender - localSlotIdx; // 从当前槽到本流水线槽组末尾的槽数
-                // 算这一批能连续读几个槽batchSlots
-                uint32_t batchSlots = availSlots;
-                if (batchSlots > remainingChunks) {
-                    batchSlots = remainingChunks;
-                }
-                if (batchSlots > maxBatchFromHere) {
-                    batchSlots = maxBatchFromHere;
-                }
-
-                uint32_t slotsRead = 0;
-                uint32_t tokensRead = 0;
-
-                // 接受的slot数据无空隙时大批量拷贝, 否则逐槽（因为存在脏数据）
-                bool noSlotSlack = (tokenSlotSize_ == static_cast<uint64_t>(maxTokensPerSlot_) * config_.rowBytes);
-                if (noSlotSlack && batchSlots < remainingChunks) {
-                    // 无间隙，且批量处理的槽数据没超过还剩余部分，可以一次性copy处理
-                    uint32_t totalTokens = batchSlots * maxTokensPerSlot_;
-                    uint32_t firstSegIdx = localReadCnt % slotsPerSender;
-                    uint32_t firstSlotIdx = pipelineIdx * slotsPerSender + firstSegIdx;
-                    uint64_t firstSlotOffset = slotAreaBase + static_cast<uint64_t>(firstSlotIdx) * tokenSlotSize_;
-
-                    LocalCopy(config_.dstGM + static_cast<uint64_t>(pipelineBase + pipelineReceived) * config_.rowBytes,
-                              localWinBase_ + firstSlotOffset,
-                              static_cast<uint64_t>(totalTokens) * config_.rowBytes); // 读槽数据到recvGrad
-                    slotsRead = batchSlots;
-                    tokensRead = totalTokens;
-                } else {
-                    // 否则while分开处理
-                    while (slotsRead < batchSlots) {
-                        uint32_t segIdx = (localReadCnt + slotsRead) % slotsPerSender;
-                        uint32_t slotGlobalIdx = pipelineIdx * slotsPerSender + segIdx;
-                        uint64_t slotOffset = slotAreaBase + static_cast<uint64_t>(slotGlobalIdx) * tokenSlotSize_;
-
-                        uint32_t thisTokens = maxTokensPerSlot_;
-                        if (tokensRead + thisTokens > remaining) {
-                            thisTokens = remaining - tokensRead;
-                        }
-
-                        LocalCopy(config_.dstGM + static_cast<uint64_t>(pipelineBase + pipelineReceived + tokensRead) *
-                                                      config_.rowBytes,
-                                  localWinBase_ + slotOffset, static_cast<uint64_t>(thisTokens) * config_.rowBytes);
-
-                        tokensRead += thisTokens;
-                        slotsRead++; // 一个一个slot挨着处理
-                    }
-                }
-
-                localReadCnt += slotsRead; // recv消费值更新
-                pipelineReceived += tokensRead;
-                WriteLocalCounter(
-                    tokenReadOffset_, srcRank, pipelineIdx,
-                    static_cast<int32_t>(localReadCnt)); // 记录recv消费值到本rank窗口的credit位置，便于发送卡读
-            }
+            DrainSenderSlots(srcRank, pipelineIdx, pipelineBase, pipelineRecvCount);
         }
     }
 
@@ -306,18 +339,9 @@ public:
         pendingHandleCount_ = 0;
     }
 
-    __aicore__ inline void LocalCopy(GM_ADDR dst, GM_ADDR src, uint64_t len)
+    // 延迟一拍流水: 本轮 MTE2 读入新块, 同时 MTE3 写出上一块(pending), 读写重叠
+    __aicore__ inline void CopyPingPongTiles(GlobalTensor<uint8_t>& srcGm, GlobalTensor<uint8_t>& dstGm, uint64_t len)
     {
-        // 本地数据段拷贝: GM→UB→GM pingpong
-        if (len == 0) {
-            return;
-        }
-
-        GlobalTensor<uint8_t> srcGm;
-        GlobalTensor<uint8_t> dstGm;
-        srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
-        dstGm.SetGlobalBuffer((__gm__ uint8_t*)dst);
-
         LocalTensor<uint8_t> buf0 = copyPing_;
         LocalTensor<uint8_t> buf1 = copyPong_;
 
@@ -330,7 +354,6 @@ public:
         uint32_t pendingBufIdx = 0;
         bool hasPendingMte3 = false;
 
-        // 延迟一拍流水: 本轮 MTE2 读入新块, 同时 MTE3 写出上一块(pending), 读写重叠
         while (off < len) {
             uint32_t thisLen =
                 (len - off > ALLTOALLV_MAX_COPY_BYTES) ? ALLTOALLV_MAX_COPY_BYTES : static_cast<uint32_t>(len - off);
@@ -375,6 +398,21 @@ public:
         if (tileIdx >= 2U) {
             AscendC::WaitFlag<HardEvent::MTE3_MTE2>(evtMte3ToMte2_[last ^ 1U]);
         }
+    }
+
+    __aicore__ inline void LocalCopy(GM_ADDR dst, GM_ADDR src, uint64_t len)
+    {
+        // 本地数据段拷贝: GM→UB→GM pingpong
+        if (len == 0) {
+            return;
+        }
+
+        GlobalTensor<uint8_t> srcGm;
+        GlobalTensor<uint8_t> dstGm;
+        srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
+        dstGm.SetGlobalBuffer((__gm__ uint8_t*)dst);
+
+        CopyPingPongTiles(srcGm, dstGm, len);
     }
 
 private:
@@ -493,60 +531,62 @@ private:
         (void)CompleteCreditCounter();
     }
 
-    __aicore__ inline void SendUnitRemote(uint32_t dstRank, uint32_t pipelineIdx, int32_t sendCount, int64_t sdispl)
+    // 信用检查：窗口将满时预取/等待对端消费计数
+    __aicore__ inline void WaitSlotCredit(uint32_t dstRank, uint32_t pipelineIdx, uint32_t localWriteCnt,
+                                          int32_t& remoteReadCnt)
     {
-        uint64_t handle = GetCommHandle(dstRank, pipelineIdx);
-        uint32_t totalSent = 0;
-        uint32_t localWriteCnt = 0; // 本端已经发送的槽数
-        int32_t remoteReadCnt = 0;  // 对端消费的槽数
         uint32_t slotsPerSender = config_.numSlots / pipelinesPerRank_;
-        // 当已经发送的小于需要发送的任务，就while循环
-        while (totalSent < static_cast<uint32_t>(sendCount)) {
-            if (!creditReadInFlight_ && localWriteCnt + 1U >= static_cast<uint32_t>(remoteReadCnt) + slotsPerSender) {
-                // 即将满，先读credit，异步发起一次“读对端窗口 credit 计数格”的 RDMA（ReadNbi），结果落到 scratch
-                // 后立刻返回不等完成
-                PrefetchCreditCounter(dstRank, pipelineIdx);
-            }
-            while (localWriteCnt >= static_cast<uint32_t>(remoteReadCnt) &&
-                   localWriteCnt - static_cast<uint32_t>(remoteReadCnt) >= slotsPerSender) {
-                PrefetchCreditCounter(dstRank, pipelineIdx);
-                remoteReadCnt = CompleteCreditCounter(); // 等待credit读完成
-            }
-
-            uint32_t remaining = static_cast<uint32_t>(sendCount) - totalSent;
-            uint32_t chunkLen = (remaining > maxTokensPerSlot_) ? maxTokensPerSlot_ : remaining;
-            ascendc_assert(chunkLen != 0U, "SendUnitRemote chunkLen is 0");
-
-            uint64_t slotBase = static_cast<uint64_t>(config_.rankId) * config_.numSlots * tokenSlotSize_;
-            uint64_t slotIdx = static_cast<uint64_t>(pipelineIdx) * slotsPerSender +
-                               (static_cast<uint64_t>(localWriteCnt) % slotsPerSender);
-            uint64_t slotOffset = tokenDataOffset_ + slotBase + slotIdx * tokenSlotSize_;
-            GM_ADDR remoteSlotAddr = GetRemoteWinAddr(dstRank, slotOffset);
-            GM_ADDR srcAddr = config_.srcGM + static_cast<uint64_t>(sdispl + totalSent) * config_.rowBytes;
-            uint64_t dataBytes = static_cast<uint64_t>(chunkLen) * config_.rowBytes;
-
-            GM_ADDR remoteCounterAddr = GetRemoteWinAddr(dstRank, tokenWriteOffset_) +
-                                        (static_cast<uint64_t>(config_.rankId) * pipelinesPerRank_ + pipelineIdx) *
-                                            ALLTOALLV_COUNTER_SLOT_BYTES;
-            int32_t ret = comm_->WriteWithNotifyNbi(handle, remoteSlotAddr, srcAddr, dataBytes, remoteCounterAddr,
-                                                    static_cast<uint64_t>(localWriteCnt + 1));
-            if (ret != 0) {
-                for (uint32_t i = 0; i < ALLTOALLV_RETRY_COUNT; i++) {
-                    ret = comm_->WriteWithNotifyNbi(handle, remoteSlotAddr, srcAddr, dataBytes, remoteCounterAddr,
-                                                    static_cast<uint64_t>(localWriteCnt + 1));
-                    if (ret == 0) {
-                        break;
-                    }
-                }
-                ascendc_assert(ret == 0, "WriteWithNotifyNbi failed after %u retries, ret=%d, rankId=%u, dstRank=%u",
-                               ALLTOALLV_RETRY_COUNT, ret, config_.rankId, dstRank);
-            }
-
-            localWriteCnt++;
-            totalSent += chunkLen;
+        if (!creditReadInFlight_ && localWriteCnt + 1U >= static_cast<uint32_t>(remoteReadCnt) + slotsPerSender) {
+            // 即将满，先读credit，异步发起一次"读对端窗口 credit 计数格"的 RDMA（ReadNbi），结果落到 scratch
+            // 后立刻返回不等完成
+            PrefetchCreditCounter(dstRank, pipelineIdx);
         }
-        RetireCreditCounter(); // 最后一次credit可能预取成功导致没有执行complete，此处complete兜底
-        // 句柄暂存数组满时排空
+        while (localWriteCnt >= static_cast<uint32_t>(remoteReadCnt) &&
+               localWriteCnt - static_cast<uint32_t>(remoteReadCnt) >= slotsPerSender) {
+            PrefetchCreditCounter(dstRank, pipelineIdx);
+            remoteReadCnt = CompleteCreditCounter(); // 等待credit读完成
+        }
+    }
+
+    // 发送一个槽（拼块 ≤ maxTokensPerSlot_），NBI 写失败重试；返回本槽 token 数
+    __aicore__ inline uint32_t SendOneSlot(uint64_t handle, uint32_t dstRank, uint32_t pipelineIdx, int64_t sdispl,
+                                           int32_t sendCount, uint32_t totalSent, uint32_t localWriteCnt)
+    {
+        uint32_t slotsPerSender = config_.numSlots / pipelinesPerRank_;
+        uint32_t remaining = static_cast<uint32_t>(sendCount) - totalSent;
+        uint32_t chunkLen = (remaining > maxTokensPerSlot_) ? maxTokensPerSlot_ : remaining;
+        ascendc_assert(chunkLen != 0U, "SendUnitRemote chunkLen is 0");
+
+        uint64_t slotBase = static_cast<uint64_t>(config_.rankId) * config_.numSlots * tokenSlotSize_;
+        uint64_t slotIdx = static_cast<uint64_t>(pipelineIdx) * slotsPerSender +
+                           (static_cast<uint64_t>(localWriteCnt) % slotsPerSender);
+        uint64_t slotOffset = tokenDataOffset_ + slotBase + slotIdx * tokenSlotSize_;
+        GM_ADDR remoteSlotAddr = GetRemoteWinAddr(dstRank, slotOffset);
+        GM_ADDR srcAddr = config_.srcGM + static_cast<uint64_t>(sdispl + totalSent) * config_.rowBytes;
+        uint64_t dataBytes = static_cast<uint64_t>(chunkLen) * config_.rowBytes;
+
+        GM_ADDR remoteCounterAddr =
+            GetRemoteWinAddr(dstRank, tokenWriteOffset_) +
+            (static_cast<uint64_t>(config_.rankId) * pipelinesPerRank_ + pipelineIdx) * ALLTOALLV_COUNTER_SLOT_BYTES;
+        int32_t ret = comm_->WriteWithNotifyNbi(handle, remoteSlotAddr, srcAddr, dataBytes, remoteCounterAddr,
+                                                static_cast<uint64_t>(localWriteCnt + 1));
+        if (ret != 0) {
+            for (uint32_t i = 0; i < ALLTOALLV_RETRY_COUNT; i++) {
+                ret = comm_->WriteWithNotifyNbi(handle, remoteSlotAddr, srcAddr, dataBytes, remoteCounterAddr,
+                                                static_cast<uint64_t>(localWriteCnt + 1));
+                if (ret == 0) {
+                    break;
+                }
+            }
+            ascendc_assert(ret == 0, "WriteWithNotifyNbi failed after %u retries, ret=%d, rankId=%u, dstRank=%u",
+                           ALLTOALLV_RETRY_COUNT, ret, config_.rankId, dstRank);
+        }
+        return chunkLen;
+    }
+
+    // 句柄暂存：数组满时排空后追加本通道句柄
+    __aicore__ inline void PushPendingHandle(uint64_t handle)
+    {
         if (pendingHandleCount_ >= ALLTOALLV_MAX_PENDING) {
             for (uint32_t i = 0; i < pendingHandleCount_; i++) {
                 int32_t ret = comm_->Drain(pendingHandles_[i]);
@@ -558,6 +598,23 @@ private:
                        pendingHandleCount_, ALLTOALLV_MAX_PENDING);
         pendingHandles_[pendingHandleCount_] = handle;
         pendingHandleCount_++;
+    }
+
+    __aicore__ inline void SendUnitRemote(uint32_t dstRank, uint32_t pipelineIdx, int32_t sendCount, int64_t sdispl)
+    {
+        uint64_t handle = GetCommHandle(dstRank, pipelineIdx);
+        uint32_t totalSent = 0;
+        uint32_t localWriteCnt = 0; // 本端已经发送的槽数
+        int32_t remoteReadCnt = 0;  // 对端消费的槽数
+        // 当已经发送的小于需要发送的任务，就while循环
+        while (totalSent < static_cast<uint32_t>(sendCount)) {
+            WaitSlotCredit(dstRank, pipelineIdx, localWriteCnt, remoteReadCnt);
+            uint32_t chunkLen = SendOneSlot(handle, dstRank, pipelineIdx, sdispl, sendCount, totalSent, localWriteCnt);
+            localWriteCnt++;
+            totalSent += chunkLen;
+        }
+        RetireCreditCounter(); // 最后一次credit可能预取成功导致没有执行complete，此处complete兜底
+        PushPendingHandle(handle);
     }
 
     AllToAllvConfig config_;

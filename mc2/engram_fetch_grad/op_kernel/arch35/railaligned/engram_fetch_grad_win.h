@@ -13,6 +13,9 @@
  * \brief 分轨（rail-aligned）WIN 区布局、收件区寻址与行收发原语，自含不依赖老通信头。
  *        WIN = 窗头 | rail 区 | owner 区；收件区 M = 96B 三计数头 + N 个行格（步长 P，环形复用）。
  *        窗头 = (W+1)×32B（W 个 barrier 写者槽 + 1 个 epoch 槽）；零映射表，格号算术直出。
+ *        注：核内多流水同步暂保留 SetFlag/WaitFlag（950 代际存量口径），
+ *        后续迭代迁移至 AscendC::Mutex::Lock/Unlock。
+
  */
 
 #ifndef ENGRAM_FETCH_GRAD_WIN_H
@@ -50,6 +53,18 @@ constexpr int32_t DFX_TASK_IDX_CLAMP = 1023; // 任务号 10bit 钳制（饱和�
 constexpr uint32_t DFX_TASK_IDX_MASK = 0x3FFU;
 constexpr uint32_t DFX_W0_VALID_BIT = 31U;
 constexpr uint32_t DFX_W3_BAD_EOF_SHIFT = 16U;
+
+// 每核进度码（DFX 上报，用于定位卡在哪个阶段；S/F/O 三组共用同一编码空间）
+constexpr int32_t DFX_PROGRESS_S_BEGIN = 10;     // S 组发送循环开始
+constexpr int32_t DFX_PROGRESS_S_IDLE = 20;      // S 组整圈无进展（idle 轮）
+constexpr int32_t DFX_PROGRESS_S_DONE = 29;      // S 组全部完结
+constexpr int32_t DFX_PROGRESS_F_BEGIN = 60;     // F 组 rail 相开始
+constexpr int32_t DFX_PROGRESS_F_RAIL_DONE = 61; // F 组 rail 相完成
+constexpr int32_t DFX_PROGRESS_F_DONE = 63;      // F 组 rail 相收齐
+constexpr int32_t DFX_PROGRESS_O_BEGIN = 70;     // O 组 owner 收件区轮转开始
+constexpr int32_t DFX_PROGRESS_O_DONE = 71;      // O 组收集完成
+// 暂存计数步进：每成功暂存一行，本槽累计行数 +1
+constexpr int32_t DFX_STAGED_ROW_STEP = 1;
 
 __aicore__ inline uint64_t WinNowUs()
 {
@@ -402,6 +417,48 @@ private:
     GM_ADDR dfxSeg_{nullptr};     // 进度码区（可选；断言时取样各组相位）
 };
 
+// 超时现场取证：读 F 进度码与首个异常 S 核快照后断言（仅超时路径调用，读取顺序与原内联块一致）
+__aicore__ inline void WinDumpRecvTimeout(GM_ADDR area, GM_ADDR dfxSeg, GM_ADDR stallSeg, uint32_t stallCores,
+                                          int32_t writeRows, uint32_t readRows)
+{
+    int32_t done = ReadCnt(area, CNT_DONE_OFF);
+    // DFX：超时现场——F 进度 + 首个异常 S 核快照（快照位域见文件头 DFX 布局注释）
+    int32_t fProgress0 = (dfxSeg != nullptr) ? ReadCnt(dfxSeg, DFX_F_PROG0_OFF) : -1;
+    int32_t fProgress1 = (dfxSeg != nullptr) ? ReadCnt(dfxSeg, DFX_F_PROG1_OFF) : -1;
+    int32_t stallCnt = 0;
+    int32_t firstBadCore = -1;
+    int32_t badSnapWord0 = 0;
+    int32_t badSnapWord1 = -1;
+    int32_t badSnapWord2 = -1;
+    int32_t badSnapWord3 = -1;
+    if (stallSeg != nullptr && stallCores > 0U) {
+        uint32_t sampleCoreLimit = (stallCores > DFX_STALL_SAMPLE_MAX) ? DFX_STALL_SAMPLE_MAX : stallCores;
+        for (uint32_t c = 0; c < sampleCoreLimit; ++c) {
+            int32_t snapWord0 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + c * DFX_SNAP_WORDS) * 4U);
+            if (snapWord0 == 0) {
+                continue; // 无快照 = 该核已完结（或从未 idle）
+            }
+            stallCnt++;
+            bool bad =
+                (((snapWord0 & (1 << DFX_W0_OWN_DONE_BIT)) == 0) || ((snapWord0 & (1 << DFX_W0_ALL_EOF_BIT)) == 0) ||
+                 ((snapWord0 & (1 << DFX_W0_DRAIN_EQ_BIT)) == 0));
+            if (bad && firstBadCore < 0) {
+                firstBadCore = static_cast<int32_t>(c);
+                badSnapWord0 = snapWord0;
+                badSnapWord1 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 1U + c * DFX_SNAP_WORDS) * 4U);
+                badSnapWord2 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 2U + c * DFX_SNAP_WORDS) * 4U);
+                badSnapWord3 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 3U + c * DFX_SNAP_WORDS) * 4U);
+            }
+        }
+    }
+    ascendc_assert(false,
+                   "recv timeout: area=%llu, write=%d, read=%u, done=%d, fProg=%d/%d, "
+                   "stallCnt=%d, bad=[c=%d w0=%d f=%d st=%d dr=%d eofV=%d]",
+                   static_cast<uint64_t>(reinterpret_cast<uintptr_t>(area)), writeRows, readRows, done, fProgress0,
+                   fProgress1, stallCnt, firstBadCore, badSnapWord0, badSnapWord1, badSnapWord2, badSnapWord3 & 0xFFFF,
+                   badSnapWord3 >> 16);
+}
+
 // ConsumeFn: void(GM_ADDR blockGM, uint32_t rows)，块内行连续、含 32B 头；
 // stallSeg/stallCores（可选）：S 核失败现场快照区，超时时随进度码一并打出
 template <typename ConsumeFn>
@@ -409,13 +466,13 @@ __aicore__ inline void RecvLoop(GM_ADDR area, const WinLayout& w, AscendC::TPipe
                                 AscendC::LocalTensor<int32_t> statusUb, ConsumeFn&& consume, GM_ADDR dfxSeg = nullptr,
                                 GM_ADDR stallSeg = nullptr, uint32_t stallCores = 0U)
 {
-    uint32_t localRead = 0;   // 已读行数（累计）
+    uint32_t readRows = 0;    // 已读行数（累计）
     uint64_t t0 = WinNowUs(); // 真墙钟 60s
     for (;;) {
-        int32_t wr = ReadCnt(area, CNT_WRITE_OFF);
-        if (wr > static_cast<int32_t>(localRead)) {
-            uint32_t n = static_cast<uint32_t>(wr) - localRead;
-            uint32_t t0r = localRead % w.numRows; // 跨环尾拆两段
+        int32_t writeRows = ReadCnt(area, CNT_WRITE_OFF);
+        if (writeRows > static_cast<int32_t>(readRows)) {
+            uint32_t n = static_cast<uint32_t>(writeRows) - readRows;
+            uint32_t t0r = readRows % w.numRows; // 跨环尾拆两段
             uint32_t fit = w.numRows - t0r;
             if (n <= fit) {
                 consume(RowSlot(area, w, t0r), n);
@@ -423,48 +480,38 @@ __aicore__ inline void RecvLoop(GM_ADDR area, const WinLayout& w, AscendC::TPipe
                 consume(RowSlot(area, w, t0r), fit);
                 consume(RowSlot(area, w, 0), n - fit);
             }
-            localRead += n;
-            WriteLocalReadCnt(area, localRead, pipe, statusUb); // 回写 read 计数（信用）
+            readRows += n;
+            WriteLocalReadCnt(area, readRows, pipe, statusUb); // 回写 read 计数（信用）
         }
-        if (AreaFinished(area, static_cast<int32_t>(localRead))) {
+        if (AreaFinished(area, static_cast<int32_t>(readRows))) {
             break;
         }
         if (WinNowUs() - t0 > WIN_TIMEOUT_US) {
-            int32_t done = ReadCnt(area, CNT_DONE_OFF);
-            // DFX：超时现场——F 进度 + 首个异常 S 核快照（快照位域见文件头 DFX 布局注释）
-            int32_t fp0 = (dfxSeg != nullptr) ? ReadCnt(dfxSeg, DFX_F_PROG0_OFF) : -1;
-            int32_t fp1 = (dfxSeg != nullptr) ? ReadCnt(dfxSeg, DFX_F_PROG1_OFF) : -1;
-            int32_t stallCnt = 0;
-            int32_t badC = -1;
-            int32_t badW0 = 0;
-            int32_t badW1 = -1;
-            int32_t badW2 = -1;
-            int32_t badW3 = -1;
-            if (stallSeg != nullptr && stallCores > 0U) {
-                uint32_t lim = (stallCores > DFX_STALL_SAMPLE_MAX) ? DFX_STALL_SAMPLE_MAX : stallCores;
-                for (uint32_t c = 0; c < lim; ++c) {
-                    int32_t w0 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + c * DFX_SNAP_WORDS) * 4U);
-                    if (w0 == 0) {
-                        continue; // 无快照 = 该核已完结（或从未 idle）
-                    }
-                    stallCnt++;
-                    bool bad = (((w0 & (1 << DFX_W0_OWN_DONE_BIT)) == 0) || ((w0 & (1 << DFX_W0_ALL_EOF_BIT)) == 0) ||
-                                ((w0 & (1 << DFX_W0_DRAIN_EQ_BIT)) == 0));
-                    if (bad && badC < 0) {
-                        badC = static_cast<int32_t>(c);
-                        badW0 = w0;
-                        badW1 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 1U + c * DFX_SNAP_WORDS) * 4U);
-                        badW2 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 2U + c * DFX_SNAP_WORDS) * 4U);
-                        badW3 = ReadCnt(stallSeg, (DFX_SCALAR_SLOTS + 3U + c * DFX_SNAP_WORDS) * 4U);
-                    }
-                }
-            }
-            ascendc_assert(false,
-                           "recv timeout: area=%llu, write=%d, read=%u, done=%d, fProg=%d/%d, "
-                           "stallCnt=%d, bad=[c=%d w0=%d f=%d st=%d dr=%d eofV=%d]",
-                           static_cast<uint64_t>(reinterpret_cast<uintptr_t>(area)), wr, localRead, done, fp0, fp1,
-                           stallCnt, badC, badW0, badW1, badW2, badW3 & 0xFFFF, badW3 >> 16);
+            WinDumpRecvTimeout(area, dfxSeg, stallSeg, stallCores, writeRows, readRows);
         }
+    }
+}
+
+// 延迟一拍写回：把上一块(pending)从 UB 写出到 GM，并交还该缓冲的 MTE3->MTE2 信用
+__aicore__ inline void WinFlushPendingTile(AscendC::GlobalTensor<uint8_t>& dstGm, uint64_t pendingOff,
+                                           uint32_t pendingLen, uint32_t pendingBufIdx,
+                                           AscendC::LocalTensor<uint8_t>& ping, AscendC::LocalTensor<uint8_t>& pong,
+                                           int32_t* evtMte2ToMte3, int32_t* evtMte3ToMte2)
+{
+    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(evtMte2ToMte3[pendingBufIdx]);
+    AscendC::LocalTensor<uint8_t>& pendBuf = (pendingBufIdx == 0U) ? ping : pong;
+    AscendC::DataCopyExtParams mte3Params{1U, pendingLen, 0U, 0U, 0U};
+    AscendC::DataCopyPad(dstGm[pendingOff], pendBuf, mte3Params);
+    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2[pendingBufIdx]);
+}
+
+// 收尾相位：等最后两块的 MTE3->MTE2 信用全部归还后才返回（乒乓双缓冲排空）
+__aicore__ inline void WinDrainCopyPipe(uint32_t tileIdx, int32_t* evtMte3ToMte2)
+{
+    uint32_t last = (tileIdx - 1U) % 2U;
+    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2[last]);
+    if (tileIdx >= 2U) {
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2[last ^ 1U]);
     }
 }
 
@@ -504,11 +551,7 @@ __aicore__ inline void WinLocalCopy(GM_ADDR dst, GM_ADDR src, uint64_t len, Asce
         AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(evtMte2ToMte3[bufIdx]);
 
         if (hasPendingMte3) {
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(evtMte2ToMte3[pendingBufIdx]);
-            AscendC::LocalTensor<uint8_t>& pendBuf = (pendingBufIdx == 0U) ? ping : pong;
-            AscendC::DataCopyExtParams mte3Params{1U, pendingLen, 0U, 0U, 0U};
-            AscendC::DataCopyPad(dstGm[pendingOff], pendBuf, mte3Params);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2[pendingBufIdx]);
+            WinFlushPendingTile(dstGm, pendingOff, pendingLen, pendingBufIdx, ping, pong, evtMte2ToMte3, evtMte3ToMte2);
         }
         pendingOff = off;
         pendingLen = thisLen;
@@ -518,17 +561,9 @@ __aicore__ inline void WinLocalCopy(GM_ADDR dst, GM_ADDR src, uint64_t len, Asce
         tileIdx++;
     }
     if (hasPendingMte3) {
-        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(evtMte2ToMte3[pendingBufIdx]);
-        AscendC::LocalTensor<uint8_t>& pendBuf = (pendingBufIdx == 0U) ? ping : pong;
-        AscendC::DataCopyExtParams mte3Params{1U, pendingLen, 0U, 0U, 0U};
-        AscendC::DataCopyPad(dstGm[pendingOff], pendBuf, mte3Params);
-        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2[pendingBufIdx]);
+        WinFlushPendingTile(dstGm, pendingOff, pendingLen, pendingBufIdx, ping, pong, evtMte2ToMte3, evtMte3ToMte2);
     }
-    uint32_t last = (tileIdx - 1U) % 2U;
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2[last]);
-    if (tileIdx >= 2U) {
-        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(evtMte3ToMte2[last ^ 1U]);
-    }
+    WinDrainCopyPipe(tileIdx, evtMte3ToMte2);
     (void)pipe;
 }
 
