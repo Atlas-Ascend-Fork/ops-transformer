@@ -328,6 +328,10 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetK(const gert::StorageShape* scal
 
     if (!scalesShape) {
         hasScales_ = false;
+        OP_CHECK_IF(k <= 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "k", std::to_string(k).c_str(),
+                                                          "k must be greater than 0."),
+                    return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
 

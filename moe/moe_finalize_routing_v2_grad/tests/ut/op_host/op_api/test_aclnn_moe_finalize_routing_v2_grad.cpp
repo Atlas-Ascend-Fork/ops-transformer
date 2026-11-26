@@ -274,6 +274,23 @@ TEST_F(l2_moe_finalize_routing_v2_grad_test, Ascend910B2_moe_finalize_routing_v2
     EXPECT_EQ(getWorkspaceResult, ACLNN_ERR_PARAM_INVALID);
 }
 
+TEST_F(l2_moe_finalize_routing_v2_grad_test, grad_scales_out_dtype_diff)
+{
+    auto gradY = TensorDesc({4, 16}, ACL_FLOAT, ACL_FORMAT_ND);
+    auto expandedRowIdx = TensorDesc({8}, ACL_INT32, ACL_FORMAT_ND);
+    auto expandedXOptional = TensorDesc({8, 16}, ACL_FLOAT, ACL_FORMAT_ND);
+    auto scalesOptional = TensorDesc({4, 2}, ACL_FLOAT, ACL_FORMAT_ND);
+    auto gradExpandedXOut = TensorDesc({8, 16}, ACL_FLOAT, ACL_FORMAT_ND);
+    auto gradScalesOut = TensorDesc({4, 2}, ACL_BF16, ACL_FORMAT_ND);
+    auto ut = OP_API_UT(aclnnMoeFinalizeRoutingV2Grad,
+                        INPUT(gradY, expandedRowIdx, expandedXOptional, scalesOptional, (aclTensor*)nullptr,
+                              (aclTensor*)nullptr, 0, 0, 0, 0),
+                        OUTPUT(gradExpandedXOut, gradScalesOut));
+    uint64_t workspaceSize = 0;
+    aclOpExecutor* executor = nullptr;
+    EXPECT_EQ(ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor), ACLNN_ERR_PARAM_INVALID);
+}
+
 TEST_F(l2_moe_finalize_routing_v2_grad_test, Ascend910B2_moe_finalize_routing_v2_grad_execute)
 {
     auto gradY = TensorDesc({1, 64}, ACL_FLOAT, ACL_FORMAT_ND).ValueRange(0, 10);
