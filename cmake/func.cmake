@@ -807,8 +807,12 @@ endif()
 
 function(cannbotdsl_schedule_host _job _output _source _inputs _layout _aclnn_type)
     set(_options)
+    set(_host_prepare_stamp)
     if(_aclnn_type)
         list(APPEND _options --aclnn-type "${_aclnn_type}")
+    else()
+        list(APPEND _options --timing-dir "${_timing_dir}")
+        set(_host_prepare_stamp "${_prepare_stamp}")
     endif()
     execute_process(COMMAND "${CMAKE_COMMAND}" -E env ${_env}
         "${HI_PYTHON}" "${_builder}" --mode layout --source "${_source}" --output "${_layout}" ${_options}
@@ -830,8 +834,11 @@ function(cannbotdsl_schedule_host _job _output _source _inputs _layout _aclnn_ty
             "${HI_PYTHON}" "${_builder}" ${_target_args} ${_jobs_args} --mode host --source "${_source}"
             --output "${_output}" --inputs "${_inputs}" --layout "${_layout}" ${_options}
         COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
-        DEPENDS ${_dependencies} "${_builder}" "${_inputs}" "${_layout}" VERBATIM)
+        DEPENDS ${_dependencies} "${_builder}" "${_inputs}" "${_layout}" ${_host_prepare_stamp} VERBATIM)
     add_custom_target(${_job} DEPENDS "${_stamp}" ${_outputs})
+    if(_host_prepare_stamp)
+        add_dependencies(${_job} ${_prepare_target})
+    endif()
 endfunction()
 
 # Build PIC Host archives and publish devices into the existing ASC kernel tree.
@@ -902,6 +909,9 @@ function(enable_cannbotdsl_kernel op_name source_dir)
     set(_source "${_source_dir}/${op_name}.py")
     set(_builder "${OPS_ADV_DIR}/cmake/scripts/build_cannbotdsl.py")
     set(_target_args --soc "${CANNBOTDSL_COMPUTE_UNIT}" --target "${CANNBOTDSL_TARGET}")
+    set(_env "ASCEND_HOME_PATH=${ASCEND_CANN_PACKAGE_PATH}"
+        TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYTHONDONTWRITEBYTECODE=1
+        "PYTHONPATH=${_source_dir}:$ENV{PYTHONPATH}")
     set(_jobserver_command)
     if(CMAKE_GENERATOR STREQUAL "Unix Makefiles")
         # Use $(MAKE) as sh's $0 to inherit the jobserver without launching a submake.
@@ -915,9 +925,6 @@ function(enable_cannbotdsl_kernel op_name source_dir)
     endif()
     file(GLOB_RECURSE _sources CONFIGURE_DEPENDS "${_source_dir}/*.py")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_sources} "${_builder}")
-    set(_env "ASCEND_HOME_PATH=${ASCEND_CANN_PACKAGE_PATH}"
-        TORCH_DEVICE_BACKEND_AUTOLOAD=0 PYTHONDONTWRITEBYTECODE=1
-        "PYTHONPATH=${_source_dir}:$ENV{PYTHONPATH}")
     set(_cache "$ENV{CANNBOTDSL_CACHE_DIR}")
     if("${_cache}" STREQUAL "")
         set(_cache "${CMAKE_BINARY_DIR}/cannbot_dsl/lowering-cache")
@@ -952,10 +959,114 @@ function(enable_cannbotdsl_kernel op_name source_dir)
             message(FATAL_ERROR "Unsupported DSL ACLNN type: ${_aclnn_type}")
         endif()
     endif()
+    set(_prepare_enabled FALSE)
+    if(_dsl_native)
+        get_property(_prepare_checked GLOBAL PROPERTY CANNBOTDSL_PREPARE_IR SET)
+        if(NOT _prepare_checked)
+            execute_process(COMMAND "${CMAKE_COMMAND}" -E env ${_env}
+                "${HI_PYTHON}" -c "import inspect, opkit; raise SystemExit(not {'group', 'out_dir'} <= inspect.signature(opkit.build).parameters.keys())"
+                RESULT_VARIABLE _result OUTPUT_QUIET ERROR_QUIET)
+            if(_result EQUAL 0)
+                set_property(GLOBAL PROPERTY CANNBOTDSL_PREPARE_IR TRUE)
+            else()
+                set_property(GLOBAL PROPERTY CANNBOTDSL_PREPARE_IR FALSE)
+            endif()
+        endif()
+        get_property(_prepare_enabled GLOBAL PROPERTY CANNBOTDSL_PREPARE_IR)
+    endif()
+    set(_kernel_groups ungrouped)
+    set(_has_explicit_group FALSE)
+    set(_asc_group_owner FALSE)
+    if(ENABLE_OPS_KERNEL AND _dsl_native)
+        list(FIND ASCEND_OP_NAME "${op_name}" _op_index)
+        list(LENGTH ASCEND_OP_NAME _op_count)
+        math(EXPR _group_index "${_op_index} + 1")
+        if(_op_index GREATER_EQUAL 0 AND _group_index LESS _op_count)
+            list(GET ASCEND_OP_NAME ${_group_index} _group)
+            if(_group MATCHES "^([1-9][0-9]*)-([0-9]+)$")
+                set(_gen "${ASCEND_BINARY_OUT_DIR}/${CANNBOTDSL_COMPUTE_UNIT}/gen")
+                file(GLOB _asc_commands "${_gen}/*-${op_name}-*.sh"
+                    "${_gen}/*-${op_name}_a2-*.sh" "${_gen}/*-${op_name}_a3-*.sh"
+                    "${_gen}/*-${op_name}_apt-*.sh" "${_gen}/*-${op_name}_a6-*.sh")
+                if(_asc_commands)
+                    # The scheduler emits one set of tasks for a name shared
+                    # with ASC. Only its first shard owns the independent DSL build.
+                    if(NOT _group MATCHES "-0$")
+                        return()
+                    endif()
+                    set(_asc_group_owner TRUE)
+                else()
+                    set(_has_explicit_group TRUE)
+                    if(NOT _group STREQUAL "1-0")
+                        if(NOT _prepare_enabled)
+                            message(FATAL_ERROR "DSL Device groups require OpKit group and out_dir support: ${op_name}")
+                        endif()
+                        set(_kernel_groups "${_group}")
+                    endif()
+                endif()
+            endif()
+        endif()
+        # The distributed PR entry point may supply only operator names. In
+        # that case schedule all configured DSL groups in the current build.
+        if(_prepare_enabled AND NOT _has_explicit_group
+            AND (ENABLE_OP_KERNEL OR _asc_group_owner OR "$ENV{CANNBOTDSL_CI_GROUPS}" STREQUAL "1"))
+            set(_group_config "${OPS_ADV_DIR}/scripts/ci/gen_ops_soc.py")
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_group_config}")
+            get_property(_group_config_json GLOBAL PROPERTY CANNBOTDSL_GROUP_CONFIG)
+            if(NOT _group_config_json)
+                execute_process(COMMAND "${HI_PYTHON}" -c
+                    "import json, runpy, sys; print(json.dumps(runpy.run_path(sys.argv[1])['dsl_group_op_dict']))"
+                    "${_group_config}" OUTPUT_VARIABLE _group_config_json OUTPUT_STRIP_TRAILING_WHITESPACE
+                    RESULT_VARIABLE _result)
+                if(NOT _result EQUAL 0)
+                    message(FATAL_ERROR "Could not load DSL Device group counts: ${_group_config}")
+                endif()
+                set_property(GLOBAL PROPERTY CANNBOTDSL_GROUP_CONFIG "${_group_config_json}")
+            endif()
+            string(JSON _groups ERROR_VARIABLE _group_error GET
+                "${_group_config_json}" "${CANNBOTDSL_COMPUTE_UNIT}" "${op_name}")
+            if(NOT _group_error AND _groups GREATER 1)
+                set(_kernel_groups)
+                math(EXPR _last_group "${_groups} - 1")
+                foreach(_index RANGE ${_last_group})
+                    list(APPEND _kernel_groups "${_groups}-${_index}")
+                endforeach()
+            endif()
+        endif()
+    endif()
     if(_dsl_aclnn)
         set_property(GLOBAL PROPERTY CANNBOTDSL_ACLNN_ENABLED TRUE)
     endif()
-    if(ENABLE_OPS_HOST AND _dsl_native)
+    set(_prepare_target)
+    set(_prepare_stamp)
+    set(_timing_dir "${ASCEND_BINARY_OUT_DIR}/${CANNBOTDSL_COMPUTE_UNIT}/gen")
+    if(_prepare_enabled)
+        set(_prepare_target "${op_name}_cannbotdsl_prepare")
+        set(_prepare_root "${_root}")
+        set(_prepare_args)
+        # A standalone cold shard only lowers its own variants. It can reuse a
+        # complete Prepare when one already exists in the default workspace.
+        if(_has_explicit_group AND NOT _kernel_groups STREQUAL "ungrouped"
+            AND NOT EXISTS "${_root}/prepared_lowering_ir/manifest.json")
+            set(_prepare_root "${CMAKE_BINARY_DIR}/cannbot_dsl/shards/${_kernel_groups}/${op_name}")
+            set(_prepare_args --kernel-shard "${_kernel_groups}")
+        endif()
+        set(_prepare_dir "${_prepare_root}/prepared_lowering_ir")
+        set(_prepare_stamp "${_prepare_dir}/manifest.json")
+        add_custom_command(OUTPUT "${_prepare_stamp}"
+            BYPRODUCTS "${_prepare_dir}/ir.json" "${_prepare_root}/.prepare-build.json"
+            COMMAND ${_jobserver_command} "${CMAKE_COMMAND}" -E env ${_env}
+                "${HI_PYTHON}" "${_builder}" ${_target_args} ${_jobs_args} ${_prepare_args}
+                --mode prepare --source "${_source}" --inputs "${_inputs}" --timing-dir "${_timing_dir}"
+            COMMAND "${CMAKE_COMMAND}" -E touch_nocreate "${_prepare_stamp}"
+            DEPENDS ${_dependencies} "${_builder}" "${_inputs}" VERBATIM)
+        add_custom_target(${_prepare_target} DEPENDS "${_prepare_stamp}")
+    endif()
+
+    # A build selecting a single Device shard leaves the complete archive to the Host job.
+    if(ENABLE_OPS_HOST AND _dsl_native AND
+        (_kernel_groups STREQUAL "ungrouped" OR
+         (_prepare_target AND NOT _has_explicit_group AND NOT ENABLE_OP_KERNEL)))
         set(_job "${op_name}_cannbotdsl_native_host")
         set(_OPKIT_NATIVE_OUTPUT "${_root}/host")
         set(_layout_dir "${_root}/host-layout")
@@ -968,7 +1079,7 @@ function(enable_cannbotdsl_kernel op_name source_dir)
         set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_NATIVE_BUILD_TARGETS "${_job}")
         set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_NATIVE_BUILD_STAMPS "${_OPKIT_NATIVE_OUTPUT}.built")
     endif()
-    if(ENABLE_OPS_HOST AND _dsl_aclnn)
+    if(ENABLE_OPS_HOST AND _kernel_groups STREQUAL "ungrouped" AND _dsl_aclnn)
         # ACLNN and Native Host packages have different ABIs and independent caches.
         set(_aclnn_host "${_root}/aclnn/host")
         set(_aclnn_inputs "${_root}/aclnn/inputs.json")
@@ -987,28 +1098,44 @@ function(enable_cannbotdsl_kernel op_name source_dir)
         set_property(GLOBAL PROPERTY "CANNBOTDSL_BUILD_${_aclnn_host}" "${_job}")
         set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_ACLNN_PACKAGES "${_aclnn_host}")
     endif()
+
     if(ENABLE_OPS_KERNEL)
-        set(_stamp "${_root}/kernel.built")
-        add_custom_command(OUTPUT "${_stamp}"
-            COMMAND ${_jobserver_command} "${CMAKE_COMMAND}" -E env ${_env}
-                "${HI_PYTHON}" "${_builder}" ${_target_args} ${_jobs_args} --mode kernel --source "${_source}"
-                --output "${_root}/device" --kernel-output "${ASCEND_BINARY_OUT_DIR}/${CANNBOTDSL_COMPUTE_UNIT}/bin"
-                --inputs "${_inputs}"
-            COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
-            DEPENDS ${_dependencies} "${_builder}" "${_inputs}" VERBATIM)
-        add_custom_target(${op_name}_cannbotdsl DEPENDS "${_stamp}")
-        set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_KERNEL_TARGETS ${op_name}_cannbotdsl)
-        set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_KERNEL_STAMPS "${_stamp}")
-        set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_KERNEL_PACKAGES "${_root}/device")
-        set_property(GLOBAL APPEND PROPERTY "CANNBOTDSL_KERNEL_PACKAGES_${CANNBOTDSL_COMPUTE_UNIT}"
-            "${_root}/device")
+        set(_kernel_stamps)
         if(ENABLE_BUILT_IN)
             set(_install "opp/built-in/op_impl/ai_core/tbe/kernel/${CANNBOTDSL_COMPUTE_UNIT}/ops_transformer")
         else()
             set(_install "packages/vendors/${VENDOR_NAME}_transformer/op_impl/ai_core/tbe/kernel/${CANNBOTDSL_COMPUTE_UNIT}")
         endif()
-        # The ASC indexer rewrites filePath in its scan copy; install the original OpKit JSON.
-        install(DIRECTORY "${_root}/device/kernel/${CANNBOTDSL_COMPUTE_UNIT}/" DESTINATION "${_install}")
+
+        foreach(_group IN LISTS _kernel_groups)
+            set(_kernel_root "${_root}")
+            set(_shard_args)
+            if(NOT _group STREQUAL "ungrouped")
+                set(_shard_args --kernel-shard "${_group}")
+                set(_kernel_root "${CMAKE_BINARY_DIR}/cannbot_dsl/shards/${_group}/${op_name}")
+            endif()
+            set(_stamp "${_kernel_root}/kernel.built")
+            add_custom_command(OUTPUT "${_stamp}"
+                COMMAND ${_jobserver_command} "${CMAKE_COMMAND}" -E env ${_env}
+                    "${HI_PYTHON}" "${_builder}" ${_target_args} ${_jobs_args} ${_shard_args}
+                    --mode kernel --source "${_source}"
+                    --output "${_kernel_root}/device" --kernel-output "${ASCEND_BINARY_OUT_DIR}/${CANNBOTDSL_COMPUTE_UNIT}/bin"
+                    --inputs "${_inputs}"
+                COMMAND "${CMAKE_COMMAND}" -E touch "${_stamp}"
+                DEPENDS ${_dependencies} "${_builder}" "${_inputs}" ${_prepare_stamp} VERBATIM)
+            list(APPEND _kernel_stamps "${_stamp}")
+            set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_KERNEL_STAMPS "${_stamp}")
+            set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_KERNEL_PACKAGES "${_kernel_root}/device")
+            set_property(GLOBAL APPEND PROPERTY "CANNBOTDSL_KERNEL_PACKAGES_${CANNBOTDSL_COMPUTE_UNIT}"
+                "${_kernel_root}/device")
+            # The ASC indexer rewrites filePath in its scan copy; install the original OpKit JSON.
+            install(DIRECTORY "${_kernel_root}/device/kernel/${CANNBOTDSL_COMPUTE_UNIT}/" DESTINATION "${_install}")
+        endforeach()
+        add_custom_target(${op_name}_cannbotdsl DEPENDS ${_kernel_stamps})
+        if(_prepare_target)
+            add_dependencies(${op_name}_cannbotdsl ${_prepare_target})
+        endif()
+        set_property(GLOBAL APPEND PROPERTY CANNBOTDSL_KERNEL_TARGETS ${op_name}_cannbotdsl)
     endif()
 endfunction()
 

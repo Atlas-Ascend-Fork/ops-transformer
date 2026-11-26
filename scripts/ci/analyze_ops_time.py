@@ -40,6 +40,7 @@ def parse_txt_content(content):
         r"Build \[([^\]]+)\] op_name \[([^\]]+)\] index \[([^\]]+)\] "
         r"bin_file \[([^\]]+)\] duration \[([^\]]+)\] size \[([^\]]+)\] "
         r"start_time \[([^\]]+)\] end_time \[([^\]]+)\](?: backend \[([^\]]+)\])?"
+        r"(?: group \[([1-9]\d*-\d+)\])?(?: phase \[(prepare|host|kernel)\])?"
     )
     match = re.search(pattern, content)
 
@@ -56,6 +57,8 @@ def parse_txt_content(content):
         "start_time": match.group(7),
         "end_time": match.group(8),
         "backend": match.group(9) or "asc",
+        "group": match.group(10),
+        "phase": match.group(11),
     }
 
 
@@ -97,6 +100,7 @@ def process_txt_file(txt_files):
     merge_dict = defaultdict(
         lambda: {"duration": 0, "max_duration": 0.0, "size": 0, "intervals": []}
     )
+    host_rows = []
     for txt_file in txt_files:
         try:
             # Extract op_name and index from filename
@@ -112,27 +116,48 @@ def process_txt_file(txt_files):
                 content = f.read().strip()
 
             # Parse content
-            parsed_data = parse_txt_content(content)
-            if not parsed_data:
-                logger.warning(f"File content format mismatch: {txt_file}")
-                continue
-            # Build data row
-            key = (parsed_data["soc"], parsed_data["op_name"], parsed_data["backend"])
-            duration = float(parsed_data["duration"])
-            merge_dict[key]["duration"] += duration
-            merge_dict[key]["max_duration"] = max(
-                merge_dict[key]["max_duration"], duration
-            )
-            merge_dict[key]["size"] += float(parsed_data["size"])
-            merge_dict[key]["intervals"].append(
-                (float(parsed_data["start_time"]), float(parsed_data["end_time"]))
-            )
-            merge_dict[key]["soc"] = parsed_data["soc"]
+            for line in content.splitlines():
+                parsed_data = parse_txt_content(line)
+                if not parsed_data:
+                    logger.warning(f"File content format mismatch: {txt_file}")
+                    continue
+                backend = parsed_data["backend"]
+                group = parsed_data["group"]
+                if backend == "dsl" and parsed_data["phase"] == "host":
+                    host_rows.append(parsed_data)
+                    continue
+                if backend == "dsl" and parsed_data["phase"] == "prepare":
+                    backend = "dsl_prepare"
+                    group = None
+                key = (parsed_data["soc"], parsed_data["op_name"], backend, group)
+                add_timing(merge_dict[key], parsed_data)
 
         except Exception as e:
             logger.error(f"Error processing file {txt_file}: {e}")
             continue
+    grouped = {
+        (soc, op)
+        for soc, op, backend, group in merge_dict
+        if backend == "dsl" and group
+    }
+    for host in host_rows:
+        operator = (host["soc"], host["op_name"])
+        if operator not in grouped:
+            try:
+                add_timing(merge_dict[(*operator, "dsl", None)], host)
+            except ValueError as exc:
+                logger.warning("Invalid Host timing for %s: %s", host["op_name"], exc)
     return merge_dict
+
+
+def add_timing(values, row):
+    duration = float(row["duration"])
+    size = float(row["size"])
+    interval = (float(row["start_time"]), float(row["end_time"]))
+    values["duration"] += duration
+    values["max_duration"] = max(values["max_duration"], duration)
+    values["size"] += size
+    values["intervals"].append(interval)
 
 
 def union_duration(intervals):
@@ -202,10 +227,12 @@ def main():
 
     data_list = []
     # Append merged rows
-    for (soc, op_name, backend), values in merge_dict.items():
-        if backend == "dsl":
-            # A whole OpKit build is timed once, independently of ASC shards.
-            real_op_name = f"{op_name}_cannbotdsl"
+    for (soc, op_name, backend, group), values in merge_dict.items():
+        if backend in ("dsl", "dsl_prepare"):
+            suffix = "_prepare" if backend == "dsl_prepare" else ""
+            real_op_name = f"{op_name}_cannbotdsl{suffix}"
+            if group:
+                real_op_name += f",{group}"
         else:
             real_op_name = remove_apt_suffix(op_name)
             real_op_name = group_trans_op_name.get(real_op_name, real_op_name)
@@ -215,7 +242,7 @@ def main():
             values["max_duration"],
         )
         duration, total, maximum = (
-            round(seconds, 3) if backend == "dsl" else int(seconds)
+            round(seconds, 3) if backend.startswith("dsl") else int(seconds)
             for seconds in durations
         )
         merged_row = {

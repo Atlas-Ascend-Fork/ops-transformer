@@ -14,6 +14,7 @@ import argparse
 import glob
 import os
 import re
+import runpy
 import sys
 from collections import defaultdict, deque
 from pathlib import Path
@@ -214,7 +215,23 @@ def def_supports(op_path, soc):
 def filter_by_soc(ops, socs):
     if not socs:
         return ops
-    return [item for item in ops if any(def_supports(item[2], soc) for soc in socs)]
+    selected = []
+    dsl_registration = None
+    dsl_soc = None
+    for item in ops:
+        _, _, path = item
+        if any(def_supports(path, soc) for soc in socs):
+            selected.append(item)
+            continue
+        if not (path / "op_dsl" / "CMakeLists.txt").is_file():
+            continue
+        if dsl_registration is None:
+            discovery = runpy.run_path(str(REPO_ROOT / "scripts/ci/gen_ops_soc.py"))
+            dsl_registration = discovery["has_dsl_registration"]
+            dsl_soc = discovery["get_dsl_default_soc"](REPO_ROOT)
+        if dsl_soc in socs and dsl_registration(path):
+            selected.append(item)
+    return selected
 
 
 def whitelist_selection(key, entry, by_key, target_socs):

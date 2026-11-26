@@ -10,6 +10,7 @@
 """Build split DSL resources and describe the consumer's existing Host library."""
 
 import argparse
+import errno
 import fcntl
 import hashlib
 import json
@@ -26,6 +27,16 @@ from pathlib import Path
 
 
 _NATIVE_ARCHIVE_INDEX = "host/config/archive_info_config.json"
+
+
+def kernel_shard(value):
+    try:
+        count, index = map(int, value.split("-"))
+        if 0 <= index < count:
+            return count, index
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("expected COUNT-INDEX with 0 <= INDEX < COUNT")
 
 
 def digest(path):
@@ -97,6 +108,9 @@ def source_exports(source):
 def input_record(source, soc, aclnn_type=None, target="dav-3510"):
     source = Path(source).resolve(strict=True)
     files = {*source.parent.rglob("*.py"), *framework_files(), Path(__file__).resolve()}
+    for variable in ("CANNBOTDSL_QMP_PROFILES", "CANNBOTDSL_DS41_PROFILES"):
+        if os.environ.get(variable):
+            files.add(Path(os.environ[variable]).resolve(strict=True))
     exports = source_exports(source)
     if aclnn_type is None:
         files.discard(source.with_name("aclnn_" + source.name))
@@ -111,7 +125,11 @@ def input_record(source, soc, aclnn_type=None, target="dav-3510"):
         environment={
             k: v
             for k, v in sorted(os.environ.items())
-            if k.startswith(("CANNBOTDSL_", "CANNBOT_OPKIT_")) or k in ("CXX", "AR")
+            if (
+                k.startswith(("CANNBOTDSL_", "CANNBOT_OPKIT_"))
+                or k in ("CXX", "AR", "MLA_PROLOG_NATIVE_NZ_PROFILES")
+            )
+            and k != "CANNBOTDSL_CI_GROUPS"
         },
         files={str(p): digest(p) for p in sorted(files)},
         exports=exports,
@@ -166,7 +184,31 @@ def package_files(root):
 
 
 def kernel_timing_path(output, soc_dir):
-    return soc_dir / "gen" / f"{output.parent.name}_cannbotdsl-0.txt"
+    group_dir = output.parent.parent
+    match = re.fullmatch(r"[1-9][0-9]*-([0-9]+)", group_dir.name)
+    index = int(match[1]) if match and group_dir.parent.name == "shards" else 0
+    return soc_dir / "gen" / f"{output.parent.name}_cannbotdsl-{index}.txt"
+
+
+def phase_timing_path(timing_dir, op, phase, shard=None):
+    index = shard[1] if shard else 0
+    return (
+        Path(timing_dir) / f"{op}_cannbotdsl_{phase}-{index}.txt"
+        if timing_dir
+        else None
+    )
+
+
+def write_timing(path, timing):
+    if path is None:
+        return
+    if timing is None:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(timing, encoding="utf-8")
+    temporary.replace(path)
 
 
 def sync_kernels(output, destination, soc, timing):
@@ -175,13 +217,7 @@ def sync_kernels(output, destination, soc, timing):
     state = destination.parent / ".cannbotdsl-files.json"
     with file_lock(state.with_suffix(".lock")):
         _sync_kernels(output, destination, soc, state)
-        if timing:
-            path = kernel_timing_path(output, destination.parent)
-            if not path.is_file() or path.read_text(encoding="utf-8") != timing:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                temporary = path.with_suffix(".tmp")
-                temporary.write_text(timing, encoding="utf-8")
-                temporary.replace(path)
+        write_timing(kernel_timing_path(output, destination.parent), timing)
 
 
 def remove_scan_files(root, paths):
@@ -388,6 +424,146 @@ def host_layout(source, output, aclnn_type):
             )
 
 
+def dsl_timing(soc, op, shard, phase, started, elapsed, size=0):
+    group = f" group [{shard[0]}-{shard[1]}]" if shard else ""
+    return (
+        f"Build [{soc}] op_name [{op}] index [{shard[1] if shard else 0}] bin_file [-] "
+        f"duration [{elapsed:.6f}] size [{size}] "
+        f"start_time [{started:.6f}] end_time [{started + elapsed:.6f}] "
+        f"backend [dsl]{group} phase [{phase}]\n"
+    )
+
+
+def prepare_ir(source, output, target, soc, inputs, jobs, shard, timing_dir=None):
+    import opkit
+
+    inputs = dict(inputs)
+    # Lowering does not invoke the Host C++ compiler or archiver.
+    if "environment" in inputs:
+        inputs["environment"] = {
+            key: value
+            for key, value in inputs["environment"].items()
+            if key not in {"CXX", "AR"}
+        }
+    record = dict(inputs=inputs, shard=list(shard) if shard else None)
+    with file_lock(output.with_name(output.name + ".check.lock")):
+        state = output.parent / ".prepare-build.json"
+        cached = json.loads(state.read_text()) if state.is_file() else {}
+        timing_path = phase_timing_path(timing_dir, source.stem, "prepare", shard)
+        if (
+            (output / "ir.json").is_file()
+            and cached.get("record") == record
+            and cached.get("files") == package_files(output)
+        ):
+            print(f"[cannbotdsl] Prepare cache hit: {output}", file=sys.stderr)
+            write_timing(timing_path, None)
+            return
+        print(
+            f"[cannbotdsl] Prepare cache miss; running prepare: {output}",
+            file=sys.stderr,
+        )
+        with publication(output) as stage:
+            started, clock = time.time(), time.monotonic()
+            package = opkit.build(
+                collectors=source.parent,
+                pattern=collector_pattern(source, None),
+                target=target,
+                soc=soc,
+                out_dir=stage.parent / "opkit",
+                mode="prepare",
+                jobs=jobs,
+                native=True,
+                group=shard,
+            )
+            elapsed = time.monotonic() - clock
+            Path(package).rename(stage)
+        write_json(state, dict(record=record, files=package_files(output)))
+        write_timing(
+            timing_path,
+            dsl_timing(soc, source.stem, shard, "prepare", started, elapsed),
+        )
+
+
+def prepared_ir_dir(inputs, shard):
+    # CMake writes inputs.json under <build>/cannbot_dsl/<op>.
+    op_root = Path(inputs).absolute().parent
+    if shard is not None:
+        count, index = shard
+        op_root = op_root.parent / "shards" / f"{count}-{index}" / op_root.name
+    return op_root / "prepared_lowering_ir"
+
+
+def select_prepared_ir(full, output, source, shard):
+    """Create the OpKit view of a complete Prepare package for one Device group."""
+    manifest = json.loads((full / "manifest.json").read_text())
+    raw = (full / "ir.json").read_bytes()
+    if (
+        manifest.get("schema") != 1
+        or manifest.get("kind") != "opkit_native_ir"
+        or hashlib.sha256(raw).hexdigest() != manifest["files"].get("ir.json")
+    ):
+        raise ValueError("Invalid shared Prepare manifest")
+    data = json.loads(raw)
+    selection = dict(
+        collectors=str(source.parent), operators=None, pattern=source.name, group=None
+    )
+    if (
+        data["selection"] != selection
+        or len(data["tasks"]) != 1
+        or data["tasks"][0]["name"] != source.stem
+    ):
+        raise ValueError(
+            "Shared Prepare requires the complete Native export for this operator"
+        )
+    task = data["tasks"][0]
+    # OpKit records factory bindings in export order, even with worker batches.
+    bindings = task.get("factory_bindings", [])
+    keys_in_order = [binding["binary_key"] for binding in bindings]
+    if (
+        len(keys_in_order) != task["requests"]
+        or len(keys_in_order) != len(set(keys_in_order))
+        or set(keys_in_order) != set(task["keys"])
+    ):
+        raise ValueError(
+            "Shared Prepare requires one ordered binding per Device variant"
+        )
+    count, index = shard
+    if count > len(bindings):
+        raise ValueError(
+            f"{source.stem}: {len(bindings)} Device variants cannot fill {count} groups"
+        )
+    selected = bindings[index::count]
+    keys = {binding["binary_key"] for binding in selected}
+    task.update(keys=sorted(keys), requests=len(selected), factory_bindings=selected)
+    if "mla_dispatch" in task:
+        task["mla_dispatch"] = [
+            entry for entry in task["mla_dispatch"] if entry["binary_key"] in keys
+        ]
+    data["records"] = [
+        record for record in data["records"] if record["artifact"]["binary_key"] in keys
+    ]
+    data["selection"]["group"] = list(shard)
+    files = {}
+    output.mkdir()
+    for key in sorted(keys):
+        if not re.fullmatch(r"[0-9a-f]{64}", key):
+            raise ValueError("Invalid binary key in shared Prepare")
+        name = key + ".mlirbc"
+        files[name] = manifest["files"][name]
+        try:
+            os.link(full / name, output / name, follow_symlinks=False)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            shutil.copyfile(full / name, output / name, follow_symlinks=False)
+    write_json(output / "ir.json", data)
+    files["ir.json"] = digest(output / "ir.json")
+    # Keep the producer's digests so OpKit validates the original selected bytecode.
+    write_json(
+        output / "manifest.json", dict(schema=1, kind="opkit_native_ir", files=files)
+    )
+
+
 def build(
     source,
     output,
@@ -399,11 +575,12 @@ def build(
     target="dav-3510",
     layout=None,
     jobs=None,
+    shard=None,
+    timing_dir=None,
 ):
     import opkit
 
     source = Path(source).resolve(strict=True)
-    output = Path(output).absolute()
     record = dict(
         inputs=json.loads(Path(inputs).read_text())
         if inputs
@@ -411,12 +588,40 @@ def build(
         mode=mode,
         aclnn_type=aclnn_type,
     )
+    prepared_ir = None
+    shared_prepare = False
+    if aclnn_type is None and mode != "prepare":
+        ir = Path(output).absolute().parent / "prepared_lowering_ir"
+        if shard is not None and inputs is not None:
+            full_ir = prepared_ir_dir(inputs, None)
+            if (full_ir / "ir.json").is_file():
+                ir = full_ir
+                shared_prepare = True
+        if (ir / "ir.json").is_file():
+            prepared_ir = ir
+    if shard is not None:
+        record["kernel_shard"] = list(shard)
+    if mode == "prepare":
+        prepare_ir(
+            source,
+            prepared_ir_dir(inputs, shard),
+            target,
+            soc,
+            record["inputs"],
+            jobs,
+            shard,
+            timing_dir,
+        )
+        return
+    output = Path(output).absolute()
+    if prepared_ir is not None:
+        record["prepared_ir"] = digest(prepared_ir / "manifest.json")
     if mode == "host":
         plan = json.loads(Path(layout).read_text())
         record["layout"] = plan
     state = output / ".transformer-build.json"
     cached = json.loads(state.read_text()) if state.is_file() else {}
-    timing = cached.get("kernel_timing")
+    timing = None
     if cached.get("record") != record or cached.get("files") != package_files(output):
         with publication(output) as stage:
             options = (
@@ -428,32 +633,51 @@ def build(
                     l2=aclnn_type == "aclnn",
                 )
             )
-            if mode == "kernel":
+            if prepared_ir is not None:
+                # Keep OpKit's default layout inside the temporary publication.
+                workspace = stage.parent / "opkit"
+                ir_root = (
+                    workspace
+                    if shard is None
+                    else workspace / "shards" / f"{shard[0]}-{shard[1]}"
+                )
+                ir_root.mkdir(parents=True)
+                ir_view = ir_root / prepared_ir.name
+                if shared_prepare:
+                    select_prepared_ir(prepared_ir, ir_view, source, shard)
+                else:
+                    ir_view.symlink_to(prepared_ir, target_is_directory=True)
+                options.update(soc=soc, group=shard, out_dir=workspace)
+            else:
+                options["output"] = stage
+                if shard is not None:
+                    options.update(soc=soc, group=shard)
+            if mode == "kernel" or timing_dir:
                 start_time = time.time()
                 start_clock = time.monotonic()
-            opkit.build(
+            package = opkit.build(
                 collectors=source.parent,
                 # Only ACLNN Host publication collects the L2 declaration.
-                # Native Host and device profiles come from the implementation.
                 pattern=collector_pattern(source, aclnn_type),
                 target=target,
-                output=stage,
                 mode=mode,
                 jobs=jobs,
                 **options,
             )
-            if mode == "kernel":
+            if mode == "kernel" or timing_dir:
                 duration = time.monotonic() - start_clock
-                size = sum(
-                    path.stat().st_size
-                    for path in (stage / "kernel" / soc).rglob("*.o")
-                    if path.is_file()
-                )
-                timing = (
-                    f"Build [{soc}] op_name [{source.stem}] index [0] bin_file [-] "
-                    f"duration [{duration:.6f}] size [{size}] "
-                    f"start_time [{start_time:.6f}] end_time [{start_time + duration:.6f}] "
-                    "backend [dsl]\n"
+            if prepared_ir is not None:
+                Path(package).rename(stage)
+            if mode == "kernel" or timing_dir:
+                size = 0
+                if mode == "kernel":
+                    size = sum(
+                        path.stat().st_size
+                        for path in (stage / "kernel" / soc).rglob("*.o")
+                        if path.is_file()
+                    )
+                timing = dsl_timing(
+                    soc, source.stem, shard, mode, start_time, duration, size
                 )
             if mode == "host":
                 if aclnn_type is None:
@@ -476,18 +700,20 @@ def build(
                         "Host package is missing files declared in the configured layout"
                     )
             build_state = dict(record=record, files=package_files(stage))
-            if timing:
-                build_state["kernel_timing"] = timing
             write_json(stage / ".transformer-build.json", build_state)
     if mode == "kernel":
         # Feed the same ASC index generator; retain logical SoC paths in JSON.
         sync_kernels(output, kernel_output, soc, timing)
+    elif aclnn_type is None:
+        write_timing(phase_timing_path(timing_dir, source.stem, "host"), timing)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("host", "kernel", "inputs", "layout", "clean"), required=True
+        "--mode",
+        choices=("host", "kernel", "prepare", "inputs", "layout", "clean"),
+        required=True,
     )
     parser.add_argument("--source", type=Path)
     parser.add_argument("--output", type=Path)
@@ -498,15 +724,28 @@ def main():
     parser.add_argument("--inputs", type=Path)
     parser.add_argument("--layout", type=Path)
     parser.add_argument("--jobs", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--kernel-shard", type=kernel_shard)
+    parser.add_argument("--timing-dir", type=Path)
     parser.add_argument("--host-enabled", action="store_true")
     parser.add_argument(
         "--aclnn-type", choices=("aclnn", "aclnn_inner", "aclnn_exclude")
     )
     args = parser.parse_args()
-    if args.output is None:
+    if args.kernel_shard is not None and args.mode not in ("kernel", "prepare"):
+        parser.error("--kernel-shard requires --mode kernel or prepare")
+    if args.kernel_shard not in (None, (1, 0)) and args.aclnn_type is not None:
+        parser.error("Device sharding requires a Native export")
+    if args.mode == "prepare":
+        if args.inputs is None or args.output is not None:
+            parser.error(
+                "--mode prepare requires --inputs and derives its output directory"
+            )
+    elif args.output is None:
         parser.error("--output is required for publication modes")
     if args.mode == "host" and args.layout is None:
         parser.error("--layout is required for Host publication")
+    if args.mode == "prepare" and args.aclnn_type is not None:
+        parser.error("--mode prepare requires Native publication")
     if args.mode == "inputs":
         record = input_record(args.source, args.soc, args.aclnn_type, args.target)
         write_json(args.output, record)
@@ -535,6 +774,8 @@ def main():
             args.target,
             args.layout,
             args.jobs,
+            args.kernel_shard if args.kernel_shard != (1, 0) else None,
+            args.timing_dir,
         )
 
 
