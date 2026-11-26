@@ -26,7 +26,7 @@
   $$
   对计算结果按照groupNum进行分组，每组按照topN的sum值对group进行排序，取前groupTopk个组：
   $$
-  groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupCount), k=topN, dim=-1), dim=-1),k=groupTopk)
+  groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupNum), k=topN, dim=-1), dim=-1),k=groupTopk)
   $$
   将未选中组的normOut置为0（选中组保持不变），再对全部专家做TopK，得到indices的结果：
   $$
@@ -36,7 +36,7 @@
   \end{cases}
   $$
   $$
-  normY,indices=TopK(normOut',k=k)
+  indices = TopK(normOut', k=topK)
   $$
   > **说明**：未选中组的元素以0参与最终TopK，而不是被排除。因此当`addNum`使`normOut`为负时，未选中组的0可能排在被选中组的负值之前，从而被选入`indices`。
   根据indices从sigmoidRes中选出y:
@@ -135,7 +135,7 @@
       <tr>
         <td>scale</td>
         <td>属性</td>
-        <td>归一化后的系数乘。</td>
+        <td>归一化后的缩放系数，isNorm为true时对归一化结果乘以该系数，isNorm为false时不生效。</td>
         <td>FLOAT</td>
         <td>-</td>
       </tr>
@@ -169,8 +169,8 @@
 - expertNum必须为groupNum的整数倍。
 - groupTopk小于等于groupNum。
 - maxMappingNum小于等于128。
-- TopK小于等于expertNum。
-- TopN小于等于expertNum / groupNum。
+- topK小于等于expertNum。
+- topN小于等于expertNum / groupNum。
 - expertNum小于等于1024。
 - groupNum小于等于256。
 

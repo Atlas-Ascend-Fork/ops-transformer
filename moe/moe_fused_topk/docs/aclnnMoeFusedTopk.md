@@ -41,7 +41,7 @@
     对计算结果按照groupNum进行分组，每组按照topN的sum值对group进行排序，取前groupTopk个组：
 
     $$
-    groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupCount), k=topN, dim=-1), dim=-1),k=groupTopk)
+    groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupNum), k=topN, dim=-1), dim=-1),k=groupTopk)
     $$
 
     将未选中组的normOut置为0（选中组保持不变），再对全部专家做TopK，得到indices的结果：
@@ -54,7 +54,7 @@
     $$
 
     $$
-    normY,indices=TopK(normOut',k=k)
+    indices = TopK(normOut', k=topK)
     $$
 
     > **说明**：未选中组的元素以0参与最终TopK，而不是被排除。因此当`addNum`使`normOut`为负时，未选中组的0可能排在被选中组的负值之前，从而被选入`indices`。
@@ -234,7 +234,7 @@ aclnnStatus aclnnMoeFusedTopk(
     <tr>
       <td>scale</td>
       <td>输入</td>
-      <td>归一化后的乘系数。</td>
+      <td>归一化后的缩放系数，isNorm为true时对归一化结果乘以该系数，isNorm为false时不生效。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -254,7 +254,7 @@ aclnnStatus aclnnMoeFusedTopk(
     <tr>
       <td>y</td>
       <td>输出</td>
-      <td>Device侧的aclTensor。</td>
+      <td>Device侧的aclTensor，保存每个token的topK分数（取自sigmoidRes）；isNorm为true时为归一化并乘scale后的值。</td>
       <td>-</td>
       <td>FLOAT32</td>
       <td>ND</td>
@@ -264,7 +264,7 @@ aclnnStatus aclnnMoeFusedTopk(
     <tr>
       <td>indices</td>
       <td>输出</td>
-      <td>Device侧的aclTensor。</td>
+      <td>Device侧的aclTensor，保存每个token选中的topK个专家索引；enableExpertMapping为true时为映射后的逻辑专家索引。</td>
       <td>-</td>
       <td>INT32</td>
       <td>ND</td>
@@ -334,7 +334,7 @@ aclnnStatus aclnnMoeFusedTopk(
       <td>输入的参数不满足约束。</td>
     </tr>
     <tr>
-      <td>输入输出的Shape不满足约束，或者输出y、indices的视图步长导致元素存储重叠。</td>
+      <td>输入输出的shape不满足约束，或者输出y、indices的视图步长导致元素存储重叠。</td>
     </tr>
   </tbody>
   </table>
@@ -391,8 +391,8 @@ aclnnStatus aclnnMoeFusedTopk(
 - expertNum必须为groupNum的整数倍。
 - groupTopk小于等于groupNum。
 - maxMappingNum小于等于128。
-- TopK小于等于expertNum。
-- TopN小于等于expertNum / groupNum。
+- topK小于等于expertNum。
+- topN小于等于expertNum / groupNum。
 - expertNum小于等于1024。
 - groupNum小于等于256。
 
@@ -611,9 +611,12 @@ int main() {
   // 1.（固定写法）device/stream初始化，参考对外接口列表
   // 根据自己的实际device填写deviceId
   int32_t deviceId = 0;
-  aclrtStream stream;
+  aclrtStream stream = nullptr;
   auto ret = aclnnMoeFusedTopkTest(deviceId, stream);
-  CHECK_FREE_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnMoeFusedTopkTest failed. ERROR: %d\n", ret); return ret);
+  if (ret != ACL_SUCCESS) {
+    LOG_PRINT("aclnnMoeFusedTopkTest failed. ERROR: %d\n", ret);
+    return ret;
+  }
 
   Finalize(deviceId, stream);
   return 0;
