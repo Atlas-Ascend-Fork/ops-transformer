@@ -234,6 +234,18 @@ cann_ops_transformer.flash_attn(
 - attn_out: Constraint: The D dimension of this output parameter must be the same as the D of value, and the other dimensions must be consistent with the shape of the input query.
 - softmax_lse: If return_softmax_lse is True, the output is generally a Tensor with shape (B, Q_N, Q_S), or a Tensor with shape (Q_N, Q_T) when input_q is TND. If return_softmax_lse is False, the output is a Tensor with shape [1] and a value of 0.
 
+## Automatic Differentiation (Training)
+
+`flash_attn` supports PyTorch autograd for training on NPU. When grad mode is enabled and at least one of `q`, `k`, `v`, or `sinks` has `requires_grad=True`, PyTorch records the forward operation and calls `flash_attn_grad` during backward to compute `dq`, `dk`, `dv`, and `dsink`.
+
+**Usage Constraints**
+
+- Generate the training `metadata` by calling `flash_attn_metadata(..., is_grad_enabled=True)` to include the task splitting data required for backward. Specify nonnegative values for `max_seqlen_q` and `max_seqlen_kv`. Using metadata generated for inference in backward results in undefined behavior.
+- The differentiable inputs are `q`, `k`, `v`, and `sinks`. Gradients for the other inputs are returned as `None`.
+- `softmax_lse` is a **non-differentiable auxiliary output**. Backpropagating through it raises `NotImplementedError`. During training, the operator computes `softmax_lse` internally for backward. When `return_softmax_lse` is `False`, the API returns a placeholder for this output.
+- The layouts and scenarios supported for backward are determined by `flash_attn_grad`. The backward operator reports an error for unsupported layouts or scenarios.
+- `flash_attn_grad` is supported on Ascend 950 series products and must be built and installed as part of the custom operator package.
+
 ## Constraints
 
 - The parameters cu_seqlens_q, cu_seqlens_kv, seqused_q, seqused_kv, block_table, and attn_mask are tensors. Since the operator cannot obtain the actual values of the tensors during the Tiling phase, the tiling side does not validate the values, and you must ensure their correctness. If invalid values are passed in for these parameters, undefined behavior occurs, such as precision issues or program crashes caused by invalid memory access.

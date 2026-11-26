@@ -203,7 +203,7 @@ python test_flash_attn.py --case_id BASE_01 --compare_mode \
 | Parameter | Type | Default Value | Description |
 |------|------|--------|------|
 | `--case_files` | str | Automatic scan of `test_cases/` | Case files, separated by commas |
-| `--case_id` | str | `all` | Case names, separated by commas, prefix matching supported |
+| `--case_id` | str | `all` | Case names, separated by commas (prefix matching supported) |
 | `--device_id` | int | `0` | NPU device ID |
 | `--use_gpu` | flag | — | Use the GPU backend |
 | `--gpu_device` | int | `0` | GPU device ID |
