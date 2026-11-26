@@ -99,6 +99,9 @@ struct FitBalanceTilingArgs {
     // kernel 是否支持短块前置交付: 仅影响无本地块形态的短块位置选择(不支持时恒后置);
     // 本地块形态的短块位置是结构性的(FRONT 恒后/BACK 恒前)。默认 false(保守)
     bool allowShortFront = false;
+    // 通信 tile(M 轴)长度上限, 0=不限。算子侧由外部资源约束(如通信窗口预算)反推注入,
+    // 引擎在该约束内搜索最优切分, 并否决超限的 NoCut 形态
+    uint64_t maxTileM = 0;
 };
 
 // 通算顺序
@@ -140,6 +143,7 @@ struct MatmulInputParams {
     // est 物理项参数(由 MakeMatmulInputParams 从标定注入, 默认中性)
     bool elemAtLeast1Byte = false; // 元素宽度>=1字节(减半惩罚门控用)
     double mmDtypeBytes = 1.0;     // A/B 每元素真实字节宽(fp4=0.5)
+    uint64_t maxTileM = 0;         // 通信 tile 长度上限(0=不限), 由 args 透传
 };
 
 // 标定数据总集: 算子侧唯一编辑面, 一个实例传给 FitBalanceCut。

@@ -40,6 +40,20 @@ Both APIs output the halving decision when `halveBaseM` is non-null: when the fi
 gate (multi-block, head-span == baseM, element >= 1 byte), a baseM halving is recommended (doubling the mm
 block count to fill the core wave—wave-filling gain); the caller decides whether to re-run mm tiling.
 
+`args.maxTileM` (optional, default 0): the upper bound of the communication tile (M-axis) length, for the
+caller to inject a feasibility boundary back-solved from an external resource constraint (such as the
+communication-window budget). **0 = unlimited, the upper bound is the full M** (including the NoCut
+single-block form—behavior identical to before this parameter was introduced). When set explicitly, the
+engine solves within the constraint: candidate long blocks in the search never exceed the value, NoCut
+(single block = full M) forms that violate it are vetoed, and est-based selection is done inside the
+feasible domain rather than by post-hoc clamping. Residual over-limit cuts (e.g. the occupancy-first (COF) challenger cut)
+are guarded by the engine's `EnforceTileCap`: a uniform re-cut at `min(512, cap aligned down to baseM)`
+(512 first, aligned with the existing coarse-cut granularity); when the re-cut granularity is 0 (the cap
+cannot hold even the minimum alignment granularity), the fix is abandoned and the cut is left as-is for
+the caller's final check to intercept. The fallback logic is provided publicly as
+`EnforceTileCapOnSplit` (split-tuple version); callers with their own fallback cuts (e.g. the COF
+result on calibration miss) can reuse it directly.
+
 Single input parameter plus calibration. Internally, the function sequentially completes the four constructions (data flow shape flow / matmul input facts mmInput / matmul model parameters mmModel / communication model parameters commModel) → cut planner construction (MakeCutPlanner) → keyed solving (Schedule, with the four inputs).
 After solving, the result is compared for timing on the same estimator against the core-utilization-first wave-geometry candidate (`DeriveCommCut`, see `core_occupancy_first_tiling.h` in the same directory), and the better one is returned.
 Returns an M-axis partitioning scheme of "1 short + N long" (or the degenerate equal split/single block).
@@ -106,6 +120,7 @@ ge::graphStatus MyOpTiling::DoTiling()
     FitBalanceTilingArgs args = {mValue_, nValue_, kValue_, rankDim_, aicCoreNum_,
                                  geAType_, inputADtypeSize_, outputDtypeSize_,
                                  ParseCommEngine(commMode_)};
+    args.maxTileM = winTileCap;   // optional: tile upper bound back-solved from external resource constraints (win budget, etc.); 0 = unlimited
     // mmBaseM/mmBaseN: the real mm tiling base block (produced by the preceding probe); pass 0 when there is no probe
 
     // ── Common calling template: preceding mm tiling probe → engine cut (with the real base block) → follow-up (e.g. halving re-run) ──

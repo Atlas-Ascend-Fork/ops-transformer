@@ -41,7 +41,7 @@ inline FitBalanceTilingResult GetA2aMmTiling(fe::PlatFormInfos* platformInfo, bo
                                              uint32_t precisionMode, ge::DataType x1Dtype, uint64_t inputADtypeSize,
                                              uint64_t outputDtypeSize, const char* commMode,
                                              QuantMatmulTilingData& mmTile, CommTilingData& commT,
-                                             CommTilingData& scaleT)
+                                             CommTilingData& scaleT, uint64_t maxTileM = 0)
 {
     FitBalanceTilingResult result{};
 
@@ -61,7 +61,7 @@ inline FitBalanceTilingResult GetA2aMmTiling(fe::PlatFormInfos* platformInfo, bo
     bool halveBaseM = false;
     const FitBalanceTilingArgs args =
         MakeFitBalanceEngineArgs(mPerRank, nValue, ka * rankDim, static_cast<uint32_t>(rankDim), probeUsedCoreNum,
-                                 x1Dtype, inputADtypeSize, outputDtypeSize, commEngine);
+                                 x1Dtype, inputADtypeSize, outputDtypeSize, commEngine, maxTileM);
     result.fitBalanceHit =
         GetFitBalanceCutFromMmBase(args, calib, result.cut, &halveBaseM, result.probeBaseM, result.probeBaseN);
 

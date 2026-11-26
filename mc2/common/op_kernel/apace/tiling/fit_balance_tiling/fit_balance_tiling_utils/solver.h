@@ -240,7 +240,8 @@ inline double EstimateCutTotalTime(const FitBalanceFlow& flow, const MatmulInput
 
 // 细向下降: 长块粒度按对齐粒度递减, est 严格变低才继续(平局即停), 变高或触及
 // 家族长块下界/轮数上限即停。
-constexpr double CUT_DESCENT_EPS_US = 1e-9; // est(µs)严格改善判定容差(代数平坦域fp噪声量级)
+constexpr uint64_t COMM_TILE_FALLBACK_LEN = 512UL; // 兜底均匀重切粒度(512 优先, 受 maxTileM 约束)
+constexpr double CUT_DESCENT_EPS_US = 1e-9;        // est(µs)严格改善判定容差(代数平坦域fp噪声量级)
 inline double DescendToFiner(const FitBalanceFlow& flow, const MatmulInputParams& mmInput,
                              const MatmulModelParams& mmModel, const CommModelParams& comm, CommCutResult& cut)
 {
@@ -291,7 +292,10 @@ inline CommCutResult QLadderSweep(const FitBalanceFlow& flow, const MatmulInputP
     CommCutResult bestCut{};
     double bestTime = 0.0;
     bool hasBest = false;
-    const uint64_t qMax = mValue / alignLen; // Q上限: 长块不超过m(单块)
+    uint64_t qMax = mValue / alignLen; // Q上限: 长块不超过m(单块)
+    if (mmInput.maxTileM > 0UL) {      // 外部资源约束(如win窗口预算)反推的长块上限
+        qMax = std::min(qMax, mmInput.maxTileM / alignLen);
+    }
     // Q下限: 轮数上限约束 numLong <= Nmax → Q >= m/(Nmax×align), 更小的候选必被轮数检查拒绝
     const uint64_t qMin = std::max((mValue + MAX_COMM_ROUNDS * alignLen - 1UL) / (MAX_COMM_ROUNDS * alignLen), 1UL);
     for (uint64_t q = qMin; q <= qMax; ++q) {
@@ -343,7 +347,11 @@ inline void SelectBestCut(const FitBalanceFlow& flow, const MatmulInputParams& m
         const CommCutResult swept = QLadderSweep(flow, mmInput, mmModel, comm, minLongLen);
         const double totalMmTime = MatmulTime(mmInput, mmModel, mmInput.mValue, mmModel.mmRankMul);
         const double serialTotalTime = TotalCommTime(comm, mmInput.mValue, 1U) + totalMmTime;
-        if (swept.totalTileCnt == 0U || EstimateCutTotalTime(flow, mmInput, mmModel, comm, swept) >= serialTotalTime) {
+        // tile 上限约束下 NoCut(单块=m)可能不可行, 不可行时保持切分形态(约束内的可行解优先于串行);
+        // 空候选且 NoCut 不可限时先退 NoCut 形态, 由 EnforceTileCap 重切到上限内
+        const bool noCutFeasible = !(mmInput.maxTileM > 0UL && mmInput.mValue > mmInput.maxTileM);
+        if (swept.totalTileCnt == 0U ||
+            (noCutFeasible && EstimateCutTotalTime(flow, mmInput, mmModel, comm, swept) >= serialTotalTime)) {
             tilingM.NoCutTiling();
         } else {
             tilingM.cutRes = swept;
@@ -359,7 +367,14 @@ inline void SelectBestCut(const FitBalanceFlow& flow, const MatmulInputParams& m
     const double totalMmTime = MatmulTime(mmInput, mmModel, mValue, mmModel.mmRankMul);
     const double serialTotalTime = TotalCommTime(comm, mValue, 1U) + totalMmTime;
     CommCutResult bestCut = tilingM.cutRes;
-    double bestTime = EstimateCutTotalTime(flow, mmInput, mmModel, comm, bestCut);
+    // maxTileM 约束在可行域内择优(K 轴族无 QLadder 限幅入口): 超限候选不参与比较;
+    // 若全族无可行解, 保留种子由 EnforceTileCap 统一收口
+    constexpr double CAP_INFEASIBLE_TIME = 1e30;
+    const auto capFeasible = [&](const CommCutResult& c) {
+        return mmInput.maxTileM == 0UL || (std::max(c.longTileLen, c.shortTileLen) <= mmInput.maxTileM);
+    };
+    double bestTime =
+        capFeasible(bestCut) ? EstimateCutTotalTime(flow, mmInput, mmModel, comm, bestCut) : CAP_INFEASIBLE_TIME;
     const uint64_t initialTileCnt = bestCut.totalTileCnt;
     for (uint64_t budget = 2U; budget < initialTileCnt; ++budget) {
         tilingM.cutRes = balancedSeed;
@@ -367,7 +382,7 @@ inline void SelectBestCut(const FitBalanceFlow& flow, const MatmulInputParams& m
         tilingM.FitTileLengthDiscrete(goodLinearity, localBlockProtected);
         MergeEqualTiles(tilingM);
         const double cutTime = EstimateCutTotalTime(flow, mmInput, mmModel, comm, tilingM.cutRes);
-        if (cutTime < bestTime) {
+        if (capFeasible(tilingM.cutRes) && cutTime < bestTime) {
             bestTime = cutTime;
             bestCut = tilingM.cutRes;
         }
@@ -378,10 +393,63 @@ inline void SelectBestCut(const FitBalanceFlow& flow, const MatmulInputParams& m
         }
     }
     tilingM.SetMaxTileCnt(MAX_COMM_ROUNDS);
-    if (bestTime >= serialTotalTime) {
+    const bool noCutFeasible = !(mmInput.maxTileM > 0UL && mmInput.mValue > mmInput.maxTileM);
+    if (noCutFeasible && bestTime >= serialTotalTime) {
         tilingM.NoCutTiling();
     } else {
         tilingM.cutRes = bestCut;
+    }
+}
+
+// tile 上限兜底(公共, 引擎与算子侧共用): 切分四元组任一 tile 超过 maxTileM 时, 按
+// min(512, maxTileM 对齐 baseM 向下取整) 均匀重切(512 优先与既有粗切粒度对齐)。
+// 返回重切粒度: 0 = 未超限/上限未设(0)/上限容不下最小对齐粒度而放弃修正——
+// 前两者无需动作, 后者交调用方终检拦截; >0 = 已按该粒度重切。
+// 适用于 CommCutResult 与 CommTilingData 两类切分载体(字段名不同、四元组同构)。
+inline uint64_t EnforceTileCapOnSplit(uint64_t& tileCnt, uint64_t& tileLen, uint64_t& tailCnt, uint64_t& tailLen,
+                                      uint64_t mValue, uint64_t maxTileM, uint64_t baseM)
+{
+    if (maxTileM == 0UL) {
+        return 0UL;
+    }
+    if (std::max(tileLen, tailLen) <= maxTileM) {
+        return 0UL;
+    }
+    const uint64_t alignLen = (baseM != 0UL) ? baseM : static_cast<uint64_t>(M_ALIGN_GRANULARITY);
+    const uint64_t capAligned = maxTileM / alignLen * alignLen;
+    uint64_t fallbackLen = std::min(COMM_TILE_FALLBACK_LEN, capAligned);
+    if (fallbackLen == 0UL) {
+        return 0UL;
+    }
+    // 轮数硬上限(通信 API FFTS 队列, MAX_COMM_ROUNDS, 非软预算): 512 粒度轮数超限时
+    // 退到上限本身(对齐向下)做最粗均切——前提上限 > 512; 上限 <= 512(无法再放粗)或
+    // 上限粒度仍超轮数则放弃均切, 交终检拦截
+    if ((mValue + fallbackLen - 1UL) / fallbackLen > MAX_COMM_ROUNDS) {
+        if (maxTileM <= COMM_TILE_FALLBACK_LEN) {
+            return 0UL;
+        }
+        fallbackLen = capAligned;
+        if ((mValue + fallbackLen - 1UL) / fallbackLen > MAX_COMM_ROUNDS) {
+            return 0UL;
+        }
+    }
+    const uint64_t numLong = mValue / fallbackLen;
+    tileCnt = numLong;
+    tileLen = fallbackLen;
+    tailLen = mValue - numLong * fallbackLen;
+    tailCnt = (tailLen > 0UL) ? 1UL : 0UL;
+    return fallbackLen;
+}
+
+// 引擎侧兜底入口(约束已参与搜索, 此处仅防御核利用率优先(COF)挑战者切分等残留超限形态)
+inline void EnforceTileCap(CommCutResult& cut, const MatmulInputParams& mmInput)
+{
+    const uint64_t fallbackLen =
+        EnforceTileCapOnSplit(cut.numLongTile, cut.longTileLen, cut.numShortTile, cut.shortTileLen, mmInput.mValue,
+                              mmInput.maxTileM, mmInput.baseM);
+    if (fallbackLen > 0UL) {
+        cut.shortTileAtBack = true;
+        cut.totalTileCnt = cut.numLongTile + cut.numShortTile;
     }
 }
 

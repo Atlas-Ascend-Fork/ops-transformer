@@ -34,6 +34,15 @@ bool GetFitBalanceCutFromMmBase(const FitBalanceTilingArgs &args, const FitBalan
 两个接口均在 `halveBaseM` 非空时输出减半决策：最终切分满足减半门控（多块、头块跨度==baseM、
 元素>=1字节）时建议 baseM 减半（mm 块数翻倍填满核波的 wave 填充收益），调用方据此决定是否重跑 mm tiling。
 
+`args.maxTileM`（可选，默认 0）：通信 tile（M 轴）长度上限，供调用方注入外部资源约束
+（如通信窗口 win 预算）反推出的可行性边界。**0 = 不限制，上界即完整 M**（含 NoCut 单块形态，
+与该参数引入前的行为完全一致）；显式传入时引擎在约束内求解——搜索候选的长块不超过该值、
+NoCut（单块=整段 M）超限形态被否决，est 择优在可行域内完成而非事后钳制。残留超限的切分
+（如 核利用率优先(COF)挑战者切分）由引擎 `EnforceTileCap` 兜底：按 `min(512, 上限对齐 baseM 向下取整)`
+均匀重切（512 优先，与既有粗切粒度对齐）；重切粒度为 0（上限容不下最小对齐粒度）时放弃
+修正、保持原样交调用方终检拦截。兜底逻辑以 `EnforceTileCapOnSplit`（切分四元组版）公共
+提供，调用方自有兜底切分（如标定 miss 的 COF 结果）超限时可直接复用。
+
 单入参 + 标定。内部顺序完成四件构造（数据流形态 flow / mm 输入事实 mmInput / mm 模型参数 mmModel / 通信模型参数 commModel）→ 切分器构造（MakeCutPlanner）→ 键控求解（Schedule，四件入参）。
 求解后与核利用率优先的波量几何候选（`DeriveCommCut`，见同目录 `core_occupancy_first_tiling.h`）
 在同一估时器下同台比时，择优返回。
@@ -101,6 +110,7 @@ ge::graphStatus MyOpTiling::DoTiling()
     FitBalanceTilingArgs args = {mValue_, nValue_, kValue_, rankDim_, aicCoreNum_,
                                  geAType_, inputADtypeSize_, outputDtypeSize_,
                                  ParseCommEngine(commMode_)};
+    args.maxTileM = winTileCap;   // 可选: 外部资源约束(win 预算等)反推的 tile 上限, 0=不限
     // mmBaseM/mmBaseN: 真实 mm tiling 底块(前置 probe 产出); 无 probe 时传 0
 
     // ── 共通调用模板: 前置 mm tiling probe → 引擎切分(带真实底块) → 后续处理(如减半重跑) ──
