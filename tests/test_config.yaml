@@ -357,6 +357,26 @@ attention:
     options:
       - quant_flash_attn
 
+  quant_flash_mla:
+    module: True
+    src:
+      - attention/quant_flash_mla
+      - attention/common/op_host
+    exclude:
+      - attention/quant_flash_mla/docs
+      - attention/quant_flash_mla/README.md
+    ut_cov_exclude:
+      - attention/quant_flash_mla/op_kernel
+      - attention/quant_flash_mla/tests
+      - attention/quant_flash_mla/torch_extension
+      - attention/quant_flash_mla/docs
+      - attention/quant_flash_mla/op_host/arch92
+    test:
+      examples: False
+      ut: True
+    options:
+      - quant_flash_mla
+
   flash_attention_score:
     module: True
     src:
