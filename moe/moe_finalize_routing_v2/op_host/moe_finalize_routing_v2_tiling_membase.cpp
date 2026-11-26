@@ -262,11 +262,11 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::DoGetShapeAttrsInfo()
                         return ge::GRAPH_FAILED);
         }
         k_ = scalesK;
-        OP_CHECK_IF(k_ <= 0,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "k", std::to_string(k_).c_str(),
-                                                          "k must be greater than 0."),
-                    return ge::GRAPH_FAILED);
     }
+    OP_CHECK_IF(k_ <= 0,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "k", std::to_string(k_).c_str(),
+                                                      "k must be greater than 0."),
+                return ge::GRAPH_FAILED);
 
     int64_t n = nk / k_;
     totalRowNum_ = n;

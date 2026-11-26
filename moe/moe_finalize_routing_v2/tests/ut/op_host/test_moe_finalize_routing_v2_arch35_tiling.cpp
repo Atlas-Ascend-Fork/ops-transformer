@@ -912,3 +912,18 @@ TEST(MoeFinalizeRoutingMx8Tiling, RejectsSpecialExpertRanges)
         }
     }
 }
+
+TEST_F(MoeFinalizeRoutingV2Arch35Tiling, WithoutScalesRequiresPositiveK)
+{
+    optiling::MoeFinalizeRoutingCompileInfoV2 compileInfo = {40, 262144};
+    for (const int64_t k : {0, -1, 2}) {
+        SCOPED_TRACE(k);
+        gert::TilingContextPara tilingContextPara(
+            "MoeFinalizeRoutingV2",
+            {{{{6, 16}, {6, 16}}, ge::DT_FLOAT, ge::FORMAT_ND}, {{{6}, {6}}, ge::DT_INT32, ge::FORMAT_ND}},
+            {{{{3, 16}, {3, 16}}, ge::DT_FLOAT, ge::FORMAT_ND}}, DefaultExpertRangeAttrs(2, k), &compileInfo,
+            "Ascend950", kA5SocInfo, 4096);
+        TilingInfo tilingInfo{};
+        EXPECT_EQ(ExecuteTiling(tilingContextPara, tilingInfo), k > 0);
+    }
+}

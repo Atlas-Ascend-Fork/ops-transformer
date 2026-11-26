@@ -256,6 +256,9 @@ private:
         xLocal = xQue.DeQue<T>();
         ProcessExpandXBiasScale<T, S>(yLocal[rowInnerIdx * tilingData->h], xLocal, innerBiasLocal, scale, tilingData->h,
                                       hasBiasAndExpertIdx, hasScales);
+        event_t v2mte = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
+        SetFlag<HardEvent::V_MTE2>(v2mte);
+        WaitFlag<HardEvent::V_MTE2>(v2mte);
     }
 
     __aicore__ inline void CastYOutput(int64_t rowInnerLoop)
