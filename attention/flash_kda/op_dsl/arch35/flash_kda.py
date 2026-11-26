@@ -944,13 +944,6 @@ def clear_caches():
     _get_compiled_kernel.cache_clear()
 
 
-@export("flash_kda_fwd")
-def export_flash_kda_fwd():
-    """Publish the same metadata-selected entries used by both public APIs."""
-    export_flash_kda()
-
-
-
 def _meta_outputs(spec, outputs):
     batch, n_qk, n_v, length, layout = spec
     chunks = (
