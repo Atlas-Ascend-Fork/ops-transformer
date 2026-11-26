@@ -406,7 +406,8 @@ def _apply_sink_to_bnsd(out, lse, sinks=None):
         O     = O * exp(lse-m_ref) / denom
         LSE   = m_ref + log(denom)
     与 kernel 首块把 sink 折叠进 running max 在精确算术下等价。
-    lse 非有限的行（全 mask 等）保持原值；sinks 为 None/空时原样返回。
+    lse 非有限的行（全 mask 等）也计入 sink：LSE = sink[head]，O 保持 0；
+    sinks 为 None/空时原样返回。
     """
     sink_src = SINKS if sinks is None else sinks
     if sink_src is None:
@@ -424,12 +425,18 @@ def _apply_sink_to_bnsd(out, lse, sinks=None):
     if lse4.dim() == 3:
         lse4 = lse4.unsqueeze(-1)
     valid = torch.isfinite(lse4)
-    m_ref = torch.maximum(lse4, sink4.expand_as(lse4)).masked_fill(~valid, 0.0)
-    p_self = torch.exp(lse4 - m_ref)
-    denom = p_self + torch.exp(sink4.expand_as(lse4) - m_ref)
-    rescale = torch.where(valid, p_self / denom, torch.ones_like(denom))
-    lse_new = torch.where(valid, m_ref + torch.log(denom), lse4)
-    out_new = (out.to(torch.float32) * rescale).to(out.dtype)
+    sink4_expand = sink4.expand_as(lse4)
+    # 无有效 key 的行(lse 非有限): sink 语义下 LSE = sink[head], O = 0。
+    m_ref = torch.maximum(lse4, sink4_expand).masked_fill(~valid, sink4_expand)
+    p_self = torch.exp(lse4 - m_ref).masked_fill(~valid, 0.0)
+    denom = p_self + torch.exp(sink4_expand - m_ref)
+    rescale = torch.where(valid, p_self / denom, torch.zeros_like(denom))
+    lse_new = m_ref + torch.log(denom)
+    out_new = torch.where(
+        valid,
+        out.to(torch.float32) * rescale,
+        torch.zeros_like(out, dtype=torch.float32),
+    ).to(out.dtype)
     if lse.dim() == 3:
         lse_new = lse_new.squeeze(-1)
     return out_new, lse_new
@@ -462,9 +469,14 @@ def cpu_fp8_fullquant_golden(
         result = torch.zeros(
             (batch, heads, q_seq, v_dim), dtype=torch.float32
         ).contiguous()
-        lse = torch.full(
-            (batch, heads, q_seq, 1), float("inf"), dtype=torch.float32
-        ).contiguous()
+        if SINKS is not None:
+            # 无 KV 的行: 开 sink 时 LSE = sink[head](与 kernel 的 LSE 初值一致)
+            sink_t = torch.as_tensor(SINKS, dtype=torch.float32).reshape(1, -1, 1, 1)
+            lse = sink_t.expand(batch, heads, q_seq, 1).clone().contiguous()
+        else:
+            lse = torch.full(
+                (batch, heads, q_seq, 1), float("inf"), dtype=torch.float32
+            ).contiguous()
         return result, lse
 
     out = torch.zeros((batch, heads, q_seq, v_dim), dtype=torch.float32).contiguous()
@@ -582,14 +594,14 @@ def cpu_fp8_fullquant_golden(
     out_sum = torch.cat(s_blocks, dim=2).contiguous()
     out_max = torch.cat(m_blocks, dim=2).contiguous()
 
-    # 无有效 key 的行(全 mask / 有效 KV 长度为 0)保持 inf 哨兵, 与 kernel 的
-    # MarkInvalidRowMaxForSink 语义一致; 其余行按 online-softmax 记账输出 LSE。
+    # 无有效 key 的行(全 mask / 有效 KV 长度为 0): 未开 sink 时保持 inf 哨兵;
+    # 开 sink 时 sink 已折叠进 online-softmax 初值, LSE = max + log(sum) 自然等于
+    # sink[head], 与 kernel 的 LSE 初值/prologue 一致(不随基本块是否被跳过而变化)。
     valid_rows = (~mask_global).any(dim=-1, keepdim=True)
-    lse = torch.where(
-        valid_rows,
-        out_max + torch.log(out_sum + EPSILON),
-        torch.full_like(out_max, float("inf")),
-    ).contiguous()
+    lse = out_max + torch.log(out_sum + EPSILON)
+    if SINKS is None:
+        lse = torch.where(valid_rows, lse, torch.full_like(out_max, float("inf")))
+    lse = lse.contiguous()
     result = torch.where(valid_rows, result, torch.zeros_like(result))
     return result, lse
 

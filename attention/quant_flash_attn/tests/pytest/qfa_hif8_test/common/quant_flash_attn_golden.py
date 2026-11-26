@@ -266,6 +266,13 @@ def convert_kv_bnsd_to_layout(tensor_bnsd, seq_lens, layout, cu_seqlens=None):
 def fill_tnd_padding(tensor_tnd, seq_lens, cu_seqlens, fill_value=float("inf")):
     if cu_seqlens is None:
         return tensor_tnd
+    if torch.is_tensor(fill_value):
+        # sink 场景: padding 行 LSE 按 head 填 sink[head], 与 kernel LSE 初值一致
+        fill_value = (
+            fill_value.detach()
+            .to(torch.float32)
+            .reshape((1, -1) + (1,) * (tensor_tnd.ndim - 2))
+        )
     B = len(seq_lens)
     for b in range(B):
         act_s = seq_lens[b]
@@ -428,7 +435,8 @@ def _apply_sink_to_bnsd(out, lse, sinks=None):
         O     = O * exp(lse-m_ref) / denom
         LSE   = m_ref + log(denom)
     与 kernel 首块把 sink 折叠进 running max 在精确算术下等价。
-    lse 非有限的行（全 mask 等）保持原值；sinks 为 None/空时原样返回。
+    lse 非有限的行（全 mask 等）也计入 sink：LSE = sink[head]，O 保持 0；
+    sinks 为 None/空时原样返回。
     """
     sink_src = SINKS if sinks is None else sinks
     if sink_src is None:
@@ -446,12 +454,18 @@ def _apply_sink_to_bnsd(out, lse, sinks=None):
     if lse4.dim() == 3:
         lse4 = lse4.unsqueeze(-1)
     valid = torch.isfinite(lse4)
-    m_ref = torch.maximum(lse4, sink4.expand_as(lse4)).masked_fill(~valid, 0.0)
-    p_self = torch.exp(lse4 - m_ref)
-    denom = p_self + torch.exp(sink4.expand_as(lse4) - m_ref)
-    rescale = torch.where(valid, p_self / denom, torch.ones_like(denom))
-    lse_new = torch.where(valid, m_ref + torch.log(denom), lse4)
-    out_new = (out.to(torch.float32) * rescale).to(out.dtype)
+    sink4_expand = sink4.expand_as(lse4)
+    # 无有效 key 的行(lse 非有限): sink 语义下 LSE = sink[head], O = 0。
+    m_ref = torch.maximum(lse4, sink4_expand).masked_fill(~valid, sink4_expand)
+    p_self = torch.exp(lse4 - m_ref).masked_fill(~valid, 0.0)
+    denom = p_self + torch.exp(sink4_expand - m_ref)
+    rescale = torch.where(valid, p_self / denom, torch.zeros_like(denom))
+    lse_new = m_ref + torch.log(denom)
+    out_new = torch.where(
+        valid,
+        out.to(torch.float32) * rescale,
+        torch.zeros_like(out, dtype=torch.float32),
+    ).to(out.dtype)
     if lse.dim() == 3:
         lse_new = lse_new.squeeze(-1)
     return out_new, lse_new
@@ -584,13 +598,13 @@ def cpu_hif8_golden(
     out = out / (out_sum + EPSILON)
 
     o_max = torch.cat(m_BLOCKS, dim=2)
-    # 无有效 key 的行保持 inf 哨兵, 与 kernel 的 MarkInvalidRowMaxForSink 语义一致
+    # 无有效 key 的行: 未开 sink 时保持 inf 哨兵; 开 sink 时 sink 已折叠进
+    # online-softmax 初值, LSE = max + log(sum) 自然等于 sink[head], 与 kernel 的
+    # LSE 初值/prologue 一致(不随基本块是否被跳过而变化)。
     valid_rows = (~mask_global).any(dim=-1, keepdim=True)
-    lse = torch.where(
-        valid_rows,
-        o_max + torch.log(out_sum + EPSILON),
-        torch.full_like(o_max, float("inf")),
-    )
+    lse = o_max + torch.log(out_sum + EPSILON)
+    if SINKS is None:
+        lse = torch.where(valid_rows, lse, torch.full_like(o_max, float("inf")))
     out = torch.where(valid_rows, out, torch.zeros_like(out))
     logger.info("[CPU Golden] output=%s", out.shape)
     return out, lse
@@ -678,6 +692,9 @@ def cpu_hif8_scheduled_golden(data, schedule):
         if SINKS is None
         else torch.as_tensor(SINKS, dtype=torch.float32).reshape(-1)
     )
+    if sinks is not None:
+        # 未参与调度的行(kv 长度为 0 等)与 kernel 的 LSE 初值一致: 预置 sink[head]
+        lse = sinks.view(1, N_q, 1, 1).expand_as(lse).clone()
     for b, (sq, sk) in enumerate(zip(qlens, klens)):
         if sk == 0:
             continue
@@ -1489,11 +1506,17 @@ if __name__ == "__main__":
         cpu_lse_tnd_torch = convert_q_bnsd_to_layout(
             cpu_lse, _get_seqused_q(), "TND", cu_seqlens=CU_SEQLENS_Q
         )
+        # padding 行按 NPU LSE 初值: 开 sink 时为 sink[head], 否则 inf
+        lse_pad = (
+            torch.as_tensor(SINKS, dtype=torch.float32).reshape(-1)
+            if SINKS is not None
+            else float("inf")
+        )
         fill_tnd_padding(
             cpu_lse_tnd_torch,
             _get_seqused_q(),
             CU_SEQLENS_Q,
-            fill_value=float("inf"),
+            fill_value=lse_pad,
         )
         # NPU LSE 输出为 N-major 排布 (N, T): N 在外, T 在内
         # CPU golden 经 convert 后是 [T, N, 1] (T-major), 需转成 [N, T] 对齐

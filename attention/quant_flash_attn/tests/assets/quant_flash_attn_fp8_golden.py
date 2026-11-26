@@ -411,10 +411,18 @@ def nt_to_bnsd_q_scale_gqa(tensor_nt, seq_lens):
 
 
 def fill_tnd_padding(tensor_tnd, seq_lens, cu_seqlens, fill_value=float("inf")):
-    """TND [T,N,D] padding 位置填 fill_value (匹配 NPU 行为)."""
+    """TND [T,N,D] padding 位置填 fill_value (匹配 NPU 行为).
+    fill_value 可为 per-head tensor: sink 场景下 padding 行 LSE 填 sink[head]。
+    """
     tensor = tensor_tnd.contiguous()
     T, N, D = tensor.shape
     result = tensor.clone()
+    if torch.is_tensor(fill_value):
+        fill_value = (
+            fill_value.detach()
+            .to(torch.float32)
+            .reshape((1, -1) + (1,) * (tensor.ndim - 2))
+        )
     if cu_seqlens is not None:
         for b_idx in range(len(seq_lens)):
             act_s = seq_lens[b_idx]
@@ -492,9 +500,14 @@ def cpu_fp8_fullquant_golden(
         result = torch.zeros(
             (batch, heads, q_seq, v_dim), dtype=torch.float32
         ).contiguous()
-        lse = torch.full(
-            (batch, heads, q_seq, 1), float("inf"), dtype=torch.float32
-        ).contiguous()
+        if SINKS is not None:
+            # 无 KV 的行: 开 sink 时 LSE = sink[head](与 kernel 的 LSE 初值一致)
+            sink_t = torch.as_tensor(SINKS, dtype=torch.float32).reshape(1, -1, 1, 1)
+            lse = sink_t.expand(batch, heads, q_seq, 1).clone().contiguous()
+        else:
+            lse = torch.full(
+                (batch, heads, q_seq, 1), float("inf"), dtype=torch.float32
+            ).contiguous()
         return result, lse
 
     out = torch.zeros((batch, heads, q_seq, v_dim), dtype=torch.float32).contiguous()
@@ -600,15 +613,14 @@ def cpu_fp8_fullquant_golden(
     out_sum = torch.cat(s_blocks, dim=2).contiguous()
     out_max = torch.cat(m_blocks, dim=2).contiguous()
 
-    # 无有效 key 的行(全 mask / 有效 KV 长度为 0)保持 inf 哨兵, 与 kernel 的
-    # MarkInvalidRowMaxForSink 语义一致; 其余行按 online-softmax 记账输出 LSE。
-    # 前置注入 sink 后 out_max 不再等于 minValue, 必须用 mask 直接判定无效行。
+    # 无有效 key 的行(全 mask / 有效 KV 长度为 0): 未开 sink 时保持 inf 哨兵;
+    # 开 sink 时 sink 已折叠进 online-softmax 初值, LSE = max + log(sum) 自然等于
+    # sink[head], 与 kernel 的 LSE 初值/prologue 一致(不随基本块是否被跳过而变化)。
     valid_rows = (~mask_global).any(dim=-1, keepdim=True)
-    lse = torch.where(
-        valid_rows,
-        out_max + torch.log(out_sum + EPSILON),
-        torch.full_like(out_max, float("inf")),
-    ).contiguous()
+    lse = out_max + torch.log(out_sum + EPSILON)
+    if SINKS is None:
+        lse = torch.where(valid_rows, lse, torch.full_like(out_max, float("inf")))
+    lse = lse.contiguous()
     result = torch.where(valid_rows, result, torch.zeros_like(result))
     return result, lse
 

@@ -185,8 +185,16 @@ def convert_kv_bnsd_to_layout(tensor_bnsd, seq_lens, layout, cu_seqlens=None):
 
 
 def fill_tnd_padding(tensor_tnd, seq_lens, cu_seqlens, fill_value=float("inf")):
+    """TND padding 行填充; fill_value 可为 per-head tensor (sink 场景填 sink[head])。"""
     if cu_seqlens is None:
         return tensor_tnd
+    if torch.is_tensor(fill_value):
+        # sink 场景: padding 行 LSE 按 head 填 sink[head], 与 kernel LSE 初值一致
+        fill_value = (
+            fill_value.detach()
+            .to(torch.float32)
+            .reshape((1, -1) + (1,) * (tensor_tnd.ndim - 2))
+        )
     B = len(seq_lens)
     for b in range(B):
         act_s = seq_lens[b]
@@ -375,14 +383,13 @@ def cpu_hif8_golden(
     out = out / (out_sum + EPSILON)
 
     o_max = torch.cat(m_BLOCKS, dim=2)
-    # 无有效 key 的行保持 inf 哨兵, 与 kernel 的 MarkInvalidRowMaxForSink 语义一致;
-    # 前置注入 sink 后 o_max 不再等于 minValue, 必须用 mask 直接判定无效行。
+    # 无有效 key 的行: 未开 sink 时保持 inf 哨兵; 开 sink 时 sink 已折叠进
+    # online-softmax 初值, LSE = max + log(sum) 自然等于 sink[head], 与 kernel 的
+    # LSE 初值/prologue 一致(不随基本块是否被跳过而变化)。
     valid_rows = (~mask_global).any(dim=-1, keepdim=True)
-    lse = torch.where(
-        valid_rows,
-        o_max + torch.log(out_sum + EPSILON),
-        torch.full_like(o_max, float("inf")),
-    )
+    lse = o_max + torch.log(out_sum + EPSILON)
+    if SINKS is None:
+        lse = torch.where(valid_rows, lse, torch.full_like(o_max, float("inf")))
     out = torch.where(valid_rows, out, torch.zeros_like(out))
     logger.info("[CPU Golden] output=%s", out.shape)
     return out, lse
@@ -455,6 +462,9 @@ def cpu_hif8_scheduled_golden(
     qlens, klens = list(actual_seq_q), list(actual_seq_kv)
     out = torch.zeros((*q.shape[:-1], v.shape[-1]), dtype=torch.float32)
     lse = torch.full((*q.shape[:-1], 1), float("inf"), dtype=torch.float32)
+    if sinks is not None:
+        # 未参与调度的行(kv 长度为 0 等)与 kernel 的 LSE 初值一致: 预置 sink[head]
+        lse = sinks.view(1, num_heads_q, 1, 1).expand_as(lse).clone()
     fmin = -torch.finfo(torch.float32).max
 
     for b, (sq, sk) in enumerate(zip(qlens, klens)):
