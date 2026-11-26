@@ -955,6 +955,253 @@ protected:
 };
 #endif
 
+#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510 || __NPU_ARCH__ == 9201 || __NPU_ARCH__ == 9202)
+#define MOE_FINALIZE_ROUTING_HAS_MXFP8
+constexpr uint32_t MX8_SCALE_BLOCK_SIZE = 32u;
+constexpr uint32_t MX8_SCALE_ALIGN = 2u;
+// UB 一个 32B block 容纳的 fp32 元素数（=8）。scaleF32/scaleIndex 的 UB 长度按此对齐，
+// 与 Host 侧 tiling 的 MX8_SCALE_INDEX_ALIGN 对应，预算与布局核对时取同一来源。
+constexpr uint32_t MX8_UB_F32_PER_BLOCK = UBBLOCKSIZE / sizeof(float);
+
+// 每行E8M0 scale个数：M = CeilAlign(CeilDiv(H, 32), 2)。整行步长按 int64 计算，
+// 避免 H≥2^32 时先窄化为 uint32 归零（G.EXP.21）；仅受 UB 上界约束的 tile 长度在使用点转 uint32。
+__aicore__ inline int64_t Mx8ScaleStride(int64_t h)
+{
+    return Ops::Base::CeilAlign((h + MX8_SCALE_BLOCK_SIZE - 1) / MX8_SCALE_BLOCK_SIZE,
+                                static_cast<int64_t>(MX8_SCALE_ALIGN));
+}
+
+// 每行E8M0 scale在UB中的对齐长度（32B对齐）；结果由 UB 预算约束，使用点按需转 uint32。
+__aicore__ inline int64_t Mx8ScaleRowAligned(int64_t h)
+{
+    return Ops::Base::CeilAlign(Mx8ScaleStride(h), static_cast<int64_t>(UBBLOCKSIZE));
+}
+
+// E8M0字节 -> 2^(e-127)，0编码2^-127，255编码NaN。复用MXFP4段的E8M0位模式常量。
+__aicore__ inline float Mx8DecodeScale(uint8_t exponent)
+{
+    union {
+        uint32_t bits;
+        float value;
+    } scale;
+    scale.bits = exponent == 0U ?
+                     E8M0_MIN_SCALE_FP32_BITS :
+                     (exponent == E8M0_NAN_CODE ? FP32_QUIET_NAN_BITS :
+                                                  (static_cast<uint32_t>(exponent) << FP32_EXPONENT_SHIFT));
+    return scale.value;
+}
+
+// E8M0 scale 由 MTE2 搬入后由标量pipe读取，需要显式等待 MTE2->S 完成，避免读到旧数据。
+__aicore__ inline void Mx8WaitScaleCopyReady()
+{
+    event_t mte2ToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
+    SetFlag<HardEvent::MTE2_S>(mte2ToS);
+    WaitFlag<HardEvent::MTE2_S>(mte2ToS);
+}
+
+// 标量decode结果写入UB后，向量读取前需要S->V同步
+__aicore__ inline void Mx8ScalarToVectorSync()
+{
+    event_t sToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
+    SetFlag<HardEvent::S_V>(sToV);
+    WaitFlag<HardEvent::S_V>(sToV);
+}
+
+// 向量pipe读完scaleF32后，下一行标量decode写scaleF32前需要V->S同步，避免覆盖首几个scale元素
+__aicore__ inline void Mx8VectorToScalarSync()
+{
+    event_t vToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_S));
+    SetFlag<HardEvent::V_S>(vToS);
+    WaitFlag<HardEvent::V_S>(vToS);
+}
+
+// UB scratch 布局（按 float 元素编号，供分配与取段共用，避免双处维护偏移）。
+// 注意：h 传入的是 32 元素对齐后的行宽（各策略的 hAligned/hFactor），
+// 保证 values/biasValues/scaleExpanded/scaleIndex 各段基址均 32B 对齐；
+//   [0, h)                values（反量化中间值）
+//   [h, 2h)               biasValues（bias 中转）
+//   [2h, 3h)              scaleExpanded（按列展开的 E8M0 系数）
+//   [3h, 3h + mAligned)   scaleF32（标量解码出的 fp32 系数）
+//   [3h + mAligned, +h)   scaleIndex（uint32 的 Gather 索引，ReinterpretCast 复用）
+// mAligned 即 scaleF32 的元素容量，与 scaleIndex/scaleF32 的 UB 对齐值保持一致。
+__aicore__ inline uint32_t Mx8ScratchBytes(uint32_t h, uint32_t scaleNumAligned)
+{
+    constexpr uint32_t MX8_SCRATCH_FP32_ROWS = 3; // values | biasValues | scaleExpanded
+    return (MX8_SCRATCH_FP32_ROWS * h + scaleNumAligned) * static_cast<uint32_t>(sizeof(float)) +
+           h * static_cast<uint32_t>(sizeof(uint32_t));
+}
+
+__aicore__ inline void Mx8GetScratchTensors(const LocalTensor<float>& scratch, uint32_t h, uint32_t scaleNumAligned,
+                                            LocalTensor<float>& values, LocalTensor<float>& biasValues,
+                                            LocalTensor<float>& scaleExpanded, LocalTensor<float>& scaleF32,
+                                            LocalTensor<uint32_t>& scaleIndex)
+{
+    values = scratch;
+    biasValues = values[h];
+    scaleExpanded = values[2u * h];
+    // 末段 scaleIndex 的起点由 scaleF32 段的末尾推导，与 Mx8ScratchBytes 的容量公式共享
+    // 同一 scaleNumAligned 上界，调整布局时只需同步本函数与 Mx8ScratchBytes 两行。
+    scaleF32 = values[3u * h];
+    LocalTensor<float> indexAddr = values[3u * h + scaleNumAligned];
+    scaleIndex = indexAddr.ReinterpretCast<uint32_t>();
+}
+
+__aicore__ inline void Mx8BuildScaleIndex(const LocalTensor<uint32_t>& scaleIndex, uint32_t elemNum)
+{
+    // Gather的srcOffset单位为字节，fp32元素需乘sizeof(float)
+    constexpr uint32_t scaleElemBytes = static_cast<uint32_t>(sizeof(float));
+    for (uint32_t i = 0; i < elemNum; ++i) {
+        scaleIndex.SetValue(i, (i / MX8_SCALE_BLOCK_SIZE) * scaleElemBytes);
+    }
+}
+
+// 计算一行的反量化结果并累加到y：y += dequant(x) (+ bias)
+// xBytes/scalesBytes 为gather行在UB中的起始地址；其余为fp32临时buffer。
+template <typename Fp8Type>
+__aicore__ inline void Mx8DequantizeRow(const LocalTensor<float>& yRow, const LocalTensor<uint8_t>& xBytes,
+                                        const LocalTensor<uint8_t>& scalesBytes, const LocalTensor<bfloat16_t>& biasRow,
+                                        const LocalTensor<float>& values, const LocalTensor<float>& biasValues,
+                                        const LocalTensor<float>& scaleExpanded, const LocalTensor<float>& scaleF32,
+                                        const LocalTensor<uint32_t>& scaleIndex, uint32_t elemNum, bool hasBias,
+                                        float routingWeight)
+{
+    // E8M0 -> fp32：标量解码到scaleF32，再一次性向量展开到H长度
+    Mx8WaitScaleCopyReady();
+    // 上一行向量Gather可能仍在读scaleF32，先等向量pipe结束再复用该buffer
+    Mx8VectorToScalarSync();
+    // H 非 32 倍数时尾块不足 32 个元素也占一个 scale，解码数量按向上取整
+    uint32_t scaleNum = Ops::Base::CeilDiv(elemNum, MX8_SCALE_BLOCK_SIZE);
+    for (uint32_t i = 0; i < scaleNum; ++i) {
+        scaleF32.SetValue(i, Mx8DecodeScale(scalesBytes.GetValue(i)));
+    }
+    Mx8ScalarToVectorSync();
+
+    LocalTensor<Fp8Type> xFp8 = xBytes.template ReinterpretCast<Fp8Type>();
+    Cast<float, Fp8Type>(values, xFp8, RoundMode::CAST_NONE, elemNum);
+    PipeBarrier<PIPE_V>();
+    // 每32个元素共用一个E8M0 scale：按index展开到H长度后整行相乘；尾块按掩码处理
+    Gather(scaleExpanded, scaleF32, scaleIndex, 0, elemNum);
+    PipeBarrier<PIPE_V>();
+    Mul(values, values, scaleExpanded, elemNum);
+    PipeBarrier<PIPE_V>();
+    if (hasBias) {
+        Cast<float, bfloat16_t>(biasValues, biasRow, RoundMode::CAST_NONE, elemNum);
+        PipeBarrier<PIPE_V>();
+        Add(values, values, biasValues, elemNum);
+        PipeBarrier<PIPE_V>();
+    }
+    if (routingWeight != 1.0f) {
+        Muls(values, values, routingWeight, elemNum);
+        PipeBarrier<PIPE_V>();
+    }
+    // y 行在 UB 中按真实 H 步进（H 非 32 倍数时行基址非 32B 对齐），与普通路径
+    // VFProcessExpandXBiasScaleOptimized 一致使用非对齐读写完成累加；expandedX/bias
+    // 等路由槽位由各策略按 hAligned 对齐步进布局，读写均为对齐地址。
+    // 注意：load 与 store 使用两个独立指针（各自由 POST_MODE_UPDATE 推进一次），
+    // 共用同一指针会被双方各推进一次导致地址翻倍。
+    __ubuf__ float* srcLocalAddr = (__ubuf__ float*)yRow.GetPhyAddr();
+    __ubuf__ float* yLocalAddr = srcLocalAddr;
+    __ubuf__ float* valuesAddr = (__ubuf__ float*)values.GetPhyAddr();
+    uint16_t loopCount = elemNum / VL_FP32;
+    uint32_t tailNum = elemNum - loopCount * VL_FP32;
+    __VEC_SCOPE__
+    {
+        UnalignRegForLoad uSrc;
+        UnalignRegForStore uDst;
+        LoadUnAlignPre<float>(uSrc, srcLocalAddr);
+        RegTensor<float> src;
+        RegTensor<float> valueReg;
+        MaskReg pregLoop;
+        MaskReg pregMain = CreateMask<float, AscendC::Reg::MaskPattern::ALL>();
+        for (uint16_t i = 0; i < loopCount; ++i) {
+            LoadInputDataUnalign<float>(src, srcLocalAddr, uSrc, pregMain, VL_FP32);
+            LoadInputData<float>(valueReg, valuesAddr, pregMain, i * VL_FP32);
+            Add(src, src, valueReg, pregMain);
+            StoreOuputDataUnalign<float>(src, yLocalAddr, uDst, pregMain, VL_FP32);
+        }
+        if (tailNum > 0) {
+            uint32_t sreg = tailNum;
+            pregLoop = UpdateMask<float>(sreg);
+            LoadInputDataUnalign<float>(src, srcLocalAddr, uSrc, pregLoop, tailNum);
+            LoadInputData<float>(valueReg, valuesAddr, pregLoop, loopCount * VL_FP32);
+            Add(src, src, valueReg, pregLoop);
+            StoreOuputDataUnalign<float>(src, yLocalAddr, uDst, pregLoop, tailNum);
+        }
+        StoreUnAlignPost(yLocalAddr, uDst, 0);
+    }
+    PipeBarrier<PIPE_V>();
+}
+
+// Common MXFP8 optional-input routing. MXFP8 does not support zero, copy or
+// constant experts; host validation keeps those tensors and ranges empty.
+template <int32_t MODE>
+class MoeFinalizeRoutingV2Mx8RouteBase {
+protected:
+    __aicore__ inline void InitMx8Optional(const MoeFinalizeRoutingV2RegbaseTilingData* data, TPipe* pipe,
+                                           GM_ADDR expandedRowIdx, GM_ADDR expertIdx, GM_ADDR bias,
+                                           GM_ADDR routingWeights, uint32_t maxWeightSlots)
+    {
+        baseData_ = data;
+        basePipe_ = pipe;
+        hasExpertIdx_ = (expertIdx != nullptr);
+        hasBias_ = (bias != nullptr) && hasExpertIdx_;
+        indices_.SetGlobalBuffer((__gm__ int32_t*)expandedRowIdx);
+        experts_.SetGlobalBuffer((__gm__ int32_t*)expertIdx);
+        hasRoutingWeights_ = (routingWeights != nullptr);
+        routingWeights_.SetGlobalBuffer((__gm__ float*)routingWeights);
+        if (hasRoutingWeights_) {
+            // 按策略实际最大缓存槽数分配：逐路处理 1 槽、HFull 分批 kFactor 槽、KHFull 逐行全 K 槽，
+            // 避免大 K 场景整 K 缓存独占 UB（权重缓存计入各策略 UB 预算）。
+            basePipe_->InitBuffer(routeWeightBuf_, maxWeightSlots * sizeof(float));
+            routeWeights_ = routeWeightBuf_.Get<float>();
+        }
+    }
+
+    __aicore__ inline float RoutingWeight(int64_t row, int64_t k) const
+    {
+        return hasRoutingWeights_ ? routingWeights_.GetValue(row * baseData_->k + k) : 1.0f;
+    }
+
+    __aicore__ inline float SlotWeight(uint32_t slot) const
+    {
+        return hasRoutingWeights_ ? routeWeights_.GetValue(slot) : 1.0f;
+    }
+
+    // Returns true for the normal expandedX path so the caller dequantizes the route.
+    __aicore__ inline bool Route(int64_t row, int64_t k, int64_t& r, int64_t& expert, uint32_t slot = 0)
+    {
+        // 索引按列还是按行排列由模式显式判断（与 MXFP4 路径一致），不依赖模式编号顺序。
+        const int64_t index =
+            (MODE == DROPLESS_COLUMN || MODE == DROP_PAD_COLUMN) ? row + k * baseData_->row : row * baseData_->k + k;
+        r = indices_.GetValue(index);
+        if (r < 0 || r >= baseData_->activeNum) {
+            return false;
+        }
+        expert = hasExpertIdx_ ? experts_.GetValue(row * baseData_->k + k) : -1;
+        // biased normal routes use expert as a bias row index. expertIdx is
+        // external data; a contract-violating value must not reach GM/UB bias
+        // addressing. Treat such a route as invalid rather than reading OOB.
+        if (hasBias_ && (expert < 0 || expert >= baseData_->e)) {
+            return false;
+        }
+        if (hasRoutingWeights_) {
+            routeWeights_.SetValue(slot, RoutingWeight(row, k));
+        }
+        return true;
+    }
+
+    const MoeFinalizeRoutingV2RegbaseTilingData* baseData_{nullptr};
+    TPipe* basePipe_{nullptr};
+    bool hasExpertIdx_{false};
+    bool hasBias_{false};
+    bool hasRoutingWeights_{false};
+    GlobalTensor<int32_t> indices_, experts_;
+    GlobalTensor<float> routingWeights_;
+    TBuf<TPosition::VECCALC> routeWeightBuf_;
+    LocalTensor<float> routeWeights_;
+};
+#endif
+
 } // namespace MoeFinalizeRoutingV2Regbase
 
 #endif

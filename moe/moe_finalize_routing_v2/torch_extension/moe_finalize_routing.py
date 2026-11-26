@@ -19,6 +19,8 @@ from torch.library import impl
 _FP4_PER_BYTE = 2
 _MXFP4_SCALE_BLOCK_SIZE = 64
 _MXFP4_SCALES_PER_BLOCK = 2
+_MXFP8_SCALE_BLOCK_SIZE = 32
+_MXFP8_SCALE_ALIGN = 2
 _DROPLESS_COLUMN_MODE, _DROP_PAD_COLUMN_MODE, _DROPLESS_ROW_MODE, _DROP_PAD_ROW_MODE = (
     range(4)
 )
@@ -34,6 +36,13 @@ _PADDED_MODES = (_DROP_PAD_COLUMN_MODE, _DROP_PAD_ROW_MODE)
 def _is_mxfp4(tensor):
     dtype = getattr(torch, "float4_e2m1fn_x2", None)
     return tensor.dtype == torch.uint8 or (dtype is not None and tensor.dtype == dtype)
+
+
+def _is_mxfp8(tensor):
+    return tensor.dtype in (
+        getattr(torch, "float8_e4m3fn", None),
+        getattr(torch, "float8_e5m2", None),
+    )
 
 
 def _mxfp4_output_shape(expanded_x, expanded_row_idx, expanded_x_scale, mode, k):
@@ -88,51 +97,112 @@ def _mxfp4_output_shape(expanded_x, expanded_row_idx, expanded_x_scale, mode, k)
     return expanded_row_idx.numel() // k, h
 
 
-def _check_mxfp4_special_experts(tensors, ranges):
+def _mxfp8_output_shape(expanded_x, expanded_row_idx, expanded_x_scale, mode, k):
+    torch._check(
+        mode in _ROUTING_MODES,
+        lambda: "MXFP8 drop_pad_mode must be in [0, 3]",
+    )
+    torch._check(k > 0, lambda: "MXFP8 k must be positive")
+    torch._check(
+        expanded_x.dim() == (3 if mode in _PADDED_MODES else 2),
+        lambda: "MXFP8 expanded_x rank does not match drop_pad_mode",
+    )
+    torch._check(
+        expanded_row_idx.dim() == 1 and expanded_row_idx.dtype == torch.int32,
+        lambda: "MXFP8 expanded_row_idx must be a 1D INT32 tensor",
+    )
+    torch._check(
+        expanded_row_idx.numel() % k == 0,
+        lambda: "MXFP8 index length must be divisible by k",
+    )
+    torch._check(
+        expanded_x_scale is not None, lambda: "MXFP8 expanded_x_scale is required"
+    )
+    torch._check(
+        expanded_x_scale.dtype in (torch.uint8, getattr(torch, "float8_e8m0fnu", None))
+        and expanded_x_scale.dim() == 2,
+        lambda: "MXFP8 expanded_x_scale must be a 2D E8M0 or uint8 tensor",
+    )
+    torch._check(
+        expanded_x.is_contiguous() and expanded_x_scale.is_contiguous(),
+        lambda: "MXFP8 expanded_x and expanded_x_scale must be contiguous",
+    )
+    h = expanded_x.size(-1)
+    torch._check(h > 0, lambda: "MXFP8 hidden size must be positive")
+    # M = CeilAlign(CeilDiv(H, 32), 2); scale rows share physical rows with
+    # expanded_x (dim0 for 2D, E*C for 3D), matching the MXFP8 scale output of
+    # moe_init_routing_v3. R may be smaller than NUM_ROWS * K; routes beyond R
+    # are skipped.
+    blocks = h // _MXFP8_SCALE_BLOCK_SIZE
+    stride = (
+        (blocks + _MXFP8_SCALE_ALIGN - 1) // _MXFP8_SCALE_ALIGN * _MXFP8_SCALE_ALIGN
+    )
+    rows = expanded_x.size(0) * (expanded_x.size(1) if expanded_x.dim() == 3 else 1)
+    torch._check(
+        expanded_x_scale.size(0) == rows,
+        lambda: "MXFP8 scale rows must match the physical row count of expanded_x",
+    )
+    torch._check(
+        expanded_x_scale.size(1) == stride,
+        lambda: "MXFP8 scale last dimension must be CeilAlign(CeilDiv(H, 32), 2)",
+    )
+    return expanded_row_idx.numel() // k, h
+
+
+def _check_quant_special_experts(label, tensors, ranges):
     torch._check(
         all(tensor is None for tensor in tensors)
         and all(r is None or len(r) == 0 for r in ranges),
-        lambda: "MXFP4 does not support zero, copy or constant experts. "
+        lambda: f"{label} does not support zero, copy or constant experts. "
         "Special expert tensors and ranges must be empty.",
     )
 
 
-def _check_mxfp4_options(shape, x1, x2, bias, expert_idx, k):
+def _check_quant_options(label, shape, x1, x2, bias, expert_idx, k):
     n, h = shape
-    torch._check(x2 is None or x1 is not None, lambda: "MXFP4 x2 requires x1")
+    torch._check(x2 is None or x1 is not None, lambda: f"{label} x2 requires x1")
     torch._check(
-        bias is None or expert_idx is not None, lambda: "MXFP4 bias requires expert_idx"
+        bias is None or expert_idx is not None,
+        lambda: f"{label} bias requires expert_idx",
     )
     for tensor in (x1, x2):
         if tensor is not None:
             torch._check(
                 tensor.dtype == torch.bfloat16 and tensor.dim() == 2,
-                lambda: "MXFP4 x1/x2 must be BF16 matrices",
+                lambda: f"{label} x1/x2 must be BF16 matrices",
             )
             torch._check(
-                tensor.size(0) == n, lambda: "MXFP4 x1/x2 row count is invalid"
+                tensor.size(0) == n, lambda: f"{label} x1/x2 row count is invalid"
             )
-            torch._check(tensor.size(1) == h, lambda: "MXFP4 x1/x2 width is invalid")
+            torch._check(tensor.size(1) == h, lambda: f"{label} x1/x2 width is invalid")
     if bias is not None:
         torch._check(
             bias.dtype == torch.bfloat16 and bias.dim() == 2,
-            lambda: "MXFP4 bias must be a BF16 matrix",
+            lambda: f"{label} bias must be a BF16 matrix",
         )
         torch._check(
-            bias.size(0) > 0, lambda: "MXFP4 bias must have at least one expert"
+            bias.size(0) > 0, lambda: f"{label} bias must have at least one expert"
         )
-        torch._check(bias.size(1) == h, lambda: "MXFP4 bias width is invalid")
+        torch._check(bias.size(1) == h, lambda: f"{label} bias width is invalid")
     if expert_idx is not None:
         torch._check(
             expert_idx.dtype == torch.int32 and expert_idx.dim() == 2,
-            lambda: "MXFP4 expert_idx must be an INT32 matrix",
+            lambda: f"{label} expert_idx must be an INT32 matrix",
         )
         torch._check(
-            expert_idx.size(0) == n, lambda: "MXFP4 expert_idx row count is invalid"
+            expert_idx.size(0) == n, lambda: f"{label} expert_idx row count is invalid"
         )
         torch._check(
-            expert_idx.size(1) == k, lambda: "MXFP4 expert_idx top-k is invalid"
+            expert_idx.size(1) == k, lambda: f"{label} expert_idx top-k is invalid"
         )
+
+
+def _check_mxfp4_special_experts(tensors, ranges):
+    _check_quant_special_experts("MXFP4", tensors, ranges)
+
+
+def _check_mxfp4_options(shape, x1, x2, bias, expert_idx, k):
+    _check_quant_options("MXFP4", shape, x1, x2, bias, expert_idx, k)
 
 
 class _MoeFinalizeRoutingOpBuilder(OpBuilder):
@@ -215,6 +285,26 @@ class _MoeFinalizeRoutingOpBuilder(OpBuilder):
                     (zero_expert_range, copy_expert_range, constant_expert_range),
                 )
                 _check_mxfp4_options(shape, x1, x2, bias, expert_idx, k_val)
+                return expanded_x.new_empty(shape, dtype=torch.bfloat16)
+            if _is_mxfp8(expanded_x):
+                shape = _mxfp8_output_shape(
+                    expanded_x, expanded_row_idx, expanded_x_scale, mode, k_val
+                )
+                if scales is not None:
+                    torch._check(
+                        scales.dtype == torch.float32 and scales.dim() == 2,
+                        lambda: "MXFP8 scales must be a 2D FLOAT32 tensor",
+                    )
+                    torch._check(
+                        scales.size(0) == shape[0] and scales.size(1) == k_val,
+                        lambda: "MXFP8 scales shape must be (NUM_ROWS, K)",
+                    )
+                _check_quant_special_experts(
+                    "MXFP8",
+                    (x, alpha1, alpha2, v),
+                    (zero_expert_range, copy_expert_range, constant_expert_range),
+                )
+                _check_quant_options("MXFP8", shape, x1, x2, bias, expert_idx, k_val)
                 return expanded_x.new_empty(shape, dtype=torch.bfloat16)
             dimm = expanded_row_idx.size(0)
             if scales is not None:
@@ -300,6 +390,10 @@ def _check_backward_supported(ctx):
         raise NotImplementedError(
             "moe_finalize_routing MXFP4 does not support autograd, including auxiliary inputs"
         )
+    if getattr(ctx, "is_mxfp8", False):
+        raise NotImplementedError(
+            "moe_finalize_routing MXFP8 does not support autograd, including auxiliary inputs"
+        )
     if ctx.has_v4_extras:
         raise NotImplementedError(
             "moe_finalize_routing autograd is not supported when V4-specific "
@@ -354,7 +448,7 @@ class MoeFinalizeRoutingFn(torch.autograd.Function):
     is empty.  When V4-specific features are used, backward raises
     ``NotImplementedError``.
 
-    MXFP4 forward is inference-only, including x1/x2/bias gradients.
+    MXFP4 and MXFP8 forward are inference-only, including x1/x2/bias gradients.
 
     Additionally, the grad op only supports ``drop_pad_mode`` 0 or 1
     (column-major ``expanded_row_idx`` layout); ``drop_pad_mode`` 2 or 3
@@ -392,6 +486,7 @@ class MoeFinalizeRoutingFn(torch.autograd.Function):
         expanded_x_scale,
     ):
         ctx.is_mxfp4 = _is_mxfp4(expanded_x)
+        ctx.is_mxfp8 = _is_mxfp8(expanded_x)
         ctx.drop_pad_mode = drop_pad_mode if drop_pad_mode is not None else 0
         ctx.k = k if k is not None else 1
         ctx.has_scales = _has_value(scales)
@@ -503,7 +598,9 @@ def moe_finalize_routing(
     *,
     expanded_x_scale: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    expanded_x_scale = expanded_x_scale if _is_mxfp4(expanded_x) else None
+    expanded_x_scale = (
+        expanded_x_scale if (_is_mxfp4(expanded_x) or _is_mxfp8(expanded_x)) else None
+    )
     needs_grad = (
         expanded_x.requires_grad
         or (x1 is not None and x1.requires_grad)

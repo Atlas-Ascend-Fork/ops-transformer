@@ -652,3 +652,263 @@ TEST(MoeFinalizeRoutingMx4Tiling, RejectsSpecialExpertRanges)
         }
     }
 }
+
+namespace {
+constexpr int64_t MX8_SCALE_BLOCK_SIZE = 32;
+constexpr int64_t MX8_SCALE_ALIGN = 2;
+constexpr int32_t kMx8AivCount = 40;
+constexpr uint64_t kMx8UbSize = 256 * 1024;
+constexpr uint64_t kMx8TilingDataCapacity = 4096;
+
+int64_t Mx8ScaleStride(int64_t h)
+{
+    return ((h + MX8_SCALE_BLOCK_SIZE - 1) / MX8_SCALE_BLOCK_SIZE + MX8_SCALE_ALIGN - 1) / MX8_SCALE_ALIGN *
+           MX8_SCALE_ALIGN;
+}
+
+TEST(MoeFinalizeRoutingMx8, InfersTokenCountFromIndices)
+{
+    gert::InfershapeContextPara para("MoeFinalizeRoutingV2",
+                                     {{{{6, 64}, {6, 64}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND},
+                                      {{{6}, {6}}, ge::DT_INT32, ge::FORMAT_ND},
+                                      {{{3, 64}, {3, 64}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{3, 64}, {3, 64}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{4, 64}, {4, 64}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{3, 2}, {3, 2}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                      {{{3, 2}, {3, 2}}, ge::DT_INT32, ge::FORMAT_ND},
+                                      {{{6, 2}, {6, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND}},
+                                     {{{{}, {}}, ge::DT_BF16, ge::FORMAT_ND}}, Mx4Attrs(2, 2));
+    para.inputInstanceNum_.assign(INPUT_COUNT, 1);
+    para.outputInstanceNum_ = {1};
+    for (size_t i = X_IDX; i <= V_IDX; ++i) {
+        para.inputInstanceNum_[i] = 0;
+    }
+    ExecuteTestCase(para, ge::GRAPH_SUCCESS, std::vector<std::vector<int64_t>>{{3, 64}});
+}
+
+TEST(MoeFinalizeRoutingMx8, InfersPartialAndEmptyShapes)
+{
+    struct Case {
+        gert::Shape expandedX;
+        int64_t indexCount;
+        gert::Shape scale;
+        int64_t k;
+        ge::graphStatus status;
+        std::vector<int64_t> output;
+    };
+    const int64_t stride = Mx8ScaleStride(64);
+    // scale shares physical rows with expanded_x (R = dim0 for 2D), not NUM_ROWS*K:
+    // R < indexCount is valid, wrong row count / stride / k are rejected.
+    for (const auto& entry :
+         {Case{{5, -1}, 6, {5, stride}, 2, ge::GRAPH_SUCCESS, {3, -1}},
+          Case{{5, 64}, 0, {5, stride}, 2, ge::GRAPH_SUCCESS, {0, 64}},
+          Case{{-2}, 6, {-2}, 2, ge::GRAPH_SUCCESS, {3, -1}},
+          Case{{5, 64}, -1, {5, stride}, 2, ge::GRAPH_SUCCESS, {-1, 64}},
+          Case{{5, -3}, 6, {5, stride}, 2, ge::GRAPH_FAILED, {}},
+          Case{{5, 65}, 6, {5, stride}, 2, ge::GRAPH_FAILED, {}}, Case{{5, 32}, 6, {5, 1}, 2, ge::GRAPH_FAILED, {}},
+          // H=33 非 32 倍数：补齐范式（参考 IsHFullLoad）下合法，scale 宽度按公式为 2。
+          Case{{5, 33}, 6, {5, 2}, 2, ge::GRAPH_SUCCESS, {3, 33}},
+          // H=65 非 32 倍数且 scale 宽度正确（4）：完整合法。
+          Case{{5, 65}, 6, {5, 4}, 2, ge::GRAPH_SUCCESS, {3, 65}},
+          Case{{5, 64}, 5, {5, stride}, 2, ge::GRAPH_FAILED, {}},
+          Case{{5, 64}, 6, {6, stride}, 2, ge::GRAPH_FAILED, {}},
+          Case{{5, 64}, 6, {5, stride + 2}, 2, ge::GRAPH_FAILED, {}},
+          Case{{5, 64}, 6, {5, stride}, 0, ge::GRAPH_FAILED, {}}}) {
+        gert::StorageShape expandedX;
+        expandedX.MutableOriginShape() = entry.expandedX;
+        expandedX.MutableStorageShape() = entry.expandedX;
+        gert::StorageShape scale;
+        scale.MutableOriginShape() = entry.scale;
+        scale.MutableStorageShape() = entry.scale;
+        gert::InfershapeContextPara para("MoeFinalizeRoutingV2",
+                                         {{expandedX, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND},
+                                          {{{entry.indexCount}, {entry.indexCount}}, ge::DT_INT32, ge::FORMAT_ND},
+                                          {scale, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND}},
+                                         {{{{}, {}}, ge::DT_BF16, ge::FORMAT_ND}}, Mx4Attrs(DROP_LESS_ROW, entry.k));
+        para.inputInstanceNum_.assign(INPUT_COUNT, 0);
+        para.inputInstanceNum_[EXPANDED_X_IDX] = 1;
+        para.inputInstanceNum_[EXPANDED_ROW_IDX_IDX] = 1;
+        para.inputInstanceNum_[EXPANDED_X_SCALE_IDX] = 1;
+        para.outputInstanceNum_ = {1};
+        ExecuteTestCase(para, entry.status, {entry.output});
+    }
+}
+} // namespace
+
+TEST(MoeFinalizeRoutingMx8Tiling, SelectsStrategiesAndRoutingModes)
+{
+    constexpr uint64_t hFullLoadKey = 90000;
+    constexpr uint64_t splitHKey = 100000;
+    constexpr uint64_t fullKHKey = 110000;
+    constexpr uint64_t fullRowKHKey = 120000;
+    constexpr uint64_t dropPadKeyStep = 10;
+    constexpr int64_t alignedSplitWidth = 16448;
+    struct Case {
+        int64_t r, h, k, tokens;
+        uint64_t key;
+    };
+    // tokens=128 makes the dropless whole-tensor residency probe exceed the UB
+    // budget so the K-H strategy (not Row-K-H) is selected.
+    // h=33 is not a multiple of 32: the whole-tensor Row-K-H strategy is gated by its
+    // alignment requirement and the K-H strategy (aligned per-route slots) is selected.
+    for (const auto& c : {Case{7, 64, 3, 3, fullRowKHKey}, Case{7, 33, 3, 3, fullKHKey},
+                          Case{1024, 512, 4, 128, fullKHKey}, Case{5000, 2048, 64, 3, hFullLoadKey},
+                          Case{7, 65536, 3, 3, splitHKey}, Case{7, alignedSplitWidth, 3, 3, splitHKey}}) {
+        for (int64_t mode = DROP_LESS_COL; mode <= DROP_PAD_ROW; ++mode) {
+            SCOPED_TRACE(testing::Message()
+                         << "r=" << c.r << " h=" << c.h << " k=" << c.k << " tokens=" << c.tokens << " mode=" << mode);
+            const bool isDropLess = (mode == DROP_LESS_COL || mode == DROP_LESS_ROW);
+            // In drop/pad mode the bias row count must match the expert count E;
+            // in dropless mode the bias must also hold at least K experts.
+            const int64_t biasRows = isDropLess ? std::max<int64_t>(4, c.k) : c.r;
+            optiling::MoeFinalizeRoutingCompileInfoV2 compileInfo = {kMx8AivCount, kMx8UbSize};
+            gert::TilingContextPara::TensorDescription xDesc =
+                isDropLess ?
+                    gert::TilingContextPara::TensorDescription{
+                        {{c.r, c.h}, {c.r, c.h}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND} :
+                    gert::TilingContextPara::TensorDescription{
+                        {{c.r, 1, c.h}, {c.r, 1, c.h}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND};
+            gert::TilingContextPara para("MoeFinalizeRoutingV2",
+                                         {xDesc,
+                                          {{{c.tokens * c.k}, {c.tokens * c.k}}, ge::DT_INT32, ge::FORMAT_ND},
+                                          {{{c.tokens, c.h}, {c.tokens, c.h}}, ge::DT_BF16, ge::FORMAT_ND},
+                                          {{{c.tokens, c.h}, {c.tokens, c.h}}, ge::DT_BF16, ge::FORMAT_ND},
+                                          {{{biasRows, c.h}, {biasRows, c.h}}, ge::DT_BF16, ge::FORMAT_ND},
+                                          {{{c.tokens, c.k}, {c.tokens, c.k}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                          {{{c.tokens, c.k}, {c.tokens, c.k}}, ge::DT_INT32, ge::FORMAT_ND}},
+                                         {{{{c.tokens, c.h}, {c.tokens, c.h}}, ge::DT_BF16, ge::FORMAT_ND}},
+                                         Mx4Attrs<gert::TilingContextPara::OpAttr>(mode, c.k), &compileInfo,
+                                         "Ascend950", kMx8AivCount, kMx8UbSize, kMx8TilingDataCapacity, kA5SocInfo);
+            para.inputTensorDesc_.resize(EXPANDED_X_SCALE_IDX, {{{}, {}}, ge::DT_UNDEFINED, ge::FORMAT_ND});
+            const int64_t stride = Mx8ScaleStride(c.h);
+            // scale rows follow expanded_x physical rows: 2D dropless R=r, 3D drop/pad R=E*C=r*1
+            para.inputTensorDesc_.push_back({{{c.r, stride}, {c.r, stride}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND});
+            if (c.h == alignedSplitWidth) {
+                TilingInfo info;
+                ASSERT_TRUE(ExecuteTiling(para, info));
+                ASSERT_EQ(info.tilingKey, c.key + mode * dropPadKeyStep);
+                ASSERT_GE(info.tilingDataSize, sizeof(MoeFinalizeRoutingV2RegbaseTilingData));
+                const auto* data =
+                    reinterpret_cast<const MoeFinalizeRoutingV2RegbaseTilingData*>(info.tilingData.get());
+                EXPECT_LT(data->hFactor, c.h);
+                EXPECT_GT(data->hFactor, 0);
+                EXPECT_EQ(data->hFactor % MX8_SCALE_BLOCK_SIZE, 0);
+            } else {
+                ExecuteTestCase(para, ge::GRAPH_SUCCESS, c.key + mode * dropPadKeyStep, "", std::vector<size_t>{0});
+            }
+        }
+    }
+}
+
+TEST(MoeFinalizeRoutingMx8Tiling, DroppadCoversAllExpertCapacityRows)
+{
+    // Drop/pad expanded_x is (E, C, H) with E*C gatherable rows; every
+    // strategy must expose activeNum = E*C, not only E.
+    constexpr int64_t e = 4;
+    constexpr int64_t c = 4;
+    constexpr int64_t h = 160;
+    constexpr int64_t k = 2;
+    constexpr int64_t tokens = 8;
+    // Reuse the strategy constants declared by SelectsStrategiesAndRoutingModes
+    // and derive the scale width instead of hard-coding it per H.
+    constexpr uint64_t fullRowKHKey = 120000;
+    constexpr uint64_t dropPadKeyStep = 10;
+    const int64_t scaleWidth = Mx8ScaleStride(h);
+    optiling::MoeFinalizeRoutingCompileInfoV2 compileInfo = {kMx8AivCount, kMx8UbSize};
+    for (const int64_t mode : {DROP_PAD_ROW, DROP_LESS_COL + 1}) {
+        gert::TilingContextPara para("MoeFinalizeRoutingV2",
+                                     {{{{e, c, h}, {e, c, h}}, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND},
+                                      {{{tokens * k}, {tokens * k}}, ge::DT_INT32, ge::FORMAT_ND},
+                                      {{{tokens, h}, {tokens, h}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{tokens, h}, {tokens, h}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{e, h}, {e, h}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{tokens, k}, {tokens, k}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                      {{{tokens, k}, {tokens, k}}, ge::DT_INT32, ge::FORMAT_ND}},
+                                     {{{{tokens, h}, {tokens, h}}, ge::DT_BF16, ge::FORMAT_ND}},
+                                     Mx4Attrs<gert::TilingContextPara::OpAttr>(mode, k), &compileInfo, "Ascend950",
+                                     kMx8AivCount, kMx8UbSize, kMx8TilingDataCapacity, kA5SocInfo);
+        para.inputTensorDesc_.resize(EXPANDED_X_SCALE_IDX, {{{}, {}}, ge::DT_UNDEFINED, ge::FORMAT_ND});
+        para.inputTensorDesc_.push_back(
+            {{{e * c, scaleWidth}, {e * c, scaleWidth}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND});
+        TilingInfo info;
+        ASSERT_TRUE(ExecuteTiling(para, info));
+        ASSERT_EQ(info.tilingKey, fullRowKHKey + mode * dropPadKeyStep);
+        ASSERT_GE(info.tilingDataSize, sizeof(MoeFinalizeRoutingV2RegbaseTilingData));
+        const auto* data = reinterpret_cast<const MoeFinalizeRoutingV2RegbaseTilingData*>(info.tilingData.get());
+        EXPECT_EQ(data->activeNum, e * c);
+    }
+}
+
+TEST(MoeFinalizeRoutingMx8Tiling, RejectsInvalidInputsThroughCommonValidation)
+{
+    using TensorDescription = gert::TilingContextPara::TensorDescription;
+    struct Case {
+        size_t index;
+        TensorDescription tensor;
+    };
+    const std::vector<Case> cases = {
+        {EXPANDED_X_IDX, {{{5, 65}, {5, 65}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND}},
+        {EXPANDED_X_IDX, {{{0, 64}, {0, 64}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND}},
+        {EXPANDED_ROW_IDX_IDX, {{{5}, {5}}, ge::DT_INT32, ge::FORMAT_ND}},
+        {EXPANDED_ROW_IDX_IDX, {{{6}, {6}}, ge::DT_INT64, ge::FORMAT_ND}},
+        {X1_IDX, {{{4, 64}, {4, 64}}, ge::DT_BF16, ge::FORMAT_ND}},
+        {X1_IDX, {{{3, 64}, {3, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND}},
+        {X1_IDX, {{{}, {}}, ge::DT_BF16, ge::FORMAT_ND}},
+        {BIAS_IDX, {{{4, 32}, {4, 32}}, ge::DT_BF16, ge::FORMAT_ND}},
+        {EXPANDED_X_SCALE_IDX, {{{7, 2}, {7, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND}},
+        {EXPANDED_X_SCALE_IDX, {{{6, 2}, {6, 2}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+        {EXPANDED_X_SCALE_IDX, {{{}, {}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND}},
+        {EXPERT_IDX, {{{3, 3}, {3, 3}}, ge::DT_INT32, ge::FORMAT_ND}},
+        {EXPERT_IDX, {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND}},
+        {X_IDX, {{{3, 64}, {3, 64}}, ge::DT_BF16, ge::FORMAT_ND}},
+        {ALPHA1_IDX, {{{1, 64}, {1, 64}}, ge::DT_BF16, ge::FORMAT_ND}},
+        {ALPHA2_IDX, {{{1, 64}, {1, 64}}, ge::DT_BF16, ge::FORMAT_ND}},
+        {V_IDX, {{{1, 64}, {1, 64}}, ge::DT_BF16, ge::FORMAT_ND}},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.index);
+        optiling::MoeFinalizeRoutingCompileInfoV2 compileInfo = {kMx8AivCount, kMx8UbSize};
+        gert::TilingContextPara para("MoeFinalizeRoutingV2",
+                                     {{{{5, 64}, {5, 64}}, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND},
+                                      {{{6}, {6}}, ge::DT_INT32, ge::FORMAT_ND},
+                                      {{{3, 64}, {3, 64}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{3, 64}, {3, 64}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{4, 64}, {4, 64}}, ge::DT_BF16, ge::FORMAT_ND},
+                                      {{{3, 2}, {3, 2}}, ge::DT_FLOAT, ge::FORMAT_ND},
+                                      {{{3, 2}, {3, 2}}, ge::DT_INT32, ge::FORMAT_ND}},
+                                     {{{{3, 64}, {3, 64}}, ge::DT_BF16, ge::FORMAT_ND}},
+                                     Mx4Attrs<gert::TilingContextPara::OpAttr>(DROP_LESS_ROW, 2), &compileInfo,
+                                     "Ascend950", kMx8AivCount, kMx8UbSize, kMx8TilingDataCapacity, kA5SocInfo);
+        para.inputTensorDesc_.resize(EXPANDED_X_SCALE_IDX, {{{}, {}}, ge::DT_UNDEFINED, ge::FORMAT_ND});
+        para.inputTensorDesc_.push_back({{{5, 2}, {5, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND});
+        if (c.index < para.inputTensorDesc_.size()) {
+            para.inputTensorDesc_[c.index] = c.tensor;
+        } else {
+            para.outputTensorDesc_[0] = c.tensor;
+        }
+        ExecuteTestCase(para, ge::GRAPH_FAILED, 0, "", {});
+    }
+}
+
+TEST(MoeFinalizeRoutingMx8Tiling, RejectsSpecialExpertRanges)
+{
+    using Attr = gert::TilingContextPara::OpAttr;
+    const gert::TilingContextPara::TensorDescription absent = {{{}, {}}, ge::DT_UNDEFINED, ge::FORMAT_ND};
+    std::vector<gert::TilingContextPara::TensorDescription> inputs(INPUT_COUNT, absent);
+    inputs[EXPANDED_X_IDX] = {{{5, 64}, {5, 64}}, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND};
+    inputs[EXPANDED_ROW_IDX_IDX] = {{{6}, {6}}, ge::DT_INT32, ge::FORMAT_ND};
+    inputs[EXPANDED_X_SCALE_IDX] = {{{5, 2}, {5, 2}}, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND};
+    const char* rangeNames[] = {"zero_expert_range", "copy_expert_range", "constant_expert_range"};
+    for (size_t i = 0; i < std::size(rangeNames); ++i) {
+        for (const auto& range : {std::vector<int64_t>{0, 1}, std::vector<int64_t>{0}}) {
+            auto attrs = Mx4Attrs<Attr>(DROP_LESS_ROW, 2);
+            attrs[i + 1] = {rangeNames[i],
+                            Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>(std::vector<int64_t>(range))};
+            optiling::MoeFinalizeRoutingCompileInfoV2 compileInfo = {kMx8AivCount, kMx8UbSize};
+            gert::TilingContextPara para("MoeFinalizeRoutingV2", inputs,
+                                         {{{{3, 64}, {3, 64}}, ge::DT_BF16, ge::FORMAT_ND}}, attrs, &compileInfo,
+                                         "Ascend950", kMx8AivCount, kMx8UbSize, kMx8TilingDataCapacity, kA5SocInfo);
+            ExecuteTestCase(para, ge::GRAPH_FAILED, 0, "", {});
+        }
+    }
+}

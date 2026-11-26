@@ -64,6 +64,40 @@ static constexpr uint64_t MX4_K_BATCH_BASE_TILING_KEY = 130000;
 static constexpr uint64_t MX4_SPLIT_H_BASE_TILING_KEY = 140000;
 static constexpr uint64_t MX4_FULL_LOAD_K_H_BASE_TILING_KEY = 150000;
 static constexpr uint64_t MX4_FULL_LOAD_ROW_K_H_BASE_TILING_KEY = 160000;
+
+// MXFP8（E4M3FN/E5M2 + E8M0 per-32 block scale）反量化
+static constexpr uint64_t MX8_FULL_LOAD_H_BASE_TILING_KEY = 90000;
+static constexpr uint64_t MX8_FULL_LOAD_SPLIT_H_BASE_TILING_KEY = 100000;
+static constexpr uint64_t MX8_FULL_LOAD_K_H_BASE_TILING_KEY = 110000;
+static constexpr uint64_t MX8_FULL_LOAD_ROW_K_H_BASE_TILING_KEY = 120000;
+static constexpr int64_t MX8_SCALE_BLOCK_SIZE = 32;
+static constexpr int64_t MX8_SCALE_ALIGN = 2;
+static constexpr int64_t MX8_SCALE_INDEX_ALIGN = 8;
+static constexpr int64_t MX8_SCRATCH_FP32_ROWS = 3;
+static constexpr int64_t MX8_SCRATCH_INDEX_ROWS = 1; // scratch 中 scaleIndex（uint32）行数
+static constexpr int64_t MX8_X_BYTES_PER_ELEM = 1;   // expandedX 为 FP8，每元素 1 字节
+// scaleF32 对齐余量折算到每元素的上界（mAligned * sizeof(float) / h < 1B，h 为 32 的倍数时恒成立）
+static constexpr int64_t MX8_SCALE_MARGIN_BYTES_PER_ELEM = 1;
+
+static inline int64_t GetMx8ScaleStride(int64_t h)
+{
+    // 每行scale块数= CeilDiv(h,32)，尾块占1个scale，对齐到2避免跨bank
+    return Ops::Base::CeilAlign<int64_t>((h + MX8_SCALE_BLOCK_SIZE - 1) / MX8_SCALE_BLOCK_SIZE, MX8_SCALE_ALIGN);
+}
+
+static inline int64_t GetMx8ScaleNumAligned(int64_t h)
+{
+    return Ops::Base::CeilAlign<int64_t>(GetMx8ScaleStride(h), MX8_SCALE_INDEX_ALIGN);
+}
+
+// UB scratch: values(h) + biasValues(h) + scaleExpanded(h) + scaleF32(mAligned) + scaleIndex(h)
+static inline int64_t GetMx8ScratchBytes(int64_t h)
+{
+    int64_t mAligned = GetMx8ScaleNumAligned(h);
+    return (MX8_SCRATCH_FP32_ROWS * h + mAligned) * static_cast<int64_t>(sizeof(float)) +
+           h * static_cast<int64_t>(sizeof(uint32_t));
+}
+
 static constexpr uint64_t DROP_PAD_MODE_KEY_BASE = 10;
 static constexpr int64_t MX4_GROUP_SIZE = 32;
 static constexpr int64_t MX4_BLOCK_SIZE = 64;
@@ -113,6 +147,9 @@ protected:
     bool IsHif4RowKHFullLoad();
     bool IsHif4KHFullLoad();
     bool IsHif4HFullLoad();
+    bool IsMx8RowKHFullLoad();
+    bool IsMx8KHFullLoad();
+    bool IsMx8HFullLoad();
     ge::graphStatus CheckOptionalInputDtype(int64_t idx, const char* name, ge::DataType expectedDtype);
     ge::graphStatus CheckOptionalInputShape(int64_t idx, const char* name, const gert::Shape& expected,
                                             const char* reason);
@@ -149,9 +186,27 @@ protected:
     ge::graphStatus DoOpTilingHif4SplitH(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
     ge::graphStatus DoOpTilingHif4RowKHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
 
+    // MXFP8反量化，未适配空专家特性
+    ge::graphStatus CheckMx8Support();
+    ge::graphStatus DoOpTilingMx8KHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+    ge::graphStatus DoOpTilingMx8HFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+    ge::graphStatus DoOpTilingMx8SplitH(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+    ge::graphStatus DoOpTilingMx8RowKHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock);
+    // expandedX 可 gather 的物理行数：drop/pad 3D 为 E*C，其余为 dim0；数据与 scale 搬运、
+    // activeNum 及 scale shape 校验统一使用该值，避免 R < NUM_ROWS*K 时读过输入末尾。
+    int64_t GetMx8ActiveNum() const;
+    // MXFP8 的 UB 对齐行宽：expandedX 为 1B/元素，按 32 元素块向上补齐（满足 32B 对齐）。
+    // 参考 IsHFullLoad 的补齐范式：GM 搬运/写出按真实 H，UB 内路由槽位与 scratch 分段按该宽度步进。
+    int64_t GetMx8HAligned() const;
+    // 路由权重 UB 槽位缓存字节数（对齐到 blockSize），按策略实际最大槽数分配。
+    int64_t GetMx8RouteWeightBytes(int64_t slots) const;
+
     bool hasX1_{false};
     bool hasX2_{false};
     bool hasScales_{false};
+    // MXFP8 路由权重（SCALES_IDX）是否传入：与 hasScales_（Mx4/Mx8 下指反量化系数存在）语义不同，
+    // 路由权重在 kernel 中常驻 UB 槽位缓存，参与各策略的 UB 预算。
+    bool hasRoutingWeights_{false};
     bool hasBias_{false};
     bool hasX_{false}; // 有x输入，且constantEnd - constantStart >= 0
     bool hasConstantExpert_{false};
@@ -160,6 +215,10 @@ protected:
     bool hFullLoad_{false};
     bool isHif4Dequant_{false};
     bool isMx4Dequant_{false};
+    bool isMx8Dequant_{false};
+    bool isMx8KHFullLoad_{false};
+    bool isMx8HFullLoad_{false};
+    bool isMx8RowKHFullLoad_{false};
     uint64_t mx4Key_{0};
     int64_t mx4Rows_{0};
     int64_t mx4BiasRows_{0};
@@ -240,7 +299,7 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetK(const gert::StorageShape* scal
     const int64_t* attrKPtr = attrsPtr->GetAttrPointer<int64_t>(ATTR_K_IDX);
     OP_CHECK_NULL_WITH_CONTEXT(context_, attrKPtr);
     k = *attrKPtr;
-    if (isMx4Dequant_) {
+    if (isMx4Dequant_ || isMx8Dequant_) {
         OP_CHECK_NULL_WITH_CONTEXT(context_, scalesShape);
         hasScales_ = true;
         OP_CHECK_IF(k <= 0,
@@ -250,7 +309,7 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetK(const gert::StorageShape* scal
         return ge::GRAPH_SUCCESS;
     }
     // 适配hif4
-    if (isHif4Dequant_) {
+    else if (isHif4Dequant_) {
         OP_CHECK_NULL_WITH_CONTEXT(context_, scalesShape);
         hasScales_ = true;
         OP_CHECK_IF(
@@ -308,7 +367,7 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetECH(const gert::StorageShape* ex
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "h", std::to_string(h).c_str(),
                                                           "h must be greater than 0."),
                     return ge::GRAPH_FAILED);
-        // 适配hif4
+        // 适配hif4（MXFP8 不做 32 对齐硬校验，kernel 按补齐范式处理任意 H，见 IsHFullLoad）
         if (isHif4Dequant_) {
             OP_CHECK_IF(h % 64 != 0,
                         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "h", std::to_string(h).c_str(),
@@ -335,7 +394,7 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetECH(const gert::StorageShape* ex
                 return ge::GRAPH_FAILED);
     dim0OfExpandedX = e;
 
-    // 适配hif4
+    // 适配hif4（MXFP8 不做 32 对齐硬校验，kernel 按补齐范式处理任意 H，见 IsHFullLoad）
     if (isHif4Dequant_) {
         OP_CHECK_IF(h % 64 != 0,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "h", std::to_string(h).c_str(),
@@ -484,17 +543,22 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CheckScalesDtypeIsValid()
 {
     auto scalesDesc = context_->GetOptionalInputDesc(SCALES_IDX);
     scaleDtypeSize = dtypeSize;
-    if (isMx4Dequant_) {
+    if (isMx4Dequant_ || isMx8Dequant_) {
         const auto dequantScalesDesc = context_->GetOptionalInputDesc(EXPANDED_X_SCALE_IDX);
         OP_CHECK_NULL_WITH_CONTEXT(context_, dequantScalesDesc);
+        // MXFP8 的路由权重在 kernel 中常驻 UB 槽位缓存，记录其存在性用于 UB 预算。
+        hasRoutingWeights_ = (scalesDesc != nullptr);
         OP_CHECK_IF(
             dequantScalesDesc->GetDataType() != ge::DT_FLOAT8_E8M0,
             OP_LOGE_FOR_INVALID_DTYPE(context_->GetNodeName(), "expanded_x_scale",
                                       Ops::Base::ToString(dequantScalesDesc->GetDataType()).c_str(), "FLOAT8_E8M0"),
             return ge::GRAPH_FAILED);
+        scaleDtypeSize = sizeof(float);
+        scaleDtypeKey = 0;
         return CheckOptionalInputDtype(SCALES_IDX, "scales", ge::DT_FLOAT);
     }
-    if (isHif4Dequant_) {
+    // 适配hif4
+    else if (isHif4Dequant_) {
         OP_CHECK_NULL_WITH_CONTEXT(context_, scalesDesc);
         auto scaleDtype = scalesDesc->GetDataType();
         OP_CHECK_IF(scaleDtype != ge::DataType::DT_FLOAT,
@@ -575,6 +639,17 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::FinalCheckShapeAndDtypeIsValid()
         gert::Shape mx4ScaleShape = {mx4Rows_, h / MX4_BLOCK_SIZE + (h % MX4_BLOCK_SIZE != 0), MX4_SCALE_PAIR_SIZE};
         if (CheckOptionalInputShape(EXPANDED_X_SCALE_IDX, "expanded_x_scale", mx4ScaleShape,
                                     "shape of expanded_x_scale must be (R, ceil(H/64), 2) for MXFP4 inputs.") !=
+            ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+    } else if (isMx8Dequant_) {
+        // scale 与 expandedX 物理行对应：dropless 2D 时 R=dim0，drop/pad 3D 时 R=E*C，
+        // 与 moe_init_routing_v3 的 MXFP8 scale 输出布局一致（数据与 scale 同物理行）。
+        gert::Shape mx8ScaleShape = {GetMx8ActiveNum(), GetMx8ScaleStride(h)};
+        if (CheckOptionalInputShape(EXPANDED_X_SCALE_IDX, "expanded_x_scale", mx8ScaleShape,
+                                    "shape of expanded_x_scale must be (R, CeilAlign(CeilDiv(H, 32), 2)) for MXFP8 "
+                                    "inputs, where R is the physical row count of expanded_x (E*C in drop/pad "
+                                    "mode), consistent with the scale output of moe_init_routing_v3.") !=
             ge::GRAPH_SUCCESS) {
             return ge::GRAPH_FAILED;
         }
@@ -674,7 +749,7 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CheckRangeOverlap(int64_t start1, i
 
 ge::graphStatus MoeFinalizeRoutingV2Regbase::CheckExpertRangeValidity()
 {
-    if (isMx4Dequant_) {
+    if (isMx4Dequant_ || isMx8Dequant_) {
         const auto* attrs = context_->GetAttrs();
         for (const auto index :
              {ATTR_ZERO_EXPERT_RANGE_IDX, ATTR_COPY_EXPERT_RANGE_IDX, ATTR_CONSTANT_EXPERT_RANGE_IDX}) {
@@ -684,10 +759,11 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CheckExpertRangeValidity()
             }
             const auto* values = static_cast<const int64_t*>(range->GetData());
             // The operator definition uses [-1, -1] for an omitted range.
-            OP_CHECK_IF(range->GetSize() != CONST_EXPERT_ATTR_LIST_SIZE || values[0] != -1 || values[1] != -1,
-                        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "special expert ranges",
-                                                                 "MXFP4 requires empty special expert ranges."),
-                        return ge::GRAPH_FAILED);
+            OP_CHECK_IF(
+                range->GetSize() != CONST_EXPERT_ATTR_LIST_SIZE || values[0] != -1 || values[1] != -1,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "special expert ranges",
+                                                         "MXFP4 and MXFP8 require empty special expert ranges."),
+                return ge::GRAPH_FAILED);
         }
         return ge::GRAPH_SUCCESS;
     }
@@ -748,6 +824,11 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetRequiredInputInfo()
     if (isMx4Dequant_) {
         dtype = ge::DT_BF16;
         dtypeSize = SIZEOF_B16;
+    } else if (dtype == ge::DT_FLOAT8_E4M3FN || dtype == ge::DT_FLOAT8_E5M2) {
+        // 适配MXFP8：expandedX为量化输入，x1/x2/bias固定BF16
+        isMx8Dequant_ = true;
+        dtypeSize = 0;                 // mx8不使用这个变量
+        dtype = ge::DataType::DT_BF16; // 用于x1/x2/bias的校验
     } else if (dtype == Ops::Transformer::DT_HIFLOAT4) {
         isHif4Dequant_ = true;
         dtypeSize = 0;                 // hif4不使用这个变量
@@ -783,8 +864,16 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::GetRequiredInputInfo()
                                                            "MXFP4 expanded row count must be positive."),
                     return ge::GRAPH_FAILED);
     }
+    // 适配MXFP8
+    else if (isMx8Dequant_) {
+        OP_CHECK_IF(dim0OfExpandedX <= 0,
+                    OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "expanded_x", "invalid",
+                                                           "MXFP8 expanded row count must be positive."),
+                    return ge::GRAPH_FAILED);
+    }
 
-    auto scalesShape = context_->GetOptionalInputShape(isMx4Dequant_ ? EXPANDED_X_SCALE_IDX : SCALES_IDX);
+    auto scalesShape =
+        context_->GetOptionalInputShape((isMx4Dequant_ || isMx8Dequant_) ? EXPANDED_X_SCALE_IDX : SCALES_IDX);
     OP_CHECK_IF(GetK(scalesShape) != ge::GRAPH_SUCCESS,
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context_->GetNodeName(), "K", "GRAPH_FAILED", "failed to get K."),
                 return ge::GRAPH_FAILED);
@@ -851,6 +940,40 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CheckMx4Support()
                     __builtin_mul_overflow(row, k, &bytes) || __builtin_mul_overflow(bytes, sizeof(int32_t), &bytes),
                 OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "out and expanded_row_idx", "invalid",
                                                        "MXFP4 output or index byte size overflows."),
+                return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MoeFinalizeRoutingV2Regbase::CheckMx8Support()
+{
+    const auto platform = context_->GetPlatformInfo();
+    OP_CHECK_NULL_WITH_CONTEXT(context_, platform);
+    OP_CHECK_IF(!Ops::Transformer::OpTiling::IsRegbaseSocVersion(context_),
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "platform",
+                                                         "MXFP8 requires a supported Regbase platform."),
+                return ge::GRAPH_FAILED);
+    for (size_t i = 0; i <= EXPANDED_X_SCALE_IDX; ++i) {
+        const auto desc = i <= EXPANDED_ROW_IDX_IDX ? context_->GetInputDesc(i) : context_->GetOptionalInputDesc(i);
+        OP_CHECK_IF(desc != nullptr && i >= X_IDX && i <= CONST_EXPERT_V_IDX,
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "x, alpha1, alpha2, v",
+                                                             "MXFP8 requires empty special expert inputs."),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            desc && desc->GetFormat().GetStorageFormat() != ge::FORMAT_ND,
+            OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(context_->GetNodeName(), std::to_string(i).c_str(),
+                                                   Ops::Base::ToString(desc->GetFormat().GetStorageFormat()).c_str(),
+                                                   "MXFP8 inputs must use ND format."),
+            return ge::GRAPH_FAILED);
+    }
+    OP_CHECK_IF(hasBias_ && context_->GetOptionalInputDesc(EXPERTIDX_IDX) == nullptr,
+                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), "expert_idx",
+                                                         "expert_idx is required when bias is provided."),
+                return ge::GRAPH_FAILED);
+    int64_t bytes;
+    OP_CHECK_IF(__builtin_mul_overflow(row, h, &bytes) || __builtin_mul_overflow(bytes, SIZEOF_B16, &bytes) ||
+                    __builtin_mul_overflow(row, k, &bytes) || __builtin_mul_overflow(bytes, sizeof(int32_t), &bytes),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "out and expanded_row_idx", "invalid",
+                                                       "MXFP8 output or index byte size overflows."),
                 return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
 }
@@ -951,6 +1074,124 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::TileMx4()
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingMx8KHFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
+{
+    // 补齐范式：路由槽位按 hAligned，行批量与 GM 搬运按真实 H
+    hAligned = GetMx8HAligned();
+    int64_t scaleRowAligned = Ops::Base::CeilAlign(GetMx8ScaleStride(h), static_cast<int64_t>(blockSize_));
+    // expandedX（1B/元素）、scales（E8M0）、bias 每次小循环搬运一次k行（槽位按对齐宽度）
+    int64_t expandedXLen = k * hAligned;
+    int64_t scalesLenAligned = k * scaleRowAligned;
+    int64_t biasLen = hasBias_ ? k * hAligned * SIZEOF_B16 : 0;
+    // 路由权重 K 个槽位为常驻缓存，从总 UB 中扣除后再做双 buffer 切分
+    int64_t ubSizeRemained =
+        (ubSize_ - GetMx8RouteWeightBytes(k)) / DOUBLE_BUFFER - expandedXLen - scalesLenAligned - biasLen;
+    int64_t rowFactor = CalcRowFactor(ubSizeRemained, false);
+
+    SetFullLoadTilingData(rowOfFormerBlock, rowOfTailBlock, rowFactor);
+    // Drop/pad 3D expanded_x carries E*C gatherable rows; activeNum must cover
+    // the whole physical range, not only the first E rows.
+    tilingData->activeNum = GetMx8ActiveNum();
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingMx8HFullLoad(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
+{
+    // 补齐范式：每路由槽位（expandedX/bias/scale 行）按 hAligned 计入 kFactor 二分预算
+    hAligned = GetMx8HAligned();
+    int64_t scaleRowAligned = Ops::Base::CeilAlign(GetMx8ScaleStride(h), static_cast<int64_t>(blockSize_));
+    int64_t expandedXAndBiasSize = hAligned + static_cast<int64_t>(hasBias_) * hAligned * SIZEOF_B16 + scaleRowAligned;
+    int64_t kFactor = ubSize_ / DOUBLE_BUFFER / expandedXAndBiasSize;
+    int64_t upper = kFactor;
+    int64_t lower = 1;
+    while (upper - lower > 1) {
+        int64_t mid = (lower + upper) / TWO;
+        // mid 个路由槽位对应 mid 个权重缓存槽位（单 buffer 常驻），与 kFactor 一起从总 UB 扣除
+        int64_t useUbSize = mid * expandedXAndBiasSize + GetMx8RouteWeightBytes(mid) + RowsHSize(1, false);
+        if (useUbSize > ubSize_ / DOUBLE_BUFFER) {
+            upper = mid;
+        } else {
+            lower = mid;
+        }
+    }
+    kFactor = lower;
+
+    int64_t kLoop = Ops::Base::CeilDiv(k, kFactor);
+    kFactor = Ops::Base::CeilDiv(k, kLoop);
+    int64_t tailKFactor = k - (kLoop - 1) * kFactor;
+
+    int64_t ubSizeRemained =
+        (ubSize_ - GetMx8RouteWeightBytes(kFactor)) / DOUBLE_BUFFER - kFactor * expandedXAndBiasSize;
+    int64_t rowFactor = CalcRowFactor(ubSizeRemained, false);
+    SetFullLoadTilingData(rowOfFormerBlock, rowOfTailBlock, rowFactor);
+    tilingData->activeNum = GetMx8ActiveNum();
+    tilingData->kLoop = kLoop;
+    tilingData->kFactor = kFactor;
+    tilingData->tailKFactor = tailKFactor;
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingMx8SplitH(int64_t rowOfFormerBlock, int64_t rowOfTailBlock)
+{
+    // SplitH 的 hFactor 按 32 元素块对齐，tile 内 scratch 按对齐宽度布局；hAligned 同步进 tilingData
+    hAligned = GetMx8HAligned();
+    // expandedX 为FP8（MX8_X_BYTES_PER_ELEM），x1/x2/bias 为BF16，y 为FP32，
+    // 反量化 scratch 布局见 GetMx8ScratchBytes（MX8_SCRATCH_FP32_ROWS 个 fp32 行 + scaleIndex 行 + scaleF32 余量）
+    const int64_t scratchBytesPerElem =
+        (MX8_SCRATCH_FP32_ROWS + MX8_SCRATCH_INDEX_ROWS) * static_cast<int64_t>(sizeof(float)) +
+        MX8_SCALE_MARGIN_BYTES_PER_ELEM;
+    int64_t bytesPerH = MX8_X_BYTES_PER_ELEM + static_cast<int64_t>(hasX1_) * SIZEOF_B16 +
+                        static_cast<int64_t>(hasX2_) * SIZEOF_B16 + static_cast<int64_t>(hasBias_) * SIZEOF_B16 +
+                        static_cast<int64_t>(sizeof(float)) + scratchBytesPerElem;
+    // 路由权重 1 个槽位为常驻缓存，从总 UB 扣除后再做双 buffer 切分
+    int64_t ubSizeForH = ubSize_ - GetMx8RouteWeightBytes(1);
+    int64_t hFactor = ubSizeForH / DOUBLE_BUFFER / bytesPerH;
+    int64_t scaleBlockSize = MX8_SCALE_BLOCK_SIZE;
+    hFactor = hFactor / scaleBlockSize * scaleBlockSize;
+    if (hFactor < scaleBlockSize) {
+        hFactor = scaleBlockSize;
+    }
+    int64_t hLoop = Ops::Base::CeilDiv(h, hFactor);
+    hFactor = Ops::Base::CeilAlign<int64_t>(Ops::Base::CeilDiv(h, hLoop), scaleBlockSize);
+    int64_t tailHFactor = h - (hLoop - 1) * hFactor;
+    tilingData->rowLoopOfFormerBlock = rowOfFormerBlock;
+    tilingData->rowLoopOfTailBlock = rowOfTailBlock;
+    tilingData->rowFactor = 1;
+    tilingData->tailRowFactorOfFormerBlock = rowOfFormerBlock;
+    tilingData->tailRowFactorOfTailBlock = rowOfTailBlock;
+    tilingData->hLoop = hLoop;
+    tilingData->hFactor = hFactor;
+    tilingData->tailHFactor = tailHFactor;
+    tilingData->activeNum = GetMx8ActiveNum();
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MoeFinalizeRoutingV2Regbase::DoOpTilingMx8RowKHFullLoad(int64_t rowOfFormerBlock,
+                                                                        int64_t rowOfTailBlock)
+{
+    // 整块策略仅接受 H%32==0 时选择（见 IsMx8RowKHFullLoad），hAligned 恒等于 h
+    hAligned = h;
+    // 搬运按实际物理行数 activeNum 计算：dropless 2D 时 dim0 可小于 NUM_ROWS*K，
+    // 按 NUM_ROWS*K 申请会读过输入末尾。
+    const int64_t activeNum = GetMx8ActiveNum();
+    int64_t expandedXAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(activeNum * h), blockSize_) * blockSize_;
+    int64_t eHAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(e * h * SIZEOF_B16), blockSize_) * blockSize_;
+    int64_t scaleRowAligned = Ops::Base::CeilAlign(GetMx8ScaleStride(h), static_cast<int64_t>(blockSize_));
+    // scale 与 expandedX 物理行对应，整块常驻 UB（单 buffer），与 expandedX 一起按固定开销扣除
+    int64_t scalesAlignedByte =
+        Ops::Base::CeilDiv(static_cast<uint64_t>(activeNum * scaleRowAligned), blockSize_) * blockSize_;
+    int64_t hasBiasvalue = hasBias_ ? eHAlignedByte : 0;
+    int64_t routeWeightBytes = GetMx8RouteWeightBytes(1);
+    int64_t scratchLen = Ops::Base::CeilAlign(GetMx8ScratchBytes(hAligned), static_cast<int64_t>(blockSize_));
+    int64_t ubSizeRemained =
+        (ubSize_ - expandedXAlignedByte - scalesAlignedByte - hasBiasvalue - scratchLen - routeWeightBytes) /
+        DOUBLE_BUFFER;
+    int64_t rowFactor = CalcRowFactor(ubSizeRemained, false);
+    SetFullLoadTilingData(rowOfFormerBlock, rowOfTailBlock, rowFactor);
+    tilingData->activeNum = activeNum;
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus MoeFinalizeRoutingV2Regbase::DoGetShapeAttrsInfo()
 {
     if (GetDropPadModeAndExpertRangeAttrs() != ge::GRAPH_SUCCESS) {
@@ -964,6 +1205,8 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::DoGetShapeAttrsInfo()
     }
     if (isMx4Dequant_ && CheckMx4Support() != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
+    } else if (isMx8Dequant_ && CheckMx8Support() != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
     }
     if (CheckShapeAndDtypeIsValid() != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
@@ -976,7 +1219,16 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::DoGetShapeAttrsInfo()
 
 int64_t MoeFinalizeRoutingV2Regbase::RowsHSize(int64_t rowFactor, bool scalesInUb)
 {
-    if (isHif4Dequant_) {
+    if (isMx8Dequant_) {
+        // 反量化 scale 与 expandedX 整块常驻 UB，已在 DoOpTilingMx8RowKHFullLoad 中按固定开销扣除；
+        // 逐批预算只含 x1/x2、y 与 scratch（scalesInUb 对 Mx8 无意义）。
+        // x1/x2/y 为真实 H 的批量缓冲；scratch 按 hAligned 对齐分段。
+        int64_t rowsBf16Len = rowFactor * h * SIZEOF_B16;
+        int64_t yLen = rowFactor * h * static_cast<int64_t>(sizeof(float));
+        // 反量化中间值（fp32）与bias中转（fp32）各一行
+        int64_t scratchLen = Ops::Base::CeilAlign(GetMx8ScratchBytes(hAligned), static_cast<int64_t>(blockSize_));
+        return (static_cast<int64_t>(hasX1_) + static_cast<int64_t>(hasX2_)) * rowsBf16Len + yLen + scratchLen;
+    } else if (isHif4Dequant_) {
         // row/k/h模式下，也需要增加scale空间
         int64_t scaleLen =
             scalesInUb ?
@@ -1341,6 +1593,17 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CalcOpTiling()
         } else {
             ret = DoOpTilingHif4SplitH(rowPerCore, rowOfTailBlock);
         }
+    } else if (isMx8Dequant_) {
+        // 适配MXFP8：与hif4相同的策略选择顺序
+        if (isMx8RowKHFullLoad_) {
+            ret = DoOpTilingMx8RowKHFullLoad(rowPerCore, rowOfTailBlock);
+        } else if (isMx8KHFullLoad_) {
+            ret = DoOpTilingMx8KHFullLoad(rowPerCore, rowOfTailBlock);
+        } else if (isMx8HFullLoad_) {
+            ret = DoOpTilingMx8HFullLoad(rowPerCore, rowOfTailBlock);
+        } else {
+            ret = DoOpTilingMx8SplitH(rowPerCore, rowOfTailBlock);
+        }
     } else {
         if (rowKHFullLoad_) {
             ret = DoOpTilingRowKHFullLoad(rowPerCore, rowOfTailBlock);
@@ -1471,6 +1734,94 @@ bool MoeFinalizeRoutingV2Regbase::IsHif4HFullLoad()
     return totalLenBytes <= ubSize_;
 }
 
+int64_t MoeFinalizeRoutingV2Regbase::GetMx8ActiveNum() const
+{
+    return (dropPadMode == DROP_PAD_ROW || dropPadMode == DROP_PAD_COL) ? e * c : dim0OfExpandedX;
+}
+
+int64_t MoeFinalizeRoutingV2Regbase::GetMx8HAligned() const
+{
+    return Ops::Base::CeilDiv(h, static_cast<int64_t>(MX8_SCALE_BLOCK_SIZE)) * MX8_SCALE_BLOCK_SIZE;
+}
+
+int64_t MoeFinalizeRoutingV2Regbase::GetMx8RouteWeightBytes(int64_t slots) const
+{
+    if (!hasRoutingWeights_ || slots <= 0) {
+        return 0;
+    }
+    return Ops::Base::CeilAlign(slots * static_cast<int64_t>(sizeof(float)), static_cast<int64_t>(blockSize_));
+}
+
+bool MoeFinalizeRoutingV2Regbase::IsMx8RowKHFullLoad()
+{
+    // 整块驻留策略按连续布局寻址每行（行基址 = r*H 字节），H 非 32 倍数时行基址不满足
+    // 32B 对齐，该策略不可用；非对齐 H 回退到按路由对齐槽位的 KH/HFull/SplitH 策略。
+    if (h % MX8_SCALE_BLOCK_SIZE != 0) {
+        return false;
+    }
+    hAligned = h;
+    // 搬运按实际物理行数 activeNum 计算：dropless 2D 时 dim0 可小于 NUM_ROWS*K，
+    // 按 NUM_ROWS*K 申请会读过输入末尾。
+    const int64_t activeNum = GetMx8ActiveNum();
+    int64_t expandedXAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(activeNum * h), blockSize_) * blockSize_;
+    int64_t eHAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(e * h * SIZEOF_B16), blockSize_) * blockSize_;
+    int64_t scaleRowAligned = Ops::Base::CeilAlign(GetMx8ScaleStride(h), static_cast<int64_t>(blockSize_));
+    // scale 与 expandedX 物理行对应，整块常驻 UB（单 buffer，见 DoOpTilingMx8RowKHFullLoad）。
+    int64_t scalesAlignedByte =
+        Ops::Base::CeilDiv(static_cast<uint64_t>(activeNum * scaleRowAligned), blockSize_) * blockSize_;
+    int64_t hAlignedByte = Ops::Base::CeilDiv(static_cast<uint64_t>(h * SIZEOF_B16), blockSize_) * blockSize_;
+    int64_t hAligned32Byte = Ops::Base::CeilDiv(static_cast<uint64_t>(h * sizeof(float)), blockSize_) * blockSize_;
+    int64_t hasBiasvalue = hasBias_ ? eHAlignedByte : 0;
+    // 逐路处理，路由权重只需 1 个槽位，且为常驻缓存（不随行批次翻倍）。
+    int64_t routeWeightBytes = GetMx8RouteWeightBytes(1);
+    int64_t scratchLen = Ops::Base::CeilAlign(GetMx8ScratchBytes(h), static_cast<int64_t>(blockSize_));
+    int64_t totalSize = expandedXAlignedByte + scalesAlignedByte + hasBiasvalue + scratchLen + routeWeightBytes +
+                        DOUBLE_BUFFER * ((static_cast<int64_t>(hasX1_) + static_cast<int64_t>(hasX2_)) * hAlignedByte +
+                                         hAligned32Byte * OUTPUT_BUFFER_NUM);
+    return totalSize <= ubSize_;
+}
+
+bool MoeFinalizeRoutingV2Regbase::IsMx8KHFullLoad()
+{
+    // 补齐范式（参考 IsHFullLoad）：路由槽位（expandedX/bias/scratch）按 hAligned，
+    // 行批量（x1/x2/y）按真实 H；GM 搬运始终按真实 H。
+    hAligned = GetMx8HAligned();
+    int64_t scaleRowAligned = Ops::Base::CeilAlign(GetMx8ScaleStride(h), static_cast<int64_t>(blockSize_));
+    int64_t expandedXLen = k * hAligned; // expandedX为1B/元素，槽位按对齐宽度
+    int64_t scalesLenAligned = k * scaleRowAligned;
+    int64_t oneRowLenBf16 = h * SIZEOF_B16;
+    int64_t oneRowLenF32 = h * static_cast<int64_t>(sizeof(float));
+    int64_t biasLen = hasBias_ ? k * hAligned * SIZEOF_B16 : 0;
+    int64_t x1Len = hasX1_ ? oneRowLenBf16 : 0;
+    int64_t x2Len = hasX2_ ? oneRowLenBf16 : 0;
+    int64_t scratchLen = Ops::Base::CeilAlign(GetMx8ScratchBytes(hAligned), static_cast<int64_t>(blockSize_));
+    // 逐行处理全部 K 路，路由权重需要 K 个槽位，常驻缓存不翻倍。
+    int64_t routeWeightBytes = GetMx8RouteWeightBytes(k);
+    int64_t totalLenBytes = DOUBLE_BUFFER * (expandedXLen + scalesLenAligned + biasLen + x1Len + x2Len + oneRowLenF32) +
+                            scratchLen + routeWeightBytes;
+    return totalLenBytes <= ubSize_;
+}
+
+bool MoeFinalizeRoutingV2Regbase::IsMx8HFullLoad()
+{
+    // 补齐范式（参考 IsHFullLoad）：路由槽位（expandedX/bias/scratch）按 hAligned，
+    // 行批量（x1/x2/y）按真实 H；GM 搬运始终按真实 H。
+    hAligned = GetMx8HAligned();
+    int64_t scaleRowAligned = Ops::Base::CeilAlign(GetMx8ScaleStride(h), static_cast<int64_t>(blockSize_));
+    int64_t expandedXLen = hAligned;
+    int64_t oneRowLenBf16 = h * SIZEOF_B16;
+    int64_t oneRowLenF32 = h * static_cast<int64_t>(sizeof(float));
+    int64_t biasLen = hasBias_ ? hAligned * SIZEOF_B16 : 0;
+    int64_t x1Len = hasX1_ ? oneRowLenBf16 : 0;
+    int64_t x2Len = hasX2_ ? oneRowLenBf16 : 0;
+    int64_t scratchLen = Ops::Base::CeilAlign(GetMx8ScratchBytes(hAligned), static_cast<int64_t>(blockSize_));
+    // 可行性按最小 kFactor=1 评估；kFactor>1 时由 DoOpTilingMx8HFullLoad 的二分预算覆盖。
+    int64_t routeWeightBytes = GetMx8RouteWeightBytes(1);
+    int64_t totalLenBytes = DOUBLE_BUFFER * (expandedXLen + scaleRowAligned + biasLen + x1Len + x2Len + oneRowLenF32) +
+                            scratchLen + routeWeightBytes;
+    return totalLenBytes <= ubSize_;
+}
+
 bool MoeFinalizeRoutingV2Regbase::IsHFullLoad()
 {
     int64_t oneKAlignedByte = static_cast<int64_t>(blockSize_);
@@ -1496,7 +1847,7 @@ bool MoeFinalizeRoutingV2Regbase::IsCapable()
         return true;
     }
     // 适配hif4
-    if (isHif4Dequant_) {
+    else if (isHif4Dequant_) {
         isHif4RowKHFullLoad_ = IsHif4RowKHFullLoad();
         if (isHif4RowKHFullLoad_) {
             return true;
@@ -1509,6 +1860,13 @@ bool MoeFinalizeRoutingV2Regbase::IsCapable()
         if (isHif4HFullLoad_) {
             return true;
         }
+        return true;
+    }
+    // 适配MXFP8：与hif4相同的策略选择顺序
+    else if (isMx8Dequant_) {
+        isMx8RowKHFullLoad_ = IsMx8RowKHFullLoad();
+        isMx8KHFullLoad_ = IsMx8KHFullLoad();
+        isMx8HFullLoad_ = IsMx8HFullLoad();
         return true;
     }
 
@@ -1534,9 +1892,8 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CalcTilingKey()
         tilingKey_ = mx4Key_ + dropPadMode * DROP_PAD_MODE_KEY_BASE;
         return ge::GRAPH_SUCCESS;
     }
-
     // 适配hif4
-    if (isHif4Dequant_) {
+    else if (isHif4Dequant_) {
         // isHif4KHFullLoad_必须为True
         if (isHif4RowKHFullLoad_) {
             tilingKey_ = HIF4_FULL_LOAD_ROW_K_H_BASE_TILING_KEY;
@@ -1546,6 +1903,16 @@ ge::graphStatus MoeFinalizeRoutingV2Regbase::CalcTilingKey()
             tilingKey_ = HIF4_FULL_LOAD_H_BASE_TILING_KEY;
         } else {
             tilingKey_ = HIF4_FULL_LOAD_SPLIT_H_BASE_TILING_KEY;
+        }
+    } else if (isMx8Dequant_) {
+        if (isMx8RowKHFullLoad_) {
+            tilingKey_ = MX8_FULL_LOAD_ROW_K_H_BASE_TILING_KEY;
+        } else if (isMx8KHFullLoad_) {
+            tilingKey_ = MX8_FULL_LOAD_K_H_BASE_TILING_KEY;
+        } else if (isMx8HFullLoad_) {
+            tilingKey_ = MX8_FULL_LOAD_H_BASE_TILING_KEY;
+        } else {
+            tilingKey_ = MX8_FULL_LOAD_SPLIT_H_BASE_TILING_KEY;
         }
     } else {
         if (rowKHFullLoad_) {

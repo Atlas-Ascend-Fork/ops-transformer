@@ -965,3 +965,110 @@ TEST_F(MoeFinalizeRoutingV2Proto, dtype_infer_ignores_expanded_x_scale_for_float
         EXPECT_EQ(context->GetOutputDataType(0), ge::DT_BF16);
     }
 }
+
+TEST_F(MoeFinalizeRoutingV2Proto, dtype_infer_mxfp8)
+{
+    // Named slot indices of the V5 signature (0-based input order), used by the cases below.
+    enum Slot : size_t {
+        SLOT_X1 = 2,
+        SLOT_X2 = 3,
+        SLOT_BIAS = 4,
+        SLOT_SCALES = 5,
+        SLOT_X = 7,
+        SLOT_ALPHA1 = 8,
+        SLOT_ALPHA2 = 9,
+        SLOT_V = 10,
+    };
+
+    auto registry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(registry, nullptr);
+    const auto impl = registry->GetOpImpl("MoeFinalizeRoutingV2");
+    ASSERT_NE(impl, nullptr);
+    const auto infer = impl->infer_datatype;
+    ASSERT_NE(infer, nullptr);
+
+    std::vector<ge::DataType> validTypes = {ge::DT_FLOAT8_E4M3FN, ge::DT_INT32,     ge::DT_BF16,
+                                            ge::DT_BF16,          ge::DT_BF16,      ge::DT_FLOAT,
+                                            ge::DT_INT32,         ge::DT_UNDEFINED, ge::DT_UNDEFINED,
+                                            ge::DT_UNDEFINED,     ge::DT_UNDEFINED, ge::DT_FLOAT8_E8M0};
+
+    // The context keeps raw pointers into these variables, so both live in the
+    // enclosing scope of every infer() call below.
+    std::vector<ge::DataType> types = validTypes;
+    ge::DataType output = ge::DT_UNDEFINED;
+    auto buildHolder = [&types, &output]() {
+        std::vector<void*> inputs;
+        inputs.reserve(types.size());
+        for (auto& type : types) {
+            inputs.push_back(&type);
+        }
+        return gert::InferDataTypeContextFaker()
+            .NodeIoNum(types.size(), 1)
+            .IrInstanceNum(std::vector<uint32_t>(types.size(), 1))
+            .InputDataTypes(inputs)
+            .OutputDataTypes({&output})
+            .Build();
+    };
+
+    for (auto quantDtype : {ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E5M2}) {
+        {
+            // The valid combination infers a BF16 output.
+            types = validTypes;
+            output = ge::DT_UNDEFINED;
+            auto holder = buildHolder();
+            auto context = holder.GetContext<gert::InferDataTypeContext>();
+            EXPECT_EQ(infer(context), ge::GRAPH_SUCCESS);
+            EXPECT_EQ(context->GetOutputDataType(0), ge::DT_BF16);
+        }
+        // x1/x2/bias must be BF16 and scales must be FLOAT32 for quantized inputs.
+        for (Slot slot : {SLOT_X1, SLOT_X2, SLOT_BIAS, SLOT_SCALES}) {
+            types = validTypes;
+            types[slot] = ge::DT_FLOAT16;
+            output = ge::DT_UNDEFINED;
+            auto holder = buildHolder();
+            auto context = holder.GetContext<gert::InferDataTypeContext>();
+            EXPECT_EQ(infer(context), ge::GRAPH_FAILED) << "aux slot: " << slot;
+        }
+        // MXFP8 requires empty special expert inputs.
+        for (Slot slot : {SLOT_X, SLOT_ALPHA1, SLOT_ALPHA2, SLOT_V}) {
+            types = validTypes;
+            types[slot] = ge::DT_BF16;
+            output = ge::DT_UNDEFINED;
+            auto holder = buildHolder();
+            auto context = holder.GetContext<gert::InferDataTypeContext>();
+            EXPECT_EQ(infer(context), ge::GRAPH_FAILED) << "special expert slot: " << slot;
+        }
+        {
+            // The dequantization scale is required for MXFP8.
+            types = validTypes;
+            types.back() = ge::DT_UNDEFINED;
+            output = ge::DT_UNDEFINED;
+            auto holder = buildHolder();
+            auto context = holder.GetContext<gert::InferDataTypeContext>();
+            EXPECT_EQ(infer(context), ge::GRAPH_FAILED);
+        }
+        {
+            // The scale dtype must be E8M0.
+            types = validTypes;
+            types.back() = ge::DT_FLOAT;
+            output = ge::DT_UNDEFINED;
+            auto holder = buildHolder();
+            auto context = holder.GetContext<gert::InferDataTypeContext>();
+            EXPECT_EQ(infer(context), ge::GRAPH_FAILED);
+        }
+        {
+            // Regression: a non-quantized expanded_x must reject FP8 auxiliary inputs.
+            // IsValidType covers only non-quantized paths, so an E4M3FN x1 alongside
+            // a BF16 expanded_x fails dtype inference.
+            for (Slot slot : {SLOT_X1, SLOT_X2, SLOT_BIAS, SLOT_SCALES}) {
+                types = validTypes;
+                types[0] = ge::DT_BF16;
+                types[slot] = quantDtype;
+                output = ge::DT_UNDEFINED;
+                auto holder = buildHolder();
+                auto context = holder.GetContext<gert::InferDataTypeContext>();
+                EXPECT_EQ(infer(context), ge::GRAPH_FAILED) << "non-quantized aux slot: " << slot;
+            }
+        }
+    }
+}

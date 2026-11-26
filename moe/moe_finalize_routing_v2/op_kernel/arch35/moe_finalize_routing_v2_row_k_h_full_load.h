@@ -468,6 +468,234 @@ private:
 };
 #endif
 
+#ifdef MOE_FINALIZE_ROUTING_HAS_MXFP8
+// MXFP8 specializations: BF16 output and FP32 accumulation.
+using Ops::Base::CeilAlign;
+using Ops::Base::CeilDiv;
+
+template <typename T, int32_t DROP_PAD_MODE>
+class MoeFinalizeRoutingV2Mx8RowKHFullLoadImpl : public MoeFinalizeRoutingV2Mx8RouteBase<DROP_PAD_MODE> {
+public:
+    __aicore__ MoeFinalizeRoutingV2Mx8RowKHFullLoadImpl() {}
+
+    __aicore__ void Init(GM_ADDR expandedX, GM_ADDR expandedRowIdx, GM_ADDR x1, GM_ADDR x2, GM_ADDR bias,
+                         GM_ADDR expandedXScale, GM_ADDR scales, GM_ADDR expertIdx, GM_ADDR x, GM_ADDR alpha1,
+                         GM_ADDR alpha2, GM_ADDR v, GM_ADDR y, GM_ADDR /*workspace*/,
+                         const MoeFinalizeRoutingV2RegbaseTilingData* data, TPipe* pipe)
+    {
+        pipe_ = pipe;
+        data_ = data;
+        coreIdx_ = GetBlockIdx();
+        coreNum_ = GetBlockNum();
+        isTailCore_ = (coreIdx_ == coreNum_ - 1);
+        this->InitMx8Optional(data, pipe, expandedRowIdx, expertIdx, bias, scales, 1);
+        hasX1_ = x1 != nullptr;
+        hasX2_ = x2 != nullptr;
+        hasBiasAndExpertIdx_ = (bias != nullptr) && (expertIdx != nullptr);
+        expandedXGm_.SetGlobalBuffer((__gm__ uint8_t*)expandedX);
+        x1Gm_.SetGlobalBuffer((__gm__ bfloat16_t*)x1);
+        x2Gm_.SetGlobalBuffer((__gm__ bfloat16_t*)x2);
+        biasGm_.SetGlobalBuffer((__gm__ bfloat16_t*)bias);
+        scalesGm_.SetGlobalBuffer((__gm__ uint8_t*)expandedXScale);
+        yGm_.SetGlobalBuffer((__gm__ bfloat16_t*)y);
+
+        scalesRowElemNum_ = Mx8ScaleStride(data_->h);
+        scalesRowLenAligned_ = Mx8ScaleRowAligned(data_->h);
+        scaleNumAligned_ =
+            static_cast<uint32_t>(CeilAlign(scalesRowElemNum_, static_cast<int64_t>(MX8_UB_F32_PER_BLOCK)));
+        // 搬运按实际物理行数 activeNum 计算：dropless 2D 时 dim0 可小于 NUM_ROWS*K，
+        // 按 NUM_ROWS*K 搬运会读过输入末尾。
+        expandedXRowBytes_ = static_cast<uint32_t>(data_->activeNum) * static_cast<uint32_t>(data_->h);
+        // scale 与数据同物理行（与 moe_init_routing_v3 的 MXFP8 scale 输出布局一致），整块常驻 UB
+        scalesWholeBytes_ = static_cast<int64_t>(data_->activeNum) * scalesRowLenAligned_;
+        auto biasLen = static_cast<uint32_t>(data_->e * data_->h * sizeof(bfloat16_t));
+        auto rowsBf16Len = static_cast<uint32_t>(data_->rowFactor * data_->h * sizeof(bfloat16_t));
+        auto yLen = static_cast<uint32_t>(data_->rowFactor * data_->h * sizeof(float));
+        auto scratchLen =
+            static_cast<uint32_t>(CeilAlign(Mx8ScratchBytes(static_cast<uint32_t>(data_->hAligned), scaleNumAligned_),
+                                            static_cast<uint32_t>(UBBLOCKSIZE)));
+
+        pipe_->InitBuffer(expandedXQue_, 1, expandedXRowBytes_);
+        pipe_->InitBuffer(scalesQue_, 1, static_cast<uint32_t>(scalesWholeBytes_));
+        if (hasX1_) {
+            pipe_->InitBuffer(x1Que_, DOUBLE_BUFFER, rowsBf16Len);
+        }
+        if (hasX2_) {
+            pipe_->InitBuffer(x2Que_, DOUBLE_BUFFER, rowsBf16Len);
+        }
+        if (hasBiasAndExpertIdx_) {
+            pipe_->InitBuffer(biasQue_, 1, biasLen);
+        }
+        pipe_->InitBuffer(yQue_, DOUBLE_BUFFER, yLen);
+        pipe_->InitBuffer(scratchBuf_, scratchLen);
+        InitScaleIndex();
+    }
+
+    __aicore__ void Process()
+    {
+        LocalTensor<uint8_t> expandedXLocal = expandedXQue_.AllocTensor<uint8_t>();
+        DataCopyPad<uint8_t>(expandedXLocal, expandedXGm_, DataCopyExtParams{1, expandedXRowBytes_, 0, 0, 0},
+                             DataCopyPadExtParams<uint8_t>{false, 0, 0, 0});
+        expandedXQue_.EnQue(expandedXLocal);
+        expandedXLocal = expandedXQue_.DeQue<uint8_t>();
+
+        // scale 整块拷入一次，随数据按物理行寻址（详见 InnerLoopProcessInput）
+        LocalTensor<uint8_t> scalesLocal = scalesQue_.AllocTensor<uint8_t>();
+        DataCopyPad<uint8_t>(scalesLocal, scalesGm_,
+                             DataCopyExtParams{1, static_cast<uint32_t>(scalesWholeBytes_), 0, 0, 0},
+                             DataCopyPadExtParams<uint8_t>{false, 0, 0, 0});
+        scalesQue_.EnQue(scalesLocal);
+        scalesLocal = scalesQue_.DeQue<uint8_t>();
+        Mx8WaitScaleCopyReady();
+
+        LocalTensor<bfloat16_t> biasLocal;
+        if (hasBiasAndExpertIdx_) {
+            biasLocal = biasQue_.AllocTensor<bfloat16_t>();
+            CopyIn<bfloat16_t>(biasGm_, biasLocal, 1, data_->e * data_->h);
+            biasQue_.EnQue(biasLocal);
+            biasLocal = biasQue_.DeQue<bfloat16_t>();
+        }
+
+        int64_t rowOuterLoop = isTailCore_ ? data_->rowLoopOfTailBlock : data_->rowLoopOfFormerBlock;
+        int64_t tailRowFactor = isTailCore_ ? data_->tailRowFactorOfTailBlock : data_->tailRowFactorOfFormerBlock;
+
+        for (int64_t rowOuterIdx = 0; rowOuterIdx < rowOuterLoop; ++rowOuterIdx) {
+            int64_t rowInnerLoop = (rowOuterIdx == rowOuterLoop - 1) ? tailRowFactor : data_->rowFactor;
+            int64_t elemOffset = (coreIdx_ * data_->rowOfFormerBlock + rowOuterIdx * data_->rowFactor) * data_->h;
+            int64_t elemLen = rowInnerLoop * data_->h;
+
+            if (hasX1_) {
+                LocalTensor<bfloat16_t> x1Local = x1Que_.AllocTensor<bfloat16_t>();
+                CopyIn<bfloat16_t>(x1Gm_[elemOffset], x1Local, 1, elemLen);
+                x1Que_.EnQue(x1Local);
+            }
+            if (hasX2_) {
+                LocalTensor<bfloat16_t> x2Local = x2Que_.AllocTensor<bfloat16_t>();
+                CopyIn<bfloat16_t>(x2Gm_[elemOffset], x2Local, 1, elemLen);
+                x2Que_.EnQue(x2Local);
+            }
+
+            LocalTensor<float> yLocal = yQue_.AllocTensor<float>();
+            ProcessX1AndX2Input(yLocal, static_cast<uint32_t>(elemLen));
+            PipeBarrier<PIPE_V>();
+            InnerLoopProcessInput(yLocal, expandedXLocal, scalesLocal, biasLocal, rowOuterIdx, rowInnerLoop);
+            Cast(yLocal.template ReinterpretCast<bfloat16_t>(), yLocal, RoundMode::CAST_RINT, elemLen);
+            yQue_.EnQue(yLocal);
+
+            yLocal = yQue_.DeQue<float>();
+            CopyOut<bfloat16_t>(yLocal.template ReinterpretCast<bfloat16_t>(), yGm_[elemOffset], 1, elemLen);
+            yQue_.FreeTensor(yLocal);
+        }
+
+        scalesQue_.FreeTensor(scalesLocal);
+        expandedXQue_.FreeTensor(expandedXLocal);
+        if (hasBiasAndExpertIdx_) {
+            biasQue_.FreeTensor(biasLocal);
+        }
+    }
+
+private:
+    __aicore__ void InitScaleIndex()
+    {
+        LocalTensor<float> scratch = scratchBuf_.Get<float>();
+        LocalTensor<float> values, biasValues, scaleExpanded, scaleF32;
+        LocalTensor<uint32_t> scaleIndex;
+        Mx8GetScratchTensors(scratch, static_cast<uint32_t>(data_->hAligned), scaleNumAligned_, values, biasValues,
+                             scaleExpanded, scaleF32, scaleIndex);
+        Mx8BuildScaleIndex(scaleIndex, static_cast<uint32_t>(data_->h));
+    }
+
+    __aicore__ void ProcessX1AndX2Input(const LocalTensor<float>& yLocal, uint32_t elemNum)
+    {
+        LocalTensor<bfloat16_t> x1Local, x2Local;
+        if (hasX1_) {
+            x1Local = x1Que_.DeQue<bfloat16_t>();
+        }
+        if (hasX2_) {
+            x2Local = x2Que_.DeQue<bfloat16_t>();
+        }
+        ProcessX1AndX2<bfloat16_t>(yLocal, x1Local, x2Local, elemNum, hasX1_, hasX2_);
+        if (hasX1_) {
+            x1Que_.FreeTensor(x1Local);
+        }
+        if (hasX2_) {
+            x2Que_.FreeTensor(x2Local);
+        }
+    }
+
+    __aicore__ void InnerLoopProcessInput(const LocalTensor<float>& yLocal, const LocalTensor<uint8_t>& expandedXLocal,
+                                          const LocalTensor<uint8_t>& scalesLocal,
+                                          const LocalTensor<bfloat16_t>& biasLocal, int64_t rowOuterIdx,
+                                          int64_t rowInnerLoop)
+    {
+        LocalTensor<float> scratch = scratchBuf_.Get<float>();
+        LocalTensor<float> values, biasValues, scaleExpanded, scaleF32;
+        LocalTensor<uint32_t> scaleIndex;
+        Mx8GetScratchTensors(scratch, static_cast<uint32_t>(data_->hAligned), scaleNumAligned_, values, biasValues,
+                             scaleExpanded, scaleF32, scaleIndex);
+        for (int64_t rowInnerIdx = 0; rowInnerIdx < rowInnerLoop; ++rowInnerIdx) {
+            const int64_t rowIndex = coreIdx_ * data_->rowOfFormerBlock + rowOuterIdx * data_->rowFactor + rowInnerIdx;
+            for (int64_t kIdx = 0; kIdx < data_->k; ++kIdx) {
+                int64_t gatherRowIdx, expert;
+                if (!this->Route(rowIndex, kIdx, gatherRowIdx, expert)) {
+                    continue;
+                }
+                LocalTensor<uint8_t> xRow = expandedXLocal[gatherRowIdx * data_->h];
+                // scale 与数据同物理行：直接用 gatherRowIdx 寻址，
+                // 与 moe_init_routing_v3 的 MXFP8 scale 输出布局一致
+                LocalTensor<uint8_t> sRow = scalesLocal[gatherRowIdx * scalesRowElemNum_];
+                LocalTensor<bfloat16_t> bRow;
+                if (hasBiasAndExpertIdx_) {
+                    bRow = biasLocal[expert * data_->h];
+                }
+                Mx8DequantizeRow<T>(yLocal[rowInnerIdx * data_->h], xRow, sRow, bRow, values, biasValues, scaleExpanded,
+                                    scaleF32, scaleIndex, static_cast<uint32_t>(data_->h), hasBiasAndExpertIdx_,
+                                    this->SlotWeight(0));
+            }
+        }
+    }
+
+    TPipe* pipe_{nullptr};
+    const MoeFinalizeRoutingV2RegbaseTilingData* data_{nullptr};
+    int64_t coreIdx_{0};
+    int64_t coreNum_{0};
+    bool isTailCore_{false};
+
+    GlobalTensor<uint8_t> expandedXGm_;
+    GlobalTensor<bfloat16_t> x1Gm_;
+    GlobalTensor<bfloat16_t> x2Gm_;
+    GlobalTensor<bfloat16_t> biasGm_;
+    GlobalTensor<uint8_t> scalesGm_;
+    GlobalTensor<bfloat16_t> yGm_;
+
+    TQue<QuePosition::VECIN, 1> expandedXQue_;
+    TQue<QuePosition::VECIN, 1> biasQue_;
+    TQue<QuePosition::VECIN, 1> x1Que_;
+    TQue<QuePosition::VECIN, 1> x2Que_;
+    TQue<QuePosition::VECIN, 1> scalesQue_;
+    TQue<QuePosition::VECOUT, 1> yQue_;
+    TBuf<TPosition::VECCALC> scratchBuf_;
+
+    bool hasX1_{false};
+    bool hasX2_{false};
+    bool hasBiasAndExpertIdx_{false};
+
+    int64_t scalesRowLenAligned_{0};
+    int64_t scalesRowElemNum_{0};
+    uint32_t scaleNumAligned_{0};
+    uint32_t expandedXRowBytes_{0};
+    int64_t scalesWholeBytes_{0};
+};
+
+template <int32_t DROP_PAD_MODE>
+class MoeFinalizeRoutingV2RowKHFullLoad<fp8_e4m3fn_t, float8_e8m0_t, DROP_PAD_MODE>
+    : public MoeFinalizeRoutingV2Mx8RowKHFullLoadImpl<fp8_e4m3fn_t, DROP_PAD_MODE> {};
+
+template <int32_t DROP_PAD_MODE>
+class MoeFinalizeRoutingV2RowKHFullLoad<fp8_e5m2_t, float8_e8m0_t, DROP_PAD_MODE>
+    : public MoeFinalizeRoutingV2Mx8RowKHFullLoadImpl<fp8_e5m2_t, DROP_PAD_MODE> {};
+#endif
+
 } // namespace MoeFinalizeRoutingV2Regbase
 
 #endif

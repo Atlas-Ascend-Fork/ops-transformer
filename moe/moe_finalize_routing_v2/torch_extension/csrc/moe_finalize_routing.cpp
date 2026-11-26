@@ -13,18 +13,21 @@
 
 namespace op_api {
 
-// MXFP4 uses ND descriptors even for 3D tensors. The common converter labels
+// MXFP4/MXFP8 use ND descriptors even for 3D tensors. The common converter labels
 // 3D tensors NCL, and its singleton stride heuristic is ambiguous for packed FP4.
-struct Mx4NdTensor {
+// The wrapper serves both quantized flavors: the packed flag drives only the FP4
+// width/stride/offset conversion and the E2M1 dtype; FP8 passes tensors through
+// unchanged except for the E8M0 bitcast of uint8 scale storage.
+struct QuantizedNdTensor {
     const at::Tensor& tensor;
     bool packed;
 };
 
-aclTensor* ConvertType(const Mx4NdTensor& input)
+aclTensor* ConvertType(const QuantizedNdTensor& input)
 {
     static const auto createTensor = GET_OP_API_FUNC(aclCreateTensor);
     TORCH_CHECK(createTensor != nullptr, "aclCreateTensor was not found");
-    TORCH_CHECK(IsOpInputBaseFormat(input.tensor), "MXFP4 requires a dense base-format tensor");
+    TORCH_CHECK(IsOpInputBaseFormat(input.tensor), "quantized inputs require a dense base-format tensor");
     auto shape = input.tensor.sizes().vec();
     auto strides = input.tensor.strides().vec();
     if (input.packed) {
@@ -49,6 +52,12 @@ constexpr size_t INDEX_TWO = 2;
 constexpr size_t DIM_TWO = 2;
 constexpr size_t DIM_THREE = 3;
 
+static bool IsMx8Dtype(const at::Tensor& tensor)
+{
+    const auto dtype = ConvertToAclDataType(tensor.scalar_type());
+    return dtype == ACL_FLOAT8_E4M3FN || dtype == ACL_FLOAT8_E5M2;
+}
+
 at::Tensor MoeFinalizeRouting(
     const at::Tensor& expandedX, const at::Tensor& expandedRowIdx, const c10::optional<at::Tensor>& x1Optional,
     const c10::optional<at::Tensor>& x2Optional, const c10::optional<at::Tensor>& biasOptional,
@@ -64,6 +73,7 @@ at::Tensor MoeFinalizeRouting(
 
     const bool isMx4 = expandedX.scalar_type() == at::ScalarType::Byte ||
                        ConvertToAclDataType(expandedX.scalar_type()) == ACL_FLOAT4_E2M1;
+    const bool isMx8 = IsMx8Dtype(expandedX);
     const int64_t mode = dropPadMode.value_or(0);
     if (isMx4) {
         // Only guard accesses needed before ACLNN performs parameter validation.
@@ -72,8 +82,14 @@ at::Tensor MoeFinalizeRouting(
                     "MXFP4 expanded_x must be 2D or 3D before allocating the output");
         TORCH_CHECK(expandedXScaleOptional.has_value(), "MXFP4 expanded_x_scale is required");
     }
-    int64_t dim0 = isMx4 ? expandedRowIdx.numel() : expandedRowIdx.size(0);
-    if (!isMx4 && scalesOptional.has_value()) {
+    if (isMx8) {
+        TORCH_CHECK(kAttr > 0, "MXFP8 k must be positive before allocating the output");
+        TORCH_CHECK(expandedX.dim() == DIM_TWO || expandedX.dim() == DIM_THREE,
+                    "MXFP8 expanded_x must be 2D or 3D before allocating the output");
+        TORCH_CHECK(expandedXScaleOptional.has_value(), "MXFP8 expanded_x_scale is required");
+    }
+    int64_t dim0 = (isMx4 || isMx8) ? expandedRowIdx.numel() : expandedRowIdx.size(0);
+    if (!isMx4 && !isMx8 && scalesOptional.has_value()) {
         dim0 = scalesOptional.value().size(0);
     } else if (kAttr > 0) {
         dim0 = dim0 / kAttr;
@@ -84,7 +100,7 @@ at::Tensor MoeFinalizeRouting(
     }
     const int64_t width = expandedX.size(dim1Index) * (isMx4 ? FP4_IN_INT8 : 1);
     at::Tensor result =
-        at::empty({dim0, width}, isMx4 ? expandedX.options().dtype(at::kBFloat16) : expandedX.options());
+        at::empty({dim0, width}, (isMx4 || isMx8) ? expandedX.options().dtype(at::kBFloat16) : expandedX.options());
     std::vector<int64_t> zeroVec = zeroExpertRange.value_or(std::vector<int64_t>{});
     std::vector<int64_t> copyVec = copyExpertRange.value_or(std::vector<int64_t>{});
     std::vector<int64_t> constVec = constantExpertRange.value_or(std::vector<int64_t>{});
@@ -92,10 +108,20 @@ at::Tensor MoeFinalizeRouting(
     at::IntArrayRef copyRange(copyVec);
     at::IntArrayRef constRange(constVec);
     if (isMx4) {
-        Mx4NdTensor mx4X{expandedX, true};
-        Mx4NdTensor mx4Scales{*expandedXScaleOptional, false};
+        QuantizedNdTensor mx4X{expandedX, true};
+        QuantizedNdTensor mx4Scales{*expandedXScaleOptional, false};
         ACLNN_CMD(aclnnMoeFinalizeRoutingV5, mx4X, expandedRowIdx, x1Optional, x2Optional, biasOptional, scalesOptional,
                   expertIdxOptional, xOptional, alpha1Optional, alpha2Optional, vOptional, mx4Scales, mode, zeroRange,
+                  copyRange, constRange, kAttr, result);
+        return result;
+    }
+    if (isMx8) {
+        // Force ND descriptors: the common converter labels 3D tensors NCL and keeps
+        // uint8 scale storage as UINT8, while V5 requires ND and FLOAT8_E8M0.
+        QuantizedNdTensor mx8X{expandedX, false};
+        QuantizedNdTensor mx8Scales{*expandedXScaleOptional, false};
+        ACLNN_CMD(aclnnMoeFinalizeRoutingV5, mx8X, expandedRowIdx, x1Optional, x2Optional, biasOptional, scalesOptional,
+                  expertIdxOptional, xOptional, alpha1Optional, alpha2Optional, vOptional, mx8Scales, mode, zeroRange,
                   copyRange, constRange, kAttr, result);
         return result;
     }

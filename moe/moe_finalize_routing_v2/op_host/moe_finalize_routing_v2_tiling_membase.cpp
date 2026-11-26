@@ -182,10 +182,10 @@ ge::graphStatus MoeFinalizeRoutingV2Membase::SetParamInfo()
 
 ge::graphStatus MoeFinalizeRoutingV2Membase::DoGetShapeAttrsInfo()
 {
-    // Regbase validates the scale layouts for both 4-bit input types.
+    // Regbase validates the scale layouts for quantized input types.
     const auto input = context_->GetInputDesc(INDEX_IN_EXPAND_PERMUTED_ROWS_V2);
-    if (input &&
-        (input->GetDataType() == ge::DT_FLOAT4_E2M1 || input->GetDataType() == Ops::Transformer::DT_HIFLOAT4)) {
+    if (input && (input->GetDataType() == ge::DT_FLOAT4_E2M1 || input->GetDataType() == Ops::Transformer::DT_HIFLOAT4 ||
+                  input->GetDataType() == ge::DT_FLOAT8_E4M3FN || input->GetDataType() == ge::DT_FLOAT8_E5M2)) {
         return ge::GRAPH_PARAM_INVALID;
     }
     offset_ = 0;

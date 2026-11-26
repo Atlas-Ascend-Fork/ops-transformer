@@ -35,9 +35,18 @@ static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST_X = {op::Dat
                                                                          op::DataType::DT_BF16, op::DataType::DT_FLOAT};
 static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST_X_310P = {op::DataType::DT_FLOAT16,
                                                                               op::DataType::DT_FLOAT};
-static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST_MX4_AUX = {op::DataType::DT_BF16};
-static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST_MX4_SCALE = {op::DataType::DT_FLOAT8_E8M0};
+static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST_QUANT_AUX = {op::DataType::DT_BF16};
+static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST_QUANT_SCALE = {op::DataType::DT_FLOAT8_E8M0};
 static const std::initializer_list<op::DataType> DTYPE_SUPPORT_LIST_ROW_IDX = {op::DataType::DT_INT32};
+
+static inline bool IsMx8Dtype(const aclTensor* tensor)
+{
+    if (tensor == nullptr) {
+        return false;
+    }
+    auto dtype = tensor->GetDataType();
+    return dtype == op::DataType::DT_FLOAT8_E4M3FN || dtype == op::DataType::DT_FLOAT8_E5M2;
+}
 
 static inline bool CheckNotNull(const aclTensor* expandedX, const aclTensor* expandedRowIdx, const aclTensor* out)
 {
@@ -50,36 +59,36 @@ static inline bool CheckNotNull(const aclTensor* expandedX, const aclTensor* exp
 static inline bool CheckDtypeValid(const aclTensor* expandedX, const aclTensor* expandedRowIdx,
                                    const aclTensor* x1Optional, const aclTensor* x2Optional,
                                    const aclTensor* biasOptional, const aclTensor* scalesOptional,
-                                   const aclTensor* expertIdxOptional, const aclTensor* out, bool isMx4 = false)
+                                   const aclTensor* expertIdxOptional, const aclTensor* out, bool isQuantized = false)
 {
-    const auto& auxTypes = isMx4 ? DTYPE_SUPPORT_LIST_MX4_AUX : DTYPE_SUPPORT_LIST_X;
-    const auto& scaleTypes = isMx4 ? DTYPE_SUPPORT_LIST_MX4_SCALE : DTYPE_SUPPORT_LIST_X;
-    const aclTensor* reference = isMx4 ? out : expandedX;
-    if (expandedX != nullptr && !isMx4 && expandedX->GetViewShape().GetShapeSize() != 0) {
+    const auto& auxTypes = isQuantized ? DTYPE_SUPPORT_LIST_QUANT_AUX : DTYPE_SUPPORT_LIST_X;
+    const auto& scaleTypes = isQuantized ? DTYPE_SUPPORT_LIST_QUANT_SCALE : DTYPE_SUPPORT_LIST_X;
+    const aclTensor* reference = isQuantized ? out : expandedX;
+    if (expandedX != nullptr && !isQuantized && expandedX->GetViewShape().GetShapeSize() != 0) {
         OP_CHECK_DTYPE_NOT_SUPPORT(expandedX, DTYPE_SUPPORT_LIST_X, return false);
     }
-    if (expandedRowIdx != nullptr && (isMx4 || expandedRowIdx->GetViewShape().GetShapeSize() != 0)) {
+    if (expandedRowIdx != nullptr && (isQuantized || expandedRowIdx->GetViewShape().GetShapeSize() != 0)) {
         OP_CHECK_DTYPE_NOT_SUPPORT(expandedRowIdx, DTYPE_SUPPORT_LIST_ROW_IDX, return false);
     }
-    if (x1Optional != nullptr && (isMx4 || x1Optional->GetViewShape().GetShapeSize() != 0)) {
+    if (x1Optional != nullptr && (isQuantized || x1Optional->GetViewShape().GetShapeSize() != 0)) {
         OP_CHECK_DTYPE_NOT_SUPPORT(x1Optional, auxTypes, return false);
         OP_CHECK_DTYPE_NOT_SAME(reference, x1Optional, return false);
     }
-    if (x2Optional != nullptr && (isMx4 || x2Optional->GetViewShape().GetShapeSize() != 0)) {
+    if (x2Optional != nullptr && (isQuantized || x2Optional->GetViewShape().GetShapeSize() != 0)) {
         OP_CHECK_DTYPE_NOT_SUPPORT(x2Optional, auxTypes, return false);
         OP_CHECK_DTYPE_NOT_SAME(reference, x2Optional, return false);
     }
-    if (biasOptional != nullptr && (isMx4 || biasOptional->GetViewShape().GetShapeSize() != 0)) {
+    if (biasOptional != nullptr && (isQuantized || biasOptional->GetViewShape().GetShapeSize() != 0)) {
         OP_CHECK_DTYPE_NOT_SUPPORT(biasOptional, auxTypes, return false);
         OP_CHECK_DTYPE_NOT_SAME(reference, biasOptional, return false);
     }
-    if (scalesOptional != nullptr && (isMx4 || scalesOptional->GetViewShape().GetShapeSize() != 0)) {
+    if (scalesOptional != nullptr && (isQuantized || scalesOptional->GetViewShape().GetShapeSize() != 0)) {
         OP_CHECK_DTYPE_NOT_SUPPORT(scalesOptional, scaleTypes, return false);
     }
-    if (expertIdxOptional != nullptr && (isMx4 || expertIdxOptional->GetViewShape().GetShapeSize() != 0)) {
+    if (expertIdxOptional != nullptr && (isQuantized || expertIdxOptional->GetViewShape().GetShapeSize() != 0)) {
         OP_CHECK_DTYPE_NOT_SUPPORT(expertIdxOptional, DTYPE_SUPPORT_LIST_ROW_IDX, return false);
     }
-    if (out != nullptr && (isMx4 || out->GetViewShape().GetShapeSize() != 0)) {
+    if (out != nullptr && (isQuantized || out->GetViewShape().GetShapeSize() != 0)) {
         OP_CHECK_DTYPE_NOT_SUPPORT(out, auxTypes, return false);
         OP_CHECK_DTYPE_NOT_SAME(reference, out, return false);
     }
@@ -124,14 +133,14 @@ static inline bool CheckDtypeValid310P(const aclTensor* expandedX, const aclTens
 
 static inline bool CheckConstExpertDtype(const aclTensor* expandedX, const aclTensor* xOptional,
                                          const aclTensor* alpha1Optional, const aclTensor* alpha2Optional,
-                                         const aclTensor* vOptional, bool isMx4 = false)
+                                         const aclTensor* vOptional, bool isQuantized = false)
 {
-    const auto& types = isMx4 ? DTYPE_SUPPORT_LIST_MX4_AUX : DTYPE_SUPPORT_LIST_X;
+    const auto& types = isQuantized ? DTYPE_SUPPORT_LIST_QUANT_AUX : DTYPE_SUPPORT_LIST_X;
     const aclTensor* extras[] = {xOptional, alpha1Optional, alpha2Optional, vOptional};
     for (const auto* tensor : extras) {
-        if (tensor != nullptr && (isMx4 || tensor->GetViewShape().GetShapeSize() != 0)) {
+        if (tensor != nullptr && (isQuantized || tensor->GetViewShape().GetShapeSize() != 0)) {
             OP_CHECK_DTYPE_NOT_SUPPORT(tensor, types, return false);
-            if (!isMx4) {
+            if (!isQuantized) {
                 OP_CHECK_DTYPE_NOT_SAME(expandedX, tensor, return false);
             }
         }
@@ -150,11 +159,11 @@ static inline bool CheckFormatValid(const aclTensor* expandedX, const aclTensor*
                                     const aclTensor* expertIdxOptional, const aclTensor* xOptional,
                                     const aclTensor* alpha1Optional, const aclTensor* alpha2Optional,
                                     const aclTensor* vOptional, const aclTensor* out, int64_t dropPadMode,
-                                    bool isMx4 = false)
+                                    bool isQuantized = false)
 {
-    bool expandedXIs3D = !isMx4 && IsExpandedX3D(dropPadMode);
-    if (expandedX != nullptr && (isMx4 || expandedX->GetViewShape().GetShapeSize() != 0)) {
-        op::Format format = isMx4 ? expandedX->GetViewFormat() : expandedX->GetStorageFormat();
+    bool expandedXIs3D = !isQuantized && IsExpandedX3D(dropPadMode);
+    if (expandedX != nullptr && (isQuantized || expandedX->GetViewShape().GetShapeSize() != 0)) {
+        op::Format format = isQuantized ? expandedX->GetViewFormat() : expandedX->GetStorageFormat();
         // aclnn converts the format of 3D tensors to NCL
         bool isSupportedFormat = format == op::Format::FORMAT_ND || (expandedXIs3D && format == op::Format::FORMAT_NCL);
         if (!isSupportedFormat) {
@@ -172,8 +181,8 @@ static inline bool CheckFormatValid(const aclTensor* expandedX, const aclTensor*
     std::vector<std::string> names = {"expandedRowIdx", "x1",     "x2", "bias", "scales", "expertIdx", "x",
                                       "alpha1",         "alpha2", "v",  "out"};
     for (size_t i = 0; i < tensors.size(); ++i) {
-        if (tensors[i] != nullptr && (isMx4 || tensors[i]->GetViewShape().GetShapeSize() != 0)) {
-            const auto format = isMx4 ? tensors[i]->GetViewFormat() : tensors[i]->GetStorageFormat();
+        if (tensors[i] != nullptr && (isQuantized || tensors[i]->GetViewShape().GetShapeSize() != 0)) {
+            const auto format = isQuantized ? tensors[i]->GetViewFormat() : tensors[i]->GetStorageFormat();
             if (format != op::Format::FORMAT_ND) {
                 OP_LOGE_FOR_INVALID_FORMAT_WITH_REASON(
                     "MoeFinalizeRoutingV2", names[i],
@@ -195,7 +204,7 @@ static inline bool CheckShapeValid(const aclTensor* expandedX, const aclTensor* 
                                    const aclTensor* expertIdxOptional, const aclTensor* xOptional,
                                    const aclTensor* alpha1Optional, const aclTensor* alpha2Optional,
                                    const aclTensor* vOptional, const aclTensor* out, int64_t dropPadMode,
-                                   int64_t mx4K = 0, int64_t constantRows = 0)
+                                   int64_t quantK = 0, int64_t constantRows = 0)
 {
     size_t expandedXDimNum = expandedX->GetViewShape().GetDimNum();
     if (IsExpandedX3D(dropPadMode)) {
@@ -222,8 +231,8 @@ static inline bool CheckShapeValid(const aclTensor* expandedX, const aclTensor* 
                                                      std::to_string(expandedRowIdx->GetViewShape().GetDimNum()) + "D.");
         return false;
     }
-    const bool isMx4 = mx4K > 0;
-    const int64_t rows = isMx4 ? expandedRowIdx->GetViewShape().GetDim(0) / mx4K : 0;
+    const bool isQuantized = quantK > 0;
+    const int64_t rows = isQuantized ? expandedRowIdx->GetViewShape().GetDim(0) / quantK : 0;
     const int64_t width = expandedX->GetViewShape().GetDim(expandedXDimNum - 1);
     struct OptionalShape {
         const aclTensor* tensor;
@@ -234,14 +243,14 @@ static inline bool CheckShapeValid(const aclTensor* expandedX, const aclTensor* 
     const OptionalShape optional2D[] = {{x1Optional, "x1", rows, width},
                                         {x2Optional, "x2", rows, width},
                                         {biasOptional, "bias", -1, width},
-                                        {scalesOptional, "scales", rows, mx4K},
-                                        {expertIdxOptional, "expertIdx", rows, mx4K},
+                                        {scalesOptional, "scales", rows, quantK},
+                                        {expertIdxOptional, "expertIdx", rows, quantK},
                                         {xOptional, "x", rows, width},
                                         {alpha1Optional, "alpha1", constantRows, width},
                                         {alpha2Optional, "alpha2", constantRows, width},
                                         {vOptional, "v", constantRows, width}};
     for (const auto& item : optional2D) {
-        if (item.tensor == nullptr || (!isMx4 && item.tensor->GetViewShape().GetShapeSize() == 0)) {
+        if (item.tensor == nullptr || (!isQuantized && item.tensor->GetViewShape().GetShapeSize() == 0)) {
             continue;
         }
         const auto& shape = item.tensor->GetViewShape();
@@ -252,7 +261,7 @@ static inline bool CheckShapeValid(const aclTensor* expandedX, const aclTensor* 
                                                          std::to_string(shape.GetDimNum()) + "D.");
             return false;
         }
-        if (isMx4 && ((item.rows >= 0 && shape.GetDim(0) != item.rows) || shape.GetDim(1) != item.cols)) {
+        if (isQuantized && ((item.rows >= 0 && shape.GetDim(0) != item.rows) || shape.GetDim(1) != item.cols)) {
             return false;
         }
     }
@@ -262,7 +271,7 @@ static inline bool CheckShapeValid(const aclTensor* expandedX, const aclTensor* 
             "out should be 2D, but got " + std::to_string(out->GetViewShape().GetDimNum()) + "D.");
         return false;
     }
-    return !isMx4 || out->GetViewShape() == op::Shape{rows, width};
+    return !isQuantized || out->GetViewShape() == op::Shape{rows, width};
 }
 
 static inline aclnnStatus CheckParams(const aclTensor* expandedX, const aclTensor* expandedRowIdx,

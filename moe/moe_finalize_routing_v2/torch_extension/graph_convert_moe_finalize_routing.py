@@ -259,7 +259,8 @@ if _TORCHAIR_AVAILABLE:
         node_name=None,
     ):
         """REG_OP(MoeFinalizeRoutingV2)\n
-        .INPUT(expanded_x, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16, DT_FLOAT4_E2M1}))\n
+        .INPUT(expanded_x, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16, DT_FLOAT4_E2M1, DT_FLOAT8_E4M3FN,
+        DT_FLOAT8_E5M2}))\n
         .INPUT(expanded_row_idx, TensorType({DT_INT32}))\n
         .OPTIONAL_INPUT(x1, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))\n
         .OPTIONAL_INPUT(x2, TensorType({DT_FLOAT, DT_FLOAT16, DT_BF16}))\n
@@ -294,16 +295,22 @@ if _TORCHAIR_AVAILABLE:
             DataType.DT_UINT8,
             DataType.DT_FLOAT4_E2M1,
         ) or getattr(expanded_x, "_moe_mxfp4_packed_input", False)
-        if is_mxfp4:
-            from .moe_finalize_routing import _check_mxfp4_special_experts
+        is_mxfp8 = expanded_x.dtype in (
+            DataType.DT_FLOAT8_E4M3FN,
+            DataType.DT_FLOAT8_E5M2,
+        )
+        is_quantized = is_mxfp4 or is_mxfp8
+        if is_quantized:
+            from .moe_finalize_routing import _check_quant_special_experts
 
-            _check_mxfp4_special_experts(
+            _check_quant_special_experts(
+                "MXFP4" if is_mxfp4 else "MXFP8",
                 (x, alpha1, alpha2, v),
                 (zero_expert_range, copy_expert_range, constant_expert_range),
             )
         expanded_x = restore_mxfp4_input(expanded_x)
         if (
-            is_mxfp4
+            is_quantized
             and expanded_x_scale is not None
             and expanded_x_scale.dtype == DataType.DT_UINT8
         ):
@@ -323,7 +330,7 @@ if _TORCHAIR_AVAILABLE:
             "alpha1": alpha1,
             "alpha2": alpha2,
             "v": v,
-            "expanded_x_scale": expanded_x_scale if is_mxfp4 else None,
+            "expanded_x_scale": expanded_x_scale if is_quantized else None,
         }
 
         attrs = {
@@ -336,9 +343,9 @@ if _TORCHAIR_AVAILABLE:
 
         outputs = ["y"]
 
-        # The MXFP4 scale is input 11. Keep placeholders for omitted optional inputs
-        # so GE cannot interpret the scale as an earlier tensor such as expert_idx.
-        if is_mxfp4:
+        # The MXFP4/MXFP8 scale is input 11. Keep placeholders for omitted optional
+        # inputs so GE cannot interpret the scale as an earlier tensor such as expert_idx.
+        if is_quantized:
             return ge_op(
                 op_type="MoeFinalizeRoutingV2",
                 inputs=inputs,
@@ -356,7 +363,10 @@ if _TORCHAIR_AVAILABLE:
             dependencies=dependencies,
             node_name=node_name,
             ir=IrDef("MoeFinalizeRoutingV2")
-            .input("expanded_x", "DT_FLOAT, DT_FLOAT16, DT_BF16, DT_FLOAT4_E2M1")
+            .input(
+                "expanded_x",
+                "DT_FLOAT, DT_FLOAT16, DT_BF16, DT_FLOAT4_E2M1, DT_FLOAT8_E4M3FN, DT_FLOAT8_E5M2",
+            )
             .input("expanded_row_idx", "DT_INT32")
             .optional_input("x1", "DT_FLOAT, DT_FLOAT16, DT_BF16")
             .optional_input("x2", "DT_FLOAT, DT_FLOAT16, DT_BF16")
