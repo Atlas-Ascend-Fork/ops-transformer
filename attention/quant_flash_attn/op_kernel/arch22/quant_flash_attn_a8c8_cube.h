@@ -15,6 +15,7 @@
 #include "kernel_operator_list_tensor_intf.h"
 #include "lib/matmul_intf.h"
 #include "quant_flash_attn_a8_c8_kernel_tiling.h"
+#include "quant_flash_attn_metadata_paged.h"
 using namespace AscendC;
 #include "attn_infra/arch/fused_arch.hpp"
 #include "attn_infra/arch/fused_cross_core_sync.hpp"
@@ -418,6 +419,19 @@ public:
             valueGmTensor.offsetCalculator.Init(constInfo.kvHeadNum, constInfo.kvCacheBlockSize, constInfo.headDim / d0,
                                                 d0, blockTableGm, constInfo.maxBlockNumPerBatch,
                                                 constInfo.valueBnStride, QfaState().valueHeadStride);
+        }
+    }
+
+    __aicore__ inline void SetQfaKvStrides(const QuantFlashAttnA8C8TilingData& tiling)
+    {
+        if constexpr (!HEAD_PAIR && GmLayoutParams<KV_FORMAT>::CATEGORY == FormatCategory::GM_KV_PA_BNBD) {
+            auto& keyStride = keyGmTensor.offsetCalculator.gmLayout.stride;
+            auto& valueStride = valueGmTensor.offsetCalculator.gmLayout.stride;
+            // PA_BBND's default layout derives head stride from D and token stride from Hkv * D.
+            AscendC::Std::get<1>(keyStride) = tiling.keyStrideHead;
+            AscendC::Std::get<2>(keyStride) = tiling.keyStrideSlot;
+            AscendC::Std::get<1>(valueStride) = tiling.valueStrideHead;
+            AscendC::Std::get<2>(valueStride) = tiling.valueStrideSlot;
         }
     }
 
@@ -2685,6 +2699,10 @@ public:
                 if (uq_ != nullptr && static_cast<uint32_t>(uq_[b]) < qLength_)
                     qLength_ = uq_[b];
                 kvLength_ = uk_ == nullptr ? t_->maxSeqKv : static_cast<uint32_t>(uk_[b]);
+                if (kvLength_ > t_->maxSeqKv) {
+                    AscendC::Trap();
+                    return false;
+                }
             }
             const uint32_t stop = bn_ == endBN_ && gs_ == endGS_ ? endK_ : panels;
             out.batch = b;
@@ -2926,6 +2944,7 @@ public:
         cube.Init(q, k, v, nullptr, nullptr, cuSeqLensQ, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                   nullptr, blockTable, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
                   nullptr, nullptr, nullptr, out, nullptr);
+        cube.SetQfaKvStrides(*tiling_);
 
         AscendC::GlobalTensor<S_T> gS;
         gS.SetGlobalBuffer(reinterpret_cast<__gm__ S_T*>(coreWorkspace + workspaceLayout_.scoreOffset));
@@ -3030,8 +3049,8 @@ public:
                                __gm__ uint8_t* seqUsedQ, __gm__ uint8_t* seqUsedKv, __gm__ uint8_t* out,
                                __gm__ uint8_t* lse, __gm__ uint8_t* workspace, uint32_t coreIdx, uint32_t coreNum,
                                const QuantFlashAttnA8C8TilingData* tiling, AscendC::TPipe* pipe,
-                               __gm__ const optiling::QfaHostPlanData* hostPlan = nullptr,
-                               uint32_t returnSoftmaxLse = 0U)
+                               __gm__ const optiling::QfaHostPlanData* hostPlan,
+                               __gm__ const optiling::QfaLaunchConfig* hpPlan, uint32_t returnSoftmaxLse)
     {
 #ifdef __DAV_C220_VEC__
         cuSeqQGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(cuSeqLensQ));
@@ -3040,7 +3059,7 @@ public:
         hasSequsedQ_ = seqUsedQ != nullptr;
         hasSequsedKv_ = seqUsedKv != nullptr;
         tiling_ = tiling;
-        workspaceLayout_ = QfaMakeWorkspaceLayout(tiling_, FiaVecType::PAIRED_HEAD_SERVICE ? hostPlan->m * 2U : 0U);
+        workspaceLayout_ = QfaMakeWorkspaceLayout(tiling_, FiaVecType::PAIRED_HEAD_SERVICE ? hpPlan->m * 2U : 0U);
         // p3a: prepass inputs (PA-blocked fp32 kDescale + block table) and the dense
         // target region appended after the per-core workspace areas. tiling stores the
         // offset relative to this user workspace, not the raw system workspace.
@@ -3066,10 +3085,10 @@ public:
         vec.QfaState().qfaShortQRoute_ = tiling_->shortQRoute != 0U;
         auto qfaParams = BuildQfaParams();
         if constexpr (FiaVecType::HIGH_PRECISION) {
-            qfaParams.hpRows = hostPlan->hpRows;
-            qfaParams.hpVec2Rows = hostPlan->hpVec2Rows;
-            qfaParams.hpScratchBytes = hostPlan->hpScratchBytes;
-            const uint32_t m = hostPlan->m;
+            qfaParams.hpRows = hpPlan->hpRows;
+            qfaParams.hpVec2Rows = hpPlan->hpVec2Rows;
+            qfaParams.hpScratchBytes = hpPlan->hpScratchBytes;
+            const uint32_t m = hpPlan->m;
             const uint32_t first = m <= 8U ? m : (((m + 1U) / 2U + 7U) & ~7U);
             qfaParams.hpStateRows = FiaVecType::PAIRED_HEAD_SERVICE                        ? ((m + 7U) & ~7U) :
                                     (tiling_->headDim == 128U || tiling_->headDim == 256U) ? ((first + 7U) & ~7U) :
@@ -3240,14 +3259,67 @@ __aicore__ inline void QfaRunHostPlan(__gm__ uint8_t* q, __gm__ uint8_t* k, __gm
                                       __gm__ uint8_t* cu, __gm__ uint8_t* uq, __gm__ uint8_t* uk, __gm__ uint8_t* out,
                                       __gm__ uint8_t* lse, __gm__ uint8_t* ws,
                                       const QuantFlashAttnA8C8TilingData* tiling, __gm__ uint8_t* rawTiling,
-                                      TPipe* pipe, __gm__ uint8_t* metadata = nullptr)
+                                      TPipe* pipe, __gm__ uint8_t* metadata)
 {
     using FIAT = AttentionCommon::FIAType<int8_t, int8_t, bfloat16_t, int8_t, true, false,
                                           AttentionCommon::FIA_LAYOUT::TND, 0U, false, KV_LAYOUT>;
-    const auto* payload = reinterpret_cast<__gm__ const optiling::QfaHostPlanTilingPayload*>(rawTiling);
-    auto* plan = &payload->plan;
-    const uint32_t returnSoftmaxLse = plan->returnSoftmaxLse;
-    (void)metadata;
+    const auto* payload = reinterpret_cast<__gm__ const optiling::QfaLaunchTilingPayload*>(rawTiling);
+    const auto* staticPlan = &payload->launch;
+    if (tiling->pageQCheck != optiling::QFA_PAGE_ANY_Q) {
+        const auto* cuQ = reinterpret_cast<__gm__ const int32_t*>(cu);
+        if (cuQ == nullptr) {
+            AscendC::Trap();
+            return;
+        }
+        bool multiQ = false;
+        int32_t previous = cuQ[0];
+        for (uint32_t b = 0U; b < tiling->batchSize; ++b) {
+            const int32_t next = cuQ[b + 1U];
+            if (static_cast<int64_t>(next) - previous > 1) {
+                multiQ = true;
+                break;
+            }
+            previous = next;
+        }
+        if (!multiQ) {
+            AscendC::Trap();
+            return;
+        }
+    }
+    const auto* meta = reinterpret_cast<__gm__ const optiling::QfaPagedMetaDataV6*>(metadata);
+    const bool validHeader =
+        metadata != nullptr && meta->header.magic == optiling::QFA_PAGED_METADATA_MAGIC &&
+        meta->header.version == optiling::QFA_PAGED_METADATA_VERSION && meta->header.quantMode == QFA_INT8_QUANT_MODE &&
+        meta->header.maskMode == tiling->maskMode && meta->header.kvLayout == tiling->kvLayout &&
+        meta->header.batchSize == tiling->batchSize && meta->header.qHeadNum == tiling->qHeadNum &&
+        meta->header.kvHeadNum == tiling->kvHeadNum && meta->header.headDim == tiling->headDim &&
+        meta->header.maxSeqQ == ((payload->lengthFlags & optiling::QFA_HAS_MAX_Q) != 0U ? tiling->maxSeqQ : 0U) &&
+        meta->header.maxSeqKv == ((payload->lengthFlags & optiling::QFA_HAS_MAX_KV) != 0U ? tiling->maxSeqKv : 0U) &&
+        meta->header.actualMaxQ <= tiling->maxSeqQ && meta->header.actualMaxKv <= tiling->maxSeqKv &&
+        (uk != nullptr || (payload->lengthFlags & optiling::QFA_HAS_MAX_KV) != 0U) &&
+        meta->header.planWords == sizeof(optiling::QfaPagedMetaPlan) / sizeof(uint32_t) &&
+        tiling->metadataPlanKind < optiling::QFA_PAGED_PLAN_COUNT;
+    if (!validHeader) {
+        AscendC::Trap();
+        return;
+    }
+    const uint32_t index = meta->header.planIndex[tiling->metadataPlanKind];
+    if (index >= optiling::QFA_PAGED_PLAN_COUNT) {
+        AscendC::Trap();
+        return;
+    }
+    const auto* entry = &meta->plans[index];
+    const auto* plan = &entry->plan;
+    const bool validPlan = entry->coreCap == tiling->coreCap && entry->partialCap == tiling->partialCap &&
+                           plan->headMajorOrder == staticPlan->headMajorOrder && plan->m == staticPlan->m &&
+                           plan->kvUnit == staticPlan->kvUnit && plan->headGroupSize == staticPlan->headGroupSize &&
+                           plan->fdRows == staticPlan->fdRows && plan->fdColumns == staticPlan->fdColumns &&
+                           plan->cores != 0U && plan->cores <= tiling->coreCap && plan->partials <= tiling->partialCap;
+    if (!validPlan) {
+        AscendC::Trap();
+        return;
+    }
+    const uint32_t returnSoftmaxLse = staticPlan->returnSoftmaxLse;
     const uint32_t core = GetBlockIdx() / (g_coreType == AIV ? 2U : 1U);
     if ASCEND_IS_AIC {
         using Cube = QfaInt8Cube<FIAT, WIDE_ROW_SCALE, HEAD_PAIR, PAIR_MAX_M>;
@@ -3257,7 +3329,7 @@ __aicore__ inline void QfaRunHostPlan(__gm__ uint8_t* q, __gm__ uint8_t* k, __gm
         using Vec =
             QfaHighPrecisionVec<FIAT, OPTIMIZED_VECTOR_SERVICE, ROW_BATCH, WIDE_ROW_SCALE, HEAD_PAIR, COMPACT_D256>;
         QuantFlashAttnA8C8FiaVecAiv<Vec, int32_t, int8_t, int32_t> actor;
-        actor.Run(qd, kd, vd, bt, ps, cu, uq, uk, out, lse, ws, core, tiling->coreNum, tiling, pipe, plan,
+        actor.Run(qd, kd, vd, bt, ps, cu, uq, uk, out, lse, ws, core, tiling->coreNum, tiling, pipe, plan, staticPlan,
                   returnSoftmaxLse);
     }
 }

@@ -32,7 +32,7 @@ ASCENDC_TPL_SEL(
                          ASCENDC_TPL_BOOL_SEL(HasAttenMask, 0),
                          ASCENDC_TPL_UINT_SEL(KvLayoutType, ASCENDC_TPL_UI_LIST, QFA_INT8_TPL_PAGED_KV_LAYOUT),
                          ASCENDC_TPL_BOOL_SEL(IsFd, 0), ASCENDC_TPL_BOOL_SEL(HasVTail, 0),
-                         ASCENDC_TPL_TILING_STRUCT_SEL(optiling::QfaHostPlanTilingPayload)),
+                         ASCENDC_TPL_TILING_STRUCT_SEL(optiling::QfaLaunchTilingPayload)),
     ASCENDC_TPL_ARGS_SEL(ASCENDC_TPL_UINT_SEL(InOutLayoutType, ASCENDC_TPL_UI_LIST, QFA_INT8_TPL_BSND_OR_MIXED),
                          ASCENDC_TPL_UINT_SEL(Config, ASCENDC_TPL_UI_LIST, QFA_INT8_CFG_D96_M512_FIXPIPE,
                                               QFA_INT8_CFG_D96_M256_CAUSAL_MHA, QFA_INT8_CFG_D96_M512_FIXPIPE_LSE,

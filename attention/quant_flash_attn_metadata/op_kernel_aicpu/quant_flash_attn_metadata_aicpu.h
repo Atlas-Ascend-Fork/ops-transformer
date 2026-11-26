@@ -72,6 +72,8 @@ public:
 
 private:
     bool Prepare(CpuKernelContext& ctx);
+    bool IsPagedInt8() const;
+    bool GenPagedInt8MetaData();
     bool BalanceSchedule(SectionStreamKResult& splitRes);
     bool GenMetaData(SectionStreamKResult& splitRes);
     void SetMetadataHead(const SectionStreamKResult& splitRes, optiling::detail::FaMetaData& faMetadata);

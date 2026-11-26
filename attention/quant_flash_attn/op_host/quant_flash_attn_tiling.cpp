@@ -19,12 +19,12 @@
 #include "log/log.h"
 #include "op_host/tiling_templates_registry.h"
 #include "quant_flash_attn_tiling.h"
+#include "arch22/quant_flash_attn_tiling_a8c8_host.h"
 #include "../op_kernel/arch22/quant_flash_attn_tiling_data_int8.h"
 #include "../op_kernel/arch22/quant_flash_attn_a8_c8_kernel_tiling.h"
 #include "quant_flash_attn_tiling_common.h"
 #include "qfa_tiling_info_parser.h"
 #include "checkers/qfa_checker.h"
-#include "arch22/quant_flash_attn_tiling_a8c8.h"
 #include "../../common/op_host/fia_tiling_templates_registry.h"
 
 using namespace ge;
@@ -120,11 +120,14 @@ ASCENDC_EXTERN_C ge::graphStatus TilingPrepareForQuantFlashAttn(gert::TilingPars
     return ge::GRAPH_SUCCESS;
 }
 
-static_assert(sizeof(QfaHostPlanTilingPayload) >= sizeof(QuantFlashAttnTilingQBlockPayloadInt8),
-              "The tiling buffer must also hold the prefill task map");
+// Keep the registered capacity for the other QFA tiling formats.
+constexpr size_t QFA_TILING_CAPACITY = sizeof(QuantFlashAttnA8C8TilingData) + sizeof(QfaHostPlanData);
+static_assert(QFA_TILING_CAPACITY >= sizeof(QuantFlashAttnTilingQBlockPayloadInt8) &&
+                  QFA_TILING_CAPACITY >= sizeof(QfaLaunchTilingPayload),
+              "The tiling buffer must hold the prefill and paged configurations");
 
 IMPL_OP_OPTILING(QuantFlashAttn)
-    .Tiling(TilingQuantFlashAttn, sizeof(QfaHostPlanTilingPayload))
+    .Tiling(TilingQuantFlashAttn, QFA_TILING_CAPACITY)
     .TilingParse<QuantFlashAttnCompileInfo>(TilingPrepareForQuantFlashAttn);
 
 } // namespace optiling

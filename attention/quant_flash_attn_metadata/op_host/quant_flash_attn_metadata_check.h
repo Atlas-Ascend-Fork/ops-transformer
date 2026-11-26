@@ -15,9 +15,11 @@
 
 #include <unordered_set>
 #include <string>
+#include <cstring>
 #include "opdev/format_utils.h"
 #include "opdev/op_log.h"
 #include "opdev/data_type_utils.h"
+#include "opdev/platform.h"
 #include "opdev/tensor_view_utils.h"
 
 #ifdef __cplusplus
@@ -35,6 +37,14 @@ public:
                                           bool isGradEnabled, const aclTensor* metadata);
 
 private:
+    static inline aclnnStatus CheckPagedInt8(const aclTensor* cuSeqlensQOptional, const aclTensor* cuSeqlensKvOptional,
+                                             const aclTensor* sequsedQOptional, const aclTensor* sequsedKvOptional,
+                                             int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenKv,
+                                             int64_t numHeadsQ, int64_t numHeadsKv, int64_t headDim, int64_t headDimV,
+                                             int64_t maskMode, const char* layoutQ, const char* layoutQDescale,
+                                             const char* layoutKv, const char* layoutOut, bool isGradEnabled,
+                                             const aclTensor* metadata);
+
     static inline bool IsTensorExist(const aclTensor* tensor);
 
     static inline aclnnStatus CheckSeqLens(bool isCu, int64_t batchSize, const aclTensor* seqLens);
@@ -69,6 +79,15 @@ inline aclnnStatus QuantFlashAttnMetadataCheck::ParamsCheck(
     int64_t winRight, const char* layoutQ, const char* layoutQDescale, const char* layoutKv, const char* layoutOut,
     bool isGradEnabled, const aclTensor* metadata)
 {
+    constexpr int64_t INT8_QUANT_MODE = 12;
+    const bool pagedInt8 = quantMode == INT8_QUANT_MODE && layoutKv != nullptr &&
+                           (std::strcmp(layoutKv, "PA_BNBD") == 0 || std::strcmp(layoutKv, "PA_BBND") == 0 ||
+                            std::strcmp(layoutKv, "PA_NZ") == 0);
+    if (pagedInt8) {
+        return CheckPagedInt8(cuSeqlensQOptional, cuSeqlensKvOptional, sequsedQOptional, sequsedKvOptional, batchSize,
+                              maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv, headDim, headDimV, maskMode, layoutQ,
+                              layoutQDescale, layoutKv, layoutOut, isGradEnabled, metadata);
+    }
     auto ret = CheckBaseAttr(batchSize, maxSeqlenQ, maxSeqlenKv, numHeadsQ, numHeadsKv, headDim, headDimV, quantMode,
                              layoutQ, layoutQDescale, layoutKv, layoutOut, isGradEnabled);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
@@ -81,6 +100,48 @@ inline aclnnStatus QuantFlashAttnMetadataCheck::ParamsCheck(
                            sequsedKvOptional);
     CHECK_RET(ret == ACLNN_SUCCESS, ret);
     return ACLNN_SUCCESS;
+}
+
+inline aclnnStatus QuantFlashAttnMetadataCheck::CheckPagedInt8(
+    const aclTensor* cuSeqlensQOptional, const aclTensor* cuSeqlensKvOptional, const aclTensor* sequsedQOptional,
+    const aclTensor* sequsedKvOptional, int64_t batchSize, int64_t maxSeqlenQ, int64_t maxSeqlenKv, int64_t numHeadsQ,
+    int64_t numHeadsKv, int64_t headDim, int64_t headDimV, int64_t maskMode, const char* layoutQ,
+    const char* layoutQDescale, const char* layoutKv, const char* layoutOut, bool isGradEnabled,
+    const aclTensor* metadata)
+{
+    constexpr uint32_t PAGED_METADATA_WORDS = 4096U;
+    constexpr int64_t MASK_NONE = 0;
+    constexpr int64_t MASK_CAUSAL = 3;
+    const auto socVersion = op::GetCurrentPlatformInfo().GetSocVersion();
+    CHECK_COND(socVersion == op::SocVersion::ASCEND910B || socVersion == op::SocVersion::ASCEND910_93,
+               ACLNN_ERR_PARAM_INVALID, "Paged INT8 metadata is only supported on A2/A3");
+    CHECK_COND(maxSeqlenQ >= -1, ACLNN_ERR_PARAM_INVALID, "Paged INT8 metadata requires max_seqlen_q >= -1");
+    CHECK_COND(maxSeqlenKv == -1 || maxSeqlenKv > 0, ACLNN_ERR_PARAM_INVALID,
+               "Paged INT8 metadata requires max_seqlen_kv to be -1 or positive");
+    CHECK_COND(batchSize > 0 && numHeadsQ > 0 && numHeadsKv > 0 && numHeadsQ % numHeadsKv == 0 && headDim > 0 &&
+                   headDim <= 256 && headDimV == headDim,
+               ACLNN_ERR_PARAM_INVALID, "Invalid paged INT8 metadata batch, head count or head dimension");
+    CHECK_COND(!isGradEnabled && (maskMode == MASK_NONE || maskMode == MASK_CAUSAL), ACLNN_ERR_PARAM_INVALID,
+               "Paged INT8 metadata requires forward mode and mask_mode 0 or 3");
+    CHECK_COND(layoutQ != nullptr && layoutQDescale != nullptr && layoutOut != nullptr &&
+                   std::strcmp(layoutQ, "TND") == 0 && std::strcmp(layoutQDescale, "NT") == 0 &&
+                   std::strcmp(layoutOut, "TND") == 0,
+               ACLNN_ERR_PARAM_INVALID, "Paged INT8 metadata requires TND query/output and NT query descale layouts");
+    CHECK_COND(metadata != nullptr && metadata->GetDataType() == op::DataType::DT_INT32 &&
+                   metadata->GetViewShape().GetDimNum() == 2 && metadata->GetViewShape().GetDim(0) == 2 &&
+                   metadata->GetViewShape().GetDim(1) >= PAGED_METADATA_WORDS && op::IsContiguous(metadata),
+               ACLNN_ERR_PARAM_INVALID,
+               "Paged INT8 metadata requires contiguous INT32 output with shape (2, S) and S >= %u",
+               PAGED_METADATA_WORDS);
+    auto ret = CheckExistency(maxSeqlenQ, maxSeqlenKv, layoutQ, layoutKv, cuSeqlensQOptional, cuSeqlensKvOptional,
+                              sequsedQOptional, sequsedKvOptional, metadata);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
+    for (const auto* lengths : {cuSeqlensQOptional, sequsedQOptional, sequsedKvOptional}) {
+        CHECK_COND(!IsTensorExist(lengths) || lengths->GetDataType() == op::DataType::DT_INT32, ACLNN_ERR_PARAM_INVALID,
+                   "Paged INT8 length tensors require INT32");
+    }
+    return CheckConsistency(batchSize, numHeadsQ, numHeadsKv, cuSeqlensQOptional, cuSeqlensKvOptional, sequsedQOptional,
+                            sequsedKvOptional);
 }
 
 inline bool QuantFlashAttnMetadataCheck::IsTensorExist(const aclTensor* tensor)

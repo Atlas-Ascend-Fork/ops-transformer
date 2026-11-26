@@ -409,10 +409,6 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             layout_out: Optional[str] = "BSND",
             is_grad_enabled: Optional[bool] = False,
         ):
-            _check_int8(
-                quant_mode != _INT8_QUANT_MODE,
-                "quant_flash_attn_metadata does not support A2/A3 INT8 Prefill",
-            )
             b_size = _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q)
             max_schedule_size = _calculate_max_schedule_size(b_size, num_heads_q)
             return torch.empty((2, max_schedule_size), dtype=torch.int32, device="meta")
@@ -453,12 +449,6 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             torch._check(
                 int(quant_mode) in (0, 1, 3, 5, 6, 7, 10, _INT8_QUANT_MODE),
                 lambda: "Unsupported quant_mode",
-            )
-            torch._check(
-                int(quant_mode) != _INT8_QUANT_MODE
-                or layout_kv not in ("PA_BNBD", "PA_BBND", "PA_NZ")
-                or metadata is None,
-                lambda: "A2/A3 paged INT8 QFA does not support metadata",
             )
             if int(quant_mode) == _INT8_QUANT_MODE and layout_kv not in (
                 "PA_BNBD",
@@ -607,19 +597,16 @@ def quant_flash_attn_metadata(
     Dispatcher implementation: NPU.
     'PrivateUse1' is dispatch key for custom NPU backends.
     """
-    _check_int8(
-        quant_mode != _INT8_QUANT_MODE,
-        "quant_flash_attn_metadata does not support A2/A3 INT8 Prefill",
-    )
     torch._check(
-        quant_mode in (0, 1, 3, 5, 6, 7, 10),
+        quant_mode in (0, 1, 3, 5, 6, 7, 10, _INT8_QUANT_MODE),
         lambda: f"The quant_mode of quant_flash_attn_metadata only supports 0 (A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32), "
         f"1 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32), "
         f"3 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP16), "
         f"5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) "
         f"6 (A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) "
         f"7 (A4C4_QKV_HIF4_P_HIF4_LEVEL1_SOFTMAX_FP16) "
-        f"or 10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16), but got {quant_mode}",
+        f"10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16), "
+        f"or {_INT8_QUANT_MODE} (INT8 paged decode), but got {quant_mode}",
     )
     if layout_q == "TND":
         torch._check(
@@ -644,14 +631,14 @@ def quant_flash_attn_metadata(
     head_dim_v = head_dim if head_dim_v is None else head_dim_v
 
     _check_layout_constraint(quant_mode, layout_q, layout_kv, layout_out)
-    torch._check(
-        quant_mode != _INT8_QUANT_MODE
-        or layout_kv not in ("PA_BNBD", "PA_BBND", "PA_NZ"),
-        lambda: "A2/A3 paged INT8 QFA does not support metadata",
+    paged_int8 = quant_mode == _INT8_QUANT_MODE and layout_kv in (
+        "PA_BNBD",
+        "PA_BBND",
+        "PA_NZ",
     )
-
+    device = cu_seqlens_q.device if paged_int8 and cu_seqlens_q is not None else "npu"
     max_schedule_size = _calculate_max_schedule_size(batch_size, num_heads_q)
-    output = torch.empty((2, max_schedule_size), dtype=torch.int32, device="npu")
+    output = torch.empty((2, max_schedule_size), dtype=torch.int32, device=device)
 
     op_module = quant_flash_attn_op_builder.load()
     return op_module.quant_flash_attn_metadata(
@@ -1008,12 +995,6 @@ def quant_flash_attn(
 
     win_left = -1 if win_left is None else win_left
     win_right = -1 if win_right is None else win_right
-    torch._check(
-        quant_mode != _INT8_QUANT_MODE
-        or layout_kv not in ("PA_BNBD", "PA_BBND", "PA_NZ")
-        or metadata is None,
-        lambda: "A2/A3 paged INT8 QFA does not support metadata",
-    )
     if quant_mode == _INT8_QUANT_MODE and layout_kv not in (
         "PA_BNBD",
         "PA_BBND",

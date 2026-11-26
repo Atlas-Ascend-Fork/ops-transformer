@@ -114,6 +114,20 @@ constexpr uint16_t QFA_VEC_PREFILL_FEATURES = QFA_VEC_D64_TASK_MAP_FEATURES | QF
 namespace optiling {
 constexpr uint32_t QFA_PLAN_MAX_CORES = 48U;
 constexpr uint32_t QFA_PLAN_MAX_BATCH = 256U;
+struct QfaLaunchConfig {
+    uint32_t m;
+    uint32_t kvUnit;
+    uint32_t headGroupSize;
+    uint32_t headMajorOrder;
+    uint32_t fdRows;
+    uint32_t fdColumns;
+    uint32_t hpRows;
+    uint32_t hpVec2Rows;
+    uint32_t hpScratchBytes;
+    uint32_t returnSoftmaxLse;
+    uint32_t cores;
+};
+
 struct QfaHostPlanData {
     uint32_t kvUnit;
     uint32_t hpRows;
