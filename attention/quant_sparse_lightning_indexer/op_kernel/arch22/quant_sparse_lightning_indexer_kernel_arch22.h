@@ -26,9 +26,9 @@
 #include "quant_sparse_lightning_indexer_service_cube_arch22.h"
 #include "../quant_sparse_lightning_indexer_metadata.h"
 
-namespace QLIV2Kernel {
-using namespace QLIV2Common;
-using namespace QLIV2ServiceVec;
+namespace QSLIKernel {
+using namespace QSLICommon;
+using namespace QSLIServiceVec;
 using namespace matmul;
 using namespace optiling::detail;
 using namespace optiling;
@@ -55,34 +55,39 @@ struct TempLoopInfo {
     uint32_t mBasicSizeTail = 0U;         // gS1方向循环的尾基本块大小
     uint32_t s2BasicSizeTail = 0U;        // S2方向循环的尾基本块大小
     uint32_t validS2Len = 0U;
+    // 候选驱动（512 token 候选 tile）：本 batch 首行全局行号、任务内最大 L、整行 tile 上界
+    uint32_t actS1RowBase = 0U;
+    uint32_t maxCandLen = 0U;
+    uint32_t maxCandTiles = 0U;
+    bool candDriven = false;
 };
 
-template <typename QLIV2T>
-class QLIV2Preload {
+template <typename QSLIT>
+class QSLIPreload {
 public:
-    __aicore__ inline QLIV2Preload(){};
+    __aicore__ inline QSLIPreload(){};
     __aicore__ inline void Init(__gm__ uint8_t* query, __gm__ uint8_t* key, __gm__ uint8_t* weights,
                                 __gm__ uint8_t* queryScale, __gm__ uint8_t* keyScale, __gm__ uint8_t* cuSeqlensQ,
                                 __gm__ uint8_t* cuSeqlensK, __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedK,
                                 __gm__ uint8_t* cmpResidualK, __gm__ uint8_t* blockTable,
                                 __gm__ uint8_t* outputIdxOffset, __gm__ uint8_t* metadata,
-                                __gm__ uint8_t* candidateBlockIndices, __gm__ uint8_t* sparseIndices,
-                                __gm__ uint8_t* sparseValues, __gm__ uint8_t* workspace,
-                                const QLIV2TilingDataConsumer* __restrict tiling, TPipe* tPipe);
+                                __gm__ uint8_t* candidateBlockIndices, __gm__ uint8_t* candidateBlockLength,
+                                __gm__ uint8_t* sparseIndices, __gm__ uint8_t* sparseValues, __gm__ uint8_t* workspace,
+                                const QSLITilingDataConsumer* __restrict tiling, TPipe* tPipe);
     __aicore__ inline void Process();
 
     // =================================类型定义区=================================
-    using Q_T = typename QLIV2T::queryType;
-    using K_T = typename QLIV2T::keyType;
-    using OUT_T = typename QLIV2T::outputType;
-    static constexpr bool PAGE_ATTENTION = QLIV2T::pageAttention;
-    static constexpr LI_LAYOUT Q_LAYOUT_T = QLIV2T::layout;
-    static constexpr LI_LAYOUT K_LAYOUT_T = QLIV2T::keyLayout;
+    using Q_T = typename QSLIT::queryType;
+    using K_T = typename QSLIT::keyType;
+    using OUT_T = typename QSLIT::outputType;
+    static constexpr bool PAGE_ATTENTION = QSLIT::pageAttention;
+    static constexpr LI_LAYOUT Q_LAYOUT_T = QSLIT::layout;
+    static constexpr LI_LAYOUT K_LAYOUT_T = QSLIT::keyLayout;
 
     using MM1_OUT_T = float;
 
-    QLIV2Matmul<QLIV2T> matmulService;
-    QLIV2Vector<QLIV2T> vectorService;
+    QSLIMatmul<QSLIT> matmulService;
+    QSLIVector<QSLIT> vectorService;
 
     // =================================常量区=================================
     static constexpr uint32_t SYNC_C1_V1_FLAG = 4;
@@ -123,6 +128,7 @@ protected:
     GlobalTensor<uint32_t> metadataGm;
     GlobalTensor<int32_t> indiceOutGm;
     GlobalTensor<int32_t> candidateBlockIndicesInGm;
+    GlobalTensor<int32_t> candidateBlockLengthGm;
     GlobalTensor<int32_t> blockTableGm;
     GlobalTensor<int32_t> outputIdxOffsetGm; // A15: 每行输出索引偏移
 
@@ -135,12 +141,13 @@ protected:
     uint32_t tmpBlockIdx = 0U;
     uint32_t aiCoreIdx = 0U;
 
-    QLIV2Common::ConstInfo constInfo{};
-    QLIV2Common::LdSplitCoreInfo ldInfo{};
+    QSLICommon::ConstInfo constInfo{};
+    QSLICommon::LdSplitCoreInfo ldInfo{};
     TempLoopInfo tempLoopInfo{};
+    uint32_t candTaskSeq_ = 0U; // 候选任务序号（AIC/AIV 同步递增）：W 槽、分数/aux 区 parity 基准
 
     // ================================Init functions==================================
-    __aicore__ inline void InitTilingData(const QLIV2TilingDataConsumer* __restrict tilingData);
+    __aicore__ inline void InitTilingData(const QSLITilingDataConsumer* __restrict tilingData);
     __aicore__ inline void InitBuffers();
     __aicore__ inline void InitActualSeqLen(__gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* cuSeqlensK,
                                             __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedK,
@@ -153,7 +160,9 @@ protected:
     // ================================Process functions================================
     __aicore__ inline void ProcessMain();
     __aicore__ inline void ProcessBaseBlock(uint32_t loop, uint64_t s2LoopIdx,
-                                            QLIV2Common::RunInfo runInfo[LI_QUANT_PRELOAD_TASK_CACHE_SIZE]);
+                                            QSLICommon::RunInfo runInfo[LI_QUANT_PRELOAD_TASK_CACHE_SIZE]);
+    // 候选驱动任务级派发：AIV 先算 W 再跑 gather/消费流水，AIC 等 W 就绪后从 staging 算 QK
+    __aicore__ inline void ProcessCandTask(uint32_t bN2LoopIdx, uint32_t gS1LoopIdx);
     __aicore__ inline void ProcessInvalid();
     __aicore__ inline void ProcessDecode();
     // ================================Params Calc=====================================
@@ -168,12 +177,12 @@ protected:
     __aicore__ inline void GetS1S2ActualSeqLen(uint32_t bIdx, uint32_t& actS1Size, uint32_t& actS2Size,
                                                uint32_t& actS2SizeOrig);
     __aicore__ inline void CalcS2LoopParams(uint32_t bN2LoopIdx, uint32_t gS1LoopIdx);
-    __aicore__ inline void CalcRunInfo(uint32_t loop, uint32_t s2LoopIdx, QLIV2Common::RunInfo& runInfo);
+    __aicore__ inline void CalcRunInfo(uint32_t loop, uint32_t s2LoopIdx, QSLICommon::RunInfo& runInfo);
     __aicore__ inline void DealActSeqLenIsZero(uint32_t bIdx, uint32_t n2Idx, uint32_t s1Start);
 };
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::InitTilingData(const QLIV2TilingDataConsumer* __restrict tilingData)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::InitTilingData(const QSLITilingDataConsumer* __restrict tilingData)
 {
     constInfo.batchSize = tilingData->bSize;
     constInfo.qHeadNum = constInfo.gSize = tilingData->gSize;
@@ -205,10 +214,12 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::InitTilingData(const QLIV2TilingDat
     constInfo.candidateMode = tilingData->candidateMode;
     constInfo.candidateTopkBlocks = tilingData->candidateTopkBlocks;
     constInfo.candidateBlockSize = tilingData->candidateBlockSize;
+    // 非空 candidate_block_length：按 512 token 候选 tile 执行（metadata 的 s2 区间同口径）
+    constInfo.candidateDriven = (tilingData->candidateDriven != 0U);
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::InitBuffers()
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::InitBuffers()
 {
     if ASCEND_IS_AIV {
         vectorService.InitBuffers(pipe);
@@ -217,10 +228,10 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::InitBuffers()
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::InitActualSeqLen(__gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* cuSeqlensK,
-                                                              __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedK,
-                                                              __gm__ uint8_t* cmpResidualK)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::InitActualSeqLen(__gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* cuSeqlensK,
+                                                            __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedK,
+                                                            __gm__ uint8_t* cmpResidualK)
 {
     // Q side: cu_seqlens (TND) or seqused (non-TND)
     if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
@@ -263,10 +274,10 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::InitActualSeqLen(__gm__ uint8_t* cu
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetActualSeqLen(uint32_t bIdx, uint32_t actualLenDims, bool isAccumSeq,
-                                                                 GlobalTensor<uint32_t>& actualSeqLengthsGm,
-                                                                 uint32_t defaultSeqLen)
+template <typename QSLIT>
+__aicore__ inline uint32_t QSLIPreload<QSLIT>::GetActualSeqLen(uint32_t bIdx, uint32_t actualLenDims, bool isAccumSeq,
+                                                               GlobalTensor<uint32_t>& actualSeqLengthsGm,
+                                                               uint32_t defaultSeqLen)
 {
     if (actualLenDims == 0) {
         return defaultSeqLen;
@@ -279,12 +290,12 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetActualSeqLen(uint32_t bIdx, 
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetActualSeqLenKey(uint32_t bIdx, uint32_t actualLenDims,
-                                                                    uint32_t cmpResiduaKLenDims, bool isAccumSeq,
-                                                                    GlobalTensor<uint32_t>& actualSeqLengthsGm,
-                                                                    GlobalTensor<uint32_t>& cmpResidualKGm,
-                                                                    uint32_t defaultSeqLen, uint32_t cmpRatio)
+template <typename QSLIT>
+__aicore__ inline uint32_t QSLIPreload<QSLIT>::GetActualSeqLenKey(uint32_t bIdx, uint32_t actualLenDims,
+                                                                  uint32_t cmpResiduaKLenDims, bool isAccumSeq,
+                                                                  GlobalTensor<uint32_t>& actualSeqLengthsGm,
+                                                                  GlobalTensor<uint32_t>& cmpResidualKGm,
+                                                                  uint32_t defaultSeqLen, uint32_t cmpRatio)
 {
     uint32_t cmpResidualK; // 当前bidx对应的cmpResidualK
     if (cmpResiduaKLenDims == 0) {
@@ -302,9 +313,9 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetActualSeqLenKey(uint32_t bId
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::GetS1S2ActualSeqLen(uint32_t bIdx, uint32_t& actS1Size,
-                                                                 uint32_t& actS2Size, uint32_t& actS2SizeOrig)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::GetS1S2ActualSeqLen(uint32_t bIdx, uint32_t& actS1Size, uint32_t& actS2Size,
+                                                               uint32_t& actS2SizeOrig)
 {
     actS1Size = GetActualSeqLen(bIdx, constInfo.actualLenQDims, constInfo.isAccumSeqS1, actualSeqLengthsGmQ,
                                 constInfo.qSeqSize);
@@ -314,9 +325,9 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::GetS1S2ActualSeqLen(uint32_t bIdx, 
     actS2Size = actS2SizeOrig / constInfo.cmpRatio;         // 真实使用的压缩后S2长度
 }
 
-template <typename QLIV2T>
-__aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size,
-                                                                         uint32_t actS2SizeOrig, uint32_t& validS2Len)
+template <typename QSLIT>
+__aicore__ inline uint32_t QSLIPreload<QSLIT>::GetS2BaseBlockNumOnMask(uint32_t s1gIdx, uint32_t actS1Size,
+                                                                       uint32_t actS2SizeOrig, uint32_t& validS2Len)
 {
     if (actS2SizeOrig / constInfo.cmpRatio == 0) {
         validS2Len = 0;
@@ -332,8 +343,8 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetS2BaseBlockNumOnMask(uint32_
     return (validS2Len + constInfo.s2BaseSize - 1) / constInfo.s2BaseSize;
 }
 
-template <typename QLIV2T>
-__aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetTotalBaseBlockNum()
+template <typename QSLIT>
+__aicore__ inline uint32_t QSLIPreload<QSLIT>::GetTotalBaseBlockNum()
 {
     uint32_t totalBlockNum = 0;
     uint32_t actS1Size, actS2Size, actS2SizeOrig;
@@ -357,8 +368,8 @@ __aicore__ inline uint32_t QLIV2Preload<QLIV2T>::GetTotalBaseBlockNum()
 
 // 多核版本，双闭区间。基本原则：计算每个核最少处理的块数,
 // 剩余的部分前面的核每个核多处理一块
-template <typename QLIV2T>
-__aicore__ void inline QLIV2Preload<QLIV2T>::SplitCore()
+template <typename QSLIT>
+__aicore__ void inline QSLIPreload<QSLIT>::SplitCore()
 {
     constInfo.coreEnable = metadataGm.GetValue(GetAttrAbsIndex(aiCoreIdx, QLI_V2_CORE_ENABLE_INDEX, false));
     if (aiCoreIdx != 0) {
@@ -415,8 +426,8 @@ __aicore__ void inline QLIV2Preload<QLIV2T>::SplitCore()
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::DealActSeqLenIsZero(uint32_t bIdx, uint32_t n2Idx, uint32_t s1Start)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::DealActSeqLenIsZero(uint32_t bIdx, uint32_t n2Idx, uint32_t s1Start)
 {
     if ASCEND_IS_AIV {
         if (constInfo.outputLayout == LI_LAYOUT::TND) {
@@ -443,16 +454,14 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::DealActSeqLenIsZero(uint32_t bIdx, 
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::Init(__gm__ uint8_t* query, __gm__ uint8_t* key, __gm__ uint8_t* weights,
-                                                  __gm__ uint8_t* queryScale, __gm__ uint8_t* keyScale,
-                                                  __gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* cuSeqlensK,
-                                                  __gm__ uint8_t* sequsedQ, __gm__ uint8_t* sequsedK,
-                                                  __gm__ uint8_t* cmpResidualK, __gm__ uint8_t* blockTable,
-                                                  __gm__ uint8_t* outputIdxOffset, __gm__ uint8_t* metadata,
-                                                  __gm__ uint8_t* candidateBlockIndices, __gm__ uint8_t* sparseIndices,
-                                                  __gm__ uint8_t* sparseValues, __gm__ uint8_t* workspace,
-                                                  const QLIV2TilingDataConsumer* __restrict tiling, TPipe* tPipe)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::Init(
+    __gm__ uint8_t* query, __gm__ uint8_t* key, __gm__ uint8_t* weights, __gm__ uint8_t* queryScale,
+    __gm__ uint8_t* keyScale, __gm__ uint8_t* cuSeqlensQ, __gm__ uint8_t* cuSeqlensK, __gm__ uint8_t* sequsedQ,
+    __gm__ uint8_t* sequsedK, __gm__ uint8_t* cmpResidualK, __gm__ uint8_t* blockTable, __gm__ uint8_t* outputIdxOffset,
+    __gm__ uint8_t* metadata, __gm__ uint8_t* candidateBlockIndices, __gm__ uint8_t* candidateBlockLength,
+    __gm__ uint8_t* sparseIndices, __gm__ uint8_t* sparseValues, __gm__ uint8_t* workspace,
+    const QSLITilingDataConsumer* __restrict tiling, TPipe* tPipe)
 {
     if ASCEND_IS_AIV {
         tmpBlockIdx = GetBlockIdx(); // vec:0-47
@@ -464,6 +473,15 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(__gm__ uint8_t* query, __gm__ 
 
     InitTilingData(tiling);
     InitActualSeqLen(cuSeqlensQ, cuSeqlensK, sequsedQ, sequsedK, cmpResidualK);
+
+    // 候选输入需在 AIC/AIV 两侧都可见：AIC 用候选块索引做 K 寻址，
+    // 两侧的 CalcS2LoopParams 都要读 candidate_block_length 现算任务 tile 上界。
+    if (candidateBlockIndices != nullptr) {
+        candidateBlockIndicesInGm.SetGlobalBuffer((__gm__ int32_t*)candidateBlockIndices);
+    }
+    if (candidateBlockLength != nullptr) {
+        candidateBlockLengthGm.SetGlobalBuffer((__gm__ int32_t*)candidateBlockLength);
+    }
 
     if (metadata != nullptr) {
         metadataGm.SetGlobalBuffer((__gm__ uint32_t*)metadata);
@@ -496,23 +514,50 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(__gm__ uint8_t* query, __gm__ 
 
     GlobalTensor<half> qScaleGm;
     GlobalTensor<half> kScaleGm;
+    // 候选驱动三块工作区（仅非空 candidate_block_length 时占用，与 host tiling 同口径）：
+    // staging（AIV 写 K、AIC 读）、分数区（AIC 写、AIV 读）、kscale 辅助区（AIV 写、AIV 读）
+    GlobalTensor<int8_t> candStagingKeyGm;
+    GlobalTensor<float> candScoreGm;
+    GlobalTensor<half> candAuxScaleGm;
+    if (constInfo.candidateDriven) {
+        uint64_t candStagingKeyBytes =
+            static_cast<uint64_t>(CAND_RING_SLOTS) * CAND_TILE_TOKENS * static_cast<uint64_t>(constInfo.headDim);
+        candStagingKeyGm.SetGlobalBuffer((__gm__ int8_t*)(workspace + offset + aiCoreIdx * candStagingKeyBytes));
+        offset += GetBlockNum() * candStagingKeyBytes;
+        // 分数区按任务序号奇偶双缓冲：跨任务延迟消费时，下一任务的写不覆盖尚未读的分数
+        uint64_t candScoreBytes =
+            WS_DOUBLE * static_cast<uint64_t>(CAND_SCORE_TILES_PER_TASK) * CAND_TILE_TOKENS * sizeof(float);
+        candScoreGm.SetGlobalBuffer((__gm__ float*)(workspace + offset + aiCoreIdx * candScoreBytes));
+        offset += GetBlockNum() * candScoreBytes;
+        // aux 区独立 4 周期（见 common 头 CAND_AUX_PERIOD 说明）
+        uint64_t candAuxBytes = static_cast<uint64_t>(CAND_AUX_PERIOD) * CAND_SCORE_TILES_PER_TASK *
+                                CAND_AUX_SCALE_HALVES_PER_TILE * sizeof(half);
+        candAuxScaleGm.SetGlobalBuffer((__gm__ half*)(workspace + offset + aiCoreIdx * candAuxBytes));
+        offset += GetBlockNum() * candAuxBytes;
+    }
     if ASCEND_IS_AIV {
         vectorService.InitParams(constInfo, ldInfo, tiling);
         indiceOutGm.SetGlobalBuffer((__gm__ int32_t*)sparseIndices);
         weightsGm.SetGlobalBuffer((__gm__ half*)weights);
         qScaleGm.SetGlobalBuffer((__gm__ half*)queryScale);
         kScaleGm.SetGlobalBuffer((__gm__ half*)keyScale);
+        keyGm.SetGlobalBuffer((__gm__ K_T*)key); // 候选 gather 需要 K 源（与 cube 同一 GM 布局）
         blockTableGm.SetGlobalBuffer((__gm__ int32_t*)blockTable);
         // consumer 算子: candidate_block_indices 为 REQUIRED 输入
         candidateBlockIndicesInGm.SetGlobalBuffer((__gm__ int32_t*)candidateBlockIndices);
+        if (candidateBlockLength != nullptr) {
+            candidateBlockLengthGm.SetGlobalBuffer((__gm__ int32_t*)candidateBlockLength);
+        }
         if (outputIdxOffset != nullptr) { // A15: 使能 output_idx_offset (参照 arch35)
             outputIdxOffsetGm.SetGlobalBuffer((__gm__ int32_t*)outputIdxOffset);
         }
         // A15: 有效标志须与 tensor 一并传给 vector (InitParams 已先值拷贝 constInfo, 此处再改标志不生效)
         bool outputIdxOffsetValid = (outputIdxOffset != nullptr);
         vectorService.InitVecInputTensor(weightsGm, qScaleGm, kScaleGm, indiceOutGm, blockTableGm);
-        vectorService.InitVecCandidateTensor(candidateBlockIndicesInGm, outputIdxOffsetGm, outputIdxOffsetValid);
+        vectorService.InitVecCandidateTensor(candidateBlockIndicesInGm, candidateBlockLengthGm, outputIdxOffsetGm,
+                                             outputIdxOffsetValid);
         vectorService.InitVecWorkspaceTensor(weightWorkspaceGm, mm1ResGm, vec1ResGm);
+        vectorService.InitCandGatherTensor(keyGm, candStagingKeyGm, candScoreGm, candAuxScaleGm);
     } else {
         matmulService.InitParams(constInfo);
         queryGm.SetGlobalBuffer((__gm__ Q_T*)query);
@@ -521,20 +566,22 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Init(__gm__ uint8_t* query, __gm__ 
         }
         keyGm.SetGlobalBuffer((__gm__ K_T*)key);
         matmulService.InitMm1GlobalTensor(blockTableGm, keyGm, queryGm, mm1ResGm, weightWorkspaceGm);
+        // 候选驱动: cube 从 staging 连续读 K、分数写候选分数区
+        matmulService.InitCandMm1Tensor(candStagingKeyGm, candScoreGm);
     }
     InitBuffers();
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::GetBN2Idx(uint32_t bN2Idx)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::GetBN2Idx(uint32_t bN2Idx)
 {
     tempLoopInfo.bN2Idx = bN2Idx;
     tempLoopInfo.bIdx = bN2Idx / constInfo.kHeadNum;
     tempLoopInfo.n2Idx = bN2Idx % constInfo.kHeadNum;
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::CalcS2LoopParams(uint32_t bN2LoopIdx, uint32_t gS1LoopIdx)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::CalcS2LoopParams(uint32_t bN2LoopIdx, uint32_t gS1LoopIdx)
 {
     tempLoopInfo.gS1Idx = gS1LoopIdx;
     tempLoopInfo.actMBaseSize = constInfo.mBaseSize;
@@ -562,13 +609,50 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcS2LoopParams(uint32_t bN2LoopId
     tempLoopInfo.s2BasicSizeTail = tempLoopInfo.validS2Len % constInfo.s2BaseSize;
     tempLoopInfo.s2BasicSizeTail =
         (tempLoopInfo.s2BasicSizeTail == 0) ? constInfo.s2BaseSize : tempLoopInfo.s2BasicSizeTail;
+
+    // 候选驱动：s2 轴语义改为 512 token 候选 tile 索引（与 QSLI metadata 的
+    // CandidateTileTokens=512 同口径），循环上界取 metadata 的 s2End（候选 tile 数）。
+    // 全量扫的 s2BaseSize=2048 只服务非候选路径，此处不混用。
+    if (constInfo.candidateDriven) {
+        const uint32_t taskTokens = tempLoopInfo.actMBaseSize / static_cast<uint32_t>(constInfo.gSize);
+        const uint32_t rowBase = tempLoopInfo.actS1RowBase + gS1LoopIdx * constInfo.s1BaseSize;
+        uint32_t maxL = 0U;
+        for (uint32_t t = 0U; t < taskTokens; t++) {
+            const int32_t len = candidateBlockLengthGm.GetValue(rowBase + t);
+            const uint32_t l = (len > 0) ? static_cast<uint32_t>(len) : 0U;
+            maxL = (l > maxL) ? l : maxL;
+        }
+        if (maxL > constInfo.candidateTopkBlocks) {
+            maxL = constInfo.candidateTopkBlocks;
+        }
+        tempLoopInfo.maxCandLen = maxL;
+        tempLoopInfo.maxCandTiles = (maxL * constInfo.candidateBlockSize + CAND_TILE_TOKENS - 1U) / CAND_TILE_TOKENS;
+        tempLoopInfo.candDriven = true;
+        // L 全 0 的任务 maxCandTiles 保持 0：任务级派发按"空任务"处理（整行输出 -1 或空 partial），
+        // 不产生 ring 流量、也不做 W/分数握手。
+        tempLoopInfo.s2LoopEnd = (isEnd && constInfo.s2End != 0) ? constInfo.s2End : tempLoopInfo.maxCandTiles;
+        if (tempLoopInfo.s2LoopEnd > tempLoopInfo.maxCandTiles) {
+            tempLoopInfo.s2LoopEnd = tempLoopInfo.maxCandTiles;
+        }
+        tempLoopInfo.isNeedLD = (constInfo.s2Start > 0 || tempLoopInfo.s2LoopEnd < tempLoopInfo.maxCandTiles);
+        // 分片任务若本核分到的区间为空（该行候选 tile 少于 batch 上界），保留空区间
+        // （tileBegin >= tileEnd）：vector 侧按 FD 约定直接溢写空 partial，AIC 不参与，
+        // 不需要再伪造一个空 tile。
+        tempLoopInfo.s2BasicSizeTail = CAND_TILE_TOKENS;
+    }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::CalcGS1LoopParams(uint32_t bN2LoopIdx)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::CalcGS1LoopParams(uint32_t bN2LoopIdx)
 {
     GetBN2Idx(bN2LoopIdx);
     GetS1S2ActualSeqLen(tempLoopInfo.bIdx, tempLoopInfo.actS1Size, tempLoopInfo.actS2Size, tempLoopInfo.actS2SizeOrig);
+    // 候选长度/候选索引的行基址：TND 用 cu_seqlens_q 前缀，BSND 用 bIdx × qSeqSize
+    if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
+        tempLoopInfo.actS1RowBase = (tempLoopInfo.bIdx <= 0) ? 0U : actualSeqLengthsGmQ.GetValue(tempLoopInfo.bIdx);
+    } else {
+        tempLoopInfo.actS1RowBase = tempLoopInfo.bIdx * constInfo.qSeqSize;
+    }
     if ((tempLoopInfo.actS2Size == 0) || (tempLoopInfo.actS1Size == 0)) {
         tempLoopInfo.curActSeqLenIsZero = true;
         return;
@@ -588,12 +672,12 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcGS1LoopParams(uint32_t bN2LoopI
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::CalcRunInfo(uint32_t loop, uint32_t s2LoopIdx,
-                                                         QLIV2Common::RunInfo& runInfo)
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::CalcRunInfo(uint32_t loop, uint32_t s2LoopIdx, QSLICommon::RunInfo& runInfo)
 {
     runInfo.loop = loop;
     runInfo.bIdx = tempLoopInfo.bIdx;
+    runInfo.n2Idx = tempLoopInfo.n2Idx;
     runInfo.gS1Idx = tempLoopInfo.gS1Idx;
     runInfo.s2Idx = s2LoopIdx;
     runInfo.bN2Idx = tempLoopInfo.bN2Idx;
@@ -618,8 +702,8 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcRunInfo(uint32_t loop, uint32_t
     if (runInfo.s2Idx == s2SplitNum - 1) {
         runInfo.actualSingleProcessSInnerSize = tempLoopInfo.s2BasicSizeTail;
     }
-    runInfo.actualSingleProcessSInnerSizeAlign = QLIV2Common::Align((uint32_t)runInfo.actualSingleProcessSInnerSize,
-                                                                    QLIV2Common::ConstInfo::BUFFER_SIZE_BYTE_32B);
+    runInfo.actualSingleProcessSInnerSizeAlign =
+        QSLICommon::Align((uint32_t)runInfo.actualSingleProcessSInnerSize, QSLICommon::ConstInfo::BUFFER_SIZE_BYTE_32B);
 
     runInfo.isFirstS2InnerLoop = s2LoopIdx == constInfo.s2Start;
     runInfo.isLastS2InnerLoop = (s2LoopIdx + 1 == tempLoopInfo.s2LoopEnd);
@@ -663,8 +747,8 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::CalcRunInfo(uint32_t loop, uint32_t
     runInfo.outputIdxOffsetCoreOffset = outputIdxOffsetCoreOffset;
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::Process()
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::Process()
 {
     // 没有计算任务，直接清理输出
     if (coreZeroEnable == 0) {
@@ -676,15 +760,15 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::Process()
     ProcessDecode();
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::ProcessInvalid()
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::ProcessInvalid()
 {
     if ASCEND_IS_AIV {
         uint32_t aivCoreNum = GetBlockNum() * 2; // 2 means c:v = 1:2
         uint64_t totalOutputSize =
             constInfo.batchSize * constInfo.qSeqSize * constInfo.kHeadNum * constInfo.sparseCount;
         uint64_t singleCoreSize =
-            QLIV2Common::Align((totalOutputSize + aivCoreNum - 1) / aivCoreNum, GM_ALIGN_BYTES / sizeof(OUT_T));
+            QSLICommon::Align((totalOutputSize + aivCoreNum - 1) / aivCoreNum, GM_ALIGN_BYTES / sizeof(OUT_T));
         uint64_t baseSize = tmpBlockIdx * singleCoreSize;
         if (baseSize < totalOutputSize) {
             uint64_t dealSize =
@@ -695,8 +779,8 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessInvalid()
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::ProcessMain()
 {
     // 无任务核直接返回
     if (constInfo.coreEnable == 0) {
@@ -705,15 +789,25 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
 
     if ASCEND_IS_AIV {
         vectorService.AllocEventID();
-        CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE2>(constInfo.syncV1C1);
-        CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE2>(constInfo.syncV1C1);
+        CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE2>(constInfo.syncV1C1);
+        CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE2>(constInfo.syncV1C1);
     } else {
         matmulService.AllocEventID();
-        CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V0);
-        CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V0);
+        CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V0);
+        CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V0);
+        // 候选 ring 初始令牌：FREE 预置 RING_SLOTS 个（单 id 计数信号量，AIV 每 gather 一个
+        // tile 消耗 1 个，AIC 每算完 1 个 tile 回补 1 个）；WFREE 预置 2 个（W 双槽）。
+        if (constInfo.candidateDriven) {
+            for (uint32_t s = 0U; s < CAND_RING_SLOTS; s++) {
+                CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(CAND_FREE_FLAG);
+            }
+            for (uint32_t s = 0U; s < 2U; s++) {
+                CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(CAND_WFREE_FLAG);
+            }
+        }
     }
 
-    QLIV2Common::RunInfo runInfo[LI_QUANT_PRELOAD_TASK_CACHE_SIZE];
+    QSLICommon::RunInfo runInfo[LI_QUANT_PRELOAD_TASK_CACHE_SIZE];
 
     // 适配左闭右开
     if (constInfo.bN2Start == constInfo.bN2End) {
@@ -740,7 +834,7 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
                 if (bN2LoopIdx + 1 == constInfo.bN2End && gloop > 0) {
                     CrossCoreWaitFlag(constInfo.syncC1V1);
                     vectorService.ProcessVec1(runInfo[1 - gloop % LI_QUANT_PRELOAD_TASK_CACHE_SIZE]);
-                    CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(
+                    CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(
                         constInfo.syncV1C1); // 反向同步 1
                 }
             }
@@ -748,6 +842,13 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
         }
         for (uint32_t gS1LoopIdx = constInfo.gS1Start; gS1LoopIdx < tempLoopInfo.gS1LoopEnd; gS1LoopIdx++) {
             CalcS2LoopParams(bN2LoopIdx, gS1LoopIdx);
+            // 候选驱动：任务级派发（AIV 的 gather 与 AIC 的 QK 用 ring 解耦，能跨越 S2 子循环
+            // 重叠），不再走下面按 2048 token 全量扫块的双缓冲 ProcessBaseBlock 循环。
+            if (tempLoopInfo.candDriven) {
+                ProcessCandTask(bN2LoopIdx, gS1LoopIdx);
+                constInfo.s2Start = 0;
+                continue;
+            }
             bool isEnd = (bN2LoopIdx + 1 == constInfo.bN2End) && (gS1LoopIdx + 1 == tempLoopInfo.gS1LoopEnd);
             uint32_t extraLoop = isEnd ? LI_QUANT_PRELOAD_TASK_CACHE_SIZE - 1 : 0; // 只preload一轮
 
@@ -765,6 +866,12 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
     }
 
     if ASCEND_IS_AIV {
+        // 核尾排空：候选任务内最后几个 token 的分数消费延迟到这里，先等 AIC 主循环结束
+        // 令牌（其分数写已推进/落地），再读分数写输出。
+        if (constInfo.candidateDriven) {
+            CrossCoreWaitFlag(CAND_AIC_DONE_FLAG);
+            vectorService.DrainPendingCandScore();
+        }
         vectorService.FreeEventID();
         CrossCoreWaitFlag(constInfo.syncC1V0);
         CrossCoreWaitFlag(constInfo.syncC1V0);
@@ -772,16 +879,22 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessMain()
         matmulService.FreeEventID();
         CrossCoreWaitFlag(constInfo.syncV1C1);
         CrossCoreWaitFlag(constInfo.syncV1C1);
+        if (constInfo.candidateDriven) {
+            // AIC_DONE 之前必须先等 fixpipe 队列清空：核尾排空读最后一个 tile 的分数，
+            // 若分数写未落地，AIV 会读到旧区域数据。
+            AscendC::PipeBarrier<PIPE_FIX>();
+            CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(CAND_AIC_DONE_FLAG);
+        }
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::ProcessBaseBlock(
-    uint32_t loop, uint64_t s2LoopIdx, QLIV2Common::RunInfo runInfo[LI_QUANT_PRELOAD_TASK_CACHE_SIZE])
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::ProcessBaseBlock(
+    uint32_t loop, uint64_t s2LoopIdx, QSLICommon::RunInfo runInfo[LI_QUANT_PRELOAD_TASK_CACHE_SIZE])
 {
     int32_t curTaskId = loop % LI_QUANT_PRELOAD_TASK_CACHE_SIZE;
-    QLIV2Common::RunInfo& curRunInfo = runInfo[curTaskId];
-    QLIV2Common::RunInfo& lastRunInfo = runInfo[1 - curTaskId];
+    QSLICommon::RunInfo& curRunInfo = runInfo[curTaskId];
+    QSLICommon::RunInfo& lastRunInfo = runInfo[1 - curTaskId];
 
     CalcRunInfo(loop, s2LoopIdx, curRunInfo);
 
@@ -792,16 +905,16 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessBaseBlock(
             }
             CrossCoreWaitFlag(constInfo.syncV1C1); // 反向同步 1
             matmulService.ComputeMm1(curRunInfo);
-            CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V1);
+            CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V1);
             if (curRunInfo.isLastS2InnerLoop) {
                 // 反向同步 0
-                CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V0);
+                CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(constInfo.syncC1V0);
             }
         } else {
             if (curRunInfo.isFirstS2InnerLoop) {
                 CrossCoreWaitFlag(constInfo.syncC1V0); // 反向同步 0
                 vectorService.ProcessVec0(curRunInfo);
-                CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV0C1);
+                CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV0C1);
             }
         }
     }
@@ -810,14 +923,87 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessBaseBlock(
         if ASCEND_IS_AIV {
             CrossCoreWaitFlag(constInfo.syncC1V1);
             vectorService.ProcessVec1(lastRunInfo);
-            CrossCoreSetFlag<QLIV2Common::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV1C1); // 反向同步 1
+            CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(constInfo.syncV1C1); // 反向同步 1
         }
         lastRunInfo.isValid = false;
     }
 }
 
-template <typename QLIV2T>
-__aicore__ inline void QLIV2Preload<QLIV2T>::ProcessDecode()
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::ProcessCandTask(uint32_t bN2LoopIdx, uint32_t gS1LoopIdx)
+{
+    (void)bN2LoopIdx;
+    const uint32_t taskTokens = tempLoopInfo.actMBaseSize / static_cast<uint32_t>(constInfo.gSize);
+    const uint32_t maxTiles = tempLoopInfo.maxCandTiles;
+    const uint32_t tileBegin = static_cast<uint32_t>(constInfo.s2Start);
+    const uint32_t tileEnd = tempLoopInfo.s2LoopEnd;
+    const bool needSpill = tempLoopInfo.isNeedLD;
+    // 空任务（行内 L 全 0 或本核分到的分片区间为空）：不做 W/ring/分数握手，
+    // 只由 vector 侧输出整行 -1 或溢写空 partial。
+    const bool emptyTask = (maxTiles == 0U) || (tileEnd <= tileBegin);
+
+    QSLICommon::RunInfo candRun{};
+    candRun.loop = candTaskSeq_; // W 槽 parity（AIC/AIV 用同一任务序号）
+    candRun.candidateTaskSeq = candTaskSeq_;
+    candTaskSeq_++;
+    candRun.bIdx = tempLoopInfo.bIdx;
+    candRun.n2Idx = tempLoopInfo.n2Idx;
+    candRun.gS1Idx = tempLoopInfo.gS1Idx;
+    candRun.actS1Size = tempLoopInfo.actS1Size;
+    candRun.actS2Size = tempLoopInfo.actS2Size;
+    candRun.actS2SizeOrig = tempLoopInfo.actS2SizeOrig;
+    candRun.actMBaseSize = tempLoopInfo.actMBaseSize;
+    candRun.actualSingleProcessSInnerSize = CAND_TILE_TOKENS;
+    candRun.actualSingleProcessSInnerSizeAlign = CAND_TILE_TOKENS;
+    candRun.candidateRowBase = tempLoopInfo.actS1RowBase + gS1LoopIdx * constInfo.s1BaseSize;
+    candRun.candidateTileBegin = tileBegin;
+    candRun.candidateTileEnd = tileEnd;
+    candRun.candidateMaxTiles = maxTiles;
+    candRun.candidateNeedSpill = needSpill;
+    candRun.candidateWsBase = ldInfo.saveWorkSpaceIdx;
+    candRun.isFirstS2InnerLoop = true;
+    candRun.isLastS2InnerLoop = true;
+    candRun.isValid = true;
+    candRun.isNeedLD = needSpill;
+
+    // Q/权重/输出偏移：与全量扫同一套前缀口径（TND 用 cu_seqlens_q，BSND 用 bIdx×qSeqSize）
+    uint64_t actualSeqQPrefixSum;
+    if constexpr (Q_LAYOUT_T == LI_LAYOUT::TND) {
+        actualSeqQPrefixSum = (candRun.bIdx <= 0) ? 0 : actualSeqLengthsGmQ.GetValue(candRun.bIdx);
+    } else {
+        actualSeqQPrefixSum = (candRun.bIdx <= 0) ? 0 : candRun.bIdx * constInfo.qSeqSize;
+    }
+    candRun.tensorQueryOffset = actualSeqQPrefixSum * constInfo.qHeadNum * constInfo.headDim +
+                                gS1LoopIdx * constInfo.mBaseSize * constInfo.headDim;
+    candRun.tensorWeightsOffset = actualSeqQPrefixSum * constInfo.qHeadNum + candRun.n2Idx * constInfo.gSize;
+    // 输出偏移只保留 n2 列前缀：candidateRowBase 是全局行号（已含 batch 前缀），
+    // 消费侧按 row×sparseCount 逐行叠加，避免重复计入 batch 前缀。
+    candRun.indiceOutOffset = static_cast<uint64_t>(candRun.n2Idx) * constInfo.sparseCount;
+    candRun.outputIdxOffsetCoreOffset = static_cast<uint64_t>(candRun.n2Idx);
+
+    if ASCEND_IS_AIV {
+        if (!emptyTask) {
+            // 先回收 W 槽（AIC 最多领先 2 个任务，不会覆盖正在读的槽），再算 w×qscale 并广播
+            CrossCoreWaitFlag(CAND_WFREE_FLAG);
+            vectorService.ProcessVec0(candRun);
+            CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_MTE3>(CAND_WREADY_FLAG);
+        }
+        vectorService.RunCandTask(candRun);
+    } else {
+        if (!emptyTask) {
+            CrossCoreWaitFlag(CAND_WREADY_FLAG);
+            matmulService.ComputeMm1Candidate(candRun, taskTokens, maxTiles, tileBegin, tileEnd);
+            CrossCoreSetFlag<QSLICommon::ConstInfo::FIA_SYNC_MODE2, PIPE_FIX>(CAND_WFREE_FLAG);
+        }
+    }
+    // FD 分片任务消耗一个 LD 工作区槽位（槽位序列须与 metadata 的分片分配顺序一致）
+    if (needSpill) {
+        ldInfo.saveWorkSpaceIdx++;
+    }
+}
+
+template <typename QSLIT>
+__aicore__ inline void QSLIPreload<QSLIT>::ProcessDecode()
 {
     if ASCEND_IS_AIV {
         vectorService.InitLDBuffers(pipe);
@@ -829,5 +1015,5 @@ __aicore__ inline void QLIV2Preload<QLIV2T>::ProcessDecode()
     }
 }
 
-} // namespace QLIV2Kernel
+} // namespace QSLIKernel
 #endif // QUANT_SPARSE_LIGHTNING_INDEXER_KERNEL_H

@@ -217,7 +217,7 @@ def judge_value_by_isclose(real_data, data_compe, force_bf16=False):
     rtol = 0.005
     pct_thd = 0.005
     diff_thd = 0.005
-    # force_bf16: QLIV2 的 returnValue 固定为 bf16，但流程中已被 .float() 转成 float32，
+    # force_bf16: QSLI 的 returnValue 固定为 bf16，但流程中已被 .float() 转成 float32，
     # 无法通过 dtype 判断，需强制按 bf16 门限对比。
     is_bfloat16 = force_bf16 or (str(real_data.dtype) in ("bfloat16", "torch.bfloat16"))
     if isinstance(real_data, torch.Tensor):
@@ -899,7 +899,7 @@ def check_result_return_value(
 
     start_time = time()
 
-    # QLIV2 returnValue 为 bf16，强制使用 bf16 门限（误差阈值 1/128）
+    # QSLI returnValue 为 bf16，强制使用 bf16 门限（误差阈值 1/128）
     npu_pass = judge_value_by_isclose(npu_reshape, cpu_reshape, force_bf16=True)
     if np.any(invalid_index_reshape):
         npu_pass = False

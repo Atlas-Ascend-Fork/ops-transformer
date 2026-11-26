@@ -13,8 +13,8 @@
  * \brief
  */
 
-#ifndef QLI_V2_CONSUMER_QUANT_LIGHTNING_INDEXER_V2_TILING_H
-#define QLI_V2_CONSUMER_QUANT_LIGHTNING_INDEXER_V2_TILING_H
+#ifndef QSLI_QUANT_SPARSE_LIGHTNING_INDEXER_TILING_H
+#define QSLI_QUANT_SPARSE_LIGHTNING_INDEXER_TILING_H
 
 #include "err/ops_err.h"
 #include "exe_graph/runtime/tiling_context.h"
@@ -117,7 +117,7 @@ constexpr uint32_t CANDIDATE_BLOCK_SIZE_DEFAULT = 8;
 constexpr uint32_t CANDIDATE_BLOCK_SIZE_MAX = 64;
 
 // -----------算子TilingData定义---------------
-BEGIN_TILING_DATA_DEF(QLIV2TilingDataConsumer)
+BEGIN_TILING_DATA_DEF(QSLITilingDataConsumer)
 TILING_DATA_FIELD_DEF(uint32_t, bSize)
 TILING_DATA_FIELD_DEF(uint32_t, n2Size)
 TILING_DATA_FIELD_DEF(uint32_t, gSize)
@@ -138,14 +138,16 @@ TILING_DATA_FIELD_DEF(uint32_t, quantMode)
 TILING_DATA_FIELD_DEF(uint32_t, candidateMode)
 TILING_DATA_FIELD_DEF(uint32_t, candidateTopkBlocks)
 TILING_DATA_FIELD_DEF(uint32_t, candidateBlockSize)
+// 1 = 传入非空 candidate_block_length，按 512 token 候选 tile 执行；0 = 原全量扫路径
+TILING_DATA_FIELD_DEF(uint32_t, candidateDriven)
 END_TILING_DATA_DEF
-REGISTER_TILING_DATA_CLASS(QuantSparseLightningIndexer, QLIV2TilingDataConsumer)
+REGISTER_TILING_DATA_CLASS(QuantSparseLightningIndexer, QSLITilingDataConsumer)
 
 // -----------算子CompileInfo定义-------------------
-struct QLIV2CompileInfoConsumer {};
+struct QSLICompileInfoConsumer {};
 
 // -----------算子Tiling入参结构体定义---------------
-struct QLIV2ParaInfo {
+struct QSLIParaInfo {
     TilingRequiredParaInfo query = {nullptr, nullptr};
     TilingRequiredParaInfo key = {nullptr, nullptr};
     TilingRequiredParaInfo weights = {nullptr, nullptr};
@@ -179,11 +181,11 @@ struct QLIV2ParaInfo {
 };
 
 // -----------算子Tiling入参信息类---------------
-class QLIV2TilingInfoConsumer {
+class QSLITilingInfoConsumer {
 public:
     const char* opName = nullptr;
     fe::PlatFormInfos* platformInfo = nullptr;
-    QLIV2ParaInfo opParamInfo;
+    QSLIParaInfo opParamInfo;
     // Base Param
     platform_ascendc::SocVersion socVersion = platform_ascendc::SocVersion::ASCEND910B;
     NpuArch npuArch = NpuArch::DAV_2201;
@@ -213,6 +215,7 @@ public:
     uint32_t candidateMode = CANDIDATE_MODE_OFF;
     uint32_t candidateTopkBlocks = CANDIDATE_TOPK_BLOCKS_FIX;
     uint32_t candidateBlockSize = CANDIDATE_BLOCK_SIZE_DEFAULT;
+    uint32_t candidateDriven = 0U; // 1 = 非空 candidate_block_length，按 512 token 候选 tile 执行
     // DType
     ge::DataType inputQType = ge::DT_FLOAT16;
     ge::DataType inputKType = ge::DT_FLOAT16;
@@ -223,12 +226,12 @@ public:
 };
 
 // -----------算子Tiling入参信息解析及Check类---------------
-class QLIV2InfoParserConsumer {
+class QSLIInfoParserConsumer {
 public:
-    explicit QLIV2InfoParserConsumer(gert::TilingContext* context)
+    explicit QSLIInfoParserConsumer(gert::TilingContext* context)
         : context_(context)
     {}
-    ~QLIV2InfoParserConsumer() = default;
+    ~QSLIInfoParserConsumer() = default;
 
     ge::graphStatus CheckRequiredInOutExistence() const;
     ge::graphStatus CheckRequiredAttrExistence() const;
@@ -262,14 +265,14 @@ public:
     ge::graphStatus GetAttenMaskInfo();
     ge::graphStatus GetActualSeqInfo();
     ge::graphStatus CheckKeyContiguous() const;
-    void GenerateInfo(QLIV2TilingInfoConsumer& QLIV2InfoConsumer);
-    ge::graphStatus ParseAndCheck(QLIV2TilingInfoConsumer& QLIV2InfoConsumer);
+    void GenerateInfo(QSLITilingInfoConsumer& QSLIInfoConsumer);
+    ge::graphStatus ParseAndCheck(QSLITilingInfoConsumer& QSLIInfoConsumer);
 
 public:
     gert::TilingContext* context_ = nullptr;
     const char* opName_;
     fe::PlatFormInfos* platformInfo_;
-    QLIV2ParaInfo opParamInfo_;
+    QSLIParaInfo opParamInfo_;
 
     // BaseParams
     uint32_t bSize_ = 0;
@@ -305,12 +308,12 @@ class QuantSparseLightningIndexerTiling {
 public:
     explicit QuantSparseLightningIndexerTiling(gert::TilingContext* context)
         : context_(context) {};
-    ge::graphStatus DoTiling(QLIV2TilingInfoConsumer* tilingInfo);
+    ge::graphStatus DoTiling(QSLITilingInfoConsumer* tilingInfo);
 
 private:
     gert::TilingContext* context_ = nullptr;
-    QLIV2TilingDataConsumer tilingData_;
+    QSLITilingDataConsumer tilingData_;
 };
 
 } // namespace optiling
-#endif // QLI_V2_CONSUMER_TILING_H
+#endif // QSLI_QUANT_SPARSE_LIGHTNING_INDEXER_TILING_H

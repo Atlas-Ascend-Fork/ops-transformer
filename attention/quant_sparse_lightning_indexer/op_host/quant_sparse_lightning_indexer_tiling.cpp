@@ -62,13 +62,13 @@ static const std::map<ge::DataType, std::string> DATATYPE_TO_STRING_MAP = {
     {ge::DT_FLOAT8_E8M0, "DT_FLOAT8_E8M0"},
     {ge::DT_FLOAT4_E2M1, "DT_FLOAT4_E2M1"}};
 
-std::string QLIV2ConsumerDataTypeToSerialString(ge::DataType type)
+std::string QSLIConsumerDataTypeToSerialString(ge::DataType type)
 {
     const auto it = DATATYPE_TO_STRING_MAP.find(type);
     if (it != DATATYPE_TO_STRING_MAP.end()) {
         return it->second;
     } else {
-        OP_LOGE("QLIV2DataTypeToSerialString ", "datatype %d not support", type);
+        OP_LOGE("QSLIDataTypeToSerialString ", "datatype %d not support", type);
         return "UNDEFINED";
     }
 }
@@ -97,8 +97,8 @@ static std::string ToStringRaw(const gert::Shape& shape)
     return oss.str();
 }
 
-// --------------------------QLIV2InfoParser类成员函数定义-------------------------------------
-ge::graphStatus QLIV2InfoParserConsumer::CheckRequiredInOutExistence() const
+// --------------------------QSLIInfoParser类成员函数定义-------------------------------------
+ge::graphStatus QSLIInfoParserConsumer::CheckRequiredInOutExistence() const
 {
     OP_CHECK_IF(opParamInfo_.query.shape == nullptr,
                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "q", "The shape of q is nullptr"),
@@ -145,7 +145,7 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckRequiredInOutExistence() const
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::CheckRequiredAttrExistence() const
+ge::graphStatus QSLIInfoParserConsumer::CheckRequiredAttrExistence() const
 {
     OP_CHECK_IF(opParamInfo_.layOutQuery == nullptr,
                 OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(opName_, "layout_q", "Layout_q is nullptr"),
@@ -170,7 +170,7 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckRequiredAttrExistence() const
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::CheckRequiredParaExistence() const
+ge::graphStatus QSLIInfoParserConsumer::CheckRequiredParaExistence() const
 {
     if (CheckRequiredInOutExistence() != ge::GRAPH_SUCCESS || CheckRequiredAttrExistence() != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
@@ -179,7 +179,7 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckRequiredParaExistence() const
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetOpName()
+ge::graphStatus QSLIInfoParserConsumer::GetOpName()
 {
     if (context_->GetNodeName() == nullptr) {
         OP_LOGE("LightningIndexerV2", "opName got from TilingContext is nullptr");
@@ -189,7 +189,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetOpName()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetNpuInfo()
+ge::graphStatus QSLIInfoParserConsumer::GetNpuInfo()
 {
     platformInfo_ = context_->GetPlatformInfo();
     OP_CHECK_IF(platformInfo_ == nullptr, OP_LOGE(opName_, "GetPlatformInfo is nullptr."), return ge::GRAPH_FAILED);
@@ -214,7 +214,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetNpuInfo()
     return ge::GRAPH_SUCCESS;
 }
 
-void QLIV2InfoParserConsumer::GetOptionalInputParaInfo()
+void QSLIInfoParserConsumer::GetOptionalInputParaInfo()
 {
     opParamInfo_.cuSeqLensQ.tensor = context_->GetOptionalInputTensor(CU_SEQLENS_Q_INDEX);
     opParamInfo_.cuSeqLensQ.desc = context_->GetOptionalInputDesc(CU_SEQLENS_Q_INDEX);
@@ -246,7 +246,7 @@ void QLIV2InfoParserConsumer::GetOptionalInputParaInfo()
     }
 }
 
-void QLIV2InfoParserConsumer::GetInputParaInfo()
+void QSLIInfoParserConsumer::GetInputParaInfo()
 {
     opParamInfo_.query.desc = context_->GetInputDesc(QUERY_INDEX);
     opParamInfo_.query.shape = context_->GetInputShape(QUERY_INDEX);
@@ -261,7 +261,7 @@ void QLIV2InfoParserConsumer::GetInputParaInfo()
     GetOptionalInputParaInfo();
 }
 
-void QLIV2InfoParserConsumer::GetOutputParaInfo()
+void QSLIInfoParserConsumer::GetOutputParaInfo()
 {
     opParamInfo_.attenOut.desc = context_->GetOutputDesc(SPARSE_INDICES_INDEX);
     opParamInfo_.attenOut.shape = context_->GetOutputShape(SPARSE_INDICES_INDEX);
@@ -269,7 +269,7 @@ void QLIV2InfoParserConsumer::GetOutputParaInfo()
     opParamInfo_.sparseValues.shape = context_->GetOutputShape(SPARSE_VALUES_INDEX);
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetAttrParaInfo()
+ge::graphStatus QSLIInfoParserConsumer::GetAttrParaInfo()
 {
     auto attrs = context_->GetAttrs();
     OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs got from ge is nullptr"),
@@ -329,7 +329,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAttrParaInfo()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::CheckAttrParaInfo()
+ge::graphStatus QSLIInfoParserConsumer::CheckAttrParaInfo()
 {
     std::string layout_key(opParamInfo_.layOutKey);
     std::string layout_query(opParamInfo_.layOutQuery);
@@ -415,14 +415,23 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckAttrParaInfo()
         // candidate_topk_blocks 不再是入参: 候选块个数 = 输入 candidate_block_indices 末维
         // (GetOptionalInputParaInfo 已推导, 缺省为 CANDIDATE_TOPK_BLOCKS_FIX)
         uint32_t candBlocks = opParamInfo_.candidateTopkBlocks;
-        // candidate_block_length: 预留接口, 仅接受空 tensor
-        OP_CHECK_IF((opParamInfo_.candidateBlockLength.tensor != nullptr) &&
-                        (opParamInfo_.candidateBlockLength.tensor->GetShapeSize() != 0),
-                    OP_LOGE_FOR_INVALID_SHAPESIZE_WITH_REASON(
-                        opName_, "candidate_block_length",
-                        std::to_string(opParamInfo_.candidateBlockLength.tensor->GetShapeSize()),
-                        "Candidate_block_length is a reserved interface and only accepts an empty tensor"),
-                    return ge::GRAPH_FAILED);
+        // candidate_block_length：可空（保持旧的按全量 S2 分核/执行路径）或 int32
+        // 每行有效候选块数。元素数必须等于 query 行数（TND: q.dim0；BSND: b×s1），
+        // 否则 kernel 行映射会越界。取值上界由 kernel/metadata 侧校验。
+        if (opParamInfo_.candidateBlockLength.tensor != nullptr) {
+            const int64_t lenNumel = opParamInfo_.candidateBlockLength.tensor->GetShapeSize();
+            if (lenNumel > 0) {
+                OP_CHECK_IF(opParamInfo_.candidateBlockLength.desc == nullptr ||
+                                opParamInfo_.candidateBlockLength.desc->GetDataType() != ge::DT_INT32,
+                            OP_LOGE(opName_, "candidate_block_length only supports int32"), return ge::GRAPH_FAILED);
+                const auto& qShape = opParamInfo_.query.shape->GetStorageShape();
+                const int64_t rows = (layout_query == "TND") ? qShape.GetDim(0) : qShape.GetDim(0) * qShape.GetDim(1);
+                OP_CHECK_IF(lenNumel != rows,
+                            OP_LOGE(opName_, "candidate_block_length element num (%ld) should equal query rows (%ld)",
+                                    static_cast<long>(lenNumel), static_cast<long>(rows)),
+                            return ge::GRAPH_FAILED);
+            }
+        }
         // 当前仅支持 2048 (累加器/抽取/拷出逻辑均按 64 对齐设计, 与第一级输出维度保持一致)
         OP_CHECK_IF(candBlocks != CANDIDATE_TOPK_BLOCKS_FIX,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
@@ -449,7 +458,7 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckAttrParaInfo()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetOpParaInfo()
+ge::graphStatus QSLIInfoParserConsumer::GetOpParaInfo()
 {
     GetInputParaInfo();
     GetOutputParaInfo();
@@ -462,7 +471,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetOpParaInfo()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckInOutDataType()
+ge::graphStatus QSLIInfoParserConsumer::GetAndCheckInOutDataType()
 {
     inputQType_ = opParamInfo_.query.desc->GetDataType();
     inputKType_ = opParamInfo_.key.desc->GetDataType();
@@ -474,16 +483,16 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckInOutDataType()
 
     OP_CHECK_IF(!(inputQType_ == inputKType_),
                 OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "q and k",
-                                                       QLIV2ConsumerDataTypeToSerialString(inputQType_) + " and " +
-                                                           QLIV2ConsumerDataTypeToSerialString(inputKType_),
+                                                       QSLIConsumerDataTypeToSerialString(inputQType_) + " and " +
+                                                           QSLIConsumerDataTypeToSerialString(inputKType_),
                                                        "The dtype of q and k must be same"),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(
         !(inputQueryScaleType_ == inputKeyScaleType_),
         OP_LOGE_FOR_INVALID_DTYPES_WITH_REASON(opName_, "q_descale and k_descale",
-                                               QLIV2ConsumerDataTypeToSerialString(inputQueryScaleType_) + " and " +
-                                                   QLIV2ConsumerDataTypeToSerialString(inputKeyScaleType_),
+                                               QSLIConsumerDataTypeToSerialString(inputQueryScaleType_) + " and " +
+                                                   QSLIConsumerDataTypeToSerialString(inputKeyScaleType_),
                                                "The dtype of q_descale and k_descale must be same"),
         return ge::GRAPH_FAILED);
     if (npuArch_ == NpuArch::DAV_2201) {
@@ -492,13 +501,13 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckInOutDataType()
         ge::DataType expectQKType = isInt4Mode ? ge::DT_INT4 : ge::DT_INT8;
         OP_CHECK_IF(inputQType_ != expectQKType,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-                        opName_, "q and k", QLIV2ConsumerDataTypeToSerialString(inputQType_).c_str(),
+                        opName_, "q and k", QSLIConsumerDataTypeToSerialString(inputQType_).c_str(),
                         "The dtype of q and k must be int8 when quant_mode=2, or int4 when quant_mode=7"),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF(inputQueryScaleType_ != ge::DT_FLOAT16,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "query_dequant_scale and key_dequant_scale",
-                        QLIV2ConsumerDataTypeToSerialString(inputQueryScaleType_).c_str(),
+                        QSLIConsumerDataTypeToSerialString(inputQueryScaleType_).c_str(),
                         "The dtype of query_dequant_scale and key_dequant_scale must be float16"),
                     return ge::GRAPH_FAILED);
     }
@@ -506,26 +515,26 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckInOutDataType()
     if (npuArch_ == NpuArch::DAV_2201) {
         OP_CHECK_IF(weightsType_ != ge::DT_FLOAT16,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "weights",
-                                                          QLIV2ConsumerDataTypeToSerialString(weightsType_).c_str(),
+                                                          QSLIConsumerDataTypeToSerialString(weightsType_).c_str(),
                                                           "The dtype of weights must be float16"),
                     return ge::GRAPH_FAILED);
     }
 
     OP_CHECK_IF(outputType_ != ge::DT_INT32,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "sparse_indices",
-                                                      QLIV2ConsumerDataTypeToSerialString(outputType_).c_str(),
+                                                      QSLIConsumerDataTypeToSerialString(outputType_).c_str(),
                                                       "The dtype of sparse_indices must be int32"),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(valuesOutType_ != ge::DT_BF16,
                 OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(opName_, "sparse_values",
-                                                      QLIV2ConsumerDataTypeToSerialString(valuesOutType_).c_str(),
+                                                      QSLIConsumerDataTypeToSerialString(valuesOutType_).c_str(),
                                                       "The dtype of sparse_values must be bfloat16"),
                 return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetQueryKeyAndOutLayout()
+ge::graphStatus QSLIInfoParserConsumer::GetQueryKeyAndOutLayout()
 {
     // 获取query,key的Layout基准值
     const map<string, DataLayout> layoutQueryMap = {{"BSND", DataLayout::BSND}, {"TND", DataLayout::TND}};
@@ -549,7 +558,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetQueryKeyAndOutLayout()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
+ge::graphStatus QSLIInfoParserConsumer::GetAndCheckOptionalInput()
 {
     // =============== K 侧校验 ===============
     if (kLayout_ == DataLayout::PA_BBND) {
@@ -569,13 +578,13 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
         OP_CHECK_IF(opParamInfo_.blockTable.desc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "block_table",
-                        QLIV2ConsumerDataTypeToSerialString(opParamInfo_.blockTable.desc->GetDataType()).c_str(),
+                        QSLIConsumerDataTypeToSerialString(opParamInfo_.blockTable.desc->GetDataType()).c_str(),
                         "The dtype of block_table only supports int32"),
                     return ge::GRAPH_FAILED);
         OP_CHECK_IF(opParamInfo_.sequsedK.desc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "seqused_k",
-                        QLIV2ConsumerDataTypeToSerialString(opParamInfo_.sequsedK.desc->GetDataType()).c_str(),
+                        QSLIConsumerDataTypeToSerialString(opParamInfo_.sequsedK.desc->GetDataType()).c_str(),
                         "The dtype of seqused_k only supports int32"),
                     return ge::GRAPH_FAILED);
     } else if (kLayout_ == DataLayout::TND) {
@@ -587,7 +596,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
         OP_CHECK_IF(opParamInfo_.cuSeqLensK.desc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "cu_seqlens_k",
-                        QLIV2ConsumerDataTypeToSerialString(opParamInfo_.cuSeqLensK.desc->GetDataType()).c_str(),
+                        QSLIConsumerDataTypeToSerialString(opParamInfo_.cuSeqLensK.desc->GetDataType()).c_str(),
                         "The dtype of cu_seqlens_k only supports int32"),
                     return ge::GRAPH_FAILED);
         // seqused_k 可选 - 仅校验数据类型
@@ -595,7 +604,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
             OP_CHECK_IF(opParamInfo_.sequsedK.desc->GetDataType() != ge::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_k",
-                            QLIV2ConsumerDataTypeToSerialString(opParamInfo_.sequsedK.desc->GetDataType()).c_str(),
+                            QSLIConsumerDataTypeToSerialString(opParamInfo_.sequsedK.desc->GetDataType()).c_str(),
                             "The dtype of seqused_k only supports int32"),
                         return ge::GRAPH_FAILED);
         }
@@ -609,7 +618,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
             OP_CHECK_IF(opParamInfo_.sequsedK.desc->GetDataType() != ge::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_k",
-                            QLIV2ConsumerDataTypeToSerialString(opParamInfo_.sequsedK.desc->GetDataType()).c_str(),
+                            QSLIConsumerDataTypeToSerialString(opParamInfo_.sequsedK.desc->GetDataType()).c_str(),
                             "The dtype of seqused_k only supports int32"),
                         return ge::GRAPH_FAILED);
         }
@@ -662,7 +671,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
         OP_CHECK_IF(opParamInfo_.cmpResidualK.desc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "cmp_residual_k",
-                        QLIV2ConsumerDataTypeToSerialString(opParamInfo_.cmpResidualK.desc->GetDataType()).c_str(),
+                        QSLIConsumerDataTypeToSerialString(opParamInfo_.cmpResidualK.desc->GetDataType()).c_str(),
                         "The dtype of cmp_residual_k supports int32"),
                     return ge::GRAPH_FAILED);
     }
@@ -702,7 +711,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
         OP_CHECK_IF(opParamInfo_.cuSeqLensQ.desc->GetDataType() != ge::DT_INT32,
                     OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                         opName_, "cu_seqlens_q",
-                        QLIV2ConsumerDataTypeToSerialString(opParamInfo_.cuSeqLensK.desc->GetDataType()).c_str(),
+                        QSLIConsumerDataTypeToSerialString(opParamInfo_.cuSeqLensK.desc->GetDataType()).c_str(),
                         "The dtype of cu_seqlens_q only supports int32"),
                     return ge::GRAPH_FAILED);
         // seqused_q 可选 - 仅校验数据类型
@@ -710,7 +719,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
             OP_CHECK_IF(opParamInfo_.sequsedQ.desc->GetDataType() != ge::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_q",
-                            QLIV2ConsumerDataTypeToSerialString(opParamInfo_.sequsedQ.desc->GetDataType()).c_str(),
+                            QSLIConsumerDataTypeToSerialString(opParamInfo_.sequsedQ.desc->GetDataType()).c_str(),
                             "The dtype of seqused_q only supports int32"),
                         return ge::GRAPH_FAILED);
         }
@@ -724,7 +733,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
             OP_CHECK_IF(opParamInfo_.sequsedQ.desc->GetDataType() != ge::DT_INT32,
                         OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
                             opName_, "seqused_q",
-                            QLIV2ConsumerDataTypeToSerialString(opParamInfo_.sequsedQ.desc->GetDataType()).c_str(),
+                            QSLIConsumerDataTypeToSerialString(opParamInfo_.sequsedQ.desc->GetDataType()).c_str(),
                             "The dtype of seqused_q only supports int32"),
                         return ge::GRAPH_FAILED);
         }
@@ -737,7 +746,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckOptionalInput()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::CheckShapeDim()
+ge::graphStatus QSLIInfoParserConsumer::CheckShapeDim()
 {
     OP_CHECK_IF((opParamInfo_.blockTable.tensor != nullptr) &&
                     (opParamInfo_.blockTable.tensor->GetStorageShape().GetDimNum() != DIM_NUM_TWO),
@@ -787,7 +796,7 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckShapeDim()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetN1Size()
+ge::graphStatus QSLIInfoParserConsumer::GetN1Size()
 {
     if (qLayout_ == DataLayout::BSND) {
         n1Size_ = static_cast<uint32_t>(opParamInfo_.query.shape->GetStorageShape().GetDim(DIM_IDX_TWO));
@@ -799,8 +808,8 @@ ge::graphStatus QLIV2InfoParserConsumer::GetN1Size()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetActualSeqLenSize(uint32_t& size, const gert::Tensor* tensor,
-                                                             const std::string& actualSeqLenName) const
+ge::graphStatus QSLIInfoParserConsumer::GetActualSeqLenSize(uint32_t& size, const gert::Tensor* tensor,
+                                                            const std::string& actualSeqLenName) const
 {
     size = static_cast<uint32_t>(tensor->GetShapeSize());
     if (size <= 0) {
@@ -812,7 +821,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetActualSeqLenSize(uint32_t& size, con
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckN2Size()
+ge::graphStatus QSLIInfoParserConsumer::GetAndCheckN2Size()
 {
     // PA_BBND
     if (kLayout_ == DataLayout::TND) {
@@ -830,7 +839,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckN2Size()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetGSize()
+ge::graphStatus QSLIInfoParserConsumer::GetGSize()
 {
     if (n1Size_ % n2Size_ != 0) {
         OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(opName_, "q and k",
@@ -850,7 +859,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetGSize()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetBatchSize()
+ge::graphStatus QSLIInfoParserConsumer::GetBatchSize()
 {
     // 获取B基准值
     // 1、非TND时, 以query的batch_size维度为基准;
@@ -896,7 +905,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetBatchSize()
     }
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetHeadDim()
+ge::graphStatus QSLIInfoParserConsumer::GetHeadDim()
 {
     // 以query的D维度为基准
     uint32_t dIndex = DIM_IDX_TWO;
@@ -925,7 +934,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetHeadDim()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetS1Size()
+ge::graphStatus QSLIInfoParserConsumer::GetS1Size()
 {
     if (qLayout_ == DataLayout::BSND) {
         s1Size_ = opParamInfo_.query.shape->GetStorageShape().GetDim(1);
@@ -939,7 +948,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetS1Size()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckBlockSize()
+ge::graphStatus QSLIInfoParserConsumer::GetAndCheckBlockSize()
 {
     blockSize_ = static_cast<uint32_t>(opParamInfo_.key.shape->GetStorageShape().GetDim(1));
     OP_LOGI(context_->GetNodeName(), "blockSize_ is %d", blockSize_);
@@ -953,7 +962,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetAndCheckBlockSize()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetS2SizeForPageAttention()
+ge::graphStatus QSLIInfoParserConsumer::GetS2SizeForPageAttention()
 {
     if (GetAndCheckBlockSize() != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
@@ -973,7 +982,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetS2SizeForPageAttention()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetS2SizeForBatchContinuous()
+ge::graphStatus QSLIInfoParserConsumer::GetS2SizeForBatchContinuous()
 {
     std::string layout_key(opParamInfo_.layOutKey);
     if (kLayout_ == DataLayout::BSND) {
@@ -987,7 +996,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetS2SizeForBatchContinuous()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::GetS2Size()
+ge::graphStatus QSLIInfoParserConsumer::GetS2Size()
 {
     // 获取S2基准值
     // 1、BATCH_CONTINUOUS时, 从key的S轴获取
@@ -998,7 +1007,7 @@ ge::graphStatus QLIV2InfoParserConsumer::GetS2Size()
     return GetS2SizeForBatchContinuous();
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::ValidateInputShapesMatch()
+ge::graphStatus QSLIInfoParserConsumer::ValidateInputShapesMatch()
 {
     /*
     TND:
@@ -1185,7 +1194,7 @@ ge::graphStatus QLIV2InfoParserConsumer::ValidateInputShapesMatch()
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::CheckScaleShape()
+ge::graphStatus QSLIInfoParserConsumer::CheckScaleShape()
 {
     uint32_t qShapeDim = opParamInfo_.query.shape->GetStorageShape().GetDimNum();
     uint32_t kShapeDim = opParamInfo_.key.shape->GetStorageShape().GetDimNum();
@@ -1326,7 +1335,7 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckScaleShape()
 // key非连续校验：通过shape计算expected stride进行校验
 // PA_BBND时，只允许0轴非连续，其余轴必须连续
 // 非PA_BBND时，所有轴都必须连续
-ge::graphStatus QLIV2InfoParserConsumer::CheckKeyContiguous() const
+ge::graphStatus QSLIInfoParserConsumer::CheckKeyContiguous() const
 {
     bool keyNonContiguous = false;
     bool scaleNonContiguous = false;
@@ -1439,66 +1448,73 @@ ge::graphStatus QLIV2InfoParserConsumer::CheckKeyContiguous() const
     return ge::GRAPH_SUCCESS;
 }
 
-void QLIV2InfoParserConsumer::GenerateInfo(QLIV2TilingInfoConsumer& QLIV2InfoConsumer)
+void QSLIInfoParserConsumer::GenerateInfo(QSLITilingInfoConsumer& QSLIInfoConsumer)
 {
-    QLIV2InfoConsumer.opName = opName_;
-    QLIV2InfoConsumer.platformInfo = platformInfo_;
-    QLIV2InfoConsumer.opParamInfo = opParamInfo_;
-    QLIV2InfoConsumer.socVersion = socVersion_;
-    QLIV2InfoConsumer.npuArch = npuArch_;
+    QSLIInfoConsumer.opName = opName_;
+    QSLIInfoConsumer.platformInfo = platformInfo_;
+    QSLIInfoConsumer.opParamInfo = opParamInfo_;
+    QSLIInfoConsumer.socVersion = socVersion_;
+    QSLIInfoConsumer.npuArch = npuArch_;
 
-    QLIV2InfoConsumer.bSize = bSize_;
-    QLIV2InfoConsumer.n1Size = n1Size_;
-    QLIV2InfoConsumer.n2Size = n2Size_;
-    QLIV2InfoConsumer.s1Size = s1Size_;
-    QLIV2InfoConsumer.s2Size = s2Size_;
-    QLIV2InfoConsumer.gSize = gSize_;
+    QSLIInfoConsumer.bSize = bSize_;
+    QSLIInfoConsumer.n1Size = n1Size_;
+    QSLIInfoConsumer.n2Size = n2Size_;
+    QSLIInfoConsumer.s1Size = s1Size_;
+    QSLIInfoConsumer.s2Size = s2Size_;
+    QSLIInfoConsumer.gSize = gSize_;
 
-    QLIV2InfoConsumer.inputQType = inputQType_;
-    QLIV2InfoConsumer.inputKType = inputKType_;
-    QLIV2InfoConsumer.outputType = outputType_;
+    QSLIInfoConsumer.inputQType = inputQType_;
+    QSLIInfoConsumer.inputKType = inputKType_;
+    QSLIInfoConsumer.outputType = outputType_;
 
-    QLIV2InfoConsumer.blockSize = blockSize_;
-    QLIV2InfoConsumer.maxBlockNumPerBatch = maxBlockNumPerBatch_;
+    QSLIInfoConsumer.blockSize = blockSize_;
+    QSLIInfoConsumer.maxBlockNumPerBatch = maxBlockNumPerBatch_;
 
-    QLIV2InfoConsumer.pageAttentionFlag = (kLayout_ == DataLayout::PA_BBND);
-    QLIV2InfoConsumer.sparseMode = *opParamInfo_.sparseMode;
-    QLIV2InfoConsumer.sparseCount = *opParamInfo_.sparseCount;
-    QLIV2InfoConsumer.cmpRatio = *opParamInfo_.cmpRatio;
-    QLIV2InfoConsumer.returnValue = *opParamInfo_.returnValue;
-    QLIV2InfoConsumer.maxSeqlenQ = (opParamInfo_.maxSeqlenQ != nullptr) ? *opParamInfo_.maxSeqlenQ : -1;
-    QLIV2InfoConsumer.candidateMode = CANDIDATE_MODE_CONSUMER; // consumer 算子模式固定为候选消费级
-    QLIV2InfoConsumer.candidateTopkBlocks = opParamInfo_.candidateTopkBlocks; // 由输入末维推导
-    QLIV2InfoConsumer.candidateBlockSize = (opParamInfo_.candidateBlockSize != nullptr) ?
-                                               static_cast<uint32_t>(*opParamInfo_.candidateBlockSize) :
-                                               CANDIDATE_BLOCK_SIZE_DEFAULT;
+    QSLIInfoConsumer.pageAttentionFlag = (kLayout_ == DataLayout::PA_BBND);
+    QSLIInfoConsumer.sparseMode = *opParamInfo_.sparseMode;
+    QSLIInfoConsumer.sparseCount = *opParamInfo_.sparseCount;
+    QSLIInfoConsumer.cmpRatio = *opParamInfo_.cmpRatio;
+    QSLIInfoConsumer.returnValue = *opParamInfo_.returnValue;
+    QSLIInfoConsumer.maxSeqlenQ = (opParamInfo_.maxSeqlenQ != nullptr) ? *opParamInfo_.maxSeqlenQ : -1;
+    QSLIInfoConsumer.candidateMode = CANDIDATE_MODE_CONSUMER; // consumer 算子模式固定为候选消费级
+    QSLIInfoConsumer.candidateTopkBlocks = opParamInfo_.candidateTopkBlocks; // 由输入末维推导
+    QSLIInfoConsumer.candidateBlockSize = (opParamInfo_.candidateBlockSize != nullptr) ?
+                                              static_cast<uint32_t>(*opParamInfo_.candidateBlockSize) :
+                                              CANDIDATE_BLOCK_SIZE_DEFAULT;
+    // int4 候选驱动暂未实现（候选 K/kscale 的字节口径按 int8 固定 128B/token 编写），
+    // 与 metadata 侧保持同一开关：int4 即使传了 candidate_block_length 也回退全量扫。
+    QSLIInfoConsumer.candidateDriven =
+        (opParamInfo_.candidateBlockLength.tensor != nullptr &&
+         opParamInfo_.candidateBlockLength.tensor->GetShapeSize() > 0 && *opParamInfo_.quantMode != QUANT_MODE_INT4) ?
+            1U :
+            0U;
 
-    QLIV2InfoConsumer.keyStridesVec = keyStridesVec_;
-    QLIV2InfoConsumer.keyDequantScaleStridesVec = keyDequantScaleStridesVec_;
+    QSLIInfoConsumer.keyStridesVec = keyStridesVec_;
+    QSLIInfoConsumer.keyDequantScaleStridesVec = keyDequantScaleStridesVec_;
     if (!keyStridesVec_.empty()) {
         uint32_t keyStride0 = static_cast<uint32_t>(keyStridesVec_[0]);
         if (*opParamInfo_.quantMode == QUANT_MODE_MXFP4) {
             // FP4 shape stride以逻辑元素计数，kernel侧以打包后的uint8为寻址单位。
             keyStride0 /= MXFP4_PACK_NUM;
         }
-        QLIV2InfoConsumer.keyStride0 = keyStride0;
+        QSLIInfoConsumer.keyStride0 = keyStride0;
     } else {
-        QLIV2InfoConsumer.keyStride0 = 0; // 紧凑存储 (描述符未携带 stride)
+        QSLIInfoConsumer.keyStride0 = 0; // 紧凑存储 (描述符未携带 stride)
     }
     if (!keyDequantScaleStridesVec_.empty()) {
-        QLIV2InfoConsumer.keyDequantScaleStride0 = static_cast<uint32_t>(keyDequantScaleStridesVec_[0]);
+        QSLIInfoConsumer.keyDequantScaleStride0 = static_cast<uint32_t>(keyDequantScaleStridesVec_[0]);
     } else if ((*opParamInfo_.quantMode == QUANT_MODE_MXFP8) || (*opParamInfo_.quantMode == QUANT_MODE_MXFP4)) {
-        QLIV2InfoConsumer.keyDequantScaleStride0 = static_cast<uint32_t>(blockSize_) * (headDim_ / MX_SCALE_GROUP_SIZE);
+        QSLIInfoConsumer.keyDequantScaleStride0 = static_cast<uint32_t>(blockSize_) * (headDim_ / MX_SCALE_GROUP_SIZE);
     } else {
-        QLIV2InfoConsumer.keyDequantScaleStride0 = 0;
+        QSLIInfoConsumer.keyDequantScaleStride0 = 0;
     }
     // stride0 不得小于紧凑值的校验见 CheckKeyContiguous 内 PA_BBND 段 (描述符路径)
 
-    QLIV2InfoConsumer.inputQLayout = qLayout_;
-    QLIV2InfoConsumer.inputKLayout = kLayout_;
+    QSLIInfoConsumer.inputQLayout = qLayout_;
+    QSLIInfoConsumer.inputKLayout = kLayout_;
 }
 
-ge::graphStatus QLIV2InfoParserConsumer::ParseAndCheck(QLIV2TilingInfoConsumer& QLIV2InfoConsumer)
+ge::graphStatus QSLIInfoParserConsumer::ParseAndCheck(QSLITilingInfoConsumer& QSLIInfoConsumer)
 {
     if (ge::GRAPH_SUCCESS != GetOpName() || ge::GRAPH_SUCCESS != GetNpuInfo() || ge::GRAPH_SUCCESS != GetOpParaInfo() ||
         ge::GRAPH_SUCCESS != CheckRequiredParaExistence()) {
@@ -1524,7 +1540,7 @@ ge::graphStatus QLIV2InfoParserConsumer::ParseAndCheck(QLIV2TilingInfoConsumer& 
         return ge::GRAPH_FAILED;
     }
 
-    GenerateInfo(QLIV2InfoConsumer);
+    GenerateInfo(QSLIInfoConsumer);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -1536,7 +1552,7 @@ static ge::graphStatus TilingPrepareForQuantSparseLightningIndexer(gert::TilingP
 }
 
 // --------------------------QuantSparseLightningIndexerTiling类成员函数定义-----------------------
-ge::graphStatus QuantSparseLightningIndexerTiling::DoTiling(QLIV2TilingInfoConsumer* tilingInfo)
+ge::graphStatus QuantSparseLightningIndexerTiling::DoTiling(QSLITilingInfoConsumer* tilingInfo)
 {
     // -------------set blockdim-----------------
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(tilingInfo->platformInfo);
@@ -1577,6 +1593,23 @@ ge::graphStatus QuantSparseLightningIndexerTiling::DoTiling(QLIV2TilingInfoConsu
     // 临时存储Decode中间参数信息大小: 2(头/尾)*8(s1Base)*16(paramNum)*sizeof(int64_t)*24=48k
     workspaceSize += V1_DECODE_DATA_NUM * S1_BASE_SIZE * V1_DECODE_PARAM_NUM * V1_DECODE_PARAM_ELEM_SIZE * aicNum;
 
+    // 候选驱动（非空 candidate_block_length）额外三块工作区，对应 kernel Init 的同名 GM 区：
+    // 1) staging：AIV 从 PA(Page Attention 分页注意力) 页表聚集的 K（8 槽 × 512 token × 128B = 512KB/核）；
+    // 2) 分数区：AIC 写的逐 token 逐候选 tile 分数（2 任务 parity × 128 tile × 512 float = 512KB/核）；
+    // 3) 辅助区：AIV 聚集的逐块 kscale（4 任务 parity × 128 tile × 1KB = 1MB/核）。
+    if (tilingInfo->candidateDriven) {
+        constexpr uint64_t CAND_TILE_TOKENS_H = 512;
+        constexpr uint64_t CAND_RING_SLOTS_H = 8;
+        constexpr uint64_t CAND_SCORE_TILES_PER_TASK_H = 128;
+        constexpr uint64_t CAND_AUX_HALVES_PER_TILE_H = 64 * 16;
+        constexpr uint64_t CAND_AUX_PERIOD_H = 4;
+        uint64_t headDimH = static_cast<uint64_t>(tilingInfo->qkHeadDim);
+        workspaceSize += CAND_RING_SLOTS_H * CAND_TILE_TOKENS_H * headDimH * aicNum;
+        workspaceSize += 2ULL * CAND_SCORE_TILES_PER_TASK_H * CAND_TILE_TOKENS_H * sizeof(float) * aicNum;
+        workspaceSize +=
+            CAND_AUX_PERIOD_H * CAND_SCORE_TILES_PER_TASK_H * CAND_AUX_HALVES_PER_TILE_H * sizeof(uint16_t) * aicNum;
+    }
+
     size_t* workSpaces = context_->GetWorkspaceSizes(1);
     workSpaces[0] = workspaceSize;
 
@@ -1586,7 +1619,7 @@ ge::graphStatus QuantSparseLightningIndexerTiling::DoTiling(QLIV2TilingInfoConsu
         std::string candidateBlockIndicesDtype = "nullptr";
         if (tilingInfo->opParamInfo.candidateBlockIndices.desc != nullptr) {
             candidateBlockIndicesDtype =
-                QLIV2ConsumerDataTypeToSerialString(tilingInfo->opParamInfo.candidateBlockIndices.desc->GetDataType());
+                QSLIConsumerDataTypeToSerialString(tilingInfo->opParamInfo.candidateBlockIndices.desc->GetDataType());
         }
         OP_CHECK_IF(tilingInfo->opParamInfo.candidateBlockIndices.desc == nullptr ||
                         tilingInfo->opParamInfo.candidateBlockIndices.desc->GetDataType() != ge::DT_INT32,
@@ -1629,6 +1662,7 @@ ge::graphStatus QuantSparseLightningIndexerTiling::DoTiling(QLIV2TilingInfoConsu
     tilingData_.set_candidateMode(tilingInfo->candidateMode);
     tilingData_.set_candidateTopkBlocks(tilingInfo->candidateTopkBlocks);
     tilingData_.set_candidateBlockSize(tilingInfo->candidateBlockSize);
+    tilingData_.set_candidateDriven(tilingInfo->candidateDriven);
     tilingData_.SaveToBuffer(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity());
     context_->GetRawTilingData()->SetDataSize(tilingData_.GetDataSize());
 
@@ -1653,18 +1687,18 @@ ge::graphStatus TilingForQuantSparseLightningIndexer(gert::TilingContext* contex
 {
     OP_CHECK_IF(context == nullptr, OP_LOGE("QuantSparseLightningIndexer", "Tiling context is null."),
                 return ge::GRAPH_FAILED);
-    QLIV2TilingInfoConsumer QLIV2InfoConsumer;
-    QLIV2InfoParserConsumer QLIV2InfoParserConsumer(context);
-    if (QLIV2InfoParserConsumer.ParseAndCheck(QLIV2InfoConsumer) != ge::GRAPH_SUCCESS) {
+    QSLITilingInfoConsumer QSLIInfoConsumer;
+    QSLIInfoParserConsumer QSLIInfoParserConsumer(context);
+    if (QSLIInfoParserConsumer.ParseAndCheck(QSLIInfoConsumer) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
-    QuantSparseLightningIndexerTiling QLIV2Tiling(context);
-    return QLIV2Tiling.DoTiling(&QLIV2InfoConsumer);
+    QuantSparseLightningIndexerTiling QSLITiling(context);
+    return QSLITiling.DoTiling(&QSLIInfoConsumer);
 }
 
 // --------------------------Tiling及函数TilingPrepare函数注册--------
 IMPL_OP_OPTILING(QuantSparseLightningIndexer)
     .Tiling(TilingForQuantSparseLightningIndexer)
-    .TilingParse<QLIV2CompileInfoConsumer>(TilingPrepareForQuantSparseLightningIndexer);
+    .TilingParse<QSLICompileInfoConsumer>(TilingPrepareForQuantSparseLightningIndexer);
 
 } // namespace optiling

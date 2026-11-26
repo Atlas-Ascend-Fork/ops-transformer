@@ -131,7 +131,15 @@ TEST_F(QuantSparseLightningIndexerTilingArch22, QuantSparseLightningIndexer_910b
     qsli_ut::RunTilingCase(p, ge::GRAPH_FAILED);
 }
 
-// candidate_block_length 只接受空 tensor，传非空应失败
+// candidate_block_length 传非空（每行有效候选块数）应被接受
+TEST_F(QuantSparseLightningIndexerTilingArch22, QuantSparseLightningIndexer_910b_tiling_cand_block_length_ok)
+{
+    qsli_ut::CaseParam p;
+    p.candBlkLenShape = {2, 39, 1}; // 元素数 = B×S1 = 2×39
+    qsli_ut::RunTilingCase(p, ge::GRAPH_SUCCESS);
+}
+
+// candidate_block_length 元素个数必须等于 query 行数（B×S1）
 TEST_F(QuantSparseLightningIndexerTilingArch22, QuantSparseLightningIndexer_910b_tiling_cand_block_length_failed)
 {
     qsli_ut::CaseParam p;

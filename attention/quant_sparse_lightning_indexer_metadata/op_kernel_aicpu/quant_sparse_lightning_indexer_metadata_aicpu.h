@@ -32,6 +32,8 @@ constexpr uint32_t COST_WEIGHT_M = 6U;
 constexpr uint32_t COST_WEIGHT_S2 = 10U;
 constexpr uint32_t S1_BASE_SIZE_SMALL = 2;
 constexpr uint32_t TOPK_6K = 6144;
+// quant_mode=7: W4A4 signed int4（与主算子 tiling 的 QUANT_MODE_INT4 对齐）
+constexpr int32_t QUANT_MODE_INT4 = 7;
 
 enum BlockType : uint32_t {
     NORMAL_BLOCK = 0,
@@ -228,6 +230,34 @@ private:
     bool CheckSequsedQ(int32_t batchSize) const;
     bool CheckSequsedK(int32_t batchSize) const;
     bool CheckCmpResidualK(int32_t batchSize) const;
+    bool CheckCandidateBlockLength();
+    // 候选长度是否可用：为空表示走原有"按全量 S2 分核"的路径，保持旧行为。
+    // int4（quant_mode=7）候选驱动尚未实现，必须与主算子 tiling 的 candidateDriven 同步关闭，
+    // 否则 metadata 按 512 token 候选 tile 分核、主算子却按 2048 token 全量扫，两侧调度错位。
+    bool HasCandidateLen() const
+    {
+        if (quantMode_ == QUANT_MODE_INT4) {
+            return false;
+        }
+        if (candidateBlockLength_ == nullptr || candidateBlockLength_->GetData() == nullptr ||
+            candidateBlockLength_->GetTensorShape() == nullptr) {
+            return false;
+        }
+        int64_t numel = 1;
+        for (const int64_t dimSize : candidateBlockLength_->GetTensorShape()->GetDimSizes()) {
+            numel *= dimSize;
+        }
+        return numel > 0;
+    }
+    // 候选长度的行映射：TND 用 cu_seqlens_q 前缀，BSND 用 bIdx × max_seqlen_q
+    uint64_t CandidateRowPrefix(uint32_t bIdx);
+    int64_t CandidateTokensForBatch(uint32_t bIdx);
+    int64_t CandidateTokensForS1G(uint32_t bIdx, uint32_t s1GIdx);
+    // 候选 tile 的 token 数：64 个候选块 × 8 token = 512（与主算子候选路径一致）
+    uint32_t CandidateTileTokens() const
+    {
+        return 512U;
+    }
     int32_t GetQueryBatchSize();
     ValidSocVersion ProcessSocVersion();
     bool ParamsInit();
@@ -279,6 +309,10 @@ private:
     Tensor* sequsedK_ = nullptr;
     Tensor* cmpResidualK_ = nullptr;
     Tensor* candidateBlockLength_ = nullptr;
+    // candidate_block_length（每行有效候选块数，int32）：参与 cost model 调度
+    int32_t candLenMax_ = 0;   // 各行最大有效候选块数（未传或为空时为 0）
+    int64_t candLenSum_ = 0;   // 各行有效候选块数之和（本期仅记录）
+    int64_t candLenNumel_ = 0; // 候选长度张量元素数（越界保护）
     // output
     Tensor* metadata_ = nullptr;
     // attributes

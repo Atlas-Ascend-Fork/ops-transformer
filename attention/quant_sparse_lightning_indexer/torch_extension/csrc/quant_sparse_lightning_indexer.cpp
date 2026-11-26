@@ -41,8 +41,8 @@ inline bool IsFp4CompatibleTensor(const at::Tensor& tensor)
 
 constexpr int64_t E8M0_SCALE_PACK_NUM = 2;
 
-inline void FixQLIV2AclDtypes(int64_t quantMode, TensorWrapper& queryWrapper, TensorWrapper& keyWrapper,
-                              TensorWrapper& queryScaleWrapper, TensorWrapper& keyScaleWrapper)
+inline void FixQSLIAclDtypes(int64_t quantMode, TensorWrapper& queryWrapper, TensorWrapper& keyWrapper,
+                             TensorWrapper& queryScaleWrapper, TensorWrapper& keyScaleWrapper)
 {
     if (quantMode == 4) {
         TORCH_CHECK(queryWrapper.tensor_.scalar_type() == at::kByte, "When quant_mode is 4, query must be hifp8 type");
@@ -214,7 +214,7 @@ std::tuple<at::Tensor, at::Tensor> QuantSparseLightningIndexer(
     auto keyWrapper = MakeWrapper(key);
     auto queryScaleWrapper = MakeWrapper(queryDequantScale);
     auto keyScaleWrapper = MakeWrapper(keyDequantScale);
-    FixQLIV2AclDtypes(quantMode, queryWrapper, keyWrapper, queryScaleWrapper, keyScaleWrapper);
+    FixQSLIAclDtypes(quantMode, queryWrapper, keyWrapper, queryScaleWrapper, keyScaleWrapper);
 
     // 0 轴非连续由输入描述符携带 stride (PR 12740 机制), 无需显式传参
     ACLNN_CMD(aclnnQuantSparseLightningIndexer, queryWrapper, keyWrapper, weights, queryScaleWrapper, keyScaleWrapper,

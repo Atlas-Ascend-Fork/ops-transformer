@@ -86,6 +86,25 @@ __aicore__ inline BinaryRepeatParams B32BinaryRepeatParams()
     return BinaryRepeatParams(1, 1, 1, B32_VEC_REPEAT_STRIDE, B32_VEC_REPEAT_STRIDE, B32_VEC_REPEAT_STRIDE);
 }
 
+/**
+  纯 V 位精确 UB→UB 回拷（int32 视图 Adds(+0)）：Level-0「掩码 + repeat」下发，
+  单条指令最多覆盖 VEC_REPEAT_MAX×B32_VEC_ELM_NUM 个元素，超出则分段。
+  位精确（+0 不改变位型），全程 V 管道，受 PipeBarrier<PIPE_V> 约束。
+ */
+__aicore__ inline void VecCopyExactRun(const LocalTensor<int32_t>& dstI, const LocalTensor<int32_t>& srcI,
+                                       int32_t total)
+{
+    int32_t off = 0;
+    while (off < total) {
+        uint64_t mask = 0;
+        uint8_t repeatTimes = 0;
+        VecRepeatPlan(total - off, mask, repeatTimes);
+        AscendC::Adds(dstI[off], srcI[off], 0, mask, repeatTimes, B32RepeatParams());
+        off += static_cast<int32_t>(repeatTimes) * static_cast<int32_t>(B32_VEC_ELM_NUM);
+    }
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
 template <typename T>
 __aicore__ inline void CopyOut(const GlobalTensor<T>& dstGm, const LocalTensor<T>& srcUb, int64_t copyCount)
 {
@@ -121,6 +140,20 @@ __aicore__ inline void InitSortOutBuf(const LocalTensor<float>& src, int64_t ele
                            INVALID_INDEX, mask0, forRemain, 1, B32_VEC_REPEAT_STRIDE);
     }
     AscendC::PipeBarrier<PIPE_V>();
+}
+
+/**
+  位精确的 UB→UB 回拷（UB 为 Unified Buffer，统一缓冲区）。
+
+  UB→UB 的 DataCopy 走 MTE（Memory Transfer Engine，存储搬运管道），其后的
+  PipeBarrier<PIPE_V> 不构成跨管道 fence：调度敏感场景下，下一次向量读可能读到
+  stale（陈旧）数据。改用 int32 视图的 Adds(+0)：全程在 V（Vector，向量）管道内，
+  受 PipeBarrier 约束，且按位拷贝 —— 避免 -1（0xFFFFFFFF）作为 float 是负符号 NaN、
+  vadd 会被规范化为 0x7FFFFFFF 的问题。
+ */
+__aicore__ inline void VecCopyExact(const LocalTensor<float>& dst, const LocalTensor<float>& src, int32_t num)
+{
+    VecCopyExactRun(dst.template ReinterpretCast<int32_t>(), src.template ReinterpretCast<int32_t>(), num);
 }
 
 /**
@@ -184,8 +217,7 @@ __aicore__ inline void SortAll(LocalTensor<float>& src, LocalTensor<float>& tmp,
         AscendC::PipeBarrier<PIPE_V>();
     }
     if (i % CONST_TWO == 0) {
-        AscendC::DataCopy(src, tmp, logitsNum * VALUE_AND_INDEX_NUM);
-        AscendC::PipeBarrier<PIPE_V>();
+        VecCopyExact(src, tmp, static_cast<int32_t>(logitsNum * VALUE_AND_INDEX_NUM));
     }
 }
 
@@ -210,8 +242,7 @@ __aicore__ inline void MergeSort(const LocalTensor<float>& mrgDst, int32_t mrgDs
 
     AscendC::MrgSort<float>(tmpTensor, srcList, params);
     AscendC::PipeBarrier<PIPE_V>();
-    AscendC::DataCopy(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
-    AscendC::PipeBarrier<PIPE_V>();
+    VecCopyExact(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
 }
 
 __aicore__ inline void ExtractIndex(const LocalTensor<uint32_t>& idxULocal, const LocalTensor<uint32_t>& sortLocal,
@@ -253,29 +284,28 @@ __aicore__ inline void ExtractValue(const LocalTensor<uint32_t>& valULocal, cons
   数据, 累加器出现 -inf 位型+8k 垃圾且 tile1 块整段缺失)。纯 V 回拷全程受 PipeBarrier 约束。
  */
 __aicore__ inline void MergeSortVecCopy(const LocalTensor<float>& mrgDst, int32_t mrgDstNum, LocalTensor<float>& mrgSrc,
-                                        int32_t mrgSrcNum, LocalTensor<float>& tmpTensor)
+                                        int32_t mrgSrcNum, LocalTensor<float>& tmpTensor, bool accumulatedFirst = false)
 {
     AscendC::MrgSort4Info params;
-    params.elementLengths[0] = mrgSrcNum;
-    params.elementLengths[1] = mrgDstNum;
+    // accumulatedFirst：让"已累积的旧候选"排在前面，同分时保留更小 ID；
+    // 默认 false 时保持原调用方的 src 顺序。
+    params.elementLengths[0] = accumulatedFirst ? mrgDstNum : mrgSrcNum;
+    params.elementLengths[1] = accumulatedFirst ? mrgSrcNum : mrgDstNum;
     params.ifExhaustedSuspension = false;
     params.validBit = MRG_VALID_BIT_2;
     params.repeatTimes = 1;
 
     AscendC::MrgSortSrcList<float> srcList;
-    srcList.src1 = mrgSrc;
-    srcList.src2 = mrgDst;
+    srcList.src1 = accumulatedFirst ? mrgDst : mrgSrc;
+    srcList.src2 = accumulatedFirst ? mrgSrc : mrgDst;
 
     AscendC::MrgSort<float>(tmpTensor, srcList, params);
     AscendC::PipeBarrier<PIPE_V>();
-    // 回拷必须位精确: -1 (0xFFFFFFFF) 作为 float 是负符号 NaN, vadd 会规范化为 0x7FFFFFFF;
-    // 用 int32 视图 Adds(+0) 保证 bit-exact 且全程 V 管道 (受 PipeBarrier fence)
+    // 保留逐 64 元素循环：块级逐 tile 归并是唯一对单条长回拷敏感的位置
+    // （实测 VecCopyExactRun 的单条多 repeat 形态会破坏候选块输出，其余回拷均正确）。
     int32_t copyNum = mrgDstNum * VALUE_AND_INDEX_NUM;
     LocalTensor<int32_t> dstI = mrgDst.template ReinterpretCast<int32_t>();
     LocalTensor<int32_t> srcI = tmpTensor.template ReinterpretCast<int32_t>();
-    // 注意: 此处保持分块下发, 不并入上面的 Level-0 单次写法 —
-    // copyNum 最大 4096 (candidateTopkBlocks=2048 对), 单条 repeatTimes=64 的向量指令
-    // 在本架构上触发 507015 (VEC 指令配置非法), 实测 rt=8 无问题、rt=64 必现。
     for (int32_t off = 0; off < copyNum; off += B32_VEC_ELM_NUM) {
         AscendC::Adds(dstI[off], srcI[off], 0, B32_VEC_ELM_NUM);
     }

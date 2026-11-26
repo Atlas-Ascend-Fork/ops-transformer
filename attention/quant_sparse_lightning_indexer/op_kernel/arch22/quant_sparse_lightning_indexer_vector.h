@@ -12,13 +12,13 @@
  * \file quant_sparse_lightning_indexer_vector.h
  * \brief
  */
-#ifndef QUANT_LIGHTNING_INDEXER_V2_VECTOR_H
-#define QUANT_LIGHTNING_INDEXER_V2_VECTOR_H
+#ifndef QUANT_SPARSE_LIGHTNING_INDEXER_VECTOR_H
+#define QUANT_SPARSE_LIGHTNING_INDEXER_VECTOR_H
 
 #include "kernel_operator.h"
 #include "quant_sparse_lightning_indexer_vector.h"
 
-namespace QLIV2ServiceVec {
+namespace QSLIServiceVec {
 using namespace AscendC;
 
 constexpr int32_t NEG_INF = 0xFF800000;
@@ -122,6 +122,27 @@ __aicore__ inline void InitSortOutBuf(const LocalTensor<float>& src, int64_t ele
 }
 
 /**
+  位精确的 UB→UB 回拷（UB 为 Unified Buffer，统一缓冲区）。
+
+  UB→UB 的 DataCopy 走 MTE（Memory Transfer Engine，存储搬运管道），其后的
+  PipeBarrier<PIPE_V> 不构成跨管道 fence：调度敏感场景下，下一次向量读可能读到
+  stale（陈旧）数据。改用 int32 视图的 Adds(+0)：全程在 V（Vector，向量）管道内，
+  受 PipeBarrier 约束，且按位拷贝 —— 避免 -1（0xFFFFFFFF）作为 float 是负符号 NaN、
+  vadd 会被规范化为 0x7FFFFFFF 的问题。
+ */
+__aicore__ inline void VecCopyExact(const LocalTensor<float>& dst, const LocalTensor<float>& src, int32_t num)
+{
+    LocalTensor<int32_t> dstI = dst.template ReinterpretCast<int32_t>();
+    LocalTensor<int32_t> srcI = src.template ReinterpretCast<int32_t>();
+    // 分块下发（每块 64 元素）：单条大 repeatTimes 的向量指令在本架构上会触发
+    // aicore 异常（507015，VEC 指令配置非法）。
+    for (int32_t off = 0; off < num; off += B32_VEC_ELM_NUM) {
+        AscendC::Adds(dstI[off], srcI[off], 0, B32_VEC_ELM_NUM);
+    }
+    AscendC::PipeBarrier<PIPE_V>();
+}
+
+/**
   src: logits和索引，前logitsNum为logits，后logitsNum为索引
   tmp: 计算使用到的临时空间，大小与src一致
   logitsNum: 排序的元素个数, 暂只支持[128,256,384,512,1024,2048]
@@ -182,8 +203,7 @@ __aicore__ inline void SortAll(LocalTensor<float>& src, LocalTensor<float>& tmp,
         AscendC::PipeBarrier<PIPE_V>();
     }
     if (i % CONST_TWO == 0) {
-        AscendC::DataCopy(src, tmp, logitsNum * VALUE_AND_INDEX_NUM);
-        AscendC::PipeBarrier<PIPE_V>();
+        VecCopyExact(src, tmp, static_cast<int32_t>(logitsNum * VALUE_AND_INDEX_NUM));
     }
 }
 
@@ -208,8 +228,7 @@ __aicore__ inline void MergeSort(const LocalTensor<float>& mrgDst, int32_t mrgDs
 
     AscendC::MrgSort<float>(tmpTensor, srcList, params);
     AscendC::PipeBarrier<PIPE_V>();
-    AscendC::DataCopy(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
-    AscendC::PipeBarrier<PIPE_V>();
+    VecCopyExact(mrgDst, tmpTensor, mrgDstNum * VALUE_AND_INDEX_NUM);
 }
 
 __aicore__ inline void ExtractIndex(const LocalTensor<uint32_t>& idxULocal, const LocalTensor<uint32_t>& sortLocal,
@@ -270,5 +289,5 @@ __aicore__ inline void SetWaitFlag(HardEvent evt)
     AscendC::WaitFlag<event>(eventId);
 }
 
-} // namespace QLIV2ServiceVec
-#endif // QUANT_LIGHTNING_INDEXER_V2_VECTOR_H
+} // namespace QSLIServiceVec
+#endif // QUANT_SPARSE_LIGHTNING_INDEXER_VECTOR_H

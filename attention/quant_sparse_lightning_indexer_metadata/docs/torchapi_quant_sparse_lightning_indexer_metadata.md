@@ -108,7 +108,6 @@ b表示batch数量，q_s表示BSND布局下Query的物理序列长度，q_t表�
 - <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：
   - `quant_mode`仅支持2，`num_heads_q`仅支持32、64，`topk`仅支持[1,2048]。
   - `layout_k`仅支持PA_BBND，`seqused_k`必须传入。
-  - `candidate_block_length`为预留参数，应保持默认值None或传入空Tensor，不支持非空Tensor。
   - `cmp_ratio`仅支持1、2、4、8、16、32、64、128。
   - `batch_size`为None时按0处理。`layout_q`为BSND时，优先通过`seqused_q`的shape推导batch数量，未传入时使用`batch_size`；`layout_q`为TND时，优先通过`seqused_q`的shape推导，未传入时使用`cu_seqlens_q`的shape。
   - `layout_q`为BSND时，`max_seqlen_q`须与Query的物理序列长度一致。
