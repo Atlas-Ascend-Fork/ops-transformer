@@ -91,6 +91,6 @@
 
 ## 参考资源
 
-- [测试用例](tests/ttk/kda_cases.py)
-- [性能测量指南](tests/ttk/PERFORMANCE.md)
+- [测试用例](tests/assets/impl/kda_cases.py)
+- [性能测量指南](tests/perf/PERFORMANCE.md)
 - [FlashKDAGrad反向算子](../flash_kda_grad/README.md)

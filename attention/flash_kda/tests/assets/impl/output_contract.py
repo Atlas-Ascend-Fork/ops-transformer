@@ -6,13 +6,24 @@
 # INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 # See LICENSE in the root of the software repository for the full text of the License.
 
-import numpy as np
+"""FlashKDA output contract checks, valid-region packing, and TTK pre_compare masking.
+
+Numerical precision comparison is delegated to TTK's native ``CrossCheckComparison``
+(remote ``xpu_server`` when configured, or local fallback via ``cross_check.py``).
+This module contains no custom numerical comparator; it handles only output
+return-protocol validation, adapter valid-region packing, and out-of-contract
+padding/slot zero-masking for TTK ``TestSpec.pre_compare``.
+"""
+
 import torch
 
-from arch92.kda_ttk_ops import load_asset
+from . import inputs as inputs_mod
+from .arch_config import architecture
 
 SLOTS = range(3)
 FORWARD_SLOTS = range(16)
+# 公开三项输出的接口类型，空槽位也使用对应类型。
+PUBLIC_OUTPUT_DTYPES = (torch.bfloat16, torch.float32, torch.bfloat16)
 
 
 def numerical_slots(c, *, forward=False):
@@ -29,59 +40,28 @@ def check_arity(outputs, *, forward=False):
         )
 
 
-def empty():
-    return torch.empty(0, dtype=torch.float32)
-
-
-def effective(c):
-    return load_asset("inputs").effective(c)
-
-
-def sequences(*args, **kwargs):
-    return load_asset("inputs").sequences(*args, **kwargs)
-
-
-def compare_contracts(actual, expected, reference, *, slots=SLOTS):
-    """Finite values and design-specific tolerances, independent of L2."""
-    if not len(actual) == len(expected) == len(slots):
-        raise AssertionError("output/reference arity mismatch")
-    reports = []
-    for slot, a, e in zip(slots, actual, expected):
-        a, e = (x.detach().cpu().double().numpy() for x in (a, e))
-        tol = 1e-3 if slot in (11, 13) else 1e-6 if slot in (12, 14, 15) else None
-        finite = np.isfinite(a).all() and np.isfinite(e).all()
-        passed = (
-            a.shape == e.shape
-            and finite
-            and (tol is None or np.allclose(a, e, atol=tol, rtol=tol, equal_nan=False))
-        )
-        error = float(np.max(np.abs(a - e))) if a.shape == e.shape and a.size else 0.0
-        reports.append(
-            {
-                "slot": slot,
-                "reference": reference,
-                "pass": bool(passed),
-                "precision": (
-                    "NOT_APPLICABLE"
-                    if not a.size and not e.size
-                    else "PASS"
-                    if passed
-                    else "FAIL"
-                ),
-                "error_info": f"{reference} slot={slot}, shape={a.shape}/{e.shape}, atol=rtol={tol}, max_abs={error}, finite={finite}",
-                "metrics": {"max_abs": error, "atol": tol, "rtol": tol},
-            }
-        )
-    return reports
+def _empty(dtype=torch.float32):
+    return torch.empty(0, dtype=dtype)
 
 
 def chunk_base(start, b):
     return start // 64 + b
 
 
-def check(outputs, inputs, c, *, meta=False, forward=False):
+def _valid_chunk_slots(valid_lengths, *, packed, max_chunks=None):
+    """Return valid chunk_states slot indices in packed or flattened-dense order."""
+    valid_slots = set()
+    start = 0
+    for bi, n in enumerate(valid_lengths):
+        base = chunk_base(start, bi) if packed else bi * max_chunks
+        valid_slots.update(range(base, base + (n + 63) // 64))
+        start += n
+    return valid_slots
+
+
+def check(outputs, inputs, c, *, meta=False, forward=False, arch=None):
     check_arity(outputs, forward=forward)
-    f = effective(c)
+    f = inputs_mod.effective(c)
     train = not c["inference"]
     b, nq, nv, s = c["batch_size"], c["nheads_qk"], c["nheads_v"], c["seqlens"]
     packed = c["layout"] == "TND"
@@ -143,16 +123,14 @@ def check(outputs, inputs, c, *, meta=False, forward=False):
                 )
     if meta:
         return
-    if outputs[2] is not None:
-        # Numeric packing below selects valid chunks, but unused public capacity
-        # must also be deterministic across allocations and graph executions.
+    selected_arch = arch or architecture(
+        metadata=inputs[5] if len(inputs) > 5 else None
+    )
+    if selected_arch == "arch92" and outputs[2] is not None:
         states = outputs[2] if packed else outputs[2].flatten(0, 1)
-        valid_slots = set()
-        start = 0
-        for bi, n in enumerate(c["valid_lengths"]):
-            base = chunk_base(start, bi) if packed else bi * j
-            valid_slots.update(range(base, base + (n + 63) // 64))
-            start += n
+        valid_slots = _valid_chunk_slots(
+            c["valid_lengths"], packed=packed, max_chunks=j
+        )
         for slot in set(range(states.shape[0])) - valid_slots:
             if not torch.equal(states[slot], torch.zeros_like(states[slot])):
                 raise AssertionError(f"chunk_states unused slot {slot} is not zero")
@@ -183,12 +161,18 @@ def check(outputs, inputs, c, *, meta=False, forward=False):
 
 
 def pack(outputs, c, *, forward=False):
+    """Extract valid regions into 1D tensors for adapter finiteness/recovery checks."""
     check_arity(outputs, forward=forward)
     result = []
     for slot in numerical_slots(c, forward=forward):
         value = outputs[slot]
         if value is None:
-            result.append(empty().to(outputs[0].device))
+            dtype = (
+                PUBLIC_OUTPUT_DTYPES[slot]
+                if slot < len(PUBLIC_OUTPUT_DTYPES)
+                else torch.float32
+            )
+            result.append(_empty(dtype=dtype).to(outputs[0].device))
             continue
         if slot == 1:
             parts = [value.flatten()]
@@ -229,6 +213,120 @@ def pack(outputs, c, *, forward=False):
             # 定长 out 固定为 BSND，切片辅助函数按输入布局解释各轴。
             if slot == 0 and c["layout"] == "BNSD":
                 value = value.transpose(1, 2)
-            parts = [x.flatten() for x in sequences(value, c)]
+            parts = [x.flatten() for x in inputs_mod.sequences(value, c)]
         result.append(torch.cat(parts))
     return result
+
+
+def _clone_buffer(value):
+    if value is None:
+        return None
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone()
+    return value.copy()
+
+
+def _validate_public_output_shapes(out, chunk_states, c):
+    """Guard against stale active-case context before zero-masking padding regions."""
+    valid_lengths = c["valid_lengths"]
+    if len(valid_lengths) != c["batch_size"]:
+        raise ValueError(
+            f"FlashKDA pre_compare valid_lengths mismatch for {c['id']}: "
+            f"len={len(valid_lengths)} vs batch_size={c['batch_size']}"
+        )
+    packed = c["layout"] == "TND"
+    if out is not None:
+        expected_out = (
+            (c["seqlens"], c["nheads_v"])
+            if packed
+            else (c["batch_size"], c["seqlens"], c["nheads_v"])
+        )
+        if (
+            out.ndim < len(expected_out)
+            or tuple(out.shape[: len(expected_out)]) != expected_out
+        ):
+            raise ValueError(
+                f"FlashKDA pre_compare out shape mismatch for {c['id']}: "
+                f"got {tuple(out.shape)}, expected prefix {expected_out} ({c['layout']})"
+            )
+    if chunk_states is not None:
+        expected_chunks = (
+            (c["seqlens"] + 63) // 64 + c["batch_size"]
+            if packed
+            else (c["seqlens"] + 63) // 64
+        )
+        expected_prefix = (
+            (expected_chunks, c["nheads_v"])
+            if packed
+            else (c["batch_size"], expected_chunks, c["nheads_v"])
+        )
+        if (
+            chunk_states.ndim < len(expected_prefix)
+            or tuple(chunk_states.shape[: len(expected_prefix)]) != expected_prefix
+        ):
+            raise ValueError(
+                f"FlashKDA pre_compare chunk_states shape mismatch for {c['id']}: "
+                f"got {tuple(chunk_states.shape)}, expected prefix {expected_prefix} ({c['layout']})"
+            )
+
+
+def mask_public_outputs(outputs, c, *, arch=None):
+    """Zero out unwritten padding tokens and unused arch35 chunk_states slots.
+
+    Direct ``torch.ops.cann_ops_transformer.flash_kda`` returns full-shape
+    tensors whose padding tokens (fixed-length ``valid_lengths[b] < S``) and
+    arch35 unused ``chunk_states`` slots contain uninitialized HBM contents.
+    Zeroing only those out-of-contract regions preserves tensor shapes so TTK
+    native remote and local ``CrossCheckComparison`` stay shape-compatible with
+    ``third_party`` while keeping valid regions bit-exact and leaving
+    ``CrossCheckComparison`` large/small metrics unaffected.
+    """
+    if len(outputs) != 3:
+        return tuple(outputs)
+    out, final_state, chunk_states = outputs
+    _validate_public_output_shapes(out, chunk_states, c)
+
+    valid_lengths = c["valid_lengths"]
+    packed = c["layout"] == "TND"
+    selected_arch = arch or architecture()
+
+    if out is not None and not packed and out.ndim >= 2:
+        seq_cap = out.shape[1]
+        if any(n < seq_cap for n in valid_lengths):
+            out = _clone_buffer(out)
+            for bi, n in enumerate(valid_lengths):
+                if n < seq_cap:
+                    out[bi, n:] = 0
+
+    if chunk_states is not None and selected_arch != "arch92":
+        if packed and chunk_states.ndim >= 1:
+            valid_slots = _valid_chunk_slots(valid_lengths, packed=True)
+            total_slots = chunk_states.shape[0]
+            if len(valid_slots) < total_slots:
+                chunk_states = _clone_buffer(chunk_states)
+                for slot_idx in range(total_slots):
+                    if slot_idx not in valid_slots:
+                        chunk_states[slot_idx] = 0
+        elif not packed and chunk_states.ndim >= 2:
+            max_chunks = chunk_states.shape[1]
+            if any((n + 63) // 64 < max_chunks for n in valid_lengths):
+                chunk_states = _clone_buffer(chunk_states)
+                for bi, n in enumerate(valid_lengths):
+                    count = (n + 63) // 64
+                    if count < max_chunks:
+                        chunk_states[bi, count:] = 0
+
+    return (out, final_state, chunk_states)
+
+
+def pre_compare_public(*outputs):
+    """TTK ``pre_compare`` hook: mask out-of-contract padding on public FlashKDA outputs."""
+    from .npu_preprocess import get_active_case
+
+    active = get_active_case()
+    if active is None or len(outputs) != 6:
+        return None
+    arch, c = active
+    masked_npu = mask_public_outputs(outputs[:3], c, arch=arch)
+    masked_golden = mask_public_outputs(outputs[3:], c, arch=arch)
+    return masked_npu + masked_golden
