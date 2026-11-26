@@ -597,38 +597,56 @@ ge::graphStatus AllGatherMatmulTilingBase::InitHcclParam(const gert::TilingConte
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus AllGatherMatmulTilingBase::InitAllGatherCommParams(gert::TilingContext* context,
-                                                                   Mc2Tiling::AllGatherMatmulTilingData* tilingData,
-                                                                   mc2tiling::TilingArgs& args)
+static ge::graphStatus GetCommInputParams(gert::TilingContext* context, const char* group, int32_t& isTransA,
+                                          int32_t& isTransB, int64_t& gatherIndex, int64_t& commTurn,
+                                          uint32_t& rankSize)
 {
     int index = IS_TRANS_A_IDX;
     auto attrs = context->GetAttrs();
-    auto isTransA = attrs->GetAttrPointer<bool>(index++);
-    auto isTransB = attrs->GetAttrPointer<bool>(index++);
-    auto gatherIndex = attrs->GetAttrPointer<int64_t>(index++);
+    auto isTransAPtr = attrs->GetAttrPointer<bool>(index++);
+    auto isTransBPtr = attrs->GetAttrPointer<bool>(index++);
+    auto gatherIndexPtr = attrs->GetAttrPointer<int64_t>(index++);
     auto commTurnPtr = attrs->GetAttrPointer<int64_t>(index++);
     OP_TILING_CHECK(commTurnPtr == nullptr,
                     OP_LOGE(context->GetNodeName(),
                             "InitAllGatherCommParams: defaulted comm_turn attribute is absent from RuntimeAttrs; "
                             "rebuild the tiling context with the required metadata"),
                     return ge::GRAPH_FAILED);
-    auto commTurn = *commTurnPtr;
+    commTurn = *commTurnPtr;
 
-    auto rankSize = mc2tiling::MatmulFormulaicTiling::GetRankSize(group_);
+    rankSize = mc2tiling::MatmulFormulaicTiling::GetRankSize(group);
     OP_TILING_CHECK(
         commTurn != 0,
         OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "commTurn", std::to_string(commTurn).c_str(), "0"),
         return ge::GRAPH_FAILED);
 
+    isTransA = isTransAPtr ? *isTransAPtr : 0;
+    isTransB = isTransBPtr ? *isTransBPtr : 0;
+    gatherIndex = gatherIndexPtr ? *gatherIndexPtr : 0;
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus AllGatherMatmulTilingBase::InitAllGatherCommParams(gert::TilingContext* context,
+                                                                   Mc2Tiling::AllGatherMatmulTilingData* tilingData,
+                                                                   mc2tiling::TilingArgs& args)
+{
+    int32_t isTransA = 0;
+    int32_t isTransB = 0;
+    int64_t gatherIndex = 0;
+    int64_t commTurn = 0;
+    uint32_t rankSize = 0;
+    if (GetCommInputParams(context, group_, isTransA, isTransB, gatherIndex, commTurn, rankSize) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
     OP_LOGD("AllGatherMatmul",
             " group is %s, rankSize is %u, isTransA is %d, isTransB is %d, gatherIndex is %d,"
             "commTurn is %ld.",
-            group_, rankSize, isTransA ? *isTransA : 0, isTransB ? *isTransB : 0, gatherIndex ? *gatherIndex : 0,
-            commTurn);
+            group_, rankSize, isTransA, isTransB, gatherIndex, commTurn);
     tilingData->param.rankDim = rankSize;
-    tilingData->param.isTransposeA = isTransA ? *isTransA : 0;
-    tilingData->param.isTransposeB = isTransB ? *isTransB : 0;
-    tilingData->param.gatherIndex = gatherIndex ? *gatherIndex : 0;
+    tilingData->param.isTransposeA = isTransA;
+    tilingData->param.isTransposeB = isTransB;
+    tilingData->param.gatherIndex = gatherIndex;
     tilingData->param.commtype = static_cast<uint32_t>(mc2tiling::AicpuComType::HCCL_CMD_ALLGATHER);
     tilingData->param.subtype = 0;
     tilingData->param.storageGather = 0;
@@ -643,8 +661,8 @@ ge::graphStatus AllGatherMatmulTilingBase::InitAllGatherCommParams(gert::TilingC
         return ge::GRAPH_FAILED;
     }
 
-    args.isATrans = isTransA ? *isTransA : 0;
-    args.isBTrans = isTransB ? *isTransB : 0;
+    args.isATrans = isTransA;
+    args.isBTrans = isTransB;
     args.cmdType = mc2tiling::AicpuComType::HCCL_CMD_ALLGATHER;
     args.rankDim = rankSize;
     args.commTurn = commTurn;

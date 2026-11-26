@@ -106,6 +106,16 @@ public:
     __aicore__ inline void Process();
 
 private:
+    __aicore__ inline void InitTilingMembers(__gm__ AllGatherMatmulAIVModeTilingData* tiling);
+    __aicore__ inline void InitCoreInfo();
+    __aicore__ inline void InitAlignAndGmPtrs(__gm__ AllGatherMatmulAIVModeTilingData* tiling, GM_ADDR workspaceGM);
+    __aicore__ inline void InitQuantFlags(__gm__ AllGatherMatmulAIVModeTilingData* tiling);
+    __aicore__ inline void InitHcclWindows(__gm__ AllGatherMatmulAIVModeTilingData* tiling, GM_ADDR contextGM0);
+    __aicore__ inline void InitWorkspace(__gm__ AllGatherMatmulAIVModeTilingData* tiling, GM_ADDR workspaceGM);
+    __aicore__ inline int32_t ProcessAivPre();
+    __aicore__ inline void ProcessMainLoop();
+    __aicore__ inline void ProcessLoopBody(int32_t cal_idx);
+    __aicore__ inline void ProcessAivPost(int32_t num_flags);
     __aicore__ inline void ResetFlags(int32_t num_flags);
     __aicore__ inline void CopyGatherResult(int32_t cal_idx);
     __aicore__ inline void AIVInit();
@@ -232,37 +242,67 @@ __aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::Init(GM_ADDR aG
     x1ScaleGM_ = x1ScaleGM;
     x2ScaleGM_ = x2ScaleGM;
 
-    m = tilingData.allGatherMatmulInfo.M;
-    k = tilingData.allGatherMatmulInfo.K;
-    n = tilingData.allGatherMatmulInfo.N;
+    InitTilingMembers(tiling);
 
-    m0 = tilingData.cocTiling.m0; // tiling 寻优
-    k0 = tilingData.cocTiling.k0; // tiling 寻优
-    n0 = tilingData.cocTiling.n0; // tiling 寻优
+    InitCoreInfo();
 
-    m_loop = tilingData.cocTiling.mLoop;
-    n_loop = tilingData.cocTiling.nLoop;
-    k_loop = tilingData.cocTiling.kLoop;
-    pValue = tilingData.cocTiling.pValue;
+    InitAlignAndGmPtrs(tiling, workspaceGM);
 
-    max_ub_ping_pong_size = tilingData.cocTiling.ubMoveNum / MAX_BLOCK_COUNT;
-    comm_npu_split = tilingData.cocTiling.commNpuSplit;   // tiling 寻优
-    comm_data_split = tilingData.cocTiling.commDataSplit; // tiling 寻优
-    comm_direct = tilingData.cocTiling.commDirect;        // tiling 寻优
-    len_per_loop = tilingData.cocTiling.lenPerLoop;       // tiling 寻优
-    swizzlCount = tilingData.cocTiling.swizzlCount;       // 家里tiling写死
-    swizzlDirect = tilingData.cocTiling.swizzlDirect;     // 家里tiling写死
+    InitQuantFlags(tiling);
+
+    InitHcclWindows(tiling, contextGM0);
+
+    InitWorkspace(tiling, workspaceGM);
+
+    AllGatherMatmulAIVMode<TemplateAGMMFunc>::AICInit();
+
+    AllGatherMatmulAIVMode<TemplateAGMMFunc>::AIVInit();
+}
+
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::InitTilingMembers(
+    __gm__ AllGatherMatmulAIVModeTilingData* tiling)
+{
+    m = tiling->allGatherMatmulInfo.M;
+    k = tiling->allGatherMatmulInfo.K;
+    n = tiling->allGatherMatmulInfo.N;
+
+    m0 = tiling->cocTiling.m0; // tiling 寻优
+    k0 = tiling->cocTiling.k0; // tiling 寻优
+    n0 = tiling->cocTiling.n0; // tiling 寻优
+
+    m_loop = tiling->cocTiling.mLoop;
+    n_loop = tiling->cocTiling.nLoop;
+    k_loop = tiling->cocTiling.kLoop;
+    pValue = tiling->cocTiling.pValue;
+
+    max_ub_ping_pong_size = tiling->cocTiling.ubMoveNum / MAX_BLOCK_COUNT;
+    comm_npu_split = tiling->cocTiling.commNpuSplit;   // tiling 寻优
+    comm_data_split = tiling->cocTiling.commDataSplit; // tiling 寻优
+    comm_direct = tiling->cocTiling.commDirect;        // tiling 寻优
+    len_per_loop = tiling->cocTiling.lenPerLoop;       // tiling 寻优
+    swizzlCount = tiling->cocTiling.swizzlCount;       // 家里tiling写死
+    swizzlDirect = tiling->cocTiling.swizzlDirect;     // 家里tiling写死
     core_count = comm_npu_split * comm_data_split;
+}
 
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::InitCoreInfo()
+{
     coreIdx = GetBlockIdx();              // 0-48核
     coreNum = GetBlockNum();              // 24
     aivIdx = GetSubBlockIdx();            // 0-1
     blockIdx = coreIdx / GetTaskRation(); // 0-24核
+}
 
-    aAlignSize = tilingData.allGatherMatmulInfo.aAlignSize;
-    bAlignSize = tilingData.allGatherMatmulInfo.bAlignSize;
-    hasAAlign = tilingData.allGatherMatmulInfo.hasAAlign;
-    hasBAlign = (tilingData.allGatherMatmulInfo.hasBAlign && !(weightNZ));
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::InitAlignAndGmPtrs(
+    __gm__ AllGatherMatmulAIVModeTilingData* tiling, GM_ADDR workspaceGM)
+{
+    aAlignSize = tiling->allGatherMatmulInfo.aAlignSize;
+    bAlignSize = tiling->allGatherMatmulInfo.bAlignSize;
+    hasAAlign = tiling->allGatherMatmulInfo.hasAAlign;
+    hasBAlign = (tiling->allGatherMatmulInfo.hasBAlign && !(weightNZ));
     gm_a_align = reinterpret_cast<GM_ADDR>(hasAAlign ? workspaceGM : 0);
     gm_b_align = reinterpret_cast<GM_ADDR>(hasBAlign ? workspaceGM + aAlignSize : 0);
     gm_a_src = reinterpret_cast<__gm__ supportX1Type*>(hasAAlign ? gm_a_align : aGM_);
@@ -274,15 +314,25 @@ __aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::Init(GM_ADDR aG
     n_align = Block512B<X1Type>::AlignUp(n);
     aligned_a = hasAAlign;
     aligned_b = hasBAlign;
+}
 
-    isX2ScaleTypeInt64 = tilingData.allGatherMatmulInfo.isX2ScaleTypeInt64;
-    dequantType = tilingData.allGatherMatmulInfo.dequantType;
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::InitQuantFlags(
+    __gm__ AllGatherMatmulAIVModeTilingData* tiling)
+{
+    isX2ScaleTypeInt64 = tiling->allGatherMatmulInfo.isX2ScaleTypeInt64;
+    dequantType = tiling->allGatherMatmulInfo.dequantType;
     needAivDequant = quantFlag && (dequantType == PER_TOKEN || std::is_same<YType, bfloat16_t>::value);
     bool needPerChannelA8W8 = quantFlag && !(isX2ScaleTypeInt64 && std::is_same<YType, float16_t>::value);
     needPerChannel = std::is_same_v<X1Type, AscendC::int4b_t> || needPerChannelA8W8;
     needPerToken = quantFlag && dequantType == PER_TOKEN;
+}
 
-    bool is910C = tilingData.allGatherMatmulInfo.is910C;
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::InitHcclWindows(
+    __gm__ AllGatherMatmulAIVModeTilingData* tiling, GM_ADDR contextGM0)
+{
+    bool is910C = tiling->allGatherMatmulInfo.is910C;
     if (is910C) {
         __gm__ HcclOpResParam* winContext_{nullptr};
         winContext_ = (__gm__ HcclOpResParam*)contextGM0;
@@ -303,16 +353,17 @@ __aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::Init(GM_ADDR aG
             stateAddrPerRank[i] = (GM_ADDR)winContext_->windowsIn[i];
         }
     }
+}
 
-    accumWorkSpacePingPong = tilingData.allGatherMatmulInfo.accumWorkSpacePingPong;
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::InitWorkspace(
+    __gm__ AllGatherMatmulAIVModeTilingData* tiling, GM_ADDR workspaceGM)
+{
+    accumWorkSpacePingPong = tiling->allGatherMatmulInfo.accumWorkSpacePingPong;
     int32_t workspaceM = accumWorkSpacePingPong ? MAX_BLOCK_COUNT * m0 * pValue : m;
     uint64_t gm_scale_workspace_st = static_cast<uint64_t>(aAlignSize) + bAlignSize +
                                      static_cast<uint64_t>(workspaceM) * n * worldSize * sizeof(int32_t);
     gm_scale_workspace = needPerToken ? workspaceGM + gm_scale_workspace_st : 0;
-
-    AllGatherMatmulAIVMode<TemplateAGMMFunc>::AICInit();
-
-    AllGatherMatmulAIVMode<TemplateAGMMFunc>::AIVInit();
 }
 
 template <TemplateAGMMClass>
@@ -354,78 +405,99 @@ __aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::Process()
     if ASCEND_IS_AIV {
         TPipe pipe;
         pipe.InitBuffer(uBuf_, USED_UB_SIZE);
-        Padding();
-        int32_t num_flags = 4;
-        // flag[0] - flag[3] 清0
-        ResetFlags(num_flags);
-        PipeBarrier<PIPE_ALL>();
-
-        for (int32_t cal_idx = 0; cal_idx < cal_count + MAX_BLOCK_COUNT; ++cal_idx) {
-            uint64_t flag_idx = cal_idx % MAX_BLOCK_COUNT;
-
-            if (cal_idx == cal_count - 1) {
-                num_per_rank_move = data_len - src_offset;
-            }
-
-            if (cal_idx == 1) {
-                // 聚合perToken scale
-                AllGatherPerTokenScale(gm_a_pingpong_size);
-            }
-
-            // wait aic
-            if (cal_idx >= MAX_BLOCK_COUNT) {
-                WaitEvent(flag_idx);
-            }
-
-            Mc2AivSync::SetAndWaitAivSync(flag_idx);
-            if (cal_idx < cal_count) {
-                // Step 2: Rank sync
-                CrossRankSyncV1(FLAG_ZERO_IDX, cal_idx + 1);
-                Mc2AivSync::SetAndWaitAivSync(flag_idx);
-            }
-
-            if (cal_idx < cal_count && aivIdx == 0 && blockIdx < core_count) {
-                int64_t gm_rank_offset = static_cast<int64_t>(flag_idx) * gm_a_pingpong_size + rank_offset;
-                if constexpr (std::is_same_v<X1Type, AscendC::int4b_t>) {
-                    MoveWithSplit(reinterpret_cast<__gm__ int8_t*>(gm_a_src) + src_offset / 2, gm_rank_offset,
-                                  num_per_rank_move);
-                } else {
-                    MoveWithSplit(reinterpret_cast<__gm__ X1Type*>(gm_a_src) + src_offset, gm_rank_offset,
-                                  num_per_rank_move);
-                }
-                src_offset += num_per_rank_move;
-            } else if (cal_idx > 0 && cal_idx < cal_count + 1 && aivIdx == 1 && blockIdx >= core_count &&
-                       blockIdx < worldSize + core_count) { // peermem to out
-                CopyGatherResult(cal_idx);
-            }
-
-            // dequant
-            if (cal_idx >= MAX_BLOCK_COUNT) {
-                Dequant(cal_idx - MAX_BLOCK_COUNT);
-            }
-
-            if (cal_idx < cal_count) {
-                Mc2AivSync::SetAndWaitAivSync(flag_idx);
-                CrossRankSyncV2(FLAG_ONE_IDX, cal_idx + 1);
-                Mc2AivSync::SetAndWaitAivSync(flag_idx);
-                // 发送aic同步
-                Mc2AivSync::SetAicSync(flag_idx);
-            }
-        }
-
-        ResetFlags(num_flags);
-
-        Mc2AivSync::SetAndWaitAivSync(FLAG_ONE_IDX);
-
-        if (blockIdx < worldSize && aivIdx == 1) {
-            CheckBuffFlag((__gm__ int32_t*)stateAddrPerRank[blockIdx] + FLAG_OFFSET + FLAG_ZERO_IDX, uBuf_, 0);
-        }
-
+        int32_t num_flags = ProcessAivPre();
+        ProcessMainLoop();
+        ProcessAivPost(num_flags);
         PipeBarrier<PIPE_ALL>();
     }
     CatlassMatmul();
 
     SyncAll<false>();
+}
+
+template <TemplateAGMMClass>
+__aicore__ inline int32_t AllGatherMatmulAIVMode<TemplateAGMMFunc>::ProcessAivPre()
+{
+    Padding();
+    int32_t num_flags = 4;
+    // flag[0] - flag[3] 清0
+    ResetFlags(num_flags);
+    PipeBarrier<PIPE_ALL>();
+    return num_flags;
+}
+
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::ProcessMainLoop()
+{
+    for (int32_t cal_idx = 0; cal_idx < cal_count + MAX_BLOCK_COUNT; ++cal_idx) {
+        ProcessLoopBody(cal_idx);
+    }
+}
+
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::ProcessLoopBody(int32_t cal_idx)
+{
+    uint64_t flag_idx = cal_idx % MAX_BLOCK_COUNT;
+
+    if (cal_idx == cal_count - 1) {
+        num_per_rank_move = data_len - src_offset;
+    }
+
+    if (cal_idx == 1) {
+        // 聚合perToken scale
+        AllGatherPerTokenScale(gm_a_pingpong_size);
+    }
+
+    // wait aic
+    if (cal_idx >= MAX_BLOCK_COUNT) {
+        WaitEvent(flag_idx);
+    }
+
+    Mc2AivSync::SetAndWaitAivSync(flag_idx);
+    if (cal_idx < cal_count) {
+        // Step 2: Rank sync
+        CrossRankSyncV1(FLAG_ZERO_IDX, cal_idx + 1);
+        Mc2AivSync::SetAndWaitAivSync(flag_idx);
+    }
+
+    if (cal_idx < cal_count && aivIdx == 0 && blockIdx < core_count) {
+        int64_t gm_rank_offset = static_cast<int64_t>(flag_idx) * gm_a_pingpong_size + rank_offset;
+        if constexpr (std::is_same_v<X1Type, AscendC::int4b_t>) {
+            MoveWithSplit(reinterpret_cast<__gm__ int8_t*>(gm_a_src) + src_offset / 2, gm_rank_offset,
+                          num_per_rank_move);
+        } else {
+            MoveWithSplit(reinterpret_cast<__gm__ X1Type*>(gm_a_src) + src_offset, gm_rank_offset, num_per_rank_move);
+        }
+        src_offset += num_per_rank_move;
+    } else if (cal_idx > 0 && cal_idx < cal_count + 1 && aivIdx == 1 && blockIdx >= core_count &&
+               blockIdx < worldSize + core_count) { // peermem to out
+        CopyGatherResult(cal_idx);
+    }
+
+    // dequant
+    if (cal_idx >= MAX_BLOCK_COUNT) {
+        Dequant(cal_idx - MAX_BLOCK_COUNT);
+    }
+
+    if (cal_idx < cal_count) {
+        Mc2AivSync::SetAndWaitAivSync(flag_idx);
+        CrossRankSyncV2(FLAG_ONE_IDX, cal_idx + 1);
+        Mc2AivSync::SetAndWaitAivSync(flag_idx);
+        // 发送aic同步
+        Mc2AivSync::SetAicSync(flag_idx);
+    }
+}
+
+template <TemplateAGMMClass>
+__aicore__ inline void AllGatherMatmulAIVMode<TemplateAGMMFunc>::ProcessAivPost(int32_t num_flags)
+{
+    ResetFlags(num_flags);
+
+    Mc2AivSync::SetAndWaitAivSync(FLAG_ONE_IDX);
+
+    if (blockIdx < worldSize && aivIdx == 1) {
+        CheckBuffFlag((__gm__ int32_t*)stateAddrPerRank[blockIdx] + FLAG_OFFSET + FLAG_ZERO_IDX, uBuf_, 0);
+    }
 }
 
 template <TemplateAGMMClass>

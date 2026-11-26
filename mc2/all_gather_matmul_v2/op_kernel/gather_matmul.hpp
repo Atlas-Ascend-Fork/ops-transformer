@@ -276,6 +276,49 @@ public:
         bool hasNextBlock;
     };
 
+    inline __aicore__ int64_t CalcGmOffsetC(int32_t dstBlockIdx, RemoteLoopContext const& ctx, Params const& params,
+                                            MatrixCoord offsetC, bool accumWorkSpacePingPong)
+    {
+        int64_t gmOffsetC;
+        if (accumWorkSpacePingPong) {
+            gmOffsetC = (static_cast<int64_t>(dstBlockIdx) + static_cast<int64_t>(ctx.flagIdx) * params.rankSize) *
+                            ctx.outputBlockSize +
+                        params.layoutC.GetOffset(offsetC);
+        } else {
+            gmOffsetC = dstBlockIdx * ctx.mnSize + ctx.calIdx * ctx.outputBlockSize + params.layoutC.GetOffset(offsetC);
+        }
+        return gmOffsetC;
+    }
+
+    inline __aicore__ bool CalcRemoteNextBlock(RemoteBlockInfo& info, int32_t nextLoopOffset,
+                                               RemoteLoopContext const& ctx, Params const& params)
+    {
+        GemmCoord nextBlockLocCoord;
+        GemmCoord nextBlockSizeCoord;
+        bool hasNextBlock = false;
+        if (nextLoopOffset < ctx.loopNumInOtherRank) {
+            hasNextBlock = true;
+            int32_t nextLoopOffsetInBlock = nextLoopOffset / ctx.otherRankNum;
+            int32_t nextDstBlockIdx = nextLoopOffset % ctx.otherRankNum;
+            GemmCoord nextBlockIdCoord = GetBlockIdCoord(nextLoopOffsetInBlock, ctx.actualPValue, nLoops,
+                                                         params.swizzlDirect, params.swizzlCount);
+            nextBlockLocCoord = Mc2MatmulAiv::GetBlockLocCoord<L1TileShape>(nextBlockIdCoord);
+            nextBlockSizeCoord = Mc2MatmulAiv::GetBlockSizeCoord<L1TileShape>(
+                nextBlockIdCoord, nextBlockLocCoord, ctx.actualPValue, ctx.blockM, nLoops, params.problemShape.n(),
+                params.problemShape.k());
+            MatrixCoord offsetNextA{nextBlockLocCoord.m(), nextBlockLocCoord.k()};
+            MatrixCoord offsetNextB{nextBlockLocCoord.k(), nextBlockLocCoord.n()};
+            info.aNextIsLocal = (nextDstBlockIdx == params.rankIdx);
+            info.gmOffsetNextA =
+                info.aNextIsLocal ?
+                    (ctx.calIdx * ctx.blockSize + params.layoutA.GetOffset(offsetNextA)) :
+                    (ctx.pingPongSt + nextDstBlockIdx * ctx.blockSize + params.layoutPeerMem.GetOffset(offsetNextA));
+            info.gmOffsetNextB = params.layoutB.GetOffset(offsetNextB);
+        }
+        info.nextBlockSizeCoord = nextBlockSizeCoord;
+        return hasNextBlock;
+    }
+
     inline __aicore__ RemoteBlockInfo GetRemoteBlockInfo(int32_t loopOffset, RemoteLoopContext const& ctx,
                                                          bool accumWorkSpacePingPong, Params const& params)
     {
@@ -291,60 +334,24 @@ public:
         MatrixCoord offsetB{blockLocCoord.k(), blockLocCoord.n()};
         MatrixCoord offsetC{blockLocCoord.m(), blockLocCoord.n()};
 
-        int64_t gmOffsetC;
-        if (accumWorkSpacePingPong) {
-            gmOffsetC = (static_cast<int64_t>(dstBlockIdx) + static_cast<int64_t>(ctx.flagIdx) * params.rankSize) *
-                            ctx.outputBlockSize +
-                        params.layoutC.GetOffset(offsetC);
-        } else {
-            gmOffsetC = dstBlockIdx * ctx.mnSize + ctx.calIdx * ctx.outputBlockSize + params.layoutC.GetOffset(offsetC);
-        }
+        int64_t gmOffsetC = CalcGmOffsetC(dstBlockIdx, ctx, params, offsetC, accumWorkSpacePingPong);
 
         bool aIsLocal = (dstBlockIdx == params.rankIdx);
         uint64_t gmOffsetA =
             aIsLocal ? (ctx.calIdx * ctx.blockSize + params.layoutA.GetOffset(offsetA)) :
                        (ctx.pingPongSt + dstBlockIdx * ctx.blockSize + params.layoutPeerMem.GetOffset(offsetA));
 
-        GemmCoord nextBlockLocCoord;
-        GemmCoord nextBlockSizeCoord;
-        uint64_t gmOffsetNextA = 0;
-        uint64_t gmOffsetNextB = 0;
-        bool aNextIsLocal = false;
-        bool hasNextBlock = false;
         int32_t nextLoopOffset = loopOffset + coreNum;
-        if (nextLoopOffset < ctx.loopNumInOtherRank) {
-            hasNextBlock = true;
-            int32_t nextLoopOffsetInBlock = nextLoopOffset / ctx.otherRankNum;
-            int32_t nextDstBlockIdx = nextLoopOffset % ctx.otherRankNum;
-            GemmCoord nextBlockIdCoord = GetBlockIdCoord(nextLoopOffsetInBlock, ctx.actualPValue, nLoops,
-                                                         params.swizzlDirect, params.swizzlCount);
-            nextBlockLocCoord = Mc2MatmulAiv::GetBlockLocCoord<L1TileShape>(nextBlockIdCoord);
-            nextBlockSizeCoord = Mc2MatmulAiv::GetBlockSizeCoord<L1TileShape>(
-                nextBlockIdCoord, nextBlockLocCoord, ctx.actualPValue, ctx.blockM, nLoops, params.problemShape.n(),
-                params.problemShape.k());
-            MatrixCoord offsetNextA{nextBlockLocCoord.m(), nextBlockLocCoord.k()};
-            MatrixCoord offsetNextB{nextBlockLocCoord.k(), nextBlockLocCoord.n()};
-            aNextIsLocal = (nextDstBlockIdx == params.rankIdx);
-            gmOffsetNextA =
-                aNextIsLocal ?
-                    (ctx.calIdx * ctx.blockSize + params.layoutA.GetOffset(offsetNextA)) :
-                    (ctx.pingPongSt + nextDstBlockIdx * ctx.blockSize + params.layoutPeerMem.GetOffset(offsetNextA));
-            gmOffsetNextB = params.layoutB.GetOffset(offsetNextB);
-        }
-
         RemoteBlockInfo info{};
+        info.hasNextBlock = CalcRemoteNextBlock(info, nextLoopOffset, ctx, params);
+
         info.blockLocCoord = blockLocCoord;
         info.blockSizeCoord = blockSizeCoord;
-        info.nextBlockSizeCoord = nextBlockSizeCoord;
         info.gmOffsetC = gmOffsetC;
         info.gmOffsetA = gmOffsetA;
         info.gmOffsetB = params.layoutB.GetOffset(offsetB);
-        info.gmOffsetNextA = gmOffsetNextA;
-        info.gmOffsetNextB = gmOffsetNextB;
         info.aIsLocal = aIsLocal;
-        info.aNextIsLocal = aNextIsLocal;
         info.isFirstBlock = (loopOffset < coreNum);
-        info.hasNextBlock = hasNextBlock;
         return info;
     }
 

@@ -182,180 +182,243 @@ public:
         // k loop
         for (uint32_t kLoopIdx = 0; kLoopIdx < kTileCount; kLoopIdx++) {
             uint32_t shuffleKIdx = (startTileIdx + kLoopIdx) % kTileCount;
-            // Load first matrix A tile in total kernel loop from GM to L1
-            if (shuffleKIdx == firstTileIdx && isFirstBlock) {
-                MatrixCoord gmTileAOffset{0, shuffleKIdx * L1TileShape::K};
-                MatrixCoord gmTileBOffset{shuffleKIdx * L1TileShape::K, 0};
-                auto gmTileA = gmBlockA[layoutA.GetOffset(gmTileAOffset)];
-                auto gmTileB = gmBlockB[layoutB.GetOffset(gmTileBOffset)];
-                // Load first matrix A tile from GM to L1
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
-                auto layoutTileA = layoutA.GetTileLayout(MakeCoord(actualShape.m(), kActual));
-                copyGmToL1A(l1ATensorList[l1ListId], gmTileA, layoutAInL1, layoutTileA);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
-
-                // Load first matrix B tile from GM to L1
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
-                auto layoutTileB = layoutB.GetTileLayout(MakeCoord(kActual, actualShape.n()));
-                copyGmToL1B(l1BTensorList[l1ListId], gmTileB, layoutBInL1, layoutTileB);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
-            }
+            LoadFirstTiles(gmBlockA, layoutA, gmBlockB, layoutB, actualShape, layoutAInL1, layoutBInL1, shuffleKIdx,
+                           firstTileIdx, isFirstBlock, kActual);
 
             uint32_t l1ListIdNext = (l1ListId + 1 < STAGES) ? (l1ListId + 1) : 0;
             uint32_t kActualNext{0};
 
-            // preload next tile from GM to L1
-            if (shuffleKIdx != lastTileIdx) {
-                uint32_t shuffleKIdxNext = (startTileIdx + kLoopIdx + 1) % kTileCount;
-                // Get L1 tensor for next stage
-                auto l1ATensor = l1ATensorList[l1ListIdNext];
-                auto l1BTensor = l1BTensorList[l1ListIdNext];
-                // Get GM tensor for next stage
-                kActualNext = (shuffleKIdxNext < kTileCount - 1) ? L1TileShape::K :
-                                                                   (actualShape.k() - shuffleKIdxNext * L1TileShape::K);
-                MatrixCoord gmTileAOffset{0, shuffleKIdxNext * L1TileShape::K};
-                MatrixCoord gmTileBOffset{shuffleKIdxNext * L1TileShape::K, 0};
-                auto gmTileA = gmBlockA[layoutA.GetOffset(gmTileAOffset)];
-                auto gmTileB = gmBlockB[layoutB.GetOffset(gmTileBOffset)];
+            PreloadNextK(gmBlockA, layoutA, gmBlockB, layoutB, actualShape, layoutAInL1, layoutBInL1, startTileIdx,
+                         kLoopIdx, kTileCount, shuffleKIdx, lastTileIdx, l1ListIdNext, kActualNext);
+            PreloadNextBlockK(gmNextBlockA, gmNextBlockB, layoutA, layoutB, actualShapeNext, layoutAInL1, layoutBInL1,
+                              kTileCountNext, firstTileIdxNext, shuffleKIdx, lastTileIdx, hasNextBlock, l1ListIdNext,
+                              kActualNext);
 
-                // load next matrix A tile from GM to L1
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListIdNext]);
-                auto layoutTileA = layoutA.GetTileLayout(MakeCoord(actualShape.m(), kActualNext));
-                copyGmToL1A(l1ATensor, gmTileA, layoutAInL1, layoutTileA);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListIdNext]);
-
-                // load next matrix B tile from GM to L1
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListIdNext]);
-                auto layoutTileB = layoutB.GetTileLayout(MakeCoord(kActualNext, actualShape.n()));
-                copyGmToL1B(l1BTensor, gmTileB, layoutBInL1, layoutTileB);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListIdNext]);
-            }
-            if (shuffleKIdx == lastTileIdx && hasNextBlock) {
-                // Get L1 tensor for next stage
-                auto l1ATensor = l1ATensorList[l1ListIdNext];
-                auto l1BTensor = l1BTensorList[l1ListIdNext];
-                // Get GM tensor for next stage
-                kActualNext = (firstTileIdxNext < kTileCountNext - 1) ?
-                                  L1TileShape::K :
-                                  (actualShapeNext.k() - firstTileIdxNext * L1TileShape::K);
-                MatrixCoord gmTileAOffset{0, firstTileIdxNext * L1TileShape::K};
-                MatrixCoord gmTileBOffset{firstTileIdxNext * L1TileShape::K, 0};
-                auto gmTileA = gmNextBlockA[layoutA.GetOffset(gmTileAOffset)];
-                auto gmTileB = gmNextBlockB[layoutB.GetOffset(gmTileBOffset)];
-                // load next matrix A tile from GM to L1
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListIdNext]);
-                auto layoutTileA = layoutA.GetTileLayout(MakeCoord(actualShapeNext.m(), kActualNext));
-                copyGmToL1A(l1ATensor, gmTileA, layoutAInL1, layoutTileA);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListIdNext]);
-
-                // load next matrix B tile from GM to L1
-                AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListIdNext]);
-                auto layoutTileB = layoutB.GetTileLayout(MakeCoord(kActualNext, actualShapeNext.n()));
-                copyGmToL1B(l1BTensor, gmTileB, layoutBInL1, layoutTileB);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListIdNext]);
-            }
-
-            // Get L1 tensor for current stage
-            auto l1ATensor = l1ATensorList[l1ListId];
-            auto l1BTensor = l1BTensorList[l1ListId];
-
-            // Get the loop nums on L0
-            uint32_t kPartLoop = CeilDiv<L0TileShape::K>(kActual);
-
-            uint32_t l0ABufId = 0;
-            uint32_t l0BBufId = 0;
-
-            for (int mPartIdx = 0; mPartIdx < mPartLoop; mPartIdx++) {
-                uint32_t mPartActual =
-                    (mPartIdx < mPartLoop - 1) ? L0TileShape::M : (mRound - mPartIdx * L0TileShape::M);
-
-                for (int kPartIdx = 0; kPartIdx < kPartLoop; kPartIdx++) {
-                    uint32_t kPartActual =
-                        (kPartIdx < kPartLoop - 1) ? L0TileShape::K : (kActual - kPartIdx * L0TileShape::K);
-
-                    // Locate the current tile on L0A
-                    auto l0ATile = l0ATensorList[l0ABufId];
-                    LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mPartActual, kPartActual);
-                    // Locate the current tile of matrix A on L1
-                    MatrixCoord l1AOffset{mPartIdx * L0TileShape::M, kPartIdx * L0TileShape::K};
-                    auto l1ATile = l1ATensor[layoutAInL1.GetOffset(l1AOffset)];
-
-                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0ABufId]);
-                    if ((mPartIdx == 0) && (kPartIdx == 0)) {
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
-                    }
-
-                    copyL1ToL0A(l0ATile, l1ATile, layoutAInL0, layoutAInL1);
-
-                    if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
-                        AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
-                    }
-
-                    for (int nPartIdx = 0; nPartIdx < nPartLoop; nPartIdx++) {
-                        uint32_t nPartActual =
-                            (nPartIdx < nPartLoop - 1) ? L0TileShape::N : (nRound - nPartIdx * L0TileShape::N);
-
-                        // Locate the current tile on L0B
-                        auto l0BTile = l0BTensorList[l0BBufId];
-                        LayoutBInL0 layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kPartActual, nPartActual);
-                        // Locate the current tile of matrix B on L1
-                        MatrixCoord l1BOffset{kPartIdx * L0TileShape::K, nPartIdx * L0TileShape::N};
-                        auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BOffset)];
-
-                        // Wait for mmad finished
-                        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BBufId]);
-                        // If the current tile is the first one on the k&n axis, wait for loading matrix B from GM to L1
-                        if ((kPartIdx == 0) && (nPartIdx == 0)) {
-                            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
-                        }
-
-                        // Load current tile from L1 to L0B
-                        copyL1ToL0B(l0BTile, l1BTile, layoutBInL0, layoutBInL1);
-
-                        // If the current tile is the last one on the k&n axis, notify to load matrix B from GM to L1
-                        if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
-                            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
-                        }
-                        // Notify to do mmad
-                        AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-
-                        // Locate the current tile on L0C
-                        MatrixCoord l0COffset{mPartIdx * L0TileShape::M, nPartIdx * L0TileShape::N};
-                        auto l0CTile = l0CTensor[layoutInL0C.GetOffset(l0COffset)];
-
-                        // Compute the matrix multiplication on L0A and L0B and write the result to the accumulator
-                        // Wait for loading L0B
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-
-                        // If the current tile is the first tile on the k axis, the accumulator needs to be reset to 0
-                        bool initC = ((kLoopIdx == 0) && (kPartIdx == 0));
-                        // If the unit flag is enabled, the unit flag is set according to the calculation progress
-                        uint8_t unitFlag = 0b00;
-                        if constexpr (ENABLE_UNIT_FLAG) {
-                            if ((kLoopIdx == kTileCount - 1) && (mPartIdx == mPartLoop - 1) &&
-                                (kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
-                                unitFlag = 0b11;
-                            } else {
-                                unitFlag = 0b10;
-                            }
-                        }
-                        // Perform calculation operations
-                        tileMmad(l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
-
-                        // Notify to move the next L0B tile
-                        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BBufId]);
-
-                        l0BBufId = (l0BBufId + 1 < STAGES) ? (l0BBufId + 1) : 0;
-                    }
-                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0ABufId]);
-                    l0ABufId = (l0ABufId + 1 < STAGES) ? (l0ABufId + 1) : 0;
-                }
-            }
+            ComputeMmadLoop(layoutAInL1, layoutBInL1, layoutInL0C, kLoopIdx, kTileCount, kActual, mPartLoop, nPartLoop,
+                            mRound, nRound);
 
             l1ListId = l1ListIdNext;
             kActual = kActualNext;
         }
 
+        CopyOutBlock(gmBlockC, layoutC, gmBlockS, layoutScale, actualShape, layoutInL0C);
+    }
+
+protected:
+    CATLASS_DEVICE
+    void LoadFirstTiles(AscendC::GlobalTensor<ElementA> const& gmBlockA, LayoutA const& layoutA,
+                        AscendC::GlobalTensor<ElementB> const& gmBlockB, LayoutB const& layoutB,
+                        GemmCoord const& actualShape, LayoutAInL1 const& layoutAInL1, LayoutBInL1 const& layoutBInL1,
+                        uint32_t shuffleKIdx, uint32_t firstTileIdx, bool isFirstBlock, uint32_t kActual)
+    {
+        // Load first matrix A tile in total kernel loop from GM to L1
+        if (shuffleKIdx == firstTileIdx && isFirstBlock) {
+            MatrixCoord gmTileAOffset{0, shuffleKIdx * L1TileShape::K};
+            MatrixCoord gmTileBOffset{shuffleKIdx * L1TileShape::K, 0};
+            auto gmTileA = gmBlockA[layoutA.GetOffset(gmTileAOffset)];
+            auto gmTileB = gmBlockB[layoutB.GetOffset(gmTileBOffset)];
+            // Load first matrix A tile from GM to L1
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
+            auto layoutTileA = layoutA.GetTileLayout(MakeCoord(actualShape.m(), kActual));
+            copyGmToL1A(l1ATensorList[l1ListId], gmTileA, layoutAInL1, layoutTileA);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
+
+            // Load first matrix B tile from GM to L1
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
+            auto layoutTileB = layoutB.GetTileLayout(MakeCoord(kActual, actualShape.n()));
+            copyGmToL1B(l1BTensorList[l1ListId], gmTileB, layoutBInL1, layoutTileB);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
+        }
+    }
+
+    CATLASS_DEVICE
+    void PreloadNextK(AscendC::GlobalTensor<ElementA> const& gmBlockA, LayoutA const& layoutA,
+                      AscendC::GlobalTensor<ElementB> const& gmBlockB, LayoutB const& layoutB,
+                      GemmCoord const& actualShape, LayoutAInL1 const& layoutAInL1, LayoutBInL1 const& layoutBInL1,
+                      uint32_t startTileIdx, uint32_t kLoopIdx, uint32_t kTileCount, uint32_t shuffleKIdx,
+                      uint32_t lastTileIdx, uint32_t l1ListIdNext, uint32_t& kActualNext)
+    {
+        // preload next tile from GM to L1
+        if (shuffleKIdx != lastTileIdx) {
+            uint32_t shuffleKIdxNext = (startTileIdx + kLoopIdx + 1) % kTileCount;
+            // Get L1 tensor for next stage
+            auto l1ATensor = l1ATensorList[l1ListIdNext];
+            auto l1BTensor = l1BTensorList[l1ListIdNext];
+            // Get GM tensor for next stage
+            kActualNext = (shuffleKIdxNext < kTileCount - 1) ? L1TileShape::K :
+                                                               (actualShape.k() - shuffleKIdxNext * L1TileShape::K);
+            MatrixCoord gmTileAOffset{0, shuffleKIdxNext * L1TileShape::K};
+            MatrixCoord gmTileBOffset{shuffleKIdxNext * L1TileShape::K, 0};
+            auto gmTileA = gmBlockA[layoutA.GetOffset(gmTileAOffset)];
+            auto gmTileB = gmBlockB[layoutB.GetOffset(gmTileBOffset)];
+
+            // load next matrix A tile from GM to L1
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListIdNext]);
+            auto layoutTileA = layoutA.GetTileLayout(MakeCoord(actualShape.m(), kActualNext));
+            copyGmToL1A(l1ATensor, gmTileA, layoutAInL1, layoutTileA);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListIdNext]);
+
+            // load next matrix B tile from GM to L1
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListIdNext]);
+            auto layoutTileB = layoutB.GetTileLayout(MakeCoord(kActualNext, actualShape.n()));
+            copyGmToL1B(l1BTensor, gmTileB, layoutBInL1, layoutTileB);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListIdNext]);
+        }
+    }
+
+    CATLASS_DEVICE
+    void PreloadNextBlockK(AscendC::GlobalTensor<ElementA> const& gmNextBlockA,
+                           AscendC::GlobalTensor<ElementB> const& gmNextBlockB, LayoutA const& layoutA,
+                           LayoutB const& layoutB, GemmCoord const& actualShapeNext, LayoutAInL1 const& layoutAInL1,
+                           LayoutBInL1 const& layoutBInL1, uint32_t kTileCountNext, uint32_t firstTileIdxNext,
+                           uint32_t shuffleKIdx, uint32_t lastTileIdx, bool hasNextBlock, uint32_t l1ListIdNext,
+                           uint32_t& kActualNext)
+    {
+        if (shuffleKIdx == lastTileIdx && hasNextBlock) {
+            // Get L1 tensor for next stage
+            auto l1ATensor = l1ATensorList[l1ListIdNext];
+            auto l1BTensor = l1BTensorList[l1ListIdNext];
+            // Get GM tensor for next stage
+            kActualNext = (firstTileIdxNext < kTileCountNext - 1) ?
+                              L1TileShape::K :
+                              (actualShapeNext.k() - firstTileIdxNext * L1TileShape::K);
+            MatrixCoord gmTileAOffset{0, firstTileIdxNext * L1TileShape::K};
+            MatrixCoord gmTileBOffset{firstTileIdxNext * L1TileShape::K, 0};
+            auto gmTileA = gmNextBlockA[layoutA.GetOffset(gmTileAOffset)];
+            auto gmTileB = gmNextBlockB[layoutB.GetOffset(gmTileBOffset)];
+            // load next matrix A tile from GM to L1
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListIdNext]);
+            auto layoutTileA = layoutA.GetTileLayout(MakeCoord(actualShapeNext.m(), kActualNext));
+            copyGmToL1A(l1ATensor, gmTileA, layoutAInL1, layoutTileA);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListIdNext]);
+
+            // load next matrix B tile from GM to L1
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListIdNext]);
+            auto layoutTileB = layoutB.GetTileLayout(MakeCoord(kActualNext, actualShapeNext.n()));
+            copyGmToL1B(l1BTensor, gmTileB, layoutBInL1, layoutTileB);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListIdNext]);
+        }
+    }
+
+    CATLASS_DEVICE
+    void ComputeMmadLoop(LayoutAInL1 const& layoutAInL1, LayoutBInL1 const& layoutBInL1, LayoutCInL0 const& layoutInL0C,
+                         uint32_t kLoopIdx, uint32_t kTileCount, uint32_t kActual, uint32_t mPartLoop,
+                         uint32_t nPartLoop, uint32_t mRound, uint32_t nRound)
+    {
+        // Get L1 tensor for current stage
+        auto l1ATensor = l1ATensorList[l1ListId];
+        auto l1BTensor = l1BTensorList[l1ListId];
+
+        // Get the loop nums on L0
+        uint32_t kPartLoop = CeilDiv<L0TileShape::K>(kActual);
+
+        uint32_t l0ABufId = 0;
+        uint32_t l0BBufId = 0;
+
+        for (int mPartIdx = 0; mPartIdx < mPartLoop; mPartIdx++) {
+            uint32_t mPartActual = (mPartIdx < mPartLoop - 1) ? L0TileShape::M : (mRound - mPartIdx * L0TileShape::M);
+
+            for (int kPartIdx = 0; kPartIdx < kPartLoop; kPartIdx++) {
+                uint32_t kPartActual =
+                    (kPartIdx < kPartLoop - 1) ? L0TileShape::K : (kActual - kPartIdx * L0TileShape::K);
+
+                // Locate the current tile on L0A
+                auto l0ATile = l0ATensorList[l0ABufId];
+                LayoutAInL0 layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mPartActual, kPartActual);
+                // Locate the current tile of matrix A on L1
+                MatrixCoord l1AOffset{mPartIdx * L0TileShape::M, kPartIdx * L0TileShape::K};
+                auto l1ATile = l1ATensor[layoutAInL1.GetOffset(l1AOffset)];
+
+                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0ABufId]);
+                if ((mPartIdx == 0) && (kPartIdx == 0)) {
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[l1ListId]);
+                }
+
+                copyL1ToL0A(l0ATile, l1ATile, layoutAInL0, layoutAInL1);
+
+                if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
+                    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[l1ListId]);
+                }
+
+                for (int nPartIdx = 0; nPartIdx < nPartLoop; nPartIdx++) {
+                    ComputeMmadNPart(l0ATile, l1BTensor, layoutBInL1, layoutInL0C, l0BBufId, kLoopIdx, kTileCount,
+                                     mPartIdx, mPartLoop, kPartIdx, kPartLoop, nPartIdx, nPartLoop, mPartActual,
+                                     kPartActual, nRound);
+                }
+
+                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0ABufId]);
+                l0ABufId = (l0ABufId + 1 < STAGES) ? (l0ABufId + 1) : 0;
+            }
+        }
+    }
+
+    CATLASS_DEVICE
+    void ComputeMmadNPart(AscendC::LocalTensor<ElementA> l0ATile, AscendC::LocalTensor<ElementB> l1BTensor,
+                          LayoutBInL1 const& layoutBInL1, LayoutCInL0 const& layoutInL0C, uint32_t& l0BBufId,
+                          uint32_t kLoopIdx, uint32_t kTileCount, int mPartIdx, uint32_t mPartLoop, int kPartIdx,
+                          uint32_t kPartLoop, int nPartIdx, uint32_t nPartLoop, uint32_t mPartActual,
+                          uint32_t kPartActual, uint32_t nRound)
+    {
+        uint32_t nPartActual = (nPartIdx < nPartLoop - 1) ? L0TileShape::N : (nRound - nPartIdx * L0TileShape::N);
+
+        // Locate the current tile on L0B
+        auto l0BTile = l0BTensorList[l0BBufId];
+        LayoutBInL0 layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kPartActual, nPartActual);
+        // Locate the current tile of matrix B on L1
+        MatrixCoord l1BOffset{kPartIdx * L0TileShape::K, nPartIdx * L0TileShape::N};
+        auto l1BTile = l1BTensor[layoutBInL1.GetOffset(l1BOffset)];
+
+        // Wait for mmad finished
+        AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BBufId]);
+        // If the current tile is the first one on the k&n axis, wait for loading matrix B from GM to L1
+        if ((kPartIdx == 0) && (nPartIdx == 0)) {
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[l1ListId]);
+        }
+
+        // Load current tile from L1 to L0B
+        copyL1ToL0B(l0BTile, l1BTile, layoutBInL0, layoutBInL1);
+
+        // If the current tile is the last one on the k&n axis, notify to load matrix B from GM to L1
+        if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
+            AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[l1ListId]);
+        }
+        // Notify to do mmad
+        AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
+
+        // Locate the current tile on L0C
+        MatrixCoord l0COffset{mPartIdx * L0TileShape::M, nPartIdx * L0TileShape::N};
+        auto l0CTile = l0CTensor[layoutInL0C.GetOffset(l0COffset)];
+
+        // Compute the matrix multiplication on L0A and L0B and write the result to the accumulator
+        // Wait for loading L0B
+        AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
+
+        // If the current tile is the first tile on the k axis, the accumulator needs to be reset to 0
+        bool initC = ((kLoopIdx == 0) && (kPartIdx == 0));
+        // If the unit flag is enabled, the unit flag is set according to the calculation progress
+        uint8_t unitFlag = 0b00;
+        if constexpr (ENABLE_UNIT_FLAG) {
+            if ((kLoopIdx == kTileCount - 1) && (mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1) &&
+                (nPartIdx == nPartLoop - 1)) {
+                unitFlag = 0b11;
+            } else {
+                unitFlag = 0b10;
+            }
+        }
+        // Perform calculation operations
+        tileMmad(l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
+
+        // Notify to move the next L0B tile
+        AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BBufId]);
+
+        l0BBufId = (l0BBufId + 1 < STAGES) ? (l0BBufId + 1) : 0;
+    }
+
+    CATLASS_DEVICE
+    void CopyOutBlock(AscendC::GlobalTensor<ElementC> const& gmBlockC, LayoutC const& layoutC,
+                      AscendC::GlobalTensor<ElementScale> const& gmBlockS, layout::VectorLayout const& layoutScale,
+                      GemmCoord const& actualShape, LayoutCInL0 const& layoutInL0C)
+    {
         // copy block out
         LayoutC layoutBlock = layoutC.GetTileLayout(actualShape.GetCoordMN());
         auto layoutTileS = layoutScale.GetTileLayout(MakeCoord(layoutBlock.shape(1)));
@@ -374,7 +437,6 @@ public:
         AscendC::SetFlag<AscendC::HardEvent::FIX_MTE2>(0);
     }
 
-protected:
     /// Data members
     AscendC::LocalTensor<ElementA> l1ATensorList[STAGES];
     AscendC::LocalTensor<ElementB> l1BTensorList[STAGES];

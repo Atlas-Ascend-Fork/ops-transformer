@@ -614,6 +614,33 @@ void AllGatherMatmulTilingBase::Reset()
     gatherIndex_ = 0U;
 }
 
+static bool CheckCommModeValue(const char* opName, const char* commMode)
+{
+    OP_TILING_CHECK(
+        !((std::strncmp(commMode, "ccu", CMP_MAX_LEN) == 0) || (std::strncmp(commMode, "ai_cpu", CMP_MAX_LEN) == 0)),
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "comm_mode", commMode,
+                                              "The value of comm_mode must be ccu, ai_cpu"),
+        return false);
+    return true;
+}
+
+static bool CheckBlockSizeValue(gert::TilingContext* context, const char* opName)
+{
+    // blockSize 语义:
+    //   0      - 非量化 (fp16/bf16 V2 路径)
+    //   32     - MX 量化  (fp8 QuantBmm 路径, FLOAT8_E8M0 scale, README §情形4)
+    //   packed - PerBlock 量化 (M | N<<16 | K<<32, FLOAT scale)
+    // 仅对非 fp8 输入硬拒非零值; fp8 路径由子类 IsCapable +
+    // AllGatherQuantBmmHelper::GetShapeAttrsInfo 区分校验, base 不拒 (否则 MX/PerBlock 不可达)。
+    auto blockSizePtr = context->GetAttrs()->GetAttrPointer<int64_t>(BLOCK_SIZE_INDEX);
+    const int64_t blockSize = blockSizePtr != nullptr ? *blockSizePtr : 0;
+    bool x1IsFp8 = CheckSupportDtype(context->GetInputDesc(INPUT_X1)->GetDataType(), FP8_DTYPE_SUPPORT_LIST);
+    OP_TILING_CHECK(!x1IsFp8 && blockSize != 0,
+                    OP_LOGE_FOR_INVALID_VALUE(opName, "blockSize", std::to_string(blockSize).c_str(), "0"),
+                    return false);
+    return true;
+}
+
 bool AllGatherMatmulTilingBase::AnalyzeAttrs()
 {
     auto attrs = context_->GetAttrs();
@@ -626,11 +653,9 @@ bool AllGatherMatmulTilingBase::AnalyzeAttrs()
     auto gatherIndexPtr = attrs->GetAttrPointer<int64_t>(GATHER_IDX);
     auto commTurn = attrs->GetAttrPointer<int64_t>(COMM_TURN);
     OP_TILING_CHECK(commMode_ == nullptr, OP_LOGE_WITH_INVALID_INPUT(opName_, "comm_mode"), return false);
-    OP_TILING_CHECK(
-        !((std::strncmp(commMode_, "ccu", CMP_MAX_LEN) == 0) || (std::strncmp(commMode_, "ai_cpu", CMP_MAX_LEN) == 0)),
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "comm_mode", commMode_,
-                                              "The value of comm_mode must be ccu, ai_cpu"),
-        return false);
+    if (!CheckCommModeValue(opName_, commMode_)) {
+        return false;
+    }
     if (!mc2tiling::GetRankSize(opName_, group_, rankSize_)) {
         OP_LOGE(opName_, "GetRankSize failed.");
         return false;
@@ -655,18 +680,9 @@ bool AllGatherMatmulTilingBase::AnalyzeAttrs()
     gatherIndex_ = gatherIndexPtr ? static_cast<uint32_t>(*gatherIndexPtr) : 0;
     OP_TILING_CHECK((args_.isATrans != 0), OP_LOGE_FOR_INVALID_VALUE(opName_, "isTransA", "true", "false"),
                     return false);
-    // blockSize 语义:
-    //   0      - 非量化 (fp16/bf16 V2 路径)
-    //   32     - MX 量化  (fp8 QuantBmm 路径, FLOAT8_E8M0 scale, README §情形4)
-    //   packed - PerBlock 量化 (M | N<<16 | K<<32, FLOAT scale)
-    // 仅对非 fp8 输入硬拒非零值; fp8 路径由子类 IsCapable +
-    // AllGatherQuantBmmHelper::GetShapeAttrsInfo 区分校验, base 不拒 (否则 MX/PerBlock 不可达)。
-    auto blockSizePtr = attrs->GetAttrPointer<int64_t>(BLOCK_SIZE_INDEX);
-    const int64_t blockSize = blockSizePtr != nullptr ? *blockSizePtr : 0;
-    bool x1IsFp8 = CheckSupportDtype(context_->GetInputDesc(INPUT_X1)->GetDataType(), FP8_DTYPE_SUPPORT_LIST);
-    OP_TILING_CHECK(!x1IsFp8 && blockSize != 0,
-                    OP_LOGE_FOR_INVALID_VALUE(opName_, "blockSize", std::to_string(blockSize).c_str(), "0"),
-                    return false);
+    if (!CheckBlockSizeValue(context_, opName_)) {
+        return false;
+    }
     OP_LOGD(opName_,
             " group=%s, rankSize=%ld, is_trans_a=%u, is_trans_b=%d, gather_index=%u,"
             " comm_turn=%lu",
