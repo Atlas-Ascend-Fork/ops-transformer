@@ -45,8 +45,8 @@ ASCENDC_TPL_ARGS_DECL(QuantFlashMla,
                       //    2: KvLayoutType_PA_NZ
                       ASCENDC_TPL_UINT_DECL(KvLayoutType, ASCENDC_TPL_2_BW, ASCENDC_TPL_UI_RANGE, 1, 0, 3),
                       //    IsFd
-                      //    false / true
-                      ASCENDC_TPL_BOOL_DECL(IsFd, false, true));
+                      //    true(QFMLA FD一直是True)
+                      ASCENDC_TPL_BOOL_DECL(IsFd, true));
 
 ASCENDC_TPL_SEL(
     // FP8
@@ -59,6 +59,6 @@ ASCENDC_TPL_SEL(
         ASCENDC_TPL_BOOL_SEL(HasAttenMask, false, true),
         ASCENDC_TPL_UINT_SEL(KvLayoutType, ASCENDC_TPL_UI_LIST, KvLayoutType_PA_BBND, KvLayoutType_PA_BNBD,
                              KvLayoutType_PA_NZ),
-        ASCENDC_TPL_BOOL_SEL(IsFd, false, true), ASCENDC_TPL_TILING_STRUCT_SEL(QuantFlashMlaTilingData)));
+        ASCENDC_TPL_BOOL_SEL(IsFd, true), ASCENDC_TPL_TILING_STRUCT_SEL(QuantFlashMlaTilingData)));
 
 #endif // TEMPLATE_TILING_KEY_QUANT_FLASH_MLA_H_
