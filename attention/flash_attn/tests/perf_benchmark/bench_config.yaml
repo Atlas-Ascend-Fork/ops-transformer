@@ -1,0 +1,40 @@
+version: 1
+
+common:
+  dtype: fp16
+  layouts: [BSND, BNSD]
+  D: 128
+  DV: 128
+  N1: 32
+  N2: 4
+  mask_mode: 3
+  win_left: 2147483647
+  win_right: 2147483647
+  scale: inv_sqrt_d
+  return_softmax_lse: false
+  phase_threshold: 16
+
+experiments:
+  s2_curve:
+    enabled: true
+    batch: 8
+    s1: [1, 3, 8, 16, 128, 256, 512, 2048, 8192]
+    s2_aligned: [128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+    s2_tail_sizes: [1, 16, 32, 64, 127]
+
+  batch_linearity:
+    enabled: true
+    batch_values: [1, 2, 4, 8, 16, 32, 64]
+    shapes:
+      - {phase: prefill, S1: 4096, S2: 6144}
+      - {phase: decode, S1: 1, S2: 24576}
+
+  s2_balance:
+    enabled: true
+    batch: 16
+    S2: 8192
+    fill: 0.5
+    distributions: [uniform, ramp, skew, outlier, alternating]
+    shapes:
+      - {phase: prefill, S1: 4096}
+      - {phase: decode, S1: 1}
