@@ -144,7 +144,6 @@
              .AttrType(OPTIONAL)
              .Bool(false);
 
-
          OpAICoreConfig aicore_config_96;
          aicore_config_96.DynamicCompileStaticFlag(true)
              .DynamicFormatFlag(true)
@@ -163,8 +162,6 @@
      }
  };
 
-
  OP_ADD(MixedQuantFlashAttn);
-
 
  }  // namespace ops

@@ -488,8 +488,8 @@ public:
                 Bmm2DataCopyParamsForP.blockCount = blockCount;
                 Bmm2DataCopyParamsForP.blockLen = (runInfo.actSingleLoopS2Size + blockCount - 1) / blockCount;
                 Bmm2DataCopyParamsForP.srcStride =
-                    (s2BaseSize / blockCount) * ((mBaseSize * sizeof(SOFTMAX_OUT_T) >> 5) - 1) +
-                    (mBaseSize * sizeof(SOFTMAX_OUT_T) >> 5) + s2BaseSize / blockCount -
+                    (s2BaseSize / blockCount) * (((mBaseSize * sizeof(SOFTMAX_OUT_T)) >> 5) - 1) +
+                    ((mBaseSize * sizeof(SOFTMAX_OUT_T)) >> 5) + s2BaseSize / blockCount -
                     Bmm2DataCopyParamsForP.blockLen;
                 Bmm2DataCopyParamsForP.dstStride = 0U;
                 for (uint16_t i = 0; i < actCopyCount; ++i) {
