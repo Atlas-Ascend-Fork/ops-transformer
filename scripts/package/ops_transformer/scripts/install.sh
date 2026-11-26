@@ -279,9 +279,14 @@ check_install_path() {
     if [ "$(id -u)" -eq 0 ]; then
       TARGET_INSTALL_PATH="/root$temp_path_value"
     else
-      local home_path=$(eval echo "${USER}")
-      home_path=$(echo "${home_path}%/")
-      TARGET_INSTALL_PATH="$home_path$temp_path_value"
+      local home_path="${HOME%/}"
+      if [ "x${home_path}" = "x" ]; then
+        echo "[OpsTransformer] [ERROR]: ERR_NO:${PARAM_INVALID};ERR_DES:Parameter --install-path\
+ home directory is empty."
+        exitlog
+        exit 1
+      fi
+      TARGET_INSTALL_PATH="${home_path}${temp_path_value}"
     fi
   fi
 }
@@ -535,10 +540,7 @@ uninstall_package() {
     logandprint "[ERROR]: ERR_NO:${FILE_NOT_EXIST};ERR_DES:The file\
  (${UNINSTALL_SHELL_FILE}) not exists. Please make sure that the opp module\
  installed in (${TARGET_VERSION_DIR}) and then set the correct install path."
-    uninstall_path=$(ls "${TARGET_INSTALL_PATH}" 2>/dev/null)
-    if [ "${uninstall_path}" = "" ]; then
-      rm -rf "${TARGET_INSTALL_PATH}"
-    fi
+    rmdir "${TARGET_INSTALL_PATH}" 2>/dev/null || true
     comm_log_operation "Uninstall" "${IN_INSTALL_TYPE}" "OpsTransformer" "$?" "${CMD_LIST}"
     exit 0
   fi
