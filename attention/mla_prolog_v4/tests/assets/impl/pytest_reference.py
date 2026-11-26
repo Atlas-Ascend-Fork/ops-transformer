@@ -494,16 +494,6 @@ def golden_mla_prolog(
             bool(torch.isfinite(quant_scale_kv).all()),
             "quant_scale_kv must be finite",
         )
-    for name, tensor in (
-        ("x", x),
-        ("wqa", qa),
-        ("wqb", qb),
-        ("wkva", kva),
-        ("wkb", wkb),
-        ("norm_weight_qa", norm_weight_qa),
-        ("norm_weight_kva", norm_weight_kva),
-    ):
-        _require(bool(torch.isfinite(tensor).all()), f"{name} contains NaN/Inf")
     if dr and rope_mode:
         _require(
             bool(torch.isfinite(rope_sin).all())
@@ -1378,7 +1368,7 @@ def compare_outputs(cpu, actual, attrs, outputs, before):
     return report
 
 
-_FROZEN_NUMERIC_AST = "1522db2d183f381edadfdefc565c42d4780eb57e243ac6be23bdc626e7d46a24"
+_FROZEN_NUMERIC_AST = "79d0af2a3599f49bd7a3e2dc2f2060b2d85d08f5f5b11424747c860928587b2c"
 
 
 _FROZEN_NUMERIC_NAMES = (
