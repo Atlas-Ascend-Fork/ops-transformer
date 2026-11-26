@@ -62,6 +62,8 @@ private:
         uint32_t needUbBuffer, bool isTailFlag);
     __aicore__ inline void PrepareInit();
     __aicore__ inline uint32_t SendCountCheck(uint32_t prepareIndex);
+    __aicore__ inline void AllToAllAndReduceSumStep(uint32_t loopIdx, bool isTailFlag, uint32_t curPadM,
+                                                    uint32_t matmulN);
 
     Mc2Tiling::QuantMatmulAllReduceTilingData* tilingData_;
     TPipe* tPipe_;
@@ -101,6 +103,40 @@ private:
 
 template <typename xType, typename wType, int fFormat, int wFormat, typename scaleType, typename yType,
           typename commType, bool aTrans, bool bTrans>
+__aicore__ inline void MatmulAllReduceQuantPertokenInt8<xType, wType, fFormat, wFormat, scaleType, yType, commType,
+                                                        aTrans, bTrans>::AllToAllAndReduceSumStep(uint32_t loopIdx,
+                                                                                                  bool isTailFlag,
+                                                                                                  uint32_t curPadM,
+                                                                                                  uint32_t matmulN)
+{
+    if (GetBlockIdx() == 0) {
+        hccl_.Commit(allToAllHandleId_[alltoAllCommitIdx_]);
+        alltoAllCommitIdx_++;
+    }
+    if (isSendTileFlag_) {
+        if (GetBlockIdx() == 0) {
+            hccl_.Wait(allToAllHandleId_[allToAllWaitIdx_]);
+        }
+        SyncAll();
+        if (isTailFlag && loopIdx == 1U) {
+            MatmulAllReduceReduceSumInt8<yType>(tempBuffGM_, commQuantScale1GM_, commQuantScale2GM_, tilePadM, matmulN,
+                                                tPipe_, hccl_);
+            tempBuffGM_ += tilePadM * matmulN;
+        } else {
+            MatmulAllReduceReduceSumInt8<yType>(tempBuffGM_, commQuantScale1GM_, commQuantScale2GM_, curPadM, matmulN,
+                                                tPipe_, hccl_);
+            tempBuffGM_ += curPadM * matmulN;
+        }
+        SyncAll();
+        if (GetBlockIdx() == 0) {
+            hccl_.Commit(allGatherHandleId_[allToAllWaitIdx_]);
+            allToAllWaitIdx_++;
+        }
+    }
+}
+
+template <typename xType, typename wType, int fFormat, int wFormat, typename scaleType, typename yType,
+          typename commType, bool aTrans, bool bTrans>
 __aicore__ inline void
 MatmulAllReduceQuantPertokenInt8<xType, wType, fFormat, wFormat, scaleType, yType, commType, aTrans, bTrans>::
     InnerProcess(BmmDequantPertoken<xType, wType, fFormat, wFormat, scaleType, yType, aTrans, bTrans, true>& op,
@@ -126,32 +162,7 @@ MatmulAllReduceQuantPertokenInt8<xType, wType, fFormat, wFormat, scaleType, yTyp
         MatmulAllReduceQuantPerchannelCommInt8<yType>(cGM_, commQuantScale1GM_, tempBuffWinOrGM_, tPipe_,
                                                       mmTiling->matmulTiling.N, mmTiling->matmulTiling.M);
         SyncAll();
-
-        if (GetBlockIdx() == 0) {
-            hccl_.Commit(allToAllHandleId_[alltoAllCommitIdx_]);
-            alltoAllCommitIdx_++;
-        }
-        if (isSendTileFlag_) {
-            if (GetBlockIdx() == 0) {
-                hccl_.Wait(allToAllHandleId_[allToAllWaitIdx_]);
-            }
-            SyncAll();
-            if (isTailFlag && i == 1U) {
-                MatmulAllReduceReduceSumInt8<yType>(tempBuffGM_, commQuantScale1GM_, commQuantScale2GM_, tilePadM,
-                                                    mmTiling->matmulTiling.N, tPipe_, hccl_);
-                tempBuffGM_ += tilePadM * mmTiling->matmulTiling.N;
-            } else {
-                MatmulAllReduceReduceSumInt8<yType>(tempBuffGM_, commQuantScale1GM_, commQuantScale2GM_, curPadM,
-                                                    mmTiling->matmulTiling.N, tPipe_, hccl_);
-                tempBuffGM_ += curPadM * mmTiling->matmulTiling.N;
-            }
-            SyncAll();
-            if (GetBlockIdx() == 0) {
-                hccl_.Commit(allGatherHandleId_[allToAllWaitIdx_]);
-                allToAllWaitIdx_++;
-            }
-        }
-
+        AllToAllAndReduceSumStep(i, isTailFlag, curPadM, mmTiling->matmulTiling.N);
         aGM_ += aOffset;
         cGM_ += cOffset;
         pertokenScaleGM_ += pertokenOffset;

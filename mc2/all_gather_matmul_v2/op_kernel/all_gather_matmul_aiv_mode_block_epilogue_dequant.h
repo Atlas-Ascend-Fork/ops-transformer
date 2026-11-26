@@ -213,6 +213,47 @@ private:
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[ubListId]);
     }
 
+    template <bool EnableScale, bool EnablePerToken>
+    CATLASS_DEVICE void CopyTileScales(MatrixCoord const& tileOffset, MatrixCoord const& actualTileShape,
+                                       LayoutScale const& layoutScale, LayoutPerTokenScale const& layoutPerTokenScale)
+    {
+        auto& ubScale = ubScaleList[ubListId];
+        auto& ubPerTokenScale = ubPerTokenScaleList[ubListId];
+
+        // Wait before overwriting either the per-channel or per-token scale buffer.
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
+
+        if constexpr (EnableScale) {
+            auto scaleTileOffset = tileOffset.template GetCoordByAxis<1>();
+            auto scaleTileShape = actualTileShape.template GetCoordByAxis<1>();
+
+            auto gmTileScale = gmScale[layoutScale.GetOffset(scaleTileOffset)];
+            auto layoutGmTileScale = layoutScale.GetTileLayout(scaleTileShape);
+
+            auto layoutUbScale = LayoutScale::template MakeLayoutInUb<ElementScale>(scaleTileShape);
+
+            // 把 scale 从GM拷贝到UB
+            copyGmToUbScale(ubScale, gmTileScale, layoutUbScale, layoutGmTileScale);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbScaleMTE2VList[ubListId]);
+        }
+
+        if constexpr (EnablePerToken) {
+            auto perTokenScaleTileOffset = tileOffset.template GetCoordByAxis<0>();
+            auto perTokenScaleTileShape = actualTileShape.template GetCoordByAxis<0>();
+
+            auto gmTilePerTokenScale = gmPerTokenScale[layoutPerTokenScale.GetOffset(perTokenScaleTileOffset)];
+            auto layoutGmTilePerTokenScale = layoutPerTokenScale.GetTileLayout(perTokenScaleTileShape);
+
+            auto layoutUbPerTokenScale =
+                LayoutScale::template MakeLayoutInUb<ElementPerTokenScale>(perTokenScaleTileShape);
+
+            // 把 perTokenScale 从GM拷贝到UB
+            copyGmToUbPerTokenScale(ubPerTokenScale, gmTilePerTokenScale, layoutUbPerTokenScale,
+                                    layoutGmTilePerTokenScale);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbPerTokenScaleMTE2VList[ubListId]);
+        }
+    }
+
     // 统一的反量化 tile 循环：EnableScale 控制是否读取 perChannel scale，
     // EnablePerToken 控制是否读取 perToken scale，DAsInput 控制主输入是 D（而非 C）
     template <bool EnableScale, bool EnablePerToken, bool DAsInput>
@@ -240,8 +281,6 @@ private:
 
             auto& ubD = ubDList[ubListId];
             auto& ubC = ubCList[ubListId];
-            auto& ubScale = ubScaleList[ubListId];
-            auto& ubPerTokenScale = ubPerTokenScaleList[ubListId];
             auto gmTileD = gmD[layoutD.GetOffset(tileOffset)];
             auto layoutGmTileD = layoutD.GetTileLayout(actualTileShape);
             LayoutD layoutUbD{actualTileShape, ubTileStride};
@@ -258,38 +297,7 @@ private:
             }
             AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[ubListId]);
 
-            // Wait before overwriting either the per-channel or per-token scale buffer.
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
-
-            if constexpr (EnableScale) {
-                auto scaleTileOffset = tileOffset.template GetCoordByAxis<1>();
-                auto scaleTileShape = actualTileShape.template GetCoordByAxis<1>();
-
-                auto gmTileScale = gmScale[layoutScale.GetOffset(scaleTileOffset)];
-                auto layoutGmTileScale = layoutScale.GetTileLayout(scaleTileShape);
-
-                auto layoutUbScale = LayoutScale::template MakeLayoutInUb<ElementScale>(scaleTileShape);
-
-                // 把 scale 从GM拷贝到UB
-                copyGmToUbScale(ubScale, gmTileScale, layoutUbScale, layoutGmTileScale);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbScaleMTE2VList[ubListId]);
-            }
-
-            if constexpr (EnablePerToken) {
-                auto perTokenScaleTileOffset = tileOffset.template GetCoordByAxis<0>();
-                auto perTokenScaleTileShape = actualTileShape.template GetCoordByAxis<0>();
-
-                auto gmTilePerTokenScale = gmPerTokenScale[layoutPerTokenScale.GetOffset(perTokenScaleTileOffset)];
-                auto layoutGmTilePerTokenScale = layoutPerTokenScale.GetTileLayout(perTokenScaleTileShape);
-
-                auto layoutUbPerTokenScale =
-                    LayoutScale::template MakeLayoutInUb<ElementPerTokenScale>(perTokenScaleTileShape);
-
-                // 把 perTokenScale 从GM拷贝到UB
-                copyGmToUbPerTokenScale(ubPerTokenScale, gmTilePerTokenScale, layoutUbPerTokenScale,
-                                        layoutGmTilePerTokenScale);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbPerTokenScaleMTE2VList[ubListId]);
-            }
+            CopyTileScales<EnableScale, EnablePerToken>(tileOffset, actualTileShape, layoutScale, layoutPerTokenScale);
 
             ComputeDequantTile<EnableScale, EnablePerToken, DAsInput>();
 

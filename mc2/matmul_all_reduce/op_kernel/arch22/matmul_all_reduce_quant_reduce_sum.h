@@ -171,6 +171,78 @@ public:
         return;
     }
 
+    __aicore__ inline void LoadAllToAllAndCast(uint32_t calcCnt, LocalTensor<float>& xFp32Local,
+                                               DataCopyParams& copyParamsCurBlock, DataCopyPadParams& padParams)
+    {
+        // all2all int8->fp16->fp32
+        LocalTensor<int8_t> allToAllLocal = queueX.AllocTensor<int8_t>();
+        DataCopyPad(allToAllLocal, tempBufferGm_, copyParamsCurBlock, padParams); // all2all res Move to UB
+        queueX.EnQue(allToAllLocal);
+        LocalTensor<half> xFp16Local = tBufFP16.Get<half>();
+        LocalTensor<int8_t> xInt8Local = queueX.DeQue<int8_t>();
+        Cast(xFp16Local, xInt8Local, RoundMode::CAST_NONE, calcCnt);
+        PipeBarrier<PIPE_V>();
+        Cast(xFp32Local, xFp16Local, RoundMode::CAST_NONE, calcCnt);
+        PipeBarrier<PIPE_V>();
+        queueX.FreeTensor(allToAllLocal); // free 首块 xInt8Local
+    }
+
+    __aicore__ inline void AddRanksIntoX(uint32_t calcCnt, LocalTensor<float>& xFp32Local,
+                                         DataCopyParams& copyParamsCurBlock, DataCopyPadParams& padParams)
+    {
+        // 偏移取其余核进行相加 Cast + Add
+        for (uint32_t i = 1; i < this->rankCnt; i++) {
+            LocalTensor<int8_t> allToAllAddLocal = queueX.AllocTensor<int8_t>();
+            DataCopyPad(allToAllAddLocal, tempBufferGm_[i * this->tileRankM * this->N], copyParamsCurBlock,
+                        padParams); // 其余卡数，对应位置 Move to UB
+            queueX.EnQue(allToAllAddLocal);
+            LocalTensor<int8_t> xAddInt8Local = queueX.DeQue<int8_t>();
+            LocalTensor<half> xAddFp16Local = tBufFP16.Get<half>();
+            Cast(xAddFp16Local, xAddInt8Local, RoundMode::CAST_NONE, calcCnt); // int8->fp16
+            PipeBarrier<PIPE_V>();
+            queueX.FreeTensor(allToAllAddLocal); // free 对应 rank 内容
+            LocalTensor<float> xAddFp32Local = tBufFP32_2.Get<float>();
+            Cast(xAddFp32Local, xAddFp16Local, RoundMode::CAST_NONE, calcCnt); // fp16->fp32
+            PipeBarrier<PIPE_V>();
+            Add(xFp32Local, xFp32Local, xAddFp32Local, calcCnt);
+            PipeBarrier<PIPE_V>();
+        }
+    }
+
+    __aicore__ inline void QuantMulScale(uint32_t calcCnt, uint32_t curBlockCntM, LocalTensor<float>& xFp32Local)
+    {
+        if (this->splitMode == SPLIT_M_MATMUL_ALLREDUCE_INT8) { // 切M
+            for (uint32_t i = 0; i < curBlockCntM; i++) {
+                Mul(xFp32Local[i * this->alginN], xFp32Local[i * this->alginN], scaleFp32Local, this->N);
+            }
+            PipeBarrier<PIPE_V>();
+        } else {
+            Mul(xFp32Local, xFp32Local, scaleFp32Local, calcCnt);
+            PipeBarrier<PIPE_V>();
+        }
+    }
+
+    __aicore__ inline LocalTensor<int8_t> QuantCastOut(uint32_t calcCnt, LocalTensor<float>& xFp32Local)
+    {
+        LocalTensor<half> zFp16Local = tBufFP16.Get<half>();
+        LocalTensor<int8_t> zInt8Local = queueZ.AllocTensor<int8_t>();
+        Cast(zFp16Local, xFp32Local, RoundMode::CAST_NONE, calcCnt); // fp32->fp16
+        PipeBarrier<PIPE_V>();
+        Cast(zInt8Local, zFp16Local, RoundMode::CAST_NONE, calcCnt); // fp16->int8
+        PipeBarrier<PIPE_V>();
+        return zInt8Local;
+    }
+
+    __aicore__ inline void WriteBackOut(LocalTensor<int8_t>& zInt8Local, DataCopyParams& copyOutParamsCurBlock)
+    {
+        // 搬出，按照卡数搬到对应位置
+        uint32_t rank_id = this->hccl_.GetRankId();
+        queueZ.EnQue<int8_t>(zInt8Local);
+        LocalTensor<int8_t> outLocal = queueZ.DeQue<int8_t>();
+        DataCopyPad(tempBufferGm_[rank_id * this->tileRankM * this->N], outLocal, copyOutParamsCurBlock);
+        queueZ.FreeTensor(zInt8Local);
+    }
+
     __aicore__ inline void Process(uint32_t loopIdx, uint32_t aivLoopNum, uint32_t curBlockCntM,
                                    uint32_t blockCntSpiltMN)
     {
@@ -203,60 +275,14 @@ public:
             CopyAndCalScale(copyBlockLen, copyParamsScaleQuant, padParams);
         }
 
-        // all2all int8->fp16->fp32
-        LocalTensor<int8_t> allToAllLocal = queueX.AllocTensor<int8_t>();
-        DataCopyPad(allToAllLocal, tempBufferGm_, copyParamsCurBlock, padParams); // all2all res Move to UB
-        queueX.EnQue(allToAllLocal);
-        LocalTensor<half> xFp16Local = tBufFP16.Get<half>();
         LocalTensor<float> xFp32Local = tBufFP32_1.Get<float>();
-        LocalTensor<int8_t> xInt8Local = queueX.DeQue<int8_t>();
-        Cast(xFp16Local, xInt8Local, RoundMode::CAST_NONE, calcCnt);
-        PipeBarrier<PIPE_V>();
-        Cast(xFp32Local, xFp16Local, RoundMode::CAST_NONE, calcCnt);
-        PipeBarrier<PIPE_V>();
-        queueX.FreeTensor(allToAllLocal); // free 首块 xInt8Local
-
-        // 偏移取其余核进行相加 Cast + Add
-        for (uint32_t i = 1; i < this->rankCnt; i++) {
-            LocalTensor<int8_t> allToAllAddLocal = queueX.AllocTensor<int8_t>();
-            DataCopyPad(allToAllAddLocal, tempBufferGm_[i * this->tileRankM * this->N], copyParamsCurBlock,
-                        padParams); // 其余卡数，对应位置 Move to UB
-            queueX.EnQue(allToAllAddLocal);
-            LocalTensor<int8_t> xAddInt8Local = queueX.DeQue<int8_t>();
-            LocalTensor<half> xAddFp16Local = tBufFP16.Get<half>();
-            Cast(xAddFp16Local, xAddInt8Local, RoundMode::CAST_NONE, calcCnt); // int8->fp16
-            PipeBarrier<PIPE_V>();
-            queueX.FreeTensor(allToAllAddLocal); // free 对应 rank 内容
-            LocalTensor<float> xAddFp32Local = tBufFP32_2.Get<float>();
-            Cast(xAddFp32Local, xAddFp16Local, RoundMode::CAST_NONE, calcCnt); // fp16->fp32
-            PipeBarrier<PIPE_V>();
-            Add(xFp32Local, xFp32Local, xAddFp32Local, calcCnt);
-            PipeBarrier<PIPE_V>();
-        }
+        LoadAllToAllAndCast(calcCnt, xFp32Local, copyParamsCurBlock, padParams);
+        AddRanksIntoX(calcCnt, xFp32Local, copyParamsCurBlock, padParams);
 
         // 乘以 S1/S2，在由 fp32->fp16->int8
-        LocalTensor<half> zFp16Local = tBufFP16.Get<half>();
-        LocalTensor<int8_t> zInt8Local = queueZ.AllocTensor<int8_t>();
-        if (this->splitMode == SPLIT_M_MATMUL_ALLREDUCE_INT8) { // 切M
-            for (uint32_t i = 0; i < curBlockCntM; i++) {
-                Mul(xFp32Local[i * this->alginN], xFp32Local[i * this->alginN], scaleFp32Local, this->N);
-            }
-            PipeBarrier<PIPE_V>();
-        } else {
-            Mul(xFp32Local, xFp32Local, scaleFp32Local, calcCnt);
-            PipeBarrier<PIPE_V>();
-        }
-        Cast(zFp16Local, xFp32Local, RoundMode::CAST_NONE, calcCnt); // fp32->fp16
-        PipeBarrier<PIPE_V>();
-        Cast(zInt8Local, zFp16Local, RoundMode::CAST_NONE, calcCnt); // fp16->int8
-        PipeBarrier<PIPE_V>();
-
-        // 搬出，按照卡数搬到对应位置
-        uint32_t rank_id = this->hccl_.GetRankId();
-        queueZ.EnQue<int8_t>(zInt8Local);
-        LocalTensor<int8_t> outLocal = queueZ.DeQue<int8_t>();
-        DataCopyPad(tempBufferGm_[rank_id * this->tileRankM * this->N], outLocal, copyOutParamsCurBlock);
-        queueZ.FreeTensor(zInt8Local);
+        QuantMulScale(calcCnt, curBlockCntM, xFp32Local);
+        LocalTensor<int8_t> zInt8Local = QuantCastOut(calcCnt, xFp32Local);
+        WriteBackOut(zInt8Local, copyOutParamsCurBlock);
         if (((loopIdx == (aivLoopNum - 1)) && (this->splitMode == SPLIT_M_MATMUL_ALLREDUCE_INT8)) ||
             (this->splitMode == SPLIT_MN_MATMUL_ALLREDUCE_INT8)) {
             queueScale1.FreeTensor(scale1Local);
@@ -330,6 +356,44 @@ public:
 };
 
 template <class T>
+__aicore__ inline bool ReduceSumLoopOnce(MatmulAllReduceReduceSum<T>& op, uint32_t loopIdx, uint32_t aivLoopNum,
+                                         uint32_t tileCalCntM, uint32_t tailCalCntM, int64_t blockAddrOffset,
+                                         uint32_t N, uint32_t tileBlockCnt, uint32_t tailBlockCnt,
+                                         uint32_t needAivCoreNum, uint32_t blockNumPerRow, uint32_t aivCoreNum)
+{
+    int64_t blockAddrOffsetSplitM = 0;
+    uint32_t blockCntM = tileCalCntM;
+    uint32_t blockCntSpiltMN = tileBlockCnt;
+    int64_t blockAddrOffsetSplitMN = 0;
+    int64_t scaleAddrOffsetSplitMN = 0;
+    uint32_t globalBlockIdx = 0;
+    if (op.splitMode == SPLIT_M_MATMUL_ALLREDUCE_INT8) {
+        if ((tailCalCntM != 0) && (loopIdx == aivLoopNum - 1)) {
+            blockCntM = tailCalCntM;
+        }
+        blockAddrOffsetSplitM = static_cast<int64_t>(blockAddrOffset) +
+                                static_cast<int64_t>(loopIdx) * static_cast<int64_t>(tileCalCntM) *
+                                    static_cast<int64_t>(N); // 取到当前核的偏移，再+当前块的地址偏移
+    } else {
+        globalBlockIdx = loopIdx * aivCoreNum + GetBlockIdx();
+        if (globalBlockIdx > (needAivCoreNum - 1)) {
+            return true;
+        }
+        if ((tailBlockCnt != 0) && (globalBlockIdx % blockNumPerRow == blockNumPerRow - 1)) {
+            blockCntSpiltMN = tailBlockCnt;
+        }
+        blockAddrOffsetSplitMN =
+            static_cast<int64_t>(globalBlockIdx / blockNumPerRow) * static_cast<int64_t>(N) +
+            static_cast<int64_t>(globalBlockIdx % blockNumPerRow) * static_cast<int64_t>(tileBlockCnt);
+        scaleAddrOffsetSplitMN =
+            static_cast<int64_t>(globalBlockIdx % blockNumPerRow) * static_cast<int64_t>(tileBlockCnt);
+    }
+    op.InitInner(loopIdx, blockAddrOffsetSplitM, blockAddrOffsetSplitMN, scaleAddrOffsetSplitMN, blockCntSpiltMN);
+    op.Process(loopIdx, aivLoopNum, blockCntM, blockCntSpiltMN);
+    return false;
+}
+
+template <class T>
 __aicore__ inline void MatmulAllReduceReduceSumInt8(GM_ADDR tempBufferGM, GM_ADDR quantScale1GM, GM_ADDR quantScale2GM,
                                                     uint32_t M, uint32_t N, TPipe* tPipe,
                                                     Hccl<HCCL_SERVER_TYPE_AICPU>& hccl_)
@@ -358,35 +422,10 @@ __aicore__ inline void MatmulAllReduceReduceSumInt8(GM_ADDR tempBufferGM, GM_ADD
     }
     op.Init(tPipe, nowQuantUbSize);                               // 按照最大开
     for (uint32_t loopIdx = 0; loopIdx < aivLoopNum; loopIdx++) { // 一轮外层循环对应着一次核间并行
-        int64_t blockAddrOffsetSplitM = 0;
-        uint32_t blockCntM = tileCalCntM;
-        uint32_t blockCntSpiltMN = tileBlockCnt;
-        int64_t blockAddrOffsetSplitMN = 0;
-        int64_t scaleAddrOffsetSplitMN = 0;
-        uint32_t globalBlockIdx = 0;
-        if (op.splitMode == SPLIT_M_MATMUL_ALLREDUCE_INT8) {
-            if ((tailCalCntM != 0) && (loopIdx == aivLoopNum - 1)) {
-                blockCntM = tailCalCntM;
-            }
-            blockAddrOffsetSplitM = static_cast<int64_t>(blockAddrOffset) +
-                                    static_cast<int64_t>(loopIdx) * static_cast<int64_t>(tileCalCntM) *
-                                        static_cast<int64_t>(N); // 取到当前核的偏移，再+当前块的地址偏移
-        } else {
-            globalBlockIdx = loopIdx * aivCoreNum + GetBlockIdx();
-            if (globalBlockIdx > (needAivCoreNum - 1)) {
-                return;
-            }
-            if ((tailBlockCnt != 0) && (globalBlockIdx % blockNumPerRow == blockNumPerRow - 1)) {
-                blockCntSpiltMN = tailBlockCnt;
-            }
-            blockAddrOffsetSplitMN =
-                static_cast<int64_t>(globalBlockIdx / blockNumPerRow) * static_cast<int64_t>(N) +
-                static_cast<int64_t>(globalBlockIdx % blockNumPerRow) * static_cast<int64_t>(tileBlockCnt);
-            scaleAddrOffsetSplitMN =
-                static_cast<int64_t>(globalBlockIdx % blockNumPerRow) * static_cast<int64_t>(tileBlockCnt);
+        if (ReduceSumLoopOnce<T>(op, loopIdx, aivLoopNum, tileCalCntM, tailCalCntM, blockAddrOffset, N, tileBlockCnt,
+                                 tailBlockCnt, needAivCoreNum, blockNumPerRow, aivCoreNum)) {
+            break;
         }
-        op.InitInner(loopIdx, blockAddrOffsetSplitM, blockAddrOffsetSplitMN, scaleAddrOffsetSplitMN, blockCntSpiltMN);
-        op.Process(loopIdx, aivLoopNum, blockCntM, blockCntSpiltMN);
     }
 }
 } // namespace MatmulAllReduceReduceSumImpl

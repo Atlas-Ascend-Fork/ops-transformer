@@ -126,14 +126,13 @@ __global__ __aicore__ void fp_matmul_all_reduce(GM_ADDR aGM, GM_ADDR bGM, GM_ADD
 #endif
 }
 
-template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_SHARE_MM, TPL_PARAMS_QUANT_MM>
-__global__ __aicore__ void quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
-                                                  GM_ADDR antiquantScaleGM, GM_ADDR antiquantOffsetGM,
-                                                  GM_ADDR dequantGM, GM_ADDR pertokenGM, GM_ADDR commQuantScale1GM,
-                                                  GM_ADDR commQuantScale2GM, GM_ADDR cGM, GM_ADDR workspaceGM,
-                                                  GM_ADDR tilingGM, TPipe& tPipe, GM_ADDR userWS)
-{
 #if defined(MC2_QUANT_FP16)
+template <TPL_PARAMS_COMM, TPL_PARAMS_QUANT_MM>
+__aicore__ inline void QuantMatmulAllreduceFp16CommF(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                     GM_ADDR dequantGM, GM_ADDR pertokenGM, GM_ADDR commQuantScale1GM,
+                                                     GM_ADDR commQuantScale2GM, GM_ADDR cGM, GM_ADDR workspaceGM,
+                                                     GM_ADDR tilingGM, TPipe& tPipe)
+{
     if constexpr (INT8_COMM == MATMUL_ALLREDUCE_INT8_COMM_F && TRANS == QUANT_BATCH_MATMUL_V3_NOT_TRANS &&
                   PERTOKEN == QUANT_BATCH_MATMUl_V3_NOT_PERTOKEN) {
         // 0
@@ -154,8 +153,17 @@ __global__ __aicore__ void quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bGM, GM_A
         // 17
         INVOKE_MC2_QUANT_910_OP_IMPL(BmmDequantPertoken, Mc2CoreType::ON_VECTOR, REG_MM_OBJ, true, float, DTYPE_Y,
                                      false, true);
-    } else if constexpr (INT8_COMM == MATMUL_ALLREDUCE_INT8_COMM_T && TRANS == QUANT_BATCH_MATMUL_V3_NOT_TRANS &&
-                         PERTOKEN == QUANT_BATCH_MATMUl_V3_NOT_PERTOKEN) {
+    }
+}
+
+template <TPL_PARAMS_COMM, TPL_PARAMS_QUANT_MM>
+__aicore__ inline void QuantMatmulAllreduceFp16CommT(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                     GM_ADDR dequantGM, GM_ADDR pertokenGM, GM_ADDR commQuantScale1GM,
+                                                     GM_ADDR commQuantScale2GM, GM_ADDR cGM, GM_ADDR workspaceGM,
+                                                     GM_ADDR tilingGM, TPipe& tPipe, GM_ADDR userWS)
+{
+    if constexpr (INT8_COMM == MATMUL_ALLREDUCE_INT8_COMM_T && TRANS == QUANT_BATCH_MATMUL_V3_NOT_TRANS &&
+                  PERTOKEN == QUANT_BATCH_MATMUl_V3_NOT_PERTOKEN) {
         // 10
         INVOKE_QUANT_BMM_DEQUANT_FP16_IMPL_COMM_INT8(MatmulAllReduceQuantFP16CommInt8, false, false);
     } else if constexpr (INT8_COMM == MATMUL_ALLREDUCE_INT8_COMM_T && TRANS == QUANT_BATCH_MATMUL_V3_B_TRANS &&
@@ -177,7 +185,14 @@ __global__ __aicore__ void quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bGM, GM_A
         INVOKE_QUANT_BATCH_MATMUL_DEQUANT_PERTOKEN_COMM_INT8_IMPL(MatmulAllReduceQuantPertokenInt8, float, opTile,
                                                                   opTail, false, true);
     }
+}
 #elif defined(MC2_QUANT_BF16)
+template <TPL_PARAMS_COMM, TPL_PARAMS_QUANT_MM>
+__aicore__ inline void QuantMatmulAllreduceBf16CommF(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                     GM_ADDR dequantGM, GM_ADDR pertokenGM, GM_ADDR commQuantScale1GM,
+                                                     GM_ADDR commQuantScale2GM, GM_ADDR cGM, GM_ADDR workspaceGM,
+                                                     GM_ADDR tilingGM, TPipe& tPipe)
+{
     if constexpr (INT8_COMM == MATMUL_ALLREDUCE_INT8_COMM_F && TRANS == QUANT_BATCH_MATMUL_V3_NOT_TRANS &&
                   PERTOKEN == QUANT_BATCH_MATMUl_V3_NOT_PERTOKEN) {
         // 0
@@ -198,8 +213,17 @@ __global__ __aicore__ void quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bGM, GM_A
         // 17
         INVOKE_MC2_QUANT_910_OP_IMPL(BmmDequantPertoken, Mc2CoreType::ON_VECTOR, REG_MM_OBJ, true, DTYPE_Y, DTYPE_Y,
                                      false, true);
-    } else if constexpr (INT8_COMM == MATMUL_ALLREDUCE_INT8_COMM_T && TRANS == QUANT_BATCH_MATMUL_V3_NOT_TRANS &&
-                         PERTOKEN == QUANT_BATCH_MATMUl_V3_NOT_PERTOKEN) {
+    }
+}
+
+template <TPL_PARAMS_COMM, TPL_PARAMS_QUANT_MM>
+__aicore__ inline void QuantMatmulAllreduceBf16CommT(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                     GM_ADDR dequantGM, GM_ADDR pertokenGM, GM_ADDR commQuantScale1GM,
+                                                     GM_ADDR commQuantScale2GM, GM_ADDR cGM, GM_ADDR workspaceGM,
+                                                     GM_ADDR tilingGM, TPipe& tPipe, GM_ADDR userWS)
+{
+    if constexpr (INT8_COMM == MATMUL_ALLREDUCE_INT8_COMM_T && TRANS == QUANT_BATCH_MATMUL_V3_NOT_TRANS &&
+                  PERTOKEN == QUANT_BATCH_MATMUl_V3_NOT_PERTOKEN) {
         // 10
         BmmDequantBf16<DTYPE_X1, DTYPE_X2, FORMAT_X1, FORMAT_X2, DTYPE_Y, DTYPE_Y, false, false, true> opTile;
         BmmDequantBf16<DTYPE_X1, DTYPE_X2, FORMAT_X1, FORMAT_X2, DTYPE_Y, DTYPE_Y, false, false, true> opTail;
@@ -227,8 +251,140 @@ __global__ __aicore__ void quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bGM, GM_A
         INVOKE_QUANT_BATCH_MATMUL_DEQUANT_PERTOKEN_COMM_INT8_IMPL(MatmulAllReduceQuantPertokenInt8, DTYPE_Y, opTile,
                                                                   opTail, false, true);
     }
+}
+#endif
+
+template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_SHARE_MM, TPL_PARAMS_QUANT_MM>
+__global__ __aicore__ void quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                  GM_ADDR antiquantScaleGM, GM_ADDR antiquantOffsetGM,
+                                                  GM_ADDR dequantGM, GM_ADDR pertokenGM, GM_ADDR commQuantScale1GM,
+                                                  GM_ADDR commQuantScale2GM, GM_ADDR cGM, GM_ADDR workspaceGM,
+                                                  GM_ADDR tilingGM, TPipe& tPipe, GM_ADDR userWS)
+{
+#if defined(MC2_QUANT_FP16)
+    QuantMatmulAllreduceFp16CommF<PARAMS_COMM, PARAMS_QUANT_MM>(aGM, bGM, biasGM, addGM, dequantGM, pertokenGM,
+                                                                commQuantScale1GM, commQuantScale2GM, cGM, workspaceGM,
+                                                                tilingGM, tPipe);
+    QuantMatmulAllreduceFp16CommT<PARAMS_COMM, PARAMS_QUANT_MM>(aGM, bGM, biasGM, addGM, dequantGM, pertokenGM,
+                                                                commQuantScale1GM, commQuantScale2GM, cGM, workspaceGM,
+                                                                tilingGM, tPipe, userWS);
+#elif defined(MC2_QUANT_BF16)
+    QuantMatmulAllreduceBf16CommF<PARAMS_COMM, PARAMS_QUANT_MM>(aGM, bGM, biasGM, addGM, dequantGM, pertokenGM,
+                                                                commQuantScale1GM, commQuantScale2GM, cGM, workspaceGM,
+                                                                tilingGM, tPipe);
+    QuantMatmulAllreduceBf16CommT<PARAMS_COMM, PARAMS_QUANT_MM>(aGM, bGM, biasGM, addGM, dequantGM, pertokenGM,
+                                                                commQuantScale1GM, commQuantScale2GM, cGM, workspaceGM,
+                                                                tilingGM, tPipe, userWS);
 #endif
 }
+
+#if defined(MC2_WEIGHT_QUANT)
+template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_WEIGHT_QUANT_MM>
+__aicore__ inline void WeightQuantAntiquantPerTensor(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                     GM_ADDR antiquantScaleGM, GM_ADDR antiquantOffsetGM, GM_ADDR cGM,
+                                                     GM_ADDR workspaceGM, GM_ADDR tilingGM, TPipe& tPipe)
+{
+    if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && HAS_ANTIQUANT_OFFSET == 0 && TRANS_B == 0) {
+        // 310100
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_TENSOR, false);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && HAS_ANTIQUANT_OFFSET == 0 &&
+                         TRANS_B == 1) {
+        // 310110
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_TENSOR, false);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && HAS_ANTIQUANT_OFFSET == 1 &&
+                         TRANS_B == 0) {
+        // 311100
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_TENSOR, true);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && HAS_ANTIQUANT_OFFSET == 1 &&
+                         TRANS_B == 1) {
+        // 311110
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_TENSOR, true);
+    }
+}
+
+template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_WEIGHT_QUANT_MM>
+__aicore__ inline void WeightQuantAntiquantPerChannel(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                      GM_ADDR antiquantScaleGM, GM_ADDR antiquantOffsetGM, GM_ADDR cGM,
+                                                      GM_ADDR workspaceGM, GM_ADDR tilingGM, TPipe& tPipe)
+{
+    if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && HAS_ANTIQUANT_OFFSET == 0 && TRANS_B == 0) {
+        // 310200
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, false);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && HAS_ANTIQUANT_OFFSET == 0 &&
+                         TRANS_B == 1) {
+        // 310210
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, false);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && HAS_ANTIQUANT_OFFSET == 1 &&
+                         TRANS_B == 0) {
+        // 311200
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, true);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && HAS_ANTIQUANT_OFFSET == 1 &&
+                         TRANS_B == 1) {
+        // 311210
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, true);
+    }
+}
+
+template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_WEIGHT_QUANT_MM>
+__aicore__ inline void WeightQuantAntiquantPerGroup(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                    GM_ADDR antiquantScaleGM, GM_ADDR antiquantOffsetGM, GM_ADDR cGM,
+                                                    GM_ADDR workspaceGM, GM_ADDR tilingGM, TPipe& tPipe)
+{
+    if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && HAS_ANTIQUANT_OFFSET == 0 && TRANS_B == 0) {
+        // 310300
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_GROUP, false);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && HAS_ANTIQUANT_OFFSET == 0 &&
+                         TRANS_B == 1) {
+        // 310310
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_GROUP, false);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && HAS_ANTIQUANT_OFFSET == 1 &&
+                         TRANS_B == 0) {
+        // 311300
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_GROUP, true);
+    } else if constexpr (ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && HAS_ANTIQUANT_OFFSET == 1 &&
+                         TRANS_B == 1) {
+        // 311310
+        INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_GROUP, true);
+    }
+}
+
+template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_WEIGHT_QUANT_MM>
+__aicore__ inline void WeightQuantAntiquantDispatch(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                                    GM_ADDR antiquantScaleGM, GM_ADDR antiquantOffsetGM, GM_ADDR cGM,
+                                                    GM_ADDR workspaceGM, GM_ADDR tilingGM, TPipe& tPipe)
+{
+    if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT) {
+        WeightQuantAntiquantPerTensor<MM_TYPE, PARAMS_COMM, PARAMS_WEIGHT_QUANT_MM>(
+            aGM, bGM, biasGM, addGM, antiquantScaleGM, antiquantOffsetGM, cGM, workspaceGM, tilingGM, tPipe);
+        WeightQuantAntiquantPerChannel<MM_TYPE, PARAMS_COMM, PARAMS_WEIGHT_QUANT_MM>(
+            aGM, bGM, biasGM, addGM, antiquantScaleGM, antiquantOffsetGM, cGM, workspaceGM, tilingGM, tPipe);
+        WeightQuantAntiquantPerGroup<MM_TYPE, PARAMS_COMM, PARAMS_WEIGHT_QUANT_MM>(
+            aGM, bGM, biasGM, addGM, antiquantScaleGM, antiquantOffsetGM, cGM, workspaceGM, tilingGM, tPipe);
+    }
+}
+
+template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_WEIGHT_QUANT_MM>
+__aicore__ inline void WeightQuantNzDispatch(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
+                                             GM_ADDR antiquantScaleGM, GM_ADDR antiquantOffsetGM, GM_ADDR cGM,
+                                             GM_ADDR workspaceGM, GM_ADDR tilingGM, TPipe& tPipe)
+{
+    if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_WEIGHT_NZ) {
+        if constexpr (HAS_ANTIQUANT_OFFSET == 0 && TRANS_B == 0) {
+            // 810200
+            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, false);
+        } else if constexpr (HAS_ANTIQUANT_OFFSET == 0 && TRANS_B == 1) {
+            // 810210
+            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, false);
+        } else if constexpr (HAS_ANTIQUANT_OFFSET == 1 && TRANS_B == 0) {
+            // 811200
+            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, true);
+        } else if constexpr (HAS_ANTIQUANT_OFFSET == 1 && TRANS_B == 1) {
+            // 811210
+            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, true);
+        }
+    }
+}
+#endif
 
 template <int MM_TYPE, TPL_PARAMS_COMM, TPL_PARAMS_SHARE_MM, TPL_PARAMS_WEIGHT_QUANT_MM>
 __global__ __aicore__ void weight_quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bGM, GM_ADDR biasGM, GM_ADDR addGM,
@@ -244,71 +400,10 @@ __global__ __aicore__ void weight_quant_matmul_allreduce(GM_ADDR aGM, GM_ADDR bG
         // empty tensor
         INVOKE_MC2_EMPTY_TENSOR_OP_IMPL();
     } else {
-        if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 0 &&
-                      ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && TRANS_B == 0) {
-            // 310100
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_TENSOR, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 0 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && TRANS_B == 1) {
-            // 310110
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_TENSOR, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 0 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && TRANS_B == 0) {
-            // 310200
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 0 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && TRANS_B == 1) {
-            // 310210
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 0 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && TRANS_B == 0) {
-            // 310300
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_GROUP, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 0 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && TRANS_B == 1) {
-            // 310310
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_GROUP, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 1 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && TRANS_B == 0) {
-            // 311100
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_TENSOR, true);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 1 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_TENSOR && TRANS_B == 1) {
-            // 311110
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_TENSOR, true);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 1 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && TRANS_B == 0) {
-            // 311200
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, true);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 1 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_CHANNEL && TRANS_B == 1) {
-            // 311210
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, true);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 1 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && TRANS_B == 0) {
-            // 311300
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_GROUP, true);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_CUSTOM_ANTIQUANT && HAS_ANTIQUANT_OFFSET == 1 &&
-                             ANTIQUANT_TYPE == WQBMMV2_ANTIQUANT_TYPE_PER_GROUP && TRANS_B == 1) {
-            // 311310
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_GROUP, true);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_WEIGHT_NZ && HAS_ANTIQUANT_OFFSET == 0 &&
-                             TRANS_B == 0) {
-            // 810200
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_WEIGHT_NZ && HAS_ANTIQUANT_OFFSET == 0 &&
-                             TRANS_B == 1) {
-            // 810210
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, false);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_WEIGHT_NZ && HAS_ANTIQUANT_OFFSET == 1 &&
-                             TRANS_B == 0) {
-            // 811200
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(false, Mc2QuantType::PER_CHANNEL, true);
-        } else if constexpr (SUB_ALGORITHM_CUSTOM == WQBMMV2_SUB_ALGO_WEIGHT_NZ && HAS_ANTIQUANT_OFFSET == 1 &&
-                             TRANS_B == 1) {
-            // 811210
-            INVOKE_MC2_WEIGHT_QUANT_910_OP_IMPL(true, Mc2QuantType::PER_CHANNEL, true);
-        }
+        WeightQuantAntiquantDispatch<MM_TYPE, PARAMS_COMM, PARAMS_WEIGHT_QUANT_MM>(
+            aGM, bGM, biasGM, addGM, antiquantScaleGM, antiquantOffsetGM, cGM, workspaceGM, tilingGM, tPipe);
+        WeightQuantNzDispatch<MM_TYPE, PARAMS_COMM, PARAMS_WEIGHT_QUANT_MM>(
+            aGM, bGM, biasGM, addGM, antiquantScaleGM, antiquantOffsetGM, cGM, workspaceGM, tilingGM, tPipe);
     }
 #endif // defined(MC2_WEIGHT_QUANT)
 }

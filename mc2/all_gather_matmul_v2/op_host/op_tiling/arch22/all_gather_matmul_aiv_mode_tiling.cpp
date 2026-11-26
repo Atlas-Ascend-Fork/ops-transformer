@@ -509,14 +509,14 @@ void SetTilingData(CoCTiling& cocTilingData, AllGatherMatmulAIVModeInfo& info, i
     AllGatherV2MatmulNPU910BEightRankFP16Tiling(cocTilingData);
 }
 
-ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
+static ge::graphStatus TilingAIVModePreCheck(gert::TilingContext* context, const char*& nodeName)
 {
     OP_TILING_CHECK(context == nullptr, Mc2Error::ReportTilingFailure("AllGatherMatmulV2", "Tiling context is null"),
                     return ge::GRAPH_FAILED);
     OP_TILING_CHECK(context->GetPlatformInfo() == nullptr,
                     Mc2Error::ReportTilingFailure(context->GetNodeName(), "Platform resource metadata is absent"),
                     return ge::GRAPH_FAILED);
-    const char* nodeName = context->GetNodeName();
+    nodeName = context->GetNodeName();
     OP_LOGI("Enter AllGatherMatmulAIVMode tiling func.");
 
     // 涉及SyncAll，设置batch mode模式，所有核同时启动
@@ -525,20 +525,26 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
     OP_TILING_CHECK(ret != ge::GRAPH_SUCCESS,
                     Mc2Error::ReportTilingFailure(nodeName, "Schedule mode output slot is absent"),
                     return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus TilingAIVModeFetchTilingData(gert::TilingContext* context, const char* nodeName,
+                                                    AllGatherMatmulAIVModeTilingData*& tilingData)
+{
     // 1. tilingData
-    AllGatherMatmulAIVModeTilingData* tilingData = context->GetTilingData<AllGatherMatmulAIVModeTilingData>();
+    tilingData = context->GetTilingData<AllGatherMatmulAIVModeTilingData>();
     OP_TILING_CHECK(tilingData == nullptr,
                     Mc2Error::ReportTilingFailure(
                         nodeName, "Typed tiling buffer is absent or too small; required " +
                                       std::to_string(sizeof(AllGatherMatmulAIVModeTilingData)) + " bytes"),
                     return ge::GRAPH_FAILED);
     OP_LOGI(nodeName, "AllGatherMatmulAIVMode get tilingData.");
-    AllGatherMatmulAIVModeInfo& info = tilingData->allGatherMatmulInfo;
-    OP_LOGI(nodeName, "AllGatherMatmulAIVMode get tilingData info.");
-    CoCTiling& coctiling = tilingData->cocTiling;
-    OP_LOGI(nodeName, "AllGatherMatmulAIVMode get CoCTiling info.");
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus TilingAIVModeCheckAttrsShape(const gert::TilingContext* context,
+                                                    AllGatherMatmulAIVModeInfo& info, CoCTiling& coctiling)
+{
     OP_TILING_CHECK(
         AllGatherMatmulAIVModeCheckAttrAndSetTiling(context, info) != ge::GRAPH_SUCCESS,
         OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "AllGatherMatmulAIVMode CheckAttrAndSetTiling Failed"),
@@ -548,14 +554,19 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
         OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "AllGatherMatmulAIVMode CheckShapeAndSetTiling Failed"),
         return ge::GRAPH_FAILED);
     AllGatherMatmulAIVModeFillPlatformInfo(context, info);
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus TilingAIVModeCheckHcclAndRankSize(gert::TilingContext* context, CoCTiling& coctiling,
+                                                         const char*& group, int64_t& rankSize)
+{
     auto attrs = context->GetAttrs();
-    auto group = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
+    group = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
     const char* opName = context->GetNodeName();
     OP_TILING_CHECK(mc2tiling::CheckHcclBuffSize(context, ATTR_GROUP_INDEX, static_cast<int32_t>(CCL_BUFFER_MIN_BYTES),
                                                  opName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(opName, "Check CCL buffer size failed"), return ge::GRAPH_FAILED);
-    int64_t rankSize = 0;
+    rankSize = 0;
     OP_TILING_CHECK(!mc2tiling::GetRankSize(opName, group, rankSize),
                     OP_LOGE_WITHOUT_REPORT(opName, "Communication group size query failed"), return ge::GRAPH_FAILED);
     coctiling.rankSize = rankSize;
@@ -564,7 +575,12 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "group", std::to_string(rankSize).c_str(),
                                               "communication group must contain 2, 4 or 8 ranks for AIV mode"),
         return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus TilingAIVModeSetNumBlocks(gert::TilingContext* context, const char* nodeName,
+                                                 const AllGatherMatmulAIVModeInfo& info, CoCTiling& coctiling)
+{
     // 2. set numBlocks
     uint32_t numBlocks = 1U;
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -582,12 +598,17 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
         return ge::GRAPH_FAILED);
     context->SetBlockDim(numBlocks);
     coctiling.numBlocks = numBlocks;
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus TilingAIVModeSetTilingKey(gert::TilingContext* context, const char* nodeName,
+                                                 AllGatherMatmulAIVModeInfo& info, ge::DataType& aType, bool& isA4W4)
+{
     // 3. set tilingKey
-    auto aType = context->GetInputTensor(0)->GetDataType();
+    aType = context->GetInputTensor(0)->GetDataType();
     auto bType = context->GetInputTensor(1)->GetDataType();
     auto cType = context->GetOutputDesc(0)->GetDataType();
-    bool isA4W4 = (aType == ge::DT_INT4) && (bType == ge::DT_INT4);
+    isA4W4 = (aType == ge::DT_INT4) && (bType == ge::DT_INT4);
     bool isA8W8 = (aType == ge::DT_INT8) && (bType == ge::DT_INT8);
     bool isOutputTypeValid = (cType == ge::DT_BF16 || cType == ge::DT_FLOAT16);
     info.quantFlag = (isA4W4 || isA8W8) && isOutputTypeValid;
@@ -606,13 +627,22 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
     GetTilingKey(tilingKey, info, context);
     context->SetTilingKey(tilingKey);
     OP_LOGI(nodeName, "The tilingKey is %lu", tilingKey);
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus TilingAIVModeGetWorkspaceSizes(gert::TilingContext* context, const char* nodeName,
+                                                      size_t*& workSpaces)
+{
     // 4. workspace
-    size_t* workSpaces = context->GetWorkspaceSizes(1);
+    workSpaces = context->GetWorkspaceSizes(1);
     OP_TILING_CHECK(workSpaces == nullptr,
                     Mc2Error::ReportTilingFailure(nodeName, "Workspace size holder is absent; required one slot"),
                     return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
 
+static void TilingAIVModeSet910CFlag(gert::TilingContext* context, AllGatherMatmulAIVModeInfo& info)
+{
     info.is910C = false;
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
     fe::PlatFormInfos& platformInfo = *platformInfoPtr;
@@ -622,10 +652,11 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
     if (socVersion == "Ascend910_93") {
         info.is910C = true;
     }
+}
 
-    // Tiling
-    SetTilingData(tilingData->cocTiling, info, rankSize, isA4W4);
-
+static void TilingAIVModeCalcWorkspaceSize(AllGatherMatmulAIVModeTilingData* tilingData, ge::DataType aType,
+                                           int64_t rankSize, size_t* workSpaces)
+{
     // workspace
     uint32_t elementSize = 0;
     uint32_t nElemAlign = 0;
@@ -639,7 +670,11 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
     uint64_t userWorkSpaceSize = 0;
     GetUsrWorkSpaceSize(nElemAlign, elementSize, userWorkSpaceSize, rankSize, tilingData);
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + userWorkSpaceSize;
+}
 
+static ge::graphStatus TilingAIVModeSetCommTiling(AllGatherMatmulAIVModeTilingData* tilingData, const char* nodeName,
+                                                  const char* group, const AllGatherMatmulAIVModeInfo& info)
+{
     // 5. communication
     if (info.is910C) {
         uint32_t opType = 6;
@@ -657,6 +692,59 @@ ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
                                              nodeName) != ge::GRAPH_SUCCESS) {
             return ge::GRAPH_FAILED;
         }
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus AllGatherMatmulTilingAIVModeFunc(gert::TilingContext* context)
+{
+    const char* nodeName = nullptr;
+    if (TilingAIVModePreCheck(context, nodeName) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    AllGatherMatmulAIVModeTilingData* tilingData = nullptr;
+    if (TilingAIVModeFetchTilingData(context, nodeName, tilingData) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    AllGatherMatmulAIVModeInfo& info = tilingData->allGatherMatmulInfo;
+    OP_LOGI(nodeName, "AllGatherMatmulAIVMode get tilingData info.");
+    CoCTiling& coctiling = tilingData->cocTiling;
+    OP_LOGI(nodeName, "AllGatherMatmulAIVMode get CoCTiling info.");
+
+    if (TilingAIVModeCheckAttrsShape(context, info, coctiling) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    const char* group = nullptr;
+    int64_t rankSize = 0;
+    if (TilingAIVModeCheckHcclAndRankSize(context, coctiling, group, rankSize) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    if (TilingAIVModeSetNumBlocks(context, nodeName, info, coctiling) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    ge::DataType aType = ge::DT_UNDEFINED;
+    bool isA4W4 = false;
+    if (TilingAIVModeSetTilingKey(context, nodeName, info, aType, isA4W4) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    size_t* workSpaces = nullptr;
+    if (TilingAIVModeGetWorkspaceSizes(context, nodeName, workSpaces) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    TilingAIVModeSet910CFlag(context, info);
+    // Tiling
+    SetTilingData(tilingData->cocTiling, info, rankSize, isA4W4);
+
+    TilingAIVModeCalcWorkspaceSize(tilingData, aType, rankSize, workSpaces);
+
+    if (TilingAIVModeSetCommTiling(tilingData, nodeName, group, info) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
     }
 
     PrintfTilingData(info, coctiling);
