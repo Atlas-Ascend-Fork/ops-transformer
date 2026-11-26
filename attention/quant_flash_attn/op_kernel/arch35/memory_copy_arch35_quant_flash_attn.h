@@ -270,68 +270,6 @@ __aicore__ inline void DataCopySoftmaxLseBNSDArch35(GlobalTensor<float> softmaxL
     }
 }
 
-template <typename T, typename CONST_INFO_T>
-__aicore__ inline void DataCopySoftmaxLseTNDArch35(GlobalTensor<float> softmaxLseGm, LocalTensor<T> lseSrc,
-                                                   uint64_t bN2Offset, uint32_t mOffset, uint32_t dealCount,
-                                                   const CONST_INFO_T& constInfo)
-{
-    uint32_t startS1Idx = mOffset / constInfo.gSize;
-    uint32_t startGIdx = mOffset % constInfo.gSize;
-    uint32_t endS1Idx = (mOffset + dealCount - 1) / constInfo.gSize;
-    uint32_t endGIdx = (mOffset + dealCount - 1) % constInfo.gSize;
-    uint64_t outOffset = 0;
-    uint64_t ubOffset = 0;
-    uint32_t curDealRowCount = 0;
-
-    for (uint32_t s1Idx = startS1Idx; s1Idx <= endS1Idx; s1Idx++) {
-        outOffset = bN2Offset + s1Idx * constInfo.n2Size * constInfo.gSize + startGIdx;
-        if (s1Idx != endS1Idx) {
-            curDealRowCount = constInfo.gSize - startGIdx;
-        } else {
-            curDealRowCount = endGIdx + 1 - startGIdx;
-        }
-        DataCopyExtParams dataCopyParams;
-        dataCopyParams.blockCount = curDealRowCount;
-        dataCopyParams.blockLen = sizeof(float);
-        dataCopyParams.srcStride = 0;
-        dataCopyParams.dstStride = 0;
-        DataCopyPad(softmaxLseGm[outOffset], lseSrc[ubOffset], dataCopyParams);
-        startGIdx = 0;
-        ubOffset += curDealRowCount * AttentionCommon::FP32_BLOCK_ELEMENT_NUM;
-    }
-}
-
-template <typename T, typename CONST_INFO_T>
-__aicore__ inline void DataCopySoftmaxLseTNDArch35NoGS1Merge(GlobalTensor<float> softmaxLseGm, LocalTensor<T> lseSrc,
-                                                             uint64_t bN2Offset, uint32_t mOffset, uint32_t dealCount,
-                                                             const CONST_INFO_T& constInfo)
-{
-    uint32_t startS1Idx = mOffset / constInfo.realGSize;
-    uint32_t startGIdx = mOffset % constInfo.realGSize;
-    uint32_t endS1Idx = (mOffset + dealCount - 1) / constInfo.realGSize;
-    uint32_t endGIdx = (mOffset + dealCount - 1) % constInfo.realGSize;
-    uint64_t outOffset = 0;
-    uint64_t ubOffset = 0;
-    uint32_t curDealRowCount = 0;
-
-    for (uint32_t s1Idx = startS1Idx; s1Idx <= endS1Idx; s1Idx++) {
-        outOffset = bN2Offset + s1Idx * constInfo.realN2Size * constInfo.realGSize + startGIdx;
-        if (s1Idx != endS1Idx) {
-            curDealRowCount = constInfo.realGSize - startGIdx;
-        } else {
-            curDealRowCount = endGIdx + 1 - startGIdx;
-        }
-        DataCopyExtParams dataCopyParams;
-        dataCopyParams.blockCount = curDealRowCount;
-        dataCopyParams.blockLen = sizeof(float);
-        dataCopyParams.srcStride = 0;
-        dataCopyParams.dstStride = 0;
-        DataCopyPad(softmaxLseGm[outOffset], lseSrc[ubOffset], dataCopyParams);
-        startGIdx = 0;
-        ubOffset += curDealRowCount * AttentionCommon::FP32_BLOCK_ELEMENT_NUM;
-    }
-}
-
 // TND layout LSE 输出转成 N-major (N 在外, T 在内) 排布: [N2*G, T]
 // bN2Offset = n2Idx * realGSize * t1Size + prefixBS1
 // 单次写入: outOffset = bN2Offset + gIdx * t1Size + s1Idx
@@ -427,24 +365,6 @@ __aicore__ inline void DataCopySoftmaxLseNTDArch35(GlobalTensor<float> softmaxLs
         startS1Idx = 0;
         ubOffset += curDealRowCount * AttentionCommon::FP32_BLOCK_ELEMENT_NUM;
     }
-}
-
-// ----------------------------------------------Copy LSE UB To Gm (S1_ONLY) arch35--------------------------------
-// DN 范式(realGSize=1)下每个任务只属于一个 query 头, LSE 在 UB 中按 s1 连续排布,
-// 且 GM 上同一个头的 s1 也是连续的, 因此算好头基址后一次整块搬出, 无需逐 s1 搬运。
-// 各 layout 的头基址由调用方预计算:
-//   TND:      realN2Idx * realGSize * t1Size + prefixBS1
-//   BSND/BNSD: bIdx * n2Size * gSize * s1Size + realN2Idx * realGSize * s1Size
-template <typename T>
-__aicore__ inline void DataCopySoftmaxLseS1OnlyArch35(GlobalTensor<float> softmaxLseGm, LocalTensor<T> lseSrc,
-                                                      uint64_t bN2Offset, uint32_t s1Offset, uint32_t dealCount)
-{
-    DataCopyExtParams dataCopyParams;
-    dataCopyParams.blockCount = dealCount;
-    dataCopyParams.blockLen = sizeof(float);
-    dataCopyParams.srcStride = 0;
-    dataCopyParams.dstStride = 0;
-    DataCopyPad(softmaxLseGm[bN2Offset + s1Offset], lseSrc, dataCopyParams);
 }
 
 #endif
