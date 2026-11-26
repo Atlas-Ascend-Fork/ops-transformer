@@ -54,6 +54,38 @@ static aclnnStatus CheckMx4BufferShapes(const aclTensor* expandedX, const aclTen
     return ACLNN_SUCCESS;
 }
 
+static aclnnStatus CheckMx8BufferShapes(const aclTensor* expandedX, const aclTensor* expandedRowIdx,
+                                        const aclTensor* bias, const aclTensor* expandedXScale, int64_t k)
+{
+    const auto& expandedShape = expandedX->GetViewShape();
+    const auto h = expandedShape.GetDim(expandedShape.GetDimNum() - 1);
+    const auto indexCount = expandedRowIdx->GetViewShape().GetDim(0);
+    // H is not required to be a multiple of 32: the kernel pads H up to the 32-element
+    // block (see IsHFullLoad) and the tail block owns a single scale.
+    // expanded_x_scale shares physical rows with expanded_x (same layout as the MXFP8 scale output of
+    // moe_init_routing_v3): (R, CeilAlign(CeilDiv(H, 32), 2)), where R is dim0 of a 2D expanded_x or E*C
+    // of a 3D one. R may be smaller than NUM_ROWS*K; routes pointing beyond R are skipped.
+    constexpr int64_t blockSize = 32;
+    constexpr int64_t scaleAlign = 2;
+    CHECK_RET(h > 0 && indexCount >= 0 && indexCount % k == 0, ACLNN_ERR_PARAM_INVALID);
+    const int64_t blocks = h / blockSize;
+    const int64_t stride = (blocks + scaleAlign - 1) / scaleAlign * scaleAlign;
+    const int64_t rows =
+        expandedShape.GetDimNum() == 2 ? expandedShape.GetDim(0) : expandedShape.GetDim(0) * expandedShape.GetDim(1);
+    CHECK_RET(rows > 0, ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET((expandedXScale->GetViewShape() == op::Shape{rows, stride}), ACLNN_ERR_PARAM_INVALID);
+
+    const auto biasRows = bias == nullptr ? 0 : bias->GetViewShape().GetDim(0);
+    int64_t bytes;
+    CHECK_RET((bias == nullptr || biasRows > 0) && !__builtin_mul_overflow(rows, h, &bytes) &&
+                  !__builtin_mul_overflow(rows, stride, &bytes) &&
+                  !__builtin_mul_overflow(indexCount, sizeof(int32_t), &bytes) &&
+                  !__builtin_mul_overflow(biasRows, h, &bytes) &&
+                  !__builtin_mul_overflow(bytes, sizeof(uint16_t), &bytes),
+              ACLNN_ERR_PARAM_INVALID);
+    return ACLNN_SUCCESS;
+}
+
 static aclnnStatus CheckMx4(const aclTensor* expandedX, const aclTensor* expandedRowIdx, const aclTensor* x1,
                             const aclTensor* x2, const aclTensor* bias, const aclTensor* scales,
                             const aclTensor* expertIdx, const aclTensor* expandedXScale, const aclTensor* out,
@@ -84,6 +116,36 @@ static aclnnStatus CheckMx4(const aclTensor* expandedX, const aclTensor* expande
     return CheckMx4BufferShapes(expandedX, expandedRowIdx, bias, expandedXScale, mode, k);
 }
 
+static aclnnStatus CheckMx8(const aclTensor* expandedX, const aclTensor* expandedRowIdx, const aclTensor* x1,
+                            const aclTensor* x2, const aclTensor* bias, const aclTensor* scales,
+                            const aclTensor* expertIdx, const aclTensor* expandedXScale, const aclTensor* out,
+                            int64_t mode, int64_t k)
+{
+    using namespace MoeFinalizeRoutingCheck;
+    OP_CHECK_NULL(expandedXScale, return ACLNN_ERR_PARAM_NULLPTR);
+    const auto arch = GetCurrentPlatformInfo().GetCurNpuArch();
+    CHECK_RET(arch == Ops::Base::DAV_3510 || arch == Ops::Base::DAV_9201 || arch == Ops::Base::DAV_9202,
+              ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(CheckDtypeValid(expandedX, expandedRowIdx, x1, x2, bias, expandedXScale, expertIdx, out, true) &&
+                  CheckFormatValid(expandedX, expandedRowIdx, x1, x2, bias, expandedXScale, expertIdx, nullptr, nullptr,
+                                   nullptr, nullptr, out, mode, true),
+              ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(scales == nullptr ||
+                  (scales->GetDataType() == DataType::DT_FLOAT && scales->GetStorageFormat() == Format::FORMAT_ND),
+              ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(op::IsContiguous(expandedX) && op::IsContiguous(expandedXScale) && op::IsContiguous(out),
+              ACLNN_ERR_PARAM_INVALID);
+    CHECK_RET(mode >= 0 && mode <= 3 && k > 0 && (x2 == nullptr || x1 != nullptr) &&
+                  (bias == nullptr || expertIdx != nullptr),
+              ACLNN_ERR_PARAM_INVALID);
+
+    CHECK_RET(CheckShapeValid(expandedX, expandedRowIdx, x1, x2, bias, scales, expertIdx, nullptr, nullptr, nullptr,
+                              nullptr, out, mode, k),
+              ACLNN_ERR_PARAM_INVALID);
+
+    return CheckMx8BufferShapes(expandedX, expandedRowIdx, bias, expandedXScale, k);
+}
+
 static aclnnStatus CheckV5(const aclTensor* expandedX, const aclTensor* expandedRowIdx, const aclTensor* x1Optional,
                            const aclTensor* x2Optional, const aclTensor* biasOptional, const aclTensor* scalesOptional,
                            const aclTensor* expertIdxOptional, const aclTensor* xOptional,
@@ -94,6 +156,10 @@ static aclnnStatus CheckV5(const aclTensor* expandedX, const aclTensor* expanded
     CHECK_RET(MoeFinalizeRoutingCheck::CheckNotNull(expandedX, expandedRowIdx, out), ACLNN_ERR_PARAM_NULLPTR);
     if (expandedX->GetDataType() == DataType::DT_FLOAT4_E2M1) {
         return CheckMx4(expandedX, expandedRowIdx, x1Optional, x2Optional, biasOptional, scalesOptional,
+                        expertIdxOptional, expandedXScaleOptional, out, dropPadMode, k);
+    }
+    if (MoeFinalizeRoutingCheck::IsMx8Dtype(expandedX)) {
+        return CheckMx8(expandedX, expandedRowIdx, x1Optional, x2Optional, biasOptional, scalesOptional,
                         expertIdxOptional, expandedXScaleOptional, out, dropPadMode, k);
     }
     CHECK_RET(static_cast<ge::DataType>(expandedX->GetDataType()) != Ops::Transformer::DT_HIFLOAT4,
@@ -160,7 +226,9 @@ ACLNN_API aclnnStatus aclnnMoeFinalizeRoutingV5GetWorkspaceSize(
 {
     OP_CHECK_COMM_INPUT(workspaceSize, executor);
     const bool isMx4 = expandedX != nullptr && expandedX->GetDataType() == DataType::DT_FLOAT4_E2M1;
-    const aclTensor* dequantScale = isMx4 ? expandedXScaleOptional : nullptr;
+    const bool isMx8 = expandedX != nullptr && MoeFinalizeRoutingCheck::IsMx8Dtype(expandedX);
+    const bool isQuantized = isMx4 || isMx8;
+    const aclTensor* dequantScale = isQuantized ? expandedXScaleOptional : nullptr;
     L2_DFX_PHASE_1(aclnnMoeFinalizeRoutingV5,
                    DFX_IN(expandedX, expandedRowIdx, x1Optional, x2Optional, biasOptional, scalesOptional,
                           expertIdxOptional, xOptional, alpha1Optional, alpha2Optional, vOptional, dequantScale,
@@ -168,14 +236,13 @@ ACLNN_API aclnnStatus aclnnMoeFinalizeRoutingV5GetWorkspaceSize(
                    DFX_OUT(out));
 
     const auto isEmptyRange = [](const aclIntArray* range) { return range == nullptr || range->Size() == 0; };
-    OP_CHECK(
-        !isMx4 ||
-            (xOptional == nullptr && alpha1Optional == nullptr && alpha2Optional == nullptr && vOptional == nullptr &&
-             isEmptyRange(zeroExpertRange) && isEmptyRange(copyExpertRange) && isEmptyRange(constantExpertRange)),
-        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(
-            "aclnnMoeFinalizeRoutingV5", "special expert tensors and ranges",
-            "MXFP4 does not support zero, copy or constant experts. Special expert tensors and ranges must be empty."),
-        return ACLNN_ERR_PARAM_INVALID);
+    OP_CHECK(!isQuantized || (xOptional == nullptr && alpha1Optional == nullptr && alpha2Optional == nullptr &&
+                              vOptional == nullptr && isEmptyRange(zeroExpertRange) && isEmptyRange(copyExpertRange) &&
+                              isEmptyRange(constantExpertRange)),
+             OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON("aclnnMoeFinalizeRoutingV5", "special expert tensors and ranges",
+                                                      "MXFP4 and MXFP8 do not support zero, copy or constant experts. "
+                                                      "Special expert tensors and ranges must be empty."),
+             return ACLNN_ERR_PARAM_INVALID);
 
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);

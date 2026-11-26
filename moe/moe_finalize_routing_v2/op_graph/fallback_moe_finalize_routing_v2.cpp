@@ -34,7 +34,7 @@ static const size_t ALPHA2_INDEX = 9;
 static const size_t V_INDEX = 10;
 static const size_t EXPANDED_X_SCALE_INDEX = 11;
 
-static std::vector<int64_t> GetExpertRange(const gert::ContinuousVector* ptr, bool isMx4)
+static std::vector<int64_t> GetExpertRange(const gert::ContinuousVector* ptr, bool isQuantized)
 {
     std::vector<int64_t> range = {-1, -1};
     if (ptr != nullptr) {
@@ -42,7 +42,7 @@ static std::vector<int64_t> GetExpertRange(const gert::ContinuousVector* ptr, bo
         range.assign(data, data + ptr->GetSize());
     }
     // The operator definition uses [-1, -1] for an omitted range.
-    if (isMx4 && range.size() == 2 && range[0] == -1 && range[1] == -1) {
+    if (isQuantized && range.size() == 2 && range[0] == -1 && range[1] == -1) {
         return {};
     }
     return range;
@@ -96,9 +96,12 @@ static graphStatus MoeFinalizeRoutingV2HostExecuteFunc(OpExecuteContext* host_ap
     const int64_t* k = attrs->GetAttrPointer<int64_t>(4);
 
     const bool isMx4 = expanded_permuted_rows->GetDataType() == ge::DT_FLOAT4_E2M1;
-    const auto zeroExpertRange = GetExpertRange(zero_expert_range_ptr, isMx4);
-    const auto copyExpertRange = GetExpertRange(copy_expert_range_ptr, isMx4);
-    const auto constantExpertRange = GetExpertRange(constant_expert_range_ptr, isMx4);
+    const bool isMx8 = expanded_permuted_rows->GetDataType() == ge::DT_FLOAT8_E4M3FN ||
+                       expanded_permuted_rows->GetDataType() == ge::DT_FLOAT8_E5M2;
+    const bool isQuantized = isMx4 || isMx8;
+    const auto zeroExpertRange = GetExpertRange(zero_expert_range_ptr, isQuantized);
+    const auto copyExpertRange = GetExpertRange(copy_expert_range_ptr, isQuantized);
+    const auto constantExpertRange = GetExpertRange(constant_expert_range_ptr, isQuantized);
 
     auto output = host_api_ctx->GetOutputTensor(0);
     OP_CHECK_IF(output == nullptr,
@@ -106,9 +109,9 @@ static graphStatus MoeFinalizeRoutingV2HostExecuteFunc(OpExecuteContext* host_ap
                 return GRAPH_FAILED);
 
     // EXEC_OPAPI_CMD converts and releases the expert range arrays.
-    const auto expandedXScale = isMx4 ? host_api_ctx->GetOptionalInputTensor(EXPANDED_X_SCALE_INDEX) : nullptr;
+    const auto expandedXScale = isQuantized ? host_api_ctx->GetOptionalInputTensor(EXPANDED_X_SCALE_INDEX) : nullptr;
     const auto api_ret =
-        isMx4 ?
+        isQuantized ?
             EXEC_OPAPI_CMD(aclnnMoeFinalizeRoutingV5, expanded_permuted_rows, expanded_src_to_dst_row, skip1,
                            skip2_optional, bias, scales, expert_for_source_row, x, alpha1, alpha2, v, expandedXScale,
                            *mode, zeroExpertRange, copyExpertRange, constantExpertRange, *k, output) :

@@ -107,6 +107,23 @@
 #define TILING_KEY_MX4_ROW_K_H_FULL_LOAD_DROPLESS_ROW 160020
 #define TILING_KEY_MX4_ROW_K_H_FULL_LOAD_DROP_PAD_ROW 160030
 
+#define TILING_KEY_MX8_H_FULL_LOAD_DROPLESS_COLUMN 90000
+#define TILING_KEY_MX8_H_FULL_LOAD_DROP_PAD_COLUMN 90010
+#define TILING_KEY_MX8_H_FULL_LOAD_DROPLESS_ROW 90020
+#define TILING_KEY_MX8_H_FULL_LOAD_DROP_PAD_ROW 90030
+#define TILING_KEY_MX8_H_PARTIAL_LOAD_DROPLESS_COLUMN 100000
+#define TILING_KEY_MX8_H_PARTIAL_LOAD_DROP_PAD_COLUMN 100010
+#define TILING_KEY_MX8_H_PARTIAL_LOAD_DROPLESS_ROW 100020
+#define TILING_KEY_MX8_H_PARTIAL_LOAD_DROP_PAD_ROW 100030
+#define TILING_KEY_MX8_K_H_FULL_LOAD_DROPLESS_COLUMN 110000
+#define TILING_KEY_MX8_K_H_FULL_LOAD_DROP_PAD_COLUMN 110010
+#define TILING_KEY_MX8_K_H_FULL_LOAD_DROPLESS_ROW 110020
+#define TILING_KEY_MX8_K_H_FULL_LOAD_DROP_PAD_ROW 110030
+#define TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROPLESS_COLUMN 120000
+#define TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROP_PAD_COLUMN 120010
+#define TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROPLESS_ROW 120020
+#define TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROP_PAD_ROW 120030
+
 using namespace MoeFinalizeRoutingV2Regbase;
 
 #define MOE_FINALIZE_ROUTING_V2_H_FULLLOAD_IMPL(INPUT_TYPE, SCALE_DTYPE, DROP_PAD_MODE) \
@@ -172,6 +189,80 @@ using namespace MoeFinalizeRoutingV2Regbase;
     } while (0)
 #endif
 
+// MXFP8暂不适配空专家特性
+#ifdef MOE_FINALIZE_ROUTING_HAS_MXFP8
+#define MOE_FINALIZE_ROUTING_V2_MX8_H_FULLLOAD_IMPL(DROP_PAD_MODE) \
+    do { \
+        MoeFinalizeRoutingV2Regbase::MoeFinalizeRoutingV2Mx8HFullLoadImpl<DTYPE_EXPANDED_X, DROP_PAD_MODE> op; \
+        op.Init(expandedX, expandedRowIdx, x1, x2, bias, expandedXScale, scales, expertIdx, x, alpha1, alpha2, v, y, \
+                userWS, &tilingData, &tPipe); \
+        op.Process(); \
+    } while (0)
+
+#define MOE_FINALIZE_ROUTING_V2_MX8_H_PARTIALLOAD_IMPL(DROP_PAD_MODE) \
+    do { \
+        MoeFinalizeRoutingV2Regbase::MoeFinalizeRoutingV2Mx8HPartialLoadImpl<DTYPE_EXPANDED_X, DROP_PAD_MODE> op; \
+        op.Init(expandedX, expandedRowIdx, x1, x2, bias, expandedXScale, scales, expertIdx, x, alpha1, alpha2, v, y, \
+                userWS, &tilingData, &tPipe); \
+        op.Process(); \
+    } while (0)
+
+#define MOE_FINALIZE_ROUTING_V2_MX8_KH_FULLLOAD_IMPL(DROP_PAD_MODE) \
+    do { \
+        MoeFinalizeRoutingV2Regbase::MoeFinalizeRoutingV2Mx8KHFullLoadImpl<DTYPE_EXPANDED_X, DROP_PAD_MODE> op; \
+        op.Init(expandedX, expandedRowIdx, x1, x2, bias, expandedXScale, scales, expertIdx, x, alpha1, alpha2, v, y, \
+                userWS, &tilingData, &tPipe); \
+        op.Process(); \
+    } while (0)
+
+#define MOE_FINALIZE_ROUTING_V2_MX8_ROWKH_FULLLOAD_IMPL(DROP_PAD_MODE) \
+    do { \
+        MoeFinalizeRoutingV2Regbase::MoeFinalizeRoutingV2Mx8RowKHFullLoadImpl<DTYPE_EXPANDED_X, DROP_PAD_MODE> op; \
+        op.Init(expandedX, expandedRowIdx, x1, x2, bias, expandedXScale, scales, expertIdx, x, alpha1, alpha2, v, y, \
+                userWS, &tilingData, &tPipe); \
+        op.Process(); \
+    } while (0)
+
+// MXFP8 专用分发：4 种搬运策略 x 4 种路由模式集中在此宏内，保持 TILING_KEY_IS 编译期
+// 特化与现有入口签名不变，缩小 kernel 入口函数体。
+#define MOE_FINALIZE_ROUTING_V2_MX8_DISPATCH() \
+    do { \
+        if (TILING_KEY_IS(TILING_KEY_MX8_H_FULL_LOAD_DROPLESS_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_FULLLOAD_IMPL(DROPLESS_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_H_FULL_LOAD_DROP_PAD_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_FULLLOAD_IMPL(DROP_PAD_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_H_FULL_LOAD_DROPLESS_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_FULLLOAD_IMPL(DROPLESS_ROW); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_H_FULL_LOAD_DROP_PAD_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_FULLLOAD_IMPL(DROP_PAD_ROW); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_H_PARTIAL_LOAD_DROPLESS_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_PARTIALLOAD_IMPL(DROPLESS_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_H_PARTIAL_LOAD_DROP_PAD_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_PARTIALLOAD_IMPL(DROP_PAD_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_H_PARTIAL_LOAD_DROPLESS_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_PARTIALLOAD_IMPL(DROPLESS_ROW); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_H_PARTIAL_LOAD_DROP_PAD_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_H_PARTIALLOAD_IMPL(DROP_PAD_ROW); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_K_H_FULL_LOAD_DROPLESS_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_KH_FULLLOAD_IMPL(DROPLESS_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_K_H_FULL_LOAD_DROP_PAD_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_KH_FULLLOAD_IMPL(DROP_PAD_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_K_H_FULL_LOAD_DROPLESS_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_KH_FULLLOAD_IMPL(DROPLESS_ROW); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_K_H_FULL_LOAD_DROP_PAD_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_KH_FULLLOAD_IMPL(DROP_PAD_ROW); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROPLESS_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_ROWKH_FULLLOAD_IMPL(DROPLESS_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROP_PAD_COLUMN)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_ROWKH_FULLLOAD_IMPL(DROP_PAD_COLUMN); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROPLESS_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_ROWKH_FULLLOAD_IMPL(DROPLESS_ROW); \
+        } else if (TILING_KEY_IS(TILING_KEY_MX8_ROW_K_H_FULL_LOAD_DROP_PAD_ROW)) { \
+            MOE_FINALIZE_ROUTING_V2_MX8_ROWKH_FULLLOAD_IMPL(DROP_PAD_ROW); \
+        } \
+    } while (0)
+#endif
+
 extern "C" __global__ __aicore__ void moe_finalize_routing_v2(GM_ADDR expandedX, GM_ADDR expandedRowIdx, GM_ADDR x1,
                                                               GM_ADDR x2, GM_ADDR bias, GM_ADDR scales,
                                                               GM_ADDR expertIdx, GM_ADDR x, GM_ADDR alpha1,
@@ -179,8 +270,10 @@ extern "C" __global__ __aicore__ void moe_finalize_routing_v2(GM_ADDR expandedX,
                                                               GM_ADDR y, GM_ADDR workspace, GM_ADDR tiling)
 {
     GM_ADDR userWS = nullptr;
-    // MXFP4 uses only UB buffers; zero workspace is valid for this path.
-    if constexpr (!IsSameType<DTYPE_EXPANDED_X, fp4x2_e2m1_t>::value) {
+    // MXFP4/MXFP8 use only UB buffers; zero workspace is valid for these paths.
+    if constexpr (!IsSameType<DTYPE_EXPANDED_X, fp4x2_e2m1_t>::value &&
+                  !IsSameType<DTYPE_EXPANDED_X, fp8_e4m3fn_t>::value &&
+                  !IsSameType<DTYPE_EXPANDED_X, fp8_e5m2_t>::value) {
         userWS = GetUserWorkspace(workspace);
         if (userWS == nullptr) {
             return;
@@ -281,6 +374,13 @@ extern "C" __global__ __aicore__ void moe_finalize_routing_v2(GM_ADDR expandedX,
                     &tPipe);
             op.Process();
         }
+        return;
+    }
+#endif
+#ifdef MOE_FINALIZE_ROUTING_HAS_MXFP8
+    if constexpr (IsSameType<DTYPE_EXPANDED_X, fp8_e4m3fn_t>::value ||
+                  IsSameType<DTYPE_EXPANDED_X, fp8_e5m2_t>::value) {
+        MOE_FINALIZE_ROUTING_V2_MX8_DISPATCH();
         return;
     }
 #endif
