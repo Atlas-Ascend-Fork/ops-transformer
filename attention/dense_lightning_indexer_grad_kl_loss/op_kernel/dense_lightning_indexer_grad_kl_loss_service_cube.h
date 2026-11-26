@@ -212,13 +212,16 @@ __aicore__ inline void DLITMatmulService<DLIT>::InitBuffers(TPipe* pipe)
     pipe->InitBuffer(reluGradOutBuf, 128 * 1024 * sizeof(KV_T)); // 256k
 
     l1QueryTensor = queryBuf.Get<Q_T>();
-    l1QueryRopeTensor = l1QueryTensor[CUBE_BASE_BLOCK * constInfo.dSizeQuery];
     l1QIndexTensor[0] = queryIndexBuf[0].Get<Q_T>();
     l1QIndexTensor[1] = queryIndexBuf[1].Get<Q_T>();
     l1KeyTensor[0] = keyBuf[0].Get<KV_T>();
     l1KeyTensor[1] = keyBuf[1].Get<KV_T>();
-    l1KeyRopeTensor[0] = l1KeyTensor[0][CUBE_BASE_BLOCK * constInfo.dSizeQuery];
-    l1KeyRopeTensor[1] = l1KeyTensor[1][CUBE_BASE_BLOCK * constInfo.dSizeQuery];
+    if constexpr (HAS_ROPE) {
+        uint32_t ropeOffset = CUBE_BASE_BLOCK * constInfo.dSizeQuery;
+        l1QueryRopeTensor = l1QueryTensor[ropeOffset];
+        l1KeyRopeTensor[0] = l1KeyTensor[0][ropeOffset];
+        l1KeyRopeTensor[1] = l1KeyTensor[1][ropeOffset];
+    }
     // l1KeyIndexTensor[0] = keyIndexBuf[0].Get<KV_T>();
     // l1KeyIndexTensor[1] = keyIndexBuf[1].Get<KV_T>();
     l1ReLuGradTensor = reluGradOutBuf.Get<Q_T>();
@@ -312,9 +315,9 @@ __aicore__ inline void DLITMatmulService<DLIT>::CopyInMm1BToL1(const DLIGradKLLo
                                                                uint32_t s2InnerIdx, uint32_t actualS2Len,
                                                                uint8_t pingpongFlag)
 {
-    uint32_t keyGmOffset = runInfo.keyTensorOffset +
-                           s2InnerIdx * constInfo.s2BaseBlk * constInfo.n2Size * constInfo.dSizeQuery +
-                           n2Idx * constInfo.dSizeQuery;
+    int64_t keyGmOffset = runInfo.keyTensorOffset +
+                          s2InnerIdx * constInfo.s2BaseBlk * constInfo.n2Size * constInfo.dSizeQuery +
+                          n2Idx * constInfo.dSizeQuery;
     auto keySrcGm = keyGm[keyGmOffset];
     CopyGmToL1(l1KeyTensor[pingpongFlag], keySrcGm, actualS2Len, constInfo.dSizeQuery,
                constInfo.dSizeQuery * constInfo.n2Size);
@@ -547,6 +550,14 @@ __aicore__ inline void DLITMatmulService<DLIT>::ComputeMm1(const DLIGradKLLossRu
             SetFlag<AscendC::HardEvent::MTE2_MTE1>(SYNC_MTE21_FLAG_KEY[l1PingPongFlag & 1]);
             WaitFlag<AscendC::HardEvent::MTE2_MTE1>(SYNC_MTE21_FLAG_KEY[l1PingPongFlag & 1]);
 
+            // Separate RoPE input uses a fixed L1 offset. A single Q/K input is
+            // packed in NZ, so the K-axis stride follows the aligned token count.
+            uint32_t qKTileStride = CUBE_BASE_BLOCK * CUBE_BASE_BLOCK;
+            uint32_t kKTileStride = qKTileStride;
+            if constexpr (!HAS_ROPE) {
+                qKTileStride = AlignTo(info.curS1Size, C0_SIZE) * CUBE_BASE_BLOCK;
+                kKTileStride = AlignTo(curS2BlkSize, C0_SIZE) * CUBE_BASE_BLOCK;
+            }
             for (uint32_t kIdx = 0; kIdx < constInfo.dLoopTimesCube; kIdx++) {
                 mmParams.singleK = (kIdx == constInfo.dLoopTimesCube - 1) ?
                                        (constInfo.dSizeActual - kIdx * CUBE_BASE_BLOCK) :
@@ -555,8 +566,8 @@ __aicore__ inline void DLITMatmulService<DLIT>::ComputeMm1(const DLIGradKLLossRu
                 mmParams.isL0CInit = (kIdx == 0);
 
                 auto mm1DstGm = mm1ResGm[info.taskIdMod2][mmParams.dstFixOffset];
-                auto l1SrcQTensor = l1QueryTensor[kIdx * CUBE_BASE_BLOCK * CUBE_BASE_BLOCK];
-                auto l1SrcKTensor = l1KeyTensor[l1PingPongFlag & 1][kIdx * CUBE_BASE_BLOCK * CUBE_BASE_BLOCK];
+                auto l1SrcQTensor = l1QueryTensor[kIdx * qKTileStride];
+                auto l1SrcKTensor = l1KeyTensor[l1PingPongFlag & 1][kIdx * kKTileStride];
                 LocalTensor<MM12_OUT_T> l0cTensor = cL0TensorPingPong[l0cPingPongFlag & 1];
                 MmadInner(mmParams, l1SrcQTensor, l1SrcKTensor, l0cTensor, l1PingPongFlag, l0abPingPongFlag,
                           l0cPingPongFlag);

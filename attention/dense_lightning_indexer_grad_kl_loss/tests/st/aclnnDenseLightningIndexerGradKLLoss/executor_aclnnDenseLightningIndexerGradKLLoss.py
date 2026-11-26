@@ -10,7 +10,7 @@
 """
 # DenseLightningIndexerGradKLLoss ATK ST 用例
 
-`aclnnDenseLightningIndexerGradKLLoss/` 包含 16 条门槛用例和配套执行器。
+`aclnnDenseLightningIndexerGradKLLoss/` 包含 17 条门槛用例和配套执行器。
 参考既有 DenseLightningIndexerKLLossTrain 测试资产；其实际 ACLNN 接口为
 `aclnnDenseLightningIndexerGradKLLoss`。
 
@@ -20,6 +20,7 @@
 - Attention 头数 32/64/128，Indexer 头数 8/16/32/64。
 - RoPE 成对提供或为空，`D=128`、`Dr=64`。
 - 单 token、非对齐长度、不等长 TND Batch、跨 128/256 长度边界。
+- Arch35 的 D=192、S1=17、S2=129 独立数值回归，覆盖 Q/K 不同 NZ 步长和 D 尾段。
 - `sparseMode=3` 的右下角因果掩码，Query 长度不超过对应 Key 长度。
 
 这些用例保留参考资产的张量取值范围和 `single_bm/high_performance` 比较标准，
@@ -48,7 +49,7 @@ accuracy 标杆节点，为前者指定空闲 NPU。使用独立结果目录运�
 atk task -n /path/to/nodes.yaml \
     -c /path/to/dense_lightning_indexer_grad_kl_loss/tests/st/aclnnDenseLightningIndexerGradKLLoss/atk_aclnnDenseLightningIndexerGradKLLoss.json \
     -p /path/to/dense_lightning_indexer_grad_kl_loss/tests/st/aclnnDenseLightningIndexerGradKLLoss/executor_aclnnDenseLightningIndexerGradKLLoss.py \
-    -s 0 -e 16 -mt 1
+    -s 0 -e 17 -mt 1
 ```
 
 测试自定义算子包时需加载对应包的环境。检查逐例执行结果、四个输出的精度
@@ -118,6 +119,33 @@ def prepare_inputs(args):
     for name in ("queryRope", "keyRope"):
         if args[name] is not None and args[name].numel() == 0:
             args[name] = None
+    # Regression for Arch35 D=192 NZ K-tile strides. The dedicated case has
+    # S1=17 and S2=129, so the Q tile and final one-row K tile have different
+    # aligned token counts. Keep the first 128 channels zero to isolate the
+    # second D-loop iteration, and vary the last 64 channels by token.
+    if (
+        args["layout"] == "BSND"
+        and args["queryRope"] is None
+        and args["keyRope"] is None
+        and tuple(args["query"].shape) == (1, 17, 8, 192)
+        and tuple(args["key"].shape) == (1, 129, 8, 192)
+    ):
+        query = args["query"]
+        key = args["key"]
+        query[..., :128].zero_()
+        key[..., :128].zero_()
+        q_tokens = torch.arange(17, device=query.device)[:, None, None]
+        q_heads = torch.arange(8, device=query.device)[None, :, None]
+        dims = torch.arange(64, device=query.device)[None, None, :]
+        q_values = ((q_tokens * 13 + q_heads * 7 + dims * 3) % 17 + 16) / 64
+        k_tokens = torch.arange(129, device=key.device)[:, None, None]
+        k_heads = torch.arange(8, device=key.device)[None, :, None]
+        k_dims = torch.arange(64, device=key.device)[None, None, :]
+        k_values = ((k_tokens * 11 + k_heads * 5 + k_dims * 7) % 37 - 18) / 64
+        # Give the one-key tail tile a distinct score, even under causal masking.
+        k_values[-1] += 0.5
+        query[0, :, :, 128:] = q_values.to(query.dtype)
+        key[0, :, :, 128:] = k_values.to(key.dtype)
     maxima, sums, index_maxima, index_sums = [], [], [], []
     for q_slice, k_slice in batch_slices(args):
         attention, logits, _ = distributions(args, q_slice, k_slice)

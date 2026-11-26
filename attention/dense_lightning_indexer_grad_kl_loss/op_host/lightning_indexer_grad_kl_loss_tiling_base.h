@@ -44,6 +44,8 @@ static const int64_t GM_ALIGN = 512;
 static const int32_t FRACTAL_NUM = 16L;
 static constexpr size_t WORK_SPACE_RESERVE_SIZE = 16 * 1024 * 1024;
 
+static constexpr uint32_t NQUERY_SIZE_8 = 8;
+static constexpr uint32_t NQUERY_SIZE_16 = 16;
 static constexpr uint32_t NQUERY_SIZE_32 = 32;
 static constexpr uint32_t NQUERY_SIZE_64 = 64;
 static constexpr uint32_t NQUERY_SIZE_128 = 128;
@@ -53,6 +55,7 @@ static constexpr uint32_t NQUERYINDEX_SIZE_32 = 32;
 static constexpr uint32_t NQUERYINDEX_SIZE_64 = 64;
 static constexpr uint32_t N2_SIZE_1 = 1;
 static constexpr uint32_t D_SIZE_128 = 128;
+static constexpr uint32_t D_SIZE_192 = 192;
 static constexpr uint32_t DROPE_SIZE_64 = 64;
 static constexpr uint8_t SCHEDULE_MODE_ALL_CORE = 1; // 全核启动
 

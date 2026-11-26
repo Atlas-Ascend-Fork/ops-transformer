@@ -478,5 +478,35 @@
       {"name": "nextTokens", "type": "attr", "required": true, "dtype": "int64_t", "shape": null, "range_values": 2147483647, "backward": false, "align_32B": null}
     ],
     "is_boundary": false
+  },
+  {
+    "id": 16,
+    "default_seed": 20261128,
+    "name": "dense_lightning_indexer_grad_kl_loss",
+    "aclnn_name": "DenseLightningIndexerGradKLLoss",
+    "api_type": "dense_lightning_indexer_grad_kl_loss_st",
+    "aclnn_api_type": "dense_lightning_indexer_grad_kl_loss_st_npu",
+    "standard": {"acc": {"single_bm": {"type": "high_performance"}}, "perf": "not_key", "mem": 1.1},
+    "inputs": [
+      {"name": "query", "type": "tensor", "required": true, "dtype": "fp16", "shape": [1, 17, 8, 192], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      {"name": "key", "type": "tensor", "required": true, "dtype": "fp16", "shape": [1, 129, 8, 192], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      {"name": "queryIndex", "type": "tensor", "required": true, "dtype": "fp16", "shape": [1, 17, 8, 128], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      {"name": "keyIndex", "type": "tensor", "required": true, "dtype": "fp16", "shape": [1, 129, 1, 128], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      {"name": "weights", "type": "tensor", "required": true, "dtype": "fp16", "shape": [1, 17, 8], "range_values": [-0.01, 0.01], "backward": false, "align_32B": null},
+      {"name": "softmaxMax", "type": "tensor", "required": true, "dtype": "fp32", "shape": [1, 8, 17, 1], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      {"name": "softmaxSum", "type": "tensor", "required": true, "dtype": "fp32", "shape": [1, 8, 17, 1], "range_values": [1, 2], "backward": false, "align_32B": null},
+      {"name": "softmaxMaxIndex", "type": "tensor", "required": true, "dtype": "fp32", "shape": [1, 1, 17], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      {"name": "softmaxSumIndex", "type": "tensor", "required": true, "dtype": "fp32", "shape": [1, 1, 17], "range_values": [1, 2], "backward": false, "align_32B": null},
+      {"name": "queryRope", "type": "tensor", "required": true, "dtype": "fp16", "shape": [0], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      {"name": "keyRope", "type": "tensor", "required": true, "dtype": "fp16", "shape": [0], "range_values": [-0.5, 0.5], "backward": false, "align_32B": null},
+      [{"name": "actualSeqLengthsQuery", "type": "attrs", "required": true, "dtype": "int64_t", "shape": null, "range_values": 17, "backward": false, "align_32B": null}],
+      [{"name": "actualSeqLengthsKey", "type": "attrs", "required": true, "dtype": "int64_t", "shape": null, "range_values": 129, "backward": false, "align_32B": null}],
+      {"name": "scaleValue", "type": "attr", "required": true, "dtype": "double", "shape": null, "range_values": 0.08838834764831845, "backward": false, "align_32B": null},
+      {"name": "layout", "type": "attr", "required": true, "dtype": "string", "shape": null, "range_values": "BSND", "backward": false, "align_32B": null},
+      {"name": "sparseMode", "type": "attr", "required": true, "dtype": "int64_t", "shape": null, "range_values": 3, "backward": false, "align_32B": null},
+      {"name": "preTokens", "type": "attr", "required": true, "dtype": "int64_t", "shape": null, "range_values": 2147483647, "backward": false, "align_32B": null},
+      {"name": "nextTokens", "type": "attr", "required": true, "dtype": "int64_t", "shape": null, "range_values": 2147483647, "backward": false, "align_32B": null}
+    ],
+    "is_boundary": true
   }
 ]

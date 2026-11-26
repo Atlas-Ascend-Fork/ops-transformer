@@ -157,7 +157,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>query（aclTensor*）</td>
        <td>输入</td>
        <td>attention结构的输入Q</td>
-       <td><ul><li>B: 支持泛化。</li><li>S1: 支持泛化。</li><li>N1: 支持128、64、32。</li><li>D: 128。</li><li>T1: 多个Batch的S1累加。</li></ul></td>
+       <td><ul><li>B: 支持泛化。</li><li>S1: 支持泛化。</li><li>N1: 支持8、16、32、64、128。</li><li>D: 传入独立 RoPE 时为 128，未传入时为 128 或 192。</li><li>T1: 多个Batch的S1累加。</li></ul></td>
        <td>FLOAT16、BFLOAT16</td>
        <td>ND</td>
        <td>(B,S1,N1,D);(T1,N1,D)</td>
@@ -167,7 +167,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>key（aclTensor*）</td>
        <td>输入</td>
        <td>attention结构的输入K</td>
-       <td><ul><li>B: 支持泛化且与query的B保持一致。</li><li>S2: 支持泛化。</li><li>N2: 等于N1。</li><li>D: 128。</li><li>T2: 多个Batch的S2累加。</li></ul></td>
+       <td><ul><li>B: 支持泛化且与query的B保持一致。</li><li>S2: 支持泛化。</li><li>N2: 等于N1。</li><li>D: 传入独立 RoPE 时为 128，未传入时为 128 或 192。</li><li>T2: 多个Batch的S2累加。</li></ul></td>
        <td>FLOAT16、BFLOAT16</td>
        <td>ND</td>
        <td>(B,S2,N2,D);(T2,N2,D)</td>
@@ -248,7 +248,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>queryRope（aclTensor*）</td>
        <td>输入</td>
        <td>MLA RoPE部分：Query位置编码的输出。</td>
-       <td><ul><li>与query的layout维度保持一致。</li><li>B: 支持泛化且与query的B保持一致。</li><li>S1: 支持泛化且与query的S1保持一致。</li><li>N1: 128、64、32。</li><li>Dr: 64。</li><li>T1: 多个Batch的S1累加。</li></ul>
+       <td><ul><li>与query的layout维度保持一致。</li><li>B: 支持泛化且与query的B保持一致。</li><li>S1: 支持泛化且与query的S1保持一致。</li><li>N1: 8、16、32、64、128。</li><li>Dr: 64。</li><li>T1: 多个Batch的S1累加。</li></ul>
        </td>
        <td>FLOAT16、BFLOAT16</td>
        <td>ND</td>
@@ -578,7 +578,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
       </tr>
       <tr>
        <td>N1</td>
-       <td>32、64、128</td>
+       <td>8、16、32、64、128</td>
        <td>-</td>
       </tr>
       <tr>
@@ -588,7 +588,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
       </tr>
       <tr>
        <td>N2</td>
-       <td>32、64、128</td>
+       <td>8、16、32、64、128</td>
        <td>-</td>
       </tr>
       <tr>
@@ -597,9 +597,9 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
        <td>-</td>
       </tr>
       <tr>
-       <td>D</td>
-       <td>128</td>
-       <td>query与queryIndex的D相同。</td>
+       <td>D（query/key）</td>
+       <td>128、192</td>
+       <td>query 和 key 的 D 必须相同。D=192 时须省略两个 RoPE 输入。Indexer 的 D 固定为 128。</td>
       </tr>
       <tr>
        <td>Drope</td>
@@ -629,7 +629,7 @@ aclnnStatus aclnnDenseLightningIndexerGradKLLoss(
       <tbody>
       <tr>
        <td>query</td>
-       <td>N1=128/64/32; D=128</td>
+       <td>N1=8/16/32/64/128；D=128，或无独立 RoPE 时 D=192</td>
       </tr>
       <tr>
        <td>queryIndex</td>

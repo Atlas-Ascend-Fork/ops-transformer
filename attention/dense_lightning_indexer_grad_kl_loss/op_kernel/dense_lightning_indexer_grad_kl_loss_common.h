@@ -127,7 +127,7 @@ struct DLIGradKLLossConstInfo {
 
     /** \brief TilingData中的信息 */
     uint32_t bSize;
-    uint32_t n1Size;              // 128/64/32
+    uint32_t n1Size;              // 8/16/32/64/128
     uint32_t n2Size;              // 目前与n1Size相同
     uint32_t n1IndexSize;         // 64/32
     uint32_t n2IndexSize;         // 目前是1
@@ -135,7 +135,7 @@ struct DLIGradKLLossConstInfo {
     uint32_t gSizeQueryIndex;     // 64/32
     uint32_t s1Size;              // 支持泛化
     uint32_t s2Size;              // 支持泛化
-    uint32_t dSizeQuery;          // 默认不带Rope，固定等于128
+    uint32_t dSizeQuery;          // Main Q/K: 128 with RoPE, 128 or 192 without RoPE
     uint32_t dSizeQueryIndex;     // 默认不带Rope，固定等于128
     uint32_t dSizeQueryRope = 64; // Rope，固定等于64
     uint32_t kSize;               // 现阶段只支持2048

@@ -289,13 +289,14 @@ bool DenseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sha
         int64_t n2IndexLen = keyIndexShape[1];
 
         // 数值验证N1 是否在支持的范围内
-        OP_CHECK_IF(
-            n1Len != NQUERY_SIZE_32 && n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
-            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
-                (std::string("Query head count N must be one of 32, 64 or 128.") + " Current layout=" + inputLayout)
-                    .c_str()),
-            return false);
+        OP_CHECK_IF(n1Len != NQUERY_SIZE_8 && n1Len != NQUERY_SIZE_16 && n1Len != NQUERY_SIZE_32 &&
+                        n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                        (std::string("Query head count N must be one of 8, 16, 32, 64 or 128.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
+                    return false);
         // 数值验证N2=N1
         OP_CHECK_IF(n2Len != n1Len,
                     OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
@@ -321,12 +322,13 @@ bool DenseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sha
                         (std::string("key_index head count must equal 1.") + " Current layout=" + inputLayout).c_str()),
                     return false);
         // 数值验证D 是否在支持的范围内
-        OP_CHECK_IF(
-            queryShape[2] != D_SIZE_128,
-            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
-                (std::string("query head dimension D must equal 128.") + " Current layout=" + inputLayout).c_str()),
-            return false);
+        OP_CHECK_IF(queryShape[2] != D_SIZE_128 && (hasRope || queryShape[2] != D_SIZE_192),
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                        (std::string("query head dimension D must be 128 with RoPE, or 128 or 192 without RoPE.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
+                    return false);
         OP_CHECK_IF(
             queryIndexShape[2] != D_SIZE_128,
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
@@ -459,13 +461,14 @@ bool DenseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sha
         int64_t n2IndexLen = keyIndexShape[2];
 
         // 数值验证N1 是否在支持的范围内
-        OP_CHECK_IF(
-            n1Len != NQUERY_SIZE_32 && n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
-            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
-                (std::string("Query head count N must be one of 32, 64 or 128.") + " Current layout=" + inputLayout)
-                    .c_str()),
-            return false);
+        OP_CHECK_IF(n1Len != NQUERY_SIZE_8 && n1Len != NQUERY_SIZE_16 && n1Len != NQUERY_SIZE_32 &&
+                        n1Len != NQUERY_SIZE_64 && n1Len != NQUERY_SIZE_128,
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                        (std::string("Query head count N must be one of 8, 16, 32, 64 or 128.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
+                    return false);
         // 数值验证N2=N1
         OP_CHECK_IF(n2Len != n1Len,
                     OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
@@ -572,18 +575,19 @@ bool DenseLightningIndexerGradKLLossTilingBase::CrossShapeVerify(const gert::Sha
                 (std::string("Dimension 1 of softmax_sum_index must equal 1.") + " Current layout=" + inputLayout)
                     .c_str()),
             return false);
-        // 交叉验证D=128
+        // Q and K must share D; the Indexer still uses D=128.
+        OP_CHECK_IF(queryShape[3] != D_SIZE_128 && (hasRope || queryShape[3] != D_SIZE_192),
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                        "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
+                        (std::string("query head dimension D must be 128 with RoPE, or 128 or 192 without RoPE.") +
+                         " Current layout=" + inputLayout)
+                            .c_str()),
+                    return false);
         OP_CHECK_IF(
-            queryShape[3] != D_SIZE_128,
-            OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                "DenseLightningIndexerGradKLLoss", "query", (Ops::Base::ToString(queryShape)).c_str(),
-                (std::string("query head dimension D must equal 128.") + " Current layout=" + inputLayout).c_str()),
-            return false);
-        OP_CHECK_IF(
-            keyShape[3] != D_SIZE_128,
+            keyShape[3] != queryShape[3],
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
                 "DenseLightningIndexerGradKLLoss", "key", (Ops::Base::ToString(keyShape)).c_str(),
-                (std::string("key head dimension D must equal 128.") + " Current layout=" + inputLayout).c_str()),
+                (std::string("key head dimension D must match query.") + " Current layout=" + inputLayout).c_str()),
             return false);
         OP_CHECK_IF(
             queryIndexShape[3] != D_SIZE_128,
@@ -1046,7 +1050,8 @@ bool DenseLightningIndexerGradKLLossTilingBase::SetSparseStartIdx(const std::vec
         int64_t sparseArraySum =
             std::accumulate(sparseValidArray.begin(), sparseValidArray.end(), 0LL); // 得到所有BS上的S2的总数量
         int64_t balanceNum = CeilDivision(sparseArraySum, validAicNum);
-        std::vector<int64_t> tmpSparseValue(validAicNum, 0);
+        // Cores left unassigned by load balancing must have an empty range at the end.
+        std::vector<int64_t> tmpSparseValue(validAicNum, totalSize);
         Balance4DLoad(tmpSparseValue, sparseValidArray, balanceNum);
         for (int64_t idx = 0; idx < static_cast<int64_t>(validAicNum); ++idx) {
             sparseStartIdx[idx] = tmpSparseValue[idx];

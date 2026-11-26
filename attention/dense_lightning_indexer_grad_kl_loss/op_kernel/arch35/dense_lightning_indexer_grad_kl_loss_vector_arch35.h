@@ -842,6 +842,8 @@ __aicore__ inline void DenseLightningIndexerGradKLLossVector<DLIT>::VectorDwDqDk
                     weightUb_[runInfo.pingPongFlagV1V2], weightOffset, runInfo.curS2StepSizeAlign8);
                 PipeBarrier<PIPE_V>();
             } else {
+                // Wait for the previous DMA to finish reading reluGradUb_.
+                WaitFlag<HardEvent::MTE3_V>(mte3ToV);
                 uint32_t weightOffset = rowIdx * constInfo.n1IndexSize + nIdx;
                 DenseDliGradKLLossArch35::ComputeGradElementwise(
                     mulLeftUb_, reluGradUb_, reduceSumPUb_[rowIdx * runInfo.curS2StepSizeAlign8], reluResUb_,
@@ -850,8 +852,6 @@ __aicore__ inline void DenseLightningIndexerGradKLLossVector<DLIT>::VectorDwDqDk
 
                 AscendC::Sum(reduceSumResTensor_[nIdx * 8], mulLeftUb_, tmpUb_, sumParams);
                 PipeBarrier<PIPE_V>();
-
-                WaitFlag<HardEvent::MTE3_V>(mte3ToV);
             }
             SetFlag<HardEvent::V_MTE2>(vToMte2);
 
