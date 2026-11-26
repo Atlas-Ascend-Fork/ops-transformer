@@ -15,24 +15,14 @@
 
 #include "moe_distribute_combine_tiling_arch35.h"
 
-#include <fcntl.h>
-#include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <cmath>
 #include <cstdint>
-#include <sys/types.h>
-#include <queue>
-#include <vector>
 #include <string>
-#include <dlfcn.h>
-#include <unistd.h>
 #include "register/op_def_registry.h"
 #include "tiling/tiling_api.h"
 #include "register/tilingdata_base.h"
 #include "op_host/op_tiling/mc2_tiling_utils.h"
 #include "../../../op_kernel/moe_distribute_combine_v2_tiling.h"
-#include "moe_distribute_combine_tiling_arch35.h"
 using namespace Mc2Tiling;
 
 namespace {
