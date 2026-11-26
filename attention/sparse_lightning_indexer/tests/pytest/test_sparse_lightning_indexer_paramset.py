@@ -74,6 +74,10 @@ BASE = {
 #   全 6 档、candBlocks 边界（64/2048）、topk 边界 2048、regime 2 无 leak（-1 补坑）、
 #   numBlocks<candBlocks 满覆盖退化。
 # 新功能（return_value 开放）：RV1 系列 8 组专项（rv=1 values 真实分输出，继承各自基座）。
+# 分段建表跨段（blkCnt > CAND_TBL_CAP=4096）：SEG 系列 4 组——bs=2/k=16384 与 bs=8/k=40960
+#   均双段（后者另覆盖 S2 跨核切分下的段基址重锚）；k=32768 为 blkCnt==CAP 单段满容量
+#   精确界；k=33280 为最小跨段步（CAP+tileBlkNum，末段仅 1 tile），cand_blocks=2048 高密度
+#   候选使同一行候选同时落在两段。
 TestCases = {
     # ------ dtype（老功能）
     "FP16_01": {**BASE},
@@ -325,6 +329,36 @@ TestCases = {
         "cand_block_size": [2],
         "return_value": [1],
     },
+    # ------ 分段建表跨段（blkCnt > CAND_TBL_CAP=4096：跨段掩码窗口 / 段基址重锚）------
+    "SEG_BS2_K16384_38": {
+        # bs=2：tileBlkNum=256，32 tiles × 256 = 8192 块 > 4096 → 2 段（16+16 tiles）；
+        # 覆盖段边界两侧候选块的置位与无效槽 -1 补齐
+        **BASE,
+        "k_seq": [16384],
+        "cand_block_size": [2],
+    },
+    "SEG_BS8_K40960_39": {
+        # bs=8：tileBlkNum=64，80 tiles × 64 = 5120 块 > 4096 → 2 段（64+16 tiles）；
+        # S2 跨核切分下非首核起始 tile 非零，覆盖段基址重锚（segBlockBase）
+        **BASE,
+        "k_seq": [40960],
+    },
+    "SEG_BS8_K32768_40": {
+        # bs=8：tileBlkNum=64，64 tiles × 64 = 4096 = CAND_TBL_CAP 精确界：
+        # blkCnt == CAP 的整行单段满容量（界内一侧、无跨段）；cand_blocks=2048 顺带
+        # 压满装载区宽度（CAND_LOAD_LEN 边界）
+        **BASE,
+        "k_seq": [32768],
+        "cand_blocks": [2048],
+    },
+    "SEG_BS8_K33280_41": {
+        # bs=8：65 tiles × 64 = 4160 = CAP+tileBlkNum（blkCnt 为 tileBlkNum 整倍，粒度上
+        # 的最小跨段步）→ 2 段（64+1 tiles，末段仅 1 tile）；cand_blocks=2048 高密度候选
+        # 使同一行候选同时落在两段（段界 block 4096 两侧均有命中），覆盖单/多段切换临界
+        **BASE,
+        "k_seq": [33280],
+        "cand_blocks": [2048],
+    },
 }
 
 
@@ -392,6 +426,11 @@ if (
             "RV1_MISSING_35",
             "RV1_MASK3_36",
             "RV1_REGIME2_37",
+            # ------ 分段建表跨段（blkCnt > CAND_TBL_CAP）与容量界点
+            "SEG_BS2_K16384_38",
+            "SEG_BS8_K40960_39",
+            "SEG_BS8_K32768_40",
+            "SEG_BS8_K33280_41",
         )
     ]
 
