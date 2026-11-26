@@ -332,6 +332,7 @@ inline CommCutResult GetFitBalanceCut(const FitBalanceTilingArgs& args, const Fi
     const uint64_t rankDim = std::max(static_cast<uint64_t>(args.rankDim), MIN_RANK_DIM);
 
     MatmulInputParams mmInput = MakeMatmulInputParams(args, calib);
+    mmInput.maxTileM = args.maxTileM;
     MatmulModelParams mmModel{};
     mmModel.computesPerCycle = ResolveComputesPerCycle(args, calib);
     mmModel.cyclePerMicroSec = calib.mmFit.cyclePerMicroSec;
@@ -374,6 +375,8 @@ inline CommCutResult GetFitBalanceCut(const FitBalanceTilingArgs& args, const Fi
             cut = occupancyCut;
         }
     }
+    // tile 上限兜底: 搜索已按上限约束, 此处防御 核利用率优先(COF)挑战者切分等残留超限形态
+    EnforceTileCap(cut, mmInput);
     // 减半决策: 最终切分满足减半门控即减半——头块跨度==baseM 时 baseM 减半使 mm 块数
     // 翻倍填满核波(wave 填充收益, est 梯度模型不可见, 不作 est 比较)
     if (halveBaseM != nullptr) {
@@ -391,7 +394,7 @@ inline CommCutResult GetFitBalanceCut(const FitBalanceTilingArgs& args, const Fi
 inline FitBalanceTilingArgs MakeFitBalanceEngineArgs(uint64_t mValue, uint64_t nValue, uint64_t kValue,
                                                      uint32_t rankDim, uint32_t aicCoreNum, ge::DataType x1Dtype,
                                                      uint64_t inputADtypeSize, uint64_t outputDtypeSize,
-                                                     TilingCommEngine commEngine)
+                                                     TilingCommEngine commEngine, uint64_t maxTileM = 0)
 {
     FitBalanceTilingArgs args{};
     args.mValue = mValue;
@@ -403,6 +406,7 @@ inline FitBalanceTilingArgs MakeFitBalanceEngineArgs(uint64_t mValue, uint64_t n
     args.inputADtypeSize = (x1Dtype == ge::DataType::DT_FLOAT4_E2M1) ? 0UL : inputADtypeSize;
     args.outputDtypeSize = outputDtypeSize;
     args.commEngine = commEngine;
+    args.maxTileM = maxTileM;
     return args;
 }
 

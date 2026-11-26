@@ -748,11 +748,32 @@ static ge::graphStatus SetTilingData(gert::TilingContext* context, const ShapeIn
     auto* yDescTiling = context->GetOutputDesc(IDX_OUTPUT_Y);
     const uint64_t outputDtypeSize = ge::GetSizeByDataType(yDescTiling->GetDataType());
 
-    // 一步完成: 基准 SWAT → fit-balance 切分与减半决策 → 终版 SWAT
+    // win 预算约束的 tile 上限(算子侧策略): data 槽按 maxTile 等步长铺放, 粗切时单槽即超
+    // 注册窗口, 复用深度下限抬升会放大越界。按 hccl_buffer_size 反推 tile 上限交给引擎,
+    // 引擎在约束内搜索最优切分(NoCut 超限形态一并否决)。
+    auto* winBudgetPtr = context->GetAttrs()->GetAttrPointer<int64_t>(ATTR_HCCL_BUFFER_SIZE_INDEX);
+    OP_TILING_CHECK(winBudgetPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "hccl_buffer_size"),
+                    return ge::GRAPH_FAILED);
+    const uint64_t winBudget = static_cast<uint64_t>(*winBudgetPtr);
+    // win 可用容量 = 注册窗口 - 框架预留(与前置校验 comm_data+预留<=attr 同口径);
+    // 不足预留时按不可约束处理(0=不限制, 由前置 needBytes 校验与末尾终检兜底)
+    const uint64_t winUsable = (winBudget > HCCL_BUFFER_RESERVED_BYTES) ? winBudget - HCCL_BUFFER_RESERVED_BYTES : 0UL;
+    const uint64_t winBytesPerMRow = k * ((isFp4Input) ? MXFP4_BITS : MXFP8_BITS) / 8UL;
+    const uint64_t winScaleRowBytes = ((k + MX_SCALE_BLOCK - 1UL) / MX_SCALE_BLOCK) * SCALE_LAST_DIM;
+    const uint64_t remoteRanks = rankSize - 1UL;
+    // 每行 tile 的预算代价: WIN_REUSE_DEPTH_MIN 个 data 槽 + scale 全量占用(含尾块余量)
+    const uint64_t perTileRowCost = remoteRanks * (WIN_REUSE_DEPTH_MIN * winBytesPerMRow + winScaleRowBytes);
+    const uint64_t scaleFloorBytes = remoteRanks * m * winScaleRowBytes;
+    // 裸 cap 直传: 对齐与下限判定由引擎按 baseM 处理(qMax 整除 + 兜底对齐);
+    // 预算容不下最小代价时 cap=0 即不限制, 由末尾终检裁决
+    const uint64_t engineMaxTileM =
+        (scaleFloorBytes + perTileRowCost > winUsable) ? 0UL : (winUsable - scaleFloorBytes) / perTileRowCost;
+
+    // 一步完成: 基准 SWAT → fit-balance 切分(带 tile 上限约束)与减半决策 → 终版 SWAT
     const AgmmTilingOutput agmm =
         GetAgmmTiling(context->GetPlatformInfo(), ascendcPlatform.GetCoreNumAic(), ascendcPlatform.GetCoreNumAiv(),
                       isFp4Input, hasBias, m, n, k, rankSize, x1DescTiling->GetDataType(),
-                      ge::GetSizeByDataType(x1DescTiling->GetDataType()), outputDtypeSize, commMode);
+                      ge::GetSizeByDataType(x1DescTiling->GetDataType()), outputDtypeSize, commMode, engineMaxTileM);
     const uint32_t usedCoreNum = agmm.usedCoreNum;
     if (agmm.fitBalanceHit) {
         MapCutToHeadTail(agmm.cut, tilingData->commTile);
@@ -769,6 +790,17 @@ static ge::graphStatus SetTilingData(gert::TilingContext* context, const ShapeIn
     }
     tilingData->commTile.nonSplitAxisSize = k;
 
+    // 切分结果校验与兜底(fb 命中路径已在 maxTileM 约束内搜索, 恒通过; COF 兜底切分不受
+    // 约束, 由引擎公共 EnforceTileCapOnSplit 重切; 粒度为 0 时放弃修正, 由末尾 win 终检拦截)
+    const uint64_t agFallback =
+        EnforceTileCapOnSplit(tilingData->commTile.splitAxisTileCnt, tilingData->commTile.splitAxisTileSize,
+                              tilingData->commTile.splitAxisTailCnt, tilingData->commTile.splitAxisTailSize, m,
+                              engineMaxTileM, agmm.mmTile.baseM);
+    if (agFallback > 0UL) {
+        OP_LOGI(nodeName, "win budget fallback re-cut: fallbackTile=%lu, cap=%lu, winBudget=%lu", agFallback,
+                engineMaxTileM, winBudget);
+    }
+
     // 从最终 commTile 读取切分事实, 推导 padded 布局与 totalLogicalM(与 kernel 侧 Run 同口径)
     uint64_t tileM = tilingData->commTile.splitAxisTileSize;
     uint64_t tileCnt = tilingData->commTile.splitAxisTileCnt;
@@ -777,32 +809,56 @@ static ge::graphStatus SetTilingData(gert::TilingContext* context, const ShapeIn
     uint64_t paddedTailM = (tailM > 0) ? ((tailM + M_TAIL_ALIGN - 1) / M_TAIL_ALIGN * M_TAIL_ALIGN) : 0U;
     uint64_t totalLogicalM = rankSize * (tileCnt * tileM + tailCnt * paddedTailM);
 
-    // win 区 buffer 复用深度决策：fullWin ≤ 400MB 时不复用(slotNum=totalTiles)，
-    // 否则在 400MB 预算内取最大复用深度（≤128 flag 同步安全上限，下限 2 保证双缓冲）。
+    // win 区 buffer 复用深度决策：fullWin 不超 hccl_buffer_size 时不复用(slotNum=totalTiles)，
+    // 否则在窗口预算内取最大复用深度（≤128 flag 同步安全上限，下限 2 保证双缓冲）。
     // data 复用、scale 恒全量，故预算需扣除 scale 固定占用。
     // AG 的 win 每 slot 只存 remote 数据（rankSize-1 段，跳过本卡），slotSize 用 (rankSize-1) 系数。
     uint64_t totalTiles = tileCnt + tailCnt;
     uint64_t maxTileSize = (tileM > tailM) ? tileM : tailM;
-    ge::DataType winX1Dtype = context->GetInputDesc(IDX_INPUT_X1)->GetDataType();
-    uint64_t x1Bits = (winX1Dtype == ge::DT_FLOAT4_E2M1) ? MXFP4_BITS : MXFP8_BITS;
-    uint64_t dataSlotSize = (rankSize - 1UL) * maxTileSize * (k * x1Bits / 8UL);
-    uint64_t scaleKGroups = (k + MX_SCALE_BLOCK - 1UL) / MX_SCALE_BLOCK;
-    uint64_t scaleSlotSize = (rankSize - 1UL) * maxTileSize * scaleKGroups * SCALE_LAST_DIM;
+    uint64_t dataSlotSize = remoteRanks * maxTileSize * winBytesPerMRow;
+    uint64_t scaleSlotSize = remoteRanks * maxTileSize * winScaleRowBytes;
     uint64_t fullWinBytes = totalTiles * (dataSlotSize + scaleSlotSize);
 
     uint64_t slotNum;
-    if (fullWinBytes <= WIN_REUSE_BUDGET_CAP) {
-        slotNum = totalTiles;
+    if (fullWinBytes <= winUsable) {
+        slotNum = totalTiles; // 不复用: 每 tile 独占一槽
     } else {
         uint64_t scaleWinFixed = totalTiles * scaleSlotSize;
-        uint64_t dataBudget = (scaleWinFixed >= WIN_REUSE_BUDGET_CAP) ? 0UL : WIN_REUSE_BUDGET_CAP - scaleWinFixed;
+        uint64_t dataBudget = (scaleWinFixed >= winUsable) ? 0UL : winUsable - scaleWinFixed;
         uint64_t budgetDepth = (dataSlotSize == 0UL) ? totalTiles : dataBudget / dataSlotSize;
         slotNum = std::min({WIN_REUSE_DEPTH_CAP, budgetDepth, totalTiles});
-    }
-    if (slotNum < WIN_REUSE_DEPTH_MIN) {
-        slotNum = WIN_REUSE_DEPTH_MIN;
+        // 复用深度下限=双缓冲不变量; 预算装不下 2 槽的情形由上游 tile 上限约束排除
+        // (装不下则更细切/终检拦截), 此处仅防御
+        if (slotNum < WIN_REUSE_DEPTH_MIN) {
+            slotNum = WIN_REUSE_DEPTH_MIN;
+        }
     }
     tilingData->commTile.slotNum = slotNum;
+
+    // 硬校验: 实际 win 足迹不得超过注册窗口，任何路径（极小预算/极端形状）越界即刻报错，
+    // 防止 kernel 侧 GM 越界写破坏紧邻算子的内存
+    // 报错建议申请下限: 按 63 轮对应的 tileM(max(512, ceil(m/MAX_COMM_ROUNDS) 对齐 baseM))反推
+    // 最小窗口(MIN 复用深度 data 槽 + 全量 scale)——客户按此申请后均切必然同时满足轮数与窗口约束
+    const uint64_t agRecTileMin = (m + MAX_COMM_ROUNDS - 1UL) / MAX_COMM_ROUNDS;
+    const uint64_t agRecAlignBase = (agmm.mmTile.baseM != 0UL) ? agmm.mmTile.baseM : M_ALIGN_GRANULARITY;
+    const uint64_t agRecTileLen =
+        std::max(COMM_TILE_FALLBACK_LEN, (agRecTileMin + agRecAlignBase - 1UL) / agRecAlignBase * agRecAlignBase);
+    const uint64_t minRequiredBytes =
+        remoteRanks * (WIN_REUSE_DEPTH_MIN * agRecTileLen * winBytesPerMRow +
+                       (m + agRecTileLen) * winScaleRowBytes); // 与 cap 反推同口径: 每行含一份 scale
+    // 建议值 >= 实际越限足迹与最小需求中的较大者, 客户提额后必然可容纳
+    const uint64_t recommendBytes =
+        std::max(slotNum * dataSlotSize + totalTiles * scaleSlotSize, minRequiredBytes) + HCCL_BUFFER_RESERVED_BYTES;
+    OP_TILING_CHECK(
+        slotNum * dataSlotSize + totalTiles * scaleSlotSize > winUsable,
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            nodeName, "hccl_buffer_size", std::to_string(winBudget).c_str(),
+            ("win footprint " + std::to_string(slotNum * dataSlotSize + totalTiles * scaleSlotSize) +
+             " bytes (data slots + full scale) exceeds usable window; request at least " +
+             std::to_string(recommendBytes) + " bytes (" + std::to_string(recommendBytes / (1024UL * 1024UL)) +
+             " MB) for " + std::to_string(agRecTileLen) + "-tile granularity")
+                .c_str()),
+        return ge::GRAPH_FAILED);
 
     tilingData->mmTile = agmm.mmTile;
 

@@ -81,7 +81,7 @@ inline void RunSwatMmTiling(fe::PlatFormInfos* platformInfo, uint32_t aicCoreNum
 inline AgmmTilingOutput GetAgmmTiling(fe::PlatFormInfos* platformInfo, uint32_t aicCoreNum, uint32_t aivCoreNum,
                                       bool isFp4, bool hasBias, uint64_t mPerRank, uint64_t nValue, uint64_t kValue,
                                       uint64_t rankSize, ge::DataType x1Dtype, uint64_t inputADtypeSize,
-                                      uint64_t outputDtypeSize, const char* commMode)
+                                      uint64_t outputDtypeSize, const char* commMode, uint64_t maxTileM = 0)
 {
     AgmmTilingOutput result{};
     const uint64_t totalLogicalM = rankSize * mPerRank;
@@ -101,7 +101,7 @@ inline AgmmTilingOutput GetAgmmTiling(fe::PlatFormInfos* platformInfo, uint32_t 
     bool halveBaseM = false;
     const FitBalanceTilingArgs args =
         MakeFitBalanceEngineArgs(mPerRank, nValue, kValue, static_cast<uint32_t>(rankSize), result.usedCoreNum, x1Dtype,
-                                 inputADtypeSize, outputDtypeSize, commEngine);
+                                 inputADtypeSize, outputDtypeSize, commEngine, maxTileM);
     result.fitBalanceHit =
         GetFitBalanceCutFromMmBase(args, calib, result.cut, &halveBaseM, result.probeBaseM, result.probeBaseN);
 

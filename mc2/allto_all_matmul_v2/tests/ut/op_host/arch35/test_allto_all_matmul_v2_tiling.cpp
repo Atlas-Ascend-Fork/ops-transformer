@@ -12,6 +12,7 @@
 #include "../allto_all_matmul_v2_host_ut_param.h"
 #include "tiling_case_executor.h"
 #include "base/registry/op_impl_space_registry_v2.h"
+#include "apace/kernel/fusions/all_to_all_matmul/all_to_all_matmul_tiling_data.h"
 
 namespace AlltoAllMatmulV2UT {
 
@@ -120,6 +121,127 @@ TEST(AlltoAllMatmulV2SmallTilingDataTest, CapacityTooSmall)
         tilingContextPara.tilingDataSize_ = 0;
         ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED, UINT64_MAX, "", {});
     }
+}
+
+// 引擎命中(ws=4)且 cap 真正捆绑(cap<m)的 win 预算用例:
+// 断实际写回切分不超可用窗口反推的 cap, 删掉引擎 maxTileM 注入即失败
+TEST(AlltoAllMatmulV2WinBudgetTest, EngineCapBinds)
+{
+    gert::StorageShape ctxShape = GetStorageShape("1 2052");
+    gert::StorageShape x1Shape = GetStorageShape("262144 1024");
+    gert::StorageShape x2Shape = GetStorageShape("2560 4096");
+    gert::StorageShape x1ScaleShape = GetStorageShape("262144 16 2");
+    gert::StorageShape x2ScaleShape = GetStorageShape("2560 64 2");
+    gert::StorageShape yShape = GetStorageShape("65536 2560");
+    gert::StorageShape outShape = GetStorageShape("65536 1024");
+
+    gert::TilingContextPara::TensorDescription context(ctxShape, ge::DT_INT32, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x1(x1Shape, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x2(x2Shape, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x1Scale(x1ScaleShape, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x2Scale(x2ScaleShape, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription y(yShape, ge::DT_BF16, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription out(outShape, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND);
+
+    std::vector<gert::TilingContextPara::TensorDescription> ins({context, x1, x2, TD_DEFAULT, x1Scale, x2Scale});
+    std::vector<gert::TilingContextPara::TensorDescription> outs({y, out});
+
+    constexpr int64_t kWinAttr = 419430400; // 400MB, 命中 >=400MB 门槛
+    std::vector<gert::TilingContextPara::OpAttr> attrs(
+        {{"group", Ops::Transformer::AnyValue::CreateFrom<std::string>("group")},
+         {"world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(4)},
+         {"hccl_buffer_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(kWinAttr)},
+         {"y_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(27)},
+         {"x1_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(6)},
+         {"x2_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(6)},
+         {"x1_quant_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(28)},
+         {"transpose_x1", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+         {"transpose_x2", Ops::Transformer::AnyValue::CreateFrom<bool>(true)},
+         {"group_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(4295032864)},
+         {"comm_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("aiv_urma")},
+         {"precision_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}});
+
+    gert::TilingContextPara para(OP_NAME, ins, outs, attrs, &compileInfo, "3510", 64);
+    TilingInfo info;
+    ASSERT_TRUE(ExecuteTiling(para, info));
+    ASSERT_NE(info.tilingData, nullptr);
+    const auto* td = reinterpret_cast<const AllToAllQuantMatmulTilingData*>(info.tilingData.get());
+
+    // cap 复算(与 tiling 同口径, 扣除 2MB 预留): (usable - ws*m*scaleRow) / (ws*(2*bytesRow+scaleRow))
+    constexpr uint64_t m = 65536UL;
+    constexpr uint64_t ws = 4UL;
+    constexpr uint64_t bytesRow = 1024UL;
+    constexpr uint64_t scaleRow = ((1024UL + 63UL) / 64UL) * 2UL;
+    constexpr uint64_t reserve = 2UL * 1024UL * 1024UL;
+    const uint64_t usable = static_cast<uint64_t>(kWinAttr) - reserve;
+    const uint64_t cap = (usable - ws * m * scaleRow) / (ws * (2UL * bytesRow + scaleRow));
+    ASSERT_LT(cap, m); // cap 真实捆绑, 否则用例无鉴别力
+    const uint64_t maxTile = std::max(td->commTilingData.splitAxisTileSize, td->commTilingData.splitAxisTailSize);
+    EXPECT_LE(maxTile, cap);
+}
+
+// fit-balance 未命中(标定仅 4P, ws=8 必 miss) + win 预算约束(COF 结果须落在 cap 内):
+// 校验实际写回的切分四元组不超 cap, 防止兜底调用丢失导致 COF 超限切分漏过
+TEST(AlltoAllMatmulV2WinBudgetTest, CofMissRespectsCap)
+{
+    gert::StorageShape ctxShape = GetStorageShape("1 2052");
+    gert::StorageShape x1Shape = GetStorageShape("131072 2048");
+    gert::StorageShape x2Shape = GetStorageShape("2560 16384");
+    gert::StorageShape x1ScaleShape = GetStorageShape("131072 32 2");
+    gert::StorageShape x2ScaleShape = GetStorageShape("2560 256 2");
+    gert::StorageShape yShape = GetStorageShape("16384 2560"); // mPerRank x N
+    gert::StorageShape outShape = GetStorageShape("16384 2048");
+
+    gert::TilingContextPara::TensorDescription context(ctxShape, ge::DT_INT32, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x1(x1Shape, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x2(x2Shape, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x1Scale(x1ScaleShape, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription x2Scale(x2ScaleShape, ge::DT_FLOAT8_E8M0, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription y(yShape, ge::DT_BF16, ge::FORMAT_ND);
+    gert::TilingContextPara::TensorDescription out(outShape, ge::DT_FLOAT8_E4M3FN, ge::FORMAT_ND);
+
+    std::vector<gert::TilingContextPara::TensorDescription> ins({context, x1, x2, TD_DEFAULT, x1Scale, x2Scale});
+    std::vector<gert::TilingContextPara::TensorDescription> outs({y, out});
+
+    constexpr int64_t kWinBudget = 419430400; // 400MB 工作预算(a2a 常量口径)
+    std::vector<gert::TilingContextPara::OpAttr> attrs(
+        {{"group", Ops::Transformer::AnyValue::CreateFrom<std::string>("group")},
+         {"world_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(8)},
+         {"hccl_buffer_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(kWinBudget)},
+         {"y_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(27)},
+         {"x1_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(6)},
+         {"x2_quant_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(6)},
+         {"x1_quant_dtype", Ops::Transformer::AnyValue::CreateFrom<int64_t>(28)},
+         {"transpose_x1", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+         {"transpose_x2", Ops::Transformer::AnyValue::CreateFrom<bool>(true)},
+         {"group_size", Ops::Transformer::AnyValue::CreateFrom<int64_t>(4295032864)},
+         {"comm_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("aiv_urma")},
+         {"precision_mode", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}});
+
+    gert::TilingContextPara para(OP_NAME, ins, outs, attrs, &compileInfo, "3510", 64);
+    TilingInfo info;
+    ASSERT_TRUE(ExecuteTiling(para, info));
+    ASSERT_NE(info.tilingData, nullptr);
+    ASSERT_GE(info.tilingDataSize, sizeof(AllToAllQuantMatmulTilingData));
+    const auto* td = reinterpret_cast<const AllToAllQuantMatmulTilingData*>(info.tilingData.get());
+    const uint64_t totalTiles = td->commTilingData.splitAxisTileCnt + td->commTilingData.splitAxisTailCnt;
+    ASSERT_GT(totalTiles, 0UL);
+
+    // cap 复算(与 tiling 同口径): (预算 - ws*m*scaleRow) / (ws*(2*bytesRow + scaleRow))
+    constexpr uint64_t m = 16384UL;
+    constexpr uint64_t ws = 8UL;
+    constexpr uint64_t bytesRow = 2048UL;                         // ka, fp8 1B
+    constexpr uint64_t scaleRow = ((2048UL + 63UL) / 64UL) * 2UL; // ceil(ka/64)*2
+    constexpr uint64_t reserve = 2UL * 1024UL * 1024UL;
+    const uint64_t cap =
+        (static_cast<uint64_t>(kWinBudget) - reserve - ws * m * scaleRow) / (ws * (2UL * bytesRow + scaleRow));
+    const uint64_t maxTile = std::max(td->commTilingData.splitAxisTileSize, td->commTilingData.splitAxisTailSize);
+    EXPECT_LE(maxTile, cap);
+    // scale 切分恒镜像 data 切分(splitAxis 四元组一致)
+    EXPECT_EQ(td->scaleCommTilingData.splitAxisTileCnt, td->commTilingData.splitAxisTileCnt);
+    EXPECT_EQ(td->scaleCommTilingData.splitAxisTileSize, td->commTilingData.splitAxisTileSize);
+    EXPECT_EQ(td->scaleCommTilingData.splitAxisTailCnt, td->commTilingData.splitAxisTailCnt);
+    EXPECT_EQ(td->scaleCommTilingData.splitAxisTailSize, td->commTilingData.splitAxisTailSize);
 }
 
 // Cover TilingParseForAlltoAllMatmulV2 (L48/L50/L51 in tiling.cpp) which
