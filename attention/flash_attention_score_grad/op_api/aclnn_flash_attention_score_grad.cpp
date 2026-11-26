@@ -1999,7 +1999,7 @@ static aclnnStatus FlashAttentionScoreGradGetWorkspace(
         preTokens, nextTokens, headNum, inputLayoutUnderTrans, innerPrecise, sparseMode, PSE_TYPE_V1, 0, 0, 0,
         softmaxInLayout, executor);
     CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr, // 0: dqOut 1: dkOut 2:dvOut
-              ACLNN_ERR_PARAM_NULLPTR);
+              ACLNN_ERR_PARAM_INVALID);
 
     // transpose + slice + reshape + viewCopy
     ret = PostFlashAttentionScoreGrad(fagRes, &dqOut, nullptr, &dkOut, nullptr, &dvOut, &dpseOut, nullptr, fagShape,
@@ -2259,7 +2259,7 @@ static aclnnStatus FlashAttentionScoreGradV2GetWorkspace(
         kvStartIdxOptional, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
         scaleValue, keepProb, preTokens, nextTokens, headNum, inputLayoutUnderTrans, innerPrecise, sparseMode, pseType,
         0, 0, 0, defaultSoftmaxInLayout, executor);
-    CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr, ACLNN_ERR_PARAM_INVALID);
 
     // transpose + slice + reshape + viewCopy
     ret = PostFlashAttentionScoreGrad(fagRes, &dqOut, nullptr, &dkOut, nullptr, &dvOut, &dpseOut, nullptr, fagShape,
@@ -2538,10 +2538,10 @@ static aclnnStatus FlashAttentionScoreGradV3GetWorkspace(
     if (queryRope != nullptr && keyRope != nullptr) {
         CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr && fagRes[4] != nullptr &&
                       fagRes[5] != nullptr, // 0: dqOut 1: dkOut 2:dvOut
-                  ACLNN_ERR_PARAM_NULLPTR);
+                  ACLNN_ERR_PARAM_INVALID);
     } else {
         CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr, // 0: dqOut 1: dkOut 2:dvOut
-                  ACLNN_ERR_PARAM_NULLPTR);
+                  ACLNN_ERR_PARAM_INVALID);
     }
 
     // transpose + slice + reshape + viewCopy
@@ -2838,10 +2838,10 @@ static aclnnStatus FlashAttentionScoreGradV5GetWorkspace(
     if (queryRope != nullptr && keyRope != nullptr) {
         CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr && fagRes[4] != nullptr &&
                       fagRes[5] != nullptr, // 0: dqOut 1: dkOut 2:dvOut
-                  ACLNN_ERR_PARAM_NULLPTR);
+                  ACLNN_ERR_PARAM_INVALID);
     } else {
         CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr, // 0: dqOut 1: dkOut 2:dvOut
-                  ACLNN_ERR_PARAM_NULLPTR);
+                  ACLNN_ERR_PARAM_INVALID);
     }
     ret = PostFlashAttentionScoreGrad(fagRes, &dqOut, &dqRopeOut, &dkOut, &dkRopeOut, &dvOut, &dpseOut, &dsinkOut,
                                       fagShape, fagShapeArray, executor);
@@ -3329,7 +3329,7 @@ static aclnnStatus FlashAttentionScoreGradV4GetWorkspace(
         scaleValue, keepProb, preTokens, nextTokens, headNum, inputLayoutUnderTrans, innerPrecise, sparseMode, pseType,
         seed, offset, outDtype, softmaxInLayout, executor);
     CHECK_RET(fagRes[0] != nullptr && fagRes[1] != nullptr && fagRes[2] != nullptr, // 0: dqOut 1: dkOut 2:dvOut
-              ACLNN_ERR_PARAM_NULLPTR);
+              ACLNN_ERR_PARAM_INVALID);
 
     // transpose + slice + reshape + viewCopy
     ret = PostFlashAttentionScoreGrad(fagRes, &dqOut, &dqRopeOut, &dkOut, &dkRopeOut, &dvOut, &dpseOut, &dsinkOut,
