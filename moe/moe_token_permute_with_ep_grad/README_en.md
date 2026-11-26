@@ -109,7 +109,7 @@ Computation formula:
   <tr>
    <td>rangeOptional</td>
    <td>Attribute</td>
-   <td>Valid range for EP partitioning.</td>
+   <td>Valid range for EP partitioning. Only an integer array of length 2 is supported; passing nullptr in aclnn calls defaults to [0, 0] (all-zero output gradients).</td>
    <td>aclIntArray</td>
    <td>-</td>
   </tr>
@@ -142,7 +142,7 @@ Computation formula:
  - The data types of permutedTokensOutputGrad, permutedProbsOutputGradOptional, tokenGradOut, and probsGradOut must be the same, being one of BFLOAT16, FLOAT16, or FLOAT32.
  - The values of sortedIndices represent global permuted positions, ranging from [0, num_tokens * numTopk).
  - paddedMode set to `True` is not supported.
- - When rangeOptional is empty, permutedProbsOutputGradOptional and probsGradOut are ignored, and the execution logic falls back to [aclnnMoeTokenPermuteGrad](../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad_en.md).
+ - In aclnn calls, rangeOptional only supports an integer array of length 2. Passing nullptr defaults to [0, 0] (an empty interval [0, 0), so no non-negative sortedIndices fall in the valid range, output gradients are all zeros, and permutedProbsOutputGradOptional and probsGradOut are not ignored). To process the full sortedIndices range, explicitly pass [0, sortedIndices.numel], or use [aclnnMoeTokenPermuteGrad](../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad_en.md).
 
 ## Invocation Description
 

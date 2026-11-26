@@ -168,7 +168,7 @@ aclnnStatus aclnnMoeTokenPermuteWithEpGrad(
       <td>rangeOptional</td>
       <td>输入</td>
       <td>EP切分的有效范围，size为2。</td>
-      <td>为空时，忽略permutedProbsOutputGradOptional和probsGradOut，执行逻辑回退到<a href="../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad.md">aclnnMoeTokenPermuteGrad</a>。</td>
+      <td>仅支持长度为2的整型数组，不支持长度为0的空数组。传入空指针时默认取[0, 0]（对应空区间[0, 0)，所有非负sortedIndices均不在有效范围内，梯度输出全0，且不会忽略permutedProbsOutputGradOptional和probsGradOut）。如需处理全量sortedIndices，请显式传入[0, sortedIndices.numel]，或使用<a href="../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad.md">aclnnMoeTokenPermuteGrad</a>。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -310,7 +310,7 @@ aclnnStatus aclnnMoeTokenPermuteWithEpGrad(
 - permutedTokensOutputGrad、permutedProbsOutputGradOptional、tokenGradOut、probsGradOut 的数据类型必须一致，同时为 BFLOAT16、FLOAT16 或 FLOAT32 之一。
 - sortedIndices 的元素取值表示全局 permuted 位置，取值范围为 [0, num_tokens * numTopk)，仅 rangeOptional[0] <= 值 < rangeOptional[1] 的元素参与计算。
 - 不支持paddedMode为`True`。
-- 当rangeOptional为空时，忽略permutedProbsOutputGradOptional和probsGradOut，执行逻辑回退到[aclnnMoeTokenPermuteGrad](../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad.md)。
+- aclnn调用时rangeOptional仅支持长度为2的整型数组，传入空指针时默认取[0, 0]（对应空区间[0, 0)，所有非负sortedIndices均不在有效范围内，梯度输出全0，且不会忽略permutedProbsOutputGradOptional和probsGradOut）；如需处理全量sortedIndices，请显式传入[0, sortedIndices.numel]，或使用[aclnnMoeTokenPermuteGrad](../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad.md)。
 
 ## 调用示例
 

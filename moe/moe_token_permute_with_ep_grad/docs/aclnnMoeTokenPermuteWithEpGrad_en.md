@@ -169,7 +169,7 @@ aclnnStatus aclnnMoeTokenPermuteWithEpGrad(
       <td>rangeOptional</td>
       <td>Input</td>
       <td>Valid range of EP split, with a size of 2.</td>
-      <td>If empty, permutedProbsOutputGradOptional and probsGradOut are ignored, and the execution logic falls back to <a href="../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad_en.md">aclnnMoeTokenPermuteGrad</a>.</td>
+      <td>Only an integer array of length 2 is supported; an empty array of length 0 is not supported. Passing nullptr defaults to [0, 0] (an empty interval [0, 0), so no non-negative sortedIndices fall in the valid range, output gradients are all zeros, and permutedProbsOutputGradOptional and probsGradOut are not ignored). To process the full sortedIndices range, explicitly pass [0, sortedIndices.numel], or use <a href="../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad_en.md">aclnnMoeTokenPermuteGrad</a>.</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -311,7 +311,7 @@ aclnnStatus aclnnMoeTokenPermuteWithEpGrad(
 - The data types of permutedTokensOutputGrad, permutedProbsOutputGradOptional, tokenGradOut, and probsGradOut must be the same, being one of BFLOAT16, FLOAT16, or FLOAT32.
 - The values of sortedIndices represent global permuted positions, ranging from [0, num_tokens * numTopk); only elements with rangeOptional[0] <= value < rangeOptional[1] participate in the computation.
 - paddedMode being `True` is not supported.
-- If rangeOptional is empty, permutedProbsOutputGradOptional and probsGradOut are ignored, and the execution logic falls back to [aclnnMoeTokenPermuteGrad](../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad_en.md).
+- In aclnn calls, rangeOptional only supports an integer array of length 2. Passing nullptr defaults to [0, 0] (an empty interval [0, 0), so no non-negative sortedIndices fall in the valid range, output gradients are all zeros, and permutedProbsOutputGradOptional and probsGradOut are not ignored). To process the full sortedIndices range, explicitly pass [0, sortedIndices.numel], or use [aclnnMoeTokenPermuteGrad](../../moe_token_permute_grad/docs/aclnnMoeTokenPermuteGrad_en.md).
 
 ## Example
 
