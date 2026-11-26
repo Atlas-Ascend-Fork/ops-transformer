@@ -16,70 +16,115 @@
 #include <gtest/gtest.h>
 #include "test_mhc_post_backward_fixture.h"
 
+class MhcPostBackwardMergeBatchTilingTest : public MhcPostBackwardTilingTest,
+                                            public testing::WithParamInterface<const char*> {};
+
 // ======================== 带fixture的写法 ===========================
 // ======================== 基础用例 网络shape ===========================
 TEST_F(MhcPostBackwardTilingTest, case_normal_network_b1_s1k_n4_d5120_bf16)
 {
-    TestMhcPostBackwardBSND("case_normal_network_b1_s1k_n4_d5120_bf16", 1, 1024, 4, 5120, ge::DT_BF16, kSocVersion950);
+    TestMhcPostBackwardBSND("case_normal_network_b1_s1k_n4_d5120_bf16", 1, 1024, 4, 5120, ge::DT_BF16, kSocVersion950,
+                            ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_network_b1_s2k_n4_d2560_bf16)
 {
-    TestMhcPostBackwardBSND("case_normal_network_b1_s2k_n4_d2560_bf16", 1, 2048, 4, 2560, ge::DT_BF16, kSocVersion950);
+    TestMhcPostBackwardBSND("case_normal_network_b1_s2k_n4_d2560_bf16", 1, 2048, 4, 2560, ge::DT_BF16, kSocVersion950,
+                            ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_network_b1_s4k_n4_d2560_bf16)
 {
-    TestMhcPostBackwardBSND("case_normal_network_b1_s4k_n4_d2560_bf16", 1, 4096, 4, 2560, ge::DT_BF16, kSocVersion950);
+    TestMhcPostBackwardBSND("case_normal_network_b1_s4k_n4_d2560_bf16", 1, 4096, 4, 2560, ge::DT_BF16, kSocVersion950,
+                            ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_network_b1_s1k_n4_d5120_fp16)
 {
     TestMhcPostBackwardBSND("case_normal_network_b1_s1k_n4_d5120_fp16", 1, 1024, 4, 5120, ge::DT_FLOAT16,
-                            kSocVersion950);
+                            kSocVersion950, ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_network_b1_s2k_n4_d2560_fp16)
 {
     TestMhcPostBackwardBSND("case_normal_network_b1_s2k_n4_d2560_fp16", 1, 2048, 4, 2560, ge::DT_FLOAT16,
-                            kSocVersion950);
+                            kSocVersion950, ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_network_b1_s4k_n4_d2560_fp16)
 {
     TestMhcPostBackwardBSND("case_normal_network_b1_s4k_n4_d2560_fp16", 1, 4096, 4, 2560, ge::DT_FLOAT16,
-                            kSocVersion950);
+                            kSocVersion950, ErrorType::NONE, 5);
 }
 
 // ======================== 典型泛化 TND ===========================
 TEST_F(MhcPostBackwardTilingTest, case_normal_typical_t1k_n4_d5120_bf16)
 {
-    TestMhcPostBackwardTND("case_normal_typical_t1k_n4_d5120_bf16", 1024, 4, 5120, ge::DT_BF16, kSocVersion950);
+    TestMhcPostBackwardTND("case_normal_typical_t1k_n4_d5120_bf16", 1024, 4, 5120, ge::DT_BF16, kSocVersion950,
+                           ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_typical_t2k_n4_d2560_bf16)
 {
-    TestMhcPostBackwardTND("case_normal_typical_t2k_n4_d2560_bf16", 2048, 4, 2560, ge::DT_BF16, kSocVersion950);
+    TestMhcPostBackwardTND("case_normal_typical_t2k_n4_d2560_bf16", 2048, 4, 2560, ge::DT_BF16, kSocVersion950,
+                           ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_typical_t4k_n4_d2560_bf16)
 {
-    TestMhcPostBackwardTND("case_normal_typical_t4k_n4_d2560_bf16", 4096, 4, 2560, ge::DT_BF16, kSocVersion950);
+    TestMhcPostBackwardTND("case_normal_typical_t4k_n4_d2560_bf16", 4096, 4, 2560, ge::DT_BF16, kSocVersion950,
+                           ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_typical_t1k_n4_d5120_fp16)
 {
-    TestMhcPostBackwardTND("case_normal_typical_t1k_n4_d5120_fp16", 1024, 4, 5120, ge::DT_FLOAT16, kSocVersion950);
+    TestMhcPostBackwardTND("case_normal_typical_t1k_n4_d5120_fp16", 1024, 4, 5120, ge::DT_FLOAT16, kSocVersion950,
+                           ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_typical_t2k_n4_d2560_fp16)
 {
-    TestMhcPostBackwardTND("case_normal_typical_t2k_n4_d2560_fp16", 2048, 4, 2560, ge::DT_FLOAT16, kSocVersion950);
+    TestMhcPostBackwardTND("case_normal_typical_t2k_n4_d2560_fp16", 2048, 4, 2560, ge::DT_FLOAT16, kSocVersion950,
+                           ErrorType::NONE, 5);
 }
 
 TEST_F(MhcPostBackwardTilingTest, case_normal_typical_t4k_n4_d2560_fp16)
 {
-    TestMhcPostBackwardTND("case_normal_typical_t4k_n4_d2560_fp16", 4096, 4, 2560, ge::DT_FLOAT16, kSocVersion950);
+    TestMhcPostBackwardTND("case_normal_typical_t4k_n4_d2560_fp16", 4096, 4, 2560, ge::DT_FLOAT16, kSocVersion950,
+                           ErrorType::NONE, 5);
+}
+
+// Medium batches use the fused path, including incomplete four-token groups.
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_medium_batch_tail_bf16)
+{
+    TestMhcPostBackwardTND("medium_batch_tail_bf16", 1025, 4, 3584, ge::DT_BF16, GetParam(), ErrorType::NONE, 5);
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_medium_batch_tail_fp16)
+{
+    TestMhcPostBackwardBSND("medium_batch_tail_fp16", 3, 343, 4, 7168, ge::DT_FLOAT16, GetParam(), ErrorType::NONE, 5);
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_small_batch_keeps_general_path)
+{
+    TestMhcPostBackwardTND("small_batch", 1, 4, 5120, ge::DT_BF16, GetParam());
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_medium_batch_other_dimension_keeps_general_path)
+{
+    TestMhcPostBackwardTND("other_dimension", 1024, 4, 384, ge::DT_BF16, GetParam());
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_medium_batch_other_head_count_keeps_general_path)
+{
+    TestMhcPostBackwardTND("other_head_count", 1024, 6, 5120, ge::DT_BF16, GetParam());
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_medium_batch_without_hres_keeps_general_path)
+{
+    auto context = BuildTilingContextTND(1024, 4, 5120, ge::DT_BF16, GetParam());
+    context.inputTensorDesc_[2].shape_ = {{0}, {0}};
+    ExecuteTestCase(context, ge::GRAPH_SUCCESS, 0, "", {16777216});
 }
 
 // ======================== 异常用例 ===========================
@@ -284,3 +329,40 @@ TEST_F(MhcPostBackwardTilingTest, case_error_wrong_shape_bsnd_n_not_4_6_8)
     TestMhcPostBackwardBSND("case_error_wrong_shape_bsnd_n_not_4_6_8", 1, 512, 7, 394, ge::DT_BF16, kSocVersion950,
                             ErrorType::N_NOT_4_6_8);
 }
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_d4096_bf16_target_shapes)
+{
+    for (uint32_t tokens : {4096U, 8192U, 16384U}) {
+        TestMhcPostBackwardBSND("d4096_bf16", 1, tokens, 4, 4096, ge::DT_BF16, GetParam(), ErrorType::NONE, 5);
+    }
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_d4096_bf16_tail_group)
+{
+    TestMhcPostBackwardTND("d4096_bf16_tail", 4097, 4, 4096, ge::DT_BF16, GetParam(), ErrorType::NONE, 5);
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_d4096_fp16_uses_merge_batch_path)
+{
+    TestMhcPostBackwardTND("d4096_fp16", 4096, 4, 4096, ge::DT_FLOAT16, GetParam(), ErrorType::NONE, 5);
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_d4096_above_batch_limit_keeps_general_path)
+{
+    TestMhcPostBackwardTND("d4096_above_batch_limit", 49153, 4, 4096, ge::DT_BF16, GetParam());
+}
+
+TEST_P(MhcPostBackwardMergeBatchTilingTest, case_merge_batch_lower_boundary)
+{
+    auto belowBoundary = BuildTilingContextTND(255, 4, 5120, ge::DT_BF16, GetParam());
+    belowBoundary.coreNum_ = 64;
+    ExecuteTestCase(belowBoundary, ge::GRAPH_SUCCESS, 4, "", {16777216});
+
+    auto atBoundary = BuildTilingContextTND(256, 4, 5120, ge::DT_BF16, GetParam());
+    atBoundary.coreNum_ = 64;
+    ExecuteTestCase(atBoundary, ge::GRAPH_SUCCESS, 5, "", {16777216});
+}
+
+// Ascend950, Ascend960DT, and Ascend960PR, respectively.
+INSTANTIATE_TEST_SUITE_P(SupportedArchitectures, MhcPostBackwardMergeBatchTilingTest,
+                         testing::Values("3510", "9201", "9202"));

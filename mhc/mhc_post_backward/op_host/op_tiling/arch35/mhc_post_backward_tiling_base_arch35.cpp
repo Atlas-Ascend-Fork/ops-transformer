@@ -969,10 +969,22 @@ ge::graphStatus MhcPostBackwardTilingBaseArch35::DoOpTiling()
         return ret;
     }
 
-    const uint32_t mergeBatchLowerInclusive = 2048;
+    auto platform = platform_ascendc::PlatformAscendC(context_->GetPlatformInfo());
+    const auto npuArch = platform.GetCurNpuArch();
+    const bool isMergeBatchSupportedArch =
+        npuArch == Ops::Base::DAV_3510 || npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202;
+    const uint32_t aicCores = static_cast<uint32_t>(platform.GetCoreNumAic());
+    // Four tokens fill one 16x16 Cube tile for n=4. Enable the fused path once
+    // every AIC can receive a group, avoiding per-token high-level Matmul setup.
+    // Other platforms retain the original, board-validated dispatch range.
+    constexpr uint32_t MERGE_BATCH_TOKENS_PER_GROUP = 4;
+    const uint32_t mergeBatchLowerInclusive = isMergeBatchSupportedArch && aicCores != 0 ?
+                                                  std::min<uint32_t>(2048, MERGE_BATCH_TOKENS_PER_GROUP * aicCores) :
+                                                  2048;
     const uint32_t mergeBatchUpperInclusive = 49152;
     const uint32_t mergeBatchHeadCount = 4;
-    const bool mergeBatchDimSupported = D_ == 2560 || D_ == 3584 || D_ == 5120 || D_ == 6144 || D_ == 7168;
+    const bool mergeBatchDimSupported =
+        D_ == 2560 || D_ == 3584 || D_ == 4096 || D_ == 5120 || D_ == 6144 || D_ == 7168;
     useOptimized_ = totalItems_ >= mergeBatchLowerInclusive && totalItems_ <= mergeBatchUpperInclusive &&
                     n_ == mergeBatchHeadCount && mergeBatchDimSupported && isHResActive_;
     OP_LOGI(context_, "Template dispatch: BS=%u, n=%u, D=%u, hRes=%u, optimized=%u", totalItems_, n_, D_, isHResActive_,

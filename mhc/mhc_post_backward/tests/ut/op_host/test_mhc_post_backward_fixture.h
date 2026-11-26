@@ -293,7 +293,8 @@ protected:
      * @brief TNN模式测试夹具
      */
     static void TestMhcPostBackwardTND(const string& caseName, uint32_t T, uint32_t n, uint32_t D, ge::DataType dtype,
-                                       const std::string& socVersion, ErrorType errorType = ErrorType::NONE)
+                                       const std::string& socVersion, ErrorType errorType = ErrorType::NONE,
+                                       int64_t expectTilingKey = 4)
     {
         (void)caseName;
         gert::TilingContextPara tilingContextPara = BuildTilingContextTND(T, n, D, dtype, socVersion);
@@ -302,11 +303,6 @@ protected:
             ApplyErrorModifications(tilingContextPara, errorType, true, n, D, T, 0, 0);
         }
 
-        // arch35 tiling key 编码: bit0 = impl(0=high-level, 1=merge-batch), bit2 = IS_HRES。
-        // h_res 生效时: high-level=4, merge-batch=5; 进入 merge-batch 域与 DoOpTiling 门控一致。
-        const bool mergeBatchDomain =
-            T >= 2048 && T <= 49152 && n == 4 && (D == 2560 || D == 5120 || D == 6144 || D == 7168);
-        int64_t expectTilingKey = mergeBatchDomain ? 5 : 4;
         string expectTilingDataStr = "";
         ge::graphStatus expectStatus = (errorType == ErrorType::NONE) ? ge::GRAPH_SUCCESS : ge::GRAPH_FAILED;
         std::vector<size_t> expectWorkspaces =
@@ -321,7 +317,7 @@ protected:
      */
     static void TestMhcPostBackwardBSND(const string& caseName, uint32_t B, uint32_t S, uint32_t n, uint32_t D,
                                         ge::DataType dtype, const std::string& socVersion,
-                                        ErrorType errorType = ErrorType::NONE)
+                                        ErrorType errorType = ErrorType::NONE, int64_t expectTilingKey = 4)
     {
         (void)caseName;
         gert::TilingContextPara tilingContextPara = BuildTilingContextBSND(B, S, n, D, dtype, socVersion);
@@ -330,11 +326,6 @@ protected:
             ApplyErrorModifications(tilingContextPara, errorType, false, n, D, 0, B, S);
         }
 
-        // arch35 tiling key 编码: bit0 = impl(0=high-level, 1=merge-batch), bit2 = IS_HRES。
-        // h_res 生效时: high-level=4, merge-batch=5; 进入 merge-batch 域与 DoOpTiling 门控一致。
-        const bool mergeBatchDomain =
-            (B * S) >= 2048 && (B * S) <= 49152 && n == 4 && (D == 2560 || D == 5120 || D == 6144 || D == 7168);
-        int64_t expectTilingKey = mergeBatchDomain ? 5 : 4;
         string expectTilingDataStr = "";
         ge::graphStatus expectStatus = (errorType == ErrorType::NONE) ? ge::GRAPH_SUCCESS : ge::GRAPH_FAILED;
         std::vector<size_t> expectWorkspaces =
