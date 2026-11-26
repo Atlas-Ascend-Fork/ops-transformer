@@ -1752,7 +1752,8 @@ static void CheckMkGeneralizedTiling(uint32_t totalLength, uint32_t n, uint32_t 
     uint32_t mkUseGmStage = readField(fieldOffset([](auto& data, uint32_t value) { data.set_mkUseGmStage(value); }));
     EXPECT_EQ(actualImplMode, static_cast<uint32_t>(implMode));
     bool shortK = totalLength <= 256U && phiDim1 < 512U;
-    bool expectL1Stage = !shortK && ((implMode == 0 && totalLength >= 512U) || (n == 8U && totalLength < 1536U));
+    const bool originalL1Stage = (implMode == 0 && totalLength >= 512U) || (n == 8U && totalLength < 1536U);
+    const uint32_t expectedStage = shortK ? 3U : (!originalL1Stage && phiDim1 % 128U != 0U ? 5U : 0U);
     if (shortK) {
         EXPECT_EQ(mDim, 1U);
         uint32_t expectedSplitK = (phiDim1 + tilingInfo.blockNum - 1U) / tilingInfo.blockNum;
@@ -1764,7 +1765,7 @@ static void CheckMkGeneralizedTiling(uint32_t totalLength, uint32_t n, uint32_t 
         ASSERT_FALSE(tilingInfo.workspaceSizes.empty());
         EXPECT_EQ(tilingInfo.workspaceSizes[0], 20U * 1024U * 1024U + xOffset + xBytes + totalLength * sizeof(float));
     }
-    EXPECT_EQ(mkUseGmStage, shortK ? 3U : (expectL1Stage ? 0U : 1U));
+    EXPECT_EQ(mkUseGmStage, expectedStage);
     EXPECT_EQ(kL1Size % 128U, 0U);
     EXPECT_EQ(fusionAlign % 8U, 0U);
     EXPECT_LE(static_cast<uint64_t>(kL1Size) * fusionAlign, 128U * 256U);

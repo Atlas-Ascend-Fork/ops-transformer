@@ -25,10 +25,10 @@ using namespace AscendC;
 
 template <class T, class P, int8_t RESI_MODE>
 class MhcPreSplitBS;
-template <class T, class P, int8_t RESI_MODE>
 #if defined(MHC_PRE_ENABLE_ASCEND950)
-class MhcPreSplitBSWave;
 template <class T, class P, int8_t RESI_MODE, bool WEIGHT_REUSE>
+#else
+template <class T, class P, int8_t RESI_MODE>
 #endif
 class MhcPreMKPart1;
 #if defined(MHC_PRE_ENABLE_ASCEND950)
@@ -1539,10 +1539,10 @@ public:
 private:
     template <class U, class V, int8_t MODE>
     friend class MhcPreSplitBS;
-    template <class U, class V, int8_t MODE>
 #if defined(MHC_PRE_ENABLE_ASCEND950)
-    friend class MhcPreSplitBSWave;
     template <class U, class V, int8_t MODE, bool REUSE>
+#else
+    template <class U, class V, int8_t MODE>
 #endif
     friend class MhcPreMKPart1;
 #if defined(MHC_PRE_ENABLE_ASCEND950)

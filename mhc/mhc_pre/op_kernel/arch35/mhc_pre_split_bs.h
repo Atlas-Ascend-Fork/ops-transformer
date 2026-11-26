@@ -23,6 +23,30 @@ namespace MhcPre {
 
 constexpr uint32_t MHC_PRE_BS_SEQUENTIAL_PARTIAL_K = 1024U;
 
+#if defined(MHC_PRE_ENABLE_ASCEND950)
+template <bool FIRST>
+__simd_vf__ inline void MhcPreAccumulateBsMixWithCompensation(__ubuf__ float* sum, __ubuf__ float* correction,
+                                                              __ubuf__ float* src, uint32_t elements, uint16_t loops)
+{
+    for (uint16_t index = 0U; index < loops; ++index) {
+        const uint32_t offset = index * 64U;
+        Reg::MaskReg mask = Reg::UpdateMask<float>(elements);
+        Reg::RegTensor<float> partial, accum, error;
+        Reg::LoadAlign(partial, src + offset);
+        if constexpr (FIRST) {
+            accum = partial;
+            Reg::Duplicate(error, 0.0f, mask);
+        } else {
+            Reg::LoadAlign(accum, sum + offset);
+            Reg::LoadAlign(error, correction + offset);
+            MhcPreCompensatedAdd<false>(accum, error, partial, mask);
+        }
+        Reg::StoreAlign(sum + offset, accum, mask);
+        Reg::StoreAlign(correction + offset, error, mask);
+    }
+}
+#endif
+
 template <class T, class P, int8_t RESI_MODE>
 class MhcPreSplitBS {
 public:
@@ -44,7 +68,9 @@ public:
         // Fixpipe addresses the same UB offset on the AIC and both paired AIVs.
         uint32_t mixBytes = MhcPreAlign(((vector_.chunkTSize_ + 1U) / 2U) * alignedMixWidth_ * sizeof(P),
                                         MHC_PRE_BASIC_API_VL_FP32 * sizeof(P));
-        vector_.pipe_->InitBuffer(partialBuffer_, mixBytes);
+        partialSlots_ = vector_.implMode_ == MHC_PRE_IMPL_MODE_FP32 ? 2U : 1U;
+        partialStride_ = mixBytes / sizeof(P);
+        vector_.pipe_->InitBuffer(partialBuffer_, partialSlots_ * mixBytes);
         partialLocal_ = partialBuffer_.Get<P>();
         if ASCEND_IS_AIV {
             vector_.pipe_->InitBuffer(accumBuffer_, mixBytes);
@@ -104,6 +130,15 @@ public:
             vector_.InitBlockParams(curblock, tBlockNum);
             ConfigureDirectUbRowPartition();
 
+            if ASCEND_IS_AIV {
+                const uint32_t mixElements = vector_.vectorOffset_.singleCoreM * alignedMixWidth_;
+                compensateMix_ = vector_.implMode_ == MHC_PRE_IMPL_MODE_FP32 && mixElements != 0U &&
+                                 mixElements * sizeof(P) <= MHC_PRE_BS_OUT_QUEUE_BYTES;
+                if (compensateMix_) {
+                    mixCorrection_ = vector_.outQueue_.template AllocTensor<P>();
+                }
+            }
+
             if ASCEND_IS_AIC {
                 vector_.mnConfig_.curSingleCoreK = vector_.mnConfig_.singleCoreK;
             }
@@ -114,6 +149,9 @@ public:
                 bool isPartialEnd = IsSequentialPartialEnd(offsetNd, curNdLen);
                 // Two X staging slots are free initially. From the third slice on,
                 // AIV waits until AIC returns the slot through X_CONSUMED_FLAG.
+                const uint32_t totalK = vector_.matrixInfo_.nD;
+                const uint32_t groupK = BsProjectionGroupK(totalK);
+                const bool grouped = vector_.implMode_ == MHC_PRE_IMPL_MODE_FP32 && totalK > groupK;
                 if ASCEND_IS_AIV {
                     if (vector_.vectorCount_ >= 2) {
                         AscendC::CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE3>(MHC_PRE_X_CONSUMED_FLAG);
@@ -125,7 +163,15 @@ public:
                     }
                     CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE3>(MHC_PRE_X_READY_FLAG);
                     vector_.vectorCount_++;
-                    if (isPartialEnd) {
+                    if (grouped) {
+                        // Publish the next X slice before draining the previous slice's projection.
+                        if (offsetNd != 0U) {
+                            ConsumeGroupedTile(offsetNd - vector_.ND_LENGTH, offsetNd, totalK, groupK, partialIndex);
+                        }
+                        if (offsetNd + curNdLen == totalK) {
+                            ConsumeGroupedTile(offsetNd, totalK, totalK, groupK, partialIndex);
+                        }
+                    } else if (isPartialEnd) {
                         ConsumePartial(partialIndex == 0U);
                     }
                 }
@@ -139,12 +185,16 @@ public:
                     CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG +
                                                                               MHC_PRE_SUBBLOCK_FLAG_OFFSET);
                 }
-                if (isPartialEnd) {
+                if (!grouped && isPartialEnd) {
                     partialIndex++;
                 }
             }
             vector_.mmCount_++;
             if ASCEND_IS_AIV {
+                if (compensateMix_) {
+                    PipeBarrier<PIPE_V>();
+                    vector_.outQueue_.FreeTensor(mixCorrection_);
+                }
                 vector_.V0PostProcess(curblock, tBlockNum);
                 AIV1ProcessDirect();
                 vector_.vec1Count_++;
@@ -155,7 +205,8 @@ public:
             vector_.invRmsOutQueue_.FreeTensor(vector_.invRmsUb_);
             vector_.biasInQue_.FreeTensor(vector_.biasInUb_);
         } else {
-            if (partialSent_) {
+            const uint32_t inFlight = MhcPreMin(partialSequence_, partialSlots_);
+            for (uint32_t slot = 0; slot < inFlight; ++slot) {
                 WaitPartialConsumed();
             }
             mmService_.End(vector_.implMode_);
@@ -237,7 +288,16 @@ private:
     uint32_t alignedMixWidth_ = 0U;
     uint32_t xQueueBytes_ = 0U;
     uint32_t rmsCorrectionOffset_ = 0U;
-    bool partialSent_ = false;
+    uint32_t partialSlots_ = 1U;
+    uint32_t partialStride_ = 0U;
+    uint32_t partialSequence_ = 0U;
+    __aicore__ static inline uint32_t BsProjectionGroupK(uint32_t totalK)
+    {
+        return MhcPreMin(MhcPreCubeCompute::ProjectionGroupK(totalK), 128U);
+    }
+
+    bool compensateMix_ = false;
+    LocalTensor<P> mixCorrection_;
 #endif
 
     __aicore__ inline void InitUbBuffersBasicApi()
@@ -374,21 +434,52 @@ private:
         uint64_t nAlign = BasicApiAlign(vector_.mnConfig_.n, AscendC::BLOCK_CUBE);
         // Fill available L0 from the live M/N footprint instead of hard-coding baseK for one shape.
         uint64_t baseK = (256 / AscendC::Std::max(mAlign, nAlign)) * 32;
+        const uint32_t totalK = vector_.matrixInfo_.nD;
+        const uint32_t groupK = BsProjectionGroupK(totalK);
+        if (vector_.implMode_ == MHC_PRE_IMPL_MODE_FP32 && totalK > groupK) {
+            const uint32_t tileEnd = offsetNd + currentK;
+            for (uint32_t k = offsetNd; k < tileEnd;) {
+                const uint32_t end = MhcPreCubeCompute::ProjectionGroupEnd(k, totalK, groupK);
+                const uint32_t stop = MhcPreMin(end, tileEnd);
+                mmService_.template ProcessProjectionSlice<true>(
+                    vector_.mnConfig_.curSingleCoreM, vector_.mnConfig_.n, vector_.mnConfig_.curSingleCoreM, baseK,
+                    k - offsetNd, stop - offsetNd,
+                    k % groupK == 0U && (k == 0U || MhcPreCubeCompute::ProjectionGroupEnd(k - 1U, totalK, groupK) == k),
+                    stop == end, currentAL1, currentBL1);
+                if (stop == end) {
+                    SendPartial();
+                }
+                k = stop;
+            }
+            mmService_.ReleaseProjectionB();
+            vector_.cubeCount_++;
+            return;
+        }
         mmService_.template Process<true>(vector_.mnConfig_.curSingleCoreM, vector_.mnConfig_.n,
                                           vector_.mnConfig_.curSingleCoreM, baseK, isFirstKL1, isLastKL1, currentAL1,
                                           currentBL1);
 
         if (isLastKL1) {
-            if (partialSent_) {
-                WaitPartialConsumed();
-            }
-            mmService_.CopyOut(partialLocal_);
-            CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(MHC_PRE_BS_PARTIAL_READY_FLAG);
-            CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(MHC_PRE_BS_PARTIAL_READY_FLAG +
-                                                                     MHC_PRE_SUBBLOCK_FLAG_OFFSET);
-            partialSent_ = true;
+            SendPartial();
         }
         vector_.cubeCount_++;
+    }
+
+    __aicore__ inline LocalTensor<P> PartialSlot()
+    {
+        return partialLocal_[(partialSequence_ % partialSlots_) * partialStride_];
+    }
+
+    __aicore__ inline void SendPartial()
+    {
+        if (partialSequence_ >= partialSlots_) {
+            WaitPartialConsumed();
+        }
+        mmService_.CopyOut(PartialSlot());
+        CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(MHC_PRE_BS_PARTIAL_READY_FLAG);
+        CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(MHC_PRE_BS_PARTIAL_READY_FLAG +
+                                                                 MHC_PRE_SUBBLOCK_FLAG_OFFSET);
+        ++partialSequence_;
     }
 
     __aicore__ inline void WaitPartialConsumed()
@@ -398,19 +489,43 @@ private:
                                                                   MHC_PRE_SUBBLOCK_FLAG_OFFSET);
     }
 
+    __aicore__ inline void ConsumeGroupedTile(uint32_t start, uint32_t stop, uint32_t totalK, uint32_t groupK,
+                                              uint32_t& partialIndex)
+    {
+        for (uint32_t end = MhcPreCubeCompute::ProjectionGroupEnd(start, totalK, groupK); end <= stop;
+             end = MhcPreCubeCompute::ProjectionGroupEnd(end, totalK, groupK)) {
+            ConsumePartial(partialIndex++ == 0U);
+            if (end == totalK) {
+                break;
+            }
+        }
+    }
+
     __aicore__ inline void ConsumePartial(bool first)
     {
         CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_V>(MHC_PRE_BS_PARTIAL_READY_FLAG);
+        auto partial = PartialSlot();
         const uint32_t elements = vector_.vectorOffset_.singleCoreM * alignedMixWidth_;
         if (elements != 0U) {
-            if (first) {
-                MhcPreAccumulateBsPartial<true>(accumLocal_, partialLocal_, elements);
+            if (compensateMix_) {
+                auto* sum = (__ubuf__ float*)accumLocal_.GetPhyAddr();
+                auto* correction = (__ubuf__ float*)mixCorrection_.GetPhyAddr();
+                auto* src = (__ubuf__ float*)partial.GetPhyAddr();
+                const uint16_t loops = BasicApiCeilDiv(elements, 64U);
+                if (first) {
+                    asc_vf_call<MhcPreAccumulateBsMixWithCompensation<true>>(sum, correction, src, elements, loops);
+                } else {
+                    asc_vf_call<MhcPreAccumulateBsMixWithCompensation<false>>(sum, correction, src, elements, loops);
+                }
+            } else if (first) {
+                MhcPreAccumulateBsPartial<true>(accumLocal_, partial, elements);
             } else {
-                MhcPreAccumulateBsPartial<false>(accumLocal_, partialLocal_, elements);
+                MhcPreAccumulateBsPartial<false>(accumLocal_, partial, elements);
             }
         }
-        // The paired Cube can overwrite the slot after both AIVs finish reading it.
+        // Both paired AIVs return slots in the Cube's publication order.
         CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_V>(MHC_PRE_BS_PARTIAL_CONSUMED_FLAG);
+        ++partialSequence_;
     }
 #else
     __aicore__ inline void AICProcessBasicApi(uint32_t offsetNd, uint32_t partialIndex)
@@ -612,367 +727,6 @@ private:
     LocalTensor<float> aL1_;
     LocalTensor<float> bL1_;
 };
-
-#if defined(MHC_PRE_ENABLE_ASCEND950)
-template <class T, class P, int8_t RESI_MODE>
-class MhcPreSplitBSWave {
-public:
-    __aicore__ inline void Init(InitParams params)
-    {
-        front_.BindGlobalTensors(params);
-        front_.InitFromTilingData(params.tilingData);
-        front_.InitMNConfig();
-        front_.InitHMixBuffer(params);
-        front_.InitPipeAndCoreIdx(params.tPipeIn);
-        front_.xGm_.template SetL2CacheHint<CacheRwMode::READ>(CacheMode::CACHE_MODE_PERSISTENT);
-        post_.BindGlobalTensors(params);
-        post_.InitFromTilingData(params.tilingData);
-        post_.InitMNConfig();
-        post_.InitHMixBuffer(params);
-        post_.InitPipeAndCoreIdx(params.tPipeIn);
-        post_.xGm_.template SetL2CacheHint<CacheRwMode::READ>(CacheMode::CACHE_MODE_PERSISTENT);
-        front_.pipe_->InitBuffer(l1_, MHC_PRE_BASIC_API_L1_ALLOC_SIZE);
-        aL1_ = l1_.template Get<P>();
-        bL1_ = aL1_[2U * MHC_PRE_BASIC_API_L1_BUF_OFFSET];
-        // These first UB allocations have identical offsets on the AIC and both paired AIVs.
-        front_.pipe_->InitBuffer(receive_, 2U * kMixElements * sizeof(P));
-        recvLocal_ = receive_.template Get<P>();
-        front_.pipe_->InitBuffer(accum_, 2U * kMixElements * sizeof(P));
-        accLocal_ = accum_.template Get<P>();
-        if ASCEND_IS_AIC {
-            cube_.Init(front_.implMode_);
-        }
-        if ASCEND_IS_AIV {
-            front_.coreIdx_ /= 2U;
-            post_.coreIdx_ /= 2U;
-            front_.pipe_->InitBuffer(front_.xInQueue_, 2U, kRows * 256U * sizeof(T));
-            if (front_.hasGamma_) {
-                front_.pipe_->InitBuffer(front_.gammaInQueue_, 1U, MHC_PRE_RMS_K_BLOCK * sizeof(P));
-            }
-            front_.pipe_->InitBuffer(nz_, (kRows + 1U) * 256U * sizeof(P));
-            nzLocal_ = nz_.template Get<P>();
-            front_.pipe_->InitBuffer(rms_, 4U * kRmsStride * sizeof(P));
-            rmsLocal_ = rms_.template Get<P>();
-            post_.curSingleT_ = kRows;
-            post_.pipe_->InitBuffer(post_.xInQueue_, 2U, 4U * front_.D_ * sizeof(T));
-            post_.pipe_->InitBuffer(post_.outQueue_, 2U, front_.D_ * sizeof(T));
-            post_.pipe_->InitBuffer(post_.invRmsOutQueue_, 1U, kRmsStride * sizeof(P));
-            post_.pipe_->InitBuffer(post_.biasInQue_, 1U, 96U);
-            post_.pipe_->InitBuffer(post_.alphaBuf_, 96U);
-            post_.alphaInUb_ = post_.alphaBuf_.template Get<P>();
-            post_.pipe_->InitBuffer(post_.tmpBuff_, 2U * kCoeffStride * sizeof(P));
-            post_.hPreBuff_ = post_.tmpBuff_.template Get<P>();
-            post_.hPostBuff_ = post_.hPreBuff_[kCoeffStride];
-            post_.pipe_->InitBuffer(mix_, (kRows * 24U + 64U) * sizeof(P));
-            mixLocal_ = mix_.template Get<P>();
-            post_.AIVPreLoad();
-            nzEvent_ = static_cast<event_t>(front_.pipe_->template AllocEventID<HardEvent::MTE3_V>());
-            rmsEvent_ = static_cast<event_t>(front_.pipe_->template AllocEventID<HardEvent::MTE3_V>());
-            drainEvent_ = static_cast<event_t>(front_.pipe_->template AllocEventID<HardEvent::MTE3_V>());
-            mixFreeEvent_ = static_cast<event_t>(front_.pipe_->template AllocEventID<HardEvent::V_MTE2>());
-            mixReadyEvent_ = static_cast<event_t>(front_.pipe_->template AllocEventID<HardEvent::MTE2_V>());
-        }
-        SyncAll<false>();
-    }
-    __aicore__ inline void Process()
-    {
-        uint32_t blocks = BasicApiCeilDiv(front_.totalLength_, front_.chunkTSize_);
-        for (uint32_t block = front_.coreIdx_; block < blocks; block += front_.coreNum_) {
-            uint32_t begin = block * front_.chunkTSize_;
-            uint32_t count = MhcPreMin(uint32_t(front_.chunkTSize_), uint32_t(front_.totalLength_ - begin));
-            if ASCEND_IS_AIC {
-                ProcessCube(begin, count);
-            }
-            if ASCEND_IS_AIV {
-                ProcessVector(begin, count);
-            }
-        }
-        if ASCEND_IS_AIC {
-            for (uint32_t i = 0; i < MhcPreMin(partialSeq_, 2U); ++i) {
-                CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(kPartialConsumed);
-                CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(kPartialConsumed + 16U);
-            }
-            cube_.End(front_.implMode_);
-        }
-        if ASCEND_IS_AIV {
-            SetFlag<HardEvent::MTE3_V>(drainEvent_);
-            WaitFlag<HardEvent::MTE3_V>(drainEvent_);
-            post_.invRmsOutQueue_.FreeTensor(post_.invRmsUb_);
-            post_.biasInQue_.FreeTensor(post_.biasInUb_);
-        }
-    }
-
-private:
-    static constexpr uint32_t kWaveM = 48U;
-    static constexpr uint32_t kRows = 24U;
-    static constexpr uint32_t kMixElements = kRows * 24U;
-    static constexpr uint16_t kPartialReady = 11U;
-    static constexpr uint16_t kPartialConsumed = 12U;
-    static constexpr uint32_t kRmsStride = 64U;
-    static constexpr uint32_t kCoeffStride = 128U;
-    __aicore__ inline void ProcessCube(uint32_t begin, uint32_t count)
-    {
-        for (uint32_t off = 0U; off < count; off += kWaveM) {
-            uint32_t m = MhcPreMin(kWaveM, count - off);
-            uint32_t partial = 0U;
-            uint32_t baseK = 256U / AscendC::Std::max(BasicApiAlign(m, 16U), 32U) * 32U;
-            for (uint32_t k = 0U; k < front_.matrixInfo_.nD; k += 256U) {
-                CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_READY_FLAG);
-                CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_READY_FLAG + 16U);
-                auto a = aL1_[(sequence_ % 2U) * MHC_PRE_BASIC_API_L1_BUF_OFFSET];
-                auto b = bL1_[cube_.GetBL1BufferId() * MHC_PRE_BASIC_API_L1_BUF_OFFSET];
-                cube_.CopyInB1Nd2Nz(front_.matrixInfo_.nD, 256U, 24U, front_.phiGm_[k], b);
-                bool first = k % 1024U == 0U;
-                bool last = (k + 256U) % 1024U == 0U || k + 256U >= front_.matrixInfo_.nD;
-                cube_.template Process<true>(m, 24U, m, baseK, first, last, a, b);
-                if (last) {
-                    if (partialSeq_ >= 2U) {
-                        CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(kPartialConsumed);
-                        CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(kPartialConsumed + 16U);
-                    }
-                    CopyPartialToUb(partialSeq_ % 2U);
-                    CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(kPartialReady);
-                    CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(kPartialReady + 16U);
-                    ++partialSeq_;
-                    ++partial;
-                }
-                CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG);
-                CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG + 16U);
-                ++sequence_;
-            }
-            CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(MHC_PRE_MM_READY_FLAG);
-            CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_FIX>(MHC_PRE_MM_READY_FLAG + 16U);
-        }
-    }
-    __aicore__ inline void CopyPartialToUb(uint32_t slot)
-    {
-        cube_.CopyOut(recvLocal_[slot * kMixElements]);
-    }
-
-    __aicore__ inline void ReceivePartial(uint32_t wave, uint32_t rows, bool first)
-    {
-        CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_V>(kPartialReady);
-        if (rows != 0U) {
-            auto input = recvLocal_[(partialSeq_ % 2U) * kMixElements];
-            auto acc = accLocal_[(wave % 2U) * kMixElements];
-            if (first) {
-                MhcPreAccumulateBsPartial<true>(acc, input, rows * 24U);
-            } else {
-                MhcPreAccumulateBsPartial<false>(acc, input, rows * 24U);
-            }
-        }
-        CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_V>(kPartialConsumed);
-        ++partialSeq_;
-    }
-    __aicore__ inline void ExportMix(uint32_t wave, uint32_t row, uint32_t rows)
-    {
-        if (rows == 0U) {
-            return;
-        }
-        auto e = static_cast<event_t>(front_.pipe_->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(e);
-        WaitFlag<HardEvent::V_MTE3>(e);
-        DataCopyExtParams copy{1U, rows * 24U * uint32_t(sizeof(P)), 0U, 0U, 0U};
-        DataCopyPad(front_.hMixGm_[row * 24U], accLocal_[(wave % 2U) * kMixElements], copy);
-        // Subsequent NZ-copy fences, PreparePost, and the final drain protect this store before bank reuse.
-    }
-    __aicore__ inline void PrefetchFront(uint32_t rows, uint32_t rowStart, uint32_t k)
-    {
-        if (rows == 0U) {
-            return;
-        }
-        front_.xLocal_ = front_.xInQueue_.template AllocTensor<T>();
-        front_.DataCopyX(rows, 256U, rowStart, k);
-    }
-    __aicore__ inline void Normalize(uint32_t wave, uint32_t row, uint32_t rows)
-    {
-        if (rows == 0U) {
-            return;
-        }
-        auto rms = rmsLocal_[(wave % 2U) * kRmsStride];
-        front_.VFDoV0ProcessInvRms((__ubuf__ P*)rms.GetPhyAddr(), rows, front_.scaleMean_, front_.matrixInfo_.normEps);
-        auto e = static_cast<event_t>(front_.pipe_->FetchEventID(HardEvent::V_MTE3));
-        SetFlag<HardEvent::V_MTE3>(e);
-        WaitFlag<HardEvent::V_MTE3>(e);
-        DataCopyExtParams copy{1U, rows * uint32_t(sizeof(P)), 0U, 0U, 0U};
-        DataCopyPad(front_.invRmsGm_[row], rms, copy);
-        SetFlag<HardEvent::MTE3_V>(rmsEvent_);
-        WaitFlag<HardEvent::MTE3_V>(rmsEvent_);
-    }
-    __aicore__ inline void PreparePost(uint32_t wave, uint32_t row, uint32_t rows)
-    {
-        if (rows == 0U) {
-            return;
-        }
-        SetFlag<HardEvent::MTE3_V>(drainEvent_);
-        WaitFlag<HardEvent::MTE3_V>(drainEvent_);
-        post_.globalOffsetM_ = row;
-        postRows_ = rows;
-        DataCopy(post_.invRmsUb_, rmsLocal_[(wave % 2U) * kRmsStride], kRmsStride);
-        mixLocal_ = accLocal_[(wave % 2U) * kMixElements];
-        PipeBarrier<PIPE_V>();
-        auto res = post_.outQueue_.template AllocTensor<P>();
-        MhcPreVFPostSegments<P, 4U, true>(post_.hPreBuff_, post_.hPostBuff_, res, mixLocal_, post_.invRmsUb_,
-                                          post_.alphaInUb_, post_.biasInUb_, rows, 0U, 24U);
-        PipeBarrier<PIPE_V>();
-        post_.outQueue_.template EnQue<P>(res);
-        res = post_.outQueue_.template DeQue<P>();
-        DataCopyExtParams rcopy{1U, rows * 16U * uint32_t(sizeof(P)), 0U, 0U, 0U};
-        DataCopyPad(post_.hResGm_[row * 16U], res, rcopy);
-        post_.outQueue_.FreeTensor(res);
-        post_.AIV1ProcessHPost(0U, rows);
-        post_.AIV1ProcessHPre(0U, rows);
-        PostLoad(0U);
-    }
-    __aicore__ inline void PostLoad(uint32_t ordinal)
-    {
-        auto x = post_.xInQueue_.template AllocTensor<T>();
-        DataCopyExtParams copy{1U, uint32_t(4U * front_.D_ * sizeof(T)), 0U, 0U, 0U};
-        DataCopyPadExtParams<T> pad{false, 0U, 0U, 0U};
-        DataCopyPad(x, post_.xGm_[(post_.globalOffsetM_ + ordinal) * 4U * front_.D_], copy, pad);
-        post_.xInQueue_.template EnQue<T>(x);
-    }
-    __aicore__ inline void PostTick(uint32_t ordinal)
-    {
-        auto x = post_.xInQueue_.template DeQue<T>();
-        if (ordinal + 1U < postRows_) {
-            PostLoad(ordinal + 1U);
-        }
-        auto out = post_.outQueue_.template AllocTensor<T>();
-        post_.template VFDoV1ProcessHInRows<4U>((__ubuf__ T*)x.GetPhyAddr(), (__ubuf__ T*)out.GetPhyAddr(),
-                                                (__ubuf__ P*)post_.hPreBuff_[ordinal * 4U].GetPhyAddr(), 1U, front_.D_,
-                                                front_.D_);
-        post_.xInQueue_.FreeTensor(x);
-        post_.outQueue_.template EnQue<T>(out);
-        out = post_.outQueue_.template DeQue<T>();
-        DataCopyExtParams copy{1U, uint32_t(front_.D_ * sizeof(T)), 0U, 0U, 0U};
-        DataCopyPad(post_.hinGm_[(post_.globalOffsetM_ + ordinal) * front_.D_], out, copy);
-        post_.outQueue_.FreeTensor(out);
-    }
-    __aicore__ inline void ProcessVector(uint32_t begin, uint32_t count)
-    {
-        uint32_t previousRow = 0U;
-        uint32_t previousRows = 0U;
-        uint32_t wave = 0U;
-        for (uint32_t off = 0U; off < count; off += kWaveM, ++wave) {
-            uint32_t m = MhcPreMin(kWaveM, count - off);
-            uint32_t first = (m + 1U) / 2U;
-            uint32_t rowStart = GetSubBlockIdx() == 0U ? 0U : first;
-            uint32_t rows = GetSubBlockIdx() == 0U ? first : m - first;
-            front_.globalOffsetM_ = begin + off;
-            auto rms = rmsLocal_[(wave % 2U) * kRmsStride];
-            auto correction = (__ubuf__ P*)rmsLocal_[(2U + wave % 2U) * kRmsStride].GetPhyAddr();
-            PrefetchFront(rows, rowStart, 0U);
-            uint32_t postDone = 0U;
-            uint32_t tile = 0U;
-            uint32_t received = 0U;
-            uint32_t postEvery =
-                previousRows ?
-                    MhcPreMin(4U, AscendC::Std::max(1U, (uint32_t(front_.matrixInfo_.nD) / 256U - 2U) / previousRows)) :
-                    1U;
-            for (uint32_t k = 0U; k < front_.matrixInfo_.nD; k += 256U, ++tile) {
-                if (sequence_ >= 2U) {
-                    CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE3>(MHC_PRE_X_CONSUMED_FLAG);
-                }
-                if (rows != 0U) {
-                    auto x = front_.xInQueue_.template DeQue<T>();
-                    if (k + 256U < front_.matrixInfo_.nD) {
-                        PrefetchFront(rows, rowStart, k + 256U);
-                    }
-                    LocalTensor<P> gamma;
-                    __ubuf__ P* gammaAddr = nullptr;
-                    if (front_.hasGamma_) {
-                        gamma = front_.LoadGammaTile(k);
-                        gammaAddr = (__ubuf__ P*)gamma.GetPhyAddr();
-                    }
-                    if (k == 0U) {
-                        MhcPreMkVFPackNz<true, true>(nzLocal_, rms, x, rows, 256U, gammaAddr, correction);
-                    } else {
-                        MhcPreMkVFPackNz<false, true>(nzLocal_, rms, x, rows, 256U, gammaAddr, correction);
-                    }
-                    front_.xInQueue_.FreeTensor(x);
-                    auto e = static_cast<event_t>(front_.pipe_->FetchEventID(HardEvent::V_MTE3));
-                    SetFlag<HardEvent::V_MTE3>(e);
-                    WaitFlag<HardEvent::V_MTE3>(e);
-                    if (front_.hasGamma_) {
-                        front_.gammaInQueue_.FreeTensor(gamma);
-                    }
-                    DataCopyParams copy{32U, static_cast<uint16_t>(rows),
-                                        static_cast<uint16_t>(BasicApiAlign(rows, 8U) + 1U - rows),
-                                        static_cast<uint16_t>(BasicApiAlign(m, 16U) - rows)};
-                    BasicApiCopyToL1(nzLocal_, aL1_[(sequence_ % 2U) * MHC_PRE_BASIC_API_L1_BUF_OFFSET + rowStart * 8U],
-                                     copy);
-                    SetFlag<HardEvent::MTE3_V>(nzEvent_);
-                    WaitFlag<HardEvent::MTE3_V>(nzEvent_);
-                }
-                CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE3>(MHC_PRE_X_READY_FLAG);
-                ++sequence_;
-                // Feed two more X tiles before consuming the previous K1024 partial.
-                if (tile >= 5U && tile % 4U == 1U) {
-                    ReceivePartial(wave, rows, received == 0U);
-                    ++received;
-                }
-                if (wave != 0U && tile == 1U) {
-                    CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE2>(MHC_PRE_MM_READY_FLAG);
-                    // Keep the next wave's first two X tiles ahead of the final partial wait.
-                    ReceivePartial(wave - 1U, previousRows, false);
-                    ExportMix(wave - 1U, previousRow, previousRows);
-                    PreparePost(wave - 1U, previousRow, previousRows);
-                }
-                if (wave != 0U && tile >= 2U && (tile - 2U) % postEvery == 0U && postDone < previousRows) {
-                    PostTick(postDone++);
-                }
-            }
-            // RMS depends on X only; complete it before waiting for the final Cube partial.
-            Normalize(wave, begin + off + rowStart, rows);
-            bool moreWaves = off + kWaveM < count;
-            uint32_t receiveLimit = BasicApiCeilDiv(front_.matrixInfo_.nD, 1024U) - (moreWaves ? 1U : 0U);
-            while (received < receiveLimit) {
-                ReceivePartial(wave, rows, received == 0U);
-                ++received;
-            }
-            if (!moreWaves) {
-                ExportMix(wave, begin + off + rowStart, rows);
-            }
-            if (wave != 0U) {
-                while (postDone < previousRows) {
-                    PostTick(postDone++);
-                }
-            }
-            previousRow = begin + off + rowStart;
-            previousRows = rows;
-        }
-        CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE2>(MHC_PRE_MM_READY_FLAG);
-        PreparePost(wave - 1U, previousRow, previousRows);
-        for (uint32_t i = 0U; i < previousRows; ++i) {
-            PostTick(i);
-        }
-    }
-    MhcPreVectorCompute<T, P, RESI_MODE> front_, post_;
-    MhcPreCubeCompute cube_;
-    TBuf<TPosition::A1> l1_;
-    TBuf<TPosition::VECCALC> nz_;
-    TBuf<TPosition::VECCALC> rms_;
-    TBuf<TPosition::VECCALC> mix_;
-    TBuf<TPosition::VECCALC> receive_;
-    TBuf<TPosition::VECCALC> accum_;
-    LocalTensor<P> recvLocal_;
-    LocalTensor<P> accLocal_;
-    LocalTensor<P> aL1_;
-    LocalTensor<P> bL1_;
-    LocalTensor<P> nzLocal_;
-    LocalTensor<P> rmsLocal_;
-    LocalTensor<P> mixLocal_;
-    event_t nzEvent_;
-    event_t rmsEvent_;
-    event_t drainEvent_;
-    event_t mixFreeEvent_;
-    event_t mixReadyEvent_;
-    uint32_t sequence_ = 0U;
-    uint32_t postRows_ = 0U;
-    uint32_t partialSeq_ = 0U;
-};
-#endif
 
 } // namespace MhcPre
 
