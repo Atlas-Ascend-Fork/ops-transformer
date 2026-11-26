@@ -40,17 +40,26 @@
     normOut = sigmoidRes + addNum
     $$
 
-    Group the computation results by groupNum, sort the groups within each group by the sum of topN values, and take the top groupTopk groups:
+    Group the computation results by groupNum. Within each group, sort the groups by the sum of the topN values, and take the top groupTopk groups:
 
     $$
-    groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupCount), k=2, dim=-1), dim=-1),k=kGroup)
+    groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupNum), k=topN, dim=-1), dim=-1),k=groupTopk)
     $$
 
-    Based on the groupId from the previous step, retrieve the corresponding elements from normOut, then perform TopK on the data again to obtain the indices result:
+    Set normOut of the unselected groups to 0 (selected groups remain unchanged), then perform TopK over all experts to obtain the indices result:
 
     $$
-    normY,indices=TopK(normOut[groupId, :],k=k)
+    normOut' = \begin{cases}
+    normOut, & group \in groupId \\
+    0, & group \notin groupId
+    \end{cases}
     $$
+
+    $$
+    indices = TopK(normOut', k=topK)
+    $$
+
+    > **Note**: Elements of the unselected groups participate in the final TopK as 0 rather than being excluded. Therefore, when `addNum` makes `normOut` negative, the 0s of the unselected groups may rank before the negative values of the selected groups and be selected into `indices`.
 
     Select y from sigmoidRes based on indices:
 
@@ -227,7 +236,7 @@ aclnnStatus aclnnMoeFusedTopk(
     <tr>
       <td>scale</td>
       <td>Input</td>
-      <td>Coefficient multiplication after normalization.</td>
+      <td>Scaling coefficient applied to the normalized result when isNorm is true; ignored when isNorm is false.</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -247,7 +256,7 @@ aclnnStatus aclnnMoeFusedTopk(
     <tr>
       <td>y</td>
       <td>Output</td>
-      <td>The aclTensor on the device.</td>
+      <td>The aclTensor on the device. It holds the topK scores of each token taken from sigmoidRes; when isNorm is true, the values are normalized and multiplied by scale.</td>
       <td>-</td>
       <td>FLOAT32</td>
       <td>ND</td>
@@ -257,7 +266,7 @@ aclnnStatus aclnnMoeFusedTopk(
     <tr>
       <td>indices</td>
       <td>Output</td>
-      <td>aclTensor on the device.</td>
+      <td>The aclTensor on the device. It holds the topK expert indices selected for each token; when enableExpertMapping is true, these are the mapped logical expert indices.</td>
       <td>-</td>
       <td>INT32</td>
       <td>ND</td>
@@ -381,8 +390,8 @@ aclnnStatus aclnnMoeFusedTopk(
 - expertNum must be an integer multiple of groupNum.
 - groupTopk is less than or equal to groupNum.
 - maxMappingNum must be less than or equal to 128.
-- TopK must be less than or equal to expertNum.
-- TopN must be less than or equal to expertNum / groupNum.
+- topK must be less than or equal to expertNum.
+- topN must be less than or equal to expertNum / groupNum.
 - expertNum must be less than or equal to 1024.
 - groupNum must be less than or equal to 256.
 
@@ -601,9 +610,12 @@ int main() {
   // 1. (boilerplate) Initialize device/stream. See the external API list.
   // Fill in deviceId based on the actual device.
   int32_t deviceId = 0;
-  aclrtStream stream;
+  aclrtStream stream = nullptr;
   auto ret = aclnnMoeFusedTopkTest(deviceId, stream);
-  CHECK_FREE_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnMoeFusedTopkTest failed. ERROR: %d\n", ret); return ret);
+  if (ret != ACL_SUCCESS) {
+    LOG_PRINT("aclnnMoeFusedTopkTest failed. ERROR: %d\n", ret);
+    return ret;
+  }
 
   Finalize(deviceId, stream);
   return 0;

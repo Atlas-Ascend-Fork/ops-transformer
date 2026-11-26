@@ -214,9 +214,12 @@ int main()
     // 1. （固定写法）device/stream初始化，参考对外接口列表
     // 根据自己的实际device填写deviceId
     int32_t deviceId = 0;
-    aclrtStream stream;
+    aclrtStream stream = nullptr;
     auto ret = aclnnMoeFusedTopkTest(deviceId, stream);
-    CHECK_FREE_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnMoeFusedTopkTest failed. ERROR: %d\n", ret); return ret);
+    if (ret != ACL_SUCCESS) {
+        LOG_PRINT("aclnnMoeFusedTopkTest failed. ERROR: %d\n", ret);
+        return ret;
+    }
 
     Finalize(deviceId, stream);
     return 0;

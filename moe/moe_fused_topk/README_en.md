@@ -28,7 +28,7 @@ English | [简体中文](./README.md)
   $$
   Group the computation results by groupNum, sort the groups by the sum of the topN values in each group, and take the first groupTopk groups:
   $$
-  groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupCount), k=topN, dim=-1), dim=-1),k=groupTopk)
+  groupOut, groupId = TopK(ReduceSum(TopK(Split(normOut, groupNum), k=topN, dim=-1), dim=-1),k=groupTopk)
   $$
   Set the normOut of the unselected groups to 0 (the selected groups remain unchanged), and then apply TopK to all experts to obtain the indices result:
   $$
@@ -38,7 +38,7 @@ English | [简体中文](./README.md)
   \end{cases}
   $$
   $$
-  normY,indices=TopK(normOut',k=k)
+  indices = TopK(normOut', k=topK)
   $$
   > **Note**: The elements of unselected groups participate in the final TopK with the value 0 instead of being excluded. Therefore, when `addNum` makes `normOut` negative, the 0 of an unselected group may be ranked before the negative value of a selected group and thus be selected into `indices`.
   Select y from sigmoidRes based on indices:
@@ -137,7 +137,7 @@ English | [简体中文](./README.md)
       <tr>
         <td>scale</td>
         <td>Attribute</td>
-        <td>Coefficient multiplied after normalization.</td>
+        <td>Scaling coefficient applied to the normalized result when isNorm is true; ignored when isNorm is false.</td>
         <td>FLOAT</td>
         <td>-</td>
       </tr>
@@ -171,8 +171,8 @@ English | [简体中文](./README.md)
 - expertNum must be an integer multiple of groupNum.
 - groupTopk is less than or equal to groupNum.
 - maxMappingNum is less than or equal to 128.
-- TopK is less than or equal to expertNum.
-- TopN is less than or equal to expertNum / groupNum.
+- topK is less than or equal to expertNum.
+- topN is less than or equal to expertNum / groupNum.
 - expertNum is less than or equal to 1024.
 - groupNum is less than or equal to 256.
 
