@@ -151,6 +151,53 @@ public:
     }
 #endif
 
+#if defined(MHC_PRE_ENABLE_ASCEND950)
+    // The projection grouping uses the full projection K, independently of M and of staging.
+    __aicore__ static inline uint32_t ProjectionGroupK(uint32_t totalK)
+    {
+        return totalK < 3U * 64U * 64U ? 64U : 128U;
+    }
+
+    // In the final interval fold the remainder into the last complete group.
+    __aicore__ static inline uint32_t ProjectionGroupEnd(uint32_t k, uint32_t totalK, uint32_t groupK)
+    {
+        const uint32_t lastBegin = totalK < groupK ? 0U : (totalK / groupK - 1U) * groupK;
+        return k >= lastBegin ? totalK : (k / groupK + 1U) * groupK;
+    }
+
+    template <bool USE_BASE_K>
+    __aicore__ inline void ProcessProjectionSlice(uint64_t m, uint64_t n, uint64_t baseM, uint64_t baseK,
+                                                  uint64_t begin, uint64_t end, bool first, bool last,
+                                                  const AscendC::LocalTensor<float>& a,
+                                                  const AscendC::LocalTensor<float>& b)
+    {
+        m_ = m;
+        n_ = n;
+        baseM_ = baseM;
+        if (first) {
+            AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(cl0PingPongID_);
+        }
+        for (uint64_t k = begin; k < end; k += baseK_) {
+            baseK_ = AscendC::Std::min(baseK, end - k);
+            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0PingPongID_ + 3U);
+            CopyInA2(k, k, a);
+            CopyInB2(k, k, b);
+            AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(l0PingPongID_);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(l0PingPongID_);
+            const bool lastL0 = k + baseK_ == end;
+            MmadBase<USE_BASE_K>(k, first && k == begin, last, lastL0, true);
+            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0PingPongID_ + 3U);
+            l0PingPongID_ ^= 1U;
+        }
+    }
+
+    __aicore__ inline void ReleaseProjectionB()
+    {
+        AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(bL1BufferID_);
+        bL1BufferID_ ^= 1U;
+    }
+#endif
+
     __aicore__ inline void CopyInB1Nd2Nz(uint64_t k, uint64_t currentK, uint64_t baseN,
                                          const AscendC::GlobalTensor<float>& bGlobal,
                                          const AscendC::LocalTensor<float>& bl1Local)
@@ -218,7 +265,8 @@ public:
     }
 
     __aicore__ inline void MmadWithReusableB(uint64_t m, uint64_t n, uint32_t stage, bool firstK, bool lastK,
-                                             const AscendC::LocalTensor<float>& al1)
+                                             const AscendC::LocalTensor<float>& al1, uint32_t begin = 0U,
+                                             uint32_t end = 4U)
     {
         m_ = m;
         n_ = n;
@@ -227,7 +275,7 @@ public:
         baseK_ = 64U;
         kL1_ = 256U;
         auto c = AscendC::LocalTensor<float>(AscendC::TPosition::CO1, stage * 16384U, 4096U);
-        for (uint32_t part = 0; part < 4U; ++part) {
+        for (uint32_t part = begin; part < end; ++part) {
             AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0PingPongID_ + 3U);
             CopyInA2(part * 64U, part * 64U, al1);
             AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(l0PingPongID_);
@@ -242,10 +290,10 @@ public:
                 params.n = n;
                 params.k = step;
                 params.disableGemv = true;
-                params.cmatrixInitVal = firstK && part == 0U && innerK == 0U;
+                params.cmatrixInitVal = firstK && part == begin && innerK == 0U;
                 params.cmatrixSource = false;
                 params.unitFlag =
-                    lastK && part == 3U && innerK + step == 64U ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION;
+                    lastK && part + 1U == end && innerK + step == 64U ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION;
                 AscendC::Mmad(
                     c, (l0PingPongID_ == 0 ? aL0Ping_ : aL0Pong_)[innerK * BasicApiAlign(m, AscendC::BLOCK_CUBE)],
                     b[innerK * BasicApiAlign(n, AscendC::BLOCK_CUBE)], params);
@@ -370,6 +418,12 @@ public:
                                          const AscendC::LocalTensor<float>& bl1Local)
 #if defined(MHC_PRE_ENABLE_ASCEND950)
     {
+        const uint32_t groupK = ProjectionGroupK(k);
+        // Shared-X stages short K shards at local offset zero. A global group boundary can split a local C0 block.
+        const bool finerK = !SHARED_X && implMode_ == MHC_PRE_IMPL_MODE_FP32 && k > groupK;
+        bool firstProjection = true;
+        uint64_t projectionStart = kStart;
+        bool atomicEnabled = false;
         uint8_t aL1BufferId = 0;
         for (uint64_t kOffset = kStart; kOffset < kEnd; kOffset += kL1Size) {
             uint64_t currentK = AscendC::Std::min(kL1Size, kEnd - kOffset);
@@ -401,10 +455,43 @@ public:
             bool isLastKL1 = useSequentialPartials ?
                                  ((kOffset + currentK) % partialK == 0U || kOffset + currentK >= kEnd) :
                                  kOffset + currentK >= kEnd;
-            Process(m, n, baseM, baseK, isFirstKL1, isLastKL1, currentAL1, currentBL1);
-            if (isLastKL1) {
-                uint64_t partialIndex = useSequentialPartials ? (kOffset + currentK - 1U) / partialK : 0U;
-                CopyOut(dstGlobal[partialIndex * dstGroupStride], n);
+            if (finerK) {
+                for (uint64_t pos = kOffset; pos < kOffset + currentK;) {
+                    const uint64_t coarseStart =
+                        useSequentialPartials ? AscendC::Std::max(kStart, pos / partialK * partialK) : kStart;
+                    const uint64_t coarseEnd =
+                        useSequentialPartials ? AscendC::Std::min(kEnd, (pos / partialK + 1U) * partialK) : kEnd;
+                    const uint64_t end =
+                        AscendC::Std::min(coarseEnd, static_cast<uint64_t>(ProjectionGroupEnd(pos, k, groupK)));
+                    const uint64_t stop = AscendC::Std::min(end, kOffset + currentK);
+                    if (firstProjection) {
+                        projectionStart = pos;
+                    }
+                    ProcessProjectionSlice<false>(m, n, baseM, baseK, pos - kOffset, stop - kOffset, firstProjection,
+                                                  stop == end, currentAL1, currentBL1);
+                    firstProjection = stop == end;
+                    if (stop == end) {
+                        AscendC::PipeBarrier<PIPE_FIX>();
+                        if (atomicEnabled != (projectionStart > coarseStart)) {
+                            if (projectionStart > coarseStart) {
+                                AscendC::SetAtomicAdd<float>();
+                            } else {
+                                AscendC::DisableDmaAtomic();
+                            }
+                            atomicEnabled = !atomicEnabled;
+                        }
+                        const uint64_t slot = useSequentialPartials ? pos / partialK : 0U;
+                        CopyOut(dstGlobal[slot * dstGroupStride], n);
+                    }
+                    pos = stop;
+                }
+                ReleaseProjectionB();
+            } else {
+                Process(m, n, baseM, baseK, isFirstKL1, isLastKL1, currentAL1, currentBL1);
+                if (isLastKL1) {
+                    uint64_t partialIndex = useSequentialPartials ? (kOffset + currentK - 1U) / partialK : 0U;
+                    CopyOut(dstGlobal[partialIndex * dstGroupStride], n);
+                }
             }
             if constexpr (!SHARED_X) {
                 AscendC::CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG);
@@ -412,6 +499,10 @@ public:
                                                                                    MHC_PRE_SUBBLOCK_FLAG_OFFSET);
             }
             aL1BufferId ^= 1U;
+        }
+        if (atomicEnabled) {
+            AscendC::PipeBarrier<PIPE_FIX>();
+            AscendC::DisableDmaAtomic();
         }
     }
 #else
@@ -503,7 +594,12 @@ public:
 
     template <bool USE_BASE_K = false>
 #endif
-    __aicore__ inline void MmadBase(uint64_t kOffset, bool isFirstKL1, bool isLastKL1, bool isLastKL0)
+    __aicore__ inline void MmadBase(uint64_t kOffset, bool isFirstKL1, bool isLastKL1, bool isLastKL0
+#if defined(MHC_PRE_ENABLE_ASCEND950)
+                                    ,
+                                    bool restartAtOffset = false
+#endif
+    )
 #if defined(MHC_PRE_ENABLE_ASCEND950)
     {
         uint32_t mmK = AscendC::Std::min(baseK_, kL1_ - kOffset);
@@ -520,13 +616,16 @@ public:
             params.n = baseN_;
             params.k = currentK;
             params.disableGemv = true;
-            params.cmatrixInitVal = (isFirstKL1 && kOffset == 0 && innerK == 0);
+            params.cmatrixInitVal = (isFirstKL1 && (kOffset == 0 || restartAtOffset) && innerK == 0);
             params.cmatrixSource = false;
             params.unitFlag = (isLastKL1 && isLastKL0 && isLastInnerK) ? FINAL_ACCUMULATION : NON_FINAL_ACCUMULATION;
             AscendC::Mmad(cl0PingPongID_ == 0 ? cL0Ping_ : cL0Pong_,
                           (l0PingPongID_ == 0 ? aL0Ping_ : aL0Pong_)[innerK * mAlign],
                           (l0PingPongID_ == 0 ? bL0Ping_ : bL0Pong_)[innerK * nAlign], params);
-            SyncMmadAccumulation(params);
+            // The last BS FP32 update is fenced by the M-to-FIX handoff before L0C reuse.
+            if (!USE_BASE_K || implMode_ != MHC_PRE_IMPL_MODE_FP32 || params.unitFlag != FINAL_ACCUMULATION) {
+                SyncMmadAccumulation(params);
+            }
         }
     }
 #else

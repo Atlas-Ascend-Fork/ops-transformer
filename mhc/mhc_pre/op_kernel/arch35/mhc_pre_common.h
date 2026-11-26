@@ -365,7 +365,37 @@ __simd_callee__ inline void MhcPreMkLoadX128(Reg::RegTensor<float>& lo, Reg::Reg
     }
 }
 
-template <typename T, bool INIT_RMS, bool HAS_GAMMA, bool COMPENSATE_RMS>
+// The final tile occupies a compact ND buffer. Its unused capacity can cover the last vector load.
+template <typename T, bool HAS_GAMMA, bool COMPUTE_RMS>
+__simd_callee__ inline void MhcPreMkPackNzKTail(__ubuf__ float* dst, __ubuf__ T* x, __ubuf__ float* gamma,
+                                                uint16_t nzRows, uint32_t remaining, Reg::RegTensor<float>& squares,
+                                                Reg::MaskReg& full)
+{
+    Reg::RegTensor<float> zero;
+    Reg::Duplicate(zero, 0.0f);
+    for (uint16_t offset = 0; offset < 128U; offset += MHC_PRE_BASIC_API_VL_FP32) {
+        Reg::RegTensor<float> value = zero;
+        if (remaining != 0U) {
+            Reg::MaskReg valid = Reg::UpdateMask<float>(remaining);
+            Reg::RegTensor<T> packed;
+            Reg::LoadAlign<T, Reg::LoadDist::DIST_UNPACK_B16>(packed, x + offset);
+            Reg::Cast<float, T, MHC_PRE_CAST_B16_TO_FP32>(value, packed, valid);
+            if constexpr (COMPUTE_RMS) {
+                Reg::MulAddDst(squares, value, value, full);
+            }
+            if constexpr (HAS_GAMMA) {
+                Reg::RegTensor<float> scale;
+                Reg::LoadAlign(scale, gamma + offset);
+                Reg::Mul(value, value, scale, valid);
+                Reg::Select(value, value, zero, valid);
+            }
+        }
+        Reg::StoreAlign<float, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
+            dst, value, nzRows, 8U * nzRows, full);
+    }
+}
+
+template <typename T, bool INIT_RMS, bool HAS_GAMMA, bool COMPENSATE_RMS, bool PAD_K_TAIL = false>
 __simd_vf__ inline void MhcPreMkVFPackNzImpl(uint16_t rows, uint16_t columns, __ubuf__ float* nz, __ubuf__ float* rms,
                                              __ubuf__ T* x, uint16_t nzRows, uint16_t passes, uint16_t groups,
                                              __ubuf__ float* gamma, __ubuf__ float* correction)
@@ -403,6 +433,12 @@ __simd_vf__ inline void MhcPreMkVFPackNzImpl(uint16_t rows, uint16_t columns, __
                     dst, lo, nzRows, 8U * nzRows, full);
                 Reg::StoreAlign<float, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                     dst, hi, nzRows, 8U * nzRows, full);
+            }
+            if constexpr (PAD_K_TAIL) {
+                const uint32_t offset = passes * 128U;
+                __ubuf__ float* tailGamma = HAS_GAMMA ? gamma + offset : nullptr;
+                MhcPreMkPackNzKTail<T, HAS_GAMMA, true>(dst, x + (group * 64U + row) * columns + offset, tailGamma,
+                                                        nzRows, columns - offset, acc, full);
             }
             Reg::Reduce<Reg::ReduceType::SUM>(sum, acc, full);
             Reg::Duplicate(broadcast, sum, full);
@@ -445,7 +481,7 @@ __simd_vf__ inline void MhcPreMkVFPackNzImpl(uint16_t rows, uint16_t columns, __
     }
 }
 
-template <bool INIT_RMS, bool COMPENSATE_RMS = false, typename T>
+template <bool INIT_RMS, bool COMPENSATE_RMS = false, bool ALLOW_K_TAIL = false, typename T>
 __aicore__ inline void MhcPreMkVFPackNz(const LocalTensor<float>& nzLocal, const LocalTensor<float>& rmsLocal,
                                         const LocalTensor<T>& xLocal, uint16_t rows, uint16_t columns,
                                         __ubuf__ float* gamma = nullptr, __ubuf__ float* correction = nullptr)
@@ -456,6 +492,18 @@ __aicore__ inline void MhcPreMkVFPackNz(const LocalTensor<float>& nzLocal, const
     uint16_t nzRows = BasicApiAlign(rows, MHC_PRE_BASIC_API_C0_SIZE) + 1U;
     uint16_t passes = columns / 128U;
     uint16_t groups = BasicApiCeilDiv(rows, 64U);
+    if constexpr (ALLOW_K_TAIL) {
+        if (columns % 128U != 0U) {
+            if (gamma != nullptr) {
+                asc_vf_call<MhcPreMkVFPackNzImpl<T, INIT_RMS, true, COMPENSATE_RMS, true>>(
+                    rows, columns, nz, rms, x, nzRows, passes, groups, gamma, correction);
+            } else {
+                asc_vf_call<MhcPreMkVFPackNzImpl<T, INIT_RMS, false, COMPENSATE_RMS, true>>(
+                    rows, columns, nz, rms, x, nzRows, passes, groups, nullptr, correction);
+            }
+            return;
+        }
+    }
     if (gamma != nullptr) {
         asc_vf_call<MhcPreMkVFPackNzImpl<T, INIT_RMS, true, COMPENSATE_RMS>>(rows, columns, nz, rms, x, nzRows, passes,
                                                                              groups, gamma, correction);

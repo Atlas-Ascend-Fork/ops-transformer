@@ -64,17 +64,6 @@ __global__ __aicore__ void mhc_pre(GM_ADDR x, GM_ADDR phi, GM_ADDR alpha, GM_ADD
     if constexpr (TILING_MODE == MHC_PRE_SPLIT_BS) {
         InitParams initParams{x,     phi,     alpha, bias,  gamma, hin,   h_post,
                               h_res, inv_rms, h_mix, h_pre, user,  &pipe, &tilingData};
-#if defined(MHC_PRE_ENABLE_ASCEND950)
-        if constexpr (IsSameType<DTYPE_X, bfloat16_t>::value && RESI_MODE == MHC_PRE_HAS_RESI) {
-            if (tilingData.implMode == MHC_PRE_IMPL_MODE_FP32 && tilingData.N == 4U &&
-                tilingData.D == MHC_PRE_BS_WAVE_D && tilingData.outFlag != 0U) {
-                MhcPreSplitBSWave<DTYPE_X, float32_t, RESI_MODE> wave;
-                wave.Init(initParams);
-                wave.Process();
-                return;
-            }
-        }
-#endif
         MhcPreSplitBS<DTYPE_X, float32_t, RESI_MODE> op;
         op.Init(initParams);
         op.Process();

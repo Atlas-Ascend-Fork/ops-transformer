@@ -1123,7 +1123,8 @@ ge::graphStatus MhcPreBaseTiling::CalculateBsTiling950(uint32_t fusionAlign)
     const uint32_t mixBytes = roundUp(halfM * fusionAlign * sizeof(float), 256U);
     const uint32_t nzBytes = useStage48 ? 0U : (stageRows + 1U) * BASIC_API_K_UB_SIZE * sizeof(float);
     const uint32_t gammaBytes = hasGamma_ ? SPLIT_BS_GAMMA_BUFFER_LENGTH * sizeof(float) : 0U;
-    const uint32_t fixedUbBytes = 2U * (mixBytes + MHC_PRE_BS_OUT_QUEUE_BYTES) + nzBytes + gammaBytes +
+    const uint32_t mixSlots = implMode_ == IMPL_MODE_FP32 ? 3U : 2U;
+    const uint32_t fixedUbBytes = mixSlots * mixBytes + 2U * MHC_PRE_BS_OUT_QUEUE_BYTES + nzBytes + gammaBytes +
                                   2U * roundUp(halfM * sizeof(float), BASIC_API_ALIGN_BYTES) +
                                   2U * fusionAlign * sizeof(float) +
                                   2U * roundUp(16U * N_ * sizeof(float), BASIC_API_ALIGN_BYTES);
@@ -1256,17 +1257,22 @@ ge::graphStatus MhcPreBaseTiling::CalculateMkTiling950()
     size_t finalOffset = roundUp(partialMmBytes, M_K_WORKSPACE_ALIGN);
     tilingData_.set_mkWorkspaceMmOffset(0U);
     tilingData_.set_mkWorkspaceRmsOffset(0U);
-    const uint32_t mkStage = static_cast<uint32_t>(mkPlan950_.schedule);
-    tilingData_.set_mkUseGmStage(mkStage);
+    uint32_t mkStage = static_cast<uint32_t>(mkPlan950_.schedule);
     if (mkPlan950_.schedule == MkSchedule950::OrdinaryGm || mkPlan950_.schedule == MkSchedule950::OrdinaryL1) {
         const uint64_t rows = ceilDiv(mL1Size, AIV_AIC_RATIO);
-        const bool useGmStage = mkStage == M_K_USE_GM_STAGE;
-        uint64_t part1Bytes = CalculateMkPart1UbBytes(rows, kL1Size, useGmStage) + AlignUbBytes(rows * sizeof(float));
-        if (!useGmStage) {
-            // Fused L1 staging can use two padded NZ slots in place of one ND and one NZ slot.
-            const uint64_t alignedRows = roundUp(rows, BASIC_API_FLOAT_ALIGN);
-            part1Bytes += (alignedRows + 2U - rows) * AlignUbBytes(kL1Size * sizeof(float));
+        const uint64_t rmsCorrectionBytes = AlignUbBytes(rows * sizeof(float));
+        // Fused L1 staging uses two padded NZ slots in place of one ND and one NZ slot.
+        const uint64_t alignedRows = roundUp(rows, BASIC_API_FLOAT_ALIGN);
+        const uint64_t l1Part1Bytes = CalculateMkPart1UbBytes(rows, kL1Size, false) + rmsCorrectionBytes +
+                                      (alignedRows + 2U - rows) * AlignUbBytes(kL1Size * sizeof(float));
+        // Keep the selected grid/tile. The fused tail stage pads only the UB NZ tile.
+        if (mkStage == M_K_USE_GM_STAGE && kL1Size % M_K_K_L1_ALIGN == 0U && splitK % M_K_K_L1_ALIGN == 0U &&
+            l1Part1Bytes <= ubSize_) {
+            mkStage = matK_ % M_K_K_L1_ALIGN == 0U ? M_K_USE_L1_STAGE : MHC_PRE_MK_FUSED_L1_TAIL_STAGE;
         }
+        const uint64_t part1Bytes = mkStage != M_K_USE_GM_STAGE ?
+                                        l1Part1Bytes :
+                                        CalculateMkPart1UbBytes(rows, kL1Size, true) + rmsCorrectionBytes;
         constexpr uint64_t part2VectorPaddingBytes = 256U;
         const uint64_t minReduceBytes = mmWorkspaceGroupK * AlignUbBytes(matN_ * sizeof(float)) +
                                         2U * actualKBlockNum * BASIC_API_ALIGN_BYTES + part2VectorPaddingBytes;
@@ -1276,6 +1282,7 @@ ge::graphStatus MhcPreBaseTiling::CalculateMkTiling950()
                 roundUp(finalOffset + 2U * actualKBlockNum * totalLength_ * sizeof(float), M_K_WORKSPACE_ALIGN);
         }
     }
+    tilingData_.set_mkUseGmStage(mkStage);
     tilingData_.set_mkWorkspaceFinalOffset(static_cast<uint32_t>(finalOffset));
 
     chunkTSize_ = static_cast<uint32_t>(mL1Size);

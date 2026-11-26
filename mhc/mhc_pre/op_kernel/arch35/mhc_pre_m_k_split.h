@@ -175,7 +175,7 @@ __aicore__ inline void MhcPreMkVFTransND2NZ(const LocalTensor<float>& dstLocal, 
 }
 
 // The extra row in each NZ column block avoids UB bank conflicts; DMA skips it.
-template <typename T, bool HAS_GAMMA>
+template <typename T, bool HAS_GAMMA, bool PAD_K_TAIL = false>
 __simd_vf__ inline void MhcPreMkVFPackOnlyNzImpl(uint16_t rows, uint16_t columns, __ubuf__ float* nz, __ubuf__ T* x,
                                                  uint16_t nzRows, uint16_t passes, __ubuf__ float* gamma)
 {
@@ -197,10 +197,17 @@ __simd_vf__ inline void MhcPreMkVFPackOnlyNzImpl(uint16_t rows, uint16_t columns
             Reg::StoreAlign<float, Reg::DataCopyMode::DATA_BLOCK_COPY, Reg::PostLiteral::POST_MODE_UPDATE>(
                 dst, hi, nzRows, 8U * nzRows, full);
         }
+        if constexpr (PAD_K_TAIL) {
+            const uint32_t offset = passes * 128U;
+            __ubuf__ float* tailGamma = HAS_GAMMA ? gamma + offset : nullptr;
+            Reg::RegTensor<float> unusedSquares;
+            MhcPreMkPackNzKTail<T, HAS_GAMMA, false>(dst, x + row * columns + offset, tailGamma, nzRows,
+                                                     columns - offset, unusedSquares, full);
+        }
     }
 }
 
-template <typename T>
+template <bool ALLOW_K_TAIL = false, typename T>
 __aicore__ inline void MhcPreMkVFPackOnlyNz(const LocalTensor<float>& nzLocal, const LocalTensor<T>& xLocal,
                                             uint16_t rows, uint16_t columns, __ubuf__ float* gamma)
 {
@@ -208,6 +215,16 @@ __aicore__ inline void MhcPreMkVFPackOnlyNz(const LocalTensor<float>& nzLocal, c
     auto x = (__ubuf__ T*)xLocal.GetPhyAddr();
     uint16_t nzRows = BasicApiAlign(rows, MHC_PRE_BASIC_API_C0_SIZE) + 1U;
     uint16_t passes = columns / 128U;
+    if constexpr (ALLOW_K_TAIL) {
+        if (columns % 128U != 0U) {
+            if (gamma != nullptr) {
+                asc_vf_call<MhcPreMkVFPackOnlyNzImpl<T, true, true>>(rows, columns, nz, x, nzRows, passes, gamma);
+            } else {
+                asc_vf_call<MhcPreMkVFPackOnlyNzImpl<T, false, true>>(rows, columns, nz, x, nzRows, passes, nullptr);
+            }
+            return;
+        }
+    }
     if (gamma != nullptr) {
         asc_vf_call<MhcPreMkVFPackOnlyNzImpl<T, true>>(rows, columns, nz, x, nzRows, passes, gamma);
     } else {
@@ -1290,12 +1307,12 @@ public:
                 MhcPreMkVFPackNz<true>(nz, rms, x, rows, k, gamma);
             } else if constexpr (INPUT == XNzInput::InputWithRmsPartials) {
                 if (firstKTile) {
-                    MhcPreMkVFPackNz<true, true>(nz, rms, x, rows, k, gamma, correction);
+                    MhcPreMkVFPackNz<true, true, !WEIGHT_REUSE>(nz, rms, x, rows, k, gamma, correction);
                 } else {
-                    MhcPreMkVFPackNz<false, true>(nz, rms, x, rows, k, gamma, correction);
+                    MhcPreMkVFPackNz<false, true, !WEIGHT_REUSE>(nz, rms, x, rows, k, gamma, correction);
                 }
             } else {
-                MhcPreMkVFPackOnlyNz(nz, x, rows, k, gamma);
+                MhcPreMkVFPackOnlyNz<!WEIGHT_REUSE>(nz, x, rows, k, gamma);
             }
             vector_.xInQueue_.FreeTensor(x);
         }
@@ -1306,6 +1323,7 @@ public:
         constexpr uint32_t pad = INPUT == XNzInput::Float ? 0U : 1U;
         constexpr uint32_t rowStep = MHC_PRE_BASIC_API_BLOCK_SIZE / sizeof(P);
         DataCopyParams copy;
+        // Transfer only the live K blocks; any extra VF padding stays in UB.
         copy.blockCount = BasicApiCeilDiv(k, MHC_PRE_BASIC_API_C0_SIZE);
         copy.blockLen = rows * MHC_PRE_BASIC_API_C0_SIZE / rowStep;
         copy.srcStride = BasicApiAlign(rows, MHC_PRE_BASIC_API_C0_SIZE) + pad - rows;
@@ -1351,39 +1369,58 @@ public:
             SetFlag<HardEvent::FIX_M>(EVENT_ID3);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID5);
             SetFlag<HardEvent::M_MTE1>(EVENT_ID6);
+            const uint32_t projectionGroupK = MhcPreCubeCompute::ProjectionGroupK(vector_.matrixInfo_.nD);
+            const uint32_t partsPerGroup = projectionGroupK / 64U;
+            bool atomicEnabled = false;
             for (uint32_t wave = 0U; wave < waves; ++wave) {
-                event_t waveFixEvent = static_cast<event_t>(EVENT_ID2 + (wave & 1U));
                 for (uint32_t kt = 0U; kt < kTiles; ++kt) {
                     bool firstPartial = kt % partialTiles == 0U;
-                    bool lastPartial = (kt + 1U) % partialTiles == 0U || kt + 1U == kTiles;
-                    if (firstPartial) {
-                        WaitFlag<HardEvent::FIX_M>(waveFixEvent);
-                    }
                     mmService_.LoadReusableB(vector_.matrixInfo_.nD, 24U, vector_.phiGm_[kStart + kt * 256U], bL1_);
                     for (uint32_t stage = 0U; stage < waveStages; ++stage) {
-                        uint32_t cStage = (wave & 1U) * waveStages + stage;
                         uint32_t mStart = (wave * waveStages + stage) * WaveStride() + mIndex * 128U;
-                        MmadStagedX(128U, MHC_PRE_MK_WAVE_PROJECTION_N, cStage, firstPartial, lastPartial, sequence);
-                        if (lastPartial) {
-                            WaitForMmad();
-                            mmService_.CopyOutMBlock(
-                                128U, MHC_PRE_MK_WAVE_PROJECTION_N, cStage,
-                                partialMmGm_[((kIndex * BasicApiCeilDiv(kTiles, partialTiles) + kt / partialTiles) *
-                                                  static_cast<uint32_t>(vector_.totalLength_) +
-                                              mStart) *
-                                             MHC_PRE_MK_WAVE_PROJECTION_N]);
+                        CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_READY_FLAG);
+                        CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_READY_FLAG +
+                                                                                   MHC_PRE_SUBBLOCK_FLAG_OFFSET);
+                        auto aTile = aL1_[(sequence % 3U) * MHC_PRE_BASIC_API_L1_BUF_OFFSET];
+                        const uint32_t slot = kIndex * BasicApiCeilDiv(kTiles, partialTiles) + kt / partialTiles;
+                        auto dst = partialMmGm_[(slot * static_cast<uint32_t>(vector_.totalLength_) + mStart) *
+                                                MHC_PRE_MK_WAVE_PROJECTION_N];
+                        for (uint32_t part = 0U; part < 4U; part += partsPerGroup) {
+                            const uint32_t cStage = (part / partsPerGroup) & 1U;
+                            const event_t fixFree = static_cast<event_t>(EVENT_ID2 + cStage);
+                            WaitFlag<HardEvent::FIX_M>(fixFree);
+                            mmService_.MmadWithReusableB(128U, MHC_PRE_MK_WAVE_PROJECTION_N, cStage, true, true, aTile,
+                                                         part, part + partsPerGroup);
+                            SetFlag<HardEvent::M_FIX>(fixFree);
+                            WaitFlag<HardEvent::M_FIX>(fixFree);
+                            // The first sub-group initializes this core's existing Wave slot.
+                            PipeBarrier<PIPE_FIX>();
+                            const bool atomic = !firstPartial || part != 0U;
+                            if (atomic != atomicEnabled) {
+                                if (atomic) {
+                                    AscendC::SetAtomicAdd<float>();
+                                } else {
+                                    AscendC::DisableDmaAtomic();
+                                }
+                                atomicEnabled = atomic;
+                            }
+                            mmService_.CopyOutMBlock(128U, MHC_PRE_MK_WAVE_PROJECTION_N, cStage, dst);
+                            SetFlag<HardEvent::FIX_M>(fixFree);
                         }
+                        CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG);
+                        CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG +
+                                                                                  MHC_PRE_SUBBLOCK_FLAG_OFFSET);
                         ++sequence;
                     }
                     mmService_.ReleaseReusableB();
-                    if (lastPartial) {
-                        SetFlag<HardEvent::FIX_M>(waveFixEvent);
-                    }
                 }
                 CrossCoreSetFlag<2, PIPE_FIX>(4U + (wave & 1U));
             }
             WaitFlag<HardEvent::FIX_M>(EVENT_ID2);
             WaitFlag<HardEvent::FIX_M>(EVENT_ID3);
+            if (atomicEnabled) {
+                AscendC::DisableDmaAtomic();
+            }
             WaitFlag<HardEvent::M_MTE1>(EVENT_ID5);
             WaitFlag<HardEvent::M_MTE1>(EVENT_ID6);
             mmService_.End(vector_.implMode_);
@@ -1734,6 +1771,9 @@ private:
         if constexpr (WEIGHT_REUSE) {
             return true;
         }
+        if (vector_.tiling_->mkUseGmStage == MHC_PRE_MK_FUSED_L1_TAIL_STAGE) {
+            return true;
+        }
         return !UseGmStage() && vector_.matrixInfo_.nD % 128U == 0U && vector_.tiling_->kL1Size % 128U == 0U &&
                vector_.tiling_->multCoreSplitKSize % 128U == 0U;
     }
@@ -1855,6 +1895,67 @@ private:
         }
     }
 
+    __aicore__ inline void ProcessAicWithGroupedWeights(uint32_t mIndex, uint32_t kIndex, uint32_t kStart,
+                                                        uint32_t kEnd, uint32_t partialK)
+    {
+        const uint32_t groupParts = MhcPreCubeCompute::ProjectionGroupK(vector_.matrixInfo_.nD) / 64U;
+        const uint32_t stride = vector_.tiling_->cubeBlockDimM * 128U;
+        const uint32_t perSplit = BasicApiCeilDiv(vector_.tiling_->multCoreSplitKSize, partialK);
+        uint32_t sequence = 0U;
+        bool atomicEnabled = false;
+        SetFlag<HardEvent::FIX_M>(EVENT_ID2);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID5);
+        SetFlag<HardEvent::M_MTE1>(EVENT_ID6);
+        for (uint32_t chunk = mIndex * 128U; chunk < vector_.totalLength_; chunk += 16U * stride) {
+            const uint32_t stages =
+                AscendC::Std::min(uint64_t(16), BasicApiCeilDiv(vector_.totalLength_ - chunk, stride));
+            for (uint32_t k = kStart; k < kEnd; k += 256U) {
+                const uint32_t slot = kIndex * perSplit + (k - kStart) / partialK;
+                mmService_.LoadReusableB(vector_.matrixInfo_.nD, vector_.matrixInfo_.fusionSize, vector_.phiGm_[k],
+                                         bL1_);
+                for (uint32_t stage = 0U; stage < stages; ++stage) {
+                    const uint32_t mStart = chunk + stage * stride;
+                    const uint32_t mReal = AscendC::Std::min(uint64_t(128), vector_.totalLength_ - mStart);
+                    const uint64_t offset =
+                        (uint64_t(slot) * vector_.totalLength_ + mStart) * vector_.matrixInfo_.fusionSize;
+                    CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_READY_FLAG);
+                    CrossCoreWaitFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_READY_FLAG +
+                                                                               MHC_PRE_SUBBLOCK_FLAG_OFFSET);
+                    auto a = aL1_[(sequence % 3U) * MHC_PRE_BASIC_API_L1_BUF_OFFSET];
+                    for (uint32_t part = 0U; part < 4U; part += groupParts) {
+                        WaitFlag<HardEvent::FIX_M>(EVENT_ID2);
+                        mmService_.MmadWithReusableB(mReal, vector_.matrixInfo_.fusionSize, stage, true, true, a, part,
+                                                     part + groupParts);
+                        WaitForMmad();
+                        PipeBarrier<PIPE_FIX>();
+                        const bool atomic = (k - kStart) % partialK != 0U || part != 0U;
+                        if (atomic != atomicEnabled) {
+                            if (atomic) {
+                                AscendC::SetAtomicAdd<float>();
+                            } else {
+                                AscendC::DisableDmaAtomic();
+                            }
+                            atomicEnabled = atomic;
+                        }
+                        mmService_.CopyOutMBlock(mReal, vector_.matrixInfo_.fusionSize, stage, partialMmGm_[offset]);
+                        SetFlag<HardEvent::FIX_M>(EVENT_ID2);
+                    }
+                    CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG);
+                    CrossCoreSetFlag<MHC_PRE_CROSS_CORE_SYNC_MODE, PIPE_MTE1>(MHC_PRE_X_CONSUMED_FLAG +
+                                                                              MHC_PRE_SUBBLOCK_FLAG_OFFSET);
+                    ++sequence;
+                }
+                mmService_.ReleaseReusableB();
+            }
+        }
+        WaitFlag<HardEvent::FIX_M>(EVENT_ID2);
+        if (atomicEnabled) {
+            AscendC::DisableDmaAtomic();
+        }
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID5);
+        WaitFlag<HardEvent::M_MTE1>(EVENT_ID6);
+    }
+
     __aicore__ inline void ProcessAicWithWeightReuse(uint32_t mIndex, uint32_t kIndex, uint32_t kStart, uint32_t kEnd)
     {
         uint32_t stride = vector_.tiling_->cubeBlockDimM * 128U;
@@ -1862,6 +1963,11 @@ private:
         uint32_t partialK =
             MhcPreMkWeightReusePartialK(vector_.totalLength_, vector_.tiling_->multCoreSplitKSize,
                                         vector_.implMode_ == MHC_PRE_IMPL_MODE_FP32, RESI_MODE == MHC_PRE_HAS_RESI);
+        if (vector_.implMode_ == MHC_PRE_IMPL_MODE_FP32 &&
+            MhcPreCubeCompute::ProjectionGroupK(vector_.matrixInfo_.nD) < partialK) {
+            ProcessAicWithGroupedWeights(mIndex, kIndex, kStart, kEnd, partialK);
+            return;
+        }
         uint32_t sequence = 0;
         SetFlag<HardEvent::FIX_M>(EVENT_ID2);
         SetFlag<HardEvent::M_MTE1>(EVENT_ID5);

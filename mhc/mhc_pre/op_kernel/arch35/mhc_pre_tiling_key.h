@@ -34,6 +34,7 @@
 constexpr unsigned int MHC_PRE_BS_WAVE_D = 5120U;
 constexpr unsigned int MHC_PRE_MK_SHARED_X_STAGE = 3U;
 constexpr unsigned int MHC_PRE_MK_WEIGHT_REUSE_WAVE_STAGE = 4U;
+constexpr unsigned int MHC_PRE_MK_FUSED_L1_TAIL_STAGE = 5U;
 constexpr unsigned int MHC_PRE_BS_X_QUEUE_MAX_BYTES = 80U * 1024U;
 constexpr unsigned int MHC_PRE_BS_OUT_QUEUE_BYTES = 20U * 1024U;
 constexpr unsigned int MHC_PRE_BS_DEFAULT_STAGE_ROWS = 32U;
