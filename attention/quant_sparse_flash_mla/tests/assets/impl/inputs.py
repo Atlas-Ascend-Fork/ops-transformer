@@ -418,6 +418,7 @@ def generate_quant_sparse_flash_mla_inputs(
     layout_kv="BSND",
     topk_value_mode=1,
     return_softmax_lse=False,
+    retain_golden=True,
     **kwargs,
 ):
     """Populate pytest-derived inputs and leave metadata for npu_preprocess."""
@@ -504,9 +505,9 @@ def generate_quant_sparse_flash_mla_inputs(
     ):
         INPUT_ADAPTER.copy_tensor(tensor, op_input.get(name), name)
     zero_metadata(metadata)
-    case_data = INPUT_ADAPTER.load_golden_store().CASE_DATA
     testcase_name = params.get("testcase_name")
-    case_data.put(testcase_name, data)
+    if retain_golden:
+        INPUT_ADAPTER.load_golden_store().CASE_DATA.put(testcase_name, data)
     INPUT_ADAPTER.load_metadata_protocol().save_metadata_inputs(
         "quant_sparse_flash_mla", testcase_name, data.get("metadata_input")
     )

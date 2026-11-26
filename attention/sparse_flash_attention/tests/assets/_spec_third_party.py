@@ -43,23 +43,23 @@ cross_check_module = load_impl_module("cross_check")
 
 
 class SparseFlashAttentionSpec:
-    golden = golden_module.cpu_sparse_flash_attention
+    golden = cross_check_module.torch_golden
     customize_inputs = inputs_module.generate_sfa_inputs
     third_party = {"torch": cross_check_module.TorchReference}
     tolerance = cross_check_module.TOLERANCE
     pre_compare = staticmethod(cross_check_module.pre_compare)
 
 
-class SparseFlashAttentionAclnnV2Spec(SparseFlashAttentionSpec):
-    golden = golden_module.cpu_sparse_flash_attention_aclnn_v2
-    customize_inputs = inputs_module.generate_sfa_inputs_aclnn_v2
-    third_party = {"torch": cross_check_module.AclnnTorchReference}
-
-
 class SparseFlashAttentionAclnnSpec(SparseFlashAttentionSpec):
     golden = golden_module.cpu_sparse_flash_attention_aclnn
     customize_inputs = inputs_module.generate_sfa_inputs_aclnn
     third_party = {"torch": cross_check_module.AclnnTorchReference}
+    pre_compare = staticmethod(cross_check_module.pre_compare_aclnn)
+
+
+class SparseFlashAttentionAclnnV2Spec(SparseFlashAttentionAclnnSpec):
+    golden = golden_module.cpu_sparse_flash_attention_aclnn_v2
+    customize_inputs = inputs_module.generate_sfa_inputs_aclnn_v2
 
 
 __spec__ = {

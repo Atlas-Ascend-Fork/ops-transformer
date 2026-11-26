@@ -950,9 +950,38 @@ def gatherKV(
     return emptyFlag, k_sparse, v_sparse
 
 
+def _repair_qk_cancellation(q, k, scores):
+    """Recover finite QK residuals after the usual FP32 accumulation."""
+    # If FP32 roundoff could cover the whole dot, retain the addition residuals.
+    magnitude = q.abs() @ k.abs().T
+    roundoff = magnitude * (q.shape[-1] * torch.finfo(torch.float32).eps)
+    affected = (
+        scores.isfinite() & (magnitude > 0) & (scores.abs() <= roundoff)
+    ).nonzero()
+    for start in range(0, affected.shape[0], 256):
+        heads, tokens = affected[start : start + 256].unbind(dim=1)
+        terms = q[heads] * k[tokens]
+        residual = torch.zeros_like(terms[:, 0])
+        while terms.shape[-1] > 1:
+            paired = terms.shape[-1] // 2 * 2
+            left, right = terms[:, :paired:2], terms[:, 1:paired:2]
+            summed = left + right
+            correction = torch.where(
+                left.abs() >= right.abs(),
+                (left - summed) + right,
+                (right - summed) + left,
+            )
+            residual += correction.sum(dim=-1)
+            terms = torch.cat((summed, terms[:, paired:]), dim=-1)
+        repaired = terms[:, 0] + residual
+        scores[heads, tokens] = torch.where(
+            repaired.isfinite(), repaired, scores[heads, tokens]
+        )
+    return scores
+
+
 def softmax(x, sinks=None, *, joint_reduction=False):
-    x = x.float()
-    sink_column = None if sinks is None else sinks.float().reshape(-1, 1)
+    sink_column = None if sinks is None else sinks.to(x.dtype).reshape(-1, 1)
     logits = x if sink_column is None else torch.cat((x, sink_column), dim=-1)
     maximum = logits.max(dim=-1, keepdim=True).values
     weights = torch.exp(x - maximum)
@@ -965,37 +994,56 @@ def softmax(x, sinks=None, *, joint_reduction=False):
     return weights / total, maximum, total
 
 
-def compute_golden_row(q, k, v, scale, sink, q_dtype, rope_dim, *, promote=False):
-    """Compute attention, max and shifted sum for one nonempty query/KV-head group."""
+def _attention_from_scores(scores, v, sink, q_dtype, promote):
     if promote:
-        scores = (q @ k.T) * scale
         weights, maximum, total = softmax(scores, sink, joint_reduction=True)
-        return weights @ v, maximum, total
+        return weights @ v.to(scores.dtype), maximum, total
 
-    # Ordinary V2 rounds the NoPE sum once and each 16-element RoPE addition to FP32.
-    nope = q.shape[-1] - rope_dim
-    acc = (q[:, :nope].double() @ k[:, :nope].double().T).float()
-    for start in range(nope, q.shape[-1], 16):
-        acc = (
-            acc.double()
-            + q[:, start : start + 16].double() @ k[:, start : start + 16].double().T
-        ).float()
-    scores = acc * scale
-    maximum = sink.float().clone()
+    dtype = scores.dtype
+    maximum = sink.to(dtype).clone()
     total = torch.ones_like(maximum)
-    accumulator = v.new_zeros((q.shape[0], v.shape[-1]), dtype=torch.float32)
-    for start in range(0, k.shape[0], 128):
+    accumulator = scores.new_zeros((scores.shape[0], v.shape[-1]))
+    for start in range(0, scores.shape[1], 128):
         tile = scores[:, start : start + 128]
         updated = torch.maximum(maximum, tile.max(dim=-1).values)
         weights = torch.exp(tile - updated[:, None])
         rescale = torch.exp(maximum - updated)
-        accumulator = (
-            accumulator * rescale[:, None]
-            + weights.to(q_dtype).float() @ v[start : start + 128].float()
-        )
+        accumulator = accumulator * rescale[:, None] + weights.to(q_dtype).to(
+            dtype
+        ) @ v[start : start + 128].to(dtype)
         total = total * rescale + weights.sum(dim=-1)
         maximum = updated
     return accumulator / total[:, None], maximum[:, None], total[:, None]
+
+
+def compute_golden_row(q, k, v, scale, sink, q_dtype, rope_dim, *, promote=False):
+    """Compute attention, max and shifted sum for one nonempty query/KV-head group."""
+    if promote:
+        dots = q @ k.T
+    else:
+        # Ordinary V2 rounds the NoPE sum once and each 16-element RoPE addition to FP32.
+        nope = q.shape[-1] - rope_dim
+        acc = (q[:, :nope].double() @ k[:, :nope].double().T).float()
+        for start in range(nope, q.shape[-1], 16):
+            acc = (
+                acc.double()
+                + q[:, start : start + 16].double()
+                @ k[:, start : start + 16].double().T
+            ).float()
+        dots = acc
+    scores = _repair_qk_cancellation(q, k, dots) * scale
+    result, maximum, total = _attention_from_scores(scores, v, sink, q_dtype, promote)
+    overflow = ~scores.isfinite().all(dim=-1) | ~result.isfinite().all(dim=-1)
+    if overflow.any():
+        # A dot can overflow FP32 even when the scaled softmax and attention are valid.
+        wide_scores = (q[overflow].double() @ k.double().T) * scale
+        recovered, wide_max, wide_sum = _attention_from_scores(
+            wide_scores, v, sink[overflow], q_dtype, promote
+        )
+        result[overflow] = recovered.float()
+        maximum[overflow] = wide_max.float()
+        total[overflow] = wide_sum.float()
+    return result, maximum, total
 
 
 def _t_increattention_bnsd(fa_param, *, promote=False):
@@ -1090,7 +1138,7 @@ def _t_increattention_bnsd(fa_param, *, promote=False):
                     scaleValue,
                     cur_sinks,
                     q_torch_dtype,
-                    64,
+                    q_curr.shape[-1] - v_sparse.shape[-1],
                     promote=promote,
                 )
                 y[batch, n2Idx * g : (n2Idx + 1) * g, s1Idx, :] = bmm2Res
@@ -1126,7 +1174,7 @@ def kv_concat_pa_preprocessing(input_tensor_dict, fa_param, params):
     k_cache_shape = fa_param["k_concat_shape"].copy()
     k_cache_shape[-1] = 512
     k_rope_cache_shape = fa_param["k_concat_shape"].copy()
-    k_rope_cache_shape[-1] = 64
+    k_rope_cache_shape[-1] = params["rope_head_dim"]
     k_dequant_scale_cache_shape = fa_param["k_concat_shape"].copy()
     k_dequant_scale_cache_shape[-1] = 512 // 128
 

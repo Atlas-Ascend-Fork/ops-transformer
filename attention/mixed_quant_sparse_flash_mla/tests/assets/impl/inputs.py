@@ -347,11 +347,19 @@ class MixedQuantSparseFlashMlaInputAdapter:
                 filled[name] = torch.full(shape, int(value[0]), dtype=torch.int32)
         pytest_check.check_valid_param(filled)
         if batch_random is None:
-            data = pytest_golden.gen_data(filled, generate_golden=False)
+            data = pytest_golden.gen_data(
+                filled,
+                generate_golden=False,
+                int8_validator=pytest_check.check_valid_param,
+            )
         else:
             batch_random.validate_params(filled)
             with batch_random:
-                data = pytest_golden.gen_data(filled, generate_golden=False)
+                data = pytest_golden.gen_data(
+                    filled,
+                    generate_golden=False,
+                    int8_validator=pytest_check.check_valid_param,
+                )
             batch_random.normalize_block_tables(data)
         return data
 
@@ -409,6 +417,7 @@ def generate_mixed_quant_sparse_flash_mla_inputs(
     return_softmax_lse=False,
     key_dtype=None,
     value_dtype=None,
+    retain_golden=True,
     **kwargs,
 ):
     """Populate pytest-derived inputs and leave metadata for npu_preprocess."""
@@ -454,9 +463,10 @@ def generate_mixed_quant_sparse_flash_mla_inputs(
             },
         )
         data = INPUT_ADAPTER.generate_case(params)
-        INPUT_ADAPTER.load_golden_store().CASE_DATA.put(
-            kwargs.get("testcase_name"), data
-        )
+        if retain_golden:
+            INPUT_ADAPTER.load_golden_store().CASE_DATA.put(
+                kwargs.get("testcase_name"), data
+            )
         return None
 
     params = dict(kwargs)
@@ -577,9 +587,9 @@ def generate_mixed_quant_sparse_flash_mla_inputs(
     ):
         INPUT_ADAPTER.copy_tensor(tensor, op_input.get(name), name)
     zero_metadata(metadata)
-    case_data = INPUT_ADAPTER.load_golden_store().CASE_DATA
     testcase_name = params.get("testcase_name")
-    case_data.put(testcase_name, data)
+    if retain_golden:
+        INPUT_ADAPTER.load_golden_store().CASE_DATA.put(testcase_name, data)
     INPUT_ADAPTER.load_metadata_protocol().save_metadata_inputs(
         "mixed_quant_sparse_flash_mla", testcase_name, data.get("metadata_input")
     )

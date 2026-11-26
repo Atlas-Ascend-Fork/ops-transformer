@@ -476,13 +476,11 @@ def kv_concat_nopa_preprocessing(input_tensor_dict, fa_param, params):
     k_torch_dtype = _k_dtype_map.get(k_dtype, torch.uint8)
 
     # 全程 torch tensor，raw bytes 用 .view(torch.uint8) 重解释后拼接
-    t_k = k_tensor.contiguous()  # uint8 / float8 / int8
-    t_rope = k_rope_tensor.contiguous().view(torch.uint8)  # bfloat16 → uint8
-    t_scale = k_dequant_scale_tensor.contiguous().view(torch.uint8)  # float32 → uint8
-
-    key_concat = torch.cat((t_k.view(torch.uint8), t_rope, t_scale), dim=-1).view(
-        k_torch_dtype
-    )
+    packed_parts = [k_tensor.contiguous().view(torch.uint8)]
+    if k_rope_tensor.shape[-1]:
+        packed_parts.append(k_rope_tensor.contiguous().view(torch.uint8))
+    packed_parts.append(k_dequant_scale_tensor.contiguous().view(torch.uint8))
+    key_concat = torch.cat(packed_parts, dim=-1).view(k_torch_dtype)
 
     # query_cache: raw query + raw query_rope 拼接后转目标 dtype
     q_raw = (
@@ -543,6 +541,14 @@ def _tq4_q_lengths(params):
             end - start for start, end in zip(actual_seq_q, actual_seq_q[1:])
         ]
     return actual_seq_q
+
+
+def _tq4_query_rows(query, params):
+    """Use physical batch strides for BSND and packed token strides for TND."""
+    start = 0
+    for length in _tq4_q_lengths(params):
+        yield range(start, start + length)
+        start += query.shape[1] if params["layout_query"] == "BSND" else length
 
 
 def _tq4_generate_inputs(params, *, use_input_ranges=False):
@@ -621,17 +627,15 @@ def _tq4_generate_inputs(params, *, use_input_ranges=False):
             )
             page_start += allocated
 
-    q_lengths = _tq4_q_lengths(params)
     kv_lengths = params["actualseqlengthskv"]
     selected = torch.full(shape["sparse_indices"], -1, dtype=torch.int32)
     selected_rows = selected.view(-1, shape["sparse_indices"][-1])
     max_count = shape["sparse_indices"][-1]
-    start = 0
-    for batch, q_length in enumerate(q_lengths):
-        for offset in range(q_length):
+    for batch, rows in enumerate(_tq4_query_rows(query_cache, params)):
+        for offset, row in enumerate(rows):
             visible = kv_lengths[batch]
             if params["sparsemode"] == 3:
-                visible = kv_lengths[batch] - q_length + offset + 1
+                visible = kv_lengths[batch] - len(rows) + offset + 1
             visible = max(0, min(kv_lengths[batch], visible))
             count = min(
                 max_count,
@@ -641,10 +645,7 @@ def _tq4_generate_inputs(params, *, use_input_ranges=False):
                 ),
             )
             if count:
-                selected_rows[start + offset, :count] = torch.arange(
-                    count, dtype=torch.int32
-                )
-        start += q_length
+                selected_rows[row, :count] = torch.arange(count, dtype=torch.int32)
 
     return {
         "query_cache": query_cache,
@@ -727,26 +728,18 @@ def _tq4_golden(input_tensor_dict, params, *, promote=False):
 
     q = query.view(-1, query.shape[-2], query.shape[-1]).to(compute_dtype)
     q_nope, q_rope = q[..., : params["D"]], q[..., params["D"] :]
-    q_lengths, kv_lengths = _tq4_q_lengths(params), params["actualseqlengthskv"]
+    kv_lengths = params["actualseqlengthskv"]
     indices = input_tensor_dict["sparse_indices"].detach().cpu().long()
     table = input_tensor_dict["block_table"].detach().cpu().long()
     output = torch.zeros((*query.shape[:-1], params["D"]), dtype=torch.float32)
     output_rows = output.view(-1, query.shape[-2], params["D"])
     flat_indices = indices.view(-1, indices.shape[-1])
     block_size = params["block_size"]
-    start = 0
-    for batch, length in enumerate(q_lengths):
-        # In the final BSND tensor each batch starts at the padded sequence capacity.
-        row_start = (
-            batch * query.shape[1]
-            if promote and params["layout_query"] == "BSND"
-            else start
-        )
-        for offset in range(length):
-            row = row_start + offset
+    for batch, rows in enumerate(_tq4_query_rows(query, params)):
+        for offset, row in enumerate(rows):
             visible = kv_lengths[batch]
             if params["sparsemode"] == 3:
-                visible = kv_lengths[batch] - length + offset + 1
+                visible = kv_lengths[batch] - len(rows) + offset + 1
             blocks = flat_indices[row]
             if promote:
                 block_size_sparse = params["sparse_blocksize"]
@@ -788,7 +781,6 @@ def _tq4_golden(input_tensor_dict, params, *, promote=False):
             output_rows[row] = tq4_weighted_value(
                 scores, latent[physical] * scale[physical, None], q_dtype
             )
-        start += length
     return output if promote else output.to(q_dtype)
 
 
@@ -1202,8 +1194,38 @@ def gatherKV(
     return emptyFlag, k_sparse, v_sparse
 
 
+def _qk_fp32(q, k):
+    """Compute FP32 QK with compensation for near-cancelling dots."""
+    scores = torch.matmul(q, k.T)
+    # If FP32 roundoff could cover the whole dot, retain the addition residuals.
+    magnitude = q.abs() @ k.abs().T
+    roundoff = magnitude * (q.shape[-1] * torch.finfo(torch.float32).eps)
+    affected = (
+        scores.isfinite() & (magnitude > 0) & (scores.abs() <= roundoff)
+    ).nonzero()
+    for start in range(0, affected.shape[0], 256):
+        heads, tokens = affected[start : start + 256].unbind(dim=1)
+        terms = q[heads] * k[tokens]
+        residual = torch.zeros_like(terms[:, 0])
+        while terms.shape[-1] > 1:
+            paired = terms.shape[-1] // 2 * 2
+            left, right = terms[:, :paired:2], terms[:, 1:paired:2]
+            summed = left + right
+            correction = torch.where(
+                left.abs() >= right.abs(),
+                (left - summed) + right,
+                (right - summed) + left,
+            )
+            residual += correction.sum(dim=-1)
+            terms = torch.cat((summed, terms[:, paired:]), dim=-1)
+        repaired = terms[:, 0] + residual
+        scores[heads, tokens] = torch.where(
+            repaired.isfinite(), repaired, scores[heads, tokens]
+        )
+    return scores
+
+
 def softmax(x):
-    x = x.float()
     x_max = x.max(dim=-1, keepdim=True).values
     x_sub = x - x_max
     y = torch.exp(x_sub)
@@ -1212,14 +1234,26 @@ def softmax(x):
     return ans
 
 
-def compute_golden_row(q, k, v, scale, q_dtype, *, promote=False, fused_softmax=False):
-    """Compute one nonempty attention row. Only ordinary per-tile probabilities round to Q dtype."""
-    scores = (q.float() @ k.float().T) * scale
+def _attention_from_scores(scores, v, q_dtype, promote, fused_softmax):
     # Pytest uses the explicit reduction; TTK ordinary historically uses torch.softmax.
     weights = torch.softmax(scores, dim=-1) if fused_softmax else softmax(scores)
     if not promote:
-        weights = weights.to(q_dtype).float()
-    return weights @ v.float()
+        weights = weights.to(q_dtype).to(scores.dtype)
+    return weights @ v.to(scores.dtype)
+
+
+def compute_golden_row(q, k, v, scale, q_dtype, *, promote=False, fused_softmax=False):
+    """Compute one nonempty attention row. Only ordinary per-tile probabilities round to Q dtype."""
+    scores = _qk_fp32(q.float(), k.float()) * scale
+    result = _attention_from_scores(scores, v, q_dtype, promote, fused_softmax)
+    overflow = ~scores.isfinite().all(dim=-1) | ~result.isfinite().all(dim=-1)
+    if overflow.any():
+        # Retry only the affected heads, using wide logits through normalization.
+        wide_scores = (q[overflow].double() @ k.double().T) * scale
+        result[overflow] = _attention_from_scores(
+            wide_scores, v, q_dtype, promote, fused_softmax
+        ).float()
+    return result
 
 
 def _t_increattention_bnsd(fa_param, *, promote=False):
@@ -1319,7 +1353,7 @@ def kv_concat_pa_preprocessing(input_tensor_dict, fa_param, params):
     k_cache_shape = fa_param["k_concat_shape"].copy()
     k_cache_shape[-1] = 512
     k_rope_cache_shape = fa_param["k_concat_shape"].copy()
-    k_rope_cache_shape[-1] = 64
+    k_rope_cache_shape[-1] = params["rope_head_dim"]
     k_dequant_scale_cache_shape = fa_param["k_concat_shape"].copy()
     k_dequant_scale_cache_shape[-1] = 512 // 128
 

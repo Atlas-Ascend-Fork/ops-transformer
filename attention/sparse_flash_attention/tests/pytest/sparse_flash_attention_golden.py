@@ -23,7 +23,6 @@ else:
 SFA_S2_BASE_SIZE = 128
 SFA_CUBE_K_GROUP = 16
 SFA_S2_TAIL_MIN_ORIGIN = 64
-NEGATIVE_MIN_VALUE_FP32 = -torch.finfo(torch.float32).max
 
 
 def concat_tensor(tensor1, shape1, tensor2, shape2, n, tnd_flag=False):
@@ -670,8 +669,7 @@ def gatherKV(
 
 
 def softmax(x, sinks=None, *, joint_reduction=False):
-    x = x.float()
-    sink_column = None if sinks is None else sinks.float().reshape(-1, 1)
+    sink_column = None if sinks is None else sinks.to(x.dtype).reshape(-1, 1)
     logits = x if sink_column is None else torch.cat((x, sink_column), dim=-1)
     maximum = logits.max(dim=-1, keepdim=True).values
     weights = torch.exp(x - maximum)
@@ -687,17 +685,18 @@ def softmax(x, sinks=None, *, joint_reduction=False):
 def online_softmax_bmm2(scale_res, v_sparse, sinks, q_dtype, quantize_exp):
     rows, kv_len = scale_res.shape
     dim = v_sparse.shape[1]
+    dtype = scale_res.dtype
     if sinks is not None:
-        running_max = sinks.float().reshape(rows).clone()
+        running_max = sinks.to(dtype).reshape(rows).clone()
         running_sum = torch.ones_like(running_max)
     else:
-        running_max = scale_res.new_full((rows,), float("-inf"), dtype=torch.float32)
-        running_sum = scale_res.new_zeros(rows, dtype=torch.float32)
-    acc = scale_res.new_zeros((rows, dim), dtype=torch.float32)
+        running_max = scale_res.new_full((rows,), float("-inf"))
+        running_sum = scale_res.new_zeros(rows)
+    acc = scale_res.new_zeros((rows, dim))
 
     for start in range(0, kv_len, SFA_S2_BASE_SIZE):
         chunk = scale_res[:, start : start + SFA_S2_BASE_SIZE]
-        v_chunk = v_sparse[start : start + SFA_S2_BASE_SIZE].float()
+        v_chunk = v_sparse[start : start + SFA_S2_BASE_SIZE].to(dtype)
         size = chunk.shape[1]
         if SFA_S2_TAIL_MIN_ORIGIN < size < SFA_S2_BASE_SIZE:
             # 尾块用 -FLT_MAX 补满 128 并参与 max/sum 归约，v 侧补 0
@@ -707,7 +706,7 @@ def online_softmax_bmm2(scale_res, v_sparse, sinks, q_dtype, quantize_exp):
                     chunk,
                     torch.full(
                         (rows, pad),
-                        NEGATIVE_MIN_VALUE_FP32,
+                        -torch.finfo(dtype).max,
                         dtype=chunk.dtype,
                         device=chunk.device,
                     ),
@@ -729,9 +728,9 @@ def online_softmax_bmm2(scale_res, v_sparse, sinks, q_dtype, quantize_exp):
         exp_quantized = exp_chunk
         if quantize_exp:
             if q_dtype == "float16":
-                exp_quantized = exp_chunk.to(torch.float16).float()
+                exp_quantized = exp_chunk.to(torch.float16).to(dtype)
             elif q_dtype == "bfloat16":
-                exp_quantized = exp_chunk.to(torch.bfloat16).float()
+                exp_quantized = exp_chunk.to(torch.bfloat16).to(dtype)
 
         # sum 用未量化的 fp32 exp（kernel 在 CastStoreExp128 之前完成归约）
         running_sum = running_sum * rescale + exp_chunk.sum(dim=-1)
@@ -742,18 +741,24 @@ def online_softmax_bmm2(scale_res, v_sparse, sinks, q_dtype, quantize_exp):
     return bmm2_res, running_max[:, None], running_sum[:, None]
 
 
-def _bmm1_fp16_cpu_reference(q_curr, k_sparse):
-    """Compute FP16-input dot products with grouped FP32 compensated summation."""
-    q = q_curr.float()
-    k = k_sparse.float()
-    acc = torch.zeros((q.shape[0], k.shape[0]), dtype=torch.float32, device=q.device)
+def _attention_from_scores(scores, v, sink, q_dtype, promote, quantize_exp):
+    if promote:
+        weights, maximum, total = softmax(scores, sink, joint_reduction=True)
+        return weights @ v.to(scores.dtype), maximum, total
+    return online_softmax_bmm2(scores, v, sink, q_dtype, quantize_exp)
 
-    for start in range(0, q.shape[-1], SFA_CUBE_K_GROUP):
-        high = acc.clone()
+
+def _compensated_fp32_dot(q, k, group_size):
+    """Accumulate rounded FP32 products and their addition residuals."""
+    shape = torch.broadcast_shapes(q.shape[:-1], k.shape[:-1])
+    acc = torch.zeros(shape, dtype=torch.float32, device=q.device)
+
+    for start in range(0, q.shape[-1], group_size):
+        high = acc
         low = torch.zeros_like(high)
 
-        for index in range(start, start + SFA_CUBE_K_GROUP):
-            term = q[:, None, index] * k[None, :, index]
+        for index in range(start, min(start + group_size, q.shape[-1])):
+            term = q[..., index] * k[..., index]
             total = high + term
             # Recover the addition residual with the larger-magnitude addend first.
             correction = torch.where(
@@ -772,8 +777,28 @@ def _bmm1_fp16_cpu_reference(q_curr, k_sparse):
 def bmm1(q_curr, k_sparse, calc_dtype):
     """Use FP32 compensated accumulation for supported FP16 head sizes."""
     if calc_dtype == torch.float16 and q_curr.shape[-1] in (512, 576):
-        return _bmm1_fp16_cpu_reference(q_curr, k_sparse)
+        return _compensated_fp32_dot(
+            q_curr.float()[:, None, :], k_sparse.float()[None, :, :], SFA_CUBE_K_GROUP
+        )
     return torch.matmul(q_curr.float(), k_sparse.float().T)
+
+
+def _repair_qk_cancellation(q, k, scores):
+    """Recover finite QK residuals after the usual FP32 accumulation."""
+    # If accumulated roundoff could account for the whole dot product, retry
+    # with compensation spanning the full dot, including across Cube groups.
+    magnitude = q.abs() @ k.abs().T
+    roundoff = magnitude * (q.shape[-1] * torch.finfo(torch.float32).eps)
+    affected = (
+        scores.isfinite() & (magnitude > 0) & (scores.abs() <= roundoff)
+    ).nonzero()
+    for start in range(0, affected.shape[0], 256):
+        heads, tokens = affected[start : start + 256].unbind(dim=1)
+        repaired = _compensated_fp32_dot(q[heads], k[tokens], q.shape[-1])
+        scores[heads, tokens] = torch.where(
+            repaired.isfinite(), repaired, scores[heads, tokens]
+        )
+    return scores
 
 
 def compute_golden_row(
@@ -786,20 +811,29 @@ def compute_golden_row(
     *,
     promote=False,
     quantize_exp=True,
-    check_npu_overflow=False,
 ):
     """Score the selected KV tokens for one query and its group of heads."""
     if promote:
-        # Independent FP32 reduction avoids sharing the ordinary GEMM's rounding error.
-        scores = torch.stack([torch.linalg.vecdot(k, head) for head in q]) * scale
-        weights, maximum, total = softmax(scores, sink, joint_reduction=True)
-        return weights @ v, maximum, total
-    if check_npu_overflow:
-        dtype = torch.bfloat16 if q_dtype == "bfloat16" else torch.float16
-        scores = bmm1(q, k, dtype) * scale
+        dots = torch.stack([torch.linalg.vecdot(k, head) for head in q])
     else:
-        scores = (q @ k.T) * scale
-    return online_softmax_bmm2(scores, v, sink, q_dtype, quantize_exp)
+        dtype = torch.bfloat16 if q_dtype == "bfloat16" else torch.float16
+        dots = bmm1(q, k, dtype)
+    scores = _repair_qk_cancellation(q, k, dots) * scale
+    result, maximum, total = _attention_from_scores(
+        scores, v, sink, q_dtype, promote, quantize_exp
+    )
+    overflow = ~scores.isfinite().all(dim=-1) | ~result.isfinite().all(dim=-1)
+    if overflow.any():
+        # Keep the QK scale, max shift, softmax and PV wide before narrowing outputs.
+        wide_scores = (q[overflow].double() @ k.double().T) * scale
+        wide_sink = None if sink is None else sink[overflow]
+        recovered, wide_max, wide_sum = _attention_from_scores(
+            wide_scores, v, wide_sink, q_dtype, promote, quantize_exp
+        )
+        result[overflow] = recovered.float()
+        maximum[overflow] = wide_max.float()
+        total[overflow] = wide_sum.float()
+    return result, maximum, total
 
 
 def _t_increattention_bnsd(fa_param, quantize_exp=True, *, promote=False):
@@ -886,7 +920,6 @@ def _t_increattention_bnsd(fa_param, quantize_exp=True, *, promote=False):
                     fa_param["q_dtype"],
                     promote=promote,
                     quantize_exp=quantize_exp,
-                    check_npu_overflow=True,
                 )
                 y[batch, n2Idx * g : (n2Idx + 1) * g, s1Idx, :] = bmm2Res
                 set_softmax_lse(

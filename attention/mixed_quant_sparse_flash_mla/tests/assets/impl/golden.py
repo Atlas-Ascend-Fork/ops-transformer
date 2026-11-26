@@ -13,8 +13,12 @@
 """CPU Golden adapter for MixedQuantSparseFlashMla TTK cases."""
 
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
 
 PYTEST_MODULE_NAME = "mqsmla_pytest_golden"
 PYTEST_MODULE_FILE = "mixed_quant_sparse_flash_mla_golden.py"
@@ -199,3 +203,61 @@ def cpu_aclnn_mixed_quant_sparse_flash_mla(
         testcase_name=testcase_name,
         **kwargs,
     )
+
+
+def cpu_tensor(value):
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        if value.device.type != "cpu":
+            raise ValueError("MLA three-party reference requires CPU tensors")
+        return value
+    value = np.asarray(value)
+    name = value.dtype.name
+    if name == "hifloat8":
+        value = value.view(np.uint8)
+    elif name == "bfloat16":
+        return torch.from_numpy(value.view(np.uint16)).view(torch.bfloat16)
+    elif name == "float8_e4m3fn":
+        return torch.from_numpy(value.view(np.uint8)).view(torch.float8_e4m3fn)
+    return torch.from_numpy(value)
+
+
+def aclnn_arguments(original_golden, args, kwargs):
+    arguments = dict(inspect.signature(original_golden).bind(*args, **kwargs).arguments)
+    arguments.update(arguments.pop("kwargs", {}))
+    arguments.pop("softmax_lse_out", None)
+    return arguments
+
+
+def checked_result(outputs, dtype, source):
+    for index, value in enumerate(outputs):
+        if value is not None and torch.isnan(value).any():
+            raise ValueError(f"{source} output {index} contains NaN")
+    return outputs[0].to(dtype), outputs[1]
+
+
+def reference_from_inputs(q, quant_mode, *, promote, query_dtype=None, **inputs):
+    """Pass the finalized CPU tensors to the existing pytest Golden."""
+    op_input = {
+        name: cpu_tensor(value)
+        if isinstance(value, (np.ndarray, torch.Tensor))
+        else value
+        for name, value in inputs.items()
+    }
+    op_input["q"] = cpu_tensor(q)
+    native = load_pytest_golden()
+    if query_dtype is None:
+        dtypes = inputs.get("tensor_dtypes")
+        name = str(dtypes[0]).removeprefix("torch.") if dtypes else ""
+        query_dtype = {"float16": torch.float16, "bfloat16": torch.bfloat16}.get(
+            name, op_input["q"].dtype
+        )
+    op_input.update(quant_mode=quant_mode, query_dtype=query_dtype)
+    outputs = native.generate_cpu_golden({"op_input": op_input}, promote=promote)
+    dtype = torch.bfloat16 if quant_mode == 4 else query_dtype
+    return checked_result(outputs, torch.float32 if promote else dtype, "MQSMLA")
+
+
+def mixed_reference(*args, **kwargs):
+    return reference_from_inputs(*args, promote=False, **kwargs)
