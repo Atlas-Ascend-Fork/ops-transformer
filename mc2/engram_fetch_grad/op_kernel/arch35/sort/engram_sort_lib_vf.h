@@ -147,6 +147,91 @@ __aicore__ inline void ReverseInputData(AscendC::LocalTensor<ValT> inputX, Ascen
 
 // ── Histogram ──
 
+// Accumulate phase (CountT 32-bit): merge this tile's exclusive bin prefix sums into the core's block-level totals.
+template <typename CountT>
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void AccumulateBlockExclusiveCount32(
+    AscendC::Reg::RegTensor<uint32_t>& sum0, AscendC::Reg::RegTensor<uint32_t>& sum1,
+    AscendC::Reg::RegTensor<uint32_t>& sum2, AscendC::Reg::RegTensor<uint32_t>& sum3, AscendC::Reg::MaskReg& maskB32,
+    __ubuf__ CountT* rPtr, __ubuf__ CountT* wPtr)
+{
+    AscendC::Reg::RegTensor<uint32_t> sumIn0;
+    AscendC::Reg::RegTensor<uint32_t> sumIn1;
+    AscendC::Reg::RegTensor<uint32_t> sumIn2;
+    AscendC::Reg::RegTensor<uint32_t> sumIn3;
+    AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn0, rPtr, VF_LEN_B32);
+    AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn1, rPtr, VF_LEN_B32);
+    AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn2, rPtr, VF_LEN_B32);
+    AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn3, rPtr, VF_LEN_B32);
+    // Accumulate the current tile's exclusive cumsum into this core's block-level bin totals.
+    AscendC::Reg::Add(sumIn0, sumIn0, sum0, maskB32);
+    AscendC::Reg::Add(sumIn1, sumIn1, sum1, maskB32);
+    AscendC::Reg::Add(sumIn2, sumIn2, sum2, maskB32);
+    AscendC::Reg::Add(sumIn3, sumIn3, sum3, maskB32);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, sumIn0, VF_LEN_B32, maskB32);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, sumIn1, VF_LEN_B32, maskB32);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, sumIn2, VF_LEN_B32, maskB32);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, sumIn3, VF_LEN_B32, maskB32);
+}
+
+// Accumulate phase (CountT 64-bit): widen the 16-bit exclusive prefix sums to 64-bit lanes before merging.
+template <typename CountT>
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void AccumulateBlockExclusiveCount64(
+    AscendC::Reg::RegTensor<uint32_t>& sum0, AscendC::Reg::RegTensor<uint32_t>& sum1,
+    AscendC::Reg::RegTensor<uint32_t>& sum2, AscendC::Reg::RegTensor<uint32_t>& sum3,
+    AscendC::Reg::RegTensor<uint16_t>& zReg, __ubuf__ CountT* rPtr, __ubuf__ CountT* wPtr)
+{
+    AscendC::Reg::MaskReg maskB64 = AscendC::Reg::CreateMask<int64_t>();
+    AscendC::Reg::RegTensor<int64_t> k0;
+    AscendC::Reg::RegTensor<int64_t> k1;
+    AscendC::Reg::RegTensor<int64_t> k2;
+    AscendC::Reg::RegTensor<int64_t> k3;
+    AscendC::Reg::RegTensor<int64_t> k4;
+    AscendC::Reg::RegTensor<int64_t> k5;
+    AscendC::Reg::RegTensor<int64_t> k6;
+    AscendC::Reg::RegTensor<int64_t> k7;
+    AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)k0, (AscendC::Reg::RegTensor<uint32_t>&)k1, sum0,
+                             (AscendC::Reg::RegTensor<uint32_t>&)zReg);
+    AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)k2, (AscendC::Reg::RegTensor<uint32_t>&)k3, sum1,
+                             (AscendC::Reg::RegTensor<uint32_t>&)zReg);
+    AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)k4, (AscendC::Reg::RegTensor<uint32_t>&)k5, sum2,
+                             (AscendC::Reg::RegTensor<uint32_t>&)zReg);
+    AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)k6, (AscendC::Reg::RegTensor<uint32_t>&)k7, sum3,
+                             (AscendC::Reg::RegTensor<uint32_t>&)zReg);
+    AscendC::Reg::RegTensor<int64_t> in0;
+    AscendC::Reg::RegTensor<int64_t> in1;
+    AscendC::Reg::RegTensor<int64_t> in2;
+    AscendC::Reg::RegTensor<int64_t> in3;
+    AscendC::Reg::RegTensor<int64_t> in4;
+    AscendC::Reg::RegTensor<int64_t> in5;
+    AscendC::Reg::RegTensor<int64_t> in6;
+    AscendC::Reg::RegTensor<int64_t> in7;
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in0, rPtr, VF_LEN_B64);
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in1, rPtr, VF_LEN_B64);
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in2, rPtr, VF_LEN_B64);
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in3, rPtr, VF_LEN_B64);
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in4, rPtr, VF_LEN_B64);
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in5, rPtr, VF_LEN_B64);
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in6, rPtr, VF_LEN_B64);
+    AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in7, rPtr, VF_LEN_B64);
+    // Accumulate the current tile's exclusive cumsum into this core's block-level bin totals.
+    AscendC::Reg::Add(in0, in0, k0, maskB64);
+    AscendC::Reg::Add(in1, in1, k1, maskB64);
+    AscendC::Reg::Add(in2, in2, k2, maskB64);
+    AscendC::Reg::Add(in3, in3, k3, maskB64);
+    AscendC::Reg::Add(in4, in4, k4, maskB64);
+    AscendC::Reg::Add(in5, in5, k5, maskB64);
+    AscendC::Reg::Add(in6, in6, k6, maskB64);
+    AscendC::Reg::Add(in7, in7, k7, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in0, VF_LEN_B64, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in1, VF_LEN_B64, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in2, VF_LEN_B64, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in3, VF_LEN_B64, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in4, VF_LEN_B64, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in5, VF_LEN_B64, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in6, VF_LEN_B64, maskB64);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(wPtr, in7, VF_LEN_B64, maskB64);
+}
+
 template <typename CountT>
 __simd_callee__ __aicore__ inline void ComputeSumChist(
     AscendC::Reg::RegTensor<uint16_t>& chist0, AscendC::Reg::RegTensor<uint16_t>& chist1,
@@ -178,87 +263,11 @@ __simd_callee__ __aicore__ inline void ComputeSumChist(
     AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint16_t>&)sum2, (AscendC::Reg::RegTensor<uint16_t>&)sum3,
                              exclusiveSumOne, zeroReg);
     if constexpr (sizeof(CountT) == sizeof(uint32_t)) {
-        AscendC::Reg::RegTensor<uint32_t> sumIn0, sumIn1, sumIn2, sumIn3;
-        AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn0, blockExclusiveUbRPtr,
-                                                                                       VF_LEN_B32);
-        AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn1, blockExclusiveUbRPtr,
-                                                                                       VF_LEN_B32);
-        AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn2, blockExclusiveUbRPtr,
-                                                                                       VF_LEN_B32);
-        AscendC::Reg::LoadAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(sumIn3, blockExclusiveUbRPtr,
-                                                                                       VF_LEN_B32);
-        // Accumulate the current tile's exclusive cumsum into this core's block-level bin totals.
-        AscendC::Reg::Add(sumIn0, sumIn0, sum0, maskB32);
-        AscendC::Reg::Add(sumIn1, sumIn1, sum1, maskB32);
-        AscendC::Reg::Add(sumIn2, sumIn2, sum2, maskB32);
-        AscendC::Reg::Add(sumIn3, sumIn3, sum3, maskB32);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, sumIn0,
-                                                                                        VF_LEN_B32, maskB32);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, sumIn1,
-                                                                                        VF_LEN_B32, maskB32);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, sumIn2,
-                                                                                        VF_LEN_B32, maskB32);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, sumIn3,
-                                                                                        VF_LEN_B32, maskB32);
+        AccumulateBlockExclusiveCount32<CountT>(sum0, sum1, sum2, sum3, maskB32, blockExclusiveUbRPtr,
+                                                blockExclusiveUbWPtr);
     } else {
-        AscendC::Reg::MaskReg maskB64 = AscendC::Reg::CreateMask<int64_t>();
-        AscendC::Reg::RegTensor<int64_t> sum0Int64, sum1Int64, sum2Int64, sum3Int64;
-        AscendC::Reg::RegTensor<int64_t> sum4Int64, sum5Int64, sum6Int64, sum7Int64;
-        AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)sum0Int64,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)sum1Int64, sum0,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)zeroReg);
-        AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)sum2Int64,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)sum3Int64, sum1,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)zeroReg);
-        AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)sum4Int64,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)sum5Int64, sum2,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)zeroReg);
-        AscendC::Reg::Interleave((AscendC::Reg::RegTensor<uint32_t>&)sum6Int64,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)sum7Int64, sum3,
-                                 (AscendC::Reg::RegTensor<uint32_t>&)zeroReg);
-        AscendC::Reg::RegTensor<int64_t> int64In0, int64In1, int64In2, int64In3;
-        AscendC::Reg::RegTensor<int64_t> int64In4, int64In5, int64In6, int64In7;
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In0, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In1, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In2, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In3, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In4, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In5, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In6, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        AscendC::Reg::LoadAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(int64In7, blockExclusiveUbRPtr,
-                                                                                      VF_LEN_B64);
-        // Accumulate the current tile's exclusive cumsum into this core's block-level bin totals.
-        AscendC::Reg::Add(int64In0, int64In0, sum0Int64, maskB64);
-        AscendC::Reg::Add(int64In1, int64In1, sum1Int64, maskB64);
-        AscendC::Reg::Add(int64In2, int64In2, sum2Int64, maskB64);
-        AscendC::Reg::Add(int64In3, int64In3, sum3Int64, maskB64);
-        AscendC::Reg::Add(int64In4, int64In4, sum4Int64, maskB64);
-        AscendC::Reg::Add(int64In5, int64In5, sum5Int64, maskB64);
-        AscendC::Reg::Add(int64In6, int64In6, sum6Int64, maskB64);
-        AscendC::Reg::Add(int64In7, int64In7, sum7Int64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In0,
-                                                                                       VF_LEN_B64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In1,
-                                                                                       VF_LEN_B64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In2,
-                                                                                       VF_LEN_B64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In3,
-                                                                                       VF_LEN_B64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In4,
-                                                                                       VF_LEN_B64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In5,
-                                                                                       VF_LEN_B64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In6,
-                                                                                       VF_LEN_B64, maskB64);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(blockExclusiveUbWPtr, int64In7,
-                                                                                       VF_LEN_B64, maskB64);
+        AccumulateBlockExclusiveCount64<CountT>(sum0, sum1, sum2, sum3, zeroReg, blockExclusiveUbRPtr,
+                                                blockExclusiveUbWPtr);
     }
 }
 
@@ -314,6 +323,68 @@ __simd_vf__ __aicore__ inline void HistogramB32VF(__ubuf__ KeyT* inP, __ubuf__ C
                             hp, cp);
 }
 
+// Gather phase: shift 8 x 64-bit keys by this round's bit offset and de-interleave them down to 128 x 8-bit bins.
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void HistogramB64GatherBins(
+    AscendC::Reg::RegTensor<uint64_t>& in0, AscendC::Reg::RegTensor<uint64_t>& in1,
+    AscendC::Reg::RegTensor<uint64_t>& in2, AscendC::Reg::RegTensor<uint64_t>& in3,
+    AscendC::Reg::RegTensor<uint64_t>& in4, AscendC::Reg::RegTensor<uint64_t>& in5,
+    AscendC::Reg::RegTensor<uint64_t>& in6, AscendC::Reg::RegTensor<uint64_t>& in7, uint32_t bitOffset,
+    AscendC::Reg::MaskReg& maskB64, AscendC::Reg::RegTensor<uint8_t>& q0, AscendC::Reg::RegTensor<uint8_t>& q1)
+{
+    AscendC::Reg::RegTensor<uint64_t> s0;
+    AscendC::Reg::RegTensor<uint64_t> s1;
+    AscendC::Reg::RegTensor<uint64_t> s2;
+    AscendC::Reg::RegTensor<uint64_t> s3;
+    AscendC::Reg::RegTensor<uint64_t> s4;
+    AscendC::Reg::RegTensor<uint64_t> s5;
+    AscendC::Reg::RegTensor<uint64_t> s6;
+    AscendC::Reg::RegTensor<uint64_t> s7;
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s0, in0, bitOffset, maskB64);
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s1, in1, bitOffset, maskB64);
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s2, in2, bitOffset, maskB64);
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s3, in3, bitOffset, maskB64);
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s4, in4, bitOffset, maskB64);
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s5, in5, bitOffset, maskB64);
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s6, in6, bitOffset, maskB64);
+    AscendC::Reg::ShiftRights<uint64_t, int16_t>(s7, in7, bitOffset, maskB64);
+    AscendC::Reg::RegTensor<uint32_t> c0;
+    AscendC::Reg::RegTensor<uint32_t> c1;
+    AscendC::Reg::RegTensor<uint32_t> c2;
+    AscendC::Reg::RegTensor<uint32_t> c3;
+    AscendC::Reg::RegTensor<uint32_t> c4;
+    AscendC::Reg::RegTensor<uint32_t> c5;
+    AscendC::Reg::RegTensor<uint32_t> c6;
+    AscendC::Reg::RegTensor<uint32_t> c7;
+    AscendC::Reg::DeInterleave(c0, c1, (AscendC::Reg::RegTensor<uint32_t>&)s0, (AscendC::Reg::RegTensor<uint32_t>&)s1);
+    AscendC::Reg::DeInterleave(c2, c3, (AscendC::Reg::RegTensor<uint32_t>&)s2, (AscendC::Reg::RegTensor<uint32_t>&)s3);
+    AscendC::Reg::DeInterleave(c4, c5, (AscendC::Reg::RegTensor<uint32_t>&)s4, (AscendC::Reg::RegTensor<uint32_t>&)s5);
+    AscendC::Reg::DeInterleave(c6, c7, (AscendC::Reg::RegTensor<uint32_t>&)s6, (AscendC::Reg::RegTensor<uint32_t>&)s7);
+    AscendC::Reg::RegTensor<uint16_t> d0;
+    AscendC::Reg::RegTensor<uint16_t> d1;
+    AscendC::Reg::RegTensor<uint16_t> d2;
+    AscendC::Reg::RegTensor<uint16_t> d3;
+    AscendC::Reg::DeInterleave(d0, d1, (AscendC::Reg::RegTensor<uint16_t>&)c0, (AscendC::Reg::RegTensor<uint16_t>&)c2);
+    AscendC::Reg::DeInterleave(d2, d3, (AscendC::Reg::RegTensor<uint16_t>&)c4, (AscendC::Reg::RegTensor<uint16_t>&)c6);
+    AscendC::Reg::DeInterleave(q0, q1, (AscendC::Reg::RegTensor<uint8_t>&)d0, (AscendC::Reg::RegTensor<uint8_t>&)d2);
+}
+
+// Histogram phase: scatter the 8-bit bins into the UB snapshot and update this tile's freq / cumulative histogram.
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void HistogramB64AccumBins(
+    __ubuf__ uint8_t* b8p, AscendC::Reg::RegTensor<uint16_t>& hist0, AscendC::Reg::RegTensor<uint16_t>& hist1,
+    AscendC::Reg::RegTensor<uint16_t>& chist0, AscendC::Reg::RegTensor<uint16_t>& chist1,
+    AscendC::Reg::RegTensor<uint8_t>& q0, AscendC::Reg::MaskReg& histMask)
+{
+    AscendC::Reg::StoreAlign<uint8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(b8p, q0, VF_LEN_B8, histMask);
+    AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN0,
+                             AscendC::Reg::HistogramsType::FREQUENCY>(hist0, q0, histMask);
+    AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN1,
+                             AscendC::Reg::HistogramsType::FREQUENCY>(hist1, q0, histMask);
+    AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN0,
+                             AscendC::Reg::HistogramsType::ACCUMULATE>(chist0, q0, histMask);
+    AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN1,
+                             AscendC::Reg::HistogramsType::ACCUMULATE>(chist1, q0, histMask);
+}
+
 template <typename KeyT, typename CountT>
 __simd_vf__ __aicore__ inline void HistogramB64VF(__ubuf__ KeyT* inP, __ubuf__ CountT* ebW, __ubuf__ uint16_t* hp,
                                                   __ubuf__ uint16_t* cp, __ubuf__ uint8_t* b8p, uint32_t sz,
@@ -343,43 +414,9 @@ __simd_vf__ __aicore__ inline void HistogramB64VF(__ubuf__ KeyT* inP, __ubuf__ C
         AscendC::Reg::LoadAlign<uint64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in5, inP, VF_LEN_B64);
         AscendC::Reg::LoadAlign<uint64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in6, inP, VF_LEN_B64);
         AscendC::Reg::LoadAlign<uint64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(in7, inP, VF_LEN_B64);
-        AscendC::Reg::RegTensor<uint64_t> shift0, shift1, shift2, shift3, shift4, shift5, shift6, shift7;
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift0, in0, bitOffset, maskB64);
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift1, in1, bitOffset, maskB64);
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift2, in2, bitOffset, maskB64);
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift3, in3, bitOffset, maskB64);
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift4, in4, bitOffset, maskB64);
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift5, in5, bitOffset, maskB64);
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift6, in6, bitOffset, maskB64);
-        AscendC::Reg::ShiftRights<uint64_t, int16_t>(shift7, in7, bitOffset, maskB64);
-        AscendC::Reg::RegTensor<uint32_t> deInter0, deInter1, deInter2, deInter3, deInter4, deInter5, deInter6,
-            deInter7;
-        AscendC::Reg::DeInterleave(deInter0, deInter1, (AscendC::Reg::RegTensor<uint32_t>&)shift0,
-                                   (AscendC::Reg::RegTensor<uint32_t>&)shift1);
-        AscendC::Reg::DeInterleave(deInter2, deInter3, (AscendC::Reg::RegTensor<uint32_t>&)shift2,
-                                   (AscendC::Reg::RegTensor<uint32_t>&)shift3);
-        AscendC::Reg::DeInterleave(deInter4, deInter5, (AscendC::Reg::RegTensor<uint32_t>&)shift4,
-                                   (AscendC::Reg::RegTensor<uint32_t>&)shift5);
-        AscendC::Reg::DeInterleave(deInter6, deInter7, (AscendC::Reg::RegTensor<uint32_t>&)shift6,
-                                   (AscendC::Reg::RegTensor<uint32_t>&)shift7);
-        AscendC::Reg::RegTensor<uint16_t> deInter0B16, deInter1B16, deInter2B16, deInter3B16;
-        AscendC::Reg::DeInterleave(deInter0B16, deInter1B16, (AscendC::Reg::RegTensor<uint16_t>&)deInter0,
-                                   (AscendC::Reg::RegTensor<uint16_t>&)deInter2);
-        AscendC::Reg::DeInterleave(deInter2B16, deInter3B16, (AscendC::Reg::RegTensor<uint16_t>&)deInter4,
-                                   (AscendC::Reg::RegTensor<uint16_t>&)deInter6);
         AscendC::Reg::RegTensor<uint8_t> deInter0B8, deInter1B8;
-        AscendC::Reg::DeInterleave(deInter0B8, deInter1B8, (AscendC::Reg::RegTensor<uint8_t>&)deInter0B16,
-                                   (AscendC::Reg::RegTensor<uint8_t>&)deInter2B16);
-        AscendC::Reg::StoreAlign<uint8_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(b8p, deInter0B8, VF_LEN_B8,
-                                                                                       histMask);
-        AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN0,
-                                 AscendC::Reg::HistogramsType::FREQUENCY>(hist0, deInter0B8, histMask);
-        AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN1,
-                                 AscendC::Reg::HistogramsType::FREQUENCY>(hist1, deInter0B8, histMask);
-        AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN0,
-                                 AscendC::Reg::HistogramsType::ACCUMULATE>(chist0, deInter0B8, histMask);
-        AscendC::Reg::Histograms<uint8_t, uint16_t, AscendC::Reg::HistogramsBinType::BIN1,
-                                 AscendC::Reg::HistogramsType::ACCUMULATE>(chist1, deInter0B8, histMask);
+        HistogramB64GatherBins(in0, in1, in2, in3, in4, in5, in6, in7, bitOffset, maskB64, deInter0B8, deInter1B8);
+        HistogramB64AccumBins(b8p, hist0, hist1, chist0, chist1, deInter0B8, histMask);
     }
     ComputeSumChist<CountT>(chist0, chist1, hist0, hist1, maskB16, maskB32, blockExclusiveUbRPtr, blockExclusiveUbWPtr,
                             hp, cp);
@@ -465,6 +502,77 @@ __simd_vf__ __aicore__ inline void HistogramB8VF(__ubuf__ KeyT* inP, __ubuf__ Co
 
 // ── Scatter / Lookback / Prefix ──
 
+// Store phase (CountT 32-bit): tag 4 x u32 lanes with AGGREGATE_READY and write out (one u32 per bin).
+template <typename CountT>
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void EncodeHistStoreB32(
+    __ubuf__ CountT* outPtr, AscendC::Reg::RegTensor<uint16_t>& o0, AscendC::Reg::RegTensor<uint16_t>& o1,
+    AscendC::Reg::RegTensor<uint16_t>& o2, AscendC::Reg::RegTensor<uint16_t>& o3)
+{
+    AscendC::Reg::RegTensor<uint32_t> readyMask;
+    AscendC::Reg::MaskReg pred = AscendC::Reg::CreateMask<uint32_t>();
+    AscendC::Reg::Duplicate(readyMask, AGGREGATE_READY_MASK, pred);
+    AscendC::Reg::RegTensor<uint32_t> k0;
+    AscendC::Reg::RegTensor<uint32_t> k1;
+    AscendC::Reg::RegTensor<uint32_t> k2;
+    AscendC::Reg::RegTensor<uint32_t> k3;
+    AscendC::Reg::Or(k0, (AscendC::Reg::RegTensor<uint32_t>&)o0, readyMask, pred);
+    AscendC::Reg::Or(k1, (AscendC::Reg::RegTensor<uint32_t>&)o1, readyMask, pred);
+    AscendC::Reg::Or(k2, (AscendC::Reg::RegTensor<uint32_t>&)o2, readyMask, pred);
+    AscendC::Reg::Or(k3, (AscendC::Reg::RegTensor<uint32_t>&)o3, readyMask, pred);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k0, VF_LEN_B32, pred);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k1, VF_LEN_B32, pred);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k2, VF_LEN_B32, pred);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k3, VF_LEN_B32, pred);
+}
+
+// Store phase (CountT 64-bit): zero-extend the 16-bit lanes to 64-bit, tag and write out (one u64 per bin).
+template <typename CountT>
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void EncodeHistStoreB64(
+    __ubuf__ CountT* outPtr, AscendC::Reg::RegTensor<uint16_t>& o0, AscendC::Reg::RegTensor<uint16_t>& o1,
+    AscendC::Reg::RegTensor<uint16_t>& o2, AscendC::Reg::RegTensor<uint16_t>& o3,
+    AscendC::Reg::RegTensor<uint16_t>& zReg)
+{
+    AscendC::Reg::RegTensor<int64_t> readyMask;
+    AscendC::Reg::MaskReg pred = AscendC::Reg::CreateMask<int64_t>();
+    AscendC::Reg::Duplicate(readyMask, AGGREGATE_READY_MASK_B64, pred);
+    AscendC::Reg::RegTensor<uint16_t> p0;
+    AscendC::Reg::RegTensor<uint16_t> p1;
+    AscendC::Reg::RegTensor<uint16_t> p2;
+    AscendC::Reg::RegTensor<uint16_t> p3;
+    AscendC::Reg::RegTensor<uint16_t> p4;
+    AscendC::Reg::RegTensor<uint16_t> p5;
+    AscendC::Reg::RegTensor<uint16_t> p6;
+    AscendC::Reg::RegTensor<uint16_t> p7;
+    AscendC::Reg::Interleave(p0, p1, o0, zReg);
+    AscendC::Reg::Interleave(p2, p3, o1, zReg);
+    AscendC::Reg::Interleave(p4, p5, o2, zReg);
+    AscendC::Reg::Interleave(p6, p7, o3, zReg);
+    AscendC::Reg::RegTensor<int64_t> k0;
+    AscendC::Reg::RegTensor<int64_t> k1;
+    AscendC::Reg::RegTensor<int64_t> k2;
+    AscendC::Reg::RegTensor<int64_t> k3;
+    AscendC::Reg::RegTensor<int64_t> k4;
+    AscendC::Reg::RegTensor<int64_t> k5;
+    AscendC::Reg::RegTensor<int64_t> k6;
+    AscendC::Reg::RegTensor<int64_t> k7;
+    AscendC::Reg::Or(k0, (AscendC::Reg::RegTensor<int64_t>&)p0, readyMask, pred);
+    AscendC::Reg::Or(k1, (AscendC::Reg::RegTensor<int64_t>&)p1, readyMask, pred);
+    AscendC::Reg::Or(k2, (AscendC::Reg::RegTensor<int64_t>&)p2, readyMask, pred);
+    AscendC::Reg::Or(k3, (AscendC::Reg::RegTensor<int64_t>&)p3, readyMask, pred);
+    AscendC::Reg::Or(k4, (AscendC::Reg::RegTensor<int64_t>&)p4, readyMask, pred);
+    AscendC::Reg::Or(k5, (AscendC::Reg::RegTensor<int64_t>&)p5, readyMask, pred);
+    AscendC::Reg::Or(k6, (AscendC::Reg::RegTensor<int64_t>&)p6, readyMask, pred);
+    AscendC::Reg::Or(k7, (AscendC::Reg::RegTensor<int64_t>&)p7, readyMask, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k0, VF_LEN_B64, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k1, VF_LEN_B64, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k2, VF_LEN_B64, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k3, VF_LEN_B64, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k4, VF_LEN_B64, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k5, VF_LEN_B64, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k6, VF_LEN_B64, pred);
+    AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(outPtr, k7, VF_LEN_B64, pred);
+}
+
 template <typename CountT>
 __simd_vf__ __aicore__ inline void EncodeHistVF(__ubuf__ uint16_t* blockHistPtr, __ubuf__ CountT* blockHistWithFlagPtr)
 {
@@ -483,76 +591,56 @@ __simd_vf__ __aicore__ inline void EncodeHistVF(__ubuf__ uint16_t* blockHistPtr,
     AscendC::Reg::Interleave(lookaheadOutZero, lookaheadOutOne, blockHistZero, zeroVector);
     AscendC::Reg::Interleave(lookaheadOutTwo, lookaheadOutThree, blockHistOne, zeroVector);
     if constexpr (AscendC::IsSameType<CountT, uint32_t>::value) {
-        AscendC::Reg::RegTensor<uint32_t> aggregateReadyMask;
-        AscendC::Reg::MaskReg predicateDefault = AscendC::Reg::CreateMask<uint32_t>();
-        AscendC::Reg::Duplicate(aggregateReadyMask, AGGREGATE_READY_MASK, predicateDefault);
-        AscendC::Reg::RegTensor<uint32_t> lookaheadOutZeroMask, lookaheadOutOneMask, lookaheadOutTwoMask,
-            lookaheadOutThreeMask;
-        AscendC::Reg::Or(lookaheadOutZeroMask, (AscendC::Reg::RegTensor<uint32_t>&)lookaheadOutZero, aggregateReadyMask,
-                         predicateDefault);
-        AscendC::Reg::Or(lookaheadOutOneMask, (AscendC::Reg::RegTensor<uint32_t>&)lookaheadOutOne, aggregateReadyMask,
-                         predicateDefault);
-        AscendC::Reg::Or(lookaheadOutTwoMask, (AscendC::Reg::RegTensor<uint32_t>&)lookaheadOutTwo, aggregateReadyMask,
-                         predicateDefault);
-        AscendC::Reg::Or(lookaheadOutThreeMask, (AscendC::Reg::RegTensor<uint32_t>&)lookaheadOutThree,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutZeroMask, VF_LEN_B32, predicateDefault);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutOneMask, VF_LEN_B32, predicateDefault);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutTwoMask, VF_LEN_B32, predicateDefault);
-        AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutThreeMask, VF_LEN_B32, predicateDefault);
+        EncodeHistStoreB32<CountT>(blockHistWithFlagPtr, lookaheadOutZero, lookaheadOutOne, lookaheadOutTwo,
+                                   lookaheadOutThree);
     } else {
-        AscendC::Reg::RegTensor<int64_t> aggregateReadyMask;
-        AscendC::Reg::MaskReg predicateDefault = AscendC::Reg::CreateMask<int64_t>();
-        AscendC::Reg::Duplicate(aggregateReadyMask, AGGREGATE_READY_MASK_B64, predicateDefault);
-        AscendC::Reg::RegTensor<uint16_t> lookaheadOutZeroB64A, lookaheadOutZeroB64B;
-        AscendC::Reg::RegTensor<uint16_t> lookaheadOutOneB64A, lookaheadOutOneB64B;
-        AscendC::Reg::RegTensor<uint16_t> lookaheadOutTwoB64A, lookaheadOutTwoB64B;
-        AscendC::Reg::RegTensor<uint16_t> lookaheadOutThreeB64A, lookaheadOutThreeB64B;
-        AscendC::Reg::Interleave(lookaheadOutZeroB64A, lookaheadOutZeroB64B, lookaheadOutZero, zeroVector);
-        AscendC::Reg::Interleave(lookaheadOutOneB64A, lookaheadOutOneB64B, lookaheadOutOne, zeroVector);
-        AscendC::Reg::Interleave(lookaheadOutTwoB64A, lookaheadOutTwoB64B, lookaheadOutTwo, zeroVector);
-        AscendC::Reg::Interleave(lookaheadOutThreeB64A, lookaheadOutThreeB64B, lookaheadOutThree, zeroVector);
-        AscendC::Reg::RegTensor<int64_t> lookaheadOutZeroMaskB64A, lookaheadOutZeroMaskB64B;
-        AscendC::Reg::RegTensor<int64_t> lookaheadOutOneMaskB64A, lookaheadOutOneMaskB64B;
-        AscendC::Reg::RegTensor<int64_t> lookaheadOutTwoMaskB64A, lookaheadOutTwoMaskB64B;
-        AscendC::Reg::RegTensor<int64_t> lookaheadOutThreeMaskB64A, lookaheadOutThreeMaskB64B;
-        AscendC::Reg::Or(lookaheadOutZeroMaskB64A, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutZeroB64A,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::Or(lookaheadOutZeroMaskB64B, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutZeroB64B,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::Or(lookaheadOutOneMaskB64A, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutOneB64A,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::Or(lookaheadOutOneMaskB64B, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutOneB64B,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::Or(lookaheadOutTwoMaskB64A, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutTwoB64A,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::Or(lookaheadOutTwoMaskB64B, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutTwoB64B,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::Or(lookaheadOutThreeMaskB64A, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutThreeB64A,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::Or(lookaheadOutThreeMaskB64B, (AscendC::Reg::RegTensor<int64_t>&)lookaheadOutThreeB64B,
-                         aggregateReadyMask, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutZeroMaskB64A, VF_LEN_B64, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutZeroMaskB64B, VF_LEN_B64, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutOneMaskB64A, VF_LEN_B64, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutOneMaskB64B, VF_LEN_B64, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutTwoMaskB64A, VF_LEN_B64, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutTwoMaskB64B, VF_LEN_B64, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutThreeMaskB64A, VF_LEN_B64, predicateDefault);
-        AscendC::Reg::StoreAlign<int64_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE>(
-            blockHistWithFlagPtr, lookaheadOutThreeMaskB64B, VF_LEN_B64, predicateDefault);
+        EncodeHistStoreB64<CountT>(blockHistWithFlagPtr, lookaheadOutZero, lookaheadOutOne, lookaheadOutTwo,
+                                   lookaheadOutThree, zeroVector);
     }
+}
+
+// Count this round's NOT_INIT / AGG_READY / PREFIX_READY hits per 32-bit lane and accumulate them.
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void LookbackAccumStateCounts(
+    AscendC::Reg::RegTensor<uint32_t>& stateBitValue, AscendC::Reg::MaskReg& selMask,
+    AscendC::Reg::RegTensor<uint32_t>& onesVec, AscendC::Reg::RegTensor<uint32_t>& zerosVec,
+    AscendC::Reg::RegTensor<uint32_t>& notInitCount, AscendC::Reg::RegTensor<uint32_t>& aggReadyCount,
+    AscendC::Reg::RegTensor<uint32_t>& prefixReadyCount)
+{
+    AscendC::Reg::MaskReg maskNotInit;
+    AscendC::Reg::RegTensor<uint32_t> maskNotInitCount;
+    AscendC::Reg::Compares<uint32_t, AscendC::CMPMODE::EQ>(maskNotInit, stateBitValue, NOT_INIT_MODE, selMask);
+    AscendC::Reg::Select(maskNotInitCount, onesVec, zerosVec, maskNotInit);
+    AscendC::Reg::Add(notInitCount, notInitCount, maskNotInitCount, maskNotInit);
+    AscendC::Reg::MaskReg maskAggReady;
+    AscendC::Reg::RegTensor<uint32_t> maskAggReadyCount;
+    AscendC::Reg::Compares<uint32_t, AscendC::CMPMODE::EQ>(maskAggReady, stateBitValue, AGG_READY_MODE, selMask);
+    AscendC::Reg::Select(maskAggReadyCount, onesVec, zerosVec, maskAggReady);
+    AscendC::Reg::Add(aggReadyCount, aggReadyCount, maskAggReadyCount, maskAggReady);
+    AscendC::Reg::MaskReg maskPrefixReady;
+    AscendC::Reg::RegTensor<uint32_t> maskPrefixReadyCount;
+    AscendC::Reg::Compares<uint32_t, AscendC::CMPMODE::EQ>(maskPrefixReady, stateBitValue, PREFIX_READY_MODE, selMask);
+    AscendC::Reg::Select(maskPrefixReadyCount, onesVec, zerosVec, maskPrefixReady);
+    AscendC::Reg::Add(prefixReadyCount, prefixReadyCount, maskPrefixReadyCount, maskPrefixReady);
+}
+
+// Reduce each state counter along lanes and store the first element into the flag area.
+__simd_callee__ __aicore__ inline __attribute__((always_inline)) void LookbackStoreStateCounts(
+    __ubuf__ uint32_t* flagPtr, AscendC::Reg::RegTensor<uint32_t>& notInitCount,
+    AscendC::Reg::RegTensor<uint32_t>& aggReadyCount, AscendC::Reg::RegTensor<uint32_t>& prefixReadyCount,
+    AscendC::Reg::MaskReg& maskB32)
+{
+    AscendC::Reg::Reduce<AscendC::Reg::ReduceType::SUM>(notInitCount, notInitCount, maskB32);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                             AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(flagPtr, notInitCount, HIST_MASK_OUT_LEN,
+                                                                              maskB32);
+    AscendC::Reg::Reduce<AscendC::Reg::ReduceType::SUM>(aggReadyCount, aggReadyCount, maskB32);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                             AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(flagPtr, aggReadyCount, HIST_MASK_OUT_LEN,
+                                                                              maskB32);
+    AscendC::Reg::Reduce<AscendC::Reg::ReduceType::SUM>(prefixReadyCount, prefixReadyCount, maskB32);
+    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
+                             AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(flagPtr, prefixReadyCount,
+                                                                              HIST_MASK_OUT_LEN, maskB32);
 }
 
 template <typename CountT>
@@ -587,35 +675,10 @@ __simd_vf__ __aicore__ inline void LookbackCheckStateVF(__ubuf__ CountT* tilePre
             AscendC::Reg::Pack(stateBitValue, stateTmp);
             pRegSelect = AscendC::Reg::CreateMask<uint32_t, AscendC::Reg::MaskPattern::H>();
         }
-        AscendC::Reg::MaskReg maskNotInit;
-        AscendC::Reg::RegTensor<uint32_t> maskNotInitCount;
-        AscendC::Reg::Compares<uint32_t, AscendC::CMPMODE::EQ>(maskNotInit, stateBitValue, NOT_INIT_MODE, pRegSelect);
-        AscendC::Reg::Select(maskNotInitCount, onesVector, zerosVector, maskNotInit);
-        AscendC::Reg::Add(notInitCount, notInitCount, maskNotInitCount, maskNotInit);
-        AscendC::Reg::MaskReg maskAggReady;
-        AscendC::Reg::RegTensor<uint32_t> maskAggReadyCount;
-        AscendC::Reg::Compares<uint32_t, AscendC::CMPMODE::EQ>(maskAggReady, stateBitValue, AGG_READY_MODE, pRegSelect);
-        AscendC::Reg::Select(maskAggReadyCount, onesVector, zerosVector, maskAggReady);
-        AscendC::Reg::Add(aggReadyCount, aggReadyCount, maskAggReadyCount, maskAggReady);
-        AscendC::Reg::MaskReg maskPrefixReady;
-        AscendC::Reg::RegTensor<uint32_t> maskPrefixReadyCount;
-        AscendC::Reg::Compares<uint32_t, AscendC::CMPMODE::EQ>(maskPrefixReady, stateBitValue, PREFIX_READY_MODE,
-                                                               pRegSelect);
-        AscendC::Reg::Select(maskPrefixReadyCount, onesVector, zerosVector, maskPrefixReady);
-        AscendC::Reg::Add(prefixReadyCount, prefixReadyCount, maskPrefixReadyCount, maskPrefixReady);
+        LookbackAccumStateCounts(stateBitValue, pRegSelect, onesVector, zerosVector, notInitCount, aggReadyCount,
+                                 prefixReadyCount);
     }
-    AscendC::Reg::Reduce<AscendC::Reg::ReduceType::SUM>(notInitCount, notInitCount, maskB32);
-    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
-                             AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(ubFlagTensorPtr, notInitCount,
-                                                                              HIST_MASK_OUT_LEN, maskB32);
-    AscendC::Reg::Reduce<AscendC::Reg::ReduceType::SUM>(aggReadyCount, aggReadyCount, maskB32);
-    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
-                             AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(ubFlagTensorPtr, aggReadyCount,
-                                                                              HIST_MASK_OUT_LEN, maskB32);
-    AscendC::Reg::Reduce<AscendC::Reg::ReduceType::SUM>(prefixReadyCount, prefixReadyCount, maskB32);
-    AscendC::Reg::StoreAlign<uint32_t, AscendC::Reg::PostLiteral::POST_MODE_UPDATE,
-                             AscendC::Reg::StoreDist::DIST_FIRST_ELEMENT_B32>(ubFlagTensorPtr, prefixReadyCount,
-                                                                              HIST_MASK_OUT_LEN, maskB32);
+    LookbackStoreStateCounts(ubFlagTensorPtr, notInitCount, aggReadyCount, prefixReadyCount, maskB32);
 }
 
 template <typename CountT>

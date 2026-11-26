@@ -28,6 +28,13 @@ using namespace AscendC;
 using namespace ge;
 
 namespace Mc2Tiling {
+// rail 窗口布局常量（host tiling 侧；与 kernel 侧 Mc2Kernel 常量口径一致）
+constexpr uint64_t WIN_CNT_SLOT_BYTES = Mc2Kernel::STATE_OFFSET; // WIN 计数槽步长（复用 32B 状态槽距）
+constexpr uint64_t WIN_CNT_PER_RANK = 8ULL;                      // 每 rank 计数区份数（groupSize=1 下限）
+constexpr int64_t RAIL_FAMILY_NUM = 2;                           // req / resp 两族份数
+constexpr uint32_t CORE_PART_RATIO_DEN = 5U;                     // S:F:O = 1:2:2 的总份数
+constexpr uint32_t FWD_RATIO_NUM = 2U;                           // F 组占比分子
+
 constexpr uint32_t COMM_CONTEXT_INDEX = 0U;
 constexpr uint32_t INDICES_INDEX = 1U;
 constexpr uint32_t LOCAL_STORAGE_ADDR_INDEX = 2U;
@@ -161,7 +168,7 @@ static ge::graphStatus CheckTensorDataType(const gert::TilingContext* context)
 /**
  * @brief 校验tensor维度
  */
-static ge::graphStatus CheckTensorDim(const gert::TilingContext* context, int64_t& numTokens)
+static ge::graphStatus CheckCommContextDim(const gert::TilingContext* context)
 {
     const char* nodeName = context->GetNodeName();
     // input dim check
@@ -181,6 +188,13 @@ static ge::graphStatus CheckTensorDim(const gert::TilingContext* context, int64_
                                               (std::string("dim0=") + std::to_string(commContextDim0)).c_str(), "> 0"),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckIndicesDim(const gert::TilingContext* context, int64_t& numTokens)
+{
+    const char* nodeName = context->GetNodeName();
+    // input dim check
     const gert::StorageShape* indicesShape = context->GetInputShape(INDICES_INDEX);
     OP_TILING_CHECK(indicesShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "indices"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(
@@ -197,6 +211,12 @@ static ge::graphStatus CheckTensorDim(const gert::TilingContext* context, int64_
         return ge::GRAPH_FAILED);
     OP_LOGD(nodeName, "indices dim0 (numTokens) = %ld", numTokens);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckFetchedDim(const gert::TilingContext* context, int64_t numTokens)
+{
+    const char* nodeName = context->GetNodeName();
     // output dim check
     const gert::StorageShape* fetchedShape = context->GetOutputShape(FETCHED_INDEX);
     OP_TILING_CHECK(fetchedShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "fetched"), return ge::GRAPH_FAILED);
@@ -216,6 +236,12 @@ static ge::graphStatus CheckTensorDim(const gert::TilingContext* context, int64_
                         (std::string("dim0 must equal numTokens=") + std::to_string(numTokens)).c_str()),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckLocalStorageAddrDim(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
     const gert::StorageShape* localStorageAddrShape = context->GetInputShape(LOCAL_STORAGE_ADDR_INDEX);
     if (localStorageAddrShape != nullptr) {
         OP_TILING_CHECK(localStorageAddrShape->GetStorageShape().GetDimNum() != DIM_ONE,
@@ -232,6 +258,22 @@ static ge::graphStatus CheckTensorDim(const gert::TilingContext* context, int64_
                 "dim0 must be 1."),
             return ge::GRAPH_FAILED);
     }
+
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckTensorDim(const gert::TilingContext* context, int64_t& numTokens)
+{
+    const char* nodeName = context->GetNodeName();
+
+    OP_TILING_CHECK(CheckCommContextDim(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckCommContextDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckIndicesDim(context, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckIndicesDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckFetchedDim(context, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckFetchedDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckLocalStorageAddrDim(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckLocalStorageAddrDim failed."), return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -273,7 +315,7 @@ static ge::graphStatus TilingCheckEngramFetch(const gert::TilingContext* context
     const char* nodeName = context->GetNodeName();
 
     OP_TILING_CHECK(CheckTensorPtrNullptr(context) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "params check nullptr failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "params check nullptr failed."), return ge::GRAPH_FAILED);
 
     OP_TILING_CHECK(
         CheckTensorDataType(context) != ge::GRAPH_SUCCESS,
@@ -345,9 +387,9 @@ static ge::graphStatus CheckAttrParams(const gert::TilingContext* context)
                     return ge::GRAPH_FAILED);
 
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK_INDEX);
-    OP_TILING_CHECK(*numEntriesPerRankPtr < 0 || *numEntriesPerRankPtr > INT32_MAX,
+    OP_TILING_CHECK(*numEntriesPerRankPtr <= 0 || *numEntriesPerRankPtr > INT32_MAX,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "num_entries_per_rank",
-                                              std::to_string(*numEntriesPerRankPtr).c_str(), "[0, INT32_MAX]"),
+                                              std::to_string(*numEntriesPerRankPtr).c_str(), "[1, INT32_MAX]"),
                     return ge::GRAPH_FAILED);
     OP_LOGD(nodeName, "num_entries_per_rank is %ld", *numEntriesPerRankPtr);
 
@@ -357,7 +399,7 @@ static ge::graphStatus CheckAttrParams(const gert::TilingContext* context)
 /**
  * @brief 校验训练场景的额外属性和输出shape
  */
-static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, int64_t numTokens)
+static ge::graphStatus CheckTrainingAttrs(const gert::TilingContext* context, int64_t numTokens)
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
@@ -383,6 +425,12 @@ static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, i
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "comm_buffer_size", std::to_string(*commBufferSizePtr).c_str(), "> 0"),
         return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckPermOutDim(const gert::TilingContext* context, int64_t numTokens)
+{
+    const char* nodeName = context->GetNodeName();
     const gert::StorageShape* permOutShape = context->GetOutputShape(PERM_OUT_INDEX);
     OP_TILING_CHECK(permOutShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "permOut"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(
@@ -398,6 +446,12 @@ static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, i
                         (std::string("dim0 must equal numTokens=") + std::to_string(numTokens)).c_str()),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckSendCountsOutDim(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
     const gert::StorageShape* sendCountsOutShape = context->GetOutputShape(SEND_COUNTS_OUT_INDEX);
     OP_TILING_CHECK(sendCountsOutShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "sendCountsOut"),
                     return ge::GRAPH_FAILED);
@@ -414,6 +468,12 @@ static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, i
             (std::string("dim0=") + std::to_string(sendCountsOutShape->GetStorageShape().GetDim(0))).c_str(), "> 0"),
         return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckRecvCountsOutDim(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
     const gert::StorageShape* recvCountsOutShape = context->GetOutputShape(RECV_COUNTS_OUT_INDEX);
     OP_TILING_CHECK(recvCountsOutShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "recvCountsOut"),
                     return ge::GRAPH_FAILED);
@@ -430,6 +490,12 @@ static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, i
             (std::string("dim0=") + std::to_string(recvCountsOutShape->GetStorageShape().GetDim(0))).c_str(), "> 0"),
         return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckRecvLocalEntryOutDim(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
     const gert::StorageShape* recvLocalEntryOutShape = context->GetOutputShape(RECV_LOCAL_ENTRY_OUT_INDEX);
     OP_TILING_CHECK(recvLocalEntryOutShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "recvLocalEntryOut"),
                     return ge::GRAPH_FAILED);
@@ -446,6 +512,12 @@ static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, i
                                   (std::string("dim0=") + std::to_string(recvLocalEntryDim0)).c_str(), ">= 0"),
         return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckNumRecvOutDim(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
     const gert::StorageShape* numRecvOutShape = context->GetOutputShape(NUM_RECV_OUT_INDEX);
     OP_TILING_CHECK(numRecvOutShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "numRecvOut"),
                     return ge::GRAPH_FAILED);
@@ -465,6 +537,26 @@ static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, i
     return ge::GRAPH_SUCCESS;
 }
 
+static ge::graphStatus CheckTrainingParams(const gert::TilingContext* context, int64_t numTokens)
+{
+    const char* nodeName = context->GetNodeName();
+
+    OP_TILING_CHECK(CheckTrainingAttrs(context, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckTrainingAttrs failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckPermOutDim(context, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckPermOutDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckSendCountsOutDim(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckSendCountsOutDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRecvCountsOutDim(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRecvCountsOutDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRecvLocalEntryOutDim(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRecvLocalEntryOutDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckNumRecvOutDim(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckNumRecvOutDim failed."), return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
 /**
  * @brief 校验所有属性
  */
@@ -473,10 +565,10 @@ static ge::graphStatus CheckAttrs(const gert::TilingContext* context)
     const char* nodeName = context->GetNodeName();
 
     OP_TILING_CHECK(CheckAttrPtrNullptr(context) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "attr params check nullptr failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "attr params check nullptr failed."), return ge::GRAPH_FAILED);
 
-    OP_TILING_CHECK(CheckAttrParams(context) != ge::GRAPH_SUCCESS, OP_LOGE(nodeName, "check attr params failed."),
-                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckAttrParams(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "check attr params failed."), return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -590,10 +682,10 @@ static ge::graphStatus CheckSfTensors(const gert::TilingContext* context, bool i
     int64_t fetchedSfDim1 = 0;
     OP_TILING_CHECK(
         CheckFetchedSf(nodeName, fetchedSfDesc, fetchedSfShape, numTokens, fetchedSfDim1) != ge::GRAPH_SUCCESS,
-        OP_LOGE(nodeName, "check fetchedSf failed."), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(nodeName, "check fetchedSf failed."), return ge::GRAPH_FAILED);
     if (isTraining) {
         OP_TILING_CHECK(CheckTrainingSfTable(nodeName, sfTableDesc, sfTableShape) != ge::GRAPH_SUCCESS,
-                        OP_LOGE(nodeName, "check training sfTable failed."), return ge::GRAPH_FAILED);
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "check training sfTable failed."), return ge::GRAPH_FAILED);
         return ge::GRAPH_SUCCESS;
     }
     OP_TILING_CHECK(
@@ -616,6 +708,7 @@ static ge::graphStatus SetPlatformInfo(gert::TilingContext* context, EngramFetch
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     uint32_t aivNum = ascendcPlatform.GetCoreNumAiv();
     uint32_t aicNum = ascendcPlatform.GetCoreNumAic();
+    OP_TILING_CHECK(aivNum == 0, OP_LOGE(nodeName, "aivNum must be > 0, got %u", aivNum), return ge::GRAPH_FAILED);
     uint32_t numBlocks = ascendcPlatform.CalcTschBlockDim(aivNum, 0, aivNum);
     context->SetBlockDim(numBlocks);
     tilingData.aivNum = aivNum;
@@ -641,10 +734,10 @@ static ge::graphStatus SetPlatformInfo(gert::TilingContext* context, EngramFetch
 }
 
 /**
- * @brief 设置tiling数据
+ * @brief 公共字段复位与 hiddenDim/hiddenBytes 落表
  */
-static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
-                                     int64_t numTokens, bool isTraining)
+static ge::graphStatus SetCommonTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
+                                           int64_t numTokens)
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
@@ -679,6 +772,14 @@ static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramF
                     OP_LOGE(nodeName, "hiddenBytes=%ld exceeds UINT32_MAX", tilingData.hiddenBytes),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief SF 行宽探测：fetchedSf 形状（numSfPacks）与 dtype（sfElemSize）
+ */
+static ge::graphStatus SetSfPacksTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData)
+{
     auto fetchedSfDesc = context->GetOutputDesc(FETCHED_SF_INDEX);
     if (fetchedSfDesc != nullptr) {
         const gert::StorageShape* fetchedSfShape = context->GetOutputShape(FETCHED_SF_INDEX);
@@ -688,6 +789,18 @@ static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramF
         ge::DataType sfDtype = fetchedSfDesc->GetDataType();
         tilingData.sfElemSize = ge::GetSizeByDataType(sfDtype);
     }
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief SF 行宽数值守卫（推理走 relay tile 预算、训练走 UINT32 对齐预算）
+ */
+static ge::graphStatus CheckSfRowSize(const gert::TilingContext* context, const EngramFetchTilingData& tilingData,
+                                      bool isTraining)
+{
+    const char* nodeName = context->GetNodeName();
+
     if (tilingData.numSfPacks != 0) {
         OP_TILING_CHECK(tilingData.numSfPacks < 0 || tilingData.sfElemSize <= 0 ||
                             tilingData.numSfPacks > INT64_MAX / tilingData.sfElemSize,
@@ -720,11 +833,22 @@ static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramF
         }
     }
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief 平台 UB 容量落表（训练态扣除 SortLib SIMT dcache 预留）
+ */
+static ge::graphStatus SetUbSizeTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
+                                           bool isTraining)
+{
+    const char* nodeName = context->GetNodeName();
     auto platformInfo = context->GetPlatformInfo();
     OPS_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
     uint64_t ubSize = 0;
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+    OP_TILING_CHECK(ubSize == 0, OP_LOGE(nodeName, "ubSize must be > 0"), return ge::GRAPH_FAILED);
     if (isTraining) {
         OP_TILING_CHECK(static_cast<int64_t>(ubSize) <= SIMT_DCACHE_SIZE,
                         OP_LOGE(nodeName, "ubSize(%llu) <= SIMT_DCACHE_SIZE(%lld)", ubSize, SIMT_DCACHE_SIZE),
@@ -733,69 +857,118 @@ static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramF
     }
     tilingData.ubSize = ubSize;
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief 训练态规模字段：rankSize/totalRecv/numMaxTokensPerRank/commBufferSize + WIN fixedSize 下限
+ */
+static ge::graphStatus SetTrainingTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData)
+{
+    const char* nodeName = context->GetNodeName();
+    auto attrs = context->GetAttrs();
+
+    auto permOutShape = context->GetOutputShape(PERM_OUT_INDEX);
+    auto sendCountsOutShape = context->GetOutputShape(SEND_COUNTS_OUT_INDEX);
+    auto recvLocalEntryOutShape = context->GetOutputShape(RECV_LOCAL_ENTRY_OUT_INDEX);
+    if (permOutShape != nullptr && sendCountsOutShape != nullptr) {
+        tilingData.rankSize = static_cast<uint32_t>(sendCountsOutShape->GetStorageShape().GetDim(0));
+    }
+    if (recvLocalEntryOutShape != nullptr) {
+        tilingData.totalRecv = recvLocalEntryOutShape->GetStorageShape().GetDim(0);
+    }
+    auto numMaxTokensPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_MAX_TOKENS_PER_RANK_INDEX);
+    if (numMaxTokensPerRankPtr != nullptr) {
+        tilingData.numMaxTokensPerRank = *numMaxTokensPerRankPtr;
+    }
+    auto commBufferSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_COMM_BUFFER_SIZE_INDEX);
+    if (commBufferSizePtr != nullptr) {
+        tilingData.commBufferSize = *commBufferSizePtr;
+    }
+
+    // 与 kernel InitWinLayout 的 fixedSize 公式同源：跨kernel保留区 2*nr*32 + indices 计数区
+    // 4*nr*32 + token 计数区 2*nr*32*groupSize（groupSize >= 1），下限取 groupSize=1 时的
+    // nr*32*8。commBufferSize 低于该下限时 kernel 侧 remaining=0、槽容量派生为 0，直接拒绝。
+    uint64_t winFixedSizeLower = static_cast<uint64_t>(tilingData.rankSize) * WIN_CNT_SLOT_BYTES * WIN_CNT_PER_RANK;
+    OP_TILING_CHECK(tilingData.commBufferSize < static_cast<int64_t>(winFixedSizeLower),
+                    OP_LOGE(nodeName,
+                            "commBufferSize(%ld) is smaller than window fixedSize lower bound(%llu), "
+                            "kernel would derive zero slot capacity",
+                            tilingData.commBufferSize, static_cast<unsigned long long>(winFixedSizeLower)),
+                    return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief 训练态 SortLib 参数：numTileData/tileCount/tmpUbSize（UB 预算内取整）
+ */
+static ge::graphStatus SetTrainingSortLibTilingData(const gert::TilingContext* context,
+                                                    EngramFetchTilingData& tilingData)
+{
+    const char* nodeName = context->GetNodeName();
+
+    // SortLib 参数：请求方对输入 indices 全局排序（key = entry id，规模 numTokens）
+    constexpr uint64_t kSortLibFixedBytes = 5120U;
+    // sortlib 内部 histUb/histCumsumUb 队列按 256 bin × uint16 = 512B 使用
+    // 而 outValueQueue_ 仅按 numTileData 字节分配，故 numTileData 下界为 512
+    constexpr uint64_t kMinTileElems = 512U;
+    constexpr uint64_t kBytesPerElem = 21U;
+    uint64_t budget = tilingData.ubSize;
+    OP_TILING_CHECK(budget < kSortLibFixedBytes + kMinTileElems * kBytesPerElem,
+                    OP_LOGE(nodeName, "SortLib UB budget too small: ubSize=%llu, need>=%llu",
+                            static_cast<unsigned long long>(budget),
+                            static_cast<unsigned long long>(kSortLibFixedBytes + kMinTileElems * kBytesPerElem)),
+                    return ge::GRAPH_FAILED);
+    int64_t numTokensI64 = tilingData.numTokens;
+    int64_t aivNumI64 = static_cast<int64_t>(tilingData.aivNum);
+    uint32_t numTile = static_cast<uint32_t>((numTokensI64 + aivNumI64 - 1) / aivNumI64);
+    uint32_t ubCap = static_cast<uint32_t>((budget - kSortLibFixedBytes) / kBytesPerElem);
+    if (numTile < kMinTileElems) {
+        numTile = kMinTileElems;
+    }
+    if (numTile > ubCap) {
+        numTile = ubCap;
+    }
+    tilingData.sortNumTileData = numTile;
+    tilingData.sortTileCount =
+        static_cast<uint32_t>((numTokensI64 + static_cast<int64_t>(numTile) - 1) / static_cast<int64_t>(numTile));
+    constexpr uint32_t kSortTmpHeadBytes = 512U;
+    constexpr uint32_t kSortTmpTailBytes = 256U;
+    constexpr uint32_t kSortTmpBytesPerGroup = 7U;
+    constexpr uint32_t kSortTmpGroupTiles = 32U;
+    uint32_t roundTile = (numTile + kSortTmpGroupTiles - 1U) / kSortTmpGroupTiles * kSortTmpGroupTiles;
+    tilingData.sortTmpUbSize = kSortTmpHeadBytes + kSortTmpBytesPerGroup * roundTile + kSortTmpTailBytes;
+    OP_LOGD(nodeName, "SortLib params: numTile=%u tileCount=%u tmpUb=%u budget=%llu", tilingData.sortNumTileData,
+            tilingData.sortTileCount, tilingData.sortTmpUbSize, static_cast<unsigned long long>(budget));
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief 设置tiling数据
+ */
+static ge::graphStatus SetTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
+                                     int64_t numTokens, bool isTraining)
+{
+    const char* nodeName = context->GetNodeName();
+
+    OP_TILING_CHECK(SetCommonTilingData(context, tilingData, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SetCommonTilingData failed."), return ge::GRAPH_FAILED);
+
+    OP_TILING_CHECK(SetSfPacksTilingData(context, tilingData) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SetSfPacksTilingData failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckSfRowSize(context, tilingData, isTraining) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckSfRowSize failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(SetUbSizeTilingData(context, tilingData, isTraining) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SetUbSizeTilingData failed."), return ge::GRAPH_FAILED);
+
     if (isTraining) {
-        auto permOutShape = context->GetOutputShape(PERM_OUT_INDEX);
-        auto sendCountsOutShape = context->GetOutputShape(SEND_COUNTS_OUT_INDEX);
-        auto recvLocalEntryOutShape = context->GetOutputShape(RECV_LOCAL_ENTRY_OUT_INDEX);
-        if (permOutShape != nullptr && sendCountsOutShape != nullptr) {
-            tilingData.rankSize = static_cast<uint32_t>(sendCountsOutShape->GetStorageShape().GetDim(0));
-        }
-        if (recvLocalEntryOutShape != nullptr) {
-            tilingData.totalRecv = recvLocalEntryOutShape->GetStorageShape().GetDim(0);
-        }
-        auto numMaxTokensPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_MAX_TOKENS_PER_RANK_INDEX);
-        if (numMaxTokensPerRankPtr != nullptr) {
-            tilingData.numMaxTokensPerRank = *numMaxTokensPerRankPtr;
-        }
-        auto commBufferSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_COMM_BUFFER_SIZE_INDEX);
-        if (commBufferSizePtr != nullptr) {
-            tilingData.commBufferSize = *commBufferSizePtr;
-        }
-
-        // 与 kernel InitWinLayout 的 fixedSize 公式同源：跨kernel保留区 2*nr*32 + indices 计数区
-        // 4*nr*32 + token 计数区 2*nr*32*groupSize（groupSize >= 1），下限取 groupSize=1 时的
-        // nr*32*8。commBufferSize 低于该下限时 kernel 侧 remaining=0、槽容量派生为 0，直接拒绝。
-        uint64_t winFixedSizeLower = static_cast<uint64_t>(tilingData.rankSize) * 32ULL * 8ULL;
-        OP_TILING_CHECK(tilingData.commBufferSize < static_cast<int64_t>(winFixedSizeLower),
-                        OP_LOGE(nodeName,
-                                "commBufferSize(%ld) is smaller than window fixedSize lower bound(%llu), "
-                                "kernel would derive zero slot capacity",
-                                tilingData.commBufferSize, static_cast<unsigned long long>(winFixedSizeLower)),
+        OP_TILING_CHECK(SetTrainingTilingData(context, tilingData) != ge::GRAPH_SUCCESS,
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "SetTrainingTilingData failed."), return ge::GRAPH_FAILED);
+        OP_TILING_CHECK(SetTrainingSortLibTilingData(context, tilingData) != ge::GRAPH_SUCCESS,
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "SetTrainingSortLibTilingData failed."),
                         return ge::GRAPH_FAILED);
-
-        // SortLib 参数：请求方对输入 indices 全局排序（key = entry id，规模 numTokens）
-        constexpr uint64_t kSortLibFixedBytes = 5120U;
-        // sortlib 内部 histUb/histCumsumUb 队列按 256 bin × uint16 = 512B 使用
-        // 而 outValueQueue_ 仅按 numTileData 字节分配，故 numTileData 下界为 512
-        constexpr uint64_t kMinTileElems = 512U;
-        constexpr uint64_t kBytesPerElem = 21U;
-        uint64_t budget = tilingData.ubSize;
-        OP_TILING_CHECK(budget < kSortLibFixedBytes + kMinTileElems * kBytesPerElem,
-                        OP_LOGE(nodeName, "SortLib UB budget too small: ubSize=%llu, need>=%llu",
-                                static_cast<unsigned long long>(budget),
-                                static_cast<unsigned long long>(kSortLibFixedBytes + kMinTileElems * kBytesPerElem)),
-                        return ge::GRAPH_FAILED);
-        int64_t numTokensI64 = tilingData.numTokens;
-        int64_t aivNumI64 = static_cast<int64_t>(tilingData.aivNum);
-        uint32_t numTile = static_cast<uint32_t>((numTokensI64 + aivNumI64 - 1) / aivNumI64);
-        uint32_t ubCap = static_cast<uint32_t>((budget - kSortLibFixedBytes) / kBytesPerElem);
-        if (numTile < kMinTileElems) {
-            numTile = kMinTileElems;
-        }
-        if (numTile > ubCap) {
-            numTile = ubCap;
-        }
-        tilingData.sortNumTileData = numTile;
-        tilingData.sortTileCount =
-            static_cast<uint32_t>((numTokensI64 + static_cast<int64_t>(numTile) - 1) / static_cast<int64_t>(numTile));
-        constexpr uint32_t kSortTmpHeadBytes = 512U;
-        constexpr uint32_t kSortTmpTailBytes = 256U;
-        constexpr uint32_t kSortTmpBytesPerGroup = 7U;
-        constexpr uint32_t kSortTmpGroupTiles = 32U;
-        uint32_t roundTile = (numTile + kSortTmpGroupTiles - 1U) / kSortTmpGroupTiles * kSortTmpGroupTiles;
-        tilingData.sortTmpUbSize = kSortTmpHeadBytes + kSortTmpBytesPerGroup * roundTile + kSortTmpTailBytes;
-        OP_LOGD(nodeName, "SortLib params: numTile=%u tileCount=%u tmpUb=%u budget=%llu", tilingData.sortNumTileData,
-                tilingData.sortTileCount, tilingData.sortTmpUbSize, static_cast<unsigned long long>(budget));
     }
 
     OP_LOGD(nodeName,
@@ -834,6 +1007,81 @@ static void SetTilingKey(gert::TilingContext* context, bool isTraining, int64_t 
 }
 
 /**
+ * @brief 训练态 staging 段 workspace：displs/桶/计数/行暂存，并做数值安全防护
+ */
+static ge::graphStatus CalcTrainingStagingWorkSpace(const gert::TilingContext* context,
+                                                    const EngramFetchTilingData& tilingData, int64_t& wsBeforeSort)
+{
+    const char* nodeName = context->GetNodeName();
+    int64_t numRanks = static_cast<int64_t>(tilingData.rankSize);
+    int64_t numTokens = tilingData.numTokens;
+    int64_t aivNum = static_cast<int64_t>(tilingData.aivNum);
+    OP_TILING_CHECK(aivNum <= 0,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "aivNum", std::to_string(aivNum).c_str(),
+                                                          "The value of aivNum must be positive"),
+                    return ge::GRAPH_FAILED);
+
+    int64_t wsSdispls = AlignTo(numRanks * static_cast<int64_t>(sizeof(int64_t)), UB_ALIGN);
+    int64_t wsRdispls = AlignTo(numRanks * static_cast<int64_t>(sizeof(int64_t)), UB_ALIGN);
+    int64_t wsSortedIndices = AlignTo(numTokens * static_cast<int64_t>(sizeof(int32_t)), UB_ALIGN);
+    int64_t wsCounterScratch = aivNum * UB_ALIGN;
+    int64_t wsPartialCounts = aivNum * numRanks * static_cast<int64_t>(sizeof(int32_t));
+    int64_t wsIndicesReadyFlag = AlignTo(numRanks * static_cast<int64_t>(sizeof(int32_t)), UB_ALIGN);
+    // 数值安全防护：sf 分量非负、乘法不溢出，numSfPacks=0 为无 sf 合法场景
+    OP_TILING_CHECK(tilingData.numSfPacks < 0 || tilingData.sfElemSize < 0 ||
+                        (tilingData.sfElemSize > 0 && tilingData.numSfPacks > INT64_MAX / tilingData.sfElemSize),
+                    OP_LOGE(nodeName, "invalid sf dims: numSfPacks=%ld, sfElemSize=%ld", tilingData.numSfPacks,
+                            tilingData.sfElemSize),
+                    return ge::GRAPH_FAILED);
+    int64_t sfBytes = static_cast<int64_t>(tilingData.numSfPacks) * static_cast<int64_t>(tilingData.sfElemSize);
+    int64_t rowStride = tilingData.hiddenBytes + sfBytes;
+    OP_TILING_CHECK(
+        tilingData.totalRecv < 0 || rowStride <= 0 || tilingData.totalRecv > INT64_MAX / rowStride,
+        OP_LOGE(nodeName, "token staging size overflow: totalRecv=%ld, rowStride=%ld", tilingData.totalRecv, rowStride),
+        return ge::GRAPH_FAILED);
+    int64_t wsTokenStaging = tilingData.totalRecv * rowStride;
+    OP_LOGD(nodeName, "token staging bytes = %ld, totalRecv=%ld, rowStride=%ld", wsTokenStaging, tilingData.totalRecv,
+            rowStride);
+
+    wsBeforeSort = wsSdispls + wsRdispls + wsSortedIndices + wsCounterScratch + wsPartialCounts + wsIndicesReadyFlag +
+                   wsTokenStaging;
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief 训练态 SortLib 六段 workspace（与 kernel 侧 InitWorkspaceLayout 逐段一致）
+ * @note 前段尺寸不保证 32B 对齐，与 kernel 一致在排序区前插入对齐 padding
+ */
+static ge::graphStatus CalcTrainingSortWorkSpace(const gert::TilingContext* context,
+                                                 const EngramFetchTilingData& tilingData, int64_t wsBeforeSort,
+                                                 int64_t& wsSortTotal)
+{
+    const char* nodeName = context->GetNodeName();
+    int64_t wsSortPad = AlignTo(wsBeforeSort, UB_ALIGN) - wsBeforeSort;
+    int64_t numTokensI64 = tilingData.numTokens;
+    OP_TILING_CHECK(numTokensI64 > INT64_MAX / static_cast<int64_t>(sizeof(int32_t)),
+                    OP_LOGE(nodeName, "sort array overflow: numTokens=%lld", numTokensI64), return ge::GRAPH_FAILED);
+    constexpr int64_t kRadixRounds = 4;
+    constexpr int64_t kRadixBinNum = 256;      // radix 桶数（与 grad 侧同名同值，workspace 契约对齐）
+    constexpr int64_t kRadixCountBytes = 4;    // 每桶计数（int32）
+    constexpr int64_t kRadixHistArrayNum = 2;  // 计数表份数
+    constexpr int64_t kRadixHistElemBytes = 2; // 计数表元素字节（uint16）
+    int64_t slSeg0 = AlignTo(kRadixBinNum * kRadixRounds * kRadixCountBytes, UB_ALIGN);
+    int64_t slSeg1 = AlignTo(
+        static_cast<int64_t>(tilingData.sortTileCount) * kRadixBinNum * kRadixRounds * kRadixCountBytes, UB_ALIGN);
+    int64_t slSeg2 = AlignTo(numTokensI64 * kRadixCountBytes, UB_ALIGN);
+    int64_t slSeg3 =
+        kRadixHistArrayNum *
+        AlignTo(static_cast<int64_t>(tilingData.sortTileCount) * kRadixBinNum * kRadixHistElemBytes, UB_ALIGN);
+    int64_t slSeg4 = AlignTo(static_cast<int64_t>(tilingData.sortTileCount) * tilingData.sortNumTileData, UB_ALIGN);
+    int64_t slSeg5 = AlignTo(numTokensI64 * kRadixCountBytes, UB_ALIGN);
+    wsSortTotal = wsSortPad + slSeg0 + slSeg1 + slSeg2 + slSeg3 + slSeg4 + slSeg5;
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
  * @brief 设置workspace大小
  */
 static ge::graphStatus SetWorkSpace(gert::TilingContext* context, const EngramFetchTilingData& tilingData,
@@ -844,53 +1092,13 @@ static ge::graphStatus SetWorkSpace(gert::TilingContext* context, const EngramFe
     OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE(nodeName, "workSpaces is nullptr."), return ge::GRAPH_FAILED);
 
     if (isTraining) {
-        int64_t numRanks = static_cast<int64_t>(tilingData.rankSize);
-        int64_t numTokens = tilingData.numTokens;
-        int64_t aivNum = static_cast<int64_t>(tilingData.aivNum);
-        OP_TILING_CHECK(aivNum <= 0,
-                        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "aivNum", std::to_string(aivNum).c_str(),
-                                                              "The value of aivNum must be positive"),
+        int64_t wsBeforeSort = 0;
+        int64_t wsSortTotal = 0;
+        OP_TILING_CHECK(CalcTrainingStagingWorkSpace(context, tilingData, wsBeforeSort) != ge::GRAPH_SUCCESS,
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "CalcTrainingStagingWorkSpace failed."),
                         return ge::GRAPH_FAILED);
-
-        int64_t wsSdispls = AlignTo(numRanks * static_cast<int64_t>(sizeof(int64_t)), UB_ALIGN);
-        int64_t wsRdispls = AlignTo(numRanks * static_cast<int64_t>(sizeof(int64_t)), UB_ALIGN);
-        int64_t wsSortedIndices = AlignTo(numTokens * static_cast<int64_t>(sizeof(int32_t)), UB_ALIGN);
-        int64_t wsCounterScratch = aivNum * UB_ALIGN;
-        int64_t wsPartialCounts = aivNum * numRanks * static_cast<int64_t>(sizeof(int32_t));
-        int64_t wsIndicesReadyFlag = AlignTo(numRanks * static_cast<int64_t>(sizeof(int32_t)), UB_ALIGN);
-        // 数值安全防护：sf 分量非负、乘法不溢出，numSfPacks=0 为无 sf 合法场景
-        OP_TILING_CHECK(tilingData.numSfPacks < 0 || tilingData.sfElemSize < 0 ||
-                            (tilingData.sfElemSize > 0 && tilingData.numSfPacks > INT64_MAX / tilingData.sfElemSize),
-                        OP_LOGE(nodeName, "invalid sf dims: numSfPacks=%ld, sfElemSize=%ld", tilingData.numSfPacks,
-                                tilingData.sfElemSize),
-                        return ge::GRAPH_FAILED);
-        int64_t sfBytes = static_cast<int64_t>(tilingData.numSfPacks) * static_cast<int64_t>(tilingData.sfElemSize);
-        int64_t rowStride = tilingData.hiddenBytes + sfBytes;
-        OP_TILING_CHECK(tilingData.totalRecv < 0 || rowStride <= 0 || tilingData.totalRecv > INT64_MAX / rowStride,
-                        OP_LOGE(nodeName, "token staging size overflow: totalRecv=%ld, rowStride=%ld",
-                                tilingData.totalRecv, rowStride),
-                        return ge::GRAPH_FAILED);
-        int64_t wsTokenStaging = tilingData.totalRecv * rowStride;
-        OP_LOGD(nodeName, "token staging bytes = %ld, totalRecv=%ld, rowStride=%ld", wsTokenStaging,
-                tilingData.totalRecv, rowStride);
-
-        // SortLib 六段 workspace，与 kernel 侧 InitWorkspaceLayout 逐段一致（按 numTokens 规模）；
-        // 前段尺寸不保证 32B 对齐，与 kernel 一致在排序区前插入对齐 padding
-        int64_t wsBeforeSort = wsSdispls + wsRdispls + wsSortedIndices + wsCounterScratch + wsPartialCounts +
-                               wsIndicesReadyFlag + wsTokenStaging;
-        int64_t wsSortPad = AlignTo(wsBeforeSort, UB_ALIGN) - wsBeforeSort;
-        int64_t numTokensI64 = tilingData.numTokens;
-        OP_TILING_CHECK(numTokensI64 > INT64_MAX / static_cast<int64_t>(sizeof(int32_t)),
-                        OP_LOGE(nodeName, "sort array overflow: numTokens=%lld", numTokensI64),
-                        return ge::GRAPH_FAILED);
-        constexpr int64_t kRadixRounds = 4;
-        int64_t slSeg0 = AlignTo(256LL * kRadixRounds * 4LL, UB_ALIGN);
-        int64_t slSeg1 = AlignTo(static_cast<int64_t>(tilingData.sortTileCount) * 256LL * kRadixRounds * 4LL, UB_ALIGN);
-        int64_t slSeg2 = AlignTo(numTokensI64 * 4LL, UB_ALIGN);
-        int64_t slSeg3 = 2LL * AlignTo(static_cast<int64_t>(tilingData.sortTileCount) * 256LL * 2LL, UB_ALIGN);
-        int64_t slSeg4 = AlignTo(static_cast<int64_t>(tilingData.sortTileCount) * tilingData.sortNumTileData, UB_ALIGN);
-        int64_t slSeg5 = AlignTo(numTokensI64 * 4LL, UB_ALIGN);
-        int64_t wsSortTotal = wsSortPad + slSeg0 + slSeg1 + slSeg2 + slSeg3 + slSeg4 + slSeg5;
+        OP_TILING_CHECK(CalcTrainingSortWorkSpace(context, tilingData, wsBeforeSort, wsSortTotal) != ge::GRAPH_SUCCESS,
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "CalcTrainingSortWorkSpace failed."), return ge::GRAPH_FAILED);
 
         int64_t wsTotal = wsBeforeSort + wsSortTotal;
         wsTotal = ((wsTotal + WORKSPACE_ALIGN_2MB - 1) / WORKSPACE_ALIGN_2MB) * WORKSPACE_ALIGN_2MB;
@@ -952,12 +1160,12 @@ static RailTopology DeriveRailTopology(uint32_t ranksPerSupernode, uint32_t worl
     topo.supernodeCnt = (ranksPerSupernode > 0U) ? world / ranksPerSupernode : 0U;
     topo.railCnt = (topo.supernodeCnt > 0U) ? topo.supernodeCnt - 1U : 0U;
     topo.areas = static_cast<uint64_t>(topo.supernodeCnt) + ranksPerSupernode;
-    topo.winHead = (topo.areas + 1ULL) * 32ULL;
+    topo.winHead = (topo.areas + 1ULL) * static_cast<uint64_t>(Mc2Kernel::STATE_OFFSET);
     return topo;
 }
 
-/// @brief 分轨段输入/输出 dtype/format 校验（commContext 平铺 rail int32、计数输出 int32 等）
-static ge::graphStatus CheckRailTensorDataType(const gert::TilingContext* context)
+/// @brief commContext dtype/format/平铺元素数校验（分轨硬校验：头部标量 + node 表两张）
+static ge::graphStatus CheckRailCommDtype(const gert::TilingContext* context)
 {
     const char* nodeName = context->GetNodeName();
 
@@ -983,6 +1191,14 @@ static ge::graphStatus CheckRailTensorDataType(const gert::TilingContext* contex
                         (std::string("== ") + std::to_string(Mc2Kernel::CTX_RAIL_ELEMS) + " (flat rail ctx)").c_str()),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief indices dtype 校验（int32）
+static ge::graphStatus CheckRailIndicesDtype(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
+
     auto indicesDesc = context->GetInputDesc(IN_INDICES);
     OP_TILING_CHECK(indicesDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "indices"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(indicesDesc->GetDataType() != ge::DT_INT32,
@@ -990,6 +1206,14 @@ static ge::graphStatus CheckRailTensorDataType(const gert::TilingContext* contex
                                                           Ops::Base::ToString(indicesDesc->GetDataType()).c_str(),
                                                           "The dtype must be DT_INT32."),
                     return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief localStorageAddr dtype 校验（1 元 int64 地址张量）
+static ge::graphStatus CheckRailLocalStorageDtype(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
 
     auto storageDesc = context->GetInputDesc(IN_LOCAL_STORAGE_ADDR);
     OP_TILING_CHECK(storageDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "localStorageAddr"),
@@ -1000,6 +1224,14 @@ static ge::graphStatus CheckRailTensorDataType(const gert::TilingContext* contex
                         "The dtype must be DT_INT64 (1-element device-address tensor)."),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief fetched dtype 校验（BF16/FP16/FLOAT/FLOAT8 族）
+static ge::graphStatus CheckRailFetchedDtype(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
+
     auto fetchedDesc = context->GetOutputDesc(OUT_FETCHED);
     OP_TILING_CHECK(fetchedDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "fetched"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(!IsContains(FETCH_DTYPE_LIST, fetchedDesc->GetDataType()),
@@ -1008,7 +1240,14 @@ static ge::graphStatus CheckRailTensorDataType(const gert::TilingContext* contex
                         "The dtype of fetched must be BF16/FP16/FLOAT/FLOAT8_E4M3FN/FLOAT8_E5M2."),
                     return ge::GRAPH_FAILED);
 
-    // 四件计数输出 + num_recv 全部 int32 ND
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 四件计数输出 + num_recv 的 dtype 校验（全部 int32 ND）
+static ge::graphStatus CheckRailInt32OutputDtype(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
+
     const char* int32Outputs[] = {"perm", "sendCountsOut", "recvCountsOut", "recvLocalEntryOut", "numRecvOut"};
     const uint32_t int32Idx[] = {OUT_PERM, OUT_SEND_COUNTS, OUT_RECV_COUNTS, OUT_RECV_LOCAL_ENTRY, OUT_NUM_RECV};
     for (size_t i = 0; i < sizeof(int32Idx) / sizeof(int32Idx[0]); i++) {
@@ -1021,15 +1260,33 @@ static ge::graphStatus CheckRailTensorDataType(const gert::TilingContext* contex
                                                               "The dtype must be DT_INT32."),
                         return ge::GRAPH_FAILED);
     }
+
     return ge::GRAPH_SUCCESS;
 }
 
-/// @brief 分轨段 shape 校验并提取关键规模（numTokens/worldSize/totalRecv/hiddenDim/numSfPacks）
-static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, int64_t& numTokens, uint32_t& worldSize,
-                                          int64_t& totalRecv, int64_t& hiddenDim, int64_t& numSfPacks)
+/// @brief 分轨段输入/输出 dtype/format 校验（commContext 平铺 rail int32、计数输出 int32 等）
+static ge::graphStatus CheckRailTensorDataType(const gert::TilingContext* context)
 {
     const char* nodeName = context->GetNodeName();
-    numSfPacks = 0;
+
+    OP_TILING_CHECK(CheckRailCommDtype(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailCommDtype failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailIndicesDtype(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailIndicesDtype failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailLocalStorageDtype(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailLocalStorageDtype failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailFetchedDtype(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailFetchedDtype failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailInt32OutputDtype(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailInt32OutputDtype failed."), return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief indices 维度校验并提取 numTokens
+static ge::graphStatus CheckRailIndicesDim(const gert::TilingContext* context, int64_t& numTokens)
+{
+    const char* nodeName = context->GetNodeName();
 
     const gert::StorageShape* indicesShape = context->GetInputShape(IN_INDICES);
     OP_TILING_CHECK(indicesShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "indices"), return ge::GRAPH_FAILED);
@@ -1044,6 +1301,14 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "indices",
                                               (std::string("dim0=") + std::to_string(numTokens)).c_str(), ">= 0"),
                     return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief fetched 维度校验并提取 hiddenDim
+static ge::graphStatus CheckRailFetchedDim(const gert::TilingContext* context, int64_t numTokens, int64_t& hiddenDim)
+{
+    const char* nodeName = context->GetNodeName();
 
     const gert::StorageShape* fetchedShape = context->GetOutputShape(OUT_FETCHED);
     OP_TILING_CHECK(fetchedShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "fetched"), return ge::GRAPH_FAILED);
@@ -1062,6 +1327,14 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
                                               (std::string("dim1=") + std::to_string(hiddenDim)).c_str(), "> 0"),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief permOut 维度校验（dim0 == numTokens）
+static ge::graphStatus CheckRailPermOutDim(const gert::TilingContext* context, int64_t numTokens)
+{
+    const char* nodeName = context->GetNodeName();
+
     const gert::StorageShape* permShape = context->GetOutputShape(OUT_PERM);
     OP_TILING_CHECK(permShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "permOut"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(
@@ -1072,7 +1345,15 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
             (std::string("dim0 must equal indices dim0=") + std::to_string(numTokens)).c_str()),
         return ge::GRAPH_FAILED);
 
-    // 分轨世界规则：world = send_counts_out.dim0/8（32B 槽距；反向读同一张张量同口径）
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 分轨世界规则：world = send_counts_out.dim0/8（32B 槽距；反向读同一张张量同口径）
+static ge::graphStatus CheckRailWorldFromSendCounts(const gert::TilingContext* context, uint32_t& worldSize,
+                                                    int64_t& world)
+{
+    const char* nodeName = context->GetNodeName();
+
     const gert::StorageShape* sendCountsShape = context->GetOutputShape(OUT_SEND_COUNTS);
     OP_TILING_CHECK(sendCountsShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "sendCountsOut"),
                     return ge::GRAPH_FAILED);
@@ -1087,12 +1368,20 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "sendCountsOut.dim0", std::to_string(sendCountsDim0).c_str(),
                                               "must be positive multiple of 8"),
                     return ge::GRAPH_FAILED);
-    int64_t world = sendCountsDim0 / SEND_COUNTS_ALIGN_FACTOR;
+    world = sendCountsDim0 / SEND_COUNTS_ALIGN_FACTOR;
     OP_TILING_CHECK(world <= 0,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "world", std::to_string(world).c_str(),
                                               "must be positive (send_counts_out.dim0/8)"),
                     return ge::GRAPH_FAILED);
     worldSize = static_cast<uint32_t>(world);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief recvCountsOut 维度校验（dim0 == world）
+static ge::graphStatus CheckRailRecvCountsDim(const gert::TilingContext* context, int64_t world)
+{
+    const char* nodeName = context->GetNodeName();
 
     const gert::StorageShape* recvCountsShape = context->GetOutputShape(OUT_RECV_COUNTS);
     OP_TILING_CHECK(recvCountsShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "recvCountsOut"),
@@ -1104,6 +1393,14 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
                         (std::string("dim0=") + std::to_string(recvCountsShape->GetStorageShape().GetDim(0))).c_str(),
                         (std::string("dim0 must equal world=") + std::to_string(world)).c_str()),
                     return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief recvLocalEntryOut 维度校验并提取 totalRecv
+static ge::graphStatus CheckRailRecvLocalEntryDim(const gert::TilingContext* context, int64_t& totalRecv)
+{
+    const char* nodeName = context->GetNodeName();
 
     const gert::StorageShape* recvLocalEntryShape = context->GetOutputShape(OUT_RECV_LOCAL_ENTRY);
     OP_TILING_CHECK(recvLocalEntryShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "recvLocalEntryOut"),
@@ -1120,6 +1417,14 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
                                               (std::string("dim0=") + std::to_string(totalRecv)).c_str(), ">= 0"),
                     return ge::GRAPH_FAILED);
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief numRecvOut 维度校验（1D 单元素）
+static ge::graphStatus CheckRailNumRecvDim(const gert::TilingContext* context)
+{
+    const char* nodeName = context->GetNodeName();
+
     const gert::StorageShape* numRecvShape = context->GetOutputShape(OUT_NUM_RECV);
     OP_TILING_CHECK(numRecvShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "numRecvOut"),
                     return ge::GRAPH_FAILED);
@@ -1131,7 +1436,14 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
             "dim0 must be 1."),
         return ge::GRAPH_FAILED);
 
-    // SF 成对校验：fetchedSf 2D (T, sfPacks) 与 sfTable 1 元 int64 地址张量成对出现
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief SF 成对校验：fetchedSf 2D (T, sfPacks) 与 sfTable 1 元 int64 地址张量成对出现
+static ge::graphStatus CheckRailSfPairDim(const gert::TilingContext* context, int64_t numTokens, int64_t& numSfPacks)
+{
+    const char* nodeName = context->GetNodeName();
+
     auto fetchedSfDesc = context->GetOutputDesc(OUT_FETCHED_SF);
     auto fetchedSfShape = context->GetOutputShape(OUT_FETCHED_SF);
     auto sfTableDesc = context->GetInputDesc(IN_SF_TABLE);
@@ -1167,12 +1479,40 @@ static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, in
                             "must be a 1-element DT_INT64 device-address tensor when fetchedSf is provided"),
                         return ge::GRAPH_FAILED);
     }
+
     return ge::GRAPH_SUCCESS;
 }
 
-/// @brief 分轨段 attr 校验并推导拓扑
-/// @note with_grad 必须为 1；ranks_per_supernode 须 (0, 1024] 且整除 world；超节点数须 <= 2048
-static ge::graphStatus CheckRailAttrs(const gert::TilingContext* context, RailTopology& topoAttr)
+/// @brief 分轨段 shape 校验并提取关键规模（numTokens/worldSize/totalRecv/hiddenDim/numSfPacks）
+static ge::graphStatus CheckRailTensorDim(const gert::TilingContext* context, int64_t& numTokens, uint32_t& worldSize,
+                                          int64_t& totalRecv, int64_t& hiddenDim, int64_t& numSfPacks)
+{
+    const char* nodeName = context->GetNodeName();
+    numSfPacks = 0;
+    int64_t world = 0;
+
+    OP_TILING_CHECK(CheckRailIndicesDim(context, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailIndicesDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailFetchedDim(context, numTokens, hiddenDim) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailFetchedDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailPermOutDim(context, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailPermOutDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailWorldFromSendCounts(context, worldSize, world) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailWorldFromSendCounts failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailRecvCountsDim(context, world) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailRecvCountsDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailRecvLocalEntryDim(context, totalRecv) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailRecvLocalEntryDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailNumRecvDim(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailNumRecvDim failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailSfPairDim(context, numTokens, numSfPacks) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailSfPairDim failed."), return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 分轨段基础 attr 校验：entry 空间、commBufferSize、with_grad
+static ge::graphStatus CheckRailBasicAttrs(const gert::TilingContext* context)
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
@@ -1181,9 +1521,9 @@ static ge::graphStatus CheckRailAttrs(const gert::TilingContext* context, RailTo
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK);
     OP_TILING_CHECK(numEntriesPerRankPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "num_entries_per_rank"),
                     return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(*numEntriesPerRankPtr < 0 || *numEntriesPerRankPtr > INT32_MAX,
+    OP_TILING_CHECK(*numEntriesPerRankPtr <= 0 || *numEntriesPerRankPtr > INT32_MAX,
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "num_entries_per_rank",
-                                              std::to_string(*numEntriesPerRankPtr).c_str(), "[0, INT32_MAX]"),
+                                              std::to_string(*numEntriesPerRankPtr).c_str(), "[1, INT32_MAX]"),
                     return ge::GRAPH_FAILED);
 
     auto commBufferSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_COMM_BUFFER_SIZE);
@@ -1199,8 +1539,16 @@ static ge::graphStatus CheckRailAttrs(const gert::TilingContext* context, RailTo
                     OP_LOGE_FOR_INVALID_VALUE(nodeName, "with_grad", "0 (or missing)", "1 (training path)"),
                     return ge::GRAPH_FAILED);
 
-    // 感知 attr（host HCCL topo 感知自动填入，非用户输入）：ranksPerSupernode=每超节点卡数（直连域）。
-    // 分轨模型唯一拓扑事实——超节点数=world÷ranksPerSupernode、轨道对端数=world÷ranksPerSupernode−1 全推导。
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 感知 attr ranks_per_supernode 校验（host HCCL topo 感知自动填入，非用户输入）
+/// @note 分轨模型唯一拓扑事实——超节点数=world÷ranksPerSupernode、轨道对端数=world÷ranksPerSupernode−1 全推导
+static ge::graphStatus CheckRailRanksPerSupernode(const gert::TilingContext* context, int64_t& ranksPerSupernode)
+{
+    const char* nodeName = context->GetNodeName();
+    auto attrs = context->GetAttrs();
+
     auto ranksPerSupernodePtr = attrs->GetAttrPointer<int64_t>(ATTR_RANKS_PER_SUPERNODE);
     OP_TILING_CHECK(ranksPerSupernodePtr == nullptr || *ranksPerSupernodePtr <= 0,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
@@ -1210,7 +1558,7 @@ static ge::graphStatus CheckRailAttrs(const gert::TilingContext* context, RailTo
                         "ElasticBuffer._get_ranks_per_supernode_attr() after rank_size (stale cached graph or "
                         "direct aclnn call without sensing?)"),
                     return ge::GRAPH_FAILED);
-    int64_t ranksPerSupernode = *ranksPerSupernodePtr;
+    ranksPerSupernode = *ranksPerSupernodePtr;
     OP_TILING_CHECK(
         ranksPerSupernode > static_cast<int64_t>(Mc2Kernel::MAX_QP_SIZE),
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "ranks_per_supernode", std::to_string(ranksPerSupernode).c_str(),
@@ -1218,6 +1566,16 @@ static ge::graphStatus CheckRailAttrs(const gert::TilingContext* context, RailTo
                                    "] (rail ctx node table supernode-segment limit)")
                                       .c_str()),
         return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief world（send_counts_out.dim0/8）与 ranks_per_supernode 一致性校验并推导拓扑
+static ge::graphStatus CheckRailWorldTopology(const gert::TilingContext* context, int64_t ranksPerSupernode,
+                                              RailTopology& topoAttr)
+{
+    const char* nodeName = context->GetNodeName();
+
     uint32_t worldFromShape = 0U;
     {
         const gert::StorageShape* sendCountsShape = context->GetOutputShape(OUT_SEND_COUNTS);
@@ -1252,6 +1610,24 @@ static ge::graphStatus CheckRailAttrs(const gert::TilingContext* context, RailTo
                                       .c_str()),
         return ge::GRAPH_FAILED);
     topoAttr = DeriveRailTopology(static_cast<uint32_t>(ranksPerSupernode), worldFromShape);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 分轨段 attr 校验并推导拓扑
+/// @note with_grad 必须为 1；ranks_per_supernode 须 (0, 1024] 且整除 world；超节点数须 <= 2048
+static ge::graphStatus CheckRailAttrs(const gert::TilingContext* context, RailTopology& topoAttr)
+{
+    const char* nodeName = context->GetNodeName();
+    int64_t ranksPerSupernode = 0;
+
+    OP_TILING_CHECK(CheckRailBasicAttrs(context) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailBasicAttrs failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailRanksPerSupernode(context, ranksPerSupernode) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailRanksPerSupernode failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailWorldTopology(context, ranksPerSupernode, topoAttr) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailWorldTopology failed."), return ge::GRAPH_FAILED);
+
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1292,12 +1668,26 @@ static ge::graphStatus SetRailPlatformInfo(gert::TilingContext* context, EngramF
 
 // ─────────────────────── 分轨 tiling data ───────────────────────
 
-/// @brief 分轨 tilingData 落表：拓扑、行距、N 反解、批行数、SortLib 参数、UB 预算校验
-/// @note 行距：req 族恒 32B，resp 族按 hiddenBytes+sf 对齐到 32B；
-///       N 反解把 commBufferSize 分满，批行数按 65504B 预算（blockLen 为 uint16）
-static ge::graphStatus SetRailTilingData(gert::TilingContext* context, EngramFetchTilingData& tilingData,
-                                         const RailTopology& topoArg, int64_t numTokens, uint32_t worldSize,
-                                         int64_t totalRecv, int64_t hiddenDim, int64_t numSfPacks)
+/// @brief 分轨 tilingData 计算中间量（拓扑/行距/WIN 预算/UB 分段）
+struct RailTilingCtx {
+    RailTopology topo;
+    int64_t sfBytes{0};
+    int64_t rowStrideReq{0};
+    int64_t rowStrideResp{0};
+    int64_t headBudget{0};
+    int64_t perDestBytes{0};
+    int64_t nFit{0};
+    uint32_t rowBlockBytes{0};
+    uint32_t statusBytes{0};
+    uint32_t tempBytes{0};
+    uint32_t indicesBytes{0};
+    uint32_t flowBytes{0};
+};
+
+/// @brief 基础规模字段落表 + entry id 空间校验 + hiddenBytes
+static ge::graphStatus SetRailBaseTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
+                                             int64_t numTokens, uint32_t worldSize, int64_t totalRecv,
+                                             int64_t hiddenDim, int64_t numSfPacks)
 {
     const char* nodeName = context->GetNodeName();
     auto attrs = context->GetAttrs();
@@ -1333,6 +1723,16 @@ static ge::graphStatus SetRailTilingData(gert::TilingContext* context, EngramFet
                     return ge::GRAPH_FAILED);
     tilingData.hiddenBytes = tilingData.hiddenDim * bytesPerElem;
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief SF 行宽与 commBufferSize 落表 + 分轨拓扑
+static ge::graphStatus SetRailSfTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
+                                           int64_t numSfPacks, const RailTopology& topo)
+{
+    const char* nodeName = context->GetNodeName();
+    auto attrs = context->GetAttrs();
+
     if (numSfPacks > 0) {
         auto fetchedSfDesc = context->GetOutputDesc(OUT_FETCHED_SF);
         tilingData.sfElemSize = ge::GetSizeByDataType(fetchedSfDesc->GetDataType());
@@ -1351,62 +1751,90 @@ static ge::graphStatus SetRailTilingData(gert::TilingContext* context, EngramFet
     auto commBufferSizePtr = attrs->GetAttrPointer<int64_t>(ATTR_COMM_BUFFER_SIZE);
     tilingData.commBufferSize = *commBufferSizePtr;
 
-    RailTopology topo = topoArg;
     tilingData.ranksPerSupernode = topo.ranksPerSupernode;
 
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 行距：req 族恒 32B，resp 族按 hiddenBytes+sf 对齐到 32B
+static ge::graphStatus CalcRailRowStride(const gert::TilingContext* context, const EngramFetchTilingData& tilingData,
+                                         int64_t numSfPacks, RailTilingCtx& ctx)
+{
+    const char* nodeName = context->GetNodeName();
+
     // sfOff 对齐保证 S 拼块 UB 侧恒 32B 对齐
-    const int64_t sfBytes = numSfPacks * tilingData.sfElemSize;
+    ctx.sfBytes = numSfPacks * tilingData.sfElemSize;
     const int64_t sfOff = AlignTo(tilingData.hiddenBytes, Mc2Kernel::UB_ALIGN);
-    const int64_t rowStrideReq = Mc2Kernel::UB_ALIGN; // P_req = 32
-    const int64_t rowStrideResp = AlignTo(Mc2Kernel::ROW_HEAD_BYTES + sfOff + sfBytes, Mc2Kernel::UB_ALIGN);
-    OP_TILING_CHECK(rowStrideResp > UINT32_MAX,
+    ctx.rowStrideReq = Mc2Kernel::UB_ALIGN; // P_req = 32
+    ctx.rowStrideResp = AlignTo(Mc2Kernel::ROW_HEAD_BYTES + sfOff + ctx.sfBytes, Mc2Kernel::UB_ALIGN);
+    OP_TILING_CHECK(ctx.rowStrideResp > UINT32_MAX,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "hidden_dim",
-                                                          (std::string("P_resp=") + std::to_string(rowStrideResp) +
+                                                          (std::string("P_resp=") + std::to_string(ctx.rowStrideResp) +
                                                            " (hiddenBytes=" + std::to_string(tilingData.hiddenBytes) +
-                                                           ", sfBytes=" + std::to_string(sfBytes) + ")")
+                                                           ", sfBytes=" + std::to_string(ctx.sfBytes) + ")")
                                                               .c_str(),
                                                           "resp row stride overflows UINT32_MAX"),
                     return ge::GRAPH_FAILED);
 
-    const int64_t headBudget =
-        static_cast<int64_t>(topo.winHead) + 2LL * static_cast<int64_t>(topo.areas) * Mc2Kernel::RECV_AREA_HEAD;
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief WIN 预算：头部预算 + 每目的字节数 + N 反解（commBufferSize 分满）
+static ge::graphStatus CheckRailWinBudget(const gert::TilingContext* context, const EngramFetchTilingData& tilingData,
+                                          RailTilingCtx& ctx)
+{
+    const char* nodeName = context->GetNodeName();
+
+    ctx.headBudget = static_cast<int64_t>(ctx.topo.winHead) +
+                     RAIL_FAMILY_NUM * static_cast<int64_t>(ctx.topo.areas) * Mc2Kernel::RECV_AREA_HEAD;
     OP_TILING_CHECK(
-        tilingData.commBufferSize <= headBudget,
+        tilingData.commBufferSize <= ctx.headBudget,
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "comm_buffer_size", std::to_string(tilingData.commBufferSize).c_str(),
-                                  (std::string("> winHead + 2*areas*96 (winHead=") + std::to_string(topo.winHead) +
-                                   ", areas=" + std::to_string(topo.areas) + "; WIN budget too small)")
+                                  (std::string("> winHead + 2*areas*96 (winHead=") + std::to_string(ctx.topo.winHead) +
+                                   ", areas=" + std::to_string(ctx.topo.areas) + "; WIN budget too small)")
                                       .c_str()),
         return ge::GRAPH_FAILED);
-    const int64_t perDestBytes = static_cast<int64_t>(topo.areas) * (rowStrideReq + rowStrideResp);
-    int64_t nFit = (tilingData.commBufferSize - headBudget) / perDestBytes;
-    // 批行数(族) = min(65504÷P(族), N÷2)：blockLen 为 uint16，满批 65536B 会截断为 0、
+    ctx.perDestBytes = static_cast<int64_t>(ctx.topo.areas) * (ctx.rowStrideReq + ctx.rowStrideResp);
+    ctx.nFit = (tilingData.commBufferSize - ctx.headBudget) / ctx.perDestBytes;
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 批行数(族)：blockLen 为 uint16，满批 65536B 会截断为 0，故按 65504B 预算拆分
+static ge::graphStatus SetRailBatchRows(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
+                                        const RailTilingCtx& ctx)
+{
+    const char* nodeName = context->GetNodeName();
+
+    // 批行数(族) = min(65504÷P(族), N÷2)
     constexpr int64_t BATCH_BLOCK_BYTES = 65504LL;
     // 硬拒绝超批块预算的行距（单行 > 65504 无法按批块搬运）
-    OP_TILING_CHECK(rowStrideResp > BATCH_BLOCK_BYTES,
+    OP_TILING_CHECK(ctx.rowStrideResp > BATCH_BLOCK_BYTES,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                         nodeName, "hidden_dim",
-                        (std::string("P_resp=") + std::to_string(rowStrideResp) +
-                         " (hiddenBytes=" + std::to_string(tilingData.hiddenBytes) +
-                         ", sfBytes=" + std::to_string(sfBytes) + ", budget=" + std::to_string(BATCH_BLOCK_BYTES) + ")")
+                        (std::string("P_resp=") + std::to_string(ctx.rowStrideResp) + " (hiddenBytes=" +
+                         std::to_string(tilingData.hiddenBytes) + ", sfBytes=" + std::to_string(ctx.sfBytes) +
+                         ", budget=" + std::to_string(BATCH_BLOCK_BYTES) + ")")
                             .c_str(),
                         "resp row stride exceeds the batch block budget (blockLen uint16, single row not movable)"),
                     return ge::GRAPH_FAILED);
-    int64_t batchRespCap = BATCH_BLOCK_BYTES / rowStrideResp;
+    int64_t batchRespCap = BATCH_BLOCK_BYTES / ctx.rowStrideResp;
     if (batchRespCap < 1LL) {
         batchRespCap = 1LL;
     }
-    OP_TILING_CHECK(nFit < 2LL * batchRespCap,
+    OP_TILING_CHECK(ctx.nFit < RAIL_FAMILY_NUM * batchRespCap,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
                         nodeName, "comm_buffer_size", std::to_string(tilingData.commBufferSize).c_str(),
-                        (std::string("N=") + std::to_string(nFit) + " < 2*batchRowsResp=" +
-                         std::to_string(batchRespCap) + " (P_req=" + std::to_string(rowStrideReq) +
-                         ", P_resp=" + std::to_string(rowStrideResp) + "; buffer too small or row too large)")
+                        (std::string("N=") + std::to_string(ctx.nFit) + " < 2*batchRowsResp=" +
+                         std::to_string(batchRespCap) + " (P_req=" + std::to_string(ctx.rowStrideReq) +
+                         ", P_resp=" + std::to_string(ctx.rowStrideResp) + "; buffer too small or row too large)")
                             .c_str()),
                     return ge::GRAPH_FAILED);
-    uint32_t numRows = static_cast<uint32_t>(nFit);
-    uint32_t batchRowsResp = static_cast<uint32_t>((batchRespCap < numRows / 2LL) ? batchRespCap : numRows / 2);
-    int64_t batchReqCap = BATCH_BLOCK_BYTES / rowStrideReq;
-    uint32_t batchRowsReq = static_cast<uint32_t>((batchReqCap < numRows / 2LL) ? batchReqCap : numRows / 2);
+    uint32_t numRows = static_cast<uint32_t>(ctx.nFit);
+    const int64_t rowsPerFamily = static_cast<int64_t>(numRows) / RAIL_FAMILY_NUM;
+    uint32_t batchRowsResp = static_cast<uint32_t>((batchRespCap < rowsPerFamily) ? batchRespCap : rowsPerFamily);
+    int64_t batchReqCap = BATCH_BLOCK_BYTES / ctx.rowStrideReq;
+    uint32_t batchRowsReq = static_cast<uint32_t>((batchReqCap < rowsPerFamily) ? batchReqCap : rowsPerFamily);
     if (batchRowsReq < 1U) {
         batchRowsReq = 1U;
     }
@@ -1417,46 +1845,58 @@ static ge::graphStatus SetRailTilingData(gert::TilingContext* context, EngramFet
     tilingData.batchRowsReq = batchRowsReq;
     tilingData.batchRowsResp = batchRowsResp;
 
-    int64_t cap = totalRecv;
-    OP_TILING_CHECK(cap < 0 || cap > INT64_MAX / 8,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "recv_local_entry", std::to_string(cap).c_str(),
-                                                          "collect cap overflow (cap < 0 or cap > INT64_MAX/8)"),
-                    return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
 
-    uint32_t rowBlockBytes = static_cast<uint32_t>(batchRowsResp * rowStrideResp);
-    uint32_t statusBytes = static_cast<uint32_t>(
+/// @brief 常驻 UB 分段字节数（行块/状态/临时/索引/流状态）
+static void CalcRailUbSegments(const EngramFetchTilingData& tilingData, RailTilingCtx& ctx)
+{
+    ctx.rowBlockBytes = static_cast<uint32_t>(tilingData.batchRowsResp * ctx.rowStrideResp);
+    ctx.statusBytes = static_cast<uint32_t>(
         AlignTo(2 * Mc2Kernel::STATE_OFFSET + static_cast<int64_t>(tilingData.aivNum) * 8, Mc2Kernel::UB_ALIGN));
     uint32_t coreArrayBytes = static_cast<uint32_t>(
         AlignTo(AlignTo(static_cast<int64_t>(tilingData.aivNum) * sizeof(int32_t), Mc2Kernel::UB_ALIGN) +
                     static_cast<int64_t>(tilingData.aivNum) * sizeof(int32_t),
                 Mc2Kernel::UB_ALIGN));
-    uint32_t tempBytes = statusBytes;
-    if (tempBytes < Mc2Kernel::ENTRY_BATCH_CAP * sizeof(int32_t)) {
-        tempBytes = Mc2Kernel::ENTRY_BATCH_CAP * sizeof(int32_t);
+    ctx.tempBytes = ctx.statusBytes;
+    if (ctx.tempBytes < Mc2Kernel::ENTRY_BATCH_CAP * sizeof(int32_t)) {
+        ctx.tempBytes = Mc2Kernel::ENTRY_BATCH_CAP * sizeof(int32_t);
     }
-    if (tempBytes < coreArrayBytes) {
-        tempBytes = coreArrayBytes;
+    if (ctx.tempBytes < coreArrayBytes) {
+        ctx.tempBytes = coreArrayBytes;
     }
-    uint32_t indicesBytes = Mc2Kernel::IDX_BUF_BYTES;
+    ctx.indicesBytes = Mc2Kernel::IDX_BUF_BYTES;
     // F 组流状态：每槽滚动 staged（ranksPerSupernode 个 int32）；S 组流状态：5 × 名下目的数 int32
-    uint32_t flowBytes = static_cast<uint32_t>(
-        AlignTo(static_cast<int64_t>(topo.ranksPerSupernode) * sizeof(int32_t), Mc2Kernel::UB_ALIGN));
-    {
-        uint32_t sDests = topo.ranksPerSupernode + topo.supernodeCnt;
-        uint32_t sCnt = (tilingData.sendCoreCnt > 0U) ? tilingData.sendCoreCnt : 1U;
-        uint32_t sFlowBytes = static_cast<uint32_t>(
-            AlignTo(static_cast<int64_t>(5) * ((sDests + sCnt - 1U) / sCnt) * sizeof(int32_t), Mc2Kernel::UB_ALIGN));
-        // 常驻 UB 预算账本（WinLocalCopy ping/pong 与 SortLib 分时复用，由 ubSize 总量兜底）
-        const uint64_t creditSpinBytes = Mc2Kernel::UB_ALIGN;  // 信用读自旋格
-        const uint64_t cursorBytes = 2U * Mc2Kernel::UB_ALIGN; // 游标
-        uint64_t permanentUb = Mc2Kernel::HCOMM_INIT_SIZE + statusBytes + tempBytes + indicesBytes + creditSpinBytes +
-                               Mc2Kernel::RECV_AREA_HEAD + static_cast<uint64_t>(rowBlockBytes) +
-                               static_cast<uint64_t>(flowBytes) + static_cast<uint64_t>(sFlowBytes) + cursorBytes;
-        OP_TILING_CHECK(
-            permanentUb >= tilingData.ubSize,
-            OP_LOGE(nodeName, "permanent UB (%llu) exceeds availUbSize (%llu)", permanentUb, tilingData.ubSize),
-            return ge::GRAPH_FAILED);
-    }
+    ctx.flowBytes = static_cast<uint32_t>(
+        AlignTo(static_cast<int64_t>(ctx.topo.ranksPerSupernode) * sizeof(int32_t), Mc2Kernel::UB_ALIGN));
+}
+
+/// @brief 常驻 UB 预算账本校验（WinLocalCopy ping/pong 与 SortLib 分时复用，由 ubSize 总量兜底）
+static ge::graphStatus CheckRailUbBudget(const gert::TilingContext* context, const EngramFetchTilingData& tilingData,
+                                         const RailTilingCtx& ctx)
+{
+    const char* nodeName = context->GetNodeName();
+
+    uint32_t sDests = ctx.topo.ranksPerSupernode + ctx.topo.supernodeCnt;
+    uint32_t sCnt = (tilingData.sendCoreCnt > 0U) ? tilingData.sendCoreCnt : 1U;
+    uint32_t sFlowBytes = static_cast<uint32_t>(
+        AlignTo(static_cast<int64_t>(5) * ((sDests + sCnt - 1U) / sCnt) * sizeof(int32_t), Mc2Kernel::UB_ALIGN));
+    const uint64_t creditSpinBytes = Mc2Kernel::UB_ALIGN;  // 信用读自旋格
+    const uint64_t cursorBytes = 2U * Mc2Kernel::UB_ALIGN; // 游标
+    uint64_t permanentUb = Mc2Kernel::HCOMM_INIT_SIZE + ctx.statusBytes + ctx.tempBytes + ctx.indicesBytes +
+                           creditSpinBytes + Mc2Kernel::RECV_AREA_HEAD + static_cast<uint64_t>(ctx.rowBlockBytes) +
+                           static_cast<uint64_t>(ctx.flowBytes) + static_cast<uint64_t>(sFlowBytes) + cursorBytes;
+    OP_TILING_CHECK(permanentUb >= tilingData.ubSize,
+                    OP_LOGE(nodeName, "permanent UB (%llu) exceeds availUbSize (%llu)", permanentUb, tilingData.ubSize),
+                    return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief SortLib 参数：numTileData/tileCount/tmpUbSize（UB 预算内取整）
+static ge::graphStatus SetRailSortLibTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData)
+{
+    const char* nodeName = context->GetNodeName();
 
     constexpr uint64_t kSortLibFixedBytes = 5120U;
     constexpr uint64_t kMinTileElems = 512U;
@@ -1489,34 +1929,92 @@ static ge::graphStatus SetRailTilingData(gert::TilingContext* context, EngramFet
     return ge::GRAPH_SUCCESS;
 }
 
-/// @brief 分轨 workspace 尺寸计算（与 kernel CalcWorkSpaceOffset 逐段一致）
-static ge::graphStatus SetRailWorkSpace(gert::TilingContext* context, const EngramFetchTilingData& tilingData)
+/// @brief 分轨 tilingData 落表：拓扑、行距、N 反解、批行数、SortLib 参数、UB 预算校验
+/// @note 行距：req 族恒 32B，resp 族按 hiddenBytes+sf 对齐到 32B；
+///       N 反解把 commBufferSize 分满，批行数按 65504B 预算（blockLen 为 uint16）
+static ge::graphStatus SetRailTilingData(const gert::TilingContext* context, EngramFetchTilingData& tilingData,
+                                         const RailTopology& topoArg, int64_t numTokens, uint32_t worldSize,
+                                         int64_t totalRecv, int64_t hiddenDim, int64_t numSfPacks)
 {
     const char* nodeName = context->GetNodeName();
-    size_t* workSpaces = context->GetWorkspaceSizes(1);
-    OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE(nodeName, "workSpaces is nullptr."), return ge::GRAPH_FAILED);
+    RailTilingCtx ctx;
+    ctx.topo = topoArg;
 
-    int64_t world = static_cast<int64_t>(tilingData.rankSize);
-    int64_t numTokens = tilingData.numTokens;
-    uint32_t aivNum = (tilingData.aivNum > 0U) ? tilingData.aivNum : 1U;
-    int64_t cap = tilingData.totalRecv; // cap = recv_local_entry.dim0
+    OP_TILING_CHECK(SetRailBaseTilingData(context, tilingData, numTokens, worldSize, totalRecv, hiddenDim,
+                                          numSfPacks) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SetRailBaseTilingData failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(SetRailSfTilingData(context, tilingData, numSfPacks, ctx.topo) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SetRailSfTilingData failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CalcRailRowStride(context, tilingData, numSfPacks, ctx) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CalcRailRowStride failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(CheckRailWinBudget(context, tilingData, ctx) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailWinBudget failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(SetRailBatchRows(context, tilingData, ctx) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SetRailBatchRows failed."), return ge::GRAPH_FAILED);
+
+    int64_t cap = totalRecv;
+    OP_TILING_CHECK(cap < 0 || cap > INT64_MAX / 8,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "recv_local_entry", std::to_string(cap).c_str(),
+                                                          "collect cap overflow (cap < 0 or cap > INT64_MAX/8)"),
+                    return ge::GRAPH_FAILED);
+
+    CalcRailUbSegments(tilingData, ctx);
+    OP_TILING_CHECK(CheckRailUbBudget(context, tilingData, ctx) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckRailUbBudget failed."), return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(SetRailSortLibTilingData(context, tilingData) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SetRailSortLibTilingData failed."), return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 分轨 workspace 计算中间量（规模/几何）
+struct RailWorkspaceCtx {
+    int64_t numTokens{0};
+    int64_t world{0};
+    uint32_t aivNum{1U};
+    int64_t cap{0};
+    int64_t slots{0};
+    int64_t ringStride{0};
+};
+
+/// @brief 分轨 workspace 几何量推导与溢出校验
+static ge::graphStatus PrepareRailWorkspace(const gert::TilingContext* context, const EngramFetchTilingData& tilingData,
+                                            RailWorkspaceCtx& ws)
+{
+    const char* nodeName = context->GetNodeName();
+    ws.world = static_cast<int64_t>(tilingData.rankSize);
+    ws.numTokens = tilingData.numTokens;
+    ws.aivNum = (tilingData.aivNum > 0U) ? tilingData.aivNum : 1U;
+    ws.cap = tilingData.totalRecv; // cap = recv_local_entry.dim0
     RailTopology topo = DeriveRailTopology(tilingData.ranksPerSupernode, tilingData.rankSize);
     const int64_t sfBytes = tilingData.numSfPacks * tilingData.sfElemSize;
     const int64_t sfOff = AlignTo(tilingData.hiddenBytes, Mc2Kernel::UB_ALIGN);
     const int64_t rowStrideReq = Mc2Kernel::UB_ALIGN;
     const int64_t rowStrideResp = AlignTo(Mc2Kernel::ROW_HEAD_BYTES + sfOff + sfBytes, Mc2Kernel::UB_ALIGN);
-    const int64_t ringStride =
-        std::max(tilingData.batchRowsReq * rowStrideReq, tilingData.batchRowsResp * rowStrideResp);
-    const int64_t slots = static_cast<int64_t>(topo.ranksPerSupernode); // F 暂存环仅 owner 槽
+    ws.ringStride = std::max(tilingData.batchRowsReq * rowStrideReq, tilingData.batchRowsResp * rowStrideResp);
+    ws.slots = static_cast<int64_t>(topo.ranksPerSupernode); // F 暂存环仅 owner 槽
 
-    OP_TILING_CHECK(numTokens > 0 && numTokens > INT64_MAX / 4,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "num_tokens", std::to_string(numTokens).c_str(),
+    OP_TILING_CHECK(ws.numTokens > 0 && ws.numTokens > INT64_MAX / 4,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "num_tokens", std::to_string(ws.numTokens).c_str(),
                                                           "workspace overflow (numTokens > INT64_MAX/4)"),
                     return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(cap > 0 && cap > INT64_MAX / 8,
-                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "recv_local_entry", std::to_string(cap).c_str(),
+    OP_TILING_CHECK(ws.cap > 0 && ws.cap > INT64_MAX / 8,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "recv_local_entry", std::to_string(ws.cap).c_str(),
                                                           "workspace overflow (cap > INT64_MAX/8)"),
                     return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief ①-⑫ 分轨 workspace 分段字节数合计
+static int64_t CalcRailWorkspaceSegs(const EngramFetchTilingData& tilingData, const RailWorkspaceCtx& ws)
+{
+    const int64_t world = ws.world;
+    const int64_t numTokens = ws.numTokens;
+    const uint32_t aivNum = ws.aivNum;
+    const int64_t cap = ws.cap;
+    const int64_t slots = ws.slots;
+    const int64_t ringStride = ws.ringStride;
 
     // ① sortedIndices：SortLib 产物（按 entry 升序）
     int64_t wsSortedIndices = AlignTo(numTokens * 4, Mc2Kernel::UB_ALIGN);
@@ -1556,7 +2054,13 @@ static ge::graphStatus SetRailWorkSpace(gert::TilingContext* context, const Engr
     int64_t wsCoreStart = coreArrayAligned;
     int64_t wsDfx = coreArrayAligned;
 
-    // ⑬ SortLib 六段 workspace（老公式，numTokens 规模；与 kernel InitWorkspaceLayout 逐段一致）
+    return wsSortedIndices + wsSrcSorted + wsBucketSeg + wsRelay + wsRelayCtl + wsSStage + wsCollect + wsSrcArrive +
+           wsRecvPrefix + wsSendPrefix + wsCounterScratch + wsFlagScratch + wsSegCount + wsCoreStart + wsDfx;
+}
+
+/// @brief ⑬ SortLib 六段 workspace（老公式，numTokens 规模；与 kernel InitWorkspaceLayout 逐段一致）
+static int64_t CalcRailSortWorkspace(const EngramFetchTilingData& tilingData, int64_t numTokens)
+{
     constexpr int64_t kRadixRounds = 4;
     int64_t slSeg0 = AlignTo(256LL * kRadixRounds * 4LL, Mc2Kernel::UB_ALIGN);
     int64_t slSeg1 =
@@ -1566,16 +2070,90 @@ static ge::graphStatus SetRailWorkSpace(gert::TilingContext* context, const Engr
     int64_t slSeg4 =
         AlignTo(static_cast<int64_t>(tilingData.sortTileCount) * tilingData.sortNumTileData, Mc2Kernel::UB_ALIGN);
     int64_t slSeg5 = AlignTo(numTokens * 4LL, Mc2Kernel::UB_ALIGN);
-    int64_t wsSortTotal = slSeg0 + slSeg1 + slSeg2 + slSeg3 + slSeg4 + slSeg5;
 
-    int64_t wsTotal = wsSortedIndices + wsSrcSorted + wsBucketSeg + wsRelay + wsRelayCtl + wsSStage + wsCollect +
-                      wsSrcArrive + wsRecvPrefix + wsSendPrefix + wsCounterScratch + wsFlagScratch + wsSegCount +
-                      wsCoreStart + wsDfx + wsSortTotal;
+    return slSeg0 + slSeg1 + slSeg2 + slSeg3 + slSeg4 + slSeg5;
+}
+
+/// @brief 分轨 workspace 尺寸计算（与 kernel CalcWorkSpaceOffset 逐段一致）
+static ge::graphStatus SetRailWorkSpace(gert::TilingContext* context, const EngramFetchTilingData& tilingData)
+{
+    const char* nodeName = context->GetNodeName();
+    size_t* workSpaces = context->GetWorkspaceSizes(1);
+    OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE(nodeName, "workSpaces is nullptr."), return ge::GRAPH_FAILED);
+
+    RailWorkspaceCtx ws;
+    OP_TILING_CHECK(PrepareRailWorkspace(context, tilingData, ws) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "PrepareRailWorkspace failed."), return ge::GRAPH_FAILED);
+
+    int64_t wsTotal = CalcRailWorkspaceSegs(tilingData, ws) + CalcRailSortWorkspace(tilingData, ws.numTokens);
     wsTotal = AlignTo(wsTotal, BUFFER_ALIGNMENT);
     wsTotal += SYSTEM_NEED_WORKSPACE;
 
     workSpaces[0] = static_cast<size_t>(wsTotal);
     return ge::GRAPH_SUCCESS;
+}
+
+/// @brief 三组核数（S:F:O ≈ 1:2:2 查表；tiling 落表、kernel 校验兜底）
+static ge::graphStatus SplitRailCoreCnt(EngramFetchTilingData& tilingData, const char* nodeName)
+{
+    // S/F/O 三组核配比查表：aiv 按档取整定配比（O=余量），低档按 1:2:2 比例兜底
+    constexpr uint32_t aivTierHi = 72U;
+    constexpr uint32_t aivTierMid = 64U;
+    constexpr uint32_t aivTierLow = 56U;
+    constexpr uint32_t tierHiSend = 14U;
+    constexpr uint32_t tierHiFwd = 29U;
+    constexpr uint32_t tierMidSend = 12U;
+    constexpr uint32_t tierMidFwd = 26U;
+    constexpr uint32_t tierLowSend = 11U;
+    constexpr uint32_t tierLowFwd = 22U;
+    uint32_t aiv = tilingData.aivNum;
+    uint32_t sendCores = 0;
+    uint32_t fwdCores = 0;
+    uint32_t ownerCores = 0;
+    if (aiv >= aivTierHi) {
+        sendCores = tierHiSend;
+        fwdCores = tierHiFwd;
+        ownerCores = aiv - tierHiSend - tierHiFwd;
+    } else if (aiv >= aivTierMid) {
+        sendCores = tierMidSend;
+        fwdCores = tierMidFwd;
+        ownerCores = aiv - tierMidSend - tierMidFwd;
+    } else if (aiv >= aivTierLow) {
+        sendCores = tierLowSend;
+        fwdCores = tierLowFwd;
+        ownerCores = aiv - tierLowSend - tierLowFwd;
+    } else {
+        sendCores = (aiv / CORE_PART_RATIO_DEN >= 1U) ? aiv / CORE_PART_RATIO_DEN : 1U;
+        fwdCores = (aiv >= CORE_PART_RATIO_DEN) ? FWD_RATIO_NUM * aiv / CORE_PART_RATIO_DEN : 1U;
+        ownerCores = (aiv > sendCores + fwdCores) ? aiv - sendCores - fwdCores : 1U;
+        if (sendCores + fwdCores + ownerCores != aiv) {
+            fwdCores = aiv - sendCores - 1U;
+            ownerCores = 1U;
+        }
+    }
+    OP_TILING_CHECK(
+        sendCores < 1U || fwdCores < 1U || ownerCores < 1U ||
+            static_cast<uint64_t>(sendCores) + fwdCores + ownerCores != aiv,
+        OP_LOGE(nodeName, "invalid core partition: S=%u, F=%u, O=%u, aiv=%u", sendCores, fwdCores, ownerCores, aiv),
+        return ge::GRAPH_FAILED);
+    tilingData.sendCoreCnt = sendCores;
+    tilingData.fwdCoreCnt = fwdCores;
+    tilingData.ownerCoreCnt = ownerCores;
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/// @brief tilingKey：train×rail×hasSf 组合——框架按 TPL 列表实例化分轨 kernel 模板参数
+/// （mode=3 训练 rail；mode=2 为推理 rail（PR #15511），tiling 按 isTraining 分流）
+static void SetRailAlignedTilingKey(gert::TilingContext* context)
+{
+    bool hasSf = false;
+    auto fetchedSfDesc = context->GetOutputDesc(OUT_FETCHED_SF);
+    auto fetchedSfShape = context->GetOutputShape(OUT_FETCHED_SF);
+    hasSf = fetchedSfDesc != nullptr && fetchedSfShape != nullptr &&
+            fetchedSfShape->GetStorageShape().GetDimNum() == DIM_TWO && fetchedSfShape->GetStorageShape().GetDim(1) > 0;
+    const uint64_t tilingKey = GET_TPL_TILING_KEY(ENGRAM_FETCH_TRAIN_RAIL_MODE, hasSf);
+    context->SetTilingKey(tilingKey);
 }
 
 /// @brief EngramFetch 分轨模型 tiling 主入口
@@ -1597,104 +2175,39 @@ ge::graphStatus EngramFetchRailAlignedTilingFunc(gert::TilingContext* context)
     int64_t numSfPacks = 0;
     RailTopology topoAttr;
     OP_TILING_CHECK(CheckRailTensorDataType(context) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "rail check input/output dtype/format failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "rail check input/output dtype/format failed."),
+                    return ge::GRAPH_FAILED);
     OP_TILING_CHECK(
         CheckRailTensorDim(context, numTokens, worldSize, totalRecv, hiddenDim, numSfPacks) != ge::GRAPH_SUCCESS,
-        OP_LOGE(nodeName, "rail check input/output shape failed."), return ge::GRAPH_FAILED);
+        OP_LOGE_WITHOUT_REPORT(nodeName, "rail check input/output shape failed."), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(CheckRailAttrs(context, topoAttr) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "rail check attrs failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "rail check attrs failed."), return ge::GRAPH_FAILED);
 
     OP_TILING_CHECK(SetRailPlatformInfo(context, *tilingData) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "rail set platform info failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "rail set platform info failed."), return ge::GRAPH_FAILED);
 
-    // 三组核数（S:F:O ≈ 1:2:2 查表；tiling 落表、kernel 校验兜底）
-    {
-        // S/F/O 三组核配比查表：aiv 按档取整定配比（O=余量），低档按 1:2:2 比例兜底
-        constexpr uint32_t AIV_TIER_HI = 72U;
-        constexpr uint32_t AIV_TIER_MID = 64U;
-        constexpr uint32_t AIV_TIER_LOW = 56U;
-        constexpr uint32_t TIER_HI_SEND = 14U;
-        constexpr uint32_t TIER_HI_FWD = 29U;
-        constexpr uint32_t TIER_MID_SEND = 12U;
-        constexpr uint32_t TIER_MID_FWD = 26U;
-        constexpr uint32_t TIER_LOW_SEND = 11U;
-        constexpr uint32_t TIER_LOW_FWD = 22U;
-        uint32_t aiv = tilingData->aivNum;
-        uint32_t sendCores = 0;
-        uint32_t fwdCores = 0;
-        uint32_t ownerCores = 0;
-        if (aiv >= AIV_TIER_HI) {
-            sendCores = TIER_HI_SEND;
-            fwdCores = TIER_HI_FWD;
-            ownerCores = aiv - TIER_HI_SEND - TIER_HI_FWD;
-        } else if (aiv >= AIV_TIER_MID) {
-            sendCores = TIER_MID_SEND;
-            fwdCores = TIER_MID_FWD;
-            ownerCores = aiv - TIER_MID_SEND - TIER_MID_FWD;
-        } else if (aiv >= AIV_TIER_LOW) {
-            sendCores = TIER_LOW_SEND;
-            fwdCores = TIER_LOW_FWD;
-            ownerCores = aiv - TIER_LOW_SEND - TIER_LOW_FWD;
-        } else {
-            sendCores = (aiv / 5U >= 1U) ? aiv / 5U : 1U;
-            fwdCores = (aiv >= 5U) ? 2U * aiv / 5U : 1U;
-            ownerCores = (aiv > sendCores + fwdCores) ? aiv - sendCores - fwdCores : 1U;
-            if (sendCores + fwdCores + ownerCores != aiv) {
-                fwdCores = aiv - sendCores - 1U;
-                ownerCores = 1U;
-            }
-        }
-        OP_TILING_CHECK(
-            sendCores < 1U || fwdCores < 1U || ownerCores < 1U ||
-                static_cast<uint64_t>(sendCores) + fwdCores + ownerCores != aiv,
-            OP_LOGE(nodeName, "invalid core partition: S=%u, F=%u, O=%u, aiv=%u", sendCores, fwdCores, ownerCores, aiv),
-            return ge::GRAPH_FAILED);
-        tilingData->sendCoreCnt = sendCores;
-        tilingData->fwdCoreCnt = fwdCores;
-        tilingData->ownerCoreCnt = ownerCores;
-    }
+    OP_TILING_CHECK(SplitRailCoreCnt(*tilingData, nodeName) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "SplitRailCoreCnt failed."), return ge::GRAPH_FAILED);
 
     OP_TILING_CHECK(context->SetScheduleMode(1) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "rail SetScheduleMode(1) failed"), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(SetRailTilingData(context, *tilingData, topoAttr, numTokens, worldSize, totalRecv, hiddenDim,
                                       numSfPacks) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "rail set tiling data failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "rail set tiling data failed."), return ge::GRAPH_FAILED);
 
-    // tilingKey：train×rail×hasSf 组合——框架按 TPL 列表实例化分轨 kernel 模板参数
-    // （mode=3 训练 rail；mode=2 为推理 rail（PR #15511），tiling 按 isTraining 分流）
-    {
-        bool hasSf = false;
-        auto fetchedSfDesc = context->GetOutputDesc(OUT_FETCHED_SF);
-        auto fetchedSfShape = context->GetOutputShape(OUT_FETCHED_SF);
-        hasSf = fetchedSfDesc != nullptr && fetchedSfShape != nullptr &&
-                fetchedSfShape->GetStorageShape().GetDimNum() == DIM_TWO &&
-                fetchedSfShape->GetStorageShape().GetDim(1) > 0;
-        const uint64_t tilingKey = GET_TPL_TILING_KEY(ENGRAM_FETCH_TRAIN_RAIL_MODE, hasSf);
-        context->SetTilingKey(tilingKey);
-    }
+    SetRailAlignedTilingKey(context);
 
     OP_TILING_CHECK(SetRailWorkSpace(context, *tilingData) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "rail set workspace failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "rail set workspace failed."), return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
 
 /**
- * @brief engram_fetch算子的tiling函数
+ * @brief 解析tiling attr：训练态标记与hybrid_mode
  */
-static ge::graphStatus EngramFetchTilingFunc(gert::TilingContext* context)
+static void ParseEngramFetchAttrs(const gert::TilingContext* context, bool& isTraining, int64_t& hybridMode)
 {
-    const char* nodeName = (context != nullptr) ? context->GetNodeName() : "engram_fetch";
-    OP_TILING_CHECK(context == nullptr, OP_LOGE(nodeName, "failed to get tiling context."), return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(nodeName == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "nodeName"), return ge::GRAPH_FAILED);
-
-    OP_LOGI(nodeName, "Enter EngramFetch tiling check func.");
-
-    EngramFetchTilingData* tilingData = context->GetTilingData<EngramFetchTilingData>();
-    OP_TILING_CHECK(tilingData == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "tilingData"), return ge::GRAPH_FAILED);
-
-    bool isTraining = false;
-    int64_t hybridMode = 0;
     auto attrs = context->GetAttrs();
     if (attrs != nullptr) {
         auto withGradPtr = attrs->GetAttrPointer<int64_t>(ATTR_WITH_GRAD_INDEX);
@@ -1706,69 +2219,131 @@ static ge::graphStatus EngramFetchTilingFunc(gert::TilingContext* context)
             hybridMode = *hybridModePtr;
         }
     }
-    OP_TILING_CHECK(hybridMode != 0 && hybridMode != RAIL_MODE_ALIGNED,
-                    OP_LOGE(nodeName, "unsupported hybrid_mode: %ld", hybridMode), return ge::GRAPH_FAILED);
+}
 
-    if (isTraining) {
-        constexpr int64_t DISPATCH_DEFAULT_RANKS_PER_SUPERNODE = 128;
-        auto ranksPerSupernodePtr = attrs->GetAttrPointer<int64_t>(ATTR_RANKS_PER_SUPERNODE);
-        const bool attrSensed = ranksPerSupernodePtr != nullptr && *ranksPerSupernodePtr > 0 &&
-                                *ranksPerSupernodePtr <= static_cast<int64_t>(Mc2Kernel::MAX_QP_SIZE);
-        const int64_t ranksPerSupernode = attrSensed ? *ranksPerSupernodePtr : DISPATCH_DEFAULT_RANKS_PER_SUPERNODE;
-        const gert::StorageShape* railCtxShape = context->GetInputShape(COMM_CONTEXT_INDEX);
-        OP_TILING_CHECK(railCtxShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "commContext"),
-                        return ge::GRAPH_FAILED);
-        int64_t railCtxElems = railCtxShape->GetStorageShape().GetDim(0);
-        const gert::StorageShape* railSendShape = context->GetOutputShape(SEND_COUNTS_OUT_INDEX);
-        OP_TILING_CHECK(railSendShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "sendCountsOut"),
-                        return ge::GRAPH_FAILED);
-        int64_t railSendDim0 = railSendShape->GetStorageShape().GetDim(0);
-        int64_t railWorld = (railSendDim0 > 0 && railSendDim0 % SEND_COUNTS_ALIGN_FACTOR == 0) ?
-                                railSendDim0 / SEND_COUNTS_ALIGN_FACTOR :
-                                -1;
-        if (railWorld > ranksPerSupernode && railCtxElems == Mc2Kernel::CTX_RAIL_ELEMS) {
-            // 轨道分支：world > ranksPerSupernode（跨超节点轨道腿存在）且建链产物为平铺 rail ctx
-            OP_LOGI(nodeName, "Enter rail-aligned tiling func, world=%lld, ranksPerSupernode=%lld.", railWorld,
-                    ranksPerSupernode);
-            return EngramFetchRailAlignedTilingFunc(context);
-        }
-        OP_TILING_CHECK(railWorld > ranksPerSupernode && railCtxElems != Mc2Kernel::CTX_RAIL_ELEMS &&
-                            railCtxElems != 0 && (attrSensed || railCtxElems != Mc2Kernel::CTX_LEGACY_ELEMS),
-                        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                            nodeName, "comm_context", std::to_string(railCtxElems).c_str(),
-                            (std::string("world=") + std::to_string(railWorld) +
-                             " (>ranks_per_supernode=" + std::to_string(ranksPerSupernode) +
-                             ") requires flat rail ctx " + std::to_string(Mc2Kernel::CTX_RAIL_ELEMS) +
-                             " int32; rebuild ElasticBuffer under rail-aligned link setup (allow_hybrid_mode=True)")
-                                .c_str()),
-                        return ge::GRAPH_FAILED);
+/**
+ * @brief 训练态分轨建链判定：world > ranks_per_supernode 且建链产物为平铺 rail ctx 时选中 rail-aligned
+ * @param railAligned 输出：是否应转入rail-aligned tiling
+ */
+static ge::graphStatus ResolveEngramFetchRailAligned(const gert::TilingContext* context, bool isTraining,
+                                                     bool& railAligned)
+{
+    if (!isTraining) {
+        return ge::GRAPH_SUCCESS;
     }
+    const char* nodeName = context->GetNodeName();
+    auto attrs = context->GetAttrs();
+    OP_TILING_CHECK(attrs == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "attrs"), return ge::GRAPH_FAILED);
+    constexpr int64_t dispatchDefaultRanksPerSupernode = 128;
+    auto ranksPerSupernodePtr = attrs->GetAttrPointer<int64_t>(ATTR_RANKS_PER_SUPERNODE);
+    const bool attrSensed = ranksPerSupernodePtr != nullptr && *ranksPerSupernodePtr > 0 &&
+                            *ranksPerSupernodePtr <= static_cast<int64_t>(Mc2Kernel::MAX_QP_SIZE);
+    const int64_t ranksPerSupernode = attrSensed ? *ranksPerSupernodePtr : dispatchDefaultRanksPerSupernode;
+    const gert::StorageShape* railCtxShape = context->GetInputShape(COMM_CONTEXT_INDEX);
+    OP_TILING_CHECK(railCtxShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "commContext"),
+                    return ge::GRAPH_FAILED);
+    int64_t railCtxElems = railCtxShape->GetStorageShape().GetDim(0);
+    const gert::StorageShape* railSendShape = context->GetOutputShape(SEND_COUNTS_OUT_INDEX);
+    OP_TILING_CHECK(railSendShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "sendCountsOut"),
+                    return ge::GRAPH_FAILED);
+    int64_t railSendDim0 = railSendShape->GetStorageShape().GetDim(0);
+    int64_t railWorld = (railSendDim0 > 0 && railSendDim0 % SEND_COUNTS_ALIGN_FACTOR == 0) ?
+                            railSendDim0 / SEND_COUNTS_ALIGN_FACTOR :
+                            -1;
+    if (railWorld > ranksPerSupernode && railCtxElems == Mc2Kernel::CTX_RAIL_ELEMS) {
+        // 轨道分支：world > ranksPerSupernode（跨超节点轨道腿存在）且建链产物为平铺 rail ctx
+        OP_LOGI(nodeName, "Enter rail-aligned tiling func, world=%lld, ranksPerSupernode=%lld.", railWorld,
+                ranksPerSupernode);
+        railAligned = true;
+        return ge::GRAPH_SUCCESS;
+    }
+    OP_TILING_CHECK(railWorld > ranksPerSupernode && railCtxElems != Mc2Kernel::CTX_RAIL_ELEMS && railCtxElems != 0 &&
+                        (attrSensed || railCtxElems != Mc2Kernel::CTX_LEGACY_ELEMS),
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        nodeName, "comm_context", std::to_string(railCtxElems).c_str(),
+                        (std::string("world=") + std::to_string(railWorld) +
+                         " (>ranks_per_supernode=" + std::to_string(ranksPerSupernode) + ") requires flat rail ctx " +
+                         std::to_string(Mc2Kernel::CTX_RAIL_ELEMS) +
+                         " int32; rebuild ElasticBuffer under rail-aligned link setup (allow_hybrid_mode=True)")
+                            .c_str()),
+                    return ge::GRAPH_FAILED);
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief 张量/属性/SF张量/训练参数校验
+ */
+static ge::graphStatus CheckEngramFetchTensorsAndAttrs(const gert::TilingContext* context, bool isTraining,
+                                                       int64_t& numTokens)
+{
+    const char* nodeName = context->GetNodeName();
 
     // 1. tensor check (ptr + dtype + shape + format)
-    int64_t numTokens = 0;
     OP_TILING_CHECK(TilingCheckEngramFetch(context, numTokens) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "check input/output failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "check input/output failed."), return ge::GRAPH_FAILED);
 
     // 2. attr check
-    OP_TILING_CHECK(CheckAttrs(context) != ge::GRAPH_SUCCESS, OP_LOGE(nodeName, "check attrs failed."),
+    OP_TILING_CHECK(CheckAttrs(context) != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(nodeName, "check attrs failed."),
                     return ge::GRAPH_FAILED);
 
     // 2.1 SF tensor contract check
+    auto attrs = context->GetAttrs();
     auto numEntriesPerRankPtr = attrs->GetAttrPointer<int64_t>(ATTR_NUM_ENTRIES_PER_RANK_INDEX);
     OP_TILING_CHECK(numEntriesPerRankPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "num_entries_per_rank"),
                     return ge::GRAPH_FAILED);
     OP_TILING_CHECK(CheckSfTensors(context, isTraining, numTokens, *numEntriesPerRankPtr) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "check sf tensors failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "check sf tensors failed."), return ge::GRAPH_FAILED);
 
     // 2.2 training params check
     if (isTraining) {
         OP_TILING_CHECK(CheckTrainingParams(context, numTokens) != ge::GRAPH_SUCCESS,
-                        OP_LOGE(nodeName, "check training params failed."), return ge::GRAPH_FAILED);
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "check training params failed."), return ge::GRAPH_FAILED);
     }
+
+    return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief engram_fetch算子的tiling函数
+ */
+static ge::graphStatus EngramFetchTilingFunc(gert::TilingContext* context)
+{
+    const char* nodeName = (context != nullptr) ? context->GetNodeName() : "engram_fetch";
+    OP_TILING_CHECK(context == nullptr, OP_LOGE(nodeName, "failed to get tiling context."), return ge::GRAPH_FAILED);
+    // nodeName 为空时不可作为 OP_LOGE_WITH_INVALID_INPUT 的 entityName 实参（宏内 std::string(nullptr) 为
+    // UB），用入口字面量兜底
+    OP_TILING_CHECK(nodeName == nullptr, OP_LOGE_WITH_INVALID_INPUT("engram_fetch_tiling", "nodeName"),
+                    return ge::GRAPH_FAILED);
+
+    OP_LOGI(nodeName, "Enter tiling check func.");
+
+    EngramFetchTilingData* tilingData = context->GetTilingData<EngramFetchTilingData>();
+    OP_TILING_CHECK(tilingData == nullptr, OP_LOGE_WITH_INVALID_INPUT(nodeName, "tilingData"), return ge::GRAPH_FAILED);
+
+    bool isTraining = false;
+    int64_t hybridMode = 0;
+    ParseEngramFetchAttrs(context, isTraining, hybridMode);
+    OP_TILING_CHECK(hybridMode != 0 && hybridMode != RAIL_MODE_ALIGNED,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "hybrid_mode", std::to_string(hybridMode).c_str(),
+                                                          "supported values: 0 (disabled) or 1 (rail-aligned)"),
+                    return ge::GRAPH_FAILED);
+
+    bool railAligned = false;
+    OP_TILING_CHECK(ResolveEngramFetchRailAligned(context, isTraining, railAligned) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "ResolveEngramFetchRailAligned failed."), return ge::GRAPH_FAILED);
+    if (railAligned) {
+        return EngramFetchRailAlignedTilingFunc(context);
+    }
+
+    int64_t numTokens = 0;
+    OP_TILING_CHECK(CheckEngramFetchTensorsAndAttrs(context, isTraining, numTokens) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "CheckEngramFetchTensorsAndAttrs failed."),
+                    return ge::GRAPH_FAILED);
 
     // 3. platform info
     OP_TILING_CHECK(SetPlatformInfo(context, *tilingData, isTraining) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "set platform info failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "set platform info failed."), return ge::GRAPH_FAILED);
 
     if (isTraining) {
         auto schedRet = context->SetScheduleMode(1);
@@ -1778,14 +2353,14 @@ static ge::graphStatus EngramFetchTilingFunc(gert::TilingContext* context)
 
     // 4. set tiling data
     OP_TILING_CHECK(SetTilingData(context, *tilingData, numTokens, isTraining) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "set tiling data failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "set tiling data failed."), return ge::GRAPH_FAILED);
 
     // 5. set tiling key
     SetTilingKey(context, isTraining, hybridMode);
 
     // 6. set workspace
     OP_TILING_CHECK(SetWorkSpace(context, *tilingData, isTraining) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "set workspace failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE_WITHOUT_REPORT(nodeName, "set workspace failed."), return ge::GRAPH_FAILED);
 
     // 7. print info
     PrintEngramFetchTilingData(tilingData, nodeName);

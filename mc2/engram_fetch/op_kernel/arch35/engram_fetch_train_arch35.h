@@ -10,6 +10,7 @@
 
 #ifndef ENGRAM_FETCH_TRAIN_ARCH35_H
 #define ENGRAM_FETCH_TRAIN_ARCH35_H
+// 注：核内多流水同步暂保留 SetFlag/WaitFlag（950 代际存量口径），后续迭代迁移 AscendC::Mutex。
 
 #if __has_include("version/asc_devkit_version.h") && __has_include("version/hcomm_version.h")
 #include "version/asc_devkit_version.h"
@@ -95,16 +96,28 @@ private:
                                        GM_ADDR recvLocalEntryOut, GM_ADDR numRecvOut, GM_ADDR workspaceGM,
                                        GM_ADDR localStorageAddr, GM_ADDR sfTableAddr, TPipe* pipe,
                                        const EngramFetchTilingData* tilingData);
+    __aicore__ inline void InitCommContext(GM_ADDR commContext);
+    __aicore__ inline void InitTilingScalars(const EngramFetchTilingData* tilingData);
+    template <bool HasSf>
+    __aicore__ inline void InitSfMembers(GM_ADDR sfTableAddr, const EngramFetchTilingData* tilingData);
+    __aicore__ inline void DeriveSendCoreLayout();
     __aicore__ inline void InitWinLayout();
+    __aicore__ inline void ComputeWinAreas(uint64_t remaining, uint64_t& indicesArea, uint64_t& tokenArea);
     __aicore__ inline void InitCoreRoles();
     __aicore__ inline void InitHcommAndPipe();
     __aicore__ inline void InitWorkspaceLayout(const EngramFetchTilingData* tilingData);
     __aicore__ inline void InitUbBuffers();
+    __aicore__ inline void InitIndexAndCompareUbBuffers();
     __aicore__ inline void InitFlagsAndCounters();
 
     __aicore__ inline void CountAndSortPhase();
     __aicore__ inline void SortInputIndices();
     __aicore__ inline void CountSendCountsFromSorted();
+    __aicore__ inline void CountRangeOwners(uint32_t lo, uint32_t hi, LocalTensor<int32_t> cntUb);
+    __aicore__ inline void CountBatchOwners(uint32_t batch, LocalTensor<int32_t> idsUb, LocalTensor<int32_t> ownerUb,
+                                            LocalTensor<int32_t> divisorUb, LocalTensor<int32_t> compactUb,
+                                            LocalTensor<uint8_t> maskUb, LocalTensor<int32_t> cntUb);
+    __aicore__ inline void WritePartialCounts(LocalTensor<int32_t> cntUb);
     __aicore__ inline void WriteSendCount(uint32_t ownerRank, int32_t myCount);
     __aicore__ inline void ComputeSdisplsLocal();
 
@@ -115,6 +128,16 @@ private:
     __aicore__ inline void LocalReadTablePerTokenSlow(int64_t batchLen);
     template <bool HasSf>
     __aicore__ inline void LocalReadTablePerTokenPipe(int64_t batchLen, uint32_t hiddenBytesU32);
+    template <bool HasSf>
+    __aicore__ inline uint32_t LoadTokenPipeSlot(LocalTensor<uint8_t> slotBase, const LocalTensor<int32_t>& indicesUb,
+                                                 const LocalTensor<uint32_t>& tokenIdxUb,
+                                                 LocalTensor<uint64_t> dstAddrUb, int64_t& jj, int64_t batchLen,
+                                                 uint32_t depth, uint32_t dataTileStride, uint32_t sfUbStride,
+                                                 uint32_t sfBytesU32, uint32_t hiddenBytesU32);
+    template <bool HasSf>
+    __aicore__ inline void StoreTokenPipeSlot(LocalTensor<uint8_t> slotBase, LocalTensor<uint64_t> dstAddrUb,
+                                              uint32_t n, uint32_t depth, uint32_t dataTileStride, uint32_t sfUbStride,
+                                              uint32_t sfBytesU32, uint32_t hiddenBytesU32);
     template <bool HasSf>
     __aicore__ inline bool GetLocalRowAddr(const LocalTensor<int32_t>& indicesUb,
                                            const LocalTensor<uint32_t>& tokenIdxUb, int64_t j, GM_ADDR& src,
@@ -134,13 +157,35 @@ private:
     template <bool HasSf>
     __aicore__ inline void LocalReadTableAndSendLocal(uint32_t subIdx, int32_t sendCount, uint32_t indicesBufCap);
     template <bool HasSf>
+    __aicore__ inline void IssueLocalReadChunk(uint32_t chunkLen, int64_t cur, LocalTensor<int32_t> indicesUb,
+                                               LocalTensor<uint32_t> tokenIdxUb, GlobalTensor<int32_t> sortedGM,
+                                               GlobalTensor<uint32_t> tokenIdxBatchGM);
+    template <bool HasSf>
     __aicore__ inline void LocalReadTableAndSendRemote(uint32_t subIdx, uint32_t dstRank, int32_t sendCount,
                                                        int64_t rdispl, uint32_t indicesBufCap);
+    __aicore__ inline void WaitRemoteCreditSlot(uint32_t dstRank, uint32_t subIdx, uint32_t totalSent,
+                                                uint32_t indicesBufCap, int32_t& remoteReadCnt);
+    template <bool HasSf>
+    __aicore__ inline void SendRemoteChunk(uint64_t handle, GM_ADDR remoteCounterAddr, GM_ADDR remoteSubIdxBase,
+                                           uint32_t dstRank, uint32_t totalSent, uint32_t chunkLen, int64_t cur,
+                                           LocalTensor<int32_t> indicesUb, GlobalTensor<int32_t> recvGM);
     __aicore__ inline GM_ADDR GetTableRowSrc(int32_t globalIdx, uint32_t numEntriesU32);
     __aicore__ inline GM_ADDR GetSfRowSrc(int32_t globalIdx, uint32_t numEntriesU32);
     template <bool HasSf>
     __aicore__ inline void GatherRowsToStaging(const LocalTensor<int32_t>& indicesUb, int64_t stagingRowBase,
                                                uint32_t chunkLen);
+    template <bool HasSf>
+    __aicore__ inline void GatherSlowRows(const LocalTensor<int32_t>& indicesUb, GM_ADDR stagingBase, uint32_t chunkLen,
+                                          uint32_t numEntriesU32, uint64_t hiddenBytesU64);
+    template <bool HasSf>
+    __aicore__ inline void LoadGatherTile(LocalTensor<uint8_t> tileBuf, const LocalTensor<int32_t>& indicesUb,
+                                          uint32_t k, uint32_t batchLen, uint32_t numEntriesU32,
+                                          uint32_t hiddenBytesU32, uint32_t sfBytesU32, uint32_t dataTileStride,
+                                          uint32_t sfTileStride, uint32_t sfBaseOff);
+    template <bool HasSf>
+    __aicore__ inline void StoreGatherTile(LocalTensor<uint8_t> tileBuf, GM_ADDR batchStaging, uint32_t batchLen,
+                                           uint32_t hiddenBytesU32, uint32_t sfBytesU32, uint32_t dataTileStride,
+                                           uint32_t sfTileStride, uint32_t sfBaseOff, uint64_t hiddenBytesU64);
     template <bool HasSf>
     __aicore__ inline void ExchangeTokenWithLocalRead();
     template <bool HasSf>
@@ -158,6 +203,16 @@ private:
     __aicore__ inline void ScatterRowsBatched(GM_ADDR dataSrc, GM_ADDR dataDst, GM_ADDR sfSrc, GM_ADDR sfDst,
                                               uint32_t dataRowBytes, uint32_t sfRowBytes, uint32_t srcStride,
                                               uint32_t batchLen, const LocalTensor<uint32_t>& tokenIdxUb);
+    template <bool HasSf>
+    __aicore__ inline void LoadScatterTile(LocalTensor<uint8_t> batchBuf, GM_ADDR dataSrc, GM_ADDR sfSrc, uint32_t j,
+                                           uint32_t tileRows, uint32_t srcStride, uint32_t dataRowBytes,
+                                           uint32_t sfRowBytes, uint32_t dataTileStride, uint32_t rowTileBytes,
+                                           bool bulkLoad);
+    template <bool HasSf>
+    __aicore__ inline void StoreScatterTile(LocalTensor<uint8_t> batchBuf, GM_ADDR dataDst, GM_ADDR sfDst,
+                                            const LocalTensor<uint32_t>& tokenIdxUb, uint32_t j, uint32_t tileRows,
+                                            uint32_t dataRowBytes, uint32_t sfRowBytes, uint32_t dataTileStride,
+                                            uint32_t rowTileBytes);
     __aicore__ inline void EnsureCachedTotalRecv();
     __aicore__ inline uint32_t CalcMyShareCount(uint32_t subIdx, uint32_t totalU32, uint32_t& myStart);
     __aicore__ inline void WaitAllStatusFlags(GM_ADDR statusWinBase, uint32_t expectCount);
@@ -325,14 +380,32 @@ __aicore__ inline void EngramFetchTrainArch35::InitMembers(GM_ADDR commContext, 
     aivId_ = GetBlockIdx();
     totalBlocks_ = GetBlockNum();
 
+    InitCommContext(commContext);
+    InitTilingScalars(tilingData);
+
+    AscendC::GlobalTensor<int64_t> localStorageTensor;
+    localStorageTensor.SetGlobalBuffer((__gm__ int64_t*)localStorageAddr);
+    localStorageAddr_ = static_cast<uint64_t>(localStorageTensor.GetValue(0));
+
+    InitSfMembers<HasSf>(sfTableAddr, tilingData);
+    DeriveSendCoreLayout();
+}
+
+__aicore__ inline void EngramFetchTrainArch35::InitCommContext(GM_ADDR commContext)
+{
     ctxPtr_ = (__gm__ EngramCommContext*)commContext;
     rankId_ = ctxPtr_->rankId;
     numRanks_ = ctxPtr_->rankSize;
+    // 全文件多处 numRanks_ 作除数（channelIdx/groupSize/slotSize 等），必须非零；与 grad 侧 InitCommContext 守卫对齐
+    ascendc_assert(numRanks_ != 0U, "invalid rankSize: commContext.rankSize must be > 0");
     channelsPerRank_ = ctxPtr_->channelsPerRank;
     if (channelsPerRank_ == 0) {
         channelsPerRank_ = 1;
     }
+}
 
+__aicore__ inline void EngramFetchTrainArch35::InitTilingScalars(const EngramFetchTilingData* tilingData)
+{
     numEntriesPerRank_ = tilingData->numEntriesPerRank;
     numTokens_ = static_cast<uint32_t>(tilingData->numTokens);
     hiddenBytes_ = tilingData->hiddenBytes;
@@ -340,11 +413,12 @@ __aicore__ inline void EngramFetchTrainArch35::InitMembers(GM_ADDR commContext, 
     winSize_ = tilingData->commBufferSize;
     sortNumTileData_ = tilingData->sortNumTileData;
     sortTmpUbSize_ = tilingData->sortTmpUbSize;
+}
 
-    AscendC::GlobalTensor<int64_t> localStorageTensor;
-    localStorageTensor.SetGlobalBuffer((__gm__ int64_t*)localStorageAddr);
-    localStorageAddr_ = static_cast<uint64_t>(localStorageTensor.GetValue(0));
-
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::InitSfMembers(GM_ADDR sfTableAddr,
+                                                             const EngramFetchTilingData* tilingData)
+{
     numSfPacks_ = tilingData->numSfPacks;
     sfElemSize_ = tilingData->sfElemSize;
     sfBytes_ = static_cast<uint64_t>(numSfPacks_) * static_cast<uint64_t>(sfElemSize_);
@@ -354,7 +428,10 @@ __aicore__ inline void EngramFetchTrainArch35::InitMembers(GM_ADDR commContext, 
         sfTableGM_ = reinterpret_cast<__gm__ uint8_t*>(static_cast<uint64_t>(sfAddrTensor.GetValue(0)));
     }
     rowStride_ = HasSf ? (static_cast<uint64_t>(hiddenBytes_) + sfBytes_) : static_cast<uint64_t>(hiddenBytes_);
+}
 
+__aicore__ inline void EngramFetchTrainArch35::DeriveSendCoreLayout()
+{
     numSendCores_ = totalBlocks_ / 2U;
     if (numSendCores_ == 0U) {
         numSendCores_ = 1U;
@@ -400,16 +477,9 @@ __aicore__ inline void EngramFetchTrainArch35::InitWinLayout()
     sendCountOffset_ = offset;
     offset += indicesCounterSize;
 
-    uint64_t indicesAreaRaw = remaining / INDICES_RATIO;
-    uint64_t indicesGranularity = static_cast<uint64_t>(numRanks_) * NUM_SLOTS * UB_ALIGN;
-    uint64_t indicesArea = Ceil(indicesAreaRaw, indicesGranularity) * indicesGranularity;
-    uint64_t tokenAreaRaw = (remaining > indicesArea) ? (remaining - indicesArea) : 0U;
-    uint64_t tokenGranularity = static_cast<uint64_t>(numRanks_) * totalSlots_ * rowStride_;
-    uint64_t tokenArea =
-        (tokenGranularity > 0U) ? Ceil(tokenAreaRaw, tokenGranularity) * tokenGranularity : tokenAreaRaw;
-    if (tokenArea > tokenAreaRaw) {
-        tokenArea = (tokenAreaRaw / tokenGranularity) * tokenGranularity;
-    }
+    uint64_t indicesArea = 0;
+    uint64_t tokenArea = 0;
+    ComputeWinAreas(remaining, indicesArea, tokenArea);
 
     indicesDataOffset_ = offset;
     tokenDataOffset_ = indicesDataOffset_ + indicesArea;
@@ -426,6 +496,20 @@ __aicore__ inline void EngramFetchTrainArch35::InitWinLayout()
     maxIndicesPerSlot_ = (maxIndicesPerSlot_ == 0U) ? 1U : maxIndicesPerSlot_;
     if (maxTokensPerSlot_ == 0U) {
         maxTokensPerSlot_ = 1U;
+    }
+}
+
+__aicore__ inline void EngramFetchTrainArch35::ComputeWinAreas(uint64_t remaining, uint64_t& indicesArea,
+                                                               uint64_t& tokenArea)
+{
+    uint64_t indicesAreaRaw = remaining / INDICES_RATIO;
+    uint64_t indicesGranularity = static_cast<uint64_t>(numRanks_) * NUM_SLOTS * UB_ALIGN;
+    indicesArea = Ceil(indicesAreaRaw, indicesGranularity) * indicesGranularity;
+    uint64_t tokenAreaRaw = (remaining > indicesArea) ? (remaining - indicesArea) : 0U;
+    uint64_t tokenGranularity = static_cast<uint64_t>(numRanks_) * totalSlots_ * rowStride_;
+    tokenArea = (tokenGranularity > 0U) ? Ceil(tokenAreaRaw, tokenGranularity) * tokenGranularity : tokenAreaRaw;
+    if (tokenArea > tokenAreaRaw) {
+        tokenArea = (tokenAreaRaw / tokenGranularity) * tokenGranularity;
     }
 }
 
@@ -522,6 +606,11 @@ __aicore__ inline void EngramFetchTrainArch35::InitUbBuffers()
     uint32_t tokenIdxInRankBufSize = Ceil(indicesBatchSize_ * sizeof(uint32_t), UB_ALIGN) * UB_ALIGN;
     tpipe_->InitBuffer(tokenIdxInRankBuf_, tokenIdxInRankBufSize);
 
+    InitIndexAndCompareUbBuffers();
+}
+
+__aicore__ inline void EngramFetchTrainArch35::InitIndexAndCompareUbBuffers()
+{
     uint32_t compareCntMax =
         Ceil(indicesBatchSize_ * sizeof(int32_t), ALIGNED_LEN_256) * ALIGNED_LEN_256 / sizeof(int32_t);
     compareCntMax_ = compareCntMax;
@@ -1094,54 +1183,76 @@ __aicore__ inline void EngramFetchTrainArch35::ScatterRowsBatched(GM_ADDR dataSr
             tileRows = rowsPerTile;
         }
         LocalTensor<uint8_t> batchBuf = relayQue_.AllocTensor<uint8_t>();
-        if (bulkLoad) {
-            GM_ADDR src = dataSrc + static_cast<uint64_t>(j) * srcStride;
-            GlobalTensor<uint8_t> srcGm;
-            srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
-            DataCopyExtParams mte2Params{1U, tileRows * srcStride, 0U, 0U, 0U};
-            DataCopyPadExtParams<uint8_t> mte2Pad{false, 0, 0, 0};
-            DataCopyPad(batchBuf, srcGm, mte2Params, mte2Pad);
-        } else {
-            for (uint32_t i = 0U; i < tileRows; i++) {
-                GM_ADDR src = dataSrc + static_cast<uint64_t>(j + i) * srcStride;
-                GlobalTensor<uint8_t> srcGm;
-                srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
-                DataCopyExtParams loadParams{1U, dataRowBytes, 0U, 0U, 0U};
-                DataCopyPadExtParams<uint8_t> loadPad{false, 0, 0, 0};
-                DataCopyPad(batchBuf[i * rowTileBytes], srcGm, loadParams, loadPad);
-                if constexpr (HasSf) {
-                    GM_ADDR sfRowSrc = sfSrc + static_cast<uint64_t>(j + i) * srcStride;
-                    GlobalTensor<uint8_t> sfSrcGm;
-                    sfSrcGm.SetGlobalBuffer((__gm__ uint8_t*)sfRowSrc);
-                    DataCopyExtParams sfParams{1U, sfRowBytes, 0U, 0U, 0U};
-                    DataCopyPadExtParams<uint8_t> sfPad{false, 0, 0, 0};
-                    DataCopyPad(batchBuf[i * rowTileBytes + dataTileStride], sfSrcGm, sfParams, sfPad);
-                }
-            }
-        }
+        LoadScatterTile<HasSf>(batchBuf, dataSrc, sfSrc, j, tileRows, srcStride, dataRowBytes, sfRowBytes,
+                               dataTileStride, rowTileBytes, bulkLoad);
         relayQue_.EnQue<uint8_t>(batchBuf);
         batchBuf = relayQue_.DeQue<uint8_t>();
-        for (uint32_t k = 0; k < tileRows; k++) {
-            uint32_t originalIdx = tokenIdxUb.GetValue(j + k);
-            if (originalIdx >= numTokens_) {
-                continue;
-            }
-            uint32_t rowOff = k * rowTileBytes;
-            GlobalTensor<uint8_t> dstGm;
-            dstGm.SetGlobalBuffer((__gm__ uint8_t*)(dataDst + static_cast<uint64_t>(originalIdx) * dataRowBytes));
-            DataCopyParams mte3Params{1U, static_cast<uint16_t>(dataRowBytes), 0U, 0U};
-            DataCopyPad(dstGm, batchBuf[rowOff], mte3Params);
-            if constexpr (HasSf) {
-                GlobalTensor<uint8_t> sfDstGm;
-                sfDstGm.SetGlobalBuffer((__gm__ uint8_t*)(sfDst + static_cast<uint64_t>(originalIdx) * sfRowBytes));
-                DataCopyParams sfOutParams{1U, static_cast<uint16_t>(sfRowBytes), 0U, 0U};
-                DataCopyPad(sfDstGm, batchBuf[rowOff + dataTileStride], sfOutParams);
-            }
-        }
+        StoreScatterTile<HasSf>(batchBuf, dataDst, sfDst, tokenIdxUb, j, tileRows, dataRowBytes, sfRowBytes,
+                                dataTileStride, rowTileBytes);
         relayQue_.FreeTensor<uint8_t>(batchBuf);
         j += tileRows;
     }
     EngramFetchTrainSyncFunc<HardEvent::MTE3_S>();
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::LoadScatterTile(LocalTensor<uint8_t> batchBuf, GM_ADDR dataSrc,
+                                                               GM_ADDR sfSrc, uint32_t j, uint32_t tileRows,
+                                                               uint32_t srcStride, uint32_t dataRowBytes,
+                                                               uint32_t sfRowBytes, uint32_t dataTileStride,
+                                                               uint32_t rowTileBytes, bool bulkLoad)
+{
+    if (bulkLoad) {
+        GM_ADDR src = dataSrc + static_cast<uint64_t>(j) * srcStride;
+        GlobalTensor<uint8_t> srcGm;
+        srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
+        DataCopyExtParams mte2Params{1U, tileRows * srcStride, 0U, 0U, 0U};
+        DataCopyPadExtParams<uint8_t> mte2Pad{false, 0, 0, 0};
+        DataCopyPad(batchBuf, srcGm, mte2Params, mte2Pad);
+    } else {
+        for (uint32_t i = 0U; i < tileRows; i++) {
+            GM_ADDR src = dataSrc + static_cast<uint64_t>(j + i) * srcStride;
+            GlobalTensor<uint8_t> srcGm;
+            srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
+            DataCopyExtParams loadParams{1U, dataRowBytes, 0U, 0U, 0U};
+            DataCopyPadExtParams<uint8_t> loadPad{false, 0, 0, 0};
+            DataCopyPad(batchBuf[i * rowTileBytes], srcGm, loadParams, loadPad);
+            if constexpr (HasSf) {
+                GM_ADDR sfRowSrc = sfSrc + static_cast<uint64_t>(j + i) * srcStride;
+                GlobalTensor<uint8_t> sfSrcGm;
+                sfSrcGm.SetGlobalBuffer((__gm__ uint8_t*)sfRowSrc);
+                DataCopyExtParams sfParams{1U, sfRowBytes, 0U, 0U, 0U};
+                DataCopyPadExtParams<uint8_t> sfPad{false, 0, 0, 0};
+                DataCopyPad(batchBuf[i * rowTileBytes + dataTileStride], sfSrcGm, sfParams, sfPad);
+            }
+        }
+    }
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::StoreScatterTile(LocalTensor<uint8_t> batchBuf, GM_ADDR dataDst,
+                                                                GM_ADDR sfDst, const LocalTensor<uint32_t>& tokenIdxUb,
+                                                                uint32_t j, uint32_t tileRows, uint32_t dataRowBytes,
+                                                                uint32_t sfRowBytes, uint32_t dataTileStride,
+                                                                uint32_t rowTileBytes)
+{
+    for (uint32_t k = 0; k < tileRows; k++) {
+        uint32_t originalIdx = tokenIdxUb.GetValue(j + k);
+        if (originalIdx >= numTokens_) {
+            continue;
+        }
+        uint32_t rowOff = k * rowTileBytes;
+        GlobalTensor<uint8_t> dstGm;
+        dstGm.SetGlobalBuffer((__gm__ uint8_t*)(dataDst + static_cast<uint64_t>(originalIdx) * dataRowBytes));
+        DataCopyParams mte3Params{1U, static_cast<uint16_t>(dataRowBytes), 0U, 0U};
+        DataCopyPad(dstGm, batchBuf[rowOff], mte3Params);
+        if constexpr (HasSf) {
+            GlobalTensor<uint8_t> sfDstGm;
+            sfDstGm.SetGlobalBuffer((__gm__ uint8_t*)(sfDst + static_cast<uint64_t>(originalIdx) * sfRowBytes));
+            DataCopyParams sfOutParams{1U, static_cast<uint16_t>(sfRowBytes), 0U, 0U};
+            DataCopyPad(sfDstGm, batchBuf[rowOff + dataTileStride], sfOutParams);
+        }
+    }
 }
 
 template <bool HasSf>
@@ -1309,57 +1420,78 @@ __aicore__ inline void EngramFetchTrainArch35::LocalReadTablePerTokenPipe(int64_
         LocalTensor<uint8_t> slotBase = relayQue_.AllocTensor<uint8_t>();
 
         int64_t jj = chunkStart;
-        uint32_t n = 0;
-        while (jj < batchLen && n < depth) {
-            GM_ADDR src;
-            GM_ADDR dst;
-            GM_ADDR sfSrc;
-            GM_ADDR sfDst;
-            if (!GetLocalRowAddr<HasSf>(indicesUb, tokenIdxUb, jj, src, dst, sfSrc, sfDst)) {
-                jj++;
-                continue;
-            }
-            dstAddrUb.SetValue(n, reinterpret_cast<uint64_t>(dst));
-            GlobalTensor<uint8_t> srcGm;
-            srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
-            DataCopyExtParams dataInParams{1U, hiddenBytesU32, 0U, 0U, 0U};
-            DataCopyPadExtParams<uint8_t> dataInPad{false, 0, 0, 0};
-            DataCopyPad(slotBase[n * dataTileStride], srcGm, dataInParams, dataInPad);
-            if constexpr (HasSf) {
-                GlobalTensor<uint8_t> sfSrcGm;
-                sfSrcGm.SetGlobalBuffer((__gm__ uint8_t*)sfSrc);
-                DataCopyExtParams sfInParams{1U, sfBytesU32, 0U, 0U, 0U};
-                DataCopyPadExtParams<uint8_t> sfInPad{false, 0, 0, 0};
-                LocalTensor<uint8_t> sfInUb = slotBase.ReinterpretCast<uint8_t>();
-                DataCopyPad(sfInUb[depth * dataTileStride + n * sfUbStride], sfSrcGm, sfInParams, sfInPad);
-            }
-            n++;
-            jj++;
-        }
+        uint32_t n = LoadTokenPipeSlot<HasSf>(slotBase, indicesUb, tokenIdxUb, dstAddrUb, jj, batchLen, depth,
+                                              dataTileStride, sfUbStride, sfBytesU32, hiddenBytesU32);
         relayQue_.EnQue<uint8_t>(slotBase);
         slotBase = relayQue_.DeQue<uint8_t>();
 
-        for (uint32_t m = 0; m < n; m++) {
-            uint64_t dstVal = dstAddrUb.GetValue(m);
-            GlobalTensor<uint8_t> dstGm;
-            dstGm.SetGlobalBuffer((__gm__ uint8_t*)dstVal);
-            DataCopyExtParams dataOutParams{1U, hiddenBytesU32, 0U, 0U, 0U};
-            DataCopyPad(dstGm, slotBase[m * dataTileStride], dataOutParams);
-            if constexpr (HasSf) {
-                uint64_t tokenIdx =
-                    (dstVal - reinterpret_cast<uint64_t>(fetchedGM_)) / static_cast<uint64_t>(hiddenBytes_);
-                GlobalTensor<uint8_t> sfDstGm;
-                sfDstGm.SetGlobalBuffer((__gm__ uint8_t*)(fetchedSfGM_ + tokenIdx * sfBytes_));
-                LocalTensor<uint8_t> sfOutUb = slotBase.ReinterpretCast<uint8_t>();
-                DataCopyParams sfOutParams{1U, static_cast<uint16_t>(sfBytesU32), 0U, 0U};
-                DataCopyPad(sfDstGm, sfOutUb[depth * dataTileStride + m * sfUbStride], sfOutParams);
-            }
-        }
+        StoreTokenPipeSlot<HasSf>(slotBase, dstAddrUb, n, depth, dataTileStride, sfUbStride, sfBytesU32,
+                                  hiddenBytesU32);
         relayQue_.FreeTensor<uint8_t>(slotBase);
 
         chunkStart = jj;
     }
     EngramFetchTrainSyncFunc<HardEvent::MTE3_S>();
+}
+
+template <bool HasSf>
+__aicore__ inline uint32_t EngramFetchTrainArch35::LoadTokenPipeSlot(
+    LocalTensor<uint8_t> slotBase, const LocalTensor<int32_t>& indicesUb, const LocalTensor<uint32_t>& tokenIdxUb,
+    LocalTensor<uint64_t> dstAddrUb, int64_t& jj, int64_t batchLen, uint32_t depth, uint32_t dataTileStride,
+    uint32_t sfUbStride, uint32_t sfBytesU32, uint32_t hiddenBytesU32)
+{
+    uint32_t n = 0;
+    while (jj < batchLen && n < depth) {
+        GM_ADDR src;
+        GM_ADDR dst;
+        GM_ADDR sfSrc;
+        GM_ADDR sfDst;
+        if (!GetLocalRowAddr<HasSf>(indicesUb, tokenIdxUb, jj, src, dst, sfSrc, sfDst)) {
+            jj++;
+            continue;
+        }
+        dstAddrUb.SetValue(n, reinterpret_cast<uint64_t>(dst));
+        GlobalTensor<uint8_t> srcGm;
+        srcGm.SetGlobalBuffer((__gm__ uint8_t*)src);
+        DataCopyExtParams dataInParams{1U, hiddenBytesU32, 0U, 0U, 0U};
+        DataCopyPadExtParams<uint8_t> dataInPad{false, 0, 0, 0};
+        DataCopyPad(slotBase[n * dataTileStride], srcGm, dataInParams, dataInPad);
+        if constexpr (HasSf) {
+            GlobalTensor<uint8_t> sfSrcGm;
+            sfSrcGm.SetGlobalBuffer((__gm__ uint8_t*)sfSrc);
+            DataCopyExtParams sfInParams{1U, sfBytesU32, 0U, 0U, 0U};
+            DataCopyPadExtParams<uint8_t> sfInPad{false, 0, 0, 0};
+            LocalTensor<uint8_t> sfInUb = slotBase.ReinterpretCast<uint8_t>();
+            DataCopyPad(sfInUb[depth * dataTileStride + n * sfUbStride], sfSrcGm, sfInParams, sfInPad);
+        }
+        n++;
+        jj++;
+    }
+    return n;
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::StoreTokenPipeSlot(LocalTensor<uint8_t> slotBase,
+                                                                  LocalTensor<uint64_t> dstAddrUb, uint32_t n,
+                                                                  uint32_t depth, uint32_t dataTileStride,
+                                                                  uint32_t sfUbStride, uint32_t sfBytesU32,
+                                                                  uint32_t hiddenBytesU32)
+{
+    for (uint32_t m = 0; m < n; m++) {
+        uint64_t dstVal = dstAddrUb.GetValue(m);
+        GlobalTensor<uint8_t> dstGm;
+        dstGm.SetGlobalBuffer((__gm__ uint8_t*)dstVal);
+        DataCopyExtParams dataOutParams{1U, hiddenBytesU32, 0U, 0U, 0U};
+        DataCopyPad(dstGm, slotBase[m * dataTileStride], dataOutParams);
+        if constexpr (HasSf) {
+            uint64_t tokenIdx = (dstVal - reinterpret_cast<uint64_t>(fetchedGM_)) / static_cast<uint64_t>(hiddenBytes_);
+            GlobalTensor<uint8_t> sfDstGm;
+            sfDstGm.SetGlobalBuffer((__gm__ uint8_t*)(fetchedSfGM_ + tokenIdx * sfBytes_));
+            LocalTensor<uint8_t> sfOutUb = slotBase.ReinterpretCast<uint8_t>();
+            DataCopyParams sfOutParams{1U, static_cast<uint16_t>(sfBytesU32), 0U, 0U};
+            DataCopyPad(sfDstGm, sfOutUb[depth * dataTileStride + m * sfUbStride], sfOutParams);
+        }
+    }
 }
 
 template <bool HasSf>
@@ -1395,18 +1527,28 @@ __aicore__ inline void EngramFetchTrainArch35::LocalReadTableAndSendLocal(uint32
             chunkLen = indicesBufCap;
         }
         int64_t cur = sdispl + myStart + totalSent;
-        DataCopyExtParams idxParams{1U, chunkLen * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
-        DataCopyPadExtParams<int32_t> idxPad{false, 0, 0, 0};
-        DataCopyPad(indicesUb, sortedGM[static_cast<uint32_t>(cur)], idxParams, idxPad);
-        AscendC::SetFlag<HardEvent::MTE2_S>(mte2SEvt_);
-        DataCopyExtParams permParams{1U, chunkLen * static_cast<uint32_t>(sizeof(uint32_t)), 0U, 0U, 0U};
-        DataCopyPadExtParams<uint32_t> permPad{false, 0, 0, 0};
-        DataCopyPad(tokenIdxUb, tokenIdxBatchGM[static_cast<uint32_t>(cur)], permParams, permPad);
-        EngramFetchTrainSyncFunc<HardEvent::MTE2_S>();
-        LocalReadTablePerToken<HasSf>(static_cast<int64_t>(chunkLen));
-        EngramFetchTrainSyncFunc<HardEvent::MTE3_S>();
+        IssueLocalReadChunk<HasSf>(chunkLen, cur, indicesUb, tokenIdxUb, sortedGM, tokenIdxBatchGM);
         totalSent += chunkLen;
     }
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::IssueLocalReadChunk(uint32_t chunkLen, int64_t cur,
+                                                                   LocalTensor<int32_t> indicesUb,
+                                                                   LocalTensor<uint32_t> tokenIdxUb,
+                                                                   GlobalTensor<int32_t> sortedGM,
+                                                                   GlobalTensor<uint32_t> tokenIdxBatchGM)
+{
+    DataCopyExtParams idxParams{1U, chunkLen * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
+    DataCopyPadExtParams<int32_t> idxPad{false, 0, 0, 0};
+    DataCopyPad(indicesUb, sortedGM[static_cast<uint32_t>(cur)], idxParams, idxPad);
+    AscendC::SetFlag<HardEvent::MTE2_S>(mte2SEvt_);
+    DataCopyExtParams permParams{1U, chunkLen * static_cast<uint32_t>(sizeof(uint32_t)), 0U, 0U, 0U};
+    DataCopyPadExtParams<uint32_t> permPad{false, 0, 0, 0};
+    DataCopyPad(tokenIdxUb, tokenIdxBatchGM[static_cast<uint32_t>(cur)], permParams, permPad);
+    EngramFetchTrainSyncFunc<HardEvent::MTE2_S>();
+    LocalReadTablePerToken<HasSf>(static_cast<int64_t>(chunkLen));
+    EngramFetchTrainSyncFunc<HardEvent::MTE3_S>();
 }
 
 __aicore__ inline GM_ADDR EngramFetchTrainArch35::GetTableRowSrc(int32_t globalIdx, uint32_t numEntriesU32)
@@ -1449,14 +1591,7 @@ __aicore__ inline void EngramFetchTrainArch35::GatherRowsToStaging(const LocalTe
     uint32_t rowTileBytes = dataTileStride + (HasSf ? sfTileStride : 0U);
     uint32_t rowsPerTile = (rowTileBytes == 0U) ? 0U : (tileBytes_ / rowTileBytes);
     if (hiddenBytesU32 == 0U || rowsPerTile == 0U) {
-        for (uint32_t k = 0U; k < chunkLen; k++) {
-            GM_ADDR rowSrc = GetTableRowSrc(indicesUb.GetValue(k), numEntriesU32);
-            LocalCopySlice(stagingBase + k * rowStride_, rowSrc, hiddenBytesU64);
-            if constexpr (HasSf) {
-                GM_ADDR sfRowSrc = GetSfRowSrc(indicesUb.GetValue(k), numEntriesU32);
-                LocalCopySlice(stagingBase + k * rowStride_ + hiddenBytesU64, sfRowSrc, sfBytes_);
-            }
-        }
+        GatherSlowRows<HasSf>(indicesUb, stagingBase, chunkLen, numEntriesU32, hiddenBytesU64);
         return;
     }
 
@@ -1468,44 +1603,82 @@ __aicore__ inline void EngramFetchTrainArch35::GatherRowsToStaging(const LocalTe
         }
         LocalTensor<uint8_t> tileBuf = relayQue_.AllocTensor<uint8_t>();
         uint32_t sfBaseOff = batchLen * dataTileStride;
-        for (uint32_t i = 0U; i < batchLen; i++) {
-            int32_t globalIdx = indicesUb.GetValue(k + i);
-            uint32_t dataOff = i * dataTileStride;
-            GM_ADDR rowSrc = GetTableRowSrc(globalIdx, numEntriesU32);
-            GlobalTensor<uint8_t> srcGm;
-            srcGm.SetGlobalBuffer((__gm__ uint8_t*)rowSrc);
-            DataCopyExtParams dataParams{1U, hiddenBytesU32, 0U, 0U, 0U};
-            DataCopyPadExtParams<uint8_t> dataPad{false, 0, 0, 0};
-            DataCopyPad(tileBuf[dataOff], srcGm, dataParams, dataPad);
-            if constexpr (HasSf) {
-                GM_ADDR sfRowSrc = GetSfRowSrc(globalIdx, numEntriesU32);
-                GlobalTensor<uint8_t> sfSrcGm;
-                sfSrcGm.SetGlobalBuffer((__gm__ uint8_t*)sfRowSrc);
-                DataCopyExtParams sfParams{1U, sfBytesU32, 0U, 0U, 0U};
-                DataCopyPadExtParams<uint8_t> sfPad{false, 0, 0, 0};
-                DataCopyPad(tileBuf[sfBaseOff + i * sfTileStride], sfSrcGm, sfParams, sfPad);
-            }
-        }
+        LoadGatherTile<HasSf>(tileBuf, indicesUb, k, batchLen, numEntriesU32, hiddenBytesU32, sfBytesU32,
+                              dataTileStride, sfTileStride, sfBaseOff);
         relayQue_.EnQue<uint8_t>(tileBuf);
         tileBuf = relayQue_.DeQue<uint8_t>();
         GM_ADDR batchStaging = stagingBase + static_cast<uint64_t>(k) * rowStride_;
-        for (uint32_t i = 0U; i < batchLen; i++) {
-            GM_ADDR rowDst = batchStaging + static_cast<uint64_t>(i) * rowStride_;
-            GlobalTensor<uint8_t> dstGm;
-            dstGm.SetGlobalBuffer((__gm__ uint8_t*)rowDst);
-            DataCopyExtParams storeParams{1U, hiddenBytesU32, 0U, 0U, 0U};
-            DataCopyPad(dstGm, tileBuf[i * dataTileStride], storeParams);
-            if constexpr (HasSf) {
-                GlobalTensor<uint8_t> sfDstGm;
-                sfDstGm.SetGlobalBuffer((__gm__ uint8_t*)(rowDst + hiddenBytesU64));
-                DataCopyExtParams sfStoreParams{1U, sfBytesU32, 0U, 0U, 0U};
-                DataCopyPad(sfDstGm, tileBuf[sfBaseOff + i * sfTileStride], sfStoreParams);
-            }
-        }
+        StoreGatherTile<HasSf>(tileBuf, batchStaging, batchLen, hiddenBytesU32, sfBytesU32, dataTileStride,
+                               sfTileStride, sfBaseOff, hiddenBytesU64);
         relayQue_.FreeTensor<uint8_t>(tileBuf);
         k += batchLen;
     }
     EngramFetchTrainSyncFunc<HardEvent::MTE3_S>();
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::GatherSlowRows(const LocalTensor<int32_t>& indicesUb,
+                                                              GM_ADDR stagingBase, uint32_t chunkLen,
+                                                              uint32_t numEntriesU32, uint64_t hiddenBytesU64)
+{
+    for (uint32_t k = 0U; k < chunkLen; k++) {
+        GM_ADDR rowSrc = GetTableRowSrc(indicesUb.GetValue(k), numEntriesU32);
+        LocalCopySlice(stagingBase + k * rowStride_, rowSrc, hiddenBytesU64);
+        if constexpr (HasSf) {
+            GM_ADDR sfRowSrc = GetSfRowSrc(indicesUb.GetValue(k), numEntriesU32);
+            LocalCopySlice(stagingBase + k * rowStride_ + hiddenBytesU64, sfRowSrc, sfBytes_);
+        }
+    }
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::LoadGatherTile(LocalTensor<uint8_t> tileBuf,
+                                                              const LocalTensor<int32_t>& indicesUb, uint32_t k,
+                                                              uint32_t batchLen, uint32_t numEntriesU32,
+                                                              uint32_t hiddenBytesU32, uint32_t sfBytesU32,
+                                                              uint32_t dataTileStride, uint32_t sfTileStride,
+                                                              uint32_t sfBaseOff)
+{
+    for (uint32_t i = 0U; i < batchLen; i++) {
+        int32_t globalIdx = indicesUb.GetValue(k + i);
+        uint32_t dataOff = i * dataTileStride;
+        GM_ADDR rowSrc = GetTableRowSrc(globalIdx, numEntriesU32);
+        GlobalTensor<uint8_t> srcGm;
+        srcGm.SetGlobalBuffer((__gm__ uint8_t*)rowSrc);
+        DataCopyExtParams dataParams{1U, hiddenBytesU32, 0U, 0U, 0U};
+        DataCopyPadExtParams<uint8_t> dataPad{false, 0, 0, 0};
+        DataCopyPad(tileBuf[dataOff], srcGm, dataParams, dataPad);
+        if constexpr (HasSf) {
+            GM_ADDR sfRowSrc = GetSfRowSrc(globalIdx, numEntriesU32);
+            GlobalTensor<uint8_t> sfSrcGm;
+            sfSrcGm.SetGlobalBuffer((__gm__ uint8_t*)sfRowSrc);
+            DataCopyExtParams sfParams{1U, sfBytesU32, 0U, 0U, 0U};
+            DataCopyPadExtParams<uint8_t> sfPad{false, 0, 0, 0};
+            DataCopyPad(tileBuf[sfBaseOff + i * sfTileStride], sfSrcGm, sfParams, sfPad);
+        }
+    }
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::StoreGatherTile(LocalTensor<uint8_t> tileBuf, GM_ADDR batchStaging,
+                                                               uint32_t batchLen, uint32_t hiddenBytesU32,
+                                                               uint32_t sfBytesU32, uint32_t dataTileStride,
+                                                               uint32_t sfTileStride, uint32_t sfBaseOff,
+                                                               uint64_t hiddenBytesU64)
+{
+    for (uint32_t i = 0U; i < batchLen; i++) {
+        GM_ADDR rowDst = batchStaging + static_cast<uint64_t>(i) * rowStride_;
+        GlobalTensor<uint8_t> dstGm;
+        dstGm.SetGlobalBuffer((__gm__ uint8_t*)rowDst);
+        DataCopyExtParams storeParams{1U, hiddenBytesU32, 0U, 0U, 0U};
+        DataCopyPad(dstGm, tileBuf[i * dataTileStride], storeParams);
+        if constexpr (HasSf) {
+            GlobalTensor<uint8_t> sfDstGm;
+            sfDstGm.SetGlobalBuffer((__gm__ uint8_t*)(rowDst + hiddenBytesU64));
+            DataCopyExtParams sfStoreParams{1U, sfBytesU32, 0U, 0U, 0U};
+            DataCopyPad(sfDstGm, tileBuf[sfBaseOff + i * sfTileStride], sfStoreParams);
+        }
+    }
 }
 
 template <bool HasSf>
@@ -1530,23 +1703,12 @@ __aicore__ inline void EngramFetchTrainArch35::LocalReadTableAndSendRemote(uint3
     LocalTensor<int32_t> indicesUb = indicesBuf_.Get<int32_t>();
     GlobalTensor<int32_t> recvGM;
     recvGM.SetGlobalBuffer((__gm__ int32_t*)recvLocalEntryOutGM_);
-    DataCopyPadExtParams<int32_t> idxPad{false, 0, 0, 0};
 
     uint32_t totalSent = 0;
     int32_t remoteReadCnt = 0;
     while (totalSent < myCount) {
-        if (totalBlocks_ > 1U) {
-            uint64_t startTime = static_cast<uint64_t>(AscendC::GetSystemCycle()) / ENGRAM_CYCLES_PER_US;
-            if (!creditReadInFlight_ &&
-                totalSent + indicesBufCap >= static_cast<uint32_t>(remoteReadCnt) + maxTokensPerSlot_) {
-                PrefetchCreditCounter(dstRank, tokenReadOffset_, subIdx, true);
-            }
-            while (totalSent >= static_cast<uint32_t>(remoteReadCnt) + maxTokensPerSlot_) {
-                PrefetchCreditCounter(dstRank, tokenReadOffset_, subIdx, true);
-                remoteReadCnt = CompleteCreditCounter(startTime, LOCAL_READ_TABLE_SEND_REMOTE_TIME_CHECK);
-                TimeoutCheck(startTime, LOCAL_READ_TABLE_SEND_REMOTE_TIME_CHECK);
-            }
-        }
+        WaitRemoteCreditSlot(dstRank, subIdx, totalSent, indicesBufCap, remoteReadCnt);
+
         uint32_t remaining = myCount - totalSent;
         uint32_t chunkLen = (remaining > indicesBufCap) ? indicesBufCap : remaining;
         uint32_t spaceToEnd = maxTokensPerSlot_ - (totalSent % maxTokensPerSlot_);
@@ -1558,23 +1720,53 @@ __aicore__ inline void EngramFetchTrainArch35::LocalReadTableAndSendRemote(uint3
         }
         ascendc_assert(chunkLen != 0U, "LocalReadTableAndSend chunkLen is 0");
         int64_t cur = static_cast<int64_t>(rdispl + myStart + totalSent);
-        DataCopyExtParams idxParams{1U, chunkLen * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
-        DataCopyPad(indicesUb, recvGM[static_cast<uint32_t>(cur)], idxParams, idxPad);
-        EngramFetchTrainSyncFunc<HardEvent::MTE2_S>();
-
-        GatherRowsToStaging<HasSf>(indicesUb, cur, chunkLen);
-
-        GM_ADDR stagingSrc = tokenStagingGM_ + static_cast<uint64_t>(cur) * rowStride_;
-        GM_ADDR rowDst = remoteSubIdxBase + static_cast<uint64_t>(totalSent % maxTokensPerSlot_) * rowStride_;
-        uint64_t sendBytes = static_cast<uint64_t>(chunkLen) * rowStride_;
-        int32_t ret = hcomm_.WriteWithNotifyNbi<true, PIPE_S, PIPE_MTE3, URMA_NO_CQE_FENCE_CFG>(
-            handle, rowDst, stagingSrc, sendBytes, remoteCounterAddr,
-            static_cast<uint64_t>(totalSent) + static_cast<uint64_t>(chunkLen));
-        ascendc_assert(ret == 0, "WriteWithNotifyNbi failed, ret=%d, tag=ExToken_data, rankId=%u, dstRank=%u", ret,
-                       rankId_, dstRank);
+        SendRemoteChunk<HasSf>(handle, remoteCounterAddr, remoteSubIdxBase, dstRank, totalSent, chunkLen, cur,
+                               indicesUb, recvGM);
         totalSent += chunkLen;
     }
     RetireCreditCounter();
+}
+
+__aicore__ inline void EngramFetchTrainArch35::WaitRemoteCreditSlot(uint32_t dstRank, uint32_t subIdx,
+                                                                    uint32_t totalSent, uint32_t indicesBufCap,
+                                                                    int32_t& remoteReadCnt)
+{
+    if (totalBlocks_ > 1U) {
+        uint64_t startTime = static_cast<uint64_t>(AscendC::GetSystemCycle()) / ENGRAM_CYCLES_PER_US;
+        if (!creditReadInFlight_ &&
+            totalSent + indicesBufCap >= static_cast<uint32_t>(remoteReadCnt) + maxTokensPerSlot_) {
+            PrefetchCreditCounter(dstRank, tokenReadOffset_, subIdx, true);
+        }
+        while (totalSent >= static_cast<uint32_t>(remoteReadCnt) + maxTokensPerSlot_) {
+            PrefetchCreditCounter(dstRank, tokenReadOffset_, subIdx, true);
+            remoteReadCnt = CompleteCreditCounter(startTime, LOCAL_READ_TABLE_SEND_REMOTE_TIME_CHECK);
+            TimeoutCheck(startTime, LOCAL_READ_TABLE_SEND_REMOTE_TIME_CHECK);
+        }
+    }
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainArch35::SendRemoteChunk(uint64_t handle, GM_ADDR remoteCounterAddr,
+                                                               GM_ADDR remoteSubIdxBase, uint32_t dstRank,
+                                                               uint32_t totalSent, uint32_t chunkLen, int64_t cur,
+                                                               LocalTensor<int32_t> indicesUb,
+                                                               GlobalTensor<int32_t> recvGM)
+{
+    DataCopyExtParams idxParams{1U, chunkLen * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
+    DataCopyPadExtParams<int32_t> idxPad{false, 0, 0, 0};
+    DataCopyPad(indicesUb, recvGM[static_cast<uint32_t>(cur)], idxParams, idxPad);
+    EngramFetchTrainSyncFunc<HardEvent::MTE2_S>();
+
+    GatherRowsToStaging<HasSf>(indicesUb, cur, chunkLen);
+
+    GM_ADDR stagingSrc = tokenStagingGM_ + static_cast<uint64_t>(cur) * rowStride_;
+    GM_ADDR rowDst = remoteSubIdxBase + static_cast<uint64_t>(totalSent % maxTokensPerSlot_) * rowStride_;
+    uint64_t sendBytes = static_cast<uint64_t>(chunkLen) * rowStride_;
+    int32_t ret = hcomm_.WriteWithNotifyNbi<true, PIPE_S, PIPE_MTE3, URMA_NO_CQE_FENCE_CFG>(
+        handle, rowDst, stagingSrc, sendBytes, remoteCounterAddr,
+        static_cast<uint64_t>(totalSent) + static_cast<uint64_t>(chunkLen));
+    ascendc_assert(ret == 0, "WriteWithNotifyNbi failed, ret=%d, tag=ExToken_data, rankId=%u, dstRank=%u", ret, rankId_,
+                   dstRank);
 }
 
 template <bool HasSf>
@@ -1665,59 +1857,75 @@ __aicore__ inline void EngramFetchTrainArch35::CountSendCountsFromSorted()
         hi = numTokens_;
     }
     if (lo < hi) {
-        LocalTensor<int32_t> idsUb = indicesBuf_.Get<int32_t>();
-        LocalTensor<int32_t> ownerUb = rankIDsBuf_.Get<int32_t>();
-        LocalTensor<int32_t> divisorUb = divisorBuf_.Get<int32_t>();
-        LocalTensor<int32_t> compactUb = gatherTmpBuf_.Get<int32_t>();
-        LocalTensor<uint8_t> maskUb = maskBuf_.Get<uint8_t>();
-        Duplicate<int32_t>(divisorUb, numEntriesPerRank_, compareCntMax_);
-        EngramFetchTrainSyncFunc<HardEvent::V_S>();
-
-        GlobalTensor<int32_t> sortedGM;
-        sortedGM.SetGlobalBuffer((__gm__ int32_t*)sortedIndicesGM_);
-        DataCopyPadExtParams<int32_t> pad{false, 0, 0, 0};
-        uint32_t done = 0U;
-        while (done < hi - lo) {
-            uint32_t batch = (hi - lo) - done;
-            if (batch > indicesBatchSize_) {
-                batch = indicesBatchSize_;
-            }
-            DataCopyExtParams cpParams{1U, batch * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
-            DataCopyPad(idsUb, sortedGM[lo + done], cpParams, pad);
-            EngramFetchTrainSyncFunc<HardEvent::MTE2_S>();
-
-            int32_t ownerFirst = idsUb.GetValue(0) / numEntriesPerRank_;
-            int32_t ownerLast = idsUb.GetValue(batch - 1U) / numEntriesPerRank_;
-            if (ownerFirst == ownerLast) {
-                uint32_t slot = (ownerFirst >= 0 && ownerFirst < static_cast<int32_t>(numRanks_)) ?
-                                    static_cast<uint32_t>(ownerFirst) :
-                                    0U;
-                cntUb.SetValue(slot, cntUb.GetValue(slot) + static_cast<int32_t>(batch));
-                done += batch;
-                continue;
-            }
-
-            Div<int32_t>(ownerUb, idsUb, divisorUb, batch);
-            PipeBarrier<PIPE_V>();
-            uint32_t batchCompareCnt = Ceil(batch * static_cast<uint32_t>(sizeof(int32_t)), ALIGNED_LEN_256) *
-                                       ALIGNED_LEN_256 / static_cast<uint32_t>(sizeof(int32_t));
-            int32_t matched = 0;
-            for (uint32_t r = 0; r < numRanks_; r++) {
-                CompareScalar(maskUb, ownerUb, static_cast<int32_t>(r), AscendC::CMPMODE::EQ, batchCompareCnt);
-                uint64_t rsvdCnt = 0;
-                GatherMask(compactUb, compactUb, maskUb.ReinterpretCast<uint32_t>(), true, batch, {1, 1, 0, 0},
-                           rsvdCnt);
-                EngramFetchTrainSyncFunc<HardEvent::V_S>();
-                cntUb.SetValue(r, cntUb.GetValue(r) + static_cast<int32_t>(rsvdCnt));
-                matched += static_cast<int32_t>(rsvdCnt);
-            }
-            if (matched < static_cast<int32_t>(batch)) {
-                cntUb.SetValue(0, cntUb.GetValue(0) + (static_cast<int32_t>(batch) - matched));
-            }
-            done += batch;
-        }
+        CountRangeOwners(lo, hi, cntUb);
     }
 
+    WritePartialCounts(cntUb);
+}
+
+__aicore__ inline void EngramFetchTrainArch35::CountRangeOwners(uint32_t lo, uint32_t hi, LocalTensor<int32_t> cntUb)
+{
+    LocalTensor<int32_t> idsUb = indicesBuf_.Get<int32_t>();
+    LocalTensor<int32_t> ownerUb = rankIDsBuf_.Get<int32_t>();
+    LocalTensor<int32_t> divisorUb = divisorBuf_.Get<int32_t>();
+    LocalTensor<int32_t> compactUb = gatherTmpBuf_.Get<int32_t>();
+    LocalTensor<uint8_t> maskUb = maskBuf_.Get<uint8_t>();
+    Duplicate<int32_t>(divisorUb, numEntriesPerRank_, compareCntMax_);
+    EngramFetchTrainSyncFunc<HardEvent::V_S>();
+
+    GlobalTensor<int32_t> sortedGM;
+    sortedGM.SetGlobalBuffer((__gm__ int32_t*)sortedIndicesGM_);
+    DataCopyPadExtParams<int32_t> pad{false, 0, 0, 0};
+    uint32_t done = 0U;
+    while (done < hi - lo) {
+        uint32_t batch = (hi - lo) - done;
+        if (batch > indicesBatchSize_) {
+            batch = indicesBatchSize_;
+        }
+        DataCopyExtParams cpParams{1U, batch * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
+        DataCopyPad(idsUb, sortedGM[lo + done], cpParams, pad);
+        EngramFetchTrainSyncFunc<HardEvent::MTE2_S>();
+
+        CountBatchOwners(batch, idsUb, ownerUb, divisorUb, compactUb, maskUb, cntUb);
+        done += batch;
+    }
+}
+
+__aicore__ inline void EngramFetchTrainArch35::CountBatchOwners(uint32_t batch, LocalTensor<int32_t> idsUb,
+                                                                LocalTensor<int32_t> ownerUb,
+                                                                LocalTensor<int32_t> divisorUb,
+                                                                LocalTensor<int32_t> compactUb,
+                                                                LocalTensor<uint8_t> maskUb, LocalTensor<int32_t> cntUb)
+{
+    int32_t ownerFirst = idsUb.GetValue(0) / numEntriesPerRank_;
+    int32_t ownerLast = idsUb.GetValue(batch - 1U) / numEntriesPerRank_;
+    if (ownerFirst == ownerLast) {
+        uint32_t slot =
+            (ownerFirst >= 0 && ownerFirst < static_cast<int32_t>(numRanks_)) ? static_cast<uint32_t>(ownerFirst) : 0U;
+        cntUb.SetValue(slot, cntUb.GetValue(slot) + static_cast<int32_t>(batch));
+        return;
+    }
+
+    Div<int32_t>(ownerUb, idsUb, divisorUb, batch);
+    PipeBarrier<PIPE_V>();
+    uint32_t batchCompareCnt = Ceil(batch * static_cast<uint32_t>(sizeof(int32_t)), ALIGNED_LEN_256) * ALIGNED_LEN_256 /
+                               static_cast<uint32_t>(sizeof(int32_t));
+    int32_t matched = 0;
+    for (uint32_t r = 0; r < numRanks_; r++) {
+        CompareScalar(maskUb, ownerUb, static_cast<int32_t>(r), AscendC::CMPMODE::EQ, batchCompareCnt);
+        uint64_t rsvdCnt = 0;
+        GatherMask(compactUb, compactUb, maskUb.ReinterpretCast<uint32_t>(), true, batch, {1, 1, 0, 0}, rsvdCnt);
+        EngramFetchTrainSyncFunc<HardEvent::V_S>();
+        cntUb.SetValue(r, cntUb.GetValue(r) + static_cast<int32_t>(rsvdCnt));
+        matched += static_cast<int32_t>(rsvdCnt);
+    }
+    if (matched < static_cast<int32_t>(batch)) {
+        cntUb.SetValue(0, cntUb.GetValue(0) + (static_cast<int32_t>(batch) - matched));
+    }
+}
+
+__aicore__ inline void EngramFetchTrainArch35::WritePartialCounts(LocalTensor<int32_t> cntUb)
+{
     EngramFetchTrainSyncFunc<HardEvent::S_MTE3>();
     GlobalTensor<int32_t> partialGM;
     partialGM.SetGlobalBuffer(

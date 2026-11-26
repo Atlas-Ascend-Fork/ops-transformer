@@ -86,7 +86,16 @@ private:
     }
 
     __aicore__ inline void LoadTilingData(const EngramFetchTilingData* t);
+    __aicore__ inline void SetupWinLayouts(const EngramFetchTilingData* t); // 双族布局（req 族在前、resp 族在后）
+    __aicore__ inline void ClampBatchRows();                                // 批行数按 65504B 预算收敛
+    __aicore__ inline void FinalizeStageRing();                             // 暂存环步距 = 两族批块取大
     __aicore__ inline void CalcWorkSpaceOffset(const EngramFetchTilingData* t);
+    __aicore__ inline int64_t AlignUpUb(int64_t x); // 32B 对齐（UB 侧目的地址前提）
+    __aicore__ inline int64_t CalcRelayCtlOffsets(int64_t off, const EngramFetchTilingData* t, int64_t world,
+                                                  int64_t cap, uint32_t aiv, uint32_t ranksPerSupernode,
+                                                  int64_t ringStride); // F 暂存环 + 三表
+    __aicore__ inline int64_t CalcSortWspOffsets(int64_t off, const EngramFetchTilingData* t,
+                                                 int64_t numTokens); // 排序 6 段
     __aicore__ inline void InitPipeAndBuffers();
     __aicore__ inline void InitCoreGroups();
 
@@ -104,7 +113,13 @@ private:
     __aicore__ inline void ClearGmRange(GM_ADDR base, int64_t r0, int64_t r1);
     __aicore__ inline void SortInputIndicesRail();
     __aicore__ inline void BucketClassify();
+    __aicore__ inline uint32_t ScanStrips(int64_t start, int64_t end, GM_ADDR strip); // 条带扫描 → 条带数
+    __aicore__ inline void EmitStripRun(GM_ADDR strip, uint32_t& runCnt, int32_t& curOwner, int64_t& runStart,
+                                        int64_t& runLen); // 单段出条带
     __aicore__ inline void MergeSegmentsBySGroup(bool accumulateCounts);
+    __aicore__ inline int32_t AreaKeyOf(int32_t dstRank); // 任务合并键（路由收件区编号）
+    __aicore__ inline void EmitMergedTask(int32_t& curDst, int64_t& runStart, int64_t& runLen,
+                                          uint32_t& taskCnt); // 出合并任务
     __aicore__ inline void BuildSendPrefix();
     __aicore__ inline void BuildRecvPrefixFinal();
 
@@ -123,13 +138,79 @@ private:
     __aicore__ inline void ScatterLocalRespRow(int32_t entry, uint32_t arrive);
     __aicore__ inline void SumRespCounts();
 
+    // ── 阶段编排 ──
+    __aicore__ inline void RunPhaseA(); // 排序 + 分类 + B1 任务表 + sdispls
+    template <bool IsReq, bool HasSf>
+    __aicore__ inline void DispatchLoops();         // 三组（S/F/O）按 aivId_ 分派
+    __aicore__ inline void RunRecvFinalize();       // B1 收尾：计数/前缀/收集散射/交叉校验
+    __aicore__ inline void PrepareRespFamily();     // B2 准备：条带 + 任务表 + 暂存表重清
+    __aicore__ inline void WriteCrossCheckTotals(); // 核 0 断言 2 + num_recv 落盘
+    __aicore__ inline void RunFinalCrossCheck();    // Σ响应计数 + 交叉校验
+
     // ── 三组循环（两子阶段翻转：IsReq = B1/req 族，!IsReq = B2/resp 族）──
     template <bool IsReq, bool HasSf>
     __aicore__ inline void SendLoopS();
+    __aicore__ inline void WriteStageProgress(int32_t code); // DFX 进度码（S/F/O 三组共用）
+    __aicore__ inline uint32_t InitSflowTaskTable(LocalTensor<int32_t>& sflow, uint32_t myDests, int32_t taskCnt,
+                                                  uint32_t sCoreIdx, uint32_t sCoreCnt, uint32_t ranksPerSupernode,
+                                                  uint32_t dests);
+    template <bool IsReq>
+    __aicore__ inline void DestAddrOf(uint32_t dIdx, uint64_t& handle, GM_ADDR& area);
+    __aicore__ inline void SendStagedBlock(RowSender& sender, uint64_t handle, GM_ADDR area,
+                                           LocalTensor<uint8_t>& block, uint32_t rows, uint32_t rowStride,
+                                           uint32_t sCoreIdx);
+    __aicore__ inline void SendOwnReqRows(RowSender& sender, uint64_t handle, GM_ADDR area, LocalTensor<uint8_t>& block,
+                                          LocalTensor<int32_t>& head, uint32_t rows, int64_t taskStart, int64_t off,
+                                          uint32_t sCoreIdx);
+    template <bool HasSf>
+    __aicore__ inline void SendOwnRespRows(RowSender& sender, uint64_t handle, GM_ADDR area,
+                                           LocalTensor<uint8_t>& block, LocalTensor<int32_t>& head, uint32_t rows,
+                                           int64_t taskStart, int64_t off, uint32_t sCoreIdx);
+    template <bool IsReq, bool HasSf>
+    __aicore__ inline void SendOwnBucketRows(RowSender& sender, uint64_t handle, GM_ADDR area,
+                                             LocalTensor<int32_t>& sflow, LocalTensor<uint8_t>& block,
+                                             LocalTensor<int32_t>& head, uint32_t k, uint32_t myDests,
+                                             uint32_t sCoreIdx, int64_t taskStart, int64_t taskRows, bool& sent);
+    template <bool IsReq>
+    __aicore__ inline void DrainRelayRows(RowSender& sender, uint64_t handle, GM_ADDR area, uint64_t idx,
+                                          int32_t staged, int32_t drained, bool& sent);
+    __aicore__ inline void FinishDestIfDone(RowSender& sender, uint64_t handle, GM_ADDR area,
+                                            LocalTensor<int32_t>& sflow, int32_t taskIdx, int64_t taskRows, uint32_t k,
+                                            uint32_t myDests, uint32_t dIdx, uint32_t ranksPerSupernode,
+                                            uint32_t fCoreCnt, uint32_t& unfinished, bool& progressed);
+    template <bool IsReq, bool HasSf>
+    __aicore__ inline void ProcessDestOnce(uint32_t k, LocalTensor<int32_t>& sflow, LocalTensor<uint8_t>& block,
+                                           LocalTensor<int32_t>& head, uint32_t myDests, uint32_t sCoreIdx,
+                                           uint32_t sCoreCnt, uint32_t ranksPerSupernode, uint32_t fCoreCnt,
+                                           uint32_t& unfinished, bool& progressed);
+    __aicore__ inline void SnapshotDestState(uint32_t dIdxS, int32_t tS, bool ownDoneS, uint32_t ranksPerSupernode,
+                                             uint32_t fCoreCnt, uint32_t sCoreIdx);
+    __aicore__ inline void SnapshotStalledDest(LocalTensor<int32_t>& sflow, uint32_t myDests, uint32_t sCoreIdx,
+                                               uint32_t sCoreCnt, uint32_t ranksPerSupernode, uint32_t fCoreCnt);
+    template <bool IsReq>
+    __aicore__ inline void WaitDestCredits(LocalTensor<int32_t>& sflow, uint32_t myDests, uint32_t sCoreIdx,
+                                           uint32_t sCoreCnt);
+    template <bool IsReq>
+    __aicore__ inline void HandleIdleRound(LocalTensor<int32_t>& sflow, uint32_t myDests, uint32_t sCoreIdx,
+                                           uint32_t sCoreCnt, uint32_t ranksPerSupernode, uint32_t fCoreCnt,
+                                           uint64_t& idleSpin, uint64_t idleT0, uint32_t unfinished);
     template <bool IsReq, bool HasSf>
     __aicore__ inline void FwdLoopF();
+    __aicore__ inline GM_ADDR RelaySlotAddr(uint32_t slot, uint32_t fCoreIdx, uint32_t slots);
+    __aicore__ inline void WaitRelayRoom(uint64_t idx, uint32_t slot, int32_t n, uint32_t fCoreIdx, uint32_t batchRows);
+    __aicore__ inline void StageRelayReqRow(GM_ADDR rowGM, uint32_t slot, LocalTensor<int32_t>& staged,
+                                            uint32_t fCoreIdx, uint32_t slots);
+    __aicore__ inline void StageRelayRespRow(GM_ADDR rowGM, uint32_t slot, LocalTensor<int32_t>& staged,
+                                             uint32_t fCoreIdx, uint32_t slots);
+    template <bool IsReq, bool HasSf>
+    __aicore__ inline void HandleFwdRow(GM_ADDR rowGM, LocalTensor<int32_t>& staged, uint32_t fCoreIdx, uint32_t slots);
+    __aicore__ inline void PublishRelayEof(uint32_t fromSlot, uint32_t toSlot, uint32_t fCoreIdx, uint32_t slots);
     template <bool IsReq, bool HasSf>
     __aicore__ inline void OwnerLoopO();
+    template <bool IsReq, bool HasSf>
+    __aicore__ inline void HandleOwnerRow(GM_ADDR rowGM); // owner 区一行 → B1 记账 / B2 散位
+    template <bool IsReq, bool HasSf>
+    __aicore__ inline void CollectLocalTasks(uint32_t oCoreIdx, uint32_t oCoreCnt); // 本地桶任务（无通信）
 
     // ── 成员 ──
     __gm__ EngramRailCtxHead* ctxHead_{nullptr}; // 平铺 rail ctx 头（localId/supernodeId/supernodeCnt/C；
@@ -138,7 +219,7 @@ private:
     RailTopo topo_{}; // ranksPerSupernode 感知（attr）+ 超节点数/轨道数推导（kernel 唯一权威）
     uint32_t myGlobalRank_{0};
     WinLayout winReq_{};         // req 族布局：rowStride=32、四区中 req 侧两段基址
-    WinLayout winResp_{};        // resp 族布局：rowStride=P_resp、四区中 resp 侧两段基址
+    WinLayout winResp_{};        // resp 族布局：rowStride=respRowStride、四区中 resp 侧两段基址
     uint64_t reqFamilyBytes_{0}; // req 族总字节（四区中 resp 族基址的偏移前提）
     GM_ADDR localWin_{nullptr};  // = NodeWinAt(ctx, localId)（本卡 WIN 基址；node 表自槽）
     uint32_t aivId_{0};
@@ -183,7 +264,7 @@ private:
     GM_ADDR collectGM_{nullptr};   // [aivNum][cap]×(src,entry) 对——每核独立游标段（无竞争）
     GM_ADDR srcArriveGM_{nullptr}; // world×4B：B1 每源到达计数；C1 改作 fill[]；B2 改作每源响应计数
     GM_ADDR recvPrefixGM_{nullptr}; // world+1：rdispls（int32）+ [world]=Σ recv_counts
-    GM_ADDR sendPrefixGM_{nullptr}; // world+1：sdispls（int32）+ [world]=T
+    GM_ADDR sendPrefixGM_{nullptr}; // world+1：sdispls（int32）+ [world]=numTokens
     GM_ADDR counterScratchGM_{nullptr};
     GM_ADDR flagScratchGM_{nullptr};
     GM_ADDR segCountGM_{nullptr};  // [0]=taskCount, [1+c]=核 c 段数；C2 兼作 Σ 分片暂存
@@ -237,7 +318,14 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::LoadTilingData(const E
     sortNumTileData_ = t->sortNumTileData;
     sortTmpUbSize_ = t->sortTmpUbSize;
     topo_ = MakeRailTopo(t->ranksPerSupernode, t->rankSize);
-    // ═══ 双族布局（两族共用一个 N；req 族在前、resp 族在后；每族 rail|owner 两区）═══
+    SetupWinLayouts(t);
+    ClampBatchRows();
+    FinalizeStageRing();
+}
+
+// ═══ 双族布局（两族共用一个 N；req 族在前、resp 族在后；每族 rail|owner 两区）═══
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SetupWinLayouts(const EngramFetchTilingData* t)
+{
     const uint32_t num = (t->numRows > 0U) ? t->numRows : 1U;
     const uint32_t snCnt = topo_.supernodeCnt;
     winReq_.topo = topo_;
@@ -256,29 +344,35 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::LoadTilingData(const E
     winResp_.winHead = winReq_.winHead;
     winResp_.railBase = winReq_.ownBase + static_cast<uint64_t>(topo_.ranksPerSupernode) * winReq_.areaSize;
     winResp_.ownBase = winResp_.railBase + static_cast<uint64_t>(snCnt) * winResp_.areaSize;
+}
 
-    {
-        constexpr uint32_t kBatchBlockBytes = 65504U; // 批块字节预算（DataCopyExtParams.blockLen 为 uint16）
-        const uint32_t maxReqRows = kBatchBlockBytes / FWD_REQ_ROW_STRIDE;
-        if (batchRowsReq_ > maxReqRows) {
-            batchRowsReq_ = maxReqRows;
-        }
-        if (winResp_.rowStride > 0U) {
-            const uint32_t maxRespRows = kBatchBlockBytes / winResp_.rowStride;
-            if (batchRowsResp_ > maxRespRows) {
-                batchRowsResp_ = maxRespRows;
-            }
-        }
-        // 纵深防御：与 tiling floor 1 同口径——行距错配把 maxRows 钳成 0 时兜回 1，防
-        // %batchRows 除零与 rows=min(...,batchRows)=0 的零行批忙转（tiling 已硬拒绝 P>65504）
-        if (batchRowsReq_ == 0U) {
-            batchRowsReq_ = 1U;
-        }
-        if (batchRowsResp_ == 0U) {
-            batchRowsResp_ = 1U;
-        }
-        ascendc_assert(batchRowsReq_ > 0U && batchRowsResp_ > 0U, "rail fwd batchRows must be positive");
+// 批行数按 DataCopyExtParams.blockLen（uint16）预算收敛
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::ClampBatchRows()
+{
+    constexpr uint32_t kBatchBlockBytes = 65504U; // 批块字节预算（DataCopyExtParams.blockLen 为 uint16）
+    const uint32_t maxReqRows = kBatchBlockBytes / FWD_REQ_ROW_STRIDE;
+    if (batchRowsReq_ > maxReqRows) {
+        batchRowsReq_ = maxReqRows;
     }
+    if (winResp_.rowStride > 0U) {
+        const uint32_t maxRespRows = kBatchBlockBytes / winResp_.rowStride;
+        if (batchRowsResp_ > maxRespRows) {
+            batchRowsResp_ = maxRespRows;
+        }
+    }
+    // 纵深防御：与 tiling floor 1 同口径——行距错配把 maxRows 钳成 0 时兜回 1，防
+    // %batchRows 除零与 rows=min(...,batchRows)=0 的零行批忙转（tiling 已硬拒绝 rowStride>65504）
+    if (batchRowsReq_ == 0U) {
+        batchRowsReq_ = 1U;
+    }
+    if (batchRowsResp_ == 0U) {
+        batchRowsResp_ = 1U;
+    }
+    ascendc_assert(batchRowsReq_ > 0U && batchRowsResp_ > 0U, "rail fwd batchRows must be positive");
+}
+
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::FinalizeStageRing()
+{
     stageRingStride_ = static_cast<int64_t>(batchRowsReq_) * FWD_REQ_ROW_STRIDE;
     const int64_t respBlock = static_cast<int64_t>(batchRowsResp_) * winResp_.rowStride;
     if (respBlock > stageRingStride_) {
@@ -289,52 +383,64 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::LoadTilingData(const E
 /// @brief workspace 各段基址计算（与 SetRailWorkSpace 逐段一致）
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::CalcWorkSpaceOffset(const EngramFetchTilingData* t)
 {
-    const int64_t T = numTokens_;
+    const int64_t numTokens = numTokens_;
     const uint32_t aiv = (t->aivNum > 0U) ? static_cast<uint32_t>(t->aivNum) : 1U;
     const int64_t world = static_cast<int64_t>(t->rankSize);
     const int64_t cap = cap_;
     const uint32_t ranksPerSupernode = topo_.ranksPerSupernode;
     const int64_t ringStride = stageRingStride_; // 两族批块取大（见 LoadTilingData 注释）
-    auto align32 = [](int64_t x) __attribute__((cce_aicore))
-    {
-        return (x + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN;
-    };
 
     int64_t off = 0;
     sortedIndicesGM_ = workspaceGM_ + off;
-    off += align32(T * 4);
+    off += AlignUpUb(numTokens * RAIL_I32_BYTES);
     srcSortedGM_ = workspaceGM_ + off;
-    off += align32(cap * 4);
-    int64_t stripCap = (T > world ? T : world) / aiv + 2; // 每核段数上界：行/核 + world 切片 + 边界分裂
+    off += AlignUpUb(cap * RAIL_I32_BYTES);
+    const int64_t stripCap =
+        (numTokens > world ? numTokens : world) / aiv + 2; // 每核段数上界：行/核 + world 切片 + 边界分裂
     stripCap_ = static_cast<uint32_t>(stripCap);
-    int64_t bucketSegBytes = align32((1 + aiv) * 4) + static_cast<int64_t>(aiv) * stripCap * 12 + (T + aiv) * 16;
+    const int64_t bucketSegBytes = AlignUpUb((1 + aiv) * RAIL_I32_BYTES) +
+                                   static_cast<int64_t>(aiv) * stripCap * RAIL_STRIP_ENT_BYTES +
+                                   (numTokens + aiv) * RAIL_TASK_ENT_BYTES;
     bucketSegGM_ = workspaceGM_ + off;
-    off += align32(bucketSegBytes);
+    off += AlignUpUb(bucketSegBytes);
     segCountsGM_ = bucketSegGM_; // [0]=taskCount, [1+c]=核 c 段数
-    stripsGM_ = bucketSegGM_ + align32((1 + aiv) * 4);
-    taskTableGM_ = stripsGM_ + static_cast<int64_t>(aiv) * stripCap * 12;
-    // ═══ F 暂存环 + 三表（两族分时复用：环格固定按 resp 族批容量开，req 族在其内用小步距）═══
+    stripsGM_ = bucketSegGM_ + AlignUpUb((1 + aiv) * RAIL_I32_BYTES);
+    taskTableGM_ = stripsGM_ + static_cast<int64_t>(aiv) * stripCap * RAIL_STRIP_ENT_BYTES;
+    off = CalcRelayCtlOffsets(off, t, world, cap, aiv, ranksPerSupernode, ringStride);
+    CalcSortWspOffsets(off, t, numTokens);
+}
+
+__aicore__ inline int64_t EngramFetchTrainRailAlignedArch35::AlignUpUb(int64_t x)
+{
+    return (x + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN;
+}
+
+// ═══ F 暂存环 + 三表（两族分时复用：环格固定按 resp 族批容量开，req 族在其内用小步距）═══
+__aicore__ inline int64_t EngramFetchTrainRailAlignedArch35::CalcRelayCtlOffsets(
+    int64_t off, const EngramFetchTilingData* t, int64_t world, int64_t cap, uint32_t aiv, uint32_t ranksPerSupernode,
+    int64_t ringStride)
+{
     const uint32_t relaySlots = ranksPerSupernode;
     const uint32_t fCoreCnt = (t->fwdCoreCnt > 0U) ? t->fwdCoreCnt : 1U;
     relayGM_ = workspaceGM_ + off;
     off += static_cast<int64_t>(fCoreCnt) * relaySlots * ringStride;
     const int64_t relayCtlInts = static_cast<int64_t>(fCoreCnt) * relaySlots;
     relayStagedGM_ = workspaceGM_ + off;
-    off += align32(relayCtlInts * 4);
+    off += AlignUpUb(relayCtlInts * RAIL_I32_BYTES);
     relayDrainedGM_ = workspaceGM_ + off;
-    off += align32(relayCtlInts * 4);
+    off += AlignUpUb(relayCtlInts * RAIL_I32_BYTES);
     relayEofGM_ = workspaceGM_ + off;
-    off += align32(relayCtlInts * 4);
+    off += AlignUpUb(relayCtlInts * RAIL_I32_BYTES);
     sStageGM_ = workspaceGM_ + off;
     off += static_cast<int64_t>(t->sendCoreCnt) * ringStride;
     collectGM_ = workspaceGM_ + off;
-    off += align32(static_cast<int64_t>(aiv) * cap * 8);
+    off += AlignUpUb(static_cast<int64_t>(aiv) * cap * RAIL_COLLECT_ENT_BYTES);
     srcArriveGM_ = workspaceGM_ + off;
-    off += align32(world * 4);
+    off += AlignUpUb(world * RAIL_I32_BYTES);
     recvPrefixGM_ = workspaceGM_ + off;
-    off += align32((world + 1) * 4);
+    off += AlignUpUb((world + 1) * RAIL_I32_BYTES);
     sendPrefixGM_ = workspaceGM_ + off;
-    off += align32((world + 1) * 4);
+    off += AlignUpUb((world + 1) * RAIL_I32_BYTES);
     counterScratchGM_ = workspaceGM_ + off;
     off += static_cast<int64_t>(aiv) * UB_ALIGN;
     // flagScratch：[0..DFX_SCALAR_SLOTS) DFX 汇总槽；其后每 S 核 DFX_SNAP_WORDS 字失败快照
@@ -342,22 +448,31 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::CalcWorkSpaceOffset(co
     off += (DFX_SCALAR_SLOTS + static_cast<int64_t>((t->sendCoreCnt > 0U) ? t->sendCoreCnt : 1U) * DFX_SNAP_WORDS) *
            sizeof(int32_t);
     segCountGM_ = workspaceGM_ + off;
-    off += align32(aiv * 4);
+    off += AlignUpUb(aiv * RAIL_I32_BYTES);
     coreStartGM_ = workspaceGM_ + off;
-    off += align32(aiv * 4);
+    off += AlignUpUb(aiv * RAIL_I32_BYTES);
     dfxGM_ = workspaceGM_ + off;
-    off += align32(aiv * 4);
+    off += AlignUpUb(aiv * RAIL_I32_BYTES);
+    return off;
+}
 
+// 排序 6 段（radix 各级临时区 + 索引/伴随）
+__aicore__ inline int64_t EngramFetchTrainRailAlignedArch35::CalcSortWspOffsets(int64_t off,
+                                                                                const EngramFetchTilingData* t,
+                                                                                int64_t numTokens)
+{
     constexpr int64_t kRadixRounds = 4;
-    int64_t slTileCount = static_cast<int64_t>(t->sortTileCount);
-    int64_t seg0 = align32(256 * kRadixRounds * 4);
-    int64_t seg1 = align32(slTileCount * 256 * kRadixRounds * 4);
-    int64_t seg2 = align32(T * 4);
-    int64_t seg3 = 2 * align32(slTileCount * 256 * 2);
-    int64_t seg4 = align32(slTileCount * t->sortNumTileData);
-    int64_t seg5 = align32(T * 4);
+    constexpr int64_t kRadixBinNum = 256; // radix 桶数
+    const int64_t slTileCount = static_cast<int64_t>(t->sortTileCount);
+    const int64_t seg0 = AlignUpUb(kRadixBinNum * kRadixRounds * RAIL_I32_BYTES);
+    const int64_t seg1 = AlignUpUb(slTileCount * kRadixBinNum * kRadixRounds * RAIL_I32_BYTES);
+    const int64_t seg2 = AlignUpUb(numTokens * RAIL_I32_BYTES);
+    const int64_t seg3 = 2 * AlignUpUb(slTileCount * kRadixBinNum * 2);
+    const int64_t seg4 = AlignUpUb(slTileCount * t->sortNumTileData);
+    const int64_t seg5 = AlignUpUb(numTokens * RAIL_I32_BYTES);
     sortWorkspaceGm_ = workspaceGM_ + off;
     off += seg0 + seg1 + seg2 + seg3 + seg4 + seg5;
+    return off;
 }
 
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::InitPipeAndBuffers()
@@ -376,14 +491,15 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::InitPipeAndBuffers()
     tpipe_->InitBuffer(indicesBuf_, IDX_BUF_BYTES); // 排序产物分片扫描
     indicesBufElems_ = IDX_BUF_BYTES / sizeof(int32_t);
 
-    uint32_t statusBytes = static_cast<uint32_t>((2 * STATE_OFFSET + static_cast<uint64_t>(tAiv) * 8 + UB_ALIGN - 1) /
-                                                 UB_ALIGN * UB_ALIGN);
+    uint32_t statusBytes = static_cast<uint32_t>(
+        (2 * STATE_OFFSET + static_cast<uint64_t>(tAiv) * 2 * RAIL_I32_BYTES + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN);
     tpipe_->InitBuffer(statusBuf_, statusBytes);
     uint32_t coreArrayBytes =
-        static_cast<uint32_t>((((static_cast<uint64_t>(tAiv) * 4 + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN) +
-                               static_cast<uint64_t>(tAiv) * 4 + UB_ALIGN - 1) /
+        static_cast<uint32_t>((((static_cast<uint64_t>(tAiv) * RAIL_I32_BYTES + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN) +
+                               static_cast<uint64_t>(tAiv) * RAIL_I32_BYTES + UB_ALIGN - 1) /
                               UB_ALIGN * UB_ALIGN);
-    uint32_t tempBytes = (statusBytes > ENTRY_BATCH_CAP * 4U) ? statusBytes : ENTRY_BATCH_CAP * 4U;
+    uint32_t tempBytes =
+        (statusBytes > ENTRY_BATCH_CAP * RAIL_I32_BYTES) ? statusBytes : ENTRY_BATCH_CAP * RAIL_I32_BYTES;
     if (tempBytes < coreArrayBytes) {
         tempBytes = coreArrayBytes;
     }
@@ -403,10 +519,10 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::InitPipeAndBuffers()
                            (sFlowInts * static_cast<uint32_t>(sizeof(int32_t)) + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN);
     }
 
-    evCopy2To3_[0] = static_cast<int32_t>(tpipe_->FetchEventID(AscendC::HardEvent::MTE2_MTE3));
-    evCopy2To3_[1] = static_cast<int32_t>(tpipe_->FetchEventID(AscendC::HardEvent::MTE2_MTE3));
-    evCopy3To2_[0] = static_cast<int32_t>(tpipe_->FetchEventID(AscendC::HardEvent::MTE3_MTE2));
-    evCopy3To2_[1] = static_cast<int32_t>(tpipe_->FetchEventID(AscendC::HardEvent::MTE3_MTE2));
+    evCopy2To3_[0] = static_cast<int32_t>(tpipe_->AllocEventID<AscendC::HardEvent::MTE2_MTE3>());
+    evCopy2To3_[1] = static_cast<int32_t>(tpipe_->AllocEventID<AscendC::HardEvent::MTE2_MTE3>());
+    evCopy3To2_[0] = static_cast<int32_t>(tpipe_->AllocEventID<AscendC::HardEvent::MTE3_MTE2>());
+    evCopy3To2_[1] = static_cast<int32_t>(tpipe_->AllocEventID<AscendC::HardEvent::MTE3_MTE2>());
 }
 
 // S/F/O 三组（tiling 落表值优先，不一致按 1:2:2 比例兜底；分轨硬要求 ≥4 AIV——三组各 ≥1）
@@ -507,10 +623,10 @@ __aicore__ inline uint32_t EngramFetchTrainRailAlignedArch35::PeerOfWriterSlot(u
 
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::BarrierWaitWritersDone(uint32_t target)
 {
-    const uint32_t W = topo_.writerSlots;
+    const uint32_t writerSlots = topo_.writerSlots;
     AscendC::SyncAll<true>();
     uint64_t t0 = WinNowUs(); // 真墙钟 60s（自旋计数受每转成本影响，实测远短于名义值）
-    for (uint32_t i = aivId_; i < W; i += totalBlocks_) {
+    for (uint32_t i = aivId_; i < writerSlots; i += totalBlocks_) {
         if (IsSelfWriterSlot(i)) {
             continue; // 自槽永不置位
         }
@@ -526,10 +642,10 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BarrierAnnounceCleared
 {
     // 通告核 = 该写者槽通道的属主 S 核（与数据发送同核，维持每通道单生产者；hcomm 的
     // sqHead 等为普通 GM 标量写，通告与数据分属两核会按陈旧 sqHead 落 WQE 覆盖 SQ 槽）
-    const uint32_t W = topo_.writerSlots;
+    const uint32_t writerSlots = topo_.writerSlots;
     GM_ADDR myScratch = counterScratchGM_ + static_cast<uint64_t>(aivId_) * UB_ALIGN;
     if (aivId_ < sendCoreEnd_) {
-        for (uint32_t i = aivId_; i < W; i += sendCoreEnd_) {
+        for (uint32_t i = aivId_; i < writerSlots; i += sendCoreEnd_) {
             if (IsSelfWriterSlot(i)) {
                 continue;
             }
@@ -552,10 +668,10 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BarrierAnnounceCleared
 
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::BarrierWaitPeersCleared(uint32_t target)
 {
-    const uint32_t W = topo_.writerSlots;
+    const uint32_t writerSlots = topo_.writerSlots;
     AscendC::SyncAll<true>();
     uint64_t t0 = WinNowUs(); // 真墙钟 60s
-    for (uint32_t i = aivId_; i < W; i += totalBlocks_) {
+    for (uint32_t i = aivId_; i < writerSlots; i += totalBlocks_) {
         if (IsSelfWriterSlot(i)) {
             continue;
         }
@@ -570,10 +686,10 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BarrierWaitPeersCleare
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::BarrierWriteCallDone(uint32_t doneVal)
 {
     // 通告核 = 通道属主 S 核（同 BarrierAnnounceCleared：全调用内每通道恒单生产者）
-    const uint32_t W = topo_.writerSlots;
+    const uint32_t writerSlots = topo_.writerSlots;
     GM_ADDR myScratch = counterScratchGM_ + static_cast<uint64_t>(aivId_) * UB_ALIGN;
     if (aivId_ < sendCoreEnd_) {
-        for (uint32_t i = aivId_; i < W; i += sendCoreEnd_) {
+        for (uint32_t i = aivId_; i < writerSlots; i += sendCoreEnd_) {
             if (IsSelfWriterSlot(i)) {
                 continue;
             }
@@ -603,7 +719,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::CheckWinHeadInvariant(
     if (aivId_ != 0U) {
         return;
     }
-    const uint32_t W = topo_.writerSlots;
+    const uint32_t writerSlots = topo_.writerSlots;
     uint32_t doneCnt = 0;
     uint32_t clrCnt = 0;
     uint32_t laggardCnt = 0;
@@ -613,7 +729,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::CheckWinHeadInvariant(
     int32_t minVal = 0x7FFFFFFF;
     int32_t maxVal = -0x7FFFFFFF;
     const bool hasPrevRound = epoch >= 2U;
-    for (uint32_t i = 0; i < W; ++i) {
+    for (uint32_t i = 0; i < writerSlots; ++i) {
         if (IsSelfWriterSlot(i)) {
             continue; // 自槽永不置位
         }
@@ -664,9 +780,9 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ClearGmRange(GM_ADDR b
             n = ENTRY_BATCH_CAP;
         }
         GlobalTensor<int32_t> rangeGM;
-        rangeGM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(base + done * 4));
+        rangeGM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(base + done * RAIL_I32_BYTES));
         // DataCopyPad：缩比床 world/段数 < 批容量时尾块 n*4 非 32B 对齐——裸 DataCopy 会整块丢弃
-        AscendC::DataCopyParams cp{1U, static_cast<uint16_t>(n * 4), 0U, 0U};
+        AscendC::DataCopyParams cp{1U, static_cast<uint16_t>(n * RAIL_I32_BYTES), 0U, 0U};
         AscendC::DataCopyPad(rangeGM, zero, cp);
         done += n;
     }
@@ -710,7 +826,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ClearRecvAreas()
     {
         const uint32_t fCnt = (fwdCoreEnd_ > sendCoreEnd_) ? (fwdCoreEnd_ - sendCoreEnd_) : 1U;
         const int64_t rawInts = static_cast<int64_t>(fCnt) * static_cast<int64_t>(ranksPerSupernode);
-        const int64_t alignInts = (rawInts * 4 + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN / 4;
+        const int64_t alignInts = (rawInts * RAIL_I32_BYTES + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN / RAIL_I32_BYTES;
         const int64_t ctlCnt = 3 * alignInts;
         int64_t per = (ctlCnt + totalBlocks_ - 1) / totalBlocks_;
         int64_t s0 = static_cast<int64_t>(aivId_) * per;
@@ -720,7 +836,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ClearRecvAreas()
     if (aivId_ == 0) {
         // DFX 标量槽 + S 核完结判定快照槽——首调 workspace 为垃圾，快照区不清零会被 trap 误读
         for (uint32_t w = 0; w < DFX_SCALAR_SLOTS + sendCoreEnd_ * DFX_SNAP_WORDS; ++w) {
-            Wr32(flagScratchGM_ + w * 4, 0);
+            Wr32(flagScratchGM_ + w * RAIL_I32_BYTES, 0);
         }
     }
 }
@@ -769,17 +885,21 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SortInputIndicesRail()
 
 // 三桶条带（阶段 A）：每核扫自己切片 → 本核条带 (dst=owner,start,cnt)
 // dst 升序不变量由排序保证（entry 升序 ⇒ owner 非降序）；越界条目立即报错（失效点 #8 最早发现点）
-__aicore__ inline void EngramFetchTrainRailAlignedArch35::BucketClassify()
+// 条带落表（单段出表）：strip 表项 (owner, startRow, rowCount)；必须 Wr32（UB→MTE3 DataCopy）：
+// 裸标量存 GM 只进本核 L1（写回），SyncAll 不刷数据缓存——合并核 bypass 读只见陈旧零
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::EmitStripRun(GM_ADDR strip, uint32_t& runCnt,
+                                                                       int32_t& curOwner, int64_t& runStart,
+                                                                       int64_t& runLen)
 {
-    int64_t per = (numTokens_ + totalBlocks_ - 1) / totalBlocks_;
-    int64_t start = static_cast<int64_t>(aivId_) * per;
-    int64_t end = (start + per > numTokens_) ? numTokens_ : start + per;
-    if (start >= end) {
-        Wr32(segCountsGM_ + (1 + aivId_) * 4, 0); // 空段也落表（merge 读全核段数）
-        return;
-    }
-    ascendc_assert(numEntriesPerRank_ > 0, "rail fwd numEntriesPerRank(%d) must be positive", numEntriesPerRank_);
-    GM_ADDR strip = stripsGM_ + static_cast<uint64_t>(aivId_) * stripCap_ * 12;
+    Wr32(strip + runCnt * RAIL_STRIP_ENT_BYTES + 0, curOwner);
+    Wr32(strip + runCnt * RAIL_STRIP_ENT_BYTES + RAIL_STRIP_START_OFF, static_cast<int32_t>(runStart));
+    Wr32(strip + runCnt * RAIL_STRIP_ENT_BYTES + RAIL_STRIP_LEN_OFF, static_cast<int32_t>(runLen));
+    runCnt++;
+}
+
+// 条带扫描：sortedIndices 按 owner 非降序分条带落 strip 表，返回条带数
+__aicore__ inline uint32_t EngramFetchTrainRailAlignedArch35::ScanStrips(int64_t start, int64_t end, GM_ADDR strip)
+{
     GlobalTensor<int32_t> sortedGM;
     sortedGM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sortedIndicesGM_));
     LocalTensor<int32_t> chunk = indicesBuf_.Get<int32_t>();
@@ -790,21 +910,12 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BucketClassify()
     int64_t runLen = 0;
     const int32_t maxEntry =
         static_cast<int32_t>(static_cast<int64_t>(numEntriesPerRank_) * static_cast<int64_t>(topo_.world));
-    // 条带落表必须 Wr32（UB→MTE3 DataCopy）：裸标量存 GM 只进本核 L1（写回），SyncAll 不刷
-    // 数据缓存——合并核 bypass 读只见陈旧零
-    auto emitRun = [&]() __attribute__((cce_aicore))
-    {
-        Wr32(strip + runCnt * 12 + 0, curOwner);
-        Wr32(strip + runCnt * 12 + 4, static_cast<int32_t>(runStart));
-        Wr32(strip + runCnt * 12 + 8, static_cast<int32_t>(runLen));
-        runCnt++;
-    };
     while (pos < end) {
         int64_t n = end - pos;
         if (n > indicesBufElems_) {
             n = indicesBufElems_;
         }
-        AscendC::DataCopyExtParams cp{1U, static_cast<uint32_t>(n * 4), 0U, 0U, 0U};
+        AscendC::DataCopyExtParams cp{1U, static_cast<uint32_t>(n * RAIL_I32_BYTES), 0U, 0U, 0U};
         AscendC::DataCopyPadExtParams<int32_t> pad{false, 0, 0, 0};
         AscendC::DataCopyPad(chunk, sortedGM[static_cast<uint32_t>(pos)], cp, pad);
         SyncEv<AscendC::HardEvent::MTE2_S>();
@@ -821,7 +932,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BucketClassify()
                                "rail fwd ownerSorted not ascending: core=%u row=%lld owner=%d prev=%d", aivId_, pos + j,
                                owner, curOwner);
                 if (curOwner >= 0) {
-                    emitRun();
+                    EmitStripRun(strip, runCnt, curOwner, runStart, runLen);
                 }
                 curOwner = owner;
                 runStart = pos + j;
@@ -832,9 +943,48 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BucketClassify()
         pos += n;
     }
     if (curOwner >= 0) {
-        emitRun();
+        EmitStripRun(strip, runCnt, curOwner, runStart, runLen);
     }
-    Wr32(segCountsGM_ + (1 + aivId_) * 4, static_cast<int32_t>(runCnt));
+    return runCnt;
+}
+
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::BucketClassify()
+{
+    int64_t per = (numTokens_ + totalBlocks_ - 1) / totalBlocks_;
+    int64_t start = static_cast<int64_t>(aivId_) * per;
+    int64_t end = (start + per > numTokens_) ? numTokens_ : start + per;
+    if (start >= end) {
+        Wr32(segCountsGM_ + (1 + aivId_) * RAIL_I32_BYTES, 0); // 空段也落表（merge 读全核段数）
+        return;
+    }
+    ascendc_assert(numEntriesPerRank_ > 0, "rail fwd numEntriesPerRank(%d) must be positive", numEntriesPerRank_);
+    GM_ADDR strip = stripsGM_ + static_cast<uint64_t>(aivId_) * stripCap_ * RAIL_STRIP_ENT_BYTES;
+    uint32_t runCnt = ScanStrips(start, end, strip);
+    Wr32(segCountsGM_ + (1 + aivId_) * RAIL_I32_BYTES, static_cast<int32_t>(runCnt));
+}
+
+// 任务合并键（路由收件区）：DIRECT 键=dst 本地号、RAIL 键=dst 超节点号，一区一任务
+__aicore__ inline int32_t EngramFetchTrainRailAlignedArch35::AreaKeyOf(int32_t dstRank)
+{
+    RankCoord c = DecodeRank(topo_, static_cast<uint32_t>(dstRank));
+    BucketKind k = ClassifyRow(topo_, me_, static_cast<uint32_t>(dstRank));
+    int32_t sub = (k == BUCKET_DIRECT) ? static_cast<int32_t>(c.local) : static_cast<int32_t>(c.supernode);
+    return static_cast<int32_t>(k) * RAIL_BUCKET_KEY_STRIDE + sub;
+}
+
+// 出合并任务：任务表项 (kind, dstRank, startRow, rowCount)
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::EmitMergedTask(int32_t& curDst, int64_t& runStart,
+                                                                         int64_t& runLen, uint32_t& taskCnt)
+{
+    if (curDst < 0) {
+        return;
+    }
+    BucketKind kind = ClassifyRow(topo_, me_, static_cast<uint32_t>(curDst));
+    Wr32(taskTableGM_ + taskCnt * RAIL_TASK_ENT_BYTES + 0, static_cast<int32_t>(kind));
+    Wr32(taskTableGM_ + taskCnt * RAIL_TASK_ENT_BYTES + RAIL_TASK_DST_OFF, curDst);
+    Wr32(taskTableGM_ + taskCnt * RAIL_TASK_ENT_BYTES + RAIL_TASK_START_OFF, static_cast<int32_t>(runStart));
+    Wr32(taskTableGM_ + taskCnt * RAIL_TASK_ENT_BYTES + RAIL_TASK_LEN_OFF, static_cast<int32_t>(runLen));
+    taskCnt++;
 }
 
 // S0 合并：同收件区相邻段合并为单一任务（每目的一条流，一区一任务；dst 升序保证同区段连续）。
@@ -844,62 +994,41 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::MergeSegmentsBySGroup(
     if (aivId_ != 0) {
         return;
     }
-    auto rdStrip = [&](uint32_t core, uint32_t i) __attribute__((cce_aicore))
-    {
-        return stripsGM_ + static_cast<uint64_t>(core) * stripCap_ * 12 + i * 12;
-    };
     int32_t curDst = -1;
     int64_t runStart = 0;
     int64_t runLen = 0;
     uint32_t taskCnt = 0;
-    // 任务按"路由收件区"合并（DIRECT 键=dst 本地号、RAIL 键=dst 超节点号）：一区一任务
-    auto areaKey = [&](int32_t dstRank) __attribute__((cce_aicore))->int32_t
-    {
-        RankCoord c = DecodeRank(topo_, static_cast<uint32_t>(dstRank));
-        BucketKind k = ClassifyRow(topo_, me_, static_cast<uint32_t>(dstRank));
-        int32_t sub = (k == BUCKET_DIRECT) ? static_cast<int32_t>(c.local) : static_cast<int32_t>(c.supernode);
-        return static_cast<int32_t>(k) * RAIL_BUCKET_KEY_STRIDE + sub;
-    };
-    auto emit = [&]() __attribute__((cce_aicore))
-    {
-        if (curDst < 0) {
-            return;
-        }
-        BucketKind kind = ClassifyRow(topo_, me_, static_cast<uint32_t>(curDst));
-        Wr32(taskTableGM_ + taskCnt * 16 + 0, static_cast<int32_t>(kind));
-        Wr32(taskTableGM_ + taskCnt * 16 + 4, curDst);
-        Wr32(taskTableGM_ + taskCnt * 16 + 8, static_cast<int32_t>(runStart));
-        Wr32(taskTableGM_ + taskCnt * 16 + 12, static_cast<int32_t>(runLen));
-        taskCnt++;
-    };
     for (uint32_t c = 0; c < totalBlocks_; ++c) {
-        int32_t cnt = Rd32(segCountsGM_ + (1 + c) * 4);
+        int32_t cnt = Rd32(segCountsGM_ + (1 + c) * RAIL_I32_BYTES);
         for (int32_t i = 0; i < cnt; ++i) {
-            GM_ADDR seg = rdStrip(c, static_cast<uint32_t>(i)); // bypass 读（跨核可见性）
+            // bypass 读（跨核可见性）
+            GM_ADDR seg = stripsGM_ + static_cast<uint64_t>(c) * stripCap_ * RAIL_STRIP_ENT_BYTES +
+                          static_cast<uint32_t>(i) * RAIL_STRIP_ENT_BYTES;
             int32_t dst = Rd32(seg);
-            int32_t st = Rd32(seg + 4);
-            int32_t len = Rd32(seg + 8);
+            int32_t stripStartRow = Rd32(seg + RAIL_STRIP_START_OFF);
+            int32_t len = Rd32(seg + RAIL_STRIP_LEN_OFF);
             if (accumulateCounts) {
                 // send_counts_out 累加（每条带恰加一次）：host 已清零（at::zeros）
                 GM_ADDR slot = sendCountsOutGM_ + static_cast<uint64_t>(dst) * UB_ALIGN;
                 Wr32(slot, Rd32(slot) + len);
             }
-            if (curDst >= 0 && areaKey(dst) == areaKey(curDst) && static_cast<int64_t>(st) == runStart + runLen) {
+            if (curDst >= 0 && AreaKeyOf(dst) == AreaKeyOf(curDst) &&
+                static_cast<int64_t>(stripStartRow) == runStart + runLen) {
                 runLen += len; // 同收件区且行连续 → 拼接为一个任务
             } else {
-                emit();
+                EmitMergedTask(curDst, runStart, runLen, taskCnt);
                 curDst = dst;
-                runStart = st;
+                runStart = stripStartRow;
                 runLen = len;
             }
         }
     }
-    emit();
+    EmitMergedTask(curDst, runStart, runLen, taskCnt);
     Wr32(segCountsGM_, static_cast<int32_t>(taskCnt));
 }
 
 // 并行两遍前缀（segCount/coreStart 作 scratch）：源 send_counts（32B 槽距），目的 sendPrefix
-// （int32，[world]=T）——B2 scatter 摆位 perm[sdispls[src]+k] 的唯一前置
+// （int32，[world]=numTokens）——B2 scatter 摆位 perm[sdispls[src]+k] 的唯一前置
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::BuildSendPrefix()
 {
     int64_t world = static_cast<int64_t>(topo_.world);
@@ -912,26 +1041,26 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BuildSendPrefix()
     }
     int64_t segSum = 0;
     for (int64_t r = r0; r < r1; ++r) {
-        segSum += Rd32(sendCountsOutGM_ + r * 32); // send_counts 每项 32B 槽距
+        segSum += Rd32(sendCountsOutGM_ + r * RAIL_SEND_CNT_STRIDE); // send_counts 每项 32B 槽距
     }
-    Wr32(segCountGM_ + aivId_ * 4, static_cast<int32_t>(segSum));
+    Wr32(segCountGM_ + aivId_ * RAIL_I32_BYTES, static_cast<int32_t>(segSum));
     AscendC::SyncAll<true>();
     if (aivId_ == 0) {
         int64_t base = 0;
         for (uint32_t c = 0; c < totalBlocks_; ++c) {
-            Wr32(coreStartGM_ + c * 4, static_cast<int32_t>(base));
-            base += Rd32(segCountGM_ + c * 4);
+            Wr32(coreStartGM_ + c * RAIL_I32_BYTES, static_cast<int32_t>(base));
+            base += Rd32(segCountGM_ + c * RAIL_I32_BYTES);
         }
     }
     AscendC::SyncAll<true>();
-    int64_t base = Rd32(coreStartGM_ + aivId_ * 4);
+    int64_t base = Rd32(coreStartGM_ + aivId_ * RAIL_I32_BYTES);
     // 逐条 Wr32：连续复用同一 creditBuf_ 时需尾部反向同步，防 MTE3 积压下源字未读走致前缀错表
     for (int64_t r = r0; r < r1; ++r) {
-        Wr32(sendPrefixGM_ + r * 4, static_cast<int32_t>(base));
-        base += Rd32(sendCountsOutGM_ + r * 32);
+        Wr32(sendPrefixGM_ + r * RAIL_I32_BYTES, static_cast<int32_t>(base));
+        base += Rd32(sendCountsOutGM_ + r * RAIL_SEND_CNT_STRIDE);
     }
-    if (r0 < world && r1 == world) { // 末段核补 T 总量（r0<world 防空段核误写）
-        Wr32(sendPrefixGM_ + world * 4, static_cast<int32_t>(base));
+    if (r0 < world && r1 == world) { // 末段核补 numTokens 总量（r0<world 防空段核误写）
+        Wr32(sendPrefixGM_ + world * RAIL_I32_BYTES, static_cast<int32_t>(base));
     }
 }
 
@@ -947,41 +1076,41 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BuildRecvPrefixFinal()
     }
     int64_t segSum = 0;
     for (int64_t r = r0; r < r1; ++r) {
-        segSum += Rd32(recvCountsOutGM_ + r * 4); // recv_counts_out 每项 4B
+        segSum += Rd32(recvCountsOutGM_ + r * RAIL_I32_BYTES); // recv_counts_out 每项 4B
     }
-    Wr32(segCountGM_ + aivId_ * 4, static_cast<int32_t>(segSum));
+    Wr32(segCountGM_ + aivId_ * RAIL_I32_BYTES, static_cast<int32_t>(segSum));
     AscendC::SyncAll<true>();
     if (aivId_ == 0) {
         int64_t base = 0;
         for (uint32_t c = 0; c < totalBlocks_; ++c) {
-            Wr32(coreStartGM_ + c * 4, static_cast<int32_t>(base));
-            base += Rd32(segCountGM_ + c * 4);
+            Wr32(coreStartGM_ + c * RAIL_I32_BYTES, static_cast<int32_t>(base));
+            base += Rd32(segCountGM_ + c * RAIL_I32_BYTES);
         }
         ascendc_assert(base <= cap_, "rail fwd owner heat overflow: total=%lld cap=%lld", base,
                        static_cast<int64_t>(cap_));
     }
     AscendC::SyncAll<true>();
-    int64_t base = Rd32(coreStartGM_ + aivId_ * 4);
+    int64_t base = Rd32(coreStartGM_ + aivId_ * RAIL_I32_BYTES);
     // 逐条 Wr32：连续复用同一 creditBuf_ 时需尾部反向同步，防 MTE3 积压下源字未读走致前缀错表
     for (int64_t r = r0; r < r1; ++r) {
-        Wr32(recvPrefixGM_ + r * 4, static_cast<int32_t>(base));
-        base += Rd32(recvCountsOutGM_ + r * 4);
+        Wr32(recvPrefixGM_ + r * RAIL_I32_BYTES, static_cast<int32_t>(base));
+        base += Rd32(recvCountsOutGM_ + r * RAIL_I32_BYTES);
     }
     if (r0 < world && r1 == world) {
-        Wr32(recvPrefixGM_ + world * 4, static_cast<int32_t>(base));
+        Wr32(recvPrefixGM_ + world * RAIL_I32_BYTES, static_cast<int32_t>(base));
     }
 }
 
 // (src,entry) 追加进本核收集段（每核独立游标，无竞争）；srcArrive[src]++（同源落位 ⇒ 单写者）
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::CollectReqRow(int32_t entry, int32_t srcRank)
 {
-    int32_t arrive = Rd32(srcArriveGM_ + static_cast<uint64_t>(srcRank) * 4);
-    Wr32(srcArriveGM_ + static_cast<uint64_t>(srcRank) * 4, arrive + 1);
+    int32_t arrive = Rd32(srcArriveGM_ + static_cast<uint64_t>(srcRank) * RAIL_I32_BYTES);
+    Wr32(srcArriveGM_ + static_cast<uint64_t>(srcRank) * RAIL_I32_BYTES, arrive + 1);
     ascendc_assert(collectCursor_ < cap_, "rail fwd collect overflow: core=%u cursor=%u cap=%llu src=%d", aivId_,
                    collectCursor_, static_cast<uint64_t>(cap_), srcRank);
-    GM_ADDR slot = collectGM_ + (static_cast<uint64_t>(aivId_) * cap_ + collectCursor_) * 8;
+    GM_ADDR slot = collectGM_ + (static_cast<uint64_t>(aivId_) * cap_ + collectCursor_) * RAIL_COLLECT_ENT_BYTES;
     Wr32(slot, srcRank);
-    Wr32(slot + 4, entry);
+    Wr32(slot + RAIL_I32_BYTES, entry);
     collectCursor_++;
 }
 
@@ -992,7 +1121,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::WriteRecvCounts()
     int64_t r0 = static_cast<int64_t>(aivId_) * per;
     int64_t r1 = (r0 + per > world) ? world : r0 + per;
     for (int64_t r = r0; r < r1; ++r) {
-        Wr32(recvCountsOutGM_ + r * 4, Rd32(srcArriveGM_ + r * 4));
+        Wr32(recvCountsOutGM_ + r * RAIL_I32_BYTES, Rd32(srcArriveGM_ + r * RAIL_I32_BYTES));
     }
     SyncEv<AscendC::HardEvent::MTE3_S>();
 }
@@ -1001,15 +1130,15 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::WriteRecvCounts()
 // recv_local_entry[rdispls[src]+k]（段内升序 = 老语义）；srcSorted 伴随落表供 B2 S 用
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::StableScatterCollect()
 {
-    GM_ADDR base = collectGM_ + static_cast<uint64_t>(aivId_) * cap_ * 8;
+    GM_ADDR base = collectGM_ + static_cast<uint64_t>(aivId_) * cap_ * RAIL_COLLECT_ENT_BYTES;
     for (uint32_t i = 0; i < collectCursor_; ++i) {
-        int32_t src = Rd32(base + static_cast<uint64_t>(i) * 8);
-        int32_t entry = Rd32(base + static_cast<uint64_t>(i) * 8 + 4);
-        int32_t fill = Rd32(srcArriveGM_ + static_cast<uint64_t>(src) * 4);
-        Wr32(srcArriveGM_ + static_cast<uint64_t>(src) * 4, fill + 1);
-        int32_t pos = Rd32(recvPrefixGM_ + static_cast<uint64_t>(src) * 4) + fill;
-        Wr32(recvLocalEntryOutGM_ + static_cast<uint64_t>(pos) * 4, entry);
-        Wr32(srcSortedGM_ + static_cast<uint64_t>(pos) * 4, src);
+        int32_t src = Rd32(base + static_cast<uint64_t>(i) * RAIL_COLLECT_ENT_BYTES);
+        int32_t entry = Rd32(base + static_cast<uint64_t>(i) * RAIL_COLLECT_ENT_BYTES + RAIL_I32_BYTES);
+        int32_t fill = Rd32(srcArriveGM_ + static_cast<uint64_t>(src) * RAIL_I32_BYTES);
+        Wr32(srcArriveGM_ + static_cast<uint64_t>(src) * RAIL_I32_BYTES, fill + 1);
+        int32_t pos = Rd32(recvPrefixGM_ + static_cast<uint64_t>(src) * RAIL_I32_BYTES) + fill;
+        Wr32(recvLocalEntryOutGM_ + static_cast<uint64_t>(pos) * RAIL_I32_BYTES, entry);
+        Wr32(srcSortedGM_ + static_cast<uint64_t>(pos) * RAIL_I32_BYTES, src);
     }
     SyncEv<AscendC::HardEvent::MTE3_S>();
 }
@@ -1021,8 +1150,8 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::CrossCheckFillAndClear
     int64_t r0 = static_cast<int64_t>(aivId_) * per;
     int64_t r1 = (r0 + per > world) ? world : r0 + per;
     for (int64_t r = r0; r < r1; ++r) {
-        int32_t fill = Rd32(srcArriveGM_ + r * 4);
-        int32_t cnt = Rd32(recvCountsOutGM_ + r * 4);
+        int32_t fill = Rd32(srcArriveGM_ + r * RAIL_I32_BYTES);
+        int32_t cnt = Rd32(recvCountsOutGM_ + r * RAIL_I32_BYTES);
         ascendc_assert(fill == cnt, "rail fwd accounting mismatch: src=%lld fill=%d recv_counts=%d", r, fill, cnt);
     }
     AscendC::SyncAll<true>();
@@ -1040,19 +1169,19 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::BuildRespStrips()
         r0 = world;
         r1 = world;
     }
-    GM_ADDR strip = stripsGM_ + static_cast<uint64_t>(aivId_) * stripCap_ * 12;
+    GM_ADDR strip = stripsGM_ + static_cast<uint64_t>(aivId_) * stripCap_ * RAIL_STRIP_ENT_BYTES;
     uint32_t runCnt = 0;
     for (int64_t r = r0; r < r1; ++r) {
-        int32_t cnt = Rd32(recvCountsOutGM_ + r * 4);
+        int32_t cnt = Rd32(recvCountsOutGM_ + r * RAIL_I32_BYTES);
         if (cnt <= 0) {
             continue;
         }
-        Wr32(strip + runCnt * 12 + 0, static_cast<int32_t>(r));
-        Wr32(strip + runCnt * 12 + 4, Rd32(recvPrefixGM_ + r * 4));
-        Wr32(strip + runCnt * 12 + 8, cnt);
+        Wr32(strip + runCnt * RAIL_STRIP_ENT_BYTES + 0, static_cast<int32_t>(r));
+        Wr32(strip + runCnt * RAIL_STRIP_ENT_BYTES + RAIL_STRIP_START_OFF, Rd32(recvPrefixGM_ + r * RAIL_I32_BYTES));
+        Wr32(strip + runCnt * RAIL_STRIP_ENT_BYTES + RAIL_STRIP_LEN_OFF, cnt);
         runCnt++;
     }
-    Wr32(segCountsGM_ + (1 + aivId_) * 4, static_cast<int32_t>(runCnt));
+    Wr32(segCountsGM_ + (1 + aivId_) * RAIL_I32_BYTES, static_cast<int32_t>(runCnt));
 }
 
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::ClearRelayTables()
@@ -1060,7 +1189,7 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ClearRelayTables()
     const uint32_t ranksPerSupernode = topo_.ranksPerSupernode;
     const uint32_t fCnt = (fwdCoreEnd_ > sendCoreEnd_) ? (fwdCoreEnd_ - sendCoreEnd_) : 1U;
     const int64_t rawInts = static_cast<int64_t>(fCnt) * static_cast<int64_t>(ranksPerSupernode);
-    const int64_t alignInts = (rawInts * 4 + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN / 4;
+    const int64_t alignInts = (rawInts * RAIL_I32_BYTES + UB_ALIGN - 1) / UB_ALIGN * UB_ALIGN / RAIL_I32_BYTES;
     const int64_t ctlCnt = 3 * alignInts;
     int64_t per = (ctlCnt + totalBlocks_ - 1) / totalBlocks_;
     int64_t s0 = static_cast<int64_t>(aivId_) * per;
@@ -1073,14 +1202,15 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ClearRelayTables()
 template <bool HasSf>
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::ScatterRespRow(GM_ADDR rowGM)
 {
-    int32_t src = Rd32(rowGM + 4);
-    GM_ADDR cntAddr = srcArriveGM_ + static_cast<uint64_t>(src) * 4;
+    int32_t src = Rd32(rowGM + RAIL_ROWHEAD_SRC_OFF);
+    GM_ADDR cntAddr = srcArriveGM_ + static_cast<uint64_t>(src) * RAIL_I32_BYTES;
     int32_t k = Rd32(cntAddr);
     Wr32(cntAddr, k + 1);
     int32_t cnt = Rd32(sendCountsOutGM_ + static_cast<uint64_t>(src) * UB_ALIGN);
     ascendc_assert(k < cnt, "rail fwd per-src resp overflow: src=%d k=%d send_counts=%d", src, k, cnt);
-    int32_t token =
-        Rd32(permOutGM_ + (static_cast<int64_t>(Rd32(sendPrefixGM_ + static_cast<uint64_t>(src) * 4)) + k) * 4);
+    int32_t token = Rd32(permOutGM_ +
+                         (static_cast<int64_t>(Rd32(sendPrefixGM_ + static_cast<uint64_t>(src) * RAIL_I32_BYTES)) + k) *
+                             RAIL_I32_BYTES);
     ascendc_assert(token >= 0 && token < numTokens_, "rail fwd resp token out of range: token=%d T=%lld", token,
                    numTokens_);
     WinLocalCopy(fetchedGM_ + static_cast<uint64_t>(token) * hiddenBytes_, rowGM + ROW_HEAD_BYTES,
@@ -1097,15 +1227,16 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ScatterRespRow(GM_ADDR
 template <bool HasSf>
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::ScatterLocalRespRow(int32_t entry, uint32_t arrive)
 {
-    GM_ADDR cntAddr = srcArriveGM_ + static_cast<uint64_t>(myGlobalRank_) * 4;
+    GM_ADDR cntAddr = srcArriveGM_ + static_cast<uint64_t>(myGlobalRank_) * RAIL_I32_BYTES;
     Wr32(cntAddr, Rd32(cntAddr) + 1); // 本地捷径不走 WIN，但响应计数与远端行同口径（断言 2 闭合）
     int32_t local = entry - static_cast<int32_t>(myGlobalRank_) * numEntriesPerRank_;
     ascendc_assert(local >= 0 && local < numEntriesPerRank_, "rail fwd local entry out of range: entry=%d local=%d",
                    entry, local);
     int32_t token =
-        Rd32(permOutGM_ + (static_cast<int64_t>(Rd32(sendPrefixGM_ + static_cast<uint64_t>(myGlobalRank_) * 4)) +
-                           static_cast<int32_t>(arrive)) *
-                              4);
+        Rd32(permOutGM_ +
+             (static_cast<int64_t>(Rd32(sendPrefixGM_ + static_cast<uint64_t>(myGlobalRank_) * RAIL_I32_BYTES)) +
+              static_cast<int32_t>(arrive)) *
+                 RAIL_I32_BYTES);
     ascendc_assert(token >= 0 && token < numTokens_, "rail fwd local token out of range: token=%d", token);
     WinLocalCopy(fetchedGM_ + static_cast<uint64_t>(token) * hiddenBytes_,
                  reinterpret_cast<GM_ADDR>(localStorageAddr_) + static_cast<uint64_t>(local) * hiddenBytes_,
@@ -1118,40 +1249,21 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::ScatterLocalRespRow(in
     }
 }
 
-// ── S 核统一发送：目的 → 属主 S 核固定映射（d<C 为 owner 同伴槽，其余为轨道槽；
-//    属主 = d mod sCoreCnt）。自有桶行（B1 拼 REQ 头 / B2 读本地表拼 RESP 块）+ F 暂存
-//    转发行同核同流发出；轮转推进（信用满/暂存空让位）；done=writeCnt+1。
-/// @brief S 核统一发送循环：每目的一条流，自有桶行 + F 暂存转发行；完结后写 done
-/// @tparam IsReq true=req 族（B1），false=resp 族（B2）
-/// @return 无（aivId_ 不在 S 组时直接返回）
-template <bool IsReq, bool HasSf>
-__aicore__ inline void EngramFetchTrainRailAlignedArch35::SendLoopS()
+// DFX 进度码（S/F/O 三组共用的 aiv 级进度槽）
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::WriteStageProgress(int32_t code)
 {
-    if (aivId_ >= sendCoreEnd_) {
-        Wr32(dfxGM_ + aivId_ * 4, 0);
-        return;
-    }
-    const uint32_t sCoreIdx = aivId_;
-    const uint32_t sCoreCnt = sendCoreEnd_;
-    const uint32_t ranksPerSupernode = topo_.ranksPerSupernode;
-    const uint32_t dests = topo_.writerSlots; // ranksPerSupernode + world/ranksPerSupernode（owner 槽 + 轨道槽）
-    const uint32_t fCoreCnt = fwdCoreEnd_ - sendCoreEnd_;
-    const uint32_t batchRows = IsReq ? batchRowsReq_ : batchRowsResp_;
-    const uint32_t P = IsReq ? winReq_.rowStride : winResp_.rowStride;
-    const WinLayout& wfam = IsReq ? winReq_ : winResp_;
-    const int64_t ringStride = stageRingStride_; // 两族批块取大（req 块 65504B > resp 块）
-    // 名下目的数：d ∈ [0,dests) 且 d mod sCoreCnt == 本核（dests < 核数时高编号核名下为空）
-    const uint32_t myDests = (sCoreIdx < dests) ? ((dests - 1U - sCoreIdx) / sCoreCnt + 1U) : 0U;
-    int32_t taskCnt = Rd32(segCountsGM_);
-    auto prog = [&](int32_t code) __attribute__((cce_aicore))
-    {
-        Wr32(dfxGM_ + static_cast<uint64_t>(aivId_) * 4, code);
-    };
-    prog(10);
+    Wr32(dfxGM_ + static_cast<uint64_t>(aivId_) * RAIL_I32_BYTES, code);
+}
 
+// 本核目的状态表初始化 + 任务 → 目的登记；返回未完结核数
+__aicore__ inline uint32_t EngramFetchTrainRailAlignedArch35::InitSflowTaskTable(LocalTensor<int32_t>& sflow,
+                                                                                 uint32_t myDests, int32_t taskCnt,
+                                                                                 uint32_t sCoreIdx, uint32_t sCoreCnt,
+                                                                                 uint32_t ranksPerSupernode,
+                                                                                 uint32_t dests)
+{
     // 本核目的状态（UB 紧凑布局；下标 k ∈ [0, myDests)）：
     // [0,my)=flowW [my,2my)=flowR [2my,3my)=taskIdx(−1 无任务——0 是合法任务号) [3my,4my)=ownOff [4my,5my)=fin
-    LocalTensor<int32_t> sflow = sFlowBuf_.Get<int32_t>();
     for (uint32_t i = 0; i < 5U * myDests; ++i) {
         sflow.SetValue(static_cast<int32_t>(i), 0);
     }
@@ -1171,9 +1283,9 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SendLoopS()
     }
     // 扫任务表一遍：任务 → 统一目的编号 → 属主核登记（任务按收件区合并，每目的 ≤1 任务）
     for (int32_t taskIdx = 0; taskIdx < taskCnt; ++taskIdx) {
-        GM_ADDR taskG = taskTableGM_ + static_cast<uint64_t>(taskIdx) * 16;
+        GM_ADDR taskG = taskTableGM_ + static_cast<uint64_t>(taskIdx) * RAIL_TASK_ENT_BYTES;
         int32_t kindV = Rd32(taskG);
-        uint32_t dst = static_cast<uint32_t>(Rd32(taskG + 4));
+        uint32_t dst = static_cast<uint32_t>(Rd32(taskG + RAIL_TASK_DST_OFF));
         RankCoord d = DecodeRank(topo_, dst);
         uint32_t dIdx = 0;
         if (static_cast<BucketKind>(kindV) == BUCKET_DIRECT) {
@@ -1192,20 +1304,366 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SendLoopS()
             sflow.SetValue(regSlot, taskIdx);
         }
     }
+    return unfinished;
+}
 
-    // 目的 → 通道句柄/对端收件区（算术直出；自槽不可达——映射排除；node 表 = S 核目的编号 d 同表直查）
-    auto destAddr = [&](uint32_t dIdx, uint64_t & handle, GM_ADDR & area) __attribute__((cce_aicore))
-    {
-        GM_ADDR ctxBase = reinterpret_cast<GM_ADDR>(ctxHead_);
-        handle = NodeChannelAt(ctxBase, dIdx);
-        if (dIdx < ranksPerSupernode) { // owner 槽 L'：写同伴 owner 族[myL]
-            area = reinterpret_cast<GM_ADDR>(NodeWinAt(ctxBase, dIdx)) + wfam.ownBase +
-                   static_cast<uint64_t>(me_.local) * wfam.areaSize;
-        } else { // 轨道槽 sn'：写轨道对端（sn' 超节点的同 L 卡）rail 族[mySn]
-            area = reinterpret_cast<GM_ADDR>(NodeWinAt(ctxBase, dIdx)) + wfam.railBase +
-                   static_cast<uint64_t>(me_.supernode) * wfam.areaSize;
+// 目的 → 通道句柄/对端收件区（算术直出；自槽不可达——映射排除；node 表 = S 核目的编号 d 同表直查）
+template <bool IsReq>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::DestAddrOf(uint32_t dIdx, uint64_t& handle, GM_ADDR& area)
+{
+    const WinLayout& wfam = IsReq ? winReq_ : winResp_;
+    GM_ADDR ctxBase = reinterpret_cast<GM_ADDR>(ctxHead_);
+    handle = NodeChannelAt(ctxBase, dIdx);
+    if (dIdx < topo_.ranksPerSupernode) { // owner 槽 L'：写同伴 owner 族[myL]
+        area = reinterpret_cast<GM_ADDR>(NodeWinAt(ctxBase, dIdx)) + wfam.ownBase +
+               static_cast<uint64_t>(me_.local) * wfam.areaSize;
+    } else { // 轨道槽 sn'：写轨道对端（sn' 超节点的同 L 卡）rail 族[mySn]
+        area = reinterpret_cast<GM_ADDR>(NodeWinAt(ctxBase, dIdx)) + wfam.railBase +
+               static_cast<uint64_t>(me_.supernode) * wfam.areaSize;
+    }
+}
+
+// 拼好的批块 → sStage 暂存 → 远程写本目的
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SendStagedBlock(RowSender& sender, uint64_t handle,
+                                                                          GM_ADDR area, LocalTensor<uint8_t>& block,
+                                                                          uint32_t rows, uint32_t rowStride,
+                                                                          uint32_t sCoreIdx)
+{
+    GM_ADDR stage = sStageGM_ + static_cast<uint64_t>(sCoreIdx) * stageRingStride_;
+    GlobalTensor<uint8_t> stageGm;
+    stageGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(stage));
+    AscendC::DataCopyExtParams sParams{1U, rows * rowStride, 0U, 0U, 0U};
+    AscendC::DataCopyPad(stageGm, block, sParams);
+    SyncEv<AscendC::HardEvent::MTE3_S>();
+    sender.SendBatch(handle, area, stage, rows);
+    sender.DrainChannel(handle);
+}
+
+// REQ 自有桶行：纯 32B 头（dst 逐行算——同区任务可跨多个 dst；entry 骑头部保留区 +8）
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SendOwnReqRows(RowSender& sender, uint64_t handle,
+                                                                         GM_ADDR area, LocalTensor<uint8_t>& block,
+                                                                         LocalTensor<int32_t>& head, uint32_t rows,
+                                                                         int64_t taskStart, int64_t off,
+                                                                         uint32_t sCoreIdx)
+{
+    const uint32_t rowStride = winReq_.rowStride;
+    const uint32_t rowStrideWords = rowStride / 4U; // 行距按 int32 字数（行头填充用）
+    for (uint32_t j = 0; j < rows; ++j) {
+        int32_t entry = Rd32(sortedIndicesGM_ + static_cast<uint64_t>(taskStart + off + j) * RAIL_I32_BYTES);
+        int32_t rowDst = entry / numEntriesPerRank_;
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords), rowDst);
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords + 1), static_cast<int32_t>(myGlobalRank_));
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords + 2), entry);
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords + 3), 0);
+    }
+    SyncEv<AscendC::HardEvent::S_MTE3>();
+    SendStagedBlock(sender, handle, area, block, rows, rowStride, sCoreIdx);
+}
+
+// RESP 自有桶行：行头 dst 从 srcSorted 伴随取（同区任务跨多请求者）；
+// 行数据 = 本地表行（+SF），读入 block 的 +32B 处（UB 侧恒 32B 对齐）
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SendOwnRespRows(RowSender& sender, uint64_t handle,
+                                                                          GM_ADDR area, LocalTensor<uint8_t>& block,
+                                                                          LocalTensor<int32_t>& head, uint32_t rows,
+                                                                          int64_t taskStart, int64_t off,
+                                                                          uint32_t sCoreIdx)
+{
+    const uint32_t rowStride = winResp_.rowStride;
+    const uint32_t rowStrideWords = rowStride / 4U; // 行距按 int32 字数（行头填充用）
+    const uint32_t rowHeadBytes = ROW_HEAD_BYTES;
+    GlobalTensor<uint8_t> dataGm;
+    dataGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(localStorageAddr_));
+    AscendC::DataCopyPadExtParams<uint8_t> pad{false, 0, 0, 0};
+    const uint32_t hiddenBytes32 = static_cast<uint32_t>(hiddenBytes_);
+    const uint32_t sfBytes32 = static_cast<uint32_t>(sfBytes_);
+    for (uint32_t j = 0; j < rows; ++j) {
+        int64_t row = taskStart + off + j;
+        int32_t entry = Rd32(recvLocalEntryOutGM_ + static_cast<uint64_t>(row) * RAIL_I32_BYTES);
+        int32_t rowDst = Rd32(srcSortedGM_ + static_cast<uint64_t>(row) * RAIL_I32_BYTES);
+        int32_t local = entry - static_cast<int32_t>(myGlobalRank_) * numEntriesPerRank_;
+        ascendc_assert(local >= 0 && local < numEntriesPerRank_, "rail fwd resp entry out of range: entry=%d local=%d",
+                       entry, local);
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords), rowDst);
+        head.SetValue(static_cast<int32_t>(j * rowStrideWords + 1), static_cast<int32_t>(myGlobalRank_));
+        AscendC::DataCopyExtParams dParams{1U, hiddenBytes32, 0U, 0U, 0U};
+        AscendC::DataCopyPad(block[static_cast<uint64_t>(j) * rowStride + rowHeadBytes],
+                             dataGm[static_cast<uint64_t>(local) * hiddenBytes_], dParams, pad);
+        if constexpr (HasSf) {
+            GlobalTensor<uint8_t> sfGm;
+            sfGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(sfTableGM_));
+            AscendC::DataCopyExtParams sfParams{1U, sfBytes32, 0U, 0U, 0U};
+            AscendC::DataCopyPad(block[static_cast<uint64_t>(j) * rowStride + rowHeadBytes + sfOffBytes_],
+                                 sfGm[static_cast<uint64_t>(local) * sfBytes_], sfParams, pad);
         }
-    };
+    }
+    SyncEv<AscendC::HardEvent::MTE2_MTE3>();
+    SyncEv<AscendC::HardEvent::S_MTE3>();
+    SendStagedBlock(sender, handle, area, block, rows, rowStride, sCoreIdx);
+}
+
+// ① 自有桶行：按族分派到 REQ/RESP 拼块；推进 ownOff，置 sent
+template <bool IsReq, bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SendOwnBucketRows(
+    RowSender& sender, uint64_t handle, GM_ADDR area, LocalTensor<int32_t>& sflow, LocalTensor<uint8_t>& block,
+    LocalTensor<int32_t>& head, uint32_t k, uint32_t myDests, uint32_t sCoreIdx, int64_t taskStart, int64_t taskRows,
+    bool& sent)
+{
+    int64_t off = sflow.GetValue(static_cast<int32_t>(3 * myDests + k));
+    if (off < taskRows) {
+        const uint32_t batchRows = IsReq ? batchRowsReq_ : batchRowsResp_;
+        uint32_t rows = static_cast<uint32_t>((taskRows - off > batchRows) ? batchRows : taskRows - off);
+        if (!sender.HasCredit(rows)) {
+            sender.AskCredit(handle, area); // 异步信用读——先转其它目的
+        } else {
+            if constexpr (IsReq) {
+                SendOwnReqRows(sender, handle, area, block, head, rows, taskStart, off, sCoreIdx);
+            } else {
+                SendOwnRespRows<HasSf>(sender, handle, area, block, head, rows, taskStart, off, sCoreIdx);
+            }
+            sflow.SetValue(static_cast<int32_t>(3 * myDests + k), static_cast<int32_t>(off + rows));
+            sent = true;
+        }
+    }
+}
+
+// ② F 暂存转发行（行自带 32B 头，直接从暂存环 GM 远程写；仅 owner 槽有）
+template <bool IsReq>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::DrainRelayRows(RowSender& sender, uint64_t handle,
+                                                                         GM_ADDR area, uint64_t idx, int32_t staged,
+                                                                         int32_t drained, bool& sent)
+{
+    const uint32_t batchRows = IsReq ? batchRowsReq_ : batchRowsResp_;
+    const uint32_t rowStride = IsReq ? winReq_.rowStride : winResp_.rowStride;
+    while (drained < staged) {
+        uint32_t run = static_cast<uint32_t>(staged - drained);
+        uint32_t ringPos = static_cast<uint32_t>(drained) % batchRows;
+        uint32_t fit = batchRows - ringPos; // 源环不跨尾
+        if (run > fit) {
+            run = fit;
+        }
+        if (!sender.HasCredit(run)) {
+            sender.AskCredit(handle, area);
+            break; // 信用不足：先转其它目的/其它 F 核
+        }
+        GM_ADDR src =
+            relayGM_ + idx * static_cast<uint64_t>(stageRingStride_) + static_cast<uint64_t>(ringPos) * rowStride;
+        sender.SendBatch(handle, area, src, run);
+        sender.DrainChannel(handle); // 通道取走源环行后才许 F 复写——先排空再推进
+        drained += static_cast<int32_t>(run);
+        Wr32(relayDrainedGM_ + idx * RAIL_I32_BYTES, drained);
+        sent = true;
+        staged = Rd32(relayStagedGM_ + idx * RAIL_I32_BYTES); // 消费中 F 可能续备
+    }
+}
+
+// ③ 完结判定：自有行发完 + 全部 F 核 EOF + 暂存排空（轨道目的无暂存）
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::FinishDestIfDone(
+    RowSender& sender, uint64_t handle, GM_ADDR area, LocalTensor<int32_t>& sflow, int32_t taskIdx, int64_t taskRows,
+    uint32_t k, uint32_t myDests, uint32_t dIdx, uint32_t ranksPerSupernode, uint32_t fCoreCnt, uint32_t& unfinished,
+    bool& progressed)
+{
+    bool ownDone = (taskIdx < 0) || (sflow.GetValue(static_cast<int32_t>(3 * myDests + k)) >= taskRows);
+    if (ownDone) {
+        bool relayDone = true;
+        if (dIdx < ranksPerSupernode && fCoreCnt > 0U) {
+            for (uint32_t f = 0; f < fCoreCnt && relayDone; ++f) {
+                uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + dIdx;
+                relayDone =
+                    (Rd32(relayEofGM_ + idx * RAIL_I32_BYTES) != 0) &&
+                    (Rd32(relayDrainedGM_ + idx * RAIL_I32_BYTES) == Rd32(relayStagedGM_ + idx * RAIL_I32_BYTES));
+            }
+        }
+        if (relayDone) {
+            sender.Finish(handle, area); // Drain + done = writeCnt+1（本地单写）
+            sflow.SetValue(static_cast<int32_t>(4 * myDests + k), 1);
+            unfinished--;
+            progressed = true;
+        }
+    }
+}
+
+// 单目的推进一轮：取任务参数 → 自有桶行 → F 暂存转发 → 信用回收 → 完结判定
+template <bool IsReq, bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::ProcessDestOnce(uint32_t k, LocalTensor<int32_t>& sflow,
+                                                                          LocalTensor<uint8_t>& block,
+                                                                          LocalTensor<int32_t>& head, uint32_t myDests,
+                                                                          uint32_t sCoreIdx, uint32_t sCoreCnt,
+                                                                          uint32_t ranksPerSupernode, uint32_t fCoreCnt,
+                                                                          uint32_t& unfinished, bool& progressed)
+{
+    uint32_t dIdx = sCoreIdx + k * sCoreCnt;
+    uint64_t handle = 0;
+    GM_ADDR area = nullptr;
+    DestAddrOf<IsReq>(dIdx, handle, area);
+    const WinLayout& wfam = IsReq ? winReq_ : winResp_;
+    RowSender sender;
+    sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), wfam, aivId_,
+                myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
+                sflow.GetValue(static_cast<int32_t>(myDests + k)), dfxGM_);
+    bool sent = false;
+    int32_t taskIdx = sflow.GetValue(static_cast<int32_t>(2 * myDests + k));
+    int64_t taskStart = 0;
+    int64_t taskRows = 0;
+    if (taskIdx >= 0) {
+        GM_ADDR taskG = taskTableGM_ + static_cast<uint64_t>(taskIdx) * RAIL_TASK_ENT_BYTES;
+        taskStart = Rd32(taskG + RAIL_TASK_START_OFF);
+        taskRows = Rd32(taskG + RAIL_TASK_LEN_OFF);
+    }
+    if (taskIdx >= 0) {
+        SendOwnBucketRows<IsReq, HasSf>(sender, handle, area, sflow, block, head, k, myDests, sCoreIdx, taskStart,
+                                        taskRows, sent);
+    }
+    if (dIdx < ranksPerSupernode && fCoreCnt > 0U) {
+        for (uint32_t f = 0; f < fCoreCnt; ++f) {
+            uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + dIdx;
+            int32_t staged = Rd32(relayStagedGM_ + idx * RAIL_I32_BYTES);
+            int32_t drained = Rd32(relayDrainedGM_ + idx * RAIL_I32_BYTES);
+            DrainRelayRows<IsReq>(sender, handle, area, idx, staged, drained, sent);
+        }
+    }
+    sflow.SetValue(static_cast<int32_t>(k), static_cast<int32_t>(sender.WriteCnt()));
+    sflow.SetValue(static_cast<int32_t>(myDests + k), sender.SyncCredit());
+    if (sent) {
+        progressed = true;
+    }
+    FinishDestIfDone(sender, handle, area, sflow, taskIdx, taskRows, k, myDests, dIdx, ranksPerSupernode, fCoreCnt,
+                     unfinished, progressed);
+}
+
+// 首个未完结 dest 的失败现场快照打包（trap 时随 RecvLoop 超时打出）
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SnapshotDestState(uint32_t dIdxS, int32_t tS, bool ownDoneS,
+                                                                            uint32_t ranksPerSupernode,
+                                                                            uint32_t fCoreCnt, uint32_t sCoreIdx)
+{
+    bool allEofS = true;
+    bool drainEqS = true;
+    int32_t badFS = -1;
+    int32_t badStagedS = 0;
+    int32_t badDrainedS = 0;
+    int32_t badEofS = 1;
+    if (dIdxS < ranksPerSupernode && fCoreCnt > 0U) {
+        for (uint32_t f = 0; f < fCoreCnt; ++f) {
+            const uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + dIdxS;
+            const int32_t stV = Rd32(relayStagedGM_ + idx * RAIL_I32_BYTES);
+            const int32_t drV = Rd32(relayDrainedGM_ + idx * RAIL_I32_BYTES);
+            const int32_t eofV = Rd32(relayEofGM_ + idx * RAIL_I32_BYTES);
+            if (eofV == 0) {
+                allEofS = false;
+            }
+            if (drV != stV) {
+                drainEqS = false;
+            }
+            if ((eofV == 0 || drV != stV) && badFS < 0) {
+                badFS = static_cast<int32_t>(f);
+                badStagedS = stV;
+                badDrainedS = drV;
+                badEofS = eofV;
+            }
+        }
+    }
+    const int32_t tPack = (tS < 0) ? 0 : ((tS > DFX_TASK_IDX_CLAMP) ? DFX_TASK_IDX_CLAMP : tS);
+    const int32_t w0S = static_cast<int32_t>(dIdxS) | ((ownDoneS ? 1 : 0) << DFX_W0_OWN_DONE_BIT) |
+                        ((allEofS ? 1 : 0) << DFX_W0_ALL_EOF_BIT) | ((drainEqS ? 1 : 0) << DFX_W0_DRAIN_EQ_BIT) |
+                        ((tPack & DFX_TASK_IDX_MASK) << DFX_W0_TASK_SHIFT) | (1 << DFX_W0_VALID_BIT);
+    const uint64_t snapBase = static_cast<uint64_t>(DFX_SCALAR_SLOTS + sCoreIdx * DFX_SNAP_WORDS) * RAIL_I32_BYTES;
+    Wr32(flagScratchGM_ + snapBase, w0S);
+    Wr32(flagScratchGM_ + snapBase + RAIL_I32_BYTES, badFS);
+    Wr32(flagScratchGM_ + snapBase + 2 * RAIL_I32_BYTES, badStagedS);
+    Wr32(flagScratchGM_ + snapBase + 3 * RAIL_I32_BYTES, badDrainedS | (badEofS << DFX_W3_BAD_EOF_SHIFT));
+}
+
+// 完结判定失败现场快照（每 DFX_SNAP_REFRESH_IDLE_ROUNDS 轮 idle 刷新一次）：本核首个未完结 dest
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SnapshotStalledDest(LocalTensor<int32_t>& sflow,
+                                                                              uint32_t myDests, uint32_t sCoreIdx,
+                                                                              uint32_t sCoreCnt,
+                                                                              uint32_t ranksPerSupernode,
+                                                                              uint32_t fCoreCnt)
+{
+    for (uint32_t k = 0; k < myDests; ++k) {
+        if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
+            continue; // 已完结——找首个未完结 dest
+        }
+        const uint32_t dIdxS = sCoreIdx + k * sCoreCnt;
+        const int32_t tS = sflow.GetValue(static_cast<int32_t>(2 * myDests + k));
+        const int64_t offS = sflow.GetValue(static_cast<int32_t>(3 * myDests + k));
+        int64_t cntS = -1;
+        if (tS >= 0) {
+            cntS = Rd32(taskTableGM_ + static_cast<uint64_t>(tS) * RAIL_TASK_ENT_BYTES + RAIL_TASK_LEN_OFF);
+        }
+        SnapshotDestState(dIdxS, tS, (tS < 0) || (offS >= cntS), ranksPerSupernode, fCoreCnt, sCoreIdx);
+        break;
+    }
+}
+
+// 自旋完成在途信用读（唯一推进手段是对端 read）
+template <bool IsReq>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::WaitDestCredits(LocalTensor<int32_t>& sflow, uint32_t myDests,
+                                                                          uint32_t sCoreIdx, uint32_t sCoreCnt)
+{
+    const WinLayout& wfam = IsReq ? winReq_ : winResp_;
+    for (uint32_t k = 0; k < myDests; ++k) {
+        if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
+            continue;
+        }
+        const uint32_t dIdx = sCoreIdx + k * sCoreCnt;
+        uint64_t handle = 0;
+        GM_ADDR area = nullptr;
+        DestAddrOf<IsReq>(dIdx, handle, area);
+        RowSender sender;
+        sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), wfam, aivId_,
+                    myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
+                    sflow.GetValue(static_cast<int32_t>(myDests + k)), dfxGM_);
+        sender.WaitCredit(handle, area);
+        sflow.SetValue(static_cast<int32_t>(myDests + k), sender.RemoteReadCnt());
+    }
+}
+
+// 整圈无进展：DFX 进度 + 60s 兜底 + 现场快照 + 在途信用读自旋
+template <bool IsReq>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::HandleIdleRound(LocalTensor<int32_t>& sflow, uint32_t myDests,
+                                                                          uint32_t sCoreIdx, uint32_t sCoreCnt,
+                                                                          uint32_t ranksPerSupernode, uint32_t fCoreCnt,
+                                                                          uint64_t& idleSpin, uint64_t idleT0,
+                                                                          uint32_t unfinished)
+{
+    WriteStageProgress(DFX_PROGRESS_S_IDLE);
+    ascendc_assert(WinNowUs() - idleT0 < WIN_TIMEOUT_US, "rail fwd send idle timeout: aiv=%u, unfinished=%u", aivId_,
+                   unfinished);
+    ++idleSpin;
+    if ((idleSpin % DFX_SNAP_REFRESH_IDLE_ROUNDS) == 0U) {
+        SnapshotStalledDest(sflow, myDests, sCoreIdx, sCoreCnt, ranksPerSupernode, fCoreCnt);
+    }
+    WaitDestCredits<IsReq>(sflow, myDests, sCoreIdx, sCoreCnt);
+}
+
+// ── S 核统一发送：目的 → 属主 S 核固定映射（d<C 为 owner 同伴槽，其余为轨道槽；
+//    属主 = d mod sCoreCnt）。自有桶行（B1 拼 REQ 头 / B2 读本地表拼 RESP 块）+ F 暂存
+//    转发行同核同流发出；轮转推进（信用满/暂存空让位）；done=writeCnt+1。
+/// @brief S 核统一发送循环：每目的一条流，自有桶行 + F 暂存转发行；完结后写 done
+/// @tparam IsReq true=req 族（B1），false=resp 族（B2）
+/// @return 无（aivId_ 不在 S 组时直接返回）
+template <bool IsReq, bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::SendLoopS()
+{
+    if (aivId_ >= sendCoreEnd_) {
+        Wr32(dfxGM_ + aivId_ * RAIL_I32_BYTES, 0);
+        return;
+    }
+    const uint32_t sCoreIdx = aivId_;
+    const uint32_t sCoreCnt = sendCoreEnd_;
+    const uint32_t ranksPerSupernode = topo_.ranksPerSupernode;
+    const uint32_t dests = topo_.writerSlots; // ranksPerSupernode + world/ranksPerSupernode（owner 槽 + 轨道槽）
+    const uint32_t fCoreCnt = fwdCoreEnd_ - sendCoreEnd_;
+    // 名下目的数：d ∈ [0,dests) 且 d mod sCoreCnt == 本核（dests < 核数时高编号核名下为空）
+    const uint32_t myDests = (sCoreIdx < dests) ? ((dests - 1U - sCoreIdx) / sCoreCnt + 1U) : 0U;
+    int32_t taskCnt = Rd32(segCountsGM_);
+    WriteStageProgress(DFX_PROGRESS_S_BEGIN);
+
+    // 本核目的状态（UB 紧凑布局；下标 k ∈ [0, myDests)）：
+    // [0,my)=flowW [my,2my)=flowR [2my,3my)=taskIdx(−1 无任务——0 是合法任务号) [3my,4my)=ownOff [4my,5my)=fin
+    LocalTensor<int32_t> sflow = sFlowBuf_.Get<int32_t>();
+    uint32_t unfinished = InitSflowTaskTable(sflow, myDests, taskCnt, sCoreIdx, sCoreCnt, ranksPerSupernode, dests);
 
     LocalTensor<uint8_t> block = rowBlockBuf_.Get<uint8_t>();
     LocalTensor<int32_t> head = rowBlockBuf_.Get<int32_t>();
@@ -1217,239 +1675,24 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SendLoopS()
             if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
                 continue;
             }
-            uint32_t dIdx = sCoreIdx + k * sCoreCnt;
-            uint64_t handle = 0;
-            GM_ADDR area = nullptr;
-            destAddr(dIdx, handle, area);
-            RowSender sender;
-            sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), wfam, aivId_,
-                        myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
-                        sflow.GetValue(static_cast<int32_t>(myDests + k)), dfxGM_);
-            bool sent = false;
-            // ── ① 自有桶行 ──
-            int32_t taskIdx = sflow.GetValue(static_cast<int32_t>(2 * myDests + k));
-            int64_t taskStart = 0;
-            int64_t taskRows = 0;
-            if (taskIdx >= 0) {
-                GM_ADDR taskG = taskTableGM_ + static_cast<uint64_t>(taskIdx) * 16;
-                taskStart = Rd32(taskG + 8);
-                taskRows = Rd32(taskG + 12);
-            }
-            if (taskIdx >= 0) {
-                int64_t off = sflow.GetValue(static_cast<int32_t>(3 * myDests + k));
-                if (off < taskRows) {
-                    uint32_t rows = static_cast<uint32_t>((taskRows - off > batchRows) ? batchRows : taskRows - off);
-                    if (!sender.HasCredit(rows)) {
-                        sender.AskCredit(handle, area); // 异步信用读——先转其它目的
-                    } else {
-                        const uint32_t rowStrideWords = P / 4U; // 行距按 int32 字数（行头填充用）
-                        const uint32_t rowHeadBytes = ROW_HEAD_BYTES;
-                        if constexpr (IsReq) {
-                            // REQ 块：纯 32B 头（dst 逐行算——同区任务可跨多个 dst；
-                            // entry 骑头部保留区 +8）
-                            for (uint32_t j = 0; j < rows; ++j) {
-                                int32_t entry = Rd32(sortedIndicesGM_ + static_cast<uint64_t>(taskStart + off + j) * 4);
-                                int32_t rowDst = entry / numEntriesPerRank_;
-                                head.SetValue(static_cast<int32_t>(j * rowStrideWords), rowDst);
-                                head.SetValue(static_cast<int32_t>(j * rowStrideWords + 1),
-                                              static_cast<int32_t>(myGlobalRank_));
-                                head.SetValue(static_cast<int32_t>(j * rowStrideWords + 2), entry);
-                                head.SetValue(static_cast<int32_t>(j * rowStrideWords + 3), 0);
-                            }
-                            SyncEv<AscendC::HardEvent::S_MTE3>();
-                            GM_ADDR stage = sStageGM_ + static_cast<uint64_t>(sCoreIdx) * ringStride;
-                            GlobalTensor<uint8_t> stageGm;
-                            stageGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(stage));
-                            AscendC::DataCopyExtParams sParams{1U, rows * P, 0U, 0U, 0U};
-                            AscendC::DataCopyPad(stageGm, block, sParams);
-                            SyncEv<AscendC::HardEvent::MTE3_S>();
-                            sender.SendBatch(handle, area, stage, rows);
-                            sender.DrainChannel(handle);
-                            sflow.SetValue(static_cast<int32_t>(3 * myDests + k), static_cast<int32_t>(off + rows));
-                            sent = true;
-                        } else {
-                            // RESP 块：行头 dst 从 srcSorted 伴随取（同区任务跨多请求者）；
-                            // 行数据 = 本地表行（+SF），读入 block 的 +32B 处（UB 侧恒 32B 对齐）
-                            GlobalTensor<uint8_t> dataGm;
-                            dataGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(localStorageAddr_));
-                            AscendC::DataCopyPadExtParams<uint8_t> pad{false, 0, 0, 0};
-                            const uint32_t hiddenBytes32 = static_cast<uint32_t>(hiddenBytes_);
-                            const uint32_t sfBytes32 = static_cast<uint32_t>(sfBytes_);
-                            for (uint32_t j = 0; j < rows; ++j) {
-                                int64_t row = taskStart + off + j;
-                                int32_t entry = Rd32(recvLocalEntryOutGM_ + static_cast<uint64_t>(row) * 4);
-                                int32_t rowDst = Rd32(srcSortedGM_ + static_cast<uint64_t>(row) * 4);
-                                int32_t local = entry - static_cast<int32_t>(myGlobalRank_) * numEntriesPerRank_;
-                                ascendc_assert(local >= 0 && local < numEntriesPerRank_,
-                                               "rail fwd resp entry out of range: entry=%d local=%d", entry, local);
-                                head.SetValue(static_cast<int32_t>(j * rowStrideWords), rowDst);
-                                head.SetValue(static_cast<int32_t>(j * rowStrideWords + 1),
-                                              static_cast<int32_t>(myGlobalRank_));
-                                AscendC::DataCopyExtParams dParams{1U, hiddenBytes32, 0U, 0U, 0U};
-                                AscendC::DataCopyPad(block[static_cast<uint64_t>(j) * P + rowHeadBytes],
-                                                     dataGm[static_cast<uint64_t>(local) * hiddenBytes_], dParams, pad);
-                                if constexpr (HasSf) {
-                                    GlobalTensor<uint8_t> sfGm;
-                                    sfGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(sfTableGM_));
-                                    AscendC::DataCopyExtParams sfParams{1U, sfBytes32, 0U, 0U, 0U};
-                                    AscendC::DataCopyPad(
-                                        block[static_cast<uint64_t>(j) * P + rowHeadBytes + sfOffBytes_],
-                                        sfGm[static_cast<uint64_t>(local) * sfBytes_], sfParams, pad);
-                                }
-                            }
-                            SyncEv<AscendC::HardEvent::MTE2_MTE3>();
-                            SyncEv<AscendC::HardEvent::S_MTE3>();
-                            GM_ADDR stage = sStageGM_ + static_cast<uint64_t>(sCoreIdx) * ringStride;
-                            GlobalTensor<uint8_t> stageGm;
-                            stageGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t*>(stage));
-                            AscendC::DataCopyExtParams sParams{1U, rows * P, 0U, 0U, 0U};
-                            AscendC::DataCopyPad(stageGm, block, sParams);
-                            SyncEv<AscendC::HardEvent::MTE3_S>();
-                            sender.SendBatch(handle, area, stage, rows);
-                            sender.DrainChannel(handle);
-                            sflow.SetValue(static_cast<int32_t>(3 * myDests + k), static_cast<int32_t>(off + rows));
-                            sent = true;
-                        }
-                    }
-                }
-            }
-            // ── ② F 暂存转发行（行自带 32B 头，直接从暂存环 GM 远程写；仅 owner 槽有）──
-            if (dIdx < ranksPerSupernode && fCoreCnt > 0U) {
-                for (uint32_t f = 0; f < fCoreCnt; ++f) {
-                    uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + dIdx;
-                    int32_t staged = Rd32(relayStagedGM_ + idx * 4);
-                    int32_t drained = Rd32(relayDrainedGM_ + idx * 4);
-                    while (drained < staged) {
-                        uint32_t run = static_cast<uint32_t>(staged - drained);
-                        uint32_t ringPos = static_cast<uint32_t>(drained) % batchRows;
-                        uint32_t fit = batchRows - ringPos; // 源环不跨尾
-                        if (run > fit) {
-                            run = fit;
-                        }
-                        if (!sender.HasCredit(run)) {
-                            sender.AskCredit(handle, area);
-                            break; // 信用不足：先转其它目的/其它 F 核
-                        }
-                        GM_ADDR src =
-                            relayGM_ + idx * static_cast<uint64_t>(ringStride) + static_cast<uint64_t>(ringPos) * P;
-                        sender.SendBatch(handle, area, src, run);
-                        sender.DrainChannel(handle); // 通道取走源环行后才许 F 复写——先排空再推进
-                        drained += static_cast<int32_t>(run);
-                        Wr32(relayDrainedGM_ + idx * 4, drained);
-                        sent = true;
-                        staged = Rd32(relayStagedGM_ + idx * 4); // 消费中 F 可能续备
-                    }
-                }
-            }
-            sflow.SetValue(static_cast<int32_t>(k), static_cast<int32_t>(sender.WriteCnt()));
-            sflow.SetValue(static_cast<int32_t>(myDests + k), sender.SyncCredit());
-            if (sent) {
-                progressed = true;
-            }
-            // ── ③ 完结判定：自有行发完 + 全部 F 核 EOF + 暂存排空（轨道目的无暂存）──
-            bool ownDone = (taskIdx < 0) || (sflow.GetValue(static_cast<int32_t>(3 * myDests + k)) >= taskRows);
-            if (ownDone) {
-                bool relayDone = true;
-                if (dIdx < ranksPerSupernode && fCoreCnt > 0U) {
-                    for (uint32_t f = 0; f < fCoreCnt && relayDone; ++f) {
-                        uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + dIdx;
-                        relayDone = (Rd32(relayEofGM_ + idx * 4) != 0) &&
-                                    (Rd32(relayDrainedGM_ + idx * 4) == Rd32(relayStagedGM_ + idx * 4));
-                    }
-                }
-                if (relayDone) {
-                    sender.Finish(handle, area); // Drain + done = writeCnt+1（本地单写）
-                    sflow.SetValue(static_cast<int32_t>(4 * myDests + k), 1);
-                    unfinished--;
-                    progressed = true;
-                }
-            }
+            ProcessDestOnce<IsReq, HasSf>(k, sflow, block, head, myDests, sCoreIdx, sCoreCnt, ranksPerSupernode,
+                                          fCoreCnt, unfinished, progressed);
         }
         if (unfinished == 0U) {
             break;
         }
         if (!progressed) {
             // 整圈无进展：唯一推进手段是对端 read——自旋完成在途信用读后重转
-            prog(20);
-            ascendc_assert(WinNowUs() - idleT0 < WIN_TIMEOUT_US, "rail fwd send idle timeout: aiv=%u, unfinished=%u",
-                           aivId_, unfinished);
-            ++idleSpin;
-            // 完结判定失败现场快照（每 DFX_SNAP_REFRESH_IDLE_ROUNDS 轮 idle 刷新一次）：
-            // 本核首个未完结 dest 的状态落 flagScratch，任一 RecvLoop 超时随 trap 打出
-            if ((idleSpin % DFX_SNAP_REFRESH_IDLE_ROUNDS) == 0U) {
-                for (uint32_t k = 0; k < myDests; ++k) {
-                    if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
-                        continue; // 已完结——找首个未完结 dest
-                    }
-                    uint32_t dIdxS = sCoreIdx + k * sCoreCnt;
-                    int32_t tS = sflow.GetValue(static_cast<int32_t>(2 * myDests + k));
-                    int64_t offS = sflow.GetValue(static_cast<int32_t>(3 * myDests + k));
-                    int64_t cntS = -1;
-                    if (tS >= 0) {
-                        cntS = Rd32(taskTableGM_ + static_cast<uint64_t>(tS) * 16 + 12);
-                    }
-                    bool ownDoneS = (tS < 0) || (offS >= cntS);
-                    bool allEofS = true;
-                    bool drainEqS = true;
-                    int32_t badFS = -1;
-                    int32_t badStagedS = 0;
-                    int32_t badDrainedS = 0;
-                    int32_t badEofS = 1;
-                    if (dIdxS < ranksPerSupernode && fCoreCnt > 0U) {
-                        for (uint32_t f = 0; f < fCoreCnt; ++f) {
-                            uint64_t idx = static_cast<uint64_t>(f) * ranksPerSupernode + dIdxS;
-                            int32_t stV = Rd32(relayStagedGM_ + idx * 4);
-                            int32_t drV = Rd32(relayDrainedGM_ + idx * 4);
-                            int32_t eofV = Rd32(relayEofGM_ + idx * 4);
-                            if (eofV == 0) {
-                                allEofS = false;
-                            }
-                            if (drV != stV) {
-                                drainEqS = false;
-                            }
-                            if ((eofV == 0 || drV != stV) && badFS < 0) {
-                                badFS = static_cast<int32_t>(f);
-                                badStagedS = stV;
-                                badDrainedS = drV;
-                                badEofS = eofV;
-                            }
-                        }
-                    }
-                    int32_t tPack = (tS < 0) ? 0 : ((tS > DFX_TASK_IDX_CLAMP) ? DFX_TASK_IDX_CLAMP : tS);
-                    int32_t w0S = static_cast<int32_t>(dIdxS) | (ownDoneS ? 1 : 0) << DFX_W0_OWN_DONE_BIT |
-                                  (allEofS ? 1 : 0) << DFX_W0_ALL_EOF_BIT | (drainEqS ? 1 : 0) << DFX_W0_DRAIN_EQ_BIT |
-                                  (tPack & DFX_TASK_IDX_MASK) << DFX_W0_TASK_SHIFT | 1 << DFX_W0_VALID_BIT;
-                    uint64_t snapBase = static_cast<uint64_t>(DFX_SCALAR_SLOTS + sCoreIdx * DFX_SNAP_WORDS) * 4;
-                    Wr32(flagScratchGM_ + snapBase, w0S);
-                    Wr32(flagScratchGM_ + snapBase + 4, badFS);
-                    Wr32(flagScratchGM_ + snapBase + 8, badStagedS);
-                    Wr32(flagScratchGM_ + snapBase + 12, badDrainedS | badEofS << DFX_W3_BAD_EOF_SHIFT);
-                    break;
-                }
-            }
-            for (uint32_t k = 0; k < myDests; ++k) {
-                if (sflow.GetValue(static_cast<int32_t>(4 * myDests + k)) != 0) {
-                    continue;
-                }
-                uint32_t dIdx = sCoreIdx + k * sCoreCnt;
-                uint64_t handle = 0;
-                GM_ADDR area = nullptr;
-                destAddr(dIdx, handle, area);
-                RowSender sender;
-                sender.Init(hcomm_, counterScratchGM_ + aivId_ * UB_ALIGN, tpipe_, creditBuf_.Get<int32_t>(), wfam,
-                            aivId_, myGlobalRank_, static_cast<uint32_t>(sflow.GetValue(static_cast<int32_t>(k))),
-                            sflow.GetValue(static_cast<int32_t>(myDests + k)), dfxGM_);
-                sender.WaitCredit(handle, area);
-                sflow.SetValue(static_cast<int32_t>(myDests + k), sender.RemoteReadCnt());
-            }
+            HandleIdleRound<IsReq>(sflow, myDests, sCoreIdx, sCoreCnt, ranksPerSupernode, fCoreCnt, idleSpin, idleT0,
+                                   unfinished);
         } else {
             idleSpin = 0;
             idleT0 = WinNowUs(); // 有进展——"距上次进展"计时复位
         }
     }
-    prog(29);
+    WriteStageProgress(DFX_PROGRESS_S_DONE);
     // 全目的完结——清本核完结判定快照槽（RecvLoop 超时里的 stallCnt = 未完结核数）
-    Wr32(flagScratchGM_ + static_cast<uint64_t>(DFX_SCALAR_SLOTS + sCoreIdx * DFX_SNAP_WORDS) * 4, 0);
+    Wr32(flagScratchGM_ + static_cast<uint64_t>(DFX_SCALAR_SLOTS + sCoreIdx * DFX_SNAP_WORDS) * RAIL_I32_BYTES, 0);
 }
 
 // ── F 核：纯消费 + 暂存（不碰通道）。按行头 dst 分类：dst==self 本地终点；否则暂存
@@ -1469,99 +1712,117 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::FwdLoopF()
     }
     const uint32_t ranksPerSupernode = topo_.ranksPerSupernode;
     const uint32_t slots = ranksPerSupernode; // [0,ranksPerSupernode)=owner 槽（键 L_T）
-    const uint32_t batchRows = IsReq ? batchRowsReq_ : batchRowsResp_;
-    const uint32_t P = IsReq ? winReq_.rowStride : winResp_.rowStride;
+    const uint32_t rowStride = IsReq ? winReq_.rowStride : winResp_.rowStride;
     const WinLayout& wfam = IsReq ? winReq_ : winResp_;
-    const int64_t ringStride = stageRingStride_; // 两族批块取大（req 块 65504B > resp 块）
-    auto prog = [&](int32_t code) __attribute__((cce_aicore))
-    {
-        Wr32(dfxGM_ + static_cast<uint64_t>(aivId_) * 4, code);
-    };
 
     LocalTensor<int32_t> staged = flowBuf_.Get<int32_t>();
     for (uint32_t i = 0; i < slots; ++i) {
         staged.SetValue(static_cast<int32_t>(i), 0);
     }
-    auto relaySlot = [&](uint32_t slot) __attribute__((cce_aicore))
-    {
-        return relayGM_ + (static_cast<uint64_t>(fCoreIdx) * slots + slot) * static_cast<uint64_t>(ringStride);
-    };
-    auto stageRowReq = [&](GM_ADDR rowGM, uint32_t slot) __attribute__((cce_aicore))
-    {
-        uint64_t idx = static_cast<uint64_t>(fCoreIdx) * slots + slot;
-        int32_t n = staged.GetValue(static_cast<int32_t>(slot));
-        // 背压：环满（staged − drained ≥ 批行数）等属主 S 核排空再复写该行格（真墙钟 60s 兜底）
-        uint64_t t0 = WinNowUs();
-        while (n - Rd32(relayDrainedGM_ + idx * 4) >= static_cast<int32_t>(batchRows)) {
-            ascendc_assert(WinNowUs() - t0 < WIN_TIMEOUT_US,
-                           "rail fwd relay backpressure timeout: f=%u, slot=%u, staged=%d", fCoreIdx, slot, n);
-        }
-        GM_ADDR dstSlot = relaySlot(slot) + static_cast<uint64_t>(n % batchRows) * P;
-        Wr32(dstSlot + 0, Rd32(rowGM + 0)); // 行原样 4×int32（dst/src/entry/rsvd）——req 行恒 32B
-        Wr32(dstSlot + 4, Rd32(rowGM + 4));
-        Wr32(dstSlot + 8, Rd32(rowGM + 8));
-        Wr32(dstSlot + 12, Rd32(rowGM + 12));
-        staged.SetValue(static_cast<int32_t>(slot), n + 1);
-        Wr32(relayStagedGM_ + idx * 4, n + 1); // 行数据（MTE3）落地后才发布计数——Wr32 同款顺序保证
-    };
-    auto stageRowResp = [&](GM_ADDR rowGM, uint32_t slot) __attribute__((cce_aicore))
-    {
-        uint64_t idx = static_cast<uint64_t>(fCoreIdx) * slots + slot;
-        int32_t n = staged.GetValue(static_cast<int32_t>(slot));
-        uint64_t t0 = WinNowUs();
-        while (n - Rd32(relayDrainedGM_ + idx * 4) >= static_cast<int32_t>(batchRows)) {
-            ascendc_assert(WinNowUs() - t0 < WIN_TIMEOUT_US,
-                           "rail fwd relay backpressure timeout: f=%u, slot=%u, staged=%d", fCoreIdx, slot, n);
-        }
-        WinLocalCopy(relaySlot(slot) + static_cast<uint64_t>(n % batchRows) * P, rowGM, P, tpipe_,
-                     entryBuf_.Get<uint8_t>(), gradBuf_.Get<uint8_t>(), evCopy2To3_, evCopy3To2_);
-        staged.SetValue(static_cast<int32_t>(slot), n + 1);
-        Wr32(relayStagedGM_ + idx * 4, n + 1);
-    };
-    // 统一分类：一行进槽（行原样暂存；攒批/信用/远程写全部由属主 S 核接管）
-    auto fwdRow = [&](GM_ADDR rowGM) __attribute__((cce_aicore))
-    {
-        uint32_t dst = static_cast<uint32_t>(Rd32(rowGM));
-        if (dst == myGlobalRank_) { // 轨道对端即终点（dst==self）→ 直接本地终点
-            if constexpr (IsReq) {
-                CollectReqRow(Rd32(rowGM + 8), Rd32(rowGM + 4)); // (entry, src)
-            } else {
-                ScatterRespRow<HasSf>(rowGM);
-            }
-            return;
-        }
-        uint32_t ownerLocal = 0;
-        (void)FwdRoute(topo_, me_, dst, ownerLocal); // 轨道区行 dst 必在本超节点
-        if constexpr (IsReq) {
-            stageRowReq(rowGM, ownerLocal); // 暂存 owner 槽（键 = 其本地号 L_T）
-        } else {
-            stageRowResp(rowGM, ownerLocal);
-        }
-    };
-    auto publishEof = [&](uint32_t fromSlot, uint32_t toSlot) __attribute__((cce_aicore))
-    {
-        for (uint32_t s = fromSlot; s < toSlot; ++s) {
-            Wr32(relayEofGM_ + (static_cast<uint64_t>(fCoreIdx) * slots + s) * 4, 1);
-        }
-    };
 
     // ── 单相：rail 族（写者 = 各超节点同 L 卡的 S 轨道流）──
-    prog(60);
+    WriteStageProgress(DFX_PROGRESS_F_BEGIN);
     for (uint32_t sn = fCoreIdx; sn < topo_.supernodeCnt; sn += fCoreCnt) {
         if (sn == me_.supernode) {
             continue; // 本超节点一格空置（无写者）
         }
         RecvLoop(
             RailArea(localWin_, wfam, sn), wfam, *tpipe_, creditBuf_.Get<int32_t>(),
-            [&](GM_ADDR blockGM, uint32_t rows) __attribute__((cce_aicore)) {
+            [ this, &staged, fCoreIdx, slots, rowStride ](GM_ADDR blockGM, uint32_t rows) __attribute__((cce_aicore)) {
                 for (uint32_t j = 0; j < rows; ++j) {
-                    fwdRow(blockGM + j * P);
+                    HandleFwdRow<IsReq, HasSf>(blockGM + j * rowStride, staged, fCoreIdx, slots);
                 }
             },
             dfxGM_, flagScratchGM_, sendCoreEnd_);
     }
-    publishEof(0, ranksPerSupernode); // owner 槽仅本相供行——rail 族收齐即 EOF
-    prog(63);
+    PublishRelayEof(0, ranksPerSupernode, fCoreIdx, slots); // owner 槽仅本相供行——rail 族收齐即 EOF
+    WriteStageProgress(DFX_PROGRESS_F_DONE);
+}
+
+// F 暂存环单槽基址（环格按 resp 族批容量开，两族同一步距）
+__aicore__ inline GM_ADDR EngramFetchTrainRailAlignedArch35::RelaySlotAddr(uint32_t slot, uint32_t fCoreIdx,
+                                                                           uint32_t slots)
+{
+    return relayGM_ + (static_cast<uint64_t>(fCoreIdx) * slots + slot) * static_cast<uint64_t>(stageRingStride_);
+}
+
+// 背压：环满（staged − drained ≥ 批行数）等属主 S 核排空再复写该行格（真墙钟 60s 兜底）
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::WaitRelayRoom(uint64_t idx, uint32_t slot, int32_t n,
+                                                                        uint32_t fCoreIdx, uint32_t batchRows)
+{
+    uint64_t t0 = WinNowUs();
+    while (n - Rd32(relayDrainedGM_ + idx * RAIL_I32_BYTES) >= static_cast<int32_t>(batchRows)) {
+        ascendc_assert(WinNowUs() - t0 < WIN_TIMEOUT_US,
+                       "rail fwd relay backpressure timeout: f=%u, slot=%u, staged=%d", fCoreIdx, slot, n);
+    }
+}
+
+// REQ 行暂存：行原样 4×int32（dst/src/entry/rsvd）——req 行恒 32B
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::StageRelayReqRow(GM_ADDR rowGM, uint32_t slot,
+                                                                           LocalTensor<int32_t>& staged,
+                                                                           uint32_t fCoreIdx, uint32_t slots)
+{
+    const uint64_t idx = static_cast<uint64_t>(fCoreIdx) * slots + slot;
+    const int32_t n = staged.GetValue(static_cast<int32_t>(slot));
+    const uint32_t batchRows = batchRowsReq_;
+    WaitRelayRoom(idx, slot, n, fCoreIdx, batchRows);
+    GM_ADDR dstSlot = RelaySlotAddr(slot, fCoreIdx, slots) + static_cast<uint64_t>(n % batchRows) * winReq_.rowStride;
+    Wr32(dstSlot, Rd32(rowGM));
+    Wr32(dstSlot + RAIL_ROWHEAD_SRC_OFF, Rd32(rowGM + RAIL_ROWHEAD_SRC_OFF));
+    Wr32(dstSlot + RAIL_ROWHEAD_ENTRY_OFF, Rd32(rowGM + RAIL_ROWHEAD_ENTRY_OFF));
+    Wr32(dstSlot + RAIL_ROWHEAD_RSVD_OFF, Rd32(rowGM + RAIL_ROWHEAD_RSVD_OFF));
+    const int32_t nextStaged = n + DFX_STAGED_ROW_STEP; // 本槽累计暂存行数（含本行）
+    staged.SetValue(static_cast<int32_t>(slot), nextStaged);
+    Wr32(relayStagedGM_ + idx * RAIL_I32_BYTES, nextStaged); // 行数据（MTE3）落地后才发布计数——Wr32 同款顺序保证
+}
+
+// RESP 行暂存：整行（头 + 数据 + SF）经 UB 中转拷入环格
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::StageRelayRespRow(GM_ADDR rowGM, uint32_t slot,
+                                                                            LocalTensor<int32_t>& staged,
+                                                                            uint32_t fCoreIdx, uint32_t slots)
+{
+    const uint64_t idx = static_cast<uint64_t>(fCoreIdx) * slots + slot;
+    const int32_t n = staged.GetValue(static_cast<int32_t>(slot));
+    const uint32_t batchRows = batchRowsResp_;
+    const uint32_t rowStride = winResp_.rowStride;
+    WaitRelayRoom(idx, slot, n, fCoreIdx, batchRows);
+    WinLocalCopy(RelaySlotAddr(slot, fCoreIdx, slots) + static_cast<uint64_t>(n % batchRows) * rowStride, rowGM,
+                 rowStride, tpipe_, entryBuf_.Get<uint8_t>(), gradBuf_.Get<uint8_t>(), evCopy2To3_, evCopy3To2_);
+    const int32_t nextStaged = n + DFX_STAGED_ROW_STEP; // 本槽累计暂存行数（含本行）
+    staged.SetValue(static_cast<int32_t>(slot), nextStaged);
+    Wr32(relayStagedGM_ + idx * RAIL_I32_BYTES, nextStaged);
+}
+
+// 统一分类：一行进槽（行原样暂存；攒批/信用/远程写全部由属主 S 核接管）
+template <bool IsReq, bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::HandleFwdRow(GM_ADDR rowGM, LocalTensor<int32_t>& staged,
+                                                                       uint32_t fCoreIdx, uint32_t slots)
+{
+    uint32_t dst = static_cast<uint32_t>(Rd32(rowGM));
+    if (dst == myGlobalRank_) { // 轨道对端即终点（dst==self）→ 直接本地终点
+        if constexpr (IsReq) {
+            CollectReqRow(Rd32(rowGM + RAIL_ROWHEAD_ENTRY_OFF), Rd32(rowGM + RAIL_ROWHEAD_SRC_OFF)); // (entry, src)
+        } else {
+            ScatterRespRow<HasSf>(rowGM);
+        }
+        return;
+    }
+    uint32_t ownerLocal = 0;
+    (void)FwdRoute(topo_, me_, dst, ownerLocal); // 轨道区行 dst 必在本超节点
+    if constexpr (IsReq) {
+        StageRelayReqRow(rowGM, ownerLocal, staged, fCoreIdx, slots); // 暂存 owner 槽（键 = 其本地号 L_T）
+    } else {
+        StageRelayRespRow(rowGM, ownerLocal, staged, fCoreIdx, slots);
+    }
+}
+
+// 发布本 F 核 [fromSlot, toSlot) 的 EOF 标志
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::PublishRelayEof(uint32_t fromSlot, uint32_t toSlot,
+                                                                          uint32_t fCoreIdx, uint32_t slots)
+{
+    for (uint32_t s = fromSlot; s < toSlot; ++s) {
+        Wr32(relayEofGM_ + (static_cast<uint64_t>(fCoreIdx) * slots + s) * RAIL_I32_BYTES, 1);
+    }
 }
 
 // ── O 核：B1 轮询 owner-req 区做 (src,entry) 记账；B2 轮询 owner-resp 区散位进 fetched。
@@ -1580,13 +1841,9 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::OwnerLoopO()
         return;
     }
     const uint32_t ranksPerSupernode = topo_.ranksPerSupernode;
-    const uint32_t P = IsReq ? winReq_.rowStride : winResp_.rowStride;
+    const uint32_t rowStride = IsReq ? winReq_.rowStride : winResp_.rowStride;
     const WinLayout& wfam = IsReq ? winReq_ : winResp_;
-    auto prog = [&](int32_t code) __attribute__((cce_aicore))
-    {
-        Wr32(dfxGM_ + static_cast<uint64_t>(aivId_) * 4, code);
-    };
-    prog(70);
+    WriteStageProgress(DFX_PROGRESS_O_BEGIN);
     // 名下 owner 收件区轮转（L' = 写者本地号；ranksPerSupernode 格，自槽 myL 空置）
     for (uint32_t peerLocal = oCoreIdx; peerLocal < ranksPerSupernode; peerLocal += oCoreCnt) {
         if (peerLocal == me_.local) {
@@ -1594,40 +1851,52 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::OwnerLoopO()
         }
         RecvLoop(
             OwnArea(localWin_, wfam, peerLocal), wfam, *tpipe_, creditBuf_.Get<int32_t>(),
-            [&](GM_ADDR blockGM, uint32_t rows) __attribute__((cce_aicore)) {
+            [ this, rowStride ](GM_ADDR blockGM, uint32_t rows) __attribute__((cce_aicore)) {
                 for (uint32_t j = 0; j < rows; ++j) {
-                    GM_ADDR rowGM = blockGM + j * P;
-                    if constexpr (IsReq) {
-                        // REQ 行：+8 = entry（骑行头保留区）
-                        CollectReqRow(Rd32(rowGM + 8), Rd32(rowGM + 4));
-                    } else {
-                        ScatterRespRow<HasSf>(rowGM);
-                    }
+                    HandleOwnerRow<IsReq, HasSf>(blockGM + j * rowStride);
                 }
             },
             dfxGM_, flagScratchGM_, sendCoreEnd_);
     }
-    // 本地桶任务（dst==myRank）：B1 行取自 sortedIndices 无通信；B2 行取自 recv_local_entry 段
-    int32_t taskCnt = Rd32(segCountsGM_);
+    CollectLocalTasks<IsReq, HasSf>(oCoreIdx, oCoreCnt);
+    WriteStageProgress(DFX_PROGRESS_O_DONE);
+}
+
+// REQ 行：+8 = entry（骑行头保留区）
+template <bool IsReq, bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::HandleOwnerRow(GM_ADDR rowGM)
+{
+    if constexpr (IsReq) {
+        CollectReqRow(Rd32(rowGM + RAIL_ROWHEAD_ENTRY_OFF), Rd32(rowGM + RAIL_ROWHEAD_SRC_OFF));
+    } else {
+        ScatterRespRow<HasSf>(rowGM);
+    }
+}
+
+// 本地桶任务（dst==myRank）：B1 行取自 sortedIndices 无通信；B2 行取自 recv_local_entry 段
+template <bool IsReq, bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::CollectLocalTasks(uint32_t oCoreIdx, uint32_t oCoreCnt)
+{
+    const int32_t taskCnt = Rd32(segCountsGM_);
     for (int32_t taskIdx = static_cast<int32_t>(oCoreIdx); taskIdx < taskCnt;
          taskIdx += static_cast<int32_t>(oCoreCnt)) {
-        GM_ADDR taskG = taskTableGM_ + static_cast<uint64_t>(taskIdx) * 16;
+        GM_ADDR taskG = taskTableGM_ + static_cast<uint64_t>(taskIdx) * RAIL_TASK_ENT_BYTES;
         if (Rd32(taskG) != BUCKET_LOCAL) {
             continue;
         }
-        int64_t startRow = Rd32(taskG + 8);
-        int64_t cnt = Rd32(taskG + 12);
+        const int64_t startRow = Rd32(taskG + RAIL_TASK_START_OFF);
+        const int64_t cnt = Rd32(taskG + RAIL_TASK_LEN_OFF);
         for (int64_t r = 0; r < cnt; ++r) {
             if constexpr (IsReq) {
-                CollectReqRow(Rd32(sortedIndicesGM_ + static_cast<uint64_t>(startRow + r) * 4),
+                CollectReqRow(Rd32(sortedIndicesGM_ + static_cast<uint64_t>(startRow + r) * RAIL_I32_BYTES),
                               static_cast<int32_t>(myGlobalRank_));
             } else {
-                ScatterLocalRespRow<HasSf>(Rd32(recvLocalEntryOutGM_ + static_cast<uint64_t>(startRow + r) * 4),
-                                           static_cast<uint32_t>(r));
+                ScatterLocalRespRow<HasSf>(
+                    Rd32(recvLocalEntryOutGM_ + static_cast<uint64_t>(startRow + r) * RAIL_I32_BYTES),
+                    static_cast<uint32_t>(r));
             }
         }
     }
-    prog(71);
 }
 
 __aicore__ inline void EngramFetchTrainRailAlignedArch35::SumRespCounts()
@@ -1638,28 +1907,14 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::SumRespCounts()
     int64_t r1 = (r0 + per > world) ? world : r0 + per;
     int32_t segSum = 0;
     for (int64_t r = r0; r < r1; ++r) {
-        segSum += Rd32(srcArriveGM_ + r * 4);
+        segSum += Rd32(srcArriveGM_ + r * RAIL_I32_BYTES);
     }
-    Wr32(segCountGM_ + aivId_ * 4, segSum);
+    Wr32(segCountGM_ + aivId_ * RAIL_I32_BYTES, segSum);
 }
 
-template <bool HasSf>
-__aicore__ inline void EngramFetchTrainRailAlignedArch35::Process()
+// 阶段 A：排序 → 通信缓冲重建 → 桶分类 → B1 任务表 → sdispls（同步点次序不变）
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::RunPhaseA()
 {
-    if (g_coreType != AscendC::AIV) {
-        return;
-    }
-    InitCoreGroups();
-    collectCursor_ = 0;
-
-    uint32_t epoch = static_cast<uint32_t>(
-        Rd32(localWin_ + static_cast<uint64_t>(topo_.writerSlots) * STATE_OFFSET)); // = done(上轮) = 2c
-    CheckWinHeadInvariant(epoch);  // 窗头入参一致性（违例即 trap）
-    BarrierWaitWritersDone(epoch); // 等全部写者上轮收尾（首次调用 epoch=0 直通）
-    ClearRecvAreas();              // 2W 收件区头 + srcArrive + relay 三表清零（分片）
-    AscendC::SyncAll<true>();
-    BarrierAnnounceCleared(epoch + 1U); // 通告"已清可写"（clr(c)=2c+1），写者收到才许写我
-
     SortInputIndicesRail();
     InitPipeAndBuffers(); // 排序后重建常驻通信缓冲（老 train 同款时序）
     AscendC::SyncAll<true>();
@@ -1669,17 +1924,24 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::Process()
     AscendC::SyncAll<true>();
     BuildSendPrefix(); // sdispls（含内部两遍 SyncAll）
     AscendC::SyncAll<true>();
-    BarrierWaitPeersCleared(epoch + 1U); // 发送门：写者们本轮"已清可写"全部就位
+}
 
+// 三组（S/F/O）按 aivId_ 分派——常驻消费组是死锁硬要求
+template <bool IsReq, bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::DispatchLoops()
+{
     if (aivId_ < sendCoreEnd_) {
-        SendLoopS<true, HasSf>();
+        SendLoopS<IsReq, HasSf>();
     } else if (aivId_ < fwdCoreEnd_) {
-        FwdLoopF<true, HasSf>();
+        FwdLoopF<IsReq, HasSf>();
     } else {
-        OwnerLoopO<true, HasSf>();
+        OwnerLoopO<IsReq, HasSf>();
     }
-    AscendC::SyncAll<true>();
+}
 
+// B1 收尾：recv_counts / fill 归零（分片）/ rdispls / 收集散射 / 交叉校验
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::RunRecvFinalize()
+{
     WriteRecvCounts(); // recv_counts[r] = srcArrive[r]
     AscendC::SyncAll<true>();
     {
@@ -1697,39 +1959,83 @@ __aicore__ inline void EngramFetchTrainRailAlignedArch35::Process()
     AscendC::SyncAll<true>();
     CrossCheckFillAndClear(); // fill==recv_counts 交叉校验；srcArrive 再清（B2 count）
     AscendC::SyncAll<true>();
+}
+
+// B2 准备：非零源条带 → B2 任务表 → 暂存三表重清（环必空——B1 全收齐）
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::PrepareRespFamily()
+{
     BuildRespStrips(); // 非零源条带（world 切片）
     AscendC::SyncAll<true>();
     MergeSegmentsBySGroup(false); // S0 合并 → B2 任务表
     AscendC::SyncAll<true>();
     ClearRelayTables(); // 暂存三表重清（B2 复用；环必空——B1 全收齐）
     AscendC::SyncAll<true>();
+}
 
-    if (aivId_ < sendCoreEnd_) {
-        SendLoopS<false, HasSf>();
-    } else if (aivId_ < fwdCoreEnd_) {
-        FwdLoopF<false, HasSf>();
-    } else {
-        OwnerLoopO<false, HasSf>();
+// 核 0：Σ响应计数 == numTokens == Σsend_counts（断言 2）+ num_recv 落盘
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::WriteCrossCheckTotals()
+{
+    int64_t total = 0;
+    for (uint32_t c = 0; c < totalBlocks_; ++c) {
+        total += Rd32(segCountGM_ + c * RAIL_I32_BYTES);
     }
-    AscendC::SyncAll<true>();
+    int32_t tSum = Rd32(sendPrefixGM_ + static_cast<int64_t>(topo_.world) * RAIL_I32_BYTES);
+    // 断言 2：请求方 Σ每源响应计数 == numTokens == Σsend_counts
+    ascendc_assert(total == tSum && total == numTokens_,
+                   "rail fwd cross-check failed: total=%lld T-sum=%d numTokens=%lld", total, tSum, numTokens_);
+    Wr32(flagScratchGM_, static_cast<int32_t>(total));
+    // num_recv = Σ recv_counts（owner 侧实收总数 = 反向记账的期望接收总量）
+    int32_t numRecv = Rd32(recvPrefixGM_ + static_cast<int64_t>(topo_.world) * RAIL_I32_BYTES);
+    Wr32(numRecvOutGM_, numRecv);
+}
 
+// 收尾：Σ响应计数（分片求和）+ 核 0 交叉校验
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::RunFinalCrossCheck()
+{
     SumRespCounts();
     AscendC::SyncAll<true>();
     if (aivId_ == 0) {
-        int64_t total = 0;
-        for (uint32_t c = 0; c < totalBlocks_; ++c) {
-            total += Rd32(segCountGM_ + c * 4);
-        }
-        int32_t tSum = Rd32(sendPrefixGM_ + static_cast<int64_t>(topo_.world) * 4);
-        // 断言 2：请求方 Σ每源响应计数 == numTokens == Σsend_counts
-        ascendc_assert(total == tSum && total == numTokens_,
-                       "rail fwd cross-check failed: total=%lld T-sum=%d numTokens=%lld", total, tSum, numTokens_);
-        Wr32(flagScratchGM_, static_cast<int32_t>(total));
-        // num_recv = Σ recv_counts（owner 侧实收总数 = 反向记账的期望接收总量）
-        int32_t numRecv = Rd32(recvPrefixGM_ + static_cast<int64_t>(topo_.world) * 4);
-        Wr32(numRecvOutGM_, numRecv);
+        WriteCrossCheckTotals();
     }
     AscendC::SyncAll<true>();
+}
+
+template <bool HasSf>
+__aicore__ inline void EngramFetchTrainRailAlignedArch35::Process()
+{
+    if (g_coreType != AscendC::AIV) {
+        return;
+    }
+    // 无 entry 空间：tiling 已拒绝 num_entries_per_rank <= 0，此处保留为不可达防御；该值全 rank 一致，可安全早退。
+    // 注意：numTokens_ 是 per-rank 本地行数，为 0 的空 rank 必须继续参与 ClearRecvAreas 与 barrier 通告协议，
+    // 否则其余 rank 等不到本 rank 的 clr/done 槽会 60s 超时（空 rank 的数据面由 ScanStrips/发送循环的 0 行路径覆盖）。
+    if (numEntriesPerRank_ == 0) {
+        return;
+    }
+    InitCoreGroups();
+    collectCursor_ = 0;
+
+    uint32_t epoch = static_cast<uint32_t>(
+        Rd32(localWin_ + static_cast<uint64_t>(topo_.writerSlots) * STATE_OFFSET)); // = done(上轮) = 2c
+    CheckWinHeadInvariant(epoch);  // 窗头入参一致性（违例即 trap）
+    BarrierWaitWritersDone(epoch); // 等全部写者上轮收尾（首次调用 epoch=0 直通）
+    ClearRecvAreas();              // 2W 收件区头 + srcArrive + relay 三表清零（分片）
+    AscendC::SyncAll<true>();
+    BarrierAnnounceCleared(epoch + 1U); // 通告"已清可写"（clr(c)=2c+1），写者收到才许写我
+
+    RunPhaseA();                         // 排序 + 分类 + B1 任务表 + sdispls
+    BarrierWaitPeersCleared(epoch + 1U); // 发送门：写者们本轮"已清可写"全部就位
+
+    DispatchLoops<true, HasSf>(); // B1：三组（S/F/O）并发
+    AscendC::SyncAll<true>();
+
+    RunRecvFinalize();   // recv_counts / rdispls / 收集散射 / 交叉校验
+    PrepareRespFamily(); // B2 条带 + 任务表 + 暂存三表重清
+
+    DispatchLoops<false, HasSf>(); // B2：三组（S/F/O）并发
+    AscendC::SyncAll<true>();
+
+    RunFinalCrossCheck(); // Σ 响应计数交叉校验（断言 2）+ num_recv 落盘
     BarrierWriteCallDone(epoch + 2U);
 }
 

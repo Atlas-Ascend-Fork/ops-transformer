@@ -22,10 +22,17 @@
 // 本头被跨算子路径 include，不得依赖任何跨目录 include；布局常量在此定义，
 // tiling_data.h 反向 include 本头派生 CTX_RAIL_ELEMS。
 
+#include <cstdint> // 头文件自包含：独立提供 uint32_t/uint64_t 基本类型
+
+// kernel 编译时 __aicore__ 由 CANN 工具链预定义；host 垫片侧不得自行定义该保留
+// 标识符（cleancode: do not declare or define reserved identifiers），改用本头
+// 私有展开宏桥接：kernel 侧展开为 __aicore__，host 侧展开为空。
 #ifndef __aicore__
 #define ENGRAM_FETCH_GRAD_ROUTE_HOST_BUILD 1
-#define __aicore__
-#define ENGRAM_FETCH_GRAD_ROUTE_UNDEF_AICORE__
+#define ENGRAM_FETCH_GRAD_ROUTE_AICORE
+#include <cstring> // host 垫片侧 NodeWinAt/NodeChannelAt 用 memcpy 读 ctx
+#else
+#define ENGRAM_FETCH_GRAD_ROUTE_AICORE __aicore__
 #endif
 
 namespace Mc2Kernel {
@@ -47,29 +54,34 @@ constexpr uint32_t RAIL_CTX_TOTAL_BYTES = RAIL_CTX_CH_OFF + RAIL_NODE_MAX * 8U; 
 // channel 建立在单一 world 通信域上（remoteRank = 全局 rank），建链侧换算落表：
 //   node[p]（p < C）←→ rank = mySn×C + p（直连同伴）；node[p]（p ≥ C）←→ rank = (p−C)×C + myL（轨道对端）
 #ifdef ENGRAM_FETCH_GRAD_ROUTE_HOST_BUILD
-// host 垫片侧（普通地址空间）：route UT / host 侧建链复用
-__aicore__ inline uint64_t NodeWinAt(const uint8_t* ctx, uint32_t p)
+// host 垫片侧（普通地址空间）：route UT / host 侧建链复用；memcpy 读规避 reinterpret_cast
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint64_t NodeWinAt(const uint8_t* ctx, uint32_t p)
 {
-    return *reinterpret_cast<const uint64_t*>(ctx + RAIL_CTX_WIN_OFF + static_cast<uint64_t>(p) * 8U);
+    uint64_t v = 0;
+    std::memcpy(&v, ctx + RAIL_CTX_WIN_OFF + static_cast<uint64_t>(p) * 8U, sizeof(v));
+    return v;
 }
-__aicore__ inline uint64_t NodeChannelAt(const uint8_t* ctx, uint32_t p)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint64_t NodeChannelAt(const uint8_t* ctx, uint32_t p)
 {
-    return *reinterpret_cast<const uint64_t*>(ctx + RAIL_CTX_CH_OFF + static_cast<uint64_t>(p) * 8U);
+    uint64_t v = 0;
+    std::memcpy(&v, ctx + RAIL_CTX_CH_OFF + static_cast<uint64_t>(p) * 8U, sizeof(v));
+    return v;
 }
 #else
 // kernel 侧（__gm__ 空间）：经 __gm__ uint64_t* 视图读
-__aicore__ inline uint64_t NodeWinAt(__gm__ uint8_t* ctx, uint32_t p)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint64_t NodeWinAt(__gm__ uint8_t* ctx, uint32_t p)
 {
     return *reinterpret_cast<__gm__ uint64_t*>(ctx + RAIL_CTX_WIN_OFF + static_cast<uint64_t>(p) * 8U);
 }
-__aicore__ inline uint64_t NodeChannelAt(__gm__ uint8_t* ctx, uint32_t p)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint64_t NodeChannelAt(__gm__ uint8_t* ctx, uint32_t p)
 {
     return *reinterpret_cast<__gm__ uint64_t*>(ctx + RAIL_CTX_CH_OFF + static_cast<uint64_t>(p) * 8U);
 }
 #endif
 
 /// @brief 目的节点索引：同超节点按对端 L；跨超节点按 C+对端超节点号
-__aicore__ inline uint32_t NodeIdxOf(uint32_t mySn, uint32_t peerSn, uint32_t peerLocal, uint32_t ranksPerSupernode)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint32_t NodeIdxOf(uint32_t mySn, uint32_t peerSn, uint32_t peerLocal,
+                                                         uint32_t ranksPerSupernode)
 {
     return (peerSn == mySn) ? peerLocal : ranksPerSupernode + peerSn;
 }
@@ -84,7 +96,7 @@ struct RailTopo {
 };
 
 /// @brief 构造运行期拓扑：由感知数与 world 推导超节点数/轨道对端数/写者槽 W
-__aicore__ inline RailTopo MakeRailTopo(uint32_t ranksPerSupernode, uint32_t world)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline RailTopo MakeRailTopo(uint32_t ranksPerSupernode, uint32_t world)
 {
     RailTopo t;
     t.ranksPerSupernode = ranksPerSupernode;
@@ -101,7 +113,7 @@ struct RankCoord {
 };
 
 /// @brief 全局 rank 分解：rank = sn * C + L
-__aicore__ inline RankCoord DecodeRank(const RailTopo& topo, uint32_t rank)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline RankCoord DecodeRank(const RailTopo& topo, uint32_t rank)
 {
     RankCoord c;
     c.supernode = rank / topo.ranksPerSupernode;
@@ -118,7 +130,8 @@ enum BucketKind : uint32_t {
 constexpr int32_t RAIL_BUCKET_KEY_STRIDE = 4096; // 桶键编码步距：kind×STRIDE + 子编号
 
 /// @brief 三桶分类（互斥完备）：dst==self 本地；同超节点直发；否则轨道腿
-__aicore__ inline BucketKind ClassifyRow(const RailTopo& topo, const RankCoord& me, uint32_t dstRank)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline BucketKind ClassifyRow(const RailTopo& topo, const RankCoord& me,
+                                                             uint32_t dstRank)
 {
     if (dstRank == (me.supernode * topo.ranksPerSupernode + me.local)) {
         return BUCKET_LOCAL;
@@ -131,7 +144,7 @@ __aicore__ inline BucketKind ClassifyRow(const RailTopo& topo, const RankCoord& 
 }
 
 /// @brief 轨道对端卡号：dst 超节点的同本地号卡（railPeer = sn_T×C + myL）
-__aicore__ inline uint32_t RailPeerOf(const RailTopo& topo, uint32_t dstRank, uint32_t myLocal)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint32_t RailPeerOf(const RailTopo& topo, uint32_t dstRank, uint32_t myLocal)
 {
     return (dstRank / topo.ranksPerSupernode) * topo.ranksPerSupernode + myLocal;
 }
@@ -141,7 +154,8 @@ enum HopKind : uint32_t {
 };
 
 /// @brief F 组转发路由：轨道区到达的行 dst 必在本超节点，恒直投 owner 槽[L_T]
-__aicore__ inline HopKind FwdRoute(const RailTopo& topo, const RankCoord& me, uint32_t dstRank, uint32_t& ownerLocal)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline HopKind FwdRoute(const RailTopo& topo, const RankCoord& me, uint32_t dstRank,
+                                                       uint32_t& ownerLocal)
 {
     (void)me;
     RankCoord d = DecodeRank(topo, dstRank);
@@ -162,8 +176,27 @@ constexpr uint32_t GRAD_BUF_BYTES = 64U * 1024U;  // WinLocalCopy pong
 constexpr uint32_t IDX_BUF_BYTES = 4U * 1024U;    // 排序产物分片扫描
 constexpr uint32_t ENTRY_BATCH_CAP = 1024U;       // GM 清零批容量（int32 个数）
 
+// ── rail 表布局常量（int32 步长与各表项/字段偏移；grad/train 双侧共用）──
+constexpr uint32_t RAIL_I32_BYTES = 4U;         // int32 元素步长字节（Wr32/Rd32 槽步进）
+constexpr uint32_t RAIL_STRIP_ENT_BYTES = 12U;  // 条带表项 (dst, startRow, rowCount)
+constexpr uint32_t RAIL_STRIP_START_OFF = 4U;   // 条带项 startRow 字段偏移
+constexpr uint32_t RAIL_STRIP_LEN_OFF = 8U;     // 条带项 rowCount 字段偏移
+constexpr uint32_t RAIL_TASK_ENT_BYTES = 16U;   // 任务表项 (kind, dstRank, startRow, rowCount)
+constexpr uint32_t RAIL_TASK_DST_OFF = 4U;      // 任务项 dstRank 字段偏移
+constexpr uint32_t RAIL_TASK_START_OFF = 8U;    // 任务项 startRow 字段偏移
+constexpr uint32_t RAIL_TASK_LEN_OFF = 12U;     // 任务项 rowCount 字段偏移
+constexpr uint32_t RAIL_ROWHEAD_SRC_OFF = 4U;   // 拼行 32B 头 src 字段偏移
+constexpr uint32_t RAIL_ROWHEAD_ENTRY_OFF = 8U; // 拼行 32B 头 entry 字段偏移
+constexpr uint32_t RAIL_ROWHEAD_RSVD_OFF = 12U; // 拼行 32B 头保留字段偏移
+constexpr uint32_t RAIL_COLLECT_ENT_BYTES = 8U; // 收集段条目 (src, entry) 字节
+constexpr uint32_t RAIL_SEND_CNT_STRIDE = 32U;  // sendCounts 每 rank 32B 槽距（写侧布局）
+constexpr uint32_t RAIL_FLAG_AREA_BYTES = 64U;  // flagScratch 头区字节（[0..31]=collectedCount）
+constexpr uint32_t RAIL_FLAG_SENT_SLOT = 4U;    // flagScratch 槽 1：S 属主流 ΣwriteCnt
+constexpr uint32_t RAIL_FLAG_STAGED_SLOT = 8U;  // flagScratch 槽 2：F 暂存发布数
+
 /// @brief 本 rank 在对端写者枚举里的槽号（关系对称）：同超节点按本地号；轨道按超节点号
-__aicore__ inline uint32_t MySlotInPeer(const RailTopo& topo, const RankCoord& me, uint32_t peerRank)
+ENGRAM_FETCH_GRAD_ROUTE_AICORE inline uint32_t MySlotInPeer(const RailTopo& topo, const RankCoord& me,
+                                                            uint32_t peerRank)
 {
     RankCoord peer = DecodeRank(topo, peerRank);
     if (peer.supernode == me.supernode) {
@@ -174,9 +207,6 @@ __aicore__ inline uint32_t MySlotInPeer(const RailTopo& topo, const RankCoord& m
 
 } // namespace Mc2Kernel
 
-#ifdef ENGRAM_FETCH_GRAD_ROUTE_UNDEF_AICORE__
-#undef __aicore__
-#undef ENGRAM_FETCH_GRAD_ROUTE_UNDEF_AICORE__
-#endif
+#undef ENGRAM_FETCH_GRAD_ROUTE_AICORE
 
 #endif // ENGRAM_FETCH_GRAD_ROUTE_H
