@@ -34,7 +34,7 @@
     - Forward formula:
 
       $$
-      H\_in = \sum_{i=1}^{N} x[{B,S,i,:}] · H\_pre_n[B,S,i]
+      H\_in = \sum_{i=1}^{N} x[{B,S,i,:}] · H\_pre[B,S,i]
       $$
 
     - Backward computation:
@@ -87,7 +87,7 @@
     - Forward formula:
 
       $$
-      H\_res = \alpha\_res * H\_res\_1 + bias\_res
+      H\_res = \alpha\_res * \text{Reshape}(H\_res\_1, [B,S,N,N]) + bias\_res
       $$
 
     - Backward computation:
@@ -95,7 +95,7 @@
       $$
       \begin{aligned}
       H\_res\_2\_grad &= H\_res\_grad \cdot \alpha_{res} \quad ([B,S,N,N]) \\
-      \alpha\_res\_grad &= \sum_{b,s,i,j}^{B,S,N,N} \left(H\_res\_grad \cdot H\_res\_2\right) \\
+      \alpha\_res\_grad &= \sum_{b,s,i,j}^{B,S,N,N} \left(H\_res\_grad \odot \text{Reshape}(H\_res\_1, [B,S,N,N])\right) \\
       bias\_res\_grad &= \sum_{b,s}^{B,S} H\_res\_grad \quad ([N,N]) \\
       H\_res\_1\_grad &= \text{Reshape}(H\_res\_2\_grad) \quad ([B,S,N^2])
       \end{aligned}
@@ -268,7 +268,7 @@ aclnnStatus aclnnMhcPreBackward(
         <tr>
             <td>alpha (aclTensor*)</td>
             <td>Input</td>
-            <td>Scaling parameter alpha of mHC.</td>
+            <td>Scaling coefficients of mHC, ordered as alpha_pre, alpha_post, and alpha_res.</td>
             <td><ul><li>Empty tensor not supported.</li><li>The shape is (3).</li></ul></td>
             <td>FLOAT32</td>
             <td>ND</td>
@@ -880,7 +880,7 @@ int main()
     float hc_eps = 1e-6;
 
     // 3. Call the CANN operator library API and replace it with the specific API name
-    uint64_t workspaceSize = 80 * 1024 * 1024;
+    uint64_t workspaceSize = 0;
     aclOpExecutor *executor;
 
     // Call the first-phase API of aclnnMhcPreBackward

@@ -36,7 +36,7 @@
     - 正向公式：
 
       $$
-      H\_in = \sum_{i=1}^{N} x[{B,S,i,:}] · H\_pre_n[B,S,i]
+      H\_in = \sum_{i=1}^{N} x[{B,S,i,:}] · H\_pre[B,S,i]
       $$
 
     - 反向计算：
@@ -89,7 +89,7 @@
     - 正向公式：
 
       $$
-      H\_res = \alpha\_res * H\_res\_1 + bias\_res
+      H\_res = \alpha\_res * \text{Reshape}(H\_res\_1, [B,S,N,N]) + bias\_res
       $$
 
     - 反向计算：
@@ -97,7 +97,7 @@
       $$
       \begin{aligned}
       H\_res\_2\_grad &= H\_res\_grad \cdot \alpha_{res} \quad ([B,S,N,N]) \\
-      \alpha\_res\_grad &= \sum_{b,s,i,j}^{B,S,N,N} \left(H\_res\_grad \cdot H\_res\_2\right) \\
+      \alpha\_res\_grad &= \sum_{b,s,i,j}^{B,S,N,N} \left(H\_res\_grad \odot \text{Reshape}(H\_res\_1, [B,S,N,N])\right) \\
       bias\_res\_grad &= \sum_{b,s}^{B,S} H\_res\_grad \quad ([N,N]) \\
       H\_res\_1\_grad &= \text{Reshape}(H\_res\_2\_grad) \quad ([B,S,N^2])
       \end{aligned}
@@ -271,7 +271,7 @@ aclnnStatus aclnnMhcPreBackwardV2(
         <tr>
             <td>alpha（aclTensor*）</td>
             <td>输入</td>
-            <td>mHC的缩放参数alpha。</td>
+            <td>mHC的缩放系数，三个元素依次对应alpha_pre、alpha_post和alpha_res。</td>
             <td><ul><li>不支持空Tensor。</li><li>shape为(3)。</li></ul></td>
             <td>FLOAT32</td>
             <td>ND</td>
@@ -352,7 +352,7 @@ aclnnStatus aclnnMhcPreBackwardV2(
             <td>gammaOptional（aclTensor*）</td>
             <td>可选输入</td>
             <td>RMSNorm的缩放系数gamma。</td>
-            <td><ul><li>不支持空Tensor。</li><li>如果传入nullptr，则表示全1的tensor。</li><li>shape为(N ,D)。其中，N与`x`的N保持一致；D与`x`的D保持一致。</li></ul></td>
+            <td><ul><li>不支持空Tensor。</li><li>如果传入nullptr，则表示全1的tensor。</li><li>shape为(N, D)。其中，N与`x`的N保持一致；D与`x`的D保持一致。</li></ul></td>
             <td>FLOAT32</td>
             <td>ND</td>
             <td>2</td>
@@ -834,7 +834,7 @@ int main()
     int64_t opImplMode = 1;
 
     // 3. 调用CANN算子库API，需要修改为具体的Api名称
-    uint64_t workspaceSize = 80 * 1024 * 1024;
+    uint64_t workspaceSize = 0;
     aclOpExecutor *executor;
 
     // 调用aclnnMhcPreBackwardV2第一段接口
