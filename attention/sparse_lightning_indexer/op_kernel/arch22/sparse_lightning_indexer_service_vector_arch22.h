@@ -14,7 +14,7 @@
  * Vector核服务类：加权ReLU求和(DoScale/DoReduce)、候选掩码构建+候选无效化链（无 leak，BuildCandidateMask）、
  * TopK排序(SortAll/MergeSort)、LD归约(ProcessLD，noS2Split 下休眠)、输出写回。
  * 相对克隆基线的差异：
- *  - InitBuffers：candBuf_(32KB 按行分区)/candConstBuf_(negInf|isOut 4KB) 恒分配，无 source 块级累加器；
+ *  - InitBuffers：candBuf_(42.5KB 按行分区)/candConstBuf_(negInf|isOut 4KB) 恒分配，无 source 块级累加器；
  *    SortedBasicBlock_ 视图不绑定（s1Base=4 下越界，恒走 SortAll+MergeSort）
  *  - ProcessVec：DoReduce 后、SortAll 前插入候选掩码构建（BuildCandidateMask + 候选无效化链：
  *    候选外位置 score→-inf 位型、idx→-1，排序流两档，不足 virTopK 槽位由 (-inf,-1) 垫底）
@@ -74,16 +74,32 @@ public:
     __aicore__ inline void AllocEventID();
     __aicore__ inline void FreeEventID();
     __aicore__ inline void InitLDBuffers(TPipe* pipe);
-    // candidate (two-level topk) consumer 链：候选掩码构建（产出 candIsOutUb_，候选无效化链在 ProcessVec）
+
+    // 候选掩码分段上下文（scan 级不变量：仅依赖 info/blockS2StartIdx_/candidateBlockSize，与行无关；
+    // 全部整除集中于 InitCandSegCtx，ProcessVec 每 tile 调用一次，行循环内零整除）
+    struct CandSegCtx {
+        int32_t blockSize;     // candidateBlockSize
+        int32_t tileBlkNum;    // s2BaseSize_/blockSize（512/bs ∈ [8,256]）
+        int32_t tileBlockBase; // cuBaseS2Idx/blockSize = s2Idx × tileBlkNum
+        int32_t blkCnt;        // 本行块号上界（含 -inf pad 尾块）= numTiles × tileBlkNum
+        bool isSingleSeg;      // blkCnt ≤ CAP：整行单段，走无分段参数的原路径
+        int32_t segBlockBase;  // 段表基址（全局块号；仅 !isSingleSeg 有效）
+        bool isSegStart;       // 本 tile 是否段首（建表；仅 !isSingleSeg 有效）
+        int32_t segBlockHi;    // 段窗口上界（仅 !isSingleSeg 有效）
+    };
+    __aicore__ inline void InitCandSegCtx(const SparseLICommon::RunInfo& info, CandSegCtx& ctx) const;
+
+    // candidate (two-level topk) consumer 链：候选掩码构建（产出 candIsOutUb_，候选无效化链在 ProcessVec）。
+    // 分段参数由 CandSegCtx 携带（ProcessVec 每 tile 一次，行循环内零整除）
     __aicore__ inline void BuildCandidateMask(const SparseLICommon::RunInfo& info, int32_t cuS1Idx, int32_t cuBaseS2Idx,
-                                              int32_t innerS1Idx);
-    // 块级 isOut 表构建（每行一次，覆盖 [0, blkCnt)）
-    __aicore__ inline void BuildCandBlockTable(const SparseLICommon::RunInfo& info, int32_t cuS1Idx, int32_t blkCnt,
-                                               int32_t innerS1Idx);
-    // 块级 isOut 表 → 位置级 candIsOutUb_ 展开（Brcb 向量展开 / 标量展开）
+                                              int32_t innerS1Idx, const CandSegCtx& seg);
+    // 块级 isOut 表构建（每行每段一次，tbl[0] 对应全局块 blkLo，覆盖 [blkLo, blkHi)）
+    __aicore__ inline void BuildCandBlockTable(const SparseLICommon::RunInfo& info, int32_t cuS1Idx, int32_t blkLo,
+                                               int32_t blkHi, int32_t innerS1Idx);
+    // 块级 isOut 表 → 位置级 candIsOutUb_ 展开（Brcb 向量展开 / 标量展开；表索引需减 segBlockBase）
     __aicore__ inline void ExpandCandMaskToPosition(int32_t tileBlockBase, int32_t tileBlkNum, int32_t blockSize,
-                                                    int32_t innerS1Idx);
-    // 回退路径：blkCnt 超块级表容量时走纯标量逐 tile 实现
+                                                    int32_t segBlockBase, int32_t innerS1Idx);
+    // 回退路径：纯标量逐 tile 实现（仅 SLI_CAND_MASK_LEGACY=1 编译期启用）
     __aicore__ inline void BuildCandidateMaskLegacyTile(const SparseLICommon::RunInfo& info, int32_t cuS1Idx,
                                                         int32_t cuBaseS2Idx, int32_t innerS1Idx);
 
@@ -116,7 +132,7 @@ private:
     TBuf<> ldOutValueBuf_;
     TBuf<> ldOutIdxBuf_;
 
-    // candidate (two-level topk) consumer：候选掩码构建专用 UB（32KB，布局见下方常量区；按行分区）
+    // candidate (two-level topk) consumer：候选掩码构建专用 UB（42.5KB，布局见下方常量区；按行分区）
     TBuf<TPosition::VECCALC> candBuf_;
     // candidate 常量/掩码缓冲（4KB）：[0,512) NEG_INF 常量 | [512,1024) isOut 掩码
     // （原第 3 段 pen 已回收：candPenUb_ 重绑定 reduceOutBuf_ 第 3 段，UB 预算省 2KB；
@@ -151,22 +167,38 @@ private:
     constexpr static uint32_t REDUCE_BANK_CONFLICT_OFFSETS = 256;
     constexpr static uint32_t REDUCE_BANK_CONFLICT_NUM = REDUCE_BANK_CONFLICT_OFFSETS / sizeof(float);
     // ---------------------------------------------------------------------------
-    // candBuf_ 布局（候选掩码构建专用，32KB = 8192 floats）
-    //   [0, CAND_TBL_CAP)                       行 0（innerS1Idx=0）块级 isOut 表
-    //   [CAND_TBL_CAP, 2*CAND_TBL_CAP)          行 1（innerS1Idx=1）块级 isOut 表
-    //   [CAND_STAGE_OFFSET, +CAND_BRCB_FANOUT²) blockSize>8 时的 Brcb 预展开暂存（64 floats）
-    //   [CAND_LOAD_OFFSET, +CAND_LOAD_LEN)      候选行 GM→UB int32 装载区（两行串行复用）
-    //   [CAND_LOAD_OFFSET+CAND_LOAD_LEN, 8192)  DataCopyPad tailPadding 守护区（576 floats）
+    // candBuf_ 布局（候选掩码构建专用，42.5KB = 10880 floats）
+    //   [0, CAND_TBL_CAP)                        行 0（innerS1Idx=0）块级 isOut 表
+    //   [CAND_TBL_CAP, 2*CAND_TBL_CAP)           行 1（innerS1Idx=1）块级 isOut 表
+    //   [CAND_STAGE_OFFSET, +CAND_BRCB_FANOUT²)  blockSize>8 时的 Brcb 预展开暂存（64 floats）
+    //   [CAND_LOAD_OFFSET, +CAND_LOAD_LEN)       候选行 GM→UB int32 装载区（两行串行复用）
+    //   [CAND_LOAD_OFFSET+CAND_LOAD_LEN, CAND_BUF_TOTAL)  DataCopyPad tailPadding 守护区（CAND_TAIL_GUARD floats）
     // ---------------------------------------------------------------------------
-    // 每行块级表容量（floats，64 对齐）：blkCnt ≤ CAP 走快路径；blkCnt > CAP 回退标量逐 tile 实现
-    constexpr static uint32_t CAND_TBL_CAP = 2752;
+    // 每行块级表容量（floats，64 对齐）：blkCnt ≤ CAP 走整行单段快分支；blkCnt > CAP 时按
+    // segTiles = CAP/tileBlkNum 个 tile 分段逐段建表（见 InitCandSegCtx/BuildCandidateMask），
+    // 不再回退标量逐 tile 实现（legacy 仅编译开关强制时启用）
+    constexpr static uint32_t CAND_TBL_CAP = 4096;
     // Brcb：每 repeat 取 8 个 b32 元素、各自广播成 1 个 32B 块（float 即 8 份）→ 每 repeat 出 64 位置
     constexpr static uint32_t CAND_BRCB_FANOUT = 8;
-    constexpr static uint32_t CAND_STAGE_OFFSET = 2 * CAND_TBL_CAP;                  // 5504
+    constexpr static uint32_t CAND_STAGE_OFFSET = 2 * CAND_TBL_CAP;                  // 8192
     constexpr static uint32_t CAND_STAGE_LEN = CAND_BRCB_FANOUT * CAND_BRCB_FANOUT;  // 64
-    constexpr static uint32_t CAND_LOAD_OFFSET = CAND_STAGE_OFFSET + CAND_STAGE_LEN; // 5568
+    constexpr static uint32_t CAND_LOAD_OFFSET = CAND_STAGE_OFFSET + CAND_STAGE_LEN; // 8256
     constexpr static uint32_t CAND_LOAD_LEN = BASE_TOPK;                             // 2048 int32 = candBlocks 上限
-    constexpr static uint32_t CAND_BUF_TOTAL = 8192;                                 // floats（32KB）
+    // 装载区尾部 DataCopyPad tailPadding 的越界写守护（尺寸自基线沿用）
+    constexpr static uint32_t CAND_TAIL_GUARD = 576; // floats
+    constexpr static uint32_t CAND_BUF_TOTAL =
+        CAND_LOAD_OFFSET + CAND_LOAD_LEN + CAND_TAIL_GUARD; // 10880 floats（42.5KB）
+    // 布局契约（编译期钉死；扩 CAP / 改装载参数时由此保证偏移与总量同步）：
+    //   - CAP 为 256 的倍数：对全部合法 blockSize（2~64，2 的幂）tileBlkNum = 512/blockSize 均为
+    //     ≤256 的 2 的幂 ⇒ segTiles = CAP/tileBlkNum 恒整除（段表容量满用），且表行保持
+    //     64-float 对齐（向量展开 Adds/Brcb 按 32B 块寻址表区）
+    //   - 装载区 32B 对齐：DataCopyPad int32 装载的块寻址前提
+    //   - 总量钉 10880：candBuf 42.5KB 已贴 UB 预算上限（≈188.1/192KB，余 ~3.9KB），
+    //     扩容须重核 InitBuffers 全量预算后再改钉值
+    static_assert(CAND_TBL_CAP % 256 == 0,
+                  "CAND_TBL_CAP must be a multiple of 256: segTiles divisibility and 64-float row alignment");
+    static_assert(CAND_LOAD_OFFSET % 8 == 0, "cand load region must be 32B aligned for DataCopyPad");
+    static_assert(CAND_BUF_TOTAL == 10880, "candBuf total changed; re-check the 192KB UB budget in InitBuffers");
     // 候选行标量扫描的展开度（先集中发 8 条 UB 读再统一置位，令读延迟重叠、消除逐元素分支串行化）
     constexpr static int32_t CAND_SCAN_UNROLL = 8;
     // candConstBuf_ 内两个 512-float 区的固定偏移（pen 段已回收，candPenUb_ 重绑定 reduceOutBuf_ 第 3 段）
@@ -201,8 +233,8 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::InitBuffers(TPi
     globalTopkNum_ = 0;
 
     // candidate (two-level topk) consumer：候选掩码构建专用 UB（恒分配，布局见常量区注释）
-    // UB 预算：基础（s1Base=4）≈141.6KB + candBuf 32KB + candConst 4KB ≈ 177.6KB ≤ 192KB
-    pipe->InitBuffer(candBuf_, CAND_BUF_TOTAL * sizeof(float)); // 32KB
+    // UB 预算：基础（s1Base=4）≈141.6KB + candBuf 42.5KB + candConst 4KB ≈ 188.1KB ≤ 192KB（余 ~3.9KB）
+    pipe->InitBuffer(candBuf_, CAND_BUF_TOTAL * sizeof(float)); // 42.5KB
     candBufUb_ = candBuf_.Get<float>();
     pipe->InitBuffer(candConstBuf_, 2 * CAND_IS_OUT_OFFSET * sizeof(float)); // 4KB: negInf|isOut
     LocalTensor<float> candConstUb = candConstBuf_.Get<float>();
@@ -337,12 +369,12 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::CleanInvalidOut
 // 输入：candidateBlockIndexInGm 行（info.candidateOutOffset + cuS1Idx × candBlocks 起 candBlocks 个 int32）。
 // 输出：candIsOutUb_[0, s2BaseSize_) 位置级 0/1 掩码（1 = 该位置所在块不在候选集内，即"可达但非候选"）。
 //
-// 实现：块级表每行一次构建 + Brcb 向量展开。不做逐 tile 全量标量扫描——候选集合对整行所有
+// 实现：块级表每行每段一次构建 + Brcb 向量展开。不做逐 tile 全量标量扫描——候选集合对整行所有
 //   tile 不变，逐 tile 重扫本质重复，其耗时占 consumer 运行时 ~95%（约为不执行掩码构建路径
 //   的 15 倍，且与 candBlocks、S1 线性相关）：
-//   (1) 块级 isOut 表【每行仅构建一次】（BuildCandBlockTable）：
+//   (1) 块级 isOut 表【每行每段构建一次】（BuildCandBlockTable）：
 //       GM→UB 一次性装载 candBlocks 个 int32 → 标量 8 路展开扫描（先集中发 8 条 UB 读令读延迟重叠，
-//       再统一置位，消除逐元素分支串行化）→ 命中 [0, blkCnt) 的候选块在块级表置 0，其余保持 1；
+//       再统一置位，消除逐元素分支串行化）→ 命中段窗口 [blkLo, blkHi) 的候选块在段表置 0，其余保持 1；
 //   (2) 位置级展开【每 tile】：candIsOutUb_[b*bs+e] = tbl[tileBlockBase+b]——bs==8 走「Level-2 Adds
 //       向量整块搬到固定 staging + 单条 Brcb(8 repeat)」（零标量、零 per-tile fence）；bs>8 走
 //       「标量预展开 64 元素 staging + 单条 Brcb」；bs<8 走标量展开（Brcb 32B 粒度不足）
@@ -355,21 +387,25 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::CleanInvalidOut
 //       - 表 S 写 → 展开 V 读用 S_V 事件 fence（同 pool_key_indexer arch22 BuildExpandGatherTpl 模式）；
 //       - 掩码路径无任何排序依赖（不存在对排序数据的交错读）。
 //   脏数据防御：-1/越界块号（∉[0,blkCnt)）按"非候选"处理，重复候选幂等。
-//   语义等价性：逐 tile 命中窗口 [tileBlockBase, tileBlockBase+tileBlkNum) 的并集 = [0, blkCnt)，
-//   与整行一次构建的表值域一致；blkCnt 之外均按非候选处理。
+//   语义等价性：各段命中窗口并集 = [0, blkCnt)，与整行一次构建的表值域一致；blkCnt 之外均按非候选处理。
 //   tileBlockBase = cuBaseS2Idx/blockSize = s2Idx×tileBlkNum，512 = 2⁹ 整除任意 [2,64] 幂次
 //   blockSize，无跨 tile 块（Brcb repeat 截断问题结构性不存在）。
 //
-// 容量与回退：块级表容量 CAND_TBL_CAP（每行分区），blkCnt ≤ CAP 时走上述快路径；
-//   blkCnt > CAP（极小 blockSize × 超长 S2，如 bs=2 且 S2>14336）回退 BuildCandidateMaskLegacyTile
-//   —— 纯标量逐 tile 实现（语义等价，仅该形态无性能收益）。
+// 容量与分段：块级表容量 CAND_TBL_CAP（每行分区）。blkCnt ≤ CAP 时【整行单段快分支】（表覆盖
+//   [0, blkCnt)、段基址恒 0、行首 tile 一次构建，无任何分段参数——与原单段实现逐位一致）；
+//   blkCnt > CAP（如 bs=8 且 S2>32768 = 65 tiles）按 segTiles = CAP/tileBlkNum 个 tile 分段：
+//   段首 tile 重建段窗口 [segBlockLo, segBlockHi) 的表（候选装载区跨段复用，仅置位判定改段窗口），
+//   段内每 tile 展开不变——语义等价：各段命中窗口的并集 = [0, blkCnt)，与整行表值域一致；
+//   段表读域 ⊆ [0, tblLen) 结构性成立。分段参数（含全部整除）为 scan 级不变量，由 CandSegCtx
+//   携带、ProcessVec 每 tile 计算一次（InitCandSegCtx），行循环内零整除。
 // 编译期开关：SLI_CAND_MASK_LEGACY=1 强制全形态走标量实现（A/B 归因与应急回滚用）。
 #ifndef SLI_CAND_MASK_LEGACY
 #define SLI_CAND_MASK_LEGACY 0
 #endif
-// 块级 isOut 表 → 位置级 candIsOutUb_ 展开（每 tile 一次）。
-// 目标：candIsOutUb_[b*blockSize + e] = tbl[tileBlockBase + b]（int 位型 1 = 非候选 / 0 = 候选内），
-//       b ∈ [0, tileBlkNum)、e ∈ [0, blockSize)，共 s2BaseSize_(=512) 个位置。
+// 块级 isOut 表 → 位置级 candIsOutUb_ 展开（每 tile 一次）。表为段表：tbl[0] 对应全局块
+// segBlockBase（blkCnt ≤ CAP 时整行单段，segBlockBase = 0）。
+// 目标：candIsOutUb_[b*blockSize + e] = tbl[tileBlockBase + b - segBlockBase]（int 位型 1 = 非候选 /
+//       0 = 候选内），b ∈ [0, tileBlkNum)、e ∈ [0, blockSize)，共 s2BaseSize_(=512) 个位置。
 // 三条路径（按 blockSize 分派，均为「块级读一次 + 向量/标量写 512 位置」，不再重扫 candBlocks）：
 //   bs == 8：Level-2 int Adds(+0)（位精确，仓内先例 VecCopyI32BitExact）把表当前 tile 切片（64 floats）
 //            整块搬到【固定偏移】staging，再单条 Brcb（8 repeat，每 repeat 取 8 个 b32 各广播成
@@ -385,10 +421,8 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::CleanInvalidOut
 //   向量写（Cast）均正确。故一律走「固定偏移 staging + Brcb」。c220 亦未提供 Scatter，
 //   故候选置位仍为标量。
 template <typename LIT>
-__aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ExpandCandMaskToPosition(int32_t tileBlockBase,
-                                                                                          int32_t tileBlkNum,
-                                                                                          int32_t blockSize,
-                                                                                          int32_t innerS1Idx)
+__aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ExpandCandMaskToPosition(
+    int32_t tileBlockBase, int32_t tileBlkNum, int32_t blockSize, int32_t segBlockBase, int32_t innerS1Idx)
 {
     LocalTensor<float> tblRow = candBufUb_[static_cast<uint32_t>(innerS1Idx) * CAND_TBL_CAP];
     LocalTensor<int32_t> tblI = tblRow.template ReinterpretCast<int32_t>();
@@ -404,7 +438,7 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ExpandCandMaskT
             // 风险，必须切 int 视图——仓内先例 VecCopyI32BitExact）——常规向量指令对子张量偏移无
             // Brcb/vgather 的上述限制，故每 tile 零标量、零 S_V fence（表在行首 tile 已由 S_V fence 交棒 V 管道）
             LocalTensor<int32_t> stageI = candBufUb_[CAND_STAGE_OFFSET].template ReinterpretCast<int32_t>();
-            Adds(stageI, tblI[tileBlockBase], 0, static_cast<uint32_t>(tileBlkNum));
+            Adds(stageI, tblI[tileBlockBase - segBlockBase], 0, static_cast<uint32_t>(tileBlkNum));
             PipeBarrier<PIPE_V>();
         } else {
             // bs∈{16,32,64}：每块值需复制 fan=bs/8 份 → 标量预展开（tileBlkNum×fan ≡ 64）
@@ -413,7 +447,7 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ExpandCandMaskT
             SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
             LocalTensor<int32_t> stage = candBufUb_[CAND_STAGE_OFFSET].template ReinterpretCast<int32_t>();
             for (int32_t b = 0; b < tileBlkNum; b++) {
-                int32_t v = tblI.GetValue(static_cast<uint32_t>(tileBlockBase + b));
+                int32_t v = tblI.GetValue(static_cast<uint32_t>(tileBlockBase + b - segBlockBase));
                 for (int32_t j = 0; j < fan; j++) {
                     stage.SetValue(static_cast<uint32_t>(b * fan + j), v);
                 }
@@ -433,7 +467,7 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ExpandCandMaskT
     SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
     LocalTensor<int32_t> isOutI = candIsOutUb_.template ReinterpretCast<int32_t>();
     for (int32_t b = 0; b < tileBlkNum; b++) {
-        int32_t v = tblI.GetValue(static_cast<uint32_t>(tileBlockBase + b));
+        int32_t v = tblI.GetValue(static_cast<uint32_t>(tileBlockBase + b - segBlockBase));
         for (int32_t e = 0; e < blockSize; e++) {
             isOutI.SetValue(static_cast<uint32_t>(b * blockSize + e), v);
         }
@@ -443,33 +477,35 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ExpandCandMaskT
     WaitFlag<HardEvent::S_V>(eventIdSToV2);
 }
 
-// 块级 isOut 表构建（每行一次，tblBase 恒 0，覆盖 [0, blkCnt)）。
-// 表内容：tbl[b] = 1（int 位型，非候选）/ 0（候选内），b ∈ [0, tblLen)。
-// 全程仅 S pipe 写（初始化 + 命中置位同管道 → 无跨管道 WAW）；候选装载区独立于表区（candBuf_ 尾部）。
+// 块级 isOut 表构建（每行每段一次，tbl[0] 对应全局块 blkLo，覆盖 [blkLo, blkHi)）。
+// 表内容：tbl[i] = 1（int 位型，非候选）/ 0（候选内），i ∈ [0, tblLen)。
+// 初始化为单条 Duplicate（V 管道向量写，tblLen ≤ CAP 次 SetValue 的标量孤岛由此消除），
+// 命中置位为 S pipe 写（跨管道 WAW 由 V_S fence 排序）；候选装载区独立于表区（candBuf_ 尾部）。
+// blkCnt ≤ CAP 时整行单段（blkLo=0、blkHi=blkCnt），与分段形态共用本路径。
 template <typename LIT>
 __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::BuildCandBlockTable(
-    const SparseLICommon::RunInfo& info, int32_t cuS1Idx, int32_t blkCnt, int32_t innerS1Idx)
+    const SparseLICommon::RunInfo& info, int32_t cuS1Idx, int32_t blkLo, int32_t blkHi, int32_t innerS1Idx)
 {
     const int32_t candBlocks = static_cast<int32_t>(constInfo_.candidateTopkBlocks);
     LocalTensor<int32_t> tbl =
         candBufUb_[static_cast<uint32_t>(innerS1Idx) * CAND_TBL_CAP].template ReinterpretCast<int32_t>();
-    const int32_t tblLen = static_cast<int32_t>(SparseLICommon::Align(blkCnt, static_cast<int32_t>(64)));
+    const int32_t tblLen = static_cast<int32_t>(SparseLICommon::Align(blkHi - blkLo, static_cast<int32_t>(64)));
 
-    // 表区按 innerS1Idx 分区，本行初始化（S 写）与上一轮同分区表数据
-    // 的 V 读（展开路径 Adds/Brcb/无效化链）构成跨轮 WAR——覆写前排空 V 管道（每行一次，开销可忽略）
-    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
+    // 表区按 innerS1Idx 分区，本段初始化（V 写）与上一轮（上一行或同行上一段）同分区
+    // 表数据的 V 读（展开路径 Adds/Brcb）构成同管道跨轮 WAR——Duplicate 发起前排空 V 管道
+    // （每行每段一次，开销可忽略；上一轮标量置位已完成于其 (4) S_V wait 返回点，与本轮 V 写无竞态）
+    PipeBarrier<PIPE_V>();
 
-    // (1) 块级表初始化全 1（int 位型 1 = 非候选；候选内为 0，与命中置位同管道）
+    // (1) 块级表初始化全 1（int 位型 1 = 非候选；候选内为 0）：单条 Duplicate（V 管道）
     constexpr int32_t CAND_IS_OUT_ONE = 1; // int 位型 1 = 非候选（候选内置 0）
-    for (int32_t i = 0; i < tblLen; i++) {
-        tbl.SetValue(static_cast<uint32_t>(i), CAND_IS_OUT_ONE);
-    }
+    Duplicate(tbl, CAND_IS_OUT_ONE, static_cast<uint32_t>(tblLen));
 
-    // (2) 候选行 GM→UB 一次性装载（int32 直存，无 Cast：块号仅作整数索引使用）
+    // (2) 候选行 GM→UB 一次性装载（int32 直存，无 Cast：块号仅作整数索引使用）。
+    //     装载区与表区不相交，MTE2 搬运与 (1) 的 V 初始化双异步并行。
+    //     装载区（CAND_LOAD_OFFSET）跨行/跨段复用：
+    //     上一轮 (3) 的标量扫描 GetValue（PIPE_S Read）与本轮 DataCopyPad（PIPE_MTE2 Write）覆写之间
+    //     无排序事件（既有 MTE2_S 仅约束本轮"写→读"方向）——MTE2 覆写前排空 S 读
     LocalTensor<int32_t> candInt = candBufUb_[CAND_LOAD_OFFSET].template ReinterpretCast<int32_t>();
-    // 装载区（CAND_LOAD_OFFSET）跨行复用：
-    // 上一行 (3) 的标量扫描 GetValue（PIPE_S Read）与本行 DataCopyPad（PIPE_MTE2 Write）覆写之间
-    // 无排序事件（既有 MTE2_S 仅约束本行"写→读"方向）——MTE2 覆写前排空 S 读
     SetWaitFlag<HardEvent::S_MTE2>(HardEvent::S_MTE2);
     DataCopyPad(candInt, candidateBlockIndexInGm[info.candidateOutOffset + static_cast<uint64_t>(cuS1Idx) * candBlocks],
                 {1, static_cast<uint16_t>(candBlocks * sizeof(int32_t)), 0, 0}, {true, 0, 0, 0});
@@ -478,6 +514,10 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::BuildCandBlockT
     event_t eventIdMte2ToS = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_S));
     SetFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
     WaitFlag<HardEvent::MTE2_S>(eventIdMte2ToS);
+
+    // (2.5) V 初始化 → 标量置位可见（跨管道 WAW：Duplicate 与 (3) CandTblMark 写同表区）。
+    //       置于装载 fence 之后：Duplicate 与 MTE2 搬运并行执行，此处 wait 通常零等待
+    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
 
     // (3) 标量扫描（8 路展开：先集中发 8 条 UB 读令延迟重叠，再统一置位消除逐元素分支串行化）
     //     [0, blkCnt) 外的块号（-1 脏数据 / 越界）不写入 → 脏数据免疫；重复候选幂等
@@ -491,27 +531,27 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::BuildCandBlockT
         int32_t b5 = candInt.GetValue(static_cast<uint32_t>(w + 5));
         int32_t b6 = candInt.GetValue(static_cast<uint32_t>(w + 6));
         int32_t b7 = candInt.GetValue(static_cast<uint32_t>(w + 7));
-        LIServiceVec::CandTblMark(tbl, b0, 0, blkCnt);
-        LIServiceVec::CandTblMark(tbl, b1, 0, blkCnt);
-        LIServiceVec::CandTblMark(tbl, b2, 0, blkCnt);
-        LIServiceVec::CandTblMark(tbl, b3, 0, blkCnt);
-        LIServiceVec::CandTblMark(tbl, b4, 0, blkCnt);
-        LIServiceVec::CandTblMark(tbl, b5, 0, blkCnt);
-        LIServiceVec::CandTblMark(tbl, b6, 0, blkCnt);
-        LIServiceVec::CandTblMark(tbl, b7, 0, blkCnt);
+        LIServiceVec::CandTblMark(tbl, b0, blkLo, blkHi);
+        LIServiceVec::CandTblMark(tbl, b1, blkLo, blkHi);
+        LIServiceVec::CandTblMark(tbl, b2, blkLo, blkHi);
+        LIServiceVec::CandTblMark(tbl, b3, blkLo, blkHi);
+        LIServiceVec::CandTblMark(tbl, b4, blkLo, blkHi);
+        LIServiceVec::CandTblMark(tbl, b5, blkLo, blkHi);
+        LIServiceVec::CandTblMark(tbl, b6, blkLo, blkHi);
+        LIServiceVec::CandTblMark(tbl, b7, blkLo, blkHi);
     }
     for (; w < candBlocks; w++) {
-        LIServiceVec::CandTblMark(tbl, candInt.GetValue(static_cast<uint32_t>(w)), 0, blkCnt);
+        LIServiceVec::CandTblMark(tbl, candInt.GetValue(static_cast<uint32_t>(w)), blkLo, blkHi);
     }
 
-    // (4) 标量写 → 向量读（展开路径）可见；行内后续 tile 无标量写，该 fence 一次覆盖该行全部 tile
+    // (4) 标量写 → 向量读（展开路径）可见；段内后续 tile 无标量写，该 fence 一次覆盖该段全部 tile
     event_t eventIdSToV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::S_V));
     SetFlag<HardEvent::S_V>(eventIdSToV);
     WaitFlag<HardEvent::S_V>(eventIdSToV);
 }
 
-// 回退路径：纯标量逐 tile 掩码实现（blkCnt > CAND_TBL_CAP 时启用；
-// SLI_CAND_MASK_LEGACY=1 时全形态启用）。语义与快路径一致，仅无性能收益。
+// 回退路径：纯标量逐 tile 掩码实现（仅 SLI_CAND_MASK_LEGACY=1 编译期强制启用，
+// A/B 归因与应急回滚用）。语义与分段快路径一致，仅无性能收益。
 template <typename LIT>
 __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::BuildCandidateMaskLegacyTile(
     const SparseLICommon::RunInfo& info, int32_t cuS1Idx, int32_t cuBaseS2Idx, int32_t innerS1Idx)
@@ -563,33 +603,69 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::BuildCandidateM
     WaitFlag<HardEvent::S_V>(eventSToV);
 }
 
+// 候选掩码分段上下文构建（scan 级不变量，ProcessVec 每 tile 一次；本函数集中全部整除，
+// 行循环内的 BuildCandidateMask 零整除——界下短扫形态的每行常数开销由此消除）。
 template <typename LIT>
-__aicore__ inline void SparseLightningIndexerServiceVector<LIT>::BuildCandidateMask(const SparseLICommon::RunInfo& info,
-                                                                                    int32_t cuS1Idx,
-                                                                                    int32_t cuBaseS2Idx,
-                                                                                    int32_t innerS1Idx)
+__aicore__ inline void SparseLightningIndexerServiceVector<LIT>::InitCandSegCtx(const SparseLICommon::RunInfo& info,
+                                                                                CandSegCtx& ctx) const
 {
     const int32_t blockSize = static_cast<int32_t>(constInfo_.candidateBlockSize);
-    const int32_t tileBlkNum = s2BaseSize_ / blockSize;    // 512/blockSize ∈ [8,256]
-    const int32_t tileBlockBase = cuBaseS2Idx / blockSize; // = s2Idx × tileBlkNum
+    const int32_t tileBlkNum = s2BaseSize_ / blockSize; // 512/blockSize ∈ [8,256]
     // 本行块号上界（含 -inf pad 尾块）：numTiles × tileBlkNum，numTiles = ceil(actS2Size/512)
     // —— 与回退路径逐 tile 命中窗口的并集一致，作为表值域与脏数据越界判定基准
     const int32_t blkCnt =
         static_cast<int32_t>(CeilDiv(info.actS2Size, static_cast<uint32_t>(s2BaseSize_))) * tileBlkNum;
-
-#if !SLI_CAND_MASK_LEGACY
+    ctx.blockSize = blockSize;
+    ctx.tileBlkNum = tileBlkNum;
+    ctx.tileBlockBase = static_cast<int32_t>(info.s2Idx) * tileBlkNum; // = cuBaseS2Idx/blockSize
+    ctx.blkCnt = blkCnt;
+    // blkCnt ≤ CAP：整行单段（blkCnt 为 tileBlkNum 整倍 ⇒ numTiles ≤ segTiles），无分段参数
     if (blkCnt <= static_cast<int32_t>(CAND_TBL_CAP)) {
-        // 行首 tile 构建块级表（候选随行走，每行一次）
-        if (info.s2Idx == blockS2StartIdx_) {
-            BuildCandBlockTable(info, cuS1Idx, blkCnt, innerS1Idx);
-        }
-        // 位置级展开：块级表 → 512 位置（bs==8 单条 Brcb；bs>8 staging+Brcb；bs<8 标量）
-        // 读上界 = tileBlockBase + tileBlkNum - 1 ≤ blkCnt - 1 < tblLen ✓
-        ExpandCandMaskToPosition(tileBlockBase, tileBlkNum, blockSize, innerS1Idx);
+        ctx.isSingleSeg = true;
         return;
     }
+    // blkCnt > CAP：块级表每段容纳 segTiles 个 tile（segTiles × tileBlkNum ≤ CAP，64 对齐见常量区）。
+    // 段按本行扫描内 tile 序号 scanTileIdx = s2Idx - blockS2StartIdx_ 对齐——blockS2StartIdx_ 为本核
+    // 本行扫描起始 tile（核切分可 >0），故段表基址须重锚为全局块号 segBlockBase。
+    const int32_t segTiles = static_cast<int32_t>(CAND_TBL_CAP) / tileBlkNum;
+    const int32_t scanTileIdx = static_cast<int32_t>(info.s2Idx - blockS2StartIdx_);
+    const int32_t segBaseTile = (scanTileIdx / segTiles) * segTiles;
+    ctx.segBlockBase = static_cast<int32_t>(blockS2StartIdx_ + segBaseTile) * tileBlkNum;
+    ctx.isSegStart = scanTileIdx % segTiles == 0;
+    const int32_t segBlockEnd = ctx.segBlockBase + segTiles * tileBlkNum;
+    ctx.segBlockHi = blkCnt < segBlockEnd ? blkCnt : segBlockEnd;
+    ctx.isSingleSeg = false;
+}
+
+template <typename LIT>
+__aicore__ inline void SparseLightningIndexerServiceVector<LIT>::BuildCandidateMask(const SparseLICommon::RunInfo& info,
+                                                                                    int32_t cuS1Idx,
+                                                                                    int32_t cuBaseS2Idx,
+                                                                                    int32_t innerS1Idx,
+                                                                                    const CandSegCtx& seg)
+{
+#if !SLI_CAND_MASK_LEGACY
+    if (seg.isSingleSeg) {
+        // 整行单段快分支（blkCnt ≤ CAP）：无分段机制，表覆盖 [0, blkCnt)、基址恒 0——与原单段实现
+        // 逐位一致；行首 tile 建表一次（候选随行走，每行一次）
+        if (info.s2Idx == blockS2StartIdx_) {
+            BuildCandBlockTable(info, cuS1Idx, 0, seg.blkCnt, innerS1Idx);
+        }
+        // 位置级展开：整行表 → 512 位置（bs==8 单条 Brcb；bs>8 staging+Brcb；bs<8 标量）
+        // 读上界 = tileBlockBase + tileBlkNum - 1 ≤ blkCnt - 1 < tblLen ✓
+        ExpandCandMaskToPosition(seg.tileBlockBase, seg.tileBlkNum, seg.blockSize, 0, innerS1Idx);
+        return;
+    }
+    // 分段快路径（blkCnt > CAP）：段首 tile 构建段表（每行每段一次；装载区跨段复用）
+    if (seg.isSegStart) {
+        BuildCandBlockTable(info, cuS1Idx, seg.segBlockBase, seg.segBlockHi, innerS1Idx);
+    }
+    // 位置级展开：段表 → 512 位置。读上界 = tileBlockBase + tileBlkNum - 1 ≤ segBlockHi - 1，
+    // 减 segBlockBase 后 < tblLen ✓
+    ExpandCandMaskToPosition(seg.tileBlockBase, seg.tileBlkNum, seg.blockSize, seg.segBlockBase, innerS1Idx);
+    return;
 #endif
-    // 回退：blkCnt 超块级表容量（极小 blockSize × 超长 S2），或 SLI_CAND_MASK_LEGACY=1
+    // 回退：SLI_CAND_MASK_LEGACY=1（A/B 归因与应急回滚）
     BuildCandidateMaskLegacyTile(info, cuS1Idx, cuBaseS2Idx, innerS1Idx);
 }
 
@@ -642,6 +718,12 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ProcessVec(cons
     int32_t cuRealAcSeqIni = cuRealAcSeq;
     // LD输出S1方向偏移，保证2个Vector输出的内容连续
     uint32_t ldS1Offset = (blockId_ % 2 == 0) ? s1BaseSize_ / 2 - cuS1ProcNumPerAiv : 0;
+
+    // 候选掩码分段上下文（scan 级不变量）：每 tile 一次，行循环内 BuildCandidateMask 零整除
+    CandSegCtx candSeg;
+#if !SLI_CAND_MASK_LEGACY
+    InitCandSegCtx(info, candSeg);
+#endif
 
     for (int innerS1Idx = 0; innerS1Idx < cuS1ProcNumPerAiv; innerS1Idx++) {
         if (constInfo_.attenMaskFlag) {
@@ -709,7 +791,7 @@ __aicore__ inline void SparseLightningIndexerServiceVector<LIT>::ProcessVec(cons
 
             // candidate (two-level topk) consumer 链（本算子唯一 candidate 链，恒执行；
             // score 行已成形、idx 已填充）
-            BuildCandidateMask(info, cuS1Idx, cuBaseS2Idx, innerS1Idx);
+            BuildCandidateMask(info, cuS1Idx, cuBaseS2Idx, innerS1Idx, candSeg);
             // 候选无效化链（无 leak，替代旧 pen 降级链）：候选外可达位置与不可达位置并轨为同一档
             // 无效位——score → -inf 位型、idx → -1，不入选；排序流仅剩两档（真实分 / -inf），
             // 不足 virTopK 的槽位由 globalTopkUb_ 垫底 (-inf,-1) 对自然补齐（输出 -1）。
