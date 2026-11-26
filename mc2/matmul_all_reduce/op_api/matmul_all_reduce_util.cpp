@@ -570,7 +570,7 @@ aclnnStatus InnerQuantMatmulAllReduceGetWorkspaceSize(const aclTensor* x1, const
     }
     if (NnopbaseSetHcclServerType) {
         if (op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510 ||
-            op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_9201) { // A6通信引擎固定AICPU
+            op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_9201) { // 此旧接口固定使用AICPU
             NnopbaseSetHcclServerType(executor, NnopbaseHcclServerType::NNOPBASE_HCCL_SERVER_TYPE_AICPU);
         }
     }
@@ -599,23 +599,33 @@ aclnnStatus InnerQuantMatmulAllReduceGetWorkspaceSize(const aclTensor* x1, const
     return ret;
 }
 
+const char* ResolveMatmulAllReduceCommMode(const char* commMode)
+{
+    if (commMode == nullptr && op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_9201) {
+        return COMM_MODE_AICPU;
+    }
+    return commMode;
+}
+
 // 检查commMode入参是否合法
 bool IsCommModeValid(const char* commModePtr)
 {
-    if (op::GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510) {
-        if (commModePtr == nullptr) {
-            OP_LOGE(ACLNN_ERR_PARAM_INVALID, "Its new Aclnn interface for A5, commModePtr should not be nullptr!");
-            return false;
+    const auto npuArch = op::GetCurrentPlatformInfo().GetCurNpuArch();
+    if (commModePtr == nullptr) {
+        if (npuArch != Ops::Base::DAV_3510) {
+            return true;
         }
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "For A5, commMode must not be nullptr.");
+        return false;
+    }
+    if (npuArch == Ops::Base::DAV_3510 || npuArch == Ops::Base::DAV_9201) {
         if (strcmp(commModePtr, COMM_MODE_AICPU) == 0)
             return true;
         if (strcmp(commModePtr, COMM_MODE_CCU) == 0)
             return true;
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "For A5, commMode only support 'ccu' or 'ai_cpu', but it is '%s'.",
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "For A5/A6, commMode only support 'ccu' or 'ai_cpu', but it is '%s'.",
                 commModePtr);
     } else {
-        if (commModePtr == nullptr)
-            return true;
         if (strcmp(commModePtr, COMM_MODE_AICPU) == 0)
             return true;
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "For A2, commMode only support nullptr or 'ai_cpu', but it is '%s'.",

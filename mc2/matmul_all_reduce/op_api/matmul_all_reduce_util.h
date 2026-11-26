@@ -128,6 +128,7 @@ aclnnStatus InnerQuantMatmulAllReduceGetWorkspaceSize(const aclTensor* x1, const
                                                       const char* group, const char* reduceOp, int64_t commTurn,
                                                       const aclTensor* output, uint64_t* workspaceSize,
                                                       aclOpExecutor** executor);
+const char* ResolveMatmulAllReduceCommMode(const char* commMode);
 bool IsCommModeValid(const char* commModePtr);
 #ifdef __cplusplus
 }

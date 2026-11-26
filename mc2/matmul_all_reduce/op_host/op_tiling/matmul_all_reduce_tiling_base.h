@@ -289,6 +289,7 @@ protected:
     Mc2Tiling::MatmulAllReduceTilingData& tilingData_;
     ge::graphStatus GetAndConvertCommMode(uint8_t& commMode) const;
     uint8_t GetCommMode() const;
+    bool SetA6CcuAlgo(const char* group, AscendC::Mc2CcTilingConfig& config) const;
     ge::graphStatus CheckCommModeA2() const;
 };
 } // namespace optiling

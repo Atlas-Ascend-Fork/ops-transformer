@@ -134,4 +134,32 @@ TEST_F(AclnnMatmulAllReduceV3ExtraTest, Dav3510NullCommMode)
     EXPECT_EQ(ACLNN_ERR_PARAM_INVALID, ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspace_size, executor));
 }
 
+TEST_F(AclnnMatmulAllReduceV3ExtraTest, Dav9201NullCommMode)
+{
+    TensorDesc x1 = {{16, 32}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc x2 = {{32, 16}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc output = {{16, 16}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunMatmulAllReduceV3Ut(op::SocVersion::ASCEND960DT, x1, x2, nullptr, nullptr, output, nullptr, ACLNN_SUCCESS);
+}
+
+TEST_F(AclnnMatmulAllReduceV3ExtraTest, Dav9201InvalidCommModes)
+{
+    TensorDesc x1 = {{16, 32}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc x2 = {{32, 16}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc output = {{16, 16}, ACL_FLOAT16, ACL_FORMAT_ND};
+    for (const char* commMode : {"", "CCU", "ccu ", "ai_cpu_x"}) {
+        SCOPED_TRACE(commMode);
+        RunMatmulAllReduceV3Ut(op::SocVersion::ASCEND960DT, x1, x2, nullptr, nullptr, output, commMode,
+                               ACLNN_ERR_PARAM_INVALID);
+    }
+}
+
+TEST_F(AclnnMatmulAllReduceV3ExtraTest, Ascend910BNullCommMode)
+{
+    TensorDesc x1 = {{16, 32}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc x2 = {{32, 16}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc output = {{16, 16}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunMatmulAllReduceV3Ut(op::SocVersion::ASCEND910B, x1, x2, nullptr, nullptr, output, nullptr, ACLNN_SUCCESS);
+}
+
 } // namespace MatmulAllReduceUT

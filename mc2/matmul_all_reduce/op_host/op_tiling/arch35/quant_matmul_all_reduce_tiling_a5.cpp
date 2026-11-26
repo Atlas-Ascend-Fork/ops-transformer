@@ -74,6 +74,9 @@ ge::graphStatus QuantMatmulAllReduceTilingA5::SetMc2HcommAllReduce(const char* g
         mc2CcTilingConfig.SetCommEngine(Mc2Comm::ENGINE_AICPU);
     } else if (commMode == Mc2Comm::COMM_MODE_CCU) {
         mc2CcTilingConfig.SetCommEngine(Mc2Comm::ENGINE_CCU_SCHED);
+        if (!SetA6CcuAlgo(groupName, mc2CcTilingConfig)) {
+            return ge::GRAPH_FAILED;
+        }
     }
     OP_TILING_CHECK(mc2CcTilingConfig.GetTiling(quantMatmulAllReduceTilingData_.mc2InitTiling),
                     OP_LOGE(opName_, "Get mc2InitTiling from quantMatmulAllReduceTilingData failed."),
@@ -99,6 +102,9 @@ ge::graphStatus QuantMatmulAllReduceTilingA5::SetMc2HcommTwoShot(const char* gro
         mc2CcTilingConfig.SetCommEngine(Mc2Comm::ENGINE_AICPU);
     } else if (commMode == Mc2Comm::COMM_MODE_CCU) {
         mc2CcTilingConfig.SetCommEngine(Mc2Comm::ENGINE_CCU_SCHED);
+        if (!SetA6CcuAlgo(groupName, mc2CcTilingConfig)) {
+            return ge::GRAPH_FAILED;
+        }
     }
     OP_TILING_CHECK(
         mc2CcTilingConfig.GetTiling(quantMatmulAllReduceTilingData_.mc2InitTiling),
@@ -110,7 +116,8 @@ ge::graphStatus QuantMatmulAllReduceTilingA5::SetMc2HcommTwoShot(const char* gro
         return ge::GRAPH_FAILED);
     mc2CcTilingConfig.SetGroupName(groupName);
     mc2CcTilingConfig.SetOpType(opType2);
-    mc2CcTilingConfig.SetAlgConfig(algConfig2);
+    mc2CcTilingConfig.SetAlgConfig(
+        npuArch_ == Ops::Base::DAV_9201 && commMode == Mc2Comm::COMM_MODE_CCU ? "sole[mesh]" : algConfig2);
     mc2CcTilingConfig.SetReduceType(reduceType, dataType, dataType);
     OP_TILING_CHECK(
         mc2CcTilingConfig.GetTiling(quantMatmulAllReduceTilingData_.mc2CcTilingComm),
@@ -173,22 +180,19 @@ ge::graphStatus QuantMatmulAllReduceTilingA5::SetMc2Hcomm()
     if (isUseA2APath && !MutableRCSTilingData().isInputCommQuantScale) {
         uint8_t dataType = static_cast<uint8_t>(mc2tiling::ConvertGeTypeToHcclType(opName_, args_.geCType));
         OP_TILING_CHECK(SetMc2HcommTwoShot(groupName, reduceType, dataType) != ge::GRAPH_SUCCESS,
-                        OP_LOGE(opName_, "set Mc2Hcomm config By SetMc2HcommTwoShot failed."), return ge::GRAPH_FAILED);
+                        OP_LOGE_WITHOUT_REPORT(opName_, "SetMc2HcommTwoShot failed."), return ge::GRAPH_FAILED);
     } else {
         if (MutableRCSTilingData().isInputCommQuantScale == 1) {
             uint8_t dataType = static_cast<uint8_t>(mc2tiling::ConvertGeTypeToHcclType(opName_, ge::DataType::DT_INT8));
             OP_TILING_CHECK(SetMc2HcommTwoShot(groupName, reduceType, dataType) != ge::GRAPH_SUCCESS,
-                            OP_LOGE(opName_, "set Mc2Hcomm config By SetMc2HcommTwoShot failed."),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE_WITHOUT_REPORT(opName_, "SetMc2HcommTwoShot failed."), return ge::GRAPH_FAILED);
         } else if (MutableRCSTilingData().isInputCommQuantScale == QUANT_MODE_FP8) {
             uint8_t dataType = static_cast<uint8_t>(mc2tiling::ConvertGeTypeToHcclType(opName_, args_.geAType));
             OP_TILING_CHECK(SetMc2HcommTwoShot(groupName, reduceType, dataType) != ge::GRAPH_SUCCESS,
-                            OP_LOGE(opName_, "set Mc2Hcomm config By SetMc2HcommTwoShot failed."),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE_WITHOUT_REPORT(opName_, "SetMc2HcommTwoShot failed."), return ge::GRAPH_FAILED);
         } else {
             OP_TILING_CHECK(SetMc2HcommAllReduce(groupName, reduceType) != ge::GRAPH_SUCCESS,
-                            OP_LOGE(opName_, "set Mc2Hcomm config By SetMc2HcommAllReduce failed."),
-                            return ge::GRAPH_FAILED);
+                            OP_LOGE_WITHOUT_REPORT(opName_, "SetMc2HcommAllReduce failed."), return ge::GRAPH_FAILED);
         }
     }
 
@@ -208,7 +212,8 @@ ge::graphStatus QuantMatmulAllReduceTilingA5::DoOpTiling()
     if (MutableRCSTilingData().isInputCommQuantScale == 1) {
         isCommInt8Enable_ = true;
     }
-    MC2_CHECK_LOG_RET(opName_, SetMc2Hcomm());
+    OP_TILING_CHECK(SetMc2Hcomm() != ge::GRAPH_SUCCESS, OP_LOGE_WITHOUT_REPORT(opName_, "SetMc2Hcomm failed."),
+                    return ge::FAILED);
     DoAllReduceTiling(true);
     if (MutableRCSTilingData().isInputCommQuantScale == QUANT_MODE_FP8) {
         isCommFp8Enable_ = true;

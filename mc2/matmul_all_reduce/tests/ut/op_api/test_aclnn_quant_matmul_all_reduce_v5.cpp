@@ -217,4 +217,47 @@ TEST_F(AclnnQuantMatmulAllReduceV5ExtraTest, LaunchApiNullExecutor)
     EXPECT_EQ(ACLNN_ERR_INNER, aclnnQuantMatmulAllReduceV5(nullptr, 0, nullptr, nullptr));
 }
 
+TEST_F(AclnnQuantMatmulAllReduceV5ExtraTest, Dav9201NullCommMode)
+{
+    TensorDesc x1 = {{32, 64}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2Scale = {{128}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunQuantMatmulAllReduceV5Ut(op::SocVersion::ASCEND960DT, x1, x2, nullptr, nullptr, nullptr, x2Scale, nullptr,
+                                nullptr, output, nullptr, 0, ACLNN_SUCCESS);
+}
+
+TEST_F(AclnnQuantMatmulAllReduceV5ExtraTest, Dav3510NullCommMode)
+{
+    TensorDesc x1 = {{32, 64}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2Scale = {{128}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunQuantMatmulAllReduceV5Ut(op::SocVersion::ASCEND950, x1, x2, nullptr, nullptr, nullptr, x2Scale, nullptr, nullptr,
+                                output, nullptr, 0, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(AclnnQuantMatmulAllReduceV5ExtraTest, Dav9201InvalidCommModes)
+{
+    TensorDesc x1 = {{32, 64}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2Scale = {{128}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    for (const char* commMode : {"", "CCU", "ccu ", "ai_cpu_x"}) {
+        SCOPED_TRACE(commMode);
+        RunQuantMatmulAllReduceV5Ut(op::SocVersion::ASCEND960DT, x1, x2, nullptr, nullptr, nullptr, x2Scale, nullptr,
+                                    nullptr, output, commMode, 0, ACLNN_ERR_PARAM_INVALID);
+    }
+}
+
+TEST_F(AclnnQuantMatmulAllReduceV5ExtraTest, Ascend910BNullCommMode)
+{
+    TensorDesc x1 = {{32, 64}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc x2Scale = {{128}, ACL_FLOAT, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunQuantMatmulAllReduceV5Ut(op::SocVersion::ASCEND910B, x1, x2, nullptr, nullptr, nullptr, x2Scale, nullptr,
+                                nullptr, output, nullptr, 0, ACLNN_SUCCESS);
+}
+
 } // namespace MatmulAllReduceUT

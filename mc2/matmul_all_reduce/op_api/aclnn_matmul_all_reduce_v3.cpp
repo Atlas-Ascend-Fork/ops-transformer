@@ -97,6 +97,7 @@ aclnnStatus aclnnMatmulAllReduceV3GetWorkspaceSize(const aclTensor* x1, const ac
     auto retParam = MatmulAllReduceCheckParams(x1, x2, x3, bias, reduceOp, streamMode, output);
     CHECK_RET(retParam == ACLNN_SUCCESS, retParam);
     // 检查commMode是否合法
+    commMode = ResolveMatmulAllReduceCommMode(commMode);
     CHECK_RET(IsCommModeValid(commMode), ACLNN_ERR_PARAM_INVALID);
 
     aclnnStatus ret = InnerMatmulAllReduceV3GetWorkspaceSize(x1, x2, bias, x3, group, reduceOp, commMode, commTurn,
@@ -116,15 +117,16 @@ aclnnStatus aclnnMatmulAllReduceV3(void* workspace, uint64_t workspaceSize, aclO
         return ACLNN_ERR_INNER;
     }
     if (NnopbaseSetHcclServerType) {
-        if (GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510) {
+        if (GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_3510 ||
+            GetCurrentPlatformInfo().GetCurNpuArch() == Ops::Base::DAV_9201) {
             void* arg = NnopbaseGetUserHandle(executor);
             uintptr_t handleVal = reinterpret_cast<uintptr_t>(arg);
             uint8_t commMode = static_cast<uint8_t>(handleVal);
             if (commMode == Mc2Comm::COMM_MODE_CCU) {
-                OP_LOGD("A5 aclnnMatmulAllReduceV3: NnopbaseHcclServerType, use CCU mode");
+                OP_LOGD("A5/A6 aclnnMatmulAllReduceV3: NnopbaseHcclServerType, use CCU mode");
                 NnopbaseSetHcclServerType(executor, NnopbaseHcclServerType::NNOPBASE_HCCL_SERVER_TYPE_CCU);
             } else {
-                OP_LOGD("A5 aclnnMatmulAllReduceV3: NnopbaseHcclServerType, use AICPU mode");
+                OP_LOGD("A5/A6 aclnnMatmulAllReduceV3: NnopbaseHcclServerType, use AICPU mode");
                 NnopbaseSetHcclServerType(executor, NnopbaseHcclServerType::NNOPBASE_HCCL_SERVER_TYPE_AICPU);
             }
         } else {

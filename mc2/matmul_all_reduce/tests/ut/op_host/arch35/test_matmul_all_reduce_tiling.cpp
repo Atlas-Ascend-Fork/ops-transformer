@@ -8,10 +8,15 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-#include <gtest/gtest.h>
 #include <cstdlib>
+#include <cstring>
+#include <string_view>
+#include <gtest/gtest.h>
 #include "../matmul_all_reduce_host_ut_param.h"
+#include "../../../../op_kernel/arch35/matmul_all_reduce_tiling_struct_ar35.h"
+#include "hccl/hccl_types.h"
 #include "mc2_tiling_case_executor.h"
+#include "mc2_hcom_topo_info.h"
 #include "op_tiling_parse_context_builder.h"
 #include "base/registry/op_impl_space_registry_v2.h"
 
@@ -53,6 +58,18 @@ void RunArch35MatmulAllReduceTilingCase(const gert::TilingContextPara& tilingCon
                        0, false);
 }
 
+void ExpectCcuCommTiling(const Mc2CcTiling& commTiling, HcclCMDType expectedOpType)
+{
+    // Mc2CcTiling stores the HCCL configuration in an opaque byte buffer.
+    static_assert(sizeof(Mc2Tiling::MC2HcommCfg) <= sizeof(Mc2CcTiling));
+    Mc2Tiling::MC2HcommCfg config{};
+    std::memcpy(&config, &commTiling, sizeof(config));
+    EXPECT_EQ(config.opType, static_cast<uint32_t>(expectedOpType));
+
+    const std::string_view algConfig(config.algConfig, sizeof(config.algConfig));
+    EXPECT_EQ(algConfig.substr(0, algConfig.find('\0')), "sole[mesh]");
+}
+
 } // namespace
 
 class MatmulAllReduceArch35TilingTest : public testing::TestWithParam<MatmulAllReduceTilingUtParam> {
@@ -90,8 +107,47 @@ TEST_P(MatmulAllReduceArch35TilingTest, param)
          {"comm_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>(param.comm_mode)}},
         param.inputInstance, param.outputInstance, &compileInfo, param.soc, param.coreNum, param.ubsize);
     Mc2Hcom::MockValues hcomTopologyMockValues{{"rankNum", param.ranksize}};
+    if (param.case_name.find("A6Ccu_") == 0) {
+        const bool clos = param.case_name.find("_clos") != std::string::npos;
+        const bool mixed = param.case_name.find("_mixed") != std::string::npos;
+        const bool fullmeshExtra = param.case_name.find("_fullmesh_extra") != std::string::npos;
+        hcomTopologyMockValues.emplace_back(
+            "l0InstTypeSet", clos ? 1ULL << COMM_TOPO_CLOS :
+                                    (mixed || fullmeshExtra ? (1ULL << COMM_TOPO_1DMESH) | (1ULL << COMM_TOPO_CLOS) :
+                                                              1ULL << COMM_TOPO_1DMESH));
+        hcomTopologyMockValues.emplace_back(
+            "l0CoverTypeSet", clos || mixed ? 1ULL << COMM_TOPO_CLOS :
+                                              (fullmeshExtra ? (1ULL << COMM_TOPO_1DMESH) | (1ULL << COMM_TOPO_CLOS) :
+                                                               1ULL << COMM_TOPO_1DMESH));
+        hcomTopologyMockValues.emplace_back("level0Topo", static_cast<uint64_t>(Mc2Hcom::Mc2Level0Topo::MESH_1D));
+        hcomTopologyMockValues.emplace_back("topoLevelNums",
+                                            param.case_name.find("_multilevel") != std::string::npos ? 2U : 1U);
+        hcomTopologyMockValues.emplace_back(
+            "getTopoInfoRet", param.case_name.find("_queryfail") != std::string::npos ? HCCL_E_PARA : HCCL_SUCCESS);
+        hcomTopologyMockValues.emplace_back("userRankSize", param.ranksize);
+    }
     Mc2ExecuteTestCase(tilingContextPara, hcomTopologyMockValues, param.expectResult, param.expectTilingKey,
                        param.expectTilingDataHash, {}, 0, true);
+    if (param.soc == "9201" && param.comm_mode == "ccu" && param.expectResult == ge::GRAPH_SUCCESS) {
+        Mc2Hcom::MC2HcomTopologyMocker::GetInstance().SetValues(hcomTopologyMockValues);
+        TilingInfo tilingInfo;
+        const bool tilingOk = ExecuteTiling(tilingContextPara, tilingInfo);
+        Mc2Hcom::MC2HcomTopologyMocker::GetInstance().Reset();
+        ASSERT_TRUE(tilingOk);
+        ASSERT_NE(tilingInfo.tilingData, nullptr);
+        if (param.case_name == "A6Ccu_a8w8_comm_quant_m3000_ranksize_4_fullmesh") {
+            Mc2Tiling::QuantMatmulAllReduceTilingDataA5 tilingData{};
+            ASSERT_GE(tilingInfo.tilingDataSize, sizeof(tilingData));
+            std::memcpy(&tilingData, tilingInfo.tilingData.get(), sizeof(tilingData));
+            ExpectCcuCommTiling(tilingData.mc2CcTiling, HCCL_CMD_ALLTOALL);
+            ExpectCcuCommTiling(tilingData.mc2CcTilingComm, HCCL_CMD_ALLGATHER);
+            return;
+        }
+        const std::string rawTiling(reinterpret_cast<const char*>(tilingInfo.tilingData.get()),
+                                    tilingInfo.tilingDataSize);
+        EXPECT_NE(rawTiling.find("sole[mesh]"), std::string::npos);
+        EXPECT_EQ(rawTiling.find("level0:fullmesh"), std::string::npos);
+    }
 }
 
 INSTANTIATE_TEST_SUITE_P(

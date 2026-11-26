@@ -171,4 +171,47 @@ TEST_F(AclnnWeightQuantMatmulAllReduceV2ExtraTest, Dav3510LaunchAicpuCommMode)
                                       output, "ai_cpu", 0, ACLNN_SUCCESS);
 }
 
+TEST_F(AclnnWeightQuantMatmulAllReduceV2ExtraTest, Dav9201NullCommMode)
+{
+    TensorDesc x1 = {{32, 64}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc antiquantScale = {{128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunWeightQuantMatmulAllReduceV2Ut(op::SocVersion::ASCEND960DT, x1, x2, nullptr, antiquantScale, nullptr, nullptr,
+                                      output, nullptr, 0, ACLNN_SUCCESS);
+}
+
+TEST_F(AclnnWeightQuantMatmulAllReduceV2ExtraTest, Dav3510NullCommMode)
+{
+    TensorDesc x1 = {{32, 64}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc antiquantScale = {{128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunWeightQuantMatmulAllReduceV2Ut(op::SocVersion::ASCEND950, x1, x2, nullptr, antiquantScale, nullptr, nullptr,
+                                      output, nullptr, 0, ACLNN_ERR_PARAM_INVALID);
+}
+
+TEST_F(AclnnWeightQuantMatmulAllReduceV2ExtraTest, Dav9201InvalidCommModes)
+{
+    TensorDesc x1 = {{32, 64}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc antiquantScale = {{128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    for (const char* commMode : {"", "CCU", "ccu ", "ai_cpu_x"}) {
+        SCOPED_TRACE(commMode);
+        RunWeightQuantMatmulAllReduceV2Ut(op::SocVersion::ASCEND960DT, x1, x2, nullptr, antiquantScale, nullptr,
+                                          nullptr, output, commMode, 0, ACLNN_ERR_PARAM_INVALID);
+    }
+}
+
+TEST_F(AclnnWeightQuantMatmulAllReduceV2ExtraTest, Ascend910BNullCommMode)
+{
+    TensorDesc x1 = {{32, 64}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc x2 = {{64, 128}, ACL_INT8, ACL_FORMAT_ND};
+    TensorDesc antiquantScale = {{128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    TensorDesc output = {{32, 128}, ACL_FLOAT16, ACL_FORMAT_ND};
+    RunWeightQuantMatmulAllReduceV2Ut(op::SocVersion::ASCEND910B, x1, x2, nullptr, antiquantScale, nullptr, nullptr,
+                                      output, nullptr, 0, ACLNN_SUCCESS);
+}
+
 } // namespace MatmulAllReduceUT

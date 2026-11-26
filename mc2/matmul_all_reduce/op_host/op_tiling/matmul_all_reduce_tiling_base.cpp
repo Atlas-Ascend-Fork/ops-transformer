@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
+#include <sstream>
 #include <sys/types.h>
 #include <unistd.h>
 #include <cmath>
@@ -30,6 +31,7 @@
 
 #include "op_host/tiling_type.h"
 #include "mc2/common/utils/mc2_comm_utils.h"
+#include "mc2_comm_algo_selector.h"
 
 using namespace AscendC;
 using namespace ge;
@@ -1662,6 +1664,34 @@ void MatmulAllReduceTilingBase::PrintTilingData()
     PrintExtendMatmulTiling(true);
     PrintTCubeTilingData(context_->GetNodeName(), MutableTCubeTailTilingData());
 }
+
+bool MatmulAllReduceTilingBase::SetA6CcuAlgo(const char* group, AscendC::Mc2CcTilingConfig& config) const
+{
+    if (npuArch_ != Ops::Base::DAV_9201) {
+        return true;
+    }
+    Mc2Hcom::Mc2TopoInfo topoInfo;
+    uint64_t topoFlags = Mc2Hcom::TOPO_FLAG_NONE;
+    if (!Mc2Hcom::Mc2CommAlgoSelector::GetTopoFlags(group, topoInfo, topoFlags)) {
+        OP_LOGE_WITHOUT_REPORT(opName_, "Failed to query topology for group=%s while configuring CCU on ascend960dt.",
+                               group != nullptr ? group : "<null>");
+        return false;
+    }
+    constexpr uint64_t ccuRequiredTopoFlags =
+        Mc2Hcom::TOPO_FLAG_SINGLE_LEVEL | Mc2Hcom::TOPO_FLAG_L0_1DMESH | Mc2Hcom::TOPO_FLAG_L0_1DMESH_COVER;
+    if ((topoFlags & ccuRequiredTopoFlags) != ccuRequiredTopoFlags) {
+        std::ostringstream reason;
+        reason << "CCU on ascend960dt requires a single-level topology with a covering L0 1D mesh. "
+               << "Group=" << group << ", topoLevelNums=" << topoInfo.topoLevelNums << ", l0InstTypeSet=0x" << std::hex
+               << topoInfo.l0InstTypeSet << ", l0CoverTypeSet=0x" << topoInfo.l0CoverTypeSet
+               << ". Please use ai_cpu or check the group topology.";
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "comm_mode", "ccu", reason.str().c_str());
+        return false;
+    }
+    config.SetAlgConfig("sole[mesh]");
+    return true;
+}
+
 ge::graphStatus MatmulAllReduceTilingBase::GetAndConvertCommMode(uint8_t& commMode) const
 {
     const gert::RuntimeAttrs* attrs = context_->GetAttrs();
@@ -1676,11 +1706,6 @@ ge::graphStatus MatmulAllReduceTilingBase::GetAndConvertCommMode(uint8_t& commMo
         commMode = Mc2Comm::COMM_MODE_AICPU;
         OP_LOGI(opName_, "The input attr comm_mode is ai_cpu, commMode will be set to AICPU.");
     } else if (std::strcmp(commModeStr, "ccu") == 0) {
-        if (npuArch_ == Ops::Base::DAV_9201) {
-            // A6(ascend960)无CCU引擎，显式ccu直接报错(默认ai_cpu不受影响)
-            OP_LOGE_FOR_INVALID_VALUE(opName_, "comm_mode", commModeStr, "'ai_cpu'");
-            return ge::GRAPH_FAILED;
-        }
         commMode = Mc2Comm::COMM_MODE_CCU;
         OP_LOGI(opName_, "The input attr comm_mode is ccu, commMode will be set to CCU.");
     } else {
@@ -1700,11 +1725,6 @@ uint8_t MatmulAllReduceTilingBase::GetCommMode() const
         return Mc2Comm::COMM_MODE_AICPU;
     }
     if (std::strcmp(commModeStr, "ccu") == 0) {
-        if (npuArch_ == Ops::Base::DAV_9201) {
-            // A6(ascend960)无CCU引擎；ccu应已被GetAndConvertCommMode拒绝，此处防御性返回AICPU
-            OP_LOGE(opName_, "A6 has no CCU engine, commMode 'ccu' should be rejected before tiling key.");
-            return Mc2Comm::COMM_MODE_AICPU;
-        }
         OP_LOGI(opName_, "TilingKey Do CCU");
         return Mc2Comm::COMM_MODE_CCU;
     }
