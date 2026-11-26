@@ -321,9 +321,12 @@ ge::graphStatus NsaCompressAttentionTilingBase::GetShapeAttrsInfo()
             GetTilingContextDebugStr().c_str());
     OP_CHECK_IF(CheckContext() != ge::GRAPH_SUCCESS, OPS_REPORT_VECTOR_INNER_ERR(opName, "invalid context."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(!AnalyzeAttrs() || !AnalyzeDtype() || !AnalyzeLayout() || !AnalyzeOptionalInput(),
+    OP_CHECK_IF(!AnalyzeAttrs() || !AnalyzeDtype() || !AnalyzeLayout(),
                 OPS_REPORT_VECTOR_INNER_ERR(opName, "fail to analyze context info."), return ge::GRAPH_FAILED);
     OP_CHECK_IF(CheckAttr() != ge::GRAPH_SUCCESS, OPS_REPORT_VECTOR_INNER_ERR(opName, "invalid attr."),
+                return ge::GRAPH_FAILED);
+
+    OP_CHECK_IF(!AnalyzeOptionalInput(), OPS_REPORT_VECTOR_INNER_ERR(opName, "invalid optional input."),
                 return ge::GRAPH_FAILED);
 
     alignedS1 = AlignUp(s1Size, FRACTAL_NUM);
@@ -634,12 +637,22 @@ bool NsaCompressAttentionTilingBase::AnalyzeOptionalInput()
     auto topkMaskInput = context_->GetOptionalInputDesc(TOPK_MASK_INPUT_INDEX);
     auto topkMaskShape = context_->GetOptionalInputShape(TOPK_MASK_INPUT_INDEX);
     if (topkMaskInput != nullptr && topkMaskShape != nullptr && topkMaskShape->GetStorageShape().GetDimNum() != 0) {
-        hasTopkMask = true;
         auto topkMaskType = topkMaskInput->GetDataType();
         OP_CHECK_IF(topkMaskType != ge::DT_BOOL && topkMaskType != ge::DT_UINT8,
                     OPS_REPORT_VECTOR_INNER_ERR(opName, "invalid topkMask dtype[%s], only support bool or uint8.",
                                                 ge::TypeUtils::DataTypeToSerialString(topkMaskType).c_str()),
                     return false);
+        const auto& maskShape = topkMaskShape->GetStorageShape();
+        OP_CHECK_IF(
+            maskShape.GetDimNum() != DIM_2,
+            OPS_REPORT_VECTOR_INNER_ERR(opName, "topkMask must be 2D, but got rank %zu.", maskShape.GetDimNum()),
+            return false);
+        const int64_t maxSelSkv = CeilDiv(s2Size, static_cast<int64_t>(selectBlockSize / compressStride));
+        OP_CHECK_IF(maskShape.GetDim(DIM_0) != s1Size || maskShape.GetDim(DIM_1) != maxSelSkv,
+                    OPS_REPORT_VECTOR_INNER_ERR(opName, "topkMask shape must be [%ld, %ld], but got [%ld, %ld].",
+                                                s1Size, maxSelSkv, maskShape.GetDim(DIM_0), maskShape.GetDim(DIM_1)),
+                    return false);
+        hasTopkMask = true;
     }
     return true;
 }
