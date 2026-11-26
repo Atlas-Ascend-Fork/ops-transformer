@@ -50,11 +50,6 @@ from cannbotdsl.ops.sync import (
 from cannbotdsl.ops.sync import onchip_rewind
 from cannbotdsl.ops import reg as rr
 
-from ..mixed_quant_sparse_flash_mla import (
-    _get_available_core_counts,
-    _get_smla_metadata_size,
-)
-
 # Consume the existing library metadata layout (smla_metadata_common.h).
 # The serialized capacity is independent of the 36-core DSL launch limit.
 AIC_CORE_MAX_NUM = 36
@@ -116,6 +111,9 @@ def _default_topk_length(indices):
 
 def _get_cube_core_num(device=None):
     """Number of complete 1:2 MIX blocks available to the Ascend 950 kernel."""
+    # AOT discovery loads this module outside the Torch package.
+    from ..mixed_quant_sparse_flash_mla import _get_available_core_counts
+
     cubes, vectors = _get_available_core_counts(device)
     return min(cubes, max(1, vectors // 2))
 
@@ -4102,6 +4100,9 @@ def _validate_inputs(
         )
     if not isinstance(metadata, torch.Tensor):
         raise TypeError("Invalid input: metadata must be a torch.Tensor")
+
+    from ..mixed_quant_sparse_flash_mla import _get_smla_metadata_size
+
     if (
         metadata.dtype != torch.int32
         or metadata.dim() != _TENSOR_RANK_1D
