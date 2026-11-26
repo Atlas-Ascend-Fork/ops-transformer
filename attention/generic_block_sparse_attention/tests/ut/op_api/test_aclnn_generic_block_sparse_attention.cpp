@@ -114,6 +114,82 @@ aclnnStatus QueryA8C4Workspace(string layoutQ, string layoutKv, int64_t qSeqLen,
 
 } // namespace
 
+namespace {
+TensorDesc MakePagedView(const vector<int64_t>& logical, aclDataType dtype, int64_t padding)
+{
+    if (padding == 0) {
+        return TensorDesc(logical, dtype, ACL_FORMAT_ND);
+    }
+    vector<int64_t> strides(logical.size());
+    int64_t pageSpan = 1;
+    for (size_t axis = logical.size() - 1; axis > 0; --axis) {
+        strides[axis] = pageSpan;
+        pageSpan *= logical[axis];
+    }
+    strides[0] = pageSpan + padding;
+    constexpr int64_t offset = 32;
+    return TensorDesc(logical, dtype, ACL_FORMAT_ND, strides, offset,
+                      {offset + (logical.front() - 1) * strides[0] + pageSpan});
+}
+
+aclnnStatus QueryMxfp4PaWorkspace(string layoutKv, int64_t dim, bool strided)
+{
+    constexpr int64_t kvHeads = 2;
+    constexpr int64_t qHeads = kN1 * kvHeads;
+    constexpr int64_t mxfp4Mode = 4;
+    const bool bnbd = layoutKv == "PA_BNBD";
+    const int64_t first = bnbd ? kvHeads : kBlockSize;
+    const int64_t second = bnbd ? kBlockSize : kvHeads;
+    constexpr int64_t pairs = kBlockSize / 64;
+    const vector<int64_t> kvShape{kMaxBlocks, first, second, dim};
+    const vector<int64_t> kScaleShape{kMaxBlocks, first, second, dim / 64, 2};
+    const vector<int64_t> vScaleShape{kMaxBlocks, bnbd ? kvHeads : pairs, bnbd ? pairs : kvHeads, dim, 2};
+    const auto query = TensorDesc({kT, qHeads, dim}, ACL_FLOAT4_E2M1, ACL_FORMAT_ND).ToAclType();
+    const auto key = MakePagedView(kvShape, ACL_FLOAT4_E2M1, strided ? kvHeads * dim : 0).ToAclType();
+    const auto value = MakePagedView(kvShape, ACL_FLOAT4_E2M1, strided ? 2 * kvHeads * dim : 0).ToAclType();
+    const auto qScale = TensorDesc({kT, qHeads, dim / 64, 2}, ACL_FLOAT8_E8M0, ACL_FORMAT_ND).ToAclType();
+    const auto kScale = MakePagedView(kScaleShape, ACL_FLOAT8_E8M0, strided ? 3 * kvHeads * dim / 32 : 0).ToAclType();
+    const auto vScale = MakePagedView(vScaleShape, ACL_FLOAT8_E8M0, strided ? kvHeads * dim * 2 : 0).ToAclType();
+    const auto indices = TensorDesc({kvHeads, kTotalQBlocks, kTopK}, ACL_INT32, ACL_FORMAT_ND).ToAclType();
+    const auto counts = TensorDesc({kvHeads, kTotalQBlocks}, ACL_INT32, ACL_FORMAT_ND).ToAclType();
+    const auto metadata = TensorDesc({1024}, ACL_INT32, ACL_FORMAT_ND).ToAclType();
+    const auto cuQ = TensorDesc({kBatch + 1}, ACL_INT64, ACL_FORMAT_ND).ToAclType();
+    const auto usedKv = TensorDesc({kBatch}, ACL_INT32, ACL_FORMAT_ND).ToAclType();
+    const auto pageTable = TensorDesc({kBatch, kMaxBlocks}, ACL_INT32, ACL_FORMAT_ND).ToAclType();
+    const auto output = TensorDesc({kT, qHeads, dim}, ACL_FLOAT16, ACL_FORMAT_ND).ToAclType();
+    const auto blockShape = IntArrayDesc(vector<int64_t>{kBlockShapeX, 16}).ToAclType();
+    char layoutQ[] = "TND";
+    const auto previousSoc = op::GetCurrentPlatformInfo().GetSocVersion();
+    op::SetPlatformSocVersion(op::SocVersion::ASCEND950);
+    uint64_t workspace = 0;
+    aclOpExecutor* executor = nullptr;
+    const auto ret = aclnnGenericBlockSparseAttentionGetWorkspaceSize(
+        query.get(), key.get(), value.get(), indices.get(), counts.get(), metadata.get(), nullptr, qScale.get(),
+        kScale.get(), vScale.get(), nullptr, cuQ.get(), nullptr, nullptr, usedKv.get(), pageTable.get(),
+        blockShape.get(), layoutQ, layoutKv.data(), kLayoutSparse, 1.0 / sqrt(static_cast<double>(dim)), 0, mxfp4Mode,
+        0.0, 0, -1, -1, 0, 0, false, output.get(), nullptr, &workspace, &executor);
+    if (ret == ACLNN_SUCCESS) {
+        EXPECT_NE(executor, nullptr);
+    }
+    if (executor != nullptr) {
+        aclDestroyAclOpExecutor(executor);
+    }
+    op::SetPlatformSocVersion(previousSoc);
+    return ret;
+}
+} // namespace
+
+TEST_F(aclnn_generic_block_sparse_attention_ut, mxfp4_paged_workspace_with_independent_strides)
+{
+    for (const char* layout : {"PA_BBND", "PA_BNBD"}) {
+        for (const int64_t dim : {192, 256}) {
+            SCOPED_TRACE(testing::Message() << layout << ", D=" << dim);
+            EXPECT_EQ(QueryMxfp4PaWorkspace(layout, dim, false), ACLNN_SUCCESS);
+            EXPECT_EQ(QueryMxfp4PaWorkspace(layout, dim, true), ACLNN_SUCCESS);
+        }
+    }
+}
+
 // ============================================================================
 // Case 1: normal TND + PA_BBND smoke
 // ============================================================================

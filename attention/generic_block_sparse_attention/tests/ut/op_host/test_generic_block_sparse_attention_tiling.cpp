@@ -9,6 +9,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -218,6 +219,137 @@ void CheckA8C4Tiling(const std::string& layoutQ, const std::string& layoutKv, in
     }
 }
 } // namespace
+
+namespace {
+constexpr int64_t kMxfp4Mode = 4;
+constexpr int64_t kMxfp4KvHeads = 2;
+constexpr int64_t kMxfp4QHeads = kN1 * kMxfp4KvHeads;
+constexpr std::array<size_t, 4> kMxfp4PageInputs{1, 2, 8, 9};
+
+std::vector<gert::TilingContextPara::TensorDescription> MakeMxfp4PagedInputs(bool bnbd, int64_t dim)
+{
+    auto inputs = MakeInputs(ge::DT_FLOAT4_E2M1, dim, kMxfp4QHeads, kMxfp4KvHeads);
+    const int64_t first = bnbd ? kMxfp4KvHeads : kBlockSize;
+    const int64_t second = bnbd ? kBlockSize : kMxfp4KvHeads;
+    inputs[1] = MakeTensorDescription({kMaxBlocks, first, second, dim}, ge::DT_FLOAT4_E2M1);
+    inputs[2] = inputs[1];
+    inputs[7] = MakeTensorDescription({kT, kMxfp4QHeads, dim / 64, 2}, ge::DT_FLOAT8_E8M0);
+    inputs[8] = MakeTensorDescription({kMaxBlocks, first, second, dim / 64, 2}, ge::DT_FLOAT8_E8M0);
+    constexpr int64_t pairs = kBlockSize / 64;
+    inputs[9] = MakeTensorDescription({kMaxBlocks, bnbd ? kMxfp4KvHeads : pairs, bnbd ? pairs : kMxfp4KvHeads, dim, 2},
+                                      ge::DT_FLOAT8_E8M0);
+    return inputs;
+}
+
+void SetPageStride(gert::TilingContextPara::TensorDescription& tensor, int64_t pageStride)
+{
+    const auto& logical = tensor.shape_.GetOriginShape();
+    tensor.hasStride_ = true;
+    tensor.stride_.SetDimNum(logical.GetDimNum());
+    int64_t pageSpan = 1;
+    for (size_t axis = logical.GetDimNum() - 1; axis > 0; --axis) {
+        tensor.stride_.SetStride(axis, pageSpan);
+        pageSpan *= logical.GetDim(axis);
+    }
+    tensor.stride_.SetStride(0, pageStride);
+    // ACLNN's view has an independent flat backing allocation for paged inputs.
+    tensor.shape_.MutableStorageShape() = gert::Shape({(logical.GetDim(0) - 1) * pageStride + pageSpan});
+}
+
+bool RunMxfp4PagedTiling(const std::vector<gert::TilingContextPara::TensorDescription>& inputs, bool bnbd, int64_t dim,
+                         TilingInfo& info)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara ctx(
+        "GenericBlockSparseAttention", inputs, MakeOutputs(ge::DT_BF16, false, dim, kMxfp4QHeads),
+        MakeAttrs(0, kMxfp4Mode, 0, 0, 0.0f, -1, -1, 4, "TND", bnbd ? "PA_BNBD" : "PA_BBND", 0, false, {1, 16}),
+        &compileInfo, "Ascend950", 32, 262144);
+    return ExecuteTiling(ctx, info);
+}
+
+uint64_t ReadTilingU64(const TilingInfo& info, size_t offset)
+{
+    uint64_t result = 0;
+    std::memcpy(&result, info.tilingData.get() + offset, sizeof(result));
+    return result;
+}
+} // namespace
+
+TEST_F(generic_block_sparse_attention_tiling_ut, mxfp4_paged_independent_strides)
+{
+    // Offsets in the serialized GenericBlockSparseAttentionTilingData layout.
+    constexpr std::array<size_t, 4> pitchOffsets{104, 112, 280, 288};
+    constexpr size_t wordsOffset = 240;
+    for (const bool bnbd : {false, true}) {
+        const int64_t dim = bnbd ? 256 : 192;
+        SCOPED_TRACE(bnbd ? "PA_BNBD" : "PA_BBND");
+        const int64_t page = kBlockSize * kMxfp4KvHeads * dim;
+        const int64_t scalePage = page / 32;
+        const std::array<int64_t, 4> compact{page, page, scalePage, scalePage};
+        const std::array<int64_t, 4> padding{kMxfp4KvHeads * dim, 2 * kMxfp4KvHeads * dim, 3 * kMxfp4KvHeads * dim / 32,
+                                             kMxfp4KvHeads * dim * 2};
+        const uint64_t compactKey = bnbd ? 9250006081000022ULL : 9250006071000022ULL;
+        const auto dense = MakeMxfp4PagedInputs(bnbd, dim);
+        TilingInfo compactInfo;
+        ASSERT_TRUE(RunMxfp4PagedTiling(dense, bnbd, dim, compactInfo));
+        ASSERT_GE(compactInfo.tilingDataSize, pitchOffsets.back() + sizeof(uint64_t));
+        EXPECT_EQ(compactInfo.tilingKey, compactKey);
+        EXPECT_EQ(ReadTilingU64(compactInfo, pitchOffsets[0]), page);
+        EXPECT_EQ(ReadTilingU64(compactInfo, pitchOffsets[1]), page);
+        EXPECT_EQ(ReadTilingU64(compactInfo, pitchOffsets[2]), 0U);
+        EXPECT_EQ(ReadTilingU64(compactInfo, pitchOffsets[3]), 0U);
+        const uint32_t compactWords = ReadTilingU32(compactInfo, wordsOffset);
+        ASSERT_GT(compactWords, 0U);
+        for (const unsigned gaps : {1U, 2U, 4U, 8U, 15U}) {
+            SCOPED_TRACE(gaps);
+            auto inputs = dense;
+            auto expected = compact;
+            for (size_t i = 0; i < kMxfp4PageInputs.size(); ++i) {
+                if ((gaps & (1U << i)) != 0U) {
+                    expected[i] += padding[i];
+                    SetPageStride(inputs[kMxfp4PageInputs[i]], expected[i]);
+                }
+            }
+            TilingInfo info;
+            ASSERT_TRUE(RunMxfp4PagedTiling(inputs, bnbd, dim, info));
+            ASSERT_GE(info.tilingDataSize, pitchOffsets.back() + sizeof(uint64_t));
+            EXPECT_EQ(info.tilingKey, compactKey + 1000000ULL);
+            for (size_t i = 0; i < expected.size(); ++i) {
+                EXPECT_EQ(ReadTilingU64(info, pitchOffsets[i]), expected[i]) << "Tensor slot " << kMxfp4PageInputs[i];
+            }
+            EXPECT_EQ(ReadTilingU32(info, wordsOffset), 2U * compactWords);
+        }
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, mxfp4_rejects_malformed_page_strides)
+{
+    constexpr int64_t dim = 192;
+    const int64_t page = kBlockSize * kMxfp4KvHeads * dim;
+    const int64_t scalePage = page / 32;
+    for (const size_t slot : kMxfp4PageInputs) {
+        SCOPED_TRACE(slot);
+        const int64_t compact = slot < 8 ? page : scalePage;
+        for (const int64_t stride : {int64_t{0}, -compact, compact - 1, compact + 1}) {
+            SCOPED_TRACE(stride);
+            auto inputs = MakeMxfp4PagedInputs(false, dim);
+            SetPageStride(inputs[slot], compact);
+            inputs[slot].stride_.SetStride(0, stride);
+            TilingInfo info;
+            EXPECT_FALSE(RunMxfp4PagedTiling(inputs, false, dim, info));
+        }
+        auto inputs = MakeMxfp4PagedInputs(false, dim);
+        SetPageStride(inputs[slot], compact);
+        auto& stride = inputs[slot].stride_;
+        const size_t rank = stride.GetDimNum();
+        stride.SetDimNum(rank - 1);
+        TilingInfo info;
+        EXPECT_FALSE(RunMxfp4PagedTiling(inputs, false, dim, info));
+        stride.SetDimNum(rank);
+        stride.SetStride(rank - 1, 2);
+        EXPECT_FALSE(RunMxfp4PagedTiling(inputs, false, dim, info));
+    }
+}
 
 TEST_F(generic_block_sparse_attention_tiling_ut, a8c4_batched_q_sequence_boundary)
 {

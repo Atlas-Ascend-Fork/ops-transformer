@@ -11,6 +11,7 @@
 #include "kernel_operator.h"
 #include "kernel_operator_list_tensor_intf.h"
 #include "generic_block_sparse_attention_tilingkey.h"
+
 #include "generic_block_sparse_attention_kernel_interface.cpp"
 #if (__CCE_AICORE__ == 220)
 #include "arch22/generic_block_sparse_attention_kernel_arch22_full_quant.h"
@@ -110,8 +111,7 @@ extern "C" __global__ __aicore__ void generic_block_sparse_attention(
 #endif
 #endif
 
-#if (__CCE_AICORE__ == 310) && TILING_KEY_VAR >= (GBSA_OP_ARCH35_BASE + GBSA_MXFP4_MODE_OFFSET) && \
-    TILING_KEY_VAR < (GBSA_OP_ARCH35_BASE + GBSA_MXFP4_MODE_OFFSET + 2000000000ULL)
+#if (__CCE_AICORE__ == 310) && GBSA_IS_MXFP4_KEY
         constexpr uint64_t modeKey = TILING_KEY_VAR - GBSA_OP_ARCH35_BASE - GBSA_MXFP4_MODE_OFFSET;
         constexpr uint64_t shapeKey = modeKey % GBSA_RESIDUAL_BLOCK_MODE_OFFSET;
         constexpr uint32_t kvLayout = (shapeKey / 10000000ULL) % 10ULL;

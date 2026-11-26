@@ -148,9 +148,24 @@ public:
     }
 
 private:
-    __aicore__ __attribute__((noinline)) inline void StoreOutput(
+    __aicore__ inline void StoreOutput(const AscendC::GlobalTensor<OutputT>& output,
+                                       const AscendC::GlobalTensor<float>& lse, uint32_t validRows, bool outputLse,
+                                       uint32_t headStride, uint32_t lseHeadStride,
+                                       const AscendC::LocalTensor<float>& numerator,
+                                       const AscendC::LocalTensor<float>& denominator,
+                                       const AscendC::LocalTensor<float>& maximum)
+    {
+        if (outputLse) {
+            StoreOutputImpl<true>(output, lse, validRows, headStride, lseHeadStride, numerator, denominator, maximum);
+        } else {
+            StoreOutputImpl<false>(output, lse, validRows, headStride, lseHeadStride, numerator, denominator, maximum);
+        }
+    }
+
+    template <bool WriteLse>
+    __aicore__ __attribute__((noinline)) inline void StoreOutputImpl(
         const AscendC::GlobalTensor<OutputT>& output, const AscendC::GlobalTensor<float>& lse, uint32_t validRows,
-        bool outputLse, uint32_t headStride, uint32_t lseHeadStride, const AscendC::LocalTensor<float>& numerator,
+        uint32_t headStride, uint32_t lseHeadStride, const AscendC::LocalTensor<float>& numerator,
         const AscendC::LocalTensor<float>& denominator, const AscendC::LocalTensor<float>& maximum)
     {
         if (validRows == 0) {
@@ -175,7 +190,7 @@ private:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(3);
         }
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(3);
-        if (outputLse) {
+        if constexpr (WriteLse) {
             GbsaMxfp4VF::LseCallVF(lseUBTensor, maximum, denominator, validRows, log2CxCeil_);
             if (lseHeadStride == 1U) {
                 // ComputeLse already stores contiguous FP32 values. Keep one

@@ -12,6 +12,14 @@
  * \file generic_block_sparse_attention_kernel_interface.cpp
  * \brief Generic Sparse Attention Kernel Interface
  */
+// The including entry file has already included the tiling-key definitions.
+// Keep strided PA implementations and the entry point in a separate section
+// so the linked image keeps compact Cube and Vector code together.
+// Keep this active through the compiler-generated Cube and Vector entry points.
+#if defined(TILING_KEY_VAR) && GBSA_IS_MXFP4_KEY && GBSA_MXFP4_STRIDED_PA
+#pragma clang section text = ".gbsa_mxfp4_pa_strided"
+#endif
+
 #include "kernel_operator.h"
 #include "generic_block_sparse_attention_tilingkey.h"
 #if (__CCE_AICORE__ == 220)
@@ -225,7 +233,7 @@ __aicore__ __attribute__((noinline)) static void GbsaInferMxfp4Head(const GbsaKe
     GET_TILING_DATA_WITH_STRUCT(GenericBlockSparseAttn::GenericBlockSparseAttentionTilingData, data, params.tiling);
     const uint32_t Q = FixedQueryTile != 0U ? FixedQueryTile : data.baseTileInfo.qBaseTile;
     const uint32_t KV = data.baseTileInfo.kvBaseTile;
-    static_assert(D == 64U || D == 128U || D == 192U || D == 256U, "Unsupported MXFP4 head size");
+    static_assert(D == 0U || D == 64U || D == 128U || D == 192U || D == 256U, "Unsupported MXFP4 head size");
     // Validate the host-selected tile pair before constructing any device layout.
     const bool validTile =
         ((Q == 16U || Q == 32U) && KV == 512U) || (Q == 64U && KV == 256U) || (Q == 128U && KV == 128U);
@@ -250,8 +258,8 @@ __aicore__ __attribute__((noinline)) static void GbsaInferMxfp4Head(const GbsaKe
     using L0TileShapePV = tla::Shape<uint32_t, uint32_t, uint32_t>;
     using DispatchPolicyQK = Gemm::MmadAtlasA5GbsaQKMxfp4<IsPaged>;
     using DispatchPolicyPV = Gemm::MmadAtlasA5GbsaPVMxfp4<IsPaged>;
-    using TileCopyQK = Gemm::Tile::PackedTileCopyMxfp4<IsPaged, false>;
-    using TileCopyPV = Gemm::Tile::PackedTileCopyMxfp4<IsPaged, true>;
+    using TileCopyQK = Gemm::Tile::PackedTileCopyMxfp4<IsPaged, false, GBSA_MXFP4_STRIDED_PA>;
+    using TileCopyPV = Gemm::Tile::PackedTileCopyMxfp4<IsPaged, true, GBSA_MXFP4_STRIDED_PA>;
     using TileMmadQK = Gemm::Tile::TileMmadTla<ArchTag, ElementQ, typename TileCopyQK::LayoutTagL1A>;
     using TileMmadPV = Gemm::Tile::TileMmadTla<ArchTag, ElementP, LayoutP>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, ElementQ, ElementK,
@@ -271,7 +279,7 @@ __aicore__ __attribute__((noinline)) static void GbsaInferMxfp4Head(const GbsaKe
     using Kernel = GbsaMxfp4FullQuantKernelArch35<BlockMmadQK, BlockMmadPV, EpilogueOnlineSoftmax,
                                                   EpilogueComputePScale, EpilogueRescaleO, EpiloguePrepareOffsets,
                                                   EpiloguePrepareKvScale, QFormat, KvFormat, IsCausal, HasResidual>;
-    Kernel kernel(D, Q, KV);
+    Kernel kernel(D == 0U ? data.embeddingSize : D, Q, KV);
     // Keep the straight-through body only for the minimum query-tile family.
     kernel(params, FixedQueryTile == 16U);
 }
@@ -291,6 +299,14 @@ __aicore__ inline void GbsaInferMxfp4Dimension(
 template <class OutputT, Format QFormat, Format KvFormat, bool IsPaged, bool IsCausal, bool HasResidual>
 __aicore__ inline void GbsaInferInterfaceMxfp4(const Mxfp4::KernelParams& params)
 {
+#if GBSA_MXFP4_STRIDED_PA
+    GET_TILING_DATA_WITH_STRUCT(GenericBlockSparseAttn::GenericBlockSparseAttentionTilingData, data, params.tiling);
+    if (data.embeddingSize == 192U) {
+        GbsaInferMxfp4Head<192U, OutputT, QFormat, KvFormat, IsPaged, IsCausal, HasResidual, 16U>(params);
+    } else {
+        GbsaInferMxfp4Head<256U, OutputT, QFormat, KvFormat, IsPaged, IsCausal, HasResidual, 16U>(params);
+    }
+#else
     GET_TILING_DATA_WITH_STRUCT(GenericBlockSparseAttn::GenericBlockSparseAttentionTilingData, data, params.tiling);
     if (data.embeddingSize == 64U) {
         GbsaInferMxfp4Dimension<64, OutputT, QFormat, KvFormat, IsPaged, IsCausal, HasResidual>(params, data);
@@ -301,6 +317,7 @@ __aicore__ inline void GbsaInferInterfaceMxfp4(const Mxfp4::KernelParams& params
     } else if (data.embeddingSize == 256U) {
         GbsaInferMxfp4Dimension<256, OutputT, QFormat, KvFormat, IsPaged, IsCausal, HasResidual>(params, data);
     }
+#endif
 }
 
 #endif // MXFP4-only entry helpers

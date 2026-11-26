@@ -32,6 +32,8 @@ template <class BlockMmadQK, class BlockMmadPV, class EpilogueOnlineSoftmax, cla
           class EpilogueRescaleO, class EpiloguePrepareOffsets, class EpiloguePrepareKvScale, Format QFormat,
           Format KvFormat, bool IsCausal, bool HasResidualBlock>
 class GbsaMxfp4FullQuantKernelArch35 {
+    static constexpr bool StridedPages = GBSA_MXFP4_STRIDED_PA;
+
 public:
     using ArchTag = typename BlockMmadQK::ArchTag;
     using Resource = NpuArch::Arch::Resource<ArchTag>;
@@ -96,7 +98,15 @@ public:
             Run<true>(params, tiling, meta, false);
             return;
         }
-        Run<false>(params, tiling, meta, flashDecode);
+        if constexpr (IsPaged) {
+            if (!flashDecode) {
+                Run<false>(params, tiling, meta, false);
+                return;
+            }
+            Run<false>(params, tiling, meta, true);
+        } else {
+            Run<false>(params, tiling, meta, flashDecode);
+        }
         if (flashDecode) {
             AscendC::PipeBarrier<PIPE_ALL>();
             AscendC::SyncAll<false>();
@@ -789,9 +799,14 @@ private:
             task.vScalePairs = tiling.blockSize / 64U;
             if (kvSeq.actualLen != 0U) {
                 const uint64_t page = blockTable.GetValue(static_cast<uint64_t>(task.batch) * tiling.maxBlocksPerBatch);
-                task.vScaleOffset = (page * task.vScalePairs * tiling.kvHeads +
-                                     task.kvHead * (KvFormat == Format::BNSD ? task.vScalePairs : 1U)) *
-                                    HeadDim * 2U;
+                if constexpr (StridedPages) {
+                    task.vScaleOffset = page * tiling.vScaleStride0 +
+                                        task.kvHead * (KvFormat == Format::BNSD ? task.vScalePairs : 1U) * HeadDim * 2U;
+                } else {
+                    task.vScaleOffset = (page * task.vScalePairs * tiling.kvHeads +
+                                         task.kvHead * (KvFormat == Format::BNSD ? task.vScalePairs : 1U)) *
+                                        HeadDim * 2U;
+                }
             }
         } else {
             task.kvByteOffset = GetTensorOffset<KvFormat>(kvSeq, 0, task.kvHead, tiling.kvHeads, HeadDim) / 2;
@@ -871,11 +886,25 @@ private:
         prepareScale.BeginTile(keyScale[task.kvByteOffset / 16U], taskBegin + tileId, tiling.blockShapeY,
                                IsPaged ? tiling.blockSize : tiling.kvSeqCapacity,
                                GbsaLayoutHelper<KvFormat>::TokenStride(tiling.kvHeads, HeadDim / 2U));
-        prepareOffsets(
-            descriptors[static_cast<uint64_t>(slot) * tiling.kvOffsetTileWords],
-            sparseIndices[task.sparseOffset].GetPhyAddr(),
-            IsPaged ? blockTable[static_cast<uint64_t>(task.batch) * tiling.maxBlocksPerBatch].GetPhyAddr() : nullptr,
-            tileId, tokens, task.explicitBlocks, task.residualBlock, prepareScale);
+        if constexpr (StridedPages) {
+            auto keys = descriptors[static_cast<uint64_t>(slot) * tiling.kvOffsetTileWords];
+            auto indices = sparseIndices[task.sparseOffset].GetPhyAddr();
+            auto pages = IsPaged ?
+                             blockTable[static_cast<uint64_t>(task.batch) * tiling.maxBlocksPerBatch].GetPhyAddr() :
+                             nullptr;
+            typename EpiloguePrepareOffsets::template PagePitchWriter<EpiloguePrepareKvScale, KvFormat == Format::BSND>
+                writer{prepareScale, tiling.kStride0 / 2U, tiling.vStride0 / 2U, tiling.kScaleStride0 * 16U,
+                       GbsaLayoutHelper<KvFormat>::TokenStride(tiling.kvHeads, HeadDim / 2U)};
+            prepareOffsets.template operator()<true>(keys, indices, pages, tileId, tokens, task.explicitBlocks,
+                                                     task.residualBlock, writer);
+        } else {
+            prepareOffsets(descriptors[static_cast<uint64_t>(slot) * tiling.kvOffsetTileWords],
+                           sparseIndices[task.sparseOffset].GetPhyAddr(),
+                           IsPaged ?
+                               blockTable[static_cast<uint64_t>(task.batch) * tiling.maxBlocksPerBatch].GetPhyAddr() :
+                               nullptr,
+                           tileId, tokens, task.explicitBlocks, task.residualBlock, prepareScale);
+        }
         AscendC::CrossCoreSetFlag<4, PIPE_MTE3>(static_cast<uint32_t>(Mxfp4::Flag::DESCRIPTOR_BASE) + slot);
     }
 

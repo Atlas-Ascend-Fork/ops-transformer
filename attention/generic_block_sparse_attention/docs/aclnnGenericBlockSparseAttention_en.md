@@ -1463,7 +1463,10 @@ The final V scale dimension of 2 represents adjacent 32-token groups. Repeat the
 For TND, round each batch's KV storage length up independently before concatenating V scales.
 Do not align only the total length or use shorter effective lengths to determine batch offsets.
 K/V and their scales share physical page IDs from blockTable, including non-contiguous or shuffled IDs; there is no independent scale page table.
-ACLNN normalizes the input storage to contiguous tensors.
+For PA_BBND and PA_BNBD, K, V, K scale and V scale support independent first-axis (physical-page) strides with contiguous inner axes.
+K/V strides are measured in logical FP4 elements, must cover at least one page and must be aligned to Nkv×D.
+K scale and V scale strides are measured in E8M0 bytes, must cover their respective page payloads and must be aligned to Nkv×D/32 and Nkv×D×2, respectively.
+ACLNN preserves these supported paged strides without a contiguous copy. Q and nonpaged inputs continue to be handled as contiguous tensors.
 
 `pQuantScaleOptional` must be nullptr because P is dynamically quantized inside the operator.
 For scaled logits x, the group exponent is `c=ceil(max(x)/ln(2)-log2(CX))`; convert `exp(x-c*ln(2)-ln(1.5))` to FP4 and compensate the running exponent in P scale.

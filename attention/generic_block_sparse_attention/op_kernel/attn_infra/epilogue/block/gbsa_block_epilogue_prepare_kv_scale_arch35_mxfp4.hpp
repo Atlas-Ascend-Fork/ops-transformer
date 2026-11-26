@@ -117,6 +117,46 @@ public:
         copiedRows += rows * matrices;
     }
 
+    struct FullBlockCopy {
+        uint32_t span;
+        uint32_t ubPitch;
+        uint32_t sourceGap;
+    };
+
+    template <uint32_t BlockRows>
+    __aicore__ inline FullBlockCopy CalcFullBlockCopy() const
+    {
+        const uint32_t stride = tokenStrideBytes / 16U;
+        const uint32_t span = (BlockRows - 1U) * stride + D / 32U;
+        return {span, (span + 31U) / 32U * 32U, BlockRows * stride - span};
+    }
+
+    // Only complete sparse blocks reach this entry. Their scratch pitch
+    // and source span are invariant across the records in the group.
+    template <uint32_t BlockRows>
+    __aicore__ inline void RecordFullBlocks(uint64_t offset, uint32_t rows, uint64_t stride, uint32_t matrices,
+                                            const FullBlockCopy& copy)
+    {
+        AscendC::DataCopyExtParams params;
+        params.blockCount = rows / BlockRows * matrices;
+        params.blockLen = copy.span;
+        params.srcStride = matrices == 1U ? copy.sourceGap : stride / 16U - copy.span;
+        params.dstStride = 0;
+        const uint64_t first = offset / 16U;
+        if (matrices == 2U && tokenStrideBytes == D / 2U && copy.span < copy.ubPitch && stride / 16U == copy.ubPitch &&
+            first + 2U * copy.ubPitch <= sourceBytes) {
+            params.blockCount = 1U;
+            params.blockLen = 2U * copy.ubPitch;
+            params.srcStride = 0U;
+        }
+        AscendC::DataCopyPadExtParams<uint8_t> padding;
+        padding.isPad = false;
+        AscendC::DataCopyPad(
+            inputScaleUBTensor[inputSlot * descriptor.INPUT_BYTES + copiedRows / BlockRows * copy.ubPitch],
+            gScale[first], params, padding);
+        copiedRows += rows * matrices;
+    }
+
     // Complete sparse blocks with contiguous token rows select the copy geometry
     // once per descriptor group, outside the record emission loop.
     template <uint32_t BlockRows>
@@ -170,17 +210,24 @@ public:
             const uint32_t slot = sequence % 3U * descriptor.GROUPS_PER_BANK + pair;
             const uint32_t rows = active ? groupRows[slot] : 0U;
             if (rows == 0U) {
-                if ((pendingScaleGroups & (1U << pair)) != 0U) {
-                    // A Scalar wait must not consume a grant belonging to an
-                    // earlier MTE3 wait on the same cross-core flag.
-                    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(SCALE_ORDER_EVENT);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(SCALE_ORDER_EVENT);
-                    pendingScaleGroups = 0U;
+                if constexpr (Paged) {
+                    // PA always packs active scale groups on AIV. Order the
+                    // inactive bank's acknowledgement on the same DMA queue.
+                    AscendC::CrossCoreWaitFlag<4, PIPE_MTE3>(static_cast<uint32_t>(Flag::KSCALE_FREE_BASE) + pair);
+                    AscendC::CrossCoreSetFlag<4, PIPE_MTE3>(static_cast<uint32_t>(Flag::KSCALE_BASE) + pair);
+                } else {
+                    if ((pendingScaleGroups & (1U << pair)) != 0U) {
+                        // A Scalar wait must not consume a grant belonging to an
+                        // earlier MTE3 wait on the same cross-core flag.
+                        AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(SCALE_ORDER_EVENT);
+                        AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(SCALE_ORDER_EVENT);
+                        pendingScaleGroups = 0U;
+                    }
+                    // Cube owns direct scale copies. No AIV L1 write needs MTE3,
+                    // but every group still consumes and returns one grant.
+                    AscendC::CrossCoreWaitFlag<4, PIPE_S>(static_cast<uint32_t>(Flag::KSCALE_FREE_BASE) + pair);
+                    AscendC::CrossCoreSetFlag<4, PIPE_S>(static_cast<uint32_t>(Flag::KSCALE_BASE) + pair);
                 }
-                // Cube owns direct scale copies. No AIV L1 write needs MTE3,
-                // but every group still consumes and returns one grant.
-                AscendC::CrossCoreWaitFlag<4, PIPE_S>(static_cast<uint32_t>(Flag::KSCALE_FREE_BASE) + pair);
-                AscendC::CrossCoreSetFlag<4, PIPE_S>(static_cast<uint32_t>(Flag::KSCALE_BASE) + pair);
                 if (active) {
                     AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(static_cast<event_t>(slot));
                     AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(static_cast<event_t>(slot));
@@ -199,7 +246,9 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(SCALE_EVENT);
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(static_cast<event_t>(slot));
                 AscendC::CrossCoreSetFlag<4, PIPE_MTE3>(static_cast<uint32_t>(Flag::KSCALE_BASE) + pair);
-                pendingScaleGroups |= 1U << pair;
+                if constexpr (!Paged) {
+                    pendingScaleGroups |= 1U << pair;
+                }
             }
         }
     }
