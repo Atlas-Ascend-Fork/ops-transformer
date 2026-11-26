@@ -386,18 +386,29 @@ void QuantFlashAttnTilingArch92::SetQFATilingData()
     }
     if (qfaInfo_->hasStride) {
         tilingData_.baseTiling.quantFlashAttnPageAttentionParams.maxBlockNumPerBatch = maxBlockNumPerBatch;
-        tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.bnStride = qfaInfo_->keyStrides->GetStride(0);
-        tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.n2Stride = qfaInfo_->keyStrides->GetStride(1);
-        tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.bnStride = qfaInfo_->valueStrides->GetStride(0);
-        tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.n2Stride = qfaInfo_->valueStrides->GetStride(1);
-        tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.bnStride =
-            qfaInfo_->kDescaleStrides->GetStride(0);
-        tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.n2Stride =
-            qfaInfo_->kDescaleStrides->GetStride(1);
-        tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.bnStride =
-            qfaInfo_->vDescaleStrides->GetStride(0);
-        tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.n2Stride =
-            qfaInfo_->vDescaleStrides->GetStride(1);
+        // parser 按输入分别判断 InputIsView，部分输入为 view 时其余 stride 指针可能为空，需逐指针判空
+        if (qfaInfo_->keyStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.bnStride = qfaInfo_->keyStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.n2Stride = qfaInfo_->keyStrides->GetStride(1);
+        }
+        if (qfaInfo_->valueStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.bnStride =
+                qfaInfo_->valueStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.n2Stride =
+                qfaInfo_->valueStrides->GetStride(1);
+        }
+        if (qfaInfo_->kDescaleStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.bnStride =
+                qfaInfo_->kDescaleStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.n2Stride =
+                qfaInfo_->kDescaleStrides->GetStride(1);
+        }
+        if (qfaInfo_->vDescaleStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.bnStride =
+                qfaInfo_->vDescaleStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.n2Stride =
+                qfaInfo_->vDescaleStrides->GetStride(1);
+        }
     }
 }
 

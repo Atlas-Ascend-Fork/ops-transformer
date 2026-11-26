@@ -291,7 +291,7 @@ The tables list the combined support across products. Use values that satisfy th
 
 > [!NOTE]
 >
-> k/v/k_descale/v_descale support non-contiguous tensors only in the Paged Attention use case. For the axis constraints supported in the non-contiguous case, see the feature cross validation in <a href="#paged-attention-parameter-group">Paged Attention Parameter Group</a>.<br>Note: The stride of each dimension of a non-contiguous tensor cannot be 0.
+> k/v/k_descale/v_descale support non-contiguous tensors only in the Paged Attention use case. For the axis constraints supported in the non-contiguous case, see the feature cross validation in <a href="#paged-attention-parameter-group">Paged Attention Parameter Group</a>.<br>Note: The stride of each dimension of a non-contiguous tensor cannot be 0. When quant_mode=6, v_descale does not support non-contiguous tensors.
 
 <!-- end id17 -->
 
@@ -1112,6 +1112,7 @@ Paged Attention is enabled when block_table is not empty.
                     <li>If layout_kv is PA, seqused_kv must be passed.</li>
                     <li>If layout_kv is PA, block_table must not be empty.</li>
                     <li>In the Paged Attention use case, k/v/k_descale/v_descale support non-contiguous tensors. The supported non-contiguous axes depend on layout_kv: when layout_kv is PA_BNBD/PA_NZ, axis 0 or axes 0 and 1 can be non-contiguous; when layout_kv is PA_BBND, only axis 0 can be non-contiguous.</li>
+                    <li>When quant_mode=6, v_descale does not support non-contiguous tensors.</li>
                     <li>Block size is supported only in the MxFP8 use case. The value can be 64, 128, 256, 512, or 1024.</li>
                     <li>FP8 (quant_mode=6) enforces the PA use case. block_table is required, and Bs is fixed to 128.</li>
                 </ul>

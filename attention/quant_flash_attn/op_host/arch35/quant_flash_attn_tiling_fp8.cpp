@@ -300,14 +300,32 @@ void QuantFlashAttnTilingFp8Impl::SetQFATilingData()
     }
     tilingData_.baseTiling.quantFlashAttnPageAttentionParams.maxBlockNumPerBatch = maxBlockNumPerBatch;
 
-    tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.bnStride = qfaInfo_->keyStrides->GetStride(0);
-    tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.n2Stride = qfaInfo_->keyStrides->GetStride(1);
-    tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.bnStride = qfaInfo_->valueStrides->GetStride(0);
-    tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.n2Stride = qfaInfo_->valueStrides->GetStride(1);
-    tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.bnStride = qfaInfo_->kDescaleStrides->GetStride(0);
-    tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.n2Stride = qfaInfo_->kDescaleStrides->GetStride(1);
-    tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.bnStride = qfaInfo_->vDescaleStrides->GetStride(0);
-    tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.n2Stride = qfaInfo_->vDescaleStrides->GetStride(1);
+    // stride 仅在对应输入为 view 时由 parser 赋值，默认为 nullptr，
+    // 需判空后写入，避免 host tiling 阶段空指针解引用；未写入时保持 0，由 kernel 按连续布局推算
+    if (qfaInfo_->hasStride) {
+        if (qfaInfo_->keyStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.bnStride = qfaInfo_->keyStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.keyStrides.n2Stride = qfaInfo_->keyStrides->GetStride(1);
+        }
+        if (qfaInfo_->valueStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.bnStride =
+                qfaInfo_->valueStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.valueStrides.n2Stride =
+                qfaInfo_->valueStrides->GetStride(1);
+        }
+        if (qfaInfo_->kDescaleStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.bnStride =
+                qfaInfo_->kDescaleStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.kDescaleStrides.n2Stride =
+                qfaInfo_->kDescaleStrides->GetStride(1);
+        }
+        if (qfaInfo_->vDescaleStrides != nullptr) {
+            tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.bnStride =
+                qfaInfo_->vDescaleStrides->GetStride(0);
+            tilingData_.baseTiling.quantFlashAttnBaseParams.vDescaleStrides.n2Stride =
+                qfaInfo_->vDescaleStrides->GetStride(1);
+        }
+    }
 }
 
 ge::graphStatus QuantFlashAttnTilingFp8Impl::SetTilingData(QuantFlashAttnTilingData& tilingData)

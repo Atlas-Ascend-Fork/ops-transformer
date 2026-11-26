@@ -296,7 +296,7 @@ cann_ops_transformer.quant_flash_attn(
 
 > [!NOTE]
 >
-> k/v/k_descale/v_descale仅在Paged Attention场景下支持非连续Tensor，非连续时支持的轴约束见<a href="#Paged Attention参数组">Paged Attention参数组</a>特性交叉校验。<br>注：非连续Tensor每一维的stride均不能为0。
+> k/v/k_descale/v_descale仅在Paged Attention场景下支持非连续Tensor，非连续时支持的轴约束见<a href="#Paged Attention参数组">Paged Attention参数组</a>特性交叉校验。<br>注：非连续Tensor每一维的stride均不能为0。quant_mode=6时v_descale不支持非连续Tensor。
 
 <!-- end id17 -->
 
@@ -1247,6 +1247,7 @@ mask_mode参数解释：
                     <li>当layout_kv为PA场景时，必须传入seqused_kv</li>
                     <li>当layout_kv为PA场景时，block_table必须不为空</li>
                     <li>Paged Attention场景下k/v/k_descale/v_descale支持非连续Tensor，支持的轴非连续与layout_kv相关：layout_kv为PA_BNBD/PA_NZ时，支持0轴或0轴1轴非连续；layout_kv为PA_BBND时，仅支持0轴非连续</li>
+                    <li>quant_mode=6时v_descale不支持非连续Tensor</li>
                     <li>块大小仅MxFP8场景支持，取值为64、128、256、512或1024</li>
                     <li>FP8（quant_mode=6）强制PA场景，block_table必选，且Bs固定为128</li>
                 </ul>

@@ -129,10 +129,10 @@ struct QuantFlashAttnTilingUtParam : public QuantFlashAttnHostUtParamBase {
         this->inputInstance.emplace_back(
             GetTensorGE(csvMap, "v_descale_shape", "v_descale_dtype", "v_descale_format", this->v_descale));
         ApplyStrideFromCsv(csvMap, "v_descale_stride", this->v_descale);
-        // parser checks InputIsView(KEY_INDEX) first, then reads all four strides.
-        // If any stride is set, all four must be TensorV2 (hasStride_=true) so that
-        // GetInputStride returns non-null for each. Key must always have hasStride_=true
-        // to trigger the stride parsing path. For tensors without explicit stride in CSV,
+        // parser checks InputIsView() for each of key/value/k_descale/v_descale separately and
+        // only reads the stride of view inputs. If any stride is set, fill contiguous strides for
+        // the rest so all four are TensorV2 (hasStride_=true) and GetInputStride returns
+        // non-null for each. For tensors without explicit stride in CSV,
         // compute contiguous stride from shape to avoid tiling failures from empty stride.
         if (this->k.hasStride_ || this->v.hasStride_ || this->k_descale.hasStride_ || this->v_descale.hasStride_) {
             if (!this->k.hasStride_) {
