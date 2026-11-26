@@ -22,6 +22,8 @@ import utils
 import sys
 import torch_npu
 
+from mqsmla_names import normalise_mqsmla_case_name, normalise_mqsmla_test_data
+
 SMLA_PYTEST_PATH = Path(__file__).resolve().parents[3] / "sparse_flash_mla/tests/pytest"
 if str(SMLA_PYTEST_PATH) not in sys.path:
     sys.path.append(str(SMLA_PYTEST_PATH))
@@ -60,7 +62,12 @@ if os.path.isdir(testcase_path):
             print(f"从表格中读取到 {len(target_names)} 个目标用例名")
             pt_files = [f for f in os.listdir(testcase_path) if f.endswith(".pt")]
             for target_name in target_names:
-                matched = [f for f in pt_files if target_name in f]
+                matched = [
+                    f
+                    for f in pt_files
+                    if normalise_mqsmla_case_name(target_name)
+                    in normalise_mqsmla_case_name(f)
+                ]
                 if matched:
                     for f in matched:
                         filepath = os.path.join(testcase_path, f)
@@ -83,7 +90,11 @@ else:
 
 
 def mqsmla(testcase_files):
-    test_data = torch.load(testcase_files, map_location="cpu", weights_only=False)
+    test_data = normalise_mqsmla_test_data(
+        torch.load(testcase_files, map_location="cpu", weights_only=False)
+    )
+    result_params = test_data["params"].copy()
+    result_params["Testcase_Name"] = normalise_mqsmla_case_name(testcase_files)
     consistency_config = resolve_consistency_config(
         test_data, os.environ.get("MQSMLA_BATCH_CONSISTENCY", "auto")
     )
@@ -106,9 +117,7 @@ def mqsmla(testcase_files):
         print(summary, flush=True)
         fulfill_percent = consistency_fulfill_percent(report)
         result = "Pass" if report["pass"] else "Failed"
-        utils.save_result(
-            test_data["params"], result, fulfill_percent, Path(result_path)
-        )
+        utils.save_result(result_params, result, fulfill_percent, Path(result_path))
         if not report["relations"]:
             pytest.skip(f"batch consistency has no applicable relation: {report}")
         if not report["pass"]:
@@ -151,7 +160,7 @@ def mqsmla(testcase_files):
         result = "NPU ERROR"
         fulfill_percent = 0
 
-    utils.save_result(test_data["params"], result, fulfill_percent, Path(result_path))
+    utils.save_result(result_params, result, fulfill_percent, Path(result_path))
 
     if result == "NPU ERROR":
         pytest.fail(
@@ -163,7 +172,7 @@ def mqsmla(testcase_files):
         )
 
 
-testcase_ids = [os.path.splitext(os.path.basename(f))[0] for f in testcase_files]
+testcase_ids = [normalise_mqsmla_case_name(f) for f in testcase_files]
 
 
 @pytest.mark.ci

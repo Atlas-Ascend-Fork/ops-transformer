@@ -16,11 +16,11 @@ import re
 import numpy as np
 import os
 import pandas as pd
-from pathlib import Path
 import pytest
 import torch
 
 from batch_consistency.config import prepare_consistency_params
+from perf_data_common import SMLA_PERF_COLUMNS, SMLA_PERF_CONFIG, append_accuracy_result
 import time
 import random
 
@@ -259,35 +259,12 @@ def load_excel_test_cases(excel_file_path: str, sheetname: str):
 def save_result(
     result, fulfill_percent, params, result_path="./result/smla_result.xlsx"
 ):
-    result_path = Path(result_path)
     row_data = {
         **params,
         "result": result,
         "fulfill_percent": fulfill_percent,
     }
-    # 检查文件是否存在
-    result_path.parent.mkdir(parents=True, exist_ok=True)
-    if result_path.exists():
-        df = pd.read_excel(result_path)
-        if set(df.columns) != set(row_data.keys()):
-            print("信息：列名不一致，将自动对齐（缺失填NaN，新增列自动扩展）")
-            print(f"Excel列名: {list(df.columns)}")
-            print(f"变量名: {list(row_data.keys())}")
-        # 追加新行
-        new_df = pd.DataFrame([row_data])
-        df = pd.concat([df, new_df], ignore_index=True, sort=False)
-    else:
-        # 文件不存在，创建新的DataFrame
-        df = pd.DataFrame([row_data])
-
-    # ---------- 新增：固定最后两列 ----------
-    # 取出除 result 和 fulfill_percent 外的所有列（保持原有顺序）
-    other_cols = [col for col in df.columns if col not in ("result", "fulfill_percent")]
-    # 重新排列：其他列在前，最后两列固定
-    df = df[other_cols + ["result", "fulfill_percent"]]
-    # -------------------------------------
-    # 保存到Excel
-    df.to_excel(result_path, index=False)
+    append_accuracy_result(result_path, row_data, SMLA_PERF_CONFIG, SMLA_PERF_COLUMNS)
 
 
 def generate_param_combinations(ENABLED_PARAMS, is_save_pt=False):

@@ -92,6 +92,8 @@ def test_sparse_flash_mla(testcase_files):
     print("执行文件: ", testcase_files)
     torch_npu.npu.set_device(0)
     test_data = torch.load(testcase_files, map_location="cpu", weights_only=False)
+    result_params = test_data["params"].copy()
+    result_params["testcase_name"] = Path(testcase_files).name
     consistency_config = resolve_consistency_config(
         test_data, os.environ.get("SMLA_BATCH_CONSISTENCY", "auto")
     )
@@ -107,9 +109,7 @@ def test_sparse_flash_mla(testcase_files):
         print(summary, flush=True)
         fulfill_percent = consistency_fulfill_percent(report)
         final_result = "Passed" if report["pass"] else "Failed"
-        utils.save_result(
-            final_result, fulfill_percent, test_data["params"], result_path
-        )
+        utils.save_result(final_result, fulfill_percent, result_params, result_path)
         if not report["relations"]:
             pytest.skip(f"batch consistency has no applicable relation: {report}")
         if not report["pass"]:
@@ -119,7 +119,7 @@ def test_sparse_flash_mla(testcase_files):
     try:
         npu_result, softmax_lse = sparse_flash_mla_process.call_npu(test_data)
     except Exception as e:
-        utils.save_result("Exception", 0, test_data["params"], result_path)
+        utils.save_result("Exception", 0, result_params, result_path)
         pytest.fail(f"NPU执行异常: {e}")
 
     global_failed = False
@@ -148,7 +148,7 @@ def test_sparse_flash_mla(testcase_files):
     else:
         final_result = "Passed"
 
-    utils.save_result(final_result, fulfill_percent, test_data["params"], result_path)
+    utils.save_result(final_result, fulfill_percent, result_params, result_path)
     if final_result not in ("Passed", "passed", "Pass", "pass"):
         pytest.fail(
             f"用例结果校验失败: result={final_result}, fulfill_percent={fulfill_percent}"

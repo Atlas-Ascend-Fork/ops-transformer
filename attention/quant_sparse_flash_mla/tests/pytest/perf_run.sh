@@ -9,7 +9,7 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# 性能数据分析脚本
-rm result.xlsx
-msprof python3 -m pytest -rA -s test_quant_sparse_flash_mla_batch.py -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning 2>&1 | tee res.log
-python process_perf_data.py --test_result_path="result.xlsx" --is_compare True --delete_perf_file True
+exec bash "$(dirname "$0")/../../../sparse_flash_mla/tests/pytest/perf_run_common.sh" \
+    QSMLA_RESULT_SAVE_PATH "result.xlsx" \
+    "${QSMLA_PERF_TEST_SCRIPT:-test_quant_sparse_flash_mla_batch_graph.py}" \
+    graph "${QSMLA_PERF_GOLDEN_PATH:-perf_golden.xlsx}" "$@"

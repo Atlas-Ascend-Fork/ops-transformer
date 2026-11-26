@@ -89,6 +89,8 @@ print("files:", locals()["testcase_files"])
 
 def smla_graph(testcase_files):
     test_data = torch.load(testcase_files, map_location="cpu")
+    result_params = test_data["params"].copy()
+    result_params["testcase_name"] = Path(testcase_files).name
     consistency_config = resolve_consistency_config(
         test_data, os.environ.get("SMLA_BATCH_CONSISTENCY", "auto")
     )
@@ -106,7 +108,7 @@ def smla_graph(testcase_files):
         print(summary, flush=True)
         fulfill_percent = consistency_fulfill_percent(report)
         result = "Pass" if report["pass"] else "Failed"
-        utils.save_result(result, fulfill_percent, test_data["params"], result_path)
+        utils.save_result(result, fulfill_percent, result_params, result_path)
         if not report["relations"]:
             pytest.skip(f"batch consistency has no applicable relation: {report}")
         if not report["pass"]:
@@ -147,7 +149,7 @@ def smla_graph(testcase_files):
         result = "NPU ERROR"
         fulfill_percent = 0
 
-    utils.save_result(result, fulfill_percent, test_data["params"], result_path)
+    utils.save_result(result, fulfill_percent, result_params, result_path)
 
     if result == "NPU ERROR":
         pytest.fail(

@@ -17,6 +17,8 @@ import random
 import numpy as np
 import math
 
+from mqsmla_names import normalise_mqsmla_case_name, normalise_mqsmla_test_data
+
 # 两种运行模式
 # 0 不切S2
 # 1 切S2
@@ -2559,10 +2561,15 @@ def save_test_case(input_data, output_dir):
     """
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
+    input_data = normalise_mqsmla_test_data(input_data)
     case_name = input_data["Testcase_Name"]
 
     # 生成文件名
-    input_filename = f"qsmla_case_{case_name}.pt"
+    input_filename = (
+        f"{case_name}.pt"
+        if case_name.lower().startswith("mqsmla_case_")
+        else f"mqsmla_case_{case_name}.pt"
+    )
     input_filepath = os.path.join(output_dir, input_filename)
 
     # 保存数据
@@ -3149,6 +3156,9 @@ def gen_data(params, generate_golden=True):
     return test_data
     """
 
+    if "Testcase_Name" in params:
+        params = params.copy()
+        params["Testcase_Name"] = normalise_mqsmla_case_name(params["Testcase_Name"])
     int8_kv = torch.int8 in (params.get("ori_kv_type"), params.get("cmp_kv_type"))
     if int8_kv:
         from check_valid_param import check_valid_param
@@ -3744,7 +3754,7 @@ def generate_cpu_golden(input_data):
                 op[f"{stream}_block_table"],
             )
             state[f"{stream}_k_bnsd"] = decoded.to(state["q_type"])
-    test_qsmla = GeneralizedSFAQuant(
+    test_mqsmla = GeneralizedSFAQuant(
         state["layout_q"],
         state["layout_kv"],
         state["q_type"],
@@ -3781,7 +3791,7 @@ def generate_cpu_golden(input_data):
         state["cmp_topk_length"],
         state["template_run_mode"],
     )
-    cpu_output, cpu_lse = test_qsmla.forward(
+    cpu_output, cpu_lse = test_mqsmla.forward(
         state["q"],
         state["ori_k_bnsd"],
         state["cmp_k_bnsd"],

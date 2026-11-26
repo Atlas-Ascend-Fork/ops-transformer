@@ -60,15 +60,17 @@ else:
     logging.warning(f"错误: 输出目录不存在: {testcase_path}")
 
 
-def qsmla(testcase_files):
+def qsmla(testcase_files, *, run_graph=is_run_graph):
     test_data = torch.load(testcase_files, map_location="cpu", weights_only=False)
+    result_params = test_data["params"].copy()
+    result_params["Testcase_Name"] = Path(testcase_files).name
     consistency_config = resolve_consistency_config(
         test_data, os.environ.get("QSMLA_BATCH_CONSISTENCY", "auto")
     )
     if consistency_config is not None:
 
         def consistency_executor(data):
-            if is_run_graph:
+            if run_graph:
                 values = quant_sparse_flash_mla_process.test_qsmla_quant_process_graph(
                     data, device_id=device_id
                 )
@@ -90,16 +92,14 @@ def qsmla(testcase_files):
         print(summary, flush=True)
         fulfill_percent = consistency_fulfill_percent(report)
         result = "PASS" if report["pass"] else "FAILED"
-        utils.save_result(
-            test_data["params"], result, fulfill_percent, Path(result_path)
-        )
+        utils.save_result(result_params, result, fulfill_percent, Path(result_path))
         if not report["relations"]:
             pytest.skip(f"batch consistency has no applicable relation: {report}")
         if not report["pass"]:
             pytest.fail(summary)
         return
     try:
-        if is_run_graph:
+        if run_graph:
             npu_result, cpu_quant_result, cpu_lse, npu_lse = (
                 quant_sparse_flash_mla_process.test_qsmla_quant_process_graph(
                     test_data, device_id=device_id
@@ -145,7 +145,7 @@ def qsmla(testcase_files):
         result = "NPU ERROR"
         fulfill_percent = 0
 
-    utils.save_result(test_data["params"], result, fulfill_percent, Path(result_path))
+    utils.save_result(result_params, result, fulfill_percent, Path(result_path))
 
     if result != "PASS":
         pytest.fail(

@@ -96,7 +96,7 @@ Three batch testing modes are supported. For each mode, you can specify the Exce
 |------|------|--------|---------|
 | `--excel <path>` | Specifies the Excel file path | `./excel/example.xlsx` | batch_save / batch_exec / batch |
 | `--sheet <name>` | Specifies the Excel sheet name | `decode` | batch_save / batch |
-| `--pt-dir <directory>` | Specifies the directory for saving/reading pt files | `qsmla_testcase` | batch_save / batch_exec / batch |
+| `--pt-dir <directory>` | Specifies the directory for saving/reading pt files | `mqsmla_testcase` | batch_save / batch_exec / batch |
 | `--keep-pt` | Keeps pt files after execution | Cleaned up by default | batch only |
 
 ##### Usage Examples

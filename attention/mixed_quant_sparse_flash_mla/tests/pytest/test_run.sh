@@ -22,17 +22,17 @@ set -- "${super_kernel_args[@]}"
 
 set -euo pipefail
 
-QSMLA_PT_SAVE_SCRIPT="./batch/test_mixed_quant_sparse_flash_mla_pt_save.py"
-TEST_QSMLA_PT_BATCH_SCRIPT="test_mixed_quant_sparse_flash_mla_batch.py"
-TEST_QSMLA_PT_BATCH_GRAPH_SCRIPT="test_mixed_quant_sparse_flash_mla_batch_graph.py"
-TEST_QSMLA_SINGLE_SCRIPT="test_mixed_quant_sparse_flash_mla_single.py"
+MQSMLA_PT_SAVE_SCRIPT="./batch/test_mixed_quant_sparse_flash_mla_pt_save.py"
+TEST_MQSMLA_PT_BATCH_SCRIPT="test_mixed_quant_sparse_flash_mla_batch.py"
+TEST_MQSMLA_PT_BATCH_GRAPH_SCRIPT="test_mixed_quant_sparse_flash_mla_batch_graph.py"
+TEST_MQSMLA_SINGLE_SCRIPT="test_mixed_quant_sparse_flash_mla_single.py"
 
 PT_SAVE_DIR="mqsmla_testcase"
 EXCEL_FILE="./excel/example.xlsx"
 SHEET_NAME="decode"
 KEEP_PT=false
 BATCH_TEST_MODE=0
-RESULT_PATH="./mqsmla_result.xlsx"
+RESULT_PATH="${MQSMLA_RESULT_SAVE_PATH:-./mqsmla_result.xlsx}"
 DEVICE_ID=0
 BATCH_CONSISTENCY_POLICY="auto"
 
@@ -41,7 +41,7 @@ BATCH_CONSISTENCY_POLICY="auto"
 run_single() {
     echo "===== 执行单用例算子调测 ====="
     export MQSMLA_BATCH_CONSISTENCY="$BATCH_CONSISTENCY_POLICY"
-    python3 -m pytest -rA -s $TEST_QSMLA_SINGLE_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
+    python3 -m pytest -rA -s $TEST_MQSMLA_SINGLE_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
 }
 
 run_batch_save() {
@@ -53,7 +53,7 @@ run_batch_save() {
     export MQSMLA_SHEET="$SHEET_NAME"
     export MQSMLA_PT_DIR="$PT_SAVE_DIR"
     export MQSMLA_BATCH_CONSISTENCY="$BATCH_CONSISTENCY_POLICY"
-    python3 -m pytest -rA -s $QSMLA_PT_SAVE_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
+    python3 -m pytest -rA -s $MQSMLA_PT_SAVE_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
     if [ $? -ne 0 ]; then
         echo "batch_save 执行失败，退出"
         exit 1
@@ -82,7 +82,7 @@ run_batch_exec() {
     export MQSMLA_RESULT_SAVE_PATH="$RESULT_PATH"
     export MQSMLA_DEVICE_ID="$DEVICE_ID"
     export MQSMLA_BATCH_CONSISTENCY="$BATCH_CONSISTENCY_POLICY"
-    python3 -m pytest -rA -s $TEST_QSMLA_PT_BATCH_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
+    python3 -m pytest -rA -s $TEST_MQSMLA_PT_BATCH_SCRIPT -v -m ci -W ignore::UserWarning -W ignore::DeprecationWarning
     if [ $? -ne 0 ]; then
         echo "batch_exec 执行失败"
         exit 1
@@ -112,7 +112,7 @@ run_batch_exec_graph() {
     export MQSMLA_RESULT_SAVE_PATH="$RESULT_PATH"
     export MQSMLA_DEVICE_ID="$DEVICE_ID"
     export MQSMLA_BATCH_CONSISTENCY="$BATCH_CONSISTENCY_POLICY"
-    python3 -m pytest -rA -s $TEST_QSMLA_PT_BATCH_GRAPH_SCRIPT -v -m graph -W ignore::UserWarning -W ignore::DeprecationWarning
+    python3 -m pytest -rA -s $TEST_MQSMLA_PT_BATCH_GRAPH_SCRIPT -v -m graph -W ignore::UserWarning -W ignore::DeprecationWarning
     if [ $? -ne 0 ]; then
         echo "batch_exec_graph 执行失败"
         exit 1

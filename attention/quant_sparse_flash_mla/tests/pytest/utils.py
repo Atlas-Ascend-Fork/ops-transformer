@@ -16,7 +16,14 @@ import pandas as pd
 import numpy as np
 import os
 import math
-import logging
+import sys
+from pathlib import Path
+
+SMLA_PYTEST_PATH = Path(__file__).resolve().parents[3] / "sparse_flash_mla/tests/pytest"
+if str(SMLA_PYTEST_PATH) not in sys.path:
+    sys.path.append(str(SMLA_PYTEST_PATH))
+
+from perf_data_common import QSMLA_PERF_CONFIG, append_accuracy_result  # noqa: E402
 
 
 def normalize_topk_mode(value):
@@ -635,24 +642,4 @@ def save_result(params, result, fulfill_percent, result_path):
         "fulfill_percent": fulfill_percent,
     }
 
-    # 检查文件是否存在
-    if result_path.exists():
-        try:
-            df = pd.read_excel(result_path)
-            if set(df.columns) != set(row_data.keys()):
-                logging.warning("警告：变量名与Excel列名不匹配！")
-                logging.warning(f"Excel列名: {list(df.columns)}")
-                logging.warning(f"变量名: {list(row_data.keys())}")
-                logging.warning("请检查变量名或Excel文件")
-                return False
-            new_df = pd.DataFrame([row_data])
-            df = pd.concat([df, new_df], ignore_index=True)
-        except Exception:
-            logging.warning(f"警告: {result_path} 文件损坏，将重建")
-            df = pd.DataFrame([row_data])
-    else:
-        # 文件不存在，创建新的DataFrame
-        df = pd.DataFrame([row_data])
-
-    # 保存到Excel
-    df.to_excel(result_path, index=False)
+    append_accuracy_result(result_path, row_data, QSMLA_PERF_CONFIG)

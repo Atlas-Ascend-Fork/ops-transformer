@@ -16,6 +16,18 @@ import pandas as pd
 import numpy as np
 import os
 import math
+import sys
+from pathlib import Path
+
+from mqsmla_names import normalise_mqsmla_case_name
+
+SMLA_PYTEST_PATH = Path(__file__).resolve().parents[3] / "sparse_flash_mla/tests/pytest"
+if str(SMLA_PYTEST_PATH) not in sys.path:
+    sys.path.append(str(SMLA_PYTEST_PATH))
+
+from perf_data_common import append_accuracy_result, mqsmla_perf_config  # noqa: E402
+
+MQSMLA_PERF_CONFIG = mqsmla_perf_config(normalise_mqsmla_case_name)
 
 
 def normalize_topk_mode(value):
@@ -403,7 +415,7 @@ def fill_none_params(params_dict):
 
     # 构建完整参数字典
     filled_params = {
-        "Testcase_Name": params_dict.get("Testcase_Name"),
+        "Testcase_Name": normalise_mqsmla_case_name(params_dict.get("Testcase_Name")),
         "layout_q": layout_q,
         "layout_kv": params_dict["layout_kv"],
         "q_type": params_dict["q_type"],
@@ -644,24 +656,4 @@ def save_result(params, result, fulfill_percent, result_path):
         "fulfill_percent": fulfill_percent,
     }
 
-    # 检查文件是否存在
-    if result_path.exists():
-        try:
-            df = pd.read_excel(result_path)
-            if set(df.columns) != set(row_data.keys()):
-                print("警告：变量名与Excel列名不匹配！")
-                print(f"Excel列名: {list(df.columns)}")
-                print(f"变量名: {list(row_data.keys())}")
-                print("请检查变量名或Excel文件")
-                return False
-            new_df = pd.DataFrame([row_data])
-            df = pd.concat([df, new_df], ignore_index=True)
-        except Exception:
-            print(f"警告: {result_path} 文件损坏，将重建")
-            df = pd.DataFrame([row_data])
-    else:
-        # 文件不存在，创建新的DataFrame
-        df = pd.DataFrame([row_data])
-
-    # 保存到Excel
-    df.to_excel(result_path, index=False)
+    append_accuracy_result(result_path, row_data, MQSMLA_PERF_CONFIG)

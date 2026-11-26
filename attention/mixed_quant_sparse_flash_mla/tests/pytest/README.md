@@ -93,7 +93,7 @@ bash test_run.sh single
 |------|------|--------|---------|
 | `--excel <路径>` | 指定excel文件路径 | `./excel/example.xlsx` | batch_save / batch_exec / batch |
 | `--sheet <名称>` | 指定excel sheet名 | `decode` | batch_save / batch |
-| `--pt-dir <目录>` | 指定pt文件保存/读取目录 | `qsmla_testcase` | batch_save / batch_exec / batch |
+| `--pt-dir <目录>` | 指定pt文件保存/读取目录 | `mqsmla_testcase` | batch_save / batch_exec / batch |
 | `--keep-pt` | 执行完成后保留pt文件 | 默认清理 | 仅batch |
 
 ##### 使用示例

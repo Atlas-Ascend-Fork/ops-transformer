@@ -27,6 +27,8 @@ import utils
 import sys
 import torch_npu
 
+from mqsmla_names import normalise_mqsmla_case_name
+
 from mixed_quant_sparse_flash_mla_paramset import ENABLED_PARAMS
 
 SMLA_PYTEST_PATH = Path(__file__).resolve().parents[3] / "sparse_flash_mla/tests/pytest"
@@ -47,7 +49,7 @@ from batch_consistency.pytest_support import (  # noqa: E402
 pt_save_path = "mqsmla_testcase"
 device_id = 0
 save_pt = os.environ.get("SAVE_PT", "0") == "1"
-result_path = Path(os.environ.get("MQSMLA_RESULT_SAVE_PATH", "result.xlsx"))
+result_path = Path(os.environ.get("MQSMLA_RESULT_SAVE_PATH", "mqsmla_result.xlsx"))
 
 param_combinations = []
 for params in ENABLED_PARAMS:
@@ -246,7 +248,7 @@ def mqsmla(param_combinations):
 def _gen_testcase_id(params, idx):
     name = params.get("Testcase_Name")
     if name is not None:
-        return name
+        return normalise_mqsmla_case_name(name)
     ops_mode = "prefill" if params["S1"] > 4 else "decode"
     q_type_str = "BF16" if params["q_type"] == torch.bfloat16 else "FP16"
     kv_type_str = (
