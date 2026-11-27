@@ -20,19 +20,27 @@
 #undef QFA_WORKLOAD_INLINE
 namespace BaseApi::Int8GqaTnd {
 constexpr uint32_t QFA_MIN_CORES_FOR_TASK_MAP = 2U;
+// Unspecified dense hints select a streaming template without assuming a physical sequence length.
+inline int64_t QfaInt8MaxSequenceHint(int64_t maxLength, int64_t totalTokens, bool querySide)
+{
+    if (totalTokens > 0)
+        return maxLength > 0 ? std::min(maxLength, totalTokens) : totalTokens;
+    return maxLength > 0 ? maxLength :
+           querySide     ? static_cast<int64_t>(QFA_MAX_AIC_CORES) * QFA_LARGE_QUERY_TILE_ROWS + 1 :
+                           QFA_K_SCALE_CACHE_TOKENS + 1;
+}
 struct QfaInt8ScheduleInput {
     int64_t batch, headsQ, headsK, dim, outputDim, maxQ, maxK, totalQ, totalK;
     int64_t layoutQ, layoutK, layoutOut, mask;
     uint32_t aicNum;
-    uint64_t l2Bytes, reservedWorkspaceBytes, tilingCapacity;
+    uint64_t tilingCapacity;
     float softmaxScale;
     int32_t winLeft = QFA_UNBOUNDED_WINDOW, winRight = QFA_UNBOUNDED_WINDOW;
+    uint32_t sequsedFlags = 0U;
 };
 struct QfaInt8Schedule {
     QuantFlashAttnTilingQBlockPayloadInt8 payload{};
-    uint64_t workspaceBytes = 0;
     uint32_t config = 0;
-    bool hasTaskBuffer = false;
 };
 struct QBlockCoreWork {
     uint64_t cost;
@@ -50,9 +58,10 @@ class QfaTaskHeap {
 
 public:
     QfaTaskHeap(uint32_t first, uint32_t count)
+        : heap_(count)
     {
-        for (uint32_t core = first; core < first + count; ++core)
-            heap_.push_back({0U, core});
+        for (uint32_t core = 0U; core < count; ++core)
+            heap_[core] = {0U, first + core};
         std::make_heap(heap_.begin(), heap_.end(), Compare{});
     }
     uint32_t Assign(uint64_t cost)
@@ -211,8 +220,13 @@ static void BuildDenseCoreRanges(QuantFlashAttnTilingPayloadInt8& payload)
             payload.coreTaskBegin[t.usedCoreNum] = start;
         return start == t.totalTasks;
     };
-    uint64_t lo = (prefix(t.totalTasks) + t.usedCoreNum - 1U) / t.usedCoreNum;
-    uint64_t hi = prefix(t.totalTasks);
+    const uint64_t totalWork = prefix(t.totalTasks);
+    uint64_t lo = (totalWork + t.usedCoreNum - 1U) / t.usedCoreNum;
+    // A greedy segment stops within one task of its limit. Average work plus the
+    // largest possible task therefore always fits in usedCoreNum segments.
+    const uint64_t maxTaskWork =
+        (static_cast<uint64_t>(t.seqLenKv) + t.blockN - 1U) / t.blockN + QFA_CORE_WORK_SETUP_STAGES;
+    uint64_t hi = std::min(totalWork, lo + maxTaskWork);
     while (lo < hi) {
         const uint64_t mid = lo + (hi - lo) / 2U;
         if (partition(mid, false))
@@ -301,10 +315,8 @@ static void RefineQBlockTaskMap(std::vector<std::vector<uint32_t>>& tasks, std::
     }
 }
 
-static bool BuildQBlockTaskMap(const QuantFlashAttnTilingPayloadInt8& payload,
-                               QuantFlashAttnTilingQBlockPayloadInt8& mapped)
+static bool CanBuildQBlockTaskMap(const QuantFlashAttnTilingDataInt8& t)
 {
-    const auto& t = payload.config;
     const bool bnsd = t.layoutQ == QFA_LAYOUT_BNSD && t.layoutKv == QFA_LAYOUT_BNSD && t.layoutOut == QFA_LAYOUT_BNSD &&
                       t.headDim == QFA_HEAD_DIM_96;
     const bool bsnd = t.layoutQ == QFA_LAYOUT_BSND && t.layoutKv == QFA_LAYOUT_BSND && t.layoutOut == QFA_LAYOUT_BSND &&
@@ -316,21 +328,27 @@ static bool BuildQBlockTaskMap(const QuantFlashAttnTilingPayloadInt8& payload,
         (t.blockM != QFA_LARGE_QUERY_TILE_ROWS &&
          !(bsnd && t.blockM == QFA_PV_OVERLAY_MIN_QUERY_TILE && t.groupSize == 1U)) ||
         t.blockN != QFA_DEFAULT_KV_TILE_TOKENS || t.seqLenQ != t.seqLenKv || t.seqLenQ <= QFA_LARGE_QUERY_TILE_ROWS ||
-        t.seqLenQ % QFA_LARGE_QUERY_TILE_ROWS != 0U || payload.useCoreRanges != QFA_CORE_RANGES_CONTIGUOUS ||
-        t.usedCoreNum < QFA_MIN_CORES_FOR_TASK_MAP || t.usedCoreNum > QFA_MAX_AIC_CORES ||
-        t.totalTasks < t.usedCoreNum || t.totalTasks > QFA_Q_BLOCK_TASK_CAPACITY || t.groupSize == 0U ||
-        t.batchSize == 0U || t.numHeadsKv == 0U || payload.coreTaskBegin[0] != 0U ||
-        payload.coreTaskBegin[t.usedCoreNum] != t.totalTasks)
+        t.seqLenQ % QFA_LARGE_QUERY_TILE_ROWS != 0U || t.usedCoreNum < QFA_MIN_CORES_FOR_TASK_MAP ||
+        t.usedCoreNum > QFA_MAX_AIC_CORES || t.totalTasks < t.usedCoreNum || t.totalTasks > QFA_Q_BLOCK_TASK_CAPACITY ||
+        t.groupSize == 0U || t.batchSize == 0U || t.numHeadsKv == 0U)
         return false;
-    // The packed scheduler already has an optimal constant-work pairing when every core receives the same number of
-    // mirror pairs.
+    // Divisible packed mirror pairs already give constant work per core.
     if (singleTnd && t.totalTilesM % QFA_MIRRORED_TASK_PAIR_SIZE == 0U &&
         (t.totalTasks / QFA_MIRRORED_TASK_PAIR_SIZE) % t.usedCoreNum == 0U)
         return false;
     const uint64_t foldedTiles = static_cast<uint64_t>(t.seqLenQ / t.blockM) * t.groupSize;
-    if (foldedTiles != t.totalTilesM || static_cast<uint64_t>(t.batchSize) * t.numHeadsKv * foldedTiles != t.totalTasks)
-        return false;
+    return foldedTiles == t.totalTilesM &&
+           static_cast<uint64_t>(t.batchSize) * t.numHeadsKv * foldedTiles == t.totalTasks;
+}
 
+static bool BuildQBlockTaskMap(const QuantFlashAttnTilingPayloadInt8& payload,
+                               QuantFlashAttnTilingQBlockPayloadInt8& mapped, bool emitTable = true)
+{
+    const auto& t = payload.config;
+    if (!CanBuildQBlockTaskMap(t) || payload.useCoreRanges != QFA_CORE_RANGES_CONTIGUOUS ||
+        payload.coreTaskBegin[0] != 0U || payload.coreTaskBegin[t.usedCoreNum] != t.totalTasks)
+        return false;
+    const bool bnsd = t.layoutQ == QFA_LAYOUT_BNSD;
     const uint32_t costGroup = bnsd ? 1U : t.groupSize;
     const uint32_t tilesPerHead = t.seqLenQ / t.blockM;
     const uint32_t heads = t.totalTasks / tilesPerHead;
@@ -341,8 +359,8 @@ static bool BuildQBlockTaskMap(const QuantFlashAttnTilingPayloadInt8& payload,
     // existing N+1 refinement can be reused. Mapping back below restores the original S1G task before device
     // decode.
     for (uint32_t tile = tilesPerHead; tile > 0U; --tile) {
+        const uint64_t visible = (static_cast<uint64_t>(tile) * t.blockM + t.blockN - 1U) / t.blockN;
         for (uint32_t head = 0U; head < heads; ++head) {
-            const uint64_t visible = (static_cast<uint64_t>(tile) * t.blockM + t.blockN - 1U) / t.blockN;
             const uint32_t core = heap.Assign(visible + 1U);
             tasks[core].push_back(head * tilesPerHead + tile - 1U);
             kvWork[core] += visible;
@@ -352,6 +370,8 @@ static bool BuildQBlockTaskMap(const QuantFlashAttnTilingPayloadInt8& payload,
 
     if (!QBlockMapImproves(payload, tasks, kvWork, costGroup))
         return false;
+    if (!emitTable)
+        return true;
     return StoreQBlockTaskMap(payload, mapped, tasks, [&](uint32_t task) {
         if (bnsd)
             return task;
@@ -363,7 +383,9 @@ static bool BuildQBlockTaskMap(const QuantFlashAttnTilingPayloadInt8& payload,
     });
 }
 
-inline bool BuildInt8Schedule(const QfaInt8ScheduleInput& input, QfaInt8Schedule& result)
+// Host and metadata generation use the same static configuration. The producer can retain
+// ranges and task maps already evaluated while choosing the template.
+inline bool SelectInt8Config(const QfaInt8ScheduleInput& input, QfaInt8Schedule& result, bool retainSchedule = false)
 {
     const int64_t b = input.batch, hq = input.headsQ, hkv = input.headsK, d = input.dim;
     const int64_t sq = input.maxQ, sk = input.maxK, outputDim = input.outputDim;
@@ -372,7 +394,6 @@ inline bool BuildInt8Schedule(const QfaInt8ScheduleInput& input, QfaInt8Schedule
     if (b <= 0 || hq <= 0 || hkv <= 0 || hq % hkv != 0 || sq <= 0 || sk <= 0 || d <= 0 || d > QFA_MAX_HEAD_DIM)
         return false;
     const uint32_t aicNum = input.aicNum;
-    const uint64_t l2Bytes = input.l2Bytes, reservedWorkspaceBytes = input.reservedWorkspaceBytes;
     const bool windowed = input.winLeft >= 0 || input.winRight >= 0;
     // Packed total tokens bound core coverage without reading cumulative lengths on the host.
     const uint64_t groupedM = static_cast<uint64_t>(hq / hkv) * sq;
@@ -405,36 +426,19 @@ inline bool BuildInt8Schedule(const QfaInt8ScheduleInput& input, QfaInt8Schedule
         const uint64_t limit = std::numeric_limits<uint64_t>::max();
         return right != 0U && left > limit / right ? limit : left * right;
     };
-    auto saturatingAdd = [](uint64_t left, uint64_t right) {
-        const uint64_t limit = std::numeric_limits<uint64_t>::max();
-        return left > limit - right ? limit : left + right;
-    };
     const uint64_t totalQTokens = lq == QFA_LAYOUT_TND ?
                                       static_cast<uint64_t>(totalQ) :
                                       saturatingMul(static_cast<uint64_t>(b), static_cast<uint64_t>(sq));
     const uint64_t totalKvTokens = lk == QFA_LAYOUT_TND ?
                                        static_cast<uint64_t>(totalK) :
                                        saturatingMul(static_cast<uint64_t>(b), static_cast<uint64_t>(sk));
-    // Each K/V token contributes two INT8 vectors and one FP32 K scale per head.
-    const uint64_t inputWorkingSet = saturatingAdd(
-        saturatingMul(saturatingMul(totalQTokens, static_cast<uint64_t>(hq)), static_cast<uint64_t>(d) + sizeof(float)),
-        saturatingMul(saturatingMul(totalKvTokens, static_cast<uint64_t>(hkv)),
-                      (sizeof(int8_t) + sizeof(int8_t)) * static_cast<uint64_t>(d) + sizeof(float)));
-    // Reserve the library workspace and the M256 score/P working tile before deciding whether the INT8 inputs can
-    // be retained in L2. Cache-resident workloads keep M128's larger vector chunks; unknown L2 does too.
-    constexpr uint32_t m256ScoreAndPBytes =
-        QFA_PV_OVERLAY_MIN_QUERY_TILE * QFA_DEFAULT_KV_TILE_TOKENS * (sizeof(uint16_t) + sizeof(int8_t));
-    const uint64_t m256TileWorkingSet = saturatingMul(aicNum, m256ScoreAndPBytes);
-    const uint64_t workspaceWorkingSet = saturatingAdd(reservedWorkspaceBytes, m256TileWorkingSet);
-    const uint64_t inputCacheBytes = l2Bytes > workspaceWorkingSet ? l2Bytes - workspaceWorkingSet : 0U;
-    const bool inputExceedsL2 = l2Bytes != 0U && inputWorkingSet > inputCacheBytes;
     // A 16-row vector chunk leaves room for 128xD FP32 accumulation on each AIV. M256 then shares every KV panel
-    // across twice as many Q rows. Preserve enough independent tasks and the existing Q L1 capacity.
+    // across twice as many Q rows. Select from shape, parallelism and on-chip buffer limits.
     const uint64_t largeDAlign =
         (static_cast<uint64_t>(d) + QFA_HEAD_DIM_ALIGNMENT - 1U) / QFA_HEAD_DIM_ALIGNMENT * QFA_HEAD_DIM_ALIGNMENT;
     const bool largeFp32M256 =
         !windowed && group > 1U && d > QFA_LARGE_FP32_HEAD_DIM_THRESHOLD && sk > QFA_DEFAULT_KV_TILE_TOKENS &&
-        inputExceedsL2 && QFA_PV_OVERLAY_MIN_QUERY_TILE * largeDAlign <= QFA_Q_L1_TILE_BYTES &&
+        QFA_PV_OVERLAY_MIN_QUERY_TILE * largeDAlign <= QFA_Q_L1_TILE_BYTES &&
         (QFA_PV_OVERLAY_MIN_QUERY_TILE / QFA_VECTOR_CORES_PER_CUBE) * largeDAlign * sizeof(float) <=
             QFA_LARGE_FP32_ACCUMULATOR_BYTES &&
         tilesForM(QFA_PV_OVERLAY_MIN_QUERY_TILE) < tilesForM(QFA_DEFAULT_QUERY_TILE_ROWS) &&
@@ -664,22 +668,12 @@ inline bool BuildInt8Schedule(const QfaInt8ScheduleInput& input, QfaInt8Schedule
     td.winLeft = input.winLeft;
     td.winRight = input.winRight;
     td.maskMode = input.mask == QFA_MASK_NONE ? QFA_MASK_NONE : QFA_MASK_CAUSAL_TILING;
-    td.totalTokensQ = lq == QFA_LAYOUT_TND ? totalQ : 0;
-    td.totalTokensKv = lk == QFA_LAYOUT_TND ? totalK : 0;
-
-    if (l2Bytes != 0U) {
-        const uint64_t available = l2Bytes > reservedWorkspaceBytes ? l2Bytes - reservedWorkspaceBytes : 0U;
-        if (available < td.coreWorkspaceBytes) {
-            return false;
-        }
-        const uint64_t maxCoresByL2 = available / td.coreWorkspaceBytes;
-        td.usedCoreNum = static_cast<uint32_t>(std::min<uint64_t>(td.usedCoreNum, maxCoresByL2));
-    }
+    td.totalTokensQ = lq == QFA_LAYOUT_TND ? totalQ : sq;
+    td.totalTokensKv = lk == QFA_LAYOUT_TND ? totalK : sk;
+    td.sequsedFlags = input.sequsedFlags;
 
     QuantFlashAttnTilingPayloadInt8 payload{};
     payload.config = td;
-    if (!windowed)
-        BuildDenseCoreRanges(payload);
     const uint64_t tilingCapacity = input.tilingCapacity;
     if (tilingCapacity < sizeof(payload))
         return false;
@@ -689,11 +683,6 @@ inline bool BuildInt8Schedule(const QfaInt8ScheduleInput& input, QfaInt8Schedule
                             sq > QFA_LARGE_QUERY_TILE_ROWS && sq % QFA_LARGE_QUERY_TILE_ROWS == 0 &&
                             blockM == QFA_LARGE_QUERY_TILE_ROWS && blockN == QFA_DEFAULT_KV_TILE_TOKENS &&
                             tilingCapacity >= sizeof(mappedPayload);
-    if (d96ScaleFb) {
-        mappedPayload = {};
-        mappedPayload.base = payload;
-        BuildQBlockTaskMap(payload, mappedPayload);
-    }
     const bool singleTaskGeneric = lq == QFA_LAYOUT_BNSD && lk == QFA_LAYOUT_BNSD && lo == QFA_LAYOUT_BNSD &&
                                    td.totalTasks <= td.usedCoreNum && blockM <= QFA_PV_OVERLAY_MIN_QUERY_TILE &&
                                    !(d == QFA_HEAD_DIM_256 && sk > QFA_K_SCALE_CACHE_TOKENS);
@@ -716,35 +705,57 @@ inline bool BuildInt8Schedule(const QfaInt8ScheduleInput& input, QfaInt8Schedule
     const bool useD64Opt = lq == lk && lq == lo && lq <= QFA_LAYOUT_TND && d == QFA_HEAD_DIM_64 &&
                            blockM == QFA_LARGE_QUERY_TILE_ROWS && blockN == QFA_DEFAULT_KV_TILE_TOKENS &&
                            baseConfig == QFA_INT8_CFG_D64_M512 && tilingCapacity >= sizeof(mappedPayload);
-    if (useD64Opt) {
-        mappedPayload = {};
-        mappedPayload.base = payload;
-        const bool useD64Map = BuildD64HeadLocalQBlockMap(payload, mappedPayload);
-        if (!useD64Map) {
-            mappedPayload = {};
-            mappedPayload.base = payload;
-        }
-    }
     const bool tndD128Overlap = lq == QFA_LAYOUT_TND && lk == QFA_LAYOUT_TND && lo == QFA_LAYOUT_TND &&
                                 d == QFA_HEAD_DIM_128 && blockM == QFA_LARGE_QUERY_TILE_ROWS &&
                                 blockN == QFA_DEFAULT_KV_TILE_TOKENS && baseConfig == QFA_INT8_CFG_D128_M512;
-    const bool tndQBlockMap =
-        tndD128Overlap && tilingCapacity >= sizeof(mappedPayload) && BuildQBlockTaskMap(payload, mappedPayload);
-    const bool causalMhaMap =
-        useCausalMhaMap && tilingCapacity >= sizeof(mappedPayload) && BuildQBlockTaskMap(payload, mappedPayload);
+    const bool probeTaskMap = !windowed && (tndD128Overlap || useCausalMhaMap) &&
+                              tilingCapacity >= sizeof(mappedPayload) && CanBuildQBlockTaskMap(td);
+    if (probeTaskMap)
+        BuildDenseCoreRanges(payload);
+    const bool mapped = probeTaskMap && BuildQBlockTaskMap(payload, mappedPayload, retainSchedule);
+    const bool tndQBlockMap = tndD128Overlap && mapped;
+    const bool causalMhaMap = useCausalMhaMap && mapped;
     // The ordinary TND D128 key uses the base payload; only mapped schedules contain the task-ID table.
     const uint32_t config = causalMhaMap ? QFA_INT8_CFG_D96_M256_CAUSAL_MHA :
                             useD64Opt    ? QFA_INT8_CFG_D64_M512_TASK_MAP :
                             tndQBlockMap ? QFA_INT8_CFG_D128_M512_TASK_MAP :
                                            baseConfig;
-    result.hasTaskBuffer = d96ScaleFb || useD64Opt || tndQBlockMap || causalMhaMap;
-    if (result.hasTaskBuffer)
-        result.payload = mappedPayload;
-    else
-        result.payload.base = payload;
+    result = {};
+    result.payload.base.config = td;
+    if (retainSchedule) {
+        if (mapped)
+            result.payload = mappedPayload;
+        else
+            result.payload.base = payload;
+    }
     result.config = config | (windowed ? QFA_INT8_CFG_WINDOW_FLAG : 0U);
-    result.workspaceBytes = reservedWorkspaceBytes + static_cast<uint64_t>(td.usedCoreNum) * td.coreWorkspaceBytes;
     return true;
 }
+
+inline bool PopulateInt8Schedule(QfaInt8Schedule& result)
+{
+    auto payload = result.payload.base;
+    if (payload.useCoreRanges == QFA_CORE_RANGES_TASK_MAP)
+        return true;
+    if ((result.config & QFA_INT8_CFG_WINDOW_FLAG) == 0U && payload.useCoreRanges == QFA_CORE_RANGES_NONE)
+        BuildDenseCoreRanges(payload);
+    const uint32_t config = result.config & ~QFA_INT8_CFG_WINDOW_FLAG;
+    const bool hasTaskBuffer = config == QFA_INT8_CFG_D96_M512_FIXPIPE || config == QFA_INT8_CFG_D64_M512_TASK_MAP ||
+                               config == QFA_INT8_CFG_D128_M512_TASK_MAP || config == QFA_INT8_CFG_D96_M256_CAUSAL_MHA;
+    if (hasTaskBuffer) {
+        auto& mapped = result.payload;
+        mapped.base = payload;
+        if (config == QFA_INT8_CFG_D64_M512_TASK_MAP)
+            BuildD64HeadLocalQBlockMap(payload, mapped);
+        else if (config == QFA_INT8_CFG_D96_M512_FIXPIPE)
+            BuildQBlockTaskMap(payload, mapped);
+        else if (!BuildQBlockTaskMap(payload, mapped))
+            return false;
+    } else {
+        result.payload.base = payload;
+    }
+    return true;
+}
+
 } // namespace BaseApi::Int8GqaTnd
 #endif

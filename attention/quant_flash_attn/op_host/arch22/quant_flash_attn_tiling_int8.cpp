@@ -12,8 +12,10 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <string>
 #include "log/log.h"
 #include "register/op_impl_registry.h"
+#include "platform/platform_info.h"
 #include "quant_flash_attn_schedule_int8.h"
 #include "../quant_flash_attn_tiling_common.h"
 #include "../qfa_tiling_info.h"
@@ -59,8 +61,16 @@ ge::graphStatus TilingQuantFlashAttnInt8(gert::TilingContext* context,
         return context->GetOptionalInputDesc(index) != nullptr && shape != nullptr &&
                shape->GetStorageShape().GetShapeSize() != 0;
     };
-    OP_CHECK_IF(hasOptionalInput(METADATA_INDEX),
-                OP_LOGE(context, "A2/A3 INT8 Prefill requires metadata to be absent."), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(!hasOptionalInput(METADATA_INDEX), OP_LOGE(context, "INT8 dense prefill requires metadata."),
+                return ge::GRAPH_FAILED);
+    {
+        const auto* desc = context->GetOptionalInputDesc(METADATA_INDEX);
+        const auto& shape = context->GetOptionalInputShape(METADATA_INDEX)->GetStorageShape();
+        OP_CHECK_IF(desc->GetDataType() != ge::DT_INT32 || desc->GetStorageFormat() != ge::FORMAT_ND ||
+                        shape.GetDimNum() != 2 || shape.GetDim(0) != 2 || shape.GetDim(1) <= 0,
+                    OP_LOGE(context, "INT8 metadata must be a nonempty INT32 ND tensor with shape (2, L)."),
+                    return ge::GRAPH_FAILED);
+    }
     const auto* softmaxScale = attrs->GetAttrPointer<float>(ATTR_SOFTMAX_SCALE_INDEX);
     const auto* maskMode = attrs->GetAttrPointer<int64_t>(ATTR_MASK_MODE_INDEX);
     const auto* layoutQ = attrs->GetAttrPointer<char>(ATTR_LAYOUT_Q_INDEX);
@@ -86,10 +96,10 @@ ge::graphStatus TilingQuantFlashAttnInt8(gert::TilingContext* context,
                      !(lq == QFA_LAYOUT_TND && lk == QFA_LAYOUT_TND && lo == QFA_LAYOUT_TND)),
                 OP_LOGE(context, "INT8 GQA requires BNSD/BSND or packed TND, mask 0/3, BF16 output."),
                 return ge::GRAPH_FAILED);
-    for (uint32_t i : {BLOCK_TABLE_INDEX, SEQUSED_Q_INDEX, SEQUSED_KV_INDEX, SINKS_INDEX, ATTN_MASK_INDEX, V_TAIL_INDEX,
-                       BLOCK_TABLE_TAIL_INDEX, SEQUSED_V_TAIL_INDEX}) {
+    for (uint32_t i : {BLOCK_TABLE_INDEX, SINKS_INDEX, ATTN_MASK_INDEX, V_TAIL_INDEX, BLOCK_TABLE_TAIL_INDEX,
+                       SEQUSED_V_TAIL_INDEX}) {
         OP_CHECK_IF(hasOptionalInput(i),
-                    OP_LOGE(context, "INT8 GQA does not accept cache, seqused, sinks or explicit mask tensors."),
+                    OP_LOGE(context, "INT8 GQA does not accept cache, sinks or explicit mask tensors."),
                     return ge::GRAPH_FAILED);
     }
     const auto* wl = attrs->GetAttrPointer<int64_t>(ATTR_WIN_LEFT_INDEX);
@@ -141,17 +151,24 @@ ge::graphStatus TilingQuantFlashAttnInt8(gert::TilingContext* context,
                         cqs->GetStorageShape().GetDim(0) != cks->GetStorageShape().GetDim(0),
                     OP_LOGE(context, "TND requires INT32 cu_seqlens_q/kv [B+1]."), return ge::GRAPH_FAILED);
         b = cqs->GetStorageShape().GetDim(0) - 1;
-        // Device cumulative lengths are consumed by the kernel, not dereferenced
-        // by host tiling. Attributes are bounds; device code checks contents.
-        const auto* mq = attrs->GetAttrPointer<int64_t>(ATTR_MAX_SEQLEN_Q_INDEX);
-        const auto* mk = attrs->GetAttrPointer<int64_t>(ATTR_MAX_SEQLEN_KV_INDEX);
-        sq = mq && *mq > 0 ? *mq : qs.GetDim(0);
-        sk = mk && *mk > 0 ? *mk : ks.GetDim(0);
-        OP_CHECK_IF(sq > qs.GetDim(0) || sk > ks.GetDim(0),
-                    OP_LOGE(context, "TND max lengths cannot exceed total token counts."), return ge::GRAPH_FAILED);
+        sq = qs.GetDim(0);
+        sk = ks.GetDim(0);
     } else if (hasOptionalInput(CU_SEQLENS_Q_INDEX) || hasOptionalInput(CU_SEQLENS_KV_INDEX)) {
         OP_LOGE(context, "cu_seqlens are only accepted for TND.");
         return ge::GRAPH_FAILED;
+    }
+    uint32_t sequsedFlags = 0U;
+    for (uint32_t index : {SEQUSED_Q_INDEX, SEQUSED_KV_INDEX}) {
+        if (!hasOptionalInput(index))
+            continue;
+        const auto* desc = context->GetOptionalInputDesc(index);
+        const auto& shape = context->GetOptionalInputShape(index)->GetStorageShape();
+        const auto* stride = context->GetInputStride(index);
+        OP_CHECK_IF(desc->GetDataType() != ge::DT_INT32 || desc->GetStorageFormat() != ge::FORMAT_ND ||
+                        shape.GetDimNum() != 1 || shape.GetDim(0) != b ||
+                        (b > 1 && stride != nullptr && stride->GetDimNum() > 0 && stride->GetStride(0) != 1),
+                    OP_LOGE(context, "INT8 seqused_q/kv must be contiguous INT32 ND [B]."), return ge::GRAPH_FAILED);
+        sequsedFlags |= index == SEQUSED_Q_INDEX ? 1U : 2U;
     }
     bool validShapes = b > 0 && hq > 0 && hkv > 0 && sq > 0 && sk > 0 && d > 0 && d <= QFA_MAX_HEAD_DIM &&
                        hq % hkv == 0 && qs.GetDim(0) > 0 && ks.GetDim(0) > 0;
@@ -209,15 +226,21 @@ ge::graphStatus TilingQuantFlashAttnInt8(gert::TilingContext* context,
     auto* workspace = context->GetWorkspaceSizes(1);
     if (rawTiling == nullptr || rawTiling->GetData() == nullptr || workspace == nullptr)
         return ge::GRAPH_FAILED;
-    uint64_t l2Bytes = 0;
-    platform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2Bytes);
+    const auto* mq = attrs->GetAttrPointer<int64_t>(ATTR_MAX_SEQLEN_Q_INDEX);
+    const auto* mk = attrs->GetAttrPointer<int64_t>(ATTR_MAX_SEQLEN_KV_INDEX);
+    const bool packed = lq == QFA_LAYOUT_TND;
+    const int64_t maxQ = mq != nullptr ? *mq : -1, maxK = mk != nullptr ? *mk : -1;
+    // Without seqused, dense callers describe the complete physical sequence. With it, the static hint and
+    // the physical shape are independent; AICPU and Host must select the same template from the same hint.
+    const int64_t hintQ = !packed && !(sequsedFlags & 1U) && maxQ <= 0 ? sq : maxQ;
+    const int64_t hintK = !packed && !(sequsedFlags & 2U) && maxK <= 0 ? sk : maxK;
     BaseApi::Int8GqaTnd::QfaInt8ScheduleInput input{b,
                                                     hq,
                                                     hkv,
                                                     d,
                                                     outputDim,
-                                                    sq,
-                                                    sk,
+                                                    QfaInt8MaxSequenceHint(hintQ, packed ? sq : 0, true),
+                                                    QfaInt8MaxSequenceHint(hintK, packed ? sk : 0, false),
                                                     lq == QFA_LAYOUT_TND ? qs.GetDim(0) : 0,
                                                     lk == QFA_LAYOUT_TND ? ks.GetDim(0) : 0,
                                                     lq,
@@ -225,23 +248,26 @@ ge::graphStatus TilingQuantFlashAttnInt8(gert::TilingContext* context,
                                                     lo,
                                                     *maskMode,
                                                     platform.GetCoreNumAic(),
-                                                    l2Bytes,
-                                                    platform.GetLibApiWorkSpaceSize(),
-                                                    rawTiling->GetCapacity(),
+                                                    sizeof(QuantFlashAttnTilingQBlockPayloadInt8),
                                                     *softmaxScale,
                                                     static_cast<int32_t>(*wl),
                                                     static_cast<int32_t>(*wr)};
+    input.sequsedFlags = sequsedFlags;
     BaseApi::Int8GqaTnd::QfaInt8Schedule schedule;
-    OP_CHECK_IF(!BaseApi::Int8GqaTnd::BuildInt8Schedule(input, schedule),
+    OP_CHECK_IF(!BaseApi::Int8GqaTnd::SelectInt8Config(input, schedule),
                 OP_LOGE(context, "INT8 scheduling parameters exceed supported limits."), return ge::GRAPH_FAILED);
-    const auto& td = schedule.payload.base.config;
+    auto& td = schedule.payload.base.config;
+    td.totalTokensQ = sq;
+    td.totalTokensKv = sk;
     const uint32_t config = schedule.config;
-    const size_t size = schedule.hasTaskBuffer ? sizeof(schedule.payload) : sizeof(schedule.payload.base);
+    // Task ranges and maps live in metadata; Host only passes the shared static configuration.
+    const size_t size = sizeof(td);
     if (rawTiling->GetCapacity() < size)
         return ge::GRAPH_FAILED;
-    std::memcpy(rawTiling->GetData(), &schedule.payload, size);
+    std::memcpy(rawTiling->GetData(), &td, size);
     rawTiling->SetDataSize(size);
-    workspace[0] = schedule.workspaceBytes;
+    // Reserve the template's scratch for all available cores, independent of actual lengths and task count.
+    workspace[0] = platform.GetLibApiWorkSpaceSize() + static_cast<uint64_t>(input.aicNum) * td.coreWorkspaceBytes;
     context->SetBlockDim(td.usedCoreNum);
     // Independent BNSD, BSND/mixed and TND implementations preserve the
     // validated dense-layout pipelines when optimizing packed attention.

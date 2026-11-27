@@ -89,20 +89,36 @@ def cpu_golden(
         win_right=win_right,
         softmax_scale=softmax_scale,
     )
+    used_q = qlens if seqused_q is None else _tensor(seqused_q).tolist()
+    used_kv = klens if seqused_kv is None else _tensor(seqused_kv).tolist()
+    if len(used_q) != len(qlens) or len(used_kv) != len(klens):
+        raise ValueError("seqused requires one length per batch")
     fp64, numerical, lses = [], [], []
-    for batch in zip(*parts):
-        fp64.append(
-            (
-                golden.attention_reference(
-                    batch, vs, high_precision=True, p_scale=ps, **options
-                ),
-            )
-        )
-        numerical.append(
-            (golden.attention_reference(batch, vs, p_scale=ps, **options).bfloat16(),)
-        )
+    for index, batch in enumerate(zip(*parts)):
+        sq, sk = used_q[index], used_kv[index]
+        if not 0 <= sq <= qlens[index] or not 0 <= sk <= klens[index]:
+            raise ValueError("seqused must be within physical sequence storage")
+        expected = torch.zeros(batch[0].shape, dtype=torch.float64)
+        reference = torch.zeros(batch[0].shape, dtype=torch.bfloat16)
         if return_softmax_lse:
-            lses.append(golden.lse_reference(batch, **options))
+            lse = torch.full(batch[0].shape[:-1], torch.inf, dtype=torch.float64)
+        if sq and sk:
+            effective = tuple(
+                value[:, :, : sq if item in (0, 3) else sk]
+                for item, value in enumerate(batch)
+            )
+            expected[:, :, :sq] = golden.attention_reference(
+                effective, vs, high_precision=True, p_scale=ps, **options
+            )
+            reference[:, :, :sq] = golden.attention_reference(
+                effective, vs, p_scale=ps, **options
+            ).bfloat16()
+            if return_softmax_lse:
+                lse[:, :, :sq] = golden.lse_reference(effective, **options)
+        fp64.append((expected,))
+        numerical.append((reference,))
+        if return_softmax_lse:
+            lses.append(lse)
     result = [golden._pack(fp64, layout_out, 0)]
     benchmark = golden._pack(numerical, layout_out, 0)
     if return_softmax_lse:

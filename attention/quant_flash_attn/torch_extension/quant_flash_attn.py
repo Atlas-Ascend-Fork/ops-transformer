@@ -119,25 +119,6 @@ def _get_core_nums():
     return props.cube_core_num, props.vector_core_num
 
 
-def _int8_padding_has_parallelism(
-    q, k, layout, batch, max_seqlen_q, max_seqlen_kv=None
-):
-    """Amortize padding by query parallelism or total attention-tile work."""
-    head_axis = 2 if layout == "BSND" else 1
-    if q.size(head_axis) != k.size(head_axis):
-        return True
-    cores = torch.npu.get_device_properties(q.device.index).cube_core_num
-    query_tiles = (max_seqlen_q + 511) // 512
-    kv_tiles = ((max_seqlen_q if max_seqlen_kv is None else max_seqlen_kv) + 511) // 512
-    query_tasks = batch * q.size(head_axis) * query_tiles
-    # Long KV scans can amortize the linear padding cost even when the Q
-    # grid has fewer than two waves. Use actual Q/K tile work so unequal
-    # lengths cannot make a short KV scan look like square attention.
-    return query_tiles > 2 and (
-        query_tasks >= 2 * cores or query_tasks * kv_tiles >= 4 * cores
-    )
-
-
 # 各 layout 期望的 Q/K/V tensor 维度数 (N2TGD 是 descale 专用 layout, 不在此表)
 _LAYOUT_EXPECTED_NDIM = {
     "TND": 3,
@@ -219,6 +200,115 @@ def _check_int8(condition, message):
     torch._check(condition, lambda: message)
 
 
+def _int8_metadata_row_size(batch, heads_kv):
+    """INT32 words in the active row; the second row is reserved as on A5."""
+    return 32 + 8 * batch + 2 * 128 * batch * heads_kv + 512
+
+
+def _metadata_row_size(batch, heads_q, heads_kv, quant_mode, layout_kv):
+    if quant_mode == _INT8_QUANT_MODE and layout_kv not in (
+        "PA_BNBD",
+        "PA_BBND",
+        "PA_NZ",
+    ):
+        return _int8_metadata_row_size(batch, heads_kv)
+    return _calculate_max_schedule_size(batch, heads_q)
+
+
+def _check_int8_metadata_contract(
+    heads_q,
+    heads_kv,
+    dim,
+    dim_v,
+    batch,
+    max_q,
+    max_kv,
+    mask,
+    left,
+    right,
+    layout_q,
+    layout_kv,
+    layout_out,
+    cu_q,
+    cu_kv,
+    used_q,
+    used_kv,
+    grad,
+):
+    check = _check_int8
+    check(
+        heads_q > 0
+        and heads_kv > 0
+        and heads_q % heads_kv == 0
+        and 1 <= dim <= 256
+        and (dim_v is None or dim_v == dim)
+        and not grad,
+        "INT8 metadata requires divisible heads, matching D in [1,256] and dense prefill",
+    )
+    check(
+        _resolve_mask_mode(mask) in (0, 3)
+        and all(x is None or -1 <= x <= 2147483647 for x in (left, right)),
+        "INT8 metadata requires mask 0/3 and windows in [-1, INT32_MAX]",
+    )
+    check(
+        all(x in ("BNSD", "BSND", "TND") for x in (layout_q, layout_kv, layout_out))
+        and (layout_q == "TND") == (layout_kv == "TND") == (layout_out == "TND"),
+        "INT8 metadata requires dense BNSD/BSND or all-TND layouts",
+    )
+    check(
+        all(x is None or -1 <= x <= 2147483647 for x in (max_q, max_kv)),
+        "INT8 metadata max lengths must be -1 or nonnegative INT32 values",
+    )
+    if layout_q == "TND":
+        check(
+            isinstance(cu_q, torch.Tensor) and isinstance(cu_kv, torch.Tensor),
+            "TND metadata requires cu_seqlens_q and cu_seqlens_kv",
+        )
+        check(
+            cu_q.dtype == cu_kv.dtype == torch.int32
+            and cu_q.dim() == cu_kv.dim() == 1
+            and cu_q.numel() == cu_kv.numel()
+            and cu_q.numel() >= 2
+            and cu_q.is_contiguous()
+            and cu_kv.is_contiguous()
+            and cu_q.device == cu_kv.device,
+            "TND metadata requires contiguous INT32 cumulative lengths [B+1] on the same device",
+        )
+        check(batch is None, "TND metadata infers batch from cu_seqlens")
+        batch = cu_q.numel() - 1
+    else:
+        check(
+            batch is not None
+            and batch > 0
+            and cu_q is None
+            and cu_kv is None
+            and (used_q is not None or (max_q is not None and max_q > 0))
+            and (used_kv is not None or (max_kv is not None and max_kv > 0)),
+            "BNSD/BSND metadata requires positive batch, max length or seqused on each side, and no cu_seqlens",
+        )
+    _check_int8_used(used_q, used_kv, batch, cu_q.device if cu_q is not None else None)
+    return batch
+
+
+def _check_int8_used(used_q, used_kv, batch, device=None):
+    for name, used in (("seqused_q", used_q), ("seqused_kv", used_kv)):
+        if used is not None:
+            _check_int8(
+                isinstance(used, torch.Tensor)
+                and used.dtype == torch.int32
+                and used.dim() == 1
+                and used.numel() == batch
+                and used.is_contiguous()
+                and (device is None or used.device == device),
+                f"INT8 {name} must be a contiguous INT32 [B] tensor on the input device",
+            )
+    if used_q is not None and used_kv is not None:
+        _check_int8(
+            used_q.device == used_kv.device,
+            "INT8 seqused tensors must use the same device",
+        )
+
+
 def _check_int8_contract(
     q,
     k,
@@ -236,6 +326,8 @@ def _check_int8_contract(
     metadata,
     win_left,
     win_right,
+    used_q,
+    used_kv,
     unsupported,
 ):
     """INT8 scales follow their input's token/head order (without D)."""
@@ -245,7 +337,6 @@ def _check_int8_contract(
     win_left = -1 if win_left is None else win_left
     win_right = -1 if win_right is None else win_right
     check = _check_int8
-    check(metadata is None, "A2/A3 INT8 Prefill requires metadata=None")
     check(
         all(
             layout in ("BNSD", "BSND", "TND")
@@ -263,7 +354,7 @@ def _check_int8_contract(
         and -1 <= win_left <= 2147483647
         and -1 <= win_right <= 2147483647
         and all(x is None for x in unsupported),
-        "Full INT8 GQA requires mask 0/3, valid windows, no cache, explicit mask, seqused or sinks",
+        "Full INT8 GQA requires mask 0/3, valid windows, no cache, explicit mask or sinks",
     )
     rank = 3 if packed else 4
     check(
@@ -299,6 +390,7 @@ def _check_int8_contract(
             "TND requires contiguous INT32 cumulative lengths [B+1]",
         )
         out_shape = tuple(q.shape)
+        batch = cu_q.numel() - 1
     else:
         check(
             cu_q is None and cu_k is None and q.size(0) == k.size(0),
@@ -310,6 +402,16 @@ def _check_int8_contract(
             if layout_out == "BNSD"
             else (batch, sq, hq, q.size(-1))
         )
+    _check_int8_used(used_q, used_kv, batch, q.device)
+    check(
+        isinstance(metadata, torch.Tensor)
+        and metadata.dtype == torch.int32
+        and metadata.dim() == 2
+        and metadata.size(0) == 2
+        and metadata.is_contiguous()
+        and metadata.size(1) > 0,
+        "INT8 metadata requires a contiguous nonempty INT32 (2, L) scheduling buffer",
+    )
     for name, scale in (
         ("q_descale", q_descale),
         ("k_descale", k_descale),
@@ -337,6 +439,7 @@ def _check_int8_contract(
         p_scale,
         cu_q,
         cu_k,
+        metadata,
     ):
         if tensor is not None:
             check(
@@ -409,8 +512,37 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             layout_out: Optional[str] = "BSND",
             is_grad_enabled: Optional[bool] = False,
         ):
-            b_size = _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q)
-            max_schedule_size = _calculate_max_schedule_size(b_size, num_heads_q)
+            quant_mode = _resolve_quant_mode(quant_mode)
+            if quant_mode == _INT8_QUANT_MODE and layout_kv not in (
+                "PA_BNBD",
+                "PA_BBND",
+                "PA_NZ",
+            ):
+                b_size = _check_int8_metadata_contract(
+                    num_heads_q,
+                    num_heads_kv,
+                    head_dim,
+                    head_dim_v,
+                    batch_size,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    mask_mode,
+                    win_left,
+                    win_right,
+                    layout_q,
+                    layout_kv,
+                    layout_out,
+                    cu_seqlens_q,
+                    cu_seqlens_kv,
+                    seqused_q,
+                    seqused_kv,
+                    is_grad_enabled,
+                )
+            else:
+                b_size = _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q)
+            max_schedule_size = _metadata_row_size(
+                b_size, num_heads_q, num_heads_kv, quant_mode, layout_kv
+            )
             return torch.empty((2, max_schedule_size), dtype=torch.int32, device="meta")
 
         @impl(get_as_library(), self.name, "Meta")
@@ -447,7 +579,7 @@ class QuantFlashAttnOpBuilder(OpBuilder):
             return_softmax_lse: Optional[bool] = False,
         ):
             torch._check(
-                int(quant_mode) in (0, 1, 3, 5, 6, 7, 10, _INT8_QUANT_MODE),
+                int(quant_mode) in (0, 1, 3, 5, 6, 7, 10, 12),
                 lambda: "Unsupported quant_mode",
             )
             if int(quant_mode) == _INT8_QUANT_MODE and layout_kv not in (
@@ -472,10 +604,10 @@ class QuantFlashAttnOpBuilder(OpBuilder):
                     metadata,
                     win_left,
                     win_right,
+                    seqused_q,
+                    seqused_kv,
                     (
                         block_table,
-                        seqused_q,
-                        seqused_kv,
                         sinks,
                         attn_mask,
                         v_tail,
@@ -597,16 +729,17 @@ def quant_flash_attn_metadata(
     Dispatcher implementation: NPU.
     'PrivateUse1' is dispatch key for custom NPU backends.
     """
+    quant_mode = _resolve_quant_mode(quant_mode)
     torch._check(
-        quant_mode in (0, 1, 3, 5, 6, 7, 10, _INT8_QUANT_MODE),
+        quant_mode in (0, 1, 3, 5, 6, 7, 10, 12),
         lambda: f"The quant_mode of quant_flash_attn_metadata only supports 0 (A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32), "
         f"1 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32), "
         f"3 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP16), "
         f"5 (A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) "
         f"6 (A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) "
         f"7 (A4C4_QKV_HIF4_P_HIF4_LEVEL1_SOFTMAX_FP16) "
-        f"10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16), "
-        f"or {_INT8_QUANT_MODE} (INT8 paged decode), but got {quant_mode}",
+        f"10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16), or "
+        f"12 (A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16), but got {quant_mode}",
     )
     if layout_q == "TND":
         torch._check(
@@ -617,10 +750,35 @@ def quant_flash_attn_metadata(
         is_grad_enabled is not True or quant_mode == 0,
         lambda: f"When is_grad_enabled is True, quant_mode must be 0, but got quant_mode={quant_mode}",
     )
-    batch_size = _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q)
+    if quant_mode == _INT8_QUANT_MODE and layout_kv not in (
+        "PA_BNBD",
+        "PA_BBND",
+        "PA_NZ",
+    ):
+        batch_size = _check_int8_metadata_contract(
+            num_heads_q,
+            num_heads_kv,
+            head_dim,
+            head_dim_v,
+            batch_size,
+            max_seqlen_q,
+            max_seqlen_kv,
+            mask_mode,
+            win_left,
+            win_right,
+            layout_q,
+            layout_kv,
+            layout_out,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            seqused_q,
+            seqused_kv,
+            is_grad_enabled,
+        )
+    else:
+        batch_size = _calculate_batch_size(batch_size, cu_seqlens_q, seqused_q)
     max_seqlen_q = -1 if max_seqlen_q is None else max_seqlen_q
     max_seqlen_kv = -1 if max_seqlen_kv is None else max_seqlen_kv
-    quant_mode = _resolve_quant_mode(quant_mode)
     mask_mode = _resolve_mask_mode(mask_mode)
     win_left = -1 if win_left is None else win_left
     win_right = -1 if win_right is None else win_right
@@ -631,17 +789,19 @@ def quant_flash_attn_metadata(
     head_dim_v = head_dim if head_dim_v is None else head_dim_v
 
     _check_layout_constraint(quant_mode, layout_q, layout_kv, layout_out)
-    paged_int8 = quant_mode == _INT8_QUANT_MODE and layout_kv in (
-        "PA_BNBD",
-        "PA_BBND",
-        "PA_NZ",
+    device = "npu"
+    if quant_mode == _INT8_QUANT_MODE:
+        device = next(
+            (t.device for t in (cu_seqlens_q, seqused_q, seqused_kv) if t is not None),
+            "npu",
+        )
+    max_schedule_size = _metadata_row_size(
+        batch_size, num_heads_q, num_heads_kv, quant_mode, layout_kv
     )
-    device = cu_seqlens_q.device if paged_int8 and cu_seqlens_q is not None else "npu"
-    max_schedule_size = _calculate_max_schedule_size(batch_size, num_heads_q)
     output = torch.empty((2, max_schedule_size), dtype=torch.int32, device=device)
 
     op_module = quant_flash_attn_op_builder.load()
-    return op_module.quant_flash_attn_metadata(
+    op_module.quant_flash_attn_metadata(
         cu_seqlens_q,
         cu_seqlens_kv,
         seqused_q,
@@ -664,6 +824,7 @@ def quant_flash_attn_metadata(
         is_grad_enabled,
         output,
     )
+    return output
 
 
 @torch.library.register_kernel("cann_ops_transformer::" + QFA_METADATA_OP_NAME, None)
@@ -714,51 +875,41 @@ def quant_flash_attn_metadata_fallback(
     )
 
 
-def _int8_mha_padding_bytes(batch, seq, dim, padded_dim):
-    """Peak per-head bytes: Stack input dies before attention output allocation.
-
-    Include partial-head scale copies for B>1; the two phases do not overlap.
-    """
-    tokens = batch * seq
-    packed_bytes = 3 * dim
-    input_bytes = 3 * padded_dim
-    scale_bytes = 8 if batch > 1 else 0
-    grouped = tokens * (input_bytes + max(packed_bytes, 2 * padded_dim + scale_bytes))
-    compact = tokens * (input_bytes + max(packed_bytes, 2 * dim))
-    return grouped, compact
-
-
-def _int8_mha_batch_step(batch, heads, seq, dim, padded_dim, scratch_bytes):
-    """Minimize calls over power-of-two batch tiles and the complete batch.
-
-    Charge the tail separately; ties prefer full heads to avoid gathers/copies.
-    """
-
-    def head_groups(tile_batch):
-        grouped, compact = _int8_mha_padding_bytes(tile_batch, seq, dim, padded_dim)
-        if grouped > scratch_bytes:
-            return None
-        if compact * heads <= scratch_bytes:
-            return 1, 0
-        cap = min(heads, scratch_bytes // grouped)
-        head_step = 1 << (cap.bit_length() - 1)
-        groups = (heads + head_step - 1) // head_step
-        return groups, groups
-
-    candidates = {batch} | {1 << power for power in range(batch.bit_length())}
-    best = None
-    for step in sorted(candidates):
-        complete, tail = divmod(batch, step)
-        whole = head_groups(step)
-        remainder = head_groups(tail) if tail else (0, 0)
-        if whole is None or remainder is None:
-            continue
-        calls = complete * whole[0] + remainder[0]
-        partial_heads = complete * whole[1] + remainder[1]
-        score = calls, partial_heads, complete + bool(tail)
-        if best is None or score < best[0]:
-            best = score, step
-    return None if best is None else best[1]
+def _int8_should_pad(
+    q,
+    k,
+    v,
+    q_descale,
+    k_descale,
+    quant_mode,
+    layout_q,
+    layout_kv,
+    layout_out,
+    mask_mode,
+    win_left,
+    win_right,
+):
+    """Amortize whole-tensor D72 padding using shape and physical-core parallelism."""
+    if not (
+        quant_mode == _INT8_QUANT_MODE
+        and win_left == win_right == -1
+        and layout_q == layout_kv == layout_out
+        and layout_q in ("BNSD", "BSND")
+        and q.shape == k.shape == v.shape
+        and q.size(-1) == 72
+        and q.device.type == "npu"
+        and mask_mode in (0, 3)
+        and all(x.is_contiguous() for x in (q, k, v, q_descale, k_descale))
+    ):
+        return False
+    head_axis = 2 if layout_q == "BSND" else 1
+    batch, heads, seq = q.size(0), q.size(head_axis), q.size(3 - head_axis)
+    cores = torch.npu.get_device_properties(q.device.index).cube_core_num
+    query_tiles = (seq + 511) // 512
+    query_tasks = batch * heads * query_tiles
+    return query_tiles > 2 and (
+        query_tasks >= 2 * cores or query_tasks * query_tiles >= 4 * cores
+    )
 
 
 def _quant_flash_attn_aligned_padded(
@@ -770,175 +921,53 @@ def _quant_flash_attn_aligned_padded(
     v_descale,
     p_scale,
     softmax_scale,
+    metadata,
     mask_mode=0,
     layout="BNSD",
     padded_dim=96,
     win_left=-1,
     win_right=-1,
     return_softmax_lse=False,
-    batch_step=None,
 ):
-    """Ordinary zero padding, with batch/head groups bounded by the L2 budget."""
-    if batch_step is not None and batch_step < q.size(0):
-        out = torch.empty(q.shape, dtype=torch.bfloat16, device=q.device)
-        lse = (
-            torch.empty(
-                (q.size(0), q.size(1), q.size(2)), dtype=torch.float32, device=q.device
-            )
-            if return_softmax_lse
-            else None
-        )
-        for begin in range(0, q.size(0), batch_step):
-            end = min(begin + batch_step, q.size(0))
-            part, part_lse = _quant_flash_attn_aligned_padded(
-                q[begin:end],
-                k[begin:end],
-                v[begin:end],
-                q_descale[begin:end],
-                k_descale[begin:end],
-                v_descale,
-                p_scale,
-                softmax_scale,
-                mask_mode,
-                layout,
-                padded_dim,
-                win_left,
-                win_right,
-                return_softmax_lse,
-            )
-            out[begin:end].copy_(part)
-            if return_softmax_lse:
-                lse[begin:end].copy_(part_lse)
-            del part, part_lse
-        return out, lse
-    head_axis = 2 if layout == "BSND" else 1
-    seq_axis = 3 - head_axis
-    batch, heads, original_dim = q.size(0), q.size(head_axis), q.size(-1)
-    seq_q, seq_k = q.size(seq_axis), k.size(seq_axis)
-    tokens = batch * max(seq_q, seq_k)
-    scratch = (
-        torch.npu.get_device_properties(q.device.index).L2_cache_size - 64 * 1024 * 1024
-    )
-    compact = (
-        original_dim < padded_dim and ((original_dim + 31) // 32) * 32 == padded_dim
-    )
-    slice_bytes = original_dim if batch > 1 or layout != "BNSD" else 0
-    scale_bytes = 4 if slice_bytes else 0
-    same_shape = q.shape == k.shape == v.shape
-    contiguous = all(x.is_contiguous() for x in (q, k, v, q_descale, k_descale))
-    combine = (
-        same_shape
-        and tokens
-        * (5 * padded_dim + 3 * slice_bytes + 2 * scale_bytes + 3 * original_dim)
-        <= scratch
-    )
-    grouped_bytes = None
-    if layout == "BNSD" and same_shape and contiguous:
-        grouped_bytes, _ = _int8_mha_padding_bytes(
-            batch, max(seq_q, seq_k), original_dim, padded_dim
-        )
-        combine = grouped_bytes <= scratch
-    packed_bytes = 3 * original_dim if combine else 0
-    minimum_bytes = (
-        grouped_bytes
-        if grouped_bytes is not None and combine
-        else tokens
-        * (5 * padded_dim + 3 * slice_bytes + 2 * scale_bytes + packed_bytes)
-    )
-    torch._check(
-        scratch >= minimum_bytes,
-        lambda: "aligned QFA needs room for one padded Q/K/V/output head within L2",
-    )
-    # Stack's temporary dies before attention; charge the larger live phase.
-    full_bytes = tokens * heads * (3 * padded_dim + max(packed_bytes, 2 * original_dim))
-    full_fits = (
-        compact
-        and seq_q == seq_k
-        and seq_q > 512
-        and contiguous
-        and full_bytes <= scratch
-    )
-    cap = min(heads, scratch // minimum_bytes)
-    head_step = heads if full_fits else 1 << (cap.bit_length() - 1)
-    out = lse = None
-    for begin in range(0, heads, head_step):
-        count = min(head_step, heads - begin)
-        groups = [x.narrow(head_axis, begin, count) for x in (q, k, v)]
-        if combine:
-            padded = F.pad(torch.stack(groups), (0, padded_dim - original_dim))
-            q_pad, k_pad, v_pad = padded.unbind(0)
-            del padded
-        else:
-            q_pad, k_pad, v_pad = [
-                F.pad(x, (0, padded_dim - original_dim)) for x in groups
-            ]
-        q_scale = q_descale.narrow(head_axis, begin, count).contiguous()
-        k_scale = k_descale.narrow(head_axis, begin, count).contiguous()
-        v_scale = v_descale[begin : begin + count]
-        if compact and begin == 0 and count == heads:
-            return quant_flash_attn_op_builder.load().quant_flash_attn_padded_out(
-                q_pad,
-                k_pad,
-                v_pad,
-                q_scale,
-                k_scale,
-                v_scale,
-                _INT8_QUANT_MODE,
-                None,
-                p_scale,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                softmax_scale,
-                mask_mode,
-                win_left,
-                win_right,
-                -1,
-                -1,
-                layout,
-                layout,
-                layout,
-                layout,
-                return_softmax_lse,
-                original_dim,
-            )
-        part, part_lse = quant_flash_attn(
-            q_pad,
-            k_pad,
-            v_pad,
-            q_scale,
-            k_scale,
-            v_scale,
-            _INT8_QUANT_MODE,
-            p_scale=p_scale,
-            softmax_scale=softmax_scale,
-            mask_mode=mask_mode,
-            win_left=win_left,
-            win_right=win_right,
-            layout_q=layout,
-            layout_kv=layout,
-            layout_out=layout,
-            return_softmax_lse=return_softmax_lse,
-        )
-        if out is None:
-            out = torch.empty(q.shape, dtype=torch.bfloat16, device=q.device)
-        out.narrow(head_axis, begin, count).copy_(part[..., :original_dim])
-        if return_softmax_lse:
-            if lse is None:
-                lse = torch.empty(
-                    (batch, heads, seq_q), dtype=torch.float32, device=q.device
-                )
-            lse.narrow(1, begin, count).copy_(part_lse)
-        del q_pad, k_pad, v_pad, q_scale, k_scale, part, part_lse
-    return out, lse if lse is not None else torch.empty(
-        (0,), dtype=torch.float32, device=q.device
+    """Pad all Q/K/V once, then write the logical-width output directly.
+
+    The caller precomputes one metadata tensor for the full padded shape.
+    """
+    original_dim = q.size(-1)
+    padded = F.pad(torch.stack((q, k, v)), (0, padded_dim - original_dim))
+    q_pad, k_pad, v_pad = padded.unbind(0)
+    return quant_flash_attn_op_builder.load().quant_flash_attn_padded_out(
+        q_pad,
+        k_pad,
+        v_pad,
+        q_descale,
+        k_descale,
+        v_descale,
+        _INT8_QUANT_MODE,
+        None,
+        p_scale,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        metadata,
+        None,
+        None,
+        None,
+        softmax_scale,
+        mask_mode,
+        win_left,
+        win_right,
+        -1,
+        -1,
+        layout,
+        layout,
+        layout,
+        layout,
+        return_softmax_lse,
+        original_dim,
     )
 
 
@@ -981,7 +1010,7 @@ def quant_flash_attn(
     """
     quant_mode = _resolve_quant_mode(quant_mode)
     torch._check(
-        quant_mode in (0, 1, 3, 5, 6, 7, 10, _INT8_QUANT_MODE),
+        quant_mode in (0, 1, 3, 5, 6, 7, 10, 12),
         lambda: f"The quant_mode of quant_flash_attn only supports 0 (A8C8_QKV_HIF8_P_PER_TENSOR_SOFTMAX_FP32), "
         f"1 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32), "
         f"3 (A8C8_QKV_MXFP8_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP16), "
@@ -989,7 +1018,7 @@ def quant_flash_attn(
         f"6 (A8C8_QK_FP8_E4M3_PER_TOKEN_HEAD_V_FP8_E4M3_PER_HEAD_P_FP8_E4M3_PER_TENSOR_SOFTMAX_FP32) "
         f"7 (A4C4_QKV_HIF4_P_HIF4_LEVEL1_SOFTMAX_FP16) "
         f"10 (A4C4_QKV_HIF4_P_FP8_E4M3_SOFTMAX_FP16), "
-        f"{_INT8_QUANT_MODE} (INT8 prefill or paged decode), but got {quant_mode}",
+        f"12 (A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16), but got {quant_mode}",
     )
     mask_mode = _resolve_mask_mode(mask_mode)
 
@@ -1000,6 +1029,8 @@ def quant_flash_attn(
         "PA_BBND",
         "PA_NZ",
     ):
+        max_seqlen_q = -1 if max_seqlen_q is None else max_seqlen_q
+        max_seqlen_kv = -1 if max_seqlen_kv is None else max_seqlen_kv
         _check_int8_contract(
             q,
             k,
@@ -1017,10 +1048,10 @@ def quant_flash_attn(
             metadata,
             win_left,
             win_right,
+            seqused_q,
+            seqused_kv,
             (
                 block_table,
-                seqused_q,
-                seqused_kv,
                 sinks,
                 attn_mask,
                 v_tail,
@@ -1103,73 +1134,6 @@ def quant_flash_attn(
                     f"In A2/A3 paged INT8 mode (quant_mode=12), {name} must be int8, "
                     f"but got {tensor.dtype}"
                 )
-    dense_same_layout = layout_q == layout_kv == layout_out and layout_q in (
-        "BNSD",
-        "BSND",
-    )
-    seq_axis = 1 if layout_q == "BSND" else 2
-    use_d72_padding = (
-        quant_mode == _INT8_QUANT_MODE
-        and win_left == win_right == -1
-        and dense_same_layout
-        and q.shape == k.shape == v.shape
-        and q.size(-1) == 72
-        and q.size(seq_axis) > 512
-        and q.device.type == "npu"
-        and mask_mode in (0, 3)
-        and all(x.is_contiguous() for x in (q, k, v, q_descale, k_descale))
-        and _int8_padding_has_parallelism(
-            q, k, layout_q, q.size(0), q.size(seq_axis), k.size(seq_axis)
-        )
-    )
-    # Independent dense MHA batches can be tiled before head grouping. This
-    # retains the aligned D96 pipeline when the complete batch exceeds L2,
-    # and reduces launches when complete-head batch tiles fit better.
-    if use_d72_padding and layout_q == "BNSD":
-        scratch = (
-            torch.npu.get_device_properties(q.device.index).L2_cache_size
-            - 64 * 1024 * 1024
-        )
-        batch_step = _int8_mha_batch_step(
-            q.size(0), q.size(1), q.size(2), q.size(3), 96, scratch
-        )
-        if batch_step is not None:
-            return _quant_flash_attn_aligned_padded(
-                q,
-                k,
-                v,
-                q_descale,
-                k_descale,
-                v_descale,
-                p_scale,
-                softmax_scale,
-                mask_mode,
-                batch_step=batch_step,
-                win_left=win_left,
-                win_right=win_right,
-                return_softmax_lse=return_softmax_lse,
-            )
-    if use_d72_padding and torch.npu.get_device_properties(
-        q.device.index
-    ).L2_cache_size - 64 * 1024 * 1024 >= q.size(0) * q.size(seq_axis) * (
-        5 * 96 + (3 * 72 + 2 * 4 if q.size(0) > 1 or layout_q == "BSND" else 0)
-    ):
-        return _quant_flash_attn_aligned_padded(
-            q,
-            k,
-            v,
-            q_descale,
-            k_descale,
-            v_descale,
-            p_scale,
-            softmax_scale,
-            mask_mode,
-            layout_q,
-            win_left=win_left,
-            win_right=win_right,
-            return_softmax_lse=return_softmax_lse,
-        )
-
     op_module = quant_flash_attn_op_builder.load()
     return op_module.quant_flash_attn(
         q,

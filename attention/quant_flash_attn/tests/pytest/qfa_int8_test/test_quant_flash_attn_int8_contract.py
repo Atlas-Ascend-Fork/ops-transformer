@@ -45,10 +45,15 @@ def _case(layout="BNSD", dim=64, **attributes):
     return params, batches, vs, qfa, args, options
 
 
+def _metadata(qfa, args, options):
+    return runner.prepare_attention(qfa, args, options)[1][0]
+
+
 @pytest.mark.parametrize("layout", ["BNSD", "BSND", "TND"])
 @pytest.mark.parametrize("mask", [0, 3])
 def test_dense_prefill_contiguous_inputs(layout, mask):
     params, batches, vs, qfa, args, options = _case(layout, mask_mode=mask)
+    options["metadata"] = _metadata(qfa, args, options)
     expected = tuple(t.cpu() for t in qfa(*args, **options))
     runner.compare(params, runner.reference(params, batches, vs), expected)
     offset_args = list(args)
@@ -90,12 +95,13 @@ def test_d72_automatic_padding(layout, mask):
     )
     assert "fast_d72" not in inspect.signature(qfa).parameters
     module = importlib.import_module(qfa.__module__)
+    call, _ = runner.prepare_attention(qfa, args, options)
     with patch.object(
         module,
         "_quant_flash_attn_aligned_padded",
         wraps=module._quant_flash_attn_aligned_padded,
     ) as pad:
-        outputs = tuple(t.cpu() for t in qfa(*args, **options))
+        outputs = tuple(t.cpu() for t in call())
         pad.assert_called_once()
     runner.compare(params, runner.reference(params, batches, vs), outputs)
     for index in (1, 2):
@@ -109,9 +115,10 @@ def test_d72_automatic_padding(layout, mask):
         strided.copy_(tensor)
         changed = list(args)
         changed[index] = strided
+        call, _ = runner.prepare_attention(qfa, changed, options)
         with patch.object(module, "_quant_flash_attn_aligned_padded") as pad:
             with pytest.raises(RuntimeError, match="contiguous"):
-                qfa(*changed, **options)
+                call()
             pad.assert_not_called()
 
 
@@ -121,6 +128,7 @@ def test_d72_automatic_padding(layout, mask):
 @pytest.mark.parametrize("invalid", ["missing", "shape", "dtype"])
 def test_required_scales(index, invalid):
     _, _, _, qfa, args, options = _case()
+    options["metadata"] = _metadata(qfa, args, options)
     values = [*args[:6], args[6], options.pop("p_scale")]
     tensor = values[index]
     values[index] = (
@@ -153,40 +161,10 @@ def test_required_qkv(layout, index, device):
         call(*values, **options)
 
 
-def test_int8_metadata_generation_unsupported():
-    qfa = runner.load_qfa()
-    module = importlib.import_module(qfa.__module__)
-    with pytest.raises(
-        RuntimeError,
-        match="call aclnnQuantFlashAttnMetadata failed",
-    ):
-        module.quant_flash_attn_metadata(
-            num_heads_q=4,
-            num_heads_kv=2,
-            head_dim=64,
-            quant_mode=12,
-            batch_size=1,
-            max_seqlen_q=17,
-            max_seqlen_kv=33,
-            layout_q="BNSD",
-            layout_kv="BNSD",
-            layout_out="BNSD",
-        )
-
-
-def test_int8_metadata_must_be_none():
-    _, _, _, qfa, args, options = _case()
-    metadata = torch.zeros(8192, dtype=torch.int32, device=args[0].device)
-    with pytest.raises(
-        (RuntimeError, ValueError), match="A2/A3 INT8 Prefill requires metadata=None"
-    ):
-        qfa(*args, **options, metadata=metadata)
-
-
 @pytest.mark.parametrize("layout", ["BNSD", "BSND", "TND"])
 @pytest.mark.parametrize("lse", [False, True])
 def test_fake_output(layout, lse):
-    runner.load_qfa()
+    module = importlib.import_module(runner.load_qfa().__module__)
     shape = (
         (2, 4, 17, 72)
         if layout == "BNSD"
@@ -213,6 +191,9 @@ def test_fake_output(layout, lse):
         torch.empty(4, device="meta"),
         12,
         p_scale=torch.empty(1, device="meta"),
+        metadata=torch.empty(
+            (2, module._int8_metadata_row_size(2, 4)), dtype=torch.int32, device="meta"
+        ),
         layout_q=layout,
         layout_kv=layout,
         layout_out=layout,
@@ -242,6 +223,7 @@ def test_pv_fixpipe_head_scales(layout):
     args[4].fill_(1.0)
     args[5].copy_(torch.tensor([1.0, 2.0], device=args[5].device))
     options["p_scale"].fill_(127.0)
+    options["metadata"] = _metadata(qfa, args, options)
     output, lse = qfa(*args, **options)
     expected = (
         torch.tensor([-128.0, -128.0, 254.0, 254.0])
@@ -283,8 +265,13 @@ def test_graph_replay_and_no_host_transfers(layout, dim):
     )
     params, batches, vs, qfa, args, options = _case(layout, dim, mask_mode=3, **lengths)
 
-    def run():
-        return qfa(*args, **options)
+    if tnd:
+
+        def run():
+            return qfa(*args, **options, metadata=_metadata(qfa, args, options))
+
+    else:
+        run, _ = runner.prepare_attention(qfa, args, options)
 
     for _ in range(3):
         run()
@@ -343,6 +330,7 @@ def test_int8_under_stream_core_limit():
         assert acl.aclrtSetStreamResLimit(stream, 0, 8) == 0
         assert acl.aclrtSetStreamResLimit(stream, 1, 16) == 0
         assert acl.aclrtUseStreamResInCurrentThread(stream) == 0
+        options["metadata"] = _metadata(qfa, args, options)
         actual = qfa(*args, **options)
         runner.compare(
             params,
@@ -369,8 +357,14 @@ def asset_spec():
 
 @pytest.mark.parametrize("layout", ["BNSD", "BSND", "TND"])
 @pytest.mark.parametrize("numpy", [False, True])
-def test_assets_round_trip(asset_spec, layout, numpy):
-    params, batches, vs, _, _, _ = _case(layout, 72)
+@pytest.mark.parametrize("used", [False, True])
+def test_assets_round_trip(asset_spec, layout, numpy, used):
+    lengths = (
+        dict(N_kv=4, actual_seq_q=(4096, 4096), actual_seq_kv=(4096, 4096))
+        if used
+        else {}
+    )
+    params, batches, vs, qfa, _, _ = _case(layout, 72, **lengths)
     args = [golden._pack(batches, layout, index) for index in range(5)] + [vs, 12]
     options = dict(
         p_scale=torch.tensor([127.0]),
@@ -378,14 +372,19 @@ def test_assets_round_trip(asset_spec, layout, numpy):
         layout_q_descale=layout,
         layout_kv=layout,
         layout_out=layout,
-        max_seqlen_q=17,
-        max_seqlen_kv=33,
+        max_seqlen_q=max(params["actual_seq_q"]),
+        max_seqlen_kv=max(params["actual_seq_kv"]),
         softmax_scale=72**-0.5,
         mask_mode=0 if numpy else 3,
-        win_left=7,
-        win_right=3,
+        win_left=-1 if used else 7,
+        win_right=-1 if used else 3,
         return_softmax_lse=not numpy,
     )
+    if used:
+        options.update(
+            seqused_q=torch.tensor([0, 9], dtype=torch.int32),
+            seqused_kv=torch.tensor([17, 23], dtype=torch.int32),
+        )
     if layout == "TND":
         for name, lengths in (
             ("q", params["actual_seq_q"]),
@@ -403,7 +402,7 @@ def test_assets_round_trip(asset_spec, layout, numpy):
             name: value.numpy() if torch.is_tensor(value) else value
             for name, value in options.items()
         }
-    name = f"asset_{layout}_{numpy}"
+    name = f"asset_{layout}_{numpy}_{used}"
     asset_spec._inputs_dispatch(*args, **options, seed=902, p_scale_value=127.0)
     expected = asset_spec._golden_dispatch(*args, **options, testcase_name=name)
     args = [
@@ -418,7 +417,7 @@ def test_assets_round_trip(asset_spec, layout, numpy):
         if not key.endswith("_values")
     }
     preprocessed = asset_spec.QuantFlashAttnSpec.npu_preprocess(*args, **options)
-    assert preprocessed == {"metadata": None}
+    assert preprocessed["metadata"] is not None
     options.update(preprocessed)
     if not numpy:
         for key in (
@@ -434,6 +433,13 @@ def test_assets_round_trip(asset_spec, layout, numpy):
         actual = asset_spec.QuantFlashAttnSpec.torch_graph(*args, **options)()
     else:
         actual = torch.ops.cann_ops_transformer.quant_flash_attn(*args, **options)
+    if used:
+        module = importlib.import_module(qfa.__module__)
+        with patch.object(module, "_quant_flash_attn_aligned_padded") as pad:
+            call, _ = runner.prepare_attention(qfa, args, options)
+            prepared = call()
+            pad.assert_not_called()
+        assert all(torch.equal(a, b) for a, b in zip(actual, prepared))
     actual = [value.cpu() for value in actual if value is not None and value.numel()]
     if numpy:
         actual = [actual[0].view(torch.uint16).numpy(), *actual[1:]]

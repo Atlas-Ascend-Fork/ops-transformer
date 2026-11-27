@@ -1,7 +1,6 @@
 # QFA Full INT8 Quantization Tests
 
-This suite follows the parameter sets, shared runner, functional and performance entry points, and cache stages of
-`qfa_fp8_test`. INT8 uses mode 12 with `metadata=None`. Coverage includes BNSD, BSND, TND, mask modes 0 and 3,
+Coverage includes BNSD, BSND, TND, mask modes 0 and 3,
 sliding-window attention (SWA), LSE, and boundary cases for head dimensions from 1 to 256.
 
 ```text

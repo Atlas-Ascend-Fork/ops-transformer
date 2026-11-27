@@ -234,7 +234,7 @@ public:
             .PrecisionReduceFlag(true)
             .ExtendCfgInfo("prebuildPattern.value", "Opaque")
             .ExtendCfgInfo("coreType.value", "AiCore")
-            .ExtendCfgInfo("opFile.value", "quant_flash_attn");
+            .ExtendCfgInfo("opFile.value", "quant_flash_attn_apt");
 
         this->AICore().AddConfig("ascend950", aicore_config_95);
         this->AICore().AddConfig("ascend350", aicore_config_95);
@@ -304,7 +304,7 @@ public:
             .PrecisionReduceFlag(true)
             .ExtendCfgInfo("prebuildPattern.value", "Opaque")
             .ExtendCfgInfo("coreType.value", "AiCore")
-            .ExtendCfgInfo("opFile.value", "quant_flash_attn");
+            .ExtendCfgInfo("opFile.value", "quant_flash_attn_apt");
 #ifdef ENABLE_QFA_DT_HIFLOAT4
         this->AICore().AddConfig("ascend960dt", aicore_config_96);
         this->AICore().AddConfig("ascend960pr", aicore_config_96);

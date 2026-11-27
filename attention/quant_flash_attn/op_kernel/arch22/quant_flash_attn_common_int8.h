@@ -32,6 +32,13 @@ __aicore__ inline uint64_t QfaRow(uint32_t layout, uint32_t batch, uint32_t head
         return (static_cast<uint64_t>(batch) * seq + token) * heads + head;
     return (static_cast<uint64_t>(start) + token) * heads + head;
 }
+// totalTokensQ/Kv hold physical S for dense layouts and total T for TND. Effective lengths may change per task.
+__aicore__ inline uint64_t QfaHeadMajorRow(const QuantFlashAttnTilingDataInt8& t, uint32_t batch, uint32_t kvHead,
+                                           uint32_t row)
+{
+    const uint64_t base = (static_cast<uint64_t>(batch) * t.numHeadsQ + kvHead * t.groupSize) * t.totalTokensQ;
+    return t.seqLenQ == t.totalTokensQ ? base + row : base + (row / t.seqLenQ) * t.totalTokensQ + row % t.seqLenQ;
+}
 template <Int8GqaPath PATH>
 struct QuantFlashAttnLayoutInt8 {
     __aicore__ static inline bool IsSg(uint32_t layout)
@@ -75,7 +82,7 @@ struct QuantFlashAttnLayoutInt8 {
         AscendC::Nd2NzParams p(1U, 0U, t.headDim, 0U, t.headDim, alignedRows, 1U, 0U);
 
         const uint64_t initial = QfaRow(t.layoutQ, batch, QfaQueryHead(t, kv, start), QfaQueryToken(t, start),
-                                        t.numHeadsQ, t.seqLenQ, t.qTokenStart) *
+                                        t.numHeadsQ, t.totalTokensQ, t.qTokenStart) *
                                  t.headDim;
         if (t.numHeadsKv == 1U || t.groupSize == 1U) {
             p.nValue = rows;

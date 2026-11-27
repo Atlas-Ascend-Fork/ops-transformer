@@ -201,7 +201,8 @@ def move_to_device(value, target):
 
 
 def run_metadata(arguments, metadata):
-    import cann_ops_transformer  # noqa: F401  (ensure op registration)
+    if int(arguments["quant_mode"]) != 12:
+        import cann_ops_transformer  # noqa: F401  (ensure A5 op registration)
 
     return torch.ops.cann_ops_transformer.quant_flash_attn_metadata(
         int(arguments["num_heads_q"]),
@@ -227,6 +228,11 @@ def run_metadata(arguments, metadata):
         layout_q_descale=str(arguments["layout_q_descale"]),
         layout_kv=str(arguments["layout_kv"]),
         layout_out=str(arguments["layout_out"]),
+        **(
+            {name: arguments[name] for name in ("win_left", "win_right")}
+            if int(arguments["quant_mode"]) == 12
+            else {}
+        ),
     )
 
 
@@ -276,7 +282,7 @@ def run(
     """
     if quant_mode is None:
         quant_mode = get_attribute(kwargs, "quant_mode", 1)
-    if int(quant_mode) == 12:
+    if int(quant_mode) == 12 and layout_kv in ("PA_BNBD", "PA_BBND", "PA_NZ"):
         return {"metadata": None}
     # 位置标量参数桥接进 kwargs, 供 build_metadata_arguments 统一读取。
     hook_kwargs = dict(kwargs)
@@ -357,6 +363,17 @@ def run(
         seqused_kv,
         hook_kwargs,
     )
+    if int(quant_mode) == 12:
+        # Dense INT8 uses the physical input shapes; TND keeps its static bounds.
+        if layout_kv == "BSND":
+            arguments["num_heads_kv"] = int(k.shape[2])
+        if layout_q != "TND":
+            arguments.update(
+                batch_size=int(q.shape[0]),
+                max_seqlen_q=int(q.shape[1 if layout_q == "BSND" else 2]),
+                max_seqlen_kv=int(k.shape[1 if layout_kv == "BSND" else 2]),
+            )
+        arguments.update(win_left=win_left, win_right=win_right)
     # 动态槽位 (CSV tensor_view_shapes 含 -1, ttk 传入 None): 按参数名物化并返回,
     # 由 ttk 回填主算子调用 (参考 flash_mla 资产: 返回
     # {"metadata": generated}, 键必须是 API 参数名);

@@ -43,7 +43,17 @@ const aclTensor* QuantFlashAttnMetadata(const aclTensor* cuSeqlensQOptional, con
            winRight, layoutQ, layoutQDescale, layoutKv, layoutOut, isGradEnabled, socVersion, aicCoreNum, aivCoreNum,
            metadataDimNum, metadataRowSize, metaData);
 
-    static internal::AicpuTaskSpace space("QuantFlashAttnMetadata");
+    static internal::AicpuTaskSpace legacySpace("QuantFlashAttnMetadata");
+    // Keep optional-input schemas separate: a cached absent input has no INT32 descriptor.
+    static const auto int8Spaces = [] {
+        std::array<std::unique_ptr<internal::AicpuTaskSpace>, 16> spaces;
+        for (auto& item : spaces)
+            item = std::make_unique<internal::AicpuTaskSpace>("QuantFlashAttnMetadata");
+        return spaces;
+    }();
+    const uint32_t inputs = (cuSeqlensQOptional != nullptr ? 1U : 0U) | (cuSeqlensKvOptional != nullptr ? 2U : 0U) |
+                            (sequsedQOptional != nullptr ? 4U : 0U) | (sequsedKvOptional != nullptr ? 8U : 0U);
+    auto& space = quantMode == 12 ? *int8Spaces[inputs] : legacySpace;
 
     auto ret = ADD_TO_LAUNCHER_LIST_AICPU(
         QuantFlashAttnMetadata,

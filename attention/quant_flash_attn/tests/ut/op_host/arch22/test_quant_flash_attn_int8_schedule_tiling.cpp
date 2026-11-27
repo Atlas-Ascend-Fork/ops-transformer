@@ -31,8 +31,6 @@ QfaInt8ScheduleInput Model(int layout = 2, int dim = 128, int mask = 3)
             layout,
             mask,
             20,
-            192ULL << 20,
-            16ULL << 20,
             sizeof(QuantFlashAttnTilingQBlockPayloadInt8),
             0.125f};
 }
@@ -97,7 +95,8 @@ TEST(QuantFlashAttnInt8Schedule, ModelMatrixCoversEveryTask)
                     input.batch = batch;
                     input.totalQ = input.totalK = layout == 2 ? batch * input.maxQ : 0;
                     QfaInt8Schedule schedule;
-                    ASSERT_TRUE(BuildInt8Schedule(input, schedule));
+                    ASSERT_TRUE(SelectInt8Config(input, schedule));
+                    ASSERT_TRUE(PopulateInt8Schedule(schedule));
                     const auto& payload = schedule.payload.base;
                     const auto& config = payload.config;
                     if (payload.useCoreRanges != QFA_CORE_RANGES_NONE) {
@@ -135,27 +134,26 @@ TEST(QuantFlashAttnInt8Schedule, QBlockPayloadSelectionMatchesTaskMapConfig)
     tnd.aicNum = 24;
 
     QfaInt8Schedule schedule;
-    ASSERT_TRUE(BuildInt8Schedule(bnsd, schedule));
+    ASSERT_TRUE(SelectInt8Config(bnsd, schedule));
+    ASSERT_TRUE(PopulateInt8Schedule(schedule));
     EXPECT_EQ(schedule.config, QFA_INT8_CFG_D96_M512_FIXPIPE);
-    EXPECT_TRUE(schedule.hasTaskBuffer);
     EXPECT_EQ(schedule.payload.base.useCoreRanges, QFA_CORE_RANGES_TASK_MAP);
 
-    // Fixpipe always sends the full payload, including when it uses contiguous ranges.
     bnsd.mask = QFA_MASK_NONE;
-    ASSERT_TRUE(BuildInt8Schedule(bnsd, schedule));
+    ASSERT_TRUE(SelectInt8Config(bnsd, schedule));
+    ASSERT_TRUE(PopulateInt8Schedule(schedule));
     EXPECT_EQ(schedule.config, QFA_INT8_CFG_D96_M512_FIXPIPE);
-    EXPECT_TRUE(schedule.hasTaskBuffer);
     EXPECT_NE(schedule.payload.base.useCoreRanges, QFA_CORE_RANGES_TASK_MAP);
 
-    ASSERT_TRUE(BuildInt8Schedule(tnd, schedule));
+    ASSERT_TRUE(SelectInt8Config(tnd, schedule));
+    ASSERT_TRUE(PopulateInt8Schedule(schedule));
     EXPECT_EQ(schedule.config, QFA_INT8_CFG_D128_M512_TASK_MAP);
-    EXPECT_TRUE(schedule.hasTaskBuffer);
     EXPECT_EQ(schedule.payload.base.useCoreRanges, QFA_CORE_RANGES_TASK_MAP);
 
     tnd.tilingCapacity = sizeof(QuantFlashAttnTilingPayloadInt8);
-    ASSERT_TRUE(BuildInt8Schedule(tnd, schedule));
+    ASSERT_TRUE(SelectInt8Config(tnd, schedule));
+    ASSERT_TRUE(PopulateInt8Schedule(schedule));
     EXPECT_EQ(schedule.config, QFA_INT8_CFG_D128_M512);
-    EXPECT_FALSE(schedule.hasTaskBuffer);
     EXPECT_NE(schedule.payload.base.useCoreRanges, QFA_CORE_RANGES_TASK_MAP);
 }
 
@@ -166,7 +164,7 @@ TEST(QuantFlashAttnInt8Schedule, EverySupportedHeadDimensionAndWindow)
         input.winLeft = dim % 2 ? -1 : 0;
         input.winRight = dim % 3 ? 0 : 127;
         QfaInt8Schedule schedule;
-        ASSERT_TRUE(BuildInt8Schedule(input, schedule)) << dim;
+        ASSERT_TRUE(SelectInt8Config(input, schedule)) << dim;
         EXPECT_EQ(schedule.payload.base.config.headDim, dim);
         EXPECT_EQ(schedule.payload.base.config.headDimAlign, (dim + 31) / 32 * 32);
         EXPECT_EQ(schedule.config & 256U, 256U);
@@ -178,22 +176,17 @@ TEST(QuantFlashAttnInt8Schedule, WorkspaceAndCoreCapacityLimits)
     auto input = Model();
     input.aicNum = 7;
     QfaInt8Schedule schedule;
-    ASSERT_TRUE(BuildInt8Schedule(input, schedule));
+    ASSERT_TRUE(SelectInt8Config(input, schedule));
     EXPECT_EQ(schedule.payload.base.config.usedCoreNum, 7U);
-    input.l2Bytes = input.reservedWorkspaceBytes + schedule.payload.base.config.coreWorkspaceBytes * 3ULL;
-    ASSERT_TRUE(BuildInt8Schedule(input, schedule));
-    EXPECT_EQ(schedule.payload.base.config.usedCoreNum, 3U);
-    input.l2Bytes = input.reservedWorkspaceBytes;
-    EXPECT_FALSE(BuildInt8Schedule(input, schedule));
     input = Model();
     input.tilingCapacity = sizeof(QuantFlashAttnTilingPayloadInt8) - 1;
-    EXPECT_FALSE(BuildInt8Schedule(input, schedule));
+    EXPECT_FALSE(SelectInt8Config(input, schedule));
     input = Model();
     input.maxQ = UINT32_MAX;
-    EXPECT_FALSE(BuildInt8Schedule(input, schedule));
+    EXPECT_FALSE(SelectInt8Config(input, schedule));
     input = Model();
     input.aicNum = 0;
-    EXPECT_FALSE(BuildInt8Schedule(input, schedule));
+    EXPECT_FALSE(SelectInt8Config(input, schedule));
 }
 
 TEST(QuantFlashAttnInt8Workload, VariableLengthCoreRangesCoverEveryTask)
