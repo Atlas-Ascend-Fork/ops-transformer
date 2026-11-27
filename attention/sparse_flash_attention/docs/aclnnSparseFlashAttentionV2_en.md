@@ -190,6 +190,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
                 <li>If seqlen is not specified, None can be passed in, indicating that the value is the same as the S length of the query shape.</li>
                 <li>The number of valid tokens of each batch in this parameter does not exceed the size of dimension S in query and is not less than 0. Supports a one-dimensional tensor of length B.</li>
                 <li>If layout_query is TND, this parameter must be passed in, and the number of elements in this parameter is used as the value of B. The value of each element in this parameter indicates the total number of tokens in the current batch and all preceding batches.</li>
+                <li>For the TND layout, the first-stage API does not validate the values of this tensor. The caller must ensure that the values meet the constraints above.</li>
           </ul>
       </td>
       <td>INT32</td>

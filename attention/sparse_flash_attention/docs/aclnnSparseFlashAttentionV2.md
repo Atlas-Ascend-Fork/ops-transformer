@@ -195,6 +195,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
                 <li>如果不指定seqlen可传入None，表示和query的shape的S长度相同。</li>
                 <li>该入参中每个Batch的有效token数不超过query中的维度S大小且不小于0。支持长度为B的一维tensor。</li>
                 <li>layoutQueryOptional为TND时，该入参必须传入，且以该入参元素的数量作为B值，该参数中每个元素的值表示当前Batch与之前所有Batch的token数总和。</li>
+                <li>TND布局下，第一阶段不校验该张量的元素取值，调用方须保证其符合上述约束。</li>
           </ul>
       </td>
       <td>INT32</td>
