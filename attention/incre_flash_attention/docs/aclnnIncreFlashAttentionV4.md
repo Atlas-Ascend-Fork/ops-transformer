@@ -123,7 +123,7 @@ aclnnStatus aclnnIncreFlashAttentionV4(
         <td>query</td>
         <td>输入</td>
         <td>公式中的输入Q。</td>
-         <td><ul><li>query和attentionOut的shape需要完全一致。</li><li>仅支持query的S轴等于1。</li></ul></td>
+         <td><ul><li>query和attentionOut的shape需要完全一致。</li><li>仅支持query的S轴等于1，S轴大于1的场景未定义，调用方应避免。</li></ul></td>
         <td>FLOAT16、BFLOAT16</td>
         <td>ND</td>
         <td><ul><li>(B, N, S, D)</li><li>(B, S, N, D)</li><li>(B, S, H)</li></ul></td>
@@ -163,7 +163,7 @@ aclnnStatus aclnnIncreFlashAttentionV4(
         <td>attenMask</td>
         <td>输入</td>
         <td>attention掩码矩阵。</td>
-        <td><ul><li>支持空Tensor。</li><li>当attenMask数据类型取INT8、UINT8时，其Tensor中的值需要为0或1。</li></ul></td>
+        <td><ul><li>支持空Tensor。</li><li>当attenMask数据类型取INT8、UINT8时，其Tensor中的值需要为0或1。</li><li>当某行被完全遮蔽时，该行输出为该行V的逐头均值，而非0或NaN。</li></ul></td>
         <td>BOOL、INT8、UINT8</td>
         <td>ND</td>
         <td><ul><li>(B, S)</li><li>(B, 1, S)</li><li>(B, 1, 1, S)</li></ul></td>
@@ -446,6 +446,10 @@ aclnnStatus aclnnIncreFlashAttentionV4(
 - 确定性计算：
   - aclnnIncreFlashAttentionV4默认确定性实现。
 
+<!-- npu="A3" id9 -->
+- <term>Atlas A3系列产品</term>：
+  - 支持B轴小于等于65536，N轴小于等于256，D轴小于等于512。
+<!-- end id9 -->
 <!-- npu="910b" id7 -->
 - <term>Atlas A2系列产品</term>：
   - 支持B轴小于等于65536，N轴小于等于256，D轴小于等于512。
