@@ -102,7 +102,7 @@ cann_ops_transformer.apply_rotary_pos_emb_grad(
 
 | Name | Type | Type | Description | Data Type | Dimension (Shape) |
 |--------|----------|-----------|------|----------|-------------|
-| grad_query_embed | Tensor | Required | Gradient of the forward output `query_out`. | bfloat16, float16, float32 | (T, Nq, D) when `layout=4`; 4D tensor for other supported `layout` values |
+| grad_query_embed | Tensor | Required | Gradient of the forward output `query_out`. | bfloat16, float16, float32 | (T, Nq, D) when `layout=4`, where Nq is the number of heads (Head-Num) of `grad_query_embed` and can differ from Nk of `grad_key_embed`; 4D tensor for other supported `layout` values |
 | grad_key_embed | Tensor | Required | Gradient of the forward output `key_out`. The shape must be the same as that of `grad_query_embed`, except for the N dimension. | Same as grad_query_embed | (T, Nk, D) when `layout=4`; 4D tensor for other supported `layout` values |
 | cos | Tensor | Required | Cosine tensor of the forward computation input. The N dimension must be 1. | Same as grad_query_embed | 3D or 4D tensor depending on the input layout |
 | sin | Tensor | Required | Sine tensor of the forward computation input. The shape must be the same as that of `cos`. | Same as grad_query_embed | Same as cos |
@@ -147,6 +147,10 @@ This operator is the backward operator of [apply_rotary_pos_emb](../../apply_rot
 - Call in single-operator mode
 
     ```python
+    # Scenario: single-operator mode calling the RoPE backward operator apply_rotary_pos_emb_grad, layout=1 (BSND), float16 precision
+    # Inputs: grad_query_embed, grad_key_embed, cos, and sin are required tensors; query and key are optional tensors. The example uses B=1, S=64, N=8, D=128.
+    # Outputs: grad_query and grad_key, plus grad_cos and grad_sin (returned when query and key are passed in).
+    # Expected result: the shapes of the four output tensors are printed, which are (1, 64, 8, 128), (1, 64, 8, 128), (1, 64, 1, 128), and (1, 64, 1, 128), respectively.
     import torch
     import torch_npu
     from cann_ops_transformer.ops import apply_rotary_pos_emb_grad
@@ -165,6 +169,7 @@ This operator is the backward operator of [apply_rotary_pos_emb](../../apply_rot
     query = torch.randn(B, S, N, D, device="npu", dtype=torch.float16)
     key = torch.randn(B, S, N, D, device="npu", dtype=torch.float16)
 
+    # Key step: call the apply_rotary_pos_emb_grad backward API to compute gradients.
     grad_query, grad_key, grad_cos, grad_sin = apply_rotary_pos_emb_grad(
         grad_query_embed,
         grad_key_embed,
@@ -176,6 +181,7 @@ This operator is the backward operator of [apply_rotary_pos_emb](../../apply_rot
         layout=1,  # BSND
     )
 
+    # Expected result: grad_query and grad_key have shape (1, 64, 8, 128); grad_cos and grad_sin have shape (1, 64, 1, 128).
     print(f"grad_query shape: {grad_query.shape}")
     print(f"grad_key shape: {grad_key.shape}")
     print(f"grad_cos shape: {grad_cos.shape}")
