@@ -123,7 +123,7 @@ ge::graphStatus PagedAttentionChecker::CheckBlockTableShapeSize(const FiaTilingI
 
     // check blockTable each dim cannot be 0
     if (blockTableShape.GetShapeSize() == 0) {
-        std::string shapeStr = ToStringRaw(blockTableShape);
+        std::string shapeStr = ToString(blockTableShape);
         OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
             fiaInfo.opName, "blockTable", shapeStr.c_str(),
             "When page attention enable, all axes of blockTable must be positive numbers");
@@ -235,7 +235,7 @@ ge::graphStatus PagedAttentionChecker::CheckMaskShape(const FiaTilingInfo& fiaIn
         uint32_t attenMaskDimNum = attenMaskShape.GetDimNum();
         if (attenMaskDimNum > 0 &&
             (attenMaskShape.GetDim(attenMaskDimNum - 1) < maxBlockNumPerBatch * fiaInfo.blockSize)) {
-            std::string shapeStr = ToStringRaw(attenMaskShape);
+            std::string shapeStr = ToString(attenMaskShape);
             std::string reasonMsg =
                 std::string("When page attention enable and attenMask enable, "
                             "the last dimension of input atten_mask must be >= maxBlockNumPerBatch(") +
@@ -264,8 +264,8 @@ ge::graphStatus PagedAttentionChecker::CheckPseShape(const FiaTilingInfo& fiaInf
                                  std::to_string(maxBlockNumPerBatch) + ") * blockSize(" + std::to_string(blockSize) +
                                  ") when page attention is enabled";
             OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
-                fiaInfo.opName, "pse_shift",
-                ToStringRaw(fiaInfo.opParamInfo.pseShift.tensor->GetStorageShape()).c_str(), reason.c_str());
+                fiaInfo.opName, "pse_shift", ToString(fiaInfo.opParamInfo.pseShift.tensor->GetStorageShape()).c_str(),
+                reason.c_str());
             return ge::GRAPH_FAILED;
         }
     }
@@ -454,7 +454,7 @@ ge::graphStatus PagedAttentionChecker::CheckPACacheShape(const FiaTilingInfo& fi
         compareD = fiaInfo.vHeadDim;
     }
 
-    std::string shapeStr = ToStringRaw(tempShape);
+    std::string shapeStr = ToString(tempShape);
 
     if (shapeDim == DIM_NUM_3) { // [blockNums, blockSize, H]
         return CheckPACacheShape3D(fiaInfo, tempShape, inputName, compareD, shapeStr);
