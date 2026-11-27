@@ -27,7 +27,7 @@ extern "C" {
  * 代表量化参数中的由输入x1量化引入的缩放因子，数据类型支持FLOAT32、FLOAT8_E8M0，数据格式支持ND。
  * @param [in] scale2: 表示量化参数，数据类型支持FLOAT32、FLOAT8_E8M0数据类型，数据格式支持ND。
  * @param [in] groupList: 代表输入和输出分组轴的matmul大小分布，数据类型支持INT64，数据格式支持ND。
- * @param [in/out] yRef: 表示公式中的y，数据类型支持FLOAT32数据类型，数据格式支持ND。
+ * @param [in/out] yRef: 表示公式中的y，数据类型支持FLOAT32数据类型，数据格式支持ND，须为连续Tensor。
  * @param [in] groupListType:
  * 整数型参数，可取值0或1，0代表groupList中数值为分组轴大小的cumsum结果（累积和），
  * 1代表groupList中数值为分组轴上每组大小。

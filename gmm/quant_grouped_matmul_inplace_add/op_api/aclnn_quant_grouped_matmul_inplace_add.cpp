@@ -420,6 +420,10 @@ static aclnnStatus CheckParams(QGmmInPlaceAdd::QuantGroupedMatmulInplaceAddParam
     CHECK_RET(CheckNotNull(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_NULLPTR);
     CHECK_RET(CheckFormat(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     CHECK_RET(CheckShape(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
+    QGMM_INPLACE_ADD_CHECK_REPORT(
+        op::IsContiguous(params.yRef), return ACLNN_ERR_PARAM_INVALID,
+        OP_LOGE_FOR_INVALID_STRIDE(QGMM_INPLACE_ADD_ACLNN_OP_NAME, "yRef",
+                                   op::ToString(params.yRef->GetViewStrides()).GetString(), "contiguous"));
     CHECK_RET(CheckDtype(params) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID);
     if (HasEmptyOutputAxes(params.yRef)) {
         return ACLNN_SUCCESS;
@@ -573,7 +577,6 @@ static aclnnStatus aclnnQuantGroupedMatmulInplaceAddGetWorkspaceSizeCommon(
                                            params.yRef, params.groupListType, params.groupSize, executorPtr);
     CHECK_RET(result != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
-    // If the output tensor is non-contiguous, convert the calculated contiguous tensor to non-contiguous.
     auto viewCopyResult = l0op::ViewCopy(result, params.yRef, executorPtr);
     CHECK_RET(viewCopyResult != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
