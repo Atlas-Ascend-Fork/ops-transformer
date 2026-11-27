@@ -39,11 +39,13 @@ bool AllToAllMxQuantMatmulTilingBase::IsCapable()
     int64_t x2QuantMode = 0;
     int64_t x1QuantMode = 0;
     const gert::RuntimeAttrs* attrs = context_->GetAttrs();
-    if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X1_QUANTMODE_INDEX)) {
-        x1QuantMode = *ptr;
-    }
-    if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X2_QUANTMODE_INDEX)) {
-        x2QuantMode = *ptr;
+    if (attrs != nullptr) {
+        if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X1_QUANTMODE_INDEX)) {
+            x1QuantMode = *ptr;
+        }
+        if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X2_QUANTMODE_INDEX)) {
+            x2QuantMode = *ptr;
+        }
     }
     if (x1QuantMode == X1_QUANTMODE_VALUES && x2QuantMode == X2_QUANTMODE_VALUES) {
         OP_LOGI(opName_, "Start with AlltoAllMxQuantMatmul MX tiling.");

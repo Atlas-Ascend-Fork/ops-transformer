@@ -48,11 +48,13 @@ bool MxQuantMatmulAllToAllTilingBase::IsCapable()
     int64_t x1QuantMode = 0;
     int64_t x2QuantMode = 0;
     const gert::RuntimeAttrs* attrs = context_->GetAttrs();
-    if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X1_QUANTMODE_INDEX)) {
-        x1QuantMode = *ptr;
-    }
-    if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X2_QUANTMODE_INDEX)) {
-        x2QuantMode = *ptr;
+    if (attrs != nullptr) {
+        if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X1_QUANTMODE_INDEX)) {
+            x1QuantMode = *ptr;
+        }
+        if (const int64_t* ptr = attrs->GetAttrPointer<int64_t>(ATTR_X2_QUANTMODE_INDEX)) {
+            x2QuantMode = *ptr;
+        }
     }
     // HiF4 量化场景: x1/x2 quant mode 均为 HIFLOAT4_QUANT(8)
     isHiF4_ = (x1QuantMode == static_cast<int64_t>(HIF4_QUANTMODE_VALUES) &&
