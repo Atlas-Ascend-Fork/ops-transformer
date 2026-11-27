@@ -54,8 +54,8 @@ inline bool CheckAttrValues(const char* nodeName, const int64_t moeExpertNum, co
     if (allowMxQuantMode) {
         OP_TILING_CHECK(quantMode != UNQUANT_MODE && quantMode != DYNAMIC_QUANT_MODE &&
                             !IsMxQuantMode(static_cast<uint32_t>(quantMode)),
-                        OP_LOGE_WITH_INVALID_ATTR("AttentionToFFN Tiling Debug", "quant_mode",
-                                                  std::to_string(quantMode).c_str(), "0, 2, 3, 4, 5, 6 or 7"),
+                        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "quant_mode", std::to_string(quantMode).c_str(),
+                                                              "0, 2, 3, 4, 5, 6 or 7"),
                         return false);
     } else {
         OP_TILING_CHECK(
