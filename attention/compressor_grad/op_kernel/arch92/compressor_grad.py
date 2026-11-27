@@ -39,7 +39,10 @@ BIT16_REG_ELEMENTS = 128  # FP16/BF16 VF 寄存器元素数
 BASE_SIZE = 128  # L0/L1 通用基础维度
 H_BASE_SIZE = 128  # hidden 维子块
 M_BASE_SIZE = 128
-
+# Phase 3 dx 归约批量行数上限：2D tile [DX_B_ROWS, M*D/DX_B_ROWS] fp32 = 64kb
+# hidden ≤ DX_B_COLS 时走批量路径，否则走逐行操作
+DX_B_ROWS = 4
+DX_B_COLS = M_BASE_SIZE * D_BASE_SIZE // DX_B_ROWS
 
 # ================================================================
 #  UB / L1 地址常量（tile_group 声明）
@@ -556,23 +559,14 @@ def _mm1_nl0_block(
     pl.set_validshape(l0c, [n_tile_rows, H_BASE_SIZE])
     pl.move(l0b, w_l1, offset=[0, n_l0])
     if w_idx == 0:
-        # 尾轮 nTileRows=0（coff=1 subVecIdx=1）时跳过 0 行 matmul（aMatrixRow 下限 1）
+        # 尾轮 nTileRows=0(coff=1 subVecIdx=1)时跳过 0 行 matmul(aMatrixRow 下限 1)
         if n_tile_rows > 0:
             pl.matmul(l0c, l0a, l0b)
     else:
         if n_tile_rows > 0:
             pl.matmul_acc(l0c, l0c, l0a, l0b)
-        if matmul_ctx.group_size > 1:
-            # 组共享原子加（组内成员预累加，P3 单行读取；
-            # 零基由每轮 vec 清零保证——见 _zero_dx_ws_plane）
-            pl.store(
-                d_x_result_gm,
-                l0c,
-                [d_coff_idx, dx_row_off, h + n_l0],
-                atomic=pl.AtomicType.AtomicAdd,
-            )
-        else:
-            pl.store(d_x_result_gm, l0c, [d_coff_idx, dx_row_off, h + n_l0])
+        # 每核独立覆盖写，消除原子加的并发顺序不确定引入的不确定性问题
+        pl.store(d_x_result_gm, l0c, [d_coff_idx, dx_row_off, h + n_l0])
 
 
 def _mm1_sub_tile(
@@ -668,16 +662,9 @@ def _compute_dx_partial(
     group_idx = cube_core_idx // group_size
     intra_group_idx = cube_core_idx % group_size
     n_start = intra_group_idx * D_BASE_SIZE
-    if dx_matmul_ctx.group_size > 1:
-        # 组内全部成员原子加进组员 0 的共享（P3 按 r=0 基行单读）
-        dx_row_base = (
-            dx_db_idx * dx_matmul_ctx.cube_core_num
-            + group_idx * dx_matmul_ctx.group_size
-        ) * dx_matmul_ctx.cube_m_base_size
-    else:
-        dx_row_base = (
-            dx_db_idx * dx_matmul_ctx.cube_core_num + cube_core_idx
-        ) * dx_matmul_ctx.cube_m_base_size
+    dx_row_base = (
+        dx_db_idx * dx_matmul_ctx.cube_core_num + cube_core_idx
+    ) * dx_matmul_ctx.cube_m_base_size
     for h in pl.range(0, dx_matmul_ctx.hidden_size, H_L1_BASE_SIZE):
         for w_idx in pl.range(0, 2):
             for sub_vec_idx in pl.range(0, 2):
@@ -704,6 +691,7 @@ def _compute_dx_partial(
 
 
 def _mm2_store(
+    round_idx,
     w_idx,
     row_off,
     col_off,
@@ -711,19 +699,24 @@ def _mm2_store(
     d_wkv_result_gm,
     d_w_gate_result_gm,
 ):
-    """mm2 单个 (wIdx) 结果写回：全程原子加（共享单 tile，组间/轮间累加；
-    零基由 round 0 vec 清零保证——见 _zero_d_weight_ws）"""
+    """mm2 单个 (wIdx) 结果写回：round 0覆盖写 / round 1+ 原子加（跨轮累加）"""
     if w_idx == 0:
-        pl.store(
-            d_wkv_result_gm, l0c, [row_off, col_off], atomic=pl.AtomicType.AtomicAdd
-        )
+        if round_idx == 0:
+            pl.store(d_wkv_result_gm, l0c, [row_off, col_off])
+        else:
+            pl.store(
+                d_wkv_result_gm, l0c, [row_off, col_off], atomic=pl.AtomicType.AtomicAdd
+            )
     else:
-        pl.store(
-            d_w_gate_result_gm,
-            l0c,
-            [row_off, col_off],
-            atomic=pl.AtomicType.AtomicAdd,
-        )
+        if round_idx == 0:
+            pl.store(d_w_gate_result_gm, l0c, [row_off, col_off])
+        else:
+            pl.store(
+                d_w_gate_result_gm,
+                l0c,
+                [row_off, col_off],
+                atomic=pl.AtomicType.AtomicAdd,
+            )
 
 
 def _mm2_l0a_load(
@@ -826,6 +819,7 @@ def _mm2_core(
     if m2c_sub_vec_idx == 1 or Coff == 2:
         dw_row_off = 0 if Coff == 1 else m2c_sub_vec_idx * m2c_matmul_ctx.head_dim
         _mm2_store(
+            m2c_round_idx,
             m2c_w_idx,
             m2c_dw_row_base + dw_row_off,
             m2c_h + m2c_n_l0,
@@ -941,15 +935,16 @@ def _compute_dw_partial(
 ):
     """Matmul #2: dkv@x + dsb@x → dWkv/dWgate partial（h×subVecIdx 循环骨架）
 
-    共享单 tile 方案：所有 group 原子加到同一 [totalHeadDim, hiddenSize] tile
-    （L2 常驻），行覆盖 = intra*D_BASE + slot*headDim + [0, D_BASE)——组内成员
-    拼行、组间累加；零基由 round 0 vec 清零（_zero_d_weight_ws）保证。
+    末轮归约方案：round 0 覆盖写初始化固定槽，round 1+ 原子加（跨轮累加），
+    ws 单缓冲（无 dbIdx），末轮由 Phase 3 一次跨核归约。
     """
     cube_core_idx = pl.get_block_idx()
     group_size = dw_matmul_ctx.group_size
+    group_num = dw_matmul_ctx.group_num
     group_idx = cube_core_idx // group_size
     intra_group_idx = cube_core_idx % group_size
-    dw_row_base = intra_group_idx * D_BASE_SIZE
+    total_head_dim = dw_matmul_ctx.total_head_dim
+    dw_row_base = group_idx * total_head_dim + intra_group_idx * D_BASE_SIZE
     db_row_cnt = dw_matmul_ctx.db_row_cnt
     # group 区域步长用实际值 groupRowStride（与 _arrange_x 写方逐字节对齐）
     m_start = (
@@ -1043,101 +1038,26 @@ def _reduce_ape(
         pl.store(tensor_d_ape_flat, reduce_acc, [0, rg_start])
 
 
-def _zero_d_weight_ws(
-    vec_ctx,
-    core_idx,
-    reduce_acc,
-    tensor_dw_kv_ws_flat,
-    tensor_dw_gate_ws_flat,
-):
-    """Round 0: vec 分片清零 dWkv/dWgate 共享 tile（mm2 全程原子加的零基）
-
-    分片模式与 _reduce_d_weight 一致（D_BASE_SIZE 块分核）；可见性由
-    V1(0) set(MTE3) → C1(0) FFTS 全 cube 汇合传递保证（cube 首个原子加
-    严格晚于所有 vec 的清零 store 生效）。workspace 为未初始化随机值，
-    原子加不能依赖覆盖写初始化。
-    """
-    core_num = vec_ctx.core_num
-    rg_chunk_num = (vec_ctx.total_head_dim * vec_ctx.hidden_size) // D_BASE_SIZE
-    rg_per_core = rg_chunk_num // core_num
-    rg_remain = rg_chunk_num % core_num
-    rg_start = core_idx * rg_per_core + (
-        core_idx if core_idx < rg_remain else rg_remain
-    )
-    rg_end = rg_start + rg_per_core + (1 if core_idx < rg_remain else 0)
-    rg_start = rg_start * D_BASE_SIZE
-    rg_end = rg_end * D_BASE_SIZE
-    for cur_rg_start in pl.range(rg_start, rg_end, (BASE_SIZE * BASE_SIZE)):
-        cur_rg_num = min(BASE_SIZE * BASE_SIZE, rg_end - cur_rg_start)
-        pl.set_validshape(reduce_acc, [1, cur_rg_num])
-        _vf_tile_zero(reduce_acc, 1, cur_rg_num)
-        pl.store(tensor_dw_kv_ws_flat, reduce_acc, [0, cur_rg_start])
-        pl.store(tensor_dw_gate_ws_flat, reduce_acc, [0, cur_rg_start])
-
-
-def _zero_dx_ws_plane(
-    vec_ctx,
-    core_idx,
-    reduce_acc,
-    db_idx,
-    tensor_dx_ws_flat,
-):
-    """groupSize>1 每轮：vec 分片清零本 db 奇偶面的 group 共享 dX 槽
-
-    mm1 原子加零基。dX ws 布局 = [coff 平面][db 行区]（flat：
-    p*2*CCN*cmbs*H + db*CCN*cmbs*H + slot*cmbs*H）——coff=2 时两个平面
-    都要清。仅清零各组员 0 槽（虚拟连续下标 [0, groupNum*cmbs*H) 按
-    16384 元素子块分核；cmbs*H 为 16384 整数倍——H 是 128 倍数——子块
-    不跨组）。次序保证：
-    - 对 P3(r-2) 同奇偶面 mte2 读的 WAR：P3 末次 dX 载入的消费 add 与
-      本清零的 vector 写同用 reduce_acc tile，pypto tile 生命周期链
-      + vector 管线按序 ⇒ 载入完成先于清零生效；
-    - 对 cube mm1(r) 原子加的可见性：清零 store 早于 V1(r)/V2(2r)
-      set(MTE3) → C1(r) wait 传递。
-    """
-    core_num = vec_ctx.core_num
-    group_num = vec_ctx.group_num
-    group_size = vec_ctx.group_size
-    cube_core_num = vec_ctx.cube_core_num
-    slot_elems = vec_ctx.cube_m_base_size * vec_ctx.hidden_size
-    db_stride = cube_core_num * slot_elems
-    plane_stride = 2 * db_stride
-    chunk = BASE_SIZE * BASE_SIZE
-    chunk_num = (group_num * slot_elems) // chunk
-    rg_per_core = chunk_num // core_num
-    rg_remain = chunk_num % core_num
-    rg_start = core_idx * rg_per_core + (
-        core_idx if core_idx < rg_remain else rg_remain
-    )
-    rg_end = rg_start + rg_per_core + (1 if core_idx < rg_remain else 0)
-    for p in pl.range(0, Coff):
-        base = p * plane_stride + db_idx * db_stride
-        for c in pl.range(rg_start, rg_end):
-            g = c * chunk // slot_elems
-            off = c * chunk % slot_elems
-            pl.set_validshape(reduce_acc, [1, chunk])
-            _vf_tile_zero(reduce_acc, 1, chunk)
-            pl.store(
-                tensor_dx_ws_flat,
-                reduce_acc,
-                [0, base + (g * group_size) * slot_elems + off],
-            )
-
-
 def _reduce_d_weight(
     vec_ctx,
     core_idx,
+    group_idx,
+    db_idx,
+    round_blocks,
     reduce_acc,
+    reduce_ld_group,
     p3_cast,
     tensor_dw_kv_flat,
     tensor_dw_kv_ws_flat,
     tensor_dw_gate_flat,
     tensor_dw_gate_ws_flat,
 ):
-    """Phase 3: dWkv/dWgate 写回——组间/轮间累加已由 mm2 原子加在共享 tile 内
-    完成，此处仅 FP32→BF16/FP16 cast + 输出（每核 rgStart..rgEnd 分片）"""
+    """Phase 3: dWkv/dWgate 跨核归约（每核处理 rgStart..rgEnd 的 chunk，累加器从零开始）"""
     core_num = vec_ctx.core_num
-    rg_chunk_num = (vec_ctx.total_head_dim * vec_ctx.hidden_size) // D_BASE_SIZE
+    group_num = vec_ctx.group_num
+    total_head_dim = vec_ctx.total_head_dim
+    flat_row_base = db_idx * group_num
+    rg_chunk_num = (total_head_dim * vec_ctx.hidden_size) // D_BASE_SIZE
     rg_per_core = rg_chunk_num // core_num
     rg_remain = rg_chunk_num % core_num
     rg_start = core_idx * rg_per_core + (
@@ -1146,14 +1066,31 @@ def _reduce_d_weight(
     rg_end = rg_start + rg_per_core + (1 if core_idx < rg_remain else 0)
     rg_start = rg_start * D_BASE_SIZE
     rg_end = rg_end * D_BASE_SIZE
+    valid_rows = (
+        round_blocks + vec_ctx.group_deal_sc_num - 1
+    ) // vec_ctx.group_deal_sc_num
     for cur_rg_start in pl.range(rg_start, rg_end, (BASE_SIZE * BASE_SIZE)):
         cur_rg_num = min(BASE_SIZE * BASE_SIZE, rg_end - cur_rg_start)
         pl.set_validshape(reduce_acc, [1, cur_rg_num])
-        pl.load(reduce_acc, tensor_dw_kv_ws_flat, [0, cur_rg_start])
+        # dWkv：末轮一次性归约，累加器从零开始（输出 tensor 不保证清零，不能读入做 RMW）
+        _vf_tile_zero(reduce_acc, 1, cur_rg_num)
+        for r in pl.range(0, valid_rows):
+            reduce_ld = reduce_ld_group.next()
+            pl.set_validshape(reduce_ld, [1, cur_rg_num])
+            pl.load(reduce_ld, tensor_dw_kv_ws_flat, [flat_row_base + r, cur_rg_start])
+            pl.add(reduce_acc, reduce_acc, reduce_ld)
         pl.set_validshape(p3_cast, [1, cur_rg_num])
         pl.cast(p3_cast, reduce_acc, mode=pl.RoundMode.CAST_ROUND)
         pl.store(tensor_dw_kv_flat, p3_cast, [0, cur_rg_start])
-        pl.load(reduce_acc, tensor_dw_gate_ws_flat, [0, cur_rg_start])
+        # dWgate：同上，从零开始
+        _vf_tile_zero(reduce_acc, 1, cur_rg_num)
+        for r in pl.range(0, valid_rows):
+            reduce_ld = reduce_ld_group.next()
+            pl.set_validshape(reduce_ld, [1, cur_rg_num])
+            pl.load(
+                reduce_ld, tensor_dw_gate_ws_flat, [flat_row_base + r, cur_rg_start]
+            )
+            pl.add(reduce_acc, reduce_acc, reduce_ld)
         pl.set_validshape(p3_cast, [1, cur_rg_num])
         pl.cast(p3_cast, reduce_acc, mode=pl.RoundMode.CAST_ROUND)
         pl.store(tensor_dw_gate_flat, p3_cast, [0, cur_rg_start])
@@ -1478,41 +1415,54 @@ def _reduce_dx_row(
     rdr_d_x_cache_gm,
     rdr_d_x_result_gm,
 ):
-    """单行压缩区累加：跨轮 cache 起算或 result 槽位起算 + coff=2 下一块累加
-
-    mm1 已将组内成员 partial 原子预累加进组员 0 共享槽，P3 仅读
-    基行（groupSize>1 时省 3/4 的 dX ws 读；groupSize==1 行为不变）"""
+    """单行压缩区累加：跨轮 cache 起算或 result 槽位起算 + 组间累加 + coff=2 下一块累加"""
     cube_core_num = rdr_vec_ctx.cube_core_num
     hidden_size = rdr_vec_ctx.hidden_size
     group_size = rdr_vec_ctx.group_size
+    cube_m_base_size = rdr_vec_ctx.cube_m_base_size
+    cmp_ratio = rdr_vec_ctx.cmp_ratio
+    group_deal_sc_num = rdr_vec_ctx.group_deal_sc_num
     if rdr_p3l_sc_idx < rdr_prev_sc_idx:
-        ws_offset = (
-            rdr_db_idx * cube_core_num * rdr_vec_ctx.cube_m_base_size + rdr_sc_inner_idx
-        )
+        ws_offset = rdr_db_idx * cube_core_num * cube_m_base_size + rdr_sc_inner_idx
         pl.set_validshape(rdr_reduce_acc, [1, hidden_size])
         pl.load(
             rdr_reduce_acc,
             rdr_d_x_cache_gm,
-            [rdr_db_idx * rdr_vec_ctx.cmp_ratio + rdr_sc_inner_idx, 0],
+            [rdr_db_idx * cmp_ratio + rdr_sc_inner_idx, 0],
         )
-        reduce_ld = rdr_reduce_ld_group.next()
-        pl.set_validshape(reduce_ld, [1, hidden_size])
-        pl.load(reduce_ld, rdr_d_x_result_gm, [0, ws_offset, 0])
-        pl.add(rdr_reduce_acc, rdr_reduce_acc, reduce_ld)
+        for r in pl.range(0, group_size):
+            reduce_ld = rdr_reduce_ld_group.next()
+            pl.set_validshape(reduce_ld, [1, hidden_size])
+            pl.load(
+                reduce_ld,
+                rdr_d_x_result_gm,
+                [0, ws_offset + r * cube_m_base_size, 0],
+            )
+            pl.add(rdr_reduce_acc, rdr_reduce_acc, reduce_ld)
     else:
         ws_offset = _reduce_dx_ws_offset(
             rdr_db_idx,
             cube_core_num,
-            rdr_vec_ctx.cube_m_base_size,
+            cube_m_base_size,
             group_size,
-            rdr_vec_ctx.group_deal_sc_num,
-            rdr_vec_ctx.cmp_ratio,
+            group_deal_sc_num,
+            cmp_ratio,
             rdr_p3l_sc_idx,
             rdr_prev_sc_idx,
             rdr_sc_inner_idx,
         )
         pl.set_validshape(rdr_reduce_acc, [1, hidden_size])
         pl.load(rdr_reduce_acc, rdr_d_x_result_gm, [Coff - 1, ws_offset, 0])
+        if group_size > 1:
+            for r in pl.range(1, group_size):
+                reduce_ld = rdr_reduce_ld_group.next()
+                pl.set_validshape(reduce_ld, [1, hidden_size])
+                pl.load(
+                    reduce_ld,
+                    rdr_d_x_result_gm,
+                    [Coff - 1, ws_offset + r * cube_m_base_size, 0],
+                )
+                pl.add(rdr_reduce_acc, rdr_reduce_acc, reduce_ld)
         if (
             Coff == 2
             and rdr_p3l_sc_idx != rdr_round_end_sc_idx
@@ -1522,18 +1472,23 @@ def _reduce_dx_row(
             next_ws_offset = _reduce_dx_ws_offset(
                 rdr_db_idx,
                 cube_core_num,
-                rdr_vec_ctx.cube_m_base_size,
+                cube_m_base_size,
                 group_size,
-                rdr_vec_ctx.group_deal_sc_num,
-                rdr_vec_ctx.cmp_ratio,
+                group_deal_sc_num,
+                cmp_ratio,
                 rdr_p3l_sc_idx + 1,
                 rdr_prev_sc_idx,
                 rdr_sc_inner_idx,
             )
-            reduce_ld = rdr_reduce_ld_group.next()
-            pl.set_validshape(reduce_ld, [1, hidden_size])
-            pl.load(reduce_ld, rdr_d_x_result_gm, [0, next_ws_offset, 0])
-            pl.add(rdr_reduce_acc, rdr_reduce_acc, reduce_ld)
+            for r in pl.range(0, group_size):
+                reduce_ld = rdr_reduce_ld_group.next()
+                pl.set_validshape(reduce_ld, [1, hidden_size])
+                pl.load(
+                    reduce_ld,
+                    rdr_d_x_result_gm,
+                    [0, next_ws_offset + r * cube_m_base_size, 0],
+                )
+                pl.add(rdr_reduce_acc, rdr_reduce_acc, reduce_ld)
 
 
 def _reduce_dx_store(
@@ -1567,6 +1522,131 @@ def _reduce_dx_store(
         pl.set_validshape(rdst_p3_cast, [1, hidden_size])
         pl.cast(rdst_p3_cast, rdst_reduce_acc, mode=pl.RoundMode.CAST_ROUND)
         pl.store(rdst_d_x_out_gm, rdst_p3_cast, [rdst_t_idx, 0])
+
+
+def _reduce_dx_row_batched(
+    rdr_vec_ctx,
+    rdr_db_idx,
+    rdr_prev_sc_idx,
+    rdr_p3l_sc_idx,
+    rdr_round_end_sc_idx,
+    rdr_batch_end_sc_idx,
+    rdr_sc_inner_idx,
+    rdr_run_len,
+    rdr_reduce_acc2d,
+    rdr_reduce_ld2d_group,
+    rdr_d_x_cache_gm,
+    rdr_d_x_result_gm,
+):
+    """批量行压缩区累加(同块内连续run_len行)"""
+    cube_core_num = rdr_vec_ctx.cube_core_num
+    hidden_size = rdr_vec_ctx.hidden_size
+    group_size = rdr_vec_ctx.group_size
+    cube_m_base_size = rdr_vec_ctx.cube_m_base_size
+    cmp_ratio = rdr_vec_ctx.cmp_ratio
+    group_deal_sc_num = rdr_vec_ctx.group_deal_sc_num
+    if rdr_p3l_sc_idx < rdr_prev_sc_idx:
+        ws_offset = rdr_db_idx * cube_core_num * cube_m_base_size + rdr_sc_inner_idx
+        pl.set_validshape(rdr_reduce_acc2d, [rdr_run_len, hidden_size])
+        pl.load(
+            rdr_reduce_acc2d,
+            rdr_d_x_cache_gm,
+            [rdr_db_idx * cmp_ratio + rdr_sc_inner_idx, 0],
+        )
+        for r in pl.range(0, group_size):
+            reduce_ld2d = rdr_reduce_ld2d_group.next()
+            pl.set_validshape(reduce_ld2d, [rdr_run_len, hidden_size])
+            pl.load(
+                reduce_ld2d,
+                rdr_d_x_result_gm,
+                [0, ws_offset + r * cube_m_base_size, 0],
+            )
+            pl.add(rdr_reduce_acc2d, rdr_reduce_acc2d, reduce_ld2d)
+    else:
+        ws_offset = _reduce_dx_ws_offset(
+            rdr_db_idx,
+            cube_core_num,
+            cube_m_base_size,
+            group_size,
+            group_deal_sc_num,
+            cmp_ratio,
+            rdr_p3l_sc_idx,
+            rdr_prev_sc_idx,
+            rdr_sc_inner_idx,
+        )
+        pl.set_validshape(rdr_reduce_acc2d, [rdr_run_len, hidden_size])
+        pl.load(rdr_reduce_acc2d, rdr_d_x_result_gm, [Coff - 1, ws_offset, 0])
+        if group_size > 1:
+            for r in pl.range(1, group_size):
+                reduce_ld2d = rdr_reduce_ld2d_group.next()
+                pl.set_validshape(reduce_ld2d, [rdr_run_len, hidden_size])
+                pl.load(
+                    reduce_ld2d,
+                    rdr_d_x_result_gm,
+                    [Coff - 1, ws_offset + r * cube_m_base_size, 0],
+                )
+                pl.add(rdr_reduce_acc2d, rdr_reduce_acc2d, reduce_ld2d)
+
+        if (
+            Coff == 2
+            and rdr_p3l_sc_idx != rdr_round_end_sc_idx
+            and rdr_p3l_sc_idx != rdr_batch_end_sc_idx
+        ):
+            pl.set_validshape(rdr_reduce_acc2d, [rdr_run_len, hidden_size])
+            next_ws_offset = _reduce_dx_ws_offset(
+                rdr_db_idx,
+                cube_core_num,
+                cube_m_base_size,
+                group_size,
+                group_deal_sc_num,
+                cmp_ratio,
+                rdr_p3l_sc_idx + 1,
+                rdr_prev_sc_idx,
+                rdr_sc_inner_idx,
+            )
+            for r in pl.range(0, group_size):
+                reduce_ld2d = rdr_reduce_ld2d_group.next()
+                pl.set_validshape(reduce_ld2d, [rdr_run_len, hidden_size])
+                pl.load(
+                    reduce_ld2d,
+                    rdr_d_x_result_gm,
+                    [0, next_ws_offset + r * cube_m_base_size, 0],
+                )
+                pl.add(rdr_reduce_acc2d, rdr_reduce_acc2d, reduce_ld2d)
+
+
+def _reduce_dx_store_batched(
+    rdst_vec_ctx,
+    rdst_db_idx,
+    rdst_p3l_sc_idx,
+    rdst_round_end_sc_idx,
+    rdst_batch_end_sc_idx,
+    rdst_sc_inner_idx,
+    rdst_t_idx,
+    rdst_run_len,
+    rdst_reduce_acc2d,
+    rdst_cast2d,
+    rdst_d_x_cache_gm,
+    rdst_d_x_out_gm,
+):
+    """批量行结果写回：coff=2 轮末块存 dXCache，否则 cast+store d_x（整 run 2D 写）"""
+    cmp_ratio = rdst_vec_ctx.cmp_ratio
+    hidden_size = rdst_vec_ctx.hidden_size
+    db_ratio = rdst_vec_ctx.db_ratio
+    if (
+        Coff == 2
+        and rdst_p3l_sc_idx == rdst_round_end_sc_idx
+        and rdst_p3l_sc_idx != rdst_batch_end_sc_idx
+    ):
+        pl.store(
+            rdst_d_x_cache_gm,
+            rdst_reduce_acc2d,
+            [(rdst_db_idx + 1) % db_ratio * cmp_ratio + rdst_sc_inner_idx, 0],
+        )
+    else:
+        pl.set_validshape(rdst_cast2d, [rdst_run_len, hidden_size])
+        pl.cast(rdst_cast2d, rdst_reduce_acc2d, mode=pl.RoundMode.CAST_ROUND)
+        pl.store(rdst_d_x_out_gm, rdst_cast2d, [rdst_t_idx, 0])
 
 
 def _reduce_dx_zero_row(p3_cast, hidden_size, d_x_out_gm, t_idx):
@@ -1722,6 +1802,9 @@ def _reduce_dx(
     rdx_reduce_acc,
     rdx_reduce_ld_group,
     rdx_p3_cast,
+    rdx_reduce_acc2d,
+    rdx_reduce_ld2d_group,
+    rdx_cast2d,
     rdx_d_x_cache_gm,
     rdx_d_x_result_gm,
     rdx_d_x_out_gm,
@@ -1730,7 +1813,8 @@ def _reduce_dx(
     rdx_cu_seqlens,
     rdx_seq_ctx,
 ):
-    """Phase 3: dX 跨核归约（token 行遍历 + coff=2 dXCache 缓存逻辑）"""
+    """Phase 3: dX 跨核归约（token 行遍历 + coff=2 dXCache 缓存逻辑）。
+    压缩区行按同块连续 run 批量处理（2D tile）；hidden 超 DX_B_COLS 回退逐行。"""
     hidden_size = rdx_vec_ctx.hidden_size
     cmp_ratio = rdx_vec_ctx.cmp_ratio
     batch_size = rdx_vec_ctx.batch_size
@@ -1778,41 +1862,91 @@ def _reduce_dx(
             rdx_cu_seqlens,
             rdx_seq_ctx,
         )
-        for _ in pl.range(my_row_s, my_row_e):
+        batched = hidden_size <= DX_B_COLS
+        row_left = my_row_e - my_row_s
+        while row_left > 0:
             in_compress = local_s < cmp_limit
             if in_compress:
-                _reduce_dx_row(
-                    rdx_vec_ctx,
-                    rdx_db_idx,
-                    prev_sc_idx,
-                    p3l_sc_idx,
-                    round_end_sc_idx,
-                    batch_end_sc_idx,
-                    sc_inner_idx,
-                    rdx_reduce_acc,
-                    rdx_reduce_ld_group,
-                    rdx_d_x_cache_gm,
-                    rdx_d_x_result_gm,
-                )
-                _reduce_dx_store(
-                    rdx_vec_ctx,
-                    rdx_db_idx,
-                    p3l_sc_idx,
-                    round_end_sc_idx,
-                    batch_end_sc_idx,
-                    sc_inner_idx,
-                    t_idx,
-                    rdx_reduce_acc,
-                    rdx_p3_cast,
-                    rdx_d_x_cache_gm,
-                    rdx_d_x_out_gm,
-                )
+                # ── 批量 run 检测：同块内连续行（同分支/同轮末/批末条件，均为块级）。
+                # 上限：块内剩余行 / tile 行容量 / 行数配额 / 压缩区尾 / batch 尾。
+                run_len = cmp_ratio - sc_inner_idx
+                if run_len > DX_B_ROWS:
+                    run_len = DX_B_ROWS
+                if run_len > row_left:
+                    run_len = row_left
+                if run_len > cmp_limit - local_s:
+                    run_len = cmp_limit - local_s
+                if run_len > b_seq_length - local_s:
+                    run_len = b_seq_length - local_s
+                if batched:
+                    _reduce_dx_row_batched(
+                        rdx_vec_ctx,
+                        rdx_db_idx,
+                        prev_sc_idx,
+                        p3l_sc_idx,
+                        round_end_sc_idx,
+                        batch_end_sc_idx,
+                        sc_inner_idx,
+                        run_len,
+                        rdx_reduce_acc2d,
+                        rdx_reduce_ld2d_group,
+                        rdx_d_x_cache_gm,
+                        rdx_d_x_result_gm,
+                    )
+                    _reduce_dx_store_batched(
+                        rdx_vec_ctx,
+                        rdx_db_idx,
+                        p3l_sc_idx,
+                        round_end_sc_idx,
+                        batch_end_sc_idx,
+                        sc_inner_idx,
+                        t_idx,
+                        run_len,
+                        rdx_reduce_acc2d,
+                        rdx_cast2d,
+                        rdx_d_x_cache_gm,
+                        rdx_d_x_out_gm,
+                    )
+                else:
+                    # hidden 超 2D tile 列上限（>DX_B_COLS）：保持逐行路径（单行步进）
+                    run_len = 1
+                    _reduce_dx_row(
+                        rdx_vec_ctx,
+                        rdx_db_idx,
+                        prev_sc_idx,
+                        p3l_sc_idx,
+                        round_end_sc_idx,
+                        batch_end_sc_idx,
+                        sc_inner_idx,
+                        rdx_reduce_acc,
+                        rdx_reduce_ld_group,
+                        rdx_d_x_cache_gm,
+                        rdx_d_x_result_gm,
+                    )
+                    _reduce_dx_store(
+                        rdx_vec_ctx,
+                        rdx_db_idx,
+                        p3l_sc_idx,
+                        round_end_sc_idx,
+                        batch_end_sc_idx,
+                        sc_inner_idx,
+                        t_idx,
+                        rdx_reduce_acc,
+                        rdx_p3_cast,
+                        rdx_d_x_cache_gm,
+                        rdx_d_x_out_gm,
+                    )
+                step = run_len
             else:
                 if p3l_sc_idx < prev_sc_idx:
+                    # 已由前序轮处理的行：消耗一次迭代、状态不动（与逐行版 for+continue 语义一致）
+                    row_left -= 1
                     continue
                 _reduce_dx_zero_row(rdx_p3_cast, hidden_size, rdx_d_x_out_gm, t_idx)
-            t_idx += 1
-            local_s += 1
+                step = 1
+            t_idx += step
+            local_s += step
+            row_left -= step
             if local_s >= b_seq_length:
                 # ── 跨 batch 转移：压缩块索引全局连续，新批首块是前序批末块的后继。
                 # 前序批有压缩块（cmpLimit>0，此刻 cmpLimit 仍是前序批的值）→ +1；
@@ -2617,6 +2751,9 @@ def _phase3_reduce(
     p3r_reduce_comp,
     p3r_reduce_load_tile_group,
     p3r_p3_cast,
+    p3r_reduce_acc2d,
+    p3r_reduce_ld2d_group,
+    p3r_cast2d,
     p3r_d_x_cache_gm,
     p3r_d_x_result_gm,
     p3r_d_x,
@@ -2655,13 +2792,19 @@ def _phase3_reduce(
     )
     tensor_dw_kv_ws_flat = pl.make_tensor(
         p3r_d_w_kv_work_space_ptr,
-        [1, p3r_total_head_dim * p3r_hidden_size],
+        [
+            p3r_d_weight_work_space_size // (p3r_total_head_dim * p3r_hidden_size),
+            p3r_total_head_dim * p3r_hidden_size,
+        ],
         [p3r_total_head_dim * p3r_hidden_size, 1],
         dtype=pl.DT_FP32,
     )
     tensor_dw_gate_ws_flat = pl.make_tensor(
         p3r_d_w_gate_work_space_ptr,
-        [1, p3r_total_head_dim * p3r_hidden_size],
+        [
+            p3r_d_weight_work_space_size // (p3r_total_head_dim * p3r_hidden_size),
+            p3r_total_head_dim * p3r_hidden_size,
+        ],
         [p3r_total_head_dim * p3r_hidden_size, 1],
         dtype=pl.DT_FP32,
     )
@@ -2690,6 +2833,9 @@ def _phase3_reduce(
         p3r_reduce_acc,
         p3r_reduce_load_tile_group,
         p3r_p3_cast,
+        p3r_reduce_acc2d,
+        p3r_reduce_ld2d_group,
+        p3r_cast2d,
         p3r_d_x_cache_gm,
         p3r_d_x_result_gm,
         d_x_out_gm,
@@ -2716,7 +2862,11 @@ def _phase3_reduce(
         _reduce_d_weight(
             p3r_vec_ctx,
             p3r_core_idx,
+            p3r_group_idx,
+            0,
+            p3r_max_round_blocks,
             p3r_reduce_acc,
+            p3r_reduce_load_tile_group,
             p3r_p3_cast,
             tensor_dw_kv_flat,
             tensor_dw_kv_ws_flat,
@@ -2968,6 +3118,31 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         compact=1,
     )
 
+    # Phase 3 dX 批量归约 2D tile：[DX_B_ROWS, 16384/DX_B_ROWS] fp32 = 64KB（acc/ld），
+    # cast 为 io dtype（bf16/fp16）= 32KB
+    dx_acc2d_tile_type = pl.TileType(
+        shape=[DX_B_ROWS, M_BASE_SIZE * D_BASE_SIZE // DX_B_ROWS],
+        dtype=pl.DT_FP32,
+        target_memory=pl.MemorySpace.Vec,
+        valid_shape=[-1, -1],
+        pad=pl.TilePad.zero,
+    )
+
+    dx_ld2d_tile_type = pl.TileType(
+        shape=[DX_B_ROWS, M_BASE_SIZE * D_BASE_SIZE // DX_B_ROWS],
+        dtype=pl.DT_FP32,
+        target_memory=pl.MemorySpace.Vec,
+        valid_shape=[-1, -1],
+        pad=pl.TilePad.zero,
+    )
+
+    dx_cast2d_tile_type = pl.TileType(
+        shape=[DX_B_ROWS, M_BASE_SIZE * D_BASE_SIZE // DX_B_ROWS],
+        dtype=ivg_io_d_type,
+        target_memory=pl.MemorySpace.Vec,
+        valid_shape=[-1, -1],
+    )
+
     # ── UB tile_group allocation (auto_mutex for shared addresses) ──
     #          | group             | addr      | size（coff=2 上限）| mutex |
     #          | dc_f16            | 0x00000   | 16384  | [0]   |
@@ -3059,6 +3234,18 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         type=flat_cast_tile_type, addrs=[UB_KV_APE_ADDR], mutex_ids=[2]
     )
 
+    # Phase 3 dX 批量归约：acc/ld 复用三个 64KB 区域（与 reduce 同 phase 串行），
+    # cast 复用 DC_F32 32KB 区域（dx 归约先于 dApe/dW，mutex 串行保护）
+    dx_acc2d_tile_group = pl.make_tile_group(
+        type=dx_acc2d_tile_type, addrs=[UB_KV_APE_ADDR], mutex_ids=[2]
+    )
+    dx_ld2d_tile_group = pl.make_tile_group(
+        type=dx_ld2d_tile_type, addrs=[UB_SM_DSB_ADDR, UB_DKV_ADDR], mutex_ids=[3, 4]
+    )
+    dx_cast2d_tile_group = pl.make_tile_group(
+        type=dx_cast2d_tile_type, addrs=[UB_DC_F32_ADDR], mutex_ids=[1]
+    )
+
     tile_dc_f16 = d_cmp_kv_tile_group.next()
     tile_dc_f32 = d_cmp_kv_fp32_tile_group.next()
     tile_kv = kv_tile_group.next()
@@ -3081,6 +3268,9 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
     reduce_comp = reduce_comp_tile_group.next()
 
     p3_cast = reduce_result_tile_group.next()
+
+    dx_acc2d = dx_acc2d_tile_group.next()
+    dx_cast2d = dx_cast2d_tile_group.next()
 
     # ── D group division ──
     # 9201: CV_RATIO=1，block_idx 即 cube 核号（a5 为 CV_RATIO=2：core_idx 为 vec
@@ -3116,11 +3306,14 @@ def _init_vec_tile_groups(ivg_io_d_type, ivg_group_size, ivg_d_deal_size):
         reduce_acc,
         reduce_comp,
         p3_cast,
+        dx_acc2d,
+        dx_cast2d,
         move_x_tile_group,
         reduce_load_tile_group,
         reduce_acc_tile_group,
         reduce_comp_tile_group,
         reduce_result_tile_group,
+        dx_ld2d_tile_group,
         temp_tile_group,
     )
 
@@ -3337,26 +3530,6 @@ def compressor_grad(
         [tiling.hidden_size, 1],
         dtype=pl.DT_FP32,
     )
-    # ── dW 共享单 tile（[totalHeadDim, hiddenSize]）flat 视图：round 0 清零用 ──
-    d_w_kv_ws_flat_gm = pl.make_tensor(
-        d_w_kv_work_space_ptr,
-        [1, d_weight_work_space_size],
-        [d_weight_work_space_size, 1],
-        dtype=pl.DT_FP32,
-    )
-    d_w_gate_ws_flat_gm = pl.make_tensor(
-        d_w_gate_work_space_ptr,
-        [1, d_weight_work_space_size],
-        [d_weight_work_space_size, 1],
-        dtype=pl.DT_FP32,
-    )
-    # ── dX ws flat 视图：groupSize>1 每轮清零 group 共享槽用 ──
-    d_x_ws_flat_gm = pl.make_tensor(
-        d_x_work_space_ptr,
-        [1, d_x_work_space_size],
-        [d_x_work_space_size, 1],
-        dtype=pl.DT_FP32,
-    )
 
     # ── L1A CV 通道（vec insert / cube 读共享）──
     (
@@ -3406,11 +3579,14 @@ def compressor_grad(
             reduce_acc,
             reduce_comp,
             p3_cast,
+            dx_acc2d,
+            dx_cast2d,
             move_x_tile_group,
             reduce_load_tile_group,
             reduce_acc_tile_group,
             reduce_comp_tile_group,
             reduce_result_tile_group,
+            dx_ld2d_tile_group,
             temp_tile_group,
         ) = _init_vec_tile_groups(io_d_type, tiling.group_size, tiling.d_deal_size)
 
@@ -3463,38 +3639,6 @@ def compressor_grad(
 
         with pl.section_vector():
             if round_idx < round_cnt:
-                # round 0 先分片清零 dW 共享 tile（mm2 全程原子加的零基；
-                # 经 V1(0)→C1(0) FFTS 传递对全部 cube 可见）──
-                if round_idx == 0:
-                    _zero_d_weight_ws(
-                        vec_ctx,
-                        core_idx,
-                        reduce_acc,
-                        d_w_kv_ws_flat_gm,
-                        d_w_gate_ws_flat_gm,
-                    )
-                # groupSize>1 每轮清零本 db 面 group 共享 dX 槽
-                #    （mm1 原子加零基；置 scatter 前——V1/V2 set(MTE3)
-                #    覆盖清零 store，C1(r) 之后 cube 首个原子加可见）──
-                if vec_ctx.group_size > 1:
-                    # ── 竞态修复：zero(r) 重清的 db 面仍可能被其余核 P3(r-2)
-                    #    读取（二者均只由 C1(r-1) FFTS 放行，跨核 WAR 原未设防，
-                    #    r>=2 才有该对手）。r>=2 时先等全核 P3(r-2) MTE2 读完成
-                    #    （event 4，set 在 i=r-1 轮 P3 后发出），再放行本核 MTE3
-                    #    （zero+scatter 的 store）──
-                    if round_idx >= 2:
-                        pl.system.wait_cross_core(
-                            pipe=pl.PipeType.MTE3,
-                            event_id=4,
-                            sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
-                        )
-                    _zero_dx_ws_plane(
-                        vec_ctx,
-                        core_idx,
-                        reduce_acc,
-                        db_idx,
-                        d_x_ws_flat_gm,
-                    )
                 # ── 9201 窗口规划：每核独占一个 group 的整窗，两个 chunk 顺序处理 ──
                 #    coff=1: chunk0/1 = 窗口 M 前后半（a5 由 core 奇偶两条车道并行分担）
                 #    coff=2: chunk0/1 = 同窗口 D 左右半（a5 由同 cube 核两条车道分担）
@@ -3741,6 +3885,9 @@ def compressor_grad(
                     reduce_comp,
                     reduce_load_tile_group,
                     p3_cast,
+                    dx_acc2d,
+                    dx_ld2d_tile_group,
+                    dx_cast2d,
                     d_x_cache_gm,
                     d_x_result_gm,
                     d_x,
@@ -3761,16 +3908,6 @@ def compressor_grad(
                     cu_seqlens,
                     seq_ctx,
                 )
-
-                # ── 竞态修复配套：i<=R-2 时本核 P3(i-1) MTE2 读完成后发 set(event 4)，
-                #    供 i+1 轮 zero(i+1) 的 wait 消费（gs>1 才有消费者，条件全核
-                #    一致；保持 event 4 set/wait 严格交替）──
-                if vec_ctx.group_size > 1 and round_idx <= round_cnt - 2:
-                    pl.system.set_cross_core(
-                        pipe=pl.PipeType.MTE2,
-                        event_id=4,
-                        sync_mode=pl.CrossCoreSyncMode.INTER_BLOCK,
-                    )
 
                 # ── V2 结束后轮换：本轮快照 cur → prev（供下一轮 V2(i) 使用）──
                 (
