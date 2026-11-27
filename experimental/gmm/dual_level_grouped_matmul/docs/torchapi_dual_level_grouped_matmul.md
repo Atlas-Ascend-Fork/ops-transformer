@@ -63,7 +63,7 @@ cann_ops_transformer.dual_level_grouped_matmul(
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 维度(shape) |
 | --- | --- | --- | --- | --- | --- |
-| x | List[Tensor] | 必选 | 左矩阵，逻辑形状 (M,K)，M 为输入行数，K 为归约长度。 | FP4 E2M1 | (M,K/2) |
+| x | List[Tensor] | 必选 | 公式中的输入 `x`，按 M 轴分组，打包前的 shape 为 `(M,K)`。 | FP4 E2M1 | (M,K/2) |
 | weight | List[Tensor] | 必选 | 专家权重，E 为专家数，N 为输出列数。 | FP4 E2M1 | 非转置 (E,K,N/2)，转置 view (E,K/2,N)。 |
 | x_level0_scale | List[Tensor] | 必选 | 输入矩阵的 level0 缩放因子，格式为 ND。 | `torch.float32` | (M,ceil(K/level0_group_size)) |
 | x_level1_scale | List[Tensor] | 必选 | 输入矩阵的 level1 缩放因子，格式为 ND。 | E8M0 | (M,ceil(K/(2×level1_group_size)),2) |
@@ -77,8 +77,8 @@ cann_ops_transformer.dual_level_grouped_matmul(
 | split_item | int | 可选 | 输出配置，支持 2 或 3，默认值为 3。本接口的输入和输出 TensorList 长度均为 1，两种取值等价。 | - | - |
 | group_type | int | 可选 | 仅支持 0，默认 0。 | - | - |
 | act_type | int | 可选 | 默认值为 0，表示无激活。传入 `None` 时同样按 0 处理。 | - | - |
-| x_dtype、weight_dtype | int | 可选 | GMM 兼容参数。调用时使用默认值 `None`，接口按 FP4 E2M1 解释矩阵中的打包字节。 | - | - |
-| scale_dtype、per_token_scale_dtype | int | 可选 | GMM 兼容参数。调用时使用默认值 `None`，接口按 E8M0 解释权重和左矩阵的 level1 scale 字节。 | - | - |
+| x_dtype、weight_dtype | int | 可选 | GMM 兼容参数。默认值为 `None`，按 FP4 E2M1 解释矩阵中的打包字节。显式指定时使用 `torch_npu.float4_e2m1fn_x2`。 | - | - |
+| scale_dtype、per_token_scale_dtype | int | 可选 | GMM 兼容参数。默认值为 `None`，按 E8M0 解释权重和左矩阵的 level1 scale 字节。显式指定时使用 `torch_npu.float8_e8m0fnu`。 | - | - |
 | offset、antiquant_scale、antiquant_offset | List[Tensor] | 可选 | 预留参数。仅支持默认值 `None`。 | - | - |
 | activation_input、activation_quant_scale、activation_quant_offset | List[Tensor] | 可选 | 预留参数。仅支持默认值 `None`。 | - | - |
 | tuning_config | List[int] | 可选 | 默认值为 `None`。显式配置时支持 `[0]`。 | - | - |
@@ -93,7 +93,7 @@ cann_ops_transformer.dual_level_grouped_matmul(
 - 支持 Torch 单算子调用，不支持图模式。
 - 接口中的 TensorList 在 PyTorch 中以 `List[Tensor]` 表示。输入 TensorList 以及提供的 `bias` 均须包含一个张量，所有输入须位于同一 NPU。
 - `weight` 须为 FRACTAL_NZ，其余输入须为 ND。除规定的转置 `weight_level1_scale` 视图外，ND 输入须连续。各输入的存储偏移须为 0。
-- 专家数须大于 0，归约长度须为偶数。非转置权重的输出列数还须为偶数。非空 Tensor 场景下，归约长度须大于 2，输出列数须大于 1。维度上限和地址范围见 [ACLNN 约束说明](aclnnDualLevelGroupedMatmulWeightNz.md#约束说明)。
+- E 须大于 0，K 须为偶数，weight 不转置时 N 也须为偶数。当 `M > 0` 且 `N > 0` 时，要求 `K > 2`、`N > 1`。维度上限和地址范围见 [ACLNN 约束说明](aclnnDualLevelGroupedMatmulWeightNz.md#约束说明)。
 - 支持 M 为 0 或 N 为 0 的空 Tensor 场景，此时允许 K 为 0。返回的 TensorList 包含一个形状为 `(M,N)` 的空 Tensor。
 - `group_list` 须完整覆盖 M 行，允许专家的行数为 0。
   - `group_list_type=0` 表示累计结束位置，各项须非负且非递减，最后一项须等于 M。
