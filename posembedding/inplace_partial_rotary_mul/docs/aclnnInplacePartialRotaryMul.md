@@ -44,7 +44,7 @@
     x = x * cos + x\_rotate * sin
     $$
 
-- partial_slice参数说明：支持对输入张量的最后一维进行部分旋转位置编码计算。通过`partial_slice`指定[start, end)范围，仅对该范围内的数据进行旋转位置编码。
+- partialSlice参数说明：支持对输入张量的最后一维进行部分旋转位置编码计算。通过`partialSlice`指定[start, end)范围，仅对该范围内的数据进行旋转位置编码。
 
 ## 函数原型
 
@@ -367,7 +367,7 @@ int main() {
     void* workspaceAddr = nullptr;
     if (workspaceSize > 0) {
         ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret;);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
 
     // 调用aclnnInplacePartialRotaryMul第二段接口

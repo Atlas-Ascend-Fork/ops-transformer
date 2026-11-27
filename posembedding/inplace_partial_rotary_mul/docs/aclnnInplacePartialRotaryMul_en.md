@@ -46,7 +46,7 @@
     x = x * cos + x\_rotate * sin
     $$
 
-- partial_slice parameter description: Supports partial rotary position encoding on the last dimension of the input tensor. The `partial_slice` parameter specifies the [start, end) range. Rotary position encoding is performed only on the data in this range.
+- partialSlice parameter description: Supports partial rotary position encoding on the last dimension of the input tensor. The `partialSlice` parameter specifies the [start, end) range. Rotary position encoding is performed only on the data in this range.
 
 ## Function Prototype
 
@@ -367,7 +367,7 @@ int main() {
     void* workspaceAddr = nullptr;
     if (workspaceSize > 0) {
         ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret;);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
 
     // Call the second-phase API of aclnnInplacePartialRotaryMul.
