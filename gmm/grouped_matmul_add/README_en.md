@@ -15,9 +15,9 @@ English | [简体中文](./README.md)
 
 ## Function Description
 
-- Operator function: performs grouped matrix multiplication, and the dimension sizes of matrix multiplication can differ between groups. The basic function is matrix multiplication, for example $yRef_i[m_i,n_i]=x_i[m_i,k_i] \times weight_i[k_i,n_i]+y_i[m_i,n_i], i=1...g$, where g is the number of groups, and $m_i/k_i/n_i$ are the corresponding shapes. Currently, only grouping along the K axis is supported.
+- Operator function: Splits x and weight along K, multiplies each pair of groups, and adds each result to the corresponding group of yRef in place.
 
-  - Grouping along the K axis: the $k_i$ values differ, but $m_i/n_i$ are the same for each group.
+  - For group $i$, the matrices have shapes $[M,k_i]$ and $[k_i,N]$ after applying transposeX. The group size $k_i$ may vary. Each result has shape $[M,N]$.
 - Calculation formula:
 
   $$
@@ -54,15 +54,15 @@ English | [简体中文](./README.md)
     <tr>
       <td style="white-space: nowrap">groupList</td>
       <td style="white-space: nowrap">Input</td>
-      <td style="white-space: nowrap">Indicates the cumsum result (cumulative sum) of the matmul size distribution of the input along the K axis.</td>
+      <td style="white-space: nowrap">Cumulative K-axis group sizes or individual group sizes, selected by groupListType.</td>
       <td style="white-space: nowrap">INT64</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
     <tr>
       <td style="white-space: nowrap">y</td>
       <td style="white-space: nowrap">Input</td>
-      <td style="white-space: nowrap">Indicates the output matrix for in-place accumulation.</td>
-      <td style="white-space: nowrap">FLOAT32</td>
+      <td style="white-space: nowrap">Matrix holding the initial values for each group before accumulation.</td>
+      <td style="white-space: nowrap">FLOAT32. Atlas A2/A3 also support FLOAT16 and BFLOAT16 when the type matches x.</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
     <tr>
@@ -94,18 +94,24 @@ English | [简体中文](./README.md)
       <td style="white-space: nowrap">-</td>
     </tr>
     <tr>
-      <td style="white-space: nowrap">yRef</td>
+      <td style="white-space: nowrap">y</td>
       <td style="white-space: nowrap">Output</td>
-      <td style="white-space: nowrap">Indicates the output matrix for in-place accumulation.</td>
-      <td style="white-space: nowrap">FLOAT32</td>
+      <td style="white-space: nowrap">Matrix after accumulation. Each group’s result is the sum of its matrix product and its initial value.</td>
+      <td style="white-space: nowrap">Same as input y</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
   </tbody>
 </table>
 
+In the V1 and V2 ACLNN interfaces, input `y` and output `y` correspond to the same parameter, `yRef`. It holds the initial values before the call and the results after the call.
+
 ## Constraint Description
 
 - For each group of tensors in x and weight, the size of each dimension after 32-byte alignment must be less than the maximum int32 value 2147483647.
+- x and weight must both be FLOAT16 or both BFLOAT16. y supports FLOAT32; on Atlas A2/A3, y may also have the same FLOAT16 or BFLOAT16 type as x, and yRef has the same type as y. ACLNN requires contiguous yRef. For a 16-bit y, its view offset must be a non-negative multiple of 16 elements, and weight's N dimension must be a multiple of 16. The matmul result and y are added in FLOAT32 and converted to y's type.
+- Both ACLNN interfaces accept true and false for transposeX. On Ascend 950PR/950DT, ACLNN prepares the [K, M] layout required by the underlying operator when transposeX is false. These products require FLOAT32 y. transposeWeight must be false.
+- On Atlas A2/A3, the last dimensions of x and weight must be less than 65536. When x is not transposed or y is 16-bit, M, K, N and the group count must fit in non-negative int32, and M × N × group count must fit in int64.
+- When groupListType is 0, groupList contains cumulative K group sizes; when it is 1, groupList contains individual K group sizes. The original aclnnGroupedMatmulAdd API uses cumulative sizes, while V2 supports both formats.
 
 ## Interface Invocation
 

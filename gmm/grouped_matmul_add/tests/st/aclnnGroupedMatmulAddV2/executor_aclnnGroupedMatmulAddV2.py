@@ -33,21 +33,28 @@ class MethodTorchGroupedMatmulAddApi(BaseApi):
         groupList = input_data.kwargs["groupList"]
         y = input_data.kwargs["y"]
         groupListType = input_data.kwargs["groupListType"]
+        transpose_x = input_data.kwargs["transposeX"]
         y_dtype = y.dtype
         # 分组矩阵乘法
         result = []
         last = 0
         if groupListType == 0:
             for i in groupList.tolist():
-                x_tensor = x[last:i, :].to(torch.float64)
+                x_tensor = (x[last:i, :].t() if transpose_x else x[:, last:i]).to(
+                    torch.float64
+                )
                 weight_tensor = weight[last:i, :].to(torch.float64)
-                result.append(torch.matmul(x_tensor.t(), weight_tensor))
+                result.append(torch.matmul(x_tensor, weight_tensor))
                 last = i
         else:
             for size in groupList.tolist():
-                x_tensor = x[last : last + size, :].to(torch.float64)
+                x_tensor = (
+                    x[last : last + size, :].t()
+                    if transpose_x
+                    else x[:, last : last + size]
+                ).to(torch.float64)
                 weight_tensor = weight[last : last + size, :].to(torch.float64)
-                result.append(torch.matmul(x_tensor.t(), weight_tensor))
+                result.append(torch.matmul(x_tensor, weight_tensor))
                 last += size
 
         result = torch.stack(result).reshape(y.shape) + y.cpu()
@@ -60,13 +67,14 @@ class MethodTorchGroupedMatmulAddApi(BaseApi):
         x = input_data.kwargs["x"]
         groupList = input_data.kwargs["groupList"]
         groupListType = input_data.kwargs["groupListType"]
+        total_k = x.shape[0] if input_data.kwargs["transposeX"] else x.shape[1]
 
         if groupListType == 0:
             if self.device == "pyaclnn":
                 input_data.kwargs["groupList"] = (
                     torch.linspace(
-                        x.shape[0] // groupList.shape[0],
-                        x.shape[0],
+                        total_k // groupList.shape[0],
+                        total_k,
                         steps=int(groupList.size(0)),
                     )
                     .round()
@@ -76,8 +84,8 @@ class MethodTorchGroupedMatmulAddApi(BaseApi):
             else:
                 input_data.kwargs["groupList"] = (
                     torch.linspace(
-                        x.shape[0] // groupList.shape[0],
-                        x.shape[0],
+                        total_k // groupList.shape[0],
+                        total_k,
                         steps=int(groupList.size(0)),
                     )
                     .round()
@@ -85,7 +93,7 @@ class MethodTorchGroupedMatmulAddApi(BaseApi):
                     .cpu()
                 )
         else:
-            group_size = x.shape[0] // groupList.shape[0]
+            group_size = total_k // groupList.shape[0]
             if self.device == "pyaclnn":
                 input_data.kwargs["groupList"] = torch.full(
                     (groupList.size(0),), group_size, dtype=torch.int64

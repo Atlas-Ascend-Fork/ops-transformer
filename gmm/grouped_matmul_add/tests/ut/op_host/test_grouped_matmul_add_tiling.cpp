@@ -142,3 +142,57 @@ TEST_F(GroupedMatmulAddTiling, test_tiling_fp16_v2)
         ExecuteTestCase(tilingContextPara, ge::GRAPH_SUCCESS, expectTilingKey, expectTilingData, expectWorkspaces);
     }
 }
+
+TEST_F(GroupedMatmulAddTiling, ExpandedPathAcceptsLargerYBacking)
+{
+    optiling::GroupedMatmulAddCompileInfo compileInfo = {};
+    gert::TilingContextPara context("GroupedMatmulAdd",
+                                    {{{{17, 32}, {17, 32}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                     {{{32, 32}, {32, 32}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                     {{{2}, {2}}, ge::DT_INT64, ge::FORMAT_ND},
+                                     {{{1120}, {1120}}, ge::DT_FLOAT16, ge::FORMAT_ND}},
+                                    {{{{1120}, {1120}}, ge::DT_FLOAT16, ge::FORMAT_ND}},
+                                    {{"transpose_x", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                     {"transpose_weight", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                     {"group_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+                                     {"group_list_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)}},
+                                    &compileInfo);
+    TilingInfo result;
+    ASSERT_TRUE(ExecuteTiling(context, result));
+    EXPECT_EQ(result.tilingKey, 6);
+}
+
+TEST_F(GroupedMatmulAddTiling, ExpandedPathRejectsTooSmallYBacking)
+{
+    optiling::GroupedMatmulAddCompileInfo compileInfo = {};
+    gert::TilingContextPara context("GroupedMatmulAdd",
+                                    {{{{17, 32}, {17, 32}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                     {{{32, 32}, {32, 32}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                     {{{2}, {2}}, ge::DT_INT64, ge::FORMAT_ND},
+                                     {{{1087}, {1087}}, ge::DT_FLOAT16, ge::FORMAT_ND}},
+                                    {{{{1087}, {1087}}, ge::DT_FLOAT16, ge::FORMAT_ND}},
+                                    {{"transpose_x", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                     {"transpose_weight", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                     {"group_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+                                     {"group_list_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)}},
+                                    &compileInfo);
+    ExecuteTestCase(context, ge::GRAPH_FAILED);
+}
+
+TEST_F(GroupedMatmulAddTiling, ExpandedPathRejectsSchedulingOverflow)
+{
+    constexpr int64_t M = 2147483647;
+    optiling::GroupedMatmulAddCompileInfo compileInfo = {};
+    gert::TilingContextPara context("GroupedMatmulAdd",
+                                    {{{{M, 16}, {M, 16}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                     {{{16, 65520}, {16, 65520}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+                                     {{{1}, {1}}, ge::DT_INT64, ge::FORMAT_ND},
+                                     {{{1, M, 65520}, {1, M, 65520}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+                                    {{{{1, M, 65520}, {1, M, 65520}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+                                    {{"transpose_x", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                     {"transpose_weight", Ops::Transformer::AnyValue::CreateFrom<bool>(false)},
+                                     {"group_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2)},
+                                     {"group_list_type", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)}},
+                                    &compileInfo);
+    ExecuteTestCase(context, ge::GRAPH_FAILED);
+}

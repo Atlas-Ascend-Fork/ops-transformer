@@ -13,9 +13,9 @@
 
 ## 功能说明
 
-- 算子功能：实现分组矩阵乘计算，每组矩阵乘的维度大小可以不同。基本功能为矩阵乘，如$yRef_i[m_i,n_i]=x_i[m_i,k_i] \times weight_i[k_i,n_i]+y_i[m_i,n_i], i=1...g$，其中g为分组个数，$m_i/k_i/n_i$为对应shape。当前仅支持K轴分组。
+- 算子功能：沿K轴对x和weight分组，将每组矩阵乘的结果累加到yRef的对应组。
 
-  - k轴分组：$k_i$各不相同，但$m_i/n_i$每组相同。
+  - 按transposeX处理输入后，第$i$组参与矩阵乘的形状为$[M,k_i]$和$[k_i,N]$。各组的$k_i$可以不同，输出均为$[M,N]$。
 - 计算公式：
 
   $$
@@ -52,15 +52,15 @@
     <tr>
       <td style="white-space: nowrap">groupList</td>
       <td style="white-space: nowrap">输入</td>
-      <td style="white-space: nowrap">表示输入K轴方向的matmul大小分布的cumsum结果（累积和）。</td>
+      <td style="white-space: nowrap">K轴各组大小的累积和或各组长度，由groupListType指定。</td>
       <td style="white-space: nowrap">INT64</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
     <tr>
       <td style="white-space: nowrap">y</td>
       <td style="white-space: nowrap">输入</td>
-      <td style="white-space: nowrap">表示原地累加的输出矩阵。</td>
-      <td style="white-space: nowrap">FLOAT32</td>
+      <td style="white-space: nowrap">累加前的矩阵，保存各组的初始值。</td>
+      <td style="white-space: nowrap">FLOAT32；Atlas A2/A3 还支持与 x 同类型的 FLOAT16、BFLOAT16</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
     <tr>
@@ -92,18 +92,24 @@
       <td style="white-space: nowrap">-</td>
     </tr>
     <tr>
-      <td style="white-space: nowrap">yRef</td>
+      <td style="white-space: nowrap">y</td>
       <td style="white-space: nowrap">输出</td>
-      <td style="white-space: nowrap">表示原地累加的输出矩阵。</td>
-      <td style="white-space: nowrap">FLOAT32</td>
+      <td style="white-space: nowrap">累加后的矩阵，每组结果等于该组的矩阵乘结果加上该组的初始值。</td>
+      <td style="white-space: nowrap">与输入 y 相同</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
   </tbody>
 </table>
 
+在 ACLNN V1/V2 接口中，输入 `y` 和输出 `y` 对应同一个参数 `yRef`。调用前，`yRef` 保存初始值；调用后，计算结果写回 `yRef`。
+
 ## 约束说明
 
 - x和weight中每一组tensor的每一维大小在32字节对齐后都应小于int32的最大值2147483647。
+- x和weight必须同为FLOAT16或同为BFLOAT16。y支持FLOAT32；在Atlas A2/A3上，y还可与x同为FLOAT16或BFLOAT16，yRef与y类型相同。ACLNN接口要求yRef连续。16位y的视图偏移须为非负数且为16个元素的倍数，weight的N维须为16的倍数；matmul结果与y在FLOAT32中相加后转换为y的类型。
+- 两个ACLNN接口的transposeX均支持true和false。在Ascend 950PR/950DT上，transposeX为false时，ACLNN将x整理为底层算子要求的[K, M]布局。该系列产品的y须为FLOAT32。transposeWeight仅支持false。
+- Atlas A2/A3上，x和weight的最后一维须小于65536。使用x不转置或16位y时，M、K、N及分组数须在int32非负范围内，M × N × 分组数须在int64范围内。
+- groupListType为0时，groupList为各组K长度的累积和；为1时，groupList为各组K长度。原始aclnnGroupedMatmulAdd接口使用累积和形式，V2接口支持两种形式。
 
 ## 调用说明
 

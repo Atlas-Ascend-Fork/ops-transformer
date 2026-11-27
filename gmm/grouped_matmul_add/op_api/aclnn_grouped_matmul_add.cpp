@@ -8,10 +8,12 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include <string>
+#include <utility>
 #include "aclnn_grouped_matmul_add.h"
 #include "aclnn_grouped_matmul_add_v2.h"
 
 #include <dlfcn.h>
+#include <limits>
 #include <new>
 
 #include "aclnn_kernels/transdata.h"
@@ -43,6 +45,14 @@ extern "C" {
 #endif
 
 namespace {
+constexpr int64_t ELEMENTS_PER_32B_16BIT = 16;
+
+bool UsesArch35Kernel()
+{
+    const auto arch = op::GetCurrentPlatformInfo().GetCurNpuArch();
+    return arch == NpuArch::DAV_3510 || arch == NpuArch::DAV_9201 || arch == NpuArch::DAV_9202;
+}
+
 static aclnnStatus CheckNotNull(gmm_add_advanced::GroupedMatmulAddParams params, const char* opName)
 {
     CHECK_COND(params.x != nullptr, ACLNN_ERR_PARAM_NULLPTR, "In op [%s], [%s] must not be nullptr.", opName, "x");
@@ -96,11 +106,44 @@ static aclnnStatus CheckShape(gmm_add_advanced::GroupedMatmulAddParams params, c
                "In op [%s], when non-quant, the shape of [%s] is not supported, got [dim num %zu]. "
                "Constraint:[dim num must be 1].",
                opName, "groupList", groupListDimNum);
-    auto aKDim = xViewShape.GetDim(0);                // 0: x shape k direction
-    auto aMDim = xViewShape.GetDim(1);                // 1: x shape m direction
+    auto aKDim = xViewShape.GetDim(params.transposeX ? 0 : 1);
+    auto aMDim = xViewShape.GetDim(params.transposeX ? 1 : 0);
     auto bKDim = wViewShape.GetDim(0);                // 0: w shape k direction
     auto bNDim = wViewShape.GetDim(1);                // 1: w shape m direction
     auto groupListDim = groupListViewShape.GetDim(0); // 0: groupList shape
+
+    // The expanded DAV_2201 paths narrow the dimensions in the matmul tiling.
+    // Validate before calculating sizes or passing dimensions to tiling.
+    const bool expandedPath = op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_2201 &&
+                              (!params.transposeX || params.yRef->GetDataType() != DataType::DT_FLOAT);
+    if (expandedPath) {
+        constexpr int64_t DIM_LIMIT = 65536;
+        constexpr int64_t INT32_LIMIT = std::numeric_limits<int32_t>::max();
+        CHECK_COND(aMDim >= 0 && aMDim <= INT32_LIMIT && aKDim >= 0 && aKDim <= INT32_LIMIT && bNDim >= 0 &&
+                       bNDim <= INT32_LIMIT && groupListDim >= 0 && groupListDim <= INT32_LIMIT,
+                   ACLNN_ERR_PARAM_INVALID, "In op [%s], M, K, N and group count must fit in int32.", opName);
+        CHECK_COND(xViewShape.GetDim(1) < DIM_LIMIT && bNDim < DIM_LIMIT, ACLNN_ERR_PARAM_INVALID,
+                   "In op [%s], the last dimensions of x and weight must be less than 65536.", opName);
+        const auto maxSize = std::numeric_limits<int64_t>::max();
+        CHECK_COND(aMDim == 0 || bNDim <= maxSize / aMDim, ACLNN_ERR_PARAM_INVALID,
+                   "In op [%s], output element count exceeds int64.", opName);
+        const int64_t matrixSize = aMDim * bNDim;
+        CHECK_COND(matrixSize == 0 || groupListDim <= maxSize / matrixSize, ACLNN_ERR_PARAM_INVALID,
+                   "In op [%s], output element count exceeds int64.", opName);
+        int64_t actualSize = 1;
+        for (size_t i = 0; i < yRefDimNum; ++i) {
+            const auto dim = yRefViewShape.GetDim(i);
+            CHECK_COND(dim >= 0 && (actualSize == 0 || dim <= maxSize / actualSize), ACLNN_ERR_PARAM_INVALID,
+                       "In op [%s], yRef element count exceeds int64 or has a negative dimension.", opName);
+            actualSize *= dim;
+        }
+    }
+
+    // Require a 32-byte-multiple row width for the initial 16-bit output path.
+    // The FP32 path keeps its old contract.
+    CHECK_COND(params.yRef->GetDataType() == DataType::DT_FLOAT || bNDim % ELEMENTS_PER_32B_16BIT == 0,
+               ACLNN_ERR_PARAM_INVALID,
+               "In op [%s], N must be a multiple of 16 when yRef is FLOAT16 or BFLOAT16, got %ld.", opName, bNDim);
 
     CHECK_COND(aMDim >= 0, ACLNN_ERR_PARAM_INVALID,
                "In op [%s], when non-quant, the shape of [%s] is not supported, got [M %ld]. Constraint:[M must "
@@ -125,9 +168,7 @@ static aclnnStatus CheckShape(gmm_add_advanced::GroupedMatmulAddParams params, c
                "Constraint:[shape size should be %ld].",
                opName, "yRef", actualYSize, expectedYSize);
 
-    if (op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510 ||
-        op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_9201 ||
-        op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_9202) {
+    if (UsesArch35Kernel()) {
         auto groupNum = params.groupList->GetViewShape().GetDim(0);
         auto yDimNum = params.yRef->GetViewShape().GetDimNum();
         if (yDimNum != Dim3) {
@@ -170,6 +211,17 @@ static aclnnStatus DataContiguous(const aclTensor*& tensor, aclOpExecutor* execu
 static aclnnStatus ParamsDataContiguous(gmm_add_advanced::GroupedMatmulAddParams& params, aclOpExecutor* executorPtr,
                                         const char* opName)
 {
+    if (!params.transposeX && UsesArch35Kernel()) {
+        // Present [K, M] to the split-K kernel and materialize it with the contiguous step below.
+        auto shape = params.x->GetViewShape();
+        auto strides = params.x->GetViewStrides();
+        std::swap(shape[0], shape[1]);
+        std::swap(strides[0], strides[1]);
+        params.x =
+            executorPtr->CreateView(params.x, shape, params.x->GetStorageShape(), strides, params.x->GetViewOffset());
+        CHECK_RET(params.x != nullptr, ACLNN_ERR_INNER_NULLPTR);
+        params.transposeX = true;
+    }
     CHECK_COND(DataContiguous(params.x, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
                "In op [%s], when non-quant, contiguous [%s] failed.", opName, "x");
     CHECK_COND(DataContiguous(params.weight, executorPtr) == ACLNN_SUCCESS, ACLNN_ERR_PARAM_INVALID,
@@ -183,9 +235,17 @@ static aclnnStatus CheckDtype(gmm_add_advanced::GroupedMatmulAddParams params, c
 {
     auto xDtype = params.x->GetDataType();
     auto weightDtype = params.weight->GetDataType();
-    CHECK_COND(params.yRef->GetDataType() == DataType::DT_FLOAT, ACLNN_ERR_PARAM_INVALID,
-               "In op [%s], when non-quant, the data type of [%s] is not supported, got [%s].", opName, "yRef",
-               op::ToString(params.yRef->GetDataType()).GetString());
+    CHECK_COND(params.yRef->GetDataType() == DataType::DT_FLOAT || params.yRef->GetDataType() == xDtype,
+               ACLNN_ERR_PARAM_INVALID, "In op [%s], when non-quant, the data type of [%s] is not supported, got [%s].",
+               opName, "yRef", op::ToString(params.yRef->GetDataType()).GetString());
+    if (params.yRef->GetDataType() != DataType::DT_FLOAT) {
+        // The initial 16-bit kernel accesses a flat, 32-byte-aligned output view.
+        CHECK_COND(IsContiguous(params.yRef), ACLNN_ERR_PARAM_INVALID, "In op [%s], 16-bit yRef must be contiguous.",
+                   opName);
+        const auto offset = params.yRef->GetViewOffset();
+        CHECK_COND(offset >= 0 && offset % ELEMENTS_PER_32B_16BIT == 0, ACLNN_ERR_PARAM_INVALID,
+                   "In op [%s], 16-bit yRef view offset must be a nonnegative multiple of 16 elements.", opName);
+    }
     CHECK_COND(params.groupList->GetDataType() == DataType::DT_INT64, ACLNN_ERR_PARAM_INVALID,
                "In op [%s], when non-quant, the data type of [%s] is not supported, got [%s].", opName, "groupList",
                op::ToString(params.groupList->GetDataType()).GetString());
@@ -209,8 +269,9 @@ static aclnnStatus CheckAttrs(gmm_add_advanced::GroupedMatmulAddParams params, c
                params.groupListType);
     CHECK_COND(params.groupType == 2, ACLNN_ERR_PARAM_INVALID,
                "In op [%s], when non-quant, [%s] must be 2, but got [%ld].", opName, "groupType", params.groupType);
-    CHECK_COND(params.transposeX, ACLNN_ERR_PARAM_INVALID, "In op [%s], when non-quant, [%s] must be True.", opName,
-               "transposeX");
+    CHECK_COND(op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_2201 ||
+                   params.yRef->GetDataType() == DataType::DT_FLOAT,
+               ACLNN_ERR_PARAM_INVALID, "In op [%s], 16-bit yRef is supported only on DAV_2201.", opName);
     CHECK_COND(!params.transposeWeight, ACLNN_ERR_PARAM_INVALID, "In op [%s], when non-quant,  [%s] must be False.",
                opName, "transposeWeight");
     return ACLNN_SUCCESS;

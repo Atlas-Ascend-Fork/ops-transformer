@@ -25,9 +25,9 @@
 
 ## Function
 
-- Description: Implements grouped matrix multiplication, where the dimensions of each group can differ. The basic function is matrix multiplication, as in $y_i[m_i,n_i]=x_i[m_i,k_i] \times weight_i[k_i,n_i]+y_i[m_i,n_i], i=1...g$, where g is the number of groups and $m_i/k_i/n_i$ are the corresponding shapes. Both input and output data types are aclTensor, with K-axis grouping.
+- Description: Splits x and weight along K, multiplies each pair of groups, and adds each result to the corresponding group of yRef in place.
 
-  - K-axis grouping: $k_i$ values differ across groups, but $m_i/n_i$ are the same for each group.
+  - For group $i$, the matrices have shapes $[M,k_i]$ and $[k_i,N]$ after applying transposeX. The group size $k_i$ may vary. Each result has shape $[M,N]$.
   - New features compared with the [GroupedMatmulAdd](../../grouped_matmul_add/docs/aclnnGroupedMatmulAdd_en.md) API:
     - Supports using the values in groupList as the size of each group on the grouping axis.
 - Formula:
@@ -93,10 +93,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>x (aclTensor)</td>
       <td>Input</td>
       <td>The input x in the formula.</td>
-      <td>        <ul>
-          <li>x must be transposed.</li>
-        </ul>
-      </td>
+      <td>The shape of x is [K, M] when transposeX is true and [M, K] when it is false.</td>
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
       <td>2</td>
@@ -106,10 +103,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>weight (aclTensor)</td>
       <td>Input</td>
       <td>Denotes the weight, i.e., weight in the formula.</td>
-      <td>        <ul>
-          <li>weight does not support transposition.</li>
-        </ul>
-      </td>
+      <td>Shape [K, N].</td>
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
       <td>2</td>
@@ -121,16 +115,16 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>Indicates the matmul size distribution of the input and output along the grouping axis.</td>
       <td>-</td>
       <td>INT64</td>
-      <td>-</td>
-      <td>-</td>
-      <td>-</td>
+      <td>ND</td>
+      <td>1</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>transposeX (bool)</td>
       <td>Input</td>
       <td>Indicates whether the x matrix is transposed. A Boolean value on the host.</td>
       <td>        <ul>
-          <li>Currently, only True is supported.</li>
+          <li>Supports true and false.</li>
         </ul>
       </td>
       <td>BOOL</td>
@@ -143,7 +137,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>Input</td>
       <td>Indicates whether the weight matrix is transposed.</td>
       <td>        <ul>
-          <li>Currently only False is supported.</li>
+          <li>Currently only false is supported.</li>
         </ul>
       </td>
       <td>BOOL</td>
@@ -181,12 +175,12 @@ aclnnStatus aclnnGroupedMatmulAddV2(
     <tr>
       <td>yRef (aclTensor)</td>
       <td>Input/Output</td>
-      <td>Input/output matrix for in-place accumulation, aclTensor on the Device side, y/yRef in the formula.</td>
-      <td>-</td>
-      <td>FLOAT32</td>
+      <td>Input/output tensor for in-place accumulation.</td>
+      <td>Shape [E, M, N], where E is the number of groups. Atlas A2/A3 also support the 2D layout [E × M, N]. FLOAT16 and BFLOAT16 are supported only on Atlas A2/A3 and must match the data type of x.</td>
+      <td>FLOAT32, FLOAT16, BFLOAT16</td>
       <td>ND</td>
-      <td>3</td>
-      <td>-</td>
+      <td>2, 3</td>
+      <td>×</td>
     </tr>
     <tr>
       <td>workspaceSize (uint64_t)</td>
@@ -234,8 +228,8 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>The input x, weight, groupList, or yRef is a null pointer.</td>
     </tr>
     <tr>
-      <td rowspan="3">ACLNN_ERR_PARAM_INVALID</td>
-      <td rowspan="3">161002</td>
+      <td rowspan="5">ACLNN_ERR_PARAM_INVALID</td>
+      <td rowspan="5">161002</td>
       <td>The data type or data format of x, weight, groupList, or yRef is out of the supported range.</td>
     </tr>
     <tr>
@@ -243,6 +237,12 @@ aclnnStatus aclnnGroupedMatmulAddV2(
     </tr>
     <tr>
       <td>The shapes of x, weight, and yRef do not meet the matmul constraints.</td>
+    </tr>
+    <tr>
+      <td>transposeWeight is true or groupType is not 2, or groupListType is neither 0 nor 1.</td>
+    </tr>
+    <tr>
+      <td>yRef is non-contiguous, or a 16-bit yRef violates the view offset or N alignment requirements.</td>
     </tr>
   </tbody></table>
 
@@ -269,13 +269,17 @@ aclnnStatus aclnnGroupedMatmulAddV2(
 
 - Deterministic computation description: aclnnGroupedMatmulAddV2 defaults to a deterministic implementation.
 - The size of each dimension of each group of tensors in x and weight, after 32-byte alignment, must be less than the maximum int32 value 2147483647.
-- The last dimension of each group of tensors in x and weight must be less than 65536. The last dimension of $x$ refers to the K axis of $x$ when x is not transposed, or the M axis of $x$ when x is transposed. The last dimension of $weight$ refers to the N axis of $weight$ when weight is not transposed, or the K axis of $weight$ when weight is transposed.
+- On Atlas A2/A3, the last dimensions of x and weight must be less than 65536. For x, this is M when transposeX is true and K when it is false. For weight, it is N.
 - The supported input type combinations are as follows:
   - x is FLOAT16, weight is FLOAT16, and yRef is FLOAT32.
   - x is BFLOAT16, weight is BFLOAT16, and yRef is FLOAT32.
+  - On Atlas A2/A3, x, weight and yRef may all be FLOAT16 or all BFLOAT16.
+- On Ascend 950PR/950DT, transposeX=false may require workspace to rearrange x. Use the size returned by the first-phase API.
+- yRef must be contiguous. For FLOAT16 or BFLOAT16 yRef, its view offset must be a non-negative multiple of 16 elements and N must be a multiple of 16. The matrix product and yRef are added in FLOAT32 before conversion to the data type of yRef.
+- On Atlas A2/A3, when transposeX is false or yRef is 16-bit, M, K, N and the group count must fit in a non-negative int32 value. The output element count (M × N × group count) must fit in int64.
 - groupListType: 0 and 1 are supported.
-  - groupListType=0: groupList must be a non-negative monotonic non-decreasing sequence (cumulative sum), and the last value must not exceed the first dimension of the tensor in x. Example with K=256 and E=4 (group sizes of 64, 0, 128, 64): `[64, 64, 192, 256]`
-  - groupListType=1: groupList must be a non-negative sequence (group sizes), and the sum of values must not exceed the first dimension of the tensor in x. Example: `[64, 0, 128, 64]`
+  - groupListType=0: groupList must be a non-negative monotonic non-decreasing sequence (cumulative sum), and the last value must not exceed the K dimension of x. Example with K=256 and E=4 (group sizes of 64, 0, 128, 64): `[64, 64, 192, 256]`
+  - groupListType=1: groupList must be a non-negative sequence (group sizes), and the sum of values must not exceed the K dimension of x. Example: `[64, 0, 128, 64]`
 - The first dimension of groupList supports a maximum of 1024, i.e., a maximum of 1024 groups.
 
 ## Example
@@ -390,11 +394,11 @@ int aclnnGroupedMatmulAddV2Test(int32_t deviceId, aclrtStream &stream) {
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("Init acl failed. ERROR: %d\n", ret); return ret);
 
     // 2. Construct the inputs and outputs. Custom construction is required based on the API.
-    std::vector<int64_t> xShape = {512, 256};
+    std::vector<int64_t> xShape = {256, 512};
     std::vector<int64_t> weightShape= {512, 256};
     std::vector<int64_t> yShape = {2, 256, 256};
     std::vector<int64_t> groupListShape = {2};
-    std::vector<int64_t> groupListData = {256, 512};
+    std::vector<int64_t> groupListData = {192, 320};
     void* xDeviceAddr = nullptr;
     void* weightDeviceAddr = nullptr;
     void* yDeviceAddr = nullptr;
@@ -404,22 +408,22 @@ int aclnnGroupedMatmulAddV2Test(int32_t deviceId, aclrtStream &stream) {
     aclTensor* groupedList = nullptr;
     aclTensor* y = nullptr;
     aclTensor* yRef = nullptr;
-    bool transpose_x = true;
+    bool transpose_x = false;
     bool transpose_weight = false;
     int group_type = 2;
-    int groupListType = 0;
+    int groupListType = 1;
 
-    // Create the x aclTensorList.
+    // Create the x aclTensor.
     ret = CreateAclTensor<uint16_t>(xShape, &xDeviceAddr, aclDataType::ACL_BF16, &x);
     std::unique_ptr<aclTensor, aclnnStatus (*)(const aclTensor *)> xTensorPtr(x, aclDestroyTensor);
     std::unique_ptr<void, aclError (*)(void *)> xDeviceAddrPtr(xDeviceAddr, aclrtFree);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
-    // Create the weight aclTensorList.
+    // Create the weight aclTensor.
     ret = CreateAclTensor<uint16_t>(weightShape, &weightDeviceAddr, aclDataType::ACL_BF16, &weight);
     std::unique_ptr<aclTensor, aclnnStatus (*)(const aclTensor *)> weightTensorPtr(weight, aclDestroyTensor);
     std::unique_ptr<void, aclError (*)(void *)> weightDeviceAddrPtr(weightDeviceAddr, aclrtFree);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
-    // Create the y aclTensorList.
+    // Create the y aclTensor.
     ret = CreateAclTensor<float>(yShape, &yDeviceAddr, aclDataType::ACL_FLOAT, &y);
     std::unique_ptr<aclTensor, aclnnStatus (*)(const aclTensor *)> yTensorPtr(y, aclDestroyTensor);
     std::unique_ptr<void, aclError (*)(void *)> yDeviceAddrPtr(yDeviceAddr, aclrtFree);

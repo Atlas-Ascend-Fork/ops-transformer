@@ -23,9 +23,9 @@
 
 ## 功能说明
 
-- 接口功能：实现分组矩阵乘计算，每组矩阵乘的维度大小可以不同。基本功能为矩阵乘，如$y_i[m_i,n_i]=x_i[m_i,k_i] \times weight_i[k_i,n_i]+y_i[m_i,n_i], i=1...g$，其中g为分组个数，$m_i/k_i/n_i$为对应shape。输入输出数据类型均为aclTensor，K轴分组。
+- 接口功能：沿K轴对x和weight分组，将每组矩阵乘的结果累加到yRef的对应组。
 
-  - k轴分组：$k_i$各不相同，但$m_i/n_i$每组相同。
+  - 按transposeX处理输入后，第$i$组参与矩阵乘的形状为$[M,k_i]$和$[k_i,N]$。各组的$k_i$可以不同，输出均为$[M,N]$。
   - 与[GroupedMatmulAdd](../../grouped_matmul_add/docs/aclnnGroupedMatmulAdd.md)接口对比新增功能：
     - 支持groupList中数值为分组轴上每组大小
 - 计算公式：
@@ -91,11 +91,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>x（aclTensor）</td>
       <td>输入</td>
       <td>公式中的输入x。</td>
-      <td>
-        <ul>
-          <li>x必须转置。</li>
-        </ul>
-      </td>
+      <td>transposeX为true时，x的shape为[K, M]；为false时，x的shape为[M, K]。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>2</td>
@@ -105,11 +101,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>weight（aclTensor）</td>
       <td>输入</td>
       <td>表示权重，公式中的weight。</td>
-      <td>
-        <ul>
-          <li>weight不支持转置。</li>
-        </ul>
-      </td>
+      <td>shape为[K, N]。</td>
       <td>FLOAT16、BFLOAT16</td>
       <td>ND</td>
       <td>2</td>
@@ -122,8 +114,8 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>-</td>
       <td>INT64</td>
       <td>ND</td>
-      <td>-</td>
-      <td>-</td>
+      <td>1</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>transposeX（bool）</td>
@@ -131,7 +123,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>表示x矩阵是否转置，Host侧的布尔值。</td>
       <td>
         <ul>
-          <li>当前仅支持True。</li>
+          <li>支持true和false。</li>
         </ul>
       </td>
       <td>BOOL</td>
@@ -145,7 +137,7 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>表示weight矩阵是否转置。</td>
       <td>
         <ul>
-          <li>当前仅支持False。</li>
+          <li>当前仅支持false。</li>
         </ul>
       </td>
       <td>BOOL</td>
@@ -185,11 +177,11 @@ aclnnStatus aclnnGroupedMatmulAddV2(
     <tr>
       <td>yRef（aclTensor）</td>
       <td>输入/输出</td>
-      <td>表示原地累加的输入输出矩阵，Device侧的aclTensor类型，公式中的y/yRef。</td>
-      <td>-</td>
-      <td>FLOAT32</td>
+      <td>原地累加的输入输出张量。</td>
+      <td>shape为[E, M, N]，E为分组数。Atlas A2/A3也支持二维布局[E × M, N]。仅Atlas A2/A3支持FLOAT16、BFLOAT16，此时数据类型须与x一致。</td>
+      <td>FLOAT32、FLOAT16、BFLOAT16</td>
       <td>ND</td>
-      <td>3</td>
+      <td>2、3</td>
       <td>×</td>
     </tr>
     <tr>
@@ -238,8 +230,8 @@ aclnnStatus aclnnGroupedMatmulAddV2(
       <td>传入的x、weight、groupList、yRef是空指针。</td>
     </tr>
     <tr>
-      <td rowspan="3">ACLNN_ERR_PARAM_INVALID</td>
-      <td rowspan="3">161002</td>
+      <td rowspan="5">ACLNN_ERR_PARAM_INVALID</td>
+      <td rowspan="5">161002</td>
       <td>x、weight、groupList、yRef的数据类型或数据格式不在支持的范围之内。</td>
     </tr>
     <tr>
@@ -247,6 +239,12 @@ aclnnStatus aclnnGroupedMatmulAddV2(
     </tr>
     <tr>
       <td>x、weight、yRef的shape不满足矩阵乘限制要求。</td>
+    </tr>
+    <tr>
+      <td>transposeWeight为true，或groupType不为2，或groupListType不为0或1。</td>
+    </tr>
+    <tr>
+      <td>yRef非连续，或16位yRef的视图偏移量、N维不满足对齐要求。</td>
     </tr>
   </tbody></table>
 
@@ -276,15 +274,19 @@ aclnnStatus aclnnGroupedMatmulAddV2(
 - 支持的输入类型组合为：
   - x为FLOAT16、weight为FLOAT16、yRef为FLOAT32。
   - x为BFLOAT16、weight为BFLOAT16、yRef为FLOAT32。
+  - Atlas A2/A3还支持x、weight和yRef同为FLOAT16，或同为BFLOAT16。
+- 在Ascend 950PR/950DT上，transposeX为false时可能需要额外的workspace调整x的布局，请以第一段接口返回的workspaceSize为准。
+- yRef须为连续Tensor。当yRef为FLOAT16或BFLOAT16时，视图偏移量须为非负数且为16个元素的倍数，N须为16的倍数。矩阵乘结果与yRef在FLOAT32中相加，再转换为yRef的数据类型。
 - groupListType：支持0、1。
-  - groupListType=0：groupList须为非负单调非递减数列（累积和），最后一个值不大于x中tensor的第一维。以K=256、E=4（各组大小依次为64、0、128、64）为例：`[64, 64, 192, 256]`
-  - groupListType=1：groupList须为非负数列（各组大小），数值总和不大于x中tensor的第一维。例如：`[64, 0, 128, 64]`
+  - groupListType=0：groupList须为非负单调非递减数列（累积和），最后一个值不大于x中tensor的K维。以K=256、E=4（各组大小依次为64、0、128、64）为例：`[64, 64, 192, 256]`
+  - groupListType=1：groupList须为非负数列（各组大小），数值总和不大于x中tensor的K维。例如：`[64, 0, 128, 64]`
 - groupList第1维最大支持1024，即最多支持1024个group。
 
 <!-- npu="A3,910b" id7 -->
 ### Atlas A3/A2系列产品
 
-- x和weight中每一组tensor的最后一维大小都应小于65536。$x$的最后一维指当x不转置时$x$的K轴或当x转置时$x$的M轴。$weight$的最后一维指当weight不转置时$weight$的N轴或当weight转置时$weight$的K轴。
+- x和weight的最后一维须小于65536。x的最后一维在transposeX为true时为M，为false时为K。weight的最后一维为N。
+- 当transposeX为false或yRef为16位时，M、K、N及分组数均须在int32的非负范围内，输出元素数（M × N × 分组数）须在int64范围内。
 <!-- end id7 -->
 
 ## 调用示例
@@ -399,11 +401,11 @@ int aclnnGroupedMatmulAddV2Test(int32_t deviceId, aclrtStream &stream) {
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("Init acl failed. ERROR: %d\n", ret); return ret);
 
     // 2. 构造输入与输出，需要根据API的接口自定义构造
-    std::vector<int64_t> xShape = {512, 256};
+    std::vector<int64_t> xShape = {256, 512};
     std::vector<int64_t> weightShape= {512, 256};
     std::vector<int64_t> yShape = {2, 256, 256};
     std::vector<int64_t> groupListShape = {2};
-    std::vector<int64_t> groupListData = {256, 512};
+    std::vector<int64_t> groupListData = {192, 320};
     void* xDeviceAddr = nullptr;
     void* weightDeviceAddr = nullptr;
     void* yDeviceAddr = nullptr;
@@ -413,22 +415,22 @@ int aclnnGroupedMatmulAddV2Test(int32_t deviceId, aclrtStream &stream) {
     aclTensor* groupedList = nullptr;
     aclTensor* y = nullptr;
     aclTensor* yRef = nullptr;
-    bool transpose_x = true;
+    bool transpose_x = false;
     bool transpose_weight = false;
     int group_type = 2;
-    int groupListType = 0;
+    int groupListType = 1;
 
-    // 创建x aclTensorList
+    // 创建x aclTensor
     ret = CreateAclTensor<uint16_t>(xShape, &xDeviceAddr, aclDataType::ACL_BF16, &x);
     std::unique_ptr<aclTensor, aclnnStatus (*)(const aclTensor *)> xTensorPtr(x, aclDestroyTensor);
     std::unique_ptr<void, aclError (*)(void *)> xDeviceAddrPtr(xDeviceAddr, aclrtFree);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
-    // 创建weight aclTensorList
+    // 创建weight aclTensor
     ret = CreateAclTensor<uint16_t>(weightShape, &weightDeviceAddr, aclDataType::ACL_BF16, &weight);
     std::unique_ptr<aclTensor, aclnnStatus (*)(const aclTensor *)> weightTensorPtr(weight, aclDestroyTensor);
     std::unique_ptr<void, aclError (*)(void *)> weightDeviceAddrPtr(weightDeviceAddr, aclrtFree);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
-    // 创建y aclTensorList
+    // 创建y aclTensor
     ret = CreateAclTensor<float>(yShape, &yDeviceAddr, aclDataType::ACL_FLOAT, &y);
     std::unique_ptr<aclTensor, aclnnStatus (*)(const aclTensor *)> yTensorPtr(y, aclDestroyTensor);
     std::unique_ptr<void, aclError (*)(void *)> yDeviceAddrPtr(yDeviceAddr, aclrtFree);

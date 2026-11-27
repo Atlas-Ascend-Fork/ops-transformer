@@ -22,14 +22,14 @@ extern "C" {
  * @param [in] x: 表示公式中的x，数据类型支持FLOAT16、BFLOAT16数据类型，数据格式支持ND。
  * @param [in] weight:
  * 表示公式中的weight，数据类型支持FLOAT16、BFLOAT16数据类型，数据格式支持ND。
- * @param [in] groupList: 代表输入和输出分组轴的matmul大小分布，数据类型支持INT64，数据格式支持ND。
- * @param [in/out] yRef: 表示公式中的y，数据类型支持FLOAT32数据类型，数据格式支持ND。
+ * @param [in] groupList: 一维INT64张量，格式为ND，表示各组K长度的累积和。
+ * @param [in/out] yRef: 表示公式中的y，支持FLOAT32；Atlas A2/A3还支持与x同类型的FLOAT16、BFLOAT16，数据格式支持ND。
  * @param [in] transposeX:
- * bool类型，仅可取值true，表示x矩阵转置。
+ * bool类型，支持true和false。true时x的形状为[K, M]，false时为[M, K]。
  * @param [in] transposeWeight:
  * bool类型，仅可取值false，表示weight矩阵不转置。
  * @param [in] groupType:
- * 整数型参数，代表需要切分的轴，仅可取值2，表示切分k轴，
+ * 整数型参数，代表需要切分的轴，仅可取值2，表示沿K轴分组。
  * @param [out] workspaceSize: 返回用户需要在npu device侧申请的workspace大小。
  * @param [out] executor: 返回op执行器，包含算子计算流程。
  * @return aclnnStatus: 返回状态码。
