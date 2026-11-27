@@ -149,13 +149,16 @@ struct ScheduleContext {
     ControlArea control;
     AttentionArea attention;
     FfnArea ffn;
-    int8_t reserve6[384]; // Padding to 1024 bytes.
+    int8_t reserve6[384]; // Padding to 1KB.
 };
-static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1024 bytes");
+static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1KB");
 #pragma pack(pop)
 
 int main()
 {
+    // 本示例演示单算子模式调用aclnnAttentionWorkerCombine两段式接口：
+    // 从ScheduleContext的AttentionArea读取FFN回传的token数据，按expertScales加权融合，输出y和nextLayerId。
+    // 1. 初始化ACL并创建Stream
     int32_t deviceId = 0;
     aclrtStream stream;
     auto ret = Init(deviceId, &stream);
@@ -173,7 +176,7 @@ int main()
     scheduleContext.common.session_num = 1;
     scheduleContext.common.micro_batch_num = 1;
     scheduleContext.common.micro_batch_size = BS;
-    scheduleContext.common.selected_expert_num = K;
+    scheduleContext.common.selected_expert_num = K + 1;
     scheduleContext.common.expert_num = 16;
     scheduleContext.common.attn_to_ffn_token_size = 512;
     scheduleContext.common.ffn_to_attn_token_size = 512;
@@ -182,26 +185,26 @@ int main()
     scheduleContext.attention.micro_batch_id = 0;
 
     // 初始化Attention token_info_buf（flag置1表示数据就绪）
-    size_t perDataDescSize = sizeof(AttentionDataDesc) + sizeof(int32_t) * BS * K;
+    size_t perDataDescSize = sizeof(AttentionDataDesc) + sizeof(int32_t) * BS * (K + 1);
     size_t tokenInfoBufSize = static_cast<size_t>(scheduleContext.common.micro_batch_num) * perDataDescSize;
     void* tokenInfoBuf = nullptr;
     ret = aclrtMalloc(&tokenInfoBuf, tokenInfoBufSize, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("malloc token info buf failed. ERROR: %d\n", ret); return ret);
     scheduleContext.attention.token_info_buf = reinterpret_cast<uint64_t>(tokenInfoBuf);
     scheduleContext.attention.token_info_buf_size = tokenInfoBufSize;
-    std::vector<int32_t> hostFlags(static_cast<size_t>(BS) * K, 1);
-    ret = aclrtMemcpy(tokenInfoBuf, tokenInfoBufSize, hostFlags.data(), static_cast<size_t>(BS) * K * sizeof(int32_t),
-                      ACL_MEMCPY_HOST_TO_DEVICE);
+    std::vector<int32_t> hostFlags(static_cast<size_t>(BS) * (K + 1), 1);
+    ret = aclrtMemcpy(tokenInfoBuf, tokenInfoBufSize, hostFlags.data(),
+                      static_cast<size_t>(BS) * (K + 1) * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("cpy token info buf failed. ERROR: %d\n", ret); return ret);
 
     // 初始化Attention token_data_buf
-    uint64_t tokenDataSize = static_cast<uint64_t>(BS) * K * hiddenSize * sizeof(int16_t);
+    uint64_t tokenDataSize = static_cast<uint64_t>(BS) * (K + 1) * hiddenSize * sizeof(int16_t);
     void* tokenDataBuf = nullptr;
     ret = aclrtMalloc(&tokenDataBuf, tokenDataSize, ACL_MEM_MALLOC_HUGE_FIRST);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("malloc token data buf failed. ERROR: %d\n", ret); return ret);
     scheduleContext.attention.token_data_buf = reinterpret_cast<uint64_t>(tokenDataBuf);
     scheduleContext.attention.token_data_buf_size = tokenDataSize;
-    std::vector<int16_t> hostTokenData(static_cast<size_t>(BS) * K * hiddenSize, 1);
+    std::vector<int16_t> hostTokenData(static_cast<size_t>(BS) * (K + 1) * hiddenSize, 1);
     ret = aclrtMemcpy(tokenDataBuf, tokenDataSize, hostTokenData.data(), tokenDataSize, ACL_MEMCPY_HOST_TO_DEVICE);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("cpy token data buf failed. ERROR: %d\n", ret); return ret);
 
