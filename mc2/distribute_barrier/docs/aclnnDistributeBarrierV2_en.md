@@ -94,7 +94,7 @@ aclnnStatus aclnnDistributeBarrierV2(
     <tr>
     <td>timeOutOptional</td>
     <td>Input</td>
-    <td>Sets the timeout duration. If the device does not complete all-device synchronization within this duration, the device is considered to have timed out.</td>
+    <td>Sets the timeout duration in microseconds (us). If the device does not complete all-device synchronization within this duration, the device is considered to have timed out.</td>
     <td>Valid data or a null pointer can be passed.</td>
     <td>INT32</td>
     <td>ND</td>
@@ -105,7 +105,7 @@ aclnnStatus aclnnDistributeBarrierV2(
     <td>elasticInfoOptional</td>
     <td>Input</td>
     <td>Dynamic scale-in information of the EP communicator.</td>
-    <td>Valid data or a null pointer can be passed. A null pointer indicates that dynamic scale-in is disabled.</td>
+    <td>Valid data or a null pointer can be passed. A null pointer or a first element of 0 disables dynamic scale-in; 1 enables it. The shape must be (4 + 2 * worldSize,). Elements [0, 4) are the enable flag, active rank count, shared-expert rank count after scale-in, and MoE expert count after scale-in. Elements [4, 4 + worldSize) map original EP rank IDs to active EP rank IDs, with -1 for inactive ranks. Elements [4 + worldSize, 4 + 2 * worldSize) contain the inverse mapping; unused entries are -1. Active rank IDs must be contiguous from 0, and both mappings must agree.</td>
     <td>INT32</td>
     <td>ND</td>
     <td>1</td>
@@ -364,7 +364,7 @@ aclnnStatus aclnnDistributeBarrierV2(
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
         char hcomEpBarrierName[128] = {0};
         ret = HcclGetCommName(args.hcclEpBarrierComm, hcomEpBarrierName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpBarrierCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomTpName[128] = {0};
 
         int64_t Bs = 8;
@@ -476,13 +476,11 @@ aclnnStatus aclnnDistributeBarrierV2(
         int32_t rankNumAfterElastic = 2;
         int32_t sharedExpertRankNumAfterElastic = sharedExpertRankNum;
         int32_t moeExpertNumAfterElastic = rankNumAfterElastic - sharedExpertRankNumAfterElastic;
-        std::unordered_set<int16_t> availableRank{
-            0, 1, /*2, 3, 4, 5,*/ 6, 7
-        };
+        std::unordered_set<int16_t> availableRank{0, 1};
         std::vector<int32_t> elasticInfoHostData{
             isElastic, rankNumAfterElastic, sharedExpertRankNumAfterElastic, moeExpertNumAfterElastic,
-            0, 1, -1, -1, -1, -1, 2, 3,
-            0, 1, 6, 7, -1, -1, -1, -1
+            0, 1,
+            0, 1
         };
         std::vector<int32_t> timeOutHostData(timeOutShapeSize, 1000000);
         std::vector<int16_t> xOutHostData(xOutShapeSize, 0);
@@ -529,7 +527,7 @@ aclnnStatus aclnnDistributeBarrierV2(
 
         /**************************************** Call dispatch warm up********************************************/
         ret = aclnnMoeDistributeDispatchV3GetWorkspaceSize(x, expertIds, (quantMode > 0 ? scales : nullptr), nullptr,
-                expertScales, nullptr, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
+                expertScales, elasticInfo, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
                 args.tpRankId, expertShardType, sharedExpertNum,sharedExpertRankNum, quantMode, globalBs,
                 expertTokenNumsType, nullptr, 0, 0, 0, expandX, dynamicScales, expandIdx, expertTokenNums, epRecvCounts,
                 tpRecvCounts, expandScales, &dispatchWorkspaceSize, &dispatchExecutor);
@@ -551,10 +549,15 @@ aclnnStatus aclnnDistributeBarrierV2(
             return ret);
 
         /**************************************** Call dispatch ********************************************/
+        if (dispatchWorkspaceAddr != nullptr) {
+            ret = aclrtFree(dispatchWorkspaceAddr);
+            CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtFree dispatch workspace failed. ret = %d\n", ret); return ret);
+            dispatchWorkspaceAddr = nullptr;
+        }
         if (availableRank.find(args.rankId) != availableRank.end()) {
             // Call the first-phase API.
             ret = aclnnMoeDistributeDispatchV3GetWorkspaceSize(x, expertIds, (quantMode > 0 ? scales : nullptr), nullptr,
-                    expertScales, nullptr, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
+                    expertScales, elasticInfo, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
                     args.tpRankId, expertShardType, sharedExpertNum,sharedExpertRankNum, quantMode, globalBs,
                     expertTokenNumsType, nullptr, 0, 0, 0, expandX, dynamicScales, expandIdx, expertTokenNums, epRecvCounts,
                     tpRecvCounts, expandScales, &dispatchWorkspaceSize, &dispatchExecutor);
@@ -576,7 +579,7 @@ aclnnStatus aclnnDistributeBarrierV2(
                     return ret);
         }
         /**************************************** Call barrier warm up********************************************/
-        ret = aclnnDistributeBarrierV2GetWorkspaceSize(expandX, nullptr, nullptr, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
+        ret = aclnnDistributeBarrierV2GetWorkspaceSize(expandX, timeOut, elasticInfo, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
 
         CHECK_RET(ret == ACL_SUCCESS,
             LOG_PRINT("[ERROR] warm up aclnnDistributeBarrierV2GetWorkspaceSize failed. ret = %d \n", ret); return ret);
@@ -595,6 +598,11 @@ aclnnStatus aclnnDistributeBarrierV2(
             return ret);
 
         /**************************************** Call barrier********************************************/
+        if (barrierWorkspaceAddr != nullptr) {
+            ret = aclrtFree(barrierWorkspaceAddr);
+            CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtFree barrier workspace failed. ret = %d\n", ret); return ret);
+            barrierWorkspaceAddr = nullptr;
+        }
         if (availableRank.find(args.rankId) != availableRank.end()) {
             ret = aclnnDistributeBarrierV2GetWorkspaceSize(expandX, timeOut, elasticInfo, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
 
@@ -653,6 +661,9 @@ aclnnStatus aclnnDistributeBarrierV2(
         if (dispatchWorkspaceSize > 0) {
             aclrtFree(dispatchWorkspaceAddr);
         }
+        if (barrierWorkspaceAddr != nullptr) {
+            aclrtFree(barrierWorkspaceAddr);
+        }
         if (combineWorkspaceSize > 0) {
             aclrtFree(combineWorkspaceAddr);
         }
@@ -693,7 +704,7 @@ aclnnStatus aclnnDistributeBarrierV2(
             aclDestroyTensor(elasticInfo);
         }
         if (timeOut != nullptr) {
-            aclDestroyTensor(elasticInfo);
+            aclDestroyTensor(timeOut);
         }
         if (xOut != nullptr) {
             aclDestroyTensor(xOut);
@@ -745,6 +756,7 @@ aclnnStatus aclnnDistributeBarrierV2(
         HcclCommDestroy(args.hcclEpBarrierComm);
         HcclCommDestroy(args.hcclTpComm);
         aclrtDestroyStream(args.dispatchStream);
+        aclrtDestroyStream(args.barrierStream);
         aclrtDestroyStream(args.combineStream);
         aclrtDestroyContext(args.context);
         aclrtResetDevice(args.rankId);
@@ -755,7 +767,7 @@ aclnnStatus aclnnDistributeBarrierV2(
     int main(int argc, char *argv[])
     {
         int ret = aclInit(nullptr);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtInit failed, ret = %d\n", ret); return ret);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclInit failed, ret = %d\n", ret); return ret);
 
         aclrtStream dispatchStream[DEV_NUM];
         aclrtStream barrierStream[DEV_NUM];

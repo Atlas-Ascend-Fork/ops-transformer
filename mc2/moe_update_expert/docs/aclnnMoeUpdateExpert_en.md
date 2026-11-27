@@ -29,22 +29,21 @@ This API supports load balancing and expert pruning. The mapped expert table and
 
 - Load balancing: To address load imbalance scenarios, this operator maps the topK Logical Expert IDs of each token to physical card IDs. The calculation method is as follows:
 
-  Load balancing for the i-th value in expert_ids, i.e., the i-th token:
+  For the i-th value in flattened expert_ids, the token index is i // K. F is the number of columns in eplb_table:
 
     ```python
-    place_num = 8
-    F = 2
-    new_expert_id = eplb_table[table_offset + 1]
+    # expert_ids and eplb_table are flattened in row-major order.
     expert_id = expert_ids[i]
     table_offset = expert_id * F
-    if (eplb_table[table_offset] == 1):
-        new_expert_id = eplb_table[table_offset + 1]
+    count = eplb_table[table_offset]
+    token_id = i // K
+    if count == 1:
+        place_idx = 1
+    elif balance_mode == 0:
+        mode_value = (world_size + count - 1) // count
+        place_idx = local_rank_id // mode_value + 1
     else:
-        if (balance_mode == 0):
-            mode_value = ceil(world_size / eplb_table[table_offset])
-            place_idx = local_rank_id / mode_value + 1
-        else:
-            place_idx = i % place_num
+        place_idx = token_id % count + 1
     new_expert_id = eplb_table[table_offset + place_idx]
     ```
 
@@ -128,7 +127,7 @@ aclnnStatus aclnnMoeUpdateExpert(
     <td>eplbTable(aclTensor*)</td>
     <td>Input</td>
     <td>Mapping table from logic experts to physical experts (the caller must ensure the values are correct).</td>
-    <td><ul><li>A total of world_size * place_per_rank expert instances.</li><li>The first column of each row indicates the number of deployed instances of the corresponding Logic Expert (Value Range [1, world_size]), and the subsequent [1, count] columns indicate instance IDs (Value Range [0, world_size*place_per_rank), without duplicates).</li><li>Must be a 2D tensor with shape (moeExpertNum, F).</li></ul></td>
+    <td><ul><li>A total of world_size * place_per_rank expert instances.</li><li>The first column of each row indicates the number of deployed instances of the corresponding Logic Expert, count (Value Range [1, min(world_size, F - 1)]), and the subsequent [1, count] columns indicate instance IDs (Value Range [0, world_size*place_per_rank), without duplicates).</li><li>Must be a 2D tensor with shape (moeExpertNum, F).</li></ul></td>
     <td>INT32</td>
     <td>ND</td>
     <td>2</td>
@@ -343,7 +342,7 @@ aclnnStatus aclnnMoeUpdateExpert(
    - **BS**: Number of tokens finally output by this device. Value range: ( 0 < BS ≤ 512 ).
    - **K**: Number of selected topK experts. Value range: ( 0 < K ≤ 16 ), and ( 0 < K ≤ moeExpertNum ) must be satisfied.
    - **moeExpertNum**: Number of MoE experts. Value range: (0, 1024].
-   - **F**: The number of columns in the mapping table `eplbTable`. Value range: [2, worldSize + 1]. The first column indicates the number of deployed instances of the Logical Expert (value > 0), and the remaining F-1 columns indicate the corresponding physical card numbers.
+   - **F**: The number of columns in the mapping table `eplbTable`. Value range: [2, worldSize + 1]. The first column is the deployed instance count, count, which must satisfy 1 <= count <= min(worldSize, F - 1). Columns [1, count] contain the corresponding distinct instance IDs; the remaining columns do not participate in instance selection. F need not equal worldSize + 1 when count is smaller than worldSize.
    - **Limit on the total number of instances**: The total number of MoE expert instances deployed on all devices is at most 1024, that is, ( place_per_rank * world_size ≤ 1024 ) (`place_per_rank` indicates the number of instances deployed on a single device).
    - **Per-Card Instance Count Consistency**: The number of expert instances deployed on each card must be identical.
 

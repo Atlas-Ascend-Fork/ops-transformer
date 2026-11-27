@@ -92,7 +92,7 @@ aclnnStatus aclnnDistributeBarrierV2(
     <tr>
     <td>timeOut</td>
     <td>输入</td>
-    <td>超时时间设置，如果在此时间内所在卡未完成全卡同步，则认为该卡存在超时异常。</td>
+    <td>超时时间设置，单位为微秒（us）。如果在此时间内所在卡未完成全卡同步，则认为该卡存在超时异常。</td>
     <td>可选择传入有效数据或填空指针。</td>
     <td>INT32</td>
     <td>ND</td>
@@ -103,7 +103,7 @@ aclnnStatus aclnnDistributeBarrierV2(
     <td>elasticInfo</td>
     <td>输入</td>
     <td>EP通信域动态缩容信息。</td>
-    <td>可选择传入有效数据或填空指针，传入空指针时表示不开启动态缩容功能。</td>
+    <td>可选择传入有效数据或填空指针。空指针或第0个元素为0表示不开启动态缩容，值为1表示开启。shape必须为(4 + 2 * worldSize,)。第[0, 4)个元素依次为缩容使能标志、缩容后有效rank数、缩容后共享专家rank数、缩容后MoE专家数。第[4, 4 + worldSize)个元素为原EP rank到缩容后EP rank的映射，退出的rank填-1；第[4 + worldSize, 4 + 2 * worldSize)个元素为反向映射，未使用的位置填-1。缩容后rank从0开始连续编号，正反映射需保持一致。</td>
     <td>INT32</td>
     <td>ND</td>
     <td>1</td>
@@ -363,7 +363,7 @@ aclnnStatus aclnnDistributeBarrierV2(
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomEpBarrierName[128] = {0};
         ret = HcclGetCommName(args.hcclEpBarrierComm, hcomEpBarrierName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpBarrierCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomTpName[128] = {0};
 
         int64_t Bs = 8;
@@ -475,13 +475,11 @@ aclnnStatus aclnnDistributeBarrierV2(
         int32_t rankNumAfterElastic = 2;
         int32_t sharedExpertRankNumAfterElastic = sharedExpertRankNum;
         int32_t moeExpertNumAfterElastic = rankNumAfterElastic - sharedExpertRankNumAfterElastic;
-        std::unordered_set<int16_t> availableRank{
-            0, 1, /*2, 3, 4, 5,*/ 6, 7
-        };
+        std::unordered_set<int16_t> availableRank{0, 1};
         std::vector<int32_t> elasticInfoHostData{
             isElastic, rankNumAfterElastic, sharedExpertRankNumAfterElastic, moeExpertNumAfterElastic,
-            0, 1, -1, -1, -1, -1, 2, 3,
-            0, 1, 6, 7, -1, -1, -1, -1
+            0, 1,
+            0, 1
         };
         std::vector<int32_t> timeOutHostData(timeOutShapeSize, 1000000);
         std::vector<int16_t> xOutHostData(xOutShapeSize, 0);
@@ -528,7 +526,7 @@ aclnnStatus aclnnDistributeBarrierV2(
 
         /**************************************** 调用dispatch warm up********************************************/
         ret = aclnnMoeDistributeDispatchV3GetWorkspaceSize(x, expertIds, (quantMode > 0 ? scales : nullptr), nullptr,
-                expertScales, nullptr, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
+                expertScales, elasticInfo, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
                 args.tpRankId, expertShardType, sharedExpertNum,sharedExpertRankNum, quantMode, globalBs,
                 expertTokenNumsType, nullptr, 0, 0, 0, expandX, dynamicScales, expandIdx, expertTokenNums, epRecvCounts,
                 tpRecvCounts, expandScales, &dispatchWorkspaceSize, &dispatchExecutor);
@@ -550,10 +548,15 @@ aclnnStatus aclnnDistributeBarrierV2(
             return ret);
 
         /**************************************** 调用dispatch ********************************************/
+        if (dispatchWorkspaceAddr != nullptr) {
+            ret = aclrtFree(dispatchWorkspaceAddr);
+            CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtFree dispatch workspace failed. ret = %d\n", ret); return ret);
+            dispatchWorkspaceAddr = nullptr;
+        }
         if (availableRank.find(args.rankId) != availableRank.end()) {
             // 调用第一阶段接口
             ret = aclnnMoeDistributeDispatchV3GetWorkspaceSize(x, expertIds, (quantMode > 0 ? scales : nullptr), nullptr,
-                    expertScales, nullptr, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
+                    expertScales, elasticInfo, hcomEpName, EP_WORLD_SIZE, args.epRankId, moeExpertNum, hcomTpName, TP_WORLD_SIZE,
                     args.tpRankId, expertShardType, sharedExpertNum,sharedExpertRankNum, quantMode, globalBs,
                     expertTokenNumsType, nullptr, 0, 0, 0, expandX, dynamicScales, expandIdx, expertTokenNums, epRecvCounts,
                     tpRecvCounts, expandScales, &dispatchWorkspaceSize, &dispatchExecutor);
@@ -575,7 +578,7 @@ aclnnStatus aclnnDistributeBarrierV2(
                     return ret);
         }
         /**************************************** 调用barrier warm up********************************************/
-        ret = aclnnDistributeBarrierV2GetWorkspaceSize(expandX, nullptr, nullptr, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
+        ret = aclnnDistributeBarrierV2GetWorkspaceSize(expandX, timeOut, elasticInfo, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
 
         CHECK_RET(ret == ACL_SUCCESS,
             LOG_PRINT("[ERROR] warm up aclnnDistributeBarrierV2GetWorkspaceSize failed. ret = %d \n", ret); return ret);
@@ -594,6 +597,11 @@ aclnnStatus aclnnDistributeBarrierV2(
             return ret);
 
         /**************************************** 调用barrier********************************************/
+        if (barrierWorkspaceAddr != nullptr) {
+            ret = aclrtFree(barrierWorkspaceAddr);
+            CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtFree barrier workspace failed. ret = %d\n", ret); return ret);
+            barrierWorkspaceAddr = nullptr;
+        }
         if (availableRank.find(args.rankId) != availableRank.end()) {
             ret = aclnnDistributeBarrierV2GetWorkspaceSize(expandX, timeOut, elasticInfo, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
 
@@ -651,6 +659,9 @@ aclnnStatus aclnnDistributeBarrierV2(
         // 释放device资源
         if (dispatchWorkspaceSize > 0) {
             aclrtFree(dispatchWorkspaceAddr);
+        }
+        if (barrierWorkspaceAddr != nullptr) {
+            aclrtFree(barrierWorkspaceAddr);
         }
         if (combineWorkspaceSize > 0) {
             aclrtFree(combineWorkspaceAddr);
@@ -755,7 +766,7 @@ aclnnStatus aclnnDistributeBarrierV2(
     int main(int argc, char *argv[])
     {
         int ret = aclInit(nullptr);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtInit failed, ret = %d\n", ret); return ret);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclInit failed, ret = %d\n", ret); return ret);
 
         aclrtStream dispatchStream[DEV_NUM];
         aclrtStream barrierStream[DEV_NUM];
