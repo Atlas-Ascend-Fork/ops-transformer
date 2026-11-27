@@ -909,8 +909,7 @@ void SetTilingData_SmallM(CoCTiling& cocTilingData, MatmulReduceScatterV2AivMode
     cocTilingData.commDataSplit = Tiling_Small_M::DEFAULT_COMMDATASPLIT;
 }
 
-inline ge::graphStatus checkAndResetTilingData_SmallM(CoCTiling& cocTilingData, MatmulReduceScatterV2AivModeInfo& info,
-                                                      gert::TilingContext* context, int64_t rankSize)
+static ge::graphStatus CheckTilingParams_SmallM(const CoCTiling& cocTilingData, gert::TilingContext* context)
 {
     OP_TILING_CHECK(
         cocTilingData.m0 != 128 && cocTilingData.m0 != 256,
@@ -946,6 +945,15 @@ inline ge::graphStatus checkAndResetTilingData_SmallM(CoCTiling& cocTilingData, 
                     OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "commDataSplit",
                                               std::to_string(cocTilingData.commDataSplit).c_str(), "8 or 16"),
                     return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+inline ge::graphStatus checkAndResetTilingData_SmallM(CoCTiling& cocTilingData, MatmulReduceScatterV2AivModeInfo& info,
+                                                      gert::TilingContext* context, int64_t rankSize)
+{
+    if (CheckTilingParams_SmallM(cocTilingData, context) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
 
     int32_t m_loop = (info.M + cocTilingData.m0 - 1) / (cocTilingData.m0);
     if ((cocTilingData.swizzlDirect == 0 && m_loop > cocTilingData.swizzlCount)) {
@@ -1112,33 +1120,34 @@ static void PrintTilingDataInfo(MatmulReduceScatterV2AivModeInfo& info, CoCTilin
     OP_LOGD("MatmulReduceScatterV2AivModeTiling", "tiling.lenPerLoop %d", cocTilingInfo.lenPerLoop);
 }
 
-ge::graphStatus MatmulReduceScatterTilingV2AivModeFunc(gert::TilingContext* context)
+static ge::graphStatus InitTilingData(gert::TilingContext* context, MatmulReduceScatterV2AivModeTilingData*& tilingData,
+                                      MatmulReduceScatterV2AivModeInfo*& info)
 {
-    OP_LOGI("Enter MatmulReduceScatterV2 aivMode tiling func.");
-
     // 涉及SyncAll，设置batch mode模式，所有核同时启动
     uint32_t batch_mode = 1U;
     auto ret = context->SetScheduleMode(batch_mode);
     MC2_CHECK_LOG_RET(context->GetNodeName(), ret);
 
     // 1. tilingData
-    MatmulReduceScatterV2AivModeTilingData* tilingData =
-        context->GetTilingData<MatmulReduceScatterV2AivModeTilingData>();
+    tilingData = context->GetTilingData<MatmulReduceScatterV2AivModeTilingData>();
     OP_TILING_CHECK(tilingData == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "tilingData"),
                     return ge::GRAPH_FAILED);
-    MatmulReduceScatterV2AivModeInfo& info = tilingData->matmulReduceScatterV2AivModeInfo;
+    info = &tilingData->matmulReduceScatterV2AivModeInfo;
     OP_TILING_CHECK(
-        MatmulReduceScatterV2CheckAttrAndSetTiling(context, info) != ge::GRAPH_SUCCESS,
+        MatmulReduceScatterV2CheckAttrAndSetTiling(context, *info) != ge::GRAPH_SUCCESS,
         OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MatmulReduceScatterV2 aivMode CheckAttrAndSetTiling Failed"),
         return ge::GRAPH_FAILED);
-    MatmulReduceScatterV2FillShapeTiling(context, info);
+    MatmulReduceScatterV2FillShapeTiling(context, *info);
     OP_TILING_CHECK(
         MatmulReduceScatterV2CheckDtypeAndSetTiling(context) != ge::GRAPH_SUCCESS,
         OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "MatmulReduceScatterV2 aivMode CheckDtypeAndSetTiling Failed"),
         return ge::GRAPH_FAILED);
-    MatmulReduceScatterV2FillPlatformInfo(context, info);
-    auto attrs = context->GetAttrs();
-    auto group = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
+    MatmulReduceScatterV2FillPlatformInfo(context, *info);
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckHcclBufferAndRankSize(gert::TilingContext* context, const char* group, int64_t& rankSize)
+{
     const char* opName = context->GetNodeName();
     // 校验HCCL BUFF空间大小
     uint64_t hcclBuffSize = 0ULL;
@@ -1154,29 +1163,37 @@ ge::graphStatus MatmulReduceScatterTilingV2AivModeFunc(gert::TilingContext* cont
     } else {
         OP_LOGW(opName, "Can't get HCCL_BUFFSIZE, skip CCL buffer size validation.");
     }
-    int64_t rankSize = 0;
     mc2tiling::GetRankSize(opName, group, rankSize);
     OP_TILING_CHECK(
         rankSize != 2 && rankSize != 4 && rankSize != 8,
         OP_LOGE_FOR_INVALID_VALUE(context->GetNodeName(), "rankSize", std::to_string(rankSize).c_str(), "2, 4 or 8"),
         return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+static uint32_t SetBlockDimAndDtypes(gert::TilingContext* context, MatmulReduceScatterV2AivModeInfo& info,
+                                     ge::DataType& aType, ge::DataType& cType, bool& needCastBias)
+{
     // 2. set numBlocks
-    uint32_t numBlocks = 1U;
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     auto aicNum = ascendcPlatform.GetCoreNumAic();
     auto aivNum = ascendcPlatform.GetCoreNumAiv();
-    numBlocks = ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum);
+    uint32_t numBlocks = ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum);
     context->SetBlockDim(numBlocks);
 
-    auto aType = context->GetInputTensor(A_INDEX)->GetDataType();
+    aType = context->GetInputTensor(A_INDEX)->GetDataType();
     auto bType = context->GetInputTensor(B_INDEX)->GetDataType();
-    auto cType = context->GetOutputDesc(0)->GetDataType();
+    cType = context->GetOutputDesc(0)->GetDataType();
     info.quantFlag =
         (aType == ge::DT_INT8) && (bType == ge::DT_INT8) && (cType == ge::DT_BF16 || cType == ge::DT_FLOAT16);
     const auto biasDesc = context->GetOptionalInputDesc(BIAS_INDEX);
-    const bool needCastBias = !info.quantFlag && aType == ge::DT_BF16 && bType == ge::DT_BF16 && biasDesc != nullptr &&
-                              biasDesc->GetDataType() == ge::DT_BF16;
+    needCastBias = !info.quantFlag && aType == ge::DT_BF16 && bType == ge::DT_BF16 && biasDesc != nullptr &&
+                   biasDesc->GetDataType() == ge::DT_BF16;
+    return numBlocks;
+}
 
+static void SetPlatformInfoAndTilingKey(gert::TilingContext* context, MatmulReduceScatterV2AivModeInfo& info)
+{
     // 3. 配置平台信息，GetTilingKey
     info.is910C = false;
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
@@ -1193,7 +1210,12 @@ ge::graphStatus MatmulReduceScatterTilingV2AivModeFunc(gert::TilingContext* cont
     GetTilingKey(tilingKey, info, context);
     context->SetTilingKey(tilingKey);
     OP_LOGD("MatmulReduceScatterV2AivModeTiling", "tilingkey is %lu", tilingKey);
+}
 
+static ge::graphStatus SetWorkspaceTiling(gert::TilingContext* context, MatmulReduceScatterV2AivModeInfo& info,
+                                          MatmulReduceScatterV2AivModeTilingData* tilingData, int64_t rankSize,
+                                          ge::DataType aType, ge::DataType cType, uint32_t numBlocks, bool needCastBias)
+{
     // 5. workspace
     size_t* workSpaces = context->GetWorkspaceSizes(1);
     OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "workSpaces"),
@@ -1226,9 +1248,14 @@ ge::graphStatus MatmulReduceScatterTilingV2AivModeFunc(gert::TilingContext* cont
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + userWorkSpaceSize;
 
     PrintTilingDataInfo(info, tilingData->cocTiling);
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus SetCommTiling(gert::TilingContext* context, MatmulReduceScatterV2AivModeTilingData* tilingData,
+                                     const char* group, bool is910C)
+{
     // 6. communication
-    if (info.is910C) {
+    if (is910C) {
         uint32_t opType = OP_TYPE_REDUCE_SCATTER;
         std::string algConfig = "ReduceScatter=level0:fullmesh";
         AscendC::Mc2CcTilingConfig mc2CcTilingConfig(group, opType, algConfig);
@@ -1248,6 +1275,43 @@ ge::graphStatus MatmulReduceScatterTilingV2AivModeFunc(gert::TilingContext* cont
         OP_TILING_CHECK(mc2CcTilingConfig.GetTiling(tilingData->mc2CcTiling) != 0,
                         OP_LOGE(context->GetNodeName(), "mc2CcTilingConfig mc2CcTiling GetTiling failed."),
                         return ge::GRAPH_FAILED);
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MatmulReduceScatterTilingV2AivModeFunc(gert::TilingContext* context)
+{
+    OP_LOGI("Enter MatmulReduceScatterV2 aivMode tiling func.");
+
+    MatmulReduceScatterV2AivModeTilingData* tilingData = nullptr;
+    MatmulReduceScatterV2AivModeInfo* infoPtr = nullptr;
+    if (InitTilingData(context, tilingData, infoPtr) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    MatmulReduceScatterV2AivModeInfo& info = *infoPtr;
+
+    auto attrs = context->GetAttrs();
+    auto group = attrs->GetAttrPointer<char>(static_cast<int>(ATTR_GROUP_INDEX));
+
+    int64_t rankSize = 0;
+    if (CheckHcclBufferAndRankSize(context, group, rankSize) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    ge::DataType aType = ge::DT_UNDEFINED;
+    ge::DataType cType = ge::DT_UNDEFINED;
+    bool needCastBias = false;
+    uint32_t numBlocks = SetBlockDimAndDtypes(context, info, aType, cType, needCastBias);
+
+    SetPlatformInfoAndTilingKey(context, info);
+
+    if (SetWorkspaceTiling(context, info, tilingData, rankSize, aType, cType, numBlocks, needCastBias) !=
+        ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    if (SetCommTiling(context, tilingData, group, info.is910C) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
     }
 
     OP_LOGI("Leave MatmulReduceScatterV2AivMode tiling func.");

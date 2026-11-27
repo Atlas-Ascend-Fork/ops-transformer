@@ -119,138 +119,184 @@ public:
             Catlass::Arch::CrossCoreWaitFlag(flagAivFinishPadding);
         }
 
-        // Represent the full gm
-        AscendC::GlobalTensor<ElementA> gmA;
-        gmA.SetGlobalBuffer((__gm__ ElementA*)params.ptrA);
-        AscendC::GlobalTensor<ElementB> gmB;
-        gmB.SetGlobalBuffer((__gm__ ElementB*)params.ptrB);
-        AscendC::GlobalTensor<ElementC> gmC;
-        gmC.SetGlobalBuffer((__gm__ ElementC*)params.ptrC);
-        AscendC::GlobalTensor<ElementBias> gmBias;
-        if constexpr (HasBias) {
-            gmBias.SetGlobalBuffer((__gm__ ElementBias*)params.ptrBias);
-        }
+        GmTensors tensors;
+        InitGmTensors(tensors, params);
 
         BlockMmad blockMmad(resource);
 
         int32_t coreIdx = AscendC::GetBlockIdx();
         int32_t coreNum = AscendC::GetBlockNum();
-
         int32_t mLoops = (params.problemShape.m() + L1TileShape::M - 1) / L1TileShape::M;
-
         int32_t commCount = (mLoops + params.pValue - 1) / params.pValue;
+
         for (int32_t commIdx = 0; commIdx < commCount; commIdx++) {
-            uint64_t flagIdx = commIdx % params.pipeDepth;
+            LoopCtx ctx;
+            ctx.commIdx = commIdx;
+            ctx.commCount = commCount;
+            ctx.mLoops = mLoops;
+            ctx.coreIdx = coreIdx;
+            ctx.coreNum = coreNum;
+            ctx.flagIdx = commIdx % params.pipeDepth;
 
-            int32_t tailN = (params.problemShape.n() / params.rankSize) % L1TileShape::N;
-            uint32_t nLoops = params.problemShape.n() / params.rankSize / L1TileShape::N;
-            if (tailN) {
-                nLoops += 1;
+            RunCommBlock(ctx, blockMmad, tensors, params);
+            FFTSCrossCoreSync<PIPE_FIX, 2>(ctx.flagIdx);
+        }
+    }
+
+private:
+    // 每次 matmul 前的全局张量视图
+    struct GmTensors {
+        AscendC::GlobalTensor<ElementA> gmA;
+        AscendC::GlobalTensor<ElementB> gmB;
+        AscendC::GlobalTensor<ElementC> gmC;
+        AscendC::GlobalTensor<ElementBias> gmBias;
+    };
+
+    // 单个 comm 轮次的循环参数
+    struct LoopCtx {
+        int32_t commIdx{0};
+        int32_t commCount{0};
+        int32_t mLoops{0};
+        int32_t actualLoopNum{0};
+        int32_t nLoopPerRank{0};
+        int32_t coreIdx{0};
+        int32_t coreNum{0};
+        uint64_t flagIdx{0};
+        int64_t gmAPingpongSize{0};
+    };
+
+    CATLASS_DEVICE static void InitGmTensors(GmTensors& tensors, Params const& params)
+    {
+        // Represent the full gm
+        tensors.gmA.SetGlobalBuffer((__gm__ ElementA*)params.ptrA);
+        tensors.gmB.SetGlobalBuffer((__gm__ ElementB*)params.ptrB);
+        tensors.gmC.SetGlobalBuffer((__gm__ ElementC*)params.ptrC);
+        if constexpr (HasBias) {
+            tensors.gmBias.SetGlobalBuffer((__gm__ ElementBias*)params.ptrBias);
+        }
+    }
+
+    CATLASS_DEVICE static uint32_t GetMActual(int32_t commIdx, int32_t commCount, int32_t mLoops, uint32_t blockM,
+                                              Params const& params)
+    {
+        bool isLastComm = (commIdx == commCount - 1);
+        bool isLastBlock = (blockM == static_cast<uint32_t>((mLoops - 1) % params.pValue));
+        bool isTailM = (params.problemShape.m() % L1TileShape::M != 0);
+        if (!isLastComm || !isLastBlock || !isTailM) {
+            return L1TileShape::M;
+        }
+        return static_cast<uint32_t>(params.problemShape.m() - commIdx * params.pValue * L1TileShape::M -
+                                     blockM * L1TileShape::M);
+    }
+
+    CATLASS_DEVICE static uint32_t GetNActual(uint32_t blockN, int32_t nLoopPerRank, Params const& params)
+    {
+        uint32_t tailOffset = blockN % static_cast<uint32_t>(nLoopPerRank);
+        if (tailOffset != static_cast<uint32_t>(nLoopPerRank - 1)) {
+            return L1TileShape::N;
+        }
+        return params.problemShape.n() / static_cast<uint32_t>(params.rankSize) - tailOffset * L1TileShape::N;
+    }
+
+    CATLASS_DEVICE static int64_t GetGmOffsetA(int32_t commIdx, GemmCoord const& blockIdxCoord, Params const& params)
+    {
+        MatrixCoord offsetA{blockIdxCoord.m() * L1TileShape::M, blockIdxCoord.k() * L1TileShape::K};
+        return params.layoutA.GetOffset(offsetA) +
+               static_cast<int64_t>(commIdx) * L1TileShape::M * params.pValue * params.problemShape.k();
+    }
+
+    CATLASS_DEVICE static int64_t GetGmOffsetB(GemmCoord const& blockIdxCoord, int32_t nLoopPerRank,
+                                               Params const& params)
+    {
+        return (static_cast<int64_t>(blockIdxCoord.n() / nLoopPerRank) * (params.problemShape.n() / params.rankSize) +
+                static_cast<int64_t>(blockIdxCoord.n() % nLoopPerRank) * L1TileShape::N) *
+               (params.transB ? params.problemShape.k() : 1);
+    }
+
+    CATLASS_DEVICE static int64_t GetGmOffsetC(uint64_t flagIdx, int64_t gmAPingpongSize,
+                                               GemmCoord const& blockIdxCoord, int32_t nLoopPerRank,
+                                               Params const& params)
+    {
+        int64_t rankOffset = gmAPingpongSize / params.rankSize;
+        int64_t rankIdx = blockIdxCoord.n() / nLoopPerRank;
+        return static_cast<int64_t>(flagIdx) * L1TileShape::M * params.pValue * params.problemShape.n() +
+               rankIdx * rankOffset +
+               static_cast<int64_t>(blockIdxCoord.m()) * L1TileShape::M * (params.problemShape.n() / params.rankSize) +
+               blockIdxCoord.n() % nLoopPerRank * L1TileShape::N;
+    }
+
+    CATLASS_DEVICE static int64_t GetGmOffsetBias(GemmCoord const& blockIdxCoord, int32_t nLoopPerRank,
+                                                  Params const& params)
+    {
+        return (blockIdxCoord.n() / nLoopPerRank) * (params.problemShape.n() / params.rankSize) +
+               (blockIdxCoord.n() % nLoopPerRank) * L1TileShape::N;
+    }
+
+    CATLASS_DEVICE void RunCommBlock(LoopCtx& ctx, BlockMmad& blockMmad, GmTensors& tensors, Params const& params)
+    {
+        int32_t tailN = (params.problemShape.n() / params.rankSize) % L1TileShape::N;
+        uint32_t nLoops = params.problemShape.n() / params.rankSize / L1TileShape::N;
+        if (tailN) {
+            nLoops += 1;
+        }
+        nLoops *= params.rankSize;
+
+        uint32_t actualPValue = params.pValue;
+        if (ctx.commIdx == ctx.commCount - 1) {
+            actualPValue = ctx.mLoops - ctx.commIdx * params.pValue;
+        }
+        if (ctx.commIdx >= params.pipeDepth) {
+            WaitEvent(ctx.flagIdx);
+        }
+        ctx.gmAPingpongSize = static_cast<int64_t>(L1TileShape::M) * params.pValue * params.problemShape.n();
+        ctx.actualLoopNum = actualPValue * nLoops;
+        ctx.nLoopPerRank = nLoops / params.rankSize;
+        GemmCoord calSwizzleShape{actualPValue, nLoops, 1};
+        BlockScheduler matmulBlockScheduler(calSwizzleShape,
+                                            MakeCoord(static_cast<uint32_t>(1), static_cast<uint32_t>(1)));
+
+        for (int32_t loopOffset = 0; loopOffset < ctx.actualLoopNum; loopOffset++) {
+            int32_t loopIdx = ctx.commIdx * params.pValue * nLoops + loopOffset;
+            if (loopIdx % ctx.coreNum != ctx.coreIdx) {
+                continue;
             }
-            nLoops *= params.rankSize;
+            RunBlock(ctx, loopOffset, matmulBlockScheduler, blockMmad, tensors, params);
+        }
+    }
 
-            int32_t coreLoops = mLoops * nLoops;
+    CATLASS_DEVICE void RunBlock(LoopCtx const& ctx, int32_t loopOffset, BlockScheduler& matmulBlockScheduler,
+                                 BlockMmad& blockMmad, GmTensors& tensors, Params const& params)
+    {
+        GemmCoord blockIdxCoord = matmulBlockScheduler.GetBlockCoord(loopOffset);
+        uint32_t mActual = GetMActual(ctx.commIdx, ctx.commCount, ctx.mLoops, blockIdxCoord.m(), params);
+        uint32_t nActual = GetNActual(blockIdxCoord.n(), ctx.nLoopPerRank, params);
+        GemmCoord actualBlockShape{mActual, nActual, params.problemShape.k()};
+        int64_t gmOffsetA = GetGmOffsetA(ctx.commIdx, blockIdxCoord, params);
+        int64_t gmOffsetB = GetGmOffsetB(blockIdxCoord, ctx.nLoopPerRank, params);
+        int64_t gmOffsetC = GetGmOffsetC(ctx.flagIdx, ctx.gmAPingpongSize, blockIdxCoord, ctx.nLoopPerRank, params);
 
-            uint32_t actualPValue = params.pValue;
-            if (commIdx == commCount - 1) {
-                actualPValue = mLoops - commIdx * params.pValue;
+        if constexpr (HasBias) {
+            int64_t gmOffsetBias = GetGmOffsetBias(blockIdxCoord, ctx.nLoopPerRank, params);
+            blockMmad(tensors.gmA[gmOffsetA], params.layoutA, tensors.gmB[gmOffsetB], params.layoutB,
+                      tensors.gmC[gmOffsetC], params.layoutC, tensors.gmBias[gmOffsetBias], actualBlockShape);
+        } else {
+            bool isFirstBlock = (loopOffset < ctx.coreNum);
+            bool hasNextBlock = false;
+            GemmCoord nextBlockIdCoord;
+            GemmCoord nextActualBlockShape;
+            if (loopOffset + ctx.coreNum < ctx.actualLoopNum) {
+                hasNextBlock = true;
+                nextBlockIdCoord = matmulBlockScheduler.GetBlockCoord(loopOffset + ctx.coreNum);
+                uint32_t mActualNext = GetMActual(ctx.commIdx, ctx.commCount, ctx.mLoops, nextBlockIdCoord.m(), params);
+                uint32_t nActualNext = GetNActual(nextBlockIdCoord.n(), ctx.nLoopPerRank, params);
+                nextActualBlockShape = GemmCoord{mActualNext, nActualNext, params.problemShape.k()};
             }
-            if (commIdx >= params.pipeDepth) {
-                WaitEvent(flagIdx);
-            }
-            int64_t gmAPingpongSize = static_cast<int64_t>(L1TileShape::M) * params.pValue * params.problemShape.n();
+            int64_t gmOffsetNextA = GetGmOffsetA(ctx.commIdx, nextBlockIdCoord, params);
+            int64_t gmOffsetNextB = GetGmOffsetB(nextBlockIdCoord, ctx.nLoopPerRank, params);
 
-            int32_t actualLoopNum = actualPValue * nLoops;
-
-            int32_t nLoopPerRank = nLoops / params.rankSize;
-            GemmCoord calSwizzleShape{actualPValue, nLoops, 1};
-            BlockScheduler matmulBlockScheduler(calSwizzleShape,
-                                                MakeCoord(static_cast<uint32_t>(1), static_cast<uint32_t>(1)));
-
-            for (int32_t loopOffset = 0; loopOffset < actualLoopNum; loopOffset++) {
-                int32_t loopIdx = commIdx * params.pValue * nLoops + loopOffset;
-                if (loopIdx % coreNum != coreIdx) {
-                    continue;
-                }
-
-                GemmCoord blockIdxCoord = matmulBlockScheduler.GetBlockCoord(loopOffset);
-                uint32_t mActual = (commIdx == commCount - 1) && (blockIdxCoord.m() == (mLoops - 1) % params.pValue) &&
-                                           (params.problemShape.m() % L1TileShape::M != 0) ?
-                                       (params.problemShape.m() - commIdx * params.pValue * L1TileShape::M -
-                                        blockIdxCoord.m() * L1TileShape::M) :
-                                       L1TileShape::M;
-                uint32_t nActual = (blockIdxCoord.n() % nLoopPerRank == (nLoopPerRank - 1)) ?
-                                       (params.problemShape.n() / params.rankSize -
-                                        blockIdxCoord.n() % nLoopPerRank * L1TileShape::N) :
-                                       L1TileShape::N;
-                GemmCoord actualBlockShape{mActual, nActual, params.problemShape.k()};
-
-                MatrixCoord offsetA{blockIdxCoord.m() * L1TileShape::M, blockIdxCoord.k() * L1TileShape::K};
-                MatrixCoord offsetC{blockIdxCoord.m() * L1TileShape::M, blockIdxCoord.n() * L1TileShape::N};
-                int64_t gmOffsetA = params.layoutA.GetOffset(offsetA) + static_cast<int64_t>(commIdx) * L1TileShape::M *
-                                                                            params.pValue * params.problemShape.k();
-                int64_t gmOffsetB = (static_cast<int64_t>(blockIdxCoord.n() / nLoopPerRank) *
-                                         (params.problemShape.n() / params.rankSize) +
-                                     static_cast<int64_t>(blockIdxCoord.n() % nLoopPerRank) * L1TileShape::N) *
-                                    (params.transB ? params.problemShape.k() : 1);
-
-                int64_t rankOffset = gmAPingpongSize / params.rankSize;
-                int64_t rankIdx = blockIdxCoord.n() / nLoopPerRank;
-                int64_t rankOffsetInRank = blockIdxCoord.n() % nLoopPerRank;
-                int64_t gmOffsetC =
-                    static_cast<int64_t>(flagIdx) * L1TileShape::M * params.pValue * params.problemShape.n() +
-                    rankIdx * rankOffset +
-                    static_cast<int64_t>(blockIdxCoord.m()) * L1TileShape::M *
-                        (params.problemShape.n() / params.rankSize) +
-                    blockIdxCoord.n() % nLoopPerRank * L1TileShape::N;
-
-                if constexpr (HasBias) {
-                    int64_t gmOffsetBias =
-                        (blockIdxCoord.n() / nLoopPerRank) * (params.problemShape.n() / params.rankSize) +
-                        (blockIdxCoord.n() % nLoopPerRank) * L1TileShape::N;
-
-                    blockMmad(gmA[gmOffsetA], params.layoutA, gmB[gmOffsetB], params.layoutB, gmC[gmOffsetC],
-                              params.layoutC, gmBias[gmOffsetBias], actualBlockShape);
-                } else {
-                    bool isFirstBlock = (loopOffset < coreNum);
-                    bool hasNextBlock = false;
-                    GemmCoord nextBlockIdCoord;
-                    GemmCoord nextActualBlockShape;
-                    if (loopOffset + coreNum < actualLoopNum) {
-                        hasNextBlock = true;
-                        nextBlockIdCoord = matmulBlockScheduler.GetBlockCoord(loopOffset + coreNum);
-
-                        uint32_t mActualNext = (commIdx == commCount - 1) &&
-                                                       (nextBlockIdCoord.m() == (mLoops - 1) % params.pValue) &&
-                                                       (params.problemShape.m() % L1TileShape::M != 0) ?
-                                                   (params.problemShape.m() - commIdx * params.pValue * L1TileShape::M -
-                                                    nextBlockIdCoord.m() * L1TileShape::M) :
-                                                   L1TileShape::M;
-                        uint32_t nActualNext = (nextBlockIdCoord.n() % nLoopPerRank == (nLoopPerRank - 1)) ?
-                                                   (params.problemShape.n() / params.rankSize -
-                                                    nextBlockIdCoord.n() % nLoopPerRank * L1TileShape::N) :
-                                                   L1TileShape::N;
-                        nextActualBlockShape = GemmCoord{mActualNext, nActualNext, params.problemShape.k()};
-                    }
-                    MatrixCoord offsetNextA{nextBlockIdCoord.m() * L1TileShape::M,
-                                            nextBlockIdCoord.k() * L1TileShape::K};
-                    MatrixCoord offsetNextB{nextBlockIdCoord.k() * L1TileShape::K,
-                                            nextBlockIdCoord.n() * L1TileShape::N};
-                    int64_t gmOffsetNextA = params.layoutA.GetOffset(offsetNextA) + static_cast<int64_t>(commIdx) *
-                                                                                        L1TileShape::M * params.pValue *
-                                                                                        params.problemShape.k();
-                    int64_t gmOffsetNextB =
-                        (static_cast<int64_t>(nextBlockIdCoord.n() / nLoopPerRank) *
-                             (params.problemShape.n() / params.rankSize) +
-                         static_cast<int64_t>(nextBlockIdCoord.n() % nLoopPerRank) * L1TileShape::N) *
-                        (params.transB ? params.problemShape.k() : 1);
-
-                    blockMmad(gmA[gmOffsetA], params.layoutA, gmB[gmOffsetB], params.layoutB, gmC[gmOffsetC],
-                              params.layoutC, gmA[gmOffsetNextA], gmB[gmOffsetNextB], actualBlockShape,
-                              nextActualBlockShape, isFirstBlock, hasNextBlock);
-                }
-            }
-            FFTSCrossCoreSync<PIPE_FIX, 2>(flagIdx);
+            blockMmad(tensors.gmA[gmOffsetA], params.layoutA, tensors.gmB[gmOffsetB], params.layoutB,
+                      tensors.gmC[gmOffsetC], params.layoutC, tensors.gmA[gmOffsetNextA], tensors.gmB[gmOffsetNextB],
+                      actualBlockShape, nextActualBlockShape, isFirstBlock, hasNextBlock);
         }
     }
 

@@ -172,6 +172,17 @@ public:
     __aicore__ inline void ComfirmRemoteCopyDone();
     __aicore__ inline void Dequant(Arch::Resource<ArchTag>& resource, int32_t calIdx, int32_t n_st, int32_t n_ed,
                                    int32_t n_nxt_ed, int32_t n_comm_block, bool needPerChannel, bool needPerToken);
+    template <typename BlockEpilogue>
+    __aicore__ inline void RunDequantLoop(BlockEpilogue& blockEpilogue, int32_t calIdx, int32_t n_st, int32_t n_ed,
+                                          int32_t n_nxt_ed, int32_t& n_comm_block, bool needPerChannel,
+                                          bool needPerToken, __gm__ float32_t* perChannelScale,
+                                          __gm__ float32_t* perTokenScale, __gm__ int32_t* workspace);
+    __aicore__ inline int64_t CalcCommOffsetC(const GemmCoord& blockIdxCoord, int32_t loopIdx, int32_t n_st,
+                                              int32_t n_ed, int32_t n_nxt_ed, int32_t& n_comm_block,
+                                              layout::RowMajor& layoutTmp);
+    __aicore__ inline void AsyncCopyRemoteDataToOutput(int32_t calIdx, int32_t n_st, int32_t n_ed, int32_t n_repeat,
+                                                       int32_t last_n_repeat, int32_t loop_copy_count,
+                                                       int32_t actual_move_size_gm2ub);
 
     inline __aicore__ GemmCoord GetBlockIdCoord(int32_t loopOffset, int32_t mLoop, int32_t nLoop, int32_t swizzlDirect,
                                                 int32_t swizzlCount);
@@ -183,6 +194,14 @@ public:
                                      MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV2Func>>::Padding;
 
 private:
+    struct ZeroCopyRange {
+        uint64_t tileNum;
+        uint32_t tileLength;
+        uint32_t lastTileLength;
+    };
+
+    inline __aicore__ auto CalcZeroCopyRange(uint64_t length, uint32_t alignNum, uint32_t ubBlockNum) -> ZeroCopyRange;
+
     template <int32_t TileM, int32_t TileN>
     __aicore__ inline void LaunchSmallMMatmul();
 };
@@ -242,14 +261,24 @@ __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV
                                                          TileRowBroadcastMul, TileRowBroadcastAdd, TileBroadcastOneBlk,
                                                          TileOneBlkColumnBroadcastMul, TileCopy, TileScheduler>;
 
-    using LayoutC = layout::RowMajor;
-
     BlockEpilogue blockEpilogue(resource);
     __gm__ float32_t* perChannelScale =
         needPerChannel ? reinterpret_cast<__gm__ float32_t*>(perChannelScaleGM_) : nullptr;
     __gm__ float32_t* perTokenScale = needPerToken ? reinterpret_cast<__gm__ float32_t*>(perTokenScaleGM_) : nullptr;
     __gm__ int32_t* workspace = needPerChannel ? reinterpret_cast<__gm__ int32_t*>(gm_accum) : nullptr;
 
+    RunDequantLoop(blockEpilogue, calIdx, n_st, n_ed, n_nxt_ed, n_comm_block, needPerChannel, needPerToken,
+                   perChannelScale, perTokenScale, workspace);
+}
+
+template <TemplateMMReduceScatterV2Class>
+template <typename BlockEpilogue>
+__aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV2Func>::RunDequantLoop(
+    BlockEpilogue& blockEpilogue, int32_t calIdx, int32_t n_st, int32_t n_ed, int32_t n_nxt_ed, int32_t& n_comm_block,
+    bool needPerChannel, bool needPerToken, __gm__ float32_t* perChannelScale, __gm__ float32_t* perTokenScale,
+    __gm__ int32_t* workspace)
+{
+    using LayoutC = layout::RowMajor;
     int32_t totalLoop = m_loop * n_loop;
     for (int32_t p = 0; p < p_value; p++) {
         int32_t loopIdx = calIdx * loop_num_per_comm + p * core_num + core_idx;
@@ -260,32 +289,7 @@ __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV
         GemmCoord blockLocCoord = GetBlockLocCoord(blockIdxCoord);
         GemmCoord blockSizeCoord = GetBlockSizeCoord(blockIdxCoord, blockLocCoord, m_loop, m, n_loop, n, 0);
         LayoutC layout_tmp;
-        int64_t gmOffsetC;
-        if (blockIdxCoord.n() < n_ed) {
-            n_comm_block = n_ed - n_st;
-            int32_t comm_loopIdx = loopIdx - m_loop * n_st;
-            layout_tmp = {static_cast<uint32_t>(m), static_cast<uint32_t>(n_comm_block * n0)};
-            GemmCoord comm_blockIdxCoord =
-                GetBlockIdCoord(comm_loopIdx, m_loop, n_comm_block, swizzl_direct, swizzl_count);
-            if (swizzl_direct && ((n_st / swizzl_count) & 1)) {
-                comm_blockIdxCoord.m() = m_loop - comm_blockIdxCoord.m() - 1;
-            }
-            GemmCoord comm_blockLocCoord = GetBlockLocCoord(comm_blockIdxCoord);
-            MatrixCoord offsetC_comm{comm_blockLocCoord.m(), comm_blockLocCoord.n()};
-            gmOffsetC = static_cast<int64_t>(n0) * n_st * m + layout_tmp.GetOffset(offsetC_comm);
-        } else {
-            n_comm_block = n_nxt_ed - n_ed;
-            int32_t comm_loopIdx = loopIdx - m_loop * n_ed;
-            layout_tmp = {static_cast<uint32_t>(m), static_cast<uint32_t>(n_comm_block * n0)};
-            GemmCoord comm_blockIdxCoord =
-                GetBlockIdCoord(comm_loopIdx, m_loop, n_comm_block, swizzl_direct, swizzl_count);
-            if (swizzl_direct && ((n_ed / swizzl_count) & 1) & 1) {
-                comm_blockIdxCoord.m() = m_loop - comm_blockIdxCoord.m() - 1;
-            }
-            GemmCoord comm_blockLocCoord = GetBlockLocCoord(comm_blockIdxCoord);
-            MatrixCoord offsetC_comm{comm_blockLocCoord.m(), comm_blockLocCoord.n()};
-            gmOffsetC = static_cast<int64_t>(n0) * n_ed * m + layout_tmp.GetOffset(offsetC_comm);
-        }
+        int64_t gmOffsetC = CalcCommOffsetC(blockIdxCoord, loopIdx, n_st, n_ed, n_nxt_ed, n_comm_block, layout_tmp);
 
         __gm__ cType* gmPeerMem = reinterpret_cast<__gm__ cType*>(buff[rank]);
 
@@ -309,6 +313,38 @@ __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV
 }
 
 template <TemplateMMReduceScatterV2Class>
+__aicore__ inline int64_t MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV2Func>::CalcCommOffsetC(
+    const GemmCoord& blockIdxCoord, int32_t loopIdx, int32_t n_st, int32_t n_ed, int32_t n_nxt_ed,
+    int32_t& n_comm_block, layout::RowMajor& layoutTmp)
+{
+    int64_t gmOffsetC;
+    if (blockIdxCoord.n() < n_ed) {
+        n_comm_block = n_ed - n_st;
+        int32_t comm_loopIdx = loopIdx - m_loop * n_st;
+        layoutTmp = {static_cast<uint32_t>(m), static_cast<uint32_t>(n_comm_block * n0)};
+        GemmCoord comm_blockIdxCoord = GetBlockIdCoord(comm_loopIdx, m_loop, n_comm_block, swizzl_direct, swizzl_count);
+        if (swizzl_direct && ((n_st / swizzl_count) & 1)) {
+            comm_blockIdxCoord.m() = m_loop - comm_blockIdxCoord.m() - 1;
+        }
+        GemmCoord comm_blockLocCoord = GetBlockLocCoord(comm_blockIdxCoord);
+        MatrixCoord offsetC_comm{comm_blockLocCoord.m(), comm_blockLocCoord.n()};
+        gmOffsetC = static_cast<int64_t>(n0) * n_st * m + layoutTmp.GetOffset(offsetC_comm);
+    } else {
+        n_comm_block = n_nxt_ed - n_ed;
+        int32_t comm_loopIdx = loopIdx - m_loop * n_ed;
+        layoutTmp = {static_cast<uint32_t>(m), static_cast<uint32_t>(n_comm_block * n0)};
+        GemmCoord comm_blockIdxCoord = GetBlockIdCoord(comm_loopIdx, m_loop, n_comm_block, swizzl_direct, swizzl_count);
+        if (swizzl_direct && ((n_ed / swizzl_count) & 1) & 1) {
+            comm_blockIdxCoord.m() = m_loop - comm_blockIdxCoord.m() - 1;
+        }
+        GemmCoord comm_blockLocCoord = GetBlockLocCoord(comm_blockIdxCoord);
+        MatrixCoord offsetC_comm{comm_blockLocCoord.m(), comm_blockLocCoord.n()};
+        gmOffsetC = static_cast<int64_t>(n0) * n_ed * m + layoutTmp.GetOffset(offsetC_comm);
+    }
+    return gmOffsetC;
+}
+
+template <TemplateMMReduceScatterV2Class>
 __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV2Func>::InitOutputMatrixCToZero()
 {
     uint64_t totalLength = static_cast<uint64_t>(m) * static_cast<uint64_t>(n) / rank_size;
@@ -321,50 +357,13 @@ __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV
     uint32_t formerNum = (totalLengthAligned / alignNum) % aiv_num;
     // 计算整核的数据量
     uint64_t formerLength = ((totalLengthAligned / aiv_num + alignNum - 1) / alignNum) * alignNum;
-    uint64_t formerTileNum = formerLength / alignNum / UB_BLOCK_NUM;
-    uint32_t formerTileLength = -1;
-    uint32_t formerLastTileLength = -1;
-    if ((formerLength / alignNum) % UB_BLOCK_NUM == 0 || formerTileNum == 0) {
-        if (formerTileNum == 0) {
-            formerTileNum = 1;
-        }
-        if (formerLength < UB_BLOCK_NUM * alignNum) {
-            formerTileLength = formerLength / alignNum * alignNum;
-            formerLastTileLength = formerTileLength;
-        } else {
-            formerTileLength = UB_BLOCK_NUM * alignNum;
-            formerLastTileLength = formerTileLength;
-        }
-    } else {
-        formerTileNum = formerTileNum + 1;
-        formerTileLength = UB_BLOCK_NUM * alignNum;
-        formerLastTileLength = (formerLength - (formerTileNum - 1) * formerTileLength);
-    }
+    ZeroCopyRange formerRange = CalcZeroCopyRange(formerLength, alignNum, UB_BLOCK_NUM);
 
     // 计算尾核数量
     uint32_t tailNum = aiv_num - formerNum;
     // 计算尾核的数据量
     uint64_t tailLength = (totalLengthAligned / aiv_num / alignNum) * alignNum;
-
-    uint64_t tailTileNum = tailLength / alignNum / UB_BLOCK_NUM;
-    uint32_t tailTileLength = -1;
-    uint32_t tailLastTileLength = -1;
-    if ((tailLength / alignNum) % UB_BLOCK_NUM == 0 || tailTileNum == 0) {
-        if (tailTileNum == 0) {
-            tailTileNum = 1;
-        }
-        if (tailLength < UB_BLOCK_NUM * alignNum) {
-            tailTileLength = tailLength / alignNum * alignNum;
-            tailLastTileLength = tailTileLength;
-        } else {
-            tailTileLength = UB_BLOCK_NUM * alignNum;
-            tailLastTileLength = tailTileLength;
-        }
-    } else {
-        tailTileNum = tailTileNum + 1;
-        tailTileLength = UB_BLOCK_NUM * alignNum;
-        tailLastTileLength = (tailLength - (tailTileNum - 1) * tailTileLength);
-    }
+    ZeroCopyRange tailRange = CalcZeroCopyRange(tailLength, alignNum, UB_BLOCK_NUM);
 
     // init
     uint64_t tileLength = -1;
@@ -372,15 +371,15 @@ __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV
     uint64_t lastTileLength = -1;
     AscendC::GlobalTensor<cType> cGm;
     if (block_id < formerNum) {
-        tileNum = formerTileNum;
-        tileLength = formerTileLength;
-        lastTileLength = formerLastTileLength;
+        tileNum = formerRange.tileNum;
+        tileLength = formerRange.tileLength;
+        lastTileLength = formerRange.lastTileLength;
 
         cGm.SetGlobalBuffer((__gm__ cType*)cGM_ + formerLength * block_id, formerLength);
     } else {
-        tileNum = tailTileNum;
-        tileLength = tailTileLength;
-        lastTileLength = tailLastTileLength;
+        tileNum = tailRange.tileNum;
+        tileLength = tailRange.tileLength;
+        lastTileLength = tailRange.lastTileLength;
         cGm.SetGlobalBuffer((__gm__ cType*)cGM_ + formerLength * formerNum + tailLength * (block_id - formerNum),
                             tailLength);
     }
@@ -397,6 +396,31 @@ __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV
             AscendC::DataCopy(cGm[i * tileLength], cLocal, tileLength);
         }
     }
+}
+
+template <TemplateMMReduceScatterV2Class>
+inline __aicore__ auto MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV2Func>::CalcZeroCopyRange(
+    uint64_t length, uint32_t alignNum, uint32_t ubBlockNum) -> ZeroCopyRange
+{
+    ZeroCopyRange range;
+    range.tileNum = length / alignNum / ubBlockNum;
+    if ((length / alignNum) % ubBlockNum == 0 || range.tileNum == 0) {
+        if (range.tileNum == 0) {
+            range.tileNum = 1;
+        }
+        if (length < ubBlockNum * alignNum) {
+            range.tileLength = length / alignNum * alignNum;
+            range.lastTileLength = range.tileLength;
+        } else {
+            range.tileLength = ubBlockNum * alignNum;
+            range.lastTileLength = range.tileLength;
+        }
+    } else {
+        range.tileNum = range.tileNum + 1;
+        range.tileLength = ubBlockNum * alignNum;
+        range.lastTileLength = (length - (range.tileNum - 1) * range.tileLength);
+    }
+    return range;
 }
 
 template <TemplateMMReduceScatterV2Class>
@@ -468,49 +492,57 @@ __aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV
         int32_t last_n_repeat = m_per_rank - n_repeat * (loop_copy_count - 1);
 
         // AIV 远程数据读，并完成 GM 累加：一个AIV单次搬运会顺序搬运n_repeat个部分行，提高带宽。
-        if (core_idx < loop_copy_count) {
-            auto ub_offset = USED_UB_SIZE / 2 / sizeof(cType);
-            LocalTensor<cType> ubTensor = uBuf_.template AllocTensor<cType>();
-            LocalTensor<cType> copyTensor0 = ubTensor;
-            LocalTensor<cType> copyTensor1 = ubTensor[ub_offset];
-
-            uint32_t i_loop_db = 0;
-            // 当前AIV核心需要完成单次搬运个数
-            uint32_t core_loop = loop_copy_count / core_num + (core_idx < (loop_copy_count % core_num) ? 1 : 0);
-            bool is_first_copy = true;
-            for (int32_t idx_core = 0; idx_core < core_loop; idx_core++) {
-                int32_t loop_copy_idx = idx_core * core_num + core_idx;
-                int32_t cur_n_repeat = loop_copy_idx == (loop_copy_count - 1) ? last_n_repeat : n_repeat;
-                // 一个AIV从全部卡中读取n_repeat个部分行的数据，并拷贝到GM上完成reduce累加。
-                for (int32_t rank_idx = 0; rank_idx < rank_size; rank_idx++) {
-                    int32_t target_rank = (core_idx + rank_idx) % rank_size;
-                    auto event_id = (i_loop_db & 1) ? EVENT_ID0 : EVENT_ID1;
-                    auto ub_buff_st = (i_loop_db & 1) ? copyTensor0 : copyTensor1;
-                    i_loop_db++;
-                    // 第一次拷贝，确保远端数据准备就绪
-                    if (is_first_copy) {
-                        CheckBuffFlagV2((__gm__ int32_t*)buff[rank] + FLAG_OFFSET + target_rank, cal_idx);
-                    }
-                    WaitFlag<HardEvent::MTE3_MTE2>(event_id);
-                    auto src_peermem = reinterpret_cast<__gm__ cType*>(buff[target_rank]) + m * n_st * n0 +
-                                       rank * m_per_rank * actual_move_size_gm2ub +
-                                       loop_copy_idx * n_repeat * actual_move_size_gm2ub;
-                    CopyGmToUbuf(ub_buff_st, src_peermem, 1, cur_n_repeat * actual_move_size_gm2ub * sizeof(cType) / 32,
-                                 0, 0);
-                    SetFlag<HardEvent::MTE2_MTE3>(event_id);
-                    WaitFlag<HardEvent::MTE2_MTE3>(event_id);
-                    auto dst_gm = reinterpret_cast<__gm__ cType*>(cGM_) + loop_copy_idx * n_repeat * n + n_st * n0;
-                    int32_t actual_move_size_ub2gm = n_ed * n0 >= n ? n - n_st * n0 : actual_move_size_gm2ub;
-                    uint16_t dst_stride = ((n - actual_move_size_ub2gm) * sizeof(cType));
-                    CopyUbufToGmUnknown(
-                        nAlign16, dst_gm, ub_buff_st, cur_n_repeat, actual_move_size_ub2gm * sizeof(cType),
-                        (actual_move_size_gm2ub - actual_move_size_ub2gm) * sizeof(cType) / 32, dst_stride);
-                    SetFlag<HardEvent::MTE3_MTE2>(event_id);
-                }
-                is_first_copy = false;
-            }
-        }
+        AsyncCopyRemoteDataToOutput(cal_idx, n_st, n_ed, n_repeat, last_n_repeat, loop_copy_count,
+                                    actual_move_size_gm2ub);
         EndFirstStep();
+    }
+}
+
+template <TemplateMMReduceScatterV2Class>
+__aicore__ inline void MatmulReduceScatterAivModeSmallM<TemplateMMReduceScatterV2Func>::AsyncCopyRemoteDataToOutput(
+    int32_t cal_idx, int32_t n_st, int32_t n_ed, int32_t n_repeat, int32_t last_n_repeat, int32_t loop_copy_count,
+    int32_t actual_move_size_gm2ub)
+{
+    if (core_idx < loop_copy_count) {
+        auto ub_offset = USED_UB_SIZE / 2 / sizeof(cType);
+        LocalTensor<cType> ubTensor = uBuf_.template AllocTensor<cType>();
+        LocalTensor<cType> copyTensor0 = ubTensor;
+        LocalTensor<cType> copyTensor1 = ubTensor[ub_offset];
+
+        uint32_t i_loop_db = 0;
+        // 当前AIV核心需要完成单次搬运个数
+        uint32_t core_loop = loop_copy_count / core_num + (core_idx < (loop_copy_count % core_num) ? 1 : 0);
+        bool is_first_copy = true;
+        for (int32_t idx_core = 0; idx_core < core_loop; idx_core++) {
+            int32_t loop_copy_idx = idx_core * core_num + core_idx;
+            int32_t cur_n_repeat = loop_copy_idx == (loop_copy_count - 1) ? last_n_repeat : n_repeat;
+            // 一个AIV从全部卡中读取n_repeat个部分行的数据，并拷贝到GM上完成reduce累加。
+            for (int32_t rank_idx = 0; rank_idx < rank_size; rank_idx++) {
+                int32_t target_rank = (core_idx + rank_idx) % rank_size;
+                auto event_id = (i_loop_db & 1) ? EVENT_ID0 : EVENT_ID1;
+                auto ub_buff_st = (i_loop_db & 1) ? copyTensor0 : copyTensor1;
+                i_loop_db++;
+                // 第一次拷贝，确保远端数据准备就绪
+                if (is_first_copy) {
+                    CheckBuffFlagV2((__gm__ int32_t*)buff[rank] + FLAG_OFFSET + target_rank, cal_idx);
+                }
+                WaitFlag<HardEvent::MTE3_MTE2>(event_id);
+                auto src_peermem = reinterpret_cast<__gm__ cType*>(buff[target_rank]) + m * n_st * n0 +
+                                   rank * m_per_rank * actual_move_size_gm2ub +
+                                   loop_copy_idx * n_repeat * actual_move_size_gm2ub;
+                CopyGmToUbuf(ub_buff_st, src_peermem, 1, cur_n_repeat * actual_move_size_gm2ub * sizeof(cType) / 32, 0,
+                             0);
+                SetFlag<HardEvent::MTE2_MTE3>(event_id);
+                WaitFlag<HardEvent::MTE2_MTE3>(event_id);
+                auto dst_gm = reinterpret_cast<__gm__ cType*>(cGM_) + loop_copy_idx * n_repeat * n + n_st * n0;
+                int32_t actual_move_size_ub2gm = n_ed * n0 >= n ? n - n_st * n0 : actual_move_size_gm2ub;
+                uint16_t dst_stride = ((n - actual_move_size_ub2gm) * sizeof(cType));
+                CopyUbufToGmUnknown(nAlign16, dst_gm, ub_buff_st, cur_n_repeat, actual_move_size_ub2gm * sizeof(cType),
+                                    (actual_move_size_gm2ub - actual_move_size_ub2gm) * sizeof(cType) / 32, dst_stride);
+                SetFlag<HardEvent::MTE3_MTE2>(event_id);
+            }
+            is_first_copy = false;
+        }
     }
 }
 

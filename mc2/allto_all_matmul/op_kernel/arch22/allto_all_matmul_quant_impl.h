@@ -60,6 +60,60 @@ __aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::QuantPerToken(
 }
 
 template <TemplateA2AMMClass>
+__aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::PreloadSmoothScale(LocalTensor<float> smoothScaleTensor,
+                                                                             uint32_t smoothScaleCastOffset)
+{
+    // smoothQuant场景需要将x1先乘上smoothQuantScale，MUL不支持bf16，因此需要先转换成float类型
+    CopyGmToUbufAlignB16(smoothScaleTensor.ReinterpretCast<AType>()[smoothScaleCastOffset],
+                         reinterpret_cast<__gm__ AType*>(x1ScaleGM_), 1, tokenSize * sizeof(AType), 0, 0);
+    SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
+    WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
+    Cast(smoothScaleTensor, smoothScaleTensor.ReinterpretCast<AType>()[smoothScaleCastOffset], RoundMode::CAST_NONE,
+         tokenSize);
+    PipeBarrier<PIPE_V>();
+}
+
+template <TemplateA2AMMClass>
+__aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::QuantOneMoveChunk(
+    int32_t moveIdx, int32_t pingPongMoveCount, int32_t dataLen, int32_t ubTokenAlignedPingPongSize,
+    LocalTensor<float> copyTensor0, LocalTensor<float> copyTensor1, LocalTensor<float> absTensor0,
+    LocalTensor<float> absTensor1, LocalTensor<float> reduceMaxTensor0, LocalTensor<float> reduceMaxTensor1,
+    LocalTensor<float> smoothScaleTensor, LocalTensor<float> quantScaleTensor, int32_t castOffset, int32_t tokenPerMove,
+    __gm__ AType* dataSrc, int64_t& dataOffset, uint32_t sizeScale)
+{
+    int32_t actualMoveSize = ubTokenAlignedPingPongSize;
+    int32_t actualMoveToken = tokenPerMove; /* ub_ping_pong_size已经与tokenSize对齐，因此必然每次搬运整数倍token */
+    // 动态量化为INT8场景，每个元素1字节；量化为INT4场景，每两个元素1字节
+    uint32_t actualMoveBytes = std::is_same_v<BType, int8_t> ? actualMoveSize : actualMoveSize / 2;
+    if (moveIdx == pingPongMoveCount - 1) {
+        actualMoveSize = dataLen - moveIdx * ubTokenAlignedPingPongSize;
+        actualMoveToken = actualMoveSize / tokenSize;
+        actualMoveBytes = std::is_same_v<BType, int8_t> ? actualMoveSize : actualMoveSize / 2;
+    }
+    auto eventId = (moveIdx & 1) ? EVENT_ID0 : EVENT_ID1;
+    LocalTensor<float> copyTensor = (moveIdx & 1) ? copyTensor0 : copyTensor1;
+    LocalTensor<float> absTensor = (moveIdx & 1) ? absTensor0 : absTensor1;
+    LocalTensor<float> reduceMaxTensor = (moveIdx & 1) ? reduceMaxTensor0 : reduceMaxTensor1;
+
+    WaitFlag<HardEvent::MTE3_MTE2>(eventId);
+    CopyGmToUbufAlignB16(copyTensor.ReinterpretCast<AType>()[castOffset],
+                         reinterpret_cast<__gm__ AType*>(dataSrc) + dataOffset, 1, actualMoveSize * sizeof(AType), 0,
+                         0);
+    SetFlag<HardEvent::MTE2_V>(eventId);
+    WaitFlag<HardEvent::MTE2_V>(eventId);
+    Cast(copyTensor, copyTensor.ReinterpretCast<AType>()[castOffset], RoundMode::CAST_NONE, actualMoveSize);
+    QuantPerToken(copyTensor, smoothScaleTensor, absTensor, reduceMaxTensor, quantScaleTensor, actualMoveSize,
+                  actualMoveToken, tokenPerMove, moveIdx, eventId);
+    SetFlag<HardEvent::V_MTE3>(eventId);
+    WaitFlag<HardEvent::V_MTE3>(eventId);
+    /* 搬运到GM上时，与peerMem上的相对位置保持不变，后续数据offset可以复用 */
+    CopyUbufToGmAlignB16(reinterpret_cast<__gm__ int8_t*>(quantAGM_) + dataOffset / sizeScale,
+                         copyTensor.ReinterpretCast<int8_t>(), 1, actualMoveBytes, 0, 0);
+    dataOffset += actualMoveSize;
+    SetFlag<HardEvent::MTE3_MTE2>(eventId);
+}
+
+template <TemplateA2AMMClass>
 __aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::QuantToken(__gm__ AType* dataSrc, int64_t dataOffset,
                                                                      int32_t coreTokenOffset, int32_t dataLen,
                                                                      int32_t commIdx)
@@ -85,11 +139,8 @@ __aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::QuantToken(__gm__ ATyp
         midElementCnt - Block32B<float>::AlignUp(tokenSize) - BLOCK_ALIGN_BYTES / sizeof(float);
     int32_t ubTokenAlignedPingPongSize = copyTensorRemainUbSize / tokenSize * tokenSize;
     int32_t pingPongMoveCount = (dataLen + ubTokenAlignedPingPongSize - 1) / ubTokenAlignedPingPongSize;
-    int32_t actualMoveSize = ubTokenAlignedPingPongSize;
-    int32_t tokenPerMove = tokenNum < actualMoveSize / tokenSize ? tokenNum : actualMoveSize / tokenSize;
-    int32_t actualMoveToken = tokenPerMove; /* ub_ping_pong_size已经与tokenSize对齐，因此必然每次搬运整数倍token */
-    // 动态量化为INT8场景，每个元素1字节；量化为INT4场景，每两个元素1字节
-    uint32_t actualMoveBytes = std::is_same_v<BType, int8_t> ? actualMoveSize : actualMoveSize / 2;
+    int32_t tokenPerMove =
+        tokenNum < ubTokenAlignedPingPongSize / tokenSize ? tokenNum : ubTokenAlignedPingPongSize / tokenSize;
     uint32_t sizeScale = std::is_same_v<BType, int8_t> ? 1 : 2;
 
     /* 用于存储计算quantScale的token取abs的结果 */
@@ -105,44 +156,14 @@ __aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::QuantToken(__gm__ ATyp
     LocalTensor<float> reduceMaxTensor1 = absTensor1[reduceMaxOffset];
 
     if (isSmoothQuant) {
-        // smoothQuant场景需要将x1先乘上smoothQuantScale，MUL不支持bf16，因此需要先转换成float类型
-        CopyGmToUbufAlignB16(smoothScaleTensor.ReinterpretCast<AType>()[smoothScaleCastOffset],
-                             reinterpret_cast<__gm__ AType*>(x1ScaleGM_), 1, tokenSize * sizeof(AType), 0, 0);
-        SetFlag<HardEvent::MTE2_V>(EVENT_ID0);
-        WaitFlag<HardEvent::MTE2_V>(EVENT_ID0);
-        Cast(smoothScaleTensor, smoothScaleTensor.ReinterpretCast<AType>()[smoothScaleCastOffset], RoundMode::CAST_NONE,
-             tokenSize);
-        PipeBarrier<PIPE_V>();
+        PreloadSmoothScale(smoothScaleTensor, smoothScaleCastOffset);
     }
     SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
     SetFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);
     for (int32_t moveIdx = 0; moveIdx < pingPongMoveCount; ++moveIdx) {
-        if (moveIdx == pingPongMoveCount - 1) {
-            actualMoveSize = dataLen - moveIdx * ubTokenAlignedPingPongSize;
-            actualMoveToken = actualMoveSize / tokenSize;
-            actualMoveBytes = std::is_same_v<BType, int8_t> ? actualMoveSize : actualMoveSize / 2;
-        }
-        auto eventId = (moveIdx & 1) ? EVENT_ID0 : EVENT_ID1;
-        LocalTensor<float> copyTensor = (moveIdx & 1) ? copyTensor0 : copyTensor1;
-        LocalTensor<float> absTensor = (moveIdx & 1) ? absTensor0 : absTensor1;
-        LocalTensor<float> reduceMaxTensor = (moveIdx & 1) ? reduceMaxTensor0 : reduceMaxTensor1;
-
-        WaitFlag<HardEvent::MTE3_MTE2>(eventId);
-        CopyGmToUbufAlignB16(copyTensor.ReinterpretCast<AType>()[castOffset],
-                             reinterpret_cast<__gm__ AType*>(dataSrc) + dataOffset, 1, actualMoveSize * sizeof(AType),
-                             0, 0);
-        SetFlag<HardEvent::MTE2_V>(eventId);
-        WaitFlag<HardEvent::MTE2_V>(eventId);
-        Cast(copyTensor, copyTensor.ReinterpretCast<AType>()[castOffset], RoundMode::CAST_NONE, actualMoveSize);
-        QuantPerToken(copyTensor, smoothScaleTensor, absTensor, reduceMaxTensor, quantScaleTensor, actualMoveSize,
-                      actualMoveToken, tokenPerMove, moveIdx, eventId);
-        SetFlag<HardEvent::V_MTE3>(eventId);
-        WaitFlag<HardEvent::V_MTE3>(eventId);
-        /* 搬运到GM上时，与peerMem上的相对位置保持不变，后续数据offset可以复用 */
-        CopyUbufToGmAlignB16(reinterpret_cast<__gm__ int8_t*>(quantAGM_) + dataOffset / sizeScale,
-                             copyTensor.ReinterpretCast<int8_t>(), 1, actualMoveBytes, 0, 0);
-        dataOffset += actualMoveSize;
-        SetFlag<HardEvent::MTE3_MTE2>(eventId);
+        QuantOneMoveChunk(moveIdx, pingPongMoveCount, dataLen, ubTokenAlignedPingPongSize, copyTensor0, copyTensor1,
+                          absTensor0, absTensor1, reduceMaxTensor0, reduceMaxTensor1, smoothScaleTensor,
+                          quantScaleTensor, castOffset, tokenPerMove, dataSrc, dataOffset, sizeScale);
     }
     WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID0);
     WaitFlag<HardEvent::MTE3_MTE2>(EVENT_ID1);

@@ -476,27 +476,10 @@ ge::graphStatus MatmulAlltoAllTiling910B::CheckTensorDataType(MatmulAlltoAllInfo
     auto biasTensorDesc = context_->GetOptionalInputDesc(INPUT_BIAS_INDEX);
 
     if (x1Dtype == ge::DT_INT8) {
-        // 校验 scale 张量不为空，量化模式
-        auto x1ScaleTensorDesc = context_->GetOptionalInputDesc(INPUT_X1_SCALE_INDEX);
-        auto x2ScaleTensorDesc = context_->GetOptionalInputDesc(INPUT_X2_SCALE_INDEX);
-        OP_TILING_CHECK((x1ScaleTensorDesc == nullptr || x2ScaleTensorDesc == nullptr || biasTensorDesc == nullptr),
-                        OP_LOGE_WITH_INVALID_INPUT(opName_, "x1Scale, x2Scale, and bias"), return ge::GRAPH_FAILED);
-        ge::DataType x1ScaleDtype = x1ScaleTensorDesc->GetDataType();
-        ge::DataType x2ScaleDtype = x2ScaleTensorDesc->GetDataType();
-        OP_TILING_CHECK(
-            (x1ScaleDtype != ge::DT_FLOAT || x2ScaleDtype != ge::DT_FLOAT),
-            OP_LOGE_FOR_INVALID_DTYPE(
-                opName_, "x1Scale/x2Scale",
-                (Ops::Base::ToString(x1ScaleDtype) + "/" + Ops::Base::ToString(x2ScaleDtype)).c_str(), "FLOAT32"),
-            return ge::GRAPH_FAILED);
-
-        OP_TILING_CHECK(
-            (quantType != SUPPORT_QUANT_MODE),
-            OP_LOGE_FOR_INVALID_VALUE(
-                opName_, "quant_mode",
-                (std::to_string(quantType / X1_QUANT_SIGN) + "/" + std::to_string(quantType % X1_QUANT_SIGN)).c_str(),
-                "x1=PerToken(3)/x2=PerChannel(2)"),
-            return ge::GRAPH_FAILED);
+        ge::graphStatus status = CheckQuantScaleDtype();
+        if (status != ge::GRAPH_SUCCESS) {
+            return status;
+        }
     }
 
     // 校验 bias 数据类型（如果存在）
@@ -510,37 +493,84 @@ ge::graphStatus MatmulAlltoAllTiling910B::CheckTensorDataType(MatmulAlltoAllInfo
         } else if (biasDtype == ge::DT_BF16) {
             quantBiasType = TILINGKEY_TPL_BF16;
         }
-        vector<uint32_t> paramsType = {x1Dtype, x2Dtype, biasDtype, yDtype};
-
-        for (uint32_t kindsId = 0; kindsId < SUPPORTED_TYPES_WITH_BIAS.size(); kindsId++) {
-            if (IsArrayEqual(paramsType, SUPPORTED_TYPES_WITH_BIAS[kindsId], COUNT_PARAMS_WITH_BIAS)) {
-                return ge::GRAPH_SUCCESS;
-            }
-        }
-        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-            opName_, "x1,x2,bias,y",
-            (Ops::Base::ToString(x1Dtype) + "," + Ops::Base::ToString(x2Dtype) + "," + Ops::Base::ToString(biasDtype) +
-             "," + Ops::Base::ToString(yDtype))
-                .c_str(),
-            "The dtypes of x1, x2, bias and y must be one of the supported combinations.");
-        return ge::GRAPH_FAILED;
-    } else {
-        vector<uint32_t> paramsType = {x1Dtype, x2Dtype, yDtype};
-
-        for (uint32_t kindsId = 0; kindsId < SUPPORTED_TYPES_WITHOUT_BIAS.size(); kindsId++) {
-            if (IsArrayEqual(paramsType, SUPPORTED_TYPES_WITHOUT_BIAS[kindsId], COUNT_PARAMS_WITHOUT_BIAS)) {
-                return ge::GRAPH_SUCCESS;
-            }
-        }
-        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-            opName_, "x1,x2,y",
-            (Ops::Base::ToString(x1Dtype) + "," + Ops::Base::ToString(x2Dtype) + "," + Ops::Base::ToString(yDtype))
-                .c_str(),
-            "The dtypes of x1, x2 and y must be one of the supported combinations.");
-        return ge::GRAPH_FAILED;
+        return CheckDtypeWithBias(x1Dtype, x2Dtype, biasDtype, yDtype);
     }
+    return CheckDtypeWithoutBias(x1Dtype, x2Dtype, yDtype);
+}
 
+/**
+ * @brief 校验量化场景 scale 张量的 dtype 与量化模式
+ * @return ge::graphStatus
+ */
+ge::graphStatus MatmulAlltoAllTiling910B::CheckQuantScaleDtype()
+{
+    // 校验 scale 张量不为空，量化模式
+    auto x1ScaleTensorDesc = context_->GetOptionalInputDesc(INPUT_X1_SCALE_INDEX);
+    auto x2ScaleTensorDesc = context_->GetOptionalInputDesc(INPUT_X2_SCALE_INDEX);
+    auto biasTensorDesc = context_->GetOptionalInputDesc(INPUT_BIAS_INDEX);
+    OP_TILING_CHECK((x1ScaleTensorDesc == nullptr || x2ScaleTensorDesc == nullptr || biasTensorDesc == nullptr),
+                    OP_LOGE_WITH_INVALID_INPUT(opName_, "x1Scale, x2Scale, and bias"), return ge::GRAPH_FAILED);
+    ge::DataType x1ScaleDtype = x1ScaleTensorDesc->GetDataType();
+    ge::DataType x2ScaleDtype = x2ScaleTensorDesc->GetDataType();
+    OP_TILING_CHECK(
+        (x1ScaleDtype != ge::DT_FLOAT || x2ScaleDtype != ge::DT_FLOAT),
+        OP_LOGE_FOR_INVALID_DTYPE(opName_, "x1Scale/x2Scale",
+                                  (Ops::Base::ToString(x1ScaleDtype) + "/" + Ops::Base::ToString(x2ScaleDtype)).c_str(),
+                                  "FLOAT32"),
+        return ge::GRAPH_FAILED);
+
+    OP_TILING_CHECK(
+        (quantType != SUPPORT_QUANT_MODE),
+        OP_LOGE_FOR_INVALID_VALUE(
+            opName_, "quant_mode",
+            (std::to_string(quantType / X1_QUANT_SIGN) + "/" + std::to_string(quantType % X1_QUANT_SIGN)).c_str(),
+            "x1=PerToken(3)/x2=PerChannel(2)"),
+        return ge::GRAPH_FAILED);
     return ge::GRAPH_SUCCESS;
+}
+
+/**
+ * @brief 校验带 bias 场景的 dtype 组合
+ * @return ge::graphStatus
+ */
+ge::graphStatus MatmulAlltoAllTiling910B::CheckDtypeWithBias(ge::DataType x1Dtype, ge::DataType x2Dtype,
+                                                             ge::DataType biasDtype, ge::DataType yDtype)
+{
+    vector<uint32_t> paramsType = {x1Dtype, x2Dtype, biasDtype, yDtype};
+
+    for (uint32_t kindsId = 0; kindsId < SUPPORTED_TYPES_WITH_BIAS.size(); kindsId++) {
+        if (IsArrayEqual(paramsType, SUPPORTED_TYPES_WITH_BIAS[kindsId], COUNT_PARAMS_WITH_BIAS)) {
+            return ge::GRAPH_SUCCESS;
+        }
+    }
+    OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+        opName_, "x1,x2,bias,y",
+        (Ops::Base::ToString(x1Dtype) + "," + Ops::Base::ToString(x2Dtype) + "," + Ops::Base::ToString(biasDtype) +
+         "," + Ops::Base::ToString(yDtype))
+            .c_str(),
+        "The dtypes of x1, x2, bias and y must be one of the supported combinations.");
+    return ge::GRAPH_FAILED;
+}
+
+/**
+ * @brief 校验不带 bias 场景的 dtype 组合
+ * @return ge::graphStatus
+ */
+ge::graphStatus MatmulAlltoAllTiling910B::CheckDtypeWithoutBias(ge::DataType x1Dtype, ge::DataType x2Dtype,
+                                                                ge::DataType yDtype)
+{
+    vector<uint32_t> paramsType = {x1Dtype, x2Dtype, yDtype};
+
+    for (uint32_t kindsId = 0; kindsId < SUPPORTED_TYPES_WITHOUT_BIAS.size(); kindsId++) {
+        if (IsArrayEqual(paramsType, SUPPORTED_TYPES_WITHOUT_BIAS[kindsId], COUNT_PARAMS_WITHOUT_BIAS)) {
+            return ge::GRAPH_SUCCESS;
+        }
+    }
+    OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
+        opName_, "x1,x2,y",
+        (Ops::Base::ToString(x1Dtype) + "," + Ops::Base::ToString(x2Dtype) + "," + Ops::Base::ToString(yDtype)).c_str(),
+        "The dtypes of x1, x2 and y must be one of the supported combinations.");
+    return ge::GRAPH_FAILED;
 }
 
 static ge::graphStatus CheckMatrixMulShapes(const gert::TilingContext* context, const char* opName, uint64_t worldSize)
@@ -611,6 +641,41 @@ ge::graphStatus MatmulAlltoAllTiling910B::CheckShapeInfo(MatmulAlltoAllInfo& inf
                     return ge::GRAPH_FAILED);
 
     // 校验维度数目是否合法
+    status = CheckInputDimNum(x1Shape, x2Shape);
+    if (status != ge::GRAPH_SUCCESS) {
+        return status;
+    }
+
+    // 校验输出
+    status = CheckOutputShape();
+    if (status != ge::GRAPH_SUCCESS) {
+        return status;
+    }
+
+    // 校验shape的维度矩阵是否合法
+    status = CheckMatrixMulShapes(context_, opName_, info.worldSize);
+    if (status != ge::GRAPH_SUCCESS)
+        return status;
+
+    FillMatmulDims(info, x1Shape, x2Shape);
+    // 校验量化场景中scale的shape信息
+    status = CheckScaleShapes(info);
+    if (status != ge::GRAPH_SUCCESS) {
+        return status;
+    }
+
+    // 校验 bias 的 shape 信息
+    status = CheckBiasShape(info);
+    if (status != ge::GRAPH_SUCCESS) {
+        return status;
+    }
+
+    return CheckShapeRange(info);
+}
+
+ge::graphStatus MatmulAlltoAllTiling910B::CheckInputDimNum(const gert::StorageShape* x1Shape,
+                                                           const gert::StorageShape* x2Shape)
+{
     uint64_t x1DimNum = x1Shape->GetStorageShape().GetDimNum();
     uint64_t x2DimNum = x2Shape->GetStorageShape().GetDimNum();
     OP_TILING_CHECK(
@@ -618,8 +683,11 @@ ge::graphStatus MatmulAlltoAllTiling910B::CheckShapeInfo(MatmulAlltoAllInfo& inf
         OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "x1/x2",
                                      (std::to_string(x1DimNum) + "D, " + std::to_string(x2DimNum) + "D").c_str(), "2D"),
         return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
 
-    // 校验输出
+ge::graphStatus MatmulAlltoAllTiling910B::CheckOutputShape()
+{
     const gert::StorageShape* yShape = context_->GetOutputShape(OUTPUT_Y_INDEX);
     OP_TILING_CHECK(
         (yShape == nullptr),
@@ -629,56 +697,70 @@ ge::graphStatus MatmulAlltoAllTiling910B::CheckShapeInfo(MatmulAlltoAllInfo& inf
     OP_TILING_CHECK((yDimNum != 2),
                     OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "y", (std::to_string(yDimNum) + "D").c_str(), "2D"),
                     return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
 
-    // 校验shape的维度矩阵是否合法
-    status = CheckMatrixMulShapes(context_, opName_, info.worldSize);
-    if (status != ge::GRAPH_SUCCESS)
-        return status;
-
-    // 校验量化场景中scale的shape信息
-    auto x1TensorDesc = context_->GetInputDesc(INPUT_X1_INDEX);
-    ge::DataType x1Dtype = x1TensorDesc->GetDataType();
+void MatmulAlltoAllTiling910B::FillMatmulDims(MatmulAlltoAllInfo& info, const gert::StorageShape* x1Shape,
+                                              const gert::StorageShape* x2Shape)
+{
     info.M = x1Shape->GetStorageShape().GetDim(0);
     info.K = x1Shape->GetStorageShape().GetDim(1);
     uint64_t x2Dim0 = x2Shape->GetStorageShape().GetDim(0);
     uint64_t x2Dim1 = x2Shape->GetStorageShape().GetDim(1);
     info.N = (info.K == x2Dim0) ? x2Dim1 : x2Dim0;
-    if (x1Dtype == ge::DT_INT8) {
-        const gert::StorageShape* x1ScaleShape = context_->GetOptionalInputShape(INPUT_X1_SCALE_INDEX);
-        const gert::StorageShape* x2ScaleShape = context_->GetOptionalInputShape(INPUT_X2_SCALE_INDEX);
-        uint64_t x1ScaleShapeDimNum = x1ScaleShape->GetStorageShape().GetDimNum();
-        uint64_t x2ScaleShapeDimNum = x2ScaleShape->GetStorageShape().GetDimNum();
-        OP_TILING_CHECK(
-            (x1ScaleShapeDimNum != 1 || x2ScaleShapeDimNum != 1),
-            OP_LOGE_FOR_INVALID_SHAPEDIM(
-                opName_, "x1Scale/x2Scale",
-                (std::to_string(x1ScaleShapeDimNum) + "D/" + std::to_string(x2ScaleShapeDimNum) + "D").c_str(), "1D"),
-            return ge::GRAPH_FAILED);
-        uint64_t x1ScaleDim0 = x1ScaleShape->GetStorageShape().GetDim(0);
-        uint64_t x2ScaleDim0 = x2ScaleShape->GetStorageShape().GetDim(0);
-        OP_TILING_CHECK((x1ScaleDim0 != info.M),
-                        OP_LOGE_FOR_INVALID_VALUE(opName_, "x1Scale", std::to_string(x1ScaleDim0).c_str(),
-                                                  std::to_string(info.M).c_str()),
-                        return ge::GRAPH_FAILED);
-        OP_TILING_CHECK((x2ScaleDim0 != info.N),
-                        OP_LOGE_FOR_INVALID_VALUE(opName_, "x2Scale", std::to_string(x2ScaleDim0).c_str(),
-                                                  std::to_string(info.N).c_str()),
-                        return ge::GRAPH_FAILED);
-    }
-    const gert::StorageShape* biasShape = context_->GetOptionalInputShape(INPUT_BIAS_INDEX);
-    if (biasShape != nullptr) {
-        uint64_t biasShapeDimNum = biasShape->GetStorageShape().GetDimNum();
-        OP_TILING_CHECK(
-            (biasShapeDimNum != 1),
-            OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "bias", (std::to_string(biasShapeDimNum) + "D").c_str(), "1D"),
-            return ge::GRAPH_FAILED);
-        uint64_t biasDim0 = biasShape->GetStorageShape().GetDim(0);
-        OP_TILING_CHECK((biasDim0 != info.N),
-                        OP_LOGE_FOR_INVALID_VALUE(opName_, "bias", std::to_string(biasDim0).c_str(),
-                                                  std::to_string(info.N).c_str()),
-                        return ge::GRAPH_FAILED);
-    }
+}
 
+ge::graphStatus MatmulAlltoAllTiling910B::CheckScaleShapes(MatmulAlltoAllInfo& info)
+{
+    auto x1TensorDesc = context_->GetInputDesc(INPUT_X1_INDEX);
+    ge::DataType x1Dtype = x1TensorDesc->GetDataType();
+    if (x1Dtype != ge::DT_INT8) {
+        return ge::GRAPH_SUCCESS;
+    }
+    const gert::StorageShape* x1ScaleShape = context_->GetOptionalInputShape(INPUT_X1_SCALE_INDEX);
+    const gert::StorageShape* x2ScaleShape = context_->GetOptionalInputShape(INPUT_X2_SCALE_INDEX);
+    uint64_t x1ScaleShapeDimNum = x1ScaleShape->GetStorageShape().GetDimNum();
+    uint64_t x2ScaleShapeDimNum = x2ScaleShape->GetStorageShape().GetDimNum();
+    OP_TILING_CHECK(
+        (x1ScaleShapeDimNum != 1 || x2ScaleShapeDimNum != 1),
+        OP_LOGE_FOR_INVALID_SHAPEDIM(
+            opName_, "x1Scale/x2Scale",
+            (std::to_string(x1ScaleShapeDimNum) + "D/" + std::to_string(x2ScaleShapeDimNum) + "D").c_str(), "1D"),
+        return ge::GRAPH_FAILED);
+    uint64_t x1ScaleDim0 = x1ScaleShape->GetStorageShape().GetDim(0);
+    uint64_t x2ScaleDim0 = x2ScaleShape->GetStorageShape().GetDim(0);
+    OP_TILING_CHECK((x1ScaleDim0 != info.M),
+                    OP_LOGE_FOR_INVALID_VALUE(opName_, "x1Scale", std::to_string(x1ScaleDim0).c_str(),
+                                              std::to_string(info.M).c_str()),
+                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK((x2ScaleDim0 != info.N),
+                    OP_LOGE_FOR_INVALID_VALUE(opName_, "x2Scale", std::to_string(x2ScaleDim0).c_str(),
+                                              std::to_string(info.N).c_str()),
+                    return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MatmulAlltoAllTiling910B::CheckBiasShape(MatmulAlltoAllInfo& info)
+{
+    const gert::StorageShape* biasShape = context_->GetOptionalInputShape(INPUT_BIAS_INDEX);
+    if (biasShape == nullptr) {
+        return ge::GRAPH_SUCCESS;
+    }
+    uint64_t biasShapeDimNum = biasShape->GetStorageShape().GetDimNum();
+    OP_TILING_CHECK(
+        (biasShapeDimNum != 1),
+        OP_LOGE_FOR_INVALID_SHAPEDIM(opName_, "bias", (std::to_string(biasShapeDimNum) + "D").c_str(), "1D"),
+        return ge::GRAPH_FAILED);
+    uint64_t biasDim0 = biasShape->GetStorageShape().GetDim(0);
+    OP_TILING_CHECK(
+        (biasDim0 != info.N),
+        OP_LOGE_FOR_INVALID_VALUE(opName_, "bias", std::to_string(biasDim0).c_str(), std::to_string(info.N).c_str()),
+        return ge::GRAPH_FAILED);
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus MatmulAlltoAllTiling910B::CheckShapeRange(MatmulAlltoAllInfo& info)
+{
     OP_TILING_CHECK(info.M == 0,
                     OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName_, "x1", std::to_string(info.M).c_str(),
                                                           "The value of dim 0 (m) of x1 cannot be 0"),

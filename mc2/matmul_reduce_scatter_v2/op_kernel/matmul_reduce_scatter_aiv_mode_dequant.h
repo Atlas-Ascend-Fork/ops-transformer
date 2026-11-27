@@ -117,9 +117,6 @@ public:
             GemmCoord blockLocCoord = GetBlockLocCoord(blockIdxCoord);
             GemmCoord blockSizeCoord = GetBlockSizeCoord(blockIdxCoord, blockLocCoord, mLoop, finalM, nLoop, finalN, 0);
 
-            layout::VectorLayout layoutPerChannelScale{blockSizeCoord.n()};
-            layout::VectorLayout layoutBias{blockSizeCoord.n()};
-            layout::VectorLayout layoutPerTokenScale{blockSizeCoord.m()};
             uint32_t dataBlockOffset = dstRankIdx * peerMemBlockSize + (loopIdx - loopSt) / rankSize * blockSize;
             layout::RowMajor layoutDst = layoutBlock;
             __gm__ OutputType* gmDst = gmPeerMem + dataBlockOffset;
@@ -129,19 +126,33 @@ public:
                 gmDst = gmOutput + layoutOutput.GetOffset(offsetC);
             }
             __gm__ BiasType* gmBiasOffset = (gmbias != nullptr) ? (gmbias + blockLocCoord.n()) : nullptr;
-            if (needPerChannel && needPerToken) {
-                blockEpilogue(perChannelScale + blockLocCoord.n(), layoutPerChannelScale,
-                              perTokenScale + dstRankIdx * finalM + blockLocCoord.m(), layoutPerTokenScale,
-                              gmBiasOffset, layoutBias, workspace + dataBlockOffset, layoutBlock, gmDst, layoutDst,
-                              blockSizeCoord);
-            } else if (needPerChannel) {
-                blockEpilogue(perChannelScale + blockLocCoord.n(), layoutPerChannelScale, gmBiasOffset, layoutBias,
-                              workspace + dataBlockOffset, layoutBlock, gmDst, layoutDst, blockSizeCoord);
-            } else if (needPerToken) {
-                blockEpilogue(perTokenScale + dstRankIdx * finalM + blockLocCoord.m(), layoutPerTokenScale,
-                              gmBiasOffset, layoutBias, gmPeerMem + dataBlockOffset, layoutBlock, gmDst, layoutDst,
-                              blockSizeCoord);
-            }
+            RunBlockEpilogue(blockEpilogue, perChannelScale, perTokenScale, workspace, needPerChannel, needPerToken,
+                             finalM, dstRankIdx, dataBlockOffset, blockLocCoord, blockSizeCoord, layoutBlock, gmPeerMem,
+                             gmDst, gmBiasOffset, layoutDst);
+        }
+    }
+
+    __aicore__ inline void RunBlockEpilogue(BlockEpilogue& blockEpilogue, __gm__ float32_t* perChannelScale,
+                                            __gm__ float32_t* perTokenScale, __gm__ int32_t* workspace,
+                                            bool needPerChannel, bool needPerToken, uint32_t finalM, int32_t dstRankIdx,
+                                            uint32_t dataBlockOffset, GemmCoord blockLocCoord, GemmCoord blockSizeCoord,
+                                            layout::RowMajor layoutBlock, __gm__ OutputType* gmPeerMem,
+                                            __gm__ OutputType* gmDst, __gm__ BiasType* gmBiasOffset,
+                                            layout::RowMajor layoutDst)
+    {
+        layout::VectorLayout layoutPerChannelScale{blockSizeCoord.n()};
+        layout::VectorLayout layoutBias{blockSizeCoord.n()};
+        layout::VectorLayout layoutPerTokenScale{blockSizeCoord.m()};
+        if (needPerChannel && needPerToken) {
+            blockEpilogue(perChannelScale + blockLocCoord.n(), layoutPerChannelScale,
+                          perTokenScale + dstRankIdx * finalM + blockLocCoord.m(), layoutPerTokenScale, gmBiasOffset,
+                          layoutBias, workspace + dataBlockOffset, layoutBlock, gmDst, layoutDst, blockSizeCoord);
+        } else if (needPerChannel) {
+            blockEpilogue(perChannelScale + blockLocCoord.n(), layoutPerChannelScale, gmBiasOffset, layoutBias,
+                          workspace + dataBlockOffset, layoutBlock, gmDst, layoutDst, blockSizeCoord);
+        } else if (needPerToken) {
+            blockEpilogue(perTokenScale + dstRankIdx * finalM + blockLocCoord.m(), layoutPerTokenScale, gmBiasOffset,
+                          layoutBias, gmPeerMem + dataBlockOffset, layoutBlock, gmDst, layoutDst, blockSizeCoord);
         }
     }
 

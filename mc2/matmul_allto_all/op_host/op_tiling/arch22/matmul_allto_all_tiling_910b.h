@@ -63,6 +63,17 @@ protected:
     void SetTilingKey();
 
 private:
+    ge::graphStatus CheckQuantScaleDtype();
+    ge::graphStatus CheckDtypeWithBias(ge::DataType x1Dtype, ge::DataType x2Dtype, ge::DataType biasDtype,
+                                       ge::DataType yDtype);
+    ge::graphStatus CheckDtypeWithoutBias(ge::DataType x1Dtype, ge::DataType x2Dtype, ge::DataType yDtype);
+    ge::graphStatus CheckInputDimNum(const gert::StorageShape* x1Shape, const gert::StorageShape* x2Shape);
+    ge::graphStatus CheckOutputShape();
+    void FillMatmulDims(MatmulAlltoAllInfo& info, const gert::StorageShape* x1Shape, const gert::StorageShape* x2Shape);
+    ge::graphStatus CheckScaleShapes(MatmulAlltoAllInfo& info);
+    ge::graphStatus CheckBiasShape(MatmulAlltoAllInfo& info);
+    ge::graphStatus CheckShapeRange(MatmulAlltoAllInfo& info);
+
     uint64_t tilingKey_;
     bool needTransX2 = false;
     bool hasBias = false;

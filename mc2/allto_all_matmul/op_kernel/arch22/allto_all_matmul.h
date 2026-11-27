@@ -78,6 +78,10 @@ private:
                                                   int32_t dataSegmentOffset, int32_t smoothScaleCastOffset,
                                                   int32_t actualMoveSize);
     __aicore__ inline void AlltoAll();
+    __aicore__ inline void AlltoAllStep(int32_t commIdx, int64_t& srcOffset);
+    __aicore__ inline void AlltoAllSendOrRecv(int32_t commIdx, uint64_t flagIdx, int64_t& srcOffset);
+    __aicore__ inline void SendTokens(uint64_t flagIdx, int64_t& srcOffset);
+    __aicore__ inline void RecvTokens(int32_t commIdx);
     __aicore__ inline void Dequant();
     template <typename EpilogueTileShape>
     __aicore__ inline void DequantImpl();
@@ -89,6 +93,15 @@ private:
                                          event_t eventId);
     __aicore__ inline void QuantToken(__gm__ AType* dataSrc, int64_t dataOffset, int32_t coreTokenOffset,
                                       int32_t dataLen, int32_t commIdx);
+    __aicore__ inline void PreloadSmoothScale(LocalTensor<float> smoothScaleTensor, uint32_t smoothScaleCastOffset);
+    __aicore__ inline void QuantOneMoveChunk(int32_t moveIdx, int32_t pingPongMoveCount, int32_t dataLen,
+                                             int32_t ubTokenAlignedPingPongSize, LocalTensor<float> copyTensor0,
+                                             LocalTensor<float> copyTensor1, LocalTensor<float> absTensor0,
+                                             LocalTensor<float> absTensor1, LocalTensor<float> reduceMaxTensor0,
+                                             LocalTensor<float> reduceMaxTensor1, LocalTensor<float> smoothScaleTensor,
+                                             LocalTensor<float> quantScaleTensor, int32_t castOffset,
+                                             int32_t tokenPerMove, __gm__ AType* dataSrc, int64_t& dataOffset,
+                                             uint32_t sizeScale);
     __aicore__ inline void QuantTokenSegment(__gm__ AType* dataSrc, int64_t dataOffset, int32_t coreTokenOffset,
                                              int32_t dataLen, int32_t commIdx);
     __aicore__ inline void SmoothQuantProc(event_t eventId, int32_t dataSegmentOffset, int32_t smoothScaleCastOffset,
@@ -199,73 +212,7 @@ __aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::AlltoAll()
         int64_t src_offset = 0;
         uint32_t elemBytes = sizeof(AType); // 将int4归入该文件时，需要修改
         for (int32_t commIdx = 0; commIdx <= commCount; ++commIdx) {
-            uint64_t flagIdx = commIdx % MAX_BLOCK_COUNT;
-
-            if (commIdx == commCount - 1) {
-                allToAllSizePerRankPerLoop = allToAllSizePerRank - src_offset;
-            }
-
-            if (commIdx >= MAX_BLOCK_COUNT && commIdx < commCount) {
-                WaitEvent(flagIdx);
-            }
-
-            SetAndWaitAivSync(flagIdx);
-            if (commIdx < commCount) {
-                CrossRankSyncV1(FLAG_ZERO_IDX, commIdx + 1);
-            }
-            SetAndWaitAivSync(flagIdx);
-
-            if (aivIdx == 0 && commIdx < commCount && aicIdx < allToAllSendCoreNum) {
-                int32_t dstRank = aicIdx / coreNumPerRank;
-                int32_t dstLoc = aicIdx % coreNumPerRank;
-                int32_t coreOffset = dstLoc * allToAllSizePerCore;
-                int32_t dataLen = coreOffset + allToAllSizePerCore > allToAllSizePerRankPerLoop ?
-                                      allToAllSizePerRankPerLoop - coreOffset :
-                                      allToAllSizePerCore;
-                uint64_t dataSrc = dstRank * allToAllSizePerRank + src_offset + coreOffset;
-                int64_t dataDst = static_cast<int64_t>(flagIdx) * pingPongBlockSize +
-                                  static_cast<int64_t>(coreOffset) * rankSize + static_cast<int64_t>(rank) * k;
-                uint32_t copyBytes = Catlass::BitsToBytes(dataLen * Catlass::SizeOfBits<AType>::value);
-
-                if (dataLen > 0) {
-                    CopyTokensFromGMToGM(reinterpret_cast<__gm__ int8_t*>(aGM_) + ElemNumToBytes<AType>(dataSrc),
-                                         (__gm__ int8_t*)buff[dstRank] + ElemNumToBytes<AType>(dataDst), copyBytes,
-                                         kBytes, tokenBytes);
-                }
-                src_offset += allToAllSizePerRankPerLoop;
-            } else if (isAlltoallOut && aivIdx == 1 && commIdx > 0 && aicIdx >= allToAllSendCoreNum &&
-                       aicIdx < usedCoreNum) {
-                int64_t blockDst = static_cast<int64_t>((commIdx - 1) % MAX_BLOCK_COUNT) * pingPongBlockSize;
-                int32_t mThisLoop = commIdx == commCount ? m / rankSize - (commIdx - 1) * mPerLoop : mPerLoop;
-                int32_t mThisLoopPerCore = DivCeil(mThisLoop, allToAllRecvCoreNum);
-                int32_t mSt = (aicIdx - allToAllSendCoreNum) * mThisLoopPerCore;
-                int32_t mThisCoreThisLoop = mSt + mThisLoopPerCore > mThisLoop ? mThisLoop - mSt : mThisLoopPerCore;
-                int64_t srcSt = blockDst + static_cast<int64_t>(mSt) * tokenSize;
-                int64_t dstSt = (static_cast<int64_t>(commIdx - 1) * mPerLoop + mSt) * tokenSize;
-                if (mThisCoreThisLoop > 0) {
-                    CopyTokensFromGMToGM(
-                        (__gm__ int8_t*)buff[rank] + ElemNumToBytes<AType>(srcSt),
-                        reinterpret_cast<__gm__ int8_t*>(allToAllResultGM_) + ElemNumToBytes<AType>(dstSt),
-                        mThisCoreThisLoop * tokenBytes, tokenBytes, tokenBytes);
-                }
-            }
-
-            SetAndWaitAivSync(flagIdx);
-            if (commIdx < commCount) {
-                CrossRankSyncV1(FLAG_ONE_IDX, commIdx + 1);
-            }
-            SetAndWaitAivSync(flagIdx);
-
-            if constexpr (QuantType == MC2_DYNAMIC_QUANT) { // 动态量化场景，拷贝完成后，对左矩阵进行quant
-                if (commIdx < commCount) {
-                    Quant(flagIdx, commIdx);
-                    SetAndWaitAivSync(flagIdx);
-                }
-            }
-
-            if (commIdx < commCount) {
-                SetAicSync(flagIdx);
-            }
+            AlltoAllStep(commIdx, src_offset);
         }
 
         WaitEvent(FLAG_ZERO_IDX);
@@ -280,6 +227,95 @@ __aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::AlltoAll()
 
         PipeBarrier<PIPE_ALL>();
         ResetIpcFlags(1);
+    }
+}
+
+template <TemplateA2AMMClass>
+__aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::AlltoAllStep(int32_t commIdx, int64_t& src_offset)
+{
+    uint64_t flagIdx = commIdx % MAX_BLOCK_COUNT;
+
+    if (commIdx == commCount - 1) {
+        allToAllSizePerRankPerLoop = allToAllSizePerRank - src_offset;
+    }
+
+    if (commIdx >= MAX_BLOCK_COUNT && commIdx < commCount) {
+        WaitEvent(flagIdx);
+    }
+
+    SetAndWaitAivSync(flagIdx);
+    if (commIdx < commCount) {
+        CrossRankSyncV1(FLAG_ZERO_IDX, commIdx + 1);
+    }
+    SetAndWaitAivSync(flagIdx);
+
+    AlltoAllSendOrRecv(commIdx, flagIdx, src_offset);
+
+    SetAndWaitAivSync(flagIdx);
+    if (commIdx < commCount) {
+        CrossRankSyncV1(FLAG_ONE_IDX, commIdx + 1);
+    }
+    SetAndWaitAivSync(flagIdx);
+
+    if constexpr (QuantType == MC2_DYNAMIC_QUANT) { // 动态量化场景，拷贝完成后，对左矩阵进行quant
+        if (commIdx < commCount) {
+            Quant(flagIdx, commIdx);
+            SetAndWaitAivSync(flagIdx);
+        }
+    }
+
+    if (commIdx < commCount) {
+        SetAicSync(flagIdx);
+    }
+}
+
+template <TemplateA2AMMClass>
+__aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::AlltoAllSendOrRecv(int32_t commIdx, uint64_t flagIdx,
+                                                                             int64_t& src_offset)
+{
+    if (aivIdx == 0 && commIdx < commCount && aicIdx < allToAllSendCoreNum) {
+        SendTokens(flagIdx, src_offset);
+    } else if (isAlltoallOut && aivIdx == 1 && commIdx > 0 && aicIdx >= allToAllSendCoreNum && aicIdx < usedCoreNum) {
+        RecvTokens(commIdx);
+    }
+}
+
+template <TemplateA2AMMClass>
+__aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::SendTokens(uint64_t flagIdx, int64_t& src_offset)
+{
+    int32_t dstRank = aicIdx / coreNumPerRank;
+    int32_t dstLoc = aicIdx % coreNumPerRank;
+    int32_t coreOffset = dstLoc * allToAllSizePerCore;
+    int32_t dataLen = coreOffset + allToAllSizePerCore > allToAllSizePerRankPerLoop ?
+                          allToAllSizePerRankPerLoop - coreOffset :
+                          allToAllSizePerCore;
+    uint64_t dataSrc = dstRank * allToAllSizePerRank + src_offset + coreOffset;
+    int64_t dataDst = static_cast<int64_t>(flagIdx) * pingPongBlockSize + static_cast<int64_t>(coreOffset) * rankSize +
+                      static_cast<int64_t>(rank) * k;
+    uint32_t copyBytes = Catlass::BitsToBytes(dataLen * Catlass::SizeOfBits<AType>::value);
+
+    if (dataLen > 0) {
+        CopyTokensFromGMToGM(reinterpret_cast<__gm__ int8_t*>(aGM_) + ElemNumToBytes<AType>(dataSrc),
+                             (__gm__ int8_t*)buff[dstRank] + ElemNumToBytes<AType>(dataDst), copyBytes, kBytes,
+                             tokenBytes);
+    }
+    src_offset += allToAllSizePerRankPerLoop;
+}
+
+template <TemplateA2AMMClass>
+__aicore__ inline void AlltoAllMatmul<TemplateA2AMMFunc>::RecvTokens(int32_t commIdx)
+{
+    int64_t blockDst = static_cast<int64_t>((commIdx - 1) % MAX_BLOCK_COUNT) * pingPongBlockSize;
+    int32_t mThisLoop = commIdx == commCount ? m / rankSize - (commIdx - 1) * mPerLoop : mPerLoop;
+    int32_t mThisLoopPerCore = DivCeil(mThisLoop, allToAllRecvCoreNum);
+    int32_t mSt = (aicIdx - allToAllSendCoreNum) * mThisLoopPerCore;
+    int32_t mThisCoreThisLoop = mSt + mThisLoopPerCore > mThisLoop ? mThisLoop - mSt : mThisLoopPerCore;
+    int64_t srcSt = blockDst + static_cast<int64_t>(mSt) * tokenSize;
+    int64_t dstSt = (static_cast<int64_t>(commIdx - 1) * mPerLoop + mSt) * tokenSize;
+    if (mThisCoreThisLoop > 0) {
+        CopyTokensFromGMToGM((__gm__ int8_t*)buff[rank] + ElemNumToBytes<AType>(srcSt),
+                             reinterpret_cast<__gm__ int8_t*>(allToAllResultGM_) + ElemNumToBytes<AType>(dstSt),
+                             mThisCoreThisLoop * tokenBytes, tokenBytes, tokenBytes);
     }
 }
 
