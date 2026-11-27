@@ -51,9 +51,6 @@ const std::array<const aclTensor*, 2> RainFusionAttention(
            numKeyValueHeads, maskType, scaleValue, innerPrecise, blockSize);
 
     const aclTensor* blockShapeTensor = ConvertIntArrayToTensor(blockShape, executor, DataType::DT_INT64);
-    const aclTensor* attenMaskTensor =
-        (attenMaskOptional != nullptr) ? attenMaskOptional :
-                                         executor->AllocTensor(DataType::DT_BOOL, Format::FORMAT_ND, Format::FORMAT_ND);
     const aclTensor* actualSeqTensor = ConvertIntArrayToTensor(actualSeqLengthsOptional, executor, DataType::DT_INT64);
     const aclTensor* actualSeqKvTensor =
         ConvertIntArrayToTensor(actualSeqLengthsKvOptional, executor, DataType::DT_INT64);
@@ -63,7 +60,7 @@ const std::array<const aclTensor*, 2> RainFusionAttention(
 
     // scaleValue is already float type, no need for cast
     auto ret = INFER_SHAPE(RainFusionAttention,
-                           OP_INPUT(query, key, value, selectIdx, selectNumIdx, blockShapeTensor, attenMaskTensor,
+                           OP_INPUT(query, key, value, selectIdx, selectNumIdx, blockShapeTensor, attenMaskOptional,
                                     actualSeqTensor, actualSeqKvTensor, blockTableOptional),
                            OP_OUTPUT(attentionOutTensor, softmaxLseTensor),
                            OP_ATTR(qInputLayout, safeKvInputLayout, static_cast<uint32_t>(numKeyValueHeads),
@@ -76,8 +73,8 @@ const std::array<const aclTensor*, 2> RainFusionAttention(
     }
 
     ADD_TO_LAUNCHER_LIST_AICORE(RainFusionAttention,
-                                OP_INPUT(query, key, value, selectIdx, selectNumIdx, blockShapeTensor, attenMaskTensor,
-                                         actualSeqTensor, actualSeqKvTensor, blockTableOptional),
+                                OP_INPUT(query, key, value, selectIdx, selectNumIdx, blockShapeTensor,
+                                         attenMaskOptional, actualSeqTensor, actualSeqKvTensor, blockTableOptional),
                                 OP_OUTPUT(attentionOutTensor, softmaxLseTensor),
                                 OP_ATTR(qInputLayout, safeKvInputLayout, static_cast<uint32_t>(numKeyValueHeads),
                                         static_cast<uint32_t>(maskType), static_cast<float>(scaleValue),
