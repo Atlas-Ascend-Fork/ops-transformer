@@ -23,10 +23,10 @@
 
 ## Function
 
-- **Description**: BlockSparseAttentionV3 sparse attention computation. It supports flexible block-level sparsity patterns. BlockSparseMask specifies the KV blocks selected by each Q block, enabling efficient sparse attention computation.
+- **Description**: BlockSparseAttentionV3 sparse attention computation. It supports flexible block-level sparsity patterns. blockSparseMaskOptional specifies the KV blocks selected by each Q block, enabling efficient sparse attention computation.
 
   Compared with BlockSparseAttentionV2, this API adds the pQuantScaleOptional, quantMode, and dstTypeMax parameters.
-- **Formula**: Sparse block size: $blockShapeX \times blockShapeY$, selectIdx specifies the sparse pattern
+- **Formula**: Sparse block size: $blockShapeX \times blockShapeY$, blockSparseMaskOptional specifies the sparse pattern
 
   $$
   attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
@@ -300,7 +300,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         </ul>
         When this input is configured:
         <ul>
-            <li>When quantMode=1, the shape is [batch, headNum, ceilDiv(maxQSeqLength, 128), 1].</li>
+            <li>When quantMode=1, the shape is [batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), 1].</li>
             <li>quantMode=2/3, see the constraints in <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scaling Factor of the MXFP4 Quantization Mode</a>.</li>
         </ul>
       </td>
@@ -320,7 +320,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         </ul>
         When this input is configured:
         <ul>
-            <li>When quantMode=1, the shape is [batch, kvHeadNum, ceilDiv(maxKVSeqLength, 256), 1] or [batch, kvHeadNum, ceilDiv(maxKVSeqLength, 512), 1].</li>
+            <li>When quantMode=1, the shape is [batch, kvHeadNum, ceilDiv(maxKVSeqLength, blockShapeY), 1].</li>
             <li>For quantMode=2/3, see the constraints in <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scaling Factor of the MXFP4 Quantization Mode</a>.</li>
         </ul>
       </td>
@@ -340,7 +340,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         </ul>
         When this input is configured:
         <ul>
-          <li>When quantMode=1, the shape is [batch, kvHeadNum, ceilDiv(maxKVSeqLength, 256), 1] or [batch, kvHeadNum, ceilDiv(maxKVSeqLength, 512), 1].</li>
+          <li>When quantMode=1, the shape is [batch, kvHeadNum, ceilDiv(maxKVSeqLength, blockShapeY), 1].</li>
          <li>When quantMode=2/3, see <a href="#quantization-scale-factor-of-the-mxfp4-quantization-mode">Quantization Scale Factor of the MXFP4 Quantization Mode</a> for constraints.</li>
         </ul>
       </td>
@@ -532,7 +532,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
           <li>If query is "BSND": [batch, maxQSeqLength, headNum, 1].</li>
         </ul>
       </td>
-      <td>FLOAT</td>
+      <td>FLOAT32</td>
       <td>ND</td>
       <td>3/4</td>
       <td>√</td>
@@ -591,7 +591,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
       <td>qInputLayout or kvInputLayout is invalid.</td>
     </tr>
     <tr>
-      <td>blockShape is invalid (the number of elements is less than 2 or the value is less than or equal to 0).</td>
+      <td>blockShape is invalid (the number of elements is not equal to 2 or the value is less than or equal to 0).</td>
     </tr>
     <tr>
       <td>innerPrecise is invalid (must be 0, 1, or 4).</td>
@@ -679,23 +679,23 @@ aclnnStatus aclnnBlockSparseAttentionV3(
     - qDequantScale (query quantization scale factor)
 
       - Data type: FLOAT32
-      - shape: (Batch, HeadNum, CeilDiv(maxQSeqLength, 128), 1)
+      - shape: (Batch, HeadNum, CeilDiv(maxQSeqLength, blockShapeX), 1)
       - Purpose: Performs query dequantization during QK matrix multiplication.
     - kDequantScale (key quantization scale factor)
 
       - Data type: FLOAT32
-      - shape: (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 256), 1) or (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 512), 1)
+      - shape: (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, blockShapeY), 1)
       - Purpose: Perform Dequantization on key during the QK Matrix Multiplication.
     - vDequantScale (value quantization scale factor)
 
       - Data type: FLOAT32
-      - shape: (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 256), 1) or (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 512), 1)
+      - shape: (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, blockShapeY), 1)
       - Purpose: Perform Dequantization on value during the PV Matrix Multiplication.
   - If any of query, key, or value is of the FLOAT8_E4M3FN data type, query, key, and value must all be of the FLOAT8_E4M3FN data type.
   - For FP8 inputs, the corresponding quantization scale factor inputs qDequantScale, kDequantScale, and vDequantScale must be provided.
   - The data type of the quantization scale factors must be FLOAT32.
-  - The shape of qDequantScale must be (Batch, HeadNum, CeilDiv(maxQSeqLength, 128), 1).
-  - The shapes of kDequantScale and vDequantScale must be the same: (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 256), 1) or (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 512), 1).
+  - The shape of qDequantScale must be (Batch, HeadNum, CeilDiv(maxQSeqLength, blockShapeX), 1).
+  - The shapes of kDequantScale and vDequantScale must be the same: (Batch, KVHeadNum, CeilDiv(maxKVSeqLength, blockShapeY), 1).
   - If the data type of any of query, key, and value is not FLOAT8_E4M3FN, qDequantScale, kDequantScale, and vDequantScale must be set to nullptr.
   - blockShapeOptional must be passed in.
   - The quantization block sizes of q and kv must be consistent with the two elements of blockShapeOptional respectively.
@@ -1032,7 +1032,7 @@ int main() {
         numKvHeads,               // numKeyValueHeads
         0,                        // maskType
         scaleValue,               // scaleValue
-        innerPrecise,             // innerPrecise (automatically selected based on the chip model)
+        innerPrecise,             // innerPrecise
         0,                        // blockSize
         2147483647,               // preTokens
         2147483647,               // nextTokens

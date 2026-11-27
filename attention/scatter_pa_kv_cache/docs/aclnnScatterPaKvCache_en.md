@@ -53,7 +53,7 @@
     valueCache:[num_blocks, block_size, num_head, v_head_size]
     slotMapping:[batch * seq_len]
     cacheMode:"Norm"
-    scatter_mode:"None"/"Nct"
+    scatterMode:"None"/"Nct"
     ```
 
     k_head_size and v_head_size can be different or the same.
@@ -83,7 +83,7 @@
     compressLensOptional:[batch * num_head]
     seqLensOptional:[batch]
     cacheMode:"Norm"
-    scatter_mode:"Alibi"
+    scatterMode:"Alibi"
     ```
 
   - Scenario 5:
@@ -98,7 +98,7 @@
     seqLensOptional:[batch]
     compressSeqOffsetOptional:[batch * num_head]
     cacheMode:"Norm"
-    scatter_mode:"Rope"/"Omni"
+    scatterMode:"Rope"/"Omni"
     ```
 
   - Scenario 6:
@@ -110,7 +110,7 @@
     valueCache:[]
     slotMapping:[batch * seq_len]
     cacheMode:"Norm"
-    scatter_mode:"None"/"Nct"
+    scatterMode:"None"/"Nct"
     ```
 
   - Scenario 7:
@@ -122,10 +122,10 @@
     valueCache:[num_blocks, num_head, block_size, v_head_size]
     slotMapping:[num_tokens]
     cacheMode:"Norm"
-    scatter_mode:"NHSD"
+    scatterMode:"NHSD"
     ```
 
-- The above scenarios are distinguished based on the constructed parameters. The first parameter construction corresponds to Scenario 1, the second to Scenario 2, the third to Scenario 3, the fourth to Scenario 4, the fifth to Scenario 5, and the sixth to Scenario 6. Scenarios 1, 2, and 6 do not have the three optional parameters: compressLensOptional, seqLensOptional, and compressSeqOffsetOptional. Scenario 4 does not have the compressSeqOffsetOptional optional parameter.
+- The above scenarios are distinguished based on the constructed parameters. The first parameter construction corresponds to Scenario 1, the second to Scenario 2, the third to Scenario 3, the fourth to Scenario 4, the fifth to Scenario 5, the sixth to Scenario 6, and the seventh to Scenario 7. Scenarios 1, 2, 6, and 7 do not have the three optional parameters: compressLensOptional, seqLensOptional, and compressSeqOffsetOptional. Scenario 4 does not have the compressSeqOffsetOptional optional parameter.
 
 <!-- npu="A3,910b" id7 -->
 - <term>Atlas A3 products</term>, <term>Atlas A2 products</term>: only supports scenarios 1, 2, 4, 5, 6, and 7.
@@ -437,16 +437,16 @@ aclnnStatus aclnnScatterPaKvCache(
 - The value range of slotMapping is [0, num_blocks * block_size - 1], and the elements in slotMapping must be unique. Correctness is not guaranteed if duplicates exist.
 - When both key and value are 3D, the shapes of the first two dimensions of key and value must be the same.
 - When both key and value are 4D, the shapes of the first three dimensions of key and value must be the same, and the third dimension of keyCacheRef and valueCacheRef must be 1.
-- When key and value are 4D, compressLensOptional and seqLensOptional are mandatory parameters. When key and value are 3D, compressLensOptional, compressSeqOffsetOptional, and seqLensOptional are optional parameters.
+- When key and value are 4D, compressLensOptional and seqLensOptional are mandatory parameters. When key and value are 3D, compressLensOptional, compressSeqOffsetOptional, and seqLensOptional are optional parameters, but when scatterModeOptional is "Alibi", compressLensOptional and seqLensOptional are mandatory, and when scatterModeOptional is "Rope" or "Omni", compressLensOptional, compressSeqOffsetOptional, and seqLensOptional are all mandatory.
 - When key and value are all 4-dimensional, slotMapping is 2-dimensional. The first dimension of slotMapping equals the first dimension of key, which is batch, and the second dimension of slotMapping equals the third dimension of key, which is num_head (corresponding to scenario 3);
 - When key and value are all 4-dimensional, seqLensOptional is 1-dimensional, and the value of seqLensOptional equals the first dimension of key, which is batch (corresponding to scenario 3);
-- When key and value are 3-dimensional and seqLensOptional exists, the sum of all values in seqLensOptional equals the first dimension of key, which is num_blocks (corresponding to scenarios 4 and 5);
+- When key and value are 3-dimensional and seqLensOptional exists, the sum of all values in seqLensOptional equals the first dimension of key, which is num_tokens (corresponding to scenarios 4 and 5);
 - Each element in seqLensOptional and compressLensOptional must satisfy the formula: reduceSum(seqLensOptional[i] - compressLensOptional[i]) <= num_blocks * block_size (corresponding to scenarios 3, 4, and 5).
 - When cacheModeOptional is "PA_NZ", the second-to-last dimension of keyCacheRef and valueCacheRef must be less than UINT16_MAX (corresponding to scenario 1).
 - k_head_size and v_head_size must be 32-byte aligned (corresponding to scenario 7).
 - num_head must be less than 4095 (corresponding to scenario 7).
 - block_size *k_head_size and block_size* v_head_size must be less than UINT32_MAX (corresponding to scenario 7).
-- (num_head *k_head_size + num_head* v_head_size) * sizeof(dtype_key) must be less than 196608 (corresponding to scenario 7).
+- (num_head *k_head_size + num_head* v_head_size) * sizeof(dtypeKey) must be less than 196608 (corresponding to scenario 7).
 
 ## Example
 

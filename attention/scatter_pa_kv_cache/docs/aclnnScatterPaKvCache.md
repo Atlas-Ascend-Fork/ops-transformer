@@ -51,7 +51,7 @@
     valueCache:[num_blocks, block_size, num_head, v_head_size]
     slotMapping:[batch * seq_len]
     cacheMode:"Norm"
-    scatter_mode:"None"/"Nct"
+    scatterMode:"None"/"Nct"
     ```
 
     其中k_head_size与v_head_size可以不同，也可以相同。
@@ -81,7 +81,7 @@
     compressLensOptional:[batch * num_head]
     seqLensOptional:[batch]
     cacheMode:"Norm"
-    scatter_mode:"Alibi"
+    scatterMode:"Alibi"
     ```
 
   - 场景五：
@@ -96,7 +96,7 @@
     seqLensOptional:[batch]
     compressSeqOffsetOptional:[batch * num_head]
     cacheMode:"Norm"
-    scatter_mode:"Rope"/"Omni"
+    scatterMode:"Rope"/"Omni"
     ```
 
   - 场景六：
@@ -108,7 +108,7 @@
     valueCache:[]
     slotMapping:[batch * seq_len]
     cacheMode:"Norm"
-    scatter_mode:"None"/"Nct"
+    scatterMode:"None"/"Nct"
     ```
 
   - 场景七：
@@ -120,10 +120,10 @@
     valueCache:[num_blocks, num_head, block_size, v_head_size]
     slotMapping:[num_tokens]
     cacheMode:"Norm"
-    scatter_mode:"NHSD"
+    scatterMode:"NHSD"
     ```
 
-- 上述场景根据构造的参数来区别，符合第一种入参构造走场景一，符合第二种构造走场景二，符合第三种构造走场景三，符合第四种构造走场景四，符合第五种构造走场景五，符合第六种构造走场景六，符合第七种构造走场景七。场景一、场景二、场景六没有compressLensOptional、seqLensOptional、compressSeqOffsetOptional这三个可选参数。场景四没有compressSeqOffsetOptional可选参数。
+- 上述场景根据构造的参数来区别，符合第一种入参构造走场景一，符合第二种构造走场景二，符合第三种构造走场景三，符合第四种构造走场景四，符合第五种构造走场景五，符合第六种构造走场景六，符合第七种构造走场景七。场景一、场景二、场景六、场景七没有compressLensOptional、seqLensOptional、compressSeqOffsetOptional这三个可选参数。场景四没有compressSeqOffsetOptional可选参数。
 
 <!-- npu="A3,910b" id7 -->
 - <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：仅支持场景一、二、四、五、六、七。
@@ -435,10 +435,10 @@ aclnnStatus aclnnScatterPaKvCache(
 - slotMapping的取值范围[0,num_blocks*block_size-1]，且slotMapping内的元素值保证不重复，重复时不保证正确性。
 - 当key和value都是3维，则key和value的前两维shape必须相同。
 - 当key和value都是4维，则key和value的前三维shape必须相同，且keyCacheRef和valueCacheRef的第三维必须是1。
-- 当key和value是4维时，compressLensOptional、seqLensOptional为必选参数；当key和value是3维时，compressLensOptional、compressSeqOffsetOptional、seqLensOptional为可选参数。
+- 当key和value是4维时，compressLensOptional、seqLensOptional为必选参数；当key和value是3维时，compressLensOptional、compressSeqOffsetOptional、seqLensOptional为可选参数，但当scatterModeOptional为"Alibi"时，compressLensOptional和seqLensOptional为必选参数，当scatterModeOptional为"Rope"或"Omni"时，compressLensOptional、compressSeqOffsetOptional和seqLensOptional均为必选参数。
 - 当key和value都是4维时，slotMapping是二维，且slotMapping的第一维值等于key的第一维为batch，slotMapping的第二维值等于key的第三维为num_head（对应场景三）。
 - 当key和value都是4维时，seqLensOptional是一维，seqLensOptional的shape[0]等于key的第一维为batch，每个元素表示对应batch的实际序列长度（对应场景三）。
-- 当key和value是3维且存在seqLensOptional时，seqLensOptional中所有值的和等于key的第一维为num_blocks（对应场景四、五）。
+- 当key和value是3维且存在seqLensOptional时，seqLensOptional中所有值的和等于key的第一维num_tokens（对应场景四、五）。
 - 压缩场景的缓存容量按模式分别计算，公式中的求和覆盖所有batch和head对应的元素；且每个写入区间需满足slotMapping >= 0、slotMapping + 写入长度 <= num_blocks * block_size：
   - 场景三、场景五（scatterModeOptional为"Rope"时）：每个batch/head的写入长度为seqLensOptional[i] - compressLensOptional[i] + 1（含1个均值token），元素值必须满足公式：reduceSum(seqLensOptional[i] - compressLensOptional[i] + 1) <= num_blocks * block_size。
   - 场景四（scatterModeOptional为"Alibi"时）：每个batch/head的写入长度为compressLensOptional[i]，元素值必须满足公式：reduceSum(compressLensOptional[i]) <= num_blocks * block_size。

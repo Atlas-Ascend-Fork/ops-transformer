@@ -23,11 +23,11 @@
 
 ## 功能说明
 
-- **接口功能**：BlockSparseAttentionV2稀疏注意力计算，支持灵活的块级稀疏模式，通过BlockSparseMask指定每个Q块选择的KV块，实现高效的稀疏注意力计算。
+- **接口功能**：BlockSparseAttentionV2稀疏注意力计算，支持灵活的块级稀疏模式，通过blockSparseMaskOptional指定每个Q块选择的KV块，实现高效的稀疏注意力计算。
 
   相比于BlockSparseAttention,本接口新增qDequantScaleOptional、kDequantScaleOptional、vDequantScaleOptional参数。
 
-- **计算公式**：稀疏块大小：$blockShapeX \times blockShapeY$，selectIdx指定稀疏模式
+- **计算公式**：稀疏块大小：$blockShapeX \times blockShapeY$，blockSparseMaskOptional指定稀疏模式
 
   $$
   attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
@@ -50,7 +50,7 @@
 <!-- npu="950" id7 -->
 - **FP8特性说明（仅<term>Ascend 950PR&950DT系列产品</term>支持）**：
 
-  本算子新增支持FP8数据类型的输入，以提高计算效率并降低显存占用。当使用FP8输入时，需要提供相应的量化缩放因子用于反量化计算。
+  本算子新增支持FP8数据类型的输入，以提高计算效率并降低内存占用。当使用FP8输入时，需要提供相应的量化缩放因子用于反量化计算。
 
 <!-- end id7 -->
 - **量化缩放因子**：
@@ -541,7 +541,7 @@ aclnnStatus aclnnBlockSparseAttentionV2(
       <td>qInputLayout或kvInputLayout不合法。</td>
     </tr>
     <tr>
-      <td>blockShape不合法（元素数量少于2或值小于等于0）。</td>
+      <td>blockShape不合法（元素数量不等于2或值小于等于0）。</td>
     </tr>
     <tr>
       <td>innerPrecise不合法（必须为0、1或4）。</td>
@@ -599,9 +599,9 @@ aclnnStatus aclnnBlockSparseAttentionV2(
 - 该接口与PyTorch配合使用时，需要保证CANN相关包与PyTorch相关包的版本匹配。
 - qInputLayout和kvInputLayout当前仅支持相同的"TND"、"BNSD"或"BSND"布局；其中"BSND"仅<term>Ascend 950PR&950DT系列产品</term>支持。
 - 当前query、key、value的InputLayout必须保持一致。
-- 输入query、key、value的数据类型必须一致，支持FLOAT16和BFLOAT16。
+- 输入query、key、value的数据类型必须一致，支持FLOAT16、BFLOAT16和FLOAT8_E4M3FN（FLOAT8_E4M3FN仅<term>Ascend 950PR&950DT系列产品</term>支持）。
 - query、key、value的D轴当前仅支持配置为64或128。
-- blockShapeOptional如果传入，则必须包含至少两个元素[blockShapeX, blockShapeY]，且值必须大于0，blockShapeY在<term>Ascend 950PR&950DT系列产品</term>上须为16的倍数，在<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>上须为128的倍数。
+- blockShapeOptional如果传入，则必须包含两个元素[blockShapeX, blockShapeY]，且值必须大于0，blockShapeY在<term>Ascend 950PR&950DT系列产品</term>上须为16的倍数，在<term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>上须为128的倍数。
 - blockSparseMaskOptional当前必须传入，且shape为[batch, headNum, qBlockNum, kvBlockNum]。TND时，qBlockNum = ceilDiv(max(actualSeqLengths), blockShapeX)，kvBlockNum = ceilDiv(max(actualSeqLengthsKv), blockShapeY)。BNSD/BSND时，qBlockNum = ceilDiv(Q shape中的S, blockShapeX)，kvBlockNum = ceilDiv(K shape中的S, blockShapeY)；若传入actualSeqLengths和actualSeqLengthsKv，也可按实际长度计算：qBlockNum = ceilDiv(max(actualSeqLengths), blockShapeX)，kvBlockNum = ceilDiv(max(actualSeqLengthsKv), blockShapeY)。
 - attenMaskOptional当前只支持传入nullptr。
 - actualSeqLengthsOptional在qInputLayout为“TND”时必选；actualSeqLengthsKvOptional在kvInputLayout为“TND”时必选。
@@ -945,7 +945,7 @@ int main() {
         numKvHeads,               // numKeyValueHeads
         0,                        // maskType
         scaleValue,               // scaleValue
-        innerPrecise,             // innerPrecise（随芯片型号自动选择）
+        innerPrecise,             // innerPrecise
         0,                        // blockSize
         2147483647,               // preTokens
         2147483647,               // nextTokens
