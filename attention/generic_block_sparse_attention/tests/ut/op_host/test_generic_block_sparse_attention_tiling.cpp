@@ -117,6 +117,13 @@ uint32_t ReadTilingU32(const TilingInfo& tilingInfo, size_t byteOffset)
     return value;
 }
 
+uint64_t ReadTilingU64(const TilingInfo& tilingInfo, size_t byteOffset)
+{
+    uint64_t value = 0;
+    std::memcpy(&value, tilingInfo.tilingData.get() + byteOffset, sizeof(uint64_t));
+    return value;
+}
+
 std::vector<gert::TilingContextPara::TensorDescription> MakeOutputs(ge::DataType outDtype, bool returnLse,
                                                                     int64_t headDim = kD, int64_t numHeads = kN1)
 {
@@ -267,12 +274,6 @@ bool RunMxfp4PagedTiling(const std::vector<gert::TilingContextPara::TensorDescri
     return ExecuteTiling(ctx, info);
 }
 
-uint64_t ReadTilingU64(const TilingInfo& info, size_t offset)
-{
-    uint64_t result = 0;
-    std::memcpy(&result, info.tilingData.get() + offset, sizeof(result));
-    return result;
-}
 } // namespace
 
 TEST_F(generic_block_sparse_attention_tiling_ut, mxfp4_paged_independent_strides)
@@ -470,6 +471,111 @@ TEST_F(generic_block_sparse_attention_tiling_ut, int8_external_scales_910b)
         ExecuteTestCase(context, ge::GRAPH_SUCCESS,
                         dtype == ge::DT_FLOAT16 ? 9200000071001032ULL : 9200000071001042ULL);
     }
+}
+
+namespace {
+// Serialized tiling-data offsets (declaration order, natural alignment).
+constexpr size_t kKScaleStride0Offset = 280U;
+constexpr size_t kVScaleStride0Offset = 288U;
+
+// Paged ACLNN inputs are views over a flat allocation; origin shape and stride carry the layout.
+void SetPagedFirstAxisStride(gert::TilingContextPara::TensorDescription& tensor, int64_t dim0Stride)
+{
+    const auto& logical = tensor.shape_.GetOriginShape();
+    int64_t innerSpan = 1;
+    tensor.hasStride_ = true;
+    tensor.stride_.SetDimNum(logical.GetDimNum());
+    for (size_t axis = logical.GetDimNum() - 1; axis > 0; --axis) {
+        tensor.stride_.SetStride(axis, innerSpan);
+        innerSpan *= logical.GetDim(axis);
+    }
+    tensor.stride_.SetStride(0, dim0Stride);
+    tensor.shape_.MutableStorageShape() = gert::Shape({(logical.GetDim(0) - 1) * dim0Stride + innerSpan});
+}
+
+std::vector<gert::TilingContextPara::TensorDescription> MakeInt8PagedInputs(const std::string& layoutKv, int64_t dim,
+                                                                            int64_t kvHeads)
+{
+    const int64_t qHeads = kN1 * kvHeads;
+    auto inputs = MakeInputs(ge::DT_INT8, dim, qHeads, kvHeads);
+    if (layoutKv == "PA_BNBD") {
+        inputs[1] = {{{kMaxBlocks, kvHeads, kBlockSize, dim}, {kMaxBlocks, kvHeads, kBlockSize, dim}},
+                     ge::DT_INT8,
+                     ge::FORMAT_ND};
+        inputs[2] = inputs[1];
+    }
+    inputs[7] = {{{kT, qHeads}, {kT, qHeads}}, ge::DT_FLOAT, ge::FORMAT_ND};
+    inputs[8] = {{{kMaxBlocks, kvHeads, kBlockSize}, {kMaxBlocks, kvHeads, kBlockSize}}, ge::DT_FLOAT, ge::FORMAT_ND};
+    inputs[9] = {{{kvHeads, dim}, {kvHeads, dim}}, ge::DT_FLOAT, ge::FORMAT_ND};
+    inputs[10] = {{{1}, {1}}, ge::DT_FLOAT, ge::FORMAT_ND};
+    return inputs;
+}
+
+bool RunInt8PagedTiling(const std::vector<gert::TilingContextPara::TensorDescription>& inputs,
+                        const std::string& layoutKv, int64_t dim, int64_t kvHeads, TilingInfo& info)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara context("GenericBlockSparseAttention", inputs,
+                                    MakeOutputs(ge::DT_FLOAT16, false, dim, kN1 * kvHeads),
+                                    MakeAttrs(1, 7, 0, 0, 0.0f, -1, -1, 4, "TND", layoutKv, 0, false, {1, 4}),
+                                    &compileInfo, "Ascend910B", 40, 196608);
+    return ExecuteTiling(context, info);
+}
+} // namespace
+
+TEST_F(generic_block_sparse_attention_tiling_ut, int8_paged_independent_scale_strides)
+{
+    constexpr int64_t kvHeads = 2;
+    constexpr int64_t dim = 256;
+    const int64_t compactKScale = kvHeads * kBlockSize;
+    const int64_t kvStride = kBlockSize * kvHeads * dim + kvHeads * dim;
+    for (const std::string layoutKv : {"PA_BBND", "PA_BNBD"}) {
+        SCOPED_TRACE(layoutKv);
+        auto inputs = MakeInt8PagedInputs(layoutKv, dim, kvHeads);
+        TilingInfo compactInfo;
+        ASSERT_TRUE(RunInt8PagedTiling(inputs, layoutKv, dim, kvHeads, compactInfo));
+        EXPECT_EQ(ReadTilingU64(compactInfo, kKScaleStride0Offset), static_cast<uint64_t>(compactKScale));
+        EXPECT_EQ(ReadTilingU64(compactInfo, kVScaleStride0Offset), static_cast<uint64_t>(dim));
+        SetPagedFirstAxisStride(inputs[1], kvStride);
+        SetPagedFirstAxisStride(inputs[2], kvStride);
+        SetPagedFirstAxisStride(inputs[8], compactKScale + 37);
+        SetPagedFirstAxisStride(inputs[9], dim + 9);
+        TilingInfo stridedInfo;
+        ASSERT_TRUE(RunInt8PagedTiling(inputs, layoutKv, dim, kvHeads, stridedInfo));
+        EXPECT_EQ(stridedInfo.tilingKey, compactInfo.tilingKey);
+        EXPECT_EQ(ReadTilingU64(stridedInfo, kKScaleStride0Offset), static_cast<uint64_t>(compactKScale + 37));
+        EXPECT_EQ(ReadTilingU64(stridedInfo, kVScaleStride0Offset), static_cast<uint64_t>(dim + 9));
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, int8_rejects_malformed_scale_strides)
+{
+    struct BadStride {
+        size_t slot;
+        int64_t stride;
+    };
+    constexpr int64_t kvHeads = 2;
+    constexpr int64_t dim = 256;
+    const int64_t compactKScale = kvHeads * kBlockSize;
+    for (const auto& bad :
+         {BadStride{8U, compactKScale - 1}, BadStride{8U, 0}, BadStride{9U, dim - 1}, BadStride{9U, -dim}}) {
+        SCOPED_TRACE(testing::Message() << "slot " << bad.slot << ", stride " << bad.stride);
+        auto inputs = MakeInt8PagedInputs("PA_BBND", dim, kvHeads);
+        SetPagedFirstAxisStride(inputs[bad.slot], bad.stride);
+        TilingInfo info;
+        EXPECT_FALSE(RunInt8PagedTiling(inputs, "PA_BBND", dim, kvHeads, info));
+    }
+    // Only dim0 may carry a hole; an explicit stride must match the scale rank.
+    auto inner = MakeInt8PagedInputs("PA_BBND", dim, kvHeads);
+    inner[8].hasStride_ = true;
+    inner[8].stride_ = gert::Stride({compactKScale, 1, kvHeads});
+    TilingInfo innerInfo;
+    EXPECT_FALSE(RunInt8PagedTiling(inner, "PA_BBND", dim, kvHeads, innerInfo));
+    auto rank = MakeInt8PagedInputs("PA_BBND", dim, kvHeads);
+    SetPagedFirstAxisStride(rank[8], compactKScale);
+    rank[8].stride_.SetDimNum(2);
+    TilingInfo rankInfo;
+    EXPECT_FALSE(RunInt8PagedTiling(rank, "PA_BBND", dim, kvHeads, rankInfo));
 }
 
 TEST_F(generic_block_sparse_attention_tiling_ut, int8_tnd_seqused_q)

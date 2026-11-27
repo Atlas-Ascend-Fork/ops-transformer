@@ -317,7 +317,7 @@ static const aclTensor* NormalizeDim0KvTensor(const aclTensor* tensor, const cha
 // GetInputShape may return storage unless Contiguous/CreateView normalizes the descriptor).
 // Keep Contiguous even when OpDef has AutoContiguous.
 // Do NOT Contiguous key/value here — dim0-strided KV is handled by NormalizeDim0KvTensor
-// (CreateView + SetStorageShape(viewShape)). A8C4 and MXFP4 also use this view for paged K/V scales.
+// (CreateView + SetStorageShape(viewShape)). Paged A8C4/MXFP4 and INT8 K/V scales reuse this view.
 static aclnnStatus MakeContiguous(const aclTensor*& query, const aclTensor*& sparseBlockIdx,
                                   const aclTensor*& sparseBlockCount, const aclTensor*& metadataOptional,
                                   const aclTensor*& attenMaskOptional, const aclTensor*& qDequantScaleOptional,
@@ -599,7 +599,8 @@ __attribute__((visibility("default"))) aclnnStatus aclnnGenericBlockSparseAttent
     auto* executorImpl = uniqueExecutor.get();
 
     const bool keepPagedKvScaleStride =
-        isPaged && (quantType == GBSA_QUANT_TYPE_A8C4 || quantType == GBSA_QUANT_TYPE_A4C4);
+        isPaged &&
+        (quantType == GBSA_QUANT_TYPE_INT8 || quantType == GBSA_QUANT_TYPE_A8C4 || quantType == GBSA_QUANT_TYPE_A4C4);
     ret = MakeContiguous(query, sparseBlockIdx, sparseBlockCount, metadataOptional, attenMaskOptional,
                          qDequantScaleOptional, kDequantScaleOptional, vDequantScaleOptional, pQuantScaleOptional,
                          cuSeqLengthsQOptional, cuSeqLengthsKvOptional, sequsedQOptional, sequsedKvOptional,

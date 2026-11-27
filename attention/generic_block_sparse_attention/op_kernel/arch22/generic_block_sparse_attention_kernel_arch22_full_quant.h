@@ -373,7 +373,7 @@ private:
             auto gP = probability_[static_cast<uint64_t>(core) * FullQuantLayout::STAGES * pBytes];
             auto gOTmp = temporary_[static_cast<uint64_t>(core) * FullQuantLayout::STAGES * oBytes / sizeof(int32_t)];
 #ifdef __DAV_C220_VEC__
-            vector.Init(localRows, qScale_[scaleOffset], vScale_[head * tiling.embeddingSize], pScale_,
+            vector.Init(localRows, qScale_[scaleOffset], vScale_[head * tiling.vScaleStride0], pScale_,
                         tiling.embeddingSize, scaleHeadStride, head);
             auto taskKScale = kScale_;
             uint64_t scaleKvStart = kvStart;
@@ -389,9 +389,10 @@ private:
                 isPaged && queryLength == 1U && kvLength <= SINGLE_QUERY_KSCALE_CACHE_MAX_KV_LENGTH;
             const bool reuseKScale = !fullPage && !fdEnabled && (queryLength > 1U || cacheSingleQueryKScale) &&
                                      rounds > 0U && taskStep % tiling.kvHeads == 0U;
-            const bool useKScaleCache = !fullPage && softmax.template PrepareHeadKScaleCache<isPaged>(
-                                                         taskKScale, source, batch, tiling.kvHeads, head, kvLength,
-                                                         scaleKvStart, scaleKvTokens, tiling.blockShapeY, reuseKScale);
+            const bool useKScaleCache =
+                !fullPage && softmax.template PrepareHeadKScaleCache<isPaged>(
+                                 taskKScale, source, batch, tiling.kScaleStride0, head, kvLength, scaleKvStart,
+                                 scaleKvTokens, tiling.blockShapeY, reuseKScale);
 #else
             qk.LoadQuery(query_[queryOffset], localRows, head, qHeadStride);
 #endif
@@ -419,8 +420,8 @@ private:
                     if (vector.HasRows()) {
                         if constexpr (fullPage) {
                             tiles[stage] = source.PageTile(selectionCursor, validBlocks);
-                            softmax.template PrefetchPageKScale<isPaged>(taskKScale, tiles[stage], tiling.kvHeads, head,
-                                                                         step, scaleKvStart, scaleKvTokens);
+                            softmax.template PrefetchPageKScale<isPaged>(taskKScale, tiles[stage], tiling.kScaleStride0,
+                                                                         head, step, scaleKvStart, scaleKvTokens);
                         } else if (useKScaleCache) {
                             tiles[stage] = softmax.PrefetchCachedKScale(source, selectionCursor, validBlocks, step,
                                                                         tiling.blockShapeY);
@@ -431,14 +432,14 @@ private:
                                 auto ubPlan = vector.GetCopyPlan();
                                 vector.BeginCopyPlan();
                                 tiles[stage] = source.NextTile(selectionCursor, validBlocks, &ubPlan);
-                                softmax.template PrefetchKScale<isPaged>(taskKScale, tiles[stage], tiling.kvHeads, head,
-                                                                         step, scaleKvStart, scaleKvTokens,
+                                softmax.template PrefetchKScale<isPaged>(taskKScale, tiles[stage], tiling.kScaleStride0,
+                                                                         head, step, scaleKvStart, scaleKvTokens,
                                                                          tiling.blockShapeY, ubPlan);
                                 vector.EndCopyPlan();
                             } else {
                                 tiles[stage] = source.NextTile(selectionCursor, validBlocks, &spanPlan);
-                                softmax.template PrefetchKScale<isPaged>(taskKScale, tiles[stage], tiling.kvHeads, head,
-                                                                         step, scaleKvStart, scaleKvTokens,
+                                softmax.template PrefetchKScale<isPaged>(taskKScale, tiles[stage], tiling.kScaleStride0,
+                                                                         head, step, scaleKvStart, scaleKvTokens,
                                                                          tiling.blockShapeY, spanPlan);
                             }
                         }
@@ -580,7 +581,7 @@ private:
                             tiling.embeddingSize +
                         head * tiling.groupSize * headStride :
                     (static_cast<uint64_t>(token) * tiling.numHeads + head * tiling.groupSize) * tiling.embeddingSize;
-            vector.Init(tiling.groupSize, qScale_[offset / tiling.embeddingSize], vScale_[head * tiling.embeddingSize],
+            vector.Init(tiling.groupSize, qScale_[offset / tiling.embeddingSize], vScale_[head * tiling.vScaleStride0],
                         pScale_, tiling.embeddingSize, tiling.qLayout == 2U ? tiling.qSeqCapacity : 1U);
             rescaleO.Store(output_[offset], headStride);
             if constexpr (outputLse) {

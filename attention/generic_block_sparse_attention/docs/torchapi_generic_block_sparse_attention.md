@@ -223,8 +223,8 @@ cann_ops_transformer.generic_block_sparse_attention(
 | metadata | Tensor | 必选 | 必须传入`generic_block_sparse_attention_metadata`生成的配套任务切分结果 | int32 | ND | (1024,) |
 | attn_mask | Tensor | 可选 | mask_mode=0/1时须为None；mask_mode=3（Union）时须为INT32 exactMask | bool/int32 | ND | Union: (KV_N, G, U×block_y) |
 | q_dequant_scale | Tensor | INT8、A4C4必传 | quant_mode=0/5/8为None；INT8全量化（quant_mode=7）须传连续、有限且大于0的float32 Tensor；A4C4（模式4）必传E8M0或uint8编码。 | float32/float8_e8m0fnu/uint8 | ND | TND: [Q_T,Q_N]；BSND: [B,Q_S,Q_N]；BNSD: [B,Q_N,Q_S] <br>A4C4：[scale形状](#a4c4quantmode4)。 |
-| k_dequant_scale | Tensor | INT8和`quant_mode=8`必传；A4C4必传 | quant_mode=0/5为None；INT8全量化（quant_mode=7）须传连续、有限且大于0的float32；A4C4（模式4）必传E8M0或uint8编码。 Tensor | float32/bfloat16/uint8 | ND | PA_BBND/PA_BNBD: [num_blocks,KV_N,128]；TND: [KV_N,KV_T]；BSND/BNSD: [B,KV_N,KV_S]<br>`quant_mode=8` 时，按 K/V 的逻辑形状将末轴 D 替换为 8。 <br>A4C4：[scale形状](#a4c4quantmode4)。 |
-| v_dequant_scale | Tensor | INT8和`quant_mode=8`必传；A4C4必传 | quant_mode=0/5为None；INT8全量化（quant_mode=7）须传连续、有限且大于0的float32；A4C4（模式4）必传E8M0或uint8编码。 Tensor | float32/bfloat16/uint8 | ND | [KV_N,D]<br>`quant_mode=8` 时，按 K/V 的逻辑形状将末轴 D 替换为 8。 <br>A4C4：[scale形状](#a4c4quantmode4)。 |
+| k_dequant_scale | Tensor | INT8和`quant_mode=8`必传；A4C4必传 | quant_mode=0/5为None；INT8全量化（quant_mode=7）须传有限且大于0的float32：PA_BBND/PA_BNBD仅物理页轴（首轴）可非连续且页内各轴连续，其他布局须连续存储；A4C4（模式4）必传E8M0或uint8编码。 Tensor | float32/bfloat16/uint8 | ND | PA_BBND/PA_BNBD: [num_blocks,KV_N,128]；TND: [KV_N,KV_T]；BSND/BNSD: [B,KV_N,KV_S]<br>`quant_mode=8` 时，按 K/V 的逻辑形状将末轴 D 替换为 8。 <br>A4C4：[scale形状](#a4c4quantmode4)。 |
+| v_dequant_scale | Tensor | INT8和`quant_mode=8`必传；A4C4必传 | quant_mode=0/5为None；INT8全量化（quant_mode=7）须传有限且大于0的float32：PA布局仅KV head轴（首轴）可非连续且其余轴连续，非PA布局须连续存储；A4C4（模式4）必传E8M0或uint8编码。 Tensor | float32/bfloat16/uint8 | ND | [KV_N,D]<br>`quant_mode=8` 时，按 K/V 的逻辑形状将末轴 D 替换为 8。 <br>A4C4：[scale形状](#a4c4quantmode4)。 |
 | p_quant_scale | Tensor | INT8必传 | quant_mode=0/5/8为None；INT8全量化（quant_mode=7）须传连续、有限且大于0的float32 Tensor | float32 | ND | [1] |
 | cu_seqlens_q | Tensor | 条件必选 | TND必须传入Q存储长度前缀和；BSND/BNSD不使用，建议传入None；第一个元素为0 | int64 | ND | (B+1,) |
 | cu_seqlens_kv | Tensor | 条件必选 | TND KV必须传入KV存储长度前缀和；BSND/BNSD不使用，建议传入None；PA_BBND/PA_BNBD必须为None | int64 | ND | (B+1,) |
@@ -831,7 +831,7 @@ mask_mode参数解释见「mask_mode 枚举」。
 
 #### Quant参数组
 
-<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term> INT8全量化设置`quant_mode=7`、`softmax_precision=0`，Q/K/V均为int8，GQA分组为1～128，D为1～256，Y为1/2/4/8/16/32/64/128。四个scale均必传，形状见上方参数表，要求float32、连续、有限且大于0；`attention_out_dtype`必须指定为torch.float16或torch.bfloat16。TND Q可传入`seqused_q`指定每个batch的有效长度。量化公式和PA scale示例见[aclnn接口的量化相关说明](aclnnGenericBlockSparseAttention.md#量化相关说明)。
+<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term> INT8全量化设置`quant_mode=7`、`softmax_precision=0`，Q/K/V均为int8，GQA分组为1～128，D为1～256，Y为1/2/4/8/16/32/64/128。四个scale均必传，形状见上方参数表，要求float32、有限且大于0；PA 布局下 K/V scale 分别按物理页和KV head独立取首轴步长，其余scale须连续；`attention_out_dtype`必须指定为torch.float16或torch.bfloat16。TND Q可传入`seqused_q`指定每个batch的有效长度。量化公式和PA scale示例见[aclnn接口的量化相关说明](aclnnGenericBlockSparseAttention.md#量化相关说明)。
 
 quant_mode参数解释见「quant_mode 枚举」。
 

@@ -141,7 +141,7 @@ TILING_DATA_FIELD_DEF(uint32_t, kvLayout);
 // Union packed O/LSE scratch (per AIC) when multi-token GQA rows are non-contiguous in GM.
 TILING_DATA_FIELD_DEF(uint64_t, unionIoPackOffset);
 TILING_DATA_FIELD_DEF(uint32_t, unionIoPackORowStride);
-// A8C4 paged BF16 scale strides in elements, independent of the K/V cache strides.
+// KV scale first-axis stride in elements (INT8 paged: K per page, V per head).
 TILING_DATA_FIELD_DEF(uint64_t, kScaleStride0);
 TILING_DATA_FIELD_DEF(uint64_t, vScaleStride0);
 // CX parameters are derived once on host; keep existing tiling offsets unchanged.
@@ -195,6 +195,7 @@ private:
     ge::graphStatus CheckReservedOptionalInputs(gert::TilingContext* context);
     ge::graphStatus CheckMxfp8Scales(gert::TilingContext* context);
     ge::graphStatus ParseKvCacheStride0(gert::TilingContext* context);
+    ge::graphStatus ParseInt8KvScaleStride0(gert::TilingContext* context, uint32_t index);
     void CalcBaseTileTilingParams950();
     void CalcMatmulPhaseL1TileInfo950();
     bool IsMxfp4() const
