@@ -20,6 +20,8 @@
 #include "kernel_operator.h"
 #endif
 
+#define GLOBAL_OVERFLOW_MODE_CTRL 60
+
 #if (ORIG_DTYPE_Q == DT_FLOAT4_E2M1) && (ORIG_DTYPE_Q_DESCALE == DT_FLOAT8_E8M0) && (ORIG_DTYPE_ATTN_OUT == DT_BF16)
 // ===================== MxFP4 DN (quant_mode=5, A4C4_QKV_MXFP4_P_MXFP4_SOFTMAX_FP16) =====================
 #include "arch35/quant_flash_attn_tiling_data.h"
@@ -216,15 +218,20 @@ __global__ __aicore__ void quant_flash_attn(
     REGISTER_TILING_DEFAULT(QuantFlashAttnTilingData);
     __gm__ uint8_t* user = GetUserWorkspace(workspace);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_1);
+    // cast 饱和模式: 保存原始溢出模式并切换为饱和模式, 结束后恢复
+    int64_t globalOriOverflowMode = AscendC::GetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>();
+    AscendC::SetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>(0);
 
 #if (ORIG_DTYPE_Q == DT_FLOAT8_E4M3FN)
     if constexpr (quantMode == QFA_MXFP8_SOFTMAX_FP16) {
         quant_flash_attn_mxfp8_softmax_fp16<inOutLayoutType, config, quantMode, hasAttenMask, KvLayoutType, isFd>(
             query, key, value, dequantScaleQuery, dequantScaleKey, dequantScaleValue, blockTable, pScale, cuSeqLensQ,
             cuSeqLensKv, sequsedQ, sequsedKv, sinks, attnMask, metadata, attnOut, softmaxLse, workspace, tiling);
+        AscendC::SetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>(globalOriOverflowMode);
         return;
     }
 #endif
+    AscendC::SetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>(globalOriOverflowMode);
 }
 
 #else /* arch35 */
@@ -277,6 +284,9 @@ __global__ __aicore__ void quant_flash_attn(
 {
     REGISTER_TILING_DEFAULT(QuantFlashAttnTilingData);
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    // cast 饱和模式: 保存原始溢出模式并切换为饱和模式, 结束后恢复
+    int64_t globalOriOverflowMode = AscendC::GetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>();
+    AscendC::SetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>(0);
 
 #if (ORIG_DTYPE_Q == DT_FLOAT8_E4M3FN)
     if constexpr (quantMode == QFA_MXFP8_SOFTMAX_FP16) {
@@ -286,6 +296,7 @@ __global__ __aicore__ void quant_flash_attn(
             softmaxLse, workspace, tiling);
     }
 #endif
+    AscendC::SetCtrlSpr<GLOBAL_OVERFLOW_MODE_CTRL, GLOBAL_OVERFLOW_MODE_CTRL>(globalOriOverflowMode);
 }
 
 #endif /* arch35 vs arch92 */
