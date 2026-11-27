@@ -529,8 +529,8 @@ static int64_t GetInputDtypeSize(const gert::TilingContext* context)
     return inputDtypeSize;
 }
 
-static ge::graphStatus RingAttentionUpdateRegbaseSoftmaxTNDSplitCore(
-    const gert::TilingContext* context, RingAttentionUpdateRegbaseSoftmaxTNDTilingData& tiling)
+static void RingAttentionUpdateRegbaseSoftmaxTNDSplitCore(const gert::TilingContext* context,
+                                                          RingAttentionUpdateRegbaseSoftmaxTNDTilingData& tiling)
 {
     int64_t dimT = tiling.get_dimT();
     int64_t dimN = tiling.get_dimN();
@@ -544,7 +544,6 @@ static ge::graphStatus RingAttentionUpdateRegbaseSoftmaxTNDSplitCore(
     tiling.set_tnNumCoreEach(tnNumCoreEach);
     tiling.set_tnNumCoreTail(tnNumCoreTail);
     tiling.set_usedVectorCoreNum(usedVectorCoreNum);
-    return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus RingAttentionUpdateRegbaseSoftmaxTNDSplitLoop(
@@ -556,7 +555,8 @@ static ge::graphStatus RingAttentionUpdateRegbaseSoftmaxTNDSplitLoop(
     int64_t dimD = tiling.get_dimD();
     int64_t softmaxTailSize = tiling.get_softmaxTailSize();
     int64_t inputDtypeSize = GetInputDtypeSize(context);
-    OP_CHECK_IF(inputDtypeSize <= 0, OP_LOGE(context->GetNodeName(), "Dtype only support fp16, fp32, bf16 currently."),
+    OP_CHECK_IF(inputDtypeSize <= 0,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Failed to get prev_attn_out dtype size."),
                 return ge::GRAPH_FAILED);
 
     // 核内循环，UB空间分配
@@ -640,9 +640,7 @@ static ge::graphStatus Tiling4RingAttentionUpdateRegbaseSoftmaxTND(
     tiling.set_batchSize(batchSize);
 
     // 核间分核
-    OP_CHECK_IF(RingAttentionUpdateRegbaseSoftmaxTNDSplitCore(context, tiling) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "RingAttentionUpdateRegbaseSoftmaxTNDSplitCore failed."),
-                return ge::GRAPH_FAILED);
+    RingAttentionUpdateRegbaseSoftmaxTNDSplitCore(context, tiling);
 
     // 核内循环
     OP_CHECK_IF(RingAttentionUpdateRegbaseSoftmaxTNDSplitLoop(context, tiling) != ge::GRAPH_SUCCESS,
@@ -652,8 +650,8 @@ static ge::graphStatus Tiling4RingAttentionUpdateRegbaseSoftmaxTND(
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus RingAttentionUpdateRegbaseTNDSplitCore(const gert::TilingContext* context,
-                                                              RingAttentionUpdateRegbaseTNDTilingData& tiling)
+static void RingAttentionUpdateRegbaseTNDSplitCore(const gert::TilingContext* context,
+                                                   RingAttentionUpdateRegbaseTNDTilingData& tiling)
 {
     int64_t dimT = tiling.get_dimT();
     const auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
@@ -666,7 +664,6 @@ static ge::graphStatus RingAttentionUpdateRegbaseTNDSplitCore(const gert::Tiling
     tiling.set_dimTCoreEach(dimTCoreEach);
     tiling.set_dimTCoreTail(dimTCoreTail);
     tiling.set_usedVectorCoreNum(usedVectorCoreNum);
-    return ge::GRAPH_SUCCESS;
 }
 
 static ge::graphStatus RingAttentionUpdateRegbaseTNDSplitLoop(const gert::TilingContext* context,
@@ -679,7 +676,8 @@ static ge::graphStatus RingAttentionUpdateRegbaseTNDSplitLoop(const gert::Tiling
     int64_t dimD = tiling.get_dimD();
     int64_t softmaxTailSize = tiling.get_softmaxTailSize();
     int64_t inputDtypeSize = GetInputDtypeSize(context);
-    OP_CHECK_IF(inputDtypeSize <= 0, OP_LOGE(context->GetNodeName(), "Dtype only support fp16, fp32, bf16 currently."),
+    OP_CHECK_IF(inputDtypeSize <= 0,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Failed to get prev_attn_out dtype size."),
                 return ge::GRAPH_FAILED);
 
     // 核内循环，UB空间分配
@@ -782,9 +780,7 @@ static ge::graphStatus Tiling4RingAttentionUpdateRegbaseTND(const gert::TilingCo
     tiling.set_batchSize(batchSize);
 
     // 核间分核
-    OP_CHECK_IF(RingAttentionUpdateRegbaseTNDSplitCore(context, tiling) != ge::GRAPH_SUCCESS,
-                OP_LOGE(context->GetNodeName(), "RingAttentionUpdateRegbaseTNDSplitCore failed."),
-                return ge::GRAPH_FAILED);
+    RingAttentionUpdateRegbaseTNDSplitCore(context, tiling);
 
     // 核内循环
     OP_CHECK_IF(RingAttentionUpdateRegbaseTNDSplitLoop(context, tiling) != ge::GRAPH_SUCCESS,
@@ -856,7 +852,8 @@ static ge::graphStatus RingAttentionUpdateRegbaseSBHSplitLoop(const gert::Tiling
     int64_t dimD = tiling.get_dimD();
     int64_t softmaxTailSize = tiling.get_softmaxTailSize();
     int64_t inputDtypeSize = GetInputDtypeSize(context);
-    OP_CHECK_IF(inputDtypeSize <= 0, OP_LOGE(context->GetNodeName(), "Dtype only support fp16, fp32, bf16 currently."),
+    OP_CHECK_IF(inputDtypeSize <= 0,
+                OP_LOGE_WITHOUT_REPORT(context->GetNodeName(), "Failed to get prev_attn_out dtype size."),
                 return ge::GRAPH_FAILED);
 
     // 核内循环，UB空间分配
