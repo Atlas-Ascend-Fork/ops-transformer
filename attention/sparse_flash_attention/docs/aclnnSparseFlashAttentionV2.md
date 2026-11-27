@@ -31,7 +31,7 @@ $$
 \text{softmax}(\frac{Q@\tilde{K}^T}{\sqrt{d_k}})@\tilde{V}
 $$
 
-其中$\tilde{K},\tilde{V}$为基于某种选择算法（如`lightning_indexer`）得到的重要性较高的Key和Value，一般具有稀疏或分块稀疏的特征，$d_k$为$Q,\tilde{K}$每一个头的维度。
+其中$\tilde{K},\tilde{V}$为基于某种选择算法（如`lightning_indexer`）得到的重要性较高的Key和Value，一般具有稀疏或分块稀疏的特征，$d_k$为query与key计算点积时每个头的维度。示例中，传入RoPE张量时取$D + D_r$，省略RoPE张量时取$D$。
 
 ## 函数原型
 
@@ -80,7 +80,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
   > [!NOTE]
   >
   >- query、key、value参数维度含义：B（Batch Size）表示输入样本批量大小、S（Sequence Length）表示输入样本序列长度、H（Head Size）表示hidden层的大小、N（Head Num）表示多头数、D（Head Dim）表示hidden层最小的单元尺寸，且满足D=H/N、T表示所有Batch输入样本序列长度的累加和。
-  >- Q\_S和S1表示query shape中的S，KV\_S和S2表示key shape中的S，Q\_N和N1表示num\_query\_heads，KV\_N和N2表示num\_key\_value\_heads，T1表示query shape中的T，T2表示key shape中的输入样本序列长度的累加和。
+  >- Q\_S和S1表示query shape中的S，KV\_S和S2表示key shape中的S，Q\_N和N1表示num\_query\_heads，KV\_N和N2表示num\_key\_value\_heads，T1表示所有输入样本的query序列长度之和，T2表示key shape中的输入样本序列长度的累加和。
 
   <table style="undefined;table-layout: fixed; width: 1494px"><colgroup>
   <col style="width: 146px">
@@ -165,7 +165,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
       <td>
           <ul>
                 <li>layoutQueryOptional为BSND时，shape为(B, Q_S, KV_N, sparse_size)。</li>
-                <li>layoutQueryOptional为TND时，shape为(Q_T, KV_N, sparse_size)。</li>
+                <li>layoutQueryOptional为TND时，shape为(T1, KV_N, sparse_size)。</li>
           </ul>
       </td>
       <td>x</td>
@@ -173,7 +173,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>blockTableOptional（aclTensor）</td>
       <td>输入</td>
-      <td>表示PageAttention中kvCache存储使用的block映射表。</td>
+      <td>表示PageAttention场景下KV Cache逻辑块到Device内存物理块的映射表。</td>
       <td>
           <ul>
                 <li>不支持空tensor。</li>
@@ -223,7 +223,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>queryRopeOptional（aclTensor）</td>
       <td>输入</td>
-      <td>表示MLA结构中的query的RoPE信息。</td>
+      <td>表示多头潜在注意力（Multi-head Latent Attention，MLA）结构中query的旋转位置编码（RoPE）信息。</td>
       <td>
           <ul>
                 <li>可选项。须与keyRopeOptional成对为空指针（不使用rope），或成对传入非空tensor（使用rope，Dr为64）。</li>
@@ -243,7 +243,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>keyRopeOptional（aclTensor）</td>
       <td>输入</td>
-      <td>表示MLA结构中的key的rope信息。</td>
+      <td>表示MLA结构中key的RoPE信息。</td>
       <td>
           <ul>
                 <li>可选项。须与queryRopeOptional成对为空指针（不使用rope），或成对传入非空tensor（使用rope，Dr为64）。</li>
@@ -278,8 +278,8 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>scaleValue（double）</td>
       <td>输入</td>
-      <td>代表缩放系数。</td>
-      <td>-</td>
+      <td>Softmax计算前应用于query与key点积结果的缩放系数。</td>
+      <td>调用时必须显式传入。常规注意力计算建议使用<code>1/sqrt(d_k)</code>等正有限值，也可按模型配置传入。传入0会将点积结果缩放为0，传入负值会反转点积结果的大小顺序。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -368,8 +368,8 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>attentionMode（int64_t）</td>
       <td>输入</td>
-      <td>-</td>
-      <td>仅支持传入2，表示MLA-absorb模式。</td>
+      <td>指定注意力计算模式。</td>
+      <td>仅支持传入2，表示MLA-absorb模式，即基于压缩后的KV表示计算注意力。</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -437,7 +437,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>workspaceSize（uint64_t*）</td>
       <td>输出</td>
-      <td>返回需要在Device侧申请的workspace大小。</td>
+      <td>返回本次计算所需的Device侧workspace大小，单位为字节。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -506,12 +506,12 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>workspace</td>
       <td>输入</td>
-      <td>在Device侧申请的workspace内存地址。</td>
+      <td>通过<code>aclrtMalloc</code>在Device侧分配的workspace地址。</td>
     </tr>
     <tr>
       <td>workspaceSize</td>
       <td>输入</td>
-      <td>在Device侧申请的workspace大小，由第一段接口aclnnSparseFlashAttentionV2GetWorkspaceSize获取。</td>
+      <td>Device侧workspace的大小，单位为字节，由第一段接口<code>aclnnSparseFlashAttentionV2GetWorkspaceSize</code>返回。</td>
     </tr>
     <tr>
       <td>executor</td>
@@ -617,12 +617,12 @@ int64_t GetShapeSize(const std::vector<int64_t>& shape) {
 
 void PrintOutResult(std::vector<int64_t> &shape, void** deviceAddr) {
     auto size = GetShapeSize(shape);
-    std::vector<short> resultData(size, 0);
+    std::vector<aclFloat16> resultData(size, 0);
     auto ret = aclrtMemcpy(resultData.data(), resultData.size() * sizeof(resultData[0]),
                            *deviceAddr, size * sizeof(resultData[0]), ACL_MEMCPY_DEVICE_TO_HOST);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("copy result from device to host failed. ERROR: %d\n", ret); return);
     for (int64_t i = 0; i < size; i++) {
-        LOG_PRINT("mean result[%ld] is: %e\n", i, resultData[i]);
+        LOG_PRINT("result[%lld] is: %f\n", static_cast<long long>(i), aclFloat16ToFloat(resultData[i]));
     }
 }
 

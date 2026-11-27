@@ -31,7 +31,7 @@ $$
 \text{softmax}(\frac{Q@\tilde{K}^T}{\sqrt{d_k}})@\tilde{V}
 $$
 
-其中$\tilde{K},\tilde{V}$为基于某种选择算法（如`lightning_indexer`）得到的重要性较高的Key和Value，一般具有稀疏或分块稀疏的特征，$d_k$为$Q,\tilde{K}$每一个头的维度。
+其中$\tilde{K},\tilde{V}$为基于某种选择算法（如`lightning_indexer`）得到的重要性较高的Key和Value，一般具有稀疏或分块稀疏的特征，$d_k$为query与key计算点积时每个头的维度。示例中，传入RoPE张量时取$D + D_r$，省略RoPE张量时取$D$。
 
 ## 函数原型
 
@@ -172,7 +172,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>blockTableOptional（aclTensor）</td>
       <td>输入</td>
-      <td>表示PageAttention中kvCache存储使用的block映射表。</td>
+      <td>表示PageAttention场景下KV Cache逻辑块到Device内存物理块的映射表。</td>
       <td>
           <ul>
                 <li>不支持空tensor。</li>
@@ -222,7 +222,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>queryRopeOptional（aclTensor）</td>
       <td>输入</td>
-      <td>表示MLA结构中的query的rope信息。</td>
+      <td>表示多头潜在注意力（Multi-head Latent Attention，MLA）结构中query的旋转位置编码（RoPE）信息。</td>
       <td>
           <ul>
                 <li>可选项。须与keyRopeOptional成对为空指针（不使用rope），或成对传入非空tensor（使用rope，Dr为64）。</li>
@@ -242,7 +242,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>keyRopeOptional（aclTensor）</td>
       <td>输入</td>
-      <td>表示MLA结构中的key的rope信息。</td>
+      <td>表示MLA结构中key的RoPE信息。</td>
       <td>
           <ul>
                 <li>可选项。须与queryRopeOptional成对为空指针（不使用rope），或成对传入非空tensor（使用rope，Dr为64）。</li>
@@ -263,8 +263,8 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>scaleValue（double）</td>
       <td>输入</td>
-      <td>代表缩放系数。</td>
-      <td>-</td>
+      <td>Softmax计算前应用于query与key点积结果的缩放系数。</td>
+      <td>调用时必须显式传入。常规注意力计算建议使用<code>1/sqrt(d_k)</code>等正有限值，也可按模型配置传入。传入0会将点积结果缩放为0，传入负值会反转点积结果的大小顺序。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -353,8 +353,8 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>attentionMode（int64_t）</td>
       <td>输入</td>
-      <td>-</td>
-      <td>仅支持传入2，表示MLA-absorb模式。</td>
+      <td>指定注意力计算模式。</td>
+      <td>仅支持传入2，表示MLA-absorb模式，即基于压缩后的KV表示计算注意力。</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -422,7 +422,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>workspaceSize（uint64_t*）</td>
       <td>输出</td>
-      <td>返回需要在Device侧申请的workspace大小。</td>
+      <td>返回本次计算所需的Device侧workspace大小，单位为字节。</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -491,12 +491,12 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>workspace</td>
       <td>输入</td>
-      <td>在Device侧申请的workspace内存地址。</td>
+      <td>通过<code>aclrtMalloc</code>在Device侧分配的workspace地址。</td>
     </tr>
     <tr>
       <td>workspaceSize</td>
       <td>输入</td>
-      <td>在Device侧申请的workspace大小，由第一段接口aclnnSparseFlashAttentionGetWorkspaceSize获取。</td>
+      <td>Device侧workspace的大小，单位为字节，由第一段接口<code>aclnnSparseFlashAttentionGetWorkspaceSize</code>返回。</td>
     </tr>
     <tr>
       <td>executor</td>
@@ -552,7 +552,7 @@ aclnnStatus aclnnSparseFlashAttention(
  */
 
 /*!
- * \file test_incre_flash_attention_v4.cpp
+ * \file test_aclnn_sparse_flash_attention.cpp
  * \brief
  */
 
@@ -650,16 +650,19 @@ struct TensorResources {
     aclTensor* keyRopeTensor = nullptr;
 };
 
+constexpr int64_t kHeadDim = 512;
+constexpr int64_t kRopeDim = 64;
+
 int InitializeTensors(TensorResources& resources) {
-    std::vector<int64_t> queryShape = {1, 2, 1, 512};
-    std::vector<int64_t> keyShape = {1, 2, 1, 512};
-    std::vector<int64_t> valueShape = {1, 2, 1, 512};
+    std::vector<int64_t> queryShape = {1, 2, 1, kHeadDim};
+    std::vector<int64_t> keyShape = {1, 2, 1, kHeadDim};
+    std::vector<int64_t> valueShape = {1, 2, 1, kHeadDim};
     std::vector<int64_t> sparseIndicesShape = {1, 2, 1, 2};
-    std::vector<int64_t> attentionOutShape = {1, 2, 1, 512};
+    std::vector<int64_t> attentionOutShape = {1, 2, 1, kHeadDim};
     std::vector<int64_t> softmaxMaxShape = {1, 1, 2, 1};
     std::vector<int64_t> softmaxSumShape = {1, 1, 2, 1};
-    std::vector<int64_t> queryRopeShape = {1, 2, 1, 64};
-    std::vector<int64_t> keyRopeShape = {1, 2, 1, 64};
+    std::vector<int64_t> queryRopeShape = {1, 2, 1, kRopeDim};
+    std::vector<int64_t> keyRopeShape = {1, 2, 1, kRopeDim};
 
     int64_t queryShapeSize = GetShapeSize(queryShape);
     int64_t keyShapeSize = GetShapeSize(keyShape);
@@ -723,21 +726,21 @@ int InitializeTensors(TensorResources& resources) {
       return ret;
     }
 
-    // Create attention_out aclTensor.
+    // Create attentionOut aclTensor.
     ret = CreateAclTensor(attentionOutHostData, attentionOutShape, &resources.attentionOutDeviceAddr,
                          aclDataType::ACL_FLOAT16, &resources.attentionOutTensor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
       return ret;
     }
 
-    // Create softmax_max aclTensor.
+    // Create softmaxMax aclTensor.
     ret = CreateAclTensor(softmaxMaxHostData, softmaxMaxShape, &resources.softmaxMaxDeviceAddr,
                          aclDataType::ACL_FLOAT, &resources.softmaxMaxTensor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
       return ret;
     }
 
-    // Create softmax_sum aclTensor.
+    // Create softmaxSum aclTensor.
     ret = CreateAclTensor(softmaxSumHostData, softmaxSumShape, &resources.softmaxSumDeviceAddr,
                          aclDataType::ACL_FLOAT, &resources.softmaxSumTensor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
@@ -749,8 +752,7 @@ int InitializeTensors(TensorResources& resources) {
 
 int ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stream,
                               void** workspaceAddr, uint64_t* workspaceSize) {
-    int64_t d = 2;
-    double scaleValue = 1 / sqrt(d);
+    const double scaleValue = 1.0 / std::sqrt(kHeadDim + kRopeDim);
     int64_t sparseBlockSize = 1;
     constexpr const char layerOutStr[] = "BSND";
     constexpr size_t layerOutLen = sizeof(layerOutStr);
@@ -770,7 +772,8 @@ int ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stream,
     int64_t preTokens = 9223372036854775807;
     int64_t nextTokens = 9223372036854775807;
     int64_t attentionMode = 2;
-    bool returnSoftmaxLse = false;
+    // 请求返回示例末尾打印的FP32 Softmax统计量。
+    bool returnSoftmaxLse = true;
     aclOpExecutor* executor;
 
     int ret = aclnnSparseFlashAttentionGetWorkspaceSize(resources.queryTensor, resources.keyTensor, resources.valueTensor, resources.sparseIndicesTensor, nullptr, nullptr, nullptr, resources.queryRopeTensor, resources.keyRopeTensor,
@@ -808,9 +811,24 @@ int PrintOutResult(std::vector<int64_t> &shape, void** deviceAddr) {
         return ret;
   }
   for (int64_t i = 0; i < size; i++) {
-    LOG_PRINT("mean result[%ld] is: %f\n", i, aclFloat16ToFloat(resultData[i]));
+    LOG_PRINT("result[%lld] is: %f\n", static_cast<long long>(i), aclFloat16ToFloat(resultData[i]));
   }
   return ACL_SUCCESS;
+}
+
+int PrintOutResultFp32(const std::vector<int64_t>& shape, void** deviceAddr) {
+    const auto size = GetShapeSize(shape);
+    std::vector<float> resultData(size);
+    const auto bytes = resultData.size() * sizeof(float);
+    const auto ret = aclrtMemcpy(resultData.data(), bytes, *deviceAddr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (!CHECK_RET(ret == ACL_SUCCESS)) {
+        LOG_PRINT("copy result from device to host failed. ERROR: %d\n", ret);
+        return ret;
+    }
+    for (int64_t i = 0; i < size; i++) {
+        LOG_PRINT("result[%lld] is: %f\n", static_cast<long long>(i), resultData[i]);
+    }
+    return ACL_SUCCESS;
 }
 
 void CleanupResources(TensorResources& resources, void* workspaceAddr,
@@ -892,7 +910,7 @@ int main() {
     TensorResources resources = {};
     void* workspaceAddr = nullptr;
     uint64_t workspaceSize = 0;
-    std::vector<int64_t> attentionOutShape = {1, 2, 1, 512};
+    std::vector<int64_t> attentionOutShape = {1, 2, 1, kHeadDim};
     std::vector<int64_t> softmaxMaxShape = {1, 1, 2, 1};
     std::vector<int64_t> softmaxSumShape = {1, 1, 2, 1};
     int ret = ACL_SUCCESS;
@@ -931,9 +949,9 @@ int main() {
     printf("-----------attentionOut输出-----------\n");
     PrintOutResult(attentionOutShape, &resources.attentionOutDeviceAddr);
     printf("-----------softmaxMax输出-----------\n");
-    PrintOutResult(softmaxMaxShape, &resources.softmaxMaxDeviceAddr);
+    PrintOutResultFp32(softmaxMaxShape, &resources.softmaxMaxDeviceAddr);
     printf("-----------softmaxSum输出-----------\n");
-    PrintOutResult(softmaxSumShape, &resources.softmaxSumDeviceAddr);
+    PrintOutResultFp32(softmaxSumShape, &resources.softmaxSumDeviceAddr);
     // 6. Cleanup resources
     CleanupResources(resources, workspaceAddr, stream, deviceId);
     return 0;

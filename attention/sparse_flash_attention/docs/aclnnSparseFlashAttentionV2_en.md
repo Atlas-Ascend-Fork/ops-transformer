@@ -33,7 +33,7 @@ $$
 \text{softmax}(\frac{Q@\tilde{K}^T}{\sqrt{d_k}})@\tilde{V}
 $$
 
-Where $\tilde{K},\tilde{V}$ are the Key and Value of higher importance obtained based on a certain selection algorithm (such as `lightning_indexer`), generally having sparse or block-sparse characteristics, and $d_k$ is the dimension of each head of $Q,\tilde{K}$.
+Where $\tilde{K},\tilde{V}$ are the Key and Value of higher importance obtained based on a certain selection algorithm (such as `lightning_indexer`), generally having sparse or block-sparse characteristics, and $d_k$ is the dimension per head used for the query-key dot product. In the example, this is $D + D_r$ when RoPE tensors are provided and $D$ when they are omitted.
 
 ## Function Prototype
 
@@ -82,7 +82,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
   > [!NOTE]
   >
   >- Dimensions of the query, key, and value parameters: B (Batch Size) indicates the batch size of input samples, S (Sequence Length) indicates the sequence length of input samples, H (Head Size) indicates the size of the hidden layer, N (Head Num) indicates the number of heads, D (Head Dim) indicates the size of the smallest unit of the hidden layer, and satisfies D=H/N. T indicates the accumulated sum of sequence lengths of input samples across all batches.
-  >- Q\_S and S1 indicate the S in the query shape, KV\_S and S2 indicate the S in the key shape, Q\_N and N1 indicate num\_query\_heads, KV\_N and N2 indicate num\_key\_value\_heads, T1 indicates the T in the query shape, and T2 indicates the accumulated sum of sequence lengths of input samples in the key shape.
+  >- Q\_S and S1 indicate the S in the query shape, KV\_S and S2 indicate the S in the key shape, Q\_N and N1 indicate num\_query\_heads, KV\_N and N2 indicate num\_key\_value\_heads, T1 is the sum of the input query sequence lengths, and T2 indicates the accumulated sum of sequence lengths of input samples in the key shape.
 
   <table style="undefined;table-layout: fixed; width: 1494px"><colgroup>
   <col style="width: 146px">
@@ -162,7 +162,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
       <td>ND</td>
       <td>          <ul>
                 <li>If layout_query is BSND, the shape is (B, Q_S, KV_N, sparse_size).</li>
-                <li>If layout_query is TND, the shape is (Q_T, KV_N, sparse_size).</li>
+                <li>If layoutQueryOptional is TND, the shape is (T1, KV_N, sparse_size).</li>
           </ul>
       </td>
       <td>x</td>
@@ -170,7 +170,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>blockTableOptional (aclTensor)</td>
       <td>Input</td>
-      <td>Indicates the block mapping table used for kvCache storage in PageAttention.</td>
+      <td>Maps logical KV cache blocks to physical device memory blocks in PageAttention.</td>
       <td>          <ul>
                 <li>Does not support null tensors.</li>
                 <li>The second dimension length is not less than the number of blocks corresponding to the maximum S2 across all batches, that is, S2_max / block_size rounded up.</li>
@@ -217,7 +217,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>queryRopeOptional (aclTensor)</td>
       <td>Input</td>
-      <td>Indicates the rope information of the query in the MLA structure.</td>
+      <td>Provides the query rotary position embedding (RoPE) in Multi-head Latent Attention (MLA).</td>
       <td>          <ul>
                 <li>Optional. Must be paired with keyRopeOptional as a null pointer (rope not used), or paired with a non-null tensor (rope used, Dr is 64).</li>
                 <li>Does not support null tensors.</li>
@@ -235,7 +235,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>keyRopeOptional (aclTensor)</td>
       <td>Input</td>
-      <td>Indicates the rope information of the key in the MLA structure.</td>
+      <td>Provides the key RoPE in the MLA structure.</td>
       <td>          <ul>
                 <li>Optional. Must be paired with queryRopeOptional as a null pointer (rope not used), or as a non-null tensor (rope used, Dr is 64).</li>
                 <li>Does not support empty tensors.</li>
@@ -267,8 +267,8 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>scaleValue (double)</td>
       <td>Input</td>
-      <td>Indicates the scaling factor.</td>
-      <td>-</td>
+      <td>Factor applied to query-key dot products before softmax.</td>
+      <td>Pass this value explicitly. For standard attention, use a finite positive value such as <code>1/sqrt(d_k)</code>, or use the scale specified by the model. Zero scales the dot products to zero, and a negative value reverses their order.</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -353,8 +353,8 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>attentionMode (int64_t)</td>
       <td>Input</td>
-      <td>-</td>
-      <td>Only 2 is supported, indicating the MLA-absorb mode.</td>
+      <td>Specifies the attention computation mode.</td>
+      <td>Only 2 is supported. It selects MLA-absorb mode, which computes attention using the compressed KV representation.</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -419,7 +419,7 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>workspaceSize (uint64_t*)</td>
       <td>Output</td>
-      <td>Returns the workspace size that needs to be applied on the Device side.</td>
+      <td>Returns the required size of the device workspace in bytes.</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -488,12 +488,12 @@ aclnnStatus aclnnSparseFlashAttentionV2(
     <tr>
       <td>workspace</td>
       <td>Input</td>
-      <td>Workspace memory address applied on the Device side.</td>
+      <td>Address of the device workspace allocated with <code>aclrtMalloc</code>.</td>
     </tr>
     <tr>
       <td>workspaceSize</td>
       <td>Input</td>
-      <td>Size of the workspace applied on the Device side, obtained by the first-phase API aclnnSparseFlashAttentionV2GetWorkspaceSize.</td>
+      <td>Size of the device workspace in bytes, returned by <code>aclnnSparseFlashAttentionV2GetWorkspaceSize</code>.</td>
     </tr>
     <tr>
       <td>executor</td>
@@ -589,12 +589,12 @@ int64_t shapeSize = 1;
 
 void PrintOutResult(std::vector<int64_t> &shape, void** deviceAddr) {
 auto size = GetShapeSize(shape);
-    std::vector<short> resultData(size, 0);
+    std::vector<aclFloat16> resultData(size, 0);
     auto ret = aclrtMemcpy(resultData.data(), resultData.size() * sizeof(resultData[0]),
     *deviceAddr, size * sizeof(resultData[0]), ACL_MEMCPY_DEVICE_TO_HOST);
                            CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("copy result from device to host failed. ERROR: %d\n", ret); return);
     for (int64_t i = 0; i < size; i++) {
-    LOG_PRINT("mean result[%ld] is: %e\n", i, resultData[i]);
+    LOG_PRINT("result[%lld] is: %f\n", static_cast<long long>(i), aclFloat16ToFloat(resultData[i]));
         }
     }
 
