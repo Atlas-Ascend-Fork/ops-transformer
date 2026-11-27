@@ -175,16 +175,15 @@ ge::graphStatus MixedQuantSparseFlashMlaTiling::DoA6CsaTiling(MQSMLATilingInfo* 
     // -------------set tilingkey-----------------
     // DT_Q, DT_KV, DT_OUT, PAGE_ATTENTION, FLASH_DECODE, LAYOUT_T, KV_LAYOUT_T
     uint32_t qType = static_cast<uint32_t>(tilingInfo->qType);
-    uint32_t oriKvType = static_cast<uint32_t>(tilingInfo->oriKvType);
     uint32_t outputType = static_cast<uint32_t>(tilingInfo->outputType);
     uint32_t qLayout = static_cast<uint32_t>(tilingInfo->qLayout);
     uint32_t inputKvLayout = static_cast<uint32_t>(tilingInfo->kvLayout);
     bool highPerf = !tilingInfo->returnSoftmaxLse;
     uint32_t tilingKey = GET_TPL_TILING_KEY(
         0U, qLayout, inputKvLayout, static_cast<uint32_t>(perfMode_), static_cast<uint32_t>(tilingInfo->gSize > 64),
-        ((oriKvType == ge::DT_FLOAT8_E4M3FN) ? DTYPE_FP8_E4M3FN : DTYPE_HIF8), vectorizeFlag,
-        static_cast<uint32_t>(tilingInfo->batchConsistency), static_cast<uint32_t>(tilingInfo->topkValueMode),
-        static_cast<uint32_t>(tilingInfo->quantMode), static_cast<uint32_t>(highPerf));
+        DTYPE_FP8_E4M3FN, vectorizeFlag, static_cast<uint32_t>(tilingInfo->batchConsistency),
+        static_cast<uint32_t>(tilingInfo->topkValueMode), static_cast<uint32_t>(tilingInfo->quantMode),
+        static_cast<uint32_t>(highPerf));
     context_->SetTilingKey(tilingKey);
     context_->SetScheduleMode(1);
 

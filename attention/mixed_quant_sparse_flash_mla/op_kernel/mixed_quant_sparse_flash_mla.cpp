@@ -69,21 +69,12 @@ __global__ __aicore__ void mixed_quant_sparse_flash_mla(
 
     TPipe tPipe;
     __gm__ uint8_t* user = GetUserWorkspace(workspace);
-    if constexpr (KV_DTYPE == DTYPE_FP8_E4M3FN) {
-        MQSMLA_OP_IMPL(BaseApi::MixedQuantSparseFlashMlaCsa, MixedQuantSparseFlashMlaTilingData, bfloat16_t,
-                       fp8_e4m3fn_t, float, bfloat16_t, FLASH_DECODE, KV_LAYOUT_T == MQSMLA_LAYOUT_PA_BBND,
-                       static_cast<MQSMLA_LAYOUT>(LAYOUT_T), static_cast<MQSMLA_LAYOUT>(KV_LAYOUT_T),
-                       static_cast<MQSMLATemplateMode>(TEMPLATE_MODE), SPLIT_G, IS_VEC_S2PHYADDR, BATCH_CONSISTENCY,
-                       static_cast<TopkValueMode>(TOPK_VALUE_MODE), static_cast<SCALE_CONTIGUOUS_MODE>(QUANT_MODE),
-                       static_cast<bool>(HIGH_PERF));
-    } else {
-        MQSMLA_OP_IMPL(BaseApi::MixedQuantSparseFlashMlaCsa, MixedQuantSparseFlashMlaTilingData, bfloat16_t, hifloat8_t,
-                       float, bfloat16_t, FLASH_DECODE, KV_LAYOUT_T == MQSMLA_LAYOUT_PA_BBND,
-                       static_cast<MQSMLA_LAYOUT>(LAYOUT_T), static_cast<MQSMLA_LAYOUT>(KV_LAYOUT_T),
-                       static_cast<MQSMLATemplateMode>(TEMPLATE_MODE), SPLIT_G, IS_VEC_S2PHYADDR, BATCH_CONSISTENCY,
-                       static_cast<TopkValueMode>(TOPK_VALUE_MODE), static_cast<SCALE_CONTIGUOUS_MODE>(QUANT_MODE),
-                       static_cast<bool>(HIGH_PERF));
-    }
+    MQSMLA_OP_IMPL(BaseApi::MixedQuantSparseFlashMlaCsa, MixedQuantSparseFlashMlaTilingData, bfloat16_t, fp8_e4m3fn_t,
+                   float, bfloat16_t, FLASH_DECODE, KV_LAYOUT_T == MQSMLA_LAYOUT_PA_BBND,
+                   static_cast<MQSMLA_LAYOUT>(LAYOUT_T), static_cast<MQSMLA_LAYOUT>(KV_LAYOUT_T),
+                   static_cast<MQSMLATemplateMode>(TEMPLATE_MODE), SPLIT_G, IS_VEC_S2PHYADDR, BATCH_CONSISTENCY,
+                   static_cast<TopkValueMode>(TOPK_VALUE_MODE), static_cast<SCALE_CONTIGUOUS_MODE>(QUANT_MODE),
+                   static_cast<bool>(HIGH_PERF));
 }
 
 #else
