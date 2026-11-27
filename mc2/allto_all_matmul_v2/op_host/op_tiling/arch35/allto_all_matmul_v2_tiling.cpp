@@ -239,24 +239,25 @@ bool AlltoAllMatmulV2TilingClass::CheckQuantAndYDtypeAttr(const char* opName)
 
 bool AlltoAllMatmulV2TilingClass::CheckOtherAttrs(const char* opName)
 {
-    auto* tx1 = context_->GetAttrs()->GetAttrPointer<bool>(IDX_ATTR_TRANSPOSE_X1);
+    auto* attrs = context_->GetAttrs();
+    auto* tx1 = attrs->GetAttrPointer<bool>(IDX_ATTR_TRANSPOSE_X1);
     if (tx1 != nullptr && *tx1) {
         OP_LOGE_FOR_INVALID_VALUE(opName, "transpose_x1", "true", "false");
         return false;
     }
-    auto* tx2 = context_->GetAttrs()->GetAttrPointer<bool>(IDX_ATTR_TRANSPOSE_X2);
+    auto* tx2 = attrs->GetAttrPointer<bool>(IDX_ATTR_TRANSPOSE_X2);
     if (!tx2 || !(*tx2)) {
         OP_LOGE_FOR_INVALID_VALUE(opName, "transpose_x2", tx2 ? std::to_string(static_cast<int>(*tx2)).c_str() : "nil",
                                   "true");
         return false;
     }
-    auto* x1QdPtr = context_->GetAttrs()->GetAttrPointer<int64_t>(IDX_ATTR_X1_QUANT_DTYPE);
+    auto* x1QdPtr = attrs->GetAttrPointer<int64_t>(IDX_ATTR_X1_QUANT_DTYPE);
     if (x1QdPtr != nullptr && *x1QdPtr != static_cast<int64_t>(ge::DT_UNDEFINED) &&
         *x1QdPtr != static_cast<int64_t>(ge::DT_FLOAT8_E8M0)) {
         OP_LOGE_FOR_INVALID_VALUE(opName, "x1_quant_dtype", std::to_string(*x1QdPtr).c_str(), "fp8_e8m0");
         return false;
     }
-    auto* pmPtr = context_->GetAttrs()->GetAttrPointer<int64_t>(IDX_ATTR_PRECISION_MODE);
+    auto* pmPtr = attrs->GetAttrPointer<int64_t>(IDX_ATTR_PRECISION_MODE);
     constexpr int64_t PRECISION_MODE_MAX = 2;
     if (pmPtr != nullptr && (*pmPtr < 0 || *pmPtr > PRECISION_MODE_MAX)) {
         OP_LOGE_FOR_INVALID_VALUE(opName, "precision_mode", std::to_string(*pmPtr).c_str(), "0/1/2");
@@ -378,7 +379,12 @@ bool AlltoAllMatmulV2TilingClass::CheckMatmulDivisibility(const char* opName)
     auto* x2Shape = context_->GetInputShape(IDX_INPUT_X2);
     auto* yShape = context_->GetOutputShape(IDX_OUTPUT_Y);
     auto* wsPtr = context_->GetAttrs()->GetAttrPointer<int64_t>(IDX_ATTR_WORLD_SIZE);
-    uint64_t worldSize = static_cast<uint64_t>(wsPtr ? *wsPtr : 1);
+    if (wsPtr == nullptr || *wsPtr <= 0) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "world_size", wsPtr ? std::to_string(*wsPtr).c_str() : "null",
+                                              "The value of world_size must be positive");
+        return false;
+    }
+    uint64_t worldSize = static_cast<uint64_t>(*wsPtr);
 
     uint64_t x1M = x1Shape->GetStorageShape().GetDim(0U);
     uint64_t x1K = x1Shape->GetStorageShape().GetDim(1U);
@@ -515,7 +521,8 @@ ge::graphStatus AlltoAllMatmulV2TilingClass::GetShapeAttrsInfo()
     auto& x1ss = x1sh->GetStorageShape();
     auto& x2ss = x2sh->GetStorageShape();
     // x1 shape: [M_total, Ka]; kernel expects M_per_rank = M_total / world_size
-    auto* wsPtr = context_->GetAttrs()->GetAttrPointer<int64_t>(IDX_ATTR_WORLD_SIZE);
+    auto* attrs = context_->GetAttrs();
+    auto* wsPtr = attrs->GetAttrPointer<int64_t>(IDX_ATTR_WORLD_SIZE);
     if (!wsPtr || *wsPtr <= 0) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "world_size", wsPtr ? std::to_string(*wsPtr).c_str() : "null",
                                               "The value of world_size must be positive");

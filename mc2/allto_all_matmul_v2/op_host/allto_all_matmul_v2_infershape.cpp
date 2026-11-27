@@ -70,6 +70,8 @@ bool ValidateInferKCrossCheck(const char* nodeName, int64_t ka, int64_t kTotal, 
     if (ka == DIM_MINUS_ONE || kTotal == DIM_MINUS_ONE) {
         return true;
     }
+    // Defensive contract: the caller AlltoAllMatmulV2InferShape already validates world_size > 0.
+    // This branch only guards standalone reuse of the function and is unreachable from the public entry.
     if (worldSize <= 0) {
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "world_size", std::to_string(worldSize).c_str(), "positive");
         return false;
@@ -175,7 +177,9 @@ ge::graphStatus AlltoAllMatmulV2InferShape(gert::InferShapeContext* context)
     int64_t m = x1Shape->GetDim(0U);
     int64_t ka = x1Shape->GetDim(1U); // per-rank K dim (Ka = K_total / world_size)
     // x2 shape: TransB=true → [N,K_total], TransB=false → [K_total,N]
-    auto* tx2 = context->GetAttrs()->GetAttrPointer<bool>(INDEX_ATTR_TRANSPOSE_X2);
+    auto* attrs = context->GetAttrs();
+    OPS_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    auto* tx2 = attrs->GetAttrPointer<bool>(INDEX_ATTR_TRANSPOSE_X2);
     bool transX2 = tx2 ? *tx2 : true;
     int64_t n = transX2 ? x2Shape->GetDim(0U) : x2Shape->GetDim(1U);
     int64_t kTotal = transX2 ? x2Shape->GetDim(1U) : x2Shape->GetDim(0U);
@@ -188,15 +192,15 @@ ge::graphStatus AlltoAllMatmulV2InferShape(gert::InferShapeContext* context)
     }
 
     // ---- Get world_size attr --------------------------------------------
-    const auto attrs = context->GetAttrs();
     const int64_t* wsPtr = attrs->GetAttrPointer<int64_t>(INDEX_ATTR_WORLD_SIZE);
     if (wsPtr == nullptr) {
         OP_LOGE_WITH_INVALID_INPUT(nodeName, "world_size");
         return ge::GRAPH_FAILED;
     }
     int64_t worldSize = *wsPtr;
-    if (worldSize == 0) {
-        OP_LOGE_WITH_INVALID_INPUT(nodeName, "world_size");
+    if (worldSize <= 0) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(nodeName, "world_size", std::to_string(worldSize).c_str(),
+                                              "The value of world_size must be positive");
         return ge::GRAPH_FAILED;
     }
 
