@@ -30,11 +30,11 @@
 
   $$
   \begin{aligned}
-  \vec{x^{'}_{l}} &= \frac{1}{\sqrt{\frac{1}{d} \sum_{\dim=-2,\text{keepdim}=\text{True}} x_i^2 + \epsilon}}\\
-  H^{pre}_l &= \alpha^{pre}_{l} ·(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
+  \vec{x^{'}_{l}} &= \frac{1}{\sqrt{\frac{1}{d} \sum_{\dim=-2,\text{keepdim}=\text{True}} x_i^2 + \epsilon_{norm}}}\\
+  p^{pre}_l &= \alpha^{pre}_{l} ·(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
   H^{post}_l &= \alpha^{post}_{l} ·(\vec{x^{'}_{l}}\varphi^{post}_{l}) + b^{post}_{l}\\
   H^{res}_l &= \alpha^{res}_{l} ·(\vec{x^{'}_{l}}\varphi^{res}_{l}) + b^{res}_{l}\\
-  H^{pre}_l &= \sigma (H^{pre}_{l})\\
+  H^{pre}_l &= \sigma (p^{pre}_{l}) + \epsilon_{hc}\\
   H^{post}_l &= 2\sigma (H^{post}_{l})\\
   h_{in} &=\vec{x_{l}}H^{pre}_l
   \end{aligned}
@@ -46,8 +46,8 @@
 
     $$
     \begin{aligned}
-        \mathbf{normOut}[0] &= \text{softmax}(\mathbf{H^{res}_l},  \dim=-1) + \epsilon, \\
-        \mathbf{sumOut}[1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[0] + \epsilon, \\
+        \mathbf{normOut}[0] &= \text{softmax}(\mathbf{H^{res}_l},  \dim=-1) + \epsilon_{hc}, \\
+        \mathbf{sumOut}[1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[0] + \epsilon_{hc}, \\
         \mathbf{normOut}[1] &= \frac{\mathbf{normOut}[0]}{\mathbf{sumOut}[1]}, \\
     \end{aligned}
     $$
@@ -56,9 +56,9 @@
 
     $$
     \begin{aligned}
-        \mathbf{sumOut}[2i] &= \sum_{\dim=-1,\text{keepdim}=\text{True}} \mathbf{normOut}[2i-1] + \epsilon, \\
+        \mathbf{sumOut}[2i] &= \sum_{\dim=-1,\text{keepdim}=\text{True}} \mathbf{normOut}[2i-1] + \epsilon_{hc}, \\
         \mathbf{normOut}[2i] &= \frac{\mathbf{normOut}[2i-1]}{\mathbf{sumOut}[2i]}, \\
-        \mathbf{sumOut}[2i+1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[2i] + \epsilon, \\
+        \mathbf{sumOut}[2i+1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[2i] + \epsilon_{hc}, \\
         \mathbf{normOut}[2i+1] &= \frac{\mathbf{normOut}[2i]}{\mathbf{sumOut}[2i+1]}, \\
     \end{aligned}
     $$
@@ -77,8 +77,9 @@
 
     | Symbol                                     | Meaning                                       |
     | ------------------------------------------ | ------------------------------------------------- |
-    | $\mathbf{x}$                         | Input tensor (the $\mathbf{H}'_{\text{res}}$ matrix of the mHC layer). |
-    | $\epsilon$                         | Parameter for preventing division by zero (corresponding to the input parameter `eps`). |
+    | $\mathbf{x}$                         | Input tensor of the mHC layer. |
+    | $\epsilon_{norm}$                       | RmsNorm stabilization parameter, corresponding to `normEps`. |
+    | $\epsilon_{hc}$                         | Offset added after the sigmoid of $H^{pre}_l$ and stabilization term for Sinkhorn normalization, corresponding to `hcEps`. |
     | $\text{softmax}(\cdot, \dim=-1)$      | Performs softmax normalization along the last dimension. |
     | $\sum_{\dim=d,\text{keepdim}=\text{True}}$                         | Sums over the specified dimension $d$ and keeps the dimension. |
     | $\mathbf{normOut}[k]$                         | Intermediate normalization result of the $k$-th step. |
@@ -209,7 +210,7 @@ aclnnStatus aclnnMhcPreSinkhorn(
       <tr>
         <td>hcEps (double)</td>
         <td>Input</td>
-        <td>Indicates the eps parameter after sigmoid of $H_{pre}$.</td>
+        <td>Offset added after the sigmoid of $H_{pre}$; also added to the Sinkhorn softmax result and row/column normalization denominators. Corresponds to $\epsilon_{hc}$.</td>
         <td>Recommended value: 1e-6.</td>
         <td>-</td>
         <td>-</td>
@@ -303,7 +304,7 @@ aclnnStatus aclnnMhcPreSinkhorn(
         <td>This output has no effect when needBackward is false.</td>
         <td>FLOAT32</td>
         <td>ND</td>
-        <td>(sk_iter_count * 2, bs, seq_len, n)<br>(sk_iter_count * 2, t, n)</td>
+        <td>(numIters * 2, bs, seq_len, n)<br>(numIters * 2, t, n)</td>
         <td>×</td>
       </tr>
       <tr>
@@ -313,7 +314,7 @@ aclnnStatus aclnnMhcPreSinkhorn(
         <td>This output has no effect when needBackward is false.</td>
         <td>FLOAT32</td>
         <td>ND</td>
-        <td>(sk_iter_count * 2, bs, seq_len, n, n)<br>(sk_iter_count * 2, t, n, n)</td>
+        <td>(numIters * 2, bs, seq_len, n, n)<br>(numIters * 2, t, n, n)</td>
         <td>×</td>
       </tr>
       <tr>
@@ -462,14 +463,20 @@ aclnnStatus aclnnMhcPreSinkhorn(
     - The input x supports the 4D BSND format and 3D TND format, with shapes (bs, seq_len, n, c) and (t, n, c) respectively.
     - In the TND format, t indicates the cumulative sum of sequence lengths of all batches; the corresponding output shape is expanded along the t axis as described in Parameters.
     - The trailing axis c must be a multiple of 128, with a value range of [1, 100000].
-    - The data range of input phi is limited to $\pm \frac{1}{\sqrt{nc}}$, and eps is limited to 1e-6. This range provides good numerical stability.
+    - The data range of input phi is limited to $\pm \frac{1}{\sqrt{nc}}$. Good numerical stability is achieved within this range when both hcEps and normEps are set to 1e-6.
   <!-- end id10 -->
 
 ## Example
 
 The sample code is as follows, for reference only. For details about compilation and execution, see [Compile and Run Samples](../../../docs/en/context/compile_and_run_sample.md).
 
+Demonstrates the two-phase API for mHC forward computation with BF16 input x and FP32 phi, alpha, and bias. Setting need_backward to true also produces intermediate results for backward computation.
+
 ```c++
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include "acl/acl.h"
@@ -528,6 +535,7 @@ void PrintTensorDataBfloat16(const std::vector<int64_t> &shape, void *device_add
   LOG_PRINT("\n");
 }
 
+// Initialize the ACL runtime, device context, and execution stream.
 int InitAcl(int32_t device_id, aclrtContext &context, aclrtStream &stream)
 {
   aclError ret = aclInit(nullptr);
@@ -548,6 +556,7 @@ int InitAcl(int32_t device_id, aclrtContext &context, aclrtStream &stream)
   return 0;
 }
 
+// Copy FP32 host data to device memory and create a contiguous ACL tensor.
 int CreateAclTensorFloat32(const std::vector<float> &host_data, const std::vector<int64_t> &shape, void *&device_addr,
                            aclTensor *&tensor)
 {
@@ -571,13 +580,16 @@ int CreateAclTensorFloat32(const std::vector<float> &host_data, const std::vecto
   return 0;
 }
 
+// Truncate the low 16 bits of each FP32 value to form BF16, then create the input tensor.
 int CreateAclTensorBfloat16(const std::vector<float> &host_data, const std::vector<int64_t> &shape, void *&device_addr,
                             aclTensor *&tensor)
 {
   int64_t size = GetShapeSize(shape);
   std::vector<uint16_t> host_data_bf16(size);
   for (int64_t i = 0; i < size; ++i) {
-      host_data_bf16[i] = static_cast<uint16_t>(static_cast<int16_t>(host_data[i] * 32767));
+      uint32_t bits = 0;
+      std::memcpy(&bits, &host_data[i], sizeof(bits));
+      host_data_bf16[i] = static_cast<uint16_t>(bits >> 16);
   }
 
   int64_t byte_size = size * sizeof(uint16_t);
@@ -600,6 +612,7 @@ int CreateAclTensorBfloat16(const std::vector<float> &host_data, const std::vect
   return 0;
 }
 
+// Allocate a BF16 output tensor; the operator fills its data.
 int CreateAclTensorBfloat16Output(const std::vector<int64_t> &shape, void *&device_addr, aclTensor *&tensor)
 {
   int64_t size = GetShapeSize(shape);
@@ -615,6 +628,7 @@ int CreateAclTensorBfloat16Output(const std::vector<int64_t> &shape, void *&devi
   return 0;
 }
 
+// Allocate an FP32 output tensor for a projection or backward intermediate result.
 int CreateAclTensorFloat32Output(const std::vector<int64_t> &shape, void *&device_addr, aclTensor *&tensor)
 {
   int64_t size = GetShapeSize(shape);
@@ -725,6 +739,7 @@ int main()
   aclrtStream stream = nullptr;
   Tensors tensors;
 
+  // BSND input: batch size, sequence length, residual streams, and hidden size.
   int64_t bs = 2, seq_len = 128, n = 4, c = 4096;
   int64_t hc_mult = n;
   int64_t hc_mix = n * n + 2 * n;
@@ -746,9 +761,11 @@ int main()
   std::vector<int64_t> sum_out_shape = {num_iters * 2, bs, seq_len, n};
   std::vector<int64_t> norm_out_shape = {num_iters * 2, bs, seq_len, n, n};
 
+  // Initialize resources and check each status with CHECK_RET.
   int ret = InitAcl(device_id, context, stream);
   CHECK_RET(ret == 0, LOG_PRINT("InitAcl failed, error: %d\n", ret); return -1);
 
+  // x is BF16; phi, alpha, and bias are FP32. Allocate all eight output tensors.
   ret = CreateInputTensors(x_shape, phi_shape, alpha_shape, bias_shape, tensors);
   CHECK_RET(ret == 0, return -1);
 
@@ -759,6 +776,7 @@ int main()
   uint64_t workspace_size = 0;
   aclOpExecutor *executor = nullptr;
 
+  // Phase 1: validate inputs and obtain the workspace size and executor.
   aclnnStatus aclnn_ret = aclnnMhcPreSinkhornGetWorkspaceSize(
       tensors.x, tensors.phi, tensors.alpha, tensors.bias,
       hc_mult, num_iters, hc_eps, norm_eps, need_backward,
@@ -769,12 +787,14 @@ int main()
   CHECK_RET(aclnn_ret == ACL_SUCCESS, LOG_PRINT("aclnnMhcPreSinkhornGetWorkspaceSize failed, error: %d\n", aclnn_ret);
             return -1);
 
+  // Allocate device workspace only when the first phase requests it.
   void *workspace_addr = nullptr;
   if (workspace_size > 0) {
       ret = aclrtMalloc(&workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);
       CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtMalloc workspace failed, error: %d\n", ret); return -1);
   }
 
+  // Phase 2: launch computation, check its status, and wait for completion.
   aclnn_ret = aclnnMhcPreSinkhorn(workspace_addr, workspace_size, executor, stream);
   CHECK_RET(aclnn_ret == ACL_SUCCESS, LOG_PRINT("aclnnMhcPreSinkhorn failed, error: %d\n", aclnn_ret); return -1);
 
@@ -782,6 +802,7 @@ int main()
 
   LOG_PRINT("MhcPreSinkhorn compute success!\n");
 
+  // Release tensor descriptors, device allocations, workspace, and ACL resources.
   DestroyTensors(tensors);
   FreeDeviceMemory(tensors);
   if (workspace_size > 0)

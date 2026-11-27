@@ -25,7 +25,7 @@
 
 - **接口功能**：
 
-  基于一系列计算得到MHC架构中hidden层的$\mathbf{{H}'_{\text{res}}}$和$\mathbf{{H}_{\text{post}}}$投影矩阵以及Attention或MLP层的输入矩阵$\mathbf{{h}_{\text{in}}}$。对$\mathbf{{H}'_{\text{res}}}$矩阵执行Sinkhorn迭代归一化变换，最终得到近似双随机矩阵$\mathbf{{H}_{\text{res}}}$；支持输出中间计算结果，用于反向梯度计算。其中，该接口在Cube中默认使用HF32计算模式。
+  基于一系列计算得到MHC架构中hidden层的$\mathbf{{H}'_{\text{res}}}$和$\mathbf{{H}_{\text{post}}}$投影矩阵以及Attention或MLP层的输入矩阵$\mathbf{{h}_{\text{in}}}$。对$\mathbf{{H}'_{\text{res}}}$矩阵执行Sinkhorn迭代归一化变换，最终得到近似双随机矩阵$\mathbf{{H}_{\text{res}}}$；自动保存中间计算结果，用于反向梯度计算。其中，该接口在Cube中默认使用HF32计算模式。
 
   <!-- npu="A3,910b" id13 -->
   <term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>：HF32模式由全局开关`torch_npu.npu.aclnn.allow_hf32`控制（缺省true），python封装不单独暴露该参数，每次调用自动读取并随调用下发，传入false语义时切换为FP32计算模式。
@@ -36,16 +36,16 @@
   $$
   \begin{aligned}
   \vec{x^{'}_{l}} &= \frac{1}{\sqrt{\frac{1}{d} \sum_{\dim=-2,\text{keepdim}=\text{True}} x_i^2 + \epsilon_{norm}}}\\
-  H^{pre}_l &= \alpha^{pre}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
+  p^{pre}_l &= \alpha^{pre}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
   H^{post}_l &= \alpha^{post}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{post}_{l}) + b^{post}_{l}\\
   H^{res}_l &= \alpha^{res}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{res}_{l}) + b^{res}_{l}\\
-  H^{pre}_l &= \sigma (H^{pre}_{l})\\
+  H^{pre}_l &= \sigma (p^{pre}_{l}) + \epsilon_{hc}\\
   H^{post}_l &= 2\sigma (H^{post}_{l})\\
   h_{in} &=\vec{x_{l}}H^{pre}_l
   \end{aligned}
   $$
 
-  将$\mathbf{H^{res}_l}$作为输入，Sinkhorn变换共执行$numIters$次迭代，迭代过程中生成中间归一化结果${normOut}[k]$和求和结果${sumOut}[k]$，最终输出最后一次迭代的${normOut}$作为变换结果。
+  将$\mathbf{H^{res}_l}$作为输入，Sinkhorn变换共执行$\mathrm{num\_iters}$次迭代，迭代过程中生成中间归一化结果${normOut}[k]$和求和结果${sumOut}[k]$，最终输出最后一次迭代的${normOut}$作为变换结果。
 
   第一次迭代（初始化）：
 
@@ -53,7 +53,7 @@
   \begin{aligned}
       {normOut}[0] &= \text{softmax}({H^{res}_l},  \dim=-1) + \epsilon_{hc}, \\
       {sumOut}[1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} {normOut}[0] + \epsilon_{hc}, \\
-      {normOut}[1] &= \frac{{normOut}[0]}{{sum\_out}[1]}, \\
+      {normOut}[1] &= \frac{{normOut}[0]}{{sumOut}[1]}, \\
   \end{aligned}
   $$
 
@@ -62,9 +62,9 @@
   $$
   \begin{aligned}
       {sumOut}[2i] &= \sum_{\dim=-1,\text{keepdim}=\text{True}} {normOut}[2i-1] + \epsilon_{hc}, \\
-      {normOut}[2i] &= \frac{{normOut}[2i-1]}{{sum\_out}[2i]}, \\
+      {normOut}[2i] &= \frac{{normOut}[2i-1]}{{sumOut}[2i]}, \\
       {sumOut}[2i+1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} {normOut}[2i] + \epsilon_{hc}, \\
-      {normOut}[2i+1] &= \frac{{normOut}[2i]}{{sum\_out}[2i+1]}, \\
+      {normOut}[2i+1] &= \frac{{normOut}[2i]}{{sumOut}[2i+1]}, \\
   \end{aligned}
   $$
 
@@ -81,8 +81,17 @@
 ## 函数原型
 
 ```python
-cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcEps, normEps, outFlag, *, preMix?: Tensor) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)
+def mhc_pre_sinkhorn(
+    x, phi, alpha, bias, hc_mult, num_iters,
+    hc_eps=1e-6, norm_eps=1e-6, *, pre_mix=None
+):
+    ...
 ```
+
+通过`from cann_ops_transformer.ops import mhc_pre_sinkhorn`导入此公开Python封装，反向计算所需的中间结果由封装内部保存。
+
+- 未传入`pre_mix`，或`x`、`phi`、`alpha`、`bias`和`pre_mix`均无需梯度时，返回`(hin, hPost, hRes)`。
+- 传入`pre_mix`且上述任一输入的`requires_grad=True`时，返回`(hin, hPost, hRes, hPre)`。
 
 ## 参数说明
 
@@ -138,7 +147,7 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>1</td>
     </tr>
     <tr>
-        <td>hcMult</td>
+        <td>hc_mult</td>
         <td>int</td>
         <td>必选</td>
         <td>残差流数量、HC维度大小。</td>
@@ -146,7 +155,7 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>-</td>
     </tr>
     <tr>
-        <td>numIters</td>
+        <td>num_iters</td>
         <td>int</td>
         <td>必选</td>
         <td>Sinkhorn算法迭代次数。</td>
@@ -154,15 +163,15 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>-</td>
     </tr>
     <tr>
-        <td>hcEps</td>
+        <td>hc_eps</td>
         <td>float</td>
         <td>可选</td>
-        <td>H<sup>pre</sup>的sigmoid后的eps参数。对应公式中ε<sub>hc</sub>。默认值：1e-6。</td>
+        <td>H<sup>pre</sup>的sigmoid结果上累加的偏移量，同时用于Sinkhorn的softmax结果及行、列归一化分母的稳定项。对应公式中ε<sub>hc</sub>。默认值：1e-6。</td>
         <td>-</td>
         <td>-</td>
     </tr>
     <tr>
-        <td>normEps</td>
+        <td>norm_eps</td>
         <td>float</td>
         <td>可选</td>
         <td>RmsNorm的防除零参数。对应公式中ε<sub>norm</sub>。默认值：1e-6。</td>
@@ -170,10 +179,10 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>-</td>
     </tr>
     <tr>
-        <td>preMix</td>
+        <td>pre_mix</td>
         <td>Tensor</td>
         <td>可选</td>
-        <td><ul><li>premix加权系数（通常填上一个折叠点输出的hPre）。传入时hin的y折叠加权使用preMix而非内部计算的hPre；不传时行为与原接口完全一致；</li><li>Shape须与 `x.shape[:-1]` 匹配</li></ul></td>
+        <td><ul><li>premix加权系数（通常填上一个折叠点输出的hPre）。传入时hin的y折叠加权使用pre_mix而非内部计算的hPre；不传时行为与原接口完全一致；</li><li>Shape须与 `x.shape[:-1]` 匹配，默认值为None。</li></ul></td>
         <td>float32</td>
         <td>2-3</td>
     </tr>
@@ -240,6 +249,14 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
             </ul>
         </td>
     </tr>
+    <tr>
+        <td>hPre</td>
+        <td>Tensor</td>
+        <td>条件输出</td>
+        <td>经过sigmoid并加上hc_eps的H<sup>pre</sup>。仅在传入pre_mix且任一输入需要梯度时，作为第四个返回值输出。</td>
+        <td>float32</td>
+        <td>(B, S, N)<br>(T, N)</td>
+    </tr>
 </tbody>
 </table>
 
@@ -255,14 +272,14 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
 - 数据类型约束：
   - 输出`hin`的数据类型与`x`保持一致。
 - 规格约束：
-  - numIters：表示迭代次数，目前仅支持20。
+  - num_iters：表示迭代次数，目前仅支持20。
   - N：目前仅支持4。
   - 输入x支持4维BSND格式和3维TND格式，shape分别为(B, S, N, C)和(T, N, C)。
   - TND格式下，T表示所有Batch序列长度的累加和；对应输出shape按参数说明中的T轴展开。
   - 尾轴C需为128的倍数且取值范围为[1, 100000]。
   <!-- npu="950" id8 -->
   - <term>Ascend 950PR&950DT系列产品</term>：
-    - 输入phi的数据范围限定在$\pm \frac{1}{\sqrt{NC}}$范围内，eps限定在1e-6，此范围内具有较好的数值稳定性。
+    - 输入phi的数据范围限定在$\pm \frac{1}{\sqrt{NC}}$范围内；hc_eps和norm_eps取值均为1e-6时，在此范围内具有较好的数值稳定性。
   <!-- end id8 -->
 
 ## 确定性/Batch一致性
@@ -285,33 +302,39 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
 - 单算子模式调用：
 
   ```python
+  # 单算子模式：构造输入并调用公开mHC封装，计算三个主输出。
   import torch
   import torch_npu
   from cann_ops_transformer.ops import mhc_pre_sinkhorn
 
+  # 输入维度：Batch大小B、序列长度S、残差流数量N和隐藏维度C。
   B = 1
   S = 1024
   N = 4
   C = 4096
 
+  # x使用BF16；phi、alpha和bias使用FP32，投影通道数为N*N + 2*N。
   x = torch.randn(B, S, N, C, dtype=torch.bfloat16).npu()
   phi = torch.randn(N * N + 2 * N, N * C, dtype=torch.float32).npu()
   alpha = torch.randn(3, dtype=torch.float32).npu()
   bias = torch.randn(N * N + 2 * N, dtype=torch.float32).npu()
 
-  hcMult = 4
-  numIters = 20
-  hcEps = 1e-6
-  normEps = 1e-6
+  # 残差流数量取4，Sinkhorn迭代20次，两类epsilon均取1e-6。
+  hc_mult = 4
+  num_iters = 20
+  hc_eps = 1e-6
+  norm_eps = 1e-6
 
+  # 未传pre_mix时返回Attention/MLP输入、post权重和残差变换矩阵。
   hin, hPost, hRes = mhc_pre_sinkhorn(
-    x, phi, alpha, bias, hcMult, numIters, hcEps, normEps
+    x, phi, alpha, bias, hc_mult, num_iters, hc_eps, norm_eps
   )
   ```
 
 - 图模式调用：
 
   ```python
+  # 图模式：编译mHC正向计算，并在NPU上执行。
   import torch
   import torch_npu
   import torchair
@@ -319,6 +342,7 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
 
   torch_npu.npu.set_device(0)
 
+  # 输入维度：Batch大小B、序列长度S、残差流数量N和隐藏维度C。
   B = 1
   S = 128
   N = 4
@@ -335,10 +359,12 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
           )
           return hin, hPost, hRes
 
+  # 使用NPU后端编译模型，公开接口的关键字参数采用下划线命名。
   model = MhcPreSinkhornModel().npu()
   npu_backend = torchair.get_npu_backend()
   model = torch.compile(model, backend=npu_backend, dynamic=False)
 
+  # x使用BF16；phi、alpha和bias使用FP32，投影通道数为N*N + 2*N。
   x = torch.randn(B, S, N, C, dtype=torch.bfloat16, device="npu")
   phi = torch.randn(N * N + 2 * N, N * C, dtype=torch.float32, device="npu")
   alpha = torch.randn(3, dtype=torch.float32, device="npu")

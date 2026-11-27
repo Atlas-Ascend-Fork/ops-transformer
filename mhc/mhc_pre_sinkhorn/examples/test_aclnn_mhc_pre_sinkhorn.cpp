@@ -8,6 +8,10 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include "acl/acl.h"
@@ -115,7 +119,9 @@ int CreateAclTensorBfloat16(const std::vector<float>& host_data, const std::vect
     int64_t size = GetShapeSize(shape);
     std::vector<uint16_t> host_data_bf16(size);
     for (int64_t i = 0; i < size; ++i) {
-        host_data_bf16[i] = static_cast<uint16_t>(static_cast<int16_t>(host_data[i] * 32767));
+        uint32_t bits = 0;
+        std::memcpy(&bits, &host_data[i], sizeof(bits));
+        host_data_bf16[i] = static_cast<uint16_t>(bits >> 16);
     }
 
     int64_t byte_size = size * sizeof(uint16_t);

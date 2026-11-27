@@ -25,7 +25,7 @@
 
 - **Description**:
 
-  Computes the $\mathbf{H}'_{\text{res}}$ and $\mathbf{H}_{\text{post}}$ projection matrices of the hidden layer in the MHC architecture, as well as the input matrix $\mathbf{h}_{\text{in}}$ of the Attention or MLP layer. Performs Sinkhorn iterative normalization on the $\mathbf{H}'_{\text{res}}$ matrix to obtain the approximately doubly stochastic matrix $\mathbf{H}_{\text{res}}$. Supports outputting intermediate computation results for backward gradient computation. The computation mode used in the Cube is HF32 by default.
+  Computes the $\mathbf{H}'_{\text{res}}$ and $\mathbf{H}_{\text{post}}$ projection matrices of the hidden layer in the MHC architecture, as well as the input matrix $\mathbf{h}_{\text{in}}$ of the Attention or MLP layer. Performs Sinkhorn iterative normalization on the $\mathbf{H}'_{\text{res}}$ matrix to obtain the approximately doubly stochastic matrix $\mathbf{H}_{\text{res}}$. Automatically saves intermediate computation results for backward gradient computation. The computation mode used in the Cube is HF32 by default.
 
   <!-- npu="A3,910b" id13 -->
   <term>Atlas A3 products</term>, <term>Atlas A2 products</term>: The HF32 mode is controlled by the global switch `torch_npu.npu.aclnn.allow_hf32` (default true). The Python wrapper does not expose this parameter separately; it reads it automatically on each call and passes it along with the call. When false semantics are passed in, the mode switches to FP32 computation.
@@ -36,16 +36,16 @@
   $$
   \begin{aligned}
   \vec{x^{'}_{l}} &= \frac{1}{\sqrt{\frac{1}{d} \sum_{\dim=-2,\text{keepdim}=\text{True}} x_i^2 + \epsilon_{norm}}}\\
-  H^{pre}_l &= \alpha^{pre}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
+  p^{pre}_l &= \alpha^{pre}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
   H^{post}_l &= \alpha^{post}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{post}_{l}) + b^{post}_{l}\\
   H^{res}_l &= \alpha^{res}_{l} \cdot(\vec{x^{'}_{l}}\varphi^{res}_{l}) + b^{res}_{l}\\
-  H^{pre}_l &= \sigma (H^{pre}_{l})\\
+  H^{pre}_l &= \sigma (p^{pre}_{l}) + \epsilon_{hc}\\
   H^{post}_l &= 2\sigma (H^{post}_{l})\\
   h_{in} &=\vec{x_{l}}H^{pre}_l
   \end{aligned}
   $$
 
-  Using $\mathbf{H^{res}_l}$ as input, the Sinkhorn transformation performs a total of $\mathbf{numIters}$ iterations. During the iterative process, intermediate normalization results $\mathbf{normOut}[k]$ and summation results $\mathbf{sumOut}[k]$ are generated. The final output is the $\mathbf{normOut}$ from the last iteration as the transformation result.
+  Using $\mathbf{H^{res}_l}$ as input, the Sinkhorn transformation performs a total of $\mathbf{num\_iters}$ iterations. During the iterative process, intermediate normalization results $\mathbf{normOut}[k]$ and summation results $\mathbf{sumOut}[k]$ are generated. The final output is the $\mathbf{normOut}$ from the last iteration as the transformation result.
 
   First iteration (initialization):
 
@@ -53,7 +53,7 @@
   \begin{aligned}
       \mathbf{normOut}[0] &= \text{softmax}(\mathbf{H^{res}_l},  \dim=-1) + \epsilon_{hc}, \\
       \mathbf{sumOut}[1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[0] + \epsilon_{hc}, \\
-      \mathbf{normOut}[1] &= \frac{\mathbf{normOut}[0]}{\mathbf{sum\_out}[1]}, \\
+      \mathbf{normOut}[1] &= \frac{\mathbf{normOut}[0]}{\mathbf{sumOut}[1]}, \\
   \end{aligned}
   $$
 
@@ -62,9 +62,9 @@
   $$
   \begin{aligned}
       \mathbf{sumOut}[2i] &= \sum_{\dim=-1,\text{keepdim}=\text{True}} \mathbf{normOut}[2i-1] + \epsilon_{hc}, \\
-      \mathbf{normOut}[2i] &= \frac{\mathbf{normOut}[2i-1]}{\mathbf{sum\_out}[2i]}, \\
+      \mathbf{normOut}[2i] &= \frac{\mathbf{normOut}[2i-1]}{\mathbf{sumOut}[2i]}, \\
       \mathbf{sumOut}[2i+1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[2i] + \epsilon_{hc}, \\
-      \mathbf{normOut}[2i+1] &= \frac{\mathbf{normOut}[2i]}{\mathbf{sum\_out}[2i+1]}, \\
+      \mathbf{normOut}[2i+1] &= \frac{\mathbf{normOut}[2i]}{\mathbf{sumOut}[2i+1]}, \\
   \end{aligned}
   $$
 
@@ -81,8 +81,17 @@
 ## Prototype
 
 ```python
-cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcEps, normEps, outFlag, *, preMix?: Tensor) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)
+def mhc_pre_sinkhorn(
+    x, phi, alpha, bias, hc_mult, num_iters,
+    hc_eps=1e-6, norm_eps=1e-6, *, pre_mix=None
+):
+    ...
 ```
+
+Import this public Python wrapper with `from cann_ops_transformer.ops import mhc_pre_sinkhorn`. Intermediate results needed for backward computation are saved internally.
+
+- If `pre_mix` is omitted, or none of `x`, `phi`, `alpha`, `bias`, and `pre_mix` has `requires_grad=True`, the return value is `(hin, hPost, hRes)`.
+- If `pre_mix` is provided and any of these inputs has `requires_grad=True`, the return value is `(hin, hPost, hRes, hPre)`.
 
 ## Parameters
 
@@ -143,7 +152,7 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>(2N+N²)</td>
     </tr>
     <tr>
-        <td>hcMult</td>
+        <td>hc_mult</td>
         <td>int</td>
         <td>Required</td>
         <td>Number of residual streams, size of the HC dimension.</td>
@@ -151,7 +160,7 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>-</td>
     </tr>
     <tr>
-        <td>numIters</td>
+        <td>num_iters</td>
         <td>int</td>
         <td>Required</td>
         <td>Number of Sinkhorn algorithm iterations.</td>
@@ -159,15 +168,15 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>-</td>
     </tr>
     <tr>
-        <td>hcEps</td>
+        <td>hc_eps</td>
         <td>float</td>
         <td>Optional</td>
-        <td>Epsilon parameter after sigmoid of H<sup>pre</sup>. Corresponds to ε<sub>hc</sub> in the formula. Default value is 1e-6.</td>
+        <td>Offset added after the sigmoid of H<sup>pre</sup>; also added to the Sinkhorn softmax result and row/column normalization denominators. Corresponds to ε<sub>hc</sub> in the formula. Default value is 1e-6.</td>
         <td>-</td>
         <td>-</td>
     </tr>
     <tr>
-        <td>normEps</td>
+        <td>norm_eps</td>
         <td>float</td>
         <td>Optional</td>
         <td>Division-by-zero prevention parameter of RmsNorm. Corresponds to ε<sub>norm</sub> in the formula. Default value is 1e-6.</td>
@@ -175,10 +184,10 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
         <td>-</td>
     </tr>
     <tr>
-        <td>preMix</td>
+        <td>pre_mix</td>
         <td>Tensor</td>
         <td>Optional</td>
-        <td><ul><li>premix weighting coefficients (usually filled with the hPre output from the previous folding point). When provided, the hin weighting uses preMix instead of the internally computed hPre; when not provided, the behavior is completely the same as the original interface.</li><li>The shape must match `x.shape[:-1]`.</li></ul></td>
+        <td><ul><li>premix weighting coefficients (usually filled with the hPre output from the previous folding point). When provided, the hin weighting uses pre_mix instead of the internally computed hPre; when not provided, the behavior is completely the same as the original interface.</li><li>The shape must match `x.shape[:-1]`. Default value is None.</li></ul></td>
         <td>float32</td>
         <td>2-3</td>
     </tr>
@@ -245,6 +254,14 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
             </ul>
         </td>
     </tr>
+    <tr>
+        <td>hPre</td>
+        <td>Tensor</td>
+        <td>Conditional</td>
+        <td>H<sup>pre</sup> after sigmoid and addition of hc_eps. Returned as the fourth output only when pre_mix is provided and any input requires gradients.</td>
+        <td>float32</td>
+        <td>(B, S, N)<br>(T, N)</td>
+    </tr>
 </tbody>
 </table>
 
@@ -258,14 +275,14 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
 - Data type constraints:
   - The data type of output `hin` must be the same as `x`.
 - Specification constraints:
-  - numIters: Indicates the number of iterations. Currently only 20 is supported.
+  - num_iters: Indicates the number of iterations. Currently only 20 is supported.
   - N: Currently only 4 is supported.
   - Input x supports the 4D BSND format and the 3D TND format, with shapes (B, S, N, C) and (T, N, C) respectively.
   - In TND format, T indicates the cumulative sum of all batch sequence lengths. The corresponding output shape expands along the T axis as described in the parameter description.
   - The tail axis C must be a multiple of 128, with a value range of [1, 100000].
   <!-- npu="950" id8 -->
   - <term>Ascend 950PR&950DT products</term>:
-    - The data range of input phi is limited to within $\pm \frac{1}{\sqrt{NC}}$, and eps is limited to 1e-6. Within this range, good numerical stability is achieved.
+    - The data range of input phi is limited to within $\pm \frac{1}{\sqrt{NC}}$. Good numerical stability is achieved within this range when both hc_eps and norm_eps are set to 1e-6.
   <!-- end id8 -->
 
 ## Deterministic Computation/Batch Consistency
@@ -288,33 +305,39 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
 - Single operator mode call:
 
   ```python
+  # Run the public mHC wrapper with explicit inputs and parameters.
   import torch
   import torch_npu
   from cann_ops_transformer.ops import mhc_pre_sinkhorn
 
+  # Input dimensions: batch size B, sequence length S, residual streams N, hidden size C.
   B = 1
   S = 1024
   N = 4
   C = 4096
 
+  # x uses BF16; phi, alpha, and bias use FP32 with N*N + 2*N projection channels.
   x = torch.randn(B, S, N, C, dtype=torch.bfloat16).npu()
   phi = torch.randn(N * N + 2 * N, N * C, dtype=torch.float32).npu()
   alpha = torch.randn(3, dtype=torch.float32).npu()
   bias = torch.randn(N * N + 2 * N, dtype=torch.float32).npu()
 
-  hcMult = 4
-  numIters = 20
-  hcEps = 1e-6
-  normEps = 1e-6
+  # Use four residual streams, twenty Sinkhorn iterations, and two epsilon values of 1e-6.
+  hc_mult = 4
+  num_iters = 20
+  hc_eps = 1e-6
+  norm_eps = 1e-6
 
+  # Without pre_mix, return the Attention/MLP input, post weights, and residual matrix.
   hin, hPost, hRes = mhc_pre_sinkhorn(
-    x, phi, alpha, bias, hcMult, numIters, hcEps, normEps
+    x, phi, alpha, bias, hc_mult, num_iters, hc_eps, norm_eps
   )
   ```
 
 - Graph mode call:
 
   ```python
+  # Compile the mHC forward computation and run it on the NPU.
   import torch
   import torch_npu
   import torchair
@@ -322,6 +345,7 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
 
   torch_npu.npu.set_device(0)
 
+  # Input dimensions: batch size B, sequence length S, residual streams N, hidden size C.
   B = 1
   S = 128
   N = 4
@@ -338,10 +362,12 @@ cann_ops_transformer.mhc_pre_sinkhorn(x, phi, alpha, bias, hcMult, numIters, hcE
           )
           return hin, hPost, hRes
 
+  # Compile the model with the NPU backend; the public API uses snake_case keywords.
   model = MhcPreSinkhornModel().npu()
   npu_backend = torchair.get_npu_backend()
   model = torch.compile(model, backend=npu_backend, dynamic=False)
 
+  # x uses BF16; phi, alpha, and bias use FP32 with N*N + 2*N projection channels.
   x = torch.randn(B, S, N, C, dtype=torch.bfloat16, device="npu")
   phi = torch.randn(N * N + 2 * N, N * C, dtype=torch.float32, device="npu")
   alpha = torch.randn(3, dtype=torch.float32, device="npu")
