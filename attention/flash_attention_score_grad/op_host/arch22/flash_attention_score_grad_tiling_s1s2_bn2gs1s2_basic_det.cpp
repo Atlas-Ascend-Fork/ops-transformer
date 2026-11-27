@@ -81,7 +81,11 @@ ge::graphStatus FlashAttentionScoreGraTilingBasicDet::SetAttrsInfo()
     fBaseParams.inputLayout = context_->GetAttrs()->GetAttrPointer<char>(INPUT_LAYOUT);
     fBaseParams.preTockens = *context_->GetAttrs()->GetAttrPointer<int64_t>(PRE_TOKENS);
     fBaseParams.nextTockens = *context_->GetAttrs()->GetAttrPointer<int64_t>(NEXT_TOKENS);
-    fBaseParams.sparseMode = *context_->GetAttrs()->GetAttrPointer<int>(SPARSE_MODE);
+    auto sparseModePtr = context_->GetAttrs()->GetAttrPointer<int>(SPARSE_MODE);
+    OP_CHECK_IF(sparseModePtr == nullptr,
+                OP_LOGE(context_, "FlashAttentionScoreGradBasicDet sparse_mode attribute is null."),
+                return ge::GRAPH_FAILED);
+    fBaseParams.sparseMode = *sparseModePtr;
     fBaseParams.dqPostAbsorb = 0;
 
     OP_CHECK_IF((fBaseParams.keepProb <= 0.0 || fBaseParams.keepProb > 1.0),
@@ -91,8 +95,11 @@ ge::graphStatus FlashAttentionScoreGraTilingBasicDet::SetAttrsInfo()
                 return ge::GRAPH_FAILED);
 
     if (context_->GetAttrs()->GetAttrNum() > static_cast<size_t>(PSETYPE)) {
-        auto pseType = *context_->GetAttrs()->GetAttrPointer<int>(PSETYPE);
-        fBaseParams.pseEnable = (pseShape != nullptr || pseType != 1);
+        auto pseTypePtr = context_->GetAttrs()->GetAttrPointer<int>(PSETYPE);
+        OP_CHECK_IF(pseTypePtr == nullptr,
+                    OP_LOGE(context_, "FlashAttentionScoreGradBasicDet pse_type attribute is null."),
+                    return ge::GRAPH_FAILED);
+        fBaseParams.pseEnable = (pseShape != nullptr || *pseTypePtr != 1);
     }
 
     return ge::GRAPH_SUCCESS;
@@ -100,6 +107,9 @@ ge::graphStatus FlashAttentionScoreGraTilingBasicDet::SetAttrsInfo()
 
 ge::graphStatus FlashAttentionScoreGraTilingBasicDet::SetBaseInfo()
 {
+    OP_CHECK_IF(context_->GetInputDesc(QUERY) == nullptr,
+                OP_LOGE(context_, "FlashAttentionScoreGradBasicDet query input desc is null."),
+                return ge::GRAPH_FAILED);
     int64_t headNum = *context_->GetAttrs()->GetAttrPointer<int>(HEAD_NUM);
     const gert::StorageShape* queryShape = context_->GetInputShape(0);
     const gert::StorageShape* keyShape = context_->GetInputShape(1);
@@ -503,9 +513,11 @@ ge::graphStatus FlashAttentionScoreGraTilingBasicDet::DoOpTiling()
         OP_LOGW(context_, "FlashAttentionBasicDet unsupported layout");
         return ge::GRAPH_PARAM_INVALID;
     }
-    bool tndSoftmaxIn = context_->GetAttrs()->GetAttrNum() > static_cast<size_t>(TND_SOFTMAX_IN) ?
-                            *(context_->GetAttrs()->GetAttrPointer<bool>(TND_SOFTMAX_IN)) :
-                            false;
+    bool tndSoftmaxIn = false;
+    if (context_->GetAttrs()->GetAttrNum() > static_cast<size_t>(TND_SOFTMAX_IN)) {
+        auto tndSoftmaxInPtr = context_->GetAttrs()->GetAttrPointer<bool>(TND_SOFTMAX_IN);
+        tndSoftmaxIn = (tndSoftmaxInPtr != nullptr) ? *tndSoftmaxInPtr : false;
+    }
     if (tndSoftmaxIn) {
         tilingData->basicDetTensorTilingData.set_tndSoftmaxIn(1);
     } else {

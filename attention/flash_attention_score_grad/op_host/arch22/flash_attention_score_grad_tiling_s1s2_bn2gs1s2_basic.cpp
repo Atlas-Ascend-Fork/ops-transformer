@@ -87,7 +87,11 @@ ge::graphStatus FlashAttentionScoreGraTilingMla::SetAttrsInfo()
     fBaseParams.scaleValue = *context_->GetAttrs()->GetAttrPointer<float>(SCALE_VALUE);
     fBaseParams.keepProb = *context_->GetAttrs()->GetAttrPointer<float>(KEEP_PROB);
     fBaseParams.inputLayout = context_->GetAttrs()->GetAttrPointer<char>(INPUT_LAYOUT);
-    fBaseParams.sparseMode = *context_->GetAttrs()->GetAttrPointer<int>(SPARSE_MODE);
+    auto sparseModePtr = context_->GetAttrs()->GetAttrPointer<int>(SPARSE_MODE);
+    OP_CHECK_IF(sparseModePtr == nullptr,
+                OP_LOGE(context_, "FlashAttentionScoreGradMla sparse_mode attribute is null."),
+                return ge::GRAPH_FAILED);
+    fBaseParams.sparseMode = *sparseModePtr;
 
     OP_CHECK_IF((fBaseParams.keepProb <= 0 || fBaseParams.keepProb > 1),
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
@@ -97,8 +101,10 @@ ge::graphStatus FlashAttentionScoreGraTilingMla::SetAttrsInfo()
 
     fBaseParams.dropMskEnable = (dropMask != nullptr || fBaseParams.keepProb < 1.0f);
     if (context_->GetAttrs()->GetAttrNum() > static_cast<size_t>(PSETYPE)) {
-        auto pseType = *context_->GetAttrs()->GetAttrPointer<int>(PSETYPE);
-        fBaseParams.pseEnable = (pseShape != nullptr || pseType != 1);
+        auto pseTypePtr = context_->GetAttrs()->GetAttrPointer<int>(PSETYPE);
+        OP_CHECK_IF(pseTypePtr == nullptr, OP_LOGE(context_, "FlashAttentionScoreGradMla pse_type attribute is null."),
+                    return ge::GRAPH_FAILED);
+        fBaseParams.pseEnable = (pseShape != nullptr || *pseTypePtr != 1);
     }
 
     return ge::GRAPH_SUCCESS;
@@ -106,6 +112,8 @@ ge::graphStatus FlashAttentionScoreGraTilingMla::SetAttrsInfo()
 
 ge::graphStatus FlashAttentionScoreGraTilingMla::SetBaseInfo()
 {
+    OP_CHECK_IF(context_->GetInputDesc(QUERY) == nullptr,
+                OP_LOGE(context_, "FlashAttentionScoreGradMla query input desc is null."), return ge::GRAPH_FAILED);
     if (strcmp(fBaseParams.inputLayout, TND_STR) != 0) {
         OP_LOGI(context_, "FlashAttentionScoreGradMla only support TND inputLayout, now is %s.",
                 fBaseParams.inputLayout);
@@ -292,9 +300,11 @@ ge::graphStatus FlashAttentionScoreGraTilingMla::DoOpTiling()
     tilingData->mlaTensorTilingData.set_kvSize(kvSize);
     tilingData->mlaTensorTilingData.set_sfmgSize(sfmgSize);
     tilingData->mlaTensorTilingData.set_sparseMode(fBaseParams.sparseMode);
-    bool tndSoftmaxIn = context_->GetAttrs()->GetAttrNum() > static_cast<size_t>(TND_SOFTMAX_IN) ?
-                            *(context_->GetAttrs()->GetAttrPointer<bool>(TND_SOFTMAX_IN)) :
-                            false;
+    bool tndSoftmaxIn = false;
+    if (context_->GetAttrs()->GetAttrNum() > static_cast<size_t>(TND_SOFTMAX_IN)) {
+        auto tndSoftmaxInPtr = context_->GetAttrs()->GetAttrPointer<bool>(TND_SOFTMAX_IN);
+        tndSoftmaxIn = (tndSoftmaxInPtr != nullptr) ? *tndSoftmaxInPtr : false;
+    }
     if (tndSoftmaxIn) {
         tilingData->mlaTensorTilingData.set_tndSoftmaxIn(1);
     } else {
