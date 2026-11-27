@@ -207,7 +207,7 @@ def _hifp4_cvt_bfloat16_to_fp4_e1m2(x):
     if x < 0.0:
         sRet = 1
     x_abs = math.fabs(x)
-    x = eval(_hifp4_float_to_hex(x_abs))
+    x = struct.unpack("<I", struct.pack("<f", x_abs))[0]
     x = x >> 16
     ef = x >> 7 & 0xFF
     mf = x & 0x7F
