@@ -118,7 +118,7 @@
     <tr>
     <td>bias</td>
     <td>可选输入</td>
-    <td>可选输入，阵乘运算后累加的偏置，对应公式中的bias。</td>
+    <td>可选输入，矩阵乘运算后累加的偏置，对应公式中的bias。</td>
     <td>FLOAT16、BFLOAT16、FLOAT32</td>
     <td>ND</td>
     </tr>

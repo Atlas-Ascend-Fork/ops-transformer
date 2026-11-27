@@ -29,7 +29,7 @@ constexpr static uint64_t NUM_EIGHT = 8;
 constexpr static double AICPU_NO_CUT_TIME_THRESHOLD_US = 80.0;
 constexpr static uint64_t AICPU_MN_RATIO_THRESHOLD = 10U;
 constexpr static uint64_t AICPU_MN_RATIO_MAX_TILE_CNT = 3U;
-constexpr static uint64_t AICPU_UPCAST_MAX_TILE_CNT = 4U;
+constexpr static uint64_t AICPU_UPCAST_MAX_TILE_CNT = 6U;
 
 void MatmulAlltoAllFitBalanceTiling::EstimateMMCommTime()
 {

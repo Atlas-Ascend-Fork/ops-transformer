@@ -120,7 +120,7 @@ English | [简体中文](./README.md)
     <tr>
     <td>bias</td>
     <td>Optional input</td>
-    <td>Optional input, the bias accumulated after the matrix multiplication, corresponding to bias in the formula.</td>
+    <td>Optional input, the bias accumulated after the matrix multiplication operation, corresponding to bias in the formula.</td>
     <td>FLOAT16, BFLOAT16, FLOAT32</td>
     <td>ND</td>
     </tr>
