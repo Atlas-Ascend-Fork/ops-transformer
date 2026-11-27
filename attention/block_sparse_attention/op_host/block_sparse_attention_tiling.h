@@ -193,7 +193,6 @@ private:
     ge::graphStatus ValidateQDequantScale(gert::TilingContext* bsaContext);
     ge::graphStatus ValidateKDequantScale(gert::TilingContext* bsaContext);
     ge::graphStatus ValidateVDequantScale(gert::TilingContext* bsaContext);
-    ge::graphStatus ValidateTNDSeqlenSum(gert::TilingContext* bsaContext);
     // 950 exclusive
     uint32_t GetCurQSTileNum950(int64_t curQSeqlen);
     void CalcBaseTileTilingParams950();
@@ -204,7 +203,7 @@ private:
                                      uint32_t kvBaseTileAligned128);
     void TransposedMatmulConfig950();
     // 910 exclusive
-    ge::graphStatus CalculateTaskSplit(gert::TilingContext* bsaContext);
+    ge::graphStatus CalculateTaskSplit();
     ge::graphStatus CalculateWorkSpace(gert::TilingContext* bsaContext);
     // shared
     void CalculateBatchTaskSplit(int64_t qSeqlen, uint32_t groupSize, uint32_t& curTaskNum, uint32_t& curQBlockNum);
@@ -261,7 +260,8 @@ private:
     uint32_t blockDim_ = 20;
     uint32_t aivNum_ = 0;
     uint32_t aicNum_ = 0;
-    uint32_t socVer_ = 0;
+    bool isA5_ = false;
+    bool isA6_ = false;
     uint64_t ubSize_ = 0;
     uint64_t workSpaceSize_ = 0;
     uint64_t libapiSize_ = 0;
@@ -272,7 +272,7 @@ private:
     uint32_t maxEffectiveKvSeqlen_ = 0; // 传入actualSeqLengthsKv时为实际长度最大值，否则为K的S维度
     int64_t totalTokensT_ = 0;          // TND格式Q的第一维（T维度，总token数）
     int64_t totalTokensKv_ = 0;         // TND格式KV的第一维（T维度，总token数）
-    uint32_t btKvTokens_ = 0; // [TND mxfp4] BTkv = sum_b CeilDiv(S2_b, 64), V-scale TND dim0(ParseSeqlensInTND 累加)
+    int64_t btKvTokens_ = 0; // [TND mxfp4] BTkv = sum_b CeilDiv(S2_b, 64), V-scale TND dim0(ParseSeqlensInTND 累加)
 
     // mask2idx tile info
     uint32_t xBlockNumAligned_;

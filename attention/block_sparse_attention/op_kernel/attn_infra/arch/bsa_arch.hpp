@@ -35,6 +35,16 @@ struct AtlasA5 {
     static constexpr uint32_t L0C_SIZE = 256U * 1024U;
 };
 
+struct Ascend960DT {
+    static constexpr uint32_t BIAS_SIZE = 4U * 1024U;
+    static constexpr uint32_t FIXBUF_SIZE = 16U * 1024U;
+    static constexpr uint32_t UB_SIZE = 376U * 1024U;
+    static constexpr uint32_t L1_SIZE = 512U * 1024U;
+    static constexpr uint32_t L0A_SIZE = 64U * 1024U;
+    static constexpr uint32_t L0B_SIZE = 64U * 1024U;
+    static constexpr uint32_t L0C_SIZE = 256U * 1024U;
+};
+
 template <AscendC::TPosition POS>
 using PositionType = std::integral_constant<AscendC::TPosition, POS>;
 

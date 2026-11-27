@@ -74,6 +74,28 @@ public:
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
         this->AICore().AddConfig("ascend950");
+        OpAICoreConfig config960dt;
+        config960dt.Input("query")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,
+                       ge::DT_FLOAT4_E2M1, ge::DT_HIFLOAT8, ge::DT_HIFLOAT8})
+            .FormatList({ge::FORMAT_ND});
+        config960dt.Input("key")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,
+                       ge::DT_FLOAT4_E2M1, ge::DT_HIFLOAT8, ge::DT_HIFLOAT8})
+            .FormatList({ge::FORMAT_ND});
+        config960dt.Input("value")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT8_E4M3FN, ge::DT_FLOAT4_E2M1,
+                       ge::DT_FLOAT4_E2M1, ge::DT_HIFLOAT8, ge::DT_HIFLOAT8})
+            .FormatList({ge::FORMAT_ND});
+        config960dt.Output("attention_out")
+            .ParamType(REQUIRED)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT16, ge::DT_BF16, ge::DT_FLOAT16, ge::DT_BF16,
+                       ge::DT_FLOAT16, ge::DT_BF16})
+            .FormatList({ge::FORMAT_ND});
+        this->AICore().AddConfig("ascend960dt", config960dt);
     }
 };
 

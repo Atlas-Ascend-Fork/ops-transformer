@@ -38,7 +38,7 @@ struct CopyL0CToDstQuantMode<ArchTag, float, float, ScaleGranularity::NO_QUANT> 
     static constexpr auto VALUE = QuantMode_t::NoQuant;
 };
 
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35) || defined(BSA_ARCH_92)
 template <class ArchTag>
 struct CopyL0CToDstQuantMode<ArchTag, float, float, ScaleGranularity::PER_TENSOR> {
     static constexpr auto VALUE = QuantMode_t::QF322F32_PRE;

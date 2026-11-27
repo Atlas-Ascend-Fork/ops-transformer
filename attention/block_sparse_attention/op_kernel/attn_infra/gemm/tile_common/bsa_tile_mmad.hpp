@@ -107,14 +107,14 @@ struct TileMmadTla {
         mmadParams.k = k;
         mmadParams.unitFlag = unitFlag;
         mmadParams.cmatrixInitVal = initC;
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35) || defined(BSA_ARCH_92)
         if constexpr (std::is_same_v<LayoutTagL1A, layout::VectorLayout>) {
             mmadParams.disableGemv = false;
         } else {
             mmadParams.disableGemv = true;
         }
 #endif
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
         if constexpr (std::is_same_v<ElementA, float> && std::is_same_v<LayoutTagL1A, layout::nZ>) {
             mmadParams.kDirectionAlign = true;
         }
@@ -139,10 +139,10 @@ struct TileMmadTla {
         mmadParams.k = k;
         mmadParams.unitFlag = unitFlag;
         mmadParams.cmatrixInitVal = false;
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35) || defined(BSA_ARCH_92)
         mmadParams.disableGemv = true;
 #endif
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
         if constexpr (std::is_same_v<ElementA, float> && std::is_same_v<LayoutTagL1A, layout::nZ>) {
             mmadParams.kDirectionAlign = true;
         }
@@ -173,7 +173,7 @@ struct TileMmadTla {
         mmadParams.k = k;
         mmadParams.unitFlag = 0;
         mmadParams.cmatrixInitVal = true;
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35) || defined(BSA_ARCH_92)
         mmadParams.disableGemv = true;
 #endif
 

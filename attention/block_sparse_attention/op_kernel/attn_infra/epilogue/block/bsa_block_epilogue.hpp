@@ -21,13 +21,28 @@ class BlockEpilogue {
 };
 
 } // namespace NpuArch::Epilogue::Block
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_online_softmax.hpp"
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_online_softmax_low_prec.hpp"
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_rescale_o.hpp"
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_rescale_o_low_prec.hpp"
 #endif
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_92)
+#include "bsa_block_epilogue_mask2idx_arch92.hpp"
+#include "bsa_block_epilogue_rescale_o_arch92_reg_high_prec.hpp"
+#include "block_epilogue_rescale_o_arch92_reg_high_prec_mxfp4.hpp"
+#include "block_epilogue_online_softmax_arch92_reg_high_prec_S_trans.hpp"
+#include "block_epilogue_online_softmax_arch92_reg_high_prec_S_trans_hif8.hpp"
+#include "bsa_block_epilogue_online_softmax_arch92_reg_low_prec.hpp"
+#include "bsa_block_epilogue_online_softmax_arch92_reg_low_prec_bf16.hpp"
+#include "block_epilogue_online_softmax_arch92_reg_S_fp16_zN_P_fp8_Mask_free.hpp"
+#include "block_epilogue_online_softmax_arch92_reg_S_bf16_zN_P_fp8_Mask_free.hpp"
+#include "block_epilogue_online_softmax_arch92_reg_low_prec_fp16_mxfp4.hpp"
+#include "block_epilogue_compute_pscale_arch92_mxfp4.hpp"
+#include "block_epilogue_rescale_o_arch92_reg_high_prec_mxfp8.hpp"
+#include "block_epilogue_online_softmax_arch92_reg_low_prec_fp16_mxfp8.hpp"
+#include "block_epilogue_compute_pscale_arch92_mxfp8.hpp"
+#elif defined(BSA_ARCH_35)
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_mask2idx_arch35.hpp"
 #include "../../../attn_infra/epilogue/block/bsa_block_epilogue_rescale_o_arch35_reg_high_prec.hpp"
 #include "../../../attn_infra/epilogue/block/block_epilogue_rescale_o_arch35_reg_high_prec_mxfp4.hpp"

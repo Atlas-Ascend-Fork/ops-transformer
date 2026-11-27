@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include "log/log.h"
 
 #include <cstdint>
@@ -98,7 +99,6 @@ namespace optiling {
 constexpr uint32_t BASIC_BLOCK_SIZE = 128;
 constexpr uint32_t WORKSPACE_BLOCK_SIZE_DB = 131072;
 constexpr uint32_t NUM3 = 3;
-constexpr uint32_t SOC_VER_950_CODE = 4;
 constexpr uint32_t INF_WINDOW_SIZE_PRE_NEXT = 2147483647;
 
 constexpr uint32_t TILE_SIZE_16 = 16;
@@ -214,7 +214,9 @@ ge::graphStatus BSATiling::GetNpuInfo(gert::TilingContext* bsaContext)
     libapiSize_ = ascendcPlatform.GetLibApiWorkSpaceSize();
     aivNum_ = ascendcPlatform.GetCoreNumAiv();
     aicNum_ = ascendcPlatform.GetCoreNumAic();
-    socVer_ = static_cast<uint32_t>(ascendcPlatform.GetSocVersion());
+    const auto arch = ascendcPlatform.GetCurNpuArch();
+    isA5_ = arch == NpuArch::DAV_3510;
+    isA6_ = arch == NpuArch::DAV_9201;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -332,47 +334,6 @@ ge::graphStatus BSATiling::CheckNDFormat(gert::TilingContext* bsaContext)
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus BSATiling::ValidateTNDSeqlenSum(gert::TilingContext* bsaContext)
-{
-    // 只在TND格式时进行校验
-    if (qInputLayout_ != BSAQInputLayout::TND_Q || kvCacheLayout_ != BSAKvCacheLayout::TND_KV) {
-        return ge::GRAPH_SUCCESS;
-    }
-
-    // 计算所有batch的qseqlen之和
-    int64_t sumQSeqlen = 0;
-    int64_t sumKvSeqlen = 0;
-
-    for (uint32_t i = 0; i < batch_; i++) {
-        sumQSeqlen += qSeqLenList_[i];
-        sumKvSeqlen += kvSeqLenList_[i];
-    }
-
-    // 校验qseqlen之和是否等于Q的T
-    if (sumQSeqlen != totalTokensT_) {
-        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-            bsaContext->GetNodeName(), "actualSeqLengths and query",
-            ("sum of qseqlen across all batches=" + std::to_string(sumQSeqlen) +
-             ", T of query=" + std::to_string(totalTokensT_))
-                .c_str(),
-            "in TND layout the sum of qseqlen across all batches must equal the T dim of query");
-        return ge::GRAPH_FAILED;
-    }
-
-    // 校验kvseqlen之和是否等于KV的T
-    if (sumKvSeqlen != totalTokensKv_) {
-        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-            bsaContext->GetNodeName(), "actualSeqLengthsKv and key",
-            ("sum of kvseqlen across all batches=" + std::to_string(sumKvSeqlen) +
-             ", T of key/value=" + std::to_string(totalTokensKv_))
-                .c_str(),
-            "in TND layout the sum of kvseqlen across all batches must equal the T dim of key/value");
-        return ge::GRAPH_FAILED;
-    }
-
-    return ge::GRAPH_SUCCESS;
-}
-
 ge::graphStatus BSATiling::GetInputLayout(gert::TilingContext* bsaContext)
 {
     auto attrs = bsaContext->GetAttrs();
@@ -405,9 +366,9 @@ ge::graphStatus BSATiling::GetInputLayout(gert::TilingContext* bsaContext)
         qInputLayout_ = BSAQInputLayout::BNSD_Q;
         kvCacheLayout_ = BSAKvCacheLayout::BNSD_KV;
     } else if (it->first == "BSND") {
-        if (socVer_ != SOC_VER_950_CODE) {
+        if (!(isA5_ || isA6_)) {
             OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(bsaContext->GetNodeName(), "qInputLayout", "BSND",
-                                                  "BSND inputLayout is supported only on chip 950");
+                                                  "BSND inputLayout is supported only on Ascend950/Ascend960DT");
             return ge::GRAPH_FAILED;
         }
         qInputLayout_ = BSAQInputLayout::BSND_Q;
@@ -428,13 +389,14 @@ ge::graphStatus BSATiling::CheckQKVDtype(gert::TilingContext* bsaContext)
     auto kDataType = kInputDesc->GetDataType();
     auto vDataType = vInputDesc->GetDataType();
 
-    if (socVer_ == SOC_VER_950_CODE) {
+    if (isA5_ || isA6_) {
         if (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16 && dataType_ != ge::DT_FLOAT8_E4M3FN &&
             dataType_ != ge::DT_FLOAT4_E2M1 && dataType_ != ge::DT_HIFLOAT8) {
-            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(
-                bsaContext->GetNodeName(), "query/key/value", DataTypeToString(dataType_).c_str(),
-                "on chip 950 the supported dtypes of query/key/value are float16, bfloat16, float8_e4m3fn, "
-                "float4_e2m1 and hifloat8");
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(bsaContext->GetNodeName(), "query/key/value",
+                                                  DataTypeToString(dataType_).c_str(),
+                                                  "on Ascend950/Ascend960DT the supported dtypes of query/key/value "
+                                                  "are float16, bfloat16, float8_e4m3fn, "
+                                                  "float4_e2m1 and hifloat8");
             return ge::GRAPH_FAILED;
         }
     } else {
@@ -485,11 +447,11 @@ ge::graphStatus BSATiling::CheckQKVDimVal(gert::TilingContext* bsaContext, uint3
             "key/value must have consistent headNum with each other and with attr numKeyValueHeads");
         return ge::GRAPH_FAILED;
     }
-    if (numHeads_ % kvHeads_ != 0) {
+    if (numHeads_ < kvHeads_ || numHeads_ % kvHeads_ != 0) {
         OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
             bsaContext->GetNodeName(), "numHeads and numKeyValueHeads",
             ("numHeads=" + std::to_string(numHeads_) + ", kvHeads=" + std::to_string(kvHeads_)).c_str(),
-            "the query headNum must be a multiple of the key/value headNum");
+            "the query headNum must be greater than or equal to and a multiple of the key/value headNum");
         return ge::GRAPH_FAILED;
     }
     // temporary regulations of D
@@ -698,7 +660,7 @@ ge::graphStatus BSATiling::ParseRequiredTensors(gert::TilingContext* bsaContext)
         ret = ParseQKVInBSND(bsaContext);
     }
 
-    if (socVer_ == SOC_VER_950_CODE) {
+    if (isA5_ || isA6_) {
         if (CheckAttentionOutDtype(bsaContext) != GRAPH_SUCCESS) {
             return ge::GRAPH_FAILED;
         }
@@ -731,11 +693,34 @@ ge::graphStatus BSATiling::ParseSeqlensInTND(gert::TilingContext* bsaContext)
     }
     qSeqLenList_ = actualSeqLengths->GetData<int64_t>();
     kvSeqLenList_ = actualSeqLengthsKv->GetData<int64_t>();
-    btKvTokens_ = 0; // [TND mxfp4] 重置(防御复用), 累加 sum_b CeilDiv(S2_b, 64) 供 V-scale TND 校验
+    int64_t remainingQ = totalTokensT_;
+    int64_t remainingKv = totalTokensKv_;
+    btKvTokens_ = 0;
     for (uint32_t bIdx = 0; bIdx < batch_; bIdx++) {
-        maxQSeqlen_ = (qSeqLenList_[bIdx] > maxQSeqlen_) ? qSeqLenList_[bIdx] : maxQSeqlen_;
-        maxKvSeqlen_ = (kvSeqLenList_[bIdx] > maxKvSeqlen_) ? kvSeqLenList_[bIdx] : maxKvSeqlen_;
-        btKvTokens_ += static_cast<uint32_t>((kvSeqLenList_[bIdx] + NUM_64 - 1) / NUM_64); // CeilDiv(S2_b, 64)
+        const int64_t qLen = qSeqLenList_[bIdx];
+        const int64_t kvLen = kvSeqLenList_[bIdx];
+        if (qLen < 0 || qLen > remainingQ || kvLen < 0 || kvLen > remainingKv ||
+            qLen > std::numeric_limits<uint32_t>::max() || kvLen > std::numeric_limits<uint32_t>::max()) {
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                bsaContext->GetNodeName(), "actualSeqLengths and actualSeqLengthsKv",
+                ("index=" + std::to_string(bIdx) + ", qSeqlen=" + std::to_string(qLen) +
+                 ", kvSeqlen=" + std::to_string(kvLen))
+                    .c_str(),
+                "each length must fit uint32 and the remaining T dimension of its tensor");
+            return ge::GRAPH_FAILED;
+        }
+        remainingQ -= qLen;
+        remainingKv -= kvLen;
+        maxQSeqlen_ = std::max(maxQSeqlen_, static_cast<uint32_t>(qLen));
+        maxKvSeqlen_ = std::max(maxKvSeqlen_, static_cast<uint32_t>(kvLen));
+        btKvTokens_ += kvLen / NUM_64 + (kvLen % NUM_64 != 0);
+    }
+    if (remainingQ != 0 || remainingKv != 0) {
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+            bsaContext->GetNodeName(), "actualSeqLengths and actualSeqLengthsKv",
+            ("remaining Q=" + std::to_string(remainingQ) + ", remaining KV=" + std::to_string(remainingKv)).c_str(),
+            "the sequence lengths must sum to the respective T dimensions of query and key/value");
+        return ge::GRAPH_FAILED;
     }
     maxEffectiveQSeqlen_ = maxQSeqlen_;
     maxEffectiveKvSeqlen_ = maxKvSeqlen_;
@@ -767,24 +752,23 @@ ge::graphStatus BSATiling::ParseSeqlensInNonTND(gert::TilingContext* bsaContext)
         maxEffectiveKvSeqlen_ = 0;
         // 校验BNSD/BSND格式时，每个batch的actualSeqLength须小于等于maxSeqLength
         for (uint32_t i = 0; i < batch_; i++) {
-            if (qSeqLenList_[i] > maxQSeqlen_) {
+            if (qSeqLenList_[i] < 0 || qSeqLenList_[i] > maxQSeqlen_) {
                 OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
                     bsaContext->GetNodeName(), "actualSeqLengths and query",
                     ("the value at index " + std::to_string(i) + " of the actualSeqLengths is " +
                      std::to_string(qSeqLenList_[i]) + ", maxSeqLength in query is " + std::to_string(maxQSeqlen_))
                         .c_str(),
-                    "the actualSeqLength of each batch must be less than or equal to the maxSeqLength of query");
+                    "the actualSeqLength of each batch must be in [0, maxSeqLength of query]");
                 return ge::GRAPH_FAILED;
             }
-            if (kvSeqLenList_[i] > maxKvSeqlen_) {
+            if (kvSeqLenList_[i] < 0 || kvSeqLenList_[i] > maxKvSeqlen_) {
                 OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
                     bsaContext->GetNodeName(), "actualSeqLengthsKv and key/value",
                     ("the value at index " + std::to_string(i) + " of the actualSeqLengthsKv is " +
                      std::to_string(kvSeqLenList_[i]) + ", maxSeqLengthKv in key/value is " +
                      std::to_string(maxKvSeqlen_))
                         .c_str(),
-                    "the actualSeqLengthKv of each batch must be less than or equal to the maxSeqLengthKv of "
-                    "key/value");
+                    "the actualSeqLengthKv of each batch must be in [0, maxSeqLengthKv of key/value]");
                 return ge::GRAPH_FAILED;
             }
             maxEffectiveQSeqlen_ = (qSeqLenList_[i] > maxEffectiveQSeqlen_) ? qSeqLenList_[i] : maxEffectiveQSeqlen_;
@@ -818,17 +802,26 @@ ge::graphStatus BSATiling::ParseSeqlens(gert::TilingContext* bsaContext)
     } else if (qInputLayout_ == BSAQInputLayout::BNSD_Q || qInputLayout_ == BSAQInputLayout::BSND_Q) {
         ret = ParseSeqlensInNonTND(bsaContext);
     }
+    if (ret == ge::GRAPH_SUCCESS && batch_ == 0) {
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(bsaContext->GetNodeName(), "query", "batch=0",
+                                               "the batch size must be greater than 0");
+        return ge::GRAPH_FAILED;
+    }
     return ret;
 }
 
 ge::graphStatus BSATiling::CheckSparsePattern(gert::TilingContext* bsaContext, const int64_t defaultShape)
 {
     const auto* blockSparseMaskShape = bsaContext->GetOptionalInputShape(BLOCK_SPARSE_MASK_INDEX);
-    if (blockShapeX_ <= 0 || blockShapeY_ <= 0) {
+    // Arch22 GetQBlocks consumes signed X. Arch35 stores both dimensions as uint32.
+    const int64_t maxBlockX = (isA5_ || isA6_) ? static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) :
+                                                 std::numeric_limits<int32_t>::max();
+    if (blockShapeX_ <= 0 || blockShapeX_ > maxBlockX || blockShapeY_ <= 0 ||
+        blockShapeY_ > std::numeric_limits<uint32_t>::max()) {
         OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
             bsaContext->GetNodeName(), "blockShape",
             ("elem0=" + std::to_string(blockShapeX_) + ", elem1=" + std::to_string(blockShapeY_)).c_str(),
-            "the elems of blockShape must be greater than 0");
+            "both block dimensions must be positive and representable on the current platform");
         return ge::GRAPH_FAILED;
     }
     // Only blockShapeY requires alignment (A950: 16; A910/A910B: 128). blockShapeX has no align constraint.
@@ -870,8 +863,8 @@ ge::graphStatus BSATiling::CheckSparsePattern(gert::TilingContext* bsaContext, c
         return ge::GRAPH_FAILED;
     }
 
-    uint32_t expectedMaxQBlockNum = CeilDiv(maxEffectiveQSeqlen_, blockShapeX_);
-    uint32_t expectedMaxKVBlockNum = CeilDiv(maxEffectiveKvSeqlen_, blockShapeY_);
+    uint32_t expectedMaxQBlockNum = (maxEffectiveQSeqlen_ + blockShapeX_ - 1) / blockShapeX_;
+    uint32_t expectedMaxKVBlockNum = (maxEffectiveKvSeqlen_ + blockShapeY_ - 1) / blockShapeY_;
     if (maxQBlockNum_ < expectedMaxQBlockNum || maxKvBlockNum_ < expectedMaxKVBlockNum) {
         OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
             bsaContext->GetNodeName(), "blockSparseMask",
@@ -919,7 +912,7 @@ ge::graphStatus BSATiling::ParseSparsePattern(gert::TilingContext* bsaContext)
             blockShapeY_ = blockShapeList[1];
         }
     }
-    const int64_t defaultShape = (socVer_ == SOC_VER_950_CODE) ? MIN_BLOCK_ALIGN : DEFAULT_BLOCK_SHAPE;
+    const int64_t defaultShape = (isA5_ || isA6_) ? MIN_BLOCK_ALIGN : DEFAULT_BLOCK_SHAPE;
     if (CheckSparsePattern(bsaContext, defaultShape) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
@@ -1116,8 +1109,8 @@ ge::graphStatus BSATiling::ValidateMxfp4DequantScale(gert::TilingContext* bsaCon
     const char* layoutName = isTND ? "TND" : (isBNSD ? "BNSD" : "BSND");
     uint32_t dDiv64 = embeddingSize_ / NUM_64;
 
-    auto checkDim = [&](uint32_t expected, int idx) -> bool {
-        uint32_t actual = static_cast<uint32_t>(storageShape.GetDim(idx));
+    auto checkDim = [&](int64_t expected, int idx) -> bool {
+        int64_t actual = storageShape.GetDim(idx);
         if (actual != expected) {
             std::string scaleName = parameterIndex == Q_DEQUANT_SCALE_INDEX ?
                                         "qDequantScale" :
@@ -1144,9 +1137,9 @@ ge::graphStatus BSATiling::ValidateMxfp4DequantScale(gert::TilingContext* bsaCon
                                                       "(quantMode 2/3/4) the mx TND scale must be 4D");
             return ge::GRAPH_FAILED;
         }
-        uint32_t expDim0, expDim1, expDim2;
+        int64_t expDim0, expDim1, expDim2;
         if (parameterIndex == Q_DEQUANT_SCALE_INDEX) {
-            expDim0 = static_cast<uint32_t>(totalTokensT_);
+            expDim0 = totalTokensT_;
             expDim1 = numHeads_;
             expDim2 = dDiv64;
         } else if (parameterIndex == V_DEQUANT_SCALE_INDEX) {
@@ -1154,7 +1147,7 @@ ge::graphStatus BSATiling::ValidateMxfp4DequantScale(gert::TilingContext* bsaCon
             expDim1 = kvHeads_;
             expDim2 = embeddingSize_;
         } else { // K_DEQUANT_SCALE_INDEX
-            expDim0 = static_cast<uint32_t>(totalTokensKv_);
+            expDim0 = totalTokensKv_;
             expDim1 = kvHeads_;
             expDim2 = dDiv64;
         }
@@ -1219,7 +1212,7 @@ ge::graphStatus BSATiling::ParseOptionalTensors(gert::TilingContext* bsaContext)
         return ge::GRAPH_FAILED;
     }
 
-    if (socVer_ == SOC_VER_950_CODE) {
+    if (isA5_ || isA6_) {
         if (ValidateQDequantScale(bsaContext) != ge::GRAPH_SUCCESS ||
             ValidateKDequantScale(bsaContext) != ge::GRAPH_SUCCESS ||
             ValidateVDequantScale(bsaContext) != ge::GRAPH_SUCCESS) {
@@ -1280,10 +1273,10 @@ ge::graphStatus BSATiling::ParseAttrs(gert::TilingContext* bsaContext)
         return ge::GRAPH_FAILED;
     }
     quantMode_ = static_cast<uint32_t>(quantModeValue);
-    if (IsHif8Quant(quantMode_) && socVer_ != SOC_VER_950_CODE) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(bsaContext->GetNodeName(), "quantMode",
-                                              std::to_string(quantModeValue).c_str(),
-                                              "quantMode 5 (HIF8 per-tensor) is supported only on chip 950");
+    if (IsHif8Quant(quantMode_) && !(isA5_ || isA6_)) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            bsaContext->GetNodeName(), "quantMode", std::to_string(quantModeValue).c_str(),
+            "quantMode 5 (HIF8 per-tensor) is supported only on Ascend950/Ascend960DT");
         return ge::GRAPH_FAILED;
     }
     if (IsHif8Quant(quantMode_) && maskType_ != 0) {
@@ -1308,13 +1301,14 @@ ge::graphStatus BSATiling::ParseAttrs(gert::TilingContext* bsaContext)
     auto qInputDesc = bsaContext->GetInputDesc(QUERY_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(bsaContext, qInputDesc);
     auto dtypeQ = qInputDesc->GetDataType();
-    if (socVer_ == SOC_VER_950_CODE) {
+    if (isA5_ || isA6_) {
         const bool isFp16OrBf16 = dtypeQ == ge::DT_FLOAT16 || dtypeQ == ge::DT_BF16;
         if (isFp16OrBf16 && innerPrecise_ != BsaInnerCalcPrec::LOW_HIGH_MIXED &&
             innerPrecise_ != BsaInnerCalcPrec::ALL_HIGH) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                bsaContext->GetNodeName(), "innerPrecise", std::to_string(innerPrecise_).c_str(),
-                "on chip 950, when query dtype is float16 or bfloat16, only innerPrec = 0 or 4 is supported");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(bsaContext->GetNodeName(), "innerPrecise",
+                                                  std::to_string(innerPrecise_).c_str(),
+                                                  "on Ascend950/Ascend960DT, when query dtype is float16 or bfloat16, "
+                                                  "only innerPrec = 0 or 4 is supported");
             return ge::GRAPH_FAILED;
         } else if (IsHif8Quant(quantMode_)) {
             if (innerPrecise_ != BsaInnerCalcPrec::ALL_HIGH) {
@@ -1324,10 +1318,11 @@ ge::graphStatus BSATiling::ParseAttrs(gert::TilingContext* bsaContext)
                 return ge::GRAPH_FAILED;
             }
         } else if (!isFp16OrBf16 && innerPrecise_ != BsaInnerCalcPrec::LOW_HIGH_MIXED) {
-            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                bsaContext->GetNodeName(), "innerPrecise", std::to_string(innerPrecise_).c_str(),
-                ("on chip 950, when query dtype is " + DataTypeToString(dtypeQ) + ", only innerPrec = 4 is supported")
-                    .c_str());
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(bsaContext->GetNodeName(), "innerPrecise",
+                                                  std::to_string(innerPrecise_).c_str(),
+                                                  ("on Ascend950/Ascend960DT, when query dtype is " +
+                                                   DataTypeToString(dtypeQ) + ", only innerPrec = 4 is supported")
+                                                      .c_str());
             return ge::GRAPH_FAILED;
         }
     } else {
@@ -1464,11 +1459,14 @@ static inline uint32_t CalcFp8KvBaseTile(uint32_t blockShapeY, uint32_t preferre
 void BSATiling::CalcBaseTileTilingParams950()
 {
     if (IsHif8Quant(quantMode_)) {
-        qBaseTile_ = TILE_SIZE_128;
+        // HIF8 materializes 64 Q lanes per AIV, including zero-padded tails.
+        qBaseTile_ = isA6_ ? NUM_64 : TILE_SIZE_128;
         kvBaseTile_ = TILE_SIZE_256;
         return;
     }
-    qBaseTile_ = (blockShapeX_ > TILE_SIZE_128) ? TILE_SIZE_128 : static_cast<uint32_t>(blockShapeX_);
+    // A6 has one AIV per AIC. Keep at most 64 Q rows in its UB.
+    const uint32_t maxQTile = isA6_ ? NUM_64 : TILE_SIZE_128;
+    qBaseTile_ = static_cast<uint32_t>(std::min<int64_t>(blockShapeX_, maxQTile));
     const bool isMixedPrecision = (innerPrecise_ == BsaInnerCalcPrec::LOW_HIGH_MIXED && embeddingSize_ <= D_SIZE_128);
     kvBaseTile_ = isMixedPrecision ? TILE_SIZE_256 : TILE_SIZE_128;
     if (quantMode_ == MXFP8_OCP_QUANT) {
@@ -1495,6 +1493,15 @@ void BSATiling::TransposedMatmulConfig950()
 void BSATiling::CalcSplitCoreTilingParams950()
 {
     CalcBaseTileTilingParams950();
+    if (isA6_ && maxEffectiveQSeqlen_ == 0) {
+        // 没有有效 Q 行时用单核启动，省去 mask 工作区。
+        blockDim_ = 1;
+        xBlockNumAligned_ = 0;
+        yBlockNumAligned_ = 0;
+        avgRowPerSubCore_ = 0;
+        preActiveSubCoreNum_ = 0;
+        return;
+    }
     for (uint32_t bIdx = 0; bIdx < batch_; bIdx++) {
         int64_t curQSeqlen = useUniformQSeqlen_ ? maxQSeqlen_ : qSeqLenList_[bIdx];
         uint32_t curQSTileNum = GetCurQSTileNum950(curQSeqlen);
@@ -1513,17 +1520,10 @@ void BSATiling::CalcSplitCoreTilingParams950()
     preActiveSubCoreNum_ = (totalRowNumBlockMask + avgRowPerSubCore_ - 1) / avgRowPerSubCore_;
 }
 
-ge::graphStatus BSATiling::CalculateTaskSplit(gert::TilingContext* bsaContext)
+ge::graphStatus BSATiling::CalculateTaskSplit()
 {
     // 计算总的Q块数量和最大KV块数量
     totalQBlocks_ = 0;
-
-    if (batch_ == 0) {
-        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
-            bsaContext->GetNodeName(), "query", "batch=0",
-            "the batch of query must be greater than 0, otherwise the task split cannot be calculated");
-        return ge::GRAPH_FAILED;
-    }
 
     // 根据useUniformQSeqlen_标志位决定分核时使用actualSeqLengths数组还是maxQSeqlen_
     uint32_t groupSize = numHeads_ / kvHeads_;
@@ -1751,7 +1751,8 @@ uint64_t BSATiling::GenerateTilingKey(gert::TilingContext* bsaContext)
      * - 位8-10:  PagedCache Flag（千万位）  0=NoCache, 1=WithCache
      * - 位11-13: KV Layout（十亿位）   30=TND, 50=BNSD, 60=BSND
      * - 位14-15: Data Type（百亿位）  00=FP16, 22=BF16
-     * - 位16-18: Operator Category（千万亿位） 900=BlockSparseAttention910, 905=BlockSparseAttention950
+     * - 位16-18: Operator Category（千万亿位） 900=BlockSparseAttention910, 905=BlockSparseAttention950,
+     * 906=BlockSparseAttention960DT
      *
      * 示例：
      * - FP16, TND, TND, NoCache, Half, NoMask = 9000000030100002
@@ -1759,8 +1760,10 @@ uint64_t BSATiling::GenerateTilingKey(gert::TilingContext* bsaContext)
      */
 
     uint64_t tilingKey = 9000000000000000ULL; // BSA基础值（Operator Category = 900）
-    if (socVer_ == SOC_VER_950_CODE) {
+    if (isA5_) {
         tilingKey = 9050000000000000ULL;
+    } else if (isA6_) {
+        tilingKey = 9060000000000000ULL;
     }
 
     // [位14-15] Data Type（百亿位）
@@ -1866,7 +1869,7 @@ ge::graphStatus BSATiling::GetBsaTiling(gert::TilingContext* bsaContext, BlockSp
     if (ret != ge::GRAPH_SUCCESS) {
         return ret;
     }
-    if (socVer_ == SOC_VER_950_CODE) {
+    if (isA5_ || isA6_) {
         ret = CheckNDFormat(bsaContext);
         if (ret != ge::GRAPH_SUCCESS) {
             return ret;
@@ -1880,19 +1883,14 @@ ge::graphStatus BSATiling::GetBsaTiling(gert::TilingContext* bsaContext, BlockSp
     }
     // scaleValue归一化依赖embeddingSize_，须在解析链完成后调用
     NormalizeScaleValue(bsaContext);
-    // 校验TND格式下qseqlen和kvseqlen之和是否分别等于Q和KV的T
-    ret = ValidateTNDSeqlenSum(bsaContext);
-    if (ret != ge::GRAPH_SUCCESS) {
-        return ret;
-    }
 
-    if (socVer_ == SOC_VER_950_CODE) {
+    if (isA5_ || isA6_) {
         CalcSplitCoreTilingParams950();
         CalcMatmulPhaseL1TileInfo950();
         TransposedMatmulConfig950();
         CalcWorkspaceTilingParams950(bsaContext);
     } else {
-        ret = CalculateTaskSplit(bsaContext);
+        ret = CalculateTaskSplit();
         if (ret != ge::GRAPH_SUCCESS) {
             return ret;
         }

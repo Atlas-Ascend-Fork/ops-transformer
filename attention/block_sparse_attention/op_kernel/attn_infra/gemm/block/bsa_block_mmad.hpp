@@ -17,7 +17,7 @@
 
 namespace NpuArch::Gemm::Block {
 
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
 template <class DispatchPolicy, class L1TileShape, class L0TileShape, class AType, class BType, class CType,
           class BiasType = void,
           class TileCopy = Gemm::Tile::TileCopy<typename DispatchPolicy::ArchTag, AType, BType, CType, BiasType>,
@@ -27,7 +27,7 @@ struct BlockMmad {
 };
 #endif
 
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35) || defined(BSA_ARCH_92)
 template <class DispatchPolicy, class L1TileShape, class L0TileShape, class ElementA, class ElementB, class ElementC,
           class ElementBias = void,
           class TileCopy =
@@ -41,11 +41,22 @@ struct BlockMmadTla {
 #endif
 
 } // namespace NpuArch::Gemm::Block
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
 #include "../../../attn_infra/gemm/block/bsa_block_mmad_qk.hpp"
 #include "../../../attn_infra/gemm/block/bsa_block_mmad_pv.hpp"
 #endif
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_92)
+#include "../bsa_gemm_dispatch_policy_arch92.hpp"
+#include "bsa_block_mmad_pv_arch92_ABf16_C_to_UB.hpp"
+#include "bsa_block_mmad_qk_arch92_ABf16_C_to_UB.hpp"
+#include "block_mmad_k_qt_st_arch92.hpp"
+#include "block_mmad_qk_arch92_mxfp4.hpp"
+#include "block_mmad_pv_arch92_mxfp4.hpp"
+#include "block_mmad_qk_arch92_mxfp8.hpp"
+#include "block_mmad_pv_arch92_mxfp8.hpp"
+#include "block_mmad_k_qt_st_arch92_fp8.hpp"
+#include "block_mmad_pv_arch92_ABf16_C_to_UB_fp8.hpp"
+#elif defined(BSA_ARCH_35)
 #include "../../../attn_infra/gemm/block/bsa_block_mmad_pv_arch35_ABf16_C_to_UB.hpp"
 #include "../../../attn_infra/gemm/block/bsa_block_mmad_qk_arch35_ABf16_C_to_UB.hpp"
 #include "../../../attn_infra/gemm/block/block_mmad_k_qt_st_arch35.hpp"

@@ -30,160 +30,161 @@ protected:
     AscendC::LocalTensor<uint8_t> tensor;
 };
 
-template <class ArchTag, AscendC::TPosition Position>
+template <class ArchTag, AscendC::TPosition Position,
+          bool DirectAddress = std::is_same_v<ArchTag, AtlasA5> || std::is_same_v<ArchTag, Ascend960DT>>
 struct LocalTensorBuffer {
     static_assert(DEPENDENT_FALSE<ArchTag>, "Unsupported local tensor buffer, can not find the specialization.");
 };
 
 /// Partial specialization for TPosition::A1
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::A1> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::A1, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::A1;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::A1, 0, Arch::AtlasA5::L1_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::A1, 0, ArchTag::L1_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::A2
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::A2> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::A2, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::A2;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::A2, 0, Arch::AtlasA5::L0A_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::A2, 0, ArchTag::L0A_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::B1
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::B1> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::B1, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::B1;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::B1, 0, Arch::AtlasA5::L1_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::B1, 0, ArchTag::L1_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::B2
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::B2> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::B2, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::B2;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::B2, 0, Arch::AtlasA5::L0B_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::B2, 0, ArchTag::L0B_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::C1
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::C1> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::C1, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::C1;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::C1, 0, Arch::AtlasA5::L1_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::C1, 0, ArchTag::L1_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::C2
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::C2> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::C2, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::C2;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::C2, 0, Arch::AtlasA5::BIAS_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::C2, 0, ArchTag::BIAS_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::CO1
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::CO1> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::CO1, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::CO1;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::CO1, 0, Arch::AtlasA5::L0C_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::CO1, 0, ArchTag::L0C_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::C2PIPE2GM
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::C2PIPE2GM> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::C2PIPE2GM, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::C2PIPE2GM;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::C2PIPE2GM, 0, Arch::AtlasA5::FIXBUF_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::C2PIPE2GM, 0, ArchTag::FIXBUF_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::VECIN
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::VECIN> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::VECIN, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::VECIN;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::VECIN, 0, Arch::AtlasA5::UB_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::VECIN, 0, ArchTag::UB_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::VECOUT
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::VECOUT> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::VECOUT, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::VECOUT;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::VECOUT, 0, Arch::AtlasA5::UB_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::VECOUT, 0, ArchTag::UB_SIZE);
     }
 };
 
 ///////////////////////////////////////////////////////////
 
 /// Partial specialization for TPosition::VECCALC
-template <>
-struct LocalTensorBuffer<Arch::AtlasA5, AscendC::TPosition::VECCALC> : LocalTensorBufferBase {
+template <class ArchTag>
+struct LocalTensorBuffer<ArchTag, AscendC::TPosition::VECCALC, true> : LocalTensorBufferBase {
 public:
     static constexpr AscendC::TPosition Position = AscendC::TPosition::VECCALC;
 
     __aicore__ inline LocalTensorBuffer()
     {
-        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::VECCALC, 0, Arch::AtlasA5::UB_SIZE);
+        tensor = AscendC::LocalTensor<uint8_t>(AscendC::TPosition::VECCALC, 0, ArchTag::UB_SIZE);
     }
 };
 

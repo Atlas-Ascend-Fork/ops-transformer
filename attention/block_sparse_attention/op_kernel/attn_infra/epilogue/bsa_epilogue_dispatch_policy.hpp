@@ -46,49 +46,55 @@ struct EpilogueAtlasA2RescaleO {
     static constexpr LseMode LSE_MODE = LSE_MODE_;
 };
 
-// For AtlasA5
-struct EpilogueBsaMask2Idx {
+template <typename ArchTag_>
+struct EpilogueBsaMask2IdxPolicy {
     static constexpr uint32_t IO_STAGES = 2;
-    using ArchTag = Arch::AtlasA5;
+    using ArchTag = ArchTag_;
 };
 
-template <bool transposedMm1_ = false>
+using EpilogueBsaMask2Idx = EpilogueBsaMask2IdxPolicy<Arch::AtlasA5>;
+
+template <bool transposedMm1_ = false, typename ArchTag_ = Arch::AtlasA5>
 struct EpilogueOnlineSoftmaxBsa {
-    using ArchTag = Arch::AtlasA5;
+    using ArchTag = ArchTag_;
     static constexpr bool transposedMm1 = transposedMm1_;
 };
 
-template <bool transposedMm1_ = false, bool zNOnlineSoftmax_ = false>
+template <bool transposedMm1_ = false, bool zNOnlineSoftmax_ = false, typename ArchTag_ = Arch::AtlasA5>
 struct EpilogueB8FullQuantOnlineSoftmaxBsa {
-    using ArchTag = Arch::AtlasA5;
+    using ArchTag = ArchTag_;
     static constexpr bool transposedMm1 = transposedMm1_;
     static constexpr bool zNOnlineSoftmax = zNOnlineSoftmax_;
 };
 
-template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE,
+          typename ArchTag_ = Arch::AtlasA5>
 struct EpilogueOnlineSoftmaxBsaMX {
-    using ArchTag = Arch::AtlasA5;
+    using ArchTag = ArchTag_;
     static constexpr bool transposedMm1 = transposedMm1_;
     static constexpr MXQuantMode MX_QUANT_MODE = MX_QUANT_MODE_;
 };
 
-template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE,
+          typename ArchTag_ = Arch::AtlasA5>
 struct EpilogueOnlineSoftmaxBsaMxfp8 {
-    using ArchTag = Arch::AtlasA5;
+    using ArchTag = ArchTag_;
     static constexpr bool transposedMm1 = transposedMm1_;
     static constexpr MXQuantMode MX_QUANT_MODE = MX_QUANT_MODE_;
 };
 
-template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE,
+          typename ArchTag_ = Arch::AtlasA5>
 struct EpilogueComputePScaleBsaMX {
-    using ArchTag = Arch::AtlasA5;
+    using ArchTag = ArchTag_;
     static constexpr bool transposedMm1 = transposedMm1_;
     static constexpr MXQuantMode MX_QUANT_MODE = MX_QUANT_MODE_;
 };
 
-template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE,
+          typename ArchTag_ = Arch::AtlasA5>
 struct EpilogueComputePScaleBsaMxfp8 {
-    using ArchTag = Arch::AtlasA5;
+    using ArchTag = ArchTag_;
     static constexpr bool transposedMm1 = transposedMm1_;
     static constexpr MXQuantMode MX_QUANT_MODE = MX_QUANT_MODE_;
 };
@@ -102,30 +108,85 @@ struct EpilogueCopyGlobalMaxUbToL1BsaMxfp8 {
 };
 
 template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false,
-          bool zNOnlineSoftmax_ = false>
-struct EpilogueAtlasA5BsaRescaleO {
-    using ArchTag = Arch::AtlasA5;
+          bool zNOnlineSoftmax_ = false, typename ArchTag_ = Arch::AtlasA5>
+struct EpilogueBsaRescaleO {
+    using ArchTag = ArchTag_;
     static constexpr LseMode LSE_MODE = LSE_MODE_;
     static constexpr LseFormat LSE_FORMAT = LSE_FORMAT_;
     static constexpr bool transposedMm1 = transposedMm1_;
     static constexpr bool zNOnlineSoftmax = zNOnlineSoftmax_;
 };
 
-template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false>
-struct EpilogueAtlasA5BsaRescaleOMX {
-    using ArchTag = Arch::AtlasA5;
+template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false,
+          bool zNOnlineSoftmax_ = false>
+using EpilogueAtlasA5BsaRescaleO =
+    EpilogueBsaRescaleO<LSE_MODE_, LSE_FORMAT_, transposedMm1_, zNOnlineSoftmax_, Arch::AtlasA5>;
+
+template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false,
+          typename ArchTag_ = Arch::AtlasA5>
+struct EpilogueBsaRescaleOMX {
+    using ArchTag = ArchTag_;
     static constexpr LseMode LSE_MODE = LSE_MODE_;
     static constexpr LseFormat LSE_FORMAT = LSE_FORMAT_;
     static constexpr bool transposedMm1 = transposedMm1_;
 };
 
 template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false>
-struct EpilogueAtlasA5BsaRescaleOMxfp8 {
-    using ArchTag = Arch::AtlasA5;
+using EpilogueAtlasA5BsaRescaleOMX = EpilogueBsaRescaleOMX<LSE_MODE_, LSE_FORMAT_, transposedMm1_, Arch::AtlasA5>;
+
+template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false,
+          typename ArchTag_ = Arch::AtlasA5>
+struct EpilogueBsaRescaleOMxfp8 {
+    using ArchTag = ArchTag_;
     static constexpr LseMode LSE_MODE = LSE_MODE_;
     static constexpr LseFormat LSE_FORMAT = LSE_FORMAT_;
     static constexpr bool transposedMm1 = transposedMm1_;
 };
+
+template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false>
+using EpilogueAtlasA5BsaRescaleOMxfp8 = EpilogueBsaRescaleOMxfp8<LSE_MODE_, LSE_FORMAT_, transposedMm1_, Arch::AtlasA5>;
+
+namespace Arch92 {
+
+using EpilogueBsaMask2Idx = EpilogueBsaMask2IdxPolicy<Arch::Ascend960DT>;
+
+template <bool transposedMm1_ = false>
+using EpilogueOnlineSoftmaxBsa = Epilogue::EpilogueOnlineSoftmaxBsa<transposedMm1_, Arch::Ascend960DT>;
+
+template <bool transposedMm1_ = false, bool zNOnlineSoftmax_ = false>
+using EpilogueB8FullQuantOnlineSoftmaxBsa =
+    Epilogue::EpilogueB8FullQuantOnlineSoftmaxBsa<transposedMm1_, zNOnlineSoftmax_, Arch::Ascend960DT>;
+
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+using EpilogueOnlineSoftmaxBsaMX =
+    Epilogue::EpilogueOnlineSoftmaxBsaMX<transposedMm1_, MX_QUANT_MODE_, Arch::Ascend960DT>;
+
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+using EpilogueOnlineSoftmaxBsaMxfp8 =
+    Epilogue::EpilogueOnlineSoftmaxBsaMxfp8<transposedMm1_, MX_QUANT_MODE_, Arch::Ascend960DT>;
+
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+using EpilogueComputePScaleBsaMX =
+    Epilogue::EpilogueComputePScaleBsaMX<transposedMm1_, MX_QUANT_MODE_, Arch::Ascend960DT>;
+
+template <bool transposedMm1_ = false, MXQuantMode MX_QUANT_MODE_ = MXQuantMode::NONE>
+using EpilogueComputePScaleBsaMxfp8 =
+    Epilogue::EpilogueComputePScaleBsaMxfp8<transposedMm1_, MX_QUANT_MODE_, Arch::Ascend960DT>;
+
+template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false,
+          bool zNOnlineSoftmax_ = false>
+using EpilogueBsaRescaleO =
+    Epilogue::EpilogueBsaRescaleO<LSE_MODE_, LSE_FORMAT_, transposedMm1_, zNOnlineSoftmax_, Arch::Ascend960DT>;
+
+template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false>
+using EpilogueBsaRescaleOMX =
+    Epilogue::EpilogueBsaRescaleOMX<LSE_MODE_, LSE_FORMAT_, transposedMm1_, Arch::Ascend960DT>;
+
+template <LseMode LSE_MODE_ = LseMode::NONE, LseFormat LSE_FORMAT_ = LseFormat::BNS1, bool transposedMm1_ = false>
+using EpilogueBsaRescaleOMxfp8 =
+    Epilogue::EpilogueBsaRescaleOMxfp8<LSE_MODE_, LSE_FORMAT_, transposedMm1_, Arch::Ascend960DT>;
+
+} // namespace Arch92
 
 } // namespace NpuArch::Epilogue
 

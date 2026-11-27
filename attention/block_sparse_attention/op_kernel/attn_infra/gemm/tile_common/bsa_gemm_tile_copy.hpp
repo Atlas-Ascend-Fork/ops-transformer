@@ -15,13 +15,16 @@
 #include "../../../attn_infra/bsa_base_defs.hpp"
 #include "../../../attn_infra/detail/bsa_tag_to_layout.hpp"
 #include "../../../tla/tensor_bsa.hpp"
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_92)
+#include "bsa_copy_gemm_inputs_a6.hpp"
+#include "bsa_copy_l0c_to_ub_a6.hpp"
+#elif defined(BSA_ARCH_35)
 #include "../../../attn_infra/gemm/tile_common/bsa_copy_gm_to_l1_a5.hpp"
 #include "../../../attn_infra/gemm/tile_common/bsa_copy_l0c_to_ub_a5.hpp"
 #include "../../../attn_infra/gemm/tile_common/bsa_copy_l1_to_l0a_a5.hpp"
 #include "../../../attn_infra/gemm/tile_common/bsa_copy_l1_to_l0b_a5.hpp"
 #endif
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
 #include "../../../attn_infra/gemm/tile_common/bsa_copy_gm_to_l1_a2.hpp"
 #include "../../../attn_infra/gemm/tile_common/bsa_copy_l0c_to_gm_a2.hpp"
 #include "../../../attn_infra/gemm/tile_common/bsa_copy_l1_to_l0a_a2.hpp"
@@ -34,7 +37,7 @@
 
 namespace NpuArch::Gemm::Tile {
 
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
 template <
     /// Tag indicating architecture
     class ArchTag,
@@ -142,7 +145,7 @@ struct PackedTileCopyTla {
     using CopyL0CToDst = Gemm::Tile::CopyL0CToGmTla<ArchTag, TensorL0C, TensorC, DEQUANT_GRANULARITY, ReluEnable>;
 };
 
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35) || defined(BSA_ARCH_92)
 template <
     /// Tag indicating architecture
     class ArchTag, class ElementA_, class LayoutTagA, class ElementB_, class LayoutTagB, class ElementC_,

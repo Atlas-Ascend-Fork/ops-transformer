@@ -13,10 +13,13 @@
  * \brief Block Sparse Attention Interface
  */
 #include "kernel_operator.h"
-#if (__CCE_AICORE__ == 220)
+#include "bsa_kernel_arch.h"
+#if defined(BSA_ARCH_22)
 #include "block_sparse_attention_kernel_regular_arch22.h"
 #endif
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_92)
+#include "arch92/block_sparse_attention_kernel_interface_arch92.hpp"
+#elif defined(BSA_ARCH_35)
 #include "arch35/block_sparse_attention_kernel_arch35_regular.h"
 #include "arch35/block_sparse_attention_kernel_arch35_full_quant.h"
 #include "arch35/block_sparse_attention_kernel_arch35_mxfp4_full_quant.h"
@@ -26,7 +29,7 @@
 
 using namespace NpuArch;
 
-#if (__CCE_AICORE__ == 220)
+#if defined(BSA_ARCH_22)
 namespace BlockSparse {
 template <typename InputDtype = half, typename SoftmaxDtype = float,
           Epilogue::LseMode lseMode = Epilogue::LseMode::NONE,
@@ -103,12 +106,16 @@ __global__ __aicore__ void BlockSparseAttentionInfer(GM_ADDR q, GM_ADDR k, GM_AD
 }
 } // namespace BlockSparse
 #endif
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35)
 
 using namespace BsaKernelArch35;
 
+template <bool transposedMm1>
+constexpr auto A5_QK_COPY_MODE =
+    transposedMm1 ? Gemm::Tile::CopyL0CToUBMode::SPLIT_N : Gemm::Tile::CopyL0CToUBMode::NO_SPLIT;
+
 template <class InDtype, class SMDtype, class REDtype, Format qFormat, Format kvFormat, Epilogue::LseMode lseMode,
-          Epilogue::LseFormat lseFormat, Gemm::Tile::CopyL0CToUBMode mm1L0C2UBMode, bool transposedMm1>
+          Epilogue::LseFormat lseFormat, bool transposedMm1>
 __global__ __aicore__ void BsaInferIntfRegular(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR mask, GM_ADDR blockTables,
                                                GM_ADDR o, GM_ADDR actualQseqlen, GM_ADDR actualKvseqlen,
                                                GM_ADDR blockSparseMask, GM_ADDR workspace, GM_ADDR lse, GM_ADDR tiling)
@@ -145,8 +152,9 @@ __global__ __aicore__ void BsaInferIntfRegular(GM_ADDR q, GM_ADDR k, GM_ADDR v, 
     using L1TileShapeQK = Shape<Int<128>, Int<128>, Int<128>>;
     using L0TileShapeQK = Shape<Int<128>, Int<128>, Int<128>>;
     using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQK<transposedMm1, false>;
-    using TileCopyQK = Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, layout::RowMajor, ElementK,
-                                                         layout::ColumnMajor, ElementS, LayoutS, void, mm1L0C2UBMode>;
+    using TileCopyQK =
+        Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, layout::RowMajor, ElementK, layout::ColumnMajor, ElementS,
+                                          LayoutS, void, A5_QK_COPY_MODE<transposedMm1>>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, ElementQ, ElementK,
                                                   ElementS, void, TileCopyQK>;
     // online softmax
@@ -360,7 +368,7 @@ __global__ __aicore__ void BsaInferIntfB8FullQuantOpt(GM_ADDR query, GM_ADDR key
 
 template <class InDtype, class SMDtype, class REDtype, class Otype, Format qFormat, Format kvFormat,
           Epilogue::LseMode lseMode, Epilogue::LseFormat lseFormat, Epilogue::MXQuantMode mxQuantMode,
-          Gemm::Tile::CopyL0CToUBMode mm1L0C2UBMode, bool transposedMm1>
+          bool transposedMm1>
 __global__ __aicore__ void BsaInferInterfaceMXFP4FullQuant(
     GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR blockSparseMask, GM_ADDR attenMask, GM_ADDR blockTable,
     GM_ADDR actualSeqLengths, GM_ADDR actualSeqLengthsKv, GM_ADDR qDequantScale, GM_ADDR kDequantScale,
@@ -406,7 +414,8 @@ __global__ __aicore__ void BsaInferInterfaceMXFP4FullQuant(
     using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQKMX<transposedMm1>;
     using TileCopyQK =
         Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, layout::RowMajor, ElementK, layout::ColumnMajor, ElementS,
-                                          LayoutS, void, mm1L0C2UBMode, false, Gemm::Tile::ScaleGranularity::PER_GROUP>;
+                                          LayoutS, void, A5_QK_COPY_MODE<transposedMm1>, false,
+                                          Gemm::Tile::ScaleGranularity::PER_GROUP>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, ElementQ, ElementK,
                                                   ElementS, void, TileCopyQK>;
     // online softmax
@@ -468,7 +477,7 @@ __global__ __aicore__ void BsaInferInterfaceMXFP4FullQuant(
 
 template <class InDtype, class SMDtype, class REDtype, class Otype, Format qFormat, Format kvFormat,
           Epilogue::LseMode lseMode, Epilogue::LseFormat lseFormat, Epilogue::MXQuantMode mxQuantMode,
-          Gemm::Tile::CopyL0CToUBMode mm1L0C2UBMode, bool transposedMm1>
+          bool transposedMm1>
 __global__ __aicore__ void BsaInferInterfaceMXFP8FullQuant(
     GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR blockSparseMask, GM_ADDR attenMask, GM_ADDR blockTable,
     GM_ADDR actualSeqLengths, GM_ADDR actualSeqLengthsKv, GM_ADDR qDequantScale, GM_ADDR kDequantScale,
@@ -508,7 +517,8 @@ __global__ __aicore__ void BsaInferInterfaceMXFP8FullQuant(
     using DispatchPolicyQK = Gemm::MmadAtlasA5BsaQKMxfp8<transposedMm1>;
     using TileCopyQK =
         Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, layout::RowMajor, ElementK, layout::ColumnMajor, ElementS,
-                                          LayoutS, void, mm1L0C2UBMode, false, Gemm::Tile::ScaleGranularity::PER_GROUP>;
+                                          LayoutS, void, A5_QK_COPY_MODE<transposedMm1>, false,
+                                          Gemm::Tile::ScaleGranularity::PER_GROUP>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, ElementQ, ElementK,
                                                   ElementS, void, TileCopyQK>;
     using DispatchPolicyOnlineSoftmax = Epilogue::EpilogueOnlineSoftmaxBsaMxfp8<transposedMm1, mxQuantMode>;
@@ -563,8 +573,7 @@ __global__ __aicore__ void BsaInferInterfaceMXFP8FullQuant(
 }
 
 template <class InDtype, class SMDtype, class REDtype, class Otype, Format qFormat, Format kvFormat,
-          Epilogue::LseMode lseMode, Epilogue::LseFormat lseFormat, Gemm::Tile::CopyL0CToUBMode mm1L0C2UBMode,
-          bool transposedMm1>
+          Epilogue::LseMode lseMode, Epilogue::LseFormat lseFormat, bool transposedMm1>
 __global__ __aicore__ void BsaInferInterfaceHIF8FullQuant(
     GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR blockSparseMask, GM_ADDR attenMask, GM_ADDR blockTable,
     GM_ADDR actualSeqLengths, GM_ADDR actualSeqLengthsKv, GM_ADDR qDequantScale, GM_ADDR kDequantScale,
@@ -608,9 +617,9 @@ __global__ __aicore__ void BsaInferInterfaceHIF8FullQuant(
     // base block instead of two). With NO_QUANT the dequant moves to the vector
     // side of the two epilogues and the fixpipe keeps dualDstCtl=2, matching QFA
     // HIF8 and the FP16 path.
-    using TileCopyQK =
-        Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, LayoutQ, ElementK, LayoutK, ElementS, LayoutS, void,
-                                          mm1L0C2UBMode, false, Gemm::Tile::ScaleGranularity::NO_QUANT>;
+    using TileCopyQK = Gemm::Tile::PackedTileCopyTlaToUB<ArchTag, ElementQ, LayoutQ, ElementK, LayoutK, ElementS,
+                                                         LayoutS, void, A5_QK_COPY_MODE<transposedMm1>, false,
+                                                         Gemm::Tile::ScaleGranularity::NO_QUANT>;
     using BlockMmadQK = Gemm::Block::BlockMmadTla<DispatchPolicyQK, L1TileShapeQK, L0TileShapeQK, ElementQ, ElementK,
                                                   ElementS, void, TileCopyQK>;
 

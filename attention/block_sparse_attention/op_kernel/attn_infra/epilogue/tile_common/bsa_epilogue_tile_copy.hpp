@@ -16,8 +16,12 @@
 #include "../../../attn_infra/detail/bsa_tag_to_layout.hpp"
 #include "../../../attn_infra/epilogue/tile_common/bsa_epilogue_copy_gm_to_ub.hpp"
 #include "../../../attn_infra/epilogue/tile_common/bsa_epilogue_copy_ub_to_gm.hpp"
+#if defined(BSA_ARCH_92)
+#include "bsa_copy_gm_ub_a6.hpp"
+#else
 #include "../../../attn_infra/epilogue/tile_common/bsa_copy_gm_to_ub_tla.hpp"
 #include "../../../attn_infra/epilogue/tile_common/bsa_copy_ub_to_gm_tla.hpp"
+#endif
 #include "../../../tla/tensor_bsa.hpp"
 
 namespace NpuArch::Epilogue::Tile {

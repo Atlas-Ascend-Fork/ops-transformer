@@ -104,7 +104,7 @@ struct ElementAccumulatorSelector<bfloat16_t, bfloat16_t> {
     using ElementAccumulator = float;
 };
 
-#if (__CCE_AICORE__ == 310)
+#if defined(BSA_ARCH_35) || defined(BSA_ARCH_92)
 template <>
 struct ElementAccumulatorSelector<float8_e4m3_t, float8_e4m3_t> {
     using ElementAccumulator = float;
@@ -244,6 +244,11 @@ struct L0ALayoutSelector<Arch::AtlasA2> {
 
 template <>
 struct L0ALayoutSelector<Arch::AtlasA5> {
+    using Layout = layout::zN;
+};
+
+template <>
+struct L0ALayoutSelector<Arch::Ascend960DT> {
     using Layout = layout::zN;
 };
 
