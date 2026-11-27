@@ -617,17 +617,17 @@ aclnnStatus CreateArgs(const ArgScenario &scenario, ArgContext &context)
     context.numHeadsQ = 1;
     context.numHeadsK = 1;
     context.headDim = 128;
-    context.topk = 0;
-    context.quantMode = 2; // 2: per-token-head / 3: group-scaling
+    context.topk = 512;
+    context.quantMode = 2;
     ret = CreateTensor(aclDataType::ACL_INT32, { QLI_V2_METADATA_TOTAL_SIZE }, context.metadata);     // 1024: Fix size
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create meta failed. Error: %d", ret);
 
-    context.maskMode = 0;                   // 0: no mask, 3: causal
-    context.cmpRatio = 1;                   // [1, 128], 1: no compress
+    context.maskMode = 0;
+    context.cmpRatio = 1;
     context.layoutQOptional = (char *)malloc(sizeof(char) * 16);
     context.layoutKOptional = (char *)malloc(sizeof(char) * 16);
-    strcpy(context.layoutQOptional, "BSND");                // BSND,TND
-    strcpy(context.layoutKOptional, "BSND");                // BSND,TND,PA_BBND
+    strcpy(context.layoutQOptional, "BSND");
+    strcpy(context.layoutKOptional, "BSND");
 
     if (!scenario.hasCuSeq && !scenario.hasSeqused) {
         context.batchSize = batchSize;
