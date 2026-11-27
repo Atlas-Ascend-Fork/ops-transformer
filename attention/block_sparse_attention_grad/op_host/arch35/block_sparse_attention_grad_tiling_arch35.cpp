@@ -15,6 +15,7 @@
 #include "tiling/platform/platform_ascendc.h"
 #include "../block_sparse_attention_grad_tiling.h"
 #include <algorithm>
+#include <string>
 #include "non_zero_tiling_arch35.h"
 
 namespace optiling {
@@ -161,8 +162,10 @@ protected:
         isHif8_ = quantMode == 5;
         if ((isHif8_ && dataType_ != ge::DT_HIFLOAT8) ||
             (!isHif8_ && dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16)) {
-            OP_LOGE(context_->GetNodeName(),
-                    "quantMode/dtype mismatch: mode 0 requires FP16/BF16, mode 5 requires HiF8.");
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "query",
+                                                  Ops::Base::ToString(dataType_).c_str(),
+                                                  isHif8_ ? "query must be HiF8 when quantMode is 5." :
+                                                            "query must be FP16 or BF16 when quantMode is 0.");
             return ge::GRAPH_FAILED;
         }
         if (isHif8_) {
@@ -186,9 +189,25 @@ protected:
                 auto scaleDesc = context_->GetOptionalInputDesc(index);
                 auto scaleShape = context_->GetOptionalInputShape(index);
                 const char* scaleName = SCALE_NAMES[index - SCALE_BEGIN_INDEX];
-                if (scaleDesc == nullptr || scaleShape == nullptr || scaleDesc->GetDataType() != ge::DT_FLOAT ||
-                    scaleShape->GetStorageShape().GetDimNum() != 1 || scaleShape->GetStorageShape().GetDim(0) != 1) {
-                    OP_LOGE(context_->GetNodeName(), "%s must be a FLOAT32 tensor with shape [1].", scaleName);
+                if (scaleDesc == nullptr || scaleShape == nullptr) {
+                    OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context_->GetNodeName(), scaleName,
+                                                             "The scale input is required when quantMode is 5.");
+                    return ge::GRAPH_FAILED;
+                }
+                if (scaleDesc->GetDataType() != ge::DT_FLOAT) {
+                    OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), scaleName,
+                                                          Ops::Base::ToString(scaleDesc->GetDataType()).c_str(),
+                                                          "The scale input must be FLOAT32 when quantMode is 5.");
+                    return ge::GRAPH_FAILED;
+                }
+                const auto& scaleStorageShape = scaleShape->GetStorageShape();
+                if (scaleStorageShape.GetDimNum() != 1 || scaleStorageShape.GetDim(0) != 1) {
+                    std::string actualShape = "rank " + std::to_string(scaleStorageShape.GetDimNum());
+                    if (scaleStorageShape.GetDimNum() == 1) {
+                        actualShape = "[" + std::to_string(scaleStorageShape.GetDim(0)) + "]";
+                    }
+                    OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context_->GetNodeName(), scaleName, actualShape.c_str(),
+                                                          "The scale input must have shape [1] when quantMode is 5.");
                     return ge::GRAPH_FAILED;
                 }
             }
