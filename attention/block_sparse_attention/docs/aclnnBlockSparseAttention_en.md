@@ -25,9 +25,9 @@
 
 ## Function
 
-- **Description**: BlockSparseAttention performs sparse attention computation, supporting flexible block-level sparse patterns. It uses BlockSparseMask to specify the KV blocks selected for each Q block, enabling efficient sparse attention computation.
+- **Description**: BlockSparseAttention performs sparse attention computation, supporting flexible block-level sparse patterns. It uses blockSparseMaskOptional to specify the KV blocks selected for each Q block, enabling efficient sparse attention computation.
 
-- **Formula**: Sparse block size: $blockShapeX \times blockShapeY$, selectIdx specifies the sparse pattern
+- **Formula**: Sparse block size: $blockShapeX \times blockShapeY$, blockSparseMaskOptional specifies the sparse pattern
 
   $$
   attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
@@ -443,7 +443,7 @@ aclnnStatus aclnnBlockSparseAttention(
       <td>qInputLayout or kvInputLayout is invalid.</td>
     </tr>
     <tr>
-      <td>blockShape is invalid (fewer than 2 elements, or a value less than or equal to 0).</td>
+      <td>blockShape is invalid (the number of elements is not equal to 2, or the value is less than or equal to 0).</td>
     </tr>
     <tr>
       <td>innerPrecise is invalid (must be 0, 1, or 4).</td>
@@ -504,7 +504,7 @@ aclnnStatus aclnnBlockSparseAttention(
 - Currently, the InputLayout of query, key, and value must be consistent.
 - The data types of the input query, key, and value must be consistent, supporting FLOAT16 and BFLOAT16.
 - The D axis of query, key, and value currently only supports being configured as 64 or 128.
-- If blockShapeOptional is passed in, it must contain at least two elements [blockShapeX, blockShapeY], both greater than 0. blockShapeY must be a multiple of 16 on <term>Ascend 950PR&950DT products</term>, and a multiple of 128 on <term>Atlas A2 products</term> and <term>Atlas A3 products</term>.
+- If blockShapeOptional is passed in, it must contain two elements [blockShapeX, blockShapeY], both greater than 0. blockShapeY must be a multiple of 16 on <term>Ascend 950PR&950DT products</term>, and a multiple of 128 on <term>Atlas A2 products</term> and <term>Atlas A3 products</term>.
 - blockSparseMaskOptional currently must be passed in, and its shape must be [batch, headNum, ceilDiv(maxQS, blockShapeX), ceilDiv(maxKVS, blockShapeY)].
 - attentionMaskOptional currently only supports passing nullptr.
 - actualSeqLengthsOptional is mandatory when qInputLayout is "TND"; actualSeqLengthsKvOptional is mandatory when kvInputLayout is "TND".
@@ -828,7 +828,7 @@ int main() {
         numKvHeads,            // numKeyValueHeads
         0,                     // maskType
         scaleValue,            // scaleValue
-        innerPrecise,          // innerPrecise (automatically selected based on the chip model)
+        innerPrecise,          // innerPrecise
         0,                     // blockSize
         2147483647,            // preTokens
         2147483647,            // nextTokens

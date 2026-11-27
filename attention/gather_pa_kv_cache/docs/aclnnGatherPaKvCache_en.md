@@ -27,7 +27,7 @@
 
 - Description: Based on the blockId values in blockTables and the seqLen of key/value in seqLens, copies and concatenates non-contiguous tokens from keyCache/valueCache into contiguous key/value sequences.
 - Formula:
-  - The first dimension of keyRef/valueRef depends on the size of seq_lens.
+  - The first dimension of keyRef/valueRef depends on the size of seqLens.
   - If isSeqLensCumsum is true, the last value in seqLens is the size of the first dimension of keyRef/valueRef: keyRef[dim0] = seqLens[-1]
   - If isSeqLensCumsum is false, the cumulative sum of all values in seqLens is the size of the first dimension of keyRef/valueRef: keyRef[dim0] = sum(seqLens)
 
@@ -37,7 +37,7 @@
 
 - Example:
 
-  ```python
+  ```text
     keyCache_shape: [128, 128, 16, 144]
     valueCache_shape: [128, 128, 16, 128]
     blockTables_shape: [16, 12]
@@ -186,7 +186,7 @@ aclnnStatus aclnnGatherPaKvCache(
       <td class="tg-0pky">isSeqLensCumsum (bool)</td>
       <td class="tg-0pky">Input</td>
       <td class="tg-0pky">Indicates whether seqLens is a cumulative sum.</td>
-      <td class="tg-0pky">false indicates a non-cumulative sum, for example, seqLens is [1, 3, 5, 3, 7].<br>true indicates a cumulative sum, for example, seqLens is [0, 1, 4, 9, 12, 19], where the 0th element must be 0.<br>For a cumulative sum, `seqlens[i + 1] - seqlens[i]` equals the non-cumulative `seqlens[i]`.</td>
+      <td class="tg-0pky">false indicates a non-cumulative sum, for example, seqLens is [1, 3, 5, 3, 7].<br>true indicates a cumulative sum, for example, seqLens is [0, 1, 4, 9, 12, 19], where the 0th element must be 0.<br>For a cumulative sum, `seqLens[i + 1] - seqLens[i]` equals the non-cumulative `seqLens[i]`.</td>
       <td class="tg-0pky">bool</td>
       <td class="tg-0pky">-</td>
       <td class="tg-0pky">-</td>
@@ -218,7 +218,7 @@ aclnnStatus aclnnGatherPaKvCache(
   <!-- npu="950" id7 -->
   - <term>Ascend 950PR&950DT products</term>:
     - The combination of keyCache in FLOAT8_E4M3FN and valueCache in FLOAT16 or BFLOAT16 is supported.
-    - When the blockTables width does not satisfy the coverage condition in the feature description, tokens corresponding to logical blocks whose blockTableOffset exceeds the block_indices range will be zero-filled and written to keyRef/valueRef; blocks whose blockId is out of range (beyond [0, num_blocks)) are also zero-filled. This behavior is undefined on other product paths. Ensure that blockTables satisfies the coverage condition.
+    - When the blockTables width does not satisfy the coverage condition in the feature description (the starting table column offset plus the number of blocks required by the batch exceeds the blockTables width), tokens corresponding to logical blocks beyond the blockTables width will be zero-filled and written to keyRef/valueRef; blocks whose blockId is out of range (beyond [0, num_blocks)) are also zero-filled. This behavior is undefined on other product paths. Ensure that blockTables satisfies the coverage condition.
   <!-- end id7 -->
   <!-- npu="A3,910b" id8 -->
   - <term>Atlas A2 products</term>, <term>Atlas A3 products</term>:

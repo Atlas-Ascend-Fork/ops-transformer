@@ -23,10 +23,10 @@
 
 ## 功能说明
 
-- **接口功能**：BlockSparseAttentionV3稀疏注意力计算，支持灵活的块级稀疏模式，通过BlockSparseMask指定每个Q块选择的KV块，实现高效的稀疏注意力计算。
+- **接口功能**：BlockSparseAttentionV3稀疏注意力计算，支持灵活的块级稀疏模式，通过blockSparseMaskOptional指定每个Q块选择的KV块，实现高效的稀疏注意力计算。
 
   相比于BlockSparseAttentionV2，本接口新增pQuantScaleOptional、quantMode、dstTypeMax参数。
-- **计算公式**：稀疏块大小：$blockShapeX \times blockShapeY$，selectIdx指定稀疏模式
+- **计算公式**：稀疏块大小：$blockShapeX \times blockShapeY$，blockSparseMaskOptional指定稀疏模式
 
   $$
   attentionOut = Softmax(scale \cdot query \cdot key_{sparse}^T + atten\_mask) \cdot value_{sparse}
@@ -307,8 +307,8 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         </ul>
         当配置此输入时：
         <ul>
-          <li>当quantMode=1, shape为[batch, headNum, ceilDiv(maxQSeqLength, 128), 1]。</li>
-          <li>quantMode=2/3/4, 约束见<a href="#MXFP4量化模式的量化缩放因子">MX量化模式的量化缩放因子。</a></li>
+          <li>当quantMode=1，shape为[batch, headNum, ceilDiv(maxQSeqLength, blockShapeX), 1]。</li>
+          <li>quantMode=2/3/4，约束见<a href="#MXFP4量化模式的量化缩放因子">MX量化模式的量化缩放因子。</a></li>
           <li>当quantMode=5时，必须传入FLOAT32类型的per-tensor反量化缩放因子，shape为[1]，所有batch、head及token共用一个缩放因子。</li>
         </ul>
       </td>
@@ -329,8 +329,8 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         </ul>
         当配置此输入时：
         <ul>
-          <li>当quantMode=1,shape为[batch, kvHeadNum, ceilDiv(maxKVSeqLength, 256), 1]或shape为[batch, kvHeadNum, ceilDiv(maxKVSeqLength, 512), 1]。</li>
-          <li>quantMode=2/3/4, 约束见<a href="#MXFP4量化模式的量化缩放因子">MX量化模式的量化缩放因子。</a></li>
+          <li>当quantMode=1，shape为[batch, kvHeadNum, ceilDiv(maxKVSeqLength, blockShapeY), 1]。</li>
+          <li>quantMode=2/3/4，约束见<a href="#MXFP4量化模式的量化缩放因子">MX量化模式的量化缩放因子。</a></li>
           <li>当quantMode=5时，必须传入FLOAT32类型的per-tensor反量化缩放因子，shape为[1]，所有batch、head及token共用一个缩放因子。</li>
         </ul>
       </td>
@@ -351,8 +351,8 @@ aclnnStatus aclnnBlockSparseAttentionV3(
         </ul>
         当配置此输入时：
         <ul>
-          <li>当quantMode=1, shape为[batch, kvHeadNum, ceilDiv(maxKVSeqLength, 256), 1]或shape为[batch, kvHeadNum, ceilDiv(maxKVSeqLength, 512), 1]。</li>
-         <li>quantMode=2/3/4, 约束见<a href="#MXFP4量化模式的量化缩放因子">MX量化模式的量化缩放因子。</a></li>
+          <li>当quantMode=1，shape为[batch, kvHeadNum, ceilDiv(maxKVSeqLength, blockShapeY), 1]。</li>
+         <li>quantMode=2/3/4，约束见<a href="#MXFP4量化模式的量化缩放因子">MX量化模式的量化缩放因子。</a></li>
           <li>当quantMode=5时，必须传入FLOAT32类型的per-tensor反量化缩放因子，shape为[1]，所有batch、head及token共用一个缩放因子。</li>
         </ul>
       </td>
@@ -553,7 +553,7 @@ aclnnStatus aclnnBlockSparseAttentionV3(
           <li>query为"BSND": [batch, maxQSeqLength, headNum, 1]。</li>
         </ul>
       </td>
-      <td>FLOAT</td>
+      <td>FLOAT32</td>
       <td>ND</td>
       <td>3/4</td>
       <td>√</td>
@@ -701,23 +701,23 @@ aclnnStatus aclnnBlockSparseAttentionV3(
     - qDequantScale（query量化缩放因子）
 
       - 数据类型：FLOAT32
-      - shape：(Batch, HeadNum, CeilDiv(maxQSeqLength, 128), 1)
+      - shape：(Batch, HeadNum, CeilDiv(maxQSeqLength, blockShapeX), 1)
       - 用途：在QK矩阵乘法时对query进行反量化。
     - kDequantScale（key量化缩放因子）
 
       - 数据类型：FLOAT32
-      - shape：(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 256), 1)或(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 512), 1)
+      - shape：(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, blockShapeY), 1)
       - 用途：在QK矩阵乘法时对key进行反量化。
     - vDequantScale（value量化缩放因子）
 
       - 数据类型：FLOAT32
-      - shape：(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 256), 1)或(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 512), 1)
+      - shape：(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, blockShapeY), 1)
       - 用途：在PV矩阵乘法时对value进行反量化。
   - 当query、key、value中任意一个数据类型为FLOAT8_E4M3FN时，query、key、value必须同时为FLOAT8_E4M3FN数据类型。
   - 使用FP8输入时，必须提供对应的量化缩放因子输入qDequantScale、kDequantScale、vDequantScale。
   - 量化缩放因子的数据类型必须为FLOAT32。
-  - qDequantScale的shape必须为(Batch, HeadNum, CeilDiv(maxQSeqLength, 128), 1)。
-  - kDequantScale和vDequantScale的shape必须一致，为(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 256), 1)或(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, 512), 1)。
+  - qDequantScale的shape必须为(Batch, HeadNum, CeilDiv(maxQSeqLength, blockShapeX), 1)。
+  - kDequantScale和vDequantScale的shape必须一致，为(Batch, KVHeadNum, CeilDiv(maxKVSeqLength, blockShapeY), 1)。
   - 当query、key、value中任意一个数据类型不为FLOAT8_E4M3FN时，qDequantScale、kDequantScale、vDequantScale必须传入nullptr。
   - blockShapeOptional必须传入。
   - q和kv的量化块大小必须与blockShapeOptional的两个元素大小分别保持一致。
@@ -1090,7 +1090,7 @@ int main() {
         numKvHeads,               // numKeyValueHeads
         0,                        // maskType
         scaleValue,               // scaleValue
-        innerPrecise,             // innerPrecise（随芯片型号自动选择）
+        innerPrecise,             // innerPrecise
         0,                        // blockSize
         2147483647,               // preTokens
         2147483647,               // nextTokens

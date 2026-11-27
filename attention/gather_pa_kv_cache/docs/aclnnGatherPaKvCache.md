@@ -25,7 +25,7 @@
 
 - 接口功能：根据blockTables中的blockId值、seqLens中key/value的seqLen从keyCache/valueCache中将内存不连续的token搬运、拼接成连续的key/value序列。
 - 计算逻辑：
-  - keyRef/valueRef的第一个维度取决于seq_lens大小。
+  - keyRef/valueRef的第一个维度取决于seqLens大小。
   - 如果isSeqLensCumsum为true，则seqLens中最后一个值即为keyRef/valueRef的第一个维度大小：keyRef[dim0] = seqLens[-1]
   - 如果isSeqLensCumsum为false，则seqLens中所有值的累加和即为keyRef/valueRef的第一个维度大小：keyRef[dim0] = sum(seqLens)
 
@@ -35,7 +35,7 @@
 
 - 示例：
 
-  ```python
+  ```text
     keyCache_shape: [128, 128, 16, 144]
     valueCache_shape: [128, 128, 16, 128]
     blockTables_shape: [16, 12]
@@ -184,7 +184,7 @@ aclnnStatus aclnnGatherPaKvCache(
       <td class="tg-0pky">isSeqLensCumsum（bool）</td>
       <td class="tg-0pky">输入</td>
       <td class="tg-0pky">表示seqLens是否为累加和。</td>
-      <td class="tg-0pky">false表示非累加和，例如seqLens为[1, 3, 5, 3, 7]。<br>true表示累加和，例如seqLens为[0, 1, 4, 9, 12, 19]，此时第0个元素必定是0。<br>累加和的`seqlens[i + 1] - seqlens[i]`等于非累加的`seqlens[i]`。</td>
+      <td class="tg-0pky">false表示非累加和，例如seqLens为[1, 3, 5, 3, 7]。<br>true表示累加和，例如seqLens为[0, 1, 4, 9, 12, 19]，此时第0个元素必定是0。<br>累加和的`seqLens[i + 1] - seqLens[i]`等于非累加的`seqLens[i]`。</td>
       <td class="tg-0pky">bool</td>
       <td class="tg-0pky">-</td>
       <td class="tg-0pky">-</td>
@@ -216,7 +216,7 @@ aclnnStatus aclnnGatherPaKvCache(
   <!-- npu="950" id7 -->
   - <term>Ascend 950PR&950DT系列产品</term>：
     - 允许keyCache为FLOAT8_E4M3FN、valueCache为FLOAT16或BFLOAT16的组合。
-    - 当blockTables宽度不满足功能说明中的覆盖条件时，blockTableOffset越出block_indices范围的逻辑块对应的token将被填零后写入keyRef/valueRef；blockId越界（超出[0, num_blocks)范围）的块同样填零。其他产品路径未定义该行为，调用方应保证blockTables满足覆盖条件。
+    - 当blockTables宽度不满足功能说明中的覆盖条件（表列起始偏移加上该batch所需块数后超过blockTables列宽）时，超出的逻辑块对应的token将被填零后写入keyRef/valueRef；blockId越界（超出[0, num_blocks)范围）的块同样填零。其他产品路径未定义该行为，调用方应保证blockTables满足覆盖条件。
   <!-- end id7 -->
   <!-- npu="A3,910b" id8 -->
   - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
