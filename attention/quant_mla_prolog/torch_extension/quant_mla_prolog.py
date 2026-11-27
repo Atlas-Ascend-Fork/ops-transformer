@@ -9,6 +9,7 @@
 from enum import Enum as _Enum
 import math as _math
 import struct as _struct
+from typing import Optional as _Optional
 
 import torch as _torch
 from torch.library import impl
@@ -238,9 +239,9 @@ def quant_mla_prolog(
     w_qr_quant_mode: WQrQuantMode,
     qkv_quant_mode: QkvQuantMode,
     *,
-    quant_scale_kv: _torch.Tensor | None = None,
-    rope_sin: _torch.Tensor | None = None,
-    rope_cos: _torch.Tensor | None = None,
+    quant_scale_kv: _Optional[_torch.Tensor] = None,
+    rope_sin: _Optional[_torch.Tensor] = None,
+    rope_cos: _Optional[_torch.Tensor] = None,
     norm_eps: float = 1e-05,
     cache_mode: CacheMode = CacheMode.PA_BSND,
     qr_scale: float = 1.0,
@@ -379,9 +380,9 @@ def quant_mla_prolog_precheck(
     w_qr_quant_mode: WQrQuantMode,
     qkv_quant_mode: QkvQuantMode,
     *,
-    quant_scale_kv: _torch.Tensor | None = None,
-    rope_sin: _torch.Tensor | None = None,
-    rope_cos: _torch.Tensor | None = None,
+    quant_scale_kv: _Optional[_torch.Tensor] = None,
+    rope_sin: _Optional[_torch.Tensor] = None,
+    rope_cos: _Optional[_torch.Tensor] = None,
     norm_eps: float = 1e-05,
     cache_mode: CacheMode = CacheMode.PA_BSND,
     qr_scale: float = 1.0,

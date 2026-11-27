@@ -3122,7 +3122,7 @@ class QGlobalQuant:
             mem_copy(tile_slice(q2d, row_tiler, (token, head)), byte_view)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _ArgumentField:
     name: str
     annotation: object
@@ -5774,7 +5774,7 @@ class GlobalSplitFront:
 # Host validation, scheduling and scratch planning.
 
 
-@dataclass(frozen=True, slots=True, eq=False, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class _InputTensors:
     x: torch.Tensor
     wqa: torch.Tensor
@@ -5790,7 +5790,7 @@ class _InputTensors:
     rope_cos: Optional[torch.Tensor]
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _Attributes:
     norm_eps: float
     qkv_quant_mode: int
@@ -5801,7 +5801,7 @@ class _Attributes:
     return_qr: bool
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _Metadata:
     tokens: int
     dim: int
@@ -5817,7 +5817,7 @@ class _Metadata:
     return_qr: bool
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _RuntimeControls:
     front_load_hint: int = 0
     qb_columns: int = 0
@@ -5825,7 +5825,7 @@ class _RuntimeControls:
     wkb_load_hint: int = 0
 
 
-@dataclass(frozen=True, slots=True, eq=False, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class _Outputs:
     q: torch.Tensor
     descale_q: torch.Tensor
@@ -5835,7 +5835,7 @@ class _Outputs:
         return self.q, self.descale_q, self.qr
 
 
-@dataclass(frozen=True, slots=True, eq=False, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class _ScratchBuffers:
     ws_qa_raw: torch.Tensor
     ws_kva_raw: torch.Tensor
@@ -5847,13 +5847,13 @@ class _ScratchBuffers:
     ws_amax: Optional[torch.Tensor] = None
 
 
-@dataclass(frozen=True, slots=True, eq=False, repr=False)
+@dataclass(frozen=True, eq=False, repr=False)
 class _QaWorkspace:
     bf16: torch.Tensor
     fp32: torch.Tensor
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _CompileDimensions:
     tokens: object
     rows: object
@@ -5915,7 +5915,7 @@ def recompute_global_q(meta, rows):
     )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class CompileKey:
     fmt: str
     qkv_quant_mode: int
@@ -6454,14 +6454,14 @@ def empty_outputs(meta, device, q_rows=None):
     )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _ScratchSpec:
     name: str
     shape: tuple
     dtype: object
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _ScratchView:
     name: str
     shape: tuple
@@ -6470,13 +6470,13 @@ class _ScratchView:
     offset_elements: int
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _ScratchLayout:
     allocation_bytes: int
     views: tuple
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class _ScratchPlan:
     rows: int
     specs: tuple

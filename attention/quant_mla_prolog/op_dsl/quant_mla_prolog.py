@@ -21,6 +21,7 @@ from dataclasses import replace as _replace
 from enum import Enum as _Enum
 from functools import lru_cache as _lru_cache
 from pathlib import Path as _Path
+from typing import Optional as _Optional
 
 import cannbotdsl as dsl
 import cannbotdsl.aot as _aot
@@ -479,12 +480,12 @@ def quantize_cast(value, mask, hif):
     )
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _ReductionConfig:
     small_token_l1_tile: int
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _TokenProfile:
     capacity: int
     hif_c2v: bool
@@ -492,7 +493,7 @@ class _TokenProfile:
     split_l0_tail: bool
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _QaTile:
     rows: int
     splits: int
@@ -12145,13 +12146,13 @@ class _PrefillMxGeometry(_RuntimeGeometryPipeline):
         self.head256 = _PrefillMxKernel(q_lora, 256, 0, qkv_mode, nz, dynamic_lora)
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _ArgumentField:
     name: str
     annotation: object
     role: str
     scalar_type: object = None
-    runtime_name: str | None = None
+    runtime_name: _Optional[str] = None
 
 
 _HOST_ARGUMENT_FIELDS = (
@@ -13007,7 +13008,7 @@ def validate_inputs(
     return T, dim, q_lora, N, Dn, Dr, weight_is_nz
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _InputMetadata:
     tokens: int
     dim: int
@@ -13018,7 +13019,7 @@ class _InputMetadata:
     weight_is_nz: bool
 
 
-@_dataclass(eq=False, repr=False, slots=True)
+@_dataclass(eq=False, repr=False)
 class _InputTensors:
     x: _torch.Tensor
     wqa: _torch.Tensor
@@ -13038,7 +13039,7 @@ class _InputTensors:
     rope_cos: _torch.Tensor
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _HostAttributes:
     w_qr_quant_mode: int
     qkv_quant_mode: int
@@ -13050,7 +13051,7 @@ class _HostAttributes:
     return_qr: bool
 
 
-@_dataclass(eq=False, repr=False, slots=True)
+@_dataclass(eq=False, repr=False)
 class _ExecutionBuffers:
     qa_matmul_fp32: _torch.Tensor
     kva_matmul_fp32: _torch.Tensor
@@ -13068,7 +13069,7 @@ class _ExecutionBuffers:
     qa_partial: _torch.Tensor
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _LaunchControls:
     core_num: int
     qkv_quant_mode: int
@@ -13088,7 +13089,7 @@ def launch_arguments(inputs, attributes, buffers, controls):
     )
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _ProgramConfig:
     """Host schedule, flattened only at the DSL construction boundary."""
 
@@ -13283,7 +13284,7 @@ def scratch_token_rows(tokens, q_lora, heads, nope_dim, rope_dim, qkv_mode):
     return min(tokens, capacity)
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _PrefillPlan:
     group_rows: int
     tail_rows: int
@@ -13334,7 +13335,7 @@ def prefill_plan(
     return ()
 
 
-@_dataclass(frozen=True, slots=True)
+@_dataclass(frozen=True)
 class _ScratchSpec:
     name: str
     shape: tuple
@@ -14487,9 +14488,9 @@ def quant_mla_prolog(
     w_qr_quant_mode: WQrQuantMode,
     qkv_quant_mode: QkvQuantMode,
     *,
-    quant_scale_kv: _torch.Tensor | None = None,
-    rope_sin: _torch.Tensor | None = None,
-    rope_cos: _torch.Tensor | None = None,
+    quant_scale_kv: _Optional[_torch.Tensor] = None,
+    rope_sin: _Optional[_torch.Tensor] = None,
+    rope_cos: _Optional[_torch.Tensor] = None,
     norm_eps: float = 1e-5,
     cache_mode: CacheMode = CacheMode.PA_BSND,
     qr_scale: float = 1.0,
@@ -14594,9 +14595,9 @@ def quant_mla_prolog_native(
     w_qr_quant_mode: WQrQuantMode,
     qkv_quant_mode: QkvQuantMode,
     *,
-    quant_scale_kv: _torch.Tensor | None = None,
-    rope_sin: _torch.Tensor | None = None,
-    rope_cos: _torch.Tensor | None = None,
+    quant_scale_kv: _Optional[_torch.Tensor] = None,
+    rope_sin: _Optional[_torch.Tensor] = None,
+    rope_cos: _Optional[_torch.Tensor] = None,
     norm_eps: float = 1e-5,
     cache_mode: CacheMode = CacheMode.PA_BSND,
     qr_scale: float = 1.0,

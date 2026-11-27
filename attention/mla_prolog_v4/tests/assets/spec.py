@@ -21,6 +21,7 @@ from pathlib import Path
 
 __spec__ = {
     "mla_prolog_v4_ttk_ops.mla_prolog_v4_ttk": "MlaPrologV4Spec",
+    "torch.ops.cann_ops_transformer.mla_prolog_v2": "MlaPrologV2TorchSpec",
 }
 
 _ASSETS_DIR = str(Path(__file__).resolve().parent)
@@ -77,3 +78,26 @@ class MlaPrologV4Spec:
     # 图模式在构造阶段准备静态缓冲区，forward 只执行公开设备调用。
 
     torch_graph = _load_impl_module("graph").MlaPrologV4AclGraph
+
+
+def _call_torch_hook(hook, args, kwargs):
+    # The Torch schema places qkv_quant_mode after the nine required tensors.
+    if len(args) == 10:
+        *tensors, qkv_quant_mode = args
+        return hook(*tensors, qkv_quant_mode=qkv_quant_mode, **kwargs)
+    return hook(*args, **kwargs)
+
+
+class MlaPrologV2TorchSpec:
+    """TTK hooks for the registered Torch operator."""
+
+    @staticmethod
+    def golden(*args, **kwargs):
+        q, descale_q, qr, _cache = _call_torch_hook(
+            MlaPrologV4Spec.golden, args, kwargs
+        )
+        return q, descale_q, qr
+
+    @staticmethod
+    def customize_inputs(*args, **kwargs):
+        _call_torch_hook(MlaPrologV4Spec.customize_inputs, args, kwargs)
