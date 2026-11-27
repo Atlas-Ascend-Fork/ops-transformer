@@ -13,8 +13,12 @@
 """CPU Golden adapter for QuantSparseFlashMla TTK cases."""
 
 import importlib.util
+import inspect
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
 
 
 PYTEST_MODULE_NAME = "qsmla_pytest_golden"
@@ -186,3 +190,67 @@ def cpu_aclnn_quant_sparse_flash_mla(
         testcase_name=testcase_name,
         **kwargs,
     )
+
+
+def cpu_tensor(value):
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        if value.device.type != "cpu":
+            raise ValueError("MLA three-party reference requires CPU tensors")
+        return value
+    value = np.asarray(value)
+    name = value.dtype.name
+    if name == "hifloat8":
+        value = value.view(np.uint8)
+    elif name == "bfloat16":
+        return torch.from_numpy(value.view(np.uint16)).view(torch.bfloat16)
+    elif name == "float8_e4m3fn":
+        return torch.from_numpy(value.view(np.uint8)).view(torch.float8_e4m3fn)
+    return torch.from_numpy(value)
+
+
+def aclnn_arguments(original_golden, args, kwargs):
+    arguments = dict(inspect.signature(original_golden).bind(*args, **kwargs).arguments)
+    arguments.update(arguments.pop("kwargs", {}))
+    arguments.pop("softmax_lse_out", None)
+    return arguments
+
+
+def checked_result(outputs, dtype, source):
+    for index, value in enumerate(outputs):
+        if value is not None and torch.isnan(value).any():
+            raise ValueError(f"{source} output {index} contains NaN")
+    return outputs[0].to(dtype), outputs[1]
+
+
+def reference_from_inputs(q, quant_mode, *, promote, **inputs):
+    """Pass the finalized CPU tensors to the existing pytest Golden."""
+    op_input = {
+        name: cpu_tensor(value)
+        if isinstance(value, (np.ndarray, torch.Tensor))
+        else value
+        for name, value in inputs.items()
+    }
+    op_input["q"] = cpu_tensor(q)
+    native = load_pytest_golden()
+    op_input["quant_mode"] = quant_mode
+    data = {"op_input": op_input}
+    if not promote and not native.batch_consistency_requested(inputs):
+        from qsmla_ttk_npu_preprocess import build_metadata_arguments
+
+        data["metadata_input"] = build_metadata_arguments(
+            op_input["q"],
+            op_input.get("ori_kv"),
+            op_input.get("cmp_kv"),
+            quant_mode,
+            op_input,
+        )
+    outputs = native.generate_cpu_golden(data, promote=promote)
+    return checked_result(
+        outputs, torch.float32 if promote else torch.bfloat16, "QSMLA"
+    )
+
+
+def mixed_reference(*args, **kwargs):
+    return reference_from_inputs(*args, promote=False, **kwargs)

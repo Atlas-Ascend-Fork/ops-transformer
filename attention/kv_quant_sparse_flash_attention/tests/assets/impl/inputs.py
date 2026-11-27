@@ -159,6 +159,15 @@ class KvQuantSparseFlashAttentionInputAdapter:
             tile_size,
             rope_head_dim,
         )
+        for name, lengths in (
+            ("actual_seq_lengths_query_values", params["actualseqlengths"]),
+            ("actual_seq_lengths_kv_values", params["actualseqlengthskv"]),
+        ):
+            declared = kwargs.get(name)
+            if declared is not None and tuple(declared) != tuple(lengths):
+                raise ValueError(
+                    f"{name}={declared} conflicts with pytest lengths {lengths}"
+                )
         generated = pytest_golden.generate_input_tensors(params, use_tq4_ranges=True)
         output, generated, _ = pytest_golden.compute_cpu(generated, params)
         if output is None:
@@ -167,9 +176,17 @@ class KvQuantSparseFlashAttentionInputAdapter:
         self.copy_tensor(query, generated.get("query_cache"), "query")
         self.copy_tensor(key, generated.get("key_cache"), "key")
         self.copy_tensor(value, generated.get("value_cache"), "value")
-        self.copy_tensor(
-            sparse_indices, generated.get("sparse_indices"), "sparse_indices"
-        )
+        indices = generated.get("sparse_indices")
+        fixed_indices = kwargs.get("sparse_indices_values")
+        if fixed_indices is not None:
+            if sparse_indices is None:
+                raise ValueError("sparse_indices_values requires a declared tensor")
+            indices = torch.as_tensor(fixed_indices, device="cpu")
+            if indices.dtype not in (torch.int32, torch.int64):
+                raise ValueError("sparse_indices_values must contain integers")
+            if not torch.equal(indices, indices.to(torch.int32).to(indices.dtype)):
+                raise ValueError("sparse_indices_values must fit in int32")
+        self.copy_tensor(sparse_indices, indices, "sparse_indices")
         # Pytest creates an internal block table for its CPU model even for non-PA layouts.
         if block_table is not None:
             self.copy_tensor(block_table, generated.get("block_table"), "block_table")

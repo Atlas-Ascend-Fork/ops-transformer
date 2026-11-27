@@ -18,6 +18,8 @@ import torch
 DATA_RANGE_LEFT = -10
 DATA_RANGE_RIGHT = 10
 
+TEMPLATE_MODES = {"SWA": 0, "HCA": 1, "CSA": 2, "ORI_SPARSE": 3, "ORI_CMP_SPARSE": 4}
+
 # 三种运行模式
 # 0 不切S2
 # 1 切S2
@@ -49,6 +51,37 @@ def _nonfinite_fill(shape, left, right):
             f"non-finite data range must be constant, got [{left}, {right}]"
         )
     return torch.full(shape, value, dtype=torch.float32)
+
+
+def _qk_fp32(q, k):
+    """Compute FP32 QK with compensation for near-cancelling dots."""
+    scores = torch.matmul(q, k.T)
+    # If FP32 roundoff could cover the whole dot, retain the addition residuals.
+    magnitude = q.abs() @ k.abs().T
+    roundoff = magnitude * (q.shape[-1] * torch.finfo(torch.float32).eps)
+    affected = (
+        scores.isfinite() & (magnitude > 0) & (scores.abs() <= roundoff)
+    ).nonzero()
+    for start in range(0, affected.shape[0], 256):
+        heads, tokens = affected[start : start + 256].unbind(dim=1)
+        terms = q[heads] * k[tokens]
+        residual = torch.zeros_like(terms[:, 0])
+        while terms.shape[-1] > 1:
+            paired = terms.shape[-1] // 2 * 2
+            left, right = terms[:, :paired:2], terms[:, 1:paired:2]
+            summed = left + right
+            correction = torch.where(
+                left.abs() >= right.abs(),
+                (left - summed) + right,
+                (right - summed) + left,
+            )
+            residual += correction.sum(dim=-1)
+            terms = torch.cat((summed, terms[:, paired:]), dim=-1)
+        repaired = terms[:, 0] + residual
+        scores[heads, tokens] = torch.where(
+            repaired.isfinite(), repaired, scores[heads, tokens]
+        )
+    return scores
 
 
 def is_empty(obj):
@@ -155,7 +188,7 @@ class GeneralizedSFA:
         acc_o,
     ):
         """Use one 128-token S2 tile to update the online-softmax state."""
-        mm1_res = torch.matmul(q_fp32, k_tile.T)
+        mm1_res = _qk_fp32(q_fp32, k_tile)
         scale_res = mm1_res * softmax_scale
 
         score_max_pre = score_max.clone()
@@ -273,8 +306,11 @@ class GeneralizedSFA:
         cmp_topk_length_bnsd=None,
         return_softmax_lse=False,
         batch_consistency=False,
+        *,
+        promote=False,
     ):
-        attn_out = torch.zeros(q_bnsd.shape, dtype=q_bnsd.dtype)
+        output_dtype = torch.float32 if promote else q_bnsd.dtype
+        attn_out = torch.zeros(q_bnsd.shape, dtype=output_dtype)
         softmax_lse = None
         if return_softmax_lse:
             softmax_lse = torch.zeros(
@@ -450,7 +486,7 @@ class GeneralizedSFA:
                         continue
 
                     cur_attn_out = attn_out[i_B, i_N2 * G : (i_N2 + 1) * G, i_S1, :]
-                    if batch_consistency:
+                    if batch_consistency and not promote:
                         ori_k_for_reduce = (
                             None
                             if is_empty(cur_ori_k_bnsd)
@@ -474,7 +510,7 @@ class GeneralizedSFA:
                             softmax_lse[i_B, i_N2, i_S1, :] = final_lse
                         continue
 
-                    if RUN_MODE == 0:
+                    if promote or RUN_MODE == 0:
                         if empty_flag:
                             k_concat = (
                                 cur_ori_k_bnsd
@@ -492,18 +528,15 @@ class GeneralizedSFA:
                         k_concat_fp32 = k_concat.to(dtype=torch.float32)
                         v_concat_fp32 = k_concat_fp32.clone()
 
-                        mm1_res = torch.matmul(q_curr_fp32, k_concat_fp32.T)
+                        mm1_res = _qk_fp32(q_curr_fp32, k_concat_fp32)
                         scale_res = mm1_res * self.softmax_scale
                         softmax_res, x_max, x_sum = self.sinks_softmax(
                             scale_res, cur_sinks_expand
                         )
-                        mm2_res = torch.matmul(
-                            softmax_res.to(dtype=q_bnsd.dtype).to(dtype=torch.float),
-                            v_concat_fp32,
-                        )
-                        attn_out[i_B, i_N2 * G : (i_N2 + 1) * G, i_S1, :] = mm2_res.to(
-                            dtype=q_bnsd.dtype
-                        )
+                        if not promote:
+                            softmax_res = softmax_res.to(q_bnsd.dtype).float()
+                        row = torch.matmul(softmax_res, v_concat_fp32)
+                        attn_out[i_B, i_N2 * G : (i_N2 + 1) * G, i_S1, :] = row
                         if return_softmax_lse:
                             softmax_lse[i_B, i_N2, i_S1, :] = x_max[:, 0] + torch.log(
                                 x_sum[:, 0] + 1e-10
@@ -554,7 +587,7 @@ class GeneralizedSFA:
                                         (i_S2 - ori_s2_loop_time) * s2_base_size :, :
                                     ]
                             v_tile = k_tile.clone()
-                            mm1_res = torch.matmul(q_curr_fp32, k_tile.T)
+                            mm1_res = _qk_fp32(q_curr_fp32, k_tile)
                             scale_res = (
                                 mm1_res * self.softmax_scale
                             )  # 外层for S1 循环，据实拷入数据，因此不需要mask
@@ -629,7 +662,7 @@ class GeneralizedSFA:
                                     ]
                             v_tile = k_tile.clone()
 
-                            mm1_res = torch.matmul(q_curr_fp32, k_tile.T)
+                            mm1_res = _qk_fp32(q_curr_fp32, k_tile)
                             scale_res = (
                                 mm1_res * self.softmax_scale
                             )  # 外层for S1 循环，据实拷入数据，因此不需要mask
@@ -974,6 +1007,8 @@ class GeneralizedSFA:
         cmp_topk_length=None,
         return_softmax_lse=False,
         batch_consistency=False,
+        *,
+        promote=False,
     ):
         q_bnsd, q_bnsd_shape = self.trans_shape_to_bnsd(
             q, q.shape, self.layout_q, cu_seqlens_q, seqused_q
@@ -1043,6 +1078,7 @@ class GeneralizedSFA:
             cmp_topk_length_bnsd,
             return_softmax_lse,
             batch_consistency,
+            promote=promote,
         )
         attn_out = self.trans_bnsd_to_target_layout(
             attn_out, self.layout_q, cu_seqlens_q
@@ -1450,7 +1486,7 @@ def gen_ori_kv(
         if ori_k_bnsd is None:
             ori_k_bnsd = (
                 torch.rand((B, N2, ori_max_s2, D))
-                * (data_range_left - data_range_right)
+                * (data_range_right - data_range_left)
                 + data_range_left
             )
         ori_k_bnsd = ori_k_bnsd.to(ori_kv_type)
@@ -1511,7 +1547,7 @@ def gen_ori_kv(
         ori_k_tnd = _nonfinite_fill((T2, N2, D), data_range_left, data_range_right)
         if ori_k_tnd is None:
             ori_k_tnd = (
-                torch.rand((T2, N2, D)) * (data_range_left - data_range_right)
+                torch.rand((T2, N2, D)) * (data_range_right - data_range_left)
                 + data_range_left
             )
         ori_k_tnd = ori_k_tnd.to(ori_kv_type)
@@ -1526,7 +1562,7 @@ def gen_ori_kv(
         if ori_k_bnsd is None:
             ori_k_bnsd = (
                 torch.rand((B, ori_max_s2, N2, D))
-                * (data_range_left - data_range_right)
+                * (data_range_right - data_range_left)
                 + data_range_left
             )
         ori_k_bnsd = ori_k_bnsd.to(ori_kv_type)
@@ -1637,7 +1673,7 @@ def gen_cmp_kv(
         if cmp_k is None:
             cmp_k = (
                 torch.rand((B, N2, cmp_max_s2, D))
-                * (data_range_left - data_range_right)
+                * (data_range_right - data_range_left)
                 + data_range_left
             )
         cmp_k = cmp_k.to(cmp_kv_type)
@@ -1696,7 +1732,7 @@ def gen_cmp_kv(
         cmp_k = _nonfinite_fill((T3, N2, D), data_range_left, data_range_right)
         if cmp_k is None:
             cmp_k = (
-                torch.rand((T3, N2, D)) * (data_range_left - data_range_right)
+                torch.rand((T3, N2, D)) * (data_range_right - data_range_left)
                 + data_range_left
             )
         cmp_k = cmp_k.to(cmp_kv_type)
@@ -1712,7 +1748,7 @@ def gen_cmp_kv(
         if cmp_k is None:
             cmp_k = (
                 torch.rand((B, cmp_max_s2, N2, D))
-                * (data_range_left - data_range_right)
+                * (data_range_right - data_range_left)
                 + data_range_left
             )
         cmp_k = cmp_k.to(cmp_kv_type)
@@ -1851,10 +1887,9 @@ def gen_data(params, prepare_device_storage=True, generate_golden=True):
     # 路由到各算子的逻辑。必须先于Tensor转换和压缩长度推导执行，
     # 否则SWA会从共享参数中生成无效的cmp_kv相关Tensor。
     template_idx = 0
-    mapping = {"SWA": 0, "HCA": 1, "CSA": 2, "ORI_SPARSE": 3, "ORI_CMP_SPARSE": 4}
-    if template_mode is not None and template_mode in mapping:
+    if template_mode in TEMPLATE_MODES:
         template_run_mode = template_mode
-        template_idx = mapping[template_mode]
+        template_idx = TEMPLATE_MODES[template_mode]
         if template_mode == "SWA":
             cmp_ratio = None
             K1 = None
@@ -2343,9 +2378,248 @@ def gen_data(params, prepare_device_storage=True, generate_golden=True):
     return input_data
 
 
-def generate_cpu_golden(input_data):
-    """Calculate CPU reference from input-stage state without regenerating random tensors."""
-    state = input_data["golden_state"]
+def _reference_lengths(tensor, capacity, name):
+    if tensor is None:
+        return capacity
+    values = torch.as_tensor(tensor).tolist()
+    if len(values) != len(capacity) or any(
+        not isinstance(value, int) or not 0 <= value <= bound
+        for value, bound in zip(values, capacity)
+    ):
+        raise ValueError(f"{name} must fit the physical sequence lengths")
+    return values
+
+
+def _sequence_capacity(tensor, layout, prefix, batch=None):
+    if layout == "BSND":
+        if tensor.ndim != 4 or (batch is not None and tensor.shape[0] != batch):
+            raise ValueError("BSND tensor must have shape (B, S, N, D)")
+        return [tensor.shape[1]] * tensor.shape[0]
+    if layout != "TND" or tensor.ndim != 3 or prefix is None:
+        raise ValueError(f"{layout} tensor requires TND shape and cumulative lengths")
+    offsets = torch.as_tensor(prefix).tolist()
+    if (
+        len(offsets) < 2
+        or offsets[0] != 0
+        or offsets[-1] != tensor.shape[0]
+        or (batch is not None and len(offsets) != batch + 1)
+        or not all(isinstance(value, int) for value in offsets)
+    ):
+        raise ValueError("cumulative lengths must span the TND tensor")
+    lengths = [offsets[i] - offsets[i - 1] for i in range(1, len(offsets))]
+    if any(length < 0 for length in lengths):
+        raise ValueError("cumulative lengths must be nondecreasing")
+    return lengths
+
+
+def _physical_to_logical(indices, table, block_size, state, topk):
+    """Translate used PA offsets back to the logical index used by the pytest model."""
+    result = indices.clone()
+    for batch, row in enumerate(table):
+        used = state["seqused_q"][batch]
+        if state["layout_q"] == "BSND":
+            index = (batch, slice(used))
+        else:
+            start = int(state["cu_seqlens_q"][batch])
+            index = slice(start, start + used)
+        positions = result[index]
+        active = (positions >= 0) & ((positions == -1).cumsum(dim=-1) == 0)
+        if topk is not None:
+            active &= torch.arange(positions.shape[-1]) < topk[index].unsqueeze(-1)
+        blocks = positions[active].long() // block_size
+        if not blocks.numel():
+            continue
+        if not row.numel():
+            raise ValueError("PA offsets require a nonempty batch block table")
+        sorted_pages, logical_pages = row.sort()
+        mapped = torch.searchsorted(sorted_pages, blocks)
+        safe = mapped.clamp(max=row.numel() - 1)
+        if (sorted_pages[safe] != blocks).any():
+            raise ValueError("PA offset refers to a page outside the batch block table")
+        ambiguous = (safe + 1 < row.numel()) & (
+            sorted_pages[(safe + 1).clamp(max=row.numel() - 1)] == blocks
+        )
+        if ambiguous.any():
+            raise ValueError("PA offset maps to multiple logical pages")
+        positions[active] = (
+            logical_pages[safe] * block_size + positions[active] % block_size
+        ).to(positions.dtype)
+    return result
+
+
+def _paged_bnsd(cache, pages, lengths):
+    block_size = cache.shape[1]
+    logical = torch.zeros(
+        (len(lengths), max(lengths), cache.shape[-2], cache.shape[-1]),
+        dtype=cache.dtype,
+    )
+    for batch, length in enumerate(lengths):
+        count = (length + block_size - 1) // block_size
+        if count == 0:
+            continue
+        physical = pages[batch, :count].long()
+        valid = (physical >= 0) & (physical < cache.shape[0])
+        if valid.all():
+            values = cache.index_select(0, physical)
+        else:
+            # Sparse rows can leave holes in the page table. Flag reads of those holes
+            # via the NaN check without rejecting unreferenced pages.
+            values = logical.new_full(
+                (count, block_size, cache.shape[-2], cache.shape[-1]), torch.nan
+            )
+            if valid.any():
+                values[valid] = cache.index_select(0, physical[valid])
+        logical[batch, :length] = values.flatten(0, 1)[:length]
+    return logical.permute(0, 2, 1, 3)
+
+
+def _restore_cache(cache, side, state, inputs, *, allow_missing_length=False):
+    """Read physical pages when necessary and preserve BSND/TND inputs."""
+    if cache is None:
+        return None, None, None, None
+    layout = state["layout_kv"]
+    prefix = inputs.get(f"cu_seqlens_{side}_kv")
+    if prefix is not None:
+        prefix = torch.as_tensor(prefix)
+    used = inputs.get(f"seqused_{side}_kv")
+    indices = inputs.get(f"{side}_sparse_indices")
+    table = inputs.get(f"{side}_block_table")
+    batch = state["B"]
+    if layout == "PA_BBND":
+        if (
+            cache.ndim != 4
+            or table is None
+            or table.ndim != 2
+            or table.shape[0] != batch
+        ):
+            raise ValueError(f"paged {side} KV requires its batch block table")
+        block_size = cache.shape[1]
+        capacity = [table.shape[1] * block_size] * batch
+        if used is None and allow_missing_length:
+            last_page = torch.where(table >= 0, torch.arange(1, table.shape[1] + 1), 0)
+            lengths = [
+                int(row.max()) * block_size if row.numel() else 0 for row in last_page
+            ]
+        else:
+            lengths = _reference_lengths(used, capacity, f"seqused_{side}_kv")
+        if used is None and not allow_missing_length:
+            raise ValueError(f"paged {side} KV requires seqused_{side}_kv")
+        cache = _paged_bnsd(cache, table, lengths)
+        if indices is not None and inputs.get("topk_value_mode", 1) == 2:
+            indices = _physical_to_logical(
+                indices,
+                table,
+                block_size,
+                state,
+                inputs.get(f"{side}_topk_length"),
+            )
+    else:
+        capacity = _sequence_capacity(cache, layout, prefix, batch)
+        lengths = _reference_lengths(used, capacity, f"seqused_{side}_kv")
+    return cache, lengths, indices, prefix
+
+
+def _reference_state(q, inputs):
+    """Populate the geometry and per-query fields used by the existing pytest golden."""
+    layout_q = inputs.get("layout_q", "BSND")
+    prefix = inputs.get("cu_seqlens_q")
+    if prefix is not None:
+        prefix = torch.as_tensor(prefix)
+    capacity = _sequence_capacity(q, layout_q, prefix)
+    state = {
+        "q": q,
+        "q_type": q.dtype,
+        "layout_q": layout_q,
+        "layout_kv": inputs.get("layout_kv", "BSND"),
+        "B": len(capacity),
+        "S1": max(capacity),
+        "T1": q.shape[0] if layout_q == "TND" else None,
+        "N1": q.shape[-2],
+        "D": q.shape[-1],
+        "cu_seqlens_q": prefix,
+        "seqused_q": _reference_lengths(inputs.get("seqused_q"), capacity, "seqused_q"),
+        "batch_consistency": inputs.get(
+            "batch_consistency",
+            all(
+                inputs.get(name) is not None
+                for name in ("batch_axis", "batch_slice_info", "batch_seed")
+            ),
+        ),
+        "softmax_scale": inputs.get("softmax_scale", 1.0),
+        "cmp_ratio": inputs.get("cmp_ratio", 1),
+        "ori_mask_mode": inputs.get("ori_mask_mode", 0),
+        "cmp_mask_mode": inputs.get("cmp_mask_mode", 0),
+        "ori_win_left": inputs.get("ori_win_left", -1),
+        "ori_win_right": inputs.get("ori_win_right", 0),
+        "return_softmax_lse": inputs.get("return_softmax_lse", False),
+    }
+    for name in ("sinks", "cmp_residual_kv", "ori_topk_length", "cmp_topk_length"):
+        value = inputs.get(name)
+        state[name] = torch.as_tensor(value) if value is not None else None
+    if state["softmax_scale"] is None:
+        raise ValueError("MLA CPU reference requires softmax_scale")
+    if state["sinks"] is not None:
+        state["sinks"] = state["sinks"].float()
+    return state
+
+
+def _state_from_inputs(inputs):
+    """Map final operator inputs to the existing CPU model's arguments."""
+    q = inputs["q"]
+    state = _reference_state(q, inputs)
+    for side, topk_key in (("ori", "K1"), ("cmp", "K")):
+        cache, lengths, indices, prefix = _restore_cache(
+            inputs.get(f"{side}_kv"),
+            side,
+            state,
+            inputs,
+            allow_missing_length=(
+                inputs.get(f"{side}_sparse_indices") is not None
+                and state[f"{side}_mask_mode"] == 0
+            ),
+        )
+        state[f"{side}_k"] = cache
+        state[f"seqused_{side}_kv"] = lengths
+        state[f"{side}_sparse_indices"] = indices
+        state[f"{side}_kv_type"] = cache.dtype if cache is not None else None
+        state[f"cu_seqlens_{side}_kv"] = prefix
+        state[topk_key] = indices.shape[-1] if indices is not None else None
+
+    ori, cmp = state["ori_k"], state["cmp_k"]
+    if ori is None:
+        raise ValueError("MLA reference requires ori_kv")
+    if state["layout_kv"] == "PA_BBND":
+        state["layout_kv"] = "BNSD"
+    heads_axis = 1 if state["layout_kv"] == "BNSD" else -2
+    state.update(N2=ori.shape[heads_axis], S2=max(state["seqused_ori_kv"]))
+    if not state["N2"] or state["N1"] % state["N2"]:
+        raise ValueError("query heads must be a multiple of KV heads")
+    if cmp is not None and cmp.shape[heads_axis] != state["N2"]:
+        raise ValueError("ORI and CMP KV head counts must match")
+    for key in ("block_num1", "block_num2", "block_size1", "block_size2"):
+        state[key] = None
+
+    if state["ori_sparse_indices"] is not None:
+        mode = (
+            "ORI_CMP_SPARSE"
+            if state["cmp_sparse_indices"] is not None
+            else "ORI_SPARSE"
+        )
+    elif cmp is None:
+        mode = "SWA"
+    else:
+        mode = "HCA" if state["cmp_sparse_indices"] is None else "CSA"
+    state["template_idx"] = TEMPLATE_MODES[mode]
+    if state["sinks"] is None:
+        state["sinks"] = q.new_full((state["N1"],), -torch.inf, dtype=torch.float32)
+    return state
+
+
+def generate_cpu_golden(input_data, *, promote=False):
+    """Calculate CPU Golden from prepared state or the final operator inputs."""
+    state = input_data.get("golden_state")
+    if state is None:
+        state = _state_from_inputs(input_data["input"])
     test_smla = GeneralizedSFA(
         state["layout_q"],
         state["layout_kv"],
@@ -2397,6 +2671,7 @@ def generate_cpu_golden(input_data):
         state["cmp_topk_length"],
         state["return_softmax_lse"],
         state.get("batch_consistency", False),
+        promote=promote,
     )
     state["cpu_output"] = cpu_output
     state["softmax_lse"] = softmax_lse
