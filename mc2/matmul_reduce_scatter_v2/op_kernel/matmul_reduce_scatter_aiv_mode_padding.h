@@ -158,76 +158,52 @@ public:
 
     inline __aicore__ void Run(PADDING_ARGS_FUN())
     {
-        using ArchTag = Arch::AtlasA2;
-        using ElementA = InputType;
-        using ElementB = WeightType;
-
+        // 根据是否转置
         if (!transA && !transB) {
-            using LayoutA = layout::RowMajor;
-            using LayoutB = layout::RowMajor;
-            using AType = Gemm::GemmType<ElementA, LayoutA>;
-            using BType = Gemm::GemmType<ElementB, LayoutB>;
-            LayoutA layoutA{matrixAM, matrixAK};
-            LayoutB layoutB{matrixBK, matrixBN};
-            // 根据是否转置
-            LayoutA layoutWA{matrixAM, matrixAKAlign};
-            LayoutB layoutWB{matrixBK, matrixBNAlign};
-
-            using TemplatePadder = Gemm::Kernel::TemplatePadder<ArchTag, AType, BType>;
-            typename TemplatePadder::Params params{gmA,      layoutA,    gmB,      layoutB,   gmAAlign,
-                                                   layoutWA, gmBAlign,   layoutWB, alignedA,  alignedB,
-                                                   castBias, biasLength, gmBias,   gmBiasCast};
-            TemplatePadder padder;
-            padder(params);
+            layout::RowMajor layoutWA{matrixAM, matrixAKAlign};
+            layout::RowMajor layoutWB{matrixBK, matrixBNAlign};
+            RunPad<layout::RowMajor, layout::RowMajor>(layoutWA, layoutWB, gmA, gmB, gmAAlign, gmBAlign, matrixAM,
+                                                       matrixAK, matrixBK, matrixBN, alignedA, alignedB, castBias,
+                                                       biasLength, gmBias, gmBiasCast);
         } else if (!transA && transB) {
-            using LayoutA = layout::RowMajor;
-            using LayoutB = layout::ColumnMajor;
-            using AType = Gemm::GemmType<ElementA, LayoutA>;
-            using BType = Gemm::GemmType<ElementB, LayoutB>;
-            LayoutA layoutA{matrixAM, matrixAK};
-            LayoutB layoutB{matrixBK, matrixBN};
-            LayoutA layoutWA{matrixAM, matrixAKAlign};
-            LayoutB layoutWB{matrixBKAlign, matrixBN};
-
-            using TemplatePadder = Gemm::Kernel::TemplatePadder<ArchTag, AType, BType>;
-            typename TemplatePadder::Params params{gmA,      layoutA,    gmB,      layoutB,   gmAAlign,
-                                                   layoutWA, gmBAlign,   layoutWB, alignedA,  alignedB,
-                                                   castBias, biasLength, gmBias,   gmBiasCast};
-            TemplatePadder padder;
-            padder(params);
+            layout::RowMajor layoutWA{matrixAM, matrixAKAlign};
+            layout::ColumnMajor layoutWB{matrixBKAlign, matrixBN};
+            RunPad<layout::RowMajor, layout::ColumnMajor>(layoutWA, layoutWB, gmA, gmB, gmAAlign, gmBAlign, matrixAM,
+                                                          matrixAK, matrixBK, matrixBN, alignedA, alignedB, castBias,
+                                                          biasLength, gmBias, gmBiasCast);
         } else if (transA && !transB) {
-            using LayoutA = layout::ColumnMajor;
-            using LayoutB = layout::RowMajor;
-            using AType = Gemm::GemmType<ElementA, LayoutA>;
-            using BType = Gemm::GemmType<ElementB, LayoutB>;
-            LayoutA layoutA{matrixAM, matrixAK};
-            LayoutB layoutB{matrixBK, matrixBN};
-            LayoutA layoutWA{matrixAMAlign, matrixAK};
-            LayoutB layoutWB{matrixBK, matrixBNAlign};
-
-            using TemplatePadder = Gemm::Kernel::TemplatePadder<ArchTag, AType, BType>;
-            typename TemplatePadder::Params params{gmA,      layoutA,    gmB,      layoutB,   gmAAlign,
-                                                   layoutWA, gmBAlign,   layoutWB, alignedA,  alignedB,
-                                                   castBias, biasLength, gmBias,   gmBiasCast};
-            TemplatePadder padder;
-            padder(params);
+            layout::ColumnMajor layoutWA{matrixAMAlign, matrixAK};
+            layout::RowMajor layoutWB{matrixBK, matrixBNAlign};
+            RunPad<layout::ColumnMajor, layout::RowMajor>(layoutWA, layoutWB, gmA, gmB, gmAAlign, gmBAlign, matrixAM,
+                                                          matrixAK, matrixBK, matrixBN, alignedA, alignedB, castBias,
+                                                          biasLength, gmBias, gmBiasCast);
         } else {
-            using LayoutA = layout::ColumnMajor;
-            using LayoutB = layout::ColumnMajor;
-            using AType = Gemm::GemmType<ElementA, LayoutA>;
-            using BType = Gemm::GemmType<ElementB, LayoutB>;
-            LayoutA layoutA{matrixAM, matrixAK};
-            LayoutB layoutB{matrixBK, matrixBN};
-            LayoutA layoutWA{matrixAMAlign, matrixAK};
-            LayoutB layoutWB{matrixBKAlign, matrixBN};
-
-            using TemplatePadder = Gemm::Kernel::TemplatePadder<ArchTag, AType, BType>;
-            typename TemplatePadder::Params params{gmA,      layoutA,    gmB,      layoutB,   gmAAlign,
-                                                   layoutWA, gmBAlign,   layoutWB, alignedA,  alignedB,
-                                                   castBias, biasLength, gmBias,   gmBiasCast};
-            TemplatePadder padder;
-            padder(params);
+            layout::ColumnMajor layoutWA{matrixAMAlign, matrixAK};
+            layout::ColumnMajor layoutWB{matrixBKAlign, matrixBN};
+            RunPad<layout::ColumnMajor, layout::ColumnMajor>(layoutWA, layoutWB, gmA, gmB, gmAAlign, gmBAlign, matrixAM,
+                                                             matrixAK, matrixBK, matrixBN, alignedA, alignedB, castBias,
+                                                             biasLength, gmBias, gmBiasCast);
         }
+    }
+
+    template <typename LayoutA, typename LayoutB>
+    inline __aicore__ void RunPad(LayoutA layoutWA, LayoutB layoutWB, GM_ADDR gmA, GM_ADDR gmB, GM_ADDR gmAAlign,
+                                  GM_ADDR gmBAlign, uint32_t matrixAM, uint32_t matrixAK, uint32_t matrixBK,
+                                  uint32_t matrixBN, bool alignedA, bool alignedB, bool castBias, uint32_t biasLength,
+                                  GM_ADDR gmBias, GM_ADDR gmBiasCast)
+    {
+        using ArchTag = Arch::AtlasA2;
+        using AType = Gemm::GemmType<InputType, LayoutA>;
+        using BType = Gemm::GemmType<WeightType, LayoutB>;
+        LayoutA layoutA{matrixAM, matrixAK};
+        LayoutB layoutB{matrixBK, matrixBN};
+
+        using TemplatePadder = Gemm::Kernel::TemplatePadder<ArchTag, AType, BType>;
+        typename TemplatePadder::Params params{gmA,      layoutA,    gmB,      layoutB,   gmAAlign,
+                                               layoutWA, gmBAlign,   layoutWB, alignedA,  alignedB,
+                                               castBias, biasLength, gmBias,   gmBiasCast};
+        TemplatePadder padder;
+        padder(params);
     }
 };
 } // namespace padding

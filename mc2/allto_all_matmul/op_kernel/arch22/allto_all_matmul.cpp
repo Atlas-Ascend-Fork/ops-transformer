@@ -57,15 +57,13 @@ using namespace Mc2Kernel;
     } while (0)
 #endif
 
+#if (QUANT_TYPE == MC2_NON_QUANT)
+// int4类型tensor不为cast的src参数，需要隔离
 template <bool ALLTO_ALL_MM_HAS_BIAS, bool ALLTO_ALL_MM_TRANSPOSE_X2, int ALLTO_ALL_MM_QUANT_TYPE,
           int ALLTO_ALL_MM_QUANT_BIAS_DTYPE, int ALLTO_ALL_MM_SOC_VERSION>
-__global__ __aicore__ void allto_all_matmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias, GM_ADDR x1_scale, GM_ADDR x2_scale,
-                                            GM_ADDR comm_scale, GM_ADDR x1_offset, GM_ADDR x2_offset, GM_ADDR y,
-                                            GM_ADDR all2all_out, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+__aicore__ inline void LaunchAlltoAllMatmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias, GM_ADDR y, GM_ADDR all2all_out,
+                                            GM_ADDR workspaceGM, GM_ADDR tilingGM)
 {
-    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2); // A2、A3的kernel task都采用1:2模式
-
-#if (QUANT_TYPE == MC2_NON_QUANT) // int4类型tensor不为cast的src参数，需要隔离
     if constexpr (ALLTO_ALL_MM_SOC_VERSION == SOC_ASCEND910B) {
         // A2结构体注册由tilingkey的编译宏ASCENDC_TPL_TILING_STRUCT_SEL实现
         GET_TILING_DATA_WITH_STRUCT(AlltoAllMatmulTilingData, tilingData, tilingGM);
@@ -90,7 +88,13 @@ __global__ __aicore__ void allto_all_matmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias
             ALLTO_ALL_MATMUL_A3_FP_IMPL(tilingData, pipe);
         }
     }
+}
 #elif (QUANT_TYPE == MC2_DYNAMIC_QUANT)
+template <bool ALLTO_ALL_MM_HAS_BIAS, bool ALLTO_ALL_MM_TRANSPOSE_X2, int ALLTO_ALL_MM_QUANT_TYPE,
+          int ALLTO_ALL_MM_QUANT_BIAS_DTYPE, int ALLTO_ALL_MM_SOC_VERSION>
+__aicore__ inline void LaunchAlltoAllMatmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias, GM_ADDR x1_scale, GM_ADDR x2_scale,
+                                            GM_ADDR y, GM_ADDR all2all_out, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+{
     GET_TILING_DATA_WITH_STRUCT(AlltoAllMatmulTilingData, tilingData, tilingGM);
 
     if constexpr ((ALLTO_ALL_MM_QUANT_TYPE == TILINGKEY_TPL_A16W8 || ALLTO_ALL_MM_QUANT_TYPE == TILINGKEY_TPL_A16W4) &&
@@ -119,8 +123,13 @@ __global__ __aicore__ void allto_all_matmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias
         op.Init(x1, x2, bias, x1_scale, x2_scale, y, all2all_out, workspaceGM, tilingGM);
         op.Process();
     }
-
-#elif (QUANT_TYPE == MC2_STATIC_QUANT)
+}
+#else
+template <bool ALLTO_ALL_MM_HAS_BIAS, bool ALLTO_ALL_MM_TRANSPOSE_X2, int ALLTO_ALL_MM_QUANT_TYPE,
+          int ALLTO_ALL_MM_QUANT_BIAS_DTYPE, int ALLTO_ALL_MM_SOC_VERSION>
+__aicore__ inline void LaunchAlltoAllMatmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias, GM_ADDR x1_scale, GM_ADDR x2_scale,
+                                            GM_ADDR y, GM_ADDR all2all_out, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+{
     GET_TILING_DATA_WITH_STRUCT(AlltoAllMatmulTilingData, tilingData, tilingGM);
 
     if constexpr (ALLTO_ALL_MM_QUANT_TYPE == TILINGKEY_TPL_A4W4 &&
@@ -145,5 +154,24 @@ __global__ __aicore__ void allto_all_matmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias
         op.Init(x1, x2, bias, x1_scale, x2_scale, y, all2all_out, workspaceGM, tilingGM);
         op.Process();
     }
+}
+#endif
+
+template <bool ALLTO_ALL_MM_HAS_BIAS, bool ALLTO_ALL_MM_TRANSPOSE_X2, int ALLTO_ALL_MM_QUANT_TYPE,
+          int ALLTO_ALL_MM_QUANT_BIAS_DTYPE, int ALLTO_ALL_MM_SOC_VERSION>
+__global__ __aicore__ void allto_all_matmul(GM_ADDR x1, GM_ADDR x2, GM_ADDR bias, GM_ADDR x1_scale, GM_ADDR x2_scale,
+                                            GM_ADDR comm_scale, GM_ADDR x1_offset, GM_ADDR x2_offset, GM_ADDR y,
+                                            GM_ADDR all2all_out, GM_ADDR workspaceGM, GM_ADDR tilingGM)
+{
+    KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2); // A2、A3的kernel task都采用1:2模式
+
+#if (QUANT_TYPE == MC2_NON_QUANT)
+    LaunchAlltoAllMatmul<ALLTO_ALL_MM_HAS_BIAS, ALLTO_ALL_MM_TRANSPOSE_X2, ALLTO_ALL_MM_QUANT_TYPE,
+                         ALLTO_ALL_MM_QUANT_BIAS_DTYPE, ALLTO_ALL_MM_SOC_VERSION>(x1, x2, bias, y, all2all_out,
+                                                                                  workspaceGM, tilingGM);
+#else
+    LaunchAlltoAllMatmul<ALLTO_ALL_MM_HAS_BIAS, ALLTO_ALL_MM_TRANSPOSE_X2, ALLTO_ALL_MM_QUANT_TYPE,
+                         ALLTO_ALL_MM_QUANT_BIAS_DTYPE, ALLTO_ALL_MM_SOC_VERSION>(x1, x2, bias, x1_scale, x2_scale, y,
+                                                                                  all2all_out, workspaceGM, tilingGM);
 #endif
 }
