@@ -217,7 +217,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16, BFLOAT16, FLOAT32</td>
               <td>ND</td>
               <td>(T,H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>gradBlockRes (aclTensor*)</td>
@@ -227,7 +227,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16, BFLOAT16, FLOAT32</td>
               <td>ND</td>
               <td>(T,N,H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>gradProjWeight (aclTensor*)</td>
@@ -237,7 +237,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16, BFLOAT16, FLOAT32</td>
               <td>ND</td>
               <td>(1,H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>gradNormWeight(aclTensor*)</td>
@@ -247,7 +247,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16, BFLOAT16, FLOAT32</td>
               <td>ND</td>
               <td>(H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>workspaceSize (uint64_t*)</td>
@@ -349,6 +349,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
 
 ## Constraints
 
+- Output tensors support non-contiguous views, such as slices and transposes; elements within each output view must not overlap.
 - Deterministic computation: aclnnBlockAttentionResidualsGrad defaults to a deterministic implementation.
 - The data types of partialBlock, blockRes, projWeight, normWeight, gradHiddenStates, and their corresponding outputs must remain consistent. FLOAT16, BFLOAT16, and FLOAT32 are supported.
 - validBlockNum is a reserved INT64 attribute with a default value of -1. Only -1 or N (blockRes.shape[1]) is supported; other values return a parameter error.

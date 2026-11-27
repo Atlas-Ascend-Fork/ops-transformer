@@ -215,7 +215,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16、BFLOAT16、FLOAT32</td>
               <td>ND</td>
               <td>(T,H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>gradBlockRes（aclTensor*）</td>
@@ -225,7 +225,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16、BFLOAT16、FLOAT32</td>
               <td>ND</td>
               <td>(T,N,H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>gradProjWeight（aclTensor*）</td>
@@ -235,7 +235,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16、BFLOAT16、FLOAT32</td>
               <td>ND</td>
               <td>(1,H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>gradNormWeight（aclTensor*）</td>
@@ -245,7 +245,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
               <td>FLOAT16、BFLOAT16、FLOAT32</td>
               <td>ND</td>
               <td>(H)</td>
-              <td>-</td>
+              <td>√</td>
           </tr>
           <tr>
               <td>workspaceSize（uint64_t*）</td>
@@ -355,6 +355,7 @@ aclnnStatus aclnnBlockAttentionResidualsGrad(
 - partialBlock、blockRes、projWeight、normWeight、gradHiddenStates、invNorm和probs均只支持ND格式。
 - shape需满足：partialBlock为(T,H)，blockRes为(T,N,H)，projWeight为(1,H)，normWeight为(H)，gradHiddenStates为(T,H)，invNorm为(T,N+1)，probs为(T,N+1)，其中T必须大于等于64，H必须在[2048,500000]内，N在[0,128]内，且各张量中的T、H以及invNorm和probs的N+1保持一致。
 - 输入张量支持非连续Tensor，接口内部统一转为Contiguous后计算。
+- 输出张量支持非连续Tensor，如切片或转置视图；各输出视图内部的元素不能相互重叠。
 - probs应为前向softmax输出，invNorm应为前向逐行归一化系数，且invNorm和probs仅支持FLOAT32。当前实现完全以保存的probs和invNorm为准。
 - T<64、H<2048或H>500000时，第一阶段接口返回ACLNN_ERR_PARAM_INVALID，不执行Kernel。
 - 仅N=0且T、H非零时不提前返回，仍计算partialBlock及权重梯度。

@@ -23,6 +23,7 @@
 #include "aclnn_kernels/reshape.h"
 #include "level0/zero_op.h"
 
+#include <array>
 #include <initializer_list>
 #include <string>
 #include <vector>
@@ -411,11 +412,39 @@ aclnnStatus aclnnBlockAttentionResidualsGradGetWorkspaceSize(
     auto probs_ = l0op::Contiguous(probs, uniqueExecutor.get());
     CHECK_RET(probs_ != nullptr, ACLNN_ERR_INNER_NULLPTR);
 
+    const std::array<const aclTensor*, 4> userOutputs = {gradPartialBlock, gradBlockRes, gradProjWeight,
+                                                         gradNormWeight};
+    const std::array<const char*, 4> outputNames = {"gradPartialBlock", "gradBlockRes", "gradProjWeight",
+                                                    "gradNormWeight"};
+    std::array<aclTensor*, 4> kernelOutputs{};
+    for (size_t i = 0; i < userOutputs.size(); ++i) {
+        if (IsContiguous(userOutputs[i])) {
+            kernelOutputs[i] = const_cast<aclTensor*>(userOutputs[i]);
+        } else {
+            kernelOutputs[i] = uniqueExecutor->AllocTensor(userOutputs[i]->GetViewShape(),
+                                                           userOutputs[i]->GetDataType(), op::Format::FORMAT_ND);
+        }
+        if (kernelOutputs[i] == nullptr) {
+            OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Failed to allocate a contiguous tensor for output %s.",
+                                   outputNames[i]);
+            return ACLNN_ERR_INNER_NULLPTR;
+        }
+    }
+
     auto output = l0op::BlockAttentionResidualsGrad(
         partialBlock_, blockRes_, projWeight_, normWeight_, gradHiddenState_, invNorm_, probs_, validBlockNum,
-        const_cast<aclTensor*>(gradPartialBlock), const_cast<aclTensor*>(gradBlockRes),
-        const_cast<aclTensor*>(gradProjWeight), const_cast<aclTensor*>(gradNormWeight), uniqueExecutor.get());
+        kernelOutputs[0], kernelOutputs[1], kernelOutputs[2], kernelOutputs[3], uniqueExecutor.get());
     CHECK_RET(output != nullptr, ACLNN_ERR_INNER_NULLPTR);
+    for (size_t i = 0; i < userOutputs.size(); ++i) {
+        if (kernelOutputs[i] != userOutputs[i]) {
+            auto viewCopyOut = l0op::ViewCopy(kernelOutputs[i], userOutputs[i], uniqueExecutor.get());
+            if (viewCopyOut == nullptr) {
+                OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER_NULLPTR, "Failed to add ViewCopy for output %s.",
+                                       outputNames[i]);
+                return ACLNN_ERR_INNER_NULLPTR;
+            }
+        }
+    }
 
     *workspaceSize = uniqueExecutor->GetWorkspaceSize();
     uniqueExecutor.ReleaseTo(executor);
