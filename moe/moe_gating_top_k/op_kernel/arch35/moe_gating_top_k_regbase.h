@@ -1052,7 +1052,7 @@ __aicore__ inline void MoeGatingTopKRegbase<T>::smallKNotAlignEVFWithNorm(
         Reg::Reduce<Reg::ReduceType::SUM>(vreg3, vreg2, preg0);
         Reg::Adds(vreg3, vreg3, eps, preg0);
         Reg::Duplicate(vreg4, vreg3, preg0);
-        Reg::Div(vreg4, vreg2, vreg4, preg0);
+        Reg::Div<float, &RENORM_DIV_MODE>(vreg4, vreg2, vreg4, preg0);
         Reg::Muls(vreg4, vreg4, routedScalingFactor, preg0);
         Reg::Duplicate(vregAlign, perGroupExpertCountAlign, pregAll);
         Reg::Div(vregExpertIdxTmp, vreg1, vregAlign, preg0);
@@ -1158,7 +1158,7 @@ __aicore__ inline void MoeGatingTopKRegbase<T>::LargeKNotAlignEVFWithNorm(
             preg1 = Reg::UpdateMask<uint32_t>(k1);
             Reg::LoadAlign<uint32_t, Reg::LoadDist::DIST_DINTLV_B32>(vreg0, vreg1, mrgSortAddr + i * 2 * VL_FLOAT_SIZE);
             Reg::Gather(vreg2, inputAddr, vreg1, preg1);
-            Reg::Div(vregOutput, vreg2, vreg4, preg1);
+            Reg::Div<float, &RENORM_DIV_MODE>(vregOutput, vreg2, vreg4, preg1);
             Reg::Muls(vregOutput, vregOutput, routedScalingFactor, preg1);
             Reg::Div(vregExpertIdxTmp, vreg1, vregAlign, preg1);
             Reg::Muls(vregExpertIdxTmp, vregExpertIdxTmp, expertIdxPad, preg1);

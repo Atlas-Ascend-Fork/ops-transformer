@@ -18,6 +18,7 @@ __spec__ = {
     "aclnnMoeGatingTopK": "AclnnMoeGatingTopKTestSpec",
     "aclnnMoeGatingTopKV2": "AclnnMoeGatingTopKV2TestSpec",
     "torch_npu.npu_moe_gating_top_k": "E2eMoeGatingTopKTestSpec",
+    "moe_gating_top_k_bitwise": "MoeGatingTopKBitwiseTestSpec",
 }
 
 
@@ -235,6 +236,77 @@ def _softmax_torch(x, axis=-1):
     y = torch.exp(x_sub)
     x_sum = y.sum(dim=axis, keepdim=True)
     return y / x_sum
+
+
+def _eager_device_ref(
+    x,
+    k,
+    bias,
+    input_ids,
+    tid2eid,
+    k_group,
+    group_count,
+    group_select_mode,
+    renorm,
+    norm_type,
+    out_flag,
+    routed_scaling_factor,
+    eps,
+):
+    """设备侧eager小算子独立参考(逐bit对抗用例专用)。
+
+    在NPU上以torch小算子组合计算参考结果, 与eager侧同口径(torch.sigmoid→aclnnSigmoid,
+    sum→aclnnSum, 除法→aclnnDiv), 用于renorm除法档位(DivAlgo)回归的逐bit判定:
+    PRECISION_0ULP档与该参考逐bit一致, INTRINSIC(vdiv)档在随机/对抗输入上有9%~25%的
+    1ULP级失配。由E2eMoeGatingTopKTestSpec.golden的bitwise_ref分支与_bitwise_compare
+    钩子消费(TTK把非签名CSV属性经extra_attrs注入golden的**kwargs, 把attributes经
+    compare_context注入compare钩子)。"""
+    import torch_npu  # noqa: F401  使torch.sigmoid/sum/div分发到aclnn小算子
+
+    ori_dtype = x.dtype
+    xd = x.detach().to(torch.float32).npu()
+    biasd = bias.detach().to(torch.float32).npu() if bias is not None else None
+    idsd = input_ids.detach().to(torch.int64).npu() if input_ids is not None else None
+    tabled = tid2eid.detach().to(torch.int64).npu() if tid2eid is not None else None
+
+    if norm_type == 0:
+        normalized = torch.softmax(xd, dim=-1)
+    elif norm_type in (1, 3):
+        normalized = torch.sigmoid(xd)
+    elif norm_type == 2:
+        normalized = torch.sqrt(torch.nn.functional.softplus(xd))
+    else:
+        raise ValueError(f"unsupported norm_type: {norm_type}")
+    ranking = normalized + biasd if biasd is not None else normalized
+    if idsd is not None and tabled is not None:
+        _check_hash_indices(input_ids, tid2eid, normalized.shape[-1])
+        indices = tabled[idsd]
+    else:
+        if group_count > 1:
+            grouped = ranking.reshape(ranking.shape[0], int(group_count), -1)
+            if group_select_mode == 0:
+                group_scores = torch.amax(grouped, dim=-1)
+            else:
+                group_scores = torch.topk(grouped, 2, dim=-1).values.sum(dim=-1)
+            selected_groups = torch.argsort(
+                group_scores, dim=-1, descending=True, stable=True
+            )[:, : int(k_group)]
+            mask = torch.ones(
+                (grouped.shape[0], int(group_count)), dtype=torch.bool, device=xd.device
+            )
+            mask.scatter_(1, selected_groups, False)
+            ranking = torch.where(mask.unsqueeze(-1), -torch.inf, grouped).reshape(
+                ranking.shape[0], -1
+            )
+        indices = torch.argsort(ranking, dim=-1, descending=True, stable=True)[
+            :, : int(k)
+        ]
+    y = torch.gather(normalized, 1, indices)
+    if _should_renormalize(norm_type, renorm):
+        y = y / (y.sum(dim=-1, keepdim=True) + eps)
+    y = y * routed_scaling_factor
+    out = normalized.to(torch.float32).cpu() if out_flag else None
+    return [y.to(ori_dtype).cpu(), indices.to(torch.int32).cpu(), out]
 
 
 def _pre_compare_topk(*arrays):
@@ -543,6 +615,70 @@ class AclnnMoeGatingTopKV2TestSpec:
     pre_compare = _pre_compare_topk
 
 
+def _bitwise_compare(*arrays, compare_context=None, **kwargs):
+    """TTK custom compare钩子(E2eMoeGatingTopKTestSpec.compare): bitwise_ref用例逐bit判定。
+
+    判定语义: renorm除法档位回退为INTRINSIC(vdiv)时, y与设备侧eager小算子参考
+    (golden的bitwise_ref分支经_eager_device_ref产出)有9%~25%元素相差1ULP, 本钩子
+    FAIL; PRECISION_0ULP档逐bit一致, PASS。y(下标0)按行降序排序后比对以消除topk
+    顺序敏感; expertIdx(下标1)跳过(选取顺序属实现自由度); normOut(下标2)按位置
+    逐bit。ulp_tol属性可放宽容差(分母累加顺序残余场景)。非bitwise_ref用例返回
+    None, TTK回落标准容差比对。
+    """
+    attrs = (
+        dict(getattr(compare_context, "attributes", None) or {})
+        if compare_context is not None
+        else {}
+    )
+    if not int(attrs.get("bitwise_ref", 0) or 0):
+        return None
+    half = len(arrays) // 2
+    ulp_tol = int(attrs.get("ulp_tol", 0) or 0)
+    items = []
+    for idx in range(half):
+        actual, gold = arrays[idx], arrays[idx + half]
+        if idx == 1 or actual is None or gold is None:
+            items.append({"pass": True, "precision": "bitwise_skip"})
+            continue
+        a = numpy.ascontiguousarray(actual)
+        g = numpy.ascontiguousarray(gold)
+        if a.shape != g.shape or a.dtype != g.dtype:
+            items.append(
+                {
+                    "pass": False,
+                    "precision": "bitwise",
+                    "error_info": f"shape/dtype mismatch: {a.shape}/{a.dtype} vs {g.shape}/{g.dtype}",
+                }
+            )
+            continue
+        if idx == 0 and a.ndim == 2:
+            a = numpy.sort(a, axis=1)[:, ::-1]
+            g = numpy.sort(g, axis=1)[:, ::-1]
+        ab = a.view(numpy.int32)
+        gb = g.view(numpy.int32)
+        if ulp_tol > 0:
+            bad_mask = (
+                numpy.abs(ab.astype(numpy.int64) - gb.astype(numpy.int64)) > ulp_tol
+            )
+        else:
+            bad_mask = ab != gb
+        bad = int(bad_mask.sum())
+        item = {
+            "pass": bad == 0,
+            "precision": "bitwise" if bad == 0 else f"bitwise_fail({bad})",
+        }
+        if bad:
+            item["error_info"] = (
+                f"{bad}/{ab.size} elements differ from eager device reference "
+                f"(ulp_tol={ulp_tol}); renorm division mode likely reverted to INTRINSIC(vdiv)"
+            )
+            item["diff_indices"] = [
+                list(map(int, p)) for p in numpy.argwhere(bad_mask)[:8]
+            ]
+        items.append(item)
+    return items
+
+
 class MoeGatingTopKTestSpec:
     third_party = {"torch": _KernelTorchImpl}
     tolerance = _TOLERANCE
@@ -653,6 +789,23 @@ class E2eMoeGatingTopKTestSpec:
         eps=1e-20,
         **kwargs,
     ):
+        bitwise_ref = int(kwargs.pop("bitwise_ref", 0) or 0)
+        if bitwise_ref:
+            return _eager_device_ref(
+                x,
+                k,
+                bias,
+                input_ids,
+                tid2eid,
+                k_group,
+                group_count,
+                group_select_mode,
+                renorm,
+                norm_type,
+                out_flag,
+                routed_scaling_factor,
+                eps,
+            )
         ori_dtype = x.dtype
         x = x.to(torch.float32)
         if bias is not None:
@@ -708,3 +861,4 @@ class E2eMoeGatingTopKTestSpec:
         return [y.to(ori_dtype), indices.to(torch.int32), out]
 
     pre_compare = _pre_compare_topk
+    compare = staticmethod(_bitwise_compare)

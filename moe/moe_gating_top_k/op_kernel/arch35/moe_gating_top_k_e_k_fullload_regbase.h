@@ -330,7 +330,7 @@ __aicore__ inline void MoeGatingTopKEKFullloadRegbase<T>::SelectTopKExpertScore(
         Reg::Reduce<Reg::ReduceType::SUM>(vreg3, vreg2, preg0);
         Reg::Adds(vreg3, vreg3, eps_, preg0);
         Reg::Duplicate(vreg4, vreg3, preg0);
-        Reg::Div(vreg4, vreg2, vreg4, preg0);
+        Reg::Div<float, &RENORM_DIV_MODE>(vreg4, vreg2, vreg4, preg0);
         Reg::Muls(vregOutput, vreg4, routedScalingFactor_, preg0);
 
         ops::StoreOneTensorForDtypeT<T>(outputAddr, vregOutput, preg0, 0);

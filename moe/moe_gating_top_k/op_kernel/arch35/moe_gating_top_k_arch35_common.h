@@ -57,6 +57,15 @@ __aicore__ inline bool ShouldRenormalize(int64_t normType, int64_t renorm)
            ((normType == NORM_TYPE_SOFTMAX || normType == NORM_TYPE_SIGMOID_OPTIONAL_RENORM) && renorm == 1);
 }
 
+// Renorm归一化除法(Step5: yOut = gathered / (ReduceSum(gathered) + eps))对齐realdiv的正确舍入除法:
+// dav-3510上Reg::Div缺省模式(DivAlgo::INTRINSIC)仅保真1ULP, 这里显式选0ULP档;
+// sigmoid自身的1/(1+exp(-x))除法保持缺省模式, 以对齐aclnnSigmoid舍入口径, 勿套用本模式。
+constexpr AscendC::Reg::DivSpecificMode RENORM_DIV_MODE = {
+    Reg::MaskMergeMode::ZEROING,
+    true,
+    AscendC::DivAlgo::PRECISION_0ULP_FTZ_TRUE,
+};
+
 __aicore__ inline int64_t Align(int64_t elementNum, int64_t bytes)
 {
     if (bytes == 0) {
@@ -161,7 +170,7 @@ __aicore__ inline void SmallKAlignEVFWithNorm(__ubuf__ float* inputAddr, __ubuf_
         Reg::Reduce<Reg::ReduceType::SUM>(vregSum, vregGathered, preg0);
         Reg::Adds(vregSum, vregSum, eps, preg0);
         Reg::Duplicate(vregSumBcast, vregSum, preg0);
-        Reg::Div(vregSumBcast, vregGathered, vregSumBcast, preg0);
+        Reg::Div<float, &RENORM_DIV_MODE>(vregSumBcast, vregGathered, vregSumBcast, preg0);
         Reg::Muls(vregSumBcast, vregSumBcast, routedScalingFactor, preg0);
         ops::StoreOneTensorForDtypeT<T>(outputAddr, vregSumBcast, preg0, 0);
         Reg::StoreAlign(expertIdxAddr, vregExpertIdx, preg0);
@@ -230,7 +239,7 @@ __aicore__ inline void LargeKAlignEVFWithNorm(__ubuf__ float* inputAddr, __ubuf_
             Reg::LoadAlign<uint32_t, Reg::LoadDist::DIST_DINTLV_B32>(vregSortValue, vregExpertIdx,
                                                                      mrgSortAddr + i * 2 * VL_FLOAT_SIZE);
             Reg::Gather(vregGathered, inputAddr, vregExpertIdx, preg1);
-            Reg::Div(vregOutput, vregGathered, vregSumBcast, preg1);
+            Reg::Div<float, &RENORM_DIV_MODE>(vregOutput, vregGathered, vregSumBcast, preg1);
             Reg::Muls(vregOutput, vregOutput, routedScalingFactor, preg1);
             ops::StoreOneTensorForDtypeT<T>(outputAddr, vregOutput, preg1, i * VL_FLOAT_SIZE);
             Reg::StoreAlign(expertIdxAddr + i * VL_FLOAT_SIZE, vregExpertIdx, preg1);

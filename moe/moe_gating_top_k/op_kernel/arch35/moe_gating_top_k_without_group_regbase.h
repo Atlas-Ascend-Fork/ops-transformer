@@ -527,7 +527,7 @@ __aicore__ inline void MoeGatingTopKWithoutGroupRegbase<T>::SelectTop1AndScoreWi
         Reg::Reduce<Reg::ReduceType::SUM>(vregSum, vregGathered, preg0);
         Reg::Adds(vregSum, vregSum, eps_, preg0);
         Reg::Duplicate(vregSumBcast, vregSum, preg0);
-        Reg::Div(vregSumBcast, vregGathered, vregSumBcast, preg0);
+        Reg::Div<float, &RENORM_DIV_MODE>(vregSumBcast, vregGathered, vregSumBcast, preg0);
         Reg::Muls(vregOutput, vregSumBcast, routedScalingFactor_, preg0);
         ops::StoreOneTensorForDtypeT<T>(outputAddr, vregOutput, preg0, 0);
         Reg::StoreAlign(expertIdxAddr, vregExpertIdx, preg0);
@@ -710,7 +710,7 @@ __aicore__ inline void MoeGatingTopKWithoutGroupRegbase<T>::ProcessSingleExpertS
                 Reg::Div(vregNorm, vregOne, vregTmp3, preg0);
                 if constexpr (NEED_RENORM) {
                     Reg::Adds(vregSumBcast, vregNorm, eps_, preg0);
-                    Reg::Div(vregOut, vregNorm, vregSumBcast, preg0);
+                    Reg::Div<float, &RENORM_DIV_MODE>(vregOut, vregNorm, vregSumBcast, preg0);
                     Reg::Muls(vregOut, vregOut, routedScalingFactor_, preg0);
                 } else {
                     Reg::Muls(vregOut, vregNorm, routedScalingFactor_, preg0);
@@ -761,7 +761,7 @@ __aicore__ inline void MoeGatingTopKWithoutGroupRegbase<T>::ProcessSingleExpertS
                 ops::LoadOneTensorForDtypeT<T>(inputAddr, vregIn, preg0, i * VL_FLOAT_SIZE);
                 Reg::Duplicate(vregNorm, static_cast<float>(1), preg0);
                 Reg::Adds(vregSumBcast, vregNorm, eps_, preg0);
-                Reg::Div(vregOut, vregNorm, vregSumBcast, preg0);
+                Reg::Div<float, &RENORM_DIV_MODE>(vregOut, vregNorm, vregSumBcast, preg0);
                 Reg::Muls(vregOut, vregOut, routedScalingFactor_, preg0);
                 Reg::Duplicate(vregZeroIdx, static_cast<int32_t>(0), preg0);
                 ops::StoreOneTensorForDtypeT<T>(outputAddr, vregOut, preg0, i * VL_FLOAT_SIZE);
@@ -880,7 +880,7 @@ __aicore__ inline void MoeGatingTopKWithoutGroupRegbase<T>::ProcessSingleExpertS
                 Reg::Add(vregNorm, vregTmp1, vregTmp3, preg0);
                 Reg::Sqrt(vregNorm, vregNorm, preg0);
                 Reg::Adds(vregSumBcast, vregNorm, eps_, preg0);
-                Reg::Div(vregOut, vregNorm, vregSumBcast, preg0);
+                Reg::Div<float, &RENORM_DIV_MODE>(vregOut, vregNorm, vregSumBcast, preg0);
                 Reg::Muls(vregOut, vregOut, routedScalingFactor_, preg0);
                 Reg::Duplicate(vregZeroIdx, static_cast<int32_t>(0), preg0);
                 ops::StoreOneTensorForDtypeT<T>(outputAddr, vregOut, preg0, i * VL_FLOAT_SIZE);

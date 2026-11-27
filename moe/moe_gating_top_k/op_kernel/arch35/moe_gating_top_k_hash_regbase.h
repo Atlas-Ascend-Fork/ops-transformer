@@ -99,7 +99,7 @@ __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::HashGatherWithSmallK
             Reg::Reduce<Reg::ReduceType::SUM>(vreg3, vreg2, preg0);
             Reg::Adds(vreg3, vreg3, eps, preg0);
             Reg::Duplicate(vreg4, vreg3, preg0);
-            Reg::Div(vreg4, vreg2, vreg4, preg0);
+            Reg::Div<float, &RENORM_DIV_MODE>(vreg4, vreg2, vreg4, preg0);
             Reg::Muls(vreg4, vreg4, routedScalingFactor, preg0);
             ops::StoreOneTensorForDtypeT<T>(outputAddr, vreg4, preg0, 0);
         }
@@ -152,7 +152,7 @@ __aicore__ inline void MoeGatingTopKHashRegbase<T, U1, U2>::HashGatherWithSmallK
             Reg::Reduce<Reg::ReduceType::SUM>(vreg3, vreg2, preg0);
             Reg::Adds(vreg3, vreg3, eps, preg0);
             Reg::Duplicate(vreg4, vreg3, preg0);
-            Reg::Div(vreg4, vreg2, vreg4, preg0);
+            Reg::Div<float, &RENORM_DIV_MODE>(vreg4, vreg2, vreg4, preg0);
             Reg::Muls(vreg4, vreg4, routedScalingFactor, preg0);
 
             Reg::Div(vregAlign, vreg1, vregAlign, preg0);
