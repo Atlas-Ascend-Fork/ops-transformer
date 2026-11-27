@@ -1310,6 +1310,21 @@ TEST_F(AttentionToFFNArch22TilingTest, InvalidQuantModeReportsSingleFormalError)
     ExpectExcelFormalError("EZ0026", "quant_mode", "9");
 }
 
+TEST_F(AttentionToFFNArch22TilingTest, InvalidMxQuantModeReportsSingleFormalError)
+{
+    ExcelErrorReportScope reportScope;
+    EXPECT_FALSE(MC2Tiling::CheckAttrValues("AttentionToFFN", 8, 16, 9, 0, 0, true, 768));
+    ExpectExcelFormalError("EZ0026", "quant_mode", "9");
+}
+
+TEST_F(AttentionToFFNArch22TilingTest, ValidMxQuantModeReportsNoFormalError)
+{
+    ExcelErrorReportScope reportScope;
+    EXPECT_TRUE(
+        MC2Tiling::CheckAttrValues("AttentionToFFN", 8, 16, MC2Tiling::USER_QUANT_MODE_MX_E5M2, 0, 0, true, 768));
+    ASSERT_EQ(ErrorManager::GetInstance().GetRawErrorMessages().size(), 0U);
+}
+
 TEST_F(AttentionToFFNArch22TilingTest, InvalidSyncFlagReportsSingleFormalError)
 {
     ExcelErrorReportScope reportScope;
