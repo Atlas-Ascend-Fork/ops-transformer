@@ -28,7 +28,7 @@
 
   Self-attention（自注意力）利用输入样本自身的关系构建了一种注意力模型。其原理是假设有一个长度为$n$的输入样本序列$x$，$x$的每个元素都是一个$d$维向量，可以将每个$d$维向量看作一个token embedding，将这样一条序列经过3个权重矩阵变换得到3个维度为$n*d$的矩阵。
 
-  Selected Attention的计算由topk索引取数与attention计算融合而成，外加paged attention取kvCache。首先，通过$topkIndices$索引从$key$中取出$key_{topk}$，从$value$中取出$value_{topk}$，计算Self-attention公式如下：
+  Selected Attention的计算由topk索引取数与attention计算融合而成，外加paged attention取kv cache。首先，通过$topkIndices$索引从$key$中取出$key_{topk}$，从$value$中取出$value_{topk}$，计算Self-attention公式如下：
 
   $$
   Attention(query,key,value)=Softmax(\frac{query · key_{topk}^T}{\sqrt{d}})value_{topk}
@@ -129,7 +129,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
               <li> 支持key的N轴小于等于256。</li>
                <li>支持key的D轴等于192。</li>
                <li>支持key的blockSize等于64或128。</li>
-                <li>key中的N和numHeads值相等，并且numHeads是numKeyValueHeads的倍数关系。</li>
+                <li>key中的N和numKeyValueHeads值相等。</li>
             </ul>
           </td>
           <td>FLOAT16、BFLOAT16</td>
@@ -147,7 +147,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
               <li>支持value的N轴小于等于256。</li>
                <li>支持value的D轴等于128。</li>
                <li>支持value的blockSize等于64或128。</li>
-               <li>value中的N和numHeads值相等，并且numHeads是numKeyValueHeads的倍数关系。</li>
+               <li>value中的N和numKeyValueHeads值相等。</li>
                <li>value的D(H/numKeyValueHeads)和output的D值相等。</li>
             </ul>
           </td>
@@ -173,7 +173,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td>×</td>
         </tr>
         <tr>
-          <td style="white-space: nowrap;">attenMask</td>
+          <td style="white-space: nowrap;">attenMaskOptional</td>
           <td>输入</td>
           <td>表示attention掩码矩阵。</td>
           <td>
@@ -304,7 +304,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
           <td>输入</td>
           <td>代表paged attention的block大小。</td>
           <td>
-      在kv cache取数时使用。
+      在kv cache取数时使用，取值为64或128。
           </td>
           <td>INT64</td>
           <td>-</td>
@@ -326,7 +326,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
         <tr>
           <td style="white-space: nowrap;">sparseMode</td>
           <td>输入</td>
-          <td>表示sparse的模式，控制有attentionMask输入时的稀疏计算。</td>
+          <td>表示sparse的模式，控制有attenMaskOptional输入时的稀疏计算。</td>
           <td>
       预留参数，暂未使用。
           </td>
@@ -378,7 +378,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
   第一段接口完成入参校验，出现以下场景时报错：
 
   <div style="overflow-x: auto;">
-  <table style="table-layout: fixed; width: 1030px">  <colgroup>
+  <table style="table-layout: fixed; width: 1030px"> <colgroup>
       <col style="width: 250px">
       <col style="width: 130px">
       <col style="width: 650px">
@@ -400,10 +400,10 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
         <!-- 合并单元格添加merged-cell类实现上下居中 -->
         <td class="merged-cell" rowspan="2">ACLNN_ERR_PARAM_INVALID</td>
         <td class="merged-cell" rowspan="2">161002</td>
-        <td>query、key、value、topkIndices、attenMask、blockTableOptional、actualQSeqLenOptional、actualKvSeqLenOptional、output的数据类型不在支持的范围内。</td>
+        <td>query、key、value、topkIndices、attenMaskOptional、blockTableOptional、actualQSeqLenOptional、actualKvSeqLenOptional、output的数据类型不在支持的范围内。</td>
       </tr>
       <tr>
-        <td>query、key、value、topkIndices、attenMask、blockTableOptional、actualQSeqLenOptional、actualKvSeqLenOptional、output的数据格式不在支持的范围内。</td>
+        <td>query、key、value、topkIndices、attenMaskOptional、blockTableOptional、actualQSeqLenOptional、actualKvSeqLenOptional、output的数据格式不在支持的范围内。</td>
       </tr>
     </tbody>
   </table>
@@ -463,7 +463,7 @@ aclnnStatus aclnnNsaSelectedAttentionInfer(
 - 支持B轴小于等于3072。
 - actualQSeqLenOptional与actualKvSeqLenOptional的长度必须等于query的第0维B（layoutOptional为BSH/BSND时），仅传入1个元素不合法；layoutOptional为TND时两者长度必须一致。
 - 仅支持paged attention。
-- 多token推理场景下，仅支持query的S轴最大等于4，并且此时要求每个batch单独的actualQSeqLen <= actualSelKvSeqLen。
+- 多token推理场景下，仅支持query的S轴最大等于4，并且此时要求每个batch的actualQSeqLenOptional <= actualKvSeqLenOptional。
 
 ## 调用示例
 
@@ -573,13 +573,13 @@ int main(int argc, char **argv)
     int64_t qSeqlen = 1;
     std::vector<int64_t> actualCmpQSeqLenVector(batch, qSeqlen);
     actualCmpQSeqLen = aclCreateIntArray(actualCmpQSeqLenVector.data(), actualCmpQSeqLenVector.size());
-    int64_t d1 = 192;
-    int64_t d2 = 128;
+    int64_t d1 = 192;  // Query和Key的head维度
+    int64_t d2 = 128;  // Value和输出的head维度
     int64_t numHeads = 1;
     int64_t numKeyValueHeads = 1;
     int64_t blockSize = 64;
     int64_t selectBlockSize = 64;
-    int64_t selectBlockCount = 1;
+    int64_t selectBlockCount = 1;  // 每个query token、每个KV头选择一个块
     int64_t blockTableLength = 1;
     int64_t numBlocks = batch * blockTableLength;
     std::vector<int64_t> queryShape = {batch, qSeqlen, numHeads, d1};
@@ -610,13 +610,14 @@ int main(int argc, char **argv)
                 if (k == 0) {
                     topkIndicesHostData.push_back(k);
                 } else {
-                    topkIndicesHostData.push_back(-1);
+                    topkIndicesHostData.push_back(-1);  // 无效块索引，不参与计算
                 }
             }
         }
        }
     }
     // attr
+    // 通常使用1/sqrt(d1)缩放，本例取1.0以保持注意力分数不变。
     double scaleValue = 1.0;
     int64_t sparseMode = 0;
     std::string sLayerOut = "BSND";
@@ -706,6 +707,8 @@ int main(int argc, char **argv)
     aclDestroyTensor(outputTensor);
     aclDestroyTensor(topkIndicesTensor);
     aclDestroyTensor(blockTableOptionalTensor);
+    aclDestroyIntArray(actualCmpQSeqLen);
+    aclDestroyIntArray(actualCmpKvSeqLen);
     aclrtFree(queryDeviceAddr);
     aclrtFree(keyDeviceAddr);
     aclrtFree(valueDeviceAddr);
