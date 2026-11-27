@@ -435,12 +435,16 @@ struct ScheduleContext {
   ControlArea   control;
   AttentionArea attention;
   FfnArea       ffn;
-  int8_t        reserve6[384];      // Padding to 1024 bytes.
+  int8_t        reserve6[384];      // Padding to 1KB.
 };
-static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1024 bytes");
+static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1KB");
 #pragma pack(pop)
 
 int main() {
+  // This example calls the two-phase aclnnAttentionWorkerCombine API in single-operator mode:
+  // it reads the FFN token data from AttentionArea in ScheduleContext, applies expertScales,
+  // and outputs y and nextLayerId.
+  // 1. Initialize ACL and create the stream.
   int32_t deviceId = 0;
   aclrtStream stream;
   auto ret = Init(deviceId, &stream);
@@ -451,7 +455,7 @@ int main() {
   int64_t K = 8;         // routed experts per token
   const int64_t expertRows = K + 1;  // includes the shared expert
   int64_t H = 20480;
-  int64_t tokenDtype = 1;    // BF16
+  int64_t tokenDtype = 1;
   int64_t needSchedule = 0;
 
   // Initialize ScheduleContext.

@@ -37,7 +37,7 @@ cann_ops_transformer.attention_worker_combine(schedule_context, expert_scales, l
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 维度(shape) |
 | --- | --- | --- | --- | --- | --- |
-| schedule_context | Tensor | 必选 | 调度上下文，保存有效的ScheduleContext结构体。 | int8 | (1024,) |
+| schedule_context | Tensor | 必选 | 调度上下文，保存有效的ScheduleContext结构体，须由上游调度流程通过`torch_npu._afd.create_schedule_context_holder`创建；本参数传入其返回的int8 Tensor，shape为(1024,)，关联的token和就绪标志缓冲区须保持有效直至调用完成。 | int8 | (1024,) |
 | expert_scales | Tensor | 必选 | 非量化场景为专家权重。MXFP 反量化场景为 E8M0 缩放因子，隐藏维度每 32 个元素共享一个缩放因子。uint8 用于承载 E8M0 原始编码。 | 非量化：float32；MXFP反量化：uint8、float8_e8m0fnu | 非量化场景为 `(R, K)`。MXFP 反量化场景为 `(R, K + 1, S)`，专家维的最后一项对应共享专家，`S` 为 `ceil(H / 32)` 向上对齐到偶数后的值。 |
 | layer_id | Tensor | 必选 | 当前层ID。 | int32 | (1,) |
 | hidden_size | int | 必选 | 隐藏维度大小 `H`。 | int | - |
@@ -73,6 +73,8 @@ cann_ops_transformer.attention_worker_combine(schedule_context, expert_scales, l
 
 ## 调用示例
 
+示例通过`torch_npu._afd.create_schedule_context_holder`创建调度上下文：`session_num`为调度会话数，`micro_batch_num`为微批个数，`micro_batch_size`为每批token数`R`，`selected_expert_num`为每token选中的专家数（`K+1`，含共享专家），`expert_num`为模型专家总数，`attn_to_ffn_token_size`/`ffn_to_attn_token_size`为单token双向搬运字节数（BF16下为`2*H`）。窗口布局中，每个专家token就绪标志占4字节，信息区按512字节对齐，整个窗口按2MB对齐。
+
 - 单算子模式调用：
 
     ```python
@@ -89,11 +91,15 @@ cann_ops_transformer.attention_worker_combine(schedule_context, expert_scales, l
     R, K, H = 256, 6, 4096
 
     # Attention窗口包含就绪标志和K+1行专家数据，BF16每个元素占2字节。
-    info_bytes = align_up(4 * R * (K + 1), 512)
+    INFO_BYTE_PER_TOKEN = 4  # 每个专家token就绪标志占4字节
+    INFO_ALIGN = 512  # 信息区按512字节对齐
+    WINDOW_ALIGN = 2 * 1024 * 1024  # 整个窗口按2MB对齐
+    info_bytes = align_up(INFO_BYTE_PER_TOKEN * R * (K + 1), INFO_ALIGN)
     data_bytes = 2 * R * (K + 1) * H
-    window_bytes = align_up(info_bytes + data_bytes, 2 * 1024 * 1024)
+    window_bytes = align_up(info_bytes + data_bytes, WINDOW_ALIGN)
     window = torch.zeros(window_bytes, dtype=torch.uint8, device="npu")
 
+    # 创建调度上下文，参数含义见上文说明。
     holder = torch_npu._afd.create_schedule_context_holder(
         schedule_mode=1,
         session_num=4,
@@ -144,11 +150,15 @@ cann_ops_transformer.attention_worker_combine(schedule_context, expert_scales, l
     R, K, H = 256, 6, 4096
 
     # Attention窗口包含就绪标志和K+1行专家数据，BF16每个元素占2字节。
-    info_bytes = align_up(4 * R * (K + 1), 512)
+    INFO_BYTE_PER_TOKEN = 4  # 每个专家token就绪标志占4字节
+    INFO_ALIGN = 512  # 信息区按512字节对齐
+    WINDOW_ALIGN = 2 * 1024 * 1024  # 整个窗口按2MB对齐
+    info_bytes = align_up(INFO_BYTE_PER_TOKEN * R * (K + 1), INFO_ALIGN)
     data_bytes = 2 * R * (K + 1) * H
-    window_bytes = align_up(info_bytes + data_bytes, 2 * 1024 * 1024)
+    window_bytes = align_up(info_bytes + data_bytes, WINDOW_ALIGN)
     window = torch.zeros(window_bytes, dtype=torch.uint8, device="npu")
 
+    # 创建调度上下文，参数含义见上文说明。
     holder = torch_npu._afd.create_schedule_context_holder(
         schedule_mode=1,
         session_num=4,
@@ -170,7 +180,7 @@ cann_ops_transformer.attention_worker_combine(schedule_context, expert_scales, l
 
 
     backend = torchair.get_npu_backend(compiler_config=CompilerConfig())
-    # dynamic=True为动态图；改为dynamic=False则为静态图。
+    # dynamic=True为动态shape；改为dynamic=False则为静态shape。
     compiled_combine = torch.compile(
         combine, backend=backend, fullgraph=True, dynamic=True,
     )

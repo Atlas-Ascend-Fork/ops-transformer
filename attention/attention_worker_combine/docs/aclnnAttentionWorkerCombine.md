@@ -43,7 +43,7 @@
     y[i,h] = \sum_{k=0}^{K-1} \text{expertScales}[i,k] \times \text{token\_data}[i,k,h] + \text{token\_data}[i,K,h]
     $$
 
-  - MXFP 反量化场景（tokenDtype 为 2、3 或 4），设 $S$ 为 scale 槽数，dequant(x, s) 表示将 token 值按其 dtype 解码后乘以 E8M0 scale 解码值：
+  - MXFP反量化场景（tokenDtype为2、3或4），设$S$为scale槽数，dequant(x, s)表示将token值按其dtype解码后乘以E8M0 scale解码值：
 
     $$
     y[i,h] = \sum_{k=0}^{K} \operatorname{dequant}\!\left(\text{token\_data}[i,k,h],\ \text{expertScales}[i,k,\lfloor h/32 \rfloor]\right)
@@ -435,12 +435,15 @@ struct ScheduleContext {
   ControlArea   control;
   AttentionArea attention;
   FfnArea       ffn;
-  int8_t        reserve6[384];      // Padding to 1024 bytes.
+  int8_t        reserve6[384];      // Padding to 1KB.
 };
-static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1024 bytes");
+static_assert(sizeof(ScheduleContext) == 1024, "ScheduleContext size must be 1KB");
 #pragma pack(pop)
 
 int main() {
+  // 本示例演示单算子模式调用aclnnAttentionWorkerCombine两段式接口：
+  // 从ScheduleContext的AttentionArea读取FFN回传的token数据，按expertScales加权融合，输出y和nextLayerId。
+  // 1. 初始化ACL并创建Stream
   int32_t deviceId = 0;
   aclrtStream stream;
   auto ret = Init(deviceId, &stream);
@@ -451,7 +454,7 @@ int main() {
   int64_t K = 8;         // routed experts per token
   const int64_t expertRows = K + 1;  // includes the shared expert
   int64_t H = 20480;
-  int64_t tokenDtype = 1;    // BF16
+  int64_t tokenDtype = 1;
   int64_t needSchedule = 0;
 
   // 初始化ScheduleContext
