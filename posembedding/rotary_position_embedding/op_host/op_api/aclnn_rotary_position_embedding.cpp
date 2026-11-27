@@ -9,6 +9,7 @@
  */
 
 #include "op_common/op_host/util/op_const_def.h"
+#include "op_common/log/log.h"
 #include "aclnn_rotary_position_embedding.h"
 #include "aclnn_rotary_position_embedding_v2.h"
 #include "rotary_position_embedding.h"
@@ -18,6 +19,7 @@
 #include "opdev/op_executor.h"
 #include "opdev/op_log.h"
 #include "opdev/platform.h"
+#include "opdev/shape_utils.h"
 #include "aclnn_kernels/contiguous.h"
 #include "external/aclnn_kernels/aclnn_platform.h"
 
@@ -64,6 +66,56 @@ static aclnnStatus CheckDtype(const aclTensor* x, const aclTensor* cos, const ac
     }
     if (x != nullptr && out != nullptr) {
         OP_CHECK_DTYPE_NOT_SAME(x, out, return ACLNN_ERR_PARAM_INVALID);
+    }
+    return ACLNN_SUCCESS;
+}
+
+static aclnnStatus CheckShape(const aclTensor* x, const aclTensor* cos, const aclTensor* sin, const aclTensor* out)
+{
+    const auto xShape = x->GetViewShape();
+    const auto cosShape = cos->GetViewShape();
+    const auto sinShape = sin->GetViewShape();
+    const auto outShape = out->GetViewShape();
+
+    int64_t xIndex = 0;
+    int64_t cosIndex = 1;
+    int64_t sinIndex = 2;
+    if (cosShape != sinShape) {
+        OP_LOGE_WITH_INVALID_INPUT_SHAPE("RotaryPositionEmbedding", sinIndex, op::ToString(sinShape).GetString(),
+                                         op::ToString(cosShape).GetString());
+        return ACLNN_ERR_INNER_TILING_ERROR;
+    }
+    if (xShape != outShape) {
+        OP_LOGE_FOR_INVALID_SHAPE("RotaryPositionEmbedding", "out", op::ToString(outShape).GetString(),
+                                  op::ToString(xShape).GetString());
+        return ACLNN_ERR_INNER_TILING_ERROR;
+    }
+    if (xShape.GetDimNum() != cosShape.GetDimNum()) {
+        OP_LOGE_WITH_INVALID_INPUT_SHAPE("RotaryPositionEmbedding", cosIndex, op::ToString(cosShape).GetString(),
+                                         "the same rank as x " + std::string(op::ToString(xShape).GetString()));
+        return ACLNN_ERR_INNER_TILING_ERROR;
+    }
+
+    const auto dimNum = xShape.GetDimNum();
+    if (dimNum == 0) {
+        OP_LOGE_WITH_INVALID_INPUT_SHAPE("RotaryPositionEmbedding", xIndex, op::ToString(xShape).GetString(),
+                                         "at least one dimension");
+        return ACLNN_ERR_INNER_TILING_ERROR;
+    }
+    const auto lastDim = dimNum - 1;
+    if (xShape.GetDim(lastDim) != cosShape.GetDim(lastDim)) {
+        OP_LOGE_WITH_INVALID_INPUT_SHAPE("RotaryPositionEmbedding", cosIndex, op::ToString(cosShape).GetString(),
+                                         "the same D dimension as x " + std::string(op::ToString(xShape).GetString()));
+        return ACLNN_ERR_INNER_TILING_ERROR;
+    }
+
+    for (size_t index = 0; index < lastDim; ++index) {
+        if (cosShape.GetDim(index) != 1 && cosShape.GetDim(index) != xShape.GetDim(index)) {
+            OP_LOGE_WITH_INVALID_INPUT_SHAPE("RotaryPositionEmbedding", cosIndex, op::ToString(cosShape).GetString(),
+                                             "each non-last dimension equal to 1 or the corresponding dimension of x " +
+                                                 std::string(op::ToString(xShape).GetString()));
+            return ACLNN_ERR_INNER_TILING_ERROR;
+        }
     }
     return ACLNN_SUCCESS;
 }
@@ -122,6 +174,9 @@ static aclnnStatus RotaryPositionEmbeddingCommonProcess(const aclTensor* x, cons
     }
     CheckModeSupportAndWarn(mode);
 
+    ret = CheckShape(x, cos, sin, out);
+    CHECK_RET(ret == ACLNN_SUCCESS, ret);
+
     const aclTensor* xProcessed = x;
     const aclTensor* cosProcessed = cos;
     const aclTensor* sinProcessed = sin;
@@ -155,6 +210,9 @@ aclnnStatus aclnnRotaryPositionEmbeddingGetWorkspaceSize(const aclTensor* x, con
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
+    OP_CHECK_NULL(x, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(cos, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(sin, return ACLNN_ERR_PARAM_NULLPTR);
     OP_CHECK_NULL(out, return ACLNN_ERR_PARAM_NULLPTR);
     if (out->IsEmpty()) {
         *workspaceSize = 0;
@@ -195,6 +253,9 @@ aclnnStatus aclnnRotaryPositionEmbeddingV2GetWorkspaceSize(const aclTensor* x, c
     auto uniqueExecutor = CREATE_EXECUTOR();
     CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
+    OP_CHECK_NULL(x, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(cos, return ACLNN_ERR_PARAM_NULLPTR);
+    OP_CHECK_NULL(sin, return ACLNN_ERR_PARAM_NULLPTR);
     OP_CHECK_NULL(out, return ACLNN_ERR_PARAM_NULLPTR);
     if (out->IsEmpty()) {
         *workspaceSize = 0;
