@@ -482,6 +482,11 @@ static bool MhcPreBackwardCheckCommonShape(const AclnnMhcPreBackwardParams& para
     // 校验 phi 第一维: 必须是 N!+2N 或 N²+2N
     uint64_t expectedFusionSizeFactN = Factorial(numsResidual) + 2 * numsResidual;   // N!+2N
     uint64_t expectedFusionSizeNsq = numsResidual * numsResidual + 2 * numsResidual; // N²+2N
+    if (GetCurrentPlatformInfo().GetSocVersion() == SocVersion::ASCEND950 && fusionSize != expectedFusionSizeNsq) {
+        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "A5 phi tensor first dim must be N^2+2N (%lu), but got %lu",
+                expectedFusionSizeNsq, fusionSize);
+        return false;
+    }
     if (fusionSize != expectedFusionSizeFactN && fusionSize != expectedFusionSizeNsq) {
         OP_LOGE(ACLNN_ERR_PARAM_INVALID, "phi tensor first dim must be N!+2N (%lu) or N^2+2N (%lu), but got %lu",
                 expectedFusionSizeFactN, expectedFusionSizeNsq, fusionSize);
