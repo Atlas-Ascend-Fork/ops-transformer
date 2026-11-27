@@ -36,8 +36,6 @@ enum class SparseModeQsmla : uint8_t {
     SPARSE_BUTT,
 };
 
-inline constexpr int64_t QSMLA_QUANT_MODE_LOWER_BOUND = 1;
-inline constexpr int64_t QSMLA_QUANT_MODE_UPPER_BOUND = 2;
 inline constexpr int64_t QSMLA_CMP_RATIO_LOWER_BOUND = 1;
 inline constexpr int64_t QSMLA_CMP_RATIO_UPPER_BOUND = 128;
 inline constexpr int64_t QSMLA_NUM_HEADS_Q_LOWER_BOUND = 1;
@@ -140,13 +138,9 @@ aclnnStatus CheckSingleParamQsmla(int64_t batchSize, int64_t maxSeqlenQ, int64_t
         OP_LOGE_FOR_INVALID_VALUE(QSMLA_ACLNN_OP_NAME, "head_dim", std::to_string(headDim), "512");
         return ACLNN_ERR_PARAM_INVALID;
     }
-    // quant_mode
-    if (quantMode < QSMLA_QUANT_MODE_LOWER_BOUND || quantMode > QSMLA_QUANT_MODE_UPPER_BOUND) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(QSMLA_ACLNN_OP_NAME, "quant_mode", std::to_string(quantMode),
-                                              "The current value is not within the valid range. "
-                                              "The valid range is [" +
-                                                  std::to_string(QSMLA_QUANT_MODE_LOWER_BOUND) + ", " +
-                                                  std::to_string(QSMLA_QUANT_MODE_UPPER_BOUND) + "]");
+    // quant_mode: 1
+    if (quantMode != 1) {
+        OP_LOGE_FOR_INVALID_VALUE(QSMLA_ACLNN_OP_NAME, "quant_mode", std::to_string(quantMode), "1");
         return ACLNN_ERR_PARAM_INVALID;
     }
     if (hasOriKv) {
@@ -699,6 +693,11 @@ aclnnStatus CheckConsistencyQsmla(const aclTensor* cuSeqlensQOptional, const acl
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(QSMLA_ACLNN_OP_NAME, "metadata", ToString(dataType).GetString(),
                                                   "The dtype of metadata must be int32");
+            return ACLNN_ERR_PARAM_INVALID;
+        }
+        if (!op::IsContiguous(metadata)) {
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(QSMLA_ACLNN_OP_NAME, "metadata",
+                                                     "The output metadata must be contiguous");
             return ACLNN_ERR_PARAM_INVALID;
         }
     }

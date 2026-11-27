@@ -291,7 +291,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
       <td>oriTopk（int64_t）</td>
       <td>输入</td>
       <td>表示oriKvOptional中筛选出的关键稀疏token的个数。0表示非稀疏场景。</td>
-      <td><ul><li>当前仅支持0。</li><li>建议值为0。</li></ul></td>
+      <td><ul><li>仅当hasOriKv为true时生效，支持非负数。非0时须等于主算子oriSparseIndicesOptional的最后一维大小。</li><li>建议值为0。</li></ul></td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -300,7 +300,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
     <tr>
       <td>cmpTopk（int64_t）</td>
       <td>输入</td>
-      <td>表示cmpKvOptional中筛选出的关键稀疏token的个数。0表示非稀疏场景。</td>
+      <td>表示cmpKvOptional中筛选出的关键稀疏token的个数。0表示非稀疏场景。仅当hasCmpKv为true时生效。</td>
       <td><ul><li>支持非负数。</li><li>建议值为0。</li></ul></td>
       <td>-</td>
       <td>-</td>
@@ -310,7 +310,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
     <tr>
       <td>cmpRatio（int64_t）</td>
       <td>输入</td>
-      <td>表示对cmpKvOptional的压缩率。</td>
+      <td>表示对cmpKvOptional的压缩率。仅当hasCmpKv为true时生效。</td>
       <td><ul><li>当前支持1到128。</li><li>建议值1，表示无压缩。</li></ul></td>
       <td>-</td>
       <td>-</td>
@@ -320,7 +320,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
     <tr>
       <td>oriMaskMode（int64_t）</td>
       <td>输入</td>
-      <td>表示q和oriKvOptional计算的mask模式。</td>
+      <td>表示q和oriKvOptional计算的mask模式。仅当hasOriKv为true时生效。</td>
       <td><ul><li>当前支持：<br/>0: No Mask。<br/>3: RightDownCausal模式。<br/>4: Band模式。</li><li>建议值为0。</li></ul></td>
       <td>-</td>
       <td>-</td>
@@ -330,7 +330,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
     <tr>
       <td>cmpMaskMode（int64_t）</td>
       <td>输入</td>
-      <td>表示q和cmpKvOptional计算的mask模式。</td>
+      <td>表示q和cmpKvOptional计算的mask模式。仅当hasCmpKv为true时生效。</td>
       <td><ul><li>当前支持：<br/>0: No Mask。<br/>3: RightDownCausal模式。</li><li>建议值为0。</li></ul></td>
       <td>-</td>
       <td>-</td>
@@ -340,7 +340,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
     <tr>
       <td>oriWinLeft（int64_t）</td>
       <td>输入</td>
-      <td>表示q和oriKvOptional计算中q对过去token计算的数量。</td>
+      <td>表示q和oriKvOptional计算中q对过去token计算的数量。仅当hasOriKv为true时生效。</td>
       <td><ul><li>取值范围≥-1，-1表示无穷大。</li><li>建议值为-1。</li></ul></td>
       <td>-</td>
       <td>-</td>
@@ -350,7 +350,7 @@ aclnnStatus aclnnQuantSparseFlashMlaMetadata(
     <tr>
       <td>oriWinRight（int64_t）</td>
       <td>输入</td>
-      <td>表示q和oriKvOptional计算中q对未来token计算的数量。</td>
+      <td>表示q和oriKvOptional计算中q对未来token计算的数量。仅当hasOriKv为true时生效。</td>
       <td><ul><li>取值范围≥-1，-1表示无穷大。</li><li>建议值为-1。</li></ul></td>
       <td>-</td>
       <td>-</td>
