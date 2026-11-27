@@ -30,7 +30,7 @@
         } \
     } while (0)
 
-// 参考 lightning_indexer_v2_metadata.h
+// 参考 lightning_indexer_v2_metadata_common.h
 uint32_t aicCoreNum = 0;
 uint32_t aivCoreNum = 0;
 uint32_t metadataSize = 0;

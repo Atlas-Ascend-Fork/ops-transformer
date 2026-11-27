@@ -19,7 +19,7 @@
 #include "opdev/op_log.h"
 #include "opdev/data_type_utils.h"
 #include "opdev/tensor_view_utils.h"
-#include "../../lightning_indexer_v2/op_kernel/lightning_indexer_v2_metadata.h"
+#include "../../lightning_indexer_v2/op_kernel/lightning_indexer_v2_metadata_common.h"
 
 #ifdef __cplusplus
 extern "C" {

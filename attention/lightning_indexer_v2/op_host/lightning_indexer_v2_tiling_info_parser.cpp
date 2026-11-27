@@ -17,7 +17,7 @@
 
 #include "checkers/checker_adapter_lightning_indexer_v2.h"
 #include "checkers/liv2_checker.h"
-#include "../op_kernel/lightning_indexer_v2_metadata.h"
+#include "../op_kernel/lightning_indexer_v2_metadata_common.h"
 
 namespace optiling {
 namespace {

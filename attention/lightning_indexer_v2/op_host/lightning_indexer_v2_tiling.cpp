@@ -19,7 +19,7 @@
 #include "base/err_msg.h"
 #include "log/log.h"
 #include "lightning_indexer_v2_tiling.h"
-#include "../op_kernel/lightning_indexer_v2_metadata.h"
+#include "../op_kernel/lightning_indexer_v2_metadata_common.h"
 #include "../op_kernel/lightning_indexer_v2_template_tiling_key.h"
 #include "lightning_indexer_v2_tiling_info_parser.h"
 

@@ -24,7 +24,7 @@
 #include "lightning_indexer_v2_common_arch35.h"
 #include "lightning_indexer_v2_service_vector_arch35.h"
 #include "lightning_indexer_v2_service_cube_arch35.h"
-#include "../lightning_indexer_v2_metadata.h"
+#include "../lightning_indexer_v2_metadata_common.h"
 
 #include "common/lightning_indexer_v2_kernel_base_arch35.h"
 

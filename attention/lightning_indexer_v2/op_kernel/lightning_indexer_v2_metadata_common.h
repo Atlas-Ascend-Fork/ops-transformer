@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file lightning_indexer_v2_metadata.h
+ * \file lightning_indexer_v2_metadata_common.h
  * \brief
  */
 
-#ifndef LIGHTNING_INDEXER_V2_METADATA_H
-#define LIGHTNING_INDEXER_V2_METADATA_H
+#ifndef LIGHTNING_INDEXER_V2_METADATA_COMMON_H
+#define LIGHTNING_INDEXER_V2_METADATA_COMMON_H
 
 #include <cstdint>
 
@@ -138,4 +138,4 @@ static_assert(sizeof(detail::LiV2FastMetadata) <= LI_V2_METADATA_FAST_WORDS * si
 static_assert(sizeof(detail::LiV2FastMetadataArch22) <= LI_V2_METADATA_FAST_WORDS * sizeof(uint32_t));
 }; // namespace optiling
 
-#endif // LIGHTNING_INDEXER_V2_METADATA_H
+#endif // LIGHTNING_INDEXER_V2_METADATA_COMMON_H
