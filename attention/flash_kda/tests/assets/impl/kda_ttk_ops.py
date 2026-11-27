@@ -106,10 +106,13 @@ def reference(inputs, c, kind, *, forward=False):
 def sequence_kwargs(inputs, c):
     """按布局选择长度参数，供 metadata 生成和前向调用共同使用。"""
     packed = c["layout"] == "TND"
-    return {
+    lengths = {
         "cu_seqlens": input_tensor(inputs, "cu_seqlens") if packed else None,
         "seqused": None if packed else input_tensor(inputs, "seqused"),
     }
+    if c.get("omit_seqused", False):
+        lengths.pop("seqused")
+    return lengths
 
 
 def produce(inputs, c, *, template=None, length_overrides=None):
@@ -199,6 +202,8 @@ def call_kwargs(inputs, c, meta=None):
     elif c["dt_bias_mode"] == "none":
         kw["dt_bias"] = None
     kw.update(sequence_kwargs(inputs, c))
+    if c.get("omit_seqused", False):
+        kw.pop("seqused", None)
     kw.update(c.get("ignored", {}))
     if meta is not None:
         kw["metadata"] = meta

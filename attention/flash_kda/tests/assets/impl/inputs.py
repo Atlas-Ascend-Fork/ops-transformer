@@ -162,6 +162,14 @@ def configuration(inputs, attributes):
         for key, default in OPERATOR_DEFAULTS.items()
         if key not in omitted
     }
+    # 以实际输入槽判断 None，不能把“未指定生成值”误当作省略张量。
+    seqused_none = not packed and inputs[10] is None
+    valid_lengths = list(attributes.get("valid_lengths") or [length] * batch)
+    if seqused_none:
+        if valid_lengths != [length] * batch:
+            raise ValueError("seqused=None requires full storage lengths for BNSD/BSND")
+        if attributes.get("seqused_value") is not None:
+            raise ValueError("seqused=None conflicts with seqused_value")
     inference = bool(attributes.get("inference", False))
     raw_enable_grad = attributes.get("enable_grad")
     enable_grad = (not inference) if raw_enable_grad is None else raw_enable_grad
@@ -169,6 +177,8 @@ def configuration(inputs, attributes):
         id=attributes.get("testcase_name", ""),
         layout=layout,
         omit_layout="layout" in omitted,
+        omit_seqused="seqused" in omitted,
+        seqused_none=seqused_none,
         batch_size=batch,
         nheads_qk=int(q.shape[head_axis]),
         nheads_v=int(v.shape[head_axis]),
@@ -191,7 +201,7 @@ def configuration(inputs, attributes):
         input_dist=_resolve_input_dist(attributes),
         cu_seqlens_value=attributes.get("cu_seqlens_value"),
         seqused_value=attributes.get("seqused_value"),
-        valid_lengths=list(attributes.get("valid_lengths") or [length] * batch),
+        valid_lengths=valid_lengths,
         test=test,
         suite=(
             "whitebox"
@@ -262,7 +272,7 @@ def materialize_optional_inputs(inputs, c, *, arch=None):
             torch.tensor(lengths).cumsum(0).tolist()
         )
         out[9] = torch.tensor(cu, dtype=torch.int32)
-    if out[10] is None:
+    if out[10] is None and not c.get("seqused_none", False):
         used = c["seqused_value"] or lengths
         out[10] = torch.tensor(used, dtype=torch.int32)
     return out
@@ -392,7 +402,8 @@ def make(c, input_ranges=(), *, include_metadata=True, arch=None):
         # 按 CSV 的实际输入形状提供偏置，内部 gate 预处理仍使用二维视图。
         bias.reshape(-1) if c.get("dt_bias_flat", False) else bias,
         torch.tensor(cu, dtype=torch.int32),
-        torch.tensor(used, dtype=torch.int32),
+        # 保留真实 None，避免参考计算和输入导出凭空补出 seqused 张量。
+        None if c.get("seqused_none", False) else torch.tensor(used, dtype=torch.int32),
     ]
     if include_metadata:
         inputs[5] = _offline_metadata(c, arch=arch)
@@ -755,7 +766,7 @@ def metadata_baseline(c, cores, arch=None):
         len(records),
         c["batch_size"],
         c["nheads_v"],
-        1,
+        int(packed or not c.get("seqused_none", False)),
         861,
         1,
         0,
