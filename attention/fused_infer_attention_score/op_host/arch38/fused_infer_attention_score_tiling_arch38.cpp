@@ -23,7 +23,6 @@ using namespace ge;
 using namespace AscendC;
 using namespace optiling::arch38;
 namespace optiling {
-REGISTER_TILING_DATA_CLASS(FusedInferAttentionScore_10000000000000090, FlashAttentionScoreSimplifiedTilingData)
 REGISTER_TILING_DATA_CLASS(FusedInferAttentionScore_1000000000000000090, FlashAttentionScoreSimplifiedTilingData)
 
 REGISTER_TILING_DATA_CLASS(FusedInferAttentionScore_1002122000000021012, FlashAttentionScoreSimplifiedTilingData)
@@ -567,14 +566,9 @@ ge::graphStatus FusedInferAttentionScoreTilingArch38::DoOpTiling()
     const bool isIfaNonMlaScenario = (s == 1) && (inputLayoutStr == "BNSD") &&
                                      (context_->GetOptionalInputShape(QUERY_ROPE_INDEX) == nullptr) &&
                                      (context_->GetOptionalInputShape(KEY_ROPE_INDEX) == nullptr);
-    // PFA tiling process
+    // 进入公共tiling流程前，先校验decode incre场景的输入
     if (isIfaNonMlaScenario) {
-        FiaArch38IncreContext ifaCheckContext{};
-        OP_CHECK_IF(ConvertContextToParamsIFA(*context_, ifaCheckContext) != ge::GRAPH_SUCCESS,
-                    OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(),
-                                           "Error occurred while converting tilingContext to ifa context!"),
-                    return ge::GRAPH_FAILED);
-        OP_CHECK_IF(!IsArch38IncreScenarioSupported(ifaCheckContext, context_),
+        OP_CHECK_IF(CheckArch38IncreInputs(*context_) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(context_->GetNodeName(), "unsupported IFA scenario on this platform."),
                     return ge::GRAPH_FAILED);
     }

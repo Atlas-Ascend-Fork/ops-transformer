@@ -25,6 +25,15 @@ constexpr uint32_t DV_TEMPLATE_128 = 128;
 constexpr uint32_t DV_TEMPLATE_192 = 192;
 constexpr uint32_t DV_TEMPLATE_256 = 256;
 constexpr uint32_t DV_TEMPLATE_512 = 512;
+constexpr uint32_t DV_TEMPLATE_576 = 576; // IFA MLA 压缩 QK(512) + rope(64)
+
+// S1(sOuter) 模板桶，与 kernel 侧 regbaseutil::S1TemplateType 语义一致（host/kernel 共用）
+constexpr uint32_t S1_TEMPLATE_64 = 64;
+constexpr uint32_t S1_TEMPLATE_128 = 128;
+
+// S2(sInner) 模板桶，与 kernel 侧 regbaseutil::S2TemplateType 语义一致（host/kernel 共用）
+constexpr uint32_t S2_TEMPLATE_128 = 128;
+constexpr uint32_t S2_TEMPLATE_256 = 256;
 
 // Force-Bmm2-to-UB 模板触发条件：atten mask + dV 模板桶 256 + S1 基本块 64。
 // dVBucket 传模板桶值（64/128/256/512），与 kernel 侧 (uint32_t)dVTemplateType 语义一致；

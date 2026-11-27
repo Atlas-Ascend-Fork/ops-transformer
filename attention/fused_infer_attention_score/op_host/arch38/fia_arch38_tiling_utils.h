@@ -91,7 +91,8 @@ constexpr int64_t ARCH38_SUPPORTED_MAX_N = 128;
 // ------------------------------------------------------------------
 // 3) 稀疏模式常量
 // ------------------------------------------------------------------
-constexpr uint64_t EMPTY_KV_TILING_KEY = 20;
+// 空 KV/空输出固定 tiling key（1e18 + 90），需与 kernel entry 及 REGISTER_TILING_DATA_CLASS 注册名一致。
+constexpr uint64_t EMPTY_KV_TILING_KEY = 90;
 constexpr uint32_t LOOP_BEGIN_NUM = 0;
 constexpr uint32_t SPARSE_MODE_NO_MASK = 0;
 constexpr uint32_t SPARSE_MODE_ALL_MASK = 1;

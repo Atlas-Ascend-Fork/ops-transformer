@@ -15,9 +15,7 @@
  * 本头文件声明 host 侧解析算子输入时使用的上下文结构，把 gert 侧的 Tensor/StorageShape/DataType
  * 指针统一聚合为便于 tiling 逻辑访问的纯结构体：
  *   - FiaArch38CompileInfo：编译期信息（各核数、UB/L1/L0 空间、SoC 版本）；
- *   - FiaArch38ContextParams：算子全部可选/必选输入的指针与标量聚合，是 tiling 各校验的入参基座；
- *   - FiaArch38RequiredParaInfo / FiaArch38OptionalParaInfo：必选/可选参数描述；
- *   - FiaArch38IncreContext：IFA 增量（复用 PFA 模板）场景的输入描述。
+ *   - FiaArch38ContextParams：算子全部可选/必选输入的指针与标量聚合，是 tiling 各校验的入参基座。
  * 这些结构仅用于 host 侧数据交换，不参与算子 tiling 数据的序列化。
  */
 
@@ -154,34 +152,6 @@ struct FiaArch38ContextParams {
     bool hasKeyAntiquantOffset = 0;
     bool hasLearnableSink = 0;
     bool isBaseApiTilingKey = false;
-};
-
-// 必选参数描述：编译期 tensor 描述 + 形状
-struct FiaArch38RequiredParaInfo {
-    const gert::CompileTimeTensorDesc* desc;
-    const gert::StorageShape* shape;
-};
-
-// 可选参数描述：编译期 tensor 描述 + tensor（可能为 null）
-struct FiaArch38OptionalParaInfo {
-    const gert::CompileTimeTensorDesc* desc;
-    const gert::Tensor* tensor;
-};
-
-// IFA 增量（复用 PFA 模板）场景的输入描述，供 IsArch38IncreScenarioSupported 做增量边界校验
-struct FiaArch38IncreContext {
-    FiaArch38RequiredParaInfo query = {nullptr, nullptr};
-    FiaArch38RequiredParaInfo key = {nullptr, nullptr};
-    FiaArch38RequiredParaInfo value = {nullptr, nullptr};
-    FiaArch38OptionalParaInfo attenMask = {nullptr, nullptr};
-    FiaArch38OptionalParaInfo blockTable = {nullptr, nullptr};
-    FiaArch38OptionalParaInfo queryRope = {nullptr, nullptr};
-    FiaArch38OptionalParaInfo keyRope = {nullptr, nullptr};
-
-    FiaArch38RequiredParaInfo attenOut = {nullptr, nullptr};
-
-    const int64_t* numHeads = nullptr;
-    const int64_t* kvHeadNums = nullptr;
 };
 
 } // namespace arch38

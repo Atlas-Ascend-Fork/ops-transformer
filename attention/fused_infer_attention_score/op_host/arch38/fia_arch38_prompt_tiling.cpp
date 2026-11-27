@@ -64,60 +64,6 @@ std::string GetPfaDataTypeStr(ge::DataType type)
     return g_strDataTypeArch38.at(findDype);
 }
 
-bool IsArch38IncreScenarioSupported(const FiaArch38IncreContext& ifaContext, const gert::TilingContext* context)
-{
-    // 只校验 IFA 增量场景特有边界；平台级约束（layout/head size/dQ==dV/dtype/D256 mask）
-    // 由 PFA 模板的 CheckArch38PlatformSupported 统一兜底，此处不重复。
-    const char* opName = context->GetNodeName();
-    // PagedAttention lays key out by block, its shape carries no real kv seq length for the check below
-    OP_CHECK_IF((ifaContext.blockTable.tensor != nullptr),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "blockTable", "not null",
-                                                      "PagedAttention is not supported on this platform."),
-                return false);
-
-    OP_CHECK_IF(((ifaContext.query.shape == nullptr) || (ifaContext.key.shape == nullptr) ||
-                 (ifaContext.value.shape == nullptr)),
-                ReportNullPointer(context, __func__, "query/key/value.shape"), return false);
-
-    const auto& queryShape = ifaContext.query.shape->GetStorageShape();
-    const auto& keyShape = ifaContext.key.shape->GetStorageShape();
-    const auto& valueShape = ifaContext.value.shape->GetStorageShape();
-    OP_CHECK_IF(((queryShape.GetDimNum() != BNSD_DIM_NUM) || (keyShape.GetDimNum() != BNSD_DIM_NUM) ||
-                 (valueShape.GetDimNum() != BNSD_DIM_NUM)),
-                OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
-                    opName, "query, key and value",
-                    (std::to_string(queryShape.GetDimNum()) + ", " + std::to_string(keyShape.GetDimNum()) + ", " +
-                     std::to_string(valueShape.GetDimNum()))
-                        .c_str(),
-                    "BNSD layout requires 4-dim query, key and value shapes."),
-                return false);
-
-    const int64_t sQ = queryShape.GetDim(BNSD_DIM_S);
-    OP_CHECK_IF((sQ != 1),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(opName, "query", std::to_string(sQ).c_str(),
-                                                      "query seq length (S dimension) must be 1."),
-                return false);
-
-    const int64_t sKV = keyShape.GetDim(BNSD_DIM_S);
-    OP_CHECK_IF(((sKV <= 1) || (sKV > ARCH38_IFA_SUPPORTED_MAX_SKV)),
-                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
-                    opName, "key", std::to_string(sKV).c_str(),
-                    ("kv seq length must be in (1, " + std::to_string(ARCH38_IFA_SUPPORTED_MAX_SKV) + "].").c_str()),
-                return false);
-
-    OP_CHECK_IF((ifaContext.numHeads == nullptr), ReportNullPointer(context, __func__, "numHeads"), return false);
-    const int64_t nQ = *ifaContext.numHeads;
-    // numKeyValueHeads defaults to numHeads when it is absent or left as 0
-    const int64_t nKV =
-        ((ifaContext.kvHeadNums != nullptr) && (*ifaContext.kvHeadNums != 0)) ? *ifaContext.kvHeadNums : nQ;
-    OP_CHECK_IF(((nQ <= 0) || (nQ > ARCH38_IFA_SUPPORTED_MAX_N) || (nKV <= 0) || (nKV > ARCH38_IFA_SUPPORTED_MAX_N)),
-                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                    opName, "numHeads, numKeyValueHeads", (std::to_string(nQ) + ", " + std::to_string(nKV)).c_str(),
-                    ("head num must be in (0, " + std::to_string(ARCH38_IFA_SUPPORTED_MAX_N) + "].").c_str()),
-                return false);
-
-    return true;
-}
 } // namespace arch38
 } // namespace optiling
 

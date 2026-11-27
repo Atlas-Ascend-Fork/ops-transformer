@@ -9,6 +9,7 @@
  */
 
 #include "fia_arch38_prompt_tiling.h"
+#include "../fused_infer_attention_score_tiling_index.h"
 
 using namespace ge;
 using namespace AscendC;
@@ -16,6 +17,83 @@ using namespace matmul_tiling;
 namespace optiling {
 
 namespace arch38 {
+
+static ge::graphStatus ReportInvalidValue(const char* opName, const std::string& param, const std::string& value,
+                                          const std::string& reason)
+{
+    OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(opName, param.c_str(), value.c_str(), reason.c_str());
+    return ge::GRAPH_FAILED;
+}
+
+static ge::graphStatus CheckArch38ShapeInputs(const char* opName, const gert::Shape& queryShape,
+                                              const gert::Shape& keyShape, const gert::Shape& valueShape)
+{
+    if ((queryShape.GetDimNum() != BNSD_DIM_NUM) || (keyShape.GetDimNum() != BNSD_DIM_NUM) ||
+        (valueShape.GetDimNum() != BNSD_DIM_NUM)) {
+        return ReportInvalidValue(opName, "query, key, value",
+                                  std::to_string(queryShape.GetDimNum()) + ", " + std::to_string(keyShape.GetDimNum()) +
+                                      ", " + std::to_string(valueShape.GetDimNum()),
+                                  "BNSD layout requires 4-dim query, key and value shapes.");
+    }
+    const int64_t sQ = queryShape.GetDim(BNSD_DIM_S);
+    const int64_t sKV = keyShape.GetDim(BNSD_DIM_S);
+    if ((sQ != 1) || (sKV <= 1) || (sKV > ARCH38_IFA_SUPPORTED_MAX_SKV)) {
+        return ReportInvalidValue(
+            opName, "query, key", std::to_string(sQ) + ", " + std::to_string(sKV),
+            "query S must be 1, kv S must be in (1, " + std::to_string(ARCH38_IFA_SUPPORTED_MAX_SKV) + "].");
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckArch38HeadInputs(const char* opName, int64_t nQ, int64_t nKV)
+{
+    if ((nQ <= 0) || (nQ > ARCH38_IFA_SUPPORTED_MAX_N) || (nKV <= 0) || (nKV > ARCH38_IFA_SUPPORTED_MAX_N)) {
+        return ReportInvalidValue(opName, "numHeads, numKeyValueHeads", std::to_string(nQ) + ", " + std::to_string(nKV),
+                                  "head num must be in (0, " + std::to_string(ARCH38_IFA_SUPPORTED_MAX_N) + "].");
+    }
+    return ge::GRAPH_SUCCESS;
+}
+
+ge::graphStatus CheckArch38IncreInputs(const gert::TilingContext& context)
+{
+    const char* opName = context.GetNodeName();
+    if (opName == nullptr) {
+        OP_LOGE_WITHOUT_REPORT("FusedInferAttentionScore", "opName got from TilingContext is nullptr");
+        return ge::GRAPH_FAILED;
+    }
+
+    const auto* queryShapePtr = context.GetInputShape(QUERY_INDEX);
+    const auto* keyShapePtr = context.GetInputShape(KEY_INDEX);
+    const auto* valueShapePtr = context.GetInputShape(VALUE_INDEX);
+    const auto* blockTable = context.GetOptionalInputTensor(BLOCK_TABLE_INDEX);
+    const auto* attrs = context.GetAttrs();
+    const auto* numHeads = (attrs == nullptr) ? nullptr : attrs->GetAttrPointer<int64_t>(ATTR_N_INDEX);
+    const auto* kvHeadNums = (attrs == nullptr) ? nullptr : attrs->GetAttrPointer<int64_t>(ATTR_NUM_KV_HEADS_INDEX);
+    if ((queryShapePtr == nullptr) || (keyShapePtr == nullptr) || (valueShapePtr == nullptr) || (attrs == nullptr) ||
+        (numHeads == nullptr)) {
+        ReportNullPointer(&context, __func__, "query/key/value.shape, attrs, numHeads");
+        return ge::GRAPH_FAILED;
+    }
+
+    // 本平台不支持 PagedAttention（K 按块存放，形状无法给出实际 KV 序列长度）与 learnable sink。
+    if ((blockTable != nullptr) || (context.GetOptionalInputTensor(LEARNABLE_SINK_INDEX) != nullptr)) {
+        return ReportInvalidValue(opName, "blockTable, learnable_sink", "not null", "not supported on this platform.");
+    }
+
+    const auto& queryShape = queryShapePtr->GetStorageShape();
+    const auto& keyShape = keyShapePtr->GetStorageShape();
+    const auto& valueShape = valueShapePtr->GetStorageShape();
+    const int64_t nQ = *numHeads;
+    const int64_t nKV = ((kvHeadNums != nullptr) && (*kvHeadNums != 0)) ? *kvHeadNums : nQ;
+    if (CheckArch38ShapeInputs(opName, queryShape, keyShape, valueShape) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    if (CheckArch38HeadInputs(opName, nQ, nKV) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    return ge::GRAPH_SUCCESS;
+}
 
 bool FiaArch38PromptTiling::CheckPFAMerge(FiaArch38ContextParams& contextKeyParams,
                                           const PFAShapeInfo& queryShapeInfo) const

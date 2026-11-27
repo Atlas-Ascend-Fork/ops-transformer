@@ -80,10 +80,9 @@ void FiaArch38PromptTiling::GetEnableDN(FiaArch38FlashAttentionTilingData& tilin
     const uint32_t sOuter = tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSOuterSize();
     enableDN = (AlignUp(queryShapeInfo.d, sOuterLimitDN) == dLimitDN) && !enableMask && (sOuter == sOuterBaseSizeDN);
 
-    // arch35 同步遗留的两段 sInner=256 扩展（d==64 / perblock fp8）在 arch38 不可达，已删除：
-    // - d==64 不满足 enableDN 的 AlignUp(d, 64) == 128，D64 不会走 DN；
-    // - perblock(fp8/hif8) 已被 CheckArch38ScenarioSupported 的 dtype 门禁拒绝。
-    // 若未来放开 D64-DN 或 fp8 perblock，需要同时恢复 sInner=256 与对应的 tilingKey/模板。
+    // 移植 arch35 时删除了两段 sInner=256 扩展（d==64 / perblock fp8），两者在 arch38 均不可达：
+    // d==64 进不了 DN（AlignUp(64,64)!=128），fp8 perblock 被 dtype 门禁拒绝。
+    // 未来放开 D64-DN 或 fp8 perblock 时，需一并恢复 sInner=256 及对应 tilingKey/模板。
 }
 
 void FiaArch38PromptTiling::SetTilingData(const FiaArch38ContextParams& contextKeyParams,
@@ -408,10 +407,13 @@ bool FiaArch38PromptTiling::AdjustCVFactorForSmallS(const FiaArch38ContextParams
     } else if (sparseMode == SPARSE_MODE_BAND) {
         nextTokens = (nextTokens > 0) ? 0 : nextTokens;
     }
-    // actual calculation area is smaller than SINNER_FACTOR_DEFAULT in SPARSE_MODE_LEFT_UP mode
-    bool checkSparseMode = ((sparseMode == SPARSE_MODE_ALL_MASK) || (sparseMode == SPARSE_MODE_RIGHT_DOWN) ||
-                            (((sparseMode == SPARSE_MODE_NO_MASK) || (sparseMode == SPARSE_MODE_BAND)) &&
-                             (preTokens + nextTokens > static_cast<int32_t>(SINNER_FACTOR_DEFAULT))));
+    // checkSparseMode：注意力窗口足够宽（带 mask / 全 mask / 右下 / 带宽 > 256）时走小 s（sInner=256）。
+    // mask 场景若只看 preTokens+nextTokens，preTokens 已归 0 且 nextTokens=0，恒 < 256 会漏掉注册的小 s key，故显式按
+    // enableMask 判宽。
+    bool checkSparseMode =
+        (enableMask || (sparseMode == SPARSE_MODE_ALL_MASK) || (sparseMode == SPARSE_MODE_RIGHT_DOWN) ||
+         (((sparseMode == SPARSE_MODE_NO_MASK) || (sparseMode == SPARSE_MODE_BAND)) &&
+          (preTokens + nextTokens > static_cast<int32_t>(SINNER_FACTOR_DEFAULT))));
     // 小 s（64/256）仅有 int8 输出的模板；fp16->fp16 固定走大 s（128/128）。
     if (checkDtype && checkQueryAndValueS && checkSparseMode && !enablePFARope && !enablePerblockQuant &&
         (contextKeyParams.outputDataType == ge::DT_INT8)) {
@@ -645,15 +647,15 @@ void FiaArch38PromptTiling::UpdateTilingKeyDSizeConst(FiaArch38FlashAttentionTil
     constexpr uint64_t tilingKeyDSizeConstValue512 = static_cast<uint64_t>(4e12);
     constexpr uint64_t tilingKeyDSizeConstValue576 = static_cast<uint64_t>(5e12); // for IFA MLA
     uint32_t dSize = tilingData.fiaArch38AttentionBaseParams.get_qkHeadSize();
-    if (dSize <= 64) { // 64: headsize is 64
+    if (dSize <= FiaPolicy::DV_TEMPLATE_64) {
         tilingKey += tilingKeyDSizeConstValue64;
-    } else if (dSize <= 128) { // 128: headsize 128
+    } else if (dSize <= FiaPolicy::DV_TEMPLATE_128) {
         tilingKey += tilingKeyDSizeConstValue128;
-    } else if (dSize <= 256) { // 256: headsize 256
+    } else if (dSize <= FiaPolicy::DV_TEMPLATE_256) {
         tilingKey += tilingKeyDSizeConstValue256;
-    } else if (dSize <= 512) { // 512: headsize 512
+    } else if (dSize <= FiaPolicy::DV_TEMPLATE_512) {
         tilingKey += tilingKeyDSizeConstValue512;
-    } else if (dSize <= 576) { // 576: headsize 576
+    } else if (dSize <= FiaPolicy::DV_TEMPLATE_576) {
         tilingKey += tilingKeyDSizeConstValue576;
     }
 }
@@ -664,10 +666,10 @@ void FiaArch38PromptTiling::UpdateTilingKeySInnerConst(FiaArch38FlashAttentionTi
     constexpr uint64_t tilingKeySInnerConstValue128 = static_cast<uint64_t>(1e13); // Position 13
     constexpr uint64_t tilingKeySInnerConstValue256 = static_cast<uint64_t>(2e13);
 
-    if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSInnerSize() == 128) { // 128: sinner is 128
+    if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSInnerSize() == FiaPolicy::S2_TEMPLATE_128) {
         tilingKey += tilingKeySInnerConstValue128;
     } else if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSInnerSize() ==
-               256) { // 256: sinner is 256
+               FiaPolicy::S2_TEMPLATE_256) {
         tilingKey += tilingKeySInnerConstValue256;
     }
 }
@@ -675,18 +677,18 @@ void FiaArch38PromptTiling::UpdateTilingKeySInnerConst(FiaArch38FlashAttentionTi
 void FiaArch38PromptTiling::UpdateTilingKeySOuterConst(FiaArch38FlashAttentionTilingData& tilingData,
                                                        uint64_t& tilingKey)
 {
+    // arch38 的 sOuter 只会取 64（SOuterFactor=32*2）或 128（SOuterFactor=64*2）；
+    // kernel 侧 S1TemplateType 无 Aligned96，故无 96 桶（对应 2e14 位）——arch35 的 96 分支已删除。
     constexpr uint64_t tilingKeySOuterConstValue64 = static_cast<uint64_t>(1e14); // Position 14
-    constexpr uint64_t tilingKeySOuterConstValue96 = static_cast<uint64_t>(2e14);
     constexpr uint64_t tilingKeySOuterConstValue128 = static_cast<uint64_t>(3e14);
 
     if (!isConstantization) {
         return;
     }
-    if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSOuterSize() == 64) { // 64:souter32
+    if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSOuterSize() == FiaPolicy::S1_TEMPLATE_64) {
         tilingKey += tilingKeySOuterConstValue64;
-    } else if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSOuterSize() == 96) { // 96:souter48*2
-        tilingKey += tilingKeySOuterConstValue96;
-    } else if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSOuterSize() == 128) { // 128:souter64*2
+    } else if (tilingData.fiaArch38AttentionSingleCoreParams.get_singleProcessSOuterSize() ==
+               FiaPolicy::S1_TEMPLATE_128) {
         tilingKey += tilingKeySOuterConstValue128;
     }
 }
@@ -699,13 +701,13 @@ void FiaArch38PromptTiling::UpdateTilingKeyValueDSizeConst(FiaArch38FlashAttenti
     constexpr uint64_t tilingKeyDSizeConstValue256 = static_cast<uint64_t>(3e15);
     constexpr uint64_t tilingKeyDSizeConstValue512 = static_cast<uint64_t>(4e15);
     uint32_t dSize = tilingData.fiaArch38AttentionBaseParams.get_vHeadSize();
-    if (dSize <= 64) { // 64: headsize is 64
+    if (dSize <= FiaPolicy::DV_TEMPLATE_64) {
         tilingKey += tilingKeyDSizeConstValue64;
-    } else if (dSize <= 128) { // 128: headsize 128
+    } else if (dSize <= FiaPolicy::DV_TEMPLATE_128) {
         tilingKey += tilingKeyDSizeConstValue128;
-    } else if (dSize <= 256) { // 256: headsize 256
+    } else if (dSize <= FiaPolicy::DV_TEMPLATE_256) {
         tilingKey += tilingKeyDSizeConstValue256;
-    } else if (dSize <= 512) { // 512: headsize 512
+    } else if (dSize <= FiaPolicy::DV_TEMPLATE_512) {
         tilingKey += tilingKeyDSizeConstValue512;
     }
 }

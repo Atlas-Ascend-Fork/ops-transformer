@@ -127,6 +127,38 @@ bool FiaArch38PromptTiling::CheckArch38UnsupportedFeatures(const FiaArch38Contex
                 OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(contextKeyParams.opName, "queryRope/keyRope or query.d, value.d",
                                                       "MLA", "MLA is not supported on this platform."),
                 return false);
+
+    // 本平台没有 PSE 对应的模板：entry 中所有 key 的 PseType 恒为 PSE_NONE_TYPE，不存在 +1e9（pse）key。
+    OP_CHECK_IF(enablePseShift,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(contextKeyParams.opName, "pse_shift", "not empty",
+                                                      "pse_shift is not supported on this platform."),
+                return false);
+
+    // 本平台没有 alibi PSE 对应的模板：entry 中不存在 +2e9/+3e9（alibi）key。
+    OP_CHECK_IF(enableAlibiPse,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(contextKeyParams.opName, "pse_type", "2 or 3",
+                                                      "alibi pse (pse_type 2/3) is not supported on this platform."),
+                return false);
+
+    // 本平台没有 PA 对应的模板：entry 中不存在 +2e7（PA）key。
+    OP_CHECK_IF(enablePA,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(contextKeyParams.opName, "block_table", "not null",
+                                                      "PagedAttention is not supported on this platform."),
+                return false);
+
+    // 本平台没有 system prefix 对应的模板：entry 中不存在 +1e8（prefix）key，
+    // 且该 +1e8 位与 mask 位冲突，放行会导致 key 歧义。
+    OP_CHECK_IF(isKVHasPrefix,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(contextKeyParams.opName, "key_shared_prefix, value_shared_prefix",
+                                                      "not null", "system prefix is not supported on this platform."),
+                return false);
+
+    // 本平台 kernel entry 没有 learnable_sink 参数（InitBaseAPI 将其置 nullptr），
+    // 放行会静默忽略 sink 输入，此处显式拒绝。
+    OP_CHECK_IF(contextKeyParams.hasLearnableSink,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(contextKeyParams.opName, "learnable_sink", "not null",
+                                                      "learnable_sink is not supported on this platform."),
+                return false);
     return true;
 }
 

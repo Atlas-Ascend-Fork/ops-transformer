@@ -651,44 +651,6 @@ ge::graphStatus ConvertContextToParamsPFA(gert::TilingContext* context, FiaArch3
     return ge::GRAPH_SUCCESS;
 }
 
-ge::graphStatus ConvertContextToParamsIFA(gert::TilingContext& context, FiaArch38IncreContext& ifaContext)
-{
-    if (context.GetNodeName() == nullptr) {
-        OP_LOGE_WITHOUT_REPORT("FusedInferAttentionScore", "opName got from TilingContext is nullptr");
-        return ge::GRAPH_FAILED;
-    }
-    ifaContext.query.desc = context.GetInputDesc(QUERY_INDEX);
-    ifaContext.query.shape = context.GetInputShape(QUERY_INDEX);
-    ifaContext.key.desc = context.GetInputDesc(KEY_INDEX);
-    ifaContext.key.shape = context.GetInputShape(KEY_INDEX);
-    OP_CHECK_IF((ifaContext.query.shape == nullptr) || (ifaContext.key.shape == nullptr),
-                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(context.GetNodeName(), "query,key", "nullptr",
-                                                       "shape of query or shape of key is null."),
-                return ge::GRAPH_FAILED);
-
-    ifaContext.value.desc = context.GetInputDesc(VALUE_INDEX);
-    ifaContext.value.shape = context.GetInputShape(VALUE_INDEX);
-    ifaContext.attenMask.desc = context.GetOptionalInputDesc(ATTEN_MASK_INDEX);
-    ifaContext.attenMask.tensor = context.GetOptionalInputTensor(ATTEN_MASK_INDEX);
-    ifaContext.attenOut.desc = context.GetOutputDesc(ATTENTION_OUT_INDEX);
-    ifaContext.attenOut.shape = context.GetOutputShape(ATTENTION_OUT_INDEX);
-    ifaContext.blockTable.tensor = context.GetOptionalInputTensor(BLOCK_TABLE_INDEX);
-
-    auto attrs = context.GetAttrs();
-    OP_CHECK_IF(attrs == nullptr, ReportNullPointer(&context, __func__, "attrs"), return ge::GRAPH_FAILED);
-
-    ifaContext.numHeads = attrs->GetAttrPointer<int64_t>(ATTR_N_INDEX);
-    ifaContext.kvHeadNums = attrs->GetAttrPointer<int64_t>(ATTR_NUM_KV_HEADS_INDEX);
-
-    // IFA（伪量化）模板当前不支持 learnable sink 输入特性
-    OP_CHECK_IF(context.GetOptionalInputTensor(LEARNABLE_SINK_INDEX) != nullptr,
-                OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context.GetNodeName(), "learnable_sink",
-                                                         "Learnable sink only supports no-quantized GQA mode."),
-                return ge::GRAPH_FAILED);
-
-    return ge::GRAPH_SUCCESS;
-}
-
 bool GetMaxWorkspaceFlag(gert::TilingContext& context)
 {
     bool res = (context.GetOptionalInputTensor(ACTUAL_SEQ_Q_INDEX) != nullptr &&

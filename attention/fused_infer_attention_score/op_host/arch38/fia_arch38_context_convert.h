@@ -23,7 +23,6 @@ namespace arch38 {
 
 ge::graphStatus ConvertContextToParamsPFA(gert::TilingContext* context, FiaArch38ContextParams& contextKeyParams,
                                           bool isMaxWorkspace);
-ge::graphStatus ConvertContextToParamsIFA(gert::TilingContext& context, FiaArch38IncreContext& ifaContext);
 bool GetMaxWorkspaceFlag(gert::TilingContext& context);
 
 } // namespace arch38

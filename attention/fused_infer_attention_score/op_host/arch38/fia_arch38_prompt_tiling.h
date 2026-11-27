@@ -25,9 +25,9 @@ namespace arch38 {
 
 std::string GetPfaDataTypeStr(ge::DataType type);
 
-// IFA 增量场景（复用 PFA 模板）门禁：只校验 IFA 特有边界（blockTable/s/dim/head num），
-// 平台级约束由 PFA 模板的 CheckArch38PlatformSupported 统一兜底。
-bool IsArch38IncreScenarioSupported(const FiaArch38IncreContext& ifaContext, const gert::TilingContext* context);
+// IFA 增量（decode 单 token，复用 PFA 模板）场景门禁：校验 IFA 特有边界（blockTable/BNSD 维度/sQ==1/sKV/head
+// 数/learnable_sink）， 平台级约束由 CheckArch38PlatformSupported 统一兜底。
+ge::graphStatus CheckArch38IncreInputs(const gert::TilingContext& context);
 
 // arch38 已验证的 head size 白名单，PFA 与 IFA 两条场景门禁共用
 constexpr int64_t ARCH38_SUPPORTED_D_64 = 64;
