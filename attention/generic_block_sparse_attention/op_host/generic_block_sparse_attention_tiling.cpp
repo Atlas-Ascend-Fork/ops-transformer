@@ -585,8 +585,13 @@ ge::graphStatus GBSATiling::ParseKvCacheStride0(gert::TilingContext* context)
             const auto& shape = context->GetInputShape(index)->GetOriginShape();
             if (stride != nullptr && stride->GetDimNum() != 0 &&
                 (stride->GetDimNum() != shape.GetDimNum() || (shape.GetDim(0) > 1 && stride->GetStride(0) <= 0))) {
-                OP_LOGE(context->GetNodeName(),
-                        "MXFP4 PA K/V require a matching stride rank and positive page stride.");
+                OP_LOGE_FOR_INVALID_STRIDE(
+                    context->GetNodeName(), index == KEY_INDEX ? "key" : "value",
+                    ("strideRank=" + std::to_string(stride->GetDimNum()) +
+                     ", shapeRank=" + std::to_string(shape.GetDimNum()) +
+                     ", dim0 stride=" + std::to_string(stride->GetStride(0)))
+                        .c_str(),
+                    "MXFP4 PA key/value require a stride rank matching the page shape and a positive dim0 page stride");
                 return ge::GRAPH_FAILED;
             }
         }
@@ -704,7 +709,9 @@ ge::graphStatus GBSATiling::ParseQueryKeyShapes(gert::TilingContext* context)
         return ge::GRAPH_FAILED;
     }
     if (socVer_ != SOC_VER_950_CODE && q.GetDim(qRank - 1U) > GBSA_TILE_SIZE_256) {
-        OP_LOGE(context->GetNodeName(), "A2/A3 headDim must be in [1, 256].");
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query headDim",
+                                                 std::to_string(q.GetDim(qRank - 1U)).c_str(),
+                                                 "A2/A3 headDim must be in [1, 256]");
         return ge::GRAPH_FAILED;
     }
     for (size_t axis = 0; axis < kvRank; ++axis) {
@@ -831,13 +838,17 @@ ge::graphStatus GBSATiling::ParseSparseTensors(gert::TilingContext* context)
         unionGroupNum_ = qBlockNum_;
         // unionSize == blockShapeX_ (validated to the supported value above).
         if (groupSize_ * blockShapeX_ > GBSA_TILE_SIZE_128) {
-            OP_LOGE(context->GetNodeName(),
-                    "Union mode requires blockShapeX*groupSize <= 128 rows, but got blockShapeX=%u groupSize=%u.",
-                    blockShapeX_, groupSize_);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context->GetNodeName(), "blockShapeX and groupSize",
+                ("blockShapeX=" + std::to_string(blockShapeX_) + ", groupSize=" + std::to_string(groupSize_)).c_str(),
+                "Union mode requires blockShapeX*groupSize <= 128 rows");
             return ge::GRAPH_FAILED;
         }
         if (unionGroupNum_ == 0U || topK <= 0) {
-            OP_LOGE(context->GetNodeName(), "Union mode requires positive group count and union capacity.");
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                context->GetNodeName(), "sparseBlockIdx dim1 and dim2",
+                ("groupNum=" + std::to_string(unionGroupNum_) + ", unionCapacity=" + std::to_string(topK)).c_str(),
+                "Union mode requires a positive group count and union capacity");
             return ge::GRAPH_FAILED;
         }
     } else if (sparseIdxShape->GetStorageShape().GetDim(SPARSE_IDX_DIM_Q_BLOCK) !=
@@ -1204,7 +1215,8 @@ ge::graphStatus GBSATiling::CheckReservedOptionalInputs(gert::TilingContext* con
         // Union mode consumes atten_mask as the int32 bit-packed exactMask
         // [kvHeads, G, U * blockShapeY].
         if (context->GetOptionalInputTensor(ATTEN_MASK_INDEX) == nullptr) {
-            OP_LOGE(context->GetNodeName(), "Union mode requires atten_mask (exactMask).");
+            OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), "atten_mask",
+                                                     "Union mode requires atten_mask as the exactMask input");
             return ge::GRAPH_FAILED;
         }
         const auto* maskShape = context->GetOptionalInputShape(ATTEN_MASK_INDEX);
@@ -1215,8 +1227,15 @@ ge::graphStatus GBSATiling::CheckReservedOptionalInputs(gert::TilingContext* con
             maskShape->GetStorageShape().GetDim(0) != static_cast<int64_t>(kvHeads_) ||
             maskShape->GetStorageShape().GetDim(1) != static_cast<int64_t>(qBlockNum_) ||
             maskShape->GetStorageShape().GetDim(2) != maskColumns) {
-            OP_LOGE(context->GetNodeName(), "Union exactMask must be INT32 [kvHeads=%u, G=%u, U*blockShapeY=%lld].",
-                    kvHeads_, qBlockNum_, static_cast<long long>(maskColumns));
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context->GetNodeName(), "atten_mask",
+                ("dtype=" +
+                 std::string(maskDesc == nullptr || maskDesc->GetDataType() != ge::DT_INT32 ? "not INT32" : "INT32") +
+                 ", dimNum=" + std::to_string(maskShape == nullptr ? 0U : maskShape->GetStorageShape().GetDimNum()) +
+                 ", expected=[kvHeads=" + std::to_string(kvHeads_) + ", G=" + std::to_string(qBlockNum_) +
+                 ", U*blockShapeY=" + std::to_string(maskColumns) + "]")
+                    .c_str(),
+                "Union exactMask must be INT32 3D [kvHeads, G, U*blockShapeY]");
             return ge::GRAPH_FAILED;
         }
     } else if (context->GetOptionalInputTensor(ATTEN_MASK_INDEX) != nullptr) {
@@ -1536,15 +1555,17 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
         (embeddingSize_ != 192U && embeddingSize_ != 256U) ||
         (blockShapeY_ < 4U || blockShapeY_ > 128U || (blockShapeY_ & (blockShapeY_ - 1U)) != 0U) ||
         (groupSize_ < 1U || groupSize_ > 16U) || (isPaged_ && blockSize_ != 128U)) {
-        OP_LOGE(
-            context->GetNodeName(),
-            "A4C4 requires quantType=4, A5 FLOAT4_E2M1 Q/K/V, supported dense/paged layouts, "
-            "FP32 softmax, maskType=0/1, blockX=1, headDim=192/256, blockY in {4,8,16,32,64,128}, groupSize in [1,16] "
-            "and pageSize=128; got headDim=%u, blockY=%u, groupSize=%u.",
-            embeddingSize_, blockShapeY_, groupSize_);
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            context->GetNodeName(), "A4C4 configuration",
+            ("headDim=" + std::to_string(embeddingSize_) + ", blockShapeY=" + std::to_string(blockShapeY_) +
+             ", groupSize=" + std::to_string(groupSize_))
+                .c_str(),
+            "A4C4 requires quantType=4, A5 FLOAT4_E2M1 Q/K/V, FP32 softmax, maskType=0/1, blockX=1, "
+            "headDim=192/256, blockY in {4,8,16,32,64,128}, groupSize in [1,16] and pageSize=128");
         return ge::GRAPH_FAILED;
     }
     for (const int scaleIndex : {Q_DEQUANT_SCALE_INDEX, K_DEQUANT_SCALE_INDEX}) {
+        const char* scaleName = scaleIndex == Q_DEQUANT_SCALE_INDEX ? "qDequantScale" : "kDequantScale";
         const auto* desc = context->GetOptionalInputDesc(scaleIndex);
         const auto* scaleShape = context->GetOptionalInputShape(scaleIndex);
         const bool isQueryScale = scaleIndex == Q_DEQUANT_SCALE_INDEX;
@@ -1553,19 +1574,30 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
         const bool useLogicalShape = isPaged_ && !isQueryScale;
         const auto& dataShape = useLogicalShape ? inputShape->GetOriginShape() : inputShape->GetStorageShape();
         if (desc == nullptr || scaleShape == nullptr || desc->GetDataType() != ge::DT_FLOAT8_E8M0) {
-            OP_LOGE(context->GetNodeName(), "MXFP4 requires E8M0 QScale and KScale.");
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context->GetNodeName(), scaleName, "nullptr or not FLOAT8_E8M0",
+                                                  "MXFP4 requires E8M0 qDequantScale and kDequantScale");
             return ge::GRAPH_FAILED;
         }
         const auto& shape = useLogicalShape ? scaleShape->GetOriginShape() : scaleShape->GetStorageShape();
         const size_t rank = dataShape.GetDimNum();
         if (shape.GetDimNum() != rank + 1U || shape.GetDim(rank - 1U) != embeddingSize_ / 64U ||
             shape.GetDim(rank) != 2) {
-            OP_LOGE(context->GetNodeName(), "MXFP4 Q/KScale must replace Q/K's D axis by [D/64, 2].");
+            OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(
+                context->GetNodeName(), scaleName,
+                ("dimNum=" + std::to_string(shape.GetDimNum()) + ", expectedDimNum=" + std::to_string(rank + 1U) +
+                 ", expected last two dims=[D/64, 2]=[" + std::to_string(embeddingSize_ / 64U) + ", 2]")
+                    .c_str(),
+                "MXFP4 Q/KScale must replace the D axis of Q/K by [D/64, 2]");
             return ge::GRAPH_FAILED;
         }
         for (size_t axis = 0; axis + 1U < rank; ++axis) {
             if (shape.GetDim(axis) != dataShape.GetDim(axis)) {
-                OP_LOGE(context->GetNodeName(), "MXFP4 Q/KScale prefix dimensions must match Q/K.");
+                OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                    context->GetNodeName(), "qDequantScale/kDequantScale and query/key",
+                    ("axis=" + std::to_string(axis) + ", scale=" + std::to_string(shape.GetDim(axis)) +
+                     ", data=" + std::to_string(dataShape.GetDim(axis)))
+                        .c_str(),
+                    "MXFP4 Q/KScale prefix dimensions must match Q/K");
                 return ge::GRAPH_FAILED;
             }
         }
@@ -1574,12 +1606,14 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
     const auto* vShape = context->GetOptionalInputShape(V_DEQUANT_SCALE_INDEX);
     const auto* pDesc = context->GetOptionalInputDesc(P_QUANT_SCALE_INDEX);
     if (pDesc != nullptr && pDesc->GetDataType() != ge::DT_UNDEFINED) {
-        OP_LOGE(context->GetNodeName(),
-                "MXFP4 P uses internal dynamic group32 quantization; pQuantScale must be absent.");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+            context->GetNodeName(), "pQuantScale", "provided",
+            "MXFP4 P uses internal dynamic group32 quantization, so pQuantScale must be absent");
         return ge::GRAPH_FAILED;
     }
     if (vDesc == nullptr || vShape == nullptr || vDesc->GetDataType() != ge::DT_FLOAT8_E8M0) {
-        OP_LOGE(context->GetNodeName(), "MXFP4 requires E8M0 VScale in the KV storage layout.");
+        OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context->GetNodeName(), "vDequantScale", "nullptr or not FLOAT8_E8M0",
+                                              "MXFP4 requires E8M0 vDequantScale in the KV storage layout");
         return ge::GRAPH_FAILED;
     }
     const auto* valueShape = context->GetInputShape(VALUE_INDEX);
@@ -1604,9 +1638,18 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
         }
     }
     if (!valid) {
-        OP_LOGE(context->GetNodeName(),
-                "MXFP4 VScale must replace the KV S axis by ceil(S/64) and append 2; "
-                "TND concatenates independently aligned batch segments. PA uses physical cache pages.");
+        std::string actual = "dimNum=" + std::to_string(scale.GetDimNum());
+        if (scale.GetDimNum() == rank) {
+            actual += ", dims=[";
+            for (size_t axis = 0; axis < rank; ++axis) {
+                actual += (axis == 0U ? "" : ", ") + std::to_string(scale.GetDim(axis));
+            }
+            actual += "]";
+        }
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context->GetNodeName(), "vDequantScale", actual.c_str(),
+                                               "MXFP4 VScale must replace the KV S axis by ceil(S/64) and append 2; "
+                                               "TND concatenates independently aligned batch segments. PA uses "
+                                               "physical cache pages.");
         return ge::GRAPH_FAILED;
     }
     if (isPaged_) {
@@ -1624,16 +1667,26 @@ ge::graphStatus GBSATiling::CheckMxfp4Config(gert::TilingContext* context)
                 if (stride->GetDimNum() != shape.GetDimNum() ||
                     ValidatePagedDim0OnlyNonContig(
                         context, stride, shape, isKeyScale ? "kDequantScale" : "vDequantScale") != ge::GRAPH_SUCCESS) {
-                    OP_LOGE(context->GetNodeName(),
-                            "MXFP4 PA scale strides must match their rank and be dense inside a page.");
+                    OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                        context->GetNodeName(), isKeyScale ? "kDequantScale" : "vDequantScale",
+                        ("strideRank=" + std::to_string(stride->GetDimNum()) +
+                         ", shapeRank=" + std::to_string(shape.GetDimNum()))
+                            .c_str(),
+                        "MXFP4 PA scale strides must match their rank and be dense inside a page");
                     return ge::GRAPH_FAILED;
                 }
                 if (shape.GetDim(0) > 1) {
                     const int64_t stride0 = stride->GetStride(0);
                     if (stride0 <= 0 || static_cast<uint64_t>(stride0) < pageBytes ||
                         static_cast<uint64_t>(stride0) % rowBytes != 0U) {
-                        OP_LOGE(context->GetNodeName(),
-                                "MXFP4 PA scale page stride must cover a page and align to its scale row.");
+                        OP_LOGE_FOR_INVALID_STRIDE(
+                            context->GetNodeName(), isKeyScale ? "kDequantScale" : "vDequantScale",
+                            ("dim0 stride=" + std::to_string(stride0) + ", pageBytes=" + std::to_string(pageBytes) +
+                             ", rowBytes=" + std::to_string(rowBytes))
+                                .c_str(),
+                            ("a page stride of at least " + std::to_string(pageBytes) +
+                             " bytes aligned to the scale row of " + std::to_string(rowBytes) + " bytes")
+                                .c_str());
                         return ge::GRAPH_FAILED;
                     }
                     pageStride = static_cast<uint64_t>(stride0);
@@ -1685,28 +1738,41 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
         if (socVer_ != SOC_VER_950_CODE || dataType_ != ge::DT_FLOAT8_E4M3FN || embeddingSize_ != 128U ||
             softmaxPrecision_ != 0U || (maskType_ != 0 && maskType_ != 1) || blockShapeX_ != 1U ||
             blockShapeY_ != 128U || residualBlockMode_ != 0 || (isPaged_ && blockSize_ != 128U)) {
-            OP_LOGE(context->GetNodeName(),
-                    "A8C4 requires Ascend950, FP8 E4M3FN query, D=128, softmaxPrecision=0, blockShape=[1,128], "
-                    "maskType=0/1 and residualBlockMode=0.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context->GetNodeName(), "A8C4 configuration",
+                ("quantType=" + std::to_string(quantType_) +
+                 ", dtype=" + std::to_string(static_cast<int32_t>(dataType_)) +
+                 ", headDim=" + std::to_string(embeddingSize_) + ", blockShapeY=" + std::to_string(blockShapeY_))
+                    .c_str(),
+                "A8C4 requires Ascend950, FP8 E4M3FN query, D=128, softmaxPrecision=0, blockShape=[1,128], "
+                "maskType=0/1 and residualBlockMode=0");
             return ge::GRAPH_FAILED;
         }
         if (layoutQ_ != "TND" && qSeqCapacity_ > GBSA_A8C4_MAX_Q_SEQ_LEN) {
-            OP_LOGE(context->GetNodeName(), "A8C4 requires Q sequence length <= %u.", GBSA_A8C4_MAX_Q_SEQ_LEN);
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query sequence length",
+                                                     std::to_string(qSeqCapacity_).c_str(),
+                                                     "A8C4 requires Q sequence length <= 16");
             return ge::GRAPH_FAILED;
         }
         if (groupSize_ > GBSA_TILE_SIZE_32) {
-            OP_LOGE(context->GetNodeName(), "A8C4 requires groupSize <= 32.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "groupSize",
+                                                  std::to_string(groupSize_).c_str(), "A8C4 requires groupSize <= 32");
             return ge::GRAPH_FAILED;
         }
         if ((layoutKv_ == "PA_BBND" || layoutKv_ == "BSND" || layoutKv_ == "TND") &&
             kvHeads_ > GBSA_A8C4_MAX_KV_HEADS_PA_BBND_BSND_TND) {
-            OP_LOGE(context->GetNodeName(), "A8C4 supports at most %u KV heads for KV layout %s.",
-                    GBSA_A8C4_MAX_KV_HEADS_PA_BBND_BSND_TND, layoutKv_.c_str());
+            OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                context->GetNodeName(), "key/value kvHeads", std::to_string(kvHeads_).c_str(),
+                ("A8C4 supports at most " + std::to_string(GBSA_A8C4_MAX_KV_HEADS_PA_BBND_BSND_TND) +
+                 " KV heads for KV layout " + layoutKv_)
+                    .c_str());
             return ge::GRAPH_FAILED;
         }
         if (context->GetOptionalInputShape(Q_DEQUANT_SCALE_INDEX) != nullptr ||
             context->GetOptionalInputShape(P_QUANT_SCALE_INDEX) != nullptr) {
-            OP_LOGE(context->GetNodeName(), "A8C4 fixes Q/P scales to one; qDequantScale/pQuantScale must be absent.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context->GetNodeName(), "qDequantScale and pQuantScale", "provided",
+                "A8C4 fixes Q/P scales to one, so qDequantScale/pQuantScale must be absent");
             return ge::GRAPH_FAILED;
         }
         constexpr uint32_t scaleGroupSize = 16U;
@@ -1717,14 +1783,27 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
             const auto& kvShape = context->GetInputShape(KEY_INDEX)->GetOriginShape();
             if (desc == nullptr || shape == nullptr || desc->GetDataType() != ge::DT_BF16 ||
                 shape->GetOriginShape().GetDimNum() != kvShape.GetDimNum()) {
-                OP_LOGE(context->GetNodeName(), "A8C4 requires both compact BF16 KV scales with the same rank as KV.");
+                const std::string dtypeStr =
+                    desc == nullptr ? "missing" : std::to_string(static_cast<int32_t>(desc->GetDataType()));
+                const std::string rankStr =
+                    shape == nullptr ? "missing" : std::to_string(shape->GetOriginShape().GetDimNum());
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    context->GetNodeName(), "kDequantScale and vDequantScale",
+                    ("dtype=" + dtypeStr + ", rank=" + rankStr + ", kvRank=" + std::to_string(kvShape.GetDimNum()))
+                        .c_str(),
+                    "A8C4 requires both compact BF16 KV scales with the same rank as key/value");
                 return ge::GRAPH_FAILED;
             }
             const auto& scale = shape->GetOriginShape();
             for (size_t axis = 0; axis < kvShape.GetDimNum(); ++axis) {
                 const int64_t expected = axis + 1U == kvShape.GetDimNum() ? scalesPerTokenHead : kvShape.GetDim(axis);
                 if (scale.GetDim(axis) != expected) {
-                    OP_LOGE(context->GetNodeName(), "A8C4 scale shape must match KV with D replaced by D/16.");
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                        context->GetNodeName(), "kDequantScale and vDequantScale",
+                        ("axis=" + std::to_string(axis) + ", scale=" + std::to_string(scale.GetDim(axis)) +
+                         ", expected=" + std::to_string(expected))
+                            .c_str(),
+                        "A8C4 scale shape must match key/value with D replaced by D/16");
                     return ge::GRAPH_FAILED;
                 }
             }
@@ -1737,7 +1816,12 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
                 uint64_t pageStride = pageElems;
                 if (stride != nullptr && stride->GetDimNum() != 0) {
                     if (stride->GetDimNum() != scale.GetDimNum()) {
-                        OP_LOGE(context->GetNodeName(), "%s stride rank must match its shape rank.", name);
+                        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+                            context->GetNodeName(), std::string(name) + " stride and shape",
+                            ("strideDimNum=" + std::to_string(stride->GetDimNum()) +
+                             ", shapeDimNum=" + std::to_string(scale.GetDimNum()))
+                                .c_str(),
+                            "the stride rank of an A8C4 KV scale must match its shape rank");
                         return ge::GRAPH_FAILED;
                     }
                     if (ValidatePagedDim0OnlyNonContig(context, stride, scale, name) != ge::GRAPH_SUCCESS) {
@@ -1747,8 +1831,12 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
                         const int64_t stride0 = stride->GetStride(0);
                         if (stride0 <= 0 || static_cast<uint64_t>(stride0) < pageElems ||
                             static_cast<uint64_t>(stride0) % rowElems != 0) {
-                            OP_LOGE(context->GetNodeName(), "%s dim0 stride must cover one page and align to Nkv * 8.",
-                                    name);
+                            OP_LOGE_FOR_INVALID_STRIDE(
+                                context->GetNodeName(), name,
+                                ("dim0 stride=" + std::to_string(stride0) + ", pageElems=" + std::to_string(pageElems) +
+                                 ", Nkv*8=" + std::to_string(rowElems))
+                                    .c_str(),
+                                "a stride covering one page and aligned to Nkv * 8");
                             return ge::GRAPH_FAILED;
                         }
                         pageStride = static_cast<uint64_t>(stride0);
@@ -1796,30 +1884,42 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
     }
     if (maskType_ == GBSA_MASK_TYPE_UNION) {
         if (residualBlockMode_ != GBSA_RESIDUAL_BLOCK_MODE_NONE || isConsistentTopk_) {
-            OP_LOGE(context->GetNodeName(), "Union mode requires residualBlockMode=0 and isConsistentTopk=false.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "residualBlockMode and isConsistentTopk",
+                                                  ("residualBlockMode=" + std::to_string(residualBlockMode_) +
+                                                   ", isConsistentTopk=" + std::to_string(isConsistentTopk_))
+                                                      .c_str(),
+                                                  "Union mode requires residualBlockMode=0 and isConsistentTopk=false");
             return ge::GRAPH_FAILED;
         }
         if (quantType_ == GBSA_QUANT_TYPE_NONE) {
             if (socVer_ != SOC_VER_950_CODE &&
                 (softmaxPrecision_ != 0U || (dataType_ != ge::DT_FLOAT16 && dataType_ != ge::DT_BF16))) {
-                OP_LOGE(context->GetNodeName(), "Union on Arch22 requires FP16/BF16 and softmaxPrecision=0.");
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "query dtype and softmaxPrecision",
+                                                      ("dtype=" + std::to_string(static_cast<int32_t>(dataType_)) +
+                                                       ", softmaxPrecision=" + std::to_string(softmaxPrecision_))
+                                                          .c_str(),
+                                                      "Union mode on Arch22 requires FP16/BF16 and softmaxPrecision=0");
                 return ge::GRAPH_FAILED;
             }
         } else if (quantType_ == GBSA_QUANT_TYPE_FULL) {
             if (embeddingSize_ != GBSA_TILE_SIZE_128) {
-                OP_LOGE(context->GetNodeName(), "Union FP8 currently requires headDim=128.");
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query headDim",
+                                                         std::to_string(embeddingSize_).c_str(),
+                                                         "Union FP8 currently requires headDim=128");
                 return ge::GRAPH_FAILED;
             }
             // FP8+PA skips actualKvLen clip to keep SoftmaxUnion S aligned; the
             // unread pad must still land inside page geometry (pageSize=128).
             if (isPaged_ && (blockShapeY_ == 0U || (128U % blockShapeY_) != 0U)) {
-                OP_LOGE(context->GetNodeName(),
-                        "Union FP8 paged KV requires blockShapeY to divide the PA page size 128, but got Y=%u.",
-                        blockShapeY_);
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    context->GetNodeName(), "blockShapeY", std::to_string(blockShapeY_).c_str(),
+                    "Union FP8 paged KV requires blockShapeY to divide the PA page size 128");
                 return ge::GRAPH_FAILED;
             }
         } else {
-            OP_LOGE(context->GetNodeName(), "Union mode only supports quantType=0 or 5.");
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "quantType",
+                                                  std::to_string(quantType_).c_str(),
+                                                  "Union mode only supports quantType=0 or 5");
             return ge::GRAPH_FAILED;
         }
     }
@@ -1830,15 +1930,22 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
     }
     if (isQuant5 && softmaxPrecision_ == 1U &&
         (!isPaged_ || layoutQ_ != "TND" || layoutKv_ != "PA_BBND" || returnSoftmaxlse_)) {
-        OP_LOGE(context->GetNodeName(), "Low-precision FP8 full-quant requires TND/PA_BBND and no LSE.");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "layoutQ, layoutKv and returnSoftmaxlse",
+                                              ("layoutQ=" + layoutQ_ + ", layoutKv=" + layoutKv_ +
+                                               ", returnSoftmaxlse=" + std::to_string(returnSoftmaxlse_))
+                                                  .c_str(),
+                                              "Low-precision FP8 full-quant requires TND/PA_BBND and no LSE");
         return ge::GRAPH_FAILED;
     }
     if (isQuant5 && softmaxPrecision_ == 0U && embeddingSize_ != GBSA_TILE_SIZE_128) {
-        OP_LOGE(context->GetNodeName(), "High-precision FP8 full-quant requires headDim=128.");
+        OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context->GetNodeName(), "query headDim",
+                                                 std::to_string(embeddingSize_).c_str(),
+                                                 "High-precision FP8 full-quant requires headDim=128");
         return ge::GRAPH_FAILED;
     }
     if (isQuant5 && softmaxPrecision_ == 0U && maskType_ != GBSA_MASK_TYPE_UNION && groupSize_ > GBSA_TILE_SIZE_16) {
-        OP_LOGE(context->GetNodeName(), "Regular high-precision FP8 requires groupSize <= 16.");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "groupSize", std::to_string(groupSize_).c_str(),
+                                              "Regular high-precision FP8 requires groupSize <= 16");
         return ge::GRAPH_FAILED;
     }
     if (blockShapeY_ != 128U) {
@@ -1857,10 +1964,13 @@ ge::graphStatus GBSATiling::CheckQuantConfig(gert::TilingContext* context)
         const bool arch22PagedNonQuant =
             arch22NonQuant && isPaged_ && blockSize_ == 128U && supportedArch22PagedY && (128U % blockShapeY_) == 0U;
         if (!arch35GeneralY && !generalizedMxfp8 && !arch22DenseNonQuant && !arch22PagedNonQuant) {
-            OP_LOGE(context->GetNodeName(),
-                    "Generalized blockShapeY=%u requires arch35 (non-quant/FP8 Y in [1,128] or MXFP8), or arch22 "
-                    "FP16/BF16 quantType=0 with power-of-two Y in [1, 128] (PA page size 128).",
-                    blockShapeY_);
+            OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                context->GetNodeName(), "blockShapeY",
+                ("blockShapeY=" + std::to_string(blockShapeY_) + ", socVer=" + std::to_string(socVer_) +
+                 ", dtype=" + std::to_string(static_cast<int32_t>(dataType_)))
+                    .c_str(),
+                "Generalized blockShapeY requires arch35 (non-quant/FP8 Y in [1,128] or MXFP8), or arch22 "
+                "FP16/BF16 quantType=0 with power-of-two Y in [1, 128] (PA page size 128)");
             return ge::GRAPH_FAILED;
         }
     }
@@ -2363,7 +2473,12 @@ ge::graphStatus GBSATiling::GetTiling(gert::TilingContext* context, GenericBlock
                                        static_cast<uint64_t>(mm2L1TileN_) * mm2L1TileKRight_;
             const uint32_t pairs = fixedBytes < l1Capacity ? (l1Capacity - fixedBytes) / pairBytes : 0U;
             if (pairs < 2U) {
-                OP_LOGE(context->GetNodeName(), "A8C4 tile cannot fit independent K/V pipeline buffers in L1.");
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    context->GetNodeName(), "L1 tile configuration",
+                    ("pairs=" + std::to_string(pairs) + ", fixedBytes=" + std::to_string(fixedBytes) +
+                     ", pairBytes=" + std::to_string(pairBytes) + ", l1Capacity=" + std::to_string(l1Capacity))
+                        .c_str(),
+                    "A8C4 requires at least two independent K/V pipeline buffer pairs in L1");
                 return ge::GRAPH_FAILED;
             }
             kL1BufNum_ = std::min(3U, pairs);

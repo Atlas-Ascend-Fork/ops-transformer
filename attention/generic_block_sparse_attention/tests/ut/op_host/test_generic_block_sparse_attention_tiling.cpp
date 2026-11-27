@@ -2858,3 +2858,370 @@ TEST_F(generic_block_sparse_attention_tiling_ut, mxfp8_rejects_invalid_lse_outpu
         EXPECT_FALSE(RunMxfp8Validation(inputs, outputs, true));
     }
 }
+
+// ============================================================================
+// Incremental coverage: structured error-log branches (PR #17031).
+// Each case first asserts a known-good baseline, then breaks exactly one field so
+// the failure lands on the intended OP_LOGE_FOR_* line.
+// ============================================================================
+namespace {
+constexpr int64_t kA4C4D = 256; // A4C4 only supports headDim 192/256.
+constexpr int64_t kMxfp4ScalePair = 2;
+constexpr int64_t kA8C4ScaleGroup = 16;
+constexpr int64_t kA8C4QSeq = 16;
+
+struct TensorCase {
+    std::vector<gert::TilingContextPara::TensorDescription> inputs;
+    std::vector<gert::TilingContextPara::TensorDescription> outputs;
+};
+
+void SetDescShape(gert::TilingContextPara::TensorDescription& desc, const gert::Shape& shape)
+{
+    desc.shape_.MutableOriginShape() = shape;
+    desc.shape_.MutableStorageShape() = shape;
+}
+
+TensorCase MakeA4C4Case(int64_t headDim = kA4C4D, int64_t numHeads = kN1, int64_t kvHeads = kN2)
+{
+    const gert::Shape qShape({kT, numHeads, headDim});
+    const gert::Shape kvShape({kMaxBlocks, kBlockSize, kvHeads, headDim});
+    const gert::Shape vScaleShape({kMaxBlocks, kMxfp4ScalePair, kvHeads, headDim, kMxfp4ScalePair});
+    std::vector<gert::TilingContextPara::TensorDescription> inputs = {
+        MakeTensorDescription(qShape, ge::DT_FLOAT4_E2M1),
+        MakeTensorDescription(kvShape, ge::DT_FLOAT4_E2M1),
+        MakeTensorDescription(kvShape, ge::DT_FLOAT4_E2M1),
+        {{{kvHeads, kT, kTopK}, {kvHeads, kT, kTopK}}, ge::DT_INT32, ge::FORMAT_ND},
+        {{{kvHeads, kT}, {kvHeads, kT}}, ge::DT_INT32, ge::FORMAT_ND},
+        {{{1024}, {1024}}, ge::DT_INT32, ge::FORMAT_ND},
+        {{}, ge::DT_UNDEFINED, ge::FORMAT_ND},
+        MakeTensorDescription(gert::Shape({kT, numHeads, headDim / 64, kMxfp4ScalePair}), ge::DT_FLOAT8_E8M0),
+        MakeTensorDescription(gert::Shape({kMaxBlocks, kBlockSize, kvHeads, headDim / 64, kMxfp4ScalePair}),
+                              ge::DT_FLOAT8_E8M0),
+        MakeTensorDescription(vScaleShape, ge::DT_FLOAT8_E8M0),
+        {{}, ge::DT_UNDEFINED, ge::FORMAT_ND},
+        {{{kBatch + 1}, {kBatch + 1}}, ge::DT_INT64, ge::FORMAT_ND},
+        {{}, ge::DT_UNDEFINED, ge::FORMAT_ND},
+        {{}, ge::DT_UNDEFINED, ge::FORMAT_ND},
+        {{{kBatch}, {kBatch}}, ge::DT_INT32, ge::FORMAT_ND},
+        {{{kBatch, kMaxBlocks}, {kBatch, kMaxBlocks}}, ge::DT_INT32, ge::FORMAT_ND},
+    };
+    return {inputs, MakeOutputs(ge::DT_FLOAT16, false, headDim, numHeads)};
+}
+
+bool RunA4C4(const TensorCase& testCase, const std::string& soc = "Ascend950", int64_t softmaxPrec = 0,
+             const std::vector<int64_t>& blockShape = kBlockShape)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara ctx(
+        "GenericBlockSparseAttention", testCase.inputs, testCase.outputs,
+        MakeAttrs(0, 4, softmaxPrec, 0, 0.0f, -1, -1, 4, "TND", "PA_BBND", 0, false, blockShape), &compileInfo, soc, 32,
+        262144);
+    TilingInfo info;
+    return ExecuteTiling(ctx, info);
+}
+
+TensorCase MakeA8C4PagedCase(int64_t kvHeads = kN2, int64_t headDim = kD, int64_t groupSize = kN1)
+{
+    const int64_t qHeads = kvHeads * groupSize;
+    const gert::Shape qShape({kA8C4QSeq, qHeads, headDim});
+    const gert::Shape kvShape({kMaxBlocks, kBlockSize, kvHeads, headDim});
+    auto inputs = MakeInputs(ge::DT_FLOAT8_E4M3FN, headDim, qHeads, kvHeads);
+    inputs[0] = MakeTensorDescription(qShape, ge::DT_FLOAT8_E4M3FN);
+    inputs[1] = MakeTensorDescription(kvShape, ge::DT_FLOAT4_E2M1);
+    inputs[2] = inputs[1];
+    inputs[3] = {{{kvHeads, kA8C4QSeq, kTopK}, {kvHeads, kA8C4QSeq, kTopK}}, ge::DT_INT32, ge::FORMAT_ND};
+    inputs[4] = {{{kvHeads, kA8C4QSeq}, {kvHeads, kA8C4QSeq}}, ge::DT_INT32, ge::FORMAT_ND};
+    auto scaleShape = kvShape;
+    scaleShape.SetDim(scaleShape.GetDimNum() - 1U, headDim / kA8C4ScaleGroup);
+    inputs[8] = MakeTensorDescription(scaleShape, ge::DT_BF16);
+    inputs[9] = inputs[8];
+    auto outputs = MakeOutputs(ge::DT_BF16, false, headDim, qHeads);
+    outputs[0] = MakeTensorDescription(qShape, ge::DT_BF16);
+    return {inputs, outputs};
+}
+
+bool RunA8C4(const TensorCase& testCase, const std::string& soc = "Ascend950",
+             const std::vector<int64_t>& blockShape = kBlockShape)
+{
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara ctx("GenericBlockSparseAttention", testCase.inputs, testCase.outputs,
+                                MakeAttrs(0, 8, 0, 0, 0.0f, -1, -1, 4, "TND", "PA_BBND", 0, false, blockShape),
+                                &compileInfo, soc, 32, 262144);
+    TilingInfo info;
+    return ExecuteTiling(ctx, info);
+}
+
+std::vector<gert::TilingContextPara::TensorDescription> MakeUnionCase(ge::DataType dtype, int64_t dim, int64_t heads,
+                                                                      int64_t blockY, int64_t group, int64_t capacity)
+{
+    auto inputs = MakeInputs(dtype, dim, heads);
+    inputs[3] = {{{kN2, group, capacity}, {kN2, group, capacity}}, ge::DT_INT32, ge::FORMAT_ND};
+    inputs[4] = {{{kN2, group}, {kN2, group}}, ge::DT_INT32, ge::FORMAT_ND};
+    inputs[6] = {{{kN2, group, capacity * blockY}, {kN2, group, capacity * blockY}}, ge::DT_INT32, ge::FORMAT_ND};
+    return inputs;
+}
+
+bool RunUnion(const std::vector<gert::TilingContextPara::TensorDescription>& inputs,
+              const std::vector<gert::TilingContextPara::TensorDescription>& outputs,
+              const std::vector<int64_t>& blockShape, int64_t softmaxPrec = 0, const std::string& soc = "Ascend910B",
+              int64_t residualMode = 0, bool consistentTopk = false)
+{
+    const bool arch35 = soc == "Ascend950";
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara ctx(
+        "GenericBlockSparseAttention", inputs, outputs,
+        MakeAttrs(3, 0, softmaxPrec, 0, 0.0f, -1, -1, 4, "TND", "PA_BBND", residualMode, consistentTopk, blockShape),
+        &compileInfo, soc, arch35 ? 56 : 40, arch35 ? 262144 : 196608);
+    TilingInfo info;
+    return ExecuteTiling(ctx, info);
+}
+} // namespace
+
+TEST_F(generic_block_sparse_attention_tiling_ut, a4c4_config_combination_errors)
+{
+    // Baseline: 950, quantType=4, FP4 Q/K/V, D=256, TND/PA_BBND, blockShape={1,128}, groupSize=4.
+    ASSERT_TRUE(RunA4C4(MakeA4C4Case())) << "A4C4 baseline must succeed";
+    // headDim must be 192 or 256.
+    EXPECT_FALSE(RunA4C4(MakeA4C4Case(128)));
+    // blockShapeY must be a power of two inside [4, 128].
+    EXPECT_FALSE(RunA4C4(MakeA4C4Case(), "Ascend950", 0, {1, 3}));
+    // softmaxPrecision must be 0 (FP32 softmax).
+    EXPECT_FALSE(RunA4C4(MakeA4C4Case(), "Ascend950", 1));
+    // A4C4 is Ascend950 only.
+    EXPECT_FALSE(RunA4C4(MakeA4C4Case(), "Ascend910B"));
+    // groupSize must stay in [1, 16].
+    EXPECT_FALSE(RunA4C4(MakeA4C4Case(kA4C4D, 17 * kN2)));
+    // Q/K/V must be FLOAT4_E2M1.
+    {
+        auto testCase = MakeA4C4Case();
+        for (int index : {0, 1, 2}) {
+            testCase.inputs[index].dtype_ = ge::DT_FLOAT16;
+        }
+        testCase.outputs = MakeOutputs(ge::DT_FLOAT16, false, kA4C4D, kN1);
+        EXPECT_FALSE(RunA4C4(testCase));
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, a4c4_scale_validation_errors)
+{
+    ASSERT_TRUE(RunA4C4(MakeA4C4Case()));
+    // Q/K/V scales must be E8M0.
+    for (int index : {7, 8, 9}) {
+        auto testCase = MakeA4C4Case();
+        testCase.inputs[index].dtype_ = ge::DT_UINT8;
+        EXPECT_FALSE(RunA4C4(testCase)) << "scale index=" << index;
+    }
+    // Q/K scales must append [D/64, 2] after the data prefix.
+    for (int index : {7, 8}) {
+        for (int error : {0, 1, 2}) {
+            SCOPED_TRACE(testing::Message() << "scale index=" << index << ", error=" << error);
+            auto testCase = MakeA4C4Case();
+            auto shape = testCase.inputs[index].shape_.GetStorageShape();
+            if (error == 0) {
+                shape.SetDim(shape.GetDimNum() - 2U, 3); // D/64 mismatch
+            } else if (error == 1) {
+                shape.SetDim(shape.GetDimNum() - 1U, 1); // pair count mismatch
+            } else {
+                shape.SetDimNum(shape.GetDimNum() - 1U); // rank off by one
+            }
+            SetDescShape(testCase.inputs[index], shape);
+            EXPECT_FALSE(RunA4C4(testCase));
+        }
+    }
+    // Q/K scale prefix dims must match Q/K.
+    {
+        auto testCase = MakeA4C4Case();
+        auto shape = testCase.inputs[7].shape_.GetStorageShape();
+        shape.SetDim(0, kT + 1);
+        SetDescShape(testCase.inputs[7], shape);
+        EXPECT_FALSE(RunA4C4(testCase));
+    }
+    {
+        auto testCase = MakeA4C4Case();
+        auto shape = testCase.inputs[8].shape_.GetStorageShape();
+        shape.SetDim(1, kBlockSize / 2);
+        SetDescShape(testCase.inputs[8], shape);
+        EXPECT_FALSE(RunA4C4(testCase));
+    }
+    // p_quant_scale must stay absent.
+    {
+        auto testCase = MakeA4C4Case();
+        testCase.inputs[10] = MakeTensorDescription(gert::Shape({1}), ge::DT_FLOAT);
+        EXPECT_FALSE(RunA4C4(testCase));
+    }
+    // V scale must be [numBlocks, 2, Nkv, D, 2].
+    for (int error : {0, 1, 2, 3}) {
+        SCOPED_TRACE(testing::Message() << "v-scale error=" << error);
+        auto testCase = MakeA4C4Case();
+        auto shape = testCase.inputs[9].shape_.GetStorageShape();
+        if (error == 0) {
+            shape.SetDim(0, kMaxBlocks + 1); // numBlocks mismatch
+        } else if (error == 1) {
+            shape.SetDim(1, 1); // ceil(page/64) mismatch
+        } else if (error == 2) {
+            shape.SetDim(3, kA4C4D / 2); // D mismatch
+        } else {
+            shape.SetDimNum(4); // rank mismatch
+        }
+        SetDescShape(testCase.inputs[9], shape);
+        EXPECT_FALSE(RunA4C4(testCase));
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, a4c4_paged_kv_only_dim0_may_be_strided)
+{
+    ASSERT_TRUE(RunA4C4(MakeA4C4Case()));
+    constexpr int64_t pageElems = kBlockSize * kN2 * kA4C4D;
+    for (int index : {1, 2}) {
+        SCOPED_TRACE(index);
+        // Dim0-only holes are legal: packed MXFP4 keeps an independent physical page pitch.
+        {
+            auto testCase = MakeA4C4Case();
+            testCase.inputs[index].hasStride_ = true;
+            testCase.inputs[index].stride_ = gert::Stride({2 * pageElems, kN2 * kA4C4D, kA4C4D, 1});
+            EXPECT_TRUE(RunA4C4(testCase));
+        }
+        // Non-dim0 axes must stay contiguous.
+        {
+            auto testCase = MakeA4C4Case();
+            testCase.inputs[index].hasStride_ = true;
+            testCase.inputs[index].stride_ = gert::Stride({pageElems, kN2 * kA4C4D + 1, kA4C4D, 1});
+            EXPECT_FALSE(RunA4C4(testCase));
+        }
+        // Dim0 must be aligned to Nkv*D.
+        {
+            auto testCase = MakeA4C4Case();
+            testCase.inputs[index].hasStride_ = true;
+            testCase.inputs[index].stride_ = gert::Stride({pageElems + 1, kN2 * kA4C4D, kA4C4D, 1});
+            EXPECT_FALSE(RunA4C4(testCase));
+        }
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, arch22_rejects_head_dim_above_256)
+{
+    // Baseline D=128 succeeds on Ascend910B.
+    {
+        GenericBlockSparseAttentionCompileInfo compileInfo;
+        gert::TilingContextPara ctx("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16),
+                                    MakeOutputs(ge::DT_FLOAT16, false), MakeAttrs(1, 0, 0, 0), &compileInfo,
+                                    "Ascend910B", 40, 196608);
+        TilingInfo info;
+        ASSERT_TRUE(ExecuteTiling(ctx, info));
+    }
+    // 384 stays under the 512 storage limit but exceeds the A2/A3 256 headDim cap.
+    GenericBlockSparseAttentionCompileInfo compileInfo;
+    gert::TilingContextPara ctx("GenericBlockSparseAttention", MakeInputs(ge::DT_FLOAT16, 384),
+                                MakeOutputs(ge::DT_FLOAT16, false, 384), MakeAttrs(1, 0, 0, 0), &compileInfo,
+                                "Ascend910B", 40, 196608);
+    TilingInfo info;
+    EXPECT_FALSE(ExecuteTiling(ctx, info));
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, union_sparse_pattern_bounds)
+{
+    const auto outputs = MakeOutputs(ge::DT_FLOAT16, false);
+    ASSERT_TRUE(RunUnion(MakeUnionCase(ge::DT_FLOAT16, kD, kN1, kBlockSize, 2, kTopK), outputs, kUnionBlockShape));
+    // blockShapeX(8) * groupSize must stay <= 128 rows.
+    EXPECT_FALSE(RunUnion(MakeUnionCase(ge::DT_FLOAT16, kD, 17 * kN2, kBlockSize, 2, kTopK),
+                          MakeOutputs(ge::DT_FLOAT16, false, kD, 17 * kN2), kUnionBlockShape));
+    // Union group count (dim1) and capacity (dim2) must be positive.
+    EXPECT_FALSE(RunUnion(MakeUnionCase(ge::DT_FLOAT16, kD, kN1, kBlockSize, 0, kTopK), outputs, kUnionBlockShape));
+    EXPECT_FALSE(RunUnion(MakeUnionCase(ge::DT_FLOAT16, kD, kN1, kBlockSize, 1, 0), outputs, kUnionBlockShape));
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, union_exact_mask_value_contract)
+{
+    const auto outputs = MakeOutputs(ge::DT_FLOAT16, false);
+    ASSERT_TRUE(RunUnion(MakeUnionCase(ge::DT_FLOAT16, kD, kN1, kBlockSize, 2, kTopK), outputs, kUnionBlockShape));
+    for (int error : {0, 1, 2}) {
+        SCOPED_TRACE(error);
+        auto inputs = MakeUnionCase(ge::DT_FLOAT16, kD, kN1, kBlockSize, 2, kTopK);
+        if (error == 0) {
+            inputs[6].dtype_ = ge::DT_FLOAT16;
+        } else {
+            auto shape = inputs[6].shape_.GetStorageShape();
+            if (error == 1) {
+                shape.SetDimNum(2);
+            } else {
+                shape.SetDim(2, kTopK * kBlockSize - 1);
+            }
+            SetDescShape(inputs[6], shape);
+        }
+        EXPECT_FALSE(RunUnion(inputs, outputs, kUnionBlockShape));
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, union_mode_rejects_residual_and_consistent_topk)
+{
+    const auto inputs = MakeUnionCase(ge::DT_FLOAT16, kD, kN1, kBlockSize, 2, kTopK);
+    const auto outputs = MakeOutputs(ge::DT_FLOAT16, false);
+    ASSERT_TRUE(RunUnion(inputs, outputs, kUnionBlockShape));
+    EXPECT_FALSE(RunUnion(inputs, outputs, kUnionBlockShape, 0, "Ascend910B", 1));
+    EXPECT_FALSE(RunUnion(inputs, outputs, kUnionBlockShape, 0, "Ascend910B", 0, true));
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, union_arch22_requires_fp32_softmax)
+{
+    const auto inputs = MakeUnionCase(ge::DT_FLOAT16, kD, kN1, kBlockSize, 2, kTopK);
+    const auto outputs = MakeOutputs(ge::DT_FLOAT16, false);
+    ASSERT_TRUE(RunUnion(inputs, outputs, kUnionBlockShape, 0, "Ascend910B"));
+    EXPECT_FALSE(RunUnion(inputs, outputs, kUnionBlockShape, 1, "Ascend910B"));
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, a8c4_config_combination_errors)
+{
+    ASSERT_TRUE(RunA8C4(MakeA8C4PagedCase())) << "A8C4 baseline must succeed";
+    // blockShapeY must be 128.
+    EXPECT_FALSE(RunA8C4(MakeA8C4PagedCase(), "Ascend950", {1, 64}));
+    // A8C4 is Ascend950 only.
+    EXPECT_FALSE(RunA8C4(MakeA8C4PagedCase(), "Ascend910B"));
+    // headDim must be 128.
+    EXPECT_FALSE(RunA8C4(MakeA8C4PagedCase(kN2, 192)));
+    // Query must be FLOAT8_E4M3FN.
+    {
+        auto testCase = MakeA8C4PagedCase();
+        testCase.inputs[0].dtype_ = ge::DT_FLOAT16;
+        testCase.outputs[0].dtype_ = ge::DT_FLOAT16;
+        EXPECT_FALSE(RunA8C4(testCase));
+    }
+    // groupSize must stay <= 32.
+    EXPECT_FALSE(RunA8C4(MakeA8C4PagedCase(kN2, kD, 33)));
+    // q/p scales must stay absent.
+    for (int index : {7, 10}) {
+        auto testCase = MakeA8C4PagedCase();
+        testCase.inputs[index] = MakeTensorDescription(gert::Shape({1}), ge::DT_FLOAT);
+        EXPECT_FALSE(RunA8C4(testCase)) << "scale index=" << index;
+    }
+}
+
+TEST_F(generic_block_sparse_attention_tiling_ut, a8c4_kv_scale_contract_errors)
+{
+    ASSERT_TRUE(RunA8C4(MakeA8C4PagedCase()));
+    constexpr int64_t scalesPerHead = kD / kA8C4ScaleGroup;
+    constexpr int64_t pageElems = kBlockSize * kN2 * scalesPerHead;
+    for (int index : {8, 9}) {
+        for (int error : {0, 1, 2, 3, 4}) {
+            SCOPED_TRACE(testing::Message() << "scale index=" << index << ", error=" << error);
+            auto testCase = MakeA8C4PagedCase();
+            auto& desc = testCase.inputs[index];
+            auto shape = desc.shape_.GetStorageShape();
+            if (error == 0) {
+                desc.dtype_ = ge::DT_FLOAT16; // must be BF16
+            } else if (error == 1) {
+                shape.SetDimNum(3); // rank must match K/V
+                SetDescShape(desc, shape);
+            } else if (error == 2) {
+                shape.SetDim(shape.GetDimNum() - 1U, scalesPerHead / 2); // D/16 mismatch
+                SetDescShape(desc, shape);
+            } else if (error == 3) {
+                desc.hasStride_ = true; // stride rank must match scale rank
+                desc.stride_ = gert::Stride({kMaxBlocks, kD, 1});
+            } else {
+                desc.hasStride_ = true; // dim0 stride must align to Nkv * (D/16)
+                desc.stride_ = gert::Stride({pageElems + 1, scalesPerHead, scalesPerHead, 1});
+            }
+            EXPECT_FALSE(RunA8C4(testCase));
+        }
+    }
+}

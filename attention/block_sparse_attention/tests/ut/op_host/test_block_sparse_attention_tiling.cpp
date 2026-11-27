@@ -3276,3 +3276,50 @@ TEST_F(block_sparse_attention_tiling_ut, A2_bnsd_batch_is_0)
         &compileInfo, "Ascend910B", 64, 196608, 16384);
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
 }
+
+// ============================================================================
+// 增量覆盖率：CheckSparsePattern 结构化错误日志分支（PR #17031）
+// 基线复用 tnd_normal 的成功配置，仅把 blockSparseMask 的 block 数改小，
+// 使失败精确落在 dim2/dim3 小于所需最大有效 Q/KV 序列块数的那一行。
+// ============================================================================
+TEST_F(block_sparse_attention_tiling_ut, sparse_mask_block_counts_too_small)
+{
+    struct BlockSparseAttentionCompileInfo {
+    } compileInfo;
+    const auto runWithMaskBlocks = [&](int64_t maskQBlockNum, int64_t maskKvBlockNum) {
+        gert::TilingContextPara tilingContextPara(
+            "BlockSparseAttention",
+            {{{{tokenQ, numHeads, headDim}, {tokenQ, numHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{tokenKv, numKvHeads, headDim}, {tokenKv, numKvHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{tokenKv, numKvHeads, headDim}, {tokenKv, numKvHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{batch, numHeads, maskQBlockNum, maskKvBlockNum}, {batch, numHeads, maskQBlockNum, maskKvBlockNum}},
+              ge::DT_INT8,
+              ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_INT8, ge::FORMAT_ND},
+             {{{2}, {2}}, ge::DT_INT64, ge::FORMAT_ND, true, blockShapeData},
+             {{{batch}, {batch}}, ge::DT_INT64, ge::FORMAT_ND, true, actualSeqLengthsData},
+             {{{batch}, {batch}}, ge::DT_INT64, ge::FORMAT_ND, true, actualSeqLengthsKvData},
+             {{{}, {}}, ge::DT_INT32, ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND},
+             {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+            {{{{tokenQ, numHeads, headDim}, {tokenQ, numHeads, headDim}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+             {{{tokenQ, numHeads, 1}, {tokenQ, numHeads, 1}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+            {{"qInputLayout", Ops::Transformer::AnyValue::CreateFrom<std::string>("TND")},
+             {"kvInputLayout", Ops::Transformer::AnyValue::CreateFrom<std::string>("TND")},
+             {"numKeyValueHeads", Ops::Transformer::AnyValue::CreateFrom<int64_t>(numKvHeads)},
+             {"maskType", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"scaleValue", Ops::Transformer::AnyValue::CreateFrom<float>(scaleValue)},
+             {"innerPrecise", Ops::Transformer::AnyValue::CreateFrom<int64_t>(1)},
+             {"blockSize", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)},
+             {"preTokens", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2147483647)},
+             {"nextTokens", Ops::Transformer::AnyValue::CreateFrom<int64_t>(2147483647)},
+             {"softmaxLseFlag", Ops::Transformer::AnyValue::CreateFrom<int64_t>(0)}},
+            &compileInfo, "Ascend910B", 64, 196608, 16384);
+        TilingInfo tilingInfo;
+        return ExecuteTiling(tilingContextPara, tilingInfo);
+    };
+    ASSERT_TRUE(runWithMaskBlocks(qBlockNum, kvBlockNum));
+    EXPECT_FALSE(runWithMaskBlocks(0, kvBlockNum));
+    EXPECT_FALSE(runWithMaskBlocks(qBlockNum, 0));
+}

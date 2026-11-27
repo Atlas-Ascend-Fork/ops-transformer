@@ -873,12 +873,13 @@ ge::graphStatus BSATiling::CheckSparsePattern(gert::TilingContext* bsaContext, c
     uint32_t expectedMaxQBlockNum = CeilDiv(maxEffectiveQSeqlen_, blockShapeX_);
     uint32_t expectedMaxKVBlockNum = CeilDiv(maxEffectiveKvSeqlen_, blockShapeY_);
     if (maxQBlockNum_ < expectedMaxQBlockNum || maxKvBlockNum_ < expectedMaxKVBlockNum) {
-        OP_LOGE(bsaContext->GetNodeName(),
-                "BlockSparseMask requires qBlockNum (dim2) >= %u and kvBlockNum (dim3) >= %u, "
-                "but got (%u, %u). The minimum values are calculated using maximum effective sequence lengths "
-                "(Q: %u, KV: %u) and blockShape (X: %ld, Y: %ld).",
-                expectedMaxQBlockNum, expectedMaxKVBlockNum, maxQBlockNum_, maxKvBlockNum_, maxEffectiveQSeqlen_,
-                maxEffectiveKvSeqlen_, blockShapeX_, blockShapeY_);
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+            bsaContext->GetNodeName(), "blockSparseMask",
+            ("qBlockNum(dim2)=" + std::to_string(maxQBlockNum_) +
+             ", kvBlockNum(dim3)=" + std::to_string(maxKvBlockNum_) + ", required>=(" +
+             std::to_string(expectedMaxQBlockNum) + ", " + std::to_string(expectedMaxKVBlockNum) + ")")
+                .c_str(),
+            "blockSparseMask block counts must cover the maximum effective Q/KV sequence lengths under blockShape");
         return ge::GRAPH_FAILED;
     }
 
