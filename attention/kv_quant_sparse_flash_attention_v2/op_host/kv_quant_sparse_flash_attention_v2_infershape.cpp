@@ -82,7 +82,9 @@ ge::graphStatus InferShapeKvQuantSparseFlashAttentionV2(gert::InferShapeContext*
     const char* inputLayoutKvPtr = attrs->GetAttrPointer<char>(LAYOUT_KV_ATTR_INDEX);
     OP_CHECK_NULL_WITH_CONTEXT(context, inputLayoutKvPtr);
     std::string inputLayoutKvPtrStr = std::string(inputLayoutKvPtr);
-    const int64_t ropeHeadDim = *attrs->GetAttrPointer<int64_t>(QSFA_ROPE_HEAD_DIM_ATTR_INDEX);
+    const int64_t* ropeHeadDimPtr = attrs->GetAttrPointer<int64_t>(QSFA_ROPE_HEAD_DIM_ATTR_INDEX);
+    OP_CHECK_NULL_WITH_CONTEXT(context, ropeHeadDimPtr);
+    const int64_t ropeHeadDim = *ropeHeadDimPtr;
     const bool* returnSoftmaxLsePtr = attrs->GetAttrPointer<bool>(RETURN_SOFTMAX_LSE_ATTR_INDEX);
     bool returnSoftmaxLse = (returnSoftmaxLsePtr != nullptr) ? *returnSoftmaxLsePtr : false;
 
