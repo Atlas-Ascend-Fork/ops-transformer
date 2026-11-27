@@ -11,9 +11,12 @@
 import fcntl
 import glob
 import hashlib
+import json
 import logging
 import os
+import platform
 import shutil
+import sysconfig
 from abc import ABC, abstractmethod
 from typing import List, Union
 
@@ -39,6 +42,15 @@ def get_as_library():
 
 class OpBuilder(ABC):
     _loaded_ops = {}
+    # Must match the keys returned by _compute_build_context.
+    _CONTEXT_KEYS = (
+        "torch_version",
+        "torch_git_version",
+        "torch_npu_version",
+        "python_version",
+        "python_abi",
+        "glibcxx_abi",
+    )
 
     def __init__(self, name, category=None):
         self.name = name
@@ -66,6 +78,7 @@ class OpBuilder(ABC):
         import torch_npu
 
         self._torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
+        self._torch_npu_version = str(getattr(torch_npu, "__version__", ""))
         self._package_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self._cann_path = self.get_cann_path()
         if not self._is_op_registered():
@@ -198,15 +211,23 @@ class OpBuilder(ABC):
         if self.name in OpBuilder._loaded_ops:
             return OpBuilder._loaded_ops[self.name]
 
-        ext_dir = os.path.expanduser(
-            os.environ.get(
-                "TORCH_EXTENSIONS_DIR", os.path.join("~", ".cache", "torch_extensions")
+        # The lock must sit next to the build directory: setting
+        # TORCH_EXTENSIONS_DIR to <default root>/py<XY>_<device> resolves to
+        # the same build directory as the default root, so a lock at the
+        # extensions root would guard one directory with two different locks.
+        # realpath folds symlinked or repeated extensions roots onto one lock.
+        build_dir = self._get_build_directory()
+        if build_dir is not None:
+            lock_dir = os.path.realpath(os.path.dirname(build_dir))
+        else:
+            lock_dir = os.path.expanduser(
+                os.environ.get(
+                    "TORCH_EXTENSIONS_DIR",
+                    os.path.join("~", ".cache", "torch_extensions"),
+                )
             )
-        )
-        os.makedirs(ext_dir, exist_ok=True)
-        lock_path = os.path.join(ext_dir, "%s.compile.lock" % self.name)
-        fprint_path = os.path.join(ext_dir, "%s.compile.fprint" % self.name)
-
+        os.makedirs(lock_dir, exist_ok=True)
+        lock_path = os.path.join(lock_dir, "%s.compile.lock" % self.name)
         # Lazy import avoids pulling arg_check into every builder import path.
         from ..utils.arg_check import wrap_op_module
 
@@ -215,11 +236,25 @@ class OpBuilder(ABC):
             if self.name in OpBuilder._loaded_ops:
                 return OpBuilder._loaded_ops[self.name]
 
-            self._remove_stale_torch_lock()
+            build_context = self._compute_build_context()
+            if build_dir is None:
+                fprint_path = None
+            else:
+                # Match the metadata to the actual artifacts, not the shared root.
+                fprint_path = os.path.join(
+                    build_dir, ".cann_ops_transformer.compile.fprint"
+                )
+                self._prepare_build_cache(build_dir, fprint_path, build_context)
+                self._remove_stale_torch_lock(build_dir)
 
-            op_module = self._try_load_cached(wrap_op_module, fprint_path)
-            if op_module is not None:
-                return op_module
+                op_module = self._try_load_cached(
+                    wrap_op_module,
+                    fprint_path,
+                    build_dir,
+                    self._compute_build_fingerprint(build_context),
+                )
+                if op_module is not None:
+                    return op_module
 
             op_module = load(
                 name=self.name,
@@ -232,10 +267,31 @@ class OpBuilder(ABC):
             # Arg type-check proxy; ops can call through load() unchanged.
             op_module = wrap_op_module(op_module)
             OpBuilder._loaded_ops[self.name] = op_module
-            self._record_sources_fingerprint(fprint_path)
+            if fprint_path is not None:
+                self._record_build_fingerprint(
+                    fprint_path, self._compute_build_fingerprint(build_context)
+                )
             return op_module
 
-    def _try_load_cached(self, wrap_op_module, fprint_path):
+    def _get_build_directory(self):
+        """Return torch's build directory for this extension.
+
+        Returns None only when torch lacks the private helper, which disables
+        cache validation. Directory errors (permissions, full disk) propagate:
+        torch's load() uses the same directory right after this call.
+        """
+        try:
+            from torch.utils.cpp_extension import _get_build_directory
+        except ImportError:
+            logger.warning(
+                "torch.utils.cpp_extension._get_build_directory is missing; "
+                "Torch extension cache validation is disabled for %s",
+                self.name,
+            )
+            return None
+        return _get_build_directory(self.name, False)
+
+    def _try_load_cached(self, wrap_op_module, fprint_path, build_dir, fingerprint):
         """Reuse a freshly built extension instead of re-running the build back end.
 
         Called while holding the per-op compile lock. torch's build back end
@@ -246,26 +302,21 @@ class OpBuilder(ABC):
         sources matches, importing the built extension is equivalent to the
         no-op rebuild and avoids the serialised checks.
 
-        Only the op's source files are fingerprinted; header-only changes are
-        not captured by design (set CANN_OP_BUILDER_NO_FPRINT_CACHE=1 to force
-        the full build path in such cases). Any mismatch or lookup failure
-        falls back to the full build path.
+        The source files and runtime compatibility fields are fingerprinted.
+        Header-only changes are not captured by design. Set
+        ``CANN_OP_BUILDER_NO_FPRINT_CACHE=1`` to force the full build path when
+        headers change. Other fingerprint mismatches or lookup failures fall
+        back to the full build path. Torch/Torch-NPU compatibility mismatches
+        are handled by ``_prepare_build_cache`` before this method is called.
         """
-        if os.environ.get("CANN_OP_BUILDER_NO_FPRINT_CACHE"):
+        if not fingerprint or os.environ.get("CANN_OP_BUILDER_NO_FPRINT_CACHE"):
             return None
         try:
-            from torch.utils.cpp_extension import (
-                _get_build_directory,
-                _import_module_from_library,
-            )
+            from torch.utils.cpp_extension import _import_module_from_library
 
-            fingerprint = self._compute_sources_fingerprint()
-            if not fingerprint:
-                return None
             with open(fprint_path) as f:
-                if f.read().strip() != fingerprint:
+                if json.load(f) != fingerprint:
                     return None
-            build_dir = _get_build_directory(self.name, False)
             so_path = os.path.join(build_dir, "%s.so" % self.name)
             if not os.path.isfile(so_path):
                 return None
@@ -303,33 +354,118 @@ class OpBuilder(ABC):
                     return None
         return digest.hexdigest()
 
-    def _record_sources_fingerprint(self, fprint_path):
-        fingerprint = self._compute_sources_fingerprint()
+    def _compute_build_context(self):
+        """Return the runtime versions that must match cached artifacts."""
+        return {
+            "torch_version": torch.__version__,
+            "torch_git_version": torch.version.git_version,
+            "torch_npu_version": self._torch_npu_version,
+            "python_version": platform.python_version(),
+            "python_abi": sysconfig.get_config_var("SOABI") or "",
+            "glibcxx_abi": int(bool(torch._C._GLIBCXX_USE_CXX11_ABI)),
+        }
+
+    def _compute_build_fingerprint(self, build_context):
+        """Fingerprint source contents together with runtime compatibility."""
+        source_fingerprint = self._compute_sources_fingerprint()
+        if not source_fingerprint:
+            return None
+        fingerprint = dict(build_context)
+        fingerprint["source"] = source_fingerprint
+        return fingerprint
+
+    def _read_build_fingerprint(self, fprint_path):
+        try:
+            with open(fprint_path) as f:
+                fingerprint = json.load(f)
+            if not isinstance(fingerprint, dict):
+                return None
+            if not isinstance(fingerprint.get("source"), str) or any(
+                key not in fingerprint for key in self._CONTEXT_KEYS
+            ):
+                return None
+            return fingerprint
+        except (OSError, ValueError):
+            return None
+
+    def _prepare_build_cache(self, build_dir, fprint_path, current):
+        """Drop the build directory when the cache cannot be reused.
+
+        Runs under the per-op compile lock; other operators are unaffected.
+        """
+        if not self._has_build_artifacts(build_dir):
+            return
+        previous = self._read_build_fingerprint(fprint_path)
+        if previous is None:
+            reason = (
+                "cached runtime versions are unknown (missing or legacy cache "
+                "metadata); current Torch=%s, Torch-NPU=%s"
+                % (
+                    current.get("torch_version") or "unknown",
+                    current.get("torch_npu_version") or "unknown",
+                )
+            )
+        else:
+            # _read_build_fingerprint guarantees every key is present.
+            changed = [
+                key for key in self._CONTEXT_KEYS if previous[key] != current.get(key)
+            ]
+            if not changed:
+                return
+            reason = "cached runtime compatibility differs: " + "; ".join(
+                "%s (cache %s, current %s)"
+                % (
+                    key,
+                    previous[key] if previous[key] is not None else "unknown",
+                    current.get(key) if current.get(key) is not None else "unknown",
+                )
+                for key in changed
+            )
+
+        logger.warning(
+            "Torch extension cache for %s will not be reused; rebuilding in "
+            "the current environment. Reason: %s. Build directory: %s",
+            self.name,
+            reason,
+            build_dir,
+        )
+        try:
+            shutil.rmtree(build_dir)
+        except OSError as e:
+            raise RuntimeError(
+                "Cannot rebuild Torch extension %s because its incompatible "
+                "cache directory could not be removed: %s" % (self.name, build_dir)
+            ) from e
+
+    def _has_build_artifacts(self, build_dir):
+        return bool(
+            glob.glob(os.path.join(build_dir, "*.so"))
+            or glob.glob(os.path.join(build_dir, "*.o"))
+            or glob.glob(os.path.join(build_dir, "*.ninja"))
+        )
+
+    def _record_build_fingerprint(self, fprint_path, fingerprint):
+        # Unfingerprintable sources: leave metadata unset so the next load
+        # revalidates and rebuilds.
         if not fingerprint:
             return
         try:
             with open(fprint_path, "w") as f:
-                f.write(fingerprint)
+                json.dump(fingerprint, f, sort_keys=True)
         except OSError:
             logger.warning(
-                "Failed to record source fingerprint %s: build cache reuse "
-                "will be skipped",
+                "Failed to record build fingerprint %s: the cache will be "
+                "revalidated and may be rebuilt on the next load",
                 fprint_path,
             )
 
-    def _remove_stale_torch_lock(self):
+    def _remove_stale_torch_lock(self, build_dir):
         """Drop torch's FileBaton lock left by a killed JIT compile process.
 
         The caller must hold the exclusive flock for this op, so the torch
         lock, if present, cannot belong to a live compile that went through
         this builder; it is either a leftover of a killed process or absent.
         """
-        try:
-            from torch.utils.cpp_extension import _get_build_directory
-
-            build_dir = _get_build_directory(self.name, False)
-        except Exception:
-            return
         torch_lock = os.path.join(build_dir, "lock")
         if os.path.isdir(torch_lock) or os.path.isfile(torch_lock):
             logger.warning("Detected stale build lock: %s", torch_lock)
