@@ -68,11 +68,11 @@ def _run_preload3_cube_normal(
     buf,
     runInfos,
 ):
-    """GS 非 swizzle 及普通 D192/Dv128 SW1 causal：预取 N+1，计算 N / N-1。
+    """GS 非 swizzle 及普通 D192/Dv128 SW1 dense/causal：预取 N+1，计算 N / N-1。
 
     D192 仅有三个 Q/dO 槽，分别容纳 N+1/N/N-1；上一轮的后半段已消费
     N-2，才允许预取 N+1 复用它的槽。C1/C2 前不增加等待 Vector 的后半段。
-    普通 D192/Dv128 SW1 causal 的 Vector 同样延后一任务；其它路径保留原计数。
+    普通 D192/Dv128 SW1 dense/causal 的 Vector 同样延后一任务；其它路径保留原计数。
     该路径由 dS ready 的 MTE1 依赖保护 UB 槽复用，不另发 V2 反向 FIX token。
     """
     if swizzle != 0 and not (
@@ -82,7 +82,7 @@ def _run_preload3_cube_normal(
         and swizzle == 1
         and deter == 0
         and layout == 0
-        and mask_mode == 3
+        and (mask_mode == 0 or mask_mode == 3)
         and sink == 0
     ):
         _run_preload3_cube_swizzle(constInfo, sched, gm, buf, runInfos)
@@ -128,7 +128,7 @@ def _run_preload3_cube_normal(
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
         )
@@ -155,7 +155,7 @@ def _run_preload3_cube_normal(
         and swizzle == 1
         and deter == 0
         and layout == 0
-        and mask_mode == 3
+        and (mask_mode == 0 or mask_mode == 3)
         and sink == 0
     ):
         slotState = make_cube_manual_slot_state()
@@ -218,7 +218,7 @@ def _run_preload3_cube_normal(
             and swizzle == 1
             and deter == 0
             and layout == 0
-            and mask_mode == 3
+            and (mask_mode == 0 or mask_mode == 3)
             and sink == 0
         ):
             q_first = q_l1[0]
@@ -232,7 +232,7 @@ def _run_preload3_cube_normal(
             and swizzle == 1
             and deter == 0
             and layout == 0
-            and mask_mode == 3
+            and (mask_mode == 0 or mask_mode == 3)
             and sink == 0
         ):
             prefetch_qdo_l1(
@@ -284,7 +284,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 q_next = q_l1[(taskId + 1) % PRELOAD_TIMES]
@@ -298,7 +298,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 prefetch_qdo_l1(
@@ -318,7 +318,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 # Compare semantic coordinates, not each implementation's
@@ -373,7 +373,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 q_cur = q_for_mm[taskId % PRELOAD_TIMES]
@@ -396,7 +396,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 loadCurrentQDo = taskId == 0
@@ -407,7 +407,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 if taskId > 1:
@@ -438,7 +438,7 @@ def _run_preload3_cube_normal(
                     and swizzle == 1
                     and deter == 0
                     and layout == 0
-                    and mask_mode == 3
+                    and (mask_mode == 0 or mask_mode == 3)
                     and sink == 0
                 )
                 else q_l1.current(),
@@ -457,7 +457,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 if taskId > 1:
@@ -500,7 +500,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 debugLateTasks = debugLateTasks + 1
@@ -512,7 +512,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 q_fix = q_l1_dk[fixTaskId % PRELOAD_TIMES]
@@ -527,7 +527,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 # Resolve Final before either resident C5/C4 MMAD. A later
@@ -578,7 +578,7 @@ def _run_preload3_cube_normal(
                 and swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             ):
                 # AscendC issues dV FIX inside C5, before releasing P and
@@ -617,7 +617,7 @@ def _run_preload3_cube_normal(
                         swizzle == 1
                         and deter == 0
                         and layout == 0
-                        and mask_mode == 3
+                        and (mask_mode == 0 or mask_mode == 3)
                         and sink == 0
                     )
                 )
@@ -665,7 +665,7 @@ def _run_preload3_cube_normal(
                     and swizzle == 1
                     and deter == 0
                     and layout == 0
-                    and mask_mode == 3
+                    and (mask_mode == 0 or mask_mode == 3)
                     and sink == 0
                 ):
                     # dV was already issued immediately after C5.
@@ -680,7 +680,7 @@ def _run_preload3_cube_normal(
                             swizzle == 1
                             and deter == 0
                             and layout == 0
-                            and mask_mode == 3
+                            and (mask_mode == 0 or mask_mode == 3)
                             and sink == 0
                         )
                     )
@@ -713,7 +713,7 @@ def _run_preload3_cube_normal(
         and swizzle == 1
         and deter == 0
         and layout == 0
-        and mask_mode == 3
+        and (mask_mode == 0 or mask_mode == 3)
         and sink == 0
     ):
         if FAG_CORE_INDEX_DEBUG:
@@ -820,24 +820,37 @@ def _run_preload3_cube_swizzle(
     ds_l1 = buf.ds_l1
     ds_t_l1 = buf.ds_t_l1
     p_t_l1 = buf.p_t_l1
+    preloadDenseQDo = (
+        template == Tmpl.BN2GS1S2
+        and d_align == 192
+        and dv_align == 128
+        and swizzle == 1
+        and deter == 0
+        and layout == 0
+        and mask_mode == 0
+        and sink == 0
+    )
+    if preloadDenseQDo:
+        # Writers stay one valid task ahead of C1/C2. The independent late
+        # readers still consume task N-2 before its Q/dO slot is overwritten.
+        q_for_mm = make_q_l1()
+        do_for_mm = make_do_l1()
     taskId = 0
     localIdx = 0
     denseCursor = blockStart
     isLastLoop = 0
     drainDone = 0
     nFetched = 0
-    while True:
-        # 取块调用放在运行期条件外：swizzle 分支内部含运行期 if/return，嵌在
-        # ``if isLastLoop == 0`` 内会触发 loop-carried phi 断裂（de5ddd541
-        # 重构后 GS1S2+swizzle 上板卡死，见 0902 教训）；条件内只保留简单
-        # 变量拷贝——与重构前 fetch_work_gidx 模式同构的最小防护形态。
-        fetchedGIdx = next_work_gidx(
+    if preloadDenseQDo:
+        # Fetch stays outside runtime conditionals: next_work_gidx contains
+        # early returns which must not be nested under a loop-carried guard.
+        gIdx = next_work_gidx(
             constInfo,
             cBlockIdx,
             coreNum,
             blockStart,
             blockEnd,
-            localIdx,
+            0,
             denseCursor,
             numBlocks,
             cuQ,
@@ -846,40 +859,96 @@ def _run_preload3_cube_swizzle(
             usedKv,
             batchCursor,
         )
-        gIdx = pl.const(-1, pl.DT_INT64)
-        if isLastLoop == 0:
-            gIdx = fetchedGIdx
-            if gIdx < 0:
-                isLastLoop = 1
-                # Keep the unconditional fetch, but do not rescan sparse tails
-                # in the two remaining preload3 drain iterations.
-                if swizzle == 0 or constInfo.normalSwizzleEnabled == 0:
-                    denseCursor = blockEnd
-            else:
-                if swizzle == 0 or constInfo.normalSwizzleEnabled == 0:
-                    denseCursor = gIdx + 1
-        doFix = 0
-        mm2_cur = mm2_res.next()
-        mm1_cur = mm1_res.next()
-        q_cur = q_l1.next()
-        do_cur = do_l1.next()
         if gIdx >= 0:
-            curInfo = runInfos[taskId % PRELOAD_TIMES]
+            firstInfo = runInfos[0]
             set_run_info(
                 constInfo,
-                curInfo,
-                taskId,
+                firstInfo,
+                0,
                 gIdx,
                 0,
-                localIdx,
+                0,
                 cuQ,
                 cuKv,
                 usedQ,
                 usedKv,
                 batchCursor,
             )
-            nFetched = nFetched + 1
-            apply_l0c_s2(constInfo, runInfos, curInfo, taskId, PRELOAD_TIMES)
+            apply_l0c_s2(constInfo, runInfos, firstInfo, 0, PRELOAD_TIMES)
+            # Reserve slot0 now; C2/C1 load Q0/dO0 immediately before
+            # their current K/V, then issue the next task's Q/dO prefetch.
+            q_l1.next()
+            do_l1.next()
+            nFetched = 1
+            if swizzle == 0 or constInfo.normalSwizzleEnabled == 0:
+                denseCursor = gIdx + 1
+        else:
+            denseCursor = blockEnd
+    while True:
+        if preloadDenseQDo:
+            if gIdx < 0:
+                isLastLoop = 1
+        else:
+            # 取块调用放在运行期条件外：swizzle 分支内部含运行期 if/return，嵌在
+            # ``if isLastLoop == 0`` 内会触发 loop-carried phi 断裂（de5ddd541
+            # 重构后 GS1S2+swizzle 上板卡死，见 0902 教训）；条件内只保留简单
+            # 变量拷贝——与重构前 fetch_work_gidx 模式同构的最小防护形态。
+            fetchedGIdx = next_work_gidx(
+                constInfo,
+                cBlockIdx,
+                coreNum,
+                blockStart,
+                blockEnd,
+                localIdx,
+                denseCursor,
+                numBlocks,
+                cuQ,
+                cuKv,
+                usedQ,
+                usedKv,
+                batchCursor,
+            )
+            gIdx = pl.const(-1, pl.DT_INT64)
+            if isLastLoop == 0:
+                gIdx = fetchedGIdx
+                if gIdx < 0:
+                    isLastLoop = 1
+                    # Keep the unconditional fetch, but do not rescan sparse tails
+                    # in the two remaining preload3 drain iterations.
+                    if swizzle == 0 or constInfo.normalSwizzleEnabled == 0:
+                        denseCursor = blockEnd
+                else:
+                    if swizzle == 0 or constInfo.normalSwizzleEnabled == 0:
+                        denseCursor = gIdx + 1
+        doFix = 0
+        mm2_cur = mm2_res.next()
+        mm1_cur = mm1_res.next()
+        if preloadDenseQDo:
+            q_cur = q_for_mm.current()
+            do_cur = do_for_mm.current()
+            if gIdx >= 0:
+                q_cur = q_for_mm.next()
+                do_cur = do_for_mm.next()
+        else:
+            q_cur = q_l1.next()
+            do_cur = do_l1.next()
+            if gIdx >= 0:
+                curInfo = runInfos[taskId % PRELOAD_TIMES]
+                set_run_info(
+                    constInfo,
+                    curInfo,
+                    taskId,
+                    gIdx,
+                    0,
+                    localIdx,
+                    cuQ,
+                    cuKv,
+                    usedQ,
+                    usedKv,
+                    batchCursor,
+                )
+                nFetched = nFetched + 1
+                apply_l0c_s2(constInfo, runInfos, curInfo, taskId, PRELOAD_TIMES)
         fixInfo = runInfos[0]
         q_fix = q_l1.current()
         do_fix = do_l1.current()
@@ -1015,6 +1084,55 @@ def _run_preload3_cube_swizzle(
                     # 192 档：dK 已每块 atomic 进 ws、不驻留 L0C，这里只有 dV 还常驻，单独累加回 ws。
                     flush_dv(constInfo, fixInfo, tensor_dv_ws, dv_acc0, dv_acc1)
             pl.system.set_cross_core(pipe=pl.PipeType.MTE1, event_id=dsFreeFlag)
+        loadCurrentQDo = 1
+        copyNextQDo = 0
+        nextInfo = runInfos[0]
+        if preloadDenseQDo:
+            # N+1 and N-2 share a RunInfo slot as well as a Q/dO slot.
+            # Decode the lookahead only after C5/C3/C4(N-2) have consumed both.
+            fetchedNextGIdx = next_work_gidx(
+                constInfo,
+                cBlockIdx,
+                coreNum,
+                blockStart,
+                blockEnd,
+                localIdx + 1,
+                denseCursor,
+                numBlocks,
+                cuQ,
+                cuKv,
+                usedQ,
+                usedKv,
+                batchCursor,
+            )
+            nextGIdx = pl.const(-1, pl.DT_INT64)
+            if isLastLoop == 0:
+                nextGIdx = fetchedNextGIdx
+            nextInfo = runInfos[(taskId + 1) % PRELOAD_TIMES]
+            if nextGIdx >= 0:
+                set_run_info(
+                    constInfo,
+                    nextInfo,
+                    taskId + 1,
+                    nextGIdx,
+                    0,
+                    localIdx + 1,
+                    cuQ,
+                    cuKv,
+                    usedQ,
+                    usedKv,
+                    batchCursor,
+                )
+                apply_l0c_s2(constInfo, runInfos, nextInfo, taskId + 1, PRELOAD_TIMES)
+                q_l1.next()
+                do_l1.next()
+                nFetched = nFetched + 1
+                if swizzle == 0 or constInfo.normalSwizzleEnabled == 0:
+                    denseCursor = nextGIdx + 1
+            else:
+                denseCursor = blockEnd
+            loadCurrentQDo = taskId == 0
+            copyNextQDo = nextGIdx >= 0
         # Keep the two-round preload3 schedule, but release C3(N-2)'s K
         # before C2(N) can reuse its slot. Vector only needs the old task's
         # already-issued C1/C2 results, so no current-task dependency is added.
@@ -1037,6 +1155,10 @@ def _run_preload3_cube_swizzle(
                 acc,
                 mm2_cur,
                 curInfo.loadKV,
+                loadCurrentQDo,
+                copyNextQDo,
+                nextInfo,
+                q_l1.current(),
             )
             pl.system.set_cross_core(
                 pipe=pl.PipeType.FIX,
@@ -1059,6 +1181,10 @@ def _run_preload3_cube_swizzle(
                 acc,
                 mm1_cur,
                 curInfo.loadKV,
+                loadCurrentQDo,
+                copyNextQDo,
+                nextInfo,
+                do_l1.current(),
             )
             pl.system.set_cross_core(
                 pipe=pl.PipeType.FIX,
@@ -1075,6 +1201,8 @@ def _run_preload3_cube_swizzle(
             if isLastLoop == 1:
                 taskId = taskId + 1
                 localIdx = localIdx + 1
+        if preloadDenseQDo:
+            gIdx = nextGIdx
 
 
 def _run_preload3_vector_normal(
@@ -1132,7 +1260,7 @@ def _run_preload3_vector_normal(
         and swizzle == 1
         and deter == 0
         and layout == 0
-        and mask_mode == 3
+        and (mask_mode == 0 or mask_mode == 3)
         and sink == 0
     ):
         vectorDelay = 1

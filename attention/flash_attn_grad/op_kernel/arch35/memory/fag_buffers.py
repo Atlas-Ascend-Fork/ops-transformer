@@ -445,11 +445,10 @@ def make_l0a():
 
 
 def make_cube_manual_slot_state():
-    """p01-only explicit allocation state; all ids come from the original arenas.
+    """Explicit allocation state for the aligned D192/Dv128 pipelines.
 
     l0a_slot advances at each original L0A allocation, never per task/MMAD.
-    k_slots records the writer's physical K slot for each live task in the ring.
-    """
+    k_slots records the writer's physical K slot for each live task in the ring."""
     return pl.struct(
         "CubeManualSlotState",
         l0a_slot=1,
@@ -574,8 +573,8 @@ def make_l0c_acc():
 
     Fixed-layout causal uses the specialized pipeline; the complementary
     normal-swizzle condition only admits its existing two-round fallback to
-    the same allocation. L1/manual-slot factories keep their narrower gates.
-    """
+    the same allocation. Fixed-layout dense deterministic families 1/21 also
+    select this allocation; their pipeline owns the explicit slot state."""
     return pl.make_tile_group(
         type=pl.TileType(
             shape=[CUBE_BASEM, mem.ACC_COLS[d_align]],
@@ -609,6 +608,16 @@ def make_l0c_acc():
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
                     )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
+                    )
                 )
             )
             else mem.L0C_ACC_ADDRS_B2[d_align]
@@ -640,6 +649,16 @@ def make_l0c_acc():
                         swizzle == 1
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
+                    )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
                     )
                 )
             )
@@ -707,6 +726,16 @@ def make_dk_l0c_chunk0():
                             and deter == 0
                             and not (layout == 0 and mask_mode == 3 and sink == 0)
                         )
+                        or (
+                            deter == 1
+                            and layout == 0
+                            and mask_mode == 0
+                            and sink == 0
+                            and (
+                                (swizzle == 1 and deter_family == 1)
+                                or (swizzle == 0 and deter_family == 21)
+                            )
+                        )
                     )
                 )
                 else D_CHUNK_MAXW[d_align],
@@ -741,6 +770,16 @@ def make_dk_l0c_chunk0():
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
                     )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
+                    )
                 )
             )
             else mem.L0C_DK0_ADDR_B2[d_align]
@@ -772,6 +811,16 @@ def make_dk_l0c_chunk0():
                         swizzle == 1
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
+                    )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
                     )
                 )
             )
@@ -813,6 +862,16 @@ def make_dv_l0c_chunk0():
                             and deter == 0
                             and not (layout == 0 and mask_mode == 3 and sink == 0)
                         )
+                        or (
+                            deter == 1
+                            and layout == 0
+                            and mask_mode == 0
+                            and sink == 0
+                            and (
+                                (swizzle == 1 and deter_family == 1)
+                                or (swizzle == 0 and deter_family == 21)
+                            )
+                        )
                     )
                 )
                 else D_CHUNK_MAXW[d_align],
@@ -847,6 +906,16 @@ def make_dv_l0c_chunk0():
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
                     )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
+                    )
                 )
             )
             else mem.L0C_DV0_ADDR_B2[d_align]
@@ -878,6 +947,16 @@ def make_dv_l0c_chunk0():
                         swizzle == 1
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
+                    )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
                     )
                 )
             )
@@ -926,6 +1005,16 @@ def make_dk_l0c_chunk1():
                             and deter == 0
                             and not (layout == 0 and mask_mode == 3 and sink == 0)
                         )
+                        or (
+                            deter == 1
+                            and layout == 0
+                            and mask_mode == 0
+                            and sink == 0
+                            and (
+                                (swizzle == 1 and deter_family == 1)
+                                or (swizzle == 0 and deter_family == 21)
+                            )
+                        )
                     )
                 )
                 else D_CHUNK_MAXW[d_align],
@@ -960,6 +1049,16 @@ def make_dk_l0c_chunk1():
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
                     )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
+                    )
                 )
             )
             else mem.L0C_DK1_ADDR_B2[d_align]
@@ -991,6 +1090,16 @@ def make_dk_l0c_chunk1():
                         swizzle == 1
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
+                    )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
                     )
                 )
             )
@@ -1032,6 +1141,16 @@ def make_dv_l0c_chunk1():
                             and deter == 0
                             and not (layout == 0 and mask_mode == 3 and sink == 0)
                         )
+                        or (
+                            deter == 1
+                            and layout == 0
+                            and mask_mode == 0
+                            and sink == 0
+                            and (
+                                (swizzle == 1 and deter_family == 1)
+                                or (swizzle == 0 and deter_family == 21)
+                            )
+                        )
                     )
                 )
                 else D_CHUNK_MAXW[d_align],
@@ -1066,6 +1185,16 @@ def make_dv_l0c_chunk1():
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
                     )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
+                    )
                 )
             )
             else mem.L0C_DV1_ADDR_B2[d_align]
@@ -1097,6 +1226,16 @@ def make_dv_l0c_chunk1():
                         swizzle == 1
                         and deter == 0
                         and not (layout == 0 and mask_mode == 3 and sink == 0)
+                    )
+                    or (
+                        deter == 1
+                        and layout == 0
+                        and mask_mode == 0
+                        and sink == 0
+                        and (
+                            (swizzle == 1 and deter_family == 1)
+                            or (swizzle == 0 and deter_family == 21)
+                        )
                     )
                 )
             )

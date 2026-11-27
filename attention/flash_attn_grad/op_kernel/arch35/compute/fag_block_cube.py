@@ -93,11 +93,25 @@ def next_cube_l0a(left, slotState=0):
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         slotState.l0a_slot = (slotState.l0a_slot + 1) % 2
         return left[slotState.l0a_slot]
@@ -332,11 +346,25 @@ def _mm_n128_64(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         # The auto MTE1 producer has released this slot. Only the bare alias
         # enters the two MMADs, so the explicit M lock is not acquired twice.
@@ -379,11 +407,25 @@ def _mm_n128_64(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         pl.system.mutex_unlock(
             pipe=pl.PipeType.M, mutex_id=slotState.l0a_ids[slotState.l0a_slot]
@@ -509,10 +551,29 @@ def iterate_mm_k(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
         and (
-            (deter == 1 and layout == 1 and deter_family == 12)
-            or (deter == 0 and layout == 0 and mask_mode == 3 and sink == 0)
+            (
+                swizzle == 1
+                and (
+                    (deter == 1 and layout == 1 and (deter_family == 12))
+                    or (
+                        deter == 0
+                        and layout == 0
+                        and (mask_mode == 0 or mask_mode == 3)
+                        and (sink == 0)
+                    )
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
         )
     )
     r_t = r_l1.current()
@@ -523,11 +584,25 @@ def iterate_mm_k(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ) and not is_value:
         r_t = r_l1[kSlot]
     elif template == Tmpl.BN2GS1S2 and d_align <= 256 and not is_value:
@@ -551,11 +626,25 @@ def iterate_mm_k(
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
-            and deter == 0
-            and layout == 0
-            and mask_mode == 3
-            and sink == 0
+            and (
+                (
+                    swizzle == 1
+                    and deter == 0
+                    and layout == 0
+                    and (mask_mode == 0 or mask_mode == 3)
+                    and sink == 0
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
+            )
         ):
             # Match ASC: consume current Q/dO after its optional first load,
             # before current K/V and next-task Q/dO are issued on MTE2.
@@ -584,10 +673,25 @@ def iterate_mm_k(
                     swizzle == 1
                     and deter == 0
                     and layout == 0
-                    and mask_mode == 3
+                    and (mask_mode == 0 or mask_mode == 3)
                     and sink == 0
                 )
-                or (swizzle == 0 and deter == 1 and layout == 1 and deter_family == 13)
+                or (
+                    swizzle == 0
+                    and deter == 1
+                    and (layout == 1)
+                    and (deter_family == 13)
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
             )
         ):
             # Match AscendC's MTE2 issue order: current K then next Q for
@@ -605,11 +709,25 @@ def iterate_mm_k(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         # K/V consumption starts after next Q/dO prefetch was issued. V has
         # one fixed slot; K uses the task's saved physical writer slot.
@@ -668,18 +786,30 @@ def iterate_mm_k(
         and dv_align == 128
         and (
             swizzle == 0
-            or (swizzle == 1 and deter == 1 and layout == 1 and deter_family == 12)
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
             or (
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
             or (
                 swizzle == 1
                 and deter == 0
-                and not (layout == 0 and mask_mode == 3 and sink == 0)
+                and not (
+                    layout == 0 and (mask_mode == 0 or mask_mode == 3) and (sink == 0)
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
             )
         )
     ) and is_value:
@@ -703,14 +833,28 @@ def iterate_mm_k(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ) and not is_value:
         # C2 matches AscendC's K128+64 split. The existing 128x128 L0A/L0B
-        # tiles fit the first chunk; keep the older SW0/deterministic split below.
+        # tiles fit the first chunk; unrelated paths keep their original split below.
         lt = next_cube_l0a(left, slotState)
         rt = right.next()
         w0 = pl.min(128, dimSize)
@@ -786,11 +930,25 @@ def iterate_mm_k(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         pl.system.mutex_unlock(pipe=pl.PipeType.MTE1, mutex_id=rightMutex)
     if use_unitflag:
@@ -807,11 +965,25 @@ def iterate_mm_k(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         # Match ASC's outer left-operand lifetime through the FIX issue.
         pl.system.mutex_unlock(pipe=pl.PipeType.MTE1, mutex_id=leftMutex)
@@ -934,11 +1106,25 @@ def iterate_mm_dsk(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         # The caller waits for both AIV dS-ready signals and releases dS only
         # after C4's L1 read. Keep that CV lifetime, without an extra L1 mutex.
@@ -950,11 +1136,25 @@ def iterate_mm_dsk(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         k_t = k_l1[kSlot]
     elif template == Tmpl.BN2GS1S2 and d_align <= 256:
@@ -976,18 +1176,30 @@ def iterate_mm_dsk(
         and dv_align == 128
         and (
             swizzle == 0
-            or (swizzle == 1 and deter == 1 and layout == 1 and deter_family == 12)
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
             or (
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
             or (
                 swizzle == 1
                 and deter == 0
-                and not (layout == 0 and mask_mode == 3 and sink == 0)
+                and not (
+                    layout == 0 and (mask_mode == 0 or mask_mode == 3) and (sink == 0)
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
             )
         )
     ):
@@ -997,21 +1209,54 @@ def iterate_mm_dsk(
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
             and (
-                (deter == 1 and layout == 1 and deter_family == 12)
-                or (deter == 0 and layout == 0 and mask_mode == 3 and sink == 0)
+                (
+                    swizzle == 1
+                    and (
+                        (deter == 1 and layout == 1 and (deter_family == 12))
+                        or (
+                            deter == 0
+                            and layout == 0
+                            and (mask_mode == 0 or mask_mode == 3)
+                            and sink == 0
+                        )
+                    )
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
             )
         )
         if (
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
-            and deter == 0
-            and layout == 0
-            and mask_mode == 3
-            and sink == 0
+            and (
+                (
+                    swizzle == 1
+                    and deter == 0
+                    and layout == 0
+                    and (mask_mode == 0 or mask_mode == 3)
+                    and sink == 0
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
+            )
         ):
             k_bare = make_k_nd_l1_no_sync()
             k_t = k_bare[kSlot]
@@ -1036,11 +1281,25 @@ def iterate_mm_dsk(
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
-            and deter == 0
-            and layout == 0
-            and mask_mode == 3
-            and sink == 0
+            and (
+                (
+                    swizzle == 1
+                    and deter == 0
+                    and layout == 0
+                    and (mask_mode == 0 or mask_mode == 3)
+                    and sink == 0
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
+            )
         ):
             pl.system.mutex_unlock(
                 pipe=pl.PipeType.MTE1, mutex_id=slotState.k_ids[kSlot]
@@ -1292,18 +1551,30 @@ def iterate_mm_n_l0c(
         and dv_align == 128
         and (
             swizzle == 0
-            or (swizzle == 1 and deter == 1 and layout == 1 and deter_family == 12)
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
             or (
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
             or (
                 swizzle == 1
                 and deter == 0
-                and not (layout == 0 and mask_mode == 3 and sink == 0)
+                and not (
+                    layout == 0 and (mask_mode == 0 or mask_mode == 3) and (sink == 0)
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
             )
         )
     ):
@@ -1312,11 +1583,37 @@ def iterate_mm_n_l0c(
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
             and (
-                (deter == 1 and layout == 1 and deter_family == 12)
-                or (deter == 0 and layout == 0 and mask_mode == 3 and sink == 0)
-                or (deter == 0 and not (layout == 0 and mask_mode == 3 and sink == 0))
+                (
+                    swizzle == 1
+                    and (
+                        (deter == 1 and layout == 1 and (deter_family == 12))
+                        or (
+                            deter == 0
+                            and layout == 0
+                            and (mask_mode == 0 or mask_mode == 3)
+                            and sink == 0
+                        )
+                        or (
+                            deter == 0
+                            and not (
+                                layout == 0
+                                and (mask_mode == 0 or mask_mode == 3)
+                                and (sink == 0)
+                            )
+                        )
+                    )
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
             )
         )
         _mm_n128_64(
@@ -1387,11 +1684,25 @@ def iterate_mm_dsq(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         ds_t_no_sync = make_ds_t_l1_no_sync()
         ds_t_l1 = ds_t_no_sync.current()
@@ -1404,18 +1715,30 @@ def iterate_mm_dsq(
         and dv_align == 128
         and (
             swizzle == 0
-            or (swizzle == 1 and deter == 1 and layout == 1 and deter_family == 12)
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
             or (
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
             or (
                 swizzle == 1
                 and deter == 0
-                and not (layout == 0 and mask_mode == 3 and sink == 0)
+                and not (
+                    layout == 0 and (mask_mode == 0 or mask_mode == 3) and (sink == 0)
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
             )
         )
     ):
@@ -1425,11 +1748,25 @@ def iterate_mm_dsq(
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
-            and deter == 0
-            and layout == 0
-            and mask_mode == 3
-            and sink == 0
+            and (
+                (
+                    swizzle == 1
+                    and deter == 0
+                    and layout == 0
+                    and (mask_mode == 0 or mask_mode == 3)
+                    and sink == 0
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
+            )
         ):
             q_bare = make_q_l1_no_sync()
             q_t = q_bare[qSlot]
@@ -1453,11 +1790,25 @@ def iterate_mm_dsq(
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
-            and deter == 0
-            and layout == 0
-            and mask_mode == 3
-            and sink == 0
+            and (
+                (
+                    swizzle == 1
+                    and deter == 0
+                    and layout == 0
+                    and (mask_mode == 0 or mask_mode == 3)
+                    and sink == 0
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
+            )
         ):
             pl.system.mutex_unlock(
                 pipe=pl.PipeType.MTE1, mutex_id=slotState.q_ids[qSlot]
@@ -1536,11 +1887,25 @@ def iterate_mm_pdy(
         template == Tmpl.BN2GS1S2
         and d_align == 192
         and dv_align == 128
-        and swizzle == 1
-        and deter == 0
-        and layout == 0
-        and mask_mode == 3
-        and sink == 0
+        and (
+            (
+                swizzle == 1
+                and deter == 0
+                and layout == 0
+                and (mask_mode == 0 or mask_mode == 3)
+                and sink == 0
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
+            )
+        )
     ):
         # P-ready/P-free surround this read; the Vector UB source retains its
         # own V/MTE3 mutex through the unchanged writer path.
@@ -1553,18 +1918,30 @@ def iterate_mm_pdy(
         and dv_align == 128
         and (
             swizzle == 0
-            or (swizzle == 1 and deter == 1 and layout == 1 and deter_family == 12)
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
             or (
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
             or (
                 swizzle == 1
                 and deter == 0
-                and not (layout == 0 and mask_mode == 3 and sink == 0)
+                and not (
+                    layout == 0 and (mask_mode == 0 or mask_mode == 3) and (sink == 0)
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
             )
         )
     ):
@@ -1573,11 +1950,37 @@ def iterate_mm_pdy(
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
             and (
-                (deter == 1 and layout == 1 and deter_family == 12)
-                or (deter == 0 and layout == 0 and mask_mode == 3 and sink == 0)
-                or (deter == 0 and not (layout == 0 and mask_mode == 3 and sink == 0))
+                (
+                    swizzle == 1
+                    and (
+                        (deter == 1 and layout == 1 and (deter_family == 12))
+                        or (
+                            deter == 0
+                            and layout == 0
+                            and (mask_mode == 0 or mask_mode == 3)
+                            and sink == 0
+                        )
+                        or (
+                            deter == 0
+                            and not (
+                                layout == 0
+                                and (mask_mode == 0 or mask_mode == 3)
+                                and (sink == 0)
+                            )
+                        )
+                    )
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
             )
         )
         _mm_resident_chunk(
@@ -1727,18 +2130,30 @@ def flush_dk(constInfo, runInfo, tensor_dk_ws, dk_acc0, dk_acc1):
         and dv_align == 128
         and (
             swizzle == 0
-            or (swizzle == 1 and deter == 1 and layout == 1 and deter_family == 12)
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
             or (
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
             or (
                 swizzle == 1
                 and deter == 0
-                and not (layout == 0 and mask_mode == 3 and sink == 0)
+                and not (
+                    layout == 0 and (mask_mode == 0 or mask_mode == 3) and (sink == 0)
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
             )
         )
     ):
@@ -1746,11 +2161,37 @@ def flush_dk(constInfo, runInfo, tensor_dk_ws, dk_acc0, dk_acc1):
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
             and (
-                (deter == 1 and layout == 1 and deter_family == 12)
-                or (deter == 0 and layout == 0 and mask_mode == 3 and sink == 0)
-                or (deter == 0 and not (layout == 0 and mask_mode == 3 and sink == 0))
+                (
+                    swizzle == 1
+                    and (
+                        (deter == 1 and layout == 1 and (deter_family == 12))
+                        or (
+                            deter == 0
+                            and layout == 0
+                            and (mask_mode == 0 or mask_mode == 3)
+                            and sink == 0
+                        )
+                        or (
+                            deter == 0
+                            and not (
+                                layout == 0
+                                and (mask_mode == 0 or mask_mode == 3)
+                                and (sink == 0)
+                            )
+                        )
+                    )
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
             )
         )
         _store_n128_64(
@@ -1796,18 +2237,30 @@ def flush_dv(constInfo, runInfo, tensor_dv_ws, dv_acc0, dv_acc1):
         and dv_align == 128
         and (
             swizzle == 0
-            or (swizzle == 1 and deter == 1 and layout == 1 and deter_family == 12)
+            or (swizzle == 1 and deter == 1 and (layout == 1) and (deter_family == 12))
             or (
                 swizzle == 1
                 and deter == 0
                 and layout == 0
-                and mask_mode == 3
+                and (mask_mode == 0 or mask_mode == 3)
                 and sink == 0
             )
             or (
                 swizzle == 1
                 and deter == 0
-                and not (layout == 0 and mask_mode == 3 and sink == 0)
+                and not (
+                    layout == 0 and (mask_mode == 0 or mask_mode == 3) and (sink == 0)
+                )
+            )
+            or (
+                deter == 1
+                and layout == 0
+                and mask_mode == 0
+                and sink == 0
+                and (
+                    (swizzle == 1 and deter_family == 1)
+                    or (swizzle == 0 and deter_family == 21)
+                )
             )
         )
     ):
@@ -1816,11 +2269,37 @@ def flush_dv(constInfo, runInfo, tensor_dv_ws, dv_acc0, dv_acc1):
             template == Tmpl.BN2GS1S2
             and d_align == 192
             and dv_align == 128
-            and swizzle == 1
             and (
-                (deter == 1 and layout == 1 and deter_family == 12)
-                or (deter == 0 and layout == 0 and mask_mode == 3 and sink == 0)
-                or (deter == 0 and not (layout == 0 and mask_mode == 3 and sink == 0))
+                (
+                    swizzle == 1
+                    and (
+                        (deter == 1 and layout == 1 and (deter_family == 12))
+                        or (
+                            deter == 0
+                            and layout == 0
+                            and (mask_mode == 0 or mask_mode == 3)
+                            and sink == 0
+                        )
+                        or (
+                            deter == 0
+                            and not (
+                                layout == 0
+                                and (mask_mode == 0 or mask_mode == 3)
+                                and (sink == 0)
+                            )
+                        )
+                    )
+                )
+                or (
+                    deter == 1
+                    and layout == 0
+                    and mask_mode == 0
+                    and sink == 0
+                    and (
+                        (swizzle == 1 and deter_family == 1)
+                        or (swizzle == 0 and deter_family == 21)
+                    )
+                )
             )
         )
         if use_unitflag:

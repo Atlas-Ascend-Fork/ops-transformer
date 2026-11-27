@@ -640,7 +640,22 @@ def flash_attn_grad_preload3(
         dy_ub = make_dy_ub(v1w)
         ds_out_ub = make_ds_out_ub(v1w)
         p_out_ub = make_p_out_ub(v1w)
-        sfmg_ub = make_sfmg_ub(v1w)
+        if (
+            template == Tmpl.BN2GS1S2
+            and d_align == 192
+            and dv_align == 128
+            and deter == 1
+            and layout == 0
+            and mask_mode == 0
+            and sink == 0
+            and (
+                (swizzle == 1 and deter_family == 1)
+                or (swizzle == 0 and deter_family == 21)
+            )
+        ):
+            sfmg_ub = make_sfmg_prefetch_ub(v1w)
+        else:
+            sfmg_ub = make_sfmg_ub(v1w)
         lse_ub = make_lse_ub(v1w)
         sink_part_ub = make_sink_part_ub(v1w)
         mask_ub = make_mask_view(v1w)
