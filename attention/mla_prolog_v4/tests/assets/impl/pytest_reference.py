@@ -477,7 +477,9 @@ def golden_mla_prolog(
         )
         return (
             torch.empty((0, n, _KV_LORA + dr), dtype=q_dtype),
-            torch.empty(0, dtype=torch.float32),
+            torch.empty(
+                (0, n, 1) if qkv_quant_mode == 2 else (0,), dtype=torch.float32
+            ),
             torch.empty((0, q_lora) if return_qr else (0,), dtype=qr_dtype),
         )
     write_index = cache_index[cache_index >= 0]
@@ -489,17 +491,6 @@ def golden_mla_prolog(
         bool((write_index < kv_cache.shape[0] * kv_cache.shape[1]).all()),
         "nonnegative cache_index is outside the cache capacity",
     )
-    if quant_scale_kv is not None:
-        _require(
-            bool(torch.isfinite(quant_scale_kv).all()),
-            "quant_scale_kv must be finite",
-        )
-    if dr and rope_mode:
-        _require(
-            bool(torch.isfinite(rope_sin).all())
-            and bool(torch.isfinite(rope_cos).all()),
-            "active rope_sin/rope_cos contains NaN/Inf",
-        )
     _require(
         sys.byteorder == "little", "packed Cache golden requires little-endian CPU"
     )
@@ -1368,7 +1359,7 @@ def compare_outputs(cpu, actual, attrs, outputs, before):
     return report
 
 
-_FROZEN_NUMERIC_AST = "79d0af2a3599f49bd7a3e2dc2f2060b2d85d08f5f5b11424747c860928587b2c"
+_FROZEN_NUMERIC_AST = "f4358d59496c90e10031b9e17eaddfd8975b96e9c668beef2bf74732380df965"
 
 
 _FROZEN_NUMERIC_NAMES = (

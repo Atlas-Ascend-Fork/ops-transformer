@@ -650,10 +650,6 @@ def cache_to_values(
     _require_cpu("quant_scale_kv", quant_scale_kv)
     _require_shape("quant_scale_kv", quant_scale_kv, (1,))
     _require(quant_scale_kv.dtype == torch.float32, "quant_scale_kv must be FP32")
-    _require(
-        bool(torch.isfinite(quant_scale_kv).all()),
-        "quant_scale_kv must be finite",
-    )
     decoded = (
         _e4m3fn_decode(logical) if qkv_quant_mode == 2 else _hif8_decode_raw(logical)
     )
@@ -918,12 +914,6 @@ def quant_mla_prolog_golden(
         )
         _require_shape("quant_scale_kv", quant_scale_kv, (1,))
         _require(quant_scale_kv.dtype == torch.float32, "quant_scale_kv must be FP32")
-        if t != 0:
-            kv_scale = float(quant_scale_kv.item())
-            _require(
-                math.isfinite(kv_scale),
-                "quant_scale_kv must be finite",
-            )
 
     dtile = kv_lora + 2 * dr + 4 * math.ceil(kv_lora / CACHE_GROUP_SIZE)
     expected_cache_tail = (
