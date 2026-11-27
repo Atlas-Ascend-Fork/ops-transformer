@@ -203,21 +203,36 @@ public:
             AscendC::Brcb(tvUbTensor.ReinterpretCast<uint16_t>(), glUbTensor.ReinterpretCast<uint16_t>()[rowOffsetLoop],
                           curRowNumRound / FLOAT_BLOCK_SIZE, AscendC::BrcbRepeatParams(1, 8));
             AscendC::PipeBarrier<PIPE_V>();
+#if defined(__DAV_C310_VEC__)
+            // Preserve FP16 subnormal outputs in the final normalization on A5.
+            static constexpr AscendC::DivConfig outputDivConfig = {AscendC::DivAlgo::PRECISION_1ULP_FTZ_FALSE};
+#endif
             // *** go = go / gl_block
             AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
             for (uint32_t vdiv_idx = 0; vdiv_idx < embed / HALF_VECTOR_SIZE; ++vdiv_idx) {
-                AscendC::Div<half, false>(goUbTensor[vdiv_idx * HALF_VECTOR_SIZE],
-                                          goUbTensor[vdiv_idx * HALF_VECTOR_SIZE], tvUbTensor, (uint64_t)0, curRowNum,
-                                          AscendC::BinaryRepeatParams(1, 1, 0, embedRound / HALF_BLOCK_SIZE,
-                                                                      embedRound / HALF_BLOCK_SIZE, 1));
+#if defined(__DAV_C310_VEC__)
+                AscendC::Div<half, false, outputDivConfig>(
+                    goUbTensor[vdiv_idx * HALF_VECTOR_SIZE],
+#else
+                AscendC::Div<half, false>(
+                    goUbTensor[vdiv_idx * HALF_VECTOR_SIZE],
+#endif
+                    goUbTensor[vdiv_idx * HALF_VECTOR_SIZE], tvUbTensor, (uint64_t)0, curRowNum,
+                    AscendC::BinaryRepeatParams(1, 1, 0, embedRound / HALF_BLOCK_SIZE, embedRound / HALF_BLOCK_SIZE,
+                                                1));
             }
             if (embed % HALF_VECTOR_SIZE > 0) {
                 SetMask(embed % HALF_VECTOR_SIZE);
-                AscendC::Div<half, false>(goUbTensor[embed / HALF_VECTOR_SIZE * HALF_VECTOR_SIZE],
-                                          goUbTensor[embed / HALF_VECTOR_SIZE * HALF_VECTOR_SIZE], tvUbTensor,
-                                          (uint64_t)0, curRowNum,
-                                          AscendC::BinaryRepeatParams(1, 1, 0, embedRound / HALF_BLOCK_SIZE,
-                                                                      embedRound / HALF_BLOCK_SIZE, 1));
+#if defined(__DAV_C310_VEC__)
+                AscendC::Div<half, false, outputDivConfig>(
+                    goUbTensor[embed / HALF_VECTOR_SIZE * HALF_VECTOR_SIZE],
+#else
+                AscendC::Div<half, false>(
+                    goUbTensor[embed / HALF_VECTOR_SIZE * HALF_VECTOR_SIZE],
+#endif
+                    goUbTensor[embed / HALF_VECTOR_SIZE * HALF_VECTOR_SIZE], tvUbTensor, (uint64_t)0, curRowNum,
+                    AscendC::BinaryRepeatParams(1, 1, 0, embedRound / HALF_BLOCK_SIZE, embedRound / HALF_BLOCK_SIZE,
+                                                1));
                 AscendC::SetVectorMask<int8_t>((uint64_t)-1, (uint64_t)-1);
             }
             AscendC::PipeBarrier<PIPE_V>();

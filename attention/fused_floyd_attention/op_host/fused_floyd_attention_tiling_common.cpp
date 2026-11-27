@@ -147,16 +147,6 @@ ge::graphStatus CheckBaseInput(gert::TilingContext* context)
                         key2Shape.GetDim(3), key2Shape.GetDim(4), b, n, s3, s2, d),
                 return ge::GRAPH_FAILED);
 
-    // key2 [B,H,K,M,D]: B/H/D with query; K with key1; M with query
-    OP_CHECK_IF((b != key2Shape.GetDim(0) || n != key2Shape.GetDim(1) || d != key2Shape.GetDim(4) ||
-                 s3 != key2Shape.GetDim(2) || s2 != key2Shape.GetDim(3)),
-                OP_LOGE(context,
-                        "query or key2 shape is invalid, query=(%ld,%ld,%ld,%ld,%ld), key1.K=%ld, "
-                        "key2=(%ld,%ld,%ld,%ld,%ld), expect key2=(%ld,%ld,%ld,%ld,%ld)",
-                        b, n, s1, s2, d, s3, key2Shape.GetDim(0), key2Shape.GetDim(1), key2Shape.GetDim(2),
-                        key2Shape.GetDim(3), key2Shape.GetDim(4), b, n, s3, s2, d),
-                return ge::GRAPH_FAILED);
-
     OP_CHECK_IF((s1 % ALIGNED_NUM_16 != 0 || s2 % ALIGNED_NUM_128 != 0),
                 OP_LOGE(context, "The third dimension of the query only supports 16-byte alignment, and the fourth "
                                  "dimension only supports 128-byte alignment"),
