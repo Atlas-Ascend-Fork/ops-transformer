@@ -27,22 +27,21 @@
 
 * 负载均衡：为了解决负载不均衡的问题，该算子可以完成每个token的topK个逻辑专家号到物理卡号的映射。计算方法如下所示：
 
-  负载均衡对于expert_ids中的第i个值，即第i个token：
+  对于按行展开的expert_ids中的第i个值，所属token的索引为i // K。F为eplb_table的列数：
 
     ```python
-    place_num = 8
-    F = 2
-    new_expert_id = eplb_table[table_offset + 1]
+    # expert_ids和eplb_table均按行展开。
     expert_id = expert_ids[i]
     table_offset = expert_id * F
-    if (eplb_table[table_offset] == 1):
-        new_expert_id = eplb_table[table_offset + 1]
+    count = eplb_table[table_offset]
+    token_id = i // K
+    if count == 1:
+        place_idx = 1
+    elif balance_mode == 0:
+        mode_value = (world_size + count - 1) // count
+        place_idx = local_rank_id // mode_value + 1
     else:
-        if (balance_mode == 0):
-            mode_value = ceil(world_size / eplb_table[table_offset])
-            place_idx = local_rank_id / mode_value + 1
-        else:
-            place_idx = i % place_num
+        place_idx = token_id % count + 1
     new_expert_id = eplb_table[table_offset + place_idx]
     ```
 
@@ -132,7 +131,7 @@ aclnnStatus aclnnMoeUpdateExpert(
     <td>eplbTable(aclTensor*)</td>
     <td>输入</td>
     <td>逻辑专家到物理专家的映射表（外部需保证值正确）。</td>
-    <td><ul><li>共world_size * place_per_rank个专家实例。</li><li>每行第一列为对应逻辑专家的部署实例数（取值[1, world_size]），后[1, count]列为实例编号（取值[0, world_size*place_per_rank)，且不重复）。</li><li>要求为2D Tensor，shape为(moeExpertNum, F)。</li></ul></td>
+    <td><ul><li>共world_size * place_per_rank个专家实例。</li><li>每行第一列为对应逻辑专家的部署实例数count（取值[1, min(world_size, F - 1)]），后[1, count]列为实例编号（取值[0, world_size*place_per_rank)，且不重复）。</li><li>要求为2D Tensor，shape为(moeExpertNum, F)。</li></ul></td>
     <td>INT32</td>
     <td>ND</td>
     <td>2</td>
@@ -349,7 +348,7 @@ aclnnStatus aclnnMoeUpdateExpert(
    - **BS**：本卡最终输出的token数量，取值范围(0, 512]。
    - **K**：选取的topK个专家，取值范围( 0 < K ≤ 16 )，且需满足( 0 < K ≤ moeExpertNum )。
    - **moeExpertNum**：MoE专家数量，取值范围(0, 1024]。
-   - **F**：映射表`eplbTable`的列数，取值范围 [2, worldSize + 1]；第一列为逻辑专家的部署实例数（值>0），后F-1列为对应的实例编号。
+   - **F**：映射表`eplbTable`的列数，取值范围 [2, worldSize + 1]；第一列为逻辑专家的部署实例数count，需满足1 ≤ count ≤ min(worldSize, F - 1)。第[1, count]列为对应的互不重复的实例编号，其余列不参与实例选择。count小于worldSize时，不要求F等于worldSize + 1。
    - **实例总数限制**：所有卡部署的MoE专家实例总数最多1024，即( place_per_rank * world_size ≤ 1024 )（`place_per_rank`为单卡部署实例数）。
    - **单卡实例数一致性**：每张卡部署的专家实例数必须相同。
 

@@ -319,7 +319,7 @@ aclnnStatus aclnnDistributeBarrier(
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomEpBarrierName[128] = {0};
         ret = HcclGetCommName(args.hcclEpBarrierComm, hcomEpBarrierName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpBarrierCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomTpName[128] = {0};
 
         int64_t Bs = 8;
@@ -526,6 +526,9 @@ aclnnStatus aclnnDistributeBarrier(
         if (dispatchWorkspaceSize > 0) {
             aclrtFree(dispatchWorkspaceAddr);
         }
+        if (barrierWorkspaceAddr != nullptr) {
+            aclrtFree(barrierWorkspaceAddr);
+        }
         if (combineWorkspaceSize > 0) {
             aclrtFree(combineWorkspaceAddr);
         }
@@ -600,6 +603,7 @@ aclnnStatus aclnnDistributeBarrier(
         HcclCommDestroy(args.hcclEpBarrierComm);
         HcclCommDestroy(args.hcclTpComm);
         aclrtDestroyStream(args.dispatchStream);
+        aclrtDestroyStream(args.barrierStream);
         aclrtDestroyStream(args.combineStream);
         aclrtDestroyContext(args.context);
         aclrtResetDevice(args.rankId);
@@ -611,7 +615,7 @@ aclnnStatus aclnnDistributeBarrier(
     {
         // 本样例基于Atlas A3实现，必须在Atlas A3上运行
         int ret = aclInit(nullptr);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtInit failed, ret = %d\n", ret); return ret);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclInit failed, ret = %d\n", ret); return ret);
 
         aclrtStream dispatchStream[DEV_NUM];
         aclrtStream barrierStream[DEV_NUM];

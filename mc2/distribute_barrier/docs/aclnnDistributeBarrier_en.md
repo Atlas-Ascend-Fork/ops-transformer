@@ -316,7 +316,7 @@ The following sample code is for reference only. For details about compilation a
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpCommName failed, ret %d\n", ret); return -1);
         char hcomEpBarrierName[128] = {0};
         ret = HcclGetCommName(args.hcclEpBarrierComm, hcomEpBarrierName);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetEpBarrierCommName failed, ret %d\n", ret); return -1);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] HcclGetCommName failed, ret %d\n", ret); return -1);
         char hcomTpName[128] = {0};
 
         int64_t Bs = 8;
@@ -469,7 +469,7 @@ The following sample code is for reference only. For details about compilation a
 
         /**************************************** Call barrier********************************************/
 
-        ret = aclnnDistributeBarrierGetWorkspaceSize(expandX, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &combineExecutor);
+        ret = aclnnDistributeBarrierGetWorkspaceSize(expandX, hcomEpBarrierName, EP_WORLD_SIZE, &barrierWorkspaceSize, &barrierExecutor);
 
         CHECK_RET(ret == ACL_SUCCESS,
             LOG_PRINT("[ERROR] aclnnDistributeBarrierGetWorkspaceSize failed. ret = %d \n", ret); return ret);
@@ -481,7 +481,7 @@ The following sample code is for reference only. For details about compilation a
 
         // Call the second-phase API.
         ret = aclnnDistributeBarrier(barrierWorkspaceAddr, barrierWorkspaceSize,
-                                     combineExecutor, args.barrierStream);
+                                     barrierExecutor, args.barrierStream);
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclnnDistributeBarrier failed. ret = %d \n", ret);  \
             return ret);
         ret = aclrtSynchronizeStreamWithTimeout(args.barrierStream, 10000);
@@ -522,6 +522,9 @@ The following sample code is for reference only. For details about compilation a
         // Release the device resources.
         if (dispatchWorkspaceSize > 0) {
             aclrtFree(dispatchWorkspaceAddr);
+        }
+        if (barrierWorkspaceAddr != nullptr) {
+            aclrtFree(barrierWorkspaceAddr);
         }
         if (combineWorkspaceSize > 0) {
             aclrtFree(combineWorkspaceAddr);
@@ -597,6 +600,7 @@ The following sample code is for reference only. For details about compilation a
         HcclCommDestroy(args.hcclEpBarrierComm);
         HcclCommDestroy(args.hcclTpComm);
         aclrtDestroyStream(args.dispatchStream);
+        aclrtDestroyStream(args.barrierStream);
         aclrtDestroyStream(args.combineStream);
         aclrtDestroyContext(args.context);
         aclrtResetDevice(args.rankId);
@@ -608,7 +612,7 @@ The following sample code is for reference only. For details about compilation a
     {
         // This sample is implemented on Atlas A3 and must run on Atlas A3.
         int ret = aclInit(nullptr);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclrtInit failed, ret = %d\n", ret); return ret);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("[ERROR] aclInit failed, ret = %d\n", ret); return ret);
 
         aclrtStream dispatchStream[DEV_NUM];
         aclrtStream barrierStream[DEV_NUM];
