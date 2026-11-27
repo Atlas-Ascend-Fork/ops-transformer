@@ -70,4 +70,49 @@ INSTANTIATE_TEST_SUITE_P(
     testing::ValuesIn(GetCasesFromCsv<ScatterPaKvCacheWithKScaleTilingUtParam>(ReplaceFileExtension2Csv(__FILE__))),
     PrintCaseInfoString<ScatterPaKvCacheWithKScaleTilingUtParam>);
 
+TEST(ScatterPaKvCacheWithKScaleArch35TilingNegative, invalid_key_dtype_reports_single_ez0019)
+{
+    struct EmptyCompileInfo {
+    } compileInfo;
+
+    const std::string SocInfo35 = "{\n"
+                                  "  \"hardware_info\": {\n"
+                                  "    \"BT_SIZE\": 0,\n"
+                                  "    \"load3d_constraints\": \"1\",\n"
+                                  "    \"Intrinsic_fix_pipe_l0c2out\": false,\n"
+                                  "    \"Intrinsic_data_move_l12ub\": true,\n"
+                                  "    \"Intrinsic_data_move_l0c2ub\": true,\n"
+                                  "    \"Intrinsic_data_move_out2l1_nd2nz\": false,\n"
+                                  "    \"UB_SIZE\": 262144,\n"
+                                  "    \"L2_SIZE\": 33554432,\n"
+                                  "    \"L1_SIZE\": 524288,\n"
+                                  "    \"L0A_SIZE\": 65536,\n"
+                                  "    \"L0B_SIZE\": 65536,\n"
+                                  "    \"L0C_SIZE\": 131072,\n"
+                                  "    \"CORE_NUM\": 40,\n"
+                                  "    \"socVersion\": \"Ascend950\"\n"
+                                  "  }\n"
+                                  "}";
+
+    gert::TilingContextPara tilingContextPara(
+        "ScatterPaKvCacheWithKScale",
+        {{{{2, 4, 128}, {2, 4, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+         {{{2, 4, 128}, {2, 4, 128}}, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND},
+         {{{8, 4, 16, 128}, {8, 4, 16, 128}}, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND},
+         {{{8, 4, 16, 128}, {8, 4, 16, 128}}, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND},
+         {{{2}, {2}}, ge::DT_INT64, ge::FORMAT_ND},
+         {{{2, 4}, {2, 4}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{8, 4, 16, 1}, {8, 4, 16, 1}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+        {{{{}, {}}, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND},
+         {{{}, {}}, ge::DT_FLOAT8_E5M2, ge::FORMAT_ND},
+         {{{}, {}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+        {{"cache_layout", Ops::Transformer::AnyValue::CreateFrom<std::string>("BNBD")}}, &compileInfo, "Ascend950", 40,
+        262144, 4096, SocInfo35);
+
+    TilingInfo tilingInfo;
+    // 注：不直接断言 ErrorManager 报告（EZ0019），op_host UT target 未链接 liberror_manager.so；
+    // 该分支经 gcov 覆盖，正式码断言建议在 UT 链接补齐 error_manager 后恢复。
+    ASSERT_FALSE(ExecuteTiling(tilingContextPara, tilingInfo));
+}
+
 } // namespace ScatterPaKvCacheWithKScaleUT

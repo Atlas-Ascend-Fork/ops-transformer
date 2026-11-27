@@ -50,3 +50,23 @@ TEST_F(ScatterPaCache, scatter_pa_cache_infershape_0)
     std::vector<std::vector<int64_t>> expectOutputShape = {{306, 128, 1, 128}};
     ExecuteTestCase(infershapeContextPara, ge::GRAPH_SUCCESS, expectOutputShape);
 }
+
+TEST_F(ScatterPaCache, scatter_pa_cache_inferdatatype_invalid_cache_mode_reports_ez0026)
+{
+    auto spaceRegistry = gert::DefaultOpImplSpaceRegistryV2::GetInstance().GetSpaceRegistry();
+    ASSERT_NE(spaceRegistry, nullptr);
+    auto opImpl = spaceRegistry->GetOpImpl("ScatterPaCache");
+    ASSERT_NE(opImpl, nullptr);
+    ASSERT_NE(opImpl->infer_datatype, nullptr);
+    auto contextHolder = gert::InferDataTypeContextFaker()
+                             .SetOpType("ScatterPaCache")
+                             .NodeIoNum(6, 1)
+                             .NodeOutputTd(0, ge::FORMAT_ND, ge::FORMAT_ND)
+                             .Attr("cache_mode", std::string("InvalidMode"))
+                             .Build();
+    auto context = contextHolder.GetContext<gert::InferDataTypeContext>();
+    ASSERT_NE(context, nullptr);
+    // 注：不直接断言 ErrorManager 报告（EZ0026），op_host UT target 未链接 liberror_manager.so；
+    // 该分支经 gcov 覆盖，正式码断言建议在 UT 链接补齐 error_manager 后恢复。
+    ASSERT_EQ(opImpl->infer_datatype(context), ge::GRAPH_FAILED);
+}

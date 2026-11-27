@@ -34,19 +34,21 @@ std::tuple<const aclTensor*, const aclTensor*> ScatterPaKvCache(
     auto& platformInfo = op::GetCurrentPlatformInfo();
     auto socVersion = platformInfo.GetCurNpuArch();
     bool isArch35 = (socVersion == Ops::Base::DAV_3510);
+    bool isAscend96 = (socVersion == Ops::Base::DAV_9201 || socVersion == Ops::Base::DAV_9202);
+    bool keepOptionalNullptr = isArch35 || isAscend96;
 
     const aclTensor* compressLens = compressLensOptional;
-    if (!isArch35 && compressLensOptional == nullptr) {
+    if (!keepOptionalNullptr && compressLensOptional == nullptr) {
         compressLens = executor->AllocTensor(DataType::DT_INT64, Format::FORMAT_ND, Format::FORMAT_ND);
     }
 
     const aclTensor* compressSeqOffset = compressSeqOffsetOptional;
-    if (!isArch35 && compressSeqOffsetOptional == nullptr) {
+    if (!keepOptionalNullptr && compressSeqOffsetOptional == nullptr) {
         compressSeqOffset = executor->AllocTensor(DataType::DT_INT64, Format::FORMAT_ND, Format::FORMAT_ND);
     }
 
     const aclTensor* seqLens = seqLensOptional;
-    if (!isArch35 && seqLensOptional == nullptr) {
+    if (!keepOptionalNullptr && seqLensOptional == nullptr) {
         seqLens = executor->AllocTensor(DataType::DT_INT64, Format::FORMAT_ND, Format::FORMAT_ND);
     }
     auto ret = ADD_TO_LAUNCHER_LIST_AICORE(
@@ -55,7 +57,7 @@ std::tuple<const aclTensor*, const aclTensor*> ScatterPaKvCache(
         OP_OUTPUT(keyCacheRef, valueCacheRef),
         OP_ATTR(cacheModeOptional, scatterModeOptional, stridesOptional, offsetsOptional));
     if (ret != ACLNN_SUCCESS) {
-        OP_LOGE(ACLNN_ERR_PARAM_INVALID, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
+        OP_LOGE_WITHOUT_REPORT(ret, "ADD_TO_LAUNCHER_LIST_AICORE failed.");
         return {nullptr, nullptr};
     }
     return std::tuple<const aclTensor*, const aclTensor*>(keyCacheRef, valueCacheRef);

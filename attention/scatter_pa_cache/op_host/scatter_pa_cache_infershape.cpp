@@ -35,9 +35,11 @@ ge::graphStatus InferShape4ScatterPaCache(gert::InferShapeContext* context)
     // inferShape key_cache
     OP_LOGD(context, "Begin to do InferShape4ScatterPaCache");
     auto inputKeyCacheShape = context->GetRequiredInputShape(INPUT_KEY_CACHE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, inputKeyCacheShape);
+    OP_CHECK_IF(inputKeyCacheShape == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache"),
+                return ge::GRAPH_FAILED);
     auto outputKeyCacheShape = context->GetOutputShape(OUTPUT_KEY_CACHE);
-    OP_CHECK_NULL_WITH_CONTEXT(context, outputKeyCacheShape);
+    OP_CHECK_IF(outputKeyCacheShape == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "key_cache output shape"), return ge::GRAPH_FAILED);
     *outputKeyCacheShape = *inputKeyCacheShape;
 
     return GRAPH_SUCCESS;
@@ -47,11 +49,16 @@ ge::graphStatus InferDataType4ScatterPaCache(gert::InferDataTypeContext* context
 {
     OP_LOGD(context, "Begin to do InferDataType4ScatterPaCache");
     auto attrs = context->GetAttrs();
-    OP_CHECK_NULL_WITH_CONTEXT(context, attrs);
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "attributes"),
+                return ge::GRAPH_FAILED);
     auto cache_mode = attrs->GetAttrPointer<char>(ATTR_CACHE_MODE_INDEX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, cache_mode);
-    OP_CHECK_IF(strcmp(cache_mode, "") != 0 && strcmp(cache_mode, "Norm") != 0 && strcmp(cache_mode, "PA_NZ") != 0,
-                OP_LOGE(context, "invalid cache mode : %s", cache_mode), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(cache_mode == nullptr, OP_LOGE_WITH_INVALID_INPUT(context->GetNodeName(), "cache_mode"),
+                return ge::GRAPH_FAILED);
+    if (strcmp(cache_mode, "") != 0 && strcmp(cache_mode, "Norm") != 0 && strcmp(cache_mode, "PA_NZ") != 0) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "cache_mode", cache_mode,
+                                              "The cache_mode must be one of '', 'Norm', or 'PA_NZ'.");
+        return ge::GRAPH_FAILED;
+    }
 
     context->SetOutputDataType(OUTPUT_KEY_CACHE, context->GetRequiredInputDataType(INPUT_KEY));
     OP_LOGD(context, "End to do InferDataType4ScatterPaCache");

@@ -33,9 +33,11 @@ std::tuple<const aclTensor*, const aclTensor*> GatherPaKvCache(const aclTensor* 
     auto& platformInfo = op::GetCurrentPlatformInfo();
     auto socVersion = platformInfo.GetCurNpuArch();
     bool isArch35 = (socVersion == Ops::Base::DAV_3510);
+    bool isAscend96 = (socVersion == Ops::Base::DAV_9201 || socVersion == Ops::Base::DAV_9202);
+    bool keepOptionalNullptr = isArch35 || isAscend96;
 
     const aclTensor* seqOffset = seqOffsetOptional;
-    if (!isArch35 && seqOffset == nullptr) {
+    if (!keepOptionalNullptr && seqOffset == nullptr) {
         seqOffset = executor->AllocTensor(DataType::DT_INT64, Format::FORMAT_ND, Format::FORMAT_ND);
     }
 

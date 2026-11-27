@@ -29,6 +29,7 @@
 #include "opdev/shape_utils.h"
 #include "opdev/tensor_view_utils.h"
 #include "opdev/platform.h"
+#include "log/log.h"
 
 using namespace op;
 
@@ -37,6 +38,8 @@ extern "C" {
 #endif
 
 namespace {
+
+static constexpr const char* kOpName = "aclnnScatterPaKvCacheWithKScale";
 
 static const std::initializer_list<op::DataType> KEY_VALUE_DTYPE_SUPPORT_LIST = {DataType::DT_FLOAT8_E5M2,
                                                                                  DataType::DT_FLOAT8_E4M3FN};
@@ -50,15 +53,42 @@ static aclnnStatus CheckNullptr(const aclTensor* key, const aclTensor* value, co
                                 const aclTensor* keyScaleCacheRef, const uint64_t* workspaceSize,
                                 aclOpExecutor** executor)
 {
-    CHECK_RET(key != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(value != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(keyCacheRef != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(valueCacheRef != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(slotMapping != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(keyScale != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(keyScaleCacheRef != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(workspaceSize != nullptr, ACLNN_ERR_PARAM_NULLPTR);
-    CHECK_RET(executor != nullptr, ACLNN_ERR_PARAM_NULLPTR);
+    if (key == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "key");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (value == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "value");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (keyCacheRef == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "keyCacheRef");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (valueCacheRef == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "valueCacheRef");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (slotMapping == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "slotMapping");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (keyScale == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "keyScale");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (keyScaleCacheRef == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "keyScaleCacheRef");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (workspaceSize == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "workspaceSize");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (executor == nullptr) {
+        OP_LOGE_WITH_INVALID_INPUT(kOpName, "executor");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
 
     return ACLNN_SUCCESS;
 }
@@ -363,7 +393,6 @@ aclnnStatus aclnnScatterPaKvCacheWithKScaleGetWorkspaceSize(const aclTensor* key
     if (slotMappingEmpty || (keyEmpty && valueEmpty && scaleEmpty)) {
         *workspaceSize = 0;
         auto uniqueExecutor = CREATE_EXECUTOR();
-        CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
         uniqueExecutor.ReleaseTo(executor);
         return ACLNN_SUCCESS;
     }
@@ -377,7 +406,6 @@ aclnnStatus aclnnScatterPaKvCacheWithKScaleGetWorkspaceSize(const aclTensor* key
               ACLNN_ERR_PARAM_INVALID);
 
     auto uniqueExecutor = CREATE_EXECUTOR();
-    CHECK_RET(uniqueExecutor.get() != nullptr, ACLNN_ERR_INNER_CREATE_EXECUTOR);
 
     bool isNonContiguous = IsSupportNonContiguous(key, value, keyCacheRef, valueCacheRef, keyScale, keyScaleCacheRef);
     if (isNonContiguous) {
@@ -393,8 +421,11 @@ aclnnStatus aclnnScatterPaKvCacheWithKScale(void* workspace, uint64_t workspaceS
                                             aclrtStream stream)
 {
     L2_DFX_PHASE_2(aclnnScatterPaKvCacheWithKScale);
-    CHECK_COND(CommonOpExecutorRun(workspace, workspaceSize, executor, stream) == ACLNN_SUCCESS, ACLNN_ERR_INNER,
-               "ScatterPaKvCacheWithKScale launch aicore failed.");
+    const auto ret = CommonOpExecutorRun(workspace, workspaceSize, executor, stream);
+    if (ret != ACLNN_SUCCESS) {
+        OP_LOGE_WITHOUT_REPORT(ACLNN_ERR_INNER, "ScatterPaKvCacheWithKScale launch aicore failed.");
+        return ACLNN_ERR_INNER;
+    }
     return ACLNN_SUCCESS;
 }
 

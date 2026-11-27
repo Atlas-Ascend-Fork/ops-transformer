@@ -794,6 +794,66 @@ TEST_F(ScatterPaKvCacheTilingTest, tiling_error_compress_rope_head_not_align_32)
     ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
 }
 
+TEST_F(ScatterPaKvCacheTilingTest, tiling_error_arch35_alibi_key_head_size_mismatch)
+{
+    // ascend950 arch35 tiling: Alibi模式下key.dim3(128)与key_cache.dim3(64)不一致必须被拒绝，否则写入跨slot
+    optiling::ScatterPaKvCacheCompileInfo compileInfo = {64, 262144};
+    gert::TilingContextPara tilingContextPara(
+        "ScatterPaKvCache",
+        {
+            {{{2, 8, 2, 128}, {2, 8, 2, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{2, 2}, {2, 2}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{2, 8, 2, 128}, {2, 8, 2, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{2, 2}, {2, 2}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{2}, {2}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{2}, {2}}, ge::DT_INT32, ge::FORMAT_ND},
+        },
+        {
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+        },
+        {
+            {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("Norm")},
+            {"scatter_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("Alibi")},
+            {"strides", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({1, 1})},
+            {"offsets", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({0, 0})},
+        },
+        &compileInfo, "Ascend950");
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
+TEST_F(ScatterPaKvCacheTilingTest, tiling_error_arch35_alibi_value_head_size_mismatch)
+{
+    // ascend950 arch35 tiling: Alibi模式下value.dim3(128)与value_cache.dim3(64)不一致必须被拒绝
+    optiling::ScatterPaKvCacheCompileInfo compileInfo = {64, 262144};
+    gert::TilingContextPara tilingContextPara(
+        "ScatterPaKvCache",
+        {
+            {{{2, 8, 2, 64}, {2, 8, 2, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{2, 2}, {2, 2}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{2, 8, 2, 128}, {2, 8, 2, 128}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{2, 2}, {2, 2}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{2}, {2}}, ge::DT_INT32, ge::FORMAT_ND},
+            {{{2}, {2}}, ge::DT_INT32, ge::FORMAT_ND},
+        },
+        {
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+            {{{16, 8, 1, 64}, {16, 8, 1, 64}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+        },
+        {
+            {"cache_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("Norm")},
+            {"scatter_mode", Ops::Transformer::AnyValue::CreateFrom<std::string>("Alibi")},
+            {"strides", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({1, 1})},
+            {"offsets", Ops::Transformer::AnyValue::CreateFrom<std::vector<int64_t>>({0, 0})},
+        },
+        &compileInfo, "Ascend950");
+    ExecuteTestCase(tilingContextPara, ge::GRAPH_FAILED);
+}
+
 TEST_F(ScatterPaKvCacheTilingTest, tiling_error_compress_kc_dim2_not_1)
 {
     optiling::ScatterPaKvCacheCompileInfo compileInfo = {64, 262144};

@@ -117,7 +117,8 @@ static void GetTensorInfo(gert::TilingContext* ctx, size_t idx, int64_t* shape, 
 static ge::graphStatus GetPlatformInfo(gert::TilingContext* context, uint64_t& ubSize, int64_t& coreNum)
 {
     fe::PlatFormInfos* platformInfoPtr = context->GetPlatformInfo();
-    OP_CHECK_NULL_WITH_CONTEXT(context, platformInfoPtr);
+    OP_CHECK_IF(platformInfoPtr == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "platformInfo"),
+                return ge::GRAPH_FAILED);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfoPtr);
     coreNum = ascendcPlatform.GetCoreNumAiv();
     if (coreNum == 0) {
@@ -138,7 +139,8 @@ static ge::graphStatus GetWorkspaceSize(gert::TilingContext* context)
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     uint64_t sysWorkspaceSize = ascendcPlatform.GetLibApiWorkSpaceSize();
     size_t* currentWorkspace = context->GetWorkspaceSizes(1);
-    OP_CHECK_NULL_WITH_CONTEXT(context, currentWorkspace);
+    OP_CHECK_IF(currentWorkspace == nullptr,
+                OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "workspace sizes"), return ge::GRAPH_FAILED);
     currentWorkspace[0] = static_cast<size_t>(userWorkspaceSize + static_cast<int64_t>(sysWorkspaceSize));
     return ge::GRAPH_SUCCESS;
 }
@@ -154,13 +156,20 @@ static ge::graphStatus ValidateDtype(gert::TilingContext* context)
     auto smDesc = context->GetInputDesc(INPUT_SLOT_MAPPING_IDX);
     auto ksDesc = context->GetInputDesc(INPUT_KEY_SCALE_IDX);
     auto kscDesc = context->GetInputDesc(INPUT_KEY_SCALE_CACHE_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context, valueDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kcDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context, vcDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context, smDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context, ksDesc);
-    OP_CHECK_NULL_WITH_CONTEXT(context, kscDesc);
+    OP_CHECK_IF(keyDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "key"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(valueDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "value"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(kcDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "key_cache"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(vcDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "value_cache"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(smDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "slot_mapping"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(ksDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "key_scale"),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(kscDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "key_scale_cache"),
+                return ge::GRAPH_FAILED);
 
     auto keyDtype = keyDesc->GetDataType();
     auto valueDtype = valueDesc->GetDataType();
@@ -560,7 +569,8 @@ constexpr int64_t SIMD_MIN_HEAD_SIZE_BYTES = 128;
 static int64_t GetKeyDtypeSize(gert::TilingContext* context)
 {
     auto keyDesc = context->GetInputDesc(INPUT_KEY_IDX);
-    OP_CHECK_NULL_WITH_CONTEXT(context, keyDesc);
+    OP_CHECK_IF(keyDesc == nullptr, OP_LOGE_WITH_INVALID_INPUT("ScatterPaKvCacheWithKScale", "key"),
+                return ge::GRAPH_FAILED);
     ge::DataType keyDtype = keyDesc->GetDataType();
     if (keyDtype == ge::DT_FLOAT8_E5M2 || keyDtype == ge::DT_FLOAT8_E4M3FN) {
         return 1;
@@ -610,27 +620,27 @@ static ge::graphStatus ScatterPaKvCacheWithKScaleTilingFunc(gert::TilingContext*
     uint64_t ubSize;
     int64_t coreNum;
     if (GetPlatformInfo(context, ubSize, coreNum) != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "GetPlatformInfo error");
+        OP_LOGE_WITHOUT_REPORT(context, "GetPlatformInfo error");
         return ge::GRAPH_FAILED;
     }
     if (GetWorkspaceSize(context) != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "GetWorkspaceSize error");
+        OP_LOGE_WITHOUT_REPORT(context, "GetWorkspaceSize error");
         return ge::GRAPH_FAILED;
     }
     if (ValidateDtype(context) != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "ValidateDtype error");
+        OP_LOGE_WITHOUT_REPORT(context, "ValidateDtype error");
         return ge::GRAPH_FAILED;
     }
 
     TensorParams params;
     if (ExtractTensorParams(context, params) != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "ExtractTensorParams error");
+        OP_LOGE_WITHOUT_REPORT(context, "ExtractTensorParams error");
         return ge::GRAPH_FAILED;
     }
 
     if (ValidateShape(context, params.numTokens, params.numHead, params.kHeadSize, params.vHeadSize, params.numBlocks,
                       params.blockSize) != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "ValidateShape error");
+        OP_LOGE_WITHOUT_REPORT(context, "ValidateShape error");
         return ge::GRAPH_FAILED;
     }
 
@@ -639,10 +649,19 @@ static ge::graphStatus ScatterPaKvCacheWithKScaleTilingFunc(gert::TilingContext*
         IsSimdCapable(context, params, keyDtypeSize) ? SCATTER_KV_CACHE_TPL_SIMD : SCATTER_KV_CACHE_TPL_SIMT;
 
     ScatterPaKvCacheWithKScaleTilingData* tiling = context->GetTilingData<ScatterPaKvCacheWithKScaleTilingData>();
-    OP_CHECK_NULL_WITH_CONTEXT(context, tiling);
-    if (memset_s(tiling, sizeof(ScatterPaKvCacheWithKScaleTilingData), 0,
-                 sizeof(ScatterPaKvCacheWithKScaleTilingData)) != EOK) {
-        OP_LOGE(context, "memset tiling data error");
+    OP_CHECK_IF(tiling == nullptr,
+                REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                          (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                                    "GetTilingData is null; Tiling cannot continue"})),
+                return ge::GRAPH_FAILED);
+    auto memsetRet =
+        memset_s(tiling, sizeof(ScatterPaKvCacheWithKScaleTilingData), 0, sizeof(ScatterPaKvCacheWithKScaleTilingData));
+    if (memsetRet != EOK) {
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            (std::string("Failed to memset tiling data, ret is ") +
+                                                             std::to_string(memsetRet) + "; Tiling cannot continue")
+                                                                .c_str()}));
         return ge::GRAPH_FAILED;
     }
 
@@ -658,7 +677,11 @@ static ge::graphStatus ScatterPaKvCacheWithKScaleTilingFunc(gert::TilingContext*
     }
     auto res = context->SetLocalMemorySize(static_cast<uint32_t>(ubSize - DCACHE_SIZE - STATIC_UB_ESTIMATE));
     if (res != ge::GRAPH_SUCCESS) {
-        OP_LOGE(context, "SetLocalMemorySize failed");
+        REPORT_PREDEFINED_ERR_MSG("EZ1008", (std::vector<const char*>{"opName", "reason"}),
+                                  (std::vector<const char*>{Ops::Base::GetOpInfo(context).c_str(),
+                                                            (std::string("SetLocalMemorySize failed, ret is ") +
+                                                             std::to_string(res) + "; Tiling cannot continue")
+                                                                .c_str()}));
         return ge::GRAPH_FAILED;
     }
 
