@@ -81,7 +81,6 @@ public:
             coreIdx = AscendC::GetBlockIdx();
             coreNum = AscendC::GetBlockNum();
         }
-        const int64_t hidden = params_.hidden;
         int64_t tokenStartIdx = 0;
         int64_t tokenEndIdx = 0;
         int64_t numTokensCurCore = 0;
@@ -112,36 +111,8 @@ public:
         ubOffset += perCoreBytes;
         // union 区：量化行流水 / 打包直写同址复用（量化 MTE3 落盘并两次 SyncAll 后才打包）
         const uint32_t unionBase = ubOffset;
-        uint32_t quantOffset = unionBase;
-        for (uint32_t i = 0; i < UB_STAGES; ++i) {
-            tokenInList[i] = resource.ubBuf.template GetBufferByByte<ElementSrc>(quantOffset);
-            quantOffset += RoundUp<Catlass::BYTE_PER_BLK>(static_cast<uint32_t>(hidden * sizeof(ElementSrc)));
-            tokenOutList[i] = resource.ubBuf.template GetBufferByByte<ElementDst>(quantOffset);
-            quantOffset += RoundUp<Catlass::BYTE_PER_BLK>(static_cast<uint32_t>(hidden * sizeof(ElementDst))) +
-                           Catlass::BYTE_PER_BLK;
-        }
-        // 量化临时缓冲：work [0,h) + abs/max 复用 [h,2h)；int32/half 复用 work（与基线同式）
-        constexpr int32_t QUANT_TMP_FLOATS_PER_HIDDEN = 2;
-        tmpBuffer = resource.ubBuf.template GetBufferByByte<float>(quantOffset);
-        quantOffset +=
-            RoundUp<Catlass::BYTE_PER_BLK>(static_cast<uint32_t>(QUANT_TMP_FLOATS_PER_HIDDEN * hidden * sizeof(float)));
-
-        // 打包缓冲：slots/probs 两平面 run 区（rankOrdinal 内联 slots 高 8bit）+ probs 只读切片
-        runBufElems = numTokensCurCore * params_.numTopk + 8 * params_.numExperts;
-        if (runBufElems < RUN_BUF_MIN_ELEMS) {
-            runBufElems = RUN_BUF_MIN_ELEMS;
-        }
-        uint32_t packOffset = unionBase;
-        const uint32_t runBytes = RoundUp<Catlass::BYTE_PER_BLK>(static_cast<uint32_t>(runBufElems * sizeof(int32_t)));
-        slotsRun = resource.ubBuf.template GetBufferByByte<int32_t>(packOffset);
-        packOffset += runBytes;
-        probsRun = resource.ubBuf.template GetBufferByByte<float>(packOffset);
-        packOffset += runBytes;
-        probsSlice = resource.ubBuf.template GetBufferByByte<float>(packOffset);
-        packOffset += perCoreBytes;
-        // 行索引表 staging（token·topK 项，逐核连续；量化区已死，与打包区同址复用）
-        rowIdxRun = resource.ubBuf.template GetBufferByByte<int32_t>(packOffset);
-        packOffset += (perCoreBytes > 0U) ? perCoreBytes : Catlass::BYTE_PER_BLK;
+        InitQuantBuffers(resource, unionBase);
+        InitPackBuffers(resource, unionBase, numTokensCurCore, perCoreBytes);
     }
 
     CATLASS_DEVICE
@@ -167,77 +138,8 @@ public:
         // 原始序量化 → 本卡 peermem A 区
         QuantizeOriginalOrder(gmX, gmA, tokenStartIdx, tokenEndIdx);
 
-        AscendC::Duplicate<int32_t>(coreExpertCount, 0, params_.alignedNumExperts);
-        AscendC::DataCopyExtParams topkCopyParams{
-            1, static_cast<uint32_t>(numTokensCurCore * params_.numTopk * sizeof(int32_t)), 0, 0, 0};
-        AscendC::DataCopyPadExtParams<int32_t> topkPadParams{false, 0, 0, 0};
-        AscendC::DataCopyPad(topkIds, gmTopkIds[tokenStartIdx * params_.numTopk], topkCopyParams, topkPadParams);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        for (int64_t t = 0; t < numTokensCurCore; ++t) {
-            if (hasXActiveMask && !gmXActiveMask.GetValue(tokenStartIdx + t)) {
-                continue;
-            }
-            for (int64_t k = 0; k < params_.numTopk; ++k) {
-                int32_t e = topkIds.GetValue(t * params_.numTopk + k);
-                if (e >= 0 && e < params_.numExperts) {
-                    coreExpertCount.SetValue(e, coreExpertCount.GetValue(e) + 1);
-                }
-            }
-        }
-        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-        AscendC::GlobalTensor<int32_t> expertCountPerCore;
-        // 基准 = workspace 起点；计数写本核槽位，前缀归约读全部核槽位
-        expertCountPerCore.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceCountsAddr));
-        AscendC::DataCopy(expertCountPerCore[coreIdx * params_.alignedNumExperts], coreExpertCount,
-                          params_.alignedNumExperts);
-        AscendC::SyncAll<true>();
-
-        // 两级前缀和 + TPE 写出
-        AscendC::Duplicate<int32_t>(prefixExpertCount, 0, params_.alignedNumExperts);
-        AscendC::PipeBarrier<PIPE_V>();
-        for (int64_t c = 0; c < coreIdx; ++c) {
-            AscendC::DataCopy(scratchCount, expertCountPerCore[c * params_.alignedNumExperts],
-                              params_.alignedNumExperts);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::Add(prefixExpertCount, prefixExpertCount, scratchCount, params_.alignedNumExperts);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        }
-        AscendC::PipeBarrier<PIPE_V>();
-        AscendC::DataCopy(totalExpertCount, prefixExpertCount, params_.alignedNumExperts);
-        AscendC::PipeBarrier<PIPE_V>();
-        for (int64_t c = coreIdx; c < coreNum; ++c) {
-            AscendC::DataCopy(scratchCount, expertCountPerCore[c * params_.alignedNumExperts],
-                              params_.alignedNumExperts);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
-            AscendC::Add(totalExpertCount, totalExpertCount, scratchCount, params_.alignedNumExperts);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
-        }
-
-        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-        countCopyParams = AscendC::DataCopyExtParams{1, params_.alignedNumExpertsBytes, 0, 0, 0};
-        AscendC::DataCopyPad(gmTokenPerExpert, totalExpertCount, countCopyParams);
-        // SyncAll 自带全流水同步，此处无需额外的 PipeBarrier
-        AscendC::SyncAll<true>();
-
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-        int32_t globalPrefix = 0;
-        for (int64_t e = 0; e < params_.numExperts; ++e) {
-            tokenPerExpertOffset.SetValue(e, globalPrefix);
-            globalPrefix += totalExpertCount.GetValue(e);
-        }
-        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
-
-        AscendC::Add(tokenPerExpertOffset, tokenPerExpertOffset, prefixExpertCount, params_.alignedNumExperts);
-        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
-        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        CountExpertRoutes(gmTopkIds, tokenStartIdx, numTokensCurCore);
+        BuildExpertOffsets(gmTokenPerExpert, workspaceCountsAddr);
 
         ScatterAndPackDirect(gmProbs, gmPackSlots, gmPackProbs, tokenStartIdx, tokenEndIdx);
         // MTE3 写回执（跨核可见性由调用方 SyncAll 收口）
@@ -273,6 +175,123 @@ private:
     // hasXActiveMask=false 时 gmXActiveMask 不访问
     bool hasXActiveMask = false;
     AscendC::GlobalTensor<bool> gmXActiveMask;
+
+    CATLASS_DEVICE
+    void InitQuantBuffers(Catlass::Arch::Resource<ArchTag>& resource, uint32_t quantOffset)
+    {
+        const int64_t hidden = params_.hidden;
+        for (uint32_t i = 0; i < UB_STAGES; ++i) {
+            tokenInList[i] = resource.ubBuf.template GetBufferByByte<ElementSrc>(quantOffset);
+            quantOffset += RoundUp<Catlass::BYTE_PER_BLK>(static_cast<uint32_t>(hidden * sizeof(ElementSrc)));
+            tokenOutList[i] = resource.ubBuf.template GetBufferByByte<ElementDst>(quantOffset);
+            quantOffset += RoundUp<Catlass::BYTE_PER_BLK>(static_cast<uint32_t>(hidden * sizeof(ElementDst))) +
+                           Catlass::BYTE_PER_BLK;
+        }
+        // 量化临时缓冲：work [0,h) + abs/max 复用 [h,2h)；int32/half 复用 work（与基线同式）
+        tmpBuffer = resource.ubBuf.template GetBufferByByte<float>(quantOffset);
+    }
+
+    CATLASS_DEVICE
+    void InitPackBuffers(Catlass::Arch::Resource<ArchTag>& resource, uint32_t packOffset, int64_t numTokensCurCore,
+                         uint32_t perCoreBytes)
+    {
+        // 打包缓冲：slots/probs 两平面 run 区（rankOrdinal 内联 slots 高 8bit）+ probs 只读切片
+        runBufElems = numTokensCurCore * params_.numTopk + 8 * params_.numExperts;
+        if (runBufElems < RUN_BUF_MIN_ELEMS) {
+            runBufElems = RUN_BUF_MIN_ELEMS;
+        }
+        const uint32_t runBytes = RoundUp<Catlass::BYTE_PER_BLK>(static_cast<uint32_t>(runBufElems * sizeof(int32_t)));
+        slotsRun = resource.ubBuf.template GetBufferByByte<int32_t>(packOffset);
+        packOffset += runBytes;
+        probsRun = resource.ubBuf.template GetBufferByByte<float>(packOffset);
+        packOffset += runBytes;
+        probsSlice = resource.ubBuf.template GetBufferByByte<float>(packOffset);
+        packOffset += perCoreBytes;
+        // 行索引表 staging（token·topK 项，逐核连续；量化区已死，与打包区同址复用）
+        rowIdxRun = resource.ubBuf.template GetBufferByByte<int32_t>(packOffset);
+    }
+
+    CATLASS_DEVICE
+    void CountExpertRoutes(AscendC::GlobalTensor<int32_t> const& gmTopkIds, int64_t tokenStartIdx,
+                           int64_t numTokensCurCore)
+    {
+        AscendC::Duplicate<int32_t>(coreExpertCount, 0, params_.alignedNumExperts);
+        AscendC::DataCopyExtParams topkCopyParams{
+            1, static_cast<uint32_t>(numTokensCurCore * params_.numTopk * sizeof(int32_t)), 0, 0, 0};
+        AscendC::DataCopyPadExtParams<int32_t> topkPadParams{false, 0, 0, 0};
+        AscendC::DataCopyPad(topkIds, gmTopkIds[tokenStartIdx * params_.numTopk], topkCopyParams, topkPadParams);
+        AscendC::PipeBarrier<PIPE_ALL>();
+        for (int64_t t = 0; t < numTokensCurCore; ++t) {
+            if (hasXActiveMask && !gmXActiveMask.GetValue(tokenStartIdx + t)) {
+                continue;
+            }
+            for (int64_t k = 0; k < params_.numTopk; ++k) {
+                int32_t e = topkIds.GetValue(t * params_.numTopk + k);
+                if (e >= 0 && e < params_.numExperts) {
+                    coreExpertCount.SetValue(e, coreExpertCount.GetValue(e) + 1);
+                }
+            }
+        }
+    }
+
+    CATLASS_DEVICE
+    void AccumulateCoreCounts(AscendC::LocalTensor<int32_t>& counts,
+                              AscendC::GlobalTensor<int32_t> const& expertCountPerCore, int64_t coreStart,
+                              int64_t coreEnd)
+    {
+        for (int64_t c = coreStart; c < coreEnd; ++c) {
+            AscendC::DataCopy(scratchCount, expertCountPerCore[c * params_.alignedNumExperts],
+                              params_.alignedNumExperts);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID0);
+            AscendC::Add(counts, counts, scratchCount, params_.alignedNumExperts);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
+        }
+    }
+
+    CATLASS_DEVICE
+    void BuildExpertOffsets(AscendC::GlobalTensor<int32_t>& gmTokenPerExpert, GM_ADDR workspaceCountsAddr)
+    {
+        AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+        AscendC::GlobalTensor<int32_t> expertCountPerCore;
+        // 基准 = workspace 起点；计数写本核槽位，前缀归约读全部核槽位
+        expertCountPerCore.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspaceCountsAddr));
+        AscendC::DataCopy(expertCountPerCore[coreIdx * params_.alignedNumExperts], coreExpertCount,
+                          params_.alignedNumExperts);
+        AscendC::SyncAll<true>();
+
+        // 两级前缀和 + TPE 写出
+        AscendC::Duplicate<int32_t>(prefixExpertCount, 0, params_.alignedNumExperts);
+        AscendC::PipeBarrier<PIPE_V>();
+        AccumulateCoreCounts(prefixExpertCount, expertCountPerCore, 0, coreIdx);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::DataCopy(totalExpertCount, prefixExpertCount, params_.alignedNumExperts);
+        AscendC::PipeBarrier<PIPE_V>();
+        AccumulateCoreCounts(totalExpertCount, expertCountPerCore, coreIdx, coreNum);
+
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+        countCopyParams = AscendC::DataCopyExtParams{1, params_.alignedNumExpertsBytes, 0, 0, 0};
+        AscendC::DataCopyPad(gmTokenPerExpert, totalExpertCount, countCopyParams);
+        // SyncAll 自带全流水同步，此处无需额外的 PipeBarrier
+        AscendC::SyncAll<true>();
+
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        int32_t globalPrefix = 0;
+        for (int64_t e = 0; e < params_.numExperts; ++e) {
+            tokenPerExpertOffset.SetValue(e, globalPrefix);
+            globalPrefix += totalExpertCount.GetValue(e);
+        }
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID0);
+
+        AscendC::Add(tokenPerExpertOffset, tokenPerExpertOffset, prefixExpertCount, params_.alignedNumExperts);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID0);
+    }
 
     CATLASS_DEVICE
     void SplitCore(int64_t numTokens, int64_t& tokenStartIdx, int64_t& tokenEndIdx, int64_t& numTokensCurCore)
@@ -349,22 +368,29 @@ private:
         dstTensor.template ReinterpretCast<float>().SetValue(count / 4, 1.0f / dynamicScale);
     }
 
-    // 源序走查 + 按专家 run 直写打包段 + 产出去重行索引表：GM 落位与散射式实现逐位相同；
-    // 无效/mask 条目不产出，尾部 [Σvalid, n) 哨兵由 core0 补填。rankOrdinal = token 去重
-    // 卡序列（topK 展开序首现）中目标卡的序数——D 区 token 块槽位因子；本函数同时把
-    // 「首现 → token·K̂ + rankOrdinal / 其余 -1」写入行索引表供 unpermute 使用
+    // 按源序打包并按专家桶直写 GM。rankOrdinal 是同一 token 按 topK 展开顺序去重后，
+    // 目标卡首次出现的序号，并编码在 slots 的高 8 位。
+    // 同 token 同目标卡仅首项写 D 区行号 token * min(topK, EP) + rankOrdinal。
+    // 同卡后续项、mask 项和无效路由均写 -1，unpermute 据此跳过这些项。
     CATLASS_DEVICE
     void ScatterAndPackDirect(AscendC::GlobalTensor<ElementTopkWeights> const& gmProbs,
                               AscendC::GlobalTensor<int32_t>& gmPackSlots, AscendC::GlobalTensor<float>& gmPackProbs,
                               int64_t tokenStartIdx, int64_t tokenEndIdx)
     {
-        const int64_t n = params_.streamLen;
-        const int64_t topk = params_.numTopk;
-        const int32_t epr = static_cast<int32_t>(params_.expertsPerRank);
-        // D 区 token 块行宽 K̂ = min(topK, EP)，行号 = token·K̂ + 卡首现序
-        const int64_t ep = params_.numExperts / params_.expertsPerRank;
-        const int64_t kHat = (topk < ep) ? topk : ep;
         const int64_t tokensCurCore = tokenEndIdx - tokenStartIdx;
+        PreparePackRuns(gmProbs, tokenStartIdx, tokensCurCore);
+        BuildPackRuns(tokenStartIdx, tokenEndIdx);
+        WritePackRuns(gmPackSlots, gmPackProbs, tokenStartIdx, tokensCurCore);
+        if (coreIdx == 0) {
+            FillPackTail(gmPackSlots, gmPackProbs);
+        }
+    }
+
+    CATLASS_DEVICE
+    void PreparePackRuns(AscendC::GlobalTensor<ElementTopkWeights> const& gmProbs, int64_t tokenStartIdx,
+                         int64_t tokensCurCore)
+    {
+        const int64_t topk = params_.numTopk;
         const uint32_t probsCount = static_cast<uint32_t>(tokensCurCore * topk);
         const uint32_t probsBytes = probsCount * sizeof(ElementTopkWeights);
         AscendC::DataCopyExtParams probsCopyParams{1, probsBytes, 0, 0, 0};
@@ -387,6 +413,41 @@ private:
             acc += coreExpertCount.GetValue(e);
             acc = (acc + 7) & ~7; // 桶基址 8 元素（32B）对齐
         }
+    }
+
+    // 按 topK 展开顺序记录各目标卡及其首次出现的 k。
+    CATLASS_DEVICE
+    void BuildCardSequence(int64_t topkBase, int32_t epr, int32_t* cardSeq, int32_t* firstK)
+    {
+        int32_t distinctCards = 0;
+        for (int64_t k2 = 0; k2 < params_.numTopk; ++k2) {
+            const int32_t e2 = topkIds.GetValue(topkBase + k2);
+            if (e2 < 0 || e2 >= params_.numExperts) {
+                continue; // 无效条目与卡集合同口径剔除（首现序的卡集合只含有效卡）
+            }
+            const int32_t c2 = e2 / epr;
+            bool dup = false;
+            for (int32_t d = 0; d < distinctCards; ++d) {
+                if (cardSeq[d] == c2) {
+                    dup = true; // c2 已首现，序列不重复入表
+                    break;
+                }
+            }
+            if (!dup) {
+                firstK[distinctCards] = static_cast<int32_t>(k2);
+                cardSeq[distinctCards++] = c2;
+            }
+        }
+    }
+
+    CATLASS_DEVICE
+    void BuildPackRuns(int64_t tokenStartIdx, int64_t tokenEndIdx)
+    {
+        const int64_t topk = params_.numTopk;
+        const int32_t epr = static_cast<int32_t>(params_.expertsPerRank);
+        // D 区 token 块行宽 K̂ = min(topK, EP)，行号 = token·K̂ + 卡首现序
+        const int64_t ep = params_.numExperts / params_.expertsPerRank;
+        const int64_t kHat = (topk < ep) ? topk : ep;
         // 源序走查（slots 值 = chunk 内 srcIdx）
         uint32_t rowIdxOffset = 0;
         int64_t topkBase = 0;
@@ -405,25 +466,7 @@ private:
                 }
                 continue; // mask token 计数阶段已跳过，落位同样跳过
             }
-            int32_t distinctCards = 0;
-            for (int64_t k2 = 0; k2 < topk; ++k2) {
-                const int32_t e2 = topkIds.GetValue(topkBase + k2);
-                if (e2 < 0 || e2 >= params_.numExperts) {
-                    continue; // 无效条目与卡集合同口径剔除（首现序的卡集合只含有效卡）
-                }
-                const int32_t c2 = e2 / epr;
-                bool dup = false;
-                for (int32_t d = 0; d < distinctCards; ++d) {
-                    if (cardSeq[d] == c2) {
-                        dup = true; // c2 已首现，序列不重复入表
-                        break;
-                    }
-                }
-                if (!dup) {
-                    firstK[distinctCards] = static_cast<int32_t>(k2);
-                    cardSeq[distinctCards++] = c2;
-                }
-            }
+            BuildCardSequence(topkBase, epr, cardSeq, firstK);
             for (int64_t k = 0; k < topk; ++k) {
                 const int32_t expert = topkIds.GetValue(topkBase + k);
                 const int32_t tblIdx = static_cast<int32_t>(rowIdxOffset + k);
@@ -451,6 +494,12 @@ private:
                 localCursor.SetValue(expert, lp + 1);
             }
         }
+    }
+
+    CATLASS_DEVICE
+    void WritePackRuns(AscendC::GlobalTensor<int32_t>& gmPackSlots, AscendC::GlobalTensor<float>& gmPackProbs,
+                       int64_t tokenStartIdx, int64_t tokensCurCore)
+    {
         // S 落盘后每非空桶 2 次 DMA 直写 GM 终位
         AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
@@ -466,33 +515,36 @@ private:
             AscendC::DataCopyPad(gmPackProbs[gmPos], probsRun[ubPos],
                                  {1, static_cast<uint32_t>(cnt * sizeof(float)), 0, 0, 0});
         }
+        const int64_t topk = params_.numTopk;
         // 行索引表落盘（本核 token 区间连续；标量写已由上方 S_MTE3 回执覆盖）
         if (tokensCurCore > 0) {
             AscendC::DataCopyPad(gmRowIdx[tokenStartIdx * topk], rowIdxRun,
                                  {1, static_cast<uint32_t>(tokensCurCore * topk * sizeof(int32_t)), 0, 0, 0});
         }
-        // 尾部哨兵 [Σvalid, n)：slots 的 rankOrdinal 段 0xFF（srcIdx 段 0）/ probs=0.0f，
-        // core0 用 run 缓冲 staging 补填
-        if (coreIdx == 0) {
-            int64_t sumValid = 0;
-            for (int64_t e = 0; e < params_.numExperts; ++e) {
-                sumValid += totalExpertCount.GetValue(e);
-            }
+    }
+
+    // 尾部哨兵 [Σvalid, n)：slots 的 rankOrdinal 段 0xFF（srcIdx 段 0）/ probs=0.0f，
+    // core0 用 run 缓冲 staging 补填
+    CATLASS_DEVICE
+    void FillPackTail(AscendC::GlobalTensor<int32_t>& gmPackSlots, AscendC::GlobalTensor<float>& gmPackProbs)
+    {
+        const int64_t n = params_.streamLen;
+        int64_t sumValid = 0;
+        for (int64_t e = 0; e < params_.numExperts; ++e) {
+            sumValid += totalExpertCount.GetValue(e);
+        }
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
+        for (int64_t p0 = sumValid; p0 < n; p0 += runBufElems) {
+            const int64_t cur = (n - p0 < runBufElems) ? (n - p0) : runBufElems;
+            AscendC::Duplicate<int32_t>(slotsRun, DEDUP_SLOT_SENTINEL, static_cast<uint32_t>(cur));
+            AscendC::Duplicate<float>(probsRun, 0.0f, static_cast<uint32_t>(cur));
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
+            AscendC::DataCopyPad(gmPackSlots[p0], slotsRun, {1, static_cast<uint32_t>(cur * sizeof(int32_t)), 0, 0, 0});
+            AscendC::DataCopyPad(gmPackProbs[p0], probsRun, {1, static_cast<uint32_t>(cur * sizeof(float)), 0, 0, 0});
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-            for (int64_t p0 = sumValid; p0 < n; p0 += runBufElems) {
-                const int64_t cur = (n - p0 < runBufElems) ? (n - p0) : runBufElems;
-                AscendC::Duplicate<int32_t>(slotsRun, DEDUP_SLOT_SENTINEL, static_cast<uint32_t>(cur));
-                AscendC::Duplicate<float>(probsRun, 0.0f, static_cast<uint32_t>(cur));
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
-                AscendC::DataCopyPad(gmPackSlots[p0], slotsRun,
-                                     {1, static_cast<uint32_t>(cur * sizeof(int32_t)), 0, 0, 0});
-                AscendC::DataCopyPad(gmPackProbs[p0], probsRun,
-                                     {1, static_cast<uint32_t>(cur * sizeof(float)), 0, 0, 0});
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID0);
-            }
         }
     }
 };

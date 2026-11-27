@@ -28,6 +28,29 @@
 using namespace AscendC;
 using namespace MegaMoeImpl;
 
+template <class Kernel, class... Args>
+__aicore__ inline void RunMegaMoeKernel(Args... args)
+{
+    Kernel op;
+    op.Init(args...);
+    op.Process();
+}
+
+template <bool TransposeW1, bool TransposeW2, int ArchCode>
+struct MegaMoeEntryTypes {
+    static constexpr bool isNz = FORMAT_WEIGHT1 == FORMAT_FRACTAL_NZ;
+    static constexpr bool isA2 = ArchCode == SOC_ASCEND910B;
+    static constexpr bool sharedGmm2Bf16 =
+        std::is_same_v<DTYPE_WEIGHT1, int8_t> && std::is_same_v<DTYPE_SHARED_WEIGHT2, bfloat16_t>;
+    static constexpr bool sharedW2Nz = FORMAT_SHARED_WEIGHT2 == FORMAT_FRACTAL_NZ;
+    static constexpr bool isW4A8 =
+        std::is_same_v<DTYPE_WEIGHT1, AscendC::int4b_t> || std::is_same_v<DTYPE_WEIGHT1, int32_t>;
+
+    template <bool Dedup = false, bool MaskRouting = false, bool BlockedOutput = false>
+    using Kernel = MegaMoe<DTYPE_X, DTYPE_WEIGHT1, DTYPE_Y, TransposeW1, TransposeW2, isNz, isA2, sharedGmm2Bf16,
+                           DTYPE_SHARED_WEIGHT1, sharedW2Nz, Dedup, MaskRouting, BlockedOutput>;
+};
+
 template <bool TPL_IS_TRANSPOSE_W1, bool TPL_IS_TRANSPOSE_W2, int TPL_QUANT_MODE, int TPL_QUANT_OUT_TYPE, int TPL_ARCH,
           bool TPL_MASK_ROUTING, bool TPL_MASK_BLOCKED_OUTPUT>
 __global__ __aicore__ void mega_moe(GM_ADDR context, GM_ADDR x, GM_ADDR topkIds, GM_ADDR topkWeights, GM_ADDR weight1,
@@ -39,44 +62,33 @@ __global__ __aicore__ void mega_moe(GM_ADDR context, GM_ADDR x, GM_ADDR topkIds,
 {
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
 
-    constexpr bool isNz = (FORMAT_WEIGHT1 == FORMAT_FRACTAL_NZ);
-    constexpr bool isA2 = (TPL_ARCH == SOC_ASCEND910B);
-    constexpr bool sharedGmm2Bf16 =
-        std::is_same_v<DTYPE_WEIGHT1, int8_t> && std::is_same_v<DTYPE_SHARED_WEIGHT2, bfloat16_t>;
-    constexpr bool sharedW2Nz = (FORMAT_SHARED_WEIGHT2 == FORMAT_FRACTAL_NZ);
+    using Types = MegaMoeEntryTypes<TPL_IS_TRANSPOSE_W1, TPL_IS_TRANSPOSE_W2, TPL_ARCH>;
     REGISTER_TILING_DEFAULT(MegaMoeTilingDataNonQuant);
     REGISTER_TILING_FOR_TILINGKEY("(QuantMode == MEGA_MOE_QUANT_MODE_PER_TOKEN)", MegaMoeTilingDataQuant);
 #if (ORIG_DTYPE_WEIGHT1 != DT_INT32)
-    if constexpr (!isA2 || TPL_QUANT_MODE == MEGA_MOE_QUANT_MODE_PER_TOKEN ||
+    if constexpr (!Types::isA2 || TPL_QUANT_MODE == MEGA_MOE_QUANT_MODE_PER_TOKEN ||
                   TPL_QUANT_MODE == MEGA_MOE_QUANT_MODE_NO_QUANT) {
 #else
     // The original INT32 weight path is unavailable on A2. Keep its template
     // instance out of this translation unit while A3 retains the packed W4A8 path.
-    if constexpr (!isA2) {
+    if constexpr (!Types::isA2) {
 #endif
         if constexpr (TPL_MASK_ROUTING) {
-            MegaMoe<DTYPE_X, DTYPE_WEIGHT1, DTYPE_Y, TPL_IS_TRANSPOSE_W1, TPL_IS_TRANSPOSE_W2, isNz, isA2,
-                    sharedGmm2Bf16, DTYPE_SHARED_WEIGHT1, sharedW2Nz, false, true, TPL_MASK_BLOCKED_OUTPUT>
-                op;
-            op.Init(context, x, topkIds, topkWeights, weight1, weight2, weightScales1, weightScales2, bias1, bias2,
-                    xActiveMask, scales, sharedWeight1, sharedWeight2, sharedWeightScales1, sharedWeightScales2,
-                    sharedBias1, sharedBias2, maskBuffer, yOut, expertTokenNumsOut, workspaceGM, tilingGM);
-            op.Process();
+            using Kernel = typename Types::template Kernel<false, true, TPL_MASK_BLOCKED_OUTPUT>;
+            RunMegaMoeKernel<Kernel>(context, x, topkIds, topkWeights, weight1, weight2, weightScales1, weightScales2,
+                                     bias1, bias2, xActiveMask, scales, sharedWeight1, sharedWeight2,
+                                     sharedWeightScales1, sharedWeightScales2, sharedBias1, sharedBias2, maskBuffer,
+                                     yOut, expertTokenNumsOut, workspaceGM, tilingGM);
             return;
         } else if constexpr (TPL_QUANT_MODE == MEGA_MOE_QUANT_MODE_PER_TOKEN) {
             GET_TILING_DATA_WITH_STRUCT(MegaMoeTilingDataQuant, tilingData, tilingGM);
-            constexpr bool isW4A8 =
-                std::is_same_v<DTYPE_WEIGHT1, AscendC::int4b_t> || std::is_same_v<DTYPE_WEIGHT1, int32_t>;
-            if constexpr (!isA2 && isW4A8) {
+            if constexpr (!Types::isA2 && Types::isW4A8) {
                 if (tilingData.common.dedupOn != 0U) {
-                    MegaMoe<DTYPE_X, DTYPE_WEIGHT1, DTYPE_Y, TPL_IS_TRANSPOSE_W1, TPL_IS_TRANSPOSE_W2, isNz, isA2,
-                            sharedGmm2Bf16, DTYPE_SHARED_WEIGHT1, sharedW2Nz, true>
-                        op;
-                    op.Init(context, x, topkIds, topkWeights, weight1, weight2, weightScales1, weightScales2, bias1,
-                            bias2, xActiveMask, scales, sharedWeight1, sharedWeight2, sharedWeightScales1,
-                            sharedWeightScales2, sharedBias1, sharedBias2, maskBuffer, yOut, expertTokenNumsOut,
-                            workspaceGM, tilingGM);
-                    op.Process();
+                    using Kernel = typename Types::template Kernel<true>;
+                    RunMegaMoeKernel<Kernel>(context, x, topkIds, topkWeights, weight1, weight2, weightScales1,
+                                             weightScales2, bias1, bias2, xActiveMask, scales, sharedWeight1,
+                                             sharedWeight2, sharedWeightScales1, sharedWeightScales2, sharedBias1,
+                                             sharedBias2, maskBuffer, yOut, expertTokenNumsOut, workspaceGM, tilingGM);
                     return;
                 }
             }
@@ -84,12 +96,10 @@ __global__ __aicore__ void mega_moe(GM_ADDR context, GM_ADDR x, GM_ADDR topkIds,
             GET_TILING_DATA_WITH_STRUCT(MegaMoeTilingDataNonQuant, tilingData, tilingGM);
         }
 
-        MegaMoe<DTYPE_X, DTYPE_WEIGHT1, DTYPE_Y, TPL_IS_TRANSPOSE_W1, TPL_IS_TRANSPOSE_W2, isNz, isA2, sharedGmm2Bf16,
-                DTYPE_SHARED_WEIGHT1, sharedW2Nz>
-            op;
-        op.Init(context, x, topkIds, topkWeights, weight1, weight2, weightScales1, weightScales2, bias1, bias2,
-                xActiveMask, scales, sharedWeight1, sharedWeight2, sharedWeightScales1, sharedWeightScales2,
-                sharedBias1, sharedBias2, maskBuffer, yOut, expertTokenNumsOut, workspaceGM, tilingGM);
-        op.Process();
+        using Kernel = typename Types::template Kernel<>;
+        RunMegaMoeKernel<Kernel>(context, x, topkIds, topkWeights, weight1, weight2, weightScales1, weightScales2,
+                                 bias1, bias2, xActiveMask, scales, sharedWeight1, sharedWeight2, sharedWeightScales1,
+                                 sharedWeightScales2, sharedBias1, sharedBias2, maskBuffer, yOut, expertTokenNumsOut,
+                                 workspaceGM, tilingGM);
     }
 }

@@ -324,6 +324,38 @@ private:
         return shmem.Rank();
     }
 
+    CATLASS_DEVICE
+    void InitRouteCache(Params const& params)
+    {
+        if ASCEND_IS_AIV {
+            // 路由表 UB 缓存：dispatch/combine/epilogue 读取 tokenPerExpert / preSumBeforeRank
+            // 一律经本核 UB 副本（MTE 搬入），避免 AIV 直接标量读 GM。
+            // winIn TPE / preSum 缓冲跨 chunk 复用，标量读 D-Cache 陈旧风险由此规避。
+            // 布局：UB 顶部往下依次 4 份 EP*expertPerRank（[TPE 发送视图][TPE 接收视图]
+            // [preSumDispatch][preSumCombine]），低地址区为既有临时缓冲区（SendTokensV3 / epilogue /
+            // CombineV2 rdma），互不踩踏；每 chunk 在 allgather + cumsum 完成后由 CacheRouteTablesToUb 刷新。
+            routeCacheNum = params.EP * params.expertPerRank;
+            expertPerRankAligned = AlignUp(params.expertPerRank, 8);
+            uint32_t routeCacheBytes = AlignUp(routeCacheNum * sizeof(int32_t), BYTE_PER_BLK);
+            uint32_t tpeCacheBytes = AlignUp(params.EP * expertPerRankAligned * sizeof(int32_t), BYTE_PER_BLK);
+            const uint32_t batchOffsetBytes = BatchedDispatch ? 2 * routeCacheBytes : 0;
+            uint32_t routeCacheUbOffset = ArchTag::UB_SIZE - 3 * routeCacheBytes - tpeCacheBytes - batchOffsetBytes;
+            ubTpeSendCache = resource.ubBuf.template GetBufferByByte<int32_t>(routeCacheUbOffset);
+            ubTpeSendCache.SetSize(routeCacheNum);
+            ubTpeRecvCache = resource.ubBuf.template GetBufferByByte<int32_t>(routeCacheUbOffset + routeCacheBytes);
+            ubPreSumDispatchCache =
+                resource.ubBuf.template GetBufferByByte<int32_t>(routeCacheUbOffset + routeCacheBytes + tpeCacheBytes);
+            ubPreSumDispatchCache.SetSize(routeCacheNum);
+            ubPreSumCombineCache = resource.ubBuf.template GetBufferByByte<int32_t>(
+                routeCacheUbOffset + 2 * routeCacheBytes + tpeCacheBytes);
+            ubPreSumCombineCache.SetSize(routeCacheNum);
+            if constexpr (BatchedDispatch) {
+                ubBatchSendBase = resource.ubBuf.template GetBufferByByte<int32_t>(ArchTag::UB_SIZE - batchOffsetBytes);
+                ubBatchRecvBase = resource.ubBuf.template GetBufferByByte<int32_t>(ArchTag::UB_SIZE - routeCacheBytes);
+            }
+        }
+    }
+
     CATLASS_DEVICE void initBuffer(Params const& params)
     {
         auto tmpContext = reinterpret_cast<__gm__ Mc2Aclnn::Mc2MoeContext*>(params.contextGM);
@@ -360,33 +392,7 @@ private:
         preSumBeforeRankForCombine.SetGlobalBuffer(
             reinterpret_cast<__gm__ int32_t*>(workspaceInfo.ptrSumBeforeRankForCombine));
 
-        if ASCEND_IS_AIV {
-            // 路由表 UB 缓存：dispatch/combine/epilogue 读取 tokenPerExpert / preSumBeforeRank
-            // 一律经本核 UB 副本（MTE 搬入），避免 AIV 直接标量读 GM。
-            // winIn TPE / preSum 缓冲跨 chunk 复用，标量读 D-Cache 陈旧风险由此规避。
-            // 布局：UB 顶部往下依次 4 份 EP*expertPerRank（[TPE 发送视图][TPE 接收视图]
-            // [preSumDispatch][preSumCombine]），低地址区为既有临时缓冲区（SendTokensV3 / epilogue /
-            // CombineV2 rdma），互不踩踏；每 chunk 在 allgather + cumsum 完成后由 CacheRouteTablesToUb 刷新。
-            routeCacheNum = params.EP * params.expertPerRank;
-            expertPerRankAligned = AlignUp(params.expertPerRank, 8);
-            uint32_t routeCacheBytes = AlignUp(routeCacheNum * sizeof(int32_t), BYTE_PER_BLK);
-            uint32_t tpeCacheBytes = AlignUp(params.EP * expertPerRankAligned * sizeof(int32_t), BYTE_PER_BLK);
-            const uint32_t batchOffsetBytes = BatchedDispatch ? 2 * routeCacheBytes : 0;
-            uint32_t routeCacheUbOffset = ArchTag::UB_SIZE - 3 * routeCacheBytes - tpeCacheBytes - batchOffsetBytes;
-            ubTpeSendCache = resource.ubBuf.template GetBufferByByte<int32_t>(routeCacheUbOffset);
-            ubTpeSendCache.SetSize(routeCacheNum);
-            ubTpeRecvCache = resource.ubBuf.template GetBufferByByte<int32_t>(routeCacheUbOffset + routeCacheBytes);
-            ubPreSumDispatchCache =
-                resource.ubBuf.template GetBufferByByte<int32_t>(routeCacheUbOffset + routeCacheBytes + tpeCacheBytes);
-            ubPreSumDispatchCache.SetSize(routeCacheNum);
-            ubPreSumCombineCache = resource.ubBuf.template GetBufferByByte<int32_t>(
-                routeCacheUbOffset + 2 * routeCacheBytes + tpeCacheBytes);
-            ubPreSumCombineCache.SetSize(routeCacheNum);
-            if constexpr (BatchedDispatch) {
-                ubBatchSendBase = resource.ubBuf.template GetBufferByByte<int32_t>(ArchTag::UB_SIZE - batchOffsetBytes);
-                ubBatchRecvBase = resource.ubBuf.template GetBufferByByte<int32_t>(ArchTag::UB_SIZE - routeCacheBytes);
-            }
-        }
+        InitRouteCache(params);
     }
 
     template <typename T>
@@ -703,6 +709,35 @@ private:
     //   - 数据已就绪：逐 token CopyGm2Ub + CopyUb2Gm（只写 hiddenSize）+ DataCopyPad scale
     //   - 使用 catlass Tile copy，与 SendTokensV3 对齐一致性，正确处理非对齐边界
     // ============================================================
+    template <class T, class CopyGmToUb>
+    CATLASS_DEVICE void ExtractBatchedRecvScales(int32_t rows2, int32_t rowStart2, uint32_t hiddenSize,
+                                                 uint32_t copyInNum, AscendC::GlobalTensor<T>& gmDstA,
+                                                 AscendC::GlobalTensor<ElementPerTokenScale>& gmScale,
+                                                 CopyGmToUb& copyGmToUb)
+    {
+        auto scaleBlock = resource.ubBuf.template GetBufferByByte<T>(0);
+        auto scaleValue = scaleBlock.template ReinterpretCast<float>();
+        auto compact = resource.ubBuf.template GetBufferByByte<float>(32 * SCALE_BATCH_ROWS);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        for (int32_t first = 0; first < rows2; first += SCALE_BATCH_ROWS) {
+            const uint32_t count = min(static_cast<uint32_t>(rows2 - first), SCALE_BATCH_ROWS);
+            const int64_t offset = static_cast<int64_t>(rowStart2 + first) * copyInNum + hiddenSize;
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+            copyGmToUb(scaleBlock, gmDstA[offset], layout::RowMajor{count, 32}, layout::RowMajor{count, 32, copyInNum});
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+            for (uint32_t row = 0; row < count; ++row) {
+                compact.SetValue(row, scaleValue.GetValue(row * (32 / sizeof(float))));
+            }
+            AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
+            AscendC::DataCopyPad(gmScale[rowStart2 + first], compact,
+                                 {1, static_cast<uint32_t>(count * sizeof(float)), 0, 0, 0});
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+        }
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+    }
+
     template <typename T>
     CATLASS_DEVICE void RecvTokensV3(int32_t rows2,     // 期望接收 token 数
                                      int32_t rowStart2, // 在本 rank peer mem 中的起始行号
@@ -724,46 +759,8 @@ private:
         //   每槽 16 个 int32（= 64B = 一个 cache line）
         __gm__ int32_t* flagAddr = reinterpret_cast<__gm__ int32_t*>(shmem() + peermemInfo.offsetFlag) +
                                    (srcEpIdx * params.expertPerRank + groupIdx) * PeermemInfo::kFlagSlotI32;
-        if constexpr (BatchedDispatch) {
-            while (true) {
-                gm_dcci(flagAddr);
-                if (gm_load(flagAddr) == FLAG_VALUE_MAGIC) {
-                    break;
-                }
-            }
-        } else {
-            // flag 由对端核（同 server gm_store / 跨 server RDMA）写入本 rank GM。
-            // 这里用 MTE2 DMA 读轮询，而不是 scalar dcci+load：后者会在 NIC 正在写的
-            // 同一条 cache line 上持续做 clean/invalidate，A2 跨 server 场景下会把发送端
-            // AI-RDMA QP 的完成拖住（HW tail 长时间不推进，flag WQE 一直不执行）。
-            // 产品 A2 dispatch 算子（moe_distribute_dispatch_a2_layered.h）的 flag 等待
-            // 同样使用 MTE2 读。
-            // 等待按经过时间设上限，不用轮询次数：A2 的 GetSystemCycle() 为 50 cycles/us，
-            // 5s 远大于正常 flag 到达延迟，且远小于 234s 设备看门狗；每 1024 轮检查一次。
-            constexpr uint32_t kFlagWaitCheckMask = 1024U - 1U;
-            constexpr uint64_t kFlagWaitTimeoutCycles = 5ULL * 1000ULL * 1000ULL * 50ULL;
-            const int64_t flagWaitStart = AscendC::GetSystemCycle();
-            uint32_t flagWaitPoll = 0;
-            AscendC::LocalTensor<int32_t> flagPollUb = resource.ubBuf.template GetBufferByByte<int32_t>(4 * UB_ALIGN);
-            AscendC::GlobalTensor<int32_t> flagSlotGm;
-            flagSlotGm.SetGlobalBuffer(flagAddr);
-            while (true) {
-                AscendC::DataCopy(flagPollUb, flagSlotGm, PeermemInfo::kFlagPayloadI32);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-                const int32_t flagVal = flagPollUb.GetValue(0);
-                if (flagVal == FLAG_VALUE_MAGIC) {
-                    break;
-                }
-                if (flagVal == FLAG_VALUE_MAGIC + 1) {
-                    return;
-                }
-                if ((++flagWaitPoll & kFlagWaitCheckMask) == 0U &&
-                    static_cast<uint64_t>(AscendC::GetSystemCycle() - flagWaitStart) >= kFlagWaitTimeoutCycles) {
-                    AscendC::Trap();
-                    return;
-                }
-            }
+        if (!Detail::WaitA2DispatchFlag<BatchedDispatch>(resource, flagAddr, PeermemInfo::kFlagPayloadI32)) {
+            return;
         }
 
         if constexpr (IS_INT8) {
@@ -790,28 +787,7 @@ private:
 
             if constexpr (BatchedDispatch) {
                 // Remote rows already have the GMM1 layout; extract only their scales.
-                auto scaleBlock = resource.ubBuf.template GetBufferByByte<T>(0);
-                auto scaleValue = scaleBlock.template ReinterpretCast<float>();
-                auto compact = resource.ubBuf.template GetBufferByByte<float>(32 * SCALE_BATCH_ROWS);
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-                for (int32_t first = 0; first < rows2; first += SCALE_BATCH_ROWS) {
-                    const uint32_t count = min(static_cast<uint32_t>(rows2 - first), SCALE_BATCH_ROWS);
-                    const int64_t offset = static_cast<int64_t>(rowStart2 + first) * copyInNum + hiddenSize;
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-                    copyGmToUb(scaleBlock, gmDstA[offset], layout::RowMajor{count, 32},
-                               layout::RowMajor{count, 32, copyInNum});
-                    AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-                    for (uint32_t row = 0; row < count; ++row) {
-                        compact.SetValue(row, scaleValue.GetValue(row * (32 / sizeof(float))));
-                    }
-                    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-                    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID0);
-                    AscendC::DataCopyPad(gmScale[rowStart2 + first], compact,
-                                         {1, static_cast<uint32_t>(count * sizeof(float)), 0, 0, 0});
-                    AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
-                }
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
+                ExtractBatchedRecvScales(rows2, rowStart2, hiddenSize, copyInNum, gmDstA, gmScale, copyGmToUb);
                 return;
             }
 
@@ -842,30 +818,89 @@ private:
     }
 
     CATLASS_DEVICE
-    void GMM1(Params const& params)
+    void RunGmm1Tile(Params const& params, BlockMmad& blockMmad, GemmCoord const& blockCoord,
+                     GemmCoord const& actualBlockShape, uint32_t groupIdx, uint32_t currentM, LayoutA& layoutA,
+                     LayoutB& layoutB1, LayoutC& layoutC, LayoutScale& layoutScale,
+                     AscendC::GlobalTensor<ElementB>& gmB1, AscendC::GlobalTensor<ElementScale>& gmS,
+                     int64_t gmGroupOffsetA, int64_t gmGroupOffsetB, int64_t gmGroupOffsetC)
     {
-        const int32_t rank = RuntimeRank(params);
-        icache_preload(ICACHE_PRELOAD_LINES);
-        BlockScheduler blockScheduler;
-        BlockMmad blockMmad(resource);
+        MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
+        MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
+        MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
+        int64_t gmOffsetA = layoutA.GetOffset(offsetA);
+        int64_t gmOffsetB = layoutB1.GetOffset(offsetB);
+        int64_t gmOffsetC = layoutC.GetOffset(offsetC);
+        if (currentM > 0) {
+            if constexpr (IS_INT8) {
+                int64_t gmOffsetS =
+                    blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
+                blockMmad(gmA[gmGroupOffsetA + gmOffsetA], layoutA, gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
+                          gmC[gmGroupOffsetC + gmOffsetC], layoutC, gmS[gmOffsetS], layoutScale, actualBlockShape);
+            } else {
+                // Floating-point matmul does not use scale; avoid evaluating a view of an empty buffer.
+                blockMmad(gmA[gmGroupOffsetA + gmOffsetA], layoutA, gmB1[gmGroupOffsetB + gmOffsetB], layoutB1,
+                          gmC[gmGroupOffsetC + gmOffsetC], layoutC, gmS, layoutScale, actualBlockShape);
+            }
+        }
+    }
 
-        int64_t gmGroupOffsetA = 0;
-        int64_t gmGroupOffsetB = 0;
-        int64_t gmGroupOffsetC = 0;
-        uint32_t startCoreIdx = 0;
-        uint32_t syncGroupIdx = 0;
-        int64_t preCurrentmSum = 0;
-        int32_t syncLoopIdx = -1;
-
-        uint16_t syncgmmIdx = 0;
-
-        AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx /
-                                        CROSS_CORE_FLAG_MAX_SET_COUNT); // Wait for AIV to finish cumsum for matmul
-        syncgmmIdx++;
+    CATLASS_DEVICE
+    void RunGmm1Expert(Params const& params, BlockScheduler& blockScheduler, BlockMmad& blockMmad, uint32_t groupIdx,
+                       uint32_t currentM, uint32_t startCoreIdx, uint32_t& coreLoops, uint32_t& syncGroupIdx,
+                       uint16_t& syncgmmIdx, int64_t gmGroupOffsetA, int64_t gmGroupOffsetB, int64_t gmGroupOffsetC)
+    {
+        AscendC::GlobalTensor<ElementB> gmB1;
+        AscendC::GlobalTensor<ElementScale> gmS;
+        int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
+        gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB*>(
+            GetTensorAddr<int8_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrB1))));
+        gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale*>(
+            GetTensorAddr<int64_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrScale1))));
         if constexpr (IS_INT8) {
             AscendC::PipeBarrier<PIPE_ALL>();
         }
 
+        if (currentM <= L1TileShape::M) {
+            gmB1.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
+        }
+        GemmCoord inGroupProblemShape{currentM, params.problemShape.n(), params.problemShape.k()};
+        // INT8 的 GMM1 行距与 prologue、分发和 peer window 使用同一 padding。
+        LayoutA layoutA = IS_INT8 ? LayoutA{inGroupProblemShape.m(),
+                                            static_cast<uint32_t>(params.problemShape.k() + RoutingPadding(params))} :
+                                    params.layoutA.GetTileLayout(inGroupProblemShape.GetCoordMK());
+        LayoutB layoutB1 = params.layoutB1;
+        LayoutScale layoutScale = params.layoutScale1;
+        LayoutC layoutC(inGroupProblemShape.m(), inGroupProblemShape.n(), params.gmmOutPreRowStride);
+        blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
+        coreLoops = blockScheduler.GetCoreLoops();
+        // Determine the starting loopIdx of the current core under the current groupIdx
+        uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
+        // Loop through the matmul of each groupIdx
+
+        for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
+            for (; syncGroupIdx <= groupIdx; syncGroupIdx++) {
+                AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT);
+                syncgmmIdx++;
+            }
+
+            // Compute block location
+            GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
+            GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
+            // Compute initial location in logical coordinates
+            RunGmm1Tile(params, blockMmad, blockCoord, actualBlockShape, groupIdx, currentM, layoutA, layoutB1, layoutC,
+                        layoutScale, gmB1, gmS, gmGroupOffsetA, gmGroupOffsetB, gmGroupOffsetC);
+        }
+    }
+
+    CATLASS_DEVICE
+    void RunGmm1Experts(Params const& params, int32_t rank, BlockScheduler& blockScheduler, BlockMmad& blockMmad,
+                        uint32_t& syncGroupIdx, uint16_t& syncgmmIdx, int32_t& syncLoopIdx)
+    {
+        int64_t gmGroupOffsetA = 0;
+        int64_t gmGroupOffsetB = 0;
+        int64_t gmGroupOffsetC = 0;
+        uint32_t startCoreIdx = 0;
+        int64_t preCurrentmSum = 0;
         bool drainBeforeEmpty = true;
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             if (UseDecodeFastPath<BatchedDispatch>(params) && groupIdx == syncGroupIdx) {
@@ -882,66 +917,8 @@ private:
             }
             uint32_t coreLoops = 0;
             if (!UseDecodeFastPath<BatchedDispatch>(params) || currentM != 0) {
-                AscendC::GlobalTensor<ElementB> gmB1;
-                AscendC::GlobalTensor<ElementScale> gmS;
-                int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-                gmB1.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB*>(
-                    GetTensorAddr<int8_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrB1))));
-                gmS.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale*>(
-                    GetTensorAddr<int64_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrScale1))));
-                if constexpr (IS_INT8) {
-                    AscendC::PipeBarrier<PIPE_ALL>();
-                }
-
-                if (currentM <= L1TileShape::M) {
-                    gmB1.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
-                }
-                GemmCoord inGroupProblemShape{currentM, params.problemShape.n(), params.problemShape.k()};
-                // INT8 的 GMM1 行距与 prologue、分发和 peer window 使用同一 padding。
-                LayoutA layoutA = IS_INT8 ?
-                                      LayoutA{inGroupProblemShape.m(),
-                                              static_cast<uint32_t>(params.problemShape.k() + RoutingPadding(params))} :
-                                      params.layoutA.GetTileLayout(inGroupProblemShape.GetCoordMK());
-                LayoutB layoutB1 = params.layoutB1;
-                LayoutScale layoutScale = params.layoutScale1;
-                LayoutC layoutC(inGroupProblemShape.m(), inGroupProblemShape.n(), params.gmmOutPreRowStride);
-                blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
-                coreLoops = blockScheduler.GetCoreLoops();
-                // Determine the starting loopIdx of the current core under the current groupIdx
-                uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
-                // Loop through the matmul of each groupIdx
-
-                for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
-                    for (; syncGroupIdx <= groupIdx; syncGroupIdx++) {
-                        AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT);
-                        syncgmmIdx++;
-                    }
-
-                    // Compute block location
-                    GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
-                    GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
-                    // Compute initial location in logical coordinates
-                    MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
-                    MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
-                    MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
-                    int64_t gmOffsetA = layoutA.GetOffset(offsetA);
-                    int64_t gmOffsetB = layoutB1.GetOffset(offsetB);
-                    int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                    if (currentM > 0) {
-                        if constexpr (IS_INT8) {
-                            int64_t gmOffsetS = blockCoord.n() * L1TileShape::N +
-                                                (params.listLen == 1 ? groupIdx * params.problemShape.n() : 0);
-                            blockMmad(gmA[gmGroupOffsetA + gmOffsetA], layoutA, gmB1[gmGroupOffsetB + gmOffsetB],
-                                      layoutB1, gmC[gmGroupOffsetC + gmOffsetC], layoutC, gmS[gmOffsetS], layoutScale,
-                                      actualBlockShape);
-                        } else {
-                            // Floating-point matmul does not use scale; avoid evaluating a view of an empty buffer.
-                            blockMmad(gmA[gmGroupOffsetA + gmOffsetA], layoutA, gmB1[gmGroupOffsetB + gmOffsetB],
-                                      layoutB1, gmC[gmGroupOffsetC + gmOffsetC], layoutC, gmS, layoutScale,
-                                      actualBlockShape);
-                        }
-                    }
-                }
+                RunGmm1Expert(params, blockScheduler, blockMmad, groupIdx, currentM, startCoreIdx, coreLoops,
+                              syncGroupIdx, syncgmmIdx, gmGroupOffsetA, gmGroupOffsetB, gmGroupOffsetC);
             } else if (drainBeforeEmpty) {
                 // Keep the first drain after a nonempty expert or an epilogue handoff.
                 AscendC::PipeBarrier<PIPE_ALL>();
@@ -967,7 +944,29 @@ private:
             gmGroupOffsetC += currentM * params.gmmOutPreRowStride;
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
         }
+    }
 
+    CATLASS_DEVICE
+    void GMM1(Params const& params)
+    {
+        const int32_t rank = RuntimeRank(params);
+        icache_preload(ICACHE_PRELOAD_LINES);
+        BlockScheduler blockScheduler;
+        BlockMmad blockMmad(resource);
+
+        uint32_t syncGroupIdx = 0;
+        int32_t syncLoopIdx = -1;
+
+        uint16_t syncgmmIdx = 0;
+
+        AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx /
+                                        CROSS_CORE_FLAG_MAX_SET_COUNT); // Wait for AIV to finish cumsum for matmul
+        syncgmmIdx++;
+        if constexpr (IS_INT8) {
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
+
+        RunGmm1Experts(params, rank, blockScheduler, blockMmad, syncGroupIdx, syncgmmIdx, syncLoopIdx);
         for (; syncGroupIdx < params.expertPerRank; syncGroupIdx++) {
             AscendC::CrossCoreWaitFlag<0x2>(syncgmmIdx / CROSS_CORE_FLAG_MAX_SET_COUNT);
             syncgmmIdx++;
@@ -981,38 +980,90 @@ private:
     }
 
     CATLASS_DEVICE
-    void GMM2(Params const& params)
+    void RunGmm2Tile(Params const& params, BlockMmad& blockMmad, GemmCoord const& blockCoord,
+                     GemmCoord const& actualBlockShape, uint32_t groupIdx, uint32_t currentM, LayoutA& layoutA,
+                     LayoutB& layoutB2, LayoutC& layoutC, LayoutScale& layoutScale,
+                     AscendC::GlobalTensor<ElementB>& gmB2, AscendC::GlobalTensor<ElementScale>& gmS2,
+                     int64_t gmGroupOffsetA, int64_t gmGroupOffsetB, int64_t gmGroupOffsetC, uint32_t n2,
+                     int32_t syncLoopIdx)
     {
-        const int32_t rank = RuntimeRank(params);
-        icache_preload(ICACHE_PRELOAD_LINES);
-        BlockScheduler blockScheduler;
-        BlockMmad blockMmad(resource);
+        MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
+        MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
+        MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
 
-        uint32_t n2 = params.problemShape.k();
-        uint32_t k2 = params.problemShape.n() / 2;
+        int64_t gmOffsetA = layoutA.GetOffset(offsetA);
+        int64_t gmOffsetB = layoutB2.GetOffset(offsetB);
+        int64_t gmOffsetC = layoutC.GetOffset(offsetC);
+        if (currentM > 0) {
+            if constexpr (IS_INT8) {
+                int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * n2 : 0);
+                blockMmad(gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA, gmB2[gmGroupOffsetB + gmOffsetB],
+                          layoutB2, gmC2[gmGroupOffsetC + gmOffsetC], layoutC, gmS2[gmOffsetS], layoutScale,
+                          actualBlockShape, syncLoopIdx, 0);
+            } else {
+                // Keep the original scale tensor without constructing a floating-point scale view.
+                blockMmad(gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA, gmB2[gmGroupOffsetB + gmOffsetB],
+                          layoutB2, gmC2[gmGroupOffsetC + gmOffsetC], layoutC, gmS2, layoutScale, actualBlockShape,
+                          syncLoopIdx, 0);
+            }
+        }
+    }
 
+    CATLASS_DEVICE
+    uint32_t RunGmm2Expert(Params const& params, BlockScheduler& blockScheduler, BlockMmad& blockMmad,
+                           uint32_t groupIdx, uint32_t currentM, uint32_t n2, uint32_t k2, uint32_t startCoreIdx,
+                           int32_t& syncLoopIdx, int64_t gmGroupOffsetA, int64_t gmGroupOffsetB, int64_t gmGroupOffsetC)
+    {
+        AscendC::GlobalTensor<ElementB> gmB2;
+        AscendC::GlobalTensor<ElementScale> gmS2;
+        int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
+        gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB*>(
+            GetTensorAddr<int8_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrB2))));
+        gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale*>(
+            GetTensorAddr<int64_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrScale2))));
+        if (currentM <= L1TileShape::M) {
+            gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
+        }
+
+        GemmCoord inGroupProblemShape{currentM, n2, k2}; // M N K
+        LayoutA layoutA = params.layoutA2.GetTileLayout(inGroupProblemShape.GetCoordMK());
+        LayoutB layoutB2 = params.layoutB2;
+        LayoutScale layoutScale = params.layoutScale2;
+        LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n());
+
+        blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
+        uint32_t coreLoops = blockScheduler.GetCoreLoops();
+
+        // Determine the starting loopIdx of the current core under the current groupIdx
+        uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
+        // Loop through the matmul of each groupIdx
+
+        for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
+            if (loopIdx + coreNum >= coreLoops) {
+                syncLoopIdx = groupIdx;
+            }
+
+            // Compute block location
+            GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
+            GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
+
+            // Compute initial location in logical coordinates
+            RunGmm2Tile(params, blockMmad, blockCoord, actualBlockShape, groupIdx, currentM, layoutA, layoutB2, layoutC,
+                        layoutScale, gmB2, gmS2, gmGroupOffsetA, gmGroupOffsetB, gmGroupOffsetC, n2, syncLoopIdx);
+        }
+        return coreLoops;
+    }
+
+    CATLASS_DEVICE
+    void RunGmm2Experts(Params const& params, int32_t rank, BlockScheduler& blockScheduler, BlockMmad& blockMmad,
+                        uint32_t n2, uint32_t k2, uint32_t lastDequantExpertNum)
+    {
         int64_t gmGroupOffsetA = 0;
         int64_t gmGroupOffsetB = 0;
         int64_t gmGroupOffsetC = 0;
-
         uint32_t startCoreIdx = 0;
-
-        if constexpr (IS_INT8) {
-            AscendC::PipeBarrier<PIPE_ALL>();
-        }
-
         int64_t preCurrentmSum = 0;
         int32_t syncLoopIdx = -1;
-        uint32_t lastDequantExpertNum = params.expertPerRank;
-
-        if (params.epilogueGranularity < params.expertPerRank) {
-            lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
-        }
-
-        if constexpr (IS_INT8) {
-            AscendC::PipeBarrier<PIPE_ALL>();
-        }
-
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
             uint32_t currentM = cumsumMM(tokenPerExpertLayout(params.EP - 1, rank, groupIdx));
             if (preCurrentmSum >= params.maxOutputSize) {
@@ -1032,61 +1083,10 @@ private:
                 }
                 continue;
             }
-            AscendC::GlobalTensor<ElementB> gmB2;
-            AscendC::GlobalTensor<ElementScale> gmS2;
-            int32_t arrayGroupIdx = params.listLen == 1 ? 0 : groupIdx;
-            gmB2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementB*>(
-                GetTensorAddr<int8_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrB2))));
-            gmS2.SetGlobalBuffer(reinterpret_cast<__gm__ ElementScale*>(
-                GetTensorAddr<int64_t>(arrayGroupIdx, reinterpret_cast<GM_ADDR>(params.ptrScale2))));
-            if (currentM <= L1TileShape::M) {
-                gmB2.SetL2CacheHint(AscendC::CacheMode::CACHE_MODE_DISABLE);
-            }
-            GemmCoord inGroupProblemShape{currentM, n2, k2}; // M N K
-
-            LayoutA layoutA = params.layoutA2.GetTileLayout(inGroupProblemShape.GetCoordMK());
-            LayoutB layoutB2 = params.layoutB2;
-            LayoutScale layoutScale = params.layoutScale2;
-            LayoutC layoutC = LayoutC(inGroupProblemShape.m(), inGroupProblemShape.n());
-
-            blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
-            uint32_t coreLoops = blockScheduler.GetCoreLoops();
-
-            // Determine the starting loopIdx of the current core under the current groupIdx
-            uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
-            // Loop through the matmul of each groupIdx
-
-            for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
-                if (loopIdx + coreNum >= coreLoops) {
-                    syncLoopIdx = groupIdx;
-                }
-
-                // Compute block location
-                GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
-                GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
-
-                // Compute initial location in logical coordinates
-                MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
-                MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
-                MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
-
-                int64_t gmOffsetA = layoutA.GetOffset(offsetA);
-                int64_t gmOffsetB = layoutB2.GetOffset(offsetB);
-                int64_t gmOffsetC = layoutC.GetOffset(offsetC);
-                if (currentM > 0) {
-                    if constexpr (IS_INT8) {
-                        int64_t gmOffsetS = blockCoord.n() * L1TileShape::N + (params.listLen == 1 ? groupIdx * n2 : 0);
-                        blockMmad(gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA,
-                                  gmB2[gmGroupOffsetB + gmOffsetB], layoutB2, gmC2[gmGroupOffsetC + gmOffsetC], layoutC,
-                                  gmS2[gmOffsetS], layoutScale, actualBlockShape, syncLoopIdx, 0);
-                    } else {
-                        // Keep the original scale tensor without constructing a floating-point scale view.
-                        blockMmad(gmPermutedToken[gmGroupOffsetA + gmOffsetA], layoutA,
-                                  gmB2[gmGroupOffsetB + gmOffsetB], layoutB2, gmC2[gmGroupOffsetC + gmOffsetC], layoutC,
-                                  gmS2, layoutScale, actualBlockShape, syncLoopIdx, 0);
-                    }
-                }
-            }
+            uint32_t coreLoops =
+                RunGmm2Expert(params, blockScheduler, blockMmad, groupIdx, currentM, n2, k2, startCoreIdx, syncLoopIdx,
+                              gmGroupOffsetA, gmGroupOffsetB, gmGroupOffsetC);
+            GemmCoord inGroupProblemShape{currentM, n2, k2};
             preCurrentmSum += currentM;
             gmGroupOffsetA += inGroupProblemShape.m() * inGroupProblemShape.k();
             if (params.listLen == 1) {
@@ -1095,6 +1095,34 @@ private:
             gmGroupOffsetC += inGroupProblemShape.m() * inGroupProblemShape.n();
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
         }
+    }
+
+    CATLASS_DEVICE
+    void GMM2(Params const& params)
+    {
+        const int32_t rank = RuntimeRank(params);
+        icache_preload(ICACHE_PRELOAD_LINES);
+        BlockScheduler blockScheduler;
+        BlockMmad blockMmad(resource);
+
+        uint32_t n2 = params.problemShape.k();
+        uint32_t k2 = params.problemShape.n() / 2;
+
+        if constexpr (IS_INT8) {
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
+
+        uint32_t lastDequantExpertNum = params.expertPerRank;
+
+        if (params.epilogueGranularity < params.expertPerRank) {
+            lastDequantExpertNum = params.expertPerRank - params.epilogueGranularity;
+        }
+
+        if constexpr (IS_INT8) {
+            AscendC::PipeBarrier<PIPE_ALL>();
+        }
+
+        RunGmm2Experts(params, rank, blockScheduler, blockMmad, n2, k2, lastDequantExpertNum);
         if constexpr (BlockMmad::DispatchPolicy::ASYNC) {
             blockMmad.SynchronizeBlock();
         }
@@ -1151,6 +1179,32 @@ private:
         return gm_load(p);
     }
 
+    CATLASS_DEVICE
+    void FillBatchRouteOffsets(Params const& params, int32_t rank)
+    {
+        if constexpr (BatchedDispatch) {
+            for (uint32_t peer = 0; peer < params.EP; ++peer) {
+                uint32_t expertBase = 0;
+                for (uint32_t group = 0; group < params.expertPerRank; ++group) {
+                    const uint32_t index = peer * params.expertPerRank + group;
+                    const uint32_t count = ubBatchSendBase.GetValue(index);
+                    const uint32_t sourcePrefix = rank == 0 ? 0 : ubBatchRecvBase.GetValue(index);
+                    ubBatchSendBase.SetValue(index, expertBase + sourcePrefix);
+                    expertBase += count;
+                }
+            }
+            // Reuse the source-prefix scratch for local receive offsets, in expert-major order.
+            uint32_t expertBase = 0;
+            for (uint32_t group = 0; group < params.expertPerRank; ++group) {
+                for (uint32_t peer = 0; peer < params.EP; ++peer) {
+                    const uint32_t index = peer * expertPerRankAligned + group;
+                    ubBatchRecvBase.SetValue(index, expertBase);
+                    expertBase += ubTpeRecvCache.GetValue(index);
+                }
+            }
+        }
+    }
+
     CATLASS_DEVICE void CacheRouteTablesToUb(Params const& params)
     {
         if (routeCacheNum == 0) {
@@ -1195,27 +1249,7 @@ private:
         // 标量读取前确保 MTE2 搬入完成（与 A3 CacheRouteTablesToUb 一致）
         AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
-        if constexpr (BatchedDispatch) {
-            for (uint32_t peer = 0; peer < params.EP; ++peer) {
-                uint32_t expertBase = 0;
-                for (uint32_t group = 0; group < params.expertPerRank; ++group) {
-                    const uint32_t index = peer * params.expertPerRank + group;
-                    const uint32_t count = ubBatchSendBase.GetValue(index);
-                    const uint32_t sourcePrefix = rank == 0 ? 0 : ubBatchRecvBase.GetValue(index);
-                    ubBatchSendBase.SetValue(index, expertBase + sourcePrefix);
-                    expertBase += count;
-                }
-            }
-            // Reuse the source-prefix scratch for local receive offsets, in expert-major order.
-            uint32_t expertBase = 0;
-            for (uint32_t group = 0; group < params.expertPerRank; ++group) {
-                for (uint32_t peer = 0; peer < params.EP; ++peer) {
-                    const uint32_t index = peer * expertPerRankAligned + group;
-                    ubBatchRecvBase.SetValue(index, expertBase);
-                    expertBase += ubTpeRecvCache.GetValue(index);
-                }
-            }
-        }
+        FillBatchRouteOffsets(params, rank);
     }
 
     CATLASS_DEVICE
@@ -1588,6 +1622,123 @@ private:
     }
 
     CATLASS_DEVICE
+    void PrepareChunkRoutes(Params const& params, int64_t chunkIdx, int64_t chunkTokens, int64_t hidden, int64_t topK,
+                            int64_t tokenBase, GM_ADDR localTokenPerExpert, int64_t localTokenPerExpertOffset,
+                            int32_t rank)
+    {
+        cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(
+            workspaceInfo.ptrcumsumMM +
+            chunkIdx * static_cast<int64_t>(paddedExpertNumAligned) * params.EP * sizeof(int32_t)));
+
+        RunChunkPrologue(params, chunkTokens, hidden, topK, tokenBase, localTokenPerExpert);
+
+        AscendC::SyncAll<true>();
+        // counts all-gather + cumsum（chunk 局部，覆盖重算）
+        exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::ALLGATHER_TOKEN_PER_EXPERT);
+        CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(params, localTokenPerExpertOffset);
+
+        if (coreIdx == 0) {
+            exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::CUMSUM_TOKEN_PER_EXPERT);
+            GetCumsumForMMAIV(tokenPerExpert, cumsumMM, params.expertPerRank, params.EP);
+        }
+
+        AscendC::SyncAll<true>();
+        // 路由表刷新到本核 UB：此后 dispatch/combine/epilogue 的标量读取不再直接读 GM
+        CacheRouteTablesToUb(params);
+
+        AccumulateExpertTokenNums(params, rank);
+        AscendC::SyncAll<true>();
+    }
+
+    CATLASS_DEVICE
+    void DispatchAndCombineExpertGroups(Params const& params, int32_t rank, uint32_t n2)
+    {
+        uint16_t syncgmm1Idx = 0;
+        AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);
+        syncgmm1Idx++;
+
+        // prevGroupSum1:   本 core 所处理的 dstEpIdx 在 peer mem 中已接收的 token 基准偏移
+        // prevGroupSum2:   rank 的 peer mem 中已接收 token 的基准偏移（所有 core 共享）
+        // 计数器按 chunk 归零：winIn A / gmC / gmPermutedToken / gmC2 均 chunk 局部（逐 chunk 复用），
+        // rowStart/rowSrc/epilogue 行区间全部基于单 chunk cumsum 的局部寻址。
+        uint32_t dequantSum1 = 0;
+        uint32_t dequantSum2 = 0;
+
+        icache_preload(ICACHE_PRELOAD_LINES);
+        exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::DISPATCH);
+        DispatchExpertGroups(params, rank, syncgmm1Idx, dequantSum1, dequantSum2);
+
+        typename BlockEpilogue2::Params epilogueParams{
+            static_cast<int32_t>(params.EP),
+            static_cast<int32_t>(params.expertPerRank),
+            static_cast<int32_t>(rank),
+            reinterpret_cast<__gm__ int32_t*>(shmem() + peermemInfo.offsetPeerTokenPerExpert),
+            params.layoutD2,
+            static_cast<int32_t>(n2),
+            static_cast<int32_t>(L1TileShape::N),
+            shmem,
+            peermemInfo.offsetD,
+            peermemInfo.offsetWinOutD,
+            static_cast<int32_t>(serverId_),
+            tokenPerExpertLayout};
+        // epilogue 内 tokenPerExpert / preSumBeforeRank 标量读取走本核 UB 缓存
+        // （每 chunk 已由 CacheRouteTablesToUb 刷新，规避跨 chunk GM 标量读 D-Cache 陈旧）
+        epilogueParams.useUbRouteCache = true;
+        epilogueParams.ubRouteStride = expertPerRankAligned;
+        epilogueParams.ubTokenPerExpert = ubTpeRecvCache;
+        epilogueParams.ubPreSumBeforeRank = ubPreSumCombineCache;
+
+        uint32_t n = params.problemShape.n();
+        BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
+        if constexpr (BatchedDispatch) {
+            RunActivation<true>(params, dequantSum1, dequantSum2);
+        } else {
+            RunActivation<false>(params, dequantSum1, dequantSum2);
+        }
+        exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::COMBINE);
+        CombineSetFlag();
+
+        CombineV2(params, blockEpilogue2);
+    }
+
+    CATLASS_DEVICE
+    void FinishChunkCombine(Params const& params, int64_t chunkTokens, int64_t topK, uint32_t n2, int64_t tokenBase,
+                            int64_t hidden)
+    {
+        AscendC::SyncAll<true>();
+        if constexpr (BatchedDispatch) {
+            exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::RESET_TOKEN_PER_EXPERT);
+            ResetTokenPerExpert(params, params.EP * paddedExpertNumAligned);
+            AscendC::SyncAll<true>();
+        }
+        // 先屏障再清零：屏障写与 dispatch flag 走同一个 QP、且排在其后，
+        // 屏障通过即表示本 chunk 对端的所有 flag（含跳过标记）都已执行完，
+        // 之后的清零不会和迟到的旧标记竞争。
+        exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::CROSS_RANK_SYNC);
+        {
+            // 3 * UB_ALIGN scratch: payload + rdma doorbell + rdma head.
+            // UB at offset 0 is unused at this point in the kernel.
+            AscendC::LocalTensor<int32_t> ctrBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
+            shmem.CrossRankSync(ctrBuffer);
+        }
+        RunChunkUnpermute(params, chunkTokens, topK, n2, tokenBase, hidden);
+
+        // chunk 边界：unpermute 读完 D/expandedRowIdx 后才允许下一 chunk 覆盖
+        AscendC::SyncAll<true>();
+        if constexpr (!BatchedDispatch) {
+            exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::RESET_TOKEN_PER_EXPERT);
+            ResetTokenPerExpert(params, params.EP * paddedExpertNumAligned);
+            AscendC::SyncAll<true>();
+            // 第二次屏障：所有 rank 都清零完成后才允许进入下一 chunk 的发送，
+            // 避免下一 chunk 的 flag 在别人清零前写入、又被那次清零抹掉。
+            {
+                AscendC::LocalTensor<int32_t> ctrBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
+                shmem.CrossRankSync(ctrBuffer);
+            }
+        }
+    }
+
+    CATLASS_DEVICE
     void DispatchAndCombine(Params const& params)
     {
         const int32_t rank = RuntimeRank(params);
@@ -1613,108 +1764,109 @@ private:
             const int64_t tokenBase = chunkIdx * permuteChunk;
             const int64_t chunkTokens = (bs - tokenBase) < permuteChunk ? (bs - tokenBase) : permuteChunk;
             // cumsumMM 每 chunk 指向独立缓冲区（不复用，规避跨 chunk cache 陈旧读）
-            cumsumMM.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(
-                workspaceInfo.ptrcumsumMM +
-                chunkIdx * static_cast<int64_t>(paddedExpertNumAligned) * params.EP * sizeof(int32_t)));
+            PrepareChunkRoutes(params, chunkIdx, chunkTokens, hidden, topK, tokenBase, localTokenPerExpert,
+                               localTokenPerExpertOffset, rank);
+            DispatchAndCombineExpertGroups(params, rank, n2);
 
-            RunChunkPrologue(params, chunkTokens, hidden, topK, tokenBase, localTokenPerExpert);
-
-            AscendC::SyncAll<true>();
-            // counts all-gather + cumsum（chunk 局部，覆盖重算）
-            exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::ALLGATHER_TOKEN_PER_EXPERT);
-            CrossRankSyncAndlocalTokenPerExpertAllGatherAndGetSumPreRankV2(params, localTokenPerExpertOffset);
-
-            if (coreIdx == 0) {
-                exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::CUMSUM_TOKEN_PER_EXPERT);
-                GetCumsumForMMAIV(tokenPerExpert, cumsumMM, params.expertPerRank, params.EP);
-            }
-
-            AscendC::SyncAll<true>();
-            // 路由表刷新到本核 UB：此后 dispatch/combine/epilogue 的标量读取不再直接读 GM
-            CacheRouteTablesToUb(params);
-
-            AccumulateExpertTokenNums(params, rank);
-            AscendC::SyncAll<true>();
-
-            uint16_t syncgmm1Idx = 0;
-            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(syncgmm1Idx / CROSS_CORE_FLAG_MAX_SET_COUNT);
-            syncgmm1Idx++;
-
-            // prevGroupSum1:   本 core 所处理的 dstEpIdx 在 peer mem 中已接收的 token 基准偏移
-            // prevGroupSum2:   rank 的 peer mem 中已接收 token 的基准偏移（所有 core 共享）
-            // 计数器按 chunk 归零：winIn A / gmC / gmPermutedToken / gmC2 均 chunk 局部（逐 chunk 复用），
-            // rowStart/rowSrc/epilogue 行区间全部基于单 chunk cumsum 的局部寻址。
-            uint32_t dequantSum1 = 0;
-            uint32_t dequantSum2 = 0;
-
-            icache_preload(ICACHE_PRELOAD_LINES);
-            exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::DISPATCH);
-            DispatchExpertGroups(params, rank, syncgmm1Idx, dequantSum1, dequantSum2);
-
-            typename BlockEpilogue2::Params epilogueParams{
-                static_cast<int32_t>(params.EP),
-                static_cast<int32_t>(params.expertPerRank),
-                static_cast<int32_t>(rank),
-                reinterpret_cast<__gm__ int32_t*>(shmem() + peermemInfo.offsetPeerTokenPerExpert),
-                params.layoutD2,
-                static_cast<int32_t>(n2),
-                static_cast<int32_t>(L1TileShape::N),
-                shmem,
-                peermemInfo.offsetD,
-                peermemInfo.offsetWinOutD,
-                static_cast<int32_t>(serverId_),
-                tokenPerExpertLayout};
-            // epilogue 内 tokenPerExpert / preSumBeforeRank 标量读取走本核 UB 缓存
-            // （每 chunk 已由 CacheRouteTablesToUb 刷新，规避跨 chunk GM 标量读 D-Cache 陈旧）
-            epilogueParams.useUbRouteCache = true;
-            epilogueParams.ubRouteStride = expertPerRankAligned;
-            epilogueParams.ubTokenPerExpert = ubTpeRecvCache;
-            epilogueParams.ubPreSumBeforeRank = ubPreSumCombineCache;
-
-            uint32_t n = params.problemShape.n();
-            BlockEpilogue2 blockEpilogue2(resource, epilogueParams);
-            if constexpr (BatchedDispatch) {
-                RunActivation<true>(params, dequantSum1, dequantSum2);
-            } else {
-                RunActivation<false>(params, dequantSum1, dequantSum2);
-            }
-            exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::COMBINE);
-            CombineSetFlag();
-
-            CombineV2(params, blockEpilogue2);
-
-            AscendC::SyncAll<true>();
-            if constexpr (BatchedDispatch) {
-                exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::RESET_TOKEN_PER_EXPERT);
-                ResetTokenPerExpert(params, params.EP * paddedExpertNumAligned);
-                AscendC::SyncAll<true>();
-            }
-            // 先屏障再清零：屏障写与 dispatch flag 走同一个 QP、且排在其后，
-            // 屏障通过即表示本 chunk 对端的所有 flag（含跳过标记）都已执行完，
-            // 之后的清零不会和迟到的旧标记竞争。
-            exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::CROSS_RANK_SYNC);
-            {
-                // 3 * UB_ALIGN scratch: payload + rdma doorbell + rdma head.
-                // UB at offset 0 is unused at this point in the kernel.
-                AscendC::LocalTensor<int32_t> ctrBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
-                shmem.CrossRankSync(ctrBuffer);
-            }
-            RunChunkUnpermute(params, chunkTokens, topK, n2, tokenBase, hidden);
-
-            // chunk 边界：unpermute 读完 D/expandedRowIdx 后才允许下一 chunk 覆盖
-            AscendC::SyncAll<true>();
-            if constexpr (!BatchedDispatch) {
-                exceptionDump_.UpdateStage(MC2MegaMoeAdump::Stage::RESET_TOKEN_PER_EXPERT);
-                ResetTokenPerExpert(params, params.EP * paddedExpertNumAligned);
-                AscendC::SyncAll<true>();
-                // 第二次屏障：所有 rank 都清零完成后才允许进入下一 chunk 的发送，
-                // 避免下一 chunk 的 flag 在别人清零前写入、又被那次清零抹掉。
-                {
-                    AscendC::LocalTensor<int32_t> ctrBuffer = resource.ubBuf.template GetBufferByByte<int32_t>(0);
-                    shmem.CrossRankSync(ctrBuffer);
-                }
-            }
+            FinishChunkCombine(params, chunkTokens, topK, n2, tokenBase, hidden);
         } // for chunkIdx
+    }
+
+    CATLASS_DEVICE
+    void WriteCombineV2Tile(BlockEpilogue2& blockEpilogue, GemmCoord const& blockCoord,
+                            GemmCoord const& actualBlockShape, uint32_t aivSubCoreIdx, uint32_t groupIdx,
+                            uint32_t preSrcExpertSum, int32_t& syncLoopIdx)
+    {
+        // 每 block 的行数，int8 与 bf16 取值不同（既有行为，按 dtype 保留）
+        int32_t m0 = IS_INT8 ? 16 : 32;
+        int32_t m_rows = (actualBlockShape.m() + m0 - 1) / m0;
+        int32_t aiv_m_rows = m_rows / SUBBLOCK_NUM_PER_AIC;
+        if (aivSubCoreIdx == 1 && aiv_m_rows * SUBBLOCK_NUM_PER_AIC < m_rows) {
+            aiv_m_rows += 1;
+        }
+        uint32_t m_offset = blockCoord.m() * L1TileShape::M; // blockOffset
+        if (aivSubCoreIdx == 1) {
+            m_offset += (m_rows / SUBBLOCK_NUM_PER_AIC) * m0;
+        }
+
+        for (; syncLoopIdx <= groupIdx; syncLoopIdx++) {
+            int32_t flag_id = syncLoopIdx / CROSS_CORE_FLAG_MAX_SET_COUNT;
+            AscendC::CrossCoreWaitFlag<0x2>(flag_id);
+        }
+
+        for (int32_t cur_row = 0; cur_row < aiv_m_rows; cur_row++) {
+            GemmCoord realTileCoord{m_offset, blockCoord.n() * L1TileShape::N, 1};
+            uint32_t actualm = m0;
+            if (aivSubCoreIdx == 1 && cur_row == aiv_m_rows - 1) {
+                actualm = actualBlockShape.m() - (m_rows / SUBBLOCK_NUM_PER_AIC) * m0 - cur_row * m0;
+            }
+            GemmCoord realTileShape{actualm, actualBlockShape.n(), 1};
+            if constexpr (IS_INT8) {
+                blockEpilogue(gmC2, gmPerTokenScale2, realTileCoord, realTileShape, groupIdx, preSrcExpertSum,
+                              preSumBeforeRankForCombine);
+            } else {
+                blockEpilogue(gmC2, realTileCoord, realTileShape, groupIdx, preSrcExpertSum,
+                              preSumBeforeRankForCombine);
+            }
+            m_offset += m0;
+        }
+    }
+
+    CATLASS_DEVICE
+    void SendCombineV2Remote(Params const& params, uint32_t groupIdx, uint32_t currentExpertM, uint32_t preSrcExpertSum,
+                             uint32_t n2, AscendC::GlobalTensor<ElementD2>& gmLocalWindowsOut,
+                             AscendC::LocalTensor<uint64_t>& rdmaUbLocal,
+                             AscendC::LocalTensor<uint32_t>& rdmaUbLocalHead)
+    {
+        int32_t preSumRankInExpert = 0;
+        for (int32_t dstEpIdx = 0; dstEpIdx < params.EP; ++dstEpIdx) {
+            // chunk 模式：路由表读走本核 UB 缓存（CacheRouteTablesToUb 每 chunk 刷新）
+            int32_t lenRankInExpert = ubTpeRecvCache.GetValue(dstEpIdx * expertPerRankAligned + groupIdx);
+            int32_t stRankInExpert = preSumRankInExpert;
+            int32_t edRankInExpert = stRankInExpert + lenRankInExpert;
+            preSumRankInExpert += lenRankInExpert;
+            if (stRankInExpert >= static_cast<int32_t>(currentExpertM)) {
+                break;
+            }
+            if ((dstEpIdx % coreNum) != static_cast<int32_t>(coreIdx)) {
+                continue;
+            }
+            if ((dstEpIdx / SERVER_RANK_SIZE_A2) == static_cast<int32_t>(serverId_)) {
+                continue;
+            }
+
+            int32_t edData = min(edRankInExpert, static_cast<int32_t>(currentExpertM));
+            uint32_t lenData = edData - stRankInExpert;
+            if (lenData == 0) {
+                continue;
+            }
+
+            AscendC::GlobalTensor<ElementD2> gmRemotePeer;
+            __gm__ void* dstPeermemPtr = shmem(peermemInfo.offsetD, dstEpIdx);
+            gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD2*>(dstPeermemPtr));
+
+            int32_t dstExpertOffset = ubPreSumCombineCache.GetValue(dstEpIdx * params.expertPerRank + groupIdx);
+            MatrixCoord srcOffset{preSrcExpertSum + static_cast<uint32_t>(stRankInExpert), 0};
+            MatrixCoord dstOffset{static_cast<uint32_t>(dstExpertOffset), 0};
+            int64_t gmSrcOffset = params.layoutD2.GetOffset(srcOffset);
+            int64_t gmDstOffset = params.layoutD2.GetOffset(dstOffset);
+            uint64_t messageLen = static_cast<uint64_t>(lenData) * static_cast<uint64_t>(n2) * sizeof(ElementD2);
+            AIVRDMAPostSend((GM_ADDR)gmLocalWindowsOut[gmSrcOffset].GetPhyAddr(),
+                            (GM_ADDR)gmRemotePeer[gmDstOffset].GetPhyAddr(), static_cast<uint64_t>(dstEpIdx),
+                            messageLen, qp_info_, rdmaUbLocal, rdmaUbLocalHead);
+        }
+    }
+
+    CATLASS_DEVICE
+    uint32_t GetCombineExpertRows(Params const& params, int32_t rank, uint32_t groupIdx, uint32_t preSrcExpertSum)
+    {
+        uint32_t currentExpertM = cumsumMM(tokenPerExpertLayout(params.EP - 1, rank, groupIdx));
+        if (preSrcExpertSum >= params.maxOutputSize) {
+            currentExpertM = 0;
+        } else if (preSrcExpertSum + currentExpertM > params.maxOutputSize) {
+            currentExpertM = params.maxOutputSize - preSrcExpertSum;
+        }
+        return currentExpertM;
     }
 
     CATLASS_DEVICE
@@ -1739,12 +1891,7 @@ private:
             reinterpret_cast<__gm__ ElementD2*>(shmem.windowsOutAddr() + peermemInfo.offsetWinOutD));
         icache_preload(ICACHE_PRELOAD_LINES);
         for (uint32_t groupIdx = 0; groupIdx < params.expertPerRank; ++groupIdx) {
-            uint32_t currentExpertM = cumsumMM(tokenPerExpertLayout(params.EP - 1, rank, groupIdx));
-            if (preSrcExpertSum >= params.maxOutputSize) {
-                currentExpertM = 0;
-            } else if (preSrcExpertSum + currentExpertM > params.maxOutputSize) {
-                currentExpertM = params.maxOutputSize - preSrcExpertSum;
-            }
+            uint32_t currentExpertM = GetCombineExpertRows(params, rank, groupIdx, preSrcExpertSum);
             GemmCoord inGroupProblemShape{currentExpertM, n2, k2}; // M N K
             blockScheduler.Update(inGroupProblemShape, MakeCoord(L1TileShape::M, L1TileShape::N));
             uint32_t coreLoops = blockScheduler.GetCoreLoops();
@@ -1754,39 +1901,8 @@ private:
             for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += aicCoreNum) {
                 GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
                 GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
-                // 每 block 的行数，int8 与 bf16 取值不同（既有行为，按 dtype 保留）
-                int32_t m0 = IS_INT8 ? 16 : 32;
-                int32_t m_rows = (actualBlockShape.m() + m0 - 1) / m0;
-                int32_t aiv_m_rows = m_rows / SUBBLOCK_NUM_PER_AIC;
-                if (aivSubCoreIdx == 1 && aiv_m_rows * SUBBLOCK_NUM_PER_AIC < m_rows) {
-                    aiv_m_rows += 1;
-                }
-                uint32_t m_offset = blockCoord.m() * L1TileShape::M; // blockOffset
-                if (aivSubCoreIdx == 1) {
-                    m_offset += (m_rows / SUBBLOCK_NUM_PER_AIC) * m0;
-                }
-
-                for (; syncLoopIdx <= groupIdx; syncLoopIdx++) {
-                    int32_t flag_id = syncLoopIdx / CROSS_CORE_FLAG_MAX_SET_COUNT;
-                    AscendC::CrossCoreWaitFlag<0x2>(flag_id);
-                }
-
-                for (int32_t cur_row = 0; cur_row < aiv_m_rows; cur_row++) {
-                    GemmCoord realTileCoord{m_offset, blockCoord.n() * L1TileShape::N, 1};
-                    uint32_t actualm = m0;
-                    if (aivSubCoreIdx == 1 && cur_row == aiv_m_rows - 1) {
-                        actualm = actualBlockShape.m() - (m_rows / SUBBLOCK_NUM_PER_AIC) * m0 - cur_row * m0;
-                    }
-                    GemmCoord realTileShape{actualm, actualBlockShape.n(), 1};
-                    if constexpr (IS_INT8) {
-                        blockEpilogue(gmC2, gmPerTokenScale2, realTileCoord, realTileShape, groupIdx, preSrcExpertSum,
-                                      preSumBeforeRankForCombine);
-                    } else {
-                        blockEpilogue(gmC2, realTileCoord, realTileShape, groupIdx, preSrcExpertSum,
-                                      preSumBeforeRankForCombine);
-                    }
-                    m_offset += m0;
-                }
+                WriteCombineV2Tile(blockEpilogue, blockCoord, actualBlockShape, aivSubCoreIdx, groupIdx,
+                                   preSrcExpertSum, syncLoopIdx);
             }
 
             if (Detail::CanSkipCombineExpertSync<BatchedDispatch>(params.EP, coreNum, DISPATCH_PEER_WORKERS)) {
@@ -1797,43 +1913,8 @@ private:
                 continue;
             }
             AscendC::SyncAll<true>();
-            int32_t preSumRankInExpert = 0;
-            for (int32_t dstEpIdx = 0; dstEpIdx < params.EP; ++dstEpIdx) {
-                // chunk 模式：路由表读走本核 UB 缓存（CacheRouteTablesToUb 每 chunk 刷新）
-                int32_t lenRankInExpert = ubTpeRecvCache.GetValue(dstEpIdx * expertPerRankAligned + groupIdx);
-                int32_t stRankInExpert = preSumRankInExpert;
-                int32_t edRankInExpert = stRankInExpert + lenRankInExpert;
-                preSumRankInExpert += lenRankInExpert;
-                if (stRankInExpert >= static_cast<int32_t>(currentExpertM)) {
-                    break;
-                }
-                if ((dstEpIdx % coreNum) != static_cast<int32_t>(coreIdx)) {
-                    continue;
-                }
-                if ((dstEpIdx / SERVER_RANK_SIZE_A2) == static_cast<int32_t>(serverId_)) {
-                    continue;
-                }
-
-                int32_t edData = min(edRankInExpert, static_cast<int32_t>(currentExpertM));
-                uint32_t lenData = edData - stRankInExpert;
-                if (lenData == 0) {
-                    continue;
-                }
-
-                AscendC::GlobalTensor<ElementD2> gmRemotePeer;
-                __gm__ void* dstPeermemPtr = shmem(peermemInfo.offsetD, dstEpIdx);
-                gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD2*>(dstPeermemPtr));
-
-                int32_t dstExpertOffset = ubPreSumCombineCache.GetValue(dstEpIdx * params.expertPerRank + groupIdx);
-                MatrixCoord srcOffset{preSrcExpertSum + static_cast<uint32_t>(stRankInExpert), 0};
-                MatrixCoord dstOffset{static_cast<uint32_t>(dstExpertOffset), 0};
-                int64_t gmSrcOffset = params.layoutD2.GetOffset(srcOffset);
-                int64_t gmDstOffset = params.layoutD2.GetOffset(dstOffset);
-                uint64_t messageLen = static_cast<uint64_t>(lenData) * static_cast<uint64_t>(n2) * sizeof(ElementD2);
-                AIVRDMAPostSend((GM_ADDR)gmLocalWindowsOut[gmSrcOffset].GetPhyAddr(),
-                                (GM_ADDR)gmRemotePeer[gmDstOffset].GetPhyAddr(), static_cast<uint64_t>(dstEpIdx),
-                                messageLen, qp_info_, rdmaUbLocal, rdmaUbLocalHead);
-            }
+            SendCombineV2Remote(params, groupIdx, currentExpertM, preSrcExpertSum, n2, gmLocalWindowsOut, rdmaUbLocal,
+                                rdmaUbLocalHead);
             preSrcExpertSum += currentExpertM;
             startCoreIdx = (startCoreIdx + coreLoops) % aicCoreNum;
         }

@@ -194,6 +194,39 @@ public:
     }
 
     CATLASS_DEVICE
+    void EnqueueL1Tile(AscendC::GlobalTensor<ElementC> const& gmBlockC, LayoutC const& layoutC,
+                       GemmCoord const& actualShape, uint32_t mRound, uint32_t nRound, uint32_t kActual,
+                       uint32_t kLoopIdx, uint32_t kTileCount, int32_t syncLoopIdx, int32_t flag,
+                       AscendC::GlobalTensor<uint64_t> const& gmBlockS, layout::VectorLayout const& layoutScale)
+    {
+        uint32_t preloadL1TileMmadParamsId = (l1TileMmadParamsId + preloadCount < PRELOAD_STAGES) ?
+                                                 (l1TileMmadParamsId + preloadCount) :
+                                                 (l1TileMmadParamsId + preloadCount - PRELOAD_STAGES);
+        auto& l1TileMmadParams = l1TileMmadParamsList[preloadL1TileMmadParamsId];
+        l1TileMmadParams.l1ListId = l1ListId;
+        l1TileMmadParams.mRound = mRound;
+        l1TileMmadParams.nRound = nRound;
+        l1TileMmadParams.kActual = kActual;
+        l1TileMmadParams.isKLoopFirst = (kLoopIdx == 0);
+        l1TileMmadParams.isKLoopLast = (kLoopIdx == kTileCount - 1);
+        l1TileMmadParams.flag = flag;
+        if (kLoopIdx == kTileCount - 1) {
+            l1TileMmadParams.gmBlockC = gmBlockC;
+            l1TileMmadParams.gmBlockS = gmBlockS;
+            l1TileMmadParams.layoutCInGm = layoutC.GetTileLayout(actualShape.GetCoordMN());
+            l1TileMmadParams.layoutScale = layoutScale;
+            l1TileMmadParams.syncLoopIdx = syncLoopIdx;
+        }
+
+        if (preloadCount < PRELOAD_STAGES) {
+            ++preloadCount;
+        } else {
+            l1TileMmadParamsId = (l1TileMmadParamsId + 1 < PRELOAD_STAGES) ? (l1TileMmadParamsId + 1) : 0;
+        }
+        l1ListId = (l1ListId + 1 < L1_STAGES) ? (l1ListId + 1) : 0;
+    }
+
+    CATLASS_DEVICE
     void operator()(AscendC::GlobalTensor<ElementA> const& gmBlockA, LayoutA const& layoutA,
                     AscendC::GlobalTensor<ElementB> const& gmBlockB, LayoutB const& layoutB,
                     AscendC::GlobalTensor<ElementC> const& gmBlockC, LayoutC const& layoutC,
@@ -239,31 +272,8 @@ public:
             }
 
             // Store the current load status
-            uint32_t preloadL1TileMmadParamsId = (l1TileMmadParamsId + preloadCount < PRELOAD_STAGES) ?
-                                                     (l1TileMmadParamsId + preloadCount) :
-                                                     (l1TileMmadParamsId + preloadCount - PRELOAD_STAGES);
-            auto& l1TileMmadParams = l1TileMmadParamsList[preloadL1TileMmadParamsId];
-            l1TileMmadParams.l1ListId = l1ListId;
-            l1TileMmadParams.mRound = mRound;
-            l1TileMmadParams.nRound = nRound;
-            l1TileMmadParams.kActual = kActual;
-            l1TileMmadParams.isKLoopFirst = (kLoopIdx == 0);
-            l1TileMmadParams.isKLoopLast = (kLoopIdx == kTileCount - 1);
-            l1TileMmadParams.flag = flag;
-            if (kLoopIdx == kTileCount - 1) {
-                l1TileMmadParams.gmBlockC = gmBlockC;
-                l1TileMmadParams.gmBlockS = gmBlockS;
-                l1TileMmadParams.layoutCInGm = layoutC.GetTileLayout(actualShape.GetCoordMN());
-                l1TileMmadParams.layoutScale = layoutScale;
-                l1TileMmadParams.syncLoopIdx = syncLoopIdx;
-            }
-
-            if (preloadCount < PRELOAD_STAGES) {
-                ++preloadCount;
-            } else {
-                l1TileMmadParamsId = (l1TileMmadParamsId + 1 < PRELOAD_STAGES) ? (l1TileMmadParamsId + 1) : 0;
-            }
-            l1ListId = (l1ListId + 1 < L1_STAGES) ? (l1ListId + 1) : 0;
+            EnqueueL1Tile(gmBlockC, layoutC, actualShape, mRound, nRound, kActual, kLoopIdx, kTileCount, syncLoopIdx,
+                          flag, gmBlockS, layoutScale);
         }
     }
 
@@ -385,91 +395,58 @@ private:
     }
 
     CATLASS_DEVICE
-    void L1TileMmad(L1TileMmadParams const& params)
+    void RunMmadNParts(L1TileMmadParams const& params, uint32_t mPartIdx, uint32_t mPartLoop, uint32_t mPartActual,
+                       uint32_t kPartIdx, uint32_t kPartLoop, uint32_t kPartActual, uint32_t nPartLoop,
+                       AscendC::LocalTensor<ElementB>& l1BTensor, AscendC::LocalTensor<ElementA>& l0ATile,
+                       AscendC::LocalTensor<ElementAccumulator>& l0CTensor, LayoutCInL0& layoutCInL0)
     {
-        uint32_t mPartLoop = CeilDiv<L0TileShape::M>(params.mRound);
-        uint32_t nPartLoop = CeilDiv<L0TileShape::N>(params.nRound);
-        uint32_t kPartLoop = CeilDiv<L0TileShape::K>(params.kActual);
-        auto& l1ATensor = l1ATensorList[params.l1ListId];
-        auto& l1BTensor = l1BTensorList[params.l1ListId];
+        for (uint32_t nPartIdx = 0; nPartIdx < nPartLoop; ++nPartIdx) {
+            uint32_t nPartActual =
+                (nPartIdx < nPartLoop - 1) ? L0TileShape::N : (params.nRound - nPartIdx * L0TileShape::N);
 
-        auto& l0CTensor = l0CTensorList[l0CListId];
-        LayoutCInL0 layoutCInL0 = LayoutCInL0::MakeLayoutInL0C(MakeCoord(params.mRound, params.nRound));
+            auto& l0BTile = l0BTensorList[l0BListId];
+            auto layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kPartActual, nPartActual);
+            auto l1BOffset = MakeCoord(kPartIdx, nPartIdx) * L0TileShape::ToCoordKN();
+            auto l1BTile = l1BTensor[L1B_LAYOUT.GetOffset(l1BOffset)];
 
-        if constexpr (!ENABLE_UNIT_FLAG) {
-            if (params.isKLoopFirst) {
-                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(l0CEventList[l0CListId]);
+            AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
+            if ((kPartIdx == 0) && (nPartIdx == 0)) {
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[params.l1ListId]);
             }
-        }
-
-        for (uint32_t mPartIdx = 0; mPartIdx < mPartLoop; ++mPartIdx) {
-            uint32_t mPartActual =
-                (mPartIdx < mPartLoop - 1) ? L0TileShape::M : (params.mRound - mPartIdx * L0TileShape::M);
-
-            for (uint32_t kPartIdx = 0; kPartIdx < kPartLoop; ++kPartIdx) {
-                uint32_t kPartActual =
-                    (kPartIdx < kPartLoop - 1) ? L0TileShape::K : (params.kActual - kPartIdx * L0TileShape::K);
-
-                auto& l0ATile = l0ATensorList[l0AListId];
-                auto layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mPartActual, kPartActual);
-                auto l1AOffset = MakeCoord(mPartIdx, kPartIdx) * L0TileShape::ToCoordMK();
-                auto l1ATile = l1ATensor[L1A_LAYOUT.GetOffset(l1AOffset)];
-
-                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
-                if ((mPartIdx == 0) && (kPartIdx == 0)) {
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[params.l1ListId]);
-                }
-                copyL1ToL0A(l0ATile, l1ATile, layoutAInL0, L1A_LAYOUT);
-                if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
-                    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[params.l1ListId]);
-                }
-
-                for (uint32_t nPartIdx = 0; nPartIdx < nPartLoop; ++nPartIdx) {
-                    uint32_t nPartActual =
-                        (nPartIdx < nPartLoop - 1) ? L0TileShape::N : (params.nRound - nPartIdx * L0TileShape::N);
-
-                    auto& l0BTile = l0BTensorList[l0BListId];
-                    auto layoutBInL0 = LayoutBInL0::template MakeLayout<ElementB>(kPartActual, nPartActual);
-                    auto l1BOffset = MakeCoord(kPartIdx, nPartIdx) * L0TileShape::ToCoordKN();
-                    auto l1BTile = l1BTensor[L1B_LAYOUT.GetOffset(l1BOffset)];
-
-                    AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
-                    if ((kPartIdx == 0) && (nPartIdx == 0)) {
-                        AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1BEventList[params.l1ListId]);
-                    }
-                    copyL1ToL0B(l0BTile, l1BTile, layoutBInL0, L1B_LAYOUT);
-                    if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
-                        AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[params.l1ListId]);
-                    }
-
-                    AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-
-                    auto l0COffset = MakeCoord(mPartIdx, nPartIdx) * L0TileShape::ToCoordMN();
-                    auto l0CTile = l0CTensor[layoutCInL0.GetOffset(l0COffset)];
-
-                    AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
-                    // If the current tile is the first tile on the k axis, the accumulator needs to be reset to 0
-                    bool initC = (params.isKLoopFirst && (kPartIdx == 0));
-                    // If the unit flag is enabled, the unit flag is set according to the calculation progress
-                    uint8_t unitFlag = 0b00;
-                    if constexpr (ENABLE_UNIT_FLAG) {
-                        if (params.isKLoopLast && (mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1) &&
-                            (nPartIdx == nPartLoop - 1)) {
-                            unitFlag = 0b11;
-                        } else {
-                            unitFlag = 0b10;
-                        }
-                    }
-                    tileMmad(l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
-
-                    AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
-                    l0BListId = (l0BListId + 1 < L0B_STAGES) ? (l0BListId + 1) : 0;
-                }
-                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
-                l0AListId = (l0AListId + 1 < L0A_STAGES) ? (l0AListId + 1) : 0;
+            copyL1ToL0B(l0BTile, l1BTile, layoutBInL0, L1B_LAYOUT);
+            if ((kPartIdx == kPartLoop - 1) && (nPartIdx == nPartLoop - 1)) {
+                AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1BEventList[params.l1ListId]);
             }
-        }
 
+            AscendC::SetFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
+
+            auto l0COffset = MakeCoord(mPartIdx, nPartIdx) * L0TileShape::ToCoordMN();
+            auto l0CTile = l0CTensor[layoutCInL0.GetOffset(l0COffset)];
+
+            AscendC::WaitFlag<AscendC::HardEvent::MTE1_M>(EVENT_ID0);
+            // If the current tile is the first tile on the k axis, the accumulator needs to be reset to 0
+            bool initC = (params.isKLoopFirst && (kPartIdx == 0));
+            // If the unit flag is enabled, the unit flag is set according to the calculation progress
+            uint8_t unitFlag = 0b00;
+            if constexpr (ENABLE_UNIT_FLAG) {
+                if (params.isKLoopLast && (mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1) &&
+                    (nPartIdx == nPartLoop - 1)) {
+                    unitFlag = 0b11;
+                } else {
+                    unitFlag = 0b10;
+                }
+            }
+            tileMmad(l0CTile, l0ATile, l0BTile, mPartActual, nPartActual, kPartActual, initC, unitFlag);
+
+            AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0BEventList[l0BListId]);
+            l0BListId = (l0BListId + 1 < L0B_STAGES) ? (l0BListId + 1) : 0;
+        }
+    }
+
+    CATLASS_DEVICE
+    void FinishL1Tile(L1TileMmadParams const& params, AscendC::LocalTensor<ElementAccumulator>& l0CTensor,
+                      LayoutCInL0& layoutCInL0)
+    {
         if (params.isKLoopLast) {
             auto layoutCInGm = params.layoutCInGm;
             if constexpr (USE_FIXPIPE_SCALE) {
@@ -512,6 +489,56 @@ private:
             Finalize(params.syncLoopIdx, params.flag);
 #endif
         }
+    }
+
+    CATLASS_DEVICE
+    void L1TileMmad(L1TileMmadParams const& params)
+    {
+        uint32_t mPartLoop = CeilDiv<L0TileShape::M>(params.mRound);
+        uint32_t nPartLoop = CeilDiv<L0TileShape::N>(params.nRound);
+        uint32_t kPartLoop = CeilDiv<L0TileShape::K>(params.kActual);
+        auto& l1ATensor = l1ATensorList[params.l1ListId];
+        auto& l1BTensor = l1BTensorList[params.l1ListId];
+
+        auto& l0CTensor = l0CTensorList[l0CListId];
+        LayoutCInL0 layoutCInL0 = LayoutCInL0::MakeLayoutInL0C(MakeCoord(params.mRound, params.nRound));
+
+        if constexpr (!ENABLE_UNIT_FLAG) {
+            if (params.isKLoopFirst) {
+                AscendC::WaitFlag<AscendC::HardEvent::FIX_M>(l0CEventList[l0CListId]);
+            }
+        }
+
+        for (uint32_t mPartIdx = 0; mPartIdx < mPartLoop; ++mPartIdx) {
+            uint32_t mPartActual =
+                (mPartIdx < mPartLoop - 1) ? L0TileShape::M : (params.mRound - mPartIdx * L0TileShape::M);
+
+            for (uint32_t kPartIdx = 0; kPartIdx < kPartLoop; ++kPartIdx) {
+                uint32_t kPartActual =
+                    (kPartIdx < kPartLoop - 1) ? L0TileShape::K : (params.kActual - kPartIdx * L0TileShape::K);
+
+                auto& l0ATile = l0ATensorList[l0AListId];
+                auto layoutAInL0 = LayoutAInL0::template MakeLayout<ElementA>(mPartActual, kPartActual);
+                auto l1AOffset = MakeCoord(mPartIdx, kPartIdx) * L0TileShape::ToCoordMK();
+                auto l1ATile = l1ATensor[L1A_LAYOUT.GetOffset(l1AOffset)];
+
+                AscendC::WaitFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
+                if ((mPartIdx == 0) && (kPartIdx == 0)) {
+                    AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE1>(l1AEventList[params.l1ListId]);
+                }
+                copyL1ToL0A(l0ATile, l1ATile, layoutAInL0, L1A_LAYOUT);
+                if ((mPartIdx == mPartLoop - 1) && (kPartIdx == kPartLoop - 1)) {
+                    AscendC::SetFlag<AscendC::HardEvent::MTE1_MTE2>(l1AEventList[params.l1ListId]);
+                }
+
+                RunMmadNParts(params, mPartIdx, mPartLoop, mPartActual, kPartIdx, kPartLoop, kPartActual, nPartLoop,
+                              l1BTensor, l0ATile, l0CTensor, layoutCInL0);
+                AscendC::SetFlag<AscendC::HardEvent::M_MTE1>(l0AEventList[l0AListId]);
+                l0AListId = (l0AListId + 1 < L0A_STAGES) ? (l0AListId + 1) : 0;
+            }
+        }
+
+        FinishL1Tile(params, l0CTensor, layoutCInL0);
     }
 
     AscendC::LocalTensor<ElementA> l1ATensorList[L1_STAGES];

@@ -215,11 +215,9 @@ public:
         for (int64_t col = 0; col < n2; col += chunkElems) {
             const int32_t buf = static_cast<int32_t>(computeSeq_ & 1U);
             ++computeSeq_;
-            const int32_t evVM3 = eventVMTE3List[buf];
             const int32_t len =
                 static_cast<int32_t>(n2 - col) < chunkElems ? static_cast<int32_t>(n2 - col) : chunkElems;
             const int64_t loOff = merged ? n2 : chunkElems; // lo 半区基址（同 IssueRead）
-            layout::RowMajor chunkLayout{1, static_cast<uint32_t>(len)};
             // bias 按列块奇偶索引（与 IssueGroupBiasLoad 同键）
             const int32_t biasBuf = static_cast<int32_t>((col / chunkElems) & 1);
 
@@ -243,21 +241,7 @@ public:
                 AscendC::PipeBarrier<PIPE_V>();
             }
 
-            // 出值：last 行 bf16（CAST_RINT）直写源卡 D 区，其余行 FP32 直写回锚点
-            if (r.isLast) {
-                AscendC::Cast(ubOutDList[buf], ubFp32List[buf], AscendC::RoundMode::CAST_RINT, len);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(evVM3);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(evVM3);
-                __gm__ void* dstPeermemPtr = params_.shmem(params_.offsetD, r.dstRank);
-                AscendC::GlobalTensor<ElementD> gmRemote;
-                gmRemote.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr));
-                copyUbToGmD_(gmRemote[dstOff + col], ubOutDList[buf], chunkLayout, chunkLayout);
-            } else {
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(evVM3);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(evVM3);
-                copyUbToGmAnchor_(gmAnchor[r.anchorF32Off + col], ubFp32List[buf], chunkLayout, chunkLayout);
-            }
+            WriteOutputChunk(gmAnchor, r, dstOff, col, buf, len);
             // 写侧回执：下一同集 IssueRead 块头或组尾 Drain 延迟消费，Set/Wait 一对一配对
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(eventMTE3M2List[buf]);
             pendingList[buf] = true;
@@ -283,6 +267,29 @@ public:
     }
 
 private:
+    // 末行以 BF16（CAST_RINT）写源卡 D 区，其余行以 FP32 写回锚点。
+    CATLASS_DEVICE
+    void WriteOutputChunk(AscendC::GlobalTensor<float>& gmAnchor, RowCtx const& r, int64_t dstOff, int64_t col,
+                          int32_t buf, int32_t len)
+    {
+        const int32_t evVM3 = eventVMTE3List[buf];
+        layout::RowMajor chunkLayout{1, static_cast<uint32_t>(len)};
+        if (r.isLast) {
+            AscendC::Cast(ubOutDList[buf], ubFp32List[buf], AscendC::RoundMode::CAST_RINT, len);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(evVM3);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(evVM3);
+            __gm__ void* dstPeermemPtr = params_.shmem(params_.offsetD, r.dstRank);
+            AscendC::GlobalTensor<ElementD> gmRemote;
+            gmRemote.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr));
+            copyUbToGmD_(gmRemote[dstOff + col], ubOutDList[buf], chunkLayout, chunkLayout);
+        } else {
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(evVM3);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(evVM3);
+            copyUbToGmAnchor_(gmAnchor[r.anchorF32Off + col], ubFp32List[buf], chunkLayout, chunkLayout);
+        }
+    }
+
     Params params_;
     // ubCur 2·chunkElems（[0,chunkElems) 为 hi 半区，其后 lo 半区）；ubAnchor 为 FP32 单行
     AscendC::LocalTensor<ElementC> ubCurList[UB_STAGES];

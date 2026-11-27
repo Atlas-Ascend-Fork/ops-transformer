@@ -250,6 +250,54 @@ CATLASS_DEVICE void CrossRankAllGatherSendShared(
     }
 }
 
+template <bool BatchedDispatch, class ArchTag>
+CATLASS_DEVICE bool WaitA2DispatchFlag(Arch::Resource<ArchTag>& resource, __gm__ int32_t* flagAddr,
+                                       uint32_t flagPayloadI32)
+{
+    if constexpr (BatchedDispatch) {
+        while (true) {
+            gm_dcci(flagAddr);
+            if (gm_load(flagAddr) == FLAG_VALUE_MAGIC) {
+                break;
+            }
+        }
+    } else {
+        // flag 由对端核（同 server gm_store / 跨 server RDMA）写入本 rank GM。
+        // 这里用 MTE2 DMA 读轮询，而不是 scalar dcci+load：后者会在 NIC 正在写的
+        // 同一条 cache line 上持续做 clean/invalidate，A2 跨 server 场景下会把发送端
+        // AI-RDMA QP 的完成拖住（HW tail 长时间不推进，flag WQE 一直不执行）。
+        // 产品 A2 dispatch 算子（moe_distribute_dispatch_a2_layered.h）的 flag 等待
+        // 同样使用 MTE2 读。
+        // 等待按经过时间设上限，不用轮询次数：A2 的 GetSystemCycle() 为 50 cycles/us，
+        // 5s 远大于正常 flag 到达延迟，且远小于 234s 设备看门狗；每 1024 轮检查一次。
+        constexpr uint32_t kFlagWaitCheckMask = 1024U - 1U;
+        constexpr uint64_t kFlagWaitTimeoutCycles = 5ULL * 1000ULL * 1000ULL * 50ULL;
+        const int64_t flagWaitStart = AscendC::GetSystemCycle();
+        uint32_t flagWaitPoll = 0;
+        AscendC::LocalTensor<int32_t> flagPollUb = resource.ubBuf.template GetBufferByByte<int32_t>(4 * UB_ALIGN);
+        AscendC::GlobalTensor<int32_t> flagSlotGm;
+        flagSlotGm.SetGlobalBuffer(flagAddr);
+        while (true) {
+            AscendC::DataCopy(flagPollUb, flagSlotGm, flagPayloadI32);
+            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(EVENT_ID0);
+            const int32_t flagVal = flagPollUb.GetValue(0);
+            if (flagVal == FLAG_VALUE_MAGIC) {
+                break;
+            }
+            if (flagVal == FLAG_VALUE_MAGIC + 1) {
+                return false;
+            }
+            if ((++flagWaitPoll & kFlagWaitCheckMask) == 0U &&
+                static_cast<uint64_t>(AscendC::GetSystemCycle() - flagWaitStart) >= kFlagWaitTimeoutCycles) {
+                AscendC::Trap();
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 template <class PeerInfo>
 CATLASS_DEVICE void WaitAllGatherFlagShared(HcclShmem<true>& shmem, const PeerInfo& peermemInfo, int32_t dstEpIdx,
                                             int32_t rank)

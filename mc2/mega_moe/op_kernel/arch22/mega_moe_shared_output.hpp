@@ -22,11 +22,26 @@ __aicore__ inline void PublishRoutedOutput()
         AscendC::CrossCoreWaitFlag<0x2>(12);
     }
 }
+
+namespace detail {
+__aicore__ inline void RoundAndAddSharedTile(AscendC::LocalTensor<bfloat16_t>& branch, AscendC::LocalTensor<float>& sum,
+                                             AscendC::LocalTensor<float>& route, uint32_t count)
+{
+    // Each FFN result and Yr is BF16. Round the FP32 shared sum to BF16
+    // before the final FP32 addition, matching the original branch boundary.
+    AscendC::Cast(branch, sum, AscendC::RoundMode::CAST_RINT, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Cast(sum, branch, AscendC::RoundMode::CAST_NONE, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Add(route, route, sum, count);
+    AscendC::PipeBarrier<PIPE_V>();
+    AscendC::Cast(branch, route, AscendC::RoundMode::CAST_RINT, count);
+}
+} // namespace detail
+
 __aicore__ inline void AddIndependentShared(GM_ADDR y, GM_ADDR shared, uint32_t m, uint32_t h, uint32_t experts)
 {
     if ASCEND_IS_AIV {
-        // Each FFN result and Yr is BF16. Round the FP32 shared sum to BF16
-        // before the final FP32 addition, matching the original branch boundary.
         constexpr uint32_t tile = 1024;
         AscendC::TPipe pipe;
         AscendC::TBuf<AscendC::TPosition::VECCALC> storage;
@@ -61,13 +76,7 @@ __aicore__ inline void AddIndependentShared(GM_ADDR y, GM_ADDR shared, uint32_t 
                 AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID6);
             }
-            AscendC::Cast(branch, sum, AscendC::RoundMode::CAST_RINT, count);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Cast(sum, branch, AscendC::RoundMode::CAST_NONE, count);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Add(route, route, sum, count);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Cast(branch, route, AscendC::RoundMode::CAST_RINT, count);
+            detail::RoundAndAddSharedTile(branch, sum, route, count);
             AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
             AscendC::DataCopy(out[offset], branch, count);

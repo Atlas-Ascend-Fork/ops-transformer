@@ -212,19 +212,11 @@ public:
     }
 
     CATLASS_DEVICE
-    void operator()(AscendC::GlobalTensor<ElementC> const& gmC,
-                    AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale, __gm__ float* gmWeightAux,
-                    GemmCoord& blockCoord, GemmCoord& actualBlockShape, int32_t groupIdx, int32_t preSrcExpertSum,
-                    AscendC::GlobalTensor<int32_t> preSumBeforeRank, int32_t listLen)
+    void LoadW4A8Tile(AscendC::GlobalTensor<ElementC> const& gmC, __gm__ float* gmWeightAux, GemmCoord& blockCoord,
+                      GemmCoord& actualBlockShape, int32_t groupIdx, int32_t preSrcExpertSum, int32_t listLen,
+                      AscendC::LocalTensor<ElementC>& ubCH, AscendC::LocalTensor<ElementC>& ubCL,
+                      AscendC::LocalTensor<float>& ubweighAux)
     {
-        auto& ubCH = ubCHList[ubListId];
-        auto& ubCL = ubCLList[ubListId];
-        auto& ubD = ubDList[ubListId];
-        auto& scaleUb = scaleUbList[ubListId];
-        auto& ubweighAux = ubweighAuxList[ubListId];
-        auto& ubFp32 = GetFp32Buffer();
-        auto& ubFp32L = GetFp32LowBuffer();
-        const uint32_t elements = actualBlockShape.m() / 2 * n0;
         int64_t gmCOffsetH =
             (static_cast<int64_t>(preSrcExpertSum) * params.n2 + blockCoord.m() * params.n2) + blockCoord.n();
         int64_t gmCOffsetL = gmCOffsetH + params.n2;
@@ -256,7 +248,13 @@ public:
         }
         AscendC::DataCopyPad(ubweighAux, gmWeighAux, copyParamsW, padParamsW);
         AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbTileWMTE2VList[ubListId]);
+    }
 
+    CATLASS_DEVICE
+    void ReconstructW4A8Tile(GemmCoord& actualBlockShape, uint32_t elements, AscendC::LocalTensor<ElementC>& ubCH,
+                             AscendC::LocalTensor<ElementC>& ubCL, AscendC::LocalTensor<float>& ubFp32,
+                             AscendC::LocalTensor<float>& ubFp32L, AscendC::LocalTensor<float>& ubweighAux)
+    {
         AscendC::PipeBarrier<PIPE_V>();
         if constexpr (EnableBatched_) {
             AscendC::Cast(ubFp32, ubCH, AscendC::RoundMode::CAST_NONE, elements);
@@ -288,7 +286,14 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbTileCVMTE2List[ubListId]);
         }
         AscendC::PipeBarrier<PIPE_V>();
+    }
 
+    CATLASS_DEVICE
+    void ScaleAndCastW4A8Tile(AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale, GemmCoord& blockCoord,
+                              GemmCoord& actualBlockShape, int32_t preSrcExpertSum, uint32_t elements,
+                              AscendC::LocalTensor<float>& ubFp32, AscendC::LocalTensor<float>& scaleUb,
+                              AscendC::LocalTensor<ElementD>& ubD)
+    {
         int32_t gmScaleOffset = (preSrcExpertSum + blockCoord.m()) / 2;
         layout::VectorLayout scaleLayout{actualBlockShape.m() / 2};
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
@@ -315,7 +320,36 @@ public:
         AscendC::PipeBarrier<PIPE_V>();
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbTileDMTE3VList[ubListId]);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbTileDMTE3VList[ubListId]);
+    }
 
+    CATLASS_DEVICE
+    void CopyW4A8PeerTile(int32_t dstEpIdx, int32_t stData, int32_t preSrcExpertSum, GemmCoord& blockCoord,
+                          AscendC::GlobalTensor<ElementD>& gmTileD, AscendC::LocalTensor<ElementD>& ubD,
+                          int32_t tileOffset, LayoutC& layoutGM2, LayoutC& layoutUB2)
+    {
+        if constexpr (IS_A2) {
+            bool isCrossServer = (dstEpIdx / SERVER_RANK_SIZE_A2) != (params.rank / SERVER_RANK_SIZE_A2);
+            if (isCrossServer) {
+                AscendC::GlobalTensor<ElementD> gmLocalWindowsOut;
+                gmLocalWindowsOut.SetGlobalBuffer(
+                    reinterpret_cast<__gm__ ElementD*>(params.shmem.windowsOutAddr() + params.offsetWinOutD));
+                MatrixCoord srcOffset{(uint32_t)(stData + preSrcExpertSum / 2), blockCoord.n()};
+                int64_t gmSrcOffset = params.layoutC.GetOffset(srcOffset);
+                auto gmTileLocal = gmLocalWindowsOut[gmSrcOffset];
+                copyUbToGmD(gmTileLocal, ubD[tileOffset * n0], layoutGM2, layoutUB2);
+            } else {
+                copyUbToGmD(gmTileD, ubD[tileOffset * n0], layoutGM2, layoutUB2);
+            }
+        } else {
+            copyUbToGmD(gmTileD, ubD[tileOffset * n0], layoutGM2, layoutUB2);
+        }
+    }
+
+    CATLASS_DEVICE
+    void WriteW4A8PeerTiles(GemmCoord& blockCoord, GemmCoord& actualBlockShape, int32_t groupIdx,
+                            int32_t preSrcExpertSum, AscendC::GlobalTensor<int32_t>& preSumBeforeRank,
+                            AscendC::LocalTensor<ElementD>& ubD)
+    {
         int32_t lenTile = actualBlockShape.m() / 2;
         int32_t stTile = blockCoord.m() / 2;
         int32_t edTile = stTile + lenTile;
@@ -344,32 +378,119 @@ public:
             auto gmTileD = gmRemotePeer[gmDstOffset];
             LayoutC layoutGM2{lenData, actualBlockShape.n(), params.n2};
             LayoutC layoutUB2{lenData, actualBlockShape.n(), n0};
-            if constexpr (IS_A2) {
-                bool isCrossServer = (dstEpIdx / SERVER_RANK_SIZE_A2) != (params.rank / SERVER_RANK_SIZE_A2);
-                if (isCrossServer) {
-                    AscendC::GlobalTensor<ElementD> gmLocalWindowsOut;
-                    gmLocalWindowsOut.SetGlobalBuffer(
-                        reinterpret_cast<__gm__ ElementD*>(params.shmem.windowsOutAddr() + params.offsetWinOutD));
-                    MatrixCoord srcOffset{(uint32_t)(stData + preSrcExpertSum / 2), blockCoord.n()};
-                    int64_t gmSrcOffset = params.layoutC.GetOffset(srcOffset);
-                    auto gmTileLocal = gmLocalWindowsOut[gmSrcOffset];
-                    copyUbToGmD(gmTileLocal, ubD[tileOffset * n0], layoutGM2, layoutUB2);
-                } else {
-                    copyUbToGmD(gmTileD, ubD[tileOffset * n0], layoutGM2, layoutUB2);
-                }
-            } else {
-                copyUbToGmD(gmTileD, ubD[tileOffset * n0], layoutGM2, layoutUB2);
-            }
+            CopyW4A8PeerTile(dstEpIdx, stData, preSrcExpertSum, blockCoord, gmTileD, ubD, tileOffset, layoutGM2,
+                             layoutUB2);
             tileOffset += lenData;
         }
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbTileDVMTE3List[ubListId]);
+    }
 
+    CATLASS_DEVICE
+    void operator()(AscendC::GlobalTensor<ElementC> const& gmC,
+                    AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale, __gm__ float* gmWeightAux,
+                    GemmCoord& blockCoord, GemmCoord& actualBlockShape, int32_t groupIdx, int32_t preSrcExpertSum,
+                    AscendC::GlobalTensor<int32_t> preSumBeforeRank, int32_t listLen)
+    {
+        auto& ubCH = ubCHList[ubListId];
+        auto& ubCL = ubCLList[ubListId];
+        auto& ubD = ubDList[ubListId];
+        auto& scaleUb = scaleUbList[ubListId];
+        auto& ubweighAux = ubweighAuxList[ubListId];
+        auto& ubFp32 = GetFp32Buffer();
+        auto& ubFp32L = GetFp32LowBuffer();
+        const uint32_t elements = actualBlockShape.m() / 2 * n0;
+        LoadW4A8Tile(gmC, gmWeightAux, blockCoord, actualBlockShape, groupIdx, preSrcExpertSum, listLen, ubCH, ubCL,
+                     ubweighAux);
+        ReconstructW4A8Tile(actualBlockShape, elements, ubCH, ubCL, ubFp32, ubFp32L, ubweighAux);
+        ScaleAndCastW4A8Tile(gmPerTokenScale, blockCoord, actualBlockShape, preSrcExpertSum, elements, ubFp32, scaleUb,
+                             ubD);
+        WriteW4A8PeerTiles(blockCoord, actualBlockShape, groupIdx, preSrcExpertSum, preSumBeforeRank, ubD);
         ubListId = (ubListId + 1 < UB_STAGES) ? (ubListId + 1) : 0;
     }
 
     // Dense shared-expert GMM2 epilogue. It reconstructs the two MSD rows,
     // adds the selected shared bias, applies the per-token activation scale and
     // publishes a local BF16 result instead of dispatching to peer memory.
+    CATLASS_DEVICE
+    void ScaleAndStoreSharedExpertTile(AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale,
+                                       AscendC::GlobalTensor<ElementD> const& gmD, uint32_t rowStart, uint32_t colStart,
+                                       uint32_t actualM, uint32_t actualN, uint32_t blockN,
+                                       AscendC::LocalTensor<float>& ubFp32, AscendC::LocalTensor<float>& scaleUb,
+                                       AscendC::LocalTensor<ElementD>& ubD)
+    {
+        layout::VectorLayout scaleLayout{actualM};
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
+        copyScaleGmToUb(scaleUb, gmPerTokenScale[rowStart], scaleLayout, scaleLayout);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(0);
+        for (uint32_t row = 0U; row < actualM; ++row) {
+            const float scale = scaleUb(row);
+            AscendC::Muls<float, false>(ubFp32[n0 * row], ubFp32[n0 * row], scale, -1, (actualN + 127U) / 128U * 2U,
+                                        {1, 1, 8, 8});
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
+
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbTileDVMTE3List[ubListId]);
+        AscendC::Cast<ElementD, float, false>(ubD, ubFp32, AscendC::RoundMode::CAST_RINT, -1, repeat, {1, 1, 4, 8});
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbTileDMTE3VList[ubListId]);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbTileDMTE3VList[ubListId]);
+        LayoutD layoutDGM{actualM, actualN, blockN};
+        LayoutD layoutDUB{actualM, actualN, static_cast<uint32_t>(n0)};
+        copyUbToGmD(gmD[static_cast<uint64_t>(rowStart) * blockN + colStart], ubD, layoutDGM, layoutDUB);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbTileDVMTE3List[ubListId]);
+    }
+
+    CATLASS_DEVICE
+    void WriteSharedExpertTile(AscendC::GlobalTensor<ElementC> const& gmC,
+                               AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale,
+                               AscendC::GlobalTensor<float> const& weightAux,
+                               AscendC::GlobalTensor<ElementD> const& gmD, uint32_t rowStart, uint32_t colStart,
+                               uint32_t actualM, uint32_t actualN, uint32_t blockN)
+    {
+        auto& ubCH = ubCHList[ubListId];
+        auto& ubCL = ubCLList[ubListId];
+        auto& ubD = ubDList[ubListId];
+        auto& scaleUb = scaleUbList[ubListId];
+        auto& ubweighAux = ubweighAuxList[ubListId];
+        auto& ubFp32 = GetFp32Buffer();
+        auto& ubFp32L = GetFp32LowBuffer();
+        auto gmTileCH = gmC[(static_cast<uint64_t>(rowStart) * 2U) * blockN + colStart];
+        auto gmTileCL = gmTileCH[blockN];
+
+        LayoutC layoutGM{actualM, actualN, blockN * 2U};
+        LayoutC layoutUB{actualM, actualN, static_cast<uint32_t>(n0)};
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbTileCVMTE2List[ubListId]);
+        copyGmToUbC(ubCH, gmTileCH, layoutUB, layoutGM);
+        copyGmToUbC(ubCL, gmTileCL, layoutUB, layoutGM);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbTileCMTE2VList[ubListId]);
+
+        DataCopyExtParams copyParamsW{1, static_cast<uint32_t>(actualN * sizeof(float)), 0, 0, 0};
+        DataCopyPadExtParams<float> padParamsW{false, 0, 0, 0};
+        AscendC::DataCopyPad(ubweighAux, weightAux[colStart], copyParamsW, padParamsW);
+        AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbTileWMTE2VList[ubListId]);
+
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbTileCMTE2VList[ubListId]);
+        AscendC::Cast<float, ElementC, false>(ubFp32, ubCH, AscendC::RoundMode::CAST_NONE, -1, repeat, {1, 1, 8, 4});
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Cast<float, ElementC, false>(ubFp32L, ubCL, AscendC::RoundMode::CAST_NONE, -1, repeat, {1, 1, 8, 4});
+        AscendC::PipeBarrier<PIPE_V>();
+        ReconstructMsd(actualM, actualN);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbTileWMTE2VList[ubListId]);
+        for (uint32_t row = 0U; row < actualM; ++row) {
+            AscendC::Add(ubFp32[row * n0], ubFp32[row * n0], ubweighAux, actualN);
+        }
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbTileCVMTE2List[ubListId]);
+        // The scale load only synchronizes MTE2 with scalar reads; drain
+        // the bias adds before the in-place vector multiply below.
+        AscendC::PipeBarrier<PIPE_V>();
+
+        ScaleAndStoreSharedExpertTile(gmPerTokenScale, gmD, rowStart, colStart, actualM, actualN, blockN, ubFp32,
+                                      scaleUb, ubD);
+        ubListId = (ubListId + 1U < UB_STAGES) ? ubListId + 1U : 0U;
+    }
+
     CATLASS_DEVICE
     void SharedExpert(AscendC::GlobalTensor<ElementC> const& gmC,
                       AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale,
@@ -392,69 +513,7 @@ public:
             const uint32_t actualM = min(ROW_TILE, blockM - rowStart);
             const uint32_t actualN = min(static_cast<uint32_t>(n0), blockN - colStart);
 
-            auto& ubCH = ubCHList[ubListId];
-            auto& ubCL = ubCLList[ubListId];
-            auto& ubD = ubDList[ubListId];
-            auto& scaleUb = scaleUbList[ubListId];
-            auto& ubweighAux = ubweighAuxList[ubListId];
-            auto& ubFp32 = GetFp32Buffer();
-            auto& ubFp32L = GetFp32LowBuffer();
-            auto gmTileCH = gmC[(static_cast<uint64_t>(rowStart) * 2U) * blockN + colStart];
-            auto gmTileCL = gmTileCH[blockN];
-
-            LayoutC layoutGM{actualM, actualN, blockN * 2U};
-            LayoutC layoutUB{actualM, actualN, static_cast<uint32_t>(n0)};
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbTileCVMTE2List[ubListId]);
-            copyGmToUbC(ubCH, gmTileCH, layoutUB, layoutGM);
-            copyGmToUbC(ubCL, gmTileCL, layoutUB, layoutGM);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbTileCMTE2VList[ubListId]);
-
-            DataCopyExtParams copyParamsW{1, static_cast<uint32_t>(actualN * sizeof(float)), 0, 0, 0};
-            DataCopyPadExtParams<float> padParamsW{false, 0, 0, 0};
-            AscendC::DataCopyPad(ubweighAux, weightAux[colStart], copyParamsW, padParamsW);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(eventUbTileWMTE2VList[ubListId]);
-
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbTileCMTE2VList[ubListId]);
-            AscendC::Cast<float, ElementC, false>(ubFp32, ubCH, AscendC::RoundMode::CAST_NONE, -1, repeat,
-                                                  {1, 1, 8, 4});
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Cast<float, ElementC, false>(ubFp32L, ubCL, AscendC::RoundMode::CAST_NONE, -1, repeat,
-                                                  {1, 1, 8, 4});
-            AscendC::PipeBarrier<PIPE_V>();
-            ReconstructMsd(actualM, actualN);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbTileWMTE2VList[ubListId]);
-            for (uint32_t row = 0U; row < actualM; ++row) {
-                AscendC::Add(ubFp32[row * n0], ubFp32[row * n0], ubweighAux, actualN);
-            }
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbTileCVMTE2List[ubListId]);
-            // The scale load only synchronizes MTE2 with scalar reads; drain
-            // the bias adds before the in-place vector multiply below.
-            AscendC::PipeBarrier<PIPE_V>();
-
-            layout::VectorLayout scaleLayout{actualM};
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
-            copyScaleGmToUb(scaleUb, gmPerTokenScale[rowStart], scaleLayout, scaleLayout);
-            AscendC::SetFlag<AscendC::HardEvent::MTE2_S>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_S>(0);
-            for (uint32_t row = 0U; row < actualM; ++row) {
-                const float scale = scaleUb(row);
-                AscendC::Muls<float, false>(ubFp32[n0 * row], ubFp32[n0 * row], scale, -1, (actualN + 127U) / 128U * 2U,
-                                            {1, 1, 8, 8});
-            }
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbScaleVMTE2List[ubListId]);
-
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbTileDVMTE3List[ubListId]);
-            AscendC::Cast<ElementD, float, false>(ubD, ubFp32, AscendC::RoundMode::CAST_RINT, -1, repeat, {1, 1, 4, 8});
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbTileDMTE3VList[ubListId]);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbTileDMTE3VList[ubListId]);
-            LayoutD layoutDGM{actualM, actualN, blockN};
-            LayoutD layoutDUB{actualM, actualN, static_cast<uint32_t>(n0)};
-            copyUbToGmD(gmD[static_cast<uint64_t>(rowStart) * blockN + colStart], ubD, layoutDGM, layoutDUB);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbTileDVMTE3List[ubListId]);
-
-            ubListId = (ubListId + 1U < UB_STAGES) ? ubListId + 1U : 0U;
+            WriteSharedExpertTile(gmC, gmPerTokenScale, weightAux, gmD, rowStart, colStart, actualM, actualN, blockN);
         }
         Finalize();
     }

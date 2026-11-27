@@ -47,6 +47,7 @@ protected:
     __aicore__ inline void CalSingleOutToken(const int64_t start_token, const int64_t out_token_idx);
     __aicore__ inline void CalPartOutToken(const int64_t start_token, const int64_t h_index, const int64_t h_length,
                                            const int64_t out_token_index);
+    __aicore__ inline void AccumulateSharedTokens(int64_t out_token_index, int64_t h_index, int64_t h_length);
     template <bool FIRST>
     __aicore__ inline void AccumulateValidToken(T2 tokenIndex, int64_t probIndex, int64_t hIndex, int64_t hLength);
     __aicore__ inline void CopyTokenIn(const T2 in_token_index, const int64_t h_index, const int64_t h_length);
@@ -322,48 +323,56 @@ __aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS, BLOCKED_COLUMN
     }
 
     if (this->shared_expert_num > 0U) {
-        const int64_t global_out_token_index = this->out_token_offset + out_token_index;
-        if constexpr (!IsSameType<T1, float>::value) {
-            // Match the unfused reference's rounding boundaries:
-            // T1(T1(routed sum) + T1(shared sum)), not T1(routed sum + shared sum).
-            // The distinction matters when the two branches nearly cancel.
-            // VECCALC scratch has a fixed lifetime. Input/output queues remain
-            // exclusively GM transfer queues and never hold saved branch values.
-            PipeBarrier<PIPE_V>();
-            Cast(this->branch_round_tensor, this->token_tensor0, RoundMode::CAST_RINT, h_length);
-            PipeBarrier<PIPE_V>();
-            Cast(this->token_tensor0, this->branch_round_tensor, RoundMode::CAST_NONE, h_length);
-            PipeBarrier<PIPE_V>();
-
-            // Keep token_tensor0 as the rounded routed result throughout.
-            Duplicate(this->shared_sum_tensor, 0.0f, h_length);
-            for (uint32_t shared_idx = 0U; shared_idx < this->shared_expert_num; ++shared_idx) {
-                CopySharedTokenIn(shared_idx, global_out_token_index, h_index, h_length);
-                LocalTensor<T1> tokensLocal = this->tokens_inque.template DeQue<T1>();
-                PipeBarrier<PIPE_V>();
-                Cast(this->token_tensor1, tokensLocal, RoundMode::CAST_NONE, h_length);
-                PipeBarrier<PIPE_V>();
-                this->tokens_inque.FreeTensor(tokensLocal);
-                Add(this->shared_sum_tensor, this->shared_sum_tensor, this->token_tensor1, h_length);
-                PipeBarrier<PIPE_V>();
-            }
-
-            Cast(this->branch_round_tensor, this->shared_sum_tensor, RoundMode::CAST_RINT, h_length);
-            PipeBarrier<PIPE_V>();
-            Cast(this->token_tensor1, this->branch_round_tensor, RoundMode::CAST_NONE, h_length);
-            PipeBarrier<PIPE_V>();
-            Add(this->token_tensor0, this->token_tensor0, this->token_tensor1, h_length);
-        } else {
-            for (uint32_t shared_idx = 0U; shared_idx < this->shared_expert_num; ++shared_idx) {
-                CopySharedTokenIn(shared_idx, global_out_token_index, h_index, h_length);
-                PipeBarrier<PIPE_V>();
-                CalSharedToken(h_length);
-            }
-        }
+        AccumulateSharedTokens(out_token_index, h_index, h_length);
     }
 
     // Write out the computed result
     CopyOut(out_token_index, h_index, h_length);
+}
+
+template <typename T1, typename T2, typename T3, bool PROBS, uint32_t BLOCKED_COLUMNS, bool UseA3UbBudget>
+__aicore__ inline void KernelMoeTokenUnpermute<T1, T2, T3, PROBS, BLOCKED_COLUMNS,
+                                               UseA3UbBudget>::AccumulateSharedTokens(int64_t out_token_index,
+                                                                                      int64_t h_index, int64_t h_length)
+{
+    const int64_t global_out_token_index = this->out_token_offset + out_token_index;
+    if constexpr (!IsSameType<T1, float>::value) {
+        // Match the unfused reference's rounding boundaries:
+        // T1(T1(routed sum) + T1(shared sum)), not T1(routed sum + shared sum).
+        // The distinction matters when the two branches nearly cancel.
+        // VECCALC scratch has a fixed lifetime. Input/output queues remain
+        // exclusively GM transfer queues and never hold saved branch values.
+        PipeBarrier<PIPE_V>();
+        Cast(this->branch_round_tensor, this->token_tensor0, RoundMode::CAST_RINT, h_length);
+        PipeBarrier<PIPE_V>();
+        Cast(this->token_tensor0, this->branch_round_tensor, RoundMode::CAST_NONE, h_length);
+        PipeBarrier<PIPE_V>();
+
+        // Keep token_tensor0 as the rounded routed result throughout.
+        Duplicate(this->shared_sum_tensor, 0.0f, h_length);
+        for (uint32_t shared_idx = 0U; shared_idx < this->shared_expert_num; ++shared_idx) {
+            CopySharedTokenIn(shared_idx, global_out_token_index, h_index, h_length);
+            LocalTensor<T1> tokensLocal = this->tokens_inque.template DeQue<T1>();
+            PipeBarrier<PIPE_V>();
+            Cast(this->token_tensor1, tokensLocal, RoundMode::CAST_NONE, h_length);
+            PipeBarrier<PIPE_V>();
+            this->tokens_inque.FreeTensor(tokensLocal);
+            Add(this->shared_sum_tensor, this->shared_sum_tensor, this->token_tensor1, h_length);
+            PipeBarrier<PIPE_V>();
+        }
+
+        Cast(this->branch_round_tensor, this->shared_sum_tensor, RoundMode::CAST_RINT, h_length);
+        PipeBarrier<PIPE_V>();
+        Cast(this->token_tensor1, this->branch_round_tensor, RoundMode::CAST_NONE, h_length);
+        PipeBarrier<PIPE_V>();
+        Add(this->token_tensor0, this->token_tensor0, this->token_tensor1, h_length);
+    } else {
+        for (uint32_t shared_idx = 0U; shared_idx < this->shared_expert_num; ++shared_idx) {
+            CopySharedTokenIn(shared_idx, global_out_token_index, h_index, h_length);
+            PipeBarrier<PIPE_V>();
+            CalSharedToken(h_length);
+        }
+    }
 }
 
 template <typename T1, typename T2, typename T3, bool PROBS, uint32_t BLOCKED_COLUMNS, bool UseA3UbBudget>

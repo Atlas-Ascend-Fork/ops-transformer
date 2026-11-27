@@ -11,6 +11,7 @@
 #ifndef MEGA_MOE_SHARED_EXPERT_HPP
 #define MEGA_MOE_SHARED_EXPERT_HPP
 
+#include "a2_a3_copy_helpers.hpp"
 #include "catlass/arch/resource.hpp"
 #include "catlass/gemm_coord.hpp"
 #include "utils/get_tensor_addr.hpp"
@@ -155,132 +156,45 @@ private:
             const uint32_t rowCount = coreIdx < remainder ? rowsPerCore + 1U : rowsPerCore;
             const uint32_t rowStart = coreIdx * rowsPerCore + (coreIdx < remainder ? coreIdx : remainder);
 
-            uint32_t ubOffset = 0U;
-            auto inputLocal = resource.ubBuf.template GetBufferByByte<ElementD2>(ubOffset);
-            ubOffset += AlignUp(k * sizeof(ElementD2), 32U);
-            auto inputFp32 = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-            ubOffset += AlignUp(k * sizeof(float), 32U);
-            auto tempFp32 = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-            ubOffset += AlignUp(k * sizeof(float), 32U);
-            auto quantLocal = resource.ubBuf.template GetBufferByByte<int8_t>(ubOffset);
-            ubOffset += AlignUp(k * sizeof(int8_t), 32U);
-            auto reduceMaxLocal = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-            ubOffset += 32U;
-
-            AscendC::LocalTensor<int4b_t> highI4;
-            AscendC::LocalTensor<int4b_t> lowI4;
-            AscendC::LocalTensor<half> highHalf;
-            AscendC::LocalTensor<half> lowHalf;
-            AscendC::LocalTensor<half> lowHalf2;
-            AscendC::LocalTensor<int16_t> lowMask;
-            if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                highI4 = resource.ubBuf.template GetBufferByByte<int4b_t>(ubOffset);
-                ubOffset += AlignUp(k / 2U, 32U);
-                lowI4 = resource.ubBuf.template GetBufferByByte<int4b_t>(ubOffset);
-                ubOffset += AlignUp(k / 2U, 32U);
-                highHalf = resource.ubBuf.template GetBufferByByte<half>(ubOffset);
-                ubOffset += AlignUp(k * sizeof(half), 32U);
-                lowHalf = resource.ubBuf.template GetBufferByByte<half>(ubOffset);
-                ubOffset += AlignUp(k * sizeof(half), 32U);
-                lowHalf2 = resource.ubBuf.template GetBufferByByte<half>(ubOffset);
-                ubOffset += AlignUp(k * sizeof(half), 32U);
-                lowMask = resource.ubBuf.template GetBufferByByte<int16_t>(ubOffset);
-                AscendC::Duplicate(lowMask, static_cast<int16_t>(0x0F0F), 128U);
-                AscendC::PipeBarrier<PIPE_V>();
-            }
-
-            AscendC::GlobalTensor<ElementD2> input;
-            AscendC::GlobalTensor<int8_t> output;
-            AscendC::GlobalTensor<float> outputScale;
-            input.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD2*>(params.ptrA));
-            output.SetGlobalBuffer(reinterpret_cast<__gm__ int8_t*>(workspaceInfo.ptrSharedInput));
-            outputScale.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(workspaceInfo.ptrSharedInputScale));
-
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
-            for (uint32_t localRow = 0U; localRow < rowCount; ++localRow) {
-                const uint32_t row = rowStart + localRow;
-                AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
-                AscendC::DataCopyPad(inputLocal, input[static_cast<uint64_t>(row) * k],
-                                     {1U, static_cast<uint32_t>(k * sizeof(ElementD2)), 0U, 0U, 0U}, {});
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID6);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID6);
-
-                AscendC::Cast(inputFp32, inputLocal, AscendC::RoundMode::CAST_NONE, k);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::Abs(tempFp32, inputFp32, k);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::ReduceMax(reduceMaxLocal, tempFp32, tempFp32, k);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::SetFlag<AscendC::HardEvent::V_S>(EVENT_ID6);
-                AscendC::WaitFlag<AscendC::HardEvent::V_S>(EVENT_ID6);
-
-                const float absMax = reduceMaxLocal.GetValue(0U);
-                const float quantScale = absMax > 0.0F ? 127.0F / absMax : 127.0F;
-                const float dequantScale = 1.0F / quantScale;
-                AscendC::SetFlag<AscendC::HardEvent::S_V>(EVENT_ID6);
-                AscendC::WaitFlag<AscendC::HardEvent::S_V>(EVENT_ID6);
-                AscendC::Muls(tempFp32, inputFp32, quantScale, k);
-                AscendC::PipeBarrier<PIPE_V>();
-                // Match routed quantization: round in FP32 before narrowing.
-                auto quantInt32 = tempFp32.template ReinterpretCast<int32_t>();
-                auto quantHalf = tempFp32.template ReinterpretCast<half>();
-                AscendC::Cast(quantInt32, tempFp32, AscendC::RoundMode::CAST_RINT, k);
-                AscendC::SetDeqScale(static_cast<half>(1.0F));
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::Cast(quantHalf, quantInt32, AscendC::RoundMode::CAST_ROUND, k);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::Cast(quantLocal, quantHalf, AscendC::RoundMode::CAST_TRUNC, k);
-                AscendC::PipeBarrier<PIPE_V>();
-
-                if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                    AscendC::Cast(highHalf, quantLocal, AscendC::RoundMode::CAST_NONE, k);
-                    AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Muls(highHalf, highHalf, static_cast<half>(0.0625F), k);
-                    AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Cast(highI4, highHalf, AscendC::RoundMode::CAST_FLOOR, k);
-
-                    const uint32_t repeat = (k / 2U) / 128U;
-                    const uint32_t tail = (k % 256U) / 2U;
-                    if (repeat > 0U) {
-                        AscendC::And(lowHalf.template ReinterpretCast<int16_t>(),
-                                     quantLocal.template ReinterpretCast<int16_t>(), lowMask, 128U, repeat,
-                                     {1U, 1U, 1U, 8U, 8U, 0U});
-                    }
-                    if (tail > 0U) {
-                        AscendC::And(lowHalf[repeat * 128U].template ReinterpretCast<int16_t>(),
-                                     quantLocal[repeat * 256U].template ReinterpretCast<int16_t>(), lowMask, tail, 1U,
-                                     {1U, 1U, 1U, 8U, 8U, 0U});
-                    }
-                    AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Cast(lowHalf2, lowHalf.template ReinterpretCast<int8_t>(), AscendC::RoundMode::CAST_NONE,
-                                  k);
-                    AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Adds(highHalf, lowHalf2, static_cast<half>(-8.0F), k);
-                    AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::Cast(lowI4, highHalf, AscendC::RoundMode::CAST_NONE, k);
-                }
-
-                AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID6);
-                if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                    AscendC::DataCopy(output[static_cast<uint64_t>(row) * k], highI4.template ReinterpretCast<int8_t>(),
-                                      k / 2U);
-                    AscendC::DataCopy(output[static_cast<uint64_t>(row) * k + k / 2U],
-                                      lowI4.template ReinterpretCast<int8_t>(), k / 2U);
-                } else {
-                    AscendC::DataCopyPad(output[static_cast<uint64_t>(row) * k], quantLocal,
-                                         {1U, static_cast<uint32_t>(k * sizeof(int8_t)), 0U, 0U, 0U});
-                }
-                reduceMaxLocal.SetValue(0U, dequantScale);
-                AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID7);
-                AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(EVENT_ID7);
-                AscendC::DataCopyPad(outputScale[row], reduceMaxLocal,
-                                     {1U, static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U});
-                AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
-            }
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID6);
+            Detail::PrepareSharedQuantInput<std::is_same_v<ElementB, AscendC::int4b_t>, ElementD2>(
+                resource, reinterpret_cast<GM_ADDR>(params.ptrA), workspaceInfo.ptrSharedInput,
+                workspaceInfo.ptrSharedInputScale, rowStart, rowCount, k);
             AscendC::SyncAll<true>();
             AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(SYNCFLAG_SHARED_INPUT_V2C);
+        }
+    }
+
+    CATLASS_DEVICE
+    void RunSharedGmm1Tiles(Params const& params, BlockMmad& blockMmad, BlockScheduler& blockScheduler,
+                            AscendC::GlobalTensor<ElementB>& sharedWeight,
+                            AscendC::GlobalTensor<ElementScale>& sharedWeightScale,
+                            AscendC::GlobalTensor<ElementA>& sharedInput, uint32_t sharedIdx, uint32_t computeM,
+                            uint32_t n, uint32_t startLoopIdx, uint32_t coreLoops, const LayoutA& sharedLayoutA,
+                            const LayoutC& sharedLayoutC)
+    {
+        for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
+            GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
+            GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
+            MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
+            MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
+            MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
+            const int64_t gmOffsetA = sharedLayoutA.GetOffset(offsetA);
+            const int64_t gmOffsetB = params.layoutB1.GetOffset(offsetB);
+            const int64_t gmOffsetC = static_cast<int64_t>(sharedIdx) * computeM * n + sharedLayoutC.GetOffset(offsetC);
+            if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
+                const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
+                blockMmad(sharedWeightScale[gmOffsetS], params.layoutScale1, sharedInput[gmOffsetA], sharedLayoutA,
+                          sharedWeight[gmOffsetB], params.layoutB1, gmSharedGmmBuffer[gmOffsetC], sharedLayoutC,
+                          actualBlockShape, Callback{}, Callback{});
+            } else if constexpr (std::is_same_v<ElementB, int8_t>) {
+                const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
+                blockMmad(sharedInput[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB1,
+                          gmSharedGmmBuffer[gmOffsetC], sharedLayoutC, sharedWeightScale[gmOffsetS],
+                          params.layoutScale1, actualBlockShape);
+            } else {
+                blockMmad(sharedInput[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB1,
+                          gmSharedGmmBuffer[gmOffsetC], sharedLayoutC, gmS, params.layoutScale1, actualBlockShape);
+            }
         }
     }
 
@@ -324,31 +238,8 @@ private:
             const uint32_t coreLoops = blockScheduler.GetCoreLoops();
             const uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
 
-            for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
-                GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
-                GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
-                MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
-                MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
-                MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
-                const int64_t gmOffsetA = sharedLayoutA.GetOffset(offsetA);
-                const int64_t gmOffsetB = params.layoutB1.GetOffset(offsetB);
-                const int64_t gmOffsetC =
-                    static_cast<int64_t>(sharedIdx) * computeM * n + sharedLayoutC.GetOffset(offsetC);
-                if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                    const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
-                    blockMmad(sharedWeightScale[gmOffsetS], params.layoutScale1, sharedInput[gmOffsetA], sharedLayoutA,
-                              sharedWeight[gmOffsetB], params.layoutB1, gmSharedGmmBuffer[gmOffsetC], sharedLayoutC,
-                              actualBlockShape, Callback{}, Callback{});
-                } else if constexpr (std::is_same_v<ElementB, int8_t>) {
-                    const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
-                    blockMmad(sharedInput[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB1,
-                              gmSharedGmmBuffer[gmOffsetC], sharedLayoutC, sharedWeightScale[gmOffsetS],
-                              params.layoutScale1, actualBlockShape);
-                } else {
-                    blockMmad(sharedInput[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB1,
-                              gmSharedGmmBuffer[gmOffsetC], sharedLayoutC, gmS, params.layoutScale1, actualBlockShape);
-                }
-            }
+            RunSharedGmm1Tiles(params, blockMmad, blockScheduler, sharedWeight, sharedWeightScale, sharedInput,
+                               sharedIdx, computeM, n, startLoopIdx, coreLoops, sharedLayoutA, sharedLayoutC);
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
         }
 
@@ -403,6 +294,41 @@ private:
     }
 
     CATLASS_DEVICE
+    void RunSharedGmm2Tiles(Params const& params, BlockMmad& blockMmad, BlockScheduler& blockScheduler,
+                            AscendC::GlobalTensor<ElementB>& sharedWeight,
+                            AscendC::GlobalTensor<ElementScale>& sharedWeightScale,
+                            AscendC::GlobalTensor<ElementA>& sharedActivation,
+                            AscendC::GlobalTensor<ElementC>& sharedOutput, uint32_t sharedIdx, uint32_t computeM,
+                            uint32_t n, uint32_t k, uint32_t startLoopIdx, uint32_t coreLoops,
+                            const LayoutA& sharedLayoutA, const LayoutC& sharedLayoutC)
+    {
+        for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
+            GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
+            GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
+            MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
+            MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
+            MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
+            const int64_t gmOffsetA = static_cast<int64_t>(sharedIdx) * computeM * k + sharedLayoutA.GetOffset(offsetA);
+            const int64_t gmOffsetB = params.layoutB2.GetOffset(offsetB);
+            const int64_t gmOffsetC = static_cast<int64_t>(sharedIdx) * computeM * n + sharedLayoutC.GetOffset(offsetC);
+            if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
+                const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
+                blockMmad(sharedWeightScale[gmOffsetS], params.layoutScale2, sharedActivation[gmOffsetA], sharedLayoutA,
+                          sharedWeight[gmOffsetB], params.layoutB2, sharedOutput[gmOffsetC], sharedLayoutC,
+                          actualBlockShape, Callback{}, Callback{});
+            } else if constexpr (std::is_same_v<ElementB, int8_t>) {
+                const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
+                blockMmad(sharedActivation[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB2,
+                          sharedOutput[gmOffsetC], sharedLayoutC, sharedWeightScale[gmOffsetS], params.layoutScale2,
+                          actualBlockShape);
+            } else {
+                blockMmad(sharedActivation[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB2,
+                          sharedOutput[gmOffsetC], sharedLayoutC, gmS2, params.layoutScale2, actualBlockShape);
+            }
+        }
+    }
+
+    CATLASS_DEVICE
     void SharedGMM2(Params const& params)
     {
         if constexpr (SharedGmm2Bf16_) {
@@ -446,32 +372,9 @@ private:
             const uint32_t coreLoops = blockScheduler.GetCoreLoops();
             const uint32_t startLoopIdx = ((coreIdx < startCoreIdx) ? (coreIdx + coreNum) : coreIdx) - startCoreIdx;
 
-            for (uint32_t loopIdx = startLoopIdx; loopIdx < coreLoops; loopIdx += coreNum) {
-                GemmCoord blockCoord = blockScheduler.GetBlockCoord(loopIdx);
-                GemmCoord actualBlockShape = blockScheduler.GetActualBlockShape(blockCoord);
-                MatrixCoord offsetA{blockCoord.m() * L1TileShape::M, blockCoord.k() * L1TileShape::K};
-                MatrixCoord offsetB{blockCoord.k() * L1TileShape::K, blockCoord.n() * L1TileShape::N};
-                MatrixCoord offsetC{blockCoord.m() * L1TileShape::M, blockCoord.n() * L1TileShape::N};
-                const int64_t gmOffsetA =
-                    static_cast<int64_t>(sharedIdx) * computeM * k + sharedLayoutA.GetOffset(offsetA);
-                const int64_t gmOffsetB = params.layoutB2.GetOffset(offsetB);
-                const int64_t gmOffsetC =
-                    static_cast<int64_t>(sharedIdx) * computeM * n + sharedLayoutC.GetOffset(offsetC);
-                if constexpr (std::is_same_v<ElementB, AscendC::int4b_t>) {
-                    const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
-                    blockMmad(sharedWeightScale[gmOffsetS], params.layoutScale2, sharedActivation[gmOffsetA],
-                              sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB2, sharedOutput[gmOffsetC],
-                              sharedLayoutC, actualBlockShape, Callback{}, Callback{});
-                } else if constexpr (std::is_same_v<ElementB, int8_t>) {
-                    const int64_t gmOffsetS = blockCoord.n() * L1TileShape::N;
-                    blockMmad(sharedActivation[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB2,
-                              sharedOutput[gmOffsetC], sharedLayoutC, sharedWeightScale[gmOffsetS], params.layoutScale2,
-                              actualBlockShape);
-                } else {
-                    blockMmad(sharedActivation[gmOffsetA], sharedLayoutA, sharedWeight[gmOffsetB], params.layoutB2,
-                              sharedOutput[gmOffsetC], sharedLayoutC, gmS2, params.layoutScale2, actualBlockShape);
-                }
-            }
+            RunSharedGmm2Tiles(params, blockMmad, blockScheduler, sharedWeight, sharedWeightScale, sharedActivation,
+                               sharedOutput, sharedIdx, computeM, n, k, startLoopIdx, coreLoops, sharedLayoutA,
+                               sharedLayoutC);
             startCoreIdx = (startCoreIdx + coreLoops) % coreNum;
         }
 

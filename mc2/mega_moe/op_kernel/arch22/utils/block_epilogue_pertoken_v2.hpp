@@ -296,52 +296,59 @@ public:
     }
 
     template <typename TileElement>
+    CATLASS_DEVICE void CopyMaskRoutedTile(AscendC::LocalTensor<TileElement>& ubTile, GemmCoord& blockCoord,
+                                           GemmCoord& actualBlockShape)
+    {
+        using MaskRoute = MaskIndexedRouteTagT<BLOCKED_OUTPUT_>;
+        auto& routeIndex = maskBuffers.routeIndexUbList[is_ping];
+        int32_t lenTile = actualBlockShape.m();
+        AscendC::GlobalTensor<ElementD> gmRemotePeer;
+        uint32_t previousRank = std::numeric_limits<uint32_t>::max();
+        for (uint32_t row = 0; row < lenTile;) {
+            const uint32_t route = routeIndex.GetValue(row);
+            const uint32_t dstEpIdx = route >> MaskRoute::RANK_SHIFT;
+            uint32_t dstRow = route & MaskRoute::SLOT_MASK;
+            if (dstEpIdx != previousRank) {
+                previousRank = dstEpIdx;
+                __gm__ void* dstPeermemPtr = params.shmem(params.offsetD, dstEpIdx);
+                if constexpr (BLOCKED_OUTPUT_) {
+                    // 通信 D 区按 [列块][路由槽位][块内列] 排列，此处定位当前列块的起点。
+                    gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr) +
+                                                 static_cast<uint64_t>(blockCoord.n()) * params.blockedRows);
+                } else {
+                    gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr));
+                }
+            }
+            auto dst = gmRemotePeer[static_cast<uint64_t>(dstRow) * params.n2 + blockCoord.n()];
+            if constexpr (BLOCKED_OUTPUT_) {
+                dst = gmRemotePeer[static_cast<uint64_t>(dstRow) * n0];
+            }
+            if (row + 1 < lenTile) {
+                const uint32_t nextRoute = routeIndex.GetValue(row + 1);
+                bool paired = (nextRoute >> MaskRoute::RANK_SHIFT) == dstEpIdx &&
+                              CopyMaskPair(gmRemotePeer, ubTile[row * n0], dstRow, nextRoute & MaskRoute::SLOT_MASK,
+                                           actualBlockShape.n(), BLOCKED_OUTPUT_ ? n0 : params.n2,
+                                           (n0 - actualBlockShape.n()) * sizeof(ElementD) / BYTE_PER_BLK,
+                                           BLOCKED_OUTPUT_ ? 0 : blockCoord.n());
+                if (paired) {
+                    row += MASK_PAIR_ROWS;
+                    continue;
+                }
+            }
+            copyUbToGmD(dst, ubTile[row * n0], LayoutC{1, actualBlockShape.n(), params.n2},
+                        LayoutC{1, actualBlockShape.n(), n0});
+            ++row;
+        }
+    }
+
+    template <typename TileElement>
     CATLASS_DEVICE void CopyRoutedTile(AscendC::LocalTensor<TileElement>& ubTile, GemmCoord& blockCoord,
                                        GemmCoord& actualBlockShape, int32_t groupIdx, int32_t preSrcExpertSum,
                                        AscendC::GlobalTensor<int32_t> const& preSumBeforeRank, int32_t stTile,
                                        int32_t edTile, int32_t& preSumRankInExpert, int32_t& tileOffset)
     {
         if constexpr (MASK_ROUTING_) {
-            using MaskRoute = MaskIndexedRouteTagT<BLOCKED_OUTPUT_>;
-            auto& routeIndex = maskBuffers.routeIndexUbList[is_ping];
-            int32_t lenTile = actualBlockShape.m();
-            AscendC::GlobalTensor<ElementD> gmRemotePeer;
-            uint32_t previousRank = std::numeric_limits<uint32_t>::max();
-            for (uint32_t row = 0; row < lenTile;) {
-                const uint32_t route = routeIndex.GetValue(row);
-                const uint32_t dstEpIdx = route >> MaskRoute::RANK_SHIFT;
-                uint32_t dstRow = route & MaskRoute::SLOT_MASK;
-                if (dstEpIdx != previousRank) {
-                    previousRank = dstEpIdx;
-                    __gm__ void* dstPeermemPtr = params.shmem(params.offsetD, dstEpIdx);
-                    if constexpr (BLOCKED_OUTPUT_) {
-                        // 通信 D 区按 [列块][路由槽位][块内列] 排列，此处定位当前列块的起点。
-                        gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr) +
-                                                     static_cast<uint64_t>(blockCoord.n()) * params.blockedRows);
-                    } else {
-                        gmRemotePeer.SetGlobalBuffer(reinterpret_cast<__gm__ ElementD*>(dstPeermemPtr));
-                    }
-                }
-                auto dst = gmRemotePeer[static_cast<uint64_t>(dstRow) * params.n2 + blockCoord.n()];
-                if constexpr (BLOCKED_OUTPUT_) {
-                    dst = gmRemotePeer[static_cast<uint64_t>(dstRow) * n0];
-                }
-                if (row + 1 < lenTile) {
-                    const uint32_t nextRoute = routeIndex.GetValue(row + 1);
-                    bool paired = (nextRoute >> MaskRoute::RANK_SHIFT) == dstEpIdx &&
-                                  CopyMaskPair(gmRemotePeer, ubTile[row * n0], dstRow, nextRoute & MaskRoute::SLOT_MASK,
-                                               actualBlockShape.n(), BLOCKED_OUTPUT_ ? n0 : params.n2,
-                                               (n0 - actualBlockShape.n()) * sizeof(ElementD) / BYTE_PER_BLK,
-                                               BLOCKED_OUTPUT_ ? 0 : blockCoord.n());
-                    if (paired) {
-                        row += MASK_PAIR_ROWS;
-                        continue;
-                    }
-                }
-                copyUbToGmD(dst, ubTile[row * n0], LayoutC{1, actualBlockShape.n(), params.n2},
-                            LayoutC{1, actualBlockShape.n(), n0});
-                ++row;
-            }
+            CopyMaskRoutedTile(ubTile, blockCoord, actualBlockShape);
             return;
         }
         for (int32_t dstEpIdx = 0; dstEpIdx < params.EP; dstEpIdx++) {

@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
+#include <optional>
 
 #include "tiling/tiling_api.h"
 #include "register/tilingdata_base.h"
@@ -1316,39 +1317,53 @@ static ge::graphStatus CheckSharedWeightList(gert::TilingContext* context, uint3
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus CheckSharedExpertInputs(gert::TilingContext* context, int64_t hiddenSize, uint32_t& n,
-                                               ge::DataType routedWeightDataType, ge::Format routedWeightFormat,
-                                               uint32_t& sharedExpertNum, uint32_t& sharedGmm2Bf16,
-                                               uint32_t& sharedIsQuant, uint32_t& sharedIsW4A8)
-{
-    sharedGmm2Bf16 = 0U;
-    // 使用逻辑长度：aclnn 为未提供的 DynamicInput 创建的 shape={0} placeholder 不代表共享专家。
-    const uint32_t sharedWeight1Num = GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT1_INDEX);
-    const uint32_t sharedWeight2Num = GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT2_INDEX);
-    const uint32_t sharedScale1Num = GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT_SCALES1_INDEX);
-    const uint32_t sharedScale2Num = GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT_SCALES2_INDEX);
-    const uint32_t sharedBias1Num = GetEffectiveDynamicInputTensorListLen(context, SHARED_BIAS1_INDEX);
-    const uint32_t sharedBias2Num = GetEffectiveDynamicInputTensorListLen(context, SHARED_BIAS2_INDEX);
+struct SharedExpertInputCounts {
+    uint32_t weight1;
+    uint32_t weight2;
+    uint32_t scale1;
+    uint32_t scale2;
+    uint32_t bias1;
+    uint32_t bias2;
+};
 
-    OP_TILING_CHECK(sharedWeight1Num != sharedWeight2Num,
+static SharedExpertInputCounts GetSharedExpertInputCounts(gert::TilingContext* context)
+{
+    // 使用逻辑长度：aclnn 为未提供的 DynamicInput 创建的 shape={0} placeholder 不代表共享专家。
+    return {
+        GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT1_INDEX),
+        GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT2_INDEX),
+        GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT_SCALES1_INDEX),
+        GetEffectiveDynamicInputTensorListLen(context, SHARED_WEIGHT_SCALES2_INDEX),
+        GetEffectiveDynamicInputTensorListLen(context, SHARED_BIAS1_INDEX),
+        GetEffectiveDynamicInputTensorListLen(context, SHARED_BIAS2_INDEX),
+    };
+}
+
+static ge::graphStatus CheckSharedInputCounts(const SharedExpertInputCounts& counts)
+{
+    OP_TILING_CHECK(counts.weight1 != counts.weight2,
                     OP_LOGE_FOR_INVALID_TENSORNUMS_WITH_REASON(
                         K_OP_NAME, "shared_weight1, shared_weight2",
-                        (std::to_string(sharedWeight1Num) + ", " + std::to_string(sharedWeight2Num)).c_str(),
+                        (std::to_string(counts.weight1) + ", " + std::to_string(counts.weight2)).c_str(),
                         "The shared weight tensor list lengths must be the same."),
                     return GRAPH_FAILED);
-    OP_TILING_CHECK(sharedWeight1Num > MEGA_MOE_A3_MAX_SHARED_EXPERT_NUM,
-                    OP_LOGE_FOR_INVALID_TENSORNUM(K_OP_NAME, "shared_weight1", sharedWeight1Num, "in [0, 2]"),
+    OP_TILING_CHECK(counts.weight1 > MEGA_MOE_A3_MAX_SHARED_EXPERT_NUM,
+                    OP_LOGE_FOR_INVALID_TENSORNUM(K_OP_NAME, "shared_weight1", counts.weight1, "in [0, 2]"),
                     return GRAPH_FAILED);
 
-    if (sharedWeight1Num == 0U) {
-        OP_TILING_CHECK(sharedScale1Num != 0U || sharedScale2Num != 0U || sharedBias1Num != 0U || sharedBias2Num != 0U,
+    if (counts.weight1 == 0U) {
+        OP_TILING_CHECK(counts.scale1 != 0U || counts.scale2 != 0U || counts.bias1 != 0U || counts.bias2 != 0U,
                         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(K_OP_NAME, "shared expert scales/biases", "present",
                                                               "shared weights must be provided first"),
                         return GRAPH_FAILED);
-        sharedExpertNum = 0U;
-        return ge::GRAPH_SUCCESS;
     }
+    return ge::GRAPH_SUCCESS;
+}
 
+static ge::graphStatus CheckSharedGateWeight(gert::TilingContext* context, ge::DataType routedWeightDataType,
+                                             ge::Format routedWeightFormat, uint32_t& n, ge::DataType& weightDataType,
+                                             ge::Format& weightFormat)
+{
     OP_TILING_CHECK(mc2tiling::GetSocVersion(context) != "Ascend910_93",
                     OP_LOGE(K_OP_NAME, "Shared experts are supported only on Ascend910_93 for Arch22."),
                     return GRAPH_FAILED);
@@ -1358,8 +1373,8 @@ static ge::graphStatus CheckSharedExpertInputs(gert::TilingContext* context, int
     OP_TILING_CHECK(
         sharedW1Desc == nullptr || sharedW1Shape == nullptr || sharedW1Shape->GetStorageShape().GetDimNum() != TWO_DIMS,
         OP_LOGE(K_OP_NAME, "Shared weight1 must be a 2D expert tensor."), return GRAPH_FAILED);
-    const auto weightDataType = sharedW1Desc->GetDataType();
-    const auto weightFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(sharedW1Desc->GetStorageFormat()));
+    weightDataType = sharedW1Desc->GetDataType();
+    weightFormat = static_cast<ge::Format>(ge::GetPrimaryFormat(sharedW1Desc->GetStorageFormat()));
     OP_TILING_CHECK(weightFormat != routedWeightFormat,
                     OP_LOGE(K_OP_NAME, "Shared/routed weight formats must match; dtype and I may differ."),
                     return GRAPH_FAILED);
@@ -1376,18 +1391,21 @@ static ge::graphStatus CheckSharedExpertInputs(gert::TilingContext* context, int
                                               "Arch22 shared experts support DT_BF16, DT_INT8 and DT_INT4 only."),
         return GRAPH_FAILED);
 
-    const bool isQuantized = weightDataType == ge::DT_INT8 || weightDataType == ge::DT_INT4;
-    const bool isW4A8 = weightDataType == ge::DT_INT4;
-    sharedIsQuant = isQuantized ? 1U : 0U;
-    sharedIsW4A8 = isW4A8 ? 1U : 0U;
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckSharedDownWeight(gert::TilingContext* context, ge::DataType routedWeightDataType,
+                                             ge::DataType weightDataType, ge::Format weightFormat, bool& mixedInt8Bf16,
+                                             ge::Format& sharedW2Format)
+{
     auto sharedW2Desc = context->GetDynamicInputDesc(SHARED_WEIGHT2_INDEX, 0);
     OP_TILING_CHECK(sharedW2Desc == nullptr, OP_LOGE_WITH_INVALID_INPUT(K_OP_NAME, "shared_weight2"),
                     return GRAPH_FAILED);
-    const bool mixedInt8Bf16 = weightDataType == ge::DT_INT8 && sharedW2Desc->GetDataType() == ge::DT_BF16;
+    mixedInt8Bf16 = weightDataType == ge::DT_INT8 && sharedW2Desc->GetDataType() == ge::DT_BF16;
     OP_TILING_CHECK(mixedInt8Bf16 && routedWeightDataType != ge::DT_INT8,
                     OP_LOGE(K_OP_NAME, "Legacy INT8/BF16 shared mixed pair requires INT8 routing."),
                     return GRAPH_FAILED);
-    const auto sharedW2Format = static_cast<ge::Format>(ge::GetPrimaryFormat(sharedW2Desc->GetStorageFormat()));
+    sharedW2Format = static_cast<ge::Format>(ge::GetPrimaryFormat(sharedW2Desc->GetStorageFormat()));
     // A3 mixed GMM2 accepts native BF16 ND as well as the legacy BF16 NZ.
     // Other modes (including A2) retain their existing format contract.
     const bool mixedNd = mixedInt8Bf16 && mc2tiling::GetSocVersion(context) == "Ascend910_93" &&
@@ -1395,62 +1413,106 @@ static ge::graphStatus CheckSharedExpertInputs(gert::TilingContext* context, int
     OP_TILING_CHECK(sharedW2Format != weightFormat && !mixedNd,
                     OP_LOGE(K_OP_NAME, "Only A3 INT8/BF16 shared experts allow NZ gateup with ND down."),
                     return GRAPH_FAILED);
-    const uint32_t expectedScale2Num = mixedInt8Bf16 ? 0U : sharedWeight1Num;
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckSharedScalesAndBiases(gert::TilingContext* context, uint32_t n, int64_t hiddenSize,
+                                                  const SharedExpertInputCounts& counts, bool isQuantized, bool isW4A8,
+                                                  bool mixedInt8Bf16)
+{
+    const uint32_t expectedScale2Num = mixedInt8Bf16 ? 0U : counts.weight1;
     if (isQuantized) {
-        OP_TILING_CHECK(sharedScale1Num != sharedWeight1Num || sharedScale2Num != expectedScale2Num,
+        OP_TILING_CHECK(counts.scale1 != counts.weight1 || counts.scale2 != expectedScale2Num,
                         OP_LOGE_FOR_INVALID_TENSORNUMS_WITH_REASON(
                             K_OP_NAME, "shared_weight_scales1/shared_weight_scales2, shared_weight1",
-                            (std::to_string(sharedScale1Num) + "/" + std::to_string(sharedScale2Num) + ", " +
-                             std::to_string(sharedWeight1Num))
+                            (std::to_string(counts.scale1) + "/" + std::to_string(counts.scale2) + ", " +
+                             std::to_string(counts.weight1))
                                 .c_str(),
                             "Each quantized shared GMM requires scales; BF16 shared GMM2 must not have scales."),
                         return GRAPH_FAILED);
         OP_TILING_CHECK(CheckWeightScaleInput(context, SHARED_WEIGHT_SCALES1_INDEX, "shared_weight_scales1",
-                                              sharedWeight1Num, n, "N") != ge::GRAPH_SUCCESS,
+                                              counts.weight1, n, "N") != ge::GRAPH_SUCCESS,
                         OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Check shared_weight_scales1 failed."),
                         return GRAPH_FAILED);
         OP_TILING_CHECK(
             !mixedInt8Bf16 && CheckWeightScaleInput(context, SHARED_WEIGHT_SCALES2_INDEX, "shared_weight_scales2",
-                                                    sharedWeight1Num, hiddenSize, "hidden_size") != ge::GRAPH_SUCCESS,
+                                                    counts.weight1, hiddenSize, "hidden_size") != ge::GRAPH_SUCCESS,
             OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Check shared_weight_scales2 failed."), return GRAPH_FAILED);
     } else {
-        OP_TILING_CHECK(sharedScale1Num != 0U || sharedScale2Num != 0U,
+        OP_TILING_CHECK(counts.scale1 != 0U || counts.scale2 != 0U,
                         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(K_OP_NAME, "shared expert scales", "present",
                                                               "BF16 shared experts do not use scales"),
                         return GRAPH_FAILED);
     }
 
     if (isW4A8) {
-        OP_TILING_CHECK(sharedBias1Num != sharedWeight1Num || sharedBias2Num != sharedWeight1Num,
+        OP_TILING_CHECK(counts.bias1 != counts.weight1 || counts.bias2 != counts.weight1,
                         OP_LOGE_FOR_INVALID_TENSORNUMS_WITH_REASON(
                             K_OP_NAME, "shared_bias1/shared_bias2, shared_weight1",
-                            (std::to_string(sharedBias1Num) + "/" + std::to_string(sharedBias2Num) + ", " +
-                             std::to_string(sharedWeight1Num))
+                            (std::to_string(counts.bias1) + "/" + std::to_string(counts.bias2) + ", " +
+                             std::to_string(counts.weight1))
                                 .c_str(),
                             "INT4 shared experts require one bias tensor per shared expert."),
                         return GRAPH_FAILED);
         OP_TILING_CHECK(
-            CheckBiasInput(context, SHARED_BIAS1_INDEX, "shared_bias1", sharedWeight1Num, n, "N") != ge::GRAPH_SUCCESS,
+            CheckBiasInput(context, SHARED_BIAS1_INDEX, "shared_bias1", counts.weight1, n, "N") != ge::GRAPH_SUCCESS,
             OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Check shared_bias1 failed."), return GRAPH_FAILED);
-        OP_TILING_CHECK(CheckBiasInput(context, SHARED_BIAS2_INDEX, "shared_bias2", sharedWeight1Num, hiddenSize,
+        OP_TILING_CHECK(CheckBiasInput(context, SHARED_BIAS2_INDEX, "shared_bias2", counts.weight1, hiddenSize,
                                        "hidden_size") != ge::GRAPH_SUCCESS,
                         OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Check shared_bias2 failed."), return GRAPH_FAILED);
     } else {
-        OP_TILING_CHECK(sharedBias1Num != 0U || sharedBias2Num != 0U,
+        OP_TILING_CHECK(counts.bias1 != 0U || counts.bias2 != 0U,
                         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(K_OP_NAME, "shared expert biases", "present",
                                                               "Bias is supported only for INT4 shared experts"),
                         return GRAPH_FAILED);
     }
 
-    OP_TILING_CHECK(CheckSharedWeightList(context, SHARED_WEIGHT1_INDEX, "shared_weight1", sharedWeight1Num,
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CheckSharedExpertInputs(gert::TilingContext* context, int64_t hiddenSize, uint32_t& n,
+                                               ge::DataType routedWeightDataType, ge::Format routedWeightFormat,
+                                               uint32_t& sharedExpertNum, uint32_t& sharedGmm2Bf16,
+                                               uint32_t& sharedIsQuant, uint32_t& sharedIsW4A8)
+{
+    sharedGmm2Bf16 = 0U;
+    const auto counts = GetSharedExpertInputCounts(context);
+    if (CheckSharedInputCounts(counts) != ge::GRAPH_SUCCESS) {
+        return GRAPH_FAILED;
+    }
+    if (counts.weight1 == 0U) {
+        sharedExpertNum = 0U;
+        return ge::GRAPH_SUCCESS;
+    }
+
+    ge::DataType weightDataType;
+    ge::Format weightFormat;
+    if (CheckSharedGateWeight(context, routedWeightDataType, routedWeightFormat, n, weightDataType, weightFormat) !=
+        ge::GRAPH_SUCCESS) {
+        return GRAPH_FAILED;
+    }
+    const bool isQuantized = weightDataType == ge::DT_INT8 || weightDataType == ge::DT_INT4;
+    const bool isW4A8 = weightDataType == ge::DT_INT4;
+    sharedIsQuant = isQuantized ? 1U : 0U;
+    sharedIsW4A8 = isW4A8 ? 1U : 0U;
+    bool mixedInt8Bf16;
+    ge::Format sharedW2Format;
+    if (CheckSharedDownWeight(context, routedWeightDataType, weightDataType, weightFormat, mixedInt8Bf16,
+                              sharedW2Format) != ge::GRAPH_SUCCESS ||
+        CheckSharedScalesAndBiases(context, n, hiddenSize, counts, isQuantized, isW4A8, mixedInt8Bf16) !=
+            ge::GRAPH_SUCCESS) {
+        return GRAPH_FAILED;
+    }
+
+    OP_TILING_CHECK(CheckSharedWeightList(context, SHARED_WEIGHT1_INDEX, "shared_weight1", counts.weight1,
                                           weightDataType, weightFormat, hiddenSize, n) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Check shared_weight1 failed."), return GRAPH_FAILED);
-    OP_TILING_CHECK(CheckSharedWeightList(context, SHARED_WEIGHT2_INDEX, "shared_weight2", sharedWeight2Num,
+    OP_TILING_CHECK(CheckSharedWeightList(context, SHARED_WEIGHT2_INDEX, "shared_weight2", counts.weight2,
                                           mixedInt8Bf16 ? ge::DT_BF16 : weightDataType, sharedW2Format, n / 2,
                                           hiddenSize) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Check shared_weight2 failed."), return GRAPH_FAILED);
 
-    sharedExpertNum = sharedWeight1Num;
+    sharedExpertNum = counts.weight1;
     sharedGmm2Bf16 = mixedInt8Bf16 ? 1U : 0U;
     return ge::GRAPH_SUCCESS;
 }
@@ -1955,80 +2017,73 @@ static ge::graphStatus StoreMegaMoeCommonTiling(gert::TilingContext* context, Me
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus MegaMoeA2A3TilingFuncImpl(gert::TilingContext* context)
+static ge::graphStatus SetDedupWorkspace(MegaMoeA2A3TilingData& info, int64_t chunkTokens, uint64_t dedupRecvBudget,
+                                         double dedupGateG, uint64_t& megeMoeWorkspace)
 {
-    // 涉及SyncAll，设置batch mode模式，所有核同时启动
-    uint32_t batch_mode = 1U;
-    auto ret = context->SetScheduleMode(batch_mode);
+    MegaMoeDedup::DedupTilingOutput dedupOut;
+    OP_TILING_CHECK(MegaMoeDedup::CalcDedupTiling(chunkTokens, info.K, info.topK, info.worldSize,
+                                                  static_cast<int64_t>(dedupRecvBudget), dedupOut) != ge::GRAPH_SUCCESS,
+                    OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "[DEDUP] CalcDedupTiling failed"), return ge::GRAPH_FAILED);
+    if (!info.useBatchedDispatch) {
+        info.dedupOn = 1U;
+        info.offsetExpandedDstToSrcRow = dedupOut.offsetExpandedDstToSrcRow;
+        info.dedupOffsetD = dedupOut.offsetD;
+        info.distTokenFirstPosSize = dedupOut.distTokenFirstPosSize;
+        info.distTokenLastPosSize = dedupOut.distTokenLastPosSize;
+        info.dedupRowMetaSize = dedupOut.rowMetaSize;
+        // workspace Dedup 增量段：FP → LP → rowMeta（段序与 kernel 侧 WorkspaceInfo 一致）
+        megeMoeWorkspace += static_cast<uint64_t>(dedupOut.distTokenFirstPosSize) +
+                            static_cast<uint64_t>(dedupOut.distTokenLastPosSize) +
+                            static_cast<uint64_t>(dedupOut.rowMetaSize);
+        OP_LOGI(K_INNER_DEBUG, "[DEDUP] enabled: m=%u G=%ldB (combine_comm_mode=1)", info.M,
+                static_cast<long>(dedupGateG));
+    }
+    return ge::GRAPH_SUCCESS;
+}
 
-    // 1. tilingData
-    MegaMoeTilingDataQuant* tilingData = context->GetTilingData<MegaMoeTilingDataQuant>();
-    OP_TILING_CHECK(tilingData == nullptr, OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Failed to get tiling data."),
+static ge::graphStatus ConfigureRequestedDedup(MegaMoeA2A3TilingData& info, uint64_t& megeMoeWorkspace)
+{
+    const int64_t chunkTokens = std::min<int64_t>(info.M, MOE_PERMUTE_CHUNK);
+    uint64_t dedupRecvBudget = info.recvRoundBudget;
+    if (info.useBatchedDispatch) {
+        const uint64_t chunkRecvMax =
+            static_cast<uint64_t>(MOE_PERMUTE_CHUNK) * info.epWorldSize * std::min(info.topK, info.expertPerRank);
+        dedupRecvBudget = std::max<uint64_t>(1, std::min(chunkRecvMax, info.maxRecvTokenNum));
+    }
+    const MegaMoeDedup::DedupFeasibility feasibility = MegaMoeDedup::CheckDedupFeasible(
+        chunkTokens, info.K, info.topK, info.worldSize, static_cast<int64_t>(info.expertPerRank),
+        static_cast<int64_t>(dedupRecvBudget), info.cclBufferSize);
+    // 配置须人工调整的不可行（路径/位宽/窗口）→ fail-fast（原因见上方 [DEDUP] infeasible
+    // 日志；回基线须显式设 combine_comm_mode=0）
+    OP_TILING_CHECK(feasibility == MegaMoeDedup::DedupFeasibility::kInfeasible,
+                    OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "[DEDUP] requested by combine_comm_mode=1 but infeasible "
+                                                          "(see the [DEDUP] infeasible line above for reason); "
+                                                          "set combine_comm_mode=0 to stay on baseline"),
                     return ge::GRAPH_FAILED);
-    OP_LOGI(K_INNER_DEBUG, "MegaMoeA2A3 get tilingData.");
-    MegaMoeA2A3TilingData& info = tilingData->common;
-    info = {};
-    OP_LOGI(K_INNER_DEBUG, "MegaMoeA2A3 get tilingData info.");
-
-    if (CheckAndSetCommonTiling(context, info) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
+    // 单轮不满足（手配 max_recv_token_num 过小）→ 自动回基线（[DEDUP] fallback 日志已在
+    // CheckDedupFeasible 内打出）：基线按同预算多轮跑，不违背调用方资源意图
+    if (feasibility == MegaMoeDedup::DedupFeasibility::kFeasible) {
+        // G 收益门控（可行性校验之后）：可行但 G ≤ 门限 → 静默回基线
+        // （阈值判断非正确性，不报错）+ decision 日志
+        const double dedupGateG = MegaMoeDedup::CalcDedupGateGBytes(
+            static_cast<int64_t>(info.M), static_cast<int64_t>(info.K), static_cast<int64_t>(info.topK),
+            static_cast<int64_t>(info.expertPerRank), static_cast<int64_t>(info.worldSize));
+        if (dedupGateG <= static_cast<double>(MegaMoeDedup::DEDUP_GATE_G_THRESHOLD_BYTES)) {
+            OP_LOGI(K_INNER_DEBUG, "[DEDUP] decision: m=%u G=%ldB thetaG=%ldB ccm=1 -> master (gate)", info.M,
+                    static_cast<long>(dedupGateG), static_cast<long>(MegaMoeDedup::DEDUP_GATE_G_THRESHOLD_BYTES));
+        } else {
+            if (SetDedupWorkspace(info, chunkTokens, dedupRecvBudget, dedupGateG, megeMoeWorkspace) !=
+                ge::GRAPH_SUCCESS) {
+                return ge::GRAPH_FAILED;
+            }
+        }
     }
-    if (ret != ge::GRAPH_SUCCESS && info.sharedExpertNum > 0U) {
-        OP_LOGE(K_OP_NAME, "Shared stages require batch scheduling for barriers.");
-        return ge::GRAPH_FAILED;
-    }
+    return ge::GRAPH_SUCCESS;
+}
 
-    // 2. set blockDim
-    uint32_t blockDim = 1U;
-    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
-    auto aicNum = ascendcPlatform.GetCoreNumAic();
-    auto aivNum = ascendcPlatform.GetCoreNumAiv();
-    blockDim = ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum);
-    context->SetBlockDim(blockDim);
-
-    uint32_t archCode;
-    if (SetMegaMoeTilingKey(context, info, archCode) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
-
-    int64_t expertNum = info.expertPerRank * info.worldSize;
-    size_t initRoutingWorkspace = 0;
-
-    // 公共 tiling 统一在各特性增量算完后落库（见下方 StoreMegaMoeCommonTiling 调用）。
-    Mc2Tiling::MoePermutePrologueTilingBase permuteTilingBase;
-    permuteTilingBase.DoTiling(info.M, info.topK, expertNum);
-    initRoutingWorkspace = permuteTilingBase.workspaceSize_;
-
-    // 4. workspace
-    size_t* workSpaces = context->GetWorkspaceSizes(1);
-    OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Failed to get workspace sizes."),
-                    return ge::GRAPH_FAILED);
-
-    uint32_t n2 = info.K;
-    uint32_t k2 = info.N / 2;
-    uint64_t megeMoeWorkspace = 0;
-    if (archCode == SOC_ASCEND910_93) {
-        SetA3WorkspaceSize(info, n2, k2, megeMoeWorkspace,
-                           MegaMoeConfig::GetPermuteChunk(info.useBatchedDispatch != 0U));
-    } else if (archCode == SOC_ASCEND910B) {
-        SetA2WorkspaceSize(info, n2, k2, megeMoeWorkspace,
-                           MegaMoeConfig::GetPermuteChunk(info.useBatchedDispatch != 0U));
-    }
-
-    // ===== Mask 路由 =====
-    if (!info.useBatchedDispatch && archCode == SOC_ASCEND910_93 && CanUseA3MaskRouting(info)) {
-        const bool blockedOutput = info.M >= MaskLayout::L1_TILE_M && info.K % MaskLayout::L1_TILE_N == 0 &&
-                                   info.recvRoundBudget >= std::min<uint64_t>(info.M, MOE_PERMUTE_CHUNK) * info.topK;
-        // 覆盖默认 key，最后两个字段分别控制 Mask 路由和列块输出。
-        const uint64_t maskTilingKey = GET_TPL_TILING_KEY(
-            static_cast<int64_t>(info.isTransposeW1), static_cast<int64_t>(info.isTransposeW2),
-            static_cast<int64_t>(MEGA_MOE_QUANT_MODE_PER_TOKEN), static_cast<int64_t>(MEGA_MOE_QUANT_OUT_TYPE_INT8),
-            static_cast<int64_t>(archCode), true, blockedOutput);
-        context->SetTilingKey(maskTilingKey);
-        megeMoeWorkspace +=
-            CalcMaskWorkspaceAddon(info.M, info.topK, info.worldSize, info.expertPerRank, info.recvRoundBudget);
-    }
-
+static ge::graphStatus ConfigureDedupTiling(gert::TilingContext* context, MegaMoeA2A3TilingData& info,
+                                            uint32_t archCode, uint64_t& megeMoeWorkspace)
+{
     // ===== 通信零冗余（Dedup）=====
     // 开启 = combineCommMode=1（属性位 19，arch22 复用为 Dedup 特性总开关）&& 单轮可行 &&
     // winIn ≥ Dedup least && G > 门限（收益门控，常数见 mega_moe_dedup_layout.h）。门序：客观门
@@ -2064,64 +2119,18 @@ static ge::graphStatus MegaMoeA2A3TilingFuncImpl(gert::TilingContext* context)
                                                               "supported; set combine_comm_mode=0"),
                         return ge::GRAPH_FAILED);
         if (combineCommMode == 1) {
-            const int64_t chunkTokens = std::min<int64_t>(info.M, MOE_PERMUTE_CHUNK);
-            uint64_t dedupRecvBudget = info.recvRoundBudget;
-            if (info.useBatchedDispatch) {
-                const uint64_t chunkRecvMax = static_cast<uint64_t>(MOE_PERMUTE_CHUNK) * info.epWorldSize *
-                                              std::min(info.topK, info.expertPerRank);
-                dedupRecvBudget = std::max<uint64_t>(1, std::min(chunkRecvMax, info.maxRecvTokenNum));
-            }
-            const MegaMoeDedup::DedupFeasibility feasibility = MegaMoeDedup::CheckDedupFeasible(
-                chunkTokens, info.K, info.topK, info.worldSize, static_cast<int64_t>(info.expertPerRank),
-                static_cast<int64_t>(dedupRecvBudget), info.cclBufferSize);
-            // 配置须人工调整的不可行（路径/位宽/窗口）→ fail-fast（原因见上方 [DEDUP] infeasible
-            // 日志；回基线须显式设 combine_comm_mode=0）
-            OP_TILING_CHECK(
-                feasibility == MegaMoeDedup::DedupFeasibility::kInfeasible,
-                OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "[DEDUP] requested by combine_comm_mode=1 but infeasible "
-                                                      "(see the [DEDUP] infeasible line above for reason); "
-                                                      "set combine_comm_mode=0 to stay on baseline"),
-                return ge::GRAPH_FAILED);
-            // 单轮不满足（手配 max_recv_token_num 过小）→ 自动回基线（[DEDUP] fallback 日志已在
-            // CheckDedupFeasible 内打出）：基线按同预算多轮跑，不违背调用方资源意图
-            if (feasibility == MegaMoeDedup::DedupFeasibility::kFeasible) {
-                // G 收益门控（可行性校验之后）：可行但 G ≤ 门限 → 静默回基线
-                // （阈值判断非正确性，不报错）+ decision 日志
-                const double dedupGateG = MegaMoeDedup::CalcDedupGateGBytes(
-                    static_cast<int64_t>(info.M), static_cast<int64_t>(info.K), static_cast<int64_t>(info.topK),
-                    static_cast<int64_t>(info.expertPerRank), static_cast<int64_t>(info.worldSize));
-                if (dedupGateG <= static_cast<double>(MegaMoeDedup::DEDUP_GATE_G_THRESHOLD_BYTES)) {
-                    OP_LOGI(K_INNER_DEBUG, "[DEDUP] decision: m=%u G=%ldB thetaG=%ldB ccm=1 -> master (gate)", info.M,
-                            static_cast<long>(dedupGateG),
-                            static_cast<long>(MegaMoeDedup::DEDUP_GATE_G_THRESHOLD_BYTES));
-                } else {
-                    MegaMoeDedup::DedupTilingOutput dedupOut;
-                    OP_TILING_CHECK(MegaMoeDedup::CalcDedupTiling(chunkTokens, info.K, info.topK, info.worldSize,
-                                                                  static_cast<int64_t>(dedupRecvBudget),
-                                                                  dedupOut) != ge::GRAPH_SUCCESS,
-                                    OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "[DEDUP] CalcDedupTiling failed"),
-                                    return ge::GRAPH_FAILED);
-                    if (!info.useBatchedDispatch) {
-                        info.dedupOn = 1U;
-                        info.offsetExpandedDstToSrcRow = dedupOut.offsetExpandedDstToSrcRow;
-                        info.dedupOffsetD = dedupOut.offsetD;
-                        info.distTokenFirstPosSize = dedupOut.distTokenFirstPosSize;
-                        info.distTokenLastPosSize = dedupOut.distTokenLastPosSize;
-                        info.dedupRowMetaSize = dedupOut.rowMetaSize;
-                        // workspace Dedup 增量段：FP → LP → rowMeta（段序与 kernel 侧 WorkspaceInfo 一致）
-                        megeMoeWorkspace += static_cast<uint64_t>(dedupOut.distTokenFirstPosSize) +
-                                            static_cast<uint64_t>(dedupOut.distTokenLastPosSize) +
-                                            static_cast<uint64_t>(dedupOut.rowMetaSize);
-                        OP_LOGI(K_INNER_DEBUG, "[DEDUP] enabled: m=%u G=%ldB (combine_comm_mode=1)", info.M,
-                                static_cast<long>(dedupGateG));
-                    }
-                }
+            if (ConfigureRequestedDedup(info, megeMoeWorkspace) != ge::GRAPH_SUCCESS) {
+                return ge::GRAPH_FAILED;
             }
         }
     }
 
-    info.sharedWorkspaceOffset = std::max(megeMoeWorkspace, static_cast<uint64_t>(initRoutingWorkspace));
-    uint64_t sharedExpertWorkspace = 0UL;
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus CalcSharedExpertWorkspace(MegaMoeA2A3TilingData& info, uint32_t archCode,
+                                                 uint64_t& sharedExpertWorkspace)
+{
     if (info.sharedExpertNum > 0U) {
         const auto alignSharedBuffer = [](uint64_t size) {
             constexpr uint64_t sharedBufferAlignment = static_cast<uint64_t>(ALIGN_512);
@@ -2165,6 +2174,117 @@ static ge::graphStatus MegaMoeA2A3TilingFuncImpl(gert::TilingContext* context)
         }
     }
 
+    return ge::GRAPH_SUCCESS;
+}
+
+struct RoutedWorkspaceResult {
+    uint64_t workspaceSize;
+    std::optional<uint64_t> maskTilingKey;
+};
+
+static RoutedWorkspaceResult CalcRoutedWorkspace(const MegaMoeA2A3TilingData& info, uint32_t archCode)
+{
+    uint32_t n2 = info.K;
+    uint32_t k2 = info.N / 2;
+    uint64_t megeMoeWorkspace = 0;
+    std::optional<uint64_t> maskTilingKey;
+    if (archCode == SOC_ASCEND910_93) {
+        SetA3WorkspaceSize(info, n2, k2, megeMoeWorkspace,
+                           MegaMoeConfig::GetPermuteChunk(info.useBatchedDispatch != 0U));
+    } else if (archCode == SOC_ASCEND910B) {
+        SetA2WorkspaceSize(info, n2, k2, megeMoeWorkspace,
+                           MegaMoeConfig::GetPermuteChunk(info.useBatchedDispatch != 0U));
+    }
+
+    // ===== Mask 路由 =====
+    if (!info.useBatchedDispatch && archCode == SOC_ASCEND910_93 && CanUseA3MaskRouting(info)) {
+        const bool blockedOutput = info.M >= MaskLayout::L1_TILE_M && info.K % MaskLayout::L1_TILE_N == 0 &&
+                                   info.recvRoundBudget >= std::min<uint64_t>(info.M, MOE_PERMUTE_CHUNK) * info.topK;
+        // 覆盖默认 key，最后两个字段分别控制 Mask 路由和列块输出。
+        maskTilingKey = GET_TPL_TILING_KEY(
+            static_cast<int64_t>(info.isTransposeW1), static_cast<int64_t>(info.isTransposeW2),
+            static_cast<int64_t>(MEGA_MOE_QUANT_MODE_PER_TOKEN), static_cast<int64_t>(MEGA_MOE_QUANT_OUT_TYPE_INT8),
+            static_cast<int64_t>(archCode), true, blockedOutput);
+        megeMoeWorkspace +=
+            CalcMaskWorkspaceAddon(info.M, info.topK, info.worldSize, info.expertPerRank, info.recvRoundBudget);
+    }
+
+    return {megeMoeWorkspace, maskTilingKey};
+}
+
+static ge::graphStatus InitCommonTiling(gert::TilingContext* context, MegaMoeA2A3TilingData*& common,
+                                        uint32_t& archCode)
+{
+    // 涉及SyncAll，设置batch mode模式，所有核同时启动
+    uint32_t batch_mode = 1U;
+    auto ret = context->SetScheduleMode(batch_mode);
+
+    // 1. tilingData
+    MegaMoeTilingDataQuant* tilingData = context->GetTilingData<MegaMoeTilingDataQuant>();
+    OP_TILING_CHECK(tilingData == nullptr, OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Failed to get tiling data."),
+                    return ge::GRAPH_FAILED);
+    OP_LOGI(K_INNER_DEBUG, "MegaMoeA2A3 get tilingData.");
+    common = &tilingData->common;
+    MegaMoeA2A3TilingData& info = *common;
+    info = {};
+    OP_LOGI(K_INNER_DEBUG, "MegaMoeA2A3 get tilingData info.");
+
+    if (CheckAndSetCommonTiling(context, info) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    if (ret != ge::GRAPH_SUCCESS && info.sharedExpertNum > 0U) {
+        OP_LOGE(K_OP_NAME, "Shared stages require batch scheduling for barriers.");
+        return ge::GRAPH_FAILED;
+    }
+
+    // 2. set blockDim
+    uint32_t blockDim = 1U;
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    auto aicNum = ascendcPlatform.GetCoreNumAic();
+    auto aivNum = ascendcPlatform.GetCoreNumAiv();
+    blockDim = ascendcPlatform.CalcTschBlockDim(aivNum, aicNum, aivNum);
+    context->SetBlockDim(blockDim);
+
+    if (SetMegaMoeTilingKey(context, info, archCode) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+
+    return ge::GRAPH_SUCCESS;
+}
+
+static ge::graphStatus MegaMoeA2A3TilingFuncImpl(gert::TilingContext* context)
+{
+    MegaMoeA2A3TilingData* common = nullptr;
+    uint32_t archCode;
+    if (InitCommonTiling(context, common, archCode) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    MegaMoeA2A3TilingData& info = *common;
+    int64_t expertNum = info.expertPerRank * info.worldSize;
+    size_t initRoutingWorkspace = 0;
+
+    // 公共 tiling 统一在各特性增量算完后落库（见下方 StoreMegaMoeCommonTiling 调用）。
+    Mc2Tiling::MoePermutePrologueTilingBase permuteTilingBase;
+    permuteTilingBase.DoTiling(info.M, info.topK, expertNum);
+    initRoutingWorkspace = permuteTilingBase.workspaceSize_;
+
+    // 4. workspace
+    size_t* workSpaces = context->GetWorkspaceSizes(1);
+    OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE_WITHOUT_REPORT(K_INNER_DEBUG, "Failed to get workspace sizes."),
+                    return ge::GRAPH_FAILED);
+
+    auto [megeMoeWorkspace, maskTilingKey] = CalcRoutedWorkspace(info, archCode);
+    if (maskTilingKey.has_value()) {
+        context->SetTilingKey(*maskTilingKey);
+    }
+    if (ConfigureDedupTiling(context, info, archCode, megeMoeWorkspace) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    info.sharedWorkspaceOffset = std::max(megeMoeWorkspace, static_cast<uint64_t>(initRoutingWorkspace));
+    uint64_t sharedExpertWorkspace = 0UL;
+    if (CalcSharedExpertWorkspace(info, archCode, sharedExpertWorkspace) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
     workSpaces[0] = SYSTEM_NEED_WORKSPACE + info.sharedWorkspaceOffset + sharedExpertWorkspace;
 
     if (StoreMegaMoeCommonTiling(context, info) != ge::GRAPH_SUCCESS) {

@@ -192,6 +192,107 @@ public:
     }
 
     CATLASS_DEVICE
+    void AccumulateSwigluRowMax(AscendC::GlobalTensor<ElementC>& gmTileC, uint32_t branchLength,
+                                uint32_t gmmOutPreRowStride, uint32_t tileCount, ElementPerTokenScale perTokenScale,
+                                float activationClamp)
+    {
+        uint32_t currentStage = 0;
+        LoadTile(gmTileC, branchLength, 0, TileLength(branchLength, 0), gmmOutPreRowStride, currentStage);
+        ResetRowAbsMax();
+        for (uint32_t tileIdx = 0; tileIdx < tileCount; ++tileIdx) {
+            uint32_t tileOffset = tileIdx * TILE_LENGTH;
+            uint32_t tileLength = TileLength(branchLength, tileOffset);
+            uint32_t nextStage = NextStage(currentStage);
+            uint32_t nextOffset = tileOffset + TILE_LENGTH;
+            if (nextOffset < branchLength) {
+                LoadTile(gmTileC, branchLength, nextOffset, TileLength(branchLength, nextOffset), gmmOutPreRowStride,
+                         nextStage);
+            }
+            ComputeLoadedTile(currentStage, tileLength, tileOffset, branchLength, perTokenScale, true, activationClamp);
+            AccumulateRowAbsMax(currentStage, tileLength);
+            currentStage = nextStage;
+        }
+    }
+
+    CATLASS_DEVICE
+    void WriteQuantizedSwigluRow(AscendC::GlobalTensor<ElementC>& gmTileC, uint32_t branchLength,
+                                 uint32_t gmmOutPreRowStride, AscendC::GlobalTensor<ElementD>& gmTileD,
+                                 uint32_t tileCount, ElementPerTokenScale perTokenScale, float activationClamp,
+                                 ElementPerTokenScale quantMultiplier)
+    {
+        uint32_t currentStage = 0;
+        if (tileCount == 1) {
+            // Single-tile fast path: ubActivationList[0] still holds the first-pass activation
+            // output, so skip the second LoadTile + reactivation and quantize it directly.
+            QuantizeAndCopyTile(0, gmTileD[0], TileLength(branchLength, 0), quantMultiplier);
+        } else {
+            LoadTile(gmTileC, branchLength, 0, TileLength(branchLength, 0), gmmOutPreRowStride, currentStage);
+            for (uint32_t tileIdx = 0; tileIdx < tileCount; ++tileIdx) {
+                uint32_t tileOffset = tileIdx * TILE_LENGTH;
+                uint32_t tileLength = TileLength(branchLength, tileOffset);
+                uint32_t nextStage = NextStage(currentStage);
+                uint32_t nextOffset = tileOffset + TILE_LENGTH;
+                if (nextOffset < branchLength) {
+                    LoadTile(gmTileC, branchLength, nextOffset, TileLength(branchLength, nextOffset),
+                             gmmOutPreRowStride, nextStage);
+                }
+                ComputeLoadedTile(currentStage, tileLength, tileOffset, branchLength, perTokenScale, true,
+                                  activationClamp);
+                QuantizeAndCopyTile(currentStage, gmTileD[tileOffset], tileLength, quantMultiplier);
+                currentStage = nextStage;
+            }
+        }
+    }
+
+    CATLASS_DEVICE
+    void RunScalarSwigluRows(AscendC::GlobalTensor<ElementC> const& gmC,
+                             AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale1,
+                             AscendC::GlobalTensor<ElementD> const& gmD,
+                             AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale2, uint32_t loopStartIdx,
+                             uint32_t tasksForIdx, uint32_t branchLength, uint32_t gmmOutPreRowStride,
+                             float activationClamp)
+    {
+        uint32_t scaleBatchStart = loopStartIdx;
+        uint32_t scaleBatchCount = 0;
+        uint32_t scaleBatchIndex = 0;
+
+        for (uint32_t loopIdx = loopStartIdx; loopIdx < loopStartIdx + tasksForIdx; ++loopIdx) {
+            auto gmTileC = gmC[loopIdx * gmmOutPreRowStride];
+            auto gmTileD = gmD[loopIdx * branchLength];
+            ElementPerTokenScale perTokenScale =
+                ::Catlass::Epilogue::Block::detail::ReadSwigluInputScale<SCALE_INPUT_COUNT>(
+                    ubPerTokenScaleInput, gmPerTokenScale1, loopIdx, loopStartIdx, tasksForIdx);
+            uint32_t tileCount = TileCount(branchLength);
+            AccumulateSwigluRowMax(gmTileC, branchLength, gmmOutPreRowStride, tileCount, perTokenScale,
+                                   activationClamp);
+            ElementPerTokenScale rowAbsMax = ReadRowAbsMax();
+            uint32_t scaleStage = scaleBatchIndex % SCALE_BUFFER_COUNT;
+            // Reuse waits only after both buffers have been launched, allowing scale MTE3 to overlap the next pass.
+            if (scaleBatchCount == 0 && scaleBatchIndex >= SCALE_BUFFER_COUNT) {
+                WaitScaleBuffer(scaleStage);
+            }
+            ubPerTokenScaleOutputList[scaleStage].SetValue(scaleBatchCount, rowAbsMax / 127.0f);
+            ElementPerTokenScale quantMultiplier = rowAbsMax > 0.0f ? 127.0f / rowAbsMax : 0.0f;
+            AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
+            AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
+            WriteQuantizedSwigluRow(gmTileC, branchLength, gmmOutPreRowStride, gmTileD, tileCount, perTokenScale,
+                                    activationClamp, quantMultiplier);
+            ++scaleBatchCount;
+            if (scaleBatchCount == SCALE_BATCH_COUNT) {
+                FlushScaleBatch(gmPerTokenScale2, scaleBatchStart, scaleBatchCount, scaleStage);
+                scaleBatchStart += scaleBatchCount;
+                scaleBatchCount = 0;
+                ++scaleBatchIndex;
+            }
+        }
+        if (scaleBatchCount > 0) {
+            FlushScaleBatch(gmPerTokenScale2, scaleBatchStart, scaleBatchCount, scaleBatchIndex % SCALE_BUFFER_COUNT);
+            ++scaleBatchIndex;
+        }
+        DrainScaleBuffers(scaleBatchIndex);
+    }
+
+    CATLASS_DEVICE
     void operator()(AscendC::GlobalTensor<ElementC> const& gmC, MatrixCoord const& shapeC,
                     AscendC::GlobalTensor<ElementPerTokenScale> const& gmPerTokenScale1,
                     AscendC::GlobalTensor<ElementD> const& gmD,
@@ -219,20 +320,29 @@ public:
                 return;
             }
         }
-        uint32_t scaleBatchStart = loopStartIdx;
-        uint32_t scaleBatchCount = 0;
-        uint32_t scaleBatchIndex = 0;
+        RunScalarSwigluRows(gmC, gmPerTokenScale1, gmD, gmPerTokenScale2, loopStartIdx, tasksForIdx, branchLength,
+                            gmmOutPreRowStride, activationClamp);
+    }
 
+    CATLASS_DEVICE
+    void RunScalarDirectRows(AscendC::GlobalTensor<ElementC> const& gmC, AscendC::GlobalTensor<ElementD> const& gmD,
+                             uint32_t loopStartIdx, uint32_t tasksForIdx, uint32_t branchLength,
+                             uint32_t gmmOutPreRowStride, float activationClamp,
+                             const AscendC::GlobalTensor<ElementPerTokenScale>* inputScale)
+    {
         for (uint32_t loopIdx = loopStartIdx; loopIdx < loopStartIdx + tasksForIdx; ++loopIdx) {
             auto gmTileC = gmC[loopIdx * gmmOutPreRowStride];
             auto gmTileD = gmD[loopIdx * branchLength];
-            ElementPerTokenScale perTokenScale =
-                ::Catlass::Epilogue::Block::detail::ReadSwigluInputScale<SCALE_INPUT_COUNT>(
-                    ubPerTokenScaleInput, gmPerTokenScale1, loopIdx, loopStartIdx, tasksForIdx);
+            // INT8 GMM1 -> BF16 GMM2: dequantize before activation, then
+            // round directly to BF16. There is no second dynamic quantization.
+            ElementPerTokenScale perTokenScale = 1.0f;
+            if (inputScale != nullptr) {
+                perTokenScale = ::Catlass::Epilogue::Block::detail::ReadSwigluInputScale<SCALE_INPUT_COUNT>(
+                    ubPerTokenScaleInput, *inputScale, loopIdx, loopStartIdx, tasksForIdx);
+            }
             uint32_t tileCount = TileCount(branchLength);
             uint32_t currentStage = 0;
             LoadTile(gmTileC, branchLength, 0, TileLength(branchLength, 0), gmmOutPreRowStride, currentStage);
-            ResetRowAbsMax();
             for (uint32_t tileIdx = 0; tileIdx < tileCount; ++tileIdx) {
                 uint32_t tileOffset = tileIdx * TILE_LENGTH;
                 uint32_t tileLength = TileLength(branchLength, tileOffset);
@@ -242,57 +352,12 @@ public:
                     LoadTile(gmTileC, branchLength, nextOffset, TileLength(branchLength, nextOffset),
                              gmmOutPreRowStride, nextStage);
                 }
-                ComputeLoadedTile(currentStage, tileLength, tileOffset, branchLength, perTokenScale, true,
-                                  activationClamp);
-                AccumulateRowAbsMax(currentStage, tileLength);
+                ComputeLoadedTile(currentStage, tileLength, tileOffset, branchLength, perTokenScale,
+                                  inputScale != nullptr, activationClamp);
+                CopyDirectTile(currentStage, gmTileD[tileOffset], tileLength);
                 currentStage = nextStage;
             }
-
-            ElementPerTokenScale rowAbsMax = ReadRowAbsMax();
-            uint32_t scaleStage = scaleBatchIndex % SCALE_BUFFER_COUNT;
-            // Reuse waits only after both buffers have been launched, allowing scale MTE3 to overlap the next pass.
-            if (scaleBatchCount == 0 && scaleBatchIndex >= SCALE_BUFFER_COUNT) {
-                WaitScaleBuffer(scaleStage);
-            }
-            ubPerTokenScaleOutputList[scaleStage].SetValue(scaleBatchCount, rowAbsMax / 127.0f);
-            ElementPerTokenScale quantMultiplier = rowAbsMax > 0.0f ? 127.0f / rowAbsMax : 0.0f;
-            AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            currentStage = 0;
-            if (tileCount == 1) {
-                // Single-tile fast path: ubActivationList[0] still holds the first-pass activation
-                // output, so skip the second LoadTile + reactivation and quantize it directly.
-                QuantizeAndCopyTile(0, gmTileD[0], TileLength(branchLength, 0), quantMultiplier);
-            } else {
-                LoadTile(gmTileC, branchLength, 0, TileLength(branchLength, 0), gmmOutPreRowStride, currentStage);
-                for (uint32_t tileIdx = 0; tileIdx < tileCount; ++tileIdx) {
-                    uint32_t tileOffset = tileIdx * TILE_LENGTH;
-                    uint32_t tileLength = TileLength(branchLength, tileOffset);
-                    uint32_t nextStage = NextStage(currentStage);
-                    uint32_t nextOffset = tileOffset + TILE_LENGTH;
-                    if (nextOffset < branchLength) {
-                        LoadTile(gmTileC, branchLength, nextOffset, TileLength(branchLength, nextOffset),
-                                 gmmOutPreRowStride, nextStage);
-                    }
-                    ComputeLoadedTile(currentStage, tileLength, tileOffset, branchLength, perTokenScale, true,
-                                      activationClamp);
-                    QuantizeAndCopyTile(currentStage, gmTileD[tileOffset], tileLength, quantMultiplier);
-                    currentStage = nextStage;
-                }
-            }
-            ++scaleBatchCount;
-            if (scaleBatchCount == SCALE_BATCH_COUNT) {
-                FlushScaleBatch(gmPerTokenScale2, scaleBatchStart, scaleBatchCount, scaleStage);
-                scaleBatchStart += scaleBatchCount;
-                scaleBatchCount = 0;
-                ++scaleBatchIndex;
-            }
         }
-        if (scaleBatchCount > 0) {
-            FlushScaleBatch(gmPerTokenScale2, scaleBatchStart, scaleBatchCount, scaleBatchIndex % SCALE_BUFFER_COUNT);
-            ++scaleBatchIndex;
-        }
-        DrainScaleBuffers(scaleBatchIndex);
     }
 
     CATLASS_DEVICE
@@ -324,34 +389,8 @@ public:
             }
         }
 
-        for (uint32_t loopIdx = loopStartIdx; loopIdx < loopStartIdx + tasksForIdx; ++loopIdx) {
-            auto gmTileC = gmC[loopIdx * gmmOutPreRowStride];
-            auto gmTileD = gmD[loopIdx * branchLength];
-            // INT8 GMM1 -> BF16 GMM2: dequantize before activation, then
-            // round directly to BF16. There is no second dynamic quantization.
-            ElementPerTokenScale perTokenScale = 1.0f;
-            if (inputScale != nullptr) {
-                perTokenScale = ::Catlass::Epilogue::Block::detail::ReadSwigluInputScale<SCALE_INPUT_COUNT>(
-                    ubPerTokenScaleInput, *inputScale, loopIdx, loopStartIdx, tasksForIdx);
-            }
-            uint32_t tileCount = TileCount(branchLength);
-            uint32_t currentStage = 0;
-            LoadTile(gmTileC, branchLength, 0, TileLength(branchLength, 0), gmmOutPreRowStride, currentStage);
-            for (uint32_t tileIdx = 0; tileIdx < tileCount; ++tileIdx) {
-                uint32_t tileOffset = tileIdx * TILE_LENGTH;
-                uint32_t tileLength = TileLength(branchLength, tileOffset);
-                uint32_t nextStage = NextStage(currentStage);
-                uint32_t nextOffset = tileOffset + TILE_LENGTH;
-                if (nextOffset < branchLength) {
-                    LoadTile(gmTileC, branchLength, nextOffset, TileLength(branchLength, nextOffset),
-                             gmmOutPreRowStride, nextStage);
-                }
-                ComputeLoadedTile(currentStage, tileLength, tileOffset, branchLength, perTokenScale,
-                                  inputScale != nullptr, activationClamp);
-                CopyDirectTile(currentStage, gmTileD[tileOffset], tileLength);
-                currentStage = nextStage;
-            }
-        }
+        RunScalarDirectRows(gmC, gmD, loopStartIdx, tasksForIdx, branchLength, gmmOutPreRowStride, activationClamp,
+                            inputScale);
     }
 
     // The A3 kernels pass Resource; the A2 kernels use the resource-free
@@ -495,6 +534,122 @@ private:
         }
     }
 
+    CATLASS_DEVICE
+    void ActivateRowBatch(uint32_t stage, uint32_t rows, uint32_t branchLength, float activationClamp,
+                          const float* inputScales)
+    {
+        const uint32_t elements = rows * branchLength;
+        auto& gate = ubGateFp32List[stage];
+        auto& up = ubUpFp32List[stage];
+        auto& activated = ubActivationList[stage];
+        AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[stage]);
+        Activation::PrepareBranches(gate, up, ubCList[stage], ROW_BATCH_CAPACITY, elements);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[stage]);
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
+        for (uint32_t i = 0; i < rows; ++i) {
+            AscendC::Muls(gate[i * branchLength], gate[i * branchLength], inputScales[i], branchLength);
+            AscendC::Muls(up[i * branchLength], up[i * branchLength], inputScales[i], branchLength);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+        Activation::Compute(activated, gate, up, sharedTmpBuffer, elements, activationClamp, activationCode_,
+                            activationParams1_, activationParams2_);
+        AscendC::Abs(gate, activated, elements);
+        AscendC::PipeBarrier<PIPE_V>();
+        if (branchLength == 512) {
+            // Reduce the eight 64-element partial maxima for each row.
+            AscendC::WholeReduceMax(up, gate, 64, rows * 8, 1, 1, 8, AscendC::ReduceOrder::ORDER_ONLY_VALUE);
+            AscendC::PipeBarrier<PIPE_V>();
+            AscendC::WholeReduceMax(ubRowAbsMax, up, 8, rows, 1, 1, 1, AscendC::ReduceOrder::ORDER_ONLY_VALUE);
+            AscendC::PipeBarrier<PIPE_V>();
+        } else {
+            // 640 is ten repeats, so do not reuse the 512-specific second reduction stride.
+            for (uint32_t i = 0; i < rows; ++i) {
+                AscendC::ReduceMax<float>(up, gate[i * branchLength], up, branchLength, false);
+                AscendC::PipeBarrier<PIPE_V>();
+                AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
+                AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
+                ubRowAbsMax.SetValue(i, up.GetValue(0));
+                AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
+                AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
+            }
+        }
+        AscendC::Duplicate(up, 0.0f, BYTE_PER_BLK / sizeof(float));
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::Max(ubRowAbsMax, up, ubRowAbsMax, rows);
+        AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
+    }
+
+    CATLASS_DEVICE
+    void StoreRowBatch(AscendC::GlobalTensor<ElementD> const& gmD, uint32_t row, uint32_t stage, uint32_t rows,
+                       uint32_t branchLength, const float* multipliers)
+    {
+        const uint32_t elements = rows * branchLength;
+        auto& gate = ubGateFp32List[stage];
+        auto& activated = ubActivationList[stage];
+        AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
+        AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
+        for (uint32_t i = 0; i < rows; ++i) {
+            AscendC::Muls(gate[i * branchLength], activated[i * branchLength], multipliers[i], branchLength);
+        }
+        AscendC::PipeBarrier<PIPE_V>();
+        auto quantS32 = gate.template ReinterpretCast<int32_t>();
+        auto quantF16 = gate.template ReinterpretCast<half>();
+        AscendC::Cast(quantS32, gate, AscendC::RoundMode::CAST_RINT, elements);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::SetDeqScale(static_cast<half>(1.0));
+        AscendC::Cast(quantF16, quantS32, AscendC::RoundMode::CAST_RINT, elements);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[stage]);
+        AscendC::Cast(ubDList[stage], quantF16, AscendC::RoundMode::CAST_RINT, elements);
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[stage]);
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[stage]);
+        LayoutD outputLayout{rows, branchLength};
+        copyUbToGmD(gmD[row * branchLength], ubDList[stage], outputLayout, outputLayout);
+        AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[stage]);
+    }
+
+    CATLASS_DEVICE
+    void WriteBatchRowScales(uint32_t rows, uint32_t scaleStage, uint32_t scaleBatchCount, float* multipliers)
+    {
+        for (uint32_t i = 0; i < rows; ++i) {
+            const float maximum = ubRowAbsMax.GetValue(i);
+            ubPerTokenScaleOutputList[scaleStage].SetValue(scaleBatchCount + i, maximum / 127.0f);
+            multipliers[i] = maximum > 0.0f ? 127.0f / maximum : 0.0f;
+        }
+    }
+
+    CATLASS_DEVICE
+    void FinishRowBatchScales(AscendC::GlobalTensor<float> const& gmOutputScale, uint32_t scaleBatchStart,
+                              uint32_t scaleBatchCount, uint32_t scaleBatchIndex)
+    {
+        if (scaleBatchCount != 0) {
+            FlushScaleBatch(gmOutputScale, scaleBatchStart, scaleBatchCount, scaleBatchIndex % SCALE_BUFFER_COUNT);
+            ++scaleBatchIndex;
+        }
+        DrainScaleBuffers(scaleBatchIndex);
+    }
+
+    CATLASS_DEVICE
+    uint32_t PrepareRowBatchInputs(AscendC::GlobalTensor<ElementC> const& gmC,
+                                   AscendC::GlobalTensor<float> const& gmInputScale, uint32_t firstRow,
+                                   uint32_t rowCount, uint32_t done, uint32_t rows, uint32_t batchRows,
+                                   uint32_t branchLength, uint32_t gmRowStride, uint32_t stage, float* inputScales)
+    {
+        const uint32_t row = firstRow + done;
+        for (uint32_t i = 0; i < rows; ++i) {
+            inputScales[i] = ::Catlass::Epilogue::Block::detail::ReadSwigluInputScale<SCALE_INPUT_COUNT>(
+                ubPerTokenScaleInput, gmInputScale, row + i, firstRow, rowCount);
+        }
+        const uint32_t nextStage = NextStage(stage);
+        if (done + rows < rowCount) {
+            LoadRowBatch(gmC[(row + rows) * gmRowStride], min(rowCount - done - rows, batchRows), branchLength,
+                         gmRowStride, nextStage);
+        }
+        return nextStage;
+    }
+
     CATLASS_DEVICE void RunRowBatches(AscendC::GlobalTensor<ElementC> const& gmC,
                                       AscendC::GlobalTensor<float> const& gmInputScale,
                                       AscendC::GlobalTensor<ElementD> const& gmD,
@@ -521,88 +676,18 @@ private:
         LoadRowBatch(gmC[firstRow * gmRowStride], min(rowCount, batchRows), branchLength, gmRowStride, stage);
         for (uint32_t done = 0; done < rowCount; done += batchRows) {
             const uint32_t rows = min(rowCount - done, batchRows);
-            const uint32_t elements = rows * branchLength;
             const uint32_t row = firstRow + done;
             float inputScales[ROW_BATCH_COUNT];
             float multipliers[ROW_BATCH_COUNT];
-            for (uint32_t i = 0; i < rows; ++i) {
-                inputScales[i] = ::Catlass::Epilogue::Block::detail::ReadSwigluInputScale<SCALE_INPUT_COUNT>(
-                    ubPerTokenScaleInput, gmInputScale, row + i, firstRow, rowCount);
-            }
-            const uint32_t nextStage = NextStage(stage);
-            if (done + rows < rowCount) {
-                LoadRowBatch(gmC[(row + rows) * gmRowStride], min(rowCount - done - rows, batchRows), branchLength,
-                             gmRowStride, nextStage);
-            }
-            auto& gate = ubGateFp32List[stage];
-            auto& up = ubUpFp32List[stage];
-            auto& activated = ubActivationList[stage];
-            AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(eventUbCMTE2VList[stage]);
-            Activation::PrepareBranches(gate, up, ubCList[stage], ROW_BATCH_CAPACITY, elements);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(eventUbCVMTE2List[stage]);
-            AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            for (uint32_t i = 0; i < rows; ++i) {
-                AscendC::Muls(gate[i * branchLength], gate[i * branchLength], inputScales[i], branchLength);
-                AscendC::Muls(up[i * branchLength], up[i * branchLength], inputScales[i], branchLength);
-            }
-            AscendC::PipeBarrier<PIPE_V>();
-            Activation::Compute(activated, gate, up, sharedTmpBuffer, elements, activationClamp, activationCode_,
-                                activationParams1_, activationParams2_);
-            AscendC::Abs(gate, activated, elements);
-            AscendC::PipeBarrier<PIPE_V>();
-            if (branchLength == 512) {
-                // Reduce the eight 64-element partial maxima for each row.
-                AscendC::WholeReduceMax(up, gate, 64, rows * 8, 1, 1, 8, AscendC::ReduceOrder::ORDER_ONLY_VALUE);
-                AscendC::PipeBarrier<PIPE_V>();
-                AscendC::WholeReduceMax(ubRowAbsMax, up, 8, rows, 1, 1, 1, AscendC::ReduceOrder::ORDER_ONLY_VALUE);
-                AscendC::PipeBarrier<PIPE_V>();
-            } else {
-                // 640 is ten repeats, so do not reuse the 512-specific second reduction stride.
-                for (uint32_t i = 0; i < rows; ++i) {
-                    AscendC::ReduceMax<float>(up, gate[i * branchLength], up, branchLength, false);
-                    AscendC::PipeBarrier<PIPE_V>();
-                    AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
-                    AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
-                    ubRowAbsMax.SetValue(i, up.GetValue(0));
-                    AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
-                    AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-                }
-            }
-            AscendC::Duplicate(up, 0.0f, BYTE_PER_BLK / sizeof(float));
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::Max(ubRowAbsMax, up, ubRowAbsMax, rows);
-            AscendC::SetFlag<AscendC::HardEvent::V_S>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::V_S>(0);
+            const uint32_t nextStage = PrepareRowBatchInputs(gmC, gmInputScale, firstRow, rowCount, done, rows,
+                                                             batchRows, branchLength, gmRowStride, stage, inputScales);
+            ActivateRowBatch(stage, rows, branchLength, activationClamp, inputScales);
             const uint32_t scaleStage = scaleBatchIndex % SCALE_BUFFER_COUNT;
             if (scaleBatchCount == 0 && scaleBatchIndex >= SCALE_BUFFER_COUNT) {
                 WaitScaleBuffer(scaleStage);
             }
-            for (uint32_t i = 0; i < rows; ++i) {
-                const float maximum = ubRowAbsMax.GetValue(i);
-                ubPerTokenScaleOutputList[scaleStage].SetValue(scaleBatchCount + i, maximum / 127.0f);
-                multipliers[i] = maximum > 0.0f ? 127.0f / maximum : 0.0f;
-            }
-            AscendC::SetFlag<AscendC::HardEvent::S_V>(0);
-            AscendC::WaitFlag<AscendC::HardEvent::S_V>(0);
-            for (uint32_t i = 0; i < rows; ++i) {
-                AscendC::Muls(gate[i * branchLength], activated[i * branchLength], multipliers[i], branchLength);
-            }
-            AscendC::PipeBarrier<PIPE_V>();
-            auto quantS32 = gate.template ReinterpretCast<int32_t>();
-            auto quantF16 = gate.template ReinterpretCast<half>();
-            AscendC::Cast(quantS32, gate, AscendC::RoundMode::CAST_RINT, elements);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::SetDeqScale(static_cast<half>(1.0));
-            AscendC::Cast(quantF16, quantS32, AscendC::RoundMode::CAST_RINT, elements);
-            AscendC::PipeBarrier<PIPE_V>();
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[stage]);
-            AscendC::Cast(ubDList[stage], quantF16, AscendC::RoundMode::CAST_RINT, elements);
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[stage]);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(eventUbDVMTE3List[stage]);
-            LayoutD outputLayout{rows, branchLength};
-            copyUbToGmD(gmD[row * branchLength], ubDList[stage], outputLayout, outputLayout);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[stage]);
+            WriteBatchRowScales(rows, scaleStage, scaleBatchCount, multipliers);
+            StoreRowBatch(gmD, row, stage, rows, branchLength, multipliers);
             scaleBatchCount += rows;
             if (scaleBatchCount == SCALE_BATCH_COUNT) {
                 FlushScaleBatch(gmOutputScale, scaleBatchStart, scaleBatchCount, scaleStage);
@@ -612,11 +697,7 @@ private:
             }
             stage = nextStage;
         }
-        if (scaleBatchCount != 0) {
-            FlushScaleBatch(gmOutputScale, scaleBatchStart, scaleBatchCount, scaleBatchIndex % SCALE_BUFFER_COUNT);
-            ++scaleBatchIndex;
-        }
-        DrainScaleBuffers(scaleBatchIndex);
+        FinishRowBatchScales(gmOutputScale, scaleBatchStart, scaleBatchCount, scaleBatchIndex);
     }
 
     CATLASS_DEVICE
