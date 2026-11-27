@@ -52,11 +52,11 @@
   If cacheModeOptional is contiguous:
 
   $$
-  kCacheRef[i][indice[i]]=quantK[i]
+  kCacheRef[i][indices[i]]=quantK[i]
   $$
 
   $$
-  vCacheRef[i][indice[i]]=quantV[i]
+  vCacheRef[i][indices[i]]=quantV[i]
   $$
 
   If cacheModeOptional is page:
@@ -174,8 +174,8 @@ aclnnStatus aclnnDequantRopeQuantKvcache(
     </tr>
     <tr>
         <td>kCacheRef</td>
-        <td>Input</td>
-        <td>Input kCacheRef used in the formula to cache k.</td>
+        <td>Input/Output</td>
+        <td>Stores quantized k values. The operator updates the cache in place using indices.</td>
         <td>The shape is [C_1, C_2, Nkv, D].</td>
         <td>INT8</td>
         <td>ND</td>
@@ -184,8 +184,8 @@ aclnnStatus aclnnDequantRopeQuantKvcache(
     </tr>
     <tr>
         <td>vCacheRef</td>
-        <td>Input</td>
-        <td>vCacheRef, the input used for caching v in the formula.</td>
+        <td>Input/Output</td>
+        <td>Stores quantized v values. The operator updates the cache in place using indices.</td>
         <td>The shape is [C_1, C_2, Nkv, D].</td>
         <td>INT8</td>
         <td>ND</td>
@@ -277,7 +277,7 @@ aclnnStatus aclnnDequantRopeQuantKvcache(
         <td>Input</td>
         <td>Specifies the lengths for splitting the input qkv.</td>
         <td>The size is 3, and the value is [Nq*D, Nkv*D, Nkv*D].</td>
-        <td>AclIntArray</td>
+        <td>aclIntArray</td>
         <td>-</td>
         <td>-</td>
         <td>-</td>
