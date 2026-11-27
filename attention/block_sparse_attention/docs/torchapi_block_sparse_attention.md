@@ -198,7 +198,7 @@ cann_ops_transformer.block_sparse_attention(
 ### quant_mode=MXFP4_OCP_QUANT / MXFP4_CX_QUANT（2/3，MXFP4量化）相关约束
 
 - 仅<term>Ascend 950PR&950DT系列产品</term>支持。
-- query、key、value为float4_e2m1fn_x2（以uint8伪装传入，D轴为uint8元素个数，逻辑headDim为2*D），需要提供float8_e8m0fnu类型的descale张量：
+- query、key、value为float4_e2m1fn_x2（以uint8传入，D为逻辑headDim，存储末维为D//2），需要提供float8_e8m0fnu类型的descale张量：
   - q_dequant_scale：MX量化模式，仅支持Rowwise E8M0 Micro Scaling，shape为：
     - BNSD: [B, Nq, Sq, ceilDiv(D, 64), 2]；
     - BSND: [B, Sq, Nq, ceilDiv(D, 64), 2]；
@@ -210,8 +210,8 @@ cann_ops_transformer.block_sparse_attention(
   - v_dequant_scale：MX量化模式，仅支持Columnwise E8M0 Micro Scaling，shape为：
     - BNSD: [B, Nkv, ceilDiv(Skv, 64), D, 2]；
     - BSND: [B, ceilDiv(Skv, 64), Nkv, D, 2]；
-    - TND: [BTkv//64, Nkv, D, 2]，其中$BTkv = \sum_{b=0}^{B-1}\lceil\frac{S2_b}{64}\rceil$。
-- attention_out_dtype必须为float16或bfloat16，attentionOut的最后一维为2*D（对应逻辑headDim，两个fp4数值打包进一个uint8字节）。
+    - TND: [BTkv, Nkv, D, 2]，其中$BTkv = \sum_{b=0}^{B-1}\lceil\frac{S2_b}{64}\rceil$。
+- attention_out_dtype必须为float16或bfloat16，attentionOut的最后一维为逻辑headDim D。
 - block_x和block_y均须为64的倍数。
 - dst_type_max可设置0.0或[6.0, 12.0]：0.0代表Amax(DType)为量化结果数据类型的最大值；6.0~12.0代表Amax(DType)为传入值。
 - **量化公式**：以P（softmax中间结果）的量化为例，其中$P_{\text{max}}$为一个group（32个元素）内元素绝对值的最大值。

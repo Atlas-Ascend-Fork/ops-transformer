@@ -210,8 +210,8 @@ aclnnStatus aclnnRainFusionAttention(
       <td>描述每个Batch对应的query序列长度。</td>
       <td>
         <ul>
-          <li>如不使用可传nullptr。</li>
-          <li>用于变长序列场景。</li>
+          <li>qInputLayout为TND时必须传入。</li>
+          <li>qInputLayout为BNSD时可传nullptr，此时各Batch的序列长度取query的S维。</li>
         </ul>
       </td>
       <td>INT64</td>
@@ -225,8 +225,8 @@ aclnnStatus aclnnRainFusionAttention(
       <td>描述每个Batch对应的key/value序列长度。</td>
       <td>
         <ul>
-          <li>如不使用可传nullptr。</li>
-          <li>用于变长序列场景。</li>
+          <li>kvInputLayout为TND时必须传入。</li>
+          <li>kvInputLayout为BNSD时可传nullptr，此时各Batch的序列长度取key/value的S维。</li>
         </ul>
       </td>
       <td>INT64</td>
@@ -278,7 +278,7 @@ aclnnStatus aclnnRainFusionAttention(
       <td>maskType</td>
       <td>输入</td>
       <td>Mask类型。</td>
-      <td>0表示无mask，其他值表示不同的mask类型。</td>
+      <td>支持0（无掩码）和3（因果掩码）。因果掩码由算子内部生成，attenMaskOptional传入nullptr。</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -451,11 +451,11 @@ aclnnStatus aclnnRainFusionAttention(
 - 输入query、key、value的数据类型必须一致，支持FLOAT16和BFLOAT16。
 - blockShape必须包含至少两个元素[blockShapeX, blockShapeY]，且值必须大于0，其中blockShapeY必须是128的整数倍。
 - 输入query的D（embeddingSize）当前仅支持64或128。
-- selectIdx的shape必须为[T, headNum, maxKvBlockNum]，其中T为所有batch中Q方向切块的总数。
-- selectNumIdx的shape必须为[T, headNum]。
+- selectIdx的shape必须为[QBlockNum, headNum, maxKvBlockNum]，其中QBlockNum为所有batch中Q方向切块的总数。
+- selectNumIdx的shape必须为[QBlockNum, headNum]。
 - innerPrecise必须为0（float32 softmax）或1（fp16 softmax）。当query输入为BFLOAT16时，当前实现仅支持innerPrecise=0；若传入非0值，算子会将其自动归一化为0，并使用float32 softmax计算。
 - qSeqlen和kvSeqlen不需要被blockShape整除，支持非对齐场景，实际分块数通过向上取整计算。
-- qSeqlen在qInputLayout为“TND”和"BNSD"时必选；kvSeqlen在kvInputLayout为“TND”和"BNSD"时必选。
+- qInputLayout为TND时必须传入actualSeqLengthsOptional，kvInputLayout为TND时必须传入actualSeqLengthsKvOptional。对应布局为BNSD时，序列长度参数可传入nullptr。
 - 稀疏块索引必须在有效范围内，无效位置用-1填充。
 - 输入query的headNum为N1，输入key和value的headNum为N2，则N1 >= N2 && N1 % N2 == 0。
 - 设G = N1 / N2，G需要满足以下约束：G < 128 && 128 % G == 0。
@@ -579,7 +579,7 @@ int main() {
     int64_t totalKvTokens = batch * kvSeqlen;
     int32_t qBlockNum = (qSeqlen + blockShapeX - 1) / blockShapeX;  // Q块的X维度数量
     int32_t kvBlockNum = (kvSeqlen + blockShapeY - 1) / blockShapeY;  // KV块的Y维度数量
-    // totalQBlocks = qBlockNum * numHeads (每个Q块对应一个head)
+    // totalQBlocks = qBlockNum * batch（所有batch的Q块总数）
     int32_t totalQBlocks = qBlockNum * batch;
     int32_t maxKvBlockNum = kvBlockNum;
 
@@ -713,7 +713,7 @@ int main() {
         numKvHeads,            // numKeyValueHeads
         0,                     // maskType
         scaleValue,            // scaleValue
-        0,                     // innerPrecise (1=fp16 softmax)
+        0,                     // innerPrecise (0=float32 softmax)
         128,                   // blockSize
         outputTensor,          // attentionOut
         nullptr,               // softmaxLseOptional
@@ -730,29 +730,29 @@ int main() {
         CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
 
-    // 12. 调用第二段接口
+    // 13. 调用第二段接口
     ret = aclnnRainFusionAttention(workspaceAddr, workspaceSize, executor, stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclnnRainFusionAttention failed. ERROR: %d\n", ret); return ret);
 
-    // 13. 同步等待任务执行结束
+    // 14. 同步等待任务执行结束
     ret = aclrtSynchronizeStream(stream);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtSynchronizeStream failed. ERROR: %d\n", ret); return ret);
 
-    // 14. 获取输出的值，将device侧内存上的结果拷贝至host侧
+    // 15. 获取输出的值，将device侧内存上的结果拷贝至host侧
     int64_t outputSize = GetShapeSize(outputShape);
     std::vector<op::fp16_t> resultData(outputSize, 0);
     ret = aclrtMemcpy(resultData.data(), resultData.size() * sizeof(op::fp16_t), outputDeviceAddr,
                      outputSize * sizeof(op::fp16_t), ACL_MEMCPY_DEVICE_TO_HOST);
     CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("copy result from device to host failed. ERROR: %d\n", ret); return ret);
 
-    // 15. 打印部分结果
+    // 16. 打印部分结果
     uint64_t printNum = 10;
     LOG_PRINT("Output results (first %lu elements):\n", printNum);
     for (uint64_t i = 0; i < printNum && i < resultData.size(); i++) {
         LOG_PRINT("  index %lu: %f\n", i, static_cast<float>(resultData[i]));
     }
 
-    // 16. 释放资源
+    // 17. 释放资源
     if (workspaceAddr) aclrtFree(workspaceAddr);
     if (queryDeviceAddr) aclrtFree(queryDeviceAddr);
     if (keyDeviceAddr) aclrtFree(keyDeviceAddr);

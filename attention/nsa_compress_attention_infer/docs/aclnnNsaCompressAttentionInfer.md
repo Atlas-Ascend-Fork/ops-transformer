@@ -166,20 +166,20 @@ aclnnStatus aclnnNsaCompressAttentionInfer(
       <td>attentionMaskOptional</td>
       <td>可选输入</td>
       <td>attention掩码矩阵。</td>
-      <td>仅在Q_S大于1的情况下生效。</td>
-      <td>-</td>
+      <td>仅在Q_S大于1的情况下生效。传入时启用内置掩码，算子不读取该Tensor的元素值。</td>
+      <td>BOOL</td>
       <td>ND</td>
-      <td>-</td>
+      <td>算子不读取shape</td>
       <td>-</td>
     </tr>
     <tr>
       <td>blockTableOptional</td>
       <td>输入</td>
       <td>paged attention中KV存储使用的block映射表。</td>
-      <td>当前只支持paged attention，因此该参数必须传入。</td>
+      <td>当前只支持paged attention，因此该参数必须传入。B为batch大小，maxNumBlocksPerSeq为单序列可用的最大块数。</td>
       <td>INT32</td>
       <td>ND</td>
-      <td>-</td>
+      <td>[B, maxNumBlocksPerSeq]</td>
       <td>x</td>
     </tr>
     <tr>
@@ -315,8 +315,8 @@ aclnnStatus aclnnNsaCompressAttentionInfer(
     <tr>
       <td>sparseMode</td>
       <td>输入</td>
-      <td>sparse的模式，控制有attentionMaskOptional输入时的稀疏计算。</td>
-      <td>-</td>
+      <td>保留参数，当前实现不根据其取值选择稀疏模式。</td>
+      <td>调用时传入0。</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -426,7 +426,7 @@ aclnnStatus aclnnNsaCompressAttentionInfer(
     <tr>
       <td>workspaceSize</td>
       <td>输入</td>
-      <td>在Device侧申请的workspace大小，由第一段接口aclnnNsaCompressAttentionInfer获取。</td>
+      <td>在Device侧申请的workspace大小，由第一段接口aclnnNsaCompressAttentionInferGetWorkspaceSize获取。</td>
     </tr>
     <tr>
       <td>executor</td>
@@ -584,7 +584,7 @@ int main() {
   // 创建key aclTensor
   ret = CreateAclTensor(keyHostData, keyShape, &keyDeviceAddr, aclDataType::ACL_FLOAT16, &keyTensor);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
-  // 创建v aclTensor
+  // 创建value aclTensor
   ret = CreateAclTensor(valueHostData, valueShape, &valueDeviceAddr, aclDataType::ACL_FLOAT16, &valueTensor);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   // 创建blockTableOptional aclTensor
@@ -637,7 +637,7 @@ int main() {
   std::vector<int32_t> topkresultData(topksize, 0);
   ret = aclrtMemcpy(topkresultData.data(), topkresultData.size() * sizeof(topkresultData[0]), topkIndicesDeviceAddr,
             topksize * sizeof(topkresultData[0]), ACL_MEMCPY_DEVICE_TO_HOST);
-  CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("copy [top k] result from device to host failed. ERROR: %d\n", ret); return ret);
+  CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("copy [topk] result from device to host failed. ERROR: %d\n", ret); return ret);
   for (int64_t i = 0; i < printNum; i++) {
     std::cout << "topk index: " << i << ": " << topkresultData[i] << std::endl;
   }

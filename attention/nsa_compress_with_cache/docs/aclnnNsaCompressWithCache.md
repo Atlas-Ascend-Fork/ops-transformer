@@ -156,7 +156,7 @@ aclnnStatus aclnnNsaCompressWithCache(
       <tr>
         <td>blockTableOptional</td>
         <td>可选输入</td>
-        <td>PageAttention中KV存储使用的block映射表。</td>
+        <td>PagedAttention中KV存储使用的block映射表。</td>
         <td>
           <ul style="list-style-type: circle;">
             <li>不使用该功能可传入nullptr。</li>
@@ -293,7 +293,7 @@ aclnnStatus aclnnNsaCompressWithCache(
       <td>input和weight不满足broadcast关系，即input的第三维大小与weight的第二维大小不相等。</td>
     </tr>
     <tr>
-      <td>activeNum、expertNum、expertCapacity的值小于0。</td>
+      <td>compressBlockSize小于compressStride或大于64。</td>
     </tr>
     <tr>
       <td>compressBlockSize、compressStride不是16的整数倍。</td>
@@ -302,7 +302,7 @@ aclnnStatus aclnnNsaCompressWithCache(
       <td>compress_stride小于等于0。</td>
     </tr>
     <tr>
-      <td>seq_lens_type!=1或者layout取值不是BSH、SBH、BSND、BNSD、TND中的一个。</td>
+      <td>actSeqLenType不为1，或layoutOptional传入无法识别的布局值。可用布局见layoutOptional参数说明。</td>
     </tr>
     <tr>
       <td>headDim未对齐16。</td>
@@ -460,13 +460,16 @@ int main() {
     std::vector<aclFloat16> inputHostData(inputShape[0] * inputShape[1] * inputShape[2] * inputShape[3],
                                           aclFloatToFloat16(1.0));
     std::vector<aclFloat16> weightHostData(weightShape[0] * weightShape[1], aclFloatToFloat16(1.0));
-    std::vector<int32_t> slotMappingHostData(slotMappingShape[0], 0);
+    std::vector<int32_t> slotMappingHostData(slotMappingShape[0]);
+    for (int32_t i = 0; i < batch_size; ++i) {
+        slotMappingHostData[i] = i;
+    }
     std::vector<aclFloat16> outputCacheRefHostData(outputCacheRefShape[0] * outputCacheRefShape[1] *
                                                    outputCacheRefShape[2], aclFloatToFloat16(1.0));
     std::vector<int64_t> actSeqLenHostData(actSeqLenShape[0], 0);
     std::vector<int32_t> blockTableHostData(blockTableShape[0] * blockTableShape[1]);
     actSeqLenHostData[0]=32;
-    // 创建self aclTensor
+    // 创建输入、输出张量和序列长度数组
     ret = CreateAclTensor(inputHostData, inputShape, &inputDeviceAddr, aclDataType::ACL_FLOAT16, &input);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
     ret = CreateAclTensor(weightHostData, weightShape, &weightDeviceAddr, aclDataType::ACL_FLOAT16, &weight);
