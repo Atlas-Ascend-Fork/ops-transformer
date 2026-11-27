@@ -2440,7 +2440,7 @@ void SFAInfoParser::GenerateInfo(SFATilingInfo& sfaInfo)
         if (kvLayout_ == SFALayout::PA_BSND) {
             // Convert the element stride into a page pitch in token rows.
             // CheckContiguous() has checked the shared page-pitch constraints.
-            if (keyStride0_ != 0) {
+            if ((keyStride0_ != 0) && (n2Size_ != 0) && (qkHeadDim_ != 0)) {
                 const uint64_t elementsPerToken = static_cast<uint64_t>(n2Size_) * qkHeadDim_;
                 sfaInfo.keyStride0 = static_cast<uint32_t>(keyStride0_ / elementsPerToken);
             } else {
