@@ -28,6 +28,7 @@
 namespace Mc2Api {
 namespace {
 constexpr size_t SHARED_JETTY_MAX_TAG_SIZE = 255;
+constexpr size_t QUERY_FAILURE_TEXT_MAX = 64; // Includes the terminating null byte.
 constexpr CommEngine COMM_ENGINE = CommEngine::COMM_ENGINE_AIV;
 constexpr uint64_t BUFFER_ALIGNMENT = 2ULL * 1024ULL * 1024ULL;
 constexpr uint64_t HUGE1G_SIZE = 1024ULL * 1024ULL * 1024ULL;
@@ -89,17 +90,29 @@ private:
         uint32_t valid = 0;
     };
 
+    struct QueryFailureMetadata {
+        uint32_t failed = 0;
+        int32_t ret = 0;
+        uint32_t layer = 0;
+        uint32_t instance = std::numeric_limits<uint32_t>::max();
+        uint32_t peer = std::numeric_limits<uint32_t>::max();
+        char operation[QUERY_FAILURE_TEXT_MAX] = {};
+        char reason[QUERY_FAILURE_TEXT_MAX] = {};
+    };
+
     struct LayerCandidateMetadata {
         uint32_t layer = 0;
         CommProtocol protocol = CommProtocol::COMM_PROTOCOL_UBC_CTP;
         uint32_t ready = 0;
         uint64_t rootEndpointCount = 0;
+        QueryFailureMetadata queryFailure;
     };
 
     struct UnsupportedProtocolMetadata {
         uint32_t detected = 0;
         uint32_t layer = 0;
         uint32_t peer = 0;
+        QueryFailureMetadata queryFailure;
     };
 
     HcclComm comm_ = nullptr;
@@ -117,6 +130,35 @@ private:
     static void CheckHccl(HcclResult ret, const char* operation)
     {
         TORCH_CHECK(ret == HCCL_SUCCESS, operation, " failed, ret=", ret);
+    }
+
+    static HcclResult RecordQueryFailure(QueryFailureMetadata& failure, HcclResult ret, const char* operation,
+                                         uint32_t layer, const char* reason = "query failed",
+                                         uint32_t instance = std::numeric_limits<uint32_t>::max(),
+                                         uint32_t peer = std::numeric_limits<uint32_t>::max())
+    {
+        if (failure.failed == 0) {
+            ASCEND_LOGW("%s: %s, layer=%u, instance=%u, peer=%u, ret=%d", operation, reason, layer, instance, peer,
+                        ret);
+            failure.failed = 1U;
+            failure.ret = static_cast<int32_t>(ret);
+            failure.layer = layer;
+            failure.instance = instance;
+            failure.peer = peer;
+            std::copy_n(operation, std::min(std::strlen(operation), QUERY_FAILURE_TEXT_MAX - 1), failure.operation);
+            std::copy_n(reason, std::min(std::strlen(reason), QUERY_FAILURE_TEXT_MAX - 1), failure.reason);
+        }
+        return ret;
+    }
+
+    static void CheckQueryFailure(const QueryFailureMetadata& failure, uint32_t rank)
+    {
+        TORCH_CHECK(
+            failure.failed == 0, failure.operation, ": ", failure.reason, "; rank=", rank, ", layer=", failure.layer,
+            ", instance=",
+            failure.instance == std::numeric_limits<uint32_t>::max() ? "n/a" : std::to_string(failure.instance),
+            ", peer=", failure.peer == std::numeric_limits<uint32_t>::max() ? "n/a" : std::to_string(failure.peer),
+            ", ret=", failure.ret);
     }
 
     static void LogCleanupFailure(aclError ret, const char* operation)
@@ -288,20 +330,28 @@ private:
         return std::memcmp(lhs.loc.raws, rhs.loc.raws, sizeof(lhs.loc.raws)) < 0;
     }
 
-    std::vector<CommLink> GetProtocolLinks(uint32_t layer, uint32_t srcRank, uint32_t dstRank, CommProtocol protocol)
+    HcclResult GetProtocolLinks(uint32_t layer, uint32_t srcRank, uint32_t dstRank, CommProtocol protocol,
+                                std::vector<CommLink>& candidates, QueryFailureMetadata& failure)
     {
         CommLink* links = nullptr;
         uint32_t linkNum = 0;
-        CheckHccl(HcclRankGraphGetLinksFunc(comm_, layer, srcRank, dstRank, &links, &linkNum), "HcclRankGraphGetLinks");
-        TORCH_CHECK(linkNum == 0 || links != nullptr, "Null link list for layer ", layer, ", source rank ", srcRank,
-                    ", destination rank ", dstRank);
-        std::vector<CommLink> candidates;
+        const auto ret = HcclRankGraphGetLinksFunc(comm_, layer, srcRank, dstRank, &links, &linkNum);
+        if (ret != HCCL_SUCCESS) {
+            ASCEND_LOGW("HcclRankGraphGetLinks failed, rank=%u, layer=%u, peer=%u, ret=%d", srcRank, layer, dstRank,
+                        ret);
+            return RecordQueryFailure(failure, ret, "HcclRankGraphGetLinks", layer, "query failed",
+                                      std::numeric_limits<uint32_t>::max(), dstRank);
+        }
+        if (linkNum != 0 && links == nullptr) {
+            return RecordQueryFailure(failure, HCCL_E_INTERNAL, "HcclRankGraphGetLinks", layer, "Null link list",
+                                      std::numeric_limits<uint32_t>::max(), dstRank);
+        }
         for (uint32_t i = 0; i < linkNum; ++i) {
             if (links[i].linkAttr.linkProtocol == protocol) {
                 candidates.push_back(links[i]);
             }
         }
-        return candidates;
+        return HCCL_SUCCESS;
     }
 
     template <typename T>
@@ -442,29 +492,194 @@ private:
         return group;
     }
 
-    bool LayerCoversAllRanks(uint32_t layer)
+    HcclResult GetRankCoverage(uint32_t layer, bool& coversAllRanks, QueryFailureMetadata& failure,
+                               const uint32_t* instance = nullptr, std::vector<uint32_t>* queriedRanks = nullptr)
     {
+        coversAllRanks = false;
         uint32_t* ranks = nullptr;
         uint32_t rankNum = 0;
-        CheckHccl(HcclRankGraphGetRanksByLayerFunc(comm_, layer, &ranks, &rankNum), "HcclRankGraphGetRanksByLayer");
-        TORCH_CHECK(rankNum == 0 || ranks != nullptr, "Null rank list for layer ", layer);
+        const auto ret = instance == nullptr ?
+                             HcclRankGraphGetRanksByLayerFunc(comm_, layer, &ranks, &rankNum) :
+                             HcclRankGraphGetRanksByTopoInstFunc(comm_, layer, *instance, &ranks, &rankNum);
+        const std::string scope =
+            "layer " + std::to_string(layer) + (instance == nullptr ? "" : ", instance " + std::to_string(*instance));
+        const char* operation =
+            instance == nullptr ? "HcclRankGraphGetRanksByLayer" : "HcclRankGraphGetRanksByTopoInst";
+        const uint32_t instanceId = instance == nullptr ? std::numeric_limits<uint32_t>::max() : *instance;
+        // Query errors must reach the candidate-status collective on every rank.
+        if (ret != HCCL_SUCCESS) {
+            ASCEND_LOGW("Rank query failed, rank=%u, %s, ret=%d", context_.epRankId, scope.c_str(), ret);
+            return RecordQueryFailure(failure, ret, operation, layer, "query failed", instanceId);
+        }
+        if (rankNum != 0 && ranks == nullptr) {
+            ASCEND_LOGW("Null rank list, rank=%u, %s", context_.epRankId, scope.c_str());
+            return RecordQueryFailure(failure, HCCL_E_INTERNAL, operation, layer, "Null rank list", instanceId);
+        }
         std::vector<bool> covered(rankSize_, false);
         for (uint32_t i = 0; i < rankNum; ++i) {
-            TORCH_CHECK(ranks[i] < rankSize_, "Invalid rank in layer ", layer, ": ", ranks[i]);
+            if (ranks[i] >= rankSize_) {
+                ASCEND_LOGW("Invalid rank %u, rank=%u, %s", ranks[i], context_.epRankId, scope.c_str());
+                return RecordQueryFailure(failure, HCCL_E_INTERNAL, operation, layer, "Invalid rank", instanceId,
+                                          ranks[i]);
+            }
             covered[ranks[i]] = true;
         }
-        return std::all_of(covered.begin(), covered.end(), [](bool value) { return value; });
+        if (queriedRanks != nullptr && rankNum != 0) {
+            queriedRanks->assign(ranks, ranks + rankNum);
+        }
+        coversAllRanks = std::all_of(covered.begin(), covered.end(), [](bool value) { return value; });
+        return HCCL_SUCCESS;
+    }
+
+    static bool MatchesInstanceEndpoint(const EndpointDesc& linkEndpoint, const EndpointDesc& instanceEndpoint)
+    {
+        if (linkEndpoint.protocol != instanceEndpoint.protocol ||
+            linkEndpoint.loc.locType != instanceEndpoint.loc.locType ||
+            linkEndpoint.commAddr.type != instanceEndpoint.commAddr.type) {
+            return false;
+        }
+        // Instance queries may omit location IDs and inactive address bytes.
+        const auto& lhs = linkEndpoint.commAddr;
+        const auto& rhs = instanceEndpoint.commAddr;
+        switch (lhs.type) {
+            case COMM_ADDR_TYPE_EID:
+                return std::memcmp(lhs.eid, rhs.eid, sizeof(lhs.eid)) == 0;
+            case COMM_ADDR_TYPE_IP_V4:
+                return std::memcmp(&lhs.addr, &rhs.addr, sizeof(lhs.addr)) == 0;
+            case COMM_ADDR_TYPE_IP_V6:
+                return std::memcmp(&lhs.addr6, &rhs.addr6, sizeof(lhs.addr6)) == 0;
+            case COMM_ADDR_TYPE_ID:
+                return lhs.id == rhs.id;
+            default:
+                return false;
+        }
+    }
+
+    HcclResult GetClosEndpoints(uint32_t layer, CommTopo& type, std::vector<EndpointDesc>& endpoints,
+                                QueryFailureMetadata& failure)
+    {
+        auto ret = HcclRankGraphGetTopoTypeByLayerFunc(comm_, layer, &type);
+        if (ret != HCCL_SUCCESS) {
+            ASCEND_LOGW("HcclRankGraphGetTopoTypeByLayer failed, rank=%u, layer=%u, ret=%d", context_.epRankId, layer,
+                        ret);
+            return RecordQueryFailure(failure, ret, "HcclRankGraphGetTopoTypeByLayer", layer);
+        }
+        if (type != COMM_TOPO_CUSTOM) {
+            if (type == COMM_TOPO_CLOS) {
+                bool coversAllRanks = false;
+                ret = GetRankCoverage(layer, coversAllRanks, failure);
+                if (ret != HCCL_SUCCESS) {
+                    return ret;
+                }
+                if (!coversAllRanks) {
+                    type = COMM_TOPO_RESERVED;
+                }
+            }
+            return ret;
+        }
+        uint32_t* instances = nullptr;
+        uint32_t instanceCount = 0;
+        ret = HcclRankGraphGetTopoInstsByLayerFunc(comm_, layer, &instances, &instanceCount);
+        if (ret != HCCL_SUCCESS) {
+            ASCEND_LOGW("HcclRankGraphGetTopoInstsByLayer failed, rank=%u, layer=%u, ret=%d", context_.epRankId, layer,
+                        ret);
+            return RecordQueryFailure(failure, ret, "HcclRankGraphGetTopoInstsByLayer", layer);
+        }
+        if (instanceCount == 0) {
+            return HCCL_SUCCESS;
+        }
+        if (instances == nullptr) {
+            ASCEND_LOGW("Null topology instance list, rank=%u, layer=%u, count=%u", context_.epRankId, layer,
+                        instanceCount);
+            return RecordQueryFailure(failure, HCCL_E_INTERNAL, "HcclRankGraphGetTopoInstsByLayer", layer,
+                                      "Null topology instance list");
+        }
+        // Retain borrowed IDs before issuing another RankGraph query.
+        const std::vector<uint32_t> instanceIds(instances, instances + instanceCount);
+        for (uint32_t instance : instanceIds) {
+            CommTopo instanceType = COMM_TOPO_RESERVED;
+            ret = HcclRankGraphGetTopoTypeFunc(comm_, layer, instance, &instanceType);
+            if (ret != HCCL_SUCCESS) {
+                ASCEND_LOGW("HcclRankGraphGetTopoType failed, rank=%u, layer=%u, instance=%u, ret=%d",
+                            context_.epRankId, layer, instance, ret);
+                return RecordQueryFailure(failure, ret, "HcclRankGraphGetTopoType", layer, "query failed", instance);
+            }
+            if (instanceType != COMM_TOPO_CLOS) {
+                continue;
+            }
+            bool coversAllRanks = false;
+            ret = GetRankCoverage(layer, coversAllRanks, failure, &instance);
+            if (ret != HCCL_SUCCESS) {
+                return ret;
+            }
+            if (!coversAllRanks) {
+                continue;
+            }
+            uint32_t capacity = 0;
+            ret = HcclRankGraphGetEndpointNumFunc(comm_, layer, instance, &capacity);
+            if (ret != HCCL_SUCCESS) {
+                ASCEND_LOGW("HcclRankGraphGetEndpointNum failed, rank=%u, layer=%u, instance=%u, ret=%d",
+                            context_.epRankId, layer, instance, ret);
+                return RecordQueryFailure(failure, ret, "HcclRankGraphGetEndpointNum", layer, "query failed", instance);
+            }
+            if (capacity == 0) {
+                continue;
+            }
+            std::vector<EndpointDesc> localEndpoints(capacity);
+            uint32_t count = capacity;
+            ret = HcclRankGraphGetEndpointDescFunc(comm_, layer, instance, &count, localEndpoints.data());
+            if (ret != HCCL_SUCCESS) {
+                ASCEND_LOGW("HcclRankGraphGetEndpointDesc failed, rank=%u, layer=%u, instance=%u, ret=%d",
+                            context_.epRankId, layer, instance, ret);
+                return RecordQueryFailure(failure, ret, "HcclRankGraphGetEndpointDesc", layer, "query failed",
+                                          instance);
+            }
+            if (count > capacity) {
+                ASCEND_LOGW("Endpoint count exceeds capacity, rank=%u, layer=%u, instance=%u, count=%u, capacity=%u",
+                            context_.epRankId, layer, instance, count, capacity);
+                return RecordQueryFailure(failure, HCCL_E_INTERNAL, "HcclRankGraphGetEndpointDesc", layer,
+                                          "Endpoint count exceeds capacity", instance);
+            }
+            endpoints.insert(endpoints.end(), localEndpoints.begin(), localEndpoints.begin() + count);
+        }
+        return HCCL_SUCCESS;
     }
 
     bool SelectSharedLinks(uint32_t layer, CommProtocol protocol, bool layerPresent)
     {
-        bool localReady = layerPresent && LayerCoversAllRanks(layer);
+        QueryFailureMetadata queryFailure;
+        bool localReady = layerPresent;
+        CommTopo type = COMM_TOPO_RESERVED;
+        std::vector<EndpointDesc> closEndpoints;
+        if (localReady) {
+            const HcclResult ret = GetClosEndpoints(layer, type, closEndpoints, queryFailure);
+            // Query failures must reach the same candidate-status AllGather as the other ranks.
+            localReady =
+                ret == HCCL_SUCCESS && (type == COMM_TOPO_CLOS || (type == COMM_TOPO_CUSTOM && !closEndpoints.empty()));
+        }
         std::vector<std::vector<CommLink>> localPeerLinks(rankSize_);
         for (uint32_t peer = 0; localReady && peer < rankSize_; ++peer) {
             if (peer == context_.epRankId) {
                 continue;
             }
-            localPeerLinks[peer] = GetProtocolLinks(layer, context_.epRankId, peer, protocol);
+            const auto ret =
+                GetProtocolLinks(layer, context_.epRankId, peer, protocol, localPeerLinks[peer], queryFailure);
+            if (ret != HCCL_SUCCESS) {
+                localReady = false;
+                break;
+            }
+            if (type == COMM_TOPO_CUSTOM) {
+                auto& links = localPeerLinks[peer];
+                links.erase(std::remove_if(links.begin(), links.end(),
+                                           [&](const CommLink& link) {
+                                               return std::none_of(closEndpoints.begin(), closEndpoints.end(),
+                                                                   [&](const EndpointDesc& endpoint) {
+                                                                       return MatchesInstanceEndpoint(
+                                                                           link.srcEndpointDesc, endpoint);
+                                                                   });
+                                           }),
+                            links.end());
+            }
             localReady = !localPeerLinks[peer].empty();
         }
 
@@ -484,11 +699,13 @@ private:
         }
         // Missing local layers or links must not skip a collective. All ranks either reject this layer together
         // or proceed with the same root endpoint count and metadata sizes.
-        const LayerCandidateMetadata candidate{layer, protocol, static_cast<uint32_t>(localReady),
-                                               rootEndpoints.size()};
+        const LayerCandidateMetadata candidate{layer, protocol, static_cast<uint32_t>(localReady), rootEndpoints.size(),
+                                               queryFailure};
         const auto gatheredCandidates = AllGatherMetadata(std::vector<LayerCandidateMetadata>{candidate});
         bool globallyReady = true;
-        for (const auto& entry : gatheredCandidates) {
+        for (uint32_t rank = 0; rank < rankSize_; ++rank) {
+            const auto& entry = gatheredCandidates[rank];
+            CheckQueryFailure(entry.queryFailure, rank);
             TORCH_CHECK(entry.layer == layer && entry.protocol == protocol,
                         "Inconsistent shared Jetty layer/protocol selection across ranks");
             globallyReady = globallyReady && entry.ready != 0;
@@ -624,27 +841,36 @@ private:
     {
         UnsupportedProtocolMetadata unsupported{};
         for (uint32_t layer : layers) {
-            uint32_t* ranks = nullptr;
-            uint32_t rankNum = 0;
-            CheckHccl(HcclRankGraphGetRanksByLayerFunc(comm_, layer, &ranks, &rankNum), "HcclRankGraphGetRanksByLayer");
-            TORCH_CHECK(rankNum == 0 || ranks != nullptr, "Null rank list for layer ", layer);
-            if (rankNum == 0) {
-                continue;
+            bool coversAllRanks = false;
+            std::vector<uint32_t> peers;
+            // Validate borrowed rank lists through the same non-throwing query path as candidate selection.
+            if (GetRankCoverage(layer, coversAllRanks, unsupported.queryFailure, nullptr, &peers) != HCCL_SUCCESS) {
+                break;
             }
-            // RankGraph arrays are borrowed; retain the rank IDs before querying links.
-            const std::vector<uint32_t> peers(ranks, ranks + rankNum);
+            // Retain only the ranks in this layer before querying links, which may invalidate borrowed arrays.
             for (uint32_t peer : peers) {
-                TORCH_CHECK(peer < rankSize_, "Invalid rank in layer ", layer, ": ", peer);
                 if (peer == context_.epRankId) {
                     continue;
                 }
-                if (unsupported.detected == 0 &&
-                    !GetProtocolLinks(layer, context_.epRankId, peer, CommProtocol::COMM_PROTOCOL_UB_RTP).empty()) {
-                    unsupported = {1U, layer, peer};
+                std::vector<CommLink> links;
+                if (GetProtocolLinks(layer, context_.epRankId, peer, CommProtocol::COMM_PROTOCOL_UB_RTP, links,
+                                     unsupported.queryFailure) != HCCL_SUCCESS) {
+                    break;
                 }
+                if (unsupported.detected == 0 && !links.empty()) {
+                    unsupported.detected = 1U;
+                    unsupported.layer = layer;
+                    unsupported.peer = peer;
+                }
+            }
+            if (unsupported.queryFailure.failed != 0) {
+                break;
             }
         }
         const auto gathered = AllGatherMetadata(std::vector<UnsupportedProtocolMetadata>{unsupported});
+        for (uint32_t rank = 0; rank < rankSize_; ++rank) {
+            CheckQueryFailure(gathered[rank].queryFailure, rank);
+        }
         for (uint32_t rank = 0; rank < rankSize_; ++rank) {
             const auto& entry = gathered[rank];
             TORCH_CHECK(entry.detected == 0, "comm_alg='clos_only' does not support UBG (UB_RTP) links; rank=", rank,
@@ -656,16 +882,26 @@ private:
     {
         uint32_t* layers = nullptr;
         uint32_t layerNum = 0;
-        CheckHccl(HcclRankGraphGetLayersFunc(comm_, &layers, &layerNum), "HcclRankGraphGetLayers");
-        TORCH_CHECK(layerNum == 0 || layers != nullptr, "Null HCCL network layer list for shared Jetty");
+        QueryFailureMetadata queryFailure;
+        const auto ret = HcclRankGraphGetLayersFunc(comm_, &layers, &layerNum);
+        if (ret != HCCL_SUCCESS) {
+            RecordQueryFailure(queryFailure, ret, "HcclRankGraphGetLayers", 0);
+        } else if (layerNum != 0 && layers == nullptr) {
+            RecordQueryFailure(queryFailure, HCCL_E_INTERNAL, "HcclRankGraphGetLayers", 0, "Null layer list");
+        }
         // Some deployed HCOMM versions reuse or invalidate the borrowed layer array on the next RankGraph query.
         // SelectSharedLinks performs several such queries, so retain the values before entering the loop.
         std::vector<uint32_t> localLayers;
-        if (layerNum != 0) {
+        if (queryFailure.failed == 0 && layerNum != 0) {
             localLayers.assign(layers, layers + layerNum);
         }
         std::sort(localLayers.begin(), localLayers.end());
         localLayers.erase(std::unique(localLayers.begin(), localLayers.end()), localLayers.end());
+
+        const auto failures = AllGatherMetadata(std::vector<QueryFailureMetadata>{queryFailure});
+        for (uint32_t rank = 0; rank < rankSize_; ++rank) {
+            CheckQueryFailure(failures[rank], rank);
+        }
 
         // Use rank 0's ordered layer IDs as the common schedule. A layer absent on rank 0 cannot serve all ranks.
         const auto counts = AllGatherMetadata(std::vector<uint64_t>{localLayers.size()});
@@ -691,7 +927,9 @@ private:
         }
         // UBC selection failed collectively. Only now diagnose unsupported UBG alternatives.
         CheckSupportedProtocols(localLayers);
-        TORCH_CHECK(false, "No UBC layer has a shared Jetty endpoint that covers all peers");
+        TORCH_CHECK(false, "comm_alg='clos_only' requires a usable Clos topology covering all ranks, "
+                           "but no matching path was found. FullMesh topology is not supported in "
+                           "this mode. Please check the rank table and network topology.");
     }
 
     void RegisterDeviceBuffer(const std::string& contextTag, const std::string& bufferTag)

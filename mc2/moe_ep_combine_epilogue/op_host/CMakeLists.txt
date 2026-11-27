@@ -21,18 +21,30 @@ if (BUILD_OPEN_PROJECT)
     set(MC2_OPT ON PARENT_SCOPE)
     set(moe_ep_combine_epilogue_depends mc2/common mc2/3rd mc2/moe_ep_combine PARENT_SCOPE)
 
-    set(CONDITION_UNIT ${ASCEND_COMPUTE_UNIT})
-    if("${CONDITION_UNIT}" STREQUAL "ascend950")
-        add_ops_compile_options(
-            OP_NAME MoeEpCombineEpilogue
-            OPTIONS --cce-auto-sync=off
-                    -mllvm -cce-aicore-dcci-before-kernel-end=false
-        )
-    elseif("${CONDITION_UNIT}" STREQUAL "ascend910_93")
-        add_ops_compile_options(OP_NAME MoeEpCombineEpilogue OPTIONS --cce-auto-sync=off)
-    elseif("${CONDITION_UNIT}" STREQUAL "ascend910b")
-        add_ops_compile_options(OP_NAME MoeEpCombineEpilogue OPTIONS --cce-auto-sync=off)
-    endif()
+    foreach(CONDITION_UNIT IN LISTS ASCEND_COMPUTE_UNIT)
+        if("${CONDITION_UNIT}" STREQUAL "ascend950")
+            add_ops_compile_options(
+                OP_NAME MoeEpCombineEpilogue
+                COMPUTE_UNIT Ascend950PR_9599
+                OPTIONS --cce-auto-sync=off
+                        -mllvm -cce-aicore-dcci-before-kernel-end=false
+            )
+        elseif("${CONDITION_UNIT}" STREQUAL "ascend960dt")
+            add_ops_compile_options(
+                OP_NAME MoeEpCombineEpilogue
+                COMPUTE_UNIT Ascend960DT_968B7
+                OPTIONS --cce-auto-sync=off
+                        -mllvm -cce-aicore-dcci-before-kernel-end=false
+            )
+        elseif("${CONDITION_UNIT}" STREQUAL "ascend960pr")
+            add_ops_compile_options(
+                OP_NAME MoeEpCombineEpilogue
+                COMPUTE_UNIT Ascend960PR_969A1
+                OPTIONS --cce-auto-sync=off
+                        -mllvm -cce-aicore-dcci-before-kernel-end=false
+            )
+        endif()
+    endforeach()
 else()
     add_mc2_modules_sources(OPTYPE moe_ep_combine_epilogue moe_ep_combine_epilogue ACLNNTYPE aclnn aclnn_inner)
     set(SUB_MC2_COMPILE TRUE PARENT_SCOPE)
