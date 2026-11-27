@@ -129,7 +129,6 @@ public:
         maxStateUb_ = maxBuf_.Get<float>();
         sumStateUb_ = sumBuf_.Get<float>();
         coeffUb_ = coeffBuf_.Get<float>();
-        brcUb_ = brcBuf_.Get<float>();
         if constexpr (D64_P_BROADCAST) {
             // P uses one scalar scale. Keep its repeated source block away from the score/P alignment without
             // allocating another buffer.
@@ -238,24 +237,31 @@ public:
                            rawQCount <= MAX_BULK_Q_SCALE_ELEMENTS;
         const bool alignedQ = PATH != Int8GqaPath::BNSD && QuantFlashAttnLayoutInt8<PATH>::IsSg(tiling_.layoutQ) &&
                               !contiguousQ && !bulkQ && tiling_.groupSize % FP32_BLOCK_LANES == 0U;
+        const bool stridedQ =
+            QuantFlashAttnLayoutInt8<PATH>::IsSg(tiling_.layoutQ) && !contiguousQ && !packedQ && !bulkQ && !alignedQ;
+        if (rows_ % FP32_BLOCK_LANES != 0U) {
+            // DMA/compaction replaces the valid scales; keep the aligned vector tail initialized.
+            Duplicate(tmpBuf_.Get<float>()[rows_ / FP32_BLOCK_LANES * FP32_BLOCK_LANES], 0.0f, FP32_BLOCK_LANES);
+            if (stridedQ) {
+                auto strided = tmpBuf_.Get<uint8_t>()[STRIDED_SCALE_TMP_OFFSET_BYTES].ReinterpretCast<float>();
+                Duplicate(strided[rows_ * FP32_BLOCK_LANES], 0.0f, (Align8(rows_) - rows_) * FP32_BLOCK_LANES);
+            }
+        }
         // Cache one Q-scale tile for all KV iterations.
-        const uint64_t qOffset =
-            (static_cast<uint64_t>(batch) * tiling_.numHeadsQ + static_cast<uint64_t>(kvHead) * tiling_.groupSize) *
-                tiling_.seqLenQ +
-            mStart + rowStart_;
         QfaSyncEvent<HardEvent::V_MTE2>(EVENT_ID6);
         DataCopyParams qCopy(1U, rows_ * sizeof(float), 0U, 0U);
         DataCopyPadParams qPad{true, 0U, static_cast<uint8_t>(Align8(rows_) - rows_), 0U};
         if (tiling_.layoutQ == Int8GqaTnd::QFA_LAYOUT_BNSD) {
-            DataCopyPad(tmpBuf_.Get<float>(), qDescaleGm_[qOffset], qCopy, qPad);
+            DataCopyPad(tmpBuf_.Get<float>(), qDescaleGm_[QfaHeadMajorRow(tiling_, batch, kvHead, flatStart)], qCopy,
+                        qPad);
         } else if (contiguousQ) {
             const uint64_t offset =
-                QfaRow(tiling_.layoutQ, batch, 0U, 0U, tiling_.numHeadsQ, tiling_.seqLenQ, tiling_.qTokenStart) +
+                QfaRow(tiling_.layoutQ, batch, 0U, 0U, tiling_.numHeadsQ, tiling_.totalTokensQ, tiling_.qTokenStart) +
                 flatStart;
             DataCopyPad(tmpBuf_.Get<float>(), qDescaleGm_[offset], qCopy, qPad);
         } else if (packedQ) {
             const uint64_t offset = QfaRow(tiling_.layoutQ, batch, kvHead * tiling_.groupSize, firstToken,
-                                           tiling_.numHeadsQ, tiling_.seqLenQ, tiling_.qTokenStart);
+                                           tiling_.numHeadsQ, tiling_.totalTokensQ, tiling_.qTokenStart);
             DataCopyExtParams copy{
                 static_cast<uint16_t>(tokenCount), tiling_.groupSize * static_cast<uint32_t>(sizeof(float)),
                 (tiling_.numHeadsQ - tiling_.groupSize) * static_cast<uint32_t>(sizeof(float)), 0U, 0U};
@@ -263,8 +269,8 @@ public:
             DataCopyPad(tmpBuf_.Get<uint8_t>()[STRIDED_SCALE_TMP_OFFSET_BYTES].ReinterpretCast<float>(),
                         qDescaleGm_[offset], copy, pad);
         } else if (bulkQ) {
-            const uint64_t offset =
-                QfaRow(tiling_.layoutQ, batch, 0U, firstToken, tiling_.numHeadsQ, tiling_.seqLenQ, tiling_.qTokenStart);
+            const uint64_t offset = QfaRow(tiling_.layoutQ, batch, 0U, firstToken, tiling_.numHeadsQ,
+                                           tiling_.totalTokensQ, tiling_.qTokenStart);
             const uint32_t count = static_cast<uint32_t>(rawQCount);
             DataCopyExtParams copy{1U, count * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
             DataCopyPadExtParams<float> pad{true, 0U, static_cast<uint8_t>(Align8(count) - count), 0.0f};
@@ -278,8 +284,8 @@ public:
                 const uint32_t token = QuantFlashAttnLayoutInt8<PATH>::QfaQueryToken(tiling_, row);
                 const uint32_t h = QuantFlashAttnLayoutInt8<PATH>::QfaQueryHead(tiling_, kvHead, row);
                 const uint32_t count = QuantFlashAttnLayoutInt8<PATH>::QfaQueryRun(tiling_, row, rows_ - done);
-                const uint64_t offset =
-                    QfaRow(tiling_.layoutQ, batch, h, token, tiling_.numHeadsQ, tiling_.seqLenQ, tiling_.qTokenStart);
+                const uint64_t offset = QfaRow(tiling_.layoutQ, batch, h, token, tiling_.numHeadsQ,
+                                               tiling_.totalTokensQ, tiling_.qTokenStart);
                 if (alignedQ) {
                     DataCopyExtParams copy{1U, count * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
                     DataCopyPad(tmpBuf_.Get<float>()[done], qDescaleGm_[offset], copy,
@@ -303,7 +309,7 @@ public:
             CompactSgGroups(flatStart % tiling_.groupSize, rows_, tokenCount);
         } else if (bulkQ) {
             GatherSgScales(flatStart % tiling_.groupSize, rows_);
-        } else if (QuantFlashAttnLayoutInt8<PATH>::IsSg(tiling_.layoutQ) && !contiguousQ && !alignedQ) {
+        } else if (stridedQ) {
             CompactStridedScales(tmpBuf_.Get<float>(), rows_);
         }
         Cast(qScaleBuf_.Get<half>(), tmpBuf_.Get<float>(), RoundMode::CAST_NONE, Align8(rows_));
@@ -364,7 +370,7 @@ public:
         // Retire Vec1/Vec2 readers before reusing their scale scratch.
         QfaSyncEvent<HardEvent::V_MTE2>(EVENT_ID6);
         const uint64_t offset = QfaRow(tiling_.layoutKv, batch_, packedHeads ? 0U : kvHead_, nStart + halfStart,
-                                       tiling_.numHeadsKv, tiling_.seqLenKv, tiling_.kvTokenStart);
+                                       tiling_.numHeadsKv, tiling_.totalTokensKv, tiling_.kvTokenStart);
         if (tiling_.layoutKv == Int8GqaTnd::QFA_LAYOUT_BNSD || packedHeads) {
             const uint32_t elements = count * scaleStride;
             DataCopyExtParams copy{1U, elements * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
@@ -509,10 +515,10 @@ public:
         haveAccum_ = true;
     }
 
-    __aicore__ inline void WriteZero()
+    __aicore__ inline void WriteZero(bool padding = false)
     {
         if constexpr (RETURN_LSE)
-            WriteLse(true);
+            WriteLse(true, padding);
         for (uint32_t chunk = 0; chunk < rows_; chunk += VecRows()) {
             const uint32_t count = Min32(VecRows(), rows_ - chunk);
             Duplicate(pvUb_, static_cast<half>(0.0f), count * HeadDimAlign());
@@ -524,7 +530,7 @@ public:
 private:
     // Called exactly once per completed Q task, before any PV compensation changes its denominator. The two online
     // max/sum banks have the same lifetime, including the interleaved cross-Q pipeline.
-    __aicore__ inline void WriteLse(bool empty)
+    __aicore__ inline void WriteLse(bool empty, bool padding = false)
     {
         if constexpr (RETURN_LSE) {
             if (rows_ == 0U)
@@ -533,7 +539,7 @@ private:
             // score/PV buffer, leaving the broadcast and online-state buffers untouched.
             LocalTensor<float> values = dataBuf_.Get<float>();
             if (empty) {
-                Duplicate(values, -__builtin_inff(), Align8(rows_));
+                Duplicate(values, padding ? __builtin_inff() : -__builtin_inff(), Align8(rows_));
             } else {
                 Ln(values, sumStateUb_[stateIdx_ * MAX_TASK_ROWS], Align8(rows_));
                 PipeBarrier<PIPE_V>();
@@ -560,7 +566,8 @@ private:
             if (stride > 1U) {
                 // Immutable row indices avoid scalar stores into retiring vector scratch.
                 const auto linear = qScaleBuf_.Get<uint8_t>()[MAX_TASK_ROWS * sizeof(half)].ReinterpretCast<int32_t>();
-                Muls(indices, linear, static_cast<int32_t>(stride * sizeof(float)), Align8(rows_));
+                const uint32_t indexRows = (rows_ + FP32_REPEAT_LANES - 1U) / FP32_REPEAT_LANES * FP32_REPEAT_LANES;
+                Muls(indices, linear, static_cast<int32_t>(stride * sizeof(float)), indexRows);
                 PipeBarrier<PIPE_V>();
             }
             for (uint32_t j = 0U; j < runs; ++j) {
@@ -571,7 +578,7 @@ private:
                 const uint64_t offset =
                     PATH == Int8GqaPath::TND ?
                         static_cast<uint64_t>(head) * tiling_.totalTokensQ + tiling_.qTokenStart + token :
-                        (static_cast<uint64_t>(batch_) * tiling_.numHeadsQ + head) * tiling_.seqLenQ + token;
+                        (static_cast<uint64_t>(batch_) * tiling_.numHeadsQ + head) * tiling_.totalTokensQ + token;
                 // Head-major Q rows can cross a head boundary contiguously.
                 auto source = values;
                 if (stride > 1U) {
@@ -604,6 +611,7 @@ private:
     static constexpr uint32_t VECTOR_REPEAT_BYTES = 256U;
     static constexpr uint32_t VECTOR_REPEAT_BLOCKS = VECTOR_REPEAT_BYTES / QFA_INT8_DMA_BLOCK_BYTES;
     static constexpr uint32_t FP16_REPEAT_LANES = VECTOR_REPEAT_BYTES / sizeof(half);
+    static constexpr uint32_t FP32_REPEAT_LANES = VECTOR_REPEAT_BYTES / sizeof(float);
     static constexpr uint32_t MAX_VECTOR_REPEATS = 255U;
     static constexpr uint32_t VECTOR_MASK_WORDS = 2U;          // AscendC vector bitmasks use two uint64_t words.
     static constexpr uint32_t K_SCALE_FIXPIPE_ALIGNMENT = 32U; // Pack and round scales in whole vector repeats.
@@ -1076,7 +1084,9 @@ private:
         auto bitmap = tmpBuf_.Get<uint8_t>()[SG_SCALE_BITMAP_OFFSET_BYTES].ReinterpretCast<uint32_t>();
         const uint32_t end = ((start + count - 1U) / tiling_.groupSize) * FP32_BLOCK_LANES +
                              (start + count - 1U) % tiling_.groupSize + 1U;
-        const uint32_t words = (tokens * FP32_BLOCK_LANES + CAUSAL_MASK_WORD_BITS - 1U) / CAUSAL_MASK_WORD_BITS;
+        // FP32 GatherMask reads complete 64-bit bitmap words.
+        const uint32_t words =
+            ((tokens * FP32_BLOCK_LANES + CAUSAL_MASK_WORD_BITS - 1U) / CAUSAL_MASK_WORD_BITS + 1U) & ~1U;
         const uint32_t pattern = ((1U << tiling_.groupSize) - 1U) * SG_SCALE_MASK_BYTE_BROADCAST;
         QfaSyncEvent<HardEvent::V_S>(EVENT_ID6);
         for (uint32_t i = 0; i < words; ++i) {
@@ -1101,7 +1111,7 @@ private:
         auto numer = tmpBuf_.Get<uint8_t>()[SG_SCALE_GATHER_NUMERATOR_OFFSET_BYTES].ReinterpretCast<float>();
         auto denom = tmpBuf_.Get<uint8_t>()[SG_SCALE_GATHER_DENOMINATOR_OFFSET_BYTES].ReinterpretCast<float>();
         auto quotient = denom.ReinterpretCast<int32_t>();
-        const uint32_t n = Align8(count);
+        const uint32_t n = (count + FP32_REPEAT_LANES - 1U) / FP32_REPEAT_LANES * FP32_REPEAT_LANES;
         // Build only the task's offset from immutable indices. Reusing the P/PV scratch must not introduce scalar
         // index stores between tasks.
         const auto qIndex = qScaleBuf_.Get<uint8_t>()[MAX_TASK_ROWS * sizeof(half)].ReinterpretCast<int32_t>();
@@ -1243,6 +1253,7 @@ private:
                 // Each bitmap word selects 32 scores in a complete N512 tile.
                 const uint32_t wordsPerRow = MAX_BLOCK_N / CAUSAL_MASK_WORD_BITS;
                 const uint32_t words = rows * wordsPerRow;
+                const uint32_t indexWords = (words + FP32_REPEAT_LANES - 1U) / FP32_REPEAT_LANES * FP32_REPEAT_LANES;
                 auto index = pUb_.template ReinterpretCast<int32_t>();
                 auto row = pUb_[P_MASK_ROW_OFFSET_BYTES].template ReinterpretCast<int32_t>();
                 auto bitmap = pUb_[P_MASK_BITMAP_OFFSET_BYTES].template ReinterpretCast<uint32_t>();
@@ -1252,31 +1263,31 @@ private:
                     static_cast<int32_t>(static_cast<int64_t>(QuantFlashAttnLayoutInt8<PATH>::QfaQueryToken(
                                              tiling_, mStart_ + rowStart_ + chunk)) +
                                          1 + static_cast<int64_t>(tiling_.seqLenKv) - tiling_.seqLenQ - nStart_);
-                CreateMaskIndices(index, words);
+                CreateMaskIndices(index, indexWords);
                 // N512 has 16 words per row: shift by 4 for the row and keep the low 4 bits for the word.
                 ShiftRight(row.template ReinterpretCast<uint32_t>(), index.template ReinterpretCast<uint32_t>(), 4U,
-                           words);
+                           indexWords);
                 PipeBarrier<PIPE_V>();
-                Adds(row, row, validBase, words);
+                Adds(row, row, validBase, indexWords);
                 PipeBarrier<PIPE_V>();
                 ShiftLeft(index.template ReinterpretCast<uint32_t>(), index.template ReinterpretCast<uint32_t>(), 28U,
-                          words);
+                          indexWords);
                 PipeBarrier<PIPE_V>();
                 ShiftRight(index.template ReinterpretCast<uint32_t>(), index.template ReinterpretCast<uint32_t>(), 28U,
-                           words);
+                           indexWords);
                 PipeBarrier<PIPE_V>();
                 // Shift by 5 to convert a word index to a 32-score offset.
                 ShiftLeft(index.template ReinterpretCast<uint32_t>(), index.template ReinterpretCast<uint32_t>(), 5U,
-                          words);
+                          indexWords);
                 PipeBarrier<PIPE_V>();
-                Sub(index, row, index, words);
+                Sub(index, row, index, indexWords);
                 PipeBarrier<PIPE_V>();
-                Maxs(index, index, static_cast<int32_t>(0), words);
+                Maxs(index, index, static_cast<int32_t>(0), indexWords);
                 PipeBarrier<PIPE_V>();
-                Mins(index, index, static_cast<int32_t>(CAUSAL_MASK_WORD_BITS), words);
+                Mins(index, index, static_cast<int32_t>(CAUSAL_MASK_WORD_BITS), indexWords);
                 PipeBarrier<PIPE_V>();
                 ShiftLeft(index.template ReinterpretCast<uint32_t>(), index.template ReinterpretCast<uint32_t>(),
-                          FP32_BYTE_OFFSET_SHIFT, words);
+                          FP32_BYTE_OFFSET_SHIFT, indexWords);
                 PipeBarrier<PIPE_V>();
                 Gather(bitmap, lut, index.template ReinterpretCast<uint32_t>(), 0U, words);
                 PipeBarrier<PIPE_V>();
@@ -1382,9 +1393,7 @@ private:
         }
         QfaSyncEvent<HardEvent::V_MTE3>(EVENT_ID0);
         if constexpr (PATH == Int8GqaPath::BNSD) {
-            const uint64_t row =
-                (static_cast<uint64_t>(batch_) * tiling_.numHeadsQ + kvHead_ * tiling_.groupSize) * tiling_.seqLenQ +
-                mStart_ + rowStart_ + chunk;
+            const uint64_t row = QfaHeadMajorRow(tiling_, batch_, kvHead_, mStart_ + rowStart_ + chunk);
             DataCopyExtParams p(chunkRows, OutputDim() * sizeof(half),
                                 (HeadDimAlign() - ((OutputDim() + FP16_BLOCK_LANES - 1U) & ~(FP16_BLOCK_LANES - 1U))) *
                                     sizeof(half) / QFA_INT8_DMA_BLOCK_BYTES,
@@ -1408,7 +1417,7 @@ private:
                         blocks = (chunkRows - done) / rows;
                     }
                     const uint64_t offset = QfaRow(tiling_.layoutOut, batch_, head, token, tiling_.numHeadsQ,
-                                                   tiling_.seqLenQ, tiling_.qTokenStart) *
+                                                   tiling_.totalTokensQ, tiling_.qTokenStart) *
                                             OutputDim();
                     DataCopyExtParams group(
                         blocks, rows * OutputDim() * sizeof(half), 0U,
@@ -1423,7 +1432,7 @@ private:
                                            chunkRows - done :
                                            QuantFlashAttnLayoutInt8<PATH>::QfaQueryRun(tiling_, row, chunkRows - done);
                 const uint64_t offset = QfaRow(tiling_.layoutOut, batch_, head, token, tiling_.numHeadsQ,
-                                               tiling_.seqLenQ, tiling_.qTokenStart) *
+                                               tiling_.totalTokensQ, tiling_.qTokenStart) *
                                         OutputDim();
                 DataCopyExtParams p;
                 p.blockCount = count;
@@ -1436,7 +1445,7 @@ private:
                                       (tiling_.numHeadsQ - 1U) * OutputDim() * sizeof(half);
                 } else if (QuantFlashAttnLayoutInt8<PATH>::IsSg(tiling_.layoutQ)) {
                     p.dstStride = tiling_.layoutOut == Int8GqaTnd::QFA_LAYOUT_BNSD ?
-                                      (tiling_.seqLenQ - 1U) * OutputDim() * sizeof(half) :
+                                      (tiling_.totalTokensQ - 1U) * OutputDim() * sizeof(half) :
                                       0U;
                 } else {
                     p.dstStride = tiling_.layoutOut == Int8GqaTnd::QFA_LAYOUT_BNSD ?
@@ -1469,7 +1478,7 @@ private:
     LocalTensor<half> scoreUb_;
     LocalTensor<int8_t> pUb_;
     LocalTensor<half> pvUb_;
-    LocalTensor<float> maxStateUb_, sumStateUb_, coeffUb_, brcUb_;
+    LocalTensor<float> maxStateUb_, sumStateUb_, coeffUb_;
     LocalTensor<half> quantScaleUb_, rowMaxUb_, rowSumUb_, rowBrcUb_;
     LocalTensor<float> rowMaxFloatUb_, rowSumFloatUb_;
     uint32_t subBlock_ = 0, batch_ = 0, kvHead_ = 0;

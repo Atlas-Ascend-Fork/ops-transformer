@@ -16,13 +16,18 @@
 #include "log.h"
 #include "status.h"
 #include <algorithm>
+#include <array>
+#include <utility>
+#include <optional>
 #include <climits>
-#include <cstdio>
+#include <cstring>
 #include <cmath>
 #include "quant_flash_attn_metadata_aicpu.h"
 #include "../../quant_flash_attn/op_host/qfa_adjust_sinner_souter.h"
 #include "../../quant_flash_attn/op_host/arch22/quant_flash_attn_tiling_a8c8.h"
 #include "../../quant_flash_attn/op_kernel/arch22/quant_flash_attn_metadata_paged.h"
+#include "../../quant_flash_attn/op_host/arch22/quant_flash_attn_schedule_int8.h"
+#include "../../quant_flash_attn/op_kernel/arch22/quant_flash_attn_metadata_int8.h"
 
 #define KERNEL_STATUS_OK 0
 #define KERNEL_STATUS_PARAM_INVALID 1
@@ -36,6 +41,9 @@ uint32_t QuantFlashAttnMetadataCpuKernel::Compute(CpuKernelContext& ctx)
     }
     if (IsPagedInt8()) {
         return GenPagedInt8MetaData() ? KERNEL_STATUS_OK : KERNEL_STATUS_PARAM_INVALID;
+    }
+    if (quantMode_ == QFA_INT8_QUANT_MODE) {
+        return GenInt8MetaData() ? KERNEL_STATUS_OK : KERNEL_STATUS_PARAM_INVALID;
     }
     SectionStreamKResult splitRes;
     success = BalanceSchedule(splitRes) && GenMetaData(splitRes);
@@ -96,7 +104,7 @@ bool QuantFlashAttnMetadataCpuKernel::Prepare(CpuKernelContext& ctx)
     GetAttrValueOpt(ctx, "head_dim_v", headDimV_);
     GetAttrValueOpt(ctx, "metadata_dim_num", metadataDimNum_);
     GetAttrValueOpt(ctx, "metadata_row_size", metadataRowSize_);
-    return IsPagedInt8() || ParamsInit();
+    return quantMode_ == QFA_INT8_QUANT_MODE || ParamsInit();
 }
 
 bool QuantFlashAttnMetadataCpuKernel::IsPagedInt8() const
@@ -259,6 +267,451 @@ bool QuantFlashAttnMetadataCpuKernel::GenPagedInt8MetaData()
         header.planIndex[QFA_PAGED_PLAN_PAGE_128_ALLOW_PAIRED] = QFA_PAGED_PLAN_PAGE_128_ALLOW_PAIRED;
     }
     return true;
+}
+
+namespace {
+// Like the other metadata schedulers, this is an algorithm budget rather than a platform L2 query.
+constexpr uint32_t INT8_L2_SECTION_BYTES = 96U * 1024U * 1024U;
+
+using namespace BaseApi::Int8GqaTnd;
+int64_t Int8VectorSize(Tensor* tensor)
+{
+    const auto shape = tensor == nullptr ? nullptr : tensor->GetTensorShape();
+    const int64_t count = shape != nullptr && shape->GetDims() == 1 ? shape->GetDimSize(0) : -1;
+    return tensor != nullptr && tensor->GetData() != nullptr && tensor->GetDataType() == DT_INT32 && count >= 0 &&
+                   (tensor->GetDataSize() == 0 ||
+                    tensor->GetDataSize() == static_cast<uint64_t>(count) * sizeof(int32_t)) ?
+               count :
+               -1;
+}
+struct Int8HeadReader {
+    const std::vector<QfaSequenceDescriptor>& sequences;
+    uint32_t heads, first = 0U;
+    QfaSequenceDescriptor ReadSequence(uint32_t index)
+    {
+        auto seq = sequences[(first + index) / heads];
+        seq.tasks = seq.tasks == 0U ? 0U : seq.tiles;
+        return seq;
+    }
+};
+QfaScheduleParameters Int8PlanParameters(const QuantFlashAttnTilingDataInt8& t, uint32_t count)
+{
+    return {count, t.usedCoreNum, t.layoutQ == QFA_LAYOUT_BNSD ? 1U : t.groupSize, t.blockM, t.blockN, t.maskMode};
+}
+
+class Int8WorkPrefix {
+    using Entry = std::array<uint64_t, 2>;
+
+public:
+    struct View {
+        const std::vector<Entry>& prefix;
+        uint32_t first, last;
+        uint64_t Tasks(uint32_t index) const
+        {
+            return prefix[first + index][0] - prefix[first][0];
+        }
+        uint64_t Work(uint32_t index) const
+        {
+            return prefix[first + index][1] - prefix[first][1];
+        }
+        uint32_t LocateTask(uint64_t tasks) const
+        {
+            return Locate(tasks, 0U, false);
+        }
+        uint32_t LocateWork(uint64_t work) const
+        {
+            return Locate(work, 1U, work == 0U);
+        }
+
+    private:
+        uint32_t Locate(uint64_t value, uint32_t column, bool strict) const
+        {
+            value += prefix[first][column];
+            const auto begin = prefix.begin() + first + 1U, end = prefix.begin() + last + 1U;
+            const auto found =
+                strict ?
+                    std::upper_bound(begin, end, value,
+                                     [column](uint64_t x, const Entry& y) { return x < y[column]; }) :
+                    std::lower_bound(begin, end, value, [column](const Entry& x, uint64_t y) { return x[column] < y; });
+            return found == end ? last - first : static_cast<uint32_t>(found - prefix.begin()) - first - 1U;
+        }
+    };
+
+    Int8WorkPrefix(const QuantFlashAttnTilingDataInt8& t, const std::vector<QfaSequenceDescriptor>& sequences)
+    {
+        prefix_.reserve(sequences.size() * t.numHeadsKv + 1U);
+        prefix_.push_back({0U, 0U});
+        const uint32_t group = t.layoutQ == QFA_LAYOUT_BNSD ? 1U : t.groupSize;
+        for (const auto& seq : sequences) {
+            const uint64_t tasks = seq.tasks == 0U ? 0U : seq.tiles;
+            // All KV heads in a sequence have the same cost; evaluate the shared model once.
+            const auto work = QfaSequenceWork(tasks, seq.sq, seq.sk, group, t.blockM, t.blockN, t.maskMode != 0U);
+            for (uint32_t h = 0U; h < t.numHeadsKv; ++h)
+                prefix_.push_back({prefix_.back()[0] + tasks, prefix_.back()[1] + work});
+        }
+    }
+    View Section(uint32_t first, uint32_t last) const
+    {
+        return {prefix_, first, last};
+    }
+
+private:
+    std::vector<Entry> prefix_;
+};
+
+struct Int8SectionPlan {
+    std::vector<std::array<uint32_t, 2>> ranges;
+    uint32_t sections = 1U, mode = QFA_METADATA_NORMAL, step = 1U;
+    uint64_t criticalWork = 0U;
+};
+
+Int8SectionPlan MakeInt8Plan(const QuantFlashAttnTilingDataInt8& t, const std::vector<QfaSequenceDescriptor>& sequences,
+                             const std::vector<uint32_t>& ends, const Int8WorkPrefix& prefix)
+{
+    Int8SectionPlan plan;
+    plan.sections = ends.size();
+    plan.ranges.resize(ends.size() * t.usedCoreNum);
+    Int8HeadReader reader{sequences, t.numHeadsKv};
+    std::pair<uint64_t, uint32_t> loads[QFA_METADATA_MAX_CORES];
+    std::pair<uint64_t, std::array<uint32_t, 2>> slots[QFA_METADATA_MAX_CORES];
+    for (uint32_t core = 0U; core < t.usedCoreNum; ++core)
+        loads[core].second = core;
+    uint64_t taskBase = 0U;
+    for (uint32_t section = 0U; section < ends.size(); ++section) {
+        const uint32_t count = ends[section] - reader.first;
+        const auto view = prefix.Section(reader.first, ends[section]);
+        QfaTaskRangePlanner<Int8HeadReader> planner(Int8PlanParameters(t, count), reader);
+        uint64_t begin = 0U, beginWork = 0U;
+        for (uint32_t core = 0U; core < t.usedCoreNum; ++core) {
+            const uint64_t end = core + 1U == t.usedCoreNum ?
+                                     view.Tasks(count) :
+                                     planner.Boundary(view.Work(count) * (core + 1U) / t.usedCoreNum, view);
+            const uint64_t endWork = end == begin ? beginWork : planner.PrefixWork(end, view);
+            slots[core] = {endWork - beginWork,
+                           {static_cast<uint32_t>(taskBase + begin), static_cast<uint32_t>(taskBase + end)}};
+            begin = end;
+            beginWork = endWork;
+            // A section boundary drains the cross-Q FIFO, even when its range is otherwise well balanced.
+            if (section != 0U && slots[core].first != 0U)
+                slots[core].first += QFA_PIPELINE_SLOTS - 1U;
+        }
+        taskBase += begin;
+        std::sort(loads, loads + t.usedCoreNum);
+        std::stable_sort(slots, slots + t.usedCoreNum, [](const auto& x, const auto& y) { return x.first > y.first; });
+        for (uint32_t i = 0U; i < t.usedCoreNum; ++i) {
+            plan.ranges[section * t.usedCoreNum + loads[i].second] = slots[i].second;
+            loads[i].first += slots[i].first;
+        }
+        reader.first = ends[section];
+    }
+    plan.criticalWork = std::max_element(loads, loads + t.usedCoreNum)->first;
+    return plan;
+}
+
+bool WriteInt8SchedulingTable(const QfaInt8ScheduleInput& input, std::vector<QfaSequenceDescriptor>& sequences,
+                              uint32_t* output)
+{
+    QfaInt8Schedule schedule;
+    KERNEL_CHECK_FALSE(
+        SelectInt8Config(input, schedule, true), false,
+        "INT8 metadata scheduling limits exceeded: B=%ld Hq=%ld Hkv=%ld D=%ld maxQ=%ld maxK=%ld cores=%u", input.batch,
+        input.headsQ, input.headsK, input.dim, input.maxQ, input.maxK, input.aicNum);
+    const auto t = schedule.payload.base.config;
+    const uint32_t batch = t.batchSize, cores = t.usedCoreNum;
+    uint64_t actualTasks = 0U;
+    uint32_t maxQ = 0U, maxK = 0U;
+    std::vector<uint32_t> ends;
+    std::vector<uint64_t> liveHeads;
+    uint64_t bytes = 0U, maxHeadBytes = 0U;
+    uint32_t head = 0U, maxTiles = 0U;
+    for (auto& seq : sequences) {
+        maxQ = std::max(maxQ, seq.sq);
+        maxK = std::max(maxK, seq.sk);
+        seq.tiles = t.layoutQ != QFA_LAYOUT_TND && t.sequsedFlags == 0U ? t.totalTilesM : QfaSequenceTiles(t, seq.sq);
+        const uint64_t tasks = seq.sk == 0U ? 0U : static_cast<uint64_t>(seq.tiles) * t.numHeadsKv;
+        KERNEL_CHECK_FALSE(tasks <= UINT32_MAX && actualTasks <= UINT32_MAX - tasks, false,
+                           "INT8 metadata task count exceeds UINT32 at batch=%zu",
+                           static_cast<size_t>(&seq - sequences.data()));
+        seq.tasks = tasks;
+        actualTasks += tasks;
+        const uint64_t qo = static_cast<uint64_t>(seq.sq) * t.groupSize * (3U * t.headDim + sizeof(float));
+        const uint64_t kv = static_cast<uint64_t>(seq.sk) * (2U * t.headDim + sizeof(float)) + sizeof(float);
+        const uint64_t headBytes = tasks == 0U ? 0U : qo + kv;
+        maxHeadBytes = std::max(maxHeadBytes, headBytes);
+        maxTiles = std::max(maxTiles, seq.tiles);
+        for (uint32_t h = 0U; h < t.numHeadsKv; ++h, ++head) {
+            if (headBytes != 0U && bytes != 0U && bytes + headBytes > INT8_L2_SECTION_BYTES) {
+                ends.push_back(head);
+                bytes = 0U;
+            }
+            bytes += headBytes;
+            if (tasks != 0U)
+                // A folded GQA tile reuses KV across G heads; price Q/O streaming per query head, rather than
+                // treating all G query heads as simultaneously reusable L2 data.
+                liveHeads.push_back(kv + qo / t.groupSize);
+        }
+    }
+    ends.push_back(head);
+    const std::vector<uint32_t> whole{head};
+    // Dense and single-sequence static ranges are already provided by the shared host/device scheduler.
+    const bool useStaticSchedule =
+        t.sequsedFlags == 0U &&
+        (t.layoutQ != QFA_LAYOUT_TND || (batch == 1U && sequences[0].sq == t.seqLenQ && sequences[0].sk == t.seqLenKv));
+    const bool staticPaired =
+        useStaticSchedule && QfaCanPair(t, sequences[0]) && (actualTasks / QFA_MIRRORED_TASK_PAIR_SIZE) % cores == 0U;
+    const bool compareSections = ends.size() > 1U && maxTiles > 1U && maxHeadBytes > INT8_L2_SECTION_BYTES / cores;
+    std::optional<Int8WorkPrefix> prefix;
+    if (!useStaticSchedule || compareSections)
+        prefix.emplace(t, sequences);
+    Int8SectionPlan best;
+    if (useStaticSchedule) {
+        // Divisible paired tasks have uniform ranges and need no populated payload.
+        if (!staticPaired)
+            KERNEL_CHECK_FALSE(PopulateInt8Schedule(schedule), false, "INT8 static task map generation failed");
+        best.ranges.resize(cores);
+        const auto& payload = schedule.payload.base;
+        struct SequenceReader {
+            const std::vector<QfaSequenceDescriptor>& seq;
+            QfaSequenceDescriptor ReadSequence(uint32_t b)
+            {
+                return seq[b];
+            }
+        } reader{sequences};
+        QfaTaskRangePlanner<SequenceReader> planner(Int8PlanParameters(t, batch), reader);
+        const bool mapped = payload.useCoreRanges == QFA_CORE_RANGES_TASK_MAP;
+        for (uint32_t core = 0U; core < cores; ++core) {
+            QfaCoreTaskRange range;
+            if (staticPaired)
+                range = {actualTasks / cores * core, actualTasks / cores * (core + 1U), 1U};
+            else if (payload.useCoreRanges != QFA_CORE_RANGES_NONE)
+                range = {payload.coreTaskBegin[core], payload.coreTaskBegin[core + 1U], 1U};
+            else if (t.layoutQ == QFA_LAYOUT_TND) {
+                planner.Init(core);
+                range = {planner.Begin(), planner.End(), 1U};
+            } else {
+                range = QfaDenseTaskRange(t, core);
+            }
+            best.ranges[core] = {static_cast<uint32_t>(range.begin), static_cast<uint32_t>(range.end)};
+            best.step = range.step;
+        }
+        best.mode = staticPaired ? QFA_METADATA_PAIRED : mapped ? QFA_METADATA_MAPPED : QFA_METADATA_NORMAL;
+    } else {
+        best = MakeInt8Plan(t, sequences, whole, *prefix);
+    }
+    if (useStaticSchedule && compareSections) {
+        Int8HeadReader reader{sequences, t.numHeadsKv};
+        QfaTaskRangePlanner<Int8HeadReader> costs(Int8PlanParameters(t, batch * t.numHeadsKv), reader);
+        const auto view = prefix->Section(0U, batch * t.numHeadsKv);
+        for (const auto range : best.ranges) {
+            uint64_t work = 0U;
+            if (best.mode == QFA_METADATA_PAIRED) {
+                work = (range[1] - range[0]) / QFA_MIRRORED_TASK_PAIR_SIZE *
+                       ((static_cast<uint64_t>(t.seqLenKv) + t.blockN - 1U) / t.blockN + 1U +
+                        2U * QFA_CORE_WORK_SETUP_STAGES);
+            } else if (best.mode == QFA_METADATA_MAPPED || best.step != 1U) {
+                if (best.mode != QFA_METADATA_MAPPED && t.maskMode == 0U) {
+                    const uint64_t tasks = (range[1] - range[0] + best.step - 1U) / best.step;
+                    work = tasks * ((static_cast<uint64_t>(t.seqLenKv) + t.blockN - 1U) / t.blockN +
+                                    QFA_CORE_WORK_SETUP_STAGES);
+                } else {
+                    for (uint32_t task = range[0]; task < range[1]; task += best.step) {
+                        const uint32_t id = best.mode == QFA_METADATA_MAPPED ? schedule.payload.taskIds[task] : task;
+                        work += costs.PrefixWork(id + 1U, view) - costs.PrefixWork(id, view);
+                    }
+                }
+            } else {
+                work = costs.PrefixWork(range[1], view) - costs.PrefixWork(range[0], view);
+            }
+            best.criticalWork = std::max(best.criticalWork, work);
+        }
+    }
+    if (compareSections) {
+        std::sort(liveHeads.begin(), liveHeads.end(), std::greater<uint64_t>());
+        uint64_t activeBytes = 0U;
+        for (uint32_t i = 0U; i < std::min<size_t>(cores, liveHeads.size()); ++i)
+            activeBytes += liveHeads[i];
+        // Bound the cache discount to one quarter of work so extra section
+        // imbalance is not hidden by the L2-capacity test alone.
+        const double discount = activeBytes > INT8_L2_SECTION_BYTES ?
+                                    0.25 * (1.0 - static_cast<double>(INT8_L2_SECTION_BYTES) / activeBytes) :
+                                    0.0;
+        const uint64_t totalWork = prefix->Section(0U, batch * t.numHeadsKv).Work(batch * t.numHeadsKv);
+        const uint64_t lower = totalWork / cores + (totalWork % cores != 0U);
+        // Section drains only add work; reject candidates whose ideal balance cannot win.
+        if (lower * (1.0 - discount) < best.criticalWork) {
+            auto candidate = MakeInt8Plan(t, sequences, ends, *prefix);
+            if (candidate.criticalWork * (1.0 - discount) < best.criticalWork)
+                best = std::move(candidate);
+        }
+    }
+    const uint32_t header[] = {QFA_METADATA_MAGIC,
+                               QFA_METADATA_VERSION,
+                               batch,
+                               t.numHeadsQ,
+                               t.numHeadsKv,
+                               t.headDim,
+                               maxQ,
+                               maxK,
+                               t.layoutQ,
+                               t.layoutKv,
+                               t.layoutOut,
+                               t.maskMode,
+                               QFA_INT8_QUANT_MODE,
+                               0U,
+                               0U,
+                               QFA_METADATA_MAX_CORES};
+    std::copy(std::begin(header), std::end(header), output);
+    for (uint32_t b = 0U; b < batch; ++b) {
+        const auto& seq = sequences[b];
+        const uint32_t values[] = {seq.qStart, seq.kStart, seq.sq,         seq.sk,
+                                   seq.tiles,  seq.tasks,  seq.physicalSq, seq.physicalSk};
+        std::copy(std::begin(values), std::end(values), output + QfaMetadataSequenceOffset(b));
+    }
+    for (uint32_t section = 0U; section < best.sections; ++section) {
+        const uint64_t offset = QfaMetadataSectionOffset(batch, QFA_METADATA_MAX_CORES, section);
+        for (uint32_t core = 0U; core < cores; ++core) {
+            const auto range = best.ranges[section * cores + core];
+            output[offset + 2U * core] = range[0];
+            output[offset + 2U * core + 1U] = range[1];
+        }
+    }
+    if (best.mode == QFA_METADATA_MAPPED)
+        std::copy(schedule.payload.taskIds, schedule.payload.taskIds + t.totalTasks,
+                  output + QfaMetadataMapOffset(batch, QFA_METADATA_MAX_CORES));
+    output[QFA_METADATA_TASK_MODE] = best.mode;
+    output[QFA_METADATA_TASK_STEP] = best.step;
+    output[QFA_METADATA_USED_CORES] = cores;
+    output[QFA_METADATA_BLOCK_M] = t.blockM;
+    output[QFA_METADATA_BLOCK_N] = t.blockN;
+    output[QFA_METADATA_CONFIG] = schedule.config;
+    output[QFA_METADATA_CORE_CAPACITY] = QFA_METADATA_MAX_CORES;
+    output[QFA_METADATA_SECTION_NUM] = best.sections;
+    output[QFA_METADATA_L2_BYTES] = INT8_L2_SECTION_BYTES;
+    output[QFA_METADATA_SEQUENCE_FLAGS] = t.sequsedFlags;
+    return true;
+}
+
+} // namespace
+
+bool QuantFlashAttnMetadataCpuKernel::GenInt8MetaData()
+{
+    using namespace BaseApi::Int8GqaTnd;
+    const auto layoutId = [](const std::string& layout) -> int32_t {
+        return layout == "BNSD" ? QFA_LAYOUT_BNSD :
+               layout == "BSND" ? QFA_LAYOUT_BSND :
+               layout == "TND"  ? QFA_LAYOUT_TND :
+                                  QFA_INVALID_LAYOUT;
+    };
+    const int32_t lq = layoutId(layoutQ_), lk = layoutId(layoutKv_), lo = layoutId(layoutOut_);
+    const bool packed = lq == QFA_LAYOUT_TND;
+    const bool invalidAttrs =
+        lq < 0 || lk < 0 || lo < 0 || packed != (lk == QFA_LAYOUT_TND) || packed != (lo == QFA_LAYOUT_TND) ||
+        aicCoreNum_ <= 0 || aicCoreNum_ > QFA_METADATA_MAX_CORES || aivCoreNum_ < 2 * aicCoreNum_ || numHeadsQ_ <= 0 ||
+        numHeadsKv_ <= 0 || numHeadsQ_ % numHeadsKv_ != 0 || headDim_ <= 0 || headDim_ > QFA_MAX_HEAD_DIM ||
+        headDimV_ != headDim_ || isGradEnabled_ || (maskMode_ != QFA_MASK_NONE && maskMode_ != QFA_MASK_CAUSAL_ATTR) ||
+        winLeft_ < QFA_UNBOUNDED_WINDOW || winRight_ < QFA_UNBOUNDED_WINDOW;
+    KERNEL_CHECK_FALSE(!invalidAttrs, false,
+                       "Invalid INT8 metadata attributes: layouts=%s/%s/%s cores=%d/%d Hq=%d Hkv=%d D=%d/%d mask=%d "
+                       "window=%d/%d grad=%d seqused=%d",
+                       layoutQ_.c_str(), layoutKv_.c_str(), layoutOut_.c_str(), aicCoreNum_, aivCoreNum_, numHeadsQ_,
+                       numHeadsKv_, headDim_, headDimV_, maskMode_, winLeft_, winRight_, isGradEnabled_,
+                       sequsedQ_ != nullptr || sequsedKv_ != nullptr);
+    KERNEL_CHECK_FALSE(metaData_ != nullptr && metaData_->GetData() != nullptr && metaData_->GetDataType() == DT_INT32,
+                       false, "INT8 metadata output must be a nonempty INT32 tensor");
+    const int32_t* cq = nullptr;
+    const int32_t* ck = nullptr;
+    if (packed) {
+        int64_t batch = -1;
+        for (auto* tensor : {cuSeqlensQ_, cuSeqlensKv_}) {
+            const char* name = tensor == cuSeqlensQ_ ? "cu_seqlens_q" : "cu_seqlens_kv";
+            const int64_t count = Int8VectorSize(tensor);
+            KERNEL_CHECK_FALSE(count >= 2 && count <= INT32_MAX && (batch < 0 || count == batch + 1), false,
+                               "INT8 metadata %s requires matching INT32 [B+1] storage: count=%ld previousB=%ld", name,
+                               count, batch);
+            batch = count - 1;
+        }
+        KERNEL_CHECK_FALSE(batchSize_ <= 0 || batchSize_ == batch, false,
+                           "INT8 metadata batch_size=%d differs from cumulative-length batch=%ld", batchSize_, batch);
+        batchSize_ = static_cast<int32_t>(batch);
+        cq = static_cast<const int32_t*>(cuSeqlensQ_->GetData());
+        ck = static_cast<const int32_t*>(cuSeqlensKv_->GetData());
+        KERNEL_CHECK_FALSE(
+            cq[0] == 0 && ck[0] == 0 && cq[batch] > 0 && ck[batch] > 0, false,
+            "INT8 cumulative lengths must start at zero and have positive totals: Q=%d..%d KV=%d..%d B=%ld", cq[0],
+            cq[batch], ck[0], ck[batch], batch);
+    } else if ((cuSeqlensQ_ != nullptr && cuSeqlensQ_->GetDataSize() != 0) ||
+               (cuSeqlensKv_ != nullptr && cuSeqlensKv_->GetDataSize() != 0)) {
+        KERNEL_LOG_ERROR("INT8 metadata cu_seqlens are only supported for TND layouts");
+        return false;
+    }
+    // Match A5's two-row container. Only the first row contains INT8 scheduling data.
+    constexpr uint64_t metadataRows = 2U;
+    if (batchSize_ <= 0 || metadataDimNum_ != 2 ||
+        metadataRowSize_ != static_cast<int64_t>(QfaMetadataSize(batchSize_, QFA_METADATA_MAX_CORES, numHeadsKv_)) ||
+        (metaData_->GetDataSize() != 0 &&
+         metadataRows * static_cast<uint64_t>(metadataRowSize_) * sizeof(int32_t) > metaData_->GetDataSize())) {
+        KERNEL_LOG_ERROR("INT8 metadata output capacity mismatch: B=%d rank=%ld words=%ld bytes=%lu", batchSize_,
+                         metadataDimNum_, metadataRowSize_, metaData_->GetDataSize());
+        return false;
+    }
+    const uint32_t batch = static_cast<uint32_t>(batchSize_);
+    const int64_t totalQ = packed ? cq[batch] : 0, totalK = packed ? ck[batch] : 0;
+    const int32_t* usedQ = nullptr;
+    const int32_t* usedK = nullptr;
+    for (uint32_t side = 0U; side < 2U; ++side) {
+        auto* tensor = side == 0U ? sequsedQ_ : sequsedKv_;
+        if (tensor == nullptr)
+            continue;
+        KERNEL_CHECK_FALSE(Int8VectorSize(tensor) == batch, false,
+                           "INT8 seqused side=%u requires INT32 [B] storage: B=%u", side, batch);
+        (side == 0U ? usedQ : usedK) = static_cast<const int32_t*>(tensor->GetData());
+    }
+    const uint32_t usedFlags = (usedQ != nullptr ? 1U : 0U) | (usedK != nullptr ? 2U : 0U);
+    KERNEL_CHECK_FALSE(packed || ((usedQ != nullptr || maxSeqlenQ_ > 0) && (usedK != nullptr || maxSeqlenKv_ > 0)),
+                       false, "INT8 dense metadata requires max_seqlen or seqused on each side");
+    std::vector<QfaSequenceDescriptor> sequences(batch);
+    for (uint32_t b = 0U; b < batch; ++b) {
+        const int64_t physicalQ = packed ? static_cast<int64_t>(cq[b + 1U]) - cq[b] : 0;
+        const int64_t physicalK = packed ? static_cast<int64_t>(ck[b + 1U]) - ck[b] : 0;
+        const int64_t sq = usedQ != nullptr ? usedQ[b] : packed ? physicalQ : maxSeqlenQ_;
+        const int64_t sk = usedK != nullptr ? usedK[b] : packed ? physicalK : maxSeqlenKv_;
+        KERNEL_CHECK_FALSE(
+            sq >= 0 && sk >= 0 &&
+                (!packed || (physicalQ >= 0 && physicalK >= 0 && sq <= physicalQ && sk <= physicalK)) &&
+                (usedFlags != 0U || sq == 0 || sk > 0),
+            false, "INT8 metadata invalid effective lengths at batch=%u: Q=%ld KV=%ld packed=%d physical=%ld/%ld", b,
+            sq, sk, packed, physicalQ, physicalK);
+        sequences[b] = {packed ? static_cast<uint32_t>(cq[b]) : 0U,
+                        packed ? static_cast<uint32_t>(ck[b]) : 0U,
+                        static_cast<uint32_t>(sq),
+                        static_cast<uint32_t>(sk),
+                        0U,
+                        0U,
+                        static_cast<uint32_t>(physicalQ),
+                        static_cast<uint32_t>(physicalK)};
+    }
+    QfaInt8ScheduleInput input{batchSize_,
+                               numHeadsQ_,
+                               numHeadsKv_,
+                               headDim_,
+                               headDim_,
+                               QfaInt8MaxSequenceHint(maxSeqlenQ_, totalQ, true),
+                               QfaInt8MaxSequenceHint(maxSeqlenKv_, totalK, false),
+                               totalQ,
+                               totalK,
+                               lq,
+                               lk,
+                               lo,
+                               maskMode_,
+                               static_cast<uint32_t>(aicCoreNum_),
+                               sizeof(QuantFlashAttnTilingQBlockPayloadInt8),
+                               1.0f,
+                               winLeft_,
+                               winRight_,
+                               usedFlags};
+    auto* output = static_cast<uint32_t*>(metaData_->GetData());
+    std::memset(output, 0, QFA_METADATA_HEADER * sizeof(*output));
+    return WriteInt8SchedulingTable(input, sequences, output);
 }
 
 std::vector<int64_t> QuantFlashAttnMetadataCpuKernel::GetTensorDataAsInt64(Tensor* tensor, size_t size)

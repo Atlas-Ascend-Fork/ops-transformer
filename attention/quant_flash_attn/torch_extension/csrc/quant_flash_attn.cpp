@@ -63,39 +63,6 @@ TensorWrapper make_wrapper(const at::Tensor& tensor, const int64_t real_dtype)
     return wrapper;
 }
 
-void CheckInt8Window(int64_t mode, int64_t left, int64_t right)
-{
-    TORCH_CHECK((mode == 0 || mode == 3) && left >= -1 && right >= -1 && left <= INT32_MAX && right <= INT32_MAX,
-                "INT8 GQA requires mask 0/3 and windows in [-1, INT32_MAX]");
-}
-
-// max_seqlen is a static upper bound. Cumulative length values stay on device.
-std::vector<int64_t> ValidateInt8Inputs(const at::Tensor& q, const at::Tensor& k, const c10::optional<at::Tensor>& cuq,
-                                        const c10::optional<at::Tensor>& cuk, const c10::optional<at::Tensor>& metadata,
-                                        int64_t maxQ, int64_t maxK, const std::string& layoutQ,
-                                        const std::string& layoutK, const std::string& layoutOut, int64_t maskMode,
-                                        int64_t winLeft, int64_t winRight)
-{
-    TORCH_CHECK(!metadata, "A2/A3 INT8 Prefill requires metadata=None");
-    const bool packed = layoutQ == "TND";
-    int64_t batch = q.size(0);
-    if (packed) {
-        TORCH_CHECK(cuq && cuk && cuq->scalar_type() == at::kInt && cuk->scalar_type() == at::kInt && cuq->dim() == 1 &&
-                        cuk->dim() == 1 && cuq->numel() == cuk->numel() && cuq->numel() >= 2 && cuq->is_contiguous() &&
-                        cuk->is_contiguous(),
-                    "TND requires contiguous INT32 cumulative lengths [B+1]");
-        batch = cuq->numel() - 1;
-        TORCH_CHECK(maxQ != 0 && maxK != 0 && q.size(0) > 0 && k.size(0) > 0,
-                    "TND max_seqlen bounds and total token counts must be positive");
-        maxQ = maxQ < 0 ? q.size(0) : std::min(maxQ, q.size(0));
-        maxK = maxK < 0 ? k.size(0) : std::min(maxK, k.size(0));
-    } else {
-        maxQ = q.size(layoutQ == "BNSD" ? 2 : 1);
-        maxK = k.size(layoutK == "BNSD" ? 2 : 1);
-    }
-    return {batch, maxQ, maxK};
-}
-
 at::Tensor quant_flash_attn_metadata(const c10::optional<at::Tensor>& cu_seqlens_q,
                                      const c10::optional<at::Tensor>& cu_seqlens_kv,
                                      const c10::optional<at::Tensor>& seqused_q,
@@ -126,61 +93,23 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_attn_impl(
     std::string layout_out, bool return_softmax_lse, int64_t output_dim)
 {
     TORCH_CHECK(output_dim >= 0, "Internal output_dim must be nonnegative");
+    const bool isInt8 =
+        quant_mode == QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16;
+    const bool pagedInt8 = isInt8 && (layout_kv == "PA_BNBD" || layout_kv == "PA_BBND" || layout_kv == "PA_NZ");
     if (output_dim != 0) {
         // Only the private alignment adapter requests a compact output. Q/K/V
         // retain their physical aligned D; all internal math is unchanged.
-        TORCH_CHECK(
-            quant_mode == QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16 &&
-                layout_q == layout_kv && layout_q == layout_out &&
-                (layout_q == "BNSD" || layout_q == "BSND" || layout_q == "TND"),
-            "Compact INT8 output requires mode12 with matching dense/TND layouts");
-        const int64_t rank = layout_q == "TND" ? 3 : 4;
-        TORCH_CHECK(q.dim() == rank && k.dim() == rank && v.dim() == rank && q.scalar_type() == at::kChar &&
-                        k.scalar_type() == at::kChar && v.scalar_type() == at::kChar && q.is_contiguous() &&
-                        k.is_contiguous() && v.is_contiguous() && q.device() == k.device() && q.device() == v.device(),
-                    "Compact INT8 output requires contiguous, same-device INT8 Q/K/V");
-        const int64_t physical_dim = q.size(-1);
-        TORCH_CHECK(physical_dim >= 64 && physical_dim <= 256 && physical_dim % 32 == 0 && k.size(-1) == physical_dim &&
-                        v.size(-1) == physical_dim && output_dim >= 64 && output_dim <= physical_dim &&
-                        output_dim % 8 == 0 && ((output_dim + 31) / 32) * 32 == physical_dim,
-                    "Compact INT8 output must remain within its physical 32-channel alignment bucket");
+        TORCH_CHECK(isInt8 && layout_q == layout_kv && layout_q == layout_out &&
+                        (layout_q == "BNSD" || layout_q == "BSND" || layout_q == "TND"),
+                    "Compact INT8 output requires mode12 with matching dense/TND layouts");
+        constexpr int64_t MAX_COMPACT_OUTPUT_DIM = 256;
+        TORCH_CHECK(output_dim <= MAX_COMPACT_OUTPUT_DIM && output_dim <= q.size(-1),
+                    "Compact INT8 output_dim must not exceed the physical width or 256");
     }
     TORCH_CHECK(quant_mode == 0 || quant_mode == 1 || quant_mode == 3 || quant_mode == 5 || quant_mode == 6 ||
                     quant_mode == 10 || quant_mode == QUANT_MODE_HIF4_P_HIF4_LEVEL1 ||
                     quant_mode == QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16,
                 "Unsupported quant_mode");
-    const bool pagedInt8 =
-        quant_mode == QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16 &&
-        (layout_kv == "PA_BNBD" || layout_kv == "PA_BBND" || layout_kv == "PA_NZ");
-    if (quant_mode == QUANT_MODE_A8C8_QK_INT8_PER_TOKEN_HEAD_V_INT8_PER_HEAD_P_INT8_PER_TENSOR_SOFTMAX_FP16 &&
-        !pagedInt8) {
-        CheckInt8Window(mask_mode, win_left, win_right);
-        const int64_t rank = layout_q == "TND" ? 3 : 4;
-        const int64_t kvHeadAxis = layout_kv == "BSND" ? 2 : 1;
-        TORCH_CHECK(q.dim() == rank && k.dim() == rank && v.dim() == rank,
-                    "Full INT8 GQA requires layout-matching Q/K/V ranks");
-        TORCH_CHECK(q.size(-1) >= 1 && q.size(-1) <= 256, "Full INT8 GQA requires D in [1,256]");
-        TORCH_CHECK(q_descale.defined() && k_descale.defined() && v_descale.defined() && p_scale.has_value() &&
-                        p_scale->defined(),
-                    "Full INT8 GQA requires Q/K/V descales and p_scale");
-        TORCH_CHECK(q_descale.scalar_type() == at::kFloat && k_descale.scalar_type() == at::kFloat &&
-                        v_descale.scalar_type() == at::kFloat && p_scale->scalar_type() == at::kFloat,
-                    "Full INT8 GQA requires FP32 scales");
-        TORCH_CHECK(q_descale.sizes() == q.sizes().slice(0, rank - 1) &&
-                        k_descale.sizes() == k.sizes().slice(0, rank - 1) && v_descale.dim() == 1 &&
-                        v_descale.size(0) == k.size(kvHeadAxis) && p_scale->dim() == 1 && p_scale->numel() == 1,
-                    "Full INT8 GQA requires q_descale [B,Hq,Sq], k_descale [B,Hkv,Sk], v_descale [Hkv], p_scale [1]");
-        TORCH_CHECK(q_descale.is_contiguous() && k_descale.is_contiguous() && v_descale.is_contiguous() &&
-                        p_scale->is_contiguous(),
-                    "Full INT8 GQA requires contiguous scales");
-        TORCH_CHECK(q_descale.device() == q.device() && k_descale.device() == q.device() &&
-                        v_descale.device() == q.device() && p_scale->device() == q.device(),
-                    "Full INT8 GQA scales must be on the Q device");
-        const auto bounds = ValidateInt8Inputs(q, k, cu_seqlens_q, cu_seqlens_kv, metadata, max_seqlen_q, max_seqlen_kv,
-                                               layout_q, layout_kv, layout_out, mask_mode, win_left, win_right);
-        max_seqlen_q = bounds[1];
-        max_seqlen_kv = bounds[2];
-    }
     int64_t tSize = 0;
     int64_t nSize = 0;
     int64_t dSize = 0;
@@ -308,7 +237,6 @@ std::tuple<at::Tensor, at::Tensor> quant_flash_attn(
 // Bind the C++ function to Python module
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
-    m.def("validate_int8_inputs", &ValidateInt8Inputs);
     m.def("quant_flash_attn_metadata", &quant_flash_attn_metadata, "quant_flash_attn_metadata");
     m.def("quant_flash_attn", &quant_flash_attn, "quant_flash_attn");
     // Internal eager-only entry. The padding helper supplies every argument,

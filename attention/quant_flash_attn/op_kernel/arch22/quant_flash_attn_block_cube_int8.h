@@ -173,12 +173,10 @@ public:
         SelectTask(batch, kvHead, mStart, mSize, selectVScale);
         QfaSyncEvent<HardEvent::MTE1_MTE2>(Q_EVENT);
         if (PATH == Int8GqaPath::BNSD || !QuantFlashAttnLayoutInt8<PATH>::IsSg(tiling_.layoutQ)) {
-            const uint64_t offset =
-                ((static_cast<uint64_t>(batch) * tiling_.numHeadsQ + kvHead * tiling_.groupSize) * tiling_.seqLenQ +
-                 mStart) *
-                tiling_.headDim;
+            const uint64_t offset = QfaHeadMajorRow(tiling_, batch, kvHead, mStart) * tiling_.headDim;
             CopyNdToNz(qL1_, qGm_, offset, mSize, tiling_.headDim, tiling_.headDim, mAligned_);
         } else {
+            PadNzRows(qL1_, mSize, tiling_.headDim, mAligned_);
             QuantFlashAttnLayoutInt8<PATH>::QfaCopySgQuery(qL1_, qGm_, tiling_, batch, kvHead, mStart, mSize,
                                                            mAligned_);
         }
@@ -207,23 +205,13 @@ public:
     {
         const uint32_t panelRows = nSize;
         const uint32_t nAligned = Align16(panelRows);
-        const uint64_t kOffset = QfaRow(tiling_.layoutKv, batch_, kvHead_, nStart, tiling_.numHeadsKv, tiling_.seqLenKv,
-                                        tiling_.kvTokenStart) *
+        const uint64_t kOffset = QfaRow(tiling_.layoutKv, batch_, kvHead_, nStart, tiling_.numHeadsKv,
+                                        tiling_.totalTokensKv, tiling_.kvTokenStart) *
                                  tiling_.headDim;
         // Cache immutable KV panels in disjoint L1 buffers, keyed by sequence base, length and panel index.
         const bool reuseK = SelectPanel<true>(nStart, kOffset);
         if (!reuseK) {
             QfaSyncEvent<HardEvent::MTE1_MTE2>(K_EVENT);
-            if (panelRows != nAligned) {
-                // ND2NZ's D padding does not imply zero-filled key rows. MMAD consumes an N tile aligned to 16 even
-                // at the final KV tail.
-                InitConstValueParams<uint16_t> zeros(Align32(tiling_.headDim) / INT8_C0, nAligned - panelRows,
-                                                     panelRows, 0U);
-                Fill(kL1_.template ReinterpretCast<uint16_t>()[panelRows *
-                                                               (QFA_INT8_DMA_BLOCK_BYTES / sizeof(uint16_t))],
-                     zeros);
-                PipeBarrier<PIPE_MTE2>();
-            }
             CopyNdToNz(kL1_, kGm_, kOffset, panelRows, tiling_.headDim,
                        tiling_.headDim * (tiling_.layoutKv == Int8GqaTnd::QFA_LAYOUT_BNSD ? 1U : tiling_.numHeadsKv),
                        nAligned);
@@ -388,20 +376,12 @@ public:
     __aicore__ inline void PreloadV(uint32_t nStart, uint32_t nSize)
     {
         const uint32_t nAligned = Align32(nSize);
-        const uint64_t vOffset = QfaRow(tiling_.layoutKv, batch_, kvHead_, nStart, tiling_.numHeadsKv, tiling_.seqLenKv,
-                                        tiling_.kvTokenStart) *
+        const uint64_t vOffset = QfaRow(tiling_.layoutKv, batch_, kvHead_, nStart, tiling_.numHeadsKv,
+                                        tiling_.totalTokensKv, tiling_.kvTokenStart) *
                                  tiling_.headDim;
         const bool reuseV = SelectPanel<false>(nStart, vOffset);
         if (!reuseV) {
             QfaSyncEvent<HardEvent::MTE1_MTE2>(V_EVENT);
-            if (nSize != nAligned) {
-                // ND2NZ pads D to C0, but does not guarantee that unused KV rows are zero. L0B's INT8 transpose
-                // reads complete groups of 32 rows.
-                InitConstValueParams<uint16_t> zeros(Align32(tiling_.headDim) / INT8_C0, nAligned - nSize, nSize, 0U);
-                Fill(vL1_.template ReinterpretCast<uint16_t>()[nSize * (QFA_INT8_DMA_BLOCK_BYTES / sizeof(uint16_t))],
-                     zeros);
-                PipeBarrier<PIPE_MTE2>();
-            }
             CopyNdToNz(vL1_, vGm_, vOffset, nSize, tiling_.headDim,
                        tiling_.headDim * (tiling_.layoutKv == Int8GqaTnd::QFA_LAYOUT_BNSD ? 1U : tiling_.numHeadsKv),
                        nAligned);
@@ -613,10 +593,21 @@ protected:
         Mmad(cL0_[c * L0_C_ELEMS], aL0_[a * L0_AB_ELEMS], bL0_[b * L0_AB_ELEMS], params);
     }
 
+    __aicore__ inline void PadNzRows(const LocalTensor<int8_t>& dst, uint32_t rows, uint32_t cols, uint32_t alignedRows)
+    {
+        if (rows != alignedRows) {
+            // ND2NZ pads columns to C0; LoadData also consumes aligned rows.
+            InitConstValueParams<uint16_t> zeros(Align32(cols) / INT8_C0, alignedRows - rows, rows, 0U);
+            Fill(dst.template ReinterpretCast<uint16_t>()[rows * (INT8_C0 / sizeof(uint16_t))], zeros);
+            PipeBarrier<PIPE_MTE2>();
+        }
+    }
+
     __aicore__ inline void CopyNdToNz(const LocalTensor<int8_t>& dst, const GlobalTensor<int8_t>& src,
                                       uint64_t srcOffset, uint32_t rows, uint32_t cols, uint32_t srcStride,
                                       uint32_t alignedRows)
     {
+        PadNzRows(dst, rows, cols, alignedRows);
         Nd2NzParams p(1U, rows, cols, 0U, srcStride, alignedRows, 1U, 0U);
         if constexpr (PATH == Int8GqaPath::BNSD) {
             DataCopy(dst, src[srcOffset], p);

@@ -21,6 +21,7 @@ if(ASCEND_COMPUTE_UNIT STREQUAL "ascend910b" OR ASCEND_COMPUTE_UNIT STREQUAL "as
    ASCEND_COMPUTE_UNIT STREQUAL "ascend950" OR ASCEND_COMPUTE_UNIT STREQUAL "ascend350" OR
    ASCEND_COMPUTE_UNIT STREQUAL "ascend960dt" OR ASCEND_COMPUTE_UNIT STREQUAL "ascend960pr")
     set(quant_flash_attn_depends attention/common CACHE INTERNAL "Dependencies for quant_flash_attn")
+    set(quant_flash_attn_apt_depends attention/common CACHE INTERNAL "Dependencies for quant_flash_attn_apt")
 endif()
 set(QFA_AUTO_SYNC_OPTION --cce-auto-sync=off)
 set(QFA_ARCH22_INCLUDE_OPTION)

@@ -15,19 +15,21 @@
 #include "quant_flash_attn_workload_int8.h"
 
 namespace BaseApi::Int8GqaTnd {
-// Actual lengths remain on device. No per-token workspace or host dereference is needed to compact the packed task
-// grid and balance its causal KV work.
-class TndTaskScheduler {
+// AICPU has already resolved actual lengths and task order. The kernel only decodes its device metadata.
+class SequenceTaskScheduler {
     using Sequence = QfaSequenceDescriptor;
 
 public:
-    __aicore__ inline void Init(const QuantFlashAttnTilingDataInt8& t, GM_ADDR cq, GM_ADDR ck, uint32_t core,
-                                GM_ADDR tiling)
+    __aicore__ inline void Init(const QuantFlashAttnTilingDataInt8& t, GM_ADDR metadata)
     {
         t_ = t;
-        cq_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(cq));
-        ck_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(ck));
-        const auto* payload = reinterpret_cast<const __gm__ QuantFlashAttnTilingPayloadInt8*>(tiling);
+        metadata_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(metadata));
+        const uint32_t mode = metadata_.GetValue(QFA_METADATA_TASK_MODE);
+        paired_ = mode == QFA_METADATA_PAIRED;
+        mapped_ = mode == QFA_METADATA_MAPPED;
+        if (mapped_)
+            tasks_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(metadata) +
+                                   QfaMetadataMapOffset(t_.batchSize, metadata_.GetValue(QFA_METADATA_CORE_CAPACITY)));
         // Cache up to 32 immutable descriptors; larger batches use the same GM reader.
         descriptorsCached_ = false;
         if (t_.batchSize <= DESCRIPTOR_CAPACITY) {
@@ -36,43 +38,8 @@ public:
             descriptorsCached_ = true;
         }
         seq_ = ReadSequence(0U);
-        // Mirror pairs have constant work; use them only with an equal pair count per core.
-        const uint64_t pairs = seq_.tasks / QFA_MIRRORED_TASK_PAIR_SIZE;
-        if (t_.batchSize == 1U && t_.maskMode != 0U && seq_.sq == seq_.sk && seq_.sq > 0U &&
-            seq_.sq % t_.blockN == 0U && static_cast<uint64_t>(seq_.sq) * t_.groupSize % t_.blockM == 0U &&
-            static_cast<uint64_t>(t_.blockN) * t_.groupSize % t_.blockM == 0U &&
-            seq_.tiles % QFA_MIRRORED_TASK_PAIR_SIZE == 0U && pairs % t_.usedCoreNum == 0U) {
-            paired_ = true;
-            begin_ = QFA_MIRRORED_TASK_PAIR_SIZE * (pairs * core / t_.usedCoreNum);
-            end_ = QFA_MIRRORED_TASK_PAIR_SIZE * (pairs * (core + 1U) / t_.usedCoreNum);
-            return;
-        }
-        if (t_.batchSize == 1U && payload->useCoreRanges != QFA_CORE_RANGES_NONE && seq_.sq == t_.seqLenQ &&
-            seq_.sk == t_.seqLenKv) {
-            mapped_ = payload->useCoreRanges == QFA_CORE_RANGES_TASK_MAP;
-            if (mapped_)
-                tasks_.SetGlobalBuffer(
-                    reinterpret_cast<__gm__ QuantFlashAttnTilingQBlockPayloadInt8*>(tiling)->taskIds);
-            begin_ = payload->coreTaskBegin[core];
-            end_ = payload->coreTaskBegin[core + 1U];
-            return;
-        }
-        QfaTaskRangePlanner<TndTaskScheduler> planner(
-            {t_.batchSize, t_.usedCoreNum, t_.groupSize, t_.blockM, t_.blockN, t_.maskMode}, *this);
-        planner.Init(core);
-        begin_ = planner.Begin();
-        end_ = planner.End();
-        seq_ = ReadSequence(0U);
     }
 
-    __aicore__ inline uint64_t Begin() const
-    {
-        return begin_;
-    }
-    __aicore__ inline uint64_t End() const
-    {
-        return end_;
-    }
     __aicore__ inline bool Decode(uint64_t task, uint32_t& batch, uint32_t& head, uint32_t& mStart, uint32_t& sq,
                                   uint32_t& sk, uint32_t& qStart, uint32_t& kStart)
     {
@@ -86,14 +53,21 @@ public:
         }
         const uint32_t local = task - batchBase_;
         batch = batch_;
+        uint32_t tile;
         if (paired_) {
             const uint32_t half = seq_.tiles / QFA_MIRRORED_TASK_PAIR_SIZE;
             head = (local / QFA_MIRRORED_TASK_PAIR_SIZE) / half;
             const uint32_t pair = (local / QFA_MIRRORED_TASK_PAIR_SIZE) % half;
-            mStart = ((local & 1U) ? seq_.tiles - 1U - pair : pair) * t_.blockM;
+            tile = (local & 1U) ? seq_.tiles - 1U - pair : pair;
         } else {
             head = local / seq_.tiles;
-            mStart = (local % seq_.tiles) * t_.blockM;
+            tile = local % seq_.tiles;
+        }
+        if (t_.sequsedFlags != 0U && t_.layoutQ == QFA_LAYOUT_BNSD) {
+            const uint32_t perHead = (static_cast<uint64_t>(seq_.sq) + t_.blockM - 1U) / t_.blockM;
+            mStart = (tile / perHead) * seq_.sq + (tile % perHead) * t_.blockM;
+        } else {
+            mStart = tile * t_.blockM;
         }
         sq = seq_.sq;
         sk = seq_.sk;
@@ -106,18 +80,12 @@ public:
     {
         if (descriptorsCached_)
             return descriptors_[b];
-        Sequence s;
-        s.qStart = cq_.GetValue(b);
-        s.kStart = ck_.GetValue(b);
-        s.sq = cq_.GetValue(b + 1U) - s.qStart;
-        s.sk = ck_.GetValue(b + 1U) - s.kStart;
-        if (s.sq > t_.seqLenQ || s.sk > t_.seqLenKv || (s.sq > 0U && s.sk == 0U) ||
-            static_cast<uint64_t>(s.qStart) + s.sq > t_.totalTokensQ ||
-            static_cast<uint64_t>(s.kStart) + s.sk > t_.totalTokensKv)
-            return Sequence{};
-        s.tiles = (static_cast<uint64_t>(s.sq) * t_.groupSize + t_.blockM - 1U) / t_.blockM;
-        s.tasks = s.tiles * t_.numHeadsKv;
-        return s;
+        const uint32_t offset = QfaMetadataSequenceOffset(b);
+        return {
+            metadata_.GetValue(offset + QFA_METADATA_Q_START),    metadata_.GetValue(offset + QFA_METADATA_K_START),
+            metadata_.GetValue(offset + QFA_METADATA_Q_LENGTH),   metadata_.GetValue(offset + QFA_METADATA_K_LENGTH),
+            metadata_.GetValue(offset + QFA_METADATA_TILES),      metadata_.GetValue(offset + QFA_METADATA_TASKS),
+            metadata_.GetValue(offset + QFA_METADATA_PHYSICAL_Q), metadata_.GetValue(offset + QFA_METADATA_PHYSICAL_K)};
     }
 
 private:
@@ -126,10 +94,10 @@ private:
     bool descriptorsCached_ = false;
     // Scalar aggregate copies use 64-bit accesses; keep the private copy aligned without changing the tiling ABI.
     alignas(uint64_t) QuantFlashAttnTilingDataInt8 t_{};
-    AscendC::GlobalTensor<int32_t> cq_, ck_;
+    AscendC::GlobalTensor<uint32_t> metadata_;
     AscendC::GlobalTensor<uint32_t> tasks_;
     Sequence seq_{};
-    uint64_t begin_ = 0U, end_ = 0U, batchBase_ = 0U;
+    uint64_t batchBase_ = 0U;
     uint32_t batch_ = 0U;
     bool paired_ = false, mapped_ = false;
 };

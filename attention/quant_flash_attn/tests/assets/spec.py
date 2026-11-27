@@ -146,7 +146,7 @@ class QuantFlashAttnSpec:
     quant_mode=1: MXFP8 (Q/K per-token-group, V per-channel-group, descale=e8m0)
     quant_mode=6: GQA FP8 全量化 (Q/K per-token-head, V per-head, descale=FP32)
     quant_mode=0: HIF8 per-tensor 量化
-    quant_mode=12: A2/A3 INT8 全量化，支持 BNSD/BSND/TND、SWA、LSE，metadata 为 None
+    quant_mode=12: GQA INT8 全量化 (Q/K per-token-head, V per-head, descale=FP32)
 
     A5 模式的 metadata 由 npu_preprocess 在主算子调用前生成并回填,
     主算子直接由 ttk 调用 torch.ops.cann_ops_transformer.quant_flash_attn。

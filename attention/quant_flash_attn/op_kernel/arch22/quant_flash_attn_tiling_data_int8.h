@@ -183,14 +183,14 @@ struct QuantFlashAttnTilingDataInt8 {
     uint32_t outputHeadDim;
     int32_t winLeft;
     int32_t winRight;
+    uint32_t sequsedFlags; // bit 0: Q, bit 1: KV; tensor contents remain on device.
 };
 
-// Fixed tiling ABI: 28 integer words and one FP32 softmax scale.
-static_assert(sizeof(QuantFlashAttnTilingDataInt8) == 28 * sizeof(uint32_t) + sizeof(float),
+// Fixed tiling ABI: 29 integer words and one FP32 softmax scale.
+static_assert(sizeof(QuantFlashAttnTilingDataInt8) == 29 * sizeof(uint32_t) + sizeof(float),
               "Unexpected INT8 GQA tiling ABI");
 
-// Keep the optional core table outside the configuration copied into each Cube/Vector object. Its storage is
-// constant and does not grow with sequence.
+// AICPU uses bounded scratch tables while preparing metadata. Only config is sent in Host tiling.
 struct QuantFlashAttnTilingPayloadInt8 {
     QuantFlashAttnTilingDataInt8 config;
     uint32_t useCoreRanges;
@@ -199,7 +199,7 @@ struct QuantFlashAttnTilingPayloadInt8 {
 
 constexpr uint32_t QFA_Q_BLOCK_TASK_CAPACITY = 512U;
 
-// The task map keeps complete Q tasks on one core. Keys that use this payload append a bounded task-ID table.
+// AICPU task-map scratch keeps complete Q tasks on one core with a bounded task-ID table.
 struct QuantFlashAttnTilingQBlockPayloadInt8 {
     QuantFlashAttnTilingPayloadInt8 base;
     uint32_t taskIds[QFA_Q_BLOCK_TASK_CAPACITY];

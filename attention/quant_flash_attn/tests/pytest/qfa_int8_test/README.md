@@ -1,6 +1,5 @@
 # QFA INT8 全量化测试
 
-沿用 `qfa_fp8_test` 的参数集、公共执行器、功能/性能入口和缓存阶段。INT8 使用模式 12，metadata 为 `None`。
 覆盖 BNSD、BSND、TND、mask 0/3、SWA、LSE 和 D=1～256 的边界场景。
 
 ```text

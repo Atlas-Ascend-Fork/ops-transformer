@@ -81,15 +81,19 @@ class QuantFlashAttnKernelGqaInt8 {
 public:
     __aicore__ static inline void Process(GM_ADDR query, GM_ADDR key, GM_ADDR value, GM_ADDR dequantScaleQuery,
                                           GM_ADDR dequantScaleKey, GM_ADDR dequantScaleValue, GM_ADDR pScale,
-                                          GM_ADDR cuSeqLensQ, GM_ADDR cuSeqLensKv, GM_ADDR attnOut, GM_ADDR softmaxLse,
-                                          GM_ADDR workspace, GM_ADDR tiling)
+                                          GM_ADDR metadata, GM_ADDR attnOut, GM_ADDR softmaxLse, GM_ADDR workspace,
+                                          GM_ADDR tiling)
     {
         constexpr bool PACKED = PATH == Int8GqaPath::TND;
-        const auto* payload = reinterpret_cast<const __gm__ QuantFlashAttnTilingPayloadInt8*>(tiling);
         GET_TILING_DATA_WITH_STRUCT(QuantFlashAttnTilingDataInt8, cfg, tiling);
         if constexpr (!WINDOWED)
             cfg.winLeft = cfg.winRight = QFA_UNBOUNDED_WINDOW;
+        GlobalTensor<uint32_t> metadataGm;
+        metadataGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(metadata));
+        cfg.usedCoreNum = metadataGm.GetValue(QFA_METADATA_USED_CORES);
+        cfg.sequsedFlags = metadataGm.GetValue(QFA_METADATA_SEQUENCE_FLAGS);
 
+        const bool dynamicSequences = PACKED || cfg.sequsedFlags != 0U;
         uint32_t coreId = GetBlockIdx();
         if ASCEND_IS_AIV {
             coreId /= QFA_VECTOR_CORES_PER_CUBE;
@@ -103,50 +107,27 @@ public:
             const uint32_t tasksPerBatch = cfg.numHeadsKv * cfg.totalTilesM;
             // Match host tilesForM: causal BNSD tasks end at the query-head boundary, so one head's last query
             // cannot expand the next head's early queries to the full KV range. No new tiling ABI is needed.
-            const bool headAligned = PATH == Int8GqaPath::BNSD && cfg.layoutQ == QFA_LAYOUT_BNSD &&
-                                     cfg.layoutKv == QFA_LAYOUT_BNSD && cfg.layoutOut == QFA_LAYOUT_BNSD &&
-                                     cfg.maskMode != QFA_MASK_NONE &&
-                                     QfaUseHeadAlignedTiles(cfg.seqLenQ, cfg.seqLenKv, cfg.headDim, cfg.blockM);
+            const bool headAligned =
+                (cfg.sequsedFlags != 0U && cfg.layoutQ == QFA_LAYOUT_BNSD) ||
+                (PATH == Int8GqaPath::BNSD && cfg.layoutQ == QFA_LAYOUT_BNSD && cfg.layoutKv == QFA_LAYOUT_BNSD &&
+                 cfg.layoutOut == QFA_LAYOUT_BNSD && cfg.maskMode != QFA_MASK_NONE &&
+                 QfaUseHeadAlignedTiles(cfg.seqLenQ, cfg.seqLenKv, cfg.headDim, cfg.blockM));
             const uint32_t queryTilesPerHead = (static_cast<uint64_t>(cfg.seqLenQ) + cfg.blockM - 1U) / cfg.blockM;
             // Retain each path's task order and causal work balancing.
             const bool tokenMajor =
                 PATH == Int8GqaPath::BNSD ?
                     false :
                     (PATH == Int8GqaPath::BSND ? cfg.layoutQ == QFA_LAYOUT_BSND : cfg.layoutQ != QFA_LAYOUT_BNSD);
-            BaseApi::Int8GqaTnd::TndTaskScheduler packedScheduler;
-            const auto range = BaseApi::Int8GqaTnd::QfaDenseTaskRange(cfg, coreId);
-            uint64_t taskBegin = range.begin;
-            uint64_t taskEnd = range.end;
-            uint32_t taskStep = range.step;
-            if (cfg.layoutQ <= QFA_LAYOUT_BSND && payload->useCoreRanges != QFA_CORE_RANGES_NONE) {
-                taskBegin = payload->coreTaskBegin[coreId];
-                taskEnd = payload->coreTaskBegin[coreId + 1U];
+            BaseApi::Int8GqaTnd::SequenceTaskScheduler packedScheduler;
+            const uint32_t offset = QfaMetadataRangeOffset(cfg.batchSize) + QFA_METADATA_CORE_RANGE_WORDS * coreId;
+            uint64_t taskBegin = metadataGm.GetValue(offset);
+            uint64_t taskEnd = metadataGm.GetValue(offset + 1U);
+            uint32_t taskStep = metadataGm.GetValue(QFA_METADATA_TASK_STEP);
+            if (dynamicSequences) {
+                packedScheduler.Init(cfg, metadata);
                 taskStep = 1U;
             }
-            if constexpr (PACKED) {
-                if (cfg.layoutQ == QFA_LAYOUT_TND) {
-                    packedScheduler.Init(cfg, cuSeqLensQ, cuSeqLensKv, coreId, tiling);
-                    taskBegin = packedScheduler.Begin();
-                    taskEnd = packedScheduler.End();
-                    taskStep = 1U;
-                }
-            }
-            // Generic tasks overlap only with independent P/PV slots. The two-slot overlaid path keeps its existing
-            // ownership schedule. The D96 M512 configuration is the cache-free BSND D96 long-prefill specialization.
-            const bool crossTaskPipeline =
-                (((CONFIG == QFA_INT8_CFG_SHARED_QP || CONFIG == QFA_INT8_CFG_RESIDENT_Q) &&
-                  cfg.blockM < QFA_PV_OVERLAY_MIN_QUERY_TILE) ||
-                 LONG_TND_CROSS_Q || (D64_CROSS_Q && CONFIG == QFA_INT8_CFG_D64_M512) ||
-                 (PATH == Int8GqaPath::BNSD && CONFIG != QFA_INT8_CFG_ISOLATED_SHARED_QP &&
-                  CONFIG != QFA_INT8_CFG_DYNAMIC_MHA) ||
-                 (PATH == Int8GqaPath::BSND &&
-                  (CONFIG == QFA_INT8_CFG_D96_M512_FIXPIPE || CONFIG == QFA_INT8_CFG_D96_M256_CAUSAL_MHA)) ||
-                 (PATH != Int8GqaPath::BNSD &&
-                  (CONFIG == QFA_INT8_CFG_D64_M512 || CONFIG == QFA_INT8_CFG_D128_M512 ||
-                   CONFIG == QFA_INT8_CFG_GENERIC_M512) &&
-                  cfg.maskMode != QFA_MASK_NONE && cfg.groupSize == 1U &&
-                  cfg.headDimAlign <= QFA_LARGE_FP32_HEAD_DIM_THRESHOLD)) &&
-                taskBegin < taskEnd && taskEnd - taskBegin > taskStep;
+            const uint32_t sectionNum = metadataGm.GetValue(QFA_METADATA_SECTION_NUM);
             Cube cube;
             Vector vec;
             if ASCEND_IS_AIC {
@@ -155,169 +136,238 @@ public:
                 vec.Init(workspaceCore, attnOut, dequantScaleQuery, dequantScaleKey, dequantScaleValue, pScale,
                          softmaxLse, cfg, &pipe);
             }
-            RunInfo taskCache[QFA_PIPELINE_SLOTS];
-            if (crossTaskPipeline) {
-                for (uint32_t i = 0U; i < QFA_PIPELINE_SLOTS; ++i)
-                    taskCache[i].isValid = false;
+            if ASCEND_IS_AIV {
+                if (cfg.sequsedFlags != 0U) {
+                    for (uint32_t item = coreId; item < cfg.batchSize * cfg.numHeadsKv; item += cfg.usedCoreNum) {
+                        const uint32_t b = item / cfg.numHeadsKv, head = item % cfg.numHeadsKv;
+                        const auto seq = packedScheduler.ReadSequence(b);
+                        const uint32_t physicalSq = PACKED ? seq.physicalSq : cfg.totalTokensQ;
+                        const uint32_t valid = seq.sk == 0U ? 0U : seq.sq;
+                        if (valid >= physicalSq)
+                            continue;
+                        vec.SetSequence(physicalSq, seq.sk, seq.qStart, seq.kStart);
+                        for (uint32_t h = 0U; h < (tokenMajor ? 1U : cfg.groupSize); ++h) {
+                            const uint32_t begin = tokenMajor ? valid * cfg.groupSize : h * physicalSq + valid;
+                            const uint32_t end = tokenMajor ? physicalSq * cfg.groupSize : (h + 1U) * physicalSq;
+                            for (uint32_t row = begin; row < end; row += cfg.blockM) {
+                                vec.SelectTask(b, head, row, cfg.blockM < end - row ? cfg.blockM : end - row, false);
+                                vec.WriteZero(true);
+                            }
+                        }
+                    }
+                }
             }
-            uint64_t pipelineLoop = 0U;
-            uint32_t initialState = 0U;
-            for (uint64_t task = taskBegin; task < taskEnd; task += taskStep) {
-                uint64_t taskId = task;
-                if constexpr (CONFIG == QFA_INT8_CFG_D96_M512_FIXPIPE || CONFIG == QFA_INT8_CFG_D96_M256_CAUSAL_MHA ||
-                              D64_OPT) {
-                    if (payload->useCoreRanges == QFA_CORE_RANGES_TASK_MAP &&
-                        !(PACKED && cfg.layoutQ == QFA_LAYOUT_TND)) {
-                        const auto* mapped =
-                            reinterpret_cast<const __gm__ QuantFlashAttnTilingQBlockPayloadInt8*>(tiling);
-                        taskId = mapped->taskIds[task];
-                    }
+            // Each core advances through the same L2 sections, reusing its fixed pipeline workspace.
+            for (uint32_t section = 0U; section < sectionNum; ++section) {
+                if (section != 0U) {
+                    const uint64_t offset =
+                        QfaMetadataSectionOffset(cfg.batchSize, metadataGm.GetValue(QFA_METADATA_CORE_CAPACITY),
+                                                 section) +
+                        QFA_METADATA_CORE_RANGE_WORDS * coreId;
+                    taskBegin = metadataGm.GetValue(offset);
+                    taskEnd = metadataGm.GetValue(offset + 1U);
                 }
-                uint32_t b = 0U, kvHead = 0U, mStart = 0U;
-                uint32_t headLocal = 0U, tokenStart = 0U;
-                uint32_t sq = cfg.seqLenQ, sk = cfg.seqLenKv, qStart = 0U, kStart = 0U;
-                if (PACKED && cfg.layoutQ == QFA_LAYOUT_TND) {
-                    if (!packedScheduler.Decode(taskId, b, kvHead, mStart, sq, sk, qStart, kStart))
-                        continue;
-                } else {
-                    b = taskId / tasksPerBatch;
-                    kvHead = (taskId / cfg.totalTilesM) % cfg.numHeadsKv;
-                    const uint32_t localTile = taskId % cfg.totalTilesM;
-                    if (headAligned) {
-                        headLocal = localTile / queryTilesPerHead;
-                        tokenStart = (localTile % queryTilesPerHead) * cfg.blockM;
-                    } else {
-                        mStart = localTile * cfg.blockM;
-                    }
-                }
-                if (sq > cfg.seqLenQ || sk > cfg.seqLenKv || (sq > 0U && sk == 0U))
-                    continue;
-                if (cfg.layoutQ == QFA_LAYOUT_TND && (static_cast<uint64_t>(qStart) + sq > cfg.totalTokensQ ||
-                                                      static_cast<uint64_t>(kStart) + sk > cfg.totalTokensKv))
-                    continue;
-                uint32_t mSize;
-                if (headAligned) {
-                    if (tokenStart >= sq)
-                        continue;
-                    mStart = headLocal * sq + tokenStart;
-                    mSize = cfg.blockM < sq - tokenStart ? cfg.blockM : sq - tokenStart;
-                } else {
-                    if (mStart >= cfg.groupSize * sq)
-                        continue;
-                    mSize = cfg.blockM < cfg.groupSize * sq - mStart ? cfg.blockM : cfg.groupSize * sq - mStart;
-                }
-                uint32_t nTiles;
-                {
-                    uint32_t visible = sk;
-                    if (cfg.maskMode != QFA_MASK_NONE) {
-                        const uint32_t first = mStart % sq;
-                        const uint32_t last = tokenMajor ? (mStart + mSize - 1U) / cfg.groupSize :
-                                                           (first + mSize > sq ? sq - 1U : first + mSize - 1U);
-                        const int64_t limit = static_cast<int64_t>(last) + 1 + sk - sq;
-                        visible = limit <= 0 ? 0U : static_cast<uint32_t>(limit);
-                    }
-                    nTiles = (visible + cfg.blockN - 1U) / cfg.blockN;
-                }
+                // Generic tasks overlap only with independent P/PV slots. The two-slot overlaid path keeps its existing
+                // ownership schedule. The D96 M512 configuration is the cache-free BSND D96 long-prefill
+                // specialization.
+                const bool crossTaskPipeline =
+                    (((CONFIG == QFA_INT8_CFG_SHARED_QP || CONFIG == QFA_INT8_CFG_RESIDENT_Q) &&
+                      cfg.blockM < QFA_PV_OVERLAY_MIN_QUERY_TILE) ||
+                     LONG_TND_CROSS_Q || (D64_CROSS_Q && CONFIG == QFA_INT8_CFG_D64_M512) ||
+                     (PATH == Int8GqaPath::BNSD && CONFIG != QFA_INT8_CFG_ISOLATED_SHARED_QP &&
+                      CONFIG != QFA_INT8_CFG_DYNAMIC_MHA) ||
+                     (PATH == Int8GqaPath::BSND &&
+                      (CONFIG == QFA_INT8_CFG_D96_M512_FIXPIPE || CONFIG == QFA_INT8_CFG_D96_M256_CAUSAL_MHA)) ||
+                     (PATH != Int8GqaPath::BNSD &&
+                      (CONFIG == QFA_INT8_CFG_D64_M512 || CONFIG == QFA_INT8_CFG_D128_M512 ||
+                       CONFIG == QFA_INT8_CFG_GENERIC_M512) &&
+                      cfg.maskMode != QFA_MASK_NONE && cfg.groupSize == 1U &&
+                      cfg.headDimAlign <= QFA_LARGE_FP32_HEAD_DIM_THRESHOLD)) &&
+                    taskBegin < taskEnd && taskEnd - taskBegin > taskStep;
+                RunInfo taskCache[QFA_PIPELINE_SLOTS];
                 if (crossTaskPipeline) {
-                    if (nTiles == 0U) {
-                        DrainTasks(pipelineLoop, taskCache, cube, vec);
-                        if ASCEND_IS_AIV {
+                    for (uint32_t i = 0U; i < QFA_PIPELINE_SLOTS; ++i)
+                        taskCache[i].isValid = false;
+                }
+                uint64_t pipelineLoop = 0U;
+                uint32_t initialState = 0U;
+                for (uint64_t task = taskBegin; task < taskEnd; task += taskStep) {
+                    uint64_t taskId = task;
+                    if constexpr (CONFIG == QFA_INT8_CFG_D96_M512_FIXPIPE ||
+                                  CONFIG == QFA_INT8_CFG_D96_M256_CAUSAL_MHA || D64_OPT) {
+                        if (!dynamicSequences) {
+                            if (metadataGm.GetValue(QFA_METADATA_TASK_MODE) == QFA_METADATA_MAPPED) {
+                                const uint32_t map = QfaMetadataMapOffset(
+                                    cfg.batchSize, metadataGm.GetValue(QFA_METADATA_CORE_CAPACITY));
+                                taskId = metadataGm.GetValue(map + task);
+                            }
+                        }
+                    }
+                    uint32_t b = 0U, kvHead = 0U, mStart = 0U;
+                    uint32_t headLocal = 0U, tokenStart = 0U;
+                    uint32_t sq = cfg.seqLenQ, sk = cfg.seqLenKv, qStart = 0U, kStart = 0U;
+                    if (dynamicSequences) {
+                        if (!packedScheduler.Decode(taskId, b, kvHead, mStart, sq, sk, qStart, kStart))
+                            continue;
+                        if (headAligned) {
+                            headLocal = mStart / sq;
+                            tokenStart = mStart % sq;
+                        }
+                    } else {
+                        b = taskId / tasksPerBatch;
+                        kvHead = (taskId / cfg.totalTilesM) % cfg.numHeadsKv;
+                        const uint32_t localTile = taskId % cfg.totalTilesM;
+                        if (headAligned) {
+                            headLocal = localTile / queryTilesPerHead;
+                            tokenStart = (localTile % queryTilesPerHead) * cfg.blockM;
+                        } else {
+                            mStart = localTile * cfg.blockM;
+                        }
+                    }
+                    const uint32_t scheduledSq = sq;
+                    if constexpr (!PACKED) {
+                        if (!(cfg.sequsedFlags & 1U))
+                            sq = cfg.totalTokensQ;
+                        if (!(cfg.sequsedFlags & 2U))
+                            sk = cfg.totalTokensKv;
+                    }
+                    uint32_t mSize;
+                    if (headAligned) {
+                        if (tokenStart >= sq)
+                            continue;
+                        mStart = headLocal * sq + tokenStart;
+                        mSize = cfg.blockM < sq - tokenStart ? cfg.blockM : sq - tokenStart;
+                    } else {
+                        if (sq != scheduledSq && !tokenMajor) {
+                            const uint32_t count = cfg.blockM < cfg.groupSize * scheduledSq - mStart ?
+                                                       cfg.blockM :
+                                                       cfg.groupSize * scheduledSq - mStart;
+                            const uint32_t end = QfaPhysicalQueryRow(mStart + count, scheduledSq, sq);
+                            mStart = QfaPhysicalQueryRow(mStart, scheduledSq, sq);
+                            mSize = end - mStart;
+                            if (mSize == 0U)
+                                continue;
+                        } else {
+                            if (mStart >= cfg.groupSize * sq)
+                                continue;
+                            mSize = cfg.blockM < cfg.groupSize * sq - mStart ? cfg.blockM : cfg.groupSize * sq - mStart;
+                        }
+                    }
+                    uint32_t nTiles;
+                    {
+                        uint32_t visible = sk;
+                        if (cfg.maskMode != QFA_MASK_NONE) {
+                            const uint32_t first = mStart % sq;
+                            const uint32_t last = tokenMajor ? (mStart + mSize - 1U) / cfg.groupSize :
+                                                               (first + mSize > sq ? sq - 1U : first + mSize - 1U);
+                            const int64_t limit = static_cast<int64_t>(last) + 1 + sk - sq;
+                            visible = limit <= 0 ? 0U : static_cast<uint32_t>(limit);
+                        }
+                        nTiles = (visible + cfg.blockN - 1U) / cfg.blockN;
+                    }
+                    if (crossTaskPipeline) {
+                        if (nTiles == 0U) {
+                            DrainTasks(pipelineLoop, taskCache, cube, vec);
+                            if ASCEND_IS_AIV {
+                                vec.SetSequence(sq, sk, qStart, kStart);
+                                vec.BeginTask(b, kvHead, mStart, mSize);
+                                vec.WriteZero();
+                            }
+                            continue;
+                        }
+                        for (uint32_t n = 0U; n < nTiles; ++n) {
+                            const uint32_t nStart = n * cfg.blockN;
+                            taskCache[pipelineLoop % QFA_PIPELINE_SLOTS] = {
+                                true,
+                                n == 0U,
+                                n + 1U == nTiles,
+                                b,
+                                kvHead,
+                                mStart,
+                                mSize,
+                                sq,
+                                sk,
+                                qStart,
+                                kStart,
+                                nStart,
+                                cfg.blockN < sk - nStart ? cfg.blockN : sk - nStart,
+                                static_cast<uint32_t>(pipelineLoop % dataSlotCount),
+                                static_cast<uint32_t>(pipelineLoop % QFA_PIPELINE_SLOTS),
+                                initialState,
+                                initialState ^ (nTiles & 1U)};
+                            ExecuteTask(pipelineLoop, taskCache, cube, vec);
+                            ++pipelineLoop;
+                        }
+                        initialState ^= nTiles & 1U;
+                    } else {
+                        if ASCEND_IS_AIC {
+                            cube.SetSequence(sq, sk, qStart, kStart);
+                            cube.BeginTask(b, kvHead, mStart, mSize);
+                        } else {
                             vec.SetSequence(sq, sk, qStart, kStart);
                             vec.BeginTask(b, kvHead, mStart, mSize);
-                            vec.WriteZero();
                         }
-                        continue;
-                    }
-                    for (uint32_t n = 0U; n < nTiles; ++n) {
-                        const uint32_t nStart = n * cfg.blockN;
-                        taskCache[pipelineLoop % QFA_PIPELINE_SLOTS] = {
-                            true,
-                            n == 0U,
-                            n + 1U == nTiles,
-                            b,
-                            kvHead,
-                            mStart,
-                            mSize,
-                            sq,
-                            sk,
-                            qStart,
-                            kStart,
-                            nStart,
-                            cfg.blockN < sk - nStart ? cfg.blockN : sk - nStart,
-                            static_cast<uint32_t>(pipelineLoop % dataSlotCount),
-                            static_cast<uint32_t>(pipelineLoop % QFA_PIPELINE_SLOTS),
-                            initialState,
-                            initialState ^ (nTiles & 1U)};
-                        ExecuteTask(pipelineLoop, taskCache, cube, vec);
-                        ++pipelineLoop;
-                    }
-                    initialState ^= nTiles & 1U;
-                } else {
-                    if ASCEND_IS_AIC {
-                        cube.SetSequence(sq, sk, qStart, kStart);
-                        cube.BeginTask(b, kvHead, mStart, mSize);
-                    } else {
-                        vec.SetSequence(sq, sk, qStart, kStart);
-                        vec.BeginTask(b, kvHead, mStart, mSize);
-                    }
-                    if (nTiles == 0U) {
-                        if ASCEND_IS_AIV
-                            vec.WriteZero();
-                        continue;
-                    }
-                    for (uint32_t step = 0U; step < nTiles + VEC2_STAGE_DELAY; ++step) {
-                        if (step < nTiles) {
-                            const uint32_t nStart = step * cfg.blockN;
-                            const uint32_t nSize = cfg.blockN < sk - nStart ? cfg.blockN : sk - nStart;
-                            if ASCEND_IS_AIC {
-                                if (PATH == Int8GqaPath::BNSD || cube.NeedKScale(nStart))
-                                    CrossCoreWaitFlag(K_SCALE_READY_FLAG);
-                                cube.ComputeMm1(nStart, nSize, step % dataSlotCount);
-                                if ((PATH == Int8GqaPath::BNSD || !cube.CachedKScales(nStart)) &&
-                                    step + dataSlotCount < nTiles)
-                                    CrossCoreSetFlag<SYNC_MODE, PIPE_MTE2>(K_SCALE_FREE_FLAG);
-                                CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(MM1_READY_FLAG_BASE + step % QFA_PIPELINE_SLOTS);
-                            } else {
-                                if (PATH == Int8GqaPath::BNSD || vec.NeedKScale(nStart)) {
-                                    if ((PATH == Int8GqaPath::BNSD || !vec.CachedKScales(nStart)) &&
-                                        step >= dataSlotCount +
-                                                    (PATH == Int8GqaPath::TND && CONFIG == QFA_INT8_CFG_RESIDENT_Q ?
-                                                         QFA_K_SCALE_PREFIX_PANELS :
-                                                         0U))
-                                        CrossCoreWaitFlag(K_SCALE_FREE_FLAG);
-                                    vec.PrepareKScale(nStart, nSize, step % dataSlotCount);
-                                    CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(K_SCALE_READY_FLAG);
+                        if (nTiles == 0U) {
+                            if ASCEND_IS_AIV
+                                vec.WriteZero();
+                            continue;
+                        }
+                        for (uint32_t step = 0U; step < nTiles + VEC2_STAGE_DELAY; ++step) {
+                            if (step < nTiles) {
+                                const uint32_t nStart = step * cfg.blockN;
+                                const uint32_t nSize = cfg.blockN < sk - nStart ? cfg.blockN : sk - nStart;
+                                if ASCEND_IS_AIC {
+                                    if (PATH == Int8GqaPath::BNSD || cube.NeedKScale(nStart))
+                                        CrossCoreWaitFlag(K_SCALE_READY_FLAG);
+                                    cube.ComputeMm1(nStart, nSize, step % dataSlotCount);
+                                    if ((PATH == Int8GqaPath::BNSD || !cube.CachedKScales(nStart)) &&
+                                        step + dataSlotCount < nTiles)
+                                        CrossCoreSetFlag<SYNC_MODE, PIPE_MTE2>(K_SCALE_FREE_FLAG);
+                                    CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(MM1_READY_FLAG_BASE +
+                                                                          step % QFA_PIPELINE_SLOTS);
+                                } else {
+                                    if (PATH == Int8GqaPath::BNSD || vec.NeedKScale(nStart)) {
+                                        if ((PATH == Int8GqaPath::BNSD || !vec.CachedKScales(nStart)) &&
+                                            step >= dataSlotCount +
+                                                        (PATH == Int8GqaPath::TND && CONFIG == QFA_INT8_CFG_RESIDENT_Q ?
+                                                             QFA_K_SCALE_PREFIX_PANELS :
+                                                             0U))
+                                            CrossCoreWaitFlag(K_SCALE_FREE_FLAG);
+                                        vec.PrepareKScale(nStart, nSize, step % dataSlotCount);
+                                        CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(K_SCALE_READY_FLAG);
+                                    }
+                                }
+                            }
+                            if (step > 0U && step - 1U < nTiles) {
+                                const uint32_t prev = step - 1U;
+                                const uint32_t nStart = prev * cfg.blockN;
+                                const uint32_t nSize = cfg.blockN < sk - nStart ? cfg.blockN : sk - nStart;
+                                if ASCEND_IS_AIC {
+                                    cube.PreloadV(nStart, nSize);
+                                    CrossCoreWaitFlag(VEC1_READY_FLAG_BASE + prev % QFA_PIPELINE_SLOTS);
+                                    cube.ComputeMm2(nStart, nSize, prev % dataSlotCount, true);
+                                    CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(MM2_READY_FLAG_BASE +
+                                                                          prev % QFA_PIPELINE_SLOTS);
+                                } else {
+                                    CrossCoreWaitFlag(MM1_READY_FLAG_BASE + prev % QFA_PIPELINE_SLOTS);
+                                    vec.Vec1(nStart, nSize, prev % dataSlotCount, prev == 0U);
+                                    CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(VEC1_READY_FLAG_BASE +
+                                                                           prev % QFA_PIPELINE_SLOTS);
+                                }
+                            }
+                            if ASCEND_IS_AIV {
+                                if (step >= VEC2_STAGE_DELAY && step - VEC2_STAGE_DELAY < nTiles) {
+                                    const uint32_t prev = step - VEC2_STAGE_DELAY;
+                                    CrossCoreWaitFlag(MM2_READY_FLAG_BASE + prev % QFA_PIPELINE_SLOTS);
+                                    vec.Vec2(prev % dataSlotCount, prev + 1U == nTiles);
                                 }
                             }
                         }
-                        if (step > 0U && step - 1U < nTiles) {
-                            const uint32_t prev = step - 1U;
-                            const uint32_t nStart = prev * cfg.blockN;
-                            const uint32_t nSize = cfg.blockN < sk - nStart ? cfg.blockN : sk - nStart;
-                            if ASCEND_IS_AIC {
-                                cube.PreloadV(nStart, nSize);
-                                CrossCoreWaitFlag(VEC1_READY_FLAG_BASE + prev % QFA_PIPELINE_SLOTS);
-                                cube.ComputeMm2(nStart, nSize, prev % dataSlotCount, true);
-                                CrossCoreSetFlag<SYNC_MODE, PIPE_FIX>(MM2_READY_FLAG_BASE + prev % QFA_PIPELINE_SLOTS);
-                            } else {
-                                CrossCoreWaitFlag(MM1_READY_FLAG_BASE + prev % QFA_PIPELINE_SLOTS);
-                                vec.Vec1(nStart, nSize, prev % dataSlotCount, prev == 0U);
-                                CrossCoreSetFlag<SYNC_MODE, PIPE_MTE3>(VEC1_READY_FLAG_BASE +
-                                                                       prev % QFA_PIPELINE_SLOTS);
-                            }
-                        }
-                        if ASCEND_IS_AIV {
-                            if (step >= VEC2_STAGE_DELAY && step - VEC2_STAGE_DELAY < nTiles) {
-                                const uint32_t prev = step - VEC2_STAGE_DELAY;
-                                CrossCoreWaitFlag(MM2_READY_FLAG_BASE + prev % QFA_PIPELINE_SLOTS);
-                                vec.Vec2(prev % dataSlotCount, prev + 1U == nTiles);
-                            }
-                        }
                     }
                 }
-            }
-            if (crossTaskPipeline) {
-                DrainTasks(pipelineLoop, taskCache, cube, vec);
+                if (crossTaskPipeline) {
+                    DrainTasks(pipelineLoop, taskCache, cube, vec);
+                }
             }
             if ASCEND_IS_AIC {
                 cube.Finish();

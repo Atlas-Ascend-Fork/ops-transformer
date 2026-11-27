@@ -64,6 +64,65 @@ def prepare_npu(params, batches, vs):
     return qfa, args, options
 
 
+def prepare_attention(qfa, args, options):
+    """Generate matching metadata before timing, including the physical D72 padding call."""
+    module = importlib.import_module(qfa.__module__)
+    options = dict(options)
+    options.pop("metadata", None)
+    layout = options["layout_q"]
+    kv_layout = options["layout_kv"]
+    mask = options.get("mask_mode", 0)
+    left, right = options.get("win_left", -1), options.get("win_right", -1)
+    head_axis = 2 if layout == "BSND" else 1
+    q, k = args[:2]
+    # The compact-output padding helper does not forward seqused.
+    pad = all(
+        options.get(name) is None for name in ("seqused_q", "seqused_kv")
+    ) and module._int8_should_pad(
+        *args[:5], args[6], layout, kv_layout, options["layout_out"], mask, left, right
+    )
+    names = (
+        "layout_q",
+        "layout_q_descale",
+        "layout_kv",
+        "layout_out",
+        "max_seqlen_q",
+        "max_seqlen_kv",
+        "cu_seqlens_q",
+        "cu_seqlens_kv",
+        "seqused_q",
+        "seqused_kv",
+        "mask_mode",
+        "win_left",
+        "win_right",
+    )
+    value = module.quant_flash_attn_metadata(
+        q.size(head_axis),
+        k.size(2 if kv_layout == "BSND" else 1),
+        96 if pad else q.size(-1),
+        args[6],
+        batch_size=None if layout == "TND" else q.size(0),
+        **{name: options[name] for name in names if name in options},
+    )
+    if not pad:
+        return lambda: qfa(*args, **options, metadata=value), [value]
+
+    def call():
+        return module._quant_flash_attn_aligned_padded(
+            *args[:6],
+            options.get("p_scale"),
+            options.get("softmax_scale", 1.0),
+            value,
+            mask_mode=mask,
+            layout=layout,
+            win_left=left,
+            win_right=right,
+            return_softmax_lse=options.get("return_softmax_lse", False),
+        )
+
+    return call, [value]
+
+
 def reference(params, batches, vs):
     outputs = []
     for batch, length in zip(batches, params["actual_seq_q"]):
@@ -175,15 +234,19 @@ def execute_test(params, mode, cdir=None):
         save("cpu_output", reference(params, batches, vs))
     if "npu" in mode:
         qfa, args, options = prepare_npu(params, batches, vs)
+        call, _ = prepare_attention(qfa, args, options)
         for _ in range(params["warmup"]):
-            qfa(*args, **options)
+            call()
         torch.npu.synchronize()
         with torch.profiler.record_function(f"qfa_gqa::{params['name']}"):
             for _ in range(params["repeat"]):
-                output, lse = qfa(*args, **options)
+                output, lse = call()
         torch.npu.synchronize()
         if params["enable_lse"]:
-            without, empty = qfa(*args, **{**options, "return_softmax_lse": False})
+            without_lse, _ = prepare_attention(
+                qfa, args, {**options, "return_softmax_lse": False}
+            )
+            without, empty = without_lse()
             torch.testing.assert_close(output, without, rtol=0, atol=0)
             assert empty is None or empty.numel() == 0
         save("npu_output", (output.cpu(), lse.cpu() if lse is not None else None))

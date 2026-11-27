@@ -16,11 +16,18 @@
 #define QFA_WORKLOAD_INLINE __aicore__ inline
 #define QFA_WORKLOAD_LOCAL_INLINE
 #endif
+#include "quant_flash_attn_metadata_int8.h"
 namespace BaseApi::Int8GqaTnd {
 struct WindowRange {
     uint32_t begin;
     uint32_t end;
 };
+// Remove unused per-head rows when a dense schedule was generated from an upper bound on physical S.
+QFA_WORKLOAD_INLINE uint32_t QfaPhysicalQueryRow(uint32_t row, uint32_t scheduledSq, uint32_t physicalSq)
+{
+    const uint32_t token = row % scheduledSq;
+    return (row / scheduledSq) * physicalSq + (token < physicalSq ? token : physicalSq);
+}
 QFA_WORKLOAD_INLINE uint32_t QfaWindowClip(int64_t x, uint32_t limit)
 {
     return x <= 0 ? 0U : x >= static_cast<int64_t>(limit) ? limit : static_cast<uint32_t>(x);
@@ -195,6 +202,7 @@ QFA_WORKLOAD_INLINE uint64_t QfaSequenceWork(uint64_t tasks, uint32_t sq, uint32
 // Packed sequence lengths and the corresponding query tile counts.
 struct QfaSequenceDescriptor {
     uint32_t qStart = 0U, kStart = 0U, sq = 0U, sk = 0U, tiles = 0U, tasks = 0U;
+    uint32_t physicalSq = 0U, physicalSk = 0U;
 };
 struct QfaScheduleParameters {
     uint32_t batchSize, usedCoreNum, groupSize, blockM, blockN, maskMode;
@@ -220,6 +228,32 @@ public:
         begin_ = core == 0U ? 0U : Boundary(totalWork * core / t_.usedCoreNum);
         end_ = core + 1U == t_.usedCoreNum ? totalTasks_ : Boundary(totalWork * (core + 1U) / t_.usedCoreNum);
     }
+    QFA_WORKLOAD_INLINE uint64_t PrefixWork(uint64_t tasks)
+    {
+        uint64_t work = 0U;
+        for (uint32_t b = 0U; b < t_.batchSize && tasks != 0U; ++b) {
+            const auto seq = Read(b);
+            const uint64_t count = tasks < seq.tasks ? tasks : seq.tasks;
+            work += Work(seq, count);
+            tasks -= count;
+        }
+        return work;
+    }
+    // Optional producer-side prefix index. The device scheduler keeps its existing uncached path.
+    template <typename Prefix>
+    QFA_WORKLOAD_INLINE uint64_t PrefixWork(uint64_t tasks, const Prefix& prefix)
+    {
+        if (tasks == 0U)
+            return 0U;
+        const uint32_t b = prefix.LocateTask(tasks);
+        return b == t_.batchSize ? prefix.Work(b) : prefix.Work(b) + Work(Read(b), tasks - prefix.Tasks(b));
+    }
+    template <typename Prefix>
+    QFA_WORKLOAD_INLINE uint64_t Boundary(uint64_t target, const Prefix& prefix)
+    {
+        const uint32_t b = prefix.LocateWork(target);
+        return b == t_.batchSize ? prefix.Tasks(b) : prefix.Tasks(b) + LocalBoundary(Read(b), target - prefix.Work(b));
+    }
     QFA_WORKLOAD_INLINE uint64_t Begin() const
     {
         return begin_;
@@ -238,26 +272,33 @@ private:
     {
         return QfaSequenceWork(tasks, s.sq, s.sk, t_.groupSize, t_.blockM, t_.blockN, t_.maskMode != 0U);
     }
+    QFA_WORKLOAD_INLINE uint64_t LocalBoundary(const Sequence& s, uint64_t target)
+    {
+        if (t_.maskMode == 0U) {
+            const uint64_t cost = Work(s, 1U);
+            if (cost != 0U)
+                return target / cost + (target % cost >= (cost + 1U) / 2U);
+        }
+        uint32_t lo = 0U, hi = s.tasks;
+        while (lo < hi) {
+            const uint32_t mid = lo + (hi - lo) / 2U;
+            if (Work(s, mid) < target)
+                lo = mid + 1U;
+            else
+                hi = mid;
+        }
+        if (lo > QFA_LAYOUT_BNSD && target - Work(s, lo - 1U) < Work(s, lo) - target)
+            --lo;
+        return lo;
+    }
     QFA_WORKLOAD_INLINE uint64_t Boundary(uint64_t target)
     {
         uint64_t taskBase = 0U, workBase = 0U;
         for (uint32_t b = 0; b < t_.batchSize; ++b) {
             const Sequence s = Read(b);
             const uint64_t cost = Work(s, s.tasks);
-            if (cost > 0U && target <= workBase + cost) {
-                const uint64_t localTarget = target - workBase;
-                uint32_t lo = 0U, hi = s.tasks;
-                while (lo < hi) {
-                    const uint32_t mid = lo + (hi - lo) / 2U;
-                    if (Work(s, mid) < localTarget)
-                        lo = mid + 1U;
-                    else
-                        hi = mid;
-                }
-                if (lo > QFA_LAYOUT_BNSD && localTarget - Work(s, lo - 1U) < Work(s, lo) - localTarget)
-                    --lo;
-                return taskBase + lo;
-            }
+            if (cost > 0U && target <= workBase + cost)
+                return taskBase + LocalBoundary(s, target - workBase);
             taskBase += s.tasks;
             workBase += cost;
         }
@@ -267,6 +308,19 @@ private:
     Reader& reader_;
     uint64_t begin_ = 0U, end_ = 0U, totalTasks_ = 0U;
 };
+QFA_WORKLOAD_INLINE uint32_t QfaSequenceTiles(const QuantFlashAttnTilingDataInt8& t, uint32_t sq)
+{
+    return t.sequsedFlags != 0U && t.layoutQ == QFA_LAYOUT_BNSD ?
+               ((static_cast<uint64_t>(sq) + t.blockM - 1U) / t.blockM) * t.groupSize :
+               (static_cast<uint64_t>(sq) * t.groupSize + t.blockM - 1U) / t.blockM;
+}
+QFA_WORKLOAD_INLINE bool QfaCanPair(const QuantFlashAttnTilingDataInt8& t, const QfaSequenceDescriptor& s)
+{
+    return t.layoutQ == QFA_LAYOUT_TND && t.maskMode != 0U && s.sq == s.sk && s.sq > 0U && s.sq % t.blockN == 0U &&
+           static_cast<uint64_t>(s.sq) * t.groupSize % t.blockM == 0U &&
+           static_cast<uint64_t>(t.blockN) * t.groupSize % t.blockM == 0U &&
+           s.tiles % QFA_MIRRORED_TASK_PAIR_SIZE == 0U;
+}
 } // namespace BaseApi::Int8GqaTnd
 #ifdef QFA_WORKLOAD_LOCAL_INLINE
 #undef QFA_WORKLOAD_INLINE
