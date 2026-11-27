@@ -26,7 +26,9 @@ constexpr uint32_t DATA_BYTES_1M = 1ULL * 1024ULL * 1024ULL;
 constexpr uint32_t DATA_BYTES_4M = 4ULL * 1024ULL * 1024ULL;
 constexpr uint32_t DATA_BYTES_8M = 8ULL * 1024ULL * 1024ULL;
 constexpr uint32_t DATA_BYTES_16M = 16ULL * 1024ULL * 1024ULL;
+constexpr uint32_t DATA_BYTES_32M = 32ULL * 1024ULL * 1024ULL;
 constexpr uint32_t DATA_BYTES_256M = 256ULL * 1024ULL * 1024ULL;
+constexpr uint32_t DATA_BYTES_1024M = 1024ULL * 1024ULL * 1024ULL;
 constexpr uint64_t MAX_DATA_BYTES_UNLIMITED = ~0ULL;
 // 卡数
 constexpr uint32_t MIN_RANK_SIZE = 0;
@@ -57,6 +59,9 @@ enum CommAlgoPriority : int32_t {
 //   其余卡数(AICPU全部/CCU 2p与16p及以上)走ReduceScatter通路，兜底为ReduceScatter算法
 static constexpr Mc2Hcom::CommAlgoEntry REDUCE_SCATTER_COMM_ALGO_TABLE[] = {
     // AICPU通信算法(ReduceScatter通路)
+    // 4p-8p/32M-1024M数据量兜底算法:sole[mesh.chunk](置于通用兜底表项之前，同级优先级按表序优先命中)
+    {mc2tiling::A5_AICPU_TS_ENGINE, TOPO_FLAG_NONE, DATA_BYTES_32M, DATA_BYTES_1024M, RANK_SIZE_8, RANK_SIZE_8, LOW,
+     "sole[mesh.chunk]"},
     // 兜底算法:ReduceScatter=level0:fullmesh
     {mc2tiling::A5_AICPU_TS_ENGINE, TOPO_FLAG_NONE, MIN_DATA_BYTES_ZERO, MAX_DATA_BYTES_UNLIMITED, MIN_RANK_SIZE,
      MAX_RANK_SIZE, LOW, "ReduceScatter=level0:fullmesh"},
