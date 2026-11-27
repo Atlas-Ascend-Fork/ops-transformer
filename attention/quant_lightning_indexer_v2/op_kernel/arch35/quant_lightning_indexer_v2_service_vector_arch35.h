@@ -550,29 +550,31 @@ __aicore__ inline void QLIV2Vector<QLIV2T>::ProcessVec1(const QLIV2Common::RunIn
     auto weightBase = weightUB_[qScalepingpong * (UB_BANK_STRIDE / sizeof(WEIGHT_T))];
 
     LocalTensor<float> weightTempBase;
+    LocalTensor<bfloat16_t> weightTempBase1;
     LocalTensor<QK_T> qkBase;
     uint32_t qkVLstride, qkStride;
 
-    if constexpr (CVRATIO > 1 || std::is_same_v<QK_T, bfloat16_t>) {
-        weightTempBase = weightTempUB_[pingpong * (UB_BANK_STRIDE / sizeof(float))];
-        qkBase = resMm1UB_[pingpong * (UB_BANK_STRIDE / sizeof(QK_T))];
-        qkVLstride = (UB_BANK_DEPTH_STRIDE / sizeof(QK_T)) / CVRATIO * constInfo_.mBaseSizeMax;
-        qkStride = gSize_ * UB_BANK_DEPTH_STRIDE / sizeof(QK_T);
+#if CVRATIO > 1
+    weightTempBase = weightTempUB_[pingpong * (UB_BANK_STRIDE / sizeof(float))];
+    qkBase = resMm1UB_[pingpong * (UB_BANK_STRIDE / sizeof(QK_T))];
+    qkVLstride = (UB_BANK_DEPTH_STRIDE / sizeof(QK_T)) / CVRATIO * constInfo_.mBaseSizeMax;
+    qkStride = gSize_ * UB_BANK_DEPTH_STRIDE / sizeof(QK_T);
+#else
+    if constexpr (std::is_same_v<QK_T, bfloat16_t>) {
+        weightTempBase1 =
+            weightTempUB_.template ReinterpretCast<bfloat16_t>()[pingpong * (UB_BANK_STRIDE / sizeof(bfloat16_t))];
     } else {
         weightTempBase = weightTempUB_[pingpong * (UB_BANK_DEPTH_STRIDE_1K / 2 / sizeof(float))];
-        qkBase = resMm1UB_[pingpong * (UB_BANK_DEPTH_STRIDE_1K / 2 / sizeof(QK_T))];
-        qkVLstride = 64;
-        qkStride = gSize_ * UB_BANK_DEPTH_STRIDE_1K / sizeof(QK_T);
     }
+    qkBase = resMm1UB_[pingpong * (UB_BANK_DEPTH_STRIDE_1K / 2 / sizeof(QK_T))];
+    qkVLstride = 64;
+    qkStride = gSize_ * UB_BANK_DEPTH_STRIDE_1K / sizeof(QK_T);
+#endif
 
-    if constexpr (IS_HIFLOAT4) {
+    if constexpr (IS_HIFLOAT4 || IS_MXFP4) {
         vector1::BatchMulWeightAndReduceSumFP4(outBase, UB_BANK_DEPTH_STRIDE / sizeof(SCORE_T), qkBase, qkVLstride,
                                                (uint32_t)qkStride, weightBase, UB_BANK_DEPTH_STRIDE / sizeof(WEIGHT_T),
-                                               gSize_, curAivS1ProcNum);
-    } else if constexpr (IS_MXFP4) {
-        vector1::BatchMulWeightAndReduceSumMXFP4(outBase, UB_BANK_DEPTH_STRIDE / sizeof(SCORE_T), qkBase, qkVLstride,
-                                                 (uint32_t)qkStride, weightBase,
-                                                 UB_BANK_DEPTH_STRIDE / sizeof(WEIGHT_T), gSize_, curAivS1ProcNum);
+                                               weightTempBase1, gSize_, curAivS1ProcNum);
     } else if constexpr (IS_MX) {
         vector1::BatchMulWeightAndReduceSumMX(outBase, UB_BANK_DEPTH_STRIDE / sizeof(SCORE_T), qkBase, qkVLstride,
                                               (uint32_t)qkStride, weightBase, UB_BANK_DEPTH_STRIDE / sizeof(WEIGHT_T),

@@ -834,9 +834,18 @@ __aicore__ inline void QLIV2Matmul<QLIV2T>::Fixp(uint64_t qliV2S1GmOffset, uint6
             mm1ResUB_[(qliV2CubeRunInfo.loop % 2) * (UB_BANK_STRIDE / sizeof(QK_T))],
             cL0_[(l0BufIdx_ % L0_BUF_NUM) * l0cBufferOffset_ + mSize / 2 * 16], fixpipeParams);
 #else
-        Fixpipe<QK_T, CL0_T, QLIV2_CFG_ROW_MAJOR_UB>(
-            mm1ResUB_[(qliV2CubeRunInfo.loop % 2) * (UB_BANK_STRIDE / sizeof(QK_T))],
-            cL0_[(l0BufIdx_ % L0_BUF_NUM) * l0cBufferOffset_], fixpipeParams);
+        // A6(1:1)：bf16(MXFP4/HiFloat4)的L0C 256x128 -> UB 128x256；ping=bank0/1，pong=bank2/3
+        // 拆两块：block0=L0C 前blockM行(bank0/2)，block1=L0C后blockM行(bank1/3)；块内行步进1K，块间 +256B
+        uint32_t blockM = mSize >> 1;
+        uint32_t dstBaseOffset = static_cast<uint32_t>(qliV2CubeRunInfo.loop % 2) *
+                                 (UB_BANK_DEPTH_STRIDE / sizeof(QK_T)); // ping:bank0/1, pong:bank2/3
+        fixpipeParams.mSize = blockM;
+        fixpipeParams.dstStride = UB_BANK_DEPTH_STRIDE_1K / sizeof(QK_T); // 同bank下一depth
+        Fixpipe<QK_T, CL0_T, QLIV2_CFG_ROW_MAJOR_UB>(mm1ResUB_[dstBaseOffset],
+                                                     cL0_[(l0BufIdx_ % L0_BUF_NUM) * l0cBufferOffset_], fixpipeParams);
+        Fixpipe<QK_T, CL0_T, QLIV2_CFG_ROW_MAJOR_UB>(mm1ResUB_[dstBaseOffset + UB_BANK_STRIDE / sizeof(QK_T)],
+                                                     cL0_[(l0BufIdx_ % L0_BUF_NUM) * l0cBufferOffset_ + blockM * 16],
+                                                     fixpipeParams);
 #endif
     }
 }
