@@ -33,7 +33,7 @@ $$
 \text{softmax}(\frac{Q@\tilde{K}^T}{\sqrt{d_k}})@\tilde{V}
 $$
 
-Where $\tilde{K},\tilde{V}$ are the Key and Value of higher importance obtained based on a certain selection algorithm (such as `lightning_indexer`), generally having sparse or block-sparse characteristics, and $d_k$ is the dimension of each head of $Q,\tilde{K}$.
+Where $\tilde{K},\tilde{V}$ are the Key and Value of higher importance obtained based on a certain selection algorithm (such as `lightning_indexer`), generally having sparse or block-sparse characteristics, and $d_k$ is the dimension per head used for the query-key dot product. In the example, this is $D + D_r$ when RoPE tensors are provided and $D$ when they are omitted.
 
 ## Function Prototype
 
@@ -169,7 +169,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>blockTable (aclTensor)</td>
       <td>Input</td>
-      <td>Indicates the block mapping table used for kvCache storage in PageAttention.</td>
+      <td>Maps logical KV cache blocks to physical device memory blocks in PageAttention.</td>
       <td>          <ul>
                 <li>Does not support null tensor.</li>
                 <li>The length of the second dimension must be no less than the number of blocks corresponding to the maximum S2 across all batches, that is, S2_max / blockSize rounded up.</li>
@@ -216,7 +216,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>queryRope (aclTensor)</td>
       <td>Input</td>
-      <td>Indicates the rope information of the query in the MLA structure.</td>
+      <td>Provides the query rotary position embedding (RoPE) in Multi-head Latent Attention (MLA).</td>
       <td>          <ul>
                 <li>Optional. Must be paired with keyRope: both are null pointers (rope not used), or both are non-null tensors (rope used, Dr is 64).</li>
                 <li>Does not support null tensor.</li>
@@ -234,7 +234,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>keyRope (aclTensor)</td>
       <td>Input</td>
-      <td>Indicates the rope information of the key in the MLA structure.</td>
+      <td>Provides the key RoPE in the MLA structure.</td>
       <td>          <ul>
                 <li>Optional. Must be paired with queryRope as null pointers (rope not used), or non-null tensors (rope used, Dr is 64).</li>
                 <li>Does not support null tensors.</li>
@@ -253,8 +253,8 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>scaleValue (double)</td>
       <td>Input</td>
-      <td>Represents the scaling factor.</td>
-      <td>-</td>
+      <td>Factor applied to query-key dot products before softmax.</td>
+      <td>Pass this value explicitly. For standard attention, use a finite positive value such as <code>1/sqrt(d_k)</code>, or use the scale specified by the model. Zero scales the dot products to zero, and a negative value reverses their order.</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -339,8 +339,8 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>attentionMode (int64_t)</td>
       <td>Input</td>
-      <td>-</td>
-      <td>Only 2 is supported, indicating the MLA-absorb mode.</td>
+      <td>Specifies the attention computation mode.</td>
+      <td>Only 2 is supported. It selects MLA-absorb mode, which computes attention using the compressed KV representation.</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -405,7 +405,7 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>workspaceSize (uint64_t*)</td>
       <td>Output</td>
-      <td>Returns the workspace size that needs to be applied by the Device side.</td>
+      <td>Returns the required size of the device workspace in bytes.</td>
       <td>-</td>
       <td>-</td>
       <td>-</td>
@@ -474,12 +474,12 @@ aclnnStatus aclnnSparseFlashAttention(
     <tr>
       <td>workspace</td>
       <td>Input</td>
-      <td>Workspace memory address applied by the Device side.</td>
+      <td>Address of the device workspace allocated with <code>aclrtMalloc</code>.</td>
     </tr>
     <tr>
       <td>workspaceSize</td>
       <td>Input</td>
-      <td>Workspace size applied by the Device side, obtained by the first-phase API aclnnSparseFlashAttentionGetWorkspaceSize.</td>
+      <td>Size of the device workspace in bytes, returned by <code>aclnnSparseFlashAttentionGetWorkspaceSize</code>.</td>
     </tr>
     <tr>
       <td>executor</td>
@@ -533,7 +533,7 @@ The following sample code is for reference only. For details about the compilati
  */
 
 /*!
- * \file test_incre_flash_attention_v4.cpp
+ * \file test_aclnn_sparse_flash_attention.cpp
  * \brief
  */
 
@@ -631,16 +631,19 @@ struct TensorResources {
     aclTensor* keyRopeTensor = nullptr;
 };
 
+constexpr int64_t kHeadDim = 512;
+constexpr int64_t kRopeDim = 64;
+
 int InitializeTensors(TensorResources& resources) {
-    std::vector<int64_t> queryShape = {1, 2, 1, 512};
-    std::vector<int64_t> keyShape = {1, 2, 1, 512};
-    std::vector<int64_t> valueShape = {1, 2, 1, 512};
+    std::vector<int64_t> queryShape = {1, 2, 1, kHeadDim};
+    std::vector<int64_t> keyShape = {1, 2, 1, kHeadDim};
+    std::vector<int64_t> valueShape = {1, 2, 1, kHeadDim};
     std::vector<int64_t> sparseIndicesShape = {1, 2, 1, 2};
-    std::vector<int64_t> attentionOutShape = {1, 2, 1, 512};
+    std::vector<int64_t> attentionOutShape = {1, 2, 1, kHeadDim};
     std::vector<int64_t> softmaxMaxShape = {1, 1, 2, 1};
     std::vector<int64_t> softmaxSumShape = {1, 1, 2, 1};
-    std::vector<int64_t> queryRopeShape = {1, 2, 1, 64};
-    std::vector<int64_t> keyRopeShape = {1, 2, 1, 64};
+    std::vector<int64_t> queryRopeShape = {1, 2, 1, kRopeDim};
+    std::vector<int64_t> keyRopeShape = {1, 2, 1, kRopeDim};
 
     int64_t queryShapeSize = GetShapeSize(queryShape);
     int64_t keyShapeSize = GetShapeSize(keyShape);
@@ -704,21 +707,21 @@ int InitializeTensors(TensorResources& resources) {
       return ret;
     }
 
-    // Create attention_out aclTensor.
+    // Create attentionOut aclTensor.
     ret = CreateAclTensor(attentionOutHostData, attentionOutShape, &resources.attentionOutDeviceAddr,
                          aclDataType::ACL_FLOAT16, &resources.attentionOutTensor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
       return ret;
     }
 
-    // Create softmax_max aclTensor.
+    // Create softmaxMax aclTensor.
     ret = CreateAclTensor(softmaxMaxHostData, softmaxMaxShape, &resources.softmaxMaxDeviceAddr,
                          aclDataType::ACL_FLOAT, &resources.softmaxMaxTensor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
       return ret;
     }
 
-    // Create softmax_sum aclTensor.
+    // Create softmaxSum aclTensor.
     ret = CreateAclTensor(softmaxSumHostData, softmaxSumShape, &resources.softmaxSumDeviceAddr,
                          aclDataType::ACL_FLOAT, &resources.softmaxSumTensor);
     if (!CHECK_RET(ret == ACL_SUCCESS)) {
@@ -730,8 +733,7 @@ int InitializeTensors(TensorResources& resources) {
 
 int ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stream,
                               void** workspaceAddr, uint64_t* workspaceSize) {
-    int64_t d = 2;
-    double scaleValue = 1 / sqrt(d);
+    const double scaleValue = 1.0 / std::sqrt(kHeadDim + kRopeDim);
     int64_t sparseBlockSize = 1;
     constexpr const char layerOutStr[] = "BSND";
     constexpr size_t layerOutLen = sizeof(layerOutStr);
@@ -751,7 +753,8 @@ int ExecuteSparseFlashAttention(TensorResources& resources, aclrtStream stream,
     int64_t preTokens = 9223372036854775807;
     int64_t nextTokens = 9223372036854775807;
     int64_t attentionMode = 2;
-    bool returnSoftmaxLse = false;
+    // Request the FP32 softmax statistics printed below.
+    bool returnSoftmaxLse = true;
     aclOpExecutor* executor;
 
     int ret = aclnnSparseFlashAttentionGetWorkspaceSize(resources.queryTensor, resources.keyTensor, resources.valueTensor, resources.sparseIndicesTensor, nullptr, nullptr, nullptr, resources.queryRopeTensor, resources.keyRopeTensor,
@@ -789,9 +792,24 @@ int PrintOutResult(std::vector<int64_t> &shape, void** deviceAddr) {
         return ret;
   }
   for (int64_t i = 0; i < size; i++) {
-    LOG_PRINT("mean result[%ld] is: %f\n", i, aclFloat16ToFloat(resultData[i]));
+    LOG_PRINT("result[%lld] is: %f\n", static_cast<long long>(i), aclFloat16ToFloat(resultData[i]));
   }
   return ACL_SUCCESS;
+}
+
+int PrintOutResultFp32(const std::vector<int64_t>& shape, void** deviceAddr) {
+    const auto size = GetShapeSize(shape);
+    std::vector<float> resultData(size);
+    const auto bytes = resultData.size() * sizeof(float);
+    const auto ret = aclrtMemcpy(resultData.data(), bytes, *deviceAddr, bytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (!CHECK_RET(ret == ACL_SUCCESS)) {
+        LOG_PRINT("copy result from device to host failed. ERROR: %d\n", ret);
+        return ret;
+    }
+    for (int64_t i = 0; i < size; i++) {
+        LOG_PRINT("result[%lld] is: %f\n", static_cast<long long>(i), resultData[i]);
+    }
+    return ACL_SUCCESS;
 }
 
 void CleanupResources(TensorResources& resources, void* workspaceAddr,
@@ -873,7 +891,7 @@ int main() {
     TensorResources resources = {};
     void* workspaceAddr = nullptr;
     uint64_t workspaceSize = 0;
-    std::vector<int64_t> attentionOutShape = {1, 2, 1, 512};
+    std::vector<int64_t> attentionOutShape = {1, 2, 1, kHeadDim};
     std::vector<int64_t> softmaxMaxShape = {1, 1, 2, 1};
     std::vector<int64_t> softmaxSumShape = {1, 1, 2, 1};
     int ret = ACL_SUCCESS;
@@ -912,9 +930,9 @@ int main() {
     printf("-----------attentionOut output -----------\n");
     PrintOutResult(attentionOutShape, &resources.attentionOutDeviceAddr);
     printf("-----------softmaxMax output -----------\n");
-    PrintOutResult(softmaxMaxShape, &resources.softmaxMaxDeviceAddr);
+    PrintOutResultFp32(softmaxMaxShape, &resources.softmaxMaxDeviceAddr);
     printf("-----------softmaxSum output -----------\n");
-    PrintOutResult(softmaxSumShape, &resources.softmaxSumDeviceAddr);
+    PrintOutResultFp32(softmaxSumShape, &resources.softmaxSumDeviceAddr);
     // 6. Cleanup resources
     CleanupResources(resources, workspaceAddr, stream, deviceId);
     return 0;
