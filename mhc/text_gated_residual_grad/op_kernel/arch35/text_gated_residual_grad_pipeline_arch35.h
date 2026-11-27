@@ -119,6 +119,25 @@ HC_GRAD_HOST_DEVICE uint64_t HcGradAlign(uint64_t bytes)
     return (bytes + HC_GRAD_WS_ALIGN - 1U) / HC_GRAD_WS_ALIGN * HC_GRAD_WS_ALIGN;
 }
 
+struct HcGradA2WeightNzLayout {
+    uint64_t wUp;
+    uint64_t act;
+    uint64_t packed;
+    uint64_t end;
+};
+
+// V may produce Act and packed G56 inputs before Cube completes its DX read.
+HC_GRAD_HOST_DEVICE HcGradA2WeightNzLayout BuildHcGradA2WeightNzLayout(uint64_t offset, uint32_t rows, uint32_t c,
+                                                                       uint32_t r, uint32_t d)
+{
+    const uint64_t alignedRows = HcGradAlign16(rows);
+    const uint64_t alignedR = HcGradAlign16(r);
+    const uint64_t packedRows = HcGradAlign16(r + HcGradAlign16(c));
+    const uint64_t act = offset + HcGradAlign(alignedR * HcGradAlign16(d) * sizeof(uint16_t));
+    const uint64_t packed = act + HcGradAlign(alignedR * alignedRows * sizeof(uint16_t));
+    return {offset, act, packed, packed + HcGradAlign(packedRows * alignedRows * sizeof(uint16_t))};
+}
+
 struct HcGradWorkspaceLayout {
     uint64_t xn{0};
     uint64_t dup{0};

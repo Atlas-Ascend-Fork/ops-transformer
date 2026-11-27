@@ -22,7 +22,8 @@ namespace TextGatedResidualGrad {
 
 // Ascend 950: CATLASS ping-pong GEMM with TLA; C1b reads dup directly as ColumnMajor.
 template <typename D_T, int HAS_GAMMA>
-using KernelTextGatedResidualGradArch35 = KernelTextGatedResidualGrad<D_T, HAS_GAMMA, HcGradGemm<D_T>, false, false>;
+using KernelTextGatedResidualGradArch35 =
+    KernelTextGatedResidualGrad<D_T, HAS_GAMMA, HcGradGemm<D_T, HAS_GAMMA>, false, false>;
 
 } // namespace TextGatedResidualGrad
 

@@ -37,6 +37,8 @@ public:
 
     __aicore__ inline void Process(uint64_t index = 0, uint8_t enAtomic = 0, uint32_t rowTilesPerReady = 0,
                                    uint16_t rowReadyFlag = 0);
+    __aicore__ inline void ProcessRowTiles(uint64_t index, uint8_t enAtomic, uint64_t firstMTile, uint64_t endMTile,
+                                           uint32_t rowTilesPerReady = 0U, uint16_t rowReadyFlag = 0U);
     __aicore__ inline void End()
     {
         mm_.End();
@@ -147,15 +149,25 @@ template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, class BLOCK
 __aicore__ inline void MatmulBaseKernel<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE, BLOCK_TYPE, MM_CFG, MM_CB>::Process(
     uint64_t index, uint8_t enAtomic, uint32_t rowTilesPerReady, uint16_t rowReadyFlag)
 {
-    if ASCEND_IS_AIV {
-        return;
+    if ASCEND_IS_AIC {
+        constexpr uint64_t firstMTile = 0U;
+        ProcessRowTiles(index, enAtomic, firstMTile, block_.params_.mTileCntL2, rowTilesPerReady, rowReadyFlag);
     }
+}
+
+template <class A_TYPE, class B_TYPE, class C_TYPE, class BIAS_TYPE, class BLOCK_TYPE, const MatmulConfig& MM_CFG,
+          class MM_CB>
+__aicore__ inline void MatmulBaseKernel<A_TYPE, B_TYPE, C_TYPE, BIAS_TYPE, BLOCK_TYPE, MM_CFG, MM_CB>::ProcessRowTiles(
+    uint64_t index, uint8_t enAtomic, uint64_t firstMTile, uint64_t endMTile, uint32_t rowTilesPerReady,
+    uint16_t rowReadyFlag)
+{
     mm_.SetHF32(false, 0);
     if (block_.params_.isHf32) {
         mm_.SetHF32(true, 1);
     }
-    bool reverse = true;
-    for (uint64_t mTileIndex = 0; mTileIndex < block_.params_.mTileCntL2; mTileIndex++) {
+    constexpr uint32_t directionPeriod = 2U;
+    bool reverse = firstMTile % directionPeriod == 0U;
+    for (uint64_t mTileIndex = firstMTile; mTileIndex < endMTile; mTileIndex++) {
 #if defined(__NPU_ARCH__) && __NPU_ARCH__ == 2201
         if (rowTilesPerReady != 0 && mTileIndex % rowTilesPerReady == 0) {
             CrossCoreWaitFlag<2U>(rowReadyFlag);

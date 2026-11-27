@@ -57,6 +57,7 @@ constexpr int64_t MATMUL_TILING_ERROR = -1;
 
 constexpr int64_t TUNED_A2_AIC_COUNT = 20;
 constexpr int64_t TUNED_A2_AIV_COUNT = 40;
+constexpr int64_t A2_WEIGHT_NZ_MIN_CHUNKS = 3;
 constexpr int64_t A2_ND2NZ_MIN_ROWS = 1024;
 constexpr uint32_t A2_C1A_N_TILES = 2U;
 constexpr uint32_t A2_C1A_ND2NZ_K_ROWS_PER_TILE = 128U;
@@ -237,7 +238,7 @@ protected:
         // V6 combines DX with the direct path before both RMS backprop and dgamma.
         tilingData->lowpDx = 0;
         tilingData->nnMatmul = nnMatmul_ ? 1 : 0;
-        tilingData->nnScratchOffset = tilingData->nnScratchBytes = tilingData->nnUbBackupOffset = NO_NN_SCRATCH;
+        tilingData->nnScratchOffset = tilingData->nnScratchBytes = tilingData->a2WeightNzOffset = NO_NN_SCRATCH;
         tilingData->n = n_;
         tilingData->c = c_;
         tilingData->h = h_;
@@ -255,9 +256,7 @@ protected:
         tilingData->vectorUbBytes = ubBytes_;
         tilingData->pipeStages = pipeStages_;
         tilingData->vectorRowBlock = rowBlock_;
-        tilingData->scheduleMode = UsesA5FullKSchedule() ?
-                                       hcgrad::HC_GRAD_A5_FULL_K_SCHEDULE :
-                                       (UseChunkedFullBatch() ? hcgrad::HC_GRAD_FULL_BATCH_SCHEDULE : 1U);
+        tilingData->scheduleMode = UseChunkedFullBatch() ? hcgrad::HC_GRAD_FULL_BATCH_SCHEDULE : 1U;
         return ge::GRAPH_SUCCESS;
     }
 
@@ -407,6 +406,14 @@ protected:
         }
         if (extraNnWorkspace_ != NO_NN_SCRATCH) {
             data->nnScratchOffset = WorkspaceLayout().totalBytes;
+            if (tuneNd2Nz && n_ >= A2_WEIGHT_NZ_MIN_CHUNKS * planRows) {
+                // DX keeps the regular scratch. The other converted operands may be live at the same time.
+                const uint64_t dxNzBytes = static_cast<uint64_t>(hcgrad::HcGradAlign16(planRows)) *
+                                           hcgrad::HcGradAlign16(r_ + c_) * sizeof(uint16_t);
+                data->a2WeightNzOffset = data->nnScratchOffset + hcgrad::HcGradAlign(dxNzBytes);
+                const auto weights = hcgrad::BuildHcGradA2WeightNzLayout(data->a2WeightNzOffset, planRows, c_, r_, d_);
+                extraNnWorkspace_ = weights.end - data->nnScratchOffset;
+            }
             data->nnScratchBytes = extraNnWorkspace_;
             data->workspaceSize = data->nnScratchOffset + data->nnScratchBytes;
         }
@@ -425,10 +432,9 @@ protected:
         for (int task = FULL_GEMM_PLAN; task < GEMM_PLAN_COUNT; ++task) {
             const int64_t rows =
                 task == FULL_GEMM_PLAN ? std::min(n_, planRows) : (remainderRows ? remainderRows : planRows);
-            const int64_t weightK = UsesA5FullKSchedule() ? n_ : rows;
             const GemmShape shapes[A5_GEMM_STAGE_COUNT] = {{rows, r_, d_, d_},
-                                                           {d_, r_, weightK, d_},
-                                                           {r_ + (hasGate_ ? gateRows : 0), d_, weightK, packedStride},
+                                                           {d_, r_, rows, d_},
+                                                           {r_ + (hasGate_ ? gateRows : 0), d_, rows, packedStride},
                                                            {rows, d_, r_ + (hasGate_ ? c_ : 0), packedStride}};
             for (uint32_t stage = hcgrad::HC_GRAD_NN_STAGE_C1A; stage < A5_GEMM_STAGE_COUNT; ++stage) {
                 const auto& shape = shapes[stage];
@@ -821,10 +827,7 @@ private:
             }
             return ge::GRAPH_SUCCESS;
         }
-        if (UsesA5FullKSchedule()) {
-            scheduleBeatCount_ = TextGatedResidualGrad::CountHcGradBeats<false, false, true>(
-                static_cast<uint32_t>(taskCount_), static_cast<uint32_t>(workspaceSlots_), hasGamma_ != 0);
-        } else if (MaterializeDupT()) {
+        if (MaterializeDupT()) {
             scheduleBeatCount_ = TextGatedResidualGrad::CountHcGradBeats<true>(
                 static_cast<uint32_t>(taskCount_), static_cast<uint32_t>(workspaceSlots_), hasGamma_ != 0);
         } else {
@@ -888,13 +891,6 @@ private:
         return npuArch_ == HC_GRAD_ARCH_A2 && TextGatedResidualGrad::HC_GRAD_USE_DUP_T;
     }
 
-    bool UsesA5FullKSchedule() const
-    {
-        // Retaining every token for a deferred dW GEMM makes workspace O(BS).
-        // A5 uses the bounded per-task schedule; eligible A2 shapes use fixed full-batch chunks.
-        return false;
-    }
-
     int64_t ChunkRows() const
     {
         return n_ < hcgrad::HC_GRAD_CHUNK_ROWS ? n_ : hcgrad::HC_GRAD_CHUNK_ROWS;
@@ -929,8 +925,7 @@ private:
     TextGatedResidualGrad::HcGradWorkspaceLayout WorkspaceLayout() const
     {
         const bool fullBatch = UseChunkedFullBatch();
-        const uint32_t retainedRows =
-            fullBatch ? static_cast<uint32_t>(ChunkRows()) : (UsesA5FullKSchedule() ? static_cast<uint32_t>(n_) : 0U);
+        const uint32_t retainedRows = fullBatch ? static_cast<uint32_t>(ChunkRows()) : 0U;
         // Both input dtypes use the first R+C entries of each aligned G56 row for DX.
         const uint32_t dxColumns =
             npuArch_ == HC_GRAD_ARCH_A5 && fullBatch ?

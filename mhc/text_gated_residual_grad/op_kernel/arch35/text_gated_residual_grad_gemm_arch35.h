@@ -16,10 +16,8 @@
 #include "../text_gated_residual_grad_constants.h"
 #include "nn_a5/mat_mul_pingpong_basic.h"
 #include "nn_a5/mat_mul_al1_full_load.h"
-#include "nn_a5/mat_mul_bl1_full_load.h"
-#include "nn_a5/mat_mul_streamk.h"
 namespace TextGatedResidualGrad {
-template <typename D_T>
+template <typename D_T, int HAS_GAMMA>
 class HcGradGemm {
 public:
     __aicore__ inline void Init(uint32_t aicNum, const TextGatedResidualGradTilingDataArch35* data, GM_ADDR workspace)
@@ -106,14 +104,8 @@ public:
     __aicore__ inline void RunC1aSplitK(GM_ADDR dup, GM_ADDR wUp, GM_ADDR partial, uint32_t rows, uint32_t r,
                                         uint32_t d, uint32_t splitkFactor)
     {
-        // Fusion splitkFactor is 1; NN may independently select Stream-K and reduce its partials in FP32.
+        // The host selects Basic tiling with a complete K per output tile.
         RunNn<false>(0, rows, rows, r, d, dup, d, wUp, r, partial, r);
-    }
-    __aicore__ inline bool NeedsVector(uint32_t stage, uint32_t rows) const
-    {
-        const uint32_t fullRows = data_->fullBatchRows != 0 ? data_->fullBatchRows :
-                                                              (data_->n < data_->taskRows ? data_->n : data_->taskRows);
-        return (data_->nnA5Key[rows == fullRows ? 0 : 1][stage] & 0xF000) == 0x1000;
     }
     // C1b: dwUpPartial = dup^T @ act, reading dup as ColumnMajor [D,rows], as on A5.
     __aicore__ inline void RunC1b(GM_ADDR dup, GM_ADDR act, GM_ADDR dwUpPartial, uint32_t rows, uint32_t r, uint32_t d,
@@ -184,117 +176,78 @@ public:
                                  uint32_t rows, uint32_t d, uint32_t r, uint32_t c, uint32_t packedStride, bool hasGate)
     {
         if (hasGate) {
-            if (data_->lowpDx != 0) {
-                RunNn<false, D_T>(HC_GRAD_NN_STAGE_DX, rows, rows, d, r + c, packed, packedStride, wConcat, d, dxOut,
-                                  d);
-            } else {
-                RunNn<false>(HC_GRAD_NN_STAGE_DX, rows, rows, d, r + c, packed, packedStride, wConcat, d, dxOut, d);
-            }
+            RunNn<false>(HC_GRAD_NN_STAGE_DX, rows, rows, d, r + c, packed, packedStride, wConcat, d, dxOut, d);
         } else {
-            if (data_->lowpDx != 0) {
-                RunNn<false, D_T>(HC_GRAD_NN_STAGE_DX, rows, rows, d, r, packed, packedStride, wDown, d, dxOut, d);
-            } else {
-                RunNn<false>(HC_GRAD_NN_STAGE_DX, rows, rows, d, r, packed, packedStride, wDown, d, dxOut, d);
-            }
+            RunNn<false>(HC_GRAD_NN_STAGE_DX, rows, rows, d, r, packed, packedStride, wDown, d, dxOut, d);
         }
     }
 
 private:
-    template <bool TRANS_A, typename C_T = float>
+    template <bool TRANS_A>
     __aicore__ inline void RunNn(uint32_t stage, uint32_t rows, uint32_t m, uint32_t n, uint32_t k, GM_ADDR a,
                                  uint32_t lda, GM_ADDR b, uint32_t ldb, GM_ADDR c, uint32_t ldc)
     {
+        if ASCEND_IS_AIV {
+            return;
+        }
         const uint32_t fullRows = data_->fullBatchRows != 0 ? data_->fullBatchRows :
                                                               (data_->n < data_->taskRows ? data_->n : data_->taskRows);
         const uint32_t task = rows == fullRows ? 0 : 1;
         auto t = data_->nnA5[task][stage];
         t.rowStride = lda;
-        const uint64_t key = data_->nnA5Key[task][stage];
-        using ALayout = AscendC::Std::conditional_t<TRANS_A, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
-        using ND = asc::te::nd_ext_layout_ptn;
-        if ((key & 0xF000) == 0x1000) {
-            HcGradNnA5::MatMulStreamKKernel<D_T, D_T, C_T, float, ALayout, ND, Blaze::Gemm::MatMulL0C2Out::ON_THE_FLY>(
-                a, b, nullptr, c, scratch_, t);
-            // Publish every Vector epilogue result before Cube may reuse NN scratch
-            // or release the result to later fused stages.
-            constexpr uint16_t AIV_EPILOGUE_DONE = 5U;
-            constexpr uint16_t CUBE_EPILOGUE_READY = 7U;
-            if ASCEND_IS_AIV {
-                AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
-                AscendC::CrossCoreSetFlag<0, PIPE_MTE3>(AIV_EPILOGUE_DONE);
-                AscendC::CrossCoreWaitFlag<0, PIPE_MTE3>(AIV_EPILOGUE_DONE);
-                if (AscendC::GetBlockIdx() % 2U == 0U) {
-                    AscendC::CrossCoreSetFlag<4, PIPE_MTE3>(CUBE_EPILOGUE_READY);
-                }
-            }
-            if ASCEND_IS_AIC {
-                AscendC::CrossCoreWaitFlag<4, PIPE_MTE2>(CUBE_EPILOGUE_READY);
-            }
-        } else {
-            if ASCEND_IS_AIV {
-                return;
-            }
-            switch ((key >> 16) & 0xF) {
-                case 1:
-                    HcGradNnA5::MatMulAL1FullLoadKernel<D_T, D_T, C_T, float, ALayout, ND, ND, 1>(a, b, nullptr, c,
-                                                                                                  scratch_, t);
-                    break;
-                case 2:
-                    HcGradNnA5::MatMulBL1FullLoadKernel<D_T, D_T, C_T, float, ALayout, ND, ND, 2>(a, b, nullptr, c,
-                                                                                                  scratch_, t);
-                    break;
-                default:
-                    if constexpr (TRANS_A && AscendC::Std::is_same_v<C_T, float>) {
-                        if (stage == 2U && UsesBlockedG56Xn()) {
-                            // Each tile owns all M rows and its entire K, so B is
-                            // read once. The 54 N tiles fit in two AIC waves.
-                            t.mL1 = t.baseM = 336U;
-                            t.nL1 = t.baseN = HC_GRAD_G56_BLOCKED_XN_N;
-                            t.mTailCnt = t.nTailCnt = 1U;
-                            t.mTailMain = t.m;
-                            t.nTailMain = t.n % t.nL1;
-                            t.aswWindowLen = 1U;
-                            if (UsesPreparedG56A()) {
-                                using ZN = asc::te::zn_layout_ptn;
-                                HcGradNnA5::MatMulBasicTrafficKernel<D_T, C_T, ZN, ND, ND, HC_GRAD_CHUNK_ROWS, false>(
-                                    a, b, c, t);
-                            } else {
-                                HcGradNnA5::MatMulBasicTrafficKernel<D_T, C_T, ALayout, ND, ND, HC_GRAD_CHUNK_ROWS,
-                                                                     false>(a, b, c, t);
-                            }
-                            break;
-                        }
-                    }
-                    constexpr bool FP32_DX = AscendC::Std::is_same_v<C_T, float>;
-                    constexpr bool FP16_DX = AscendC::Std::is_same_v<D_T, half> && AscendC::Std::is_same_v<C_T, half>;
-                    if constexpr (!TRANS_A && FP32_DX) {
-                        // Retain the installed Basic K tessellation and output shape on every tile.
-                        if (stage == 3U && key == 0x2U && rows == HC_GRAD_CHUNK_ROWS && n == 10240U && k == 324U &&
-                            data_->fullBatchRows == HC_GRAD_CHUNK_ROWS && data_->hasGate != 0 && data_->aicNum == 28 &&
-                            t.usedCoreNum == 28U && t.m == HC_GRAD_CHUNK_ROWS && t.n == n && t.k == k &&
-                            t.rowStride >= k && t.mL1 == 256U && t.nL1 == 256U && t.kL1 == 256U && t.baseM == 256U &&
-                            t.baseN == 256U && t.baseK == 64U && t.mTailCnt == 1U && t.nTailCnt == 1U &&
-                            t.mBaseTailSplitCnt == 1U && t.nBaseTailSplitCnt == 1U && t.l1BufferNum == 2U &&
-                            t.l0cDB == 1U && t.sliceM <= 1U && t.l2CacheDisable == 0U) {
-                            HcGradNnA5::MatMulDxAPanelL1Kernel<D_T>(a, b, c, t);
-                            break;
-                        }
-                    }
-                    if constexpr (!TRANS_A && (FP32_DX || FP16_DX)) {
-                        // A non-allocating output keeps this large one-use DX intermediate out of L2.
-                        if (stage == 3U && key == 0x2U && n == 10240U && k == 324U && rows >= 3072U &&
-                            data_->fullBatchRows == HC_GRAD_CHUNK_ROWS && t.sliceM <= 1U) {
-                            HcGradNnA5::MatMulBasicTrafficKernel<D_T, C_T, ALayout, ND, ND, 0U, true>(a, b, c, t);
-                            break;
-                        }
-                    }
-                    HcGradNnA5::MatMulBasicKernel<D_T, D_T, C_T, float, ALayout, ND, ND>(a, b, nullptr, c, scratch_, t);
-                    break;
-            }
-        }
+        RunBasic<TRANS_A>(stage, rows, n, k, a, b, c, data_->nnA5Key[task][stage], t);
         AscendC::PipeBarrier<PIPE_ALL>();
         AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
     }
+
+    template <bool TRANS_A>
+    __aicore__ inline void RunBasic(uint32_t stage, uint32_t rows, uint32_t n, uint32_t k, GM_ADDR a, GM_ADDR b,
+                                    GM_ADDR c, uint64_t key, HcGradA5NnTiling& t)
+    {
+        using ALayout = AscendC::Std::conditional_t<TRANS_A, asc::te::dn_ext_layout_ptn, asc::te::nd_ext_layout_ptn>;
+        using ND = asc::te::nd_ext_layout_ptn;
+        // TileA5Nn selects Basic and transposed Basic. The tuned variants require a gamma chunk.
+        if constexpr (HAS_GAMMA) {
+            if constexpr (TRANS_A) {
+                if (stage == HC_GRAD_NN_STAGE_G56 && UsesBlockedG56Xn()) {
+                    // Each tile owns all M rows and its entire K, so B is read once.
+                    t.mL1 = t.baseM = 336U;
+                    t.nL1 = t.baseN = HC_GRAD_G56_BLOCKED_XN_N;
+                    t.mTailCnt = t.nTailCnt = 1U;
+                    t.mTailMain = t.m;
+                    t.nTailMain = t.n % t.nL1;
+                    t.aswWindowLen = 1U;
+                    if (UsesPreparedG56A()) {
+                        using ZN = asc::te::zn_layout_ptn;
+                        HcGradNnA5::MatMulBasicTrafficKernel<D_T, float, ZN, ND, ND, HC_GRAD_CHUNK_ROWS, false>(a, b, c,
+                                                                                                                t);
+                    } else {
+                        HcGradNnA5::MatMulBasicTrafficKernel<D_T, float, ALayout, ND, ND, HC_GRAD_CHUNK_ROWS, false>(
+                            a, b, c, t);
+                    }
+                    return;
+                }
+            } else if (stage == HC_GRAD_NN_STAGE_DX && key == HC_GRAD_A5_BASIC_GEMM_KEY && n == 10240U && k == 324U &&
+                       data_->fullBatchRows == HC_GRAD_CHUNK_ROWS && t.sliceM <= 1U) {
+                // Retain the installed Basic K tessellation and output shape on every tile.
+                if (rows == HC_GRAD_CHUNK_ROWS && data_->hasGate != 0 && data_->aicNum == 28 && t.usedCoreNum == 28U &&
+                    t.m == HC_GRAD_CHUNK_ROWS && t.n == n && t.k == k && t.rowStride >= k && t.mL1 == 256U &&
+                    t.nL1 == 256U && t.kL1 == 256U && t.baseM == 256U && t.baseN == 256U && t.baseK == 64U &&
+                    t.mTailCnt == 1U && t.nTailCnt == 1U && t.mBaseTailSplitCnt == 1U && t.nBaseTailSplitCnt == 1U &&
+                    t.l1BufferNum == 2U && t.l0cDB == 1U && t.l2CacheDisable == 0U) {
+                    HcGradNnA5::MatMulDxAPanelL1Kernel<D_T>(a, b, c, t);
+                    return;
+                }
+                // A non-allocating output keeps this large one-use DX intermediate out of L2.
+                if (rows >= 3072U) {
+                    HcGradNnA5::MatMulBasicTrafficKernel<D_T, float, ALayout, ND, ND, 0U, true>(a, b, c, t);
+                    return;
+                }
+            }
+        }
+        HcGradNnA5::MatMulBasicKernel<D_T, D_T, float, float, ALayout, ND, ND>(a, b, nullptr, c, scratch_, t);
+    }
+
     const TextGatedResidualGradTilingDataArch35* data_{nullptr};
     GM_ADDR scratch_{nullptr};
 };

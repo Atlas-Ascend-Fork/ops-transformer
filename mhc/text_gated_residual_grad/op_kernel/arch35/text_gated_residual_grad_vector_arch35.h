@@ -70,9 +70,13 @@ public:
         gmDwUp_ = Pointer(layout_.dwUpAccum);
         gmDwGate_ = Pointer(layout_.dwGateAccum);
         taskRows_ = static_cast<uint32_t>(tilingData->taskRows);
+#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
         directWeights_ = tilingData->taskCount == 1 && tilingData->nnMatmul == 0;
-        recomputeDirect_ = tilingData->recomputeDirect != 0;
+#endif
+        recomputeDirect_ = (HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5 || HAS_GAMMA) && tilingData->recomputeDirect != 0;
+#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A2 && HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
         lowpDx_ = tilingData->lowpDx != 0;
+#endif
         n_ = static_cast<uint32_t>(tilingData->n);
         c_ = static_cast<uint32_t>(tilingData->c);
         h_ = static_cast<uint32_t>(tilingData->h);
@@ -4693,9 +4697,18 @@ private:
     uint32_t r_{0};
     uint32_t d_{0};
     uint32_t taskRows_{HC_GRAD_TASK_ROWS};
+#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
+    static constexpr bool directWeights_ = false;
+#else
     bool directWeights_{false};
+#endif
     bool recomputeDirect_{false};
+#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2 || HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
+    // Host tiling always supplies FP32 DX on A2 and A5.
+    static constexpr bool lowpDx_ = false;
+#else
     bool lowpDx_{false};
+#endif
     uint32_t taskCount_{0};
     uint32_t workspaceSlots_{0};
     uint32_t splitkFactor_{0};

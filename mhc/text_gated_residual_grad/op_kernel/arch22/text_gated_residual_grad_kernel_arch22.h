@@ -24,7 +24,7 @@ namespace TextGatedResidualGrad {
 // as on A5. Init/Process/RunCube use the shared pipeline.
 template <typename D_T, int HAS_GAMMA>
 using KernelTextGatedResidualGradArch22 =
-    KernelTextGatedResidualGrad<D_T, HAS_GAMMA, HcGradGemmArch22<D_T>, HC_GRAD_USE_DUP_T, false>;
+    KernelTextGatedResidualGrad<D_T, HAS_GAMMA, HcGradGemmArch22<D_T, HAS_GAMMA>, HC_GRAD_USE_DUP_T, false>;
 
 } // namespace TextGatedResidualGrad
 

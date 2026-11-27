@@ -121,6 +121,8 @@ public:
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2
     // The retained-chunk scheduler owns these edges separately from the task ring.
     static constexpr uint16_t A2_C1A_INPUT_READY = EDGE_V1_C1;
+    // The two row groups have distinct credits while both are in flight.
+    static constexpr uint16_t A2_C1A_SUFFIX_READY = EDGE_WD_C1;
     static constexpr uint16_t A2_C1A_OUTPUT_READY = EDGE_C1_RD;
     static constexpr uint16_t A2_DX_INPUT_READY = EDGE_V3_DX;
     static constexpr uint16_t A2_DX_OUTPUT_READY = EDGE_DX_V6;
@@ -141,11 +143,6 @@ public:
         WaitEdge(edge);
     }
 
-    static constexpr uint16_t C1A_SLAB_READY = EDGE_V1_C1;
-    HC_GRAD_HOST_DEVICE void MarkC1aSlabReady()
-    {
-        Send(C1A_SLAB_READY);
-    }
 #endif
 
     HC_GRAD_HOST_DEVICE void Init(GM_ADDR, uint64_t, uint32_t taskCount, uint32_t workspaceSlots, uint32_t, uint32_t)

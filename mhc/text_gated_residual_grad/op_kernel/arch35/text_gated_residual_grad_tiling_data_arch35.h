@@ -67,8 +67,9 @@ public:
     uint32_t nnWeightBatchMask{0};
     HcGradA5NnTiling nnA5[2][5]{};
     uint64_t nnA5Key[2][5]{};
-    uint64_t nnScratchOffset{0}, nnScratchBytes{0}, nnUbBackupOffset{0};
-    int64_t scheduleMode{0}; // 0 = SyncAll each step; 1 = bounded producer-consumer ready/free credits.
+    uint64_t nnScratchOffset{0}, nnScratchBytes{0};
+    uint64_t a2WeightNzOffset{0}; // Separate WUp/Act/G56 operands when nonzero.
+    int64_t scheduleMode{0};      // 0 = SyncAll each step; 1 = bounded producer-consumer ready/free credits.
 };
 
 #endif // TEXT_GATED_RESIDUAL_GRAD_TILING_DATA_ARCH35_H

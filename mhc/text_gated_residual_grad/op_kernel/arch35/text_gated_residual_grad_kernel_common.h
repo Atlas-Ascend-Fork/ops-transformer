@@ -41,8 +41,9 @@ public:
     {
         taskRows_ = static_cast<uint32_t>(tilingData->taskRows);
         fullBatchRows_ = static_cast<uint32_t>(tilingData->fullBatchRows);
+#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A2 && HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
         lowpDx_ = tilingData->lowpDx != 0;
-        gmDxOutput_ = dx;
+#endif
         n_ = static_cast<uint32_t>(tilingData->n);
         c_ = static_cast<uint32_t>(tilingData->c);
         r_ = static_cast<uint32_t>(tilingData->r);
@@ -54,30 +55,35 @@ public:
         scheduleBeatCount_ = static_cast<uint32_t>(tilingData->scheduleBeatCount);
         aicNum_ = static_cast<uint32_t>(tilingData->aicNum);
         workspace_ = workspace;
-        fullBatch_ = tilingData->scheduleMode == HC_GRAD_FULL_BATCH_SCHEDULE;
+        // A5 only chooses a full-batch chunk for inputs with gamma.
+        fullBatch_ = (HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5 || HAS_GAMMA) &&
+                     tilingData->scheduleMode == HC_GRAD_FULL_BATCH_SCHEDULE;
+#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A2 && HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
         producerConsumer_ = (tilingData->scheduleMode != 0) && !USE_DUP_T && !G56_PACKED_T;
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        deferWeightGrads_ = tilingData->scheduleMode == HC_GRAD_A5_FULL_K_SCHEDULE;
 #endif
+#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
         singleTask_ = taskCount_ == 1U && tilingData->nnMatmul == 0;
+#endif
         gmWUp_ = wUp;
         gmWDown_ = wDown;
         gmWGate_ = wGate;
-        const bool retainWeightOperands = fullBatch_ || deferWeightGrads_;
-        const uint32_t retainedRows = fullBatch_ ? fullBatchRows_ : n_;
+        const uint32_t retainedRows = fullBatch_ ? fullBatchRows_ : 0U;
         const uint32_t denseColumns = r_ + (hasGate_ != 0U ? c_ : 0U);
         const uint32_t dxColumns =
             HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5 && fullBatch_ ? HcGradAlign16(r_ + HcGradAlign16(c_)) : denseColumns;
-        layout_ = BuildHcGradWorkspaceLayout(
-            workspaceSlots_, splitkFactor_, static_cast<uint32_t>(tilingData->aivNum), c_,
-            static_cast<uint32_t>(tilingData->h), r_, d_, sizeof(D_T), HAS_GAMMA != 0, USE_DUP_T, taskRows_,
-            retainWeightOperands ? retainedRows : 0U, fullBatch_, dxColumns, tilingData->recomputeDirect != 0,
-            fullBatch_, fullBatch_ && !lowpDx_, fullBatch_);
+        layout_ = BuildHcGradWorkspaceLayout(workspaceSlots_, splitkFactor_, static_cast<uint32_t>(tilingData->aivNum),
+                                             c_, static_cast<uint32_t>(tilingData->h), r_, d_, sizeof(D_T),
+                                             HAS_GAMMA != 0, USE_DUP_T, taskRows_, retainedRows, fullBatch_, dxColumns,
+                                             tilingData->recomputeDirect != 0, fullBatch_, fullBatch_ && !lowpDx_,
+                                             fullBatch_);
         gmDwDown_ = Pointer(layout_.dwDownAccum);
         gmDwUp_ = Pointer(layout_.dwUpAccum);
         gmDwGate_ = Pointer(layout_.dwGateAccum);
         g56Rows_ = layout_.g56Rows;
         gateRows_ = layout_.gateRows;
+#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2
+        InitC1aSlab(tilingData);
+#endif
         credit_.Init(workspace_, 0U, taskCount_, workspaceSlots_, aicNum_, static_cast<uint32_t>(tilingData->aivNum));
         if ASCEND_IS_AIC {
             gemm_.Init(aicNum_, tilingData, workspace);
@@ -93,7 +99,9 @@ public:
             vector_.Init(gradMixed, x, wDown, wUp, invRms, downPreAct, up, gradInject, wGate, gamma, inject, dx, dwDown,
                          dwUp, dwGate, dgamma, workspace, layout_, tilingData, pipe);
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-            vector_.SetBlockedG56Xn(gemm_.UsesBlockedG56Xn(), gemm_.UsesPreparedG56A());
+            if constexpr (HAS_GAMMA) {
+                vector_.SetBlockedG56Xn(gemm_.UsesBlockedG56Xn(), gemm_.UsesPreparedG56A());
+            }
 #endif
         }
     }
@@ -129,38 +137,24 @@ public:
             ProcessA2ChunkCredits();
             return;
         }
-        if (!producerConsumer_) {
+        if constexpr (!producerConsumer_) {
             AscendC::SyncAll<false>();
         }
 #elif HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        if (fullBatch_) {
-            ProcessChunkedFullBatch();
-            return;
+        if constexpr (HAS_GAMMA) {
+            if (fullBatch_) {
+                ProcessChunkedFullBatch();
+                return;
+            }
+        }
+        if constexpr (!producerConsumer_) {
+            AscendC::SyncAll<false>();
         }
 #else
         AscendC::SyncAll<false>();
 #endif
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        // V1 and V3 publish the first Cube operands and the prepared weights.
-        if (!producerConsumer_ || deferWeightGrads_) {
-            AscendC::SyncAll<false>();
-        }
-        if (deferWeightGrads_) {
-            ProcessTokenPipeline<true>();
-        } else
-#endif
-        {
-            ProcessTokenPipeline<false>();
-        }
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        if (producerConsumer_ && deferWeightGrads_) {
-            AscendC::SyncAll<false>();
-        }
-        if (deferWeightGrads_) {
-            // The final DX beat already launched the full-K dW GEMMs; publish their result.
-            ComputeFullWeightGradients(true);
-        }
-#elif HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A2
+        ProcessTokenPipeline();
+#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A2 && HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
         if (producerConsumer_) {
             AscendC::SyncAll<false>();
         }
@@ -180,25 +174,22 @@ public:
     }
 
 private:
-    template <bool DEFER_WEIGHT_GRADS>
     __aicore__ inline void ProcessTokenPipeline()
     {
-        HcGradScheduler<USE_DUP_T, G56_PACKED_T, DEFER_WEIGHT_GRADS> scheduler(taskCount_, workspaceSlots_,
-                                                                               HAS_GAMMA != 0);
+        HcGradScheduler<USE_DUP_T, G56_PACKED_T> scheduler(taskCount_, workspaceSlots_, HAS_GAMMA != 0);
         for (uint32_t beatIndex = 0; beatIndex < scheduleBeatCount_ && !scheduler.Done(); ++beatIndex) {
             const HcGradBeat beat = scheduler.Next();
-            if constexpr (!DEFER_WEIGHT_GRADS) {
-                if (!producerConsumer_) {
-                    ProcessSynchronizedBeat(beat);
-                    continue;
-                }
+            if (!producerConsumer_) {
+                ProcessSynchronizedBeat(beat);
+                continue;
             }
             // Both sides share the beat sequence; credits provide cross-side readiness and slot reuse.
-            ProcessCubeCredits<DEFER_WEIGHT_GRADS>(beat);
-            ProcessNnVector(beat);
-            ProcessVectorCredits<DEFER_WEIGHT_GRADS>(beat);
+            ProcessCubeCredits(beat);
+            ProcessVectorCredits(beat);
 #if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A2
-            SynchronizeDgamma(beat);
+            if constexpr (HAS_GAMMA) {
+                SynchronizeDgamma(beat);
+            }
 #endif
         }
     }
@@ -210,25 +201,25 @@ private:
         AscendC::SyncAll<false>();
     }
 
-    __aicore__ inline void ConvertFullBatchInputs(uint32_t stage, GM_ADDR a, GM_ADDR b)
+    template <uint32_t STAGE>
+    __aicore__ inline void ConvertFullBatchInputs(GM_ADDR a, GM_ADDR b)
     {
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2
         const uint32_t plan = gemm_.ConversionPlan(chunk_.rows);
-        if (!gemm_.NeedsNnConversion(stage, plan)) {
+        if (!gemm_.NeedsNnConversion(STAGE, plan)) {
             // V3 and DX already published their outputs immediately before these two calls.
-            if (stage != HC_GRAD_NN_STAGE_DX && stage != HC_GRAD_NN_STAGE_C1B) {
+            if constexpr (STAGE != HC_GRAD_NN_STAGE_DX && STAGE != HC_GRAD_NN_STAGE_C1B) {
                 FinishFullBatchStage();
             }
             return;
         }
         if ASCEND_IS_AIV {
-            gemm_.ConvertNnInputs(stage, plan, a, b, vector_.NnScratch());
+            gemm_.template ConvertNnInputs<STAGE>(plan, a, b, vector_.NnScratch());
             vector_.FinishNnScratch();
         }
 #else
         // A5 Blaze consumes the retained ND operands directly. Its callers already
         // publish V1/V3/DX at the enclosing stage boundary, so no conversion barrier is needed.
-        (void)stage;
         (void)a;
         (void)b;
 #endif
@@ -239,15 +230,23 @@ private:
 
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2
     static constexpr uint32_t C1A_SLABS = 2U;
+    static constexpr uint32_t A2_CHUNK_TASK = 0U;
+    static constexpr uint32_t A2_FIRST_ROW = 0U;
 
     __aicore__ inline void InitC1aSlab(const TextGatedResidualGradTilingDataArch35* data)
     {
-        if (fullBatchRows_ < 16384U || fullBatchRows_ > 49152U || c_ != 4U || d_ != 10240U || r_ != 320U ||
+        constexpr uint32_t fullPlan = 0U;
+        constexpr uint32_t unsplitK = 1U;
+        constexpr uint32_t c1aMask = 1U << HC_GRAD_NN_STAGE_C1A;
+        if (!HAS_GAMMA || !fullBatch_ || !layout_.duplicateV1Operands || data->a2WeightNzOffset == 0U ||
+            c_ != HC_GRAD_TUNED_CHANNELS || d_ != HC_GRAD_TUNED_FEATURES || r_ != HC_GRAD_TUNED_PROJECTION_SIZE ||
             data->aivNum != HC_GRAD_AIV_PER_AIC * data->aicNum || data->aivNum % c_ != 0U ||
-            data->vectorUbBytes < HC_GRAD_A2_NN_UB_BYTES || splitkFactor_ != 1U || (data->nnMixMask[0] & 1U) == 0U) {
+            data->vectorUbBytes < HC_GRAD_A2_NN_UB_BYTES || splitkFactor_ != unsplitK ||
+            (data->nnMixMask[fullPlan] & c1aMask) == 0U) {
             return;
         }
-        const auto& nn = data->nnBase[0][0];
+        const auto& nn = data->nnBase[fullPlan][HC_GRAD_NN_STAGE_C1A];
+        // Each group must cover whole M tiles with the original full-K accumulation.
         const uint32_t tiles = nn.tileL2cacheTiling.mTileCntL2;
         const uint32_t rowsPerTile = nn.tileL2cacheTiling.mTileBlock * nn.matmulTiling.singleCoreM;
         if (nn.matmulRunInfo.nd2nzA == 0U && nn.matmulRunInfo.nd2nzB == 1U && nn.matmulRunInfo.transA == 0U &&
@@ -258,25 +257,56 @@ private:
         }
     }
 
-    __aicore__ inline void ProcessC1aSlabs()
+    __aicore__ inline bool StreamsA2C1aRows() const
     {
-        // WUp needs one conversion. NN scratch is released before V1 takes ownership of UB.
-        ConvertFullBatchInputs(HC_GRAD_NN_STAGE_C1A, TaskPointer(layout_.dup, 0U, d_), gmWUp_);
-        if ASCEND_IS_AIV {
-            const uint32_t rows = chunk_.rows / C1A_SLABS;
-            for (uint32_t slab = 0; slab < C1A_SLABS; ++slab) {
-                vector_.ProcessFullV1Slab(slab * rows, rows);
-                AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
-                credit_.SameKindBarrier();
-                credit_.MarkC1aSlabReady();
+        return c1aTilesPerSlab_ != 0U && chunk_.rows == fullBatchRows_;
+    }
+
+    __aicore__ inline void RunA2C1aGroup(uint32_t firstRow, uint32_t rows)
+    {
+        const uint64_t inputOffset = static_cast<uint64_t>(firstRow) * d_ * sizeof(D_T);
+        const uint64_t outputOffset = static_cast<uint64_t>(firstRow) * r_ * sizeof(float);
+        GM_ADDR dup = TaskPointer(layout_.dup, A2_CHUNK_TASK, d_) + inputOffset;
+        GM_ADDR partial = Pointer(layout_.dactPartial);
+        gemm_.RunC1aRowGroup(dup, partial + outputOffset, rows, c1aTilesPerSlab_);
+    }
+
+    static constexpr uint32_t A2_FIRST_M_TILE = 0U;
+    static constexpr uint32_t A2_EARLY_C1B_M_TILES = 1U;
+
+    __aicore__ inline bool HasA2EarlyC1b() const
+    {
+        return StreamsA2C1aRows() && gemm_.C1bRowTileCount() > A2_EARLY_C1B_M_TILES;
+    }
+
+    __aicore__ inline void RunA2C1bTiles(uint32_t firstTile, uint32_t endTile)
+    {
+        gemm_.RunC1bTiles(TaskPointer(layout_.dup, A2_CHUNK_TASK, d_), Pointer(layout_.dwUpPartial), firstTile, endTile,
+                          chunk_.rowBegin != 0U);
+    }
+
+    __aicore__ inline void PrepareA2EarlyC1b()
+    {
+        ConvertA2ChunkInputs<HC_GRAD_NN_STAGE_C1B, true>(TaskPointer(layout_.dup, A2_CHUNK_TASK, d_),
+                                                         TaskPointer(layout_.act, A2_CHUNK_TASK, r_));
+        credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_C1B_INPUT_READY);
+    }
+
+    __aicore__ inline void ComputeA2ChunkC1a()
+    {
+        if (StreamsA2C1aRows()) {
+            const uint32_t groupRows = chunk_.rows / C1A_SLABS;
+            if ASCEND_IS_AIC {
+                RunA2C1aGroup(A2_FIRST_ROW, groupRows);
+                credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_C1A_SUFFIX_READY);
+                RunA2C1aGroup(groupRows, groupRows);
+            } else {
+                vector_.ProcessFullV1Slab(groupRows, groupRows);
+                credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_C1A_SUFFIX_READY);
             }
-            // C1a only reads dup. C1b first reads act after the enclosing stage barrier.
-            vector_.ProcessFullV1Act();
-        } else {
-            gemm_.RunC1aSlabs(TaskPointer(layout_.dup, 0U, d_), Pointer(layout_.dactPartial), c1aTilesPerSlab_,
-                              HcGradCreditSync::C1A_SLAB_READY);
+        } else if ASCEND_IS_AIC {
+            RunC1a(A2_CHUNK_TASK, chunk_.rows);
         }
-        FinishFullBatchStage();
     }
 #endif
 
@@ -294,12 +324,7 @@ private:
 
     __aicore__ inline void ProduceV1()
     {
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2
-        if (!layout_.duplicateV1Operands && c1aTilesPerSlab_ != 0U && chunk_.rows == fullBatchRows_) {
-            ProcessC1aSlabs();
-        } else
-#endif
-            if ASCEND_IS_AIV {
+        if ASCEND_IS_AIV {
             if (!vector_.TryProcessFullV1()) {
                 for (uint32_t task = 0; task < chunk_.taskCount; ++task) {
                     vector_.Process(HcGradVectorOp::V1, task);
@@ -310,12 +335,12 @@ private:
 
     __aicore__ inline void ComputeC1a()
     {
-        ConvertFullBatchInputs(HC_GRAD_NN_STAGE_C1A, TaskPointer(layout_.dup, 0U, d_), gmWUp_);
+        ConvertFullBatchInputs<HC_GRAD_NN_STAGE_C1A>(TaskPointer(layout_.dup, 0U, d_), gmWUp_);
         if ASCEND_IS_AIC {
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
             credit_.WaitChunkStage(HcGradCreditSync::CHUNK_V1_READY);
 #endif
-            RunC1(0U, chunk_.rows);
+            RunC1a(0U, chunk_.rows);
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
             credit_.PublishChunkOutput<HcGradCreditSync::CHUNK_C1A_READY>();
 #endif
@@ -423,7 +448,7 @@ private:
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
         }
 #endif
-        ConvertFullBatchInputs(HC_GRAD_NN_STAGE_DX, DxMatrix(0U), hasGate_ != 0U ? Pointer(layout_.wConcat) : gmWDown_);
+        ConvertFullBatchInputs<HC_GRAD_NN_STAGE_DX>(DxMatrix(0U), hasGate_ != 0U ? Pointer(layout_.wConcat) : gmWDown_);
         if ASCEND_IS_AIC {
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
             credit_.WaitChunkStage(HcGradCreditSync::CHUNK_V3_READY);
@@ -437,8 +462,8 @@ private:
         // Publish the intermediate DX before V6 reads it.
         FinishFullBatchStage();
 #endif
-        ConvertFullBatchInputs(HC_GRAD_NN_STAGE_C1B, TaskPointer(layout_.dup, 0U, d_),
-                               TaskPointer(layout_.act, 0U, r_));
+        ConvertFullBatchInputs<HC_GRAD_NN_STAGE_C1B>(TaskPointer(layout_.dup, 0U, d_),
+                                                     TaskPointer(layout_.act, 0U, r_));
         if ASCEND_IS_AIC {
             RunC1b();
         }
@@ -463,23 +488,54 @@ private:
     }
 
 #if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2
+    static constexpr uint32_t A2_DX_V1_PREFETCH_ROWS = 1024U;
+
+    template <uint32_t STAGE, bool READS_PEER_OPERANDS = false>
+    __aicore__ inline void ConvertA2ChunkInputs(GM_ADDR a, GM_ADDR b)
+    {
+        const uint32_t plan = gemm_.ConversionPlan(chunk_.rows);
+        if (!gemm_.NeedsNnConversion(STAGE, plan)) {
+            return;
+        }
+        if constexpr (READS_PEER_OPERANDS) {
+            AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
+            credit_.SameKindBarrier();
+        }
+        gemm_.template ConvertNnInputs<STAGE>(plan, a, b, vector_.NnScratch());
+        vector_.FinishNnScratch();
+    }
+
     template <uint32_t STAGE, uint16_t READY, bool READS_PEER_OPERANDS = false>
-    __aicore__ inline void PrepareA2ChunkGemm(GM_ADDR a, GM_ADDR b)
+    __aicore__ inline void PrepareA2ChunkGemm(GM_ADDR a, GM_ADDR b, bool convertInputs = true)
     {
         if ASCEND_IS_AIV {
-            const uint32_t plan = gemm_.ConversionPlan(chunk_.rows);
-            if (gemm_.NeedsNnConversion(STAGE, plan)) {
-                if constexpr (READS_PEER_OPERANDS) {
-                    AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
-                    credit_.SameKindBarrier();
-                }
-                gemm_.ConvertNnInputs(STAGE, plan, a, b, vector_.NnScratch());
-                vector_.FinishNnScratch();
+            if (convertInputs) {
+                ConvertA2ChunkInputs<STAGE, READS_PEER_OPERANDS>(a, b);
             }
             credit_.PublishA2ChunkEdge(READY);
         } else {
             credit_.WaitA2ChunkEdge(READY);
         }
+    }
+
+    __aicore__ inline void PrepareA2C1b()
+    {
+        PrepareA2ChunkGemm<HC_GRAD_NN_STAGE_C1B, HcGradCreditSync::A2_C1B_INPUT_READY>(
+            TaskPointer(layout_.dup, 0U, d_), TaskPointer(layout_.act, 0U, r_));
+    }
+
+    __aicore__ inline void PrepareA2G56()
+    {
+        PrepareA2ChunkGemm<HC_GRAD_NN_STAGE_G56, HcGradCreditSync::A2_G56_INPUT_READY>(G56Matrix(),
+                                                                                       TaskPointer(layout_.xn, 0U, d_));
+    }
+
+    __aicore__ inline void PrepareA2WeightInputs()
+    {
+        // V1 and V3 published these operands before DX was issued. Both NZ regions are free after C1a.
+        ConvertA2ChunkInputs<HC_GRAD_NN_STAGE_C1B>(TaskPointer(layout_.dup, 0U, d_), TaskPointer(layout_.act, 0U, r_));
+        ConvertA2ChunkInputs<HC_GRAD_NN_STAGE_G56>(G56Matrix(), TaskPointer(layout_.xn, 0U, d_));
+        credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_C1B_INPUT_READY);
     }
 
     __aicore__ inline uint32_t PrefetchA2NextV1(uint32_t nextRow, uint32_t nextChunk)
@@ -489,27 +545,70 @@ private:
         }
         const uint32_t rows = AscendC::Std::min(fullBatchRows_, n_ - nextRow);
         const uint32_t tasks = (rows + taskRows_ - 1U) / taskRows_;
-        constexpr uint32_t PREFETCH_ROWS = 1024U;
-        const uint32_t head = AscendC::Std::min(rows, PREFETCH_ROWS);
+        const uint32_t prefetched = AscendC::Std::min(rows, A2_DX_V1_PREFETCH_ROWS);
         vector_.SetChunk(nextRow, rows, tasks, nextChunk & 1U);
-        vector_.ProcessFullV1Slab(0U, head);
+        vector_.ProcessFullV1Slab(0U, prefetched);
         vector_.SetChunk(chunk_.rowBegin, chunk_.rows, chunk_.taskCount, chunk_.parity);
-        return head;
+        return prefetched;
+    }
+
+    __aicore__ inline void FinishA2V1Inputs(uint32_t prefetchedRows, bool deferAct)
+    {
+        if (StreamsA2C1aRows()) {
+            if ASCEND_IS_AIV {
+                const uint32_t groupRows = chunk_.rows / C1A_SLABS;
+                if (prefetchedRows < groupRows) {
+                    vector_.ProcessFullV1Slab(prefetchedRows, groupRows - prefetchedRows);
+                }
+            }
+            return;
+        }
+        if (!deferAct && prefetchedRows == 0U) {
+            ProduceV1();
+            return;
+        }
+        if (!deferAct) {
+            vector_.ProcessFullV1Act();
+        }
+        vector_.ProcessFullV1Slab(prefetchedRows, chunk_.rows - prefetchedRows);
     }
 
     __aicore__ inline void ProcessA2ChunkCredits()
     {
+        const bool preconvertWeights = gemm_.HasSeparateWeightNz();
+        bool deferAct = false;
+        if ASCEND_IS_AIV {
+            deferAct = preconvertWeights && vector_.CanUseFullV1Slabs();
+        }
         SetChunkState(0U, 0U);
-        ProduceV1();
+        constexpr uint32_t noPrefetchedRows = 0U;
+        FinishA2V1Inputs(noPrefetchedRows, deferAct);
         for (uint32_t row = 0U, index = 0U; row < n_; row += fullBatchRows_, ++index) {
             const uint32_t next = row + fullBatchRows_;
             const bool hasNext = next < n_;
             PrepareA2ChunkGemm<HC_GRAD_NN_STAGE_C1A, HcGradCreditSync::A2_C1A_INPUT_READY, true>(
-                TaskPointer(layout_.dup, 0U, d_), gmWUp_);
+                TaskPointer(layout_.dup, 0U, d_), gmWUp_, !preconvertWeights || row == 0U);
+            ComputeA2ChunkC1a();
+            const bool earlyC1b = HasA2EarlyC1b();
             if ASCEND_IS_AIC {
-                RunC1(0U, chunk_.rows);
                 credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_C1A_OUTPUT_READY);
+                if (earlyC1b) {
+                    credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_C1B_INPUT_READY);
+                    // This independent dWUp tile covers the V3 and DX-conversion latency.
+                    RunA2C1bTiles(A2_FIRST_M_TILE, A2_EARLY_C1B_M_TILES);
+                }
             } else {
+                // C1a consumes dup. Act is first read by C1b after the DX-input publication.
+                if (deferAct) {
+                    vector_.ProcessFullV1Act();
+                }
+                if (preconvertWeights && index != 0U) {
+                    // The previous C1b has finished reading the dedicated Act NZ buffer.
+                    credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_C1B_READ_DONE);
+                }
+                if (earlyC1b) {
+                    PrepareA2EarlyC1b();
+                }
                 credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_C1A_OUTPUT_READY);
                 if (!vector_.TryProcessV3FullBatch()) {
                     for (uint32_t task = 0U; task < chunk_.taskCount; ++task) {
@@ -520,22 +619,42 @@ private:
             }
             PrepareA2ChunkGemm<HC_GRAD_NN_STAGE_DX, HcGradCreditSync::A2_DX_INPUT_READY, true>(
                 DxMatrix(0U), hasGate_ != 0U ? Pointer(layout_.wConcat) : gmWDown_);
-            uint32_t prefetchedRows = 0U;
             if ASCEND_IS_AIC {
                 RunDx(0U, chunk_.rows);
                 credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_DX_OUTPUT_READY);
+                if (earlyC1b) {
+                    RunA2C1bTiles(A2_EARLY_C1B_M_TILES, gemm_.C1bRowTileCount());
+                } else {
+                    PrepareA2C1b();
+                    RunC1b();
+                }
+                if (!preconvertWeights || hasNext) {
+                    credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_C1B_READ_DONE);
+                }
+                if (!preconvertWeights) {
+                    PrepareA2G56();
+                } else if (earlyC1b) {
+                    credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_G56_INPUT_READY);
+                }
+                RunG56(index != 0U);
+                if (!preconvertWeights || !hasNext) {
+                    credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_G56_READ_DONE);
+                }
+                if (hasNext) {
+                    SetChunkState(next, index + 1U);
+                }
             } else {
-                // The old owner of the next parity released it at the previous
-                // G56 edge. Recomputed direct gradients need no shared V1 buffer.
-                prefetchedRows = PrefetchA2NextV1(next, index + 1U);
+                if (earlyC1b) {
+                    ConvertA2ChunkInputs<HC_GRAD_NN_STAGE_G56>(G56Matrix(), TaskPointer(layout_.xn, 0U, d_));
+                    credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_G56_INPUT_READY);
+                } else if (preconvertWeights) {
+                    PrepareA2WeightInputs();
+                }
+                const uint32_t prefetchedRows = PrefetchA2NextV1(next, index + 1U);
                 credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_DX_OUTPUT_READY);
-            }
-            PrepareA2ChunkGemm<HC_GRAD_NN_STAGE_C1B, HcGradCreditSync::A2_C1B_INPUT_READY>(
-                TaskPointer(layout_.dup, 0U, d_), TaskPointer(layout_.act, 0U, r_));
-            if ASCEND_IS_AIC {
-                RunC1b();
-                credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_C1B_READ_DONE);
-            } else {
+                if (!preconvertWeights) {
+                    PrepareA2C1b();
+                }
                 vector_.ResumeDgammaAfterNn(row != 0U);
                 vector_.ProcessFullV6();
                 if constexpr (HAS_GAMMA) {
@@ -546,28 +665,20 @@ private:
                         vector_.Process(HcGradVectorOp::REDUCE_DGAMMA, HC_GRAD_NO_TASK);
                     }
                 }
-                // C1b still owns the shared NN scratch until its last read.
-                credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_C1B_READ_DONE);
-            }
-            PrepareA2ChunkGemm<HC_GRAD_NN_STAGE_G56, HcGradCreditSync::A2_G56_INPUT_READY>(
-                G56Matrix(), TaskPointer(layout_.xn, 0U, d_));
-            if ASCEND_IS_AIC {
-                RunG56(index != 0U);
-                credit_.PublishA2ChunkEdge(HcGradCreditSync::A2_G56_READ_DONE);
+                if (!preconvertWeights) {
+                    // The fallback shares C1b and G56 scratch.
+                    credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_C1B_READ_DONE);
+                    PrepareA2G56();
+                }
                 if (hasNext) {
                     SetChunkState(next, index + 1U);
+                    FinishA2V1Inputs(prefetchedRows, deferAct);
                 }
-            } else {
-                if (hasNext) {
-                    SetChunkState(next, index + 1U);
-                    if (prefetchedRows != 0U) {
-                        vector_.ProcessFullV1Act();
-                        vector_.ProcessFullV1Slab(prefetchedRows, chunk_.rows - prefetchedRows);
-                    } else {
-                        ProduceV1();
-                    }
+                if (!preconvertWeights || !hasNext) {
+                    // Separate NZ buffers can be reused after the next C1a completion.
+                    // The final G56 release still orders StoreWeightGradients against all Cube writers.
+                    credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_G56_READ_DONE);
                 }
-                credit_.WaitA2ChunkEdge(HcGradCreditSync::A2_G56_READ_DONE);
             }
         }
         if ASCEND_IS_AIV {
@@ -578,69 +689,45 @@ private:
     }
 #endif
 
+#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
     __aicore__ inline void ProcessChunkedFullBatch()
     {
-        SetChunkState(0U, 0U);
-        ProduceV1();
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        if ASCEND_IS_AIV {
-            credit_.PublishChunkInput(HcGradCreditSync::CHUNK_V1_READY);
-            // V3 publishes the DX weights after C1a has consumed WUp.
-            AscendC::PipeBarrier<PIPE_ALL>();
-            vector_.PrepareWeights();
-        }
-#endif
         for (uint32_t rowBegin = 0U, chunk = 0U; rowBegin < n_; rowBegin += fullBatchRows_, ++chunk) {
+            SetChunkState(rowBegin, chunk);
+            // AIV can fill this chunk's operand bank while AIC finishes the previous G56.
+            ProduceV1();
+            if ASCEND_IS_AIV {
+                credit_.PublishChunkInput(HcGradCreditSync::CHUNK_V1_READY);
+                if (chunk == 0U) {
+                    // V3 publishes the DX weights after C1a has consumed WUp.
+                    AscendC::PipeBarrier<PIPE_ALL>();
+                    vector_.PrepareWeights();
+                }
+            }
             ProcessAfterV1();
+            const bool lastChunk = chunk_.rows == n_ - rowBegin;
             if ASCEND_IS_AIV {
                 if constexpr (HAS_GAMMA) {
-                    if (chunk_.rows == n_ - rowBegin) {
+                    if (lastChunk) {
                         vector_.Process(HcGradVectorOp::REDUCE_DGAMMA, HC_GRAD_NO_TASK);
                     }
                 }
             }
-            const uint32_t nextRowBegin = rowBegin + fullBatchRows_;
-            ConvertFullBatchInputs(HC_GRAD_NN_STAGE_G56, G56Matrix(), TaskPointer(layout_.xn, 0U, d_));
-            if (nextRowBegin < n_) {
-                if ASCEND_IS_AIC {
-                    RunG56(chunk != 0U);
-                }
-                if ASCEND_IS_AIV {
-                    // The next V1 fills the opposite operand bank while Cube reads this bank.
-                    SetChunkState(nextRowBegin, chunk + 1U);
-                    ProduceV1();
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-                    credit_.PublishChunkInput(HcGradCreditSync::CHUNK_V1_READY);
-#endif
-                }
-#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
-                FinishFullBatchStage();
-#endif
-                SetChunkState(nextRowBegin, chunk + 1U);
-            } else {
-                if ASCEND_IS_AIC {
-                    RunG56(chunk != 0U);
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
+            if ASCEND_IS_AIC {
+                RunG56(chunk != 0U);
+                if (lastChunk) {
                     credit_.PublishChunkOutput<HcGradCreditSync::CHUNK_DW_READY>();
-#endif
                 }
-#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
-                FinishFullBatchStage();
-#endif
             }
         }
         if ASCEND_IS_AIV {
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
             // All Cube dW writers have drained before Vector reads their accumulators.
             credit_.WaitChunkStage(HcGradCreditSync::CHUNK_DW_READY);
-#endif
             vector_.StoreWeightGradients();
             AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
         }
-#if HC_GRAD_NPU_ARCH != HC_GRAD_ARCH_A5
-        AscendC::SyncAll<false>();
-#endif
     }
+#endif
 #endif
 
     __aicore__ inline void RunC1b()
@@ -672,65 +759,8 @@ private:
         return fullBatch_ && hasGate_ == 0 ? DxMatrix(0U) : TaskPointer(layout_.packed, 0U, g56Rows_);
     }
 
-    __aicore__ inline void RunFullWeightMatmuls()
-    {
-        // Each dW output tile has one AIC owner with K=[0,n_).
-        // The host selects a deterministic NN path without an AIV epilogue.
-        RunC1b();
-        RunG56();
-    }
-
-    __aicore__ inline void ComputeFullWeightGradients(bool weightsComputed)
-    {
-        if ASCEND_IS_AIC {
-            if (!weightsComputed) {
-                RunFullWeightMatmuls();
-            }
-        }
-        AscendC::SyncAll<false>();
-        if ASCEND_IS_AIV {
-            vector_.CopyFullWeightGradients();
-            AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
-        }
-        AscendC::SyncAll<false>();
-    }
-
-    __aicore__ inline bool CubeNeedsVector(HcGradCubeOp op, uint32_t task)
-    {
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        if (op == HcGradCubeOp::NONE)
-            return false;
-        const uint32_t rows = Rows(task);
-        if (op == HcGradCubeOp::C1) {
-            return gemm_.NeedsVector(0, rows) || (!deferWeightGrads_ && gemm_.NeedsVector(1, rows));
-        }
-        if (op == HcGradCubeOp::G56)
-            return !deferWeightGrads_ && gemm_.NeedsVector(HC_GRAD_NN_STAGE_G56, rows);
-        if (op == HcGradCubeOp::DX)
-            return gemm_.NeedsVector(HC_GRAD_NN_STAGE_DX, rows);
-#endif
-        return false;
-    }
-    __aicore__ inline void ProcessNnVector(const HcGradBeat& beat)
-    {
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        if ASCEND_IS_AIV {
-            const bool first = CubeNeedsVector(beat.cubeOp, beat.cubeTask);
-            const bool second = CubeNeedsVector(beat.cubeOp2, beat.cubeTask2);
-            if (!first && !second)
-                return;
-            AscendC::PipeBarrier<PIPE_ALL>();
-            if (first)
-                RunCube(beat.cubeOp, beat.cubeTask);
-            if (second)
-                RunCube(beat.cubeOp2, beat.cubeTask2);
-            vector_.FinishNnScratch();
-        }
-#endif
-    }
     __aicore__ inline void ProcessSynchronizedBeat(const HcGradBeat& beat)
     {
-        ProcessNnVector(beat);
         if ASCEND_IS_AIC {
             RunCube(beat.cubeOp, beat.cubeTask);
             RunCube(beat.cubeOp2, beat.cubeTask2);
@@ -746,38 +776,29 @@ private:
         AscendC::SyncAll<false>();
     }
 
-    template <bool DEFER_WEIGHT_GRADS>
     __aicore__ inline void ProcessCubeCredits(const HcGradBeat& beat)
     {
         if ASCEND_IS_AIC {
             const bool hasCube = (beat.cubeOp != HcGradCubeOp::NONE) || (beat.cubeOp2 != HcGradCubeOp::NONE);
-            credit_.WaitCubeDeps<DEFER_WEIGHT_GRADS>(beat.cubeOp, beat.cubeTask);
+            credit_.WaitCubeDeps(beat.cubeOp, beat.cubeTask);
             RunCube(beat.cubeOp, beat.cubeTask);
-            credit_.WaitCubeDeps<DEFER_WEIGHT_GRADS>(beat.cubeOp2, beat.cubeTask2);
+            credit_.WaitCubeDeps(beat.cubeOp2, beat.cubeTask2);
             RunCube(beat.cubeOp2, beat.cubeTask2);
             if (hasCube) {
                 credit_.SameKindBarrier();
-                credit_.MarkCube<DEFER_WEIGHT_GRADS>(beat.cubeOp, beat.cubeTask);
-                credit_.MarkCube<DEFER_WEIGHT_GRADS>(beat.cubeOp2, beat.cubeTask2);
-            }
-            if constexpr (DEFER_WEIGHT_GRADS) {
-                if (beat.cubeOp == HcGradCubeOp::DX && beat.cubeTask + 1U == taskCount_) {
-                    // The last DX acquired V3's final publication. All retained dW
-                    // operands are visible, while the AIVs can consume the last dx2 slot.
-                    RunFullWeightMatmuls();
-                }
+                credit_.MarkCube(beat.cubeOp, beat.cubeTask);
+                credit_.MarkCube(beat.cubeOp2, beat.cubeTask2);
             }
         }
     }
 
-    template <bool DEFER_WEIGHT_GRADS>
     __aicore__ inline void ProcessVectorCredits(const HcGradBeat& beat)
     {
         if ASCEND_IS_AIV {
             bool hasVector = false;
             for (uint32_t i = 0; i < HC_GRAD_VECTOR_OPS_PER_BEAT; ++i) {
                 if (beat.vectorOp[i] != HcGradVectorOp::NONE) {
-                    credit_.WaitVectorDeps<DEFER_WEIGHT_GRADS>(beat.vectorOp[i], beat.vectorTask[i]);
+                    credit_.WaitVectorDeps(beat.vectorOp[i], beat.vectorTask[i]);
                     vector_.Process(beat.vectorOp[i], beat.vectorTask[i]);
                     hasVector = true;
                 }
@@ -786,7 +807,7 @@ private:
                 AscendC::DataSyncBarrier<AscendC::MemDsbT::DDR>();
                 credit_.SameKindBarrier();
                 for (uint32_t i = 0; i < HC_GRAD_VECTOR_OPS_PER_BEAT; ++i) {
-                    credit_.MarkVector<DEFER_WEIGHT_GRADS>(beat.vectorOp[i], beat.vectorTask[i]);
+                    credit_.MarkVector(beat.vectorOp[i], beat.vectorTask[i]);
                 }
             }
         }
@@ -839,14 +860,16 @@ private:
         return n_ - rowBegin < taskRows_ ? n_ - rowBegin : taskRows_;
     }
 
-    __aicore__ inline void RunC1(uint32_t task, uint32_t rows)
+    __aicore__ inline void RunC1a(uint32_t task, uint32_t rows)
     {
         GM_ADDR dactPartial =
             SlotPointerF32(layout_.dactPartial, task, static_cast<uint64_t>(splitkFactor_) * taskRows_ * r_);
         gemm_.RunC1aSplitK(TaskPointer(layout_.dup, task, d_), gmWUp_, dactPartial, rows, r_, d_, splitkFactor_);
-        if (fullBatch_ || deferWeightGrads_) {
-            return; // Full-K modes consume retained operands after the token pipeline drains.
-        }
+    }
+
+    __aicore__ inline void RunC1(uint32_t task, uint32_t rows)
+    {
+        RunC1a(task, rows);
         // Bounded mode finishes dW for this task before its ring slot can be reused.
         const uint64_t c1bA = USE_DUP_T ? layout_.dupT : layout_.dup;
         if (singleTask_) {
@@ -867,11 +890,6 @@ private:
         const bool dense = layout_.denseDx != 0U;
         const uint32_t stride = dense ? r_ + (hasGate_ != 0U ? c_ : 0U) : g56Rows_;
         GM_ADDR dxOut = TaskPointerF32(layout_.dx2, task, d_);
-#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2 || HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
-        if (fullBatch_ && lowpDx_) {
-            dxOut = gmDxOutput_ + static_cast<uint64_t>(chunk_.rowBegin) * d_ * sizeof(D_T);
-        }
-#endif
         gemm_.RunDx(DxMatrix(task), gmWDown_, gmWGate_, Pointer(layout_.wConcat), dxOut, rows, d_, r_, c_, stride,
                     hasGate_ != 0U);
     }
@@ -885,9 +903,6 @@ private:
                 break;
             }
             case HcGradCubeOp::G56: {
-                if (fullBatch_ || deferWeightGrads_) {
-                    break; // Full-K modes retire this marker without overwriting retained inputs.
-                }
                 GM_ADDR packedT = TaskPointer(layout_.packedT, task, g56Rows_);
                 GM_ADDR packed = TaskPointer(layout_.packed, task, g56Rows_);
                 GM_ADDR xn = TaskPointer(layout_.xn, task, d_);
@@ -933,7 +948,6 @@ private:
     uint32_t scheduleBeatCount_{0};
     uint32_t aicNum_{0};
     GM_ADDR workspace_{nullptr};
-    GM_ADDR gmDxOutput_{nullptr};
     GM_ADDR gmWUp_{nullptr};
     GM_ADDR gmWDown_{nullptr};
     GM_ADDR gmWGate_{nullptr};
@@ -943,11 +957,20 @@ private:
     uint32_t c1aTilesPerSlab_{0};
     uint32_t fullBatchRows_{0};
     ChunkState chunk_{};
+#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A2 || HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
+    static constexpr bool lowpDx_ = false;
+    // Both host tilings emit nonzero schedule modes for chunk and token execution.
+    static constexpr bool producerConsumer_ = !USE_DUP_T && !G56_PACKED_T;
+#else
     bool lowpDx_{false};
-    bool singleTask_{false};
-    bool fullBatch_{false};
-    bool deferWeightGrads_{false};
     bool producerConsumer_{false};
+#endif
+#if HC_GRAD_NPU_ARCH == HC_GRAD_ARCH_A5
+    static constexpr bool singleTask_ = false;
+#else
+    bool singleTask_{false};
+#endif
+    bool fullBatch_{false};
     HcGradWorkspaceLayout layout_;
     HcGradCreditSync credit_;
     GemmT gemm_;
