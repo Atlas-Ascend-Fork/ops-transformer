@@ -28,11 +28,11 @@
 
   $$
   \begin{aligned}
-  \vec{x^{'}_{l}} &= \frac{1}{\sqrt{\frac{1}{d} \sum_{\dim=-2,\text{keepdim}=\text{True}} x_i^2 + \epsilon}}\\
-  H^{pre}_l &= \alpha^{pre}_{l} ·(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
+  \vec{x^{'}_{l}} &= \frac{1}{\sqrt{\frac{1}{d} \sum_{\dim=-2,\text{keepdim}=\text{True}} x_i^2 + \epsilon_{norm}}}\\
+  p^{pre}_l &= \alpha^{pre}_{l} ·(\vec{x^{'}_{l}}\varphi^{pre}_{l}) + b^{pre}_{l}\\
   H^{post}_l &= \alpha^{post}_{l} ·(\vec{x^{'}_{l}}\varphi^{post}_{l}) + b^{post}_{l}\\
   H^{res}_l &= \alpha^{res}_{l} ·(\vec{x^{'}_{l}}\varphi^{res}_{l}) + b^{res}_{l}\\
-  H^{pre}_l &= \sigma (H^{pre}_{l})\\
+  H^{pre}_l &= \sigma (p^{pre}_{l}) + \epsilon_{hc}\\
   H^{post}_l &= 2\sigma (H^{post}_{l})\\
   h_{in} &=\vec{x_{l}}H^{pre}_l
   \end{aligned}
@@ -44,8 +44,8 @@
 
     $$
     \begin{aligned}
-        \mathbf{normOut}[0] &= \text{softmax}(\mathbf{H^{res}_l},  \dim=-1) + \epsilon, \\
-        \mathbf{sumOut}[1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[0] + \epsilon, \\
+        \mathbf{normOut}[0] &= \text{softmax}(\mathbf{H^{res}_l},  \dim=-1) + \epsilon_{hc}, \\
+        \mathbf{sumOut}[1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[0] + \epsilon_{hc}, \\
         \mathbf{normOut}[1] &= \frac{\mathbf{normOut}[0]}{\mathbf{sumOut}[1]}, \\
     \end{aligned}
     $$
@@ -54,9 +54,9 @@
 
     $$
     \begin{aligned}
-        \mathbf{sumOut}[2i] &= \sum_{\dim=-1,\text{keepdim}=\text{True}} \mathbf{normOut}[2i-1] + \epsilon, \\
+        \mathbf{sumOut}[2i] &= \sum_{\dim=-1,\text{keepdim}=\text{True}} \mathbf{normOut}[2i-1] + \epsilon_{hc}, \\
         \mathbf{normOut}[2i] &= \frac{\mathbf{normOut}[2i-1]}{\mathbf{sumOut}[2i]}, \\
-        \mathbf{sumOut}[2i+1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[2i] + \epsilon, \\
+        \mathbf{sumOut}[2i+1] &= \sum_{\dim=-2,\text{keepdim}=\text{True}} \mathbf{normOut}[2i] + \epsilon_{hc}, \\
         \mathbf{normOut}[2i+1] &= \frac{\mathbf{normOut}[2i]}{\mathbf{sumOut}[2i+1]}, \\
     \end{aligned}
     $$
@@ -75,8 +75,9 @@
 
     | 符号                                       | 含义                                              |
     | ------------------------------------------ | ------------------------------------------------- |
-    | $\mathbf{x}$                               | 输入张量（mHC层的$\mathbf{H}'_{\text{res}}$矩阵） |
-    | $\epsilon$                                 | 防除零参数（对应入参`eps`）                       |
+    | $\mathbf{x}$                               | 输入张量（mHC层的输入数据） |
+    | $\epsilon_{norm}$                               | RmsNorm的防除零参数，对应入参`normEps`             |
+    | $\epsilon_{hc}$                                 | $H^{pre}_l$的sigmoid后偏移量及Sinkhorn归一化稳定项，对应入参`hcEps` |
     | $\text{softmax}(\cdot, \dim=-1)$           | 在最后一维执行softmax归一化                       |
     | $\sum_{\dim=d,\text{keepdim}=\text{True}}$ | 在指定维度$d$上求和并保持维度                     |
     | $\mathbf{normOut}[k]$                      | 第$k$步归一化中间结果                             |
@@ -207,7 +208,7 @@ aclnnStatus aclnnMhcPreSinkhorn(
       <tr>
         <td>hcEps（double）</td>
         <td>输入</td>
-        <td>$H_{pre}$的sigmoid后的eps参数。</td>
+        <td>$H_{pre}$的sigmoid结果上累加的偏移量，同时用于Sinkhorn的softmax结果及行、列归一化分母的稳定项。对应公式中的$\epsilon_{hc}$。</td>
         <td>建议值：1e-6。</td>
         <td>-</td>
         <td>-</td>
@@ -301,7 +302,7 @@ aclnnStatus aclnnMhcPreSinkhorn(
         <td>当needBackward为false时，此输出无效。</td>
         <td>FLOAT32</td>
         <td>ND</td>
-        <td>(sk_iter_count * 2, bs, seq_len, n)<br>(sk_iter_count * 2, t, n)</td>
+        <td>(numIters * 2, bs, seq_len, n)<br>(numIters * 2, t, n)</td>
         <td>×</td>
       </tr>
       <tr>
@@ -311,7 +312,7 @@ aclnnStatus aclnnMhcPreSinkhorn(
         <td>当needBackward为false时，此输出无效。</td>
         <td>FLOAT32</td>
         <td>ND</td>
-        <td>(sk_iter_count * 2, bs, seq_len, n, n)<br>(sk_iter_count * 2, t, n, n)</td>
+        <td>(numIters * 2, bs, seq_len, n, n)<br>(numIters * 2, t, n, n)</td>
         <td>×</td>
       </tr>
       <tr>
@@ -460,14 +461,20 @@ aclnnStatus aclnnMhcPreSinkhorn(
     - 输入x支持4维BSND格式和3维TND格式，shape分别为(bs, seq_len, n, c)和(t, n, c)。
     - TND格式下，t表示所有Batch序列长度的累加和；对应输出shape按参数说明中的t轴展开。
     - 尾轴c需为128的倍数且取值范围为[1, 100000]。
-    - 输入phi的数据范围限定在$\pm \frac{1}{\sqrt{nc}}$范围内，eps限定在1e-6，此范围内具有较好的数值稳定性。
+    - 输入phi的数据范围限定在$\pm \frac{1}{\sqrt{nc}}$范围内；hcEps和normEps取值均为1e-6时，在此范围内具有较好的数值稳定性。
   <!-- end id10 -->
 
 ## 调用示例
 
 调用示例代码如下，仅供参考，具体编译和执行过程请参考[编译与运行样例](../../../docs/zh/context/compile_and_run_sample.md)。
 
+本示例演示mHC正向计算的两段式接口调用：输入x为BF16，phi、alpha和bias为FP32；need_backward取true时，还会输出反向计算所需的中间结果。
+
 ```c++
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <vector>
 #include "acl/acl.h"
@@ -526,6 +533,7 @@ void PrintTensorDataBfloat16(const std::vector<int64_t> &shape, void *device_add
   LOG_PRINT("\n");
 }
 
+// 初始化ACL运行时、Device上下文和执行Stream。
 int InitAcl(int32_t device_id, aclrtContext &context, aclrtStream &stream)
 {
   aclError ret = aclInit(nullptr);
@@ -546,6 +554,7 @@ int InitAcl(int32_t device_id, aclrtContext &context, aclrtStream &stream)
   return 0;
 }
 
+// 将FP32主机数据复制到Device，并创建连续的ACL Tensor。
 int CreateAclTensorFloat32(const std::vector<float> &host_data, const std::vector<int64_t> &shape, void *&device_addr,
                            aclTensor *&tensor)
 {
@@ -569,13 +578,16 @@ int CreateAclTensorFloat32(const std::vector<float> &host_data, const std::vecto
   return 0;
 }
 
+// 保留FP32位模式的高16位进行BF16截断转换，再创建输入Tensor。
 int CreateAclTensorBfloat16(const std::vector<float> &host_data, const std::vector<int64_t> &shape, void *&device_addr,
                             aclTensor *&tensor)
 {
   int64_t size = GetShapeSize(shape);
   std::vector<uint16_t> host_data_bf16(size);
   for (int64_t i = 0; i < size; ++i) {
-      host_data_bf16[i] = static_cast<uint16_t>(static_cast<int16_t>(host_data[i] * 32767));
+      uint32_t bits = 0;
+      std::memcpy(&bits, &host_data[i], sizeof(bits));
+      host_data_bf16[i] = static_cast<uint16_t>(bits >> 16);
   }
 
   int64_t byte_size = size * sizeof(uint16_t);
@@ -598,6 +610,7 @@ int CreateAclTensorBfloat16(const std::vector<float> &host_data, const std::vect
   return 0;
 }
 
+// 为BF16输出分配Device内存，数据由算子写入。
 int CreateAclTensorBfloat16Output(const std::vector<int64_t> &shape, void *&device_addr, aclTensor *&tensor)
 {
   int64_t size = GetShapeSize(shape);
@@ -613,6 +626,7 @@ int CreateAclTensorBfloat16Output(const std::vector<int64_t> &shape, void *&devi
   return 0;
 }
 
+// 为FP32投影矩阵或反向中间结果分配输出Tensor。
 int CreateAclTensorFloat32Output(const std::vector<int64_t> &shape, void *&device_addr, aclTensor *&tensor)
 {
   int64_t size = GetShapeSize(shape);
@@ -723,6 +737,7 @@ int main()
   aclrtStream stream = nullptr;
   Tensors tensors;
 
+  // BSND输入：Batch大小、序列长度、残差流数量和隐藏维度大小。
   int64_t bs = 2, seq_len = 128, n = 4, c = 4096;
   int64_t hc_mult = n;
   int64_t hc_mix = n * n + 2 * n;
@@ -744,9 +759,11 @@ int main()
   std::vector<int64_t> sum_out_shape = {num_iters * 2, bs, seq_len, n};
   std::vector<int64_t> norm_out_shape = {num_iters * 2, bs, seq_len, n, n};
 
+  // 初始化运行资源，各步骤通过CHECK_RET检查返回值。
   int ret = InitAcl(device_id, context, stream);
   CHECK_RET(ret == 0, LOG_PRINT("InitAcl failed, error: %d\n", ret); return -1);
 
+  // x使用BF16，phi、alpha、bias使用FP32；随后分配八个输出Tensor。
   ret = CreateInputTensors(x_shape, phi_shape, alpha_shape, bias_shape, tensors);
   CHECK_RET(ret == 0, return -1);
 
@@ -757,6 +774,7 @@ int main()
   uint64_t workspace_size = 0;
   aclOpExecutor *executor = nullptr;
 
+  // 第一段接口：校验入参，获取workspace大小和执行器。
   aclnnStatus aclnn_ret = aclnnMhcPreSinkhornGetWorkspaceSize(
       tensors.x, tensors.phi, tensors.alpha, tensors.bias,
       hc_mult, num_iters, hc_eps, norm_eps, need_backward,
@@ -767,12 +785,14 @@ int main()
   CHECK_RET(aclnn_ret == ACL_SUCCESS, LOG_PRINT("aclnnMhcPreSinkhornGetWorkspaceSize failed, error: %d\n", aclnn_ret);
             return -1);
 
+  // 根据第一段接口返回的大小申请Device workspace。
   void *workspace_addr = nullptr;
   if (workspace_size > 0) {
       ret = aclrtMalloc(&workspace_addr, workspace_size, ACL_MEM_MALLOC_HUGE_FIRST);
       CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("aclrtMalloc workspace failed, error: %d\n", ret); return -1);
   }
 
+  // 第二段接口：执行计算，检查返回值并同步Stream，等待计算完成。
   aclnn_ret = aclnnMhcPreSinkhorn(workspace_addr, workspace_size, executor, stream);
   CHECK_RET(aclnn_ret == ACL_SUCCESS, LOG_PRINT("aclnnMhcPreSinkhorn failed, error: %d\n", aclnn_ret); return -1);
 
@@ -780,6 +800,7 @@ int main()
 
   LOG_PRINT("MhcPreSinkhorn compute success!\n");
 
+  // 释放Tensor描述、Device内存、workspace及ACL运行资源。
   DestroyTensors(tensors);
   FreeDeviceMemory(tensors);
   if (workspace_size > 0)
