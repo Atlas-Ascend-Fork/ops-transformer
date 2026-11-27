@@ -22,7 +22,7 @@
 #include <algorithm>
 #include <limits>
 
-#include "../op_kernel/quant_lightning_indexer_v2_metadata.h"
+#include "../op_kernel/quant_lightning_indexer_v2_metadata_common.h"
 #include "../op_kernel/quant_lightning_indexer_v2_template_tiling_key.h"
 #include "quant_lightning_indexer_v2_tiling_info_parser.h"
 

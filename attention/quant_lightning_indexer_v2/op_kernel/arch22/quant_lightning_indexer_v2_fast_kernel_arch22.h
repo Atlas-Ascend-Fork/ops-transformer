@@ -20,7 +20,7 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "quant_lightning_indexer_v2_common_arch22.h"
 #include "quant_lightning_indexer_v2_fast_service_vector_arch22.h"
-#include "../quant_lightning_indexer_v2_metadata.h"
+#include "../quant_lightning_indexer_v2_metadata_common.h"
 
 namespace QLIV2Kernel {
 using namespace QLIV2Common;

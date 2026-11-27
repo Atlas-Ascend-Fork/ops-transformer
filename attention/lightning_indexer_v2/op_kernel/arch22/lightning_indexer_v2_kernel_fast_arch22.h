@@ -25,7 +25,7 @@
 #include "lightning_indexer_v2_common_fast_arch22.h"
 #include "lightning_indexer_v2_service_cube_fast_arch22.h"
 #include "lightning_indexer_v2_service_vector_fast_arch22.h"
-#include "../lightning_indexer_v2_metadata.h"
+#include "../lightning_indexer_v2_metadata_common.h"
 
 namespace LIV2Kernel {
 using namespace LIV2Common;

@@ -19,7 +19,7 @@
 #include "kernel_operator_data_copy_intf.h"
 #include "kernel_operator_block_sync_intf.h"
 #include "quant_lightning_indexer_v2_common_arch35.h"
-#include "../quant_lightning_indexer_v2_metadata.h"
+#include "../quant_lightning_indexer_v2_metadata_common.h"
 
 namespace QLIV2Fast {
 using namespace AscendC;

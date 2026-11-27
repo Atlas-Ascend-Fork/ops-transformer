@@ -9,12 +9,12 @@
  */
 
 /*!
- * \file quant_lightning_indexer_v2_metadata.h
+ * \file quant_lightning_indexer_v2_metadata_common.h
  * \brief
  */
 
-#ifndef QUANT_LIGHTNING_INDEXER_V2_METADATA_H
-#define QUANT_LIGHTNING_INDEXER_V2_METADATA_H
+#ifndef QUANT_LIGHTNING_INDEXER_V2_METADATA_COMMON_H
+#define QUANT_LIGHTNING_INDEXER_V2_METADATA_COMMON_H
 
 #include <cstdint>
 
@@ -103,4 +103,4 @@ __aicore__ inline uint32_t GetAttrAbsIndex(uint32_t coreIdx, uint32_t metaIdx, u
 
 }; // namespace optiling
 
-#endif // QUANT_LIGHTNING_INDEXER_V2_METADATA_H
+#endif // QUANT_LIGHTNING_INDEXER_V2_METADATA_COMMON_H
