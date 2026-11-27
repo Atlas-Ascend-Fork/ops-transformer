@@ -129,7 +129,7 @@ aclnnStatus aclnnApplyRotaryPosEmbGrad(
     <tr>
       <td>gradQueryEmbed</td>
       <td>输入</td>
-      <td>正向输出query的导数，对应公式中grad_q_embed。</td>
+      <td>正向输出query的导数，对应公式中grad_query_embed。</td>
       <td>不支持空Tensor。</td>
       <td>BFLOAT16、FLOAT16、FLOAT32</td>
       <td>ND</td>
@@ -139,7 +139,7 @@ aclnnStatus aclnnApplyRotaryPosEmbGrad(
     <tr>
       <td>gradKeyEmbed</td>
       <td>输入</td>
-      <td>正向输出key的导数，对应公式中grad_k_embed。</td>
+      <td>正向输出key的导数，对应公式中grad_key_embed。</td>
       <td>与gradQueryEmbed的数据类型和维度一致，不支持空Tensor。</td>
       <td>BFLOAT16、FLOAT16、FLOAT32</td>
       <td>ND</td>
@@ -549,10 +549,9 @@ int main()
     // 创建gradSinOut aclTensor
     ret = CreateAclTensor(std::vector<float>(128, 0.0f), gradSinOutShape, &gradSinOutDeviceAddr, aclDataType::ACL_FLOAT, &gradSinOut);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
-    // 3. 调用CANN算子库API，需要修改为具体的API
+    // 3. 调用aclnnApplyRotaryPosEmbGrad第一段接口，获取workspaceSize与executor
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor;
-    // 调用aclnnApplyRotaryPosEmbGrad第一段接口
     ret = aclnnApplyRotaryPosEmbGradGetWorkspaceSize(gradQueryEmbed, gradKeyEmbed, cos, sin, query, key,
                                                       const_cast<char*>(rotaryModeOptional), layout,
                                                       gradQueryOut, gradKeyOut, gradCosOut, gradSinOut,
@@ -564,7 +563,7 @@ int main()
     void* workspaceAddr = nullptr;
     if (workspaceSize > 0) {
         ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret;);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
     // 调用aclnnApplyRotaryPosEmbGrad第二段接口
     ret = aclnnApplyRotaryPosEmbGrad(workspaceAddr, workspaceSize, executor, stream);
@@ -582,6 +581,7 @@ int main()
     for (int64_t i = 0; i < size; i++) {
         LOG_PRINT("result[%ld] is: %f\n", i, resultData[i]);
     }
+    // 预期结果：gradQueryOut的形状为{1, 1, 1, 128}，打印数值与device侧计算结果一致即表示调用成功
 
     // 6. 释放aclTensor和aclScalar
     aclDestroyTensor(gradQueryEmbed);

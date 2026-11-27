@@ -131,7 +131,7 @@ aclnnStatus aclnnApplyRotaryPosEmbGrad(
     <tr>
       <td>gradQueryEmbed</td>
       <td>Input</td>
-      <td>Derivative of the forward output query, corresponding to grad_q_embed in the formula.</td>
+      <td>Derivative of the forward output query, corresponding to grad_query_embed in the formula.</td>
       <td>Does not support empty tensor.</td>
       <td>BFLOAT16, FLOAT16, FLOAT32</td>
       <td>ND</td>
@@ -141,7 +141,7 @@ aclnnStatus aclnnApplyRotaryPosEmbGrad(
     <tr>
       <td>gradKeyEmbed</td>
       <td>Input</td>
-      <td>Derivative of the forward output key, corresponding to grad_k_embed in the formula.</td>
+      <td>Derivative of the forward output key, corresponding to grad_key_embed in the formula.</td>
       <td>Data type and dimensions must be the same as those of gradQueryEmbed. Does not support empty tensors.</td>
       <td>BFLOAT16, FLOAT16, FLOAT32</td>
       <td>ND</td>
@@ -551,10 +551,9 @@ int main()
     // Create the gradSinOut aclTensor.
     ret = CreateAclTensor(std::vector<float>(128, 0.0f), gradSinOutShape, &gradSinOutDeviceAddr, aclDataType::ACL_FLOAT, &gradSinOut);
     CHECK_RET(ret == ACL_SUCCESS, return ret);
-    // 3. Call the CANN operator library API. Replace it with the specific API.
+    // 3. Call the first-phase API of aclnnApplyRotaryPosEmbGrad to obtain the workspaceSize and executor.
     uint64_t workspaceSize = 0;
     aclOpExecutor* executor;
-    // Call the first-phase API of aclnnApplyRotaryPosEmbGrad.
     ret = aclnnApplyRotaryPosEmbGradGetWorkspaceSize(gradQueryEmbed, gradKeyEmbed, cos, sin, query, key,
                                                       const_cast<char*>(rotaryModeOptional), layout,
                                                       gradQueryOut, gradKeyOut, gradCosOut, gradSinOut,
@@ -566,7 +565,7 @@ int main()
     void* workspaceAddr = nullptr;
     if (workspaceSize > 0) {
         ret = aclrtMalloc(&workspaceAddr, workspaceSize, ACL_MEM_MALLOC_HUGE_FIRST);
-        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret;);
+        CHECK_RET(ret == ACL_SUCCESS, LOG_PRINT("allocate workspace failed. ERROR: %d\n", ret); return ret);
     }
     // Call the second-phase API of aclnnApplyRotaryPosEmbGrad.
     ret = aclnnApplyRotaryPosEmbGrad(workspaceAddr, workspaceSize, executor, stream);
@@ -584,6 +583,7 @@ int main()
     for (int64_t i = 0; i < size; i++) {
         LOG_PRINT("result[%ld] is: %f\n", i, resultData[i]);
     }
+    // Expected result: the shape of gradQueryOut is {1, 1, 1, 128}. The API call succeeds when the printed values are consistent with the device-side computation result.
 
     // 6. Destroy the aclTensor and aclScalar.
     aclDestroyTensor(gradQueryEmbed);

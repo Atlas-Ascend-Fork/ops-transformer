@@ -100,7 +100,7 @@ cann_ops_transformer.apply_rotary_pos_emb_grad(
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 维度（shape） |
 |--------|----------|-----------|------|----------|-------------|
-| grad_query_embed | Tensor | 必选 | 正向输出`query_out`的梯度。 | bfloat16、float16、float32 | `layout=4`时为(T, Nq, D)，其他支持的`layout`下为4维Tensor |
+| grad_query_embed | Tensor | 必选 | 正向输出`query_out`的梯度。 | bfloat16、float16、float32 | `layout=4`时为(T, Nq, D)，其中Nq表示`grad_query_embed`的多头数（Head-Num），可与`grad_key_embed`的Nk不同；其他支持的`layout`下为4维Tensor |
 | grad_key_embed | Tensor | 必选 | 正向输出`key_out`的梯度。除N维度外，shape需与`grad_query_embed`一致。 | 同grad_query_embed | `layout=4`时为(T, Nk, D)，其他支持的`layout`下为4维Tensor |
 | cos | Tensor | 必选 | 正向计算输入的余弦值张量，N维度必须等于1。 | 同grad_query_embed | 与输入布局对应的3维或4维Tensor |
 | sin | Tensor | 必选 | 正向计算输入的正弦值张量，shape需与`cos`一致。 | 同grad_query_embed | 同cos |
@@ -145,6 +145,10 @@ cann_ops_transformer.apply_rotary_pos_emb_grad(
 - 单算子模式调用
 
     ```python
+    # 场景：单算子模式调用RoPE反向算子apply_rotary_pos_emb_grad，layout=1（BSND），float16精度
+    # 输入：grad_query_embed、grad_key_embed、cos、sin为必选张量，query、key为可选张量，示例取B=1、S=64、N=8、D=128
+    # 输出：grad_query、grad_key，以及传入query和key时返回的grad_cos、grad_sin
+    # 预期结果：打印4个输出张量的shape，依次为(1, 64, 8, 128)、(1, 64, 8, 128)、(1, 64, 1, 128)、(1, 64, 1, 128)
     import torch
     import torch_npu
     from cann_ops_transformer.ops import apply_rotary_pos_emb_grad
@@ -163,6 +167,7 @@ cann_ops_transformer.apply_rotary_pos_emb_grad(
     query = torch.randn(B, S, N, D, device="npu", dtype=torch.float16)
     key = torch.randn(B, S, N, D, device="npu", dtype=torch.float16)
 
+    # 关键步骤：调用apply_rotary_pos_emb_grad反向接口计算梯度
     grad_query, grad_key, grad_cos, grad_sin = apply_rotary_pos_emb_grad(
         grad_query_embed,
         grad_key_embed,
@@ -174,6 +179,7 @@ cann_ops_transformer.apply_rotary_pos_emb_grad(
         layout=1,  # BSND
     )
 
+    # 预期结果：grad_query、grad_key的shape为(1, 64, 8, 128)，grad_cos、grad_sin的shape为(1, 64, 1, 128)
     print(f"grad_query shape: {grad_query.shape}")
     print(f"grad_key shape: {grad_key.shape}")
     print(f"grad_cos shape: {grad_cos.shape}")
