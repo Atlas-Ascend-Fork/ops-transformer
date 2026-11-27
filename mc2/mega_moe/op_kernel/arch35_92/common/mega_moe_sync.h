@@ -195,7 +195,7 @@ __aicore__ inline void SyncInterWait(uint16_t eventId)
 #endif
 }
 
-#if !defined(MEGA_MOE_ARCH92_DEVICE)
+#ifdef MEGA_MOE_ARCH35_DEVICE
 // Reserved event IDs used by the full-core barrier protocols.
 constexpr uint16_t ALL_AIC_BARRIER_EVENT = 11;
 constexpr uint16_t AIV_ARRIVE_EVENT = 12;

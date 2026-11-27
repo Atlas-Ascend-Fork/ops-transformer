@@ -81,12 +81,12 @@ struct ExpertTokenRange {
 
 using Mc2MoeContext = Mc2Aclnn::Mc2MoeContext;
 
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
 // 同次 MoE 调用共用的回收区地址，在进入专家流水前绑定一次。
 struct MteRingReuseBuffers {
     __gm__ int32_t* gmm1ConsumedEpoch = nullptr;
     __gm__ int32_t* gmm1ConsumedRowTiles = nullptr;
-    __gm__ int32_t* gmm2ConsumedRowTiles = nullptr;
+    __gm__ int32_t* gmm2ConsumedTileCountByMGroup = nullptr;
     uint64_t rows = 0U;
 };
 #endif
@@ -104,10 +104,12 @@ struct GMMAddrInfo {
     __gm__ int32_t* gmm2CombineSyncCounter = nullptr;
     __gm__ int32_t* sharedExpertGmm2TileCounter = nullptr;
     uint32_t gmm2CombineLogicalCoreCount = 0U;
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
     MteRingReuseBuffers ringReuse{};
     uint64_t gmm1LogicalPaddedRow = 0U;
     uint64_t gmm2LogicalPaddedRow = 0U;
+    __gm__ int32_t* gmm2ReadyTileCountByMGroup = nullptr;
+    uint64_t gmm2OutputRingRows = 0U; // 为零时按线性行组寻址，否则按环形槽和代次寻址。
 #endif
     Gmm1ActivationSync* gmm1ActivationSync = nullptr;
     Gmm2CombineSync* gmm2CombineSync =
@@ -232,7 +234,7 @@ constexpr AxWMode ResolveAxWMode()
     return AxWMode::A4W4;
 }
 
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
 template <typename WeightType, int32_t QuantMode>
 struct QuantConfig {
     using QuantOutType = typename QuantTypeTraits<QuantMode>::Type;

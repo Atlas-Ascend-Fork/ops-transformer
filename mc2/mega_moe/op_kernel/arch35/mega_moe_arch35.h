@@ -305,10 +305,17 @@ template <TemplateMegaMoeTypeClass>
 __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::InitMoeRingReuseBuffers(GMMAddrInfo& gmmAddrInfo) const
 {
     const auto& workspace = params_.workspace;
-    gmmAddrInfo.ringReuse = {workspace.layout.mte.sync.gmm1ConsumedEpoch.template get_ptr<int32_t>(workspace.base),
-                             workspace.layout.mte.sync.gmm1ConsumedRowTiles.template get_ptr<int32_t>(workspace.base),
-                             workspace.layout.mte.sync.gmm2ConsumedRowTiles.template get_ptr<int32_t>(workspace.base),
-                             gmmExecutionConfig_.ring.rows};
+    gmmAddrInfo.ringReuse = {
+        workspace.layout.mte.sync.gmm1ConsumedEpoch.template get_ptr<int32_t>(workspace.base),
+        workspace.layout.mte.sync.gmm1ConsumedRowTiles.template get_ptr<int32_t>(workspace.base),
+        workspace.layout.mte.sync.gmm2ConsumedTileCountByMGroup.template get_ptr<int32_t>(workspace.base),
+        gmmExecutionConfig_.ring.rows};
+    const auto& compute = params_.tilingData->compute;
+    if (UseMGroupCombine(compute)) {
+        gmmAddrInfo.gmm2ReadyTileCountByMGroup =
+            workspace.layout.mte.sync.gmm2ReadyTileCountByMGroup.template get_ptr<int32_t>(workspace.base);
+        gmmAddrInfo.gmm2OutputRingRows = compute.ring.gmm2 ? compute.ring.rows : 0U;
+    }
 }
 // ========================
 // Init：初始化 & 偏移计算
@@ -985,7 +992,7 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::RunSharedExpertGmm2(GMM
     if constexpr (SharedQuantConfig::AXW_MODE == AxWMode::A8W4 || SharedQuantConfig::AXW_MODE == AxWMode::A4W4) {
         RunGmm2A8W4<SharedActivationOutType, SharedWeightType, bfloat16_t, SharedQuantScaleType, SharedQuantScaleType,
                     GMM1_TILE_M, true, false, true, notifyCombineTileReady>(
-            sharedTopkWeightsPrefetch, sharedBlockContext_, problemShape, gmmAddrInfo, startBlockIdx_,
+            sharedTopkWeightsPrefetch, commonConfig_, sharedBlockContext_, problemShape, gmmAddrInfo, startBlockIdx_,
             gmmExecutionConfig_.blockJob, static_cast<uint32_t>(Get<M_VALUE>(problemShape)), 0U, nullptr,
             commonConfig_.activationOutputDivisor);
     } else {
@@ -1059,7 +1066,7 @@ __aicore__ inline void MegaMoe<TemplateMegaMoeTypeFunc>::RunGmm2CombineForExpert
             combineQuantMode == COMBINE_NO_QUANT, [&](auto notifyTag) __attribute__((cce_aicore)) {
                 RunGmm2A8W4<ActivationQuantOutType, MoeWeightType, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                             GMM1_TILE_M, false, false, true, decltype(notifyTag)::value>(
-                    topkWeightsPrefetch, pipeline, sliceProblemShape, gmmAddrInfo, startBlockIdx,
+                    topkWeightsPrefetch, commonConfig_, pipeline, sliceProblemShape, gmmAddrInfo, startBlockIdx,
                     gmmExecutionConfig_.blockJob, expertTokenCount, tokenStartIndexInExpert, &params_,
                     commonConfig_.activationOutputDivisor, MoeQuantConfig::AXW_MODE == AxWMode::A4W4);
             });

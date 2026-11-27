@@ -21,7 +21,7 @@ constexpr uint16_t AIC_SYNC_AIV_FLAG = 4;
 constexpr uint16_t AIV_SYNC_AIC_FLAG = 6;
 constexpr uint16_t GMM_AIV_FLAG_OFFSET = 16U;
 
-// 每条同步链路各允许 AIC 领先 15 个逻辑 tile，计数跨 expert/wave 保留。
+// 带反向 ACK 的同步链路各允许 AIC 领先 15 个逻辑 tile，计数跨 expert/wave 保留。
 // 每个 tile 的所有 GM 输出完成后通知消费者，消费者处理完所有子 tile 后通知 AIC。
 constexpr uint32_t GMM_MAX_PENDING_TILES = 15;
 
@@ -191,6 +191,26 @@ private:
     uint32_t pendingTiles_ = 0; // 已提交的 tile 数减去 AIC 已消费的 Activation 完成通知数。
 };
 
+#ifdef MEGA_MOE_ARCH35_DEVICE
+// AIC 的 FIX 完成后，由 AIV0 的 Scalar 发布 GM 行组就绪计数。
+// 仅使用 AIV0 侧的 10 号 FIX 通知，与权重的 0/1 号标志、AIV1 的 Combine 同步独立。
+// 逐 tile 供权与上一 tile 的就绪发布交错进行，将未消费 FIX 通知限制在两个 tile 窗口内。
+class Gmm2RowReadyRelay {
+public:
+    static constexpr uint16_t FIX_FINISHED_FLAG = static_cast<uint16_t>(GmmEventPair::MOE_GMM2);
+
+    __aicore__ inline void NotifyFix()
+    {
+        SyncIntraArrive<PIPE_FIX>(FIX_FINISHED_FLAG);
+    }
+
+    __aicore__ inline void WaitForFix()
+    {
+        SyncIntraWait<PIPE_S>(FIX_FINISHED_FLAG);
+    }
+};
+#endif
+
 // GMM2 -> 非量化 Combine：arch35 使用 AIV1，arch92 使用唯一 AIV，事件和计数独立于 GMM1/Activation。
 template <uint16_t CombineSubBlockIdx>
 class Gmm2CombineSyncForSubBlock {
@@ -200,6 +220,10 @@ private:
     static constexpr uint16_t COMBINE_AIV_FLAG_OFFSET = CombineSubBlockIdx * GMM_AIV_FLAG_OFFSET;
 
 public:
+#ifdef MEGA_MOE_ARCH35_DEVICE
+    // 每个切片返回前由 AIV0 接收完全部 FIX 通知并发布 GM ready，中继不保存反向 ACK 额度。
+    Gmm2RowReadyRelay rowReadyRelay{};
+#endif
     // AIC：提交前预留额度。累计第 16 个 tile 起，每次消费一个 ACK；已到达的 ACK 可直接通过。
     // PIPE_S gates submission itself. PIPE_MTE2 would only stall loads and cannot
     // enforce this bound for work that can advance without another MTE2 load.

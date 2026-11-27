@@ -44,13 +44,14 @@ __aicore__ inline void WaitForGmm1InputReady(const GMMAddrInfo& gmmAddrInfo, con
     WaitUntilGmFlagEquals(flagValueAddr, static_cast<int32_t>(targetValue));
 }
 
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
 // 覆写 Activation 物理行前，等待旧代 GMM2 的全部 N tile 完成读取。
 __aicore__ inline void WaitForActivationRingRowReuse(const GMMAddrInfo& gmmAddrInfo, uint32_t mLoc,
                                                      uint32_t tokenHiddenDim)
 {
     const uint64_t logicalRow = gmmAddrInfo.gmm1LogicalPaddedRow + mLoc;
-    if (unlikely(gmmAddrInfo.ringReuse.gmm2ConsumedRowTiles == nullptr || logicalRow < gmmAddrInfo.ringReuse.rows)) {
+    if (unlikely(gmmAddrInfo.ringReuse.gmm2ConsumedTileCountByMGroup == nullptr ||
+                 logicalRow < gmmAddrInfo.ringReuse.rows)) {
         return;
     }
     const uint64_t epoch = logicalRow / gmmAddrInfo.ringReuse.rows;
@@ -62,7 +63,7 @@ __aicore__ inline void WaitForActivationRingRowReuse(const GMMAddrInfo& gmmAddrI
     // 当前写入者发布 ready 前，消费计数不会推进到下一次复用。
     // 目标值与 atomicAdd 的计数一致，均按低 32 位比较。
     const uint32_t target = static_cast<uint32_t>(epoch * nTiles);
-    WaitUntilGmFlagEquals(gmmAddrInfo.ringReuse.gmm2ConsumedRowTiles + rowSlot * INT_CACHELINE,
+    WaitUntilGmFlagEquals(gmmAddrInfo.ringReuse.gmm2ConsumedTileCountByMGroup + rowSlot * INT_CACHELINE,
                           static_cast<int32_t>(target));
 }
 
@@ -244,7 +245,7 @@ __aicore__ inline void Gmm1AicMmadToGmGeneric(WorkSet& workSet, const Params& pa
             lastWaitedMGroupIdx = mGroupIdx;
         }
         sync.WaitForActivation();
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
         WaitForGmm1RingTileReuse(gmmAddrInfo, mLoc, nLoc, config.n);
 #endif
         Gmm1AicMmadTileToGmGeneric<BlockMmad>(blockMmad, config, workSet.gmB, workSet.gmScaleB, workSet.gmC,
@@ -328,7 +329,7 @@ __aicore__ inline void Gmm1AicMmadA8W4(BlockMmad& blockMmad, WorkSet& workSet, c
         }
 
         sync.WaitForActivation();
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
         WaitForGmm1RingTileReuse(gmmAddrInfo, mLoc, nLoc, config.n);
 #endif
         Gmm1AicMmadTileA8W4(blockMmad, workSet.gmA, workSet.gmScaleA, workSet.gmScaleB, workSet.gmC, config,
@@ -356,7 +357,7 @@ __aicore__ inline void Gmm1Aiv0PrefetchEpilogueTileGeneric(const Config& config,
     auto tensorBlockUb = asc::te::make_tensor(asc::te::make_mem_ptr<asc::te::location::ub, ElementC>(0), layoutL0cUb);
     auto copyGm2Ub = asc::te::make_copy(asc::te::copy_gm_to_ub{});
     auto topkWeightTensor = activationQuantOp.GetTopkWeightTensor();
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
     WaitForActivationRingRowReuse(gmmAddrInfo, mLoc, config.k);
 #endif
 
@@ -387,7 +388,7 @@ __aicore__ inline void Gmm1Aiv0PrefetchEpilogueTileGeneric(const Config& config,
         PipeNotify<PIPE_V, PIPE_MTE2>(0);
     }
     PipeWait<PIPE_V, PIPE_MTE2>(0);
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
     PublishGmm1RingTileConsumed(gmmAddrInfo, mLoc, nLoc, config.n);
 #endif
 }
@@ -407,7 +408,7 @@ __aicore__ inline void Gmm1Aiv0EpilogueTileGeneric(const Config& config, Activat
     Std::tuple<int64_t, int64_t> epilogueOffset{
         mLoc * config.outputN + epilogueNLoc, mLoc * CeilDiv(config.outputN, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE +
                                                   CeilDiv(epilogueNLoc, MXFP_DIVISOR_SIZE) * MXFP_MULTI_BASE_SIZE};
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
     using KernelConfig = typename Config::KernelConfig;
     if constexpr (!KernelConfig::IS_SHARED) {
         WaitForActivationRingRowReuse(gmmAddrInfo, mLoc, config.k);
@@ -415,7 +416,7 @@ __aicore__ inline void Gmm1Aiv0EpilogueTileGeneric(const Config& config, Activat
 #endif
     MegaMoeImpl::SetSaturationStrategy(SaturationStrategy::USE_API);
     activationQuantOp(false, epilogueShape, epilogueOffset, pingpongIdx);
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
     PublishGmm1RingTileConsumed(gmmAddrInfo, mLoc, nLoc, config.n);
 #endif
     NotifyGmm2InputReady<IsWaveFlagGrained>(gmmAddrInfo.activationToGmm2Flag, mLoc / L1_TILE_M_256);

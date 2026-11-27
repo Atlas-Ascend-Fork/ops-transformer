@@ -84,10 +84,10 @@ __aicore__ inline void Gmm2ExecGeneric(Scheduler& scheduler, const GMMAddrInfo& 
 
 template <typename BlockMmad, typename BlockPrologue, typename ElementC, bool IsShared, bool IsLayered,
           bool NotifyCombineTileReady, typename Scheduler, typename Config>
-__aicore__ inline void Gmm2ExecA8W4(Scheduler& scheduler, const GMMAddrInfo& gmmAddrInfo, const Config& config,
-                                    uint32_t startLoopIdx, uint32_t tileNum, uint32_t expertTokenCount,
-                                    uint32_t rowOffsetInExpert, const Params* params,
-                                    const A8W4BlockContext<BlockMmad, BlockPrologue>& pipeline,
+__aicore__ inline void Gmm2ExecA8W4(Scheduler& scheduler, const MoeStageCommonConfig& common,
+                                    const GMMAddrInfo& gmmAddrInfo, const Config& config, uint32_t startLoopIdx,
+                                    uint32_t tileNum, uint32_t expertTokenCount, uint32_t rowOffsetInExpert,
+                                    const Params* params, const A8W4BlockContext<BlockMmad, BlockPrologue>& pipeline,
                                     bool allowPackedWeightL2Bypass)
 {
     using KernelConfig = typename Config::KernelConfig;
@@ -139,10 +139,17 @@ __aicore__ inline void Gmm2ExecA8W4(Scheduler& scheduler, const GMMAddrInfo& gmm
                                               config.m == expertTokenCount && config.m <= config.tileM;
             workSet.gmB.set_l2_cache_hint(bypassPackedWeightL2 ? asc::te::cache_mode::disable :
                                                                  asc::te::cache_mode::normal);
-            Gmm2Aiv0PrologueA8W4(*pipeline.block, workSet.scheduler, workSet.gmB, config, startLoopIdx, tileNum);
+            Gmm2Aiv0PrologueA8W4(*pipeline.block, workSet.scheduler, workSet.gmB, gmmAddrInfo, config, startLoopIdx,
+                                 tileNum);
         } else if constexpr (NotifyCombineTileReady) {
             // 同上：W4 路径去重开关走运行时判断（嵌套模板参数触发编译器代码生成问题）。
             if (!IsCombineDedupOn(params->tilingData->compute.dedupMode)) {
+#ifdef MEGA_MOE_ARCH35_DEVICE
+                if (gmmAddrInfo.gmm2ReadyTileCountByMGroup != nullptr) {
+                    CombineByMGroup(workSet.scheduler, common, *params, gmmAddrInfo, config, startLoopIdx, tileNum);
+                    return;
+                }
+#endif
                 using MakeLayoutC = typename KernelConfig::MakeLayoutC;
                 CombineTokenRange<ElementC, MakeLayoutC>(workSet.scheduler, workSet.gmC, *params, gmmAddrInfo, config,
                                                          startLoopIdx, tileNum);
@@ -199,7 +206,8 @@ __aicore__ inline void RunGmm2Generic(uint8_t combineQuantMode, bool topkWeights
 template <typename ElementA, typename ElementB, typename ElementC, typename ElementMxScaleA, typename ElementMxScaleB,
           uint32_t Gmm1TileM = L1_TILE_M_256, bool IsShared = false, bool IsLayered = false,
           bool IsWaveFlagGrained = false, bool NotifyCombineTileReady = false, typename BlockContext>
-__aicore__ inline void RunGmm2A8W4(bool topkWeightsPrefetch, const BlockContext& pipeline,
+__aicore__ inline void RunGmm2A8W4(bool topkWeightsPrefetch, const MoeStageCommonConfig& common,
+                                   const BlockContext& pipeline,
                                    const AscendC::Shape<int64_t, int64_t, int64_t, int64_t>& problemShape,
                                    const GMMAddrInfo& gmmAddrInfo, uint32_t& startBlockIdx,
                                    const BlockJobContext& blockJob, uint32_t expertTokenCount,
@@ -233,9 +241,9 @@ __aicore__ inline void RunGmm2A8W4(bool topkWeightsPrefetch, const BlockContext&
     }
 
     GmmKernel::Gmm2ExecA8W4<BlockMmad, BlockPrologue, ElementC, IsShared, IsLayered, NotifyCombineTileReady,
-                            GmmKernel::BlockScheduler, decltype(config)>(scheduler, gmmAddrInfo, config, startLoopIdx,
-                                                                         tileNum, expertTokenCount, rowOffsetInExpert,
-                                                                         params, pipeline, allowPackedWeightL2Bypass);
+                            GmmKernel::BlockScheduler, decltype(config)>(
+        scheduler, common, gmmAddrInfo, config, startLoopIdx, tileNum, expertTokenCount, rowOffsetInExpert, params,
+        pipeline, allowPackedWeightL2Bypass);
 
     startBlockIdx = (startBlockIdx + tileNum) % config.blockNum;
 }

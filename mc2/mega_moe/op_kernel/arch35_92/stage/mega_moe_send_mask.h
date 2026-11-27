@@ -88,7 +88,7 @@ __aicore__ inline void PrepareTopkIdsForCurrentBatch(uint32_t indexBytes, SendMa
     }
 }
 
-#if !defined(MEGA_MOE_ARCH92_DEVICE)
+#ifdef MEGA_MOE_ARCH35_DEVICE
 // 调用方保证 validLen > 0；每个专家、每批只初始化一次压缩状态，比较结果直接用于筛选位置索引。
 // Host 将 batch 容量按 256 条对齐，两个输入均按完整 batch 分配，尾轮完整加载不会越界。
 template <typename TopkIndexType>

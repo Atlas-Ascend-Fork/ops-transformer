@@ -94,6 +94,25 @@ constexpr int64_t SIZE_BF_16 = 2;
 constexpr int64_t INVALID_WORKSPACE_OFFSET = -1;
 constexpr uint32_t MTE_RING_WAVE_COUNT = 3U;
 
+// Wave Combine 的行缓冲槽数、UB 区间和元数据容量统一在此定义。
+constexpr uint32_t WAVE_COMBINE_MIN_ROW_BUFFER_COUNT = 2U;
+constexpr uint32_t WAVE_COMBINE_STEADY_ROW_BUFFER_COUNT = 1U;
+constexpr uint32_t WAVE_COMBINE_MAX_ROW_BUFFER_COUNT = 6U;
+// 行缓冲和量化临时空间使用 [64 KiB, 184 KiB)，后续就绪扫描区从 184 KiB 开始。
+constexpr uint32_t WAVE_COMBINE_UB_BASE = 64U * 1024U;
+constexpr uint32_t WAVE_COMBINE_UB_LIMIT = 184U * 1024U;
+constexpr uint32_t WAVE_COMBINE_META_INFO_TOKEN_CAPACITY = 1536U;
+
+// 调用方保证 H 为有效正值，并将槽数上限控制在 1～6。
+HOST_DEVICE constexpr uint32_t CalcCombineRowBufferCount(int64_t h,
+                                                         uint32_t maxBufferCount = WAVE_COMBINE_MAX_ROW_BUFFER_COUNT)
+{
+    constexpr int64_t budgetBytes = WAVE_COMBINE_UB_LIMIT - WAVE_COMBINE_UB_BASE;
+    const int64_t strideBytes = MemoryLayoutDetail::CeilAlign(h * SIZE_BF_16, MemoryLayoutDetail::ALIGN_32);
+    const uint32_t maxRowBufferCountByUb = static_cast<uint32_t>(budgetBytes / strideBytes);
+    return maxRowBufferCountByUb < maxBufferCount ? maxRowBufferCountByUb : maxBufferCount;
+}
+
 // 原同步布局：前 48 KiB 是 rank 槽位，随后 12 KiB 是各 AIV 的同步计数区。
 // URMA 的 rank 槽位超过预留区时动态扩展；MTE 保持原 60 KiB 固定布局。
 constexpr int64_t PEERMEM_MIN_RANK_SYNC_SIZE = 1024 * 48LL;
@@ -386,7 +405,8 @@ struct MteSyncBuffers {
     GmBuffer dedupReady{};
     GmBuffer gmm1ConsumedEpoch{};
     GmBuffer gmm1ConsumedRowTiles{};
-    GmBuffer gmm2ConsumedRowTiles{};
+    GmBuffer gmm2ConsumedTileCountByMGroup{};
+    GmBuffer gmm2ReadyTileCountByMGroup{};
 };
 
 struct MteBuffers {
@@ -576,6 +596,39 @@ struct CclComputeLayoutParams {
 HOST_DEVICE constexpr bool NeedsMteExpertGmm2Ready(const CclComputeLayoutParams& params)
 {
     return params.combineQuant || IsCombineDedupOn(params.dedupMode);
+}
+
+// 仅判断协议是否支持，参数合法性由 tiling 保证。
+// Dispatch 去重仍为每个专家保留标准输出行，可复用行组 Combine。
+HOST_DEVICE constexpr bool UseMGroupCombine(const CclComputeLayoutParams& params)
+{
+    return params.topoType == TOPO_TYPE_MTE && params.dispatchFp4 && !params.combineQuant &&
+           !IsCombineDedupOn(params.dedupMode) && !IsServerCombineDedupOn(params.dedupMode);
+}
+
+HOST_DEVICE constexpr int64_t CalcMGroupReadyCounterBytes(const CclComputeLayoutParams& params)
+{
+    // 线性布局为每个专家保留独立尾组：所有非空专家的向上取整之和
+    // 不超过总行数向上取整加专家数，避免不同专家尾部共用一个计数。
+    const int64_t rowGroups =
+        params.ring.gmm2 ?
+            MemoryLayoutDetail::CeilDiv(static_cast<int64_t>(params.ring.rows), MemoryLayoutDetail::L1_TILE_M_256) :
+            MemoryLayoutDetail::CeilDiv(params.maxOutputSize, MemoryLayoutDetail::L1_TILE_M_256) +
+                params.moeExpertPerRank;
+    return MemoryLayoutDetail::CeilAlign(rowGroups * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32,
+                                         MemoryLayoutDetail::ALIGN_512);
+}
+
+HOST_DEVICE constexpr uint64_t GetMGroupCounterSlot(uint64_t logicalRow, uint64_t ringRows)
+{
+    const uint64_t row = ringRows != 0U ? logicalRow % ringRows : logicalRow;
+    return row / MemoryLayoutDetail::L1_TILE_M_256;
+}
+
+HOST_DEVICE constexpr uint32_t CalcMGroupReadyTileTarget(uint64_t logicalRow, uint64_t ringRows, uint32_t nTiles)
+{
+    const uint64_t generation = ringRows != 0U ? logicalRow / ringRows + 1U : 1U;
+    return static_cast<uint32_t>(generation * nTiles);
 }
 
 HOST_DEVICE constexpr int64_t CalcDispatchRouteIndexAlignSize(const CclComputeLayoutParams& params)
@@ -885,7 +938,10 @@ private:
                 Allocate(mte.sync.gmm1ConsumedRowTiles, rowCounterBytes);
             }
             // 普通 Combine 读完 C2 后反馈，去重路径由 AIC 读完 Activation 后反馈。
-            Allocate(mte.sync.gmm2ConsumedRowTiles, rowCounterBytes);
+            Allocate(mte.sync.gmm2ConsumedTileCountByMGroup, rowCounterBytes);
+        }
+        if (UseMGroupCombine(params)) {
+            Allocate(mte.sync.gmm2ReadyTileCountByMGroup, CalcMGroupReadyCounterBytes(params));
         }
         reset.flags = GmBuffer{sync.activationReady.offsetBytes,
                                ((workspaceSize - flagRegionBeginOffset) / SIZE_INT_32) * SIZE_INT_32};

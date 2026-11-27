@@ -12,9 +12,8 @@
 #define MEGA_MOE_COPY_H
 
 #include <type_traits>
-#if defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202))
 #include "mega_moe_arch_policy.h"
-#else
+#if !(defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202)))
 #include "c_api/asc_simd.h"
 #endif
 
@@ -53,7 +52,7 @@ struct CopyRows {
 // C API configures padding once; Basic API supplies it with each padded transfer.
 __aicore__ inline void InitCopyPadding()
 {
-#if !defined(MEGA_MOE_ARCH92_DEVICE)
+#ifdef MEGA_MOE_ARCH35_DEVICE
     asc_set_copy_pad_val(uint32_t{0});
 #endif
 }

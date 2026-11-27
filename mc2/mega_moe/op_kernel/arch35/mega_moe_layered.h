@@ -969,8 +969,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
     if constexpr (MoeQuantConfig::AXW_MODE == AxWMode::A8W4) {
         RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                     L1_TILE_M_256, IsShared, true, !IsShared, false>(
-            TopkWeightsPrefetch, blockContext_, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob,
-            expertTokenCount, rowOffsetInExpert, nullptr, activationOutputDivisor_);
+            TopkWeightsPrefetch, commonConfig_, blockContext_, state.problemShape, gmmAddrInfo, startBlockIdx_,
+            blockJob, expertTokenCount, rowOffsetInExpert, nullptr, activationOutputDivisor_);
     } else if constexpr (MoeQuantConfig::AXW_MODE == AxWMode::A4W4) {
         // 空 slice 三角色整对跳过，避免每 slice 局部构造的 BlockMmad/BlockPrologue 跨核额度收支失配。
         // 跳过后额度 flag（SYNC_AIV_AIC_FLAG）未消费计数恒 <16：AIC 侧构造 Set 与逐 chunk 就绪 Wait
@@ -989,7 +989,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
             typename A8W4Config::BlockContext context{&block};
             RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                         L1_TILE_M_256, IsShared, true, !IsShared, false>(
-                TopkWeightsPrefetch, context, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob,
+                TopkWeightsPrefetch, commonConfig_, context, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob,
                 expertTokenCount, rowOffsetInExpert, nullptr, activationOutputDivisor_);
         } else {
             if (GetSubBlockIdx() == 0U) {
@@ -997,13 +997,14 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GroupMatm
                 typename A8W4Config::BlockContext context{&block};
                 RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                             L1_TILE_M_256, IsShared, true, !IsShared, false>(
-                    TopkWeightsPrefetch, context, state.problemShape, gmmAddrInfo, startBlockIdx_, blockJob,
-                    expertTokenCount, rowOffsetInExpert, nullptr, activationOutputDivisor_);
+                    TopkWeightsPrefetch, commonConfig_, context, state.problemShape, gmmAddrInfo, startBlockIdx_,
+                    blockJob, expertTokenCount, rowOffsetInExpert, nullptr, activationOutputDivisor_);
             } else {
                 RunGmm2A8W4<ActivationQuantOutType, Weight1Type, bfloat16_t, QuantScaleOutType, QuantScaleOutType,
                             L1_TILE_M_256, IsShared, true, !IsShared, false>(
-                    TopkWeightsPrefetch, typename A8W4Config::BlockContext{}, state.problemShape, gmmAddrInfo,
-                    startBlockIdx_, blockJob, expertTokenCount, rowOffsetInExpert, nullptr, activationOutputDivisor_);
+                    TopkWeightsPrefetch, commonConfig_, typename A8W4Config::BlockContext{}, state.problemShape,
+                    gmmAddrInfo, startBlockIdx_, blockJob, expertTokenCount, rowOffsetInExpert, nullptr,
+                    activationOutputDivisor_);
             }
         }
     } else {

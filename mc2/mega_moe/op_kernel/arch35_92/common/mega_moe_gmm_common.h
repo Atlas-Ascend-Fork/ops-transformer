@@ -21,7 +21,7 @@
 #include "../blaze/gemm/tile/copy_gmm1_concat.h"
 #include "../blaze/gemm/block/block_scheduler_swizzle.h"
 #include "../blaze/prologue/block_prologue.h"
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
 // Arch92 没有 A8W4 Prologue 路径，不应解析其中仅供 Arch35 使用的拷贝对象。
 #include "../blaze/gemm/block/block_mmad_mx_fp8fp4.h"
 #include "../blaze/prologue/block_prologue_mx_fp8fp4.h"
@@ -442,7 +442,7 @@ struct BlockMmadContext<BlockMmad, Blaze::Gemm::GroupedMatmulWithScaleMx<>> {
                                             .kL1 = tiling.l1Params.kAL1,
                                             .scaleKL1 = tiling.l1Params.scaleKL1};
         const MegaMoeFp4Gmm1L1Layout* fp4Layout = nullptr;
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
         using KernelConfig = typename ProblemConfig::KernelConfig;
         if constexpr (Stage == GmmStage::GMM1 && KernelConfig::IS_GENERIC_A4W4) {
             if (config.m > 0U && config.m <= Blaze::Gemm::MATMUL_MNK_ALIGN && config.k % L1_TILE_K == 0U &&
@@ -456,7 +456,7 @@ struct BlockMmadContext<BlockMmad, Blaze::Gemm::GroupedMatmulWithScaleMx<>> {
         }
 #endif
         if (!initialized_ || initConfig_ != requestedConfig) {
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
             if (initialized_) {
                 DrainBeforeReconfigure();
             }
@@ -464,7 +464,7 @@ struct BlockMmadContext<BlockMmad, Blaze::Gemm::GroupedMatmulWithScaleMx<>> {
             typename BlockMmad::ProblemShape problemShape{config.m, config.n, config.k, 0};
             typename BlockMmad::MmadParams params{
                 {tiling.tileM, tileN, requestedConfig.l0TileK, 0}, tiling.l1Params, false, false};
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
             if constexpr (KernelConfig::IS_GENERIC_A4W4) {
                 blockMmad.Init(problemShape, params, fp4Layout);
             } else

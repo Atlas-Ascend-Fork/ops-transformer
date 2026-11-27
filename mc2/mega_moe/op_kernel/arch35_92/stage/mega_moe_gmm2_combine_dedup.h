@@ -368,7 +368,7 @@ __aicore__ inline void DrainCombineRowBuffersDedup(uint32_t& issuedRowCount, uin
     PipeWait<PIPE_MTE3, PIPE_V>(static_cast<TEventID>(WAVE_COMBINE_DEDUP_MERGE_EVENT_BASE + 1));
 }
 
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
 // prepass 槽 0（done 计数：AIV1 低 16 位、AIV0 参与档另有高 16 位）到齐后整张 desc 表方可读；
 // combine 消费点远晚于 prepass 收尾，此处等待实际≈0，仅作契约兜底。
 __aicore__ inline void WaitDedupPrepassAllDone(const Params& params)

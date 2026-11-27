@@ -67,14 +67,6 @@ struct WaveCombineScratch {
     __ubuf__ float* quantTempTensor = nullptr;
 };
 
-constexpr uint32_t WAVE_COMBINE_MIN_ROW_BUFFER_COUNT = 2U;
-constexpr uint32_t WAVE_COMBINE_STEADY_ROW_BUFFER_COUNT = 1U;
-constexpr uint32_t WAVE_COMBINE_MAX_ROW_BUFFER_COUNT = 6U;
-constexpr uint32_t WAVE_COMBINE_UB_BASE = 64U * 1024U;
-// [64 KiB, 184 KiB) is dedicated to the Combine row ring and quant scratch.
-// The ready scan starts at 184 KiB, so adaptive row buffers must stay below it.
-constexpr uint32_t WAVE_COMBINE_UB_LIMIT = 184U * 1024U;
-constexpr uint32_t WAVE_COMBINE_META_INFO_TOKEN_CAPACITY = 1536U;
 #ifdef MEGA_MOE_ARCH92_DEVICE
 static_assert(META_INFO_TENSOR_ADDR + WAVE_COMBINE_META_INFO_TOKEN_CAPACITY * META_INFO_SIZE * sizeof(int32_t) <=
                   ARCH92_FIXED_WORK_UB_BYTES,
@@ -202,7 +194,7 @@ __aicore__ inline WaveCombineBufferConfig InitWaveCombineBuffers(uint8_t combine
         bufferConfig.quantTempElements =
             Ops::Base::CeilAlign(storedScaleBytes, static_cast<uint32_t>(ALIGN_32)) + storedScaleBytes / 2U;
     }
-    bufferConfig.rowBufferCount = MaxRowBufferCount;
+    bufferConfig.rowBufferCount = CalcCombineRowBufferCount(common.tokenHiddenDim, MaxRowBufferCount);
     if (combineMode != COMBINE_NO_QUANT) {
         uint32_t quantTempBytes = bufferConfig.quantTempElements * sizeof(float);
         uint32_t rowRingBudgetBytes = WAVE_COMBINE_UB_LIMIT - WAVE_COMBINE_UB_BASE - quantTempBytes;
@@ -426,17 +418,17 @@ __aicore__ inline void NotifySharedExpertTileCompletion(uint32_t rowTileOffset, 
 
 namespace GmmKernel {
 
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
 // Combine 去重由 AIC 发布 Activation 输入读取完成，供下一代写入者复用。
 // 全量 C2 输出保留到独立的专家级 Combine 消费完成。
 __aicore__ inline void PublishGmm2InputReadComplete(const GMMAddrInfo& info, uint32_t mLoc)
 {
-    if (unlikely(info.ringReuse.gmm2ConsumedRowTiles == nullptr)) {
+    if (unlikely(info.ringReuse.gmm2ConsumedTileCountByMGroup == nullptr)) {
         return;
     }
     PipeFence<PIPE_MTE2, PIPE_S, SYNC_EVENT_ID0>();
     const uint64_t row = (info.gmm2LogicalPaddedRow + mLoc) % info.ringReuse.rows / L1_TILE_M_256;
-    atomicAdd(info.ringReuse.gmm2ConsumedRowTiles + row * INT_CACHELINE, int32_t(1));
+    atomicAdd(info.ringReuse.gmm2ConsumedTileCountByMGroup + row * INT_CACHELINE, int32_t(1));
     GmDataBarrier();
 }
 
@@ -503,7 +495,7 @@ __aicore__ inline void Gmm2AicMmadGeneric(BlockMmad& blockMmad, WorkSet& workSet
             gmmAddrInfo.gmm2CombineSync->WaitForCombine();
         }
         blockMmad(gmBlockA, gmBlockB, gmBlockScaleA, gmBlockScaleB, workSet.gmBias, gmBlockC, singleShape);
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
         if constexpr (!NotifyCombineTileReady && !IsShared && !IsLayered) {
             PublishGmm2InputReadComplete(gmmAddrInfo, mLoc);
         }
@@ -519,6 +511,74 @@ __aicore__ inline void Gmm2AicMmadGeneric(BlockMmad& blockMmad, WorkSet& workSet
         }
     }
 }
+
+#ifdef MEGA_MOE_ARCH35_DEVICE
+// AIV0 收到配对 AIC 的 FIX 完成通知后，发布软件就绪计数。
+// AIV1 独立消费，等待整个 M 行组的结果就绪。
+__aicore__ inline void PublishGmm2TileReady(const GMMAddrInfo& info, uint32_t mLoc)
+{
+    auto& relay = info.gmm2CombineSync->rowReadyRelay;
+    relay.WaitForFix();
+    const uint64_t row = info.gmm2LogicalPaddedRow + mLoc;
+    const uint64_t slot = GetMGroupCounterSlot(row, info.gmm2OutputRingRows);
+    atomicAdd(info.gmm2ReadyTileCountByMGroup + slot * INT_CACHELINE, int32_t(1));
+    GmDataBarrier();
+}
+
+template <typename Scheduler, typename Config>
+__aicore__ inline void CombineByMGroup(Scheduler& scheduler, const MoeStageCommonConfig& common, const Params& params,
+                                       const GMMAddrInfo& info, const Config& config, uint32_t startLoopIdx,
+                                       uint32_t tileNum)
+{
+    const uint32_t nTiles = Ops::Base::CeilDiv(config.n, static_cast<uint32_t>(L1_TILE_N));
+    // 当前 slice 位于单个 Wave 内，不跨环形缓存边界，所有行组使用相同的计数轮次。
+    const uint64_t baseSlot = GetMGroupCounterSlot(info.gmm2LogicalPaddedRow, info.gmm2OutputRingRows);
+    const uint32_t target = CalcMGroupReadyTileTarget(info.gmm2LogicalPaddedRow, info.gmm2OutputRingRows, nTiles);
+    // 按实际行宽和 UB 预算计算可用槽数，保持原 UB 区域大小不变。
+    WaveCombineScratch scratch{};
+    const auto rowConfig = InitWaveCombineBuffers(COMBINE_NO_QUANT, common, scratch);
+    uint32_t rowSequence = 0U;
+    for (uint32_t loopIdx = startLoopIdx; loopIdx < tileNum; loopIdx += config.blockNum) {
+        auto coord = scheduler.GetBlockCoord(loopIdx);
+        auto shape = scheduler.GetBlockShape(coord);
+        const uint32_t mLoc = Get<M_VALUE>(coord);
+        const uint32_t nLoc = Get<N_VALUE>(coord);
+        const uint64_t slot = baseSlot + mLoc / L1_TILE_M_256;
+        WaitUntilGmFlagEquals(info.gmm2ReadyTileCountByMGroup + slot * INT_CACHELINE, static_cast<int32_t>(target));
+
+        // 保留原分工：由 N 方向 tile 下标划分互不重叠的完整 token 行。
+        // 按实际行宽布局的缓冲槽循环复用，允许 MTE2 读取与 MTE3 发送异步重叠。
+        const WorkRange rows = GetBalancedWorkRange(static_cast<uint32_t>(Get<M_VALUE>(shape)),
+                                                    {.jobIndex = nLoc / L1_TILE_N, .totalJobs = nTiles});
+        if (rows.count != 0U) {
+            const uint64_t firstRow = static_cast<uint64_t>(mLoc) + rows.start;
+            auto* metaGm = reinterpret_cast<__gm__ int32_t*>(info.metaInfoGlobal) + firstRow * META_INFO_SIZE;
+            CopyGmToUb(scratch.metaInfoTensor, metaGm, rows.count * META_INFO_SIZE * sizeof(int32_t));
+            PipeNotify<PIPE_MTE2, PIPE_S>(0);
+            PipeWait<PIPE_MTE2, PIPE_S>(0);
+            CombineWaveTokenRange(COMBINE_NO_QUANT, common, rowConfig, scratch, params, info.gmm2OutGlobal,
+                                  static_cast<uint32_t>(firstRow), rows.count, 0U, rowSequence);
+            // 本消费者所需结果全部从 GM 读入后，即可归还 GM 消费计数。
+            // 在途 MTE3 发送读取的是 UB，由各槽的 MTE3→MTE2 事件保护其复用。
+            PipeNotify<PIPE_MTE2, PIPE_S>(0);
+            PipeWait<PIPE_MTE2, PIPE_S>(0);
+        }
+        if (info.gmm2OutputRingRows != 0U) {
+            // 环形布局中，每个原 N 向 tile 恰好累加一次消费计数，包括零行消费者。
+            // 线性结果不会回绕，不访问环形消费计数。
+            atomicAdd(info.ringReuse.gmm2ConsumedTileCountByMGroup + slot * INT_CACHELINE, int32_t(1));
+            GmDataBarrier();
+        }
+    }
+    if (rowSequence != 0U) {
+        // 退出前回收所有在途槽位事件，避免 Dispatch 或下一切片复用 UB 和事件编号。
+        // 通过 MTE2→Scalar 同步确认上述等待已完成。
+        DrainCombineRowBuffers(rowSequence, rowConfig.rowBufferCount);
+        PipeNotify<PIPE_MTE2, PIPE_S>(0);
+        PipeWait<PIPE_MTE2, PIPE_S>(0);
+    }
+}
+#endif
 
 // 非量化 Combine 的统一入口。AIV1 直接使用 GMM2 已构造的 scheduler，逐 tile 等待配对 AIC 并消费。
 // 当前 GMM2 problem 的起始地址和 M 大小共同限定 token 范围，无需再次遍历专家或重建 scheduler。
@@ -553,12 +613,12 @@ __aicore__ inline void CombineTokenRange(Scheduler& scheduler, TensorC& l0cOutGm
         CopyGmToUb(metaInfoTensor, metaInfoGm, (lenTile * META_INFO_SIZE) * sizeof(int32_t));
         PipeNotify<PIPE_MTE2, PIPE_S>(0);
         PipeWait<PIPE_MTE2, PIPE_S>(0);
-#ifndef MEGA_MOE_ARCH92_DEVICE
-        if (gmmAddrInfo.ringReuse.gmm2ConsumedRowTiles != nullptr) {
+#ifdef MEGA_MOE_ARCH35_DEVICE
+        if (gmmAddrInfo.ringReuse.gmm2ConsumedTileCountByMGroup != nullptr) {
             // MTE2→S 已确保 C2 搬入 UB；整行 N 分块消费后才允许覆写 Activation。
             // 下次 GMM2 必须等新 Activation ready，因此也不能提前覆写同一 C2 行槽。
             const uint64_t row = (gmmAddrInfo.gmm2LogicalPaddedRow + mLoc) % gmmAddrInfo.ringReuse.rows / L1_TILE_M_256;
-            atomicAdd(gmmAddrInfo.ringReuse.gmm2ConsumedRowTiles + row * INT_CACHELINE, int32_t(1));
+            atomicAdd(gmmAddrInfo.ringReuse.gmm2ConsumedTileCountByMGroup + row * INT_CACHELINE, int32_t(1));
             GmDataBarrier();
         }
 #endif
@@ -618,12 +678,16 @@ __aicore__ inline void Gmm2AicMmadA8W4(BlockMmad& blockMmad, Scheduler& schedule
             // 将去重开关做成其嵌套模板参数时（template<类参> template<bool>），编译器生成的
             // AIC 代码在 W4 实例上 scalar 访问 L1 越界（2026-09 实测，源码语义与运行时判断
             // 逐行等价仍崩）。Generic 路径经自由函数模板下发不受影响，保持编译期分化。
-            if (gmmAddrInfo.gmm2CombineSync != nullptr) {
+            if (gmmAddrInfo.gmm2CombineSync != nullptr
+#ifdef MEGA_MOE_ARCH35_DEVICE
+                && gmmAddrInfo.gmm2ReadyTileCountByMGroup == nullptr
+#endif
+            ) {
                 gmmAddrInfo.gmm2CombineSync->WaitForCombine();
             }
         }
         blockMmad(gmBlockA, gmBlockScaleA, gmBlockScaleB, tensorBlockGm);
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
         if constexpr (!IsShared && !IsLayered) {
             if (gmmAddrInfo.gmm2CombineSync == nullptr) {
                 PublishGmm2InputReadComplete(gmmAddrInfo, mLoc);
@@ -631,11 +695,19 @@ __aicore__ inline void Gmm2AicMmadA8W4(BlockMmad& blockMmad, Scheduler& schedule
         }
 #endif
         if constexpr (NotifyCombineTileReady && !IsShared) {
-            // AIV1 与本 AIC 重放同一 scheduler。FIX 完成后通知 Combine 读取 GM；
-            // W4 prologue 仍由 AIV0 独立推进，不参与该一对一完成链路。
-            if (gmmAddrInfo.gmm2CombineSync != nullptr) {
+            // 原路径由 FIX 通知 AIV1；按 M 行组消费时，改为通知 AIV0 发布 GM ready。
+            if (gmmAddrInfo.gmm2CombineSync != nullptr
+#ifdef MEGA_MOE_ARCH35_DEVICE
+                && gmmAddrInfo.gmm2ReadyTileCountByMGroup == nullptr
+#endif
+            ) {
                 gmmAddrInfo.gmm2CombineSync->NotifyCombine();
             }
+#ifdef MEGA_MOE_ARCH35_DEVICE
+            if (gmmAddrInfo.gmm2ReadyTileCountByMGroup != nullptr) {
+                gmmAddrInfo.gmm2CombineSync->rowReadyRelay.NotifyFix();
+            }
+#endif
         } else if constexpr (IsLayered && !IsShared) {
             NotifyCombineConsumersOfTileCompletion(rowOffsetInExpert + mLoc, groupSyncSlotLayout,
                                                    gmmAddrInfo.gmm2CombineSyncCounter);
@@ -648,15 +720,41 @@ __aicore__ inline void Gmm2AicMmadA8W4(BlockMmad& blockMmad, Scheduler& schedule
 // 为一个 GMM2 逻辑 block 的 AIV0 路径展开一段 A8W4 权重。
 template <typename BlockPrologue, typename Scheduler, typename TensorB, typename Config>
 __aicore__ inline void Gmm2Aiv0PrologueA8W4(BlockPrologue& blockPrologue, Scheduler& scheduler, TensorB& gmB,
-                                            const Config& config, uint32_t startLoopIdx, uint32_t tileNum)
+                                            const GMMAddrInfo& gmmAddrInfo, const Config& config, uint32_t startLoopIdx,
+                                            uint32_t tileNum)
 {
+#ifdef MEGA_MOE_ARCH35_DEVICE
+    const bool relayReady = gmmAddrInfo.gmm2ReadyTileCountByMGroup != nullptr;
+    bool pendingReady = false;
+    uint32_t pendingLoopIdx = startLoopIdx;
+#endif
     for (uint32_t loopIdx = startLoopIdx; loopIdx < tileNum; loopIdx += config.blockNum) {
         auto blockCoord = scheduler.GetBlockCoord(loopIdx);
         auto actualShape = scheduler.GetBlockShape(blockCoord);
         uint32_t nLoc = Get<N_VALUE>(blockCoord);
         auto nL1Size = Get<N_VALUE>(actualShape);
         blockPrologue(gmB, config.k, nL1Size, nLoc, config.n, 0U);
+#ifdef MEGA_MOE_ARCH35_DEVICE
+        if (relayReady) {
+            // 先提交当前 tile 的全部供权任务，再等待上一 tile 的 FIX 完成。
+            // 避免尚未提交的供权任务被 FIX 等待阻塞。
+            if (pendingReady) {
+                auto readyCoord = scheduler.GetBlockCoord(pendingLoopIdx);
+                PublishGmm2TileReady(gmmAddrInfo, Get<M_VALUE>(readyCoord));
+            }
+            pendingReady = true;
+            pendingLoopIdx = loopIdx;
+        }
+#endif
     }
+#ifdef MEGA_MOE_ARCH35_DEVICE
+    // 最后一个 tile 已无后续供权可穿插，须先接收其 FIX 通知并发布就绪计数，
+    // 再切换切片、GM 地址或让 AIV0 进入下一 GMM1/激活阶段。
+    if (pendingReady) {
+        auto readyCoord = scheduler.GetBlockCoord(pendingLoopIdx);
+        PublishGmm2TileReady(gmmAddrInfo, Get<M_VALUE>(readyCoord));
+    }
+#endif
 }
 
 // 根据 GM 地址建立执行资源，并执行通用 GMM2 阶段。
@@ -683,7 +781,7 @@ __aicore__ inline void UpdateMoeExpertGmm2GlobalBuffer(const GmmExecutionConfig&
             CalcMteRingPhysicalRow(state.paddedTokenStartIndex + rowOffsetInExpert, gmmConfig.ring.rows) :
             globalTokenStartIndex;
     uint32_t expertMGroupOffset = rowOffsetInExpert / L1_TILE_M_256;
-#ifndef MEGA_MOE_ARCH92_DEVICE
+#ifdef MEGA_MOE_ARCH35_DEVICE
     gmmAddrInfo.gmm2LogicalPaddedRow = state.paddedTokenStartIndex + rowOffsetInExpert;
 #endif
     // 激活输入按自身循环容量读取；Combine 去重时结果按紧凑逻辑行全量保存。
