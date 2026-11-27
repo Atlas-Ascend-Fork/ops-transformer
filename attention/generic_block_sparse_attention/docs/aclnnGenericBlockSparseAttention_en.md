@@ -205,7 +205,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
       <td>kDequantScaleOptional</td>
       <td>Input</td>
       <td>Dequantization scaling factor of key.</td>
-      <td>INT8 quantization (quantType=7) requires this scale as a contiguous, positive, finite FLOAT32 Tensor. INT8 shape: PA_BBND/PA_BNBD: [numBlocks,kvHeadNum,128]; TND: [kvHeadNum,Tkv]; BSND/BNSD: [B,kvHeadNum,Sk]. For A8C8 (quantType=6), an E8M0 scale is required; see the A8C8 quantization contract for its shape. For quantType=0/5, pass nullptr.<br>For A8C4 (quantType=8), pass an independent BFLOAT16 K scale, one per token, KV head and 16 D elements. A4C4 (quantType=4) requires FLOAT8_E8M0; see the <a href="#a4c4quanttype4">A4C4</a> scale shapes.</td>
+      <td>INT8 quantization (quantType=7) requires this scale as a positive, finite FLOAT32 Tensor. For PA_BBND/PA_BNBD only the physical-page axis (the first axis) may be strided while the inner axes stay contiguous; TND/BSND/BNSD require contiguous storage. INT8 shape: PA_BBND/PA_BNBD: [numBlocks,kvHeadNum,128]; TND: [kvHeadNum,Tkv]; BSND/BNSD: [B,kvHeadNum,Sk]. For A8C8 (quantType=6), an E8M0 scale is required; see the A8C8 quantization contract for its shape. For quantType=0/5, pass nullptr.<br>For A8C4 (quantType=8), pass an independent BFLOAT16 K scale, one per token, KV head and 16 D elements. A4C4 (quantType=4) requires FLOAT8_E8M0; see the <a href="#a4c4quanttype4">A4C4</a> scale shapes.</td>
       <td>FLOAT32, FLOAT8_E8M0, BFLOAT16 (A8C4), FLOAT8_E8M0 (A4C4)</td>
       <td>ND</td>
       <td>INT8: PA_BBND/PA_BNBD: [numBlocks,kvHeadNum,128]; TND: [kvHeadNum,Tkv]; BSND/BNSD: [B,kvHeadNum,Sk]; A8C8: see quantization contract A4C4: <a href="#a4c4quanttype4">A4C4</a></td>
@@ -215,7 +215,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
       <td>vDequantScaleOptional</td>
       <td>Input</td>
       <td>Dequantization scaling factor of value.</td>
-      <td>INT8 quantization (quantType=7) requires this scale as a contiguous, positive, finite FLOAT32 Tensor. INT8 shape: [kvHeadNum,D]. For A8C8 (quantType=6), an E8M0 scale is required; see the A8C8 quantization contract for its shape. For quantType=0/5, pass nullptr.<br>For A8C4 (quantType=8), pass an independent BFLOAT16 V scale, using the same layout as the K scale. A4C4 (quantType=4) requires FLOAT8_E8M0; see the <a href="#a4c4quanttype4">A4C4</a> scale shapes.</td>
+      <td>INT8 quantization (quantType=7) requires this scale as a positive, finite FLOAT32 Tensor. For PA layouts only the KV-head axis (the first axis) may be strided while the remaining axes stay contiguous; non-PA layouts require contiguous storage. INT8 shape: [kvHeadNum,D]. For A8C8 (quantType=6), an E8M0 scale is required; see the A8C8 quantization contract for its shape. For quantType=0/5, pass nullptr.<br>For A8C4 (quantType=8), pass an independent BFLOAT16 V scale, using the same layout as the K scale. A4C4 (quantType=4) requires FLOAT8_E8M0; see the <a href="#a4c4quanttype4">A4C4</a> scale shapes.</td>
       <td>FLOAT32, FLOAT8_E8M0, BFLOAT16 (A8C4), FLOAT8_E8M0 (A4C4)</td>
       <td>ND</td>
       <td>INT8: [kvHeadNum,D]; A8C8: see quantization contract A4C4: <a href="#a4c4quanttype4">A4C4</a></td>
@@ -268,11 +268,12 @@ aclnnStatus aclnnGenericBlockSparseAttention(
       <td>sequsedQOptional</td>
       <td>Input</td>
       <td>Actual sequence length of the query in each batch.</td>
-      <td>        <ul>
-          <li>If the actual length is not specified, nullptr can be passed in, indicating that the storage length is the same as that obtained by difference from cuSeqLengthsQOptional.</li>
-          <li>If passed, the shape is (B,), and each element must be ≥0 and ≤ the storage length of cu in the corresponding batch. See <a href="#other-constraints">Other Constraints</a> for the dual-length semantics when coexisting with cu.</li>
+      <td>
+        <ul>
+          <li>If the actual length is not specified, nullptr can be passed in, indicating that the storage length is the same as that obtained by difference from cuSeqLengthsQOptional. BSND/BNSD must pass sequsedQ and does not use the cu difference.</li>
+          <li>If passed, the shape is (B,), and each element must be ≥0 and ≤ the storage length of cu in the corresponding batch for TND, or ≤Sq for BSND/BNSD. See <a href="#other-constraints">Other Constraints</a> for the dual-length semantics when coexisting with cu.</li>
         </ul>
-       For INT8 (quantType=7), TND Q requires nullptr; BSND/BNSD still require this input.</td>
+      </td>
       <td>INT32</td>
       <td>ND</td>
       <td>(B,)</td>
@@ -282,7 +283,8 @@ aclnnStatus aclnnGenericBlockSparseAttention(
       <td>sequsedKvOptional</td>
       <td>Input</td>
       <td>Actual sequence length of KV in each batch.</td>
-      <td>        <ul>
+      <td>
+        <ul>
           <li>Must be passed in when layoutKv is PA_BBND/PA_BNBD, with shape (B,); each element must be ≥ 0.</li>
           <li>When layoutKv is TND: if the actual length is not specified, nullptr can be passed in, indicating that the storage length is the same as that obtained by difference from cuSeqLengthsKvOptional; if passed in, shape is (B,) and each element must be ≥ 0 and ≤ the storage length of cu in the corresponding batch. For the dual-length semantics when coexisting with cu, see <a href="#other-constraints">Other Constraints</a>.</li>
         </ul>
@@ -834,7 +836,7 @@ For INT8, `S=scaleValue*(Q_int8*K_int8^T)*q_scale*k_scale` and `E=exp(S-row_max)
 
 For INT8 shapes, qHeadNum denotes the Q head count, kvHeadNum the KV head count, Tq/Tkv the total stored Q/KV token counts, and Sq/Sk the per-batch Q/KV storage capacities.
 
-INT8 full quantization on <term>Atlas A2 products</term> and <term>Atlas A3 products</term> uses `quantType=7`: Q/K/V are INT8 and the output is FLOAT16 or BFLOAT16. All four scales must be FLOAT32, contiguous, finite, and positive. Q scale shapes are TND `[Tq,qHeadNum]`, BSND `[B,Sq,qHeadNum]`, and BNSD `[B,qHeadNum,Sq]`; K scale shapes are PA `[numBlocks,kvHeadNum,128]`, TND `[kvHeadNum,Tkv]`, and BSND/BNSD `[B,kvHeadNum,Sk]`; V scale is `[kvHeadNum,D]` and P scale is `[1]`. `softmaxPrecision=0` is required; optional FLOAT32 LSE is supported. Value 5 remains reserved for FP8 on <term>Ascend 950PR&950DT products</term> and is rejected for INT8 inputs.
+INT8 full quantization on <term>Atlas A2 products</term> and <term>Atlas A3 products</term> uses `quantType=7`: Q/K/V are INT8 and the output is FLOAT16 or BFLOAT16. All four scales must be finite, positive FLOAT32 tensors. Under PA_BBND/PA_BNBD, the K scale page stride (≥ kvHeadNum × 128) and the V scale head stride (≥ D) are read independently, with contiguous inner axes; all other layouts and scales must be contiguous. Q scale shapes are TND `[Tq,qHeadNum]`, BSND `[B,Sq,qHeadNum]`, and BNSD `[B,qHeadNum,Sq]`; K scale shapes are PA `[numBlocks,kvHeadNum,128]`, TND `[kvHeadNum,Tkv]`, and BSND/BNSD `[B,kvHeadNum,Sk]`; V scale is `[kvHeadNum,D]` and P scale is `[1]`. `softmaxPrecision=0` is required; optional FLOAT32 LSE is supported. Value 5 remains reserved for FP8 on <term>Ascend 950PR&950DT products</term> and is rejected for INT8 inputs.
 
 The following quantization configurations are described by the Ascend 950PR&950DT products (Ascend 950PR&950DT products) generation; see the mode-specific constraints for A8C8 (quantType=6) and A8C4 (quantType=8).
 

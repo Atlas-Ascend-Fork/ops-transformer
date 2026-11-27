@@ -171,7 +171,7 @@ cann_ops_transformer.generic_block_sparse_attention(
 | block_shape | list[int] | Required | Sparse block shape `[block_x, block_y]`. A4C4 uses [1,Y], Y in {4,8,16,32,64,128}. | int64 | - | Length of 2 |
 | cu_seqlens_q | Tensor | Conditional | Required for TND Q. Cumulative sequence lengths, used to process variable-length sequences. The first element must be 0. | int64 | ND | (B+1,) |
 | cu_seqlens_kv | Tensor | Conditional | Required for TND KV. Pass `None` for paged KV. Cumulative sequence lengths, used to process variable-length sequences. The first element must be 0. | int64 | ND | (B+1,) |
-| seqused_q | Tensor | Conditional | Required for BSND/BNSD. For TND Q, this is optional with non-quantized inputs or `quant_mode=8`. Pass `None` for INT8 TND. | int32 | ND | (B,) |
+| seqused_q | Tensor | Conditional | Required for BSND/BNSD. For TND Q, this is optional. Specifies the actual Q length of each batch. | int32 | ND | (B,) |
 | seqused_kv | Tensor | Conditional | Actual KV length for each batch. Required for BSND, BNSD, PA_BBND, and PA_BNBD KV. Optional for TND KV. | int32 | ND | (B,) |
 | max_seqlen_q | int | Optional | Specifies the upper limit of the query q sequence length. | int32 | - | - |
 | max_seqlen_kv | int | Optional | Specifies the upper limit of the key k and value v sequence lengths. | int32 | - | - |
@@ -201,12 +201,12 @@ D in the table denotes the logical head dimension. A4C4 Torch tensors use a phys
 | metadata | Tensor | Required | Task split result from `generic_block_sparse_attention_metadata` with matching layout, inputs, and attributes. | int32 | ND | (1024,) |
 | attn_mask | Tensor | Optional | Must be None when mask_mode=0/1; must be INT32 exactMask when mask_mode=3 (Union) | bool/int32 | ND | Union: (KV_N, G, U×block_y) |
 | q_dequant_scale | Tensor | Required for INT8; conditional for other modes; required for A4C4 | query dequantization scale factor; INT8 (quant_mode=7) requires a contiguous, positive, finite float32 Tensor. A4C4 (mode 4) requires E8M0 or uint8 encoding. | float32/float8_e8m0/uint8 | ND | INT8: TND: [Q_T,Q_N]; BSND: [B,Q_S,Q_N]; BNSD: [B,Q_N,Q_S] <br>A4C4: [scale shapes](#a4c4quantmode4). |
-| k_dequant_scale | Tensor | Required for INT8 and `quant_mode=8`; required for A4C4 | key dequantization scale factor; INT8 (quant_mode=7) requires a contiguous, positive, finite float32 Tensor. A4C4 (mode 4) requires E8M0 or uint8 encoding. | float32/bfloat16/uint8 | ND | INT8: PA_BBND/PA_BNBD: [num_blocks,KV_N,128]; TND: [KV_N,KV_T]; BSND/BNSD: [B,KV_N,KV_S] <br>For `quant_mode=8`, use the logical K/V shape with D replaced by 8. <br>A4C4: [scale shapes](#a4c4quantmode4). |
-| v_dequant_scale | Tensor | Required for INT8 and `quant_mode=8`; required for A4C4 | value dequantization scale factor; INT8 (quant_mode=7) requires a contiguous, positive, finite float32 Tensor. A4C4 (mode 4) requires E8M0 or uint8 encoding. | float32/bfloat16/uint8 | ND | INT8: [KV_N,D] <br>For `quant_mode=8`, use the logical K/V shape with D replaced by 8. <br>A4C4: [scale shapes](#a4c4quantmode4). |
+| k_dequant_scale | Tensor | Required for INT8 and `quant_mode=8`; required for A4C4 | key dequantization scale factor; INT8 (quant_mode=7) requires a positive, finite float32 Tensor: in PA_BBND/PA_BNBD only the physical-page axis (the first axis) may be strided with contiguous inner axes, other layouts require contiguous storage. A4C4 (mode 4) requires E8M0 or uint8 encoding. | float32/bfloat16/uint8 | ND | INT8: PA_BBND/PA_BNBD: [num_blocks,KV_N,128]; TND: [KV_N,KV_T]; BSND/BNSD: [B,KV_N,KV_S] <br>For `quant_mode=8`, use the logical K/V shape with D replaced by 8. <br>A4C4: [scale shapes](#a4c4quantmode4). |
+| v_dequant_scale | Tensor | Required for INT8 and `quant_mode=8`; required for A4C4 | value dequantization scale factor; INT8 (quant_mode=7) requires a positive, finite float32 Tensor: in PA layouts only the KV-head axis (the first axis) may be strided with the remaining axes contiguous, non-PA layouts require contiguous storage. A4C4 (mode 4) requires E8M0 or uint8 encoding. | float32/bfloat16/uint8 | ND | INT8: [KV_N,D] <br>For `quant_mode=8`, use the logical K/V shape with D replaced by 8. <br>A4C4: [scale shapes](#a4c4quantmode4). |
 | p_quant_scale | Tensor | Required for INT8; conditional for other modes |P quantization scale factor; INT8 (quant_mode=7) requires a contiguous, positive, finite float32 Tensor | float32 | ND | INT8: [1] |
 | cu_seqlens_q | Tensor | Conditional | Required for TND Q. Cumulative sequence length, used to process variable-length sequences. The first element must be 0 | int64 | ND | (B+1,) |
 | cu_seqlens_kv | Tensor | Conditional | Required for TND KV. Pass `None` for paged KV. Cumulative sequence length, used to process variable-length sequences. The first element must be 0 | int64 | ND | (B+1,) |
-| seqused_q | Tensor | Conditional | Required for BSND/BNSD. For TND Q, this is optional with non-quantized inputs or `quant_mode=8`. Pass `None` for INT8 TND. | int32 | ND | (B,) |
+| seqused_q | Tensor | Conditional | Required for BSND/BNSD. For TND Q, this is optional. Specifies the actual Q length of each batch. | int32 | ND | (B,) |
 | seqused_kv | Tensor | Conditional | Actual KV length for each batch. Required for BSND, BNSD, PA_BBND, and PA_BNBD KV. Optional for TND KV. | int32 | ND | (B,) |
 | block_table | Tensor | Optional | Block index mapping used in Paged Attention computation | int32 | ND | (B, max_num_blocks_per_seq) |
 | layout_q | string | Optional | Defines the layout format of the input query tensor | string | - | - |
@@ -246,7 +246,7 @@ D in the table denotes the logical head dimension. A4C4 Torch tensors use a phys
 
 ## Constraints
 
-- INT8 quantization on <term>Atlas A2 products</term> and <term>Atlas A3 products</term> (quant_mode=7): D is 1..256 and the GQA group size is 1..128. Q supports TND, BSND, and BNSD; KV uses the same nonpaged layout as Q or PA_BBND/PA_BNBD with 128-token pages. block_shape=[1,Y], with Y in {1,2,4,8,16,32,64,128}; mask_mode=0/1, residual_block_mode=0/1, and softmax_precision=0. For TND Q, `seqused_q` must be `None`. Metadata and attention must use matching inputs and attributes.
+- INT8 quantization on <term>Atlas A2 products</term> and <term>Atlas A3 products</term> (quant_mode=7): D is 1..256 and the GQA group size is 1..128. Q supports TND, BSND, and BNSD; KV uses the same nonpaged layout as Q or PA_BBND/PA_BNBD with 128-token pages. In paged layouts K, V, K scale, and V scale may each use an independent first-axis stride while the inner axes stay contiguous; dense layouts require contiguous KV scales. block_shape=[1,Y], with Y in {1,2,4,8,16,32,64,128}; mask_mode=0/1, residual_block_mode=0/1, and softmax_precision=0. For TND Q, optional `seqused_q` specifies the valid token count in each storage segment. Metadata and attention must use matching inputs and attributes.
 
 - Parameters cu_seqlens_q, cu_seqlens_kv, seqused_q, seqused_kv, sparse_block_idx, sparse_block_count, and block_table are tensors. The operator cannot obtain the specific values of these tensors during the Tiling phase. Therefore, the tiling side does not validate the values, and users must ensure their correctness. If invalid values are passed for the preceding parameters, undefined behavior may occur (such as accuracy issues or program crashes caused by invalid memory access).
 - The input parameters of generic_block_sparse_attention_metadata and generic_block_sparse_attention must be consistent during the call. The operator is called in two phases through two APIs and cannot perform the check itself. Customers must ensure correctness. If the parameters passed to the APIs are inconsistent, undefined behavior may occur (such as accuracy issues or program crashes caused by invalid memory access).
@@ -669,7 +669,7 @@ For details about the mask_mode parameter, see "mask_mode Enumeration".
                     <li>Values in seqused_kv must be less than or equal to KV_S.</li>
                 </ul>
             </td>
-            <td rowspan="2">Optional parameter</td>
+            <td rowspan="2">Required for BSND/BNSD; optional for TND</td>
             <td rowspan="4">None</td>
             <td rowspan="4">None</td>
         </tr>

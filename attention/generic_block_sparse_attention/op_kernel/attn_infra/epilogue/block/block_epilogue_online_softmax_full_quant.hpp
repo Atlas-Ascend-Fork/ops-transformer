@@ -32,7 +32,7 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
 
     template <bool isPaged, class Source>
     __aicore__ inline bool PrepareHeadKScaleCache(AscendC::GlobalTensor<float> scales, const Source& source,
-                                                  uint32_t batch, uint32_t heads, uint32_t head, uint32_t kvLength,
+                                                  uint32_t batch, uint64_t pageStride, uint32_t head, uint32_t kvLength,
                                                   uint64_t kvStart, uint64_t totalKvTokens, uint32_t blockY,
                                                   bool willReuse)
     {
@@ -67,8 +67,8 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
                     const uint32_t remain = kvLength - page * FullQuantLayout::PAGE_TOKENS;
                     const uint32_t length =
                         remain < FullQuantLayout::PAGE_TOKENS ? remain : FullQuantLayout::PAGE_TOKENS;
-                    const uint64_t src = (static_cast<uint64_t>(source.PhysicalPage(page)) * heads + head) *
-                                         FullQuantLayout::PAGE_TOKENS;
+                    const uint64_t src = static_cast<uint64_t>(source.PhysicalPage(page)) * pageStride +
+                                         static_cast<uint64_t>(head) * FullQuantLayout::PAGE_TOKENS;
                     AscendC::DataCopyExtParams copy{1, length * uint32_t{sizeof(float)}, 0, 0, 0};
                     AscendC::DataCopyPad(cache[page * FullQuantLayout::PAGE_TOKENS], scales[src], copy, padding);
                 }
@@ -157,8 +157,9 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
     }
 
     template <bool isPaged>
-    __aicore__ inline void PrefetchPageKScale(AscendC::GlobalTensor<float> scales, const Tile& tile, uint32_t heads,
-                                              uint32_t head, uint32_t round, uint64_t kvStart, uint64_t total)
+    __aicore__ inline void PrefetchPageKScale(AscendC::GlobalTensor<float> scales, const Tile& tile,
+                                              uint64_t pageStride, uint32_t head, uint32_t round, uint64_t kvStart,
+                                              uint64_t total)
     {
         auto dst = state.template Ub<float>(BufferLayout::K_SCALE + (round % FullQuantLayout::DOUBLE_BUFFER) *
                                                                         FullQuantLayout::KV_TILE * sizeof(float));
@@ -166,7 +167,7 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
         for (uint32_t page = 0; page < FullQuantLayout::PAGES_PER_TILE; ++page) {
             const auto& part = tile.pages[page];
             if (part.validTokens != 0U) {
-                auto offset = ScaleOffset<isPaged>(part.sourceToken, heads, head, kvStart, total);
+                auto offset = ScaleOffset<isPaged>(part.sourceToken, pageStride, head, kvStart, total);
                 CopyScaleSpan(dst[page * FullQuantLayout::PAGE_TOKENS], scales[offset], part.validTokens);
                 if (part.validTokens % 32U != 0U) {
                     const uint32_t afterDma = (part.validTokens + 7U) / 8U * 8U;
@@ -181,7 +182,7 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
     }
 
     template <bool isPaged, class PlanType>
-    __aicore__ inline void PrefetchKScale(AscendC::GlobalTensor<float> scales, const Tile& tile, uint32_t heads,
+    __aicore__ inline void PrefetchKScale(AscendC::GlobalTensor<float> scales, const Tile& tile, uint64_t pageStride,
                                           uint32_t head, uint32_t round, uint64_t kvStart, uint64_t totalKvTokens,
                                           uint32_t blockY, const PlanType& plan)
     {
@@ -189,7 +190,7 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
             return;
         }
         if (blockY >= 4U) {
-            PrefetchExactKScale<isPaged>(scales, tile, heads, head, round, kvStart, totalKvTokens, blockY, plan);
+            PrefetchExactKScale<isPaged>(scales, tile, pageStride, head, round, kvStart, totalKvTokens, blockY, plan);
             return;
         }
         const uint32_t slot = round % FullQuantLayout::DOUBLE_BUFFER;
@@ -214,7 +215,8 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
                 continue;
             }
             if (part.contiguous) {
-                const uint64_t offset = ScaleOffset<isPaged>(part.sourceToken, heads, head, kvStart, totalKvTokens);
+                const uint64_t offset =
+                    ScaleOffset<isPaged>(part.sourceToken, pageStride, head, kvStart, totalKvTokens);
                 AscendC::DataCopyExtParams copy{1, part.validTokens * uint32_t{sizeof(float)}, 0, 0, 0};
                 AscendC::DataCopyPadExtParams<float> padding{false, 0, 0, 0};
                 AscendC::DataCopyPad(dst[chunk * FullQuantLayout::PAGE_TOKENS], scales[offset], copy, padding);
@@ -239,7 +241,7 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
                     if (window != cachedWindow) {
                         cachedWindow = window;
                         windowSlot = windows++ * windowTokens;
-                        const uint64_t offset = ScaleOffset<isPaged>(window, heads, head, kvStart, totalKvTokens);
+                        const uint64_t offset = ScaleOffset<isPaged>(window, pageStride, head, kvStart, totalKvTokens);
                         uint32_t length = windowTokens;
                         if constexpr (!isPaged) {
                             const uint64_t available = totalKvTokens - kvStart - window;
@@ -383,9 +385,9 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
     }
 
     template <bool isPaged, class PlanType>
-    __aicore__ inline void PrefetchExactKScale(AscendC::GlobalTensor<float> scales, const Tile& tile, uint32_t heads,
-                                               uint32_t head, uint32_t round, uint64_t kvStart, uint64_t totalKvTokens,
-                                               uint32_t blockY, const PlanType& plan)
+    __aicore__ inline void PrefetchExactKScale(AscendC::GlobalTensor<float> scales, const Tile& tile,
+                                               uint64_t pageStride, uint32_t head, uint32_t round, uint64_t kvStart,
+                                               uint64_t totalKvTokens, uint32_t blockY, const PlanType& plan)
     {
         auto dst = state.template Ub<float>(BufferLayout::K_SCALE + (round % FullQuantLayout::DOUBLE_BUFFER) *
                                                                         FullQuantLayout::KV_TILE * sizeof(float));
@@ -409,7 +411,8 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
                 continue;
             }
             if (part.contiguous) {
-                const uint64_t source = ScaleOffset<isPaged>(part.sourceToken, heads, head, kvStart, totalKvTokens);
+                const uint64_t source =
+                    ScaleOffset<isPaged>(part.sourceToken, pageStride, head, kvStart, totalKvTokens);
                 CopyScaleSpan(dst[chunk * FullQuantLayout::PAGE_TOKENS], scales[source], part.validTokens);
                 continue;
             }
@@ -418,7 +421,7 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
             uint32_t packed = 0U;
             for (uint32_t ri = part.planBegin; ri < part.planEnd; ++ri) {
                 const auto run = plan.GetSpan(ri);
-                const uint64_t source = ScaleOffset<isPaged>(run.token, heads, head, kvStart, totalKvTokens);
+                const uint64_t source = ScaleOffset<isPaged>(run.token, pageStride, head, kvStart, totalKvTokens);
                 if (!packFour) {
                     // Full Y>=8 spans and all preceding destination offsets
                     // are multiples of 32 bytes; only the last tail needs pad.
@@ -464,11 +467,11 @@ struct GbsaFullQuantVectorArch22<ElementO, singleRowTile, compactUb, fullPage>::
     }
 
     template <bool isPaged>
-    __aicore__ inline uint64_t ScaleOffset(uint64_t token, uint32_t heads, uint32_t head, uint64_t kvStart,
+    __aicore__ inline uint64_t ScaleOffset(uint64_t token, uint64_t pageStride, uint32_t head, uint64_t kvStart,
                                            uint64_t totalKvTokens)
     {
         if constexpr (isPaged) {
-            return (token / FullQuantLayout::PAGE_TOKENS * heads + head) * FullQuantLayout::PAGE_TOKENS +
+            return token / FullQuantLayout::PAGE_TOKENS * pageStride + head * uint64_t{FullQuantLayout::PAGE_TOKENS} +
                    token % FullQuantLayout::PAGE_TOKENS;
         }
         return static_cast<uint64_t>(head) * totalKvTokens + kvStart + token;

@@ -487,12 +487,22 @@ ge::graphStatus GBSATiling::CheckAttentionOutDtype(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
-// Validate paged key/value: only dim0 may be non-contiguous. Shape-driven, so it
-// covers PA_BBND and PA_BNBD alike.
+// Only dim0 may be non-contiguous, for paged KV and its scales.
 static ge::graphStatus ValidatePagedDim0OnlyNonContig(gert::TilingContext* context, const gert::Stride* stride,
                                                       const gert::Shape& shape, const char* tensorName)
 {
-    if (stride == nullptr || stride->GetDimNum() != shape.GetDimNum()) {
+    if (stride == nullptr || stride->GetDimNum() == 0) {
+        return ge::GRAPH_SUCCESS; // No stride descriptor: the tensor is described as contiguous.
+    }
+    if (stride->GetDimNum() != shape.GetDimNum()) {
+        OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
+            context->GetNodeName(), tensorName,
+            ("strideRank=" + std::to_string(stride->GetDimNum()) + ", shapeRank=" + std::to_string(shape.GetDimNum()))
+                .c_str(),
+            "an explicit stride descriptor must match the logical shape rank");
+        return ge::GRAPH_FAILED;
+    }
+    if (shape.GetDimNum() <= 1U) {
         return ge::GRAPH_SUCCESS;
     }
 
@@ -1175,26 +1185,78 @@ ge::graphStatus GBSATiling::CheckMetadata(gert::TilingContext* context)
     return ge::GRAPH_SUCCESS;
 }
 
+// Paged ACLNN views only flatten the storage extent: validate the logical (origin) shape.
 static ge::graphStatus CheckInt8Scale(gert::TilingContext* context, uint32_t index,
                                       std::initializer_list<int64_t> dimensions)
 {
     const auto* desc = context->GetOptionalInputDesc(index);
     const auto* shape = context->GetOptionalInputShape(index);
     if (desc == nullptr || shape == nullptr || desc->GetDataType() != ge::DT_FLOAT ||
-        shape->GetStorageShape().GetDimNum() != dimensions.size()) {
+        shape->GetOriginShape().GetDimNum() != dimensions.size()) {
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "INT8 scale", std::to_string(index).c_str(),
                                               "all four scale tensors must be provided as FP32 with the required rank");
         return ge::GRAPH_FAILED;
     }
     uint32_t axis = 0;
     for (const int64_t dimension : dimensions) {
-        if (shape->GetStorageShape().GetDim(axis++) != dimension) {
+        if (shape->GetOriginShape().GetDim(axis++) != dimension) {
             OP_LOGE_FOR_INVALID_SHAPEDIMS_WITH_REASON(
                 context->GetNodeName(), "INT8 scale", std::to_string(index).c_str(),
                 "scale shape must match the token/head, channel or per-tensor contract");
             return ge::GRAPH_FAILED;
         }
     }
+    return ge::GRAPH_SUCCESS;
+}
+
+// Paged scale pitch: K per page, V per head; non-paged scales must be compact.
+ge::graphStatus GBSATiling::ParseInt8KvScaleStride0(gert::TilingContext* context, uint32_t index)
+{
+    const bool isKeyScale = index == K_DEQUANT_SCALE_INDEX;
+    const char* tensorName = isKeyScale ? "kDequantScale" : "vDequantScale";
+    uint64_t& stride0 = isKeyScale ? kScaleStride0_ : vScaleStride0_;
+    const auto* shape = context->GetOptionalInputShape(index);
+    if (shape == nullptr) {
+        OP_LOGE_FOR_INVALID_ARGUMENT_WITH_REASON(context->GetNodeName(), tensorName, "shape is nullptr");
+        return ge::GRAPH_FAILED;
+    }
+    const auto& scaleShape = shape->GetOriginShape();
+    uint64_t compactStride = 1U;
+    for (size_t axis = 1U; axis < scaleShape.GetDimNum(); ++axis) {
+        compactStride *= static_cast<uint64_t>(scaleShape.GetDim(axis));
+    }
+
+    const auto* stride = context->GetOptionalInputStride(index);
+    const bool hasStride = stride != nullptr && stride->GetDimNum() != 0U;
+    if (hasStride && ValidatePagedDim0OnlyNonContig(context, stride, scaleShape, tensorName) != ge::GRAPH_SUCCESS) {
+        return ge::GRAPH_FAILED;
+    }
+    uint64_t actualStride = compactStride;
+    if (hasStride && scaleShape.GetDim(0) > 1) {
+        const int64_t dim0Stride = stride->GetStride(0);
+        if (dim0Stride <= 0) {
+            OP_LOGE_FOR_INVALID_STRIDE(context->GetNodeName(), tensorName, std::to_string(dim0Stride).c_str(),
+                                       "a positive first-axis stride");
+            return ge::GRAPH_FAILED;
+        }
+        actualStride = static_cast<uint64_t>(dim0Stride);
+    }
+    if (isPaged_) {
+        if (actualStride < compactStride) {
+            OP_LOGE_FOR_INVALID_STRIDE(
+                context->GetNodeName(), tensorName, std::to_string(actualStride).c_str(),
+                ("at least " + std::to_string(compactStride) + " elements, one page of K scale or head of V scale")
+                    .c_str());
+            return ge::GRAPH_FAILED;
+        }
+    } else if (actualStride != compactStride) {
+        OP_LOGE_FOR_INVALID_STRIDE(context->GetNodeName(), tensorName, std::to_string(actualStride).c_str(),
+                                   (std::to_string(compactStride) + " elements; non-paged KV scales must be "
+                                                                    "contiguous")
+                                       .c_str());
+        return ge::GRAPH_FAILED;
+    }
+    stride0 = actualStride;
     return ge::GRAPH_SUCCESS;
 }
 
@@ -1244,6 +1306,11 @@ ge::graphStatus GBSATiling::CheckReservedOptionalInputs(gert::TilingContext* con
         if (queryScaleStatus != ge::GRAPH_SUCCESS || keyScaleStatus != ge::GRAPH_SUCCESS ||
             CheckInt8Scale(context, V_DEQUANT_SCALE_INDEX, {kvHeads_, embeddingSize_}) != ge::GRAPH_SUCCESS ||
             CheckInt8Scale(context, P_QUANT_SCALE_INDEX, {1}) != ge::GRAPH_SUCCESS) {
+            return ge::GRAPH_FAILED;
+        }
+        // Publish the KV scale pitches; both default to the compact first axis.
+        if (ParseInt8KvScaleStride0(context, K_DEQUANT_SCALE_INDEX) != ge::GRAPH_SUCCESS ||
+            ParseInt8KvScaleStride0(context, V_DEQUANT_SCALE_INDEX) != ge::GRAPH_SUCCESS) {
             return ge::GRAPH_FAILED;
         }
         return ge::GRAPH_SUCCESS;
@@ -1522,11 +1589,6 @@ ge::graphStatus GBSATiling::CheckInt8Config(gert::TilingContext* context)
         OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "softmaxPrecision",
                                               std::to_string(softmaxPrecision_).c_str(),
                                               "INT8 quantization requires softmaxPrecision=0 (FP32 Softmax)");
-        return ge::GRAPH_FAILED;
-    }
-    if (layoutQ_ == "TND" && context->GetOptionalInputTensor(SEQUSED_Q_INDEX) != nullptr) {
-        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "sequsedQ", "provided",
-                                              "INT8 quantization with TND Q requires sequsedQ=nullptr");
         return ge::GRAPH_FAILED;
     }
     // Reuse the FP16 metadata split-K schedule and FP32 partial-output merge.

@@ -82,7 +82,7 @@ struct GenericBlockSparseAttentionTilingData {
     // Union packed O/LSE scratch when multi-token GQA rows are non-contiguous in GM.
     uint64_t unionIoPackOffset;
     uint32_t unionIoPackORowStride;
-    // A8C4 paged BF16 scale strides in elements.
+    // KV scale first-axis stride in elements (INT8 paged: K per page, V per head).
     uint64_t kScaleStride0;
     uint64_t vScaleStride0;
     float log2Cx;

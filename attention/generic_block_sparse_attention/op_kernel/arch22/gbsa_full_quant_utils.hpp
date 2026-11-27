@@ -341,6 +341,11 @@ public:
             }
             return;
         }
+        if constexpr (isPaged) {
+            if (WriteContiguousY4Record(part, kPageStride, vPageStride, heads, head, kvStart, emit)) {
+                return;
+            }
+        }
         KvCopyRecord pending{};
         uint64_t pendingSpan = 0;
         const uint64_t tokenStride = TokenStride(heads);
@@ -452,6 +457,46 @@ public:
     }
 
 private:
+    // PA with blockY == 4: one full page of consecutive blocks shares a single page-table entry.
+    template <class Emit>
+    __aicore__ inline bool WriteContiguousY4Record(const Page& part, uint64_t kPageStride, uint64_t vPageStride,
+                                                   uint32_t heads, uint32_t head, uint64_t kvStart, Emit emit) const
+    {
+        const uint32_t blockCount = part.endIndex - part.firstIndex;
+        if (blockY_ != 4U || blockCount == 0U || part.validTokens != blockCount * blockY_) {
+            return false;
+        }
+        if constexpr (hasResidualBlock) {
+            if (part.endIndex > explicitCount_) {
+                return false;
+            }
+        }
+        const int32_t firstBlock = indices_.GetValue(part.firstIndex);
+        const int32_t lastBlock = indices_.GetValue(part.endIndex - 1U);
+        // Sparse block IDs are strictly increasing, so the endpoints prove contiguity.
+        if (firstBlock < 0 || lastBlock < firstBlock ||
+            static_cast<uint32_t>(lastBlock - firstBlock) + 1U != blockCount) {
+            return false;
+        }
+        const uint64_t firstToken = static_cast<uint64_t>(firstBlock) * blockY_;
+        const uint64_t lastToken = static_cast<uint64_t>(lastBlock) * blockY_;
+        const uint64_t logicalPage = firstToken / FullQuantLayout::PAGE_TOKENS;
+        if (logicalPage >= static_cast<uint64_t>(maxPages_) ||
+            lastToken / FullQuantLayout::PAGE_TOKENS != logicalPage) {
+            return false;
+        }
+        const uint64_t physicalPage = table_.GetValue(static_cast<uint32_t>(logicalPage));
+        const uint64_t sourceToken =
+            physicalPage * FullQuantLayout::PAGE_TOKENS + firstToken % FullQuantLayout::PAGE_TOKENS;
+        KvCopyRecord record{};
+        record.key = KvOffset(sourceToken, kPageStride, heads, head, kvStart);
+        record.value = KvOffset(sourceToken, vPageStride, heads, head, kvStart);
+        record.rows = static_cast<uint16_t>(part.validTokens);
+        record.ndNum = 1U;
+        emit(record);
+        return true;
+    }
+
     __aicore__ inline void ReadFullBlock(int32_t id, SparseRun& run) const
     {
         const uint64_t token = static_cast<uint64_t>(id) * blockY_;

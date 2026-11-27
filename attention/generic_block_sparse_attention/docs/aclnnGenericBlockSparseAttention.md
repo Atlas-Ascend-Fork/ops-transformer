@@ -204,7 +204,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
       <td>kDequantScaleOptional</td>
       <td>输入</td>
       <td>key的反量化缩放因子。</td>
-      <td>INT8量化（quantType=7）必传，要求FLOAT32、连续存储、有限且大于0。INT8场景：PA_BBND/PA_BNBD：[numBlocks,kvHeadNum,128]；TND：[kvHeadNum,Tkv]；BSND/BNSD：[B,kvHeadNum,Sk]。A8C8（quantType=6）须传E8M0，shape见A8C8量化契约；quantType=0/5传入nullptr。<br>A8C4（quantType=8）须传独立的 BFLOAT16 K scale，每 token、每 KV head、每 16 个 D 元素一份。A4C4（quantType=4）必传FLOAT8_E8M0，shape见<a href="#a4c4quanttype4">A4C4</a>量化参数说明。</td>
+      <td>INT8量化（quantType=7）必传，要求FLOAT32、有限且大于0。PA_BBND/PA_BNBD下仅物理页轴（首轴）允许非连续，页内各轴须连续；TND/BSND/BNSD须连续存储。INT8场景：PA_BBND/PA_BNBD：[numBlocks,kvHeadNum,128]；TND：[kvHeadNum,Tkv]；BSND/BNSD：[B,kvHeadNum,Sk]。A8C8（quantType=6）须传E8M0，shape见A8C8量化契约；quantType=0/5传入nullptr。<br>A8C4（quantType=8）须传独立的 BFLOAT16 K scale，每 token、每 KV head、每 16 个 D 元素一份。A4C4（quantType=4）必传FLOAT8_E8M0，shape见<a href="#a4c4quanttype4">A4C4</a>量化参数说明。</td>
       <td>FLOAT32（INT8）或FLOAT8_E8M0（A8C8/A4C4）或 BFLOAT16（A8C4）</td>
       <td>ND</td>
       <td>INT8：PA_BBND/PA_BNBD：[numBlocks,kvHeadNum,128]；TND：[kvHeadNum,Tkv]；BSND/BNSD：[B,kvHeadNum,Sk]；A8C8见量化契约 A4C4: <a href="#a4c4quanttype4">A4C4</a></td>
@@ -214,7 +214,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
       <td>vDequantScaleOptional</td>
       <td>输入</td>
       <td>value的反量化缩放因子。</td>
-      <td>INT8量化（quantType=7）必传，要求FLOAT32、连续存储、有限且大于0。INT8场景：[kvHeadNum,D]。A8C8（quantType=6）须传E8M0，shape见A8C8量化契约；quantType=0/5传入nullptr。<br>A8C4（quantType=8）须传独立的 BFLOAT16 V scale，布局与 K scale 相同。A4C4（quantType=4）必传FLOAT8_E8M0，shape见<a href="#a4c4quanttype4">A4C4</a>量化参数说明。</td>
+      <td>INT8量化（quantType=7）必传，要求FLOAT32、有限且大于0。PA布局下仅KV head轴（首轴）允许非连续，其余轴须连续；非PA布局须连续存储。INT8场景：[kvHeadNum,D]。A8C8（quantType=6）须传E8M0，shape见A8C8量化契约；quantType=0/5传入nullptr。<br>A8C4（quantType=8）须传独立的 BFLOAT16 V scale，布局与 K scale 相同。A4C4（quantType=4）必传FLOAT8_E8M0，shape见<a href="#a4c4quanttype4">A4C4</a>量化参数说明。</td>
       <td>FLOAT32（INT8）或FLOAT8_E8M0（A8C8/A4C4）或 BFLOAT16（A8C4）</td>
       <td>ND</td>
       <td>INT8：[kvHeadNum,D]；A8C8见量化契约 A4C4: <a href="#a4c4quanttype4">A4C4</a></td>
@@ -274,7 +274,7 @@ aclnnStatus aclnnGenericBlockSparseAttention(
           <li>TND下不指定实际长度可传入nullptr，表示与cuSeqLengthsQOptional差分得到的存储长度相同；BSND/BNSD下必须传入sequsedQ，不使用cu差分。</li>
           <li>传入时shape为(B,)，每个元素须≥0；TND下须≤对应batch的cu存储长度，BSND/BNSD下须≤Sq。与cu并存时的双长度语义见<a href="#其他约束">其他约束</a>。</li>
         </ul>
-       INT8（quantType=7）例外：TND Q必须传入nullptr；BSND/BNSD仍为必传。</td>
+      </td>
       <td>INT32</td>
       <td>ND</td>
       <td>(B,)</td>
@@ -827,7 +827,7 @@ PA_BBND/PA_BNBD必须传入非空blockTable。TND/BSND/BNSD必须传入nullptr�
 
 ### 量化相关说明
 
-<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term> INT8全量化使用`quantType=7`，Q/K/V均为INT8，输出为调用方指定的FLOAT16或BFLOAT16。四个scale均必传，数据类型为FLOAT32、连续存储，取值须有限且大于0，不使用zero-point。Tq/Tkv表示Q/KV总token数，qHeadNum/kvHeadNum表示Q/KV head数，Sq/Sk表示单batch的存储容量。
+<term>Atlas A2系列产品</term>和<term>Atlas A3系列产品</term> INT8全量化使用`quantType=7`，Q/K/V均为INT8，输出为调用方指定的FLOAT16或BFLOAT16。四个scale均必传，数据类型为FLOAT32，取值须有限且大于0，不使用zero-point。PA_BBND/PA_BNBD下，K scale按物理页、V scale按KV head独立取首轴步长（分别不小于kvHeadNum×128、D），页内/head内连续；其余布局和scale须连续。Tq/Tkv表示Q/KV总token数，qHeadNum/kvHeadNum表示Q/KV head数，Sq/Sk表示单batch的存储容量。
 
 INT8计算中，`S=scaleValue×(Q_int8×K_int8ᵀ)×q_scale×k_scale`，`E=exp(S−row_max)`；q_scale按Q token/head应用，k_scale按K token/KV head应用。
 
@@ -839,7 +839,7 @@ INT8计算中，`S=scaleValue×(Q_int8×K_int8ᵀ)×q_scale×k_scale`，`E=exp(S
 | pQuantScaleOptional | [1] | 未归一化指数权重E的量化乘数：P=clip(round_even(E×p_scale),0,127) |
 
 PA下K scale的第一维与K/V的物理页编号一致，两种PA布局均使用[numBlocks,kvHeadNum,128]。例如B=4、kvHeadNum=2、Sk=16384、D=64时，BSND/BNSD的K scale为[4,2,16384]，TND的K scale为[2,65536]，V scale均为[2,64]；使用128-token分页、共512个物理页时，K scale为[512,2,128]。
-INT8使用FP32 Softmax（`softmaxPrecision=0`）。PV结果乘V scale并除以P scale，最终用P量化前的指数权重E之和归一化；P的取整会引入量化误差。TND Q不接受`sequsedQOptional`，BSND/BNSD必须提供`sequsedQOptional`和`sequsedKvOptional`。支持`returnSoftmaxlse=0/1`；LSE基于QK反量化后的Softmax分数计算，不受P的INT8取整影响。
+INT8使用FP32 Softmax（`softmaxPrecision=0`）。PV结果乘V scale并除以P scale，最终用P量化前的指数权重E之和归一化；P的取整会引入量化误差。TND Q可通过`sequsedQOptional`指定各batch的有效长度，BSND/BNSD必须提供`sequsedQOptional`和`sequsedKvOptional`。支持`returnSoftmaxlse=0/1`；LSE基于QK反量化后的Softmax分数计算，不受P的INT8取整影响。
 
 <!-- npu="950" id17 -->
 下列量化配置按<term>Ascend 950PR&950DT系列产品</term>代际描述；当前可用quantType=0，<term>Ascend 950PR&950DT系列产品</term>上可选quantType=4、5、6或8；下表中1~3仅为预留配置。
