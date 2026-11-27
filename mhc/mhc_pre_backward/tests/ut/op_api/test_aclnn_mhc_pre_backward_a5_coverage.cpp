@@ -10,6 +10,7 @@
 
 #include "gtest/gtest.h"
 #include <vector>
+#include "../../../op_host/op_api/aclnn_mhc_pre_backward.h"
 #include "../../../op_host/op_api/aclnn_mhc_pre_backward_v2.h"
 #include "opdev/platform.h"
 #include "op_api_ut_common/tensor_desc.h"
@@ -34,12 +35,12 @@ protected:
 };
 
 aclnnStatus RunMhcPreBackwardTnd(int64_t innerPrecise, int field = -1, int defect = 0, bool bsnd = false,
-                                 int dimension = 0)
+                                 int dimension = 0, bool factorialFusion = false, bool useV2 = true)
 {
     constexpr int64_t t = 10;
     constexpr int64_t n = 4;
     constexpr int64_t d = 64;
-    constexpr int64_t fusionSize = n * n + 2 * n;
+    const int64_t fusionSize = factorialFusion ? 32 : n * n + 2 * n;
     constexpr int64_t nD = n * d;
 
     auto x = TensorDesc({t, n, d}, ACL_BF16, ACL_FORMAT_ND).ValueRange(-1, 1);
@@ -89,6 +90,15 @@ aclnnStatus RunMhcPreBackwardTnd(int64_t innerPrecise, int field = -1, int defec
         if (defect == 5)
             tensors[field]->Format(ACL_FORMAT_FRACTAL_NZ);
     }
+    if (!useV2) {
+        auto ut =
+            OP_API_UT(aclnnMhcPreBackward,
+                      INPUT(x, phi, alpha, gradHIn, gradHPost, gradHRes, invRms, hMix, hPre, hPost, gamma, post, 1e-6f),
+                      OUTPUT(gradX, gradPhi, gradAlpha, gradBias, gradGamma));
+        uint64_t workspaceSize = 0;
+        aclOpExecutor* executor = nullptr;
+        return ut.TestGetWorkspaceSizeWithNNopbaseInner(&workspaceSize, executor);
+    }
     auto ut = OP_API_UT(
         aclnnMhcPreBackwardV2,
         INPUT(x, phi, alpha, gradHIn, gradHPost, gradHRes, invRms, hMix, hPre, hPost, gamma, post, 1e-6f, innerPrecise),
@@ -112,6 +122,16 @@ TEST_F(MhcPreBackwardA5CoverageApiTest, RejectInvalidInnerPrecise)
 {
     EXPECT_NE(RunMhcPreBackwardTnd(-1), ACLNN_SUCCESS);
     EXPECT_NE(RunMhcPreBackwardTnd(2), ACLNN_SUCCESS);
+}
+
+TEST_F(MhcPreBackwardA5CoverageApiTest, RejectFactorialFusionWithSquareResidual)
+{
+    for (bool bsnd : {false, true}) {
+        EXPECT_EQ(RunMhcPreBackwardTnd(0, -1, 0, bsnd, 0, true), ACLNN_ERR_PARAM_INVALID);
+        EXPECT_EQ(RunMhcPreBackwardTnd(1, -1, 0, bsnd, 0, true), ACLNN_ERR_PARAM_INVALID);
+        EXPECT_EQ(RunMhcPreBackwardTnd(0, -1, 0, bsnd, 0, true, false), ACLNN_ERR_PARAM_INVALID);
+        EXPECT_EQ(RunMhcPreBackwardTnd(0, -1, 0, bsnd, 0, false, false), ACLNN_SUCCESS);
+    }
 }
 
 TEST_F(MhcPreBackwardA5CoverageApiTest, RejectFactorialResidualLayout)
