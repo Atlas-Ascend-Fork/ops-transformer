@@ -22,6 +22,7 @@ from pathlib import Path
 
 __spec__ = {
     "quant_mla_ttk_ops.quant_mla_prolog_ttk": "QuantMlaPrologSpec",
+    "torch.ops.cann_ops_transformer.quant_mla_prolog": "QuantMlaPrologTorchSpec",
 }
 
 _ASSETS_DIR = str(Path(__file__).resolve().parent)
@@ -78,3 +79,25 @@ class QuantMlaPrologSpec:
     # 图模式在构造阶段保留静态张量，forward 只执行公开设备调用。
 
     torch_graph = _load_impl_module("graph").QuantMlaPrologAclGraph
+
+
+def _call_torch_hook(hook, args, kwargs):
+    # Torch places the two required modes after the 13 mandatory tensors.
+    tensors = args[:13]
+    modes = dict(zip(("w_qr_quant_mode", "qkv_quant_mode"), args[13:]))
+    return hook(*tensors, **modes, **kwargs)
+
+
+class QuantMlaPrologTorchSpec:
+    """TTK hooks for the registered Torch operator."""
+
+    @staticmethod
+    def golden(*args, **kwargs):
+        q, descale_q, qr, descale_qr, _cache = _call_torch_hook(
+            QuantMlaPrologSpec.golden, args, kwargs
+        )
+        return q, descale_q, qr, descale_qr
+
+    @staticmethod
+    def customize_inputs(*args, **kwargs):
+        _call_torch_hook(QuantMlaPrologSpec.customize_inputs, args, kwargs)
