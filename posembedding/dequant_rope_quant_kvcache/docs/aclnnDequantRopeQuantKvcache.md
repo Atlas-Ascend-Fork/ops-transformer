@@ -54,7 +54,7 @@
   $$
 
   $$
-  vCacheRef[i][indice[i]]=quantV[i]
+  vCacheRef[i][indices[i]]=quantV[i]
   $$
 
   如果cacheModeOptional为page则：
@@ -172,8 +172,8 @@ aclnnStatus aclnnDequantRopeQuantKvcache(
     </tr>
     <tr>
         <td>kCacheRef</td>
-        <td>输入</td>
-        <td>公式中用于缓存k的输入kCacheRef。</td>
+        <td>输入/输出</td>
+        <td>缓存量化后的k，按indices原地更新。</td>
         <td>shape为[C_1, C_2, Nkv, D]。</td>
         <td>INT8</td>
         <td>ND</td>
@@ -182,8 +182,8 @@ aclnnStatus aclnnDequantRopeQuantKvcache(
     </tr>
     <tr>
         <td>vCacheRef</td>
-        <td>输入</td>
-        <td>公式中用于缓存v的输入vCacheRef。</td>
+        <td>输入/输出</td>
+        <td>缓存量化后的v，按indices原地更新。</td>
         <td>shape为[C_1, C_2, Nkv, D]。</td>
         <td>INT8</td>
         <td>ND</td>
@@ -275,7 +275,7 @@ aclnnStatus aclnnDequantRopeQuantKvcache(
         <td>输入</td>
         <td>表示输入的qkv进行切分的长度。</td>
         <td>size大小为3，值为[Nq*D, Nkv*D, Nkv*D]。</td>
-        <td>AclIntArray</td>
+        <td>aclIntArray</td>
         <td>-</td>
         <td>-</td>
         <td>-</td>

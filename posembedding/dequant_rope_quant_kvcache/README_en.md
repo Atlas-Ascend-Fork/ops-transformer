@@ -104,15 +104,15 @@ English | [简体中文](./README.md)
     </tr>
     <tr>
       <td style="white-space: nowrap">kCacheRef</td>
-      <td style="white-space: nowrap">Input</td>
-      <td style="white-space: nowrap">Input `kCacheRef` for caching k in the formula. It is an aclTensor on the device.</td>
+      <td style="white-space: nowrap">Input/Output</td>
+      <td style="white-space: nowrap">Device-side aclTensor that stores quantized k values. The operator updates the cache in place using indices.</td>
       <td style="white-space: nowrap">INT8</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
     <tr>
       <td style="white-space: nowrap">vCacheRef</td>
-      <td style="white-space: nowrap">Input</td>
-      <td style="white-space: nowrap">Input `vCacheRef` for caching v in the formula. It is an aclTensor on the device.</td>
+      <td style="white-space: nowrap">Input/Output</td>
+      <td style="white-space: nowrap">Device-side aclTensor that stores quantized v values. The operator updates the cache in place using indices.</td>
       <td style="white-space: nowrap">INT8</td>
       <td style="white-space: nowrap">ND</td>
     </tr>

@@ -102,15 +102,15 @@
     </tr>
     <tr>
       <td style="white-space: nowrap">kCacheRef</td>
-      <td style="white-space: nowrap">输入</td>
-      <td style="white-space: nowrap">公式中用于缓存k的输入`kCacheRef`，Device侧的aclTensor。</td>
+      <td style="white-space: nowrap">输入/输出</td>
+      <td style="white-space: nowrap">缓存量化后的k，按indices原地更新。该参数为Device侧的aclTensor。</td>
       <td style="white-space: nowrap">INT8</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
     <tr>
       <td style="white-space: nowrap">vCacheRef</td>
-      <td style="white-space: nowrap">输入</td>
-      <td style="white-space: nowrap">公式中用于缓存v的输入`vCacheRef`，Device侧的aclTensor。</td>
+      <td style="white-space: nowrap">输入/输出</td>
+      <td style="white-space: nowrap">缓存量化后的v，按indices原地更新。该参数为Device侧的aclTensor。</td>
       <td style="white-space: nowrap">INT8</td>
       <td style="white-space: nowrap">ND</td>
     </tr>
