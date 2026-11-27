@@ -465,6 +465,29 @@ def compressor(
     """
     if x is None or not isinstance(x, torch.Tensor):
         raise ValueError("x must be a torch.Tensor, got {}".format(type(x).__name__))
+    if wkv is None:
+        raise RuntimeError(
+            "wkv must be a torch.Tensor, got {}".format(type(wkv).__name__)
+        )
+    x_dim = x.dim()
+    if x_dim != 2 and x_dim != 3:
+        raise RuntimeError(f"x dim num[{x_dim}] should be 2 or 3")
+    if cmp_ratio < 2 or cmp_ratio > 128:
+        raise RuntimeError(f"cmp_ratio should be in [2, 128], got {cmp_ratio}")
+    if wkv is None:
+        raise RuntimeError("wkv must be a torch.Tensor, got None")
+    if wkv.dim() != 2:
+        raise RuntimeError(f"wkv dim num[{wkv.dim()}] should be 2")
+    if wkv.size(0) <= 0:
+        raise RuntimeError("wkv dim 0 should be greater than 0")
+    if coff != 1 and coff != 2:
+        raise RuntimeError(f"coff value[{coff}] should be 1 or 2")
+    if x_dim != 3 and cu_seqlens is None:
+        raise RuntimeError("Check cu_seqlens != nullptr failed")
+    if x_dim != 3 and cu_seqlens.dim() <= 0:
+        raise RuntimeError(
+            f"cu_seqlens dim should be greater than 0 when x_dim = 2, got {cu_seqlens.dim()}"
+        )
     return _CompressorFunction.apply(
         x,
         wkv,
