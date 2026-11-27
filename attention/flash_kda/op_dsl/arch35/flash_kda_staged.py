@@ -2510,7 +2510,7 @@ class StageTwoVector:
 
     @jit
     def finish_u_delta_to_l1(
-        self, u_l1, tmp_u_delta, subblock_idx, gm_v_new_chunk, valid_rows
+        self, u_l1, tmp_u_delta, subblock_idx, gm_v_new_chunk, valid_rows, save_v_new
     ):
         u_l1_rows = tile_slice(u_l1.next_write(), (self.u_row_block, self.dv_base), (subblock_idx, 0))
         delta = tmp_u_delta
@@ -2542,7 +2542,8 @@ class StageTwoVector:
         nd2nz_tile(u_nz_slot, self.tmp_u_bf16.flatten()[0:self.u_row_block * self.dv_base,].reshape((self.u_row_block, self.dv_base)))
         u_nz_read = self.u_nz[0:self.u_row_block, 0:self.dv_base]
         mem_copy(u_l1_rows, u_nz_read)
-        if rows > 0:
+        # 仅在训练且禁用重计算、需要返回缓存时写回 GM。
+        if rows > 0 and save_v_new != 0:
             v_new_rows = tile_slice(gm_v_new_chunk, (self.u_row_block, self.dv_base), (subblock_idx, 0))
             mem_copy(
                 _valid_rows_view(v_new_rows, rows, self.dv_base),
@@ -2636,6 +2637,7 @@ def _run_stage2_body(
     state_chunk_base: int,
     has_initial_state,
     save_final_state,
+    save_v_new,
 ):
     block_idx = get_block_idx()
     subblock_idx = get_subblock_id()
@@ -2735,7 +2737,9 @@ def _run_stage2_body(
                     next_u_tile = tile_slice(next_u_tile_full, (CHUNK_SIZE, dv_base), (0, dv_idx))
                     s2_vector.issue_u_rows(next_u_tile, subblock_idx, next_valid_rows)
                 s2_matmul.store_u_delta(tmp_u_delta)
-                s2_vector.finish_u_delta_to_l1(u_l1, tmp_u_delta, subblock_idx, v_new_chunk, valid_rows)
+                s2_vector.finish_u_delta_to_l1(
+                    u_l1, tmp_u_delta, subblock_idx, v_new_chunk, valid_rows, save_v_new
+                )
                 u_slot = u_l1.next_read()
                 s2_matmul.update_state(u_slot, valid_rows)
                 s2_matmul.store_state_delta(tmp_delta)
@@ -2877,6 +2881,7 @@ def _run_stage2_round(
     state_is_compact,
     has_initial_state,
     save_final_state,
+    save_v_new,
 ):
     for active_batch_idx in range(0, active_batch_num):
         prefix_start = gm_metadata[stage2_task_prefix_base + active_batch_idx]
@@ -2918,7 +2923,7 @@ def _run_stage2_round(
             chunks_total=chunks_total, seq_len=seq_len, group_start=group_start, group_count=chunk_num_per_group,
             eff_group=chunk_num_per_group, logical_core_num=logical_core_num, item_start=item_start, item_end=item_end,
             resources=resources, state_batch=logical_batch,
-            has_initial_state=has_initial_state, save_final_state=save_final_state,
+            has_initial_state=has_initial_state, save_final_state=save_final_state, save_v_new=save_v_new,
             state_batch_idx=0 if state_is_compact != 0 else logical_batch,
             state_chunk_base=chunk_storage_base if state_is_compact != 0 else 0,
         )
@@ -2956,6 +2961,7 @@ def _run_stage2_dynamic(
     state_is_compact,
     has_initial_state,
     save_final_state,
+    save_v_new,
 ):
     resources = _StageTwoResources()
     if dv_splits_num == 1:
@@ -2968,6 +2974,7 @@ def _run_stage2_dynamic(
             stage2_task_prefix_base=stage2_task_prefix_base, stage2_core_start=stage2_core_start,
             stage2_core_end=stage2_core_end, logical_core_num=logical_core_num, resources=resources,
             state_is_compact=state_is_compact, has_initial_state=has_initial_state, save_final_state=save_final_state,
+            save_v_new=save_v_new,
         )
     elif dv_splits_num == 2:
         _run_stage2_round(
@@ -2979,6 +2986,7 @@ def _run_stage2_dynamic(
             stage2_task_prefix_base=stage2_task_prefix_base, stage2_core_start=stage2_core_start,
             stage2_core_end=stage2_core_end, logical_core_num=logical_core_num, resources=resources,
             state_is_compact=state_is_compact, has_initial_state=has_initial_state, save_final_state=save_final_state,
+            save_v_new=save_v_new,
         )
     elif dv_splits_num == 4:
         _run_stage2_round(
@@ -2990,6 +2998,7 @@ def _run_stage2_dynamic(
             stage2_task_prefix_base=stage2_task_prefix_base, stage2_core_start=stage2_core_start,
             stage2_core_end=stage2_core_end, logical_core_num=logical_core_num, resources=resources,
             state_is_compact=state_is_compact, has_initial_state=has_initial_state, save_final_state=save_final_state,
+            save_v_new=save_v_new,
         )
     else:
         _run_stage2_round(
@@ -3001,6 +3010,7 @@ def _run_stage2_dynamic(
             stage2_task_prefix_base=stage2_task_prefix_base, stage2_core_start=stage2_core_start,
             stage2_core_end=stage2_core_end, logical_core_num=logical_core_num, resources=resources,
             state_is_compact=state_is_compact, has_initial_state=has_initial_state, save_final_state=save_final_state,
+            save_v_new=save_v_new,
         )
 
 
@@ -3142,6 +3152,7 @@ def run_staged_flash_kda_fwd(
                 stage1_task_prefix_base=stage1_task_prefix_base, stage2_task_prefix_base=stage2_task_prefix_base,
                 stage2_core_start=stage2_core_start, stage2_core_end=stage2_core_end, logical_core_num=block_num,
                 state_is_compact=state_is_compact, has_initial_state=has_initial_state, save_final_state=save_final_state,
+                save_v_new=save_qg,
             )
             if global_round_idx + 1 < stage12_round_num:
                 _stage_boundary_reset(STAGE2_BOUNDARY_FLAG_ID)

@@ -110,8 +110,8 @@ These scheduling parameters must match the subsequent `flash_kda` call. Explicit
 
 | Name | Parameter type | Required/Optional | Description | Data type | Data format | Shape |
 | --- | --- | --- | --- | --- | --- | --- |
-| cu_seqlens | Tensor | Optional | Cumulative sequence lengths. Default: `None`. Required for TND: starts at zero, strictly increases, and ends at `seqlens`. For dense layouts, supplied adjacent differences must be positive and at most `seqlens`. | int32 | ND | `(B+1,)` |
-| seqused | Tensor | Optional | Valid sequence lengths. Default: `None`, using adjacent differences from `cu_seqlens`. If both tensors are omitted, each dense sequence uses `seqlens`. If both are supplied, entries must equal the corresponding adjacent differences. | int32 | ND | `(B,)` |
+| cu_seqlens | Tensor | Optional | Cumulative sequence lengths. Default: `None`. Required for TND: starts at zero, strictly increases, and ends at total tokens `T`. Must be `None` for BNSD/BSND. | int32 | ND | `(B+1,)` |
+| seqused | Tensor | Optional | Valid sequence lengths. Default: `None`. Optional for BNSD/BSND: `None` means every sequence uses the full storage length `S` (`seqlens`). Supplied entries must satisfy `0 < seqused[i] <= S`. Must be `None` for TND; cannot be supplied together with `cu_seqlens`. | int32 | ND | `(B,)` |
 | batch_size | int | Required | Number of sequences `B`, with no default. The Q/K/V batch dimension for dense layouts; `cu_seqlens.numel()-1` for TND. | - | - | - |
 | nheads_qk | int | Required | Q/K head count `Nqk`, with no default. Must satisfy `1 <= Nqk <= Nv`. | - | - | - |
 | nheads_v | int | Required | V head count `Nv`, with no default. Must satisfy `Nv <= 96` and `Nv % Nqk == 0`. | - | - | - |
@@ -134,9 +134,9 @@ These scheduling parameters must match the subsequent `flash_kda` call. Explicit
 | initial_state | Tensor | Optional | Initial state $H_0$. Default: `None`, interpreted as zero. | float32 | ND | `(B,Nv,128,128)` |
 | A_log | Tensor | Optional | Per-value-head gate parameter. Default: `None`; required when `use_gate_in_kernel=True`. | float32 | ND | `(Nv,)` |
 | dt_bias | Tensor | Optional | Gate bias. Default: `None`, interpreted as zero. | float32 | ND | `(Nv,128)` or `(Nv*128,)` |
-| cu_seqlens | Tensor | Optional | Cumulative sequence lengths. Default: `None`; required for TND, matching metadata generation. | int32 | ND | `(B+1,)` |
+| cu_seqlens | Tensor | Optional | Cumulative sequence lengths. Default: `None`. Required for TND: starts at zero, strictly increases, and ends at total tokens `T`. Must be `None` for BNSD/BSND. Keep consistent with metadata generation. | int32 | ND | `(B+1,)` |
 | cu_seqlens_cpu | List[int] | Optional | Reserved; only the default `None` is supported. | - | - | - |
-| seqused | Tensor | Optional | Valid sequence lengths. Default: `None`, using differences from `cu_seqlens`, or `S` if both length tensors are omitted. | int32 | ND | `(B,)` |
+| seqused | Tensor | Optional | Valid sequence lengths. Default: `None`. Optional for BNSD/BSND: `None` means every sequence uses the full storage length `S` (`seqlens`). Supplied entries must satisfy `0 < seqused[i] <= S`. Must be `None` for TND; cannot be supplied together with `cu_seqlens`. | int32 | ND | `(B,)` |
 | scale | float | Optional | Output scale. Default: `0.08838834764831845`, equal to `128**(-0.5)`. Accepts a finite value or `None`; `None` uses the default scale. | - | - | - |
 | output_final_state | bool | Optional | Returns the final state. Default: `False`. | - | - | - |
 | return_intermediate_states | bool | Optional | Returns chunk entry states during inference. Default: `False`; training uses `disable_recompute` instead. | - | - | - |
@@ -183,7 +183,7 @@ Returns `(out, final_state, chunk_states)`. Unrequested optional outputs are `No
 - Non-contiguous tensors: None of the computational tensor inputs (for both `flash_kda_metadata` and `flash_kda`) support non-contiguous tensors; passing a non-contiguous tensor raises a validation error.
 - Empty tensors: None of the computational tensor inputs (for both `flash_kda_metadata` and `flash_kda`) support empty tensors (any dimension equal to 0 or zero elements); passing an empty tensor raises a validation error. Pass `None` when omitting an optional tensor argument.
 - Prepare inputs and metadata on the same NPU and set the current device before calling. Meta tensors are for shape inference only.
-- For TND, `cu_seqlens` starts at zero, is strictly increasing, and ends at `T`. For dense layouts, any supplied adjacent differences must be positive and at most `S`. `seqused` entries must be positive and at most the storage length. If both length tensors are supplied, each `seqused` entry must equal the corresponding adjacent difference; smaller values cannot truncate the interval.
+- Length parameters are mutually exclusive. TND requires `cu_seqlens`, starting at zero, strictly increasing, and ending at `T`; `seqused` must be `None`. For BNSD/BSND, `cu_seqlens` must be `None`; `seqused=None` means each sequence uses the full storage length `S`, while supplied entries must satisfy `0 < seqused[i] <= S`.
 - Metadata must match layout, storage dimensions, head counts, valid lengths, mode, and device. Regenerate it when these change; do not reuse it across devices or implementation versions. Always pass storage length `S` for dense layouts or total length `T` for TND.
 - `torch.is_inference_mode_enabled()` controls the forward output/cache protocol. Use `torch.inference_mode()` with `enable_grad=False` for inference; `torch.no_grad()` retains the training protocol. Training uses `enable_grad=True`; `disable_recompute=False` retains necessary caches and recomputes during backward, while `True` retains additional caches.
 - Use `flash_kda` for autograd. When gradient recording is enabled and at least one input requires gradients, it saves backward caches internally and invokes FlashKDAGrad. Second-order gradients are unsupported.

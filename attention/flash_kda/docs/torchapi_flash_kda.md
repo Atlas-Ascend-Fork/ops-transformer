@@ -110,8 +110,8 @@ cann_ops_transformer.flash_kda(
 
 | 参数名 | 参数类型 | 可选/必选 | 描述 | 数据类型 | 数据格式 | 维度(shape) |
 | --- | --- | --- | --- | --- | --- | --- |
-| cu_seqlens | Tensor | 可选 | 序列长度累积和，默认`None`。TND布局必传，首项为0、严格递增且末项等于`seqlens`；定长布局传入时，相邻差值须大于0且不超过`seqlens`。 | int32 | ND | `(B+1,)` |
-| seqused | Tensor | 可选 | 每条序列的有效长度，默认`None`。未传入时使用`cu_seqlens`的相邻差值；两者均未传入时，定长布局各序列使用`seqlens`。与`cu_seqlens`同时传入时，须与其相邻差值逐项相等。 | int32 | ND | `(B,)` |
+| cu_seqlens | Tensor | 可选 | 序列长度累积和，默认`None`。TND布局必传，首项为0、严格递增且末项等于总token数`T`；BNSD/BSND布局必须为`None`。 | int32 | ND | `(B+1,)` |
+| seqused | Tensor | 可选 | 每条序列的有效长度，默认`None`。BNSD/BSND布局可省略或传`None`，表示各序列使用完整存储长度`S`（`seqlens`）；提供时须满足`0 < seqused[i] <= S`。TND布局必须为`None`，不能与`cu_seqlens`同时传入。 | int32 | ND | `(B,)` |
 | batch_size | int | 必选 | 序列数`B`，无默认值。定长布局为Q/K/V的batch维大小；TND布局为`cu_seqlens.numel()-1`。 | - | - | - |
 | nheads_qk | int | 必选 | Q/K的head数`Nqk`，无默认值，须满足`1 <= Nqk <= Nv`。 | - | - | - |
 | nheads_v | int | 必选 | V的head数`Nv`，无默认值，须满足`Nv <= 96`且`Nv % Nqk == 0`。 | - | - | - |
@@ -134,9 +134,9 @@ cann_ops_transformer.flash_kda(
 | initial_state | Tensor | 可选 | 初始状态$H_0$，默认`None`，按零状态计算。 | float32 | ND | `(B,Nv,128,128)` |
 | A_log | Tensor | 可选 | 每个value head的gate参数，默认`None`；`use_gate_in_kernel=True`时必传。 | float32 | ND | `(Nv,)` |
 | dt_bias | Tensor | 可选 | gate偏置，默认`None`，按零偏置处理。 | float32 | ND | `(Nv,128)`或`(Nv*128,)` |
-| cu_seqlens | Tensor | 可选 | 序列长度累积和，默认`None`；TND布局必传，与metadata生成时一致。 | int32 | ND | `(B+1,)` |
+| cu_seqlens | Tensor | 可选 | 序列长度累积和，默认`None`。TND布局必传，首项为0、严格递增且末项等于总token数`T`；BNSD/BSND布局必须为`None`。与metadata生成时保持一致。 | int32 | ND | `(B+1,)` |
 | cu_seqlens_cpu | List[int] | 可选 | 保留参数，当前仅支持默认值`None`。 | - | - | - |
-| seqused | Tensor | 可选 | 每条序列的有效长度，默认`None`。未传入时使用`cu_seqlens`的相邻差值；两者均未传入时使用`S`。 | int32 | ND | `(B,)` |
+| seqused | Tensor | 可选 | 每条序列的有效长度，默认`None`。BNSD/BSND布局可省略或传`None`，表示各序列使用完整存储长度`S`（`seqlens`）；提供时须满足`0 < seqused[i] <= S`。TND布局必须为`None`，不能与`cu_seqlens`同时传入。 | int32 | ND | `(B,)` |
 | scale | float | 可选 | 输出缩放系数，默认`0.08838834764831845`，即`128**(-0.5)`；支持有限数值或`None`，`None`使用默认缩放。 | - | - | - |
 | output_final_state | bool | 可选 | 是否返回最终状态，默认`False`。 | - | - | - |
 | return_intermediate_states | bool | 可选 | 推理时是否返回分块入口状态，默认`False`；训练时由`disable_recompute`决定。 | - | - | - |
@@ -183,7 +183,7 @@ cann_ops_transformer.flash_kda(
 - 非连续张量支持情况：所有参与计算的输入张量（包括`flash_kda_metadata`与`flash_kda`的张量输入）均不支持非连续张量，传入非连续张量会校验报错。
 - 空张量支持情况：所有参与计算的输入张量（包括`flash_kda_metadata`与`flash_kda`的张量输入）均不支持空张量（任意维度为0或元素数为0），传入空张量会校验报错。未提供可选张量参数时应传入`None`。
 - 在同一NPU上准备输入和metadata，调用前设置当前设备；Meta张量仅用于输出规格推导。
-- TND布局中，`cu_seqlens`从0开始、严格递增，末项等于`T`。定长布局中若提供`cu_seqlens`，相邻差值必须大于0且不超过`S`。`seqused`必须大于0且不超过存储长度；与`cu_seqlens`同时提供时，每一项必须等于对应的相邻差值，不支持用较小的`seqused`截断该区间。
+- 长度参数按布局互斥。TND必须提供`cu_seqlens`，首项为0、严格递增且末项等于`T`，`seqused`必须为`None`。BNSD/BSND的`cu_seqlens`必须为`None`；`seqused=None`表示各序列使用完整存储长度`S`，提供时须满足`0 < seqused[i] <= S`。
 - metadata必须与本次调用的布局、存储维度、head数、有效长度、运行模式和设备一致。上述条件变化后重新生成；不得跨设备或跨实现版本复用。定长布局的`seqlens`始终传`S`，TND始终传`T`。
 - 前向输出及缓存的训练/推理协议由`torch.is_inference_mode_enabled()`决定。推理应使用`torch.inference_mode()`并设置`enable_grad=False`；`torch.no_grad()`不会切换为推理协议。训练使用`enable_grad=True`，`disable_recompute=False`保存必要缓存并在反向时重计算，取`True`时保存额外缓存。
 - 自动求导使用`flash_kda`：开启梯度记录且至少一个输入需要梯度时，其内部保存反向缓存并调用FlashKDAGrad；不支持二阶梯度。

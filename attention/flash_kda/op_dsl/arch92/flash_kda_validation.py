@@ -159,7 +159,7 @@ def validate_length_specs(cu_seqlens, seqused, spec):
         require(
             cu_seqlens is None, "cu_seqlens must be None for BNSD/BSND; use seqused"
         )
-        require(seqused is not None, "seqused is required for BNSD/BSND")
+        # 未提供 seqused 时，每条序列使用完整存储长度 S。
     for name, value, size in (
         ("cu_seqlens", cu_seqlens, spec.batch + 1),
         ("seqused", seqused, spec.batch),

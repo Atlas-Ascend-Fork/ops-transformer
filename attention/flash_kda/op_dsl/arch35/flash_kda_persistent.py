@@ -1731,6 +1731,7 @@ class TrainingCacheWriter:
         self.save_final_state = None
         self.sequence_length = None
         self.write_qk = None
+        self.write_beta = None
         self.q_norm = None
         self.k_norm = None
         self.q_rstd = None
@@ -1753,33 +1754,34 @@ class TrainingCacheWriter:
 
     @jit
     def store_preprocessed(self, preprocessing, chunk_idx):
-        if self.save_backward_inputs != 0:
-            rows = self.valid_rows(chunk_idx)
-            if self.write_qk:
-                mem_copy(
-                    tile_slice(self.q_norm, (CHUNK_SIZE, D_HALF), (chunk_idx, self.subblock_idx))[:rows, None],
-                    preprocessing.ub_q_norm[:rows, None], options=copy_options(l2_cache_ctl=4),
-                )
-                mem_copy(
-                    tile_slice(self.k_norm, (CHUNK_SIZE, D_HALF), (chunk_idx, self.subblock_idx))[:rows, None],
-                    preprocessing.ub_k_norm[:rows, None], options=copy_options(l2_cache_ctl=4),
-                )
-                if self.subblock_idx == 0:
-                    mem_copy(
-                        tile_slice(self.q_rstd, (CHUNK_SIZE, 1), (chunk_idx, 0))[:rows, :1],
-                        preprocessing.ub_qk_norms.flatten()[0:rows,].reshape(rows, 1),
-                        options=copy_options(l2_cache_ctl=4),
-                    )
-                    mem_copy(
-                        tile_slice(self.k_rstd, (CHUNK_SIZE, 1), (chunk_idx, 0))[:rows, :1],
-                        preprocessing.ub_qk_norms.flatten()[CHUNK_SIZE:CHUNK_SIZE + rows,].reshape(rows, 1),
-                        options=copy_options(l2_cache_ctl=4),
-                    )
+        # norm、beta 和递推缓存分别按公开返回条件写回。
+        rows = self.valid_rows(chunk_idx)
+        if self.write_qk:
+            mem_copy(
+                tile_slice(self.q_norm, (CHUNK_SIZE, D_HALF), (chunk_idx, self.subblock_idx))[:rows, None],
+                preprocessing.ub_q_norm[:rows, None], options=copy_options(l2_cache_ctl=4),
+            )
+            mem_copy(
+                tile_slice(self.k_norm, (CHUNK_SIZE, D_HALF), (chunk_idx, self.subblock_idx))[:rows, None],
+                preprocessing.ub_k_norm[:rows, None], options=copy_options(l2_cache_ctl=4),
+            )
             if self.subblock_idx == 0:
                 mem_copy(
-                    tile_slice(self.beta_activated, (CHUNK_SIZE, 1), (chunk_idx, 0))[:rows, :1], preprocessing.ub_beta[:rows, :1],
+                    tile_slice(self.q_rstd, (CHUNK_SIZE, 1), (chunk_idx, 0))[:rows, :1],
+                    preprocessing.ub_qk_norms.flatten()[0:rows,].reshape(rows, 1),
                     options=copy_options(l2_cache_ctl=4),
                 )
+                mem_copy(
+                    tile_slice(self.k_rstd, (CHUNK_SIZE, 1), (chunk_idx, 0))[:rows, :1],
+                    preprocessing.ub_qk_norms.flatten()[CHUNK_SIZE:CHUNK_SIZE + rows,].reshape(rows, 1),
+                    options=copy_options(l2_cache_ctl=4),
+                )
+        if self.write_beta and self.subblock_idx == 0:
+            mem_copy(
+                tile_slice(self.beta_activated, (CHUNK_SIZE, 1), (chunk_idx, 0))[:rows, :1], preprocessing.ub_beta[:rows, :1],
+                options=copy_options(l2_cache_ctl=4),
+            )
+        if self.save_backward_inputs != 0:
             mem_copy(
                 tile_slice(self.g_cumsum, (CHUNK_SIZE, D_HALF), (chunk_idx, self.subblock_idx))[:rows, None],
                 preprocessing.ub_g_cumsum[:rows, None], options=copy_options(l2_cache_ctl=4),
@@ -1965,6 +1967,7 @@ def _run_persistent_training_tasks(
     caches = TrainingCacheWriter(subblock_idx)
     scores.causal_qkt_nd = caches.ub_cast_bf16
     caches.save_backward_inputs = save_qg
+    caches.write_beta = save_matrices != 0 and use_beta_sigmoid_in_kernel != 0
     caches.save_intermediate_state = save_intermediate_state
     caches.save_matrices = save_matrices
     caches.save_final_state = save_final_state
@@ -1993,7 +1996,8 @@ def _run_persistent_training_tasks(
         out = gm_O[storage_batch_idx, head_idx, token_start:token_stop, None]
         caches.sequence_length = sequence_length
         caches.write_qk = (
-            head_idx % head_group_size == 0 and use_qk_l2norm_in_kernel != 0
+            save_matrices != 0
+            and head_idx % head_group_size == 0 and use_qk_l2norm_in_kernel != 0
         )
         caches.q_norm = gm_q_norm[
             storage_batch_idx, qk_head_idx, token_start:token_stop, None

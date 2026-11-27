@@ -658,12 +658,8 @@ def _flash_kda_fwd_impl(
     physical_batches = 1 if layout == "TND" else batch
     if internal_template:
         require(template == internal_template, "metadata template does not match the selected entry")
-    # persistent 共用一个存储开关控制预处理和递推缓存。
-    # 独立请求 norm/beta 输出时仍需开启存储，再按输出条件筛选公开返回值。
-    save_kernel_caches = outputs.caches or (
-        template == TEMPLATE_PERSISTENT and not inference
-        and (use_qk_l2norm_in_kernel or use_beta_sigmoid_in_kernel)
-    )
+    # 递推缓存仅在需要返回时保存；persistent 的 norm/beta 写回独立控制。
+    save_kernel_caches = outputs.caches
     if scale is None:
         scale = dim ** -0.5
     has_initial_state = initial_state is not None
@@ -729,7 +725,7 @@ def _flash_kda_fwd_impl(
         q_rstd = empty_inverse_norm(q_logical)
         k_rstd = q_rstd
     beta_activated = (torch.empty(beta_logical.shape[:-1], dtype=HIGH_DTYPE, device=q.device)
-                      if outputs.beta or (persistent and save_kernel_caches) else beta_logical.squeeze(-1))
+                      if outputs.beta else beta_logical.squeeze(-1))
     chunk_count = (
         staged._tnd_state_chunk_capacity(storage_length, initial_state.shape[0])
         if layout == "TND"

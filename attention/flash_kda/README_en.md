@@ -49,9 +49,9 @@ The PyTorch parameters are listed in the order defined in `torch_extension/flash
 | initial_state | Optional input | Initial state $H_0$ of shape `(B,Nv,128,128)`. Defaults to `None`, which uses a zero state. | FLOAT32 | ND |
 | A_log | Optional input | Per-head gate parameter of shape `(Nv,)`. Defaults to `None`. Required with `use_gate_in_kernel=True`. | FLOAT32 | ND |
 | dt_bias | Optional input | Gate bias of shape `(Nv,128)` or `(Nv*128,)`. Defaults to `None`, which uses zero bias. | FLOAT32 | ND |
-| cu_seqlens | Optional input | Cumulative sequence lengths of shape `(B+1,)`. Defaults to `None`. Required for TND. | INT32 | ND |
+| cu_seqlens | Optional input | Cumulative sequence lengths of shape `(B+1,)`. Defaults to `None`. Required for TND; must be `None` for BNSD/BSND. | INT32 | ND |
 | cu_seqlens_cpu | Optional input | Reserved parameter. Only the default value `None` is supported. | INT list | - |
-| seqused | Optional input | Effective length of each sequence, of shape `(B,)`. Defaults to `None`, using lengths from `cu_seqlens`, or storage length `S` when both length tensors are omitted. | INT32 | ND |
+| seqused | Optional input | Effective length of each sequence, of shape `(B,)`. Defaults to `None`. Optional for BNSD/BSND: `None` means each sequence uses the full storage length `S`. Must be `None` for TND. | INT32 | ND |
 | scale | Optional attribute | Output scale. Defaults to `128**(-0.5)`. Accepts a finite number or `None` to use the default. | FLOAT | - |
 | output_final_state | Optional attribute | Whether to return the final state. Accepts `True` or `False`, and defaults to `False`. | BOOL | - |
 | return_intermediate_states | Optional attribute | Whether to return chunk entry states during inference. Accepts `True` or `False`, and defaults to `False`. | BOOL | - |
@@ -78,7 +78,8 @@ For fixed-length layouts, the sequence dimension of `g` and `beta` precedes the 
 
 - `B` and the applicable storage length `S` or `T` are positive. Head counts satisfy `1 <= Nqk <= Nv <= 96` and `Nv % Nqk == 0`. The Q/K and V head dimensions are both 128.
 - All computational input tensors must be contiguous and non-empty. Compute runs on an NPU. Meta tensors are used only for output specification inference.
-- For TND, `cu_seqlens` starts at zero, is strictly increasing, and ends at `T`. In fixed-length layouts, when `cu_seqlens` is supplied, consecutive differences must be positive and at most `S`. Each `seqused` value must be positive and at most the storage length; if `cu_seqlens` is also supplied, it must equal the corresponding adjacent difference.
+- Length parameters are mutually exclusive according to the layout: they cannot both be supplied. TND requires `cu_seqlens`, and `seqused` must be `None`. `cu_seqlens` starts at zero, is strictly increasing, and ends at `T`.
+- For BNSD/BSND, `cu_seqlens` must be `None`. Omitting `seqused` or passing `None` means every sequence uses the full storage length `S`. When supplied, each entry must satisfy `0 < seqused[i] <= S`.
 - Metadata must match the layout, storage dimensions, head counts, and effective lengths of the current call. Regenerate metadata when these change.
 - `torch.is_inference_mode_enabled()` determines training or inference behavior. Use `torch.inference_mode()` for inference. `torch.no_grad()` still uses the training output contract. See the [PyTorch API reference](docs/torchapi_flash_kda_en.md) for the return conditions of `flash_kda`.
 - With gate fusion disabled, `g` provides the per-token log gate and the operator ignores `A_log`, `dt_bias`, and `lower_bound`. With beta sigmoid fusion disabled, `beta` provides the update coefficient directly.
