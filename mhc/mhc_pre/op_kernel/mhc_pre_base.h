@@ -498,7 +498,7 @@ __aicore__ void inline ProcessY(const LocalTensor<T>& yLocal, const LocalTensor<
 __aicore__ inline void ProcessPost(const LocalTensor<float>& postLocal, const LocalTensor<float>& mixLocal,
                                    const LocalTensor<float>& hcBaseLocal, const LocalTensor<float>& rsqrtLocal,
                                    const LocalTensor<float>& tmpBuffer0, const LocalTensor<float>& tmpBuffer1,
-                                   float scale, const int32_t curRowNum, const int32_t curColNum)
+                                   float scale, const int32_t curRowNum, const int32_t curColNum, float eps)
 {
     int32_t curColNumAlign = RoundUp<float>(curColNum);
     MulABLastDimBrcInline<float, false>(mixLocal, mixLocal, rsqrtLocal, tmpBuffer0, curRowNum, curColNum);
@@ -507,6 +507,10 @@ __aicore__ inline void ProcessPost(const LocalTensor<float>& postLocal, const Lo
     AddBAFirstDimBrcInline<float>(mixLocal, mixLocal, hcBaseLocal, curRowNum, curColNum);
     SigmoidPerf(postLocal, mixLocal, tmpBuffer1, curRowNum * curColNumAlign);
     Muls(postLocal, postLocal, static_cast<float>(2.0f), curRowNum * curColNumAlign);
+    // nores模式(alpha.shape=[2])按公式 hPost = 2σ(...) + hcEps 补加eps，顺序对齐arch35实现与文档公式（issue 7567）
+    if (eps != 0.0f) {
+        Adds(postLocal, postLocal, eps, curRowNum * curColNumAlign);
+    }
     PipeBarrier<PIPE_V>();
 }
 

@@ -6,10 +6,10 @@
 - <term>Ascend 950PR&950DT系列产品</term>：支持
 <!-- end id1 -->
 <!-- npu="A3" id2 -->
-- <term>Atlas A3系列产品</term>：不支持
+- <term>Atlas A3系列产品</term>：支持
 <!-- end id2 -->
 <!-- npu="910b" id3 -->
-- <term>Atlas A2系列产品</term>：不支持
+- <term>Atlas A2系列产品</term>：支持
 <!-- end id3 -->
 <!-- npu="310b" id4 -->
 - <term>Atlas 200I/500 A2推理产品</term>：不支持
@@ -26,8 +26,14 @@
 - 接口功能：基于一系列计算得到mHC架构中hidden层的$H^{res}$和$H^{post}$投影矩阵以及Attention或MLP层的输入矩阵$h^{in}$。
 
 - 相较于[aclnnMhcPre](aclnnMhcPre.md)接口，此接口新增`opImplMode`参数，用于指定MhcPre算子的计算模式：
+  <!-- npu="950" id9 -->
   - `opImplMode=0`：在Cube中使用FP32模式计算。
   - `opImplMode=1`：在Cube中使用HF32模式计算。
+  <!-- end id9 -->
+  <!-- npu="A3,910b" id10 -->
+  - `opImplMode=0`：在Cube中使用FP32模式计算。
+  - `opImplMode=1`：不生效（按FP32模式计算），建议仅配置为0。
+  <!-- end id10 -->
 
 - 计算公式：
 
@@ -191,10 +197,7 @@ aclnnStatus aclnnMhcPreV2(
       <td>opImplMode</td>
       <td>输入</td>
       <td>指定MhcPre算子的计算模式。</td>
-      <td>支持的枚举值如下：<ul>
-        <li>0：建议值，在Cube中使用FP32模式计算。</li>
-        <li>1：在Cube中使用HF32模式计算。</li>
-      </ul></td>
+      <td>支持的取值：0（FP32）、1（HF32），各产品下的取值差异见本表下方说明。</td>
       <td>INT64</td>
       <td>-</td>
       <td>-</td>
@@ -281,6 +284,13 @@ aclnnStatus aclnnMhcPreV2(
       <td>-</td>
   </tr>
   </tbody></table>
+
+  <!-- npu="950" id11 -->
+  - 参数`opImplMode`支持配置为0或1，1选择Cube的HF32模式计算。
+  <!-- end id11 -->
+  <!-- npu="A3,910b" id12 -->
+  - 参数`opImplMode`仅支持配置为0，配置为1时不生效（按FP32模式计算），建议仅配置为0。
+  <!-- end id12 -->
 
 - **返回值**
 
@@ -377,9 +387,72 @@ aclnnStatus aclnnMhcPreV2(
   - 默认非Batch一致性实现，不支持通过aclrtSetSysParamOpt开启Batch一致性。
 
 - 规格约束：
-  - n目前支持4、6、8。
-  - D支持16~16384范围以内，需满足D为16对齐。
-  - 当alpha=[3]时，支持hRes输出，必须满足以下条件：输入phi=[n^2+2n, n×D]、bias=[n^2+2n]，输出hMixOptional=[B,S,n^2+2n] 或 [T,n^2+2n]；当alpha=[2]时，hRes输出为0，必须满足以下条件：输入phi=[2n, n×D]、bias=[2n]，输出hMixOptional=[B,S,2n] 或 [T,2n]。
+  <!-- npu="950" id7 -->
+  - <term>Ascend 950PR&950DT系列产品</term>：
+    <table style="undefined;table-layout: fixed; width: 942px"><colgroup>
+        <col style="width: 100px">
+        <col style="width: 300px">
+        <col style="width: 360px">
+        </colgroup>
+        <thead>
+            <tr>
+                <th>规格项</th>
+                <th>规格说明</th>
+            </tr>
+        </thead>
+        <tbody>
+        <tr>
+            <td>n</td>
+            <td>n目前支持4、6、8。</td>
+        </tr>
+        <tr>
+            <td>D</td>
+            <td>D支持16~16384范围以内，需满足D为16对齐。</td>
+        </tr>
+        <tr>
+            <td>opImplMode</td>
+            <td>支持配置为0或1，1选择Cube的HF32模式计算。</td>
+        </tr>
+        <tr>
+            <td>alpha/phi/bias/hMixOptional</td>
+            <td>当alpha=[3]时，支持hRes输出，必须满足以下条件：输入phi=[n^2+2n, n×D]、bias=[n^2+2n]，输出hMixOptional=[B,S,n^2+2n] 或 [T,n^2+2n]；当alpha=[2]时，hRes输出为0，必须满足以下条件：输入phi=[2n, n×D]、bias=[2n]，输出hMixOptional=[B,S,2n] 或 [T,2n]。</td>
+        </tr>
+        </tbody>
+    </table>
+  <!-- end id7 -->
+  <!-- npu="A3,910b" id8 -->
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
+    <table style="undefined;table-layout: fixed; width: 942px"><colgroup>
+        <col style="width: 100px">
+        <col style="width: 300px">
+        <col style="width: 360px">
+        </colgroup>
+        <thead>
+            <tr>
+                <th>规格项</th>
+                <th>规格说明</th>
+            </tr>
+        </thead>
+        <tbody>
+        <tr>
+            <td>n</td>
+            <td>n目前支持4。</td>
+        </tr>
+        <tr>
+            <td>D</td>
+            <td>D支持100000范围以内，需满足D为128对齐。</td>
+        </tr>
+        <tr>
+            <td>opImplMode</td>
+            <td>仅支持配置为0，配置为1时不生效（按FP32模式计算）。</td>
+        </tr>
+        <tr>
+            <td>alpha/phi/bias/hMixOptional</td>
+            <td>当alpha=[3]时，支持hRes输出，必须满足以下条件：输入phi=[n^2+2n, n×D]、bias=[n^2+2n]或phi=[n!+2n, n×D]、bias=[n!+2n]；输出hMixOptional=[B,S,n^2+2n]、[B,S,n!+2n]或[T,n^2+2n]、[T,n!+2n]；当alpha=[2]时，hRes输出为0，必须满足以下条件：输入phi=[2n, n×D]、bias=[2n]，输出hMixOptional=[B,S,2n] 或 [T,2n]。</td>
+        </tr>
+        </tbody>
+    </table>
+  <!-- end id8 -->
   - 可选输出invRmsOptional、hMixOptional、hPreOptional为互存关系，需同时输出或全部不输出，不支持仅返回其中部分，输出条件：invRmsOptional!=nullptr && hMixOptional!=nullptr && hPreOptional!=nullptr。
 
 ## 调用示例
@@ -661,6 +734,8 @@ int main()
     CHECK_RET(ret == 0, return -1);
     uint64_t workspace_size = 0;
     aclOpExecutor *executor = nullptr;
+    // opImplMode: 0 = FP32, 1 = HF32. HF32仅在Ascend 950PR&950DT系列生效，
+    // Atlas A3/A2系列上传入1不生效（按FP32计算），建议配置0
     int64_t opImplMode = 1;
     aclnnStatus aclnn_ret = aclnnMhcPreV2GetWorkspaceSize(
         tensors.x, tensors.phi, tensors.alpha, tensors.bias, tensors.gamma, 1e-6, 1e-6, opImplMode, tensors.hin,

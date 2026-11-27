@@ -486,8 +486,13 @@ public:
                 }
                 // post
                 postLocal = postQue.AllocTensor<float>();
+                // nores模式(alpha.shape=[2]) hPost需+hcEps；res模式(3)无eps传0（issue 7567）
+                float postEps = 0.0f;
+                if constexpr (!hasResi) {
+                    postEps = tilingData->hcEps;
+                }
                 ProcessPost(postLocal, mxies01Local[curRowFactor * hcMultAlign], hcBase1Local, squareSumOutLocal,
-                            rowBrcbLocal0, hcBrcbLocal1, hcScaleGm.GetValue(1), curRowFactor, hcMult);
+                            rowBrcbLocal0, hcBrcbLocal1, hcScaleGm.GetValue(1), curRowFactor, hcMult, postEps);
                 mixesQue01.FreeTensor(mxies01Local); // 这里对应的申请在上面
                 postQue.EnQue(postLocal);
                 postLocal = postQue.DeQue<float>();

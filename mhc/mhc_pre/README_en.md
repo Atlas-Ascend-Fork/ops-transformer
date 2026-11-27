@@ -183,4 +183,4 @@ English | [简体中文](./README.md)
 | Calling Method      | Calling Sample                 | Description                                                         |
 |--------------|-------------------------|--------------------------------------------------------------|
 | aclnn invocation | [test_aclnn_mhc_pre](examples/test_aclnn_mhc_pre.cpp) | Calls the MhcPre operator through the [aclnnMhcPre](docs/aclnnMhcPre_en.md) API. |
-| aclnn invocation | [test_aclnn_mhc_pre_v2](examples/test_aclnn_mhc_pre_v2.cpp) | Calls the MhcPre operator through the [aclnnMhcPreV2](docs/aclnnMhcPreV2_en.md) API, and selects the FP32 or HF32 computation mode of the Cube through opImplMode. |
+| aclnn invocation | [test_aclnn_mhc_pre_v2](examples/test_aclnn_mhc_pre_v2.cpp) | Calls the MhcPre operator through the [aclnnMhcPreV2](docs/aclnnMhcPreV2_en.md) API, and selects the FP32 or HF32 computation mode of the Cube through opImplMode (HF32 is only supported by <term>Ascend 950PR&950DT</term> series products; <term>Atlas A3 products</term> and <term>Atlas A2 products</term> support FP32 only). |

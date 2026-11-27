@@ -181,4 +181,4 @@
 | 调用方式      | 调用样例                 | 说明                                                         |
 |--------------|-------------------------|--------------------------------------------------------------|
 | aclnn调用 | [test_aclnn_mhc_pre](examples/test_aclnn_mhc_pre.cpp) | 通过[aclnnMhcPre](docs/aclnnMhcPre.md)接口方式调用MhcPre算子。 |
-| aclnn调用 | [test_aclnn_mhc_pre_v2](examples/test_aclnn_mhc_pre_v2.cpp) | 通过[aclnnMhcPreV2](docs/aclnnMhcPreV2.md)接口方式调用MhcPre算子，并通过opImplMode选择Cube的FP32或HF32计算模式。 |
+| aclnn调用 | [test_aclnn_mhc_pre_v2](examples/test_aclnn_mhc_pre_v2.cpp) | 通过[aclnnMhcPreV2](docs/aclnnMhcPreV2.md)接口方式调用MhcPre算子，并通过opImplMode选择Cube的FP32或HF32计算模式（HF32仅<term>Ascend 950PR&950DT系列产品</term>支持，<term>Atlas A3系列产品</term>、<term>Atlas A2系列产品</term>仅支持FP32）。 |

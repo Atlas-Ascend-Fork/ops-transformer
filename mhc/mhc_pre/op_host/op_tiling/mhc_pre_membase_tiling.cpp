@@ -60,6 +60,7 @@ constexpr uint64_t K_L1_MAX_SIZE = 1024;
 constexpr int64_t OUT_FLAG_ATTR_IDX = 0;
 constexpr int64_t NORM_EPS_ATTR_IDX = 1;
 constexpr int64_t HC_EPS_ATTR_IDX = 2;
+constexpr size_t SYSTEM_WORKSPACE_SIZE = 20U * 1024U * 1024U; // 系统预留workspace，与arch35路径对齐
 constexpr int64_t BS_SPLIT_THRESHOLD = 128;
 constexpr int64_t MAX_BS_PER_LOOP = 32;
 constexpr int64_t MAX_REDUCE_SIZE = 256;
@@ -534,7 +535,9 @@ ge::graphStatus MhcPreTiling::CalcStage1Tiling()
 
 ge::graphStatus MhcPreTiling::GetWorkspaceSize()
 {
-    workspaceSize_ += 16 * 1024 * 1024 + 128 * 1024 * 1024;
+    // 系统预留workspace按需申请，与arch35路径(arch35/mhc_pre_tiling.cpp)的SYSTEM_WORKSPACE对齐，
+    // 用户段(xCast/invRms/hcBeforeNorm)已由CalcStage1Tiling按shape精确计算，不再叠加固定大常量
+    workspaceSize_ += SYSTEM_WORKSPACE_SIZE;
     return ge::GRAPH_SUCCESS;
 }
 

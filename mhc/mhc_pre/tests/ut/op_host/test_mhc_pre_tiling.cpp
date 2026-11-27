@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include "../../../op_host/op_tiling/arch35/mhc_pre_tiling.h"
 #include "../../../op_host/op_tiling/arch35/mhc_pre_mk_wave_policy.h"
+#include "../../../op_host/op_tiling/mhc_pre_membase_tiling.h"
 #include "tiling_context_faker.h"
 #include "tiling_case_executor.h"
 
@@ -59,6 +60,18 @@ static string MakeAscend950SocInfo(uint32_t cubeCoreCnt, uint32_t vectorCoreCnt)
 static string MakeAscend950SocInfo(uint32_t cubeCoreCnt)
 {
     return MakeAscend950SocInfo(cubeCoreCnt, cubeCoreCnt * 2);
+}
+
+// A2 (Ascend910B, NpuArch=2201)：非regbase，走membase tiling路径
+static string MakeAscend910BSocInfo(uint32_t cubeCoreCnt, uint32_t vectorCoreCnt)
+{
+    return R"({"hardware_info": {"BT_SIZE": 0, "load3d_constraints": "1", "Intrinsic_fix_pipe_l0c2out": false,)"
+           R"( "Intrinsic_data_move_l12ub": true, "Intrinsic_data_move_l0c2ub": true,)"
+           R"( "Intrinsic_data_move_out2l1_nd2nz": false, "UB_SIZE": 262144, "L2_SIZE": 33554432,)"
+           R"( "L1_SIZE": 524288, "L0A_SIZE": 65536, "L0B_SIZE": 65536, "L0C_SIZE": 131072,)"
+           R"( "CORE_NUM": )" +
+           std::to_string(cubeCoreCnt) + R"(, "cube_core_cnt": )" + std::to_string(cubeCoreCnt) +
+           R"(, "vector_core_cnt": )" + std::to_string(vectorCoreCnt) + R"(, "socVersion":"Ascend910B"} })";
 }
 
 /*
@@ -1454,6 +1467,116 @@ TEST_F(MhcPreTiling, Ut_Check_BasicApi_N8_LongM_Workspace)
     ASSERT_FALSE(tilingInfo.workspaceSizes.empty());
     constexpr size_t systemWorkspaceSize = 20U * 1024U * 1024U;
     EXPECT_EQ(tilingInfo.workspaceSizes[0], systemWorkspaceSize);
+}
+
+/*
+ * A2 membase路径（issue 7730回归）：最小shape bs=1, n=4, D=128。
+ * workspace必须为精确值 = 系统预留20MiB(对齐arch35路径) + xCast段 + invRms段 + hcBeforeNorm段，
+ * 不允许出现与输入无关的常量地板（历史上曾无条件叠加16MiB+128MiB=144MiB）。
+ */
+TEST_F(MhcPreTiling, Ut_Check_Membase_Workspace_MinShape)
+{
+    uint32_t B = 1;
+    uint32_t S = 1;
+    uint32_t n = 4;
+    uint32_t d = 128;
+    uint32_t phi_dim0 = n * n + 2 * n; // 24
+    uint32_t phi_dim1 = n * d;         // 512
+    uint32_t bias_dim = phi_dim0;
+    float normEps = 0.000001f;
+    float hcEps = 0.000001f;
+    uint32_t outFlag = 0;
+
+    optiling::MhcPreMembaseCompileInfo compileInfo = {};
+    uint32_t cubeCoreCnt = 24;
+    uint32_t vectorCoreCnt = 48;
+
+    gert::TilingContextPara tilingContextPara(
+        "MhcPre",
+        {{{{B, S, n, d}, {B, S, n, d}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+         {{{phi_dim0, phi_dim1}, {phi_dim0, phi_dim1}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{3}, {3}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{bias_dim}, {bias_dim}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{phi_dim1}, {phi_dim1}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+        {{{{B, S, d}, {B, S, d}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+         {{{B, S, n}, {B, S, n}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S, n, n}, {B, S, n, n}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S}, {B, S}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S, phi_dim0}, {B, S, phi_dim0}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S, n}, {B, S, n}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+        {{"out_flag", Ops::Transformer::AnyValue::CreateFrom<int64_t>(outFlag)},
+         {"norm_eps", Ops::Transformer::AnyValue::CreateFrom<float>(normEps)},
+         {"hc_eps", Ops::Transformer::AnyValue::CreateFrom<float>(hcEps)}},
+        &compileInfo, "Ascend910B", cubeCoreCnt, 262144, 4096, MakeAscend910BSocInfo(cubeCoreCnt, vectorCoreCnt));
+
+    TilingInfo tilingInfo;
+    ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo));
+    ASSERT_FALSE(tilingInfo.workspaceSizes.empty());
+
+    // 与mhc_pre_membase_tiling.cpp CalcStage1Tiling的公式保持一致
+    constexpr size_t membaseSystemWorkspaceSize = 20U * 1024U * 1024U;
+    int64_t ncSize = static_cast<int64_t>(n) * d;
+    int64_t xCastWsSize = 32 * static_cast<int64_t>(vectorCoreCnt) * 2 * ncSize * static_cast<int64_t>(sizeof(float));
+    int64_t invRmsWsSize = static_cast<int64_t>(B) * S * sizeof(float);
+    int64_t hcBeforeNormWsSize = static_cast<int64_t>(B) * S * phi_dim0 * sizeof(float);
+    size_t expectWorkspace = membaseSystemWorkspaceSize + static_cast<size_t>(xCastWsSize) +
+                             static_cast<size_t>(invRmsWsSize) + static_cast<size_t>(hcBeforeNormWsSize);
+    EXPECT_EQ(tilingInfo.workspaceSizes[0], expectWorkspace);
+    // 上界断言（issue建议）：系统预留20MiB + xCast段6MiB(D=128) + 2MiB裕量，
+    // 若常量地板（如历史上144MiB）回归则在此被拦截
+    EXPECT_LE(tilingInfo.workspaceSizes[0], membaseSystemWorkspaceSize + 8U * 1024U * 1024U);
+    // power + resi → tilingKey 10
+    EXPECT_EQ(tilingInfo.tilingKey, 10);
+}
+
+/*
+ * A2 membase路径：out_flag=1（needGrad）时 invRms/hcBeforeNorm 直写输出张量，
+ * workspace仅含系统预留 + xCast段。
+ */
+TEST_F(MhcPreTiling, Ut_Check_Membase_Workspace_NeedGrad)
+{
+    uint32_t B = 1;
+    uint32_t S = 1;
+    uint32_t n = 4;
+    uint32_t d = 128;
+    uint32_t phi_dim0 = n * n + 2 * n;
+    uint32_t phi_dim1 = n * d;
+    uint32_t bias_dim = phi_dim0;
+    float normEps = 0.000001f;
+    float hcEps = 0.000001f;
+    uint32_t outFlag = 1;
+
+    optiling::MhcPreMembaseCompileInfo compileInfo = {};
+    uint32_t cubeCoreCnt = 24;
+    uint32_t vectorCoreCnt = 48;
+
+    gert::TilingContextPara tilingContextPara(
+        "MhcPre",
+        {{{{B, S, n, d}, {B, S, n, d}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+         {{{phi_dim0, phi_dim1}, {phi_dim0, phi_dim1}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{3}, {3}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{bias_dim}, {bias_dim}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{phi_dim1}, {phi_dim1}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+        {{{{B, S, d}, {B, S, d}}, ge::DT_FLOAT16, ge::FORMAT_ND},
+         {{{B, S, n}, {B, S, n}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S, n, n}, {B, S, n, n}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S}, {B, S}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S, phi_dim0}, {B, S, phi_dim0}}, ge::DT_FLOAT, ge::FORMAT_ND},
+         {{{B, S, n}, {B, S, n}}, ge::DT_FLOAT, ge::FORMAT_ND}},
+        {{"out_flag", Ops::Transformer::AnyValue::CreateFrom<int64_t>(outFlag)},
+         {"norm_eps", Ops::Transformer::AnyValue::CreateFrom<float>(normEps)},
+         {"hc_eps", Ops::Transformer::AnyValue::CreateFrom<float>(hcEps)}},
+        &compileInfo, "Ascend910B", cubeCoreCnt, 262144, 4096, MakeAscend910BSocInfo(cubeCoreCnt, vectorCoreCnt));
+
+    TilingInfo tilingInfo;
+    ASSERT_TRUE(ExecuteTiling(tilingContextPara, tilingInfo));
+    ASSERT_FALSE(tilingInfo.workspaceSizes.empty());
+
+    constexpr size_t membaseSystemWorkspaceSize = 20U * 1024U * 1024U;
+    int64_t ncSize = static_cast<int64_t>(n) * d;
+    int64_t xCastWsSize = 32 * static_cast<int64_t>(vectorCoreCnt) * 2 * ncSize * static_cast<int64_t>(sizeof(float));
+    size_t expectWorkspace = membaseSystemWorkspaceSize + static_cast<size_t>(xCastWsSize);
+    EXPECT_EQ(tilingInfo.workspaceSizes[0], expectWorkspace);
 }
 
 /*

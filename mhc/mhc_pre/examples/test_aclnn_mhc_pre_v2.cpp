@@ -287,6 +287,8 @@ int main()
     CHECK_RET(ret == 0, return -1);
     uint64_t workspace_size = 0;
     aclOpExecutor* executor = nullptr;
+    // opImplMode: 0 = FP32, 1 = HF32. HF32仅在Ascend 950PR&950DT系列生效，
+    // Atlas A3/A2系列上传入1不生效（按FP32计算），建议配置0
     int64_t opImplMode = 1;
     aclnnStatus aclnn_ret = aclnnMhcPreV2GetWorkspaceSize(
         tensors.x, tensors.phi, tensors.alpha, tensors.bias, tensors.gamma, 1e-6, 1e-6, opImplMode, tensors.hin,

@@ -6,10 +6,10 @@
 - <term>Ascend 950PR&950DT系列产品</term>：支持
 <!-- end id1 -->
 <!-- npu="A3" id2 -->
-- <term>Atlas A3系列产品</term>：不支持
+- <term>Atlas A3系列产品</term>：支持
 <!-- end id2 -->
 <!-- npu="910b" id3 -->
-- <term>Atlas A2系列产品</term>：不支持
+- <term>Atlas A2系列产品</term>：支持
 <!-- end id3 -->
 <!-- npu="310b" id4 -->
 - <term>Atlas 200I/500 A2推理产品</term>：不支持
@@ -608,6 +608,68 @@ aclnnStatus aclnnMhcPreBackwardV2(
         </tbody>
     </table>
   <!-- end id8 -->
+
+  <!-- npu="A3,910b" id9 -->
+  - <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
+
+    <table style="undefined;table-layout: fixed; width: 942px"><colgroup>
+        <col style="width: 100px">
+        <col style="width: 300px">
+        <col style="width: 360px">
+        </colgroup>
+        <thead>
+            <tr>
+                <th>格式</th>
+                <th>gradHRes shape</th>
+            </tr>
+        </thead>
+        <tbody>
+        <tr>
+            <td>BSNN</td>
+            <td>(B, S, N, N)</td>
+        </tr>
+        <tr>
+            <td>BSN!</td>
+            <td>(B, S, N!)</td>
+        </tr>
+        <tr>
+            <td>TNN</td>
+            <td>(T, N, N)</td>
+        </tr>
+        <tr>
+            <td>TN!</td>
+            <td>(T, N!)</td>
+        </tr>
+        </tbody>
+    </table>
+
+    <table style="undefined;table-layout: fixed; width: 942px"><colgroup>
+        <col style="width: 100px">
+        <col style="width: 300px">
+        <col style="width: 360px">
+        </colgroup>
+        <thead>
+            <tr>
+                <th>规格项</th>
+                <th>规格说明</th>
+            </tr>
+        </thead>
+        <tbody>
+        <tr>
+            <td>N</td>
+            <td>N值目前仅支持4。</td>
+        </tr>
+        <tr>
+            <td>D</td>
+            <td>D支持100000范围以内，要求128元素对齐。</td>
+        </tr>
+        <tr>
+            <td>fusionSize</td>
+            <td>支持N!+2N和N*N+2N两种fusionSize。</td>
+        </tr>
+        </tbody>
+    </table>
+  <!-- end id9 -->
 
 ## 调用示例
 
