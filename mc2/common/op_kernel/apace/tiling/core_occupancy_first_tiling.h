@@ -132,6 +132,6 @@ inline void GetCoreOccupancyFirstTiling(fe::PlatFormInfos* platformInfo, uint64_
 
     // ---- MXFP4 打包存储(2 fp4/字节): 数据通信的 K 轴字节数需减半 ----
     if (isFp4) {
-        dataTiling.nonSplitAxisSize = ka / 2;
+        dataTiling.nonSplitAxisSize = ka >> 1;
     }
 }

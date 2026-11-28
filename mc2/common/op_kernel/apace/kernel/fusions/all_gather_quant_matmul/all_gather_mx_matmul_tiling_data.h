@@ -34,11 +34,14 @@ struct CommContext {
 } // namespace AivComm
 } // namespace Apace
 
+// Alignment in bytes of the tiling data struct.
+constexpr uint32_t ALL_GATHER_MX_MATMUL_TILING_ALIGN = 8U;
+
 #pragma pack(push, 8)
 // 8 means 8 bytes aligned
 // DFX 约定: dumpInfo 位于Mc2InitTiling/Mc2CcTiling之后，否则放在最前面
 // 异常dump回调按调用方传入的offsetof(..., dumpInfo) 偏移解析DfxDumpInfo
-struct alignas(8) AllGatherMxMatmulUrmaTilingData {
+struct alignas(ALL_GATHER_MX_MATMUL_TILING_ALIGN) AllGatherMxMatmulUrmaTilingData {
     Utils::DfxDumpInfo dumpInfo{};
     QuantMatmulTilingData mmTile;
     CommTilingData commTile;

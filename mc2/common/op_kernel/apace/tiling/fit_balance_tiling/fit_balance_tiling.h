@@ -127,11 +127,13 @@ inline CommCutResult Schedule(const FitBalanceFlow& flow, const MatmulInputParam
 
     // ---- [2] SetShort: 设置短块下限 (由每轮通信启动开销反解——短块独立占一轮通信,
     //      其通信时长须大于等于两倍的每轮启动开销才值得成轮) ----
-    tilingM.SetMinLenByMax(InverseCommTime(comm, 2.0 * comm.roundOverheadUs));
+    constexpr double shortTileRoundOverheadFactor = 2.0;
+    tilingM.SetMinLenByMax(InverseCommTime(comm, shortTileRoundOverheadFactor * comm.roundOverheadUs));
     tilingM.cutRes.shortTileLen = tilingM.GetMinLen();
     tilingM.cutRes.numShortTile = 1U;
-    // mValue 过小则不切
-    if (tilingM.totalLen < tilingM.cutRes.shortTileLen * 2) {
+    // mValue 过小则不切：总长度至少能容纳 2 个短块才值得切分
+    constexpr uint64_t minCutTileCount = 2U;
+    if (tilingM.totalLen < tilingM.cutRes.shortTileLen * minCutTileCount) {
         tilingM.NoCutTiling();
         return tilingM.cutRes;
     }

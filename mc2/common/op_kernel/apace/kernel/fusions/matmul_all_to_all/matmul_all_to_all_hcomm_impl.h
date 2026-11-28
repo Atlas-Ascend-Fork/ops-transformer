@@ -126,6 +126,10 @@ private:
     // AIC 核间屏障 flag id
     static constexpr uint16_t AIC_BARRIER_FLAG_ID = 8U;
 
+    // L0C 结果缓冲级数：单缓冲/双缓冲
+    static constexpr uint32_t L0C_SINGLE_BUFFER_STAGES = 1U;
+    static constexpr uint32_t L0C_DOUBLE_BUFFER_STAGES = 2U;
+
     // 等 fixpipe 异步搬出（L0C->GM）全部落盘后再发通信，否则会发出半成品
     __aicore__ inline void SyncAicCores()
     {
@@ -163,7 +167,8 @@ private:
         mmParams.kL0 = mmTile.baseK;
         mmParams.l1Stages = mmTile.l1BufferNum;
         // SWAT 块形恰好填满 L0C，l0cDB > 1 才能开双缓冲，否则 L0C 越界
-        mmParams.l0cStages = mmTile.l0cDB > 1 ? 2 : 1;
+        mmParams.l0cStages =
+            mmTile.l0cDB > L0C_SINGLE_BUFFER_STAGES ? L0C_DOUBLE_BUFFER_STAGES : L0C_SINGLE_BUFFER_STAGES;
         mmParams.splitKNum = 1; // K 整段单次调用完成
 
         auto& schParams = params.schedulerParams;

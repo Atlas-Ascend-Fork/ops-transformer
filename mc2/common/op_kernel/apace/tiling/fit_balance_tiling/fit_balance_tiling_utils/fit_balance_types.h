@@ -148,12 +148,8 @@ struct MatmulInputParams {
 
 // 标定数据总集: 算子侧唯一编辑面, 一个实例传给 FitBalanceCut。
 //
-// 用法(算子侧标定头):
-//   static const FitBalanceCalibration CALIBRATION = {
-//       /* dataflow */ { CommComputeOrder::..., LocalMMPosition::..., bool },
-//       /* commRows */ { {TilingCommEngine::..., 卡数, k, b, c}, ... },
-//       /* mmFit */    { /*baseBlock*/ {256, 256, 128} },   // 算力默认公式, 特殊形态加覆盖值
-//   };
+// 用法: 按 dataflow → commRows → mmFit 的顺序进行聚合初始化;
+//       完整示例与分轴维护写法见上级目录 README.md（../README.md）的「二、接入示例」。
 //
 // 填写规则:
 //   - 通信行按 (通信引擎, rankDim) 匹配; 未标定形态不写行(miss 走其他切分策略);

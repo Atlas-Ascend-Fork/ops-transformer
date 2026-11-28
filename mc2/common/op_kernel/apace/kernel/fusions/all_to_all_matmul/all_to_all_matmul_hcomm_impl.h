@@ -127,7 +127,7 @@ struct HcommCommWaitPolicy {
                 const auto handle = nextTile < state_->headTileCnt_ ? state_->dataHeadHandle_ : state_->dataTailHandle_;
                 state_->hccl_.Wait(handle);
                 if constexpr (EnableHcommAllToAllOut) {
-                    AscendC::CrossCoreSetFlag<2, PIPE_FIX>(HCOMM_DATA_READY_FLAG);
+                    AscendC::CrossCoreSetFlag<0x2, PIPE_FIX>(HCOMM_DATA_READY_FLAG);
                 }
                 ++state_->nextNotifyTile_;
             }
@@ -467,7 +467,7 @@ AllToAllMatmulHcommImpl<X1Type, X2Type, YType, CommDataTypeX1, AlltoAllMatmulTil
         allToAllPermute.CopyTile(rowStart, rowCount);
         // Idle AIVs still participate in every notification and window ACK.
         if ((tileIdx + 1) % HCOMM_NOTIFY_WINDOW == 0 || tileIdx + 1 == commState_.totalTileCnt_) {
-            AscendC::CrossCoreSetFlag<2, PIPE_MTE3>(HCOMM_WINDOW_ACK_FLAG);
+            AscendC::CrossCoreSetFlag<0x2, PIPE_MTE3>(HCOMM_WINDOW_ACK_FLAG);
         }
     }
     allToAllPermute.Finish();
