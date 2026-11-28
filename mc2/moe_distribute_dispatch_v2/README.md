@@ -140,7 +140,7 @@ $$
    <td>elasticInfoOptional</td>
    <td>可选输入</td>
    <td>EP通信域动态缩容信息。当某些通信卡因异常而从通信域中剔除，实际参与通信的卡数可从本参数中获取。</td>
-   <td>FLOAT32</td>
+   <td>INT32</td>
    <td>ND</td>
   </tr>
   <tr>

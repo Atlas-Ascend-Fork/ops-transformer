@@ -142,7 +142,7 @@ For details, see the following parameter description.
    <td>elasticInfoOptional</td>
    <td>Optional Input</td>
    <td>Dynamic scale-in information of the EP communicator. When some communication devices are removed from the communicator due to faults, the actual number of devices participating in communication can be obtained from this parameter.</td>
-   <td>FLOAT32</td>
+   <td>INT32</td>
    <td>ND</td>
   </tr>
   <tr>

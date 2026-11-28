@@ -2968,7 +2968,9 @@ ge::graphStatus CheckSizeAndSetRelevantCfg(gert::TilingContext* context, MoeDist
     tilingData->moeDistributeDispatchV2Info.tokenNumPerSlot = 0U;
     OP_TILING_CHECK(!config.isRoce && CheckAndCalWinSize(context, *tilingData, nodeName, isSetFullMeshV2,
                                                          localMoeExpertNum, isLayered, config) != ge::GRAPH_SUCCESS,
-                    OP_LOGE(nodeName, "Tiling check window size failed."), return ge::GRAPH_FAILED);
+                    OP_LOGE(nodeName, "Tiling check window size failed. "
+                                      "The buffer size may be unavailable or too small. See the plog for details."),
+                    return ge::GRAPH_FAILED);
 
     OP_TILING_CHECK(SetWorkSpace(context, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE(nodeName, "Tiling set workspace failed."), return ge::GRAPH_FAILED);
