@@ -167,7 +167,7 @@ aclnnStatus aclnnQuantGroupedMatmulInplaceAdd(
       <td>FLOAT32</td>
       <td>ND</td>
       <td>3(g, M, N)</td>
-      <td>√</td>
+      <td>×</td>
     </tr>
     <tr>
       <td>groupListType</td>
@@ -245,7 +245,7 @@ aclnnStatus aclnnQuantGroupedMatmulInplaceAdd(
     <tr>
       <td>ACLNN_ERR_PARAM_INVALID</td>
       <td>161002</td>
-      <td>The data type or data format of x1, x2, scale2, groupList, yRef, or scale1Optional is not supported, or the value of groupListType or groupSize is not supported.</td>
+      <td><ul><li>The data type or data format of x1, x2, scale2, groupList, yRef, or scale1Optional is not supported, or the value of groupListType or groupSize is not supported.</li><li>yRef is a non-contiguous tensor.</li></ul></td>
     </tr>
   </tbody></table>
 

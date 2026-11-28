@@ -78,6 +78,13 @@ TEST(QuantGroupedMatmulInplaceAddStorage, ChecksInputScaleGroupListAndInplaceOut
     }
 }
 
+TEST(QuantGroupedMatmulInplaceAddStorage, RejectsNonContiguousInplaceOutputWithinStorageBounds)
+{
+    StorageTestInputs inputs;
+    inputs.y = TensorDesc({1, 3, 4}, ACL_FLOAT, ACL_FORMAT_ND, {12, 1, 3}, 0, {1, 4, 3}).ToAclType();
+    ExpectWorkspaceError(inputs.Tensors(), ACLNN_ERR_PARAM_INVALID);
+}
+
 TEST(QuantGroupedMatmulInplaceAddStorage, EmptyFastPathStillRejectsInvalidAuxiliaryStorage)
 {
     StorageTestInputs inputs;

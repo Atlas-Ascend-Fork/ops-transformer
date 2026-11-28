@@ -168,7 +168,7 @@ aclnnStatus aclnnQuantGroupedMatmulInplaceAdd(
       <td>FLOAT32</td>
       <td>ND</td>
       <td>3(g，M，N)</td>
-      <td>√</td>
+      <td>×</td>
     </tr>
     <tr>
       <td>groupListType</td>
@@ -248,7 +248,7 @@ aclnnStatus aclnnQuantGroupedMatmulInplaceAdd(
     <tr>
       <td>ACLNN_ERR_PARAM_INVALID</td>
       <td>161002</td>
-      <td>x1、x2、scale2、groupList、yRef、scale1Optional的shape、数据类型和数据格式不在支持的范围内，或groupListType、groupSize的取值不在支持的范围内。</td>
+      <td><ul><li>x1、x2、scale2、groupList、yRef、scale1Optional的shape、数据类型和数据格式不在支持的范围内，或groupListType、groupSize的取值不在支持的范围内。</li><li>yRef为非连续Tensor。</li></ul></td>
     </tr>
   </tbody></table>
 
