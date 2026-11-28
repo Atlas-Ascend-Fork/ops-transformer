@@ -286,6 +286,7 @@ def cpu_hif8_golden(
     q_tensor = hif8_per_tensor_dequant(q_fp8)
     k_tensor = hif8_per_tensor_dequant(k_fp8)
     v_tensor = hif8_per_tensor_dequant(v_fp8)
+    N_q, N_kv = q_tensor.shape[1], k_tensor.shape[1]
 
     if N_q != N_kv:
         logger.info("[INFO] GQA 广播")
@@ -617,6 +618,7 @@ def cpu_hif8_bench(
     q_tensor = hif8_per_tensor_dequant(q_fp8).to(acc_dtype) * dq_scale
     k_tensor = hif8_per_tensor_dequant(k_fp8).to(acc_dtype) * dk_scale
     v_tensor = hif8_per_tensor_dequant(v_fp8).to(acc_dtype) * dv_scale
+    N_q, N_kv = q_tensor.shape[1], k_tensor.shape[1]
 
     if N_q != N_kv:
         logger.info("[INFO] GQA 广播 (bench)")
