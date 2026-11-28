@@ -1,0 +1,906 @@
+[
+  {
+    "id": 0,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          1,
+          1,
+          16
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          32,
+          1,
+          16
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          32,
+          1
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 32
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 0
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  },
+  {
+    "id": 1,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          3,
+          3,
+          64
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          79,
+          3,
+          64
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          32,
+          3
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 79
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 16
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 0
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          15,
+          4,
+          128
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          272,
+          4,
+          128
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          32,
+          4
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 128
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 272
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 16
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 0
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          7,
+          2,
+          32
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          144,
+          2,
+          32
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          32,
+          2
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 64
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 80
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 16
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 1
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          4,
+          3,
+          48
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          209,
+          3,
+          48
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          48,
+          3
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 48
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 65
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 96
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 48
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 1
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          2,
+          4,
+          128
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          160,
+          4,
+          128
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          64,
+          4
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 96
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 160
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 64
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 64
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 0
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          3,
+          2,
+          32
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          110,
+          2,
+          32
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "fp16",
+        "shape": [
+          32,
+          2
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 15
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 47
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 110
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 16
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 0
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  },
+  {
+    "id": 7,
+    "name": "NsaCompressGrad",
+    "aclnn_name": "aclnnNsaCompressGrad",
+    "api": "pytorch",
+    "api_type": "nsa_compress_grad_reference",
+    "aclnn_api_type": "nsa_compress_grad_aclnn",
+    "standard": {
+      "acc": {
+        "single_bm": {
+          "type": "high_performance"
+        }
+      },
+      "perf": "not_key"
+    },
+    "inputs": [
+      {
+        "name": "outputGrad",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          3,
+          2,
+          32
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "input",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          95,
+          2,
+          32
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      {
+        "name": "weight",
+        "type": "tensor",
+        "required": true,
+        "dtype": "bf16",
+        "shape": [
+          32,
+          2
+        ],
+        "range_values": [
+          -1,
+          1
+        ]
+      },
+      [
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 32
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 15
+        },
+        {
+          "name": "actSeqLenOptional",
+          "type": "attrs",
+          "required": true,
+          "dtype": "int64_t",
+          "shape": null,
+          "range_values": 48
+        }
+      ],
+      {
+        "name": "compressBlockSize",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 32
+      },
+      {
+        "name": "compressStride",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 16
+      },
+      {
+        "name": "actSeqLenType",
+        "type": "attr",
+        "required": true,
+        "dtype": "int64_t",
+        "shape": null,
+        "range_values": 1
+      },
+      {
+        "name": "layoutOptional",
+        "type": "attr",
+        "required": true,
+        "dtype": "string",
+        "shape": null,
+        "range_values": "TND"
+      }
+    ]
+  }
+]
