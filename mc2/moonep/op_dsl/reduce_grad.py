@@ -926,7 +926,6 @@ def reduce_grad(
     local_grads,
     epn,
     *,
-    slots=None,
     async_finish=False,
 ):
     """owner 直累 reduce_grad：副本梯度归并回 home（full-dW 直入形态）。
@@ -946,8 +945,6 @@ def reduce_grad(
         async_finish: False（缺省）阻塞到全组归并完成（返回 event=None）；
                      True 返回发起流 torch.npu.Event（wait_event 汇合后读
                      归并结果）。
-        slots: 窗口池层数（None = context.window_slots 定型值；显式给出时
-            须与定型值一致，否则 ValueError）。
 
     Returns:
         变长返回：``async_finish=False``（缺省）只返回
@@ -974,14 +971,6 @@ def reduce_grad(
             return home_views, None
         return home_views
 
-    # —— 窗口池约定校验（与 prefetch 同族；归并落点与槽位无关）——
-    if slots is None:
-        slots = context.window_slots or 1
-    elif context.window_slots is not None and int(slots) != int(context.window_slots):
-        raise ValueError(
-            f"reduce_grad slots={slots} 与窗口池定型层数 {context.window_slots} 不一致"
-        )
-
     # —— 副本区布局（紧随权重发布区；[epn, Wg] × 组——pull 恒定，不随 R 增长）——
     scale_widths, weight_bytes = _grad_region_params(context)
     copy_off = grad_slot_off(
@@ -989,7 +978,6 @@ def reduce_grad(
         widths=widths,
         scale_widths=scale_widths,
         weight_bytes=weight_bytes,
-        slots=slots,
     )
     rank_size = context.rank_size
     copy_bytes = epn * sum(widths) * elem_bytes
@@ -998,16 +986,6 @@ def reduce_grad(
         HEAP_BASE + copy_off + copy_bytes + LAYOUT_TAIL_BYTES,
         "pull 梯度副本区",
     )
-    # —— 槽视图一致性守卫（pull_slots_used 契约沿用）——
-    used = context.pull_slots_used
-    if used is None:
-        context.pull_slots_used = slots
-    elif used != slots:
-        raise ValueError(
-            f"梯度槽视图 slots={slots} 与既有 slots={used}"
-            " 不一致——副本区基址会错位（请保持全链 slots 一致）"
-        )
-
     # owner 直累：host 先把副本行拷进 workspace，kernel 只读 etc
     # 映射到的行，没有陈旧行掺和
     _copy_grads_to_ws(

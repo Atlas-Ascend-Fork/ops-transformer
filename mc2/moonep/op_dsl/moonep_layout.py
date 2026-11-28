@@ -53,8 +53,8 @@ def prefetch_weight_off() -> int:
     return PLAN_REGION_END
 
 
-def lcm_slot_stride(epn: int, row_bytes) -> int:
-    """行宽列表（字节）→ LCM 对齐的 slot 步长（lcm_slot_stride 唯一真源）。
+def lcm_window_stride(epn: int, row_bytes) -> int:
+    """行宽列表（字节）→ LCM 对齐的窗口步长（lcm_window_stride 唯一真源）。
 
     kernel 编译期（sizes×elem_bytes 折成行字节列表）与 host 视图/容量
     公式（widths/scale_widths 折行字节）都收敛到这里——两侧行字节列表
@@ -72,72 +72,68 @@ def lcm_slot_stride(epn: int, row_bytes) -> int:
     return (raw + lcm - 1) // lcm * lcm
 
 
-def slot_stride_bytes(epn: int, widths, scale_widths, weight_bytes: int) -> int:
-    """单 slot 窗口步长（字节）——LCM 对齐（kernel/host 共用唯一公式）。
+def window_stride_bytes(epn: int, widths, scale_widths, weight_bytes: int) -> int:
+    """预取窗口步长（字节）——LCM 对齐（kernel/host 共用唯一公式）。
 
     原始步长 = (ΣWg×weight_bytes + ΣSg) × 2×epn；但 push kernel 的槽寻址
-    ``dst = group_rows[g] + slot × slot_rows[g] + slot_row`` 以"本组一行字节宽"
-    为单位（tile_slice 坐标 = 瓦片序号），要求步长被每个组的行字节数
-    整除。scale 组加入后原始步长一般不再满足（如交织 (1024,512)+scale
-    (32,16)：原始 12672B 不被 1024 整除）——向上取整到全部行宽的最小公
-    倍数。代价 ≤ lcm-1 字节/slot；kernel（编译期 __init__）与本侧
-    （视图/容量公式）同式调用，逐字节一致（不一致即寻址错位）。
+    ``dst = group_rows[g] + slot_row`` 以"本组一行字节宽"为单位（tile_slice
+    坐标 = 瓦片序号），要求步长被每个组的行字节数整除。scale 组加入后原始
+    步长一般不再满足（如交织 (1024,512)+scale (32,16)：原始 12672B 不被
+    1024 整除）——向上取整到全部行宽的最小公倍数。代价 ≤ lcm-1 字节/窗口；
+    kernel（编译期 __init__）与本侧（视图/容量公式）同式调用，逐字节一致
+    （不一致即寻址错位）。
     """
     row_bytes = [int(w) * int(weight_bytes) for w in widths]
     row_bytes += [int(s) for s in (scale_widths or ())]
-    return lcm_slot_stride(epn, row_bytes)
+    return lcm_window_stride(epn, row_bytes)
 
 
-def group_slot_rows(epn: int, row_bytes):
-    """校验组前缀和可整除，返回每组起始行号与 slot 行步长。
+def group_row_offsets(epn: int, row_bytes):
+    """校验组前缀和可整除，返回每组起始行号。
 
-    kernel 按“组起始行 + slot × 行步长 + 槽内行号”寻址，要求每组前缀和
-    和 slot 步长都能被该组行字节数整除；不满足时在这里提前报错。
+    kernel 按“组起始行 + 槽内行号”寻址，要求每组前缀和与窗口步长都能被
+    该组行字节数整除；不满足时在这里提前报错。
     """
     row_bytes = tuple(int(row_bytes_i) for row_bytes_i in row_bytes)
-    slot_bytes = lcm_slot_stride(epn, row_bytes)
-    group_rows, slot_rows = [], []
+    window_bytes = lcm_window_stride(epn, row_bytes)
+    group_rows = []
     base_bytes = 0
     for g, row_bytes_i in enumerate(row_bytes):
-        if base_bytes % row_bytes_i or slot_bytes % row_bytes_i:
+        if base_bytes % row_bytes_i or window_bytes % row_bytes_i:
             raise ValueError(
                 f"第 {g} 组行宽 {row_bytes_i}B 无法与前缀 {base_bytes}B / "
-                f"slot 步长 {slot_bytes}B 对齐；请调整该组行宽或 epn"
+                f"窗口步长 {window_bytes}B 对齐；请调整该组行宽或 epn"
             )
         group_rows.append(base_bytes // row_bytes_i)
-        slot_rows.append(slot_bytes // row_bytes_i)
         base_bytes += row_bytes_i * ROWS_PER_EXPERT * int(epn)
-    return tuple(group_rows), tuple(slot_rows)
+    return tuple(group_rows)
 
 
 def reduce_stg_off(
     epn: int,
     w_elems: int = 0,
     num_groups: int = 1,
-    slots: int = 1,
     *,
     widths=None,
     scale_widths=None,
     weight_bytes: int = WEIGHT_BYTES,
 ) -> int:
-    """权重发布区后的工作缓冲区基址（发布区按 slots×组数预留）。
+    """权重发布区后的工作缓冲区基址（发布区按单窗口预留）。
 
     每组发布区是完整的 [2*epn, W] 权重视图（真实行 + 预取槽同址），
     组步长必须按整视图 2*epn*W*elem 字节计——按 epn*W 计会使组间重叠一半
-    （组 g+1 起点压在组 g 的预取槽区正中）。slots 为多槽窗口池层数
-    （槽 s、组 g 的视图基址 = prefetch_weight_off + 槽内 sizes 前缀和）：
-    双槽轮转使 GEMM 可直读当前槽视图，下一层 prefetch 写另一槽，免快照拷贝。
+    （组 g+1 起点压在组 g 的预取槽区正中）。
 
     等宽组传 ``w_elems``/``num_groups``；变宽组（如交织型 W13 宽 2W、
     down 宽 W）传 ``widths=(2W, W)``，总宽按各组件宽求和——交织两组与
     等宽三组字节数相同（2W + W = 3W）。``weight_bytes`` 为每组
     权重要素字节宽（bf16 2B / fp8 1B，进编译键）；``scale_widths`` 为
     各 scale 组行宽（字节——ue8m0 定宽 1B，mxfp8 形态传入；scale 组
-    跟随同 slot 窗口的权重组之后前缀和排布，None = 无 scale 组）。
+    跟随同窗口的权重组之后前缀和排布，None = 无 scale 组）。
     """
     if widths is None:
         widths = (int(w_elems),) * int(num_groups)
-    return prefetch_weight_off() + slots * slot_stride_bytes(
+    return prefetch_weight_off() + window_stride_bytes(
         epn, widths, scale_widths, weight_bytes
     )
 
@@ -146,7 +142,6 @@ def grad_slot_off(
     epn: int,
     w_elems: int = 0,
     num_groups: int = 1,
-    slots: int = 1,
     *,
     widths=None,
     scale_widths=None,
@@ -162,7 +157,6 @@ def grad_slot_off(
         epn,
         w_elems,
         num_groups,
-        slots,
         widths=widths,
         scale_widths=scale_widths,
         weight_bytes=weight_bytes,
@@ -173,7 +167,6 @@ def reduce_region_end(
     epn: int,
     w_elems: int,
     num_groups: int = 1,
-    slots: int = 1,
     grad_bytes_per_elem: int = 2,
     *,
     widths=None,
@@ -186,20 +179,19 @@ def reduce_region_end(
       owner 远读；无 R 维度，显存恒定（19.3MB 级）
     - push 形态接收区 [R, epn, Wg] 随 R 线性（32 卡
       617MB），为 pull 选型的动因
-    ``scale_widths`` 只扩大权重发布区（scale 随 slot 轮转），不影响梯度区。
+    ``scale_widths`` 只扩大权重发布区，不影响梯度区。
     """
     total_w = (
         sum(int(w) for w in widths)
         if widths is not None
         else int(w_elems) * int(num_groups)
     )
-    slot_off = grad_slot_off(
+    window_off = grad_slot_off(
         epn,
         w_elems,
         num_groups,
-        slots,
         widths=widths,
         scale_widths=scale_widths,
         weight_bytes=weight_bytes,
     )
-    return slot_off + total_w * epn * grad_bytes_per_elem + LAYOUT_TAIL_BYTES
+    return window_off + total_w * epn * grad_bytes_per_elem + LAYOUT_TAIL_BYTES
