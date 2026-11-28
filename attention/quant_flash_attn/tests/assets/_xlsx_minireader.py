@@ -68,6 +68,8 @@ def _cell_text(cell, shared_strings):
     """
     t = cell.getAttribute("t")
     v_els = cell.getElementsByTagName("v")
+    if t != "inlineStr" and v_els and v_els[0].firstChild is None:
+        return None
     if t == "s" and v_els:
         idx = int(v_els[0].firstChild.data)
         if not 0 <= idx < len(shared_strings):
