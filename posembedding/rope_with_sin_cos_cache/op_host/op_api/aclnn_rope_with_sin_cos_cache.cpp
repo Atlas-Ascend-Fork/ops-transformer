@@ -20,7 +20,6 @@
 #include "aclnn_kernels/contiguous.h"
 #include "aclnn_kernels/reshape.h"
 #include "level0/add.h"
-#include "rsqrt.h"
 #include "aclnn_kernels/cast.h"
 #include "aclnn_rope_with_sin_cos_cache.h"
 #include "aclnn_rope_with_sin_cos_cache_v2.h"
