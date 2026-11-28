@@ -276,7 +276,9 @@ aclnnStatus aclnnMoeTokenUnpermute(
   - aclnnMoeTokenUnpermute defaults to a deterministic implementation.
 
 <!-- npu="A3,910b" id7 -->
-- <term>Atlas A2 products</term>, <term>Atlas A3 products</term>: topK_num <= 512.
+- <term>Atlas A2 products</term>, <term>Atlas A3 products</term>:
+  - `topK_num <= 512`.
+  - If a value in `probs` is zero, the operator skips the corresponding token in `permutedTokens`.
 <!-- end id7 -->
 <!-- npu="950" id8 -->
 - <term>Ascend 950PR&950DT products</term>:

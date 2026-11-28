@@ -274,7 +274,9 @@ aclnnStatus aclnnMoeTokenUnpermute(
   - aclnnMoeTokenUnpermute默认确定性实现。
 
 <!-- npu="A3,910b" id7 -->
-- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：topK_num <= 512。
+- <term>Atlas A2系列产品</term>、<term>Atlas A3系列产品</term>：
+  - topK_num <= 512。
+  - permutedTokens中token对应的probs为0时会跳过该token。
 <!-- end id7 -->
 <!-- npu="950" id8 -->
 - <term>Ascend 950PR&950DT系列产品</term>：
