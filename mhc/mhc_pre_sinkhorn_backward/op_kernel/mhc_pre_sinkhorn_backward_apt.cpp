@@ -8,11 +8,13 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
-// Ascend960 使用独立的 Tiling 数据和 TilingKey。
-#if defined(__DAV_920R1__) || defined(__DAV_920R2__) || \
-    (defined(__NPU_ARCH__) && ((__NPU_ARCH__ == 9201) || (__NPU_ARCH__ == 9202)))
-#include "arch92/mhc_pre_sinkhorn_backward_entry_arch92.h"
-#else
+/*!
+ * \file mhc_pre_sinkhorn_backward_apt.cpp
+ * \brief arch35 与 arch92 共用入口。
+ *        两架构复用 arch35 目录下的同一套 Kernel 实现，按 TilingKey 区分：
+ *        - 3000 (arch35): KERNEL_TYPE_MIX_AIC_1_2；
+ *        - 4000 (arch92): KERNEL_TYPE_MIX_AIC_1_1；
+ */
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
@@ -22,14 +24,16 @@
 using namespace AscendC;
 using namespace MhcPreSinkhornBackwardNs;
 
-// arch35 入口：在 MhcPreBackward 的 V0 阶段融合 Sinkhorn 反向。
 extern "C" __global__ __aicore__ void mhc_pre_sinkhorn_backward(
     GM_ADDR grad_hin, GM_ADDR grad_h_post, GM_ADDR grad_h_res, GM_ADDR x, GM_ADDR phi, GM_ADDR alpha, GM_ADDR bias,
     GM_ADDR h_pre, GM_ADDR hc_before_norm, GM_ADDR inv_rms, GM_ADDR sum_out, GM_ADDR norm_out, GM_ADDR pre_mix,
     GM_ADDR grad_pre, GM_ADDR grad_x, GM_ADDR grad_phi, GM_ADDR grad_alpha, GM_ADDR grad_bias, GM_ADDR grad_pre_mix,
     GM_ADDR workspace, GM_ADDR tiling)
 {
+    // 默认KERNEL_TYPE_MIX_AIC_1_2，TilingKey 4000 按KERNEL_TYPE_MIX_AIC_1_1编译核函数。
+    // 注意：KERNEL_TASK_TYPE 的 key 必须为数字字面量（预编译阶段按正则解析）。
     KERNEL_TASK_TYPE_DEFAULT(KERNEL_TYPE_MIX_AIC_1_2);
+    KERNEL_TASK_TYPE(4000, KERNEL_TYPE_MIX_AIC_1_1);
     REGISTER_TILING_DEFAULT(MhcPreSinkhornBackwardArch35TilingData);
     GET_TILING_DATA_WITH_STRUCT(MhcPreSinkhornBackwardArch35TilingData, tilingDataValue, tiling);
     const MhcPreSinkhornBackwardArch35TilingData* tilingData = &tilingDataValue;
@@ -64,11 +68,13 @@ extern "C" __global__ __aicore__ void mhc_pre_sinkhorn_backward(
     params.tilingData = tilingData;
 
     // 大小 M 共用同一实例，Stage2 策略由 tilingData->smallM 控制。
-    if (TILING_KEY_IS(3000)) {
-        MhcPreSinkhornBackwardKernel<DTYPE_X, float32_t> op;
+    if (TILING_KEY_IS(MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH35)) { // arch35
+        MhcPreSinkhornBackwardKernel<DTYPE_X, float32_t, 2U> op;
+        op.Init(params);
+        op.Process();
+    } else if (TILING_KEY_IS(MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH92)) { // arch92
+        MhcPreSinkhornBackwardKernel<DTYPE_X, float32_t, 1U> op;
         op.Init(params);
         op.Process();
     }
 }
-
-#endif

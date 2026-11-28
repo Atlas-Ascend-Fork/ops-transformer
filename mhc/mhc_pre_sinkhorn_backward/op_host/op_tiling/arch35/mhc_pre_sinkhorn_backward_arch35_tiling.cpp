@@ -27,7 +27,6 @@ constexpr int64_t MIN_C = 128;
 constexpr int64_t MAX_C_VALUE = 100000;
 constexpr int64_t C_ALIGNMENT = 128;
 constexpr int64_t ITERATIONS = 20;
-constexpr uint64_t TILING_KEY_ARCH35 = 3000;
 
 constexpr uint32_t INPUT_X = 3;
 constexpr uint32_t SUM_OUT = 10;
@@ -103,6 +102,12 @@ bool MhcPreSinkhornBackwardArch35Tiling::IsCapable()
     return true;
 }
 
+bool MhcPreSinkhornBackwardArch35Tiling::IsAivEqualsAicSoc(const platform_ascendc::PlatformAscendC& platform)
+{
+    const auto npuArch = platform.GetCurNpuArch();
+    return npuArch == Ops::Base::DAV_9201 || npuArch == Ops::Base::DAV_9202;
+}
+
 ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetPlatformInfo()
 {
     auto platformInfo = context_->GetPlatformInfo();
@@ -111,6 +116,12 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetPlatformInfo()
     platform_ascendc::PlatformAscendC platform(platformInfo);
     aicNum_ = platform.GetCoreNumAic();
     aivNum_ = platform.GetCoreNumAiv();
+    if (IsAivEqualsAicSoc(platform)) {
+        // arch92（DAV_9201/9202）为 KERNEL_TYPE_MIX_AIC_1_1，
+        // 切换 TilingKey 至 4000。
+        aivNum_ = aicNum_;
+        tilingKey_ = MHC_PRE_SINKHORN_BACKWARD_TILING_KEY_ARCH92;
+    }
     platform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize_);
     platform.GetCoreMemSize(platform_ascendc::CoreMemType::L1, l1Size_);
     platform.GetCoreMemSize(platform_ascendc::CoreMemType::L2, l2Size_);
@@ -419,7 +430,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetShapeAttrsInfo()
     OP_CHECK_IF(!std::isfinite(hcEps_) || hcEps_ <= 0.0f,
                 OP_LOGE(context_->GetNodeName(), "hc_eps must be finite and positive"), return ge::GRAPH_FAILED);
 
-    // arch35 的默认行为保持 HF32，调用方可通过 enable_hf32=false 切换到普通 FP32。
+    // 默认行为保持 HF32，可通过 enable_hf32=false 切换到普通 FP32。
     auto enableHf32Ptr = attrs->GetAttrPointer<bool>(1);
     const bool enableHf32 = enableHf32Ptr == nullptr ? true : *enableHf32Ptr;
     implMode_ = enableHf32 ? IMPL_MODE_HF32 : IMPL_MODE_FP32;
@@ -677,7 +688,7 @@ ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::GetWorkspaceSize()
 
 uint64_t MhcPreSinkhornBackwardArch35Tiling::GetTilingKey() const
 {
-    return TILING_KEY_ARCH35;
+    return tilingKey_;
 }
 
 ge::graphStatus MhcPreSinkhornBackwardArch35Tiling::PostTiling()
@@ -700,11 +711,11 @@ void MhcPreSinkhornBackwardArch35Tiling::DumpTilingInfo()
         return;
     }
     OP_LOGI(context_->GetNodeName(),
-            "MhcPreSinkhornBackward arch35: coreNum=%u, vecCoreNum=%u, totalLength=%lu, N=%lu, D=%lu, nD=%lu, "
-            "fusionSize=%lu, hcEps=%f, implMode=%u, smallM=%u, iterTimes=%lu",
-            tilingData_->coreNum, tilingData_->vecCoreNum, tilingData_->totalLength, tilingData_->N, tilingData_->D,
-            tilingData_->nD, tilingData_->fusionSize, tilingData_->hcEps, tilingData_->implMode, tilingData_->smallM,
-            tilingData_->iterTimes);
+            "MhcPreSinkhornBackward arch35(key=%lu): coreNum=%u, vecCoreNum=%u, totalLength=%lu, N=%lu, D=%lu, "
+            "nD=%lu, fusionSize=%lu, hcEps=%f, implMode=%u, smallM=%u, iterTimes=%lu",
+            tilingKey_, tilingData_->coreNum, tilingData_->vecCoreNum, tilingData_->totalLength, tilingData_->N,
+            tilingData_->D, tilingData_->nD, tilingData_->fusionSize, tilingData_->hcEps, tilingData_->implMode,
+            tilingData_->smallM, tilingData_->iterTimes);
     OP_LOGI(context_->GetNodeName(),
             "MM config: C0=[%u,%u,%u,L1K=%u], C1=[%u,%u,%u,L1K=%u], depth=[%u,%u,%u,%u,%u], "
             "block=[%u,%u,%u], sync=[%u,%u], maxBufferDepth=%u",
