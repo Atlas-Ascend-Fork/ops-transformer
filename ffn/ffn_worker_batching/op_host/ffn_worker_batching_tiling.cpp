@@ -91,14 +91,18 @@ ge::graphStatus FfnWorkerBatchingTiling::CheckInputParam()
     OP_CHECK_NULL_WITH_CONTEXT(context_, inputDesc);
     ge::DataType xdtype = inputDesc->GetDataType();
     OP_CHECK_IF(xdtype != ge::DT_INT8,
-                OP_LOGE(context_->GetNodeName(), "Input dtype:%s not int8", Ops::Base::ToString(xdtype).c_str()),
+                OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "input",
+                                                      std::string(Ops::Base::ToString(xdtype).c_str()).c_str(),
+                                                      "Input dtype not int8"),
                 return ge::GRAPH_FAILED);
 
     auto inputX = context_->GetInputShape(0);
     OP_CHECK_NULL_WITH_CONTEXT(context_, inputX);
     auto xShape = Ops::Transformer::OpTiling::EnsureNotScalar(inputX->GetStorageShape());
     OP_CHECK_IF(xShape.GetDimNum() != 1,
-                OP_LOGE(context_->GetNodeName(), "x shape %s dim num not 1", Ops::Base::ToString(xShape).c_str()),
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "x",
+                                                         std::string(Ops::Base::ToString(xShape).c_str()).c_str(),
+                                                         "x shape dim num not 1"),
                 return ge::GRAPH_FAILED);
     // 所有公共入口均需保护固定 1024B context 读取；Torch wrapper 的检查不能
     // 覆盖直接 ACLNN/GE 调用。空输入也必须在下发 kernel 前拒绝。
@@ -117,16 +121,20 @@ ge::graphStatus FfnWorkerBatchingTiling::GetAttrsInfo()
     OP_CHECK_NULL_WITH_CONTEXT(context_, attrs);
     const int64_t* expertNumPtr = attrs->GetAttrPointer<int64_t>(EXPERT_NUM_ATTR);
     OP_CHECK_NULL_WITH_CONTEXT(context_, expertNumPtr);
-    OP_CHECK_IF(
-        *expertNumPtr > EXPERT_IDX_MAX || *expertNumPtr <= 0,
-        OP_LOGE(context_->GetNodeName(), "expert_num:%ld should be in range (0, %ld]", *expertNumPtr, EXPERT_IDX_MAX),
-        return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*expertNumPtr > EXPERT_IDX_MAX || *expertNumPtr <= 0,
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                    context_->GetNodeName(), "expert_num",
+                    (std::to_string(*expertNumPtr) + ", " + std::to_string(EXPERT_IDX_MAX)).c_str(),
+                    "expert_num should be in range"),
+                return ge::GRAPH_FAILED);
     tilingData_.set_expertNum(*expertNumPtr);
 
     const gert::ContinuousVector* maxOutShapePtr = attrs->GetAttrPointer<gert::ContinuousVector>(MAX_OUT_SHAPE_ATTR);
     OP_CHECK_NULL_WITH_CONTEXT(context_, maxOutShapePtr);
     OP_CHECK_IF(maxOutShapePtr->GetSize() != NUM_FOUR,
-                OP_LOGE(context_->GetNodeName(), "The max_out_shape size:%lu not equal 4.", maxOutShapePtr->GetSize()),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "max_out_shape",
+                                                       std::to_string(maxOutShapePtr->GetSize()),
+                                                       "The max_out_shape size not equal 4"),
                 return ge::GRAPH_FAILED);
     const int64_t* maxOutShapeArray = reinterpret_cast<const int64_t*>(maxOutShapePtr->GetData());
     A_ = maxOutShapeArray[INDEX_ZERO];
@@ -134,16 +142,23 @@ ge::graphStatus FfnWorkerBatchingTiling::GetAttrsInfo()
     K_ = maxOutShapeArray[INDEX_TWO];
     OP_CHECK_IF(
         (A_ > MAX_SESSION_NUM || A_ <= 0),
-        OP_LOGE(context_->GetNodeName(), "max_out_shape[0]:%ld should be in range of (0, %ld]", A_, MAX_SESSION_NUM),
+        OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "max_out_shape",
+                                               (std::to_string(A_) + ", " + std::to_string(MAX_SESSION_NUM)).c_str(),
+                                               "max_out_shape[0]: should be in range of"),
         return ge::GRAPH_FAILED);
-    OP_CHECK_IF(BS_ <= 0, OP_LOGE(context_->GetNodeName(), "max_out_shape[1]:%ld should be greater than 0", BS_),
+    OP_CHECK_IF(BS_ <= 0,
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "max_out_shape", std::to_string(BS_),
+                                                         "max_out_shape[1]: should be greater than 0"),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF((K_ > MAX_K_NUM || K_ <= 0),
-                OP_LOGE(context_->GetNodeName(), "max_out_shape[2]:%ld should be in range of (0, %ld]", K_, MAX_K_NUM),
+                OP_LOGE_FOR_INVALID_SHAPES_WITH_REASON(context_->GetNodeName(), "max_out_shape",
+                                                       (std::to_string(K_) + ", " + std::to_string(MAX_K_NUM)).c_str(),
+                                                       "max_out_shape[2]: should be in range of"),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(maxOutShapeArray[INDEX_THREE] <= 0,
-                OP_LOGE(context_->GetNodeName(), "max_out_shape[3]:%ld should be greater than 0",
-                        maxOutShapeArray[INDEX_THREE]),
+                OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(context_->GetNodeName(), "max_out_shape",
+                                                         std::to_string(maxOutShapeArray[INDEX_THREE]),
+                                                         "max_out_shape[3]: should be greater than 0"),
                 return ge::GRAPH_FAILED);
 
     Y_ = A_ * BS_ * K_;
@@ -152,9 +167,11 @@ ge::graphStatus FfnWorkerBatchingTiling::GetAttrsInfo()
 
     const int64_t* tokenDtype = attrs->GetAttrPointer<int64_t>(TOKEN_DTYPE_ATTR);
     if (tokenDtype != nullptr) {
-        OP_CHECK_IF((*tokenDtype < 0 || *tokenDtype > NUM_TWO),
-                    OP_LOGE(context_->GetNodeName(), "token_dtype:%ld must be one of [0, 1, 2]", *tokenDtype),
-                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(
+            (*tokenDtype < 0 || *tokenDtype > NUM_TWO),
+            OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(context_->GetNodeName(), "token_dtype", std::to_string(*tokenDtype),
+                                                  "token_dtype must be one of [0, 1, 2, 3, 4, 5]"),
+            return ge::GRAPH_FAILED);
         tilingData_.set_tokenDtype(*tokenDtype);
     } else {
         tilingData_.set_tokenDtype(0);
