@@ -447,6 +447,26 @@ static ge::graphStatus CheckAndSetQuantModeAttrs(const gert::TilingContext* cont
     return ge::GRAPH_SUCCESS;
 }
 
+// 校验 URMA 的 Combine 通信模式并设置 dedupMode。
+static ge::graphStatus CheckAndSetUrmaDedupMode(int64_t combineCommMode, MegaMoeTilingData* tilingData,
+                                                const char* nodeName)
+{
+    OP_TILING_CHECK(combineCommMode != COMBINE_COMM_MODE_NO_DEDUP && combineCommMode != COMBINE_COMM_MODE_SERVER_DEDUP,
+                    OP_LOGE_FOR_INVALID_VALUE(nodeName, "combine_comm_mode", std::to_string(combineCommMode).c_str(),
+                                              "0 or 2 on Layered topology (topo_type=1, 2 or 3)"),
+                    return ge::GRAPH_FAILED);
+    OP_TILING_CHECK(combineCommMode == COMBINE_COMM_MODE_SERVER_DEDUP &&
+                        tilingData->combineQuantMode != COMBINE_QUANT_OUT_TYPE_NO_QUANT,
+                    OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(
+                        nodeName, "combine_comm_mode", "2",
+                        "enabling server combine reduction does not support quantized combine; it requires "
+                        "combine_quant_mode=0"),
+                    return ge::GRAPH_FAILED);
+    tilingData->compute.dedupMode =
+        combineCommMode == COMBINE_COMM_MODE_SERVER_DEDUP ? DEDUP_MODE_SERVER_COMBINE : DEDUP_MODE_OFF;
+    return ge::GRAPH_SUCCESS;
+}
+
 /*
  * 校验预量化输入的逻辑类型、通信拓扑及共享专家类型约束。
  */

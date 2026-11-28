@@ -13,7 +13,7 @@
 
 #include "adv_api/transpose/confusion_transpose.h"
 
-#include "../mega_moe_vf/mega_moe_layered_vf.h"
+#include "../../mega_moe_vf/mega_moe_layered_vf.h"
 
 // Internal member definitions; included by mega_moe_layered.h after the class declaration.
 namespace MegaMoeImpl {
@@ -229,7 +229,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendAndQu
 {
     // 输入准备与 DispatchBuffInit 生命期不重叠，可复用同一 UB 地址。
     // 减去通信 scratch、清零和专家 count 区后，按 4R + R/4 字节计算单轮容量。
-    LocalTensor<uint8_t> hcommTensor(TPosition::VECCALC, 0, ALIGN_512);
+    LocalTensor<uint8_t> hcommTensor(TPosition::VECCALC, SEND_MASK_HCOMM_UB_OFFSET, ALIGN_512);
     comm_.Init(hcommTensor, ALIGN_512);
 
     uint32_t resetTensorSize = InitResetBatch();
@@ -614,7 +614,7 @@ __aicore__ inline uint32_t MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Trans
     tiling.param0 = 1U;
     tiling.param1 = alignedCount;
     tiling.param2 = ROW_ELEMENTS;
-    // 950 的 021 路径额外 scratch 为 0；传有效 UB 视图，避免无 scratch 重载申请栈缓冲。
+    // 021 路径使用独立的目标 UB 视图，避免无 scratch 重载申请栈缓冲。
     Transpose<uint32_t>(transposedMasks, masks, transposedMasks.template ReinterpretCast<uint8_t>(),
                         TransposeType::TRANSPOSE_ND2ND_021, tiling);
     return alignedCount;
@@ -627,8 +627,6 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PublishDi
     const auto& peermem = params_.communication.layout;
     const auto& commBuffer = params_.communication.base;
     // GM 保留 8B ready 槽；Compact 只写低 32 位，高位由入口整区清零保证。
-    const DataCopyExtParams copyParams{static_cast<uint16_t>(tokenRange.count), sizeof(uint32_t), 0U, sizeof(uint32_t),
-                                       0U};
     __gm__ uint32_t* readyGlobal = nullptr;
     for (uint32_t index = 0; index < serverRange.count; ++index) {
         const uint32_t server = serverRange.start + index;
@@ -648,10 +646,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PublishDi
 }
 
 /*
- * 当前 UB：[0,512B) 通信 scratch；[512B,184KiB) 建表；[184KiB,248KiB) 保留给 WQE。
- * 普通模式 topkIds/masks 两块，每批 367 token；去重模式增加独立转置区，每批 240 token。
- * 每块每 token 预留 256B；去重三块共 180KiB，转置后按 Server 行批量 MTE 发布。
- * 输入每批只搬一次；每段位图完成标量消费及 MTE 发布后，复用同一输出缓冲。
+ * 按本架构的 UB 预算确定每批 token 数。去重路径多一块转置区，
+ * 将按 token 产生的位图转为按 Server 连续排列，再由 MTE3 批量搬出。
  */
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PrepareDispatchRelayQueues(
@@ -729,7 +725,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::BuildDisp
             if constexpr (CombineServerDedup) {
                 // 当前 VF 可与上段搬出重叠；仅转置覆盖输出前等待上段 MTE3 读完。
                 PipeWait<PIPE_MTE3, PIPE_V>(static_cast<event_t>(SYNC_EVENT_ID2));
-                // 950 的 V 流水依赖由硬件保证，转置直接读取当前 VF 的输出。
+                // 在 V 流水内转置当前 VF 的输出。
                 const uint32_t rowElements = TransposeDispatchRelayBitmaps(masks, transposedMasks, batchRange.count);
                 PipeFence<PIPE_V, PIPE_MTE3, SYNC_EVENT_ID2>();
                 PublishDispatchRelayBitmaps(transposedMasks, batchRange, serverRange, rowElements);
@@ -927,10 +923,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PrepareEx
     const auto& peermem = params_.communication.layout;
     const auto& commBuffer = params_.communication.base;
     gmmWaveCount_ = 0U;
-    if constexpr (g_coreType == AIC) {
-        return;
-    }
-    if (subBlockIdx_ != 1U || moeExpertPerRank_ == 0U) {
+    if (moeExpertPerRank_ == 0U) {
         return;
     }
 

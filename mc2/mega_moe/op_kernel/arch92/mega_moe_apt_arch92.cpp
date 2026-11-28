@@ -10,7 +10,7 @@
 
 /*!
  * \file mega_moe_apt_arch92.cpp
- * \brief arch92 A8W8、原生 A8W4 及 A4W4 MTE 1C1V 核函数入口。
+ * \brief Arch92 1C1V 的 MTE 和 URMA kernel 入口。
  */
 
 #if __has_include("version/asc_devkit_version.h") && __has_include("version/hcomm_version.h")
@@ -31,6 +31,7 @@
 
 #ifdef ENABLE_TENSOR_API
 #include "mega_moe_wave.h"
+#include "mega_moe_layered_wave_arch92.h"
 #endif
 
 #include "../arch35_92/mega_moe_tiling.h"
@@ -86,5 +87,20 @@ __global__ __aicore__ void mega_moe(GM_ADDR context, GM_ADDR x, GM_ADDR topkIds,
                 workspaceGM, &tilingData, tilingGM);
         op.Process();
     }
+#if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL) && (ORIG_DTYPE_X == DT_BF16)
+    if constexpr (CommModeType == TILINGKEY_TPL_URMA && std::is_same_v<MoeWeightType, SharedWeightType> &&
+                  DispatchQuantOutType == SharedQuantOutType) {
+        if (tilingData.compute.topoType == MegaMoeImpl::TOPO_TYPE_URMA &&
+            tilingData.dispatchQuantMode == DISPATCH_QUANT_MODE_MXFP) {
+            MegaMoeImpl::MegaMoeLayeredWave<DTYPE_X, DTYPE_Y, DTYPE_TOPK_WEIGHTS, MoeWeightType, DispatchQuantOutType,
+                                            FORMAT_WEIGHT1, FORMAT_WEIGHT2>
+                op(context);
+            op.Init(x, topkIds, topkWeights, weight1, weight2, xActiveMask, weightScales1, weightScales2, scales,
+                    sharedWeight1, sharedWeight2, sharedWeightScales1, sharedWeightScales2, yOut, expertTokenNumsOut,
+                    workspaceGM, &tilingData);
+            op.Process();
+        }
+    }
+#endif
 #endif
 }

@@ -61,14 +61,15 @@ HOST_DEVICE constexpr void SetTensorStorage(CclComputeLayoutParams& params, uint
 }
 
 HOST_DEVICE constexpr WorkspaceLayout MakeWorkspaceLayout(CclComputeLayoutParams params, uint8_t moeGmmMode,
-                                                          uint8_t sharedGmmMode, bool alignCombineRows = false)
+                                                          uint8_t sharedGmmMode, bool alignCombineRows = false,
+                                                          bool useLayeredUrmaLayout = false)
 {
     params.ring = {};
-    params.reserveGmm1Output =
-        params.topoType == TOPO_TYPE_MTE || moeGmmMode == GMM_MODE_A8W4_NZ || params.topkWeightsPrefetch;
+    params.reserveGmm1Output = useLayeredUrmaLayout || params.topoType == TOPO_TYPE_MTE ||
+                               moeGmmMode == GMM_MODE_A8W4_NZ || params.topkWeightsPrefetch;
     params.reserveCumsum = false;
     SetTensorStorage(params, moeGmmMode, sharedGmmMode);
-    return WorkspaceLayout(params, {NeedsExpertGmm2Ready(params, alignCombineRows), /*useLayeredUrmaLayout=*/false});
+    return WorkspaceLayout(params, {NeedsExpertGmm2Ready(params, alignCombineRows), useLayeredUrmaLayout});
 }
 
 } // namespace LayoutArch92

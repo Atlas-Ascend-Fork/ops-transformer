@@ -591,7 +591,8 @@ static void ExpandUrmaUnpermuteWeightBatch(const MegaMoeTilingData* tilingData,
 static MegaMoeUnpermuteBufferConfig CalcUrmaUnpermuteBufferConfig(const MegaMoeTilingData* tilingData,
                                                                   uint32_t coreTokenCount,
                                                                   uint32_t topKWeightsConversionElementBytes,
-                                                                  uint32_t availableUbBytes)
+                                                                  uint32_t availableUbBytes,
+                                                                  uint32_t ubLimitBytes = LAYERED_USABLE_UB_BYTES)
 {
     MegaMoeUnpermuteBufferConfig bufferConfig{};
     if (coreTokenCount == 0U) {
@@ -602,7 +603,7 @@ static MegaMoeUnpermuteBufferConfig CalcUrmaUnpermuteBufferConfig(const MegaMoeT
     uint32_t fixedBytes = 0U;
     CalcUrmaUnpermuteSlotAndScaleBytes(tilingData, bufferConfig, inputSlotBytes, fixedBytes);
     // Dispatch 已结束，来源就绪缓存占用的 UB 可由本阶段复用。
-    const uint32_t usableUbBytes = std::min(availableUbBytes, LAYERED_USABLE_UB_BYTES);
+    const uint32_t usableUbBytes = std::min(availableUbBytes, ubLimitBytes);
 
     // 先保证基准权重 batch，再用剩余 UB 选取输入 ring 深度。
     const uint32_t baseTokensPerBatch = UNPERMUTE_WEIGHT_ITEMS_PER_BATCH / tilingData->compute.topK;
@@ -717,7 +718,7 @@ static void SetMteUnpermuteBufferConfigs(MegaMoeTilingData* tilingData, ge::Data
 
 /* 与普通 Layered Unpermute 的 GetBalancedWorkRange 分核对应。 */
 static void SetUrmaUnpermuteBufferConfigs(MegaMoeTilingData* tilingData, ge::DataType topKWeightsDataType,
-                                          uint32_t availableUbBytes)
+                                          uint32_t availableUbBytes, uint32_t ubLimitBytes = LAYERED_USABLE_UB_BYTES)
 {
     const uint32_t topKWeightsConversionElementBytes =
         topKWeightsDataType == ge::DT_FLOAT ? 0U : static_cast<uint32_t>(ge::GetSizeByDataType(topKWeightsDataType));
@@ -727,11 +728,12 @@ static void SetUrmaUnpermuteBufferConfigs(MegaMoeTilingData* tilingData, ge::Dat
     tilingData->unpermuteFullTokenChunkCoreCount =
         extraTokenCoreCount != 0U ? extraTokenCoreCount : tilingData->blockAivNum;
     tilingData->unpermuteConfigForFullTokenChunk = CalcUrmaUnpermuteBufferConfig(
-        tilingData, fullTokenChunkSize, topKWeightsConversionElementBytes, availableUbBytes);
+        tilingData, fullTokenChunkSize, topKWeightsConversionElementBytes, availableUbBytes, ubLimitBytes);
     tilingData->unpermuteConfigForTailTokenChunk =
-        extraTokenCoreCount == 0U ? MegaMoeUnpermuteBufferConfig{} :
-                                    CalcUrmaUnpermuteBufferConfig(tilingData, baseTokenCount,
-                                                                  topKWeightsConversionElementBytes, availableUbBytes);
+        extraTokenCoreCount == 0U ?
+            MegaMoeUnpermuteBufferConfig{} :
+            CalcUrmaUnpermuteBufferConfig(tilingData, baseTokenCount, topKWeightsConversionElementBytes,
+                                          availableUbBytes, ubLimitBytes);
 }
 
 /* URMA 按均分 token 配置 full/tail，MTE 保留原有分核和缓冲策略。 */

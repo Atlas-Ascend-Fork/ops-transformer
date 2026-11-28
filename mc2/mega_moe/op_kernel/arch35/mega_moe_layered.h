@@ -39,7 +39,7 @@
 #include "../arch35_92/stage/mega_moe_token_quant.h"
 #include "../arch35_92/stage/mega_moe_expert_count.h"
 #include "../arch35_92/mega_moe_vf/mega_moe_layered_vf.h"
-#include "../arch35_92/stage/mega_moe_layered_combine_send.h"
+#include "../arch35_92/stage/layered/mega_moe_layered_combine_send.h"
 #include "stage/mega_moe_gmm1_activation_arch35.h"
 #include "stage/mega_moe_gmm2_combine_arch35.h"
 
@@ -68,6 +68,9 @@ struct DispatchRoundSlice {
 #define TemplateMegaMoeLayeredTypeFunc \
     XType, OutputType, TopkWeightsType, Weight1Type, QuantMode, Weight1Format, Weight2Format, CommPolicy
 
+template <TemplateMegaMoeLayeredTypeClass>
+class MegaMoeLayeredWave;
+
 template <typename XType, typename OutputType, typename TopkWeightsType, typename Weight1Type, int32_t QuantMode,
           int32_t Weight1Format, int32_t Weight2Format, typename CommPolicy = LayeredUrmaComm>
 class MegaMoeLayered {
@@ -89,9 +92,13 @@ public:
                                 GM_ADDR sharedWeight1, GM_ADDR sharedWeight2, GM_ADDR sharedWeightScales1,
                                 GM_ADDR sharedWeightScales2, GM_ADDR yOut, GM_ADDR expertTokenNumsOut,
                                 GM_ADDR workspaceGM, const MegaMoeTilingData* tilingData);
-    __aicore__ inline void Process();
 
 private:
+    friend class MegaMoeLayeredWave<TemplateMegaMoeLayeredTypeFunc>;
+
+    template <typename Wave>
+    __aicore__ inline void ProcessWave(Wave& wave);
+
     __aicore__ inline void PrepareWithoutSharedExpert();
     __aicore__ inline void PrepareSharedExpertInput(uint32_t maskWorkerCount);
     __aicore__ inline void DrainAndUnlockMaskChannels(const AivJobContext& job);
@@ -171,18 +178,7 @@ private:
     __aicore__ inline uint32_t GetChannelOwnerBlock(uint32_t rank) const;
     __aicore__ inline bool IsChannelOwner(uint32_t rank) const;
     __aicore__ inline void PrepareExpertTokenCountTable();
-    __aicore__ inline void InitDispatchSourceReadyCache();
     __aicore__ inline void EnsureDispatchSourceReady(uint32_t relayRank, uint32_t srcServer);
-    __aicore__ inline ExpertTokenRange PlanTokenWave(const ExpertTokenPosition& begin, uint32_t groupTarget);
-    __aicore__ inline void AdjustStartBlockIdxForNextWave(const ExpertTokenRange& wave, uint32_t waveStartBlockIdx,
-                                                          uint32_t gmm1EndBlockIdx);
-    template <AddrUpdateMode Mode>
-    __aicore__ inline void ProcessGmmTokenRange(const ExpertTokenRange& range, ExpertLoopState& state,
-                                                GMMAddrInfo& addrInfo, int32_t& vecSetSyncCom);
-    __aicore__ inline void ProcessMoeExpertWaveLoop(ExpertLoopState& gmm1State, ExpertLoopState& gmm2State,
-                                                    GMMAddrInfo& gmm1AddrInfo, GMMAddrInfo& gmm2AddrInfo,
-                                                    int32_t& vecSetSyncCom, ExpertTokenRange currentWave);
-    __aicore__ inline void ProcessMoeExpertWave(Gmm1ActivationSync& gmm1ActivationSync);
     __aicore__ inline void DispatchBuffInit();
     __aicore__ inline void DispatchPrepareBuffInit();
     __aicore__ inline void SendAndQuantBuffInit(uint32_t maskWorkerCount);
@@ -222,7 +218,7 @@ private:
                                                   uint32_t rowOffsetInExpert = 0U);
     template <AddrUpdateMode Mode>
     __aicore__ inline void UpdateSharedGlobalBuffer(GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state);
-    __aicore__ inline void Unpermute(const MegaMoeUnpermuteBufferConfig& bufferConfig);
+    __aicore__ inline void Unpermute();
     __aicore__ inline void InitCombineBuffers();
     __aicore__ inline void ProcessCombineTokenRange(const ExpertLoopState& waveBeginState,
                                                     const ExpertTokenRange& range);
@@ -387,6 +383,7 @@ private:
                   "Layered Hcomm UB must hold 256 three-WQE token records");
     // Wave 通信需要同时保留批量描述符和其他搬运张量，因此动态 UB 预算止于批量区起点。
     static constexpr uint32_t COMM_WORK_UB_LIMIT = LAYERED_HCOMM_BATCH_UB_OFFSET - DISPATCH_READY_CACHE_RESERVE_BYTES;
+    static constexpr uint32_t SEND_MASK_HCOMM_UB_OFFSET = 0U;
     // AIV1 私有持久存储；Dispatch/Combine 临时缓冲的上界不得进入该区域。
     __ubuf__ uint32_t* dispatchSourceReadyBitsUb_ = nullptr;
     // 一级按协议长度限制连续分块；二级按最多 256 条 metadata 组织批次。
@@ -431,81 +428,6 @@ private:
     BlockEpilogue epilogueOp_;
     SharedBlockEpilogue sharedEpilogueOp_;
 };
-
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline uint32_t MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::GetChannelOwnerBlock(uint32_t rank) const
-{
-    // 通道归属在逻辑 AIC 域内计算，不使用物理 AIV 编号。
-    // Dispatch 两级通信、Combine 写入和最终 Drain 共用此映射，且只有归属 block 的 AIV1 可访问通道。
-    return rank % blockNum_;
-}
-
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline bool MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::IsChannelOwner(uint32_t rank) const
-{
-    if constexpr (g_coreType == AIC) {
-        return false;
-    }
-    return subBlockIdx_ == 1U && blockIdx_ == GetChannelOwnerBlock(rank);
-}
-
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitDispatchSourceReadyCache()
-{
-    if constexpr (g_coreType == AIV) {
-        if (subBlockIdx_ != 1U) {
-            return;
-        }
-        const uint32_t readyCacheBytes =
-            Ops::Base::CeilAlign(Ops::Base::CeilDiv(worldSize_, uint32_t(32)) * static_cast<uint32_t>(sizeof(uint32_t)),
-                                 static_cast<uint32_t>(ALIGN_32));
-        dispatchSourceReadyBitsUb_ =
-            reinterpret_cast<__ubuf__ uint32_t*>(LAYERED_USABLE_UB_BYTES - DISPATCH_READY_CACHE_RESERVE_BYTES);
-        // 每次调用初始化一次；计数表准备阶段的 V→S 同步保证首次标量访问前清零完成。
-        // 后续仅由当前 AIV1 以标量方式读写。
-        const uint32_t cacheWordCount = readyCacheBytes / sizeof(uint32_t);
-        LocalTensor<uint32_t> readyCache(TPosition::VECCALC, reinterpret_cast<uint64_t>(dispatchSourceReadyBitsUb_),
-                                         cacheWordCount);
-        Duplicate<uint32_t>(readyCache, 0U, cacheWordCount);
-    }
-}
-
-// 完整计数表在入口就绪后，按调用方给定的 M-group 预算规划 wave。
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline ExpertTokenRange MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PlanTokenWave(
-    const ExpertTokenPosition& begin, uint32_t groupTarget)
-{
-    const auto& workspace = params_.workspace.layout;
-    const auto& buffer = params_.workspace.base;
-    ExpertTokenRange range{begin, begin};
-    uint32_t groupCount = 0U;
-    const BlockWorkspaceContext countWorkspace{blockIdx_, aicNum_};
-    while (range.end.expertIdx < moeExpertPerRank_ && groupCount < groupTarget) {
-        uint32_t rowCount = GetExpertTokenCountFromWorkspace(workspace.routing.recvCounts.get_ptr(buffer),
-                                                             countWorkspace, moeExpertPerRank_, range.end.expertIdx);
-        if (rowCount == 0U || range.end.tokenIndexInExpert >= rowCount) {
-            ++range.end.expertIdx;
-            range.end.tokenIndexInExpert = 0U;
-            continue;
-        }
-        AdvanceExpertTokenPositionInWave<GMM1_TILE_M>(rowCount, groupTarget, groupCount, range.end);
-    }
-    return range;
-}
-
-// 保持原 GMM wave 的固定角色共振：GMM1 结束时若整体 block 游标发生偏移，则下一 wave 从该偏移开始。
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::AdjustStartBlockIdxForNextWave(
-    const ExpertTokenRange& wave, uint32_t waveStartBlockIdx, uint32_t gmm1EndBlockIdx)
-{
-    if constexpr (MoeQuantConfig::AXW_MODE != AxWMode::A8W4) {
-        const bool hasNextWave = wave.end.expertIdx < moeExpertPerRank_;
-        const bool fixedRoleResonance = startBlockIdx_ == waveStartBlockIdx && gmm1EndBlockIdx != waveStartBlockIdx;
-        if (hasNextWave && fixedRoleResonance) {
-            startBlockIdx_ = gmm1EndBlockIdx;
-        }
-    }
-}
 
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::InitTopology(const MegaMoeTilingData* tilingData)
@@ -649,255 +571,6 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Init(
     params_.expertTokenNumsOutGmAddr = expertTokenNumsOut;
     params_.probsGmAddr = topkWeights;
     InitWorkspace(workspaceGM, tilingData);
-}
-
-// ==================================================================================
-// UpdateGmm1GlobalBuffer：绑定 GMM1 的输入、权重、输出、tile 状态与 flag 地址。
-// ==================================================================================
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::UpdateGmm1GlobalBuffer(
-    GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state, uint32_t rowOffsetInExpert)
-{
-    const bool TopkWeightsPrefetch = params_.tilingData->isTopkWeightsPrefetch;
-    const auto& workspace = params_.workspace.layout;
-    const auto& buffer = params_.workspace.base;
-    // 地址 = 专家前累计行数 + 专家内偏移；行相关项随行数线性增长，权重/flag 只依赖专家序号。
-    const uint64_t rows = static_cast<uint64_t>(state.globalTokenStartIndex) + rowOffsetInExpert;
-    const uint32_t expertIdx = state.expertIdx;
-    const uint64_t n = static_cast<uint64_t>(Get<N_VALUE>(state.problemShape));
-    const uint64_t k = static_cast<uint64_t>(Get<K_VALUE>(state.problemShape));
-    const uint64_t activationCols = n / activationOutputDivisor_;
-    const uint64_t scaleK = Ops::Base::CeilDiv(k, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
-    const uint64_t scaleN =
-        Ops::Base::CeilDiv(activationCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
-    // guard 与 WorkspaceInfo 分配条件一致，由量化配置和 tiling data 保证同步。
-    if (MoeQuantConfig::AXW_MODE == AxWMode::A8W4 || TopkWeightsPrefetch) {
-        gmmAddrInfo.gmm1OutGlobal = workspace.routed.gmm1Output.get_ptr(buffer) + rows * n * sizeof(bfloat16_t);
-    }
-    gmmAddrInfo.metaInfoGlobal = workspace.routing.receivedTokenMetadata.get_ptr(buffer);
-    gmmAddrInfo.aGlobal =
-        workspace.routed.gmm1Input.data.get_ptr(buffer) + rows * k / A_ELEMS_PER_BYTE * sizeof(ActivationType);
-    gmmAddrInfo.aScaleGlobal =
-        workspace.routed.gmm1Input.scale.get_ptr(buffer) + rows * scaleK * sizeof(QuantScaleOutType);
-    gmmAddrInfo.bGlobal =
-        GetExpertWeightAddr<Weight1Type>(params_.bGmAddr, params_.tilingData->isPerExpertWeightTensor, expertIdx,
-                                         static_cast<uint64_t>(expertIdx) * (n * k / B_ELEMS_PER_BYTE));
-    gmmAddrInfo.bScaleGlobal =
-        GetExpertWeightAddr<QuantScaleOutType>(params_.bScaleGmAddr, params_.tilingData->isPerExpertWeightTensor,
-                                               expertIdx, static_cast<uint64_t>(expertIdx) * (n * scaleK));
-    if constexpr (g_coreType == AIV) {
-        AscendC::Coord<int64_t, int64_t> vecBaseOffset{static_cast<int64_t>(rows * activationCols / C_ELEMS_PER_BYTE),
-                                                       static_cast<int64_t>(rows * scaleN)};
-        epilogueOp_.UpdateGlobalAddr(vecBaseOffset);
-    }
-    gmmAddrInfo.activationToGmm2Flag = (__gm__ int32_t*)workspace.sync.activationReady.get_ptr(buffer) +
-                                       static_cast<uint64_t>(expertIdx) * dispatchFlagSlotsPerExpert_ +
-                                       static_cast<uint64_t>(rowOffsetInExpert / GMM1_TILE_M) * INT_CACHELINE;
-    // wave-grain dispatch-gmm1 flag: per-expert 步长是 dispatchFlagSlotsPerExpert_,而不是 INT_CACHELINE。
-    gmmAddrInfo.dispatchToGmm1Flag = (__gm__ int32_t*)workspace.sync.dispatchReady.get_ptr(buffer) +
-                                     static_cast<uint64_t>(expertIdx) * dispatchFlagSlotsPerExpert_ +
-                                     static_cast<uint64_t>(rowOffsetInExpert / GMM1_TILE_M) * INT_CACHELINE;
-}
-
-// ==================================================================================
-// UpdateGmm2GlobalBuffer：绑定 GMM2 的激活输入、权重、输出与 flag 地址。
-// ==================================================================================
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::UpdateGmm2GlobalBuffer(
-    GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state, uint32_t rowOffsetInExpert)
-{
-    const auto& workspace = params_.workspace.layout;
-    const auto& buffer = params_.workspace.base;
-    // 地址 = 专家前累计行数 + 专家内偏移；行相关项随行数线性增长，权重/flag 只依赖专家序号。
-    const uint64_t rows = static_cast<uint64_t>(state.globalTokenStartIndex) + rowOffsetInExpert;
-    const uint32_t expertIdx = state.expertIdx;
-    const uint64_t k = static_cast<uint64_t>(Get<K_VALUE>(state.problemShape));
-    const uint64_t activationCols = static_cast<uint64_t>(Get<N_VALUE>(state.problemShape)) / activationOutputDivisor_;
-    const uint64_t scaleN =
-        Ops::Base::CeilDiv(activationCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
-    gmmAddrInfo.gmm2OutGlobal = workspace.routed.gmm2Output.get_ptr(buffer) + rows * k * sizeof(bfloat16_t);
-    gmmAddrInfo.metaInfoGlobal =
-        workspace.routing.receivedTokenMetadata.get_ptr(buffer) + rows * META_INFO_SIZE * sizeof(int32_t);
-    gmmAddrInfo.aGlobal = workspace.routed.gmm2Input.data.get_ptr(buffer) +
-                          rows * activationCols / C_ELEMS_PER_BYTE * sizeof(ActivationType);
-    gmmAddrInfo.aScaleGlobal =
-        workspace.routed.gmm2Input.scale.get_ptr(buffer) + rows * scaleN * sizeof(QuantScaleOutType);
-    gmmAddrInfo.bGlobal =
-        GetExpertWeightAddr<Weight1Type>(params_.b2GmAddr, params_.tilingData->isPerExpertWeightTensor, expertIdx,
-                                         static_cast<uint64_t>(expertIdx) * (k * activationCols / B_ELEMS_PER_BYTE));
-    gmmAddrInfo.bScaleGlobal =
-        GetExpertWeightAddr<QuantScaleOutType>(params_.b2ScaleGmAddr, params_.tilingData->isPerExpertWeightTensor,
-                                               expertIdx, static_cast<uint64_t>(expertIdx) * (k * scaleN));
-    gmmAddrInfo.gmm2CombineSyncCounter = (__gm__ int32_t*)workspace.urma.sync.combineCounters.get_ptr(buffer) +
-                                         static_cast<uint64_t>(expertIdx) *
-                                             params_.tilingData->compute.combineSyncSlotCountPerExpert *
-                                             static_cast<uint64_t>(INT_CACHELINE);
-    gmmAddrInfo.gmm2CombineLogicalCoreCount = blockNum_;
-    gmmAddrInfo.activationToGmm2Flag = (__gm__ int32_t*)workspace.sync.activationReady.get_ptr(buffer) +
-                                       static_cast<uint64_t>(expertIdx) * dispatchFlagSlotsPerExpert_ +
-                                       static_cast<uint64_t>(rowOffsetInExpert / GMM1_TILE_M) * INT_CACHELINE;
-    gmmAddrInfo.dispatchToGmm1Flag = (__gm__ int32_t*)workspace.sync.dispatchReady.get_ptr(buffer) +
-                                     static_cast<uint64_t>(expertIdx) * dispatchFlagSlotsPerExpert_ +
-                                     static_cast<uint64_t>(rowOffsetInExpert / GMM1_TILE_M) * INT_CACHELINE;
-}
-
-// ==================================================================================
-// UpdateSharedGlobalBuffer：共享 GMM1 复用本卡量化记录，其余中间结果使用 shared workspace。
-// ==================================================================================
-template <TemplateMegaMoeLayeredTypeClass>
-template <AddrUpdateMode Mode>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::UpdateSharedGlobalBuffer(
-    GMMAddrInfo& gmmAddrInfo, const ExpertLoopState& state)
-{
-    const auto& workspace = params_.workspace.layout;
-    const auto& buffer = params_.workspace.base;
-    const uint64_t rows = static_cast<uint64_t>(state.globalTokenStartIndex);
-    const uint32_t expertIdx = state.expertIdx;
-
-    if constexpr (Mode == AddrUpdateMode::GMM1) {
-        const uint64_t n = static_cast<uint64_t>(Get<N_VALUE>(state.problemShape));
-        const uint64_t k = static_cast<uint64_t>(Get<K_VALUE>(state.problemShape));
-        const uint64_t scaleK = Ops::Base::CeilDiv(k, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
-        gmmAddrInfo.aGlobal = params_.communication.layout.dispatchReceive.get_ptr(params_.communication.base) +
-                              RelayTokenOffset(serverId_, 0U);
-        gmmAddrInfo.aScaleGlobal = gmmAddrInfo.aGlobal + mxQuantTokenAlignBytes_;
-        if constexpr (MoeQuantConfig::AXW_MODE == AxWMode::A8W4) {
-            gmmAddrInfo.gmm1OutGlobal = workspace.shared.gmm1Output.get_ptr(buffer) + rows * n * sizeof(bfloat16_t);
-        }
-        gmmAddrInfo.bGlobal =
-            GetExpertWeightAddr<Weight1Type>(params_.sharedBGmAddr, params_.tilingData->isPerExpertWeightTensor,
-                                             expertIdx, static_cast<uint64_t>(expertIdx) * (n * k / B_ELEMS_PER_BYTE));
-        gmmAddrInfo.bScaleGlobal = GetExpertWeightAddr<QuantScaleOutType>(
-            params_.sharedBScaleGmAddr, params_.tilingData->isPerExpertWeightTensor, expertIdx,
-            static_cast<uint64_t>(expertIdx) * (n * scaleK));
-    } else if constexpr (Mode == AddrUpdateMode::GMM2) {
-        const uint64_t k = static_cast<uint64_t>(Get<K_VALUE>(state.problemShape));
-        const uint64_t activationCols =
-            static_cast<uint64_t>(Get<N_VALUE>(state.problemShape)) / activationOutputDivisor_;
-        const uint64_t scaleN =
-            Ops::Base::CeilDiv(activationCols, static_cast<uint64_t>(MXFP_DIVISOR_SIZE)) * MXFP_MULTI_BASE_SIZE;
-        const uint32_t tokenGroupCount = Ops::Base::CeilDiv(m_, COMBINE_TOKEN_GROUP_SIZE);
-        gmmAddrInfo.sharedExpertGmm2TileCounter =
-            workspace.urma.sync.sharedGmm2Tiles.template get_ptr<int32_t>(buffer) +
-            static_cast<uint64_t>(expertIdx) * tokenGroupCount * INT_CACHELINE;
-        gmmAddrInfo.gmm2OutGlobal = workspace.shared.gmm2Output.get_ptr(buffer) + rows * k * sizeof(bfloat16_t);
-        gmmAddrInfo.aGlobal = workspace.shared.gmm2Input.data.get_ptr(buffer) +
-                              rows * activationCols / C_ELEMS_PER_BYTE * sizeof(ActivationType);
-        gmmAddrInfo.aScaleGlobal =
-            workspace.shared.gmm2Input.scale.get_ptr(buffer) + rows * scaleN * sizeof(QuantScaleOutType);
-        gmmAddrInfo.bGlobal = GetExpertWeightAddr<Weight1Type>(
-            params_.sharedB2GmAddr, params_.tilingData->isPerExpertWeightTensor, expertIdx,
-            static_cast<uint64_t>(expertIdx) * (k * activationCols / B_ELEMS_PER_BYTE));
-        gmmAddrInfo.bScaleGlobal = GetExpertWeightAddr<QuantScaleOutType>(
-            params_.sharedB2ScaleGmAddr, params_.tilingData->isPerExpertWeightTensor, expertIdx,
-            static_cast<uint64_t>(expertIdx) * (k * scaleN));
-    }
-    gmmAddrInfo.activationToGmm2Flag = nullptr;
-    gmmAddrInfo.dispatchToGmm1Flag = nullptr;
-}
-
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::LockOwnedRemoteChannels()
-{
-    if constexpr (g_coreType == AIC) {
-        return;
-    }
-    if (subBlockIdx_ != 1U) {
-        return;
-    }
-    // Wave 内 Dispatch 一级写、Dispatch 二级读和 Combine 写始终使用同一套固定归属核。
-    // 在 Wave 开始前一次性取得全部归属通道，整个 Wave 内不重复 Lock/Unlock。
-    for (uint32_t rank = 0; rank < worldSize_; ++rank) {
-        if (rank == rankId_ || !IsChannelOwner(rank)) {
-            continue;
-        }
-        comm_.Lock(comm_.GetChannel(rank));
-    }
-}
-
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::DrainAndUnlockOwnedRemoteChannels()
-{
-    if constexpr (g_coreType == AIC) {
-        return;
-    }
-    if (subBlockIdx_ != 1U) {
-        return;
-    }
-    // Drain 全部归属远端 rank，不能只处理最后一个专家的活跃 rank。
-    // 否则当最后一个专家无 token 时，早期专家的 WriteNbi 可能遗留到流水结束之后。
-    // Drain 后 Unlock 发布通道 counter 并释放所有权，允许后续同步阶段换核使用同一通道。
-    for (uint32_t rank = 0; rank < worldSize_; ++rank) {
-        if (rank == rankId_ || !IsChannelOwner(rank)) {
-            continue;
-        }
-        Channel channel = comm_.GetChannel(rank);
-        BatchHandle batchHandle = comm_.MakeBatchHandle(channel, GetRankWinAddrWithOffset(rank, 0));
-        // 同一通道可能同时残留 Dispatch 一级和 Combine 的已提交批次，统一按批量句柄等待完成。
-        comm_.Drain(batchHandle);
-        comm_.Unlock(channel);
-    }
-}
-
-/* 全部 AIV 每次同步均推进本核轮次，保持参与范围改变时的通知值一致。 */
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline int32_t MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::AdvanceRankSyncRound()
-{
-    const auto& peermem = params_.communication.layout;
-    const auto& commBuffer = params_.communication.base;
-    auto* syncCount =
-        reinterpret_cast<__gm__ int32_t*>(peermem.syncCount.get_ptr(commBuffer) + aivCoreIdx_ * PEERMEM_SYNC_SLOT_SIZE);
-    const int32_t syncRound = GmRead(syncCount) + 1;
-    GmWrite(syncCount, syncRound);
-    GmDataBarrier(); // 通信引擎读取本核通知槽前，确保旁路 GM 写已完成。
-    return syncRound;
-}
-
-/* 常规入口：推进本核轮次，再执行本核负责的跨卡通信。 */
-template <TemplateMegaMoeLayeredTypeClass>
-template <bool ReuseChannelLock>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CrossRankSync(const AivJobContext& syncJob)
-{
-    const auto syncRound = AdvanceRankSyncRound();
-    CrossRankSync<ReuseChannelLock>(syncJob, syncRound);
-}
-
-/* 按 syncJob 分担跨卡通知和等待；本卡会合及参与核选择由调用处编排。 */
-template <TemplateMegaMoeLayeredTypeClass>
-template <bool ReuseChannelLock>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::CrossRankSync(const AivJobContext& syncJob,
-                                                                                     int32_t syncRound)
-{
-    const auto& peermem = params_.communication.layout;
-    const auto& commBuffer = params_.communication.base;
-    auto* syncRank = reinterpret_cast<__gm__ int32_t*>(peermem.rankSync.get_ptr(commBuffer));
-    auto* syncCount =
-        reinterpret_cast<__gm__ int32_t*>(peermem.syncCount.get_ptr(commBuffer) + aivCoreIdx_ * PEERMEM_SYNC_SLOT_SIZE);
-    // 先向本 AIV 负责的所有 peer 发出通知，再进入等待。256P 场景下可同时维持多个
-    // channel 在途，避免原实现逐 peer“写-等-Drain”造成的串行握手。
-    for (uint32_t rankIndex = syncJob.jobIndex; rankIndex < worldSize_; rankIndex += syncJob.totalJobs) {
-        if (rankIndex == rankId_) {
-            continue;
-        }
-        Channel channel = comm_.GetChannel(rankIndex);
-        if constexpr (!ReuseChannelLock) {
-            // 同步任务的通道归属可能与 Wave 不同，先由当前通信核取得锁。
-            comm_.Lock(channel);
-        }
-        __gm__ int32_t* syncRemoteAddr = (__gm__ int32_t*)(g_winRankAddr_[rankIndex]) + rankId_ * 16;
-        comm_.WriteNbi(channel, (GM_ADDR)syncRemoteAddr, (GM_ADDR)syncCount, static_cast<int64_t>(sizeof(int32_t)));
-    }
-    for (uint32_t rankIndex = syncJob.jobIndex; rankIndex < worldSize_; rankIndex += syncJob.totalJobs) {
-        if (rankIndex == rankId_) {
-            continue;
-        }
-        Channel channel = comm_.GetChannel(rankIndex);
-        auto syncCheck = syncRank + rankIndex * 16;
-        WaitUntilGmFlagEquals(syncCheck, syncRound);
-        // 等待完成后释放通道锁：复用调用方已持有的锁时由本函数统一释放，否则释放本函数取得的锁。
-        comm_.Drain(channel);
-        comm_.Unlock(channel);
-    }
 }
 
 // ===============================================================
@@ -1095,178 +768,6 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessSh
 }
 
 template <TemplateMegaMoeLayeredTypeClass>
-template <AddrUpdateMode Mode>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessGmmTokenRange(
-    const ExpertTokenRange& range, ExpertLoopState& state, GMMAddrInfo& addrInfo, int32_t& vecSetSyncCom)
-{
-    uint32_t expertEnd = range.end.expertIdx + (range.end.tokenIndexInExpert == 0U ? 0U : 1U);
-    for (uint32_t expertIdx = range.begin.expertIdx; expertIdx < expertEnd; ++expertIdx) {
-        uint32_t rowBegin = expertIdx == range.begin.expertIdx ? range.begin.tokenIndexInExpert : 0U;
-        if (rowBegin == 0U) {
-            // 按专家顺序推进累计行偏移：空专家直接跳过，非空专家把 M 换成当前专家行数。
-            const BlockWorkspaceContext countWorkspace{blockIdx_, aicNum_};
-            const uint32_t expertTokenCount = GetExpertTokenCountFromWorkspace(
-                params_.workspace.layout.routing.recvCounts.get_ptr(params_.workspace.base), countWorkspace,
-                moeExpertPerRank_, expertIdx);
-            UpdateExpertLoopState(state, expertIdx, expertTokenCount);
-            if (expertTokenCount == 0U) {
-                continue;
-            }
-        }
-        uint32_t expertRows = static_cast<uint32_t>(Get<M_VALUE>(state.problemShape));
-        uint32_t rowEnd = expertIdx == range.end.expertIdx ? range.end.tokenIndexInExpert : expertRows;
-        if (rowEnd <= rowBegin) {
-            continue;
-        }
-        // 临时计算视图只切 M；地址由 globalTokenStartIndex + 专家内偏移在绑定时计算。
-        ExpertLoopState problem = state;
-        Get<M_VALUE>(problem.problemShape) = static_cast<int64_t>(rowEnd - rowBegin);
-        if constexpr (Mode == AddrUpdateMode::GMM1) {
-            UpdateGmm1GlobalBuffer(addrInfo, problem, rowBegin);
-            GroupMatmulWithActivationQuant(addrInfo, problem, expertIdx, vecSetSyncCom, rowBegin);
-        } else {
-            UpdateGmm2GlobalBuffer(addrInfo, problem, rowBegin);
-            GroupMatmulWithCombine(addrInfo, problem, expertRows, rowBegin);
-        }
-    }
-}
-
-// =================================================================================================
-// ProcessMoeExpertWaveLoop：按“计算 wave + 通信 wave”两层结构滚动执行 GMM1/GMM2/Combine。
-//   - 计算 wave（GMM wave）：一次 GMM1 + GMM2，消费一个 ExpertTokenRange；
-//   - 通信 wave：固定每个 comm wave 承载 gmmWavesPerCommunicationWave = ceil(gmmWaveCount /
-//     MAX_COMMUNICATION_WAVES) 个计算 wave；最后不足的部分作为尾块；
-//     每个 comm wave 执行一次 Dispatch 接收、gmmWavesPerCommunicationWave 个计算 wave、一次 Combine 提交；
-//   - currentWave：下一个待执行的计算 wave；communicationWave：当前通信 wave 已覆盖的范围；
-//   - combineWaveBeginState：通信 wave 起点处的 GMM2 游标；
-//   - gmmWavesPerCommunicationWave 只在 AIV1 上计算，AIC/AIV0 固定为 1；
-//   - AIV1 是唯一通信/Combine 角色；AIC/AIV0 只执行计算 wave。
-// =================================================================================================
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessMoeExpertWaveLoop(
-    ExpertLoopState& gmm1State, ExpertLoopState& gmm2State, GMMAddrInfo& gmm1AddrInfo, GMMAddrInfo& gmm2AddrInfo,
-    int32_t& vecSetSyncCom, ExpertTokenRange currentWave)
-{
-    constexpr uint32_t MAX_COMMUNICATION_WAVES = 2U;
-    uint64_t gmmWavesPerCommunicationWave = 1U;
-    if constexpr (g_coreType == AIV) {
-        if (subBlockIdx_ == 1U) {
-            // 固定每个 comm wave 承载 gmmWavesPerCommunicationWave = ceil(gmmWaveCount / MAX_COMMUNICATION_WAVES)，
-            // 最后不足的部分作为尾块。
-            gmmWavesPerCommunicationWave =
-                gmmWaveCount_ == 0U ? 1U : (gmmWaveCount_ - 1U) / MAX_COMMUNICATION_WAVES + 1U;
-        }
-    }
-    // [prefetch] 通信预取：AIV1 在第 1 段计算期间就把第 2 段的 Dispatch 接收发起，隐藏远端到达延迟。
-    // dispatchRevData 按 maxOutputSize 整块分配，提前接收不增加内存占用。
-    bool dispatchPrefetched = false;
-    while (currentWave.begin.expertIdx < moeExpertPerRank_) {
-        // 外层通信 wave：AIV1 一次性接收一个 comm wave 的 gmmWavesPerCommunicationWave 个计算 wave 范围；
-        // AIC/AIV0 固定按 1 个计算 wave 处理。
-        ExpertTokenRange communicationWave = currentWave;
-        ExpertLoopState combineWaveBeginState = gmm2State;
-        if constexpr (g_coreType == AIV) {
-            if (subBlockIdx_ == 1U) {
-                // 整个 comm wave 的 M-group 预算 = gmmWavesPerCommunicationWave * mGroupsPerWave_；
-                // 该值受 maxOutputSize/256 约束，uint32 足够。
-                const uint64_t groupTarget64 = gmmWavesPerCommunicationWave * static_cast<uint64_t>(mGroupsPerWave_);
-                if (!dispatchPrefetched) {
-                    ExpertTokenRange dispatchWave =
-                        PlanTokenWave(currentWave.begin, static_cast<uint32_t>(groupTarget64));
-                    ReceiveDispatchTokenRange(dispatchWave);
-                    // 预取下一通信 wave 的范围：从本段起点按计算 wave 推进 gmmWavesPerCommunicationWave 次。
-                    ExpertTokenRange nextWaveBegin = currentWave;
-                    for (uint64_t i = 0U; i < gmmWavesPerCommunicationWave; ++i) {
-                        nextWaveBegin = PlanTokenWave(nextWaveBegin.end, mGroupsPerWave_);
-                    }
-                    if (nextWaveBegin.begin.expertIdx < moeExpertPerRank_) {
-                        ExpertTokenRange nextDispatch =
-                            PlanTokenWave(nextWaveBegin.begin, static_cast<uint32_t>(groupTarget64));
-                        ReceiveDispatchTokenRange(nextDispatch);
-                        dispatchPrefetched = true;
-                    }
-                }
-            }
-        }
-
-        // 内层计算 wave：满 comm wave 预算的 gmmWavesPerCommunicationWave 个走正常路径，
-        // 最后不足的部分作为尾块处理。
-        for (uint64_t gmmWaveIdx = 0U;
-             gmmWaveIdx < gmmWavesPerCommunicationWave && currentWave.begin.expertIdx < moeExpertPerRank_;
-             ++gmmWaveIdx) {
-            // 单个计算 wave：GMM1、GMM2 使用同一 token 区间；GMM1 结束后的 block 游标用于固定角色共振。
-            const uint32_t waveStartBlockIdx = startBlockIdx_;
-            ProcessGmmTokenRange<AddrUpdateMode::GMM1>(currentWave, gmm1State, gmm1AddrInfo, vecSetSyncCom);
-            const uint32_t gmm1EndBlockIdx = startBlockIdx_;
-            ProcessGmmTokenRange<AddrUpdateMode::GMM2>(currentWave, gmm2State, gmm2AddrInfo, vecSetSyncCom);
-            communicationWave.end = currentWave.end;
-            AdjustStartBlockIdxForNextWave(currentWave, waveStartBlockIdx, gmm1EndBlockIdx);
-            // 当前计算 wave 的 GMM 调用结束后，再推进下一计算 wave 的边界。
-            currentWave = PlanTokenWave(currentWave.end, mGroupsPerWave_);
-        }
-
-        // 通信 wave 尾：以当前通信 wave 范围执行 Combine；WQE 可跨计算 wave 累积，尾批在此提交。
-        ProcessCombineTokenRange(combineWaveBeginState, communicationWave);
-    }
-}
-
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessMoeExpertWave(
-    Gmm1ActivationSync& gmm1ActivationSync)
-{
-    const auto& workspace = params_.workspace.layout;
-    const auto& buffer = params_.workspace.base;
-    DispatchBuffInit();
-    InitCombineBuffers();
-    InitDispatchSourceReadyCache();
-    LockOwnedRemoteChannels();
-    ExpertLoopState gmm1State = CreateExpertLoopState(commonConfig_);
-    ExpertLoopState gmm2State = CreateExpertLoopState(commonConfig_);
-    GMMAddrInfo gmm1AddrInfo{};
-    GMMAddrInfo gmm2AddrInfo{};
-    // GM 结果交接使用逐 tile 硬同步；A8W4 由 AIV1 激活，generic 的 topk 提前乘权路径由 AIV0 激活。
-    if (MoeQuantConfig::AXW_MODE == AxWMode::A8W4 || params_.tilingData->isTopkWeightsPrefetch) {
-        gmm1AddrInfo.gmm1ActivationSync = &gmm1ActivationSync;
-    }
-    int32_t vecSetSyncCom = 0;
-    if constexpr (g_coreType == AIV) {
-        if (subBlockIdx_ == 1U) {
-            // 量化和 Combine 元数据已准备完成，一级通信异步提交，
-            // 使本 Server 的二级接收能够与其重叠。
-            StartInterServerDispatch();
-            PrepareExpertTokenCountTable();
-        }
-    }
-    // 每个 block 只等待一次完整计数表；输入数据仍按 256 行分组独立等待就绪。
-    if (moeExpertPerRank_ != 0U && (g_coreType == AIC || subBlockIdx_ == 0U)) {
-        const BlockWorkspaceContext countWorkspace{blockIdx_, aicNum_};
-        WaitForMoeExpertTokenCountReady(workspace.sync.countsReady.get_ptr(buffer), countWorkspace, 0U);
-    }
-    ExpertTokenRange currentWave = PlanTokenWave({}, mGroupsPerWave_);
-
-    if constexpr (MoeQuantConfig::AXW_MODE == AxWMode::A8W4) {
-        if (g_coreType == AscendC::AIC || GetSubBlockIdx() == 0U) {
-            typename A8W4Config::BlockContext::Block block(params_.tilingData->a8w4L1Layout);
-            blockContext_ = {&block};
-            ProcessMoeExpertWaveLoop(gmm1State, gmm2State, gmm1AddrInfo, gmm2AddrInfo, vecSetSyncCom, currentWave);
-            blockContext_ = {};
-        } else {
-            ProcessMoeExpertWaveLoop(gmm1State, gmm2State, gmm1AddrInfo, gmm2AddrInfo, vecSetSyncCom, currentWave);
-        }
-    } else {
-        ProcessMoeExpertWaveLoop(gmm1State, gmm2State, gmm1AddrInfo, gmm2AddrInfo, vecSetSyncCom, currentWave);
-    }
-
-    // UB 双缓冲在本阶段回收；GM 硬同步的剩余 ACK 由 Process 末尾统一回收。
-    if constexpr (MoeQuantConfig::AXW_MODE != AxWMode::A8W4) {
-        if (!params_.tilingData->isTopkWeightsPrefetch) {
-            Gmm1UbActivationSync::EndSync(vecSetSyncCom, gmm1PingPongIdx_);
-        }
-    }
-    gmm1PingPongIdx_ = 0U;
-}
-
-template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PrepareWithoutSharedExpert()
 {
     const AivJobContext maskJob{aivCoreIdx_, blockAivNum_};
@@ -1319,20 +820,6 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PrepareSh
     PipeFence<PIPE_MTE3, PIPE_MTE2, SYNC_EVENT_ID3>(); // 清零搬出读完 UB 后，允许量化搬入覆盖。
     DispatchPrepareBuffInit();
     QuantizeLocalTokensToRelay();
-}
-
-/* mask 发送核交还通道锁，供首次跨卡同步重新分配 owner。 */
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::DrainAndUnlockMaskChannels(
-    const AivJobContext& job)
-{
-    for (uint32_t rankIndex = job.jobIndex; rankIndex < worldSize_; rankIndex += job.totalJobs) {
-        if (rankIndex != rankId_) {
-            Channel channel = comm_.GetChannel(rankIndex);
-            comm_.Drain(channel);  // 等待该通道的 mask 写请求完成。
-            comm_.Unlock(channel); // 交还通道，供同步核重新持锁。
-        }
-    }
 }
 
 template <TemplateMegaMoeLayeredTypeClass>
@@ -1393,6 +880,22 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::PrepareWi
     }
 }
 
+/* 中继阶段由 AIV0 建表并归约，AIV1 等待各 Server 归约完成后回传。 */
+template <TemplateMegaMoeLayeredTypeClass>
+__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCombineRelay()
+{
+    if (subBlockIdx_ == 0U) {
+        if constexpr (MoeQuantConfig::AXW_MODE != AxWMode::A8W8) {
+            // 无建表任务或空列表也会直接由 Scalar 缓存 count，先完成 Prologue 的旧 UB 访问。
+            PipeFence<PIPE_V, PIPE_S, SYNC_EVENT_ID2>();
+        }
+        BuildServerCombineLists();
+        ReduceRelayContributions();
+    } else {
+        SendServerCombineResults();
+    }
+}
+
 /* AIV1 收尾通信，全部 AIV 会合后分担跨卡同步，确认 Combine 结果可读。 */
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::FinishCombineAndSync()
@@ -1441,7 +944,8 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessSh
 }
 
 template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
+template <typename Wave>
+__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessWave(Wave& wave)
 {
     int64_t oriOverflowMode = GetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>();
     SetCtrlSpr<OVERFLOW_MODE_CTRL, OVERFLOW_MODE_CTRL>(0);
@@ -1454,7 +958,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
 
     // URMA Layered 的 A8W8、A4W4 和 A8W4 共用同一专家 Wave 状态机。
     Gmm1ActivationSync gmm1ActivationSync(MoeQuantConfig::AXW_MODE == AxWMode::A8W4 ? 1U : 0U, GmmEventPair::MOE_GMM1);
-    ProcessMoeExpertWave(gmm1ActivationSync);
+    wave.ProcessMoeExpertWave(gmm1ActivationSync);
 
     if constexpr (g_coreType == AIV) {
         if (IsCombineServerDedupEnabled()) {
@@ -1477,12 +981,7 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
     }
     if constexpr (g_coreType == AIV) {
         // 全部 AIV 均分 token；共享结果的组就绪等待在 Unpermute 内部完成。
-        if (IsCombineServerDedupEnabled()) {
-            UnpermuteServerCombine();
-        } else {
-            const auto unpermuteBufferConfig = UnpermuteBuffInit();
-            Unpermute(unpermuteBufferConfig);
-        }
+        Unpermute();
     }
     // 出口排空剩余 ACK；共享 GMM1 的 AIC 已在共享 GMM2 前完成回收。
     sharedGmm1ActivationSync.EndSync();
@@ -1495,9 +994,13 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::Process()
 } // namespace MegaMoeImpl
 
 #if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL)
-#include "../arch35_92/stage/mega_moe_layered_dispatch.h"
-#include "../arch35_92/stage/mega_moe_layered_combine.h"
-#include "../arch35_92/stage/mega_moe_layered_combine_relay.h"
+#include "stage/layered/mega_moe_layered_gmm_arch35.h"
+#include "stage/layered/mega_moe_layered_sync_arch35.h"
+#include "../arch35_92/stage/layered/mega_moe_layered_dispatch.h"
+#include "../arch35_92/stage/layered/mega_moe_layered_combine.h"
+#include "../arch35_92/stage/layered/mega_moe_layered_combine_relay.h"
+#include "../arch35_92/stage/layered/mega_moe_layered_unpermute.h"
+#include "stage/layered/mega_moe_layered_unpermute_arch35.h"
 #endif
 
 #undef TemplateMegaMoeLayeredTypeClass

@@ -13,10 +13,10 @@
 
 #include <type_traits>
 
-#include "../common/mega_moe_utils.h"
-#include "../common/mega_moe_copy.h"
-#include "../common/mega_moe_sync.h"
-#include "../common/mega_moe_mxfp8_utils.h"
+#include "../../common/mega_moe_utils.h"
+#include "../../common/mega_moe_copy.h"
+#include "../../common/mega_moe_sync.h"
+#include "../../common/mega_moe_mxfp8_utils.h"
 
 #if defined(ENABLE_MEGA_MOE_LAYERED_KERNEL)
 namespace MegaMoeImpl::CombineImpl {

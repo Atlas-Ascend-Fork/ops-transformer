@@ -11,7 +11,7 @@
 #ifndef MEGA_MOE_LAYERED_COMBINE_RELAY_H
 #define MEGA_MOE_LAYERED_COMBINE_RELAY_H
 
-#include "../mega_moe_vf/mega_moe_layered_vf.h"
+#include "../../mega_moe_vf/mega_moe_layered_vf.h"
 
 namespace MegaMoeImpl {
 
@@ -193,23 +193,7 @@ __aicore__ inline uint64_t MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::WaitF
     return totalTokenCount;
 }
 
-/* 中继阶段由 AIV0 建表并归约，AIV1 等待各 Server 归约完成后回传。 */
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ProcessCombineRelay()
-{
-    if (subBlockIdx_ == 0U) {
-        if constexpr (MoeQuantConfig::AXW_MODE != AxWMode::A8W8) {
-            // 无建表任务或空列表也会直接由 Scalar 缓存 count，先完成 Prologue 的旧 UB 访问。
-            PipeFence<PIPE_V, PIPE_S, SYNC_EVENT_ID2>();
-        }
-        BuildServerCombineLists();
-        ReduceRelayContributions();
-    } else {
-        SendServerCombineResults();
-    }
-}
-
-/* 分配 AIV0 中继归约任务和 UB，按 Server 列表范围分批处理有效 token。 */
+/* 分配中继归约任务和 UB，按 Server 列表范围分批处理有效 token。 */
 template <TemplateMegaMoeLayeredTypeClass>
 __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::ReduceRelayContributions()
 {
@@ -465,76 +449,6 @@ __aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::SendRelay
         }
         comm_.BatchCommit(batch);
     }
-}
-
-template <TemplateMegaMoeLayeredTypeClass>
-__aicore__ inline void MegaMoeLayered<TemplateMegaMoeLayeredTypeFunc>::UnpermuteServerCombine()
-{
-    const auto& workspace = params_.workspace.layout;
-    const auto& buffer = params_.workspace.base;
-    const auto& peermem = params_.communication.layout;
-    const auto& commBuffer = params_.communication.base;
-    const uint32_t floatBytes =
-        Ops::Base::CeilAlign(k_ * static_cast<uint32_t>(sizeof(float)), static_cast<uint32_t>(ALIGN_32));
-    LocalTensor<float> inputTensor(TPosition::VECIN, ALIGN_512, k_);
-    LocalTensor<float> sumTensor(TPosition::VECCALC, ALIGN_512 + floatBytes, k_);
-    LocalTensor<bfloat16_t> bf16Tensor(TPosition::VECIN, ALIGN_512 + 2U * floatBytes, k_);
-    __gm__ OutputType* outputGlobalTensor = nullptr;
-    outputGlobalTensor = reinterpret_cast<__gm__ OutputType*>(params_.y2GmAddr);
-    LocalTensor<OutputType> outputTensor = bf16Tensor.template ReinterpretCast<OutputType>();
-    __gm__ bfloat16_t* combineResultsGlobalTensor = nullptr;
-    combineResultsGlobalTensor = reinterpret_cast<__gm__ bfloat16_t*>(peermem.combineReceive.get_ptr(commBuffer));
-    __gm__ bfloat16_t* sharedResultsGlobalTensor = nullptr;
-    sharedResultsGlobalTensor = reinterpret_cast<__gm__ bfloat16_t*>(workspace.shared.gmm2Output.get_ptr(buffer));
-    const WorkRange tokenRange = GetBalancedWorkRange(m_, {.jobIndex = aivCoreIdx_, .totalJobs = blockAivNum_});
-    uint32_t readySharedGroup = UINT32_MAX; // 每次调用重新开始，不复用上轮就绪状态。
-    for (uint32_t tokenOffset = 0U; tokenOffset < tokenRange.count; ++tokenOffset) {
-        const uint32_t token = tokenRange.start + tokenOffset;
-        Duplicate(sumTensor, 0.0f, k_);
-        PipeFence<PIPE_MTE3, PIPE_V, SYNC_EVENT_ID2>();
-        // 预置 bf16 缓冲可搬入事件，Server 和共享专家循环共用此链。
-        PipeNotify<PIPE_V, PIPE_MTE2>(static_cast<event_t>(SYNC_EVENT_ID2));
-        for (uint32_t server = 0; server < serverNum_; ++server) {
-            auto bitmapPtr = reinterpret_cast<__gm__ uint64_t*>(peermem.sourceReady.get_ptr(commBuffer) +
-                                                                RelayFlagOffset(server, token));
-            if (static_cast<uint32_t>(GmRead(bitmapPtr)) == 0U) {
-                continue;
-            }
-            PipeWait<PIPE_V, PIPE_MTE2>(static_cast<event_t>(SYNC_EVENT_ID2));
-            CopyGmToUb(reinterpret_cast<__ubuf__ bfloat16_t*>((bf16Tensor).GetPhyAddr()),
-                       (combineResultsGlobalTensor + ((static_cast<uint64_t>(token) * serverNum_ + server) * k_)),
-                       k_ * static_cast<uint32_t>(sizeof(bfloat16_t)));
-            PipeFence<PIPE_MTE2, PIPE_V, SYNC_EVENT_ID2>();
-            Cast(inputTensor, bf16Tensor, RoundMode::CAST_NONE, k_);
-            PipeNotify<PIPE_V, PIPE_MTE2>(static_cast<event_t>(SYNC_EVENT_ID2));
-            Add(sumTensor, sumTensor, inputTensor, k_);
-        }
-        const uint32_t tokenGroup = token / COMBINE_TOKEN_GROUP_SIZE;
-        const bool waitForGroup = tokenGroup != readySharedGroup;
-        for (uint32_t expert = 0; expert < sharedExpertNum_; ++expert) {
-            if (waitForGroup) {
-                WaitForSharedExpertResult(expert, token);
-            }
-            PipeWait<PIPE_V, PIPE_MTE2>(static_cast<event_t>(SYNC_EVENT_ID2));
-            CopyGmToUb(reinterpret_cast<__ubuf__ bfloat16_t*>((bf16Tensor).GetPhyAddr()),
-                       (sharedResultsGlobalTensor + ((static_cast<uint64_t>(expert) * m_ + token) * k_)),
-                       k_ * static_cast<uint32_t>(sizeof(bfloat16_t)));
-            PipeFence<PIPE_MTE2, PIPE_V, SYNC_EVENT_ID2>();
-            Cast(inputTensor, bf16Tensor, RoundMode::CAST_NONE, k_);
-            PipeNotify<PIPE_V, PIPE_MTE2>(static_cast<event_t>(SYNC_EVENT_ID2));
-            Add(sumTensor, sumTensor, inputTensor, k_);
-        }
-        readySharedGroup = tokenGroup;
-        // 回收最后一个事件；没有输入时回收入口预置事件。
-        PipeWait<PIPE_V, PIPE_MTE2>(static_cast<event_t>(SYNC_EVENT_ID2));
-        Cast(outputTensor, sumTensor, RoundMode::CAST_RINT, k_);
-        PipeFence<PIPE_V, PIPE_MTE3, SYNC_EVENT_ID2>();
-        CopyUbToGm((outputGlobalTensor + (static_cast<uint64_t>(token) * k_)),
-                   reinterpret_cast<__ubuf__ OutputType*>((outputTensor).GetPhyAddr()),
-                   k_ * static_cast<uint32_t>(sizeof(OutputType)));
-    }
-    // 返回前等待本核最后一次输出搬运完成。
-    PipeFence<PIPE_MTE3, PIPE_S, SYNC_EVENT_ID2>();
 }
 
 } // namespace MegaMoeImpl

@@ -63,11 +63,21 @@ static ge::graphStatus CheckAndSetIndependentAttrs(const gert::TilingContext* co
                     OP_LOGE_WITHOUT_REPORT(nodeName, "topology type is invalid."), return ge::GRAPH_FAILED);
     OP_TILING_CHECK(CheckAndSetEpWorldSizeAttr(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "EP world size is invalid."), return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(CheckDedupRequestAttrs(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
-                    OP_LOGE_WITHOUT_REPORT(nodeName, "communication algorithm is invalid."), return ge::GRAPH_FAILED);
+    if (tilingData->compute.topoType == TOPO_TYPE_MTE) {
+        OP_TILING_CHECK(CheckDedupRequestAttrs(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "communication algorithm is invalid."),
+                        return ge::GRAPH_FAILED);
+    }
     OP_TILING_CHECK(CheckAndSetQuantModeAttrs(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "quantization mode attributes are invalid."),
                     return ge::GRAPH_FAILED);
+    if (tilingData->compute.topoType == TOPO_TYPE_URMA) {
+        const auto* mode = context->GetAttrs()->GetAttrPointer<int64_t>(config.attrCombineCommModeIndex);
+        OP_TILING_CHECK(CheckAndSetUrmaDedupMode(mode == nullptr ? COMBINE_COMM_MODE_NO_DEDUP : *mode, tilingData,
+                                                 nodeName) != ge::GRAPH_SUCCESS,
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "communication dedup mode request is invalid."),
+                        return ge::GRAPH_FAILED);
+    }
     OP_TILING_CHECK(CheckActivationParams(context, config, tilingData->compute.topoType, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "activation parameters are invalid."), return ge::GRAPH_FAILED);
     SetActivationAttrParams(context, config, tilingData);
@@ -126,11 +136,8 @@ static ge::graphStatus CheckAndSetCapacityAttrs(const gert::TilingContext* conte
  * dispatch 位保持内部自动裁决。必须在 bs/h/topK/epWorldSize/numMaxTokensPerRank 全部写入
  * tilingData 之后、workspace 与自适应 buffer 规划之前调用（两者按 dedupMode 定布局）。
  */
-static ge::graphStatus SetDedupModeParams(const gert::TilingContext* context, const MegaMoeConfig& config,
-                                          MegaMoeTilingData* tilingData, const char* nodeName)
+static ge::graphStatus SetMteDedupModeParams(MegaMoeTilingData* tilingData, const char* nodeName)
 {
-    (void)context;
-    (void)config;
     OP_TILING_CHECK(ApplyDedupPrepassChunkGuard(tilingData, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "dedup prepass capacity check failed."), return ge::GRAPH_FAILED);
     ApplyDedupBenefitGate(tilingData, nodeName);
@@ -139,25 +146,60 @@ static ge::graphStatus SetDedupModeParams(const gert::TilingContext* context, co
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus CheckArchitectureCapability(gert::TilingContext* context, const MegaMoeTilingData* tilingData,
-                                                   const char* nodeName)
+static ge::graphStatus CheckArchitectureCapability(gert::TilingContext* context, const MegaMoeConfig& config,
+                                                   const MegaMoeTilingData* tilingData, const char* nodeName)
 {
-    auto supportedGmmMode = [](uint8_t mode) {
-        return mode == GMM_MODE_A8W8_ND || mode == GMM_MODE_A8W8_NZ || mode == GMM_MODE_A8W4_NZ ||
-               mode == GMM_MODE_A4W4_ND || mode == GMM_MODE_A4W4_NZ;
-    };
-    bool moeSupported = supportedGmmMode(tilingData->moeGmmMode);
-    bool sharedSupported = tilingData->compute.sharedExpertNum == 0U || supportedGmmMode(tilingData->sharedGmmMode);
-    OP_TILING_CHECK(tilingData->compute.topoType != TOPO_TYPE_MTE || !moeSupported || !sharedSupported,
-                    OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
-                        nodeName, "topo_type, weight1/weight2 dtype and format",
-                        "[topo_type=" + std::to_string(tilingData->compute.topoType) +
-                            ", moeGmmMode=" + std::to_string(tilingData->moeGmmMode) + ", sharedGmmMode=" +
-                            (tilingData->compute.sharedExpertNum == 0U ? std::string("absent") :
-                                                                         std::to_string(tilingData->sharedGmmMode)) +
-                            "]",
-                        "arch92 only supports A8W8/A8W4/A4W4 GMM modes with topo_type=MTE(0)"),
-                    return ge::GRAPH_FAILED);
+    if (tilingData->compute.topoType == TOPO_TYPE_URMA) {
+        const auto& compute = tilingData->compute;
+        constexpr int64_t MAX_URMA_AIC_NUM = 64;
+        OP_TILING_CHECK(
+            compute.aicNum > MAX_URMA_AIC_NUM || compute.aicNum != tilingData->blockAivNum,
+            OP_LOGE_FOR_INVALID_VALUE(
+                nodeName, "aicNum/aivNum",
+                (std::to_string(compute.aicNum) + "/" + std::to_string(tilingData->blockAivNum)).c_str(),
+                ("equal (1C1V), with at most " + std::to_string(MAX_URMA_AIC_NUM) + " AICs for Arch92 URMA").c_str()),
+            return ge::GRAPH_FAILED);
+        OP_TILING_CHECK(compute.topK > compute.moeExpertPerRank * compute.epWorldSize,
+                        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                            nodeName, "topk_ids", ("dim1=" + std::to_string(compute.topK)).c_str(),
+                            ("topK (dim 1 of topk_ids) must not exceed total MoE experts (" +
+                             std::to_string(compute.moeExpertPerRank * compute.epWorldSize) + ")")
+                                .c_str()),
+                        return ge::GRAPH_FAILED);
+        const auto xDesc = context->GetInputDesc(config.xIndex);
+        OP_TILING_CHECK(
+            xDesc == nullptr || xDesc->GetDataType() != ge::DT_BF16 ||
+                tilingData->dispatchQuantMode != DISPATCH_QUANT_MODE_MXFP ||
+                (tilingData->moeGmmMode != GMM_MODE_A8W8_ND && tilingData->moeGmmMode != GMM_MODE_A8W8_NZ &&
+                 tilingData->moeGmmMode != GMM_MODE_A8W4_NZ && tilingData->moeGmmMode != GMM_MODE_A4W4_ND &&
+                 tilingData->moeGmmMode != GMM_MODE_A4W4_NZ),
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                nodeName, "x dtype, dispatch_quant_mode, weight1/weight2 dtype and format",
+                "[x dtype=" + (xDesc == nullptr ? std::string("absent") : Ops::Base::ToString(xDesc->GetDataType())) +
+                    ", dispatch_quant_mode=" + std::to_string(tilingData->dispatchQuantMode) +
+                    ", moeGmmMode=" + std::to_string(tilingData->moeGmmMode) + "]",
+                "Arch92 URMA requires BF16 input, internal MX quantization (dispatch_quant_mode=4) "
+                "and A8W8/A8W4/A4W4 expert modes"),
+            return ge::GRAPH_FAILED);
+    } else {
+        auto supportedGmmMode = [](uint8_t mode) {
+            return mode == GMM_MODE_A8W8_ND || mode == GMM_MODE_A8W8_NZ || mode == GMM_MODE_A8W4_NZ ||
+                   mode == GMM_MODE_A4W4_ND || mode == GMM_MODE_A4W4_NZ;
+        };
+        bool moeSupported = supportedGmmMode(tilingData->moeGmmMode);
+        bool sharedSupported = tilingData->compute.sharedExpertNum == 0U || supportedGmmMode(tilingData->sharedGmmMode);
+        OP_TILING_CHECK(
+            tilingData->compute.topoType != TOPO_TYPE_MTE || !moeSupported || !sharedSupported,
+            OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(
+                nodeName, "topo_type, weight1/weight2 dtype and format",
+                "[topo_type=" + std::to_string(tilingData->compute.topoType) +
+                    ", moeGmmMode=" + std::to_string(tilingData->moeGmmMode) + ", sharedGmmMode=" +
+                    (tilingData->compute.sharedExpertNum == 0U ? std::string("absent") :
+                                                                 std::to_string(tilingData->sharedGmmMode)) +
+                    "]",
+                "arch92 only supports A8W8/A8W4/A4W4 GMM modes with topo_type=MTE(0)"),
+            return ge::GRAPH_FAILED);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -166,11 +208,10 @@ static ge::graphStatus CheckArchitectureCapability(gert::TilingContext* context,
  */
 static MegaMoeDispatchBufferConfig CalcDispatchBufferConfig(const MegaMoeTilingData* tilingData,
                                                             uint32_t activationElementsPerByte,
-                                                            uint32_t availableUbBytes)
+                                                            uint32_t availableUbBytes, uint32_t fixedBufferBytes = 0U)
 {
     MegaMoeDispatchBufferConfig bufferConfig{};
     // 调用方传入的预算已扣除 UB 尾部常驻表。
-    uint32_t fixedBufferBytes = 0U;
     // 去重模式：批内 desc/扇出 meta/活跃表暂存紧跟 dispatch 固定区尾动态落位，
     // 此处先从自适应预算里扣掉预留，保证暂存区在任意合法规格下不越 UB。
     if (tilingData->compute.dedupMode != 0 && tilingData->compute.topoType == TOPO_TYPE_MTE) {
@@ -320,16 +361,14 @@ static void SetTopkValidIndexBufferConfigs(MegaMoeTilingData* tilingData, uint32
 static void SetCclLayoutParams(MegaMoeTilingData* tilingData)
 {
     auto& compute = tilingData->compute;
+    const bool isUrma = compute.topoType == TOPO_TYPE_URMA;
     const uint32_t rankNumPerServer =
         tilingData->rankNumPerServer == 0U || tilingData->rankNumPerServer > compute.epWorldSize ?
             static_cast<uint32_t>(compute.epWorldSize) :
             tilingData->rankNumPerServer;
     compute.serverNum = ops::CeilDiv(compute.epWorldSize, static_cast<int64_t>(rankNumPerServer));
-    compute.activationOutputDivisor = GetActivationOutputDivisor(tilingData->actMode);
-    compute.combineQuant = tilingData->combineQuantMode != COMBINE_NO_QUANT;
-    compute.topkWeightsPrefetch = tilingData->isTopkWeightsPrefetch;
     compute.reserveGmm1Output = true;
-    compute.reserveCumsum = false;
+    compute.reserveCumsum = isUrma;
     LayoutArch92::SetTensorStorage(compute, tilingData->moeGmmMode, tilingData->sharedGmmMode);
     // Arch92 keeps its existing full-row workspace and execution policy.
     compute.ring = {};
@@ -372,43 +411,86 @@ static ge::graphStatus SetAdaptiveBufferConfigs(const gert::TilingContext* conte
                                                 const MegaMoeExpertParams& expertParams, MegaMoeTilingData* tilingData,
                                                 uint32_t availableUbBytes, const char* nodeName)
 {
+    // 两种拓扑都需要先解析属性，再计算 CCL 布局。
+    auto& compute = tilingData->compute;
+    compute.activationOutputDivisor = GetActivationOutputDivisor(tilingData->actMode);
+    compute.combineQuant = tilingData->combineQuantMode != COMBINE_NO_QUANT;
+    compute.topkWeightsPrefetch = tilingData->isTopkWeightsPrefetch;
+
     auto topKWeightsDesc = context->GetInputDesc(config.topkWeightsIndex);
     auto xDesc = context->GetInputDesc(config.xIndex);
-    OP_TILING_CHECK(
-        availableUbBytes < ARCH92_FIXED_WORK_UB_BYTES + ARCH92_DISPATCH_TABLE_BYTES,
-        ReportPlatformTilingFailure(
-            nodeName, "Arch92 UB is insufficient: available=" + std::to_string(availableUbBytes) +
-                          " bytes, fixed working area=" + std::to_string(ARCH92_FIXED_WORK_UB_BYTES) +
-                          " bytes, dispatch tables=" + std::to_string(ARCH92_DISPATCH_TABLE_BYTES) + " bytes."),
-        return ge::GRAPH_FAILED);
-    const uint32_t dispatchUbBytes = (availableUbBytes - ARCH92_DISPATCH_TABLE_BYTES) /
-                                     static_cast<uint32_t>(ALIGN_512) * static_cast<uint32_t>(ALIGN_512);
-    tilingData->dispatchTableUbBaseAddr = dispatchUbBytes;
+    if (compute.topoType == TOPO_TYPE_URMA) {
+        compute.combineSyncSlotCountPerExpert = CalcCombineSyncSlotCountPerExpert(tilingData);
+        SetCclLayoutParams(tilingData);
+        const auto& comm = tilingData->comm;
+        tilingData->dispatchTableUbBaseAddr = 0U;
+        OP_TILING_CHECK(availableUbBytes < ARCH92_LAYERED_UB_BYTES,
+                        ReportPlatformTilingFailure(
+                            nodeName, "Arch92 URMA UB is insufficient: available=" + std::to_string(availableUbBytes) +
+                                          " bytes, required=" + std::to_string(ARCH92_LAYERED_UB_BYTES) + " bytes."),
+                        return ge::GRAPH_FAILED);
+        constexpr uint32_t workUbBytes = ARCH92_LAYERED_WORK_UB_BYTES;
+        const uint64_t fixedBytes =
+            ops::CeilAlign(static_cast<uint64_t>(compute.epWorldSize * compute.moeExpertPerRank) * sizeof(int32_t),
+                           static_cast<uint64_t>(ALIGN_32)) +
+            ops::CeilAlign(static_cast<uint64_t>(compute.moeExpertPerRank) * sizeof(int32_t),
+                           static_cast<uint64_t>(ALIGN_32)) +
+            ALIGN_512;
+        const uint64_t minimumDispatchBytes =
+            fixedBytes +
+            static_cast<uint64_t>(5U) *
+                CalcQuantTokenScaleBytes(compute.h, comm.elemsPerByte, compute.topK, comm.topkWeightsPrefetch) +
+            L1_TILE_M_256 * ALIGN_32 + ALIGN_256 * 2U * sizeof(int32_t) + ALIGN_32;
+        OP_TILING_CHECK(minimumDispatchBytes > workUbBytes,
+                        ReportPlatformTilingFailure(
+                            nodeName, "Arch92 URMA UB is insufficient for Dispatch routing tables: available=" +
+                                          std::to_string(workUbBytes) +
+                                          " bytes, required=" + std::to_string(minimumDispatchBytes) + " bytes."),
+                        return ge::GRAPH_FAILED);
+        tilingData->dispatchBufferConfig =
+            CalcDispatchBufferConfig(tilingData, comm.elemsPerByte, workUbBytes, static_cast<uint32_t>(fixedBytes));
+        SetPreQuantTileConfig(tilingData, false, 1U, topKWeightsDesc->GetDataType());
+        SetTopkValidIndexBufferConfigs(tilingData, 1U, 1U, false, workUbBytes);
+        SetUrmaUnpermuteBufferConfigs(tilingData, topKWeightsDesc->GetDataType(), ARCH92_LAYERED_UB_BYTES,
+                                      ARCH92_LAYERED_UB_BYTES);
+    } else {
+        OP_TILING_CHECK(
+            availableUbBytes < ARCH92_FIXED_WORK_UB_BYTES + ARCH92_DISPATCH_TABLE_BYTES,
+            ReportPlatformTilingFailure(
+                nodeName, "Arch92 UB is insufficient: available=" + std::to_string(availableUbBytes) +
+                              " bytes, fixed working area=" + std::to_string(ARCH92_FIXED_WORK_UB_BYTES) +
+                              " bytes, dispatch tables=" + std::to_string(ARCH92_DISPATCH_TABLE_BYTES) + " bytes."),
+            return ge::GRAPH_FAILED);
+        const uint32_t dispatchUbBytes = (availableUbBytes - ARCH92_DISPATCH_TABLE_BYTES) /
+                                         static_cast<uint32_t>(ALIGN_512) * static_cast<uint32_t>(ALIGN_512);
+        tilingData->dispatchTableUbBaseAddr = dispatchUbBytes;
 
-    uint32_t activationElementsPerByte = expertParams.moe.quantOutDtype == ge::DT_FLOAT4_E2M1 ? 2U : 1U;
-    uint32_t sharedActivationElementsPerByte = expertParams.shared.quantOutDtype == ge::DT_FLOAT4_E2M1 ? 2U : 1U;
-    // 所有 AIV 核共用同一套 dispatch UB 配置，该布局与分核方式无关。
-    // 若 kernel 改为按核拆分 tensor 或调整 copyTmp 槽位布局，需同步更新此处计算。
-    tilingData->dispatchBufferConfig = CalcDispatchBufferConfig(tilingData, activationElementsPerByte, dispatchUbBytes);
+        uint32_t activationElementsPerByte = expertParams.moe.quantOutDtype == ge::DT_FLOAT4_E2M1 ? 2U : 1U;
+        uint32_t sharedActivationElementsPerByte = expertParams.shared.quantOutDtype == ge::DT_FLOAT4_E2M1 ? 2U : 1U;
+        // 所有 AIV 核共用同一套 dispatch UB 配置，该布局与分核方式无关。
+        // 若 kernel 改为按核拆分 tensor 或调整 copyTmp 槽位布局，需同步更新此处计算。
+        tilingData->dispatchBufferConfig =
+            CalcDispatchBufferConfig(tilingData, activationElementsPerByte, dispatchUbBytes);
 
-    // 先于 topK 有效下标配置写入：CalcHostFlagElementCount 会读这个字段累加 flag 区大小，
-    // 该依赖只经 tilingData 传递，调换顺序会静默改变 flag 区尺寸。
-    tilingData->compute.combineSyncSlotCountPerExpert = CalcCombineSyncSlotCountPerExpert(tilingData);
-    SetCclLayoutParams(tilingData);
+        // 先于 topK 有效下标配置写入：CalcHostFlagElementCount 会读这个字段累加 flag 区大小，
+        // 该依赖只经 tilingData 传递，调换顺序会静默改变 flag 区尺寸。
+        tilingData->compute.combineSyncSlotCountPerExpert = CalcCombineSyncSlotCountPerExpert(tilingData);
+        SetCclLayoutParams(tilingData);
 
-    const bool isPreQuantizedX = xDesc != nullptr && IsPreQuantizedXType(xDesc->GetDataType());
-    SetPreQuantTileConfig(tilingData, isPreQuantizedX, activationElementsPerByte,
-                          topKWeightsDesc == nullptr ? ge::DT_FLOAT : topKWeightsDesc->GetDataType());
+        const bool isPreQuantizedX = xDesc != nullptr && IsPreQuantizedXType(xDesc->GetDataType());
+        SetPreQuantTileConfig(tilingData, isPreQuantizedX, activationElementsPerByte,
+                              topKWeightsDesc == nullptr ? ge::DT_FLOAT : topKWeightsDesc->GetDataType());
 
-    SetTopkValidIndexBufferConfigs(tilingData, activationElementsPerByte, sharedActivationElementsPerByte,
-                                   tilingData->compute.sharedInputIndependent == 1U, availableUbBytes);
+        SetTopkValidIndexBufferConfigs(tilingData, activationElementsPerByte, sharedActivationElementsPerByte,
+                                       tilingData->compute.sharedInputIndependent == 1U, availableUbBytes);
 
-    ge::DataType topKWeightsDataType = topKWeightsDesc->GetDataType();
-    SetUnpermuteBufferConfigs(tilingData, topKWeightsDataType, availableUbBytes,
-                              UnpermuteBufferPolicy::SEPARATE_DEQUANTIZATION);
-    const uint32_t rowAlignment = tilingData->comm.combineRowAlignmentBytes;
-    OP_LOGI(nodeName, "Arch92 Combine row alignment=%u bytes, packet mode=%u, RSW=off; local writes=NORMAL",
-            rowAlignment, rowAlignment != 0U ? CommPacketArch92::ROW_MODE : 0U);
+        ge::DataType topKWeightsDataType = topKWeightsDesc->GetDataType();
+        SetUnpermuteBufferConfigs(tilingData, topKWeightsDataType, availableUbBytes,
+                                  UnpermuteBufferPolicy::SEPARATE_DEQUANTIZATION);
+        const uint32_t rowAlignment = tilingData->comm.combineRowAlignmentBytes;
+        OP_LOGI(nodeName, "Arch92 Combine row alignment=%u bytes, packet mode=%u, RSW=off; local writes=NORMAL",
+                rowAlignment, rowAlignment != 0U ? CommPacketArch92::ROW_MODE : 0U);
+    }
     return ge::GRAPH_SUCCESS;
 }
 
@@ -515,9 +597,9 @@ static ge::graphStatus CommitTilingResult(gert::TilingContext* context, const Me
                                         l1Size, tilingData->a8w4L1Layout, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "calculate A8W4 L1 layout failed"), return ge::GRAPH_FAILED);
 
-    const auto workspaceLayout =
-        LayoutArch92::MakeWorkspaceLayout(tilingData->compute, tilingData->moeGmmMode, tilingData->sharedGmmMode,
-                                          tilingData->comm.combineRowAlignmentBytes != 0U);
+    const auto workspaceLayout = LayoutArch92::MakeWorkspaceLayout(
+        tilingData->compute, tilingData->moeGmmMode, tilingData->sharedGmmMode,
+        tilingData->comm.combineRowAlignmentBytes != 0U, tilingData->compute.topoType == TOPO_TYPE_URMA);
     // Preserve Arch92's existing FP8-sized admission bound for packed FP4 records.
     auto capacityComm = tilingData->comm;
     capacityComm.elemsPerByte = 1U;
@@ -525,6 +607,13 @@ static ge::graphStatus CommitTilingResult(gert::TilingContext* context, const Me
     OP_TILING_CHECK(CheckCclBufferCapacity(context, config, tilingData, workspaceLayout, nodeName, &capacityComm) !=
                         ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "CCL buffer capacity is insufficient."), return ge::GRAPH_FAILED);
+    if (tilingData->compute.topoType == TOPO_TYPE_URMA) {
+        const auto requiredWindowBytes = MemoryLayoutDetail::CeilAlign(
+            CalcCclComputeOffset(tilingData->comm) + workspaceLayout.workspaceSize, MemoryLayoutDetail::ALIGN_512);
+        OP_LOGI(nodeName, "Arch92 URMA Wave/ACK: AIC=%ld AIV=%u servers=%ld workspace=%ld requiredWindow=%ld",
+                tilingData->compute.aicNum, tilingData->blockAivNum, tilingData->compute.serverNum,
+                workspaceLayout.workspaceSize, requiredWindowBytes);
+    }
     OP_TILING_CHECK(SetWorkspace(context, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "Tiling set workspace failed."), return ge::GRAPH_FAILED);
 
@@ -584,15 +673,17 @@ ge::graphStatus MegaMoeTilingFuncImplArch92(gert::TilingContext* context, MegaMo
 
     // 通信去重：请求位落库 + per-shape 收益/容量门。prepass 容量护栏要读 numMaxTokensPerRank，
     // 故必须排在容量属性落库之后；CCL 窗口下界在收益门确定最终布局后于 CommitTilingResult 中检查。
-    OP_TILING_CHECK(SetDedupModeParams(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
-                    OP_LOGE_WITHOUT_REPORT(nodeName, "dedup mode params are invalid."), return ge::GRAPH_FAILED);
+    if (tilingData->compute.topoType == TOPO_TYPE_MTE) {
+        OP_TILING_CHECK(SetMteDedupModeParams(tilingData, nodeName) != ge::GRAPH_SUCCESS,
+                        OP_LOGE_WITHOUT_REPORT(nodeName, "dedup mode params are invalid."), return ge::GRAPH_FAILED);
+    }
 
     // 平台与资源规划。
     uint32_t aicNum = 0U;
     uint64_t ubSize = 0U;
     OP_TILING_CHECK(CheckAndSetPlatformParams(context, tilingData, aicNum, ubSize, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "platform parameters are invalid."), return ge::GRAPH_FAILED);
-    OP_TILING_CHECK(CheckArchitectureCapability(context, tilingData, nodeName) != ge::GRAPH_SUCCESS,
+    OP_TILING_CHECK(CheckArchitectureCapability(context, config, tilingData, nodeName) != ge::GRAPH_SUCCESS,
                     OP_LOGE_WITHOUT_REPORT(nodeName, "architecture capability is invalid."), return ge::GRAPH_FAILED);
 
     SetWaveParams(tilingData, aicNum);

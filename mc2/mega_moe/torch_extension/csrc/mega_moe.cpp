@@ -843,7 +843,7 @@ MemoryBudgetParams BuildMemoryBudgetParams(int64_t epWorldSize, int64_t moeExper
                                            int64_t numTopk, int64_t h, int64_t intermediateHidden,
                                            int64_t maxRecvTokenNum, int64_t topkWeightsType, int64_t serverNum,
                                            int64_t combineQuantMode, int64_t combineCommMode,
-                                           aclDataType dispatchQuantOutDtype)
+                                           aclDataType dispatchQuantOutDtype, int64_t maxAicNum = 36)
 {
     MemoryBudgetParams budget{};
     auto& params = budget.compute;
@@ -857,7 +857,7 @@ MemoryBudgetParams BuildMemoryBudgetParams(int64_t epWorldSize, int64_t moeExper
     params.bs = numMaxTokensPerRank;
     params.moeExpertPerRank = moeExpertNum / epWorldSize;
     params.epWorldSize = epWorldSize;
-    params.aicNum = 36;
+    params.aicNum = maxAicNum;
     params.sharedExpertNum = 4;
     // 创建窗口时尚未知激活类型，按 GELU 的较窄 GMM1 输出取较大的 wave 行预算。
     // GMM1 结果宽度仍按门控激活的两倍 intermediateHidden 预留。
@@ -1019,7 +1019,6 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
                                         numTopk, permuteChunk);
     }
 
-    TORCH_CHECK(!isArch92 || serverNum == 0, "Ascend960DT MegaMoe only supports the MTE topology (server_num=0)");
     TORCH_CHECK(epWorldSize >= 2 && epWorldSize <= 1024, "ep_world_size only support in [2, 1024], but got ",
                 epWorldSize);
     TORCH_CHECK(hidden >= 1024 && hidden <= 8192, "hidden only support in [1024, 8192], but got ", hidden);
@@ -1068,6 +1067,24 @@ int64_t GetMegaMoeCclBufferSize(int64_t epWorldSize, int64_t moeExpertNum, int64
                     "BF16 CCL buffer sizing requires MTE (server_num=0) and combine_quant_mode=0.");
     }
     if (isArch92) {
+        if (serverNum > 0) {
+            TORCH_CHECK(dispatchQuantMode == 4, "Ascend960DT URMA requires internal MX quantization");
+            TORCH_CHECK(combineCommMode == 0 || combineCommMode == 2,
+                        "Ascend960DT URMA supports combine_comm_mode=0 or 2");
+            TORCH_CHECK(combineCommMode != 2 || combineQuantMode == 0,
+                        "Ascend960DT URMA combine_comm_mode=2 requires combine_quant_mode=0");
+            TORCH_CHECK(intermediateHidden >= 256 && intermediateHidden <= 8192 && intermediateHidden % 128 == 0,
+                        "Ascend960DT URMA intermediate_hidden must be a multiple of 128 in [256, 8192]");
+            TORCH_CHECK(numTopk <= moeExpertNum, "Ascend960DT URMA num_topk must not exceed moe_expert_num");
+            // 即使输入采用 FP4 打包，也按 FP8 估算窗口容量，与 Arch92 Host 校验上界一致。
+            const auto budget = BuildMemoryBudgetParams(
+                epWorldSize, moeExpertNum, numMaxTokensPerRank, numTopk, hidden, intermediateHidden, maxRecvTokenNum,
+                topkWeightsType, serverNum, combineQuantMode, combineCommMode, ACL_DT_UNDEFINED, ARCH92_MAX_AIC_NUM);
+            constexpr auto mode = MegaMoeImpl::GMM_MODE_A8W8_ND;
+            const auto layout = MegaMoeImpl::LayoutArch92::MakeWorkspaceLayout(
+                budget.compute, mode, mode, /*alignCombineRows=*/false, /*useLayeredUrmaLayout=*/true);
+            return CeilAlign(MegaMoeImpl::CalcCclComputeOffset(budget.comm) + layout.workspaceSize, ALIGN_512);
+        }
         // Arch92 沿用主线全量分配和 64 核容量上界，不接入 Arch35 的布局优化。
         const int64_t layoutTopkWeights = (topkWeightsType == 1 || combineCommMode == 1) ? 1 : 0;
         const uint32_t rowAlignment =

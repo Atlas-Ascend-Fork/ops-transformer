@@ -422,7 +422,7 @@ struct UrmaSyncBuffers {
 struct ServerCombineBuffers {
     GmBuffer tokenIds{};
     GmBuffer tokenBitmaps{};
-    GmBuffer completedCounts{};
+    GmBuffer completedCounts{}; // 按来源 Server 记录已归约并写回的 token 数。
 };
 
 struct UrmaBuffers {
@@ -802,7 +802,7 @@ private:
     HOST_DEVICE constexpr void InitializeServerCombineBuffers(const CclComputeLayoutParams& params, int64_t serverNum)
     {
         const int64_t capacity = params.numMaxTokensPerRank;
-        // 每个 Server 的完成计数独占 64B，仅本段在入口统一清零。
+        // 每个 Server 的完成计数独占 64 B，进入算子时清零。
         Allocate(urma.serverCombine.completedCounts,
                  MemoryLayoutDetail::CeilAlign(serverNum * MemoryLayoutDetail::INT_CACHELINE * SIZE_INT_32,
                                                MemoryLayoutDetail::ALIGN_512));
