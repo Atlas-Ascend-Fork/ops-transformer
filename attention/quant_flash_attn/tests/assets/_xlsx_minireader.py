@@ -11,8 +11,9 @@
 # -----------------------------------------------------------------------------------------------------------
 """极简 xlsx 读取器：zipfile + xml.dom.minidom，无 openPyXL/pandas 依赖。
 
-供 excel_to_csv.py 使用。默认读 xl/worksheets/sheet1.xml +
-xl/sharedStrings.xml，返回 list[dict[col_idx]→text]，空单元格 → None。
+供 excel_to_csv.py 使用。共享字符串表可选，优先读取 xl/sharedStrings.xml，
+缺失时查找工作簿关系中指向 ZIP 内现有部件的目标；可直接解析内联字符串和数值。
+返回 list[dict[col_idx]→text]，空单元格 → None。工作表部件缺失时回退到 openpyxl。
 
 支持指定 sheet:
   - load_sheet1(path)          → 读 sheet1 (向后兼容)
@@ -21,8 +22,10 @@ xl/sharedStrings.xml，返回 list[dict[col_idx]→text]，空单元格 → None
 """
 
 import re
+import posixpath
 import zipfile
 import xml.dom.minidom as minidom
+from typing import Optional
 
 _CELL_RE = re.compile(r"^([A-Z]+)(\d+)$")
 
@@ -67,6 +70,11 @@ def _cell_text(cell, shared_strings):
     v_els = cell.getElementsByTagName("v")
     if t == "s" and v_els:
         idx = int(v_els[0].firstChild.data)
+        if not 0 <= idx < len(shared_strings):
+            raise ValueError(
+                f"shared string index {idx} out of range for sharedStrings table "
+                f"of size {len(shared_strings)}"
+            )
         return shared_strings[idx]
     if t == "b" and v_els:
         return "True" if v_els[0].firstChild.data == "1" else "False"
@@ -139,6 +147,35 @@ def _parse_sheet_xml(sheet_xml: str, shared_strings: list) -> list:
     return parsed_rows
 
 
+def _resolve_shared_strings_path(z: zipfile.ZipFile) -> Optional[str]:
+    """Return the default table or its internal relationship target, if present."""
+    members = set(z.namelist())
+    default = "xl/sharedStrings.xml"
+    if default in members:
+        return default
+
+    try:
+        rels_xml = z.read("xl/_rels/workbook.xml.rels")
+    except KeyError:
+        return None
+
+    for rel in minidom.parseString(rels_xml).getElementsByTagName("Relationship"):
+        if not rel.getAttribute("Type").endswith("/sharedStrings"):
+            continue
+        if rel.getAttribute("TargetMode") == "External":
+            continue
+        target = rel.getAttribute("Target")
+        if not target:
+            continue
+        if target.startswith("/"):
+            part = posixpath.normpath(target).lstrip("/")
+        else:
+            part = posixpath.normpath(posixpath.join("xl", target))
+        if part in members:
+            return part
+    return None
+
+
 def load_sheet(xlsx_path: str, sheet=1):
     """读取指定 sheet。sheet 可为序号 (int, 1-based) 或 sheet 名 (str)。
 
@@ -147,19 +184,21 @@ def load_sheet(xlsx_path: str, sheet=1):
     """
     try:
         with zipfile.ZipFile(xlsx_path) as z:
-            ss_xml = z.read("xl/sharedStrings.xml").decode("utf-8")
+            ss_path = _resolve_shared_strings_path(z)
+            ss_xml = z.read(ss_path).decode("utf-8") if ss_path else None
             sheet_path = _resolve_sheet_xml(z, sheet)
             sheet_xml = z.read(sheet_path).decode("utf-8")
     except (KeyError, FileNotFoundError):
         return _load_sheet_openpyxl(xlsx_path, sheet)
 
-    ss_doc = minidom.parseString(ss_xml)
     shared_strings = []
-    for si in ss_doc.getElementsByTagName("si"):
-        ts = si.getElementsByTagName("t")
-        shared_strings.append(
-            "".join(t.firstChild.data if t.firstChild else "" for t in ts)
-        )
+    if ss_xml is not None:
+        ss_doc = minidom.parseString(ss_xml)
+        for si in ss_doc.getElementsByTagName("si"):
+            ts = si.getElementsByTagName("t")
+            shared_strings.append(
+                "".join(t.firstChild.data if t.firstChild else "" for t in ts)
+            )
     return _parse_sheet_xml(sheet_xml, shared_strings)
 
 
