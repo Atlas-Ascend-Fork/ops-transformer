@@ -13,6 +13,7 @@
  * \brief
  */
 #include "flash_attention_score_grad_tiling_normal_regbase.h"
+#include <algorithm>
 #include <limits>
 
 // Isolated candidate builds: 0 = frozen scheduling, 1 = D-A10 / P1, 2 = D-R / P2.
@@ -2152,8 +2153,84 @@ protected:
         return true;
     }
 
+    bool IsUnmaskedDenseTnd() const
+    {
+        const auto& p = fBaseParams;
+        return p.layoutType == INPUT_FORMAT_TND && p.attenMaskOptional == EMPTY_TENSOR &&
+               p.sparseMode == static_cast<int64_t>(SparseMode::NO_MASK) &&
+               p.sparseType == static_cast<uint8_t>(SparseType::DENSE) && p.s1Token >= p.s1 && p.s2Token >= p.s2 &&
+               p.b >= 32;
+    }
+
+    bool TrySplitDenseUnpad()
+    {
+        const auto& p = fBaseParams;
+        if (!IsUnmaskedDenseTnd() || p.aicNum == 0 || p.aicNum > CORE_LIST_NUM || p.s1CvInner <= 0 ||
+            p.cvS2Inner <= 0 || p.s1Inner <= 0 || p.s2Inner <= 0) {
+            return false;
+        }
+        int64_t heads, prefixS1Step, prefixS2Step;
+        if (__builtin_mul_overflow(p.n2, p.g, &heads) || heads <= 0 ||
+            __builtin_mul_overflow(p.s1Inner, S1CV_RATIO_DEFAULT, &prefixS1Step) ||
+            __builtin_mul_overflow(p.s2Inner, S2CV_RATIO_DEFAULT, &prefixS2Step)) {
+            return false;
+        }
+        // All tiles in each batch are valid. Build the exclusive end of each batch in block order.
+        std::vector<int64_t> ends(p.b);
+        int64_t total = 0;
+        for (int64_t b = 0; b < p.b; ++b) {
+            const int64_t q = p.actualSeqQlen[b];
+            const int64_t kv = p.actualSeqKvlen[b];
+            if (q < 0 || kv < 0 || q > p.s1 || kv > p.s2) {
+                return false;
+            }
+            const int64_t rows = q / p.s1CvInner + (q % p.s1CvInner != 0);
+            const int64_t cols = kv / p.cvS2Inner + (kv % p.cvS2Inner != 0);
+            int64_t count;
+            if (__builtin_mul_overflow(rows, cols, &count) || __builtin_mul_overflow(count, heads, &count) ||
+                __builtin_add_overflow(total, count, &total)) {
+                return false;
+            }
+            ends[b] = total;
+        }
+        if (total == 0) {
+            return false;
+        }
+        const int64_t factor = 1 + (total - 1) / static_cast<int64_t>(p.aicNum);
+        const int64_t cores = 1 + (total - 1) / factor;
+        fBaseParams.blockFactor = factor;
+        fBaseParams.maxValidBBLen = factor;
+        fBaseParams.blockOuter = cores;
+        std::fill(std::begin(fBaseParams.blockStarts), std::end(fBaseParams.blockStarts), 0);
+        std::fill(std::begin(fBaseParams.blockEnds), std::end(fBaseParams.blockEnds), 0);
+        uint64_t area = 0, alignedArea = 0, tiles = 0;
+        int64_t b = 0;
+        for (int64_t c = 1; c < cores; ++c) {
+            const int64_t cut = c * factor;
+            while (ends[b] <= cut) {
+                const uint64_t q = p.actualSeqQlen[b];
+                const uint64_t kv = p.actualSeqKvlen[b];
+                area += q * kv;
+                alignedArea += q * AlignTo(kv, static_cast<uint64_t>(ConstAxisTemplateNum::NUM16));
+                tiles += (q / prefixS1Step + (q % prefixS1Step != 0)) * (kv / prefixS2Step + (kv % prefixS2Step != 0));
+                ++b;
+            }
+            fBaseParams.blockStarts[c] = cut;
+            fBaseParams.blockEnds[c - 1] = cut;
+            tndBaseInfo.tndStartBIdx[c] = b;
+            tndBaseInfo.tndS1S2PrefixSum[c] = area;
+            tndBaseInfo.tndS1S2AlignPrefixSum[c] = alignedArea;
+            tndBaseInfo.tndPrefixSum[c] = tiles;
+        }
+        fBaseParams.blockEnds[cores - 1] = total;
+        return true;
+    }
+
     ge::graphStatus GetSparseUnpadBlockInfo() override
     {
+        if (TrySplitDenseUnpad()) {
+            return ge::GRAPH_SUCCESS;
+        }
         std::vector<std::vector<std::vector<int64_t>>> calculatedBlockInfo(
             fBaseParams.b,
             std::vector<std::vector<int64_t>>(fBaseParams.s2Outer, std::vector<int64_t>(CALCULATED_BLOCK_DIMENSION)));
@@ -2450,14 +2527,91 @@ protected:
         return true;
     }
 
+    // Prefixes contain exact integer multiples of 1/scale. Skip this representation if it
+    // cannot reproduce the float additions, or if a single call would need over 2 MiB.
+    bool BuildDenseLoadPrefix(const std::vector<std::vector<float>>& weights, std::vector<int64_t>& prefix,
+                              int64_t& scale) const
+    {
+        const auto& p = fBaseParams;
+        if (!IsUnmaskedDenseTnd() || p.isBn2MultiBlk || p.splitAxis != SplitAxisEnum::BN2S2 || p.cvS2Inner <= 0) {
+            return false;
+        }
+        scale = std::max(p.s1CvInner, p.cvS2Inner);
+        if (scale <= 0 || (scale & (scale - 1)) != 0) {
+            return false;
+        }
+        constexpr int64_t maxEntries = 262144;
+        int64_t heads;
+        if (__builtin_mul_overflow(p.g, p.n2, &heads) || heads <= 0) {
+            return false;
+        }
+        int64_t entries = 0;
+        for (int64_t kv : p.actualSeqKvlen) {
+            if (kv < 0 || kv > p.s2) {
+                return false;
+            }
+            const int64_t cols = kv / p.cvS2Inner + (kv % p.cvS2Inner != 0);
+            if (cols > (maxEntries - 1 - entries) / heads) {
+                return false;
+            }
+            entries += cols * heads;
+        }
+        prefix.reserve(entries + 1);
+        prefix.push_back(0);
+        for (int64_t b = 0; b < p.b; ++b) {
+            const int64_t kv = p.actualSeqKvlen[b];
+            const int64_t cols = kv / p.cvS2Inner + (kv % p.cvS2Inner != 0);
+            const size_t start = prefix.size() - 1;
+            for (int64_t j = 0; j < cols; ++j) {
+                const double scaled = static_cast<double>(weights[b][j]) * scale;
+                if (!(scaled >= 0 && scaled <= (1 << 24)) || scaled != static_cast<int64_t>(scaled)) {
+                    return false;
+                }
+                prefix.push_back(prefix.back() + static_cast<int64_t>(scaled));
+            }
+            const int64_t headWeight = prefix.back() - prefix[start];
+            if (headWeight == 0) {
+                continue;
+            }
+            for (int64_t h = 1; h < heads; ++h) {
+                const size_t prev = prefix.size() - cols;
+                for (int64_t j = 0; j < cols; ++j) {
+                    prefix.push_back(prefix[prev + j] + headWeight);
+                }
+            }
+        }
+        return prefix.size() > 1;
+    }
+
+    bool DenseLoadFits(const std::vector<int64_t>& prefix, int64_t limit) const
+    {
+        auto current = prefix.begin();
+        for (uint64_t core = 0; core < fBaseParams.aicNum; ++core) {
+            const int64_t end = *current + limit;
+            if (prefix.back() <= end) {
+                return true;
+            }
+            current = std::upper_bound(current + 1, prefix.end(), end) - 1;
+        }
+        return false;
+    }
+
     float BinarySearchMaxBlockNumPerCore(const std::vector<std::vector<float>>& acturalBlockInfo)
     {
         float left = acturalBlockInfo[fBaseParams.b + 1][0];
         float right = acturalBlockInfo[fBaseParams.b][0];
         float mid = 0;
+        const float maxWeight = left;
+        std::vector<int64_t> prefix;
+        int64_t scale = 0;
+        const bool indexed = BuildDenseLoadPrefix(acturalBlockInfo, prefix, scale);
         while (left < right - 1) {
             mid = (left + right) / NUM_TWO;
-            if (IsPossible(acturalBlockInfo, mid)) {
+            // The old predicate evaluates currentSum + num in float before each comparison.
+            // Every possible trial sum must be exactly representable for integer prefix lookup.
+            const bool exact = indexed && (static_cast<double>(mid) + maxWeight) * scale <= (1 << 24);
+            if (exact ? DenseLoadFits(prefix, static_cast<int64_t>(static_cast<double>(mid) * scale)) :
+                        IsPossible(acturalBlockInfo, mid)) {
                 right = mid;
             } else {
                 left = mid + 1;

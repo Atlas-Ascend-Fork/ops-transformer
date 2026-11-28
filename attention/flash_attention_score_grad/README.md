@@ -10,6 +10,8 @@
 |<term>Atlas A2训练系列产品</term>|      √     |
 |<term>Atlas A2推理系列产品</term>|      ×     |
 
+Atlas A3训练系列产品支持 `aclnnFlashAttentionScoreGrad`、`aclnnFlashAttentionScoreGradV2` 和 `aclnnFlashAttentionScoreGradV3`，暂不支持 `aclnnFlashAttentionScoreGradV4`。各接口的产品支持情况见[算子接口列表](../../docs/zh/op_api_list.md)。
+
 ## 功能说明
 
 - 算子功能：训练场景下计算注意力的反向输出，即FlashAttentionScore的反向计算：

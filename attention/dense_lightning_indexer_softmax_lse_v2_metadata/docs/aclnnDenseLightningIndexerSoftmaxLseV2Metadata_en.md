@@ -29,7 +29,7 @@
 
   **This operator is not recommended for standalone use. Use it with the aclnnDenseLightningIndexerSoftmaxLseV2 operator to form a complete workflow.**
     1. Receive the shape information of the main operator, including batchSize, maxSeqLenQ, maxSeqLenK, numHeadsQ, numHeadsK, headDim, layout, and mask information.
-    2. Calculate the total number of seqs involved in load balancing based on layout and the optional input seqUsedQOptional, and evenly split tasks onto available AIC cores in a strided manner.
+    2. Calculate the total number of query tokens to process (totalNum) from layoutQ and the optional input seqUsedQOptional, and evenly split tasks onto available AIC cores in a strided manner.
     3. After the metadata is output, it is subsequently used as the metadataOptional input of the aclnnDenseLightningIndexerSoftmaxLseV2 operator.
 
 ## Function Prototype
@@ -96,31 +96,31 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
       <td>cuSeqLensQOptional (const aclTensor*)</td>
       <td>Input</td>
       <td>Indicates the cumulative sequence length of queries in different batches.<br>Mandatory in TND use cases, and the batch can be derived from the shape of this input parameter.<br>The first value is fixed to 0.</td>
-      <td>Empty tensors are supported.</td>
+      <td>In TND layout this tensor must be nonempty. In BSND layout it may be empty.</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1 dimension, shape (B+1,)</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>cuSeqLensKOptional (const aclTensor*)</td>
       <td>Input</td>
       <td>Indicates the cumulative sequence length of keys in different batches.<br>Mandatory in TND use cases.<br>The first value is fixed to 0.</td>
-      <td>Supports empty tensors.</td>
+      <td>In TND layout this tensor must be nonempty. In BSND layout it may be empty.</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1D, shape (B+1,)</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>seqUsedQOptional (const aclTensor*)</td>
       <td>Input</td>
-      <td>Indicates the sequence length of queries actually involved in computation for different batches.</td>
-      <td>Supports empty tensors. When this parameter exists, the total number of sequences is calculated by accumulating the sequences actually used in each batch.</td>
+      <td>Specifies the query length used for each sequence in the batch.</td>
+      <td>For a nonempty tensor, totalNum is the sum of its elements. A 1D empty tensor of shape (0,) is treated as omitted. In TND layout, totalNum then equals the last element of cuSeqLensQOptional. Passing a scalar tensor returns 161002.</td>
       <td>INT32</td>
       <td>ND</td>
-      <td>1D, shape (B,)</td>
-      <td>×</td>
+      <td>1D, shape (B,) or (0,)</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>seqUsedKOptional (const aclTensor*)</td>
@@ -130,7 +130,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
       <td>INT32</td>
       <td>ND</td>
       <td>1D, shape (B,)</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>cmpResidualKOptional (const aclTensor*)</td>
@@ -140,12 +140,12 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
       <td>INT32</td>
       <td>ND</td>
       <td>1-D, shape (B,)</td>
-      <td>×</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>batchSize (int64_t)</td>
       <td>Input</td>
-      <td>Indicates the number of batches.</td>
+      <td>Specifies the number of sequences (B) in the batch.</td>
       <td>Supports non-negative values. In the TND use case, it can be set to 0 and derived via cuSeqLensQOptional.</td>
       <td>-</td>
       <td>-</td>
@@ -249,8 +249,8 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
       <td>The output is used as the metadataOptional input of aclnnDenseLightningIndexerSoftmaxLseV2.</td>
       <td>INT32</td>
       <td>ND</td>
-      <td>1-D, shape fixed to (64,)</td>
-      <td>×</td>
+      <td>1-D, shape (L,). See <a href="#Metadata">Metadata Output Layout</a> for L.</td>
+      <td>√</td>
     </tr>
     <tr>
       <td>workspaceSize(uint64_t*)</td>
@@ -407,9 +407,9 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
 <summary><a id="special-constraints"></a>Special Constraints</summary>
 
   - Batch Value Rules
-    - If batchSize is greater than 0, batchSize takes precedence.
-    - If batchSize is less than or equal to 0 and layoutQ is TND, batch is derived from the shape of cuSeqLensQOptional.
-    - If batchSize is less than or equal to 0 and layoutQ is BSND, an error is reported.
+    - When batchSize is positive, B equals batchSize. In TND layout, cuSeqLensQOptional and cuSeqLensKOptional must each contain B + 1 elements.
+    - In TND layout, when batchSize is 0, B equals the number of elements in cuSeqLensQOptional minus 1. A negative batchSize is invalid.
+    - For BSND layout, pass a positive batchSize.
   - Seqlen Value Rules
     - In TND use cases, calculate the actual q/k length of each batch via cuSeqLensQOptional and cuSeqLensKOptional.
     - In BSND use cases, obtain the q/k length via maxSeqLenQ and maxSeqLenK.
@@ -435,7 +435,12 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
 <details>
 <summary><a id="Metadata"></a>Metadata Output Layout</summary>
 
-  The metadata output is an INT32 Tensor, and the shape is currently fixed to (64,). The field layout is as follows.
+  Allocate a 1-D INT32 Tensor with shape `(L,)`. The length counts INT32 elements. Use the following rule for the operator in this repository.
+
+  1. Calculate the bound `U` from the call parameters. For TND, use `maxSeqLenQ` if positive or `65536` otherwise. For BSND, use `batchSize * maxSeqLenQ` if both values are positive or `0` otherwise.
+  2. If `U = 0`, set `L = 64`. If `U > 0`, set `L = 136 + 8 * min(U, 65536)`. For example, TND with `maxSeqLenQ = 32` requires 392 INT32 elements even when every query token is skipped.
+
+  The main operator consumes this tensor directly. The table describes its first four elements.
 
   <table style="undefined;table-layout: fixed; width: 1150px"><colgroup>
     <col style="width: 180px">
@@ -453,27 +458,27 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
         <tr>
         <td>forecore_num</td>
         <td>0</td>
-        <td>Number of fore cores, that is, the number of cores that process more tasks. If totalNum cannot be evenly divided by aicCoreNum, forecore_num = totalNum % aicCoreNum, and each fore core processes ceil(totalNum / aicCoreNum) tasks. If totalNum can be evenly divided by aicCoreNum, forecore_num = aicCoreNum.</td>
+        <td>Number of fore cores. Core IDs start at 0. A core with an ID less than forecore_num is a fore core.</td>
         </tr>
         <tr>
         <td>tail_core_num</td>
         <td>1</td>
-        <td>Number of tail cores, that is, the number of cores that process fewer tasks. tail_core_num = aicCoreNum - forecore_num, and each tail core processes floor(totalNum / aicCoreNum) tasks. The value is 0 if totalNum can be evenly divided by aicCoreNum.</td>
+        <td>Number of tail cores. The tail cores occupy tail_core_num consecutive core IDs starting at forecore_num.</td>
         </tr>
         <tr>
         <td>b_s1_per_core</td>
         <td>2</td>
-        <td>Number of B*S1 tasks processed by each preceding core, that is, ceil(totalNum / aicCoreNum).</td>
+        <td>Tasks per fore core. For a positive totalNum this is ceil(totalNum / aicCoreNum). For zero tasks this field is 1 and no core uses it.</td>
         </tr>
         <tr>
         <td>b_s1_per_tail_core</td>
         <td>3</td>
-        <td>Number of B*S1 tasks processed by each tail core, that is, floor(totalNum / aicCoreNum). Set to 0 when totalNum can be evenly divided by aicCoreNum.</td>
+        <td>Tasks per tail core. This field is 0 when there are no tail cores.</td>
         </tr>
     </tbody>
   </table>
 
-  Differentiated block partitioning is used for preceding cores and tail cores. Let totalNum be the total number of seqs involved in load balancing and N be aicCoreNum. When totalNum can be evenly divided by N, forecore_num=N, tail_core_num=0, and each core processes totalNum/N tasks. When it cannot be evenly divided, let base=floor(totalNum/N) and rem=totalNum%N. Then forecore_num=rem, each preceding core processes base+1 tasks, tail_core_num=N-rem, and each tail core processes base tasks. For example, when totalNum=16 and N=36, 16<36, forecore_num=16, tail_core_num=0, and b_s1_per_core=1. The first 16 cores each process 1 task, and the remaining cores are idle.
+  Each query token to process counts as one task. N denotes the number of available AIC cores (aicCoreNum). If totalNum is 0, the first four fields are [0, 0, 1, 0] and no core has work. For 0 &lt; totalNum &lt; N, each of the first totalNum cores gets one task and the others stay idle. For totalNum ≥ N, let r be the remainder when totalNum is divided by N. If r is 0, each core gets totalNum / N tasks. If r is positive, the first r cores each get floor(totalNum / N) + 1 tasks and the remaining cores each get floor(totalNum / N) tasks.
 
 </details>
 
@@ -500,8 +505,6 @@ The following sample code is for reference only. For details about compilation a
             return (ret_val);                       \
         }                                           \
     } while (0)
-
-constexpr uint32_t DLI_METADATA_SIZE = 64;
 
 struct DenseLISoftmaxLseV2MetaData {
     int32_t forecore_num;
@@ -661,7 +664,10 @@ aclnnStatus CreateArgs(const ArgScenario &scenario, ArgContext &context)
     strcpy(context.layoutQ, scenario.hasCuSeq ? "TND" : "BSND");
     strcpy(context.layoutK, scenario.hasCuSeq ? "TND" : "BSND");
 
-    ret = CreateTensor(aclDataType::ACL_INT32, { DLI_METADATA_SIZE }, context.metadata);
+    // In this example batchSize is 1 and maxSeqLenQ is 16, so both layouts require 264 INT32 elements.
+    const int64_t itemBound = scenario.hasCuSeq ? context.maxSeqLenQ : batchSize * context.maxSeqLenQ;
+    const int64_t metadataLength = 136 + 8 * itemBound;
+    ret = CreateTensor(aclDataType::ACL_INT32, { metadataLength }, context.metadata);
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create metadata failed. Error: %d", ret);
 
     if (scenario.hasCuSeq) {

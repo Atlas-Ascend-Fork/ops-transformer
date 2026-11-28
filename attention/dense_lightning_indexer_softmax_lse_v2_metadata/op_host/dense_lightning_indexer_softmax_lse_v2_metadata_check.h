@@ -269,11 +269,6 @@ aclnnStatus CheckConsistencyDliSLse(int64_t batchSize, int64_t maxSeqlenQ, const
         }
     }
     if (IsTensorExistDliSLse(sequsedQOptional)) {
-        dimNum = GetDimNumDliSLse(sequsedQOptional);
-        if (dimNum != 1) {
-            OP_LOGE_FOR_INVALID_SHAPEDIM(DLI_ACLNN_OP_NAME, "seqused_q", std::to_string(dimNum), "1");
-            return ACLNN_ERR_PARAM_INVALID;
-        }
         dataType = GetDataTypeDliSLse(sequsedQOptional);
         if (dataType != aclDataType::ACL_INT32) {
             OP_LOGE_FOR_INVALID_DTYPE_WITH_REASON(DLI_ACLNN_OP_NAME, "seqused_q", ToString(dataType).GetString(),
@@ -364,6 +359,11 @@ aclnnStatus CheckConsistencyDliSLse(int64_t batchSize, int64_t maxSeqlenQ, const
                                               "The value of batch_size must be greater than 0");
         return ACLNN_ERR_PARAM_INVALID;
     }
+    if (batchSize > 0 && batchSize != queryBatchSize) {
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(DLI_ACLNN_OP_NAME, "batch_size", std::to_string(batchSize),
+                                              "The explicit batch size must match the sequence tensors");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
 
     if (IsTensorExistDliSLse(cuSeqlensQOptional) &&
         cuSeqlensQOptional->GetViewShape().GetDim(0) != queryBatchSize + 1) {
@@ -440,9 +440,13 @@ aclnnStatus ParamsCheckDliSLse(const aclTensor* cuSeqlensQOptional, const aclTen
                                char* layoutQOptional, char* layoutKOptional, int64_t maskMode, int64_t cmpRatio,
                                const aclTensor* metadata, uint32_t aicCoreNum, const std::string& socVersion)
 {
+    if (sequsedQOptional != nullptr && GetDimNumDliSLse(sequsedQOptional) != 1) {
+        OP_LOGE_FOR_INVALID_SHAPEDIM(DLI_ACLNN_OP_NAME, "seqused_q", std::to_string(GetDimNumDliSLse(sequsedQOptional)),
+                                     "1");
+        return ACLNN_ERR_PARAM_INVALID;
+    }
     const std::string ascend950 = "Ascend950";
     if (socVersion.find(ascend950) == std::string::npos) {
-        CHECK_RET(metadata != nullptr, ACLNN_ERR_PARAM_NULLPTR);
         return ACLNN_SUCCESS;
     }
     return ParamsCheckDliSLseA5(cuSeqlensQOptional, cuSeqlensKOptional, sequsedQOptional, sequsedKOptional,

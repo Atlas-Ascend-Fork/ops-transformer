@@ -42,7 +42,8 @@ enum class ValidSocVersion {
 
 inline bool IsTensorValid(Tensor* tensor)
 {
-    return tensor != nullptr && tensor->GetData() != nullptr && tensor->GetTensorShape() != nullptr;
+    return tensor != nullptr && tensor->GetData() != nullptr && tensor->GetTensorShape() != nullptr &&
+           tensor->NumElements() > 0;
 }
 
 template <typename T>

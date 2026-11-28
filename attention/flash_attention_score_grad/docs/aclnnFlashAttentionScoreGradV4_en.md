@@ -140,7 +140,7 @@ aclnnStatus aclnnFlashAttentionScoreGradV4GetWorkspaceSize(
   const aclTensor   *dpseOut,
   const aclTensor   *dsinkOut,
   uint64_t          *workspaceSize,
-  aclOpExecutor    **executor)`
+  aclOpExecutor    **executor);
 ```
 
 ```c++
@@ -305,7 +305,7 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
     <tr>
       <td>softmaxMaxOptional</td>
       <td>Optional input</td>
-      <td>Intermediate output of the attention direction calculation.</td>
+      <td>Intermediate output of the attention forward calculation.</td>
       <td>-</td>
       <td>FLOAT</td>
       <td>ND</td>
@@ -495,8 +495,8 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
     <tr>
       <td>softmaxInLayout</td>
       <td>Input</td>
-      <td>Controls the actual data layout of softmaxMax and softmaxSum.</td>
-      <td>Pass "same_as_input" if the shape is TND but the actual data layout needs to be NTD. Pass "" for TND.</td>
+      <td>Controls the actual data layout of softmaxMaxOptional and softmaxSumOptional.</td>
+      <td>When inputLayout is TND, pass "same_as_input" if softmaxMaxOptional and softmaxSumOptional store all heads of each token consecutively. Pass "" if, within each batch segment, they store all tokens of each head consecutively. For other inputLayout values, pass "".</td>
       <td>String</td>
       <td>-</td>
       <td>-</td>
@@ -741,15 +741,15 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
 - The N of query and dy and the N of key and value can be different, but they must be in a proportional relationship, that is, Nq/Nkv must be a non-zero integer, with Nq in the value range of 1 to 256.
 - Constraints on data shape, taking TND of inputLayout as an example, where:
 
-    - B: value range is 1 to 2K. When prefixOptional is present, B supports a maximum of 1K.
+    - B: value range is 1 to 2k. When prefixOptional is present, B supports a maximum of 1k.
     - N: ranges from 1 to 256.
     - S: ranges from 1 to 1M.
     - D: ranges from 1 to 768.
     - KeepProb: value range is (0, 1].
 - In some scenarios, if the computation workload is too large, the operator execution may time out (aicore error with errorStr: timeout or trap error). In this case, axis splitting is recommended. Note: The computation workload here is affected by parameters such as B, S, N, and D. Larger values result in a heavier workload.
-- The prefixOptional sparse computation supports only the compression scenario, sparseModeOptional=6. When Sq > Skv, the N value range of prefix is [0, Skv]; when Sq <= Skv, the N value range of prefix is [Skv-Sq, Skv]. When sparseModeOptional=5, prefix N > Skv, or prefixOptional is not passed, full computation is performed. sparseModeOptional=6 requires that prefixOptional must be passed.
+- The prefixOptional sparse computation supports only the compression scenario, sparseMode=6. When Sq > Skv, the N value range of prefix is [0, Skv]; when Sq <= Skv, the N value range of prefix is [Skv-Sq, Skv]. When sparseMode=5, prefix N > Skv, or prefixOptional is not passed, full computation is performed. sparseMode=6 requires that prefixOptional must be passed.
 - When sparseMode=7, the optional input pseShiftOptional is not supported.
-- When sparseMode=8, the optional input pseShiftOptional is supported when q and kv of each sequence have equal lengths, and pse is generated globally. Outer splitting in the q direction is supported, which requires that q and kv of each sequence have equal lengths before outer splitting, and after outer splitting, actualSeqQLenOptional[0] - actualSeqKvLenOptional[0] + qStartIdxOptional - kvStartIdxOptional == 0 (this feature is experimental).
+- When sparseMode=8 and the operator generates PSE internally, it supports pseShiftOptional and external splitting along the query dimension (experimental). Before splitting, the query and KV sequence lengths must match in each batch segment. After splitting, the first batch segment must satisfy `actualSeqQLenOptional[0] - actualSeqKvLenOptional[0] + qStart - kvStart == 0`. The values of qStart and kvStart are the first elements of qStartIdxOptional and kvStartIdxOptional, respectively. An omitted start index defaults to 0. In every remaining batch segment, the query and KV sequence lengths must still match.
 - The actualSeqQLenOptional input supports a case where the S length of a batch is 0, but the optional input pseShiftOptional is not supported in this case.
 - Constraints on pseType and pseShiftOptional are as follows:
   - If pseType is 2 or 3, the data type of pseShiftOptional must be FLOAT32, and the supported shape range is [B,N] or [N].
@@ -763,7 +763,7 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
     | 2           | The internally generated pse is first multiplied and then added. | - |
     | 3           | The internally generated pse is first multiplied, then added, and then square-rooted. | - |
 
-- Constraints on the softmaxMax and softmaxSum parameters: The input format is fixed as [B, N, S, 8], except for the TND input format, which is [N, T, 8]. Note: T = B * S.
+- For TND inputLayout, T is the sum of the query lengths of all batch segments. When softmaxInLayout is "same_as_input", softmaxMaxOptional and softmaxSumOptional have shape [T, N, 8]. For the default layout (""), see the memory order in the softmaxInLayout parameter description. For non-TND inputLayout, see the shapes in the softmaxMaxOptional and softmaxSumOptional parameter descriptions.
 - The value of headNum must be consistent with the N value in the input query.
 
 <!-- npu="950" id8 -->
@@ -776,7 +776,6 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
 - In TND format, trailing batches that do not participate in computation are supported. In this case, pass the corresponding number of zeros at the end of actual_seq_q_len and actual_seq_kv_len. Assume the actual S length is [2, 3, 4, 5, 6]. If you want the last two batches to not participate in computation, pass actual_seq_q_len as [2, 3, 4, 0, 0]. In this case, if prefixOptional needs to be passed, its trailing part must also contain the same number of zeros, for example, [1, 1, 1, 0, 0].
 - In TND use cases, each batch segment is still generated as [N, Sq_i, Skv_i] internally, but is uniformly flattened for storage and parameter passing. If the actual query length of the i-th batch segment is Sq_i and the actual key/value length is Skv_i, the number of PSE elements in this segment is N *Sq_i* Skv_i, and the total length pseTotalLen of the entire PSE is sum_i(N *Sq_i* Skv_i).
 - When sinkInOptional is not None, input tensors such as query and key only support two data types: float16 and bfloat16. The dimension of sinkInOptional is 1, and its length must be the same as the headnum of query.
-- When the data layout of softmaxSum and softmaxMax is TND, softmaxInLayout must be "same_as_input".
 
 ## Example
 
@@ -786,6 +785,7 @@ The sample code is for reference only. For details about the compilation and exe
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
 #include <random>
 #include "acl/acl.h"
@@ -853,6 +853,12 @@ int CreateAclTensor(const std::vector<T>& hostData, const std::vector<int64_t>& 
   // Call aclCreateTensor to create an aclTensor.
   *tensor = aclCreateTensor(shape.data(), shape.size(), dataType, strides.data(), 0, aclFormat::ACL_FORMAT_ND,
                             shape.data(), shape.size(), *deviceAddr);
+  if (*tensor == nullptr) {
+    LOG_PRINT("aclCreateTensor failed.\n");
+    aclrtFree(*deviceAddr);
+    *deviceAddr = nullptr;
+    return EXIT_FAILURE;
+  }
   return 0;
 }
 
@@ -985,6 +991,7 @@ int main() {
   ret = CreateAclTensor(softmaxSumHostData, softmaxSumShape, &softmaxSumDeviceAddr, aclDataType::ACL_FLOAT, &softmaxSum);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(attentionInHostData, attentionInShape, &attentionInDeviceAddr, aclDataType::ACL_FLOAT, &attentionIn);
+  CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(sinkInOptionalHostData, sinkInOptionalShape, &sinkInOptionalDeviceAddr, aclDataType::ACL_FLOAT, &sinkInOptional);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(dqHostData, dqShape, &dqDeviceAddr, aclDataType::ACL_FLOAT, &dq);

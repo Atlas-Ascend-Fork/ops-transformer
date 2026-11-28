@@ -111,7 +111,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
       <td>(B,S1,N1,D);(T1,N1,D)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>keyIndex (aclTensor*)</td>
@@ -121,7 +121,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>FLOAT16, BFLOAT16</td>
       <td>ND</td>
       <td>(B,S2,N2,D);(T2,N2,D)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>weight (aclTensor*)</td>
@@ -131,27 +131,27 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>FLOAT32</td>
       <td>ND</td>
       <td>(B,S1,N1);(T1,N1)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>cuSeqLensQOptional (aclTensor*)</td>
       <td>Optional input</td>
       <td>Accumulated sum of the valid token counts of q in the current batch and preceding batches.</td>
-      <td><ul><li>Must be passed in for TND use cases. The first value is fixed to 0.</li><li>Supports empty Tensor.</li></ul></td>
+      <td>For TND, pass B+1 cumulative token counts starting with 0. For BSND, this parameter may be omitted (nullptr).</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1D, shape (B+1,)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>cuSeqLensKOptional (aclTensor*)</td>
       <td>Optional input</td>
       <td>Accumulation of the number of valid tokens of k in the current batch and preceding batches.</td>
-      <td><ul><li>Must be passed in in TND use cases. The first value is fixed to 0.</li><li>Supports empty tensors.</li></ul></td>
+      <td>For TND, pass B+1 cumulative token counts starting with 0. For BSND, this parameter may be omitted (nullptr).</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1D, shape (B+1,)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>seqUsedQOptional (aclTensor*)</td>
@@ -161,7 +161,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>INT32</td>
       <td>ND</td>
       <td>1D, shape (B,)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>seqUsedKOptional (aclTensor*)</td>
@@ -171,7 +171,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>INT32</td>
       <td>ND</td>
       <td>1D, shape (B,)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>cmpResidualKOptional (aclTensor*)</td>
@@ -181,7 +181,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>INT32</td>
       <td>ND</td>
       <td>1D, shape (B,)</td>
-      <td>×</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>metadataOptional (aclTensor*)</td>
@@ -190,8 +190,8 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td><ul><li>Must be passed in. Output by the aclnnDenseLightningIndexerSoftmaxLseV2Metadata operator to reduce host array access in the tiling phase.</li></ul></td>
       <td>INT32</td>
       <td>ND</td>
-      <td>1D, shape (64,)</td>
-      <td>×</td>
+      <td>1-D. Pass the output tensor of <a href="../../dense_lightning_indexer_softmax_lse_v2_metadata/docs/aclnnDenseLightningIndexerSoftmaxLseV2Metadata_en.md#Metadata">aclnnDenseLightningIndexerSoftmaxLseV2Metadata</a> directly.</td>
+      <td>√</td>
      </tr>
      <tr>
       <td>layoutQ (char*)</td>
@@ -289,15 +289,17 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
             <tr>
                 <td>ACLNN_ERR_PARAM_NULLPTR</td>
                 <td>161001</td>
-                <td>The parameters contain an invalid nullptr.</td>
+                <td>queryIndex, keyIndex, weight, or softmaxLseOut is nullptr.</td>
             </tr>
             <tr>
-                <td rowspan="2">ACLNN_ERR_PARAM_INVALID</td>
-                <td rowspan="2">161002</td>
+                <td>ACLNN_ERR_PARAM_INVALID</td>
+                <td>161002</td>
                 <td>The input data type is not a supported type.</td>
             </tr>
             <tr>
-                <td>Required inputs/outputs queryIndex, keyIndex, weight, and softmaxLseOut are not passed in.</td>
+                <td>ACLNN_ERR_INNER_TILING_ERROR</td>
+                <td>561002</td>
+                <td>Tiling fails if layoutQ and layoutK differ or metadataOptional is nullptr.</td>
             </tr>
         </tbody>
     </table>
@@ -543,7 +545,9 @@ int main() {
   std::vector<int64_t> kIndexShape = {B, S2, N2, D};
   std::vector<int64_t> weightShape = {B, S1, N1};
   std::vector<int64_t> softmaxLseShape = {B, N2, S1};
-  std::vector<int64_t> metadataShape = {64};
+  // In this BSND example, B * S1 = 256, so metadata requires 2184 INT32 elements.
+  const int64_t metadataLength = 136 + 8 * B * S1;
+  std::vector<int64_t> metadataShape = {metadataLength};
 
   void* qIndexDeviceAddr = nullptr;
   void* kIndexDeviceAddr = nullptr;
@@ -561,7 +565,7 @@ int main() {
   std::vector<aclFloat16> kIndexHostData(B * S2 * 1 * D, aclFloatToFloat16(0.1));
   std::vector<float> weightHostData(B * S1 * N1, 0.005f);
   std::vector<float> softmaxLseHostData(B * N2 * S1, 0.0f);
-  std::vector<int32_t> metadataHostData(64, 0);
+  std::vector<int32_t> metadataHostData(metadataLength, 0);
 
   ret = CreateAclTensor(qIndexHostData, qIndexShape, &qIndexDeviceAddr, aclDataType::ACL_FLOAT16, &qIndex);
   CHECK_RET(ret == ACL_SUCCESS, return ret);

@@ -135,7 +135,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>cuSeqLensQOptional（aclTensor*）</td>
       <td>可选输入</td>
       <td>当前 Batch 及前序 Batch 中 q 的有效 token 数的累加和。</td>
-      <td><ul><li>TND 场景下必传，第一个值固定为 0。</li><li>支持空 Tensor。</li></ul></td>
+      <td>TND场景须传入B+1个累积token数，首元素为0。BSND场景可以不传（nullptr）。</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1维，shape 为 (B+1,)</td>
@@ -145,7 +145,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td>cuSeqLensKOptional（aclTensor*）</td>
       <td>可选输入</td>
       <td>当前 Batch 及前序 Batch 中 k 的有效 token 数的累加和。</td>
-      <td><ul><li>TND 场景下必传，第一个值固定为 0。</li><li>支持空 Tensor。</li></ul></td>
+      <td>TND场景须传入B+1个累积token数，首元素为0。BSND场景可以不传（nullptr）。</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1维，shape 为 (B+1,)</td>
@@ -188,7 +188,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
       <td><ul><li>必须传入。由 aclnnDenseLightningIndexerSoftmaxLseV2Metadata 算子输出，减少 tiling 阶段对 host array 的访问。</li></ul></td>
       <td>INT32</td>
       <td>ND</td>
-      <td>1维，shape 为 (64,)</td>
+      <td>1维，直接传入<a href="../../dense_lightning_indexer_softmax_lse_v2_metadata/docs/aclnnDenseLightningIndexerSoftmaxLseV2Metadata.md#Metadata">aclnnDenseLightningIndexerSoftmaxLseV2Metadata</a>的输出Tensor。</td>
       <td>√</td>
      </tr>
      <tr>
@@ -287,15 +287,17 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2(
             <tr>
                 <td>ACLNN_ERR_PARAM_NULLPTR</td>
                 <td>161001</td>
-                <td>参数中存在非法的nullptr。</td>
+                <td>queryIndex、keyIndex、weight或softmaxLseOut为nullptr。</td>
             </tr>
             <tr>
-                <td rowspan="2">ACLNN_ERR_PARAM_INVALID</td>
-                <td rowspan="2">161002</td>
+                <td>ACLNN_ERR_PARAM_INVALID</td>
+                <td>161002</td>
                 <td>输入的数据类型不满足支持类型。</td>
             </tr>
             <tr>
-                <td>queryIndex、keyIndex、weight、softmaxLseOut必选输入/输出未传。</td>
+                <td>ACLNN_ERR_INNER_TILING_ERROR</td>
+                <td>561002</td>
+                <td>layoutQ与layoutK不一致，或metadataOptional为nullptr，导致tiling失败。</td>
             </tr>
         </tbody>
     </table>
@@ -541,7 +543,9 @@ int main() {
   std::vector<int64_t> kIndexShape = {B, S2, N2, D};
   std::vector<int64_t> weightShape = {B, S1, N1};
   std::vector<int64_t> softmaxLseShape = {B, N2, S1};
-  std::vector<int64_t> metadataShape = {64};
+  // In this BSND example, B * S1 = 256, so metadata requires 2184 INT32 elements.
+  const int64_t metadataLength = 136 + 8 * B * S1;
+  std::vector<int64_t> metadataShape = {metadataLength};
 
   void* qIndexDeviceAddr = nullptr;
   void* kIndexDeviceAddr = nullptr;
@@ -559,7 +563,7 @@ int main() {
   std::vector<aclFloat16> kIndexHostData(B * S2 * 1 * D, aclFloatToFloat16(0.1));
   std::vector<float> weightHostData(B * S1 * N1, 0.005f);
   std::vector<float> softmaxLseHostData(B * N2 * S1, 0.0f);
-  std::vector<int32_t> metadataHostData(64, 0);
+  std::vector<int32_t> metadataHostData(metadataLength, 0);
 
   ret = CreateAclTensor(qIndexHostData, qIndexShape, &qIndexDeviceAddr, aclDataType::ACL_FLOAT16, &qIndex);
   CHECK_RET(ret == ACL_SUCCESS, return ret);

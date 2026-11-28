@@ -27,7 +27,7 @@
 
   **该算子不建议单独使用，建议与aclnnDenseLightningIndexerSoftmaxLseV2算子配合使用，形成完整的工作流。**
     1. 接收主算子的shape信息，包括batchSize、maxSeqLenQ、maxSeqLenK、numHeadsQ、numHeadsK、headDim、layout和mask信息。
-    2. 根据layout和可选输入seqUsedQOptional计算参与负载均衡的seq总数，采用strided方式将任务均衡切分到可用AIC核上。
+    2. 根据layoutQ和可选输入seqUsedQOptional计算参与运算的query token总数（totalNum），采用strided方式将任务均衡切分到可用AIC核上。
     3. 输出metadata后，后续作为aclnnDenseLightningIndexerSoftmaxLseV2算子的metadataOptional输入使用。
 
 ## 函数原型
@@ -94,7 +94,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
       <td>cuSeqLensQOptional（const aclTensor*）</td>
       <td>输入</td>
       <td>表示不同batch中query的累积sequence length。<br>TND场景下必传，并可通过该入参shape推导batch。<br>第一个值固定为0。</td>
-      <td>支持空Tensor。</td>
+      <td>TND场景下必须传入非空Tensor。BSND场景下支持空Tensor。</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1维，shape为(B+1,)</td>
@@ -104,7 +104,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
       <td>cuSeqLensKOptional（const aclTensor*）</td>
       <td>输入</td>
       <td>表示不同batch中key的累积sequence length。<br>TND场景下必传。<br>第一个值固定为0。</td>
-      <td>支持空Tensor。</td>
+      <td>TND场景下必须传入非空Tensor。BSND场景下支持空Tensor。</td>
       <td>INT32</td>
       <td>ND</td>
       <td>1维，shape为(B+1,)</td>
@@ -113,11 +113,11 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
     <tr>
       <td>seqUsedQOptional（const aclTensor*）</td>
       <td>输入</td>
-      <td>表示不同batch中query实际参与运算的sequence length。</td>
-      <td>支持空Tensor。当该入参存在时，seq总数按每个batch实际用到的seq累加计算。</td>
+      <td>表示每个batch段实际参与运算的query长度。</td>
+      <td>非空时，totalNum为所有元素之和。shape为(0,)的一维空Tensor按未传处理，此时TND场景取cuSeqLensQOptional的最后一个元素作为totalNum。传入零维标量返回161002。</td>
       <td>INT32</td>
       <td>ND</td>
-      <td>1维，shape为(B,)</td>
+      <td>1维，shape为(B,)或(0,)</td>
       <td>√</td>
     </tr>
     <tr>
@@ -143,7 +143,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
     <tr>
       <td>batchSize（int64_t）</td>
       <td>输入</td>
-      <td>表示batch数量。</td>
+      <td>表示一个batch中的序列条数B。</td>
       <td>支持非负数。TND场景可填0，并通过cuSeqLensQOptional推导。</td>
       <td>-</td>
       <td>-</td>
@@ -247,7 +247,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
       <td>输出结果作为aclnnDenseLightningIndexerSoftmaxLseV2的metadataOptional输入。</td>
       <td>INT32</td>
       <td>ND</td>
-      <td>1维，shape固定为(64,)</td>
+      <td>1维，shape为(L,)。L的计算见<a href="#Metadata">Metadata输出布局</a>。</td>
       <td>√</td>
     </tr>
     <tr>
@@ -405,9 +405,9 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
 <summary><a id="特殊约束"></a>特殊约束</summary>
 
   - Batch取值规则
-    - 如果batchSize大于0，优先使用batchSize。
-    - 如果batchSize小于等于0，且layoutQ为TND，则通过cuSeqLensQOptional的shape推导batch。
-    - 如果batchSize小于等于0，且layoutQ为BSND，则报错。
+    - batchSize大于0时，B等于batchSize。TND场景下，cuSeqLensQOptional和cuSeqLensKOptional各有B + 1个元素。
+    - TND场景下，batchSize为0时，B等于cuSeqLensQOptional的元素个数减1。batchSize小于0为非法输入。
+    - BSND场景下，batchSize应传正数。
   - Seqlen取值规则
     - TND场景下，通过cuSeqLensQOptional和cuSeqLensKOptional计算每个batch的实际q/k长度。
     - BSND场景下，通过maxSeqLenQ和maxSeqLenK获取q/k长度。
@@ -433,7 +433,12 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
 <details>
 <summary><a id="Metadata"></a>Metadata输出布局</summary>
 
-  metadata输出为INT32 Tensor，当前shape固定为(64,)，字段布局如下：
+  调用方需申请shape为`(L,)`的一维INT32 Tensor。L表示INT32元素个数。本仓库版本按以下规则计算L。
+
+  1. 根据调用参数计算上限`U`。TND下，`maxSeqLenQ`为正数时取该值，否则取`65536`。BSND下，`batchSize`和`maxSeqLenQ`均为正数时取两者的乘积，否则取`0`。
+  2. 当`U = 0`时，`L = 64`。当`U > 0`时，`L = 136 + 8 * min(U, 65536)`。例如，TND下`maxSeqLenQ = 32`时，即使各batch实际使用的query token数都是0，也需要申请392个INT32元素。
+
+  将这个Tensor直接传给主算子。下表说明前四个元素的含义。
 
   <table style="undefined;table-layout: fixed; width: 1150px"><colgroup>
     <col style="width: 180px">
@@ -451,27 +456,27 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
         <tr>
         <td>forecore_num</td>
         <td>0</td>
-        <td>前置核数，即处理较多任务的核数。当totalNum不能被aicCoreNum整除时，forecore_num = totalNum % aicCoreNum，每个前置核处理 ceil(totalNum / aicCoreNum) 个任务；当能整除时，forecore_num = aicCoreNum。</td>
+        <td>前置核数。核编号从0开始，编号小于forecore_num的核为前置核。</td>
         </tr>
         <tr>
         <td>tail_core_num</td>
         <td>1</td>
-        <td>尾核数，即处理较少任务的核数。tail_core_num = aicCoreNum - forecore_num，每个尾核处理 floor(totalNum / aicCoreNum) 个任务。当totalNum能被aicCoreNum整除时为0。</td>
+        <td>尾核数。从核编号forecore_num开始，连续tail_core_num个核为尾核。</td>
         </tr>
         <tr>
         <td>b_s1_per_core</td>
         <td>2</td>
-        <td>前置核每核处理的 B*S1 任务数，即 ceil(totalNum / aicCoreNum)。</td>
+        <td>前置核每核的任务数。totalNum大于0时为ceil(totalNum / aicCoreNum)。零任务时该字段为1，无计算核使用它。</td>
         </tr>
         <tr>
         <td>b_s1_per_tail_core</td>
         <td>3</td>
-        <td>尾核每核处理的 B*S1 任务数，即 floor(totalNum / aicCoreNum)。当totalNum能被aicCoreNum整除时为0。</td>
+        <td>尾核每核的任务数。没有尾核参与时为0。</td>
         </tr>
     </tbody>
   </table>
 
-  采用前后核差异化分块切分方式。设totalNum为参与负载均衡的seq总数，N为aicCoreNum。当totalNum能被N整除时，forecore_num=N，tail_core_num=0，每核处理totalNum/N个任务。当不能整除时，设base=floor(totalNum/N)，rem=totalNum%N，则forecore_num=rem，每个前置核处理base+1个任务，tail_core_num=N-rem，每个尾核处理base个任务。例如totalNum=16，N=36时，16<36，forecore_num=16，tail_core_num=0，b_s1_per_core=1，前16个核各处理1个任务，其余核不工作。
+  每个参与运算的query token计为一个任务，N表示可用AIC核数aicCoreNum。totalNum为0时，前四个字段为[0, 0, 1, 0]，所有核均无任务。0 &lt; totalNum &lt; N时，前totalNum个核各处理1个任务，其余核空闲。totalNum ≥ N时，令r为totalNum除以N的余数。若r为0，每个核处理totalNum / N个任务。若r大于0，前r个核各处理floor(totalNum / N) + 1个任务，其余核各处理floor(totalNum / N)个任务。
 
 </details>
 
@@ -498,8 +503,6 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2Metadata(
             return (ret_val);                       \
         }                                           \
     } while (0)
-
-constexpr uint32_t DLI_METADATA_SIZE = 64;
 
 struct DenseLISoftmaxLseV2MetaData {
     int32_t forecore_num;
@@ -659,7 +662,10 @@ aclnnStatus CreateArgs(const ArgScenario &scenario, ArgContext &context)
     strcpy(context.layoutQ, scenario.hasCuSeq ? "TND" : "BSND");
     strcpy(context.layoutK, scenario.hasCuSeq ? "TND" : "BSND");
 
-    ret = CreateTensor(aclDataType::ACL_INT32, { DLI_METADATA_SIZE }, context.metadata);
+    // In this example batchSize is 1 and maxSeqLenQ is 16, so both layouts require 264 INT32 elements.
+    const int64_t itemBound = scenario.hasCuSeq ? context.maxSeqLenQ : batchSize * context.maxSeqLenQ;
+    const int64_t metadataLength = 136 + 8 * itemBound;
+    ret = CreateTensor(aclDataType::ACL_INT32, { metadataLength }, context.metadata);
     CHECK_LOG_RET(ret == ACL_SUCCESS, ret, "Create metadata failed. Error: %d", ret);
 
     if (scenario.hasCuSeq) {

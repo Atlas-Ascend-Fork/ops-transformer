@@ -76,9 +76,9 @@ bool DenseLightningIndexerSoftmaxLseV2MetadataCpuKernel::Prepare(CpuKernelContex
 
     if (bSize_ <= 0) {
         if (IsTensorValid(seqUsedQuery_)) {
-            bSize_ = seqUsedQuery_->GetTensorShape()->GetDimSize(0);
+            bSize_ = seqUsedQuery_->NumElements();
         } else if (layoutType_ == DliLayout::TND && IsTensorValid(cuSeqLensQuery_)) {
-            bSize_ = cuSeqLensQuery_->GetTensorShape()->GetDimSize(0) - 1;
+            bSize_ = cuSeqLensQuery_->NumElements() - 1;
         }
     }
 
@@ -103,6 +103,15 @@ bool DenseLightningIndexerSoftmaxLseV2MetadataCpuKernel::ParamsCheck()
     KERNEL_CHECK_NULLPTR(metadata_->GetData(), false, "metadata data is null");
     KERNEL_CHECK_NULLPTR(metadata_->GetTensorShape(), false, "metadata shape is null");
 
+    const auto matchesBatch = [this](Tensor* tensor, int64_t extra) {
+        return !IsTensorValid(tensor) ||
+               (tensor->GetTensorShape()->GetDims() == 1 && tensor->NumElements() - extra == bSize_);
+    };
+    if ((layoutType_ == DliLayout::TND && (!matchesBatch(cuSeqLensQuery_, 1) || !matchesBatch(cuSeqLensKey_, 1))) ||
+        !matchesBatch(seqUsedQuery_, 0) || !matchesBatch(seqUsedKey_, 0) || !matchesBatch(cmpResidualKey_, 0)) {
+        KERNEL_LOG_ERROR("Sequence tensor lengths must match the batch size");
+        return false;
+    }
     return CheckTensorValues();
 }
 

@@ -36,12 +36,16 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2MetadataGetWorkspaceSize(
     int64_t maskMode, int64_t cmpRatio, const aclTensor* metadata, uint64_t* workspaceSize, aclOpExecutor** executor)
 {
     if (workspaceSize == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "workspaceSize is nullptr");
-        return ACLNN_ERR_INNER_NULLPTR;
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "workspaceSize is nullptr");
+        return ACLNN_ERR_PARAM_NULLPTR;
     }
     if (executor == nullptr) {
-        OP_LOGE(ACLNN_ERR_INNER_NULLPTR, "executor is nullptr");
-        return ACLNN_ERR_INNER_NULLPTR;
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "executor is nullptr");
+        return ACLNN_ERR_PARAM_NULLPTR;
+    }
+    if (metadata == nullptr) {
+        OP_LOGE(ACLNN_ERR_PARAM_NULLPTR, "metadata is nullptr");
+        return ACLNN_ERR_PARAM_NULLPTR;
     }
     L2_DFX_PHASE_1(
         aclnnDenseLightningIndexerSoftmaxLseV2Metadata,
@@ -73,7 +77,7 @@ aclnnStatus aclnnDenseLightningIndexerSoftmaxLseV2MetadataGetWorkspaceSize(
         CHECK_RET(cuSeqLensKContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }
     const aclTensor* seqUsedQContiguous = nullptr;
-    if (seqUsedQOptional != nullptr) {
+    if (IsTensorExistDliSLse(seqUsedQOptional)) {
         seqUsedQContiguous = l0op::Contiguous(seqUsedQOptional, uniqueExecutor.get());
         CHECK_RET(seqUsedQContiguous != nullptr, ACLNN_ERR_INNER_NULLPTR);
     }

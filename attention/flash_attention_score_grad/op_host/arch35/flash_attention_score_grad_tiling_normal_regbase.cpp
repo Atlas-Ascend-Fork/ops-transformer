@@ -13,6 +13,7 @@
  * \brief
  */
 #include "flash_attention_score_grad_tiling_normal_regbase.h"
+#include <algorithm>
 #include <array>
 #include <limits>
 #include "op_host/tiling_templates_registry.h"
@@ -1955,6 +1956,97 @@ void FlashAttentionScoreGradTilingNormalRegbase::GetIsDeterArr()
     }
 }
 
+namespace {
+struct TndL2Batch {
+    int64_t firstBlock;
+    int64_t firstQ;
+    int64_t firstKv;
+    int64_t s1Tiles;
+    int64_t s2Tiles;
+};
+
+struct TndL2Index {
+    std::vector<TndL2Batch> batches;
+    int64_t blockCount = 0;
+    int64_t qStep = 0;
+    int64_t kvStep = 0;
+    int64_t qWidth = 0;
+    int64_t kvWidth = 0;
+
+    bool Build(const FuzzyBaseInfoParamsRegbase& p)
+    {
+        // IsValidUnpad and GetOffset use the same block domain only with this S2 ratio.
+        if (S2CV_RATIO_DEFAULT != 1 || p.b < 2 || p.maxValidBBLen <= 1 || p.s1Inner <= 0 || p.s2Inner <= 0 ||
+            p.n2 <= 0 || p.g <= 0 || p.d <= 0 || p.actualSeqQlen.size() != static_cast<size_t>(p.b) ||
+            p.actualSeqKvlen.size() != static_cast<size_t>(p.b)) {
+            return false;
+        }
+        int64_t heads = 0;
+        if (__builtin_mul_overflow(p.n2, p.g, &heads) || __builtin_mul_overflow(heads, p.d, &qWidth) ||
+            __builtin_mul_overflow(p.n2, p.d, &kvWidth) ||
+            __builtin_mul_overflow(p.s1Inner, static_cast<int64_t>(S1CV_RATIO_DEFAULT), &qStep)) {
+            return false;
+        }
+        kvStep = p.s2Inner;
+        int64_t firstQ = 0;
+        int64_t firstKv = 0;
+        batches.reserve(p.b);
+        for (int64_t b = 0; b < p.b; ++b) {
+            const int64_t q = p.actualSeqQlen[b];
+            const int64_t kv = p.actualSeqKvlen[b];
+            if (q < 0 || kv < 0) {
+                return false;
+            }
+            const int64_t s1Tiles = q / qStep + (q % qStep != 0);
+            const int64_t s2Tiles = kv / kvStep + (kv % kvStep != 0);
+            if (s1Tiles != 0 && s2Tiles != 0) {
+                batches.push_back({blockCount, firstQ, firstKv, s1Tiles, s2Tiles});
+                int64_t count = 0;
+                if (__builtin_mul_overflow(s1Tiles, s2Tiles, &count) || __builtin_mul_overflow(count, heads, &count) ||
+                    __builtin_add_overflow(blockCount, count, &blockCount)) {
+                    return false;
+                }
+            }
+            // One side can contain tokens even when this batch contributes no blocks.
+            int64_t qElements = 0;
+            int64_t kvElements = 0;
+            if (__builtin_mul_overflow(q, qWidth, &qElements) || __builtin_add_overflow(firstQ, qElements, &firstQ) ||
+                __builtin_mul_overflow(kv, kvWidth, &kvElements) ||
+                __builtin_add_overflow(firstKv, kvElements, &firstKv)) {
+                return false;
+            }
+        }
+        for (uint32_t c = 0; c < p.blockOuter; ++c) {
+            if (p.blockStarts[c] < 0 || p.blockEnds[c] > blockCount || p.blockStarts[c] > p.blockEnds[c]) {
+                return false;
+            }
+        }
+        return !batches.empty();
+    }
+
+    void Offsets(int64_t index, size_t& cursor, const FuzzyBaseInfoParamsRegbase& p, int64_t& dq, int64_t& dkv) const
+    {
+        if (cursor == batches.size()) {
+            auto next = std::upper_bound(batches.begin(), batches.end(), index,
+                                         [](int64_t i, const TndL2Batch& batch) { return i < batch.firstBlock; });
+            cursor = static_cast<size_t>(next - batches.begin() - 1);
+        } else {
+            while (cursor + 1 < batches.size() && batches[cursor + 1].firstBlock <= index) {
+                ++cursor;
+            }
+        }
+        const auto& batch = batches[cursor];
+        const int64_t local = index - batch.firstBlock;
+        const int64_t s1 = local % batch.s1Tiles;
+        const int64_t column = local / batch.s1Tiles;
+        const int64_t s2 = column % batch.s2Tiles;
+        const int64_t head = column / batch.s2Tiles;
+        dq = batch.firstQ + s1 * qStep * qWidth + head * p.d;
+        dkv = batch.firstKv + s2 * kvStep * kvWidth + (head / p.g) * p.d;
+    }
+};
+} // namespace
+
 bool FlashAttentionScoreGradTilingNormalRegbase::CheckExceedL2Cache()
 {
     std::array<int64_t, CORE_LIST_NUM> dqOffset;
@@ -1976,10 +2068,22 @@ bool FlashAttentionScoreGradTilingNormalRegbase::CheckExceedL2Cache()
         inputSize = 1;
     }
 
+    TndL2Index index;
+    const bool useIndex = fBaseParams.layoutType == INPUT_FORMAT_TND && fBaseParams.attenMaskOptional == EMPTY_TENSOR &&
+                          fBaseParams.sparseMode == static_cast<int64_t>(SparseMode::NO_MASK) &&
+                          fBaseParams.sparseType == static_cast<uint8_t>(SparseType::DENSE) &&
+                          strcmp(context_->GetAttrs()->GetAttrPointer<char>(LAYOUT_ATTR_IDX), "TND") == 0 &&
+                          index.Build(fBaseParams);
+    std::array<size_t, CORE_LIST_NUM> cursors;
+    if (useIndex) {
+        cursors.fill(index.batches.size());
+    }
+    auto valid = [&](int64_t block) { return useIndex ? (block >= 0 && block < index.blockCount) : IsValid(block); };
+
     bool isExceed = false;
     while (calcNum < fBaseParams.maxValidBBLen) {
         for (uint16_t cBlockIdx = 0; cBlockIdx < fBaseParams.blockOuter; cBlockIdx++) {
-            while (!IsValid(fBaseParams.blockStarts[cBlockIdx] + loopIdx[cBlockIdx]) &&
+            while (!valid(fBaseParams.blockStarts[cBlockIdx] + loopIdx[cBlockIdx]) &&
                    (fBaseParams.blockStarts[cBlockIdx] + loopIdx[cBlockIdx] < fBaseParams.blockEnds[cBlockIdx])) {
                 loopIdx[cBlockIdx]++;
             }
@@ -1989,7 +2093,12 @@ bool FlashAttentionScoreGradTilingNormalRegbase::CheckExceedL2Cache()
                 continue;
             }
             int64_t validBlockIdx = fBaseParams.blockStarts[cBlockIdx] + loopIdx[cBlockIdx];
-            GetOffset(fBaseParams, dqOffset[cBlockIdx], dkDvOffset[cBlockIdx], validBlockIdx);
+            if (useIndex) {
+                index.Offsets(validBlockIdx, cursors[cBlockIdx], fBaseParams, dqOffset[cBlockIdx],
+                              dkDvOffset[cBlockIdx]);
+            } else {
+                GetOffset(fBaseParams, dqOffset[cBlockIdx], dkDvOffset[cBlockIdx], validBlockIdx);
+            }
             loopIdx[cBlockIdx]++;
 
             if (dqOffsetSet.find(dqOffset[cBlockIdx]) == dqOffsetSet.end()) {

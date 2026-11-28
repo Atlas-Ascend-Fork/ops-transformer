@@ -12,6 +12,8 @@ English | [简体中文](./README.md)
 |<term>Atlas A2 training products</term>|      √     |
 |<term>Atlas A2 inference products</term>|      ×     |
 
+Atlas A3 training products support [aclnnFlashAttentionScoreGrad](./docs/aclnnFlashAttentionScoreGrad_en.md), [aclnnFlashAttentionScoreGradV2](./docs/aclnnFlashAttentionScoreGradV2_en.md), and [aclnnFlashAttentionScoreGradV3](./docs/aclnnFlashAttentionScoreGradV3_en.md). Support for [aclnnFlashAttentionScoreGradV4](./docs/aclnnFlashAttentionScoreGradV4_en.md) is currently unavailable on these products.
+
 ## Function Description
 
 - Operator function: Computes the backward output of attention in the training scenario, that is, the backward computation of FlashAttentionScore:

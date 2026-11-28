@@ -138,7 +138,7 @@ aclnnStatus aclnnFlashAttentionScoreGradV4GetWorkspaceSize(
   const aclTensor   *dpseOut,
   const aclTensor   *dsinkOut,
   uint64_t          *workspaceSize,
-  aclOpExecutor    **executor)`
+  aclOpExecutor    **executor);
 ```
 
 ```c++
@@ -494,8 +494,8 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
     <tr>
       <td>softmaxInLayout</td>
       <td>输入</td>
-      <td>控制softmaxMax、softmaxSum的实际数据排布。</td>
-      <td>shape为TND，实际数据排布需要NTD时传"same_as_input"，TND时传""</td>
+      <td>控制softmaxMaxOptional和softmaxSumOptional的实际数据排布。</td>
+      <td>inputLayout为TND时，若softmaxMaxOptional、softmaxSumOptional按token排布，同一token的各个head连续存放，传"same_as_input"。若每个batch段内按head排布，同一head的各个token连续存放，传""。其他inputLayout取值传""。</td>
       <td>String</td>
       <td>-</td>
       <td>-</td>
@@ -746,9 +746,9 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
     - D：取值范围为1\~768。
     - KeepProb：取值范围为(0, 1]。
 - 部分场景下，如果计算量过大可能会导致算子执行超时（aicore error类型报错，errorStr为：timeout or trap error），此时建议做轴切分处理，注：这里的计算量会受B、S、N、D等参数的影响，值越大计算量越大。
-- prefixOptional稀疏计算仅支持压缩场景，sparseModeOptional=6，当Sq > Skv时，prefix的N值取值范围\[0, Skv\]，当Sq <= Skv时，prefix的N值取值范围\[Skv-Sq, Skv\]。当sparseModeOptional=5、prefix的N > Skv或prefixOptional不传时执行全计算，sparseModeOptional=6要求prefixOptional必传。
+- prefixOptional稀疏计算仅支持压缩场景，sparseMode=6，当Sq > Skv时，prefix的N值取值范围\[0, Skv\]，当Sq <= Skv时，prefix的N值取值范围\[Skv-Sq, Skv\]。当sparseMode=5、prefix的N > Skv或prefixOptional不传时执行全计算，sparseMode=6要求prefixOptional必传。
 - sparseMode=7时，不支持可选输入pseShiftOptional。
-- sparseMode=8时，当每个sequence的q、kv等长时支持可选输入pseShiftOptional，针对全局做pse生成。支持q方向进行外切，需要外切前每个sequence的q、kv等长，外切后传入的actualSeqQLenOptional[0] - actualSeqKvLenOptional[0] + qStartIdxOptional - kvStartIdxOptional == 0（本功能属实验性功能）。
+- sparseMode=8且由算子内部生成PSE时，支持可选输入pseShiftOptional，并支持沿query方向外切（实验性功能）。外切前，每个batch段的query与KV序列长度须相等。外切后，第一个batch段须满足`actualSeqQLenOptional[0] - actualSeqKvLenOptional[0] + qStart - kvStart == 0`。qStart和kvStart分别取qStartIdxOptional和kvStartIdxOptional的首元素，未传入的起点取0。其余每个batch段的query与KV序列长度仍须相等。
 - actualSeqQLenOptional输入支持某个Batch上的S长度为0，此时不支持可选输入pseShiftOptional。
 - pseType与pseShiftOptional的配套约束如下：
   - pseType为2或3时，pseShiftOptional的数据类型需为FLOAT32，对应shape支持范围是[B,N]或[N]。
@@ -762,7 +762,7 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
     | 2           | 内部生成pse先mul再add              | - |
     | 3           | 内部生成pse先mul再add再sqrt         | - |
 
-- 关于softmaxMax与softmaxSum参数的约束：输入格式固定为\[B, N, S, 8\]，TND的输入格式除外，此时为\[N, T, 8\]，注：T=B*S。
+- inputLayout为TND时，T为各batch段的query长度之和。softmaxInLayout为"same_as_input"时，softmaxMaxOptional和softmaxSumOptional的shape为[T, N, 8]。默认取值""对应的实际数据排布见softmaxInLayout参数说明。其他inputLayout对应的shape见softmaxMaxOptional和softmaxSumOptional参数说明。
 - headNum的取值必须和传入的Query中的N值保持一致。
 
 <!-- npu="950" id8 -->
@@ -775,7 +775,6 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
 - TND格式下，支持尾部部分Batch不参与计算，此时actual_seq_q_len和actual_seq_kv_len尾部传入对应个数的0即可。假设真实S长度为[2, 3, 4, 5, 6]，若希望最后两个Batch不参与计算，则传入的actual_seq_q_len为[2, 3, 4, 0, 0]。此时若需要传入prefixOptional，其尾部也需要传入同等数量的0，例如[1, 1, 1, 0, 0]。
 - TND场景下，每个batch段内部仍按[N, Sq_i, Skv_i]生成，但存储与传参时统一flatten。若第i个batch段的真实query长度为Sq_i、真实key/value长度为Skv_i，则该段PSE元素个数为N *Sq_i* Skv_i，整段PSE总长度pseTotalLen为sum_i(N *Sq_i* Skv_i)。
 - sinkInOptional不为None时，query与key等输入tensor仅支持float16和bfloat16两种类型，sinkInOptional维度为1，长度需要与query的headNum相同。
-- softmaxSum、softmaxMax数据排布为NTD时，softmaxInLayout需要为"same_as_input"。
 
 ## 调用示例
 
@@ -785,6 +784,7 @@ aclnnStatus aclnnFlashAttentionScoreGradV4(
 #include <iostream>
 #include <vector>
 #include <cstdint>
+#include <cstdlib>
 #include <cmath>
 #include <random>
 #include "acl/acl.h"
@@ -852,6 +852,12 @@ int CreateAclTensor(const std::vector<T>& hostData, const std::vector<int64_t>& 
   // 调用aclCreateTensor接口创建aclTensor
   *tensor = aclCreateTensor(shape.data(), shape.size(), dataType, strides.data(), 0, aclFormat::ACL_FORMAT_ND,
                             shape.data(), shape.size(), *deviceAddr);
+  if (*tensor == nullptr) {
+    LOG_PRINT("aclCreateTensor failed.\n");
+    aclrtFree(*deviceAddr);
+    *deviceAddr = nullptr;
+    return EXIT_FAILURE;
+  }
   return 0;
 }
 
@@ -984,6 +990,7 @@ int main() {
   ret = CreateAclTensor(softmaxSumHostData, softmaxSumShape, &softmaxSumDeviceAddr, aclDataType::ACL_FLOAT, &softmaxSum);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(attentionInHostData, attentionInShape, &attentionInDeviceAddr, aclDataType::ACL_FLOAT, &attentionIn);
+  CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(sinkInOptionalHostData, sinkInOptionalShape, &sinkInOptionalDeviceAddr, aclDataType::ACL_FLOAT, &sinkInOptional);
   CHECK_RET(ret == ACL_SUCCESS, return ret);
   ret = CreateAclTensor(dqHostData, dqShape, &dqDeviceAddr, aclDataType::ACL_FLOAT, &dq);
