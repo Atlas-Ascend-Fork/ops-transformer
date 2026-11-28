@@ -97,8 +97,8 @@ aclnnStatus aclnnDualLevelGroupedMatmulWeightNz(
     <tr>
     <td>x（const aclTensorList *）</td>
     <td>输入</td>
-    <td>左矩阵。</td>
-    <td>按输入行分组，M 为输入行数，K 为归约长度。</td>
+    <td>公式中的输入<code>x</code>。</td>
+    <td>TensorList 长度为 1，按 M 轴分组。</td>
     <td>FLOAT4_E2M1</td>
     <td>ND</td>
     <td>(M, K)</td>
@@ -299,6 +299,11 @@ aclnnStatus aclnnDualLevelGroupedMatmulWeightNz(
     <tr>
     <td>3. 两级分组大小、分组模式、调优配置或其他控制参数取值不符合约束。</td>
     </tr>
+    <tr>
+    <td>ACLNN_ERR_INNER_CREATE_EXECUTOR</td>
+    <td>561101</td>
+    <td>创建算子执行器失败。</td>
+    </tr>
     </tbody>
     </table>
 
@@ -323,12 +328,12 @@ aclnnStatus aclnnDualLevelGroupedMatmulWeightNz(
   - `aclnnDualLevelGroupedMatmulWeightNz` 默认采用确定性实现。
 
 - level1 scale 的最内层两个元素分别对应连续的两个 level1 分组。
-- 矩阵、缩放因子和输出均使用长度为 1 的 TensorList，且其中的张量须有效。`biasOptional` 提供时遵循相同的 TensorList 约束。`groupListOptional` 传入单个张量。各专家共享归约和输出列维度。
-- E 须大于 0，K 须为偶数，非转置权重的 N 也须为偶数。非空 Tensor 场景下，K 须大于 2，N 须大于 1。
+- 矩阵、缩放因子和输出均使用长度为 1 的 TensorList，且其中的张量须有效。`biasOptional` 提供时遵循相同的 TensorList 约束。`groupListOptional` 传入单个张量。各专家的 K 和 N 分别相同。
+- E 须大于 0，K 须为偶数，weight 不转置时 N 也须为偶数。当 `M > 0` 且 `N > 0` 时，要求 `K > 2`、`N > 1`。
 - 支持 M 为 0 或 N 为 0 的空 Tensor 场景，此时允许 K 为 0。参数校验通过后，第一段接口返回 `ACLNN_SUCCESS`，`workspaceSize` 为 0。当 M 和 N 均不为 0 时，K 为 0 将使第一段接口返回 `ACLNN_ERR_PARAM_INVALID`。
 - E、M、K、N 均不得超过 `INT32_MAX - 1`。用于张量寻址的维度乘积及权重补齐后的元素数须可用 `int64_t` 表示。
 - 张量的存储偏移须为 0。ND 参数须使用实际 ND 存储，除规定的转置权重 level1 scale 视图外，ND 张量须连续。
-- `out` 须为形状和存储形状均为 `(M,N)` 的 ND 张量。输出非空时，步长须为 `(N,1)`。
+- `out` 须为形状和存储形状均为 `(M,N)` 的 ND 张量。当 `M > 0` 且 `N > 0` 时，步长须为 `(N,1)`。
 - 分组列表按 `groupListType` 填写。允许专家的行数为 0。
   - `0` 表示累计结束位置，各项须非负且非递减，最后一项须等于 M。
   - `1` 表示各组行数，各项须非负，总和须等于 M。
