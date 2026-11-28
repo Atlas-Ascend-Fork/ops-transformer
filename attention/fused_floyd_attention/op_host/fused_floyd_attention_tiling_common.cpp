@@ -31,12 +31,15 @@ ge::graphStatus CheckAttentionMaskShape(gert::TilingContext* context, int64_t b,
 {
     auto attentionMaskShape = context->GetOptionalInputShape(ATTENTION_MASK_INPUT_INDEX);
     if (attentionMaskShape == nullptr) {
-        OP_LOGE(context, "FusedFloydAttention does not support a null atten_mask.");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "atten_mask", "nullptr",
+                                              "FusedFloydAttention does not support a null atten_mask");
         return ge::GRAPH_FAILED;
     }
     auto attentionMaskDimNum = attentionMaskShape->GetStorageShape().GetDimNum();
     if (attentionMaskDimNum != SUPPORT_DIM_NUM) { // attentionMask only support 5 dimensions
-        OP_LOGE(context, "The shape of atten_mask is invalid, got %lu dimensions", attentionMaskDimNum);
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+            context->GetNodeName(), "atten_mask", std::to_string(attentionMaskDimNum),
+            "The shape of atten_mask is invalid, got " + std::to_string(attentionMaskDimNum) + " dimensions");
         return ge::GRAPH_FAILED;
     }
     auto dim0 = attentionMaskShape->GetStorageShape().GetDim(0); // 0:b
@@ -47,8 +50,13 @@ ge::graphStatus CheckAttentionMaskShape(gert::TilingContext* context, int64_t b,
 
     OP_CHECK_IF(
         (dim0 != b || dim1 != 1 || dim2 != n || dim3 != 1 || dim4 != k),
-        OP_LOGE(context, "The shape of atten_mask is invalid, got (%ld,%ld,%ld,%ld,%ld), should be (%ld,1,%ld,1,%ld)",
-                dim0, dim1, dim2, dim3, dim4, b, n, k),
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+            context->GetNodeName(), "atten_mask",
+            "[" + std::to_string(dim0) + "," + std::to_string(dim1) + "," + std::to_string(dim2) + "," +
+                std::to_string(dim3) + "," + std::to_string(dim4) + "]",
+            "The shape of atten_mask is invalid, got (" + std::to_string(dim0) + "," + std::to_string(dim1) + "," +
+                std::to_string(dim2) + "," + std::to_string(dim3) + "," + std::to_string(dim4) + "), should be (" +
+                std::to_string(b) + ",1," + std::to_string(n) + ",1," + std::to_string(k) + ")"),
         return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
@@ -62,9 +70,13 @@ ge::graphStatus CheckSupportShape(gert::TilingContext* context)
     const gert::StorageShape* value2Shape = context->GetInputShape(VALUE2_INPUT_INDEX);
 
     OP_CHECK_IF(!CheckSameShape(key1Shape, value1Shape),
-                OP_LOGE(context, "key1's shape and value1's shape is different"), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context->GetNodeName(), "key1/value1", "different shapes",
+                                                      "key1's shape and value1's shape is different"),
+                return ge::GRAPH_FAILED);
     OP_CHECK_IF(!CheckSameShape(key2Shape, value2Shape),
-                OP_LOGE(context, "key2's shape and value2's shape is different"), return ge::GRAPH_FAILED);
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context->GetNodeName(), "key2/value2", "different shapes",
+                                                      "key2's shape and value2's shape is different"),
+                return ge::GRAPH_FAILED);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -74,7 +86,11 @@ ge::graphStatus CheckInputShapeValid(gert::TilingContext* context, int64_t b, in
 {
     auto isShapeInValid = (b == 0 || n == 0 || s1 == 0 || s2 == 0 || s3 == 0 || d == 0);
     OP_CHECK_IF(isShapeInValid,
-                OP_LOGE(context, "input shape error, got 0 in bhmnkd(%ld,%ld,%ld,%ld,%ld,%ld)", b, n, s1, s2, s3, d),
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context->GetNodeName(), "query/key1", "zero dimension",
+                                                      "input shape error, got 0 in bhmnkd(" + std::to_string(b) + "," +
+                                                          std::to_string(n) + "," + std::to_string(s1) + "," +
+                                                          std::to_string(s2) + "," + std::to_string(s3) + "," +
+                                                          std::to_string(d) + ")"),
                 return ge::GRAPH_FAILED);
 
     auto ret = CheckSupportShape(context);
@@ -135,7 +151,9 @@ ge::graphStatus CheckBaseInput(gert::TilingContext* context)
     // query [B,H,N,M,D], key1 [B,H,N,K,D]: B/H/N/D must match
     OP_CHECK_IF(
         (b != keyShape.GetDim(0) || n != keyShape.GetDim(1) || s1 != keyShape.GetDim(2) || d != keyShape.GetDim(4)),
-        OP_LOGE(context, "query or key1 shape is invalid"), return ge::GRAPH_FAILED);
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context->GetNodeName(), "query/key1", "mismatched dimensions",
+                                              "query or key1 shape is invalid"),
+        return ge::GRAPH_FAILED);
 
     // key2 [B,H,K,M,D]: B/H/D with query; K with key1; M with query
     OP_CHECK_IF((b != key2Shape.GetDim(0) || n != key2Shape.GetDim(1) || d != key2Shape.GetDim(4) ||
@@ -148,15 +166,21 @@ ge::graphStatus CheckBaseInput(gert::TilingContext* context)
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF((s1 % ALIGNED_NUM_16 != 0 || s2 % ALIGNED_NUM_128 != 0),
-                OP_LOGE(context, "The third dimension of the query only supports 16-byte alignment, and the fourth "
-                                 "dimension only supports 128-byte alignment"),
+                OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                    context->GetNodeName(), "query", std::to_string(s1) + "," + std::to_string(s2),
+                    "The third dimension of the query only supports 16-byte alignment, and the fourth "
+                    "dimension only supports 128-byte alignment"),
                 return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF(s3 % ALIGNED_NUM_128 != 0,
-                OP_LOGE(context, "The fourth dimension of the key1 only supports 128-byte alignment"),
-                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(
+        s3 % ALIGNED_NUM_128 != 0,
+        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(context->GetNodeName(), "key1", std::to_string(s3),
+                                              "The fourth dimension of the key1 only supports 128-byte alignment"),
+        return ge::GRAPH_FAILED);
 
-    OP_CHECK_IF((d != 32 && d != 64 && d != 128), OP_LOGE(context, "Headdim only supports 32/64/128."),
+    OP_CHECK_IF((d != 32 && d != 64 && d != 128),
+                OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "query.head_dim", std::to_string(d),
+                                                      "Headdim only supports 32/64/128"),
                 return ge::GRAPH_FAILED);
 
     if (CheckAttrs(context) != ge::GRAPH_SUCCESS) {

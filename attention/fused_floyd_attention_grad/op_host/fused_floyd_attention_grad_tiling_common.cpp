@@ -97,7 +97,8 @@ ge::graphStatus CheckAttentionMaskShape(gert::TilingContext* context, int64_t b,
 {
     auto attentionMaskShape = context->GetOptionalInputShape(ATTEN_MASK);
     if (attentionMaskShape == nullptr) {
-        OP_LOGE(context, "FusedFloydAttentionGrad does not support a null atten_mask.");
+        OP_LOGE_FOR_INVALID_VALUE_WITH_REASON(context->GetNodeName(), "atten_mask", "nullptr",
+                                              "FusedFloydAttentionGrad does not support a null atten_mask");
         return ge::GRAPH_FAILED;
     }
     auto attentionMaskShapeDim = attentionMaskShape->GetStorageShape().GetDimNum();

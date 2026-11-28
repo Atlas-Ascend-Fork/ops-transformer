@@ -215,13 +215,18 @@ static ge::graphStatus CheckOutputShapes(gert::TilingContext* context)
         const auto& expected = input->GetStorageShape();
         const auto& actual = output->GetStorageShape();
         OP_CHECK_IF(actual.GetDimNum() != expected.GetDimNum(),
-                    OP_LOGE(context, "%s rank is invalid: got %zu, expected %zu to match %s.", outputNames[i],
-                            actual.GetDimNum(), expected.GetDimNum(), inputNames[i]),
+                    OP_LOGE_FOR_INVALID_SHAPEDIM_WITH_REASON(
+                        context->GetNodeName(), outputNames[i], std::to_string(actual.GetDimNum()),
+                        std::string(outputNames[i]) + " rank is invalid: got " + std::to_string(actual.GetDimNum()) +
+                            ", expected " + std::to_string(expected.GetDimNum()) + " to match " + inputNames[i]),
                     return ge::GRAPH_FAILED);
         for (uint64_t dim = 0; dim < expected.GetDimNum(); ++dim) {
             OP_CHECK_IF(actual.GetDim(dim) != expected.GetDim(dim),
-                        OP_LOGE(context, "%s shape is invalid at dimension %zu: got %ld, expected %ld to match %s.",
-                                outputNames[i], dim, actual.GetDim(dim), expected.GetDim(dim), inputNames[i]),
+                        OP_LOGE_FOR_INVALID_SHAPE_WITH_REASON(
+                            context->GetNodeName(), outputNames[i], std::to_string(actual.GetDim(dim)),
+                            std::string(outputNames[i]) + " shape is invalid at dimension " + std::to_string(dim) +
+                                ": got " + std::to_string(actual.GetDim(dim)) + ", expected " +
+                                std::to_string(expected.GetDim(dim)) + " to match " + inputNames[i]),
                         return ge::GRAPH_FAILED);
         }
     }
