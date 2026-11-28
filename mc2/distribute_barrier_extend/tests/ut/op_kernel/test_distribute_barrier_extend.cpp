@@ -28,6 +28,7 @@ extern "C" __global__ __aicore__ void distribute_barrier_extend(GM_ADDR context,
 
 namespace Mc2BarrierUt {
 CommState* g_commState = nullptr;
+OomRangeState* g_oomRangeState = nullptr;
 Channel* g_delayedChannel = nullptr;
 uint32_t* g_drainGate = nullptr;
 constexpr uint32_t TRANSPORT_ROUNDS = 32U;
@@ -166,6 +167,11 @@ protected:
         return memory;
     }
 
+    void InitOomRangeState()
+    {
+        Mc2BarrierUt::g_oomRangeState = new (Allocate(sizeof(Mc2BarrierUt::OomRangeState))) Mc2BarrierUt::OomRangeState;
+    }
+
     void TearDown() override
     {
         for (pid_t worker : workers_) {
@@ -182,6 +188,7 @@ protected:
             AscendC::GmFree(memory);
         }
         Mc2BarrierUt::g_commState = nullptr;
+        Mc2BarrierUt::g_oomRangeState = nullptr;
         Mc2BarrierUt::g_delayedChannel = nullptr;
         Mc2BarrierUt::g_drainGate = nullptr;
     }
@@ -216,7 +223,7 @@ protected:
         return tiling;
     }
 
-    void CheckRound(uint32_t bank, uint8_t* tiling)
+    void RunRound(uint32_t bank, uint8_t* tiling, uint32_t blockNum = 2U)
     {
         const uint32_t count = context_->localSize + context_->railSize;
         const uint64_t sequence = Mc2Barrier::SequenceOffset(context_->localSize, context_->railSize);
@@ -226,8 +233,16 @@ protected:
             auto* flag = reinterpret_cast<uint64_t*>(context_->window + offset + i * Mc2Barrier::SLOT_BYTES);
             std::fill(flag, flag + 4, epoch);
         }
-        ICPU_RUN_KF(distribute_barrier_extend, 2, reinterpret_cast<GM_ADDR>(context_), nullptr, nullptr, nullptr,
+        ICPU_RUN_KF(distribute_barrier_extend, blockNum, reinterpret_cast<GM_ADDR>(context_), nullptr, nullptr, nullptr,
                     nullptr, nullptr, tiling);
+    }
+
+    void CheckRound(uint32_t bank, uint8_t* tiling)
+    {
+        const uint64_t sequence = Mc2Barrier::SequenceOffset(context_->localSize, context_->railSize);
+        const uint64_t epoch = *reinterpret_cast<uint64_t*>(context_->window + sequence) + 1U;
+        const uint64_t offset = bank * Mc2Barrier::BankBytes(context_->localSize, context_->railSize);
+        RunRound(bank, tiling);
         for (uint32_t i = 0; i < context_->localSize; ++i) {
             EXPECT_EQ(*reinterpret_cast<uint64_t*>(context_->window + offset + i * Mc2Barrier::SLOT_BYTES), 0U);
             EXPECT_EQ(*reinterpret_cast<uint64_t*>(peers_[i].window + offset), i == 0 ? 0U : epoch);
@@ -857,6 +872,102 @@ TEST_F(DistributeBarrierExtendTest, EveryRankWaitsForDelayedArrivalOnUrma)
 }
 #endif
 
+#if defined(MC2_BARRIER_OOM_UT) && MC2_BARRIER_OOM_UT == 1
+TEST_F(DistributeBarrierExtendTest, OomChecksCoverLocalAndRailPeerWindows)
+{
+    constexpr uint32_t oomUtExpectedCores = 2U;
+    constexpr uint32_t oomUtLocalRecords = 1U;
+    constexpr uint32_t oomUtPeerRecords = 4U;
+    constexpr uint32_t oomUtTotalRecords = oomUtLocalRecords + oomUtPeerRecords;
+    InitContext(2, 3);
+    auto* tiling = InitTiling(2);
+    InitOomRangeState();
+
+    RunRound(1, tiling);
+
+    const uint32_t expectedCounts[oomUtExpectedCores] = {oomUtLocalRecords, oomUtPeerRecords};
+    const uint64_t expectedAddresses[oomUtExpectedCores][oomUtPeerRecords] = {
+        {context_->window, 0U, 0U},
+        {context_->window, peers_[1].window, peers_[3].window, peers_[4].window},
+    };
+    uint32_t total = 0;
+    for (uint32_t core = 0; core < oomUtExpectedCores; ++core) {
+        ASSERT_EQ(Mc2BarrierUt::g_oomRangeState->counts[core], expectedCounts[core]);
+        for (uint32_t i = 0; i < expectedCounts[core]; ++i) {
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].core, core);
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].address, expectedAddresses[core][i]);
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].bytes, context_->windowBytes);
+            ++total;
+        }
+    }
+    EXPECT_EQ(total, oomUtTotalRecords);
+}
+
+TEST_F(DistributeBarrierExtendTest, OomChecksSplitPeerWindowsAcrossWorkers)
+{
+    constexpr uint32_t oomUtCores = 4U;
+    constexpr uint32_t oomUtMaxRecords = 3U;
+    constexpr uint32_t oomUtTotalRecords = 7U;
+    InitContext(2, 3);
+    auto* tiling = InitTiling(oomUtCores);
+    InitOomRangeState();
+
+    RunRound(1, tiling, oomUtCores);
+
+    const uint32_t expectedCounts[oomUtCores] = {1U, 1U, 3U, 2U};
+    const uint64_t expectedAddresses[oomUtCores][oomUtMaxRecords] = {
+        {context_->window, 0U, 0U},
+        {context_->window, 0U, 0U},
+        {context_->window, peers_[1].window, peers_[3].window},
+        {context_->window, peers_[4].window, 0U},
+    };
+    uint32_t total = 0;
+    for (uint32_t core = 0; core < oomUtCores; ++core) {
+        ASSERT_EQ(Mc2BarrierUt::g_oomRangeState->counts[core], expectedCounts[core]);
+        for (uint32_t i = 0; i < expectedCounts[core]; ++i) {
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].core, core);
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].address, expectedAddresses[core][i]);
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].bytes, context_->windowBytes);
+            ++total;
+        }
+    }
+    EXPECT_EQ(total, oomUtTotalRecords);
+}
+
+TEST_F(DistributeBarrierExtendTest, OomChecksSkipInactiveElasticPeerWindows)
+{
+    constexpr uint32_t oomUtCores = 3U;
+    constexpr uint32_t oomUtMaxRecords = 3U;
+    constexpr uint32_t oomUtTotalRecords = 5U;
+    InitContext(2, 3);
+    auto* tiling = InitTiling(oomUtCores);
+    reinterpret_cast<DistributeBarrierTilingData*>(tiling)->distributeBarrierInfo.isInputElasticInfo = true;
+    auto* elastic = MakeElasticInfo(context_->worldSize, {2U});
+    InitOomRangeState();
+    peers_[3].window = reinterpret_cast<uint64_t>(Allocate(context_->windowBytes));
+
+    CheckLargeElasticRound(tiling, elastic, oomUtCores);
+
+    const uint32_t expectedCounts[oomUtCores] = {1U, 1U, 3U};
+    const uint64_t expectedAddresses[oomUtCores][oomUtMaxRecords] = {
+        {context_->window, 0U, 0U},
+        {context_->window, 0U, 0U},
+        {context_->window, peers_[1].window, peers_[4].window},
+    };
+    uint32_t total = 0;
+    for (uint32_t core = 0; core < oomUtCores; ++core) {
+        ASSERT_EQ(Mc2BarrierUt::g_oomRangeState->counts[core], expectedCounts[core]);
+        for (uint32_t i = 0; i < expectedCounts[core]; ++i) {
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].core, core);
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].address, expectedAddresses[core][i]);
+            EXPECT_EQ(Mc2BarrierUt::g_oomRangeState->records[core][i].bytes, context_->windowBytes);
+            ++total;
+        }
+    }
+    EXPECT_EQ(total, oomUtTotalRecords);
+}
+#endif
+
 TEST_F(DistributeBarrierExtendTest, UbmemDelayedArrivalHonorsMicrosecondTimeout)
 {
     CheckEveryLateRank(8, 1, Mc2Barrier::Protocol::UBMEM, 5000000);
@@ -1020,15 +1131,17 @@ TEST_F(DistributeBarrierExtendTest, RtpElasticRailExitPrecedesNextCall)
 
 TEST_F(DistributeBarrierExtendTest, LegacyContextRemainsCompatible)
 {
+    constexpr uint64_t legacyWindowBytes = 2U * 1024U * 1024U;
     auto* context = new (Allocate(sizeof(Mc2Aclnn::Mc2MoeContext))) Mc2Aclnn::Mc2MoeContext{};
     for (uint32_t rank = 0; rank < 2; ++rank) {
-        context->epHcclBuffer_[rank] = reinterpret_cast<uint64_t>(Allocate(2U * 1024U * 1024U));
+        context->epHcclBuffer_[rank] = reinterpret_cast<uint64_t>(Allocate(legacyWindowBytes));
     }
     auto* tiling = Allocate(sizeof(DistributeBarrierTilingData));
     auto& info = reinterpret_cast<DistributeBarrierTilingData*>(tiling)->distributeBarrierInfo;
     info.worldSize = 2;
     info.aivNum = 3;
     info.isMc2Context = true;
+    info.totalWinSize = legacyWindowBytes;
     for (uint32_t bank = 0; bank < 2; ++bank) {
         const uint64_t offset = bank * 512U * 1024U;
         auto* incoming = reinterpret_cast<float*>(context->epHcclBuffer_[0] + offset + 512U);

@@ -18,5 +18,9 @@ if (UT_TEST_ALL OR OP_KERNEL_UT)
             Trap=DistributeBarrierTrapApi TrapImpl=DistributeBarrierTrapImpl)
         target_sources(distribute_barrier_extend_Ascend950PR_9599_cases_obj PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/../test_distribute_barrier_extend.cpp)
+        if(ENABLE_OOM)
+            target_compile_definitions(distribute_barrier_extend_Ascend950PR_9599_cases_obj PRIVATE
+                ASCENDC_OOM=1 MC2_BARRIER_OOM_UT=1)
+        endif()
     endif()
 endif()
