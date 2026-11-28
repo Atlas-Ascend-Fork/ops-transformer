@@ -36,7 +36,7 @@ public:
         : GroupedQmmTiling(context),
           activation_(activation)
     {
-        Reset();
+        ResetState();
     }
     ~GroupedMatmulSwigluQuantV2Tiling950() override = default;
 
@@ -67,10 +67,11 @@ protected:
     // 4、保存Tiling数据
     ge::graphStatus PostTiling() override;
     void Reset() override;
-    void SetKernelType();
     ge::graphStatus GetWorkspaceSize() override;
 
 private:
+    void ResetState();
+
     bool IsSplitSwigluMode() const
     {
         return useV3Path_;

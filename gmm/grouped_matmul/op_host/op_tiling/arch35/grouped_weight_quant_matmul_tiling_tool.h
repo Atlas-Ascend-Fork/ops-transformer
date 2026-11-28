@@ -160,7 +160,7 @@ bool AnalyzeInputs(const gert::TilingContext* context, GMMWeightQuantInputInfo& 
 void GetNumOfInputs(const gert::TilingContext* context, GMMWeightQuantInputNum& inputNum);
 uint16_t GetTensorListSize(const gert::TilingContext* context, size_t inputIdx);
 bool AnalyzeAttrs(const gert::TilingContext* context, GMMWeightQuantInputInfo& inputParams,
-                  GMMWeightQuantInputNum& inputNum);
+                  const GMMWeightQuantInputNum& inputNum);
 bool AnalyzeInputParams(const gert::TilingContext* context, GMMWeightQuantInputInfo& inputParams,
                         GMMWeightQuantInputNum& inputNum);
 bool AnalyzeGroupList(const gert::TilingContext* context, GMMWeightQuantInputInfo& inputParams);

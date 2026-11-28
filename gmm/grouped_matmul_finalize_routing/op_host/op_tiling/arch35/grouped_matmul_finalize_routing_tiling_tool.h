@@ -95,10 +95,11 @@ ge::graphStatus GetInputsInfo(gert::TilingContext* context, GQmmInputInfo& input
 bool CheckInputTensorShape(const char* name, const gert::Shape& shape, const std::vector<int64_t>& expectedShape);
 
 // 公共校验
-bool CheckCommonInputsDtype(const GMMFRExtraInfo& frInfo, gert::TilingContext* context);
+bool CheckCommonInputsDtype(const GMMFRExtraInfo& frInfo, const gert::TilingContext* context);
 bool CheckFinalizeRoutingInputsShape(const GQmmInputInfo& inputParams, const GMMFRExtraInfo& frInfo,
-                                     gert::TilingContext* context);
-bool CheckSharedInput(const GQmmInputInfo& inputParams, const GMMFRExtraInfo& frInfo, gert::TilingContext* context);
+                                     const gert::TilingContext* context);
+bool CheckSharedInput(const GQmmInputInfo& inputParams, const GMMFRExtraInfo& frInfo,
+                      const gert::TilingContext* context);
 
 } // namespace GMMFRTilingTools
 } // namespace optiling

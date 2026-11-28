@@ -1717,7 +1717,7 @@ static ge::graphStatus CheckCaseSplitK(gert::InferShapeContext* context, bool tr
 
 // A5 非量化「单 weight（列表长度 1、二维）+ 单 x / 单 y」特殊多 tensor 场景的 bias 校验：
 // 与真多 tensor 口径一致——bias 列表长度与 weight 列表长度相同（=1），每个 bias 为 1 维 (N)。
-static ge::graphStatus CheckBiasSingleWeight2DMultiTensor(gert::InferShapeContext* context,
+static ge::graphStatus CheckBiasSingleWeight2DMultiTensor(const gert::InferShapeContext* context,
                                                           const GMMParamsInfo& paramsInfo, bool transposeWeight)
 {
     size_t biasSize = 0;

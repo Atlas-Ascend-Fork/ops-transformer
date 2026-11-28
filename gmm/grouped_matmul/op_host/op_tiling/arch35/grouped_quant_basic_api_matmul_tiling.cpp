@@ -68,6 +68,7 @@ bool GroupedQmmBasicApiTiling::IsCubeBasicApi() const
     constexpr int32_t minorUnit = 100000;
     const int32_t major = version / majorUnit;
     const int32_t minor = version % majorUnit / minorUnit;
+    // 9 is the minimum asc-devkit major version required by the kernel IS_BLAZE predicate.
     return major >= 9 && minor > 0;
 }
 
@@ -85,10 +86,10 @@ ge::graphStatus GroupedQmmBasicApiTiling::CalCubeL1Tiling()
     const uint64_t aBytes = ge::GetSizeByDataType(inputParams_.aDtype);
     const uint64_t bBytes = ge::GetSizeByDataType(inputParams_.bDtype);
     const uint64_t c0 = GetShapeWithDataType(CUBE_REDUCE_BLOCK, inputParams_.aDtype);
-    const auto aSize = [&](uint64_t k) {
+    const auto aSize = [this, c0, aBytes](uint64_t k) {
         return CeilAlign(basicTiling_.baseM, CUBE_BLOCK) * CeilAlign(k, c0) * aBytes;
     };
-    const auto bSize = [&](uint64_t k) {
+    const auto bSize = [this, c0, bBytes](uint64_t k) {
         return inputParams_.transB ? CeilAlign(k, c0) * CeilAlign(basicTiling_.baseN, CUBE_BLOCK) * bBytes :
                                      CeilAlign(k, CUBE_BLOCK) * CeilAlign(basicTiling_.baseN, c0) * bBytes;
     };

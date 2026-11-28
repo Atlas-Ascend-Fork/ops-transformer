@@ -9,6 +9,7 @@
  */
 
 #include "grouped_matmul_finalize_routing_weight_quant_checker.h"
+#include <vector>
 #include "common/include/op_host/op_const_def_transformer.h"
 #include "log/log.h"
 #include "common/include/err/ops_err.h"
@@ -230,7 +231,7 @@ bool GMMFinalizeRoutingWeightQuantChecker::CheckKNAlign()
     return true;
 }
 
-bool GMMFinalizeRoutingWeightQuantChecker::CheckCoreNum(uint64_t aicNum, uint64_t aivNum)
+bool GMMFinalizeRoutingWeightQuantChecker::CheckCoreNum(uint64_t aicNum, uint64_t aivNum) const
 {
     if (unlikely(aicNum == 0 || aivNum == 0)) {
         std::string aicVal = std::to_string(aicNum);

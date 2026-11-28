@@ -14,6 +14,8 @@
  */
 
 #include "grouped_weight_quant_matmul_asw_tiling.h"
+#include <limits>
+#include <string>
 #include "../../../op_kernel/arch35/weight_quant_asw/weight_quant_asw_tiling_key.h"
 
 namespace GmmTilingTool = optiling::GMMWeightQuantTilingTool;
@@ -101,6 +103,14 @@ bool GroupedWeightQuantMatmulAswTiling::SetMKN()
                                                xShape.GetDim(xDimNum - GmmConstants::LAST_FIRST_DIM_INDEX);
     inputParams_.nSize = inputParams_.transWeight ? wShape.GetDim(wDimNum - GmmConstants::LAST_SECOND_DIM_INDEX) :
                                                     wShape.GetDim(wDimNum - GmmConstants::LAST_FIRST_DIM_INDEX);
+    constexpr uint64_t maxDim = std::numeric_limits<int32_t>::max();
+    OP_CHECK_IF(inputParams_.mSize > maxDim || inputParams_.nSize > maxDim || inputParams_.kSize > maxDim,
+                OP_LOGE_FOR_INVALID_VALUES_WITH_REASON(inputParams_.opName, "M, N, K",
+                                                       std::to_string(inputParams_.mSize) + ", " +
+                                                           std::to_string(inputParams_.nSize) + ", " +
+                                                           std::to_string(inputParams_.kSize),
+                                                       "M, N and K must be in [0, INT32_MAX]."),
+                return false);
     return true;
 }
 
@@ -129,10 +139,10 @@ void GroupedWeightQuantMatmulAswTiling::DoOpTiling()
 void GroupedWeightQuantMatmulAswTiling::DoLibApiTiling()
 {
     CalBasicBlock();
-    tilingData_.mmTilingData.M = inputParams_.mSize;
-    tilingData_.mmTilingData.N = inputParams_.nSize;
-    tilingData_.mmTilingData.Ka = inputParams_.kSize;
-    tilingData_.mmTilingData.Kb = inputParams_.kSize;
+    tilingData_.mmTilingData.M = static_cast<int32_t>(inputParams_.mSize);
+    tilingData_.mmTilingData.N = static_cast<int32_t>(inputParams_.nSize);
+    tilingData_.mmTilingData.Ka = static_cast<int32_t>(inputParams_.kSize);
+    tilingData_.mmTilingData.Kb = static_cast<int32_t>(inputParams_.kSize);
     tilingData_.mmTilingData.usedCoreNum = aicoreParams_.aicNum;
     tilingData_.mmTilingData.baseM = basicTiling_.baseM;
     tilingData_.mmTilingData.baseN = basicTiling_.baseN;
@@ -196,7 +206,7 @@ bool GroupedWeightQuantMatmulAswTiling::PostTiling()
     OP_CHECK_IF(context_->GetRawTilingData() == nullptr, OP_LOGE(inputParams_.opName, "RawTilingData is nullptr."),
                 return false);
     errno_t ret = memcpy_s(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity(),
-                           reinterpret_cast<void*>(&tilingData_), sizeof(tilingData_));
+                           &tilingData_, sizeof(tilingData_));
     if (ret != EOK) {
         OP_LOGE(inputParams_.opName, "memcpy_s failed, ret = %d", ret);
         return false;

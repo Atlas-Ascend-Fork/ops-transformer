@@ -379,7 +379,7 @@ aclnnStatus AclnnGroupedMatmulWeightQuantDAV3510Checker::CheckNDimConsistency(
                 return ACLNN_ERR_PARAM_INVALID;
             }
         }
-        tensorNDimValue = tensorShape.GetDim(tensorDimNum - 2);
+        tensorNDimValue = tensorShape.GetDim(tensorDimNum - LAST_SECOND_DIM_INDEX);
     } else {
         tensorNDimValue = tensorShape.GetDim(tensorDimNum - 1);
     }

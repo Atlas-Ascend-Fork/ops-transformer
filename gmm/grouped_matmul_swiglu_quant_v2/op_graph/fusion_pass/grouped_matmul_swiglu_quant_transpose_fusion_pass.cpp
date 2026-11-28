@@ -218,17 +218,18 @@ bool GetShapeDims(const GNodePtr& node, bool input, std::vector<int64_t>& dims)
 bool IsExpectedSwap(const std::vector<int64_t>& inputDims, const std::vector<int64_t>& outputDims, int64_t inputIndex,
                     bool requireUnitAxis)
 {
+    // 3 is the minimum tensor rank supported by this transpose swap check.
     if (inputDims.size() < 3) {
         return false;
     }
     std::size_t firstAxis = inputDims.size() - 2;
     std::size_t secondAxis = inputDims.size() - 1;
     if (inputIndex == WEIGHT_SCALE_INDEX) {
-        if (inputDims.size() != 4) {
+        if (inputDims.size() != PERM_WEIGHT_SCALE.size()) {
             return false;
         }
         firstAxis = 1;
-        secondAxis = 2;
+        secondAxis = INDEX_THREE;
     }
     if (requireUnitAxis && inputDims[firstAxis] != 1 && inputDims[secondAxis] != 1) {
         return false;
@@ -465,6 +466,7 @@ bool CheckChainForCommit(const TransposeChain& chain)
         if (chain.tailReshapeNode == nullptr ||
             chain.sourceNode->GetOutputDesc(chain.sourceOutputPort, sourceDesc) != GRAPH_SUCCESS ||
             chain.tailReshapeNode->GetOutputDesc(0, tailDesc) != GRAPH_SUCCESS ||
+            // 3 is the required source tensor rank for the special FP4 transpose chain.
             sourceDesc.GetShape().GetDimNum() != 3) {
             return false;
         }

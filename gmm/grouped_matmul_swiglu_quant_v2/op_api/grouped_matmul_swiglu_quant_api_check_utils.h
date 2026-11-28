@@ -13,7 +13,6 @@
 
 #include <string>
 #include "aclnn/aclnn_base.h"
-#include "aclnn_util.h"
 #include "opdev/op_log.h"
 
 namespace gmm_swiglu_quant_api_check {

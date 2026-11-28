@@ -18,11 +18,11 @@
 #include "../../grouped_matmul_host_util.h"
 #include "grouped_weight_quant_matmul_tiling_tool.h"
 
-using optiling::GMMWeightQuantTilingTool::GMMWeightQuantInputInfo;
-using optiling::GMMWeightQuantTilingTool::GMMWeightQuantInputNum;
-using optiling::GMMWeightQuantTilingTool::MKNDimInfo;
-
 namespace optiling {
+using GMMWeightQuantTilingTool::GMMWeightQuantInputInfo;
+using GMMWeightQuantTilingTool::GMMWeightQuantInputNum;
+using GMMWeightQuantTilingTool::MKNDimInfo;
+
 class GMMWeightQuantTilingChecker {
 public:
     explicit GMMWeightQuantTilingChecker(gert::TilingContext* context, const GMMWeightQuantInputInfo& inputParams,

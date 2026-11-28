@@ -1148,7 +1148,6 @@ protected:
                              ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(1) :
                              (gmmDsqParams_.transposeWeight ? ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(1) :
                                                               ((*gmmDsqParams_.weight)[0])->GetViewShape().GetDim(2));
-
         if (nValue == 0 && op::GetCurrentPlatformInfo().GetCurNpuArch() == NpuArch::DAV_3510) {
             return true;
         }

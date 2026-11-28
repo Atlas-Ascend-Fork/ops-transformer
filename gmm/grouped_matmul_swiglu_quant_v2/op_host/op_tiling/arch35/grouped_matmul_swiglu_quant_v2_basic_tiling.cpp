@@ -104,6 +104,11 @@ bool IsDenseFormat(ge::Format format)
 
 void GroupedMatmulSwigluQuantV2Tiling950::Reset()
 {
+    ResetState();
+}
+
+void GroupedMatmulSwigluQuantV2Tiling950::ResetState()
+{
     auto* rawTilingData = context_ == nullptr ? nullptr : context_->GetRawTilingData();
     tilingData_.SetDataPtr(rawTilingData == nullptr ? nullptr : rawTilingData->GetData());
     isMxWeightNzMultiTensor_ = false;

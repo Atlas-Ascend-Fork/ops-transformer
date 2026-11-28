@@ -280,7 +280,7 @@ bool CheckInputTensorShape(const char* name, const gert::Shape& shape, const std
     return true;
 }
 
-bool CheckCommonInputsDtype(const GMMFRExtraInfo& frInfo, gert::TilingContext* context)
+bool CheckCommonInputsDtype(const GMMFRExtraInfo& frInfo, const gert::TilingContext* context)
 {
     auto groupListDesc = context->GetOptionalInputDesc(GROUPLIST_INDEX);
     if (unlikely(groupListDesc->GetDataType() != ge::DT_INT64)) {
@@ -316,7 +316,7 @@ bool CheckCommonInputsDtype(const GMMFRExtraInfo& frInfo, gert::TilingContext* c
 }
 
 bool CheckFinalizeRoutingInputsShape(const GQmmInputInfo& inputParams, const GMMFRExtraInfo& frInfo,
-                                     gert::TilingContext* context)
+                                     const gert::TilingContext* context)
 {
     const gert::Shape& rowIndexShape = context->GetOptionalInputShape(ROW_INDEX_INDEX)->GetStorageShape();
     if (!CheckInputTensorShape("row_index", rowIndexShape, {static_cast<int64_t>(inputParams.mSize)})) {
@@ -343,7 +343,8 @@ bool CheckFinalizeRoutingInputsShape(const GQmmInputInfo& inputParams, const GMM
     return true;
 }
 
-bool CheckSharedInput(const GQmmInputInfo& inputParams, const GMMFRExtraInfo& frInfo, gert::TilingContext* context)
+bool CheckSharedInput(const GQmmInputInfo& inputParams, const GMMFRExtraInfo& frInfo,
+                      const gert::TilingContext* context)
 {
     if (!frInfo.hasSharedInput) {
         return true;

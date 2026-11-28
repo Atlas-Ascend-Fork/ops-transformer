@@ -83,7 +83,7 @@ uint16_t GetTensorListSize(const gert::TilingContext* context, size_t inputIdx)
 }
 
 bool AnalyzeAttrs(const gert::TilingContext* context, GMMWeightQuantInputInfo& inputParams,
-                  GMMWeightQuantInputNum& inputNum)
+                  const GMMWeightQuantInputNum& inputNum)
 {
     auto attrs = context->GetAttrs();
     OP_CHECK_IF(attrs == nullptr, OP_LOGE(inputParams.opName, "Attrs is nullptr."), return false);

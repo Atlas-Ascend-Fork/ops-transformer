@@ -15,7 +15,6 @@
 
 #pragma once
 
-#include <vector>
 #include <string>
 #include <exe_graph/runtime/tiling_context.h>
 #include <graph/types.h>
@@ -64,7 +63,7 @@ private:
     bool CheckWeightShape();
     bool CheckMxScaleShape();
     bool CheckKNAlign();
-    bool CheckCoreNum(uint64_t aicNum, uint64_t aivNum);
+    bool CheckCoreNum(uint64_t aicNum, uint64_t aivNum) const;
 
     gert::TilingContext* context_;
     GQmmInputInfo& inputParams_;

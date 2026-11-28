@@ -151,7 +151,7 @@ ge::graphStatus GMMFRWeightQuantAswTiling::PostTiling()
                 OP_LOGE(context_, "Tiling data size[%zu] is not aligned to 8", tilingDataSize),
                 return ge::GRAPH_FAILED);
     errno_t ret = memcpy_s(context_->GetRawTilingData()->GetData(), context_->GetRawTilingData()->GetCapacity(),
-                           reinterpret_cast<void*>(&tilingData_), tilingDataSize);
+                           &tilingData_, tilingDataSize);
     if (ret != EOK) {
         OP_LOGE(context_, "memcpy_s failed, ret = %d", ret);
         return ge::GRAPH_FAILED;
@@ -171,13 +171,12 @@ void GMMFRWeightQuantAswTiling::Reset()
     inputParams_.Reset();
     frInfo_ = GMMFRExtraInfo{};
     tilingData_ = GMMFinalizeRoutingTilingData();
-    const auto* rawTiling = context_ != nullptr ? context_->GetRawTilingData() : nullptr;
+    auto* rawTiling = context_ != nullptr ? context_->GetRawTilingData() : nullptr;
     if (rawTiling == nullptr || rawTiling->GetData() == nullptr) {
         return;
     }
-    OP_CHECK_IF(
-        memset_s(const_cast<void*>(rawTiling->GetData()), rawTiling->GetCapacity(), 0, rawTiling->GetCapacity()) != EOK,
-        OP_LOGE(context_, "Fail to clear tiling data."), return);
+    OP_CHECK_IF(memset_s(rawTiling->GetData(), rawTiling->GetCapacity(), 0, rawTiling->GetCapacity()) != EOK,
+                OP_LOGE(context_, "Fail to clear tiling data."), return);
 }
 
 REGISTER_OPS_TILING_TEMPLATE(GroupedMatmulFinalizeRouting, GMMFRWeightQuantAswTiling, GMMFR_WEIGHT_QUANT_ASW_TILING);

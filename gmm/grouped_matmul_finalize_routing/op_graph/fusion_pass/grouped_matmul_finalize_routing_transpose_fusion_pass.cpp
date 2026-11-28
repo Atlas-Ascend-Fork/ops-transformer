@@ -282,6 +282,7 @@ GNodePtr GetBaseViewSource(const GNodePtr& node)
     // Bitcast nodes between the data input and the node used by Shape/Gather.
     // Follow only these view operations; stopping at any other op keeps the
     // equivalence proof tied to the same producer tensor.
+    // 8 is the maximum number of view-operation nodes traversed to find the base source.
     for (int32_t depth = 0; current != nullptr && depth < 8; ++depth) {
         if (!IsType(current, OP_TYPE_RESHAPE) && !IsTransposeType(current) && !IsType(current, OP_TYPE_BITCAST)) {
             break;
@@ -401,17 +402,18 @@ bool IsDynamicAxisSwapReshape(const GNodePtr& reshapeNode, int64_t inputIndex)
     }
     const auto sourceDims = inputDesc.GetShape().GetDims();
     const auto rank = sourceDims.size();
+    // 3 is the minimum tensor rank supported by this transpose swap check.
     if (rank < 3) {
         return false;
     }
     std::size_t firstAxis = rank - 2;
     std::size_t secondAxis = rank - 1;
     if (inputIndex == WEIGHT_SCALE_INDEX) {
-        if (rank != 4) {
+        if (rank != PERM_WEIGHT_SCALE.size()) {
             return false;
         }
         firstAxis = 1;
-        secondAxis = 2;
+        secondAxis = INDEX_THREE;
     }
     if (packNode->GetInputsSize() != rank) {
         return false;
@@ -446,11 +448,11 @@ bool IsExpectedSwap(const std::vector<int64_t>& inputDims, const std::vector<int
     std::size_t firstAxis = inputDims.size() - 2;
     std::size_t secondAxis = inputDims.size() - 1;
     if (inputIndex == WEIGHT_SCALE_INDEX && !nonMxScale) {
-        if (inputDims.size() != 4) {
+        if (inputDims.size() != PERM_WEIGHT_SCALE.size()) {
             return false;
         }
         firstAxis = 1;
-        secondAxis = 2;
+        secondAxis = INDEX_THREE;
     }
     if (requireUnitAxis && inputDims[firstAxis] != 1 && inputDims[secondAxis] != 1) {
         return false;
@@ -491,6 +493,7 @@ bool IsStaticFp4PackedWeightTranspose(const TensorDesc& sourceDesc, const Tensor
     }
     const auto sourceDims = sourceDesc.GetShape().GetDims();
     const auto targetDims = targetDesc.GetShape().GetDims();
+    // Both occurrences of 3 require the source and target tensors to have rank 3.
     if (sourceDims.size() != 3 || targetDims.size() != 3 || sourceDims[0] != 1 || targetDims[0] != 1) {
         return false;
     }

@@ -719,7 +719,7 @@ aclnnStatus PrepareQuantInputs(const aclTensor* x, const aclTensor* xScale, cons
     return ACLNN_SUCCESS;
 }
 
-aclnnStatus CopyQuantOutputs(const std::tuple<aclTensor*, aclTensor*>& result, aclTensor* output,
+aclnnStatus CopyQuantOutputs(const std::tuple<const aclTensor*, const aclTensor*>& result, aclTensor* output,
                              aclTensor* outputScale, aclOpExecutor* executor)
 {
     const aclTensor* outputResult = l0op::ViewCopy(std::get<0>(result), output, executor);
@@ -742,13 +742,13 @@ aclnnStatus ExecuteQuant(const aclTensor* x, const aclTensorList* weight, const 
                          const aclTensor* smoothScaleForOp, const aclTensorList* weightScaleForOp,
                          const aclTensorList* weightForOp)
 {
-    std::tuple<aclTensor*, aclTensor*> result;
+    std::tuple<const aclTensor*, const aclTensor*> result;
     if (IsA4W4Bf16Output(x, weight, output)) {
         const aclTensor* activationOut = l0op::GroupedMatmulActivation(
             xForOp, xScaleForOp, groupListForOp, weightForOp, weightScaleForOp, nullptr, dequantMode, dequantDtype,
             "swiglu", groupListType, nullptr, swigluMode, static_cast<float>(clampLimit), static_cast<float>(gluAlpha),
             static_cast<float>(gluBias), transposeWeight, executor);
-        result = std::make_tuple(const_cast<aclTensor*>(activationOut), nullptr);
+        result = std::make_tuple(activationOut, nullptr);
     } else {
         const aclTensorList* weightAssistForOp = weightAssistMatrix;
         CHECK_RET(CreateEmptyWeightAssistTensorList(weightAssistForOp, executor) == ACLNN_SUCCESS,

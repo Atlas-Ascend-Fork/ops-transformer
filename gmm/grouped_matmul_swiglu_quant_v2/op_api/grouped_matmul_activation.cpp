@@ -26,6 +26,7 @@ const aclTensor* GroupedMatmulActivation(const aclTensor* x, const aclTensor* xS
     L0_DFX(GroupedMatmulActivation, x, xScale, groupList, weight, weightScale, bias, dequantMode, dequantDtype, actType,
            groupListType, tuningConfig, swigluMode, clampLimit, gluAlpha, gluBias, transposeWeight);
     if (executor == nullptr || x == nullptr || weightScale == nullptr || weightScale->Size() != 1 ||
+        // 4 is the weightScale rank for [g, n, scalePairs, 2] or [g, scalePairs, n, 2].
         (*weightScale)[0] == nullptr || (*weightScale)[0]->GetViewShape().GetDimNum() != 4) {
         return nullptr;
     }
